@@ -14,6 +14,7 @@ import {
   clearForcedUpdate,
   enterForcedUpdate,
   getForcedUpdateRevision,
+  getForcedUpdateTarget,
 } from './forcedUpdateStore';
 import { isCanaryChannel } from './canaryChannelStore';
 
@@ -34,6 +35,8 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
       onStillForced: enterForcedUpdate,
       // compare-and-set:核对期间若有更新的观察写入 store,本次旧结论作废。
       getRevision: getForcedUpdateRevision,
+      // 新鲜度门:CDN 边缘可能返回比当前阻断目标更旧的记录,那种记录不得用来解除。
+      getHeldTarget: getForcedUpdateTarget,
       now: () => Date.now(),
       isCurrent: () => current,
       // 阻断态可能在 App 已切后台后才被置位(检查的 /latest 迟到返回),

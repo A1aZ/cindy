@@ -73,7 +73,14 @@ function isSameTarget(a: ForcedUpdateTarget | null, b: ForcedUpdateTarget | null
  */
 export function enterForcedUpdate(target: ForcedUpdateTarget, expectedRevision?: number): void {
   if (expectedRevision !== undefined && expectedRevision !== revision) return;
-  if (isSameTarget(forcedTarget, target)) return;
+  if (isSameTarget(forcedTarget, target)) {
+    // 不带 expectedRevision 的调用代表**另一条检查路径的一次新观察**落地。即使目标等值、
+    // 没有状态变化,也必须推进 revision:否则在途重新核对基于旧 revision 得出的"解除"
+    // 结论仍能通过 compare-and-clear,把最新观察仍要求强更的阻断态清掉。
+    // 不通知订阅者 —— 状态确实没变,幂等语义不受影响。
+    if (expectedRevision === undefined) revision += 1;
+    return;
+  }
   forcedTarget = target;
   revision += 1;
   notifyListeners();

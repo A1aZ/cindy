@@ -171,6 +171,44 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     }), 7);
   });
 
+  it('读到比阻断目标更旧的记录(CDN 边缘旧值)→ 维持阻断,不解除', async () => {
+    // /latest 背后是可变指针且请求不带 cache-buster,边缘可能回一条旧记录;
+    // 旧记录没有 minVersion,若照它解除就会把仍需强更的用户放进业务树。
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '1.5.0', minVersion: undefined })),
+      getHeldTarget: () => ({ version: '2.0.0' }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('error');
+    expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
+  });
+
+  it('记录缺 version → 证明不了新鲜度,维持阻断', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '', minVersion: undefined })),
+      getHeldTarget: () => ({ version: '2.0.0' }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('error');
+    expect(deps.onCleared).not.toHaveBeenCalled();
+  });
+
+  it('同版本记录撤回门槛(最常见的撤回形态)→ 正常解除', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '2.0.0', minVersion: undefined })),
+      getHeldTarget: () => ({ version: '2.0.0' }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('cleared');
+    expect(deps.onCleared).toHaveBeenCalledOnce();
+  });
+
+  it('更新版本的记录且不再强更 → 正常解除', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '2.1.0', minVersion: undefined })),
+      getHeldTarget: () => ({ version: '2.0.0' }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('cleared');
+  });
+
   it('/latest 拉取失败 → 维持阻断(不能靠断网绕过强更)', async () => {
     const deps = makeDeps({ fetchLatest: vi.fn(async () => { throw new Error('offline'); }) });
     await expect(runOnce(deps)).resolves.toBe('error');

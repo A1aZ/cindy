@@ -96,6 +96,24 @@ describe('forcedUpdateStore', () => {
     expect(getForcedUpdateTarget()?.version).toBe('2.1.0');
   });
 
+  it('等值目标的无守卫写入也推进 revision → 在途旧结论作废', () => {
+    // 另一条检查路径的迟到响应写入**相同**目标时,状态没变但确实是一次新观察落地;
+    // 若不推进 revision,在途核对基于旧 revision 的"解除"结论仍会通过 compare。
+    enterForcedUpdate(target());
+    const stale = getForcedUpdateRevision();
+    enterForcedUpdate(target()); // 等值、无 expectedRevision
+    expect(getForcedUpdateRevision()).not.toBe(stale);
+    clearForcedUpdate(stale);
+    expect(getForcedUpdateTarget()).not.toBeNull();
+  });
+
+  it('等值目标的带守卫写入不推进 revision(自己的刷新不该作废自己)', () => {
+    enterForcedUpdate(target());
+    const rev = getForcedUpdateRevision();
+    enterForcedUpdate(target(), rev); // 核对回来发现目标没变
+    expect(getForcedUpdateRevision()).toBe(rev);
+  });
+
   it('compare-and-clear:revision 未变 → 正常解除', () => {
     enterForcedUpdate(target());
     clearForcedUpdate(getForcedUpdateRevision());

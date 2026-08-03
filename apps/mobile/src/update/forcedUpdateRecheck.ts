@@ -13,7 +13,7 @@
 // 节流比 resume 通道(5 分钟)短得多:用户此刻正被挡在门外,恢复延迟直接可感;
 // 但仍要节流,避免在阻断屏上反复切前后台把 /latest 打成高频请求。
 
-import { evaluateBundleUpdate, parseLatestRelease } from './bundleUpdate';
+import { compareVersions, evaluateBundleUpdate, parseLatestRelease } from './bundleUpdate';
 import { withTimeout } from './startupOtaUpdate';
 
 export type ForcedUpdateRecheckOutcome = 'still-forced' | 'cleared' | 'error';
@@ -60,6 +60,14 @@ export interface ForcedUpdateRecheckDeps {
    * 省略则不做 compare-and-set(维持旧行为)。
    */
   getRevision?: () => number;
+  /**
+   * 当前阻断中的目标(实参为 getForcedUpdateTarget),用于证明本次读到的记录不比它旧。
+   * 必要性:`/latest` 背后是**可变指针**,且客户端这条请求既不带 cache-buster 也不发
+   * no-cache(见 fetchLatestRelease),CDN 边缘完全可能返回一条更旧的 release 记录
+   * (发布链侧对同一现象有明确记载:lib/ios-local.mjs 的 CDN 缓存注释)。旧记录里没有
+   * minVersion,就会把仍需强更的用户放进业务树。省略则不做新鲜度校验(维持旧行为)。
+   */
+  getHeldTarget?: () => { version: string } | null;
 }
 
 export interface ForcedUpdateRecheckOptions {
@@ -110,6 +118,13 @@ export function createForcedUpdateRechecker(
       const record = parseLatestRelease(latest);
       const currentVersion = String(deps.getCurrentVersion() ?? '').trim();
       if (!record || !currentVersion) return 'error';
+      // 新鲜度门:读到的记录不得比正在阻断的目标更旧。可变指针 + 无 cache-buster 的请求
+      // 会撞上 CDN 边缘的旧记录,那条记录没有 minVersion → 会把仍需强更的用户放出去。
+      // 记录缺 version(parseLatestRelease 容许空串)同样证明不了新鲜度,一并挡掉。
+      const held = deps.getHeldTarget?.();
+      if (held && (!record.version || compareVersions(record.version, held.version) < 0)) {
+        return 'error';
+      }
       const evaluation = evaluateBundleUpdate({
         currentRuntimeVersion: deps.getCurrentRuntimeVersion(),
         currentVersion,

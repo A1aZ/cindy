@@ -622,6 +622,29 @@ describe('RAWTEXT 内容整段跳过(review P1:回填会改写作者脚本源码
     expect(joinRemotePath('', 'a.html')).toBe('a.html');
   });
 
+  it('两次 span 扫描不可合并成「扫全集再 filter」—— 那不是等价变换', () => {
+    // span 边界依赖 tag 集合本身:命中一段后游标推到体尾,所以集合里少一个 tag 会让原本被它
+    // 吞掉的内层伪标签重新成段。这条钉住实测差异,防止以后有人"顺手优化"成一次扫描。
+    const html = "<style>var s='<script>x</script>'</style>";
+    const all = findRawTextContentSpans(html);
+    const exceptStyle = findRawTextContentSpans(html, ['script', 'textarea', 'title']);
+    expect(all).toHaveLength(1);
+    expect(exceptStyle).toHaveLength(1);
+    // 位置不同:全集里是整个 style 体;除 style 时反而是体内那个伪 script。
+    expect(all[0].start).not.toBe(exceptStyle[0].start);
+    expect(all[0].end).not.toBe(exceptStyle[0].end);
+    expect(html.slice(all[0].start, all[0].end)).toBe("var s='<script>x</script>'");
+    expect(html.slice(exceptStyle[0].start, exceptStyle[0].end)).toBe('x');
+  });
+
+  it('CSS 注释里的伪 script 不影响同一 style 块的 url() 收集', () => {
+    // 除 style 扫描会在 CSS 注释处产生一个伪 script span(无结束标签 → 延伸到文末),
+    // 但 styleRe 判的是**开标签位置**,它在该 span 之前 → 不跳过;url() 扫描在 body 文本内
+    // 独立进行,不受 span 影响 → 两个 url() 都收到。
+    const html = '<style>body{background:url(bg.png)} /* <script> */ .a{background:url(a.png)}</style>';
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['bg.png', 'a.png']);
+  });
+
   it('⚠️ 已知残留:属性值里的字面 `<script>` 会造成误判(如实钉住,不假装没有)', () => {
     // 开标签仍靠正则找,`[^<>]*` 遇到属性值里的 `<` 就停,于是这里的 `<script>` 被当成真开标签,
     // 后面那个真引用被跳过 → 缺图。该形态极罕见,而「HTML 模板放 JS 字符串」很常见,净收益为正。

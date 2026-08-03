@@ -313,6 +313,14 @@ const RAW_TEXT_CONTENT_TAGS = ['script', 'style', 'textarea', 'title'] as const;
  *  - CSS `url()` 扫描专扫 `<style>` 体,所以它按「除 style 外」的 RAWTEXT 判跳过 ——
  *    脚本字符串里的 `<style>` 字面量仍不算样式块。
  * 两个用途各取所需,不能共用一份 span。
+ *
+ * ⚠️ **必须各扫一次,不能「扫全集再 filter 掉 style」** —— 那不是等价变换。span 的边界依赖
+ * tag 集合本身:扫描命中一段内容后会把游标推到体尾(`openRe.lastIndex = bodyEnd`),所以
+ * 集合里少一个 tag 会让原本被它「吞掉」的内层伪标签重新变成开标签。实测差异:
+ *   `<style>var s='<script>x</script>'</style>`
+ *     全集扫  → style[7,33)          (整个 style 体是一段)
+ *     除 style → script[22,23)        (style 不成段,体内的伪 script 反而成了段)
+ * 两者位置与数量都不同。合并成一次扫描 + filter 会静默改变判定结果,用例钉住了这一点。
  */
 const TAG_SCAN_SKIP_TAGS = RAW_TEXT_CONTENT_TAGS;
 const CSS_SCAN_SKIP_TAGS = RAW_TEXT_CONTENT_TAGS.filter((t) => t !== 'style');

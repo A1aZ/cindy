@@ -315,6 +315,30 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
   });
 
+  it('首轮迁移治愈损坏/旧 schema 的 receipt(格式升级不落到用户重新确认)', async () => {
+    // issue #1243 验收第 4 条的实现形态:schema/编码 bump 后的旧 receipt 判 invalid,
+    // 但**首轮迁移**会把它当"已判损坏"从安装目录 backfill 重建 —— 一次内部格式变更
+    // 不变成用户重新确认。v1 receipt 从未随任何构建发布,所以不需要专门的 v1 读取器;
+    // 未来的 bump 走 §5 的「按旧编码核对 → 原地升级」,见规则文档。
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const stateDir = path.join(workDir, 'ghosts-install-state');
+    await fs.promises.mkdir(stateDir, { recursive: true });
+    // 一份 schemaVersion 过时的 receipt(读取器判 invalid)。
+    await fs.promises.writeFile(
+      path.join(stateDir, 'hello.json'),
+      JSON.stringify({ schemaVersion: 1, id: 'hello', legacy: true }),
+    );
+    expect(manager.list()[0].approval.state).toBe('invalid');
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['hello']);
+    // 治愈后为有效批准;用户的停用决定(.disabled)照旧保留。
+    expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'approved' },
+    });
+  });
+
   it('已有 receipt 的安装不被迁移覆盖(迁移只补,不改既有批准)', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const before = await fs.promises.readFile(
@@ -341,6 +365,82 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(outcome.failed).toEqual(['hello']);
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
     expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+  });
+});
+
+describe('GhostManager · 从已装目录重新确认(本地包第三条恢复路径)', () => {
+  it('批准丢失后不用原始 .cindy:inspect 出全量清单,确认后开 receipt、恢复可用', async () => {
+    // 场景:迁移已跑过(ledger 在),之后 receipt 又被删 —— 一次性门不再迁移,
+    // 本地包用户没有市场路线;第三条路必须能不找文件恢复。
+    await writeLegacyInstall('hello', goodManifest());
+    await manager.migrateLegacyApprovalsOnce();
+    await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+
+    const inspected = manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    expect(inspected.manifest.id).toBe('hello');
+    expect(inspected.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const result = await manager.reapproveInstalled('hello', {
+      enable: true,
+      expectedManifestSha256: inspected.manifestSha256,
+      expectedInstalledApproval: 'legacy-unapproved',
+    });
+    if ('rejection' in result) throw new Error(JSON.stringify(result.rejection));
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    // 启停镜像同步维护(回滚到旧客户端不错位)。
+    expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
+  });
+
+  it('确认间隙 ghost.json 被换 → 拒(确认卡展示的与批准的必须是同一份字节)', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    const inspected = manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+
+    // 攻击窗口:用户看的是权限集 A,confirm 落地前清单被换成声明更多权限的 B。
+    await fs.promises.writeFile(
+      path.join(rootDir, 'hello', 'ghost.json'),
+      JSON.stringify({ ...goodManifest(), slots: ['tool', 'skill'], skill: { items: [{ dir: 'skills/x', name: 'x', description: 'x' }] } }),
+    );
+    const result = await manager.reapproveInstalled('hello', {
+      enable: true,
+      expectedManifestSha256: inspected.manifestSha256,
+      expectedInstalledApproval: 'legacy-unapproved',
+    });
+    expect('rejection' in result && result.rejection.code).toBe('state-changed');
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+  });
+
+  it('随包插件拒走人工重新确认(由启动对账自动补批准)', async () => {
+    const guarded = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: (id) => id === 'hello',
+    });
+    await writeLegacyInstall('hello', goodManifest());
+    const inspected = guarded.inspectInstalledReapproval('hello');
+    expect('rejection' in inspected && inspected.rejection.code).toBe('file-invalid');
+  });
+
+  it('已是 approved 的插件拒重复确认(不给覆盖既有批准开口子)', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const inspected = manager.inspectInstalledReapproval('hello');
+    expect('rejection' in inspected && inspected.rejection.code).toBe('state-changed');
+  });
+
+  it('信任镜像自称 cindy-official 一律封顶拒收(非随包目录不可能合法持有官方档)', async () => {
+    await writeLegacyInstall('hello', goodManifest(), {
+      trust: {
+        level: 'cindy-official',
+        publisherSigned: true,
+        publisherVerified: true,
+        reviewed: true,
+      },
+    });
+    const inspected = manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    expect(inspected.trust.level).toBe('unverified');
   });
 });
 

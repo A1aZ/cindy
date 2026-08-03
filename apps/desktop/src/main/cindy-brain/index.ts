@@ -627,6 +627,18 @@ function currentProvisionIdentity(): ProvisionIdentity | null {
  */
 let builtinReconcileChain: Promise<void> = Promise.resolve();
 
+/**
+ * 本会话内因「撤销陈旧批准」被熄灯的常驻随包插件 id。
+ *
+ * 撤销路径的四连熄灯会把正在跑的常驻实例停掉;后一轮对账把批准补回来时,原判
+ * (#1080)是不自动重启 —— 那时缺少"用户此刻想让它跑"的信号。但对**本会话内被
+ * 我们自己熄掉**的常驻声明插件,重启只是恢复熄灯前的既有状态,不是新决策;常驻
+ * 声明本身就是"启用即应运行"的意思(启动扫描无条件点火)。范围刻意收窄:只记
+ * 本会话、只记常驻声明、点火仍走 spawnIfResident(它自查启用态与会话可用性,
+ * 停用的插件不会被点亮)。
+ */
+const quenchedResidentBuiltinIds = new Set<string>();
+
 function scheduleBuiltinReconcile(reason: string): Promise<boolean> {
   const scheduled = builtinReconcileChain
     .catch((err) => {
@@ -816,6 +828,7 @@ async function reconcileBuiltinGhostsLocked(
     }
   }
   let approvalChanged = false;
+  const healedResidentIds: string[] = [];
   for (const manifest of outcome.approved) {
     try {
       approvalChanged =
@@ -826,6 +839,11 @@ async function reconcileBuiltinGhostsLocked(
           // 头注释;重新启用只有用户显式 setEnabled 一条路)。
           !fs.existsSync(path.join(brainRootDir(), manifest.id, '.disabled')),
         )) || approvalChanged;
+      // 本会话内被撤销熄灯的常驻实例,批准补回即恢复点火(隔离态下批准必然重写,
+      // approvalChanged 已为 true,不会被下面的 no-op 早退拦住)。
+      if (quenchedResidentBuiltinIds.delete(manifest.id)) {
+        healedResidentIds.push(manifest.id);
+      }
     } catch (err) {
       // 走到这里内容目录可能已经换成新种子字节，旧 receipt 却还是授权事实 ——
       // 留着它就是拿旧批准跑新代码(新版删掉的 slot 仍被授予、版本与技能快照
@@ -846,6 +864,10 @@ async function reconcileBuiltinGhostsLocked(
       getGhostNodeRuntimeBroker().stop(manifest.id);
       getGhostAgentSlot().clearGhost(manifest.id);
       getGhostErrandSlot().clearGhost(manifest.id);
+      // 常驻声明的实例被本次撤销熄掉:记下 id,批准自愈那一轮补点火(见 set 头注释)。
+      if (manifest.launch === 'resident' || manifest.node?.lifecycle === 'resident') {
+        quenchedResidentBuiltinIds.add(manifest.id);
+      }
       approvalChanged = true;
       log.warn('builtin ghost approval receipt failed; approval revoked', {
         id: manifest.id,
@@ -885,6 +907,12 @@ async function reconcileBuiltinGhostsLocked(
     }
     // 登录触发的对账装上常驻意识时,这里就是它的点火时机(启动那趟扫描早过了)。
     const ghost = manager.list().find((g) => g.manifest.id === manifest.id);
+    if (ghost) spawnIfResident(ghost);
+  }
+  // 本会话内被撤销熄灯、本轮批准自愈的常驻插件:恢复熄灯前的运行状态。
+  // spawnIfResident 自查启用态与会话可用性,停用/不可用的不会被点亮。
+  for (const id of healedResidentIds) {
+    const ghost = manager.list().find((g) => g.manifest.id === id);
     if (ghost) spawnIfResident(ghost);
   }
 }
@@ -4072,6 +4100,61 @@ export function registerGhostIpc(): void {
   ipcMain.handle('ghosts:take-pending-install', (event) => {
     assertTrustedAppRendererEvent(event);
     return { filePath: takePendingCindyInstall() };
+  });
+
+  // 本地包第三条恢复路径第一步:从**已装目录**读出确认卡事实,零副作用。
+  // 批准丢失(迁移后 receipt 又损坏/被删)时不用用户翻出原始 .cindy —— 字节从安装
+  // 目录读,权限清单全量展示,确认后由 ghosts:reapprove-installed 开 receipt。
+  ipcMain.handle('ghosts:reapprove-inspect', (event, id: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof id !== 'string' || id.trim().length === 0) {
+      throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
+    }
+    const result = manager.inspectInstalledReapproval(id);
+    if ('rejection' in result) throwInstallError(result.rejection);
+    return result;
+  });
+
+  // 第三条恢复路径第二步:用户点过确认卡后开 receipt。expectedManifestSha256 绑定
+  // 「确认卡展示的」与「此刻批准的」清单字节(与更新流程 expectedPackageSha256 同形),
+  // expectedInstalledApproval 防确认期间批准状态被并发改写。
+  ipcMain.handle('ghosts:reapprove-installed', async (event, id: unknown, opts: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof id !== 'string' || id.trim().length === 0) {
+      throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
+    }
+    const options = opts as
+      | { enable?: unknown; expectedManifestSha256?: unknown; expectedInstalledApproval?: unknown }
+      | undefined;
+    if (typeof options?.enable !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'enable must be a boolean');
+    }
+    if (
+      typeof options.expectedManifestSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(options.expectedManifestSha256)
+    ) {
+      throwIpcError('INVALID_PARAMS', 'expectedManifestSha256 must come from ghosts:reapprove-inspect');
+    }
+    if (!isGhostInstallApprovalToken(options.expectedInstalledApproval)) {
+      throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
+    }
+    const result = await manager.reapproveInstalled(id, {
+      enable: options.enable,
+      expectedManifestSha256: options.expectedManifestSha256,
+      expectedInstalledApproval: options.expectedInstalledApproval,
+    });
+    if ('rejection' in result) throwInstallError(result.rejection);
+    // 与装入/更新同款收尾:面板停靠(已有位置则 no-op)+ 常驻点火。
+    const store = getLayoutStore();
+    const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
+    if (docked) {
+      const applied = store.setLayout(docked);
+      if ('rejection' in applied) {
+        log.warn('ghost panel dock rejected', { id: result.ghost.manifest.id, reason: applied.rejection });
+      }
+    }
+    spawnIfResident(result.ghost);
+    return { ghost: result.ghost };
   });
 
   // 只验不装:读出 .cindy 的清单给确认弹窗展示,零副作用。

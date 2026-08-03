@@ -902,6 +902,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
       iconDataUrl?: string;
     }> =>
       ipcRenderer.invoke('ghosts:inspect', lizFilePath),
+    /** 本地包第三条恢复路径:从已装目录读确认卡事实(零副作用)。 */
+    reapproveInspect: (id: string): Promise<{
+      manifest: unknown;
+      trust: unknown;
+      manifestSha256: string;
+    }> => ipcRenderer.invoke('ghosts:reapprove-inspect', id),
+    /** 确认卡点过同意后开 receipt;sha 绑定确认卡展示时的清单字节。 */
+    reapproveInstalled: (
+      id: string,
+      opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+    ): Promise<{ ghost: unknown }> =>
+      ipcRenderer.invoke('ghosts:reapprove-installed', id, opts),
     uninstall: (id: string): Promise<{ ok: true }> => ipcRenderer.invoke('ghosts:uninstall', id),
     /** 详情页「导出 .cindy」:main 打包安装目录 → 系统保存对话框落盘。 */
     export: (id: string): Promise<{ status: 'saved'; savedPath: string } | { status: 'canceled' }> =>

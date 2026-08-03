@@ -29,6 +29,8 @@ export interface GhostPluginListItem {
    * 详情都必须如实说明并给出重新确认入口,而不是让它看起来只是"被关掉了"。
    */
   approvalState: GhostInstallApproval['state'];
+  /** 随包内置插件(main 按种子清单投影)。批准态异常时文案与恢复入口都不同。 */
+  builtin: boolean;
   trust?: GhostTrustInfo;
   iconDataUrl?: string;
 }
@@ -172,6 +174,7 @@ export function toGhostPluginListItem(
     enabled: ghost.enabled,
     canUse: Boolean(manifest.command),
     approvalState: ghost.approval.state,
+    builtin: ghost.builtin === true,
     trust: ghost.trust ?? {
       level: 'unverified',
       publisherSigned: false,

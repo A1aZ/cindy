@@ -1157,6 +1157,20 @@ interface ElectronAPI {
       packageSha256: string;
       iconDataUrl?: string;
     }>;
+    /** 本地包第三条恢复路径第一步:从已装目录读确认卡事实,零副作用。 */
+    reapproveInspect: (
+      id: string,
+    ) => Promise<{
+      manifest: import('../shared/ghost').GhostManifest;
+      trust: import('../shared/ghost').GhostTrustInfo;
+      /** 确认卡展示时的清单字节指纹;确认时回传,防确认间隙清单被换。 */
+      manifestSha256: string;
+    }>;
+    /** 第三条恢复路径第二步:用户点过确认卡后开 receipt。 */
+    reapproveInstalled: (
+      id: string,
+      opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+    ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     uninstall: (id: string) => Promise<{ ok: true }>;
     /** 详情页「导出 .cindy」:打包安装目录 → 保存对话框落盘。 */
     export: (

@@ -233,7 +233,7 @@ export function GhostPluginDetailView({
               className="plugin-detail-actions flex shrink-0 flex-nowrap items-center gap-1.5"
               style={WINDOW_NO_DRAG_STYLE}
             >
-              {needsReapproval ? (
+              {needsReapproval && !detail.builtin ? (
                 <button
                   type="button"
                   onClick={onReapprove}
@@ -368,9 +368,11 @@ export function GhostPluginDetailView({
               </p>
               <p className="mt-1 text-13 leading-5 text-[var(--text-secondary)]">
                 {t(
-                  detail.approvalState === 'invalid'
-                    ? 'settings.ghosts.reapproval.bodyInvalid'
-                    : 'settings.ghosts.reapproval.bodyLegacy',
+                  detail.builtin
+                    ? 'settings.ghosts.reapproval.bodyBuiltinRestart'
+                    : detail.approvalState === 'invalid'
+                      ? 'settings.ghosts.reapproval.bodyInvalid'
+                      : 'settings.ghosts.reapproval.bodyLegacy',
                 )}
               </p>
             </div>

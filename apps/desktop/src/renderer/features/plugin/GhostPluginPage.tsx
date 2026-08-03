@@ -33,7 +33,11 @@ import {
 } from '@/lib/composerDraftStore';
 import { patchDraft } from '@/state/newMakerDraft';
 import { ghostInstallErrorKey } from '@/cindy-brain/installErrorKey';
-import { confirmAndInstallGhost, pickAndUpdateGhost } from '@/cindy-brain/installFlow';
+import {
+  confirmAndInstallGhost,
+  pickAndUpdateGhost,
+  reapproveInstalledGhost,
+} from '@/cindy-brain/installFlow';
 import { GhostPermissionList, GhostUpdateReview } from '@/cindy-brain/GhostPermissionList';
 import { cn } from '@/lib/utils';
 import { Switch } from '@/components/ui/switch';
@@ -544,13 +548,17 @@ export function GhostPluginPage() {
    */
   const handleReapprove = useCallback(
     async (ghostId: string) => {
+      // 随包插件不走人工重新确认(入口已隐藏,这里是防御):批准由启动对账自动补。
+      if (ghosts.find((g) => g.manifest.id === ghostId)?.builtin) return;
       if (ghostReapprovalRoute(marketByGhostId.get(ghostId)) === 'market') {
         await handleMarketUpdate(ghostId);
         return;
       }
-      await pickAndUpdateGhost(ghostId, { t, confirm, confirmWithCheckbox });
+      // 本地包路线:从已装目录读全量权限清单确认后开 receipt,不用用户翻出原始
+      // .cindy 文件;目录读不出时该流程内部自动回退到"重新选包"。
+      await reapproveInstalledGhost(ghostId, { t, confirm, confirmWithCheckbox });
     },
-    [confirm, confirmWithCheckbox, handleMarketUpdate, marketByGhostId, t],
+    [confirm, confirmWithCheckbox, ghosts, handleMarketUpdate, marketByGhostId, t],
   );
 
   const handleInstall = useCallback(async () => {
@@ -1447,7 +1455,8 @@ export function GhostPluginCard({
           />
         ) : null}
         {needsReapproval ? (
-          onReapprove ? (
+          // 随包插件不给人工重新确认入口:批准由启动对账自动补,详情页说明「重启即恢复」。
+          onReapprove && !item.builtin ? (
             <button
               type="button"
               onClick={onReapprove}

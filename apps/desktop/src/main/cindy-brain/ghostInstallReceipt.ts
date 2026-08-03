@@ -408,13 +408,20 @@ export class GhostInstallReceiptStore {
  * 缺失/损坏/非普通文件一律返回 `null` —— trust 只是**展示与来源信号**(能力由 manifest
  * slot 授予,不由 trust 等级授予),读不出时调用方用保守默认(`unverified`)而不是让整个
  * 迁移失败:旧模型读的也是同一个文件,缺了同样显示不出 verified,不比旧模型少展示什么。
+ *
+ * `cindy-official` 一律**封顶拒收**(按镜像损坏处理):官方档只该由 provisioning 在与
+ * 随包种子逐字节对账后授予,而本函数的两个调用方(legacy 迁移 / 从已装目录重新确认)都
+ * 只服务非随包插件 —— 非随包目录里出现官方档镜像本身就不可信,照抄会让确认卡/列表把
+ * 一个可变目录里的插件展示成「Cindy 官方」。
  */
 export function readLegacyInstallTrust(dir: string): GhostTrustInfo | null {
   const file = path.join(dir, '.cindy-trust.json');
   try {
     const stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) return null;
-    return validateTrust(JSON.parse(fs.readFileSync(file, 'utf8')));
+    const trust = validateTrust(JSON.parse(fs.readFileSync(file, 'utf8')));
+    if (!trust || trust.level === 'cindy-official') return null;
+    return trust;
   } catch {
     return null;
   }

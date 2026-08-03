@@ -100,6 +100,7 @@ const detail: GhostPluginDetail = {
   enabled: true,
   canUse: true,
   approvalState: 'approved',
+  builtin: false,
   author: 'XD',
   contents: ['code'],
   permissions: [],

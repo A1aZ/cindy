@@ -38,6 +38,7 @@ const installedPlugin: GhostPluginListItem = {
   enabled: true,
   canUse: true,
   approvalState: 'approved',
+  builtin: false,
 };
 
 const marketPlugin: PluginMarketItem = {

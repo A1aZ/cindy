@@ -1334,6 +1334,12 @@ export interface InstalledGhost {
    * 文件缺失或超限时缺省)。renderer 直接作 <img src> 用,无需 loading 态。
    */
   iconDataUrl?: string;
+  /**
+   * 是否随包内置插件(id 在随包种子清单里,由 main 投影;renderer 不自判前缀 ——
+   * 企业种子不带 `cindy-` 前缀)。批准态异常时 UI 据此换文案:随包插件由启动对账
+   * 自动补批准,「重启应用即恢复」,不走人工重新确认。
+   */
+  builtin?: boolean;
 }
 
 /** 插件包的来源与审核等级；决定 UI 徽标，不改变运行时 slot 权限。 */

@@ -365,6 +365,151 @@ export class GhostManager {
     return true;
   }
 
+  /**
+   * 「从已装目录重新确认」第一步:只读出确认卡需要的事实,零副作用。
+   *
+   * 这是本地包批准丢失(一次性迁移之后 receipt 又损坏/被删)时的第三条恢复路径 ——
+   * 不用用户翻出原始 `.cindy` 文件,也不自动放行:字节从已装目录读,权限清单在确认卡
+   * 上**全量**展示(无批准基线,全部按新增项列),用户逐条看过点确认才开 receipt。
+   * 本地 `.cindy` 的运行字节本来就一直从这个可变目录现读(§7 登记),两条恢复路径的
+   * 差别只是字节来源,授权边界同样是那张确认卡。
+   *
+   * `manifestSha256` 是「确认卡展示的」与「confirm 时批准的」之间的字节绑定:renderer
+   * 原样回传,confirm 侧重读重算,对不上即拒 —— 与更新流程的 `expectedPackageSha256`
+   * 同形,防确认间隙里 ghost.json 被换(#636 的同类窗口)。
+   *
+   * 随包插件一律拒:它们的批准由 provisioning 与种子逐字节对账后自动补,重启即恢复,
+   * 不走人工确认(也不能走 —— 这条路的 trust 封顶在非官方档)。
+   */
+  inspectInstalledReapproval(
+    id: string,
+  ):
+    | { manifest: GhostManifest; trust: GhostTrustInfo; manifestSha256: string }
+    | { rejection: InstallRejection } {
+    if (!isValidGhostId(id) || this.options.isTrustedBundledId?.(id)) {
+      return { rejection: { code: 'file-invalid', reason: '该插件不支持从安装目录重新确认' } };
+    }
+    if (this.readApproval(id).state === 'approved') {
+      return { rejection: { code: 'state-changed', reason: '插件批准状态已恢复,无需重新确认' } };
+    }
+    const dir = path.join(this.options.getRootDir(), id);
+    let rawBytes: Buffer;
+    try {
+      rawBytes = fs.readFileSync(path.join(dir, GHOST_MANIFEST_FILE));
+    } catch (err) {
+      return {
+        rejection: {
+          code: 'not-installed',
+          reason: `安装目录里读不到清单:${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBytes.toString('utf8'));
+    } catch (err) {
+      return {
+        rejection: {
+          code: 'file-invalid',
+          reason: `清单不是合法 JSON:${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
+    const validated = validateGhostManifest(parsed);
+    if (!validated.ok) return { rejection: { code: 'file-invalid', reason: validated.reason } };
+    if (validated.manifest.id !== id) {
+      return { rejection: { code: 'file-invalid', reason: '清单 id 与安装目录不一致' } };
+    }
+    const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
+      level: 'unverified',
+      publisherSigned: false,
+      publisherVerified: false,
+      reviewed: false,
+    };
+    return {
+      manifest: validated.manifest,
+      trust,
+      manifestSha256: crypto.createHash('sha256').update(rawBytes).digest('hex'),
+    };
+  }
+
+  /**
+   * 「从已装目录重新确认」第二步:用户在确认卡上点了同意,据此开 receipt。
+   *
+   * 与迁移(`backfillLegacyApproval`)的本质区别:**这是一次真实的用户确认**(用户
+   * 刚看完全量权限清单),不受迁移 ledger 一次性门约束,来源记 `user-reapproval`。
+   * 与迁移的共同点:trust 走同一个封顶读取器、技能字节现算钉指纹、只写状态根。
+   */
+  async reapproveInstalled(
+    id: string,
+    opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+  ): Promise<{ ghost: InstalledGhost } | { rejection: InstallRejection }> {
+    return this.runExclusiveMutation(() => this.reapproveInstalledUnlocked(id, opts));
+  }
+
+  private async reapproveInstalledUnlocked(
+    id: string,
+    opts: { enable: boolean; expectedManifestSha256: string; expectedInstalledApproval: string },
+  ): Promise<{ ghost: InstalledGhost } | { rejection: InstallRejection }> {
+    // 确认期间批准状态不得变过:与更新流程同款前置条件(token 由 Main 现读比对)。
+    const currentToken = ghostInstallApprovalToken(
+      this.list().find((g) => g.manifest.id === id)?.approval,
+    );
+    if (currentToken !== opts.expectedInstalledApproval || currentToken.startsWith('approved')) {
+      return {
+        rejection: { code: 'state-changed', reason: '插件批准状态在确认后发生了变化,请重新确认' },
+      };
+    }
+    // 重走只读检查(含随包拒收/清单校验),并绑定确认卡展示时的清单字节。
+    const inspected = this.inspectInstalledReapproval(id);
+    if ('rejection' in inspected) return inspected;
+    if (inspected.manifestSha256 !== opts.expectedManifestSha256) {
+      return {
+        rejection: { code: 'state-changed', reason: '插件清单在确认后发生了变化,请重新确认' },
+      };
+    }
+    const dir = path.join(this.options.getRootDir(), id);
+    try {
+      const localeResources = this.readApprovedLocaleResources(dir, inspected.manifest);
+      const iconDataUrl = this.readInstalledIconDataUrl(dir, inspected.manifest) ?? undefined;
+      const skillContentSha256 = await hashApprovedSkillContent(inspected.manifest, dir);
+      await this.receiptStore.write(
+        createGhostInstallReceipt({
+          manifest: inspected.manifest,
+          localeResources,
+          enabled: opts.enable,
+          trust: inspected.trust,
+          skillContentSha256,
+          ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+        }),
+        { skillSourceDir: dir },
+      );
+    } catch (err) {
+      return {
+        rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
+      };
+    }
+    this.untrustedApprovals.delete(id);
+    // 与 setEnabled 同款:启停镜像同步维护,回滚到旧客户端不错位。
+    try {
+      const marker = path.join(dir, DISABLED_MARKER_FILE);
+      if (opts.enable) await fs.promises.rm(marker, { force: true });
+      else await fs.promises.writeFile(marker, '');
+    } catch {
+      // 镜像写不动不影响批准事实;receipt 是权威。
+    }
+    this.options.log?.info('ghost reapproved from installed dir', {
+      id,
+      enabled: opts.enable,
+      trustLevel: inspected.trust.level,
+      origin: 'user-reapproval',
+    });
+    const ghost = this.list().find((g) => g.manifest.id === id);
+    if (!ghost) return { rejection: { code: 'io', reason: '重新确认后读不到插件清单' } };
+    this.options.onChanged?.(this.list());
+    return { ghost };
+  }
+
   /** 扫描已装意识(同步 —— renderer 首帧 sendSync 拉取,目录极小不卡启动)。 */
   list(): InstalledGhost[] {
     const root = this.options.getRootDir();
@@ -403,6 +548,7 @@ export class GhostManager {
               }
             : {}),
           ...(receipt.iconDataUrl !== undefined ? { iconDataUrl: receipt.iconDataUrl } : {}),
+          ...(this.options.isTrustedBundledId?.(entry.name) ? { builtin: true } : {}),
         });
         continue;
       }
@@ -447,6 +593,7 @@ export class GhostManager {
         enabled: false,
         approval: { state: approvalResult.state },
         ...(iconDataUrl !== null ? { iconDataUrl } : {}),
+        ...(this.options.isTrustedBundledId?.(entry.name) ? { builtin: true } : {}),
       });
     }
     result.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));

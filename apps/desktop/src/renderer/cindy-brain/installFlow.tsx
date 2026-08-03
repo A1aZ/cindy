@@ -227,6 +227,77 @@ export async function confirmAndInstallGhost(
 }
 
 /**
+ * 「重新确认权限」的本地包路线:**从已装目录**读出全量权限清单 → 确认 → 开 receipt。
+ * 不用用户翻出原始 `.cindy` 文件(#1243 验收:本地包不存在不可恢复状态)。
+ *
+ * 授权边界仍是这张确认卡:无批准基线,权限**全量**按新增项展示(GhostInstallReview),
+ * 与"重新选包"路线看到的是同一张卡,差别只是字节从安装目录读。清单字节以
+ * manifestSha256 绑定到 confirm(确认间隙 ghost.json 被换 → main 拒 state-changed)。
+ *
+ * 安装目录读不出/清单不合法时回退到「重新选包」路线 —— 目录坏了才需要用户找文件,
+ * 目录完好时一次点击即恢复。
+ */
+export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlowDeps): Promise<void> {
+  const { t, confirmWithCheckbox } = deps;
+  const installed = findInstalled(ghostId);
+  if (!installed) {
+    toast.error(t('settings.ghosts.errors.generic'));
+    return;
+  }
+  let manifest: GhostManifest;
+  let trust: GhostTrustInfo;
+  let manifestSha256: string;
+  try {
+    const inspected = await window.electronAPI.ghosts.reapproveInspect(ghostId);
+    manifest = inspected.manifest;
+    trust = inspected.trust;
+    manifestSha256 = inspected.manifestSha256;
+  } catch (err) {
+    // 安装目录读不出清单 = 只剩"重新选包"一条路;如实降级,不吞掉恢复机会。
+    installFlowLog.warn('reapprove-inspect failed; falling back to file picker', {
+      ghostId,
+      err,
+    });
+    await pickAndUpdateGhost(ghostId, deps);
+    return;
+  }
+  const factsLine = manifest.author
+    ? t('settings.ghosts.installConfirm.metaWithAuthor', {
+        author: manifest.author,
+        version: manifest.version,
+      })
+    : t('settings.ghosts.installConfirm.meta', { version: manifest.version });
+  const { ok, checked: enable } = await confirmWithCheckbox({
+    title: t('settings.ghosts.reapproveConfirm.title', { name: manifest.name }),
+    description: t('settings.ghosts.reapproveConfirm.body'),
+    content: (
+      <GhostInstallReview
+        description={manifest.description}
+        meta={factsLine}
+        trust={trust}
+        items={ghostPermissionItems(manifest)}
+      />
+    ),
+    maxWidth: GHOST_CONFIRM_MAX_WIDTH,
+    confirmText: t('settings.ghosts.reapproveConfirm.confirm'),
+    cancelText: t('settings.ghosts.installConfirm.cancel'),
+    checkboxLabel: t('settings.ghosts.installConfirm.enableNow'),
+    checkboxDefaultChecked: true,
+  });
+  if (!ok) return;
+  try {
+    const { ghost } = await window.electronAPI.ghosts.reapproveInstalled(ghostId, {
+      enable,
+      expectedManifestSha256: manifestSha256,
+      expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
+    });
+    toast.success(t('settings.ghosts.toast.reapproved', { name: ghost.manifest.name }));
+  } catch (err) {
+    toast.error(t(ghostInstallErrorKey(extractIpcError(err)?.code)));
+  }
+}
+
+/**
  * 单意识详情页的「更新版本…」:选文件 → 验身 → 必须与当前意识同 id
  * (选错别的意识的包直接拒,不做"顺手装成新意识"的隐式行为)→ 确认 → 更新。
  */

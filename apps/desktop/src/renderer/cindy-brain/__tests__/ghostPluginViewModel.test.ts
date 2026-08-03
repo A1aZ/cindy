@@ -103,6 +103,7 @@ describe('ghostPluginViewModel', () => {
         enabled: true,
         canUse: true,
         approvalState: 'approved',
+  builtin: false,
       },
       {
         id: 'lizi-mivo',
@@ -112,6 +113,7 @@ describe('ghostPluginViewModel', () => {
         enabled: true,
         canUse: true,
         approvalState: 'approved',
+  builtin: false,
       },
       {
         id: 'slack',
@@ -121,6 +123,7 @@ describe('ghostPluginViewModel', () => {
         enabled: true,
         canUse: true,
         approvalState: 'approved',
+  builtin: false,
       },
     ] satisfies GhostPluginListItem[];
 

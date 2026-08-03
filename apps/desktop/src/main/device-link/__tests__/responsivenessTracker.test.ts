@@ -19,6 +19,7 @@ import {
 } from '../responsivenessTracker';
 
 const DEV = 'device-under-test';
+const OTHER_DEV = 'other-device';
 
 function timeoutError(): DeviceLinkError {
   return new DeviceLinkError('INVOKE_TIMEOUT', 'no invoke-result within 12000ms');
@@ -50,14 +51,19 @@ function harness(overrides?: {
 }
 
 /** 连续 N 个超时批次把熔断打开(批次间推进时钟越过 1s 归批窗口,构成独立故障证据)。 */
-async function openBreaker(h: ReturnType<typeof harness>): Promise<void> {
+async function openBreaker(
+  h: ReturnType<typeof harness>,
+  deviceId = DEV,
+): Promise<void> {
   for (let i = 0; i < BREAKER_FAILURE_THRESHOLD; i++) {
     await expect(
-      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+      h.tracker.guardInvoke(deviceId, 'local-db:sessions:list', () =>
+        Promise.reject(timeoutError()),
+      ),
     ).rejects.toThrow('no invoke-result');
     h.advance(1_100);
   }
-  expect(h.tracker.isUnresponsive(DEV)).toBe(true);
+  expect(h.tracker.isUnresponsive(deviceId)).toBe(true);
 }
 
 describe('responsivenessTracker', () => {
@@ -203,6 +209,61 @@ describe('responsivenessTracker', () => {
     h.advance(BREAKER_PROBE_BACKOFF_BASE_MS);
     h.tracker.probeTick();
     expect(h.probeInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('探测超时会再次重开该 peer link,不影响其它设备', async () => {
+    let resolveInitialRecovery!: () => void;
+    const initialRecovery = new Promise<void>((resolve) => {
+      resolveInitialRecovery = resolve;
+    });
+    const recoverLink = vi
+      .fn()
+      .mockImplementationOnce(() => initialRecovery)
+      .mockResolvedValue(undefined);
+    const h = harness({ recoverLink });
+    await openBreaker(h);
+    expect(recoverLink).toHaveBeenCalledTimes(1);
+    expect(recoverLink).toHaveBeenCalledWith(DEV);
+
+    await expect(
+      h.tracker.guardInvoke(OTHER_DEV, 'local-db:sessions:list', async () => 'other-ok'),
+    ).resolves.toBe('other-ok');
+    resolveInitialRecovery();
+    await initialRecovery;
+
+    h.advance(BREAKER_PROBE_BACKOFF_BASE_MS);
+    h.probeInvoke.mockRejectedValueOnce(timeoutError());
+    h.tracker.probeTick();
+    await vi.waitFor(() => {
+      expect(recoverLink).toHaveBeenCalledTimes(2);
+    });
+    expect(recoverLink).toHaveBeenNthCalledWith(2, DEV);
+    expect(h.tracker.isUnresponsive(OTHER_DEV)).toBe(false);
+    await expect(
+      h.tracker.guardInvoke(OTHER_DEV, 'local-db:sessions:list', async () => 'still-ok'),
+    ).resolves.toBe('still-ok');
+  });
+
+  it('clearDevice 后晚到的探测超时不再触发 link recovery', async () => {
+    let rejectProbe!: (err: unknown) => void;
+    const recoverLink = vi.fn(async () => {});
+    const h = harness({ recoverLink });
+    await openBreaker(h);
+    recoverLink.mockClear();
+
+    h.advance(BREAKER_PROBE_BACKOFF_BASE_MS);
+    h.probeInvoke.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectProbe = reject;
+        }),
+    );
+    h.tracker.probeTick();
+    h.tracker.clearDevice(DEV);
+    rejectProbe(timeoutError());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+    expect(recoverLink).not.toHaveBeenCalled();
   });
 
   it('clearDevice 作废在途请求的晚到超时:清除后旧超时不得重建计数', async () => {

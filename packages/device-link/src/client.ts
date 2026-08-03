@@ -434,7 +434,12 @@ export class DeviceLinkClient {
    * 已 online 时为空操作,不打断健康连接;stopped 时等价于 start()。
    */
   connectNow(reason = 'connect-now', options?: { force?: boolean }): void {
-    if (this.status === 'online' && !options?.force) return;
+    if (this.status === 'online') {
+      if (!options?.force) return;
+      // force 会更换整条 relay socket；旧 socket 的 close 回调会被 epoch 守卫忽略，
+      // 因此必须在这里主动复位所有 peer 的旧 link 状态。
+      this.resetLinkStateForReconnect();
+    }
     this.stopped = false;
     this.reconnectAttempt = 0;
     if (this.reconnectTimer) {

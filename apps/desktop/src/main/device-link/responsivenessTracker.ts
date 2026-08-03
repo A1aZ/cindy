@@ -167,6 +167,26 @@ export function createResponsivenessTracker(
     breaker.settle(deviceId, slot, outcome);
   };
 
+  const triggerLinkRecovery = (deviceId: string): void => {
+    if (!deps.recoverLink || linkRecoveryInFlight.has(deviceId)) return;
+    let recovery: Promise<unknown>;
+    try {
+      recovery = Promise.resolve(deps.recoverLink(deviceId));
+    } catch (recoveryErr) {
+      recovery = Promise.reject(recoveryErr);
+    }
+    linkRecoveryInFlight.set(deviceId, recovery);
+    void recovery.then(
+      () => {
+        if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
+      },
+      (recoveryErr) => {
+        if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
+        log.debug(`peer link recovery failed for ${deviceId.slice(0, 8)}`, recoveryErr);
+      },
+    );
+  };
+
   const selectCohort = (deviceId: string, channel: string, cohortOverride?: number): number => {
     if (cohortOverride !== undefined) return cohortOverride;
     if (!BOOTSTRAP_FAN_OUT_CHANNELS.has(channel)) return breaker.createCohort(deviceId);
@@ -203,24 +223,7 @@ export function createResponsivenessTracker(
           ? 'inconclusive'
           : classifyDeviceSendFailure(err);
       settle(deviceId, slot, outcome);
-      if (outcome === 'timeout' && deps.recoverLink && !linkRecoveryInFlight.has(deviceId)) {
-        let recovery: Promise<unknown>;
-        try {
-          recovery = Promise.resolve(deps.recoverLink(deviceId));
-        } catch (recoveryErr) {
-          recovery = Promise.reject(recoveryErr);
-        }
-        linkRecoveryInFlight.set(deviceId, recovery);
-        void recovery.then(
-          () => {
-            if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
-          },
-          (recoveryErr) => {
-            if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
-            log.debug(`peer link recovery failed for ${deviceId.slice(0, 8)}`, recoveryErr);
-          },
-        );
-      }
+      if (outcome === 'timeout') triggerLinkRecovery(deviceId);
       throw err;
     }
   };
@@ -253,7 +256,13 @@ export function createResponsivenessTracker(
               classifyDeviceSendSuccess(DEVICE_RESPONSIVENESS_PROBE_CHANNEL, true),
             ),
           (err) => {
-            breaker.settle(deviceId, slot, classifyDeviceSendFailure(err));
+            const outcome = classifyDeviceSendFailure(err);
+            breaker.settle(deviceId, slot, outcome);
+            // 探测是 open 后唯一会真正穿过 peer link 的流量。若它仍等满超时，
+            // 继续按单-peer 半径重开 link；clear/reset 已翻代时 breaker 会先关闭。
+            if (outcome === 'timeout' && breaker.isOpen(deviceId)) {
+              triggerLinkRecovery(deviceId);
+            }
             throw err;
           },
         )

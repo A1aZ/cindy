@@ -24,7 +24,10 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1', version: '1.2.0' }));
     vi.stubGlobal('fetch', fetchMock);
     await expect(fetchLatestRelease('ios', 8000, BASE)).resolves.toEqual({ runtimeVersion: 'rtv1', version: '1.2.0' });
-    expect(fetchMock).toHaveBeenCalledWith(`${BASE}/latest?platform=ios`, expect.any(Object));
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`)),
+      expect.any(Object),
+    );
   });
 
   it('canary 显式追加 channel，stable URL 保持旧契约', async () => {
@@ -32,27 +35,22 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     vi.stubGlobal('fetch', fetchMock);
     await fetchLatestRelease('android', 8000, BASE, true);
     expect(fetchMock).toHaveBeenCalledWith(
-      `${BASE}/latest?platform=android&channel=canary`,
+      expect.stringMatching(
+        new RegExp(`^${BASE}/latest\\?platform=android&channel=canary&t=\\d+$`),
+      ),
       expect.any(Object),
     );
   });
 
-  it('noCache=true → 追加 cache-buster + no-cache 头(放行决定不能读边缘旧记录)', async () => {
-    const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
-    vi.stubGlobal('fetch', fetchMock);
-    await fetchLatestRelease('ios', 8000, BASE, false, true);
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toMatch(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`));
-    expect(init.headers).toMatchObject({ 'cache-control': 'no-cache' });
-  });
-
-  it('默认不绕缓存:常规路径的 URL 与请求头保持旧契约', async () => {
+  it('一律绕缓存:每次请求都带 cache-buster + no-cache 头', async () => {
+    // 可变指针 + 原地改 minVersion:边缘旧副本两个方向都会错判(误挡 / 误放行),
+    // 所以四条调用路径统一不吃缓存。
     const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
     vi.stubGlobal('fetch', fetchMock);
     await fetchLatestRelease('ios', 8000, BASE);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe(`${BASE}/latest?platform=ios`);
-    expect(init.headers).toEqual({ accept: 'application/json' });
+    expect(url).toMatch(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`));
+    expect(init.headers).toEqual({ accept: 'application/json', 'cache-control': 'no-cache' });
   });
 
   it('404(服务端确认暂无记录)→ null(= 无更新)', async () => {

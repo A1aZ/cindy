@@ -88,6 +88,40 @@ describe('evaluateBundleUpdate', () => {
     expect(r.forced).toBe(false);
   });
 
+  it('runtimeVersion 相同但低于 minVersion → 仍然强更(门槛不经指纹门闸)', () => {
+    // 服务端可以对某个已发布版本事后下发门槛;此时装机指纹与 /latest 一致,但 version
+    // 低于门槛 —— 必须命中强更,否则发布链写了 minVersion 也拦不住同指纹的旧构建。
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-new',
+      currentVersion: '1.0.0',
+      latest: { ...VALID, minVersion: '1.2.0' },
+    });
+    expect(r.needsUpdate).toBe(true);
+    expect(r.forced).toBe(true);
+    // 同指纹强更时 target.runtimeVersion 就等于当前值,消费方不得据此判断"换了指纹"。
+    expect(r.target?.runtimeVersion).toBe('rtv-new');
+  });
+
+  it('runtimeVersion 相同且不低于 minVersion → 无更新', () => {
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-new',
+      currentVersion: '1.2.0',
+      latest: { ...VALID, minVersion: '1.2.0' },
+    });
+    expect(r.needsUpdate).toBe(false);
+    expect(r.target).toBeNull();
+  });
+
+  it('缺 currentVersion → 不强更(无法比较,fail-open)', () => {
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-new',
+      currentVersion: null,
+      latest: { ...VALID, minVersion: '1.2.0' },
+    });
+    expect(r.needsUpdate).toBe(false);
+    expect(r.forced).toBe(false);
+  });
+
   it('拿不到当前 runtimeVersion(dev / 未启用)→ 无更新', () => {
     expect(evaluateBundleUpdate({ currentRuntimeVersion: null, currentVersion: '1.0.0', latest: VALID }).needsUpdate).toBe(false);
     expect(evaluateBundleUpdate({ currentRuntimeVersion: '', currentVersion: '1.0.0', latest: VALID }).needsUpdate).toBe(false);

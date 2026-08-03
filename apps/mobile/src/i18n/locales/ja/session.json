@@ -162,6 +162,7 @@
     "previewNotReadyTitle": "まだ作成できません",
     "previewReadySubtitle": "確認すると、操作対象のデバイスにセッションを作成し、最初のメッセージをキューに追加します。",
     "useWorktree": "worktree を使用",
+    "worktreeShortLabel": "worktree",
     "worktreeSourceBranch": "ソースブランチ",
     "selectWorktreeBranchA11y": "worktree のソースブランチを選択。現在は {{branch}}",
     "worktreeBranchesLoading": "ブランチを読み込み中…",

@@ -162,6 +162,7 @@
     "previewNotReadyTitle": "还不能创建",
     "previewReadySubtitle": "确认后会在被控设备创建任务，并把首条消息加入队列。",
     "useWorktree": "使用 worktree",
+    "worktreeShortLabel": "worktree",
     "worktreeSourceBranch": "源分支",
     "selectWorktreeBranchA11y": "选择 worktree 源分支，当前 {{branch}}",
     "worktreeBranchesLoading": "正在读取分支…",

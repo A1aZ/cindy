@@ -162,6 +162,7 @@
     "previewNotReadyTitle": "아직 만들 수 없습니다",
     "previewReadySubtitle": "확인하면 제어 기기에 세션을 만들고 첫 메시지를 대기열에 추가합니다.",
     "useWorktree": "worktree 사용",
+    "worktreeShortLabel": "worktree",
     "worktreeSourceBranch": "소스 브랜치",
     "selectWorktreeBranchA11y": "worktree 소스 브랜치 선택. 현재 {{branch}}",
     "worktreeBranchesLoading": "브랜치 불러오는 중…",

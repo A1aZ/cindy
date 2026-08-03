@@ -1268,6 +1268,8 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('useRemoteNewMakerWorktreeBranchPreference(');
     expect(newSource).toContain('testID="newSession.worktreeBranchPicker"');
     expect(newSource).toContain('testID="newSession.worktreeToggle"');
+    expect(newSource).toContain("t('session.new.worktreeShortLabel')");
+    expect(newSource).not.toContain('>worktree</Text>');
   });
 
   it('applies the protocol timeout override map to mobile invokes (worktree:create needs 60s)', () => {

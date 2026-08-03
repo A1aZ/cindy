@@ -3566,7 +3566,9 @@ export default function NewRemoteSessionScreen() {
                             <Check color={colors.ctaText} size={iconSize.xs} strokeWidth={iconStroke.bold} />
                           ) : null}
                         </View>
-                        <Text style={styles.worktreeToggleLabel} numberOfLines={1}>worktree</Text>
+                        <Text style={styles.worktreeToggleLabel} numberOfLines={1}>
+                          {t('session.new.worktreeShortLabel')}
+                        </Text>
                       </Pressable>
                     </View>
                   </View>

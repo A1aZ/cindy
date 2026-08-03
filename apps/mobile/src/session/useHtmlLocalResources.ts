@@ -18,6 +18,7 @@ import {
   applyHtmlResourceUrls,
   collectHtmlLocalResourceRefs,
   planHtmlResourceFetches,
+  HTML_RESOURCE_TOTAL_MAX_CHARS,
   type HtmlResourceFetchTarget,
 } from '@/session/htmlLocalResources';
 
@@ -28,6 +29,8 @@ export interface HtmlResourceFetchOutcome {
   urlByAbsPath: Map<string, string>;
   /** 取件失败(抛错或回空地址)的数量;这些位置回填时保留原引用。 */
   failed: number;
+  /** 因整页总量预算用尽而未取的数量(与 failed 分开计,提示语不同)。 */
+  overBudget: number;
 }
 
 /**
@@ -42,13 +45,29 @@ export async function fetchHtmlResourceUrls(
   targets: readonly HtmlResourceFetchTarget[],
   /** 取一个资源 → `data:` URI(取不到返回空串或抛错,两者都计入 failed)。 */
   fetchOne: (target: HtmlResourceFetchTarget) => Promise<string>,
-  options: { concurrency?: number; isCancelled?: () => boolean } = {},
+  options: {
+    concurrency?: number;
+    isCancelled?: () => boolean;
+    /** 整页内联总量预算(data: URI 字符数);缺省 HTML_RESOURCE_TOTAL_MAX_CHARS。 */
+    totalBudgetChars?: number;
+  } = {},
 ): Promise<HtmlResourceFetchOutcome> {
   const concurrency = Math.max(1, options.concurrency ?? FETCH_CONCURRENCY);
   const isCancelled = options.isCancelled ?? (() => false);
+  const totalBudget = options.totalBudgetChars ?? HTML_RESOURCE_TOTAL_MAX_CHARS;
   const urlByAbsPath = new Map<string, string>();
   let failed = 0;
+  let overBudget = 0;
+  let usedChars = 0;
   let cursor = 0;
+  // 一旦有资源装不进剩余预算,就视为预算耗尽、后续一律不再取件。
+  //
+  // **不能只比 `usedChars >= totalBudget`**:资源大小要取回来才知道,而被拒的那个不计入
+  // usedChars —— 于是 usedChars 可能永远到不了预算线,早退分支从不触发,剩下的资源仍会
+  // 被逐个下载完(网络与临时文件全白花),正是这条 review 要防的 DoS。
+  // 代价是偏保守:大资源用尽预算后,后面本可塞进去的小资源也不再取。预览场景下可预测、
+  // 有界比多塞一两个资源重要。
+  let budgetExhausted = false;
 
   const worker = async (): Promise<void> => {
     for (;;) {
@@ -57,10 +76,24 @@ export async function fetchHtmlResourceUrls(
       cursor += 1;
       if (index >= targets.length) return;
       const target = targets[index];
+      if (budgetExhausted) {
+        overBudget += 1;
+        continue;
+      }
       try {
         const dataUri = await fetchOne(target);
-        if (dataUri) urlByAbsPath.set(target.absPath, dataUri);
-        else failed += 1;
+        if (!dataUri) {
+          failed += 1;
+          continue;
+        }
+        // 取回来才知道多大;装不进剩余预算就丢掉这一个(保留原引用),不占内存。
+        if (usedChars + dataUri.length > totalBudget) {
+          budgetExhausted = true;
+          overBudget += 1;
+          continue;
+        }
+        usedChars += dataUri.length;
+        urlByAbsPath.set(target.absPath, dataUri);
       } catch {
         failed += 1;
       }
@@ -70,7 +103,7 @@ export async function fetchHtmlResourceUrls(
   await Promise.all(
     Array.from({ length: Math.min(concurrency, targets.length) }, worker),
   );
-  return { urlByAbsPath, failed };
+  return { urlByAbsPath, failed, overBudget };
 }
 
 export interface HtmlLocalResourceState {
@@ -82,7 +115,9 @@ export interface HtmlLocalResourceState {
   total: number;
   /** 取件失败数(这些位置保留原引用)。 */
   failed: number;
-  /** 超出 HTML_RESOURCE_LIMIT 被跳过的数量(不静默截断,交上层如实提示)。 */
+  /**
+   * 未取回的资源数(超出条数上限 + 整页总量预算用尽),不静默截断、交上层如实提示。
+   */
   skipped: number;
 }
 
@@ -97,7 +132,9 @@ export function useHtmlLocalResources(
     [baseDirAbsPath, html],
   );
   const plan = useMemo(() => planHtmlResourceFetches(refs), [refs]);
-  const [outcome, setOutcome] = useState<{ html: string; failed: number } | null>(null);
+  const [outcome, setOutcome] = useState<
+    { html: string; failed: number; overBudget: number } | null
+  >(null);
 
   useEffect(() => {
     if (plan.targets.length === 0) {
@@ -111,9 +148,13 @@ export function useHtmlLocalResources(
 
     void fetchHtmlResourceUrls(plan.targets, fetchResourceDataUri, {
       isCancelled: () => cancelled,
-    }).then(({ urlByAbsPath, failed }) => {
+    }).then(({ urlByAbsPath, failed, overBudget }) => {
       if (cancelled) return;
-      setOutcome({ html: applyHtmlResourceUrls(html, refs, urlByAbsPath), failed });
+      setOutcome({
+        html: applyHtmlResourceUrls(html, refs, urlByAbsPath),
+        failed,
+        overBudget,
+      });
     });
 
     return () => {
@@ -127,6 +168,7 @@ export function useHtmlLocalResources(
     loading: needsFetch && outcome === null,
     total: plan.targets.length,
     failed: outcome?.failed ?? 0,
-    skipped: plan.skipped,
+    // 条数上限跳过的 + 总量预算用尽未取的,合并成一条「没取到」的提示口径。
+    skipped: plan.skipped + (outcome?.overBudget ?? 0),
   };
 }

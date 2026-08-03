@@ -8,6 +8,7 @@ import {
   HTML_RESOURCE_LIMIT,
   planHtmlResourceFetches,
   resolveHtmlResourcePath,
+  HTML_RESOURCE_TOTAL_MAX_CHARS,
 } from '@/session/htmlLocalResources';
 import { fetchHtmlResourceUrls } from '@/session/useHtmlLocalResources';
 
@@ -300,7 +301,7 @@ describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
       return 'x';
     });
     expect(called).toBe(false);
-    expect(out).toEqual({ urlByAbsPath: new Map(), failed: 0 });
+    expect(out).toEqual({ urlByAbsPath: new Map(), failed: 0, overBudget: 0 });
   });
 });
 
@@ -359,5 +360,53 @@ describe('SVG fragment 必须保留(sprite 靠它选 symbol)', () => {
     expect(planHtmlResourceFetches(refs).targets).toEqual([
       { absPath: '/Users/me/drafts/s.svg', mimeType: 'image/svg+xml' },
     ]);
+  });
+});
+
+describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
+  it('逐文件上限挡不住总量:预算用尽后不再取件', async () => {
+    // 32 个接近单文件上限的资源 ≈ 85 MiB base64,取件 Map / 回填 HTML / WebView 序列化
+    // 会同时各持一份,足以 OOM(review P1)。
+    const targets = Array.from({ length: 10 }, (_, i) => ({
+      absPath: `/a${i}.png`,
+      mimeType: 'image/png',
+    }));
+    const chunk = 'x'.repeat(100);
+    let calls = 0;
+    const out = await fetchHtmlResourceUrls(
+      targets,
+      async () => {
+        calls += 1;
+        return chunk;
+      },
+      { concurrency: 1, totalBudgetChars: 250 },
+    );
+    // 250 字符预算装得下 2 个 100 字符的资源,第 3 个超预算被丢。
+    expect(out.urlByAbsPath.size).toBe(2);
+    expect(out.overBudget).toBe(8);
+    expect(out.failed).toBe(0);
+    // 预算耗尽后不再下载:第 3 个取回来才知道装不下(它置耗尽标记),之后 7 个直接跳过。
+    // 若只比 usedChars >= budget,usedChars 会永远停在 200、早退从不触发,10 个全下载。
+    expect(calls).toBe(3);
+  });
+
+  it('超预算的那个保留原引用,不占内存也不换错地址', async () => {
+    const out = await fetchHtmlResourceUrls(
+      [{ absPath: '/big.png', mimeType: 'image/png' }],
+      async () => 'y'.repeat(500),
+      { totalBudgetChars: 100 },
+    );
+    expect(out.urlByAbsPath.size).toBe(0);
+    expect(out.overBudget).toBe(1);
+  });
+
+  it('预算内不受影响,且默认预算是显式常量', async () => {
+    const out = await fetchHtmlResourceUrls(
+      [{ absPath: '/a.png', mimeType: 'image/png' }],
+      async () => 'data:image/png;base64,AAA',
+    );
+    expect(out.urlByAbsPath.size).toBe(1);
+    expect(out.overBudget).toBe(0);
+    expect(HTML_RESOURCE_TOTAL_MAX_CHARS).toBeGreaterThan(0);
   });
 });

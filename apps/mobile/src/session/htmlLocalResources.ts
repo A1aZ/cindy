@@ -54,6 +54,19 @@ export const HTML_RESOURCE_LIMIT = 32;
 export const HTML_RESOURCE_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
+ * **整页**内联总量上限(按回填进 HTML 的 `data:` URI 字符长度计)。
+ *
+ * 逐文件上限 + 条数上限挡不住总量(review P1):32 个接近 2 MiB 的资源 ≈ 64 MiB 原始字节
+ * ≈ 85 MiB base64,而取件 Map、回填后的 HTML、以及 WebView source 序列化会同时各持一份 ——
+ * 在常见移动端堆限制下足以 OOM。预览内容来自不可信的 agent 产物,这就是一条稳定的
+ * 拒绝服务输入,必须有累计预算。
+ *
+ * 按 `data:` URI **字符长度**计而不是原始字节:那才是真正占内存的东西(base64 约 4/3 倍)。
+ * 8 MiB 够装一份带十几张配图的设计稿;超预算的资源不取,保留原引用并如实提示。
+ */
+export const HTML_RESOURCE_TOTAL_MAX_CHARS = 8 * 1024 * 1024;
+
+/**
  * 资源扩展名 → MIME。**必须给准**:`data:` URI 的类型由它决定,给成
  * `application/octet-stream` 时浏览器会拒绝把它当样式表/脚本用(样式静默失效)。
  * 表外类型不猜,返回 null → 上层不改写该引用(fail-closed)。

@@ -114,9 +114,16 @@ describe('渲染载体与取件的安全接线(源码级守卫)', () => {
     // 且对象删掉后缓存命中会回死 URL。
     expect(pageSource).toContain('fetchRemoteAbsFileOnce(');
     // 删除必须在 finally 里:下载失败 / 超限同样要回收(失败路径最容易漏)。
+    //
+    // 回收对象取自 onOssKey 累加的集合,**不是** media.ossKey(review P1 第二轮):
+    // presign 失败时取件在返回 media 之前就抛错,围绕 media 写的 finally 不会执行;
+    // 瞬断重试还会重复上传、产出不同的 key。
     const body = /const fetchResourceDataUri = useCallback\(([\s\S]*?)\n  \);/.exec(pageSource);
     expect(body, '未找到 fetchResourceDataUri 实现').not.toBeNull();
-    expect(body![1]).toMatch(/finally\s*\{[\s\S]*?deleteResourceOssObject\(media\.ossKey\)/);
+    expect(body![1]).toMatch(/finally\s*\{[\s\S]*?for \(const ossKey of uploadedKeys\) deleteResourceOssObject\(ossKey\)/);
+    expect(body![1]).not.toContain('deleteResourceOssObject(media.ossKey)');
+    // 集合必须在 try 之外声明,否则取件抛错时 finally 拿不到它。
+    expect(body![1]).toMatch(/const uploadedKeys = new Set<string>\(\);\s*\n\s*try \{/);
   });
 
   it('SSH 会话的资源取件必须带会话上下文', () => {

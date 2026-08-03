@@ -380,13 +380,23 @@ export default function RemoteFilePreviewScreen() {
    */
   const fetchResourceDataUri = useCallback(
     async (target: HtmlResourceFetchTarget): Promise<string> => {
-      // 一次性取件(带 ossKey、不进 60s 共享缓存):对象用完即删,缓存命中会回死 URL。
-      const media = await fetchRemoteAbsFileOnce(
-        { maker, deviceId, openLink, presignGet },
-        target.absPath,
-        sshMediaContext,
-      );
+      // 每个资源都会在 OSS 上新建一个对象;字节一旦进了 data: URI,对象立即无用。
+      // 不回收的话一页最多遗留 32 个,反复进出预览还会累积(review P1)。
+      //
+      // **按 key 累加收集,而不是只回收 media.ossKey**(review P1 第二轮):
+      //  - presign 失败(弱网 / 回包非法)时 resolveMobileRemoteMedia 在**返回之前**抛错,
+      //    对象已经上传但 media 拿不到 —— 只围绕 media 写 finally 的话那个对象永久遗留;
+      //  - 瞬断重试的每一次都可能再上传一份,产出不同的 key,只记最后一个同样会漏。
+      // 所以在 onOssKey 里收全,统一在 finally 里逐个删。
+      const uploadedKeys = new Set<string>();
       try {
+        // 一次性取件(带 ossKey、不进 60s 共享缓存):对象用完即删,缓存命中会回死 URL。
+        const media = await fetchRemoteAbsFileOnce(
+          { maker, deviceId, openLink, presignGet },
+          target.absPath,
+          sshMediaContext,
+          (ossKey) => uploadedKeys.add(ossKey),
+        );
         // 预签名地址只在这里用一次:下载完即转成 data: URI,**绝不回填进页面**
         // (页面里的脚本能读 DOM,凭证进 DOM 等于交给不可信文档,review P1)。
         const dataUri = await downloadRemoteMediaAsDataUri(
@@ -396,10 +406,8 @@ export default function RemoteFilePreviewScreen() {
         );
         return dataUri ?? '';
       } finally {
-        // 每个资源都新建了一个 OSS 对象;字节已进 data: URI,对象立即无用。
-        // 不回收的话一页最多遗留 32 个,反复进出预览还会累积(review P1)。
-        // 放 finally:下载失败 / 超限同样要删,失败路径才是最容易漏掉的那条。
-        deleteResourceOssObject(media.ossKey);
+        // 放 finally:取件抛错 / 下载失败 / 超限同样要删,失败路径才是最容易漏掉的那条。
+        for (const ossKey of uploadedKeys) deleteResourceOssObject(ossKey);
       }
     },
     [deleteResourceOssObject, deviceId, maker, openLink, presignGet, sshMediaContext],
@@ -977,8 +985,13 @@ function TextPreviewPage({
     htmlResources.failed > 0
       ? t('files.preview.htmlResourcesMissing', { count: htmlResources.failed })
       : null,
-    htmlResources.skipped > 0
+    // 条数上限与总量预算**分开提示**(review P2):只有前者才等于「前 32 项已取回」,
+    // 总量预算可能在第 3 项就用尽,合并成一条会谎报取回数量。
+    htmlResources.overLimit > 0
       ? t('files.preview.htmlResourcesTruncated', { limit: HTML_RESOURCE_LIMIT })
+      : null,
+    htmlResources.overBudget > 0
+      ? t('files.preview.htmlResourcesOverBudget', { count: htmlResources.overBudget })
       : null,
   ].filter((line): line is string => line !== null);
 

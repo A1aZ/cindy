@@ -176,18 +176,96 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
 }
 
 /**
+ * 把「浏览器不会当资源看」的惰性文本替换成**等长**空白,只用于扫描。
+ *
+ * 为什么需要(review P1):HTML 注释、`<script>` 体、CSS 注释里可以塞任意多个长得像
+ * `<img src="a.png">` 或 `url(b.png)` 的字符串。它们永远不会被浏览器加载,却会被词法
+ * 扫描当成资源、占满 32 项配额,把后面**真实**的图片 / 样式挤掉 —— 一份产物只要在
+ * 开头放一段注释掉的旧标记,预览就继续缺图。
+ *
+ * **必须等长**:回填(applyHtmlResourceUrls)按下标切原文改写,掩码只服务扫描,两者
+ * 的下标必须逐字符对齐。换行保留不动,便于对照原文调试。
+ *
+ * 未闭合的 `<!--` / `<script>` 掩到文末 —— 真实 parser 也是这么吞的,后面本来就没有
+ * 会被加载的资源。
+ */
+export function maskInertHtmlText(html: string): string {
+  const out = html.split('');
+  const blank = (start: number, end: number): void => {
+    for (let i = Math.max(0, start); i < Math.min(end, out.length); i += 1) {
+      if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ';
+    }
+  };
+
+  // ① HTML 注释(含未闭合到文末)。整段抹掉,连 `<!--` 标记本身 —— 它不是资源。
+  for (let at = html.indexOf('<!--'); at >= 0; at = html.indexOf('<!--', at + 1)) {
+    const close = html.indexOf('-->', at + 4);
+    const end = close < 0 ? html.length : close + 3;
+    blank(at, end);
+    if (close < 0) break;
+    at = end - 1;
+  }
+
+  // ② `<script>` 体。**标签本身留着** —— `<script src="x.js">` 是要取回的真资源,
+  //    只抹开合标签之间的内容(JS 字符串里的 `url()` / 假标记不是资源)。
+  //
+  //    **必须扫「已抹掉注释」的副本,不能扫原文**:`<!-- <script> -->` 里的开标签在原文
+  //    里也能命中,而它没有配对的 `</script>`,按未闭合处理会把文末之前的真资源全抹掉。
+  const afterComments = out.join('');
+  const afterCommentsLower = afterComments.toLowerCase();
+  const scriptOpenRe = /<script\b[^<>]*>/gi;
+  let open: RegExpExecArray | null;
+  while ((open = scriptOpenRe.exec(afterComments)) !== null) {
+    const bodyStart = open.index + open[0].length;
+    const closeAt = afterCommentsLower.indexOf('</script', bodyStart);
+    const bodyEnd = closeAt < 0 ? afterComments.length : closeAt;
+    blank(bodyStart, bodyEnd);
+    scriptOpenRe.lastIndex = bodyEnd;
+    if (closeAt < 0) break;
+  }
+
+  // ③ `<style>` 体里的 CSS 注释。style 体本身要保留 —— 里面的 `url()` 是真资源。
+  //    同理扫已抹掉注释与脚本体的副本。
+  const masked = out.join('');
+  const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
+  let style: RegExpExecArray | null;
+  while ((style = styleRe.exec(masked)) !== null) {
+    const bodyStart = style.index + style[0].indexOf(style[1], style[0].indexOf('>'));
+    const body = style[1];
+    for (let at = body.indexOf('/*'); at >= 0; at = body.indexOf('/*', at + 1)) {
+      const close = body.indexOf('*/', at + 2);
+      const end = close < 0 ? body.length : close + 2;
+      blank(bodyStart + at, bodyStart + end);
+      if (close < 0) break;
+      at = end - 1;
+    }
+  }
+  return out.join('');
+}
+
+/**
  * 扫出 HTML 里全部可改写的本地资源引用(按出现顺序)。
  *
  * 标签属性(`<img src>` / `<link href>` / …)与 `<style>` 块里的 `url()` 两类都收。
  * 只做词法定位与路径换算,不判断文件是否存在 —— 取不到的由上层保留原引用。
+ *
+ * 扫描跑在 maskInertHtmlText 的掩码副本上(注释 / 脚本体 / CSS 注释已抹平),命中下标
+ * 与原文一一对应。掩码只会**减少**匹配,不会凭空造出新的;唯一的理论例外是掩码把某个
+ * 构造切成了原文里不存在的形状(如属性值内部嵌了 `<!--`),所以每条命中都再用原文
+ * 校验一次切片相等,不等就丢掉。
  */
 export function collectHtmlLocalResourceRefs(
   html: string,
   baseDirAbsPath: string,
 ): HtmlResourceRef[] {
   if (!html || !baseDirAbsPath) return [];
+  // 扫描跑在掩码副本上(注释 / 脚本体 / CSS 注释已抹成等长空白),下标与原文对齐。
+  const scan = maskInertHtmlText(html);
   const refs: HtmlResourceRef[] = [];
   const push = (start: number, end: number, raw: string): void => {
+    // 掩码可能把某个构造切成原文里不存在的形状(如属性值里嵌了 `<!--`)。用原文校验
+    // 切片相等,把这类凭空产生的命中挡掉 —— 否则会按错下标改写原文。
+    if (html.slice(start, end) !== raw) return;
     const absPath = resolveHtmlResourcePath(baseDirAbsPath, raw);
     if (!absPath) return;
     // fragment 单独留着:取件不带它,回填要补回去(见 HtmlResourceRef.fragment)。
@@ -204,7 +282,7 @@ export function collectHtmlLocalResourceRefs(
   //    直接全局扫 `src=` 会把不在白名单标签上的属性也改写掉。
   const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)\b([^<>]*)>/g;
   let tag: RegExpExecArray | null;
-  while ((tag = tagRe.exec(html)) !== null) {
+  while ((tag = tagRe.exec(scan)) !== null) {
     const attrs = RESOURCE_ATTRS_BY_TAG[tag[1].toLowerCase()];
     if (!attrs) continue;
     const attrsText = tag[2];
@@ -226,7 +304,7 @@ export function collectHtmlLocalResourceRefs(
   // ② `<style>` 块里的 `url(...)`(同一份文档里的内联样式,顺手就能补齐)。
   const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
   let style: RegExpExecArray | null;
-  while ((style = styleRe.exec(html)) !== null) {
+  while ((style = styleRe.exec(scan)) !== null) {
     const body = style[1];
     const bodyOffset = style.index + style[0].indexOf(body, style[0].indexOf('>'));
     const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/g;

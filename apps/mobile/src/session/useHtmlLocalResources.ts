@@ -116,9 +116,15 @@ export interface HtmlLocalResourceState {
   /** 取件失败数(这些位置保留原引用)。 */
   failed: number;
   /**
-   * 未取回的资源数(超出条数上限 + 整页总量预算用尽),不静默截断、交上层如实提示。
+   * 因超出**条数上限**(HTML_RESOURCE_LIMIT)而未取的数量。
+   *
+   * 与 overBudget **分开报**(review P2):两者的用户可见事实不同 —— 这一条意味着
+   * 「前 32 项已取回」,而总量预算用尽可能在第 3 项就停了。合并成一个数字会让提示语
+   * 在后一种情况下谎报「已取回前 32 项」。
    */
-  skipped: number;
+  overLimit: number;
+  /** 因**整页总量预算**用尽而未取的数量(可能远少于条数上限就触发)。 */
+  overBudget: number;
 }
 
 export function useHtmlLocalResources(
@@ -168,7 +174,7 @@ export function useHtmlLocalResources(
     loading: needsFetch && outcome === null,
     total: plan.targets.length,
     failed: outcome?.failed ?? 0,
-    // 条数上限跳过的 + 总量预算用尽未取的,合并成一条「没取到」的提示口径。
-    skipped: plan.skipped + (outcome?.overBudget ?? 0),
+    overLimit: plan.skipped,
+    overBudget: outcome?.overBudget ?? 0,
   };
 }

@@ -73,23 +73,21 @@ describe('HTML 渲染态的 WebView 约束', () => {
     expect(htmlReaderSource).toContain('allowFileAccess={false}');
   });
 
-  it('只有用户点击的 http(s) 才外送 —— 程序化导航一律拒绝', () => {
-    // JavaScript 在这里是开启的:location.href / 表单自动提交 / meta refresh 都会走进
-    // 回调,不卡 click 的话,用户只要打开生成物就会被脚本强制带出 Cindy(review P1)。
-    expect(htmlReaderSource).toContain("request.navigationType === 'click'");
-    // Android 不上报 navigationType → 判为无法确认 → 拒绝(fail-closed)。
-    expect(htmlReaderSource).toContain('navigationType');
-  });
-
-  it('三档决策:about 放行、http(s) 外送、其余拒绝且不碰 Linking', () => {
-    // 页内锚点必须放行,否则目录跳转失效。
+  it('零出网信道:连用户点击的 http(s) 外链也不外送', () => {
+    // 页面里内联了被控电脑上的资源字节(data: URI),而脚本是开启的 —— 作者脚本能把这些
+    // 字节拼进一个真实 <a href="https://attacker/…">,用户一点就命中 click 门,数据在
+    // 看见浏览器前已经发出(review P1)。CSP 管不到顶层导航,点击门挡不住脚本构造的 URL。
+    //
+    // 判据写成「模块既不 import 也不调用 Linking」:比检查某个分支更难绕过。
+    // (注意别写成 /Linking/ —— 头注里本来就在解释「为什么不用 Linking」,会自我命中。)
+    expect(htmlReaderSource).toContain("import { StyleSheet, View } from 'react-native';");
+    expect(htmlReaderSource).not.toMatch(/\bLinking\.\w/);
+    // 放行面只剩 about:(文档自身与页内锚点,否则目录跳转失效)。
     expect(htmlReaderSource).toContain("url.startsWith('about:')");
-    // http(s) 之外不得有任何 Linking 调用 —— 唯一一处必须在 http(s) 判定分支内。
-    const linkingCalls = htmlReaderSource.match(/Linking\.openURL/g) ?? [];
-    expect(linkingCalls).toHaveLength(1);
-    const httpBranch = /if \(\/\^https\?:[\s\S]*?\n  \}/.exec(htmlReaderSource);
-    expect(httpBranch, '未找到 http(s) 分支').not.toBeNull();
-    expect(httpBranch![0]).toContain('Linking.openURL');
+    // 回调必须以无条件拒绝收尾(默认拒绝,不是默认放行)。
+    const decision = /function interceptHtmlNavigation[\s\S]*?\n\}/.exec(htmlReaderSource);
+    expect(decision, '未找到导航决策函数').not.toBeNull();
+    expect(decision![0].trimEnd().endsWith('return false;\n}')).toBe(true);
     // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。
     // 只匹配 JSX 属性形态 —— 头注里说明「不挂 onMessage」的那句话不算挂上。
     expect(htmlReaderSource).not.toMatch(/onMessage\s*=/);
@@ -146,6 +144,32 @@ describe('HTML 生成物的渲染态接线', () => {
     expect(source).toContain("t('files.preview.htmlResourcesMissing'");
     expect(source).toContain("t('files.preview.htmlResourcesTruncated'");
     expect(source).toContain('testID="filePreview.htmlResourceNotice"');
+  });
+
+  it('条数上限与总量预算分开提示(不谎报「已取回前 32 项」)', () => {
+    // 只有条数上限才等于「前 32 项已取回」;总量预算可能在第 3 项就用尽,合并成一条
+    // 会在后一种情况下报错数量(review P2)。hook 也必须分开两个计数,不能先合并。
+    expect(source).toContain('htmlResources.overLimit > 0');
+    expect(source).toContain("t('files.preview.htmlResourcesOverBudget', { count: htmlResources.overBudget })");
+    expect(source).not.toContain('htmlResources.skipped');
+    const hook = readSource('src/session/useHtmlLocalResources.ts');
+    expect(hook).toContain('overLimit: plan.skipped');
+    expect(hook).toContain('overBudget: outcome?.overBudget ?? 0');
+    expect(hook).not.toMatch(/skipped:\s*plan\.skipped\s*\+/);
+  });
+
+  it('取件产出的每个 OSS 对象都回收,含 presign 失败与重试重复上传', () => {
+    // presign 失败时 resolveMobileRemoteMedia 在返回前抛错 —— 只围绕 media.ossKey 写
+    // finally 的话那个已上传对象永久遗留;重试还会产出不同的 key(review P1 第二轮)。
+    expect(source).toContain('const uploadedKeys = new Set<string>()');
+    expect(source).toContain('(ossKey) => uploadedKeys.add(ossKey)');
+    expect(source).toContain('for (const ossKey of uploadedKeys) deleteResourceOssObject(ossKey)');
+    expect(source).not.toMatch(/deleteResourceOssObject\(media\.ossKey\)/);
+    // key 的来源:上传成功后、presign 之前同步回调。
+    const media = readSource('src/session/remoteMedia.ts');
+    expect(media).toContain('opts?.onOssKey?.(fetched.ossKey);');
+    expect(media.indexOf('opts?.onOssKey?.(fetched.ossKey);'))
+      .toBeLessThan(media.indexOf('const signed = await deps.presignGet('));
   });
 
   it('markdown 与 HTML 共用同一套双态机(不再是 markdown 专用)', () => {

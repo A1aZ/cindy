@@ -5,6 +5,7 @@ import {
   htmlResourceMimeFor,
   collectHtmlLocalResourceRefs,
   htmlBaseDirOf,
+  maskInertHtmlText,
   HTML_RESOURCE_LIMIT,
   planHtmlResourceFetches,
   resolveHtmlResourcePath,
@@ -408,5 +409,57 @@ describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
     expect(out.urlByAbsPath.size).toBe(1);
     expect(out.overBudget).toBe(0);
     expect(HTML_RESOURCE_TOTAL_MAX_CHARS).toBeGreaterThan(0);
+  });
+});
+
+describe('惰性文本不占取件配额(注释 / 脚本体 / CSS 注释)', () => {
+  it('掩码等长,且只抹内容不动换行', () => {
+    const html = '<!-- x -->\n<img src="a.png">';
+    const masked = maskInertHtmlText(html);
+    expect(masked.length).toBe(html.length);
+    expect(masked.split('\n')).toHaveLength(2);
+    // 注释整段变空白,真标记原样留下。
+    expect(masked.startsWith('          \n')).toBe(true);
+    expect(masked).toContain('<img src="a.png">');
+  });
+
+  it('注释里的伪资源不进候选(不再挤占 32 项配额)', () => {
+    const fake = Array.from({ length: 40 }, (_, i) => `<img src="old${i}.png">`).join('');
+    const refs = collectHtmlLocalResourceRefs(`<!--${fake}--><img src="real.png">`, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('脚本体里的伪标记与 url() 不进候选,但 <script src> 本身仍取', () => {
+    const html = '<script src="app.js">var s = \'<img src="fake.png">\'; var u = "url(fake2.png)";</script>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['app.js']);
+  });
+
+  it('CSS 注释里的 url() 不进候选,同块内真 url() 照旧取', () => {
+    const html = '<style>/* url(old.png) */ body { background: url(new.png); }</style>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['new.png']);
+  });
+
+  it('未闭合注释 / 未闭合脚本掩到文末(真 parser 同样吞掉后面)', () => {
+    expect(collectHtmlLocalResourceRefs('<!-- <img src="a.png">', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('<script>x<img src="a.png">', BASE)).toEqual([]);
+  });
+
+  it('注释里出现 <script> 开标签不得把后面的真资源一起抹掉', () => {
+    // 扫脚本体时若扫的是原文,这个开标签没有配对 </script>,会按未闭合掩到文末。
+    const refs = collectHtmlLocalResourceRefs('<!-- <script> --><img src="real.png">', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('回填下标仍对齐原文(掩码只服务扫描)', () => {
+    const html = '<!-- url(old.png) --><style>body{background:url(new.png)}</style>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs).toHaveLength(1);
+    expect(html.slice(refs[0].start, refs[0].end)).toBe('new.png');
+    const out = applyHtmlResourceUrls(html, refs, new Map([[refs[0].absPath, 'data:image/png;base64,AAA']]));
+    expect(out).toContain('url(data:image/png;base64,AAA)');
+    // 注释原文一字不动。
+    expect(out).toContain('<!-- url(old.png) -->');
   });
 });

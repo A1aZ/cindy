@@ -69,6 +69,7 @@
     "fetchingHtmlResources": "Fetching page resources…",
     "htmlResourcesMissing": "{{count}} page resource(s) could not be fetched; images or styles may be missing",
     "htmlResourcesTruncated": "Too many page resources; only the first {{limit}} were fetched",
+    "htmlResourcesOverBudget": "{{count}} more resource(s) were skipped because the page's total size limit was reached",
     "mdRendered": "Rendered",
     "mdSource": "Source",
     "mdViewA11y": "{{view}} view",

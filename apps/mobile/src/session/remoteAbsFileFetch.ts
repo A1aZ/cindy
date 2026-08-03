@@ -116,6 +116,17 @@ export async function fetchRemoteAbsFileOnce(
   deps: RemoteAbsFileFetchDeps,
   absPath: string,
   ssh?: RemoteMediaSshContext | null,
+  /**
+   * 每次上传成功、拿到 ossKey 时回调(可能被调用多次,见下)。
+   *
+   * **调用方必须累加收集,并对每个 key 都做 best-effort DELETE**:
+   *  - presign 失败(弱网 / 回包非法)会让 resolveMobileRemoteMedia 在返回之前抛错,
+   *    此时对象已经在 OSS 上,但调用方拿不到 resolved 结果 —— 只围绕结果写 finally 的话
+   *    这个对象永久遗留(review P1);
+   *  - withTransientRemoteRetry 的每一次重试都可能再上传一份,产出**不同**的 key,
+   *    所以只记最后一个同样会漏。
+   */
+  onOssKey?: (ossKey: string) => void,
 ): Promise<MobileResolvedRemoteMedia> {
   return withTransientRemoteRetry(async () => {
     await deps.openLink(deps.deviceId);
@@ -123,6 +134,7 @@ export async function fetchRemoteAbsFileOnce(
     return resolveMobileRemoteMedia(
       { kind: 'image', url: remoteFileMediaUrl(absPath, undefined, ssh) },
       { fetchRemoteMedia: deps.maker.fetchRemoteMedia, presignGet: deps.presignGet },
+      onOssKey ? { onOssKey } : undefined,
     );
   });
 }

@@ -8,20 +8,37 @@
  * 会在用户打开预览的那一刻静默把文档正文发出去,导航回调一无所知(review P1 实捉)。
  *
  * 所以出网必须由**渲染引擎强制**关闭,而不是靠我们在导航回调里约定。这里用 meta CSP
- * 把页面的全部网络出口关掉:子资源、`fetch` / `XHR`、表单、iframe、插件一律不出网。
- * 配套的另一半在 HtmlFileReader:顶层导航只放行 `about:`,连用户点击的外链也不外送 ——
- * 两者合起来,预览是一个**完全离线的沙箱**,没有任何出网信道。
+ * 关掉 CSP 管得到的全部出口:子资源、`fetch` / `XHR`、表单、iframe、插件。配套的另一半在
+ * HtmlFileReader:顶层导航只放行 `about:`,连用户点击的外链也不外送。
  *
  * 代价(刻意接受,PR 已写明):公网 https 图片 / 字体 / 脚本在预览里**不再加载**。
  * 允许它们就等于留一条 `img-src https:` 的外传通道(`new Image().src='…?d=…'` 正是最经典的
- * 姿势),那会让上面整段封锁形同虚设。预览态因此是完全离线渲染的。
+ * 姿势),那会让上面整段封锁形同虚设。
+ *
+ * ── ⚠️ 残留信道:WebRTC(**不要把本模块说成「零出网」**) ────────────────────
+ * `RTCPeerConnection` 的 ICE / STUN / DTLS 流量**不受 CSP 各 `*-src` 指令管辖** —— 恶意脚本
+ * 可以把文档内容编码进 STUN 服务器域名,或直接与固定 peer 建数据通道外传,全程不经过导航
+ * 回调、也不产生任何 CSP 管辖的 URL 请求(review P1 实捉)。本文件与 HtmlFileReader 早先的
+ * 注释把这套封锁描述成绝对的,**那是错的**,已改;守卫用例禁止那类措辞回归。
+ *
+ * 已做的收窄:
+ *  - `webrtc 'block'`(CSP3):Chromium 111+ 实现,Android System WebView 走 Chromium 内核、
+ *    随 Play 商店更新,实机上基本都覆盖 → 那一侧是真封住的。**iOS 的 WKWebView 是 WebKit,
+ *    尚未实现该指令,这条在 iOS 上无效**。未知指令被引擎忽略、不影响策略其余部分,所以加
+ *    它没有副作用。
+ *  - `mediaCapturePermissionGrantType="deny"`(见 HtmlFileReader):挡掉摄像头 / 麦克风取用。
+ *    它**不能**关闭 WebRTC 外传 —— 纯数据通道与 STUN 候选收集都不需要媒体权限;这条是
+ *    「不可信页面不该弹权限框」本身的正确做法,不要当成 WebRTC 的解。
+ *
+ * iOS 上要真正封死只有一条路:`javaScriptEnabled={false}`。那会让带交互的产物(标签切换、
+ * 折叠、图表)退化成静态页 —— 属产品取舍,已在 PR 描述里显式提给放行人裁决,本层不擅自决定。
  *
  * 与「同目录资源透传」的关系(见 htmlLocalResources,栈上一层):资源一律以 `data:` URI
  * 内联、页面里不出现任何 bearer 凭证。那条路把被控端的文件内容带进页面,更需要这里的
  * 封锁 —— 但封锁本身属于「在 WebView 里渲染不可信 HTML」这件事,所以留在这一层。
  */
 
-/** 预览文档的策略:默认全拒,只放行内联与 data: 资源,网络出口一律关闭。 */
+/** 预览文档的策略:默认全拒,只放行内联与 data: 资源,CSP 管得到的出口一律关闭。 */
 export const HTML_PREVIEW_CSP = [
   "default-src 'none'",
   "img-src data:",
@@ -34,6 +51,9 @@ export const HTML_PREVIEW_CSP = [
   "base-uri 'none'",
   "frame-src 'none'",
   "object-src 'none'",
+  // Chromium 111+ 才实现(Android System WebView 覆盖,iOS WKWebView 无效);
+  // 未知指令被忽略、不影响其余策略。残留面见头注的「WebRTC」一节。
+  "webrtc 'block'",
 ].join('; ');
 
 const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;

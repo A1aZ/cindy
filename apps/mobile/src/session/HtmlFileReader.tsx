@@ -18,8 +18,10 @@
  * 公网 https 图片 / 字体同样不加载 —— 那是 CSP 关掉出网的代价(见 htmlPreviewCsp)。
  *
  * 导航一律拦下:只有 `about:`(文档自身与页内锚点)放行,**其余一切明确拒绝,且不交给
- * Linking** —— 包含用户主动点击的 http(s) 外链。这是一个**完全离线的预览沙箱**,没有任何
- * 出网信道(理由见 interceptHtmlNavigation)。
+ * Linking** —— 包含用户主动点击的 http(s) 外链(理由见 interceptHtmlNavigation)。
+ * 出网由 htmlPreviewCsp 在引擎层封锁(导航回调管不到子资源请求)。
+ * ⚠️ **不要把这套说成「零出网」**:WebRTC 不受 CSP 管辖,iOS 上仍是残留信道 ——
+ * 准确边界与待裁决的取舍见 htmlPreviewCsp 头注的「残留信道」一节。
  * 不挂 onMessage:页面里的 postMessage 无人消费,不给任意生成物开一条通向 RN 侧的通道。
  * Android 另关多窗口:`window.open` / `target="_blank"` 走的是 onCreateWindow,不经过下面
  * 的导航回调,不关掉等于给策略留一个后门(见 setSupportMultipleWindows 处的说明)。
@@ -58,6 +60,10 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
         // ComposerRichInput 一致。(allowFileAccessFromFileURLs /
         // allowUniversalAccessFromFileURLs 默认已为 false,不需显式声明。)
         allowFileAccess={false}
+        // iOS:不可信页面不得弹摄像头 / 麦克风权限框,一律拒绝(review 相邻发现)。
+        // ⚠️ 这**不是** WebRTC 外传的解 —— 纯数据通道与 STUN 候选收集都不需要媒体权限,
+        // 见 htmlPreviewCsp 头注的「残留信道」一节。
+        mediaCapturePermissionGrantType="deny"
         // baseUrl 显式给 about:blank,**不能省**:两端默认值不一致 —— iOS
         // (RNCWebViewImpl.m)缺省就是 about:blank,Android(RNCWebViewManagerImpl.kt)
         // 缺省传的是空串给 loadDataWithBaseURL。空串下页内锚点(`<a href="#toc">`)
@@ -95,9 +101,9 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
  * 而这条能力**本来就只在 iOS 上存在** —— Android 侧 RNW 的 `createWebViewEvent` 根本不设
  * `navigationType`,那边一直拿不准、一直是拒绝。删掉它是把两端对齐,不是砍掉一个统一功能。
  *
- * 与本 PR 已经接受的取舍也一致:CSP 让公网 https 图片 / 字体在预览里不加载,预览本就
- * 是离线的;留一条点击外送信道反而是这套设计里唯一的破口。外链的退路是工具栏「分享」把
- * 文件送到电脑或浏览器里打开,或切「源码」态自己看 URL。
+ * 与本 PR 已经接受的取舍也一致:CSP 让公网 https 图片 / 字体在预览里不加载,预览本就不联网;
+ * 在那个前提下还留一条**用户可触发**的外送信道没有道理。外链的退路是工具栏「分享」把文件
+ * 送到电脑或浏览器里打开,或切「源码」态自己看 URL。
  */
 function interceptHtmlNavigation(request: ShouldStartLoadRequest): boolean {
   const url = request.url ?? '';

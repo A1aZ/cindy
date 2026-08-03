@@ -68,6 +68,17 @@ export const BREAKER_NEUTRAL_INVOKE_CHANNELS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Renderer 启动时会在同一轮并发预取这些只读信息。一次链路抖动导致整批超时只应
+ * 贡献一次 strike；其它通道仍按独立请求计数，避免把无关的重叠故障吞成一批。
+ */
+const BOOTSTRAP_FAN_OUT_CHANNELS: ReadonlySet<string> = new Set([
+  'maker:get-capabilities',
+  'maker:provider:list',
+  'maker:git-safety:get',
+]);
+const BOOTSTRAP_FAN_OUT_COHORT_WINDOW_MS = 250;
+
+/**
  * 失败 → 熔断信号:仅 INVOKE_TIMEOUT(等满超时无回包)计失败;NOT_CONNECTED /
  * relay 层错误 / 发送前本地中止是本机链路问题,不定论。纯函数,便于单测。
  */
@@ -136,10 +147,12 @@ export function createResponsivenessTracker(
   deps: ResponsivenessTrackerDeps,
 ): DeviceResponsivenessTracker {
   const log = deps.log ?? { info: () => {}, warn: () => {}, debug: () => {} };
+  const now = deps.now ?? Date.now;
   const unresponsive = new Set<string>();
   const linkRecoveryInFlight = new Map<string, Promise<unknown>>();
+  const bootstrapFanOutCohorts = new Map<string, { cohort: number; expiresAt: number }>();
   const breaker = createDeviceResponsivenessBreaker({
-    now: deps.now,
+    now,
     onOpenChanged: (deviceId, open) => {
       if (open) unresponsive.add(deviceId);
       else unresponsive.delete(deviceId);
@@ -154,13 +167,29 @@ export function createResponsivenessTracker(
     breaker.settle(deviceId, slot, outcome);
   };
 
+  const selectCohort = (deviceId: string, channel: string, cohortOverride?: number): number => {
+    if (cohortOverride !== undefined) return cohortOverride;
+    if (!BOOTSTRAP_FAN_OUT_CHANNELS.has(channel)) return breaker.createCohort(deviceId);
+
+    const at = now();
+    const current = bootstrapFanOutCohorts.get(deviceId);
+    if (current && at < current.expiresAt) return current.cohort;
+
+    const cohort = breaker.createCohort(deviceId);
+    bootstrapFanOutCohorts.set(deviceId, {
+      cohort,
+      expiresAt: at + BOOTSTRAP_FAN_OUT_COHORT_WINDOW_MS,
+    });
+    return cohort;
+  };
+
   const guardInvoke = async <T>(
     deviceId: string,
     channel: string,
     run: () => Promise<T>,
     cohortOverride?: number,
   ): Promise<T> => {
-    const cohort = cohortOverride ?? breaker.createCohort(deviceId);
+    const cohort = selectCohort(deviceId, channel, cohortOverride);
     const slot = breaker.acquire(deviceId, cohort, { allowProbe: false });
     if (slot.decision === 'reject') throw createDeviceUnresponsiveError(deviceId);
     const wasProbe = slot.decision === 'probe';
@@ -241,10 +270,12 @@ export function createResponsivenessTracker(
     getUnresponsiveDeviceIds: () => [...unresponsive],
     clearDevice: (deviceId) => {
       linkRecoveryInFlight.delete(deviceId);
+      bootstrapFanOutCohorts.delete(deviceId);
       breaker.clear(deviceId);
     },
     resetAll: () => {
       linkRecoveryInFlight.clear();
+      bootstrapFanOutCohorts.clear();
       breaker.resetAll();
     },
   };

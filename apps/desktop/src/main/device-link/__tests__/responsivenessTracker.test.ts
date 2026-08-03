@@ -116,6 +116,36 @@ describe('responsivenessTracker', () => {
     expect(h.tracker.isUnresponsive(DEV)).toBe(true);
   });
 
+  it('启动只读 fan-out 同批超时只计一次,跨批次仍按独立故障熔断', async () => {
+    const h = harness();
+    const channels = [
+      'maker:get-capabilities',
+      'maker:get-capabilities',
+      'maker:get-capabilities',
+      'maker:provider:list',
+      'maker:git-safety:get',
+    ];
+    const timeoutBatch = async (): Promise<void> => {
+      const results = await Promise.allSettled(
+        channels.map((channel) =>
+          h.tracker.guardInvoke(DEV, channel, () => Promise.reject(timeoutError())),
+        ),
+      );
+      expect(results.every((result) => result.status === 'rejected')).toBe(true);
+    };
+
+    await timeoutBatch();
+    expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+
+    h.advance(250);
+    await timeoutBatch();
+    expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+
+    h.advance(250);
+    await timeoutBatch();
+    expect(h.tracker.isUnresponsive(DEV)).toBe(true);
+  });
+
   it('探测窗口未到 / 前置条件不满足时 probeTick 不发探测;窗口到且合格才单飞', async () => {
     let eligible = false;
     const h = harness({ isProbeEligible: () => eligible });

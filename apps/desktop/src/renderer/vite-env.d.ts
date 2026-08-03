@@ -2328,6 +2328,27 @@ interface ElectronAPI {
    */
   openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
 
+  /** Copy a dangerous local attachment into the controlled inert cache. */
+  stageChatAttachment: (params: {
+    sourcePath: string;
+    suggestedName: string;
+  }) => Promise<
+    | { success: true; path: string }
+    | {
+        success: false;
+        code:
+          | 'invalid_source'
+          | 'forbidden'
+          | 'not_found'
+          | 'not_file'
+          | 'unsupported_type'
+          | 'copy_failed';
+      }
+  >;
+
+  /** Remove staged dangerous attachment copies from the controlled cache. */
+  cleanupStagedChatAttachments: (filePaths: readonly string[]) => Promise<void>;
+
   /**
    * Save a safely materialized chat attachment under its sanitized original
    * filename. The main process validates the source and never opens the target.
@@ -3043,6 +3064,7 @@ interface ElectronAPI {
       controlledBy: Array<{ deviceId: string; name: string }>;
       revokedControllers: string[];
       disabledControlDeviceIds: string[];
+      unresponsiveDeviceIds: string[];
     }>;
     setEnabled: (enabled: boolean) => Promise<{ remoteControlEnabled: boolean }>;
     setKeepAwake: (enabled: boolean) => Promise<{ keepAwake: boolean }>;
@@ -3098,6 +3120,10 @@ interface ElectronAPI {
     ) => () => void;
     /** 「保持电脑唤醒」在其它共享 userData 实例被翻转后推送 */
     onKeepAwakeChanged: (cb: (payload: { keepAwake: boolean }) => void) => () => void;
+    /** 控制端:目标设备「无响应」熔断状态翻转(弱网 / 对端卡死;presence 可能仍在线) */
+    onResponsivenessChanged: (
+      cb: (payload: { deviceId: string; unresponsive: boolean }) => void,
+    ) => () => void;
     /**
      * 同机单持有者仲裁角色变化。standby=true = 本机另一个 Cindy 实例正持有 device-link,
      * 本实例不连 relay(远程设备会全部显示离线,远程调用一律 DEVICE_LINK_STANDBY)。

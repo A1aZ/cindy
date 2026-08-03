@@ -1091,8 +1091,10 @@ export class GhostNetworkSlot {
       // ── 执行(重定向逐跳手动跟,每跳重验白名单 + 重算凭证注入)────────
       // 外层 attempt 循环只为交换型 / oauth / Connection 凭证的 401 兜底:令牌可能被
       // 服务端提前作废,作废本地缓存重换/重刷一次再整链重试;第二次仍
-      // 401 就原样回给意识。
+      // 401 就原样回给意识。原始请求方法也参与判定:POST/上传即使因 3xx
+      // 降级成 GET,仍不得在 401 后重放最初的副作用请求。
       let response: Response | null = null;
+      const originalRequestMethod = method;
       for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt > 0) {
           this.invalidateExchangedTokens(ghostId, net.secrets ?? []);
@@ -1204,7 +1206,10 @@ export class GhostNetworkSlot {
         if (
           response.status === 401
           && responseConnectionInjected.size > 0
-          && !CONNECTION_RETRYABLE_METHODS.has(responseMethod)
+          && (
+            !CONNECTION_RETRYABLE_METHODS.has(responseMethod)
+            || !CONNECTION_RETRYABLE_METHODS.has(originalRequestMethod)
+          )
         ) {
           for (const input of responseConnectionInjected.values()) {
             this.deps.connectionTokens?.invalidate({

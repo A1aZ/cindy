@@ -185,6 +185,34 @@ describe('networkSlot Connection identity', () => {
     expect(h.invalidate).toHaveBeenCalledWith(TOKEN_INPUT);
   });
 
+  it.each([301, 302, 303])(
+    'does not replay an original POST after a %s redirect downgrades it to GET before a 401',
+    async (redirectStatus) => {
+      const h = makeSlot();
+      h.fetchImpl
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: redirectStatus,
+            headers: { location: 'https://service-a.x.test/after-redirect' },
+          }),
+        )
+        .mockResolvedValueOnce(response(401));
+
+      const result = await h.slot.handleFetchRequest('plugin-a', {
+        url: URL,
+        method: 'POST',
+        body: '{"action":"create"}',
+      });
+
+      expect(result).toMatchObject({ ok: true, status: 401 });
+      expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+      expect(h.fetchImpl.mock.calls.map((call) => call[1].method)).toEqual(['POST', 'GET']);
+      expect(h.getToken).toHaveBeenCalledTimes(2);
+      expect(h.invalidate).toHaveBeenCalledTimes(1);
+      expect(h.invalidate).toHaveBeenCalledWith(TOKEN_INPUT);
+    },
+  );
+
   it('does not retry 403 and never retries a second 401', async () => {
     const forbidden = makeSlot();
     forbidden.fetchImpl.mockResolvedValue(response(403));

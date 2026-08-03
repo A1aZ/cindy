@@ -134,6 +134,32 @@ const WIN_ABS_RE = /^[A-Za-z]:[\\/]/;
  */
 const WIN_ROOT_RE = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/;
 
+/**
+ * 被控端绝对路径是否 Windows 形态。**导出供预览页共用,不要各写一份。**
+ *
+ * review 连挖两处同根因(`resolveHtmlResourcePath` 与预览页的 `absolutePathOf`),都是用
+ * 「路径里含反斜杠」判 Windows —— POSIX 上反斜杠是合法文件名/目录名字符,`/tmp/a\b` 会被
+ * 误判,拼出来的路径不存在,该页**所有**同目录资源取件失败。修一处漏一处的成因就是判定
+ * 各写一份,所以这次抽出来共用。
+ */
+export function isWindowsAbsPath(absPath: string): boolean {
+  return WIN_ROOT_RE.test(absPath);
+}
+
+/**
+ * 按被控端路径形态拼接目录与相对路径(分隔符与相对路径里的斜杠一起归一)。
+ *
+ * 预览页与本模块共用同一份实现,避免「一处修好、另一处照旧」。
+ */
+export function joinRemotePath(baseAbsPath: string, relPath: string): string {
+  if (!baseAbsPath) return relPath;
+  const win = isWindowsAbsPath(baseAbsPath);
+  const sep = win ? '\\' : '/';
+  // 只有 Windows 才把相对路径里的 `/` 换成 `\`;POSIX 上 `\` 是合法字符,不能反向替换。
+  const tail = win ? relPath.replace(/\//g, '\\') : relPath;
+  return `${baseAbsPath}${baseAbsPath.endsWith(sep) ? '' : sep}${tail}`;
+}
+
 /** HTML 里一处待改写的资源引用(区间指向**属性值本身**,不含引号)。 */
 export interface HtmlResourceRef {
   /** 属性值在原 HTML 里的起始下标。 */
@@ -218,7 +244,7 @@ export function resolveHtmlResourcePath(baseDirAbsPath: string, raw: string): st
   // (review P2):macOS / Linux 上目录名可以合法含反斜杠,`/tmp/a\b/index.html` 会被
   // `includes('\\')` 误判成 Windows,于是拼出 `/tmp/a\b\chart.png` —— POSIX 把后一个反斜杠
   // 也当普通文件名字符,取件路径根本不存在,该页所有同目录资源全失败。
-  const isWin = WIN_ROOT_RE.test(baseDirAbsPath);
+  const isWin = isWindowsAbsPath(baseDirAbsPath);
   const segments = decoded.split(/[\\/]/);
   // `..` 逃逸一律拒绝;`.` 段丢掉;空段(`a//b`)丢掉。
   const kept: string[] = [];
@@ -274,11 +300,30 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
  * 代价权衡:该形态极罕见,而「HTML 模板放 JS 字符串」很常见,净收益为正。两种失败都只影响
  * 资源是否内联,不影响文档结构。
  */
-const RAW_TEXT_CONTENT_TAGS = ['script', 'textarea', 'title'] as const;
+const RAW_TEXT_CONTENT_TAGS = ['script', 'style', 'textarea', 'title'] as const;
 
-export function findRawTextContentSpans(html: string): Array<{ start: number; end: number }> {
+/**
+ * `<style>` 也在表里(review P2),但它**只能用于标签扫描的跳过,不能用于 CSS `url()` 扫描** ——
+ * 否则样式块里的 `url()` 会连同伪标签一起被跳掉,多文件产物的背景图整批丢失。
+ *
+ * 具体分工:
+ *  - 标签扫描(`<img src>` 这类)跳过**全部**四种 RAWTEXT 内容 —— 包括 style,因为
+ *    `<style>code::before{content:'<img src="a.png">'}</style>` 里那个 `<img>` 只是 CSS 字符串
+ *    里的字面文本,浏览器当文字显示;当成真标签回填就**篡改了页面显示内容**(review 实捉);
+ *  - CSS `url()` 扫描专扫 `<style>` 体,所以它按「除 style 外」的 RAWTEXT 判跳过 ——
+ *    脚本字符串里的 `<style>` 字面量仍不算样式块。
+ * 两个用途各取所需,不能共用一份 span。
+ */
+const TAG_SCAN_SKIP_TAGS = RAW_TEXT_CONTENT_TAGS;
+const CSS_SCAN_SKIP_TAGS = RAW_TEXT_CONTENT_TAGS.filter((t) => t !== 'style');
+
+export function findRawTextContentSpans(
+  html: string,
+  tags: readonly string[] = RAW_TEXT_CONTENT_TAGS,
+): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = [];
-  const openRe = new RegExp(`<(${RAW_TEXT_CONTENT_TAGS.join('|')})\\b[^<>]*>`, 'gi');
+  if (tags.length === 0) return spans;
+  const openRe = new RegExp(`<(${tags.join('|')})\\b[^<>]*>`, 'gi');
   let open: RegExpExecArray | null;
   while ((open = openRe.exec(html)) !== null) {
     const tag = open[1].toLowerCase();
@@ -401,13 +446,14 @@ export function collectHtmlLocalResourceRefs(
   //    **标签白名单只约束「资源属性」这一路,不约束 `style` 属性**:任意标签都能带内联样式
   //    (`<div style="background-image:url(...)">`),所以这里不能因为标签不在白名单就整个跳过
   //    (这条正是本轮 style 属性 finding 的第一版实现踩到的:分支写在 `continue` 之后,永远到不了)。
-  //    RAWTEXT 内容(`<script>` / `<textarea>` / `<title>` 体)整段跳过 —— 那里的 `<` 不开标签,
-  //    收进来会被真的回填、改写作者脚本源码(见 findRawTextContentSpans 的说明)。
-  const rawTextSpans = findRawTextContentSpans(html);
+  //    RAWTEXT 内容整段跳过 —— 那里的 `<` 不开标签,收进来会被真的回填:脚本体里会改写作者
+  //    脚本源码,`<style>` 体里会把 CSS 字符串(`content:'<img src="a.png">'`)当成真标签、
+  //    篡改页面显示内容(见 findRawTextContentSpans 的说明)。
+  const tagScanSkipSpans = findRawTextContentSpans(html, TAG_SCAN_SKIP_TAGS);
   const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)\b([^<>]*)>/g;
   let tag: RegExpExecArray | null;
   while ((tag = tagRe.exec(html)) !== null) {
-    if (isInsideSpans(tag.index, rawTextSpans)) continue;
+    if (isInsideSpans(tag.index, tagScanSkipSpans)) continue;
     const attrs = RESOURCE_ATTRS_BY_TAG[tag[1].toLowerCase()];
     const attrsText = tag[2];
     const attrsOffset = tag.index + 1 + tag[1].length;
@@ -440,11 +486,13 @@ export function collectHtmlLocalResourceRefs(
   }
 
   // ② `<style>` 块里的 `url(...)`(同一份文档里的内联样式,顺手就能补齐)。
+  //    这一路**专扫 `<style>` 体**,所以跳过判据要排除 style 本身(否则样式块里的 url()
+  //    会连同伪标签一起被跳掉,背景图整批丢失)。脚本字符串里的 `<style>` 字面量仍不算样式块。
+  const cssScanSkipSpans = findRawTextContentSpans(html, CSS_SCAN_SKIP_TAGS);
   const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
   let style: RegExpExecArray | null;
   while ((style = styleRe.exec(html)) !== null) {
-    // 同上:脚本字符串里的 `<style>` 字面量不算样式块。
-    if (isInsideSpans(style.index, rawTextSpans)) continue;
+    if (isInsideSpans(style.index, cssScanSkipSpans)) continue;
     const body = style[1];
     const bodyOffset = style.index + style[0].indexOf(body, style[0].indexOf('>'));
     for (const hit of findCssUrlRefs(body)) {

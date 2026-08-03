@@ -7,6 +7,8 @@ import {
   htmlBaseDirOf,
   decodeHtmlCharRefs,
   findRawTextContentSpans,
+  isWindowsAbsPath,
+  joinRemotePath,
   HTML_RESOURCE_LIMIT,
   planHtmlResourceFetches,
   resolveHtmlResourcePath,
@@ -577,6 +579,47 @@ describe('RAWTEXT 内容整段跳过(review P1:回填会改写作者脚本源码
     expect(refs.every((r) => r.raw.startsWith('real'))).toBe(true);
     // 宽松上限:只用来挡住量级退化(线性判定在本机约慢一个数量级),不做精确基准。
     expect(elapsed).toBeLessThan(3000);
+  });
+
+  it('<style> 体同样跳过标签扫描,但 CSS url() 扫描照旧(review P2)', () => {
+    // `<style>` 在 HTML 规范里也是 RAWTEXT。实测(Chromium):
+    // `<style>code::before{content:'<img src="a.png">'}</style>` 里的 `<img>` **不成为元素**,
+    // `content` 就是那段字面文本 —— 当成真标签回填就**篡改了页面显示内容**。
+    const html = '<style>code::before{content:\'<img src="a.png">\'}</style><img src="real.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+    // 端到端:CSS 字符串一字不动。
+    const urls = new Map(refs.map((r) => [r.absPath, 'data:image/png;base64,AAA']));
+    expect(applyHtmlResourceUrls(html, refs, urls)).toContain('content:\'<img src="a.png">\'');
+  });
+
+  it('两个 span 集合必须分开:style 进标签跳过表,但不能让样式 url() 跟着丢', () => {
+    // 若 CSS 扫描也按含 style 的 span 判跳过,就会自我否定 —— 样式块里的 url() 全部丢失,
+    // 多文件产物的背景图整批缺失。这条钉住分工。
+    const html = '<style>body{background:url(bg.png)}</style><img src="real.png">';
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['bg.png', 'real.png']);
+    // 同时:脚本字符串里的 <style> 字面量仍不算样式块(CSS 扫描跳过 script 体)。
+    const inScript = '<script>var s = \'<style>body{background:url(g.png)}</style>\';</script>';
+    expect(collectHtmlLocalResourceRefs(inScript, BASE)).toEqual([]);
+    // 两种 tag 集合的 span 数不同,函数参数化后各取所需。
+    expect(findRawTextContentSpans(html).length).toBe(1);                       // 默认含 style
+    expect(findRawTextContentSpans(html, ['script', 'textarea', 'title']).length).toBe(0);
+  });
+
+  it('joinRemotePath / isWindowsAbsPath 按根形态判(两处共用一份实现,review P2)', () => {
+    // 预览页的 absolutePathOf 与 resolveHtmlResourcePath 曾各写一份「含反斜杠即 Windows」,
+    // 修一处漏一处。现在共用:POSIX 上 workdir 名含反斜杠时不得改写相对路径里的斜杠。
+    expect(isWindowsAbsPath('/tmp/a\\b')).toBe(false);
+    expect(isWindowsAbsPath('C:\\proj')).toBe(true);
+    expect(isWindowsAbsPath('C:/proj')).toBe(true);
+    expect(isWindowsAbsPath('\\\\server\\share\\d')).toBe(true);
+    // workdir `/tmp/a\b` + `pages/index.html` → 必须保持正斜杠。
+    expect(joinRemotePath('/tmp/a\\b', 'pages/index.html')).toBe('/tmp/a\\b/pages/index.html');
+    // Windows 才把相对路径里的 `/` 换成 `\`。
+    expect(joinRemotePath('C:\\proj', 'pages/index.html')).toBe('C:\\proj\\pages\\index.html');
+    // 尾分隔符不产生双分隔符;空 base 原样返回。
+    expect(joinRemotePath('/tmp/x/', 'a.html')).toBe('/tmp/x/a.html');
+    expect(joinRemotePath('', 'a.html')).toBe('a.html');
   });
 
   it('⚠️ 已知残留:属性值里的字面 `<script>` 会造成误判(如实钉住,不假装没有)', () => {

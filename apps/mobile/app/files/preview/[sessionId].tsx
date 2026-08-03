@@ -49,6 +49,7 @@ import type { FileBrowserReadFileResult, MobileMakerTransport } from '@/device-l
 import { isAbsolutePathShape, pathDisplayName } from '@/session/chatPathCandidate';
 import { adaptTextFilePreviewResult, fetchRemoteAbsFileOnce, fetchRemoteAbsFileToUrl } from '@/session/remoteAbsFileFetch';
 import { formatByteSize, isHtmlFilePreviewCandidate } from '@/session/filePreview';
+import { joinRemotePath } from '@/session/htmlLocalResources';
 import { decodeGzipBase64Text, mergePathIntoComposerDraft, shareMimeForFileName } from '@/session/fileBrowserActions';
 import { appendQuote, truncateQuoteText } from '@/session/chatQuoteStore';
 import { getCachedPreviewText, storeCachedPreviewText } from '@/session/fileBrowserCache';
@@ -326,9 +327,11 @@ export default function RemoteFilePreviewScreen() {
     // absPath 单文件模式的 item.relPath 本身就是被控端绝对路径,原样返回。
     if (isAbsolutePathShape(itemRelPath)) return itemRelPath;
     if (!workdir) return itemRelPath;
-    const sep = workdir.includes('\\') ? '\\' : '/';
-    const tail = sep === '\\' ? itemRelPath.replace(/\//g, '\\') : itemRelPath;
-    return `${workdir}${workdir.endsWith(sep) ? '' : sep}${tail}`;
+    // 分隔符判定走共享实现(review P2):原先用 `workdir.includes('\\')`,而 POSIX 上反斜杠是
+    // 合法目录名字符 —— workdir `/tmp/a\b` 会被误判成 Windows,`pages/index.html` 被改写成
+    // `pages\index.html`,于是 HTML 基目录算成 `/tmp/a\b\pages`,该页所有同目录资源取件失败。
+    // 同一根因在 resolveHtmlResourcePath 里也出现过,判定各写一份正是「修一处漏一处」的成因。
+    return joinRemotePath(workdir, itemRelPath);
   }, [workdir]);
 
   const presignGet = useCallback(async (ossKey: string) => {

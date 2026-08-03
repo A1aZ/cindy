@@ -5232,6 +5232,7 @@
         "dismiss": "닫기"
       },
       "credentialSwitchDeferred": "모델 제공자를 전환했습니다. 현재 작업이 끝난 후 적용됩니다.",
+      "effortRuntimeDirty": "추론 강도를 업데이트하고 있습니다. 잠시 후 다시 전송해 주세요.",
       "credentialSwitchApplied": "모델 제공자 전환이 적용되었습니다.",
       "modelSwitchContextGuard": {
         "title": "대상 모델의 컨텍스트 창이 더 작습니다",

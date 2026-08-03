@@ -5232,6 +5232,7 @@
         "dismiss": "关闭"
       },
       "credentialSwitchDeferred": "模型来源已切换，将在当前任务结束后生效。",
+      "effortRuntimeDirty": "推理强度还在更新，稍等一下再发送",
       "credentialSwitchApplied": "模型来源切换已生效。",
       "modelSwitchContextGuard": {
         "title": "目标模型的上下文窗口较小",

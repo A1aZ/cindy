@@ -50,6 +50,10 @@ describe('HTML 渲染态的 WebView 约束', () => {
     expect(htmlReaderSource).toContain('setSupportMultipleWindows={false}');
   });
 
+  it('Android 关掉 file:// 读取能力(不可信页面不得探测 app 沙盒)', () => {
+    expect(htmlReaderSource).toContain('allowFileAccess={false}');
+  });
+
   it('只有用户点击的 http(s) 才外送 —— 程序化导航一律拒绝', () => {
     // JavaScript 在这里是开启的:location.href / 表单自动提交 / meta refresh 都会走进
     // 回调,不卡 click 的话,用户只要打开生成物就会被脚本强制带出 Cindy(review P1)。

@@ -46,6 +46,11 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
         // 与仓内其它本地 HTML WebView 一致(mathWebView / mermaidWebView /
         // AnnotationBurnInWebView / ComposerRichInput 都设了这一项)。
         setSupportMultipleWindows={false}
+        // Android:关掉 WebView 的 file:// 读取能力(review)。页面是不可信内容,默认允许
+        // 时它能用子资源 / iframe 去探测甚至读取 app 沙盒内的本地文件。与仓内
+        // ComposerRichInput 一致。(allowFileAccessFromFileURLs /
+        // allowUniversalAccessFromFileURLs 默认已为 false,不需显式声明。)
+        allowFileAccess={false}
         // baseUrl 显式给 about:blank,**不能省**:两端默认值不一致 —— iOS
         // (RNCWebViewImpl.m)缺省就是 about:blank,Android(RNCWebViewManagerImpl.kt)
         // 缺省传的是空串给 loadDataWithBaseURL。空串下页内锚点(`<a href="#toc">`)

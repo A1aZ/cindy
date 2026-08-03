@@ -625,11 +625,17 @@ export function findBareFilePathMatch(input: string, from: number): BareFilePath
 //
 // **刻意只认小写 `file://`**:下游 resolveChatAbsPath 与 looksLikeLocalHref 都是大小写
 // 敏感地剥 scheme,放行 `FILE://` 会造出「进了候选却剥不掉 scheme」的坏绝对路径。
+//
+// **必须是无 authority 的 `file:///`(三斜杠)**(review P2 实捉):`file://localhost/x.html`
+// 与 Windows UNC `file://server/share/x.html` 都是合法 file URL,但 resolveChatAbsPath 固定
+// 做 `href.slice(7)`,分别得到 `localhost/x.html` 与 `server/share/x.html` —— 丢掉了绝对
+// 路径与 UNC 语义,远端 stat 必然找不到文件(还白发一次 stat)。要正确支持 authority 得改
+// 整条路径解析链(含 UNC 换算),那是独立改动;这里按「宁可不点亮」收窄成三斜杠形态。
 const BARE_FILE_URL_CJK_PUNCT = '。，、；：！？…·（）【】〔〕「」『』《》〈〉“”‘’　';
 const BARE_FILE_URL_TRAILING_ASCII = '.,;:!?\'"`';
 const BARE_FILE_URL_RE_SOURCE =
   '(?<![A-Za-z0-9+.\\-])'
-  + `(file://[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}]*`
+  + `(file:///[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}]*`
   + `[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}${BARE_FILE_URL_TRAILING_ASCII}])`;
 
 /**
@@ -647,7 +653,7 @@ const BARE_FILE_URL_RE_SOURCE =
  */
 export function findBareFileUrlMatch(input: string, from: number): BareFilePathMatch | null {
   // 廉价短路(同 findBareFilePathMatch:本函数在渲染热路径上逐 token 调用)。
-  if (!input.includes('file://')) return null;
+  if (!input.includes('file:///')) return null;
   // 每次调用新建:`g` 的 lastIndex 是可变状态(同本文件与 messageMarkdown 的既有约定)。
   const re = new RegExp(BARE_FILE_URL_RE_SOURCE, 'g');
   re.lastIndex = Math.max(0, from);

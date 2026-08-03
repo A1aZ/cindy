@@ -16,8 +16,9 @@
  * 页面(内联样式与脚本、`data:` 图、公网图)完整可读;多文件站点式产物会缺资源,退路
  * 是工具栏「分享」把文件送到电脑上看。桌面靠 `file://` 的同目录天然没有这个问题。
  *
- * 导航一律拦下:about: 放行(文档自身与页内锚点),http(s) 转系统浏览器,其余一切
- * (`file://`、`tel:`、`mailto:`、自定义 scheme)明确拒绝且**不交给 Linking**。
+ * 导航一律拦下:about: 放行(文档自身与页内锚点),**用户点击**的 http(s) 转系统浏览器,
+ * 其余一切(程序化导航、`file://`、`tel:`、`mailto:`、自定义 scheme)明确拒绝且
+ * **不交给 Linking**。
  * 不挂 onMessage:页面里的 postMessage 无人消费,不给任意生成物开一条通向 RN 侧的通道。
  *
  * ⚠️ `originWhitelist` 必须是 `['*']`,不能收窄成 `['about:blank']`(review P2 实捉):
@@ -55,15 +56,24 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
  *
  * 三档,默认拒绝:
  *  - `about:` —— 文档自身(`source={{ baseUrl: 'about:blank' }}`)与页内锚点,放行;
- *  - `http(s)` —— 不在预览 WebView 里导航走,交系统浏览器打开;
- *  - **其余一切**(`file://`、`tel:`、`mailto:`、`intent:`、自定义 scheme)—— 拒绝,
- *    且**不调 Linking**:`file://` 在手机上指向 app 沙盒而非被控端,其余会拉起外部
- *    应用或弹系统报错。生成物不该有拉起外部应用的能力。
+ *  - **用户点击的** `http(s)` —— 不在预览 WebView 里导航走,交系统浏览器打开;
+ *  - **其余一切** —— 拒绝,且**不调 Linking**:`file://` 在手机上指向 app 沙盒而非
+ *    被控端,`tel:` / `mailto:` / `intent:` 等会拉起外部应用。生成物不该有这个能力。
+ *
+ * ⚠️ 为什么必须卡 `navigationType === 'click'`(review P1 实捉):HTML 与静态 markdown
+ * 不同,这里 JavaScript 是开启的。`location.href = '…'`、表单自动提交、meta refresh
+ * 同样会走进这个回调 —— 不区分的话,用户只要打开一份生成物就会被脚本强制带出 Cindy
+ * 跳到任意网页(也是一条把页面内容带出去的信道)。
+ *
+ * Android 的取舍:RNW 的 Android 侧 `createWebViewEvent` 根本不设 `navigationType`
+ * (只有 url / title / loading 等),所以那边**无法确认**是否用户点击 → 一律按拒绝处理。
+ * 代价是 Android 上生成物里的外链点不开(可用工具栏「分享」把文件送到别处打开);
+ * 方向与本文件其余判据一致:拿不准就不放行。
  */
 function interceptHtmlNavigation(request: ShouldStartLoadRequest): boolean {
   const url = request.url ?? '';
   if (url === 'about:blank' || url.startsWith('about:')) return true;
-  if (/^https?:\/\//i.test(url)) {
+  if (/^https?:\/\//i.test(url) && request.navigationType === 'click') {
     void Linking.openURL(url).catch(() => undefined);
     return false;
   }

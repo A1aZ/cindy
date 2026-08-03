@@ -66,7 +66,10 @@ describe('强更阻断闸门', () => {
     expect(recheck).toContain("if (!record || !currentVersion) return 'error';");
     expect(recheck).toContain("return 'error'");
     // 仍强更时必须刷新 target:服务端可能只修正了坏掉的安装地址。
-    expect(recheck).toContain('deps.onStillForced(evaluation.target)');
+    expect(recheck).toContain('deps.onStillForced(evaluation.target, startRevision)');
+    // 在途期间若有更新的观察写入 store,本次旧结论必须作废(compare-and-set)。
+    expect(recheck).toContain('const startRevision = deps.getRevision?.();');
+    expect(recheck).toContain('deps.onCleared(startRevision)');
   });
 
   it('阻断态只存内存,不持久化(服务端撤回门槛后用户不能被本地缓存锁死)', () => {

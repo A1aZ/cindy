@@ -3,6 +3,7 @@ import {
   __testing,
   clearForcedUpdate,
   enterForcedUpdate,
+  getForcedUpdateRevision,
   getForcedUpdateTarget,
   subscribeForcedUpdate,
   type ForcedUpdateTarget,
@@ -83,6 +84,38 @@ describe('forcedUpdateStore', () => {
     clearForcedUpdate();
     enterForcedUpdate(target());
     expect(getForcedUpdateTarget()).toEqual(target());
+  });
+
+  it('compare-and-clear:revision 已前进 → 旧结论作废,不解除', () => {
+    // 竞态:核对发起时读到 revision=1,在途期间另一条路径写入更新的强更目标(revision=2),
+    // 旧结论带着 1 回来时不得把用户放进业务树。
+    enterForcedUpdate(target());
+    const stale = getForcedUpdateRevision();
+    enterForcedUpdate(target({ version: '2.1.0' })); // 更新的观察落地
+    clearForcedUpdate(stale);
+    expect(getForcedUpdateTarget()?.version).toBe('2.1.0');
+  });
+
+  it('compare-and-clear:revision 未变 → 正常解除', () => {
+    enterForcedUpdate(target());
+    clearForcedUpdate(getForcedUpdateRevision());
+    expect(getForcedUpdateTarget()).toBeNull();
+  });
+
+  it('compare-and-set:revision 已前进 → 旧 target 不回写(按钮不退回旧链接)', () => {
+    enterForcedUpdate(target());
+    const stale = getForcedUpdateRevision();
+    enterForcedUpdate(target({ installUrl: 'https://cdn.example/fixed' }));
+    enterForcedUpdate(target({ installUrl: 'https://cdn.example/old' }), stale);
+    expect(getForcedUpdateTarget()?.installUrl).toBe('https://cdn.example/fixed');
+  });
+
+  it('不传 revision 的调用不受 compare 影响(首次进入 / 旧调用点)', () => {
+    enterForcedUpdate(target());
+    enterForcedUpdate(target({ version: '3.0.0' }));
+    expect(getForcedUpdateTarget()?.version).toBe('3.0.0');
+    clearForcedUpdate();
+    expect(getForcedUpdateTarget()).toBeNull();
   });
 
   it('单个订阅者抛错不影响其它订阅者', () => {

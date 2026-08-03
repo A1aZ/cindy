@@ -25,6 +25,7 @@ function makeDeps(overrides: Partial<ForcedUpdateRecheckDeps> = {}) {
     getCurrentVersion: () => '1.0.0',
     onCleared: vi.fn(),
     onStillForced: vi.fn(),
+    getRevision: () => 7,
     now: () => nowMs,
     advance: (ms: number) => { nowMs += ms; },
     ...overrides,
@@ -128,6 +129,23 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onStillForced).toHaveBeenCalledOnce();
   });
 
+  it('落地时回传发起时的 revision(compare-and-set 的依据)', async () => {
+    // 发起后 store 被更新的观察改写时,revision 会变;这里断言回传的是**发起时**读到的值。
+    let rev = 7;
+    const deps = makeDeps({
+      getRevision: () => rev,
+      fetchLatest: vi.fn(async () => { rev = 9; return latestRecord({ minVersion: undefined }); }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('cleared');
+    expect(deps.onCleared).toHaveBeenCalledWith(7);
+  });
+
+  it('仍强更时刷新 target 也带上发起时的 revision', async () => {
+    const deps = makeDeps();
+    await expect(runOnce(deps)).resolves.toBe('still-forced');
+    expect(deps.onStillForced).toHaveBeenCalledWith(expect.objectContaining({ version: '2.0.0' }), 7);
+  });
+
   it('门槛仍在但服务端修正了安装地址 → 刷新 target(否则按钮一直打开旧链接)', async () => {
     const deps = makeDeps({
       fetchLatest: vi.fn(async () => latestRecord({
@@ -139,7 +157,7 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onStillForced).toHaveBeenCalledWith(expect.objectContaining({
       installUrl: 'https://cdn.example/fixed',
       itmsUrl: 'itms-services://?action=download-manifest&url=https://cdn.example/fixed.plist',
-    }));
+    }), 7);
   });
 
   it('门槛仍在且换了更高的强更目标 → 刷新 target', async () => {
@@ -150,7 +168,7 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onStillForced).toHaveBeenCalledWith(expect.objectContaining({
       version: '3.0.0',
       runtimeVersion: '3',
-    }));
+    }), 7);
   });
 
   it('/latest 拉取失败 → 维持阻断(不能靠断网绕过强更)', async () => {

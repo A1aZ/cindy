@@ -23,20 +23,27 @@ export interface ForcedUpdateRecheckDeps {
   fetchLatest: () => Promise<unknown>;
   getCurrentRuntimeVersion: () => string | null | undefined;
   getCurrentVersion: () => string | null | undefined;
-  /** 判定不再强更时调用(实参为 clearForcedUpdate),之后业务树重新挂载。 */
-  onCleared: () => void;
+  /**
+   * 判定不再强更时调用(实参为 clearForcedUpdate),之后业务树重新挂载。
+   * 回传发起时的 revision 做 compare-and-clear:核对期间若有更新的观察写入了强更目标,
+   * 这条旧结论必须作废,不能把用户放进业务树。
+   */
+  onCleared: (expectedRevision?: number) => void;
   /**
    * 仍然强更时把**最新**目标写回(实参为 enterForcedUpdate,对等值目标幂等)。
    * 必须刷新而不是原样保留:服务端修正 installUrl / itmsUrl(坏链接正是最需要救的那种
    * 故障),或发布更高的强更目标时,阻断屏的「去更新」不能继续打开旧链接。
    */
-  onStillForced: (target: {
-    version: string;
-    runtimeVersion: string;
-    installUrl: string;
-    itmsUrl: string;
-    releaseNotes?: string;
-  }) => void;
+  onStillForced: (
+    target: {
+      version: string;
+      runtimeVersion: string;
+      installUrl: string;
+      itmsUrl: string;
+      releaseNotes?: string;
+    },
+    expectedRevision?: number,
+  ) => void;
   now: () => number;
   /** 阻断屏卸载后使迟到结果失效。 */
   isCurrent?: () => boolean;
@@ -48,6 +55,11 @@ export interface ForcedUpdateRecheckDeps {
    * 用户回来还要再切一次后台才自愈。省略则按 'active' 处理(维持旧行为)。
    */
   getAppState?: () => string;
+  /**
+   * 发起时读一次 store revision(实参为 getForcedUpdateRevision),落地时回传。
+   * 省略则不做 compare-and-set(维持旧行为)。
+   */
+  getRevision?: () => number;
 }
 
 export interface ForcedUpdateRecheckOptions {
@@ -86,6 +98,8 @@ export function createForcedUpdateRechecker(
 
   async function run(): Promise<ForcedUpdateRecheckOutcome> {
     inFlight = true;
+    // 必须在 await 之前读:这是"本次核对看到的世界"的版本号。
+    const startRevision = deps.getRevision?.();
     try {
       const latest = await withTimeout(deps.fetchLatest(), latestTimeoutMs);
       if (deps.isCurrent && !deps.isCurrent()) return 'still-forced';
@@ -105,10 +119,10 @@ export function createForcedUpdateRechecker(
       // 服务端可能只修正了 installUrl / itmsUrl(坏链接恰恰是最需要救的故障),
       // 或发布了更高的强更目标 —— 继续用旧 target 会让「去更新」一直打开旧链接。
       if (evaluation.forced) {
-        if (evaluation.target) deps.onStillForced(evaluation.target);
+        if (evaluation.target) deps.onStillForced(evaluation.target, startRevision);
         return 'still-forced';
       }
-      deps.onCleared();
+      deps.onCleared(startRevision);
       return 'cleared';
     } catch {
       return 'error'; // 拉不到就维持阻断(见文件头:解除方向 fail-closed)

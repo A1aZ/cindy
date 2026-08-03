@@ -10,7 +10,11 @@ import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { fetchLatestRelease } from './fetchLatestRelease';
 import { createForcedUpdateRechecker } from './forcedUpdateRecheck';
-import { clearForcedUpdate, enterForcedUpdate } from './forcedUpdateStore';
+import {
+  clearForcedUpdate,
+  enterForcedUpdate,
+  getForcedUpdateRevision,
+} from './forcedUpdateStore';
 import { isCanaryChannel } from './canaryChannelStore';
 
 export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
@@ -28,6 +32,8 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
       onCleared: clearForcedUpdate,
       // 仍强更时刷新目标(等值时 enterForcedUpdate 幂等,不会引发重渲染)。
       onStillForced: enterForcedUpdate,
+      // compare-and-set:核对期间若有更新的观察写入 store,本次旧结论作废。
+      getRevision: getForcedUpdateRevision,
       now: () => Date.now(),
       isCurrent: () => current,
       // 阻断态可能在 App 已切后台后才被置位(检查的 /latest 迟到返回),

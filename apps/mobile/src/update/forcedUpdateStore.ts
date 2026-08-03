@@ -34,6 +34,13 @@ export interface ForcedUpdateTarget {
 }
 
 let forcedTarget: ForcedUpdateTarget | null = null;
+/**
+ * 每次目标真正变化(含解除)自增。用于 compare-and-set:
+ * 检查是异步的,一次检查发起后到落地前,别的路径(启动检查的迟到响应、阻断屏重挂后的
+ * 新一轮核对)可能已经写入更新的观察。带着"发起时的 revision"回来的旧结论必须作废,
+ * 否则会出现「旧响应清掉新版强更状态」——业务树在最新观察仍要求强更时重新挂载。
+ */
+let revision = 0;
 const listeners = new Set<() => void>();
 
 function notifyListeners(): void {
@@ -60,10 +67,15 @@ function isSameTarget(a: ForcedUpdateTarget | null, b: ForcedUpdateTarget | null
 /**
  * 进入强更阻断态。幂等:同一目标重复调用不通知订阅者(三条检查路径都可能反复命中,
  * 尤其 resume 每 5 分钟一次;不做等值判断会引发无意义重渲染)。
+ *
+ * expectedRevision 可选:传入则做 compare-and-set —— 只有 store 自本次检查发起以来
+ * 没被更新的观察改写过才生效。首次进入(promptBundleUpdate)不传,它就是最新观察。
  */
-export function enterForcedUpdate(target: ForcedUpdateTarget): void {
+export function enterForcedUpdate(target: ForcedUpdateTarget, expectedRevision?: number): void {
+  if (expectedRevision !== undefined && expectedRevision !== revision) return;
   if (isSameTarget(forcedTarget, target)) return;
   forcedTarget = target;
+  revision += 1;
   notifyListeners();
 }
 
@@ -71,11 +83,21 @@ export function enterForcedUpdate(target: ForcedUpdateTarget): void {
  * 解除阻断态(生产入口,不是测试专用)。
  * 唯一调用方是阻断屏的重新核对:**成功**拉到 /latest 且判定不再强更时才解除
  * —— 不能在拉取失败时解除,否则断网就能绕过强更。
+ *
+ * expectedRevision 可选:传入则做 compare-and-clear —— 本次核对发起后若有更新的观察
+ * 写入了强更目标,这条旧结论作废,不得把用户放进业务树。
  */
-export function clearForcedUpdate(): void {
+export function clearForcedUpdate(expectedRevision?: number): void {
+  if (expectedRevision !== undefined && expectedRevision !== revision) return;
   if (forcedTarget === null) return;
   forcedTarget = null;
+  revision += 1;
   notifyListeners();
+}
+
+/** 当前 revision;检查发起时读一次,落地时回传做 compare-and-set。 */
+export function getForcedUpdateRevision(): number {
+  return revision;
 }
 
 /** 当前阻断目标;null = 未命中强更。 */
@@ -99,6 +121,7 @@ export function useForcedUpdate(): ForcedUpdateTarget | null {
 export const __testing = {
   reset(): void {
     forcedTarget = null;
+    revision = 0;
     listeners.clear();
   },
 };

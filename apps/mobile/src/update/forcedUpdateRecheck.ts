@@ -25,6 +25,18 @@ export interface ForcedUpdateRecheckDeps {
   getCurrentVersion: () => string | null | undefined;
   /** 判定不再强更时调用(实参为 clearForcedUpdate),之后业务树重新挂载。 */
   onCleared: () => void;
+  /**
+   * 仍然强更时把**最新**目标写回(实参为 enterForcedUpdate,对等值目标幂等)。
+   * 必须刷新而不是原样保留:服务端修正 installUrl / itmsUrl(坏链接正是最需要救的那种
+   * 故障),或发布更高的强更目标时,阻断屏的「去更新」不能继续打开旧链接。
+   */
+  onStillForced: (target: {
+    version: string;
+    runtimeVersion: string;
+    installUrl: string;
+    itmsUrl: string;
+    releaseNotes?: string;
+  }) => void;
   now: () => number;
   /** 阻断屏卸载后使迟到结果失效。 */
   isCurrent?: () => boolean;
@@ -78,9 +90,13 @@ export function createForcedUpdateRechecker(
         currentVersion,
         latest,
       });
-      // 仍然强更(门槛还在,或换了更高的目标)→ 维持阻断,不动 store:
-      // 目标信息的刷新交给下次冷启动,阻断屏本身不需要热更文案。
-      if (evaluation.forced) return 'still-forced';
+      // 仍然强更(门槛还在,或换了更高的目标)→ 维持阻断,但把最新 target 写回:
+      // 服务端可能只修正了 installUrl / itmsUrl(坏链接恰恰是最需要救的故障),
+      // 或发布了更高的强更目标 —— 继续用旧 target 会让「去更新」一直打开旧链接。
+      if (evaluation.forced) {
+        if (evaluation.target) deps.onStillForced(evaluation.target);
+        return 'still-forced';
+      }
       deps.onCleared();
       return 'cleared';
     } catch {

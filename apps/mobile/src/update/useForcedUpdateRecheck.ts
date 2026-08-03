@@ -10,7 +10,7 @@ import Constants from 'expo-constants';
 import * as Updates from 'expo-updates';
 import { fetchLatestRelease } from './fetchLatestRelease';
 import { createForcedUpdateRechecker } from './forcedUpdateRecheck';
-import { clearForcedUpdate } from './forcedUpdateStore';
+import { clearForcedUpdate, enterForcedUpdate } from './forcedUpdateStore';
 import { isCanaryChannel } from './canaryChannelStore';
 
 export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
@@ -26,6 +26,8 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
       getCurrentRuntimeVersion: () => Updates.runtimeVersion,
       getCurrentVersion: () => Constants.expoConfig?.version ?? null,
       onCleared: clearForcedUpdate,
+      // 仍强更时刷新目标(等值时 enterForcedUpdate 幂等,不会引发重渲染)。
+      onStillForced: enterForcedUpdate,
       now: () => Date.now(),
       isCurrent: () => current,
     });

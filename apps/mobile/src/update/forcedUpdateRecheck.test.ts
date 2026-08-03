@@ -24,6 +24,7 @@ function makeDeps(overrides: Partial<ForcedUpdateRecheckDeps> = {}) {
     getCurrentRuntimeVersion: () => '1',
     getCurrentVersion: () => '1.0.0',
     onCleared: vi.fn(),
+    onStillForced: vi.fn(),
     now: () => nowMs,
     advance: (ms: number) => { nowMs += ms; },
     ...overrides,
@@ -86,22 +87,50 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onCleared).toHaveBeenCalledOnce();
   });
 
-  it('门槛仍在 → 维持阻断', async () => {
+  it('门槛仍在 → 维持阻断,并把最新 target 写回', async () => {
     const deps = makeDeps();
     await expect(runOnce(deps)).resolves.toBe('still-forced');
     expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).toHaveBeenCalledOnce();
+  });
+
+  it('门槛仍在但服务端修正了安装地址 → 刷新 target(否则按钮一直打开旧链接)', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({
+        installUrl: 'https://cdn.example/fixed',
+        itmsUrl: 'itms-services://?action=download-manifest&url=https://cdn.example/fixed.plist',
+      })),
+    });
+    await expect(runOnce(deps)).resolves.toBe('still-forced');
+    expect(deps.onStillForced).toHaveBeenCalledWith(expect.objectContaining({
+      installUrl: 'https://cdn.example/fixed',
+      itmsUrl: 'itms-services://?action=download-manifest&url=https://cdn.example/fixed.plist',
+    }));
+  });
+
+  it('门槛仍在且换了更高的强更目标 → 刷新 target', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '3.0.0', runtimeVersion: '3', minVersion: '3.0.0' })),
+    });
+    await expect(runOnce(deps)).resolves.toBe('still-forced');
+    expect(deps.onStillForced).toHaveBeenCalledWith(expect.objectContaining({
+      version: '3.0.0',
+      runtimeVersion: '3',
+    }));
   });
 
   it('/latest 拉取失败 → 维持阻断(不能靠断网绕过强更)', async () => {
     const deps = makeDeps({ fetchLatest: vi.fn(async () => { throw new Error('offline'); }) });
     await expect(runOnce(deps)).resolves.toBe('error');
     expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
   it('/latest 记录解析不出 → 维持阻断(一条坏记录不得放行所有被强更装机)', async () => {
     const deps = makeDeps({ fetchLatest: vi.fn(async () => ({})) });
     await expect(runOnce(deps)).resolves.toBe('error');
     expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
   it('记录有效但缺 runtimeVersion / 安装地址 → 维持阻断', async () => {
@@ -110,6 +139,7 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     });
     await expect(runOnce(deps)).resolves.toBe('error');
     expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
   it('拿不到本机 version → 维持阻断(比不出来不放行)', async () => {
@@ -119,6 +149,7 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     });
     await expect(runOnce(deps)).resolves.toBe('error');
     expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
   it('/latest 挂起 → withTimeout 兜底为 error,维持阻断', async () => {

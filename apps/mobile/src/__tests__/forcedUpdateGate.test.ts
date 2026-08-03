@@ -62,9 +62,11 @@ describe('强更阻断闸门', () => {
     expect(layout).toContain("from '@/update/useForcedUpdateRecheck'");
     expect(layout).toContain('useForcedUpdateRecheck();');
     // 解除方向 fail-closed:只有成功拉到 /latest 且判定不再强更才解除,
-    // 拉取失败维持阻断,不能靠断网 / 飞行模式绕过。
-    expect(recheck).toContain('if (evaluation.forced) return \'still-forced\';');
+    // 拉取失败 / 记录解析不出 / 拿不到本机 version 一律维持阻断,不能靠断网绕过。
+    expect(recheck).toContain("if (!record || !currentVersion) return 'error';");
     expect(recheck).toContain("return 'error'");
+    // 仍强更时必须刷新 target:服务端可能只修正了坏掉的安装地址。
+    expect(recheck).toContain('deps.onStillForced(evaluation.target)');
   });
 
   it('阻断态只存内存,不持久化(服务端撤回门槛后用户不能被本地缓存锁死)', () => {

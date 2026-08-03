@@ -46,6 +46,10 @@ const RESOURCE_ATTRS_BY_TAG: Readonly<Record<string, readonly string[]>> = {
   source: ['src'],
   video: ['src', 'poster'],
   audio: ['src'],
+  // 内联 SVG 的标准图片引用(review P1):`<svg><image href="chart.png"/></svg>`。
+  // CSP 的 `img-src data:` 放行它,不收就必然缺图。`xlink:href` 是 SVG 1.1 的写法,
+  // 仍被浏览器支持且产物里常见(导出工具多用它),两个都收。
+  image: ['href', 'xlink:href'],
 };
 
 /** 一次改写最多取回多少个资源(超出部分原样保留,由上层如实报告数量)。 */
@@ -96,16 +100,35 @@ const RESOURCE_MIME_BY_EXT: Readonly<Record<string, string>> = {
   '.otf': 'font/otf',
 };
 
-export function htmlResourceMimeFor(pathOrName: string): string | null {
-  const clean = pathOrName.split(/[?#]/)[0] ?? '';
-  const dot = clean.lastIndexOf('.');
+/**
+ * 文件系统路径 → MIME。**入参是已解析出的文件系统路径,不是 URL。**
+ *
+ * 刻意**不剥** `?` / `#`(review P2):唯一调用方传的是 resolveHtmlResourcePath 的输出,
+ * 那已经是「按 URL 规则剥过 query/fragment、再做过百分号解码」的真实路径。此处再剥一次
+ * 就把文件名里合法的保留字符当成 URL 语法:同目录文件 `chart#1.png` 在引用里按 URL 规则
+ * 写成 `chart%231.png`,解析后得到 `/…/chart#1.png`,原实现在这里把 `#1.png` 当 fragment
+ * 截掉 → 扩展名判定失败 → 引用被静默排除,而浏览器实际会正常加载它。
+ *
+ * 与 filePreview 里 remoteFilePreviewKind 这轮的修正是同一个根因:**一个函数吃两种语义**
+ * (URL / 文件名)。这里的契约定死为文件名一种。
+ */
+export function htmlResourceMimeFor(fsPath: string): string | null {
+  const dot = fsPath.lastIndexOf('.');
   if (dot < 0) return null;
-  return RESOURCE_MIME_BY_EXT[clean.slice(dot).toLowerCase()] ?? null;
+  // 目录里带点、文件名不带点时(`a.b/plain`)最后一个点不属于文件名 —— 扩展名判定应失败。
+  const lastSep = Math.max(fsPath.lastIndexOf('/'), fsPath.lastIndexOf('\\'));
+  if (dot < lastSep) return null;
+  return RESOURCE_MIME_BY_EXT[fsPath.slice(dot).toLowerCase()] ?? null;
 }
 
 /** 任意 scheme(`https://`、`file://`、`data:`、`mailto:` …)。 */
 const HAS_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 const WIN_ABS_RE = /^[A-Za-z]:[\\/]/;
+/**
+ * 基目录是否 Windows 路径 —— 只认**根形态**:盘符(`C:\` / `C:/`)或 UNC(`\\server\share`)。
+ * 不能用「路径里含反斜杠」判(review P2):POSIX 上反斜杠是合法文件名字符。
+ */
+const WIN_ROOT_RE = /^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/;
 
 /** HTML 里一处待改写的资源引用(区间指向**属性值本身**,不含引号)。 */
 export interface HtmlResourceRef {
@@ -187,7 +210,11 @@ export function resolveHtmlResourcePath(baseDirAbsPath: string, raw: string): st
     decoded = pathOnly;
   }
 
-  const isWin = baseDirAbsPath.includes('\\');
+  // Windows 判定只看**根形态**(盘符 `C:\` 或 UNC `\\server\share`),不看路径里有没有反斜杠
+  // (review P2):macOS / Linux 上目录名可以合法含反斜杠,`/tmp/a\b/index.html` 会被
+  // `includes('\\')` 误判成 Windows,于是拼出 `/tmp/a\b\chart.png` —— POSIX 把后一个反斜杠
+  // 也当普通文件名字符,取件路径根本不存在,该页所有同目录资源全失败。
+  const isWin = WIN_ROOT_RE.test(baseDirAbsPath);
   const segments = decoded.split(/[\\/]/);
   // `..` 逃逸一律拒绝;`.` 段丢掉;空段(`a//b`)丢掉。
   const kept: string[] = [];
@@ -211,10 +238,72 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
   return htmlAbsPath.slice(0, lastSep);
 }
 
+/**
+ * RAWTEXT / RCDATA 元素的**内容区间** —— 这些区间里的 `<` 不开标签,扫描必须跳过。
+ *
+ * ── 为什么这次可以做,而被删掉的 masking 层不行 ──────────────────────────────
+ * 两者看起来都是「先划出不该扫的区域」,但判据的性质完全不同:
+ *  - masking 层要判的是**注释 / `<template>` 体 / CSS 注释** —— 那需要知道某个 `<` 处在哪个
+ *    HTML 数据态里,是开放集合(连挖五轮,每轮一种新形态),没有 tokenizer 做不到;
+ *  - RAWTEXT 的终止规则是**闭合的**:HTML 规范规定 `<script>` 的内容直到 `</script` 后跟
+ *    空白 / `/` / `>` 才结束,**字符串、注释、嵌套一律不影响**(这正是 JS 里写 `'</script>'`
+ *    会提前闭合文档的原因)。一条规则、无例外,不需要通用 tokenizer。
+ * 所以这不是把 masking 加回来 —— 那条注释说的「除非引入真 HTML tokenizer」针对的是数据态
+ * 判定,不是 RAWTEXT 终止序列。
+ *
+ * ── 为什么必须跳过(真实危害是**功能正确性**,不是读文件) ─────────────────────
+ * 不跳过时全局标签正则会命中脚本字符串里的伪标签,而 applyHtmlResourceUrls 会**真的把它替换**
+ * 成 `data:` URI,于是作者脚本的源码被改写:
+ * ```js
+ * const tpl = '<img src="logo.png">';   // ← 被替成 data:image/png;base64,… 整段
+ * tpl.replace('logo.png', next);         // ← 后续字符串处理全部失效
+ * ```
+ * 把 HTML 模板放在 JS 字符串里是产物里的常见写法,所以这会打坏**正常页面**。
+ *
+ * 附带说明 review 里标成 security 的那条(「脚本能读取未被 DOM 引用的被控端文件」):
+ * 那一点**不构成攻击面增量** —— 页面整份都由不可信产物控制,作者想读同一批文件,直接写一个
+ * 真的 `<img src="secret.css">` 就会被正常回填,不需要伪标签。伪标签的增量危害只有上面那条
+ * (改写自己的脚本源码),所以本修复按**功能正确性**记,不当安全修复宣传。
+ *
+ * ⚠️ 残留误判(如实记录):开标签仍靠正则找,`<div data-tpl="<script>">` 这种把字面
+ * `<script>` 写进属性值的页面会被误认为进入了脚本体,于是后面一段真引用被跳过、渲染成缺图。
+ * 代价权衡:该形态极罕见,而「HTML 模板放 JS 字符串」很常见,净收益为正。两种失败都只影响
+ * 资源是否内联,不影响文档结构。
+ */
+const RAW_TEXT_CONTENT_TAGS = ['script', 'textarea', 'title'] as const;
+
+export function findRawTextContentSpans(html: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  const openRe = new RegExp(`<(${RAW_TEXT_CONTENT_TAGS.join('|')})\\b[^<>]*>`, 'gi');
+  let open: RegExpExecArray | null;
+  while ((open = openRe.exec(html)) !== null) {
+    const tag = open[1].toLowerCase();
+    // 开标签本身**不在**跳过区间里 —— `<script src="a.js">` 的 src 仍要被收。
+    const bodyStart = open.index + open[0].length;
+    const rest = html.slice(bodyStart);
+    const rel = rest.search(new RegExp(`</${tag}(?=[\\s/>])`, 'i'));
+    // 没有结束标签时整段到文末都是内容(与解析器一致)。
+    const bodyEnd = rel < 0 ? html.length : bodyStart + rel;
+    if (bodyEnd > bodyStart) spans.push({ start: bodyStart, end: bodyEnd });
+    // **从体尾继续找下一个开标签**:体内的 `<script>` 字面量因此不会被当成开标签(顺序扫描)。
+    openRe.lastIndex = bodyEnd;
+  }
+  return spans;
+}
+
+function isInsideSpans(pos: number, spans: readonly { start: number; end: number }[]): boolean {
+  for (const s of spans) {
+    if (pos >= s.start && pos < s.end) return true;
+  }
+  return false;
+}
+
 /** 一段 CSS 文本里的 `url(...)` 引用(区间相对该段文本)。 */
 function findCssUrlRefs(css: string): Array<{ start: number; end: number; value: string }> {
   const out: Array<{ start: number; end: number; value: string }> = [];
-  const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/g;
+  // 函数名 ASCII 大小写不敏感(review P1):`background: URL("hero.png")` 是合法 CSS,
+  // CSS 解析器照常加载,只认小写会让这类资源整个漏掉、渲染成空白。
+  const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi;
   let m: RegExpExecArray | null;
   while ((m = urlRe.exec(css)) !== null) {
     const value = m[1] ?? m[2] ?? m[3] ?? '';
@@ -242,6 +331,25 @@ function findCssUrlRefs(css: string): Array<{ start: number; end: number; value:
  * 而两种失败模式的代价差一个数量级:不掩码最多让伪引用占掉配额(**图少取几个**,可见的
  * 退化);掩错却会把中间的真资源整段抹掉(**正常页面静默缺图**,不可见)。所以放弃掩码,
  * 接受前者。**不要再把它加回来** —— 除非引入真正的 HTML tokenizer。
+ *
+ * ── 唯一的例外:RAWTEXT 内容(`<script>` / `<textarea>` / `<title>` 体)确实跳过 ──────
+ * 上面那条禁令针对的是**数据态判定**(某个 `<` 算不算标签),那是开放集合。RAWTEXT 不同:
+ * 它的终止规则由规范写死为「`</tag` 后跟空白 / `/` / `>`」,字符串与注释一律不影响,是**闭合
+ * 规则**,不需要 tokenizer 也能精确实现(见 findRawTextContentSpans)。
+ * 必须跳过的理由也比配额严重一档:不跳过时脚本字符串里的伪标签会被**真的回填**,直接改写
+ * 作者脚本源码(`const tpl = '<img src="logo.png">'` 整段变成 data: URI),打坏正常页面。
+ *
+ * ── 已知限制(需要真 tokenizer,故不在本文件解决;PR 描述里列为已知限制) ────────────
+ * 下面这些形态会让个别资源**不被内联**(渲染成破图 / 空白背景,可见的退化,fail-closed),
+ * 但不会改写文档结构,也不会取到目录外文件:
+ *  - 属性值里含 `>` 时标签边界判定会提前结束(`<img alt="w>90" src="a.png">` 的 src 收不到);
+ *  - `style` 属性里用字符引用写 CSS 引号(`style="background:url(&quot;a.png&quot;)"`)时,
+ *    先按原文找 `url()` 会把 `&quot;` 计入 URL;
+ *  - 命名字符引用只解码 6 个常用项(`amp/lt/gt/quot/apos/nbsp`),`&eacute;` 之类表外引用
+ *    保持原样 → 取不到 → 保留原引用(不猜,fail-closed);
+ *  - SVG fragment 取自解码后的值,fragment 里含引号时按原上下文回填会破坏属性。
+ * 这四类的正确解法都需要「按 HTML 数据态解析 + 保留原文区间映射」,即真 tokenizer。
+ * 而 `apps/mobile` 新增依赖会改动 runtime fingerprint → 触发冷更门,属独立决定。
  */
 export function collectHtmlLocalResourceRefs(
   html: string,
@@ -272,9 +380,13 @@ export function collectHtmlLocalResourceRefs(
   //    **标签白名单只约束「资源属性」这一路,不约束 `style` 属性**:任意标签都能带内联样式
   //    (`<div style="background-image:url(...)">`),所以这里不能因为标签不在白名单就整个跳过
   //    (这条正是本轮 style 属性 finding 的第一版实现踩到的:分支写在 `continue` 之后,永远到不了)。
+  //    RAWTEXT 内容(`<script>` / `<textarea>` / `<title>` 体)整段跳过 —— 那里的 `<` 不开标签,
+  //    收进来会被真的回填、改写作者脚本源码(见 findRawTextContentSpans 的说明)。
+  const rawTextSpans = findRawTextContentSpans(html);
   const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)\b([^<>]*)>/g;
   let tag: RegExpExecArray | null;
   while ((tag = tagRe.exec(html)) !== null) {
+    if (isInsideSpans(tag.index, rawTextSpans)) continue;
     const attrs = RESOURCE_ATTRS_BY_TAG[tag[1].toLowerCase()];
     const attrsText = tag[2];
     const attrsOffset = tag.index + 1 + tag[1].length;
@@ -310,6 +422,8 @@ export function collectHtmlLocalResourceRefs(
   const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
   let style: RegExpExecArray | null;
   while ((style = styleRe.exec(html)) !== null) {
+    // 同上:脚本字符串里的 `<style>` 字面量不算样式块。
+    if (isInsideSpans(style.index, rawTextSpans)) continue;
     const body = style[1];
     const bodyOffset = style.index + style[0].indexOf(body, style[0].indexOf('>'));
     for (const hit of findCssUrlRefs(body)) {

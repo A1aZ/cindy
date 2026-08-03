@@ -6,6 +6,7 @@ import {
   collectHtmlLocalResourceRefs,
   htmlBaseDirOf,
   decodeHtmlCharRefs,
+  findRawTextContentSpans,
   HTML_RESOURCE_LIMIT,
   planHtmlResourceFetches,
   resolveHtmlResourcePath,
@@ -312,8 +313,13 @@ describe('htmlResourceMimeFor(data: URI 的类型)', () => {
     expect(htmlResourceMimeFor('a/app.css')).toBe('text/css');
     expect(htmlResourceMimeFor('a/app.js')).toBe('text/javascript');
     expect(htmlResourceMimeFor('a/logo.SVG')).toBe('image/svg+xml');
-    expect(htmlResourceMimeFor('a/x.png?v=2')).toBe('image/png');
     expect(htmlResourceMimeFor('a/f.woff2')).toBe('font/woff2');
+    // **入参是文件系统路径,不是 URL**(review P2):`a/x.png?v=2` 这种形态在生产中不会出现 ——
+    // 唯一调用方传的是 resolveHtmlResourcePath 的输出,query/fragment 已经在那里按 URL 规则
+    // 剥过、并做完百分号解码。这里再剥一次会把文件名里合法的 `?` / `#` 当语法,
+    // 让 `chart#1.png` 这类真实文件判不出扩展名(见下面 review P2 那组用例)。
+    // 所以带 query 的字符串现在按「文件名里含 `?`」处理:扩展名是 `.png?v=2`,表外 → null。
+    expect(htmlResourceMimeFor('a/x.png?v=2')).toBeNull();
   });
 
   it('表外类型不猜 —— 猜错会让浏览器拒收样式表/脚本,静默失效', () => {
@@ -476,11 +482,13 @@ describe('CSP 必然拦掉的嵌入类型不取回(review P2)', () => {
   });
 });
 
-describe('掩码层已删除:惰性文本里的伪引用会占配额(刻意接受的退化)', () => {
-  it('注释 / 脚本体里的伪引用现在会进候选 —— 代价只是图少取几个', () => {
+describe('掩码层已删除:注释等惰性文本里的伪引用会占配额(刻意接受的退化)', () => {
+  it('注释里的伪引用仍会进候选 —— 代价只是图少取几个', () => {
     // 掩码被 review 连挖五轮(注释 → template → 属性字面标签 → 脚本字符串 → 跨属性配对),
     // 根因是正则认不出「`<` 在哪个数据态」。两种失败模式代价差一个数量级:不掩最多让伪
     // 引用占配额,掩错会把真资源整段抹掉。所以放弃掩码,这里钉住新口径。
+    // **例外是 RAWTEXT 内容(script / textarea / title),见下一个 describe** —— 它的终止规则
+    // 由规范写死、是闭合的,且不跳过会真的改写作者脚本源码,比占配额严重一档。
     const refs = collectHtmlLocalResourceRefs('<!-- <img src="ghost.png"> --><img src="real.png">', BASE);
     expect(refs.map((r) => r.raw)).toEqual(['ghost.png', 'real.png']);
   });
@@ -488,6 +496,131 @@ describe('掩码层已删除:惰性文本里的伪引用会占配额(刻意接�
   it('跨属性的 `<!--` / `-->` 不再吞掉中间的真资源(本轮 review P1)', () => {
     const html = '<div a="<!--"></div><img src="real.png"><div b="-->"></div>';
     expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
+  });
+});
+
+describe('RAWTEXT 内容整段跳过(review P1:回填会改写作者脚本源码)', () => {
+  it('脚本字符串里的伪标签不进候选,也就不会被回填', () => {
+    // 不跳过时 applyHtmlResourceUrls 会把 `logo.png` 真的替成 data: URI,于是作者脚本
+    // 后续的 tpl.replace('logo.png', …) 全部失效 —— 打坏的是**正常页面**(把 HTML 模板
+    // 放 JS 字符串里是常见写法)。
+    const html = '<script>const tpl = \'<img src="logo.png">\';</script><img src="real.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+    // 端到端:回填后脚本源码一字不动。
+    const urls = new Map(refs.map((r) => [r.absPath, 'data:image/png;base64,AAA']));
+    const out = applyHtmlResourceUrls(html, refs, urls);
+    expect(out).toContain('const tpl = \'<img src="logo.png">\';');
+    expect(out).toContain('<img src="data:image/png;base64,AAA">');
+  });
+
+  it('开标签本身不在跳过区间:<script src> 仍要收', () => {
+    const refs = collectHtmlLocalResourceRefs('<script src="app.js"></script>', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['app.js']);
+  });
+
+  it('textarea / title 体同样跳过(RCDATA 里的 `<` 也不开标签)', () => {
+    expect(collectHtmlLocalResourceRefs('<textarea><img src="g.png"></textarea>', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('<title><img src="g.png"></title>', BASE)).toEqual([]);
+  });
+
+  it('终止序列按规范判:`</script` 后须跟空白 / `/` / `>`,大小写不敏感', () => {
+    // `</scriptx>` 不终止脚本体 —— 后面那个 img 仍在 RAWTEXT 里。
+    expect(collectHtmlLocalResourceRefs('<script>a</scriptx><img src="g.png"></script>', BASE)).toEqual([]);
+    // 大写结束标签正常终止。
+    const refs = collectHtmlLocalResourceRefs('<SCRIPT>a</SCRIPT><img src="real.png">', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+    // 带空白的结束标签也终止。
+    const refs2 = collectHtmlLocalResourceRefs('<script>a</script ><img src="real.png">', BASE);
+    expect(refs2.map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('未闭合的 script 体一直到文末(与解析器一致)', () => {
+    expect(collectHtmlLocalResourceRefs('<script><img src="g.png">', BASE)).toEqual([]);
+  });
+
+  it('脚本体里的 <style> 字面量不算样式块', () => {
+    const html = '<script>var s = \'<style>body{background:url(g.png)}</style>\';</script>';
+    expect(collectHtmlLocalResourceRefs(html, BASE)).toEqual([]);
+  });
+
+  it('span 计算:体内的 `<script>` 字面量不被当成新的开标签(顺序扫描)', () => {
+    const html = '<script>var a = "<script>";</script><img src="real.png">';
+    const spans = findRawTextContentSpans(html);
+    expect(spans).toHaveLength(1);
+    // 一个 span,从第一个开标签之后到第一个合法 `</script` 之前。
+    expect(html.slice(spans[0].start, spans[0].end)).toBe('var a = "<script>";');
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('⚠️ 已知残留:属性值里的字面 `<script>` 会造成误判(如实钉住,不假装没有)', () => {
+    // 开标签仍靠正则找,`[^<>]*` 遇到属性值里的 `<` 就停,于是这里的 `<script>` 被当成真开标签,
+    // 后面那个真引用被跳过 → 缺图。该形态极罕见,而「HTML 模板放 JS 字符串」很常见,净收益为正。
+    // 两种失败都只影响资源是否内联,不影响文档结构。
+    const html = '<div data-tpl="<script>"></div><img src="real.png">';
+    expect(collectHtmlLocalResourceRefs(html, BASE)).toEqual([]);
+  });
+});
+
+describe('CSS url() 函数名大小写不敏感(review P1)', () => {
+  it('URL(...) / Url(...) 与小写等价', () => {
+    for (const fn of ['url', 'URL', 'Url', 'uRl']) {
+      const refs = collectHtmlLocalResourceRefs(`<style>body{background:${fn}("hero.png")}</style>`, BASE);
+      expect(refs.map((r) => r.raw), fn).toEqual(['hero.png']);
+    }
+  });
+
+  it('style 属性里同样不敏感', () => {
+    const refs = collectHtmlLocalResourceRefs('<div style="background:URL(\'hero.png\')"></div>', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['hero.png']);
+  });
+});
+
+describe('内联 SVG 的 image href / xlink:href(review P1)', () => {
+  it('两种写法都收(CSP 的 img-src data: 放行它们)', () => {
+    const refs = collectHtmlLocalResourceRefs('<svg><image href="chart.png"/></svg>', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['chart.png']);
+    const legacy = collectHtmlLocalResourceRefs('<svg><image xlink:href="chart.png"/></svg>', BASE);
+    expect(legacy.map((r) => r.raw)).toEqual(['chart.png']);
+  });
+
+  it('image 之外的标签不因此放开 href', () => {
+    // a[href] 是导航不是资源,不该被取件回填。
+    expect(collectHtmlLocalResourceRefs('<a href="page.html">x</a>', BASE)).toEqual([]);
+  });
+});
+
+describe('Windows 路径判定只看根形态(review P2)', () => {
+  it('POSIX 目录名里的反斜杠不再被误判成 Windows', () => {
+    // `/tmp/a\b` 是 macOS / Linux 上合法目录名;误判会拼出 `/tmp/a\b\chart.png`,
+    // POSIX 把后一个反斜杠也当普通字符 → 路径不存在 → 该页所有同目录资源全失败。
+    expect(resolveHtmlResourcePath('/tmp/a\\b', 'chart.png')).toBe('/tmp/a\\b/chart.png');
+  });
+
+  it('盘符与 UNC 根仍按 Windows 分隔符拼接', () => {
+    expect(resolveHtmlResourcePath('C:\\proj\\docs', 'chart.png')).toBe('C:\\proj\\docs\\chart.png');
+    expect(resolveHtmlResourcePath('C:/proj/docs', 'chart.png')).toBe('C:/proj/docs\\chart.png');
+    expect(resolveHtmlResourcePath('\\\\server\\share\\docs', 'chart.png'))
+      .toBe('\\\\server\\share\\docs\\chart.png');
+  });
+});
+
+describe('MIME 判定不对已解析的文件系统路径再剥 query/fragment(review P2)', () => {
+  it('文件名里合法含 `#` 的资源仍能判出扩展名', () => {
+    // 引用按 URL 规则写成 `chart%231.png`,解析后是真实路径 `/…/chart#1.png`。
+    // 原实现在 MIME 判定时把 `#1.png` 当 fragment 截掉 → 判定失败 → 引用被静默排除,
+    // 而浏览器实际会正常加载它。
+    expect(htmlResourceMimeFor('/Users/me/drafts/chart#1.png')).toBe('image/png');
+    expect(htmlResourceMimeFor('/Users/me/drafts/data?v=1.css')).toBe('text/css');
+    const refs = collectHtmlLocalResourceRefs('<img src="chart%231.png">', BASE);
+    expect(refs.map((r) => r.absPath)).toEqual([`${BASE}/chart#1.png`]);
+    expect(refs[0].mimeType).toBe('image/png');
+    // fragment 仍为空:`%23` 解出来的 `#` 属于文件名,不是 URL fragment。
+    expect(refs[0].fragment).toBe('');
+  });
+
+  it('目录名带点、文件名不带点时扩展名判定失败(不误取目录后缀)', () => {
+    expect(htmlResourceMimeFor('/Users/me/a.css/plain')).toBeNull();
   });
 });
 

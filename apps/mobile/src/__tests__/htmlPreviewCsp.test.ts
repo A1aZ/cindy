@@ -196,7 +196,13 @@ describe('渲染载体的安全接线(源码级守卫)', () => {
   it('CSP 与导航策略是配套的两半:CSP 管得到的出口必须全关', () => {
     // CSP 关子资源与表单,导航回调关顶层跳转。少任何一半都留着一条外传路径
     // (review P1:导航回调完全不经过 new Image().src / fetch 这类子资源请求)。
-    expect(readerSource).toContain("url.startsWith('about:')");
+    // 导航判定已抽到 htmlNavigationPolicy(纯模块,便于行为级用例);载体只负责接线。
+    const navPolicy = readFileSync(
+      resolve(process.cwd(), 'src/session/htmlNavigationPolicy.ts'),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+    expect(readerSource).toContain('onShouldStartLoadWithRequest={interceptNavigation}');
+    expect(navPolicy).toContain("/^about:blank#/i.test(url)");
     expect(readerSource).not.toMatch(/\bLinking\.\w/);
     expect(HTML_PREVIEW_CSP).toContain("default-src 'none'");
     expect(HTML_PREVIEW_CSP).toContain("connect-src 'none'");

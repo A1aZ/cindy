@@ -148,12 +148,27 @@ export function isTextFilePreviewCandidate(pathOrName: string): boolean {
  * 而不是可执行 WebView —— 少一次渲染,不会多一次执行。
  */
 export function isHtmlFilePreviewCandidate(fileNameOrPath: string): boolean {
-  // **不 trim**(review P1):契约既然是真实文件名,就不能再对名字做归一化 ——
-  // `report.html ` / `payload.htm\t` 在 macOS / Linux 上都是合法文件名,trim 掉尾随空白会
-  // 让它们冒充 HTML 扩展名、进可执行 WebView,而真实名字并不以 `.html` / `.htm` 结尾。
-  const name = basenameRemotePath(fileNameOrPath);
+  const name = htmlCandidateBasename(fileNameOrPath);
   if (!name) return false;
   return HTML_PREVIEW_EXTS.has(extractRemoteFileExt(name));
+}
+
+/**
+ * 取「最后一段」用于判扩展名 —— **不做任何归一化**。
+ *
+ * 与 basenameRemotePath 的区别就是这一点,而这一点是判定正确性的关键(review P1,连挖两轮):
+ *  - `basenameRemotePath` 会先 `stripTrailingPathSeparators`,于是 macOS / Linux 上合法的
+ *    `report.html\` 被削成 `report.html`、冒充 HTML 扩展名进可执行 WebView;
+ *  - 上一轮移掉的 `.trim()` 是同一个病:`report.html ` 也是合法文件名。
+ * 归一化的目的是「把路径写法摆平」,而这个入口收到的是**真实名字**,摆平就等于改名。
+ *
+ * 所以只按分隔符切最后一段、**不削尾**:输入以分隔符结尾时最后一段是空串 → 返回 ''
+ * → 调用方判 false。那是目录形态或名字里带尾随分隔符,两种都不该进渲染态(fail-closed:
+ * 少一次渲染,不会多一次执行)。
+ */
+function htmlCandidateBasename(fileNameOrPath: string): string {
+  const slash = Math.max(fileNameOrPath.lastIndexOf('/'), fileNameOrPath.lastIndexOf('\\'));
+  return slash < 0 ? fileNameOrPath : fileNameOrPath.slice(slash + 1);
 }
 
 export function nonTextFilePreviewStatusText(kind: RemoteFilePreviewKind): string {

@@ -54,6 +54,15 @@ describe('file preview shared model', () => {
     expect(isHtmlFilePreviewCandidate('/repo/report.html ')).toBe(false);
     expect(isHtmlFilePreviewCandidate('/repo/payload.htm\t')).toBe(false);
     expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
+    // 尾随**反斜杠**同理(review P1 第二轮):它在 macOS / Linux 上是合法文件名字符,
+    // 而 basenameRemotePath 的 stripTrailingPathSeparators 会把它削掉、让文件冒充 .html。
+    // 现在按分隔符切最后一段但不削尾 → 最后一段为空 → false。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html\\')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('report.html\\')).toBe(false);
+    // 目录形态同样不进渲染态。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html/')).toBe(false);
+    // Windows 路径的正常形态照旧。
+    expect(isHtmlFilePreviewCandidate('C:\\proj\\report.html')).toBe(true);
   });
 
   it('only treats desktop text-like files as remote text preview candidates', () => {

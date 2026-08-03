@@ -368,6 +368,171 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
   });
 });
 
+describe('GhostManager · 迁移崩溃安全(in-progress 状态机)与隔离命名空间', () => {
+  it('中途崩溃后按 pendingIds 续跑:已迁的跳过、剩余补迁、台账推进到 completed', async () => {
+    // 复现真实崩溃现场:首轮迁移在 aaa 写完 receipt(receipt 首写自动落账被
+    // in-progress 台账挡住)、bbb 还没动笔时进程死掉。
+    await writeLegacyInstall('aaa', goodManifest('aaa'));
+    await writeLegacyInstall('bbb', goodManifest('bbb'));
+    await manager.migrateLegacyApprovalsOnce();
+    // 手工把状态倒回"崩溃时刻":台账退回 in-progress、bbb 的 receipt 消失。
+    await fs.promises.writeFile(
+      migrationLedgerPath(),
+      JSON.stringify({
+        version: 1,
+        migratedAt: '2026-08-01T00:00:00.000Z',
+        migratedIds: [],
+        state: 'in-progress',
+        pendingIds: ['aaa', 'bbb'],
+      }),
+    );
+    await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'bbb.json'));
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    // bbb 被续跑补迁;aaa 已有 receipt,计入 migrated(它就是迁移铸出的)。
+    expect(outcome.migrated).toEqual(['bbb']);
+    const byId = Object.fromEntries(manager.list().map((g) => [g.manifest.id, g.approval.state]));
+    expect(byId).toEqual({ aaa: 'approved', bbb: 'approved' });
+    const ledger = JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as {
+      state?: string;
+      migratedIds: string[];
+    };
+    expect(ledger.state).toBe('completed');
+    expect(ledger.migratedIds).toEqual(['aaa', 'bbb']);
+  });
+
+  it('续跑只认动笔前钉死的清单:清单外的无 receipt 目录不被重铸', async () => {
+    await writeLegacyInstall('aaa', goodManifest('aaa'));
+    // 迁移窗口期间新装再删 receipt 的插件(不在 pendingIds 里)骗不到续跑。
+    await writeLegacyInstall('ccc', goodManifest('ccc'));
+    await fs.promises.mkdir(path.join(workDir, 'ghosts-install-state'), { recursive: true });
+    await fs.promises.writeFile(
+      migrationLedgerPath(),
+      JSON.stringify({
+        version: 1,
+        migratedAt: '2026-08-01T00:00:00.000Z',
+        migratedIds: [],
+        state: 'in-progress',
+        pendingIds: ['aaa'],
+      }),
+    );
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['aaa']);
+    const byId = Object.fromEntries(manager.list().map((g) => [g.manifest.id, g.approval.state]));
+    expect(byId.aaa).toBe('approved');
+    expect(byId.ccc).toBe('legacy-unapproved');
+    expect(
+      (JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as { state?: string })
+        .state,
+    ).toBe('completed');
+  });
+
+  it('receipt 首写的自动落账不覆盖 in-progress 台账(崩溃门不被焊死)', async () => {
+    await fs.promises.mkdir(path.join(workDir, 'ghosts-install-state'), { recursive: true });
+    await fs.promises.writeFile(
+      migrationLedgerPath(),
+      JSON.stringify({
+        version: 1,
+        migratedAt: '2026-08-01T00:00:00.000Z',
+        migratedIds: [],
+        state: 'in-progress',
+        pendingIds: ['zzz'],
+      }),
+    );
+    // 迁移窗口内经正常装入流程写 receipt(内部有"缺台账即补写 completed"的守卫)。
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const ledger = JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as {
+      state?: string;
+    };
+    expect(ledger.state).toBe('in-progress');
+  });
+
+  it('台账存在但读不出:门保守关死,不迁也不重写', async () => {
+    await writeLegacyInstall('aaa', goodManifest('aaa'));
+    await fs.promises.mkdir(path.join(workDir, 'ghosts-install-state'), { recursive: true });
+    await fs.promises.writeFile(migrationLedgerPath(), '{ not valid json');
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe('{ not valid json');
+  });
+
+  it('启用失败的回滚按"镜像先前是否在盘上",不吞掉旧客户端的停用决定', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 旧客户端只写镜像:receipt.enabled=true + .disabled 在盘 → 读时合并 = 停用。
+    const marker = path.join(rootDir, 'hello', '.disabled');
+    await fs.promises.writeFile(marker, '');
+    expect(manager.list()[0].enabled).toBe(false);
+
+    // receipt 落盘的 rename 失败(状态根抖动):启用必须整体失败且镜像原样放回。
+    const realRename = fs.promises.rename;
+    const spy = vi
+      .spyOn(fs.promises, 'rename')
+      .mockImplementation(async (from, to) => {
+        if (String(to).endsWith('hello.json')) throw new Error('state root unwritable');
+        return realRename(from, to);
+      });
+    try {
+      const result = await manager.setEnabled('hello', true);
+      expect('rejection' in result && result.rejection.code).toBe('io');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(marker)).toBe(true);
+    expect(manager.list()[0].enabled).toBe(false);
+  });
+
+  it('进程内隔离按状态根命名空间:A 账号的隔离不污染 B,切回 A 仍生效', async () => {
+    let stateDir = path.join(workDir, 'owner-a-state');
+    const owned = new GhostManager({
+      getRootDir: () => rootDir,
+      getStateDir: () => stateDir,
+      getLocale: () => hostLocale,
+    });
+    await owned.install(await makeCindy('a.cindy', goodManifest()));
+    // 撤销失败 → A 的进程内隔离。
+    const realRm = fs.promises.rm;
+    const spy = vi.spyOn(fs.promises, 'rm').mockImplementation(async (target, opts) => {
+      if (String(target).endsWith('hello.json')) throw new Error('EACCES');
+      return realRm(target as never, opts as never);
+    });
+    try {
+      await owned.removeInstallApproval('hello');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(owned.list()[0].approval.state).toBe('invalid');
+
+    // 切到 B 账号(状态根变了):同 id 不被 A 的隔离污染 —— B 没有 receipt,
+    // 如实是 legacy-unapproved 而不是 invalid。
+    stateDir = path.join(workDir, 'owner-b-state');
+    expect(owned.list()[0].approval.state).toBe('legacy-unapproved');
+
+    // 切回 A:隔离仍在(盘上那份陈旧 receipt 不得复活)。
+    stateDir = path.join(workDir, 'owner-a-state');
+    expect(owned.list()[0].approval.state).toBe('invalid');
+  });
+
+  it('安装根下的 junction 不算已装插件:迁移不迁它,list 不列它', async () => {
+    await writeLegacyInstall('real', goodManifest('real'));
+    const outside = path.join(workDir, 'outside-plugin');
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.writeFile(path.join(outside, 'ghost.json'), JSON.stringify(goodManifest('planted')));
+    try {
+      fs.symlinkSync(outside, path.join(rootDir, 'planted'), 'junction');
+    } catch {
+      return; // 环境建不了链接则跳过;判据逻辑平台无关。
+    }
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['real']);
+    expect(manager.list().map((g) => g.manifest.id)).toEqual(['real']);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'planted.json'))).toBe(false);
+  });
+});
+
 describe('GhostManager · 从已装目录重新确认(本地包第三条恢复路径)', () => {
   it('批准丢失后不用原始 .cindy:inspect 出全量清单,确认后开 receipt、恢复可用', async () => {
     // 场景:迁移已跑过(ledger 在),之后 receipt 又被删 —— 一次性门不再迁移,

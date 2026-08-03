@@ -275,10 +275,13 @@
   之后凭迁移 ledger 瞬时 no-op)，从旧的三份事实源(`ghost.json` / `.cindy-trust.json` /
   `.disabled`)重建等价 receipt，让市场与本地安装升级后无感可用；随包内置插件仍走
   provisioning 的 `approveTrustedBundledInstall`(有权威字节可比，是更强的迁移形态)，不
-  重复迁移。三条不变量:**全局一次性**(状态根有 `.legacy-migration.json` ledger 即视为已
-  迁过，此后缺 receipt 一律 fail closed，不再迁——否则删 receipt 就能骗一次"从可变安装
-  目录重建授权"；该门是充分守卫，因为能删 ledger 的进程本就能直接写伪造 receipt，见下
-  「批准状态根无写保护」)、**不扩权**(权限集原样取当前 `ghost.json`，等价于旧模型无条件
+  重复迁移。三条不变量:**全局一次性且崩溃安全**(ledger 是 in-progress→completed 两态状态机:
+  首个 backfill 动笔前先原子落 `in-progress` 并钉死本轮 `pendingIds`,全部处理完才原子
+  改写成 `completed`;`completed`/存在但读不出 = 门关死,此后缺 receipt 一律 fail closed
+  ——否则删 receipt 就能骗一次"从可变安装目录重建授权";`in-progress` = 上一轮中途崩溃,
+  续跑**只认清单内的 id**,迁移窗口期间新装再删 receipt 的 id 骗不到重铸;receipt 首写
+  自动补落的 completed 台账只在"完全没有台账"时动笔,不覆盖 in-progress。该门是充分
+  守卫,因为能删/改 ledger 的进程本就能直接写伪造 receipt,见下「批准状态根无写保护」)、**不扩权**(权限集原样取当前 `ghost.json`，等价于旧模型无条件
   授权的那一组，此后任何 manifest/权限变化照旧走完整确认)、**只写状态根不动安装目录**
   (三份旧文件原样保留，回滚到旧客户端时仍按安装目录判定，符合第 5 节兜底第 4 条)。核心
   授权事实读不出(manifest 不合法、技能目录含链接、声明的 locale 装入后损坏)才对该插件

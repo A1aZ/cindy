@@ -93,6 +93,19 @@ export interface GhostLegacyMigrationLedger {
    * 记进台账供支持排查与 UI 提示;这些 id 走每插件的重新确认恢复入口。
    */
   failedIds?: string[];
+  /**
+   * 迁移状态机,缺省按 `completed` 读(与旧台账兼容)。
+   *
+   * `in-progress` 在**首个 backfill 动笔之前**原子落盘,记下本轮要迁的完整 id 清单
+   * (`pendingIds`)。这是崩溃安全的关键:迁移中途崩溃/断电时,receipt 首写自动落
+   * 台账的守卫(见 `write`)不会把门焊死 —— 下次启动看到 `in-progress` 就按
+   * `pendingIds` 续跑,已写出 receipt 的 id 自然跳过,全部处理完才原子改写成
+   * `completed`。清单钉死在动笔前,续跑**只认清单内的 id**:迁移窗口期间新装再删
+   * receipt 的 id 不在清单里,骗不到续跑重铸。
+   */
+  state?: 'in-progress' | 'completed';
+  /** 仅 `in-progress`:本轮待迁 id 全集(动笔前钉死)。 */
+  pendingIds?: string[];
 }
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
@@ -176,12 +189,15 @@ export class GhostInstallReceiptStore {
     // 会让 hasAnyReceipt 判据也失效(ledger 尚未写),"改 manifest → 删 receipt →
     // 骗 backfill"就能凭空铸出扩权批准。台账写失败不阻断本次批准(状态根刚写成功,
     // 失败面极窄),下一轮迁移检查的 hasAnyReceipt 判据会兜住并补写。
+    // 只在**完全没有**台账时落 completed:迁移进行中(in-progress)的台账绝不能被
+    // backfill 自己的 receipt 首写覆盖成"已完成",否则中途崩溃后剩余插件永不迁。
     if (!this.hasMigrationLedger()) {
       await this
         .writeMigrationLedger({
           version: 1,
           migratedAt: new Date().toISOString(),
           migratedIds: [],
+          state: 'completed',
         })
         .catch(() => undefined);
     }
@@ -240,10 +256,30 @@ export class GhostInstallReceiptStore {
       const raw = JSON.parse(
         fs.readFileSync(this.migrationLedgerPath(), 'utf8'),
       ) as GhostLegacyMigrationLedger;
-      return raw && raw.version === 1 && Array.isArray(raw.migratedIds) ? raw : null;
+      if (!raw || raw.version !== 1 || !Array.isArray(raw.migratedIds)) return null;
+      if (raw.state !== undefined && raw.state !== 'in-progress' && raw.state !== 'completed') {
+        return null;
+      }
+      if (raw.state === 'in-progress' && !Array.isArray(raw.pendingIds)) return null;
+      return raw;
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 迁移门是否已关死。三种情况:
+   * - 无台账 → 开(首轮迁移 / legacy 恢复流程的留门);
+   * - 台账 `in-progress` → 开(上一轮中途崩溃,按 pendingIds 续跑);
+   * - 台账 `completed` / 无 state(旧格式)/ **存在但读不出** → 关。
+   * 损坏台账按"关"处理是刻意的保守方向:台账由原子 temp+rename 写出,自然损坏面
+   * 趋近于零;能改坏它的进程与 §7「可直接伪造合法 receipt」同类,把门放开反而是
+   * 给这类进程送一条重铸授权的路。调用方发现"存在但读不出"应记 error 日志。
+   */
+  migrationDoorClosed(): boolean {
+    if (!this.hasMigrationLedger()) return false;
+    const ledger = this.readMigrationLedger();
+    return ledger === null || ledger.state !== 'in-progress';
   }
 
   /** 是否已跑过一轮 legacy 迁移(全局一次性门;读不动按"存在"处理,宁可不再迁)。 */

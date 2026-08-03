@@ -4055,6 +4055,10 @@ export function registerGhostIpc(): void {
 
   ipcMain.handle('ghosts:install', async (event, lizFilePath: unknown, opts: unknown) => {
     assertTrustedAppRendererEvent(event);
+    // 与市场路径同款 owner 租约:入口处同步捕获 owner,异步 inspect 之后、真正动
+    // 文件系统之前取租约并核对 owner 未变 —— manager 的内容根/状态根都是调用时
+    // 现解析的,异步窗口里账号切换落定会让后半段写进新 owner 的命名空间。
+    const mutationOwner = captureGhostMutationOwner();
     if (typeof lizFilePath !== 'string' || lizFilePath.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'lizFilePath must be a non-empty string');
     }
@@ -4077,12 +4081,17 @@ export function registerGhostIpc(): void {
     // Node 高风险提示在 renderer 装入确认卡的权限清单里如实展示;
     // 2026-07-24 Lizi 定案:不再追加 Main 原生二次确认弹窗。
     const enable = installOpts.enable === true;
-    return {
-      ghost: await installAndDock(manager, lizFilePath, {
-        enable,
-        expectedPackageSha256: installOpts.expectedPackageSha256,
-      }),
-    };
+    const releaseMutation = beginGhostMutation(mutationOwner);
+    try {
+      return {
+        ghost: await installAndDock(manager, lizFilePath, {
+          enable,
+          expectedPackageSha256: installOpts.expectedPackageSha256,
+        }),
+      };
+    } finally {
+      releaseMutation();
+    }
   });
 
   // 原位更新(同 id 换版):先熄灯沙箱(新代码由下一次派活/面板重挂拉起),
@@ -4090,6 +4099,8 @@ export function registerGhostIpc(): void {
   // 停靠(新版本首次声明面板时补位;已停靠则不动树)。
   ipcMain.handle('ghosts:update', async (event, lizFilePath: unknown, opts: unknown) => {
     assertTrustedAppRendererEvent(event);
+    // 同 ghosts:install:入口同步捕获 owner,异步 inspect 后、熄灯与换版之前取租约。
+    const mutationOwner = captureGhostMutationOwner();
     if (typeof lizFilePath !== 'string' || lizFilePath.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'lizFilePath must be a non-empty string');
     }
@@ -4121,42 +4132,49 @@ export function registerGhostIpc(): void {
     rejectReservedGhostId(inspected.manifest.id);
     rejectUnauthorizedTokenBroker(inspected.manifest);
     const previousGhost = manager.list().find((g) => g.manifest.id === inspected.manifest.id);
-    runtime.stop(inspected.manifest.id);
-    getGhostNodeRuntimeBroker().stop(inspected.manifest.id);
-    getGhostAgentSlot().clearGhost(inspected.manifest.id);
-    getGhostErrandSlot().clearGhost(inspected.manifest.id);
-    let result: Awaited<ReturnType<typeof manager.update>>;
+    // 从熄灯到换版收尾整段持租约:熄灯之后的每一步都在改"当前 owner"的插件世界,
+    // 中途 owner 切换落定会把后半段(update 落盘/停靠/点火)写进新 owner。
+    const releaseMutation = beginGhostMutation(mutationOwner);
     try {
-      result = await manager.update(lizFilePath, {
-        expectedPackageSha256,
-        expectedInstalledApproval,
-      });
-    } catch (err) {
-      // 更新失败:恢复旧版本的常驻 Node 工作进程(如果是 resident 且已启用)
-      if (previousGhost) spawnIfResident(previousGhost);
-      throw err;
-    }
-    if ('rejection' in result) {
-      // 回滚失败时安装目录状态未知(可能是新字节/缺失),不按"旧版本还在"重启。
-      if (
-        previousGhost &&
-        !(result.rejection.code === 'io' && result.rejection.rollbackFailed)
-      ) {
-        spawnIfResident(previousGhost);
+      runtime.stop(inspected.manifest.id);
+      getGhostNodeRuntimeBroker().stop(inspected.manifest.id);
+      getGhostAgentSlot().clearGhost(inspected.manifest.id);
+      getGhostErrandSlot().clearGhost(inspected.manifest.id);
+      let result: Awaited<ReturnType<typeof manager.update>>;
+      try {
+        result = await manager.update(lizFilePath, {
+          expectedPackageSha256,
+          expectedInstalledApproval,
+        });
+      } catch (err) {
+        // 更新失败:恢复旧版本的常驻 Node 工作进程(如果是 resident 且已启用)
+        if (previousGhost) spawnIfResident(previousGhost);
+        throw err;
       }
-      throwInstallError(result.rejection);
-    }
-    runtime.resetFuse(inspected.manifest.id); // 换了代码,给新版本干净的熔断记账
-    const store = getLayoutStore();
-    const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
-    if (docked) {
-      const applied = store.setLayout(docked);
-      if ('rejection' in applied) {
-        log.warn('ghost panel dock rejected', { id: result.ghost.manifest.id, reason: applied.rejection });
+      if ('rejection' in result) {
+        // 回滚失败时安装目录状态未知(可能是新字节/缺失),不按"旧版本还在"重启。
+        if (
+          previousGhost &&
+          !(result.rejection.code === 'io' && result.rejection.rollbackFailed)
+        ) {
+          spawnIfResident(previousGhost);
+        }
+        throwInstallError(result.rejection);
       }
+      runtime.resetFuse(inspected.manifest.id); // 换了代码,给新版本干净的熔断记账
+      const store = getLayoutStore();
+      const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
+      if (docked) {
+        const applied = store.setLayout(docked);
+        if ('rejection' in applied) {
+          log.warn('ghost panel dock rejected', { id: result.ghost.manifest.id, reason: applied.rejection });
+        }
+      }
+      spawnIfResident(result.ghost); // 常驻意识:换完代码立即用新版本点火
+      return { ghost: result.ghost };
+    } finally {
+      releaseMutation();
     }
-    spawnIfResident(result.ghost); // 常驻意识:换完代码立即用新版本点火
-    return { ghost: result.ghost };
   });
 
   // 设置页「装入意识…」第一步:系统文件选择框(按 .cindy 过滤),只选不装。
@@ -4389,23 +4407,31 @@ export function registerGhostIpc(): void {
     if (typeof enabled !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'enabled must be a boolean');
     }
-    if (!enabled) {
-      runtime.stop(id); // 沉睡立即熄灯
-      getGhostNodeRuntimeBroker().stop(id); // 随包 Node 也立即关闭
-      getGhostSubscriptionGateway().dropGhost(id); // 订阅态清零(缓冲/熔断/seq)
-      // 与更新/撤销路径同款:agent 工具授权与 errand 节流/在途记录不跨停用存活,
-      // 重新启用后从干净状态开始。
-      getGhostAgentSlot().clearGhost(id);
-      getGhostErrandSlot().clearGhost(id);
+    // 同 install/update 的 owner 租约:setEnabled 先 await pathExists(旧 owner 的
+    // 安装目录)再动态写 receipt —— 不持租约,这个异步窗口里切号落定会拿 A 的镜像
+    // 状态改 B 的 receipt(启停同时落在两个 owner 的两半)。
+    const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
+    try {
+      if (!enabled) {
+        runtime.stop(id); // 沉睡立即熄灯
+        getGhostNodeRuntimeBroker().stop(id); // 随包 Node 也立即关闭
+        getGhostSubscriptionGateway().dropGhost(id); // 订阅态清零(缓冲/熔断/seq)
+        // 与更新/撤销路径同款:agent 工具授权与 errand 节流/在途记录不跨停用存活,
+        // 重新启用后从干净状态开始。
+        getGhostAgentSlot().clearGhost(id);
+        getGhostErrandSlot().clearGhost(id);
+      }
+      const result = await manager.setEnabled(id, enabled);
+      if ('rejection' in result) throwUninstallError(result.rejection);
+      if (enabled) {
+        runtime.resetFuse(id); // 重新唤醒 = 清熔断记账,可再拉起
+        const ghost = findAvailableGhost(id);
+        if (ghost) spawnIfResident(ghost); // 常驻意识:唤醒即启动
+      }
+      return { ok: true };
+    } finally {
+      releaseMutation();
     }
-    const result = await manager.setEnabled(id, enabled);
-    if ('rejection' in result) throwUninstallError(result.rejection);
-    if (enabled) {
-      runtime.resetFuse(id); // 重新唤醒 = 清熔断记账,可再拉起
-      const ghost = findAvailableGhost(id);
-      if (ghost) spawnIfResident(ghost); // 常驻意识:唤醒即启动
-    }
-    return { ok: true };
   });
 
   // 运行时状态快照(面板错误接管态的首帧数据源;广播只覆盖后续变化)。

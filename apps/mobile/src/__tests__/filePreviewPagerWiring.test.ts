@@ -26,6 +26,27 @@ describe('remote file preview pager wiring', () => {
   });
 });
 
+const htmlReaderSource = readFileSync(
+  resolve(process.cwd(), 'src/session/HtmlFileReader.tsx'),
+  'utf8',
+);
+
+describe('HTML 渲染态的 WebView 约束', () => {
+  it('显式给 baseUrl,不吃两端默认值不一致(Android 空串会吞掉页内锚点)', () => {
+    expect(htmlReaderSource).toContain("source={{ baseUrl: 'about:blank', html }}");
+  });
+
+  it('导航一律拦截,且不开向 RN 侧的消息通道', () => {
+    expect(htmlReaderSource).toContain('onShouldStartLoadWithRequest={interceptHtmlNavigation}');
+    expect(htmlReaderSource).toContain("originWhitelist={['about:blank']}");
+    // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。
+    // 只匹配 JSX 属性形态 —— 头注里说明「不挂 onMessage」的那句话不算挂上。
+    expect(htmlReaderSource).not.toMatch(/onMessage\s*=/);
+    // 页内锚点必须放行,否则目录跳转失效。
+    expect(htmlReaderSource).toContain("url.startsWith('about:')");
+  });
+});
+
 describe('HTML 生成物的渲染态接线', () => {
   it('渲染态复用已读文本,不为 HTML 另走一遍 OSS 导出', () => {
     // 取件通道保持一条:richKind 非空时才留原文,渲染态直接把它喂 HtmlFileReader。

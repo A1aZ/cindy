@@ -32,7 +32,13 @@ export function HtmlFileReader({ html, testID }: { html: string; testID?: string
         onShouldStartLoadWithRequest={interceptHtmlNavigation}
         originWhitelist={['about:blank']}
         scrollEnabled
-        source={{ html }}
+        // baseUrl 显式给 about:blank,**不能省**:两端默认值不一致 —— iOS
+        // (RNCWebViewImpl.m)缺省就是 about:blank,Android(RNCWebViewManagerImpl.kt)
+        // 缺省传的是空串给 loadDataWithBaseURL。空串下页内锚点(`<a href="#toc">`)
+        // 解析出的 URL 不以 `about:` 开头,会被下面的导航拦截当成外部跳转吞掉,
+        // 于是目录锚点在 Android 上点了没反应。显式对齐后两端都解析成
+        // `about:blank#toc`,锚点放行、origin 仍是 opaque(不放宽权限面)。
+        source={{ baseUrl: 'about:blank', html }}
         style={styles.fill}
       />
     </View>

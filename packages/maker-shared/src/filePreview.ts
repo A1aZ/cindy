@@ -124,14 +124,11 @@ export function isTextFilePreviewCandidate(pathOrName: string): boolean {
 }
 
 /**
- * 是否按网页渲染预览(HTML 生成物)。
+ * 是否按「网页」渲染态预览。**入参是真实文件名 / 路径,不是 URL。**
  *
  * agent 产出的 HTML 报告 / 设计稿是跨端生成物:桌面端点开就进浏览器渲染,手机端此前
  * 只能看源码——因为 HTML 落在 SUPPORTED_TEXT_EXTS 里,预览页按文本分派。判定单列一处
  * 供两端共用,不去动 remoteFilePreviewKind 的 'text' 结论(取字节仍走文本通道)。
- */
-/**
- * 是否按「网页」渲染态预览。**入参是真实文件名 / 路径,不是 URL。**
  *
  * ── 为什么契约收成「只吃文件名」(review P2,同一处被连挖三轮) ────────────────
  * 前两版试图同时吃 URL 形态(`report.html?from=chat`)与真实文件名,而 `?` / `#` 在两者里

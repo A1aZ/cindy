@@ -58,8 +58,52 @@ export const HTML_PREVIEW_CSP = [
 
 const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PREVIEW_CSP}">`;
 
-/** 我们自己的前导段:标准模式 + 策略,一次性拼在最前面。 */
-const CSP_PROLOG = `<!doctype html>${CSP_META}`;
+/**
+ * 设备与 WebRTC 面的剥离脚本 —— **必须是文档里第一段脚本**。
+ *
+ * ── 为什么用内联脚本而不是 WebView prop / native patch(review P0) ────────────
+ * `mediaCapturePermissionGrantType="deny"` **只在 iOS 生效**:Android 侧
+ * `RNCWebViewManager.java` 的 setter 是空函数(已在 node_modules 里核实
+ * `setMediaCapturePermissionGrantType(RNCWebViewWrapper view, @Nullable String value) {}`),
+ * 权限实际由 `RNCWebChromeClient.onPermissionRequest` 按 **app 级 OS 运行时权限**判定 ——
+ * 用户为语音输入 / 拍照附件授过 `RECORD_AUDIO` / `CAMERA` 之后(常见状态),这个"离线沙箱"里
+ * 的任意不可信 HTML 都能零提示拿到实时音视频流。react-native-webview 也没有暴露
+ * `onPermissionRequest` 之类的回调可供拒绝。
+ *
+ * 两条备选都不划算:
+ *  - **patch 原生**(`dependency-patches/react-native-webview@13.16.1.patch` 机制已在):改的是
+ *    Android Java,会变动原生构建 → 触发冷更门,需要把关人对冷更单独确认,代价远大于本修复;
+ *  - **`injectedJavaScriptBeforeContentLoaded`**:与解析赛跑(Android 靠 `onPageStarted` 触发),
+ *    作者脚本可能先跑,是 mitigation 不是 fix。
+ *
+ * 而这段脚本拼在文档最前面,**由解析器保证先于任何作者脚本执行,没有竞态** —— 与 CSP meta
+ * 同一个位置、同一个理由。它把能力面直接删掉,不依赖任何平台的权限实现是否正确。
+ *
+ * 作者脚本拿不到干净 realm 来恢复这些全局:CSP 里 `frame-src 'none'` 与 `object-src 'none'`
+ * 已经封掉 iframe / object(用例钉住这两条与本脚本的共存关系)。属性用
+ * `writable: false, configurable: false` 定死,重定义会抛。
+ *
+ * 顺带关掉的还有 **iOS 上的 WebRTC 残留信道**:`webrtc 'block'` 只有 Chromium 111+ 实现,
+ * WKWebView 不认;`RTCPeerConnection` 一旦不存在,那条不受 CSP 管辖的外传路径也就没有了。
+ * **这不改变「预览保留 JavaScript」这个已定的产品取舍** —— 脚本照旧执行,只是没有摄像头、
+ * 麦克风与 WebRTC 这三样能力。
+ *
+ * ⚠️ 脚本文本里**不得出现 `</script>`**,否则会提前闭合(这里没有,用例钉住)。
+ */
+const DEVICE_SURFACE_GUARD = '<script>(function(){'
+  + 'var hide=function(o,k){try{Object.defineProperty(o,k,'
+  + '{value:undefined,writable:false,configurable:false});}catch(e){}};'
+  + 'try{var N=Navigator.prototype;'
+  // mediaDevices 是原型上的 getter:实例与原型都要盖掉,否则能沿原型链取回。
+  + "hide(N,'mediaDevices');hide(navigator,'mediaDevices');"
+  + "hide(N,'getUserMedia');hide(navigator,'getUserMedia');"
+  + "hide(navigator,'webkitGetUserMedia');hide(navigator,'mozGetUserMedia');"
+  + "hide(window,'RTCPeerConnection');hide(window,'webkitRTCPeerConnection');"
+  + "hide(window,'RTCDataChannel');"
+  + '}catch(e){}})();</scr' + 'ipt>';
+
+/** 我们自己的前导段:标准模式 + 策略 + 能力剥离,一次性拼在最前面。 */
+const CSP_PROLOG = `<!doctype html>${CSP_META}${DEVICE_SURFACE_GUARD}`;
 
 /**
  * 给文档加上 CSP。**不去定位作者写在哪的 doctype —— 自己前置一个。**

@@ -87,6 +87,54 @@ describe('withHtmlPreviewCsp(自带前导段,不定位作者 doctype)', () => {
   });
 });
 
+describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
+  const prolog = withHtmlPreviewCsp('<html><body>x</body></html>');
+  const OPEN = '<script>';
+  const CLOSE = '</script>';
+  // 只取我们这一段:切到**第一个** </script> 为止,否则会把作者内容一起圈进来。
+  const guard = prolog.slice(prolog.indexOf(OPEN), prolog.indexOf(CLOSE) + CLOSE.length);
+
+  it('剥掉摄像头 / 麦克风入口:实例与原型都要盖,否则能沿原型链取回', () => {
+    // Android 的 mediaCapturePermissionGrantType setter 是空函数(RNCWebViewManager.java),
+    // 权限只看 app 级 OS 运行时权限 —— 用户为语音输入授过 RECORD_AUDIO 之后,不可信 HTML
+    // 就能零提示拿到音视频流。所以能力面直接删掉,不依赖平台权限实现是否正确。
+    expect(guard).toContain("hide(Navigator.prototype,'mediaDevices')".replace('Navigator.prototype', 'N'));
+    expect(guard).toContain("hide(navigator,'mediaDevices')");
+    expect(guard).toContain("hide(navigator,'webkitGetUserMedia')");
+  });
+
+  it('剥掉 WebRTC:iOS 上 webrtc 指令无效,删掉构造器才是真封住', () => {
+    expect(guard).toContain("hide(window,'RTCPeerConnection')");
+    expect(guard).toContain("hide(window,'webkitRTCPeerConnection')");
+  });
+
+  it('属性定死为不可写不可配置,作者脚本重定义会抛', () => {
+    expect(guard).toContain('writable:false,configurable:false');
+  });
+
+  it('脚本在 CSP meta 之后、任何作者内容之前(无竞态)', () => {
+    expect(prolog.indexOf('<meta http-equiv')).toBeLessThan(prolog.indexOf('<script>'));
+    expect(prolog.indexOf('<script>')).toBeLessThan(prolog.indexOf('<html>'));
+  });
+
+  it('脚本文本不得含提前闭合的 </script>', () => {
+    const body = guard.slice(OPEN.length, guard.length - CLOSE.length);
+    expect(body).not.toContain('</script');
+    // 整份文档里只应有我们这一个 <script>(作者内容为空时)。
+    expect(prolog.split('<script>')).toHaveLength(2);
+  });
+
+  it('依赖 CSP 封掉干净 realm —— 少了这两条,作者能新开 iframe 取回原始全局', () => {
+    expect(HTML_PREVIEW_CSP).toContain("frame-src 'none'");
+    expect(HTML_PREVIEW_CSP).toContain("object-src 'none'");
+  });
+
+  it('不改变「预览保留 JavaScript」这个已定取舍', () => {
+    // 只删设备与 WebRTC 三样,脚本执行本身照旧放行。
+    expect(HTML_PREVIEW_CSP).toContain("script-src 'unsafe-inline' data:");
+  });
+});
+
 describe('渲染载体的安全接线(源码级守卫)', () => {
   const readerSource = readFileSync(
     resolve(process.cwd(), 'src/session/HtmlFileReader.tsx'),

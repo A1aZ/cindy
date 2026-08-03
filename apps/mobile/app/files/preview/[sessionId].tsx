@@ -11,6 +11,8 @@
  * OSS 导出原图就绪后无缝换源(不出 loading 态,规则 7);其它 = 占位 + 下载。
  * markdown 与 HTML 额外有「渲染 / 源码」双态,默认渲染:两者都只用已读到的那份文本
  * (不为渲染多走一遍 OSS 导出),载体分别是 MarkdownFileReader 与 HtmlFileReader。
+ * HTML 再多一步同目录资源透传:页面引用的相对资源经 media:fetch 逐个取回后回填
+ * (htmlLocalResources + useHtmlLocalResources),自包含页面零请求直接过。
  *
  * absPath 单文件模式(route 参 absPath,与 relPath 互斥):聊天 chip 指向
  * workdir 外文件时进入。file-browser 的 relPath 通道(listDir / readFile /
@@ -52,6 +54,8 @@ import { appendQuote, truncateQuoteText } from '@/session/chatQuoteStore';
 import { getCachedPreviewText, storeCachedPreviewText } from '@/session/fileBrowserCache';
 import { exportRemoteFileToUrl } from '@/session/fileBrowserExport';
 import { HtmlFileReader } from '@/session/HtmlFileReader';
+import { HTML_RESOURCE_LIMIT, htmlBaseDirOf } from '@/session/htmlLocalResources';
+import { useHtmlLocalResources } from '@/session/useHtmlLocalResources';
 import { MarkdownFileReader } from '@/session/MarkdownFileReader';
 import { RemoteMediaPlayerWebView } from '@/session/mediaPlayerWebView';
 import {
@@ -323,6 +327,20 @@ export default function RemoteFilePreviewScreen() {
     [deviceId, maker, openLink, presignGet, singleAbsPath, workdir],
   );
 
+  /**
+   * 任意被控端绝对路径 → presign 地址(HTML 渲染态取同目录资源用)。
+   *
+   * 与 exportToUrl 的区别:后者只服务「当前这个文件」(workdir 内走两段式导出、
+   * absPath 模式走单一路径取件);资源透传要取的是**页面引用的其它路径**,所以
+   * 统一走 media:fetch 的绝对路径通道 —— 它对 workdir 内外一视同仁,一条路径一条码。
+   * 路径合法性(必须是 HTML 所在目录子树内的相对引用)已在 htmlLocalResources
+   * 里 fail-closed 判定,这里不再重复。
+   */
+  const fetchResourceUrl = useCallback(
+    (absPath: string) => fetchRemoteAbsFileToUrl({ maker, deviceId, openLink, presignGet }, absPath),
+    [deviceId, maker, openLink, presignGet],
+  );
+
   // 文本预览读文件也走瞬断重试 + openLink(与列表/搜索/导出同一路径),
   // relay 短暂重连不再把预览页打成「读取失败」。
   // absPath 单文件模式走 text-file:read-preview(被控端绝对路径文本通道),
@@ -436,8 +454,10 @@ export default function RemoteFilePreviewScreen() {
         renderItem={({ item, index }) => (
           <View style={{ width: pageWidth }}>
             <FilePreviewPage
+              absolutePathOf={absolutePathOf}
               active={Math.abs(index - pageIndex) <= 1}
               exportToUrl={exportToUrl}
+              fetchResourceUrl={fetchResourceUrl}
               item={item}
               maker={maker}
               onDownload={() => void downloadAndShare(item)}
@@ -541,8 +561,10 @@ function PreviewNav({
 }
 
 function FilePreviewPage({
+  absolutePathOf,
   active,
   exportToUrl,
+  fetchResourceUrl,
   item,
   maker,
   onDownload,
@@ -553,8 +575,10 @@ function FilePreviewPage({
   targetLine,
   workdir,
 }: {
+  absolutePathOf(relPath: string): string;
   active: boolean;
   exportToUrl(relPath: string, mtimeMs: number): Promise<string>;
+  fetchResourceUrl(absPath: string): Promise<string>;
   item: FileBrowserGridItem;
   maker: Pick<MobileMakerTransport, 'fileBrowser'>;
   onDownload(): void;
@@ -587,7 +611,19 @@ function FilePreviewPage({
     return <AvPreviewPage active={active} exportToUrl={exportToUrl} item={item} kind={avKind} onDownload={onDownload} workdir={workdir} />;
   }
   if (item.thumb === 'doc') {
-    return <TextPreviewPage active={active} item={item} onDownload={onDownload} onQuoteSelection={onQuoteSelection} readTextFile={readTextFile} targetLine={targetLine} workdir={workdir} />;
+    return (
+      <TextPreviewPage
+        absolutePathOf={absolutePathOf}
+        active={active}
+        fetchResourceUrl={fetchResourceUrl}
+        item={item}
+        onDownload={onDownload}
+        onQuoteSelection={onQuoteSelection}
+        readTextFile={readTextFile}
+        targetLine={targetLine}
+        workdir={workdir}
+      />
+    );
   }
   return <UnsupportedPage item={item} onDownload={onDownload} reason={t('files.preview.unsupportedType')} />;
 }
@@ -737,7 +773,9 @@ function PdfPreviewPage({
  * markdown / HTML(richTextKindOf)多一层「渲染 / 源码」切换,渲染态复用同一份已读文本。
  */
 function TextPreviewPage({
+  absolutePathOf,
   active,
+  fetchResourceUrl,
   item,
   onDownload,
   onQuoteSelection,
@@ -745,7 +783,11 @@ function TextPreviewPage({
   targetLine,
   workdir,
 }: {
+  /** item.relPath → 被控端绝对路径(HTML 资源透传要据此定位同目录)。 */
+  absolutePathOf(relPath: string): string;
   active: boolean;
+  /** 任意绝对路径 → presign 地址(HTML 渲染态取同目录资源)。 */
+  fetchResourceUrl(absPath: string): Promise<string>;
   item: FileBrowserGridItem;
   onDownload(): void;
   /** chat-text-quote:markdown 渲染态的选中引用回调(源码态暂不支持,见 PR 说明)。 */
@@ -830,6 +872,23 @@ function TextPreviewPage({
     };
   }, [active, cacheable, item.relPath, richKind, readTextFile, t, workdir]);
 
+  // HTML 资源透传:页面引用的同目录资源取回后回填,自包含页面零请求直接过。
+  // hook 必须在下面的早返回之前无条件调用 —— 未就绪时传空串,内部即刻短路。
+  const htmlSource = richKind === 'html' && state.status === 'ready' ? (state.content ?? '') : '';
+  const htmlBaseDir = useMemo(
+    () => (htmlSource ? htmlBaseDirOf(absolutePathOf(item.relPath)) : ''),
+    [absolutePathOf, htmlSource, item.relPath],
+  );
+  const htmlResources = useHtmlLocalResources(htmlSource, htmlBaseDir, fetchResourceUrl);
+  const resourceNotices = [
+    htmlResources.failed > 0
+      ? t('files.preview.htmlResourcesMissing', { count: htmlResources.failed })
+      : null,
+    htmlResources.skipped > 0
+      ? t('files.preview.htmlResourcesTruncated', { limit: HTML_RESOURCE_LIMIT })
+      : null,
+  ].filter((line): line is string => line !== null);
+
   if (state.status === 'loading') {
     return (
       <View style={styles.centerFill}>
@@ -875,11 +934,25 @@ function TextPreviewPage({
           ))}
         </View>
       ) : null}
+      {showRendered && richKind === 'html' && resourceNotices.length > 0 ? (
+        <View style={styles.truncBar} testID="filePreview.htmlResourceNotice">
+          <Info color={colors.textSecondary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          <Text style={styles.truncText}>{resourceNotices.join(' · ')}</Text>
+        </View>
+      ) : null}
       {showRendered ? (
         richKind === 'html' ? (
-          // HTML 生成物:已读到的文本直接进 WebView(不走 OSS 导出),同目录相对资源
-          // 取不到是已知边界,见 HtmlFileReader 头注。
-          <HtmlFileReader html={state.content ?? ''} testID="filePreview.htmlRendered" />
+          htmlResources.loading ? (
+            // 取件期间不先渲染破图再热替换 —— 那会让 WebView 重载、页面闪一下。
+            <View style={styles.centerFill} testID="filePreview.htmlResourceLoading">
+              <ActivityIndicator color={colors.textTertiary} />
+              <Text style={styles.hintText}>{t('files.preview.fetchingHtmlResources')}</Text>
+            </View>
+          ) : (
+            // HTML 生成物:文本 + 回填后的同目录资源地址直接进 WebView(不走 OSS
+            // 两段式导出)。仍取不到的引用保留原样,渲染成破图,见 HtmlFileReader 头注。
+            <HtmlFileReader html={htmlResources.html} testID="filePreview.htmlRendered" />
+          )
         ) : (
           <MarkdownFileReader markdown={state.content ?? ''} onQuoteSelection={onQuoteSelection} targetLine={targetLine} testID="filePreview.markdownRendered" />
         )

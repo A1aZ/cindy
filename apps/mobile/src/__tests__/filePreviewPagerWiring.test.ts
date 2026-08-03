@@ -48,12 +48,24 @@ describe('HTML 渲染态的 WebView 约束', () => {
 });
 
 describe('HTML 生成物的渲染态接线', () => {
-  it('渲染态复用已读文本,不为 HTML 另走一遍 OSS 导出', () => {
-    // 取件通道保持一条:richKind 非空时才留原文,渲染态直接把它喂 HtmlFileReader。
+  it('文档正文复用已读文本,不为 HTML 另走一遍 OSS 两段式导出', () => {
+    // 取件通道保持一条:richKind 非空时才留原文,渲染态用的就是它(经资源回填)。
     expect(source).toContain('content: richKind ? content : undefined');
-    expect(source).toContain("<HtmlFileReader html={state.content ?? ''}");
+    expect(source).toContain('<HtmlFileReader html={htmlResources.html}');
     // HTML 不得混进 exportToUrl 那条(图片 / PDF / 音视频 / 下载共用的)导出链路。
     expect(source).not.toMatch(/HtmlFileReader[^>]*exportToUrl/);
+  });
+
+  it('同目录资源走 media:fetch 绝对路径通道,不复用 exportToUrl', () => {
+    // exportToUrl 只服务「当前这个文件」;资源要取的是页面引用的其它路径。
+    expect(source).toContain('const htmlResources = useHtmlLocalResources(htmlSource, htmlBaseDir, fetchResourceUrl)');
+    expect(source).toContain('fetchRemoteAbsFileToUrl({ maker, deviceId, openLink, presignGet }, absPath)');
+  });
+
+  it('资源被跳过 / 取不到时如实提示,不静默截断', () => {
+    expect(source).toContain("t('files.preview.htmlResourcesMissing'");
+    expect(source).toContain("t('files.preview.htmlResourcesTruncated'");
+    expect(source).toContain('testID="filePreview.htmlResourceNotice"');
   });
 
   it('markdown 与 HTML 共用同一套双态机(不再是 markdown 专用)', () => {

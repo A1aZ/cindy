@@ -1,0 +1,296 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  applyHtmlResourceUrls,
+  collectHtmlLocalResourceRefs,
+  htmlBaseDirOf,
+  HTML_RESOURCE_LIMIT,
+  planHtmlResourceFetches,
+  resolveHtmlResourcePath,
+} from '@/session/htmlLocalResources';
+import { fetchHtmlResourceUrls } from '@/session/useHtmlLocalResources';
+
+const BASE = '/Users/me/drafts';
+
+describe('resolveHtmlResourcePath(引用 → 被控端绝对路径)', () => {
+  it('相对引用按 HTML 所在目录换算', () => {
+    expect(resolveHtmlResourcePath(BASE, 'chart.png')).toBe('/Users/me/drafts/chart.png');
+    expect(resolveHtmlResourcePath(BASE, './chart.png')).toBe('/Users/me/drafts/chart.png');
+    expect(resolveHtmlResourcePath(BASE, 'assets/app.css')).toBe('/Users/me/drafts/assets/app.css');
+    expect(resolveHtmlResourcePath(BASE, 'a//b/./c.js')).toBe('/Users/me/drafts/a/b/c.js');
+  });
+
+  it('尾分隔符的 baseDir 不产生双斜杠', () => {
+    expect(resolveHtmlResourcePath('/Users/me/drafts/', 'x.png')).toBe('/Users/me/drafts/x.png');
+  });
+
+  it('查询串与片段剥掉(改写会替掉整个引用,丢掉它们无副作用)', () => {
+    expect(resolveHtmlResourcePath(BASE, 'app.css?v=2')).toBe('/Users/me/drafts/app.css');
+    expect(resolveHtmlResourcePath(BASE, 'icons.svg#logo')).toBe('/Users/me/drafts/icons.svg');
+  });
+
+  it('百分号编码还原成真实文件名;非法序列不 throw', () => {
+    expect(resolveHtmlResourcePath(BASE, 'my%20chart.png')).toBe('/Users/me/drafts/my chart.png');
+    expect(resolveHtmlResourcePath(BASE, '50%off.png')).toBe('/Users/me/drafts/50%off.png');
+  });
+
+  it('Windows 被控端按反斜杠 join', () => {
+    expect(resolveHtmlResourcePath('C:\\proj\\drafts', 'assets/x.png'))
+      .toBe('C:\\proj\\drafts\\assets\\x.png');
+  });
+
+  it('中文目录名照常', () => {
+    expect(resolveHtmlResourcePath(BASE, '设计稿/图 1.png'))
+      .toBe('/Users/me/drafts/设计稿/图 1.png');
+  });
+
+  // ── fail-closed:以下一律不改写,保持原引用 ──
+
+  it('含 `..` 段一律拒绝(逃出 HTML 所在目录子树)', () => {
+    expect(resolveHtmlResourcePath(BASE, '../shared/x.png')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, 'assets/../../x.png')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, '..')).toBeNull();
+  });
+
+  it('根相对与本机绝对拒绝(前者语义是 web root,后者是最该警惕的形态)', () => {
+    expect(resolveHtmlResourcePath(BASE, '/assets/x.png')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, '/etc/passwd')).toBeNull();
+    expect(resolveHtmlResourcePath('C:\\proj', 'D:\\other\\x.png')).toBeNull();
+  });
+
+  it('带 scheme 与协议相对拒绝(本来就能加载,或本来就不该加载)', () => {
+    expect(resolveHtmlResourcePath(BASE, 'https://cdn.example.com/x.png')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, 'http://localhost:5173/x.js')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, 'data:image/png;base64,AAAA')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, 'file:///Users/me/x.png')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, '//cdn.example.com/x.png')).toBeNull();
+  });
+
+  it('纯锚点 / 空 / 无 baseDir 拒绝', () => {
+    expect(resolveHtmlResourcePath(BASE, '#top')).toBeNull();
+    expect(resolveHtmlResourcePath(BASE, '   ')).toBeNull();
+    expect(resolveHtmlResourcePath('', 'x.png')).toBeNull();
+  });
+});
+
+describe('htmlBaseDirOf', () => {
+  it('取父目录,保住根形态', () => {
+    expect(htmlBaseDirOf('/Users/me/drafts/a.html')).toBe('/Users/me/drafts');
+    expect(htmlBaseDirOf('/a.html')).toBe('/');
+    expect(htmlBaseDirOf('C:\\proj\\a.html')).toBe('C:\\proj');
+    expect(htmlBaseDirOf('a.html')).toBe('');
+  });
+});
+
+describe('collectHtmlLocalResourceRefs(词法定位)', () => {
+  const values = (html: string): string[] =>
+    collectHtmlLocalResourceRefs(html, BASE).map((ref) => ref.raw);
+
+  it('收白名单标签上的资源属性', () => {
+    const html = [
+      '<link rel="stylesheet" href="assets/app.css">',
+      '<script src="./app.js"></script>',
+      '<img src="chart.png" alt="图">',
+      '<video src="clip.mp4" poster="cover.jpg"></video>',
+      '<source src=\'audio.mp3\'>',
+    ].join('\n');
+    expect(values(html)).toEqual([
+      'assets/app.css', './app.js', 'chart.png', 'clip.mp4', 'cover.jpg', 'audio.mp3',
+    ]);
+  });
+
+  it('不在白名单的标签 / 属性不碰', () => {
+    // `<a href>` 是导航不是资源;`data-src` 不是资源属性。
+    expect(values('<a href="other.html">x</a>')).toEqual([]);
+    expect(values('<div data-src="x.png"></div>')).toEqual([]);
+    // 标签名必须恰好匹配:img-wrapper 不是 img。
+    expect(values('<img-wrapper src="x.png"></img-wrapper>')).toEqual([]);
+  });
+
+  it('无引号属性值也收', () => {
+    expect(values('<img src=chart.png>')).toEqual(['chart.png']);
+  });
+
+  it('http(s) / data: 引用不收(它们本来就能加载)', () => {
+    expect(values('<img src="https://cdn.example.com/a.png"><img src="data:image/png;base64,AA">'))
+      .toEqual([]);
+  });
+
+  it('<style> 块里的 url() 收(同一份文档里的内联样式)', () => {
+    const html = '<style>body{background:url("bg.png")} .a{mask:url(m.svg)}</style>';
+    expect(values(html)).toEqual(['bg.png', 'm.svg']);
+  });
+
+  it('空文档 / 无 baseDir 返回空', () => {
+    expect(collectHtmlLocalResourceRefs('', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('<img src="a.png">', '')).toEqual([]);
+  });
+
+  it('区间精确指向属性值本身(不含引号)', () => {
+    const html = '<img src="chart.png">';
+    const [ref] = collectHtmlLocalResourceRefs(html, BASE);
+    expect(html.slice(ref.start, ref.end)).toBe('chart.png');
+    expect(ref.absPath).toBe('/Users/me/drafts/chart.png');
+  });
+
+  it('多处引用按位置升序(回填从后往前才安全)', () => {
+    const refs = collectHtmlLocalResourceRefs(
+      '<style>.a{background:url(bg.png)}</style><img src="chart.png">',
+      BASE,
+    );
+    expect(refs.map((r) => r.raw)).toEqual(['bg.png', 'chart.png']);
+    expect(refs[0].start).toBeLessThan(refs[1].start);
+  });
+});
+
+describe('applyHtmlResourceUrls(回填)', () => {
+  it('多处引用整体替换,区间不串位', () => {
+    const html = '<link href="a.css"><img src="b.png"><script src="c.js"></script>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    const urls = new Map([
+      ['/Users/me/drafts/a.css', 'https://oss/a'],
+      ['/Users/me/drafts/b.png', 'https://oss/b'],
+      ['/Users/me/drafts/c.js', 'https://oss/c'],
+    ]);
+    expect(applyHtmlResourceUrls(html, refs, urls)).toBe(
+      '<link href="https://oss/a"><img src="https://oss/b"><script src="https://oss/c"></script>',
+    );
+  });
+
+  it('取不到的保留原引用(渲染成破图比换成错地址诚实)', () => {
+    const html = '<img src="a.png"><img src="b.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    const urls = new Map([['/Users/me/drafts/b.png', 'https://oss/b']]);
+    expect(applyHtmlResourceUrls(html, refs, urls)).toBe(
+      '<img src="a.png"><img src="https://oss/b">',
+    );
+  });
+
+  it('同一路径多处引用共用一个取回地址', () => {
+    const html = '<img src="a.png"><img src="./a.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    const urls = new Map([['/Users/me/drafts/a.png', 'https://oss/a']]);
+    expect(applyHtmlResourceUrls(html, refs, urls)).toBe(
+      '<img src="https://oss/a"><img src="https://oss/a">',
+    );
+  });
+
+  it('style 块与属性混排也不串位', () => {
+    const html = '<style>.a{background:url(bg.png)}</style><img src="chart.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    const urls = new Map([
+      ['/Users/me/drafts/bg.png', 'https://oss/bg'],
+      ['/Users/me/drafts/chart.png', 'https://oss/chart'],
+    ]);
+    expect(applyHtmlResourceUrls(html, refs, urls)).toBe(
+      '<style>.a{background:url(https://oss/bg)}</style><img src="https://oss/chart">',
+    );
+  });
+});
+
+describe('planHtmlResourceFetches(去重与上限)', () => {
+  it('按首次出现顺序去重', () => {
+    const refs = collectHtmlLocalResourceRefs(
+      '<img src="b.png"><img src="a.png"><img src="./b.png">',
+      BASE,
+    );
+    expect(planHtmlResourceFetches(refs)).toEqual({
+      absPaths: ['/Users/me/drafts/b.png', '/Users/me/drafts/a.png'],
+      skipped: 0,
+    });
+  });
+
+  it('超上限的计入 skipped,不静默截断', () => {
+    const html = Array.from({ length: HTML_RESOURCE_LIMIT + 3 }, (_, i) => `<img src="a${i}.png">`).join('');
+    const plan = planHtmlResourceFetches(collectHtmlLocalResourceRefs(html, BASE));
+    expect(plan.absPaths).toHaveLength(HTML_RESOURCE_LIMIT);
+    expect(plan.skipped).toBe(3);
+  });
+
+  it('自包含页面 → 零待取(零请求路径)', () => {
+    const html = '<style>body{color:red}</style><img src="data:image/png;base64,AA">';
+    expect(planHtmlResourceFetches(collectHtmlLocalResourceRefs(html, BASE)).absPaths).toEqual([]);
+  });
+});
+
+describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
+  it('全部成功:地址齐全,失败数为 0', async () => {
+    const out = await fetchHtmlResourceUrls(
+      ['/a.png', '/b.png'],
+      async (p) => `https://oss${p}`,
+    );
+    expect(out.failed).toBe(0);
+    expect([...out.urlByAbsPath]).toEqual([
+      ['/a.png', 'https://oss/a.png'],
+      ['/b.png', 'https://oss/b.png'],
+    ]);
+  });
+
+  it('单个失败不影响其它(整页不因一张图取不到而失败)', async () => {
+    const out = await fetchHtmlResourceUrls(
+      ['/a.png', '/bad.png', '/c.png'],
+      async (p) => {
+        if (p === '/bad.png') throw new Error('nope');
+        return `https://oss${p}`;
+      },
+    );
+    expect(out.failed).toBe(1);
+    expect(out.urlByAbsPath.has('/bad.png')).toBe(false);
+    expect(out.urlByAbsPath.size).toBe(2);
+  });
+
+  it('回空地址也算失败(不把空串回填进 HTML)', async () => {
+    const out = await fetchHtmlResourceUrls(['/a.png'], async () => '');
+    expect(out.failed).toBe(1);
+    expect(out.urlByAbsPath.size).toBe(0);
+  });
+
+  it('并发不超过上限,且每个路径只取一次', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const calls: string[] = [];
+    const paths = Array.from({ length: 9 }, (_, i) => `/a${i}.png`);
+    const out = await fetchHtmlResourceUrls(
+      paths,
+      async (p) => {
+        calls.push(p);
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await Promise.resolve();
+        inFlight -= 1;
+        return `https://oss${p}`;
+      },
+      { concurrency: 3 },
+    );
+    expect(peak).toBeLessThanOrEqual(3);
+    expect(calls).toHaveLength(9);
+    expect(new Set(calls).size).toBe(9);
+    expect(out.urlByAbsPath.size).toBe(9);
+  });
+
+  it('已取消时停止后续取件(卸载 / 换文档后不白发请求)', async () => {
+    const calls: string[] = [];
+    let cancelled = false;
+    const out = await fetchHtmlResourceUrls(
+      Array.from({ length: 8 }, (_, i) => `/a${i}.png`),
+      async (p) => {
+        calls.push(p);
+        cancelled = true; // 第一批发出后即取消
+        return `https://oss${p}`;
+      },
+      { concurrency: 1, isCancelled: () => cancelled },
+    );
+    expect(calls).toEqual(['/a0.png']);
+    expect(out.urlByAbsPath.size).toBe(1);
+  });
+
+  it('空清单不发请求', async () => {
+    let called = false;
+    const out = await fetchHtmlResourceUrls([], async () => {
+      called = true;
+      return 'x';
+    });
+    expect(called).toBe(false);
+    expect(out).toEqual({ urlByAbsPath: new Map(), failed: 0 });
+  });
+});

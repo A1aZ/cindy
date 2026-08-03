@@ -149,6 +149,9 @@ describe('responsivenessTracker', () => {
     expect(h.probeInvoke).not.toHaveBeenCalled();
 
     h.advance(BREAKER_PROBE_BACKOFF_BASE_MS);
+    const run = vi.fn(async () => 'business-result');
+    await expect(h.tracker.guardInvoke(DEV, 'maker:send', run)).rejects.toThrow('unresponsive');
+    expect(run).not.toHaveBeenCalled();
     h.tracker.probeTick(); // 窗口已到但不合格(relay 掉线 / presence 不可用)
     expect(h.probeInvoke).not.toHaveBeenCalled();
 

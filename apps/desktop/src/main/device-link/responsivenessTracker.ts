@@ -138,7 +138,6 @@ export function createResponsivenessTracker(
   const log = deps.log ?? { info: () => {}, warn: () => {}, debug: () => {} };
   const unresponsive = new Set<string>();
   const linkRecoveryInFlight = new Map<string, Promise<unknown>>();
-  /** 同一设备并发业务请求共享一个 timeout cohort，避免一次链路故障重复计 strike。 */
   const breaker = createDeviceResponsivenessBreaker({
     now: deps.now,
     onOpenChanged: (deviceId, open) => {

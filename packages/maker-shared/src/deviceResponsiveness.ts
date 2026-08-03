@@ -71,7 +71,8 @@ export interface DeviceResponsivenessBreaker {
   createCohort(deviceId: string): number;
   /**
    * 发送前门禁:closed → 'allow';同一 fan-out 可传共享 cohort,省略则每次调用
-   * 创建独立 cohort。open 且探测窗口已到、无在途探测 → 'probe';其余 → 'reject'。
+   * 创建独立 cohort。open 且探测窗口已到、无在途探测,且调用方显式 allowProbe:true
+   * → 'probe';其余 → 'reject'。
    */
   acquire(deviceId: string, cohort?: number, options?: { allowProbe?: boolean }): BreakerSendSlot;
   /** 请求收尾上报。slot 必须是 acquire 返回的票据;代数不匹配的旧请求被忽略。 */
@@ -145,7 +146,9 @@ export function createDeviceResponsivenessBreaker(
     if (now() - state.openedAt < state.probeBackoffMs) {
       return { decision: 'reject', generation, cohort: 0 };
     }
-    if (options?.allowProbe === false) {
+    // half-open 的唯一席位只能由代表性探测路径显式领取;普通业务请求即使
+    // 窗口到点也必须保持 reject,避免抢占探测并错误推进退避。
+    if (options?.allowProbe !== true) {
       return { decision: 'reject', generation, cohort: 0 };
     }
     state.probeInFlight = true;

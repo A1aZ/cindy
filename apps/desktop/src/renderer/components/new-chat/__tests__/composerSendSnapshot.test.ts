@@ -12,13 +12,31 @@ const attachment = {
   path: '/tmp/one.txt',
   ext: 'txt',
   size: 3,
-  category: 'document' as const,
+  category: 'text' as const,
+  mimeType: 'text/plain',
 };
 const comment = {
   id: 'comment-1',
   markerNumber: 1,
+  pageUrl: 'https://example.com/one',
+  target: {
+    kind: 'element' as const,
+    point: { x: 1, y: 2 },
+    viewport: { width: 800, height: 600 },
+    region: null,
+    selectedText: null,
+    immediate: false,
+    targetTag: 'div',
+    targetLabel: null,
+    targetRole: null,
+    targetSelector: '#one',
+    targetPath: null,
+    nearbyText: null,
+    themeVariant: null,
+    designBaseline: null,
+    markerNumber: 1,
+  },
   comment: 'keep this',
-  selector: { type: 'element' as const, value: '#one' },
   screenshot: attachment,
 };
 

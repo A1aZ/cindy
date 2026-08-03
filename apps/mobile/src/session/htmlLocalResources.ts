@@ -31,7 +31,14 @@
  *    属下一步)。
  */
 
-/** 可改写的标签 → 该标签上承载资源地址的属性名(全小写)。 */
+/**
+ * 可改写的标签 → 该标签上承载资源地址的属性名(全小写)。
+ *
+ * **`iframe` / `embed` 刻意不在表里**(review P2):HtmlFileReader 注入的 CSP 固定含
+ * `frame-src 'none'` 与 `object-src 'none'`,这两类嵌入**必然被引擎拦掉** —— 取回来也渲染不出。
+ * 留着它们只会白花一次取件(被控端上传 + 手机下载 + OSS 对象创建与回收),还占掉 32 项配额里
+ * 的位置,把真正能渲染的图片 / 样式挤掉。表里只放 CSP 放行得了的类型。
+ */
 const RESOURCE_ATTRS_BY_TAG: Readonly<Record<string, readonly string[]>> = {
   img: ['src'],
   script: ['src'],
@@ -39,8 +46,6 @@ const RESOURCE_ATTRS_BY_TAG: Readonly<Record<string, readonly string[]>> = {
   source: ['src'],
   video: ['src', 'poster'],
   audio: ['src'],
-  embed: ['src'],
-  iframe: ['src'],
 };
 
 /** 一次改写最多取回多少个资源(超出部分原样保留,由上层如实报告数量)。 */
@@ -186,8 +191,16 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
  * **必须等长**:回填(applyHtmlResourceUrls)按下标切原文改写,掩码只服务扫描,两者
  * 的下标必须逐字符对齐。换行保留不动,便于对照原文调试。
  *
- * 未闭合的 `<!--` / `<script>` 掩到文末 —— 真实 parser 也是这么吞的,后面本来就没有
- * 会被加载的资源。
+ * ── UNTERMINATED_POLICY:未闭合的标记**一律不掩码** ──────────────────────
+ * 早先这里按「真实 parser 也会吞到文末」把未闭合的 `<!--` / `<script>` / `<template>` 掩到
+ * 文末。那是**错的取舍**,review 从两个方向各挖出一次:
+ *  - `<div data-template="<template>">` —— 属性值里的字面标签被正则当成开标签,没有配对
+ *    闭合 → 后面**全部真资源**被掩掉,一份完全正常的产物直接缺图缺样式;
+ *  - `<script>const marker = '<!--';</script><img src="real.png">` —— 脚本字符串里的 `<!--`
+ *    同理,而浏览器在 `</script>` 之后照常加载那张图。
+ * 正则扫标签认不出「`<` 在引号里」,这类误判无法在词法层根除。所以改成:**闭合配得上才掩,
+ * 配不上就一个字符都不掩**。两种失败模式的代价差一个数量级 —— 不掩最多让伪引用占掉配额
+ * (退化成"图少取几个"),掩错却让正常页面**静默全缺**。
  */
 export function maskInertHtmlText(html: string): string {
   const out = html.split('');
@@ -197,13 +210,13 @@ export function maskInertHtmlText(html: string): string {
     }
   };
 
-  // ① HTML 注释(含未闭合到文末)。整段抹掉,连 `<!--` 标记本身 —— 它不是资源。
+  // ① HTML 注释。整段抹掉,连 `<!--` 标记本身 —— 它不是资源。
   for (let at = html.indexOf('<!--'); at >= 0; at = html.indexOf('<!--', at + 1)) {
     const close = html.indexOf('-->', at + 4);
-    const end = close < 0 ? html.length : close + 3;
-    blank(at, end);
+    // **未闭合 → 什么都不掩**(review P1/P2 实捉,见下方 UNTERMINATED_POLICY)。
     if (close < 0) break;
-    at = end - 1;
+    blank(at, close + 3);
+    at = close + 2;
   }
 
   // ② `<script>` 体。**标签本身留着** —— `<script src="x.js">` 是要取回的真资源,
@@ -218,10 +231,11 @@ export function maskInertHtmlText(html: string): string {
   while ((open = scriptOpenRe.exec(afterComments)) !== null) {
     const bodyStart = open.index + open[0].length;
     const closeAt = afterCommentsLower.indexOf('</script', bodyStart);
-    const bodyEnd = closeAt < 0 ? afterComments.length : closeAt;
-    blank(bodyStart, bodyEnd);
-    scriptOpenRe.lastIndex = bodyEnd;
+    // 未闭合 → 什么都不掩(见 UNTERMINATED_POLICY)。多半根本不是脚本标签,
+    // 而是某个属性值里的字面 `<script>`。
     if (closeAt < 0) break;
+    blank(bodyStart, closeAt);
+    scriptOpenRe.lastIndex = closeAt;
   }
 
   // ③ `<template>` 体(review P1)。模板内容是**惰性**的:浏览器解析后放进
@@ -250,7 +264,7 @@ export function maskInertHtmlText(html: string): string {
       bodyStart = -1;
     }
   }
-  if (depth > 0 && bodyStart >= 0) blank(bodyStart, afterScripts.length);
+  // 未闭合 → 什么都不掩(见 UNTERMINATED_POLICY);不再 blank 到文末。
 
   // ④ `<style>` 体里的 CSS 注释。style 体本身要保留 —— 里面的 `url()` 是真资源。
   //    同理扫已抹掉注释 / 脚本体 / 模板体的副本。

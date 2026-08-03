@@ -443,9 +443,14 @@ describe('惰性文本不占取件配额(注释 / 脚本体 / CSS 注释)', () =
     expect(refs.map((r) => r.raw)).toEqual(['new.png']);
   });
 
-  it('未闭合注释 / 未闭合脚本掩到文末(真 parser 同样吞掉后面)', () => {
-    expect(collectHtmlLocalResourceRefs('<!-- <img src="a.png">', BASE)).toEqual([]);
-    expect(collectHtmlLocalResourceRefs('<script>x<img src="a.png">', BASE)).toEqual([]);
+  it('未闭合标记一律不掩码(掩错的代价比不掩大一个数量级)', () => {
+    // 早先按「真 parser 会吞到文末」掩到文末。那让 `<div data-template="<template>">`
+    // 这类**属性值里的字面标签**把整页真资源掩掉(review P1)。改成配不上闭合就一个字符
+    // 都不掩:代价只是伪引用占配额,不会让正常页面静默全缺。
+    expect(collectHtmlLocalResourceRefs('<!-- <img src="a.png">', BASE).map((r) => r.raw))
+      .toEqual(['a.png']);
+    expect(collectHtmlLocalResourceRefs('<script>x<img src="a.png">', BASE).map((r) => r.raw))
+      .toEqual(['a.png']);
   });
 
   it('注释里出现 <script> 开标签不得把后面的真资源一起抹掉', () => {
@@ -483,8 +488,9 @@ describe('<template> 体也是惰性文本(不占取件配额)', () => {
     expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
   });
 
-  it('未闭合模板掩到文末;落单的闭合标记不影响后续', () => {
-    expect(collectHtmlLocalResourceRefs('<template><img src="a.png">', BASE)).toEqual([]);
+  it('未闭合模板不掩码;落单的闭合标记不影响后续', () => {
+    expect(collectHtmlLocalResourceRefs('<template><img src="a.png">', BASE).map((r) => r.raw))
+      .toEqual(['a.png']);
     expect(collectHtmlLocalResourceRefs('</template><img src="a.png">', BASE).map((r) => r.raw))
       .toEqual(['a.png']);
   });
@@ -538,5 +544,40 @@ describe('总量预算按回填后的实际增量计费', () => {
       expect(out.urlByAbsPath.size).toBe(0);
       expect(out.overBudget).toBe(1);
     }
+  });
+});
+
+describe('属性值里的字面标签不得掩掉真资源(review P1)', () => {
+  it('data-* 属性里写着 <template> / <script> 时,后面的真资源照旧取回', () => {
+    // 正则扫标签认不出「`<` 在引号里」。旧的「未闭合掩到文末」政策会让这类完全正常的
+    // 产物静默丢掉全部资源 —— 比"伪引用占配额"严重一个数量级。
+    for (const attr of ['<template>', '<script>', '<!--']) {
+      const html = `<div data-tpl="${attr}"></div><img src="real.png"><link href="a.css">`;
+      expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw))
+        .toEqual(['real.png', 'a.css']);
+    }
+  });
+
+  it('脚本字符串里的孤立 <!-- 不影响 </script> 之后的真资源', () => {
+    const html = '<script>const marker = \'<!--\';</script><img src="real.png">';
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('闭合配得上时照旧掩码(政策只放宽未闭合那一种)', () => {
+    expect(collectHtmlLocalResourceRefs('<!-- <img src="ghost.png"> --><img src="real.png">', BASE)
+      .map((r) => r.raw)).toEqual(['real.png']);
+    expect(collectHtmlLocalResourceRefs('<template><img src="ghost.png"></template><img src="real.png">', BASE)
+      .map((r) => r.raw)).toEqual(['real.png']);
+  });
+});
+
+describe('CSP 必然拦掉的嵌入类型不取回(review P2)', () => {
+  it('iframe / embed 不进候选:frame-src / object-src 都是 none', () => {
+    // 取回来也渲染不出,白花一次上传 + 下载 + OSS 对象创建与回收,还占掉 32 项配额。
+    expect(collectHtmlLocalResourceRefs('<iframe src="diagram.svg"></iframe>', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('<embed src="diagram.svg">', BASE)).toEqual([]);
+    // CSP 放行得了的类型照旧。
+    expect(collectHtmlLocalResourceRefs('<img src="diagram.svg">', BASE).map((r) => r.raw))
+      .toEqual(['diagram.svg']);
   });
 });

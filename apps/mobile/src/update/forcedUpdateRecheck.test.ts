@@ -220,15 +220,16 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
-  it('阻断目标本身缺 version → 证明不了新鲜度,维持阻断', async () => {
-    // 触发阻断的那条记录可能没写 version(parseLatestRelease 容许空串),此时任何
-    // 带正常 version 的旧记录都会"看起来更新",不能据此放行。
+  it('阻断目标缺 version(理论不可达)→ 不做版本比较,也不死锁', async () => {
+    // evaluateBundleUpdate 要求 record 带 version 才判 forced,所以正常路径下 held.version
+    // 必然非空。万一为空,也不能靠"维持阻断"兜着 —— 那会把用户永久钉在阻断屏上,
+    // 定时与回前台核对都过不去。此时退化成无新鲜度约束,照常评估门槛。
     const deps = makeDeps({
       fetchLatest: vi.fn(async () => latestRecord({ version: '1.5.0', minVersion: undefined })),
       getHeldTarget: () => ({ version: '' }),
     });
-    await expect(runOnce(deps)).resolves.toBe('error');
-    expect(deps.onCleared).not.toHaveBeenCalled();
+    await expect(runOnce(deps)).resolves.toBe('cleared');
+    expect(deps.onCleared).toHaveBeenCalledOnce();
   });
 
   it('记录缺 version → 证明不了新鲜度,维持阻断', async () => {

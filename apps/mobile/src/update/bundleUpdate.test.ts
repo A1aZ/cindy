@@ -112,6 +112,18 @@ describe('evaluateBundleUpdate', () => {
     expect(r.target).toBeNull();
   });
 
+  it('record 缺 version 但带 minVersion → 不强更(退化成普通提示,不造无法自愈的阻断)', () => {
+    // 无目标版本就无法证明"装上它能解除阻断",阻断态的自愈也失去比较基准。
+    // 发布链侧 assertMinVersionUsable 已保证有 minVersion 必有 version,这里是客户端兜底。
+    const r = evaluateBundleUpdate({
+      currentRuntimeVersion: 'rtv-old',
+      currentVersion: '1.0.0',
+      latest: { ...VALID, version: '', minVersion: '1.2.0' },
+    });
+    expect(r.forced).toBe(false);
+    expect(r.needsUpdate).toBe(true); // runtimeVersion 不同 → 仍是可跳过的普通更新
+  });
+
   it('缺 currentVersion → 不强更(无法比较,fail-open)', () => {
     const r = evaluateBundleUpdate({
       currentRuntimeVersion: 'rtv-new',

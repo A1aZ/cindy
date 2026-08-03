@@ -142,9 +142,12 @@ export function createForcedUpdateRechecker(
       // 新鲜度门:读到的记录不得比正在阻断的目标更旧。可变指针 + 无 cache-buster 的请求
       // 会撞上 CDN 边缘的旧记录,那条记录没有 minVersion → 会把仍需强更的用户放出去。
       // 记录缺 version(parseLatestRelease 容许空串)同样证明不了新鲜度,一并挡掉。
-      // held.version 为空(触发阻断的那条记录本身缺 version)时同样比不出新鲜度,一并挡掉。
+      // 只有两边都有版本号时才比较。held.version 为空按"无新鲜度约束"处理而不是维持阻断
+      // ——否则一条无 version 的记录会把用户永久钉在阻断屏上(定时与回前台核对都过不去)。
+      // 这种情况现在不可达:evaluateBundleUpdate 要求 record 带 version 才判 forced,
+      // 所以能进入阻断的目标必然有版本号。此处只是不给自己留死锁的余地。
       const held = deps.getHeldTarget?.();
-      if (held && (!record.version || !held.version
+      if (held?.version && (!record.version
         || compareVersions(record.version, held.version) < 0)) {
         return 'error';
       }

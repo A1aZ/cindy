@@ -49,6 +49,11 @@ describe('file preview shared model', () => {
     // 确实以 HTML 扩展名结尾的照常进,名字中段有 `?` / `#` 不影响。
     expect(isHtmlFilePreviewCandidate('/repo/report#draft.html')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/report?v=1.html')).toBe(true);
+    // 同理不做 trim:尾随空白 / 制表符在 macOS / Linux 上都是合法文件名的一部分,
+    // 归一化掉会让它们冒充 HTML 扩展名(review P1)。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html ')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('/repo/payload.htm\t')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
   });
 
   it('only treats desktop text-like files as remote text preview candidates', () => {

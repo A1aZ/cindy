@@ -151,7 +151,10 @@ export function isTextFilePreviewCandidate(pathOrName: string): boolean {
  * 而不是可执行 WebView —— 少一次渲染,不会多一次执行。
  */
 export function isHtmlFilePreviewCandidate(fileNameOrPath: string): boolean {
-  const name = basenameRemotePath(fileNameOrPath).trim();
+  // **不 trim**(review P1):契约既然是真实文件名,就不能再对名字做归一化 ——
+  // `report.html ` / `payload.htm\t` 在 macOS / Linux 上都是合法文件名,trim 掉尾随空白会
+  // 让它们冒充 HTML 扩展名、进可执行 WebView,而真实名字并不以 `.html` / `.htm` 结尾。
+  const name = basenameRemotePath(fileNameOrPath);
   if (!name) return false;
   return HTML_PREVIEW_EXTS.has(extractRemoteFileExt(name));
 }

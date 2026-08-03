@@ -520,29 +520,16 @@ const ALLOWED_BEFORE_RE = /[([{（【「『"'`:：,;，；、>]/;
 const SEP_IN_RUN_RE = /[\\/]/;
 const TRAILING_EXT_RE = /\.[A-Za-z0-9]{1,10}$/;
 
-/**
- * 命中点左边是不是同一个非空白 run 的中段(= 我们从别的 token 里切了一刀)。
- *
- * 判据只有一条:命中点之前在同一 run 内还有字符时,紧邻的那个必须在
- * ALLOWED_BEFORE_RE 白名单里。白名单之外一律算中段 —— 这样 `=` `)` 之类不必逐个枚举。
- *
- * 裸路径与裸 `file://` URL 共用同一份实现,两条入口的口径必须一致:URL 有显式 scheme,
- * 不需要裸路径那套「跨空格看前一个 run」的启发式(见 startsMidPathToken 的 (2)),但
- * 「不许从别的 token 中段起切」这条对两者同样成立。
- */
-function precededByDisallowedRunChar(text: string, start: number): boolean {
-  if (start === 0) return false;
-  let runStart = start - 1;
-  while (runStart >= 0 && !/\s/.test(text[runStart])) runStart -= 1;
-  if (runStart + 1 >= start) return false; // 命中点前紧邻空白 / 行首
-  return !ALLOWED_BEFORE_RE.test(text[start - 1]);
-}
-
 /** 命中是否从路径 token 的**中段**起(见上方说明)。 */
 function startsMidPathToken(text: string, start: number): boolean {
   if (start === 0) return false;
   // (1) 同一非空白 run 内:只有白名单字符可以紧邻路径,其余说明是被断开的中段。
-  if (/\S/.test(text[start - 1])) return precededByDisallowedRunChar(text, start);
+  let runStart = start - 1;
+  while (runStart >= 0 && !/\s/.test(text[runStart])) runStart -= 1;
+  const runPrefix = text.slice(runStart + 1, start);
+  if (runPrefix.length > 0) {
+    return !ALLOWED_BEFORE_RE.test(text[start - 1]);
+  }
   // (2) 命中点前是空白:看空白前那个 run 是不是「被空格截断的前半段」。
   //     只跨空格 / 制表符,不跨换行 —— 换行之后是新的一行,不是同一条路径。
   let i = start - 1;
@@ -613,109 +600,4 @@ export function findBareFilePathMatch(input: string, from: number): BareFilePath
     return { index, end: index + value.length, value };
   }
   return null;
-}
-
-// ── 正文纯文本裸 `file://` URL 的词法定位 ────────────────────────────────────
-//
-// `file:///Users/me/report.html` 这种**不带 markdown 链接语法**的写法此前两个入口都
-// 漏:裸 URL matcher 只认 `https?://`(见 messageMarkdown.findNextInlineToken),而上面
-// 的裸路径 matcher 会因为命中点前一个字符是 `/`(BARE_PATH_LEFT_BOUNDARY)拒绝从
-// `file://` 之后起切。结果它既不是链接也不是路径,只能是纯文本 —— 偏偏 `file://` 是
-// 路径引用里最明确的形态(ABSOLUTE_PATH_SHAPE_RE / hasUnsupportedScheme 早就这么认)。
-//
-// 词法上比裸路径宽松得多:有显式 scheme,不存在「其实是属性访问 / 散文」的歧义,所以
-// 不套用裸路径那套中段过滤,只保留三条:
-//   - 主体沿用裸 http URL matcher 的口径(`[^\s<>()]`),空白 / 括号天然收尾,**另外排除
-//     全角句读**——中文里 URL 后面常常不带空格就接下文(`…a.html。然后`),不断开的话
-//     整段散文会被吞进路径;
-//   - 末字符再排除 ASCII 句读,句末的 `.` / `,` / `)` 不吞进路径(它们在路径中段合法,
-//     所以只挡末位);
-//   - 左边界必须独占所在 token:与裸路径 matcher 共用 precededByDisallowedRunChar
-//     (白名单之外一律拒绝)。**只排除 scheme 字符是不够的**(review P2 实捉):
-//     `foo=file:///tmp/a.html` 与 `myapp://open?path=file:///tmp/a.html` 里紧邻的 `=`
-//     不是 scheme 字符,负向后瞻放行后会把一条完整的自定义 URL 从中间切成独立文件链接
-//     (断链乐观点亮还会把它点亮)。正则里的 scheme 字符后瞻保留作廉价前置过滤。
-//
-// CJK **文字**照旧留在主体里(`file:///Users/me/文档/报告.html` 要能认),取舍与裸路径
-// matcher 一致:宁可承担「半角标点紧贴中文」的误伤,也不砍掉真实的中文目录名。残留误伤
-// 见 findBareFileUrlMatch 的说明,代价只是保持纯文本,不会点开错地址。
-//
-// **刻意只认小写 `file://`**:下游 resolveChatAbsPath 与 looksLikeLocalHref 都是大小写
-// 敏感地剥 scheme,放行 `FILE://` 会造出「进了候选却剥不掉 scheme」的坏绝对路径。
-//
-// **必须是无 authority 的 `file:///`(三斜杠)**(review P2 实捉):`file://localhost/x.html`
-// 与 Windows UNC `file://server/share/x.html` 都是合法 file URL,但 resolveChatAbsPath 固定
-// 做 `href.slice(7)`,分别得到 `localhost/x.html` 与 `server/share/x.html` —— 丢掉了绝对
-// 路径与 UNC 语义,远端 stat 必然找不到文件(还白发一次 stat)。要正确支持 authority 得改
-// 整条路径解析链(含 UNC 换算),那是独立改动;这里按「宁可不点亮」收窄成三斜杠形态。
-const BARE_FILE_URL_CJK_PUNCT = '。，、；：！？…·（）【】〔〕「」『』《》〈〉“”‘’　';
-/**
- * 不许出现在命中**末位**的 ASCII 字符:句读 + **闭合包裹符**。
- *
- * 两类合成一条,因为它们是同一个道理 —— 这些字符在路径**中段**完全合法(`[sessionId].tsx`
- * 就是本仓真实文件名),但出现在末位时几乎一定是正文的一部分而不是文件名的一部分。所以
- * 只挡末位、不从主体字符集里排除:正则的 `*` 会回退一位,内层的 `]` `}` 照旧保住。
- *
- * 闭合符是 ALLOWED_BEFORE_RE(裸路径的左边界白名单)的镜像 —— 那张表刻意**不收**
- * `)` `]`,注释写的是「它只可能出现在被断开的 token 中间」;右边界同理:`(` `[` `{` 能合法
- * 地紧邻一条路径的**前面**,对应的闭合符就能紧邻它的**后面**。
- *
- * `(` `)` 已经整体不在主体字符集里(裸 http URL matcher 的既有口径),这里补 `]` `}`
- * (review P2 实捉:`[file:///tmp/a.html]` 会把 `]` 吞进候选 —— 在线时 stat 判不存在点不亮,
- * 断链时又因绝对路径形态乐观点亮,打开一个错地址)。新增闭合形态时加在这里,不要另开分支。
- *
- * ⚠️ `]` 必须写成 `\]`:本串是直接拼进**字符类**的,未转义的 `]` 会把字符类提前闭合,
- * 剩下的 `}]` 变成字面量 —— 正则不报错,但语义完全变了(静默坏掉)。已有用例校验类合法性。
- */
-const BARE_FILE_URL_TRAILING_ASCII = '.,;:!?\'"`\\]}';
-const BARE_FILE_URL_RE_SOURCE =
-  '(?<![A-Za-z0-9+.\\-])'
-  + `(file:///[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}]*`
-  + `[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}${BARE_FILE_URL_TRAILING_ASCII}])`;
-
-/**
- * 在一段纯文本里定位从 `from` 起**第一条**裸 `file://` URL。
- *
- * 复核走与其它入口同一个候选门(classifyChatPathLinkTarget):形状不达标的
- * (`file://x`)不产出 token —— 否则 renderInline 的 link 分支会落到
- * Linking.openURL,把 `file://` 交给手机 OS(必失败,部分 Android 还弹系统报错)。
- * 存在性照旧由远端 stat(remotePathVerdict)兜底。
- *
- * 已知误伤(显式取舍,有用例钉住):**半角**标点紧贴中文时会连坐,如
- * `…a.html,然后呢` —— 半角 `,` 在路径中段合法、`然后呢` 又是合法路径段字符,词法层分不开。
- * 代价是整条保持纯文本(远端 stat 判 nonfile),不会点开错地址;中文正规写法用全角
- * `，`,已在主体字符集里断开。
- */
-export function findBareFileUrlMatch(input: string, from: number): BareFilePathMatch | null {
-  // 廉价短路(同 findBareFilePathMatch:本函数在渲染热路径上逐 token 调用)。
-  if (!input.includes('file:///')) return null;
-  // 每次调用新建:`g` 的 lastIndex 是可变状态(同本文件与 messageMarkdown 的既有约定)。
-  const re = new RegExp(BARE_FILE_URL_RE_SOURCE, 'g');
-  re.lastIndex = Math.max(0, from);
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(input)) !== null) {
-    // **按 file URL 语义只取 pathname**(review P1):`file:///tmp/a.html#results` 与
-    // `?view=1` 里的 `#` / `?` 是 URL 语法,不是文件名的一部分。整段收进候选的话,
-    // 下游 resolveChatAbsPath 只做 slice(7) + 解码,会拿 `/tmp/a.html#results` 去 stat
-    // ——本来存在的文件点不亮,断链乐观点亮时还会打开一个不存在的地址。
-    // 命中区间同步收缩,`#results` 留作正文文本(预览页不支持按锚点定位,丢掉无损失);
-    // 字面文件名里的 `#` / `?` 按 URL 规范应写成 %23 / %3F,解码在 resolveChatAbsPath。
-    // 边界后置过滤:命中必须独占它所在的 token(见上方说明)。
-    if (precededByDisallowedRunChar(input, m.index)) continue;
-    const value = trimFileUrlQueryAndFragment(m[1]);
-    if (!value) continue;
-    if (!classifyChatPathLinkTarget(value)) continue;
-    return { index: m.index, end: m.index + value.length, value };
-  }
-  return null;
-}
-
-/** 剥掉 file URL 的 query 与 fragment(只保留 `file:///` + pathname)。 */
-function trimFileUrlQueryAndFragment(value: string): string | null {
-  const prefix = 'file:///';
-  const rest = value.slice(prefix.length);
-  const cut = rest.search(/[?#]/);
-  if (cut < 0) return value;
-  const pathname = rest.slice(0, cut);
-  return pathname ? `${prefix}${pathname}` : null;
 }

@@ -4320,7 +4320,12 @@ export function registerGhostIpc(): void {
     };
   });
 
-  ipcMain.handle('ghosts:uninstall', async (_event, id: unknown) => {
+  ipcMain.handle('ghosts:uninstall', async (event, id: unknown) => {
+    // 卸载会停运行时、撤 receipt 批准、清凭证/KV/ghost-fs 并删安装目录 —— 与
+    // install/update/set-enabled/export 同级的高权限写路径,来源判定必须由 Main
+    // 按真实顶层 frame 完成,不可信任页面自报;不受信 Ghost/WebView 页面若能
+    // invoke 此 channel 即可卸载任意插件(评审 P1)。
+    assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
     }
@@ -4412,7 +4417,10 @@ export function registerGhostIpc(): void {
   });
 
   // 恢复被抽离的内置意识:清墓碑 + 立即对账(串行链上排队,装回原位)。
-  ipcMain.handle('ghosts:restore-builtin', async (_event, id: unknown) => {
+  ipcMain.handle('ghosts:restore-builtin', async (event, id: unknown) => {
+    // 恢复内置意识会清墓碑并触发对账装回,同属改写插件世界的写路径,来源判定
+    // 与其它写通道对齐,不信任页面自报(评审 P1)。
+    assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
     }

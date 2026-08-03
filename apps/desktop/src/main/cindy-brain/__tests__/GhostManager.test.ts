@@ -2116,6 +2116,33 @@ describe('GhostManager · 更新崩溃恢复(两次 rename 之间)', () => {
     expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-22222222'))).toBe(true);
     expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
   });
+
+  it('id 是另一个 id 的 `-` 前缀(hello / hello-x)各留唯一 backup → 两者都搬回,不因前缀误判互相拖累(P1)', async () => {
+    // 回归:siblings 统计曾用 startsWith(`.cindy-updating-${id}-`) 前缀匹配,
+    // `.cindy-updating-hello-<hex>` 是 `.cindy-updating-hello-x-<hex>` 的前缀,
+    // 于是处理 hello 时把 hello-x 的 backup 也算进来 → siblings 变 2 → 判"多备份
+    // 留待人工" → hello 崩溃后持续消失。修复后按解析 id 精确比对,两者各自恢复。
+    await manager.install(await makeCindy('a.cindy', goodManifest('hello')));
+    await manager.install(await makeCindy('b.cindy', goodManifest('hello-x')));
+    // 两个插件都卡在"final→backup 已发生,staging→final 未完成"的崩溃现场,
+    // 且各自只有唯一 backup(合法可恢复的场景)。
+    await fs.promises.rename(
+      path.join(rootDir, 'hello'),
+      path.join(rootDir, '.cindy-updating-hello-11111111'),
+    );
+    await fs.promises.rename(
+      path.join(rootDir, 'hello-x'),
+      path.join(rootDir, '.cindy-updating-hello-x-22222222'),
+    );
+
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+
+    // 两者都应搬回 final,backup 清空 —— hello 不能被 hello-x 的存在拖成"消失"。
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, 'hello-x', 'ghost.json'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-11111111'))).toBe(false);
+    expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-x-22222222'))).toBe(false);
+  });
 });
 
 describe('GhostManager · setEnabled(启用/停用)', () => {

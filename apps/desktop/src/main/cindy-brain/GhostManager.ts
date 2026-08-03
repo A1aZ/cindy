@@ -268,9 +268,14 @@ export class GhostManager {
         continue;
       }
       const finalDir = path.join(root, id);
-      const siblings = backups.filter((other) =>
-        other.name.startsWith(`.cindy-updating-${id}-`),
-      );
+      // 按解析后的 id 精确比对,不能用前缀 startsWith:合法 id 允许带 `-`,
+      // `.cindy-updating-foo-<hex>` 是 `.cindy-updating-foo-bar-<hex>` 的前缀,
+      // 若用前缀匹配,foo 与 foo-bar 同时留有 backup 时,foo 的唯一 backup 会被
+      // 误统计成多个而判为"多备份,留待人工",崩溃后 foo 持续消失(评审 P1)。
+      const siblings = backups.filter((other) => {
+        const otherMatch = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(other.name);
+        return otherMatch !== null && otherMatch[1] === id;
+      });
       if (fs.existsSync(finalDir)) {
         try {
           fs.rmSync(backupPath, { recursive: true, force: true });

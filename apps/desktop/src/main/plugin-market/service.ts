@@ -446,6 +446,10 @@ export class PluginMarketService {
       const ghost = await installOrUpdateMarketGhostPackage(tempPath, {
         ghostId: plugin.ghostId,
         version: plugin.currentRelease.version,
+        // 用户在确认卡上审阅的权限 diff 是拿服务端 release.manifest 算的;把它一并
+        // 传下去,由装入侧比对下载包清单的权限投影与指令 —— 服务端记录与包内
+        // ghost.json 不一致时中止,不让"看到 A 权限、批准 B 权限"发生。
+        expectedManifest: compatible.manifest,
         ...(options.expectedInstalledApproval
           ? { expectedInstalledApproval: options.expectedInstalledApproval }
           : {}),

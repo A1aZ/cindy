@@ -67,7 +67,11 @@
   一份 receipt（`ghostInstallReceipt.ts`），落在**安装根之外**的 owner-scoped 状态根里，
   钉住这次批准过的 manifest、trust、启停态和一个随机 `revision`；`GhostManager.list()`
   只从 receipt 取这些字段，安装目录里的 `ghost.json` / `.cindy-trust.json` / `.disabled`
-  退化为旧版本兼容镜像。理由是可变安装目录曾经就是授权事实本身：就地改写
+  退化为旧版本兼容镜像。**唯一的非对称例外是启停态**：`.disabled` 镜像在读取时只往
+  停用方向合并（`enabled = receipt.enabled && !镜像存在`）——停用必须永远能成功，状态根
+  不可写时镜像是 `setEnabled(false)` 唯一还能落笔的地方，只读 receipt 会让那次停用在
+  重启后静默复活；镜像**不能**把插件往启用方向翻，重新启用只有 `setEnabled(true)` 成功
+  写 receipt 一条路。理由是可变安装目录曾经就是授权事实本身：就地改写
   `ghost.json` 能让权限 diff 显示"无新增"，未确认的 slot 因此拿到运行授权。
   - 没有 receipt（旧安装）或 receipt 损坏 = **不构成运行授权**：一律按停用列出、
     不许启用、不参与技能落链。但"不构成运行授权"只是**当下状态**，不等于"该由用户
@@ -283,8 +287,20 @@
   (那就是把授权事实重新交给可变安装目录，等于回到 #636)。迁移之后批准再丢失的恢复
   路径：市场包走市场重装确认；本地包走「从已装目录重新确认」（`ghosts:reapprove-inspect`
   → 确认卡全量权限清单 → `ghosts:reapprove-installed`，清单字节以 manifestSha256 绑定
-  确认间隙，trust 走与迁移同一个封顶读取器）—— 不要求用户重新提供原始 `.cindy`，不存在
-  不可恢复状态；随包插件不走人工确认，由启动对账自动补（UI 提示「重启应用即恢复」）。
+  确认间隙，trust 走与迁移同一个封顶读取器，装入侧的指令查重／tokenBroker／保留前缀
+  门禁照走）—— 不要求用户重新提供原始 `.cindy`，不存在不可恢复状态；随包插件不走人工
+  确认，由启动对账自动补（UI 提示「重启应用即恢复」）。一次性门的完整判据（三道，缺一
+  即漏）：ledger 存在不迁；状态根有任何**有效** receipt 不迁并补写 ledger（损坏/旧
+  schema 的 receipt 不算「活动过」——它们正是本条要治愈的对象，能改坏 receipt 的进程与
+  §「状态根无写保护」登记的伪造者同类）；**首次写任何 receipt 时自动落 ledger**（不落
+  的话，「新装 receipt 后、下一轮对账前」删 receipt 可骗一次按已扩权 manifest 的重铸）。
+  安装根为空/未诞生时**不落 ledger**——门要留给 owner 命名空间 legacy 恢复流程随后搬入
+  的旧目录；恢复流程对刚搬入的 id 走 `backfillRecoveredLegacyGhosts` 旁路（信任级与首轮
+  迁移等同，只作用于恢复流程自己搬动的 id）。安装根读失败（非 ENOENT）整轮放弃且不落
+  ledger，下次启动重试。迁移失败的 id 记进 ledger 的 `failedIds` 供排查，逐个走上面的
+  恢复入口。整轮对账（迁移＋播种＋批准写入）与「从已装目录重新确认」都必须持
+  GhostMutationCoordinator 的 owner 租约——状态根路径是每次调用现解析的，不持租约时
+  异步 hash/copy 中途账号切换落定，写入会漏进新 owner 的状态根。
 - `networkSlot.ts` 的 `as: 'media'` 不能只信任 Content-Type（GLB 常见
   `application/octet-stream`），需要安全的 magic-byte／扩展名嗅探。
 - SSH 远程场景必须让 `LiziMcpSessionContext` 携带 remote 标识；目录过户不得回退读取本机

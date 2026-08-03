@@ -1165,6 +1165,8 @@ interface ElectronAPI {
       trust: import('../shared/ghost').GhostTrustInfo;
       /** 确认卡展示时的清单字节指纹;确认时回传,防确认间隙清单被换。 */
       manifestSha256: string;
+      /** 升级前的启停偏好(.disabled 镜像读数):确认卡勾选默认值。 */
+      previouslyEnabled: boolean;
     }>;
     /** 第三条恢复路径第二步:用户点过确认卡后开 receipt。 */
     reapproveInstalled: (

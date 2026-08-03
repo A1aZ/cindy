@@ -12,6 +12,7 @@ import {
   ghostLocalePathFor,
   ghostInstallApprovalToken,
   ghostIconMimeType,
+  isOfficialGhostId,
   isValidGhostId,
   resolveGhostManifestLocale,
   validateGhostManifest,
@@ -98,7 +99,15 @@ export type InstallRejection =
   | { code: 'not-installed'; reason: string }
   | { code: 'command-conflict'; reason: string }
   | { code: 'state-changed'; reason: string }
-  | { code: 'io'; reason: string };
+  | {
+      code: 'io';
+      reason: string;
+      /**
+       * 更新失败后连旧版本目录都没能滚回原位(Windows 文件锁/AV 等):此时安装目录
+       * 可能是新字节或缺失,调用方**不得**按"旧版本还在"重启运行时。
+       */
+      rollbackFailed?: boolean;
+    };
 
 export type UninstallRejection =
   | { code: 'invalid-id'; reason: string }
@@ -159,6 +168,18 @@ export class GhostManager {
 
   approvalStateRoot(): string {
     return this.receiptStore.rootDir();
+  }
+
+  /**
+   * 启停投影:receipt 为主,安装目录 `.disabled` 镜像**只往停用方向覆盖**(读时合并)。
+   *
+   * 为什么在读侧合并而不是只信 receipt:停用必须永远能成功(规则 §3 收敛方向不对称)。
+   * 状态根不可写时 `setEnabled(false)` 仍能写镜像;若 list() 只读 receipt,那次停用会在
+   * 重启后静默复活 —— fail open。镜像只能把启停态往下拉,不能往上翻(重新启用只有
+   * setEnabled(true) 成功写 receipt 一条路),与随包对账的合并规则同向。
+   */
+  private effectiveEnabled(dir: string, receiptEnabled: boolean): boolean {
+    return receiptEnabled && !fs.existsSync(path.join(dir, DISABLED_MARKER_FILE));
   }
 
   /**
@@ -256,17 +277,38 @@ export class GhostManager {
     failed: string[];
   }> {
     const result = { migrated: [] as string[], skipped: [] as string[], failed: [] as string[] };
-    // 全局一次性门:已迁过就再也不迁(读不动 ledger 同样当作"已迁",宁可少迁不可
-    // 把"从可变安装目录重建授权"再放开一次)。
+    // 一次性门,两道判据缺一不可:
+    // 1) ledger 存在 = 迁过,不再迁;
+    // 2) 状态根已有任何**有效** receipt = 新模型已在本机运转过,此后缺某个 receipt
+    //    只能是删除,同样不迁(补写 ledger 把门关死);损坏/旧 schema 的 receipt 不算
+    //    "活动过" —— 它们正是 §5 要求本轮治愈的对象。
+    // 之所以要第 2 道:下面"安装根为空/未诞生时不落 ledger"是为 owner 命名空间的
+    // legacy 恢复流程留门(它会在之后才把旧目录搬进来),没有第 2 道,这个留门会被
+    // "装一个插件→删 receipt"利用成从可变安装目录重建授权(receipt 首写自动落
+    // ledger 把这个窗口进一步压到零,见 receiptStore.write)。
     if (this.receiptStore.hasMigrationLedger()) return result;
+    if (this.receiptStore.hasAnyValidReceipt()) {
+      await this.receiptStore.writeMigrationLedger({
+        version: 1,
+        migratedAt: new Date().toISOString(),
+        migratedIds: [],
+      });
+      return result;
+    }
 
     const root = this.options.getRootDir();
     let entries: fs.Dirent[] = [];
     try {
       entries = fs.readdirSync(root, { withFileTypes: true });
-    } catch {
-      // 安装根还不存在 = 没装过任何插件(全新用户)。仍写 ledger 落一道门:让
-      // "ledger 存在 ⟺ 迁移已跑过"这个不变量成立,今后新装的插件走正常装入流程。
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // 安装根未诞生:全新用户,或 legacy 恢复流程还没把旧目录搬进来。没有可迁
+        // 对象,也**不写 ledger** —— 门要给随后搬入的旧目录留着(见上第 2 道判据)。
+        return result;
+      }
+      // EACCES/EIO 等真实故障:本轮放弃且不写 ledger,下次启动重试。吞掉错误照写
+      // ledger 会把迁移永久封死在一次环境抖动上。
+      throw err;
     }
 
     for (const entry of entries) {
@@ -297,13 +339,69 @@ export class GhostManager {
       }
     }
 
-    await this.receiptStore.writeMigrationLedger({
-      version: 1,
-      migratedAt: new Date().toISOString(),
-      migratedIds: [...result.migrated].sort(),
-    });
+    // 一个 backfill 都没尝试过(空目录/只有随包目录)就不落 ledger —— 留给 legacy
+    // 恢复流程;删 receipt 骗迁移由 hasAnyValidReceipt 判据 + receipt 首写自动落
+    // ledger(见 receiptStore.write)两道一起挡住。
+    if (result.migrated.length > 0 || result.failed.length > 0) {
+      await this.receiptStore.writeMigrationLedger({
+        version: 1,
+        migratedAt: new Date().toISOString(),
+        migratedIds: [...result.migrated].sort(),
+        ...(result.failed.length > 0 ? { failedIds: [...result.failed].sort() } : {}),
+      });
+    }
     if (result.migrated.length > 0) this.options.onChanged?.(this.list());
     return result;
+  }
+
+  /**
+   * legacy 恢复流程(owner 命名空间认领旧布局目录)专用的 backfill 旁路。
+   *
+   * 为什么允许绕过一次性 ledger 门:`ids` 来自恢复流程**刚从旧布局根搬进安装根**的
+   * 目录 —— 这个来源本身就是旧世界的授权事实(与首轮迁移同一信任级),不是可变安装
+   * 目录里凭空冒出来的目录。调用方只传本次恢复实际搬动/新增的 id;逐 id 仍然只在
+   * 没有有效 receipt 时 backfill,随包 id 照旧交给 provisioning。结果并进 ledger,
+   * 事后可分辨来源。
+   */
+  async backfillRecoveredLegacyGhosts(
+    ids: readonly string[],
+  ): Promise<{ migrated: string[]; failed: string[] }> {
+    return this.runExclusiveMutation(async () => {
+      const out = { migrated: [] as string[], failed: [] as string[] };
+      const root = this.options.getRootDir();
+      for (const id of new Set(ids)) {
+        if (!isValidGhostId(id)) continue;
+        if (this.options.isTrustedBundledId?.(id)) continue;
+        if (this.receiptStore.read(id).state === 'approved') continue;
+        try {
+          if (await this.backfillLegacyApproval(path.join(root, id), id)) {
+            out.migrated.push(id);
+          }
+        } catch (err) {
+          out.failed.push(id);
+          this.options.log?.warn('recovered legacy ghost backfill failed; kept fail-closed', {
+            id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (out.migrated.length > 0 || out.failed.length > 0) {
+        const prev = this.receiptStore.readMigrationLedger();
+        const failedIds = [
+          ...new Set([...(prev?.failedIds ?? []), ...out.failed]),
+        ].sort();
+        await this.receiptStore.writeMigrationLedger({
+          version: 1,
+          migratedAt: new Date().toISOString(),
+          migratedIds: [
+            ...new Set([...(prev?.migratedIds ?? []), ...out.migrated]),
+          ].sort(),
+          ...(failedIds.length > 0 ? { failedIds } : {}),
+        });
+      }
+      if (out.migrated.length > 0) this.options.onChanged?.(this.list());
+      return out;
+    });
   }
 
   /**
@@ -384,7 +482,13 @@ export class GhostManager {
   inspectInstalledReapproval(
     id: string,
   ):
-    | { manifest: GhostManifest; trust: GhostTrustInfo; manifestSha256: string }
+    | {
+        manifest: GhostManifest;
+        trust: GhostTrustInfo;
+        manifestSha256: string;
+        /** `.disabled` 镜像的读数:确认卡"立即开启"勾选的默认值,不重置用户停用偏好。 */
+        previouslyEnabled: boolean;
+      }
     | { rejection: InstallRejection } {
     if (!isValidGhostId(id) || this.options.isTrustedBundledId?.(id)) {
       return { rejection: { code: 'file-invalid', reason: '该插件不支持从安装目录重新确认' } };
@@ -420,6 +524,19 @@ export class GhostManager {
     if (validated.manifest.id !== id) {
       return { rejection: { code: 'file-invalid', reason: '清单 id 与安装目录不一致' } };
     }
+    // tokenBroker 门控与装入侧同一条规则(XDT 授权 broker 仅第一方官方插件可用,
+    // 不区分 dev/packaged):走已装目录重新确认的都不是随包插件,声明即拒。
+    if (
+      !isOfficialGhostId(id) &&
+      (validated.manifest.network?.secrets ?? []).some((s) => s.oauth?.tokenBroker !== undefined)
+    ) {
+      return {
+        rejection: {
+          code: 'file-invalid',
+          reason: `id "${id}" 声明了 oauth.tokenBroker——XDT 授权 broker 仅第一方官方插件可用`,
+        },
+      };
+    }
     const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
       level: 'unverified',
       publisherSigned: false,
@@ -430,6 +547,7 @@ export class GhostManager {
       manifest: validated.manifest,
       trust,
       manifestSha256: crypto.createHash('sha256').update(rawBytes).digest('hex'),
+      previouslyEnabled: !fs.existsSync(path.join(dir, DISABLED_MARKER_FILE)),
     };
   }
 
@@ -467,6 +585,24 @@ export class GhostManager {
       return {
         rejection: { code: 'state-changed', reason: '插件清单在确认后发生了变化,请重新确认' },
       };
+    }
+    // 指令查重与装入/更新同一条规则(豁免自己):重新确认不是给撞名指令开的后门。
+    if (inspected.manifest.command !== undefined) {
+      const commandFold = inspected.manifest.command.toLowerCase();
+      const holder = this.list().find(
+        (g) =>
+          g.manifest.id !== id &&
+          g.manifest.command !== undefined &&
+          g.manifest.command.toLowerCase() === commandFold,
+      );
+      if (holder) {
+        return {
+          rejection: {
+            code: 'command-conflict',
+            reason: `指令 /${inspected.manifest.command} 已被已装意识「${holder.manifest.name}」(${holder.manifest.id})占用`,
+          },
+        };
+      }
     }
     const dir = path.join(this.options.getRootDir(), id);
     try {
@@ -536,7 +672,7 @@ export class GhostManager {
         result.push({
           manifest: localizedManifest,
           dir,
-          enabled: receipt.enabled,
+          enabled: this.effectiveEnabled(dir, receipt.enabled),
           approval: { state: 'approved', revision: receipt.revision },
           trust: receipt.trust,
           ...(receipt.manifest.skill?.items.length
@@ -711,11 +847,20 @@ export class GhostManager {
         );
       }
     } catch (err) {
-      // `.disabled` 是旧版本兼容镜像；receipt 写失败时尽力把镜像回滚，
-      // 避免降级运行旧客户端时看到与批准状态相反的启用态。
-      if (previousEnabled) {
-        await fs.promises.rm(marker, { force: true }).catch(() => undefined);
-      } else {
+      if (!enabled) {
+        // 停用必须永远能成功(§3 收敛方向不对称):receipt 写失败时镜像已就位,
+        // list() 的读时合并会把启停态压成停用(重启后依然,镜像在盘上),旧客户端
+        // 也按镜像判 —— 停用已经生效,如实返回 ok,receipt 留待下次成功写入收敛。
+        this.options.log?.warn('ghost disable persisted via mirror only; receipt write failed', {
+          id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        this.options.onChanged?.(this.list());
+        return { ok: true };
+      }
+      // 启用方向 fail closed:receipt 没写成就不算启用,把镜像回滚回停用态,
+      // 避免"receipt 说停用、镜像却被删了"让旧客户端看到相反的启用态。
+      if (!previousEnabled) {
         await fs.promises.writeFile(marker, '').catch(() => undefined);
       }
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
@@ -1253,7 +1398,9 @@ export class GhostManager {
     // 采用原 `.disabled` 镜像；损坏 receipt 一律保持停用。
     const enabled =
       approvalResult.state === 'approved'
-        ? approvalResult.receipt.enabled
+        // 读时合并后的有效值:receipt 可能因状态根短暂不可写而停在陈旧的 enabled=true,
+        // 用户的停用镜像不能被一次更新静默冲掉。
+        ? this.effectiveEnabled(finalDir, approvalResult.receipt.enabled)
         : approvalResult.state === 'legacy-unapproved'
           ? !fs.existsSync(path.join(finalDir, DISABLED_MARKER_FILE))
           : false;
@@ -1306,9 +1453,23 @@ export class GhostManager {
     try {
       await fs.promises.rename(stagingDir, finalDir);
     } catch (err) {
-      await fs.promises.rename(backupDir, finalDir).catch(() => {});
+      let rolledBack = true;
+      await fs.promises.rename(backupDir, finalDir).catch((rollbackErr) => {
+        rolledBack = false;
+        (this.options.log?.error ?? this.options.log?.warn)?.call(this.options.log,
+          'ghost update rollback failed; install dir left inconsistent', {
+            id: manifest.id, backupDir,
+            error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          });
+      });
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
+      return {
+        rejection: {
+          code: 'io',
+          reason: err instanceof Error ? err.message : String(err),
+          ...(rolledBack ? {} : { rollbackFailed: true }),
+        },
+      };
     }
     // 与 install 同理:技能字节指纹从这次换入的内容目录现算。
     let receipt: GhostInstallReceipt;
@@ -1325,9 +1486,23 @@ export class GhostManager {
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
       this.untrustedApprovals.delete(manifest.id);
     } catch (err) {
+      let rolledBack = true;
       await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
-      await fs.promises.rename(backupDir, finalDir).catch(() => undefined);
-      return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
+      await fs.promises.rename(backupDir, finalDir).catch((rollbackErr) => {
+        rolledBack = false;
+        (this.options.log?.error ?? this.options.log?.warn)?.call(this.options.log,
+          'ghost update rollback failed after receipt write failure', {
+            id: manifest.id, backupDir,
+            error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+          });
+      });
+      return {
+        rejection: {
+          code: 'io',
+          reason: err instanceof Error ? err.message : String(err),
+          ...(rolledBack ? {} : { rollbackFailed: true }),
+        },
+      };
     }
     await fs.promises.rm(backupDir, { recursive: true, force: true }).catch(() => {});
 

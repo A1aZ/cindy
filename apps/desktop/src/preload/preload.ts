@@ -907,6 +907,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       manifest: unknown;
       trust: unknown;
       manifestSha256: string;
+      previouslyEnabled: boolean;
     }> => ipcRenderer.invoke('ghosts:reapprove-inspect', id),
     /** 确认卡点过同意后开 receipt;sha 绑定确认卡展示时的清单字节。 */
     reapproveInstalled: (

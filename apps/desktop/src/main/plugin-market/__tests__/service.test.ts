@@ -388,6 +388,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       {
         ghostId: 'cindy-test',
         version: '1.0.0',
+        expectedManifest: expect.objectContaining({ id: 'cindy-test' }),
       },
     );
     expect(snapshot.items[0]).toMatchObject({
@@ -418,6 +419,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       {
         ghostId: 'cindy-test',
         version: '1.0.0',
+        expectedManifest: expect.objectContaining({ id: 'cindy-test' }),
       },
     );
     // 锁定装完即开的最终结果:装入入口返回的 ghost 必须是启用态。
@@ -449,6 +451,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       {
         ghostId: item.ghostId,
         version: item.currentRelease.version,
+        // 权限绑定:用户确认的服务端清单必须随包传给装入侧比对(P0:服务端记录与
+        // 包内 ghost.json 不一致时,不能让"看到 A 权限、批准 B 权限"发生)。
+        expectedManifest: expect.objectContaining({ id: item.ghostId }),
       },
     );
     expect(snapshot.items[0]).toMatchObject({

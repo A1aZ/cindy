@@ -444,6 +444,217 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
   });
 });
 
+describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
+  it('P0-3:停用在 receipt 写失败时仍然生效,且跨实例(重启)持久', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    expect(manager.list()[0].enabled).toBe(true);
+
+    // 状态根不可写(AV/权限/磁盘故障):receipt 的 rename 提交失败。
+    const realRename = fs.promises.rename;
+    const renameSpy = vi
+      .spyOn(fs.promises, 'rename')
+      .mockImplementation(async (from, to) => {
+        if (String(to).includes('ghosts-install-state')) {
+          throw Object.assign(new Error('EACCES: state root locked'), { code: 'EACCES' });
+        }
+        return realRename(from as never, to as never);
+      });
+    try {
+      // 停用必须永远能成功:镜像已落盘,如实返回 ok,而不是 io + 回滚镜像(fail open)。
+      expect(await manager.setEnabled('hello', false)).toEqual({ ok: true });
+      expect(manager.list()[0].enabled).toBe(false);
+    } finally {
+      renameSpy.mockRestore();
+    }
+    // "重启"(新实例,内存态清零):镜像在盘上,停用不复活。
+    const restarted = new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+    expect(restarted.list()[0].enabled).toBe(false);
+    // 启用方向照旧要求 receipt 写成功(此时状态根已恢复可写)。
+    expect(await manager.setEnabled('hello', true)).toEqual({ ok: true });
+    expect(manager.list()[0].enabled).toBe(true);
+  });
+
+  it('P0-5:嵌套 skill dir(祖先包含子项)装入/快照/校验全通,不撞 COPYFILE_EXCL', async () => {
+    const nested = {
+      ...goodManifest('skilled'),
+      slots: ['tool', 'skill'],
+      skill: {
+        items: [
+          { dir: 'skills/foo', name: 'foo', description: 'Foo skill' },
+          { dir: 'skills/foo/bar', name: 'bar', description: 'Bar skill' },
+        ],
+      },
+    };
+    const files = {
+      'skills/foo/SKILL.md': '---\nname: foo\ndescription: Foo skill\n---\n\nfoo\n',
+      'skills/foo/bar/SKILL.md': '---\nname: bar\ndescription: Bar skill\n---\n\nbar\n',
+    };
+    const result = await manager.install(await makeCindy('nested.cindy', nested, files));
+    if ('rejection' in result) throw new Error(JSON.stringify(result.rejection));
+    const ghost = manager.list()[0];
+    expect(ghost.approval.state).toBe('approved');
+    // 两个 item 的字节指纹都能对上(嵌套项的根就在祖先拷出的快照树里)。
+    expect(await manager.verifyApprovedSkillSnapshot(ghost)).toBe(true);
+  });
+
+  it('P0-5:嵌套 skill dir 的旧安装迁移同样成功(存量兼容红线)', async () => {
+    await writeLegacyInstall(
+      'skilled',
+      {
+        ...goodManifest('skilled'),
+        slots: ['tool', 'skill'],
+        skill: {
+          items: [
+            { dir: 'skills/foo/bar', name: 'bar', description: 'Bar skill' },
+            { dir: 'skills/foo', name: 'foo', description: 'Foo skill' },
+          ],
+        },
+      },
+      {
+        files: {
+          'skills/foo/SKILL.md': '---\nname: foo\ndescription: Foo skill\n---\n\nfoo\n',
+          'skills/foo/bar/SKILL.md': '---\nname: bar\ndescription: Bar skill\n---\n\nbar\n',
+        },
+      },
+    );
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['skilled']);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+  });
+
+  it('P0-2:安装根为空/未诞生时不落台账,legacy 恢复流程随后搬入仍可迁移', async () => {
+    // 首轮:根目录还不存在(owner 命名空间刚建立,旧目录尚未被恢复流程搬入)。
+    expect(await manager.migrateLegacyApprovalsOnce()).toEqual({
+      migrated: [],
+      skipped: [],
+      failed: [],
+    });
+    expect(fs.existsSync(migrationLedgerPath())).toBe(false);
+    // 恢复流程把旧布局目录搬进来 → 门还开着,照常迁移。
+    await writeLegacyInstall('hello', goodManifest());
+    const second = await manager.migrateLegacyApprovalsOnce();
+    expect(second.migrated).toEqual(['hello']);
+    expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+  });
+
+  it('P0-2:首个 receipt 写入即自动落台账 —— "装插件→删 receipt"骗不到迁移', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 新模型首次活动(装入写 receipt)时台账已经落了,不等下一轮 reconcile。
+    expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+    // 攻击:改写安装目录 manifest 扩权,再删掉 receipt,指望迁移按新 manifest 重铸批准。
+    await fs.promises.writeFile(
+      path.join(rootDir, 'hello', 'ghost.json'),
+      JSON.stringify({
+        ...goodManifest(),
+        slots: ['tool', 'skill'],
+        skill: { items: [{ dir: 's', name: 's', description: 's' }] },
+      }),
+    );
+    await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+  });
+
+  it('P0-2:安装根读失败(EACCES 类)本轮放弃且不落台账,不把迁移永久封死', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    const realReaddir = fs.readdirSync;
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((dir: never, opts: never) => {
+      if (String(dir) === rootDir) {
+        throw Object.assign(new Error('EACCES: install root locked'), { code: 'EACCES' });
+      }
+      return realReaddir(dir, opts);
+    }) as never);
+    try {
+      await expect(manager.migrateLegacyApprovalsOnce()).rejects.toThrow(/EACCES/);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(migrationLedgerPath())).toBe(false);
+    // 环境恢复后下一轮照常迁移。
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual(['hello']);
+  });
+
+  it('P0-2:恢复旁路只补给定 id,台账门对其余目录照常生效', async () => {
+    // 台账已落(首轮迁移空跑一个插件)。
+    await writeLegacyInstall('first', goodManifest('first'));
+    await manager.migrateLegacyApprovalsOnce();
+    expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+    // 恢复流程搬入两个目录,但只把 recovered 声明为其中一个。
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+    await writeLegacyInstall('planted', goodManifest('planted'));
+    const out = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    expect(out.migrated).toEqual(['recovered']);
+    const byId = Object.fromEntries(manager.list().map((g) => [g.manifest.id, g.approval.state]));
+    expect(byId.recovered).toBe('approved');
+    expect(byId.planted).toBe('legacy-unapproved');
+  });
+
+  it('P1-6:重新确认拒绝与已装插件撞名的指令', async () => {
+    await manager.install(
+      await makeCindy('holder.cindy', chipManifestWithCommand('holder', 'draw')),
+    );
+    await writeLegacyInstall('clasher', chipManifestWithCommand('clasher', 'Draw'));
+    const inspected = manager.inspectInstalledReapproval('clasher');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    const result = await manager.reapproveInstalled('clasher', {
+      enable: true,
+      expectedManifestSha256: inspected.manifestSha256,
+      expectedInstalledApproval: 'legacy-unapproved',
+    });
+    expect('rejection' in result && result.rejection.code).toBe('command-conflict');
+  });
+
+  it('P1-6:声明 tokenBroker 的目录拒走已装目录重新确认', async () => {
+    await writeLegacyInstall('brokered', {
+      ...goodManifest('brokered'),
+      network: {
+        hosts: ['api.example.com'],
+        secrets: [
+          {
+            key: 'token',
+            source: 'oauth',
+            oauth: { tokenBroker: 'github' },
+          },
+        ],
+      },
+    });
+    const inspected = manager.inspectInstalledReapproval('brokered');
+    expect('rejection' in inspected && inspected.rejection.code).toBe('file-invalid');
+  });
+
+  it('P1-7:重新确认的启停默认值取镜像读数,不重置用户停用偏好', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const inspected = manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    expect(inspected.previouslyEnabled).toBe(false);
+  });
+
+  it('P1-9:更新失败且旧目录滚不回时如实报 rollbackFailed,不假装旧版本还在', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const realRename = fs.promises.rename;
+    const spy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      // staging→final 与 backup→final 都失败(Windows 文件锁/AV 的典型形态)。
+      if (path.resolve(String(to)) === path.resolve(finalDir)) {
+        throw Object.assign(new Error('EPERM: dir locked'), { code: 'EPERM' });
+      }
+      return realRename(from as never, to as never);
+    });
+    try {
+      const bumped = await makeCindy('b.cindy', { ...goodManifest(), version: '1.0.1' });
+      const result = await updateGhost(bumped);
+      expect('rejection' in result).toBe(true);
+      if (!('rejection' in result)) return;
+      expect(result.rejection.code).toBe('io');
+      expect(result.rejection.code === 'io' && result.rejection.rollbackFailed).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe('GhostManager · install', () => {
   it('按宿主语言返回本地化清单，切换语言后 list 立即更新，不支持语言固定回退英文', async () => {
     const manifest = {
@@ -858,9 +1069,16 @@ describe('GhostManager · Host approval receipt', () => {
 
     const after = manager.list()[0];
     expect(after.manifest).toEqual(before.manifest);
-    expect(after.enabled).toBe(true);
+    // 启停是**非对称**的例外:`.disabled` 镜像允许把启停态往下拉(停用必须永远能
+    // 成功,状态根不可写时镜像是唯一落点),但 manifest/trust/批准态不受安装目录
+    // 影响,镜像也不能把插件往"启用"方向翻。
+    expect(after.enabled).toBe(false);
     expect(after.trust).toEqual(before.trust);
     expect(after.approval.state).toBe('approved');
+
+    // 移除镜像 → 回到 receipt 的授权事实(enabled=true 是用户确认装入时的决定)。
+    await fs.promises.rm(path.join(rootDir, 'hello', '.disabled'));
+    expect(manager.list()[0].enabled).toBe(true);
   });
 
   it('fails legacy and corrupt receipts closed until a fully reviewed update replaces them', async () => {

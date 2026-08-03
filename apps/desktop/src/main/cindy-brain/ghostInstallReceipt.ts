@@ -88,6 +88,11 @@ export interface GhostLegacyMigrationLedger {
   migratedAt: string;
   /** 实际 backfill 出 receipt 的 id 清单,便于事后分辨"用户确认过"与"迁移来的"。 */
   migratedIds: string[];
+  /**
+   * 迁移读不出核心事实而 fail closed 的 id(坏 manifest / 技能目录含链接等)。
+   * 记进台账供支持排查与 UI 提示;这些 id 走每插件的重新确认恢复入口。
+   */
+  failedIds?: string[];
 }
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
@@ -166,6 +171,20 @@ export class GhostInstallReceiptStore {
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }
+    // 首次写 receipt 即落迁移台账,把一次性门在"新模型开始活动"那一刻关死。
+    // 不落的话有一个窗口:新装 receipt 后、下一轮 reconcile 前,删掉唯一的 receipt
+    // 会让 hasAnyReceipt 判据也失效(ledger 尚未写),"改 manifest → 删 receipt →
+    // 骗 backfill"就能凭空铸出扩权批准。台账写失败不阻断本次批准(状态根刚写成功,
+    // 失败面极窄),下一轮迁移检查的 hasAnyReceipt 判据会兜住并补写。
+    if (!this.hasMigrationLedger()) {
+      await this
+        .writeMigrationLedger({
+          version: 1,
+          migratedAt: new Date().toISOString(),
+          migratedIds: [],
+        })
+        .catch(() => undefined);
+    }
     await this.pruneStaleSkillSnapshots(receipt);
   }
 
@@ -187,6 +206,44 @@ export class GhostInstallReceiptStore {
   /** 迁移台账路径。点开头,不会与任何合法 ghost id 的 `<id>.json` receipt 撞名。 */
   private migrationLedgerPath(): string {
     return path.join(this.rootDir(), '.legacy-migration.json');
+  }
+
+  /**
+   * 状态根里是否已有任何**有效** receipt。它是迁移门的第二道判据:有有效 receipt
+   * = 新模型已在本机运转过,此后缺某个 receipt 只能是删除,不再触发迁移 ——
+   * 否则"空目录首启不落 ledger"(为给 legacy 恢复流程留门)会让删 receipt 骗迁移
+   * 复活。ENOENT = 状态根未诞生,按无 receipt 处理。
+   *
+   * 只认**有效**而不是"存在 json 文件":损坏/旧 schema 的 receipt 正是 §5 要求迁移
+   * 治愈的对象(如从未发布的 v1 格式),把它当"活动过"会把治愈路径堵死。能把 receipt
+   * 改坏的进程需要状态根写权限,与 §7 登记的"可伪造合法 receipt"是同一攻击者类,
+   * 此判据不给它新增能力。
+   */
+  hasAnyValidReceipt(): boolean {
+    try {
+      return fs
+        .readdirSync(this.rootDir(), { withFileTypes: true })
+        .some((entry) => {
+          if (!entry.isFile() || !entry.name.endsWith('.json')) return false;
+          const id = entry.name.slice(0, -'.json'.length);
+          return isValidGhostId(id) && this.read(id).state === 'approved';
+        });
+    } catch (error) {
+      // 与 hasMigrationLedger 同一保守方向:读不动就当"有",绝不因此把迁移放开。
+      return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+
+  /** 读迁移台账(缺失/损坏返回 null;追加 id 时用,判定门只看 hasMigrationLedger)。 */
+  readMigrationLedger(): GhostLegacyMigrationLedger | null {
+    try {
+      const raw = JSON.parse(
+        fs.readFileSync(this.migrationLedgerPath(), 'utf8'),
+      ) as GhostLegacyMigrationLedger;
+      return raw && raw.version === 1 && Array.isArray(raw.migratedIds) ? raw : null;
+    } catch {
+      return null;
+    }
   }
 
   /** 是否已跑过一轮 legacy 迁移(全局一次性门;读不动按"存在"处理,宁可不再迁)。 */
@@ -267,7 +324,21 @@ export class GhostInstallReceiptStore {
       // 改写,校验和复制各读一次就有一个可换字节的窗口,复制出来的快照可能不是被
       // 校验过的那一份。因此**先复制到 temp,再对 temp 里(即将成为快照的)那份字节
       // 做全部权威校验**,校验通过才 rename 就位。
-      for (const item of items) {
+      // 清单允许嵌套的 skill dir(如 skills/foo 与 skills/foo/bar —— 校验只拒重复,
+      // 不拒前缀嵌套)。祖先目录的整树复制已经带上了嵌套项的字节,再按嵌套项复制一次
+      // 会撞上 COPYFILE_EXCL 直接失败 —— 那会让一份合法清单在装入/更新/迁移/重新确认
+      // 四条路上全军覆没(§5 红线)。按深度排序、祖先先复制,已覆盖的嵌套项跳过复制;
+      // 指纹校验仍逐 item 进行(嵌套项的根就在祖先拷出的树里)。大小写折叠比较,
+      // 与清单查重同口径。
+      const copiedRoots: string[] = [];
+      const itemsByDepth = [...items].sort(
+        (a, b) => a.dir.split('/').length - b.dir.split('/').length,
+      );
+      for (const item of itemsByDepth) {
+        const dirFold = item.dir.toLowerCase();
+        if (copiedRoots.some((root) => dirFold === root || dirFold.startsWith(`${root}/`))) {
+          continue;
+        }
         // 与算指纹同一个解析入口:逐段确认真目录,挡住"中间段被换成链接"这条从技能
         // 目录之外取字节的路子。两侧必须共用,否则一侧穿透、一侧不穿透,复制的和
         // 算指纹的就不是同一组字节。
@@ -290,6 +361,7 @@ export class GhostInstallReceiptStore {
           );
         }
         await copyRegularDirectory(source, path.join(temp, ...item.dir.split('/')));
+        copiedRoots.push(dirFold);
       }
 
       // 权威校验一律针对 temp:此刻这些字节已经脱离可变安装目录,复制期间被换过也

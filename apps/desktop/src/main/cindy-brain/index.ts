@@ -17,6 +17,7 @@ import {
   ghostWebviewEntryPaths,
   isCindyAccountGhostId,
   isOfficialGhostId,
+  ghostPermissionItems,
   isValidGhostId,
   layoutWithGhostPanel,
   type GhostHostNoticeKey,
@@ -513,6 +514,25 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
           getGhostNodeRuntimeBroker().stop(ghost.manifest.id);
         }
       }
+      // 恢复搬进来的旧布局目录补 backfill:首轮迁移可能早已跑过并落了一次性 ledger
+      // (当时安装根还是空的),不补的话这批旧插件会全部卡在 legacy-unapproved,违反
+      // §5 升级无感红线。旁路只作用于本次恢复实际搬动/新增的 id(信任级与首轮迁移
+      // 等同:来源是恢复流程刚认领的旧世界布局,不是安装根里凭空冒出的目录)。
+      const recoveredLegacyIds = [
+        ...movedGhostIds,
+        ...restoredBeforeReconcile
+          .filter((ghost) => !existingGhostDirs.has(ghost.manifest.id))
+          .map((ghost) => ghost.manifest.id),
+      ];
+      if (recoveredLegacyIds.length > 0) {
+        await getGhostManager()
+          .backfillRecoveredLegacyGhosts(recoveredLegacyIds)
+          .catch((err) =>
+            log.warn('recovered legacy ghost backfill pass failed', {
+              error: err instanceof Error ? err.message : String(err),
+            }),
+          );
+      }
       const builtinReconcileSucceeded =
         result.deferredReason !== 'concurrent-live-instances' &&
         await scheduleBuiltinReconcile('legacy-recovery');
@@ -728,24 +748,41 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
 
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
 async function reconcileBuiltinGhosts(reason: string): Promise<void> {
-  const manager = getGhostManager();
-  // 存量插件迁移必须先于播种与授权消费:#1080 之前装的插件没有 receipt,这里从旧安装
-  // 布局 backfill 出等价批准,让它们升级后无感可用(docs §5 红线)。全局一次性 —— 首次
-  // 之后 ledger 存在即瞬时 no-op,所以放在每轮 reconcile 前都安全。它自己取事务锁,因此
-  // 必须在下面 runExclusiveMutation **之外**调用(锁内再取锁会死锁),两次顺序取锁。
+  // 整轮对账(迁移 backfill + 播种换目录 + 批准 receipt 写入)都是 owner 绑定的
+  // 文件系统写路径,但 GhostManager/ReceiptStore 的根目录是**每次调用现解析**的:
+  // 异步 hash/copy 中途账号切换落定,后半段写入就会漏进新 owner 的状态根(拿 A 的
+  // 安装目录字节给 B 的同 id 插件铸批准)。与市场装入同一套约束:开工前捕获 owner、
+  // 全程持 mutation 租约(账号 teardown 会等租约),边界期一律整轮跳过 —— 对账是
+  // 幂等的,下一次触发(startup/auth-change)会补上。
+  let releaseMutation: () => void;
   try {
-    await manager.migrateLegacyApprovalsOnce();
-  } catch (err) {
-    // 迁移整体失败(如状态根不可写)不能挡住播种与后续对账:随包插件仍要能装/更新,
-    // 存量插件保持 fail-closed(列停用、走恢复 UI),下一轮启动再尝试迁移。
-    log.warn('legacy ghost approval migration pass failed', {
-      reason,
-      error: err instanceof Error ? err.message : String(err),
-    });
+    releaseMutation = beginGhostMutation(captureGhostMutationOwner());
+  } catch {
+    log.info('builtin ghost reconcile skipped: app session boundary', { reason });
+    return;
   }
-  await manager.runExclusiveMutation(() =>
-    reconcileBuiltinGhostsLocked(reason, manager),
-  );
+  try {
+    const manager = getGhostManager();
+    // 存量插件迁移必须先于播种与授权消费:#1080 之前装的插件没有 receipt,这里从旧安装
+    // 布局 backfill 出等价批准,让它们升级后无感可用(docs §5 红线)。全局一次性 —— 首次
+    // 之后 ledger 存在即瞬时 no-op,所以放在每轮 reconcile 前都安全。它自己取事务锁,因此
+    // 必须在下面 runExclusiveMutation **之外**调用(锁内再取锁会死锁),两次顺序取锁。
+    try {
+      await manager.migrateLegacyApprovalsOnce();
+    } catch (err) {
+      // 迁移整体失败(如状态根不可写)不能挡住播种与后续对账:随包插件仍要能装/更新,
+      // 存量插件保持 fail-closed(列停用、走恢复 UI),下一轮启动再尝试迁移。
+      log.warn('legacy ghost approval migration pass failed', {
+        reason,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    await manager.runExclusiveMutation(() =>
+      reconcileBuiltinGhostsLocked(reason, manager),
+    );
+  } finally {
+    releaseMutation();
+  }
 }
 
 async function reconcileBuiltinGhostsLocked(
@@ -2906,6 +2943,12 @@ export async function installOrUpdateMarketGhostPackage(
     ghostId: string;
     version: string;
     expectedInstalledApproval?: string;
+    /**
+     * 用户在确认卡上审阅过的市场清单(服务端 release.manifest)。下载包的清单必须与
+     * 它在**权限投影与指令**上逐项一致 —— 权限 diff 是拿它算的,不绑定的话服务端记录
+     * 与包内 ghost.json 不一致时,用户看到 A 权限、批准并运行的却是 B 权限。
+     */
+    expectedManifest?: GhostManifest;
   },
 ): Promise<InstalledGhost> {
   const mutationOwner = captureGhostMutationOwner();
@@ -2925,6 +2968,26 @@ export async function installOrUpdateMarketGhostPackage(
     }
     requireGhostAvailableForActiveSession(expected.ghostId);
     rejectUnauthorizedTokenBroker(inspected.manifest);
+    if (expected.expectedManifest) {
+      // 权限投影 + 指令逐项比对,而不是整卡 deep-equal:服务端清单允许存在展示性
+      // 差异(字段顺序/补充元数据),但用户批准的权限集与指令名必须就是包里的那份。
+      const wanted = ghostPermissionItems(expected.expectedManifest)
+        .map((item) => item.key)
+        .sort();
+      const got = ghostPermissionItems(inspected.manifest)
+        .map((item) => item.key)
+        .sort();
+      const sameProjection =
+        wanted.length === got.length &&
+        wanted.every((key, index) => key === got[index]) &&
+        (expected.expectedManifest.command ?? null) === (inspected.manifest.command ?? null);
+      if (!sameProjection) {
+        throwIpcError(
+          'GHOST_FILE_INVALID',
+          '下载包的权限声明与确认时审阅的市场清单不一致,已中止安装',
+        );
+      }
+    }
 
     const installed = manager.list().find((ghost) => ghost.manifest.id === expected.ghostId);
     // Node 高风险条目由 renderer 装入确认卡权限清单如实展示;
@@ -2939,7 +3002,12 @@ export async function installOrUpdateMarketGhostPackage(
       // 校验下载),且确认框如实展示权限清单,确认安装即授权运行;本地 .cindy
       // 文件装入的初始启用态仍由确认框勾选决定(勾选默认开启,main 侧
       // installAndDock 缺省不启用,授权判断始终来自 UI 显式值)。
-      return installAndDock(manager, cindyFilePath, { enable: true });
+      // sha 绑定与本地入口同形:inspect 与真正装入各读一次文件,不绑就有一个
+      // temp 文件可被换字节的窗口。
+      return installAndDock(manager, cindyFilePath, {
+        enable: true,
+        expectedPackageSha256: inspected.packageSha256,
+      });
     }
 
     const runtime = getGhostRuntime();
@@ -2956,6 +3024,7 @@ export async function installOrUpdateMarketGhostPackage(
         );
       }
       result = await manager.update(cindyFilePath, {
+        expectedPackageSha256: inspected.packageSha256,
         expectedInstalledApproval: expected.expectedInstalledApproval,
       });
     } catch (error) {
@@ -2963,7 +3032,11 @@ export async function installOrUpdateMarketGhostPackage(
       throw error;
     }
     if ('rejection' in result) {
-      spawnIfResident(installed);
+      // 回滚失败 = 安装目录可能已是新字节或缺失,"旧版本还在"不成立,不得按旧
+      // InstalledGhost 重启运行时(P1:那会拿旧批准跑未知字节)。
+      if (!(result.rejection.code === 'io' && result.rejection.rollbackFailed)) {
+        spawnIfResident(installed);
+      }
       throwInstallError(result.rejection);
     }
     runtime.resetFuse(expected.ghostId);
@@ -4064,7 +4137,13 @@ export function registerGhostIpc(): void {
       throw err;
     }
     if ('rejection' in result) {
-      if (previousGhost) spawnIfResident(previousGhost);
+      // 回滚失败时安装目录状态未知(可能是新字节/缺失),不按"旧版本还在"重启。
+      if (
+        previousGhost &&
+        !(result.rejection.code === 'io' && result.rejection.rollbackFailed)
+      ) {
+        spawnIfResident(previousGhost);
+      }
       throwInstallError(result.rejection);
     }
     runtime.resetFuse(inspected.manifest.id); // 换了代码,给新版本干净的熔断记账
@@ -4110,6 +4189,8 @@ export function registerGhostIpc(): void {
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
     }
+    requireGhostAvailableForActiveSession(id);
+    rejectReservedGhostId(id);
     const result = manager.inspectInstalledReapproval(id);
     if ('rejection' in result) throwInstallError(result.rejection);
     return result;
@@ -4123,6 +4204,10 @@ export function registerGhostIpc(): void {
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
     }
+    requireGhostAvailableForActiveSession(id);
+    // 与本地装入同一道门:官方保留前缀不走用户通道(真随包 id 已被 manager 的
+    // 种子清单检查拒掉,这里拦的是冒充官方前缀的目录)。
+    rejectReservedGhostId(id);
     const options = opts as
       | { enable?: unknown; expectedManifestSha256?: unknown; expectedInstalledApproval?: unknown }
       | undefined;
@@ -4138,11 +4223,19 @@ export function registerGhostIpc(): void {
     if (!isGhostInstallApprovalToken(options.expectedInstalledApproval)) {
       throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
     }
-    const result = await manager.reapproveInstalled(id, {
-      enable: options.enable,
-      expectedManifestSha256: options.expectedManifestSha256,
-      expectedInstalledApproval: options.expectedInstalledApproval,
-    });
+    // 开 receipt 是 owner 绑定的状态根写路径:确认卡停留期间账号可能已切换,
+    // 与装入/更新同一套租约与边界拒绝(beginGhostMutation 在边界期直接抛)。
+    const releaseMutation = beginGhostMutation(captureGhostMutationOwner());
+    let result: Awaited<ReturnType<typeof manager.reapproveInstalled>>;
+    try {
+      result = await manager.reapproveInstalled(id, {
+        enable: options.enable,
+        expectedManifestSha256: options.expectedManifestSha256,
+        expectedInstalledApproval: options.expectedInstalledApproval,
+      });
+    } finally {
+      releaseMutation();
+    }
     if ('rejection' in result) throwInstallError(result.rejection);
     // 与装入/更新同款收尾:面板停靠(已有位置则 no-op)+ 常驻点火。
     const store = getLayoutStore();
@@ -4300,6 +4393,10 @@ export function registerGhostIpc(): void {
       runtime.stop(id); // 沉睡立即熄灯
       getGhostNodeRuntimeBroker().stop(id); // 随包 Node 也立即关闭
       getGhostSubscriptionGateway().dropGhost(id); // 订阅态清零(缓冲/熔断/seq)
+      // 与更新/撤销路径同款:agent 工具授权与 errand 节流/在途记录不跨停用存活,
+      // 重新启用后从干净状态开始。
+      getGhostAgentSlot().clearGhost(id);
+      getGhostErrandSlot().clearGhost(id);
     }
     const result = await manager.setEnabled(id, enabled);
     if ('rejection' in result) throwUninstallError(result.rejection);

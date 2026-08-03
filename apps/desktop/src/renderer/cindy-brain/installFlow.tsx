@@ -247,11 +247,13 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
   let manifest: GhostManifest;
   let trust: GhostTrustInfo;
   let manifestSha256: string;
+  let previouslyEnabled: boolean;
   try {
     const inspected = await window.electronAPI.ghosts.reapproveInspect(ghostId);
     manifest = inspected.manifest;
     trust = inspected.trust;
     manifestSha256 = inspected.manifestSha256;
+    previouslyEnabled = inspected.previouslyEnabled;
   } catch (err) {
     // 安装目录读不出清单 = 只剩"重新选包"一条路;如实降级,不吞掉恢复机会。
     installFlowLog.warn('reapprove-inspect failed; falling back to file picker', {
@@ -282,7 +284,9 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
     confirmText: t('settings.ghosts.reapproveConfirm.confirm'),
     cancelText: t('settings.ghosts.installConfirm.cancel'),
     checkboxLabel: t('settings.ghosts.installConfirm.enableNow'),
-    checkboxDefaultChecked: true,
+    // 默认值取用户升级前的启停偏好(.disabled 镜像):恢复权限 ≠ 替用户把停用的
+    // 插件重新点亮。
+    checkboxDefaultChecked: previouslyEnabled,
   });
   if (!ok) return;
   try {

@@ -45,13 +45,21 @@ describe('HTML 渲染态的 WebView 约束', () => {
     expect(htmlReaderSource).not.toContain("originWhitelist={['about:blank']}");
   });
 
+  it('只有用户点击的 http(s) 才外送 —— 程序化导航一律拒绝', () => {
+    // JavaScript 在这里是开启的:location.href / 表单自动提交 / meta refresh 都会走进
+    // 回调,不卡 click 的话,用户只要打开生成物就会被脚本强制带出 Cindy(review P1)。
+    expect(htmlReaderSource).toContain("request.navigationType === 'click'");
+    // Android 不上报 navigationType → 判为无法确认 → 拒绝(fail-closed)。
+    expect(htmlReaderSource).toContain('navigationType');
+  });
+
   it('三档决策:about 放行、http(s) 外送、其余拒绝且不碰 Linking', () => {
     // 页内锚点必须放行,否则目录跳转失效。
     expect(htmlReaderSource).toContain("url.startsWith('about:')");
     // http(s) 之外不得有任何 Linking 调用 —— 唯一一处必须在 http(s) 判定分支内。
     const linkingCalls = htmlReaderSource.match(/Linking\.openURL/g) ?? [];
     expect(linkingCalls).toHaveLength(1);
-    const httpBranch = /if \(\/\^https\?:\\\/\\\/\/i\.test\(url\)\) \{[\s\S]*?\n  \}/.exec(htmlReaderSource);
+    const httpBranch = /if \(\/\^https\?:[\s\S]*?\n  \}/.exec(htmlReaderSource);
     expect(httpBranch, '未找到 http(s) 分支').not.toBeNull();
     expect(httpBranch![0]).toContain('Linking.openURL');
     // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。

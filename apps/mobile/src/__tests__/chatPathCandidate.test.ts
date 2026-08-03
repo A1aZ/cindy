@@ -848,6 +848,16 @@ describe('findBareFileUrlMatch(正文纯文本裸 file:// URL 词法)', () => {
     expect(allValues('见 FILE:///Users/me/a.html')).toEqual([]);
   });
 
+  it('带 authority 的 file URL 不点亮(下游 slice(7) 会解析出垃圾路径)', () => {
+    // `file://localhost/x` 与 Windows UNC `file://server/share/x` 都是合法 file URL,
+    // 但 resolveChatAbsPath 固定 slice(7) 会得到 `localhost/x` / `server/share/x`,
+    // 丢掉绝对路径与 UNC 语义,远端 stat 必然找不到(还白发一次 stat)。
+    expect(allValues('见 file://localhost/Users/me/a.html')).toEqual([]);
+    expect(allValues('见 file://server/share/report.html')).toEqual([]);
+    // 三斜杠形态照常识别。
+    expect(allValues('见 file:///Users/me/a.html')).toEqual(['file:///Users/me/a.html']);
+  });
+
   it('不含 file:// 的文本走廉价短路', () => {
     expect(findBareFileUrlMatch('这是一句普通的中文,没有任何路径。', 0)).toBeNull();
     expect(findBareFileUrlMatch('见 src/App.tsx 第 20 行', 0)).toBeNull();

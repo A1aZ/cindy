@@ -65,9 +65,22 @@ describe('file preview shared model', () => {
     expect(isHtmlFilePreviewCandidate('C:\\proj\\report.html')).toBe(true);
   });
 
+  it('入参按真实文件名处理,`?` / `#` 不再被当 URL 语法截断(review P1)', () => {
+    // 原实现先 split(/[?#]/)[0],于是 macOS / Linux 上合法的 `report#draft.html` 被截成
+    // `report` → 无扩展名 → 判 unknown,**连文本预览都不给**。全部 7 个调用方传的都是
+    // 真实文件名 / 路径,没有一个传 URL,所以那份截断没有真实需求。
+    expect(remoteFilePreviewKind('/repo/report#draft.html')).toBe('text');
+    expect(remoteFilePreviewKind('/repo/report?v=1.html')).toBe('text');
+    // 与渲染态判定对齐:这两个名字既能读文本,也能进渲染态(上游分派不再拦住它们)。
+    expect(isHtmlFilePreviewCandidate('/repo/report#draft.html')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/report?v=1.html')).toBe(true);
+    // 反过来:名字里带 `?` / `#` 但**不以**已知扩展名结尾的,现在按真实扩展名判(不再截断后误判)。
+    expect(remoteFilePreviewKind('/repo/notes.html#readme.txt')).toBe('text'); // .txt 也是文本
+    expect(remoteFilePreviewKind('/repo/data.zip?x=1')).toBe('binary');
+  });
+
   it('only treats desktop text-like files as remote text preview candidates', () => {
     expect(remoteFilePreviewKind('/repo/notes.md')).toBe('text');
-    expect(remoteFilePreviewKind('/repo/package.json?from=mobile')).toBe('text');
     expect(remoteFilePreviewKind('/repo/Makefile')).toBe('text');
     expect(remoteFilePreviewKind('/repo/spec.pdf')).toBe('pdf');
     expect(remoteFilePreviewKind('/repo/workflow.drawio')).toBe('drawio');

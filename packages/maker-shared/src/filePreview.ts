@@ -103,8 +103,30 @@ export function extractRemoteFileExt(name: string): string {
   return lower.slice(dotIdx);
 }
 
+/**
+ * 文件按什么方式展示(text / pdf / office / drawio / binary / unknown)。**入参是真实文件名或路径。**
+ *
+ * ── 为什么不再按 URL 语义在 `?` / `#` 处截断(review P1) ──────────────────────
+ * 原实现先做 `pathOrName.split(/[?#]/)[0]`,那是把入参当 URL 处理。但 `?` / `#` 在真实文件名里
+ * 是**合法字符**(macOS / Linux 都允许),于是 macOS 上一个正常的 `report#draft.html` 会被截成
+ * `report` → 没有扩展名 → 判 `unknown`,**连文本预览都不给**;`report?v=1.html` 同理。
+ * 这不是安全问题,是功能缺失:文件明明可读,却被判成不可读。
+ *
+ * 全部 7 个调用方传的都是真实文件名或路径,**没有一个传 URL**:
+ * `fileBrowserGrid`(被控端 `fs:list` 的 `entry.name`)、`fileBrowser` 的三处(`entry.path` /
+ * `file.resolvedPath` / 用户输入的完整路径)、`MessageRenderer` 的两处(聊天里的文件路径)。
+ * 所以那份 URL 容忍从来没有真实需求 —— 与 `isHtmlFilePreviewCandidate` 上一轮收窄时得到的
+ * 是同一个结论,这次把它补齐到本函数。
+ *
+ * ── 为什么**只**去掉 URL 截断,保留 `.trim()` 与 basenameRemotePath 的削尾 ─────
+ * 这两个判定的严格度要求不同,不能一刀切:
+ *  - 本函数决定「怎么展示」。判宽一点的后果是「把一个怪名字的文件也按文本读了」—— 无害。
+ *  - `isHtmlFilePreviewCandidate` 决定「进不进可执行 WebView」,必须 fail-closed,所以它那边
+ *    连 `.trim()` 和削尾都不做(尾随空格 / 反斜杠都是合法文件名字符,归一化会让文件冒充 .html)。
+ * URL 截断之所以要改,是因为它的后果**不是判宽而是判死**:合法文件被判成不可读。
+ */
 export function remoteFilePreviewKind(pathOrName: string): RemoteFilePreviewKind {
-  const name = basenameRemotePath(pathOrName.split(/[?#]/)[0] ?? '').trim();
+  const name = basenameRemotePath(pathOrName).trim();
   if (!name) return 'unknown';
 
   const lowerName = name.toLowerCase();

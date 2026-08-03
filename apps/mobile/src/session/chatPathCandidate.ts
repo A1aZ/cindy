@@ -601,3 +601,61 @@ export function findBareFilePathMatch(input: string, from: number): BareFilePath
   }
   return null;
 }
+
+// ── 正文纯文本裸 `file://` URL 的词法定位 ────────────────────────────────────
+//
+// `file:///Users/me/report.html` 这种**不带 markdown 链接语法**的写法此前两个入口都
+// 漏:裸 URL matcher 只认 `https?://`(见 messageMarkdown.findNextInlineToken),而上面
+// 的裸路径 matcher 会因为命中点前一个字符是 `/`(BARE_PATH_LEFT_BOUNDARY)拒绝从
+// `file://` 之后起切。结果它既不是链接也不是路径,只能是纯文本 —— 偏偏 `file://` 是
+// 路径引用里最明确的形态(ABSOLUTE_PATH_SHAPE_RE / hasUnsupportedScheme 早就这么认)。
+//
+// 词法上比裸路径宽松得多:有显式 scheme,不存在「其实是属性访问 / 散文」的歧义,所以
+// 不套用裸路径那套中段过滤,只保留三条:
+//   - 主体沿用裸 http URL matcher 的口径(`[^\s<>()]`),空白 / 括号天然收尾,**另外排除
+//     全角句读**——中文里 URL 后面常常不带空格就接下文(`…a.html。然后`),不断开的话
+//     整段散文会被吞进路径;
+//   - 末字符再排除 ASCII 句读,句末的 `.` / `,` / `)` 不吞进路径(它们在路径中段合法,
+//     所以只挡末位);
+//   - 左边界拒绝 scheme 字符,`myfile://x` 不从中段起切。
+//
+// CJK **文字**照旧留在主体里(`file:///Users/me/文档/报告.html` 要能认),取舍与裸路径
+// matcher 一致:宁可承担「半角标点紧贴中文」的误伤,也不砍掉真实的中文目录名。残留误伤
+// 见 findBareFileUrlMatch 的说明,代价只是保持纯文本,不会点开错地址。
+//
+// **刻意只认小写 `file://`**:下游 resolveChatAbsPath 与 looksLikeLocalHref 都是大小写
+// 敏感地剥 scheme,放行 `FILE://` 会造出「进了候选却剥不掉 scheme」的坏绝对路径。
+const BARE_FILE_URL_CJK_PUNCT = '。，、；：！？…·（）【】〔〕「」『』《》〈〉“”‘’　';
+const BARE_FILE_URL_TRAILING_ASCII = '.,;:!?\'"`';
+const BARE_FILE_URL_RE_SOURCE =
+  '(?<![A-Za-z0-9+.\\-])'
+  + `(file://[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}]*`
+  + `[^\\s<>()${BARE_FILE_URL_CJK_PUNCT}${BARE_FILE_URL_TRAILING_ASCII}])`;
+
+/**
+ * 在一段纯文本里定位从 `from` 起**第一条**裸 `file://` URL。
+ *
+ * 复核走与其它入口同一个候选门(classifyChatPathLinkTarget):形状不达标的
+ * (`file://x`)不产出 token —— 否则 renderInline 的 link 分支会落到
+ * Linking.openURL,把 `file://` 交给手机 OS(必失败,部分 Android 还弹系统报错)。
+ * 存在性照旧由远端 stat(remotePathVerdict)兜底。
+ *
+ * 已知误伤(显式取舍,有用例钉住):**半角**标点紧贴中文时会连坐,如
+ * `…a.html,然后呢` —— 半角 `,` 在路径中段合法、`然后呢` 又是合法路径段字符,词法层分不开。
+ * 代价是整条保持纯文本(远端 stat 判 nonfile),不会点开错地址;中文正规写法用全角
+ * `，`,已在主体字符集里断开。
+ */
+export function findBareFileUrlMatch(input: string, from: number): BareFilePathMatch | null {
+  // 廉价短路(同 findBareFilePathMatch:本函数在渲染热路径上逐 token 调用)。
+  if (!input.includes('file://')) return null;
+  // 每次调用新建:`g` 的 lastIndex 是可变状态(同本文件与 messageMarkdown 的既有约定)。
+  const re = new RegExp(BARE_FILE_URL_RE_SOURCE, 'g');
+  re.lastIndex = Math.max(0, from);
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(input)) !== null) {
+    const value = m[1];
+    if (!classifyChatPathLinkTarget(value)) continue;
+    return { index: m.index, end: m.index + value.length, value };
+  }
+  return null;
+}

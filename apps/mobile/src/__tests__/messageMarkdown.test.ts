@@ -1308,6 +1308,55 @@ describe('bare file paths(正文纯文本形态)', () => {
   });
 });
 
+describe('bare file:// URLs(正文纯文本形态)', () => {
+  // 裸 `file://` 此前两个入口都漏:裸 URL matcher 只认 http(s),裸路径 matcher 的左边界
+  // 又卡在 `//` 之后 —— 结果既不是链接也不是路径,只能是纯文本。词法口径由
+  // chatPathCandidate.test.ts 固化,这里只钉分词结果与「不抢走既有包裹语法」。
+
+  it('句中裸 file:// URL 切成 link,前后纯文本保留', () => {
+    expect(parseMobileMarkdownInlines('稿子在 file:///Users/me/drafts/report.html 这里')).toEqual([
+      { type: 'text', text: '稿子在 ' },
+      {
+        type: 'link',
+        text: 'file:///Users/me/drafts/report.html',
+        url: 'file:///Users/me/drafts/report.html',
+        bare: true,
+      },
+      { type: 'text', text: ' 这里' },
+    ]);
+  });
+
+  it('整行只有一条 URL 时整段成 link', () => {
+    expect(parseMobileMarkdownInlines('file:///Users/me/a.html')).toEqual([
+      { type: 'link', text: 'file:///Users/me/a.html', url: 'file:///Users/me/a.html', bare: true },
+    ]);
+  });
+
+  it('显式 markdown 链接仍由链接 matcher 胜出(不被裸形态切碎)', () => {
+    expect(parseMobileMarkdownInlines('[稿子](file:///Users/me/a.html)')).toEqual([
+      { type: 'link', text: '稿子', url: 'file:///Users/me/a.html' },
+    ]);
+  });
+
+  it('行内 code 里的 file:// 仍是 code(由 code matcher 胜出)', () => {
+    expect(parseMobileMarkdownInlines('`file:///Users/me/a.html`')).toEqual([
+      { type: 'code', text: 'file:///Users/me/a.html' },
+    ]);
+  });
+
+  it('HTML 注释里的不识别(与裸路径同口径)', () => {
+    expect(parseMobileMarkdownInlines('<!-- file:///Users/me/a.html -->')).toEqual([
+      { type: 'text', text: '<!-- file:///Users/me/a.html -->' },
+    ]);
+  });
+
+  it('形状不达标的不成 link —— 否则渲染层会落到 Linking.openURL', () => {
+    expect(parseMobileMarkdownInlines('file://x')).toEqual([
+      { type: 'text', text: 'file://x' },
+    ]);
+  });
+});
+
 describe('groupMobileMarkdownSelectableBlocks', () => {
   it('merges consecutive text blocks into one run so native selection can cross paragraphs', () => {
     const blocks = parseMobileMarkdown([

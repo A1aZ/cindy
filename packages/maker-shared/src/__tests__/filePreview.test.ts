@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   describeTextPreviewFailure,
+  isHtmlFilePreviewCandidate,
   isTextFilePreviewCandidate,
   nonTextFilePreviewStatusText,
   remoteFilePreviewKind,
@@ -15,6 +16,24 @@ describe('file preview shared model', () => {
     expect(textPreviewStatusText({ status: 'ready', data: 'hello', size: 1024 }, true)).toBe('已加载文本预览 · 1.0 KB');
     expect(textPreviewStatusText({ status: 'unavailable', message: 'blocked', size: 0 }, true)).toBe('blocked');
     expect(textPreviewStatusText({ status: 'idle' }, false)).toContain('无法从远程电脑读取预览');
+  });
+
+  it('marks HTML generated artifacts as render-first previews without leaving the text channel', () => {
+    // 桌面端点开 HTML 就进浏览器渲染;手机端此前只能看源码,因为 HTML 落在
+    // SUPPORTED_TEXT_EXTS 里、预览页按文本分派。渲染判定单列一处,不动 'text' 结论。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/report.htm')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/page.xhtml')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/REPORT.HTML')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/report.html?from=chat')).toBe(true);
+    // 取字节仍走文本通道:两个判定同时为真,源码态与内容搜索不受影响。
+    expect(isTextFilePreviewCandidate('/repo/report.html')).toBe(true);
+    expect(remoteFilePreviewKind('/repo/report.html')).toBe('text');
+
+    expect(isHtmlFilePreviewCandidate('/repo/notes.md')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('/repo/index.html.bak')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('/repo/archive.zip')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('')).toBe(false);
   });
 
   it('only treats desktop text-like files as remote text preview candidates', () => {

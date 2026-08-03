@@ -2,15 +2,18 @@ import { normalizeMathDelimiters } from '@cindy/maker-shared/math-markdown';
 import {
   classifyChatPathLinkTarget,
   findBareFilePathMatch,
+  findBareFileUrlMatch,
   resolveChatAbsPath,
+  type BareFilePathMatch,
 } from '@/session/chatPathCandidate';
 import { DEEP_LINK_SCHEME_GROUP } from '@/session/sessionLinks';
 import { i18n } from '@/i18n';
 
 export type MobileMarkdownInline =
   | { type: 'text'; text: string }
-  // bare:这条 link 是从正文纯文本里切出来的裸路径(matchBareFilePathLink),不是作者
-  // 手写的 `[label](url)`。渲染层据此决定点亮后是否套等宽 chip —— 裸路径的未点亮态是
+  // bare:这条 link 是从正文纯文本里切出来的裸路径或裸 `file://` URL
+  // (matchBareLocalPathLink),不是作者手写的 `[label](url)`。
+  // 渲染层据此决定点亮后是否套等宽 chip —— 裸路径的未点亮态是
   // 普通正文,套等宽会让同一句里点亮/未点亮的路径在字体、底色、下划线三处齐变;作者
   // 手写且 label 像文件名的仍保留 chip(那是作者的排版意图)。见 DESIGN.md §14.5。
   // 与桌面 remarkLocalPathLinks 打的 data-bare-path 标记是同一件事的两端实现。
@@ -641,7 +644,12 @@ function findNextInlineToken(
     // 模型高频形态,桌面端由 remarkLocalPathLinks 切成 link 节点,这里补齐同一入口。
     // 产出 link inline 后与 `[label](path)` 形态共用 LinkPathChipSpan → 远端 stat →
     // 点亮 chip / 保持纯文本。
-    matchBareFilePathLink(input, from, startsInsideHtmlComment),
+    matchBareLocalPathLink(input, from, startsInsideHtmlComment, findBareFilePathMatch),
+    // 正文裸写的 `file://` URL(`见 file:///Users/me/report.html`):同样是模型高频
+    // 形态,却既不被裸 URL matcher(只认 http(s))也不被裸路径 matcher(左边界卡在
+    // `//` 后)收 —— 词法见 chatPathCandidate.findBareFileUrlMatch。产出同款 link
+    // inline,复用 LinkPathChipSpan → 远端 stat → 点亮 chip。
+    matchBareLocalPathLink(input, from, startsInsideHtmlComment, findBareFileUrlMatch),
     matchRegex(input, from, /`([^`]+)`/g, (match) => ({ type: 'code' as const, text: match[1] })),
     // inline math:$$x$$(双 dollar 行内形态)与 $x$。候选按起点排序,公式起点
     // 的 $ 早于公式体内的 * / _,强调规则不会拆走公式内容。单 dollar 采用
@@ -738,19 +746,21 @@ function matchLocalPathLink(
   return null;
 }
 
-// 正文纯文本裸路径 matcher(桌面 remarkLocalPathLinks 的分词层对等物)。词法判定在
-// chatPathCandidate.findBareFilePathMatch 里(含「必须带分隔符」的严判与廉价短路),
-// 这里只负责两件事:注释内压制、包装成 link inline。
+// 正文纯文本裸路径 / 裸 `file://` URL 的 matcher(桌面 remarkLocalPathLinks 的分词层
+// 对等物)。词法判定都在 chatPathCandidate 里(findBareFilePathMatch 含「必须带分隔符」
+// 的严判、findBareFileUrlMatch 含 scheme 形态,两者各自带廉价短路),`locate` 注入哪
+// 一个,这里只负责三件事:注释内压制、标签标记内压制、包装成 link inline。
 //
 // **不需要为「别抢走包裹语法」做特判**:`[图](/a.png)` / `![图](/a.png)` /
 // `` `src/a.ts` `` / `https://x.com/a/b.png` 这些形态里,包裹语法候选的起点 index 都
 // 严格小于其内部路径的 index,findNextInlineToken 既有的 index 升序排序天然让它们胜出。
 // 反过来,未闭合的反引号(`` `src/a.ts `` 流式中途)不构成 code span,此时裸路径照常
 // 命中——与桌面 remark 同口径(remark 也不会把它当 inlineCode)。
-function matchBareFilePathLink(
+function matchBareLocalPathLink(
   input: string,
   from: number,
-  startsInsideHtmlComment = false,
+  startsInsideHtmlComment: boolean,
+  locate: (input: string, from: number) => BareFilePathMatch | null,
 ): { index: number; end: number; inline: MobileMarkdownInline } | null {
   // 廉价短路:绝大多数消息段既不含 `<!--`、也不在跨块注释里,不为它们付
   // blankCodeSpans + blankEscapedAngles 两趟整串拷贝的开销(本函数在渲染热路径上
@@ -763,7 +773,7 @@ function matchBareFilePathLink(
   // 才是同口径),注释外的照常识别。
   let commentProbe: string | null = null;
   for (;;) {
-    const match = findBareFilePathMatch(input, cursor);
+    const match = locate(input, cursor);
     if (!match) return null;
     if (needsCommentCheck) {
       if (commentProbe === null) commentProbe = blankEscapedAngles(blankCodeSpans(input));

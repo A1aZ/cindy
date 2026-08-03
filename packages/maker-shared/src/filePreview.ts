@@ -51,6 +51,19 @@ const SUPPORTED_TEXT_EXTS = new Set([
   '.nvmrc', '.node-version', '.python-version', '.ruby-version', '.tool-versions',
 ]);
 
+/**
+ * 按「网页」预览的扩展名(渲染态优先,源码态可切)。
+ *
+ * 与桌面 shared/browserOpenableExts.ts 的 BROWSER_OPENABLE_EXTS 同源(桌面进系统
+ * 浏览器 / 侧边栏浏览器),额外收 `.xhtml`——桌面 useOpenWithMenu.isHtmlFilePath
+ * 也含它,渲染路径完全一样。两端如需调整应同步。
+ *
+ * ⚠️ 这些扩展名同时留在 SUPPORTED_TEXT_EXTS 里,是刻意的:HTML 仍然是「可安全按
+ * UTF-8 读取」的文本,取字节、源码态与内容搜索都依赖那个判定。本集合只多给一层
+ * 「默认怎么展示」的语义,不改变 remoteFilePreviewKind 的分类。
+ */
+const HTML_PREVIEW_EXTS = new Set(['.html', '.htm', '.xhtml']);
+
 const COMPOUND_EXTS = ['.env.example', '.env.local', '.env.development', '.env.production'];
 const KNOWN_TEXT_FILENAMES = new Set([
   'dockerfile',
@@ -98,6 +111,19 @@ export function remoteFilePreviewKind(pathOrName: string): RemoteFilePreviewKind
 
 export function isTextFilePreviewCandidate(pathOrName: string): boolean {
   return remoteFilePreviewKind(pathOrName) === 'text';
+}
+
+/**
+ * 是否按网页渲染预览(HTML 生成物)。
+ *
+ * agent 产出的 HTML 报告 / 设计稿是跨端生成物:桌面端点开就进浏览器渲染,手机端此前
+ * 只能看源码——因为 HTML 落在 SUPPORTED_TEXT_EXTS 里,预览页按文本分派。判定单列一处
+ * 供两端共用,不去动 remoteFilePreviewKind 的 'text' 结论(取字节仍走文本通道)。
+ */
+export function isHtmlFilePreviewCandidate(pathOrName: string): boolean {
+  const name = basenameRemotePath(pathOrName.split(/[?#]/)[0] ?? '').trim();
+  if (!name) return false;
+  return HTML_PREVIEW_EXTS.has(extractRemoteFileExt(name));
 }
 
 export function nonTextFilePreviewStatusText(kind: RemoteFilePreviewKind): string {

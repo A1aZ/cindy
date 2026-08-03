@@ -9,6 +9,7 @@ import {
   classifyInlineCodePathCandidate,
   dropDotSegments,
   findBareFilePathMatch,
+  findBareFileUrlMatch,
   isAbsolutePathShape,
   looksLikeBareFileReference,
   looksLikeFilePath,
@@ -761,5 +762,103 @@ describe('远端 verdict 通知必须驱动重验,不能只驱动重绘(源码�
     const deps = /\}, \[([^\]]*)\]\);/.exec(src.slice(idx));
     expect(deps, '未找到验证副作用的依赖数组').not.toBeNull();
     expect(deps![1], 'cacheGen 不在依赖里 —— 缓存变化不会触发重验').toMatch(/cacheGen/);
+  });
+});
+
+describe('findBareFileUrlMatch(正文纯文本裸 file:// URL 词法)', () => {
+  /** 从头扫一遍,列出全部命中。 */
+  const allValues = (text: string): string[] => {
+    const out: string[] = [];
+    let cursor = 0;
+    for (;;) {
+      const match = findBareFileUrlMatch(text, cursor);
+      if (!match) return out;
+      out.push(match.value);
+      cursor = match.end;
+    }
+  };
+
+  // ── 应该识别的场景 ──
+
+  it('正文里裸写的 file:// URL,并给出精确区间', () => {
+    const text = '稿子在 file:///Users/me/drafts/report.html 这里';
+    const match = findBareFileUrlMatch(text, 0);
+    expect(match).toEqual({
+      index: 4,
+      end: 39,
+      value: 'file:///Users/me/drafts/report.html',
+    });
+    // 区间外是纯文本,分词层据此切前后两段。
+    expect(text.slice(0, match!.index)).toBe('稿子在 ');
+    expect(text.slice(match!.end)).toBe(' 这里');
+  });
+
+  it('句末标点不吞进路径(ASCII 与全角都不吞)', () => {
+    expect(allValues('见 file:///Users/me/a.html。')).toEqual(['file:///Users/me/a.html']);
+    expect(allValues('见 file:///Users/me/a.html.')).toEqual(['file:///Users/me/a.html']);
+    expect(allValues('见 file:///Users/me/a.html)')).toEqual(['file:///Users/me/a.html']);
+    expect(allValues('见 file:///Users/me/a.html;')).toEqual(['file:///Users/me/a.html']);
+  });
+
+  it('中文不带空格接下文时在全角句读处断开(URL 不吞散文)', () => {
+    expect(allValues('见 file:///Users/me/a.html。然后改一下'))
+      .toEqual(['file:///Users/me/a.html']);
+    expect(allValues('见 file:///Users/me/a.html，然后改一下'))
+      .toEqual(['file:///Users/me/a.html']);
+    expect(allValues('稿子(file:///Users/me/a.html)在这'))
+      .toEqual(['file:///Users/me/a.html']);
+  });
+
+  it('已知误伤:半角标点紧贴中文时连坐(代价只是保持纯文本)', () => {
+    // 半角 `,` 在路径中段合法、`然后呢` 又是合法路径段字符,词法层分不开。
+    // 命中的是一条不存在的路径 → 远端 stat 判 nonfile → 保持纯文本,不会点开错地址。
+    expect(allValues('见 file:///Users/me/a.html,然后呢'))
+      .toEqual(['file:///Users/me/a.html,然后呢']);
+  });
+
+  it('同一段里的多条 URL 各自命中', () => {
+    expect(allValues('对比 file:///a/x.html 和 file:///b/y.html'))
+      .toEqual(['file:///a/x.html', 'file:///b/y.html']);
+  });
+
+  it('中文目录名照常识别(路径段里的 CJK 不是边界)', () => {
+    expect(allValues('见 file:///Users/me/文档/报告.html'))
+      .toEqual(['file:///Users/me/文档/报告.html']);
+  });
+
+  it('带 :line 后缀的形态整条收进来(拆后缀交给渲染层)', () => {
+    expect(allValues('见 file:///Users/me/a.ts:42')).toEqual(['file:///Users/me/a.ts:42']);
+  });
+
+  // ── 不应该识别的场景 ──
+
+  it('不从另一个 token 的中段起切', () => {
+    expect(allValues('myfile:///Users/me/a.html')).toEqual([]);
+    expect(allValues('x2file:///Users/me/a.html')).toEqual([]);
+  });
+
+  it('形状不达标的不产出 token —— 否则渲染层会把它交给 Linking.openURL', () => {
+    // classifyChatPathLinkTarget 是与 inline code / 显式链接共用的候选门:
+    // `file://x` 过不了它,这里就不能产出 link inline,不然手机 OS 必然打不开。
+    expect(allValues('file://x')).toEqual([]);
+    expect(allValues('见 file:// 后面什么都没有')).toEqual([]);
+  });
+
+  it('只认小写 scheme(下游剥 scheme 是大小写敏感的)', () => {
+    expect(allValues('见 FILE:///Users/me/a.html')).toEqual([]);
+  });
+
+  it('不含 file:// 的文本走廉价短路', () => {
+    expect(findBareFileUrlMatch('这是一句普通的中文,没有任何路径。', 0)).toBeNull();
+    expect(findBareFileUrlMatch('见 src/App.tsx 第 20 行', 0)).toBeNull();
+  });
+
+  it('命中可被 classifyChatPathLinkTarget 解成非歧义候选(断链时也乐观点亮)', () => {
+    const value = findBareFileUrlMatch('见 file:///Users/me/a.html', 0)!.value;
+    const candidate = classifyChatPathLinkTarget(value);
+    expect(candidate).not.toBeNull();
+    // file:// 是路径引用里最明确的形态 → 不歧义 → verdict unknown 时照旧点亮。
+    expect(candidate!.ambiguousShape).toBe(false);
+    expect(resolveChatAbsPath(candidate!.href, '/w')).toBe('/Users/me/a.html');
   });
 });

@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import type { BrowserCommentTargetInfo } from '../../../../shared/browserComment';
 
 import {
   captureComposerSendSnapshot,
@@ -11,33 +10,32 @@ const attachment = {
   id: 'file-1',
   name: 'one.txt',
   path: '/tmp/one.txt',
-  ext: 'txt',
+  ext: '.txt',
   size: 3,
-  mimeType: 'text/plain',
   category: 'text' as const,
-};
-const commentTarget: BrowserCommentTargetInfo = {
-  kind: 'element',
-  point: { x: 10, y: 20 },
-  viewport: { width: 1280, height: 720 },
-  region: null,
-  selectedText: null,
-  immediate: false,
-  targetTag: 'button',
-  targetLabel: 'one',
-  targetRole: 'button',
-  targetSelector: '#one',
-  targetPath: 'html > body > button',
-  nearbyText: 'one',
-  themeVariant: 'light',
-  designBaseline: null,
-  markerNumber: 1,
+  mimeType: 'text/plain',
 };
 const comment = {
   id: 'comment-1',
   markerNumber: 1,
-  pageUrl: 'https://example.com',
-  target: commentTarget,
+  pageUrl: 'https://example.com/page',
+  target: {
+    kind: 'element' as const,
+    point: { x: 10, y: 10 },
+    viewport: { width: 1280, height: 800 },
+    region: null,
+    selectedText: null,
+    immediate: false,
+    targetTag: 'div',
+    targetLabel: null,
+    targetRole: null,
+    targetSelector: '#one',
+    targetPath: null,
+    nearbyText: null,
+    themeVariant: null,
+    designBaseline: null,
+    markerNumber: 1,
+  },
   comment: 'keep this',
   screenshot: attachment,
 };

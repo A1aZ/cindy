@@ -367,4 +367,14 @@ describe('probeDue(只读探测窗口判定,给 rehydrate 主动探测用)', () 
     expect(h.breaker.probeDue(DEV)).toBe(false);
     expect(h.breaker.isOpen(DEV)).toBe(false);
   });
+
+  it('half-open 时普通请求不能占用 probe 席位', () => {
+    const h = harness();
+    openBreaker(h);
+    h.advance(BREAKER_PROBE_BACKOFF_BASE_MS);
+    expect(h.breaker.acquire(DEV, h.breaker.createCohort(DEV), { allowProbe: false }).decision).toBe(
+      'reject',
+    );
+    expect(h.breaker.acquire(DEV).decision).toBe('probe');
+  });
 });

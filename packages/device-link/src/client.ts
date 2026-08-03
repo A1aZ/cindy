@@ -433,8 +433,8 @@ export class DeviceLinkClient {
    * 不改默认退避曲线(桌面端断线重连仍走 scheduleReconnect 的 1s→30s)。
    * 已 online 时为空操作,不打断健康连接;stopped 时等价于 start()。
    */
-  connectNow(reason = 'connect-now'): void {
-    if (this.status === 'online') return;
+  connectNow(reason = 'connect-now', options?: { force?: boolean }): void {
+    if (this.status === 'online' && !options?.force) return;
     this.stopped = false;
     this.reconnectAttempt = 0;
     if (this.reconnectTimer) {

@@ -153,16 +153,33 @@ let unsubscribeAuthState: (() => void) | null = null;
 /** ownership store 按 DbClient 实例缓存(避免每 tick 建对象);换库(换账号)自动重建 */
 let ownershipStoreCache: { db: unknown; store: OwnershipStore } | null = null;
 const pendingPeerLinkReopens = new Set<string>();
+let pendingPeerLinkReopenRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function schedulePendingPeerLinkReopenRetry(): void {
+  if (pendingPeerLinkReopenRetryTimer !== null || linkTornDown) return;
+  if (arbiter && !arbiter.isOwner()) return;
+  pendingPeerLinkReopenRetryTimer = setTimeout(() => {
+    pendingPeerLinkReopenRetryTimer = null;
+    flushPendingPeerLinkReopens();
+  }, 5_000);
+  pendingPeerLinkReopenRetryTimer.unref?.();
+}
 
 function flushPendingPeerLinkReopens(): void {
   if (linkTornDown || (arbiter && !arbiter.isOwner())) return;
   for (const deviceId of pendingPeerLinkReopens) {
     log.debug(`peer link stale-frame recovery for ${deviceId.slice(0, 8)}`);
     void openRemoteLink(deviceId).then(
-      () => pendingPeerLinkReopens.delete(deviceId),
+      () => {
+        pendingPeerLinkReopens.delete(deviceId);
+        if (pendingPeerLinkReopens.size === 0 && pendingPeerLinkReopenRetryTimer !== null) {
+          clearTimeout(pendingPeerLinkReopenRetryTimer);
+          pendingPeerLinkReopenRetryTimer = null;
+        }
+      },
       (err) => {
         log.debug(`peer link stale-frame recovery failed for ${deviceId.slice(0, 8)}`, err);
-        setTimeout(flushPendingPeerLinkReopens, 5_000);
+        schedulePendingPeerLinkReopenRetry();
       },
     );
   }
@@ -798,6 +815,11 @@ export function getMobileNotifyGeneration(): number {
 function teardownActiveLink(): void {
   if (!client || linkTornDown) return;
   linkTornDown = true;
+  if (pendingPeerLinkReopenRetryTimer !== null) {
+    clearTimeout(pendingPeerLinkReopenRetryTimer);
+    pendingPeerLinkReopenRetryTimer = null;
+  }
+  pendingPeerLinkReopens.clear();
   mobileNotifyGeneration += 1;
   if (relayAuthRecoveryRetryTimer !== null) {
     clearTimeout(relayAuthRecoveryRetryTimer);

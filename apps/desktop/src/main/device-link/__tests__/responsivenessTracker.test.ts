@@ -131,20 +131,12 @@ describe('responsivenessTracker', () => {
     expect(recoverLink).toHaveBeenCalledWith(DEV);
   });
 
-  it('同一设备的并发超时共享 cohort,一次链路故障只计一次 strike', async () => {
+  it('同一设备的独立并发超时分别计数,避免吞掉独立故障', async () => {
     const h = harness();
     const requests = Array.from({ length: BREAKER_FAILURE_THRESHOLD }, () =>
       h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
     );
     await expect(Promise.all(requests)).rejects.toThrow('no invoke-result');
-    expect(h.tracker.isUnresponsive(DEV)).toBe(false);
-
-    await expect(
-      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
-    ).rejects.toThrow();
-    await expect(
-      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
-    ).rejects.toThrow();
     expect(h.tracker.isUnresponsive(DEV)).toBe(true);
   });
 
@@ -225,6 +217,20 @@ describe('responsivenessTracker', () => {
       ).rejects.toThrow();
     }
     expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+  });
+
+  it('clearDevice 清理在途 recovery 后允许再次触发恢复', async () => {
+    const recoverLink = vi.fn(() => new Promise<void>(() => {}));
+    const h = harness({ recoverLink });
+    await expect(
+      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+    ).rejects.toThrow();
+    expect(recoverLink).toHaveBeenCalledTimes(1);
+    h.tracker.clearDevice(DEV);
+    await expect(
+      h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+    ).rejects.toThrow();
+    expect(recoverLink).toHaveBeenCalledTimes(2);
   });
 
   it('resetAll 关闭所有 open 设备并通知恢复', async () => {

@@ -116,7 +116,12 @@ export interface DeviceResponsivenessTracker {
    * 熔断 open 且无探测窗口 → 立即抛 DEVICE_UNRESPONSIVE(不占管道、不等超时);
    * 否则执行 run 并按结果 settle(超时计失败,真实回包按通道分类)。
    */
-  guardInvoke<T>(deviceId: string, channel: string, run: () => Promise<T>): Promise<T>;
+  guardInvoke<T>(
+    deviceId: string,
+    channel: string,
+    run: () => Promise<T>,
+    cohort?: number,
+  ): Promise<T>;
   /** 周期探测 tick:对每个熔断 open、探测窗口已到且前置条件满足的设备发一发单飞探测。 */
   probeTick(): void;
   isUnresponsive(deviceId: string): boolean;
@@ -131,11 +136,9 @@ export function createResponsivenessTracker(
   deps: ResponsivenessTrackerDeps,
 ): DeviceResponsivenessTracker {
   const log = deps.log ?? { info: () => {}, warn: () => {}, debug: () => {} };
-  const now = deps.now ?? Date.now;
   const unresponsive = new Set<string>();
   const linkRecoveryInFlight = new Map<string, Promise<unknown>>();
-  /** 同一设备在途业务请求共享一个 timeout cohort，避免一次链路故障重复计 strike。 */
-  const activeCohorts = new Map<string, { cohort: number; count: number }>();
+  /** 同一设备并发业务请求共享一个 timeout cohort，避免一次链路故障重复计 strike。 */
   const breaker = createDeviceResponsivenessBreaker({
     now: deps.now,
     onOpenChanged: (deviceId, open) => {
@@ -152,37 +155,26 @@ export function createResponsivenessTracker(
     breaker.settle(deviceId, slot, outcome);
   };
 
-  const releaseCohort = (deviceId: string, slot: BreakerSendSlot): void => {
-    if (slot.decision !== 'allow') return;
-    const active = activeCohorts.get(deviceId);
-    if (!active || active.cohort !== slot.cohort) return;
-    if (active.count <= 1) activeCohorts.delete(deviceId);
-    else active.count -= 1;
-  };
-
   const guardInvoke = async <T>(
     deviceId: string,
     channel: string,
     run: () => Promise<T>,
+    cohortOverride?: number,
   ): Promise<T> => {
-    const cohort = activeCohorts.get(deviceId)?.cohort ?? breaker.createCohort(deviceId);
-    const slot = breaker.acquire(deviceId, cohort);
+    const cohort = cohortOverride ?? breaker.createCohort(deviceId);
+    const slot = breaker.acquire(deviceId, cohort, { allowProbe: false });
     if (slot.decision === 'reject') throw createDeviceUnresponsiveError(deviceId);
-    if (slot.decision === 'allow') {
-      const current = activeCohorts.get(deviceId);
-      if (current?.cohort === cohort) current.count += 1;
-      else activeCohorts.set(deviceId, { cohort, count: 1 });
-    }
     const wasProbe = slot.decision === 'probe';
     try {
       const result = await run();
       settle(deviceId, slot, classifyDeviceSendSuccess(channel, wasProbe));
-      releaseCohort(deviceId, slot);
       return result;
     } catch (err) {
-      const outcome = classifyDeviceSendFailure(err);
+      const outcome =
+        wasProbe && channel !== DEVICE_RESPONSIVENESS_PROBE_CHANNEL
+          ? 'inconclusive'
+          : classifyDeviceSendFailure(err);
       settle(deviceId, slot, outcome);
-      releaseCohort(deviceId, slot);
       if (outcome === 'timeout' && deps.recoverLink && !linkRecoveryInFlight.has(deviceId)) {
         let recovery: Promise<unknown>;
         try {
@@ -210,15 +202,36 @@ export function createResponsivenessTracker(
       if (!breaker.probeDue(deviceId)) continue;
       if (!deps.isProbeEligible(deviceId)) continue;
       log.debug(`probing unresponsive device ${deviceId.slice(0, 8)}`);
-      void guardInvoke(deviceId, DEVICE_RESPONSIVENESS_PROBE_CHANNEL, () =>
-        deps.probeInvoke(
+      const slot = breaker.acquire(deviceId, breaker.createCohort(deviceId), {
+        allowProbe: true,
+      });
+      if (slot.decision !== 'probe') continue;
+      let probePromise: Promise<unknown>;
+      try {
+        probePromise = deps.probeInvoke(
           deviceId,
           DEVICE_RESPONSIVENESS_PROBE_CHANNEL,
           buildDeviceResponsivenessProbeArgs(),
-        ),
-      ).catch((err) => {
-        log.debug(`responsiveness probe failed for ${deviceId.slice(0, 8)}`, err);
-      });
+        );
+      } catch (err) {
+        probePromise = Promise.reject(err);
+      }
+      void Promise.resolve(probePromise)
+        .then(
+          () =>
+            breaker.settle(
+              deviceId,
+              slot,
+              classifyDeviceSendSuccess(DEVICE_RESPONSIVENESS_PROBE_CHANNEL, true),
+            ),
+          (err) => {
+            breaker.settle(deviceId, slot, classifyDeviceSendFailure(err));
+            throw err;
+          },
+        )
+        .catch((err) => {
+          log.debug(`responsiveness probe failed for ${deviceId.slice(0, 8)}`, err);
+        });
     }
   };
 
@@ -228,11 +241,10 @@ export function createResponsivenessTracker(
     isUnresponsive: (deviceId) => unresponsive.has(deviceId),
     getUnresponsiveDeviceIds: () => [...unresponsive],
     clearDevice: (deviceId) => {
-      activeCohorts.delete(deviceId);
+      linkRecoveryInFlight.delete(deviceId);
       breaker.clear(deviceId);
     },
     resetAll: () => {
-      activeCohorts.clear();
       linkRecoveryInFlight.clear();
       breaker.resetAll();
     },

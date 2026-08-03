@@ -3004,6 +3004,21 @@ describe('DeviceLinkClient', () => {
     h.client.stop();
   });
 
+  it('connectNow:force 可在 online 状态丢弃半开 socket 并重连', async () => {
+    const h = makeHarness();
+    h.client.start();
+    await tick();
+    h.current().ack();
+    expect(h.client.getStatus()).toBe('online');
+
+    h.client.connectNow('system-resume', { force: true });
+    await tick();
+    expect(h.sockets.length).toBe(2);
+    h.current().ack();
+    expect(h.client.getStatus()).toBe('online');
+    h.client.stop();
+  });
+
   it('connectNow:stopped 后也能拉起连接(等价 start)', async () => {
     const h = makeHarness();
     h.client.start();

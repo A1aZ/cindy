@@ -63,7 +63,9 @@ describe('强更阻断闸门', () => {
     expect(layout).toContain('useForcedUpdateRecheck();');
     // 解除方向 fail-closed:只有成功拉到 /latest 且判定不再强更才解除,
     // 拉取失败 / 记录解析不出 / 拿不到本机 version 一律维持阻断,不能靠断网绕过。
-    expect(recheck).toContain("if (!record || !currentVersion) return 'error';");
+    expect(recheck).toContain(
+      "if (!record || !currentRuntimeVersion || !currentVersion) return 'error';",
+    );
     expect(recheck).toContain("return 'error'");
     // 仍强更时必须刷新 target:服务端可能只修正了坏掉的安装地址。
     expect(recheck).toContain('deps.onStillForced(evaluation.target, startRevision)');

@@ -220,6 +220,24 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     await expect(runOnce(deps)).resolves.toBe('cleared');
   });
 
+  it('服务端 404(整包记录被撤下)→ 解除阻断(冷启动同样不会阻断,运行中不该更严)', async () => {
+    // fetchLatestRelease 只在 404 时返回 null(网络 / 5xx 都抛错),这是服务端明确声明
+    // "该平台当前没有整包记录" —— 记录不存在,门槛也不存在。
+    const deps = makeDeps({ fetchLatest: vi.fn(async () => null) });
+    await expect(runOnce(deps)).resolves.toBe('cleared');
+    expect(deps.onCleared).toHaveBeenCalledWith(7);
+  });
+
+  it('拿不到本机 runtimeVersion → 维持阻断(不能靠 expo-updates 异常绕过)', async () => {
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ minVersion: undefined })),
+      getCurrentRuntimeVersion: () => null,
+    });
+    await expect(runOnce(deps)).resolves.toBe('error');
+    expect(deps.onCleared).not.toHaveBeenCalled();
+    expect(deps.onStillForced).not.toHaveBeenCalled();
+  });
+
   it('/latest 拉取失败 → 维持阻断(不能靠断网绕过强更)', async () => {
     const deps = makeDeps({ fetchLatest: vi.fn(async () => { throw new Error('offline'); }) });
     await expect(runOnce(deps)).resolves.toBe('error');

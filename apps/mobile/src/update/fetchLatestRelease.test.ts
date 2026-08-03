@@ -12,6 +12,18 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/**
+ * 断言请求 URL = 期望前缀 + `&t=<时间戳>`。
+ * 刻意不用 `new RegExp` 拼含 host 的字符串:URL 里的 `.` 在正则里是通配,
+ * 会匹配到别的主机(CodeQL js/incomplete-hostname-regexp)。
+ */
+function expectCacheBustedUrl(url: unknown, prefix: string): void {
+  expect(typeof url).toBe('string');
+  const bustPrefix = `${prefix}&t=`;
+  expect(String(url).startsWith(bustPrefix)).toBe(true);
+  expect(String(url).slice(bustPrefix.length)).toMatch(/^\d+$/);
+}
+
 describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
   it('非自建变体(baseUrl 为空)→ null,不发请求', async () => {
     const fetchMock = vi.fn();
@@ -24,22 +36,16 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1', version: '1.2.0' }));
     vi.stubGlobal('fetch', fetchMock);
     await expect(fetchLatestRelease('ios', 8000, BASE)).resolves.toEqual({ runtimeVersion: 'rtv1', version: '1.2.0' });
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringMatching(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`)),
-      expect.any(Object),
-    );
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expectCacheBustedUrl(url, `${BASE}/latest?platform=ios`);
   });
 
   it('canary 显式追加 channel，stable URL 保持旧契约', async () => {
     const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
     vi.stubGlobal('fetch', fetchMock);
     await fetchLatestRelease('android', 8000, BASE, true);
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringMatching(
-        new RegExp(`^${BASE}/latest\\?platform=android&channel=canary&t=\\d+$`),
-      ),
-      expect.any(Object),
-    );
+    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    expectCacheBustedUrl(url, `${BASE}/latest?platform=android&channel=canary`);
   });
 
   it('一律绕缓存:每次请求都带 cache-buster + no-cache 头', async () => {
@@ -49,7 +55,7 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     vi.stubGlobal('fetch', fetchMock);
     await fetchLatestRelease('ios', 8000, BASE);
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toMatch(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`));
+    expectCacheBustedUrl(url, `${BASE}/latest?platform=ios`);
     expect(init.headers).toEqual({ accept: 'application/json', 'cache-control': 'no-cache' });
   });
 

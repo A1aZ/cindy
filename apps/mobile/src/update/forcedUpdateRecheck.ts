@@ -111,13 +111,25 @@ export function createForcedUpdateRechecker(
     try {
       const latest = await withTimeout(deps.fetchLatest(), latestTimeoutMs);
       if (deps.isCurrent && !deps.isCurrent()) return 'still-forced';
+      // null 只在服务端 404 时出现(网络 / 5xx 都抛错),是服务端**明确声明**该平台当前
+      // 没有整包记录 —— 记录不存在,门槛也就不存在。必须解除:同样的 404 在冷启动路径上
+      // 根本不会进入阻断(evaluateBundleUpdate 对 null 返回无更新),运行中的进程不该比
+      // 冷启动更严,否则用户被卡到杀进程为止。
+      if (latest === null) {
+        deps.onCleared(startRevision);
+        return 'cleared';
+      }
       // 解除必须建立在"真的比出来了不再低于门槛"之上。record 解析不出(指针损坏 /
       // 被中间层改坏)或拿不到本机 version 时,evaluateBundleUpdate 会 fail-open 报
       // 无更新 —— 那是**进入**方向的正确取向,拿到解除方向就成了漏洞:一条坏记录
       // 就能放行所有被强更的装机。这里显式挡掉,按拉取失败处理。
+      // currentRuntimeVersion 同样是必需条件:拿不到它(expo-updates 未启用 / 返回空)时
+      // evaluateBundleUpdate 会 fail-open 报无更新 —— 那是进入方向的取向,用在解除方向
+      // 就成了绕过强更的口子。
       const record = parseLatestRelease(latest);
+      const currentRuntimeVersion = String(deps.getCurrentRuntimeVersion() ?? '').trim();
       const currentVersion = String(deps.getCurrentVersion() ?? '').trim();
-      if (!record || !currentVersion) return 'error';
+      if (!record || !currentRuntimeVersion || !currentVersion) return 'error';
       // 新鲜度门:读到的记录不得比正在阻断的目标更旧。可变指针 + 无 cache-buster 的请求
       // 会撞上 CDN 边缘的旧记录,那条记录没有 minVersion → 会把仍需强更的用户放出去。
       // 记录缺 version(parseLatestRelease 容许空串)同样证明不了新鲜度,一并挡掉。
@@ -128,7 +140,7 @@ export function createForcedUpdateRechecker(
         return 'error';
       }
       const evaluation = evaluateBundleUpdate({
-        currentRuntimeVersion: deps.getCurrentRuntimeVersion(),
+        currentRuntimeVersion,
         currentVersion,
         latest,
       });

@@ -1055,6 +1055,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // dev-only 运行时控制(packaged 版 main 侧不注册该 channel)。
     devRuntime: (action: 'status' | 'spawn' | 'stop' | 'crash', id?: string): Promise<unknown> =>
       ipcRenderer.invoke('ghosts:dev-runtime', action, id),
+    devCall: (id: string, tool: string, args: Record<string, unknown>): Promise<unknown> =>
+      ipcRenderer.invoke('ghosts:dev-runtime', 'call', id, { tool, args }),
   },
 
   pluginMarket: {

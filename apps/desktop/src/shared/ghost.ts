@@ -711,12 +711,15 @@ export const GHOST_OAUTH_BOUNCE_PATH_RE = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)
  *   授权换来的 access token——用户在意识设置页填 client 凭证并点"连接账号",
  *   主机跑授权流程并保管全部令牌,出网时现取新鲜 token 注入(见
  *   GhostSecretOauthDecl;必须同时声明 oauth 详单)。
+ * - 'oidc-token':值 = Cindy 为当前企业 Membership 签发的短时 Connection
+ *   JWT。audience 由 Host 的可信安装记录推导，插件不能声明或读取；令牌
+ *   只在 networkSlot 发请求时注入，且永不进入 Node Worker。
  *
  * ('login-feishu-token' 已于 2026-07-17 随飞书登录整体下线退役——xd-feishu
  * 改走 source:'oauth' + tokenBroker:'feishu';存量已装清单由内置意识播种器
  * 按指纹覆盖自愈,未覆盖前该意识加载被拒属预期。)
  */
-export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth'] as const;
+export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth', 'oidc-token'] as const;
 export type GhostSecretSource = (typeof GHOST_SECRET_SOURCES)[number];
 
 /**
@@ -735,7 +738,7 @@ export interface GhostSecretDecl {
   key: string;
   /** 给用户看的名称(装入确认框展示)。 */
   label: string;
-  /** 凭证值来源;缺省 'user'(校验归一化:'user' 不落清单,只保留 'login-email')。 */
+  /** 凭证值来源;缺省 'user'(校验归一化:'user' 不落清单)。 */
   source?: GhostSecretSource;
   /** 可选提示(如"在 example.com/settings 生成")。 */
   hint?: string;
@@ -1624,6 +1627,16 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
         ...(secret.oauth.scopes && secret.oauth.scopes.length > 0
           ? { detail: secret.oauth.scopes.join('\n') }
           : {}),
+      });
+      continue;
+    }
+    if (secret.source === 'oidc-token') {
+      items.push({
+        key: `network:secret:${secret.key}`,
+        kind: 'network',
+        labelKey: 'networkSecretOrganizationIdentity',
+        labelArgs: { name: secret.label },
+        detailKey: 'networkSecretOrganizationIdentityDetail',
       });
       continue;
     }
@@ -3424,7 +3437,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         if (typeof s.label !== 'string' || s.label.trim().length === 0 || s.label.length > 64) {
           return { ok: false, reason: 'network.secrets[].label 必须是 1–64 字符的非空字符串' };
         }
-        // 来源:缺省 'user';'login-email' = 主机登录邮箱派生(用户不填值)。
+        // 来源:缺省 'user';login-email / oauth / oidc-token 均由主机托管。
         // 归一化:'user' 不落清单(与缺省同义,权限 diff 不 churn)。
         let source: GhostSecretSource | undefined;
         if (s.source !== undefined) {
@@ -3439,6 +3452,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           }
           if (s.source === 'login-email') source = 'login-email';
           if (s.source === 'oauth') source = 'oauth';
+          if (s.source === 'oidc-token') source = 'oidc-token';
         }
         // 旧 input 字段已退役：Setup Runtime 直接从 Secret 声明生成 Host 表单，
         // settingsHtml 继续提供详情页管理。遗留 `input: "ghost"` 接受并忽略
@@ -3451,26 +3465,26 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         }
         // login-email:值取自主机登录态派生,用户不填、没有输入面,
         // 禁 url / exchange,settingsHtml 豁免。
-        const loginDerived = source === 'login-email';
-        if (s.input === 'ghost' && loginDerived) {
+        const hostDerived = source === 'login-email' || source === 'oidc-token';
+        if (s.input === 'ghost' && hostDerived) {
           return {
             ok: false,
             reason: `source: ${source} 的凭证不允许标注 input: ghost(派生凭证没有输入,谈不上谁收单)`,
           };
         }
-        if (!loginDerived && raw.settingsHtml === undefined) {
+        if (!hostDerived && raw.settingsHtml === undefined) {
           return {
             ok: false,
             reason: 'network.secrets 声明了用户填写的凭证时必须同时声明 settingsHtml(调用前可由 Host Setup 卡收单,settingsHtml 仍是长期管理/替换/清除入口)',
           };
         }
-        if (loginDerived && s.url !== undefined) {
+        if (hostDerived && s.url !== undefined) {
           return {
             ok: false,
             reason: `network.secrets[].source 为 ${source} 时不允许声明 url(值取自主机登录态,没有"前往控制台"可去)`,
           };
         }
-        if (loginDerived && s.exchange !== undefined) {
+        if (hostDerived && s.exchange !== undefined) {
           // 组合会把登录态凭证作为原始值 POST 给交换端点,而确认框文案只
           // 承诺"派生注入请求头"——语义盖不住,结构上禁掉(有真实场景再议)。
           return {
@@ -3534,6 +3548,26 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
               return { ok: false, reason: `network.secrets[].inject.hosts 含重复条目 ${JSON.stringify(ih)}` };
             }
             injectHosts.push(ihNorm);
+          }
+        }
+        if (source === 'oidc-token') {
+          if (inj.header !== 'Authorization' || inj.format !== 'Bearer {value}') {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时 inject 必须是 Authorization: Bearer {value}',
+            };
+          }
+          if (injectHosts === undefined) {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时必须显式声明非空 inject.hosts，限制企业身份令牌的流向',
+            };
+          }
+          if (injectHosts.some((host) => host.startsWith('*.'))) {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时 inject.hosts 只允许精确域名，不允许通配',
+            };
           }
         }
         // oauth(source: 'oauth' 时必填):主机托管 OAuth 授权详单。授权页与
@@ -4040,7 +4074,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
 
   // setup 就绪声明:引用必须指向已声明的凭证/连接(悬空引用在装包期拒,
   // 不留到运行期才发现作者写错);kv 引用要求 settingsHtml(没有设置页
-  // 没人填参数);login-email 源恒就绪,引用它属结构性误解,直接拒装。
+  // 没人填参数);Host 派生源没有用户配置动作,引用它属结构性误解,直接拒装。
   let setup: GhostSetupDecl | undefined;
   if (raw.setup !== undefined) {
     if (!isPlainObject(raw.setup)) {
@@ -4052,12 +4086,21 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     if (!Array.isArray(su.requires) || su.requires.length > GHOST_SETUP_MAX_GROUPS) {
       return { ok: false, reason: `setup.requires 必须是 0–${GHOST_SETUP_MAX_GROUPS} 组的数组(空数组 = 显式声明无使用前置需求)` };
     }
-    const secretByKey = new Map<string, { loginDerived: boolean }>([
+    const secretByKey = new Map<
+      string,
+      { hostDerivedSource: 'login-email' | 'oidc-token' | null }
+    >([
       ...(network?.secrets ?? []).map(
-        (s) => [s.key, { loginDerived: s.source === 'login-email' }] as const,
+        (s) => [
+          s.key,
+          {
+            hostDerivedSource:
+              s.source === 'login-email' || s.source === 'oidc-token' ? s.source : null,
+          },
+        ] as const,
       ),
       ...(node?.secretBindings ?? []).map(
-        (s) => [s.key, { loginDerived: false }] as const,
+        (s) => [s.key, { hostDerivedSource: null }] as const,
       ),
     ]);
     const connectionKeys = new Set((network?.connections ?? []).map((c) => c.key));
@@ -4081,8 +4124,8 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
             if (!decl) {
               return { ok: false, reason: `setup 引用了未声明的凭证 ${JSON.stringify(refKey)}(必须逐字取自 network.secrets[].key 或 node.secretBindings[].key)` };
             }
-            if (decl.loginDerived) {
-              return { ok: false, reason: `setup 不允许引用 login-email 源凭证 ${JSON.stringify(refKey)}(登录派生身份恒就绪,无配置动作可引导)` };
+            if (decl.hostDerivedSource) {
+              return { ok: false, reason: `setup 不允许引用 ${decl.hostDerivedSource} 源凭证 ${JSON.stringify(refKey)}(Host 派生身份没有用户配置动作可引导)` };
             }
             item = { kind: 'secret', key: refKey };
           } else {

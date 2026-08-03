@@ -383,7 +383,10 @@ function buildOverlay(markerNumber: number): OverlayState {
       border-radius: 50%;
       background: ${ACCENT};
       color: #fff;
-      font: 600 12px/22px -apple-system, "Segoe UI", sans-serif;
+      font-weight: 600;
+      font-size: 12px;
+      line-height: 22px;
+      font-family: -apple-system, "Segoe UI", sans-serif;
       text-align: center;
       box-shadow: 0 0 0 2px #fff, 0 1px 4px rgba(0,0,0,0.35);
     }

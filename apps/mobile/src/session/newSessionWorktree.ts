@@ -27,7 +27,7 @@ export type NewSessionWorktreeIneligibleReason =
  *  - recovering:瞬时断连/超时，页面会自动重试 → 开关禁用 + 恢复连接 caption;
  *  - eligible:可用,携带 create 所需的 baseRepo(repoRoot)与 sourceBranch(当前分支);
  *  - ineligible:环境不满足 → 开关禁用 + 原因 caption;
- *  - unsupported:老被控端无 worktree 通道(CHANNEL_NOT_ALLOWED)→ 整行隐藏;
+ *  - unsupported:老被控端缺安全 worktree 能力；OFF 时隐藏，旧 ON 镜像保留关闭入口;
  *  - detect-failed:探测失败(断连/超时等非通道原因)→ 开关禁用 + 失败 caption。
  */
 export type NewSessionWorktreeEligibility =
@@ -136,8 +136,8 @@ export function resolveWorktreeEligibility(
 }
 
 /**
- * detect-cwd 抛错的归并:老被控端 CHANNEL_NOT_ALLOWED → unsupported(整行隐藏,
- * 「worktree 不可用」降级);断连/超时 → recovering(页面自动重试);其余未知错误
+ * detect-cwd 抛错的归并:老被控端 CHANNEL_NOT_ALLOWED → unsupported；断连/超时
+ * → recovering(页面自动重试);其余未知错误
  * → detect-failed(行保留、开关禁用)。
  *
  * 真实 wire 形状:被控端 dispatch 回 { code:'CHANNEL_NOT_ALLOWED', message:"channel
@@ -147,14 +147,11 @@ export function resolveWorktreeEligibility(
  * 字符串错误的兜底;同时容忍 relay 包装的 DEVICE_LINK_CHANNEL_NOT_ALLOWED 变体。
  */
 export function worktreeEligibilityFromError(error: unknown): NewSessionWorktreeEligibility {
-  const code = (error as { code?: unknown } | null | undefined)?.code;
-  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
-  const text = `${typeof code === 'string' ? code : ''} ${message}`;
-  if (text.includes('CHANNEL_NOT_ALLOWED')) return { status: 'unsupported' };
+  if (isChannelNotAllowedError(error)) return { status: 'unsupported' };
   // DEVICE_UNRESPONSIVE 是本机熔断器为了阻止原地重试风暴而产出的快速失败，
   // 对页面生命周期仍是可恢复状态：Context 的代表性探测会自动关熔断，本页定时
   // 重探即可，不能把它固化成“目录环境错误”。
-  if (text.includes('DEVICE_UNRESPONSIVE')) return { status: 'recovering' };
+  if (remoteErrorText(error).includes('DEVICE_UNRESPONSIVE')) return { status: 'recovering' };
   if (isTransientRemoteError(error)) return { status: 'recovering' };
   return { status: 'detect-failed' };
 }
@@ -173,32 +170,60 @@ export function seedWorktreeEnabled(
 
 /**
  * 手机只是远程控制器:checkbox 偏好先由工作端接受,再更新手机内存镜像。
- * apply 失败时 mirror 绝不执行,避免留下一份仅手机生效的假偏好。
+ * apply 失败时通常不执行 mirror；唯一例外是老端明确没有偏好 channel，且用户
+ * 显式关闭一份阻塞创建的旧 ON 镜像。瞬时错误绝不触发兼容退出。
  */
 export async function applyWorktreePreferenceOnHost(input: {
   enabled: boolean;
   apply: (enabled: boolean) => Promise<void>;
   mirror: (enabled: boolean) => void;
+  /**
+   * 老工作端连偏好 channel 都没有时，允许用户显式关闭手机保留的旧 ON 镜像。
+   * 仅 CHANNEL_NOT_ALLOWED + OFF 生效；瞬时失败仍保留 ON 并继续 fail closed。
+   */
+  allowUnsupportedDisableFallback?: boolean;
 }): Promise<void> {
-  await input.apply(input.enabled);
+  try {
+    await input.apply(input.enabled);
+  } catch (error) {
+    if (
+      input.enabled
+      || input.allowUnsupportedDisableFallback !== true
+      || !isChannelNotAllowedError(error)
+    ) throw error;
+  }
   input.mirror(input.enabled);
 }
 
-/** 开关行是否显示:project 模式 + 已选 workingDir,且通道未被判定为不可用。 */
+function remoteErrorText(error: unknown): string {
+  const code = (error as { code?: unknown } | null | undefined)?.code;
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : String(error);
+  return `${typeof code === 'string' ? code : ''} ${message}`;
+}
+
+function isChannelNotAllowedError(error: unknown): boolean {
+  return remoteErrorText(error).includes('CHANNEL_NOT_ALLOWED');
+}
+
+/**
+ * 开关行是否显示:正常情况下是 project + workingDir + 通道可用；若老端不支持但
+ * 镜像仍为 ON，保留已勾选的关闭入口，不能把用户锁在 fail-closed 状态。
+ */
 export function shouldShowWorktreeToggle(input: {
   workspaceKind: 'project' | 'dialogue';
   workingDir: string;
   eligibility: NewSessionWorktreeEligibility;
+  enabled: boolean;
 }): boolean {
   return input.workspaceKind === 'project'
     && input.workingDir.trim().length > 0
-    && input.eligibility.status !== 'unsupported';
+    && (input.eligibility.status !== 'unsupported' || input.enabled);
 }
 
 /**
  * checkbox 正在写工作端时不能按旧镜像创建；已勾选且当前目标尚未确认 eligible 时，
- * 也不能静默退化为普通目录会话。unsupported 只隐藏老工作端无法操作的控件；
- * 若当前镜像仍为已勾选，也必须 fail closed，不能绕过 worktree:create 落到 base repo。
+ * 也不能静默退化为普通目录会话。unsupported + ON 仍 fail closed，但保留显式关闭
+ * 入口，不能绕过 worktree:create 落到 base repo，也不能把用户永久锁住。
  */
 export function shouldBlockNewSessionCreateForWorktree(input: {
   /** 当前草稿是否真的会使用 worktree：仅 project + 已选目录。 */
@@ -215,7 +240,7 @@ export function shouldBlockNewSessionCreateForWorktree(input: {
     && input.eligibility.status !== 'eligible';
 }
 
-/** 资格未通过时的 caption 文案 key(session.json);eligible/unsupported 无 caption。 */
+/** 资格未通过时的 caption 文案 key(session.json);eligible 无 caption。 */
 export function worktreeEligibilityCaptionKey(
   eligibility: NewSessionWorktreeEligibility,
 ): string | null {
@@ -236,6 +261,8 @@ export function worktreeEligibilityCaptionKey(
       return null;
     case 'detect-failed':
       return 'session.new.worktreeDetectFailed';
+    case 'unsupported':
+      return 'session.new.worktreeUnsupported';
     default:
       return null;
   }

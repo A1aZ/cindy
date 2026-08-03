@@ -6095,7 +6095,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       logCreateSession: (fields) => log.info('create-session invoked', fields),
       warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
     },
-  });
+  );
 
   registerPrecreatedWorktreeDiscardHandler(makerSessionRegistry, {
     assertCaller: (event) => {

@@ -174,6 +174,7 @@
     "worktreeNotGitRepo": "Current directory is not a git repository",
     "worktreeAlreadyInWorktree": "Already inside a worktree, nesting is not allowed",
     "worktreeDetectFailed": "Could not check this directory — reselect it later and try again",
+    "worktreeUnsupported": "This desktop cannot safely create worktrees. Turn worktree off to continue, or update the desktop app.",
     "worktreeCreateFailed": "Failed to create worktree: {{message}}",
     "worktreeRecoveryStateFailed": "Could not save the worktree recovery state. Try again.",
     "worktreeCleanupPending": "The previous worktree is still awaiting cleanup. Reconnect the device and try again."

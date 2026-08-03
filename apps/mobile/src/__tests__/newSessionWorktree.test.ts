@@ -188,7 +188,7 @@ describe('shouldAcceptWorktreeBranchListResult', () => {
 });
 
 describe('worktreeEligibilityFromError', () => {
-  it('CHANNEL_NOT_ALLOWED(老被控端)→ unsupported(整行隐藏降级)', () => {
+  it('CHANNEL_NOT_ALLOWED(老被控端)→ unsupported(由 UI 按镜像状态决定隐藏或退出入口)', () => {
     // 真实 wire 形状:DeviceLinkError 的 code 在 .code 字段,message **不含**该字面量
     // (被控端 dispatch 回 "channel '...' not allowed remotely")——必须靠结构化 code 命中。
     expect(worktreeEligibilityFromError(
@@ -258,6 +258,37 @@ describe('applyWorktreePreferenceOnHost', () => {
     })).rejects.toThrow('offline');
     expect(mirror).not.toHaveBeenCalled();
   });
+
+  it('unsupported 老端允许用户显式关闭旧 ON 镜像，但瞬时失败与开启操作不本地降级', async () => {
+    const channelNotAllowed = Object.assign(new Error('channel not allowed'), {
+      code: 'CHANNEL_NOT_ALLOWED',
+    });
+    const mirror = vi.fn();
+    await applyWorktreePreferenceOnHost({
+      enabled: false,
+      apply: vi.fn(async () => { throw channelNotAllowed; }),
+      mirror,
+      allowUnsupportedDisableFallback: true,
+    });
+    expect(mirror).toHaveBeenCalledWith(false);
+
+    mirror.mockClear();
+    await expect(applyWorktreePreferenceOnHost({
+      enabled: false,
+      apply: vi.fn(async () => { throw new Error('offline'); }),
+      mirror,
+      allowUnsupportedDisableFallback: true,
+    })).rejects.toThrow('offline');
+    expect(mirror).not.toHaveBeenCalled();
+
+    await expect(applyWorktreePreferenceOnHost({
+      enabled: true,
+      apply: vi.fn(async () => { throw channelNotAllowed; }),
+      mirror,
+      allowUnsupportedDisableFallback: true,
+    })).rejects.toThrow('channel not allowed');
+    expect(mirror).not.toHaveBeenCalled();
+  });
 });
 
 describe('shouldShowWorktreeToggle / caption key', () => {
@@ -265,12 +296,13 @@ describe('shouldShowWorktreeToggle / caption key', () => {
     status: 'eligible', baseRepo: '/repo', sourceBranch: 'main',
   };
 
-  it('project + 已选目录且通道可用才显示;dialogue / 空目录 / unsupported 隐藏', () => {
-    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: eligible })).toBe(true);
-    expect(shouldShowWorktreeToggle({ workspaceKind: 'dialogue', workingDir: '/repo', eligibility: eligible })).toBe(false);
-    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '  ', eligibility: eligible })).toBe(false);
-    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: { status: 'unsupported' } })).toBe(false);
-    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: { status: 'probing' } })).toBe(true);
+  it('project + 已选目录才显示；unsupported 仅在旧 ON 镜像需要退出入口时显示', () => {
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: eligible, enabled: false })).toBe(true);
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'dialogue', workingDir: '/repo', eligibility: eligible, enabled: true })).toBe(false);
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '  ', eligibility: eligible, enabled: true })).toBe(false);
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: { status: 'unsupported' }, enabled: false })).toBe(false);
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: { status: 'unsupported' }, enabled: true })).toBe(true);
+    expect(shouldShowWorktreeToggle({ workspaceKind: 'project', workingDir: '/repo', eligibility: { status: 'probing' }, enabled: false })).toBe(true);
   });
 
   it('caption key 覆盖探测中 / 三种不合格原因 / 探测失败;eligible 无 caption', () => {
@@ -281,7 +313,7 @@ describe('shouldShowWorktreeToggle / caption key', () => {
     expect(worktreeEligibilityCaptionKey({ status: 'ineligible', reason: 'alreadyInWorktree' })).toBe('session.new.worktreeAlreadyInWorktree');
     expect(worktreeEligibilityCaptionKey({ status: 'detect-failed' })).toBe('session.new.worktreeDetectFailed');
     expect(worktreeEligibilityCaptionKey(eligible)).toBeNull();
-    expect(worktreeEligibilityCaptionKey({ status: 'unsupported' })).toBeNull();
+    expect(worktreeEligibilityCaptionKey({ status: 'unsupported' })).toBe('session.new.worktreeUnsupported');
   });
 });
 

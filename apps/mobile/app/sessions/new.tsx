@@ -876,11 +876,13 @@ export default function NewRemoteSessionScreen() {
       : [],
     [worktreeBranchList, worktreeBranchListMatchesTarget],
   );
-  // worktree 开关行:project + 已选目录才显示;老被控端(unsupported)整行隐藏。
+  // 老被控端通常隐藏开关；若工作端旧镜像仍为 ON，则保留显式关闭入口，避免
+  // fail-closed 后既不能创建、也不能解除状态。
   const worktreeRowVisible = shouldShowWorktreeToggle({
     workspaceKind: draft.workspaceKind,
     workingDir: draft.workingDir,
     eligibility: worktreeEligibility,
+    enabled: worktreeEnabled,
   });
   const worktreePreferenceSaving =
     selectedDeviceId != null && worktreePreferenceSavingDeviceId === selectedDeviceId;
@@ -1655,7 +1657,8 @@ export default function NewRemoteSessionScreen() {
   }, [draft.agentKind, draft.permissionMode, patchDraft]);
 
   // —— worktree 资格探测:目录 / 设备 / 链路变化即重探(seq 防竞态,旧结果作废)。
-  // CHANNEL_NOT_ALLOWED(老被控端)→ unsupported 整行隐藏;其余失败保留行但禁用。
+  // CHANNEL_NOT_ALLOWED(老被控端)→ unsupported；OFF 时隐藏，旧 ON 镜像保留关闭
+  // 入口；其余失败保留行但禁用。
   useEffect(() => {
     const cwd = draft.workspaceKind === 'project' ? draft.workingDir.trim() : '';
     const seq = ++worktreeDetectSeqRef.current;
@@ -1982,6 +1985,11 @@ export default function NewRemoteSessionScreen() {
     void applyWorktreePreferenceOnHost({
       enabled: next,
       apply: maker.applyNewMakerWorktreePref,
+      // unsupported 可能是“有偏好写穿、缺安全 worktree 能力”，也可能是最老端
+      // 连偏好 channel 都没有：先写 host；只有后者且用户明确点 OFF 时才清手机
+      // 保留的旧 ON 镜像。断连/超时不降级，仍保留 ON + fail closed。
+      allowUnsupportedDisableFallback:
+        !next && worktreeEligibility.status === 'unsupported',
       mirror: (enabled) => {
         if (worktreePreferenceWriteSeqRef.current !== writeSeq) return;
         // 权威 push 或其它显式操作若已先到,它拥有更新 revision;
@@ -1999,7 +2007,13 @@ export default function NewRemoteSessionScreen() {
           setWorktreePreferenceSavingDeviceId(null);
         }
       });
-  }, [maker, selectedDeviceId, worktreeEnabled, worktreePreferenceSaving]);
+  }, [
+    maker,
+    selectedDeviceId,
+    worktreeEnabled,
+    worktreePreferenceSaving,
+    worktreeEligibility.status,
+  ]);
 
   useEffect(() => {
     const tracker = createMobileVoiceDictionaryLearningTracker({

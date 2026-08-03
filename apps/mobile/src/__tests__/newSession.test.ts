@@ -1119,6 +1119,10 @@ describe('new session worktree wiring (source locks)', () => {
     // 显式点击才写穿工作端记忆;工作端接受后才更新手机镜像。
     expect(newSource).toContain('applyWorktreePreferenceOnHost({');
     expect(newSource).toContain('apply: maker.applyNewMakerWorktreePref,');
+    expect(newSource).toContain(
+      "!next && worktreeEligibility.status === 'unsupported',",
+    );
+    expect(newSource).toContain('enabled: worktreeEnabled,');
     expect(newSource).not.toContain(
       'void maker.applyNewMakerWorktreePref(next).catch(() => undefined);',
     );

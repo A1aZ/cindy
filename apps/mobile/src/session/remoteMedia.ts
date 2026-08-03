@@ -158,11 +158,16 @@ export async function resolveMobileRemoteMedia(
       inlineBase64: fetched.inlineBase64,
     };
   }
+  // **在校验之前就把 key 交出去**(review P1 第三轮)。判据是「有没有在世的 OSS 对象」,
+  // 不是「回包合不合法」—— 只要 ossKey 非空,被控端的 PUT 就已经完成了。放在 isValidFetchResult
+  // 之后会漏掉一整类:合法的**零字节**文件(空的 .css / .js 完全正常)会因为 `size > 0` 这条
+  // 校验先抛错,而对象已经上传 —— 调用方拿不到 key,那个对象永久遗留。
+  if (typeof fetched?.ossKey === 'string' && fetched.ossKey.length > 0) {
+    opts?.onOssKey?.(fetched.ossKey);
+  }
   if (!isValidFetchResult(fetched)) {
     throw new Error(i18n.t('composer.attachments.mediaResultInvalid'));
   }
-  // 对象已在 OSS 上了 —— 先把 key 交给调用方,再做 presign(它可能失败/抛错,见 onOssKey)。
-  opts?.onOssKey?.(fetched.ossKey);
   const signed = await deps.presignGet(fetched.ossKey);
   if (!isValidPresignResult(signed)) {
     throw new Error(i18n.t('composer.attachments.mediaUrlInvalid'));

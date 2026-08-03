@@ -71,6 +71,36 @@ describe('mobile remote media', () => {
     expect(order).toEqual(['upload', 'onOssKey', 'presign']);
   });
 
+  it('hands out the ossKey even when the fetch result fails validation (0-byte file)', async () => {
+    // 合法的零字节文件(空 .css / .js)会因 `size > 0` 这条校验先抛错,而被控端的 PUT
+    // 已经完成 —— key 必须在校验**之前**交出去,否则那个对象永久遗留(review P1)。
+    const fetchRemoteMedia = vi.fn(async () => ({
+      ossKey: 'cindy/device-link/user-1/empty.css',
+      mimeType: 'text/css',
+      size: 0,
+    }));
+    const seen: string[] = [];
+
+    await expect(resolveMobileRemoteMedia(
+      { kind: 'image', url: 'xdt-image://cache/empty.css' },
+      { fetchRemoteMedia, presignGet: vi.fn() },
+      { onOssKey: (key) => seen.push(key) },
+    )).rejects.toThrow();
+
+    expect(seen).toEqual(['cindy/device-link/user-1/empty.css']);
+  });
+
+  it('does not call onOssKey when there is no object at all (empty key)', async () => {
+    const fetchRemoteMedia = vi.fn(async () => ({ ossKey: '', mimeType: 'text/css', size: 0 }));
+    const onOssKey = vi.fn();
+    await expect(resolveMobileRemoteMedia(
+      { kind: 'image', url: 'xdt-image://cache/x.css' },
+      { fetchRemoteMedia, presignGet: vi.fn() },
+      { onOssKey },
+    )).rejects.toThrow();
+    expect(onOssKey).not.toHaveBeenCalled();
+  });
+
   it('does not call onOssKey for inline results (no OSS object to reclaim)', async () => {
     const fetchRemoteMedia = vi.fn(async () => ({
       ossKey: '',

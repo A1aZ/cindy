@@ -947,3 +947,25 @@ function recordForTest(item: VisiblePluginSummary) {
     updatedAt: '2026-07-23T00:00:00.000Z',
   };
 }
+
+describe('market detail 响应身份绑定', () => {
+  it('detail 自报的 id/ghostId 与请求不一致 → 拒,不把 A 的确认导向 B 的内容', async () => {
+    const item = summary();
+    const h = harness([item]);
+    // 服务端异常/恶意响应:返回另一个插件的 detail(id 与 ghostId 都换了)。
+    h.api.detail.mockImplementation(async () =>
+      detail({ ...item, id: 'plg_other', ghostId: 'cindy-other' }),
+    );
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[GHOST_FILE_INVALID]');
+    // 只换 ghostId、id 相同也要拒:可见性与 ghostId 冲突判定都基于目录 summary。
+    h.api.detail.mockImplementation(async () => detail({ ...item, ghostId: 'cindy-other' }));
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[GHOST_FILE_INVALID]');
+    await expect(h.service.detail(item.id)).resolves.toBeTruthy(); // detail() 只绑 id
+    h.api.detail.mockImplementation(async () => detail({ ...item, id: 'plg_other' }));
+    await expect(h.service.detail(item.id)).rejects.toThrow('[GHOST_FILE_INVALID]');
+  });
+});

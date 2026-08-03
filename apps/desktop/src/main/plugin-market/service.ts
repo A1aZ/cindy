@@ -204,6 +204,23 @@ export class PluginMarketService {
     return { items: this.toItems(plugins, ledger), unavailableReason: null };
   }
 
+  /**
+   * detail 响应必须与请求身份一致:后续下载、安装、ledger 全都信 detail 的自报
+   * 字段,不绑定的话异常/恶意服务端响应可以把 A 的确认导向 B 的内容,并绕过
+   * 调用方基于目录 summary 做过的可见性与 ghostId 冲突判断。
+   */
+  private requireDetailIdentity(
+    detail: { id: string; ghostId: string },
+    expected: { pluginId: string; ghostId?: string },
+  ): void {
+    if (
+      detail.id !== expected.pluginId ||
+      (expected.ghostId !== undefined && detail.ghostId !== expected.ghostId)
+    ) {
+      throwIpcError('GHOST_FILE_INVALID', 'Market detail response does not match the requested Plugin');
+    }
+  }
+
   async detail(pluginId: string): Promise<PluginMarketDetail> {
     if (!isValidPluginResourceId(pluginId)) {
       throwIpcError('INVALID_PARAMS', 'Invalid Plugin ID');
@@ -212,6 +229,7 @@ export class PluginMarketService {
     const owner = captureMarketOwner();
     const plugin = await this.api.detail(pluginId);
     requireSameMarketOwner(owner);
+    this.requireDetailIdentity(plugin, { pluginId });
     if (owner.mode === 'local' && plugin.scope !== 'public') {
       throwIpcError('PERMISSION_DENIED', 'Local mode can only access public Plugins');
     }
@@ -260,6 +278,9 @@ export class PluginMarketService {
       }
       const plugin = await this.api.detail(pluginId);
       requireSameMarketOwner(owner);
+      // 绑定到用户确认时看的那份目录 summary:id 与 ghostId 都必须一致 —— 可见性
+      // 判定与 ghostId 唯一性判定都是基于 selected 做的,detail 换身份就全绕过了。
+      this.requireDetailIdentity(plugin, { pluginId, ghostId: selected.ghostId });
       if (plugin.currentRelease.id !== options.expectedReleaseId) {
         throwIpcError(
           'PRECONDITION_FAILED',
@@ -596,6 +617,7 @@ export class PluginMarketService {
         await this.withMutation(summary.id, async () => {
           requireSameMarketOwner(owner);
           const detail = await this.api.detail(summary.id);
+          this.requireDetailIdentity(detail, { pluginId: summary.id, ghostId: summary.ghostId });
           // 装完即开语义已收敛进市场安装入口本身,这里无需再显式声明。
           await this.installDetail(
             detail,

@@ -1507,6 +1507,39 @@ function formatGhostQuotaSize(bytes: number): string {
  * 顺序即展示顺序:Cindy 代办 → 注册工具 → 聊天指令 → 面板 → 订阅/卡片 →
  * 可执行代码(先能力后载体,与权限展示契约一致)。
  */
+/**
+ * 权限投影的规范化指纹:两份 manifest「用户在确认卡上看到的权限内容」是否逐字
+ * 相同的唯一判据。
+ *
+ * **只比 `key` 是不够的**:同一个 key 下还有会呈现给用户、并构成授权语义的字段 ——
+ * `labelArgs`(preview 的 hosts、工具名等)、`detail`(作者自由文本,OAuth scopes /
+ * node secret 绑定方式等都经它展示)、`detailKey`/`detailArgs`。市场确认拿服务端
+ * 清单给用户看、拿下载包装入,两份清单在这些字段上不同而 key 相同时,用户看的是 A、
+ * receipt 钉的是 B。字段序列化按固定字段序 + labelArgs/detailArgs 键排序,与对象
+ * 构造顺序无关。
+ */
+export function ghostPermissionProjectionFingerprint(manifest: GhostManifest): string {
+  const sortRecord = (record: Record<string, string> | undefined): [string, string][] =>
+    Object.entries(record ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return JSON.stringify(
+    ghostPermissionItems(manifest)
+      .map((item) => [
+        item.key,
+        item.kind,
+        item.labelKey,
+        sortRecord(item.labelArgs),
+        item.detail ?? null,
+        item.detailKey ?? null,
+        sortRecord(item.detailArgs),
+      ])
+      .sort((a, b) => {
+        const ka = JSON.stringify(a);
+        const kb = JSON.stringify(b);
+        return ka < kb ? -1 : ka > kb ? 1 : 0;
+      }),
+  );
+}
+
 export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionItem[] {
   const items: GhostPermissionItem[] = [];
   for (const [category, actions] of Object.entries(manifest.cindy ?? {})) {

@@ -273,7 +273,7 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     // 安装目录重建授权"这条路被这道门堵死。
     await writeLegacyInstall('second', goodManifest('second'));
     const outcome = await manager.migrateLegacyApprovalsOnce();
-    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [], retryPending: [] });
     expect(manager.list().find((g) => g.manifest.id === 'second')?.approval.state).toBe(
       'legacy-unapproved',
     );
@@ -310,9 +310,44 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     });
     await writeLegacyInstall('hello', goodManifest());
     const outcome = await seededManager.migrateLegacyApprovalsOnce();
-    expect(outcome).toEqual({ migrated: [], skipped: ['hello'], failed: [] });
+    expect(outcome).toEqual({ migrated: [], skipped: ['hello'], failed: [], retryPending: [] });
     // 没有替它写 receipt:provisioning 才是随包插件的批准入口。
     expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+  });
+
+  it('瞬时状态根 IO 不封门:台账停在 in-progress,下次启动自动续跑治愈', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    // 第一轮:receipt 落盘的 rename 吃一次 EACCES(模拟杀软/句柄占用的环境抖动)。
+    const realRename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith(`${path.sep}hello.json`)) {
+        renameSpy.mockRestore();
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realRename(from, to);
+    });
+    const first = await manager.migrateLegacyApprovalsOnce();
+    // 瞬时错不算"内容无效":不进 failed(那会写进 completed 台账永久封门),
+    // 记 retryPending、台账停在 in-progress。
+    expect(first.retryPending).toEqual(['hello']);
+    expect(first.failed).toEqual([]);
+    const ledger = JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as {
+      state?: string;
+      pendingIds?: string[];
+    };
+    expect(ledger.state).toBe('in-progress');
+    expect(ledger.pendingIds).toEqual(['hello']);
+
+    // 第二轮(下次启动):环境恢复,自动续跑治愈,不需要用户操作。
+    const second = await manager.migrateLegacyApprovalsOnce();
+    expect(second.migrated).toEqual(['hello']);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    const finalLedger = JSON.parse(
+      await fs.promises.readFile(migrationLedgerPath(), 'utf8'),
+    ) as { state?: string };
+    expect(finalLedger.state).toBe('completed');
   });
 
   it('首轮迁移治愈损坏/旧 schema 的 receipt(格式升级不落到用户重新确认)', async () => {
@@ -454,7 +489,7 @@ describe('GhostManager · 迁移崩溃安全(in-progress 状态机)与隔离命�
     await fs.promises.writeFile(migrationLedgerPath(), '{ not valid json');
 
     const outcome = await manager.migrateLegacyApprovalsOnce();
-    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [], retryPending: [] });
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
     expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe('{ not valid json');
   });
@@ -693,6 +728,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       migrated: [],
       skipped: [],
       failed: [],
+      retryPending: [],
     });
     expect(fs.existsSync(migrationLedgerPath())).toBe(false);
     // 恢复流程把旧布局目录搬进来 → 门还开着,照常迁移。
@@ -717,7 +753,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     );
     await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
     const outcome = await manager.migrateLegacyApprovalsOnce();
-    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [] });
+    expect(outcome).toEqual({ migrated: [], skipped: [], failed: [], retryPending: [] });
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
 
@@ -1400,6 +1436,30 @@ describe('GhostManager · Host approval receipt', () => {
     ]);
   });
 
+  it('快照回收/重建绝不穿透被换成 junction 的父段删外部目录内容', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const idDir = path.join(workDir, 'ghosts-install-state', 'skill-snapshots', 'skilled');
+    // 外部目录里放一个"看起来像旧 revision"的子目录 + 哨兵文件。
+    const external = path.join(workDir, 'external-data');
+    await fs.promises.mkdir(path.join(external, 'stale-revision'), { recursive: true });
+    await fs.promises.writeFile(path.join(external, 'stale-revision', 'sentinel.txt'), 'keep');
+    // 把 `<id>` 父段整个换成指向外部目录的 junction(同权限进程可做到)。
+    await fs.promises.rm(idDir, { recursive: true, force: true });
+    try {
+      await fs.promises.symlink(external, idDir, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return; // 环境建不了链接则跳过;判定逻辑平台同源。
+    }
+
+    // 触发一次 receipt 写(启停翻转):修复前 ensureSkillSnapshot 会沿 junction 把
+    // 快照发布到外部目录,prune 的 readdir + 逐项 recursive rm 更会把外部目录里的
+    // "旧 revision"整个删掉(sentinel 消失)。修复后父段遏制先行:可疑父段整体跳过。
+    await manager.setEnabled('skilled', false);
+    expect(fs.existsSync(path.join(external, 'stale-revision', 'sentinel.txt'))).toBe(true);
+    // 外部目录里也不应多出任何被"发布"进去的快照字节。
+    expect(await fs.promises.readdir(external)).toEqual(['stale-revision']);
+  });
+
   it('holds the install-time SKILL.md size ceiling when rebuilding from mutable install bytes', async () => {
     await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
     const snapshotRoot = manager.list()[0].approvedSkillRoot!;
@@ -1781,6 +1841,33 @@ describe('GhostManager · Host approval receipt', () => {
 });
 
 describe('GhostManager · setEnabled(启用/停用)', () => {
+  it('停用镜像本身写失败 → 如实报错,不谎报"已停用"(此刻什么都没落盘)', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 故障注入:.disabled 镜像写入抛 EACCES(receipt 还没轮到写)。
+    const realWriteFile = fs.promises.writeFile;
+    const spy = vi.spyOn(fs.promises, 'writeFile').mockImplementation(async (file, ...rest) => {
+      if (String(file).endsWith('.disabled')) {
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realWriteFile(file, ...(rest as [Parameters<typeof realWriteFile>[1]]));
+    });
+    try {
+      const result = await manager.setEnabled('hello', false);
+      // 修复前这里返回 {ok:true}:catch 分不清失败的是镜像写还是 receipt 写,按
+      // "镜像已就位"降级 —— 但镜像根本没写成,receipt.enabled 仍为 true,重启即复活。
+      expect('rejection' in result && result.rejection.code).toBe('io');
+      expect(manager.list()[0].enabled).toBe(true); // 如实:停用没有生效
+      expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
+    // 环境恢复后停用照常成功。
+    expect('ok' in (await manager.setEnabled('hello', false))).toBe(true);
+    expect(manager.list()[0].enabled).toBe(false);
+  });
+
   it('停用:目录里出现 .disabled 标记、list 报 enabled=false、onChanged 广播;启用即恢复', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     onChanged.mockClear();

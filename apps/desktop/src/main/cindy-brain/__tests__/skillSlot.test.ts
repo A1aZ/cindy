@@ -303,6 +303,32 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
     expect(fs.existsSync(managedLink)).toBe(false);
   });
 
+  it('用户自建悬空链接不因目标路径里恰有 cindy-brain 段而被删(布局 id 必须对上链接名)', async () => {
+    await fs.promises.mkdir(sharedDir(), { recursive: true });
+    // 用户把自己项目目录(路径里恰好有一段叫 cindy-brain)链进技能根,随后目标没了。
+    // 链接名 `foo--notes` 拆出的 id 是 `foo`,与目标里 cindy-brain 后面的段(`missing`)
+    // 对不上 —— 不是我们铺的布局,绝不能删。
+    const foreignLink = path.join(sharedDir(), 'foo--notes');
+    await fs.promises.symlink(
+      path.join(workDir, 'projects', 'cindy-brain', 'missing'),
+      foreignLink,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
+    expect(fs.lstatSync(foreignLink).isSymbolicLink()).toBe(true);
+
+    // 对照:同样悬空、但布局 id 与链接名对得上的旧模型链接(cindy-brain/<id>/...)
+    // 是我们自己的存量,要回收。
+    const legacyLink = path.join(sharedDir(), 'my-ghost--foo');
+    await fs.promises.symlink(
+      path.join(workDir, 'anywhere', 'cindy-brain', 'my-ghost', 'skills', 'foo'),
+      legacyLink,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
+    expect(fs.existsSync(legacyLink)).toBe(false);
+  });
+
   it('他 owner 的活链接不碰(多账号隔离);他 owner 的断链回收(防积尘)', async () => {
     // 另一个 owner 的 brainRoot 与真实技能
     const otherBrainRoot = path.join(workDir, 'owners', 'bbb', 'cindy-brain');

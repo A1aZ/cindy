@@ -19,6 +19,7 @@ import {
   isRegularGhostDirEntry,
   resolveGhostContentPath,
 } from './ghostContentTree.js';
+import { isPathInsideDir } from './dirDeposit.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 
 // v2 pairs receipts with the unambiguous ghostContentTree framing. Keeping v1
@@ -110,6 +111,9 @@ export interface GhostLegacyMigrationLedger {
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
+  /** receipt 首写后的自动落账写失败(进程内关门标志,见 migrationDoorClosed)。 */
+  private autoLedgerWriteFailed = false;
+
   constructor(private readonly getRootDir: () => string) {}
 
   rootDir(): string {
@@ -199,14 +203,31 @@ export class GhostInstallReceiptStore {
           migratedIds: [],
           state: 'completed',
         })
-        .catch(() => undefined);
+        .catch(() => {
+          // 不作 best-effort 吞掉:置进程内关门标志(migrationDoorClosed 优先读它),
+          // 消除"落账失败 + 同会话删 receipt → 骗重铸"的窗口。批准本身不回滚 ——
+          // receipt 刚写进同一目录,此处失败面极窄,且下次启动会经 hasAnyValidReceipt
+          // 判据补写台账。
+          this.autoLedgerWriteFailed = true;
+        });
     }
     await this.pruneStaleSkillSnapshots(receipt);
   }
 
   async remove(id: string): Promise<void> {
     await fs.promises.rm(this.receiptPath(id), { force: true });
-    await fs.promises.rm(path.join(this.rootDir(), 'skill-snapshots', id), {
+    // `skill-snapshots` 段必须是真目录才能递归删 `<id>`:该段被换成 junction 时,
+    // recursive rm 会穿透删外部目录内容。`<id>` 自身是链接没关系 —— rm 按 lstat
+    // 语义只摘链接本体,不进目标。段可疑/缺失就跳过(receipt 已删,批准已失效)。
+    const snapshotsDir = path.join(this.rootDir(), 'skill-snapshots');
+    let kind: string;
+    try {
+      kind = await classifyGhostDirEntry(snapshotsDir);
+    } catch {
+      return;
+    }
+    if (kind !== 'directory') return;
+    await fs.promises.rm(path.join(snapshotsDir, id), {
       recursive: true,
       force: true,
     });
@@ -217,6 +238,58 @@ export class GhostInstallReceiptStore {
       throw new Error('invalid ghost skill snapshot identity');
     }
     return path.join(this.rootDir(), 'skill-snapshots', id, revision);
+  }
+
+  /**
+   * 快照父路径(`<状态根>/skill-snapshots/<id>`)的逐段遏制断言。
+   *
+   * 任何 readdir / mkdir / rename / rm 之前都必须过这道:父段被同权限进程换成
+   * junction/链接时,这些操作会**穿透**到状态根之外 —— 把 §7 登记的「状态根可写→
+   * 可伪造批准」升级成「任意外部目录删除/写入」,是一次真实的权限升级(已在
+   * Windows 上实测复现)。判据与 ghostContentTree 同源:逐段 lstat、链接一律拒,
+   * 最后再 realpath 对账"物理路径仍在状态根内"(状态根自身的祖先允许是链接 ——
+   * relocated home 场景,所以以 realpath(root) 为基准而不是词法路径)。
+   *
+   * `createMissing`:装入/更新路径按需补建缺失段;prune/remove 等回收路径不建,
+   * 段缺失(ENOENT)返回 null 表示"没有可回收对象"。段存在但不是真目录一律抛错,
+   * 由调用方决定 fail closed 还是跳过 —— 绝不带着可疑父段继续动盘。
+   */
+  private async assertManagedSnapshotParent(
+    id: string,
+    opts: { createMissing: boolean },
+  ): Promise<string | null> {
+    if (!isValidGhostId(id)) throw new Error('invalid ghost id for snapshot path');
+    const root = this.rootDir();
+    let current = root;
+    for (const segment of ['skill-snapshots', id]) {
+      current = path.join(current, segment);
+      let kind: Awaited<ReturnType<typeof classifyGhostDirEntry>> | null;
+      try {
+        kind = await classifyGhostDirEntry(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        kind = null;
+      }
+      if (kind === null) {
+        if (!opts.createMissing) return null;
+        // 非 recursive:上一段刚验证过是真目录,逐段建才不会静默沿着链接铺路。
+        await fs.promises.mkdir(current);
+        continue;
+      }
+      if (kind !== 'directory') {
+        throw new Error(
+          `skill snapshot path segment is not a real directory: ${segment} (${kind})`,
+        );
+      }
+    }
+    const [realRoot, realParent] = await Promise.all([
+      fs.promises.realpath(root),
+      fs.promises.realpath(current),
+    ]);
+    if (!isPathInsideDir(realRoot, realParent)) {
+      throw new Error('skill snapshot parent escaped the approval state root');
+    }
+    return current;
   }
 
   /** 迁移台账路径。点开头,不会与任何合法 ghost id 的 `<id>.json` receipt 撞名。 */
@@ -277,6 +350,11 @@ export class GhostInstallReceiptStore {
    * 给这类进程送一条重铸授权的路。调用方发现"存在但读不出"应记 error 日志。
    */
   migrationDoorClosed(): boolean {
+    // 进程内保险门:receipt 首写后的自动落账写失败时置位(见 write())。没有它,
+    // "落账失败 + 同会话内 receipt 又被删"的组合会让 hasAnyValidReceipt 判据也
+    // 失效,可变 manifest 就能骗一次重铸 —— 状态根刚成功写过 receipt,门在本进程
+    // 内必须视为已关;下次启动 hasAnyValidReceipt 或补写成功的台账接棒。
+    if (this.autoLedgerWriteFailed) return true;
     if (!this.hasMigrationLedger()) return false;
     const ledger = this.readMigrationLedger();
     return ledger === null || ledger.state !== 'in-progress';
@@ -325,6 +403,10 @@ export class GhostInstallReceiptStore {
     const items = receipt.manifest.skill?.items ?? [];
     if (items.length === 0) return;
     const target = this.skillSnapshotRoot(receipt.id, receipt.revision);
+    // 父段遏制必须先于**任何**对 target 的操作:lstat/rm/rename 都会穿透被换成
+    // junction 的父段,读写到状态根之外(见 assertManagedSnapshotParent 头注释)。
+    const parent = await this.assertManagedSnapshotParent(receipt.id, { createMissing: true });
+    if (!parent) throw new Error('skill snapshot parent unavailable');
     let existing: fs.Stats | null;
     try {
       existing = await fs.promises.lstat(target);
@@ -347,12 +429,10 @@ export class GhostInstallReceiptStore {
     if (!skillSourceDir) {
       throw new Error('approved skill snapshot is missing');
     }
-    const parent = path.dirname(target);
     const temp = path.join(
       parent,
       `.${receipt.revision}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
     );
-    await fs.promises.mkdir(parent, { recursive: true });
     try {
       await fs.promises.mkdir(temp, { recursive: false });
 
@@ -490,7 +570,16 @@ export class GhostInstallReceiptStore {
    * best-effort:批准事实已经落盘，回收失败只记为待清理状态，不回滚安装。
    */
   private async pruneStaleSkillSnapshots(receipt: GhostInstallReceipt): Promise<void> {
-    const parent = path.join(this.rootDir(), 'skill-snapshots', receipt.id);
+    // 父段遏制先行:`<id>` 段被换成 junction 时,readdir 会列出外部目录的条目、
+    // 随后的逐项 recursive rm 就会把**外部目录的内容**删掉(Windows 实测可复现)。
+    // 回收是 best-effort:父段可疑就整体跳过,绝不带着可疑父段动盘。
+    let parent: string | null;
+    try {
+      parent = await this.assertManagedSnapshotParent(receipt.id, { createMissing: false });
+    } catch {
+      return;
+    }
+    if (!parent) return;
     let entries: fs.Dirent[];
     try {
       entries = await fs.promises.readdir(parent, { withFileTypes: true });

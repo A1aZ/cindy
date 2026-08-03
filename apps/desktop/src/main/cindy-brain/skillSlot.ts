@@ -41,7 +41,12 @@ import path from 'node:path';
 
 import matter from 'gray-matter';
 
-import type { GhostSkillItem, InstalledGhost } from '../../shared/ghost.js';
+import {
+  GHOST_SKILL_NAME_RE,
+  isValidGhostId,
+  type GhostSkillItem,
+  type InstalledGhost,
+} from '../../shared/ghost.js';
 import { parseAndValidateFrontmatter } from '../skillhub/frontmatterValidation.js';
 import {
   prepareSharedGlobalSkillLinks,
@@ -142,13 +147,30 @@ function targetLooksGhostManaged(
   linkName: string,
   approvalStateDirName: string,
 ): boolean {
-  if (!linkName.includes('--')) return false;
+  // 链接名必须完整符合我们自己的命名契约:`<合法 ghostId>--<合法技能名>`
+  // (按最后一个 `--` 拆分,与 ghostSkillLinkName 同规)。只看 includes('--')
+  // 会把用户自建的 `foo--notes` 之类当成候选。
+  const splitAt = linkName.lastIndexOf('--');
+  if (splitAt <= 0) return false;
+  const ghostId = linkName.slice(0, splitAt);
+  const skillName = linkName.slice(splitAt + 2);
+  if (!isValidGhostId(ghostId) || !GHOST_SKILL_NAME_RE.test(skillName)) return false;
+
+  // 目标结构必须命中**我们铺过的两种布局之一**,且布局里的 id 段必须等于链接名里
+  // 的 ghostId —— 单看"路径里有个段叫 cindy-brain"会把用户指向自己项目目录
+  // (如 D:/projects/cindy-brain/...)的悬空链接误删,违背"外来链接绝不动"。
+  // 两种布局(id 段可核对,这就是可验证的布局标识):
+  //   旧模型(pre-receipt,线上存量): .../cindy-brain/<ghostId>/<skillDir...>
+  //   新模型:                       .../<状态根名>/skill-snapshots/<ghostId>/<revision>/...
   const segments = target.split(/[\\/]/).map((segment) => segment.toLowerCase());
   const stateDirName = approvalStateDirName.toLowerCase();
+  const idLower = ghostId.toLowerCase();
   return segments.some(
     (segment, index) =>
-      segment === 'cindy-brain' ||
-      (segment === stateDirName && segments[index + 1] === 'skill-snapshots'),
+      (segment === 'cindy-brain' && segments[index + 1] === idLower) ||
+      (segment === stateDirName &&
+        segments[index + 1] === 'skill-snapshots' &&
+        segments[index + 2] === idLower),
   );
 }
 

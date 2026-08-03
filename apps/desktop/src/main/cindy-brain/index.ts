@@ -18,6 +18,7 @@ import {
   isCindyAccountGhostId,
   isOfficialGhostId,
   ghostPermissionItems,
+  ghostPermissionProjectionFingerprint,
   isValidGhostId,
   layoutWithGhostPanel,
   type GhostHostNoticeKey,
@@ -2970,16 +2971,13 @@ export async function installOrUpdateMarketGhostPackage(
     rejectUnauthorizedTokenBroker(inspected.manifest);
     if (expected.expectedManifest) {
       // 权限投影 + 指令逐项比对,而不是整卡 deep-equal:服务端清单允许存在展示性
-      // 差异(字段顺序/补充元数据),但用户批准的权限集与指令名必须就是包里的那份。
-      const wanted = ghostPermissionItems(expected.expectedManifest)
-        .map((item) => item.key)
-        .sort();
-      const got = ghostPermissionItems(inspected.manifest)
-        .map((item) => item.key)
-        .sort();
+      // 差异(字段顺序/补充元数据),但用户批准的权限内容必须就是包里的那份。
+      // 指纹覆盖 key + kind + labelArgs + detail/detailKey/detailArgs —— 只比 key
+      // 会漏掉同 key 下的安全语义字段(preview 的 hosts、OAuth scopes、node secret
+      // 绑定方式、工具描述都在这些字段里),用户看 A、receipt 钉 B。
       const sameProjection =
-        wanted.length === got.length &&
-        wanted.every((key, index) => key === got[index]) &&
+        ghostPermissionProjectionFingerprint(expected.expectedManifest) ===
+          ghostPermissionProjectionFingerprint(inspected.manifest) &&
         (expected.expectedManifest.command ?? null) === (inspected.manifest.command ?? null);
       if (!sameProjection) {
         throwIpcError(

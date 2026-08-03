@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { interceptHtmlNavigation } from '@/session/htmlNavigationPolicy';
+import { pathDisplayName } from '@/session/chatPathCandidate';
+import { isHtmlFilePreviewCandidate } from '@/session/filePreview';
 
 /**
  * 源码契约用例的统一读法:**必须把 CRLF 归一成 LF**。
@@ -185,10 +187,41 @@ describe('HTML 生成物的渲染态接线', () => {
   });
 
   it('markdown 与 HTML 共用同一套双态机(不再是 markdown 专用)', () => {
-    expect(source).toContain("const richKind = richTextKindOf(item.name)");
+    expect(source).toContain("const richKind = richTextKindOf(item.relPath)");
     expect(source).toContain("useState<'rendered' | 'source'>(richKind ? 'rendered' : 'source')");
     // 双态切换只在这两类文本上出现,其余仍恒为源码态。
     expect(source).toContain("const canRenderRich = richKind !== null && typeof state.content === 'string'");
+  });
+
+  it('进 WebView 的判定必须吃 relPath(真实路径),不得吃 name(展示名)', () => {
+    // review P1 第三轮,同一根因的**调用方**入口:`absPathItem` 的 name 走 pathDisplayName,
+    // 它 split(/[\\/]/).filter(Boolean) 会把 macOS/Linux 上合法的 `report.html\` 削成
+    // `report.html` —— 判定函数内部再严也拿不回上游丢掉的字符。relPath 两种模式下都是
+    // 未归一化的真实路径,所以判定一律以它为输入。
+    expect(source).toContain('richTextKindOf(item.relPath)');
+    expect(source).toContain('avKindFor(item.relPath)');
+    // 不许有任何一处判定回退到 name(这两个写法就是上一版的漏洞形态)。
+    expect(source).not.toContain('richTextKindOf(item.name)');
+    expect(source).not.toContain('avKindFor(item.name)');
+    // pathDisplayName 仍只用于展示(标题栏 / 合成 item 的 name),不得进判定。
+    expect(source).not.toMatch(/richTextKindOf\(\s*pathDisplayName/);
+    expect(source).not.toMatch(/isHtmlFilePreviewCandidate\(\s*pathDisplayName/);
+  });
+
+  it('行为级证据:pathDisplayName 会削掉尾随反斜杠,足以让非 HTML 文件冒充 HTML', () => {
+    // 上面那条是源码守卫(防写法回归),这条是**行为**证据 —— 证明这两个入参不等价、
+    // 且差异恰好落在「进不进可执行 WebView」上,而不是只在措辞上不同。
+    const posixTrailingBackslash = '/repo/report.html\\'; // macOS / Linux 上的合法文件名
+    // 归一化后 `\` 消失 → 冒充成 .html。
+    expect(pathDisplayName(posixTrailingBackslash)).toBe('report.html');
+    expect(isHtmlFilePreviewCandidate(pathDisplayName(posixTrailingBackslash))).toBe(true);
+    // 直接吃真实路径 → 最后一段为空 → fail-closed,不进渲染态。
+    expect(isHtmlFilePreviewCandidate(posixTrailingBackslash)).toBe(false);
+    // 正常路径两条路结论一致(修复没有把正常文件挡在外面)。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
+    expect(isHtmlFilePreviewCandidate(pathDisplayName('/repo/report.html'))).toBe(true);
+    // Windows 被控端的正常形态照旧可进(`\` 在那里是真分隔符)。
+    expect(isHtmlFilePreviewCandidate('C:\\proj\\report.html')).toBe(true);
   });
 
   it('HTML 判定取共享层口径,不在页面里另写一份扩展名表', () => {

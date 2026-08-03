@@ -97,16 +97,32 @@ type TextPreviewState =
  */
 type RichTextKind = 'markdown' | 'html';
 
-function richTextKindOf(name: string): RichTextKind | null {
-  if (/\.(md|mdx|markdown)$/i.test(name)) return 'markdown';
-  if (isHtmlFilePreviewCandidate(name)) return 'html';
+/**
+ * **入参必须是 `item.relPath`(真实路径),不能是 `item.name`(展示名)。**
+ *
+ * 这两个字段在 absPath 单文件模式下不等价(review P1,尾随反斜杠第三轮):`absPathItem`
+ * 的 name 走 `pathDisplayName`,它 `split(/[\\/]/).filter(Boolean)` —— 把 `\` 一律当分隔符、
+ * 再丢掉空段。于是 macOS / Linux 上合法的 `report.html\` 被削成 `report.html`,
+ * 一个**不以 HTML 扩展名结尾**的文件就此冒充 HTML 进可执行 WebView。
+ *
+ * 上一轮修的是判定函数**内部**(`isHtmlFilePreviewCandidate` 改用不削尾的 basename),
+ * 但调用方在传参之前就已经把那个字符做掉了 —— 函数再严也拿不回丢掉的信息。
+ * `relPath` 两种模式下都是未归一化的真实路径(浏览器模式=被控端 `fs:list` 的原值,
+ * absPath 模式=原始绝对路径),所以判定一律以它为输入。
+ *
+ * `pathDisplayName` 本身不改:它是**展示**函数(`/a/b/` 显示 `b` 是对的),
+ * 问题从来不是它归一化,而是它的输出被当成了语义值。
+ */
+function richTextKindOf(pathOrName: string): RichTextKind | null {
+  if (/\.(md|mdx|markdown)$/i.test(pathOrName)) return 'markdown';
+  if (isHtmlFilePreviewCandidate(pathOrName)) return 'html';
   return null;
 }
 
-/** 音视频类型(复用消息里的 RemoteMediaPlayerWebView 播放器)。 */
-function avKindFor(name: string): 'video' | 'audio' | null {
-  if (/\.(mp4|mov|m4v|webm)$/i.test(name)) return 'video';
-  if (/\.(mp3|m4a|wav|aac|ogg|flac)$/i.test(name)) return 'audio';
+/** 音视频类型(复用消息里的 RemoteMediaPlayerWebView 播放器)。同上:吃 relPath 不吃 name。 */
+function avKindFor(pathOrName: string): 'video' | 'audio' | null {
+  if (/\.(mp4|mov|m4v|webm)$/i.test(pathOrName)) return 'video';
+  if (/\.(mp3|m4a|wav|aac|ogg|flac)$/i.test(pathOrName)) return 'audio';
   return null;
 }
 
@@ -705,7 +721,7 @@ function FilePreviewPage({
   if (item.previewKind === 'pdf') {
     return <PdfPreviewPage active={active} exportToUrl={exportToUrl} item={item} onDownload={onDownload} recoveryEpoch={recoveryEpoch} workdir={workdir} />;
   }
-  const avKind = avKindFor(item.name);
+  const avKind = avKindFor(item.relPath);
   if (avKind) {
     return <AvPreviewPage active={active} exportToUrl={exportToUrl} item={item} kind={avKind} onDownload={onDownload} workdir={workdir} />;
   }
@@ -907,7 +923,7 @@ function TextPreviewPage({
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
-  const richKind = richTextKindOf(item.name);
+  const richKind = richTextKindOf(item.relPath);
   // absPath 单文件模式(item.relPath 为绝对路径)没有可靠 mtime(恒 0),
   // 缓存键无法随文件覆写失效,读写一律跳过缓存。
   const cacheable = !!workdir && !isAbsolutePathShape(item.relPath);

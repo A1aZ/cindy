@@ -40,6 +40,14 @@ export interface ForcedUpdateRecheckDeps {
   now: () => number;
   /** 阻断屏卸载后使迟到结果失效。 */
   isCurrent?: () => boolean;
+  /**
+   * 创建时读一次当前 AppState(实参为 () => AppState.currentState)。
+   * 必要性:阻断态可能在 App **已经切到后台之后**才被置位(启动 / resume 检查的
+   * /latest 迟到返回),此时本实例从未见过 'background' 事件,回前台的第一次
+   * 'active' 会被 wasBackground 门挡掉 —— 运维撤回门槛正好发生在用户离开期间时,
+   * 用户回来还要再切一次后台才自愈。省略则按 'active' 处理(维持旧行为)。
+   */
+  getAppState?: () => string;
 }
 
 export interface ForcedUpdateRecheckOptions {
@@ -68,9 +76,12 @@ export function createForcedUpdateRechecker(
     latestTimeoutMs = DEFAULT_LATEST_TIMEOUT_MS,
   }: ForcedUpdateRecheckOptions = {},
 ): ForcedUpdateRechecker {
-  // 与 resume 通道不同:阻断屏刚挂载时那次检查刚跑完,所以创建时刻同样视为"刚查过"。
+  // 与 resume 通道不同:阻断屏刚挂载时那次检查刚跑完,所以创建时刻同样视为"刚查过"
+  // (节流仍然生效:用户离开不足 minIntervalMs 就回来时,重查是冗余的)。
   let lastRunAt = deps.now();
-  let wasBackground = false;
+  // 挂载时若 App 已不在前台,视同"已经进过后台":下一次回前台就该核对,
+  // 不必等用户再走一个完整的切后台→回前台周期。
+  let wasBackground = deps.getAppState ? deps.getAppState() !== 'active' : false;
   let inFlight = false;
 
   async function run(): Promise<ForcedUpdateRecheckOutcome> {

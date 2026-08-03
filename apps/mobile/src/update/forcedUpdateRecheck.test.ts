@@ -55,6 +55,40 @@ describe('createForcedUpdateRechecker 触发条件', () => {
     expect(deps.fetchLatest).not.toHaveBeenCalled();
   });
 
+  it('挂载时已在后台(阻断态被迟到的 /latest 置位)→ 回前台第一次就核对', async () => {
+    // 没有这条 seeding,本实例见不到 'background' 事件,回前台首次会被 wasBackground
+    // 门挡掉,用户得再走一个完整的切后台→回前台周期才自愈。
+    const deps = makeDeps({ getAppState: () => 'background' });
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 0 });
+    deps.advance(1);
+    const result = rechecker.handleAppStateChange('active');
+    expect(result).not.toBeNull();
+    await result;
+    expect(deps.fetchLatest).toHaveBeenCalledOnce();
+  });
+
+  it('挂载时处于 inactive(iOS 抖动 / 系统弹框)→ 同样按已离开前台处理', async () => {
+    const deps = makeDeps({ getAppState: () => 'inactive' });
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 0 });
+    deps.advance(1);
+    expect(rechecker.handleAppStateChange('active')).not.toBeNull();
+  });
+
+  it('挂载时在前台 → 维持原行为(首次 active 不检查)', () => {
+    const deps = makeDeps({ getAppState: () => 'active' });
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 0 });
+    deps.advance(1);
+    expect(rechecker.handleAppStateChange('active')).toBeNull();
+    expect(deps.fetchLatest).not.toHaveBeenCalled();
+  });
+
+  it('挂载时已在后台但用户很快回来 → 节流仍然生效(刚查过,重查冗余)', () => {
+    const deps = makeDeps({ getAppState: () => 'background' });
+    const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 30_000 });
+    deps.advance(1000); // 远小于节流间隔
+    expect(rechecker.handleAppStateChange('active')).toBeNull();
+  });
+
   it('间隔不足的连续回前台 → 只检查一次(节流)', async () => {
     const deps = makeDeps();
     const rechecker = createForcedUpdateRechecker(deps, { minIntervalMs: 1000 });

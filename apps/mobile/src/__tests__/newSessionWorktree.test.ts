@@ -314,7 +314,7 @@ describe('shouldBlockNewSessionCreateForWorktree', () => {
     })).toBe(false);
   });
 
-  it('ON 时必须等当前目标 eligible，OFF 与老端 unsupported 允许普通创建', () => {
+  it('ON 时必须等当前目标 eligible，unsupported 也不能把显式选择静默降级成普通创建', () => {
     expect(shouldBlockNewSessionCreateForWorktree({
       applicable: true, enabled: true, eligibility: { status: 'probing' }, preferenceSaving: false,
     })).toBe(true);
@@ -332,7 +332,7 @@ describe('shouldBlockNewSessionCreateForWorktree', () => {
     })).toBe(false);
     expect(shouldBlockNewSessionCreateForWorktree({
       applicable: true, enabled: true, eligibility: { status: 'unsupported' }, preferenceSaving: false,
-    })).toBe(false);
+    })).toBe(true);
   });
 });
 

@@ -197,8 +197,8 @@ export function shouldShowWorktreeToggle(input: {
 
 /**
  * checkbox 正在写工作端时不能按旧镜像创建；已勾选且当前目标尚未确认 eligible 时，
- * 也不能静默退化为普通目录会话。unsupported 是老工作端的兼容降级：控件整行隐藏，
- * 继续允许创建普通会话，避免用户被一份无法在该工作端关闭的旧镜像永久卡住。
+ * 也不能静默退化为普通目录会话。unsupported 只隐藏老工作端无法操作的控件；
+ * 若当前镜像仍为已勾选，也必须 fail closed，不能绕过 worktree:create 落到 base repo。
  */
 export function shouldBlockNewSessionCreateForWorktree(input: {
   /** 当前草稿是否真的会使用 worktree：仅 project + 已选目录。 */
@@ -212,8 +212,7 @@ export function shouldBlockNewSessionCreateForWorktree(input: {
   if (!input.applicable) return false;
   if (input.preferenceSaving) return true;
   return input.enabled
-    && input.eligibility.status !== 'eligible'
-    && input.eligibility.status !== 'unsupported';
+    && input.eligibility.status !== 'eligible';
 }
 
 /** 资格未通过时的 caption 文案 key(session.json);eligible/unsupported 无 caption。 */

@@ -656,7 +656,10 @@ import { listActiveClaudeBackgroundActivitySessions } from './maker-host/claude-
 import { registerRelaunchBusyActivityIpc } from './relaunchBusyActivityIpc.js';
 import { getGhostSetupChangeBus } from './cindy-brain/ghostSetupChangeBus.js';
 import { getGhostSetupInteractionBridge } from './cindy-brain/ghostSetupInteractionBridge.js';
-import { registerPluginMarketIpc } from './plugin-market/registerIpc.js';
+import {
+  registerPluginMarketIpc,
+  syncDefaultMarketPlugins,
+} from './plugin-market/registerIpc.js';
 import { findCindyFileInArgv } from './cindy-brain/argv.js';
 import { handleIncomingCindyFile } from './cindy-brain/openFileInstall.js';
 import { registerCindyFileAssociation } from './cindy-brain/fileAssociation.js';
@@ -2574,6 +2577,20 @@ const createWindow = () => {
 
 let disposeSkillhubAutoSyncAuthListener: (() => void) | null = null;
 let disposeProviderAccessAuthListener: (() => void) | null = null;
+let disposePluginMarketAuthListener: (() => void) | null = null;
+let defaultPluginSyncInFlightScope: string | null = null;
+
+/** Run the existing market reconciliation once for each stable app owner. */
+function syncDefaultPluginsForActiveOwner(): void {
+  const session = getActiveAppSession();
+  if (!session.dataOwnerId || isAppSessionBoundaryPending()) return;
+  const scope = activeOwnerScopeKey();
+  if (scope === defaultPluginSyncInFlightScope) return;
+  defaultPluginSyncInFlightScope = scope;
+  void syncDefaultMarketPlugins().finally(() => {
+    if (defaultPluginSyncInFlightScope === scope) defaultPluginSyncInFlightScope = null;
+  });
+}
 
 const registerIpcHandlers = () => {
   // Find the primary app window, skipping transient utility BrowserWindows like
@@ -4572,6 +4589,13 @@ const registerIpcHandlers = () => {
   disposeProviderAccessAuthListener = authManager.onAuthStateChange(() => {
     refreshProviderAccessAfterAuthChange();
   });
+  // 默认插件同步不能依赖用户先打开插件页。启动时本地 owner 已经稳定则立刻
+  // 复用市场快照；云端登录/切号的通知可能早于 owner boundary 释放，因此
+  // 延迟到当前调用栈结束后再按已提交的新 owner 补跑一次。
+  disposePluginMarketAuthListener = authManager.onAuthStateChange(() => {
+    queueMicrotask(syncDefaultPluginsForActiveOwner);
+  });
+  syncDefaultPluginsForActiveOwner();
 
   // ── Dialog: 目录选择器（v0.6 新增，与旧 show-open-directory-dialog 并存） ──
   ipcMain.handle(
@@ -6358,6 +6382,14 @@ onQuit(
   () => {
     disposeProviderAccessAuthListener?.();
     disposeProviderAccessAuthListener = null;
+  },
+  'sync',
+);
+onQuit(
+  'plugin-market-auth-listener',
+  () => {
+    disposePluginMarketAuthListener?.();
+    disposePluginMarketAuthListener = null;
   },
   'sync',
 );

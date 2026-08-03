@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { interceptHtmlNavigation } from '@/session/htmlNavigationPolicy';
+
 /**
  * 源码契约用例的统一读法:**必须把 CRLF 归一成 LF**。
  *
@@ -49,6 +51,8 @@ describe('remote file preview pager wiring', () => {
 });
 
 const htmlReaderSource = readSource('src/session/HtmlFileReader.tsx');
+const source_reader = htmlReaderSource;
+const navPolicySource = readSource('src/session/htmlNavigationPolicy.ts');
 
 describe('HTML 渲染态的 WebView 约束', () => {
   it('显式给 baseUrl,不吃两端默认值不一致(Android 空串会吞掉页内锚点)', () => {
@@ -56,7 +60,9 @@ describe('HTML 渲染态的 WebView 约束', () => {
   });
 
   it('回调是唯一导航决策点:originWhitelist 不得收窄', () => {
-    expect(htmlReaderSource).toContain('onShouldStartLoadWithRequest={interceptHtmlNavigation}');
+    expect(htmlReaderSource).toContain('onShouldStartLoadWithRequest={interceptNavigation}');
+    // 载体只负责传闩,判定在纯策略模块里(便于行为级用例)。
+    expect(htmlReaderSource).toContain('interceptHtmlNavigation(request, documentSettledRef.current)');
     // 收窄成 ['about:blank'] 会让 RNW 在回调**之前**拒掉非白名单 URL,并把它交给
     // RN Linking 让系统处理 —— tel: / mailto: / 自定义 scheme 会拉起外部应用,
     // 整段策略被绕过(review P2 实捉)。必须放到 '*' 让回调拿到全部请求。
@@ -84,12 +90,16 @@ describe('HTML 渲染态的 WebView 约束', () => {
     // (注意别写成 /Linking/ —— 头注里本来就在解释「为什么不用 Linking」,会自我命中。)
     expect(htmlReaderSource).toContain("import { StyleSheet, View } from 'react-native';");
     expect(htmlReaderSource).not.toMatch(/\bLinking\.\w/);
-    // 放行面只剩 about:(文档自身与页内锚点,否则目录跳转失效)。
-    expect(htmlReaderSource).toContain("url.startsWith('about:')");
     // 回调必须以无条件拒绝收尾(默认拒绝,不是默认放行)。
-    const decision = /function interceptHtmlNavigation[\s\S]*?\n\}/.exec(htmlReaderSource);
+    const decision = /export function interceptHtmlNavigation[\s\S]*?\n\}/.exec(navPolicySource);
     expect(decision, '未找到导航决策函数').not.toBeNull();
     expect(decision![0].trimEnd().endsWith('return false;\n}')).toBe(true);
+    // **不得**放行整个 about:* —— 那会让页面把自己导航到 about:blank、换掉加固过的文档。
+    // 注意别写成裸字符串 —— 头注里正在解释「为什么不再这么做」,会自我命中(第 5 次踩)。
+    // 只禁代码形态:整段 about: 前缀放行的 return。
+    expect(navPolicySource).not.toMatch(/if\s*\(.*startsWith\('about:'\).*\)\s*return true/);
+    // 策略模块必须保持无 RN 运行时依赖(否则契约用例又只能读源码字符串)。
+    expect(navPolicySource).not.toMatch(/^import \{[^}]*\} from 'react-native'/m);
     // onMessage 缺席是刻意的:不给任意生成物一条通向 RN 的桥。
     // 只匹配 JSX 属性形态 —— 头注里说明「不挂 onMessage」的那句话不算挂上。
     expect(htmlReaderSource).not.toMatch(/onMessage\s*=/);
@@ -184,5 +194,50 @@ describe('HTML 生成物的渲染态接线', () => {
   it('HTML 判定取共享层口径,不在页面里另写一份扩展名表', () => {
     expect(source).toContain('isHtmlFilePreviewCandidate');
     expect(source).not.toMatch(/\/\\\.\(html\|htm/);
+  });
+});
+
+describe('导航门:只放行同文档锚点与首份文档加载(review P1)', () => {
+  it('同文档锚点放行 —— 不替换文档,CSP 与能力剥离都还在', () => {
+    for (const settled of [false, true]) {
+      expect(interceptHtmlNavigation({ url: 'about:blank#toc' } as never, settled)).toBe(true);
+      expect(interceptHtmlNavigation({ url: 'about:blank#a/b' } as never, settled)).toBe(true);
+    }
+  });
+
+  it('首份文档加载放行一次,上闩之后 about:blank 一律拒绝', () => {
+    // 早先 `startsWith('about:')` 一律放行 → 页面能把自己导航到 about:blank,新文档不再
+    // 经过 withHtmlPreviewCsp,iOS 侧原生 RTCPeerConnection 复活(review P1)。
+    expect(interceptHtmlNavigation({ url: 'about:blank' } as never, false)).toBe(true);
+    expect(interceptHtmlNavigation({ url: '' } as never, false)).toBe(true);
+    expect(interceptHtmlNavigation({ url: 'about:blank' } as never, true)).toBe(false);
+    expect(interceptHtmlNavigation({ url: '' } as never, true)).toBe(false);
+  });
+
+  it('其它 about: 形态一律拒绝(不再整段放行)', () => {
+    for (const settled of [false, true]) {
+      for (const url of ['about:srcdoc', 'about:config', 'about:blank?x=1', 'ABOUT:BLANK']) {
+        expect(interceptHtmlNavigation({ url } as never, settled)).toBe(false);
+      }
+    }
+  });
+
+  it('http(s) / 自定义 scheme / file 一律拒绝,与闩状态无关', () => {
+    for (const settled of [false, true]) {
+      for (const url of [
+        'https://evil.example/?d=x', 'http://x', 'file:///etc/passwd',
+        'tel:123', 'mailto:a@b.c', 'intent://x', 'javascript:alert(1)',
+      ]) {
+        expect(interceptHtmlNavigation({ url } as never, settled)).toBe(false);
+      }
+    }
+  });
+
+  it('闩由 onLoadEnd 合上,换 html 时重置(渲染期比对,不用弱 key)', () => {
+    expect(source_reader).toContain('onLoadEnd={() => { documentSettledRef.current = true; }}');
+    expect(source_reader).toContain('lastHtmlRef.current !== guardedHtml');
+    expect(source_reader).toContain('documentSettledRef.current = false');
+    // 不得退回用长度当 key 的弱判据。
+    expect(source_reader).not.toContain('key={guardedHtml.length}');
   });
 });

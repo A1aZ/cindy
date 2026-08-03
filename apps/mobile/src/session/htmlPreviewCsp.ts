@@ -79,6 +79,10 @@ const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PRE
  * 而这段脚本拼在文档最前面,**由解析器保证先于任何作者脚本执行,没有竞态** —— 与 CSP meta
  * 同一个位置、同一个理由。它把能力面直接删掉,不依赖任何平台的权限实现是否正确。
  *
+ * **必须同时盖原型**:只在 `navigator` 上建同名遮蔽属性,只挡住 `navigator.x` 这种写法,
+ * 原型方法仍可 `Navigator.prototype.webkitGetUserMedia.call(navigator, ...)` 取出来直接调
+ * (review P1 实捉,上一版漏了两个前缀变体)。所以名单 × {实例, 原型} 两处一起盖。
+ *
  * 作者脚本拿不到干净 realm 来恢复这些全局:CSP 里 `frame-src 'none'` 与 `object-src 'none'`
  * 已经封掉 iframe / object(用例钉住这两条与本脚本的共存关系)。属性用
  * `writable: false, configurable: false` 定死,重定义会抛。
@@ -91,15 +95,24 @@ const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PRE
  * ⚠️ 脚本文本里**不得出现 `</script>`**,否则会提前闭合(这里没有,用例钉住)。
  */
 const DEVICE_SURFACE_GUARD = '<script>(function(){'
-  + 'var hide=function(o,k){try{Object.defineProperty(o,k,'
+  + 'var freeze=function(o,k){try{Object.defineProperty(o,k,'
   + '{value:undefined,writable:false,configurable:false});}catch(e){}};'
-  + 'try{var N=Navigator.prototype;'
-  // mediaDevices 是原型上的 getter:实例与原型都要盖掉,否则能沿原型链取回。
-  + "hide(N,'mediaDevices');hide(navigator,'mediaDevices');"
-  + "hide(N,'getUserMedia');hide(navigator,'getUserMedia');"
-  + "hide(navigator,'webkitGetUserMedia');hide(navigator,'mozGetUserMedia');"
-  + "hide(window,'RTCPeerConnection');hide(window,'webkitRTCPeerConnection');"
-  + "hide(window,'RTCDataChannel');"
+  // **每个名字都盖「实例 + 原型」两处** —— 写成一个 both() 而不是逐条列举,是因为上一版
+  // 只给 mediaDevices / getUserMedia 盖了原型、漏了两个前缀变体,于是
+  // `Navigator.prototype.webkitGetUserMedia.call(navigator, ...)` 能绕过守卫(review P1 实捉)。
+  // 遮蔽实例属性只挡住 `navigator.x` 这一种写法,原型方法照旧可以 .call 出来。
+  // 用一份名单 × 两个目标,漏一边在结构上就不可能了 —— 以后加名字也不会再漏。
+  + 'var both=function(k){freeze(navigator,k);'
+  + 'try{freeze(Navigator.prototype,k);}catch(e){}};'
+  + 'try{'
+  + "['mediaDevices','getUserMedia','webkitGetUserMedia','mozGetUserMedia']"
+  + '.forEach(both);'
+  + "['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel']"
+  + '.forEach(function(k){freeze(window,k);});'
+  // 兜底一层:MediaDevices 实例本应取不到(上面已盖两处),但若某引擎另有取法,
+  // 把原型方法也盖掉,代价一行。
+  + "if(typeof MediaDevices!=='undefined'&&MediaDevices.prototype)"
+  + "{freeze(MediaDevices.prototype,'getUserMedia');}"
   + '}catch(e){}})();</scr' + 'ipt>';
 
 /** 我们自己的前导段:标准模式 + 策略 + 能力剥离,一次性拼在最前面。 */

@@ -95,18 +95,37 @@ describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
   // 只取我们这一段:切到**第一个** </script> 为止,否则会把作者内容一起圈进来。
   const guard = prolog.slice(prolog.indexOf(OPEN), prolog.indexOf(CLOSE) + CLOSE.length);
 
-  it('剥掉摄像头 / 麦克风入口:实例与原型都要盖,否则能沿原型链取回', () => {
+  it('媒体入口按「名单 × 实例+原型」两处一起盖(结构性,不逐条列举)', () => {
     // Android 的 mediaCapturePermissionGrantType setter 是空函数(RNCWebViewManager.java),
     // 权限只看 app 级 OS 运行时权限 —— 用户为语音输入授过 RECORD_AUDIO 之后,不可信 HTML
     // 就能零提示拿到音视频流。所以能力面直接删掉,不依赖平台权限实现是否正确。
-    expect(guard).toContain("hide(Navigator.prototype,'mediaDevices')".replace('Navigator.prototype', 'N'));
-    expect(guard).toContain("hide(navigator,'mediaDevices')");
-    expect(guard).toContain("hide(navigator,'webkitGetUserMedia')");
+    //
+    // **只盖实例不够**(review P1 实捉):遮蔽 `navigator.x` 只挡住那一种写法,原型方法仍可
+    // `Navigator.prototype.webkitGetUserMedia.call(navigator, ...)` 取出来直接调。上一版正是
+    // 只给 mediaDevices / getUserMedia 盖了原型、漏了两个前缀变体。
+    //
+    // 断言写成「必须有一个同时作用于实例与原型的 both()」而不是逐个名字对 —— 逐个对的写法
+    // 就是上一版漏掉一边的成因;结构性保证才挡得住下一次加名字时再漏。
+    expect(guard).toContain("var both=function(k){freeze(navigator,k)");
+    expect(guard).toContain("freeze(Navigator.prototype,k)");
+    for (const name of ['mediaDevices', 'getUserMedia', 'webkitGetUserMedia', 'mozGetUserMedia']) {
+      expect(guard).toContain(`'${name}'`);
+    }
+    // 名单必须整体走 both,不允许某个名字被单独用 freeze(navigator, ...) 处理掉。
+    expect(guard).toContain('.forEach(both)');
+    expect(guard).not.toMatch(/freeze\(navigator,'/);
   });
 
   it('剥掉 WebRTC:iOS 上 webrtc 指令无效,删掉构造器才是真封住', () => {
-    expect(guard).toContain("hide(window,'RTCPeerConnection')");
-    expect(guard).toContain("hide(window,'webkitRTCPeerConnection')");
+    for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChannel']) {
+      expect(guard).toContain(`'${name}'`);
+    }
+    expect(guard).toContain('freeze(window,k)');
+  });
+
+  it('兜底盖 MediaDevices.prototype.getUserMedia(带存在性判断,不炸老引擎)', () => {
+    expect(guard).toContain("typeof MediaDevices!=='undefined'");
+    expect(guard).toContain("freeze(MediaDevices.prototype,'getUserMedia')");
   });
 
   it('属性定死为不可写不可配置,作者脚本重定义会抛', () => {

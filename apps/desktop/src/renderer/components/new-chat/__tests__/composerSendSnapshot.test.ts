@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { BrowserCommentTargetInfo } from '../../../../shared/browserComment';
 
 import {
   captureComposerSendSnapshot,
@@ -12,13 +13,32 @@ const attachment = {
   path: '/tmp/one.txt',
   ext: 'txt',
   size: 3,
-  category: 'document' as const,
+  mimeType: 'text/plain',
+  category: 'text' as const,
+};
+const commentTarget: BrowserCommentTargetInfo = {
+  kind: 'element',
+  point: { x: 10, y: 20 },
+  viewport: { width: 1280, height: 720 },
+  region: null,
+  selectedText: null,
+  immediate: false,
+  targetTag: 'button',
+  targetLabel: 'one',
+  targetRole: 'button',
+  targetSelector: '#one',
+  targetPath: 'html > body > button',
+  nearbyText: 'one',
+  themeVariant: 'light',
+  designBaseline: null,
+  markerNumber: 1,
 };
 const comment = {
   id: 'comment-1',
   markerNumber: 1,
+  pageUrl: 'https://example.com',
+  target: commentTarget,
   comment: 'keep this',
-  selector: { type: 'element' as const, value: '#one' },
   screenshot: attachment,
 };
 

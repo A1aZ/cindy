@@ -16,7 +16,7 @@ import { fetchHtmlResourceUrls } from '@/session/useHtmlLocalResources';
 const BASE = '/Users/me/drafts';
 
 /** 取件目标简写(取件编排只关心 absPath + mimeType)。 */
-const t = (absPath: string) => ({ absPath, mimeType: 'image/png' });
+const t = (absPath: string, refCount = 1) => ({ absPath, mimeType: 'image/png', refCount });
 
 describe('resolveHtmlResourcePath(引用 → 被控端绝对路径)', () => {
   it('相对引用按 HTML 所在目录换算', () => {
@@ -204,8 +204,9 @@ describe('planHtmlResourceFetches(去重与上限)', () => {
     );
     expect(planHtmlResourceFetches(refs)).toEqual({
       targets: [
-        { absPath: '/Users/me/drafts/b.png', mimeType: 'image/png' },
-        { absPath: '/Users/me/drafts/a.png', mimeType: 'image/png' },
+        // b.png 出现两次 → 仍只取一次件,但 refCount 记 2(预算按回填倍数计费)。
+        { absPath: '/Users/me/drafts/b.png', mimeType: 'image/png', refCount: 2 },
+        { absPath: '/Users/me/drafts/a.png', mimeType: 'image/png', refCount: 1 },
       ],
       skipped: 0,
     });
@@ -359,7 +360,7 @@ describe('SVG fragment 必须保留(sprite 靠它选 symbol)', () => {
   it('同一 SVG 的不同 fragment 只取一次件', () => {
     const refs = collectHtmlLocalResourceRefs('<img src="s.svg#a"><img src="s.svg#b">', BASE);
     expect(planHtmlResourceFetches(refs).targets).toEqual([
-      { absPath: '/Users/me/drafts/s.svg', mimeType: 'image/svg+xml' },
+      { absPath: '/Users/me/drafts/s.svg', mimeType: 'image/svg+xml', refCount: 2 },
     ]);
   });
 });
@@ -371,6 +372,7 @@ describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
     const targets = Array.from({ length: 10 }, (_, i) => ({
       absPath: `/a${i}.png`,
       mimeType: 'image/png',
+      refCount: 1,
     }));
     const chunk = 'x'.repeat(100);
     let calls = 0;
@@ -393,7 +395,7 @@ describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
 
   it('超预算的那个保留原引用,不占内存也不换错地址', async () => {
     const out = await fetchHtmlResourceUrls(
-      [{ absPath: '/big.png', mimeType: 'image/png' }],
+      [{ absPath: '/big.png', mimeType: 'image/png', refCount: 1 }],
       async () => 'y'.repeat(500),
       { totalBudgetChars: 100 },
     );
@@ -403,7 +405,7 @@ describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
 
   it('预算内不受影响,且默认预算是显式常量', async () => {
     const out = await fetchHtmlResourceUrls(
-      [{ absPath: '/a.png', mimeType: 'image/png' }],
+      [{ absPath: '/a.png', mimeType: 'image/png', refCount: 1 }],
       async () => 'data:image/png;base64,AAA',
     );
     expect(out.urlByAbsPath.size).toBe(1);
@@ -461,5 +463,80 @@ describe('惰性文本不占取件配额(注释 / 脚本体 / CSS 注释)', () =
     expect(out).toContain('url(data:image/png;base64,AAA)');
     // 注释原文一字不动。
     expect(out).toContain('<!-- url(old.png) -->');
+  });
+});
+
+describe('<template> 体也是惰性文本(不占取件配额)', () => {
+  it('模板里的伪引用不进候选,模板外的真资源照旧取', () => {
+    const fake = Array.from({ length: 32 }, (_, i) => `<img src="tpl${i}.png">`).join('');
+    const refs = collectHtmlLocalResourceRefs(
+      `<template id="row">${fake}</template><img src="real.png">`,
+      BASE,
+    );
+    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('嵌套模板按深度计数,外层剩余部分不逃过掩码', () => {
+    // 只匹配到第一个 </template> 会让 `<img src="outer.png">` 被当成真资源。
+    const html = '<template><template><img src="inner.png"></template>'
+      + '<img src="outer.png"></template><img src="real.png">';
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
+  });
+
+  it('未闭合模板掩到文末;落单的闭合标记不影响后续', () => {
+    expect(collectHtmlLocalResourceRefs('<template><img src="a.png">', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('</template><img src="a.png">', BASE).map((r) => r.raw))
+      .toEqual(['a.png']);
+  });
+});
+
+describe('总量预算按回填后的实际增量计费', () => {
+  it('同一资源被多处引用时按 refCount 倍计费', () => {
+    // 去重后只有 1 个 target,但回填会插入 100 次 —— 只计一次就会放过 100 倍的内存。
+    const refs = collectHtmlLocalResourceRefs(
+      Array.from({ length: 100 }, () => '<img src="a.png">').join(''),
+      BASE,
+    );
+    const plan = planHtmlResourceFetches(refs);
+    expect(plan.targets).toHaveLength(1);
+    expect(plan.targets[0].refCount).toBe(100);
+  });
+
+  it('单份能装下、乘以引用次数装不下 → 拒绝并计入 overBudget', async () => {
+    const out = await fetchHtmlResourceUrls(
+      [{ absPath: '/a.png', mimeType: 'image/png', refCount: 100 }],
+      async () => 'x'.repeat(200),
+      { totalBudgetChars: 1000 },
+    );
+    expect(out.urlByAbsPath.size).toBe(0);
+    expect(out.overBudget).toBe(1);
+  });
+
+  it('引用一次时行为不变(不因新计费方式变严)', async () => {
+    const out = await fetchHtmlResourceUrls(
+      [{ absPath: '/a.png', mimeType: 'image/png', refCount: 1 }],
+      async () => 'x'.repeat(200),
+      { totalBudgetChars: 1000 },
+    );
+    expect(out.urlByAbsPath.size).toBe(1);
+    expect(out.overBudget).toBe(0);
+  });
+
+  it('refCount 缺失 / 为 0 / 非数时按 1 计,预算判断不得 fail-open', async () => {
+    // `Math.max(1, undefined)` 是 NaN,而 `usedChars + NaN > budget` 恒为 false ——
+    // 少一个字段就让整条预算判断放行一切。三种脏形态都必须退化成「按 1 计」。
+    for (const dirty of [
+      { absPath: '/a.png', mimeType: 'image/png' } as never,
+      { absPath: '/a.png', mimeType: 'image/png', refCount: 0 },
+      { absPath: '/a.png', mimeType: 'image/png', refCount: Number.NaN },
+    ]) {
+      const out = await fetchHtmlResourceUrls(
+        [dirty],
+        async () => 'x'.repeat(2000),
+        { totalBudgetChars: 1000 },
+      );
+      expect(out.urlByAbsPath.size).toBe(0);
+      expect(out.overBudget).toBe(1);
+    }
   });
 });

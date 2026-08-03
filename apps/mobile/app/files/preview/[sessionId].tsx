@@ -397,6 +397,12 @@ export default function RemoteFilePreviewScreen() {
           sshMediaContext,
           (ossKey) => uploadedKeys.add(ossKey),
         );
+        // **下载之前先按 media.size 拒掉超限资源**(review P1):取件回包已经带了大小,
+        // 而 downloadRemoteMediaAsDataUri 是先把整个对象拉到手机缓存、再看 file.size ——
+        // media:fetch 上限有 2 GB、批量取件又有 4 路并发,不前置判断的话一份不可信产物
+        // 能凭「白名单扩展名的超大文件」打出数 GB 流量与临时磁盘占用,最后才返回空地址。
+        // 下载后的那道判断保留:size 缺失 / 谎报时仍要兜住(fail-closed 的第二道)。
+        if (media.size > HTML_RESOURCE_MAX_BYTES) return '';
         // 预签名地址只在这里用一次:下载完即转成 data: URI,**绝不回填进页面**
         // (页面里的脚本能读 DOM,凭证进 DOM 等于交给不可信文档,review P1)。
         const dataUri = await downloadRemoteMediaAsDataUri(

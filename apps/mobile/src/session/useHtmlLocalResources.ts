@@ -87,12 +87,24 @@ export async function fetchHtmlResourceUrls(
           continue;
         }
         // 取回来才知道多大;装不进剩余预算就丢掉这一个(保留原引用),不占内存。
-        if (usedChars + dataUri.length > totalBudget) {
+        //
+        // **按 `长度 × refCount` 计费,不是按长度**(review P1 实捉):取件按路径去重,但
+        // applyHtmlResourceUrls 会在**每一处**引用都完整插入这份 data: URI —— 100 个
+        // `<img src="a.png">` 指向同一张 2 MiB 图,只计一次时能通过 8 MiB 预算,回填后却
+        // 生成约 267 MiB 的 HTML,WebView 序列化时 OOM。预算要覆盖的是**最终回填后的增量**。
+        // 计数必须显式兜底成 1:`Math.max(1, undefined)` 是 **NaN**,而
+        // `usedChars + NaN > totalBudget` 恒为 false —— 少一个字段就让整条预算判断变成
+        // fail-open,所有资源无条件放行(本仓既有用例实捉)。
+        const refCount = Number.isFinite(target.refCount) && target.refCount > 0
+          ? target.refCount
+          : 1;
+        const inlinedChars = dataUri.length * refCount;
+        if (usedChars + inlinedChars > totalBudget) {
           budgetExhausted = true;
           overBudget += 1;
           continue;
         }
-        usedChars += dataUri.length;
+        usedChars += inlinedChars;
         urlByAbsPath.set(target.absPath, dataUri);
       } catch {
         failed += 1;

@@ -145,6 +145,23 @@ describe('资源取件的安全接线(源码级守卫)', () => {
     expect(pageSource).not.toMatch(/fetchResourceDataUri[\s\S]{0,400}?return url;/);
   });
 
+  it('下载前先按 media.size 拒掉超限资源(别先拉几 GB 再看)', () => {
+    // downloadRemoteMediaAsDataUri 是先落盘再看 file.size;media:fetch 上限 2 GB、批量取件
+    // 4 路并发,不前置判断的话一份不可信产物能打出数 GB 流量与临时磁盘占用(review P1)。
+    const body = /const fetchResourceDataUri = useCallback\(([\s\S]*?)\n  \);/.exec(pageSource);
+    expect(body, '未找到 fetchResourceDataUri 实现').not.toBeNull();
+    expect(body![1]).toContain('if (media.size > HTML_RESOURCE_MAX_BYTES) return');
+    // 前置判断必须在下载之前。
+    expect(body![1].indexOf('media.size > HTML_RESOURCE_MAX_BYTES'))
+      .toBeLessThan(body![1].indexOf('downloadRemoteMediaAsDataUri('));
+    // 下载后那道判断保留(size 缺失 / 谎报时的第二道 fail-closed)。
+    const dl = readFileSync(
+      resolve(process.cwd(), 'src/session/remoteMediaDiskCacheExpo.ts'),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+    expect(dl).toContain('size > maxBytes');
+  });
+
   it('取件产生的 OSS 对象必须回收,且失败路径也删', () => {
     // 每个资源都新建一个 OSS 对象,不删的话一页最多遗留 32 个、反复进出还会累积。
     expect(pageSource).toContain('const deleteResourceOssObject = useCallback');

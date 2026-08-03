@@ -178,10 +178,10 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
 /**
  * 把「浏览器不会当资源看」的惰性文本替换成**等长**空白,只用于扫描。
  *
- * 为什么需要(review P1):HTML 注释、`<script>` 体、CSS 注释里可以塞任意多个长得像
- * `<img src="a.png">` 或 `url(b.png)` 的字符串。它们永远不会被浏览器加载,却会被词法
- * 扫描当成资源、占满 32 项配额,把后面**真实**的图片 / 样式挤掉 —— 一份产物只要在
- * 开头放一段注释掉的旧标记,预览就继续缺图。
+ * 为什么需要(review P1):HTML 注释、`<script>` 体、`<template>` 体、CSS 注释里可以塞任意
+ * 多个长得像 `<img src="a.png">` 或 `url(b.png)` 的字符串。它们永远不会被浏览器加载,却会被
+ * 词法扫描当成资源、占满 32 项配额,把后面**真实**的图片 / 样式挤掉 —— 一份产物只要在
+ * 开头放一段注释掉的旧标记(或一个模板),预览就继续缺图。
  *
  * **必须等长**:回填(applyHtmlResourceUrls)按下标切原文改写,掩码只服务扫描,两者
  * 的下标必须逐字符对齐。换行保留不动,便于对照原文调试。
@@ -224,8 +224,36 @@ export function maskInertHtmlText(html: string): string {
     if (closeAt < 0) break;
   }
 
-  // ③ `<style>` 体里的 CSS 注释。style 体本身要保留 —— 里面的 `url()` 是真资源。
-  //    同理扫已抹掉注释与脚本体的副本。
+  // ③ `<template>` 体(review P1)。模板内容是**惰性**的:浏览器解析后放进
+  //    `content` DocumentFragment,不在文档里、不会加载其中任何资源。所以它和注释同性质,
+  //    不该占取件配额 —— 一份产物只要在真资源前放一个含 32 条引用的模板,后面的图就全被挤掉。
+  //    (即使脚本把模板克隆进文档,那些相对引用也解析不到 —— 文档 base 是 about:blank。)
+  //
+  //    **必须带深度计数**:`<template>` 可以嵌套,只匹配到第一个 `</template>` 会让外层
+  //    剩余部分逃过掩码。未闭合同样掩到文末。
+  const afterScripts = out.join('');
+  const templateTokenRe = /<(\/?)template\b[^<>]*>/gi;
+  let token: RegExpExecArray | null;
+  let depth = 0;
+  let bodyStart = -1;
+  while ((token = templateTokenRe.exec(afterScripts)) !== null) {
+    const isClose = token[1] === '/';
+    if (!isClose) {
+      if (depth === 0) bodyStart = token.index + token[0].length;
+      depth += 1;
+      continue;
+    }
+    if (depth === 0) continue; // 落单的 `</template>`,忽略
+    depth -= 1;
+    if (depth === 0 && bodyStart >= 0) {
+      blank(bodyStart, token.index);
+      bodyStart = -1;
+    }
+  }
+  if (depth > 0 && bodyStart >= 0) blank(bodyStart, afterScripts.length);
+
+  // ④ `<style>` 体里的 CSS 注释。style 体本身要保留 —— 里面的 `url()` 是真资源。
+  //    同理扫已抹掉注释 / 脚本体 / 模板体的副本。
   const masked = out.join('');
   const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
   let style: RegExpExecArray | null;
@@ -352,24 +380,44 @@ export function applyHtmlResourceUrls(
 export interface HtmlResourceFetchTarget {
   absPath: string;
   mimeType: string;
+  /**
+   * 该路径在文档里被引用的**次数**(去重前)。
+   *
+   * 取件按路径去重(同一张图引用十次只取一次),但 applyHtmlResourceUrls 会在**每一处**
+   * 引用都完整插入那份 `data:` URI —— 所以总量预算必须按 `长度 × refCount` 计费
+   * (review P1 实捉:100 个 `<img src="a.png">` 指向同一张 2 MiB 图,只计一次时能通过
+   * 8 MiB 预算,回填后却生成约 267 MiB 的 HTML,WebView 序列化时 OOM)。
+   */
+  refCount: number;
 }
 
 export function planHtmlResourceFetches(refs: readonly HtmlResourceRef[]): {
   targets: HtmlResourceFetchTarget[];
   skipped: number;
 } {
-  const seen = new Set<string>();
+  const seen = new Map<string, HtmlResourceFetchTarget>();
   const targets: HtmlResourceFetchTarget[] = [];
   let skipped = 0;
   for (const ref of refs) {
-    if (seen.has(ref.absPath)) continue;
+    const known = seen.get(ref.absPath);
+    if (known) {
+      // 重复引用不新增取件,但要累加引用次数 —— 预算按回填后的实际增量计费。
+      known.refCount += 1;
+      continue;
+    }
     if (targets.length >= HTML_RESOURCE_LIMIT) {
-      seen.add(ref.absPath);
+      // 超限的路径也登记(refCount 不再有意义,占位防止同一路径重复计入 skipped)。
+      seen.set(ref.absPath, { absPath: ref.absPath, mimeType: ref.mimeType, refCount: 1 });
       skipped += 1;
       continue;
     }
-    seen.add(ref.absPath);
-    targets.push({ absPath: ref.absPath, mimeType: ref.mimeType });
+    const target: HtmlResourceFetchTarget = {
+      absPath: ref.absPath,
+      mimeType: ref.mimeType,
+      refCount: 1,
+    };
+    seen.set(ref.absPath, target);
+    targets.push(target);
   }
   return { targets, skipped };
 }

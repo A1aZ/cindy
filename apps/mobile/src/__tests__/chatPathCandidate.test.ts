@@ -848,6 +848,22 @@ describe('findBareFileUrlMatch(正文纯文本裸 file:// URL 词法)', () => {
     expect(allValues('见 FILE:///Users/me/a.html')).toEqual([]);
   });
 
+  it('query 与 fragment 按 URL 语义剥掉,只留 pathname', () => {
+    // 整段收进候选的话,下游 slice(7) 会拿 `/tmp/a.html#results` 去 stat —— 本来存在的
+    // 文件点不亮,断链乐观点亮时还会打开不存在的地址(review P1)。
+    const text = '见 file:///tmp/report.html#results 这一节';
+    const match = findBareFileUrlMatch(text, 0);
+    expect(match!.value).toBe('file:///tmp/report.html');
+    // 区间同步收缩,`#results` 留作正文文本。
+    expect(text.slice(match!.end)).toBe('#results 这一节');
+    expect(allValues('见 file:///tmp/report.html?view=1')).toEqual(['file:///tmp/report.html']);
+    expect(allValues('见 file:///tmp/a.html?v=1#x')).toEqual(['file:///tmp/a.html']);
+    // 字面文件名里的 # 按规范写成 %23,解码在 resolveChatAbsPath,这里原样保留。
+    expect(allValues('见 file:///tmp/a%23b.html')).toEqual(['file:///tmp/a%23b.html']);
+    // pathname 为空时不产出 token。
+    expect(allValues('见 file:///?x=1')).toEqual([]);
+  });
+
   it('带 authority 的 file URL 不点亮(下游 slice(7) 会解析出垃圾路径)', () => {
     // `file://localhost/x` 与 Windows UNC `file://server/share/x` 都是合法 file URL,
     // 但 resolveChatAbsPath 固定 slice(7) 会得到 `localhost/x` / `server/share/x`,

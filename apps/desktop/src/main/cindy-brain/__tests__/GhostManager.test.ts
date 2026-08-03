@@ -350,6 +350,38 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(finalLedger.state).toBe('completed');
   });
 
+  it('读 legacy ghost.json 的瞬时 IO(EACCES)判瞬时、不永久封门(P1 回归)', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    const realReadFileSync = fs.readFileSync;
+    // 只让 <root>/hello/ghost.json 的读吃一次 EACCES(模拟杀软/句柄占用),其余照常。
+    const spy = vi
+      .spyOn(fs, 'readFileSync')
+      .mockImplementation(((p: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+        if (typeof p === 'string' && p.endsWith(path.join('hello', 'ghost.json'))) {
+          spy.mockRestore();
+          const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return (realReadFileSync as (...a: unknown[]) => unknown)(p, ...rest);
+      }) as typeof fs.readFileSync);
+
+    const first = await manager.migrateLegacyApprovalsOnce();
+    // 修复前:readFileSync 的错被包成无 code 的 new Error → 误判确定性 failed →
+    // 写进 completed 台账永久封门。修复后:保留 errno → 判瞬时 → retryPending + in-progress。
+    expect(first.retryPending).toEqual(['hello']);
+    expect(first.failed).toEqual([]);
+    const ledger = JSON.parse(realReadFileSync(migrationLedgerPath(), 'utf8')) as {
+      state?: string;
+    };
+    expect(ledger.state).toBe('in-progress');
+
+    // 下轮环境恢复:自动续跑治愈,不需要用户重新确认。
+    const second = await manager.migrateLegacyApprovalsOnce();
+    expect(second.migrated).toEqual(['hello']);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+  });
+
   it('首轮迁移治愈损坏/旧 schema 的 receipt(格式升级不落到用户重新确认)', async () => {
     // issue #1243 验收第 4 条的实现形态:schema/编码 bump 后的旧 receipt 判 invalid,
     // 但**首轮迁移**会把它当"已判损坏"从安装目录 backfill 重建 —— 一次内部格式变更

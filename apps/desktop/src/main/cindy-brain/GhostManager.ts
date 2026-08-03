@@ -594,13 +594,12 @@ export class GhostManager {
         // - 无 errno 的校验错(manifest 不合法、技能目录含链接、locale 装入后损坏)
         //   与 ENOENT(声明的文件缺失 = 内容状态,不是抖动)是**确定性**内容无效,
         //   记 failed、fail closed,走每插件恢复 UI。
-        const code = (err as NodeJS.ErrnoException | null)?.code;
-        const transient = typeof code === 'string' && code !== 'ENOENT';
+        const transient = isTransientBackfillError(err);
         if (transient) {
           result.retryPending.push(id);
           this.options.log?.warn('legacy ghost approval migration hit transient IO; will retry next launch', {
             id,
-            code,
+            code: (err as NodeJS.ErrnoException | null)?.code,
             error: err instanceof Error ? err.message : String(err),
           });
         } else {
@@ -661,11 +660,21 @@ export class GhostManager {
             out.migrated.push(id);
           }
         } catch (err) {
-          out.failed.push(id);
-          this.options.log?.warn('recovered legacy ghost backfill failed; kept fail-closed', {
-            id,
-            error: err instanceof Error ? err.message : String(err),
-          });
+          // 与主迁移循环同一分类:瞬时 IO 抖动不记 failed(否则写进 completed 台账就
+          // 把一次环境抖动永久封成"需要人工重新确认"),只记日志、留待下次恢复触发重试;
+          // 确定性内容无效才 fail closed。
+          if (isTransientBackfillError(err)) {
+            this.options.log?.warn('recovered legacy ghost backfill hit transient IO; will retry', {
+              id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          } else {
+            out.failed.push(id);
+            this.options.log?.warn('recovered legacy ghost backfill failed; kept fail-closed', {
+              id,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
       }
       if (out.migrated.length > 0 || out.failed.length > 0) {
@@ -710,11 +719,24 @@ export class GhostManager {
    *   技能目录含链接等异常会在那里如实 fail closed。
    */
   private async backfillLegacyApproval(dir: string, id: string): Promise<boolean> {
+    // 读文件与解析分开抛,且**保留 fs 错误的 errno**:迁移循环按 `err.code` 把
+    // EACCES/EBUSY/EIO 判为瞬时(下次启动续跑),把无 errno 的错判为确定性内容无效
+    // (fail closed)。若把 readFileSync 的错也包成 new Error()(丢掉 code),一次
+    // 读 legacy ghost.json 的瞬时 IO 抖动就会被误判成确定性 failed、写进 completed
+    // 台账,永久要求重新确认 —— 违反 §5 瞬时故障自动重试。ENOENT(缺 ghost.json)与
+    // JSON 解析失败是真的内容无效,保持确定性:前者带 ENOENT(分类器显式归确定性),
+    // 后者无 errno。
+    let rawBytes: Buffer;
+    try {
+      rawBytes = fs.readFileSync(path.join(dir, GHOST_MANIFEST_FILE));
+    } catch (err) {
+      throw err; // 原样抛,保留 errno(EACCES/EBUSY/EIO → 瞬时;ENOENT → 确定性)
+    }
     let raw: unknown;
     try {
-      raw = JSON.parse(fs.readFileSync(path.join(dir, GHOST_MANIFEST_FILE), 'utf-8'));
+      raw = JSON.parse(rawBytes.toString('utf-8'));
     } catch (err) {
-      throw new Error(`unreadable manifest: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(`invalid manifest JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
     const validated = validateGhostManifest(raw);
     if (!validated.ok) throw new Error(`invalid manifest: ${validated.reason}`);
@@ -2202,6 +2224,22 @@ async function pathExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * legacy backfill 的错误分类:**带 errno 且非 ENOENT** = 瞬时环境故障
+ * (EACCES/EBUSY/EIO/ENOSPC…,状态根写不动、文件被占等),应下次启动自动重试,不能
+ * 记进 completed 台账的 failedIds 永久封死(§5 瞬时故障自动重试)。无 errno 的校验错
+ * (manifest 不合法、技能目录含链接、locale 装入后损坏)与 ENOENT(声明文件缺失 = 内容
+ * 状态)是**确定性**内容无效,fail closed 走每插件恢复 UI。
+ *
+ * 前提:`backfillLegacyApproval` 及其调用链对 fs 错误原样传播、保留 errno —— 一旦某处
+ * 把它包成不带 code 的 `new Error()`,瞬时故障就会被误判成确定性 failed(本函数的判据
+ * 就落空了),这正是被修掉的 P1。
+ */
+function isTransientBackfillError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return typeof code === 'string' && code !== 'ENOENT';
 }
 
 /**

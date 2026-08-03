@@ -83,8 +83,6 @@ describe('SaveDepositVault', () => {
   });
 
   it('写入前完整性校验失败会清掉本次创建的空文件，重试仍可使用原文件名', async () => {
-    if (process.platform === 'win32') return;
-
     const vault = new SaveDepositVault();
     const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
     if (!deposited.ok) throw new Error('deposit failed');

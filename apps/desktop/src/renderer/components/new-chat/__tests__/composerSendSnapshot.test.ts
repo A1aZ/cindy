@@ -10,7 +10,7 @@ const attachment = {
   id: 'file-1',
   name: 'one.txt',
   path: '/tmp/one.txt',
-  ext: 'txt',
+  ext: '.txt',
   size: 3,
   category: 'text' as const,
   mimeType: 'text/plain',

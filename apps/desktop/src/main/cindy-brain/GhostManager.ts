@@ -207,7 +207,14 @@ export class GhostManager {
           continue;
         }
         const approval = this.receiptStore.read(id);
-        if (marker.kind === 'install') {
+        if (marker.kind === 'uninstall') {
+          // 卸载崩在半途:把批准与内容目录都删净(幂等,顺序无关)。撤批准已在卸载时
+          // 先行,这里兜住"receipt 或目录仍残留"的任意组合 —— 收尾后该 id 干净消失。
+          this.receiptStore.removeSync(id);
+          if (this.isRealDirChild(root, id)) {
+            fs.rmSync(finalDir, { recursive: true, force: true });
+          }
+        } else if (marker.kind === 'install') {
           // 未提交装入(无已批准 receipt)= 不完整安装,删 finalDir;有已批准 receipt = 完整
           // 安装,保留(绝不删有有效批准的插件)。只删真目录,junction/链接跳过(避免穿透)。
           if (approval.state !== 'approved' && this.isRealDirChild(root, id)) {
@@ -2116,15 +2123,23 @@ export class GhostManager {
     if (!(await pathExists(dir))) {
       return { rejection: { code: 'not-installed', reason: `意识 ${id} 未装入` } };
     }
+    // 顺序是安全要点:先撤批准(receipt + 快照 + 隔离),再删内容目录。反过来(旧写法)
+    // 若崩在两步之间,会留下"孤立 approved receipt + 目录暂缺";之后同 id 路径被恢复/
+    // 同权限进程新建目录时,list() 会拿这份陈旧 receipt 授权那个目录(manifest/slots/
+    // trust 全来自 receipt),等于卸载过的插件被"借尸还魂"。事务标记让崩溃后的启动恢复
+    // 把这次卸载收尾干净。
+    await this.receiptStore.writePendingMutation(id, { kind: 'uninstall' });
+    // 走同一个撤销入口:成功即清掉隔离记录,失败由该入口转进程内隔离并记日志。撤批准
+    // 在删目录之前 —— 即便随后删目录失败/崩溃,也不会留下"目录在 + 旧 receipt 授权"。
+    await this.removeInstallApproval(id);
     try {
       await fs.promises.rm(dir, { recursive: true, force: true });
     } catch (err) {
+      // 批准已撤、标记还在:插件此刻已 fail closed(list 无 receipt → legacy-unapproved),
+      // 下次启动恢复据标记把残留目录删净。如实报 io,不假装卸载完成。
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
     }
-    // 走同一个撤销入口:成功即清掉隔离记录,失败由该入口转进程内隔离并记日志。
-    // 内容目录已经删除，插件不可能再运行；孤立 receipt 与 skill snapshot 仅是待回收
-    // 状态，不能把“清理延后”误报成“插件仍已安装”。
-    await this.removeInstallApproval(id);
+    await this.receiptStore.clearPendingMutation(id).catch(() => undefined);
     this.options.log?.info('ghost uninstalled', { id });
     if (options.notify !== false) this.options.onChanged?.(this.list());
     return { ok: true };

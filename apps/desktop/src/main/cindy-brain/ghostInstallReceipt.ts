@@ -14,6 +14,7 @@ import {
 } from '../../shared/ghost.js';
 import {
   classifyGhostDirEntry,
+  classifyGhostDirEntrySync,
   collectGhostContentFiles,
   hashGhostContentFiles,
   isRegularGhostDirEntry,
@@ -126,7 +127,10 @@ export interface GhostLegacyMigrationLedger {
  */
 export type GhostPendingMutation =
   | { kind: 'install'; packageSha256: string }
-  | { kind: 'update'; packageSha256: string; backupDirName: string };
+  | { kind: 'update'; packageSha256: string; backupDirName: string }
+  // uninstall 不带 packageSha256:它的提交信号不是"receipt 写到某版本",而是"receipt +
+  // 内容目录都已移除"。恢复见到它就把两者删干净(顺序无关,幂等)。
+  | { kind: 'uninstall' };
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
@@ -250,6 +254,20 @@ export class GhostInstallReceiptStore {
       recursive: true,
       force: true,
     });
+  }
+
+  /** `remove` 的同步版:启动恢复(构造期同步)收尾未完成卸载用,判据同 `remove`。 */
+  removeSync(id: string): void {
+    fs.rmSync(this.receiptPath(id), { force: true });
+    const snapshotsDir = path.join(this.rootDir(), 'skill-snapshots');
+    let kind: string;
+    try {
+      kind = classifyGhostDirEntrySync(snapshotsDir);
+    } catch {
+      return;
+    }
+    if (kind !== 'directory') return;
+    fs.rmSync(path.join(snapshotsDir, id), { recursive: true, force: true });
   }
 
   skillSnapshotRoot(id: string, revision: string): string {
@@ -454,6 +472,7 @@ export class GhostInstallReceiptStore {
     } catch {
       return null;
     }
+    if (raw.kind === 'uninstall') return { kind: 'uninstall' };
     if (typeof raw.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.packageSha256)) {
       return null;
     }

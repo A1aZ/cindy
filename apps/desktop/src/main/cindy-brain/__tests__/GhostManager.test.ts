@@ -978,6 +978,60 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
     expect(manager.list()[0].approval.state).toBe('approved');
   });
 
+  it('卸载先撤批准再删目录:删目录失败时不留"孤立 approved receipt + 目录在"(防借尸还魂)', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    expect(manager.list()[0].approval.state).toBe('approved');
+    // 让内容目录的 rm 失败(模拟句柄占用),但放行 receipt/快照的 rm。
+    const realRm = fs.promises.rm;
+    const rmSpy = vi.spyOn(fs.promises, 'rm').mockImplementation((async (p: fs.PathLike, ...rest: unknown[]) => {
+      if (String(p) === path.join(rootDir, 'hello')) {
+        rmSpy.mockRestore();
+        const err = new Error('EBUSY: resource busy') as NodeJS.ErrnoException;
+        err.code = 'EBUSY';
+        throw err;
+      }
+      return (realRm as (...a: unknown[]) => Promise<void>)(p, ...rest);
+    }) as typeof fs.promises.rm);
+
+    const res = await manager.uninstall('hello');
+    await expectRejection(res, 'io');
+    // 关键:撤批准在删目录之前 —— receipt 已没了,目录还在但 fail closed(list 报
+    // legacy-unapproved),不会被这份 receipt 授权。孤立标记留给启动恢复收尾。
+    expect(fs.existsSync(receiptPath())).toBe(false);
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+  });
+
+  it('卸载崩在撤批准之后、删目录之前:恢复据 uninstall 标记删净残留目录', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 模拟崩溃现场:receipt 已撤(revoke 先行),目录还在,uninstall 标记在。
+    await fs.promises.rm(receiptPath(), { force: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({ version: 1, id: 'hello', kind: 'uninstall' }),
+    );
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+
+    freshManager(); // 构造期恢复
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+  });
+
+  it('卸载崩在撤批准之前:恢复据 uninstall 标记把 receipt 与目录都删净', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    // 崩在写标记之后、撤批准之前:receipt 与目录都还在。
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({ version: 1, id: 'hello', kind: 'uninstall' }),
+    );
+    expect(fs.existsSync(receiptPath())).toBe(true);
+
+    freshManager();
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(fs.existsSync(receiptPath())).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+  });
+
   it('setEnabled 不跟随非真目录:<id> 是普通文件时按未装入拒,不越安装根写标记', async () => {
     await fs.promises.mkdir(rootDir, { recursive: true });
     await fs.promises.writeFile(path.join(rootDir, 'foo'), 'not a dir');

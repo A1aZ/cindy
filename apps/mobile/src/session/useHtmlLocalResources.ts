@@ -3,7 +3,8 @@
  *
  * 词法与路径换算在 htmlLocalResources(纯函数、单测覆盖),这里只做编排:
  * 去重 → 限并发取件 → 回填 → 交给 HtmlFileReader 渲染。取件走的是单文件预览
- * 已经在用的那条被控端绝对路径通道(media:fetch),**不新增 device-link channel**。
+ * 已经在用的那条被控端绝对路径通道(media:fetch),**不新增 device-link channel**;
+ * 取回的是 `data:` URI 而非预签名地址(原因见 htmlLocalResources 头注)。
  *
  * 状态语义:
  *  - 文档里没有可改写引用(自包含页面,最常见)→ 零延迟、零请求,直接回原文;
@@ -17,6 +18,7 @@ import {
   applyHtmlResourceUrls,
   collectHtmlLocalResourceRefs,
   planHtmlResourceFetches,
+  type HtmlResourceFetchTarget,
 } from '@/session/htmlLocalResources';
 
 /** 并发上限:每个资源都是一次 device-link invoke + 被控端上传 OSS,不打风暴。 */
@@ -37,8 +39,9 @@ export interface HtmlResourceFetchOutcome {
  * `isCancelled` 让调用方在卸载 / 换文档后立刻停止后续取件,不白发请求。
  */
 export async function fetchHtmlResourceUrls(
-  absPaths: readonly string[],
-  fetchOne: (absPath: string) => Promise<string>,
+  targets: readonly HtmlResourceFetchTarget[],
+  /** 取一个资源 → `data:` URI(取不到返回空串或抛错,两者都计入 failed)。 */
+  fetchOne: (target: HtmlResourceFetchTarget) => Promise<string>,
   options: { concurrency?: number; isCancelled?: () => boolean } = {},
 ): Promise<HtmlResourceFetchOutcome> {
   const concurrency = Math.max(1, options.concurrency ?? FETCH_CONCURRENCY);
@@ -52,11 +55,11 @@ export async function fetchHtmlResourceUrls(
       if (isCancelled()) return;
       const index = cursor;
       cursor += 1;
-      if (index >= absPaths.length) return;
-      const absPath = absPaths[index];
+      if (index >= targets.length) return;
+      const target = targets[index];
       try {
-        const url = await fetchOne(absPath);
-        if (url) urlByAbsPath.set(absPath, url);
+        const dataUri = await fetchOne(target);
+        if (dataUri) urlByAbsPath.set(target.absPath, dataUri);
         else failed += 1;
       } catch {
         failed += 1;
@@ -65,7 +68,7 @@ export async function fetchHtmlResourceUrls(
   };
 
   await Promise.all(
-    Array.from({ length: Math.min(concurrency, absPaths.length) }, worker),
+    Array.from({ length: Math.min(concurrency, targets.length) }, worker),
   );
   return { urlByAbsPath, failed };
 }
@@ -87,7 +90,7 @@ export function useHtmlLocalResources(
   html: string,
   /** HTML 文件所在目录的被控端绝对路径;空串表示无法定位(退化为不取件)。 */
   baseDirAbsPath: string,
-  fetchResourceUrl: (absPath: string) => Promise<string>,
+  fetchResourceDataUri: (target: HtmlResourceFetchTarget) => Promise<string>,
 ): HtmlLocalResourceState {
   const refs = useMemo(
     () => collectHtmlLocalResourceRefs(html, baseDirAbsPath),
@@ -97,7 +100,7 @@ export function useHtmlLocalResources(
   const [outcome, setOutcome] = useState<{ html: string; failed: number } | null>(null);
 
   useEffect(() => {
-    if (plan.absPaths.length === 0) {
+    if (plan.targets.length === 0) {
       setOutcome(null);
       return undefined;
     }
@@ -106,7 +109,7 @@ export function useHtmlLocalResources(
     // (同款迟到回调隐患在本仓 review 里被反复抓过)。
     setOutcome(null);
 
-    void fetchHtmlResourceUrls(plan.absPaths, fetchResourceUrl, {
+    void fetchHtmlResourceUrls(plan.targets, fetchResourceDataUri, {
       isCancelled: () => cancelled,
     }).then(({ urlByAbsPath, failed }) => {
       if (cancelled) return;
@@ -116,13 +119,13 @@ export function useHtmlLocalResources(
     return () => {
       cancelled = true;
     };
-  }, [fetchResourceUrl, html, plan, refs]);
+  }, [fetchResourceDataUri, html, plan, refs]);
 
-  const needsFetch = plan.absPaths.length > 0;
+  const needsFetch = plan.targets.length > 0;
   return {
     html: outcome?.html ?? html,
     loading: needsFetch && outcome === null,
-    total: plan.absPaths.length,
+    total: plan.targets.length,
     failed: outcome?.failed ?? 0,
     skipped: plan.skipped,
   };

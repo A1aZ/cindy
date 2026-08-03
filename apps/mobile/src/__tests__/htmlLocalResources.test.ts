@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   applyHtmlResourceUrls,
+  htmlResourceMimeFor,
   collectHtmlLocalResourceRefs,
   htmlBaseDirOf,
   HTML_RESOURCE_LIMIT,
@@ -11,6 +12,9 @@ import {
 import { fetchHtmlResourceUrls } from '@/session/useHtmlLocalResources';
 
 const BASE = '/Users/me/drafts';
+
+/** 取件目标简写(取件编排只关心 absPath + mimeType)。 */
+const t = (absPath: string) => ({ absPath, mimeType: 'image/png' });
 
 describe('resolveHtmlResourcePath(引用 → 被控端绝对路径)', () => {
   it('相对引用按 HTML 所在目录换算', () => {
@@ -94,8 +98,10 @@ describe('collectHtmlLocalResourceRefs(词法定位)', () => {
       '<video src="clip.mp4" poster="cover.jpg"></video>',
       '<source src=\'audio.mp3\'>',
     ].join('\n');
+    // 音视频**刻意不在 MIME 表里**:资源要整份内联成 data: URI,一段视频足以撑爆内存。
+    // 它们保持原引用(渲染成不可播放的占位),poster 图这类静态图仍照常内联。
     expect(values(html)).toEqual([
-      'assets/app.css', './app.js', 'chart.png', 'clip.mp4', 'cover.jpg', 'audio.mp3',
+      'assets/app.css', './app.js', 'chart.png', 'cover.jpg',
     ]);
   });
 
@@ -195,7 +201,10 @@ describe('planHtmlResourceFetches(去重与上限)', () => {
       BASE,
     );
     expect(planHtmlResourceFetches(refs)).toEqual({
-      absPaths: ['/Users/me/drafts/b.png', '/Users/me/drafts/a.png'],
+      targets: [
+        { absPath: '/Users/me/drafts/b.png', mimeType: 'image/png' },
+        { absPath: '/Users/me/drafts/a.png', mimeType: 'image/png' },
+      ],
       skipped: 0,
     });
   });
@@ -203,35 +212,35 @@ describe('planHtmlResourceFetches(去重与上限)', () => {
   it('超上限的计入 skipped,不静默截断', () => {
     const html = Array.from({ length: HTML_RESOURCE_LIMIT + 3 }, (_, i) => `<img src="a${i}.png">`).join('');
     const plan = planHtmlResourceFetches(collectHtmlLocalResourceRefs(html, BASE));
-    expect(plan.absPaths).toHaveLength(HTML_RESOURCE_LIMIT);
+    expect(plan.targets).toHaveLength(HTML_RESOURCE_LIMIT);
     expect(plan.skipped).toBe(3);
   });
 
   it('自包含页面 → 零待取(零请求路径)', () => {
     const html = '<style>body{color:red}</style><img src="data:image/png;base64,AA">';
-    expect(planHtmlResourceFetches(collectHtmlLocalResourceRefs(html, BASE)).absPaths).toEqual([]);
+    expect(planHtmlResourceFetches(collectHtmlLocalResourceRefs(html, BASE)).targets).toEqual([]);
   });
 });
 
 describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
   it('全部成功:地址齐全,失败数为 0', async () => {
     const out = await fetchHtmlResourceUrls(
-      ['/a.png', '/b.png'],
-      async (p) => `https://oss${p}`,
+      [t('/a.png'), t('/b.png')],
+      async ({ absPath }) => `data:image/png;base64,${absPath}`,
     );
     expect(out.failed).toBe(0);
     expect([...out.urlByAbsPath]).toEqual([
-      ['/a.png', 'https://oss/a.png'],
-      ['/b.png', 'https://oss/b.png'],
+      ['/a.png', 'data:image/png;base64,/a.png'],
+      ['/b.png', 'data:image/png;base64,/b.png'],
     ]);
   });
 
   it('单个失败不影响其它(整页不因一张图取不到而失败)', async () => {
     const out = await fetchHtmlResourceUrls(
-      ['/a.png', '/bad.png', '/c.png'],
-      async (p) => {
-        if (p === '/bad.png') throw new Error('nope');
-        return `https://oss${p}`;
+      [t('/a.png'), t('/bad.png'), t('/c.png')],
+      async ({ absPath }) => {
+        if (absPath === '/bad.png') throw new Error('nope');
+        return `data:image/png;base64,${absPath}`;
       },
     );
     expect(out.failed).toBe(1);
@@ -240,7 +249,7 @@ describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
   });
 
   it('回空地址也算失败(不把空串回填进 HTML)', async () => {
-    const out = await fetchHtmlResourceUrls(['/a.png'], async () => '');
+    const out = await fetchHtmlResourceUrls([t('/a.png')], async () => '');
     expect(out.failed).toBe(1);
     expect(out.urlByAbsPath.size).toBe(0);
   });
@@ -249,16 +258,16 @@ describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
     let inFlight = 0;
     let peak = 0;
     const calls: string[] = [];
-    const paths = Array.from({ length: 9 }, (_, i) => `/a${i}.png`);
+    const paths = Array.from({ length: 9 }, (_, i) => t(`/a${i}.png`));
     const out = await fetchHtmlResourceUrls(
       paths,
-      async (p) => {
-        calls.push(p);
+      async ({ absPath }) => {
+        calls.push(absPath);
         inFlight += 1;
         peak = Math.max(peak, inFlight);
         await Promise.resolve();
         inFlight -= 1;
-        return `https://oss${p}`;
+        return `data:image/png;base64,${absPath}`;
       },
       { concurrency: 3 },
     );
@@ -272,11 +281,11 @@ describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
     const calls: string[] = [];
     let cancelled = false;
     const out = await fetchHtmlResourceUrls(
-      Array.from({ length: 8 }, (_, i) => `/a${i}.png`),
-      async (p) => {
-        calls.push(p);
+      Array.from({ length: 8 }, (_, i) => t(`/a${i}.png`)),
+      async ({ absPath }) => {
+        calls.push(absPath);
         cancelled = true; // 第一批发出后即取消
-        return `https://oss${p}`;
+        return `data:image/png;base64,${absPath}`;
       },
       { concurrency: 1, isCancelled: () => cancelled },
     );
@@ -292,5 +301,29 @@ describe('fetchHtmlResourceUrls(限并发批量取件)', () => {
     });
     expect(called).toBe(false);
     expect(out).toEqual({ urlByAbsPath: new Map(), failed: 0 });
+  });
+});
+
+describe('htmlResourceMimeFor(data: URI 的类型)', () => {
+  it('常见 web 资源给准类型', () => {
+    expect(htmlResourceMimeFor('a/app.css')).toBe('text/css');
+    expect(htmlResourceMimeFor('a/app.js')).toBe('text/javascript');
+    expect(htmlResourceMimeFor('a/logo.SVG')).toBe('image/svg+xml');
+    expect(htmlResourceMimeFor('a/x.png?v=2')).toBe('image/png');
+    expect(htmlResourceMimeFor('a/f.woff2')).toBe('font/woff2');
+  });
+
+  it('表外类型不猜 —— 猜错会让浏览器拒收样式表/脚本,静默失效', () => {
+    expect(htmlResourceMimeFor('a/data.bin')).toBeNull();
+    expect(htmlResourceMimeFor('a/archive.zip')).toBeNull();
+    expect(htmlResourceMimeFor('noext')).toBeNull();
+  });
+});
+
+describe('MIME 未知的引用不进候选(fail-closed)', () => {
+  it('未知类型不改写,保持原引用', () => {
+    const refs = collectHtmlLocalResourceRefs('<img src="a.png"><embed src="x.bin">', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['a.png']);
+    expect(refs[0].mimeType).toBe('image/png');
   });
 });

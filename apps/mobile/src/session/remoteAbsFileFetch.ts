@@ -24,7 +24,7 @@ import type {
   MobileMakerTransport,
   RemoteTextFilePreviewResult,
 } from '@/device-link/mobileMakerTransport';
-import { remoteFileMediaUrl } from '@/session/fileBrowserGallery';
+import { remoteFileMediaUrl, type RemoteMediaSshContext } from '@/session/fileBrowserGallery';
 import {
   isResolvedRemoteMediaFresh,
   resolveMobileRemoteMedia,
@@ -79,15 +79,23 @@ function rememberFetch(key: string, media: MobileResolvedRemoteMedia, now: numbe
 export async function fetchRemoteAbsFileToUrl(
   deps: RemoteAbsFileFetchDeps,
   absPath: string,
+  /**
+   * SSH 会话的取件上下文(见 remoteFileMediaUrl):不传会让被控端把 absPath 当**本机**
+   * 路径解析。**必须进缓存键** —— 同一路径在不同远端主机上是不同文件,漏进去会串味。
+   */
+  ssh?: RemoteMediaSshContext | null,
 ): Promise<string> {
-  const key = `${deps.deviceId}\u0000${absPath}`;
+  const sshKey = ssh
+    ? `${ssh.sessionId}\u0000${ssh.remoteHostId}\u0000${ssh.workdir}`
+    : '';
+  const key = `${deps.deviceId}\u0000${absPath}\u0000${sshKey}`;
   const cached = lookupCache(key, Date.now());
   if (cached) return cached.url;
   const resolved = await withTransientRemoteRetry(async () => {
     await deps.openLink(deps.deviceId);
     // kind 只影响结果的 previewable 标志(此处不消费),按 image 占位。
     return resolveMobileRemoteMedia(
-      { kind: 'image', url: remoteFileMediaUrl(absPath) },
+      { kind: 'image', url: remoteFileMediaUrl(absPath, undefined, ssh) },
       { fetchRemoteMedia: deps.maker.fetchRemoteMedia, presignGet: deps.presignGet },
     );
   });

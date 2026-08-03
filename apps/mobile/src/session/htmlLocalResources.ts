@@ -6,9 +6,13 @@
  * `source={{ html }}` 的 about:blank 文档里解析不到,于是多文件产物「页面能开、
  * 图和样式全缺」。桌面端靠 `file://` 的同目录天然没有这个问题。
  *
- * 这里补齐:把相对引用挑出来 → 换算成被控端绝对路径 → 上层逐个走既有
- * `media:fetch` 取件通道拿 presign 地址 → 回填进 HTML。**不新增 device-link
- * channel、不新增安全面**,用的还是单文件预览已经在用的那条绝对路径取件通道。
+ * 这里补齐:把相对引用挑出来 → 换算成被控端绝对路径 → 上层逐个走既有 `media:fetch`
+ * 取件通道取回字节 → **转成 `data:` URI** 回填进 HTML。**不新增 device-link channel、
+ * 不新增安全面**,用的还是单文件预览已经在用的那条绝对路径取件通道。
+ *
+ * ⚠️ 回填进页面的必须是 `data:` URI,**不能是预签名地址**:页面是可执行的不可信文档,
+ * 内联脚本能读 `img.src` 再以 no-cors 外传,等于把一个 bearer 凭证交出去
+ * (review P1 实捉)。配套的网络出口封锁见 htmlPreviewCsp。
  *
  * 全部纯函数,无 IO、无 RN 依赖,可单测。取件与并发编排在 useHtmlLocalResources。
  *
@@ -42,6 +46,45 @@ const RESOURCE_ATTRS_BY_TAG: Readonly<Record<string, readonly string[]>> = {
 /** 一次改写最多取回多少个资源(超出部分原样保留,由上层如实报告数量)。 */
 export const HTML_RESOURCE_LIMIT = 32;
 
+/**
+ * 单个资源的字节上限。资源会以 `data:` URI 整份进 JS 字符串与 DOM(见
+ * downloadRemoteMediaAsDataUri 为什么不用预签名地址),不设上限会被一张大图撑爆内存。
+ * 2 MiB 覆盖设计稿里的常规配图与字体;超限的保留原引用、渲染成破图并如实提示。
+ */
+export const HTML_RESOURCE_MAX_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 资源扩展名 → MIME。**必须给准**:`data:` URI 的类型由它决定,给成
+ * `application/octet-stream` 时浏览器会拒绝把它当样式表/脚本用(样式静默失效)。
+ * 表外类型不猜,返回 null → 上层不改写该引用(fail-closed)。
+ */
+const RESOURCE_MIME_BY_EXT: Readonly<Record<string, string>> = {
+  '.css': 'text/css',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.json': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+};
+
+export function htmlResourceMimeFor(pathOrName: string): string | null {
+  const clean = pathOrName.split(/[?#]/)[0] ?? '';
+  const dot = clean.lastIndexOf('.');
+  if (dot < 0) return null;
+  return RESOURCE_MIME_BY_EXT[clean.slice(dot).toLowerCase()] ?? null;
+}
+
 /** 任意 scheme(`https://`、`file://`、`data:`、`mailto:` …)。 */
 const HAS_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 const WIN_ABS_RE = /^[A-Za-z]:[\\/]/;
@@ -56,6 +99,8 @@ export interface HtmlResourceRef {
   raw: string;
   /** 换算出的被控端绝对路径(取件用)。 */
   absPath: string;
+  /** 该资源的 MIME(data: URI 用;未知类型不会进候选)。 */
+  mimeType: string;
 }
 
 /**
@@ -123,7 +168,12 @@ export function collectHtmlLocalResourceRefs(
   const refs: HtmlResourceRef[] = [];
   const push = (start: number, end: number, raw: string): void => {
     const absPath = resolveHtmlResourcePath(baseDirAbsPath, raw);
-    if (absPath) refs.push({ start, end, raw, absPath });
+    if (!absPath) return;
+    // MIME 未知的不改写:data: URI 的类型由它决定,给错会让样式表/脚本被浏览器拒收,
+    // 猜一个反而制造"看起来取到了其实没生效"的假象(fail-closed)。
+    const mimeType = htmlResourceMimeFor(absPath);
+    if (!mimeType) return;
+    refs.push({ start, end, raw, absPath, mimeType });
   };
 
   // ① 标签属性。先定位标签(含标签名判定),再在该标签文本内找目标属性 ——
@@ -171,10 +221,11 @@ export function collectHtmlLocalResourceRefs(
 }
 
 /**
- * 把取回的地址回填进 HTML。
+ * 把取回的资源回填进 HTML。装进去的是 **`data:` URI**,不是预签名地址 —— 页面里绝不
+ * 出现 bearer 凭证(见 downloadRemoteMediaAsDataUri 的说明)。
  *
- * `urlByAbsPath` 缺某个路径(取件失败 / 超出上限)时该处**保持原引用**——渲染成
- * 破图比换成一个错地址诚实。回填从后往前做,前面的区间下标不受影响。
+ * `urlByAbsPath` 缺某个路径(取件失败 / 超限 / 超出条数上限)时该处**保持原引用** ——
+ * 渲染成破图比换成一个错地址诚实。回填从后往前做,前面的区间下标不受影响。
  */
 export function applyHtmlResourceUrls(
   html: string,
@@ -195,22 +246,27 @@ export function applyHtmlResourceUrls(
  * 去重后的待取路径清单(按首次出现顺序),并给出被上限截掉的数量。
  * 上限存在时必须让上层能如实报告,不做静默截断。
  */
+export interface HtmlResourceFetchTarget {
+  absPath: string;
+  mimeType: string;
+}
+
 export function planHtmlResourceFetches(refs: readonly HtmlResourceRef[]): {
-  absPaths: string[];
+  targets: HtmlResourceFetchTarget[];
   skipped: number;
 } {
   const seen = new Set<string>();
-  const absPaths: string[] = [];
+  const targets: HtmlResourceFetchTarget[] = [];
   let skipped = 0;
   for (const ref of refs) {
     if (seen.has(ref.absPath)) continue;
-    if (absPaths.length >= HTML_RESOURCE_LIMIT) {
+    if (targets.length >= HTML_RESOURCE_LIMIT) {
       seen.add(ref.absPath);
       skipped += 1;
       continue;
     }
     seen.add(ref.absPath);
-    absPaths.push(ref.absPath);
+    targets.push({ absPath: ref.absPath, mimeType: ref.mimeType });
   }
-  return { absPaths, skipped };
+  return { targets, skipped };
 }

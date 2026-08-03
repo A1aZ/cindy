@@ -34,6 +34,7 @@ import {
   hashGhostContentBuffers,
   hashGhostContentFiles,
   resolveGhostContentPathSync,
+  type GhostDirEntryKind,
 } from './ghostContentTree.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 import {
@@ -172,31 +173,83 @@ export class GhostManager {
     ) {
       throw new Error('ghost install content and approval state roots must be disjoint');
     }
-    this.recoverInterruptedUpdatesSync();
+    this.recoverInterruptedMutationsSync();
   }
 
   /**
-   * 启动一次性:恢复更新的"两次 rename 之间"崩溃现场(§5:插件不得凭空消失)。
+   * 启动一次性:恢复装入/更新的"目录已 rename、receipt 还没写"崩溃现场。构造期同步跑
+   * (目录极小,与 resolveGhostRepoRoot 的启动期迁移同一先例)。
    *
-   * update 的目录交换是 final→backup(.cindy-updating-*)、staging→final 两步;断电/
-   * 进程被杀落在两步之间时,final 缺位、旧版完整字节还在 backup 里 —— 而 list()
-   * 跳过点目录,插件就从 UI 与运行时**消失**了。这里在构造期同步扫一遍(目录极小,
-   * 与 resolveGhostRepoRoot 的启动期迁移同一先例):
-   * - final 缺位且该 id 只有唯一 backup → 原子搬回(receipt 未更新过,恢复后
-   *   receipt/内容完全一致,等价于更新从未发生);
-   * - final 在位(崩溃发生在收尾清理前)→ backup 是已被替换的旧字节,回收;
-   * - 同 id 多个 backup(多次崩溃)→ 不猜,原样保留并记 error 供人工处理;
-   * - `.cindy-installing-*` staging 残留一律回收(从未发布过,不构成任何事实)。
+   * **事务标记(状态根内)是权威判据**:装入/更新在 rename 动盘前落标记、写完 receipt
+   * 清标记,标记带本次 `packageSha256`。恢复时同步读 receipt,`receipt.packageSha256 ===
+   * marker.packageSha256` 即"已提交":
+   * - install 未提交 → finalDir 是不完整安装,删掉(否则迁移会把它当 legacy 收编,而
+   *   崩溃窗口内 manifest 可能已被同权限进程改写 = 用户确认 A 却授权 B);已提交 → 保留;
+   * - update 未提交 → 回滚到 backup(旧字节+旧 receipt 自洽);已提交 → 回收陈旧 backup。
+   *   这修掉了"final 在位就删 backup"把"新字节+旧 receipt"固化成"按旧批准跑新代码"的洞。
+   *
+   * 无标记的孤儿 `.cindy-updating-*`(journal 之前的崩溃残留)沿用原启发式兜底:final
+   * 缺位且唯一 backup → 搬回(§5 插件不得凭空消失);final 在位 → 陈旧 backup 回收。
+   * `.cindy-installing-*` staging 残留一律回收(从未发布)。
    */
-  private recoverInterruptedUpdatesSync(): void {
+  private recoverInterruptedMutationsSync(): void {
     const root = this.options.getRootDir();
+
+    // 1) 标记驱动恢复(权威)。
+    const handledBackupNames = new Set<string>();
+    for (const id of this.receiptStore.listPendingMutationIdsSync()) {
+      const marker = this.receiptStore.readPendingMutationSync(id);
+      const finalDir = path.join(root, id);
+      try {
+        if (!marker) {
+          // 标记读不出:它只驱动恢复,读不出就无从据它动盘,清掉(下次启动靠内容判定)。
+          this.receiptStore.clearPendingMutationSync(id);
+          continue;
+        }
+        const approval = this.receiptStore.read(id);
+        if (marker.kind === 'install') {
+          // 未提交装入(无已批准 receipt)= 不完整安装,删 finalDir;有已批准 receipt = 完整
+          // 安装,保留(绝不删有有效批准的插件)。只删真目录,junction/链接跳过(避免穿透)。
+          if (approval.state !== 'approved' && this.isRealDirChild(root, id)) {
+            fs.rmSync(finalDir, { recursive: true, force: true });
+          }
+        } else {
+          handledBackupNames.add(marker.backupDirName);
+          const backupPath = path.join(root, marker.backupDirName);
+          const committed =
+            approval.state === 'approved' &&
+            approval.receipt.packageSha256 === marker.packageSha256;
+          if (committed) {
+            fs.rmSync(backupPath, { recursive: true, force: true }); // 陈旧旧字节
+          } else {
+            // 回滚:finalDir 可能是未提交新字节,删;backup 若在则搬回(旧字节+旧 receipt)。
+            if (this.isRealDirChild(root, id)) {
+              fs.rmSync(finalDir, { recursive: true, force: true });
+            }
+            if (this.isBackupDir(backupPath)) fs.renameSync(backupPath, finalDir);
+          }
+        }
+        this.receiptStore.clearPendingMutationSync(id);
+      } catch (err) {
+        // 动盘失败:留着标记,下次启动幂等重试。
+        (this.options.log?.error ?? this.options.log?.warn)?.call(this.options.log,
+          'interrupted ghost mutation recovery failed; left for next launch', {
+            id, kind: marker?.kind, error: err instanceof Error ? err.message : String(err),
+          });
+      }
+    }
+
+    // 2) 无标记的孤儿 backup + staging 残留。
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(root, { withFileTypes: true });
     } catch {
       return; // 根目录还不存在 = 没装过任何插件
     }
-    const backups = entries.filter((entry) => entry.name.startsWith('.cindy-updating-'));
+    const backups = entries.filter(
+      (entry) =>
+        entry.name.startsWith('.cindy-updating-') && !handledBackupNames.has(entry.name),
+    );
     for (const entry of backups) {
       const match = /^\.cindy-updating-(.+)-[0-9a-f]{8}$/.exec(entry.name);
       if (!match || !isValidGhostId(match[1])) continue;
@@ -247,6 +300,24 @@ export class GhostManager {
       } catch {
         // staging 残留清不掉只占磁盘,不影响正确性;下次启动再试。
       }
+    }
+  }
+
+  /** `<root>/<id>` 是否真目录(非链接/junction;判据同 ghostContentTree,避免穿透删除)。 */
+  private isRealDirChild(root: string, id: string): boolean {
+    try {
+      return classifyGhostDirEntrySync(path.join(root, id)) === 'directory';
+    } catch {
+      return false;
+    }
+  }
+
+  /** backup 路径是否真目录(搬回前确认,不跟随链接)。 */
+  private isBackupDir(backupPath: string): boolean {
+    try {
+      return classifyGhostDirEntrySync(backupPath) === 'directory';
+    } catch {
+      return false;
     }
   }
 
@@ -483,6 +554,13 @@ export class GhostManager {
         // 首轮:迁移前不该有,防御性跳过。续跑轮:上一轮崩溃前已写出的 receipt,
         // 计入 migrated 让最终台账如实反映"这些是迁移铸出的"。
         (resumePending ? preMigrated : result.skipped).push(id);
+        continue;
+      }
+      // 有未清的事务标记 = 一次装入/更新崩在半途、启动恢复还没收干净(通常恢复已在
+      // 构造期把它清掉,这里兜住"恢复删 finalDir 失败"的残留)。绝不迁移这种目录 ——
+      // 它的字节来源不是"用户确认过的旧安装",而是一次未完成事务的中间态。
+      if (this.receiptStore.readPendingMutationSync(id) !== null) {
+        result.skipped.push(id);
         continue;
       }
       candidates.push(id);
@@ -1033,7 +1111,17 @@ export class GhostManager {
       return { rejection: { code: 'invalid-id', reason: '非法意识 id' } };
     }
     const dir = path.join(this.options.getRootDir(), id);
-    if (!(await pathExists(dir))) {
+    // pathExists(fs.access)跟随链接:`<root>/<id>` 被换成 junction 时,下面对
+    // `<dir>/.disabled` 的写/删会穿透到安装根之外的目标。判据改用 ghostContentTree 的
+    // lstat 分类(与 list()「只有真目录才算安装」同源):不存在(ENOENT→抛错)或非真目录
+    // (链接/文件)一律按未装入拒,标记读写不越过安装根边界。
+    let dirKind: GhostDirEntryKind | null;
+    try {
+      dirKind = classifyGhostDirEntrySync(dir);
+    } catch {
+      dirKind = null;
+    }
+    if (dirKind !== 'directory') {
       return { rejection: { code: 'not-installed', reason: `意识 ${id} 未装入` } };
     }
     const receiptResult = this.readApproval(id);
@@ -1536,6 +1624,14 @@ export class GhostManager {
           : MAX_BASIC_UNCOMPRESSED_BYTES,
         trust,
       });
+      // 事务标记必须在 rename 动盘**之前**落:否则 rename→写 receipt 之间崩溃会留下
+      // "有 finalDir、无 receipt、无 ledger"的目录,与 legacy 安装无法区分,被迁移当
+      // 存量批准掉(而崩溃窗口内同权限进程可改写 finalDir 的 manifest)。带 packageSha256
+      // 让启动恢复能判定 receipt 是否已提交。
+      await this.receiptStore.writePendingMutation(manifest.id, {
+        kind: 'install',
+        packageSha256,
+      });
       await fs.promises.rename(stagingDir, finalDir);
       try {
         receipt = createGhostInstallReceipt({
@@ -1554,9 +1650,13 @@ export class GhostManager {
           ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
         });
         await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
+        // receipt 已就位 = 事务提交,清标记。清失败只多留一份标记,下轮恢复见
+        // receipt.packageSha256 与标记相符即判已提交、幂等清理。
+        await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
         this.untrustedApprovals.delete(this.isolationKey(manifest.id));
       } catch (error) {
         await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
+        await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
         throw error;
       }
     } catch (err) {
@@ -1691,11 +1791,26 @@ export class GhostManager {
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
     }
 
+    // 事务标记在两次 rename 动盘**之前**落:staging→final 之后、写 receipt 之前崩溃会
+    // 留下"新字节 + 旧 receipt";恢复器旧逻辑(final 在位就删 backup)会把它固化成"按旧
+    // 批准跑新代码"。标记带本次 packageSha256 + backup 目录名,让恢复能判定 receipt 是否
+    // 已提交:未提交则回滚到 backup。
+    try {
+      await this.receiptStore.writePendingMutation(manifest.id, {
+        kind: 'update',
+        packageSha256,
+        backupDirName: path.basename(backupDir),
+      });
+    } catch (err) {
+      await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
+    }
     // 换目录:旧版先挪去备份位,新版 rename 失败即滚回,保证任何时刻都有一份完整版本在位。
     try {
       await fs.promises.rename(finalDir, backupDir);
     } catch (err) {
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
       return { rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) } };
     }
     try {
@@ -1711,6 +1826,10 @@ export class GhostManager {
           });
       });
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      // 已回滚到 backup(或回滚也失败):无论如何这次 update 未提交,清标记 —— 回滚成功时
+      // finalDir=旧字节+旧 receipt 已自洽;回滚失败时 rollbackFailed 已上报,标记留着也
+      // 只会让恢复器再尝试同样已失败的回滚。
+      await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
       return {
         rejection: {
           code: 'io',
@@ -1749,6 +1868,7 @@ export class GhostManager {
             error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
           });
       });
+      await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
       return {
         rejection: {
           code: 'io',
@@ -1757,6 +1877,8 @@ export class GhostManager {
         },
       };
     }
+    // receipt 已就位 = 事务提交,清标记后再回收 backup;顺序保证"标记在 ⟺ 可能未提交"。
+    await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
     await fs.promises.rm(backupDir, { recursive: true, force: true }).catch(() => {});
 
     const ghost: InstalledGhost = {

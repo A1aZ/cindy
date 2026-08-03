@@ -856,6 +856,121 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
   });
 });
 
+describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => {
+  const pendingMarkerPath = (id = 'hello') =>
+    path.join(workDir, 'ghosts-install-state', `.pending-${id}.json`);
+  const receiptPath = (id = 'hello') =>
+    path.join(workDir, 'ghosts-install-state', `${id}.json`);
+  /** 在同一组根上新建 manager —— 构造期跑一次崩溃恢复扫描。 */
+  const freshManager = () =>
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale, onChanged });
+
+  it('崩溃的装入(有 finalDir、无 receipt、有 install 标记)被恢复删除,不被迁移收编', async () => {
+    // install 在 rename(staging→final) 之后、写 receipt 之前崩溃:finalDir 完整、无
+    // receipt、无 ledger。若不处理,迁移会把它(崩溃窗口内可能被改过 manifest)当 legacy
+    // 批准掉。事务标记让恢复识别它是"未完成安装"并删除。
+    await writeLegacyInstall('hello', goodManifest());
+    await fs.promises.mkdir(path.dirname(pendingMarkerPath()), { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({ version: 1, id: 'hello', kind: 'install', packageSha256: 'a'.repeat(64) }),
+    );
+
+    const recovered = freshManager(); // 构造期恢复:删掉未完成安装
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+    const outcome = await recovered.migrateLegacyApprovalsOnce();
+    expect(outcome.migrated).toEqual([]); // 目录已被删,迁移无对象
+  });
+
+  it('未提交的更新(新字节+旧 receipt+update 标记)回滚到 backup,不固化成按旧批准跑新代码', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receiptBefore = await fs.promises.readFile(receiptPath(), 'utf8');
+    const finalDir = path.join(rootDir, 'hello');
+    const backupName = '.cindy-updating-hello-abcdef12';
+
+    // 模拟 staging→final 之后、写 receipt 之前崩溃:旧字节挪到 backup,新字节在 final,
+    // receipt 仍是旧的。标记的 packageSha256 与旧 receipt 不同 = 未提交。
+    await fs.promises.rename(finalDir, path.join(rootDir, backupName));
+    await fs.promises.mkdir(finalDir);
+    await fs.promises.writeFile(
+      path.join(finalDir, 'ghost.json'),
+      JSON.stringify({ ...goodManifest(), version: '2.0.0' }),
+    );
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), 'new-bytes');
+    await fs.promises.mkdir(path.dirname(pendingMarkerPath()), { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: backupName,
+      }),
+    );
+
+    freshManager(); // 构造期恢复:未提交 → 回滚到 backup
+    const restored = JSON.parse(await fs.promises.readFile(path.join(finalDir, 'ghost.json'), 'utf8'));
+    expect(restored.version).toBe('1.0.0'); // 旧字节搬回
+    expect(fs.existsSync(path.join(rootDir, backupName))).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+    // receipt 一字未动,与回滚后的旧字节自洽(不是"新字节 + 旧 receipt"的错位)。
+    expect(await fs.promises.readFile(receiptPath(), 'utf8')).toBe(receiptBefore);
+  });
+
+  it('已提交的更新(标记 packageSha256 == receipt)保留新字节,只回收陈旧 backup', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const committedPkg = (JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256: string;
+    }).packageSha256;
+    const backupName = '.cindy-updating-hello-abcdef34';
+    await fs.promises.mkdir(path.join(rootDir, backupName));
+    await fs.promises.writeFile(path.join(rootDir, backupName, 'stale.txt'), 'old');
+    await fs.promises.mkdir(path.dirname(pendingMarkerPath()), { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: committedPkg, // 与 receipt 相符 = 已提交
+        backupDirName: backupName,
+      }),
+    );
+
+    freshManager();
+    expect(fs.existsSync(path.join(rootDir, backupName))).toBe(false); // 陈旧 backup 回收
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true); // 新版保留
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+    expect(manager.list()[0].approval.state).toBe('approved');
+  });
+
+  it('setEnabled 不跟随非真目录:<id> 是普通文件时按未装入拒,不越安装根写标记', async () => {
+    await fs.promises.mkdir(rootDir, { recursive: true });
+    await fs.promises.writeFile(path.join(rootDir, 'foo'), 'not a dir');
+    const result = await manager.setEnabled('foo', false);
+    await expectRejection(result, 'not-installed');
+  });
+
+  it('setEnabled 不跟随 junction:<id> 是指向外部的链接时拒,不在外部目标写/删 .disabled', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const dir = path.join(rootDir, 'hello');
+    const outside = path.join(workDir, 'outside-target');
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.rm(dir, { recursive: true, force: true });
+    try {
+      await fs.promises.symlink(outside, dir, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return; // 无 symlink 权限(Windows 未开发者模式):生产守卫仍由 classify 钉死。
+    }
+    const result = await manager.setEnabled('hello', false);
+    await expectRejection(result, 'not-installed');
+    // 关键:没有往 junction 目标(安装根之外)写 .disabled。
+    expect(fs.existsSync(path.join(outside, '.disabled'))).toBe(false);
+  });
+});
+
 describe('GhostManager · install', () => {
   it('按宿主语言返回本地化清单，切换语言后 list 立即更新，不支持语言固定回退英文', async () => {
     const manifest = {

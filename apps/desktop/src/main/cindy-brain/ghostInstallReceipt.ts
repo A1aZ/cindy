@@ -109,6 +109,25 @@ export interface GhostLegacyMigrationLedger {
   pendingIds?: string[];
 }
 
+/**
+ * 装入/更新事务的提交日志(状态根内,崩溃后仍在)。用来消除「目录已 rename、receipt
+ * 还没写」这段崩溃窗口:
+ * - install:崩溃留下"有 finalDir、无 receipt、无 ledger"的目录,与 legacy 安装无法
+ *   区分 —— 全新 owner 首个安装崩在这里,下轮迁移会把它(含崩溃窗口内被同权限进程
+ *   改写的 manifest)当存量批准掉,用户确认的是 A、被授权的是 B。
+ * - update:`final→backup`、`staging→final`、写 receipt 三步;第二三步之间崩溃留下
+ *   "新字节 + 旧 receipt",恢复器旧逻辑(final 在位就删 backup)会把它固化成"按旧批准
+ *   跑新代码"。
+ *
+ * `packageSha256` 是判定「提交是否完成」的唯一信号:装入/更新写出的 receipt 一定带上
+ * 这次 `.cindy` 的哈希,所以启动恢复只需**同步**读 receipt、比对
+ * `receipt.packageSha256 === marker.packageSha256` —— 相等 = receipt 已写(提交完成),
+ * 不等/缺失 = 未提交。两者都是已落盘事实,判定不引入额外写窗口。
+ */
+export type GhostPendingMutation =
+  | { kind: 'install'; packageSha256: string }
+  | { kind: 'update'; packageSha256: string; backupDirName: string };
+
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
   /** receipt 首写后的自动落账写失败(进程内关门标志,见 migrationDoorClosed)。 */
@@ -389,6 +408,76 @@ export class GhostInstallReceiptStore {
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }
+  }
+
+  /** 事务标记路径。点开头,不与 `<id>.json` receipt 或 `.legacy-migration.json` 撞名。 */
+  private pendingMutationPath(id: string): string {
+    if (!isValidGhostId(id)) throw new Error('invalid ghost id for pending mutation path');
+    return path.join(this.rootDir(), `.pending-${id}.json`);
+  }
+
+  /** 事务开始:装入/更新 rename 动盘**之前**落标记(原子 temp+rename;re-begin 覆盖)。 */
+  async writePendingMutation(id: string, entry: GhostPendingMutation): Promise<void> {
+    const root = this.rootDir();
+    await fs.promises.mkdir(root, { recursive: true });
+    const target = this.pendingMutationPath(id);
+    const temp = path.join(
+      root,
+      `.pending-${id}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
+    );
+    try {
+      await fs.promises.writeFile(temp, `${JSON.stringify({ version: 1, id, ...entry })}\n`, {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: 0o600,
+      });
+      await fs.promises.rename(temp, target);
+    } finally {
+      await fs.promises.rm(temp, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** 事务提交:receipt 写成功后清标记。删不动只多留一份标记,下轮恢复幂等重判。 */
+  async clearPendingMutation(id: string): Promise<void> {
+    await fs.promises.rm(this.pendingMutationPath(id), { force: true });
+  }
+
+  /** 同步清标记(启动恢复在构造期同步跑,不能留 fire-and-forget 的异步删除)。 */
+  clearPendingMutationSync(id: string): void {
+    fs.rmSync(this.pendingMutationPath(id), { force: true });
+  }
+
+  readPendingMutationSync(id: string): GhostPendingMutation | null {
+    let raw: Record<string, unknown>;
+    try {
+      raw = JSON.parse(fs.readFileSync(this.pendingMutationPath(id), 'utf8')) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    if (typeof raw.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.packageSha256)) {
+      return null;
+    }
+    if (raw.kind === 'install') return { kind: 'install', packageSha256: raw.packageSha256 };
+    if (raw.kind === 'update' && typeof raw.backupDirName === 'string') {
+      return { kind: 'update', packageSha256: raw.packageSha256, backupDirName: raw.backupDirName };
+    }
+    return null;
+  }
+
+  /** 状态根里所有未清的事务标记 id(启动恢复用)。 */
+  listPendingMutationIdsSync(): string[] {
+    let names: string[];
+    try {
+      names = fs.readdirSync(this.rootDir());
+    } catch {
+      return [];
+    }
+    const ids: string[] = [];
+    for (const name of names) {
+      const match = /^\.pending-(.+)\.json$/.exec(name);
+      if (match && isValidGhostId(match[1])) ids.push(match[1]);
+    }
+    return ids;
   }
 
   private receiptPath(id: string): string {

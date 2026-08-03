@@ -2,14 +2,34 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(
-  resolve(process.cwd(), 'app/files/preview/[sessionId].tsx'),
-  'utf8',
-);
+/**
+ * 源码契约用例的统一读法:**必须把 CRLF 归一成 LF**。
+ *
+ * Windows CI 的 checkout 走 `core.autocrlf=true`,而 .gitattributes 只给
+ * `.sh` / `.mjs` / `.githooks/**` / migration `.sql` 钉了 `eol=lf` —— `.tsx` 不在其中,
+ * 于是 runner 上读到的源码是 CRLF。任何跨行的字面量或含 `\n` 的正则断言不归一就只在
+ * Windows 上红(实捉:head c6527c24 的 `Windows unit tests (1/2)` 卡在一条 `visible ? (\n…`
+ * 断言上,Linux 全绿)。断言本意是代码结构,与行尾无关,所以在读入口一次性抹平。
+ */
+function readSource(rel: string): string {
+  return readFileSync(resolve(process.cwd(), rel), 'utf8').replace(/\r\n/g, '\n');
+}
+
+const source = readSource('app/files/preview/[sessionId].tsx');
 
 describe('remote file preview pager wiring', () => {
   it('reserves horizontal gestures for the PDF WebView', () => {
-    expect(source).toContain("scrollEnabled={current.previewKind !== 'pdf'}");
+    expect(source).toContain("current.previewKind !== 'pdf'");
+  });
+
+  it('HTML 渲染态同样让出外层横滑,让内层 WebView 能横向平移', () => {
+    // 固定宽度布局 / 放大后需要横向平移,pager 抢走手势就永远看不到超出视口的内容。
+    expect(source).toContain("scrollEnabled={current.previewKind !== 'pdf' && htmlPanPageKey !== current.key}");
+    // 让路状态按页 key 存,不存布尔:翻页时新旧两页的上报先后顺序不能决定结果。
+    expect(source).toContain('setHtmlPanPageKey((prev) => (wants ? key : (prev === key ? null : prev)))');
+    // 只有真的挂着 WebView 的那种组合才要横滑;cleanup 必须无条件归还。
+    expect(source).toContain("visible && richKind === 'html' && richView === 'rendered' && state.status === 'ready'");
+    expect(source).toContain('return () => onHtmlPanChange?.(item.key, false)');
   });
 
   it('keeps ordinary PDF gestures out of WebView remount and reload triggers', () => {
@@ -26,10 +46,7 @@ describe('remote file preview pager wiring', () => {
   });
 });
 
-const htmlReaderSource = readFileSync(
-  resolve(process.cwd(), 'src/session/HtmlFileReader.tsx'),
-  'utf8',
-);
+const htmlReaderSource = readSource('src/session/HtmlFileReader.tsx');
 
 describe('HTML 渲染态的 WebView 约束', () => {
   it('显式给 baseUrl,不吃两端默认值不一致(Android 空串会吞掉页内锚点)', () => {
@@ -79,11 +96,24 @@ describe('HTML 渲染态的 WebView 约束', () => {
   it('可执行 WebView 只为真正可见的当前页挂载', () => {
     // 相邻预取页(active)不得提前挂 WebView:里面的脚本 / 计时器 / 网络请求会在
     // 用户还没打开该文件时就跑起来,滑走后还继续跑(review P1)。
-    expect(source).toContain('visible={index === pageIndex}');
-    expect(source).toContain('visible ? (\n            <HtmlFileReader');
+    //
+    // 断言写成空白宽松的正则而不是跨行字面量:意图是「visible 直接包住 HtmlFileReader,
+    // 中间没有夹别的东西」,与缩进、行尾都无关(见 readSource 的 CRLF 说明)。
+    expect(source).toMatch(/visible\s*\?\s*\(\s*<HtmlFileReader/);
     expect(source).toContain('testID="filePreview.htmlOffscreen"');
     // 挂载门必须是 visible 而不是 active。
     expect(source).not.toMatch(/active\s*\?\s*\(\s*<HtmlFileReader/);
+  });
+
+  it('挂载门含屏级焦点,本屏被压栈后脚本不再跑', () => {
+    // 深链进预览 → 点「发送到会话」→ router.navigate 把会话页推到根 Stack:
+    // 预览路由默认仍挂载、pageIndex 也不变,只看 pageIndex 的话 WebView 会在用户
+    // 已经回到对话界面之后继续执行脚本 / 计时器 / 网络请求(review P1 第二轮)。
+    expect(source).toContain('visible={screenFocused && index === pageIndex}');
+    expect(source).toContain('const screenFocused = useIsFocused()');
+    // 用 expo-router 的再导出,不新增依赖 —— apps/mobile 的依赖是 runtime fingerprint
+    // 输入,加包会触发冷更门(见 docs/dev-rules/mobile-development.md)。
+    expect(source).toMatch(/import \{[^}]*useIsFocused[^}]*\} from 'expo-router'/);
   });
 });
 

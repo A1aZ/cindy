@@ -520,16 +520,29 @@ const ALLOWED_BEFORE_RE = /[([{（【「『"'`:：,;，；、>]/;
 const SEP_IN_RUN_RE = /[\\/]/;
 const TRAILING_EXT_RE = /\.[A-Za-z0-9]{1,10}$/;
 
+/**
+ * 命中点左边是不是同一个非空白 run 的中段(= 我们从别的 token 里切了一刀)。
+ *
+ * 判据只有一条:命中点之前在同一 run 内还有字符时,紧邻的那个必须在
+ * ALLOWED_BEFORE_RE 白名单里。白名单之外一律算中段 —— 这样 `=` `)` 之类不必逐个枚举。
+ *
+ * 裸路径与裸 `file://` URL 共用同一份实现,两条入口的口径必须一致:URL 有显式 scheme,
+ * 不需要裸路径那套「跨空格看前一个 run」的启发式(见 startsMidPathToken 的 (2)),但
+ * 「不许从别的 token 中段起切」这条对两者同样成立。
+ */
+function precededByDisallowedRunChar(text: string, start: number): boolean {
+  if (start === 0) return false;
+  let runStart = start - 1;
+  while (runStart >= 0 && !/\s/.test(text[runStart])) runStart -= 1;
+  if (runStart + 1 >= start) return false; // 命中点前紧邻空白 / 行首
+  return !ALLOWED_BEFORE_RE.test(text[start - 1]);
+}
+
 /** 命中是否从路径 token 的**中段**起(见上方说明)。 */
 function startsMidPathToken(text: string, start: number): boolean {
   if (start === 0) return false;
   // (1) 同一非空白 run 内:只有白名单字符可以紧邻路径,其余说明是被断开的中段。
-  let runStart = start - 1;
-  while (runStart >= 0 && !/\s/.test(text[runStart])) runStart -= 1;
-  const runPrefix = text.slice(runStart + 1, start);
-  if (runPrefix.length > 0) {
-    return !ALLOWED_BEFORE_RE.test(text[start - 1]);
-  }
+  if (/\S/.test(text[start - 1])) return precededByDisallowedRunChar(text, start);
   // (2) 命中点前是空白:看空白前那个 run 是不是「被空格截断的前半段」。
   //     只跨空格 / 制表符,不跨换行 —— 换行之后是新的一行,不是同一条路径。
   let i = start - 1;
@@ -617,7 +630,11 @@ export function findBareFilePathMatch(input: string, from: number): BareFilePath
 //     整段散文会被吞进路径;
 //   - 末字符再排除 ASCII 句读,句末的 `.` / `,` / `)` 不吞进路径(它们在路径中段合法,
 //     所以只挡末位);
-//   - 左边界拒绝 scheme 字符,`myfile://x` 不从中段起切。
+//   - 左边界必须独占所在 token:与裸路径 matcher 共用 precededByDisallowedRunChar
+//     (白名单之外一律拒绝)。**只排除 scheme 字符是不够的**(review P2 实捉):
+//     `foo=file:///tmp/a.html` 与 `myapp://open?path=file:///tmp/a.html` 里紧邻的 `=`
+//     不是 scheme 字符,负向后瞻放行后会把一条完整的自定义 URL 从中间切成独立文件链接
+//     (断链乐观点亮还会把它点亮)。正则里的 scheme 字符后瞻保留作廉价前置过滤。
 //
 // CJK **文字**照旧留在主体里(`file:///Users/me/文档/报告.html` 要能认),取舍与裸路径
 // matcher 一致:宁可承担「半角标点紧贴中文」的误伤,也不砍掉真实的中文目录名。残留误伤
@@ -665,6 +682,8 @@ export function findBareFileUrlMatch(input: string, from: number): BareFilePathM
     // ——本来存在的文件点不亮,断链乐观点亮时还会打开一个不存在的地址。
     // 命中区间同步收缩,`#results` 留作正文文本(预览页不支持按锚点定位,丢掉无损失);
     // 字面文件名里的 `#` / `?` 按 URL 规范应写成 %23 / %3F,解码在 resolveChatAbsPath。
+    // 边界后置过滤:命中必须独占它所在的 token(见上方说明)。
+    if (precededByDisallowedRunChar(input, m.index)) continue;
     const value = trimFileUrlQueryAndFragment(m[1]);
     if (!value) continue;
     if (!classifyChatPathLinkTarget(value)) continue;

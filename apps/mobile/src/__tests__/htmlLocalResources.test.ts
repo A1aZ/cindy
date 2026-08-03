@@ -553,6 +553,32 @@ describe('RAWTEXT 内容整段跳过(review P1:回填会改写作者脚本源码
     expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
   });
 
+  it('spans 按 start 升序且互不重叠(isInsideSpans 用二分,依赖这个前提)', () => {
+    const html = '<script>a</script><img src="a.png"><script>b</script><img src="b.png"><textarea>c</textarea>';
+    const spans = findRawTextContentSpans(html);
+    expect(spans).toHaveLength(3);
+    for (let i = 1; i < spans.length; i += 1) {
+      expect(spans[i].start).toBeGreaterThanOrEqual(spans[i - 1].end);
+    }
+    // 前提成立时判定结果正确:两个真 img 都收到。
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['a.png', 'b.png']);
+  });
+
+  it('大量 script 时仍线性完成(不可信产物的 DoS 面,二分而非 O(n·m))', () => {
+    // 自审补:线性判定下 5000 段 script 会产生约 5×10⁷ 次比较,足以卡住 JS 线程。
+    const N = 3000;
+    const html = Array.from({ length: N }, (_, i) =>
+      `<script>var x${i} = '<img src="ghost${i}.png">';</script><img src="real${i}.png">`).join('');
+    const started = performance.now();
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    const elapsed = performance.now() - started;
+    // 伪引用一个都不收,真引用全收(受 32 项上限约束的是取件计划,不是扫描)。
+    expect(refs).toHaveLength(N);
+    expect(refs.every((r) => r.raw.startsWith('real'))).toBe(true);
+    // 宽松上限:只用来挡住量级退化(线性判定在本机约慢一个数量级),不做精确基准。
+    expect(elapsed).toBeLessThan(3000);
+  });
+
   it('⚠️ 已知残留:属性值里的字面 `<script>` 会造成误判(如实钉住,不假装没有)', () => {
     // 开标签仍靠正则找,`[^<>]*` 遇到属性值里的 `<` 就停,于是这里的 `<script>` 被当成真开标签,
     // 后面那个真引用被跳过 → 缺图。该形态极罕见,而「HTML 模板放 JS 字符串」很常见,净收益为正。

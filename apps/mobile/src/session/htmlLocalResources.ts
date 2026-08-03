@@ -295,9 +295,26 @@ export function findRawTextContentSpans(html: string): Array<{ start: number; en
   return spans;
 }
 
+/**
+ * 位置是否落在某个跳过区间里 —— **二分,不是线性扫**。
+ *
+ * 自审发现的 DoS 面(与 HTML_RESOURCE_TOTAL_MAX_CHARS 同一类):预览内容是不可信的 agent
+ * 产物,一份塞了 5000 个 `<script>` 的 HTML 会产生 5000 个 span,而标签扫描本身也有上万次
+ * 匹配 —— 线性判定是 O(n·m) ≈ 5×10⁷ 次比较,足以在移动端卡住 JS 线程。而 spans 由
+ * findRawTextContentSpans 顺序生成,天然**按 start 升序且互不重叠**,二分是 O(log m)。
+ *
+ * 不用「共用游标单指针」是因为本函数有两个调用方(标签扫描与 `<style>` 块扫描),
+ * 各自独立推进,共用游标会互相打乱。
+ */
 function isInsideSpans(pos: number, spans: readonly { start: number; end: number }[]): boolean {
-  for (const s of spans) {
-    if (pos >= s.start && pos < s.end) return true;
+  let lo = 0;
+  let hi = spans.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const s = spans[mid];
+    if (pos < s.start) hi = mid - 1;
+    else if (pos >= s.end) lo = mid + 1;
+    else return true;
   }
   return false;
 }

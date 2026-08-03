@@ -5014,8 +5014,7 @@
         "context": "{{value}} context",
         "codexCompatibilityMode": "Codex compatibility mode",
         "price": "{{input}}/{{output}} per 1M",
-        "fastBadge": "Fast",
-        "budgetDiscount": "Special discount"
+        "fastBadge": "Fast"
       },
       "source": {
         "railLabel": "Source",

@@ -307,7 +307,8 @@ import {
 import { recordModelMismatchOnMessage } from '../modelMismatchBroadcaster.js';
 import { detectClaudeModelMismatch } from '../../shared/modelMismatch.js';
 import { triggerClaudeAccountUsageRefresh } from '../usage/claudeAccountUsage.js';
-import { broadcastEffectiveModelPricing, getCodexProviderSubscriptionValuePrice, getGatewayAccountCurrency, getModelPriceQuote, getModelPricing, getModelPricingForModel, getSubscriptionDirectValuePrice } from '../usage/modelPricing.js';
+import { getGatewayAccountCurrency, getGatewayModelPricingForModel, getModelPriceQuote } from '../usage/modelPricing.js';
+import { broadcastReferenceModelPricing, getCodexProviderSubscriptionValuePrice, getReferenceModelPricing, getSubscriptionDirectValuePrice } from '../usage/referenceModelPricing.js';
 import { clearModelPriceOverride, stageProviderModelPriceOverridesClear, readModelPriceOverrideView, setModelPriceOverride } from '../usage/modelPriceOverrideStore.js';
 import { computeModelUsageDeltas, detectOutputLag, type ModelUsageCumulative, type ModelUsageDeltaEntry } from '../usage/modelUsageDelta.js';
 import { claudeSubscriptionUsageModelKey, codexApiUsageModelKey, codexSubscriptionUsageModelKey, piSubscriptionUsageModelKey } from '../usage/usageHistory.js';
@@ -3534,11 +3535,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
                 ?? (observedClaudeRoute === 'gateway' ? 'xd-gateway' : 'unknown');
           const pricing =
             billingRoute === 'xd-gateway'
-              ? await getModelPricingForModel(
-                  'xd',
-                  normalizeModelIdForPricing(deltas[0]?.model),
-                )
-              : await getModelPricing();
+              ? await getGatewayModelPricingForModel()
+              : getReferenceModelPricing();
           const { turnMoney, estimatedTurnMoney, perModel } = resolveClaudeTurnCostSinks(
             deltas,
             pricing,
@@ -3622,7 +3620,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
               const claudeEstimated = estimateClaudeSubscriptionTurnValue(
                 perModel,
                 currentLedgerCurrency(),
-                await getModelPricing(),
+                pricing,
               );
               if (claudeEstimated?.amount) estimatedValues.push(claudeEstimated);
             }
@@ -3859,11 +3857,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           };
           try {
             const pricing = isSubscriptionValue
-              ? await getModelPricing()
+              ? getReferenceModelPricing()
               : hasEffectiveGatewayRoute
-                ? await getModelPricingForModel('xd', pricingModel)
+                ? await getGatewayModelPricingForModel()
                 : usesReferencePriceEstimate
-                  ? await getModelPricing()
+                  ? getReferenceModelPricing()
                   : null;
             // 订阅估值按显式来源取各自的日期定价路由:内置 anthropic 走 Anthropic
             // registry 参考价(含 codex 侧价格覆盖),默认/openai 保持 OpenAI 价表。
@@ -4019,7 +4017,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
             const pricing =
               isSubscriptionValue || isCustomProviderRoute
                 ? null
-                : await getModelPricingForModel('xd', pricingModel);
+                : await getGatewayModelPricingForModel();
             const price =
               effectiveProvider === 'openai'
               || effectiveProvider === 'anthropic'
@@ -4616,7 +4614,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       setModelPriceOverride(target, desired, getActiveCatalog().modelRegistry),
     clearModelPriceOverride,
     stageClearProviderModelPriceOverrides: stageProviderModelPriceOverridesClear,
-    broadcastPricingChanged: broadcastEffectiveModelPricing,
+    broadcastPricingChanged: broadcastReferenceModelPricing,
     // 通用 OAuth（目录 auth.oauth 描述符驱动）：login 成功后 best-effort 拉动态模型发现
     // (additions-only merge 进 active-catalog) 并广播 PROVIDER_CHANGED 让 UI 刷新连接态。
     oauthLogin: async (providerId, isCurrent) => {

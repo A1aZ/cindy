@@ -46,10 +46,14 @@ const RESOURCE_ATTRS_BY_TAG: Readonly<Record<string, readonly string[]>> = {
   source: ['src'],
   video: ['src', 'poster'],
   audio: ['src'],
-  // 内联 SVG 的标准图片引用(review P1):`<svg><image href="chart.png"/></svg>`。
-  // CSP 的 `img-src data:` 放行它,不收就必然缺图。`xlink:href` 是 SVG 1.1 的写法,
-  // 仍被浏览器支持且产物里常见(导出工具多用它),两个都收。
-  image: ['href', 'xlink:href'],
+  // `image` 有**两种语境**,三个属性都要收(自审补 `src`,review 只提到前两个):
+  //  - SVG 里是真的 SVG 图片元素:`<svg><image href="chart.png"/></svg>`;
+  //    `xlink:href` 是 SVG 1.1 写法,浏览器仍支持且导出工具多用它。
+  //  - **HTML 里 `<image>` 是 `<img>` 的废弃别名** —— 实测(Chromium)
+  //    `<image src="a.png">` 被解析成 `IMG` 且是 `HTMLImageElement`,浏览器照常加载。
+  //    只收 href 会让 `<image src="…">` 这种写法漏掉、渲染成破图。
+  // CSP 的 `img-src data:` 放行这三条路,不收就必然缺图。
+  image: ['href', 'xlink:href', 'src'],
 };
 
 /** 一次改写最多取回多少个资源(超出部分原样保留,由上层如实报告数量)。 */

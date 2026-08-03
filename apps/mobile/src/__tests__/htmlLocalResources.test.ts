@@ -577,11 +577,16 @@ describe('CSS url() 函数名大小写不敏感(review P1)', () => {
 });
 
 describe('内联 SVG 的 image href / xlink:href(review P1)', () => {
-  it('两种写法都收(CSP 的 img-src data: 放行它们)', () => {
+  it('href / xlink:href / src 三条路都收(CSP 的 img-src data: 放行它们)', () => {
     const refs = collectHtmlLocalResourceRefs('<svg><image href="chart.png"/></svg>', BASE);
     expect(refs.map((r) => r.raw)).toEqual(['chart.png']);
     const legacy = collectHtmlLocalResourceRefs('<svg><image xlink:href="chart.png"/></svg>', BASE);
     expect(legacy.map((r) => r.raw)).toEqual(['chart.png']);
+    // **HTML 里 `<image>` 是 `<img>` 的废弃别名**(自审补,review 未提):实测 Chromium 把
+    // `<image src="a.png">` 解析成 IMG 且是 HTMLImageElement,浏览器照常加载 —— 只收 href
+    // 会让这种写法漏掉。
+    const htmlAlias = collectHtmlLocalResourceRefs('<image src="chart.png" alt="x">', BASE);
+    expect(htmlAlias.map((r) => r.raw)).toEqual(['chart.png']);
   });
 
   it('image 之外的标签不因此放开 href', () => {

@@ -13,11 +13,14 @@
  *   就再也救不回被误挡的装机。
  * 而"杀进程绕过"并不成立:下次启动会重新拉 /latest 并立刻命中同一个门槛。
  *
- * 三层保证"不会把人永久挡在门外":
+ * 四层保证"不会把人永久挡在门外":
  * 1. 拉不到 /latest(离线 / 超时 / 5xx)→ 调用方 fail-open,不进入阻断态;
  * 2. 拿不到可跳转的安装地址 → 不进入阻断态(见 promptBundleUpdate),不造无出口的屏;
  * 3. 门槛必须 ≤ 该 record 宣告的 version(发布链 assertMinVersionUsable fail closed),
- *    所以装上被广播的那个版本必然解除阻断。
+ *    所以装上被广播的那个版本必然解除阻断;
+ * 4. 阻断期间业务树整体不挂载 —— resume 检查也随之停摆,所以阻断屏自带一次
+ *    "回前台重新核对"(见 forcedUpdateRecheck):服务端撤回门槛后不必杀进程冷启动,
+ *    切出去再回来即自动解除。
  */
 import { useSyncExternalStore } from 'react';
 
@@ -61,6 +64,17 @@ function isSameTarget(a: ForcedUpdateTarget | null, b: ForcedUpdateTarget | null
 export function enterForcedUpdate(target: ForcedUpdateTarget): void {
   if (isSameTarget(forcedTarget, target)) return;
   forcedTarget = target;
+  notifyListeners();
+}
+
+/**
+ * 解除阻断态(生产入口,不是测试专用)。
+ * 唯一调用方是阻断屏的重新核对:**成功**拉到 /latest 且判定不再强更时才解除
+ * —— 不能在拉取失败时解除,否则断网就能绕过强更。
+ */
+export function clearForcedUpdate(): void {
+  if (forcedTarget === null) return;
+  forcedTarget = null;
   notifyListeners();
 }
 

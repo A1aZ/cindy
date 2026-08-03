@@ -14,6 +14,18 @@ describe('强更阻断闸门', () => {
   const read = (rel: string) =>
     readFileSync(resolve(process.cwd(), rel), 'utf8').replace(/\r\n/g, '\n');
 
+  /**
+   * 去掉行注释与块注释后再断言"某段代码不存在"。
+   * 直接搜关键字会误伤解释这段历史的注释;搜 `{ cancelable:` 又依赖空格写法
+   * (`{cancelable:` 就漏检)。剥注释后按关键字断言,两个问题一起消掉。
+   */
+  const readCode = (rel: string) =>
+    read(rel)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => line.replace(/(^|\s)\/\/.*$/, '$1'))
+      .join('\n');
+
   it('root layout 用 forcedUpdate 状态阻断业务树,唯一出口是「去更新」', () => {
     const layout = read('app/_layout.tsx');
 
@@ -32,14 +44,27 @@ describe('强更阻断闸门', () => {
 
   it('强更路径不再走 Alert:promptBundleUpdate 直接进入阻断态', () => {
     const prompt = read('src/update/useBundleUpdatePrompt.ts');
+    const promptCode = readCode('src/update/useBundleUpdatePrompt.ts');
 
     expect(prompt).toContain('enterForcedUpdate(evaluation.target)');
-    // 不可取消弹窗是被替换掉的旧实现,不允许回归(匹配 Alert 的 options 对象写法,
-    // 不误伤注释里解释这段历史的文字)。
-    expect(prompt).not.toContain('{ cancelable:');
-    expect(prompt).not.toContain("i18n.t('update.forcedTitle')");
+    // 不可取消弹窗是被替换掉的旧实现,不允许以任何写法回归。
+    expect(promptCode).not.toMatch(/cancelable/);
+    expect(promptCode).not.toContain("i18n.t('update.forcedTitle')");
     // 拿不到安装地址时不得进入阻断态(否则把用户关进没有出口的屏)。
     expect(prompt).toContain('if (!url) return;');
+  });
+
+  it('阻断屏自带回前台重新核对:服务端撤回门槛后不必杀进程', () => {
+    const layout = read('app/_layout.tsx');
+    const recheck = read('src/update/forcedUpdateRecheck.ts');
+
+    // 阻断期间业务树不挂载 → resume 通道停摆,恢复入口必须挂在阻断屏自己身上。
+    expect(layout).toContain("from '@/update/useForcedUpdateRecheck'");
+    expect(layout).toContain('useForcedUpdateRecheck();');
+    // 解除方向 fail-closed:只有成功拉到 /latest 且判定不再强更才解除,
+    // 拉取失败维持阻断,不能靠断网 / 飞行模式绕过。
+    expect(recheck).toContain('if (evaluation.forced) return \'still-forced\';');
+    expect(recheck).toContain("return 'error'");
   });
 
   it('阻断态只存内存,不持久化(服务端撤回门槛后用户不能被本地缓存锁死)', () => {

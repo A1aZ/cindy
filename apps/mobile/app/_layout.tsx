@@ -55,6 +55,7 @@ import {
   useForcedUpdate,
   type ForcedUpdateTarget,
 } from '@/update/forcedUpdateStore';
+import { useForcedUpdateRecheck } from '@/update/useForcedUpdateRecheck';
 import { useResumeUpdateCheck } from '@/update/useResumeUpdateCheck';
 import {
   markStartupOtaLaunchSuccess,
@@ -472,6 +473,10 @@ function StartupGateBlockedContent({
  */
 function ForcedUpdateGateContent({ target }: { target: ForcedUpdateTarget }) {
   const { t } = useTranslation();
+  // 阻断期间业务树不挂载 → useResumeUpdateCheck 也停了,本进程不会再拉 /latest。
+  // 所以阻断屏自带一次"回前台重新核对":服务端撤回误下发的门槛后,用户切出去再回来
+  // 即自动解除,不必杀进程冷启动。拉取失败一律维持阻断(不能靠断网绕过)。
+  useForcedUpdateRecheck();
   const notes = target.releaseNotes?.trim();
   const subtitle = [
     t('update.bundleAvailableBody'),

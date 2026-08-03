@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   __testing,
+  clearForcedUpdate,
   enterForcedUpdate,
   getForcedUpdateTarget,
   subscribeForcedUpdate,
@@ -59,6 +60,29 @@ describe('forcedUpdateStore', () => {
     enterForcedUpdate(target());
     expect(listener).not.toHaveBeenCalled();
     expect(getForcedUpdateTarget()).not.toBeNull();
+  });
+
+  it('解除阻断态 → 目标清空并通知(服务端撤回门槛后的恢复入口)', () => {
+    enterForcedUpdate(target());
+    const listener = vi.fn();
+    subscribeForcedUpdate(listener);
+    clearForcedUpdate();
+    expect(getForcedUpdateTarget()).toBeNull();
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('本来就没阻断时解除 → 幂等,不通知', () => {
+    const listener = vi.fn();
+    subscribeForcedUpdate(listener);
+    clearForcedUpdate();
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('解除后可再次进入(下一轮门槛)', () => {
+    enterForcedUpdate(target());
+    clearForcedUpdate();
+    enterForcedUpdate(target());
+    expect(getForcedUpdateTarget()).toEqual(target());
   });
 
   it('单个订阅者抛错不影响其它订阅者', () => {

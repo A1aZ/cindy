@@ -23,7 +23,6 @@ describe('file preview shared model', () => {
     // SUPPORTED_TEXT_EXTS 里、预览页按文本分派。渲染判定单列一处,不动 'text' 结论。
     expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/report.htm')).toBe(true);
-    expect(isHtmlFilePreviewCandidate('/repo/page.xhtml')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/REPORT.HTML')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/report.html?from=chat')).toBe(true);
     // 取字节仍走文本通道:两个判定同时为真,源码态与内容搜索不受影响。
@@ -34,6 +33,10 @@ describe('file preview shared model', () => {
     expect(isHtmlFilePreviewCandidate('/repo/index.html.bak')).toBe(false);
     expect(isHtmlFilePreviewCandidate('/repo/archive.zip')).toBe(false);
     expect(isHtmlFilePreviewCandidate('')).toBe(false);
+    // `.xhtml` 刻意排除(review P1):手机的 WebView 只能按 text/html 加载,合法 XHTML
+    // 会被 HTML parser 曲解成白屏。它仍是文本 → 退化成源码态,内容照样可读。
+    expect(isHtmlFilePreviewCandidate('/repo/page.xhtml')).toBe(false);
+    expect(isTextFilePreviewCandidate('/repo/page.xhtml')).toBe(true);
   });
 
   it('only treats desktop text-like files as remote text preview candidates', () => {

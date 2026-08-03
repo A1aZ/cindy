@@ -874,6 +874,28 @@ describe('findBareFileUrlMatch(正文纯文本裸 file:// URL 词法)', () => {
     expect(allValues('见 file:///Users/me/a.html')).toEqual(['file:///Users/me/a.html']);
   });
 
+  it('不从别的 token 中段起切(只排除 scheme 字符不够)', () => {
+    // 负向后瞻只挡 scheme 字符,`=` 会被放行,于是一条完整的自定义 URL 被从中间切成
+    // 独立文件链接 —— 断链乐观点亮还会把它点亮(review P2)。改为与裸路径 matcher 共用
+    // precededByDisallowedRunChar:白名单之外一律拒绝,不必逐个枚举 `=` `)` 之类。
+    expect(allValues('见 myapp://open?path=file:///tmp/a.html')).toEqual([]);
+    expect(allValues('见 foo=file:///tmp/a.html')).toEqual([]);
+    expect(allValues('见 --config=file:///tmp/a.html')).toEqual([]);
+    // 被排除的整段不再被二次切分(lastIndex 已越过命中),不会退化成更短的假路径。
+    expect(allValues('见 x=file:///tmp/a.html 和 file:///tmp/b.html'))
+      .toEqual(['file:///tmp/b.html']);
+    // 白名单内的紧邻字符照旧放行:被包裹、中文冒号引出、逗号分隔都是真实写法。
+    expect(allValues('见(file:///tmp/a.html)')).toEqual(['file:///tmp/a.html']);
+    expect(allValues('文件:file:///tmp/a.html')).toEqual(['file:///tmp/a.html']);
+    // 行首与空白之后照旧放行。
+    expect(allValues('file:///tmp/a.html')).toEqual(['file:///tmp/a.html']);
+    // 左边界白名单管的是「命中之前」;命中**之后**紧贴半角逗号仍照既有取舍连坐成一条
+    // (半角标点在 URL 主体里合法,见 findBareFileUrlMatch 的已知误伤说明)。整条 stat
+    // 必然不存在 → 保持纯文本,不会点开错地址。本轮不动这条口径,仅钉住现状。
+    expect(allValues('见 file:///tmp/a.html,file:///tmp/b.html'))
+      .toEqual(['file:///tmp/a.html,file:///tmp/b.html']);
+  });
+
   it('不含 file:// 的文本走廉价短路', () => {
     expect(findBareFileUrlMatch('这是一句普通的中文,没有任何路径。', 0)).toBeNull();
     expect(findBareFileUrlMatch('见 src/App.tsx 第 20 行', 0)).toBeNull();

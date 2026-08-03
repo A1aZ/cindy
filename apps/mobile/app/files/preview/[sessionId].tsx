@@ -21,7 +21,7 @@
  * (fetchRemoteAbsFileToUrl);无同目录翻页、无缩略图(直接取原图)。
  */
 import * as Clipboard from 'expo-clipboard';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useIsFocused, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownToLine, Copy, Database, File as FileIcon, Info, MessageSquarePlus, Share as ShareIcon } from 'lucide-react-native';
@@ -149,11 +149,23 @@ export default function RemoteFilePreviewScreen() {
 
   const [siblings, setSiblings] = useState<FileBrowserGridItem[] | null>(null);
   const [pageIndex, setPageIndex] = useState(0);
+  // 屏级焦点(HTML 可执行 WebView 的挂载门之一,见 renderItem 的 visible)。
+  // 本屏被压栈(点「发送到会话」→ router.navigate 把会话页推到根 Stack 上)时
+  // 路由仍挂载、pageIndex 也不变,只有 focus 会翻。
+  const screenFocused = useIsFocused();
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 当前页是否处在「HTML 渲染态」——外层横滑要为它让路(见 pager 的 scrollEnabled)。
+  // 渲染 / 源码的切换状态在子页里,所以由子页按页 key 上报;setter 用 key 比对而不是
+  // 直接存布尔,避免翻页时「旧页报 false」与「新页报 true」的先后顺序决定结果。
+  const [htmlPanPageKey, setHtmlPanPageKey] = useState<string | null>(null);
+  const reportHtmlPan = useCallback((key: string, wants: boolean) => {
+    setHtmlPanPageKey((prev) => (wants ? key : (prev === key ? null : prev)));
+  }, []);
 
   const showNotice = useCallback((text: string) => {
     setNotice(text);
@@ -511,7 +523,13 @@ export default function RemoteFilePreviewScreen() {
               // HTML 渲染态只在真正可见的当前页挂载可执行 WebView(review P1):
               // active 含相邻页(文本预取要它),但相邻页提前挂 WebView 会让用户还没
               // 滑到的文件里的脚本 / 计时器 / 网络请求先跑起来,滑走后还继续跑。
-              visible={index === pageIndex}
+              //
+              // **屏级焦点也是门的一部分**(review P1 第二轮):本屏被压栈时(从深链进
+              // 预览再点「发送到会话」,router.navigate 把会话页推到根 Stack 上)路由默认
+              // 仍挂载、pageIndex 也不变 —— 只看 pageIndex 的话 WebView 会在用户已经回到
+              // 对话界面之后继续跑脚本。screenFocused 翻假即卸载。
+              visible={screenFocused && index === pageIndex}
+              onHtmlPanChange={reportHtmlPan}
               exportToUrl={exportToUrl}
               fetchResourceDataUri={fetchResourceDataUri}
               item={item}
@@ -543,7 +561,12 @@ export default function RemoteFilePreviewScreen() {
             />
           </View>
         )}
-        scrollEnabled={current.previewKind !== 'pdf'}
+        // PDF 与「HTML 渲染态」都要把水平拖动完整留给内层 WebView(review P2):
+        // 固定宽度布局或用户放大后需要横向平移,外层 pager 会抢走手势并切到相邻文件,
+        // 超出视口的内容永远看不到。手势仲裁(区分内层平移与翻页)在 RN 上要自己写一套
+        // 竞态裁决,属独立改动;这里沿用本文件对 PDF 已经采用的同一口径 —— 想翻页就切到
+        // 「源码」态(源码是竖向列表,不冲突),或 Done 返回列表。
+        scrollEnabled={current.previewKind !== 'pdf' && htmlPanPageKey !== current.key}
         showsHorizontalScrollIndicator={false}
         windowSize={3}
       />
@@ -624,6 +647,7 @@ function FilePreviewPage({
   item,
   maker,
   onDownload,
+  onHtmlPanChange,
   onOpenLightbox,
   onQuoteSelection,
   readTextFile,
@@ -639,6 +663,8 @@ function FilePreviewPage({
   item: FileBrowserGridItem;
   maker: Pick<MobileMakerTransport, 'fileBrowser'>;
   onDownload(): void;
+  /** 上报本页是否处在 HTML 渲染态(外层 pager 据此让出横滑,仅文本页产出)。 */
+  onHtmlPanChange?: (key: string, wants: boolean) => void;
   onOpenLightbox(url: string): void;
   /** chat-text-quote:markdown 渲染态的选中引用回调(仅文本页消费)。 */
   onQuoteSelection?: (text: string) => void;
@@ -677,6 +703,7 @@ function FilePreviewPage({
         fetchResourceDataUri={fetchResourceDataUri}
         item={item}
         onDownload={onDownload}
+        onHtmlPanChange={onHtmlPanChange}
         onQuoteSelection={onQuoteSelection}
         readTextFile={readTextFile}
         targetLine={targetLine}
@@ -838,6 +865,7 @@ function TextPreviewPage({
   fetchResourceDataUri,
   item,
   onDownload,
+  onHtmlPanChange,
   onQuoteSelection,
   readTextFile,
   targetLine,
@@ -851,6 +879,8 @@ function TextPreviewPage({
   fetchResourceDataUri(target: HtmlResourceFetchTarget): Promise<string>;
   item: FileBrowserGridItem;
   onDownload(): void;
+  /** 上报本页是否处在 HTML 渲染态(外层 pager 据此让出横滑,见调用处说明)。 */
+  onHtmlPanChange?: (key: string, wants: boolean) => void;
   /** chat-text-quote:markdown 渲染态的选中引用回调(源码态暂不支持,见 PR 说明)。 */
   onQuoteSelection?: (text: string) => void;
   /** 屏级注入:readFile 带瞬断重试 + openLink(与列表/搜索/导出同路径)。 */
@@ -951,6 +981,16 @@ function TextPreviewPage({
       ? t('files.preview.htmlResourcesTruncated', { limit: HTML_RESOURCE_LIMIT })
       : null,
   ].filter((line): line is string => line !== null);
+
+  // 只有「可见 + HTML + 渲染态 + 正文就绪 + 资源取件已结束」这一种组合真的挂着 WebView,
+  // 需要外层让出横滑。资源还在取时页面上是 spinner —— 那时禁滑只会让用户滑不走。
+  // cleanup 无条件报 false:卸载(翻页 / 失焦 / 换文件)后不能把 pager 留在禁滑状态。
+  const htmlPanWanted = visible && richKind === 'html' && richView === 'rendered'
+    && state.status === 'ready' && !htmlResources.loading;
+  useEffect(() => {
+    onHtmlPanChange?.(item.key, htmlPanWanted);
+    return () => onHtmlPanChange?.(item.key, false);
+  }, [htmlPanWanted, item.key, onHtmlPanChange]);
 
   if (state.status === 'loading') {
     return (

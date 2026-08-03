@@ -55,14 +55,24 @@ const SUPPORTED_TEXT_EXTS = new Set([
  * 按「网页」预览的扩展名(渲染态优先,源码态可切)。
  *
  * 与桌面 shared/browserOpenableExts.ts 的 BROWSER_OPENABLE_EXTS 同源(桌面进系统
- * 浏览器 / 侧边栏浏览器),额外收 `.xhtml`——桌面 useOpenWithMenu.isHtmlFilePath
- * 也含它,渲染路径完全一样。两端如需调整应同步。
+ * 浏览器 / 侧边栏浏览器)。
+ *
+ * **刻意不收 `.xhtml`,尽管桌面的 useOpenWithMenu.isHtmlFilePath 收**(review P1):
+ * 两端的渲染载体不同,能力也不同。桌面把 `file://` 交给真浏览器,浏览器按扩展名认
+ * `application/xhtml+xml`,XML 语义(自闭合 `<script />`、CDATA、命名空间)照旧成立;
+ * 手机走 react-native-webview 的 `source={{ html }}`,它在 iOS(`loadHTMLString`)与
+ * Android(`loadDataWithBaseURL` 的 mimeType 参数被库写死 `text/html`)两端都只能按
+ * HTML 解析 —— 合法 XHTML 会被 HTML parser 曲解:`<script />` 不自闭合,后面整段正文
+ * 被当脚本文本吞掉;CDATA 段变成 bogus comment 丢内容。结果是**静默白屏**,比不渲染更差。
+ * 要真正支持得给它一条保住 XHTML MIME 的加载路径(临时文件 + `file://`,或改用
+ * `source={{ uri }}`),那是独立改动。这里按「宁可不渲染」收窄:`.xhtml` 仍在
+ * SUPPORTED_TEXT_EXTS 里,退化成源码态 —— 内容照样可读,只是不给渲染切换。
  *
  * ⚠️ 这些扩展名同时留在 SUPPORTED_TEXT_EXTS 里,是刻意的:HTML 仍然是「可安全按
  * UTF-8 读取」的文本,取字节、源码态与内容搜索都依赖那个判定。本集合只多给一层
  * 「默认怎么展示」的语义,不改变 remoteFilePreviewKind 的分类。
  */
-const HTML_PREVIEW_EXTS = new Set(['.html', '.htm', '.xhtml']);
+const HTML_PREVIEW_EXTS = new Set(['.html', '.htm']);
 
 const COMPOUND_EXTS = ['.env.example', '.env.local', '.env.development', '.env.production'];
 const KNOWN_TEXT_FILENAMES = new Set([

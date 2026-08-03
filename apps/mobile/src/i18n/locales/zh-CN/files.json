@@ -68,7 +68,7 @@
     "truncatedLines": "仅显示前 {{lines}} 行",
     "fetchingHtmlResources": "正在取回页面资源…",
     "htmlResourcesMissing": "{{count}} 项页面资源没取到，可能缺图或缺样式",
-    "htmlResourcesTruncated": "页面资源过多，只取回前 {{limit}} 项",
+    "htmlResourcesTruncated": "页面资源过多，只处理了前 {{limit}} 项",
     "htmlResourcesOverBudget": "另有 {{count}} 项资源因总大小超限未取回",
     "mdRendered": "渲染",
     "mdSource": "源码",

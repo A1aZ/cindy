@@ -68,7 +68,7 @@
     "truncatedLines": "先頭 {{lines}} 行のみ表示します",
     "fetchingHtmlResources": "ページリソースを取得中…",
     "htmlResourcesMissing": "{{count}} 件のページリソースを取得できませんでした。画像やスタイルが欠ける場合があります",
-    "htmlResourcesTruncated": "ページリソースが多すぎます。先頭 {{limit}} 件のみ取得しました",
+    "htmlResourcesTruncated": "ページリソースが多すぎます。先頭 {{limit}} 件のみ処理しました",
     "htmlResourcesOverBudget": "合計サイズの上限に達したため、さらに {{count}} 件のリソースを取得していません",
     "mdRendered": "レンダリング",
     "mdSource": "ソース",

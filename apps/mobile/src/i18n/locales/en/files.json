@@ -68,7 +68,7 @@
     "truncatedLines": "Showing the first {{lines}} lines only",
     "fetchingHtmlResources": "Fetching page resources…",
     "htmlResourcesMissing": "{{count}} page resource(s) could not be fetched; images or styles may be missing",
-    "htmlResourcesTruncated": "Too many page resources; only the first {{limit}} were fetched",
+    "htmlResourcesTruncated": "Too many page resources; only the first {{limit}} were attempted",
     "htmlResourcesOverBudget": "{{count}} more resource(s) were skipped because the page's total size limit was reached",
     "mdRendered": "Rendered",
     "mdSource": "Source",

@@ -5,7 +5,7 @@ import {
   htmlResourceMimeFor,
   collectHtmlLocalResourceRefs,
   htmlBaseDirOf,
-  maskInertHtmlText,
+  decodeHtmlCharRefs,
   HTML_RESOURCE_LIMIT,
   planHtmlResourceFetches,
   resolveHtmlResourcePath,
@@ -414,88 +414,6 @@ describe('整页内联总量预算(不可信产物的 DoS 面)', () => {
   });
 });
 
-describe('惰性文本不占取件配额(注释 / 脚本体 / CSS 注释)', () => {
-  it('掩码等长,且只抹内容不动换行', () => {
-    const html = '<!-- x -->\n<img src="a.png">';
-    const masked = maskInertHtmlText(html);
-    expect(masked.length).toBe(html.length);
-    expect(masked.split('\n')).toHaveLength(2);
-    // 注释整段变空白,真标记原样留下。
-    expect(masked.startsWith('          \n')).toBe(true);
-    expect(masked).toContain('<img src="a.png">');
-  });
-
-  it('注释里的伪资源不进候选(不再挤占 32 项配额)', () => {
-    const fake = Array.from({ length: 40 }, (_, i) => `<img src="old${i}.png">`).join('');
-    const refs = collectHtmlLocalResourceRefs(`<!--${fake}--><img src="real.png">`, BASE);
-    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
-  });
-
-  it('脚本体里的伪标记与 url() 不进候选,但 <script src> 本身仍取', () => {
-    const html = '<script src="app.js">var s = \'<img src="fake.png">\'; var u = "url(fake2.png)";</script>';
-    const refs = collectHtmlLocalResourceRefs(html, BASE);
-    expect(refs.map((r) => r.raw)).toEqual(['app.js']);
-  });
-
-  it('CSS 注释里的 url() 不进候选,同块内真 url() 照旧取', () => {
-    const html = '<style>/* url(old.png) */ body { background: url(new.png); }</style>';
-    const refs = collectHtmlLocalResourceRefs(html, BASE);
-    expect(refs.map((r) => r.raw)).toEqual(['new.png']);
-  });
-
-  it('未闭合标记一律不掩码(掩错的代价比不掩大一个数量级)', () => {
-    // 早先按「真 parser 会吞到文末」掩到文末。那让 `<div data-template="<template>">`
-    // 这类**属性值里的字面标签**把整页真资源掩掉(review P1)。改成配不上闭合就一个字符
-    // 都不掩:代价只是伪引用占配额,不会让正常页面静默全缺。
-    expect(collectHtmlLocalResourceRefs('<!-- <img src="a.png">', BASE).map((r) => r.raw))
-      .toEqual(['a.png']);
-    expect(collectHtmlLocalResourceRefs('<script>x<img src="a.png">', BASE).map((r) => r.raw))
-      .toEqual(['a.png']);
-  });
-
-  it('注释里出现 <script> 开标签不得把后面的真资源一起抹掉', () => {
-    // 扫脚本体时若扫的是原文,这个开标签没有配对 </script>,会按未闭合掩到文末。
-    const refs = collectHtmlLocalResourceRefs('<!-- <script> --><img src="real.png">', BASE);
-    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
-  });
-
-  it('回填下标仍对齐原文(掩码只服务扫描)', () => {
-    const html = '<!-- url(old.png) --><style>body{background:url(new.png)}</style>';
-    const refs = collectHtmlLocalResourceRefs(html, BASE);
-    expect(refs).toHaveLength(1);
-    expect(html.slice(refs[0].start, refs[0].end)).toBe('new.png');
-    const out = applyHtmlResourceUrls(html, refs, new Map([[refs[0].absPath, 'data:image/png;base64,AAA']]));
-    expect(out).toContain('url(data:image/png;base64,AAA)');
-    // 注释原文一字不动。
-    expect(out).toContain('<!-- url(old.png) -->');
-  });
-});
-
-describe('<template> 体也是惰性文本(不占取件配额)', () => {
-  it('模板里的伪引用不进候选,模板外的真资源照旧取', () => {
-    const fake = Array.from({ length: 32 }, (_, i) => `<img src="tpl${i}.png">`).join('');
-    const refs = collectHtmlLocalResourceRefs(
-      `<template id="row">${fake}</template><img src="real.png">`,
-      BASE,
-    );
-    expect(refs.map((r) => r.raw)).toEqual(['real.png']);
-  });
-
-  it('嵌套模板按深度计数,外层剩余部分不逃过掩码', () => {
-    // 只匹配到第一个 </template> 会让 `<img src="outer.png">` 被当成真资源。
-    const html = '<template><template><img src="inner.png"></template>'
-      + '<img src="outer.png"></template><img src="real.png">';
-    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
-  });
-
-  it('未闭合模板不掩码;落单的闭合标记不影响后续', () => {
-    expect(collectHtmlLocalResourceRefs('<template><img src="a.png">', BASE).map((r) => r.raw))
-      .toEqual(['a.png']);
-    expect(collectHtmlLocalResourceRefs('</template><img src="a.png">', BASE).map((r) => r.raw))
-      .toEqual(['a.png']);
-  });
-});
-
 describe('总量预算按回填后的实际增量计费', () => {
   it('同一资源被多处引用时按 refCount 倍计费', () => {
     // 去重后只有 1 个 target,但回填会插入 100 次 —— 只计一次就会放过 100 倍的内存。
@@ -547,30 +465,6 @@ describe('总量预算按回填后的实际增量计费', () => {
   });
 });
 
-describe('属性值里的字面标签不得掩掉真资源(review P1)', () => {
-  it('data-* 属性里写着 <template> / <script> 时,后面的真资源照旧取回', () => {
-    // 正则扫标签认不出「`<` 在引号里」。旧的「未闭合掩到文末」政策会让这类完全正常的
-    // 产物静默丢掉全部资源 —— 比"伪引用占配额"严重一个数量级。
-    for (const attr of ['<template>', '<script>', '<!--']) {
-      const html = `<div data-tpl="${attr}"></div><img src="real.png"><link href="a.css">`;
-      expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw))
-        .toEqual(['real.png', 'a.css']);
-    }
-  });
-
-  it('脚本字符串里的孤立 <!-- 不影响 </script> 之后的真资源', () => {
-    const html = '<script>const marker = \'<!--\';</script><img src="real.png">';
-    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
-  });
-
-  it('闭合配得上时照旧掩码(政策只放宽未闭合那一种)', () => {
-    expect(collectHtmlLocalResourceRefs('<!-- <img src="ghost.png"> --><img src="real.png">', BASE)
-      .map((r) => r.raw)).toEqual(['real.png']);
-    expect(collectHtmlLocalResourceRefs('<template><img src="ghost.png"></template><img src="real.png">', BASE)
-      .map((r) => r.raw)).toEqual(['real.png']);
-  });
-});
-
 describe('CSP 必然拦掉的嵌入类型不取回(review P2)', () => {
   it('iframe / embed 不进候选:frame-src / object-src 都是 none', () => {
     // 取回来也渲染不出,白花一次上传 + 下载 + OSS 对象创建与回收,还占掉 32 项配额。
@@ -579,5 +473,82 @@ describe('CSP 必然拦掉的嵌入类型不取回(review P2)', () => {
     // CSP 放行得了的类型照旧。
     expect(collectHtmlLocalResourceRefs('<img src="diagram.svg">', BASE).map((r) => r.raw))
       .toEqual(['diagram.svg']);
+  });
+});
+
+describe('掩码层已删除:惰性文本里的伪引用会占配额(刻意接受的退化)', () => {
+  it('注释 / 脚本体里的伪引用现在会进候选 —— 代价只是图少取几个', () => {
+    // 掩码被 review 连挖五轮(注释 → template → 属性字面标签 → 脚本字符串 → 跨属性配对),
+    // 根因是正则认不出「`<` 在哪个数据态」。两种失败模式代价差一个数量级:不掩最多让伪
+    // 引用占配额,掩错会把真资源整段抹掉。所以放弃掩码,这里钉住新口径。
+    const refs = collectHtmlLocalResourceRefs('<!-- <img src="ghost.png"> --><img src="real.png">', BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['ghost.png', 'real.png']);
+  });
+
+  it('跨属性的 `<!--` / `-->` 不再吞掉中间的真资源(本轮 review P1)', () => {
+    const html = '<div a="<!--"></div><img src="real.png"><div b="-->"></div>';
+    expect(collectHtmlLocalResourceRefs(html, BASE).map((r) => r.raw)).toEqual(['real.png']);
+  });
+});
+
+describe('内联 style 属性里的 url()(review P1)', () => {
+  it('任意标签的 style 属性都收,不受资源标签白名单限制', () => {
+    const html = '<div style="background-image:url(\'./hero.png\')"></div>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['./hero.png']);
+    // 区间精确指向属性内的那段 URL,回填不串位。
+    expect(html.slice(refs[0].start, refs[0].end)).toBe('./hero.png');
+  });
+
+  it('style 属性与 <style> 块混排,按位置升序且各自不串位', () => {
+    // 双引号属性里必须用单引号或 &quot;,套双引号是非法 HTML(第一版 fixture 写错过)。
+    const html = '<style>body{background:url(bg.png)}</style><p style="background:url(\'in.png\')">x</p>';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs.map((r) => r.raw)).toEqual(['bg.png', 'in.png']);
+    const urls = new Map(refs.map((r) => [r.absPath, `data:image/png;base64,AAA`]));
+    const out = applyHtmlResourceUrls(html, refs, urls);
+    expect(out).toBe('<style>body{background:url(data:image/png;base64,AAA)}</style>'
+      + '<p style="background:url(\'data:image/png;base64,AAA\')">x</p>');
+  });
+
+  it('style 属性里的 http(s) / 越界引用照旧不改写', () => {
+    expect(collectHtmlLocalResourceRefs('<div style="background:url(https://cdn/x.png)"></div>', BASE)).toEqual([]);
+    expect(collectHtmlLocalResourceRefs('<div style="background:url(../x.png)"></div>', BASE)).toEqual([]);
+  });
+});
+
+describe('decodeHtmlCharRefs(属性值里的字符引用,review P2)', () => {
+  it('命名引用:`&` 在属性里必须转义,不解码会取一个不存在的名字', () => {
+    expect(decodeHtmlCharRefs('charts/A&amp;B.png')).toBe('charts/A&B.png');
+    expect(decodeHtmlCharRefs('a&lt;b&gt;c&quot;d&apos;e')).toBe('a<b>c"d\'e');
+  });
+
+  it('十进制与十六进制数字引用', () => {
+    expect(decodeHtmlCharRefs('a&#38;b')).toBe('a&b');
+    expect(decodeHtmlCharRefs('a&#x26;b')).toBe('a&b');
+    expect(decodeHtmlCharRefs('&#22909;.png')).toBe('好.png');
+  });
+
+  it('表外命名引用 / 非法码点原样保留(fail-closed,猜错会造出不存在的路径)', () => {
+    expect(decodeHtmlCharRefs('a&notarealref;b')).toBe('a&notarealref;b');
+    expect(decodeHtmlCharRefs('a&#xD800;b')).toBe('a&#xD800;b');   // 代理区
+    expect(decodeHtmlCharRefs('a&#1114112;b')).toBe('a&#1114112;b'); // 越界
+    expect(decodeHtmlCharRefs('a&#0;b')).toBe('a&#0;b');
+  });
+
+  it('无 & 时廉价短路;不做百分号解码(那一步在 resolveHtmlResourcePath)', () => {
+    expect(decodeHtmlCharRefs('plain/a.png')).toBe('plain/a.png');
+    expect(decodeHtmlCharRefs('a%20b.png')).toBe('a%20b.png');
+  });
+
+  it('端到端:带字符引用的属性按解码后的名字取件,回填仍替原样那段', () => {
+    const html = '<img src="charts/A&amp;B.png">';
+    const refs = collectHtmlLocalResourceRefs(html, BASE);
+    expect(refs).toHaveLength(1);
+    expect(refs[0].absPath).toBe(`${BASE}/charts/A&B.png`);
+    // 区间是原始文本那段,回填替换的是它。
+    expect(html.slice(refs[0].start, refs[0].end)).toBe('charts/A&amp;B.png');
+    expect(applyHtmlResourceUrls(html, refs, new Map([[refs[0].absPath, 'data:image/png;base64,AAA']])))
+      .toBe('<img src="data:image/png;base64,AAA">');
   });
 });

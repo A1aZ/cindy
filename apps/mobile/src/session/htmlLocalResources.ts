@@ -129,6 +129,37 @@ export interface HtmlResourceRef {
   fragment: string;
 }
 
+/** 属性值里合法且会影响文件名的命名字符引用(HTML 规范要求 `&` 在属性里转义)。 */
+const NAMED_CHAR_REFS: Readonly<Record<string, string>> = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0',
+};
+
+/**
+ * 解码属性值里的 HTML 字符引用(命名 + 十进制 + 十六进制)。
+ *
+ * 为什么必需(review P2):`<img src="charts/A&amp;B.png">` 浏览器请求的是 `A&B.png`,
+ * 把原始属性文本直接拿去取件会取一个不存在的名字、渲染成破图。`&` 在属性值里**必须**
+ * 写成字符引用,所以这不是边缘写法。
+ *
+ * 只解码这一层,**不做**百分号解码(那一步在 resolveHtmlResourcePath 里,顺序不能颠倒:
+ * 先解字符引用得到浏览器眼中的 URL,再按 URL 规则解百分号得到文件名)。
+ * 表外的命名引用原样保留 —— 猜错会造出不存在的路径,不如保持破图(fail-closed)。
+ */
+export function decodeHtmlCharRefs(value: string): string {
+  if (!value.includes('&')) return value; // 廉价短路(逐引用调用)
+  return value.replace(/&(#[0-9]+|#[xX][0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (whole, body: string) => {
+    if (body.startsWith('#')) {
+      const hex = body[1] === 'x' || body[1] === 'X';
+      const code = Number.parseInt(hex ? body.slice(2) : body.slice(1), hex ? 16 : 10);
+      // 代理区与越界码点不还原:String.fromCodePoint 会抛,且那不是合法文件名字符。
+      if (!Number.isInteger(code) || code <= 0 || code > 0x10ffff) return whole;
+      if (code >= 0xd800 && code <= 0xdfff) return whole;
+      return String.fromCodePoint(code);
+    }
+    return NAMED_CHAR_REFS[body] ?? whole;
+  });
+}
+
 /**
  * 引用文本 → 被控端绝对路径;不是「同目录子树内的相对引用」一律返回 null。
  *
@@ -180,139 +211,54 @@ export function htmlBaseDirOf(htmlAbsPath: string): string {
   return htmlAbsPath.slice(0, lastSep);
 }
 
-/**
- * 把「浏览器不会当资源看」的惰性文本替换成**等长**空白,只用于扫描。
- *
- * 为什么需要(review P1):HTML 注释、`<script>` 体、`<template>` 体、CSS 注释里可以塞任意
- * 多个长得像 `<img src="a.png">` 或 `url(b.png)` 的字符串。它们永远不会被浏览器加载,却会被
- * 词法扫描当成资源、占满 32 项配额,把后面**真实**的图片 / 样式挤掉 —— 一份产物只要在
- * 开头放一段注释掉的旧标记(或一个模板),预览就继续缺图。
- *
- * **必须等长**:回填(applyHtmlResourceUrls)按下标切原文改写,掩码只服务扫描,两者
- * 的下标必须逐字符对齐。换行保留不动,便于对照原文调试。
- *
- * ── UNTERMINATED_POLICY:未闭合的标记**一律不掩码** ──────────────────────
- * 早先这里按「真实 parser 也会吞到文末」把未闭合的 `<!--` / `<script>` / `<template>` 掩到
- * 文末。那是**错的取舍**,review 从两个方向各挖出一次:
- *  - `<div data-template="<template>">` —— 属性值里的字面标签被正则当成开标签,没有配对
- *    闭合 → 后面**全部真资源**被掩掉,一份完全正常的产物直接缺图缺样式;
- *  - `<script>const marker = '<!--';</script><img src="real.png">` —— 脚本字符串里的 `<!--`
- *    同理,而浏览器在 `</script>` 之后照常加载那张图。
- * 正则扫标签认不出「`<` 在引号里」,这类误判无法在词法层根除。所以改成:**闭合配得上才掩,
- * 配不上就一个字符都不掩**。两种失败模式的代价差一个数量级 —— 不掩最多让伪引用占掉配额
- * (退化成"图少取几个"),掩错却让正常页面**静默全缺**。
- */
-export function maskInertHtmlText(html: string): string {
-  const out = html.split('');
-  const blank = (start: number, end: number): void => {
-    for (let i = Math.max(0, start); i < Math.min(end, out.length); i += 1) {
-      if (out[i] !== '\n' && out[i] !== '\r') out[i] = ' ';
-    }
-  };
-
-  // ① HTML 注释。整段抹掉,连 `<!--` 标记本身 —— 它不是资源。
-  for (let at = html.indexOf('<!--'); at >= 0; at = html.indexOf('<!--', at + 1)) {
-    const close = html.indexOf('-->', at + 4);
-    // **未闭合 → 什么都不掩**(review P1/P2 实捉,见下方 UNTERMINATED_POLICY)。
-    if (close < 0) break;
-    blank(at, close + 3);
-    at = close + 2;
+/** 一段 CSS 文本里的 `url(...)` 引用(区间相对该段文本)。 */
+function findCssUrlRefs(css: string): Array<{ start: number; end: number; value: string }> {
+  const out: Array<{ start: number; end: number; value: string }> = [];
+  const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = urlRe.exec(css)) !== null) {
+    const value = m[1] ?? m[2] ?? m[3] ?? '';
+    if (!value) continue;
+    const at = m.index + m[0].indexOf(value);
+    out.push({ start: at, end: at + value.length, value });
   }
-
-  // ② `<script>` 体。**标签本身留着** —— `<script src="x.js">` 是要取回的真资源,
-  //    只抹开合标签之间的内容(JS 字符串里的 `url()` / 假标记不是资源)。
-  //
-  //    **必须扫「已抹掉注释」的副本,不能扫原文**:`<!-- <script> -->` 里的开标签在原文
-  //    里也能命中,而它没有配对的 `</script>`,按未闭合处理会把文末之前的真资源全抹掉。
-  const afterComments = out.join('');
-  const afterCommentsLower = afterComments.toLowerCase();
-  const scriptOpenRe = /<script\b[^<>]*>/gi;
-  let open: RegExpExecArray | null;
-  while ((open = scriptOpenRe.exec(afterComments)) !== null) {
-    const bodyStart = open.index + open[0].length;
-    const closeAt = afterCommentsLower.indexOf('</script', bodyStart);
-    // 未闭合 → 什么都不掩(见 UNTERMINATED_POLICY)。多半根本不是脚本标签,
-    // 而是某个属性值里的字面 `<script>`。
-    if (closeAt < 0) break;
-    blank(bodyStart, closeAt);
-    scriptOpenRe.lastIndex = closeAt;
-  }
-
-  // ③ `<template>` 体(review P1)。模板内容是**惰性**的:浏览器解析后放进
-  //    `content` DocumentFragment,不在文档里、不会加载其中任何资源。所以它和注释同性质,
-  //    不该占取件配额 —— 一份产物只要在真资源前放一个含 32 条引用的模板,后面的图就全被挤掉。
-  //    (即使脚本把模板克隆进文档,那些相对引用也解析不到 —— 文档 base 是 about:blank。)
-  //
-  //    **必须带深度计数**:`<template>` 可以嵌套,只匹配到第一个 `</template>` 会让外层
-  //    剩余部分逃过掩码。未闭合同样掩到文末。
-  const afterScripts = out.join('');
-  const templateTokenRe = /<(\/?)template\b[^<>]*>/gi;
-  let token: RegExpExecArray | null;
-  let depth = 0;
-  let bodyStart = -1;
-  while ((token = templateTokenRe.exec(afterScripts)) !== null) {
-    const isClose = token[1] === '/';
-    if (!isClose) {
-      if (depth === 0) bodyStart = token.index + token[0].length;
-      depth += 1;
-      continue;
-    }
-    if (depth === 0) continue; // 落单的 `</template>`,忽略
-    depth -= 1;
-    if (depth === 0 && bodyStart >= 0) {
-      blank(bodyStart, token.index);
-      bodyStart = -1;
-    }
-  }
-  // 未闭合 → 什么都不掩(见 UNTERMINATED_POLICY);不再 blank 到文末。
-
-  // ④ `<style>` 体里的 CSS 注释。style 体本身要保留 —— 里面的 `url()` 是真资源。
-  //    同理扫已抹掉注释 / 脚本体 / 模板体的副本。
-  const masked = out.join('');
-  const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
-  let style: RegExpExecArray | null;
-  while ((style = styleRe.exec(masked)) !== null) {
-    const bodyStart = style.index + style[0].indexOf(style[1], style[0].indexOf('>'));
-    const body = style[1];
-    for (let at = body.indexOf('/*'); at >= 0; at = body.indexOf('/*', at + 1)) {
-      const close = body.indexOf('*/', at + 2);
-      const end = close < 0 ? body.length : close + 2;
-      blank(bodyStart + at, bodyStart + end);
-      if (close < 0) break;
-      at = end - 1;
-    }
-  }
-  return out.join('');
+  return out;
 }
 
 /**
  * 扫出 HTML 里全部可改写的本地资源引用(按出现顺序)。
  *
- * 标签属性(`<img src>` / `<link href>` / …)与 `<style>` 块里的 `url()` 两类都收。
- * 只做词法定位与路径换算,不判断文件是否存在 —— 取不到的由上层保留原引用。
+ * 收三类:标签白名单上的资源属性(`<img src>` / `<link href>` / …)、`<style>` 块里的
+ * `url()`、以及**任意标签的 `style` 属性**里的 `url()`。只做词法定位与路径换算,不判断
+ * 文件是否存在 —— 取不到的由上层保留原引用。
  *
- * 扫描跑在 maskInertHtmlText 的掩码副本上(注释 / 脚本体 / CSS 注释已抹平),命中下标
- * 与原文一一对应。掩码只会**减少**匹配,不会凭空造出新的;唯一的理论例外是掩码把某个
- * 构造切成了原文里不存在的形状(如属性值内部嵌了 `<!--`),所以每条命中都再用原文
- * 校验一次切片相等,不等就丢掉。
+ * ── 刻意**不做**惰性文本掩码(曾经做过,已整块删除) ────────────────────────
+ * 早先这里先把注释 / `<script>` 体 / `<template>` 体 / CSS 注释抹成等长空白再扫,目的是
+ * 「伪引用不要占掉 32 项配额」。那条路被 review 连挖五轮,每轮一种新的误判形态:注释里的
+ * 伪引用 → `<template>` 体 → 属性值里的字面标签(`<div data-tpl="<template>">`)→ 脚本
+ * 字符串里的孤立 `<!--` → 两个属性值分别含 `<!--` 与 `-->` 被配成一段注释。
+ *
+ * 根因是**正则扫标签无法判别「`<` 处在哪个 HTML 数据态里」**,要根治得有真正的 tokenizer。
+ * 而两种失败模式的代价差一个数量级:不掩码最多让伪引用占掉配额(**图少取几个**,可见的
+ * 退化);掩错却会把中间的真资源整段抹掉(**正常页面静默缺图**,不可见)。所以放弃掩码,
+ * 接受前者。**不要再把它加回来** —— 除非引入真正的 HTML tokenizer。
  */
 export function collectHtmlLocalResourceRefs(
   html: string,
   baseDirAbsPath: string,
 ): HtmlResourceRef[] {
   if (!html || !baseDirAbsPath) return [];
-  // 扫描跑在掩码副本上(注释 / 脚本体 / CSS 注释已抹成等长空白),下标与原文对齐。
-  const scan = maskInertHtmlText(html);
   const refs: HtmlResourceRef[] = [];
   const push = (start: number, end: number, raw: string): void => {
-    // 掩码可能把某个构造切成原文里不存在的形状(如属性值里嵌了 `<!--`)。用原文校验
-    // 切片相等,把这类凭空产生的命中挡掉 —— 否则会按错下标改写原文。
-    if (html.slice(start, end) !== raw) return;
-    const absPath = resolveHtmlResourcePath(baseDirAbsPath, raw);
+    // 路径解析前先解码 HTML 字符引用(review P2):`<img src="charts/A&amp;B.png">` 浏览器
+    // 请求的是 `A&B.png`,原始属性文本直接拿去取件会取一个不存在的名字、渲染成破图。
+    // **区间仍用原始文本的下标**,回填替换的是原样那段,所以解码只影响取件路径。
+    const decoded = decodeHtmlCharRefs(raw);
+    const absPath = resolveHtmlResourcePath(baseDirAbsPath, decoded);
     if (!absPath) return;
     // fragment 单独留着:取件不带它,回填要补回去(见 HtmlResourceRef.fragment)。
-    const hashAt = raw.indexOf('#');
-    const fragment = hashAt >= 0 ? raw.slice(hashAt) : '';
+    const hashAt = decoded.indexOf('#');
+    const fragment = hashAt >= 0 ? decoded.slice(hashAt) : '';
     // MIME 未知的不改写:data: URI 的类型由它决定,给错会让样式表/脚本被浏览器拒收,
     // 猜一个反而制造"看起来取到了其实没生效"的假象(fail-closed)。
     const mimeType = htmlResourceMimeFor(absPath);
@@ -322,23 +268,40 @@ export function collectHtmlLocalResourceRefs(
 
   // ① 标签属性。先定位标签(含标签名判定),再在该标签文本内找目标属性 ——
   //    直接全局扫 `src=` 会把不在白名单标签上的属性也改写掉。
+  //
+  //    **标签白名单只约束「资源属性」这一路,不约束 `style` 属性**:任意标签都能带内联样式
+  //    (`<div style="background-image:url(...)">`),所以这里不能因为标签不在白名单就整个跳过
+  //    (这条正是本轮 style 属性 finding 的第一版实现踩到的:分支写在 `continue` 之后,永远到不了)。
   const tagRe = /<([a-zA-Z][a-zA-Z0-9-]*)\b([^<>]*)>/g;
   let tag: RegExpExecArray | null;
-  while ((tag = tagRe.exec(scan)) !== null) {
+  while ((tag = tagRe.exec(html)) !== null) {
     const attrs = RESOURCE_ATTRS_BY_TAG[tag[1].toLowerCase()];
-    if (!attrs) continue;
     const attrsText = tag[2];
     const attrsOffset = tag.index + 1 + tag[1].length;
     const attrRe = /([a-zA-Z_:][a-zA-Z0-9:._-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
     let attr: RegExpExecArray | null;
     while ((attr = attrRe.exec(attrsText)) !== null) {
-      if (!attrs.includes(attr[1].toLowerCase())) continue;
+      const attrName = attr[1].toLowerCase();
       const value = attr[2] ?? attr[3] ?? attr[4] ?? '';
       if (!value) continue;
-      // 值在 attrsText 里的起点:整段匹配末尾回退 value 长度,再补回收尾引号。
-      const quoted = attr[2] !== undefined || attr[3] !== undefined;
-      const matchEnd = attr.index + attr[0].length;
-      const valueStart = attrsOffset + matchEnd - value.length - (quoted ? 1 : 0);
+      // 起点算法与下面共用:整段匹配末尾回退 value 长度,再补回收尾引号。
+      const valueStartOf = (): number => {
+        const q = attr![2] !== undefined || attr![3] !== undefined;
+        return attrsOffset + attr!.index + attr![0].length - value.length - (q ? 1 : 0);
+      };
+      // **内联 `style` 属性里的 `url()` 也要收**(review P1):
+      // `<div style="background-image:url('./hero.png')">` 是产物里最常见的写法之一,
+      // 只扫 `<style>` 块会让它在 about:blank 文档里渲染成空白背景。
+      // 任意标签都可能带 style,所以不受资源标签白名单限制。
+      if (attrName === 'style') {
+        const styleAttrOffset = valueStartOf();
+        for (const hit of findCssUrlRefs(value)) {
+          push(styleAttrOffset + hit.start, styleAttrOffset + hit.end, hit.value);
+        }
+        continue;
+      }
+      if (!attrs || !attrs.includes(attrName)) continue;
+      const valueStart = valueStartOf();
       push(valueStart, valueStart + value.length, value);
     }
   }
@@ -346,17 +309,11 @@ export function collectHtmlLocalResourceRefs(
   // ② `<style>` 块里的 `url(...)`(同一份文档里的内联样式,顺手就能补齐)。
   const styleRe = /<style\b[^<>]*>([\s\S]*?)<\/style\s*>/gi;
   let style: RegExpExecArray | null;
-  while ((style = styleRe.exec(scan)) !== null) {
+  while ((style = styleRe.exec(html)) !== null) {
     const body = style[1];
     const bodyOffset = style.index + style[0].indexOf(body, style[0].indexOf('>'));
-    const urlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/g;
-    let url: RegExpExecArray | null;
-    while ((url = urlRe.exec(body)) !== null) {
-      const value = url[1] ?? url[2] ?? url[3] ?? '';
-      if (!value) continue;
-      const valueStartInMatch = url[0].indexOf(value);
-      const valueStart = bodyOffset + url.index + valueStartInMatch;
-      push(valueStart, valueStart + value.length, value);
+    for (const hit of findCssUrlRefs(body)) {
+      push(bodyOffset + hit.start, bodyOffset + hit.end, hit.value);
     }
   }
 

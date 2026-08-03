@@ -130,10 +130,28 @@ export function isTextFilePreviewCandidate(pathOrName: string): boolean {
  * 只能看源码——因为 HTML 落在 SUPPORTED_TEXT_EXTS 里,预览页按文本分派。判定单列一处
  * 供两端共用,不去动 remoteFilePreviewKind 的 'text' 结论(取字节仍走文本通道)。
  */
+/**
+ * 是否按「网页」渲染态预览。
+ *
+ * 入参**两种来源都要吃**:URL 形态(`report.html?from=chat`,聊天链接带查询串)与真实文件名
+ * (预览页直接传 `item.name`)。两者对 `?` / `#` 的语义相反 —— URL 里它们是语法,文件名里
+ * 它们是合法字符。所以先按**原始串**判扩展名,不命中再退回剥掉 query/fragment 的形态
+ * (review P2 实捉:一律先剥会把 `notes.html#readme.txt` 截成 `notes.html`,让一个 `.txt`
+ * 文件进可执行 WebView;反向的 `report#draft.html` 又会丢掉渲染态)。
+ */
 export function isHtmlFilePreviewCandidate(pathOrName: string): boolean {
-  const name = basenameRemotePath(pathOrName.split(/[?#]/)[0] ?? '').trim();
-  if (!name) return false;
-  return HTML_PREVIEW_EXTS.has(extractRemoteFileExt(name));
+  const raw = basenameRemotePath(pathOrName).trim();
+  if (!raw) return false;
+  const rawExt = extractRemoteFileExt(raw);
+  // 判据是「扩展名里有没有混进 URL 语法」,而不是「整串里有没有 ? #」:
+  //  - `notes.html#readme.txt` 的扩展名是 `.txt` —— 干净,直接按它判(不剥,否则会被截成
+  //    `notes.html` 让一个 .txt 进可执行 WebView);
+  //  - `report.html?from=chat` 的扩展名是 `.html?from=chat` —— 混进了语法,说明入参是 URL
+  //    形态,剥掉 query/fragment 再判。
+  // 先按原始串判、再无条件回退到剥完的形态是错的:第一种情况会被第二步重新放行。
+  if (!/[?#]/.test(rawExt)) return HTML_PREVIEW_EXTS.has(rawExt);
+  const stripped = basenameRemotePath(pathOrName.split(/[?#]/)[0] ?? '').trim();
+  return !!stripped && HTML_PREVIEW_EXTS.has(extractRemoteFileExt(stripped));
 }
 
 export function nonTextFilePreviewStatusText(kind: RemoteFilePreviewKind): string {

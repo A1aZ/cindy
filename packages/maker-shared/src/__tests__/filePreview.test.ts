@@ -39,6 +39,18 @@ describe('file preview shared model', () => {
     expect(isTextFilePreviewCandidate('/repo/page.xhtml')).toBe(true);
   });
 
+  it('文件名里合法的 # / ? 不按 URL 语法截断(review P2)', () => {
+    // 入参两种来源:URL 形态(带查询串)与真实文件名。一律先剥 query/fragment 会把
+    // `notes.html#readme.txt` 截成 `notes.html`,让一个 .txt 文件进可执行 WebView。
+    expect(isHtmlFilePreviewCandidate('/repo/notes.html#readme.txt')).toBe(false);
+    // 反向:真实文件名里带 # 且确实以 .html 结尾,不能丢掉渲染态。
+    expect(isHtmlFilePreviewCandidate('/repo/report#draft.html')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/report?v=1.html')).toBe(true);
+    // URL 形态仍照旧(原始串不命中 → 退回剥掉 query 的形态)。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html?from=chat')).toBe(true);
+    expect(isHtmlFilePreviewCandidate('/repo/report.html#toc')).toBe(true);
+  });
+
   it('only treats desktop text-like files as remote text preview candidates', () => {
     expect(remoteFilePreviewKind('/repo/notes.md')).toBe('text');
     expect(remoteFilePreviewKind('/repo/package.json?from=mobile')).toBe('text');

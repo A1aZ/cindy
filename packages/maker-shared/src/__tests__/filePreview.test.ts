@@ -24,7 +24,6 @@ describe('file preview shared model', () => {
     expect(isHtmlFilePreviewCandidate('/repo/report.html')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/report.htm')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/REPORT.HTML')).toBe(true);
-    expect(isHtmlFilePreviewCandidate('/repo/report.html?from=chat')).toBe(true);
     // 取字节仍走文本通道:两个判定同时为真,源码态与内容搜索不受影响。
     expect(isTextFilePreviewCandidate('/repo/report.html')).toBe(true);
     expect(remoteFilePreviewKind('/repo/report.html')).toBe('text');
@@ -39,16 +38,17 @@ describe('file preview shared model', () => {
     expect(isTextFilePreviewCandidate('/repo/page.xhtml')).toBe(true);
   });
 
-  it('文件名里合法的 # / ? 不按 URL 语法截断(review P2)', () => {
-    // 入参两种来源:URL 形态(带查询串)与真实文件名。一律先剥 query/fragment 会把
-    // `notes.html#readme.txt` 截成 `notes.html`,让一个 .txt 文件进可执行 WebView。
+  it('入参只吃真实文件名,`?` / `#` 一律按合法字符处理(review P2)', () => {
+    // 契约收成一种语义后不再有启发式:扩展名就是最后一个点之后的东西。
+    // `.txt` 结尾的不进可执行 WebView。
     expect(isHtmlFilePreviewCandidate('/repo/notes.html#readme.txt')).toBe(false);
-    // 反向:真实文件名里带 # 且确实以 .html 结尾,不能丢掉渲染态。
+    // 名字里带 `?` / `#` 且**不以** HTML 扩展名结尾的同样不进 —— 前两版都在这里放行过
+    // (fail-closed:少一次渲染,不会多一次执行)。
+    expect(isHtmlFilePreviewCandidate('/repo/report.html?draft')).toBe(false);
+    expect(isHtmlFilePreviewCandidate('/repo/report.htm#notes')).toBe(false);
+    // 确实以 HTML 扩展名结尾的照常进,名字中段有 `?` / `#` 不影响。
     expect(isHtmlFilePreviewCandidate('/repo/report#draft.html')).toBe(true);
     expect(isHtmlFilePreviewCandidate('/repo/report?v=1.html')).toBe(true);
-    // URL 形态仍照旧(原始串不命中 → 退回剥掉 query 的形态)。
-    expect(isHtmlFilePreviewCandidate('/repo/report.html?from=chat')).toBe(true);
-    expect(isHtmlFilePreviewCandidate('/repo/report.html#toc')).toBe(true);
   });
 
   it('only treats desktop text-like files as remote text preview candidates', () => {

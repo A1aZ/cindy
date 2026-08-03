@@ -131,27 +131,29 @@ export function isTextFilePreviewCandidate(pathOrName: string): boolean {
  * 供两端共用,不去动 remoteFilePreviewKind 的 'text' 结论(取字节仍走文本通道)。
  */
 /**
- * 是否按「网页」渲染态预览。
+ * 是否按「网页」渲染态预览。**入参是真实文件名 / 路径,不是 URL。**
  *
- * 入参**两种来源都要吃**:URL 形态(`report.html?from=chat`,聊天链接带查询串)与真实文件名
- * (预览页直接传 `item.name`)。两者对 `?` / `#` 的语义相反 —— URL 里它们是语法,文件名里
- * 它们是合法字符。所以先按**原始串**判扩展名,不命中再退回剥掉 query/fragment 的形态
- * (review P2 实捉:一律先剥会把 `notes.html#readme.txt` 截成 `notes.html`,让一个 `.txt`
- * 文件进可执行 WebView;反向的 `report#draft.html` 又会丢掉渲染态)。
+ * ── 为什么契约收成「只吃文件名」(review P2,同一处被连挖三轮) ────────────────
+ * 前两版试图同时吃 URL 形态(`report.html?from=chat`)与真实文件名,而 `?` / `#` 在两者里
+ * 语义相反 —— URL 里是语法,文件名里是**合法字符**(macOS / Linux 都允许)。同一个字符串
+ * 因此无法判别:`report.html?draft` 既可能是名字里带 `?` 的文件,也可能是 `report.html` 带
+ * 查询串。任何"先按原串判、不行再剥"的启发式都只是把误判挪个位置:
+ *  - 一律先剥 → `notes.html#readme.txt` 被截成 `notes.html`,一个 `.txt` 进可执行 WebView;
+ *  - 剥完兜底 → 上一条又被兜底重新放行;
+ *  - 只在"扩展名混进语法"时剥 → `report.html?draft` 仍被判成 HTML。
+ * 所以根因不在判据,在**入参契约**:一个函数吃两种语义。现在收成文件名一种,歧义直接消失。
+ *
+ * 生产调用点只有一处(预览页 `richTextKindOf(item.name)`,传的就是真实文件名),所以这次
+ * 收窄没有真实调用方受影响 —— 之前那份 URL 容忍是臆想出来的需求。将来真出现 URL 入口,
+ * 由它自己先剥 query/fragment,或另立一个显式命名的函数,**不要**再把两种语义塞回这里。
+ *
+ * 判定比 remoteFilePreviewKind 更严是刻意的(fail-closed):`report.html?draft` 会落进源码态
+ * 而不是可执行 WebView —— 少一次渲染,不会多一次执行。
  */
-export function isHtmlFilePreviewCandidate(pathOrName: string): boolean {
-  const raw = basenameRemotePath(pathOrName).trim();
-  if (!raw) return false;
-  const rawExt = extractRemoteFileExt(raw);
-  // 判据是「扩展名里有没有混进 URL 语法」,而不是「整串里有没有 ? #」:
-  //  - `notes.html#readme.txt` 的扩展名是 `.txt` —— 干净,直接按它判(不剥,否则会被截成
-  //    `notes.html` 让一个 .txt 进可执行 WebView);
-  //  - `report.html?from=chat` 的扩展名是 `.html?from=chat` —— 混进了语法,说明入参是 URL
-  //    形态,剥掉 query/fragment 再判。
-  // 先按原始串判、再无条件回退到剥完的形态是错的:第一种情况会被第二步重新放行。
-  if (!/[?#]/.test(rawExt)) return HTML_PREVIEW_EXTS.has(rawExt);
-  const stripped = basenameRemotePath(pathOrName.split(/[?#]/)[0] ?? '').trim();
-  return !!stripped && HTML_PREVIEW_EXTS.has(extractRemoteFileExt(stripped));
+export function isHtmlFilePreviewCandidate(fileNameOrPath: string): boolean {
+  const name = basenameRemotePath(fileNameOrPath).trim();
+  if (!name) return false;
+  return HTML_PREVIEW_EXTS.has(extractRemoteFileExt(name));
 }
 
 export function nonTextFilePreviewStatusText(kind: RemoteFilePreviewKind): string {

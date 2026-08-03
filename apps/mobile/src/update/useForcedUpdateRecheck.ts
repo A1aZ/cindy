@@ -27,6 +27,9 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
         undefined,
         undefined,
         isCanary,
+        // 绕开缓存:同一条记录被原地改过 minVersion 时,"同 version"证明不了新鲜度
+        // (set-mobile-min-version 就是原地改)。**放行**用户的决定不能读边缘旧记录。
+        true,
       ),
       getCurrentRuntimeVersion: () => Updates.runtimeVersion,
       getCurrentVersion: () => Constants.expoConfig?.version ?? null,

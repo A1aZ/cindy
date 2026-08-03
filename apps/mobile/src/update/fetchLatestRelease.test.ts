@@ -37,6 +37,24 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     );
   });
 
+  it('noCache=true → 追加 cache-buster + no-cache 头(放行决定不能读边缘旧记录)', async () => {
+    const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await fetchLatestRelease('ios', 8000, BASE, false, true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toMatch(new RegExp(`^${BASE}/latest\\?platform=ios&t=\\d+$`));
+    expect(init.headers).toMatchObject({ 'cache-control': 'no-cache' });
+  });
+
+  it('默认不绕缓存:常规路径的 URL 与请求头保持旧契约', async () => {
+    const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await fetchLatestRelease('ios', 8000, BASE);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${BASE}/latest?platform=ios`);
+    expect(init.headers).toEqual({ accept: 'application/json' });
+  });
+
   it('404(服务端确认暂无记录)→ null(= 无更新)', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => resp(404)));
     await expect(fetchLatestRelease('ios', 8000, BASE)).resolves.toBeNull();

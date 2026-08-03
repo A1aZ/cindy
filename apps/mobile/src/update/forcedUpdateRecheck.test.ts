@@ -183,6 +183,17 @@ describe('createForcedUpdateRechecker 解除判定', () => {
     expect(deps.onStillForced).not.toHaveBeenCalled();
   });
 
+  it('阻断目标本身缺 version → 证明不了新鲜度,维持阻断', async () => {
+    // 触发阻断的那条记录可能没写 version(parseLatestRelease 容许空串),此时任何
+    // 带正常 version 的旧记录都会"看起来更新",不能据此放行。
+    const deps = makeDeps({
+      fetchLatest: vi.fn(async () => latestRecord({ version: '1.5.0', minVersion: undefined })),
+      getHeldTarget: () => ({ version: '' }),
+    });
+    await expect(runOnce(deps)).resolves.toBe('error');
+    expect(deps.onCleared).not.toHaveBeenCalled();
+  });
+
   it('记录缺 version → 证明不了新鲜度,维持阻断', async () => {
     const deps = makeDeps({
       fetchLatest: vi.fn(async () => latestRecord({ version: '', minVersion: undefined })),

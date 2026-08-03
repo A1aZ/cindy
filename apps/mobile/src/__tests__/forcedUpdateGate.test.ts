@@ -67,6 +67,11 @@ describe('强更阻断闸门', () => {
     expect(recheck).toContain("return 'error'");
     // 仍强更时必须刷新 target:服务端可能只修正了坏掉的安装地址。
     expect(recheck).toContain('deps.onStillForced(evaluation.target, startRevision)');
+    // 放行决定不能读缓存:/latest 是可变指针,minVersion 会被原地改(set-mobile-min-version),
+    // 同 version 的边缘旧副本证明不了新鲜度,所以核对这条请求必须绕缓存。
+    const recheckHook = read('src/update/useForcedUpdateRecheck.ts');
+    expect(recheckHook).toContain('fetchLatestRelease(');
+    expect(recheckHook).toMatch(/isCanary,\n\s*(\/\/[^\n]*\n\s*)*true,/);
     // 在途期间若有更新的观察写入 store,本次旧结论必须作废(compare-and-set)。
     expect(recheck).toContain('const startRevision = deps.getRevision?.();');
     expect(recheck).toContain('deps.onCleared(startRevision)');

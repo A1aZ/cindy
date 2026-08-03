@@ -121,8 +121,10 @@ export function createForcedUpdateRechecker(
       // 新鲜度门:读到的记录不得比正在阻断的目标更旧。可变指针 + 无 cache-buster 的请求
       // 会撞上 CDN 边缘的旧记录,那条记录没有 minVersion → 会把仍需强更的用户放出去。
       // 记录缺 version(parseLatestRelease 容许空串)同样证明不了新鲜度,一并挡掉。
+      // held.version 为空(触发阻断的那条记录本身缺 version)时同样比不出新鲜度,一并挡掉。
       const held = deps.getHeldTarget?.();
-      if (held && (!record.version || compareVersions(record.version, held.version) < 0)) {
+      if (held && (!record.version || !held.version
+        || compareVersions(record.version, held.version) < 0)) {
         return 'error';
       }
       const evaluation = evaluateBundleUpdate({

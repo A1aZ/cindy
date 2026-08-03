@@ -158,6 +158,7 @@ describe('device-link IPC handlers', () => {
         controlledBy: [],
         revokedControllers: [],
         disabledControlDeviceIds: [],
+        unresponsiveDeviceIds: [],
       }),
     });
     expect(handleGetState(deps).standby).toBe(true);

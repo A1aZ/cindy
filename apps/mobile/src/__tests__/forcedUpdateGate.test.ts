@@ -79,6 +79,8 @@ describe('强更阻断闸门', () => {
     const recheckHook = readCode('src/update/useForcedUpdateRecheck.ts');
     expect(recheckHook).toContain('rechecker.handleTick()');
     expect(recheckHook).toContain('clearInterval(timer)');
+    // 但兜底只在前台敲门:后台定时器仍可能触发,那会白发 /latest(耗电 + 后台网络)。
+    expect(recheckHook).toContain("if (AppState.currentState !== 'active') return;");
     // 在途期间若有更新的观察写入 store,本次旧结论必须作废(compare-and-set)。
     expect(recheck).toContain('const startRevision = deps.getRevision?.();');
     expect(recheck).toContain('deps.onCleared(startRevision)');

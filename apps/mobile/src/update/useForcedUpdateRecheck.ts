@@ -54,6 +54,10 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
     // 而在后台被置位又在节流窗口内回前台的那次 'active' 也会被节流丢掉。
     // 实际请求频率由核对器内部节流(默认 30s)决定,这里只负责按时敲门。
     const timer = setInterval(() => {
+      // 只在前台敲门:部分平台 / 配置下定时器在后台仍会触发,那会白发 /latest
+      // (耗电 + 无谓的后台网络)。回前台那一刻由 AppState 通道负责,
+      // 定时兜底只需要覆盖"用户停在前台的阻断屏上、没有任何跳变"这一种场景。
+      if (AppState.currentState !== 'active') return;
       void rechecker.handleTick();
     }, RECHECK_TICK_MS);
     return () => {

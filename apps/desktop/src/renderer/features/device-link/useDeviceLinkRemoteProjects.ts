@@ -164,7 +164,10 @@ export function startRemoteSessionsReconciler(
     }
     backoff.retainOnly(seen);
   }, intervalMs);
-  return () => clearInterval(timer);
+  return () => {
+    clearInterval(timer);
+    inFlight.clear();
+  };
 }
 
 type IneligibleRemoteProjectAction = 'disconnect' | 'remove' | 'ignore';

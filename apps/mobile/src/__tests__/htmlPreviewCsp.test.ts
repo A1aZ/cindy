@@ -87,6 +87,10 @@ describe('渲染载体的安全接线(源码级守卫)', () => {
     resolve(process.cwd(), 'src/session/HtmlFileReader.tsx'),
     'utf8',
   ).replace(/\r\n/g, '\n');
+  const cspSource = readFileSync(
+    resolve(process.cwd(), 'src/session/htmlPreviewCsp.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
 
   it('CSP 挂在渲染载体上:任何进 WebView 的 HTML 都带策略', () => {
     // 放在载体这一层而不是取件那一层:不管 HTML 从哪条路来、有没有同目录资源,
@@ -97,7 +101,26 @@ describe('渲染载体的安全接线(源码级守卫)', () => {
     expect(readerSource).not.toMatch(/html:\s*html\s*\}/);
   });
 
-  it('CSP 与导航策略是配套的两半:出网信道必须同时为零', () => {
+  it('WebRTC 是已知残留面:不得把这套说成「零出网」', () => {
+    // RTCPeerConnection 的 ICE / STUN / DTLS 不受 CSP 各 *-src 指令管辖,恶意脚本能把内容
+    // 编码进 STUN 域名外传(review P1)。`webrtc 'block'` 只在 Chromium 111+ 生效
+    // (Android System WebView 覆盖),iOS 的 WKWebView 未实现 —— 所以 iOS 上仍有信道。
+    expect(HTML_PREVIEW_CSP).toContain("webrtc 'block'");
+    // 这三个说法一旦回归,就是在这个值上重建一个不成立的安全假设(同「不可伪造」那次)。
+    for (const text of [readerSource, cspSource]) {
+      expect(text).not.toContain('完全离线的沙箱');
+      expect(text).not.toContain('完全离线的预览沙箱');
+      expect(text).not.toContain('没有任何出网信道');
+    }
+    // 残留面必须被显式写下来,而不是靠删掉过强说法蒙过去。
+    expect(cspSource).toContain('残留信道');
+    expect(cspSource).toContain('WebKit');
+    // 媒体权限拒绝是另一件事,注释必须说明它不是 WebRTC 的解(否则会被当成已修)。
+    expect(readerSource).toContain('mediaCapturePermissionGrantType="deny"');
+    expect(readerSource).toContain('不是** WebRTC 外传的解');
+  });
+
+  it('CSP 与导航策略是配套的两半:CSP 管得到的出口必须全关', () => {
     // CSP 关子资源与表单,导航回调关顶层跳转。少任何一半都留着一条外传路径
     // (review P1:导航回调完全不经过 new Image().src / fetch 这类子资源请求)。
     expect(readerSource).toContain("url.startsWith('about:')");

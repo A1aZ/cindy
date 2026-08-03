@@ -83,9 +83,27 @@ const CSP_META = `<meta http-equiv="Content-Security-Policy" content="${HTML_PRE
  * 原型方法仍可 `Navigator.prototype.webkitGetUserMedia.call(navigator, ...)` 取出来直接调
  * (review P1 实捉,上一版漏了两个前缀变体)。所以名单 × {实例, 原型} 两处一起盖。
  *
- * 作者脚本拿不到干净 realm 来恢复这些全局:CSP 里 `frame-src 'none'` 与 `object-src 'none'`
- * 已经封掉 iframe / object(用例钉住这两条与本脚本的共存关系)。属性用
- * `writable: false, configurable: false` 定死,重定义会抛。
+ * 属性用 `writable: false, configurable: false` 定死,重定义会抛。
+ *
+ * ── ⚠️ 残留:**子 browsing context 拿得到未加固的 realm** ────────────────────
+ * 早先这里写过「CSP 的 `frame-src 'none'` / `object-src 'none'` 封掉了 iframe,所以作者拿不到
+ * 干净 realm」。**那是错的**(review P1 实捉,已实测确认):`frame-src` 管的是 frame 的**导航**,
+ * 而无 `src` 的 iframe 会**同步**得到一个初始 `about:blank` 子上下文 —— 不发生 fetch、CSP 不介入。
+ * 实测(headless Chromium)加固页与裸页拿到的绕过路径完全相同:
+ *   `iframe.contentWindow.RTCPeerConnection` / `.navigator.mediaDevices` 都是原装的。
+ *
+ * 本脚本现在封掉了**便捷取法**(四类嵌入元素的 `contentWindow` / `contentDocument` 恒 null),
+ * 但**封不住索引取法**:`window[0]` / `window.frames[0]` 仍指向子 realm,而
+ * `Object.defineProperty(window,'0',…)` 在 WindowProxy 上直接抛
+ * `TypeError: Failed to set an indexed property` —— 无法覆写。而且 iframe 根本不需要脚本创建:
+ * 不可信 HTML 里直接写一个 `<iframe>`,解析期就有子上下文了。
+ *
+ * **结论(如实记录,不要再声称已封死)**:只要 JavaScript 开着,文档层就无法保证「设备能力
+ * 与 WebRTC 对不可信 HTML 完全不可达」。要完整闭合只有两条路,都属产品/发布层决定:
+ *  1. `javaScriptEnabled={false}` —— 没有作者脚本,这一整类随之消失(带交互的产物退化成静态页);
+ *  2. 在原生权限层统一 deny(Android 需 patch react-native-webview → 触发冷更门;iOS 的 WebRTC
+ *     仍无对应原生开关)。
+ * 已在 PR 描述里列成待裁决项。
  *
  * 顺带关掉的还有 **iOS 上的 WebRTC 残留信道**:`webrtc 'block'` 只有 Chromium 111+ 实现,
  * WKWebView 不认;`RTCPeerConnection` 一旦不存在,那条不受 CSP 管辖的外传路径也就没有了。
@@ -113,6 +131,16 @@ const DEVICE_SURFACE_GUARD = '<script>(function(){'
   // 把原型方法也盖掉,代价一行。
   + "if(typeof MediaDevices!=='undefined'&&MediaDevices.prototype)"
   + "{freeze(MediaDevices.prototype,'getUserMedia');}"
+  // 子 browsing context 的**便捷取法**一并封掉(review P1):无 src 的 iframe 会同步得到一个
+  // 未加固的初始 about:blank realm,`iframe.contentWindow.RTCPeerConnection` 就绕过了上面
+  // 全部冻结。这里把四类嵌入元素的 contentWindow / contentDocument 取值器改成恒 null。
+  // ⚠️ 这**不是完整封锁**,残留见头注「子 realm」一节 —— `window[0]` 挡不住。
+  + "['HTMLIFrameElement','HTMLFrameElement','HTMLObjectElement','HTMLEmbedElement']"
+  + '.forEach(function(n){try{var C=window[n];if(C&&C.prototype){'
+  + "['contentWindow','contentDocument'].forEach(function(k){"
+  + 'try{Object.defineProperty(C.prototype,k,'
+  + '{get:function(){return null;},configurable:false});}catch(e){}});'
+  + '}}catch(e){}});'
   + '}catch(e){}})();</scr' + 'ipt>';
 
 /** 我们自己的前导段:标准模式 + 策略 + 能力剥离,一次性拼在最前面。 */

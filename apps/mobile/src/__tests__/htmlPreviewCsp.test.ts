@@ -90,6 +90,10 @@ describe('withHtmlPreviewCsp(自带前导段,不定位作者 doctype)', () => {
 
 describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
   const prolog = withHtmlPreviewCsp('<html><body>x</body></html>');
+  const cspSource = readFileSync(
+    resolve(process.cwd(), 'src/session/htmlPreviewCsp.ts'),
+    'utf8',
+  ).replace(/\r\n/g, '\n');
   const OPEN = '<script>';
   const CLOSE = '</script>';
   // 只取我们这一段:切到**第一个** </script> 为止,否则会把作者内容一起圈进来。
@@ -144,7 +148,24 @@ describe('前导段剥离设备与 WebRTC 能力(review P0)', () => {
     expect(prolog.split('<script>')).toHaveLength(2);
   });
 
-  it('依赖 CSP 封掉干净 realm —— 少了这两条,作者能新开 iframe 取回原始全局', () => {
+  it('封掉子 realm 的便捷取法(contentWindow / contentDocument 恒 null)', () => {
+    // 无 src 的 iframe 会同步得到未加固的初始 about:blank realm,
+    // `iframe.contentWindow.RTCPeerConnection` 绕过上面全部冻结(review P1,已实测)。
+    for (const n of ['HTMLIFrameElement', 'HTMLFrameElement', 'HTMLObjectElement', 'HTMLEmbedElement']) {
+      expect(guard).toContain(`'${n}'`);
+    }
+    expect(guard).toContain("['contentWindow','contentDocument']");
+    expect(guard).toContain('get:function(){return null;}');
+  });
+
+  it('不得再声称 frame-src 封掉了干净 realm —— 那个说法是错的', () => {
+    // `frame-src` 管 frame 的**导航**,不阻止无 src iframe 的初始 about:blank 上下文;
+    // 实测加固页与裸页拿到的绕过路径完全相同。这条守卫防止该错误结论回归。
+    expect(cspSource).not.toContain('拿不到干净 realm');
+    // 残留必须被显式写下来,而不是靠删掉错误说法蒙过去。
+    expect(cspSource).toContain('子 browsing context');
+    expect(cspSource).toContain('window[0]');
+    // CSP 这两条仍在(它们各自有别的作用:阻止 frame 导航与插件),只是不能当 realm 证明。
     expect(HTML_PREVIEW_CSP).toContain("frame-src 'none'");
     expect(HTML_PREVIEW_CSP).toContain("object-src 'none'");
   });

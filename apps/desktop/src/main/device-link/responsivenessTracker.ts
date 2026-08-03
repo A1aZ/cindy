@@ -103,6 +103,8 @@ export interface ResponsivenessTrackerDeps {
   onUnresponsiveChanged(deviceId: string, unresponsive: boolean): void;
   /** 探测前置条件:本实例持有 relay、链路 online、目标设备 presence 可用。 */
   isProbeEligible(deviceId: string): boolean;
+  /** 首次业务超时后的 peer 级恢复；由 Desktop 接入 openRemoteLink 去重。 */
+  recoverLink?: (deviceId: string) => Promise<unknown>;
   /** 时钟注入(测试用;默认 Date.now)。 */
   now?: () => number;
   log?: TrackerLogger;
@@ -131,6 +133,7 @@ export function createResponsivenessTracker(
   const log = deps.log ?? { info: () => {}, warn: () => {}, debug: () => {} };
   const now = deps.now ?? Date.now;
   const unresponsive = new Set<string>();
+  const linkRecoveryInFlight = new Map<string, Promise<unknown>>();
   const breaker = createDeviceResponsivenessBreaker({
     now: deps.now,
     onOpenChanged: (deviceId, open) => {
@@ -179,7 +182,26 @@ export function createResponsivenessTracker(
       settle(deviceId, slot, classifyDeviceSendSuccess(channel, wasProbe));
       return result;
     } catch (err) {
-      settle(deviceId, slot, classifyDeviceSendFailure(err));
+      const outcome = classifyDeviceSendFailure(err);
+      settle(deviceId, slot, outcome);
+      if (outcome === 'timeout' && deps.recoverLink && !linkRecoveryInFlight.has(deviceId)) {
+        let recovery: Promise<unknown>;
+        try {
+          recovery = Promise.resolve(deps.recoverLink(deviceId));
+        } catch (recoveryErr) {
+          recovery = Promise.reject(recoveryErr);
+        }
+        linkRecoveryInFlight.set(deviceId, recovery);
+        void recovery.then(
+          () => {
+            if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
+          },
+          (recoveryErr) => {
+            if (linkRecoveryInFlight.get(deviceId) === recovery) linkRecoveryInFlight.delete(deviceId);
+            log.debug(`peer link recovery failed for ${deviceId.slice(0, 8)}`, recoveryErr);
+          },
+        );
+      }
       throw err;
     }
   };
@@ -212,6 +234,7 @@ export function createResponsivenessTracker(
     },
     resetAll: () => {
       activeCohorts.clear();
+      linkRecoveryInFlight.clear();
       breaker.resetAll();
     },
   };

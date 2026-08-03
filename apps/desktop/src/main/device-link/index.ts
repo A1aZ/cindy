@@ -152,6 +152,21 @@ let authRealmReconnectGeneration = 0;
 let unsubscribeAuthState: (() => void) | null = null;
 /** ownership store 按 DbClient 实例缓存(避免每 tick 建对象);换库(换账号)自动重建 */
 let ownershipStoreCache: { db: unknown; store: OwnershipStore } | null = null;
+const pendingPeerLinkReopens = new Set<string>();
+
+function flushPendingPeerLinkReopens(): void {
+  if (linkTornDown || (arbiter && !arbiter.isOwner())) return;
+  for (const deviceId of pendingPeerLinkReopens) {
+    log.debug(`peer link stale-frame recovery for ${deviceId.slice(0, 8)}`);
+    void openRemoteLink(deviceId).then(
+      () => pendingPeerLinkReopens.delete(deviceId),
+      (err) => {
+        log.debug(`peer link stale-frame recovery failed for ${deviceId.slice(0, 8)}`, err);
+        setTimeout(flushPendingPeerLinkReopens, 5_000);
+      },
+    );
+  }
+}
 /**
  * 持有者已生效的授权快照(允许被控开关 + 撤销名单)。用于检测**其它实例**改写共享
  * settings 文件(被动实例的设置页也能改授权,见 settings-store 多实例语义):持有者
@@ -338,6 +353,11 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       warn: (...args) => log.warn(...args),
       error: (...args) => log.error(...args),
     },
+    onPeerLinkNeedsReopen: (deviceId) => {
+      if (linkTornDown) return;
+      pendingPeerLinkReopens.add(deviceId);
+      flushPendingPeerLinkReopens();
+    },
     // 弱网收紧:默认 20s ping × (2+1) tick 要 ~60s 才判死半开连接,期间所有请求黑洞。
     // 15s ping 把判死缩到 ~45s;不动 pongMissLimit——高延迟链路(实测响应性可达 ~10s)
     // 下更激进的宽限会把「慢但活着」误判成死链,造成重连循环(mobile 用 10s×1 是因为
@@ -367,6 +387,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       arbiter?.isOwner() === true &&
       presenceAvailableByDevice.get(deviceId) === true &&
       !readDeviceLinkSettings().disabledControlDeviceIds.includes(deviceId),
+    recoverLink: (deviceId) => openRemoteLink(deviceId),
     log: {
       info: (...args) => log.info(...args),
       warn: (...args) => log.warn(...args),
@@ -615,6 +636,8 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       if (!authManager.getAuthState().isAuthenticated) return;
       linkTornDown = false;
       client?.start();
+      // 可靠帧可能在 ownership 接管前到达；接管后补发一次 link-open，避免启动竞态留下半开链路。
+      setTimeout(flushPendingPeerLinkReopens, 250);
       setContactsDeviceLinkOwnerActive(true);
       refreshAppliedSettingsSnapshot();
       pollContactsDeviceSyncSettingChange();

@@ -27,6 +27,7 @@ function timeoutError(): DeviceLinkError {
 function harness(overrides?: {
   probeInvoke?: ReturnType<typeof vi.fn>;
   isProbeEligible?: () => boolean;
+  recoverLink?: ReturnType<typeof vi.fn>;
 }) {
   let at = 1_000_000;
   const probeInvoke = overrides?.probeInvoke ?? vi.fn(async () => [{ id: 's1' }]);
@@ -35,6 +36,7 @@ function harness(overrides?: {
     probeInvoke,
     onUnresponsiveChanged,
     isProbeEligible: overrides?.isProbeEligible ?? (() => true),
+    recoverLink: overrides?.recoverLink,
     now: () => at,
   });
   return {
@@ -115,6 +117,18 @@ describe('responsivenessTracker', () => {
       ).rejects.toThrow('relay connection lost');
     }
     expect(h.tracker.isUnresponsive(DEV)).toBe(false);
+  });
+
+  it('首次业务超时触发一次 peer link 重开,并对并发超时去重', async () => {
+    const recoverLink = vi.fn(() => new Promise<void>(() => {}));
+    const h = harness({ recoverLink });
+    for (let i = 0; i < 2; i++) {
+      await expect(
+        h.tracker.guardInvoke(DEV, 'local-db:sessions:list', () => Promise.reject(timeoutError())),
+      ).rejects.toThrow();
+    }
+    expect(recoverLink).toHaveBeenCalledTimes(1);
+    expect(recoverLink).toHaveBeenCalledWith(DEV);
   });
 
   it('探测窗口未到 / 前置条件不满足时 probeTick 不发探测;窗口到且合格才单飞', async () => {

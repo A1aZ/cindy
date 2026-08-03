@@ -132,6 +132,8 @@ export interface DeviceLinkClientOptions {
   getHello(): HelloPayload;
   createWebSocket: WsFactory;
   logger?: DeviceLinkLogger;
+  /** 对端仍发送可靠帧但本地 peer 未 ready 时通知 host 触发一次去重重开。 */
+  onPeerLinkNeedsReopen?: (deviceId: string) => void;
   /** 测试注入:覆盖重连/心跳的时间参数 */
   timing?: Partial<DeviceLinkTiming>;
 }
@@ -350,6 +352,7 @@ export class DeviceLinkClient {
   private readonly opts: DeviceLinkClientOptions;
   private readonly timing: DeviceLinkTiming;
   private readonly log: DeviceLinkLogger;
+  private readonly staleLinkRepairAt = new Map<string, number>();
 
   private ws: WsLike | null = null;
   private status: DeviceLinkStatus = 'stopped';

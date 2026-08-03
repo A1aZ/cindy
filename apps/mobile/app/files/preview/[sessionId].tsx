@@ -47,7 +47,7 @@ import { withTransientRemoteRetry } from '@/device-link/remoteRetry';
 import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import type { FileBrowserReadFileResult, MobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { isAbsolutePathShape, pathDisplayName } from '@/session/chatPathCandidate';
-import { adaptTextFilePreviewResult, fetchRemoteAbsFileToUrl } from '@/session/remoteAbsFileFetch';
+import { adaptTextFilePreviewResult, fetchRemoteAbsFileOnce, fetchRemoteAbsFileToUrl } from '@/session/remoteAbsFileFetch';
 import { formatByteSize, isHtmlFilePreviewCandidate } from '@/session/filePreview';
 import { decodeGzipBase64Text, mergePathIntoComposerDraft, shareMimeForFileName } from '@/session/fileBrowserActions';
 import { appendQuote, truncateQuoteText } from '@/session/chatQuoteStore';
@@ -333,6 +333,19 @@ export default function RemoteFilePreviewScreen() {
     [deviceId, maker, openLink, presignGet, singleAbsPath, workdir],
   );
 
+  /**
+   * 回收资源取件产生的 OSS 对象(与会话页 deleteRemoteMediaObject 同一端点与语义)。
+   * 空 ossKey(inline 缩略图 / 缓存命中)没有在世对象,跳过。
+   */
+  const deleteResourceOssObject = useCallback((ossKey: string) => {
+    if (!ossKey) return;
+    void auth.apiFetch('/api/device-link/media', {
+      baseUrl: DEVICE_LINK_API_BASE_URL,
+      method: 'DELETE',
+      body: { key: ossKey },
+    }).catch(() => undefined);
+  }, [auth]);
+
   // SSH 远程工作区的取件上下文:三项必须同时给(被控端 parseSshMediaOrigin 会按
   // sessionId 反查会话库逐项比对);本机会话为 null,取件走被控桌面本机路径。
   const sshMediaContext = useMemo((): RemoteMediaSshContext | null => {
@@ -355,21 +368,29 @@ export default function RemoteFilePreviewScreen() {
    */
   const fetchResourceDataUri = useCallback(
     async (target: HtmlResourceFetchTarget): Promise<string> => {
-      const url = await fetchRemoteAbsFileToUrl(
+      // 一次性取件(带 ossKey、不进 60s 共享缓存):对象用完即删,缓存命中会回死 URL。
+      const media = await fetchRemoteAbsFileOnce(
         { maker, deviceId, openLink, presignGet },
         target.absPath,
         sshMediaContext,
       );
-      // 预签名地址只在这里用一次:下载完即转成 data: URI,**绝不回填进页面**
-      // (页面里的脚本能读 DOM,凭证进 DOM 等于交给不可信文档,review P1)。
-      const dataUri = await downloadRemoteMediaAsDataUri(
-        url,
-        target.mimeType,
-        HTML_RESOURCE_MAX_BYTES,
-      );
-      return dataUri ?? '';
+      try {
+        // 预签名地址只在这里用一次:下载完即转成 data: URI,**绝不回填进页面**
+        // (页面里的脚本能读 DOM,凭证进 DOM 等于交给不可信文档,review P1)。
+        const dataUri = await downloadRemoteMediaAsDataUri(
+          media.url,
+          target.mimeType,
+          HTML_RESOURCE_MAX_BYTES,
+        );
+        return dataUri ?? '';
+      } finally {
+        // 每个资源都新建了一个 OSS 对象;字节已进 data: URI,对象立即无用。
+        // 不回收的话一页最多遗留 32 个,反复进出预览还会累积(review P1)。
+        // 放 finally:下载失败 / 超限同样要删,失败路径才是最容易漏掉的那条。
+        deleteResourceOssObject(media.ossKey);
+      }
     },
-    [deviceId, maker, openLink, presignGet, sshMediaContext],
+    [deleteResourceOssObject, deviceId, maker, openLink, presignGet, sshMediaContext],
   );
 
   // 文本预览读文件也走瞬断重试 + openLink(与列表/搜索/导出同一路径),

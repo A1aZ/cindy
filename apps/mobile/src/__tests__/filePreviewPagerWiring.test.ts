@@ -103,7 +103,8 @@ describe('HTML 生成物的渲染态接线', () => {
     // 精确取回调体判定(不用邻近匹配:props 列表里两个名字相邻会误报)。
     const body = /const fetchResourceDataUri = useCallback\(([\s\S]*?)\n  \);/.exec(source);
     expect(body, '未找到 fetchResourceDataUri 实现').not.toBeNull();
-    expect(body![1]).toContain('fetchRemoteAbsFileToUrl(');
+    // 一次性取件(带 ossKey、不进共享缓存),而不是只回 url 的那个。
+    expect(body![1]).toContain('fetchRemoteAbsFileOnce(');
     expect(body![1]).toContain('downloadRemoteMediaAsDataUri(');
     // exportToUrl 只服务「当前这个文件」,资源要取的是页面引用的其它路径。
     expect(body![1]).not.toContain('exportToUrl');

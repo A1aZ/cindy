@@ -106,6 +106,19 @@ describe('渲染载体与取件的安全接线(源码级守卫)', () => {
     expect(pageSource).not.toMatch(/fetchResourceDataUri[\s\S]{0,400}?return url;/);
   });
 
+  it('取件产生的 OSS 对象必须回收,且失败路径也删', () => {
+    // 每个资源都新建一个 OSS 对象,不删的话一页最多遗留 32 个、反复进出还会累积。
+    expect(pageSource).toContain('const deleteResourceOssObject = useCallback');
+    expect(pageSource).toContain("method: 'DELETE'");
+    // 用带 ossKey 且不进共享缓存的一次性取件 —— 只回 url 的那个拿不到 key,
+    // 且对象删掉后缓存命中会回死 URL。
+    expect(pageSource).toContain('fetchRemoteAbsFileOnce(');
+    // 删除必须在 finally 里:下载失败 / 超限同样要回收(失败路径最容易漏)。
+    const body = /const fetchResourceDataUri = useCallback\(([\s\S]*?)\n  \);/.exec(pageSource);
+    expect(body, '未找到 fetchResourceDataUri 实现').not.toBeNull();
+    expect(body![1]).toMatch(/finally\s*\{[\s\S]*?deleteResourceOssObject\(media\.ossKey\)/);
+  });
+
   it('SSH 会话的资源取件必须带会话上下文', () => {
     expect(pageSource).toContain('const sshMediaContext = useMemo');
     expect(pageSource).toContain('session?.remoteHostId?.trim()');

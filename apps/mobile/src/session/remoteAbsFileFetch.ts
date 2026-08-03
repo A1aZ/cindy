@@ -104,6 +104,30 @@ export async function fetchRemoteAbsFileToUrl(
 }
 
 /**
+ * 一次性取件:返回**完整** resolved 结果(含 ossKey)且**不进共享缓存**。
+ *
+ * 给「取回字节后立刻转成 data: URI」的消费方用(HTML 渲染态的同目录资源):
+ *  - 需要 ossKey 才能在用完后 DELETE 掉 OSS 对象 —— fetchRemoteAbsFileToUrl 只回 url、
+ *    丢掉 ossKey,于是每个资源都会遗留一个在世对象,一页最多 32 个,反复进出还会累积
+ *    (review P1)。
+ *  - 不进那份 60s TTL 缓存:对象用完即删,缓存命中会回一个已被删除的死 URL。
+ */
+export async function fetchRemoteAbsFileOnce(
+  deps: RemoteAbsFileFetchDeps,
+  absPath: string,
+  ssh?: RemoteMediaSshContext | null,
+): Promise<MobileResolvedRemoteMedia> {
+  return withTransientRemoteRetry(async () => {
+    await deps.openLink(deps.deviceId);
+    // kind 只影响结果的 previewable 标志(此处不消费),按 image 占位。
+    return resolveMobileRemoteMedia(
+      { kind: 'image', url: remoteFileMediaUrl(absPath, undefined, ssh) },
+      { fetchRemoteMedia: deps.maker.fetchRemoteMedia, presignGet: deps.presignGet },
+    );
+  });
+}
+
+/**
  * text-file:read-preview 回包 → file-browser readFile 同构结果(absPath
  * 单文件模式专用,让预览页文本渲染零分支)。该通道返回纯文本(无 gzip /
  * truncated 语义),oversize 映射 OVERSIZE 供「超上限,可下载」占位复用。

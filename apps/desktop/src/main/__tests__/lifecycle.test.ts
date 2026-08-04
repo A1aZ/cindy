@@ -337,6 +337,18 @@ describe('armShutdownHardKillWatchdog', () => {
     ).toBe(first);
   });
 
+  it('win32: 脚本被外部删除后 re-prepare 生成新路径', async () => {
+    const { prepareShutdownWatchdogScript } = await freshLifecycle();
+    const first = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir })!;
+    expect(existsSync(first)).toBe(true);
+    rmSync(first);
+    expect(existsSync(first)).toBe(false);
+    const second = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir })!;
+    expect(second).not.toBeNull();
+    expect(existsSync(second!)).toBe(true);
+    expect(second).not.toBe(first);
+  });
+
   it('win32: watchdog 脚本写盘失败 → 共享 spawn 失败预算, 耗尽打缺席标记, 不 throw', async () => {
     // 不走 freshLifecycle: 那里会预 seed 脚本缓存, 而本用例要的就是"prepare
     // 一直失败"(目标目录不存在) 的路径。

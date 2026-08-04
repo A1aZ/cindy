@@ -34,7 +34,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -267,7 +267,10 @@ export function prepareShutdownWatchdogScript(
 ): string | null {
   const platform = options.platform ?? process.platform;
   if (platform !== 'win32') return null;
-  if (_watchdogScriptPath) return _watchdogScriptPath;
+  if (_watchdogScriptPath) {
+    if (existsSync(_watchdogScriptPath)) return _watchdogScriptPath;
+    _watchdogScriptPath = null;
+  }
   if (_watchdogScriptPrepareFailed) return null;
   try {
     const dir = mkdtempSync(join(options.tmpDir ?? tmpdir(), 'cindy-wd-'));

@@ -35,6 +35,7 @@ function fakeManager(overrides: Partial<GhostOauthEndpointManager> = {}): GhostO
         isDefault: true,
         createdAt: 1,
         avatarDataUrl: null,
+        scopeStale: true,
       },
     ]),
     connectAccount: vi.fn(async () => ({
@@ -46,6 +47,7 @@ function fakeManager(overrides: Partial<GhostOauthEndpointManager> = {}): GhostO
         isDefault: false,
         createdAt: 2,
         avatarDataUrl: null,
+        scopeStale: false,
       },
     })),
     disconnectAccount: vi.fn(),
@@ -76,12 +78,18 @@ function call(params: {
 
 describe('GET /oauth', () => {
   it('回全部 oauth 凭证槽状态,零令牌字节', async () => {
-    const outcome = await call({ method: 'GET', pathname: '/oauth' });
+    const manager = fakeManager();
+    const outcome = await call({ method: 'GET', pathname: '/oauth', manager });
     expect(outcome.status).toBe(200);
     const parsed = JSON.parse(outcome.body ?? '[]') as Array<Record<string, unknown>>;
     expect(parsed).toHaveLength(1);
     expect(parsed[0]).toMatchObject({ key: 'acct', clientConfigured: true, clientCustom: false });
-    expect((parsed[0].accounts as unknown[])[0]).toMatchObject({ id: 'acc-1', isDefault: true });
+    expect((parsed[0].accounts as unknown[])[0]).toMatchObject({
+      id: 'acc-1',
+      isDefault: true,
+      scopeStale: true,
+    });
+    expect(manager.listAccounts).toHaveBeenCalledWith(GHOST, 'acct', DECL);
     // 端点契约:响应体里不可能出现 token 类字段。
     expect(outcome.body).not.toMatch(/token|secret/i);
   });

@@ -86,6 +86,11 @@ export interface GhostOauthAccountView {
    * 上下文(networkSlot 只走 getFreshAccessToken)。
    */
   avatarDataUrl: string | null;
+  /**
+   * 当前清单声明新增了本账号全量授权时未申请的 scope。仅 full 快照可判定；
+   * 老账号与主动降面账号恒为 false，避免把未知状态误报成异常。
+   */
+  scopeStale: boolean;
 }
 
 /** 保险库最小面(providerSecretStore 在接线处适配;测试喂内存假体)。 */
@@ -177,6 +182,10 @@ interface AccountRow {
   displayLabel: string | null;
   status: GhostOauthAccountStatus;
   createdAt: number;
+  /** 本次浏览器授权 URL 实际携带的 scope 面；旧账号没有该快照。 */
+  authScopes?: string[];
+  /** full = 当时清单全量；subset = 用户主动选择了降面授权。 */
+  authFace?: 'full' | 'subset';
 }
 
 interface AccountsManifest {
@@ -220,6 +229,10 @@ function parseManifest(raw: string | null): AccountsManifest {
         displayLabel: typeof r.displayLabel === 'string' && r.displayLabel.length > 0 ? r.displayLabel : null,
         status: r.status === 'expired' ? 'expired' : 'connected',
         createdAt: typeof r.createdAt === 'number' && Number.isFinite(r.createdAt) ? r.createdAt : 0,
+        ...(Array.isArray(r.authScopes) && r.authScopes.every((scope) => typeof scope === 'string')
+          ? { authScopes: [...r.authScopes] }
+          : {}),
+        ...(r.authFace === 'full' || r.authFace === 'subset' ? { authFace: r.authFace } : {}),
       });
     }
     const defaultAccountId =
@@ -238,6 +251,7 @@ function toView(
   row: AccountRow,
   defaultAccountId: string | null,
   avatarDataUrl: string | null,
+  declScopes: readonly string[] = [],
 ): GhostOauthAccountView {
   return {
     id: row.id,
@@ -246,7 +260,35 @@ function toView(
     isDefault: row.id === defaultAccountId,
     createdAt: row.createdAt,
     avatarDataUrl,
+    scopeStale: isScopeStale(declScopes, row),
   };
+}
+
+/**
+ * 仅在可证明“当时拿的是全量面”时判断新增 scope；老数据与降面授权不猜。
+ */
+export function isScopeStale(
+  declScopes: readonly string[],
+  row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
+): boolean {
+  if (row.authFace !== 'full' || row.authScopes === undefined) return false;
+  const granted = new Set(row.authScopes);
+  return declScopes.some((scope) => !granted.has(scope));
+}
+
+function missingScopes(
+  declScopes: readonly string[],
+  row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
+): string[] {
+  if (!isScopeStale(declScopes, row) || row.authScopes === undefined) return [];
+  const granted = new Set(row.authScopes);
+  return declScopes.filter((scope) => !granted.has(scope));
+}
+
+function sameScopeFace(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  const expected = new Set(left);
+  return expected.size === new Set(right).size && right.every((scope) => expected.has(scope));
 }
 
 interface CachedAccessToken {
@@ -374,11 +416,24 @@ export class GhostOauthAccountManager {
 
   /* ------------------------------ 账号清单 ------------------------------ */
 
-  listAccounts(ghostId: string, secretKey: string): GhostOauthAccountView[] {
+  listAccounts(ghostId: string, secretKey: string, decl?: GhostOauthDecl): GhostOauthAccountView[] {
     const manifest = parseManifest(this.deps.vault.read(ghostId, accountsKey(secretKey)));
     return manifest.accounts.map((a) =>
-      toView(a, manifest.defaultAccountId, this.readAvatar(ghostId, secretKey, a.id)),
+      toView(a, manifest.defaultAccountId, this.readAvatar(ghostId, secretKey, a.id), decl?.scopes),
     );
+  }
+
+  /** 默认账号的陈旧授权面；判不准或无需重连时返回 null。 */
+  defaultScopeStaleness(
+    ghostId: string,
+    secretKey: string,
+    decl: GhostOauthDecl,
+  ): { missingScopes: string[] } | null {
+    const manifest = parseManifest(this.deps.vault.read(ghostId, accountsKey(secretKey)));
+    const row = manifest.accounts.find((account) => account.id === manifest.defaultAccountId);
+    if (!row) return null;
+    const missing = missingScopes(decl.scopes ?? [], row);
+    return missing.length > 0 ? { missingScopes: missing } : null;
   }
 
   /** 头像 data URL 读取(形状校验兜底:库里的坏值当无头像,不喂给 <img>)。 */
@@ -477,6 +532,10 @@ export class GhostOauthAccountManager {
       }
       config.scopes = [...opts.scopes];
     }
+    const authScopes = [...config.scopes];
+    const authFace: AccountRow['authFace'] = sameScopeFace(decl.scopes ?? [], authScopes)
+      ? 'full'
+      : 'subset';
 
     const flow = await startGhostOauthFlow({
       config,
@@ -564,6 +623,14 @@ export class GhostOauthAccountManager {
         existing.displayLabel = display;
         manifestDirty = true;
       }
+      if (existing.authScopes === undefined || !sameScopeFace(existing.authScopes, authScopes)) {
+        existing.authScopes = authScopes;
+        manifestDirty = true;
+      }
+      if (existing.authFace !== authFace) {
+        existing.authFace = authFace;
+        manifestDirty = true;
+      }
       if (manifestDirty) {
         this.deps.vault.store(ghostId, accountsKey(secretKey), JSON.stringify(manifest));
       }
@@ -583,6 +650,7 @@ export class GhostOauthAccountManager {
           existing,
           manifest.defaultAccountId,
           avatar ?? this.readAvatar(ghostId, secretKey, existing.id),
+          decl.scopes,
         ),
       };
     }
@@ -599,6 +667,8 @@ export class GhostOauthAccountManager {
       displayLabel: display,
       status: 'connected',
       createdAt: Date.now(),
+      authScopes,
+      authFace,
     };
 
     // refresh token 先落库再挂清单:清单是"账号存在"的事实源,顺序反了
@@ -628,7 +698,7 @@ export class GhostOauthAccountManager {
     });
     this.deps.logger?.info('ghost oauth 账号已连接', { ghostId, secretKey, accountId: account.id });
     this.notifyConnected(ghostId, secretKey, account.displayLabel ?? account.label);
-    return { ok: true, account: toView(account, nextManifest.defaultAccountId, avatar) };
+    return { ok: true, account: toView(account, nextManifest.defaultAccountId, avatar, decl.scopes) };
   }
 
   /** 授权成功通知(自兜异常:提示挂了不影响连接结果)。 */

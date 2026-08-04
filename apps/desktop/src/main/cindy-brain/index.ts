@@ -28,6 +28,7 @@ import {
   type GhostManifest,
   type GhostSetupAllowedAction,
   type GhostSetupAssessment,
+  type GhostSetupReauthSuggest,
   type GhostVideoRefMode,
   type GhostVideoResultParams,
   type InstalledGhost,
@@ -98,6 +99,10 @@ import { handleGhostSecretsRequest } from './runtime/ghostSecretsEndpoint.js';
 import { handleGhostOauthRequest } from './runtime/ghostOauthEndpoint.js';
 import { handleGhostConnectionsRequest } from './runtime/ghostConnectionsEndpoint.js';
 import { GhostOauthAccountManager, type GhostOauthDecl } from './ghostOauthAccounts.js';
+import {
+  appendReadyGhostOauthReauthSuggest,
+  findGhostOauthReauthSuggest,
+} from './ghostOauthScopeStaleness.js';
 import { mapGhostOauthConnectError } from './ghostOauthSetupError.js';
 import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
@@ -593,6 +598,30 @@ function availableGhosts(): InstalledGhost[] {
   return getGhostManager().list().filter((ghost) =>
     isGhostAvailableForActiveSession(ghost.manifest.id),
   );
+}
+
+function projectGhostForRenderer(ghost: InstalledGhost): InstalledGhost {
+  try {
+    const suggest = getGhostOauthReauthSuggest(withRuntimeFiloGoogleClient(ghost.manifest));
+    return {
+      ...ghost,
+      ...(suggest
+        ? {
+            oauthScopeStale: {
+              secretKey: suggest.secretKey,
+              missingScopeCount: suggest.missingScopeCount,
+            },
+          }
+        : {}),
+    };
+  } catch (error) {
+    // 详情页角标是提示面，保险库异常不能让插件清单整体消失。
+    log.warn('ghost oauth scope stale projection omitted', {
+      ghostId: ghost.manifest.id,
+      errorType: error instanceof Error ? error.name : typeof error,
+    });
+    return ghost;
+  }
 }
 
 function findAvailableGhost(id: string): InstalledGhost | null {
@@ -2772,6 +2801,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
       // 展示标签时报"已连接 xxx",没有时报通用授权成功)。
       onAccountConnected: ({ ghostId, label }) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth' });
+        broadcastGhostsChanged(getGhostManager().list());
         broadcastGhostHostNotice(
           ghostId,
           label
@@ -2784,6 +2814,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
           source: 'oauth',
           ref: secretKey,
         });
+        broadcastGhostsChanged(getGhostManager().list());
       },
       isConnectTargetCurrent: (ghostId, secretKey, decl) => {
         const ghost = findAvailableGhost(ghostId);
@@ -2822,6 +2853,22 @@ function getGhostConnectionManager(): GhostConnectionManager {
 
 let ghostSetupKvStore: GhostKvStore | null = null;
 
+/** 默认 OAuth 账号的授权面陈旧建议；只返回首个凭证槽，保持 envelope 有界。 */
+function getGhostOauthReauthSuggest(runtimeManifest: GhostManifest): GhostSetupReauthSuggest | undefined {
+  const oauthManager = getGhostOauthAccountManager();
+  const oauthDecls = new Map(
+    (runtimeManifest.network?.secrets ?? [])
+      .filter((secret) => secret.source === 'oauth' && secret.oauth)
+      .map((secret) => [secret.key, secret.oauth!] as const),
+  );
+  return findGhostOauthReauthSuggest(runtimeManifest, (secretKey) => {
+    const decl = oauthDecls.get(secretKey);
+    return decl
+      ? oauthManager.defaultScopeStaleness(runtimeManifest.id, secretKey, decl)
+      : null;
+  });
+}
+
 /**
  * Runtime-authoritative setup assessment used by ghost_list and ghost_call.
  * Unlike the legacy plugin-page projection this path is strict: storage or
@@ -2836,13 +2883,13 @@ export function getGhostSetupAssessment(ghostId: string): GhostSetupAssessment {
   const oauthManager = getGhostOauthAccountManager();
   const connectionManager = getGhostConnectionManager();
   let kvSnapshot: Record<string, unknown> | null = null;
-  return evaluateGhostSetupAssessment(
+  const assessment = evaluateGhostSetupAssessment(
     runtimeManifest,
     {
       secretSaved: (key) => ghostSecretSaved(ghostId, key),
       oauthStatus: (key) => {
         const decl = runtimeManifest.network?.secrets?.find((secret) => secret.key === key)?.oauth;
-        const accounts = oauthManager.listAccounts(ghostId, key);
+        const accounts = oauthManager.listAccounts(ghostId, key, decl);
         return {
           clientConfigured: oauthManager.clientConfigured(ghostId, key, decl),
           connected: accounts.filter((account) => account.status === 'connected').length,
@@ -2863,6 +2910,10 @@ export function getGhostSetupAssessment(ghostId: string): GhostSetupAssessment {
           configId === 'model-provider' && isModelAccessReady(),
       }),
     },
+  );
+  return appendReadyGhostOauthReauthSuggest(
+    assessment,
+    getGhostOauthReauthSuggest(runtimeManifest),
   );
 }
 
@@ -3735,6 +3786,7 @@ export function registerGhostIpc(): void {
       ghostId,
       onChanged: (secretKey) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth', ref: secretKey });
+        broadcastGhostsChanged(getGhostManager().list());
       },
       log,
     });
@@ -4248,7 +4300,7 @@ export function registerGhostIpc(): void {
   });
 
   ipcMain.on('ghosts:list', (event) => {
-    event.returnValue = { ghosts: availableGhosts() };
+    event.returnValue = { ghosts: availableGhosts().map(projectGhostForRenderer) };
   });
 
   // Plugin 页的已安装快捷行按最近成功使用排序。历史是主机 UI 状态，不写入
@@ -4349,7 +4401,7 @@ export function registerGhostIpc(): void {
           secretSaved: (key) => ghostSecretSaved(ghostId, key),
           oauthStatus: (key) => {
             const decl = runtimeManifest.network?.secrets?.find((s) => s.key === key)?.oauth;
-            const accounts = oauthManager.listAccounts(ghostId, key);
+            const accounts = oauthManager.listAccounts(ghostId, key, decl);
             return {
               clientConfigured: oauthManager.clientConfigured(ghostId, key, decl),
               connected: accounts.filter((a) => a.status === 'connected').length,
@@ -4998,7 +5050,9 @@ function broadcastGhostsChanged(
 ): void {
   getGhostSetupManifestTracker().note(ghosts);
   sweepRevokedGhostUnread(ghosts, rosterAuthoritative);
-  const visible = ghosts.filter((ghost) => isGhostAvailableForActiveSession(ghost.manifest.id));
+  const visible = ghosts
+    .filter((ghost) => isGhostAvailableForActiveSession(ghost.manifest.id))
+    .map(projectGhostForRenderer);
   BrowserWindow.getAllWindows().forEach((window) => {
     if (window.isDestroyed()) return;
     window.webContents.send('ghosts:changed', { ghosts: visible });

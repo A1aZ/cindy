@@ -9,6 +9,7 @@ import {
   GHOST_OAUTH_INVALID_GRANT_RECHECK_DELAY_MS,
   GHOST_OAUTH_MAX_ACCOUNTS,
   GhostOauthAccountManager,
+  isScopeStale,
   type GhostOauthDecl,
   type GhostOauthVault,
 } from '../ghostOauthAccounts.js';
@@ -70,6 +71,49 @@ function seededVault(rt = 'rt-seed'): ReturnType<typeof memoryVault> {
     [`${KEY}-rt-acc-1`]: rt,
   });
 }
+
+describe('isScopeStale', () => {
+  it.each([
+    ['全量快照没有新增 scope', ['scope.a'], { authFace: 'full', authScopes: ['scope.a'] }, false],
+    ['全量快照存在新增 scope', ['scope.a', 'scope.b'], { authFace: 'full', authScopes: ['scope.a'] }, true],
+    ['主动降面账号不猜', ['scope.a', 'scope.b'], { authFace: 'subset', authScopes: ['scope.a'] }, false],
+    ['老账号无快照不猜', ['scope.a', 'scope.b'], {}, false],
+    ['只有 scope 面没有 full 标记不猜', ['scope.a', 'scope.b'], { authScopes: ['scope.a'] }, false],
+  ] as const)('%s', (_name, declScopes, row, expected) => {
+    expect(isScopeStale(declScopes, row)).toBe(expected);
+  });
+
+  it('老清单与非法快照继续宽松读取，不误报陈旧授权', () => {
+    const vault = memoryVault({
+      [`${KEY}-accounts`]: JSON.stringify({
+        defaultAccountId: 'acc-old',
+        accounts: [
+          { id: 'acc-old', label: 'old@example.com', status: 'connected', createdAt: 1 },
+          {
+            id: 'acc-bad',
+            label: 'bad@example.com',
+            status: 'connected',
+            createdAt: 2,
+            authScopes: ['scope.a', 42],
+            authFace: 'unknown',
+          },
+        ],
+      }),
+    });
+    const mgr = new GhostOauthAccountManager({
+      vault,
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      openExternal: vi.fn(),
+    });
+    const expanded = { ...DECL, scopes: ['scope.a', 'scope.b'] };
+
+    expect(mgr.listAccounts(GHOST, KEY, expanded)).toMatchObject([
+      { id: 'acc-old', scopeStale: false },
+      { id: 'acc-bad', scopeStale: false },
+    ]);
+    expect(mgr.defaultScopeStaleness(GHOST, KEY, expanded)).toBeNull();
+  });
+});
 
 describe('connectAccount', () => {
   it('端口回收器只对第一方官方意识放行(第三方 redirectPort 不许借刀杀进程)', async () => {
@@ -138,13 +182,18 @@ describe('connectAccount', () => {
     expect(result.account.label).toBe('user@example.com');
     expect(result.account.isDefault).toBe(true);
     expect(result.account.status).toBe('connected');
+    expect(result.account.scopeStale).toBe(false);
 
-    const listed = mgr.listAccounts(GHOST, KEY);
+    const listed = mgr.listAccounts(GHOST, KEY, DECL);
     expect(listed).toHaveLength(1);
     expect(vault.read(GHOST, `${KEY}-rt-${result.account.id}`)).toBe('rt-1');
     // 清单里不落任何令牌字节。
     expect(vault.read(GHOST, `${KEY}-accounts`)).not.toContain('rt-1');
     expect(vault.read(GHOST, `${KEY}-accounts`)).not.toContain('at-1');
+    expect(JSON.parse(vault.read(GHOST, `${KEY}-accounts`) ?? '{}').accounts[0]).toMatchObject({
+      authScopes: ['scope.a'],
+      authFace: 'full',
+    });
 
     // 授权余温:access token 已进缓存,取用不再走网络。
     const fetchCalls = fetchImpl.mock.calls.length;
@@ -360,6 +409,10 @@ describe('connectAccount', () => {
     const listed = mgr.listAccounts(GHOST, KEY);
     expect(listed).toHaveLength(2);
     expect(vault.read(GHOST, `${KEY}-rt-acc-1`)).toBe('rt-fresh');
+    expect(JSON.parse(vault.read(GHOST, `${KEY}-accounts`) ?? '{}').accounts[0]).toMatchObject({
+      authScopes: ['scope.a'],
+      authFace: 'full',
+    });
     // 授权余温:合并账号的 access token 已进缓存。
     await expect(mgr.getFreshAccessToken(GHOST, KEY, DECL, 'acc-1')).resolves.toMatchObject({
       ok: true,
@@ -1153,8 +1206,9 @@ describe('connectAccount · opts.scopes 收窄', () => {
 
   it('声明子集 → 授权 URL 的 scope 面收窄为子集', async () => {
     let capturedScope: string | null = null;
+    const vault = memoryVault();
     const mgr = new GhostOauthAccountManager({
-      vault: memoryVault(),
+      vault,
       fetchImpl: vi.fn(async () =>
         jsonResponse({ access_token: 'at-narrow', refresh_token: 'rt-narrow', expires_in: 3600 }),
       ) as unknown as typeof fetch,
@@ -1167,6 +1221,16 @@ describe('connectAccount · opts.scopes 收窄', () => {
       mgr.connectAccount(GHOST, KEY, NARROW_DECL, { scopes: ['read:x'] }),
     ).resolves.toMatchObject({ ok: true });
     expect(capturedScope).toBe('read:x');
+    expect(JSON.parse(vault.read(GHOST, `${KEY}-accounts`) ?? '{}').accounts[0]).toMatchObject({
+      authScopes: ['read:x'],
+      authFace: 'subset',
+    });
+    expect(
+      mgr.listAccounts(GHOST, KEY, {
+        ...NARROW_DECL,
+        scopes: ['read:x', 'write:y', 'admin:z'],
+      })[0]?.scopeStale,
+    ).toBe(false);
   });
 
   it('含未声明条目 / 空数组 → INVALID_CONFIG,不拉浏览器', async () => {

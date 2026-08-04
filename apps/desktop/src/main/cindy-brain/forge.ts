@@ -2119,8 +2119,9 @@ settingsHtml 里自填**(用户用自己注册的 OAuth 应用,配额风控归�
 \`\`\`js
 // 状态回查(哪些 oauth 凭证槽、client 配没配、连了哪些账号;零令牌字节):
 const list = await (await fetch('/oauth')).json();
-// → [{ key:'acct', clientConfigured:true, clientCustom:false, accounts:[{ id, label, status:'connected'|'expired', isDefault, createdAt, avatarDataUrl }] }]
+// → [{ key:'acct', clientConfigured:true, clientCustom:false, accounts:[{ id, label, status:'connected'|'expired', isDefault, createdAt, avatarDataUrl, scopeStale }] }]
 // avatarDataUrl = 头像 data URL(声明了 identity.avatarPath 且主机下载成功才有,否则 null;<img src> 直接用)
+// scopeStale = true 表示该全量授权账号未包含插件后来新增的 scope;账号仍可用,设置页应显示非阻塞提示并复用现有重新连接动作
 // clientConfigured = 自填或内置任一在场;clientCustom = 用户自填过(UI 显示"内置应用身份/已自定义")
 // client 凭证只写入库(和 /secrets 同纪律,存入后拿不回;clientSecret 可省略 = 纯 PKCE):
 await fetch('/oauth/acct/client', { method:'PUT', body: JSON.stringify({ clientId, clientSecret }) });  // 204 即入库

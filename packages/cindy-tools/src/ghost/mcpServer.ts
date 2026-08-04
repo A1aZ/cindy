@@ -216,6 +216,7 @@ const SETUP_REQUIREMENT_KINDS = new Set([
   "client_config",
 ]);
 const SETUP_REQUIREMENT_STATES = new Set(["missing", "expired", "satisfied"]);
+const SETUP_REAUTH_SCOPE_MAX = 64;
 
 function sanitizeSetupAction(
   raw: unknown,
@@ -352,10 +353,61 @@ export function sanitizeGhostSetupAssessment(
     }
     groups.push({ id: group.id, mode: "any_of", items });
   }
+  let reauthSuggest: CindyGhostSetupAssessment["reauthSuggest"];
+  const rawSuggest = value.reauthSuggest;
+  if (rawSuggest !== undefined) {
+    if (!rawSuggest || typeof rawSuggest !== "object" || Array.isArray(rawSuggest)) return null;
+    const suggest = rawSuggest as Record<string, unknown>;
+    const requirement = suggest.requirement;
+    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return null;
+    const req = requirement as Record<string, unknown>;
+    const action = req.action;
+    if (!action || typeof action !== "object" || Array.isArray(action)) return null;
+    const act = action as Record<string, unknown>;
+    if (
+      typeof suggest.ghostId !== "string" ||
+      suggest.ghostId.length === 0 ||
+      suggest.ghostId.length > 128 ||
+      typeof suggest.secretKey !== "string" ||
+      suggest.secretKey.length === 0 ||
+      suggest.secretKey.length > 128 ||
+      !Array.isArray(suggest.missingScopes) ||
+      suggest.missingScopes.length === 0 ||
+      suggest.missingScopes.length > SETUP_REAUTH_SCOPE_MAX ||
+      !suggest.missingScopes.every(
+        (scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 256,
+      ) ||
+      !Number.isInteger(suggest.missingScopeCount) ||
+      suggest.missingScopeCount !== suggest.missingScopes.length ||
+      typeof req.ref !== "string" ||
+      req.ref.length === 0 ||
+      req.kind !== "oauth" ||
+      typeof req.label !== "string" ||
+      req.label.length === 0 ||
+      typeof act.id !== "string" ||
+      act.id.length === 0 ||
+      act.kind !== "oauth_connect"
+    ) {
+      return null;
+    }
+    reauthSuggest = {
+      ghostId: suggest.ghostId,
+      secretKey: suggest.secretKey,
+      missingScopes: [...suggest.missingScopes] as string[],
+      missingScopeCount: suggest.missingScopeCount as number,
+      requirement: {
+        ref: req.ref,
+        kind: "oauth",
+        label: req.label,
+        action: { id: act.id, kind: "oauth_connect" },
+      },
+    };
+  }
   return {
     state: value.state as CindyGhostSetupAssessment["state"],
     revision: value.revision as number,
     groups,
+    ...(reauthSuggest ? { reauthSuggest } : {}),
   };
 }
 
@@ -570,7 +622,9 @@ export async function handleGhostCall(
     // IM/hook 出站消费它,保证"意识画卡后删字段"也不影响媒体送达 IM 用户。
     // 声明了媒体字段(含 xdt_audio_tracks)时以声明为准,账本不注入
     // (声明是意图表达,能覆盖 render:false 抑制等语义)。
-    const { producedMedia, ...resultForModel } = result;
+    const { producedMedia, setup: unsafeSetup, ...resultForModel } = result;
+    const setup = sanitizeGhostSetupAssessment(unsafeSetup);
+    const reauthSetup = setup?.state === "ready" && setup.reauthSuggest ? setup : null;
     const declaredMedia = [
       "xdt_image_urls",
       "xdt_video_urls",
@@ -611,6 +665,7 @@ export async function handleGhostCall(
           : {};
     return textResult({
       ...resultForModel,
+      ...(reauthSetup ? { setup: reauthSetup } : {}),
       ...hoisted,
       ...producedFallback,
       ...mediaHint,

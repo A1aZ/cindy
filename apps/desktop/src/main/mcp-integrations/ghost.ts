@@ -1026,6 +1026,7 @@ export function getCindyGhostsMcpDeps(
           setup: finalAssessment,
         };
       }
+      let readyAssessment = finalAssessment;
       // 批量预授权(grant_only):只过户不派发。它与普通调用共用上面的
       // Host-authoritative setup gate，确保任何授权副作用之前插件已经 ready。
       if (grantOnly) {
@@ -1120,6 +1121,7 @@ export function getCindyGhostsMcpDeps(
               setup: postGrantAssessment,
             };
           }
+          readyAssessment = postGrantAssessment;
         } catch {
           return {
             ok: false,
@@ -1130,6 +1132,7 @@ export function getCindyGhostsMcpDeps(
         log.info('ghost grant-only: batch pre-granted', { ghostId, count: grant.hashes.length });
         return {
           ok: true,
+          ...(readyAssessment.reauthSuggest ? { setup: readyAssessment } : {}),
           result: {
             ok: true,
             granted_count: grant.hashes.length,
@@ -1263,6 +1266,7 @@ export function getCindyGhostsMcpDeps(
             setup: preDispatchAssessment,
           };
         }
+        readyAssessment = preDispatchAssessment;
       } catch {
         return {
           ok: false,
@@ -1324,6 +1328,7 @@ export function getCindyGhostsMcpDeps(
             setup: postCtxAssessment,
           };
         }
+        readyAssessment = postCtxAssessment;
       } catch {
         return {
           ok: false,
@@ -1358,7 +1363,11 @@ export function getCindyGhostsMcpDeps(
       // 在意识未声明媒体字段时以 xdt_media_produced 注入,兜底 IM/hook 送达。
       const producedMedia = drainGhostCallMedia(ghostId, callId);
       const finalized = withCardToken(result, cardService.finalizeCall(callId), callId);
-      return finalized.ok && producedMedia.length > 0 ? { ...finalized, producedMedia } : finalized;
+      if (!finalized.ok) return finalized;
+      const advisory = readyAssessment.reauthSuggest ? { setup: readyAssessment } : {};
+      return producedMedia.length > 0
+        ? { ...finalized, ...advisory, producedMedia }
+        : { ...finalized, ...advisory };
     },
     async forgeGuide(): Promise<string> {
       return FORGE_GUIDE;

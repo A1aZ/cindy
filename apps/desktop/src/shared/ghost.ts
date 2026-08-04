@@ -1082,6 +1082,26 @@ export interface GhostSetupAssessmentGroup {
 }
 
 /**
+ * 插件仍可调用、但默认 OAuth 账号的全量授权面落后于当前清单时的非阻塞建议。
+ * 只含 scope 名称与 Host 生成的动作引用，不含令牌或 client 凭证。
+ */
+export interface GhostSetupReauthSuggest {
+  ghostId: string;
+  secretKey: string;
+  missingScopes: string[];
+  missingScopeCount: number;
+  requirement: {
+    ref: string;
+    kind: 'oauth';
+    label: string;
+    action: {
+      id: string;
+      kind: 'oauth_connect';
+    };
+  };
+}
+
+/**
  * Setup Runtime 的完整判定结果。groups 之间 all-of，组内 any-of；
  * revision 由 Host 变更总线维护，用于丢弃过期卡片更新。
  */
@@ -1089,6 +1109,8 @@ export interface GhostSetupAssessment {
   state: 'ready' | 'required';
   revision: number;
   groups: GhostSetupAssessmentGroup[];
+  /** ready 语义不变；Agent 可据此建议用户重新连接，但不得拦截当前调用。 */
+  reauthSuggest?: GhostSetupReauthSuggest;
 }
 
 /** Agent 可选提供的展示编排；身份、Action 和完成状态仍由 Host 决定。 */
@@ -1320,6 +1342,11 @@ export interface InstalledGhost {
    * 文件缺失或超限时缺省)。renderer 直接作 <img src> 用,无需 loading 态。
    */
   iconDataUrl?: string;
+  /** 插件详情页宿主角标所需的最小陈旧授权投影；不含账号或 scope 明细。 */
+  oauthScopeStale?: {
+    secretKey: string;
+    missingScopeCount: number;
+  };
 }
 
 /** 插件包的来源与审核等级；决定 UI 徽标，不改变运行时 slot 权限。 */

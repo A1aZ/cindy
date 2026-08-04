@@ -6,7 +6,8 @@
  * 协议(意识 settingsHtml 页面用,`fetch('/oauth')`):
  * - GET  /oauth                          → 200 + [{ key, clientConfigured, accounts }]
  *   (仅 source:'oauth' 的凭证;accounts 只含 {id,label,status,isDefault,
- *   avatarDataUrl},零令牌字节——avatarDataUrl 是主机下载转码的头像小图);
+ *   avatarDataUrl,scopeStale},零令牌字节——avatarDataUrl 是主机下载转码
+ *   的头像小图,scopeStale 是宿主据授权面快照计算的非阻塞提示);
  * - PUT  /oauth/<key>/client             → body {"clientId":"...","clientSecret":"..."}
  *   写入用户自填的 OAuth 客户端凭证(clientSecret 可省略 = 纯 PKCE),204;
  * - DELETE /oauth/<key>/client           → 清除 client 凭证,204(幂等);
@@ -48,7 +49,7 @@ export interface GhostOauthEndpointManager {
   clientCustomized(ghostId: string, secretKey: string): boolean;
   setClientConfig(ghostId: string, secretKey: string, clientId: string, clientSecret?: string): boolean;
   clearClientConfig(ghostId: string, secretKey: string): void;
-  listAccounts(ghostId: string, secretKey: string): GhostOauthAccountView[];
+  listAccounts(ghostId: string, secretKey: string, decl?: GhostOauthDecl): GhostOauthAccountView[];
   connectAccount(
     ghostId: string,
     secretKey: string,
@@ -100,7 +101,7 @@ export async function handleGhostOauthRequest(args: {
         clientConfigured: manager.clientConfigured(ghostId, key, keyDecl),
         // 自填与内置分开报:settingsHtml 据此显示"内置应用身份 / 已自定义"。
         clientCustom: manager.clientCustomized(ghostId, key),
-        accounts: manager.listAccounts(ghostId, key),
+        accounts: manager.listAccounts(ghostId, key, keyDecl),
       }));
       return { status: 200, body: JSON.stringify(list) };
     } catch (err) {

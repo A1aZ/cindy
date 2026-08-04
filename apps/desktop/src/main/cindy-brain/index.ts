@@ -11,6 +11,8 @@ import {
   GHOST_CARD_HEIGHT_DEFAULT,
   GHOST_CARD_HEIGHT_MAX,
   GHOST_CARD_HEIGHT_MIN,
+  GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  GHOST_MANIFEST_FILE,
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   diffGhostPermissionItems,
@@ -20,6 +22,7 @@ import {
   isOfficialGhostId,
   isValidGhostId,
   layoutWithGhostPanel,
+  validateGhostManifest,
   type GhostHostNoticeKey,
   type GhostImageAspectRatio,
   type GhostManifest,
@@ -199,6 +202,8 @@ import { GhostFsSlot } from './fsSlot.js';
 import { getGhostGrantConfirmBridge } from './ghostGrantConfirmBridge.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
 import { getDirDepositVault, getSaveDepositVault, isPathInsideDir } from './dirDeposit.js';
+import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
+import { ghostManifestDigest, PluginMarketLedger } from '../plugin-market/ledger.js';
 import {
   GhostSubscriptionGateway,
   GhostActivityTracker,
@@ -1660,8 +1665,35 @@ let networkSlotSingleton: GhostNetworkSlot | null = null;
 let notifySlotSingleton: GhostNotifySlot | null = null;
 let connectionAudienceResolverSingleton: ConnectionAudienceResolver | null = null;
 let connectionTokenProviderSingleton: ConnectionTokenProvider | null = null;
+let pluginMarketLedgerSingleton: PluginMarketLedger | null = null;
 
-/** Resolve Connection metadata from the currently installed plugin manifest. */
+function getPluginMarketLedger(): PluginMarketLedger {
+  if (!pluginMarketLedgerSingleton) {
+    pluginMarketLedgerSingleton = new PluginMarketLedger(() =>
+      ownerScopedUserDataPath('plugin-market', 'ledger.v1.json'),
+    );
+  }
+  return pluginMarketLedgerSingleton;
+}
+
+/** Read the locale-independent manifest digest from the installed package. */
+function readInstalledGhostManifestDigest(ghostId: string): string | null {
+  const ghost = getGhostManager().list().find((candidate) => candidate.manifest.id === ghostId);
+  if (!ghost) return null;
+  try {
+    const bytes = readBoundedFileNoFollowSync(
+      path.join(ghost.dir, GHOST_MANIFEST_FILE),
+      GHOST_INSTALL_MANIFEST_MAX_BYTES,
+    );
+    if (bytes === null) return null;
+    const validated = validateGhostManifest(JSON.parse(bytes.toString('utf8')) as unknown);
+    return validated.ok ? ghostManifestDigest(validated.manifest) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve Connection metadata only from a trusted organization market install. */
 function getConnectionAudienceResolver(): ConnectionAudienceResolver {
   if (!connectionAudienceResolverSingleton) {
     connectionAudienceResolverSingleton = loadConnectionAudienceResolver({
@@ -1669,6 +1701,8 @@ function getConnectionAudienceResolver(): ConnectionAudienceResolver {
         getGhostManager()
           .list()
           .find((candidate) => candidate.manifest.id === ghostId)?.manifest ?? null,
+      readInstalledManifestDigest: readInstalledGhostManifestDigest,
+      readMarketInstallation: (ghostId) => getPluginMarketLedger().installationForGhost(ghostId),
       log,
     });
   }
@@ -1684,6 +1718,7 @@ function resolveConnectionAudienceForGhost(
   return getConnectionAudienceResolver().resolve(ghostId, {
     membershipId: user.id,
     membershipKind: user.membershipKind,
+    orgId: user.orgId,
     orgSlug: user.orgSlug,
   });
 }

@@ -1,14 +1,16 @@
 /**
- * Host-owned Connection audience resolution. Plugins declare where the managed
- * token is injected, while the Host derives the audience from the current
- * organization and the installed plugin id.
+ * Host-owned Connection audience resolution. Only organization-scoped Plugin
+ * Market installs with an intact manifest may receive a token; the Host derives
+ * the audience from the current organization and the installed plugin id.
  */
 import { isValidGhostId, isValidGhostNetworkHostPattern } from '../../shared/ghost.js';
 import type { GhostManifest } from '../../shared/ghost.js';
+import type { PluginMarketInstallationRecord } from '../plugin-market/ledger.js';
 
 export interface ConnectionAudienceIdentity {
   membershipId: string;
   membershipKind: 'personal' | 'org';
+  orgId: string | null;
   orgSlug: string | null;
 }
 
@@ -39,6 +41,8 @@ export function isConnectionSecretReady(
 
 export interface LoadConnectionAudienceResolverOptions {
   readInstalledManifest(ghostId: string): GhostManifest | null;
+  readInstalledManifestDigest(ghostId: string): string | null;
+  readMarketInstallation(ghostId: string): PluginMarketInstallationRecord | null;
   log?: {
     info: (msg: string, meta?: Record<string, unknown>) => void;
     warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -62,8 +66,29 @@ export function loadConnectionAudienceResolver(
       }
       if (identity.membershipKind !== 'org') return reject('membership-not-org');
       if (!identity.membershipId) return reject('membership-id-empty');
+      if (!identity.orgId) return reject('org-id-unavailable');
       if (!identity.orgSlug || !ORG_SLUG_RE.test(identity.orgSlug)) {
         return reject('org-slug-unavailable');
+      }
+
+      let installation: PluginMarketInstallationRecord | null = null;
+      try {
+        installation = options.readMarketInstallation(ghostId);
+      } catch {
+        return reject('market-installation-read-failed');
+      }
+      if (!installation || !installation.installed) {
+        return reject('market-installation-missing');
+      }
+      if (installation.source !== 'market') return reject('market-installation-untrusted');
+      if (installation.scope !== 'organization') {
+        return reject('market-installation-not-organization');
+      }
+      if (installation.organizationId !== identity.orgId) {
+        return reject('market-installation-org-mismatch');
+      }
+      if (!installation.manifestDigest) {
+        return reject('market-manifest-digest-missing');
       }
 
       let manifest: GhostManifest | null = null;
@@ -74,6 +99,15 @@ export function loadConnectionAudienceResolver(
       }
       if (!manifest) return reject('plugin-not-installed');
       if (manifest.id !== ghostId) return reject('plugin-id-mismatch');
+      let installedManifestDigest: string | null = null;
+      try {
+        installedManifestDigest = options.readInstalledManifestDigest(ghostId);
+      } catch {
+        return reject('installed-manifest-digest-read-failed');
+      }
+      if (installedManifestDigest !== installation.manifestDigest) {
+        return reject('installed-manifest-digest-mismatch');
+      }
 
       const allowedHosts = [
         ...new Set(

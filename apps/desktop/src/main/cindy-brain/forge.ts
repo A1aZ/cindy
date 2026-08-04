@@ -2111,13 +2111,13 @@ BroadcastChannel、日志或任何自存路径(review 必查)。凭证只会注�
 PUT/DELETE 一律 405(派生身份不可配置)。
 
 **Cindy 企业身份断言(source:"oidc-token",可选)**:适用于接入 Cindy Connection
-Auth 的企业服务。主机只在当前登录账号属于组织 Membership、且该插件存在受信安装映射时,
+Auth 的企业服务。主机只在当前登录账号属于组织 Membership、且该插件已安装并声明了目标服务域名时,
 按需向 auth-server 换取短时 Connection JWT;audience 与组织身份由主机推导,插件清单和
 运行时代码都不能选择、读取或保存 audience/token。该凭证必须固定声明
 \`"inject": { "header": "Authorization", "format": "Bearer {value}", "hosts": [...] }\`,
 且 \`hosts\` 必须是非空的显式子集,只允许把断言发给列出的企业服务域名。
 \`oidc-token\` 的 \`inject.hosts\` 只接受精确域名,不允许 \`*.example.com\` 通配；Host
-还会用受信安装记录里的服务域名做第二层精确校验,两边都匹配才会签发并注入。
+会从当前已安装插件 manifest 读取这些声明,目标请求必须精确命中声明域名才会签发并注入。
 它没有用户输入、\`url\`、\`exchange\` 或 \`oauth\` 详单,也不要放进 \`setup.requires\`;没有企业
 身份时 cindy.fetch 会 fail-closed 并返回结构化错误。企业服务应使用 Connection JWT
 中的 \`sub\`、\`email\` 或 \`identities\` 等声明自行选择业务身份,不要要求 Cindy 客户端先把

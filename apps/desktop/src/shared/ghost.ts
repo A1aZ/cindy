@@ -731,8 +731,8 @@ export const GHOST_OAUTH_BOUNCE_PATH_RE = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)
  *   主机跑授权流程并保管全部令牌,出网时现取新鲜 token 注入(见
  *   GhostSecretOauthDecl;必须同时声明 oauth 详单)。
  * - 'oidc-token':值 = Cindy 为当前企业 Membership 签发的短时 Connection
- *   JWT。audience 由 Host 的可信安装记录推导，插件不能声明或读取；令牌
- *   只在 networkSlot 发请求时注入，且永不进入 Node Worker。
+ *   JWT。audience 由 Host 根据当前组织和已安装插件 id 推导，插件不能声明或读取；
+ *   令牌只在 networkSlot 发请求时注入，且永不进入 Node Worker。
  *
  * ('login-feishu-token' 已于 2026-07-17 随飞书登录整体下线退役——xd-feishu
  * 改走 source:'oauth' + tokenBroker:'feishu';存量已装清单由内置意识播种器

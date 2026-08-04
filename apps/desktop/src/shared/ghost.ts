@@ -1908,6 +1908,26 @@ export function diffGhostPermissionItems(
 }
 
 /**
+ * 返回未被发布清单或已批准旧版本覆盖的包权限。
+ *
+ * 第二个来源用于兼容旧市场元数据：旧详情投影可能漏掉已存在的权限，
+ * 但这些权限此前已经被用户批准，更新时应继续保留。
+ */
+export function unreviewedGhostPermissionItems(
+  reviewed: GhostManifest,
+  previouslyInstalled: GhostManifest | undefined,
+  actual: GhostManifest,
+): GhostPermissionItem[] {
+  const approvalKey = (item: GhostPermissionItem): string =>
+    JSON.stringify([item.key, item.detail ?? '']);
+  const approved = new Set(ghostPermissionItems(reviewed).map(approvalKey));
+  for (const item of ghostPermissionItems(previouslyInstalled ?? reviewed)) {
+    approved.add(approvalKey(item));
+  }
+  return ghostPermissionItems(actual).filter((item) => !approved.has(approvalKey(item)));
+}
+
+/**
  * icon 允许的图片扩展名 → mime(校验与 main 读盘供图共用同一口径)。
  * 不收 svg:svg 可携带脚本,虽经 <img> 渲染不执行,仍不给这个面。
  */

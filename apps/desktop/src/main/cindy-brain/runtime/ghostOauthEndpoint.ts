@@ -7,7 +7,7 @@
  * - GET  /oauth                          → 200 + [{ key, clientConfigured, accounts }]
  *   (仅 source:'oauth' 的凭证;accounts 只含 {id,label,status,isDefault,
  *   avatarDataUrl,scopeStale},零令牌字节——avatarDataUrl 是主机下载转码
- *   的头像小图,scopeStale 是宿主据授权面快照计算的非阻塞提示);
+ *   的头像小图,scopeStale 是宿主据真实缺权证据或授权面快照计算的非阻塞提示);
  * - PUT  /oauth/<key>/client             → body {"clientId":"...","clientSecret":"..."}
  *   写入用户自填的 OAuth 客户端凭证(clientSecret 可省略 = 纯 PKCE),204;
  * - DELETE /oauth/<key>/client           → 清除 client 凭证,204(幂等);
@@ -19,6 +19,8 @@
  * - DELETE /oauth/<key>/accounts/<id>    → 断开账号,204(幂等);
  * - POST /oauth/<key>/default            → body {"accountId":"..."} 设默认账号,
  *   204;账号不存在 404;
+ * - POST /oauth/<key>/insufficient-scopes → body {"scopes":[...]} 上报真实 API
+ *   返回的缺失权限证据；只接受当前清单声明内的 scope，成功 204;
  * - 未声明 / 非 oauth 的 key → 404;坏 body / 空值 → 400;值超长 → 413;
  *   其它 method → 405;保险库写失败 → 500(不外泄细节)。
  *
@@ -47,7 +49,12 @@ export interface GhostOauthEndpointManager {
   clientConfigured(ghostId: string, secretKey: string, decl?: GhostOauthDecl): boolean;
   /** 用户是否自填过(UI 区分"内置应用身份 / 已自定义")。 */
   clientCustomized(ghostId: string, secretKey: string): boolean;
-  setClientConfig(ghostId: string, secretKey: string, clientId: string, clientSecret?: string): boolean;
+  setClientConfig(
+    ghostId: string,
+    secretKey: string,
+    clientId: string,
+    clientSecret?: string,
+  ): boolean;
   clearClientConfig(ghostId: string, secretKey: string): void;
   listAccounts(ghostId: string, secretKey: string, decl?: GhostOauthDecl): GhostOauthAccountView[];
   connectAccount(
@@ -62,6 +69,7 @@ export interface GhostOauthEndpointManager {
   ): Promise<GhostOauthConnectResult>;
   disconnectAccount(ghostId: string, secretKey: string, accountId: string): void;
   setDefaultAccount(ghostId: string, secretKey: string, accountId: string): boolean;
+  reportInsufficientScopes(ghostId: string, secretKey: string, scopes: readonly string[]): boolean;
 }
 
 export async function handleGhostOauthRequest(args: {
@@ -80,7 +88,8 @@ export async function handleGhostOauthRequest(args: {
   onChanged?: (secretKey: string) => void;
   log?: { warn(message: string, meta?: Record<string, unknown>): void };
 }): Promise<GhostOauthRequestOutcome> {
-  const { method, pathname, readBodyText, oauthSecrets, networkHosts, manager, ghostId, log } = args;
+  const { method, pathname, readBodyText, oauthSecrets, networkHosts, manager, ghostId, log } =
+    args;
   const notifyChanged = (secretKey: string): void => {
     try {
       args.onChanged?.(secretKey);
@@ -126,7 +135,8 @@ export async function handleGhostOauthRequest(args: {
     try {
       text = await readBodyText();
     } catch (err) {
-      if (err instanceof GhostKvError && err.code === 'TOO_LARGE') return { ok: false, status: 413 };
+      if (err instanceof GhostKvError && err.code === 'TOO_LARGE')
+        return { ok: false, status: 413 };
       return { ok: false, status: 400 };
     }
     try {
@@ -189,7 +199,11 @@ export async function handleGhostOauthRequest(args: {
     if (decl.tokenBroker !== undefined && !isOfficialGhostId(ghostId)) {
       return {
         status: 200,
-        body: JSON.stringify({ ok: false, error: 'BROKER_FORBIDDEN', detail: 'tokenBroker 仅第一方官方意识可用' }),
+        body: JSON.stringify({
+          ok: false,
+          error: 'BROKER_FORBIDDEN',
+          detail: 'tokenBroker 仅第一方官方意识可用',
+        }),
       };
     }
     // 可选 body {"scopes":[...],"clientId":"..."}:scopes 是本次授权申请
@@ -202,7 +216,8 @@ export async function handleGhostOauthRequest(args: {
       const text = await readBodyText();
       if (text.trim().length > 0) {
         const parsed = JSON.parse(text) as unknown;
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return { status: 400 };
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+          return { status: 400 };
         const rawScopes = (parsed as Record<string, unknown>).scopes;
         if (rawScopes !== undefined) {
           if (!Array.isArray(rawScopes) || rawScopes.length === 0) return { status: 400 };
@@ -253,6 +268,37 @@ export async function handleGhostOauthRequest(args: {
       return { status: 200, body: JSON.stringify(result) };
     } catch (err) {
       log?.warn('ghost oauth 授权流程意外失败', { ghostId, secretKey, err: String(err) });
+      return { status: 500 };
+    }
+  }
+
+  if (action === 'insufficient-scopes' && segments.length === 2) {
+    if (method !== 'POST') return { status: 405 };
+    const parsed = await readJsonBody();
+    if (!parsed.ok) return { status: parsed.status };
+    const rawScopes = parsed.body.scopes;
+    if (!Array.isArray(rawScopes) || rawScopes.length === 0 || rawScopes.length > 64) {
+      return { status: 400 };
+    }
+    const declared = new Set(decl.scopes ?? []);
+    const scopes: string[] = [];
+    for (const scope of rawScopes) {
+      if (
+        typeof scope !== 'string' ||
+        scope.trim().length === 0 ||
+        scope.length > 256 ||
+        !declared.has(scope)
+      ) {
+        return { status: 400 };
+      }
+      if (!scopes.includes(scope)) scopes.push(scope);
+    }
+    try {
+      if (!manager.reportInsufficientScopes(ghostId, secretKey, scopes)) return { status: 500 };
+      notifyChanged(secretKey);
+      return { status: 204 };
+    } catch (err) {
+      log?.warn('ghost oauth 缺失 scope 证据入库失败', { ghostId, secretKey, err: String(err) });
       return { status: 500 };
     }
   }

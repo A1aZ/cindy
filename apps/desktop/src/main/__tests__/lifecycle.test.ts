@@ -337,16 +337,15 @@ describe('armShutdownHardKillWatchdog', () => {
     ).toBe(first);
   });
 
-  it('win32: 脚本被外部删除后 re-prepare 生成新路径', async () => {
+  it('win32: 缓存路径直接返回,不做文件存在性探测 (零盘 IO 保证)', async () => {
     const { prepareShutdownWatchdogScript } = await freshLifecycle();
     const first = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir })!;
     expect(existsSync(first)).toBe(true);
     rmSync(first);
-    expect(existsSync(first)).toBe(false);
-    const second = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir })!;
-    expect(second).not.toBeNull();
-    expect(existsSync(second!)).toBe(true);
-    expect(second).not.toBe(first);
+    // 即使文件已被外部删除,prepare 仍返回缓存路径 (不做 existsSync,避免
+    // 退出路径被故障存储阻塞;wscript //B 拿不到文件会静默退出 = 可接受的缺席)
+    const second = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir });
+    expect(second).toBe(first);
   });
 
   it('win32: watchdog 脚本写盘失败 → 共享 spawn 失败预算, 耗尽打缺席标记, 不 throw', async () => {

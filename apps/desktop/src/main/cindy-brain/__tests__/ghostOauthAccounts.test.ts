@@ -111,7 +111,7 @@ describe('isScopeStale', () => {
       { id: 'acc-old', scopeStale: false },
       { id: 'acc-bad', scopeStale: false },
     ]);
-    expect(mgr.defaultScopeStaleness(GHOST, KEY, expanded)).toBeNull();
+    expect(mgr.defaultMissingScopes(GHOST, KEY, expanded)).toEqual([]);
   });
 });
 

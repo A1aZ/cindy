@@ -89,6 +89,7 @@ import {
 import {
   evaluateGhostSetupAssessment,
   handleGhostSetupStatusRequest,
+  parseOauthConnectSecretKey,
 } from './ghostSetupStatus.js';
 import { getGhostSetupChangeBus } from './ghostSetupChangeBus.js';
 import { GhostSetupManifestTracker } from './ghostSetupManifestTracker.js';
@@ -2801,7 +2802,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
       // 展示标签时报"已连接 xxx",没有时报通用授权成功)。
       onAccountConnected: ({ ghostId, label }) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth' });
-        broadcastGhostsChanged(getGhostManager().list());
+        broadcastGhostsChanged(getGhostManager().list(), false, { projectionOnly: true });
         broadcastGhostHostNotice(
           ghostId,
           label
@@ -2814,7 +2815,7 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
           source: 'oauth',
           ref: secretKey,
         });
-        broadcastGhostsChanged(getGhostManager().list());
+        broadcastGhostsChanged(getGhostManager().list(), false, { projectionOnly: true });
       },
       isConnectTargetCurrent: (ghostId, secretKey, decl) => {
         const ghost = findAvailableGhost(ghostId);
@@ -2856,17 +2857,9 @@ let ghostSetupKvStore: GhostKvStore | null = null;
 /** 默认 OAuth 账号的授权面陈旧建议；只返回首个凭证槽，保持 envelope 有界。 */
 function getGhostOauthReauthSuggest(runtimeManifest: GhostManifest): GhostSetupReauthSuggest | undefined {
   const oauthManager = getGhostOauthAccountManager();
-  const oauthDecls = new Map(
-    (runtimeManifest.network?.secrets ?? [])
-      .filter((secret) => secret.source === 'oauth' && secret.oauth)
-      .map((secret) => [secret.key, secret.oauth!] as const),
+  return findGhostOauthReauthSuggest(runtimeManifest, (secretKey, decl) =>
+    oauthManager.defaultMissingScopes(runtimeManifest.id, secretKey, decl),
   );
-  return findGhostOauthReauthSuggest(runtimeManifest, (secretKey) => {
-    const decl = oauthDecls.get(secretKey);
-    return decl
-      ? oauthManager.defaultScopeStaleness(runtimeManifest.id, secretKey, decl)
-      : null;
-  });
 }
 
 /**
@@ -2889,7 +2882,7 @@ export function getGhostSetupAssessment(ghostId: string): GhostSetupAssessment {
       secretSaved: (key) => ghostSecretSaved(ghostId, key),
       oauthStatus: (key) => {
         const decl = runtimeManifest.network?.secrets?.find((secret) => secret.key === key)?.oauth;
-        const accounts = oauthManager.listAccounts(ghostId, key, decl);
+        const accounts = oauthManager.listAccounts(ghostId, key);
         return {
           clientConfigured: oauthManager.clientConfigured(ghostId, key, decl),
           connected: accounts.filter((account) => account.status === 'connected').length,
@@ -2911,6 +2904,9 @@ export function getGhostSetupAssessment(ghostId: string): GhostSetupAssessment {
       }),
     },
   );
+  // 性能短路:required 时建议注定被丢弃,不再为它读保险库。
+  // "required 绝不带建议"的契约不变量仍由 appendReadyGhostOauthReauthSuggest 守着。
+  if (assessment.state !== 'ready') return assessment;
   return appendReadyGhostOauthReauthSuggest(
     assessment,
     getGhostOauthReauthSuggest(runtimeManifest),
@@ -2936,11 +2932,10 @@ export async function executeGhostSetupAction(args: {
     };
   }
   if (args.action.kind === 'oauth_connect') {
-    const prefix = 'oauth_connect:secret:';
-    if (!args.action.id.startsWith(prefix)) {
+    const secretKey = parseOauthConnectSecretKey(args.action.id);
+    if (!secretKey) {
       return { ok: false, errorCode: 'ACTION_STALE', message: '授权动作已失效' };
     }
-    const secretKey = args.action.id.slice(prefix.length);
     const runtimeManifest = withRuntimeFiloGoogleClient(ghost.manifest);
     const decl = runtimeManifest.network?.secrets?.find(
       (secret) => secret.key === secretKey && secret.source === 'oauth',
@@ -3786,7 +3781,7 @@ export function registerGhostIpc(): void {
       ghostId,
       onChanged: (secretKey) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth', ref: secretKey });
-        broadcastGhostsChanged(getGhostManager().list());
+        broadcastGhostsChanged(getGhostManager().list(), false, { projectionOnly: true });
       },
       log,
     });
@@ -4401,7 +4396,7 @@ export function registerGhostIpc(): void {
           secretSaved: (key) => ghostSecretSaved(ghostId, key),
           oauthStatus: (key) => {
             const decl = runtimeManifest.network?.secrets?.find((s) => s.key === key)?.oauth;
-            const accounts = oauthManager.listAccounts(ghostId, key, decl);
+            const accounts = oauthManager.listAccounts(ghostId, key);
             return {
               clientConfigured: oauthManager.clientConfigured(ghostId, key, decl),
               connected: accounts.filter((a) => a.status === 'connected').length,
@@ -5047,9 +5042,19 @@ function broadcastGhostProvisioning(active: boolean): void {
 function broadcastGhostsChanged(
   ghosts: InstalledGhost[],
   rosterAuthoritative = false,
+  opts?: {
+    /**
+     * true = 花名册没变,只是 renderer 投影字段(OAuth 陈旧角标)需要刷新。
+     * 跳过清单指纹、未读扫尾与 skill 链接对账这些只对装/卸/启停/换版有
+     * 意义的花名册侧效应,OAuth 账号操作不再连带两趟全量磁盘扫描。
+     */
+    projectionOnly?: boolean;
+  },
 ): void {
-  getGhostSetupManifestTracker().note(ghosts);
-  sweepRevokedGhostUnread(ghosts, rosterAuthoritative);
+  if (!opts?.projectionOnly) {
+    getGhostSetupManifestTracker().note(ghosts);
+    sweepRevokedGhostUnread(ghosts, rosterAuthoritative);
+  }
   const visible = ghosts
     .filter((ghost) => isGhostAvailableForActiveSession(ghost.manifest.id))
     .map(projectGhostForRenderer);
@@ -5071,7 +5076,7 @@ function broadcastGhostsChanged(
   // skill 槽共享链接对账:装/卸/启停/换版全走本广播,一处挂接全覆盖。
   // 异步合并执行,不阻塞广播;用全量 list() 而非 per-session 过滤后的 visible
   // (链接对账关心"装了什么",与当前会话可见性无关)。
-  scheduleGhostSkillReconcile();
+  if (!opts?.projectionOnly) scheduleGhostSkillReconcile();
 }
 
 // —— skill 槽链接对账调度:合并突发广播(in-flight + pending 双标志),

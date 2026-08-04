@@ -36,9 +36,7 @@ const READY: GhostSetupAssessment = { state: 'ready', revision: 7, groups: [] };
 
 describe('OAuth scope stale runtime assessment', () => {
   it('ready + 默认账号陈旧时附加非阻塞 reauthSuggest', () => {
-    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => ({
-      missingScopes: ['scope.new'],
-    }));
+    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => ['scope.new']);
 
     expect(appendReadyGhostOauthReauthSuggest(READY, suggest)).toEqual({
       ...READY,
@@ -60,11 +58,8 @@ describe('OAuth scope stale runtime assessment', () => {
     });
   });
 
-  it.each([
-    ['非 stale', { missingScopes: [] }],
-    ['老账号无快照', null],
-  ] as const)('%s 时不附建议', (_name, staleness) => {
-    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => staleness);
+  it('缺失面为空(非 stale / 老账号判不准)时不附建议', () => {
+    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => []);
     expect(appendReadyGhostOauthReauthSuggest(READY, suggest)).toBe(READY);
   });
 
@@ -74,9 +69,7 @@ describe('OAuth scope stale runtime assessment', () => {
       revision: 8,
       groups: [],
     };
-    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => ({
-      missingScopes: ['scope.new'],
-    }));
+    const suggest = findGhostOauthReauthSuggest(MANIFEST, () => ['scope.new']);
 
     expect(appendReadyGhostOauthReauthSuggest(required, suggest)).toBe(required);
   });

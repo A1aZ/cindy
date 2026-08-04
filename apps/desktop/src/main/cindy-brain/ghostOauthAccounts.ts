@@ -265,24 +265,23 @@ function toView(
 }
 
 /**
- * 仅在可证明“当时拿的是全量面”时判断新增 scope；老数据与降面授权不猜。
+ * 仅在可证明“当时拿的是全量面”时列出新增 scope；老数据与降面授权不猜
+ * (返回空数组)。这是陈旧判定的唯一实现,isScopeStale 只是它的布尔投影。
  */
+export function missingAuthScopes(
+  declScopes: readonly string[],
+  row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
+): string[] {
+  if (row.authFace !== 'full' || row.authScopes === undefined) return [];
+  const granted = new Set(row.authScopes);
+  return declScopes.filter((scope) => !granted.has(scope));
+}
+
 export function isScopeStale(
   declScopes: readonly string[],
   row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
 ): boolean {
-  if (row.authFace !== 'full' || row.authScopes === undefined) return false;
-  const granted = new Set(row.authScopes);
-  return declScopes.some((scope) => !granted.has(scope));
-}
-
-function missingScopes(
-  declScopes: readonly string[],
-  row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
-): string[] {
-  if (!isScopeStale(declScopes, row) || row.authScopes === undefined) return [];
-  const granted = new Set(row.authScopes);
-  return declScopes.filter((scope) => !granted.has(scope));
+  return missingAuthScopes(declScopes, row).length > 0;
 }
 
 function sameScopeFace(left: readonly string[], right: readonly string[]): boolean {
@@ -423,17 +422,11 @@ export class GhostOauthAccountManager {
     );
   }
 
-  /** 默认账号的陈旧授权面；判不准或无需重连时返回 null。 */
-  defaultScopeStaleness(
-    ghostId: string,
-    secretKey: string,
-    decl: GhostOauthDecl,
-  ): { missingScopes: string[] } | null {
+  /** 默认账号相对当前声明缺失的 scope；空数组 = 无需重连或判不准。 */
+  defaultMissingScopes(ghostId: string, secretKey: string, decl: GhostOauthDecl): string[] {
     const manifest = parseManifest(this.deps.vault.read(ghostId, accountsKey(secretKey)));
     const row = manifest.accounts.find((account) => account.id === manifest.defaultAccountId);
-    if (!row) return null;
-    const missing = missingScopes(decl.scopes ?? [], row);
-    return missing.length > 0 ? { missingScopes: missing } : null;
+    return row ? missingAuthScopes(decl.scopes ?? [], row) : [];
   }
 
   /** 头像 data URL 读取(形状校验兜底:库里的坏值当无头像,不喂给 <img>)。 */

@@ -50,7 +50,11 @@ import {
 import { classifyLocalAttachmentPath } from '../cindy-brain/ghostLocalPathGrant.js';
 import { toolNotFoundMessage } from '../cindy-brain/pipeDispatcher.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
-import { deriveGhostSessionContext, type GhostSessionContextInjected } from '../../shared/ghost.js';
+import {
+  deriveGhostSessionContext,
+  type GhostSessionContextInjected,
+  type GhostSetupAssessment,
+} from '../../shared/ghost.js';
 import { withCardToken } from '../cindy-brain/cardService.js';
 import { drainGhostCallMedia } from '../cindy-brain/ghostMediaLedger.js';
 import {
@@ -1026,7 +1030,6 @@ export function getCindyGhostsMcpDeps(
           setup: finalAssessment,
         };
       }
-      let readyAssessment = finalAssessment;
       // 批量预授权(grant_only):只过户不派发。它与普通调用共用上面的
       // Host-authoritative setup gate，确保任何授权副作用之前插件已经 ready。
       if (grantOnly) {
@@ -1111,8 +1114,9 @@ export function getCindyGhostsMcpDeps(
             message: t('newChat.pluginSetup.targetDisabledInWorkdir'),
           };
         }
+        let postGrantAssessment: GhostSetupAssessment;
         try {
-          const postGrantAssessment = getGhostSetupAssessment(ghostId);
+          postGrantAssessment = getGhostSetupAssessment(ghostId);
           if (postGrantAssessment.state !== 'ready') {
             return {
               ok: false,
@@ -1121,7 +1125,6 @@ export function getCindyGhostsMcpDeps(
               setup: postGrantAssessment,
             };
           }
-          readyAssessment = postGrantAssessment;
         } catch {
           return {
             ok: false,
@@ -1132,7 +1135,7 @@ export function getCindyGhostsMcpDeps(
         log.info('ghost grant-only: batch pre-granted', { ghostId, count: grant.hashes.length });
         return {
           ok: true,
-          ...(readyAssessment.reauthSuggest ? { setup: readyAssessment } : {}),
+          ...(postGrantAssessment.reauthSuggest ? { setup: postGrantAssessment } : {}),
           result: {
             ok: true,
             granted_count: grant.hashes.length,
@@ -1266,7 +1269,6 @@ export function getCindyGhostsMcpDeps(
             setup: preDispatchAssessment,
           };
         }
-        readyAssessment = preDispatchAssessment;
       } catch {
         return {
           ok: false,
@@ -1318,8 +1320,9 @@ export function getCindyGhostsMcpDeps(
           message: toolNotFoundMessage(ghostId, tool, postCtx.manifest.tools),
         };
       }
+      let postCtxAssessment: GhostSetupAssessment;
       try {
-        const postCtxAssessment = getGhostSetupAssessment(ghostId);
+        postCtxAssessment = getGhostSetupAssessment(ghostId);
         if (postCtxAssessment.state !== 'ready') {
           return {
             ok: false,
@@ -1328,7 +1331,6 @@ export function getCindyGhostsMcpDeps(
             setup: postCtxAssessment,
           };
         }
-        readyAssessment = postCtxAssessment;
       } catch {
         return {
           ok: false,
@@ -1364,7 +1366,8 @@ export function getCindyGhostsMcpDeps(
       const producedMedia = drainGhostCallMedia(ghostId, callId);
       const finalized = withCardToken(result, cardService.finalizeCall(callId), callId);
       if (!finalized.ok) return finalized;
-      const advisory = readyAssessment.reauthSuggest ? { setup: readyAssessment } : {};
+      // 附最后一道 gate(postCtx)的快照:它是派发前最新的 ready 判定。
+      const advisory = postCtxAssessment.reauthSuggest ? { setup: postCtxAssessment } : {};
       return producedMedia.length > 0
         ? { ...finalized, ...advisory, producedMedia }
         : { ...finalized, ...advisory };

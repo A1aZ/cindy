@@ -1,34 +1,32 @@
 import type {
   GhostManifest,
+  GhostSecretOauthDecl,
   GhostSetupAssessment,
   GhostSetupReauthSuggest,
 } from '../../shared/ghost.js';
-
-export interface GhostOauthScopeStaleness {
-  missingScopes: readonly string[];
-}
+import { oauthConnectActionId, requirementRef } from './ghostSetupStatus.js';
 
 /** 从清单顺序中挑首个陈旧 OAuth 凭证槽，生成有界且不含凭证明文的建议。 */
 export function findGhostOauthReauthSuggest(
   manifest: GhostManifest,
-  resolve: (secretKey: string) => GhostOauthScopeStaleness | null,
+  resolveMissingScopes: (secretKey: string, decl: GhostSecretOauthDecl) => readonly string[],
 ): GhostSetupReauthSuggest | undefined {
   for (const secret of manifest.network?.secrets ?? []) {
     if (secret.source !== 'oauth' || !secret.oauth) continue;
-    const stale = resolve(secret.key);
-    if (!stale || stale.missingScopes.length === 0) continue;
-    const ref = `secret:${secret.key}`;
+    const missing = resolveMissingScopes(secret.key, secret.oauth);
+    if (missing.length === 0) continue;
+    const ref = requirementRef({ kind: 'secret', key: secret.key });
     return {
       ghostId: manifest.id,
       secretKey: secret.key,
-      missingScopes: [...stale.missingScopes],
-      missingScopeCount: stale.missingScopes.length,
+      missingScopes: [...missing],
+      missingScopeCount: missing.length,
       requirement: {
         ref,
         kind: 'oauth',
         label: secret.label,
         action: {
-          id: `oauth_connect:${ref}`,
+          id: oauthConnectActionId(ref),
           kind: 'oauth_connect',
         },
       },

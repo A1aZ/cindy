@@ -354,60 +354,67 @@ export function sanitizeGhostSetupAssessment(
     groups.push({ id: group.id, mode: "any_of", items });
   }
   let reauthSuggest: CindyGhostSetupAssessment["reauthSuggest"];
-  const rawSuggest = value.reauthSuggest;
-  if (rawSuggest !== undefined) {
-    if (!rawSuggest || typeof rawSuggest !== "object" || Array.isArray(rawSuggest)) return null;
-    const suggest = rawSuggest as Record<string, unknown>;
-    const requirement = suggest.requirement;
-    if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return null;
-    const req = requirement as Record<string, unknown>;
-    const action = req.action;
-    if (!action || typeof action !== "object" || Array.isArray(action)) return null;
-    const act = action as Record<string, unknown>;
-    if (
-      typeof suggest.ghostId !== "string" ||
-      suggest.ghostId.length === 0 ||
-      suggest.ghostId.length > 128 ||
-      typeof suggest.secretKey !== "string" ||
-      suggest.secretKey.length === 0 ||
-      suggest.secretKey.length > 128 ||
-      !Array.isArray(suggest.missingScopes) ||
-      suggest.missingScopes.length === 0 ||
-      suggest.missingScopes.length > SETUP_REAUTH_SCOPE_MAX ||
-      !suggest.missingScopes.every(
-        (scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 256,
-      ) ||
-      !Number.isInteger(suggest.missingScopeCount) ||
-      suggest.missingScopeCount !== suggest.missingScopes.length ||
-      typeof req.ref !== "string" ||
-      req.ref.length === 0 ||
-      req.kind !== "oauth" ||
-      typeof req.label !== "string" ||
-      req.label.length === 0 ||
-      typeof act.id !== "string" ||
-      act.id.length === 0 ||
-      act.kind !== "oauth_connect"
-    ) {
-      return null;
-    }
-    reauthSuggest = {
-      ghostId: suggest.ghostId,
-      secretKey: suggest.secretKey,
-      missingScopes: [...suggest.missingScopes] as string[],
-      missingScopeCount: suggest.missingScopeCount as number,
-      requirement: {
-        ref: req.ref,
-        kind: "oauth",
-        label: req.label,
-        action: { id: act.id, kind: "oauth_connect" },
-      },
-    };
+  if (value.reauthSuggest !== undefined) {
+    // 在场即严:非法 reauthSuggest 判废整份 assessment,与缺省合法互补。
+    reauthSuggest = sanitizeSetupReauthSuggest(value.reauthSuggest) ?? undefined;
+    if (!reauthSuggest) return null;
   }
   return {
     state: value.state as CindyGhostSetupAssessment["state"],
     revision: value.revision as number,
     groups,
     ...(reauthSuggest ? { reauthSuggest } : {}),
+  };
+}
+
+/**
+ * reauthSuggest 的独立 sanitize(与 sanitizeSetupAction 等"一形状一函数"
+ * 同款)。action 部分复用 sanitizeSetupAction —— 由它统一收 id 非空 + 256
+ * 上界与 kind 白名单,再钉死本形状只认 oauth_connect。
+ */
+function sanitizeSetupReauthSuggest(
+  raw: unknown,
+): NonNullable<CindyGhostSetupAssessment["reauthSuggest"]> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const suggest = raw as Record<string, unknown>;
+  const requirement = suggest.requirement;
+  if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return null;
+  const req = requirement as Record<string, unknown>;
+  const action = sanitizeSetupAction(req.action);
+  if (!action || action.kind !== "oauth_connect") return null;
+  if (
+    typeof suggest.ghostId !== "string" ||
+    suggest.ghostId.length === 0 ||
+    suggest.ghostId.length > 128 ||
+    typeof suggest.secretKey !== "string" ||
+    suggest.secretKey.length === 0 ||
+    suggest.secretKey.length > 128 ||
+    !Array.isArray(suggest.missingScopes) ||
+    suggest.missingScopes.length === 0 ||
+    suggest.missingScopes.length > SETUP_REAUTH_SCOPE_MAX ||
+    !suggest.missingScopes.every(
+      (scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 256,
+    ) ||
+    suggest.missingScopeCount !== suggest.missingScopes.length ||
+    typeof req.ref !== "string" ||
+    req.ref.length === 0 ||
+    req.kind !== "oauth" ||
+    typeof req.label !== "string" ||
+    req.label.length === 0
+  ) {
+    return null;
+  }
+  return {
+    ghostId: suggest.ghostId,
+    secretKey: suggest.secretKey,
+    missingScopes: [...suggest.missingScopes] as string[],
+    missingScopeCount: suggest.missingScopes.length,
+    requirement: {
+      ref: req.ref,
+      kind: "oauth",
+      label: req.label,
+      action: { id: action.id, kind: "oauth_connect" },
+    },
   };
 }
 
@@ -624,7 +631,7 @@ export async function handleGhostCall(
     // (声明是意图表达,能覆盖 render:false 抑制等语义)。
     const { producedMedia, setup: unsafeSetup, ...resultForModel } = result;
     const setup = sanitizeGhostSetupAssessment(unsafeSetup);
-    const reauthSetup = setup?.state === "ready" && setup.reauthSuggest ? setup : null;
+    const advisory = setup?.state === "ready" && setup.reauthSuggest ? { setup } : {};
     const declaredMedia = [
       "xdt_image_urls",
       "xdt_video_urls",
@@ -665,7 +672,7 @@ export async function handleGhostCall(
           : {};
     return textResult({
       ...resultForModel,
-      ...(reauthSetup ? { setup: reauthSetup } : {}),
+      ...advisory,
       ...hoisted,
       ...producedFallback,
       ...mediaHint,

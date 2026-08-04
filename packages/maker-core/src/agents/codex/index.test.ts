@@ -146,6 +146,16 @@ const { MockCodexTransport, createdTransports } = vi.hoisted(() => {
         this.emitLine({ id: req.id, result: { data: [], nextCursor: null } });
         return;
       }
+      if (req.method === 'mcpServerStatus/list') {
+        this.emitLine({
+          id: req.id,
+          result: {
+            data: [{ name: 'node_repl', tools: { js: { name: 'js' } } }],
+            nextCursor: null,
+          },
+        });
+        return;
+      }
       if (req.method === 'config/read') {
         this.emitLine({
           id: req.id,
@@ -321,6 +331,9 @@ function installFakeHost(
   requestImpl?: (method: string, params: unknown) => Promise<unknown> | unknown,
   opts: {
     codexProxyActive?: boolean;
+    codexBrowserUseAvailable?: boolean;
+    codexBrowserUseVersion?: string;
+    codexBrowserMcpToolAvailable?: boolean;
     remoteCompactionProviderId?: string;
     userAgent?: string;
     codexHome?: string;
@@ -377,6 +390,15 @@ function installFakeHost(
   });
   const unsubscribeThread = vi.fn(async () => {});
   const isCodexProxyActive = vi.fn(() => opts.codexProxyActive === true);
+  const isCodexBrowserUseAvailable = vi.fn(
+    () => opts.codexBrowserUseAvailable === true,
+  );
+  const getCodexBrowserUseVersion = vi.fn(
+    () => opts.codexBrowserUseVersion ?? null,
+  );
+  const waitForMcpTool = vi.fn(async () => (
+    opts.codexBrowserMcpToolAvailable ?? opts.codexBrowserUseAvailable === true
+  ));
   const getRemoteCompactionProviderId = vi.fn(() => opts.remoteCompactionProviderId ?? null);
   const getSessionMcpConfig = vi.fn((sessionInstanceId?: string) =>
     opts.buildSessionMcpConfig?.(sessionInstanceId) ?? {},
@@ -390,6 +412,9 @@ function installFakeHost(
     subscribeThread,
     unsubscribeThread,
     isCodexProxyActive,
+    isCodexBrowserUseAvailable,
+    getCodexBrowserUseVersion,
+    waitForMcpTool,
     getRemoteCompactionProviderId,
     getSessionMcpConfig,
     getConnectionId: () => 'test-connection',
@@ -589,6 +614,160 @@ describe('CodexAgent capability routing', () => {
     ],
   } as const;
 
+  it('resolves workspace routing once from the frozen session context', async () => {
+    const resolveCapabilityRouting = vi.fn(() => ({
+      overrides: [
+        {
+          capabilityId: 'browser-use',
+          source: {
+            kind: 'harness-plugin' as const,
+            harness: 'codex',
+            surface: 'plugin' as const,
+            id: 'chrome@openai-bundled',
+          },
+          invocation: 'disabled' as const,
+        },
+      ],
+    }));
+    const agent = new CodexAgent(createDeps({}, { resolveCapabilityRouting }));
+    const host = installFakeHost(agent, undefined, {
+      userAgent: 'mock-codex/0.145.0',
+      codexBrowserUseAvailable: true,
+      codexBrowserUseVersion: '26.727.51351',
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-scoped-capability-routing',
+      model: 'gpt-5.4',
+      workingDir: '/workspace/browser-off',
+      vendorOptions: { frozenDisabledPluginIds: ['browser'] },
+    });
+    const params = host.request.mock.calls.find(
+      ([method]) => method === Method.ThreadStart,
+    )?.[1] as { config?: Record<string, unknown> };
+
+    expect(resolveCapabilityRouting).toHaveBeenCalledOnce();
+    expect(resolveCapabilityRouting).toHaveBeenCalledWith({
+      workingDir: '/workspace/browser-off',
+      remoteHostId: undefined,
+      vendorOptions: { frozenDisabledPluginIds: ['browser'] },
+      codexBrowserUseProvisioned: true,
+      codexBrowserUseVersion: '26.727.51351',
+      ensureCodexBrowserUseReady: expect.any(Function),
+    });
+    expect(params.config).toMatchObject({
+      'plugins."chrome@openai-bundled".enabled': false,
+    });
+    expect(host.waitForMcpTool).not.toHaveBeenCalled();
+
+    await handle.close();
+  });
+
+  it('preserves the remote daemon Browser companion snapshot', async () => {
+    const prepareCodexExtraSpawnConfig = vi.fn(async (_providers, ctx) => {
+      expect(ctx?.remoteHostId).toBe('remote-browser-host');
+      return {
+        extraArgs: [],
+        extraEnv: {},
+        codexBrowserUseAvailable: true,
+        codexBrowserUseVersion: '26.727.51351',
+        codexBrowserUseStartupTimeoutMs: 120_000,
+      };
+    });
+    const remoteTransport = new MockCodexTransport();
+    const getRemoteCodexTransport = vi.fn(() => remoteTransport);
+    const agent = new CodexAgent(createDeps({}, {
+      prepareCodexExtraSpawnConfig,
+      getRemoteCodexTransport,
+    }));
+
+    const handle = await agent.startSession({
+      sessionId: 'session-remote-browser-companion',
+      model: 'gpt-5.4',
+      workingDir: '/remote/repo',
+      remoteHostId: 'remote-browser-host',
+    });
+    const hosts = (agent as unknown as {
+      hosts: Map<string, {
+        isCodexBrowserUseAvailable(): boolean;
+        getCodexBrowserUseVersion(): string | null;
+      }>;
+    }).hosts;
+
+    expect(prepareCodexExtraSpawnConfig).toHaveBeenCalledWith([], {
+      remoteHostId: 'remote-browser-host',
+      credentialMode: undefined,
+    });
+    expect(getRemoteCodexTransport).toHaveBeenCalledWith('remote-browser-host');
+    expect([...hosts.values()]).toHaveLength(1);
+    expect([...hosts.values()][0]?.isCodexBrowserUseAvailable()).toBe(true);
+    expect([...hosts.values()][0]?.getCodexBrowserUseVersion()).toBe('26.727.51351');
+
+    await handle.close();
+    await agent.dispose();
+  });
+
+  it('fails closed when a provisioned companion does not publish the js tool', async () => {
+    let ready: boolean | undefined;
+    const resolveCapabilityRouting = vi.fn(async (
+      ctx: Parameters<NonNullable<AgentDeps['resolveCapabilityRouting']>>[0],
+    ) => {
+      ready = await ctx.ensureCodexBrowserUseReady();
+      return { overrides: [] };
+    });
+    const agent = new CodexAgent(createDeps({}, { resolveCapabilityRouting }));
+    const host = installFakeHost(agent, undefined, {
+      userAgent: 'mock-codex/0.145.0',
+      codexBrowserUseAvailable: true,
+      codexBrowserMcpToolAvailable: false,
+    });
+
+    const handle = await agent.startSession({
+      sessionId: 'session-browser-companion-missing-tool',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+
+    expect(host.waitForMcpTool).toHaveBeenCalledWith('node_repl', 'js', {
+      timeoutMs: 2_000,
+    });
+    expect(host.waitForMcpTool).toHaveBeenCalledTimes(2);
+    expect(resolveCapabilityRouting).toHaveBeenCalledWith(expect.objectContaining({
+      codexBrowserUseProvisioned: true,
+    }));
+    expect(ready).toBe(false);
+
+    await handle.close();
+  });
+
+  it('retries a transient Browser companion readiness miss before freezing routing', async () => {
+    let ready: boolean | undefined;
+    const resolveCapabilityRouting = vi.fn(async (
+      ctx: Parameters<NonNullable<AgentDeps['resolveCapabilityRouting']>>[0],
+    ) => {
+      ready = await ctx.ensureCodexBrowserUseReady();
+      return { overrides: [] };
+    });
+    const agent = new CodexAgent(createDeps({}, { resolveCapabilityRouting }));
+    const host = installFakeHost(agent, undefined, {
+      userAgent: 'mock-codex/0.145.0',
+      codexBrowserUseAvailable: true,
+    });
+    host.waitForMcpTool
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+
+    const handle = await agent.startSession({
+      sessionId: 'session-browser-companion-transient-miss',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+
+    expect(host.waitForMcpTool).toHaveBeenCalledTimes(2);
+    expect(ready).toBe(true);
+
+    await handle.close();
+  });
+
   it('applies host-owned plugin policy to new and resumed Codex 0.145 threads', async () => {
     const listComputerUseSkill = (method: string, params: unknown) => {
       if (method !== Method.SkillsList) return undefined;
@@ -630,8 +809,8 @@ describe('CodexAgent capability routing', () => {
     )?.[1] as { config?: Record<string, unknown> };
     expect(startParams.config).toMatchObject({
       'plugins."computer-use@openai-bundled".enabled': false,
-      'plugins."feishu-delegate@personal".mcp_servers."feishu-delegate".enabled': false,
-      'plugins."feishu-delegate@personal".mcp_servers."cindy-routed-feishu-delegate".default_tools_approval_mode':
+      'plugins."feishu-delegate@personal".mcp_servers.feishu-delegate.enabled': false,
+      'plugins."feishu-delegate@personal".mcp_servers.cindy-routed-feishu-delegate.default_tools_approval_mode':
         'prompt',
       'skills.config': [
         {
@@ -665,8 +844,8 @@ describe('CodexAgent capability routing', () => {
     )?.[1] as { config?: Record<string, unknown> };
     expect(resumeParams.config).toMatchObject({
       'plugins."computer-use@openai-bundled".enabled': false,
-      'plugins."feishu-delegate@personal".mcp_servers."feishu-delegate".enabled': false,
-      'plugins."feishu-delegate@personal".mcp_servers."cindy-routed-feishu-delegate".default_tools_approval_mode':
+      'plugins."feishu-delegate@personal".mcp_servers.feishu-delegate.enabled': false,
+      'plugins."feishu-delegate@personal".mcp_servers.cindy-routed-feishu-delegate.default_tools_approval_mode':
         'prompt',
       'skills.config': [
         {
@@ -825,7 +1004,7 @@ describe('CodexAgent capability routing', () => {
       }],
     });
     expect(params.config).not.toHaveProperty(
-      'plugins."feishu-delegate@personal".mcp_servers."cindy-routed-feishu-delegate".default_tools_approval_mode',
+      'plugins."feishu-delegate@personal".mcp_servers.cindy-routed-feishu-delegate.default_tools_approval_mode',
     );
     expect(params.config).not.toHaveProperty(
       'plugins."computer-use@openai-bundled".enabled',
@@ -3774,6 +3953,30 @@ describe('CodexAgent send', () => {
 });
 
 describe('CodexAgent MCP thread context hooks', () => {
+  it('binds Browser companion availability to the concrete app-server host', async () => {
+    const prepareCodexExtraSpawnConfig = vi.fn(async () => ({
+      extraArgs: [],
+      extraEnv: {},
+      codexBrowserUseAvailable: true,
+    }));
+    const agent = new CodexAgent(createDeps({}, { prepareCodexExtraSpawnConfig }));
+
+    const handle = await agent.startSession({
+      sessionId: 'session-browser-companion-host-snapshot',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const hosts = (agent as unknown as {
+      hosts: Map<string, { isCodexBrowserUseAvailable(): boolean }>;
+    }).hosts;
+
+    expect([...hosts.values()]).toHaveLength(1);
+    expect([...hosts.values()][0]?.isCodexBrowserUseAvailable()).toBe(true);
+
+    await handle.close();
+    await agent.dispose();
+  });
+
   it('passes target context to Codex extra spawn config and reuses the shared local host', async () => {
     const prepareCodexExtraSpawnConfig = vi.fn(async () => ({
       extraArgs: ['-c', 'mcp_servers.cindy_test.url="http://127.0.0.1:1234/mcp/cindy_test"'],

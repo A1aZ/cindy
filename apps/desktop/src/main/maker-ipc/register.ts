@@ -11769,7 +11769,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // Ordinary plugins are user defaults: existing sessions keep their frozen
     // policy and only new sessions observe changes, so no shared environment
     // refresh is needed.
-    if (!GLOBAL_PLUGIN_IDS.has(id)) {
+    if (!GLOBAL_PLUGIN_IDS.has(id) && id !== 'browser') {
       return { codexMcpRefreshed: true };
     }
     // Machine-wide tools keep their existing lifecycle. The preference is
@@ -11779,6 +11779,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
+      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });
@@ -11791,12 +11792,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (!ok) {
       throwIpcError('PERMISSION_DENIED', `Cannot modify essential plugin: ${id}`);
     }
-    if (!GLOBAL_PLUGIN_IDS.has(id)) {
+    if (!GLOBAL_PLUGIN_IDS.has(id) && id !== 'browser') {
       return { codexMcpRefreshed: true };
     }
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
+      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });

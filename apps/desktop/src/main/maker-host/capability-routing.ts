@@ -133,22 +133,96 @@ export const DESKTOP_CAPABILITY_ROUTING_POLICY = {
   ],
 } as const satisfies CapabilityRoutingPolicy;
 
-/**
- * Freeze the routing policy for one Codex session.
- *
- * Disabling the downstream plugin is replacement arbitration, so it only
- * applies after the current Codex environment actually exposes cindy_computer.
- * The base policy still hides the incompatible node_repl Skill when the Cindy
- * replacement is unavailable, without changing the plugin-wide setting.
- */
+const CODEX_IN_APP_BROWSER_UNAVAILABLE_OVERRIDE = {
+  capabilityId: 'browser-use',
+  source: {
+    kind: 'harness-plugin',
+    harness: 'codex',
+    surface: 'plugin',
+    id: 'browser@openai-bundled',
+  },
+  invocation: 'disabled',
+  reason: 'Cindy does not host the ChatGPT in-app browser runtime.',
+} as const satisfies CapabilityRoutingPolicy['overrides'][number];
+
+const CODEX_CHROME_USE_OVERRIDES = [
+  {
+    capabilityId: 'browser-use',
+    source: {
+      kind: 'harness-plugin',
+      harness: 'codex',
+      surface: 'plugin',
+      id: 'chrome@openai-bundled',
+    },
+    invocation: 'disabled',
+    replacement: {
+      kind: 'cindy-plugin',
+      id: 'browser',
+    },
+    reason: 'Cindy Browser owns browser automation while it is enabled for this workspace.',
+  },
+  {
+    capabilityId: 'browser-use',
+    source: {
+      kind: 'harness-plugin',
+      harness: 'codex',
+      surface: 'mcp',
+      id: 'node_repl',
+    },
+    invocation: 'disabled',
+    replacement: {
+      kind: 'cindy-plugin',
+      id: 'browser',
+    },
+    reason: 'Cindy Browser owns browser automation while it is enabled for this workspace.',
+  },
+] as const satisfies CapabilityRoutingPolicy['overrides'];
+
+const CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES = CODEX_CHROME_USE_OVERRIDES.map(
+  (override) => ({
+    capabilityId: override.capabilityId,
+    source: override.source,
+    invocation: override.invocation,
+    reason: 'The official Codex Browser companion is unavailable in this runtime.',
+  }),
+) satisfies CapabilityRoutingPolicy['overrides'];
+
+/** Freeze workspace-scoped capability arbitration for one new runtime. */
 export function buildDesktopCapabilityRoutingPolicy(opts: {
-  cindyComputerAvailable: boolean;
+  /** Whether the current Codex bridge exposes Cindy's Computer Use host. */
+  cindyComputerAvailable?: boolean;
+  /** Workspace-scoped Cindy Browser ownership snapshot. */
+  cindyBrowserEnabled?: boolean;
+  codexBrowserUseAvailable?: boolean;
+  /** Remote Codex cannot invoke the local Cindy Browser plugin bridge. */
+  remoteHostId?: string | null;
 }): CapabilityRoutingPolicy {
-  if (!opts.cindyComputerAvailable) return DESKTOP_CAPABILITY_ROUTING_POLICY;
+  const cindyBrowserEnabled = opts.remoteHostId
+    ? undefined
+    : opts.cindyBrowserEnabled;
+  const computerUseAvailable =
+    opts.cindyComputerAvailable ?? cindyBrowserEnabled !== undefined;
+  const computerOverrides = computerUseAvailable
+    ? [CODEX_COMPUTER_USE_REPLACEMENT_ROUTE]
+    : [];
+  const chromeOverrides = cindyBrowserEnabled === undefined
+    ? []
+    : cindyBrowserEnabled
+    ? CODEX_CHROME_USE_OVERRIDES
+    : opts.codexBrowserUseAvailable === false
+      ? CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES
+      : [];
   return {
     overrides: [
       ...DESKTOP_CAPABILITY_ROUTING_POLICY.overrides,
-      CODEX_COMPUTER_USE_REPLACEMENT_ROUTE,
+      ...computerOverrides,
+      {
+        ...CODEX_IN_APP_BROWSER_UNAVAILABLE_OVERRIDE,
+        ...(cindyBrowserEnabled === true
+          ? { replacement: { kind: 'cindy-plugin' as const, id: 'browser' } }
+          : {}),
+      },
+      ...chromeOverrides,
     ],
   };
 }

@@ -822,6 +822,18 @@ const TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS = 10_000;
 // ignore Stop.
 const PROFILE_LIFECYCLE_ACK_TIMEOUT_MS = 10_000;
 
+// The Browser fallback route is resolved before thread/start, so the app-server
+// can only answer its readiness query against the global MCP inventory. Keep
+// that pre-thread probe bounded: a slow unrelated MCP server must not stretch
+// Codex session creation to the companion's full startup timeout (which may be
+// as high as 120 seconds). Once a concrete thread exists, callers can use the
+// thread-scoped status API instead of this pre-thread path.
+const CODEX_BROWSER_USE_READINESS_PROBE_TIMEOUT_MS = 2_000;
+// A single short miss can race the MCP child process finishing its cold start.
+// Retry once before freezing the thread's capability routing, while keeping a
+// genuinely unavailable companion bounded to two short probes.
+const CODEX_BROWSER_USE_READINESS_PROBE_ATTEMPTS = 2;
+
 // thread/start / thread/resume / turn/start 的 RPC 上限。AppServerClient.request
 // 默认无超时 — 远端 daemon 失联 (SSH 隧道半开 / daemon 挂起但 socket 未断) 时
 // 裸 await 永久挂起, session 永远停在 generating (issue #677 同类断链面)。
@@ -2020,6 +2032,9 @@ export class CodexAgent extends BaseAgent {
     let env: Record<string, string> = {};
     let extraArgs: string[] = [];
     let codexProxyActive = false;
+    let codexBrowserUseAvailable = false;
+    let codexBrowserUseVersion: string | undefined;
+    let codexBrowserUseStartupTimeoutMs: number | undefined;
     let remoteCompactionProviderId: string | undefined;
     let buildSessionMcpConfig: CodexExtraSpawnConfig['buildSessionMcpConfig'];
     for (;;) {
@@ -2041,6 +2056,9 @@ export class CodexAgent extends BaseAgent {
 
       extraArgs = [];
       codexProxyActive = false;
+      codexBrowserUseAvailable = false;
+      codexBrowserUseVersion = undefined;
+      codexBrowserUseStartupTimeoutMs = undefined;
       remoteCompactionProviderId = undefined;
       buildSessionMcpConfig = undefined;
       if (this.deps.prepareCodexExtraSpawnConfig) {
@@ -2058,6 +2076,12 @@ export class CodexAgent extends BaseAgent {
           extraArgs = cfg.extraArgs;
           buildSessionMcpConfig = cfg.buildSessionMcpConfig;
           codexProxyActive = cfg.codexProxyActive === true && !remoteHostId;
+          // Remote daemons own their browser companion and its CODEX_HOME;
+          // preserve the host-provided availability snapshot instead of
+          // forcing every remote target into the local fail-closed state.
+          codexBrowserUseAvailable = cfg.codexBrowserUseAvailable === true;
+          codexBrowserUseVersion = cfg.codexBrowserUseVersion;
+          codexBrowserUseStartupTimeoutMs = cfg.codexBrowserUseStartupTimeoutMs;
           // OpenAI 身份 provider 依赖 loopback proxy 路由订阅直连;proxy 不可用
           // (退化直连网关)时不得下发,否则远端压缩请求会打到不支持它的上游。
           if (codexProxyActive && cfg.codexRemoteCompactionProviderId) {
@@ -2131,6 +2155,9 @@ export class CodexAgent extends BaseAgent {
       // (2026-07-17 随品牌翻转改 cindy;上游 gating 走 originator,与此无关)。
       clientInfo: { name: 'cindy', version: '0.0.0' },
       codexProxyActive,
+      codexBrowserUseAvailable,
+      codexBrowserUseVersion,
+      codexBrowserUseStartupTimeoutMs,
       remoteCompactionProviderId,
       buildSessionMcpConfig,
       // app-server 对失败 RPC 返回 cloudRequirements + Auth/relogin 结构化错误时,当前 host
@@ -3016,8 +3043,29 @@ export class CodexAgent extends BaseAgent {
       : credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
     const approvalsReviewerProtocolSupported =
       supportsCodexApprovalsReviewerProtocol(initResp.userAgent);
+    const codexBrowserUseProvisioned = host.isCodexBrowserUseAvailable();
+    const hostCapabilityRoutingPolicy =
+      await this.deps.resolveCapabilityRouting?.({
+        workingDir: opts.workingDir,
+        remoteHostId: opts.remoteHostId,
+        vendorOptions: vo,
+        codexBrowserUseProvisioned,
+        codexBrowserUseVersion: host.getCodexBrowserUseVersion(),
+        ensureCodexBrowserUseReady: async () => {
+          if (!codexBrowserUseProvisioned) return false;
+          for (let attempt = 0; attempt < CODEX_BROWSER_USE_READINESS_PROBE_ATTEMPTS; attempt++) {
+            if (await host.waitForMcpTool('node_repl', 'js', {
+              timeoutMs: CODEX_BROWSER_USE_READINESS_PROBE_TIMEOUT_MS,
+            })) {
+              return true;
+            }
+          }
+          return false;
+        },
+      }) ?? this.deps.capabilityRouting;
+    assertCurrentHost('capability routing resolution');
     const capabilityRoutingPolicy = buildCodexSessionCapabilityRoutingPolicy(
-      this.deps.capabilityRouting,
+      hostCapabilityRoutingPolicy,
       {
         // Remote Codex does not receive the local Cindy MCP bridge. Keep
         // compatibility restrictions, but do not disable a remote capability

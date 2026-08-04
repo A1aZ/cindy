@@ -195,22 +195,31 @@ function harness(
   };
 }
 
+/** 清理通告测试的组织安装记录（统一账本 factory 的 organization 视图）。 */
 function removalRecord(
   overrides: Partial<PluginMarketInstallationRecord> = {},
 ): PluginMarketInstallationRecord {
+  return recordForTest(
+    summary({ scope: 'organization', organizationId: 'org-1' }),
+    overrides,
+  );
+}
+
+/** 清理通告测试的运行时 Ghost 目录项。 */
+function ghostEntry(id: string, name?: string) {
   return {
-    pluginId: PLUGIN_ID,
-    ghostId: 'cindy-test',
-    releaseId: 'release-removed',
-    version: '1.0.0',
-    sha256: 'a'.repeat(64),
-    scope: 'organization',
-    organizationId: 'org-1',
-    source: 'market',
-    installed: true,
-    updatedAt: '2026-08-03T08:00:00.000Z',
-    ...overrides,
+    manifest: name === undefined ? manifest(id) : { ...manifest(id), name },
+    dir: `/userData/cindy-brain/${id}`,
+    enabled: true,
   };
+}
+
+/** uninstall mock 真的把 Ghost 从运行时目录拿走；failFor 指定的那条抛错。 */
+function mockUninstallDropsGhost(failFor?: string): void {
+  runtime.uninstall.mockImplementation(async (ghostId: string) => {
+    if (ghostId === failFor) throw new Error('cleanup failed');
+    runtime.ghosts = runtime.ghosts.filter((ghost) => ghost.manifest.id !== ghostId);
+  });
 }
 
 describe('PluginMarketService migration and defaultInstall', () => {
@@ -938,16 +947,8 @@ describe('PluginMarketService migration and defaultInstall', () => {
     async (source) => {
       const notice = removal();
       const h = harness([], [notice]);
-      runtime.ghosts = [
-        {
-          manifest: manifest(notice.ghostId),
-          dir: `/userData/cindy-brain/${notice.ghostId}`,
-          enabled: true,
-        },
-      ];
-      runtime.uninstall.mockImplementation(async (ghostId: string) => {
-        runtime.ghosts = runtime.ghosts.filter((ghost) => ghost.manifest.id !== ghostId);
-      });
+      runtime.ghosts = [ghostEntry(notice.ghostId)];
+      mockUninstallDropsGhost();
       h.ledger.upsertInstallation(removalRecord({ source }));
 
       await expect(h.service.snapshot()).resolves.toMatchObject({
@@ -984,13 +985,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     async (_label, record) => {
       const notice = removal();
       const h = harness([], [notice]);
-      runtime.ghosts = [
-        {
-          manifest: manifest(notice.ghostId),
-          dir: `/userData/cindy-brain/${notice.ghostId}`,
-          enabled: true,
-        },
-      ];
+      runtime.ghosts = [ghostEntry(notice.ghostId)];
       if (record) h.ledger.upsertInstallation(record);
       const before = h.ledger.read();
 
@@ -1003,6 +998,26 @@ describe('PluginMarketService migration and defaultInstall', () => {
       expect(h.service.consumeRemovalNotice()).toBeNull();
     },
   );
+
+  it('skips a removal whose action is not purge without touching the ledger', async () => {
+    // 协议层已滤掉未知 action;这里锁的是 service 兜底(验收点 6):万一有
+    // 非 purge 通告穿透,零卸载、零账本写入、零通知。
+    const notice = removal({
+      action: 'quarantine' as unknown as PluginRemovalNotice['action'],
+    });
+    const h = harness([], [notice]);
+    runtime.ghosts = [ghostEntry(notice.ghostId)];
+    h.ledger.upsertInstallation(removalRecord());
+    const before = h.ledger.read();
+
+    await expect(h.service.snapshot()).resolves.toMatchObject({
+      unavailableReason: null,
+    });
+
+    expect(runtime.uninstall).not.toHaveBeenCalled();
+    expect(h.ledger.read()).toEqual(before);
+    expect(h.service.consumeRemovalNotice()).toBeNull();
+  });
 
   it('keeps an existing default-install opt-out when a repeated purge is skipped', async () => {
     const notice = removal();
@@ -1017,19 +1032,30 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.service.consumeRemovalNotice()).toBeNull();
   });
 
+  it('keeps a pre-existing opt-out intact after a successful purge', async () => {
+    // 退订只读的另一半(不清):早先手动卸载写过退订、之后又重新安装的用户,
+    // purge 成功后退订必须原样保留,穿越重新上架周期继续生效。
+    const notice = removal();
+    const h = harness([], [notice]);
+    runtime.ghosts = [ghostEntry(notice.ghostId)];
+    mockUninstallDropsGhost();
+    h.ledger.upsertInstallation(removalRecord());
+    h.ledger.markRemoved(notice.ghostId, 'user-1');
+    h.ledger.upsertInstallation(removalRecord());
+
+    await h.service.snapshot();
+
+    expect(runtime.uninstall).toHaveBeenCalledTimes(1);
+    expect(h.ledger.installationForGhost(notice.ghostId)?.installed).toBe(false);
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', notice.pluginId)).toBe(true);
+    expect(h.service.consumeRemovalNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+  });
+
   it('applies a repeated removal only once across snapshots', async () => {
     const notice = removal();
     const h = harness([], [notice]);
-    runtime.ghosts = [
-      {
-        manifest: manifest(notice.ghostId),
-        dir: `/userData/cindy-brain/${notice.ghostId}`,
-        enabled: true,
-      },
-    ];
-    runtime.uninstall.mockImplementation(async () => {
-      runtime.ghosts = [];
-    });
+    runtime.ghosts = [ghostEntry(notice.ghostId)];
+    mockUninstallDropsGhost();
     h.ledger.upsertInstallation(removalRecord());
 
     await h.service.snapshot();
@@ -1048,20 +1074,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
     ];
     const h = harness([], notices);
     runtime.ghosts = [
-      {
-        manifest: manifest('cindy-test'),
-        dir: '/userData/cindy-brain/cindy-test',
-        enabled: true,
-      },
-      {
-        manifest: { ...manifest('cindy-second'), name: 'Second Plugin' },
-        dir: '/userData/cindy-brain/cindy-second',
-        enabled: true,
-      },
+      ghostEntry('cindy-test'),
+      ghostEntry('cindy-second', 'Second Plugin'),
     ];
-    runtime.uninstall.mockImplementation(async (ghostId: string) => {
-      runtime.ghosts = runtime.ghosts.filter((ghost) => ghost.manifest.id !== ghostId);
-    });
+    mockUninstallDropsGhost();
     h.ledger.upsertInstallation(removalRecord());
     h.ledger.upsertInstallation(
       removalRecord({ pluginId: secondPluginId, ghostId: 'cindy-second' }),
@@ -1076,16 +1092,8 @@ describe('PluginMarketService migration and defaultInstall', () => {
   it('keeps a pending removal notice isolated to the owner that was cleaned', async () => {
     const notice = removal();
     const h = harness([], [notice]);
-    runtime.ghosts = [
-      {
-        manifest: manifest(notice.ghostId),
-        dir: `/userData/cindy-brain/${notice.ghostId}`,
-        enabled: true,
-      },
-    ];
-    runtime.uninstall.mockImplementation(async () => {
-      runtime.ghosts = [];
-    });
+    runtime.ghosts = [ghostEntry(notice.ghostId)];
+    mockUninstallDropsGhost();
     h.ledger.upsertInstallation(removalRecord());
 
     await h.service.snapshot();
@@ -1104,21 +1112,15 @@ describe('PluginMarketService migration and defaultInstall', () => {
       count: 1,
       name: 'Test Plugin',
     });
+    // 一次即清:同 owner 紧接着再取必须为空,不会重复弹窗。
+    expect(h.service.consumeRemovalNotice()).toBeNull();
   });
 
   it('still counts a successful removal when the safe display name becomes empty', async () => {
     const notice = removal();
     const h = harness([], [notice]);
-    runtime.ghosts = [
-      {
-        manifest: { ...manifest(notice.ghostId), name: '\u202e' },
-        dir: `/userData/cindy-brain/${notice.ghostId}`,
-        enabled: true,
-      },
-    ];
-    runtime.uninstall.mockImplementation(async () => {
-      runtime.ghosts = [];
-    });
+    runtime.ghosts = [ghostEntry(notice.ghostId, '\u202e')];
+    mockUninstallDropsGhost();
     h.ledger.upsertInstallation(removalRecord());
 
     await h.service.snapshot();
@@ -1134,21 +1136,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
     ];
     const h = harness([], notices);
     runtime.ghosts = [
-      {
-        manifest: manifest('cindy-test'),
-        dir: '/userData/cindy-brain/cindy-test',
-        enabled: true,
-      },
-      {
-        manifest: { ...manifest('cindy-second'), name: 'Second Plugin' },
-        dir: '/userData/cindy-brain/cindy-second',
-        enabled: true,
-      },
+      ghostEntry('cindy-test'),
+      ghostEntry('cindy-second', 'Second Plugin'),
     ];
-    runtime.uninstall.mockImplementation(async (ghostId: string) => {
-      if (ghostId === 'cindy-test') throw new Error('cleanup failed');
-      runtime.ghosts = runtime.ghosts.filter((ghost) => ghost.manifest.id !== ghostId);
-    });
+    mockUninstallDropsGhost('cindy-test');
     h.ledger.upsertInstallation(removalRecord());
     h.ledger.upsertInstallation(
       removalRecord({ pluginId: secondPluginId, ghostId: 'cindy-second' }),
@@ -1487,7 +1478,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
   });
 });
 
-function recordForTest(item: VisiblePluginSummary) {
+function recordForTest(
+  item: VisiblePluginSummary,
+  overrides: Partial<PluginMarketInstallationRecord> = {},
+): PluginMarketInstallationRecord {
   return {
     pluginId: item.id,
     ghostId: item.ghostId,
@@ -1496,8 +1490,9 @@ function recordForTest(item: VisiblePluginSummary) {
     sha256: item.currentRelease.sha256,
     scope: item.scope,
     organizationId: item.organizationId,
-    source: 'market' as const,
+    source: 'market',
     installed: true,
     updatedAt: '2026-07-23T00:00:00.000Z',
+    ...overrides,
   };
 }

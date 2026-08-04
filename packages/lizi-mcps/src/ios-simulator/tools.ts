@@ -614,7 +614,7 @@ export function registerIOSSimulatorTools(
   registry.register({
     name: "read_build_diagnostics",
     description:
-      "Read a bounded chunk of build output or xcresult diagnostics returned by build_app.",
+      "Read a bounded chunk of build output or xcresult diagnostics returned by a successful or failed build_app call.",
     readOnly: true,
     inputShape: {
       diagnosticsId: z.string().uuid(),

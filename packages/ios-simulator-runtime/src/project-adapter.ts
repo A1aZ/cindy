@@ -1,9 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
 import { IOSSimulatorInstanceError } from "./instance-errors.js";
-import type { IOSSimulatorCommandRunner } from "./types.js";
+import type {
+  IOSSimulatorCommandResult,
+  IOSSimulatorCommandRunner,
+} from "./types.js";
 
 export type IOSSimulatorProjectKind =
   "cindy-mobile" | "xcode-workspace" | "xcode-project";
@@ -20,6 +24,22 @@ export interface IOSSimulatorProjectBuildResult extends IOSSimulatorProjectDescr
   appPath: string;
   resultBundlePath?: string | null;
   buildLogTail?: string;
+  outputTruncated?: boolean;
+}
+
+/** Build failure that retains bounded diagnostics without exposing raw process state. */
+export class IOSSimulatorProjectBuildError extends IOSSimulatorInstanceError {
+  constructor(
+    code: "APP_BUILD_FAILED" | "APP_ARTIFACT_INVALID",
+    message: string,
+    readonly buildLogTail: string,
+    readonly resultBundlePath: string | null,
+    readonly outputTruncated = false,
+    retryable = false,
+  ) {
+    super(code, message, retryable);
+    this.name = "IOSSimulatorProjectBuildError";
+  }
 }
 
 export interface IOSSimulatorProjectBuilderOptions {
@@ -64,7 +84,26 @@ async function containersIn(directory: string): Promise<string[]> {
 }
 
 function tail(value: string, maxBytes = 32 * 1024): string {
-  return value.length <= maxBytes ? value : value.slice(-maxBytes);
+  if (maxBytes <= 0) return "";
+  const bytes = Buffer.from(value, "utf8");
+  return bytes.byteLength <= maxBytes
+    ? value
+    : bytes.subarray(-maxBytes).toString("utf8");
+}
+
+function commandLogTail(
+  results: readonly IOSSimulatorCommandResult[],
+  maxBytes = 32 * 1024,
+): string {
+  const outputTruncated = results.some((result) => result.outputTruncated);
+  const output = results
+    .flatMap((result) => [result.stdout, result.stderr])
+    .filter(Boolean)
+    .join("\n");
+  if (!outputTruncated) return tail(output, maxBytes);
+  const marker =
+    "[Earlier command output was omitted after the capture limit was reached.]\n";
+  return `${marker}${tail(output, maxBytes - Buffer.byteLength(marker))}`;
 }
 
 function isWithinRoot(root: string, candidate: string): boolean {
@@ -132,7 +171,10 @@ export class IOSSimulatorProjectBuilder {
           "containerPath must remain inside the current worktree.",
         );
       }
-      if (!isXcodeContainer(containerPath) || !(await stat(containerPath)).isDirectory()) {
+      if (
+        !isXcodeContainer(containerPath) ||
+        !(await stat(containerPath)).isDirectory()
+      ) {
         throw new IOSSimulatorInstanceError(
           "INVALID_ARGUMENT",
           "containerPath must identify an .xcworkspace or .xcodeproj directory.",
@@ -210,10 +252,7 @@ export class IOSSimulatorProjectBuilder {
     containerPath?: string;
     scheme?: string;
   }): Promise<IOSSimulatorProjectBuildResult> {
-    const project = await this.inspect(
-      input.worktreeRoot,
-      input.containerPath,
-    );
+    const project = await this.inspect(input.worktreeRoot, input.containerPath);
     if (project.kind === "cindy-mobile") {
       const result = await this.#runner.run(
         "pnpm",
@@ -225,9 +264,12 @@ export class IOSSimulatorProjectBuilder {
         },
       );
       if (result.exitCode !== 0) {
-        throw new IOSSimulatorInstanceError(
+        throw new IOSSimulatorProjectBuildError(
           "APP_BUILD_FAILED",
           "Cindy Mobile could not be built.",
+          commandLogTail([result]),
+          null,
+          Boolean(result.outputTruncated),
           true,
         );
       }
@@ -243,9 +285,12 @@ export class IOSSimulatorProjectBuilder {
         name.endsWith(".app"),
       );
       if (apps.length !== 1) {
-        throw new IOSSimulatorInstanceError(
+        throw new IOSSimulatorProjectBuildError(
           "APP_ARTIFACT_INVALID",
           "The Cindy Mobile build did not produce one unambiguous app artifact.",
+          commandLogTail([result]),
+          null,
+          Boolean(result.outputTruncated),
         );
       }
       return {
@@ -253,7 +298,8 @@ export class IOSSimulatorProjectBuilder {
         scheme: apps[0]!.slice(0, -4),
         appPath: await realpath(path.join(products, apps[0]!)),
         resultBundlePath: null,
-        buildLogTail: tail(`${result.stdout}\n${result.stderr}`),
+        buildLogTail: commandLogTail([result]),
+        outputTruncated: Boolean(result.outputTruncated),
       };
     }
 
@@ -268,10 +314,13 @@ export class IOSSimulatorProjectBuilder {
         maxBufferBytes: 1024 * 1024,
       },
     );
-    if (list.exitCode !== 0) {
-      throw new IOSSimulatorInstanceError(
+    if (list.exitCode !== 0 || list.outputTruncated) {
+      throw new IOSSimulatorProjectBuildError(
         "APP_BUILD_FAILED",
         "Xcode could not inspect the project.",
+        commandLogTail([list]),
+        null,
+        Boolean(list.outputTruncated),
         true,
       );
     }
@@ -292,8 +341,7 @@ export class IOSSimulatorProjectBuilder {
       schemes = [];
     }
     const requestedScheme = input.scheme?.trim();
-    const scheme =
-      requestedScheme || (schemes.length === 1 ? schemes[0]! : "");
+    const scheme = requestedScheme || (schemes.length === 1 ? schemes[0]! : "");
     if (!scheme || (!requestedScheme && schemes.length !== 1)) {
       throw new IOSSimulatorInstanceError(
         "AMBIGUOUS_XCODE_PROJECT",
@@ -308,7 +356,7 @@ export class IOSSimulatorProjectBuilder {
         `The selected Xcode scheme is unavailable. Available schemes: ${summarize(schemes)}.`,
       );
     }
-    const common = [
+    const commonArgs = [
       containerFlag,
       project.containerPath!,
       "-scheme",
@@ -322,34 +370,46 @@ export class IOSSimulatorProjectBuilder {
     ];
     const resultBundlePath = path.join(
       input.derivedDataPath,
-      "CindyBuild.xcresult",
+      `CindyBuild-${randomUUID()}.xcresult`,
     );
-    common.push("-resultBundlePath", resultBundlePath);
-    const build = await this.#runner.run("xcodebuild", [...common, "build"], {
-      cwd: project.projectRoot,
-      timeoutMs: this.#buildTimeoutMs,
-      maxBufferBytes: 1024 * 1024,
-    });
+    const build = await this.#runner.run(
+      "xcodebuild",
+      [...commonArgs, "-resultBundlePath", resultBundlePath, "build"],
+      {
+        cwd: project.projectRoot,
+        timeoutMs: this.#buildTimeoutMs,
+        maxBufferBytes: 1024 * 1024,
+      },
+    );
+    const availableResultBundlePath = (await exists(resultBundlePath))
+      ? resultBundlePath
+      : null;
     if (build.exitCode !== 0) {
-      throw new IOSSimulatorInstanceError(
+      throw new IOSSimulatorProjectBuildError(
         "APP_BUILD_FAILED",
         "The Xcode project could not be built.",
+        commandLogTail([build]),
+        availableResultBundlePath,
+        Boolean(build.outputTruncated),
         true,
       );
     }
     const settings = await this.#runner.run(
       "xcodebuild",
-      [...common, "-showBuildSettings", "-json"],
+      [...commonArgs, "-showBuildSettings", "-json"],
       {
         cwd: project.projectRoot,
         timeoutMs: 60_000,
         maxBufferBytes: 4 * 1024 * 1024,
       },
     );
-    if (settings.exitCode !== 0) {
-      throw new IOSSimulatorInstanceError(
+    if (settings.exitCode !== 0 || settings.outputTruncated) {
+      throw new IOSSimulatorProjectBuildError(
         "APP_ARTIFACT_INVALID",
         "Xcode build settings are unavailable.",
+        commandLogTail([build, settings]),
+        availableResultBundlePath,
+        Boolean(build.outputTruncated || settings.outputTruncated),
       );
     }
     let appPaths: string[] = [];
@@ -371,17 +431,21 @@ export class IOSSimulatorProjectBuilder {
     }
     const uniqueApps = [...new Set(appPaths)];
     if (uniqueApps.length !== 1 || !(await exists(uniqueApps[0]!))) {
-      throw new IOSSimulatorInstanceError(
+      throw new IOSSimulatorProjectBuildError(
         "APP_ARTIFACT_INVALID",
         "The Xcode build did not produce one unambiguous app artifact.",
+        commandLogTail([build]),
+        availableResultBundlePath,
+        Boolean(build.outputTruncated),
       );
     }
     return {
       ...project,
       scheme,
       appPath: await realpath(uniqueApps[0]!),
-      resultBundlePath,
-      buildLogTail: tail(`${build.stdout}\n${build.stderr}`),
+      resultBundlePath: availableResultBundlePath,
+      buildLogTail: commandLogTail([build]),
+      outputTruncated: Boolean(build.outputTruncated),
     };
   }
 

@@ -65,6 +65,8 @@ const STREAM_PROFILES: Record<
   high: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
 };
 
+const FRAME_FRESHNESS_TIMEOUT_MS = 3_000;
+
 /** Translate stable discovery codes instead of leaking host-side English guidance into the UI. */
 export function setupStepKeys(issue: IOSSimulatorRuntimeErrorCode | null): string[] {
   switch (issue) {
@@ -134,6 +136,7 @@ function resultMutation(result: IOSSimulatorToolResponse): IOSSimulatorMutationS
 interface PointerGesture {
   pointerId: number;
   gestureId: string;
+  route: ReturnType<typeof routeFor>;
   startedAt: number;
   startClientX: number;
   startClientY: number;
@@ -160,6 +163,8 @@ export function IOSSimulatorTabBody({
   const [operation, setOperation] = useState<Operation>(null);
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
   const [framePresentation, setFramePresentation] = useState<'jpeg' | 'h264' | null>(null);
+  const [presentationRouteKey, setPresentationRouteKey] = useState<string | null>(null);
+  const [frameFresh, setFrameFresh] = useState(false);
   const [streamState, setStreamState] = useState<IOSSimulatorFramePumpSnapshot['state']>('idle');
   const [streamFps, setStreamFps] = useState(0);
   const [viewport, setViewport] = useState<IOSSimulatorPublicViewport | null>(null);
@@ -177,6 +182,56 @@ export function IOSSimulatorTabBody({
   const interactiveProfileActiveRef = useRef(false);
   const profileRestoreTimerRef = useRef<number | null>(null);
   const h264CanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const frameUrlRef = useRef<string | null>(null);
+  const presentationEpochRef = useRef(0);
+  const frameFreshnessTimerRef = useRef<number | null>(null);
+
+  const replaceFrameUrl = useCallback((next: string | null) => {
+    const previous = frameUrlRef.current;
+    if (previous && previous !== next) URL.revokeObjectURL(previous);
+    frameUrlRef.current = next;
+    setFrameUrl(next);
+  }, []);
+
+  const clearViewerPresentation = useCallback(
+    (nextState: IOSSimulatorFramePumpSnapshot['state'] = 'idle') => {
+      presentationEpochRef.current += 1;
+      if (frameFreshnessTimerRef.current !== null) {
+        window.clearTimeout(frameFreshnessTimerRef.current);
+        frameFreshnessTimerRef.current = null;
+      }
+      replaceFrameUrl(null);
+      setFramePresentation(null);
+      setPresentationRouteKey(null);
+      setFrameFresh(false);
+      setStreamState(nextState);
+      setStreamFps(0);
+      setViewport(null);
+      frameSequenceRef.current = 0;
+      frameEncodingRef.current = null;
+      fpsWindowRef.current = { startedAt: 0, frames: 0 };
+      const canvas = h264CanvasRef.current;
+      const context = canvas?.getContext('2d', { alpha: false });
+      if (canvas && context) context.clearRect(0, 0, canvas.width, canvas.height);
+    },
+    [replaceFrameUrl],
+  );
+
+  const markFramePresented = useCallback(
+    (routeKey: string, presentation: 'jpeg' | 'h264') => {
+      if (frameFreshnessTimerRef.current !== null) {
+        window.clearTimeout(frameFreshnessTimerRef.current);
+      }
+      setPresentationRouteKey(routeKey);
+      setFramePresentation(presentation);
+      setFrameFresh(true);
+      frameFreshnessTimerRef.current = window.setTimeout(() => {
+        frameFreshnessTimerRef.current = null;
+        setFrameFresh(false);
+      }, FRAME_FRESHNESS_TIMEOUT_MS);
+    },
+    [],
+  );
 
   const refresh = useCallback(async () => {
     const requestVersion = ++requestVersionRef.current;
@@ -207,6 +262,9 @@ export function IOSSimulatorTabBody({
   const instances = status?.ok ? status.instances : [];
   const attachedInstance =
     instances.find((instance) => instance.instanceId === state.instanceId) ?? instances[0] ?? null;
+  const viewerRouteKey = attachedInstance
+    ? `${attachedInstance.instanceId}:${attachedInstance.generation}`
+    : null;
   const grant =
     status?.ok && attachedInstance
       ? status.deviceGrants.find(
@@ -231,11 +289,30 @@ export function IOSSimulatorTabBody({
   const viewerVisible = Boolean(
     active && shellVisible && attachedInstance?.lifecycleState === 'ready',
   );
+  const presentationMatchesRoute = Boolean(
+    viewerRouteKey && presentationRouteKey === viewerRouteKey && framePresentation !== null,
+  );
+  const viewerInteractive = Boolean(
+    viewerVisible &&
+      streamState === 'streaming' &&
+      presentationMatchesRoute &&
+      frameFresh &&
+      !busy,
+  );
 
   useEffect(() => {
     const nextId = attachedInstance?.instanceId ?? null;
     if ((state.instanceId ?? null) !== nextId) ctx.patchState({ instanceId: nextId });
   }, [attachedInstance?.instanceId, ctx, state.instanceId]);
+
+  useEffect(() => {
+    clearViewerPresentation('idle');
+  }, [
+    attachedInstance?.generation,
+    attachedInstance?.instanceId,
+    attachedInstance?.lifecycleState,
+    clearViewerPresentation,
+  ]);
 
   useEffect(() => {
     if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
@@ -246,14 +323,34 @@ export function IOSSimulatorTabBody({
     let routeRecoveryPending = false;
     let pollTimer: number | null = null;
     let preferredEncoding: 'jpeg' | 'h264' = 'jpeg';
+    let mediaDisconnected = false;
+    let routeInactive = false;
+    const routeKey = `${route.instanceId}:${route.generation}`;
     const decoderRuntime = createBrowserIOSSimulatorH264DecoderRuntime();
     let decoder: IOSSimulatorH264Decoder | null = null;
     frameSequenceRef.current = 0;
     frameEncodingRef.current = null;
     fpsWindowRef.current = { startedAt: 0, frames: 0 };
     setViewport(null);
+    const disconnectViewer = () => {
+      if (cancelled) return;
+      mediaDisconnected = true;
+      preferredEncoding = 'jpeg';
+      decoder?.close();
+      decoder = null;
+      clearViewerPresentation('disconnected');
+    };
     const acceptStream = (stream: IOSSimulatorFramePumpSnapshot | null) => {
-      if (cancelled || !stream) return;
+      if (cancelled) return;
+      if (!stream || stream.state === 'disconnected') {
+        disconnectViewer();
+        return;
+      }
+      if (stream.instanceId !== route.instanceId || stream.generation !== route.generation) {
+        disconnectViewer();
+        return;
+      }
+      mediaDisconnected = false;
       setStreamState(stream.state);
       const frame = stream.latestFrame;
       if (frame && frame.encoding !== frameEncodingRef.current) {
@@ -280,38 +377,50 @@ export function IOSSimulatorTabBody({
       const candidateUrl = URL.createObjectURL(
         new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'image/jpeg' }),
       );
+      const candidateEpoch = presentationEpochRef.current;
+      const candidateSequence = frame.sequence;
       const image = new Image();
       image.onload = () => {
-        if (cancelled) {
+        if (
+          cancelled ||
+          mediaDisconnected ||
+          presentationEpochRef.current !== candidateEpoch ||
+          frameEncodingRef.current !== 'jpeg' ||
+          frameSequenceRef.current !== candidateSequence
+        ) {
           URL.revokeObjectURL(candidateUrl);
           return;
         }
-        setFrameUrl((previous) => {
-          if (previous) URL.revokeObjectURL(previous);
-          return candidateUrl;
-        });
-        setFramePresentation('jpeg');
+        replaceFrameUrl(candidateUrl);
+        markFramePresented(routeKey, 'jpeg');
       };
       image.onerror = () => URL.revokeObjectURL(candidateUrl);
       image.src = candidateUrl;
     };
     const acceptViewerResult = (result: IOSSimulatorToolResponse) => {
       if (!result.ok) {
+        disconnectViewer();
         if (
           viewerVisible &&
           !routeRecoveryPending &&
           (result.errorCode === 'LEASE_EXPIRED' || result.errorCode === 'STALE_GENERATION')
         ) {
           routeRecoveryPending = true;
-          setStreamState('disconnected');
           void refresh().finally(() => {
             routeRecoveryPending = false;
           });
         }
         return;
       }
+      const nextInstance = resultInstance(result);
+      if (nextInstance && nextInstance.lifecycleState !== 'ready') {
+        routeInactive = true;
+        disconnectViewer();
+        void refresh();
+        return;
+      }
       acceptStream(resultStream(result));
-      if (resultInstance(result)) void refresh();
+      if (nextInstance) void refresh();
       const nextViewport = resultViewport(result);
       if (!cancelled && nextViewport) setViewport(nextViewport);
       const nextMutation = resultMutation(result);
@@ -353,11 +462,13 @@ export function IOSSimulatorTabBody({
           context.drawImage(frame as unknown as CanvasImageSource, 0, 0, width, height);
         },
         onFrameRendered() {
-          if (!cancelled) setFramePresentation('h264');
+          if (!cancelled && !mediaDisconnected) markFramePresented(routeKey, 'h264');
         },
         onFallback() {
           if (cancelled) return;
           preferredEncoding = 'jpeg';
+          decoder?.close();
+          decoder = null;
           if (pollTimer !== null) window.clearTimeout(pollTimer);
           pollTimer = null;
           void window.electronAPI.maker.iosSimulator
@@ -368,7 +479,7 @@ export function IOSSimulatorTabBody({
             })
             .then(acceptViewerResult)
             .catch(() => {
-              if (!cancelled) setStreamState('disconnected');
+              disconnectViewer();
             });
         },
       });
@@ -377,6 +488,21 @@ export function IOSSimulatorTabBody({
       if (polling || cancelled) return;
       polling = true;
       try {
+        if (
+          mediaDisconnected &&
+          viewerVisible &&
+          !routeInactive &&
+          performance.now() >= nextRecoveryAt
+        ) {
+          nextRecoveryAt = performance.now() + 3_000;
+          const recovered = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
+            ...route,
+            visible: true,
+            preferredEncoding: 'jpeg',
+          });
+          acceptViewerResult(recovered);
+          return;
+        }
         const result = await window.electronAPI.maker.iosSimulator.latestFrame(route);
         acceptViewerResult(result);
         const stream = resultStream(result);
@@ -394,7 +520,7 @@ export function IOSSimulatorTabBody({
           acceptViewerResult(recovered);
         }
       } catch {
-        if (!cancelled) setStreamState('disconnected');
+        disconnectViewer();
       } finally {
         polling = false;
       }
@@ -406,20 +532,25 @@ export function IOSSimulatorTabBody({
           pollTimer = null;
           void poll().finally(schedulePoll);
         },
-        preferredEncoding === 'h264' ? 1_000 : 50,
+        mediaDisconnected ? 250 : preferredEncoding === 'h264' ? 1_000 : 50,
       );
     };
-    void window.electronAPI.maker.iosSimulator
-      .setViewerVisibility({ ...route, visible: viewerVisible, preferredEncoding })
-      .then(acceptViewerResult)
-      .catch(() => {
-        if (!cancelled) setStreamState('disconnected');
-      });
-    // H.264 frames arrive through the Main push channel. Poll slowly as a
-    // recovery watchdog; JPEG keeps the compatibility polling cadence.
-    if (viewerVisible) {
-      void poll().finally(schedulePoll);
-    }
+    const startViewer = async () => {
+      try {
+        const result = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
+          ...route,
+          visible: viewerVisible,
+          preferredEncoding,
+        });
+        acceptViewerResult(result);
+      } catch {
+        disconnectViewer();
+      }
+      // H.264 frames arrive through the Main push channel. Poll slowly as a
+      // recovery watchdog; JPEG keeps the compatibility polling cadence.
+      if (viewerVisible && !cancelled) void poll().finally(schedulePoll);
+    };
+    void startViewer();
     return () => {
       cancelled = true;
       decoder?.close();
@@ -429,13 +560,27 @@ export function IOSSimulatorTabBody({
         .setViewerVisibility({ ...route, visible: false })
         .catch(() => undefined);
     };
-  }, [attachedInstance, ctx.sessionId, refresh, viewerVisible]);
+  }, [
+    attachedInstance,
+    clearViewerPresentation,
+    ctx.sessionId,
+    markFramePresented,
+    refresh,
+    replaceFrameUrl,
+    viewerVisible,
+  ]);
 
   useEffect(
     () => () => {
-      if (frameUrl) URL.revokeObjectURL(frameUrl);
+      const current = frameUrlRef.current;
+      frameUrlRef.current = null;
+      if (current) URL.revokeObjectURL(current);
+      if (frameFreshnessTimerRef.current !== null) {
+        window.clearTimeout(frameFreshnessTimerRef.current);
+        frameFreshnessTimerRef.current = null;
+      }
     },
-    [frameUrl],
+    [],
   );
 
   const call = useCallback(
@@ -600,12 +745,7 @@ export function IOSSimulatorTabBody({
         | 'unlock_screen',
       args: Record<string, unknown>,
     ) => {
-      if (
-        !attachedInstance ||
-        attachedInstance.lifecycleState !== 'ready' ||
-        interactionBusy ||
-        agentBusy
-      ) {
+      if (!attachedInstance || !viewerInteractive) {
         return false;
       }
       setInteractionBusy(true);
@@ -644,7 +784,7 @@ export function IOSSimulatorTabBody({
         setInteractionBusy(false);
       }
     },
-    [agentBusy, attachedInstance, ctx.sessionId, interactionBusy, t],
+    [attachedInstance, ctx.sessionId, refresh, t, viewerInteractive],
   );
 
   const pointerRatio = useCallback(
@@ -660,23 +800,23 @@ export function IOSSimulatorTabBody({
 
   const invokeLiveTouch = useCallback(
     async (
-      gesture: Pick<PointerGesture, 'gestureId'>,
+      gesture: Pick<PointerGesture, 'gestureId' | 'route'>,
       phase: 'begin' | 'move' | 'end' | 'cancel',
       point: { xRatio: number; yRatio: number },
     ) => {
-      if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') {
+      if (phase !== 'cancel' && !viewerInteractive) {
         throw new Error('Simulator instance is unavailable');
       }
       const result = await window.electronAPI.maker.iosSimulator.liveTouch({
         sessionId: ctx.sessionId,
-        ...routeFor(attachedInstance),
+        ...gesture.route,
         gestureId: gesture.gestureId,
         phase,
         ...point,
       });
       if (!result.ok) throw new Error(result.message);
     },
-    [attachedInstance, ctx.sessionId],
+    [ctx.sessionId, viewerInteractive],
   );
 
   const queueLiveMove = useCallback(
@@ -698,11 +838,19 @@ export function IOSSimulatorTabBody({
 
   const onViewerPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
-      if (pointerGestureRef.current || interactionBusy || agentBusy || event.button !== 0) return;
+      if (
+        !attachedInstance ||
+        !viewerInteractive ||
+        pointerGestureRef.current ||
+        event.button !== 0
+      ) {
+        return;
+      }
       const point = pointerRatio(event);
       const gesture: PointerGesture = {
         pointerId: event.pointerId,
         gestureId: `viewer-${Date.now()}-${++gestureSequenceRef.current}`,
+        route: routeFor(attachedInstance),
         startedAt: performance.now(),
         startClientX: event.clientX,
         startClientY: event.clientY,
@@ -720,13 +868,13 @@ export function IOSSimulatorTabBody({
       event.currentTarget.setPointerCapture(event.pointerId);
       event.preventDefault();
     },
-    [agentBusy, beginInteractiveFrameRate, interactionBusy, invokeLiveTouch, pointerRatio],
+    [attachedInstance, beginInteractiveFrameRate, invokeLiveTouch, pointerRatio, viewerInteractive],
   );
 
   const onViewerPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
       const gesture = pointerGestureRef.current;
-      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      if (!viewerInteractive || !gesture || gesture.pointerId !== event.pointerId) return;
       const coalesced = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
       const latest = coalesced.at(-1) ?? event.nativeEvent;
       const bounds = event.currentTarget.getBoundingClientRect();
@@ -739,7 +887,7 @@ export function IOSSimulatorTabBody({
       queueLiveMove(gesture, point);
       event.preventDefault();
     },
-    [queueLiveMove],
+    [queueLiveMove, viewerInteractive],
   );
 
   const onViewerPointerUp = useCallback(
@@ -797,9 +945,10 @@ export function IOSSimulatorTabBody({
     [endInteractiveFrameRate, invokeLiveTouch],
   );
 
-  useEffect(
-    () => () => {
+  const cancelActivePointerGesture = useCallback(
+    (restoreProfile: boolean) => {
       const gesture = pointerGestureRef.current;
+      const hadInteractiveProfile = interactiveProfileActiveRef.current;
       pointerGestureRef.current = null;
       if (gesture) {
         gesture.pendingMove = null;
@@ -811,15 +960,33 @@ export function IOSSimulatorTabBody({
               yRatio: gesture.lastYRatio,
             }),
           )
-          .catch(() => undefined);
+          .catch(() => undefined)
+          .finally(() => {
+            if (restoreProfile) endInteractiveFrameRate();
+          });
+      } else if (restoreProfile && hadInteractiveProfile) {
+        endInteractiveFrameRate();
       }
-      if (profileRestoreTimerRef.current !== null) {
-        window.clearTimeout(profileRestoreTimerRef.current);
-        profileRestoreTimerRef.current = null;
+      if (!restoreProfile) {
+        if (profileRestoreTimerRef.current !== null) {
+          window.clearTimeout(profileRestoreTimerRef.current);
+          profileRestoreTimerRef.current = null;
+        }
+        interactiveProfileActiveRef.current = false;
       }
-      interactiveProfileActiveRef.current = false;
     },
-    [invokeLiveTouch],
+    [endInteractiveFrameRate, invokeLiveTouch],
+  );
+
+  useEffect(() => {
+    if (!viewerInteractive) cancelActivePointerGesture(true);
+  }, [cancelActivePointerGesture, viewerInteractive]);
+
+  useEffect(
+    () => () => {
+      cancelActivePointerGesture(false);
+    },
+    [cancelActivePointerGesture],
   );
 
   const sendTextInput = useCallback(async () => {
@@ -992,38 +1159,39 @@ export function IOSSimulatorTabBody({
                   </span>
                 </div>
 
-                {(agentBusy || mutation?.agentPaused) && (
-                  <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface)] p-3">
-                    <div className="min-w-0">
-                      <div className="text-[11px] font-medium text-[var(--warning-accent)]">
-                        {t(
-                          agentBusy
-                            ? 'rightSidebar.iosSimulator.agentBusyTitle'
-                            : 'rightSidebar.iosSimulator.manualControlTitle',
-                        )}
+                {attachedInstance.lifecycleState === 'ready' &&
+                  (agentBusy || mutation?.agentPaused) && (
+                    <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface)] p-3">
+                      <div className="min-w-0">
+                        <div className="text-[11px] font-medium text-[var(--warning-accent)]">
+                          {t(
+                            agentBusy
+                              ? 'rightSidebar.iosSimulator.agentBusyTitle'
+                              : 'rightSidebar.iosSimulator.manualControlTitle',
+                          )}
+                        </div>
+                        <div className="mt-0.5 text-pretty text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                          {t(
+                            mutation?.takeoverPending
+                              ? 'rightSidebar.iosSimulator.takeoverPendingDescription'
+                              : agentBusy
+                                ? 'rightSidebar.iosSimulator.agentBusyDescription'
+                                : 'rightSidebar.iosSimulator.manualControlDescription',
+                          )}
+                        </div>
                       </div>
-                      <div className="mt-0.5 text-pretty text-[10px] leading-relaxed text-[var(--text-secondary)]">
-                        {t(
-                          mutation?.takeoverPending
-                            ? 'rightSidebar.iosSimulator.takeoverPendingDescription'
-                            : agentBusy
-                              ? 'rightSidebar.iosSimulator.agentBusyDescription'
-                              : 'rightSidebar.iosSimulator.manualControlDescription',
+                      <ActionButton
+                        label={t(
+                          mutation?.agentPaused
+                            ? 'rightSidebar.iosSimulator.resumeAgentInput'
+                            : 'rightSidebar.iosSimulator.takeControl',
                         )}
-                      </div>
+                        icon={mutation?.agentPaused ? Play : ShieldCheck}
+                        disabled={operation !== null || mutation?.takeoverPending}
+                        onClick={() => void setMutationControl()}
+                      />
                     </div>
-                    <ActionButton
-                      label={t(
-                        mutation?.agentPaused
-                          ? 'rightSidebar.iosSimulator.resumeAgentInput'
-                          : 'rightSidebar.iosSimulator.takeControl',
-                      )}
-                      icon={mutation?.agentPaused ? Play : ShieldCheck}
-                      disabled={operation !== null || mutation?.takeoverPending}
-                      onClick={() => void setMutationControl()}
-                    />
-                  </div>
-                )}
+                  )}
 
                 {attachedInstance.lifecycleState === 'ready' && (
                   <>
@@ -1053,7 +1221,7 @@ export function IOSSimulatorTabBody({
                     </div>
                     <div className="mt-3 overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface)]">
                       <div className="relative flex min-h-48 items-center justify-center p-2">
-                        {frameUrl && (
+                        {frameUrl && presentationMatchesRoute && (
                           <img
                             src={frameUrl}
                             alt={t('rightSidebar.iosSimulator.streamAlt', {
@@ -1063,9 +1231,11 @@ export function IOSSimulatorTabBody({
                             className={cn(
                               'max-h-[520px] max-w-full touch-none select-none object-contain',
                               framePresentation === 'jpeg' ? null : 'hidden',
-                              interactionBusy || agentBusy
+                              busy
                                 ? 'cursor-wait opacity-80'
-                                : 'cursor-crosshair',
+                                : !viewerInteractive
+                                  ? 'pointer-events-none cursor-default opacity-80'
+                                  : 'cursor-crosshair',
                             )}
                             draggable={false}
                             onPointerDown={onViewerPointerDown}
@@ -1080,21 +1250,25 @@ export function IOSSimulatorTabBody({
                           aria-label={t('rightSidebar.iosSimulator.streamAlt', {
                             device: attachedInstance.simulatorName,
                           })}
-                          aria-hidden={framePresentation !== 'h264'}
+                          aria-hidden={!(presentationMatchesRoute && framePresentation === 'h264')}
                           title={t('rightSidebar.iosSimulator.gestureHint')}
                           className={cn(
                             'max-h-[520px] max-w-full touch-none select-none object-contain',
-                            framePresentation === 'h264' ? null : 'hidden',
-                            interactionBusy || agentBusy
+                            presentationMatchesRoute && framePresentation === 'h264'
+                              ? null
+                              : 'hidden',
+                            busy
                               ? 'cursor-wait opacity-80'
-                              : 'cursor-crosshair',
+                              : !viewerInteractive
+                                ? 'pointer-events-none cursor-default opacity-80'
+                                : 'cursor-crosshair',
                           )}
                           onPointerDown={onViewerPointerDown}
                           onPointerMove={onViewerPointerMove}
                           onPointerUp={onViewerPointerUp}
                           onPointerCancel={onViewerPointerCancel}
                         />
-                        {!framePresentation && (
+                        {!presentationMatchesRoute && (
                           <div className="flex flex-col items-center gap-2 p-8 text-center text-[11px] text-[var(--text-secondary)]">
                             <Smartphone size={22} aria-hidden="true" />
                             <span className="text-pretty">
@@ -1130,7 +1304,7 @@ export function IOSSimulatorTabBody({
                               void sendTextInput();
                             }
                           }}
-                          disabled={interactionBusy || agentBusy}
+                          disabled={!viewerInteractive}
                           aria-label={t('rightSidebar.iosSimulator.textInputLabel')}
                           placeholder={t('rightSidebar.iosSimulator.textInputPlaceholder')}
                           className="h-8 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface)] pl-8 pr-3 text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
@@ -1139,19 +1313,19 @@ export function IOSSimulatorTabBody({
                       <ActionButton
                         label={t('rightSidebar.iosSimulator.sendText')}
                         icon={Send}
-                        disabled={interactionBusy || agentBusy || !textInput}
+                        disabled={!viewerInteractive || !textInput}
                         onClick={() => void sendTextInput()}
                       />
                       <ActionButton
                         label={t('rightSidebar.iosSimulator.pressHome')}
                         icon={House}
-                        disabled={interactionBusy || agentBusy}
+                        disabled={!viewerInteractive}
                         onClick={() => void runInteraction('press_home', {})}
                       />
                       <ActionButton
                         label={t('rightSidebar.iosSimulator.rotateDevice')}
                         icon={RotateCw}
-                        disabled={interactionBusy || agentBusy || !viewport}
+                        disabled={!viewerInteractive || !viewport}
                         onClick={() =>
                           void runInteraction('set_orientation', {
                             orientation:
@@ -1162,13 +1336,13 @@ export function IOSSimulatorTabBody({
                       <ActionButton
                         label={t('rightSidebar.iosSimulator.lockScreen')}
                         icon={LockKeyhole}
-                        disabled={interactionBusy || agentBusy}
+                        disabled={!viewerInteractive}
                         onClick={() => void runInteraction('lock_screen', {})}
                       />
                       <ActionButton
                         label={t('rightSidebar.iosSimulator.unlockScreen')}
                         icon={UnlockKeyhole}
-                        disabled={interactionBusy || agentBusy}
+                        disabled={!viewerInteractive}
                         onClick={() => void runInteraction('unlock_screen', {})}
                       />
                     </div>
@@ -1176,6 +1350,28 @@ export function IOSSimulatorTabBody({
                       {t('rightSidebar.iosSimulator.gestureHint')}
                     </p>
                   </>
+                )}
+
+                {attachedInstance.lifecycleState === 'stopped' && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="mt-3 flex gap-2.5 rounded-xl border border-[var(--border-default)] bg-[var(--surface)] p-3"
+                  >
+                    <Square
+                      size={15}
+                      className="mt-0.5 shrink-0 text-[var(--text-secondary)]"
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0">
+                      <div className="text-[12px] font-medium">
+                        {t('rightSidebar.iosSimulator.viewerStoppedTitle')}
+                      </div>
+                      <div className="mt-1 text-pretty text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                        {t('rightSidebar.iosSimulator.viewerStoppedDescription')}
+                      </div>
+                    </div>
+                  </div>
                 )}
 
                 <div className="mt-3 flex flex-wrap gap-2">
@@ -1204,26 +1400,28 @@ export function IOSSimulatorTabBody({
                   />
                 </div>
 
-                <div className="mt-3 flex items-center justify-between gap-3 border-t border-[var(--border-default)] pt-3">
-                  <div className="min-w-0">
-                    <div className="text-[11px] font-medium">
-                      {t('rightSidebar.iosSimulator.agentControlTitle')}
+                {attachedInstance.lifecycleState === 'ready' && (
+                  <div className="mt-3 flex items-center justify-between gap-3 border-t border-[var(--border-default)] pt-3">
+                    <div className="min-w-0">
+                      <div className="text-[11px] font-medium">
+                        {t('rightSidebar.iosSimulator.agentControlTitle')}
+                      </div>
+                      <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                        {t('rightSidebar.iosSimulator.agentControlDescription')}
+                      </div>
                     </div>
-                    <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-secondary)]">
-                      {t('rightSidebar.iosSimulator.agentControlDescription')}
-                    </div>
+                    <ActionButton
+                      label={t(
+                        grant?.agentControl === 'allowed'
+                          ? 'rightSidebar.iosSimulator.disableAgentControl'
+                          : 'rightSidebar.iosSimulator.allowAgentControl',
+                      )}
+                      icon={grant?.agentControl === 'allowed' ? ShieldOff : ShieldCheck}
+                      disabled={busy}
+                      onClick={() => void setAgentControl()}
+                    />
                   </div>
-                  <ActionButton
-                    label={t(
-                      grant?.agentControl === 'allowed'
-                        ? 'rightSidebar.iosSimulator.disableAgentControl'
-                        : 'rightSidebar.iosSimulator.allowAgentControl',
-                    )}
-                    icon={grant?.agentControl === 'allowed' ? ShieldOff : ShieldCheck}
-                    disabled={busy}
-                    onClick={() => void setAgentControl()}
-                  />
-                </div>
+                )}
               </section>
             )}
 

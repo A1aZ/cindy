@@ -79,6 +79,25 @@ describe("IOSSimulatorFramePump", () => {
     expect(driver.streamFrames).toHaveBeenCalledTimes(3);
   });
 
+  it("drops the retained JPEG frame after the stream becomes disconnected", async () => {
+    const driver = driverWithStreams(["frame", "eof"]);
+    const pump = new IOSSimulatorFramePump({
+      maxReconnectAttempts: 0,
+      reconnectDelaysMs: [0],
+    });
+    pump.setVisible({
+      instanceId: "instance-a",
+      generation: 1,
+      driver,
+      visible: true,
+    });
+
+    await vi.waitFor(() =>
+      expect(pump.snapshot("instance-a")?.state).toBe("disconnected"),
+    );
+    expect(pump.snapshot("instance-a")?.latestFrame).toBeNull();
+  });
+
   it("drops retained bytes when an instance is cleared", () => {
     const pump = new IOSSimulatorFramePump();
     const driver = driverWithStreams([]);
@@ -142,7 +161,23 @@ function nativeDriverWithStreams(streams: Array<"frame" | "eof">) {
 
 describe("IOSSimulatorH264FramePump", () => {
   it("configures a capability-selected native stream and owns one copied access unit", async () => {
-    const driver = nativeDriverWithStreams(["frame", "eof"]);
+    const driver = nativeDriverWithStreams([]);
+    driver.streamNativeFrames.mockImplementationOnce(
+      async ({ signal, onFrame }) => {
+        await onFrame(h264Frame(0));
+        await new Promise<void>((resolve) => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return {
+          frameCount: 1,
+          byteCount: 6,
+          startedAt: "now",
+          firstFrameAt: "now",
+          endedAt: "now",
+          endReason: "aborted",
+        };
+      },
+    );
     const pump = new IOSSimulatorH264FramePump({
       maxReconnectAttempts: 0,
       reconnectDelaysMs: [0],
@@ -187,6 +222,7 @@ describe("IOSSimulatorH264FramePump", () => {
     expect(pump.snapshot("instance-a")?.latestFrame?.bytes).not.toBe(
       first.latestFrame?.bytes,
     );
+    pump.clear("instance-a");
   });
 
   it("notifies the host immediately for each accepted H.264 access unit", async () => {
@@ -255,6 +291,30 @@ describe("IOSSimulatorH264FramePump", () => {
     expect(paused.latestFrame?.encoding).toBe("h264");
     pump.clear("instance-a");
     expect(pump.snapshot("instance-a")).toBeNull();
+  });
+
+  it("drops the retained H.264 frame after the stream becomes disconnected", async () => {
+    const driver = nativeDriverWithStreams(["frame", "eof"]);
+    const pump = new IOSSimulatorH264FramePump({
+      maxReconnectAttempts: 0,
+      reconnectDelaysMs: [0],
+    });
+    pump.setVisible({
+      instanceId: "instance-a",
+      generation: 1,
+      driver,
+      profile: {
+        encoding: "h264",
+        framesPerSecond: 5,
+        scalingPercent: 50,
+      },
+      visible: true,
+    });
+
+    await vi.waitFor(() =>
+      expect(pump.snapshot("instance-a")?.state).toBe("disconnected"),
+    );
+    expect(pump.snapshot("instance-a")?.latestFrame).toBeNull();
   });
 
   it("keeps host sequence monotonic when the stream profile changes", async () => {

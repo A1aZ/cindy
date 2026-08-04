@@ -95,7 +95,7 @@ async function createHarness(
     })),
     configureStream: vi.fn(async (_sessionId, profile) => profile),
     deleteSession: vi.fn(async () => undefined),
-  } as unknown as IOSSimulatorAutomationDriver;
+  };
   let now = 1_000;
   const ports = [18_100, 19_100];
   const manager = new WdaProcessManager({
@@ -105,7 +105,9 @@ async function createHarness(
     commandRunner: { run },
     processLauncher: { launch: vi.fn(() => process) },
     allocatePort: vi.fn(async () => ports.shift()!),
-    createDriver: vi.fn(() => driver),
+    createDriver: vi.fn(
+      () => driver as unknown as IOSSimulatorAutomationDriver,
+    ),
     clock: {
       now: () => now,
       sleep: async (ms) => {
@@ -177,6 +179,24 @@ describe("WdaProcessManager", () => {
     expect(harness.killed).toEqual(["SIGINT"]);
     expect(harness.driver.deleteSession).toHaveBeenCalledWith("wda-session");
     expect(harness.manager.get("instance-a")).toBeNull();
+  });
+
+  it("drops a cached running record when the live WDA probe fails", async () => {
+    const harness = await createHarness();
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+    harness.driver.probe.mockRejectedValueOnce(new Error("connection refused"));
+
+    await expect(harness.manager.probe("instance-a")).resolves.toBeNull();
+
+    expect(harness.manager.get("instance-a")).toBeNull();
+    expect(harness.driver.deleteSession).toHaveBeenCalledWith("wda-session");
+    expect(harness.killed).toEqual(["SIGINT"]);
   });
 
   it("waits for an in-flight start and deterministically stops the late process", async () => {

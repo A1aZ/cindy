@@ -114,6 +114,156 @@ describe("IOSSimulatorInstanceActor", () => {
     });
   });
 
+  it("records an external shutdown without issuing another simctl mutation", async () => {
+    const harness = createHarness({ booted: true });
+    const releaseRuntime = vi.fn(async () => undefined);
+
+    const result = await harness.actor.reconcileExternalDeviceState(
+      {
+        sessionId: harness.instance.sessionId,
+        instanceId: harness.instance.instanceId,
+        simulatorUdid: harness.instance.simulatorUdid,
+        expectedGeneration: harness.instance.generation,
+        state: "shutdown",
+      },
+      releaseRuntime,
+    );
+
+    expect(result).toMatchObject({
+      applied: true,
+      previousGeneration: harness.instance.generation,
+      instance: {
+        lifecycleState: "stopped",
+        healthState: "healthy",
+        errorCode: null,
+        generation: harness.instance.generation + 1,
+        viewerState: "attached",
+      },
+    });
+    expect(releaseRuntime).toHaveBeenCalledTimes(1);
+    expect(harness.lifecycle.bootExact).not.toHaveBeenCalled();
+    expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(harness.lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it("marks an externally missing device as orphaned", async () => {
+    const harness = createHarness({ booted: true });
+
+    const result = await harness.actor.reconcileExternalDeviceState({
+      sessionId: harness.instance.sessionId,
+      instanceId: harness.instance.instanceId,
+      simulatorUdid: harness.instance.simulatorUdid,
+      expectedGeneration: harness.instance.generation,
+      state: "missing",
+    });
+
+    expect(result).toMatchObject({
+      applied: true,
+      instance: {
+        lifecycleState: "error",
+        healthState: "degraded",
+        errorCode: "ORPHANED_DEVICE",
+        generation: harness.instance.generation + 1,
+      },
+    });
+    expect(harness.lifecycle.bootExact).not.toHaveBeenCalled();
+    expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(harness.lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it("cancels active and queued Agent mutations before applying external state", async () => {
+    const harness = createHarness({ booted: true });
+    let releaseActive: () => void = () => undefined;
+    let activeSignal: AbortSignal | undefined;
+    const active = harness.actor.runMutation(
+      harness.route(),
+      async (_instance, signal) => {
+        activeSignal = signal;
+        await new Promise<void>((resolve) => {
+          releaseActive = resolve;
+        });
+      },
+    );
+    const queued = harness.actor
+      .runMutation(harness.route(), async () => "should-not-run")
+      .catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+    const reconcile = harness.actor.reconcileExternalDeviceState({
+      sessionId: harness.instance.sessionId,
+      instanceId: harness.instance.instanceId,
+      simulatorUdid: harness.instance.simulatorUdid,
+      expectedGeneration: harness.instance.generation,
+      state: "shutdown",
+    });
+    expect(activeSignal?.aborted).toBe(true);
+    releaseActive();
+
+    await expect(active).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(queued).resolves.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(reconcile).resolves.toMatchObject({
+      applied: true,
+      instance: { lifecycleState: "stopped" },
+    });
+  });
+
+  it("ignores a stale liveness result without cancelling the new generation", async () => {
+    const harness = createHarness({ booted: true });
+    const recovered = await harness.actor.recover(harness.route());
+    let releaseMutation: () => void = () => undefined;
+    let mutationSignal: AbortSignal | undefined;
+    const mutation = harness.actor.runMutation(
+      harness.route(recovered),
+      async (_instance, signal) => {
+        mutationSignal = signal;
+        await new Promise<void>((resolve) => {
+          releaseMutation = resolve;
+        });
+        return "completed";
+      },
+    );
+    await vi.waitFor(() => expect(mutationSignal).toBeDefined());
+
+    const result = await harness.actor.reconcileExternalDeviceState({
+      sessionId: recovered.sessionId,
+      instanceId: recovered.instanceId,
+      simulatorUdid: recovered.simulatorUdid,
+      expectedGeneration: harness.instance.generation,
+      state: "shutdown",
+    });
+
+    expect(result).toMatchObject({
+      applied: false,
+      instance: { generation: recovered.generation, lifecycleState: "ready" },
+    });
+    expect(mutationSignal?.aborted).toBe(false);
+    releaseMutation();
+    await expect(mutation).resolves.toBe("completed");
+  });
+
+  it("does not advance generation for a repeated external shutdown", async () => {
+    const harness = createHarness({ booted: true });
+    const first = await harness.actor.reconcileExternalDeviceState({
+      sessionId: harness.instance.sessionId,
+      instanceId: harness.instance.instanceId,
+      simulatorUdid: harness.instance.simulatorUdid,
+      expectedGeneration: harness.instance.generation,
+      state: "shutdown",
+    });
+    const second = await harness.actor.reconcileExternalDeviceState({
+      sessionId: first.instance.sessionId,
+      instanceId: first.instance.instanceId,
+      simulatorUdid: first.instance.simulatorUdid,
+      expectedGeneration: first.instance.generation,
+      state: "shutdown",
+    });
+
+    expect(second).toMatchObject({
+      applied: false,
+      instance: { generation: first.instance.generation },
+    });
+  });
+
   it("keeps agent-booted devices for grace then shuts down and releases", async () => {
     const harness = createHarness();
     const started = await harness.actor.start(harness.route());

@@ -11,7 +11,10 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { IOSSimulatorProjectBuilder } from "./project-adapter.js";
+import {
+  IOSSimulatorProjectBuildError,
+  IOSSimulatorProjectBuilder,
+} from "./project-adapter.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -112,12 +115,12 @@ describe("IOSSimulatorProjectBuilder", () => {
     roots.push(root);
     await mkdir(path.join(root, "One.xcworkspace"));
     await mkdir(path.join(root, "Two.xcworkspace"));
-    await expect(new IOSSimulatorProjectBuilder().inspect(root)).rejects.toMatchObject(
-      {
-        code: "AMBIGUOUS_XCODE_PROJECT",
-        message: expect.stringContaining("One.xcworkspace"),
-      },
-    );
+    await expect(
+      new IOSSimulatorProjectBuilder().inspect(root),
+    ).rejects.toMatchObject({
+      code: "AMBIGUOUS_XCODE_PROJECT",
+      message: expect.stringContaining("One.xcworkspace"),
+    });
   });
 
   it("builds an explicitly selected Xcode container without repository-specific rules", async () => {
@@ -189,9 +192,11 @@ describe("IOSSimulatorProjectBuilder", () => {
     ).rejects.toMatchObject({
       code: "PROJECT_NOT_FOUND",
     });
-    await expect(builder.inspect(root, outsideWorkspace)).rejects.toMatchObject({
-      code: "INVALID_ARGUMENT",
-    });
+    await expect(builder.inspect(root, outsideWorkspace)).rejects.toMatchObject(
+      {
+        code: "INVALID_ARGUMENT",
+      },
+    );
     await expect(
       builder.inspect(root, "Escape.xcworkspace"),
     ).rejects.toMatchObject({
@@ -224,9 +229,7 @@ describe("IOSSimulatorProjectBuilder", () => {
       }),
     ).rejects.toMatchObject({
       code: "AMBIGUOUS_XCODE_PROJECT",
-      message: expect.stringMatching(
-        /Scheme-01.*Scheme-08.*and 4 more/,
-      ),
+      message: expect.stringMatching(/Scheme-01.*Scheme-08.*and 4 more/),
     });
   });
 
@@ -281,5 +284,108 @@ describe("IOSSimulatorProjectBuilder", () => {
       ]),
       expect.any(Object),
     );
+    const settingsCall = run.mock.calls.find(([, args]) =>
+      args.includes("-showBuildSettings"),
+    );
+    expect(settingsCall?.[1]).not.toContain("-resultBundlePath");
+  });
+
+  it("uses a fresh xcresult bundle for each build", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-project-"));
+    roots.push(root);
+    const workspace = path.join(root, "Example.xcworkspace");
+    const appPath = path.join(root, "derived", "Build", "Example.app");
+    await mkdir(workspace);
+    await mkdir(appPath, { recursive: true });
+    const run = vi.fn(async (_command: string, args: readonly string[]) => {
+      if (args.includes("-list")) {
+        return {
+          stdout: JSON.stringify({ workspace: { schemes: ["Example"] } }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      if (args.includes("-showBuildSettings")) {
+        return {
+          stdout: JSON.stringify([
+            {
+              buildSettings: {
+                TARGET_BUILD_DIR: path.dirname(appPath),
+                WRAPPER_NAME: "Example.app",
+              },
+            },
+          ]),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      const resultBundleIndex = args.indexOf("-resultBundlePath");
+      if (resultBundleIndex >= 0) {
+        await mkdir(args[resultBundleIndex + 1]!, { recursive: true });
+      }
+      return { stdout: "build succeeded", stderr: "", exitCode: 0 };
+    });
+    const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
+    const input = {
+      worktreeRoot: root,
+      derivedDataPath: path.join(root, "derived"),
+    };
+
+    const first = await builder.build(input);
+    const second = await builder.build(input);
+
+    expect(first.resultBundlePath).toMatch(/CindyBuild-[0-9a-f-]+\.xcresult$/);
+    expect(second.resultBundlePath).toMatch(/CindyBuild-[0-9a-f-]+\.xcresult$/);
+    expect(second.resultBundlePath).not.toBe(first.resultBundlePath);
+  });
+
+  it("retains bounded build diagnostics when xcodebuild fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-project-"));
+    roots.push(root);
+    await mkdir(path.join(root, "Example.xcworkspace"));
+    const run = vi.fn(async (_command: string, args: readonly string[]) => {
+      if (args.includes("-list")) {
+        return {
+          stdout: JSON.stringify({ workspace: { schemes: ["Example"] } }),
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      const resultBundleIndex = args.indexOf("-resultBundlePath");
+      if (resultBundleIndex >= 0) {
+        await mkdir(args[resultBundleIndex + 1]!, { recursive: true });
+      }
+      return {
+        stdout: "compile output\nBUILD_FAILURE_MARKER",
+        stderr: "error: compile failed",
+        exitCode: 65,
+        outputTruncated: true,
+      };
+    });
+
+    const error = await new IOSSimulatorProjectBuilder({
+      commandRunner: { run },
+    })
+      .build({
+        worktreeRoot: root,
+        derivedDataPath: path.join(root, "derived"),
+      })
+      .then(
+        () => null,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(IOSSimulatorProjectBuildError);
+    expect(error).toMatchObject({
+      name: "IOSSimulatorProjectBuildError",
+      code: "APP_BUILD_FAILED",
+      buildLogTail: expect.stringMatching(
+        /Earlier command output.*BUILD_FAILURE_MARKER.*compile failed/s,
+      ),
+      resultBundlePath: expect.stringMatching(
+        /CindyBuild-[0-9a-f-]+\.xcresult$/,
+      ),
+      outputTruncated: true,
+    });
   });
 });

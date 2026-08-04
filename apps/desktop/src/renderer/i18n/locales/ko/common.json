@@ -4363,6 +4363,8 @@
       "retryHint": "상태를 새로 고친 후 다시 시도하세요.",
       "streamAlt": "{{device}}의 실시간 시뮬레이터 화면",
       "waitingForFrame": "연결되면 실시간 화면이 여기에 표시됩니다.",
+      "viewerStoppedTitle": "시뮬레이터가 중지됨",
+      "viewerStoppedDescription": "이 기기를 시작하면 실시간 화면과 제어를 다시 사용할 수 있습니다.",
       "gestureHint": "실시간 화면을 클릭하면 탭하고, 드래그하면 스와이프할 수 있습니다.",
       "textInputLabel": "시뮬레이터에 입력할 텍스트",
       "textInputPlaceholder": "시뮬레이터에 보낼 텍스트 입력",

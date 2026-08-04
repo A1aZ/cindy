@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   IOSSimulatorH264FramePush,
   IOSSimulatorLiveTouchRequest,
+  IOSSimulatorPublicInstance,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../../../../../shared/iosSimulatorIpc';
@@ -27,6 +28,79 @@ const ctx: TabKindHostContext = {
   setCloseInterceptor: () => () => undefined,
 };
 
+function streamingJpegResult(generation = 2, sequence = 1): IOSSimulatorToolResponse {
+  return {
+    ok: true,
+    data: {
+      stream: {
+        instanceId: 'instance-a',
+        generation,
+        state: 'streaming',
+        reconnectAttempt: 0,
+        latestFrame: {
+          instanceId: 'instance-a',
+          generation,
+          sequence,
+          encoding: 'jpeg',
+          receivedAt: '2026-07-24T00:00:00.000Z',
+          bytes: new Uint8Array([1, 2, 3]),
+        },
+      },
+      viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
+    },
+  };
+}
+
+function readyInstance(generation = 2): IOSSimulatorPublicInstance {
+  return {
+    instanceId: 'instance-a',
+    sessionId: 'session-a',
+    sessionKind: 'local',
+    sourceFingerprint: 'fingerprint-a',
+    simulatorUdid: 'DEVICE-UDID-123',
+    simulatorName: 'iPhone 17 Pro',
+    runtimeIdentifier: 'runtime',
+    deviceTypeIdentifier: 'type',
+    creationProvenance: 'external',
+    bootProvenance: 'preexisting',
+    generation,
+    lifecycleState: 'ready',
+    viewerState: 'attached',
+    healthState: 'healthy',
+    lease: {
+      id: `lease-${generation}`,
+      issuedAt: '2026-07-23T00:00:00.000Z',
+      expiresAt: '2026-07-23T00:10:00.000Z',
+    },
+    createdAt: '2026-07-23T00:00:00.000Z',
+    lastActiveAt: '2026-07-23T00:00:00.000Z',
+    stoppedAt: null,
+    graceExpiresAt: null,
+    errorCode: null,
+  };
+}
+
+function readyStatus(instance = readyInstance()): IOSSimulatorSessionStatus {
+  return {
+    ok: true,
+    sessionId: 'session-a',
+    deviceGrants: [],
+    mutationStates: [],
+    instances: [instance],
+    environment: {
+      platform: 'darwin',
+      supported: true,
+      ready: true,
+      xcodeVersion: 'Xcode 26.4',
+      runtimes: [],
+      devices: [],
+      issue: null,
+      error: null,
+      setupSteps: [],
+    },
+  };
+}
+
 function installStatus(statusValue: IOSSimulatorSessionStatus) {
   const status = vi.fn(async () => statusValue);
   const call = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
@@ -34,7 +108,10 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     data: {},
   }));
   const setAgentControl = vi.fn(async () => ({ ok: true as const, data: {} }));
-  const setViewerVisibility = vi.fn(async () => ({ ok: true as const, data: { stream: null } }));
+  const setViewerVisibility = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
+    ok: true,
+    data: { stream: null },
+  }));
   const setStreamProfile = vi.fn(async () => ({ ok: true as const, data: {} }));
   let h264FrameListener: ((payload: IOSSimulatorH264FramePush) => void) | null = null;
   const onH264Frame = vi.fn((callback: (payload: IOSSimulatorH264FramePush) => void) => {
@@ -43,10 +120,13 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
       if (h264FrameListener === callback) h264FrameListener = null;
     };
   });
-  const liveTouch = vi.fn(async (_request: IOSSimulatorLiveTouchRequest) => ({
-    ok: true as const,
-    data: {},
-  }));
+  const liveTouch = vi.fn(async (request: IOSSimulatorLiveTouchRequest) => {
+    void request;
+    return {
+      ok: true as const,
+      data: {},
+    };
+  });
   const latestFrame = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
     ok: true,
     data: { stream: null },
@@ -97,12 +177,41 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
   };
 }
 
+beforeEach(() => {
+  let objectUrlSequence = 0;
+  Object.defineProperty(URL, 'createObjectURL', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(() => `blob:ios-simulator-${++objectUrlSequence}`),
+  });
+  Object.defineProperty(URL, 'revokeObjectURL', {
+    configurable: true,
+    writable: true,
+    value: vi.fn(),
+  });
+  vi.stubGlobal(
+    'Image',
+    class TestImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      set src(_value: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    },
+  );
+  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
+    () => ({ clearRect: vi.fn(), drawImage: vi.fn() }) as never,
+  );
+});
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
   delete (globalThis as { VideoDecoder?: unknown }).VideoDecoder;
   delete (globalThis as { EncodedVideoChunk?: unknown }).EncodedVideoChunk;
   delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+  vi.unstubAllGlobals();
 });
 
 describe('IOSSimulatorTabBody', () => {
@@ -329,12 +438,14 @@ describe('IOSSimulatorTabBody', () => {
         setupSteps: [],
       },
     });
-    render(
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    const rendered = render(
       <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
     );
-    await waitFor(() => expect(document.querySelector('canvas')).toBeTruthy());
-    const canvas = document.querySelector('canvas') as HTMLCanvasElement;
-    Object.defineProperties(canvas, {
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const image = rendered.container.querySelector('img') as HTMLImageElement;
+    Object.defineProperties(image, {
       setPointerCapture: { configurable: true, value: vi.fn() },
       hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
       releasePointerCapture: { configurable: true, value: vi.fn() },
@@ -344,9 +455,9 @@ describe('IOSSimulatorTabBody', () => {
       },
     });
 
-    fireEvent.pointerDown(canvas, { pointerId: 7, button: 0, clientX: 20, clientY: 40 });
-    fireEvent.pointerMove(canvas, { pointerId: 7, clientX: 100, clientY: 200 });
-    fireEvent.pointerUp(canvas, { pointerId: 7, clientX: 180, clientY: 360 });
+    fireEvent.pointerDown(image, { pointerId: 7, button: 0, clientX: 20, clientY: 40 });
+    fireEvent.pointerMove(image, { pointerId: 7, clientX: 100, clientY: 200 });
+    fireEvent.pointerUp(image, { pointerId: 7, clientX: 180, clientY: 360 });
 
     await waitFor(() => {
       expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual([
@@ -389,6 +500,177 @@ describe('IOSSimulatorTabBody', () => {
     );
   });
 
+  it('rejects a frame that belongs to an obsolete simulator generation', async () => {
+    const api = installStatus(readyStatus());
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult(1));
+    api.latestFrame.mockResolvedValue(streamingJpegResult(1));
+
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ instanceId: 'instance-a', generation: 2, visible: true }),
+      );
+    });
+    expect(rendered.container.querySelector('img')).toBeNull();
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'rightSidebar.iosSimulator.pressHome',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+  });
+
+  it('disables simulator input when the presented frame stops refreshing', async () => {
+    const api = installStatus(readyStatus());
+    let resolveViewer!: (result: IOSSimulatorToolResponse) => void;
+    api.setViewerVisibility.mockImplementationOnce(
+      () =>
+        new Promise<IOSSimulatorToolResponse>((resolve) => {
+          resolveViewer = resolve;
+        }),
+    );
+    api.latestFrame.mockImplementation(() => new Promise<IOSSimulatorToolResponse>(() => {}));
+    let expireFreshness: (() => void) | null = null;
+    const originalSetTimeout = window.setTimeout.bind(window);
+    vi.spyOn(window, 'setTimeout').mockImplementation(
+      ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+        if (timeout === 3_000 && typeof handler === 'function') {
+          expireFreshness = () => handler(...args);
+          return 30_001;
+        }
+        return originalSetTimeout(handler, timeout, ...args);
+      }) as typeof window.setTimeout,
+    );
+
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+    await waitFor(() => expect(api.setViewerVisibility).toHaveBeenCalledTimes(1));
+    act(() => resolveViewer(streamingJpegResult()));
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const homeButton = screen.getByRole('button', {
+      name: 'rightSidebar.iosSimulator.pressHome',
+    }) as HTMLButtonElement;
+    expect(homeButton.disabled).toBe(false);
+
+    act(() => expireFreshness?.());
+
+    expect(homeButton.disabled).toBe(true);
+  });
+
+  it('clears the last frame and keeps only recovery actions after an external shutdown', async () => {
+    const readyInstance = {
+      instanceId: 'instance-a',
+      sessionId: 'session-a',
+      sessionKind: 'local' as const,
+      sourceFingerprint: 'fingerprint-a',
+      simulatorUdid: 'DEVICE-UDID-123',
+      simulatorName: 'iPhone 17 Pro',
+      runtimeIdentifier: 'runtime',
+      deviceTypeIdentifier: 'type',
+      creationProvenance: 'external' as const,
+      bootProvenance: 'preexisting' as const,
+      generation: 2,
+      lifecycleState: 'ready' as const,
+      viewerState: 'attached' as const,
+      healthState: 'healthy' as const,
+      lease: {
+        id: 'lease-a',
+        issuedAt: '2026-07-23T00:00:00.000Z',
+        expiresAt: '2026-07-23T00:10:00.000Z',
+      },
+      createdAt: '2026-07-23T00:00:00.000Z',
+      lastActiveAt: '2026-07-23T00:00:00.000Z',
+      stoppedAt: null,
+      graceExpiresAt: null,
+      errorCode: null,
+    };
+    const stoppedInstance = {
+      ...readyInstance,
+      generation: 3,
+      lifecycleState: 'stopped' as const,
+      stoppedAt: '2026-08-04T09:00:00.000Z',
+      lease: {
+        id: 'lease-b',
+        issuedAt: '2026-08-04T09:00:00.000Z',
+        expiresAt: '2026-08-04T09:10:00.000Z',
+      },
+    };
+    const environment = {
+      platform: 'darwin' as const,
+      supported: true,
+      ready: true,
+      xcodeVersion: 'Xcode 26.4',
+      runtimes: [],
+      devices: [],
+      issue: null,
+      error: null,
+      setupSteps: [],
+    };
+    const readyStatus: IOSSimulatorSessionStatus = {
+      ok: true,
+      sessionId: 'session-a',
+      deviceGrants: [],
+      mutationStates: [],
+      instances: [readyInstance],
+      environment,
+    };
+    const stoppedStatus: IOSSimulatorSessionStatus = {
+      ...readyStatus,
+      instances: [stoppedInstance],
+    };
+    const api = installStatus(readyStatus);
+    api.status.mockResolvedValueOnce(readyStatus).mockResolvedValue(stoppedStatus);
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    let resolveLatestFrame: ((result: IOSSimulatorToolResponse) => void) | null = null;
+    api.latestFrame.mockImplementationOnce(
+      () =>
+        new Promise<IOSSimulatorToolResponse>((resolve) => {
+          resolveLatestFrame = resolve;
+        }),
+    );
+
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    act(() => {
+      resolveLatestFrame?.({
+        ok: true,
+        data: {
+          instance: stoppedInstance,
+          stream: null,
+          viewport: null,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(rendered.container.querySelector('img')).toBeNull();
+      expect(screen.getByText('rightSidebar.iosSimulator.viewerStoppedTitle')).toBeTruthy();
+      expect(screen.getByText('rightSidebar.iosSimulator.viewerStoppedDescription')).toBeTruthy();
+    });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:ios-simulator-1');
+    expect(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.startDevice' }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.detachDevice' }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole('button', { name: 'rightSidebar.iosSimulator.pressHome' }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole('button', { name: 'rightSidebar.iosSimulator.stopDevice' }),
+    ).toBeNull();
+    expect(screen.queryByText('rightSidebar.iosSimulator.agentControlTitle')).toBeNull();
+  });
+
   it('maps host error codes to stable localized setup steps', () => {
     expect(setupStepKeys('XCODE_NOT_FOUND')).toEqual([
       'rightSidebar.iosSimulator.setup.installXcode',
@@ -399,7 +681,7 @@ describe('IOSSimulatorTabBody', () => {
   it('requests H.264 when WebCodecs is available and presents the first decoded canvas frame', async () => {
     const drawImage = vi.fn();
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(
-      () => ({ drawImage }) as never,
+      () => ({ clearRect: vi.fn(), drawImage }) as never,
     );
     class FakeVideoDecoder {
       static async isConfigSupported() {
@@ -473,6 +755,21 @@ describe('IOSSimulatorTabBody', () => {
         setupSteps: [],
       },
     });
+    const connectingH264: IOSSimulatorToolResponse = {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: 'instance-a',
+          generation: 2,
+          state: 'connecting',
+          reconnectAttempt: 0,
+          latestFrame: null,
+        },
+        viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
+      },
+    };
+    api.setViewerVisibility.mockResolvedValue(connectingH264);
+    api.latestFrame.mockResolvedValue(connectingH264);
     const rendered = render(
       <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
     );
@@ -484,23 +781,23 @@ describe('IOSSimulatorTabBody', () => {
     act(() => {
       api.emitH264Frame({
         frame: {
-        instanceId: 'instance-a',
-        generation: 2,
-        sequence: 1,
-        encoding: 'h264',
-        format: 'annex-b',
-        bytes: new Uint8Array([
-          0, 0, 0, 1, 0x67, 0x64, 0, 0x28, 0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 1, 0x65,
-          0x88,
-        ]).buffer,
-        receivedAt: '2026-07-24T00:00:00.000Z',
-        width: 1206,
-        height: 2622,
-        orientation: 'PORTRAIT',
-        scale: 3,
-        colorSpace: 'srgb',
-        timestampMicros: 0,
-        keyFrame: true,
+          instanceId: 'instance-a',
+          generation: 2,
+          sequence: 1,
+          encoding: 'h264',
+          format: 'annex-b',
+          bytes: new Uint8Array([
+            0, 0, 0, 1, 0x67, 0x64, 0, 0x28, 0, 0, 0, 1, 0x68, 0xee, 0x3c, 0x80, 0, 0, 0, 1, 0x65,
+            0x88,
+          ]).buffer,
+          receivedAt: '2026-07-24T00:00:00.000Z',
+          width: 1206,
+          height: 2622,
+          orientation: 'PORTRAIT',
+          scale: 3,
+          colorSpace: 'srgb',
+          timestampMicros: 0,
+          keyFrame: true,
         },
       });
     });
@@ -562,13 +859,14 @@ describe('IOSSimulatorTabBody', () => {
       .mockResolvedValueOnce(statusWithLease('lease-expired'))
       .mockResolvedValueOnce(statusWithLease('lease-renewed'))
       .mockResolvedValue(statusWithLease('lease-retried'));
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
     api.latestFrame
       .mockResolvedValueOnce({
         ok: false,
         errorCode: 'LEASE_EXPIRED',
         message: 'The simulator control lease expired.',
       })
-      .mockResolvedValue({ ok: true, data: { stream: null } });
+      .mockResolvedValue(streamingJpegResult(2, 2));
     api.call
       .mockResolvedValueOnce({
         ok: false,
@@ -586,6 +884,13 @@ describe('IOSSimulatorTabBody', () => {
       expect(api.setViewerVisibility).toHaveBeenCalledWith(
         expect.objectContaining({ leaseId: 'lease-renewed', visible: true }),
       );
+      expect(
+        (
+          screen.getByRole('button', {
+            name: 'rightSidebar.iosSimulator.pressHome',
+          }) as HTMLButtonElement
+        ).disabled,
+      ).toBe(false);
     });
 
     fireEvent.click(screen.getByRole('button', { name: 'rightSidebar.iosSimulator.pressHome' }));

@@ -278,6 +278,33 @@ export class WdaProcessManager {
     return safe;
   }
 
+  /**
+   * Revalidate the cached WDA session. A still-running xcodebuild process is
+   * not sufficient evidence that the driver remains reachable after its
+   * CoreSimulator device exits.
+   */
+  async probe(instanceId: string): Promise<WdaRunningInstance | null> {
+    const stopping = this.#stopping.get(instanceId);
+    if (stopping) {
+      await stopping;
+      return null;
+    }
+    const running = this.#running.get(instanceId);
+    if (!running) return null;
+    try {
+      const health = await running.driver.probe();
+      if (!health.ready) throw new Error("WebDriverAgent is not ready");
+      if (this.#running.get(instanceId) !== running)
+        return this.get(instanceId);
+      running.health = health;
+      return this.get(instanceId);
+    } catch {
+      if (this.#running.get(instanceId) === running)
+        await this.stop(instanceId);
+      return null;
+    }
+  }
+
   diagnostics(instanceId: string): {
     running: boolean;
     logTail: string;

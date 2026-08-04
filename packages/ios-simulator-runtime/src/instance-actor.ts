@@ -33,6 +33,20 @@ export interface IOSSimulatorMutationState {
   takeoverPending: boolean;
 }
 
+export interface IOSSimulatorExternalDeviceReconcileInput {
+  sessionId: string;
+  instanceId: string;
+  simulatorUdid: string;
+  expectedGeneration: number;
+  state: "shutdown" | "missing";
+}
+
+export interface IOSSimulatorExternalDeviceReconcileResult {
+  applied: boolean;
+  instance: IOSSimulatorInstance;
+  previousGeneration: number;
+}
+
 interface MutableMutationState {
   activeSource: IOSSimulatorMutationSource | null;
   lastSource: IOSSimulatorMutationSource | null;
@@ -168,6 +182,92 @@ export class IOSSimulatorInstanceActor {
     });
   }
 
+  /**
+   * Apply an exact CoreSimulator state observed outside Cindy without issuing
+   * another simctl mutation. The generation/UDID compare-and-swap is checked
+   * both before and inside the serialized lifecycle queue so an old liveness
+   * result cannot tear down a replacement instance.
+   */
+  async reconcileExternalDeviceState(
+    input: IOSSimulatorExternalDeviceReconcileInput,
+    releaseRuntime: (
+      previous: IOSSimulatorInstance,
+      next: IOSSimulatorInstance,
+    ) => void | Promise<void> = () => undefined,
+  ): Promise<IOSSimulatorExternalDeviceReconcileResult> {
+    const before = this.#store.requireOwned(input.instanceId, input.sessionId);
+    if (
+      before.generation !== input.expectedGeneration ||
+      before.simulatorUdid.toUpperCase() !== input.simulatorUdid.toUpperCase()
+    ) {
+      return {
+        applied: false,
+        instance: before,
+        previousGeneration: input.expectedGeneration,
+      };
+    }
+    const alreadyReconciled =
+      input.state === "shutdown"
+        ? before.lifecycleState === "stopped" &&
+          before.healthState === "healthy" &&
+          before.errorCode === null
+        : before.lifecycleState === "error" &&
+          before.healthState === "degraded" &&
+          before.errorCode === "ORPHANED_DEVICE";
+    if (alreadyReconciled) {
+      return {
+        applied: false,
+        instance: before,
+        previousGeneration: input.expectedGeneration,
+      };
+    }
+
+    // Invalidate mutations that entered the queue before this transition and
+    // abort the currently active Agent operation. User operations remain
+    // serialized and will revalidate their now-stale route afterwards.
+    this.#mutationState(input.instanceId).takeoverEpoch += 1;
+    this.#cancelActiveAgentMutation(input.instanceId);
+    this.#cancelGrace.get(input.instanceId)?.();
+    this.#cancelGrace.delete(input.instanceId);
+
+    return this.#serialize(input.instanceId, async () => {
+      const current = this.#store.requireOwned(
+        input.instanceId,
+        input.sessionId,
+      );
+      if (
+        current.generation !== input.expectedGeneration ||
+        current.simulatorUdid.toUpperCase() !==
+          input.simulatorUdid.toUpperCase()
+      ) {
+        return {
+          applied: false,
+          instance: current,
+          previousGeneration: input.expectedGeneration,
+        };
+      }
+
+      const now = new Date(this.#clock.now()).toISOString();
+      const renewed = this.#store.renew(current.instanceId, current.sessionId);
+      const next = this.#store.update(current.instanceId, current.sessionId, {
+        generation: current.generation + 1,
+        lifecycleState: input.state === "shutdown" ? "stopped" : "error",
+        healthState: input.state === "shutdown" ? "healthy" : "degraded",
+        errorCode: input.state === "shutdown" ? null : "ORPHANED_DEVICE",
+        lease: renewed.lease,
+        stoppedAt: input.state === "shutdown" ? now : current.stoppedAt,
+        lastActiveAt: now,
+        graceExpiresAt: null,
+      });
+      await releaseRuntime(current, next);
+      return {
+        applied: true,
+        instance: this.#store.requireOwned(input.instanceId, input.sessionId),
+        previousGeneration: current.generation,
+      };
+    });
+  }
+
   getOwned(sessionId: string, instanceId: string): IOSSimulatorInstance {
     return this.#store.requireOwned(instanceId, sessionId);
   }
@@ -268,7 +368,7 @@ export class IOSSimulatorInstanceActor {
         ) {
           throw new IOSSimulatorInstanceError(
             "MUTATION_CANCELLED",
-            "The queued simulator action was cancelled when the user took control.",
+            "The queued simulator action was cancelled because simulator control changed.",
             true,
           );
         }
@@ -301,7 +401,7 @@ export class IOSSimulatorInstanceActor {
         if (source === "agent" && controller.signal.aborted) {
           throw new IOSSimulatorInstanceError(
             "MUTATION_CANCELLED",
-            "The active simulator action was cancelled when the user took control.",
+            "The active simulator action was cancelled because simulator control changed.",
             true,
           );
         }

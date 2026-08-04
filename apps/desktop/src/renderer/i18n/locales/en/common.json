@@ -4365,6 +4365,8 @@
       "retryHint": "Refresh the status and try again.",
       "streamAlt": "Live simulator view for {{device}}",
       "waitingForFrame": "The live view will appear here when connected.",
+      "viewerStoppedTitle": "Simulator stopped",
+      "viewerStoppedDescription": "Start this device to resume the live view and controls.",
       "gestureHint": "Click the live view to tap, or drag across it to swipe.",
       "textInputLabel": "Text to type in the simulator",
       "textInputPlaceholder": "Type text in the simulator",

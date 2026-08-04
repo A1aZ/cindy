@@ -4363,6 +4363,8 @@
       "retryHint": "状態を更新してから、もう一度お試しください。",
       "streamAlt": "{{device}} のライブシミュレータ画面",
       "waitingForFrame": "接続されると、ここにライブ画面が表示されます。",
+      "viewerStoppedTitle": "シミュレータは停止しました",
+      "viewerStoppedDescription": "このデバイスを起動すると、ライブ画面と操作を再開できます。",
       "gestureHint": "ライブ画面をクリックしてタップ、ドラッグしてスワイプできます。",
       "textInputLabel": "シミュレータに入力するテキスト",
       "textInputPlaceholder": "シミュレータに送るテキストを入力",

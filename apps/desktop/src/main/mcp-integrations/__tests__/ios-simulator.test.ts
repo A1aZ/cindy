@@ -1,3 +1,7 @@
+import { mkdir, rm, stat, utimes } from 'node:fs/promises';
+import path from 'node:path';
+
+import { app } from 'electron';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -5,6 +9,7 @@ import {
   evaluateIOSSimulatorNativeCapabilityAdmission,
   IOSSimulatorInstanceActor,
   IOSSimulatorOwnershipStore,
+  IOSSimulatorProjectBuildError,
   IOSSimulatorResourceScheduler,
   WdaError,
   type IOSSimulatorEnvironmentReport,
@@ -85,6 +90,71 @@ describe('iOS Simulator host', () => {
     const environment = await host.callTool('check_environment', {}, { sessionId: 'session-a' });
     expect(environment).not.toHaveProperty('data.xcodeSelectPath');
     expect(environment).not.toHaveProperty('data.devices.0.availabilityError');
+  });
+
+  it('keeps build diagnostics host-available without a running simulator instance', async () => {
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle: {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      },
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    await expect(host.describeTools('session-a')).resolves.toMatchObject({
+      tools: {
+        build_app: { state: 'requires-instance', backend: 'host' },
+        read_build_diagnostics: { state: 'available', backend: 'host' },
+      },
+    });
+  });
+
+  it('removes stale orphaned xcresult bundles during ownership reconciliation', async () => {
+    const projectRoot = path.join(
+      app.getPath('userData'),
+      'ios-simulator',
+      'projects',
+      `orphan-reconcile-${crypto.randomUUID()}`,
+    );
+    const staleBundle = path.join(projectRoot, `CindyBuild-${crypto.randomUUID()}.xcresult`);
+    const freshBundle = path.join(projectRoot, `CindyBuild-${crypto.randomUUID()}.xcresult`);
+    await mkdir(staleBundle, { recursive: true });
+    await mkdir(freshBundle, { recursive: true });
+    const staleTime = new Date(Date.now() - 31 * 60_000);
+    await utimes(staleBundle, staleTime, staleTime);
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle: {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      },
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    try {
+      await host.reconcileOwnership();
+
+      await expect(stat(staleBundle)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(freshBundle)).resolves.toBeDefined();
+    } finally {
+      await host.dispose();
+      await rm(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it('reconciles a persisted binding with fresh generation and lease on startup', async () => {
@@ -739,6 +809,85 @@ describe('iOS Simulator host', () => {
     expect(stopDriver).toHaveBeenCalled();
   });
 
+  it('does not retain build results that finish after host disposal', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'dispose-build-session',
+      worktreeRoot: '/tmp/dispose-build-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const projectRoot = path.join(
+      app.getPath('userData'),
+      'ios-simulator',
+      'projects',
+      `dispose-build-${crypto.randomUUID()}`,
+    );
+    const resultBundlePath = path.join(projectRoot, `CindyBuild-${crypto.randomUUID()}.xcresult`);
+    await mkdir(resultBundlePath, { recursive: true });
+    let finishBuild!: (
+      result: Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>,
+    ) => void;
+    const build = vi.fn(
+      () =>
+        new Promise<Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>>((resolve) => {
+          finishBuild = resolve;
+        }),
+    );
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      projectBuilder: { build },
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => localSession('dispose-build-session')),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('dispose-build-session', instance.instanceId);
+    const callPromise = host.callTool(
+      'build_app',
+      {
+        instanceId: current.instanceId,
+        generation: current.generation,
+        leaseId: current.lease.id,
+      },
+      { sessionId: 'dispose-build-session', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
+
+    await host.dispose();
+    finishBuild({
+      kind: 'xcode-project',
+      worktreeRoot: instance.worktreeRoot,
+      projectRoot: path.join(instance.worktreeRoot, 'ios'),
+      containerPath: path.join(instance.worktreeRoot, 'ios', 'Demo.xcodeproj'),
+      scheme: 'Demo',
+      appPath: path.join(instance.worktreeRoot, 'build', 'Demo.app'),
+      resultBundlePath,
+      buildLogTail: 'BUILD SUCCEEDED',
+    });
+
+    try {
+      await expect(callPromise).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator host is shutting down.',
+      });
+      await expect(stat(resultBundlePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects SSH sessions before touching local Apple tooling', async () => {
     const inspect = vi.fn();
     const host = createIOSSimulatorHost({
@@ -1369,9 +1518,10 @@ describe('iOS Simulator host', () => {
     );
   });
 
-  it('reboots a shutdown simulator before rebuilding WDA for a visible pane', async () => {
+  it('stops the embedded viewer when the exact external simulator is shut down', async () => {
+    const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
     const lifecycle: IOSSimulatorSimctlLifecycle = {
-      findExact: vi.fn(),
+      findExact: vi.fn(async () => shutdownDevice),
       bootExact: vi.fn(async () => ({ ...READY_REPORT.devices[0]!, state: 'Booted' })),
       shutdownExact: vi.fn(async () => undefined),
       createExact: vi.fn(),
@@ -1387,36 +1537,20 @@ describe('iOS Simulator host', () => {
       sourceFingerprint: 'fingerprint-a',
       device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
     });
-    const driver = {
-      getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
-      getOrientation: vi.fn(async () => 'PORTRAIT' as const),
-      configureStream: vi.fn(
-        async (sessionId: string, profile: IOSSimulatorStreamProfile) => profile,
-      ),
-    };
-    const running = {
-      instanceId: attached.instanceId,
-      simulatorUdid: attached.simulatorUdid,
-      pid: 42,
-      driver,
-      driverSessionId: 'wda-session',
-    } as unknown as WdaRunningInstance;
+    const initialGeneration = attached.generation;
     const driverManager = {
       get: vi.fn(() => null),
-      start: vi.fn(async () => running),
+      start: vi.fn(),
       stop: vi.fn(async () => undefined),
-    };
-    const shutdownEnvironment = {
-      ...READY_REPORT,
-      devices: [{ ...READY_REPORT.devices[0]!, state: 'Shutdown' as const }],
     };
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
       driverManager,
-      runtime: { inspect: vi.fn(async () => shutdownEnvironment) },
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession: vi.fn(async (id) => localSession(id)),
       resourceScheduler: testResourceScheduler(),
+      deviceLivenessIntervalMs: 0,
     });
     const route = {
       instanceId: attached.instanceId,
@@ -1429,20 +1563,322 @@ describe('iOS Simulator host', () => {
     expect(result).toMatchObject({
       ok: true,
       data: {
-        instance: { generation: attached.generation + 1, lifecycleState: 'ready' },
-        viewport: { width: 393, height: 852 },
+        instance: {
+          generation: initialGeneration + 1,
+          lifecycleState: 'stopped',
+          healthState: 'healthy',
+          errorCode: null,
+        },
+        stream: null,
+        viewport: null,
       },
     });
-    expect(lifecycle.bootExact).toHaveBeenCalledWith(attached.simulatorUdid);
-    expect(driverManager.start).toHaveBeenCalledWith(
-      expect.objectContaining({
-        instanceId: attached.instanceId,
-        runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-26-4',
-        runtimeBuildVersion: '23E244',
-        xcodeBuild: 'Xcode 26.4\nBuild version 17E192',
-        architecture: process.arch === 'x64' ? 'x86_64' : 'arm64',
+    expect(lifecycle.bootExact).not.toHaveBeenCalled();
+    expect(driverManager.start).not.toHaveBeenCalled();
+    expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
+  });
+
+  it('does not resurrect a viewer when driver startup finishes after an external shutdown', async () => {
+    const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi
+        .fn()
+        .mockResolvedValueOnce(READY_REPORT.devices[0]!)
+        .mockResolvedValue(shutdownDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    let resolveStart!: (running: WdaRunningInstance) => void;
+    let liveRunning: WdaRunningInstance | null = null;
+    const running = {
+      instanceId: attached.instanceId,
+      simulatorUdid: attached.simulatorUdid,
+      pid: 42,
+      driver: {},
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance;
+    const driverManager = {
+      get: vi.fn(() => liveRunning),
+      start: vi.fn(
+        () =>
+          new Promise<WdaRunningInstance>((resolve) => {
+            resolveStart = (value) => {
+              liveRunning = value;
+              resolve(value);
+            };
+          }),
+      ),
+      stop: vi.fn(async () => {
+        liveRunning = null;
       }),
-    );
+    };
+    const framePump = {
+      setVisible: vi.fn(),
+      snapshot: vi.fn(() => null),
+      clear: vi.fn(),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      framePump: framePump as never,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resourceScheduler: testResourceScheduler(),
+      deviceLivenessIntervalMs: 0,
+    });
+    const route = {
+      instanceId: attached.instanceId,
+      generation: attached.generation,
+      leaseId: attached.lease.id,
+    };
+
+    const viewer = host.setViewerVisibility('session-a', route, true);
+    await vi.waitFor(() => expect(driverManager.start).toHaveBeenCalledTimes(1));
+    await expect(host.getStatus('session-a')).resolves.toMatchObject({
+      ok: true,
+      instances: [
+        {
+          instanceId: attached.instanceId,
+          lifecycleState: 'stopped',
+          healthState: 'healthy',
+          errorCode: null,
+        },
+      ],
+    });
+
+    resolveStart(running);
+
+    await expect(viewer).resolves.toMatchObject({
+      ok: true,
+      data: {
+        instance: {
+          instanceId: attached.instanceId,
+          lifecycleState: 'stopped',
+          healthState: 'healthy',
+          errorCode: null,
+        },
+        stream: null,
+        viewport: null,
+      },
+    });
+    expect(framePump.setVisible).not.toHaveBeenCalled();
+    expect(driverManager.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores an exact-device probe that finishes after the binding is detached', async () => {
+    let resolveProbe!: (device: (typeof READY_REPORT.devices)[number] | null) => void;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(
+        () =>
+          new Promise<(typeof READY_REPORT.devices)[number] | null>((resolve) => {
+            resolveProbe = resolve;
+          }),
+      ),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      deviceLivenessIntervalMs: 0,
+    });
+
+    const status = host.getStatus('session-a');
+    await vi.waitFor(() => expect(lifecycle.findExact).toHaveBeenCalledTimes(1));
+    const current = actor.getOwned('session-a', attached.instanceId);
+    await actor.detach({
+      instanceId: current.instanceId,
+      sessionId: current.sessionId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    });
+    resolveProbe(READY_REPORT.devices[0]!);
+
+    await expect(status).resolves.toMatchObject({ ok: true, instances: [] });
+  });
+
+  it('marks an unavailable exact simulator as orphaned even when it reports Shutdown', async () => {
+    const unavailableDevice = {
+      ...READY_REPORT.devices[0]!,
+      state: 'Shutdown' as const,
+      isAvailable: false,
+      availabilityError: 'runtime unavailable',
+    };
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => unavailableDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      deviceLivenessIntervalMs: 0,
+    });
+
+    await expect(host.getStatus('session-a')).resolves.toMatchObject({
+      ok: true,
+      instances: [
+        {
+          instanceId: attached.instanceId,
+          lifecycleState: 'error',
+          healthState: 'degraded',
+          errorCode: 'ORPHANED_DEVICE',
+        },
+      ],
+    });
+  });
+
+  it('marks an externally deleted exact simulator as orphaned', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => null),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
+    });
+    const initialGeneration = attached.generation;
+    const driverManager = {
+      get: vi.fn(() => null),
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      deviceLivenessIntervalMs: 0,
+    });
+
+    const status = await host.getStatus('session-a');
+
+    expect(status).toMatchObject({
+      ok: true,
+      instances: [
+        {
+          instanceId: attached.instanceId,
+          generation: initialGeneration + 2,
+          lifecycleState: 'error',
+          healthState: 'degraded',
+          errorCode: 'ORPHANED_DEVICE',
+        },
+      ],
+    });
+    expect(lifecycle.bootExact).not.toHaveBeenCalled();
+    expect(driverManager.start).not.toHaveBeenCalled();
+    expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
+  });
+
+  it('deduplicates concurrent exact-device liveness probes for one generation', async () => {
+    let resolveProbe!: (device: (typeof READY_REPORT.devices)[number] | null) => void;
+    const probe = new Promise<(typeof READY_REPORT.devices)[number] | null>((resolve) => {
+      resolveProbe = resolve;
+    });
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(() => probe),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
+    });
+    const initialGeneration = attached.generation;
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      deviceLivenessIntervalMs: 1_000,
+    });
+
+    const statuses = Promise.all([host.getStatus('session-a'), host.getStatus('session-a')]);
+    await vi.waitFor(() => expect(lifecycle.findExact).toHaveBeenCalledTimes(1));
+    resolveProbe({ ...READY_REPORT.devices[0]!, state: 'Booted' });
+
+    await expect(statuses).resolves.toEqual([
+      expect.objectContaining({
+        ok: true,
+        instances: [
+          expect.objectContaining({
+            instanceId: attached.instanceId,
+            generation: initialGeneration + 1,
+            lifecycleState: 'ready',
+          }),
+        ],
+      }),
+      expect.objectContaining({
+        ok: true,
+        instances: [
+          expect.objectContaining({
+            instanceId: attached.instanceId,
+            generation: initialGeneration + 1,
+            lifecycleState: 'ready',
+          }),
+        ],
+      }),
+    ]);
+    expect(lifecycle.findExact).toHaveBeenCalledTimes(1);
   });
 
   it('creates and attaches a Cindy-owned simulator from an exact template device', async () => {
@@ -1913,11 +2349,7 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { screenMap: { generation: instance.generation, elements: [{ label: 'Continue' }] } },
     });
-    const doctor = await host.callTool(
-      'doctor',
-      {},
-      { sessionId: 'session-a', origin: 'agent' },
-    );
+    const doctor = await host.callTool('doctor', {}, { sessionId: 'session-a', origin: 'agent' });
     expect(doctor).toMatchObject({
       ok: true,
       data: {
@@ -2798,5 +3230,110 @@ describe('iOS Simulator host', () => {
       'demo://home',
     );
     expect(requestViewerFocus).toHaveBeenCalledWith('session-a', instance.instanceId);
+  });
+
+  it('returns readable diagnostics when build_app fails', async () => {
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle: {
+        findExact: vi.fn(),
+        bootExact: vi.fn(async () => ({ ...READY_REPORT.devices[0]!, state: 'Booted' })),
+        shutdownExact: vi.fn(async () => undefined),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      },
+    });
+    const driverManager = {
+      get: vi.fn(() => null),
+      start: vi.fn(
+        async (options) =>
+          ({
+            instanceId: options.instanceId,
+            simulatorUdid: options.simulatorUdid,
+            pid: 42,
+            driver: {},
+            driverSessionId: 'wda-session',
+          }) as unknown as Promise<WdaRunningInstance>,
+      ),
+      stop: vi.fn(async () => undefined),
+    };
+    const resultBundlePath =
+      '/tmp/cindy-user-data/ios-simulator/projects/build/CindyBuild-failed.xcresult';
+    const projectBuilder: IOSSimulatorProjectBuilderAdapter = {
+      build: vi.fn(async () => {
+        throw new IOSSimulatorProjectBuildError(
+          'APP_BUILD_FAILED',
+          'The Xcode project could not be built.',
+          'compile /Users/secret/project.swift\nerror: BUILD_FAILURE_MARKER',
+          resultBundlePath,
+          true,
+          true,
+        );
+      }),
+      readXcresult: vi.fn(async () => 'xcresult BUILD_FAILURE_MARKER'),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      driverManager,
+      projectBuilder,
+      resourceScheduler: testResourceScheduler(),
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+    });
+
+    await host.callTool(
+      'attach_device',
+      { udid: READY_REPORT.devices[0]!.udid },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    const instance = actor.list('session-a')[0]!;
+    const route = {
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    };
+    const failed = await host.callTool('build_app', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+
+    expect(failed).toMatchObject({
+      ok: false,
+      errorCode: 'APP_BUILD_FAILED',
+      message: 'The Xcode project could not be built.',
+      data: {
+        diagnostics: {
+          diagnosticsId: expect.any(String),
+          buildLogTail: expect.stringMatching(/<redacted-path>.*BUILD_FAILURE_MARKER/s),
+          xcresultAvailable: true,
+          outputTruncated: true,
+        },
+      },
+    });
+    const diagnosticsId = (
+      failed as unknown as { ok: false; data: { diagnostics: { diagnosticsId: string } } }
+    ).data.diagnostics.diagnosticsId;
+    await expect(
+      host.callTool(
+        'read_build_diagnostics',
+        { diagnosticsId, source: 'build-log' },
+        { sessionId: 'session-a', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        diagnosticsId,
+        available: true,
+        text: expect.stringContaining('BUILD_FAILURE_MARKER'),
+      },
+    });
+    await expect(
+      host.callTool(
+        'read_build_diagnostics',
+        { diagnosticsId, source: 'build-log' },
+        { sessionId: 'session-b', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT' });
   });
 });

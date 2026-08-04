@@ -187,6 +187,7 @@ export class IOSSimulatorFramePump {
       entry.reconnectAttempt += 1;
       if (entry.reconnectAttempt > this.#maxReconnectAttempts) {
         entry.state = "disconnected";
+        entry.latestFrame = null;
         return;
       }
       entry.state = "reconnecting";
@@ -383,6 +384,7 @@ export class IOSSimulatorH264FramePump {
       entry.reconnectAttempt += 1;
       if (entry.reconnectAttempt > this.#maxReconnectAttempts) {
         entry.state = "disconnected";
+        entry.latestFrame = null;
         return;
       }
       entry.state = "reconnecting";

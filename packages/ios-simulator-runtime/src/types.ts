@@ -54,6 +54,8 @@ export interface IOSSimulatorCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  /** Earlier output was discarded after the bounded rolling buffer filled. */
+  outputTruncated?: boolean;
 }
 
 export interface IOSSimulatorCommandRunner {

@@ -178,7 +178,8 @@ import {
 import { GhostNetworkSlot } from './networkSlot.js';
 import {
   type ConnectionAudienceResolution,
-  loadDevConnectionAudienceResolver,
+  isConnectionSecretReady,
+  loadConnectionAudienceResolver,
   type ConnectionAudienceResolver,
 } from './connectionAudienceResolver.js';
 import {
@@ -1651,14 +1652,14 @@ let notifySlotSingleton: GhostNotifySlot | null = null;
 let connectionAudienceResolverSingleton: ConnectionAudienceResolver | null = null;
 let connectionTokenProviderSingleton: ConnectionTokenProvider | null = null;
 
-/** Development-only provenance source; production will replace this resolver with Market records. */
+/** Resolve Connection metadata from the currently installed plugin manifest. */
 function getConnectionAudienceResolver(): ConnectionAudienceResolver {
   if (!connectionAudienceResolverSingleton) {
-    connectionAudienceResolverSingleton = loadDevConnectionAudienceResolver({
-      trustFilePath: process.env.XDT_CONNECTION_DEV_TRUST_FILE,
-      isPackaged: app.isPackaged,
-      desktopDevMode: process.env.XDT_DESKTOP_DEV_MODE,
-      readFile: (pathname) => fs.readFileSync(pathname, 'utf8'),
+    connectionAudienceResolverSingleton = loadConnectionAudienceResolver({
+      readInstalledManifest: (ghostId) =>
+        getGhostManager()
+          .list()
+          .find((candidate) => candidate.manifest.id === ghostId)?.manifest ?? null,
       log,
     });
   }
@@ -3010,7 +3011,7 @@ export function getGhostNetworkSlot(): GhostNetworkSlot {
         invalidateAccessToken: (ghostId, secretKey, accountId) =>
           getGhostOauthAccountManager().invalidateAccessToken(ghostId, secretKey, accountId),
       },
-      // Cindy Connection JWT:audience 只由 Host 的可信映射推导，令牌只留在
+      // Cindy Connection JWT:audience 只由 Host 根据组织和插件 id 推导，令牌只留在
       // Main 内存并由 networkSlot 直接注入，插件与 Node Worker 都拿不到。
       connectionTokens: {
         resolve: resolveConnectionAudienceForGhost,
@@ -3595,19 +3596,19 @@ export function registerGhostIpc(): void {
     const managedSecretDecls = networkSecretDecls.filter(
       (s) => s.source === 'oidc-token',
     );
-    const connectionIdentityReady =
+    const connectionResolution =
       managedSecretDecls.length > 0
         ? (() => {
             try {
-              return resolveConnectionAudienceForGhost(ghostId) !== null;
+              return resolveConnectionAudienceForGhost(ghostId);
             } catch {
-              return false;
+              return null;
             }
           })()
-        : false;
+        : null;
     const managedSecretStates = managedSecretDecls.map((s) => ({
       key: s.key,
-      saved: connectionIdentityReady,
+      saved: isConnectionSecretReady(s.inject.hosts ?? [], connectionResolution),
     }));
     return handleGhostSecretsRequest({
       method,

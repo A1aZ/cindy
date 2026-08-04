@@ -98,7 +98,7 @@ describe('networkSlot Connection identity', () => {
     expect(JSON.stringify(result)).not.toContain('forged-by-plugin');
   });
 
-  it('fails closed when Host provenance does not authorize the plugin', async () => {
+  it('fails closed when the audience resolver does not authorize the plugin', async () => {
     const h = makeSlot({
       connectionTokens: {
         resolve: () => null,
@@ -114,7 +114,7 @@ describe('networkSlot Connection identity', () => {
     expect(JSON.stringify(result)).not.toContain('org-example');
   });
 
-  it('fails closed before issuance when the target host is absent from Host provenance', async () => {
+  it('fails closed before issuance when the target host is absent from the manifest', async () => {
     const h = makeSlot({
       connectionTokens: {
         resolve: () => ({ ...INPUT, allowedHosts: ['other.x.test'] }),
@@ -130,7 +130,7 @@ describe('networkSlot Connection identity', () => {
     expect(JSON.stringify(result)).not.toContain(INPUT.audience);
   });
 
-  it('blocks a redirect before the second request when its host is not in Host provenance', async () => {
+  it('blocks a redirect before the second request when its host is not in the manifest', async () => {
     const h = makeSlot({
       getGhost: () =>
         ghost(
@@ -240,7 +240,7 @@ describe('networkSlot Connection identity', () => {
     expect(JSON.stringify(result)).not.toContain('connection.jwt.value');
   });
 
-  it('cancels before fetch when Host provenance no longer authorizes the injected hostname', async () => {
+  it('cancels before fetch when the manifest no longer authorizes the injected hostname', async () => {
     const h = makeSlot();
     h.resolve
       .mockReturnValueOnce(INPUT)

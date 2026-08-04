@@ -46,7 +46,7 @@ describe('ghost manifest oidc-token source', () => {
     });
     expect(ghostPermissionItems(result.manifest)).toContainEqual(
       expect.objectContaining({
-        key: 'network:secret:cindy_identity',
+        key: 'network:secret:cindy_identity:oidc-token',
         labelKey: 'networkSecretOrganizationIdentity',
       }),
     );

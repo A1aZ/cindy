@@ -75,10 +75,10 @@
 
 - network 只允许 manifest 白名单域名；凭证由主机保险库注入，**无明文读回**给沙箱。
 - `source: "oidc-token"` 是 Host 托管的短时 Cindy Connection JWT：只对当前企业
-  Membership 生效，audience 由 Host 的受信插件映射推导，插件和 Node Worker 都不能读取或
-  保存令牌。声明必须固定使用 `Authorization: Bearer {value}` 并显式列出非空
-  `inject.hosts`；其中只允许精确域名，不允许通配。实际目标还必须精确命中 Host 受信安装
-  映射里的服务域名，两层同时通过才签发和注入。它没有用户输入、`url`、`exchange` 或
+  Membership 生效，audience 由 Host 根据当前组织和插件 id 推导，插件和 Node Worker
+  都不能读取或保存令牌。声明必须固定使用 `Authorization: Bearer {value}` 并显式列出
+  非空 `inject.hosts`；其中只允许精确域名，不允许通配。实际目标必须精确命中当前安装
+  插件 manifest 声明的服务域名才会签发和注入。它没有用户输入、`url`、`exchange` 或
   `setup.requires` 配置动作。Connection JWT 请求遇到 401 时，仅 GET / HEAD / OPTIONS
   可自动换令牌重试一次；非幂等请求只作废缓存，不自动重放。
 - 插件 setup 的完成状态只由 Host 读取真实持久化状态后判定。简单的

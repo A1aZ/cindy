@@ -47,14 +47,7 @@ export function inboundToggleState(
   return { checked: !isRevokedController, disabled: !masterEnabled };
 }
 
-/**
- * 本机卡片该不该显示连接问题原因行。
- *
- * 默认只在链路非 online 时显示 —— 连上了还挂着原因是噪音。`unstable`(反复连上又掉)是唯一
- * 例外:它描述的是一个**跨多次连接的模式**,判定成立时链路每隔几十秒就会 online 一小会儿,
- * 按 linkStatus 过滤会让提示跟着连接一起闪 —— 恰好在最需要它的场景下看不清。它的解除由
- * 客户端负责(稳定在线满一个稳定期即撤销),UI 照显示即可。
- */
+/** 连接问题原因行的显示规则。unstable 描述跨连接抖动,即使当前短暂 online 也保留。 */
 export function resolveActiveConnectionIssue<T extends { kind: string }>(
   linkStatus: 'stopped' | 'connecting' | 'online',
   issue: T | null,

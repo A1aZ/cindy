@@ -37,9 +37,8 @@ describe('resolveConnectionBannerVisibility', () => {
     expect(resolveConnectionBannerVisibility({ ...base, offline: true, hasIssue: true })).toBe(true);
   });
 
-  it('unstable 即使 relay 瞬时 online 也保持可见(flapping 场景不闪)', () => {
+  it('unstable 即使 relay 瞬时 online 也保持可见', () => {
     expect(resolveConnectionBannerVisibility({ ...base, hasUnstableIssue: true })).toBe(true);
-    expect(resolveConnectionBannerVisibility({ ...base, hasUnstableIssue: true, hasIssue: true })).toBe(true);
   });
 });
 

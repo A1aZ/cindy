@@ -94,6 +94,8 @@ export const DEVICE_LINK_PUSH = {
    * payload: { keepAwake: boolean } —— renderer 据此同步开关显示状态。
    */
   KEEP_AWAKE_CHANGED: 'device-link:keep-awake-changed',
+  /** 同机单持有者仲裁角色变化。payload: { standby: boolean }。 */
+  OWNERSHIP_CHANGED: 'device-link:ownership-changed',
   /**
    * 同机单持有者仲裁的角色变化。payload: { standby: boolean }。
    * standby=true 表示本机另一个 Cindy 实例正持有 device-link 连接,本实例不连 relay ——
@@ -124,7 +126,7 @@ export type DeviceLinkConnectionIssueKind =
   | 'replaced'
   | 'too-many-connections'
   | 'version-mismatch'
-  /** 反复「连上就掉」:连续多次握手成功后又在稳定期内断开 */
+  /** 连续多次握手成功后仍在稳定期内断开。 */
   | 'unstable';
 
 /** 连接问题(同 @cindy/device-link 的 DeviceLinkConnectionIssue) */
@@ -154,10 +156,7 @@ export interface DeviceLinkState {
   linkStatus: DeviceLinkStatus;
   /** 当前连接问题(null = 无;变化走 CONNECTION_ISSUE push) */
   connectionIssue: DeviceLinkConnectionIssue | null;
-  /**
-   * 本机另一个 Cindy 实例正持有 device-link 连接,本实例待命中(变化走 OWNERSHIP_CHANGED push)。
-   * 待命时 linkStatus 恒为 stopped,远程能力整体不可用 —— UI 必须给出原因和处理办法。
-   */
+  /** 本机另一个 Cindy 实例持有 device-link,当前实例处于待命。 */
   standby: boolean;
   /** 当前正在控制本机的控制端(被控端可见性初值;后续变化走 CONTROLLED_STATE push) */
   controlledBy: ControlledByDevice[];

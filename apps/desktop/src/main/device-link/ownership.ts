@@ -80,14 +80,7 @@ export interface OwnershipArbiterOptions {
   onAcquire: () => void;
   /** 失去持有权(续期 CAS 失败,行被他人接管)→ 宿主停止 relay 连接 */
   onDemote: () => void;
-  /**
-   * 「本机另一个实例正持有 device-link」的可见性回调(true = 本实例待命中)。
-   *
-   * 为什么需要:待命实例不连 relay,于是它的远程列表全是灰的、远程调用一律返回
-   * DEVICE_LINK_STANDBY —— 而这个状态此前只存在于日志和 IPC 错误里,界面上什么都不说,
-   * 用户只会以为"远程功能坏了"。宿主据此把它广播给 renderer 提示到界面上。
-   * 只在状态**变化**时回调,幂等。
-   */
+  /** 本机另一个实例持有连接时通知宿主；仅在状态变化时调用。 */
   onStandbyChanged?: (standby: boolean) => void;
   /** 持有者续期间隔,默认 5s */
   heartbeatMs?: number;
@@ -158,7 +151,7 @@ export class DeviceLinkOwnershipArbiter {
   private lastRenewOkAt = 0;
   /** 已记录过日志的外部持有者,变化才再记(避免被动态每 5s 刷一行) */
   private loggedForeignOwnerId: string | null = null;
-  /** 是否确知「本机另一实例正持有」。只由 setStandby 改,变化时通知宿主。 */
+  /** 是否确知本机另一个实例正持有 device-link。 */
   private standby = false;
 
   constructor(options: OwnershipArbiterOptions) {
@@ -186,7 +179,6 @@ export class DeviceLinkOwnershipArbiter {
     return this.owner;
   }
 
-  /** 本机另一实例正持有 device-link(本实例待命,不连 relay)。供宿主拼 getState 初值。 */
   isStandby(): boolean {
     return this.standby;
   }
@@ -218,7 +210,6 @@ export class DeviceLinkOwnershipArbiter {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // 退出仲裁即不再"待命"(登出 / 退出进程),否则界面会挂着一条过期的占用提示。
     this.setStandby(false);
     this.clearStoreRetry();
     let released: Promise<void> = Promise.resolve();
@@ -261,7 +252,9 @@ export class DeviceLinkOwnershipArbiter {
         // 回到 4409 互踢。超过自我降级期限(< staleMs)先停 client 保安全。
         this.maybeSelfDemoteForRenewFailure((this.opts.now ?? Date.now)());
       } else {
-        // DB 未就绪:排一次快速重试,把冷启动首连延迟从一整拍收敛到亚秒级
+        // DB 未就绪时保留最近一次已确认的 standby 事实,避免短暂故障把“另一实例占用”
+        // 错误地洗成普通离线;DB 恢复后的明确 ownership 结果再推进状态。
+        // 同时排一次快速重试,把冷启动首连延迟从一整拍收敛到亚秒级。
         this.scheduleStoreRetry();
       }
       return;
@@ -379,8 +372,7 @@ export class DeviceLinkOwnershipArbiter {
         if (taken) this.promote(`takeover-stale(prev pid=${row.ownerPid})`);
         return;
       }
-      // 持有者心跳新鲜 → 保持被动,不抢。待命通知刻意放在**过期判定之后**:行已过期时
-      // 本轮很可能立刻接管,先报 true 再报 false 会让界面提示闪一下。
+      // 持有者心跳新鲜 → 保持被动,不抢。过期行会直接尝试接管，不先闪一次待命提示。
       this.setStandby(true);
     } catch (err) {
       log.warn('ownership tick failed (will retry next tick)', err);
@@ -492,9 +484,6 @@ export class DeviceLinkOwnershipArbiter {
 
   private demote(reason: string): void {
     this.owner = false;
-    // 'superseded' = 行已被同机另一实例接管,本实例即刻进入待命(要给用户看);其余原因
-    // (stop / 自我降级)不是待命:前者是退出登录或退出进程,后者是本机 DB 不可用,
-    // 都不该显示「另一个实例正在用」。待命判定只跟"确知有别的持有者"绑定。
     this.setStandby(reason === 'superseded');
     log.info(`no longer device-link owner (${reason})`);
     try {
@@ -504,7 +493,6 @@ export class DeviceLinkOwnershipArbiter {
     }
   }
 
-  /** 待命状态变化通知(去重)。宿主据此让「被本机另一实例占用」在界面上可见。 */
   private setStandby(next: boolean): void {
     if (this.standby === next) return;
     this.standby = next;

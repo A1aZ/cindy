@@ -1,4 +1,11 @@
-import type { AgentKind, SessionSendOptions, SessionSendResult, UserMessage } from '@cindy/maker-core';
+import {
+  CodexResumePreparationBlockedError,
+  type AgentKind,
+  type SessionSendOptions,
+  type SessionSendResult,
+  type UserMessage,
+} from '@cindy/maker-core';
+import { CODEX_RESUME_NOT_READY_WIRE_MESSAGE } from '@cindy/maker-shared/agent-input-projection';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createMakerSendTransaction,
@@ -233,6 +240,39 @@ describe('maker SEND transaction', () => {
     );
   });
 
+  it('persists Orca queue origin without sending the unsupported origin to maker-core', async () => {
+    const { deps, session } = createDeps();
+    const transaction = createMakerSendTransaction(deps);
+    const origin = { kind: 'orca', senderLabel: 'Lead', displayText: 'hello' } as const;
+
+    await transaction.sendToAgentAccepted(
+      'session-1',
+      { type: 'user', content: 'orca prompt' },
+      undefined,
+      {
+        messageUuid: 'message-uuid',
+        persistUserMessage: {
+          clientId: 'client-1',
+          content: 'orca prompt',
+          delivery: 'turn',
+          origin,
+        },
+      },
+    );
+
+    expect(session.send).toHaveBeenCalledWith(
+      { type: 'user', content: 'orca prompt' },
+      expect.not.objectContaining({ origin }),
+    );
+    expect(deps.createDbMessage).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({
+        agentMeta: expect.objectContaining({ origin }),
+      }),
+      undefined,
+    );
+  });
+
   it('threads the autoResume flag into persisted agentMeta', async () => {
     // 中断自动续跑补发的「继续」经 coordinator drain 透传 autoResume(见
     // AgentInputQueuedMessage.autoResume)。它必须落进 agentMeta:renderer 靠它隐藏气泡,
@@ -246,12 +286,14 @@ describe('maker SEND transaction', () => {
       undefined,
       {
         messageUuid: 'message-uuid',
+        turnAttemptToken: 7,
         persistUserMessage: {
           clientId: 'client-1',
           content: 'continue',
           sdkSessionId: 'sdk-1',
           delivery: 'turn',
           autoResume: true,
+          autoResumeInfo: { attempt: 1, maxAttempts: 5, sessionTotal: 7 },
         },
       },
     );
@@ -263,6 +305,9 @@ describe('maker SEND transaction', () => {
       }),
       undefined,
     );
+    expect(
+      (deps.getSession('session-1')?.send as ReturnType<typeof vi.fn>).mock.calls[0]?.[1],
+    ).toEqual(expect.objectContaining({ turnAttemptToken: 7 }));
   });
 
   it('omits autoResume for ordinary user sends', async () => {
@@ -648,6 +693,37 @@ describe('maker SEND transaction', () => {
     expect(session.send).not.toHaveBeenCalled();
   });
 
+  it('rebuilds an error session through lazy bootstrap before dispatch', async () => {
+    const failedSession = createSession({
+      getStatus: vi.fn(() => 'error' as const),
+    });
+    const recoveredSession = createSession({ id: 'session-1', workDir: 'C:\\repo' });
+    const createOpts: MakerSessionCreateOpts = {
+      id: 'session-1',
+      agentKind: 'codex',
+      workingDir: 'C:\\repo',
+      model: 'gpt-5.4',
+    };
+    const { deps } = createDeps({
+      getSession: vi.fn(() => failedSession),
+      bootstrapSession: vi.fn(async () => ({
+        session: recoveredSession,
+        didInjectOrcaInstructions: false,
+        didInjectProjectContext: false,
+      })),
+    });
+    const transaction = createMakerSendTransaction(deps);
+
+    await expect(transaction.sendToAgentAccepted('session-1', 'hello', createOpts)).resolves.toMatchObject({
+      accepted: true,
+      outcome: { kind: 'session-dispatch', dispatched: true },
+    });
+
+    expect(failedSession.send).not.toHaveBeenCalled();
+    expect(deps.bootstrapSession).toHaveBeenCalledWith(createOpts);
+    expect(recoveredSession.send).toHaveBeenCalled();
+  });
+
   it('lazy-create adopts the DB working_dir when the caller-provided one is stale', async () => {
     // 场景:输入队列崩溃快照回放,createOpts 内嵌启动 sweep 改写前的老路径。
     const staleDir = '/data/xdt-maker/dialogues/2026-06-22/lazy-1';
@@ -771,6 +847,39 @@ describe('maker SEND transaction', () => {
     expect(deps.broadcastSessionCreated).not.toHaveBeenCalled();
   });
 
+  it('projects a stable marker with a safe fallback when lazy-create Codex resume preparation is blocked', async () => {
+    const diagnostic = 'Codex thread private-id is not safe to resume yet';
+    const { deps } = createDeps({
+      getSession: vi.fn(() => undefined),
+      bootstrapSession: vi.fn(async () => {
+        throw new CodexResumePreparationBlockedError(diagnostic);
+      }),
+    });
+    const transaction = createMakerSendTransaction(deps);
+
+    await expect(
+      transaction.sendToAgentAccepted('lazy-session', 'hello', {
+        id: 'lazy-session',
+        agentKind: 'codex',
+        workingDir: 'D:\\lazy',
+        model: 'gpt-5.4',
+      }),
+    ).resolves.toEqual({
+      accepted: false,
+      reason: 'LAZY_CREATE_FAILED',
+      outcome: {
+        kind: 'host-send',
+        accepted: false,
+        code: 'LAZY_CREATE_FAILED',
+        message: CODEX_RESUME_NOT_READY_WIRE_MESSAGE,
+      },
+    });
+    expect(deps.log.warn).toHaveBeenCalledWith(
+      'send: Codex resume preparation blocked during lazy create',
+      { sessionId: 'lazy-session', error: diagnostic },
+    );
+  });
+
   it('maps lazy-create credential busy to CREDENTIAL_SWITCH_BUSY without dispatching', async () => {
     const { deps } = createDeps({
       getSession: vi.fn(() => undefined),
@@ -866,6 +975,43 @@ describe('maker SEND transaction', () => {
       },
     });
 
+    expect(oldSession.send).not.toHaveBeenCalled();
+  });
+
+  it('projects a stable marker with a safe fallback when rehydrate Codex resume preparation is blocked', async () => {
+    const diagnostic = 'Codex thread private-id still has a live rollout writer';
+    const oldSession = createSession({ id: 'orca-session', workDir: 'C:\\repo' });
+    const { deps } = createDeps({
+      getSession: vi.fn(() => oldSession),
+      isOrcaMcpHydrated: vi.fn(() => false),
+      synthesizeOrcaVendorOptionsFromDb: vi.fn(async () => true),
+      withRehydrateCloseSuppressed: vi.fn(async () => {
+        throw new CodexResumePreparationBlockedError(diagnostic);
+      }),
+    });
+    const transaction = createMakerSendTransaction(deps);
+
+    await expect(
+      transaction.sendToAgentAccepted('orca-session', 'hello', {
+        id: 'orca-session',
+        agentKind: 'codex',
+        workingDir: 'C:\\repo',
+        model: 'gpt-5.4',
+      }),
+    ).resolves.toEqual({
+      accepted: false,
+      reason: 'REHYDRATE_FAILED',
+      outcome: {
+        kind: 'host-send',
+        accepted: false,
+        code: 'REHYDRATE_FAILED',
+        message: CODEX_RESUME_NOT_READY_WIRE_MESSAGE,
+      },
+    });
+    expect(deps.log.warn).toHaveBeenCalledWith(
+      'send: Codex resume preparation blocked during rehydrate',
+      { sessionId: 'orca-session', error: diagnostic },
+    );
     expect(oldSession.send).not.toHaveBeenCalled();
   });
 

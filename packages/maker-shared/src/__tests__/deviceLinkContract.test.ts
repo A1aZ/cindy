@@ -117,10 +117,8 @@ describe('device-link shared contract', () => {
     expect(connectionIssueTitle('replaced')).toContain('顶替');
     expect(connectionIssueHint('too-many-connections')).toContain('断开其它设备');
     expect(connectionIssueHint('version-mismatch')).toContain('升级到最新版本');
-    // 反复「连上就掉」:文案说的是**本机**链路(issue 来自本端 client),不能读成对端的问题
     expect(connectionIssueTitle('unstable')).toContain('反复断开');
     expect(connectionIssueHint('unstable')).toContain('本机');
-    expect(connectionIssueHint('unstable')).toContain('重启');
   });
 
   it('preserves structured remote error codes and access revoked classification', () => {

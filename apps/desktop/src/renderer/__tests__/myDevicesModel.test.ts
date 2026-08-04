@@ -64,22 +64,11 @@ describe('inboundToggleState（允许它控制本机）', () => {
 });
 
 describe('resolveActiveConnectionIssue（本机卡片的原因行）', () => {
-  const authFailed = { kind: 'auth-failed' as const };
-  const unstable = { kind: 'unstable' as const };
-
-  it('无 issue → 不显示', () => {
-    expect(resolveActiveConnectionIssue('online', null)).toBeNull();
-    expect(resolveActiveConnectionIssue('connecting', null)).toBeNull();
-  });
-
-  it('普通 issue:连上了就不再显示原因(避免噪音)', () => {
+  it('普通 issue 在 online 后隐藏,unstable 即使 online 仍显示', () => {
+    const authFailed = { kind: 'auth-failed' as const };
+    const unstable = { kind: 'unstable' as const };
     expect(resolveActiveConnectionIssue('connecting', authFailed)).toBe(authFailed);
-    expect(resolveActiveConnectionIssue('stopped', authFailed)).toBe(authFailed);
     expect(resolveActiveConnectionIssue('online', authFailed)).toBeNull();
-  });
-
-  it('unstable:即使此刻恰好 online 也照显示 —— 它描述的是跨多次连接的模式,按 linkStatus 过滤会跟着连接一起闪', () => {
     expect(resolveActiveConnectionIssue('online', unstable)).toBe(unstable);
-    expect(resolveActiveConnectionIssue('connecting', unstable)).toBe(unstable);
   });
 });

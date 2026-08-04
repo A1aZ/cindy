@@ -21,6 +21,12 @@ import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './local
 /** 清单文件名(zip 根部)。 */
 export const GHOST_MANIFEST_FILE = 'ghost.json';
 
+/**
+ * 安装器读取包内 ghost.json 的硬上限。源码目录的发现/预读取可以使用更宽的
+ * 安全预算，但最终写进 .cindy 的清单必须落在这个上限内。
+ */
+export const GHOST_INSTALL_MANIFEST_MAX_BYTES = 256 * 1024;
+
 /** 意识文件扩展名。 */
 export const CINDY_FILE_EXT = '.cindy';
 
@@ -115,6 +121,7 @@ export const GHOST_SLOTS = [
   'node',
   'network',
   'notify',
+  'badge',
   'confirm',
   'fs',
   'session-context',
@@ -710,12 +717,16 @@ export const GHOST_OAUTH_BOUNCE_PATH_RE = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)
  *   授权换来的 access token——用户在意识设置页填 client 凭证并点"连接账号",
  *   主机跑授权流程并保管全部令牌,出网时现取新鲜 token 注入(见
  *   GhostSecretOauthDecl;必须同时声明 oauth 详单)。
+ * - 'oidc-token':值 = Cindy 为当前企业 Membership 签发的短时 Connection
+ *   JWT。只有当前组织的 Plugin Market organization 安装记录和 manifest digest
+ *   校验通过时,Host 才根据当前组织和插件 id 推导 audience;插件不能声明或读取。
+ *   令牌只在 networkSlot 发请求时注入，且永不进入 Node Worker。
  *
  * ('login-feishu-token' 已于 2026-07-17 随飞书登录整体下线退役——xd-feishu
  * 改走 source:'oauth' + tokenBroker:'feishu';存量已装清单由内置意识播种器
  * 按指纹覆盖自愈,未覆盖前该意识加载被拒属预期。)
  */
-export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth'] as const;
+export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth', 'oidc-token'] as const;
 export type GhostSecretSource = (typeof GHOST_SECRET_SOURCES)[number];
 
 /**
@@ -734,7 +745,7 @@ export interface GhostSecretDecl {
   key: string;
   /** 给用户看的名称(装入确认框展示)。 */
   label: string;
-  /** 凭证值来源;缺省 'user'(校验归一化:'user' 不落清单,只保留 'login-email')。 */
+  /** 凭证值来源;缺省 'user'(校验归一化:'user' 不落清单)。 */
   source?: GhostSecretSource;
   /** 可选提示(如"在 example.com/settings 生成")。 */
   hint?: string;
@@ -1205,6 +1216,7 @@ export interface GhostManifest {
   card?: GhostCardNeeds;
   /** 注册给 agent 的工具声明(与 slots 含 'tool' 成对)。 */
   tools?: GhostToolDecl[];
+  /** `@` 面板入口由已安装插件的 command 提供；不支持资源搜索字段。 */
   /**
    * cindy 槽能力详单(与 slots 含 'cindy' 成对;缺省 = 零能力,任何代办
    * 都会被拒并提示作者补声明)。清单里的旧字段名 model 在校验层作别名
@@ -1349,6 +1361,7 @@ export function ghostContentKeys(manifest: GhostManifest): string[] {
     else if (slot === 'card') keys.push('slotCard');
     else if (slot === 'network') keys.push('slotNetwork');
     else if (slot === 'notify') keys.push('slotNotify');
+    else if (slot === 'badge') keys.push('slotBadge');
     else if (slot === 'confirm') keys.push('slotConfirm');
     else if (slot === 'fs') keys.push('slotFs');
     // skill 是信任面最高的内容(给主 Agent 灌指令),详情页必须如实露出。
@@ -1601,8 +1614,8 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     // 来源分档文案:登录邮箱派生 vs 用户自填(意识 settingsHtml 收单——宿主
     // 凭证渲染已退役,user 凭证只剩这一档)。收单档文案不许说"意识代码无法
     // 读取"这种过头话:录入瞬间明文经过意识页面,知情同意面要如实。
-    // key 不掺 source——同一凭证换档时更新 diff 显示为内容不变但文案已按
-    // 新版渲染,可接受。
+    // user/login-email/oauth 保持历史 key,不影响存量插件;企业身份是新的高风险
+    // Host 托管来源,单独带 source 后缀,从其它来源切换时必须重新确认。
     if (secret.source === 'oauth' && secret.oauth) {
       // OAuth 凭证:展示授权域名 + scopes 全量如实列出(通用声明式的知情
       // 同意面——平台不预设 provider,用户看到的就是全部授权事实)。detail
@@ -1622,6 +1635,16 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
         ...(secret.oauth.scopes && secret.oauth.scopes.length > 0
           ? { detail: secret.oauth.scopes.join('\n') }
           : {}),
+      });
+      continue;
+    }
+    if (secret.source === 'oidc-token') {
+      items.push({
+        key: `network:secret:${secret.key}:oidc-token`,
+        kind: 'network',
+        labelKey: 'networkSecretOrganizationIdentity',
+        labelArgs: { name: secret.label },
+        detailKey: 'networkSecretOrganizationIdentityDetail',
       });
       continue;
     }
@@ -1771,6 +1794,15 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       items.push({ key: 'notify', kind: 'notify', labelKey: 'notify', detailKey: 'notifyDetail' });
     }
   }
+  // 未读角标:与 notify 槽**并列**的独立一档(不是它的子项)——绿点比 toast 克制,
+  // 只想安静点个绿点的意识不该被迫连"能弹全屏顶部提示"一起申请。
+  // key 独立还有一层必要性(同 subscribe 的 activity topic 判例):
+  // diffGhostPermissionItems 按 key + detail 比对,若并进某个固定 key,已装插件
+  // 新增这一档时 added 为空,plugin-market 的扩权确认就不会拦——用户会在毫不
+  // 知情的情况下多给出一个常驻的注意力入口。
+  if (manifest.slots.includes('badge')) {
+    items.push({ key: 'badge', kind: 'notify', labelKey: 'badge', detailKey: 'badgeDetail' });
+  }
   // confirm 槽:能请主机弹一个二选一确认框(会打断操作)。装入时如实告知"它会来问",
   // 决定权仍在用户的点击上——detailKey 的固定说明把这层讲清。
   if (manifest.slots.includes('confirm')) {
@@ -1853,6 +1885,26 @@ export function diffGhostPermissionItems(
 }
 
 /**
+ * 返回未被发布清单或已批准旧版本覆盖的包权限。
+ *
+ * 第二个来源用于兼容旧市场元数据：旧详情投影可能漏掉已存在的权限，
+ * 但这些权限此前已经被用户批准，更新时应继续保留。
+ */
+export function unreviewedGhostPermissionItems(
+  reviewed: GhostManifest,
+  previouslyInstalled: GhostManifest | undefined,
+  actual: GhostManifest,
+): GhostPermissionItem[] {
+  const approvalKey = (item: GhostPermissionItem): string =>
+    JSON.stringify([item.key, item.detail ?? '']);
+  const approved = new Set(ghostPermissionItems(reviewed).map(approvalKey));
+  for (const item of ghostPermissionItems(previouslyInstalled ?? reviewed)) {
+    approved.add(approvalKey(item));
+  }
+  return ghostPermissionItems(actual).filter((item) => !approved.has(approvalKey(item)));
+}
+
+/**
  * icon 允许的图片扩展名 → mime(校验与 main 读盘供图共用同一口径)。
  * 不收 svg:svg 可携带脚本,虽经 <img> 渲染不执行,仍不给这个面。
  */
@@ -1863,6 +1915,12 @@ const GHOST_ICON_MIME_BY_EXT: Record<string, string> = {
   '.webp': 'image/webp',
   '.gif': 'image/gif',
 };
+
+/**
+ * icon 字节上限。icon 会以 data URL 形态同步下发给 Renderer，因此安装、
+ * 本地读取与 Forge overlay 必须共用同一硬顶，避免“能打包但不能安装”。
+ */
+export const GHOST_ICON_MAX_BYTES = 512 * 1024;
 
 /** icon 路径 → mime;扩展名不在白名单返回 null(即校验不通过)。 */
 export function ghostIconMimeType(p: string): string | null {
@@ -2746,6 +2804,28 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     }
   }
 
+  /**
+   * 未读角标槽(badge)与 `panel` 严格成对:未读点承诺「点开能看到内容」,
+   * 纯工具型 / 对话型意识没有可打开的界面,点亮了也无处可点,给了就是骗点击。
+   *
+   * **为什么用一个新 slot 而不是 `notify` 下的子字段**(2026-08-03,codex review P1):
+   * `slots` 是硬白名单——未登记的槽名一律拒装。所以任何**已经装在用户机器上**的
+   * 老包都不可能带 `badge` 槽:当初装它的客户端会直接拒绝那份清单。这让「新声明」
+   * 与「老包的同名自定义字段」成为**可证明**可分,而不是靠概率赌。
+   *
+   * 早前的方案把它放在顶层 `notify` 对象里。那个字段在本改动前完全未登记、会被
+   * 校验器静默忽略,于是两头堵:严格校验会让写过同名字段的老包升级后消失(§5 红线),
+   * 放松成"识别到就给"又会让恰好写成 `badge:true` 且有面板的老包在**没有任何安装
+   * 或更新确认**的情况下白拿一个常驻注意力面。换成 slot 后两个问题同时消失,
+   * `notify` 顶层字段也不再被解释——存量清单里有什么形态都照旧忽略。
+   */
+  if (slots.includes('badge') && panel === undefined) {
+    return {
+      ok: false,
+      reason: 'slots 声明了 "badge" 但缺少 panel——未读点承诺「点开能看到内容」,没有面板的意识点亮了也无处可点',
+    };
+  }
+
   // 工具声明(卡槽②):与 slots 含 'tool' 严格成对,规则同 panel。
   let tools: GhostToolDecl[] | undefined;
   if (raw.tools !== undefined) {
@@ -2791,6 +2871,8 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     return { ok: false, reason: 'slots 声明了 "tool" 但缺少 tools(注册什么工具要写清楚)' };
   }
 
+  // 历史版本可能在 manifest 中带有已移除的资源搜索字段；它作为未知顶层字段忽略，
+  // 保持存量插件可见且不因字段形状自动获得新的运行能力。
   // cindy 槽能力详单:与 slots 含 'cindy' 成对(有详单必有槽;有槽无详单
   // 允许装入但运行时零能力——老包不消失,只是代办被拒并提示作者更新)。
   // 字段旧名 model 作别名收入(两个都写以 cindy 为准)。
@@ -3391,7 +3473,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         if (typeof s.label !== 'string' || s.label.trim().length === 0 || s.label.length > 64) {
           return { ok: false, reason: 'network.secrets[].label 必须是 1–64 字符的非空字符串' };
         }
-        // 来源:缺省 'user';'login-email' = 主机登录邮箱派生(用户不填值)。
+        // 来源:缺省 'user';login-email / oauth / oidc-token 均由主机托管。
         // 归一化:'user' 不落清单(与缺省同义,权限 diff 不 churn)。
         let source: GhostSecretSource | undefined;
         if (s.source !== undefined) {
@@ -3406,6 +3488,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           }
           if (s.source === 'login-email') source = 'login-email';
           if (s.source === 'oauth') source = 'oauth';
+          if (s.source === 'oidc-token') source = 'oidc-token';
         }
         // 旧 input 字段已退役：Setup Runtime 直接从 Secret 声明生成 Host 表单，
         // settingsHtml 继续提供详情页管理。遗留 `input: "ghost"` 接受并忽略
@@ -3418,26 +3501,26 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         }
         // login-email:值取自主机登录态派生,用户不填、没有输入面,
         // 禁 url / exchange,settingsHtml 豁免。
-        const loginDerived = source === 'login-email';
-        if (s.input === 'ghost' && loginDerived) {
+        const hostDerived = source === 'login-email' || source === 'oidc-token';
+        if (s.input === 'ghost' && hostDerived) {
           return {
             ok: false,
             reason: `source: ${source} 的凭证不允许标注 input: ghost(派生凭证没有输入,谈不上谁收单)`,
           };
         }
-        if (!loginDerived && raw.settingsHtml === undefined) {
+        if (!hostDerived && raw.settingsHtml === undefined) {
           return {
             ok: false,
             reason: 'network.secrets 声明了用户填写的凭证时必须同时声明 settingsHtml(调用前可由 Host Setup 卡收单,settingsHtml 仍是长期管理/替换/清除入口)',
           };
         }
-        if (loginDerived && s.url !== undefined) {
+        if (hostDerived && s.url !== undefined) {
           return {
             ok: false,
             reason: `network.secrets[].source 为 ${source} 时不允许声明 url(值取自主机登录态,没有"前往控制台"可去)`,
           };
         }
-        if (loginDerived && s.exchange !== undefined) {
+        if (hostDerived && s.exchange !== undefined) {
           // 组合会把登录态凭证作为原始值 POST 给交换端点,而确认框文案只
           // 承诺"派生注入请求头"——语义盖不住,结构上禁掉(有真实场景再议)。
           return {
@@ -3501,6 +3584,26 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
               return { ok: false, reason: `network.secrets[].inject.hosts 含重复条目 ${JSON.stringify(ih)}` };
             }
             injectHosts.push(ihNorm);
+          }
+        }
+        if (source === 'oidc-token') {
+          if (inj.header !== 'Authorization' || inj.format !== 'Bearer {value}') {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时 inject 必须是 Authorization: Bearer {value}',
+            };
+          }
+          if (injectHosts === undefined) {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时必须显式声明非空 inject.hosts，限制企业身份令牌的流向',
+            };
+          }
+          if (injectHosts.some((host) => host.startsWith('*.'))) {
+            return {
+              ok: false,
+              reason: 'network.secrets[].source 为 oidc-token 时 inject.hosts 只允许精确域名，不允许通配',
+            };
           }
         }
         // oauth(source: 'oauth' 时必填):主机托管 OAuth 授权详单。授权页与
@@ -4007,7 +4110,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
 
   // setup 就绪声明:引用必须指向已声明的凭证/连接(悬空引用在装包期拒,
   // 不留到运行期才发现作者写错);kv 引用要求 settingsHtml(没有设置页
-  // 没人填参数);login-email 源恒就绪,引用它属结构性误解,直接拒装。
+  // 没人填参数);Host 派生源没有用户配置动作,引用它属结构性误解,直接拒装。
   let setup: GhostSetupDecl | undefined;
   if (raw.setup !== undefined) {
     if (!isPlainObject(raw.setup)) {
@@ -4019,12 +4122,21 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     if (!Array.isArray(su.requires) || su.requires.length > GHOST_SETUP_MAX_GROUPS) {
       return { ok: false, reason: `setup.requires 必须是 0–${GHOST_SETUP_MAX_GROUPS} 组的数组(空数组 = 显式声明无使用前置需求)` };
     }
-    const secretByKey = new Map<string, { loginDerived: boolean }>([
+    const secretByKey = new Map<
+      string,
+      { hostDerivedSource: 'login-email' | 'oidc-token' | null }
+    >([
       ...(network?.secrets ?? []).map(
-        (s) => [s.key, { loginDerived: s.source === 'login-email' }] as const,
+        (s) => [
+          s.key,
+          {
+            hostDerivedSource:
+              s.source === 'login-email' || s.source === 'oidc-token' ? s.source : null,
+          },
+        ] as const,
       ),
       ...(node?.secretBindings ?? []).map(
-        (s) => [s.key, { loginDerived: false }] as const,
+        (s) => [s.key, { hostDerivedSource: null }] as const,
       ),
     ]);
     const connectionKeys = new Set((network?.connections ?? []).map((c) => c.key));
@@ -4048,8 +4160,8 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
             if (!decl) {
               return { ok: false, reason: `setup 引用了未声明的凭证 ${JSON.stringify(refKey)}(必须逐字取自 network.secrets[].key 或 node.secretBindings[].key)` };
             }
-            if (decl.loginDerived) {
-              return { ok: false, reason: `setup 不允许引用 login-email 源凭证 ${JSON.stringify(refKey)}(登录派生身份恒就绪,无配置动作可引导)` };
+            if (decl.hostDerivedSource) {
+              return { ok: false, reason: `setup 不允许引用 ${decl.hostDerivedSource} 源凭证 ${JSON.stringify(refKey)}(Host 派生身份没有用户配置动作可引导)` };
             }
             item = { kind: 'secret', key: refKey };
           } else {
@@ -4825,6 +4937,49 @@ export interface GhostPipeNotify {
 
 /** notify 的 invoke 返回(失败带人话原因,供意识作者调试;不涉他人信息)。 */
 export type GhostPipeNotifyResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * 上行:未读角标(badge 槽,2026-08-03)。意识告诉主机"我这儿有新内容了",
+ * 主机在插件入口与插件卡上点一颗**绿点**,并把 summary 显示在卡片简介位。
+ *
+ * 与 notify 的分工:notify 是"弹一条即走"的一次性 toast(错过就没了);本消息
+ * 是**持久状态**——用户没去看就一直亮着,打开面板即清零。两者是**并列的两档
+ * 权限**,不是加档关系:要 toast 声明 `notify` 槽,要绿点声明 `badge` 槽,
+ * 谁也不是谁的前置(绿点比 toast 克制,不该被 toast 权限捆绑)。
+ *
+ * 门槛(validateGhostManifest 强制):只有声明了 `panel` 的意识能申请。理由是
+ * 未读点承诺"点开能看到内容",纯工具型/对话型意识没有可打开的界面,给了就是
+ * 骗点击。
+ *
+ * 信任边界与 notify 同款:意识只供纯文本 summary(净化 + 限长),点的颜色、
+ * 位置、身份头全由主机画;意识改不了别人的角标(id 由沙箱绑定,不看载荷自报)。
+ */
+export interface GhostPipeBadge {
+  type: 'badge';
+  /** true = 有未读(点亮);false = 自己清零(如意识内已读)。 */
+  unread: boolean;
+  /**
+   * 最新一条的摘要(纯文本,≤ GHOST_BADGE_SUMMARY_MAX_CHARS)。
+   * 显示在插件卡的简介位,替代静态描述——用户扫一眼就知道新内容是什么。
+   * unread:false 时忽略。
+   */
+  summary?: string;
+}
+
+/** badge 的 invoke 返回(与 notify 同款结构化拒绝,不抛异常穿透沙箱)。 */
+export type GhostPipeBadgeResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * 未读摘要长度上限。比 notify 正文更短:它要挤进卡片一行、单行省略,
+ * 太长的部分用户根本看不到,不如让作者自己裁。
+ */
+export const GHOST_BADGE_SUMMARY_MAX_CHARS = 80;
+
+/**
+ * 同一意识两次角标上报的最小间隔 ms。比 notify 宽松得多——角标是幂等的
+ * 状态写入(不像 toast 每条都打扰用户),但仍要挡住死循环刷写。
+ */
+export const GHOST_BADGE_MIN_INTERVAL_MS = 500;
 
 /** 提示正文长度上限(与订阅槽 block reason ≤200 同量级:一眼能读完的量)。 */
 export const GHOST_NOTIFY_MAX_CHARS = 200;

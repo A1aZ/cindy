@@ -25,6 +25,9 @@ type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
 type MakerSessionTreeSnapshot = import('@cindy/maker-core').SessionTreeSnapshot;
+type BrowserBackendHealth = import('../shared/browserBackend').BrowserBackendHealth;
+type BrowserBackendRecoveryResult =
+  import('../shared/browserBackend').BrowserBackendRecoveryResult;
 type DesktopAccountDeletionConfirmInput =
   import('../shared/authIpc').DesktopAccountDeletionConfirmInput;
 type DesktopAccountDeletionAvailabilityResult =
@@ -1118,6 +1121,8 @@ interface ElectronAPI {
      * 引导去配置。未装 NOT_FOUND。
      */
     setupStatus: (id: string) => Promise<import('../shared/ghost').GhostSetupStatus>;
+    /** 只列入口元数据，不运行插件工具；远程/device-link 不暴露。 */
+    /** 用户选定一个入口后，按固定只读摘要契约搜索该插件。 */
     /** 最近使用顺序变化（发送 /卸载），多窗口同步。 */
     onRecentUsageChanged: (
       callback: (payload: { ids: string[] }) => void,
@@ -1320,6 +1325,28 @@ interface ElectronAPI {
         tone: 'info' | 'success' | 'warning' | 'error';
       }) => void,
     ) => () => void;
+    /** badge 槽:意识未读角标变化(插件入口与插件卡上的绿点)。
+     *  与 onNotify 的分工是持久状态对一次性 toast——用户没去看就一直亮着。
+     *  summary/at 只在 unread:true 时给。 */
+    onBadge: (
+      callback: (payload: {
+        ghostId: string;
+        unread: boolean;
+        summary?: string;
+        at?: number;
+      }) => void,
+    ) => () => void;
+    /** badge 槽:未读全量快照(换账号后整表替换;逐条 onBadge 只表达增量)。 */
+    onUnreadSnapshot: (
+      callback: (payload: {
+        entries: Array<{ ghostId: string; summary?: string; at: number }>;
+      }) => void,
+    ) => () => void;
+    /** badge 槽:未读角标首帧快照(同步读,避免绿点晚一帧跳出来)。 */
+    unreadSync: () => { entries: Array<{ ghostId: string; summary?: string; at: number }> };
+    /** badge 槽:用户侧熄灭未读(打开面板 = 明确已读)。seenAt = 当时看到的那条
+     *  的点亮时刻,main 据此条件删除,避免陈旧清除抹掉更新的未读。 */
+    clearUnread: (id: string, seenAt?: number) => Promise<{ ok: boolean }>;
     /** confirm 槽:插件请求弹主机同款确认框(main 已资格审+净化+限速+单飞)。
      *  main 只投单个窗口,所以收到即本窗口负责弹;答案用 resolveConfirm 回包。
      *  confirmText/cancelText 为 null 时用 renderer 自己的缺省文案(跟语言走)。 */
@@ -1358,6 +1385,12 @@ interface ElectronAPI {
       action: 'status' | 'spawn' | 'stop' | 'crash',
       id?: string,
     ) => Promise<{ states?: Record<string, string>; state?: string }>;
+    /** dev-only：经正式插件派发/权限链调用一个已声明工具。 */
+    devCall: (
+      id: string,
+      tool: string,
+      args: Record<string, unknown>,
+    ) => Promise<unknown>;
   };
 
   /** Plugin Protocol v2 市场；网络、下载与安装全部在 main 进程完成。 */
@@ -1368,12 +1401,8 @@ interface ElectronAPI {
     ) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
     install: (
       pluginId: string,
-      options: {
-        expectedReleaseId: string;
-        expectedManifest?: import('../shared/ghost').GhostManifest;
-        allowPermissionExpansion?: boolean;
-      },
-    ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
+      options: import('../shared/pluginMarket').PluginMarketInstallOptions,
+    ) => Promise<import('../shared/pluginMarket').PluginMarketInstallResult>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
     listSources: () => Promise<import('../shared/pluginMarket').MarketSourceSummary[]>;
     pickLocalSource: (
@@ -1589,6 +1618,7 @@ interface ElectronAPI {
       sessionId: string | null;
       workdir: string | null;
       remoteHostId: string | null;
+      deviceLinkDeviceId?: string | null;
       available: boolean;
     } | null>;
     /** 子窗口根组件挂载握手。 */
@@ -1603,6 +1633,7 @@ interface ElectronAPI {
       sessionId: string | null;
       workdir: string | null;
       remoteHostId: string | null;
+      deviceLinkDeviceId?: string | null;
       available: boolean;
     }) => void;
     onStateChanged: (cb: (state: { detached: boolean; open: boolean }) => void) => () => void;
@@ -1611,6 +1642,7 @@ interface ElectronAPI {
         sessionId: string | null;
         workdir: string | null;
         remoteHostId: string | null;
+        deviceLinkDeviceId?: string | null;
         available: boolean;
       }) => void,
     ) => () => void;
@@ -2183,9 +2215,8 @@ interface ElectronAPI {
   openExternal: (url: string) => Promise<{ success: boolean }>;
   openChatGPTApp: () => Promise<{ success: boolean }>;
 
-  // file-chip 右键菜单 "在浏览器中查看": 把本地文件用 file:// 喂给系统
-  // 默认浏览器(或 .html/.pdf/.svg 等扩展名的默认 handler)。
-  openFileInBrowser: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  // 绝对路径或完整本地 file:// URL;URL 形态用于保留 query/hash 页面状态。
+  openFileInBrowser: (filePathOrUrl: string) => Promise<{ success: true }>;
 
   // ── 系统级通知（CC Agent session 状态变更）──
   /**
@@ -2249,8 +2280,28 @@ interface ElectronAPI {
       disposition: string;
       openerTabId?: string;
       openerSessionId?: string;
+      nativePopupSurfaceId?: string;
     }) => void,
   ) => () => void;
+
+  /** Main-owned WebContentsView used only for Chromium-created popup contexts. */
+  rsbNativePopup: {
+    claim: (
+      input: import('../shared/rsbNativePopup').RsbNativePopupClaimInput,
+    ) => Promise<import('../shared/rsbNativePopup').RsbNativePopupClaimResult>;
+    setBounds: (input: {
+      surfaceId: string;
+      bounds: import('../shared/rsbNativePopup').RsbNativePopupBounds;
+      visible: boolean;
+    }) => Promise<{ ok: true }>;
+    command: (
+      input: { surfaceId: string } & import('../shared/rsbNativePopup').RsbNativePopupCommand,
+    ) => Promise<{ ok: true }>;
+    close: (input: { surfaceId: string }) => Promise<{ ok: true }>;
+    onEvent: (
+      callback: (event: import('../shared/rsbNativePopup').RsbNativePopupEvent) => void,
+    ) => () => void;
+  };
 
   /**
    * RSB web-browser plugin:guest webview 内按下 Cmd/Ctrl+L 时,main 端
@@ -3059,7 +3110,6 @@ interface ElectronAPI {
       keepAwake: boolean;
       linkStatus: 'stopped' | 'connecting' | 'online';
       connectionIssue: DeviceLinkConnectionIssuePayload | null;
-      /** 本机另一个 Cindy 实例正持有 device-link,本实例待命中(变化走 onOwnershipChanged) */
       standby: boolean;
       controlledBy: Array<{ deviceId: string; name: string }>;
       revokedControllers: string[];
@@ -3100,6 +3150,8 @@ interface ElectronAPI {
     onConnectionIssue: (
       cb: (payload: { issue: DeviceLinkConnectionIssuePayload | null }) => void,
     ) => () => void;
+    /** 同机单持有者仲裁角色变化。 */
+    onOwnershipChanged: (cb: (payload: { standby: boolean }) => void) => () => void;
     /** 控制端:被控端转发回来的 renderer 广播事件 */
     onRemotePush: (
       cb: (payload: { deviceId: string; channel: string; payload: unknown }) => void,
@@ -3333,8 +3385,9 @@ interface ElectronAPI {
     setWorkspaces: (
       workspaces: Record<string, string>,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    /** X 派发任务的默认工作目录别名(null = 内置「对话」伪目录)。 */
-    setXDefaultWorkspace: (
+    /** 该 provider 派发任务的默认工作目录别名(null = 内置「对话」伪目录)。 */
+    setProviderDefaultWorkspace: (
+      provider: 'telegram' | 'x',
       alias: string | null,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     bindStart: () => Promise<{ ok: true }>;
@@ -3479,6 +3532,11 @@ interface ElectronAPI {
   sidebarSettingsLoadPinnedOrderSync: () => string[];
   sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
   sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
+  sidebarSettings: {
+    loadHiddenProjectKeys: () => string[];
+    setProjectHidden: (projectKey: string, hidden: boolean) => Promise<boolean>;
+    onHiddenProjectKeysChanged: (cb: (projectKeys: string[]) => void) => () => void;
+  };
 
   remotePrecreatedWorktreeLedger: {
     list: () => Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
@@ -3748,6 +3806,7 @@ interface ElectronAPI {
       getByLeadSession: (leadSessionId: string) => Promise<OrcaTeamRecord | null>;
       getByWorkerSession: (workerSessionId: string) => Promise<OrcaTeamRecord | null>;
       listWorkersByLead: (leadSessionId: string) => Promise<OrcaWorkerRecord[]>;
+      listWorkersByLeads?: (leadSessionIds: string[]) => Promise<Record<string, OrcaWorkerRecord[]>>;
       updateWorkerStatus: (
         workerId: string,
         status: 'idle' | 'running' | 'done' | 'error',
@@ -3882,7 +3941,7 @@ interface ElectronAPI {
     onUnpin: (cb: (payload: { tabId: string }) => void) => () => void;
     /**
      * main → renderer:Phase 3 backend 让 renderer 代调 store 的 tab-op
-     * 请求(open / focus / close)。payload 是带 reqId 的 union;renderer 处理
+     * 请求(probe / open / focus / close)。payload 是带 reqId 的 union;renderer 处理
      * 完后通过 `tabOpResult` 回报。
      */
     onTabOpRequest: (
@@ -3926,6 +3985,8 @@ interface ElectronAPI {
       active: 'external' | 'rsb-webview';
     }>;
     reset: () => Promise<{ ok: true; active: 'external' | 'rsb-webview' }>;
+    getHealth: () => Promise<BrowserBackendHealth>;
+    recover: () => Promise<BrowserBackendRecoveryResult>;
   };
 
   // ── Dialog（v0.6 新增） ────────────────────────────────────────────────────
@@ -3942,6 +4003,12 @@ interface ElectronAPI {
     }) => Promise<{
       success: boolean;
       path: string | null;
+    }>;
+    /** 打开 @ 资源系统选择器；macOS 可选文件或目录，Windows/Linux 选择文件。 */
+    showOpenResource: (params?: { defaultPath?: string }) => Promise<{
+      success: true;
+      path: string | null;
+      kind: 'file' | 'directory' | null;
     }>;
   };
 
@@ -4251,6 +4318,22 @@ interface ElectronAPI {
         | { type: 'agent'; name: string; relPath: string; description?: string }
       >;
       truncated?: boolean;
+    }>;
+    listAtContext: (params: {
+      sessionId?: string;
+      workingDir?: string;
+      query?: string;
+      limit?: number;
+    }) => Promise<{
+      success: true;
+      browserTabs: Array<{ tabId: string; title: string; url: string }>;
+      desktopWindows: Array<{
+        windowId: number;
+        pid: number;
+        appName: string;
+        title: string;
+      }>;
+      unavailable: Array<'browser-tabs' | 'desktop-windows'>;
     }>;
 
     createSession: (opts: {
@@ -4904,7 +4987,7 @@ interface ElectronAPI {
       getCodexRateLimits: () => Promise<
         import('@cindy/maker-shared/device-link-contract').MobileCodexRateLimitsResult
       >;
-      /** provider-scoped 模型单价表；XD 价格与 model-access /models 同快照更新。 */
+      /** Cindy AI /models 下发的 XD 原生报价。 */
       getModelPricing: () => Promise<
         import('../shared/regionalMoney').ModelPricingCatalog | null
       >;
@@ -4912,6 +4995,13 @@ interface ElectronAPI {
         cb: (
           pricing: import('../shared/regionalMoney').ModelPricingCatalog | null,
         ) => void,
+      ) => () => void;
+      /** 非 XD Provider 的 Catalog 参考价与用户覆盖。 */
+      getReferenceModelPricing: () => Promise<
+        import('../shared/regionalMoney').ModelPricingCatalog
+      >;
+      onReferenceModelPricingChanged: (
+        cb: (pricing: import('../shared/regionalMoney').ModelPricingCatalog) => void,
       ) => () => void;
       /** 用量历史聚合 (首页仪表盘)。wire 形态与 main/usage/usageHistory.ts 的 UsageHistoryPayload 同形。 */
       getHistory: (

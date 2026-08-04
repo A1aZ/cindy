@@ -154,6 +154,53 @@ function createCommandRunner(
 }
 
 describe('packaged iOS Simulator sidecar artifact verification', () => {
+  it('builds and stages the Host-owned Helper in a clean Forge package', async () => {
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const sourcePath = path.resolve(testDirectory, '../../../../forge.config.ts');
+    const source = await readFile(sourcePath, 'utf8');
+    const resourcesStart = source.indexOf('function extraResourcesForTarget');
+    const resourcesEnd = source.indexOf('function assertRealAndroidPlatformTool');
+    const buildStart = source.indexOf('function buildMacIOSSimulatorHelper');
+    const buildEnd = source.indexOf('function runSwiftcForTarget');
+    const stageStart = source.indexOf('function stageMacIOSSimulatorHelper');
+    const stageEnd = source.indexOf('function targetPlatformKey');
+    const prePackageStart = source.indexOf('prePackage: async');
+    const postPackageStart = source.indexOf('postPackage: async');
+    const postPackageEnd = source.indexOf('  makers,', postPackageStart);
+
+    for (const marker of [
+      resourcesStart,
+      resourcesEnd,
+      buildStart,
+      buildEnd,
+      stageStart,
+      stageEnd,
+      prePackageStart,
+      postPackageStart,
+      postPackageEnd,
+    ]) {
+      expect(marker).toBeGreaterThan(-1);
+    }
+
+    const resourcesBody = source.slice(resourcesStart, resourcesEnd);
+    const buildBody = source.slice(buildStart, buildEnd);
+    const stageBody = source.slice(stageStart, stageEnd);
+    const prePackageBody = source.slice(prePackageStart, postPackageStart);
+    const postPackageBody = source.slice(postPackageStart, postPackageEnd);
+
+    expect(resourcesBody).toContain("base.push('resources/ios-simulator')");
+    expect(resourcesBody).toContain("base.push('resources/cli')");
+    expect(buildBody).toContain("CINDY_IOS_SIDECAR_OUTPUT_MODE: 'helper'");
+    expect(buildBody).toContain('CINDY_IOS_SIDECAR_ARCH: helperArch');
+    expect(buildBody).toContain('`${CINDY_APP_ID}.ios-simulator-helper`');
+    expect(buildBody).toContain('process.env.APP_VERSION ?? DESKTOP_PACKAGE_VERSION');
+    expect(stageBody).toContain("path.join(appContents, 'Helpers', IOS_SIMULATOR_HELPER_BUNDLE)");
+    expect(stageBody).toContain("fs.rmSync(path.join(resourceRoot, 'helper')");
+    expect(stageBody).toContain("fs.rmSync(path.join(resourceRoot, 'native')");
+    expect(prePackageBody).toContain('buildMacIOSSimulatorHelper(platform, arch);');
+    expect(postPackageBody).toContain('stageMacIOSSimulatorHelper(buildPath, opts.platform);');
+  });
+
   it('promotes only the fixed signed Helper layout to a verified descriptor', async () => {
     const fixture = await createFixture();
     const commandRunner = createCommandRunner(fixture);

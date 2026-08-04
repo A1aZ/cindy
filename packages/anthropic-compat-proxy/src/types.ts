@@ -116,7 +116,20 @@ export interface ResponseObserverCtx {
   readonly url: string;
   readonly upstreamBase: string;
   readonly status: number;
+  /**
+   * 客户端(agent 子进程)发来的原始请求头,**未**经路由改写。
+   * 反解会话归属(thread-id 等 agent 自带 header)用这个。
+   */
   readonly requestHeaders: Readonly<Record<string, string>>;
+  /**
+   * 实际发往上游的请求头 —— 已应用 RoutingDecision 的 headerOverride 与 headerDelete。
+   *
+   * 凡是要判断「这次请求究竟用了哪把凭证」的观察器必须读它:供应商 OAuth 是路由期注入的,
+   * requestHeaders 里的 authorization 仍是子进程自带的那把,拿它做等值关联必然对不上。
+   *
+   * 省略时按 requestHeaders 理解(没有路由改写 = 发出去的就是收到的)。
+   */
+  readonly outboundHeaders?: Readonly<Record<string, string>>;
   readonly responseHeaders: Readonly<Record<string, string>>;
   readonly requestBody: Buffer;
 }
@@ -224,13 +237,43 @@ export interface ProxyOptions {
    */
   maxRequestBodyBytes?: number;
   /**
-   * 可选: 出站(上游方向)代理解析器。per-request 以最终上游 origin 现取:返回
-   * http:// 代理地址 = 该请求经代理转发(https 上游走 CONNECT 隧道、http 上游走
-   * 绝对形式);返回 null / 抛错 = 直连(fail-open)。loopback 上游不会被调用。
+   * 可选: 出站(上游方向)代理解析器。per-request 以最终上游 origin 现取:
+   *   - `http://` 代理地址 = 经该代理转发(https 上游走 CONNECT 隧道、http 上游走绝对形式)
+   *   - `socks5://`(含 socks5h / socks 别名)= 经 SOCKS5 隧道转发,两种上游都走隧道,
+   *     且**上游域名交给代理端解析**(见 socks5.ts;本地 DNS 解不出上游时这是唯一出路)
+   *   - 返回 null / 其它 scheme / 抛错 = 直连(fail-open)。loopback 上游不会被调用。
    * 宿主用它接系统代理(Electron resolveProxy)或代理环境变量
    * (createEnvOutboundProxyResolver)。不传 = 永远直连,与扩展前字节级一致。
    */
   resolveOutboundProxy?: OutboundProxyResolver;
+  /**
+   * 可选: WebSocket upgrade 的上游解析器。**不传 = 完全不接受 upgrade**
+   * (Claude Code 侧的 proxy 就不传, 行为与扩展前逐字节一致)。
+   *
+   * 返回上游 URL → 接受 upgrade 并把两端 socket 对接到该上游;
+   * 返回 **null → 回 426 Upgrade Required**, codex 据此优雅退回 HTTP transport
+   * (426 是它唯一认作降级信号的状态码, 见 codex core/src/client.rs 的
+   * `StatusCode::UPGRADE_REQUIRED` 分支; 其余错误一律 Err 抛出 = 用户吃报错)。
+   * 而 codex 侧的降级是 **session 级**的(一个 turn 触发后同 session 后续 turn
+   * 都走 HTTP), 所以一次 426 即稳定, 不会在两种传输之间抖动。
+   *
+   * 因此 null 的语义不是"拒绝服务", 而是"这个会话走 HTTP 更合适" —— 宿主可以据此
+   * 把需要 body 级能力(recoveryRules / responseObserver)的会话导回 HTTP 路径,
+   * 而不牺牲其余会话的 WS 长连接。
+   *
+   * **为什么不复用 routingTransform 来定 WS 上游**: 那条路按请求体里的 model 分流,
+   * 而 upgrade 请求没有 body、也未必带 session/thread header, 会 fallback 到默认
+   * 上游。开了 WS 的 provider 是明确且唯一的, 上游可以直接给定, 不需要推导。
+   *
+   * **WS 流量上以下能力一律不生效**(proxy 只做 socket 级转发, 不解析 WS 帧):
+   * requestTransform / routingTransform 的 body 改写、recoveryRules、
+   * responseObserver、maxRequestBodyBytes。放开某个 provider 的 WS 前必须确认
+   * 它不依赖这些。
+   */
+  resolveWebSocketUpstream?: (ctx: {
+    readonly url: string;
+    readonly headers: Readonly<Record<string, string>>;
+  }) => string | null;
   /**
    * 可选: debug 级别下是否 dump 入站请求 body(截断到 64KiB)。默认 false ——
    * dev 的日志级别默认 trace,若默认 dump,agent 高并发场景(code-review 扇出 +
@@ -250,6 +293,13 @@ export interface ProxyOptions {
 export interface ProxyHandle {
   /** Claude Code 子进程应该用的 ANTHROPIC_BASE_URL,例: http://127.0.0.1:54321 */
   readonly url: string;
+  /**
+   * 强制断开指定 thread 当前已建立或正在握手的 WS 隧道，返回断开的隧道数。
+   *
+   * 用于宿主把已命中 HTTP-only recovery 的 Codex thread 从预热连接池中逐出；
+   * 否则下一次请求会复用旧 WS，无法通过新的 upgrade 响应触发 transport fallback。
+   */
+  disconnectWebSocketsForThread?(threadId: string): number;
   /** 优雅关闭 —— close listener + 等待 in-flight 请求结束(2s 超时强关) */
   dispose(): Promise<void>;
 }

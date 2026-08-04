@@ -5,6 +5,25 @@ import type Database from 'better-sqlite3';
 
 import type { DbTxName } from '../../client/tx/types.js';
 import { normalizeWorkingDirForStorage } from '../../../../shared/workingDir.js';
+import {
+  wechatActivateBindingEpoch,
+  wechatCancelForCommand,
+  wechatCloseBindingEpoch,
+  wechatCommitInterrupted,
+  wechatCommitPreDispatchFailure,
+  wechatCommitPollBatch,
+  wechatCommitTerminal,
+  wechatLeaseNextTask,
+  wechatMarkAccepted,
+  wechatMarkOutboxDelivered,
+  wechatPromoteTaskAttachments,
+  wechatRefreshOutboxContexts,
+  wechatRecordOutboxFailure,
+  wechatReleaseDispatch,
+  wechatSetWaitingDesktop,
+  wechatStopAll,
+  wechatUnbindCleanup,
+} from './wechatTx.js';
 
 const LOCAL_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -22,6 +41,8 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return claudeImportMessages(db, txArgs);
     case 'rewind.commit':
       return rewindCommit(db, txArgs);
+    case 'session.treeRehydrate':
+      return sessionTreeRehydrate(db, txArgs);
     case 'fork.session':
       return forkSession(db, txArgs);
     case 'embedding.markDone':
@@ -58,6 +79,40 @@ export function tx(db: Database.Database, args: unknown): unknown {
       return imDeleteBindings(db, txArgs);
     case 'im.replaceBinding':
       return imReplaceBinding(db, txArgs);
+    case 'wechatActivateBindingEpoch':
+      return wechatActivateBindingEpoch(db, txArgs);
+    case 'wechatCommitPollBatch':
+      return wechatCommitPollBatch(db, txArgs);
+    case 'wechatLeaseNextTask':
+      return wechatLeaseNextTask(db, txArgs);
+    case 'wechatReleaseDispatch':
+      return wechatReleaseDispatch(db, txArgs);
+    case 'wechatMarkAccepted':
+      return wechatMarkAccepted(db, txArgs);
+    case 'wechatSetWaitingDesktop':
+      return wechatSetWaitingDesktop(db, txArgs);
+    case 'wechatCommitPreDispatchFailure':
+      return wechatCommitPreDispatchFailure(db, txArgs);
+    case 'wechatCancelForCommand':
+      return wechatCancelForCommand(db, txArgs);
+    case 'wechatCommitInterrupted':
+      return wechatCommitInterrupted(db, txArgs);
+    case 'wechatCommitTerminal':
+      return wechatCommitTerminal(db, txArgs);
+    case 'wechatMarkOutboxDelivered':
+      return wechatMarkOutboxDelivered(db, txArgs);
+    case 'wechatRecordOutboxFailure':
+      return wechatRecordOutboxFailure(db, txArgs);
+    case 'wechatStopAll':
+      return wechatStopAll(db, txArgs);
+    case 'wechatCloseBindingEpoch':
+      return wechatCloseBindingEpoch(db, txArgs);
+    case 'wechatPromoteTaskAttachments':
+      return wechatPromoteTaskAttachments(db, txArgs);
+    case 'wechatRefreshOutboxContexts':
+      return wechatRefreshOutboxContexts(db, txArgs);
+    case 'wechatUnbindCleanup':
+      return wechatUnbindCleanup(db, txArgs);
     case 'session.importShare':
       return sessionImportShare(db, txArgs);
     default:
@@ -560,6 +615,211 @@ function rewindCommit(db: Database.Database, args: unknown): void {
     }
   });
   transaction();
+}
+
+interface TreeAttachmentSourceRow {
+  client_id: string;
+  content: string;
+  agent_meta: string | null;
+  created_at: number;
+  rewind_at: number | null;
+}
+
+function parsedObjectJson(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function treeEntryUuid(agentMeta: string | null): string | null {
+  const uuid = parsedObjectJson(agentMeta)?.uuid;
+  return typeof uuid === 'string' && uuid.length > 0 ? uuid : null;
+}
+
+function linkedPiEntryId(agentMeta: string | null): string | null {
+  const piEntryId = parsedObjectJson(agentMeta)?.piEntryId;
+  return typeof piEntryId === 'string' && piEntryId.length > 0 ? piEntryId : null;
+}
+
+function normalizedTreeUserText(content: string): string | null {
+  const parsed = parsedObjectJson(content);
+  if (!parsed || typeof parsed.text !== 'string') return null;
+  // Pi 树会把原图 block 投影成 [image]；该占位不是 Cindy 文本的一部分。
+  return parsed.text
+    .split(/\r?\n/)
+    .filter((line) => line.trim() !== '[image]')
+    .join('\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mergeTreeUserAttachments(content: string, source: TreeAttachmentSourceRow | null): string {
+  if (!source) return content;
+  const next = parsedObjectJson(content);
+  const previous = parsedObjectJson(source.content);
+  if (!next || !previous) return content;
+  const merged: Record<string, unknown> = { ...next };
+  // 只恢复 Cindy 自己持久化的托管引用；不从 Pi base64 猜路径，也不复制其它
+  // 分支的任意 content 字段。传入消息若将来原生带附件，则以它自己的值为准。
+  if (!Object.hasOwn(next, 'images') && Array.isArray(previous.images)) {
+    merged.images = previous.images;
+  }
+  if (!Object.hasOwn(next, 'files') && Array.isArray(previous.files)) {
+    merged.files = previous.files;
+  }
+  return JSON.stringify(merged);
+}
+
+const TREE_HOST_AGENT_META_KEYS = ['origin', 'autoResume', 'autoResumeInfo'] as const;
+
+function mergeTreeUserAgentMeta(
+  agentMeta: string | null,
+  source: TreeAttachmentSourceRow | null,
+): string | null {
+  if (!source) return agentMeta;
+  const previous = parsedObjectJson(source.agent_meta);
+  if (!previous) return agentMeta;
+  const projected = parsedObjectJson(agentMeta) ?? {};
+  const merged: Record<string, unknown> = { ...projected };
+  let changed = false;
+  // Pi owns the projected entry uuid; Cindy remains authoritative for delivery metadata that
+  // controls scheduler/auto-resume rendering and must survive A→B→A branch reprojection.
+  for (const key of TREE_HOST_AGENT_META_KEYS) {
+    if (!Object.hasOwn(previous, key)) continue;
+    merged[key] = previous[key];
+    changed = true;
+  }
+  return changed ? JSON.stringify(merged) : agentMeta;
+}
+
+/** Pi 原生分支切换后，把当前活动路径原子投影成 Cindy 可见消息时间线。 */
+function sessionTreeRehydrate(
+  db: Database.Database,
+  args: unknown,
+): { messageCount: number; hiddenClientIds: string[] } {
+  const payload = asRecord(args, 'session.treeRehydrate args');
+  const sessionId = expectString(payload.sessionId, 'sessionId');
+  const now = expectNumber(payload.now, 'now');
+  const contextTokens = expectNumber(payload.contextTokens, 'contextTokens');
+  if (contextTokens < 0) throw new TypeError('contextTokens must be non-negative');
+  const contextWindow = expectNumber(payload.contextWindow, 'contextWindow');
+  if (contextWindow < 0) throw new TypeError('contextWindow must be non-negative');
+  const rows = expectArray(payload.messages, 'messages').map((raw, index) => {
+    const row = asRecord(raw, `messages.${index}`);
+    return {
+      id: expectString(row.id, `messages.${index}.id`),
+      clientId: expectString(row.clientId, `messages.${index}.clientId`),
+      role: expectString(row.role, `messages.${index}.role`),
+      content: expectString(row.content, `messages.${index}.content`),
+      toolUseId: nullableString(row.toolUseId),
+      agentMeta: nullableString(row.agentMeta),
+      agentKind: expectString(row.agentKind, `messages.${index}.agentKind`),
+      createdAt: expectNumber(row.createdAt, `messages.${index}.createdAt`),
+    };
+  });
+  const selectVisibleClientIds = db.prepare(
+    'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
+  );
+  const selectUserAttachmentSources = db.prepare(
+    `SELECT client_id, content, agent_meta, created_at, rewind_at
+       FROM messages
+      WHERE session_id = ? AND role = 'user'
+      ORDER BY created_at ASC, id ASC`,
+  );
+  const hideVisible = db.prepare(
+    'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
+  );
+  const upsert = db.prepare(
+    `INSERT INTO messages
+      (id, client_id, session_id, role, content, tool_use_id, agent_meta, agent_kind, created_at, rewind_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+     ON CONFLICT(session_id, client_id) DO UPDATE SET
+       role = excluded.role,
+       content = excluded.content,
+       tool_use_id = excluded.tool_use_id,
+       agent_meta = excluded.agent_meta,
+       agent_kind = excluded.agent_kind,
+       created_at = excluded.created_at,
+       rewind_at = NULL`,
+  );
+  const transaction = db.transaction((): string[] => {
+    const session = db.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
+    if (!session) throw Object.assign(new Error(`Session 不存在: ${sessionId}`), { code: 'NOT_FOUND' });
+    // 在隐藏前冻结附件来源。历史投影行(含已 rewind 的其它分支)按稳定 clientId / Pi
+    // entry uuid 精确复用；首次导航按发送时持久化的 piEntryId 关联。旧 live 行没有关联时，
+    // 只允许“可见公共前缀中
+    // 文本和原始时间戳都一致”的保守回退，避免相同文字的另一分支附件串线。
+    const attachmentSources = selectUserAttachmentSources.all(sessionId) as TreeAttachmentSourceRow[];
+    const byClientId = new Map(attachmentSources.map((row) => [row.client_id, row]));
+    const byUuid = new Map<string, TreeAttachmentSourceRow>();
+    const byLinkedPiEntryId = new Map<string, TreeAttachmentSourceRow>();
+    for (const source of attachmentSources) {
+      const uuid = treeEntryUuid(source.agent_meta);
+      if (uuid) byUuid.set(uuid, source);
+      const piEntryId = linkedPiEntryId(source.agent_meta);
+      if (piEntryId) byLinkedPiEntryId.set(piEntryId, source);
+    }
+    const visibleUserSources = attachmentSources.filter((row) => row.rewind_at === null);
+    let visiblePrefixIndex = 0;
+    let visiblePrefixIntact = true;
+
+    // 原子快照当前可见集,再隐藏:导航期间(带摘要可等数分钟)并发落库的消息也在其中,
+    // 交给调用方作删除广播的权威集 —— 避免用导航前的陈旧快照漏掉这条(codex review)。
+    const hiddenClientIds = (selectVisibleClientIds.all(sessionId) as { client_id: string }[])
+      .map((row) => row.client_id);
+    hideVisible.run(now, sessionId);
+    for (const row of rows) {
+      let content = row.content;
+      let agentMeta = row.agentMeta;
+      if (row.role === 'user') {
+        const uuid = treeEntryUuid(row.agentMeta);
+        let source = byClientId.get(row.clientId)
+          ?? (uuid ? byUuid.get(uuid) : undefined)
+          ?? (uuid ? byLinkedPiEntryId.get(uuid) : undefined)
+          ?? null;
+        const candidate = visibleUserSources[visiblePrefixIndex] ?? null;
+        if (source && visiblePrefixIntact && source !== candidate) {
+          // 已经精确命中另一个历史分支，说明公共可见前缀在这里结束；后续消息不能
+          // 再退回按文本/时间猜附件，否则会把旧活动分支的附件串到新分支。
+          visiblePrefixIntact = false;
+        } else if (!source && visiblePrefixIntact) {
+          const samePrefix = !!candidate
+            && candidate.created_at === row.createdAt
+            && normalizedTreeUserText(candidate.content) === normalizedTreeUserText(row.content);
+          if (samePrefix) source = candidate;
+          else visiblePrefixIntact = false;
+        }
+        visiblePrefixIndex += 1;
+        content = mergeTreeUserAttachments(row.content, source);
+        agentMeta = mergeTreeUserAgentMeta(row.agentMeta, source);
+      }
+      upsert.run(
+        row.id,
+        row.clientId,
+        sessionId,
+        row.role,
+        content,
+        row.toolUseId,
+        agentMeta,
+        row.agentKind,
+        row.createdAt,
+      );
+    }
+    db.prepare(
+      `UPDATE sessions
+          SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ?
+        WHERE id = ?`,
+    ).run(contextTokens, contextWindow, now, sessionId);
+    return hiddenClientIds;
+  });
+  const hiddenClientIds = transaction();
+  return { messageCount: rows.length, hiddenClientIds };
 }
 
 interface RewindMessageRow {
@@ -1149,7 +1409,16 @@ function readExistingImportedClientIds(
 
 interface MessageFingerprint {
   role: 'user' | 'assistant';
-  text: string;
+  /** 原文指纹(仅换行归一 + trim),普通消息只用它精确比较。 */
+  plain: string;
+  /**
+   * citation 规范形指纹(有损:标记→路径、去反引号、折叠空白)。只在 canon 比较
+   * 门放行时参与(见 isLikelyLocalDuplicate),避免「仅 Markdown 格式不同」的两条
+   * 正常回复被误判成重复(review 反馈)。
+   */
+  canonical?: string;
+  /** 原文是否含原始标记字面量——canon 比较的门:至少一侧为真才启用有损比较。 */
+  hasMarker: boolean;
   createdAt: number;
 }
 
@@ -1184,10 +1453,18 @@ function isLikelyLocalDuplicate(
   row: { role: 'user' | 'assistant'; text: string; createdAt: number },
 ): boolean {
   const next = messageFingerprint(row.role, row.text, row.createdAt);
-  return existing.some((prev) =>
-    prev.role === next.role &&
-    prev.text === next.text &&
-    Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS,
+  return existing.some(
+    (prev) =>
+      prev.role === next.role &&
+      Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS &&
+      // 普通消息:原文精确比较。canon 有损比较只在「至少一侧含原始标记字面量」时
+      // 启用——即升级前的旧标记行 vs 已归一化的导入行;两条都不含标记的正常回复
+      // (如 `Use \`foo\`` vs `Use foo`)绝不走有损比较(review 反馈)。
+      (prev.plain === next.plain ||
+        (prev.canonical !== undefined &&
+          next.canonical !== undefined &&
+          (prev.hasMarker || next.hasMarker) &&
+          prev.canonical === next.canonical)),
   );
 }
 
@@ -1196,7 +1473,76 @@ function messageFingerprint(
   text: string,
   createdAt: number,
 ): MessageFingerprint {
-  return { role, text: normalizeFingerprintText(text), createdAt };
+  // 升级前落库的旧行仍带原始 `:codex-file-citation{...}` 标记,导入侧新文本已
+  // 归一化(标记换成 code span,截断残尾则被整段剥掉——此时是**不含任何标记/
+  // 反引号的纯文本**)。因此 assistant 一律算出规范形候选指纹,是否参与比较由
+  // isLikelyLocalDuplicate 的标记门决定(review 反馈:残尾行的规范形是纯文本,
+  // 导入侧若不给纯文本算规范形就永远配不上)。只影响比较,不改落库内容。
+  const plain = normalizeFingerprintText(text);
+  const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
+  const canonical =
+    role === 'assistant' ? normalizeFingerprintText(canonicalizeCodexCitations(text)) : undefined;
+  return { role, plain, ...(canonical !== undefined ? { canonical } : {}), hasMarker, createdAt };
+}
+
+// 指纹专用规范形——与展示形(maker-core finalizeCodexCitationText)**刻意不同**:
+// 标记替换为解码路径本体(无 code span 围栏/空格垫),循环到不动点,再去掉全部
+// 反引号并折叠空白。这样「升级前的原始标记行」与「已归一化的展示形文本」两侧
+// 都收敛到同一规范形——路径本身解码出完整标记字面量的极端文件名也一致(review
+// 反馈:展示形二次处理不幂等,不能拿来当指纹)。只用于去重比较,不落库。
+// eval-fallback worker(WorkerThreadTransport WORKER_CODE)无法 import,两份 worker
+// 各内联一份,口径变更需同步(tx.test 用真实标记 fixture 钉行为)。
+const CODEX_CITATION_RE = /:codex-file-citation\{((?:[^"{}]|"(?:[^"\\]|\\.)*")*)\}/g;
+const CODEX_CITATION_OPEN = ':codex-file-citation{';
+
+function codexCitationClose(text: string, attrsStart: number): number {
+  let inQuote = false;
+  for (let i = attrsStart; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuote && ch === '\\') i += 1;
+    else if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && ch === '}') return i;
+    else if (!inQuote && ch === '{') return -2; // 裸 { = 畸形标记,原样透出
+  }
+  return -1; // 扫描到末尾未闭合 = 截断残尾
+}
+
+// path 属性解码(与 translator extractCitationPath 同口径:完整属性名边界、
+// \"/\\ 转义、开头恰好两个反斜杠 = 原生 UNC 整体保留)。
+function decodeCitationPathForFingerprint(attrs: string): string {
+  const raw = /(?:^|\s)path="((?:[^"\\]|\\.)*)"/.exec(attrs)?.[1];
+  if (raw === undefined) return '';
+  const nativeUnc = raw.startsWith('\\\\') && raw[2] !== '\\';
+  const head = nativeUnc ? '\\\\' : '';
+  return head + (nativeUnc ? raw.slice(2) : raw).replace(/\\([\\"])/g, '$1');
+}
+
+function canonicalizeCodexCitations(text: string): string {
+  // 无早退:纯文本也要走末尾的空白折叠,否则「残尾行规范形(折叠过)」与「导入侧
+  // 纯文本规范形(未折叠)」会因内部空白差异配不上。
+  // 截断残尾剥除(与展示口径一致:只剥「扫描到文本末尾仍未闭合」的标记)。
+  let out = text;
+  let from = 0;
+  for (;;) {
+    const open = out.indexOf(CODEX_CITATION_OPEN, from);
+    if (open === -1) break;
+    const close = codexCitationClose(out, open + CODEX_CITATION_OPEN.length);
+    if (close === -1) {
+      out = out.slice(0, open);
+      break;
+    }
+    from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
+  }
+  // 标记 → 解码路径,循环到不动点(路径解码可能暴露新的完整标记字面量;有界防御)。
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(CODEX_CITATION_RE, (_all, attrs: string) =>
+      decodeCitationPathForFingerprint(attrs),
+    );
+    if (next === out) break;
+    out = next;
+  }
+  // 展示形的围栏/空格垫与换行渲染差异不参与指纹比较。
+  return out.replace(/`+/g, '').replace(/\s+/g, ' ');
 }
 
 function normalizeStoredMessageText(raw: string): string {

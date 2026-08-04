@@ -6,16 +6,22 @@
  */
 
 import { useState, type ReactNode } from 'react';
-import { ArrowLeftRight, ChevronRight, Layers, RefreshCw, Target } from 'lucide-react';
+import { ArrowLeftRight, Check, ChevronDown, ChevronRight, Layers, RefreshCw, Target, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { Collapse } from '@/components/ui/collapse';
+import { Spinner } from '@/components/ui/spinner';
 import { LearnStatusCard } from '@/features/learn/LearnStatusCard';
 
 interface SystemCardProps {
-  cardType: 'help' | 'cost' | 'context' | 'pwd' | 'status' | 'compact' | 'cmd' | 'goal-complete' | 'goal-resumed' | 'learn' | 'auto-resume' | 'agent-switch';
+  cardType: 'help' | 'cost' | 'context' | 'pwd' | 'status' | 'compact' | 'cmd' | 'goal-complete' | 'goal-resumed' | 'learn' | 'auto-resume' | 'auto-resume-pending' | 'agent-switch';
   data?: Record<string, unknown>;
+  /**
+   * 这条自愈记录此刻是否真的在飞（会话有在跑的 turn，且它就是那个 turn 的发起者）。
+   * 由 MessageStream 注入，判据见那里的注释。只影响 `auto-resume` 卡。
+   */
+  autoResumeInFlight?: boolean;
   /** 卡片所在消息流的 sessionId(MessageStream 注入)。learn 卡按它路由 / 判定
    *  归属会话 —— 嵌入式视图(Orca split pane)里 URL 参数是 lead 而非本 pane,
    *  不能用 useParams(Codex review #548)。 */
@@ -711,10 +717,18 @@ function GoalCompleteCard({ data }: { data?: Record<string, unknown> }) {
  * /goal 提示分隔条(目前:usageLimited 到点自动续跑的"用量已恢复,继续目标")。
  * 同 GoalCompleteCard 复用 CompactBoundaryCard 的分隔条语言。
  */
-function GoalResumedCard() {
+function GoalResumedCard({ data }: { data?: { kind?: string } }) {
   const { t } = useTranslation();
-  // 目前只有 'usage-resumed' 一种 notice;未来多 kind 再分支。
-  const label = t('goal.usageResumeNotice');
+  // 两种续跑原因共用同一张分隔条,但说法必须分开:
+  //   - 账号限流续跑:重置时刻来自账号额度信息, 说「用量已恢复」有依据;
+  //   - 上游过载续跑:只是干等了 60s, **没有**任何容量探测。因此文案只能说
+  //     「正在重试目标」—— 说「模型服务已恢复」在持续故障期会在每次重试前插一条
+  //     假恢复通知, 紧接着又是一次容量失败(review #844 codex P1)。
+  // 存档里的 kind 仍是 'capacity-resumed'(已落库的卡片按这个值渲染), 只有文案改。
+  const label =
+    data?.kind === 'capacity-resumed'
+      ? t('goal.capacityRetryNotice')
+      : t('goal.usageResumeNotice');
   return (
     <div className="flex w-full items-center gap-3 py-2 select-none" role="separator" aria-label={label}>
       <div className="h-px flex-1 bg-[var(--msg-tool-card-border)]" />
@@ -733,9 +747,79 @@ function GoalResumedCard() {
  * 一次自动接续"(否则模型"一句话断成两段凭空接着说"会让人怀疑消息丢了)。
  * 复用 CompactBoundaryCard / GoalResumedCard 的分隔条视觉语言。
  */
-function AutoResumeCard() {
+/** 活动行需要的展示信息(从 systemCardData 松散读取,缺字段一律降级而不是崩)。 */
+interface AutoResumeCardInfo {
+  error?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  sessionTotal?: number;
+  /** 结果:由 main 在产出 / 再次被打断时回填;缺省 = 还在等结果。 */
+  outcome?: 'succeeded' | 'failed';
+}
+
+/**
+ * 这条自动续跑记录属于「中断重连」还是 silent-stop 的「空回复后续跑」。
+ *
+ * 判据是有没有任何中断上下文（原因 / 次数 / 累计 / 结果）。**必须区分**：silent-stop 那条
+ * 路径也走 `auto-resume` 卡，但它不是重连——把三态重连行套上去，历史里那条「已自动继续」
+ * 会变成语义错误的「重新连接」（copilot review）。
+ */
+function hasInterruptionContext(info: AutoResumeCardInfo): boolean {
+  return (
+    info.error !== undefined ||
+    info.attempt !== undefined ||
+    info.maxAttempts !== undefined ||
+    info.sessionTotal !== undefined ||
+    info.outcome !== undefined
+  );
+}
+
+function readAutoResumeInfo(data?: Record<string, unknown>): AutoResumeCardInfo {
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+  return {
+    ...(typeof data?.error === 'string' && data.error.length > 0 ? { error: data.error } : {}),
+    ...(num(data?.attempt) !== undefined ? { attempt: num(data?.attempt) } : {}),
+    ...(num(data?.maxAttempts) !== undefined ? { maxAttempts: num(data?.maxAttempts) } : {}),
+    ...(num(data?.sessionTotal) !== undefined ? { sessionTotal: num(data?.sessionTotal) } : {}),
+    ...(data?.outcome === 'succeeded' || data?.outcome === 'failed'
+      ? { outcome: data.outcome }
+      : {}),
+  };
+}
+
+/**
+ * 把中断原文压成一行摘要，放进活动行的 param 位（对齐 AgentActionRow 的
+ * 「动词 + 命令 / 文件名」结构）。
+ *
+ * 为什么必须有这一位：只写「已重新连接」是句没有信息量的结论，而这条行存在的唯一理由
+ * 就是解释「这里的回复为什么断成两段」。原因得直接看得见，不能只藏在展开区里。
+ *
+ * 处理：去掉 `API Error:` 这类前缀噪音、只取首句、压掉换行、限长；完整原文仍在展开区。
+ */
+function summarizeInterruption(detail?: string): string | undefined {
+  if (!detail) return undefined;
+  const compact = detail
+    .replace(/^\s*API Error:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (compact.length === 0) return undefined;
+  const firstSentence = compact.split(/(?<=[.。!?！？])\s/)[0] ?? compact;
+  return firstSentence.length > 72 ? `${firstSentence.slice(0, 71)}…` : firstSentence;
+}
+
+/**
+ * silent-stop 自动续跑的分隔条（上游用空回复静默收尾后自动续跑）。形态与文案保持
+ * 本 PR 之前的原样：居中 pill + 「连接中断，已自动继续」。它不是重连，没有原因也没有
+ * 次数，套用重连行只会给出错误的语义。
+ *
+ * **文案 key 必须是它自己的 `autoResumeSeparator.label`。** 本 PR 把
+ * `autoResume.label` 的**值**改成了「已重新连接」（那是重连成功态），复用它等于让
+ * silent-stop 行显示「已重新连接」—— 恢复了组件形态却仍然改错文案，只是把回归从
+ * 组件层搬到了 i18n 层（copilot review）。
+ */
+function AutoResumeSeparator() {
   const { t } = useTranslation();
-  const label = t('chat.systemCard.autoResume.label');
+  const label = t('chat.systemCard.autoResumeSeparator.label');
   return (
     <div className="flex w-full items-center gap-3 py-2 select-none" role="separator" aria-label={label}>
       <div className="h-px flex-1 bg-[var(--msg-tool-card-border)]" />
@@ -749,6 +833,191 @@ function AutoResumeCard() {
 }
 
 /**
+ * 中断自愈活动行（进行中 / 已完成共用）。
+ *
+ * **形态刻意对齐 AgentActionRow（工具活动行）**：radius 6 / `px-2 py-[3px]` / 16px 状态
+ * 图标槽位 / 14px `--msg-tool-card-chevron` 文字 / param 位 / 尾部 chevron / hover 抬到
+ * `--msg-code-inline-bg`。产品语义就是「这是 agent 干活流程里的一步，只不过这一步在
+ * 重连」，而不是一条系统公告——所以它读起来必须像正常工作行，不是横幅、不是警告。
+ *
+ * 展开详情给三件事：为什么重连（完整原文）、本轮第几次 / 上限、本会话累计多少次。
+ * 自愈成功时 error 行**不落库**，所以这里是中断原因唯一的用户可见出口。
+ *
+ * **只服务「中断重连」这一条路径**：silent-stop 那套（空回复后自动续跑）没有中断原因也
+ * 没有重试次数，它继续用原来的 `AutoResumeSeparator`。判据见 `hasInterruptionContext`。
+ */
+function AutoResumeActionRow({
+  state,
+  info,
+  inFlight,
+}: {
+  /**
+   * `live` = 退避窗口里的 ephemeral 行（一定是"正在重连"）。
+   * `recorded` = 落库的那条续跑记录，结果看 `info.outcome` 与 `inFlight`。
+   */
+  state: 'live' | 'recorded';
+  info: AutoResumeCardInfo;
+  /**
+   * 落库记录**此刻是否真的在飞**：会话有在跑的 turn，且这条续跑指令就是那个 turn 的
+   * 发起者（判据在 MessageStream）。为真且结果还没回填时，这一行按"正在重连"呈现。
+   */
+  inFlight?: boolean;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const hasProgress = info.attempt !== undefined && info.maxAttempts !== undefined;
+  // **转圈的判据是"此刻真的有 turn 在跑",不是"是不是 ephemeral 行"。**
+  //
+  // 一次中断的进行中状态跨两种载体:退避那 3–20 秒是 ephemeral 行(state='live'),续跑
+  // 指令发出去之后交棒给落库的这一行 —— 那时任务确实在跑,只是还没吐出第一个可见字符。
+  // 早先把"落库行"一律做成静态,导致转圈在交棒那一刻断掉,用户看到一个静止的「重新连接」
+  // 却不知道是不是还在跑(实测截图)。
+  //
+  // 但也**不能**只看"结果未回填":app 在回填前退出的话 outcome 永远回不来,会话重开后
+  // 一堆历史记录会集体转圈,那是假的。所以由 `inFlight` 把两者分开:
+  //   - 未回填 + 正在飞 → 「重新连接中 N/5」+ 转圈(与退避那段文案连续,不跳变)
+  //   - 未回填 + 没在飞 → 静态 ⟳ +「重新连接」(中性、无时态,不骗人)
+  //   - 已回填          → ✓ / ✗ 定格,`inFlight` 不参与(终态优先)
+  const live = state === 'live' || (inFlight === true && info.outcome === undefined);
+  const outcome = live ? undefined : info.outcome;
+  const label = live
+    ? hasProgress
+      ? t('chat.systemCard.autoResumePending.labelWithProgress', {
+          attempt: info.attempt,
+          total: info.maxAttempts,
+        })
+      : t('chat.systemCard.autoResumePending.label')
+    : outcome === 'succeeded'
+      ? t('chat.systemCard.autoResume.label')
+      : outcome === 'failed'
+        ? t('chat.systemCard.autoResume.labelFailed')
+        : t('chat.systemCard.autoResume.labelNeutral');
+  const summary = summarizeInterruption(info.error);
+  const canExpand = Boolean(info.error) || hasProgress || info.sessionTotal !== undefined;
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick={canExpand ? () => setExpanded((v) => !v) : undefined}
+        aria-expanded={canExpand ? expanded : undefined}
+        // 刻意**不设 aria-label**:设了会覆盖按钮的可见文本,读屏就只念得到「已重新连接」,
+        // 听不到紧跟其后的中断原因摘要 —— 而那句摘要正是这行存在的理由(copilot review)。
+        // 图标与 chevron 都是 aria-hidden,可见文本(动词 + 摘要)本身就是正确的无障碍名。
+        disabled={!canExpand}
+        className={cn(
+          'group flex w-full items-center gap-[6px]',
+          'rounded-[6px] px-2 py-[3px]',
+          'text-left outline-none transition-colors',
+          canExpand
+            ? 'cursor-pointer select-none hover:bg-[var(--msg-code-inline-bg)] focus-visible:ring-2 focus-visible:ring-[var(--info-700)]/40'
+            : 'cursor-default select-none',
+        )}
+      >
+        {/* 固定 16px 状态槽位:三态只在同槽位换图标,零布局位移(规则 7)。成功用 Check
+            (与工具活动行 done 完全一致)、失败用 X;两者都走同一个灰 token —— 设计规范
+            禁止在正文引入 chromatic 色,失败**不给红**,靠图形与文案区分。 */}
+        <span
+          aria-hidden="true"
+          className="inline-flex h-[18px] w-4 items-center justify-center shrink-0 text-[var(--msg-tool-card-chevron)]"
+        >
+          {live ? (
+            <Spinner size={13} />
+          ) : outcome === 'succeeded' ? (
+            <Check size={13} />
+          ) : outcome === 'failed' ? (
+            <X size={13} />
+          ) : (
+            <RefreshCw size={13} />
+          )}
+        </span>
+        <span className="text-[14px] text-[var(--msg-tool-card-chevron)] shrink-0">{label}</span>
+        {/* param 位:中断原因摘要。与动词同色同字号(工具行的命令同款处理),
+            不加色 —— 设计规范禁止在正文里引入 chromatic 色。 */}
+        {summary && (
+          <span
+            title={summary}
+            className="min-w-0 truncate text-[14px] text-[var(--msg-tool-card-chevron)]"
+          >
+            {summary}
+          </span>
+        )}
+        <span className="flex-1" />
+        {canExpand && (
+          <span
+            aria-hidden="true"
+            className={cn(
+              'flex h-[18px] w-[18px] items-center justify-center rounded-[4px] shrink-0',
+              'text-[var(--msg-tool-card-chevron)]',
+              'transition-colors group-hover:bg-[var(--cmd-palette-item-hover)]',
+            )}
+          >
+            {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+          </span>
+        )}
+      </button>
+      {canExpand && expanded && (
+        <div
+          className={cn(
+            'mx-2 mt-1 mb-1 rounded-[6px] px-[10px] py-2',
+            'bg-[var(--msg-user-bg)]',
+            'border border-[var(--msg-user-border)]',
+            'text-[var(--msg-tool-card-chevron)]',
+            'select-text cursor-text',
+          )}
+        >
+          {info.error && (
+            <>
+              <div className="text-[12px] opacity-70">
+                {t('chat.systemCard.autoResume.detail.reason')}
+              </div>
+              <pre className="m-0 mt-[2px] whitespace-pre-wrap break-words font-mono text-[length:calc(var(--app-code-font-size)_-_1px)] leading-[calc(var(--app-code-font-size)_+_4px)]">
+                {info.error}
+              </pre>
+            </>
+          )}
+          {(hasProgress || info.sessionTotal !== undefined) && (
+            <div className={cn('flex flex-wrap gap-x-4 gap-y-[2px] text-[12px]', info.error && 'mt-2')}>
+              {hasProgress && (
+                <span>
+                  {t('chat.systemCard.autoResume.detail.attempt', {
+                    attempt: info.attempt,
+                    total: info.maxAttempts,
+                  })}
+                </span>
+              )}
+              {info.sessionTotal !== undefined && (
+                <span>
+                  {t('chat.systemCard.autoResume.detail.sessionTotal', {
+                    count: info.sessionTotal,
+                  })}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 交接正文是否为英文格式。
+ *
+ * `content.handoff` 是持久化数据:英文化之前落库的行仍是中文正文,升级后展开老卡片
+ * 看到的就是中文。标题里"原文为英文"那句只能对新格式说,否则会自相矛盾。判据取英文
+ * 结束标记的公共尾巴——三种英文标记(handoff / rebuild / fork)都含它,旧中文标记不含。
+ * main 侧对应常量见 maker-ipc/agentHandoff.ts 的 *_TERMINATOR。
+ */
+const ENGLISH_HANDOFF_TERMINATOR_TAIL = "; the user's new message follows ==";
+
+function isEnglishSourceHandoff(handoff: string): boolean {
+  // 锚在**尾部**而不是 includes:交接正文里嵌着用户与助手的历史原文,里面完全可能
+  // 出现这段尾串(比如聊过这段代码),那样旧中文交接会被误判成英文。结束标记只可能
+  // 在整段的最末尾。
+  return handoff.trimEnd().endsWith(ENGLISH_HANDOFF_TERMINATOR_TAIL);
+}
+
+/**
  * session-agent-switch 边界分隔条:复用 CompactBoundaryCard 的"分隔线 + 居中
  * chip"语言标记"此处引擎从 X 切换到 Y"。chip 可点展开交接内容面板(发给新引擎
  * 的上下文摘要全文)——默认不打扰,想看时可核查我们替用户做了什么交接。
@@ -758,7 +1027,7 @@ function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const engineLabel = (kind: unknown): string =>
-    kind === 'codex' ? 'Codex' : 'Claude Code';
+    kind === 'codex' ? 'Codex' : kind === 'pi' ? 'Pi' : 'Claude Code';
   const fromLabel = engineLabel(data?.fromAgentKind);
   const toLabel = engineLabel(data?.toAgentKind);
   const toModel = typeof data?.toModel === 'string' ? data.toModel : '';
@@ -814,7 +1083,11 @@ function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
             )}
           >
             <div className="mb-1.5 text-[11px] font-medium text-muted-foreground">
-              {t('chat.systemCard.agentSwitch.handoffTitle')}
+              {t(
+                isEnglishSourceHandoff(handoff)
+                  ? 'chat.systemCard.agentSwitch.handoffTitleEnglishSource'
+                  : 'chat.systemCard.agentSwitch.handoffTitle',
+              )}
             </div>
             <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.55] text-[var(--msg-tool-text)]">
               {handoff}
@@ -826,7 +1099,7 @@ function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
   );
 }
 
-export function SystemCard({ cardType, data, sessionId }: SystemCardProps) {
+export function SystemCard({ cardType, data, sessionId, autoResumeInFlight }: SystemCardProps) {
   switch (cardType) {
     case 'help':
       return <HelpCard data={data} />;
@@ -845,9 +1118,19 @@ export function SystemCard({ cardType, data, sessionId }: SystemCardProps) {
     case 'goal-complete':
       return <GoalCompleteCard data={data} />;
     case 'goal-resumed':
-      return <GoalResumedCard />;
-    case 'auto-resume':
-      return <AutoResumeCard />;
+      return <GoalResumedCard data={data as { kind?: string } | undefined} />;
+    case 'auto-resume': {
+      // 同一个卡类型承载两套自愈:带中断上下文的是本份的「重连」记录,没有的是 silent-stop
+      // 的「已自动继续」分隔条 —— 后者保持原形态原文案,不被重连三态改写(copilot review)。
+      const info = readAutoResumeInfo(data);
+      return hasInterruptionContext(info) ? (
+        <AutoResumeActionRow state="recorded" info={info} inFlight={autoResumeInFlight === true} />
+      ) : (
+        <AutoResumeSeparator />
+      );
+    }
+    case 'auto-resume-pending':
+      return <AutoResumeActionRow state="live" info={readAutoResumeInfo(data)} />;
     case 'agent-switch':
       return <AgentSwitchCard data={data} />;
     case 'learn':

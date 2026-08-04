@@ -15,3 +15,4 @@ import './ios-simulator';
 import './terminal';
 import './review';
 import './orca-workers';
+import './background-tasks';

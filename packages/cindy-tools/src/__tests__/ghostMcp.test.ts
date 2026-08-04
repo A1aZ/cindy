@@ -903,10 +903,110 @@ describe("ghost_call · setup_plan MCP 边界", () => {
 });
 
 describe("cindy_ghosts · ghost_forge(锻造)", () => {
-  it("forge_guide 原文返回手册(不 JSON 包裹,agent 直接读 markdown)", async () => {
+  it("forge_guide 无 ## 标题的短手册整本原样返回(退化路径,不 JSON 包裹)", async () => {
     const result = await handleForgeGuide(fakeDeps());
     expect(result.content[0].text).toBe("# 手册");
     expect(result.isError).toBeUndefined();
+  });
+
+  it("forge_guide 退化手册 + 传 section 仍整本原样返回,不报未命中", async () => {
+    const result = await handleForgeGuide(fakeDeps(), { section: "4.7" });
+    expect(result.content[0].text).toBe("# 手册");
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("forge_guide 空串/纯空白 section 视为未传,返回目录而非报错", async () => {
+    const blank = await handleForgeGuide(sectionedDeps(), { section: "   " });
+    expect(blank.isError).toBeUndefined();
+    expect(blank.content[0].text).toContain("## 目录");
+    expect(blank.content[0].text).not.toContain("net-body");
+  });
+
+  // 分章手册:开场白 + 4 章,其中 4.6.1 也是 ## 级(与真实手册一致)
+  const SECTIONED_GUIDE = [
+    "# 手册",
+    "开场白一句。",
+    "## 1. 起步",
+    "one-body",
+    "## 4.6 订阅(subscribe 槽)",
+    "sub-body",
+    "## 4.6.1 出口钩子",
+    "hook-body",
+    "## 4.7 网络代发(network 槽)",
+    "net-body",
+  ].join("\n");
+  const sectionedDeps = () =>
+    fakeDeps({ forgeGuide: async () => SECTIONED_GUIDE });
+
+  it("forge_guide 手册以 ## 直接开头(无 H1 开场白)时目录不吞第一章正文", async () => {
+    const noPreamble = ["## 1. 起步", "one-body", "## 2. 进阶", "two-body"].join("\n");
+    const result = await handleForgeGuide(
+      fakeDeps({ forgeGuide: async () => noPreamble }),
+    );
+    const text = result.content[0].text;
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain("- 1. 起步");
+    expect(text).toContain("- 2. 进阶");
+    expect(text).not.toContain("one-body");
+    expect(text).not.toContain("two-body");
+  });
+
+  it("forge_guide 无参返回目录:含开场白与全部章节标题,不含章节正文", async () => {
+    const result = await handleForgeGuide(sectionedDeps());
+    const text = result.content[0].text;
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain("开场白一句。");
+    expect(text).toContain("## 目录");
+    expect(text).toContain("- 4.7 网络代发(network 槽)");
+    expect(text).toContain("- 4.6.1 出口钩子");
+    expect(text).not.toContain("net-body");
+    expect(text).not.toContain("one-body");
+  });
+
+  it("forge_guide 按章号取正文:含本章标题与正文,止于下一个 ## 标题", async () => {
+    const result = await handleForgeGuide(sectionedDeps(), { section: "4.6" });
+    const text = result.content[0].text;
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain("## 4.6 订阅(subscribe 槽)");
+    expect(text).toContain("sub-body");
+    expect(text).not.toContain("hook-body");
+  });
+
+  it("forge_guide 按标题关键词取正文(大小写不敏感,唯一命中)", async () => {
+    const result = await handleForgeGuide(sectionedDeps(), {
+      section: "NETWORK",
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toContain("net-body");
+  });
+
+  it("forge_guide 关键词命中多章标 isError 并列出歧义候选", async () => {
+    const result = await handleForgeGuide(sectionedDeps(), { section: "4.6" });
+    expect(result.isError).toBeUndefined(); // 章号精确匹配优先,不歧义
+    const ambiguous = await handleForgeGuide(sectionedDeps(), {
+      section: "钩子",
+    });
+    expect(ambiguous.isError).toBeUndefined(); // 唯一命中
+    const multi = await handleForgeGuide(sectionedDeps(), { section: "槽" });
+    expect(multi.isError).toBe(true);
+    expect(parsePayload(multi)).toMatchObject({
+      ok: false,
+      errorCode: "SECTION_NOT_FOUND",
+    });
+    expect((parsePayload(multi) as { message: string }).message).toContain(
+      "4.6 订阅(subscribe 槽)",
+    );
+  });
+
+  it("forge_guide 零命中标 isError 并列出全部可用章节", async () => {
+    const result = await handleForgeGuide(sectionedDeps(), {
+      section: "不存在的章",
+    });
+    expect(result.isError).toBe(true);
+    const payload = parsePayload(result) as { message: string };
+    expect(payload).toMatchObject({ ok: false, errorCode: "SECTION_NOT_FOUND" });
+    expect(payload.message).toContain("1. 起步");
+    expect(payload.message).toContain("4.7 网络代发(network 槽)");
   });
 
   it("forge_scaffold 透传模板和创建文件；目标存在时标 isError", async () => {
@@ -966,6 +1066,47 @@ describe("cindy_ghosts · ghost_forge(锻造)", () => {
       errorCode: "MANIFEST_INVALID",
     });
   });
+
+  it("forge_pack 仅在传入时把 icon_source 映射给 host", async () => {
+    const requests: Array<{ dir: string; iconSource?: string }> = [];
+    const deps = fakeDeps({
+      forgePack: async (request) => {
+        requests.push(request);
+        return {
+          ok: true,
+          cindyPath: "/src/my-ghost/my-ghost-1.0.0.cindy",
+          id: "my-ghost",
+          name: "My Ghost",
+          version: "1.0.0",
+          note: "packed",
+        };
+      },
+    });
+
+    await handleForgePack(deps, {
+      dir: "/src/my-ghost",
+      icon_source: `cindy-media://blobs/${"a".repeat(64)}.png`,
+    });
+    await handleForgePack(deps, { dir: "/src/default" });
+
+    expect(requests).toEqual([
+      {
+        dir: "/src/my-ghost",
+        iconSource: `cindy-media://blobs/${"a".repeat(64)}.png`,
+      },
+      { dir: "/src/default" },
+    ]);
+  });
+
+  it("forge_pack 描述明确图片工具结果字段", () => {
+    const server = createCindyGhostsMcpServer(fakeDeps()) as unknown as {
+      _registeredTools: Record<string, { description?: string } | undefined>;
+    };
+    const description = server._registeredTools.ghost_forge_pack?.description ?? "";
+    expect(description).toContain("xdt_image_url");
+    expect(description).toContain("xdt_image_urls");
+    expect(description).toContain("icon_source");
+  });
 });
 
 describe("formatGhostRoster(花名册快照:语义召回数据源)", () => {
@@ -998,6 +1139,43 @@ describe("formatGhostRoster(花名册快照:语义召回数据源)", () => {
       Array.from({ length: 20 }, (_, i) => ({ id: `g${i}`, name: `G${i}` })),
     );
     expect(many.split("\n")).toHaveLength(1 + 16); // 标题 + 上限 16 条
+  });
+
+  /**
+   * 花名册只许进 ghost_list 一处。两件工具的描述都在 system prompt 的固定
+   * 前缀里,拼两遍等于整份已装插件清单在上下文出现两次。
+   */
+  it("只注入 ghost_list 描述;ghost_call 描述不带花名册", () => {
+    const server = createCindyGhostsMcpServer(
+      fakeDeps({
+        getRosterItems: () => [
+          {
+            id: "art",
+            name: "画图",
+            command: "画图",
+            description: "画图与改图。",
+          },
+        ],
+      }),
+    ) as unknown as {
+      _registeredTools: Record<string, { description?: string } | undefined>;
+    };
+
+    const listDesc = server._registeredTools.ghost_list?.description ?? "";
+    const callDesc = server._registeredTools.ghost_call?.description ?? "";
+
+    expect(listDesc).toContain("【本机插件清单");
+    expect(listDesc).toContain("- 画图(id: art,指令 $画图):画图与改图。");
+
+    expect(callDesc).not.toContain("【本机插件清单");
+    expect(callDesc).not.toContain("id: art");
+    // ghost_call 仍保留自身基线描述(去重不等于把描述删空)。
+    expect(callDesc).toContain("调用某个插件(Ghost)提供的工具。");
+    // 权限契约必须进入模型可见描述:本地 Full Access 自动交接,远程/降档
+    // 仍 fail closed，且自动交接不伪装成人工永久授权。
+    expect(callDesc).toContain("Full Access(bypassPermissions)");
+    expect(callDesc).toContain("远程会话仍向用户弹确认卡");
+    expect(callDesc).toContain("不写人工永久授权");
   });
 });
 

@@ -25,7 +25,11 @@ const SESSION_SOURCES = [
   'feishu',
   'slack',
   'telegram',
+  'x',
   'discord',
+  'wechat',
+  'dingtalk',
+  'wecom',
   'scheduler',
   'learn',
   'shared',
@@ -187,10 +191,11 @@ export const sessions = sqliteTable(
     extraDirs: text('extra_dirs').notNull().default('[]'),
     /**
      * 远端目标 host id (`@cindy/maker-remote-ssh` ConnectionPool 里的 alias)。
-     * 非空 = 这个 session 跑在远端机器上 (codex agent 在远端、workingDir 是远端路径)。
+     * 非空 = 这个 session 跑在远端机器上 (agent 在远端、workingDir 是远端路径)。
      * 应用重启 / session 切换都能恢复远端目标; 本地 session 字段为 null,
      * 跟历史行为兼容 (老 session 没这列, sqlite default null 即可)。
-     * 仅 Codex 支持; Claude session 此列恒为 null (capability 未接通)。
+     * Codex 与 Claude Code 均支持 (cc 经 cc-mgr daemon, codex 经 app-server
+     * daemon);两端 in-process MCP 都经 SSH remote-forward 回本机 HTTP bridge。
      */
     remoteHostId: text('remote_host_id'),
     /**
@@ -513,6 +518,148 @@ export const imBindings = sqliteTable(
 );
 
 /**
+ * Personal WeChat reliable-ingress state.
+ *
+ * Credentials never enter SQLite. The binding epoch is an opaque generation id
+ * that lets late poll/pump callbacks fail closed after reconnect or unbind.
+ */
+export const wechatSyncState = sqliteTable(
+  'wechat_sync_state',
+  {
+    bindingEpoch: text('binding_epoch').primaryKey(),
+    isActive: integer('is_active', { mode: 'boolean' }).notNull().default(false),
+    syncCursor: text('sync_cursor').notNull().default(''),
+    lastPollAt: integer('last_poll_at'),
+    lastErrorCode: text('last_error_code'),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    oneActiveEpoch: uniqueIndex('uniq_wechat_sync_active')
+      .on(t.isActive)
+      .where(sql`${t.isActive} = 1`),
+  }),
+);
+
+export const wechatInbox = sqliteTable(
+  'wechat_inbox',
+  {
+    id: text('id').primaryKey(),
+    bindingEpoch: text('binding_epoch')
+      .notNull()
+      .references(() => wechatSyncState.bindingEpoch, { onDelete: 'cascade' }),
+    platformMessageId: text('platform_message_id').notNull(),
+    platformSeq: integer('platform_seq').notNull(),
+    peerId: text('peer_id').notNull(),
+    receivedAt: integer('received_at').notNull(),
+    platformCreatedAt: integer('platform_created_at').notNull(),
+    expiresAt: integer('expires_at').notNull(),
+    status: text('status', {
+      enum: [
+        'pending',
+        'dispatching',
+        'accepted_running',
+        'waiting_desktop',
+        'delivery_pending',
+        'completed',
+        'interrupted',
+        'cancelled',
+        'expired',
+        'failed_terminal',
+        'rejected_overload',
+      ],
+    })
+      .notNull()
+      .default('pending'),
+    leaseUntil: integer('lease_until'),
+    sessionId: text('session_id').references(() => sessions.id, { onDelete: 'set null' }),
+    conversationEpoch: integer('conversation_epoch').notNull().default(0),
+    payloadJson: text('payload_json').notNull(),
+    /** AES-256-GCM fields. The data key is owner-scoped and kept in safeStorage. */
+    contextNonce: text('context_nonce').notNull(),
+    contextCiphertext: text('context_ciphertext').notNull(),
+    contextTag: text('context_tag').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    lastErrorCode: text('last_error_code'),
+  },
+  (t) => ({
+    platformMessage: uniqueIndex('uniq_wechat_inbox_platform_message').on(
+      t.bindingEpoch,
+      t.platformMessageId,
+    ),
+    byQueue: index('idx_wechat_inbox_queue').on(t.bindingEpoch, t.status, t.receivedAt),
+    byLease: index('idx_wechat_inbox_lease').on(t.bindingEpoch, t.leaseUntil),
+    byConversation: index('idx_wechat_inbox_conversation').on(
+      t.bindingEpoch,
+      t.peerId,
+      t.conversationEpoch,
+    ),
+    oneRunningPerSession: uniqueIndex('uniq_wechat_inbox_running_session')
+      .on(t.bindingEpoch, t.sessionId)
+      .where(
+        sql`${t.sessionId} IS NOT NULL AND ${t.status} IN ('dispatching', 'accepted_running', 'waiting_desktop', 'delivery_pending')`,
+      ),
+  }),
+);
+
+export const wechatOutbox = sqliteTable(
+  'wechat_outbox',
+  {
+    id: text('id').primaryKey(),
+    bindingEpoch: text('binding_epoch')
+      .notNull()
+      .references(() => wechatSyncState.bindingEpoch, { onDelete: 'cascade' }),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => wechatInbox.id, { onDelete: 'cascade' }),
+    clientId: text('client_id').notNull(),
+    kind: text('kind', { enum: ['final', 'error', 'interrupted', 'overload'] }).notNull(),
+    chunkIndex: integer('chunk_index').notNull(),
+    text: text('text').notNull(),
+    mediaJson: text('media_json').notNull().default('[]'),
+    status: text('status', {
+      enum: ['pending', 'sending', 'delivered', 'failed_terminal'],
+    })
+      .notNull()
+      .default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextRetryAt: integer('next_retry_at').notNull(),
+    createdAt: integer('created_at').notNull(),
+    deliveredAt: integer('delivered_at'),
+  },
+  (t) => ({
+    clientId: uniqueIndex('uniq_wechat_outbox_client_id').on(t.bindingEpoch, t.clientId),
+    byDelivery: index('idx_wechat_outbox_delivery').on(t.bindingEpoch, t.status, t.nextRetryAt),
+    byTask: index('idx_wechat_outbox_task').on(t.bindingEpoch, t.taskId, t.chunkIndex),
+  }),
+);
+
+export const wechatFileAttachments = sqliteTable(
+  'wechat_file_attachments',
+  {
+    id: text('id').primaryKey(),
+    bindingEpoch: text('binding_epoch')
+      .notNull()
+      .references(() => wechatSyncState.bindingEpoch, { onDelete: 'cascade' }),
+    taskId: text('task_id')
+      .notNull()
+      .references(() => wechatInbox.id, { onDelete: 'cascade' }),
+    sessionId: text('session_id').references(() => sessions.id, { onDelete: 'set null' }),
+    absPath: text('abs_path').notNull(),
+    originalName: text('original_name').notNull(),
+    mimeType: text('mime_type').notNull(),
+    bytes: integer('bytes').notNull(),
+    status: text('status', { enum: ['staged', 'promoted', 'released'] })
+      .notNull()
+      .default('staged'),
+    promotedAt: integer('promoted_at'),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => ({
+    byTask: index('idx_wechat_file_attachments_task').on(t.bindingEpoch, t.taskId),
+  }),
+);
+
+/**
  * scheduler 模块 (Phase 2): cron 定时任务表。
  *
  * 与 `@cindy/maker-scheduler` 的 `Schedule` 类型一一对应。注意：
@@ -577,7 +724,7 @@ export const schedules = sqliteTable(
      * 引擎 fireOne 优先用 intervalMs 算 nextFireAt；旧 cron 数据 0015 migration 自动回填。
      */
     intervalMs: integer('interval_ms'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     model: text('model'),
     /**
      * 显式选定的供应商(来源)id。NULL = 回落该 agent 原生默认来源(no-break,
@@ -632,6 +779,7 @@ export const schedules = sqliteTable(
     }),
     notifyDesktop: integer('notify_desktop', { mode: 'boolean' }).notNull().default(true),
     notifyFeishu: integer('notify_feishu', { mode: 'boolean' }).notNull().default(false),
+    notifyWecomGroup: integer('notify_wecom_group', { mode: 'boolean' }).notNull().default(false),
     status: text('status', { enum: ['active', 'paused', 'expired'] })
       .notNull()
       .default('active'),
@@ -695,7 +843,7 @@ export const sessionGoals = sqliteTable(
     /** usageLimited 时记录的限额重置时刻(unix ms);到点自动续跑。其它状态为 null。 */
     usageResetAt: integer('usage_reset_at'),
     lastReason: text('last_reason'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     startedAt: integer('started_at').notNull(),
     updatedAt: integer('updated_at').notNull(),
   },
@@ -777,9 +925,7 @@ export const scheduleRuns = sqliteTable(
     costAmount: real('cost_amount').notNull().default(0),
     estimatedValueAmount: real('estimated_value_amount').notNull().default(0),
     costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }),
-    costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' })
-      .notNull()
-      .default(false),
+    costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' }).notNull().default(false),
     /**
      * zero 表示已确认零费用；unavailable 表示 agent run 尚无可靠计价；legacy
      * 表示迁移前数据缺少 runId，不能精确拆分。SQLite 无 CHECK，无需 migration。
@@ -912,20 +1058,32 @@ export const embeddingMeta = sqliteTable('embedding_meta', {
  *   - 同账号用多设备时本表数字会不一致 — 设计取舍, chip 点击跳 web 看完整账。
  *
  * 历史数据: 不 backfill — 安装迁移后从 0 开始累计 (用户明确接受)。
+ *
+ * 主键含币种: 一天一行放不下两种币种。此前主键只有 day, 账本币种切换时写入侧只能
+ * 二选一 —— 实现选择了"用新币种的金额覆盖当天累计", 于是每翻转一次就静默丢掉当天
+ * 已记的全部花费。按 (day, currency) 分行后两种币种各自累加, 读侧再按当前账本币种
+ * 取用; 换号、跨租户、上游漏发币种都不再造成数据丢失。
  */
-export const dailySpend = sqliteTable('daily_spend', {
-  /** 本地时区 YYYY-MM-DD 字符串。 */
-  day: text('day').primaryKey(),
-  /** 当日累计 USD (real)。SDK 单 turn 的 cost 通常是小数 (如 0.0391)。 */
-  costUsd: real('cost_usd').notNull().default(0),
-  costAmount: real('cost_amount').notNull().default(0),
-  costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }),
-  costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' })
-    .notNull()
-    .default(false),
-  /** 最后一次更新的 unix ms。 */
-  updatedAt: integer('updated_at').notNull(),
-});
+export const dailySpend = sqliteTable(
+  'daily_spend',
+  {
+    /** 本地时区 YYYY-MM-DD 字符串。 */
+    day: text('day').notNull(),
+    /** 当日累计 USD (real)。SDK 单 turn 的 cost 通常是小数 (如 0.0391)。 */
+    costUsd: real('cost_usd').notNull().default(0),
+    costAmount: real('cost_amount').notNull().default(0),
+    /** 该行金额的币种。历史 NULL 行在迁移时按其 USD 口径填为 'USD'。 */
+    costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }).notNull().default('USD'),
+    costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    /** 最后一次更新的 unix ms。 */
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.day, t.costCurrency] }),
+  }),
+);
 
 /**
  * 每日按模型用量聚合表 (daily_model_usage) — 支撑首页用量仪表盘的"按模型拆分"。
@@ -935,25 +1093,30 @@ export const dailySpend = sqliteTable('daily_spend', {
  *     costUsd 为 SDK 实报美元。
  *   - codex: done.data.usage 的 per-turn token 数 (SDK 不报 cost, costUsd 恒 0,
  *     美元在读取时用 modelPricing 价格表估算 — 价格会变, 不在写入时冻结)。
+ *   - pi: done.data.usage 的 per-turn token/cache 数；订阅路由读时估值，API 路由写时记费。
  *
  * 与 daily_spend 的关系: daily_spend 仍是日总额 canonical 来源 (热力图 / streak 用它);
  * 本表只做按模型的拆分展示, 两边求和因舍入可能有微小差异 — 设计取舍。
  *
  * 历史数据: 不 backfill — 上线后从 0 开始积累。
+ *
+ * 主键含币种: 理由同 daily_spend —— 单行单币种会在账本币种切换时把当天该模型已累计
+ * 的金额覆盖掉。
  */
 export const dailyModelUsage = sqliteTable(
   'daily_model_usage',
   {
     /** 本地时区 YYYY-MM-DD 字符串 (localDayKey)。 */
     day: text('day').notNull(),
-    /** 'claude-code' | 'codex' — 网关模型 id 可能跨 agent 撞名, 需区分。 */
+    /** 'claude-code' | 'codex' | 'pi' — 网关模型 id 可能跨 agent 撞名, 需区分。 */
     agentKind: text('agent_kind').notNull(),
     /** SDK 模型 id; 拿不到时兜底 'unknown'。 */
     model: text('model').notNull(),
     /** 当日该模型累计 USD (仅 claude-code 实报; codex 恒 0)。 */
     costUsd: real('cost_usd').notNull().default(0),
     costAmount: real('cost_amount').notNull().default(0),
-    costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }),
+    /** 该行金额的币种。无金额的纯 token 行与历史 NULL 行迁移时填为 'USD'。 */
+    costCurrency: text('cost_currency', { enum: ['CNY', 'USD'] }).notNull().default('USD'),
     costIsApproximate: integer('cost_is_approximate', { mode: 'boolean' })
       .notNull()
       .default(false),
@@ -966,7 +1129,7 @@ export const dailyModelUsage = sqliteTable(
   },
   (t) => ({
     // day 开头 → 近 N 天范围扫描直接走 PK 索引, 无需额外 index。
-    pk: primaryKey({ columns: [t.day, t.agentKind, t.model] }),
+    pk: primaryKey({ columns: [t.day, t.agentKind, t.model, t.costCurrency] }),
   }),
 );
 
@@ -978,7 +1141,7 @@ export const skillUsageSources = sqliteTable(
     rawFilePath: text('raw_file_path').primaryKey(),
     /** 当前源文件最后一次用哪个解析器版本扫描。用于 analyzer 升级时渐进重建。 */
     analyzerVersion: text('analyzer_version').notNull().default('6'),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     sessionId: text('session_id').notNull(),
     sdkSessionId: text('sdk_session_id').notNull(),
     mtimeMs: integer('mtime_ms').notNull().default(0),
@@ -1008,7 +1171,7 @@ export const skillUsageExposures = sqliteTable(
     rawLineNo: integer('raw_line_no').notNull(),
     sessionId: text('session_id').notNull(),
     sdkSessionId: text('sdk_session_id').notNull(),
-    agentKind: text('agent_kind', { enum: ['claude-code', 'codex'] }).notNull(),
+    agentKind: text('agent_kind', { enum: ['claude-code', 'codex', 'pi'] }).notNull(),
     skillName: text('skill_name').notNull(),
     skillPath: text('skill_path'),
     /** 规范 SKILL.md 文档 hash；拿不到规范文档时为 NULL，不参与版本聚合。 */
@@ -1248,7 +1411,11 @@ export const mediaBlobs = sqliteTable('media_blobs', {
  * refKind/refId 是多态引用(消息 id / 会话 id / 意识 id),不设 FK——
  * 删除会话/卸载意识时由对应业务代码删自己名下的 ref(回收器对账兜底)。
  * origin* 记出生:意识面板供图的归属校验即查「该指纹是否有 origin 为本意识
- * 的行或 ghost-gallery ref」(ghostCanRead,见 main/cindy-media/ledger.ts)。
+ * 的行,或 ghost-gallery / ghost-grant / ghost-tool-grant / ghost-deposit ref」
+ * (ghostCanRead,见 main/cindy-media/ledger.ts)。
+ *
+ * refKind 是无约束的 text 列:新增引用类型只改 ledger.ts 的联合类型,
+ * 不需要 migration。
  */
 export const mediaRefs = sqliteTable(
   'media_refs',
@@ -1257,7 +1424,7 @@ export const mediaRefs = sqliteTable(
     hash: text('hash')
       .notNull()
       .references((): AnySQLiteColumn => mediaBlobs.hash, { onDelete: 'cascade' }),
-    /** 'message' | 'session-attachment' | 'ghost-gallery' | 'import'(联合类型见 ledger.ts)。 */
+    /** 'message' | 'session-attachment' | 'ghost-gallery' | 'ghost-tool-grant' | 'ghost-deposit' | 'import'…(联合类型见 ledger.ts)。 */
     refKind: text('ref_kind').notNull(),
     /** 引用方 id:消息 clientId / 会话 id / 意识 id。 */
     refId: text('ref_id').notNull(),
@@ -1308,5 +1475,48 @@ export const ghostCards = sqliteTable(
   (t) => ({
     /** GC 按最旧淘汰的扫描路径。 */
     byUpdatedAt: index('ghost_cards_updated_at_idx').on(t.updatedAt),
+  }),
+);
+
+/**
+ * IM 群消息本地窗口(group-relay-v1)。
+ *
+ * 一行 = hook server 实时中继(group.message 帧)的一条群消息。这是
+ * 「服务端零内容驻留」架构下群上下文的唯一存储方:窗口长在用户自己的
+ * 设备上(与其 Telegram 客户端本地缓存同性质)。派发 hook 任务时按
+ * (provider principal namespace, chatId, threadId) 取最近条目拼进 agent 上下文,并按
+ * source.triggerMessageId 剔除当前消息。行数由插入时的 GC 控制
+ * (官方群每个键保最新 N 行、无 TTL；个人 bot 使用独立命名空间),thread_id 用空串表示主群流(保证唯一
+ * 索引对"无 topic"生效,SQLite 的 NULL 互不相等)。
+ */
+export const hookGroupMessages = sqliteTable(
+  'hook_group_messages',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    provider: text('provider').notNull(),
+    chatId: text('chat_id').notNull(),
+    /** forum topic / thread id;空串 = 主群流。 */
+    threadId: text('thread_id').notNull().default(''),
+    messageId: text('message_id').notNull(),
+    chatName: text('chat_name'),
+    author: text('author').notNull(),
+    isBot: integer('is_bot').notNull().default(0),
+    text: text('text').notNull(),
+    /** JSON string[];无附件为空。 */
+    fileNames: text('file_names'),
+    /** IM 平台侧发送时刻(unix ms)。 */
+    sentAt: integer('sent_at').notNull(),
+    createdAt: integer('created_at').notNull(),
+  },
+  (t) => ({
+    /** 同一条消息(重放/重连)幂等去重的键(冲突即忽略, 不更新)。 */
+    byMessage: uniqueIndex('hook_group_messages_msg_idx').on(
+      t.provider,
+      t.chatId,
+      t.threadId,
+      t.messageId,
+    ),
+    /** 窗口查询与 GC 的扫描路径。 */
+    byWindow: index('hook_group_messages_window_idx').on(t.provider, t.chatId, t.threadId, t.id),
   }),
 );

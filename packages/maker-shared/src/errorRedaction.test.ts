@@ -2,8 +2,45 @@ import { describe, expect, it } from 'vitest';
 
 import {
   extractNonSecretErrorSignals,
+  matchesDeterministicUsageExhaustionText,
   redactSensitiveText,
 } from './errorRedaction.js';
+
+describe('matchesDeterministicUsageExhaustionText', () => {
+  it.each([
+    'insufficient_quota',
+    'insufficient credit balance',
+    'insufficient balance',
+    'insufficient funds',
+    'quota exhausted for this key',
+    'Your quota has been exceeded',
+    'You exceeded your current quota',
+    'usage limit',
+    'account budget exhausted',
+    'session budget exhausted',
+    'usage budget has been exceeded',
+    'ExceededBudget',
+    'budget_exceeded',
+    'exceeded_budget',
+    '账户余额不足，请充值',
+    '账户欠费',
+  ])('recognizes deterministic usage exhaustion: %s', (message) => {
+    expect(matchesDeterministicUsageExhaustionText(message)).toBe(true);
+  });
+
+  it.each([
+    '429',
+    'HTTP 429 Too Many Requests',
+    'Too Many Requests',
+    'rate limit exceeded',
+    'retry budget exhausted',
+    'retry budget exceeded',
+    'exhausted daemon retry budget',
+    'exceeded retry limit, last status: 429 Too Many Requests',
+  ])('does not treat transient or retry exhaustion as usage exhaustion: %s', (message) => {
+    expect(matchesDeterministicUsageExhaustionText(message)).toBe(false);
+  });
+});
 
 describe('redactSensitiveText', () => {
   it('redacts LiteLLM credential fields and bearer tokens while preserving context', () => {
@@ -110,6 +147,57 @@ describe('redactSensitiveText', () => {
 
     expect(output).toBe('proxy password=[REDACTED] password: [REDACTED] passwd=[REDACTED]');
     expect(output).not.toMatch(/abc123|def456|ghi789/);
+  });
+
+  it('redacts gateway principals while keeping surrounding diagnostics', () => {
+    const output = redactSensitiveText(
+      '{"error":"ExceededBudget","principal":"aigw:v1:cindy:usr_a1b2c3","spend":12.34,"budget":10}',
+    );
+
+    expect(output).not.toContain('usr_a1b2c3');
+    expect(output).toContain('aigw:[REDACTED]');
+    expect(output).toContain('ExceededBudget');
+    expect(output).toContain('"spend":12.34');
+
+    const inline = redactSensitiveText('Request rejected (429): budget check failed for aigw:v1:cindy:usr_a1b2c3, retry later');
+    expect(inline).not.toContain('usr_a1b2c3');
+    expect(inline).toContain('aigw:[REDACTED], retry later');
+  });
+
+  it('keeps gateway principal redaction idempotent (review 反馈)', () => {
+    // 没有 negative lookahead 时第二遍会匹配 `aigw:[REDACTED`(`]` 在排除集里),
+    // 每跑一遍多长出一个 `]`;多路径重复调用 redactSensitiveText 是常态。
+    const once = redactSensitiveText('aigw:v1:cindy:usr_a1b2c3');
+    expect(once).toBe('aigw:[REDACTED]');
+    expect(redactSensitiveText(once)).toBe('aigw:[REDACTED]');
+    expect(redactSensitiveText(redactSensitiveText(once))).toBe('aigw:[REDACTED]');
+    const inJson = redactSensitiveText(redactSensitiveText('{"principal":"aigw:v1:cindy:usr_a1b2c3"}'));
+    expect(inJson).toContain('"aigw:[REDACTED]"');
+  });
+
+  it('recognizes gateway budget-exhaustion signals', () => {
+    expect(
+      extractNonSecretErrorSignals('Request rejected (429): ExceededBudget for aigw:v1:cindy:usr_a1b2c3'),
+    ).toEqual({ errorStatus: 429, usageLimit: true });
+    expect(extractNonSecretErrorSignals('{"code":"ExceededBudget"}')).toEqual({
+      usageLimit: true,
+    });
+    // 网关结构化错误也常用 error / message 字段承载额度码(review 反馈:只认
+    // code|type 会把 {"error":"ExceededBudget"} 判成普通错误进 blocked)。
+    expect(extractNonSecretErrorSignals('{"error":"ExceededBudget","spend":12.3}')).toEqual({
+      usageLimit: true,
+    });
+    expect(extractNonSecretErrorSignals('{"message":"budget_exceeded"}')).toEqual({
+      usageLimit: true,
+    });
+    expect(extractNonSecretErrorSignals('upstream said budget_exceeded, status=429')).toEqual({
+      errorStatus: 429,
+      usageLimit: true,
+    });
+    // A 504 gateway timeout is not a quota signal and carries no supported status.
+    expect(
+      extractNonSecretErrorSignals('{"code":"origin_gateway_timeout","status":504}'),
+    ).toEqual({ usageLimit: false });
   });
 
   it('keeps redaction idempotent for existing placeholders', () => {

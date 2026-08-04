@@ -26,6 +26,7 @@ import {
   Terminal,
   GitPullRequestArrow,
   UsersRound,
+  ListTodo,
   Plus,
   Puzzle,
   X,
@@ -122,6 +123,7 @@ const KIND_ICON: Record<BuiltinTabKindId, LucideIcon> = {
   terminal: Terminal,
   review: GitPullRequestArrow,
   'orca-workers': UsersRound,
+  'background-tasks': ListTodo,
 };
 
 const KIND_LABEL_KEY: Record<BuiltinTabKindId, string> = {
@@ -131,6 +133,7 @@ const KIND_LABEL_KEY: Record<BuiltinTabKindId, string> = {
   terminal: 'rightSidebar.tabs.kinds.terminal',
   review: 'rightSidebar.tabs.kinds.review',
   'orca-workers': 'rightSidebar.tabs.kinds.collaboration',
+  'background-tasks': 'rightSidebar.tabs.kinds.backgroundTasks',
 };
 
 /**
@@ -279,6 +282,7 @@ export function TabStrip({
   const reducedMotion = useReducedMotion();
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const tabsScrollRef = useRef<HTMLDivElement | null>(null);
+  const addButtonWrapperRef = useRef<HTMLDivElement | null>(null);
   const existingKinds = useMemo(() => new Set<TabKindId>(tabs.map((t) => t.kind)), [tabs]);
   // 右键菜单状态:虚拟 trigger 在 rect 位置弹 DropdownMenu(跟 FileTreeView 同款做法,
   // 同时间只可能一个右键菜单打开,统一在 TabStrip 顶层管理避免每 pill 一份实例)。
@@ -396,9 +400,10 @@ export function TabStrip({
           )}
         />
       </div>
-      {/* 「+」按钮 wrapper:scroll 容器外、shrink-0 永远可见。relative 给 dropdown
-          absolute 定位用;dropdown 现在不被 mask / overflow 切。 */}
+      {/* 「+」按钮 wrapper:scroll 容器外、shrink-0 永远可见。dropdown portal 到
+          body(fixed 定位,以本 wrapper 为 anchor),不被面板 overflow-hidden 切。 */}
       <div
+        ref={addButtonWrapperRef}
         className={cn('relative flex shrink-0 items-center', addButtonWrapperClassName)}
         style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
       >
@@ -420,6 +425,7 @@ export function TabStrip({
         </button>
         {dropdownOpen && (
           <AddTabDropdown
+            anchorRef={addButtonWrapperRef}
             onClose={() => setDropdownOpen(false)}
             onSelect={(kind) => {
               onAdd(kind);

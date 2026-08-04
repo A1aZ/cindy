@@ -9,6 +9,12 @@
 import type { AuthState } from '../types/common.js';
 
 export type AgentCredentialMode = 'gateway-key' | 'oauth-bearer' | 'provider-oauth';
+export type AgentLoginMode = 'browser' | 'device-code';
+
+export interface AuthLoginOptions {
+  mode?: AgentLoginMode;
+  onProgress?: (msg: string) => void;
+}
 
 export interface AuthAdapterOptions {
   /**
@@ -19,6 +25,11 @@ export interface AuthAdapterOptions {
    * 由 host/proxy 注入,子进程自身凭证只作占位。
    */
   credentialMode?: AgentCredentialMode;
+  /**
+   * 本次会话显式选择的模型来源。需要按来源复用宿主凭证的 agent（如 pi）
+   * 用它检查对应连接态；未传保持既有 adapter fallback。
+   */
+  providerId?: string | null;
 }
 
 export interface AuthAdapter {
@@ -26,7 +37,7 @@ export interface AuthAdapter {
   getState(options?: AuthAdapterOptions): Promise<AuthState>;
 
   /** 触发登录流程（OAuth 跳浏览器 / API key 弹窗 / 报错） */
-  triggerLogin(opts?: { onProgress?: (msg: string) => void }): Promise<AuthState>;
+  triggerLogin(opts?: AuthLoginOptions): Promise<AuthState>;
 
   /** 退出登录，清理本地凭证 */
   logout(): Promise<void>;

@@ -1,5 +1,6 @@
 import {
   groupAutomationListItems,
+  remoteSessionDisplayTitle,
   sessionRowMessagePreview,
   toRemoteSessionListItem,
   type RemoteSessionLiveActivity,
@@ -9,6 +10,7 @@ import {
   type RemoteSessionStatusFilter,
 } from './sessionList.js';
 import { stripTrailingPathSeparators } from './pathText.js';
+import { collapseWorktreeDirForGrouping } from './worktreePaths.js';
 
 export const MOBILE_HOME_ALL_DEVICES = 'all';
 
@@ -115,6 +117,11 @@ export interface MobileHomeOptions {
   selectedDeviceId?: string | null;
   sessions: readonly MobileHomeSessionLike[];
   statusFilter?: RemoteSessionStatusFilter;
+  /**
+   * 「尚未起名」会话的显示文案(已解析的 i18n 值)。不传则回落 workingDir → 「未命名会话」;
+   * 共享层刻意不兜中文串,见 sessionList 的 remoteSessionDisplayTitle。
+   */
+  unnamedLabel?: string;
 }
 
 export function buildMobileHomePresentation({
@@ -128,6 +135,7 @@ export function buildMobileHomePresentation({
   selectedDeviceId = null,
   sessions,
   statusFilter = 'active',
+  unnamedLabel,
 }: MobileHomeOptions): MobileHomePresentation {
   // 设备身份归一化在管线源头对每个会话算出 canonicalDeviceId(写入字段,不改 deviceLinkDeviceId):
   // 后续设备筛选统计、matchesSelectedDevice 过滤、项目分组、概览、卡片 deviceId 全部按 canonicalDeviceId
@@ -151,6 +159,7 @@ export function buildMobileHomePresentation({
       liveActivityIndex,
       pendingInteractionIndex,
       scheduleIndex,
+      unnamedLabel,
     ))
     .sort(compareSessionsByStatusThenActivityDesc);
   const items = filteredSessions.map((session) => toRemoteSessionListItem(
@@ -162,6 +171,7 @@ export function buildMobileHomePresentation({
     // (sessionRowMessagePreview 读取),与 buildRemoteSessionSections 同一套兜底。
     messagePreviewIndex?.get(session.id) ?? sessionRowMessagePreview(session),
     liveActivityIndex?.get(session.id) ?? null,
+    unnamedLabel,
   ));
   const pinned = items.filter((item) => !!item.session.pinnedAt);
   const rest = items.filter((item) => !item.session.pinnedAt);
@@ -502,11 +512,15 @@ function matchesSearchQuery(
   liveActivityIndex: ReadonlyMap<string, RemoteSessionLiveActivity> | undefined,
   pendingInteractionIndex: ReadonlyMap<string, number> | undefined,
   scheduleIndex: ReadonlyMap<string, RemoteSessionScheduleInfo> | undefined,
+  unnamedLabel: string | undefined,
 ): boolean {
   if (!query) return true;
   const scheduleInfo = scheduleIndex?.get(session.id) ?? fallbackScheduleInfo(session);
   const haystack = [
-    session.title,
+    // 与首页行展示同源到函数级(同 sessionList 的 matchesSearchQuery):行上显示的就是
+    // remoteSessionDisplayTitle 的结果,haystack 直接调同一个函数。放原始哨兵会让
+    // 「搜得到的」与「看得到的」错位 —— 两个方向都错(见 sessionList 那条注释)。
+    remoteSessionDisplayTitle(session, unnamedLabel),
     session.workingDir,
     session.model,
     session.agentKind,
@@ -554,7 +568,7 @@ function fallbackScheduleInfo(session: RemoteSessionListSessionLike): RemoteSess
     latestRunAt: 0,
     running: false,
     scheduleId: '',
-    scheduleName: title || '自动化任务',
+    scheduleName: title || '自动化',
     allSchedulesStopped: false,
     unreadCount: 0,
     unreadRunIds: [],
@@ -583,7 +597,12 @@ function normalizeProjectWorkingDir(value: string | null | undefined): string {
   // 此时把紧跟 "X:" 的第一个分隔符保留下来。
   if (end === 2 && trimmed.length > 2 && trimmed[1] === ':' && isAsciiLetter(trimmed[0])) end = 3;
   // 全是斜杠时(end === 0)保留 trim 后原值,与旧 `replace(...) || value` 语义一致。
-  return end > 0 ? trimmed.slice(0, end) : trimmed;
+  const withoutTrailingSeparators = end > 0 ? trimmed.slice(0, end) : trimmed;
+  // worktree 会话折叠到 base repo(与桌面侧栏 normalizeWorkingDirForGrouping 同一口径):
+  // 不折叠的话每个 worktree 都会变成一个独立「项目」,标题是随机 worktree 名(serene-lovelace
+  // 之类),Slack / 定时任务这类自动建 worktree 的会话尤其明显。worktree 身份仍由会话行与
+  // 会话菜单的 worktreePath 单独展示,信息不丢。
+  return collapseWorktreeDirForGrouping(withoutTrailingSeparators);
 }
 
 function isAsciiLetter(ch: string): boolean {
@@ -635,7 +654,7 @@ function mobileHomeEmptyState({
       kind: 'search',
       noDevice: null,
       title: '没有匹配结果',
-      copy: '换一个项目名、对话标题、电脑名或消息关键词再试。',
+      copy: '换一个项目名、任务标题、电脑名或消息关键词再试。',
     };
   }
   if (deviceCount === 0) {
@@ -656,23 +675,23 @@ function mobileHomeEmptyState({
     return {
       kind: 'automation',
       noDevice: null,
-      title: '没有自动化会话',
-      copy: '自动化任务运行后，对应会话会按项目聚合到这里。',
+      title: '没有自动化生成的任务',
+      copy: '自动化运行后，对应任务会按项目聚合到这里。',
     };
   }
   if (statusFilter === 'archived') {
     return {
       kind: 'archived',
       noDevice: null,
-      title: '没有归档会话',
-      copy: '切到全部或活跃筛选，继续查看当前项目和对话。',
+      title: '没有归档任务',
+      copy: '切到全部或活跃筛选，继续查看当前项目和任务。',
     };
   }
   return {
     kind: 'noSession',
     noDevice: null,
-    title: '还没有会话',
-    copy: '先在桌面端创建或继续一个会话，手机端会直接显示对应项目和对话。',
+    title: '还没有任务',
+    copy: '先在桌面端创建或继续一个任务，手机端会直接显示对应项目和任务。',
   };
 }
 

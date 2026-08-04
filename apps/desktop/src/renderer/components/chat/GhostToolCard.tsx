@@ -52,6 +52,11 @@ import {
   subscribeGhostCards,
 } from '@/cindy-brain/ghostCardStore';
 import { useGhostCardThemeVars } from '@/cindy-brain/useGhostCardThemeVars';
+import { alignFrameWithGate } from '@/lib/hiddenAnimationGate';
+import {
+  extractGhostCardGallerySrcs,
+  ghostCardGalleryId,
+} from '@/cindy-brain/ghostCardGallery';
 import {
   GHOST_CARD_ACTION_INFLIGHT_MS,
   GHOST_CARD_ACTION_PROMPT_MAX_LEN,
@@ -109,21 +114,30 @@ function buildAudioRowHtml(durationLabel: string): string {
 /** srcdoc 脚手架:meta CSP 锁子资源 + 主题变量块 + 最小 reset;正文为主机
  *  净化产物。文字保持可选中(海报里的说明文案用户要能复制);图片禁拖拽保住
  *  海报手感。
- *  themeVars:主机主题的 `:root{--token:value}` 白名单变量块(见
+ *  themeVars:主机主题的 `:root{color-scheme:…;--token:value}` 白名单变量块(见
  *  useGhostCardThemeVars),纯加法下发——意识引用 var(--xxx) 就跟主题,写死
- *  配色的意识不引用即无感知。style-src 'unsafe-inline' 已放行本段内联样式。 */
+ *  配色的意识不引用即无感知。其中 color-scheme 是**透明画布契约的前提**:
+ *  它不跨文档继承,不声明时 Chromium 按 light 给 iframe 一张不透明白 canvas,
+ *  于是不铺底色的全出血卡在暗色主题下整张变白(且切主题不变——白来自 UA)。
+ *  取值与守卫见 ghostPanelTheme.readHostColorScheme。
+ *  style-src 'unsafe-inline' 已放行本段内联样式。 */
 function buildCardSrcDoc(sanitizedHtml: string, themeVars: string): string {
   return [
     '<!doctype html><html><head>',
     '<meta charset="utf-8">',
     '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src cindy-media:; style-src \'unsafe-inline\'">',
     // 主题变量块放在基线 reset 之前:意识正文的净化后内联样式仍可覆盖,
-    // var(--xxx) 供其按需取用;themeVars 为空(极端:token 全空)时不注空标签。
+    // var(--xxx) 供其按需取用;themeVars 为空(极端:store 未就绪)时不注空标签
+    // ——正常路径下它恒含 color-scheme 声明,不会为空。
     themeVars ? `<style>${themeVars}</style>` : '',
     // reduced-motion 门控是宿主强制(规则 7),不靠意识作者自觉:系统开了
     // 减弱动效时,动画版卡片的意识自绘动画一律停播(srcdoc 内 media query
     // 正常继承系统偏好)。背景仍由意识正文自己决定:透明画布是现行卡片
     // 作者契约,宿主不能强铺 surface 改变其它 Ghost 的视觉。
+    // 窗口不可见时卡内动画的冻结不在这里做:CSS 选不出「只暂停无限循环动画」,通配
+    // 规则会把 cardSanitizer 允许的有限动画(如 animation:f 1s)一并冻在中途帧,恢复可见
+    // 时突兀。改由宿主用 Web Animations API 逐个判 iterations,见 hiddenAnimationGate 的
+    // syncFrameAnimations 与下面 onLoad 的对齐。
     '<style>html,body{margin:0;padding:0;overflow:hidden;font-family:system-ui,-apple-system,sans-serif}img{max-width:100%;-webkit-user-drag:none;-webkit-user-select:none;user-select:none}@media (prefers-reduced-motion:reduce){*{animation:none!important}}</style>',
     '</head><body>',
     sanitizedHtml,
@@ -166,7 +180,7 @@ function GhostCardCanvas({
   const { t } = useTranslation();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const anchorRef = useRef<HTMLDivElement | null>(null);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; galleryId: string } | null>(null);
   // data-ghost-model 声明的 3D 预览:点击开应用内 3D 查看器(GLB 已在媒体
   // 总仓,blob 来源直读,预览图作 poster)。
   const [modelView, setModelView] = useState<{ url: string; poster: string } | null>(null);
@@ -211,6 +225,11 @@ function GhostCardCanvas({
   // 只立 pending 标记,等 commit 落地后的 effect 再放开缓动开关。
   const settledOnceRef = useRef(false);
   const pendingSettleRef = useRef(false);
+  const renderedCardHtml = running && animatedHtml ? animatedHtml : html;
+  const gallerySrcs = useMemo(
+    () => extractGhostCardGallerySrcs(renderedCardHtml),
+    [renderedCardHtml],
+  );
 
   const measureHeight = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
@@ -373,7 +392,12 @@ function GhostCardCanvas({
   const attachClickBridge = useCallback(() => {
     const doc = iframeRef.current?.contentDocument;
     if (!doc) return;
+    // 与宿主的装饰动画闸门对齐一次:窗口可能在本卡挂载之前就已隐藏,那时闸门的遍历
+    // 还看不到这个 iframe。走闸门自己的入口,由它登记进共享的恢复集合 —— 自行 pause
+    // 而不登记的话,窗口切回来时统一恢复路径不会 play 它们,这张卡的动画会永久停住。
+    alignFrameWithGate(doc);
     const imgs = doc.querySelectorAll<HTMLImageElement>('img[src^="cindy-media://"]');
+    let galleryImageIndex = 0;
     imgs.forEach((img) => {
       // 量高写回会让 height prop 变化 → effect 重跑,对同一份未重载的文档
       // 再走到这里;dataset 标记去重,避免重复挂监听(srcDoc 换新文档时
@@ -397,9 +421,12 @@ function GhostCardCanvas({
       // 图片点击的四级路由:data-ghost-action(动作按钮)> data-ghost-link
       // (外链,均由下面的循环挂)> data-ghost-model(3D 预览 → 应用内 3D
       // 查看器)> 普通看大图 lightbox。
-      if (!img.dataset.ghostAction && !img.dataset.ghostLink) {
+      if (!img.closest('[data-ghost-action], [data-ghost-link]')) {
         img.style.cursor = 'pointer';
         const modelUrl = img.dataset.ghostModel;
+        const galleryId = modelUrl
+          ? null
+          : ghostCardGalleryId(callId, galleryImageIndex++);
         img.addEventListener('click', (e) => {
           e.stopPropagation();
           // 点击发生在 iframe 里,焦点会留在 guest 文档——keydown 不跨文档冒泡,
@@ -407,7 +434,7 @@ function GhostCardCanvas({
           // GhostMediaLightboxHost 同坑同解:blur 掉 iframe,键盘立即归位)。
           iframeRef.current?.blur();
           if (modelUrl) setModelView({ url: modelUrl, poster: img.src });
-          else setLightboxSrc(img.src);
+          else if (galleryId) setLightbox({ src: img.src, galleryId });
         });
       }
       // 右键 → 宿主图片菜单(复制图片 / 打开所在目录,与基座 ChatImageView 同
@@ -596,7 +623,7 @@ function GhostCardCanvas({
         <iframe
           ref={iframeRef}
           sandbox="allow-same-origin"
-          srcDoc={buildCardSrcDoc(running && animatedHtml ? animatedHtml : html, themeVars)}
+          srcDoc={buildCardSrcDoc(renderedCardHtml, themeVars)}
           onLoad={attachClickBridge}
           title={ariaTitle}
           className="block w-full border-0"
@@ -626,6 +653,17 @@ function GhostCardCanvas({
           </div>
         ) : null}
       </div>
+      {/* iframe 子文档不在宿主 querySelector 范围内。镜像零尺寸标记让既有
+          DOM 位置映射仍看到完整顺序，避免相同 URL 的普通附件被错定位到
+          插件图片；真正的图片和点击处理仍留在沙箱 iframe 内。 */}
+      {gallerySrcs.map((src, imageIndex) => (
+        <span
+          key={ghostCardGalleryId(callId, imageIndex)}
+          hidden
+          aria-hidden
+          data-gallery-src={src}
+        />
+      ))}
 
       {/* ── data-ghost-prompt 输入面板(宿主交互面,与 lightbox 同层;体验与
           老基座 ChatImageActions 的 imgPrompt popover 一致:textarea + 回车
@@ -825,8 +863,14 @@ function GhostCardCanvas({
         </DropdownMenu>
       ) : null}
 
-      {lightboxSrc ? (
-        <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} sessionId={sessionId} />
+      {lightbox ? (
+        <ImageLightbox
+          src={lightbox.src}
+          galleryId={lightbox.galleryId}
+          enableGallery
+          onClose={() => setLightbox(null)}
+          sessionId={sessionId}
+        />
       ) : null}
       {modelView ? (
         <ModelLightbox

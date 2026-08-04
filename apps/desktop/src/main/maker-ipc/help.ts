@@ -5,9 +5,10 @@ import type { AgentKind, Maker, OneShotOptions } from '@cindy/maker-core';
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
 
 import { createLogger } from '../logger.js';
+import { isAgentOneShotRouteDisabled } from '../maker-host/model-route-guard-live.js';
 import { getDbClient } from '../localDb/client/current.js';
 import { sessions } from '../localDb/schema.js';
-import { requestUtilityText } from '../utility-model/oneShotCandidates.js';
+import { agentSupportsOneShot, requestUtilityText } from '../utility-model/oneShotCandidates.js';
 import { MAKER_INVOKE } from './channels.js';
 import { DESKTOP_VISIBLE_SESSION_SOURCES } from '../../shared/sessionSource.js';
 import type {
@@ -127,7 +128,13 @@ async function routeHelpTopics(
       timeoutMs: 12_000,
     });
     let raw = utility.ok ? utility.text : '';
-    if (!raw && target.agentKind) {
+    // 停用轴:agent one-shot 兜底同样是新的付费调用,目标模型/默认路由被停用时
+    // 不派发(help 是 best-effort,静默降级到 summary-only,PR #744 review)。
+    if (
+      !raw &&
+      target.agentKind &&
+      !(await isAgentOneShotRouteDisabled(target.agentKind, target.options.model))
+    ) {
       raw = await maker.oneShot(target.agentKind, prompt, {
         ...target.options,
         maxTokens: 30,
@@ -239,6 +246,7 @@ async function getMostRecentSessionAgent(): Promise<AgentKind | null> {
     if (!row) return null;
     if (row.agentKind === 'cc' || row.agentKind === 'claude-code') return 'claude-code';
     if (row.agentKind === 'codex') return 'codex';
+    if (row.agentKind === 'pi') return 'pi';
     return null;
   } catch (err) {
     log.debug('help recent-agent probe failed', { error: String(err) });
@@ -246,13 +254,17 @@ async function getMostRecentSessionAgent(): Promise<AgentKind | null> {
   }
 }
 
-async function pickHelpAgent(
+// help 兜底走 maker.oneShot;只有实现了 oneShot 的 agent(agentSupportsOneShot)才可选。
+// PiAgent 继承 BaseAgent 的 not-implemented,选中它会让 HELP_ASK / 置顶摘要抛错并直接
+// no-answer,即便其它 agent 兜底仍可用 —— 故从候选里剔除(与任务摘要兜底共用同一判定)。
+export async function pickHelpAgent(
   maker: Maker,
   preferredAgent: AgentKind | null,
 ): Promise<AgentKind | null> {
-  const ordered: AgentKind[] = preferredAgent
-    ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex'])]
-    : ['claude-code', 'codex'];
+  const candidates: AgentKind[] = preferredAgent
+    ? [...new Set<AgentKind>([preferredAgent, 'claude-code', 'codex', 'pi'])]
+    : ['claude-code', 'codex', 'pi'];
+  const ordered = candidates.filter((agentKind) => agentSupportsOneShot(agentKind));
   const available = new Set(maker.listAvailableAgents());
   for (const agentKind of ordered) {
     if (!available.has(agentKind)) continue;
@@ -274,6 +286,9 @@ function buildOneShotOptions(agentKind: AgentKind): OneShotOptions {
       timeoutMs: 20_000,
     };
   }
+  // Pi 的可用模型来自动态 provider 目录(BYOM 也可能只有本地模型)，不硬编码
+  // GPT id；让 Maker 按该 Pi agent 的当前能力选择默认模型。
+  if (agentKind === 'pi') return { timeoutMs: 20_000 };
   return {
     model: 'gpt-5.4-mini',
     timeoutMs: 20_000,
@@ -319,7 +334,12 @@ export function registerMakerHelpIpc(maker: Maker): void {
           ...target.options,
         });
         let raw = utility.ok ? utility.text : '';
-        if (!raw && target.agentKind) {
+        // 停用轴:同上,兜底一击的目标路由被停用则不派发(回落既有的失败文案路径)。
+        if (
+          !raw &&
+          target.agentKind &&
+          !(await isAgentOneShotRouteDisabled(target.agentKind, target.options.model))
+        ) {
           raw = await maker.oneShot(target.agentKind, prompt, target.options);
         }
         if (utility.ok) {

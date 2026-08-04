@@ -31,10 +31,22 @@ import { createPortal } from 'react-dom';
 import { GitFork } from 'lucide-react';
 import { SelectionQuoteButton } from './SelectionQuoteButton';
 import { useTranslation } from 'react-i18next';
-import { findMessageTodoInsertions, isAgentPlanToolName } from '@cindy/maker-shared/message-render';
+import {
+  isAgentPlanToolName,
+  isDeliveryProseText,
+} from '@cindy/maker-shared/message-render';
+// 子代理卡判据只能有一份:此前桌面自带一份只认 Agent/Task/collab:* 的副本,新增 harness
+// (PI 的 subagent)加进共享判据也到不了 AgentTaskCard,会静默落进普通工具组(codex review)。
+import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
 
-import type { AgentTaskUpdate, ChatMessage } from '@/hooks/useCCAgentChat';
+import type {
+  AgentTaskUpdate,
+  ChatMessage,
+  ContinuationInFlightProjectionCapability,
+} from '@/hooks/useCCAgentChat';
 import { Spinner } from '@/components/ui/spinner';
+import { useMessageNavRailPreference } from '@/hooks/useMessageNavRailPreference';
+import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
 import type { KnownLocalFileRef } from '@/lib/localPathResolver';
 import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
@@ -137,7 +149,6 @@ import { ErrorMessageCard } from './ErrorMessageCard';
 import { APP_EXIT_INTERRUPTED_REASON } from '../../../shared/interruptedTurn';
 import { PlanReviewBubble } from './PlanReviewBubble';
 import { ToolCallCard, getToolSummary } from './ToolCallCard';
-import { TodoListCard, type TodoItem } from './TodoListCard';
 import { SystemCard } from './SystemCard';
 import { NewMessageIndicator } from './NewMessageIndicator';
 import { ThinkingCard } from './ThinkingCard';
@@ -158,6 +169,10 @@ import {
   subscribeGhostCards,
   type GhostCardSnapshot,
 } from '@/cindy-brain/ghostCardStore';
+import {
+  collectGhostCardGalleryImages,
+  createGhostCardSpawnIndex,
+} from '@/cindy-brain/ghostCardGallery';
 import { ChatImageView } from './ChatImageView';
 import { ImageGalleryContext, type GalleryImage } from './ImageGalleryContext';
 import { GhostFulfillmentContext } from './GhostSummonCard';
@@ -172,6 +187,13 @@ import { PrevMessageJumpChip, firstNonEmptyLine } from './PrevMessageJumpChip';
 import { useTopRightChipSlot } from './TopRightChipStack';
 import { usePrevUserMessageInView } from './usePrevUserMessageInView';
 import { JumpToBottomChip } from './JumpToBottomChip';
+import { MessageNavRail } from './MessageNavRail';
+import {
+  NAV_RAIL_JUMP_TOP_OFFSET_PX,
+  deriveNavRailEntries,
+  shouldBackfillForNavRail,
+} from './messageNavRailModel';
+import { resolveUserDisplayText } from './userMessageDisplayText';
 import { detectScrollAnchoringApplied } from './scrollAnchoringDetect';
 import {
   decideAutoFillAction,
@@ -180,6 +202,8 @@ import {
 } from './viewportFillDetect';
 import {
   resolveNearBottomOnScroll,
+  resolveLastUserMessageObservation,
+  resolveRenderPinDecision,
   shouldUnpinOnUpIntent,
   shouldUnpinOnWheel,
 } from './autoFollowIntent';
@@ -193,7 +217,7 @@ interface MessageStreamProps {
   sessionTitle?: string | null;
   /** Owning agent kind — propagated to UserMessage so capability gates
    *  (fork/rewind icon visibility) can read the right agent's capabilities. */
-  agentKind?: 'cc' | 'codex';
+  agentKind?: 'cc' | 'codex' | 'pi';
   /** Owning session's remote SSH host id (null for local sessions). Forwarded
    *  so message-level controls can gate features unsupported on remote
    *  (e.g. rewind on cc-remote daemon sessions). */
@@ -212,6 +236,10 @@ interface MessageStreamProps {
    *  state via useExpandedBlockMemory). The session-level "is streaming"
    *  state lives on each ChatMessage's own `isStreaming` field instead. */
   isSessionStreaming?: boolean;
+  /** 当前 vendor turn 的续跑发起项 clientId；steer 顶替 activeTurn 后仍保持。 */
+  continuationTurnClientId?: string | null;
+  /** 旧被控端缺省该字段时才启用兼容兜底；unknown 在首个投影前 fail closed。 */
+  continuationInFlightProjectionCapability?: ContinuationInFlightProjectionCapability;
   /** F-SYNC-2: callback to load older messages */
   onLoadMore?: () => void;
   isLoadingMore?: boolean;
@@ -250,7 +278,6 @@ interface MessageStreamProps {
 // 引用这两个成员(WorkChildItem),让「children 只含这两类」由类型系统保证,
 // 渲染处无需 as 强转;其余成员保持内联。
 type MessageRenderItem = { type: 'message'; key: string; message: ChatMessage };
-type AgentPlanRenderItem = { type: 'agent_plan'; key: string; todos: TodoItem[] };
 type ToolSegmentRenderItem = {
   /** A run of consecutive tool_use messages between text segments,
    *  rendered as a single AgentActionsBlock. v2 — no isStreaming
@@ -264,6 +291,11 @@ type ToolSegmentRenderItem = {
    *  隐藏、没进 resultMap 的空结果)。行级 running/done 状态判定用 —
    *  只看 resultMap 会让 orca 通信工具永久显示 running。 */
   settledIds: Set<string>;
+  /** tool_use clientId → 对应 tool_result 的 createdAt(ms)。
+   *  段的结束时间必须算进 result:单次工具跑了半小时以上时,只看最后一个 tool_use 的
+   *  createdAt 会把段的结束时间大幅低估,让紧随其后的最终答复被空洞守卫误判(#676
+   *  review)。resultMap 只留正文,时间戳单独存这里。 */
+  resultTsMap: Map<string, number>;
 };
 type AgentTaskRenderItem = {
   type: 'agent_task';
@@ -271,6 +303,10 @@ type AgentTaskRenderItem = {
   toolCall?: ChatMessage;
   update?: AgentTaskUpdate;
   result?: string;
+  /** 对应 tool_result 的 createdAt(ms)。历史会话没有 live taskUpdates 时,item 的结束
+   *  时间只能靠它 —— 否则跑了半小时以上的 Agent/Task 会让紧随其后的最终答复被空洞守卫
+   *  误判(#676 review)。与 tool_segment 的 resultTsMap 同源。 */
+  resultTsMs?: number;
 };
 type ForkOriginRenderItem = {
   type: 'fork_origin';
@@ -296,13 +332,14 @@ interface WorkGroupRenderItem {
   durationMs?: number;
   /** 当前是否是仍在执行的尾部动作段。完成态时间线始终 false。 */
   isStreaming: boolean;
-  /** 工作段首个真实活动的 epoch ms,供 live elapsed ticker 使用。 */
+  /** 工作段起点 epoch ms,供 live elapsed ticker 使用。优先是上一个边界
+   *  (用户消息/上一句正文,可能早于段内首个活动),边界缺失时退回首个活动
+   *  时间戳 —— 与 durationMs 的段起点同源(见 createWorkGroup)。 */
   startedAtMs?: number;
 }
 
 export type RenderItem =
   | MessageRenderItem
-  | AgentPlanRenderItem
   | ToolSegmentRenderItem
   | AgentTaskRenderItem
   | ForkOriginRenderItem
@@ -337,6 +374,11 @@ export type RenderItem =
       /** 原始 tool_use 消息(头带展开区显示调用参数;审计层不因行隐身而丢)。 */
       toolCall: ChatMessage;
       settled: boolean;
+      /** 配对到的 tool_result 时间戳(ms)。与 AgentTaskRenderItem.resultTsMs 同口径:
+       *  toolCall.createdAt 只是"开始调用",一次跑很久的供卡调用(出图 / 出视频)拿它
+       *  当结束会把结束时间低估整个执行时长,紧随其后的正文被误判成历史空洞。
+       *  未配对(活卡)时缺省。 */
+      resultTsMs?: number;
       /** 回锚媒体:后续调用(如 poll_result)的 tool_result 带 xdt_anchor_card_id
        *  指回本卡时,其媒体挂在卡正下方渲染(替换"生成中"的视觉位置),而非
        *  留在轮询调用处。仅同 ghostId 的结果可锚入;无回锚时字段缺省。 */
@@ -349,7 +391,7 @@ function isRenderWindowBoundaryItem(item: RenderItem | undefined): boolean {
 }
 
 // export 仅供 render-window 集成单测使用。窗口默认/扩窗时如果刚好切在
-// agent_plan / work_group / assistant 中间,顶部会出现无上下文的 Task/Todo 卡。
+// agent_task / work_group / assistant 中间,顶部会出现无上下文的卡片。
 // 向前吸收同一 user turn 的开头,但限制 lookback 防止单个超长 turn 破坏首屏预算。
 export function snapRenderWindowStartIdx(
   items: readonly RenderItem[],
@@ -529,6 +571,51 @@ export function findLastUserMessageClientId(messages: readonly ChatMessage[]): s
   return null;
 }
 
+/**
+ * 最后一条「用户侧输入」的 clientId —— **含**合成行（自动续跑指令本身）。
+ *
+ * 与上面的 `findLastUserMessageClientId` 的区别就在这里：那份服务于「编辑最后一条消息」
+ * 这个**可见** affordance，刻意跳过渲染成 null 的合成行；本份要回答的是「此刻正在跑的
+ * 这个 turn 是不是自动续跑发起的」——合成行恰恰是那个 turn 的发起者，跳过就答不了。
+ *
+ * 用途：自愈重连行判断自己是不是"仍在飞"。用户在续跑之后又自己发了消息时，最后一条用户
+ * 侧输入就换成他那条，旧的重连行随之停转（正在跑的已经是另一个 turn 了）。
+ */
+export function findLastUserInputClientId(messages: readonly ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    // **插话（`delivery === 'steer'`）不算新 turn 的发起者** —— 它是同一个正在跑的 turn 内
+    // 的追加输入。算进来的话，用户在自愈 turn 里插一句，正在跑的重连行会立刻被"夺走归属"、
+    // 提前停转退回静态（codex P2 / greptile P1）。本文件里其它 turn 边界判断（见上方
+    // `hasFollowingUserTurn` 等）也都显式排除 steer，此处保持一致。
+    //
+    // 首选判据直接使用 main 投影的 vendor-turn owner；旧被控端缺省 owner 字段时，
+    // 才由下面的兼容分支按最后一条非 steer 用户输入兜底。
+    if (messages[i].role === 'user' && messages[i].delivery !== 'steer') {
+      return messages[i].clientId;
+    }
+  }
+  return null;
+}
+
+/**
+ * 自愈落库行是否仍属于当前运行中的续跑 turn。
+ *
+ * 新端以 main 持有的 vendor-turn owner 做精确关联；只有 wire 上确实缺省 owner 字段的旧
+ * 被控端才恢复历史启发式。旧端无法区分自动续跑与不落 user 行的 Goal turn，这是协议信息
+ * 不足时的兼容降级，不能扩散到 supported / unknown 两种状态。
+ */
+export function isAutoResumeRowInFlight(args: {
+  isContinuationTurnOwner: boolean;
+  sessionRunning: boolean;
+  isLastUserInput: boolean;
+  projectionCapability: ContinuationInFlightProjectionCapability;
+}): boolean {
+  return (
+    args.isContinuationTurnOwner ||
+    (args.projectionCapability === 'legacy' && args.sessionRunning && args.isLastUserInput)
+  );
+}
+
 export function shouldBlockAssistantFork(
   isSessionStreaming: boolean,
   message: ChatMessage,
@@ -552,9 +639,14 @@ export function shouldBlockAssistantFork(
  * 只回答"是不是本 turn 最后一条正文"。export 仅供单测使用。
  */
 function isCompletedAssistantMessage(message: ChatMessage): boolean {
-  return message.turnCompleted === true ||
+  return (
+    message.turnCompleted === true ||
     (message.turnMoney?.amount ?? 0) > 0 ||
-    (typeof message.turnCostUsd === 'number' && message.turnCostUsd > 0);
+    (typeof message.turnCostUsd === 'number' && message.turnCostUsd > 0) ||
+    // turnUsageDetails 也只在 turn 结束时 patch(算不出报价的轮次只落它),
+    // 与费用字段一样是等价的收尾信号 —— 少这一条,无金额轮就挂不出 action bar。
+    message.turnUsageDetails !== undefined
+  );
 }
 
 export function collectTurnFinalAssistantClientIds(messages: readonly ChatMessage[]): Set<string> {
@@ -597,17 +689,13 @@ export function collectTurnFinalAssistantClientIds(messages: readonly ChatMessag
  * their own per-block expand state via useExpandedBlockMemory (default
  * collapsed; user click → persisted).
  *
- * Agent plan handling (two-pass):
- *   Pass 1 — Pre-scan all messages to group TodoWrite / update_plan /
- *     TaskCreate/TaskUpdate/TaskList calls into logical "sessions".
- *     A session is one logical task list. A new session starts after the
- *     previous one's items are all completed. Within a session every
- *     plan update refreshes the same card; only the LAST update's position
- *     and state are kept (the card "moves down" as updates arrive).
- *   Pass 2 — Linear build. Plan tool_use messages are skipped, but at the
- *     position of each session's last update an `agent_plan` RenderItem is injected.
- *     Pending tool_segment is flushed before the plan card so order is
- *     preserved.
+ * Agent plan handling:
+ *   Plan tool calls (TodoWrite / update_plan / TaskCreate…) are swallowed
+ *   entirely — same treatment as F7's AskUserQuestion / ExitPlanMode: the
+ *   call and its tool_results produce no render item and do NOT cut the
+ *   surrounding tool_segment. 计划的唯一呈现是 composer 上方的常驻面板
+ *   (PinnedPlanPanel,Codex IDE 扩展式钉住交互),它直接从 messages 派生
+ *   最新 plan session 快照,与本函数无关。
  */
 /**
  * 锚点丢失恢复:DB 加载更老历史 prepend 时,若新拉回的末尾是 tool_use 且当前
@@ -620,7 +708,7 @@ export function collectTurnFinalAssistantClientIds(messages: readonly ChatMessag
  * 扫描 allRenderItems 找哪个 item **现在覆盖**这个 clientId:
  *   - message: msg.clientId 严格匹配
  *   - tool_segment: toolCalls.*.clientId 任一匹配(段合并后老 toolCall 仍在新段内)
- *   - tool_media / agent_plan: 用 key 后缀匹配(它们的 key 派生自 stable message clientId)
+ *   - tool_media / ghost_card: 用 key 后缀匹配(它们的 key 派生自 stable message clientId)
  *
  * 找到即返回该 index,visible slice 从这里继续;找不到才退回默认窗口。
  *
@@ -650,7 +738,7 @@ function recoverLostAnchorIdx(items: RenderItem[], lostKey: string): number {
       if (it.key === lostKey || it.key.endsWith(`-${lostCid}`)) return i;
       if (renderItemContainsClientId(it, lostCid)) return i;
     } else if (it.type !== 'fork_origin') {
-      // tool_media / agent_plan:其 key 派生自 stable message clientId,精确后缀匹配
+      // tool_media / ghost_card:其 key 派生自 stable message clientId,精确后缀匹配
       if (it.key === lostKey || it.key.endsWith(`-${lostCid}`)) return i;
     }
   }
@@ -664,9 +752,10 @@ export function findRestorableViewportItemIdx(items: RenderItem[], viewportTopKe
 
 /**
  * 从全量 render items 里按渲染顺序抽出会话内所有图片的 src,作为 lightbox 翻图
- * 的数据源(全量,不受渲染窗口裁剪影响)。只收**结构化、确定会渲染成图**的两类:
+ * 的数据源(全量,不受渲染窗口裁剪影响)。只收**结构化、确定会渲染成图**的三类:
  *   - tool-output 图(art 出图 / 飞书拉图等)→ tool_media item 的 image 项
  *   - 用户上传图 → user message 的 images(url 或 data:base64,与 UserMessage 同款拼法)
+ *   - 插件生成图 → ghost card 及其衍生卡中会打开 ImageLightbox 的图片
  *
  * 不收正文 Markdown 内嵌图:用正则扫文本会误抓代码块里当作文本展示的 ![]() 语法,
  * 虚增计数 / 让翻页跳到无效图(codex review);要准确得复刻 MarkdownRenderer 的
@@ -676,18 +765,36 @@ export function findRestorableViewportItemIdx(items: RenderItem[], viewportTopKe
 export function collectSessionImageSrcs(
   items: RenderItem[],
   mediaOrigin?: RemoteMediaOrigin,
+  ghostCards?: GhostCardSnapshot,
+  isSessionStreaming = false,
 ): GalleryImage[] {
   // 远程会话:画廊 src 必须与渲染出的 <img data-gallery-src> 同样改写到 cindy-remote-media://,
   // 否则 ImageLightbox 的画廊 src 匹配对不上、退化成仅当前窗口翻图 + 计数错。
   const push = (url: string, meta?: Omit<GalleryImage, 'src'>): void =>
     void out.push({ src: rewriteToRemoteMediaOrigin(url, mediaOrigin), ...meta });
   const out: GalleryImage[] = [];
+  const ghostCardSpawnIndex = ghostCards ? createGhostCardSpawnIndex(ghostCards) : undefined;
   for (const item of items) {
     if (item.type === 'fork_origin') {
       continue;
     } else if (item.type === 'tool_media') {
       for (const m of item.items) {
         if (m.kind === 'image' && m.url) push(m.url);
+      }
+    } else if (item.type === 'ghost_card') {
+      if (ghostCards) {
+        for (const image of collectGhostCardGalleryImages(
+          item.callId,
+          ghostCards,
+          !item.settled && isSessionStreaming,
+          ghostCardSpawnIndex!,
+        )) {
+          push(image.src, { galleryId: image.galleryId });
+        }
+      }
+      // 回锚媒体渲染在卡片及其衍生卡之后，画廊顺序必须与 DOM 一致。
+      for (const media of item.media ?? []) {
+        if (media.kind === 'image' && media.url) push(media.url);
       }
     } else if (item.type === 'message') {
       const msg = item.message;
@@ -709,15 +816,20 @@ export function collectSessionImageSrcs(
             push(`data:${img.mimeType};base64,${img.base64}`);
           }
         }
+      } else if (msg.role === 'assistant' && ghostCards) {
+        // will-assistant-message 出口钩子的自绘卡以消息 clientId 为根 callId。
+        for (const image of collectGhostCardGalleryImages(
+          msg.clientId,
+          ghostCards,
+          false,
+          ghostCardSpawnIndex!,
+        )) {
+          push(image.src, { galleryId: image.galleryId });
+        }
       }
     }
   }
   return out;
-}
-
-// export 仅供单测(`buildRenderItemsKeyStability.test.ts`)使用,运行时无外部消费者。
-function isAgentTaskToolName(toolName: string): boolean {
-  return toolName === 'Agent' || toolName === 'Task' || toolName.startsWith('collab:');
 }
 
 // Workflow 工具(Claude Code SDK 多 agent 编排)在父会话事件流里 = 单个 local_workflow
@@ -771,6 +883,13 @@ export function buildRenderItems(
   messages: ChatMessage[],
   taskUpdates?: ReadonlyMap<string, AgentTaskUpdate>,
   ghostCards?: GhostCardSnapshot,
+  opts?: {
+    /**
+     * 还有更老的历史页没加载(= `messages` 只是窗口、不是全量)。为真时,凡靠
+     * 「父调用在不在 messages 里」做的归属判定都不可信,必须放宽而不是丢弃。
+     */
+    historyWindowIncomplete?: boolean;
+  },
 ): {
   items: RenderItem[];
   singleResultMap: Map<string, string>;
@@ -779,22 +898,21 @@ export function buildRenderItems(
   // Plan/task rendering and regular tool result pairing both need a stable
   // lookup by vendor toolUseId. Adjacency remains a fallback in Pass 2.
   const resultByToolUseId = new Map<string, string>();
+  // toolUseId → tool_result.createdAt(ms)。段的结束时间要算进 result,见
+  // ToolSegmentRenderItem.resultTsMap 的注释。
+  const resultTsByToolUseId = new Map<string, number>();
   // 卡槽③:已被某条 tool_result 认领的卡(xdt_card_id)——活卡锚定要跳过
   // 这些,防止 settle 后同一张卡又被别的 in-flight 行启发式抢走。
   const settledCardIds = new Set<string>();
   for (const m of messages) {
     if (m.role === 'tool_result' && typeof m.toolUseId === 'string' && m.toolUseId.length > 0) {
       resultByToolUseId.set(m.toolUseId, m.content);
+      const resultMs = Date.parse(m.createdAt ?? '');
+      if (Number.isFinite(resultMs)) resultTsByToolUseId.set(m.toolUseId, resultMs);
       const cardId = extractGhostCardId(m.content);
       if (cardId) settledCardIds.add(cardId);
     }
   }
-
-  // ── Pass 1: pre-scan agent plan sessions ──
-  // Shared groups TodoWrite / update_plan / Task* into logical sessions.
-  // Desktop keeps the existing `agent_plan` render item and `plan-*` keys,
-  // while mobile can consume the same shared logic through buildMessageRenderItems.
-  const planInsertAt = findMessageTodoInsertions(messages, { keyPrefix: 'plan' });
 
   const isOrcaCommunicationTool = (toolName: string): boolean => {
     const normalized = toolName.replace(/^mcp__/, 'mcp:').replace(/__/g, ':');
@@ -842,6 +960,16 @@ export function buildRenderItems(
   const singleResultMap = new Map<string, string>();
   let pendingToolCalls: ChatMessage[] = [];
   let pendingResultMap = new Map<string, string>();
+  // 段内 tool_use clientId → tool_result.createdAt(ms),见 resultTsMap 注释。
+  let pendingResultTsMap = new Map<string, number>();
+  // 段内已见过的最晚**结束**时间(调用发起时刻与其 tool_result 时间取 max)。空洞判定用它,
+  // 增量维护而不是每条调用重扫一遍 pendingToolCalls —— 工具密集的长 turn 里那是 O(n²)
+  // (#676 review copilot)。flushSegment 时复位。
+  let pendingSegmentEndMs: number | null = null;
+  const notePendingSegmentEnd = (ms: number | null | undefined): void => {
+    if (ms === null || ms === undefined || !Number.isFinite(ms)) return;
+    pendingSegmentEndMs = pendingSegmentEndMs === null ? ms : Math.max(pendingSegmentEndMs, ms);
+  };
   // 状态判定专用:tool_result 已到达的 tool_use(含被 shouldHideToolResult
   // 隐藏、不进 resultMap 的空结果)。
   let pendingSettledIds = new Set<string>();
@@ -873,6 +1001,7 @@ export function buildRenderItems(
       key: segmentKey,
       toolCalls: pendingToolCalls,
       resultMap: pendingResultMap,
+      resultTsMap: pendingResultTsMap,
       settledIds: pendingSettledIds,
     });
     if (pendingSegmentMedia.length > 0) {
@@ -897,6 +1026,8 @@ export function buildRenderItems(
     for (const gc of pendingSegmentGhostCards) items.push(gc);
     pendingToolCalls = [];
     pendingResultMap = new Map<string, string>();
+    pendingResultTsMap = new Map<string, number>();
+    pendingSegmentEndMs = null;
     pendingSettledIds = new Set<string>();
     pendingSegmentMedia = [];
     pendingSegmentGhostCards = [];
@@ -928,14 +1059,10 @@ export function buildRenderItems(
         continue;
       }
 
-      // Todo/plan updates — break the segment so the plan card doesn't get buried
-      // inside the tool block.
+      // Plan tools (TodoWrite / update_plan / Task*) — swallowed like F7:
+      // 计划的唯一呈现是 composer 上方的 PinnedPlanPanel(钉住式常驻面板),
+      // 流内不再插卡;也不切段,周围工具保持聚组,如同调用不存在。
       if (isAgentPlanToolName(toolName)) {
-        const sessionTodos = planInsertAt.get(i);
-        if (sessionTodos) {
-          flushSegment();
-          items.push({ type: 'agent_plan', key: sessionTodos.key, todos: sessionTodos.todos });
-        }
         let j = i + 1;
         while (j < messages.length && messages[j].role === 'tool_result') j++;
         i = j;
@@ -948,10 +1075,22 @@ export function buildRenderItems(
           typeof msg.toolUseId === 'string' && msg.toolUseId.length > 0
             ? resultByToolUseId.get(msg.toolUseId)
             : undefined;
+        // 结束时间:主路径按 toolUseId 查,adjacency 兜底取相邻 tool_result 的最新时间。
+        let resultTsMs =
+          typeof msg.toolUseId === 'string' && msg.toolUseId.length > 0
+            ? resultTsByToolUseId.get(msg.toolUseId)
+            : undefined;
         let j = i + 1;
         while (j < messages.length && messages[j].role === 'tool_result') {
           if (result === undefined && !shouldHideToolResult(toolName, messages[j].content)) {
             result = messages[j].content;
+          }
+          const adjacentTs = Date.parse(messages[j].createdAt ?? '');
+          if (
+            Number.isFinite(adjacentTs) &&
+            (resultTsMs === undefined || adjacentTs > resultTsMs)
+          ) {
+            resultTsMs = adjacentTs;
           }
           j++;
         }
@@ -965,6 +1104,7 @@ export function buildRenderItems(
           toolCall: msg,
           update,
           ...(result !== undefined && !shouldHideToolResult(toolName, result) ? { result } : {}),
+          ...(resultTsMs !== undefined ? { resultTsMs } : {}),
         });
         i = j;
         continue;
@@ -1002,6 +1142,10 @@ export function buildRenderItems(
               tool: toolFromInput,
               toolCall: msg,
               settled: true,
+              resultTsMs:
+                typeof msg.toolUseId === 'string'
+                  ? resultTsByToolUseId.get(msg.toolUseId)
+                  : undefined,
             };
             pendingSegmentGhostCards.push(cardItem);
             ghostCardItemByCallId.set(cardId, cardItem);
@@ -1100,10 +1244,38 @@ export function buildRenderItems(
 
       // Regular tool_use — accumulate(配上卡的 ghost_call 不进段,行隐身)。
       if (!hideRowForCard) {
+        // 历史窗口空洞可能正好落在两次工具调用之间(缺的是 user 行):那样两个窗口的
+        // tool call 会被合进同一个 tool_segment,段首尾时间差直接成了跨空洞的假时长,
+        // 而 groupWorkRuns 的空洞守卫只看段首时间、发现不了段内部的跳变。所以在段内
+        // 也按同一阈值切开,让「已工作 Xs」的时长和分组都落在真实连续的动作上。
+        //
+        // 锚点是 pendingSegmentEndMs —— 段内所有调用结束时间的**最大值**,不能只看紧邻的
+        // 上一条:并行工具会乱序完成(A 跑 40 分钟还没回,B 紧随其后一分钟就结束,这时又发起
+        // C),只比 B 的早结束时间会把 C 误判成空洞、把一段连续工作切碎,段产物(tool_media)
+        // 也跟着挪到错误的边界上(#676 review codex P1)。groupWorkRuns 的 prevEndMs 早就是
+        // 单调取 max 的,这里补齐同一口径。
+        if (pendingToolCalls.length > 0) {
+          const currentCallMs = messageTs(msg);
+          if (
+            pendingSegmentEndMs !== null &&
+            currentCallMs !== null &&
+            currentCallMs - pendingSegmentEndMs > HISTORY_GAP_SPLIT_MS
+          ) {
+            flushSegment();
+          }
+        }
         pendingToolCalls.push(msg);
+        notePendingSegmentEnd(messageTs(msg));
         if (mainResult !== undefined) {
           // result 到了就算 settled,即便内容被隐藏不进 resultMap。
           pendingSettledIds.add(msg.clientId);
+          // 时间戳与内容是否被隐藏无关:段的结束时间靠它算(见 resultTsMap 注释)。
+          const resultTs =
+            typeof msg.toolUseId === 'string' ? resultTsByToolUseId.get(msg.toolUseId) : undefined;
+          if (resultTs !== undefined) {
+            pendingResultTsMap.set(msg.clientId, resultTs);
+            notePendingSegmentEnd(resultTs);
+          }
         }
         if (mainResult !== undefined && !shouldHideToolResult(toolName, mainResult)) {
           pendingResultMap.set(msg.clientId, mainResult);
@@ -1122,6 +1294,15 @@ export function buildRenderItems(
       while (j < messages.length && messages[j].role === 'tool_result') {
         if (!hideRowForCard) {
           pendingSettledIds.add(msg.clientId);
+          // adjacency 配对同样要留下 result 时间戳(段结束时间用)。
+          const adjacencyTs = Date.parse(messages[j].createdAt ?? '');
+          if (Number.isFinite(adjacencyTs)) {
+            notePendingSegmentEnd(adjacencyTs);
+            const known = pendingResultTsMap.get(msg.clientId);
+            if (known === undefined || adjacencyTs > known) {
+              pendingResultTsMap.set(msg.clientId, adjacencyTs);
+            }
+          }
           // 主路径没命中时才用 adjacency 覆盖(后到 last wins,保留原行为)
           const result = messages[j].content;
           if (!pendingResultMap.has(msg.clientId) && !shouldHideToolResult(toolName, result)) {
@@ -1152,8 +1333,38 @@ export function buildRenderItems(
   flushSegment();
 
   if (taskUpdates) {
+    // 父会话自己的 Bash 调用集合:local_bash 任务卡(#247 的「后台命令」卡,含
+    // 停止按钮)的**唯一**渲染来源就是本孤儿循环(Bash toolCall 走 tool_segment,
+    // 不进 agent_task 配对分支),必须按 parentToolUseId 命中保留;命不中的才是
+    // workflow / 子 agent 内部启动的后台命令 —— 只进后台任务面板,不进聊天流刷屏
+    // (对齐官方:聊天流只呈现父会话自己的调用)。
+    //
+    // 归属只能靠「父 Bash 调用在不在 messages 里」判定(AgentTaskUpdate 没有
+    // 结构化的「谁 spawn 的」字段),而 messages 是分页窗口(首屏 50 行)。窗口
+    // 不完整时父调用可能只是还没翻到,此时**不丢**:宁可临时多显示 workflow 内部
+    // 的后台命令卡(本 PR 之前就是这个形态),也不能把用户自己还在跑的后台命令
+    // 及其停止按钮从聊天流里抹掉。翻到旧页 / 加载完历史后过滤自动恢复。
+    const historyWindowIncomplete = opts?.historyWindowIncomplete === true;
+    const parentBashToolUseIds = new Set<string>();
+    for (const m of messages) {
+      if (
+        m.role === 'tool_use' &&
+        m.toolName === 'Bash' &&
+        typeof m.toolUseId === 'string' &&
+        m.toolUseId.length > 0
+      ) {
+        parentBashToolUseIds.add(m.toolUseId);
+      }
+    }
     const seenTaskIds = new Set<string>();
     for (const update of taskUpdates.values()) {
+      if (
+        update.taskType === 'local_bash' &&
+        !historyWindowIncomplete &&
+        !(update.parentToolUseId && parentBashToolUseIds.has(update.parentToolUseId))
+      ) {
+        continue;
+      }
       const primaryKey = update.parentToolUseId ?? update.taskId;
       if (
         seenTaskIds.has(update.taskId) ||
@@ -1213,14 +1424,47 @@ function isRunningAgentTask(it: RenderItem): boolean {
   return status === 'running';
 }
 
+/** workflow 卡永远平铺,完成后也不折进工作组:它是后台任务面板的常驻入口,
+ *  折叠掉等于把入口藏起来(产品拍板 2026-07-27:完成后保留痕迹、可点击进
+ *  面板详情;对齐官方——原版完成的 workflow 行留在对话里)。 */
+function isWorkflowTaskItem(it: RenderItem): boolean {
+  return (
+    it.type === 'agent_task' &&
+    (it.update?.taskType === 'local_workflow' || it.toolCall?.toolName === 'Workflow')
+  );
+}
+
 /** preview 中计为一条真实活动的 render item。assistant 进度文字
  *  始终留在主消息流,不占最近 5 条活动窗口。 */
 function isWorkActivityItem(it: RenderItem): it is WorkChildItem {
   return (
     !isRunningAgentTask(it) &&
+    // workflow 卡三条分组路径(answered/legacy/active)统一平铺,见 isWorkflowTaskItem。
+    !isWorkflowTaskItem(it) &&
     (it.type === 'tool_segment' ||
       it.type === 'agent_task' ||
       (it.type === 'message' && it.message.role === 'thinking'))
+  );
+}
+
+/**
+ * 交付正文 item —— 无论落在 turn 的哪个位置都不折进「已工作 Xs」。
+ *
+ * 为什么只靠 seal 位置不够:「最终答复」只认最后一次动作之后的正文,而 agent
+ * 常见「先输出正文 → 再执行一个收尾副作用(发通知 / 落库 / 提交) → 再说一句
+ * 已完成」。这时真正的交付内容排在收尾动作之前,会被整段折起来,只剩收尾那句
+ * 元数据留在消息流里(实例:2026-07-31 定时巡检的产品决策简报 3250 字被折,
+ * 外面只剩 110 字的「已触发通知」)。
+ *
+ * 判据(长度 / 块级 markdown 结构)由 maker-shared 的 isDeliveryProseText 单一
+ * 提供,两端不各写一份。
+ */
+function isDeliveryProseItem(it: RenderItem): boolean {
+  return (
+    it.type === 'message' &&
+    it.message.role === 'assistant' &&
+    !it.message.systemCardType &&
+    isDeliveryProseText(it.message.content)
   );
 }
 
@@ -1264,6 +1508,22 @@ function workGroupClientId(run: WorkChildItem[]): string {
   return workChildClientId(firstActivity ?? run[0]);
 }
 
+/** 工作组内全部可定位 clientId(嵌套组递归),供组容器的回退锚点使用。 */
+function collectWorkGroupClientIds(children: readonly RenderItem[]): string[] {
+  const ids: string[] = [];
+  for (const child of children) {
+    if (child.type === 'message') ids.push(child.message.clientId);
+    else if (child.type === 'tool_segment') {
+      for (const toolCall of child.toolCalls) ids.push(toolCall.clientId);
+    } else if (child.type === 'agent_task' && child.toolCall) {
+      ids.push(child.toolCall.clientId);
+    } else if (child.type === 'work_group') {
+      ids.push(...collectWorkGroupClientIds(child.children));
+    }
+  }
+  return ids;
+}
+
 function renderItemContainsClientId(item: RenderItem, clientId: string): boolean {
   if (item.type === 'fork_origin') return false;
   if (item.type === 'message') return item.message.clientId === clientId;
@@ -1289,13 +1549,96 @@ function renderItemStartMs(item: RenderItem): number | null {
     const ms = Date.parse(item.toolCall?.createdAt ?? item.update?.createdAt ?? '');
     return Number.isFinite(ms) ? ms : null;
   }
+  // ghost_card 是那次调用在流里的**唯一**呈现(工具行被卡片取代),所以它必须
+  // 报出调用时间。漏掉的后果是间隔判定把它当"无时间戳"跳过:空洞后的第一个
+  // 动作恰好是卡片时切不开,卡片还会被归到空洞前那一组里(#676 review)。
+  if (item.type === 'ghost_card') {
+    const ms = Date.parse(item.toolCall.createdAt ?? '');
+    return Number.isFinite(ms) ? ms : null;
+  }
   if (item.type === 'work_group') {
     for (const child of item.children) {
       const childMs = renderItemStartMs(child);
       if (childMs !== null) return childMs;
     }
   }
+  // 剩下两类**故意**不报时间,不是漏:
+  //  - tool_media:段产物,永远紧跟在派生它的 tool_segment 之后(见 flushSegment),
+  //    锚点留在段末正是它自己的时间区间,单独给它一个时间戳没有意义。
+  //  - fork_origin:分叉标记,不是动作,不该参与间隔判定。
   return null;
+}
+
+/**
+ * item 的结束时间戳 —— 空洞判定必须用它,不能用 start。
+ *
+ * 一个合法连续 turn 里的 tool_segment 本身可能跨半小时以上(段内每次相邻调用都在
+ * 阈值内,所以不会被切段)。若拿下一条 item 的 start 去跟这个段的 **start** 比,
+ * 差值就等于整段耗时,会把正常长任务误判成历史空洞:该切的没切,不该切的切了,
+ * 前面的 assistant 进度文字被留在工作组外,时长也退化成段兜底而非最终答复。
+ *
+ * 段的结束必须算进 tool_result:单次工具跑半小时以上时(典型:一次长构建 / CI),
+ * 段里只有一个 tool_use,它的 createdAt 是"开始执行"的时刻,拿它当段末会把结束
+ * 时间低估整个执行时长,紧随其后的最终答复照样被误判成空洞。
+ */
+function renderItemEndMs(item: RenderItem): number | null {
+  if (item.type === 'tool_segment') {
+    let latest = Number.NEGATIVE_INFINITY;
+    for (const call of item.toolCalls) {
+      const callMs = Date.parse(call.createdAt ?? '');
+      if (Number.isFinite(callMs)) latest = Math.max(latest, callMs);
+      const resultMs = item.resultTsMap.get(call.clientId);
+      if (resultMs !== undefined) latest = Math.max(latest, resultMs);
+    }
+    return Number.isFinite(latest) ? latest : renderItemStartMs(item);
+  }
+  if (item.type === 'agent_task') {
+    // fallback 顺序:updatedAt → update.createdAt → toolCall.createdAt。
+    // AgentTaskUpdate 可以只有 createdAt 而没有 updatedAt(见 normalizeAgentTaskUpdate),
+    // 那时 update.createdAt 比调用发起时刻更接近任务结束 —— 先取 toolCall.createdAt 会
+    // 低估结束时间,进而误判空洞、低报工作组时长(#676 review)。
+    const ms = Date.parse(
+      item.update?.updatedAt ?? item.update?.createdAt ?? item.toolCall?.createdAt ?? '',
+    );
+    const liveEnd = Number.isFinite(ms) ? ms : renderItemStartMs(item);
+    // 历史会话没有 live update 时,liveEnd 退化成调用的开始时间;result 时间戳才是
+    // 这张卡真正的结束(与 tool_segment 同口径)。两者取更晚的。
+    if (item.resultTsMs === undefined) return liveEnd;
+    return liveEnd === null ? item.resultTsMs : Math.max(liveEnd, item.resultTsMs);
+  }
+  if (item.type === 'ghost_card') {
+    const startMs = renderItemStartMs(item);
+    if (item.resultTsMs === undefined) return startMs;
+    return startMs === null ? item.resultTsMs : Math.max(startMs, item.resultTsMs);
+  }
+  if (item.type === 'work_group') {
+    // 全量取 max,不是"最后一个 child":children 按**发起**时刻排列,并行的 Agent/Task 乱序完成时
+    // 真正的结束时刻可能落在更靠前的 child 上(先发起、更晚 settle)。取最后一个会低估组的结束
+    // 时间,于是空洞判定的锚点变小、把本来连续的 turn 误判成空洞切开 —— 与本函数 tool_segment
+    // 分支、以及 groupWorkRuns 里 prevEndMs 的 Math.max 是同一条理由(#676 review codex P1)。
+    // 手机端同款函数(maker-shared 的 itemEndTimestamp)已按此收敛,#1210 review 指出这里镜像存在。
+    let latest: number | null = null;
+    for (const child of item.children) {
+      const childMs = renderItemEndMs(child);
+      if (childMs === null) continue;
+      latest = latest === null ? childMs : Math.max(latest, childMs);
+    }
+    return latest;
+  }
+  // thinking 的 createdAt 是块**开始**的时刻,真正结束要加 thinkingDurationMs
+  // (与 workRunEndTs 同口径)。一个想了半小时以上的 thinking 块后面紧跟工具或正文时,
+  // 只看 createdAt 会把它误判成历史空洞、切开一个本来连续的 turn。
+  const startMs = renderItemStartMs(item);
+  if (startMs !== null && item.type === 'message' && item.message.role === 'thinking') {
+    // duration 与 mapServerCreatedAt 同口径夹断:该字段可能是负数 / 非有限值(那边就做了
+    // Math.max(0, …) 的防御)。不夹断会得出 end < start,空洞判定与工作组时长都跟着错
+    // (#676 review copilot)。
+    const durationMs = item.message.thinkingDurationMs;
+    const safeDurationMs =
+      typeof durationMs === 'number' && Number.isFinite(durationMs) ? Math.max(0, durationMs) : 0;
+    return startMs + safeDurationMs;
+  }
+  return startMs;
 }
 
 export function insertForkOriginItem(
@@ -1337,6 +1680,12 @@ function messageTs(msg: ChatMessage): number | null {
   return Number.isFinite(t) ? t : null;
 }
 
+/** 边界项(用户消息 / assistant 正文)的时间戳;非 message 项(卡片等)返回 null,
+ *  让下一段退回段内锚点,避免把已折叠段的时长重复计入。 */
+function boundaryTs(item: RenderItem | undefined): number | null {
+  return item && item.type === 'message' ? messageTs(item.message) : null;
+}
+
 /** run 首子项的起始时间戳。 */
 function workRunStartTs(it: WorkChildItem): number | null {
   if (it.type === 'tool_segment') return messageTs(it.toolCalls[0]);
@@ -1344,40 +1693,54 @@ function workRunStartTs(it: WorkChildItem): number | null {
   return messageTs(it.message);
 }
 
-/** run 末子项的结束时间戳估算(无终结正文消息可用时的兜底):
- *  tool_segment 取最后一个 toolCall 的 createdAt(低估最后一次工具执行耗时,
- *  可接受);thinking 取 createdAt + durationMs 与 createdAt 的较大值。 */
+/**
+ * run 末子项的结束时间戳 —— 直接复用 renderItemEndMs,不再自己算一份。
+ *
+ * 原来这里另算一份:tool_segment 取**最后一次调用的发起时刻**、agent_task 取
+ * `updatedAt ?? toolCall.createdAt`,两者都不看 tool_result 时间。于是"一个跑了 40 分钟的
+ * 工具 / Task 之后紧跟一段历史空洞、后面没有 assistant 正文"时,createWorkGroup 拿不到
+ * nextItem、回落到这里,时长显示成约 0s —— 而 renderItemEndMs 明明已经算得出真正的结束
+ * 时间(#676 review codex P1)。两处口径合一,顺带修掉 agent_task 那个把
+ * `toolCall.createdAt` 排在 `update.createdAt` 前面的旧 fallback 顺序。
+ */
 function workRunEndTs(it: WorkChildItem): number | null {
-  if (it.type === 'tool_segment') {
-    return messageTs(it.toolCalls[it.toolCalls.length - 1]);
-  }
-  if (it.type === 'agent_task') {
-    const ms = Date.parse(
-      it.update?.updatedAt ?? it.toolCall?.createdAt ?? it.update?.createdAt ?? '',
-    );
-    return Number.isFinite(ms) ? ms : null;
-  }
-  const base = messageTs(it.message);
-  if (base === null) return null;
-  const dur = it.message.thinkingDurationMs ?? 0;
-  return base + dur;
+  return renderItemEndMs(it);
 }
 
+/**
+ * 没有终结正文可用时,run 的结束时间 = **所有子项结束时间的最大值**。
+ *
+ * 不能"从后往前找第一个有时间的子项就返回":并行的 Agent/Task 会乱序完成(A 跑到 40 分钟,
+ * B 紧随其后 2 分钟就结束),末尾那张卡的结束时间可能远早于整段真正的结束。被空洞收尾的组
+ * 正好走这条 fallback(没有 nextItem),于是 40 分钟的工作显示成约 2 分钟 —— 而空洞判定那边
+ * 用的已经是正确的最大值(#676 review codex P1)。
+ */
 function workRunFallbackEndTs(run: WorkChildItem[]): number | null {
-  for (let i = run.length - 1; i >= 0; i--) {
-    const ts = workRunEndTs(run[i]);
-    if (ts !== null) return ts;
+  let latest: number | null = null;
+  for (const item of run) {
+    const ts = workRunEndTs(item);
+    if (ts === null) continue;
+    latest = latest === null ? ts : Math.max(latest, ts);
   }
-  return null;
+  return latest;
 }
 
 function createWorkGroup(
   run: WorkChildItem[],
   nextItem: RenderItem | undefined,
   isStreaming = false,
+  prevBoundaryTs: number | null = null,
 ): Extract<RenderItem, { type: 'work_group' }> {
   const firstActivity = run.find((it) => it.type !== 'message' || it.message.role === 'thinking');
-  const startTs = workRunStartTs(firstActivity ?? run[0]);
+  const anchorTs = workRunStartTs(firstActivity ?? run[0]);
+  // 段起点优先锚上一个边界(用户消息 / 上一句正文),与「正在工作…」活表的墙钟
+  // 口径一致:一次性到达的 thinking 块 createdAt≈结束时刻,只用段内锚点会把
+  // 模型思考整段丢掉(实际 6s 显示 1s,内层相加也对不上外层总表)。边界缺失
+  // (窗口截断)或时序异常(rewind 改序)时退回段内锚点。
+  const startTs =
+    prevBoundaryTs !== null && (anchorTs === null || prevBoundaryTs <= anchorTs)
+      ? prevBoundaryTs
+      : anchorTs;
   const endTs =
     nextItem && nextItem.type === 'message'
       ? messageTs(nextItem.message)
@@ -1400,17 +1763,19 @@ function createWorkGroup(
 function createCompletedWorkGroup(
   run: WorkChildItem[],
   nextItem: RenderItem | undefined,
+  prevBoundaryTs: number | null = null,
 ): WorkGroupRenderItem {
   const hasAssistantText = run.some(
     (item) => item.type === 'message' && item.message.role === 'assistant',
   );
-  if (!hasAssistantText) return createWorkGroup(run, nextItem);
+  if (!hasAssistantText) return createWorkGroup(run, nextItem, false, prevBoundaryTs);
 
   const children: WorkGroupChildItem[] = [];
   let activityRun: WorkChildItem[] = [];
+  let innerPrevBoundaryTs = prevBoundaryTs;
   const flushActivityRun = (activityNextItem: RenderItem | undefined) => {
     if (activityRun.length === 0) return;
-    children.push(createWorkGroup(activityRun, activityNextItem));
+    children.push(createWorkGroup(activityRun, activityNextItem, false, innerPrevBoundaryTs));
     activityRun = [];
   };
 
@@ -1421,10 +1786,11 @@ function createCompletedWorkGroup(
     }
     flushActivityRun(item);
     children.push(item);
+    innerPrevBoundaryTs = boundaryTs(item);
   }
   flushActivityRun(nextItem);
 
-  const outer = createWorkGroup(run, nextItem);
+  const outer = createWorkGroup(run, nextItem, false, prevBoundaryTs);
   return {
     ...outer,
     key: `work-summary-${workGroupClientId(run)}`,
@@ -1433,13 +1799,14 @@ function createCompletedWorkGroup(
   };
 }
 
-function groupLegacyWorkRuns(items: RenderItem[]): RenderItem[] {
+function groupLegacyWorkRuns(items: RenderItem[], turnStartTs: number | null = null): RenderItem[] {
   const out: RenderItem[] = [];
   let run: WorkChildItem[] = [];
+  let prevBoundaryTs = turnStartTs;
 
   const flushRun = (nextItem: RenderItem | undefined) => {
     if (run.length === 0) return;
-    out.push(createWorkGroup(run, nextItem));
+    out.push(createWorkGroup(run, nextItem, false, prevBoundaryTs));
     run = [];
   };
 
@@ -1452,6 +1819,7 @@ function groupLegacyWorkRuns(items: RenderItem[]): RenderItem[] {
     } else {
       flushRun(it);
       out.push(it);
+      prevBoundaryTs = boundaryTs(it);
     }
   }
   flushRun(undefined);
@@ -1465,7 +1833,7 @@ function groupLegacyWorkRuns(items: RenderItem[]): RenderItem[] {
  *  - 最后一段之后还没有新的边界时,该段才标成 streaming,
  *    默认显示 latest-five preview。
  */
-function groupActiveWorkRuns(items: RenderItem[]): RenderItem[] {
+function groupActiveWorkRuns(items: RenderItem[], turnStartTs: number | null = null): RenderItem[] {
   let lastCompletedRunBoundaryIdx = -1;
   for (let i = 0; i < items.length; i++) {
     if (isAssistantAnswerCandidate(items[i]) || isCompactBoundaryItem(items[i])) {
@@ -1476,9 +1844,12 @@ function groupActiveWorkRuns(items: RenderItem[]): RenderItem[] {
   const out: RenderItem[] = [];
   let run: WorkChildItem[] = [];
   let runLastIdx = -1;
+  let prevBoundaryTs = turnStartTs;
   const flushRun = (nextItem: RenderItem | undefined) => {
     if (run.length === 0) return;
-    out.push(createWorkGroup(run, nextItem, runLastIdx > lastCompletedRunBoundaryIdx));
+    out.push(
+      createWorkGroup(run, nextItem, runLastIdx > lastCompletedRunBoundaryIdx, prevBoundaryTs),
+    );
     run = [];
   };
 
@@ -1490,6 +1861,7 @@ function groupActiveWorkRuns(items: RenderItem[]): RenderItem[] {
     } else {
       flushRun(it);
       out.push(it);
+      prevBoundaryTs = boundaryTs(it);
     }
   }
   flushRun(undefined);
@@ -1503,11 +1875,17 @@ function groupActiveWorkRuns(items: RenderItem[]): RenderItem[] {
  * 连续输出的 assistant 文字视为最终答复阶段,留在组外;若整轮没有真实动作,
  * 只保留最后一条 assistant 正文,此前文字仍视作工作过程。
  *
+ * 位置判定之外还有一条位置无关的兜底:交付正文(见 isDeliveryProseItem)即使排在
+ * 收尾动作之前也不折叠,免得「先出简报 → 再发通知 → 再说一句已完成」把产出藏进组里。
+ *
  * 没有最终正文(被中断 / 停在工具)或最终正文后仍有已完成动作时返回
  * handled:false,交回 groupLegacyWorkRuns 按连续动作折叠。tool_media /
- * agent_plan /运行中子 Agent 等非可归档项保持可见,并作为顺序锚点切开工作组。
+ * 运行中子 Agent 等非可归档项保持可见,并作为顺序锚点切开工作组。
  */
-function groupAnsweredTurnItems(turnItems: RenderItem[]): {
+function groupAnsweredTurnItems(
+  turnItems: RenderItem[],
+  turnStartTs: number | null = null,
+): {
   items: RenderItem[];
   handled: boolean;
 } {
@@ -1583,19 +1961,27 @@ function groupAnsweredTurnItems(turnItems: RenderItem[]): {
 
   const out: RenderItem[] = [];
   let run: WorkChildItem[] = [];
+  let prevBoundaryTs = turnStartTs;
   const flushRun = (nextItem: RenderItem | undefined) => {
     if (run.length === 0) return;
-    out.push(createCompletedWorkGroup(run, nextItem));
+    out.push(createCompletedWorkGroup(run, nextItem, prevBoundaryTs));
     run = [];
   };
 
   for (let i = 0; i < turnItems.length; i++) {
     const it = turnItems[i];
-    if (!sealedAnswers.has(i) && !isRunningAgentTask(it) && isWorkChild(it)) {
+    if (
+      !sealedAnswers.has(i) &&
+      !isRunningAgentTask(it) &&
+      !isWorkflowTaskItem(it) &&
+      !isDeliveryProseItem(it) &&
+      isWorkChild(it)
+    ) {
       run.push(it);
     } else {
       flushRun(it);
       out.push(it);
+      prevBoundaryTs = boundaryTs(it);
     }
   }
   flushRun(undefined);
@@ -1671,11 +2057,17 @@ function renderWorkGroupChild(
     workingDir: string;
     sessionId?: string;
     sessionTitle?: string | null;
-    agentKind?: 'cc' | 'codex';
+    agentKind?: 'cc' | 'codex' | 'pi';
     remoteHostId?: string | null;
     isSessionStreaming: boolean;
     firstUserMessageClientId: string | null;
     lastUserMessageClientId: string | null;
+    /** 含合成行的最后一条用户侧输入(自愈重连行判断"仍在飞"的兜底判据)。 */
+    lastUserInputClientId: string | null;
+    /** 当前 vendor turn 的续跑 owner clientId。 */
+    continuationTurnClientId: string | null;
+    /** 旧端缺省 owner 字段时才启用兼容兜底。 */
+    continuationInFlightProjectionCapability: ContinuationInFlightProjectionCapability;
     localFileRefs: readonly KnownLocalFileRef[];
     singleResultMap: Map<string, string>;
     assistantsWithFollowingUserBoundary: ReadonlySet<string>;
@@ -1717,6 +2109,9 @@ function renderWorkGroupChild(
       assistantIsTurnFinal={props.turnFinalAssistantClientIds.has(item.message.clientId)}
       isFirstUserMessage={item.message.clientId === props.firstUserMessageClientId}
       isLastUserMessage={item.message.clientId === props.lastUserMessageClientId}
+      isLastUserInput={item.message.clientId === props.lastUserInputClientId}
+      isContinuationTurnOwner={item.message.clientId === props.continuationTurnClientId}
+      continuationInFlightProjectionCapability={props.continuationInFlightProjectionCapability}
       localFileRefs={props.localFileRefs}
     />
   );
@@ -1738,32 +2133,67 @@ function renderWorkGroupChild(
  * 内层组 key 不变;完成态外组另用 `work-summary-*`,避免复用展开记忆。
  * DB prepend 向前合并等场景由 recoverLostAnchorIdx 递归找回锚点。
  *
+ * 窗口空洞:除 user 行外,相邻动作间隔超过 HISTORY_GAP_SPLIT_MS 也切断工作组,
+ * 见该常量注释。
+ *
  * export 仅供单测使用。
  */
 export function groupWorkRuns(items: RenderItem[], isSessionStreaming: boolean): RenderItem[] {
   const out: RenderItem[] = [];
   let currentTurn: RenderItem[] = [];
+  // turn 开场边界(用户消息)的时间戳;窗口截断没见到用户消息时为 null,
+  // 各分组路径退回段内锚点。
+  let turnStartTs: number | null = null;
 
   const flushTurn = (isActiveTail: boolean) => {
     if (currentTurn.length === 0) return;
     const activeStreaming = isActiveTail && isSessionStreaming;
     if (activeStreaming) {
-      out.push(...groupActiveWorkRuns(currentTurn));
+      out.push(...groupActiveWorkRuns(currentTurn, turnStartTs));
       currentTurn = [];
       return;
     }
-    const grouped = groupAnsweredTurnItems(currentTurn);
-    out.push(...(grouped.handled ? grouped.items : groupLegacyWorkRuns(currentTurn)));
+    const grouped = groupAnsweredTurnItems(currentTurn, turnStartTs);
+    out.push(...(grouped.handled ? grouped.items : groupLegacyWorkRuns(currentTurn, turnStartTs)));
     currentTurn = [];
   };
+
+  // 锚点用上一个 item 的**结束**时间(见 renderItemEndMs):否则一个正常的长时段
+  // tool_segment 会让紧随其后的 item 被误判成空洞。
+  // 无时间戳的 item 不重置锚点:让间隔判定跨过它,继续比对上一个有时间的动作。
+  let prevEndMs: number | null = null;
 
   for (const it of items) {
     if (it.type === 'message' && it.message.role === 'user') {
       flushTurn(false);
       out.push(it);
+      // 两件事互不相干,合并时都要保留:
+      //  - prevEndMs:空洞判定的锚点(#676);
+      //  - turnStartTs:turn 开场边界,分组算时长用(#598)。
+      prevEndMs = renderItemEndMs(it) ?? prevEndMs;
+      turnStartTs = messageTs(it.message);
       continue;
     }
+    const itemStartMs = renderItemStartMs(it);
+    if (
+      prevEndMs !== null &&
+      itemStartMs !== null &&
+      itemStartMs - prevEndMs > HISTORY_GAP_SPLIT_MS
+    ) {
+      flushTurn(false);
+      // 空洞切开的新段没有已知的 turn 开场边界:那条 user 行在空洞的**另一侧**(或压根没加载)。
+      // 继续拿它当起点会让新段的时长横跨整个空洞 —— 正是本 PR 要修的那种谎报(实测 47 小时)。
+      // 置 null 与 #598 里"窗口截断没见到用户消息"同语义:各分组路径退回段内锚点。
+      turnStartTs = null;
+    }
     currentTurn.push(it);
+    // 取本 turn 内见过的**最大**结束时间,不能无条件覆盖:并行的 Agent/Task 可能乱序完成
+    // (相邻的后一张卡先结束),无条件赋值会让锚点回退到更早的时刻,于是紧随其后的最终答复
+    // 与这个退化锚点相差超过阈值 → 连续 turn 被误切、时长被低报(#676 review)。
+    const itemEndMs = renderItemEndMs(it);
+    if (itemEndMs !== null) {
+      prevEndMs = prevEndMs === null ? itemEndMs : Math.max(prevEndMs, itemEndMs);
+    }
   }
   flushTurn(true);
   return out;
@@ -1785,6 +2215,8 @@ export function MessageStream({
   messages,
   taskUpdates,
   isSessionStreaming = false,
+  continuationTurnClientId = null,
+  continuationInFlightProjectionCapability = 'unknown',
   onLoadMore,
   isLoadingMore,
   hasMoreMessages,
@@ -1844,7 +2276,10 @@ export function MessageStream({
   const prevScrollTopRef = useRef(0);
   /** clientId of the last user-role message we've already observed. Used to
    *  detect a NEW user send → force pin regardless of prior scroll state. */
-  const lastUserMsgIdRef = useRef<string | null>(null);
+  const lastUserMsg = messages[messages.length - 1];
+  const lastUserMsgIdRef = useRef<string | null>(
+    lastUserMsg?.role === 'user' ? lastUserMsg.clientId : null,
+  );
 
   // ── render-window state ──
   // null = 默认窗口(取末尾 RENDER_WINDOW_INITIAL_ITEMS 个 item);非 null = 锚定到
@@ -1913,8 +2348,11 @@ export function MessageStream({
   // 用户看到的。流式中每 token messages 引用变 → 这里跑一次 O(n) 单线性扫描,
   // 实测 N=1000 < 2ms (Windows),如果未来发现瓶颈再走增量化(out of scope)。
   const { items: ungroupedRenderItems, singleResultMap } = useMemo(
-    () => buildRenderItems(messages, taskUpdates, ghostCardSnapshot),
-    [messages, taskUpdates, ghostCardSnapshot],
+    () =>
+      buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
+        historyWindowIncomplete: Boolean(hasMoreMessages),
+      }),
+    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages],
   );
   const assistantsWithFollowingUserBoundary = useMemo(
     () => collectAssistantsWithFollowingUserBoundary(messages),
@@ -1937,6 +2375,32 @@ export function MessageStream({
     [ungroupedRenderItems, isSessionStreaming, forkOrigin],
   );
 
+  /**
+   * TODO(render-window-bidirectional): 锚定分支目前是 `slice(startIdx)` —— 从锚点切到
+   * 末尾、**没有上界**。这是 #676 review 反复指向的根因:补齐 / 跳转让 messages 变长后,
+   * 深跳会一次挂载"锚点 → 末尾"的全部 item。因为它无界,store 侧只能靠"跳转补齐预算"
+   * 间接限制挂载量,而那个预算必须逐一追平 buildRenderItems 的每种 item 展开规则
+   * (agent_task 卡、空洞切段、ghost_card、tool_media…),review 中已发现 5 种
+   * 被低估的路径 —— 是一条追不完的线。
+   *
+   * 决定:把锚定窗口做成双向有界 + 配套向下扩窗,作为紧随其后的独立改动(不塞进本 PR ——
+   * 它要动下面 5 处联动派生,且滚动手感必须实机验证,需要一个完整的实施与验证窗口)。
+   * 之前那套补齐预算是它落地前的过渡兜底,落地后可以大幅放宽甚至移除。
+   *
+   * 实施要点(照此改,别重新推导):
+   *   1. 新增 anchoredForwardItems state 作为锚点向后的 item 上界,锚点变化时重置;
+   *      锚定分支改为 slice(start, start + anchoredForwardItems)。
+   *   2. windowAtTop 现在是 `visible.length === all.length`,加上界后即使 start 已到 0
+   *      也恒为 false → decideUserIntentFillAction 再也走不到 load-from-db。必须改成
+   *      基于 startIdx === 0 判定,因此要把 startIdx 从这个 useMemo 里一并导出。
+   *   3. isNearBottom:窗口未覆盖末尾时 DOM 距底 <100px 会被误判成"贴底",auto-follow 与
+   *      jump-down chip 语义都会错。窗口未覆盖末尾时必须强制判为非贴底。
+   *   4. expandWindow(向上扩)必须同步把上界 +RENDER_WINDOW_GROWTH_ITEMS,否则 start 前移
+   *      而上界不动,会把用户视口下方的内容反向截掉。
+   *   5. handleScroll 已有 distanceFromBottom:距底 <threshold 且窗口未覆盖末尾时扩上界。
+   *      向下扩窗比向上简单 —— 在下方 append 不改变已有内容的滚动偏移,不需要 F-SYNC-2
+   *      那种 delta 补偿。上界扩到覆盖末尾后清除它,此后贴底语义与现状完全一致。
+   */
   const visibleRenderItems = useMemo(() => {
     if (allRenderItems.length === 0) return allRenderItems;
     if (firstVisibleItemKey === null) {
@@ -2026,9 +2490,15 @@ export function MessageStream({
     }
     const root = scrollRef.current;
     if (!root) return;
-    const el = root.querySelector(
+    // 精确锚点(message wrapper / 带 toolCall 的任务卡)优先;查不到时退回
+    // 聚合动作块的容器锚点(data-message-client-ids 空格分隔多 clientId)——
+    // 后台 Bash 等工具行渲染在折叠块内,没有独立的行级 DOM 锚点。
+    const el = (root.querySelector(
       `[data-message-client-id="${CSS.escape(focusMessageClientId)}"]`,
-    ) as HTMLElement | null;
+    ) ??
+      root.querySelector(
+        `[data-message-client-ids~="${CSS.escape(focusMessageClientId)}"]`,
+      )) as HTMLElement | null;
     if (!el) return;
     restoringRef.current = false;
     isNearBottomRef.current = false;
@@ -2082,8 +2552,14 @@ export function MessageStream({
     [sessionFileValue],
   );
   const sessionImageSrcs = useMemo(
-    () => collectSessionImageSrcs(allRenderItems, galleryMediaOrigin),
-    [allRenderItems, galleryMediaOrigin],
+    () =>
+      collectSessionImageSrcs(
+        allRenderItems,
+        galleryMediaOrigin,
+        ghostCardSnapshot,
+        isSessionStreaming,
+      ),
+    [allRenderItems, galleryMediaOrigin, ghostCardSnapshot, isSessionStreaming],
   );
 
   // 把可见窗口往前(更早)推 RENDER_WINDOW_GROWTH_ITEMS 个 item,用于滚到顶时的客户端扩窗。
@@ -2589,12 +3065,6 @@ export function MessageStream({
   // result land.
   // biome-ignore lint/correctness/useExhaustiveDependencies: bottomPadding 是触发型依赖；overlay 高度变化时即使 effect 内不读取它，也必须重新 pin 到底。
   useLayoutEffect(() => {
-    // 还原中:跳过一切 auto-follow,位置由下面的还原 effect / ResizeObserver 接管。
-    if (restoringRef.current) {
-      const el = scrollRef.current;
-      if (el) prevScrollTopRef.current = el.scrollTop;
-      return;
-    }
     // tail item 在 visibleRenderItems 与 allRenderItems 末尾完全一致(window 始终
     // 包含最新的一段),用 visibleRenderItems 避免扩窗时多触发一次。
     // 用户消息总是产出独立的 message item(不进 segment / 不被丢弃),所以这里
@@ -2602,15 +3072,26 @@ export function MessageStream({
     const lastItem = visibleRenderItems[visibleRenderItems.length - 1];
     const lastUserMsg =
       lastItem?.type === 'message' && lastItem.message.role === 'user' ? lastItem.message : null;
-    const isNewUserSend = lastUserMsg !== null && lastUserMsg.clientId !== lastUserMsgIdRef.current;
+    const userMessageObservation = resolveLastUserMessageObservation({
+      restoring: restoringRef.current,
+      tailUserMessageId: lastUserMsg?.clientId ?? null,
+      previousTailUserMessageId: lastUserMsgIdRef.current,
+    });
+    lastUserMsgIdRef.current = userMessageObservation.baselineUserMessageId;
+    const decision = resolveRenderPinDecision({
+      restoring: restoringRef.current,
+      newUserSend: userMessageObservation.isNewUserSend,
+      nearBottom: isNearBottomRef.current,
+    });
 
-    if (isNewUserSend) {
+    if (userMessageObservation.isNewUserSend && lastUserMsg) {
       lastUserMsgIdRef.current = lastUserMsg.clientId;
-      isNearBottomRef.current = true;
-      pinToBottom();
-    } else if (isNearBottomRef.current) {
-      pinToBottom();
     }
+    if (decision.clearRestoring) {
+      restoringRef.current = false;
+      isNearBottomRef.current = true;
+    }
+    if (decision.pinToBottom) pinToBottom();
 
     const el = scrollRef.current;
     if (el) prevScrollTopRef.current = el.scrollTop;
@@ -2899,6 +3380,9 @@ export function MessageStream({
   // scrollIntoView 直接可用,无需扩窗。user 消息总是单独 message item(不进
   // segment / 不被丢弃),所以这里只 unwrap type==='message' && role==='user'。
   // previewById 同源,截断/去噪都在 PrevMessageJumpChip 的 truncatePreview 里做。
+  // 预览存显示文本而非原始 content:chip 是导航条缺席/截断时的兜底入口,其
+  // title/aria 与刻度预览承担同一职责,hook 消息的隐藏 prompt/<thread_context>
+  // 与 Orca 行的 JSON 原文同样不能裸奔(userMessageDisplayText,PR #830 review)。
   const { userMessageIds, previewById } = useMemo(() => {
     const ids: string[] = [];
     const map = new Map<string, string>();
@@ -2908,7 +3392,7 @@ export function MessageStream({
       // 静默失效(review P2)。
       if (it.message.isSyntheticTrigger) continue;
       ids.push(it.message.clientId);
-      map.set(it.message.clientId, it.message.content);
+      map.set(it.message.clientId, resolveUserDisplayText(it.message));
     }
     return { userMessageIds: ids, previewById: map };
   }, [visibleRenderItems]);
@@ -2950,6 +3434,126 @@ export function MessageStream({
   // chip 在栈里各占一行,自然共存。
   const prevUserMsgVisible = prevUserMsgId !== null;
 
+  // ── message-nav-rail ──
+  // 左缘"提问导航条":条目覆盖**全量已加载** messages(不同于 chip 的窗口内
+  // 派生 —— 导航条要给整段历史画刻度)。目标可能在渲染窗口外,跳转走下面的
+  // layout effect:复用 focus-jump 的"先扩窗到目标、下一轮再滚动"两段式,
+  // 以及 chip-jump 的 expandWindow/onLoadMore 抑制协议。
+  // 导航条是个性化可选功能(Settings → 个性化 → 小技巧),默认关闭;关闭时
+  // 不挂载组件(卸载时组件自会把 navRailCoversNav 报回 false,chip 兜底回归),
+  // 也不做下面的空闲补页。
+  const { enabled: navRailEnabled } = useMessageNavRailPreference();
+  const navRailEntries = useMemo(() => deriveNavRailEntries(messages), [messages]);
+
+  // 入口去重:导航条**完整覆盖导航**(出场且刻度未截断)时抑制"跳到上一条
+  // 提问"chip —— 同一个导航任务只保留一套入口。导航条缺席(短对话 / 窄窗 /
+  // 矮视口)或截断了更早刻度的超长会话里 chip 回归兜底(PR #830 review)。
+  const [navRailCoversNav, setNavRailCoversNav] = useState(false);
+
+  // ── nav-rail 空闲补页 ──
+  // 老会话打开时只加载尾部切片,导航条(整段对话的地图)可能凑不齐条目。
+  // 首屏落定后的空闲期沿现有 onLoadMore 通道自动向前补页,直到提问数达标 /
+  // 翻到历史起点 / 轮数预算用完(目标与预算的设计依据见
+  // shouldBackfillForNavRail 一族常量注释)。与"跳转补齐"同属程序化翻页,
+  // prepend 的滚动补偿照走 F-SYNC-2 协议:调用前快照 scrollHeight/scrollTop。
+  // 即使当下窗口太窄导航条没出场,补到的历史对搜索/上滚阅读同样有用,
+  // 且有轮数预算封顶,不做 eligible 门控。但**用户显式关闭导航条**(个性化
+  // 开关,默认关)时跳过:为一个不存在的 UI 自动翻页不符合默认克制,开关
+  // 打开后本 effect 依赖变化会重新评估补页。
+  // 调度 effect 的依赖含 sessionId(与 MessageNavRail 的 resetKey 同款惯例):
+  // 两个会话的条目数 / hasMore 恰好相同且 onLoadMore 身份未变时,切会话也要
+  // 取消旧会话待发的空闲回调、并按归零后的轮数预算为新会话重新评估
+  // (Copilot review)。
+  const navRailBackfillRoundsRef = useRef(0);
+  useEffect(() => {
+    navRailBackfillRoundsRef.current = 0;
+  }, [sessionId]);
+  useEffect(() => {
+    if (!navRailEnabled) return;
+    if (!onLoadMore) return;
+    if (
+      !shouldBackfillForNavRail({
+        entryCount: navRailEntries.length,
+        hasMoreMessages: hasMoreMessages ?? false,
+        isLoadingMore: isLoadingMore ?? false,
+        rounds: navRailBackfillRoundsRef.current,
+      })
+    ) {
+      return;
+    }
+    const run = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      navRailBackfillRoundsRef.current += 1;
+      prevScrollHeightRef.current = el.scrollHeight;
+      prevScrollTopAtLoadRef.current = el.scrollTop;
+      onLoadMore();
+    };
+    // 空闲期执行,别跟首屏渲染 / 两段式扩窗抢主线程;测试等无 ric 环境退化。
+    if (typeof window.requestIdleCallback === 'function') {
+      const id = window.requestIdleCallback(run, { timeout: 2000 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = window.setTimeout(run, 300);
+    return () => window.clearTimeout(id);
+  }, [sessionId, navRailEnabled, navRailEntries.length, hasMoreMessages, isLoadingMore, onLoadMore]);
+
+  const railJumpSeqRef = useRef(0);
+  const [railJumpRequest, setRailJumpRequest] = useState<{ id: string; seq: number } | null>(null);
+  const lastAppliedRailJumpRef = useRef(0);
+  const handleNavRailJump = useCallback((clientId: string) => {
+    railJumpSeqRef.current += 1;
+    setRailJumpRequest({ id: clientId, seq: railJumpSeqRef.current });
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!railJumpRequest) return;
+    if (lastAppliedRailJumpRef.current === railJumpRequest.seq) return;
+    const targetKey = renderItemKeyForClientId(allRenderItems, railJumpRequest.id);
+    if (!targetKey) {
+      // 条目派生自 messages,拿不到 key 只可能是消息刚被删 / clear — 放弃本次。
+      lastAppliedRailJumpRef.current = railJumpRequest.seq;
+      return;
+    }
+    if (!visibleRenderItems.some((item) => item.key === targetKey)) {
+      // 目标在渲染窗口外:先把窗口锚到目标。本 effect 因 visibleRenderItems
+      // 变化重跑,下一轮走下面的滚动分支(focus-jump 同款两段式)。
+      setFirstVisibleItemKey(targetKey);
+      return;
+    }
+    const root = scrollRef.current;
+    if (!root) return;
+    const el = root.querySelector(
+      `[data-message-client-id="${CSS.escape(railJumpRequest.id)}"]`,
+    ) as HTMLElement | null;
+    if (!el) return;
+    lastAppliedRailJumpRef.current = railJumpRequest.seq;
+    // 从贴底态往上跳必须先解除 auto-follow 钉底,否则流式期间 pin effect 会把
+    // 视口拽回底部(focus-jump 同款处理;chip 不需要是因为它只在已上滚时出现)。
+    restoringRef.current = false;
+    isNearBottomRef.current = false;
+    setIsNearBottom(false);
+    // smooth scroll 途经顶部区域时抑制 expandWindow/onLoadMore(chip-jump 协议,
+    // 解抑靠用户 wheel/touch/keydown + 安全兜底 timer)。
+    chipJumpInProgressRef.current = true;
+    if (chipJumpClearTimerRef.current !== null) {
+      window.clearTimeout(chipJumpClearTimerRef.current);
+    }
+    chipJumpClearTimerRef.current = window.setTimeout(() => {
+      chipJumpClearTimerRef.current = null;
+      clearChipJumpSuppression();
+    }, CHIP_JUMP_SAFETY_MS);
+    // 落点手动计算,不走 scrollIntoView:轮次跳转要让视口恰好框住
+    // "提问 → 回答",提问顶边停在容器顶下方 12px;消息锚点通用的
+    // scroll-mt-20(80px)是搜索跳转的上文语境预留,对本任务是漏出
+    // 上一轮尾巴的噪音(设计依据见 NAV_RAIL_JUMP_TOP_OFFSET_PX 注释)。
+    const targetTop =
+      root.scrollTop +
+      (el.getBoundingClientRect().top - root.getBoundingClientRect().top) -
+      NAV_RAIL_JUMP_TOP_OFFSET_PX;
+    root.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+  }, [railJumpRequest, allRenderItems, visibleRenderItems, clearChipJumpSuppression]);
+
   // 第一条 user 消息没有"上一条 assistant"作为 resumeSessionAt 锚点，
   // rewind 必然抛 NO_PRIOR_ASSISTANT。直接在 UI 层把按钮藏掉，避免无效点击。
   // 注意:这里要用全量 messages 而不是 visibleRenderItems —— "首条 user" 的语义
@@ -2965,6 +3569,8 @@ export function MessageStream({
   // + 重发,更早的消息会连带丢弃后续轮次,v1 不开放)。与 first 同理用全量
   // messages 判定,不受窗口分页影响。
   const lastUserMessageClientId = useMemo(() => findLastUserMessageClientId(messages), [messages]);
+  // 含合成行的"最后一条用户侧输入":自愈重连行据此判断自己是不是仍在飞(见 helper 注释)。
+  const lastUserInputClientId = useMemo(() => findLastUserInputClientId(messages), [messages]);
 
   // error-tail-banner:尾部未忽略的 error 行由输入框上方红条独家承载,流内需要
   // 知道"是不是最后一条"来跳过重复渲染。
@@ -3051,16 +3657,6 @@ export function MessageStream({
                       return <ForkOriginMarker key={item.key} onClick={onOpenForkOrigin} />;
                     }
 
-                    if (item.type === 'agent_plan') {
-                      return (
-                        <TodoListCard
-                          key={item.key}
-                          todos={item.todos}
-                          animated={isSessionStreaming}
-                        />
-                      );
-                    }
-
                     if (item.type === 'tool_segment') {
                       return (
                         <AgentActionsBlock
@@ -3130,6 +3726,9 @@ export function MessageStream({
                               isSessionStreaming,
                               firstUserMessageClientId,
                               lastUserMessageClientId,
+                              lastUserInputClientId,
+                              continuationTurnClientId,
+                              continuationInFlightProjectionCapability,
                               localFileRefs,
                               singleResultMap,
                               assistantsWithFollowingUserBoundary,
@@ -3140,16 +3739,26 @@ export function MessageStream({
                       };
                       const childItems = item.children.map(toWorkGroupChild);
                       return (
-                        <WorkGroupBlock
+                        // data-message-client-ids:组折叠时子卡片/聚合块整体 unmount,
+                        // 精确锚点消失 —— 后台任务面板「点行跳聊天」经 ~= 回退查询
+                        // 落到组容器(与 AgentActionsBlock 的容器锚点同一约定)。
+                        <div
                           key={item.key}
-                          // 单层前缀约定 `work:<clientId>` — item.key 形如 `work-<cid>`,
-                          // 去掉 `work-` 后拼 `<role>:<id>`,与 agent: / thinking: 同构。
-                          blockId={`work:${item.key.slice('work-'.length)}`}
-                          durationMs={item.durationMs}
-                          isStreaming={item.isStreaming}
-                          startedAtMs={item.startedAtMs}
-                          childItems={childItems}
-                        />
+                          className="scroll-mt-20"
+                          data-message-client-ids={collectWorkGroupClientIds(item.children).join(
+                            ' ',
+                          )}
+                        >
+                          <WorkGroupBlock
+                            // 单层前缀约定 `work:<clientId>` — item.key 形如 `work-<cid>`,
+                            // 去掉 `work-` 后拼 `<role>:<id>`,与 agent: / thinking: 同构。
+                            blockId={`work:${item.key.slice('work-'.length)}`}
+                            durationMs={item.durationMs}
+                            isStreaming={item.isStreaming}
+                            startedAtMs={item.startedAtMs}
+                            childItems={childItems}
+                          />
+                        </div>
                       );
                     }
 
@@ -3239,6 +3848,11 @@ export function MessageStream({
                           assistantIsTurnFinal={turnFinalAssistantClientIds.has(msg.clientId)}
                           isFirstUserMessage={msg.clientId === firstUserMessageClientId}
                           isLastUserMessage={msg.clientId === lastUserMessageClientId}
+                          isLastUserInput={msg.clientId === lastUserInputClientId}
+                          isContinuationTurnOwner={msg.clientId === continuationTurnClientId}
+                          continuationInFlightProjectionCapability={
+                            continuationInFlightProjectionCapability
+                          }
                           isLastMessage={msg.clientId === lastMessageClientId}
                           localFileRefs={localFileRefs}
                         />
@@ -3269,6 +3883,22 @@ export function MessageStream({
               bottomOffset={indicatorBottomOffset}
             />
 
+            {/* message-nav-rail: 左缘提问导航条(每条提问一根刻度,当前项加深,
+          hover 预览,点击跳转)。个性化开关(默认关)决定挂不挂载;挂载后的
+          显隐仍由组件自判:提问数 ≥4 且内容列左侧留白足够;窄窗口 / 嵌入面板
+          自然隐藏,绝不压在气泡上。 */}
+            {navRailEnabled && (
+              <MessageNavRail
+                entries={navRailEntries}
+                scrollRef={scrollRef}
+                contentMaxWidth={contentWidth ?? 880}
+                bottomOffset={resolvedBottomPadding}
+                onJump={handleNavRailJump}
+                onNavCoverageChange={setNavRailCoversNav}
+                resetKey={sessionId}
+              />
+            )}
+
             {/* prev-user-msg-jump: 右上角"跳到上一条提问"icon 按钮。
           通过 createPortal 挂到祖先的 TopRightChipStack 容器里,与 DiffPanelToggle
           各占栈中一行;DiffToggle 在 session 载入时就 mount,本 chip 仅在
@@ -3277,6 +3907,8 @@ export function MessageStream({
           近底时 hook 自然返回 null → 不挂入 → 不占行。 */}
             {chipSlot &&
               prevUserMsgVisible &&
+              // 导航条完整覆盖导航时不再挂本 chip(入口去重,见 navRailCoversNav)。
+              !navRailCoversNav &&
               createPortal(
                 <PrevMessageJumpChip preview={prevPreview} onClick={handleJumpToPrevUserMsg} />,
                 chipSlot,
@@ -3310,6 +3942,9 @@ const MessageItem = memo(function MessageItem({
   assistantIsTurnFinal,
   isFirstUserMessage,
   isLastUserMessage,
+  isLastUserInput,
+  isContinuationTurnOwner,
+  continuationInFlightProjectionCapability,
   isLastMessage,
   localFileRefs,
 }: {
@@ -3325,7 +3960,7 @@ const MessageItem = memo(function MessageItem({
   remoteHostId?: string | null;
   /** Forwarded to User/AssistantMessage so they can read this agent's
    *  capabilities (gates Fork/Rewind icon visibility). */
-  agentKind?: 'cc' | 'codex';
+  agentKind?: 'cc' | 'codex' | 'pi';
   /** Whether this session currently has an in-flight SDK turn. Rewind uses it
    *  to require an idle live query; fork can still target stable history. */
   sessionRunning?: boolean;
@@ -3342,6 +3977,16 @@ const MessageItem = memo(function MessageItem({
   /** True iff this message is the last user message in the full list —
    *  edit-last-message: gates the Edit (pencil) entry in UserMessage. */
   isLastUserMessage?: boolean;
+  /**
+   * True iff this message is the last **user-side input** in the full list, synthetic rows
+   * included（见 `findLastUserInputClientId`）。自愈重连行用它 + `sessionRunning` 判断
+   * 「此刻正在跑的 turn 是不是我发起的」，从而决定要不要显示成"重新连接中"。
+   */
+  isLastUserInput?: boolean;
+  /** 当前 vendor turn 的续跑 owner 是否就是这条消息。 */
+  isContinuationTurnOwner?: boolean;
+  /** 当前投影对精确续跑边界字段的支持状态；legacy 才允许启用旧端兼容兜底。 */
+  continuationInFlightProjectionCapability?: ContinuationInFlightProjectionCapability;
   /** True iff this message is the last message in the full list —
    *  error-tail-banner: a trailing un-dismissed error row is rendered by the
    *  actionable banner above the composer instead of an inline card. */
@@ -3356,6 +4001,14 @@ const MessageItem = memo(function MessageItem({
         cardType={message.systemCardType}
         data={message.systemCardData}
         sessionId={sessionId}
+        // 「这条自愈记录此刻真的在飞吗」：main 持有 vendor-turn owner，只有旧端缺省该字段时
+        // 才回落到兼容启发式；supported / unknown 不再依赖 Renderer 的 sticky memory。
+        autoResumeInFlight={isAutoResumeRowInFlight({
+          isContinuationTurnOwner: isContinuationTurnOwner === true,
+          sessionRunning: sessionRunning === true,
+          isLastUserInput: isLastUserInput === true,
+          projectionCapability: continuationInFlightProjectionCapability ?? 'unknown',
+        })}
       />
     );
   }
@@ -3444,7 +4097,18 @@ const MessageItem = memo(function MessageItem({
     case 'ask_user':
       return <AskUserQuestionBubble message={message} />;
     case 'plan_review':
-      return <PlanReviewBubble message={message} />;
+      // 计划正文是会话消息内容,解析上下文与 AssistantMessage 保持一致
+      // (currentSessionId 缺失会让远程会话里计划内的媒体链接绕过
+      // cindy-remote-media:// 改写而坏图)。
+      return (
+        <PlanReviewBubble
+          message={message}
+          workingDir={workingDir}
+          currentSessionId={sessionId}
+          currentSessionTitle={sessionTitle}
+          localFileRefs={localFileRefs}
+        />
+      );
     case 'error':
       // interrupted-turn-resume:app 退出中断标记行不进消息流(2026-07-05 产品
       // 决策)——它作为「会话尾部是否停在中断态」的判定源保留在 messages 数组里,

@@ -40,6 +40,17 @@ import type { Transport } from './transport.js';
  */
 const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_STDERR_LOG_CHARS = 2_000;
+
+export class AppServerRequestTimeoutError extends Error {
+  constructor(
+    public readonly method: string,
+    public readonly timeoutMs: number,
+  ) {
+    super(`codex app-server ${method} timed out after ${timeoutMs}ms`);
+    this.name = 'AppServerRequestTimeoutError';
+  }
+}
+
 /**
  * Keep a small bounded correlation window for writes that rejected after the
  * transport may already have handed bytes to the OS / websocket buffer.
@@ -79,7 +90,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * narrowly-matched config-load wrapper around codex-rs' permanent token
  * refresh failure.
  */
-export function detectAuthInvalidationReason(error: JsonRpcErrorObject): string | null {
+export function detectAuthInvalidationReason(
+  error: JsonRpcErrorObject,
+  method?: string,
+): string | null {
   const data = isRecord(error.data) ? error.data : null;
   // 两种结构化 provenance 都是 app-server 主动声明的鉴权失效:
   //  - cloudRequirements: turn 级 cloud 依赖检查失败 (Auth/relogin)。
@@ -97,7 +111,25 @@ export function detectAuthInvalidationReason(error: JsonRpcErrorObject): string 
     !hasStructuredAuthSignal &&
     /failed to load configuration:/i.test(error.message) &&
     /access token could not be refreshed/i.test(error.message);
-  if (!hasStructuredAuthSignal && !isTextualConfigLoadRefreshFailure) {
+  // account/rateLimits/read 与 reset-credit consume 是明确绑定 ChatGPT OAuth 账号的
+  // 控制面 RPC。codex-rs 当前会把 wham/usage 的 401 包成普通 -32603，既没有
+  // cloudRequirements provenance，也没有 config-load 包装；但 method 已由 request id
+  // 可靠关联。只对这两个账号级 RPC 放行「401 + 机器可读 token 原因」窄门，避免工具
+  // 输出或 model/list 偶然回显 token_revoked 时误清凭证。
+  const isAccountAuthRpc =
+    method === Method.AccountRateLimitsRead ||
+    method === Method.AccountRateLimitResetCreditConsume;
+  const isCorrelatedAccountAuthFailure =
+    isAccountAuthRpc &&
+    /\b401\b|Unauthorized/i.test(error.message) &&
+    /token_revoked|token_invalidated|refresh token (?:was|has been) revoked|refresh token was already used|refresh_token.*already used/i.test(
+      error.message,
+    );
+  if (
+    !hasStructuredAuthSignal &&
+    !isTextualConfigLoadRefreshFailure &&
+    !isCorrelatedAccountAuthFailure
+  ) {
     return null;
   }
 
@@ -335,7 +367,7 @@ export class AppServerClient {
         pending.timeoutId = setTimeout(() => {
           if (this.pending.get(id) !== pending) return;
           this.pending.delete(id);
-          reject(new Error(`codex app-server ${method} timed out after ${timeoutMs}ms`));
+          reject(new AppServerRequestTimeoutError(method, timeoutMs));
         }, timeoutMs);
         pending.timeoutId.unref?.();
       }
@@ -446,7 +478,7 @@ export class AppServerClient {
           method: failedWriteMethod,
           hasError: error !== null,
         });
-        if (error) this.notifyAuthInvalidated(error);
+        if (error) this.notifyAuthInvalidated(error, failedWriteMethod);
         return;
       }
       this.logger.warn('response for unknown id', { id });
@@ -455,7 +487,7 @@ export class AppServerClient {
     this.pending.delete(id);
     if (pending.timeoutId) clearTimeout(pending.timeoutId);
     if (error) {
-      this.notifyAuthInvalidated(error);
+      this.notifyAuthInvalidated(error, pending.method);
       const err = new Error(`codex app-server ${pending.method} error ${error.code}: ${error.message}`);
       // 把 code/data 挂上, 上层想区分 OVERLOADED 等可以判 (err as any).code。
       Object.assign(err, { code: error.code, data: error.data });
@@ -476,8 +508,8 @@ export class AppServerClient {
   }
 
   /** Notify the host once, but only after the caller has correlated the response. */
-  private notifyAuthInvalidated(error: JsonRpcErrorObject): void {
-    const authInvalidationReason = detectAuthInvalidationReason(error);
+  private notifyAuthInvalidated(error: JsonRpcErrorObject, method?: string): void {
+    const authInvalidationReason = detectAuthInvalidationReason(error, method);
     if (this.authInvalidatedFired || !this.onAuthInvalidated || !authInvalidationReason) return;
     this.authInvalidatedFired = true;
     try {

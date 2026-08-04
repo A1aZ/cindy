@@ -4,7 +4,7 @@
  * （模式同 providerDiagnostics.test.ts）。
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 import {
   buildModelsFetchRequest,
@@ -26,6 +26,14 @@ describe('buildModelsFetchRequest', () => {
     expect(
       buildModelsFetchRequest(spec({ agent: 'codex', baseUrl: 'https://openrouter.ai/api/v1' })).url,
     ).toBe('https://openrouter.ai/api/v1/models');
+  });
+
+  it('preserves base URL query parameters while appending the discovery pathname', () => {
+    expect(
+      buildModelsFetchRequest(
+        spec({ agent: 'codex', baseUrl: 'https://openrouter.ai/api/v1?tenant=a#ignored' }),
+      ).url,
+    ).toBe('https://openrouter.ai/api/v1/models?tenant=a');
   });
 
   it('explicit modelsUrl wins over derivation only when same-host as baseUrl', () => {
@@ -62,6 +70,21 @@ describe('buildModelsFetchRequest', () => {
     expect(codex['authorization']).toBe('Bearer sk-test');
   });
 
+  it('Codex Anthropic Messages bridge sends provider-owned x-api-key and Bearer', () => {
+    const headers = buildModelsFetchRequest(
+      spec({
+        agent: 'codex',
+        wireProtocol: 'anthropic-messages',
+        baseUrl: 'https://api.anthropic.com',
+        headers: { 'Anthropic-Version': 'custom-version' },
+      }),
+    ).init.headers as Record<string, string>;
+    expect(headers['anthropic-version']).toBe('custom-version');
+    expect(headers['Anthropic-Version']).toBeUndefined();
+    expect(headers['x-api-key']).toBe('sk-test');
+    expect(headers.authorization).toBe('Bearer sk-test');
+  });
+
   it('omits auth headers without apiKey and keeps custom headers', () => {
     const h = buildModelsFetchRequest(spec({ apiKey: null, headers: { 'x-extra': '1' } })).init
       .headers as Record<string, string>;
@@ -69,9 +92,58 @@ describe('buildModelsFetchRequest', () => {
     expect(h['authorization']).toBeUndefined();
     expect(h['x-extra']).toBe('1');
   });
+
+  it.each(['none', 'oauth'] as const)(
+    'strips legacy credential headers for %s auth even without an apiKey',
+    (authMethod) => {
+      const h = buildModelsFetchRequest(spec({
+        authMethod,
+        apiKey: null,
+        headers: {
+          Authorization: 'Bearer legacy',
+          'X-API-Key': 'legacy',
+          'x-extra': '1',
+        },
+      })).init.headers as Record<string, string>;
+
+      expect(h.Authorization).toBeUndefined();
+      expect(h['X-API-Key']).toBeUndefined();
+      expect(h.authorization).toBeUndefined();
+      expect(h['x-api-key']).toBeUndefined();
+      expect(h['x-extra']).toBe('1');
+    },
+  );
 });
 
 describe('fetchProviderModels', () => {
+  it.each([
+    {
+      baseUrl: 'https://remote.example/v1',
+      modelsUrl: null,
+    },
+    {
+      baseUrl: 'http://127.0.0.1:4000/v1',
+      modelsUrl: 'https://remote.example/v1/models',
+    },
+  ])('returns a structured failure for non-loopback no-auth discovery: %j', async (urls) => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const result = await fetchProviderModels(
+      spec({
+        ...urls,
+        authMethod: 'none',
+        apiKey: null,
+      }),
+      fetchImpl,
+    );
+
+    expect(result).toEqual({
+      ok: false,
+      code: 'UNKNOWN',
+      detail: 'no-auth provider model discovery requires loopback URLs',
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('parses OpenAI {data:[{id}]} shape, preferring display_name/name for labels', async () => {
     const r = await fetchProviderModels(spec(), async () =>
       fakeResponse(
@@ -145,6 +217,25 @@ describe('fetchProviderModels', () => {
     );
     expect(seenUrl).toBe('https://api.moonshot.cn/v1/models');
     expect(seenHeaders['x-api-key']).toBe('sk-test');
+    expect(seenHeaders['anthropic-version']).toBe('2023-06-01');
+  });
+
+  it('end-to-end Codex Anthropic discovery uses the Messages authentication headers', async () => {
+    let seenHeaders: Record<string, string> = {};
+    const result = await fetchProviderModels(
+      spec({
+        agent: 'codex',
+        wireProtocol: 'anthropic-messages',
+        baseUrl: 'https://api.anthropic.com',
+      }),
+      async (_url, init) => {
+        seenHeaders = (init?.headers ?? {}) as Record<string, string>;
+        return fakeResponse(200, JSON.stringify({ data: [{ id: 'claude-opus-5' }] }));
+      },
+    );
+    expect(result.ok).toBe(true);
+    expect(seenHeaders['x-api-key']).toBe('sk-test');
+    expect(seenHeaders.authorization).toBe('Bearer sk-test');
     expect(seenHeaders['anthropic-version']).toBe('2023-06-01');
   });
 });

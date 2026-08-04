@@ -63,11 +63,15 @@ interface RightSidebarProps {
   workdir: string;
   /** 非空 = SSH remote 会话(workdir 为远端路径),透传给 Shell → plugin ctx。 */
   remoteHostId: string | null;
+  /** device-link 会话归属：null = 已确认本机，undefined = 尚未解析。 */
+  deviceLinkDeviceId?: string | null;
   /** Maximize 态(Phase 6):RSB 撑满整个非左栏区,主区 hidden。本组件用来隐藏
    *  resize handle(maximize 不允许拖宽)+ 把 TabBar maximize 按钮图标切到"还原"。 */
   isMaximized?: boolean;
   /** 左侧栏完全收起且 RSB maximize 时，为顶栏左上角浮动 ChromeActions 让位。 */
   reserveLeftChromeActions?: boolean;
+  /** 工具面板位于最左且左侧栏为 rail 时，顶栏承接 ChromeActions 的 no-drag 命中区。 */
+  railChromeActionsHitHole?: boolean;
   /** 「在新窗口中打开侧边栏」:开偏好 + 弹出子窗口。Win 端 TabBar 内渲染按钮
    *  (Mac 走 MainLayout 浮层,不经此 prop)。 */
   onDetach?: () => void;
@@ -87,9 +91,11 @@ export const RightSidebar = forwardRef<RightSidebarHandle, RightSidebarProps>(fu
     onMaximize,
     isMaximized,
     reserveLeftChromeActions = false,
+    railChromeActionsHitHole = false,
     sessionId,
     workdir,
     remoteHostId,
+    deviceLinkDeviceId,
     onDetach,
     panelSide,
     onAllTabsClosed,
@@ -251,6 +257,7 @@ export const RightSidebar = forwardRef<RightSidebarHandle, RightSidebarProps>(fu
           sessionId={sessionId}
           workdir={workdir}
           remoteHostId={remoteHostId}
+          deviceLinkDeviceId={deviceLinkDeviceId}
           shellVisible={!displayCollapsed}
           isMac={isMac}
           unifiedTopbar={isMac}
@@ -258,6 +265,7 @@ export const RightSidebar = forwardRef<RightSidebarHandle, RightSidebarProps>(fu
           onMaximize={onMaximize}
           isMaximized={isMaximized}
           reserveLeftChromeActions={reserveLeftChromeActions}
+          railChromeActionsHitHole={railChromeActionsHitHole}
           onDetach={onDetach}
           // B3:主窗口内嵌形态 Tab 条空白处 = 拖面板手势面(窗口拖动走左栏顶行)。
           chromeWindowDrag={false}

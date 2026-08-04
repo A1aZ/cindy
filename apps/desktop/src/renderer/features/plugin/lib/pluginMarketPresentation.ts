@@ -10,20 +10,37 @@ import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 export type PluginPresentationOrigin =
   | 'public'
   | 'organization'
-  | 'local';
+  | 'local'
+  | 'custom';
 
 export type PluginCatalogPresentationItem<TInstalled> =
   { kind: 'installed'; item: TInstalled } | { kind: 'market'; item: PluginMarketItem };
 
 export function pluginPresentationOrigin(
-  item: Pick<PluginMarketItem, 'scope'> | null | undefined,
+  item: Pick<PluginMarketItem, 'scope' | 'sourceType'> | null | undefined,
 ): PluginPresentationOrigin {
+  // 自定义市场（Git / 本地源）归 'custom'，与服务端 scope 正交。
+  if (item && item.sourceType !== 'server') return 'custom';
   if (item?.scope === 'public' || item?.scope === 'organization') {
     return item.scope;
   }
   // Personal market publishing is intentionally not exposed by the client.
   // Keep the renderer taxonomy closed even if an older/newer server returns it.
   return 'local';
+}
+
+/**
+ * Main's install state is authoritative for the update affordance.
+ *
+ * A same-version `update-available` item can be a legacy-adopted install whose
+ * bytes have not been verified against the market release. Version equality
+ * alone cannot suppress that replacement path; same-release metadata refreshes
+ * are already reported as `installed` by Main.
+ */
+export function pluginUpdateForInstalledVersion(
+  item: PluginMarketItem | null | undefined,
+): PluginMarketItem | null {
+  return item?.installState === 'update-available' ? item : null;
 }
 
 /**

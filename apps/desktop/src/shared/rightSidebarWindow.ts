@@ -25,6 +25,8 @@ export interface RsbWindowContext {
   sessionId: string | null;
   workdir: string | null;
   remoteHostId: string | null;
+  /** device-link 会话归属：null = 已确认本机，undefined = 尚未解析。 */
+  deviceLinkDeviceId?: string | null;
   /** 当前主窗视图是否有侧边栏语义(设置页等无会话视图为 false,子窗口显示占位空态)。 */
   available: boolean;
 }
@@ -33,8 +35,6 @@ export interface RsbWindowContext {
 export type RsbWindowCommand =
   | { type: 'open-terminal'; sessionId: string }
   | { type: 'open-web-browser'; sessionId: string; url: string }
-  /** 打开/聚焦插件页签(panel.position:'tab',每会话单例;装入即开与未来入口共用)。 */
-  | { type: 'open-ghost-tab'; sessionId: string; ghostId: string }
   | {
       type: 'ensure-orca-workers-tab';
       sessionId: string;
@@ -43,6 +43,12 @@ export type RsbWindowCommand =
       focusTab?: boolean;
     }
   | { type: 'close-orca-workers-tab'; sessionId: string }
+  /** 打开/聚焦「后台任务」页签(每会话单例);focusTaskId 定位到对应 workflow 详情。 */
+  | {
+      type: 'open-background-tasks-tab';
+      sessionId: string;
+      focusTaskId?: string | null;
+    }
   | {
       type: 'open-file-browser';
       sessionId: string;
@@ -61,6 +67,15 @@ export interface RsbWindowCommandRouteRequest {
   command: RsbWindowCommand;
   /** false 时 detached host 关闭/未 ready 不得重开，main 会保存 intent。 */
   allowOpen: boolean;
+  /**
+   * 这条命令是不是用户当次手势直接要求的(点链接 / 点菜单 / 点按钮)。
+   *
+   * 缺省 true —— 绝大多数调用点都是用户手势,保持既有「带出子窗口」观感。
+   * 插件 preview 槽开页、agent 浏览器自动化这类**程序自发**的命令必须显式传
+   * false:内容照常送进子窗口,但不得 show/focus 抢走用户当前前台应用
+   * (Windows 上 focus() 就是抢前台,后台干活弹窗口是硬伤)。
+   */
+  userInitiated?: boolean;
 }
 
 /** main-owned 宿主裁决；renderer 只有 attached 可以写本地 store。 */

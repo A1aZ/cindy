@@ -108,7 +108,12 @@ describeMigrationReplay('migration replay', () => {
         .prepare(
           `SELECT name FROM sqlite_master
            WHERE type='index'
-             AND name IN ('uniq_active_team_per_lead', 'uniq_orca_workers_focused_per_team')
+             AND name IN (
+               'uniq_active_team_per_lead',
+               'uniq_orca_workers_focused_per_team',
+               'uniq_wechat_inbox_running_session',
+               'uniq_wechat_sync_active'
+             )
            ORDER BY name`,
         )
         .pluck()
@@ -122,7 +127,13 @@ describeMigrationReplay('migration replay', () => {
       expect(partialIndexes).toEqual([
         'uniq_active_team_per_lead',
         'uniq_orca_workers_focused_per_team',
+        'uniq_wechat_inbox_running_session',
+        'uniq_wechat_sync_active',
       ]);
+      expect(tableExists(db, 'wechat_sync_state')).toBe(true);
+      expect(tableExists(db, 'wechat_inbox')).toBe(true);
+      expect(tableExists(db, 'wechat_outbox')).toBe(true);
+      expect(tableExists(db, 'wechat_file_attachments')).toBe(true);
     } finally {
       cleanup();
     }
@@ -282,6 +293,9 @@ describeMigrationReplay('migration replay', () => {
           'cost_attribution',
         ]),
       );
+      // fixture 故意不建 schedules(最小库 + 各迁移自带守卫的设计):0084 的
+      // 裸 ALTER 靠 runner 的冻结缺陷守卫跳过,迁移链必须能走完而不是中途炸掉。
+      expect(tableExists(db, 'schedules')).toBe(false);
       expect(tableExists(db, 'project_aliases')).toBe(true);
       expect(tableExists(db, 'device_link_ownership')).toBe(true);
       expect(

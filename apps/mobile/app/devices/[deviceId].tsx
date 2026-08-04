@@ -16,6 +16,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { ConnectionBanner, useShowConnectionBanner } from '@/components/ConnectionBanner';
+import { unresponsiveDevicesStore, useUnresponsiveDevices } from '@/device-link/unresponsiveDevicesStore';
 import { goBackGuarded } from '@/utils/backGuard';
 import { configureCollapseAnimation } from '@/utils/collapseAnimation';
 import { useGuardedPush } from '@/utils/useGuardedPush';
@@ -74,8 +75,18 @@ import {
   useRemoteSessions,
   useRemoteSessionStoreVersion,
 } from '@/session/remoteSessionStore';
-import { useRemoteScheduleEventSnapshot } from '@/scheduler/remoteScheduleEvents';
-import { loadSessionScheduleIndex, loadSessionScheduleIndexThrottled } from '@/session/scheduleIndex';
+import {
+  remoteScheduleEventStore,
+  useRemoteScheduleEventSnapshot,
+  useRemoteScheduleMirrorInvalidations,
+} from '@/scheduler/remoteScheduleEvents';
+import {
+  getScheduleIndexInvalidationVersion,
+  invalidateOfflineScheduleIndexFailureFor,
+  invalidateRunningSessionScheduleEntries,
+  loadSessionScheduleIndex,
+  loadSessionScheduleIndexThrottled,
+} from '@/session/scheduleIndex';
 import { shouldSuppressRemoteListEmptyState } from '@/session/sessionEmptyState';
 import type { RemoteSession } from '@/session/types';
 import { useTheme, useThemedStyles, type ThemeColors } from '@/theme';
@@ -134,6 +145,7 @@ export default function DeviceDetailScreen() {
   const { connectionIssue, invoke, status, subscribe, unsubscribe } = useDeviceLink();
   const maker = useMobileMakerTransport(deviceId);
   const scheduleEventSnapshot = useRemoteScheduleEventSnapshot(deviceId);
+  const scheduleMirrorInvalidations = useRemoteScheduleMirrorInvalidations();
   const allSessions = useRemoteSessions();
   // filter 必须 memo:裸 filter 每次渲染都产新数组,会让下游全部 [sessions, ...] 依赖的
   // useMemo 逐 emit 失效,派生链(索引 → sections → 全列表行)整体重建(2026-07-18
@@ -153,8 +165,11 @@ export default function DeviceDetailScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 熔断 open(电脑端未响应):relay 可能仍 online,可见性与 banner 文案单独入参。
+  const unresponsiveDevices = useUnresponsiveDevices();
+  const deviceUnresponsive = !!deviceId && unresponsiveDevices.has(deviceId);
   // 自动化 / 项目分支视图的条件挂载 banner:普通弱网断线也要有可见信号(防闪延迟后)
-  const showConnectionBanner = useShowConnectionBanner(status, error, connectionIssue);
+  const showConnectionBanner = useShowConnectionBanner(status, error, connectionIssue, deviceUnresponsive);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [expandedAutomationGroups, setExpandedAutomationGroups] = useState<string[]>([]);
@@ -164,6 +179,14 @@ export default function DeviceDetailScreen() {
   const [scheduleIndex, setScheduleIndex] = useState<Map<string, RemoteSessionScheduleInfo>>(
     () => new Map(),
   );
+
+  useEffect(() => {
+    if (!deviceId || !scheduleMirrorInvalidations.has(deviceId)) return;
+    setScheduleIndex((current) => invalidateRunningSessionScheduleEntries(
+      current,
+      sessions.map((session) => session.id),
+    ));
+  }, [deviceId, scheduleMirrorInvalidations, sessions]);
 
   const syncSessions = useCallback(async () => {
     if (!deviceId) return;
@@ -181,11 +204,22 @@ export default function DeviceDetailScreen() {
         ]);
       });
       remoteSessionStore.setDeviceSessions(deviceId, deviceName, Array.isArray(list) ? list : []);
+      // A successful sessions:list is authoritative reachability evidence even when relay
+      // presence was not replayed. Retire both offline caches before the schedule reload.
+      remoteScheduleEventStore.clearDeviceMirrorInvalidation(deviceId);
+      invalidateOfflineScheduleIndexFailureFor(deviceId);
       // 节流缓存与首页共用同一 key(deviceId):两页交替浏览时不重复全量拉取(单飞 + TTL,
       // 拥塞背景见 scheduleIndex 注释)。
-      void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker))
-        .then(setScheduleIndex)
-        .catch(() => setScheduleIndex(new Map()));
+      const invalidationVersion = getScheduleIndexInvalidationVersion(deviceId);
+      void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker, { isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId) }))
+        .then((nextIndex) => {
+          if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
+          setScheduleIndex(nextIndex);
+        })
+        .catch(() => {
+          if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
+          setScheduleIndex(new Map());
+        });
       setLastSyncedAt(Date.now());
     } catch (err) {
       setError(formatRemoteError(err));
@@ -222,8 +256,12 @@ export default function DeviceDetailScreen() {
       scheduleEventSnapshot.scheduleListVersion === 0
       && scheduleEventSnapshot.unreadClearVersion === 0
     ) return;
-    void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker), { force: true })
-      .then(setScheduleIndex)
+    const invalidationVersion = getScheduleIndexInvalidationVersion(deviceId);
+    void loadSessionScheduleIndexThrottled(deviceId, () => loadSessionScheduleIndex(maker, { isDeviceUnresponsive: () => unresponsiveDevicesStore.has(deviceId) }), { force: true })
+      .then((nextIndex) => {
+        if (getScheduleIndexInvalidationVersion(deviceId) !== invalidationVersion) return;
+        setScheduleIndex(nextIndex);
+      })
       .catch(() => {
         // 失败保留旧徽标,与整页 load 的容错口径一致。
       });
@@ -266,11 +304,13 @@ export default function DeviceDetailScreen() {
       // 自动化任务作用域页无筛选 UI 且承诺"全部 N 次运行",statusFilter 固定 'all'
       // (本页 statusFilter state 停留在初值 'active',若沿用会把归档 run 滤掉)。
       statusFilter: automationScopeKey ? 'all' : statusFilter,
+      // 未起名会话的显示文案:共享层不兜中文串,由这里给已解析的 i18n 值。
+      unnamedLabel: t('session.menu.unnamedTitle'),
       // 项目作用域精简页与完整设备详情页都折叠自动化组(HomeSessionRow / SessionRow 均支持组行
       // 展开,与首页交互一致);自动化任务作用域页本身就是"某任务的全部运行",必须平铺不折叠。
       groupAutomations: !automationScopeKey,
     }),
-    [automationScopeKey, groupMode, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, searchQuery, sessions, statusFilter],
+    [automationScopeKey, groupMode, messagePreviewIndex, pendingInteractionIndex, scheduleIndex, searchQuery, sessions, statusFilter, t],
   );
   const listContext = useMemo(
     () => buildRemoteSessionListContext({
@@ -503,6 +543,7 @@ export default function DeviceDetailScreen() {
         />
         {showConnectionBanner ? (
           <ConnectionBanner
+            deviceUnresponsive={deviceUnresponsive}
             error={error}
             issue={connectionIssue}
             lastSyncedAt={lastSyncedAt}
@@ -575,6 +616,7 @@ export default function DeviceDetailScreen() {
         />
         {showConnectionBanner ? (
           <ConnectionBanner
+            deviceUnresponsive={deviceUnresponsive}
             error={error}
             issue={connectionIssue}
             lastSyncedAt={lastSyncedAt}
@@ -652,6 +694,7 @@ export default function DeviceDetailScreen() {
       />
 
       <ConnectionBanner
+        deviceUnresponsive={deviceUnresponsive}
         error={error}
         issue={connectionIssue}
         lastSyncedAt={lastSyncedAt}

@@ -20,16 +20,7 @@
 import { AlertCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { decodeRemoteErrorMessage } from '../../lib/makerChatStore';
-
-/** 稳定 reason key → i18n。error-tail-banner(CCAgentSessionView)复用同一映射,
- *  保证尾部可操作红条与历史静态卡展示同一段文案。 */
-export const ERROR_REASON_I18N_KEYS: Record<string, string> = {
-  'empty-response': 'logic.errors.emptyResponse',
-  'turn-failed': 'logic.errors.turnFailed',
-  'silent-stop-exhausted': 'logic.errors.silentStopExhausted',
-  'permission-tighten-interrupt-failed': 'logic.errors.permissionTightenInterruptFailed',
-  'codex-auto-review-unavailable': 'logic.errors.codexAutoReviewUnavailable',
-};
+import { ERROR_REASON_I18N_KEYS } from './errorReasonI18n';
 
 export function ErrorMessageCard({ message, reason }: { message: string; reason?: string }) {
   const { t } = useTranslation();

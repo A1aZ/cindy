@@ -61,6 +61,19 @@ export interface AgentInputSessionReferenceMessage {
   createdAt?: number;
 }
 
+/**
+ * Safe terminal-state hint for a quoted session.
+ *
+ * The actual persisted error row is intentionally not copied into the quote:
+ * it may contain provider-specific or user-sensitive details.  This additive
+ * marker lets the receiving agent distinguish a genuinely interrupted turn
+ * from a response that simply ended at the last visible text.
+ */
+export interface AgentInputSessionReferenceTerminal {
+  status: 'error';
+  createdAt?: number;
+}
+
 export interface AgentInputSessionReferenceContext {
   sessionId: string;
   title?: string;
@@ -71,6 +84,8 @@ export interface AgentInputSessionReferenceContext {
   range: 'recent' | 'around-anchor';
   messageCount: number;
   truncated: boolean;
+  /** Present only when the recent snapshot (local or device-link) ends in a persisted turn error. */
+  terminal?: AgentInputSessionReferenceTerminal;
 }
 
 export interface AgentInputImageRef {
@@ -101,7 +116,7 @@ export interface AgentInputChatMessage {
 }
 
 export interface AgentInputCreateOpts {
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   workingDir: string;
   model: string;
   providerId?: string | null;
@@ -117,6 +132,24 @@ export interface AgentInputCreateOpts {
   vendorOptions?: Record<string, unknown>;
   remoteHostId?: string;
   resumeSessionId?: string;
+}
+
+/**
+ * 一次自动续跑（中断自愈）的展示信息，main 与 renderer 共用。
+ *
+ * 全部字段都只服务于「让用户看懂刚才发生了什么」：活动行的 param 位显示原因摘要，
+ * 展开详情显示完整原因 + 本轮第几次 + 本会话累计。`maxAttempts` 随记录一起带，
+ * 而不是让 renderer 引用 main 的常量——这样以后调整上限，旧记录仍显示当时的值。
+ */
+export interface AutoResumeInfo {
+  /** 中断原文（terminal error 的 message，通常是 SDK 的英文文案）。 */
+  error?: string;
+  /** 本轮连续第几次重连（从 1 起）。 */
+  attempt: number;
+  /** 本轮上限。 */
+  maxAttempts: number;
+  /** 本会话累计自动重连次数（不设上限，纯展示）。 */
+  sessionTotal: number;
 }
 
 export interface AgentInputQueuedMessage {
@@ -164,11 +197,58 @@ export interface AgentInputQueuedMessage {
         runId?: string;
       };
   /**
+   * 本条由**手机控制端**入队 / 插入。
+   *
+   * 手机会话页的所有发送都走 input:enqueue / input:steer(没有一处调 maker:send),
+   * 而 drain 派发与 steer 都发生在原 invoke 的 AsyncLocalStorage 之外 —— 来源必须在
+   * 入队/插入的那一刻盖在队列项上,才能一路带到最终 wire 消息(见
+   * maker-ipc/mobileClientPromptNote)。
+   *
+   * **只由被控端在 IPC 边界写入,不采信 wire 传来的值**(客户端可控数据)。语义上仅用于
+   * 体验分流(要不要追加一段手机说明),不是安全 / 鉴权判据 —— 平台值本身也是对端自报的,
+   * 见 device-link/invoke-context 的可信度说明。
+   */
+  fromMobileClient?: boolean;
+  /**
    * 一次性跳过意识拦截钩(订阅槽①)。**预留字段,v1 无调用点置位**:当前
    * 没有"强制发送"UI,被拦消息只能编辑后重发且重发仍会再审;未来落地
    * "仍要发送"按钮时由它置位(只影响 will- 钩子,did- 旁听照常)。
    */
   bypassGhostHooks?: boolean;
+  /**
+   * 本条是**自动**补发的续跑指令(turn 被上游打断后由 main 守卫触发,见
+   * maker-ipc/interruptedTurnAutoResume.ts),不是人点的重试。
+   *
+   * 两个用途,都不能靠"文本恰好等于续跑常量"来推断:
+   *  - 落库时写进 `agentMeta.autoResume`,renderer 据此隐藏用户气泡、渲染
+   *    「已自动继续」分隔线(与 silent-stop 自动续跑同一渲染路径),也是 DB /
+   *    transcript 里每次自动续跑的审计标记。
+   *  - **不给自动续跑守卫充值额度**(register 的 createDbMessage 按它跳过
+   *    noteUserSend)。这是防死循环的硬保证:每条真实人话背书的额度是有限的,
+   *    自动补发若自我充值,上游连环抽风时就会无限续跑。
+   *
+   * 旧队列快照缺省该字段(undefined = 人工),向后兼容。
+   */
+  autoResume?: boolean;
+  /**
+   * 本次自动续跑的展示信息（中断原因 + 本轮第几次 + 会话累计）。随 `autoResume`
+   * 一起透传到落库 agentMeta，供「已重新连接」活动行的展开详情用。
+   */
+  autoResumeInfo?: AutoResumeInfo;
+  /**
+   * 本条是零产出失败 turn 的克隆重发(错误横幅「重试」,见 performRetryLastError),
+   * 值 = 被取代的那条已落库 user 行的 clientId。本条落库并派发成功后,host 据此把
+   * 旧 user 行与其后的 role='error' 行软删(置 rewind_at + messages:deleted 广播),
+   * 否则历史里会留下两条一模一样的用户消息。
+   *
+   * 只在克隆重发分支置位:续跑指令(失败 turn 已有产出)不重发原文,旧行是真实
+   * 历史,不取代。软删必须等本条**落库且真正派发出去**之后才执行:落库前的失败路径
+   * 里旧行是用户消息的唯一载体,动它就是消息凭空消失;落库后、派发前的取消路径里
+   * 旧 error 行还是用户唯一的重试入口,提前藏掉会让人卡在"消息发了没反应"。
+   *
+   * 旧队列快照缺省该字段(undefined = 不软删),向后兼容。
+   */
+  supersedesUserClientId?: string;
 }
 
 export type AgentInputDelivery = 'turn' | 'steer';
@@ -187,6 +267,12 @@ export interface AgentInputProjection {
    * 派发」；旧被控端可能缺省该字段，消费方必须回落为 null。
    */
   continuationInFlightClientId?: string | null;
+  /**
+   * 当前 vendor turn 的续跑发起项 clientId。与上面的 dispatch 边界字段不同：同轮
+   * steer 顶替 activeTurn 后，本字段仍保持原续跑项归属，供 Renderer 重载后恢复
+   * 「仍在运行」呈现。旧被控端可能缺省，消费方必须按旧端兼容策略处理。
+   */
+  continuationTurnClientId?: string | null;
   steeringQueueClientIds: string[];
   queuePaused: boolean;
   queueExpanded: boolean;
@@ -208,6 +294,17 @@ export interface AgentInputProjection {
    * 可能缺省,renderer 回落队首)。null = 无等待。
    */
   credentialSwitchWait: { clientId?: string; blockedBySessionIds: string[] } | null;
+  /**
+   * 中断自动续跑接管中:上游把「已经干到一半」的 turn 打断了,main 守卫已决定自动
+   * 续跑,正在退避窗口里(见 main/maker-ipc/interruptedTurnAutoResume.ts)。
+   *
+   * 此时 `error` 刻意保持 null —— 自愈过程不该弹红色横幅,只在聊天流里显示一条低调
+   * 的「正在自动继续」分隔条(renderer 据本字段插 ephemeral system card)。真正救不
+   * 回来时 main 才把错误回落成常规 error + 横幅。
+   *
+   * 老被控端可能缺省该字段,消费方按 falsy 处理即可(退化成"没有自愈提示")。
+   */
+  autoResumePending?: AutoResumeInfo;
 }
 
 export type AgentInputMakerMessage =

@@ -22,12 +22,16 @@ interface MessageDeleteSessionRow {
   agentKind: string;
 }
 
+/**
+ * 不含 messageCount:删除对 `_count.messages` 权威口径(全部 messages 行数)的影响只有
+ * 0 或 +1(见 commitMessageDeletion 的注释),不值得为此每次删除多跑一次全表 count,故
+ * 删除路径不 patch 该字段,由 sessions:list / reseed 提供权威值。见 issue #1282。
+ */
 interface MessageDeleteCommittedPayload {
   sessionId: string;
   deletedClientIds: string[];
   updatedAt: number;
   preview: string | null;
-  messageCount: number;
 }
 
 export interface MessageDeleteHandlerDeps {
@@ -49,7 +53,10 @@ export interface MessageDeleteHandlerDeps {
     clientIds: string[],
     handoff: string,
   ): Promise<MessageDeleteCommittedPayload>;
-  setPendingHandoff(sessionId: string, handoff: string): void;
+  /** 见 sessionAgentSwitchHandler 同名字段:带代次写,防 /clear 竞态。 */
+  setPendingHandoff(sessionId: string, handoff: string, expectedGeneration?: number): void;
+  /** 读交接注册表的当前代次(在读历史之前取一次)。 */
+  readPendingHandoffGeneration?(sessionId: string): number;
   onCommitted(
     payload: MessageDeleteCommittedPayload,
     requestedClientId: string,
@@ -61,7 +68,7 @@ export interface MessageDeleteHandlerDeps {
 }
 
 function engineLabel(agentKind: string): string {
-  return agentKind === 'codex' ? 'Codex' : 'Claude Code';
+  return agentKind === 'codex' ? 'Codex' : agentKind === 'pi' ? 'Pi' : 'Claude Code';
 }
 
 export async function performMessageDeletion(
@@ -95,6 +102,9 @@ export async function performMessageDeletion(
     throwIpcError('SESSION_RUNNING', `Session ${sessionId} has background activity`);
   }
 
+  // 代次在读历史之前取:下面到 setPendingHandoff 之间有异步活,期间 /clear 过的话
+  // 这份按删除前历史算出的交接必须作废(见 registry.set 的 expectedGeneration)。
+  const handoffGeneration = deps.readPendingHandoffGeneration?.(sessionId);
   const source = await deps.listMessagesForContext(sessionId);
   const deletedClientIds = new Set(target.deletedClientIds);
   const remaining = source.filter((message) => !deletedClientIds.has(message.clientId));
@@ -123,7 +133,7 @@ export async function performMessageDeletion(
       target.deletedClientIds,
       handoff,
     );
-    deps.setPendingHandoff(sessionId, handoff);
+    deps.setPendingHandoff(sessionId, handoff, handoffGeneration);
     await deps.onCommitted(committed, clientId);
     deps.log.info('message delete committed; native context will rebuild on next send', {
       sessionId,

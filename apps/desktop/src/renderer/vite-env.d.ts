@@ -2,14 +2,18 @@
 
 interface ImportMetaEnv {
   readonly VITE_CINDY_AUTH_REGION: 'cn' | 'global' | 'dev';
-  /** 端点清单自举基址(唯一烘焙远程 URL);业务端点走 electronAPI.clientEndpoints。 */
+  /** 当前构建区域的端点清单自举基址；业务端点走 electronAPI.clientEndpoints。 */
   readonly VITE_ENDPOINT_MANIFEST_BASE_URL: string;
+  /** 另一物理区域的受信任端点清单自举基址。 */
+  readonly VITE_ENDPOINT_MANIFEST_PEER_BASE_URL: string;
 }
 
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
 
+type AgentProxyPrefPayload = import('../shared/agentProxyConfig').SshHostAgentProxyPref;
+type AgentProxyTunnelStatePayload = import('../shared/agentProxyConfig').AgentProxyTunnelState;
 type ModelAccessStatusPayload = import('../shared/modelAccess').ModelAccessStatus;
 type AnalyticsSettingsPayload = import('../shared/analyticsSettings').AnalyticsSettingsPayload;
 type RsbWindowCommand = import('../shared/rightSidebarWindow').RsbWindowCommand;
@@ -38,6 +42,10 @@ type IOSSimulatorViewerVisibilityRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorViewerVisibilityRequest;
 type IOSSimulatorStreamProfileRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorStreamProfileRequest;
+type MakerSessionTreeSnapshot = import('@cindy/maker-core').SessionTreeSnapshot;
+type BrowserBackendHealth = import('../shared/browserBackend').BrowserBackendHealth;
+type BrowserBackendRecoveryResult =
+  import('../shared/browserBackend').BrowserBackendRecoveryResult;
 type DesktopAccountDeletionConfirmInput =
   import('../shared/authIpc').DesktopAccountDeletionConfirmInput;
 type DesktopAccountDeletionAvailabilityResult =
@@ -48,12 +56,20 @@ type DesktopAccountDeletionConfirmResult =
   import('../shared/authIpc').DesktopAccountDeletionConfirmResult;
 type DesktopAccountDeletionStatusResult =
   import('../shared/authIpc').DesktopAccountDeletionStatusResult;
+type PendingRemotePrecreatedWorktree =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktree;
+type PendingRemotePrecreatedWorktreeTarget =
+  import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktreeTarget;
+type RemotePrecreatedWorktreeLedgerSnapshot =
+  import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
 
 /* ── Environment check ── */
 
 interface EnvCheckResult {
   claudeCode: { status: 'passed' | 'failed'; path?: string; error?: string };
   codex: { status: 'passed' | 'failed' | 'skipped'; path?: string; error?: string };
+  /** pi 可选实验 agent:failed 不影响 allPassed；本次启动会禁用 pi。 */
+  pi?: { status: 'passed' | 'failed' | 'skipped'; path?: string; error?: string };
   allPassed: boolean;
   platform: 'darwin' | 'win32' | 'linux';
 }
@@ -62,10 +78,14 @@ interface EnvCheckResult {
 // surface and the core package's contract in sync. `VoiceInputShortcut` is
 // renderer-only (defined in voice-input/shortcut.ts) so it stays inline.
 // HostSnapshot 来自 transport-only package; desktop main 端 wrap 时附加
-// autoConnect 偏好字段 (本地 prefs, 不写入 ~/.ssh/config), 渲染层统一用
+// autoConnect / agentProxy 偏好字段 (本地 prefs, 不写入 ~/.ssh/config), 渲染层统一用
 // 这个扩展类型即可一次拿到完整信息, 不必再为单个字段单独 IPC。
 type RemoteHostSnapshot = import('@cindy/maker-remote-ssh').HostSnapshot & {
   autoConnect: boolean;
+  /** Agent 流量经 SSH 隧道走本地 Proxy 的 per-host 配置; 未开启 → null。 */
+  agentProxy: AgentProxyPrefPayload | null;
+  /** 隧道实时状态 (main 进程内存态); 无记录 → null。 */
+  agentProxyTunnel: AgentProxyTunnelStatePayload | null;
 };
 /** 设备互联:REST 设备视图(同 shared/deviceLinkIpc.ts DeviceLinkDeviceView) */
 interface DeviceLinkDeviceInfo {
@@ -93,7 +113,7 @@ interface DeviceLinkDeviceView {
 
 /** 设备互联:relay 连接问题(镜像 @cindy/device-link 的 DeviceLinkConnectionIssue) */
 interface DeviceLinkConnectionIssuePayload {
-  kind: 'auth-failed' | 'replaced' | 'too-many-connections' | 'version-mismatch';
+  kind: 'auth-failed' | 'replaced' | 'too-many-connections' | 'version-mismatch' | 'unstable';
   closeCode?: number;
   detail?: string;
   at: number;
@@ -116,7 +136,7 @@ interface DeviceLinkPresenceSnapshot {
 /** .cshare 导入向导的预览数据(main 侧 SharePreview 的镜像)。 */
 interface SessionSharePreview {
   title: string;
-  agentKind: 'cc' | 'codex';
+  agentKind: 'cc' | 'codex' | 'pi';
   workspaceKind: 'project' | 'dialogue';
   originalWorkingDir: string | null;
   exportedAt: string;
@@ -180,26 +200,23 @@ interface RemoteAgentOneShotResult extends RemoteAgentExecResult {
 type VoiceInputState = import('@cindy/voice-input-core').VoiceInputState;
 type VoiceAudioTrace = import('@cindy/voice-input-core').AudioTrace;
 type VoiceSpeechSegment = import('@cindy/voice-input-core').SpeechSegment;
-type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed';
+type VoiceInputGlobalErrorCode = 'empty' | 'unavailable' | 'unconfirmed' | 'permission' | 'failed' | 'superseded';
 type VoiceInputGlobalResult =
-  { ok: true } | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
+  | { ok: true }
+  | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode };
 type VoiceEditableRange = import('@cindy/voice-input-core').EditableRange;
 type VoiceRefinementContext = import('@cindy/voice-input-core').DictationRefinementContext;
 type VoiceInputDraftSource = import('@cindy/voice-input-core').VoiceInputDraftSource;
 type VoiceInputRendererEvent = import('@cindy/voice-input-core').VoiceInputRendererEvent;
-type VoiceInputDictionaryAdviceInput =
-  import('@cindy/voice-input-core').DictationDictionaryAdviceInput;
-type VoiceInputDictionaryLearningAction =
-  import('@cindy/voice-input-core').DictationDictionaryLearningAction;
+type VoiceInputDictionaryAdviceInput = import('@cindy/voice-input-core').DictationDictionaryAdviceInput;
+type VoiceInputDictionaryLearningAction = import('@cindy/voice-input-core').DictationDictionaryLearningAction;
 type VoiceInputSettingsData = import('../shared/voiceInputData').VoiceInputSettings;
 type VoiceInputHistoryEntryData = import('../shared/voiceInputData').VoiceInputHistoryEntry;
 type VoiceInputDataSnapshot = import('../shared/voiceInputData').VoiceInputDataSnapshot;
 type VoiceInputProviderKindData = import('../shared/voiceInputAsrProfiles').VoiceInputProviderKind;
 type VoiceInputAsrModeData = import('../shared/voiceInputAsrProfiles').VoiceInputAsrMode;
-type VoiceInputRefinerProviderKindData =
-  import('../shared/voiceInputRefinerProfiles').VoiceInputRefinerProviderKind;
-type VoiceInputRefinerTransportData =
-  import('../shared/voiceInputRefinerProfiles').VoiceInputRefinerTransport;
+type VoiceInputRefinerProviderKindData = import('../shared/voiceInputRefinerProfiles').VoiceInputRefinerProviderKind;
+type VoiceInputRefinerTransportData = import('../shared/voiceInputRefinerProfiles').VoiceInputRefinerTransport;
 type VoiceInputServiceModeData = 'cindy' | 'byok';
 type VoiceInputModelSelectionResultData = {
   selection: {
@@ -250,10 +267,24 @@ type LocalThemeWriteResult = import('../shared/local-themes').LocalThemeWriteRes
 type ImDefaultSettingsPatch = import('../shared/imDefaultSettings').ImDefaultSettingsPatch;
 type ImDefaultSettingsState = import('../shared/imDefaultSettings').ImDefaultSettingsState;
 type ImDefaultSettingsChannel = import('../shared/imDefaultSettings').ImDefaultSettingsChannel;
-type SubagentModelSettingsPatch =
-  import('../shared/subagentModelSettings').SubagentModelSettingsPatch;
-type SubagentModelSettingsState =
-  import('../shared/subagentModelSettings').SubagentModelSettingsState;
+type SubagentModelSettingsPatch = import('../shared/subagentModelSettings').SubagentModelSettingsPatch;
+type SubagentModelSettingsState = import('../shared/subagentModelSettings').SubagentModelSettingsState;
+type SubagentModelSettingsWriteResult = import('../shared/subagentModelSettings').SubagentModelSettingsWriteResult;
+
+/** Agent 资源占用设置的 IPC wire 形状(main 侧 agentResourceSettingsWire)。 */
+type AgentResourceProcessPriority = 'normal' | 'low' | 'lowest';
+type AgentResourceSettingsWire = {
+  maxConcurrentCommands: number;
+  processPriority: AgentResourceProcessPriority;
+  capToolchainThreads: boolean;
+  isCustomized: boolean;
+  customizedKeys: string[];
+  defaults: {
+    maxConcurrentCommands: number;
+    processPriority: AgentResourceProcessPriority;
+    capToolchainThreads: boolean;
+  };
+};
 
 interface VoiceInputShortcut {
   trigger?: 'keyboard' | 'modifier';
@@ -333,21 +364,21 @@ interface ComputerDriverUpdateProgress {
 
 interface BinaryDownloadProgressPayload {
   progress: number;
-  speed?: string; // e.g. "2.5 MB/s"
-  downloaded?: string; // e.g. "15.3 MB"
-  total?: string; // e.g. "80.0 MB"
+  speed?: string;       // e.g. "2.5 MB/s"
+  downloaded?: string;  // e.g. "15.3 MB"
+  total?: string;       // e.g. "80.0 MB"
   /** Terminal failure flag from main; renderer should escape splash & show retry. */
   failed?: boolean;
   /** DownloadError code (e.g. 'NETWORK', 'CHECKSUM', 'HTTP_4XX', 'manifest_failed'). */
   error?: string;
-  /** D 场景（两个都需要下载）: 当前阶段 1 或 2；B/C 场景缺省。 */
-  step?: 1 | 2;
-  /** D 场景下固定为 2；B/C 场景缺省。 */
-  totalSteps?: 2;
+  /** D 场景（两个及以上需要下载）: 当前阶段 1 / 2 / 3；B/C 场景缺省。 */
+  step?: 1 | 2 | 3;
+  /** D 场景 = 本次需要下载的二进制段数(2 或 3)；B/C 场景缺省。 */
+  totalSteps?: 2 | 3;
   /** step 切换瞬间的同步信号——splash 收到立即 set 进度=0，禁用 transition 动画。 */
   reset?: boolean;
   /** 失败/调试文案使用，标识当前推进度的 vendor。 */
-  vendor?: 'claude' | 'codex';
+  vendor?: 'claude' | 'codex' | 'pi';
 }
 
 /* ── App Update Progress ── */
@@ -397,10 +428,62 @@ type DiscordBotTransportStatus =
   | { kind: 'conflict'; appId: string }
   | { kind: 'error'; reason: string };
 
+/** @cindy/im TelegramIM 的 transport 状态(IMStatus union 的 mirror)。 */
+interface TelegramBotBehavior {
+  emojiReactions: 'off' | 'minimal' | 'expressive';
+  replyQuoteGroup: 'off' | 'first' | 'all';
+  replyQuoteDm: 'off' | 'first';
+}
+
+type TelegramBotTransportStatus =
+  | { kind: 'idle' }
+  | { kind: 'connecting' }
+  | { kind: 'connected'; appId: string }
+  | { kind: 'conflict'; appId: string }
+  /** 凭证保留、用户主动下线(不轮询); 与 idle=未配置 严格区分。 */
+  | { kind: 'offline'; appId: string }
+  | { kind: 'error'; reason: string; code?: TelegramBotErrorCode };
+
+/** 稳定错误分类;renderer 据此取 i18n 文案,不直接展示 main 层 reason。 */
+type TelegramBotErrorCode = 'invalid-token' | 'provider-api' | 'network' | 'secret-unavailable';
+
+type DingTalkBotTransportStatus = DiscordBotTransportStatus;
+type WecomBotTransportStatus =
+  | { kind: 'idle' }
+  | { kind: 'connecting' }
+  | { kind: 'connected'; appId: string }
+  | { kind: 'conflict'; appId: string }
+  | { kind: 'error'; reason: string };
+
+type WechatBotPhase =
+  | 'disconnected'
+  | 'authorizing'
+  | 'waiting_confirmation'
+  | 'connected'
+  | 'reconnecting'
+  | 'needs_reauth'
+  | 'disabled_by_policy'
+  | 'error';
+
+interface WechatBotState {
+  phase: WechatBotPhase;
+  bound: boolean;
+  connectedAt?: number;
+  lastInboundAt?: number;
+  queuedTasks: number;
+  errorCode?: string;
+}
+
+interface WechatChannelSettingsState {
+  version: 1;
+  workingDir: string | null;
+  workingDirAvailable: boolean;
+}
+
 type DiscordBotSessionAuthCheckResult = {
   ok: boolean;
   missing: 'gateway-key' | 'agent-oauth' | 'provider-key' | 'provider-disconnected' | null;
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   model: string;
   providerId: string | null;
   providerLabel: string | null;
@@ -495,7 +578,7 @@ interface OrcaWorkerRecord {
   session: {
     id: string;
     title: string;
-    agentKind: 'claude-code' | 'codex';
+    agentKind: 'claude-code' | 'codex' | 'pi';
     workingDir: string;
     model: string;
     effort: string;
@@ -514,6 +597,8 @@ interface CodexAuthState {
   expiresAt?: number;
   errorReason?: string;
   authSource?: 'oauth' | 'api-key';
+  credentialScope?: 'system-shared' | 'instance-isolated' | 'unknown';
+  recoveryRequiredReason?: string;
 }
 
 /** Codex progress event payload (binary download + login phases) */
@@ -553,23 +638,9 @@ interface CodexUsageSnapshot {
 
 interface CCAgentStreamEvent {
   sessionId: string;
-  type:
-    | 'text'
-    | 'tool_use'
-    | 'tool_result'
-    | 'tool_result_full'
-    | 'agent_task_update'
-    | 'status'
-    | 'done'
-    | 'error'
-    | 'permission_request'
-    | 'permission_dismissed'
-    | 'ask_user_question'
-    | 'plan_review'
-    | 'thinking'
-    | 'compact_boundary';
+  type: 'text' | 'tool_use' | 'tool_result' | 'tool_result_full' | 'agent_task_update' | 'status' | 'done' | 'error' | 'permission_request' | 'permission_dismissed' | 'ask_user_question' | 'plan_review' | 'thinking' | 'compact_boundary';
   data: unknown;
-  source?: 'claude-code' | 'codex';
+  source?: 'claude-code' | 'codex' | 'pi';
   /**
    * agent-meta: SDK 元信息（按 session.agentKind 解析）。当事件来自一条 SDK
    * message（assistant / tool_use / thinking final / done 等）时由 main 透传过来。
@@ -641,8 +712,7 @@ interface CCAgentPermissionResult {
 interface CCAgentPermissionDismissedPayload {
   sessionId: string;
   requestId: string;
-  reason:
-    'mode_changed_to_bypassPermissions' | 'mode_changed_to_acceptEdits' | 'mode_changed_to_plan';
+  reason: 'mode_changed_to_bypassPermissions' | 'mode_changed_to_acceptEdits' | 'mode_changed_to_plan';
   resolvedAs: 'allow' | 'deny';
 }
 
@@ -722,8 +792,8 @@ interface CCAgentAnswerUserQuestionParams {
 interface CCAgentPlanReviewPayload {
   sessionId: string;
   requestId: string;
-  plan: string; // Markdown content
-  planFilePath: string; // Absolute path of the plan file on disk
+  plan: string;           // Markdown content
+  planFilePath: string;   // Absolute path of the plan file on disk
 }
 
 /**
@@ -828,6 +898,7 @@ interface PluginEnableState {
   projectOverride?: { enabled: boolean; workingDir: string } | null;
   userOverride?: { enabled: boolean } | null;
   globalOverride?: { enabled: boolean } | null;
+  collabWorkspaceKind?: 'project' | 'dialogue';
 }
 
 interface PluginEnableUpdateResult {
@@ -851,7 +922,14 @@ type AndroidMcpErrorCode =
   | 'INVALID_NODE'
   | 'ANDROID_DRIVER_ERROR';
 
-type AndroidAdbPathSource = 'custom' | 'env' | 'prepared' | 'bundled' | 'sdk' | 'path' | 'fallback';
+type AndroidAdbPathSource =
+  | 'custom'
+  | 'env'
+  | 'prepared'
+  | 'bundled'
+  | 'sdk'
+  | 'path'
+  | 'fallback';
 
 interface AndroidConnectedDevice {
   device_serial: string;
@@ -1003,6 +1081,10 @@ interface ElectronAPI {
     list: () => Promise<LocalThemesResult>;
     write: (req: LocalThemeWriteRequest) => Promise<LocalThemeWriteResult>;
     openDir: () => Promise<LocalThemeOpenDirResult>;
+    /** 导入 VSCode / Obsidian 主题文件；对话框与读文件都在 main 侧。 */
+    importExternal: () => Promise<
+      import('../shared/theme-import/types').LocalThemeImportResult
+    >;
   };
 
   /** RSB terminal tab —— PTY 后端 + xterm.js,详见 shared/terminal-bridge.ts 注释。 */
@@ -1057,8 +1139,28 @@ interface ElectronAPI {
      * 引导去配置。未装 NOT_FOUND。
      */
     setupStatus: (id: string) => Promise<import('../shared/ghost').GhostSetupStatus>;
+    /** 只列入口元数据，不运行插件工具；远程/device-link 不暴露。 */
+    listAtResourceProviders: (params: { sessionId?: string; workingDir?: string }) => Promise<{
+      items: Array<{ ghostId: string; name: string; description?: string }>;
+    }>;
+    /** 用户选定一个入口后，按固定只读摘要契约搜索该插件。 */
+    queryAtResources: (params: {
+      ghostId: string;
+      sessionId?: string;
+      workingDir?: string;
+      query?: string;
+      limit?: number;
+    }) => Promise<{
+      success: boolean;
+      error?: string;
+      pluginName?: string;
+      items: Array<{ id: string; label: string; description?: string; href: string }>;
+      truncated: boolean;
+    }>;
     /** 最近使用顺序变化（发送 /卸载），多窗口同步。 */
-    onRecentUsageChanged: (callback: (payload: { ids: string[] }) => void) => () => void;
+    onRecentUsageChanged: (
+      callback: (payload: { ids: string[] }) => void,
+    ) => () => void;
     install: (
       lizFilePath: string,
       /** enable:装入后立即开启(确认框勾选决定;缺省沉睡)。 */
@@ -1080,6 +1182,8 @@ interface ElectronAPI {
       overrides: Record<string, string>;
       image: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
       video: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
+      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      text: { options: Array<{ id: string; label: string }>; defaultModel: { id: string; label: string } | null };
     };
     /** 写/清一项覆盖(model=null 即恢复跟随默认);返回该意识最新覆盖表。 */
     setCindyPref: (
@@ -1087,10 +1191,19 @@ interface ElectronAPI {
       capability: string,
       model: string | null,
     ) => Promise<{ overrides: Record<string, string> }>;
+    /** 派活(errand)每插件配置:首帧同步读(规则 7);config 缺项 = 跟随默认。 */
+    errandPrefsSync: (id: string) => { config: Record<string, unknown> };
+    /** 整卡替换派活配置(null / 空对象 = 全恢复跟随默认);返回清洗后的落盘值。 */
+    setErrandConfig: (
+      id: string,
+      config: Record<string, unknown> | null,
+    ) => Promise<{ config: Record<string, unknown> }>;
     /** 系统文件选择框(.cindy 过滤),只选不装;取消返回 { canceled: true }。 */
     pickFile: () => Promise<{ canceled: true } | { filePath: string }>;
     /** 只验不装:读出清单、签名信任等级与 icon data URL,供确认弹窗展示。 */
-    inspect: (lizFilePath: string) => Promise<{
+    inspect: (
+      lizFilePath: string,
+    ) => Promise<{
       manifest: import('../shared/ghost').GhostManifest;
       trust: import('../shared/ghost').GhostTrustInfo;
       /** 本次检查的整包指纹；安装/更新时回传，防止确认后文件被替换。 */
@@ -1098,6 +1211,10 @@ interface ElectronAPI {
       iconDataUrl?: string;
     }>;
     uninstall: (id: string) => Promise<{ ok: true }>;
+    /** 详情页「导出 .cindy」:打包安装目录 → 保存对话框落盘。 */
+    export: (
+      id: string,
+    ) => Promise<{ status: 'saved'; savedPath: string } | { status: 'canceled' }>;
     /** 启用/停用(停用 = 面板休眠,布局位置保留)。 */
     setEnabled: (id: string, enabled: boolean) => Promise<{ ok: true }>;
     /** 目录级禁用清单(插件页项目范围视图;sendSync 切换同帧渲染)。 */
@@ -1144,15 +1261,7 @@ interface ElectronAPI {
       purpose?: 'attach' | 'menu',
     ) => Promise<
       | { url: string; kind?: 'image' }
-      | {
-          url: string;
-          kind: 'video';
-          absPath: string;
-          size: number;
-          name: string;
-          ext: string;
-          mimeType: string;
-        }
+      | { url: string; kind: 'video'; absPath: string; size: number; name: string; ext: string; mimeType: string }
     >;
     /** 意识聊天卡片更新推送(卡槽③):card-update 过闸后带净化 html 全量推,
      *  ghostCardStore 消费;toolUseId 仅 claude 路径有(codex 为 null,
@@ -1188,11 +1297,7 @@ interface ElectronAPI {
     /** 交互卡(v2)按钮点击回传:宿主桥捕获 data-ghost-action 点击后调,主机
      *  验卡片归属→唤醒意识→管子下发 card-action。fire-and-forget。prompt 仅
      *  data-ghost-prompt 类动作有(宿主输入框收集的用户文字)。 */
-    dispatchCardAction: (
-      callId: string,
-      actionId: string,
-      prompt?: string,
-    ) => Promise<{ ok: boolean }>;
+    dispatchCardAction: (callId: string, actionId: string, prompt?: string) => Promise<{ ok: boolean }>;
     /** 订阅槽①:用户消息被意识钩子拦下(renderer 把乐观气泡原地降级为被拦态;
      *  没有既有气泡时用 text 补渲一条——排队消息被拦不无声蒸发)。 */
     onUserMessageBlocked: (
@@ -1237,7 +1342,9 @@ interface ElectronAPI {
     /** 会话切换上报(did-session-switched 数据源;单向 send,main 去重+资格门)。 */
     noteSessionFocused: (sessionId: string | null) => void;
     /** 订阅槽①:意识钩子熔断(连续失败降级只旁听,renderer 弹提示)。 */
-    onHookFused: (callback: (payload: { ghostId: string; name: string }) => void) => () => void;
+    onHookFused: (
+      callback: (payload: { ghostId: string; name: string }) => void,
+    ) => () => void;
     /** notify 槽 + 主机代言 notice:意识系统提示(宿主 Toast 渲染,带意识身份头)。
      *  意识自发的带 text(main 侧已净化+限速);主机代言的(凭证入库/授权成功)
      *  带 textKey/textArgs,renderer 按 GHOST_HOST_NOTICE_KEYS 白名单翻译。 */
@@ -1252,6 +1359,45 @@ interface ElectronAPI {
         tone: 'info' | 'success' | 'warning' | 'error';
       }) => void,
     ) => () => void;
+    /** badge 槽:意识未读角标变化(插件入口与插件卡上的绿点)。
+     *  与 onNotify 的分工是持久状态对一次性 toast——用户没去看就一直亮着。
+     *  summary/at 只在 unread:true 时给。 */
+    onBadge: (
+      callback: (payload: {
+        ghostId: string;
+        unread: boolean;
+        summary?: string;
+        at?: number;
+      }) => void,
+    ) => () => void;
+    /** badge 槽:未读全量快照(换账号后整表替换;逐条 onBadge 只表达增量)。 */
+    onUnreadSnapshot: (
+      callback: (payload: {
+        entries: Array<{ ghostId: string; summary?: string; at: number }>;
+      }) => void,
+    ) => () => void;
+    /** badge 槽:未读角标首帧快照(同步读,避免绿点晚一帧跳出来)。 */
+    unreadSync: () => { entries: Array<{ ghostId: string; summary?: string; at: number }> };
+    /** badge 槽:用户侧熄灭未读(打开面板 = 明确已读)。seenAt = 当时看到的那条
+     *  的点亮时刻,main 据此条件删除,避免陈旧清除抹掉更新的未读。 */
+    clearUnread: (id: string, seenAt?: number) => Promise<{ ok: boolean }>;
+    /** confirm 槽:插件请求弹主机同款确认框(main 已资格审+净化+限速+单飞)。
+     *  main 只投单个窗口,所以收到即本窗口负责弹;答案用 resolveConfirm 回包。
+     *  confirmText/cancelText 为 null 时用 renderer 自己的缺省文案(跟语言走)。 */
+    onConfirmRequest: (
+      callback: (payload: {
+        requestId: string;
+        ghostId: string;
+        ghostName: string;
+        iconDataUrl?: string;
+        body: string;
+        confirmText: string | null;
+        cancelText: string | null;
+        danger: boolean;
+      }) => void,
+    ) => () => void;
+    /** confirm 槽回包:把用户的点击送回 main 结算挂起的管子请求。 */
+    resolveConfirm: (requestId: string, confirmed: boolean) => Promise<{ handled: boolean }>;
     /** preview 槽:插件请求在右侧栏内置浏览器开预览标签(main 已白名单守门+限速)。 */
     onPreviewOpen: (
       callback: (payload: {
@@ -1278,23 +1424,42 @@ interface ElectronAPI {
   /** Plugin Protocol v2 市场；网络、下载与安装全部在 main 进程完成。 */
   pluginMarket: {
     snapshot: () => Promise<import('../shared/pluginMarket').PluginMarketSnapshot>;
-    detail: (pluginId: string) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
+    detail: (
+      pluginId: string,
+    ) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
     install: (
       pluginId: string,
-      options: { expectedReleaseId: string; allowPermissionExpansion?: boolean },
+      options: {
+        expectedReleaseId: string;
+        expectedManifest?: import('../shared/ghost').GhostManifest;
+        allowPermissionExpansion?: boolean;
+      },
     ) => Promise<{ ghost: import('../shared/ghost').InstalledGhost }>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
+    listSources: () => Promise<import('../shared/pluginMarket').MarketSourceSummary[]>;
+    pickLocalSource: (
+      defaultPath?: string,
+    ) => Promise<
+      | { canceled: true }
+      | { canceled: false; summary: import('../shared/pluginMarket').MarketSourceSummary }
+    >;
+    addSource: (input: {
+      source: string;
+      ref?: string;
+      sparsePaths?: string[];
+    }) => Promise<import('../shared/pluginMarket').MarketSourceSummary>;
+    removeSource: (name: string) => Promise<{ ok: true }>;
+    refreshSource: (
+      name: string,
+    ) => Promise<import('../shared/pluginMarket').MarketSourceSummary>;
+    gitPreflight: () => Promise<{ ok: boolean; version: string | null }>;
   };
   voiceInput: {
-    prewarm: (payload?: {
-      sourceLanguage?: string;
-      refinementEnabled?: boolean;
-    }) => Promise<{ ok: true }>;
-    getBenchmarkFixtureAudio: () => Promise<
-      { ok: true; path: string; wav: ArrayBuffer } | { ok: false }
-    >;
+    prewarm: (payload?: { sourceLanguage?: string; refinementEnabled?: boolean }) => Promise<{ ok: true }>;
+    getBenchmarkFixtureAudio: () => Promise<{ ok: true; path: string; wav: ArrayBuffer } | { ok: false }>;
     getMicrophonePermissionCached: () =>
-      { ok: true; status: string } | { ok: false; status: string; error: string };
+      | { ok: true; status: string }
+      | { ok: false; status: string; error: string };
     getSystemPermissionsCached: () => {
       microphone: { ok: true; status: string } | { ok: false; status: string; error: string };
       inputMonitoring: { ok: true; status: string } | { ok: false; status: string; error: string };
@@ -1309,6 +1474,11 @@ interface ElectronAPI {
     }>;
     openMicrophoneSettings: () => Promise<{ ok: true } | { ok: false; error: string }>;
     openInputMonitoringSettings: () => Promise<VoiceInputGlobalResult>;
+    /**
+     * 失败走统一 IPC 错误协议（reject），成功路径只有 ok:true + 权限状态。
+     * status 与 getSystemPermissions 的各项同为 string 形状（granted / denied / …）。
+     */
+    requestInputMonitoringPermission: () => Promise<{ ok: true; status: string }>;
     muteSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     restoreSystemAudio: () => Promise<{ ok: true } | { ok: false; error: string }>;
     testConnection: () => Promise<VoiceInputConnectionTestResult>;
@@ -1384,13 +1554,19 @@ interface ElectronAPI {
       historyRaw?: string | null;
     }) => VoiceInputDataSnapshot;
     updateSettings: (patch: Partial<VoiceInputSettingsData>) => Promise<VoiceInputSettingsData>;
-    updateShortcutSetting: (
-      shortcut: VoiceInputShortcut | null,
-    ) => Promise<
-      | { ok: true; settings: VoiceInputSettingsData }
+    updateShortcutSetting: (shortcut: VoiceInputShortcut | null) => Promise<
+      | {
+        ok: true;
+        settings: VoiceInputSettingsData;
+        /** 已存盘但 macOS 监听权限未授权，快捷键要等授权后才生效。 */
+        pendingInputMonitoring?: boolean;
+      }
       | { ok: false; error: string; errorCode?: VoiceInputGlobalErrorCode }
     >;
     deleteDictionaryEntries: (entryIds: string[]) => Promise<VoiceInputSettingsData>;
+    addDictionaryEntry: (text: string) => Promise<VoiceInputSettingsData>;
+    importDictionaryEntries: (texts: string[]) => Promise<VoiceInputSettingsData>;
+    renameDictionaryEntry: (entryId: string, text: string) => Promise<VoiceInputSettingsData>;
     recordDictionaryLearningActions: (actions: VoiceInputDictionaryLearningAction[]) => Promise<{
       settings: VoiceInputSettingsData;
       newAutomaticEntries: Array<{ id: string; text: string }>;
@@ -1401,41 +1577,34 @@ interface ElectronAPI {
     updateHistoryEntry: (id: string, text: string) => void;
     deleteHistoryEntry: (id: string) => void;
     onDataChanged: (callback: (payload: VoiceInputDataSnapshot) => void) => () => void;
-    setGlobalShortcut: (shortcut: VoiceInputShortcut | null) => Promise<VoiceInputGlobalResult>;
+    /** options.suspend = 录制期挂起（故意与存盘不同）；不带它的请求会被 main 按存盘校验。 */
+    setGlobalShortcut: (
+      shortcut: VoiceInputShortcut | null,
+      options?: { suspend?: true },
+    ) => Promise<VoiceInputGlobalResult>;
     startModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     stopModifierShortcutRecording: () => Promise<VoiceInputGlobalResult>;
     onModifierShortcutKeys: (callback: (payload: { keys: string[] }) => void) => () => void;
-    onGlobalShortcutTrigger: (
-      callback: (payload?: { id?: string; phase?: 'start' | 'tap' | 'end' }) => void,
-    ) => () => void;
+    /** 「待授权」快捷键在设置页之外自动恢复失败（helper 起不来）。 */
+    onShortcutRecoveryFailed: (callback: () => void) => () => void;
+    /**
+     * 取走「自动恢复失败」这条待通知状态（取走即清，一次 App 运行只提示一次）。
+     * 挂载时也要主动取一次：失败可能发生在常挂载 UI 之前，那时推送没有订阅者。
+     */
+    consumeShortcutRecoveryFailure: () => Promise<{ failed: boolean }>;
+    onGlobalShortcutTrigger: (callback: (payload?: { id?: string; phase?: 'start' | 'tap' | 'end' }) => void) => () => void;
     claimGlobalShortcutTrigger: (id: string) => void;
-    onGlobalOverlayCommand: (
-      callback: (command: { type: 'start' | 'submit' | 'cancel' }) => void,
-    ) => () => void;
-    adviseDictionaryLearning: (payload: VoiceInputDictionaryAdviceInput) => Promise<
-      | {
-          ok: true;
-          actions: VoiceInputDictionaryLearningAction[];
-          elapsedMs: number;
-          ignoreReason?: string | null;
-        }
-      | { ok: false; error: string }
-    >;
+    onGlobalOverlayCommand: (callback: (command: { type: 'start' | 'submit' | 'cancel' }) => void) => () => void;
+    adviseDictionaryLearning: (
+      payload: VoiceInputDictionaryAdviceInput,
+    ) => Promise<{ ok: true; actions: VoiceInputDictionaryLearningAction[]; elapsedMs: number; ignoreReason?: string | null } | { ok: false; error: string }>;
     onDictionaryLearningEvidence: (
-      callback: (payload: {
-        evidence: Pick<
-          VoiceInputDictionaryAdviceInput,
-          'source' | 'rawTranscriptText' | 'beforeText' | 'afterText' | 'context'
-        >;
-      }) => void,
+      callback: (payload: { evidence: Pick<VoiceInputDictionaryAdviceInput, 'source' | 'rawTranscriptText' | 'beforeText' | 'afterText' | 'context'> }) => void,
     ) => () => void;
     /** 系统挂起/锁屏 → 释放 fast activation 的保活麦克风。 */
     onPowerStateChange: (callback: (payload: VoiceInputPowerStatePayload) => void) => () => void;
     notifyGlobalOverlayReady: () => void;
-    pasteIntoFocusedTarget: (
-      text: string,
-      rawTranscriptText?: string,
-    ) => Promise<VoiceInputGlobalResult>;
+    pasteIntoFocusedTarget: (text: string, rawTranscriptText?: string) => Promise<VoiceInputGlobalResult>;
     restoreGlobalPasteTargetFocus: () => Promise<VoiceInputGlobalResult>;
     closeGlobalOverlay: (options?: { preservePasteTarget?: boolean }) => Promise<{ ok: true }>;
     showGlobalOverlay: () => Promise<VoiceInputGlobalResult>;
@@ -1444,11 +1613,13 @@ interface ElectronAPI {
     endGlobalOverlayDrag: () => void;
     resetGlobalOverlayPosition: () => Promise<{ ok: true }>;
     openAccessibilitySettings: () => Promise<VoiceInputGlobalResult>;
-    showDictionaryToast: (payload: {
-      entryId?: string;
-      term?: string;
-      entries?: Array<{ entryId: string; term: string }>;
-    }) => Promise<{ ok: true } | { ok: false; error: string }>;
+    showDictionaryToast: (
+      payload: {
+        entryId?: string;
+        term?: string;
+        entries?: Array<{ entryId: string; term: string }>;
+      },
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
     closeDictionaryToast: () => Promise<{ ok: true }>;
   };
 
@@ -1464,8 +1635,11 @@ interface ElectronAPI {
   // 「侧边栏在新窗口中显示」偏好 + 子窗口生命周期(main: right-sidebar-window/)。
   rightSidebarWindow: {
     getState: () => Promise<{ detached: boolean; lastOpen: boolean; open: boolean }>;
-    /** 幂等:已开则 show + focus。 */
-    open: () => Promise<void>;
+    /**
+     * 幂等开窗。缺省(用户手势)已开则 show + focus;
+     * userInitiated:false(启动恢复 / 插件 / agent 自发)已开则完全不动窗口。
+     */
+    open: (options?: { userInitiated?: boolean }) => Promise<void>;
     close: () => Promise<void>;
     /** 写偏好;true 附带开窗,false 附带关窗。返回新 state。 */
     setDetached: (
@@ -1476,6 +1650,7 @@ interface ElectronAPI {
       sessionId: string | null;
       workdir: string | null;
       remoteHostId: string | null;
+      deviceLinkDeviceId?: string | null;
       available: boolean;
     } | null>;
     /** 子窗口根组件挂载握手。 */
@@ -1490,6 +1665,7 @@ interface ElectronAPI {
       sessionId: string | null;
       workdir: string | null;
       remoteHostId: string | null;
+      deviceLinkDeviceId?: string | null;
       available: boolean;
     }) => void;
     onStateChanged: (cb: (state: { detached: boolean; open: boolean }) => void) => () => void;
@@ -1498,6 +1674,7 @@ interface ElectronAPI {
         sessionId: string | null;
         workdir: string | null;
         remoteHostId: string | null;
+        deviceLinkDeviceId?: string | null;
         available: boolean;
       }) => void,
     ) => () => void;
@@ -1557,6 +1734,10 @@ interface ElectronAPI {
   safeStorageStore: (key: string, value: string) => Promise<boolean>;
   safeStorageRead: (key: string) => Promise<string | null>;
   safeStorageRemove: (key: string) => Promise<{ success: boolean; error?: string }>;
+  /** 内置 API-key 供应商专用 IPC(查/写/删,永不回读明文;对应 MAIN_ONLY 键)。mutation 失败抛统一 IPC 错误。 */
+  builtinApiKeyHas: (providerId: string) => Promise<boolean>;
+  builtinApiKeyStore: (providerId: string, value: string) => Promise<void>;
+  builtinApiKeyRemove: (providerId: string) => Promise<void>;
   /** CC 网络调试日志开关 (admin experimental). main 端 mutate process.env.XDT_CC_DEBUG_NET。 */
   ccSetDebugNet: (enabled: boolean) => Promise<{ ok: true }>;
   /** 网关凭据自动下发(model-access,类型见 shared/modelAccess.ts)。 */
@@ -1598,7 +1779,6 @@ interface ElectronAPI {
   authConsumeAccountDeletionRestoredNotice: () => Promise<boolean>;
   onAuthStateChange: (callback: (state: AuthStateChangePayload) => void) => () => void;
   onAuthSessionExpired: (callback: (state: AuthSessionExpiredPayload) => void) => () => void;
-  onTapdbDailyActive: (callback: (payload: { date: string }) => void) => () => void;
 
   // ── 使用统计(TapDB)同意闸 ──
   getAnalyticsSettings: () => Promise<AnalyticsSettingsPayload>;
@@ -1638,8 +1818,9 @@ interface ElectronAPI {
       ownerOpenId: string | null;
       error?: string;
       lifecycleAnnouncement: boolean;
+      service: 'feishu' | 'lark';
     }>;
-    save: (payload: { appId: string; appSecret: string }) => Promise<{
+    save: (payload: { appId: string; appSecret: string; service: 'feishu' | 'lark' }) => Promise<{
       verdict: 'connected' | 'conflict' | 'error' | 'pending';
     }>;
     reconnect: () => Promise<{
@@ -1647,7 +1828,7 @@ interface ElectronAPI {
     }>;
     clear: () => Promise<{ ok: true }>;
     setLifecycleAnnouncement: (enabled: boolean) => Promise<{ ok: true }>;
-    registrationBegin: () => Promise<FeishuBotRegistrationBeginResult>;
+    registrationBegin: (service: 'feishu' | 'lark') => Promise<FeishuBotRegistrationBeginResult>;
     registrationCancel: () => Promise<{ ok: true }>;
     onStatusChange: (
       callback: (update: {
@@ -1679,8 +1860,124 @@ interface ElectronAPI {
     }>;
     checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;
     onStatusChange: (
-      callback: (update: { status: DiscordBotTransportStatus }) => void,
+      callback: (update: {
+        status: DiscordBotTransportStatus;
+      }) => void,
     ) => () => void;
+  };
+
+  // ── Personal Telegram Bot (Settings → IM Bot → Personal) ──
+  telegramBot: {
+    getStatus: () => Promise<{
+      status: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    setConfig: (payload: { token: string; ownerUserId: string }) => Promise<{
+      status: TelegramBotTransportStatus;
+      saveErrorStatus?: TelegramBotTransportStatus;
+      ownerUserId: string | null;
+      botUsername: string | null;
+    }>;
+    disconnect: () => Promise<{
+      status: TelegramBotTransportStatus;
+    }>;
+    /** 上线/下线(保留 token 与绑定信息, 只切轮询)。 */
+    setOnline: (payload: { online: boolean }) => Promise<{
+      status: TelegramBotTransportStatus;
+    }>;
+    checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;
+    getBehavior: () => Promise<TelegramBotBehavior>;
+    setBehavior: (patch: Partial<TelegramBotBehavior>) => Promise<TelegramBotBehavior>;
+    listGroups: () => Promise<{
+      groups: Array<{ chatId: string; chatName: string | null; activation: 'mention' | 'always' }>;
+    }>;
+    setGroupActivation: (payload: { chatId: string; mode: 'mention' | 'always' }) => Promise<unknown>;
+    getPersona: () => Promise<{ botName: string; soul: string }>;
+    setPersona: (payload: {
+      botName?: string;
+      soul?: string;
+      syncProfile?: boolean;
+    }) => Promise<{ persona: { botName: string; soul: string }; profileSynced?: boolean }>;
+    onStatusChange: (
+      callback: (update: {
+        status: TelegramBotTransportStatus;
+        botUsername: string | null;
+      }) => void,
+    ) => () => void;
+  };
+
+  // ── Personal DingTalk Bot (Settings → IM Bot → Personal) ──
+  dingtalkBot: {
+    getState: () => Promise<{
+      status: DingTalkBotTransportStatus;
+      appKey: string | null;
+      hasSecret: boolean;
+      ownerUserId: string | null;
+    }>;
+    save: (payload: { appKey: string; appSecret: string }) => Promise<{
+      status: DingTalkBotTransportStatus;
+      appKey: string | null;
+      hasSecret: boolean;
+      ownerUserId: string | null;
+    }>;
+    reconnect: () => Promise<{
+      status: DingTalkBotTransportStatus;
+      appKey: string | null;
+      hasSecret: boolean;
+      ownerUserId: string | null;
+    }>;
+    clear: () => Promise<{ ok: true }>;
+    onStatusChange: (
+      callback: (update: { status: DingTalkBotTransportStatus }) => void,
+    ) => () => void;
+    onOwnerChange: (callback: (update: { ownerUserId: string }) => void) => () => void;
+  };
+
+  wecomBot: {
+    getStatus: () => Promise<{
+      status: WecomBotTransportStatus;
+      botId: string | null;
+      ownerUserId: string | null;
+    }>;
+    setConfig: (payload: { botId: string; secret: string }) => Promise<{
+      status: WecomBotTransportStatus;
+      saveErrorStatus?: WecomBotTransportStatus;
+      botId: string | null;
+      ownerUserId: string | null;
+    }>;
+    reconnect: () => Promise<{
+      status: WecomBotTransportStatus;
+      botId: string | null;
+      ownerUserId: string | null;
+    }>;
+    disconnect: () => Promise<{
+      status: WecomBotTransportStatus;
+      botId: string | null;
+      ownerUserId: string | null;
+    }>;
+    onStatusChange: (
+      callback: (update: {
+        status: WecomBotTransportStatus;
+        botId: string | null;
+        ownerUserId: string | null;
+      }) => void,
+    ) => () => void;
+  };
+
+  // ── Personal WeChat (Settings → IM Bot → Personal) ──
+  wechatBot: {
+    getState: () => Promise<WechatBotState>;
+    authorize: () => Promise<{ started: true }>;
+    cancelAuthorization: () => Promise<{ ok: true }>;
+    unbind: () => Promise<{ ok: true }>;
+    getChannelSettings: () => Promise<WechatChannelSettingsState>;
+    chooseWorkingDirectory: () => Promise<{
+      canceled: boolean;
+      state: WechatChannelSettingsState;
+    }>;
+    resetWorkingDirectory: () => Promise<WechatChannelSettingsState>;
+    onStateChange: (callback: (state: WechatBotState) => void) => () => void;
   };
 
   /**
@@ -1700,26 +1997,26 @@ interface ElectronAPI {
   syncNewMakerDraft: (snapshot: {
     lastByVendor: Partial<
       Record<
-        'cc' | 'codex',
+        'cc' | 'codex' | 'pi',
         { model?: string; effort?: string; permissionMode?: string; providerId?: string | null }
       >
     >;
     fastModeByModel: Record<string, boolean>;
     effortByModel: Record<string, string>;
+    /** 「新建会话默认启用 worktree」勾选记忆(vendor 无关根字段,远程草稿播种用)。 */
+    worktreeEnabled: boolean;
   }) => void;
 
   /** 被控端 renderer → 自身 main:providerModelMemory 全量快照镜像(草稿列表行真实读源)。 */
-  syncProviderModelMemory: (
-    snapshot: Record<
-      string,
-      { effortByModel: Record<string, string>; fastByModel: Record<string, boolean> }
-    >,
-  ) => void;
+  syncProviderModelMemory: (snapshot: Record<
+    string,
+    { effortByModel: Record<string, string>; fastByModel: Record<string, boolean> }
+  >) => void;
 
   /** 被控端 renderer → 自身 main:会话「非选中模型」effort/fast 变化镜像(转发给控制端)。 */
   syncSessionModelPref: (pref: {
     sessionId: string;
-    agent: 'claude-code' | 'codex';
+    agent: 'claude-code' | 'codex' | 'pi';
     providerId: string;
     model: string;
     effort?: string;
@@ -1729,7 +2026,7 @@ interface ElectronAPI {
   /** 被控端本地 main → 自身 renderer:控制端写穿的草稿「模型 effort/fast」pref(调本地 setter)。 */
   onMakerDraftPrefApply: (
     cb: (payload: {
-      agent: 'claude-code' | 'codex';
+      agent: 'claude-code' | 'codex' | 'pi';
       providerId: string;
       modelId: string;
       active: boolean;
@@ -1739,11 +2036,16 @@ interface ElectronAPI {
     }) => void,
   ) => () => void;
 
+  /** 被控端本地 main → 自身 renderer:控制端写穿的「新建会话默认启用 worktree」(patchDraft 写真实草稿)。 */
+  onMakerWorktreePrefApply: (
+    cb: (payload: { worktreeEnabled: boolean }) => void,
+  ) => () => void;
+
   /** 被控端本地 main → 自身 renderer:控制端写穿的会话「模型 effort/fast」pref(调本地 setter)。 */
   onMakerSessionPrefApply: (
     cb: (payload: {
       sessionId: string;
-      agent: 'claude-code' | 'codex';
+      agent: 'claude-code' | 'codex' | 'pi';
       providerId: string;
       model: string;
       effort?: string;
@@ -1774,9 +2076,7 @@ interface ElectronAPI {
   };
 
   checkEnvironment: () => Promise<EnvCheckResult>;
-  onBinaryDownloadProgress: (
-    callback: (payload: BinaryDownloadProgressPayload) => void,
-  ) => () => void;
+  onBinaryDownloadProgress: (callback: (payload: BinaryDownloadProgressPayload) => void) => () => void;
   checkAppUpdate: () => Promise<{
     hasUpdate: boolean;
     action?: 'relaunch' | 'none';
@@ -1792,93 +2092,45 @@ interface ElectronAPI {
       relPath?: string;
       hideMetaFiles?: boolean;
       docMode?: boolean;
-    }) => Promise<
-      Array<{
-        name: string;
-        relPath: string;
-        type: 'file' | 'directory';
-        size: number;
-        mtimeMs: number;
-      }>
-    >;
+    }) => Promise<Array<{
+      name: string;
+      relPath: string;
+      type: 'file' | 'directory';
+      size: number;
+      mtimeMs: number;
+    }>>;
     /** 项目级文件名扁平列表(ripgrep --files honor .gitignore);失败返回空数组
      *  + error 字段,renderer 应做 fallback 渲染。 */
-    listAllFiles: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      cap?: number;
-    }) => Promise<{
+    listAllFiles: (params: { remoteHostId?: string | null; workdir: string; cap?: number }) => Promise<{
       files: string[];
       truncated: boolean;
       elapsedMs: number;
       error?: string;
     }>;
-    readFile: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      relPath: string;
-    }) => Promise<
-      | {
-          ok: true;
-          data: {
-            relPath: string;
-            content: string;
-            size: number;
-            mtimeMs: number;
-            truncated: boolean;
-          };
-        }
+    readFile: (params: { remoteHostId?: string | null; workdir: string; relPath: string }) => Promise<
+      | { ok: true; data: { relPath: string; content: string; size: number; mtimeMs: number; truncated: boolean } }
       /** OVERSIZE = 远程文本超传输上限(device-link 帧限预判),stat 供"文件过大"占位卡。 */
       | { ok: false; code: 'BINARY_FILE' | 'READ_FAILED'; message?: string }
-      | {
-          ok: false;
-          code: 'OVERSIZE';
-          stat: { relPath: string; type: 'file'; size: number; mtimeMs: number };
-        }
+      | { ok: false; code: 'OVERSIZE'; stat: { relPath: string; type: 'file'; size: number; mtimeMs: number } }
     >;
-    writeFile: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      relPath: string;
-      content: string;
-    }) => Promise<{ ok: true; size: number; mtimeMs: number } | { ok: false; message: string }>;
-    createFile: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      relPath: string;
-    }) => Promise<
-      | {
-          ok: true;
-          stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number };
-        }
+    writeFile: (params: { remoteHostId?: string | null; workdir: string; relPath: string; content: string }) => Promise<
+      | { ok: true; size: number; mtimeMs: number }
       | { ok: false; message: string }
     >;
-    createFolder: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      relPath: string;
-    }) => Promise<
-      | {
-          ok: true;
-          stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number };
-        }
+    createFile: (params: { remoteHostId?: string | null; workdir: string; relPath: string }) => Promise<
+      | { ok: true; stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number } }
       | { ok: false; message: string }
     >;
-    deleteEntry: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      relPath: string;
-    }) => Promise<{ ok: true } | { ok: false; message: string }>;
-    renameEntry: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      fromRel: string;
-      toRel: string;
-    }) => Promise<
-      | {
-          ok: true;
-          stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number };
-        }
+    createFolder: (params: { remoteHostId?: string | null; workdir: string; relPath: string }) => Promise<
+      | { ok: true; stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number } }
+      | { ok: false; message: string }
+    >;
+    deleteEntry: (params: { remoteHostId?: string | null; workdir: string; relPath: string }) => Promise<
+      | { ok: true }
+      | { ok: false; message: string }
+    >;
+    renameEntry: (params: { remoteHostId?: string | null; workdir: string; fromRel: string; toRel: string }) => Promise<
+      | { ok: true; stat: { relPath: string; type: 'file' | 'directory'; size: number; mtimeMs: number } }
       | { ok: false; message: string }
     >;
     stat: (params: { remoteHostId?: string | null; workdir: string; relPath: string }) => Promise<{
@@ -1887,15 +2139,8 @@ interface ElectronAPI {
       size: number;
       mtimeMs: number;
     }>;
-    startWatch: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-      hideMetaFiles?: boolean;
-    }) => Promise<{ ok: boolean }>;
-    stopWatch: (params: {
-      remoteHostId?: string | null;
-      workdir: string;
-    }) => Promise<{ ok: boolean }>;
+    startWatch: (params: { remoteHostId?: string | null; workdir: string; hideMetaFiles?: boolean }) => Promise<{ ok: boolean }>;
+    stopWatch: (params: { remoteHostId?: string | null; workdir: string }) => Promise<{ ok: boolean }>;
     onEvent: (
       cb: (event: {
         workdir: string;
@@ -1912,9 +2157,7 @@ interface ElectronAPI {
       remoteHostId?: string | null;
       deviceId?: string | null;
     }) => Promise<{ ok: true; cachePath: string; stale: boolean } | { ok: false; message: string }>;
-    readCached: (params: {
-      cachePath: string;
-    }) => Promise<
+    readCached: (params: { cachePath: string }) => Promise<
       | { ok: true; kind: 'text'; content: string; truncated: boolean }
       | { ok: true; kind: 'binary' }
       | { ok: false; message: string }
@@ -1929,13 +2172,7 @@ interface ElectronAPI {
       deviceId?: string | null;
     }) => Promise<{ ok: boolean }>;
     onTransferProgress: (
-      cb: (event: {
-        workdir: string;
-        relPath: string;
-        received: number;
-        total: number;
-        phase?: 'upload' | 'download';
-      }) => void,
+      cb: (event: { workdir: string; relPath: string; received: number; total: number; phase?: 'upload' | 'download' }) => void,
     ) => () => void;
     /** 聊天流文件取回:远端绝对路径 → 本地缓存副本(进度经 onTransferProgress,relPath 键 = absPath)。 */
     chatFetch: (params: {
@@ -1944,11 +2181,7 @@ interface ElectronAPI {
       absPath: string;
     }) => Promise<
       | { ok: true; cachePath: string; stale: boolean; size: number }
-      | {
-          ok: false;
-          code: 'BAD_ARGS' | 'OUTSIDE_WORKDIR' | 'NOT_FOUND' | 'FETCH_FAILED';
-          message?: string;
-        }
+      | { ok: false; code: 'BAD_ARGS' | 'OUTSIDE_WORKDIR' | 'NOT_FOUND' | 'FETCH_FAILED'; message?: string }
     >;
     /** 聊天流文件 chip 点亮预检:远端精确 stat。file=点亮;nonfile=保持纯文本;unknown=乐观点亮。 */
     chatStat: (params: {
@@ -1981,13 +2214,7 @@ interface ElectronAPI {
                 lineText: string;
                 submatches: Array<{ start: number; end: number }>;
               }
-            | {
-                type: 'end';
-                searchId: string;
-                truncated: boolean;
-                totalMatches: number;
-                totalFiles: number;
-              }
+            | { type: 'end'; searchId: string; truncated: boolean; totalMatches: number; totalFiles: number }
             | { type: 'error'; searchId: string; message: string }
           >;
         }
@@ -1996,41 +2223,40 @@ interface ElectronAPI {
     >;
     cancel: (params: { searchId: string; remoteHostId?: string | null }) => Promise<{ ok: true }>;
     onEvent: (
-      cb: (
-        event:
-          | {
-              type: 'match';
-              searchId: string;
-              relPath: string;
-              lineNumber: number;
-              lineText: string;
-              submatches: Array<{ start: number; end: number }>;
-            }
-          | {
-              type: 'end';
-              searchId: string;
-              truncated: boolean;
-              totalMatches: number;
-              totalFiles: number;
-            }
-          | { type: 'error'; searchId: string; message: string },
+      cb: (event:
+        | {
+            type: 'match';
+            searchId: string;
+            relPath: string;
+            lineNumber: number;
+            lineText: string;
+            submatches: Array<{ start: number; end: number }>;
+          }
+        | {
+            type: 'end';
+            searchId: string;
+            truncated: boolean;
+            totalMatches: number;
+            totalFiles: number;
+          }
+        | { type: 'error'; searchId: string; message: string }
       ) => void,
     ) => () => void;
   };
   showOpenDirectoryDialog: () => Promise<{ canceled: boolean; path?: string }>;
   openExternal: (url: string) => Promise<{ success: boolean }>;
+  openChatGPTApp: () => Promise<{ success: boolean }>;
 
-  // file-chip 右键菜单 "在浏览器中查看": 把本地文件用 file:// 喂给系统
-  // 默认浏览器(或 .html/.pdf/.svg 等扩展名的默认 handler)。
-  openFileInBrowser: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  // 绝对路径或完整本地 file:// URL;URL 形态用于保留 query/hash 页面状态。
+  openFileInBrowser: (filePathOrUrl: string) => Promise<{ success: true }>;
 
   // ── 系统级通知（CC Agent session 状态变更）──
   /**
    * 弹一条桌面通知。kind 决定文案：
-   *   - 'done'        — 真完成，文案 "会话「xxx」已完成"
-   *   - 'error'       — 执行失败，文案 "会话「xxx」执行失败"
+   *   - 'done'        — 真完成，文案 "任务「xxx」已完成"
+   *   - 'error'       — 执行失败，文案 "任务「xxx」执行失败"
    *   - 'needs-reply' — 等用户回复（ask-user / permission / plan-review），
-   *                     文案 "会话「xxx」需要你回复"
+   *                     文案 "任务「xxx」需要你回复"
    */
   notificationShowSessionEvent: (payload: {
     sessionId: string;
@@ -2047,13 +2273,22 @@ interface ElectronAPI {
   }) => Promise<void>;
   /** Sync the renderer-owned global desktop-notification preference to main. */
   notificationSetDesktopEnabled?: (enabled: boolean) => Promise<{ ok: true }>;
+  wecomGroupNotification: {
+    getState: () => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    saveAndTest: (
+      webhookUrl: string,
+      testMessage: string,
+    ) => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    test: (testMessage: string) => Promise<{ ok: true }>;
+    setEnabled: (
+      enabled: boolean,
+    ) => Promise<{ configured: boolean; enabled: boolean; maskedKey?: string }>;
+    clear: () => Promise<{ configured: boolean; enabled: boolean }>;
+  };
   /** 将对应 session 标记为需要关注，显示 Dock/taskbar app badge。 */
   notificationMarkSessionAttention: (sessionId: string) => Promise<void>;
   /** 用户查看对应 session 后，清除系统级 Dock/taskbar attention badge。 */
-  notificationClearSessionAttention: (
-    sessionId: string,
-    intent?: 'explicit' | 'passive',
-  ) => Promise<void>;
+  notificationClearSessionAttention: (sessionId: string, intent?: 'explicit' | 'passive') => Promise<void>;
   /**
    * main → renderer 的会话已读广播(payload:{ sessionId, intent })。清除来源可能是
    * device-link 远程控制端(手机看完会话),sessionAttentionStore 订阅后把本机侧栏
@@ -2066,11 +2301,18 @@ interface ElectronAPI {
   /**
    * RSB web-browser plugin popup 路由订阅。guest webview 内 `window.open` /
    * `<a target="_blank">` / window.location 跨 host 时,main 端 webview-security
-   * setWindowOpenHandler 把 url + disposition 推过来,renderer 端 RightSidebarShell
-   * 收到后调 store.addTab 开新 web-browser tab。
+   * setWindowOpenHandler 把 url + disposition(+ opener 归属,按发起方 guest 的
+   * webContentsId 从 TabRegistry 反查)推过来,renderer 端 RightSidebarShell
+   * 收到后调 store.addTab 开新 web-browser tab——有 openerSessionId 时落进该
+   * session 的 bucket,而不是用户正在看的 session。
    */
   onRsbBrowserPopup: (
-    callback: (payload: { url: string; disposition: string }) => void,
+    callback: (payload: {
+      url: string;
+      disposition: string;
+      openerTabId?: string;
+      openerSessionId?: string;
+    }) => void,
   ) => () => void;
 
   /**
@@ -2088,8 +2330,7 @@ interface ElectronAPI {
    */
   onRsbBrowserCommand: (
     callback: (payload: {
-      command:
-        'go-back' | 'go-forward' | 'reload' | 'close-tab' | 'right-tab-prev' | 'right-tab-next';
+      command: 'go-back' | 'go-forward' | 'reload' | 'close-tab' | 'right-tab-prev' | 'right-tab-next';
     }) => void,
   ) => () => void;
 
@@ -2134,7 +2375,9 @@ interface ElectronAPI {
    * (single-sourced) so the renderer can render dynamic
    * "exceeding the {limitMb} MB preview limit" copy.
    */
-  readTextFilePreview: (params: { filePath: string }) => Promise<{
+  readTextFilePreview: (params: {
+    filePath: string;
+  }) => Promise<{
     success: boolean;
     error?: string;
     reason?: 'oversize' | 'not_found' | 'forbidden' | 'read_failed';
@@ -2148,11 +2391,35 @@ interface ElectronAPI {
    */
   openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
 
+  /** Copy a dangerous local attachment into the controlled inert cache. */
+  stageChatAttachment: (params: {
+    sourcePath: string;
+    suggestedName: string;
+  }) => Promise<
+    | { success: true; path: string }
+    | {
+        success: false;
+        code:
+          | 'invalid_source'
+          | 'forbidden'
+          | 'not_found'
+          | 'not_file'
+          | 'unsupported_type'
+          | 'copy_failed';
+      }
+  >;
+
+  /** Remove staged dangerous attachment copies from the controlled cache. */
+  cleanupStagedChatAttachments: (filePaths: readonly string[]) => Promise<void>;
+
   /**
    * Save a safely materialized chat attachment under its sanitized original
    * filename. The main process validates the source and never opens the target.
    */
-  saveChatAttachmentAs: (params: { sourcePath: string; suggestedName: string }) => Promise<
+  saveChatAttachmentAs: (params: {
+    sourcePath: string;
+    suggestedName: string;
+  }) => Promise<
     | { status: 'saved'; savedPath: string }
     | { status: 'canceled' }
     | {
@@ -2203,7 +2470,9 @@ interface ElectronAPI {
    * 图片 lightbox:另存为。本地源直接复制,http(s)/data: 先取字节;用户取消
    * 保存对话框返回 `{ canceled: true }`,不算错误。
    */
-  saveMediaAs: (params: { url: string }) => Promise<{ canceled: boolean; savedPath?: string }>;
+  saveMediaAs: (params: {
+    url: string;
+  }) => Promise<{ canceled: boolean; savedPath?: string }>;
 
   /**
    * 图片 lightbox "发送到对话":把图片复制成目标会话的一份新 `xdt-image://`
@@ -2215,7 +2484,22 @@ interface ElectronAPI {
   }) => Promise<{ url: string; name: string; ext: string; mimeType: string; size: number }>;
 
   /** 图片 lightbox 字节层:http / cindy-remote-media 源取字节(标注/位图复制)。 */
-  readImageBytes: (params: { url: string }) => Promise<{ base64: string; mimeType: string }>;
+  readImageBytes: (params: {
+    url: string;
+  }) => Promise<{ base64: string; mimeType: string }>;
+
+  /**
+   * 附件卡缩略图:本机文件走系统缩略图服务(macOS QuickLook / Windows Shell)。
+   * 路径越界 / 不是文件 / stat 失败 → 整体回 null;文件在但出不了图(系统不支持、
+   * 超时、排不上并发名额)→ `dataUrl` 为 null,调用方回落自绘文件图标。
+   * `byteSize` 是复核那一刻的当前大小,用来刷新卡片上「类型 · 大小」的快照值。
+   */
+  getFileThumbnail: (params: {
+    path: string;
+    size: number;
+    /** 显式复核:跳过正缓存重新生成(负缓存仍尊重)。焦点复核时传 true。 */
+    revalidate?: boolean;
+  }) => Promise<{ dataUrl: string | null; byteSize: number } | null>;
 
   /**
    * markdown-monorepo-resolve: smart relative-path resolver. Tries direct
@@ -2223,7 +2507,10 @@ interface ElectronAPI {
    * ends with `/<href>`. Returns 'none' on bad input or no matches so the
    * renderer can fall back to legacy resolveLocalPath.
    */
-  resolvePath: (params: { href: string; workingDir: string }) => Promise<{
+  resolvePath: (params: {
+    href: string;
+    workingDir: string;
+  }) => Promise<{
     status: 'unique' | 'multiple' | 'none';
     candidates: string[];
     /** unique 命中时的目标类型;缺省按 file 理解(老 main 兼容)。 */
@@ -2240,10 +2527,7 @@ interface ElectronAPI {
     hrefs: string[];
     workingDir: string;
   }) => Promise<
-    Record<
-      string,
-      { status: 'unique' | 'multiple' | 'none'; candidates: string[]; kind?: 'file' | 'directory' }
-    >
+    Record<string, { status: 'unique' | 'multiple' | 'none'; candidates: string[]; kind?: 'file' | 'directory' }>
   >;
 
   // 本机文件系统目录浏览(项目选择器「添加远程项目」;device-link 经隧道在被控端执行)。
@@ -2274,13 +2558,23 @@ interface ElectronAPI {
     truncated?: boolean;
   }>;
 
+  /** Raw-bytes sibling of readFileForAttachment (PDF preview → pdf.js data).
+   *  Rejects with an IpcError on failure (no partial payload). */
+  readFileBytes: (params: {
+    filePath: string;
+    maxSize?: number;
+  }) => Promise<{ bytes: Uint8Array; size: number }>;
+
   // ── File header peek IPC (F-FI-8 fallback inference) ──
   /**
    * Read at most `bytes` (default 8192, hard-cap 64KB) from the head of a
    * file. Used by the renderer to run magic-bytes + UTF-8 sniffing on files
    * whose extension didn't match any supported type.
    */
-  peekFileHeader: (params: { filePath: string; bytes?: number }) => Promise<{
+  peekFileHeader: (params: {
+    filePath: string;
+    bytes?: number;
+  }) => Promise<{
     success: boolean;
     error?: string;
     /** base64-encoded leading bytes; present when actualBytes > 0. */
@@ -2296,7 +2590,7 @@ interface ElectronAPI {
     workingDir: string;
     cap?: number;
     query?: string;
-    agentKind?: 'claude-code' | 'codex';
+    agentKind?: 'claude-code' | 'codex' | 'pi';
   }) => Promise<{
     success: boolean;
     error?: string;
@@ -2312,17 +2606,12 @@ interface ElectronAPI {
 
   // ── Learn (/learn 蒸馏 —— 系统级"学成 skill"能力) ──
   learn: {
-    start: (req: import('../shared/learnTypes').LearnStartRequest) => Promise<{ runId: string }>;
-    listRuns: () => Promise<{
-      runs: import('../shared/learnTypes').LearnRunPublic[];
-      ready: boolean;
-    }>;
-    getProposalDiff: (params: {
-      runId: string;
-    }) => Promise<import('../shared/learnTypes').LearnProposalDiff>;
-    apply: (params: {
-      runId: string;
-    }) => Promise<{ name: string; absolutePath: string; replacedBackupPath?: string }>;
+    start: (
+      req: import('../shared/learnTypes').LearnStartRequest,
+    ) => Promise<{ runId: string }>;
+    listRuns: () => Promise<{ runs: import('../shared/learnTypes').LearnRunPublic[]; ready: boolean }>;
+    getProposalDiff: (params: { runId: string }) => Promise<import('../shared/learnTypes').LearnProposalDiff>;
+    apply: (params: { runId: string }) => Promise<{ name: string; absolutePath: string; replacedBackupPath?: string }>;
     discard: (params: { runId: string }) => Promise<{ ok: boolean }>;
     cancel: (params: { runId: string }) => Promise<{ ok: boolean }>;
     onEvent: (
@@ -2332,7 +2621,9 @@ interface ElectronAPI {
 
   // ── SkillHub (xdt-maker-技能中心 v0.2) ──
   skillhub: {
-    scan: (params: { projects?: SkillhubProjectInput[] }) => Promise<{
+    scan: (params: {
+      projects?: SkillhubProjectInput[];
+    }) => Promise<{
       success: boolean;
       error?: string;
       skills?: SkillhubSkill[];
@@ -2371,18 +2662,14 @@ interface ElectronAPI {
       | { success: false; error: string }
     >;
     /** 改名整个 skill (目录名 + SKILL.md frontmatter `name`),用于撞名发布流程。 */
-    renameLocal: (params: {
-      absolutePath: string;
-      newName: string;
-    }) => Promise<{ success: true; newAbsolutePath: string } | { success: false; error: string }>;
+    renameLocal: (params: { absolutePath: string; newName: string }) => Promise<
+      | { success: true; newAbsolutePath: string }
+      | { success: false; error: string }
+    >;
     // ── v0.2.1: publish pipeline ──
-    sync: (
-      params:
-        | string[]
-        | {
-            slugs?: string[];
-          },
-    ) => Promise<{
+    sync: (params: string[] | {
+      slugs?: string[];
+    }) => Promise<{
       success: boolean;
       error?: string;
       results?: SkillhubSyncResult[];
@@ -2473,12 +2760,8 @@ interface ElectronAPI {
         teamSlug?: string | null;
       };
     }) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
-    deletePublished: (
-      name: string,
-    ) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
-    unpublishPublished: (
-      name: string,
-    ) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
+    deletePublished: (name: string) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
+    unpublishPublished: (name: string) => Promise<{ success: boolean; result?: unknown; error?: string; errorCode?: string }>;
     setPublishedVisibility: (params: {
       name: string;
       visibility: 'private' | 'shared' | 'public';
@@ -2504,7 +2787,10 @@ interface ElectronAPI {
      * - hasSnapshot=false:本地无快照(历史 publish 或换机器),UI 显示"无快照"提示
      * - changes:文件粒度 add/remove/modify,文本文件已带内容,二进制只带 size
      */
-    getSnapshotDiff: (params: { absolutePath: string; name: string }) => Promise<{
+    getSnapshotDiff: (params: {
+      absolutePath: string;
+      name: string;
+    }) => Promise<{
       success: boolean;
       hasSnapshot?: boolean;
       changes?: Array<{
@@ -2518,19 +2804,14 @@ interface ElectronAPI {
       }>;
       error?: string;
     }>;
-    getUsageSummary: (params: {
-      name: string;
-      mdPath?: string;
-    }) => Promise<
+    getUsageSummary: (params: { name: string; mdPath?: string }) => Promise<
       | { success: true; summary: SkillUsageSummary; refreshing: boolean }
       | { success: false; error: string }
     >;
     onUsageAnalyticsRefreshed: (callback: () => void) => () => void;
-    getUsageDiagnosisContext: (params: {
-      name: string;
-      mdPath?: string;
-    }) => Promise<
-      { success: true; context: SkillUsageDiagnosisContext } | { success: false; error: string }
+    getUsageDiagnosisContext: (params: { name: string; mdPath?: string }) => Promise<
+      | { success: true; context: SkillUsageDiagnosisContext }
+      | { success: false; error: string }
     >;
     getMyDepts: () => Promise<{
       success: boolean;
@@ -2554,14 +2835,7 @@ interface ElectronAPI {
     }>;
     listUserTeams: () => Promise<{
       success: boolean;
-      teams: Array<{
-        slug: string;
-        name: string;
-        type: string;
-        source?: string | null;
-        isPersonal?: boolean;
-        myRole?: 'admin' | 'publisher' | 'viewer';
-      }>;
+      teams: Array<{ slug: string; name: string; type: string; source?: string | null; isPersonal?: boolean; myRole?: 'admin' | 'publisher' | 'viewer' }>;
       error?: string;
     }>;
     publish: (params: SkillhubPublishParams) => Promise<{
@@ -2573,7 +2847,9 @@ interface ElectronAPI {
     cancelPublish: () => Promise<{ success: boolean }>;
     startScanPoll: (params: { slug: string; version: string }) => Promise<{ success: boolean }>;
     stopScanPoll: () => Promise<{ success: boolean }>;
-    onPublishProgress: (callback: (event: SkillhubPublishProgressEvent) => void) => () => void;
+    onPublishProgress: (
+      callback: (event: SkillhubPublishProgressEvent) => void,
+    ) => () => void;
 
     // ── Market install / uninstall / cancel ──
     // 冲突手写技能 → errorCode='CONFLICT_USER_OWNED'，UI 弹确认后重发 with force:true
@@ -2585,7 +2861,7 @@ interface ElectronAPI {
       force?: boolean;
       /** 完整安装目标路径。不传 → global scope 默认路径。*/
       installPath?: string;
-      /** force 覆盖时跳过 XDMaker 持久备份,直接 rmrf 旧目录(完整替换)。 */
+      /** force 覆盖时跳过 Cindy 持久备份,直接 rmrf 旧目录(完整替换)。 */
       skipBackup?: boolean;
     }) => Promise<
       | { success: true; name: string; version: string; absolutePath: string }
@@ -2603,13 +2879,7 @@ interface ElectronAPI {
     };
     /** 一次性补齐:把 server 权威 authorId 写回本地 registry。 */
     reconcileMineRegistry: (
-      items: Array<{
-        name: string;
-        absolutePath: string;
-        version: string;
-        authorId: string;
-        folderHash?: string;
-      }>,
+      items: Array<{ name: string; absolutePath: string; version: string; authorId: string; folderHash?: string }>,
     ) => Promise<{
       success: boolean;
       added: number;
@@ -2617,9 +2887,38 @@ interface ElectronAPI {
       failures: Array<{ name: string; error: string }>;
     }>;
     cancelInstall: (name: string) => Promise<{ success: boolean }>;
-    uninstall: (
-      absolutePath: string,
-    ) => Promise<{ success: true } | { success: false; errorCode: string; message: string }>;
+    uninstall: (absolutePath: string) => Promise<
+      | { success: true }
+      | { success: false; errorCode: string; message: string }
+    >;
+    /** 在 main 内选择并检查本地包，成功时签发绑定当前 renderer 的短期导入授权。 */
+    pickLocal: () => Promise<
+      | { success: true; canceled: true }
+      | {
+          success: true;
+          canceled: false;
+          grantToken: string;
+          name: string;
+          description: string;
+          version: string;
+        }
+      | { success: false; errorCode: string; message: string }
+    >;
+    /** 使用 main 签发的文件授权导入；registry origin=imported。 */
+    importLocal: (params: {
+      grantToken: string;
+      installPath?: string;
+      force?: boolean;
+    }) => Promise<
+      | {
+          success: true;
+          name: string;
+          description: string;
+          version: string;
+          absolutePath: string;
+        }
+      | { success: false; errorCode: string; message: string }
+    >;
     onInstallProgress: (
       callback: (event: {
         phase:
@@ -2749,9 +3048,7 @@ interface ElectronAPI {
   getUpdateStatus: () => Promise<{ status: string; version?: string; errorCode?: string }>;
   /** Query and update auto-apply settings for downloaded app updates. */
   getAutoUpdateSettings: () => Promise<AutoUpdateSettingsPayload>;
-  setAutoUpdateSettings: (settings: {
-    autoRelaunchOnIdle: boolean;
-  }) => Promise<AutoUpdateSettingsPayload>;
+  setAutoUpdateSettings: (settings: { autoRelaunchOnIdle: boolean }) => Promise<AutoUpdateSettingsPayload>;
   resetAutoUpdateSettings: () => Promise<AutoUpdateSettingsPayload>;
   setUpdateRelaunchTheme: (theme: 'light' | 'dark') => void;
   // E4D 毛玻璃:family 切换/启动通知 main 开关 vibrancy(仅 CINDY 透壁纸)
@@ -2767,9 +3064,13 @@ interface ElectronAPI {
    *   - 'manual_download'  → Linux 首版仅支持手动下载安装包
    */
   checkForUpdate: () => Promise<{
-    result:
-      'ready' | 'idle' | 'downloading' | 'manifest_failed' | 'download_failed' | 'manual_download';
+    result: 'ready' | 'idle' | 'downloading' | 'manifest_failed' | 'download_failed' | 'manual_download';
   }>;
+  /**
+   * 现在重启会不会打断正在跑的活(逻辑 turn / Claude 后台活动 / Ghost card-action 后台活动
+   * 三源聚合,判定在 main 侧一处)。UpdateBanner 用它决定「直接重启」还是「先弹中断警告」。
+   */
+  anyActivityBlockingRelaunch: () => Promise<boolean>;
   /** Tell main process to apply the update and relaunch the app.
    *  `theme` is the renderer's *resolved* light/dark (after collapsing 'system'),
    *  forwarded to cindy-updater so its splash matches the app the user is seeing. */
@@ -2792,6 +3093,10 @@ interface ElectronAPI {
    *  that fired before the renderer had a chance to subscribe). */
   getFullscreenState: () => Promise<boolean>;
 
+  /** 窗口是否对用户不可见(最小化 / hide)。装饰动画闸门用它兜底 ——
+   *  backgroundThrottling 关闭时 document.visibilityState 会一直停在 visible。 */
+  onWindowHiddenChange: (callback: (hidden: boolean) => void) => () => void;
+
   // ── Release notes (per-version, fetched from CDN by main) ──
   /**
    * Fetch the release notes JSON for a given version. Platform is resolved
@@ -2799,7 +3104,9 @@ interface ElectronAPI {
    * Returns null on 404 / network error / parse error — caller decides
    * whether to surface a toast or stay silent.
    */
-  fetchReleaseNotes: (version: string) => Promise<RawReleaseNotesPayload | null>;
+  fetchReleaseNotes: (
+    version: string,
+  ) => Promise<RawReleaseNotesPayload | null>;
 
   /**
    * Sorted ascending list of every version with a notice on the CDN. Used by
@@ -2815,9 +3122,11 @@ interface ElectronAPI {
       keepAwake: boolean;
       linkStatus: 'stopped' | 'connecting' | 'online';
       connectionIssue: DeviceLinkConnectionIssuePayload | null;
+      standby: boolean;
       controlledBy: Array<{ deviceId: string; name: string }>;
       revokedControllers: string[];
       disabledControlDeviceIds: string[];
+      unresponsiveDeviceIds: string[];
     }>;
     setEnabled: (enabled: boolean) => Promise<{ remoteControlEnabled: boolean }>;
     setKeepAwake: (enabled: boolean) => Promise<{ keepAwake: boolean }>;
@@ -2826,10 +3135,7 @@ interface ElectronAPI {
       enabled: boolean,
     ) => Promise<{ deviceId: string; enabled: boolean; disabledControlDeviceIds: string[] }>;
     listDevices: () => Promise<{ devices: DeviceLinkDeviceView[] }>;
-    renameDevice: (
-      deviceId: string,
-      name: string | null,
-    ) => Promise<{ deviceId: string; name: string; manualName?: string | null }>;
+    renameDevice: (deviceId: string, name: string | null) => Promise<{ deviceId: string; name: string; manualName?: string | null }>;
     deleteDevice: (deviceId: string) => Promise<{ deviceId: string; deleted: boolean }>;
     // —— 控制端:远程会话视图 ——
     openLink: (deviceId: string) => Promise<{ appVersion: string; allowlistHash: string }>;
@@ -2856,6 +3162,8 @@ interface ElectronAPI {
     onConnectionIssue: (
       cb: (payload: { issue: DeviceLinkConnectionIssuePayload | null }) => void,
     ) => () => void;
+    /** 同机单持有者仲裁角色变化。 */
+    onOwnershipChanged: (cb: (payload: { standby: boolean }) => void) => () => void;
     /** 控制端:被控端转发回来的 renderer 广播事件 */
     onRemotePush: (
       cb: (payload: { deviceId: string; channel: string; payload: unknown }) => void,
@@ -2876,6 +3184,43 @@ interface ElectronAPI {
     ) => () => void;
     /** 「保持电脑唤醒」在其它共享 userData 实例被翻转后推送 */
     onKeepAwakeChanged: (cb: (payload: { keepAwake: boolean }) => void) => () => void;
+    /** 控制端:目标设备「无响应」熔断状态翻转(弱网 / 对端卡死;presence 可能仍在线) */
+    onResponsivenessChanged: (
+      cb: (payload: { deviceId: string; unresponsive: boolean }) => void,
+    ) => () => void;
+    /**
+     * 控制端:远程会话镜像的本地冷缓存(main 落 userData,见
+     * main/device-link/mirrorCacheStore.ts)。只做首屏加速、非权威 —— 缓存里没有 live 态,
+     * fresh 数据一到由 renderer 整体接管。
+     */
+    mirrorCache: {
+      getMessages: (
+        deviceId: string,
+        sessionId: string,
+      ) => Promise<{ messages: Record<string, unknown>[]; invalidation?: number }>;
+      putMessages: (
+        deviceId: string,
+        sessionId: string,
+        messages: readonly Record<string, unknown>[],
+        expectedInvalidation?: number,
+      ) => Promise<{ ok: true; invalidation?: number }>;
+      getSessionList: () => Promise<{
+        devices: Array<{
+          deviceId: string;
+          deviceName: string;
+          sessions: Record<string, unknown>[];
+        }>;
+      }>;
+      putSessionList: (
+        devices: ReadonlyArray<{
+          deviceId: string;
+          deviceName: string;
+          sessions: readonly Record<string, unknown>[];
+        }>,
+      ) => Promise<{ ok: true }>;
+      /** 清掉一台设备的缓存;deviceId 必填(登出的整体清理由 main 在账号边界自己做) */
+      clear: (deviceId: string) => Promise<{ ok: true }>;
+    };
   };
 
   // ── Remote SSH (Phase A) ───────────────────────────────────────────────
@@ -2890,6 +3235,8 @@ interface ElectronAPI {
       user: string;
       authMethod?: 'agent' | 'key';
       identityFile?: string;
+      /** 「Agent 流量走本地 Proxy」pref; null = 关闭, 缺省 = 不动。 */
+      agentProxy?: AgentProxyPrefPayload | null;
     }) => Promise<{ host: RemoteHostSnapshot }>;
     update: (host: {
       id: string;
@@ -2898,6 +3245,7 @@ interface ElectronAPI {
       user: string;
       authMethod?: 'agent' | 'key';
       identityFile?: string;
+      agentProxy?: AgentProxyPrefPayload | null;
     }) => Promise<{ host: RemoteHostSnapshot }>;
     remove: (id: string) => Promise<{ ok: true }>;
     connect: (id: string) => Promise<{ host: RemoteHostSnapshot | null }>;
@@ -2905,46 +3253,23 @@ interface ElectronAPI {
     onStatusChanged: (cb: (snap: RemoteHostSnapshot) => void) => () => void;
     // Phase B: agent-on-remote
     probeAgent: (id: string, kind: RemoteAgentKind) => Promise<{ probe: RemoteAgentProbe }>;
-    installAgent: (
-      id: string,
-      kind: RemoteAgentKind,
-    ) => Promise<{ result: RemoteAgentInstallResult }>;
+    installAgent: (id: string, kind: RemoteAgentKind) => Promise<{ result: RemoteAgentInstallResult }>;
     uninstallAgent: (id: string, kind: RemoteAgentKind) => Promise<{ ok: true }>;
-    runAgentOneShot: (
-      id: string,
-      kind: RemoteAgentKind,
-      prompt: string,
-    ) => Promise<{ result: RemoteAgentOneShotResult }>;
+    runAgentOneShot: (id: string, kind: RemoteAgentKind, prompt: string) => Promise<{ result: RemoteAgentOneShotResult }>;
     // Generic remote fs primitives (Phase C) — reusable by a future remote
     // file browser. Both accept '~' / '~/...' and let remote bash expand to $HOME.
-    statRemotePath: (
-      id: string,
-      path: string,
-    ) => Promise<{ kind: 'dir' | 'file' | 'missing'; resolvedPath: string }>;
+    statRemotePath: (id: string, path: string) => Promise<{ kind: 'dir' | 'file' | 'missing'; resolvedPath: string }>;
     mkdirPRemote: (id: string, path: string) => Promise<{ resolvedPath: string }>;
-    setAutoConnect: (
-      id: string,
-      autoConnect: boolean,
-    ) => Promise<{ ok: true; autoConnect: boolean }>;
+    setAutoConnect: (id: string, autoConnect: boolean) => Promise<{ ok: true; autoConnect: boolean }>;
     hasAnyAutoConnectHost: () => Promise<{ hasAny: boolean }>;
-    listRemoteDir: (
-      id: string,
-      path: string,
-    ) => Promise<{
+    listRemoteDir: (id: string, path: string) => Promise<{
       resolvedPath: string;
       entries: Array<{ name: string; kind: 'dir' | 'symlink' }>;
     }>;
     onInstallProgress: (cb: (payload: RemoteAgentInstallProgressPush) => void) => () => void;
-    onSilentInstallStatus: (
-      cb: (payload: RemoteAgentSilentInstallStatusPush) => void,
-    ) => () => void;
-    onCcMgrUpgradeAvailable: (
-      cb: (payload: RemoteAgentCcMgrUpgradeAvailablePush) => void,
-    ) => () => void;
-    ccMgrForceUpgrade: (
-      hostId: string,
-      sessionId?: string,
-    ) => Promise<{ ok: true; daemonReady: boolean }>;
+    onSilentInstallStatus: (cb: (payload: RemoteAgentSilentInstallStatusPush) => void) => () => void;
+    onCcMgrUpgradeAvailable: (cb: (payload: RemoteAgentCcMgrUpgradeAvailablePush) => void) => () => void;
+    ccMgrForceUpgrade: (hostId: string, sessionId?: string) => Promise<{ ok: true; daemonReady: boolean }>;
     ccMgrListPendingUpgrades: () => Promise<{
       pending: Array<{ hostId: string; currentVersion: string; availableVersion: string }>;
     }>;
@@ -2981,10 +3306,7 @@ interface ElectronAPI {
       };
     }>;
     readPubkey: (pubkeyPath: string) => Promise<{ content: string }>;
-    buildInstallCmd: (
-      id: string,
-      pubkeyPath: string,
-    ) => Promise<{
+    buildInstallCmd: (id: string, pubkeyPath: string) => Promise<{
       command: string;
       platform: NodeJS.Platform;
     }>;
@@ -3015,8 +3337,12 @@ interface ElectronAPI {
   worktreeGetForSession: (
     sessionId: string,
   ) => Promise<import('@/lib/worktree.types').WorktreeMeta | null>;
-  worktreeListAll: () => Promise<import('@/lib/worktree.types').WorktreeMeta[]>;
-  worktreeReveal: (req: { path: string }) => Promise<import('@/lib/worktree.types').RevealResp>;
+  worktreeListAll: () => Promise<
+    import('@/lib/worktree.types').WorktreeMeta[]
+  >;
+  worktreeReveal: (req: {
+    path: string;
+  }) => Promise<import('@/lib/worktree.types').RevealResp>;
   worktreeSuggestName: (req: {
     baseRepo: string;
   }) => Promise<import('@/lib/worktree.types').SuggestNameResp>;
@@ -3024,22 +3350,31 @@ interface ElectronAPI {
     baseRepo: string;
   }) => Promise<import('@/lib/worktree.types').ListBranchesResp>;
   // P1: 删除/归档确认预检
-  worktreeRemovalPreview: (sessionId: string) => Promise<{ hasWorktree: boolean; dirty: boolean }>;
-  // P1: worktree 回收后的可恢复状态 + 一键恢复
-  worktreeRestoreStatus: (
+  worktreeRemovalPreview: (
     sessionId: string,
-  ) => Promise<
+  ) => Promise<{ hasWorktree: boolean; dirty: boolean }>;
+  // P1: worktree 回收后的可恢复状态 + 一键恢复
+  worktreeRestoreStatus: (sessionId: string) => Promise<
     | { state: 'present'; worktreePath: string; hasSnapshot?: boolean }
     | { state: 'no-worktree' }
     | { state: 'restorable'; worktreePath: string; hasSnapshot: boolean }
     | { state: 'gone'; worktreePath: string }
   >;
-  worktreeRestoreForSession: (sessionId: string) => Promise<{
+  worktreeRestoreForSession: (
+    sessionId: string,
+  ) => Promise<{
     ok: boolean;
     snapshotApplied?: boolean;
     reason?: 'gone' | 'no-worktree' | 'git-error';
     detail?: string;
   }>;
+  /**
+   * 「worktree 回收链已跑完」推送。归档/删除后 main 侧的回收是 fire-and-forget 的
+   * 异步链，store 条目移除远晚于状态 IPC 返回，renderer 必须等这条才能拿到真实快照。
+   */
+  onWorktreeChanged: (
+    callback: (payload: { sessionId: string }) => void,
+  ) => () => void;
 
   // ── Slack Hook(中心 slack-hook-server 接入) ── 类型正本在 shared/hookControlIpc.ts
   hookControl: {
@@ -3047,12 +3382,20 @@ interface ElectronAPI {
     setEnabled: (
       enabled: boolean,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    setLifecycleAnnouncement: (
+      enabled: boolean,
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     setProviderEnabled: (
-      provider: 'telegram',
+      provider: 'telegram' | 'x',
       enabled: boolean,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     setWorkspaces: (
       workspaces: Record<string, string>,
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    /** 该 provider 派发任务的默认工作目录别名(null = 内置「对话」伪目录)。 */
+    setProviderDefaultWorkspace: (
+      provider: 'telegram' | 'x',
+      alias: string | null,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     bindStart: () => Promise<{ ok: true }>;
     bindRevoke: () => Promise<{ ok: true }>;
@@ -3065,11 +3408,18 @@ interface ElectronAPI {
       teamId: string,
     ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
     cancelPendingBind: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindStart: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindCancel: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    providerBindRevoke: () => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
-    openTelegramAction: (
-      action: import('../shared/hookControlIpc').TelegramOpenAction,
+    providerBindStart: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    providerBindCancel: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    providerBindRevoke: (
+      provider: 'telegram' | 'x',
+    ) => Promise<{ hook: import('../shared/hookControlIpc').SlackHookView }>;
+    openProviderAction: (
+      provider: 'telegram' | 'x',
+      action: import('../shared/hookControlIpc').ProviderOpenAction,
     ) => Promise<{ ok: true }>;
     getWorkspacePrefs: () => Promise<{
       prefs: import('../shared/hookControlIpc').HookPrefsView;
@@ -3079,18 +3429,38 @@ interface ElectronAPI {
       patch: import('../shared/hookControlIpc').HookPrefsPatch,
       teamId?: string | null,
     ) => Promise<{ prefs: import('../shared/hookControlIpc').HookPrefsView }>;
-    getProviderWorkspacePrefs: () => Promise<{
+    getProviderWorkspacePrefs: (provider: 'telegram' | 'x') => Promise<{
       prefs: import('../shared/hookControlIpc').ProviderPrefsView;
     }>;
     setProviderWorkspacePrefs: (
+      provider: 'telegram' | 'x',
       workspace: string,
       patch: import('../shared/hookControlIpc').HookPrefsPatch,
     ) => Promise<{ prefs: import('../shared/hookControlIpc').ProviderPrefsView }>;
+    getTelegramBehavior: (bindingId: string) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
+    setTelegramBehavior: (
+      bindingId: string,
+      patch: import('../shared/hookControlIpc').TelegramHookBehaviorPatch,
+    ) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
+    listTelegramGroups: (bindingId: string) => Promise<{
+      groups: import('../shared/hookControlIpc').TelegramHookKnownGroup[];
+    }>;
+    setTelegramGroupActivation: (
+      bindingId: string,
+      chatId: string,
+      mode: import('../shared/hookControlIpc').TelegramHookGroupActivationMode,
+    ) => Promise<{
+      behavior: import('../shared/hookControlIpc').TelegramHookBehaviorState;
+    }>;
     getWorkspaceProviderSources: () => Promise<{
       entries: import('../shared/hookControlIpc').HookWorkspaceProviderSourceEntry[];
     }>;
     setWorkspaceProviderSource: (payload: {
-      channel: 'slack' | 'telegram';
+      channel: 'slack' | 'telegram' | 'x';
       teamId: string | null;
       workspace: string;
       providerId: string | null;
@@ -3108,6 +3478,9 @@ interface ElectronAPI {
     onProviderPrefsChanged: (
       cb: (view: import('../shared/hookControlIpc').ProviderPrefsView) => void,
     ) => () => void;
+    onTelegramBehaviorChanged: (
+      cb: (view: import('../shared/hookControlIpc').TelegramHookBehaviorState) => void,
+    ) => () => void;
     onStatusChanged: (
       cb: (view: import('../shared/hookControlIpc').SlackHookView) => void,
     ) => () => void;
@@ -3115,7 +3488,9 @@ interface ElectronAPI {
 
   // ── session-git-pr-context: 会话分支感知 + PR 关联状态 ──
   gitContext: {
-    get: (workdir: string) => Promise<import('@/lib/gitContext.types').GitContextSnapshot>;
+    get: (
+      workdir: string,
+    ) => Promise<import('@/lib/gitContext.types').GitContextSnapshot>;
     getForSession: (input: {
       sessionId: string;
       workingDir: string | null;
@@ -3123,7 +3498,9 @@ interface ElectronAPI {
     }) => Promise<import('@/lib/gitContext.types').SessionGitDirResult>;
     watch: (workdir: string) => Promise<void>;
     unwatch: (workdir: string) => Promise<void>;
-    listPrRefs: (sessionId: string) => Promise<import('@/lib/gitContext.types').SessionPrRef[]>;
+    listPrRefs: (
+      sessionId: string,
+    ) => Promise<import('@/lib/gitContext.types').SessionPrRef[]>;
     /** null = main 侧 db 尚未就绪(登录前/启动期),调用方应稍后重试。 */
     listAllPrRefs: () => Promise<import('@/lib/gitContext.types').SessionPrRef[] | null>;
     getPrStatuses: (
@@ -3136,89 +3513,47 @@ interface ElectronAPI {
   };
 
   gitReview: {
-    get: (params: {
-      sessionId: string;
-      ignoreWhitespace?: boolean;
-    }) => Promise<import('@/lib/gitReview.types').ReviewData>;
-    summary: (params: {
-      sessionId: string;
-    }) => Promise<import('@/lib/gitReview.types').ReviewDirtySummary>;
-    commits: (params: {
-      sessionId: string;
-      baseRef?: string | null;
-    }) => Promise<import('@/lib/gitReview.types').ReviewCommitListData>;
-    commitDiff: (params: {
-      sessionId: string;
-      oid: string;
-      ignoreWhitespace?: boolean;
-    }) => Promise<import('@/lib/gitReview.types').ReviewCommitDiffData>;
-    branchDiff: (params: {
-      sessionId: string;
-      baseRef?: string | null;
-      ignoreWhitespace?: boolean;
-    }) => Promise<import('@/lib/gitReview.types').ReviewBranchDiffData>;
-    fileDiff: (
-      params: { sessionId: string } & import('@/lib/gitReview.types').ReviewFileDiffRequest,
-    ) => Promise<import('@/lib/gitReview.types').ReviewFileDiffData>;
-    imagePreview: (params: {
-      sessionId: string;
-      diff: import('@/lib/gitReview.types').FileDiff;
-      commitOid?: string | null;
-      branchBaseRef?: string | null;
-    }) => Promise<import('@/lib/gitReview.types').ReviewImagePreviewData>;
-    markdownPreview: (params: {
-      sessionId: string;
-      diff: import('@/lib/gitReview.types').FileDiff;
-      commitOid?: string | null;
-      branchBaseRef?: string | null;
-    }) => Promise<import('@/lib/gitReview.types').ReviewMarkdownPreviewData>;
+    get: (params: { sessionId: string; ignoreWhitespace?: boolean }) => Promise<import('@/lib/gitReview.types').ReviewData>;
+    summary: (params: { sessionId: string }) => Promise<import('@/lib/gitReview.types').ReviewDirtySummary>;
+    commits: (params: { sessionId: string; baseRef?: string | null }) => Promise<import('@/lib/gitReview.types').ReviewCommitListData>;
+    commitDiff: (params: { sessionId: string; oid: string; ignoreWhitespace?: boolean }) => Promise<import('@/lib/gitReview.types').ReviewCommitDiffData>;
+    branchDiff: (params: { sessionId: string; baseRef?: string | null; ignoreWhitespace?: boolean }) => Promise<import('@/lib/gitReview.types').ReviewBranchDiffData>;
+    fileDiff: (params: { sessionId: string } & import('@/lib/gitReview.types').ReviewFileDiffRequest) => Promise<import('@/lib/gitReview.types').ReviewFileDiffData>;
+    imagePreview: (params: { sessionId: string; diff: import('@/lib/gitReview.types').FileDiff; commitOid?: string | null; branchBaseRef?: string | null }) => Promise<import('@/lib/gitReview.types').ReviewImagePreviewData>;
+    markdownPreview: (params: { sessionId: string; diff: import('@/lib/gitReview.types').FileDiff; commitOid?: string | null; branchBaseRef?: string | null }) => Promise<import('@/lib/gitReview.types').ReviewMarkdownPreviewData>;
     openFile: (params: { sessionId: string; path: string }) => Promise<void>;
-    stageFile: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    unstageFile: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    discardFile: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    stageHunk: (
-      params: import('@/lib/gitReview.types').ReviewHunkOperationRequest,
-    ) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    unstageHunk: (
-      params: import('@/lib/gitReview.types').ReviewHunkOperationRequest,
-    ) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    discardHunk: (
-      params: import('@/lib/gitReview.types').ReviewHunkOperationRequest,
-    ) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    stageAll: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    unstageAll: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    discardAll: (params: {
-      sessionId: string;
-      targets: import('@/lib/gitReview.types').ReviewFileTarget[];
-    }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
-    commit: (
-      params: import('@/lib/gitReview.types').ReviewCommitRequest,
-    ) => Promise<import('@/lib/gitReview.types').ReviewCommitResult>;
-    push: (params: {
-      sessionId: string;
-      confirmForce?: import('@/lib/gitReview.types').ReviewPushConfirmForce;
-    }) => Promise<import('@/lib/gitReview.types').ReviewPushResult>;
+    stageFile: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    unstageFile: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    discardFile: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    stageHunk: (params: import('@/lib/gitReview.types').ReviewHunkOperationRequest) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    unstageHunk: (params: import('@/lib/gitReview.types').ReviewHunkOperationRequest) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    discardHunk: (params: import('@/lib/gitReview.types').ReviewHunkOperationRequest) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    stageAll: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    unstageAll: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    discardAll: (params: { sessionId: string; targets: import('@/lib/gitReview.types').ReviewFileTarget[] }) => Promise<import('@/lib/gitReview.types').ReviewStageOperationResult>;
+    commit: (params: import('@/lib/gitReview.types').ReviewCommitRequest) => Promise<import('@/lib/gitReview.types').ReviewCommitResult>;
+    push: (params: { sessionId: string; confirmForce?: import('@/lib/gitReview.types').ReviewPushConfirmForce }) => Promise<import('@/lib/gitReview.types').ReviewPushResult>;
   };
 
   // sidebar 偏好(置顶手动顺序)跨 dev / installed 共享;读 sendSync,写 invoke。
   sidebarSettingsLoadPinnedOrderSync: () => string[];
   sidebarSettingsSavePinnedOrder: (order: readonly string[]) => Promise<void>;
   sidebarSettingsOnPinnedOrderChanged: (cb: (order: string[]) => void) => () => void;
+  sidebarSettings: {
+    loadHiddenProjectKeys: () => string[];
+    setProjectHidden: (projectKey: string, hidden: boolean) => Promise<boolean>;
+    onHiddenProjectKeysChanged: (cb: (projectKeys: string[]) => void) => () => void;
+  };
+
+  remotePrecreatedWorktreeLedger: {
+    list: () => Promise<RemotePrecreatedWorktreeLedgerSnapshot>;
+    register: (
+      record: PendingRemotePrecreatedWorktree,
+    ) => Promise<{ persisted: boolean }>;
+    forget: (
+      target: PendingRemotePrecreatedWorktreeTarget,
+    ) => Promise<{ persisted: boolean }>;
+  };
 
   // ── session 级"终身累计 cost"变化 (per-session, 不是 today-aggregate) ──
   // today aggregate 已搬到 electronAPI.maker.usage.* (Claude USD + Codex token 统一)。
@@ -3234,18 +3569,13 @@ interface ElectronAPI {
   ) => () => void;
 
   // per-message 维度: turn 结束后 main 推该轮费用(挂在最后一条 assistant 上)。
+  // 直接复用 main 侧的 payload 正本 —— 金额字段整组可选(无报价轮只带
+  // turnUsageDetails),两侧各写一份必然漂移:曾出现 main 已放宽为可选、这里仍声明
+  // 必填,消费方在 typecheck 通过的情况下解引用 undefined。
   onUsageMessageTurnCost: (
-    cb: (data: {
-      sessionId: string;
-      clientId: string;
-      turnMoney: import('../shared/regionalMoney').RegionalMoney;
-      turnCostUsd?: number;
-      turnCostIsEstimate: boolean;
-      userTurnMoney: import('../shared/regionalMoney').RegionalMoney;
-      userTurnCostUsd?: number;
-      userTurnCostIsEstimate: boolean;
-      turnUsageDetails?: import('../shared/turnUsageDetails').TurnUsageDetails;
-    }) => void,
+    cb: (
+      data: import('../shared/turnCostPayload').MessageTurnCostPayload,
+    ) => void,
   ) => () => void;
 
   // per-message 维度: turn 结束检测到模型被上游降级 / 替换时 main 推标记
@@ -3273,7 +3603,9 @@ interface ElectronAPI {
   // ── chat-data-localization (M-FE2) — local SQLite IPC bridge ──
   localDb: {
     /** Open / migrate the per-user db file. Failure → fatal dialog + ready:false. */
-    ensureReady: (userId: string) => Promise<
+    ensureReady: (
+      userId: string,
+    ) => Promise<
       | { ready: true }
       | {
           ready: false;
@@ -3297,7 +3629,7 @@ interface ElectronAPI {
         permissionMode?: string;
         fastMode?: boolean;
         planModeEnabled?: boolean;
-        agentKind?: 'cc' | 'codex';
+        agentKind?: 'cc' | 'codex' | 'pi';
         orcaRole?: import('@/lib/ccAgent.types').OrcaRole | null;
         /** 附加只读引用目录列表 (绝对路径); main 端 mapper 会 JSON.stringify 后写库。 */
         extraDirs?: string[];
@@ -3343,8 +3675,14 @@ interface ElectronAPI {
        * fire-and-forget；renderer 应在 emitPatch userSendAt 之后调用，作为持久化兜底。
        */
       touchUserSend: (id: string, atMs?: number) => Promise<void>;
-      /** interrupted-turn-resume:尾部停在未忽略中断标记行的 active 会话 id(启动红点)。 */
+      /** interrupted-turn-resume:「疑似中断」(startedAt > endedAt)的 active 会话 id。 */
       interruptedPending: () => Promise<string[]>;
+      /** 红点派生的周期性重算源:尾部停在未 dismissed 错误行的 active 会话 id。 */
+      errorTailPending: () => Promise<string[]>;
+      /** 批量处置未处理告警(「全部标为已读」)。failed = 未处置成功的会话 id。 */
+      dismissPendingAlerts: (
+        sessionIds: string[],
+      ) => Promise<{ dismissed: number; processed: string[]; failed: string[] }>;
       ackInterrupted: (id: string) => Promise<void>;
       // Stage 2 C2: fork 已迁到 electronAPI.maker.fork (走 maker:fork IPC)。
     };
@@ -3430,11 +3768,7 @@ interface ElectronAPI {
       ) => Promise<{ matched: number; inserted: number; updated: number; scanned: number }>;
     };
     sessionShare: {
-      export: (request: {
-        sessionId: string;
-        password?: string;
-        excludeMedia?: boolean;
-      }) => Promise<
+      export: (request: { sessionId: string; password?: string; excludeMedia?: boolean }) => Promise<
         | {
             status: 'ok';
             filePath: string;
@@ -3445,9 +3779,7 @@ interface ElectronAPI {
         | { status: 'canceled' }
         | { status: 'oversize'; totalBytes: number; mediaBytes: number; limitBytes: number }
       >;
-      inspect: (request?: {
-        filePath?: string;
-      }) => Promise<
+      inspect: (request?: { filePath?: string }) => Promise<
         | { status: 'canceled' }
         | { draftId: string; encrypted: true }
         | { draftId: string; encrypted: false; preview: SessionSharePreview }
@@ -3475,14 +3807,13 @@ interface ElectronAPI {
         notes: string[];
       }>;
       cancel: (request: { draftId: string }) => Promise<{ ok: boolean }>;
-      classifyPath: (request: {
-        path: string;
-      }) => Promise<{ kind: 'share' | 'directory' | 'other' }>;
+      classifyPath: (request: { path: string }) => Promise<{ kind: 'share' | 'directory' | 'other' }>;
     };
     orcaWorkflows: {
       getByLeadSession: (leadSessionId: string) => Promise<OrcaTeamRecord | null>;
       getByWorkerSession: (workerSessionId: string) => Promise<OrcaTeamRecord | null>;
       listWorkersByLead: (leadSessionId: string) => Promise<OrcaWorkerRecord[]>;
+      listWorkersByLeads?: (leadSessionIds: string[]) => Promise<Record<string, OrcaWorkerRecord[]>>;
       updateWorkerStatus: (
         workerId: string,
         status: 'idle' | 'running' | 'done' | 'error',
@@ -3490,11 +3821,7 @@ interface ElectronAPI {
       onOrcaWorkerChanged: (cb: (payload: unknown) => void) => () => void;
       createWorker: (input: Record<string, unknown>) => Promise<unknown>;
       switchFocus: (input: Record<string, unknown>) => Promise<unknown>;
-      idleWorker: (
-        leadSessionId: string,
-        workerId: string,
-        expectedStatus?: 'done',
-      ) => Promise<unknown>;
+      idleWorker: (leadSessionId: string, workerId: string, expectedStatus?: 'done') => Promise<unknown>;
       archiveWorker: (leadSessionId: string, workerId: string) => Promise<unknown>;
       endTeam: (leadSessionId: string) => Promise<unknown>;
       getCollaborationSettings: () => Promise<unknown>;
@@ -3506,7 +3833,9 @@ interface ElectronAPI {
         sessionId: string,
         opts?: { limit?: number; before?: string; beforeTs?: number },
       ) => Promise<import('@/lib/ccAgent.types').Message[]>;
-      estimatedSessionValue: (sessionId: string) => Promise<{
+      estimatedSessionValue: (
+        sessionId: string,
+      ) => Promise<{
         totalValueMoney?: import('../shared/regionalMoney').RegionalMoney | null;
         totalValueUsd?: number;
         entries: Array<{
@@ -3557,10 +3886,14 @@ interface ElectronAPI {
       onDeleted: (
         callback: (payload: { sessionId: string; clientId: string }) => void,
       ) => () => void;
-      onErrorPersisted: (callback: (payload: { sessionId: string }) => void) => () => void;
+      onErrorPersisted: (
+        callback: (payload: { sessionId: string }) => void,
+      ) => () => void;
     };
     sessionsPush: {
-      onCreated: (callback: (payload: { sessionId: string }) => void) => () => void;
+      onCreated: (
+        callback: (payload: { sessionId: string }) => void,
+      ) => () => void;
       onPatched: (
         callback: (payload: {
           sessionId: string;
@@ -3569,9 +3902,13 @@ interface ElectronAPI {
       ) => () => void;
     };
     /** V0.4 (C10): one-shot toast trigger when ensureReady ran two-level fallback. */
-    onCorruptionRestored: (cb: (info: CorruptionRestoredPayload) => void) => () => void;
+    onCorruptionRestored: (
+      cb: (info: CorruptionRestoredPayload) => void,
+    ) => () => void;
     /** #37: release 端检测到 schema drift 时的一次性 toast 事件。 */
-    onSchemaDriftWarning: (cb: (info: SchemaDriftWarningPayload) => void) => () => void;
+    onSchemaDriftWarning: (
+      cb: (info: SchemaDriftWarningPayload) => void,
+    ) => () => void;
   };
 
   // ── RSB browser bridge (Phase 2) ───────────────────────────────────────────
@@ -3602,18 +3939,22 @@ interface ElectronAPI {
     /** 工具栏截图按钮:main 端 capturePage 后写入系统剪贴板。失败抛 IPC error。 */
     captureScreenshot: (input: { tabId: string }) => Promise<{ ok: true }>;
     /** 页面评论:main 端 capturePage 后返回 PNG 字节(不写剪贴板)。失败抛 IPC error。 */
-    captureScreenshotData: (input: { tabId: string }) => Promise<{ ok: true; data: Uint8Array }>;
+    captureScreenshotData: (input: {
+      tabId: string;
+    }) => Promise<{ ok: true; data: Uint8Array }>;
     /** main → renderer:把 tabId 标记为 automation pinned(LRU 跳过)。 */
     onPin: (cb: (payload: { tabId: string }) => void) => () => void;
     /** main → renderer:取消 automation pin。 */
     onUnpin: (cb: (payload: { tabId: string }) => void) => () => void;
     /**
      * main → renderer:Phase 3 backend 让 renderer 代调 store 的 tab-op
-     * 请求(open / focus / close)。payload 是带 reqId 的 union;renderer 处理
+     * 请求(probe / open / focus / close)。payload 是带 reqId 的 union;renderer 处理
      * 完后通过 `tabOpResult` 回报。
      */
     onTabOpRequest: (
-      cb: (req: import('../shared/rsbBrowserBridge').RsbBrowserBridgeTabOpRequest) => void,
+      cb: (
+        req: import('../shared/rsbBrowserBridge').RsbBrowserBridgeTabOpRequest,
+      ) => void,
     ) => () => void;
     /** renderer → main:tab-op-request 的结果,按 reqId 关联。 */
     tabOpResult: (
@@ -3635,9 +3976,10 @@ interface ElectronAPI {
   };
 
   /**
-   * Browser backend toggle (Phase 5): 切换 MCP `browser` 工具实际控制的浏览器。
-   * - `external`: vendored Playwright + 独立 Chrome(老行为)
-   * - `rsb-webview`: 右侧栏内置 webview tab(新默认)
+   * Browser backend toggle: 切换 MCP `browser` 工具实际控制的浏览器。
+   * - `external`: vendored Playwright + 独立 Chrome(**系统默认**)
+   * - `rsb-webview`: 右侧栏内置 webview tab
+   * 默认值口径与两次翻转的 override 语义见 main/browser-backend-settings-store.ts。
    */
   browserBackend: {
     getState: () => Promise<{
@@ -3650,6 +3992,8 @@ interface ElectronAPI {
       active: 'external' | 'rsb-webview';
     }>;
     reset: () => Promise<{ ok: true; active: 'external' | 'rsb-webview' }>;
+    getHealth: () => Promise<BrowserBackendHealth>;
+    recover: () => Promise<BrowserBackendRecoveryResult>;
   };
 
   // ── Dialog（v0.6 新增） ────────────────────────────────────────────────────
@@ -3667,6 +4011,12 @@ interface ElectronAPI {
       success: boolean;
       path: string | null;
     }>;
+    /** 打开 @ 资源系统选择器；macOS 可选文件或目录，Windows/Linux 选择文件。 */
+    showOpenResource: (params?: { defaultPath?: string }) => Promise<{
+      success: true;
+      path: string | null;
+      kind: 'file' | 'directory' | null;
+    }>;
   };
 
   // electronAPI.codex 已退役 —— auth / binary status / usage / OAuth 登录进度 全部
@@ -3677,8 +4027,8 @@ interface ElectronAPI {
    * apps/desktop/src/main/maker-ipc/ 的 handlers + apps/desktop/src/main/maker-host/。
    */
   maker: {
-    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex'>>;
-    getCapabilities: (agentKind: 'claude-code' | 'codex') => Promise<unknown>;
+    listAvailableAgents: () => Promise<Array<'claude-code' | 'codex' | 'pi'>>;
+    getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<unknown>;
     /** workflow 逐 agent 进度树(只读);读不到 / 解析失败返回 null → 回退 workflow 级卡片。 */
     getWorkflowProgress: (
       sessionId: string,
@@ -3686,30 +4036,44 @@ interface ElectronAPI {
     ) => Promise<import('../shared/workflow-progress').WorkflowProgress | null>;
 
     // 模型供应商目录（只读）—— 内置目录元数据 + 各供应商实时连接状态。
-    listProviders: () => Promise<{ providers: import('@cindy/model-providers').ProviderView[] }>;
+    listProviders: () => Promise<{
+      dataOwnerId: string | null;
+      ownerGeneration: number;
+      providers: import('@cindy/model-providers').ProviderView[];
+      providerOrder: string[];
+    }>;
+    /** 复用各内置供应商既有真源刷新模型清单。 */
+    refreshBuiltinProviderModels: (
+      providerId: import('../shared/providerModelRefresh').BuiltinRefreshableProviderId,
+    ) => Promise<import('../shared/providerModelRefresh').ProviderModelRefreshResult>;
+    /** 静默请求 Main 在冷却允许时刷新已连接内置供应商。 */
+    requestProviderModelsAutoRefresh: (
+      trigger: import('../shared/providerModelRefresh').ProviderModelAutoRefreshRendererTrigger,
+    ) => Promise<import('../shared/providerModelRefresh').ProviderModelAutoRefreshResult>;
 
-    // 自定义供应商配置 CRUD（密钥另走通用 safeStorage IPC，不经这里）。
+    // 自定义供应商配置 CRUD（配置与 runtime 密钥均由 main 原子排队）。
     createCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
+      keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
     ) => Promise<{ ok: true }>;
     updateCustomProvider: (
       config: import('@cindy/model-providers').CustomProviderConfig,
+      keys: Partial<Record<'claude-code' | 'codex' | 'pi', string>>,
     ) => Promise<{ ok: true }>;
     deleteCustomProvider: (providerId: string) => Promise<{ ok: true }>;
     /** 自定义供应商创建模板（目录 presets 段，纯 UI 模板数据）。 */
-    listProviderPresets: () => Promise<{
-      presets: import('@cindy/model-providers').ProviderPreset[];
-    }>;
+    listProviderPresets: () => Promise<{ presets: import('@cindy/model-providers').ProviderPreset[] }>;
     /** 供应商「测试连接」—— 与真实会话同路由口径的最小探测请求（结构化结果，code 走 providerError.* i18n）。 */
     testProviderConnection: (
       input:
-        | { kind: 'saved'; providerId: string; agent: 'claude-code' | 'codex' }
+        | { kind: 'saved'; providerId: string; agent: 'claude-code' | 'codex' | 'pi' }
         | {
             kind: 'adhoc';
             spec: {
-              agent: 'claude-code' | 'codex';
+              agent: 'claude-code' | 'codex' | 'pi';
               baseUrl: string;
               modelId: string;
+              authMethod: 'apiKey' | 'oauth' | 'none';
               wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
               requestPath?: string;
               apiKey?: string | null;
@@ -3725,14 +4089,18 @@ interface ElectronAPI {
     }>;
     /** 供应商「获取模型列表」—— 表单值透传，结构化结果（code 走 providerError.* i18n）。 */
     fetchProviderModels: (input: {
-      agent: 'claude-code' | 'codex';
+      agent: 'claude-code' | 'codex' | 'pi';
       baseUrl: string;
+      authMethod: 'apiKey' | 'oauth' | 'none';
+      wireProtocol?: import('@cindy/model-providers').ProviderWireProtocol;
       modelsUrl?: string | null;
       apiKey?: string | null;
       headers?: Record<string, string>;
+      /** 已保存供应商 id:main 侧据此并入 main-only 鉴权请求头(renderer 不回读明文头)。 */
+      savedProviderId?: string;
     }) => Promise<{
       ok: boolean;
-      models?: { id: string; name: string }[];
+      models?: { id: string; name: string; contextWindow?: number }[];
       code?: import('../shared/providerErrors').ProviderErrorCode;
       status?: number;
       detail?: string;
@@ -3743,6 +4111,15 @@ interface ElectronAPI {
      */
     scanLocalCli: () => Promise<{
       detections: import('../shared/localCliDetect').LocalCliDetection[];
+    }>;
+    /**
+     * 立即重新发现动态清单（当前只有 anthropic 订阅）。host 只对暂时性失败做有限次退避
+     * 重试、确定性拒绝不重试，所以这是用户在失败态下「立刻再试一次」的入口（同时重开
+     * 一轮退避）；失败归因随结果回传，供 UI 渲染分类文案。
+     */
+    rediscoverModels: (providerId: string) => Promise<{
+      ok: boolean;
+      failure?: import('@cindy/model-providers').ProviderModelDiscoveryFailureView;
     }>;
     /** 自定义供应商变更广播订阅（返回 off）。 */
     onProvidersChanged: (cb: () => void) => () => void;
@@ -3763,9 +4140,15 @@ interface ElectronAPI {
     /** 自定义 MCP 变更广播订阅（返回 off）。 */
     onMcpChanged: (cb: () => void) => () => void;
     /** 通用 OAuth 供应商（目录 auth.oauth 描述符驱动）登录 / 登出 / 取消。 */
-    providerOAuthLogin: (providerId: string) => Promise<{ ok: boolean; reason?: string }>;
+    providerOAuthLogin: (
+      providerId: string,
+      options?: { ownerId?: string },
+    ) => Promise<{ ok: boolean; reason?: string }>;
     providerOAuthLogout: (providerId: string) => Promise<{ ok: true }>;
-    providerOAuthCancel: (providerId: string) => Promise<{ ok: true }>;
+    providerOAuthCancel: (
+      providerId: string,
+      options?: { releaseOwner?: boolean; ownerId?: string },
+    ) => Promise<{ ok: true }>;
     onProviderOAuthProgress: (
       cb: (progress: {
         providerId: string;
@@ -3778,7 +4161,7 @@ interface ElectronAPI {
     /** 自定义供应商上游错误订阅（返回 off）；code 走 providerError.* i18n。 */
     onProviderUpstreamError: (
       cb: (event: {
-        agent: 'claude-code' | 'codex';
+        agent: 'claude-code' | 'codex' | 'pi';
         providerId: string;
         providerName?: string;
         code: import('../shared/providerErrors').ProviderErrorCode;
@@ -3818,6 +4201,33 @@ interface ElectronAPI {
      * 让 IM /model 在 main 侧复用同一套可见性过滤,与应用内模型列表逐模型一致。fire-and-forget。
      */
     syncModelVisibility: (map: Record<string, boolean>) => Promise<void>;
+    /**
+     * 「模型 / 供应商停用」override 写入(main 侧 model-disable-store);成功后 main 广播
+     * PROVIDER_CHANGED,useProviders 快照刷新后 UI 拿到新的 suspended / disabled 标志。
+     */
+    setModelDisable: (
+      input:
+        | { kind: 'model'; providerId: string; modelIds: string[]; disabled: boolean }
+        | { kind: 'provider'; providerId: string; disabled: boolean }
+        // reset = 恢复默认:删除该供应商整组停用 override(含指向已下架模型的陈旧条目)。
+        | { kind: 'reset'; providerId: string },
+    ) => Promise<{ ok: true }>;
+    /** Persist the visible provider order only if the active owner still matches. */
+    setProviderOrder: (
+      dataOwnerId: string | null,
+      ownerGeneration: number,
+      providerIds: string[],
+    ) => Promise<{ ok: true }>;
+    getModelPriceOverride: (
+      target: import('../shared/modelPriceOverride').ModelPriceOverrideTarget,
+    ) => Promise<import('../shared/modelPriceOverride').ModelPriceOverrideView>;
+    setModelPriceOverride: (
+      target: import('../shared/modelPriceOverride').ModelPriceOverrideTarget,
+      desired: import('../shared/modelPriceOverride').ModelPriceOverrideDesiredQuote,
+    ) => Promise<import('../shared/modelPriceOverride').ModelPriceOverrideView>;
+    resetModelPriceOverride: (
+      target: import('../shared/modelPriceOverride').ModelPriceOverrideTarget,
+    ) => Promise<import('../shared/modelPriceOverride').ModelPriceOverrideView>;
 
     // 「在新窗口打开」会话多开
     openSessionInNewWindow: (sessionId: string) => Promise<void>;
@@ -3834,15 +4244,17 @@ interface ElectronAPI {
       ctx: { sessionId?: string; workingDir?: string; args?: string; deviceId?: string },
     ) => Promise<{ success: boolean; error?: string }>;
 
-    listAgentCommands: (agentKind: 'claude-code' | 'codex') => Promise<{
+    listAgentCommands: (
+      agentKind: 'claude-code' | 'codex' | 'pi',
+    ) => Promise<{
       success: boolean;
       error?: string;
       commands?: Array<{ kind: 'agent-builtin'; name: string; description: string }>;
     }>;
 
     listAgentSkills: (
-      agentKind: 'claude-code' | 'codex',
-      params: { workingDir: string; forceReload?: boolean },
+      agentKind: 'claude-code' | 'codex' | 'pi',
+      params: { workingDir?: string; forceReload?: boolean },
     ) => Promise<{
       success: boolean;
       error?: string;
@@ -3887,23 +4299,14 @@ interface ElectronAPI {
     setGoal: (input: {
       sessionId: string;
       objective: string;
-      limits?: {
-        maxTurns: number | null;
-        budgetTokens: number | null;
-        noProgressLimit: number | null;
-      };
+      limits?: { maxTurns: number | null; budgetTokens: number | null; noProgressLimit: number | null };
     }) => Promise<{ ok: boolean }>;
     clearGoal: (sessionId: string) => Promise<{ ok: boolean }>;
     pauseGoal: (sessionId: string) => Promise<{ ok: boolean }>;
     resumeGoal: (sessionId: string) => Promise<{ ok: boolean }>;
     updateGoal: (
       sessionId: string,
-      patch: {
-        objective?: string;
-        maxTurns?: number | null;
-        budgetTokens?: number | null;
-        noProgressLimit?: number | null;
-      },
+      patch: { objective?: string; maxTurns?: number | null; budgetTokens?: number | null; noProgressLimit?: number | null },
     ) => Promise<{ ok: boolean }>;
     getGoalStatus: (sessionId: string) => Promise<GoalStatusPayload | null>;
     onGoalStatusChanged: (
@@ -3911,7 +4314,7 @@ interface ElectronAPI {
     ) => () => void;
 
     scanAtResources: (
-      agentKind: 'claude-code' | 'codex',
+      agentKind: 'claude-code' | 'codex' | 'pi',
       params: { workingDir: string; cap?: number; query?: string },
     ) => Promise<{
       success: boolean;
@@ -3923,11 +4326,27 @@ interface ElectronAPI {
       >;
       truncated?: boolean;
     }>;
+    listAtContext: (params: {
+      sessionId?: string;
+      workingDir?: string;
+      query?: string;
+      limit?: number;
+    }) => Promise<{
+      success: true;
+      browserTabs: Array<{ tabId: string; title: string; url: string }>;
+      desktopWindows: Array<{
+        windowId: number;
+        pid: number;
+        appName: string;
+        title: string;
+      }>;
+      unavailable: Array<'browser-tabs' | 'desktop-windows'>;
+    }>;
 
     createSession: (opts: {
       /** 可选: 复用外部 sessionId(本端 chat 用 local-db:sessions:create 拿到的 id) */
       id?: string;
-      agentKind: 'claude-code' | 'codex';
+      agentKind: 'claude-code' | 'codex' | 'pi';
       workingDir: string;
       model: string;
       title?: string;
@@ -3949,13 +4368,7 @@ interface ElectronAPI {
       /** 远端 host alias (Codex only) — codex agent 跑在远端机器上, workingDir 是远端路径。 */
       remoteHostId?: string;
       vendorOptions?: Record<string, unknown>;
-    }) => Promise<{
-      sessionId: string;
-      agentKind: string;
-      workDir: string;
-      capabilities: unknown;
-      usedProjectContext?: boolean;
-    }>;
+    }) => Promise<{ sessionId: string; agentKind: string; workDir: string; capabilities: unknown; usedProjectContext?: boolean }>;
 
     markOrcaRole: (
       sessionId: string,
@@ -3971,7 +4384,7 @@ interface ElectronAPI {
     enableOrca: (
       leadSessionId: string,
       opts: {
-        workerAgent: 'claude-code' | 'codex';
+        workerAgent: 'claude-code' | 'codex' | 'pi';
         delegateTask?: string;
         role?: string;
         label?: string;
@@ -3997,10 +4410,9 @@ interface ElectronAPI {
      */
     send: (
       sessionId: string,
-      message:
-        string | { type: 'user'; content: string | Array<{ type: string; [k: string]: unknown }> },
+      message: string | { type: 'user'; content: string | Array<{ type: string; [k: string]: unknown }> },
       createOpts?: {
-        agentKind: 'claude-code' | 'codex';
+        agentKind: 'claude-code' | 'codex' | 'pi';
         workingDir: string;
         model: string;
         orcaRole?: import('@/lib/ccAgent.types').OrcaRole | null;
@@ -4033,8 +4445,7 @@ interface ElectronAPI {
 
     steer: (
       sessionId: string,
-      message:
-        string | { type: 'user'; content: string | Array<{ type: string; [k: string]: unknown }> },
+      message: string | { type: 'user'; content: string | Array<{ type: string; [k: string]: unknown }> },
       sendOpts?: {
         /** 这条 user 消息的 SDK uuid (renderer 与 messages.agent_meta.uuid 同源, rewind 锚点)。 */
         messageUuid?: string;
@@ -4046,7 +4457,7 @@ interface ElectronAPI {
     getContextUsage: (
       sessionId: string,
       createOpts?: {
-        agentKind: 'claude-code' | 'codex';
+        agentKind: 'claude-code' | 'codex' | 'pi';
         workingDir: string;
         model: string;
         orcaRole?: import('@/lib/ccAgent.types').OrcaRole | null;
@@ -4072,22 +4483,18 @@ interface ElectronAPI {
       sessionId: string,
       clientId: string,
     ) => Promise<{ sessionId: string; clientId: string; clientIds: string[] }>;
-    listActive: () => Promise<
-      Array<{
-        sessionId: string;
-        agentKind: 'claude-code' | 'codex';
-        workDir: string;
-        capabilities: unknown;
-        isTurnRunning: boolean;
-      }>
-    >;
+    listActive: () => Promise<Array<{
+      sessionId: string;
+      agentKind: 'claude-code' | 'codex' | 'pi';
+      workDir: string;
+      capabilities: unknown;
+      isTurnRunning: boolean;
+    }>>;
     onInputProjection: (
       cb: (payload: import('../shared/agentInputQueue').AgentInputProjection) => void,
     ) => () => void;
     input: {
-      getProjection: (
-        sessionId: string,
-      ) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
+      getProjection: (sessionId: string) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
       enqueue: (
         sessionId: string,
         item: import('../shared/agentInputQueue').AgentInputQueuedMessage,
@@ -4107,20 +4514,10 @@ interface ElectronAPI {
         sessionId: string,
         opts?: { keepQueue?: boolean; pauseQueue?: boolean },
       ) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
-      resume: (
-        sessionId: string,
-      ) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
-      retryLastError: (
-        sessionId: string,
-      ) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
-      clearError: (
-        sessionId: string,
-      ) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
-      persistTurnErrorDeferred: (
-        sessionId: string,
-        errData: Record<string, unknown> | null,
-        agentMeta?: import('@/lib/ccAgent.types').AgentMeta | null,
-      ) => Promise<void>;
+      resume: (sessionId: string) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
+      retryLastError: (sessionId: string) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
+      clearError: (sessionId: string) => Promise<import('../shared/agentInputQueue').AgentInputProjection>;
+      persistTurnErrorDeferred: (sessionId: string, errData: Record<string, unknown> | null, agentMeta?: import('@/lib/ccAgent.types').AgentMeta | null) => Promise<void>;
       remove: (
         sessionId: string,
         clientId: string,
@@ -4157,7 +4554,10 @@ interface ElectronAPI {
     };
 
     /** Resolve a pending interaction (permission / ask_user_question / plan_review). */
-    resolveInteraction: (requestId: string, decision: Record<string, unknown>) => Promise<void>;
+    resolveInteraction: (
+      requestId: string,
+      decision: Record<string, unknown>,
+    ) => Promise<void>;
 
     /** Submit one inline plugin Secret through the local trusted-frame-only IPC. */
     submitPluginSetupInline: (request: {
@@ -4168,12 +4568,9 @@ interface ElectronAPI {
     }) => Promise<void>;
 
     /** 快照:某会话当前挂起交互(permission/ask/plan),打开/重连/刷新会话时拉一次重建面板。 */
-    getPendingInteractions: (sessionId: string) => Promise<
-      Array<{
-        request: { kind: string; requestId: string; [k: string]: unknown };
-        persistId?: string;
-      }>
-    >;
+    getPendingInteractions: (
+      sessionId: string,
+    ) => Promise<Array<{ request: { kind: string; requestId: string; [k: string]: unknown }; persistId?: string }>>;
 
     // ── 运行时切换 (Stage 2 B) ─────────────────────────────────────────────
     // session 不存在(没 send 过/已 close)时 main 侧 no-op,renderer 可乐观调用。
@@ -4182,7 +4579,9 @@ interface ElectronAPI {
       sessionId: string,
       model: string,
       providerId?: string | null,
-    ) => Promise<{ deferred: boolean } | undefined>;
+      expectedAgentSwitchRevision?: number,
+      selection?: { effort: string; fastMode: boolean },
+    ) => Promise<{ deferred: boolean; superseded?: boolean } | undefined>;
     /**
      * session-agent-switch:同一会话切换 agent 引擎(claude-code ↔ codex)。
      * 同引擎换模型走 setModel;跨引擎必须走本方法。意图制:本调用只登记切换
@@ -4192,24 +4591,50 @@ interface ElectronAPI {
      */
     switchSessionAgent: (
       sessionId: string,
-      targetAgentKind: 'claude-code' | 'codex',
+      targetAgentKind: 'claude-code' | 'codex' | 'pi',
       model: string,
       providerId?: string | null,
       effort?: string,
       fastMode?: boolean,
+    ) => Promise<{ switched: boolean; agentKind: 'claude-code' | 'codex' | 'pi'; model: string; engineReady: boolean; deferred?: boolean; sameEngineRevision?: number; sameEngineSuperseded?: boolean }>;
+    /**
+     * 读 main 权威的 pending 切换意图(内存态,不落库;无意图 → null)。
+     * 重开视图 / device-link 远程会话重连后恢复乐观显示用。
+     */
+    getSessionAgentSwitchIntent: (
+      sessionId: string,
     ) => Promise<{
-      switched: boolean;
-      agentKind: 'claude-code' | 'codex';
+      targetAgentKind: 'claude-code' | 'codex' | 'pi';
       model: string;
-      engineReady: boolean;
-      deferred?: boolean;
-    }>;
+      providerId: string | null;
+      effort?: string;
+      fastMode?: boolean;
+    } | null>;
     // effort/mode 透传 string —— 合法值由 maker capabilities 决定, vite-env 不重复枚举
     setEffort: (sessionId: string, effort: string) => Promise<void>;
     setPermissionMode: (sessionId: string, mode: string) => Promise<void>;
     setFastMode: (sessionId: string, enabled: boolean) => Promise<void>;
     /** 计划模式一级开关(与 permissionMode 正交); DB 持久化由调用方另调 sessionService.update({ planModeEnabled }) */
     setPlanMode: (sessionId: string, enabled: boolean) => Promise<void>;
+    /** 会话导出 HTML(pi 原生); 主进程弹保存对话框 + 导出 + 在文件管理器显示; 返回路径或 null(取消/不支持) */
+    exportSessionHtml: (sessionId: string) => Promise<string | null>;
+    /** 手动压缩会话上下文(pi 原生, 可带聚焦指令); 返回压缩前后 token 数 / {noop} / null(会话不在/不支持) */
+    compactSession: (
+      sessionId: string,
+      instructions?: string,
+    ) => Promise<{ tokensBefore?: number; estimatedTokensAfter?: number; noop?: boolean } | null>;
+    /** 同会话原生分支树；旧 Pi 会话会在 main 侧按持久化元数据懒恢复。 */
+    getSessionTree: (sessionId: string) => Promise<MakerSessionTreeSnapshot | null>;
+    /** 切换原生分支并同步 Cindy 可见时间线。 */
+    navigateSessionTree: (
+      sessionId: string,
+      entryId: string,
+      options?: { summarize?: boolean; customInstructions?: string },
+    ) => Promise<{
+      tree: MakerSessionTreeSnapshot;
+      draftText?: string;
+      cancelled?: boolean;
+    } | null>;
     /**
      * 附加只读引用目录的 closure 推送; DB 持久化要 renderer 同步调
      * sessionService.update({ extraDirs }) (跟 setModel + sessionService.update 双 IPC 协调先例一致)。
@@ -4218,21 +4643,21 @@ interface ElectronAPI {
     setExtraDirs: (sessionId: string, dirs: string[]) => Promise<void>;
 
     // Memory 控制 (Settings → Personalization → Memory section)
-    memoryGet: (agentKind: 'claude-code' | 'codex') => Promise<{
+    memoryGet: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
       enabled: boolean;
       source: 'agent-default' | 'host-runtime' | 'user-config';
       stats?: { entryCount?: number; sizeBytes?: number; storagePath?: string };
     }>;
     memorySet: (
-      agentKind: 'claude-code' | 'codex',
+      agentKind: 'claude-code' | 'codex' | 'pi',
       enabled: boolean,
     ) => Promise<{
       effective: 'immediate' | 'next-session';
       isCustomized: boolean;
       customizedKeys: string[];
-      defaults: { maker: boolean; claudeCode: boolean; codex: boolean };
+      defaults: { maker: boolean; claudeCode: boolean; codex: boolean; pi: boolean };
     }>;
-    memoryReset: (agentKind: 'claude-code' | 'codex') => Promise<{
+    memoryReset: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
       removedEntries?: number;
       removedBytes?: number;
     }>;
@@ -4245,7 +4670,7 @@ interface ElectronAPI {
       effective: 'next-session';
       isCustomized: boolean;
       customizedKeys: string[];
-      defaults: { maker: boolean; claudeCode: boolean; codex: boolean };
+      defaults: { maker: boolean; claudeCode: boolean; codex: boolean; pi: boolean };
       /** true = Codex 正忙, 存活会话的软重启在任务结束后自动补做 (设置已生效) */
       codexRestartDeferred: boolean;
     }>;
@@ -4254,28 +4679,31 @@ interface ElectronAPI {
     makerMemoryReset: () => Promise<{ removedCount: number }>;
 
     /** 启动期拉 main 持久化的三个 memory 开关 — 见 preload memoryGetSettings 注释 */
-    memoryGetSettings: () => Promise<{ maker: boolean; claudeCode: boolean; codex: boolean }>;
+    memoryGetSettings: () => Promise<{ maker: boolean; claudeCode: boolean; codex: boolean; pi: boolean }>;
     memoryGetSettingsState: () => Promise<{
       maker: boolean;
       claudeCode: boolean;
       codex: boolean;
+      pi: boolean;
       isCustomized: boolean;
       customizedKeys: string[];
-      defaults: { maker: boolean; claudeCode: boolean; codex: boolean };
+      defaults: { maker: boolean; claudeCode: boolean; codex: boolean; pi: boolean };
     }>;
     /** 启动期迁移旧版 renderer/native memory opt-out；null 表示 renderer marker 缺失。 */
     memoryPreserveLegacyMakerDisabled: (legacyRendererValue: boolean | null) => Promise<{
       maker: boolean;
       claudeCode: boolean;
       codex: boolean;
+      pi: boolean;
     }>;
     memoryResetSettings: () => Promise<{
       maker: boolean;
       claudeCode: boolean;
       codex: boolean;
+      pi: boolean;
       isCustomized: boolean;
       customizedKeys: string[];
-      defaults: { maker: boolean; claudeCode: boolean; codex: boolean };
+      defaults: { maker: boolean; claudeCode: boolean; codex: boolean; pi: boolean };
       /** true = Codex 正忙, 存活会话的软重启在任务结束后自动补做 (设置已生效) */
       codexRestartDeferred: boolean;
     }>;
@@ -4290,38 +4718,28 @@ interface ElectronAPI {
 
     /** 子代理模型覆盖。null 表示不注入覆盖，仅对新建 agent 会话生效。 */
     subagentModelSettingsGet: () => Promise<SubagentModelSettingsState>;
-    subagentModelSettingsSet: (
-      patch: SubagentModelSettingsPatch,
-    ) => Promise<SubagentModelSettingsState>;
-    subagentModelSettingsReset: () => Promise<SubagentModelSettingsState>;
+    subagentModelSettingsSet: (patch: SubagentModelSettingsPatch) => Promise<SubagentModelSettingsWriteResult>;
+    subagentModelSettingsReset: () => Promise<SubagentModelSettingsWriteResult>;
+
+    /** Agent 资源占用治理(命令并发上限/进程优先级/工具链限核)。 */
+    agentResourceSettingsGet: () => Promise<AgentResourceSettingsWire>;
+    agentResourceSettingsSet: (
+      key: 'maxConcurrentCommands' | 'processPriority' | 'capToolchainThreads',
+      value: number | string | boolean,
+    ) => Promise<AgentResourceSettingsWire>;
+    agentResourceSettingsReset: () => Promise<AgentResourceSettingsWire>;
 
     /** Silent invalid_encrypted_content recovery setting. */
-    silentEncryptedRetryGet: () => Promise<{
-      enabled: boolean;
-      isCustomized?: boolean;
-      defaultEnabled?: boolean;
-    }>;
+    silentEncryptedRetryGet: () => Promise<{ enabled: boolean; isCustomized?: boolean; defaultEnabled?: boolean }>;
     /** Takes effect immediately for proxy recovery. */
-    silentEncryptedRetrySet: (enabled: boolean) => Promise<{
-      enabled: boolean;
-      isCustomized: boolean;
-      defaultEnabled: boolean;
-      effective: 'immediate';
-    }>;
-    silentEncryptedRetryReset: () => Promise<{
-      enabled: boolean;
-      isCustomized: boolean;
-      defaultEnabled: boolean;
-      effective: 'immediate';
-    }>;
+    silentEncryptedRetrySet: (enabled: boolean) => Promise<{ enabled: boolean; isCustomized: boolean; defaultEnabled: boolean; effective: 'immediate' }>;
+    silentEncryptedRetryReset: () => Promise<{ enabled: boolean; isCustomized: boolean; defaultEnabled: boolean; effective: 'immediate' }>;
 
     /** Claude Code 自动上下文压缩触发百分比。仅对新建会话生效 */
     compactionGetPct: () => Promise<number>;
     compactionGetState: () => Promise<{ pct: number; isCustomized: boolean; defaultPct: number }>;
     /** 写入后返回 main 端 clamp 后的最终百分比 */
-    compactionSetPct: (
-      pct: number,
-    ) => Promise<{ pct: number; isCustomized: boolean; defaultPct: number }>;
+    compactionSetPct: (pct: number) => Promise<{ pct: number; isCustomized: boolean; defaultPct: number }>;
     compactionResetPct: () => Promise<{ pct: number; isCustomized: boolean; defaultPct: number }>;
 
     /** LSP Beta 开关 — 控制 mcp providers 是否注入 lsp_* 工具 (默认 false) */
@@ -4330,38 +4748,16 @@ interface ElectronAPI {
     lspModeSet: (enabled: boolean) => Promise<{ effective: 'next-session' }>;
 
     /** 聊天嵌入开关 — 控制 chat-history-embedder 是否对新消息入队嵌入到本地向量库 */
-    chatEmbeddingGet: () => Promise<{
-      enabled: boolean;
-      isCustomized?: boolean;
-      defaultEnabled?: boolean;
-    }>;
+    chatEmbeddingGet: () => Promise<{ enabled: boolean; isCustomized?: boolean; defaultEnabled?: boolean }>;
     /** 立即生效; 第一次开启时 main 会在 embedding_meta 表写入 cutoff 时间戳 */
-    chatEmbeddingSet: (
-      enabled: boolean,
-    ) => Promise<{ enabled: boolean; isCustomized: boolean; defaultEnabled: boolean }>;
-    chatEmbeddingReset: () => Promise<{
-      enabled: boolean;
-      isCustomized: boolean;
-      defaultEnabled: boolean;
-    }>;
+    chatEmbeddingSet: (enabled: boolean) => Promise<{ enabled: boolean; isCustomized: boolean; defaultEnabled: boolean }>;
+    chatEmbeddingReset: () => Promise<{ enabled: boolean; isCustomized: boolean; defaultEnabled: boolean }>;
 
     /** Git 安全保存点开关 — 控制 agent turn 后是否自动创建 XDT savepoint commit */
-    gitSafetyGet: () => Promise<{
-      autoSnapshotEnabled: boolean;
-      isCustomized: boolean;
-      defaultAutoSnapshotEnabled: boolean;
-    }>;
+    gitSafetyGet: () => Promise<{ autoSnapshotEnabled: boolean; isCustomized: boolean; defaultAutoSnapshotEnabled: boolean }>;
     /** 立即生效; Codex rewind 入口跟随此开关显示 */
-    gitSafetySet: (enabled: boolean) => Promise<{
-      autoSnapshotEnabled: boolean;
-      isCustomized: boolean;
-      defaultAutoSnapshotEnabled: boolean;
-    }>;
-    gitSafetyReset: () => Promise<{
-      autoSnapshotEnabled: boolean;
-      isCustomized: boolean;
-      defaultAutoSnapshotEnabled: boolean;
-    }>;
+    gitSafetySet: (enabled: boolean) => Promise<{ autoSnapshotEnabled: boolean; isCustomized: boolean; defaultAutoSnapshotEnabled: boolean }>;
+    gitSafetyReset: () => Promise<{ autoSnapshotEnabled: boolean; isCustomized: boolean; defaultAutoSnapshotEnabled: boolean }>;
 
     /**
      * 智能通讯录(maker-contacts)— 设置页管理 UI 数据通道。
@@ -4371,6 +4767,9 @@ interface ElectronAPI {
     contacts: {
       settingsGet: () => Promise<{ enabled: boolean; isCustomized: boolean }>;
       settingsSet: (enabled: boolean) => Promise<{ enabled: boolean; codexMcpRefreshed?: boolean }>;
+      syncStatusGet: () => Promise<unknown>;
+      syncEnabledSet: (enabled: boolean) => Promise<unknown>;
+      syncNow: () => Promise<unknown>;
       list: (opts?: unknown) => Promise<unknown[]>;
       get: (id: string) => Promise<unknown>;
       create: (input: unknown) => Promise<unknown>;
@@ -4399,6 +4798,7 @@ interface ElectronAPI {
       parseVcf: (text: string) => Promise<unknown[]>;
       import: (records: unknown[], opts?: { groupId?: string }) => Promise<unknown>;
       onChanged: (cb: () => void) => () => void;
+      onSyncStatusChanged: (cb: (status: unknown) => void) => () => void;
     };
 
     /** Codex app-server 当前进程启动冻结的鉴权注入方式(oauth-bearer = 走订阅 / env-key = 走网关 / provider-oauth = proxy 注入供应商 OAuth) */
@@ -4447,7 +4847,7 @@ interface ElectronAPI {
     // Stage 2 C1: chat utility (前身 cc-agent:generate-title / cc-agent:plan-file-write)
     generateTitle: (
       message: string,
-      agentKind: 'claude-code' | 'codex',
+      agentKind: 'claude-code' | 'codex' | 'pi',
       sessionId?: string,
     ) => Promise<{ title: string | null }>;
     /** 重命名输入框 Magic 按钮:按会话最新对话内容重新生成标题(失败返 title: null)。 */
@@ -4460,7 +4860,7 @@ interface ElectronAPI {
     autoTitle: (request: {
       sessionId: string;
       text: string;
-      agentKind: 'claude-code' | 'codex';
+      agentKind: 'claude-code' | 'codex' | 'pi';
       isUserText?: boolean;
     }) => Promise<{ applied: boolean; done: boolean }>;
     helpAsk: (
@@ -4469,6 +4869,28 @@ interface ElectronAPI {
     helpFeedbackCreate: (
       input: import('../shared/helpTypes').HelpFeedbackDraftInput,
     ) => Promise<import('../shared/helpTypes').HelpFeedbackDraft>;
+    /** /issues 页面的「我的 Issue」列表;force=true 绕过 main 侧 60s TTL(手动刷新)。 */
+    /**
+     * /issues 首屏快照(上次查询成功时落盘的列表镜像)。进页面先渲染它,避免空等远端;
+     * fresh 一到即整体接管。**非权威**:里面没有本次查询的健康状况,它的空列表也不构成
+     * 「查证过的空」(详见 main/github-issue/myIssuesSnapshotStore.ts)。
+     */
+    getMyIssuesSnapshot: () => Promise<
+      import('../shared/myIssues').MyIssuesSnapshot | null
+    >;
+    listMyIssues: (options?: { force?: boolean }) => Promise<
+      | ({ success: true } & import('../shared/myIssues').MyIssuesResult)
+      | {
+          success: false;
+          /** 稳定脱敏码,不是原始错误文本。 */
+          error: import('../shared/myIssues').MyIssuesErrorCode;
+          items: [];
+          githubEnhancement: null;
+          githubEnhancementFailed: false;
+          degraded: null;
+          truncated: false;
+        }
+    >;
     writePlanFile: (params: {
       requestId: string;
       planFilePath: string;
@@ -4481,7 +4903,10 @@ interface ElectronAPI {
      * 错误码: SESSION_NOT_FOUND / MESSAGE_NOT_FOUND / NOT_USER_MESSAGE /
      *        NO_PRIOR_ASSISTANT / SESSION_RUNNING / NO_LIVE_QUERY
      */
-    rewindPreview: (sessionId: string, clientId: string) => Promise<RewindFilesResultPayload>;
+    rewindPreview: (
+      sessionId: string,
+      clientId: string,
+    ) => Promise<RewindFilesResultPayload>;
     /**
      * 真执行 rewind: SDK 文件回滚 + 关 query + 设 pendingRewindTo + DB 软删 messages。
      * 三件套 (resume + resumeSessionAt + forkSession) 重启在用户下一次 send 时由
@@ -4492,7 +4917,9 @@ interface ElectronAPI {
       clientId: string,
       opts?: { requireLatestUser?: boolean; stopIfRunning?: boolean },
     ) => Promise<import('@/lib/ccAgent.types').Session>;
-    forkStripEncrypted: (sourceSessionId: string) => Promise<import('@/lib/ccAgent.types').Session>;
+    forkStripEncrypted: (
+      sourceSessionId: string,
+    ) => Promise<import('@/lib/ccAgent.types').Session>;
     /**
      * fork: 把 source session 在 messageClientId 处 fork 成新 session。
      * fork 点支持 user 消息(复制提问之前内容)与 assistant 消息(复制含该回复
@@ -4508,29 +4935,42 @@ interface ElectronAPI {
 
     /* ── Agent 鉴权 (取代老 codex.auth.*) ── */
     auth: {
-      getState: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
-      triggerLogin: (agentKind: 'claude-code' | 'codex') => Promise<CodexAuthState>;
-      cancelLogin: (agentKind: 'claude-code' | 'codex') => Promise<void>;
-      logout: (agentKind: 'claude-code' | 'codex') => Promise<void>;
+      getState: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<CodexAuthState>;
+      triggerLogin: (
+        agentKind: 'claude-code' | 'codex' | 'pi',
+        options?: { mode?: 'browser' | 'device-code'; ownerId?: string },
+      ) => Promise<CodexAuthState>;
+      cancelLogin: (
+        agentKind: 'claude-code' | 'codex' | 'pi',
+        options?: { releaseOwner?: boolean; ownerId?: string },
+      ) => Promise<void>;
+      logout: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<void>;
       onStateChanged: (
-        cb: (s: { agentKind: 'claude-code' | 'codex' } & CodexAuthState) => void,
+        cb: (s: { agentKind: 'claude-code' | 'codex' | 'pi' } & CodexAuthState) => void,
       ) => () => void;
       onLoginProgress: (
-        cb: (p: { agentKind: 'claude-code' | 'codex'; phase: string; detail?: string }) => void,
+        cb: (p: {
+          agentKind: 'claude-code' | 'codex' | 'pi';
+          phase: string;
+          mode?: 'browser' | 'device-code';
+          detail?: string;
+          verificationUrl?: string;
+          userCode?: string;
+        }) => void,
       ) => () => void;
     };
 
     /* ── Agent 联合状态 (binary + auth, 取代老 codex.binary.getStatus) ── */
     agent: {
-      getStatus: (agentKind: 'claude-code' | 'codex') => Promise<{
+      getStatus: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
         binaryReady: boolean;
         binaryPath: string;
         authReady: boolean;
         identity?: string;
       }>;
       /** spawn 当前应用使用的 binary `--version`, 进程内缓存。About 面板用。 */
-      getBinaryVersion: (agentKind: 'claude-code' | 'codex') => Promise<{
-        kind: 'claude-code' | 'codex';
+      getBinaryVersion: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
+        kind: 'claude-code' | 'codex' | 'pi';
         binaryPath: string | null;
         version: string | null;
         error?: string;
@@ -4539,7 +4979,7 @@ interface ElectronAPI {
 
     /* ── Agent 今日累计 (取代老 codex.usage.* + onUsageTodaySpendChanged) ── */
     usage: {
-      getToday: (agentKind: 'claude-code' | 'codex') => Promise<{
+      getToday: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<{
         day: string;
         money?: import('../shared/regionalMoney').RegionalMoney;
         costUsd?: number;
@@ -4549,29 +4989,42 @@ interface ElectronAPI {
         reasoningTokens?: number;
         cachedTokens?: number;
       }>;
-      getAccount: (agentKind: 'claude-code' | 'codex') => Promise<unknown | null>;
-      /** provider-scoped 模型单价表；XD 价格与 model-access /models 同快照更新。 */
-      getModelPricing: () => Promise<import('../shared/regionalMoney').ModelPricingCatalog | null>;
+      getAccount: (agentKind: 'claude-code' | 'codex' | 'pi') => Promise<unknown | null>;
+      /** Codex app-server authoritative windows and banked reset-credit metadata. */
+      getCodexRateLimits: () => Promise<
+        import('@cindy/maker-shared/device-link-contract').MobileCodexRateLimitsResult
+      >;
+      /** Cindy AI /models 下发的 XD 原生报价。 */
+      getModelPricing: () => Promise<
+        import('../shared/regionalMoney').ModelPricingCatalog | null
+      >;
       onModelPricingChanged: (
-        cb: (pricing: import('../shared/regionalMoney').ModelPricingCatalog | null) => void,
+        cb: (
+          pricing: import('../shared/regionalMoney').ModelPricingCatalog | null,
+        ) => void,
+      ) => () => void;
+      /** 非 XD Provider 的 Catalog 参考价与用户覆盖。 */
+      getReferenceModelPricing: () => Promise<
+        import('../shared/regionalMoney').ModelPricingCatalog
+      >;
+      onReferenceModelPricingChanged: (
+        cb: (pricing: import('../shared/regionalMoney').ModelPricingCatalog) => void,
       ) => () => void;
       /** 用量历史聚合 (首页仪表盘)。wire 形态与 main/usage/usageHistory.ts 的 UsageHistoryPayload 同形。 */
-      getHistory: (opts?: {
-        days?: number;
-        forceRefresh?: boolean;
-      }) => Promise<import('../main/usage/usageHistory').UsageHistoryPayload>;
-      onTodaySpendChanged: (
-        cb: (p: {
-          day: string;
-          money: import('../shared/regionalMoney').RegionalMoney;
-          costUsd?: number;
-        }) => void,
-      ) => () => void;
+      getHistory: (
+        opts?: { days?: number; forceRefresh?: boolean },
+      ) => Promise<import('../main/usage/usageHistory').UsageHistoryPayload>;
+      onTodaySpendChanged: (cb: (p: {
+        day: string;
+        money: import('../shared/regionalMoney').RegionalMoney;
+        costUsd?: number;
+      }) => void) => () => void;
       onTodayTokensChanged: (cb: (p: CodexUsageSnapshot) => void) => () => void;
       onClaudeAccountChanged: (
         cb: (p: {
           spend: number;
           maxBudget: number;
+          currency: import('../shared/regionalMoney').MoneyCurrency;
           budgetResetAt?: string | null;
           todaySpend: number | null;
           fetchedAt: number;
@@ -4606,15 +5059,13 @@ interface ElectronAPI {
       /** xAI(SuperGrok bridge)限流快照推送;字段与 main usageBroadcaster XaiRateLimitSnapshot 对齐。
        *  null = main 主动清空(xAI 登出 / 换账号,clearXaiRateLimitSnapshot)。 */
       onXaiRateLimitChanged: (
-        cb: (
-          p: {
-            limitRequests?: number;
-            remainingRequests?: number;
-            limitTokens?: number;
-            remainingTokens?: number;
-            updatedAt: number;
-          } | null,
-        ) => void,
+        cb: (p: {
+          limitRequests?: number;
+          remainingRequests?: number;
+          limitTokens?: number;
+          remainingTokens?: number;
+          updatedAt: number;
+        } | null) => void,
       ) => () => void;
     };
 
@@ -4622,14 +5073,11 @@ interface ElectronAPI {
     crossAgent: {
       detect: (
         workingDir: string,
-        agentKind: 'claude-code' | 'codex',
+        agentKind: 'claude-code' | 'codex' | 'pi',
       ) => Promise<{ items: CrossAgentMigrationItem[] }>;
-      convert: (items: CrossAgentMigrationItem[]) => Promise<{
-        total: number;
-        successCount: number;
-        skippedCount: number;
-        failedCount: number;
-      }>;
+      convert: (
+        items: CrossAgentMigrationItem[],
+      ) => Promise<{ total: number; successCount: number; skippedCount: number; failedCount: number }>;
       onStep: (cb: (ev: CrossAgentStepEvent) => void) => () => void;
     };
 
@@ -4655,11 +5103,7 @@ interface ElectronAPI {
       runNow: (id: string) => Promise<{ runId: string }>;
       /** script 任务能力选择器:各能力的运行时可用性(依赖意识的装入/唤醒态)。 */
       scriptCapabilityStatus: () => Promise<{
-        statuses: Array<{
-          capability: string;
-          state: 'ok' | 'ghost-missing' | 'ghost-asleep';
-          ghostName?: string;
-        }>;
+        statuses: Array<{ capability: string; state: 'ok' | 'ghost-missing' | 'ghost-asleep'; ghostName?: string }>;
       }>;
       /** 表单「测试运行」:立即执行一次前置检查脚本,返回判定 / exit code / 输出 / 耗时。 */
       testPreRunHook: (params: {
@@ -4689,36 +5133,34 @@ interface ElectronAPI {
         scheduleName?: string;
         workingDir?: string;
         providerId?: string;
-        agentKind?: 'claude-code' | 'codex';
+        agentKind?: 'claude-code' | 'codex' | 'pi';
         model?: string;
         /** 绑定会话任务:workingDir 空时 main 按会话 meta.workDir 解析落盘/自测目录。 */
         targetSessionId?: string;
         currentCommand?: string;
-      }) => Promise<
-        | {
-            ok: true;
-            command: string;
-            filePath: string;
-            content: string;
-            test: {
-              status: 'passed' | 'skipped' | 'failed' | 'timed_out' | 'aborted';
-              decision: 'run' | 'skip' | 'block';
-              exitCode: number | null;
-              durationMs: number;
-              stdout: string;
-              stderr: string;
-              stdoutTruncated: boolean;
-              stderrTruncated: boolean;
-              timedOut: boolean;
-              aborted: boolean;
-              spawnError?: string;
-              error?: string;
-            };
-          }
-        | UtilityTextFailure
-      >;
+      }) => Promise<{
+        ok: true;
+        command: string;
+        filePath: string;
+        content: string;
+        test: {
+          status: 'passed' | 'skipped' | 'failed' | 'timed_out' | 'aborted';
+          decision: 'run' | 'skip' | 'block';
+          exitCode: number | null;
+          durationMs: number;
+          stdout: string;
+          stderr: string;
+          stdoutTruncated: boolean;
+          stderrTruncated: boolean;
+          timedOut: boolean;
+          aborted: boolean;
+          spawnError?: string;
+          error?: string;
+        };
+      } | UtilityTextFailure>;
       listRuns: (id: string, limit?: number) => Promise<unknown[]>;
-      listSidebarIndexRuns: () => Promise<unknown[]>;
+      /** { runs, inflightRunIds } —— 形态见 features/scheduler/lib/scheduleSidebarIndexRuns。 */
+      listSidebarIndexRuns: () => Promise<unknown>;
       listCostSummaries: () => Promise<unknown[]>;
       deleteRun: (runId: string) => Promise<void>;
       getInflightCount: (id: string) => Promise<number>;
@@ -4734,20 +5176,18 @@ interface ElectronAPI {
       reconcile: (params: { workingDir: string }) => Promise<ProjectAutomationReconcileResult>;
       listConsents: () => Promise<ProjectAutomationConsent[]>;
       revokeConsent: (workingDir: string) => Promise<{ deleted: number }>;
-      upsertSchedule: (params: {
-        workingDir: string;
-        config: unknown;
-      }) => Promise<ProjectAutomationReconcileResult>;
-      removeSchedule: (params: {
-        workingDir: string;
-        id: string;
-      }) => Promise<ProjectAutomationReconcileResult>;
+      upsertSchedule: (params: { workingDir: string; config: unknown }) => Promise<ProjectAutomationReconcileResult>;
+      removeSchedule: (params: { workingDir: string; id: string }) => Promise<ProjectAutomationReconcileResult>;
       onEvent: (cb: (ev: ProjectAutomationEvent) => void) => () => void;
     };
 
     plugins: {
       list: (workingDir?: string) => Promise<PluginListItem[]>;
-      getState: (id: string, workingDir?: string) => Promise<PluginEnableState>;
+      getState: (
+        id: string,
+        workingDir?: string,
+        workspaceKind?: string | null,
+      ) => Promise<PluginEnableState>;
       setEnabled: (id: string, enabled: boolean) => Promise<PluginEnableUpdateResult>;
       clearEnabled: (id: string) => Promise<PluginEnableUpdateResult>;
       setProjectEnabled: (workingDir: string, id: string, enabled: boolean) => Promise<void>;
@@ -4760,9 +5200,7 @@ interface ElectronAPI {
     android: {
       status: () => Promise<AndroidStatusSummary>;
       getConfig: () => Promise<AndroidAutomationConfigState>;
-      setDefaultDevice: (
-        defaultDeviceSerial: string | null,
-      ) => Promise<AndroidAutomationConfigState>;
+      setDefaultDevice: (defaultDeviceSerial: string | null) => Promise<AndroidAutomationConfigState>;
       setAdbPath: (adbPathOverride: string | null) => Promise<AndroidAutomationConfigState>;
       prepareAdb: () => Promise<AndroidAdbPreparationState>;
     };
@@ -4804,7 +5242,9 @@ interface ElectronAPI {
       ) => () => void;
       checkUpdate: () => Promise<ComputerDriverUpdateCheck>;
       updateDriver: (opts?: { joinOnly?: boolean }) => Promise<ComputerDriverInstallResult>;
-      onUpdateProgress: (callback: (progress: ComputerDriverUpdateProgress) => void) => () => void;
+      onUpdateProgress: (
+        callback: (progress: ComputerDriverUpdateProgress) => void,
+      ) => () => void;
     };
   };
 }
@@ -4822,12 +5262,28 @@ interface RawReleaseNotesSection {
   items: RawReleaseNotesItem[];
 }
 
+/** Topic-format (v2) block: one user-facing theme with a short narrative. */
+interface RawReleaseNotesTopic {
+  emoji?: string;
+  title: string;
+  text: string;
+  contributors?: string[];
+}
+
 interface RawReleaseNotesPayload {
   version: string;
   date: string;
-  /** Flat contributor list — collective hall-of-fame on top of per-item `by`. */
-  contributors: string[];
-  sections: RawReleaseNotesSection[];
+  /**
+   * Flat contributor list — collective hall-of-fame on top of per-item `by`.
+   * Optional: older notice files predate the field (renderer defaults to []).
+   */
+  contributors?: string[];
+  /** Legacy author-grouped sections. Absent on topic-format payloads. */
+  sections?: RawReleaseNotesSection[];
+  /** Topic-format blocks. Non-empty ⇒ renderer uses the topic layout. */
+  topics?: RawReleaseNotesTopic[];
+  /** Optional one-line lead above the topics (e.g. PR/commit counts). */
+  intro?: string;
 }
 
 /* ── SkillHub Registry types (v0.6) ──
@@ -4845,8 +5301,8 @@ interface StoredInstall {
   installedAt: number;
   /** unix seconds。update / publish 同步时刷新。 */
   updatedAt: number;
-  /** 本地来源：installed=从市场安装，published=本地创建后发布，learned=/learn 蒸馏产物。历史数据无此字段。 */
-  origin?: 'installed' | 'published' | 'learned';
+  /** 本地来源：installed=从市场安装，published=本地创建后发布，learned=/learn 蒸馏产物，imported=本地 zip/SKILL.md 导入。历史数据无此字段。 */
+  origin?: 'installed' | 'published' | 'learned' | 'imported';
   /** 是否由产品自动同步流程安装。用于区分普通市场安装与用户可 opt-out 的自动同步安装。 */
   autoSynced?: boolean;
   /** /learn 蒸馏产物的溯源(仅 origin='learned')。personal=true ⇒ publish 拦截。 */
@@ -4880,9 +5336,9 @@ interface SkillhubSkill {
   /** URL 匹配键 — 不含 engine，和路由格式一致，用于侧栏选中高亮。 */
   urlKey: string;
   /** 来自哪个 agent 引擎。 */
-  engine: 'claude-code' | 'codex';
+  engine: 'claude-code' | 'codex' | 'pi';
   /** 发现该 skill 的所有引擎专属路径（去重后）。 */
-  linkedEngines: Array<{ engine: 'claude-code' | 'codex'; label: string }>;
+  linkedEngines: Array<{ engine: 'claude-code' | 'codex' | 'pi'; label: string }>;
   kind: SkillhubKind;
   scope: SkillhubScope;
   name: string;
@@ -4906,7 +5362,9 @@ interface SkillhubSkill {
 }
 
 type SkillhubSourceStatus =
-  { state: 'ok'; count: number } | { state: 'missing' } | { state: 'error'; message: string };
+  | { state: 'ok'; count: number }
+  | { state: 'missing' }
+  | { state: 'error'; message: string };
 
 interface SkillhubSourceReport {
   kind: SkillhubKind;
@@ -4993,7 +5451,11 @@ interface SkillUsageSummary {
   trend: SkillUsageTrendPoint[];
 }
 
-type SkillUsageEvidenceBucket = 'tool_failed' | 'command_failed' | 'repeated_calls' | 'recent';
+type SkillUsageEvidenceBucket =
+  | 'tool_failed'
+  | 'command_failed'
+  | 'repeated_calls'
+  | 'recent';
 
 interface SkillUsageEvidenceIndex {
   id: string;
@@ -5002,7 +5464,7 @@ interface SkillUsageEvidenceIndex {
   rawLineNo: number;
   sessionId: string;
   sdkSessionId: string;
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   skillName: string;
   skillPath: string | null;
   skillDocumentHash: string | null;
@@ -5131,24 +5593,14 @@ type SkillhubPublishProgressEvent =
       name: string;
       version: string;
       status: string;
-      gates?: Array<{
-        name: string;
-        label?: Record<string, string>;
-        status: string;
-        issues?: unknown[];
-      }>;
+      gates?: Array<{ name: string; label?: Record<string, string>; status: string; issues?: unknown[] }>;
     }
   | {
       phase: 'scan-result';
       name: string;
       version: string;
       status: string;
-      gates?: Array<{
-        name: string;
-        label?: Record<string, string>;
-        status: string;
-        issues?: unknown[];
-      }>;
+      gates?: Array<{ name: string; label?: Record<string, string>; status: string; issues?: unknown[] }>;
     }
   | { phase: 'failed'; name?: string; errorCode: SkillhubPublishErrorCode; message: string };
 

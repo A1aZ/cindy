@@ -2,6 +2,7 @@ import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 import type { SessionSource } from '../../shared/sessionSource';
 import type { TurnUsageDetails } from '../../shared/turnUsageDetails';
 import type { RegionalMoney } from '../../shared/regionalMoney';
+import type { AutoResumeInfo } from '../../shared/agentInputQueue';
 
 export type SessionStatus = 'active' | 'archived' | 'deleted';
 export type WorkspaceKind = 'project' | 'dialogue';
@@ -12,7 +13,7 @@ export type DeviceLinkConnectionStatus = 'connected' | 'disconnected';
  * 暂时只有 'cc'（Claude Code）。未来扩展 'codex' 等时新增枚举值即可，
  * schema 不动；老 session DEFAULT 'cc' 兜底。
  */
-export type AgentKind = 'cc' | 'codex';
+export type AgentKind = 'cc' | 'codex' | 'pi';
 export type MakerVendor = AgentKind | 'orca';
 export type OrcaRole = 'lead' | 'worker';
 
@@ -87,6 +88,21 @@ export interface CcMeta {
   autoResume?: boolean;
 
   /**
+   * 这次自动续跑的展示信息（中断原因 + 本轮第几次 + 会话累计）。
+   *
+   * 只有「中断自愈」路径会带（silent-stop 那条本身没有 error）。renderer 用它渲染
+   * 「已重新连接」活动行的 param 位与展开详情——自愈成功时 error 行**不落库**，
+   * 所以这是中断原因唯一的用户可见出口。
+   */
+  autoResumeInfo?: AutoResumeInfo;
+
+  /**
+   * 这次自动续跑的**结果**,由后续事件回填(见 main 的 markAutoResumeOutcome)。
+   * 缺省 = 还在等结果。renderer 据此三态渲染:重新连接中 / 已重新连接 / 未成功。
+   */
+  autoResumeOutcome?: 'succeeded' | 'failed';
+
+  /**
    * Hook 来源元数据（IM 平台 + 用户干净原文 + 结构化 thread 上下文）。
    * hook session-runner 注入; renderer 据此渲染 Cindy 署名任务卡片
    * (userText 为卡片正文, 与发给 agent 的完整 prompt 分离)。
@@ -144,7 +160,7 @@ export interface CcMeta {
    * "用量已恢复,继续目标")。同 goalCompletion,renderer 据此渲成 system card 分隔条,
    * 不进 prompt。
    */
-  goalNotice?: 'usage-resumed';
+  goalNotice?: 'usage-resumed' | 'capacity-resumed';
 
   /**
    * Host-side marker:这条 user 消息是一个 /goal 目标的设定 / 更新(goal-host 在新建或
@@ -295,8 +311,8 @@ export type MessageRole = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'a
  * 不作为对话正文渲染,也绝不回发给 agent(注入走 main 的 wire 前缀通道)。
  */
 export interface AgentSwitchContent {
-  fromAgentKind: 'cc' | 'codex';
-  toAgentKind: 'cc' | 'codex';
+  fromAgentKind: 'cc' | 'codex' | 'pi';
+  toAgentKind: 'cc' | 'codex' | 'pi';
   fromModel: string | null;
   toModel: string | null;
   handoff: string;
@@ -326,6 +342,6 @@ export interface Message {
    * session-agent-switch 后 session.agentKind 只代表当前活跃引擎,历史行按本字段解析;
    * null = 切换功能上线前的老消息(回落 session.agentKind)。
    */
-  agentKind?: 'cc' | 'codex' | null;
+  agentKind?: 'cc' | 'codex' | 'pi' | null;
   createdAt: string; // ISO 8601
 }

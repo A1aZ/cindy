@@ -6,9 +6,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { GhostManifest, InstalledGhost } from '../../../shared/ghost';
+import type { PluginMarketItem } from '../../../shared/pluginMarket';
 import {
   filterGhostPluginItems,
   ghostFallbackIconKind,
+  ghostPanelOwnerKey,
+  marketPresentationForInstalledGhost,
+  nextOpenPanelIdForOwner,
   sortGhostPluginItemsByRecentUse,
   toGhostPluginDetail,
   toGhostPluginListItem,
@@ -56,6 +60,34 @@ function installed(overrides: Partial<InstalledGhost> = {}): InstalledGhost {
   };
 }
 
+function marketItem(overrides: Partial<PluginMarketItem> = {}): PluginMarketItem {
+  return {
+    pluginId: `c${'a'.repeat(24)}`,
+    ghostId: 'xd-mivo',
+    name: 'Mivo Studio',
+    description: 'Latest market description.',
+    author: 'Xindong Design',
+    scope: 'public',
+    organizationId: null,
+    defaultInstall: false,
+    releaseId: 'release-1',
+    version: '1.5.10',
+    publishedAt: '2026-07-27T00:00:00.000Z',
+    sourceType: 'server',
+    sourceMarketName: null,
+    icon: {
+      mimeType: 'image/png',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 128,
+      url: 'https://plugin.example.invalid/mivo.png?signature=new',
+      expiresAt: '2026-07-27T01:00:00.000Z',
+    },
+    installState: 'installed',
+    enabled: true,
+    ...overrides,
+  };
+}
+
 describe('ghostPluginViewModel', () => {
   it('maps iconless Plugins to restrained functional fallback symbols', () => {
     expect(ghostFallbackIconKind('Lizi Mivo', 'lizi-mivo')).toBe('media');
@@ -73,6 +105,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
       {
         id: 'lizi-mivo',
@@ -81,6 +114,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
       {
         id: 'slack',
@@ -89,6 +123,7 @@ describe('ghostPluginViewModel', () => {
         version: '1',
         enabled: true,
         canUse: true,
+        tabPanel: false,
       },
     ] satisfies GhostPluginListItem[];
 
@@ -114,6 +149,63 @@ describe('ghostPluginViewModel', () => {
       enabled: true,
       canUse: true,
       version: '1.5.10',
+    });
+  });
+
+  it('overlays exact installed market presentation without changing runtime facts', () => {
+    const ghost = installed({
+      iconDataUrl: 'data:image/png;base64,OLD',
+      enabled: false,
+    });
+    const presentation = marketPresentationForInstalledGhost(ghost, marketItem());
+
+    expect(toGhostPluginListItem(ghost, presentation)).toMatchObject({
+      id: 'xd-mivo',
+      name: 'Mivo Studio',
+      description: 'Latest market description.',
+      iconDataUrl: 'https://plugin.example.invalid/mivo.png?signature=new',
+      version: '1.5.10',
+      enabled: false,
+      canUse: true,
+    });
+    const detail = toGhostPluginDetail(ghost, presentation);
+    expect(detail.author).toBe('Xindong Design');
+    expect(detail.permissions.map((item) => item.kind)).toEqual([
+      'network',
+      'network',
+      'tool',
+      'tool',
+      'command',
+      'card',
+      'code',
+    ]);
+  });
+
+  it('treats a market null icon as an explicit presentation override', () => {
+    const ghost = installed({ iconDataUrl: 'data:image/png;base64,OLD' });
+    const presentation = marketPresentationForInstalledGhost(ghost, marketItem({ icon: null }));
+
+    expect(presentation).not.toBeNull();
+    expect(toGhostPluginListItem(ghost, presentation)).not.toHaveProperty('iconDataUrl');
+  });
+
+  it.each([
+    ['local market miss', null],
+    ['not installed', marketItem({ installState: 'not-installed' })],
+    ['source conflict', marketItem({ installState: 'conflict' })],
+    ['pending update', marketItem({ installState: 'update-available', version: '1.6.0' })],
+    ['unresolved same-version provenance', marketItem({ installState: 'update-available' })],
+    ['version mismatch', marketItem({ version: '1.6.0' })],
+    ['ghost ID mismatch', marketItem({ ghostId: 'another-plugin' })],
+  ] as const)('keeps local presentation for %s', (_label, item) => {
+    const ghost = installed({ iconDataUrl: 'data:image/png;base64,LOCAL' });
+    const presentation = marketPresentationForInstalledGhost(ghost, item);
+
+    expect(presentation).toBeNull();
+    expect(toGhostPluginListItem(ghost, presentation)).toMatchObject({
+      name: 'XD Mivo',
+      description: 'Generate media assets.',
+      iconDataUrl: 'data:image/png;base64,LOCAL',
     });
   });
 
@@ -181,5 +273,32 @@ describe('ghostPluginViewModel', () => {
 
     expect(detail.panelMinWidth).toBe(360);
     expect(detail).not.toHaveProperty('manifest');
+  });
+});
+
+describe('plugin panel owner isolation', () => {
+  it('gives each data owner its own panel host key and stays stable within one', () => {
+    const cloudA = ghostPanelOwnerKey('cloud', 'owner-a');
+    const cloudB = ghostPanelOwnerKey('cloud', 'owner-b');
+    const local = ghostPanelOwnerKey('local', null);
+
+    // 账号 A 与 B 即便装了同 id / 同版本 / 同入口的插件,宿主 key 也必须不同——
+    // 否则 React 复用同一 webview 实例,A 的 DOM 与内存态会留在 B 面前。
+    expect(new Set([cloudA, cloudB, local]).size).toBe(3);
+    // 同一身份内稳定,不会无谓重挂面板。
+    expect(ghostPanelOwnerKey('cloud', 'owner-a')).toBe(cloudA);
+  });
+
+  it('closes an open panel when the data owner changes, keeps it otherwise', () => {
+    const a = ghostPanelOwnerKey('cloud', 'owner-a');
+    const b = ghostPanelOwnerKey('cloud', 'owner-b');
+
+    // A 打开着面板 → 切到 B:必须关掉,不许因为 B 也装了同 id 的插件就留着。
+    expect(nextOpenPanelIdForOwner(a, b, 'ghost-shared')).toBeNull();
+    // 云 → 本地同样算换身份。
+    expect(nextOpenPanelIdForOwner(a, ghostPanelOwnerKey('local', null), 'ghost-shared')).toBeNull();
+    // 身份没变则原样保留(别把用户正在用的面板关掉)。
+    expect(nextOpenPanelIdForOwner(a, a, 'ghost-shared')).toBe('ghost-shared');
+    expect(nextOpenPanelIdForOwner(a, a, null)).toBeNull();
   });
 });

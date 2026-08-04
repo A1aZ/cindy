@@ -1,11 +1,11 @@
-import type { BrowserControlRuntime } from "@cindy/browser-control-runtime";
-import type { AgentKind } from "@cindy/maker-core";
+import type { BrowserControlRuntime } from '@cindy/browser-control-runtime';
+import type { AgentKind } from '@cindy/maker-core';
 import type {
   IOSSimulatorInstanceErrorCode,
   IOSSimulatorRuntimeErrorCode,
-} from "@cindy/ios-simulator-runtime";
+} from '@cindy/ios-simulator-runtime';
 
-import type { Recipe, SiteGuide } from "./browser/recipe-loader.js";
+import type { Recipe, SiteGuide } from './browser/recipe-loader.js';
 
 export interface LiziMcpLogger {
   trace(...args: unknown[]): void;
@@ -77,6 +77,7 @@ export interface SavedVideoRef {
 // Jira / Confluence 的 deps 与结果类型已随 lizi_jira / lizi_confluence 退役
 // (2026-07-14,迁入内置意识 xd-atlassian)整体删除。
 
+
 export interface FeishuBotSendFileResult {
   ok: boolean;
   reason?: string;
@@ -128,6 +129,33 @@ export interface FeishuBotMcpHostDeps {
   logger?: LiziMcpLogger;
 }
 
+export interface WechatBotSendMessageResult {
+  ok: boolean;
+  messageId?: string;
+  reason?: string;
+}
+
+export interface WechatBotSendFileResult {
+  ok: boolean;
+  messageId?: string;
+  reason?: string;
+}
+
+/** Host bridge for the personal WeChat proactive-message MCP. */
+export interface WechatBotMcpHostDeps {
+  getActivePeerIdForSession(
+    sessionId: string | undefined,
+  ): Promise<string | null> | string | null;
+  getMostRecentPeerId(): Promise<string | null> | string | null;
+  sendMessage(peerId: string, text: string): Promise<WechatBotSendMessageResult>;
+  sendFile(
+    peerId: string,
+    absPath: string,
+    displayName?: string,
+  ): Promise<WechatBotSendFileResult>;
+  logger?: LiziMcpLogger;
+}
+
 // ── cindy_slack(Slack 网关工具, 2026-07 并轨 hook 通道) ──────────────────────
 
 /** Slack 网关工具的结构化错误(hook-control manager 定义的同构形状)。 */
@@ -138,7 +166,8 @@ export interface SlackToolBridgeError {
 
 /** callTool 的结构化结果(桥永不 throw)。 */
 export type SlackToolBridgeResult =
-  { ok: true; result: unknown } | { ok: false; error: SlackToolBridgeError };
+  | { ok: true; result: unknown }
+  | { ok: false; error: SlackToolBridgeError };
 
 /**
  * hook-control 的 Slack 工具桥(结构性 duck type —— 本包不 import desktop
@@ -186,7 +215,7 @@ export interface SlackHookMcpDeps {
  * @cindy/maker-scheduler still has zero runtime deps per Phase 1).
  */
 export interface SchedulerMcpDeps {
-  getScheduler(): import("@cindy/maker-scheduler").Scheduler;
+  getScheduler(): import('@cindy/maker-scheduler').Scheduler;
   /**
    * 前置检查脚本(preRunHook)统一安装服务(host 注入,desktop 实现为
    * scheduler-host/hook-script-generator.installHookScript):落盘路径规范、
@@ -210,10 +239,7 @@ export interface SchedulerHookScriptService {
    * 把受支持的单脚本相对命令固化为绝对路径。任意 shell 命令保持原样；相对脚本
    * 缺少原 cwd 或文件不存在时必须报错，避免改绑后以 fail-open 静默绕过 hook。
    */
-  stabilizeCommand?(input: {
-    command: string;
-    workingDir?: string;
-  }): Promise<string>;
+  stabilizeCommand?(input: { command: string; workingDir?: string }): Promise<string>;
   install(input: {
     /** agent 写好的脚本内容(Node ESM);与 description 至少给一个,都给时 script 优先。 */
     script?: string;
@@ -234,7 +260,7 @@ export interface SchedulerHookScriptService {
     filePath: string;
     content: string;
     /** 落盘后立即执行一次的自测结果。 */
-    test: import("@cindy/maker-scheduler").PreRunHookRunResult;
+    test: import('@cindy/maker-scheduler').PreRunHookRunResult;
   }>;
 }
 
@@ -258,7 +284,7 @@ export interface SchedulerHookScriptService {
  * vCard 序列化, workspace dep 已声明), 依赖方向仍单向 @cindy/mcps → maker-core。
  */
 export interface MemoryMcpDeps {
-  getManager(): import("@cindy/maker-core").MakerMemoryManager;
+  getManager(): import('@cindy/maker-core').MakerMemoryManager;
   workdir: string;
   getSessionContext?: () => LiziMcpSessionContext;
   /**
@@ -271,7 +297,7 @@ export interface MemoryMcpDeps {
 
 export interface LspMcpDeps {
   workdir: string;
-  pool: import("./lsp/server/lsp-server-pool.js").LspServerPool;
+  pool: import('./lsp/server/lsp-server-pool.js').LspServerPool;
   logger?: LiziMcpLogger;
 }
 
@@ -290,16 +316,16 @@ export interface SshHostSnapshotLike {
     hostname: string;
     port: number;
     user: string;
-    authMethod: "agent" | "key";
-    source: "ssh-config" | "manual";
+    authMethod: 'agent' | 'key';
+    source: 'ssh-config' | 'manual';
   };
   status:
-    | "disconnected"
-    | "connecting"
-    | "authenticating"
-    | "ready"
-    | "reconnecting"
-    | "failed";
+    | 'disconnected'
+    | 'connecting'
+    | 'authenticating'
+    | 'ready'
+    | 'reconnecting'
+    | 'failed';
   lastError?: string;
   lastAuthLabel?: string;
   statusChangedAt: number;
@@ -363,23 +389,21 @@ export interface SshMcpDeps {
  * vCard 序列化, workspace dep 已声明), 依赖方向仍单向 @cindy/mcps → maker-core。
  */
 export interface ContactsMcpDeps {
-  getManager(): import("@cindy/maker-core").MakerContactsManager;
+  getManager(): import('@cindy/maker-core').MakerContactsManager;
   /** host 设置层的功能开关. 缺省视为常开(测试/独立复用场景) */
   isEnabled?: () => boolean;
   /**
    * 系统通讯录只读拉取(macOS 由 host 注入 JXA 读取器; 其它平台缺省)。
    * 缺省时 contacts_import_system 工具不注册(跟 memory 的 session_search 同模式)。
    */
-  readSystemContacts?: () => Promise<
-    import("@cindy/maker-core").ImportContactRecord[]
-  >;
+  readSystemContacts?: () => Promise<import('@cindy/maker-core').ImportContactRecord[]>;
   /**
    * 系统通讯录回写(macOS host 注入)。缺省时 contacts_export_system 不注册。
    * 语义: 只增/改结构化字段, 系统侧永不删除。
    */
   writeSystemContacts?: (
-    items: import("@cindy/maker-core").SystemContactWriteItem[],
-  ) => Promise<import("@cindy/maker-core").SystemContactWriteResult[]>;
+    items: import('@cindy/maker-core').SystemContactWriteItem[],
+  ) => Promise<import('@cindy/maker-core').SystemContactWriteResult[]>;
   /**
    * write/manage 类工具成功后的变更通知(host 注入, 用于广播 renderer 刷新)。
    * MCP 直写同进程 store 不经 IPC 层, 没有这个回调 UI 就收不到 agent 侧变更。
@@ -392,7 +416,7 @@ export interface SessionSearchOptions {
   /** 限定 sessionId */
   sessionId?: string;
   /** 限定 role */
-  role?: "user" | "assistant" | "system";
+  role?: 'user' | 'assistant' | 'system';
   /** 默认 10 */
   limit?: number;
 }
@@ -421,19 +445,20 @@ export type SessionSearchFn = (
 // 经 hook 通道由 slack-hook-server 以托管 user token 调 Slack 官方 MCP,
 // 接替退役的 cindy-slack 意识。
 export type LiziMcpId =
-  | "android"
-  | "ios_simulator"
-  | "browser"
-  | "computer"
-  | "cindy_feishu_bot"
-  | "cindy_slack"
-  | "cindy_scheduler"
-  | "cindy_ssh"
-  | "cindy_memory"
-  | "cindy_contacts"
-  | "cindy_helper"
-  | "cindy_orca"
-  | "cindy_lsp";
+  | 'android'
+  | 'ios_simulator'
+  | 'browser'
+  | 'computer'
+  | 'cindy_feishu_bot'
+  | 'cindy_wechat'
+  | 'cindy_slack'
+  | 'cindy_scheduler'
+  | 'cindy_ssh'
+  | 'cindy_memory'
+  | 'cindy_contacts'
+  | 'cindy_helper'
+  | 'cindy_orca'
+  | 'cindy_lsp';
 
 // ── Host-callback Result pattern ────────────────────────────────────────────
 //
@@ -452,13 +477,14 @@ export type ControlOkResult<T extends object = object> = { ok: true } & T;
 
 export type ControlErrResult<E extends string = never> = {
   ok: false;
-  errorCode: E | "HOST_NOT_READY" | "INTERNAL";
+  errorCode: E | 'HOST_NOT_READY' | 'INTERNAL';
   /** Raw diagnostic / error message to pass through as a hint to the LLM. */
   message: string;
 };
 
 export type ControlResult<T extends object = object, E extends string = never> =
-  ControlOkResult<T> | ControlErrResult<E>;
+  | ControlOkResult<T>
+  | ControlErrResult<E>;
 
 /**
  * Worker agent literal — kept as a string literal union (not imported from
@@ -467,11 +493,15 @@ export type ControlResult<T extends object = object, E extends string = never> =
  * adding a new vendor (e.g. 'gemini') without updating this union will cause
  * LLM tool calls to fail zod enum validation.
  */
-export type ControlWorkerAgent = "claude-code" | "codex";
+export type ControlWorkerAgent = 'claude-code' | 'codex' | 'pi';
 
 /** Browser automation MCP host deps. Core browser execution is injected by host. */
 export interface BrowserMcpDeps {
   getRuntime(): BrowserControlRuntime;
+  /** Whether the active backend accepts managed resource downloads. */
+  supportsResourceDownloads?(): boolean;
+  /** Whether the active backend accepts semantic element queries. */
+  supportsSemanticQueries?(): boolean;
   logger?: LiziMcpLogger;
   /**
    * Optional L2 (user-local) recipe layer. The host scans userData, parses with
@@ -497,32 +527,32 @@ export interface BrowserMcpDeps {
 }
 
 export type ComputerMcpToolName =
-  | "status"
-  | "check_permissions"
-  | "get_accessibility_tree"
-  | "launch_app"
-  | "list_apps"
-  | "list_windows"
-  | "get_window_state"
-  | "click"
-  | "double_click"
-  | "right_click"
-  | "drag"
-  | "type_text"
-  | "set_value"
-  | "press_key"
-  | "hotkey"
-  | "scroll"
-  | "zoom"
-  | "get_screen_size"
-  | "get_cursor_position"
-  | "move_cursor"
-  | "get_agent_cursor_state"
-  | "start_recording"
-  | "stop_recording"
-  | "replay_trajectory"
-  | "start_session"
-  | "end_session";
+  | 'status'
+  | 'check_permissions'
+  | 'get_accessibility_tree'
+  | 'launch_app'
+  | 'list_apps'
+  | 'list_windows'
+  | 'get_window_state'
+  | 'click'
+  | 'double_click'
+  | 'right_click'
+  | 'drag'
+  | 'type_text'
+  | 'set_value'
+  | 'press_key'
+  | 'hotkey'
+  | 'scroll'
+  | 'zoom'
+  | 'get_screen_size'
+  | 'get_cursor_position'
+  | 'move_cursor'
+  | 'get_agent_cursor_state'
+  | 'start_recording'
+  | 'stop_recording'
+  | 'replay_trajectory'
+  | 'start_session'
+  | 'end_session';
 
 export interface ComputerDriverStatus {
   installed: boolean;
@@ -538,12 +568,9 @@ export interface ComputerDriverStatus {
   error?: string;
 }
 
-export type ComputerDriverPermissionPlatform =
-  "macos" | "windows" | "linux" | "unsupported";
-export type ComputerDriverPermissionStatus =
-  "granted" | "missing" | "unknown" | "not_required";
-export type ComputerDriverPermissionGrant =
-  "granted" | "missing" | "unknown" | "not_required";
+export type ComputerDriverPermissionPlatform = 'macos' | 'windows' | 'linux' | 'unsupported';
+export type ComputerDriverPermissionStatus = 'granted' | 'missing' | 'unknown' | 'not_required';
+export type ComputerDriverPermissionGrant = 'granted' | 'missing' | 'unknown' | 'not_required';
 
 export interface ComputerDriverPermissionState {
   platform: ComputerDriverPermissionPlatform;
@@ -563,7 +590,6 @@ export interface ComputerMcpCallContext {
   agentKind?: string;
 }
 
-/** Host-resolved process provenance used by MCP routing guards. */
 export interface ComputerProcessIdentity {
   pid: number;
   name?: string;
@@ -574,11 +600,7 @@ export interface ComputerProcessIdentity {
 
 export interface ComputerMcpDeps {
   getStatus(): Promise<ComputerDriverStatus>;
-  /**
-   * Resolve a PID without trusting model-supplied app labels. Desktop hosts
-   * should use OS process provenance; absent/unknown identities preserve the
-   * generic Computer Use path.
-   */
+  /** Resolve process provenance without trusting model-supplied app labels. */
   resolveProcessIdentity?(pid: number): Promise<ComputerProcessIdentity | null>;
   /** Host-issued authorization for an explicitly requested external iOS UI workflow. */
   isExternalIosWorkflowAllowed?(context?: ComputerMcpCallContext): boolean;
@@ -591,28 +613,28 @@ export interface ComputerMcpDeps {
 }
 
 export const ANDROID_MCP_ERROR_CODES = [
-  "ADB_NOT_FOUND",
-  "NO_DEVICE",
-  "MULTIPLE_DEVICES",
-  "DEVICE_UNAUTHORIZED",
-  "DEVICE_OFFLINE",
-  "UI_DUMP_FAILED",
-  "SCREENSHOT_FAILED",
-  "INVALID_NODE",
-  "ANDROID_DRIVER_ERROR",
+  'ADB_NOT_FOUND',
+  'NO_DEVICE',
+  'MULTIPLE_DEVICES',
+  'DEVICE_UNAUTHORIZED',
+  'DEVICE_OFFLINE',
+  'UI_DUMP_FAILED',
+  'SCREENSHOT_FAILED',
+  'INVALID_NODE',
+  'ANDROID_DRIVER_ERROR',
 ] as const;
 
 export type AndroidMcpErrorCode = (typeof ANDROID_MCP_ERROR_CODES)[number];
 
 export type AndroidMcpToolName =
-  | "status"
-  | "list_devices"
-  | "get_device_state"
-  | "tap"
-  | "swipe"
-  | "input_text"
-  | "press_key"
-  | "launch_app";
+  | 'status'
+  | 'list_devices'
+  | 'get_device_state'
+  | 'tap'
+  | 'swipe'
+  | 'input_text'
+  | 'press_key'
+  | 'launch_app';
 
 export interface AndroidConnectedDevice {
   device_serial: string;
@@ -625,7 +647,13 @@ export interface AndroidConnectedDevice {
 }
 
 export type AndroidAdbPathSource =
-  "custom" | "env" | "prepared" | "bundled" | "sdk" | "path" | "fallback";
+  | 'custom'
+  | 'env'
+  | 'prepared'
+  | 'bundled'
+  | 'sdk'
+  | 'path'
+  | 'fallback';
 
 export interface AndroidAdbPreparationState {
   supported: boolean;
@@ -690,7 +718,7 @@ export interface AndroidDeviceStateResult {
   current_app: AndroidCurrentAppState;
   screenshot_file_path: string;
   screenshot_base64: string;
-  screenshot_mime_type: "image/png";
+  screenshot_mime_type: 'image/png';
   nodes: AndroidUiNode[];
   nodes_truncated?: boolean;
   raw_ui_dump_file_path?: string;
@@ -715,26 +743,26 @@ export interface AndroidMcpDeps {
 export type IOSSimulatorMcpErrorCode =
   | IOSSimulatorRuntimeErrorCode
   | IOSSimulatorInstanceErrorCode
-  | "SESSION_CONTEXT_REQUIRED"
-  | "SESSION_NOT_FOUND"
-  | "UNSUPPORTED_SESSION_KIND"
-  | "IOS_SIMULATOR_DISABLED"
-  | "WDA_UNAVAILABLE"
-  | "XCODE_BUILD_FAILED"
-  | "DRIVER_DISCONNECTED"
-  | "ORIENTATION_UNSUPPORTED"
-  | "IOS_SIMULATOR_HOST_ERROR";
+  | 'SESSION_CONTEXT_REQUIRED'
+  | 'SESSION_NOT_FOUND'
+  | 'UNSUPPORTED_SESSION_KIND'
+  | 'IOS_SIMULATOR_DISABLED'
+  | 'WDA_UNAVAILABLE'
+  | 'XCODE_BUILD_FAILED'
+  | 'DRIVER_DISCONNECTED'
+  | 'ORIENTATION_UNSUPPORTED'
+  | 'IOS_SIMULATOR_HOST_ERROR';
 
 export type IOSSimulatorToolAvailabilityState =
-  | "available"
-  | "requires-instance"
-  | "instance-dependent"
-  | "unavailable";
+  | 'available'
+  | 'requires-instance'
+  | 'instance-dependent'
+  | 'unavailable';
 
 export interface IOSSimulatorToolAvailability {
   state: IOSSimulatorToolAvailabilityState;
   reasonCode?: string;
-  backend?: "wda" | "native-hid" | "simctl" | "host";
+  backend?: 'wda' | 'native-hid' | 'simctl' | 'host';
 }
 
 export interface IOSSimulatorToolAvailabilityReport {
@@ -745,60 +773,60 @@ export interface IOSSimulatorToolAvailabilityReport {
 }
 
 export type IOSSimulatorMcpToolName =
-  | "check_environment"
-  | "doctor"
-  | "list_devices"
-  | "list_instances"
-  | "create_instance"
-  | "attach_device"
-  | "detach_device"
-  | "start_instance"
-  | "stop_instance"
-  | "get_screen_map"
-  | "audit_accessibility"
-  | "compare_screen_maps"
-  | "wait_for_ui"
-  | "tap"
-  | "swipe"
-  | "drag"
-  | "long_press"
-  | "key_press"
-  | "batch"
-  | "touch_path"
-  | "touch2_path"
-  | "type_text"
-  | "press_home"
-  | "set_orientation"
-  | "set_appearance"
-  | "set_increase_contrast"
-  | "set_content_size"
-  | "set_location"
-  | "start_location_route"
-  | "clear_location"
-  | "set_privacy"
-  | "push_notification"
-  | "set_status_bar"
-  | "clear_status_bar"
-  | "lock_screen"
-  | "unlock_screen"
-  | "build_app"
-  | "read_build_diagnostics"
-  | "install_app"
-  | "launch_app"
-  | "terminate_app"
-  | "open_url"
-  | "take_screenshot"
-  | "capture_visual_baseline"
-  | "visual_diff"
-  | "capture_state"
-  | "get_diagnostics"
-  | "start_recording"
-  | "stop_recording";
+  | 'check_environment'
+  | 'doctor'
+  | 'list_devices'
+  | 'list_instances'
+  | 'create_instance'
+  | 'attach_device'
+  | 'detach_device'
+  | 'start_instance'
+  | 'stop_instance'
+  | 'get_screen_map'
+  | 'audit_accessibility'
+  | 'compare_screen_maps'
+  | 'wait_for_ui'
+  | 'tap'
+  | 'swipe'
+  | 'drag'
+  | 'long_press'
+  | 'key_press'
+  | 'batch'
+  | 'touch_path'
+  | 'touch2_path'
+  | 'type_text'
+  | 'press_home'
+  | 'set_orientation'
+  | 'set_appearance'
+  | 'set_increase_contrast'
+  | 'set_content_size'
+  | 'set_location'
+  | 'start_location_route'
+  | 'clear_location'
+  | 'set_privacy'
+  | 'push_notification'
+  | 'set_status_bar'
+  | 'clear_status_bar'
+  | 'lock_screen'
+  | 'unlock_screen'
+  | 'build_app'
+  | 'read_build_diagnostics'
+  | 'install_app'
+  | 'launch_app'
+  | 'terminate_app'
+  | 'open_url'
+  | 'take_screenshot'
+  | 'capture_visual_baseline'
+  | 'visual_diff'
+  | 'capture_state'
+  | 'get_diagnostics'
+  | 'start_recording'
+  | 'stop_recording';
 
 export interface IOSSimulatorMcpCallContext {
   sessionId?: string;
   /** Host-internal origin. MCP transport always uses agent; renderer IPC uses user. */
-  origin?: "agent" | "user";
+  origin?: 'agent' | 'user';
 }
 
 /** Host adapter used by the reusable iOS Simulator MCP server. */
@@ -817,6 +845,13 @@ export interface IOSSimulatorMcpDeps {
 export interface LiziMcpSessionContext {
   agentKind: string;
   workingDir: string;
+  /**
+   * SSH remote 会话的 host id (本地会话缺省)。workingDir 此时是远端机器上的
+   * 路径字符串 — cindy_memory 等按 workdir 分区的工具必须用
+   * buildMemoryScopeKey(workingDir, remoteHostId) 定位 store, 不得把远端路径
+   * 直接当本地键 (会与本地同名路径互串)。
+   */
+  remoteHostId?: string;
   vendorOptions?: Record<string, unknown>;
   /**
    * Business 层 session id (host 在 createSession 时通过 opts.id 注入, maker-core
@@ -829,10 +864,17 @@ export interface LiziMcpSessionContext {
    * ctx 时，标准范式是工具直接返业务错误码 (如 LEAD_NOT_SUPPORTED) 而不是抛异常。
    */
   sessionId?: string;
+  /**
+   * 当前内存 Session 实例的唯一代号。business sessionId 在重建后可能复用，
+   * 权限读取方用本字段阻断旧 MCP 请求借用新实例权限。宿主可将它作为
+   * opaque route identity 放进 harness 的本地 MCP URL；不得把它暴露成
+   * 模型或插件可控的工具参数。
+   */
+  sessionInstanceId?: string;
 }
 
 export interface CodexHttpMcpConfig {
-  type: "http";
+  type: 'http';
   url: string;
   /** Env var holding the RAW bearer token (no "Bearer " prefix — Codex prepends it). */
   bearerTokenEnvVar?: string;
@@ -845,7 +887,5 @@ export interface LiziMcpProvider {
   /** Remote MCP config for Codex app-server; SDK instance providers use the host HTTP bridge instead. */
   toCodexMcpConfig?(context: LiziMcpSessionContext): CodexHttpMcpConfig | null;
   /** Extra env required by remote MCP configs, e.g. bearer tokens. */
-  getExtraEnv?(
-    context: LiziMcpSessionContext,
-  ): Promise<Record<string, string> | null> | Record<string, string> | null;
+  getExtraEnv?(context: LiziMcpSessionContext): Promise<Record<string, string> | null> | Record<string, string> | null;
 }

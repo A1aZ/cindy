@@ -64,6 +64,7 @@ function realBuiltinProviderNames(): KnownProviderName[] {
     browser: {} as never,
     computer: {} as never,
     feishuBot: {} as never,
+    wechatBot: {} as never,
     slackHook: {} as never,
     scheduler: {} as never,
     ssh: {} as never,

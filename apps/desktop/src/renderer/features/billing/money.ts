@@ -4,7 +4,25 @@
  * must not re-introduce binary floating point rounding artifacts.
  */
 
+import { CURRENT_CINDY_REGION } from '../../../shared/brandRegion';
+
+/**
+ * 计费面的币种由发行区域决定（服务端下发的金额本身不带币种）。所有展示余额 /
+ * 充值金额的界面必须用同一个常量，否则同一笔钱会在两个界面显示成不同货币
+ * （见 TodaySpendChip 的「与账单页 BILLING_CURRENCY 同一笔钱、必须同口径」注释）。
+ */
+export const BILLING_CURRENCY = CURRENT_CINDY_REGION === 'global' ? 'usd' : 'cny';
+
 const DECIMAL_PATTERN = /^([+-]?)(\d+)(?:\.(\d+))?$/;
+
+function billingCurrencyFormatOptions(currency: string): Intl.NumberFormatOptions {
+  const normalizedCurrency = currency.toUpperCase();
+  return {
+    style: 'currency',
+    currency: normalizedCurrency,
+    ...(normalizedCurrency === 'USD' ? { currencyDisplay: 'narrowSymbol' } : {}),
+  };
+}
 
 function roundToMinorUnits(amount: string, digits: number): bigint | null {
   const matched = DECIMAL_PATTERN.exec(amount.trim());
@@ -50,10 +68,7 @@ function formatMinorUnits(
 
 export function formatBillingAmount(amount: string, currency: string, locale?: string): string {
   try {
-    const fmt = new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: currency.toUpperCase(),
-    });
+    const fmt = new Intl.NumberFormat(locale, billingCurrencyFormatOptions(currency));
     const digits = fmt.resolvedOptions().maximumFractionDigits ?? 2;
     const minor = roundToMinorUnits(amount, digits);
     return minor === null
@@ -71,10 +86,7 @@ export function formatBillingMinorAmount(
 ): string {
   try {
     if (!Number.isSafeInteger(minor)) return `${minor} ${currency.toUpperCase()}`;
-    const fmt = new Intl.NumberFormat(locale, {
-      style: 'currency',
-      currency: currency.toUpperCase(),
-    });
+    const fmt = new Intl.NumberFormat(locale, billingCurrencyFormatOptions(currency));
     const digits = fmt.resolvedOptions().maximumFractionDigits ?? 2;
     return formatMinorUnits(BigInt(minor), fmt, digits);
   } catch {

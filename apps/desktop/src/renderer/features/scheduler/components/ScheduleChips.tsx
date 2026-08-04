@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { useState, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, ExternalLink, Folder, MessageCircle, Timer, SlidersHorizontal } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover';
@@ -14,6 +14,7 @@ import { useDetectCwd } from '@/hooks/useWorktreeQueries';
 import { useAgentCapabilities, type ModelDescriptor } from '@/hooks/useAgentCapabilities';
 import { useProviders } from '@/hooks/useProviders';
 import { ModelIconMark, ModelSelectorContent } from '@/components/new-chat/ModelSelector';
+import { useModelDiscoveryPending } from '@/components/new-chat/useModelDiscoveryPending';
 import {
   connectedProvidersForAgent,
   effectiveSourceIdForModel,
@@ -44,7 +45,7 @@ import { PENDING_SESSION_ID } from '../lib/scheduleFormLogic';
 import type { SessionReference } from '../../../../shared/sessionReference';
 
 export type Destination = 'local' | 'worktree' | 'thread';
-export type AgentKind = 'claude-code' | 'codex';
+export type AgentKind = 'claude-code' | 'codex' | 'pi';
 
 interface ChipButtonProps {
   icon?: React.ReactNode;
@@ -159,9 +160,10 @@ export function ProjectChip({
   );
 }
 
-const AGENT_META: Record<AgentKind, { label: string; vendor: 'cc' | 'codex' }> = {
+const AGENT_META: Record<AgentKind, { label: string; vendor: 'cc' | 'codex' | 'pi' }> = {
   'claude-code': { label: 'Claude Code', vendor: 'cc' },
   codex: { label: 'Codex', vendor: 'codex' },
+  pi: { label: 'Pi', vendor: 'pi' },
 };
 
 export function AgentTabs({ value, onChange, disabled }: { value: AgentKind; onChange: (v: AgentKind) => void; disabled?: boolean }) {
@@ -385,10 +387,13 @@ export function ScheduleChip({
       : INTERVAL_MENU_MODES)
     : SCHEDULE_MENU_MODES;
   const intervalIsPreset = timingPresentation.kind !== 'intervalExact';
+  const scheduleUnset = intervalMs === undefined && cronExpr.trim() === '';
   const scheduleSummary = intervalMs === undefined
     ? summarizeConfig(normalizeScheduleConfig(config))
     : formatIntervalDuration(intervalMs, i18n.resolvedLanguage ?? i18n.language);
-  const chipLabel = t(`scheduler.chips.timingMode.${timingMode}Chip`, { schedule: scheduleSummary });
+  const chipLabel = scheduleUnset
+    ? t('scheduler.chips.chooseTime')
+    : t(`scheduler.chips.timingMode.${timingMode}Chip`, { schedule: scheduleSummary });
 
   const update = (patch: Partial<CodexScheduleConfig>) => {
     const next = normalizeScheduleConfig({ ...config, ...patch });
@@ -1087,6 +1092,29 @@ export function ModelEffortChip({
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  const openRef = useRef(false);
+  const setOpenWithoutAutoRefresh = useCallback((next: boolean): void => {
+    openRef.current = next;
+    setOpen(next);
+  }, []);
+  // 与聊天的模型选择器同一套「发现在途」状态(理由见 useModelDiscoveryPending):
+  // 定时任务这边同样是打开就触发一次发现,静默的话用户看到的清单同样可能是上一轮的。
+  const discovery = useModelDiscoveryPending();
+  const handleOpenChange = useCallback(
+    (next: boolean): void => {
+      const nextOpen = disabled ? false : next;
+      const wasOpen = openRef.current;
+      openRef.current = nextOpen;
+      if (nextOpen && !wasOpen) {
+        discovery.begin(() =>
+          window.electronAPI.maker.requestProviderModelsAutoRefresh('model-selector-open'),
+        );
+      }
+      if (!nextOpen) discovery.reset();
+      setOpen(nextOpen);
+    },
+    [disabled, discovery],
+  );
   const caps = useAgentCapabilities(agentKind);
   // 触发器(trigger)展示用:仍按 codex/ 折扣模型的 XD 网关来源可见性过滤,算出当前
   // 选中模型名。下拉内容本体改用聊天的 ModelSelectorContent(它内部按来源/api-key 自行
@@ -1118,7 +1146,7 @@ export function ModelEffortChip({
       : t('scheduler.chips.model.default');
 
   // railSources 仅用于 nativeDefault 归一化(下拉宽度由 ModelSelectorContent 内容自适应,见 w-auto)。
-  const vendorKey = agentKind === 'codex' ? 'codex' : 'cc';
+  const vendorKey = agentKind === 'claude-code' ? 'cc' : agentKind;
   const railSources = useMemo(
     () => connectedProvidersForAgent(providers, agentKind),
     [providers, agentKind],
@@ -1143,7 +1171,7 @@ export function ModelEffortChip({
   const activeProvider = providers.find((p) => p.id === activeSourceId);
 
   return (
-    <Popover open={open} onOpenChange={(v) => !disabled && setOpen(v)}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <ChipButton
           icon={
@@ -1190,7 +1218,7 @@ export function ModelEffortChip({
           onEffortChange={(e) => onChangeEffort(e as EffortValue)}
           fastMode={fastMode}
           onFastModeChange={onChangeFast}
-          onDismiss={() => setOpen(false)}
+          onDismiss={() => setOpenWithoutAutoRefresh(false)}
           currentProviderId={providerId || null}
           onProviderChange={(pid, reconciledModelId, reconciledEffort) => {
             onChangeProviderId(pid && pid !== nativeDefault ? pid : '');
@@ -1199,6 +1227,7 @@ export function ModelEffortChip({
           }}
           onNavigateToProviders={onNavigateToProviders}
           overlayContentClassName="z-[10020]"
+          discoveringModels={discovery.pending}
           followSession={
             followSession
               ? {
@@ -1297,7 +1326,7 @@ export function ThreadPickerInline({ value, onSelect, onOpen, reference }: {
             )}
             {sessions.map((s) => (
               <option key={s.id} value={s.id}>
-                {s.title} · {s.agentKind === 'cc' ? 'Claude Code' : 'Codex'}
+                {s.title} · {s.agentKind === 'cc' ? 'Claude Code' : s.agentKind === 'pi' ? 'Pi' : 'Codex'}
               </option>
             ))}
           </select>

@@ -27,7 +27,8 @@ import {
  * 所有权(v4/v6.12):品牌视觉(白底体系背景/立绘/字标/Slogan)已整体迁入
  * `LoginBrandStage`(唯一渲染者,z-[9980],本组件透过透明根透出它);本组件退化为
  * loading/tips/进度层——登录同款白面板(680×440 r36 @570,1229,与登录帧同坐标系
- * 同 desktopScale 缩放)承载全部 Splash 状态。
+ * 同 desktopScale 缩放)承载全部 Splash 状态。面板高 440 由 SPLASH_PANEL.height 固定,
+ * 不跟随登录面板 2026-07-27 的 500(增高只为登录面板内的「跳过登录」入口)。
  *
  * 状态机零删改:useSplash 14-phase 与动作映射未动,本组件只消费。
  * 帧↔状态映射(design.md §8.1 / figma §10.3):
@@ -51,8 +52,8 @@ import {
 function splashTitleFor(
   phase: SplashPhase,
   t: (key: string) => string,
-  step?: 1 | 2,
-  totalSteps?: 2,
+  step?: 1 | 2 | 3,
+  totalSteps?: 2 | 3,
 ): string | null {
   switch (phase) {
     case 'splash_checking_update':
@@ -64,7 +65,7 @@ function splashTitleFor(
     case 'splash_checking':
       return t('splash.tips.checkingEnv');
     case 'splash_downloading': {
-      // D 场景(两个 vendor 都需要下载)显示 (x/2) 进度标签;B/C 场景维持单文案。
+      // D 场景(两个及以上 vendor 需要下载)显示 (x/y) 进度标签;B/C 场景维持单文案。
       const suffix = step && totalSteps ? `(${step}/${totalSteps})` : '';
       return `${t('splash.tips.waking')}${suffix}`;
     }
@@ -226,7 +227,10 @@ export function SplashScreen() {
           transformOrigin: '50% 50%',
         }}
       >
-        {/* 统一白面板:登录同款(680×440 r36 @570,1229,wave4 五帧同位) */}
+        {/* 统一白面板:登录同款(680×440 r36 @570,1229,wave4 五帧同位)。
+            no-drag 盒高度取 SPLASH_PANEL.height 而非 LOGIN_GROUP.height:登录组高
+            (620,含圆钮行)与 Splash 无关,跟着它会把面板底下的空白也划成不可拖拽区。
+            盒 = 面板本体,语义即「只有面板内容不参与窗口拖拽」。 */}
         <div
           className="absolute"
           style={
@@ -234,12 +238,14 @@ export function SplashScreen() {
               left: LOGIN_GROUP.x,
               top: LOGIN_GROUP.yDefault,
               width: LOGIN_GROUP.width,
-              height: LOGIN_GROUP.height,
+              height: SPLASH_PANEL.height,
               WebkitAppRegion: 'no-drag',
             } as React.CSSProperties
           }
         >
-          <LoginPanel testId="splash-panel">
+          {/* height 显式取 SPLASH_PANEL.height(440):登录面板 2026-07-27 增高到 500 是为
+              承载面板内「跳过登录」入口,Splash 五帧无该入口、设计稿未改版,故不跟随 */}
+          <LoginPanel testId="splash-panel" height={SPLASH_PANEL.height}>
             {title !== null && (
               <LoginTitleBlock
                 title={title}

@@ -6,7 +6,7 @@
  *   - 项目设置：.claude/settings.json → xdtMaker.builtinTools.{id}
  *
  * 所有 ID 都使用短且一致的名字，不带 `cindy_` 前缀：
- *   android | ios-simulator | browser | computer | feishu_bot |
+ *   android | ios-simulator | browser | computer | feishu_bot | wechat |
  *   scheduler | ssh | memory | contacts | xdt_helper | collab(→ cindy_orca) | lsp
  *
  * @cindy/mcps/providers.ts 里的现役 MCP provider `name` 使用 `cindy_` 前缀；
@@ -29,78 +29,20 @@ interface BuiltinPluginMeta {
  * `id` 是面向用户的稳定标识，用在 settings 文件和 IPC 中。
  */
 const BUILTIN_META: BuiltinPluginMeta[] = [
-  {
-    id: 'android',
-    name: 'Android Automation',
-    description:
-      'Android adb automation — screenshots, UI dump, taps, swipes, text input, and app launch on connected devices',
-  },
-  {
-    id: 'ios-simulator',
-    name: 'iOS Simulator',
-    description:
-      'Cindy embedded iOS Simulator — create or attach a session-owned device, boot it in the embedded viewer, build/install/launch apps, inspect screens, and debug interactions. Prefer this for requests to open, run, test, or debug an iOS app; do not launch macOS Simulator.app unless the user explicitly asks for an external system window.',
-  },
-  {
-    id: 'browser',
-    name: 'Browser',
-    description: 'Browser automation — isolated browsing, snapshots, screenshots, and page actions',
-  },
-  {
-    id: 'computer',
-    name: 'Computer Use',
-    description:
-      'Local desktop automation — apps, windows, UI inspection, clicks, and typing via an installed driver',
-  },
-  {
-    id: 'feishu_bot',
-    name: 'Feishu Bot',
-    description: 'Send files and notifications to Feishu users via bot messages',
-  },
-  {
-    id: 'slack',
-    name: 'Slack',
-    description:
-      "Slack tools via the bound Slack connection — search, read history, and post through Slack's hosted MCP as the bound user",
-  },
-  {
-    id: 'scheduler',
-    name: 'Scheduler',
-    description: 'Task scheduling — cron-based recurring jobs and one-shot reminders',
-  },
-  {
-    id: 'ssh',
-    name: 'SSH Remote',
-    description:
-      'Run commands on configured SSH hosts via the built-in connection pool (aliases, ssh-agent/keys) — nothing installed remotely',
-  },
-  {
-    id: 'memory',
-    name: 'Maker Memory',
-    description: 'Cross-agent long-term memory for persistent context across sessions',
-  },
-  {
-    id: 'contacts',
-    name: 'Smart Contacts',
-    description:
-      'Agent-native contacts — cross-platform identity resolution, relationship context, and timeline events',
-  },
-  {
-    id: 'xdt_helper',
-    name: 'Cindy Helper',
-    description: 'Host capability disclosure — tells agents what tools and models are available',
-  },
-  {
-    id: 'collab',
-    name: 'Collab Mode',
-    description:
-      'Multi-worker collaboration (Orca team) — start_team / create_worker / send_to_worker etc.',
-  },
-  {
-    id: 'lsp',
-    name: 'LSP',
-    description: 'TypeScript LSP queries (Beta — gated by Settings → Experimental → LSP Mode)',
-  },
+  { id: 'android',     name: 'Android Automation', description: 'Android adb automation — screenshots, UI dump, taps, swipes, text input, and app launch on connected devices' },
+  { id: 'ios-simulator', name: 'iOS Simulator', description: 'Cindy embedded iOS Simulator — create or attach a session-owned device, boot it in the embedded viewer, build/install/launch apps, inspect screens, and debug interactions. Prefer this for requests to open, run, test, or debug an iOS app; do not launch macOS Simulator.app unless the user explicitly asks for an external system window.' },
+  { id: 'browser',     name: 'Browser',      description: 'Browser automation — isolated browsing, snapshots, screenshots, and page actions' },
+  { id: 'computer',    name: 'Computer Use', description: 'Local desktop automation — apps, windows, UI inspection, clicks, and typing via an installed driver' },
+  { id: 'feishu_bot',   name: 'Feishu Bot',   description: 'Send files and notifications to Feishu users via bot messages' },
+  { id: 'wechat',       name: 'Personal WeChat', description: 'Send proactive messages to known personal WeChat contacts' },
+  { id: 'slack',        name: 'Slack',        description: 'Slack tools via the bound Slack connection — search, read history, and post through Slack\'s hosted MCP as the bound user' },
+  { id: 'scheduler',    name: 'Scheduler',    description: 'Task scheduling — cron-based recurring jobs and one-shot reminders' },
+  { id: 'ssh',          name: 'SSH Remote',   description: 'Run commands on configured SSH hosts via the built-in connection pool (aliases, ssh-agent/keys) — nothing installed remotely' },
+  { id: 'memory',       name: 'Maker Memory', description: 'Cross-agent long-term memory for persistent context across sessions' },
+  { id: 'contacts',     name: 'Smart Contacts', description: 'Agent-native contacts — cross-platform identity resolution, relationship context, and timeline events' },
+  { id: 'xdt_helper',   name: 'Cindy Helper', description: 'Host capability disclosure — tells agents what tools and models are available' },
+  { id: 'collab',       name: 'Collab Mode',  description: 'Multi-worker collaboration (Orca team) — start_team / create_worker / send_to_worker etc.' },
+  { id: 'lsp',          name: 'LSP',          description: 'TypeScript LSP queries (Beta — gated by Settings → Experimental → LSP Mode)' },
   // xd_service 已于 2026-07-13 退役:Pages 能力(含部署)整体迁入内置意识
   // xd-pages(登录邮箱派生凭证 + 目录过户上传),不再是 MCP 插件。
   // mivo 已于 2026-07-13 退役:13 工具整体迁入内置意识 xd-mivo(exchange
@@ -132,6 +74,7 @@ export type KnownProviderName =
   | 'cindy_browser'
   | 'cindy_computer'
   | 'cindy_feishu_bot'
+  | 'cindy_wechat'
   | 'cindy_slack'
   | 'cindy_scheduler'
   | 'cindy_ssh'
@@ -161,6 +104,7 @@ export const PROVIDER_NAME_TO_PLUGIN_ID: Record<KnownProviderName, PluginId> = {
   cindy_browser: 'browser',
   cindy_computer: 'computer',
   cindy_feishu_bot: 'feishu_bot',
+  cindy_wechat: 'wechat',
   cindy_slack: 'slack',
   cindy_scheduler: 'scheduler',
   cindy_ssh: 'ssh',
@@ -217,6 +161,7 @@ const PLUGIN_ID_TO_MCP_ID: Record<PluginId, LiziMcpId | undefined> = {
   browser: 'browser',
   computer: 'computer',
   feishu_bot: 'cindy_feishu_bot',
+  wechat: 'cindy_wechat',
   slack: 'cindy_slack',
   scheduler: 'cindy_scheduler',
   ssh: 'cindy_ssh',
@@ -228,6 +173,6 @@ const PLUGIN_ID_TO_MCP_ID: Record<PluginId, LiziMcpId | undefined> = {
 };
 
 /** createLiziMcpProviders `enabled` 数组使用的有序 LiziMcpId。模块加载时计算一次，运行期不变。 */
-export const BUILTIN_LIZI_MCP_IDS: readonly LiziMcpId[] = BUILTIN_META.map(
-  (m) => PLUGIN_ID_TO_MCP_ID[m.id],
-).filter((id): id is LiziMcpId => id !== undefined);
+export const BUILTIN_LIZI_MCP_IDS: readonly LiziMcpId[] = BUILTIN_META
+  .map((m) => PLUGIN_ID_TO_MCP_ID[m.id])
+  .filter((id): id is LiziMcpId => id !== undefined);

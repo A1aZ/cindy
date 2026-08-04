@@ -64,6 +64,58 @@ UI 文案的语气与措辞另见 [`DESIGN.md`](../design-rules/DESIGN.md) 的 V
 - 新增 handler 至少覆盖主路径与关键错误路径；修改已有 handler 时补上能复现本次风险的
   回归用例。
 
+### 3.1 测试资源与分层
+
+默认 `test:unit` 必须适合多个 worktree 同时运行。新增、生成或改写测试时遵守：
+
+- 默认单测优先使用进程内依赖注入、内存 fake 和表驱动用例；同一模块的重复初始化应合并到
+  文件级 fixture，不要为每个断言重复启动子进程、仓库、数据库或监听服务。
+- 默认单测不得访问业务外网、真实云服务或开发者账号。需要验证 HTTP／WebSocket 协议时，
+  优先直接调用 handler；确需真实 socket 时只绑定 loopback，使用 `listen(0)` 的系统分配
+  端口，并在 `afterAll`／`finally` 中关闭。禁止固定端口。
+- 临时文件必须放在 `os.tmpdir()` 下由 `mkdtemp` 创建的唯一目录并可靠清理；禁止复用仓库外
+  的固定目录、用户配置目录或跨 worktree 共享文件。测试不得修改全局 Git 配置、系统代理或
+  其它机器级状态。
+- 默认单测中真实 Git 只保留一条代表性 smoke；覆盖 index、patch、hook、ref、worktree 等
+  组合语义的完整用例命名为 `*.git-integration.test.ts`，由
+  `pnpm test:git-integration` 显式执行。不得因 review 或补回归把完整真实 Git 链路重新放回
+  默认层。
+- SQLite migration、runtime asset、严格性能计时等已有专用 tier 的资源测试继续进入对应
+  tier。新增资源类型若无法进程内隔离，必须先在 `scripts/test-workspaces.config.mjs` 声明
+  专用 tier，并按实际共享资源增加跨 worktree 协调；不要在测试文件里自行发明全局锁。
+- “合并测试”只合并重复 fixture 和等价输入矩阵，不合并语义不同的失败路径，也不以删除断言
+  换速度。若单文件仍有大量真实 I/O，迁移 tier，而不是继续扩大 timeout。
+
+`scripts/__tests__/test-workspaces.test.mjs` 是 tier 边界的可执行契约；调整测试命名、include
+或 exclude 时必须同步更新并运行 `pnpm test:runner`。
+
+### 3.2 路径断言的跨平台宪法
+
+测试必须先区分路径代表的语义，不能把当前开发机的路径表示误当成跨平台事实：
+
+- **宿主文件系统路径**：传给或来自 Node `fs`、Electron、子进程 `cwd` 等本机 API 的路径，
+  期望值必须用 `path.join`／`path.resolve`／`path.relative` 构造；按被测语义使用
+  `path.normalize`，涉及软链、junction 或物理文件身份时使用 `realpath` 后比较。禁止在这类
+  断言中把 `/` 或 `\` 写成固定期望，也禁止只为让断言通过而把整段输出统一
+  `replace(/\\/g, '/')`——整段替换会掩盖产品代码返回了错误路径格式，并可能误改 URL、转义
+  内容或其它非路径文本。
+- **逻辑路径**：URL／URI、远程 POSIX 路径、归档条目、wire protocol，以及契约明确规定用
+  `/` 的 repo-relative 路径，不跟随宿主分隔符。这类测试可以固定写 `/`，但测试名称、类型或
+  邻近注释必须明确它是稳定协议格式，不能仅凭字符串“看起来像路径”就归入例外。
+- **模拟目标平台**：验证 Windows／POSIX 路径算法时使用 `path.win32`／`path.posix`，或把目标
+  platform／path API 注入被测函数；禁止只 mock `process.platform` 后继续调用由宿主系统决定的
+  默认 `path` 实现。Windows 大小写折叠也只在被测契约明确需要时进行，不能作为所有路径断言的
+  通用归一化。
+- **平台能力差异**：symlink、junction、文件权限等能力先做 capability probe。宿主确实不支持
+  时可以跳过真实文件系统用例，但核心语义必须在支持该能力的受控 CI 平台继续实跑，或通过
+  依赖注入／纯函数用例保留等价覆盖；禁止按 `process.platform` 大面积跳过后让整个 CI 矩阵
+  失去相应回归保护。
+
+PR 门禁必须在 Windows 上用两个并行分片完整覆盖 `pnpm test:unit`；两个分片的并集必须等价于
+未分片的全量测试，且由稳定的汇总检查统一阻断。`scripts/__tests__/dev-docs-contract.test.mjs` 锁住
+该 CI 契约。不能用静态扫描“测试字符串是否含斜杠”代替 Windows 实跑，因为它无法可靠区分宿主
+路径与逻辑路径。
+
 ## 4. 跨平台双端兼容（macOS / Windows）
 
 任何功能都必须同时考虑 macOS / Windows，并在两端做到最优性能。
@@ -128,6 +180,9 @@ UI 文案的语气与措辞另见 [`DESIGN.md`](../design-rules/DESIGN.md) 的 V
     `apps/mobile/src/__tests__/shadowCatalogGlossary.test.ts`
   - desktop：`src/main/applicationMenuLabels.ts`（macOS 原生菜单栏）→
     `apps/desktop/src/main/__tests__/applicationMenuLabels.test.ts`
+  - desktop：`src/main/endpointManifestDialogCopy.ts`（启动期端点清单获取失败的系统弹框，
+    弹在 createWindow 之前、renderer 与 i18next 都还不存在）→
+    `apps/desktop/src/main/__tests__/endpointManifestDialogCopyGlossary.test.ts`
   - desktop：`src/main/oauthResultPage.ts`（OAuth 回调结果页，渲染在系统浏览器里）→
     `apps/desktop/src/main/__tests__/oauthResultPageGlossary.test.ts`。它的文案分散在
     若干函数里且要传 provider / brand 实参，测试用固定占位实参求值后再扫；占位值不含
@@ -215,12 +270,14 @@ UI 文案的语气与措辞另见 [`DESIGN.md`](../design-rules/DESIGN.md) 的 V
    正则解码？`{success}` 风格是否只用在确实需要 fallback data 的查询型 handler？
 3. main 侧新／改业务逻辑是否带了主路径 + 关键错误路径的测试？handler 业务体是否可注入
    依赖、便于免 Electron 测试？
-4. 路径、子进程、FS、性能、快捷键是否在 macOS / Windows 两端都成立？未实测平台是否
+4. 新增测试是否避免外网、固定端口、共享临时路径和重复真实子进程？资源测试是否进入正确
+   tier，并保留了低成本默认 smoke？
+5. 路径、子进程、FS、性能、快捷键是否在 macOS / Windows 两端都成立？未实测平台是否
    标注？
-5. UI 文案是否全部走 `t()`、4 种语言齐全且翻译准确、无孤儿 key？术语是否照 `i18n/GLOSSARY.md`
+6. UI 文案是否全部走 `t()`、4 种语言齐全且翻译准确、无孤儿 key？术语是否照 `i18n/GLOSSARY.md`
    写、没有自造译法？是否跑过 `pnpm check:i18n` 与 `pnpm check:i18n-glossary`？
-6. 新增类／核心逻辑是否有职责注释？
-7. 新增常驻动画是否 compositor-only（HTML 元素 + `transform`/`opacity` + wrapper）、
+7. 新增类／核心逻辑是否有职责注释？
+8. 新增常驻动画是否 compositor-only（HTML 元素 + `transform`/`opacity` + wrapper）、
    响应 `prefers-reduced-motion`？界面切换是否无跳变／空白帧、未引入不必要的 loading 态？
 
 验证按 [`desktop-development.md`](desktop-development.md) 的分层选择：改 TypeScript 至少跑相关

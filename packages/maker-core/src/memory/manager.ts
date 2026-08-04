@@ -25,7 +25,7 @@
 import * as path from 'node:path';
 import type Database from 'better-sqlite3';
 
-import { MakerMemoryStore, sanitizeWorkdir } from './store.js';
+import { MakerMemoryStore, memoryScopeDirName, parseFilename } from './store.js';
 import {
   type MemoryConfig,
   type WriteOptions,
@@ -47,6 +47,13 @@ export interface MakerMemoryManagerDeps {
   agents: Partial<Record<AgentKind, BaseAgent>>;
   /** 跑 memory_review 时用哪个 agent 的 oneShot. 默认 'claude-code' (haiku 最便宜) */
   reviewAgent?: AgentKind;
+  /**
+   * review 派发前的停用轴守卫(host 注入,desktop = isAgentOneShotRouteDisabled)。
+   * memory_review 的 oneShot 是一次新的付费调用:该 agent 的默认 one-shot 路由被
+   * 用户停用时不派发,抛错让 MCP 工具面把原因回给调用方(PR #744 review 第十六轮)。
+   * 缺席 = 不裁决(未接入停用设置的宿主)。
+   */
+  isOneShotRouteDisabled?: (agent: AgentKind) => Promise<boolean>;
   logger: Logger;
   /** 配置覆盖 */
   config?: Partial<MemoryConfig>;
@@ -191,6 +198,10 @@ export class MakerMemoryManager {
    *  - 调 store.init() (创建 FTS 表 + sanity check)
    *
    * 同 workdir 复用同一 store + db 实例。失败 (db open 失败 / mkdir 失败) 抛错。
+   *
+   * key 语义: 本地会话传 workdir 绝对路径; SSH remote 会话传
+   * buildMemoryScopeKey 产出的 `ssh:<hostId>:<path>` 复合键 (调用方负责,
+   * manager 不自己判远端) — 见 storage.ts buildMemoryScopeKey。
    */
   async getStore(absWorkdir: string): Promise<MakerMemoryStore> {
     if (!absWorkdir || absWorkdir.length === 0) {
@@ -199,7 +210,9 @@ export class MakerMemoryManager {
     const cached = this.stores.get(absWorkdir);
     if (cached) return cached.store;
 
-    const sanitized = sanitizeWorkdir(absWorkdir);
+    // 目录名派生见 memoryScopeDirName:本地键 = sanitizeWorkdir 原规则 (不迁移),
+    // 远端 ssh: 键 = 碰撞安全的 hash 形态 (review R4 P2)。
+    const sanitized = memoryScopeDirName(absWorkdir);
     const storageDir = path.join(this.deps.basePath, MEMORY_SUBDIR, sanitized);
     const dbPath = path.join(storageDir, FTS_DB_FILENAME);
 
@@ -232,6 +245,55 @@ export class MakerMemoryManager {
   async resetWorkdir(absWorkdir: string): Promise<{ removedCount: number }> {
     const store = await this.getStore(absWorkdir);
     return store.resetAll();
+  }
+
+  /**
+   * 仅清空 Pi 压缩产生的 digest，绝不触碰用户维护的四类 curated memory。
+   *
+   * 已打开的 store 经 facade 删除以同步 FTS；未打开目录直接删 digest 文件，遗留的
+   * FTS 行会在下次打开时被 sanityCheck 的计数差异触发重建。digest 本来就不进入
+   * MEMORY.md，因此无需改写用户索引。
+   */
+  async resetDigests(): Promise<{ removedCount: number }> {
+    let total = 0;
+    const activeDirs = new Set<string>();
+    for (const [workdir, { store }] of this.stores) {
+      activeDirs.add(memoryScopeDirName(workdir));
+      total += (await store.resetType('digest')).removedCount;
+    }
+
+    const fs = await import('node:fs/promises');
+    const memoryRoot = path.join(this.deps.basePath, MEMORY_SUBDIR);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(memoryRoot);
+    } catch {
+      return { removedCount: total };
+    }
+    for (const entry of entries) {
+      if (activeDirs.has(entry)) continue;
+      const dir = path.join(memoryRoot, entry);
+      let filenames: string[];
+      try {
+        if (!(await fs.stat(dir)).isDirectory()) continue;
+        filenames = await fs.readdir(dir);
+      } catch {
+        continue;
+      }
+      for (const filename of filenames) {
+        if (parseFilename(filename)?.type !== 'digest') continue;
+        try {
+          await fs.unlink(path.join(dir, filename));
+          total += 1;
+        } catch (error) {
+          this.logger.warn('resetDigests: failed to remove digest', {
+            filename,
+            error: String(error),
+          });
+        }
+      }
+    }
+    return { removedCount: total };
   }
 
   /** 清空所有 workdir 全部 memory. 慎用. */
@@ -287,6 +349,11 @@ export class MakerMemoryManager {
     const agent = this.deps.agents[reviewAgentKind];
     if (!agent) {
       throw new Error(`runReview: review agent '${reviewAgentKind}' not registered`);
+    }
+    if (await this.deps.isOneShotRouteDisabled?.(reviewAgentKind)) {
+      throw new Error(
+        `runReview: one-shot route for '${reviewAgentKind}' is disabled in settings`,
+      );
     }
 
     const summary = records

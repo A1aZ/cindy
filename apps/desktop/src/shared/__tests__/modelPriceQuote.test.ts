@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import type { ModelRegistry } from '@cindy/model-providers';
 
 import type { ModelAccessGatewayModel } from '../modelAccess.js';
 import {
   gatewayPricingCatalog,
-  resolveGatewayCatalogCurrency,
+  providerReferencePriceQuote,
+  registryPricingCatalog,
 } from '../modelPriceQuote.js';
 
 function model(
@@ -18,130 +20,195 @@ function model(
   };
 }
 
-describe('resolveGatewayCatalogCurrency', () => {
-  it('defaults to gateway-native USD when nothing is declared', () => {
-    expect(resolveGatewayCatalogCurrency([model('a'), model('b')])).toBe('USD');
-    expect(resolveGatewayCatalogCurrency([])).toBe('USD');
+describe('gatewayPricingCatalog', () => {
+  it('rejects the whole catalog when the Gateway declares mixed currencies', () => {
+    // 混币目录已被 resolveGatewayAccountCurrency 判定不可信(账本随之回退构建币种)。
+    // 若这里继续产出混币 catalog，非账本币种的那部分模型金额会被账本写入守卫选择性
+    // 丢弃，形成"按模型漏记账"——比整份没有报价更难发现。
+    expect(
+      gatewayPricingCatalog(
+        [model('a', { currency: 'CNY' }), model('b', { currency: 'USD' }), model('c')],
+        'CNY',
+      ),
+    ).toEqual({});
   });
 
-  it('switches only when every entry explicitly declares the same non-USD currency', () => {
+  it('lets a single declared currency cover the models that omit it', () => {
+    // 同一账号的目录币种是统一的:省略 currency 的条目跟随同目录已声明的币种，
+    // 而不是各自回落账本币种(那会产出跨币种目录)。
+    const catalog = gatewayPricingCatalog(
+      [model('a', { currency: 'USD' }), model('b')],
+      'CNY',
+    );
+    expect(Object.keys(catalog.xd ?? {})).toEqual(['a', 'b']);
+    expect(Object.values(catalog.xd ?? {}).map((quote) => quote.currency)).toEqual([
+      'USD',
+      'USD',
+    ]);
+    // 目录声明了币种,不是猜的 —— 下游金额仍按精确账单记。
     expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('b', { currency: 'CNY' }),
-      ]),
-    ).toBe('CNY');
+      Object.values(catalog.xd ?? {}).every((quote) => quote.currencyInferred === undefined),
+    ).toBe(true);
   });
 
-  it('keeps undeclared entries USD — a partial CNY declaration never flips the catalog', () => {
+  it('falls back to the ledger currency and marks it inferred when no model declares one', () => {
+    // 服务端漏发 currency 时只能回落账本币种,但必须留下"这是猜的"的痕迹:报价数值来自
+    // 服务端、币种由本地推断,猜错就是把一个口径的数字盖上另一个口径的戳。
+    const catalog = gatewayPricingCatalog([model('a'), model('b')], 'USD');
+    expect(Object.values(catalog.xd ?? {}).map((quote) => quote.currency)).toEqual([
+      'USD',
+      'USD',
+    ]);
     expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('b'),
-      ]),
-    ).toBe('USD');
+      Object.values(catalog.xd ?? {}).every((quote) => quote.currencyInferred === true),
+    ).toBe(true);
   });
 
-  it('treats mixed declarations as USD — local ledgers are single-currency', () => {
-    expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('b', { currency: 'USD' }),
-      ]),
-    ).toBe('USD');
+  it('never guesses the currency by build region', () => {
+    // 回归护栏:此前整份目录没声明 currency 时按构建区域猜 CNY,把 USD 口径的报价数值
+    // 盖上 CNY 戳,产生 6.7 倍量级的错账。回落值只能来自调用方给的账本币种。
+    const catalog = gatewayPricingCatalog([model('a')], 'USD');
+    expect(catalog.xd?.a?.currency).toBe('USD');
   });
 
-  it('ignores invalid declaration values', () => {
-    expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'EUR' as unknown as 'USD' }),
-      ]),
-    ).toBe('USD');
-  });
-
-  it('excludes price-less entries from the vote — a metadata-only sibling cannot pin CNY catalogs to USD', () => {
-    expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('doc', {
-          inputCostPerToken: undefined,
-          outputCostPerToken: undefined,
-        }),
-      ]),
-    ).toBe('CNY');
-  });
-
-  it('excludes zero-priced (free) entries from the vote', () => {
-    expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('free', { inputCostPerToken: 0, outputCostPerToken: 0 }),
-      ]),
-    ).toBe('CNY');
-  });
-
-  it('still keeps the catalog USD when a priced entry lacks the declaration', () => {
-    expect(
-      resolveGatewayCatalogCurrency([
-        model('a', { currency: 'CNY' }),
-        model('b'),
-        model('doc', {
-          inputCostPerToken: undefined,
-          outputCostPerToken: undefined,
-        }),
-      ]),
-    ).toBe('USD');
+  it('carries Gateway costDiscount uniformly for ordinary and codex models', () => {
+    const catalog = gatewayPricingCatalog(
+      [model('a', { costDiscount: 0.4 }), model('codex/gpt-5.5', { costDiscount: 0.4 })],
+      'CNY',
+    );
+    expect(catalog.xd.a).toMatchObject({
+      inputPerMtok: 2,
+      outputPerMtok: 8,
+      costDiscount: 0.4,
+    });
+    expect(catalog.xd['codex/gpt-5.5']).toMatchObject({
+      inputPerMtok: 2,
+      outputPerMtok: 8,
+      costDiscount: 0.4,
+    });
   });
 });
 
-describe('gatewayPricingCatalog currency', () => {
-  it('drops conflicting declared entries instead of relabeling their prices', () => {
-    const catalog = gatewayPricingCatalog([
-      model('a', { currency: 'CNY' }),
-      model('b', { currency: 'USD' }),
-      model('c'),
-    ]);
-    expect(Object.keys(catalog.xd)).toEqual(['b', 'c']);
-    expect(Object.values(catalog.xd).map((quote) => quote.currency)).toEqual([
-      'USD',
-      'USD',
-    ]);
+describe('registryPricingCatalog', () => {
+  it('preserves the bounds of a single reference-price interval', () => {
+    const registry: ModelRegistry = {
+      schemaVersion: 1,
+      updatedAt: '2026-07-31T00:00:00.000Z',
+      models: [
+        {
+          id: 'xai/grok-code-fast',
+          name: 'Grok Code Fast',
+          routes: [
+            {
+              providerId: 'xai',
+              modelId: 'grok-code-fast',
+              agents: ['codex'],
+              referencePrices: [
+                {
+                  currency: 'USD',
+                  variant: 'standard',
+                  maxInputTokens: 200_000,
+                  inputPerMtok: 0.2,
+                  outputPerMtok: 1.5,
+                  effectiveFrom: '2026-01-01',
+                  source: {
+                    kind: 'provider-official',
+                    url: 'https://example.test/pricing',
+                    verifiedAt: '2026-07-31',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(providerReferencePriceQuote('xai', 'grok-code-fast', registry)).toMatchObject({
+      inputTokenPriceBands: [
+        {
+          minInputTokens: 0,
+          maxInputTokens: 200_000,
+          inputPerMtok: 0.2,
+          outputPerMtok: 1.5,
+        },
+      ],
+    });
   });
 
-  it('labels every quote with the catalog currency when all entries declare it', () => {
-    const catalog = gatewayPricingCatalog([
-      model('a', { currency: 'CNY' }),
-      model('b', { currency: 'CNY' }),
-    ]);
-    expect(Object.values(catalog.xd).map((quote) => quote.currency)).toEqual([
-      'CNY',
-      'CNY',
-    ]);
+  it('never treats a public XD reference as the Cindy Gateway sale price', () => {
+    const registry: ModelRegistry = {
+      schemaVersion: 1,
+      updatedAt: '2026-07-31T00:00:00.000Z',
+      models: [
+        {
+          id: 'test/model',
+          name: 'Test Model',
+          routes: [
+            {
+              providerId: 'xd',
+              modelId: 'test-model',
+              agents: ['claude-code'],
+              referencePrices: [
+                {
+                  currency: 'USD',
+                  variant: 'standard',
+                  inputPerMtok: 1,
+                  outputPerMtok: 2,
+                  effectiveFrom: '2026-01-01',
+                  source: {
+                    kind: 'provider-official',
+                    url: 'https://example.test/pricing',
+                    verifiedAt: '2026-07-31',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    expect(registryPricingCatalog(registry)).toEqual({});
   });
 
-  it('never relabels undeclared entries when a sibling declares CNY', () => {
-    const catalog = gatewayPricingCatalog([
-      model('a', { currency: 'CNY' }),
-      model('b'),
-    ]);
-    expect(Object.keys(catalog.xd)).toEqual(['b']);
-    expect(catalog.xd.b.currency).toBe('USD');
-  });
+  it('preserves the currency declared by a provider reference price', () => {
+    const registry: ModelRegistry = {
+      schemaVersion: 1,
+      updatedAt: '2026-07-31T00:00:00.000Z',
+      models: [
+        {
+          id: 'test/cny-model',
+          name: 'CNY Model',
+          routes: [
+            {
+              providerId: 'custom-cn',
+              modelId: 'cny-model',
+              agents: ['codex'],
+              referencePrices: [
+                {
+                  currency: 'CNY',
+                  variant: 'standard',
+                  inputPerMtok: 7,
+                  outputPerMtok: 21,
+                  effectiveFrom: '2026-01-01',
+                  source: {
+                    kind: 'provider-official',
+                    url: 'https://example.test/pricing',
+                    verifiedAt: '2026-07-31',
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
 
-  it('keeps every CNY quote when the only undeclared sibling is price-less (#587 regression)', () => {
-    const catalog = gatewayPricingCatalog([
-      model('a', { currency: 'CNY' }),
-      model('b', { currency: 'CNY' }),
-      model('doc', {
-        inputCostPerToken: undefined,
-        outputCostPerToken: undefined,
-      }),
-      model('free', { inputCostPerToken: 0, outputCostPerToken: 0 }),
-    ]);
-    expect(Object.keys(catalog.xd)).toEqual(['a', 'b']);
-    expect(Object.values(catalog.xd).map((quote) => quote.currency)).toEqual([
-      'CNY',
-      'CNY',
-    ]);
+    expect(registryPricingCatalog(registry)['custom-cn']?.['cny-model']).toMatchObject({
+      currency: 'CNY',
+      inputPerMtok: 7,
+      outputPerMtok: 21,
+    });
   });
 });

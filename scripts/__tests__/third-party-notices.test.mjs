@@ -40,6 +40,12 @@ test("generated artifact notices are platform-scoped and disclose restricted com
   assert.doesNotMatch(windows, /@img\/sharp-darwin-/);
   assert.match(windows, /SECTION \d+: cargo packages/);
   assert.match(windows, /Android SDK Platform-Tools/);
+  // 安装包内资产和运行时受管下载的 agent 二进制，都必须出现在三个桌面平台声明里。
+  for (const notice of [windows, macos, linux]) {
+    assert.match(notice, /OpenAI Codex CLI \(runtime-downloaded binary\) \d/);
+    assert.match(notice, /pi coding agent \(runtime-downloaded binary\) \d/);
+    assert.match(notice, /ripgrep \(bundled binary\) \d/);
+  }
   assert.match(macos, /@img\/sharp-darwin-/);
   assert.doesNotMatch(macos, /Android SDK Platform-Tools/);
   assert.match(linux, /@img\/sharp-linux-x64@/);
@@ -189,6 +195,17 @@ test("desktop resources include both open-source and restricted disclosures", ()
   const desktopRestricted = read(
     "apps/desktop/resources/THIRD-PARTY-RESTRICTED.txt",
   );
+  const assertProviderBrandingOrder = (noticePath) => {
+    const notice = read(noticePath);
+    const liteLlmIndex = notice.indexOf("LiteLLM mascot SVG path (adapted)");
+    const lobeIndex = notice.indexOf("Lobe Icons SVG paths (vendored)");
+    assert.notEqual(liteLlmIndex, -1, `${noticePath} includes the LiteLLM notice`);
+    assert.notEqual(lobeIndex, -1, `${noticePath} includes the Lobe Icons notice`);
+    assert.ok(
+      liteLlmIndex < lobeIndex,
+      `${noticePath} keeps provider branding notices in canonical name order`,
+    );
+  };
   assert.match(desktopRestricted, /Claude Code CLI@/);
   assert.doesNotMatch(desktopRestricted, /WeChat OpenSDK/);
   assert.match(
@@ -199,6 +216,34 @@ test("desktop resources include both open-source and restricted disclosures", ()
     read("apps/desktop/resources/THIRD-PARTY-NOTICES.txt"),
     /Lobe Icons SVG paths \(vendored\).*Copyright \(c\) 2023 LobeHub/s,
   );
+  assert.match(
+    read("apps/desktop/resources/THIRD-PARTY-NOTICES.txt"),
+    /LiteLLM mascot SVG path \(adapted\).*Copyright \(c\) 2026 Berri AI/s,
+  );
+  assert.doesNotMatch(
+    read("apps/desktop/resources/THIRD-PARTY-NOTICES.txt"),
+    /LiteLLM mascot SVG path \(adapted\) adapted/,
+  );
+  assertProviderBrandingOrder(
+    "apps/desktop/resources/THIRD-PARTY-NOTICES.txt",
+  );
+  assertProviderBrandingOrder(
+    "docs/legal/notices/THIRD-PARTY-NOTICES.txt",
+  );
+  for (const platform of ["ios", "android"]) {
+    const mobileNotice = read(
+      `docs/legal/notices/mobile-${platform}.txt`,
+    );
+    assert.match(
+      mobileNotice,
+      /LiteLLM mascot SVG path \(adapted\).*Copyright \(c\) 2026 Berri AI/s,
+    );
+    assert.doesNotMatch(
+      mobileNotice,
+      /LiteLLM mascot SVG path \(adapted\) adapted/,
+    );
+    assertProviderBrandingOrder(`docs/legal/notices/mobile-${platform}.txt`);
+  }
   assert.ok(
     fs.existsSync(
       path.join(repoRoot, "apps/desktop/cindy-updater/src-tauri/Cargo.lock"),

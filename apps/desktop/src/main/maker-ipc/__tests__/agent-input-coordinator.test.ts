@@ -6,6 +6,7 @@ import type {
   AgentInputSendResult,
 } from '../agent-input-coordinator.js';
 import type {
+  AgentInputCreateOpts,
   AgentInputProjection,
   AgentInputQueuedMessage,
 } from '../../../shared/agentInputQueue.js';
@@ -58,8 +59,6 @@ const flush = async () => {
     await Promise.resolve();
   }
 };
-
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function makeItem(
   clientId: string,
@@ -153,10 +152,18 @@ function sessionRunningError(): Error & { code: string } {
   });
 }
 
+function unsupportedChatBridgeImageError(
+  feature = "input content part 'input_image'",
+): string {
+  return 'unexpected status 400 Bad Request: Responses feature is not supported by the '
+    + `Chat Completions bridge: ${feature}, url: http://127.0.0.1/v1/responses`;
+}
+
 function createHarness() {
   let running = false;
+  let turnGeneration = 0;
   let pendingInteraction = false;
-  let agentKind: 'claude-code' | 'codex' | null = 'claude-code';
+  let agentKind: AgentInputCreateOpts['agentKind'] | null = 'claude-code';
   const projections: AgentInputProjection[] = [];
 
   const sendToAgent = vi.fn<AgentInputCoordinatorDeps['sendToAgent']>(async (sessionId, _message, _createOpts, sendOpts) => {
@@ -167,11 +174,28 @@ function createHarness() {
   const steerToAgent = vi.fn<AgentInputCoordinatorDeps['steerToAgent']>(async () => {});
   const abortSession = vi.fn<AgentInputCoordinatorDeps['abortSession']>(async () => {});
   const getSdkSessionId = vi.fn<AgentInputCoordinatorDeps['getSdkSessionId']>(async () => 'sdk-session');
-  const reconcileTurnIdle = vi.fn<NonNullable<AgentInputCoordinatorDeps['reconcileTurnIdle']>>(() => {});
+  const reconcileTurnIdle = vi.fn<NonNullable<AgentInputCoordinatorDeps['reconcileTurnIdle']>>(() => false);
   const beforeDispatchUserTurn = vi.fn<NonNullable<AgentInputCoordinatorDeps['beforeDispatchUserTurn']>>(() => {});
   const onUndispatchedUserTurn = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUndispatchedUserTurn']>>(() => {});
   const onAcceptedQueuedMessage = vi.fn<NonNullable<AgentInputCoordinatorDeps['onAcceptedQueuedMessage']>>(() => {});
   const onDispatchedUserTurn = vi.fn<NonNullable<AgentInputCoordinatorDeps['onDispatchedUserTurn']>>(() => {});
+  // host 是否接管自愈。null = 不接管(走常规错误呈现),与「没装自愈」的行为一致;
+  // 非 null 时返回的就是要透到 UI 的展示信息(原因 + 本轮次数 + 会话累计)。
+  let resumableTurnErrorTakeover: { error?: string; attempt: number; maxAttempts: number; sessionTotal: number } | null =
+    null;
+  const onResumableTurnError = vi.fn<NonNullable<AgentInputCoordinatorDeps['onResumableTurnError']>>(
+    () => resumableTurnErrorTakeover,
+  );
+  // 纯判定(无副作用):这条 error 有没有可能被接管。host 侧接的是 isInterruptedTurnError,
+  // 这里默认认所有带 sdkError='server_error' 的,够表达"候选 / 非候选"两种分支。
+  let resumableTurnErrorCandidate: (signals: { sdkError?: string }) => boolean = (signals) =>
+    signals.sdkError === 'server_error';
+  const isResumableTurnErrorCandidate = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['isResumableTurnErrorCandidate']>
+  >((signals) => resumableTurnErrorCandidate(signals));
+  const onResumableTurnErrorDiscarded = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['onResumableTurnErrorDiscarded']>
+  >(() => {});
   const noteSessionClearBoundary = vi.fn<NonNullable<AgentInputCoordinatorDeps['noteSessionClearBoundary']>>();
   const resolveSessionReferences = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['resolveSessionReferences']>
@@ -196,11 +220,32 @@ function createHarness() {
   const persistQueueSnapshot = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['persistQueueSnapshot']>
   >();
+  const onUiRetry = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUiRetry']>>(() => {});
+  const onAutomaticEnqueue = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['onAutomaticEnqueue']>
+  >(() => {});
+  const onUserEnqueue = vi.fn<NonNullable<AgentInputCoordinatorDeps['onUserEnqueue']>>(() => {});
+  const onDiscardedQueuedMessage = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['onDiscardedQueuedMessage']>
+  >(() => {});
+  const onRejectedUserTurn = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['onRejectedUserTurn']>
+  >(() => {});
+  const supersedeRetriedUserTurn = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['supersedeRetriedUserTurn']>
+  >(async () => []);
   const coordinator = new AgentInputCoordinator({
     sendToAgent,
     steerToAgent,
     abortSession,
+    onUiRetry,
+    onAutomaticEnqueue,
+    onUserEnqueue,
+    onDiscardedQueuedMessage,
+    onRejectedUserTurn,
+    supersedeRetriedUserTurn,
     isTurnRunning: () => running,
+    getTurnGeneration: () => turnGeneration,
     reconcileTurnIdle,
     hasPendingInteraction: () => pendingInteraction,
     getAgentKind: () => agentKind,
@@ -213,6 +258,9 @@ function createHarness() {
     onUndispatchedUserTurn,
     onAcceptedQueuedMessage,
     onDispatchedUserTurn,
+    onResumableTurnError,
+    isResumableTurnErrorCandidate,
+    onResumableTurnErrorDiscarded,
     noteSessionClearBoundary,
     resolveSessionReferences,
     hasPendingCredentialSwitch: () => hasPendingCredentialSwitch?.() === true,
@@ -239,17 +287,29 @@ function createHarness() {
     onUndispatchedUserTurn,
     onAcceptedQueuedMessage,
     onDispatchedUserTurn,
+    onResumableTurnError,
+    isResumableTurnErrorCandidate,
+    onResumableTurnErrorDiscarded,
     noteSessionClearBoundary,
     resolveSessionReferences,
     emitProjection,
     projections,
+    onUiRetry,
+    onAutomaticEnqueue,
+    onUserEnqueue,
+    onDiscardedQueuedMessage,
+    onRejectedUserTurn,
+    supersedeRetriedUserTurn,
     setRunning(value: boolean) {
       running = value;
+    },
+    setTurnGeneration(value: number) {
+      turnGeneration = value;
     },
     setPendingInteraction(value: boolean) {
       pendingInteraction = value;
     },
-    setAgentKind(value: 'claude-code' | 'codex' | null) {
+    setAgentKind(value: AgentInputCreateOpts['agentKind'] | null) {
       agentKind = value;
     },
     setHasPendingCredentialSwitch(fn: (() => boolean) | null) {
@@ -266,6 +326,18 @@ function createHarness() {
       fn: ((sessionId: string, userClientId: string) => Promise<boolean>) | null,
     ) {
       hasAssistantProgressAfter = fn;
+    },
+    /** 模拟 host 决定接管自愈(判定命中 + 额度允许);传 null = 不接管。 */
+    setResumableTurnErrorTakeover(
+      value:
+        | { error?: string; attempt: number; maxAttempts: number; sessionTotal: number }
+        | null,
+    ) {
+      resumableTurnErrorTakeover = value;
+    },
+    /** 改写"这条 error 有没有可能被接管"的纯判定(决定横幅与落库要不要先按住)。 */
+    setResumableTurnErrorCandidate(fn: (signals: { sdkError?: string }) => boolean) {
+      resumableTurnErrorCandidate = fn;
     },
     persistQueueSnapshot,
     setLoadQueueSnapshot(
@@ -306,6 +378,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -450,6 +523,32 @@ describe('AgentInputCoordinator trusted session reference snapshots', () => {
     expect(latestProjection(h.projections).error).toBeNull();
   });
 
+  it('sends a foreign session link as ordinary Agent text when history enrichment fails', async () => {
+    const h = createHarness();
+    h.resolveSessionReferences.mockRejectedValueOnce(new Error('session belongs to another account'));
+    const text = 'inspect cindy://session/foreign-session';
+
+    h.coordinator.enqueue('target-session', makeItem('quoted-foreign', text, {
+      sessionRefs: [{ sessionId: 'foreign-session' }],
+    }));
+    await flush();
+
+    expect(h.resolveSessionReferences).toHaveBeenCalledWith([
+      { sessionId: 'foreign-session' },
+    ]);
+    expect(h.sendToAgent).toHaveBeenCalledWith(
+      'target-session',
+      { type: 'user', content: text },
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(latestProjection(h.projections).error).toBeNull();
+    expect(mocks.logger.warn).toHaveBeenCalledWith(
+      'session reference enrichment skipped',
+      expect.objectContaining({ referenceCount: 1 }),
+    );
+  });
+
   it('clears a stale trusted snapshot on a full-content rewrite without refs', () => {
     const h = createHarness();
     const item = makeItem('quoted-content-rewrite', 'compare cindy://session/source-session', {
@@ -538,6 +637,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('turns CREDENTIAL_SWITCH_BUSY into a visible wait and auto-dispatches when the blocker settles', async () => {
+    vi.useFakeTimers();
     // 回归锚点(2026-07-03 → 2026-07-04):凭证切换忙先被修成「可见错误 + 手动
     // Retry」;现在升级为**可见等待 + 自动派发** —— credentialSwitchWait 进
     // projection(renderer 显等待横幅),挡路会话 turn 结束(onExternalTurnSettled)
@@ -569,7 +669,7 @@ describe('AgentInputCoordinator send transaction', () => {
     });
 
     // 兜底定时器是 2s 档,300ms 内不应有静默重试(避免高频 lazy-create)。
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
 
@@ -656,6 +756,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('cancels the credential switch wait when the queued head is removed', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'send-credential-switch-busy-cancel';
     const first = makeItem('q-1', 'first');
@@ -680,7 +781,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.credentialSwitchWait).toBeNull();
 
     h.coordinator.onExternalTurnSettled('other-session');
-    await wait(50);
+    await vi.advanceTimersByTimeAsync(50);
     await flush();
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
     projection = latestProjection(h.projections);
@@ -713,6 +814,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('retries a restored queue head when SESSION_RUNNING clears without a done event', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'send-session-running-retry-without-done';
     const first = makeItem('q-1', 'first');
@@ -732,7 +834,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.recovery).toBeNull();
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -745,6 +847,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('keeps retrying a restored queue head when a late done arrives before SESSION_RUNNING clears', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'send-session-running-late-done-before-idle';
     const first = makeItem('q-1', 'first');
@@ -766,7 +869,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -779,6 +882,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('drains queued input after an external turn error clears without a coordinator active turn', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'external-turn-error-drains-queue';
     const first = makeItem('q-1', 'first');
@@ -796,7 +900,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.sendToAgent).not.toHaveBeenCalled();
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -1006,6 +1110,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('drains queued input when an external live reservation clears without a terminal event', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'external-reservation-drains-queue';
     const first = makeItem('q-1', 'first');
@@ -1019,7 +1124,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.pendingQueue.map((q) => q.clientId)).toEqual(['q-1']);
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -1519,6 +1624,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.sendToAgent.mock.calls[0]?.[3].persistUserMessage).toBeUndefined();
     expect(mocks.createMessage).not.toHaveBeenCalled();
     expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
   });
 
   it('blocks queued turns while silent compact is active until Done', async () => {
@@ -1650,6 +1756,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('retries silent compact when SESSION_RUNNING clears without a done event', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'compact-session-running-retry-without-done';
     const createOpts = makeItem('q-compact', 'ignored').createOpts;
@@ -1669,7 +1776,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.recovery).toBeNull();
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -1687,6 +1794,7 @@ describe('AgentInputCoordinator send transaction', () => {
   });
 
   it('drains queued silent compact when an external live reservation clears without a terminal event', async () => {
+    vi.useFakeTimers();
     const h = createHarness();
     const sid = 'external-reservation-drains-compact';
     const createOpts = makeItem('q-compact', 'ignored').createOpts;
@@ -1702,7 +1810,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.recovery).toBeNull();
 
     h.setRunning(false);
-    await wait(300);
+    await vi.advanceTimersByTimeAsync(300);
     await flush();
 
     projection = latestProjection(h.projections);
@@ -2005,6 +2113,455 @@ describe('AgentInputCoordinator send transaction', () => {
 
     expect(h.sendToAgent).toHaveBeenCalledTimes(2);
     expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'original task' });
+    // 重发的是原文, 文本上与普通用户消息无异 —— 所以「用户显式重试」只能靠这个
+    // 回调传出去。hook 侧的渠道回流(turn.reopen)依赖它: 零产出失败恰是上游过载
+    // 最典型的形态, 也最需要把结果接回渠道那条消息。
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String), 'manual', undefined);
+  });
+
+  it('removes unsupported image blocks but preserves GIF and PDF files on retry', async () => {
+    const h = createHarness();
+    const sid = 'retry-unsupported-image-with-text';
+    h.setHasAssistantProgressAfter(async () => false);
+    const item = makeItem('q-first', 'describe this');
+    item.files = [
+      {
+        id: 'image-1',
+        name: 'image.png',
+        path: 'clipboard://image.png',
+        ext: '.png',
+        size: 4,
+        category: 'image',
+        mimeType: 'image/png',
+        url: 'data:image/png;base64,aW1hZ2U=',
+      },
+      {
+        id: 'gif-1',
+        name: 'clip.gif',
+        path: '/repo/clip.gif',
+        ext: '.gif',
+        size: 6,
+        category: 'image',
+        mimeType: 'image/gif',
+        url: 'xdt-image://session/clip.gif',
+      },
+      {
+        id: 'file-1',
+        name: 'notes.pdf',
+        path: '/repo/notes.pdf',
+        ext: '.pdf',
+        size: 8,
+        category: 'pdf',
+        mimeType: 'application/pdf',
+      },
+    ];
+    item.persistedContent = JSON.stringify({
+      text: item.text,
+      images: [{
+        url: 'data:image/png;base64,aW1hZ2U=',
+        mimeType: 'image/png',
+        originalName: 'image.png',
+      }, {
+        url: 'xdt-image://session/clip.gif',
+        mimeType: 'image/gif',
+        originalName: 'clip.gif',
+      }],
+      files: [{ name: 'notes.pdf', path: '/repo/notes.pdf' }],
+    });
+    item.chatMessage = {
+      ...item.chatMessage,
+      images: [{
+        url: 'data:image/png;base64,aW1hZ2U=',
+        mimeType: 'image/png',
+        originalName: 'image.png',
+      }, {
+        url: 'xdt-image://session/clip.gif',
+        mimeType: 'image/gif',
+        originalName: 'clip.gif',
+      }],
+      files: [{ name: 'notes.pdf', path: '/repo/notes.pdf' }],
+    };
+    (item.chatMessage as typeof item.chatMessage & {
+      retryFiles?: AgentInputQueuedMessage['files'];
+    }).retryFiles = item.files;
+
+    h.coordinator.enqueue(sid, item);
+    await flush();
+    h.setRunning(false);
+    const error = unsupportedChatBridgeImageError();
+    h.coordinator.onTurnEvent(sid, 'error', error);
+    await flush();
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: [
+        { type: 'text', text: 'describe this' },
+        { type: 'file', path: 'xdt-image://session/clip.gif', mimeType: 'image/gif' },
+        { type: 'file', path: '/repo/notes.pdf', mimeType: 'application/pdf' },
+      ],
+    });
+    const retried = h.onDispatchedUserTurn.mock.calls[1]?.[1];
+    expect(retried?.files).toEqual([
+      expect.objectContaining({ id: 'gif-1', ext: '.gif', category: 'image' }),
+      expect.objectContaining({ id: 'file-1', category: 'pdf' }),
+    ]);
+    expect(retried?.chatMessage.images).toEqual([{
+      url: 'xdt-image://session/clip.gif',
+      mimeType: 'image/gif',
+      originalName: 'clip.gif',
+    }]);
+    expect(retried?.chatMessage.files).toEqual([{ name: 'notes.pdf', path: '/repo/notes.pdf' }]);
+    expect((retried?.chatMessage as typeof retried.chatMessage & {
+      retryFiles?: AgentInputQueuedMessage['files'];
+    }).retryFiles).toEqual([
+      expect.objectContaining({ id: 'gif-1', ext: '.gif', category: 'image' }),
+      expect.objectContaining({ id: 'file-1', category: 'pdf' }),
+    ]);
+    expect(JSON.parse(retried?.persistedContent ?? '{}')).toEqual({
+      text: 'describe this',
+      images: [{
+        url: 'xdt-image://session/clip.gif',
+        mimeType: 'image/gif',
+        originalName: 'clip.gif',
+      }],
+      files: [{ name: 'notes.pdf', path: '/repo/notes.pdf' }],
+    });
+  });
+
+  it('keeps an unsupported image-only retry recoverable without fabricating text', async () => {
+    const h = createHarness();
+    const sid = 'retry-unsupported-image-only';
+    h.setHasAssistantProgressAfter(async () => false);
+    const item = makeItem('q-first', '');
+    item.files = [{
+      id: 'image-1',
+      name: 'image.png',
+      path: 'clipboard://image.png',
+      ext: '.png',
+      size: 4,
+      category: 'image',
+      mimeType: 'image/png',
+      url: 'data:image/png;base64,aW1hZ2U=',
+    }];
+    item.persistedContent = JSON.stringify({
+      text: '',
+      images: [{
+        url: 'data:image/png;base64,aW1hZ2U=',
+        mimeType: 'image/png',
+        originalName: 'image.png',
+      }],
+      files: [],
+    });
+    item.chatMessage = {
+      ...item.chatMessage,
+      images: [{
+        url: 'data:image/png;base64,aW1hZ2U=',
+        mimeType: 'image/png',
+        originalName: 'image.png',
+      }],
+    };
+
+    h.coordinator.enqueue(sid, item);
+    await flush();
+    h.setRunning(false);
+    const error = unsupportedChatBridgeImageError();
+    h.coordinator.onTurnEvent(sid, 'error', error);
+    await flush();
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(latestProjection(h.projections).error).toBe(error);
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+
+    h.coordinator.enqueue(sid, makeItem('q-next', 'continue in text'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'continue in text' });
+  });
+
+  it('keeps retry recovery compatible with the legacy bridge image error', async () => {
+    const h = createHarness();
+    const sid = 'retry-unsupported-image-legacy-error';
+    h.setHasAssistantProgressAfter(async () => false);
+    const item = makeItem('q-first', 'describe this');
+    item.files = [{
+      id: 'image-1',
+      name: 'image.png',
+      path: 'clipboard://image.png',
+      ext: '.png',
+      size: 4,
+      category: 'image',
+      mimeType: 'image/png',
+      url: 'data:image/png;base64,aW1hZ2U=',
+    }];
+
+    h.coordinator.enqueue(sid, item);
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', unsupportedChatBridgeImageError('input_image'));
+    await flush();
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'describe this' });
+  });
+
+  it('zero-progress retry supersedes the failed user row once the clone is dispatched', async () => {
+    // retry-supersede:零产出克隆重发会在历史里留下两条一模一样的 user 行
+    // (旧行 + 克隆行)。克隆行落库并派发成功后必须软删旧行,且锚定的是
+    // 本轮被取代的那条与新克隆行——软删本体在 host(见 supersedeRetriedUserTurn
+    // dep),这里锁 coordinator 的触发时机与参数。
+    const h = createHarness();
+    const sid = 'retry-supersede-basic';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+    expect(h.supersedeRetriedUserTurn).not.toHaveBeenCalled();
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    const persist = h.sendToAgent.mock.calls[1]?.[3]?.persistUserMessage;
+    expect(persist?.clientId).toEqual(expect.any(String));
+    expect(persist?.clientId).not.toBe('q-first');
+    expect(h.supersedeRetriedUserTurn).toHaveBeenCalledTimes(1);
+    expect(h.supersedeRetriedUserTurn).toHaveBeenCalledWith(sid, {
+      supersededUserClientId: 'q-first',
+      retryUserClientId: persist?.clientId,
+    });
+  });
+
+  it('continue-prompt retry (turn made progress) never supersedes the original row', async () => {
+    // 续跑分支的原消息是真实历史,不取代。这里同时锁住展开继承陷阱:续跑 item
+    // 由 recovery.item 展开而来,若不显式清 supersedesUserClientId,上一轮克隆
+    // 消费过的旧值会跟着落库,把"有产出失败"的 error 行一并误藏。
+    const h = createHarness();
+    const sid = 'retry-supersede-continue-exempt';
+    h.setHasAssistantProgressAfter(async () => true);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.supersedeRetriedUserTurn).not.toHaveBeenCalled();
+    expect(
+      h.onDispatchedUserTurn.mock.calls[1]?.[1]?.supersedesUserClientId,
+    ).toBeUndefined();
+  });
+
+  it('chained zero-progress retries anchor each supersede on the previous clone', async () => {
+    // 连环失败回归锁:第二次重试的克隆项由 recovery.item(= 第一次的克隆项)
+    // 展开而来,取代目标必须显式覆盖为第一次克隆行,不能顺着展开继承退回最初
+    // 那条(它已被软删,窗口锚错会漏掉第二次失败的 error 行)。
+    const h = createHarness();
+    const sid = 'retry-supersede-chain';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+    await h.coordinator.retryLastError(sid);
+    await flush();
+    const firstClone =
+      h.supersedeRetriedUserTurn.mock.calls[0]?.[1]?.retryUserClientId;
+    expect(firstClone).toEqual(expect.any(String));
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed again');
+    await flush();
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.supersedeRetriedUserTurn).toHaveBeenCalledTimes(2);
+    const second = h.supersedeRetriedUserTurn.mock.calls[1]?.[1];
+    expect(second?.supersededUserClientId).toBe(firstClone);
+    expect(second?.retryUserClientId).not.toBe(firstClone);
+  });
+
+  it('does not supersede when the retry dispatch fails before the clone is persisted', async () => {
+    // 软删只能发生在克隆行确定落库之后:落库前派发失败时旧行是用户消息的唯一
+    // 载体,动它就是消息凭空消失。
+    const h = createHarness();
+    const sid = 'retry-supersede-persist-fail';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+
+    h.sendToAgent.mockImplementationOnce(async () => {
+      throw new Error('vendor exploded before persist');
+    });
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.supersedeRetriedUserTurn).not.toHaveBeenCalled();
+  });
+
+  it('does not supersede when the clone is persisted but cancelled before vendor dispatch', async () => {
+    // review(greptile P1)回归锁:软删一度挂在 onPersisted 上,而落库到派发之间
+    // 还夹着 beforeDispatch / onAccepted 两个 hook —— 期间停止或关闭会话会走
+    // cancelled-before-dispatch,那时旧行若已被藏,历史里只剩一条从未送达模型的
+    // 克隆消息,连原失败 error 行上的「重试」入口都没了。派发确实发生前不许软删。
+    const h = createHarness();
+    const sid = 'retry-supersede-cancelled-before-dispatch';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      // 克隆行照常落库(onPersisted 走完),但 vendor 派发被取消。
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sessionDispatchFailure('stopped before dispatch');
+    });
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(
+      h.sendToAgent.mock.calls[1]?.[3]?.persistUserMessage?.clientId,
+    ).toEqual(expect.any(String));
+    expect(h.supersedeRetriedUserTurn).not.toHaveBeenCalled();
+  });
+
+  it('signals an explicit UI retry on both retry shapes (continue prompt and original resend)', async () => {
+    // 防漂移锁: 回流信号一度只在发送路径上按文本认 CONTINUE_AFTER_ERROR_PROMPT,
+    // 于是零产出重试(重发原文)完全没有信号 —— 最需要回流的那类失败恰好漏掉。
+    for (const hasProgress of [true, false]) {
+      const h = createHarness();
+      const sid = `retry-signal-${String(hasProgress)}`;
+      h.setHasAssistantProgressAfter(async () => hasProgress);
+
+      h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+      await flush();
+      h.setRunning(false);
+      h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+      await flush();
+
+      expect(h.onUiRetry).not.toHaveBeenCalled();
+      await h.coordinator.retryLastError(sid);
+      await flush();
+      expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String), 'manual', undefined);
+      expect(h.onUiRetry).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it('retry does not report a user enqueue (it must not invalidate its own reopen)', async () => {
+    // 防漂移锁: 渠道回流的作废判据一度按**消息文本**做(非续跑指令即视为无关介入),
+    // 而零产出重试重发的是原文 —— 那会让它撤掉自己刚挂上的观察器, 把本能力最主要的
+    // 场景又打回原样。判据因此改成**入口**: enqueue 才算新消息, retry 走 unshift。
+    const h = createHarness();
+    const sid = 'retry-not-enqueue';
+    h.setHasAssistantProgressAfter(async () => false);
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original task'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
+    h.onUserEnqueue.mockClear();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'turn failed');
+    await flush();
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid, expect.any(String), 'manual', undefined);
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
+  });
+
+  it('a continuation prompt enqueue is not reported as an unrelated intervention', async () => {
+    // 中断横幅「继续任务」由 renderer 直发 CONTINUE_AFTER_APP_EXIT_PROMPT, 它**先**经
+    // enqueue、之后才在 drain 时被认成续跑。无条件作废会把它自己的待续跑记账删掉,
+    // 于是那条续跑跑成了却不回流。
+    const h = createHarness();
+    const sid = 'enqueue-continue-exempt';
+    h.coordinator.enqueue(sid, makeItem('q-continue', CONTINUE_AFTER_APP_EXIT_PROMPT));
+    await flush();
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
+    expect(h.onUiRetry).toHaveBeenCalledWith(sid, 'q-continue', 'manual');
+
+    // 普通消息照常上报。
+    h.coordinator.enqueue(sid, makeItem('q-normal', '顺手问个别的'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
+  });
+
+  it('a deduplicated resend does not report a user enqueue', async () => {
+    // 弱网 / 移动端的重传带同一个 clientId, 会被幂等去重丢弃 —— 它压根没推进会话。
+    // 若在去重**之前**作废记账, 一条延迟到达的旧重传就会删掉之后才装上的、更新的
+    // 那笔待续跑记账, 于是下一次显式重试跑成了却不回流。
+    const h = createHarness();
+    const sid = 'enqueue-dup-no-signal';
+    h.coordinator.enqueue(sid, makeItem('q-dup', 'first'));
+    await flush();
+    expect(h.onUserEnqueue).toHaveBeenCalledTimes(1);
+
+    h.onUserEnqueue.mockClear();
+    h.coordinator.enqueue(sid, makeItem('q-dup', 'first'));
+    await flush();
+    expect(h.onUserEnqueue).not.toHaveBeenCalled();
+  });
+
+  it('does not signal a UI retry when there is nothing to recover', async () => {
+    const h = createHarness();
+    await h.coordinator.retryLastError('retry-signal-noop');
+    await flush();
+    expect(h.onUiRetry).not.toHaveBeenCalled();
+  });
+
+  it('does not signal a UI retry for queue-head recovery (never became a turn)', async () => {
+    // queue-head 的那条消息在**派发前**就失败了, 与之前失败的 hook turn 无关。
+    // 在它上面发信号会让一条无关的排队桌面消息认领并改写渠道那条旧消息。
+    const h = createHarness();
+    const sid = 'retry-signal-queue-head';
+    const lookupStarted = deferred<void>();
+    const lookup = deferred<string | undefined>();
+    h.getSdkSessionId.mockImplementationOnce(async () => {
+      lookupStarted.resolve();
+      return lookup.promise;
+    });
+
+    // 会话在派发前被关闭 -> 队头消息回到队列并留下 queue-head recovery。
+    h.coordinator.enqueue(sid, makeItem('q-first', 'first'));
+    await lookupStarted.promise;
+    h.coordinator.onSessionClosed(sid);
+    lookup.resolve('sdk-session');
+    await flush();
+
+    expect(h.sendToAgent).not.toHaveBeenCalled();
+    expect(latestProjection(h.projections).recovery).toEqual({
+      kind: 'queue-head',
+      clientId: 'q-first',
+    });
+    await h.coordinator.retryLastError(sid);
+    await flush();
+    expect(h.onUiRetry).not.toHaveBeenCalled();
   });
 
   it('queue-head retry never substitutes the continue prompt and redrains the original head', async () => {
@@ -2079,7 +2636,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.pendingQueue.map((q) => q.clientId)).toEqual(['q-head', 'q-second']);
   });
 
-  it('does not clear an existing recovery when compact is requested', async () => {
+  it('does not clear a queue-head recovery when compact is requested', async () => {
     const h = createHarness();
     const sid = 'compact-preserves-recovery';
     const failed = makeItem('q-failed', 'failed');
@@ -2099,6 +2656,63 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(h.sendToAgent).not.toHaveBeenCalled();
     expect(after.recovery).toEqual({ kind: 'queue-head', clientId: 'q-failed' });
     expect(after.errorRetryText).toBe('failed');
+  });
+
+  it('abandons an idle active-turn recovery and dispatches compact immediately', async () => {
+    const h = createHarness();
+    const sid = 'compact-abandons-idle-active-turn-recovery';
+
+    h.coordinator.enqueue(sid, makeItem('q-failed', 'failed'));
+    await flush();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'context window exhausted');
+    await flush();
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+
+    await h.coordinator.compact(sid, makeItem('q-compact', 'ignored').createOpts);
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: '/compact' });
+    expect(projection.error).toBeNull();
+    expect(projection.recovery).toBeNull();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await h.coordinator.retryLastError(sid);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('queues compact after abandoning active-turn recovery while the dispatch boundary is still busy', async () => {
+    const h = createHarness();
+    const sid = 'compact-queues-after-active-turn-recovery';
+
+    h.coordinator.enqueue(sid, makeItem('q-failed', 'failed'));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'context window exhausted');
+    await flush();
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+
+    await h.coordinator.compact(sid, makeItem('q-compact', 'ignored').createOpts);
+    await flush();
+
+    let projection = latestProjection(h.projections);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(projection.error).toBeNull();
+    expect(projection.recovery).toBeNull();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    projection = latestProjection(h.projections);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: '/compact' });
+    expect(projection.recovery).toBeNull();
   });
 
   it('wakes queued turns after compact dispatch failure releases the active turn', async () => {
@@ -2160,6 +2774,10 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-1' });
     expect(projection.errorRetryText).toBe('first');
     expect(mocks.createMessage).not.toHaveBeenCalled();
+    expect(h.onRejectedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-1' }),
+    );
 
     h.coordinator.retryLastError(sid);
     await flush();
@@ -2170,6 +2788,23 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.error).toBeNull();
     expect(projection.recovery).toBeNull();
     expect(mocks.createMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the Pi image-capability marker for display-side localization', async () => {
+    const h = createHarness();
+    const sid = 'pi-image-capability';
+    h.sendToAgent.mockRejectedValueOnce(Object.assign(
+      new Error('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled'),
+      { code: 'PI_IMAGE_INPUT_UNSUPPORTED' },
+    ));
+
+    h.coordinator.enqueue(sid, makeItem('q-image', 'describe the screenshot'));
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.error).toBe('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled');
+    expect(projection.pendingQueue.map((item) => item.clientId)).toEqual(['q-image']);
+    expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-image' });
   });
 
   it('retries a queue-head recovery when an external live reservation clears without a terminal event', async () => {
@@ -2586,7 +3221,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.error).toBe('turn/start failed');
     expect(projection.recovery).toEqual({ kind: 'active-turn', item: first });
     expect(projection.errorRetryText).toBe('first');
-    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first);
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first, 'failed');
   });
 
   it('recovers a persisted turn when terminal error arrives before send resolves', async () => {
@@ -2730,7 +3365,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.error).toContain('cancelled-before-dispatch');
     expect(projection.recovery).toEqual({ kind: 'active-turn', item: first });
     expect(projection.errorRetryText).toBe('first');
-    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first);
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first, 'failed');
   });
 
   it('keeps a persisted ordinary send recoverable when a host failure is reported late', async () => {
@@ -2761,7 +3396,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.error).toContain('WORKDIR_MISSING');
     expect(projection.recovery).toEqual({ kind: 'active-turn', item: first });
     expect(projection.errorRetryText).toBe('first');
-    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first);
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first, 'failed');
   });
 
   it('keeps ordinary send DB writes linear while draining queued turns', async () => {
@@ -2823,7 +3458,8 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.pendingQueue).toEqual([second]);
     expect(projection.error).toContain('cancelled-before-dispatch');
     expect(projection.recovery).toEqual({ kind: 'active-turn', item: first });
-    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first);
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first, 'cancelled');
+    expect(h.onRejectedUserTurn).not.toHaveBeenCalled();
 
     h.coordinator.resume(sid);
     await flush();
@@ -2994,7 +3630,7 @@ describe('AgentInputCoordinator send transaction', () => {
     expect(projection.pendingQueue).toEqual([second]);
     expect(projection.error).toBeNull();
     expect(projection.recovery).toEqual({ kind: 'active-turn', item: first });
-    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first);
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(sid, first, 'cancelled');
 
     h.coordinator.resume(sid);
     await flush();
@@ -3312,6 +3948,239 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
     expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'second' });
   });
 
+  it('reconciles a dead Claude turn when abort rejects after the vendor has stopped', async () => {
+    const h = createHarness();
+    const sid = 'stop-claude-abort-rejected';
+    const first = makeItem('q-1', 'first');
+    const second = makeItem('q-2', 'second');
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.enqueue(sid, second);
+    await flush();
+
+    h.abortSession.mockRejectedValueOnce(new Error('Claude Code process aborted by user'));
+    h.reconcileTurnIdle.mockImplementationOnce(() => {
+      h.setRunning(false);
+      return true;
+    });
+    h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+    h.coordinator.resume(sid);
+    await flush();
+
+    expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'second' });
+    expect(latestProjection(h.projections).queueAbortPending).toBe(false);
+  });
+
+  it('releases a Codex abort lock when reconciliation proves the vendor has stopped', async () => {
+    const h = createHarness();
+    const sid = 'stop-codex-abort-rejected';
+    const first = makeItem('q-1', 'first', {
+      createOpts: { ...makeItem('tmp', 'tmp').createOpts, agentKind: 'codex' },
+    });
+    const second = makeItem('q-2', 'second', {
+      createOpts: { ...makeItem('tmp2', 'tmp2').createOpts, agentKind: 'codex' },
+    });
+    h.setAgentKind('codex');
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.enqueue(sid, second);
+    await flush();
+
+    h.abortSession.mockRejectedValueOnce(new Error('Codex process aborted by user'));
+    h.reconcileTurnIdle.mockImplementationOnce(() => {
+      h.setRunning(false);
+      return true;
+    });
+    h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+    h.coordinator.resume(sid);
+    await flush();
+
+    expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'second' });
+    expect(latestProjection(h.projections).queueAbortPending).toBe(false);
+  });
+
+  it.each([
+    { agentKind: 'claude-code' as const, providerId: 'xd', model: 'claude-opus-5' },
+    { agentKind: 'codex' as const, providerId: 'xd', model: 'gpt-5.5' },
+    { agentKind: 'pi' as const, providerId: 'openai', model: 'gpt-5.5' },
+  ])('retries abort reconciliation after $agentKind abort settles before the live turn is idle', async ({
+    agentKind,
+    providerId,
+    model,
+  }) => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = `stop-delayed-idle-${agentKind}`;
+    const first = makeItem('q-1', 'first', {
+      createOpts: { ...makeItem('tmp', 'tmp').createOpts, agentKind, providerId, model },
+    });
+    const second = makeItem('q-2', 'second', {
+      createOpts: { ...makeItem('tmp2', 'tmp2').createOpts, agentKind, providerId, model },
+    });
+    const abort = deferred<void>();
+    h.setAgentKind(agentKind);
+    h.abortSession.mockImplementationOnce(() => abort.promise);
+    h.reconcileTurnIdle
+      .mockReturnValueOnce(false)
+      .mockImplementationOnce(() => {
+        h.setRunning(false);
+        return true;
+      });
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.enqueue(sid, second);
+    await flush();
+
+    h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+    h.coordinator.resume(sid);
+    abort.resolve();
+    await flush();
+
+    expect(h.reconcileTurnIdle).toHaveBeenCalledTimes(1);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(latestProjection(h.projections).pendingQueue).toEqual([second]);
+
+    await vi.advanceTimersByTimeAsync(250);
+    await flush();
+
+    expect(h.reconcileTurnIdle).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'second' });
+    expect(latestProjection(h.projections).queueAbortPending).toBe(false);
+  });
+
+  it('retains an abort lock when owner switching hides the agent kind and live idle cannot be confirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = createHarness();
+      const sid = 'stop-owner-boundary-agent-unknown';
+      const first = makeItem('q-1', 'first');
+      const second = makeItem('q-2', 'second');
+      h.setAgentKind(null);
+      h.reconcileTurnIdle
+        .mockReturnValueOnce(false)
+        .mockImplementationOnce(() => true);
+
+      h.coordinator.enqueue(sid, first);
+      await flush();
+      h.coordinator.enqueue(sid, second);
+      await flush();
+
+      h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+      h.coordinator.resume(sid);
+      h.setRunning(false);
+      await flush();
+
+      expect(h.reconcileTurnIdle).toHaveBeenCalledWith(sid);
+      expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+      expect(latestProjection(h.projections).queueAbortPending).toBe(true);
+
+      // The owner is available again before the delayed retry. The retry must
+      // keep the lock until the authoritative reconciliation proves idle.
+      h.setAgentKind('codex');
+      await vi.advanceTimersByTimeAsync(250);
+      await flush();
+
+      expect(h.reconcileTurnIdle).toHaveBeenCalledTimes(2);
+      expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+      expect(latestProjection(h.projections).queueAbortPending).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores an old abort completion after clearSession starts a new turn', async () => {
+    const h = createHarness();
+    const sid = 'stop-abort-clear-new-turn';
+    const first = makeItem('q-1', 'first', {
+      createOpts: { ...makeItem('tmp', 'tmp').createOpts, agentKind: 'codex' },
+    });
+    const replacement = makeItem('q-new', 'replacement', {
+      createOpts: { ...makeItem('tmp-new', 'tmp-new').createOpts, agentKind: 'codex' },
+    });
+    const abort = deferred<void>();
+    h.setAgentKind('codex');
+    h.abortSession.mockImplementationOnce(() => abort.promise);
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.stop(sid, { keepQueue: true, pauseQueue: true });
+
+    // The user explicitly resets the session while the old abort RPC is still
+    // pending, then starts a new turn in the replacement state.
+    h.coordinator.clearSession(sid);
+    h.setRunning(false);
+    h.coordinator.enqueue(sid, replacement);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    h.reconcileTurnIdle.mockReturnValueOnce(true);
+    abort.resolve();
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => { activeTurn: { item: AgentInputQueuedMessage | null } | null };
+      }
+    ).getState(sid);
+    expect(state.activeTurn?.item?.clientId).toBe('q-new');
+    expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { agentKind: 'claude-code' as const, providerId: 'xd', model: 'claude-opus-5' },
+    { agentKind: 'codex' as const, providerId: 'xd', model: 'gpt-5.5' },
+  ])('invalidates an old abort token when $agentKind starts a new turn after a non-preserving stop', async ({
+    agentKind,
+    providerId,
+    model,
+  }) => {
+    const h = createHarness();
+    const sid = `stop-abort-new-turn-${agentKind}`;
+    const first = makeItem('q-1', 'first', {
+      createOpts: { ...makeItem('tmp', 'tmp').createOpts, agentKind, providerId, model },
+    });
+    const replacement = makeItem('q-new', 'replacement', {
+      createOpts: { ...makeItem('tmp-new', 'tmp-new').createOpts, agentKind, providerId, model },
+    });
+    const abort = deferred<void>();
+    const beforeDispatch = deferred<void>();
+    h.setAgentKind(agentKind);
+    h.abortSession.mockImplementationOnce(() => abort.promise);
+    h.beforeDispatchUserTurn.mockImplementationOnce(() => beforeDispatch.promise);
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.stop(sid, { keepQueue: false });
+    h.setRunning(false);
+    beforeDispatch.resolve();
+    await flush();
+
+    // A non-preserving stop does not hold queueAbortPending, so a replacement
+    // turn can start while the old vendor abort promise is still unresolved.
+    h.coordinator.enqueue(sid, replacement);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    abort.resolve();
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => { activeTurn: { item: AgentInputQueuedMessage | null } | null };
+      }
+    ).getState(sid);
+    expect(state.activeTurn?.item?.clientId).toBe('q-new');
+    expect(h.reconcileTurnIdle).not.toHaveBeenCalled();
+  });
+
   it('keeps Codex queue abort lock until a real turn boundary', async () => {
     const h = createHarness();
     const sid = 'stop-codex';
@@ -3480,6 +4349,101 @@ describe('AgentInputCoordinator steer transaction', () => {
     expect(afterDone.pendingQueue.map((q) => q.clientId)).toEqual(['q-2']);
   });
 
+  it('restores a capability-rejected steer to the queue head for retry after switching models', async () => {
+    const h = createHarness();
+    h.setAgentKind('pi');
+    const sid = 'steer-pi-image-capability-retry';
+    const first = makeItem('q-1', 'first');
+    const second = makeItem('q-2', 'describe the screenshot');
+    h.steerToAgent.mockRejectedValueOnce(Object.assign(
+      new Error('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled'),
+      { code: 'PI_IMAGE_INPUT_UNSUPPORTED' },
+    ));
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.enqueue(sid, second);
+    await flush();
+
+    await expect(h.coordinator.steer(sid, second, { removeFromQueue: true })).resolves.toBe(false);
+    await flush();
+
+    let projection = latestProjection(h.projections);
+    expect(projection.error).toBe('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled');
+    expect(projection.pendingQueue.map((item) => item.clientId)).toEqual(['q-2']);
+    expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-2' });
+    expect(projection.errorRetryText).toBe('describe the screenshot');
+    expect(projection.queuePaused).toBe(false);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    // Capability rejection is pre-RPC, so finishing the old turn must not auto-send. Once the
+    // user has switched models, the explicit Retry consumes the preserved queue row exactly once.
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    projection = latestProjection(h.projections);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: 'describe the screenshot',
+    });
+    expect(projection.pendingQueue).toEqual([]);
+    expect(projection.error).toBeNull();
+    expect(projection.recovery).toBeNull();
+  });
+
+  it('preserves a capability-rejected steer when the original active turn errors concurrently', async () => {
+    const h = createHarness();
+    h.setAgentKind('pi');
+    const sid = 'steer-pi-image-capability-active-error';
+    const first = makeItem('q-1', 'first');
+    const second = makeItem('q-2', 'describe the screenshot');
+    h.steerToAgent.mockRejectedValueOnce(Object.assign(
+      new Error('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled'),
+      { code: 'PI_IMAGE_INPUT_UNSUPPORTED' },
+    ));
+
+    h.coordinator.enqueue(sid, first);
+    await flush();
+    h.coordinator.enqueue(sid, second);
+    await flush();
+
+    await expect(h.coordinator.steer(sid, second, { removeFromQueue: true })).resolves.toBe(false);
+    await flush();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', 'original turn failed');
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    let projection = latestProjection(h.projections);
+    expect(projection.error).toBe('[PI_IMAGE_INPUT_UNSUPPORTED] image input disabled');
+    expect(projection.pendingQueue.map((item) => item.clientId)).toEqual(['q-2']);
+    expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-2' });
+    expect(projection.errorRetryText).toBe('describe the screenshot');
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    // Switching to an image-capable model is represented by the next host send succeeding.
+    // Only the explicit Retry may consume the preserved steer, and it must do so once.
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    projection = latestProjection(h.projections);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: 'describe the screenshot',
+    });
+    expect(projection.pendingQueue).toEqual([]);
+    expect(projection.error).toBeNull();
+    expect(projection.recovery).toBeNull();
+  });
+
   it('screens same-turn steers through ghost hooks: block discards without injecting or persisting', async () => {
     // review #939 第四轮:steer 直达 steerToAgent 不经 drain,必须补同一道
     // will-user-message 筛查,否则被拦消息可经插话原样注入并落库。
@@ -3508,6 +4472,10 @@ describe('AgentInputCoordinator steer transaction', () => {
       sid,
       expect.objectContaining({ clientId: 'q-2' }),
       expect.objectContaining({ ghostId: 'g-1' }),
+    );
+    expect(h.onRejectedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-2' }),
     );
     expect(mocks.createMessage).toHaveBeenCalledTimes(1);
     const projection = latestProjection(h.projections);
@@ -4040,6 +5008,7 @@ describe('AgentInputCoordinator steer transaction', () => {
       item.createOpts,
       expect.objectContaining({ throwOnStartFailure: true }),
     );
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
     expect(mocks.touchUserSendInDb).toHaveBeenCalledWith(sid, undefined);
   });
 
@@ -4066,6 +5035,7 @@ describe('AgentInputCoordinator steer transaction', () => {
     // host 校准: 复核后清掉 stale busy tracker (镜像 register.ts 的接线行为)。
     h.reconcileTurnIdle.mockImplementationOnce(() => {
       h.setRunning(false);
+      return true;
     });
 
     const ok = await h.coordinator.steer(sid, second, { removeFromQueue: true });
@@ -4116,7 +5086,10 @@ describe('AgentInputCoordinator steer transaction', () => {
     await flush();
     h.coordinator.enqueue(sid, markerOnly);
     h.steerToAgent.mockRejectedValueOnce(new Error('[NO_ACTIVE_TURN] Session has no active turn'));
-    h.reconcileTurnIdle.mockImplementationOnce(() => h.setRunning(false));
+    h.reconcileTurnIdle.mockImplementationOnce(() => {
+      h.setRunning(false);
+      return true;
+    });
 
     await expect(h.coordinator.steer(sid, incoming, { removeFromQueue: true })).resolves.toBe(true);
     await flush();
@@ -4595,6 +5568,167 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
 
     projection = latestProjection(h.projections);
     expect(projection.continuationInFlightClientId).toBeNull();
+  });
+
+  it('preserves the continuation vendor-turn owner after an accepted steer', async () => {
+    const h = createHarness();
+    const sid = 'continue-owner-survives-steer';
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await flush();
+
+    let projection = latestProjection(h.projections);
+    expect(projection.continuationInFlightClientId).toBe('q-continue');
+    expect(projection.continuationTurnClientId).toBe('q-continue');
+
+    await h.coordinator.steer(sid, makeItem('q-steer', 'additional context'));
+    await flush();
+
+    projection = latestProjection(h.projections);
+    expect(projection.continuationInFlightClientId).toBeNull();
+    expect(projection.continuationTurnClientId).toBe('q-continue');
+
+    h.coordinator.onTurnEvent(sid, 'done');
+    projection = latestProjection(h.projections);
+    expect(projection.continuationTurnClientId).toBeNull();
+  });
+
+  it('keeps the continuation owner when a terminal event races ahead of steer ack but host remains running', async () => {
+    const h = createHarness();
+    h.setAgentKind('codex');
+    const sid = 'continue-owner-terminal-before-steer-ack';
+    const steerGate = deferred<void>();
+    h.steerToAgent.mockImplementationOnce(() => steerGate.promise);
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await flush();
+
+    const steerPromise = h.coordinator.steer(sid, makeItem('q-steer', 'additional context'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+
+    // maker-core 仍把注入接受进同一 vendor turn；host running 视图也仍为 true。
+    steerGate.resolve();
+    await expect(steerPromise).resolves.toBe(true);
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBe('q-continue');
+  });
+
+  it('does not inherit a continuation owner when vendor turn generation is unavailable', async () => {
+    const h = createHarness();
+    h.setAgentKind('codex');
+    const sid = 'continue-owner-generation-unavailable';
+    const steerGate = deferred<void>();
+    h.steerToAgent.mockImplementationOnce(() => steerGate.promise);
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await flush();
+
+    h.setTurnGeneration(null as never);
+    const steerPromise = h.coordinator.steer(sid, makeItem('q-steer', 'additional context'));
+    await flush();
+    steerGate.resolve();
+    await expect(steerPromise).resolves.toBe(true);
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+  });
+
+  it('does not inherit a continuation owner when another vendor turn starts during steer ack', async () => {
+    const h = createHarness();
+    h.setAgentKind('codex');
+    h.setTurnGeneration(1);
+    const sid = 'continue-owner-new-vendor-turn-during-steer';
+    const steerGate = deferred<void>();
+    h.steerToAgent.mockImplementationOnce(() => steerGate.promise);
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await flush();
+
+    const steerPromise = h.coordinator.steer(sid, makeItem('q-steer', 'additional context'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'done');
+    h.setTurnGeneration(2);
+
+    steerGate.resolve();
+    await expect(steerPromise).resolves.toBe(true);
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+  });
+
+  it('clears the continuation vendor-turn owner immediately when the user stops', async () => {
+    const h = createHarness();
+    h.setAgentKind('codex');
+    const sid = 'continue-owner-cleared-on-stop';
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBe('q-continue');
+
+    h.coordinator.stop(sid);
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+  });
+
+  it('keeps the continuation dispatch identity current when Stop wins during vendor send', async () => {
+    const h = createHarness();
+    h.setAgentKind('codex');
+    const sid = 'continue-owner-stop-during-vendor-send';
+    const sendStarted = deferred<void>();
+    const sendSettled = deferred<void>();
+
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      sendStarted.resolve();
+      await sendSettled.promise;
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sendSuccess();
+    });
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-continue', CONTINUE_AFTER_ERROR_PROMPT),
+      { resumeRestorePausedQueue: true },
+    );
+    await sendStarted.promise;
+
+    h.coordinator.stop(sid);
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+
+    sendSettled.resolve();
+    await flush();
+
+    expect(latestProjection(h.projections).continuationTurnClientId).toBeNull();
+    expect(h.onDispatchedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-continue' }),
+      expect.any(Number),
+    );
   });
 
   it('does not retain an in-flight continuation marker when the user cancels it in the queue', async () => {
@@ -5116,12 +6250,24 @@ describe('AgentInputCoordinator scheduler 排队心跳(撞忙排队桥)', () => 
     expect(bySchedule('sch-C')).toBe(false);
   });
 
-  it('drain 派发把 scheduler origin 透传进 sendOpts(orca/无 origin 项不透传)', async () => {
+  it('drain 派发把自动来源写入持久化 metadata,仅 scheduler 进入 turn origin', async () => {
     const h = createHarness();
     h.coordinator.enqueue('s-sched', makeItem('c1', 'hb', { origin: schedulerOrigin('sch-1') }));
     await flush();
     const schedSendOpts = h.sendToAgent.mock.calls.at(-1)?.[3] as { origin?: unknown };
     expect(schedSendOpts.origin).toEqual(schedulerOrigin('sch-1'));
+
+    const orcaOrigin = { kind: 'orca', senderLabel: 'Lead', displayText: 'hello' } as const;
+    const hOrca = createHarness();
+    hOrca.coordinator.enqueue('s-orca', makeItem('c-orca', 'orca input', { origin: orcaOrigin }));
+    await flush();
+    const orcaSendOpts = hOrca.sendToAgent.mock.calls.at(-1)?.[3] as {
+      origin?: unknown;
+      persistUserMessage?: { origin?: unknown };
+    };
+    expect(orcaSendOpts.origin).toBeUndefined();
+    expect(orcaSendOpts.persistUserMessage?.origin).toEqual(orcaOrigin);
+    expect(hOrca.onUserEnqueue, 'Orca 自动输入不应被当成人工接管').not.toHaveBeenCalled();
 
     // 无 origin 的普通输入不透传(独立 harness:上面的派发已把全局 running 翻 true)。
     const h2 = createHarness();
@@ -5148,11 +6294,16 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     expect(mocks.touchUserSendInDb).toHaveBeenCalledWith('s-b', undefined);
   });
 
-  it('active-turn recovery 项:去重视为在途,存活探测视为不存活', async () => {
-    // 派发在持久化后被取消 → 项转 active-turn recovery:后续 Retry 走克隆已受理
-    // turn 路径,不再经过 onAcceptedQueuedMessage —— 排队方的回调等不到了。
-    // 去重(includeRecovery:true)仍要看见它防双份;存活探测(默认)必须判死,
-    // 让 runner 的 run 以失败收口而非永久挂 running(review P1)。
+  it('派发在持久化后被取消:scheduler 项不留 recovery(不可被人手动 Retry)', async () => {
+    // 项转 active-turn recovery 后唯一的出路是**用户点 Retry**,而 Retry 走克隆已受理
+    // turn 的路径,不再经过 onAcceptedQueuedMessage —— 没有 scheduler 回调也没有 run
+    // 跟踪。而这条 run 此刻已经顺延或落终态了,留着就等于让一条已收口的调度 prompt
+    // 之后还能被人手动跑一次(review #944 第九轮 P1)。所以 scheduler 项直接摘掉。
+    //
+    // 本条原本断言"去重(includeRecovery:true)仍要看见它防双份"。该预期已被推翻:
+    // 留着它,同任务后续每一次 fire 都会被去重判 duplicate,而这个残项永远不会有人
+    // 派发 —— 自动化就此停摆,正是隔壁「崩溃快照恢复时丢弃 scheduler 项」那条用例
+    // 记录的同一个坑。存活探测判死这一半的语义不变(下方仍断言)。
     const h = createHarness();
     const sid = 'sched-recovery';
     h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
@@ -5162,18 +6313,380 @@ describe('AgentInputCoordinator scheduler 排队心跳(review 反馈回归)', ()
     h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
     await flush();
 
-    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    expect(latestProjection(h.projections).recovery).toBeNull();
     const bySchedule = (includeRecovery: boolean) =>
       h.coordinator.hasQueuedItemWhere(
         sid,
         (item) => item.origin?.kind === 'scheduler' && item.origin.scheduleId === 'sch-1',
         { includeRecovery },
       );
-    expect(bySchedule(true)).toBe(true);
+    // 去重视角也看不到它 → 顺延重试 / 下一轮 cron 能重新入队,不被僵尸挡住
+    expect(bySchedule(true)).toBe(false);
     expect(bySchedule(false)).toBe(false);
     expect(
       h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1'),
     ).toBe(false);
+  });
+
+  it('onAccepted 抛错取消 scheduler 项:放掉 activeTurn 并唤醒队列(不把会话钉死)', async () => {
+    // runner 在拿不到 live 会话时会从 onAcceptedQueuedMessage 抛错让 coordinator 回滚,
+    // 于是走 persisted-error 分支。摘掉 scheduler recovery 之后,若不一并放掉 activeTurn,
+    // isDispatchBoundaryBusy 会永久判忙 —— 而那条 recovery 本来是唯一能清掉它的入口
+    // (用户 Retry / clearError),现在没有人点。后续所有消息就此积压
+    // (review #944 第十轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-accept-throw';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => {
+      throw new Error('[SEND_CANCELLED_BEFORE_DISPATCH] queued heartbeat dispatch cancelled');
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    // activeTurn 是内部态(不进 projection),但它正是 isDispatchBoundaryBusy 的判据
+    expect(
+      (h.coordinator as unknown as { getState: (id: string) => { activeTurn: unknown } })
+        .getState(sid).activeTurn,
+    ).toBeNull();
+
+    // 派发边界确实放开了:紧接着入队的消息能被真正派发出去
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('已派发的 scheduler turn 收到终态 error:不留 recovery,且队列被唤醒', async () => {
+    // 摘掉 scheduler recovery 的前两轮只改了「派发失败」那条路。turn 已经派发出去、之后
+    // 才收到终态 error 时,onTurnEvent 的 persisted 分支照样造出 active-turn recovery ——
+    // 而这一轮 run 已由 runner 按 terminal error 收口了。用户点 Retry 会克隆这条 prompt
+    // 重跑:没有 FireContext 回调、不计 run 账(review #944 第十八轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-terminal-error';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+
+    // 队列真的被唤醒了(recovery 不留就没人点 clearError,必须自己唤)。注意唤醒是
+    // **等失败收尾的配对 done 到达之后**:第二十一轮起这条路会打配对标记,标记期间派发
+    // 边界算忙 —— 旧 turn 的尾巴还在飞时就起新活,正是那一轮要防的错误归因。
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('普通用户项收到终态 error 时仍保留 active-turn recovery', async () => {
+    // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
+    const h = createHarness();
+    const sid = 'user-terminal-error';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+  });
+
+  it('scheduler turn 失败后紧随的 done 不擦掉失败呈现', async () => {
+    // 各 agent 的失败收尾都是 terminal error 后再补一个 done。普通用户项靠
+    // "!active && recovery.kind==='active-turn'" 那道守卫挡住它,而 scheduler 项恰恰没有
+    // recovery 可挡 —— done 会落到 onTurnEvent 尾部的 `state.error = null`,把刚呈现的
+    // 失败擦掉,还按"正常完成"放行新队列工作,而 scheduler 那边这一轮记的是 failed
+    // (review #944 第二十一轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-error-then-done';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+    expect(latestProjection(h.projections).error).toBe('upstream went silent');
+
+    // 失败收尾的第二拍
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    // 失败必须还在(不能被 done 擦成"已完成"),且不会凭空长出重试入口
+    expect(latestProjection(h.projections).error).toBe('upstream went silent');
+    expect(latestProjection(h.projections).recovery).toBeNull();
+  });
+
+  it('配对标记不会永久卡住派发边界:done 到达后队列照常放行', async () => {
+    // 配对标记期间 isDispatchBoundaryBusy 为真,这是刻意的(别在旧 turn 的尾巴还在飞时
+    // 就起新活)。但它必须被配对的 done 清掉,否则会话永久判忙。
+    const h = createHarness();
+    const sid = 'sched-error-done-then-drain';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream went silent');
+    await flush();
+
+    h.sendToAgent.mockImplementationOnce(async () => ({
+      kind: 'session-dispatch',
+      dispatched: true,
+    }) as never);
+    h.coordinator.enqueue(sid, makeItem('c2', 'next one'));
+    await flush();
+    // 配对标记仍在 → 新消息不该被派发
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('终态 error 撞在持久化中途:落库后结算时 scheduler 项也不留 recovery', async () => {
+    // 第五条终态路径。终态 error 在 active.persisting 期间到达 → 被暂存成
+    // pendingTerminalEvent,落库完成后由 settlePendingTerminalEventAfterPersist 结算 ——
+    // 那里原来无条件造 active-turn recovery,漏了 scheduler 排除(第二十轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-error-during-persist';
+    let releasePersist!: () => void;
+    mocks.createMessage.mockImplementationOnce(
+      () => new Promise<Record<string, never>>((resolve) => {
+        releasePersist = () => resolve({});
+      }),
+    );
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    // 落库还挂着,此刻终态 error 到达 → 走 persisting 分支暂存
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream died mid-persist');
+    await flush();
+    releasePersist();
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('终态 error 撞在持久化中途:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-error-during-persist';
+    let releasePersist!: () => void;
+    mocks.createMessage.mockImplementationOnce(
+      () => new Promise<Record<string, never>>((resolve) => {
+        releasePersist = () => resolve({});
+      }),
+    );
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    h.coordinator.onTurnEvent(sid, 'error', 'upstream died mid-persist');
+    await flush();
+    releasePersist();
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+  });
+
+  it('Stop 赢在 pre-vendor 窗口:已持久化的 scheduler 项不留 recovery', async () => {
+    // 第六条终态路径,本轮自查补上(reviewer 没报)。cancelPreSendActiveTurn 在 Stop
+    // (keepQueue) 时给已持久化的项留 active-turn recovery —— scheduler 项同样不该留。
+    const h = createHarness();
+    const sid = 'sched-stop-pre-vendor';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => { releaseSend = resolve; });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean; dispatchLifecycle?: string } | null;
+        };
+      }
+    ).getState(sid);
+    expect(state.activeTurn).not.toBeNull();
+    // pre-vendor 窗口的形态:已落库,vendor 派发还没成立
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.stop(sid, { keepQueue: true });
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    releaseSend();
+    await flush();
+  });
+
+  it('Stop 赢在 pre-vendor 窗口:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-stop-pre-vendor';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => { releaseSend = resolve; });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.stop(sid, { keepQueue: true });
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    releaseSend();
+    await flush();
+  });
+
+  it('派发前会话被关闭:已持久化的 scheduler 项不留 recovery', async () => {
+    // 第三条漏掉的终态路径(onSessionClosed → handleActiveTurnClosedBeforeDispatch)。
+    // 生产里它命中的是"持久化已过、vendor 派发还没起"的那一瞬,单测里从外部制造这个
+    // 时序不稳,所以直接把 activeTurn 摆成那个形态再关会话 —— 断言的是分支行为本身
+    // (review #944 第十八轮 P1)。
+    const h = createHarness();
+    const sid = 'sched-closed-before-dispatch';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'hb', { origin: schedOrigin }));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    expect(state.activeTurn).not.toBeNull();
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false; // 走 closed-before-dispatch 那条分支
+
+    h.coordinator.onSessionClosed(sid);
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(false);
+    releaseSend();
+    await flush();
+  });
+
+  it('派发前会话被关闭:普通用户项仍保留 active-turn recovery', async () => {
+    const h = createHarness();
+    const sid = 'user-closed-before-dispatch';
+    let releaseSend!: () => void;
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      await new Promise<void>((resolve) => {
+        releaseSend = resolve;
+      });
+      return { kind: 'session-dispatch', dispatched: true } as never;
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const state = (
+      h.coordinator as unknown as {
+        getState: (id: string) => {
+          activeTurn: { persisted: boolean; sendStarted: boolean } | null;
+        };
+      }
+    ).getState(sid);
+    state.activeTurn!.persisted = true;
+    state.activeTurn!.sendStarted = false;
+
+    h.coordinator.onSessionClosed(sid);
+    await flush();
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    releaseSend();
+    await flush();
+  });
+
+  it('派发在持久化后被取消:普通用户项仍保留 active-turn recovery', async () => {
+    // 上一条只对 scheduler 来源生效 —— 交互输入的重试入口不受影响。
+    const h = createHarness();
+    const sid = 'user-recovery';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sessionDispatchFailure('SEND/user-recovery/send');
+    });
+    h.coordinator.enqueue(sid, makeItem('c1', 'typed by hand'));
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.recovery?.kind).toBe('active-turn');
+    expect(
+      h.coordinator.hasQueuedItemWhere(sid, (item) => item.clientId === 'c1', {
+        includeRecovery: true,
+      }),
+    ).toBe(true);
   });
 
   it('崩溃快照恢复时丢弃 scheduler 项(不进暂停队列,普通项照常恢复)', async () => {
@@ -5293,5 +6806,923 @@ describe('AgentInputCoordinator replaceQueuedMessage(Orca lead 排队消息修�
 
     steer.resolve();
     await steerPromise;
+  });
+});
+
+describe('AgentInputCoordinator 中断自动续跑', () => {
+  // 上游把「已经干到一半」的 turn 打断时,main 守卫自动替用户点一次「继续」。
+  // coordinator 这一侧只负责两件事:把带结构化信号的失败告知 host(判据不在这里),
+  // 以及提供一条**带 autoResume 标记**的补发路径(标记是额度不自我充值的判据)。
+  const truncationSignals = { sdkError: 'server_error' } as const;
+  /** host 接管时回传的展示信息(原因 + 本轮第几次 / 上限 + 会话累计)。 */
+  const TAKEOVER_INFO = {
+    error: 'API Error: Connection closed mid-response.',
+    attempt: 1,
+    maxAttempts: 5,
+    sessionTotal: 1,
+  } as const;
+  const truncationMessage = 'API Error: Connection closed mid-response.';
+
+  /** 派发一条用户消息并让它以 terminal error 收尾，返回 harness。 */
+  async function failAfterDispatch(
+    h: ReturnType<typeof createHarness>,
+    sid: string,
+    item = makeItem('q-first', 'original long task'),
+  ) {
+    h.coordinator.enqueue(sid, item);
+    await flush();
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    return h;
+  }
+
+  it('通知 host 时带上 message 与结构化信号', async () => {
+    const h = createHarness();
+    const sid = 'resumable-error-signals';
+    const item = makeItem('q-first', 'original long task');
+    await failAfterDispatch(h, sid, item);
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    expect(h.onResumableTurnError).toHaveBeenCalledTimes(1);
+    expect(h.onResumableTurnError.mock.calls[0]).toEqual([
+      sid,
+      { sdkError: 'server_error', message: truncationMessage },
+      expect.objectContaining({ clientId: item.clientId }),
+    ]);
+  });
+
+  it('scheduler 来源复用同一套自动续跑并保留 run origin', async () => {
+    const h = createHarness();
+    const sid = 'resumable-error-scheduler';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    const item = makeItem('q-sched', 'heartbeat', {
+      origin: {
+        kind: 'scheduler',
+        scheduleId: 'sch-1',
+        scheduleName: '任务 1',
+        runId: 'run-1',
+      },
+    });
+    await failAfterDispatch(
+      h,
+      sid,
+      item,
+    );
+
+    expect(latestProjection(h.projections).recovery?.kind).toBe('active-turn');
+    expect(h.onResumableTurnError).toHaveBeenCalledWith(
+      sid,
+      { sdkError: 'server_error', message: truncationMessage },
+      expect.objectContaining({ clientId: 'q-sched', origin: item.origin }),
+    );
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    expect(h.sendToAgent.mock.calls[1]?.[3]?.origin).toEqual(item.origin);
+    // Scheduler 的自动续跑已有专属 waiter；不能触发通用自动入队回调，否则
+    // register.ts 会把当前 waiter 当成被新输入作废，导致 scheduler retry 只执行一次。
+    expect(h.onAutomaticEnqueue).not.toHaveBeenCalled();
+  });
+
+  it('用户接管会撤销已经离队但尚未派发的 scheduler 自动续跑', async () => {
+    const h = createHarness();
+    const sid = 'cancel-pre-vendor-scheduler-auto-resume';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    const schedulerItem = makeItem('q-sched', 'heartbeat', {
+      origin: {
+        kind: 'scheduler',
+        scheduleId: 'sch-1',
+        scheduleName: '任务 1',
+        runId: 'run-1',
+      },
+    });
+    await failAfterDispatch(h, sid, schedulerItem);
+
+    // 自动 Continue 已离队成为 activeTurn，但仍卡在 user row 持久化；此时
+    // maker-core 已建立 reservation，vendor dispatch 仍未发生。
+    const persistGate = deferred<Record<string, never>>();
+    mocks.createMessage.mockImplementationOnce(() => persistGate.promise);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await vi.waitFor(() => expect(mocks.createMessage).toHaveBeenCalledTimes(2));
+
+    const userItem = makeItem('q-user', 'take over');
+    h.coordinator.enqueue(sid, userItem);
+
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({
+        autoResume: true,
+        origin: schedulerItem.origin,
+      }),
+    );
+    expect(h.onUserEnqueue).toHaveBeenCalledWith(sid);
+
+    persistGate.resolve({});
+    await vi.waitFor(() => expect(h.sendToAgent).toHaveBeenCalledTimes(3));
+    expect(h.sendToAgent.mock.calls[2]?.[1]).toEqual({ type: 'user', content: 'take over' });
+  });
+
+  it('host 放弃接管会撤销仍在队列中的 scheduler 自动续跑', async () => {
+    const h = createHarness();
+    const sid = 'abandon-queued-scheduler-auto-resume';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    const schedulerItem = makeItem('q-sched', 'heartbeat', {
+      origin: {
+        kind: 'scheduler',
+        scheduleId: 'sch-1',
+        scheduleName: '任务 1',
+        runId: 'run-1',
+      },
+    });
+    await failAfterDispatch(h, sid, schedulerItem);
+
+    // 模拟另一个 turn 占用会话：自动 Continue 已入队，但尚未离队派发。
+    h.setRunning(true);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    expect(latestProjection(h.projections).pendingQueue).toEqual([
+      expect.objectContaining({ autoResume: true, origin: schedulerItem.origin }),
+    ]);
+
+    h.coordinator.abandonAutoResume(sid);
+
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ autoResume: true, origin: schedulerItem.origin }),
+    );
+    expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it('外部发起的 turn(无 active turn)失败不通知', async () => {
+    const h = createHarness();
+    const sid = 'resumable-error-external';
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+
+    expect(h.onResumableTurnError).not.toHaveBeenCalled();
+  });
+
+  it('terminal error 早于持久化完成时,信号跟着暂存并在结算时通知(对称路径)', async () => {
+    // 第五条终态路径:error 在 DB 写入还没完成时到达 → 暂存,落库后才结算。
+    // signals 若不跟着暂存,这条时序下自愈会静默失效。
+    const h = createHarness();
+    const sid = 'resumable-error-deferred-persist';
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    // 持久化卡住期间 terminal error 先到。
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    expect(h.onResumableTurnError, '持久化未完成前不该通知').not.toHaveBeenCalled();
+
+    releasePersist();
+    await flush();
+
+    expect(h.onResumableTurnError).toHaveBeenCalledTimes(1);
+    expect(h.onResumableTurnError.mock.calls[0]).toEqual([
+      sid,
+      { sdkError: 'server_error', message: truncationMessage },
+      expect.objectContaining({ clientId: 'q-first' }),
+    ]);
+  });
+
+  it('scheduler 入队只排队，不冒充用户介入取消当前自动续跑', async () => {
+    const h = createHarness();
+    const sid = 'scheduler-does-not-cancel-auto-resume';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(true);
+    const userInterventionsBefore = h.onUserEnqueue.mock.calls.length;
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-sched-next', 'next heartbeat', {
+        origin: {
+          kind: 'scheduler',
+          scheduleId: 'sch-2',
+          scheduleName: '任务 2',
+          runId: 'run-2',
+        },
+      }),
+    );
+
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(true);
+    expect(h.onUserEnqueue).toHaveBeenCalledTimes(userInterventionsBefore);
+    expect(latestProjection(h.projections).pendingQueue.map((queued) => queued.clientId)).toContain(
+      'q-sched-next',
+    );
+  });
+
+  it('autoRetryLastError 在有产出时补发带 autoResume 的续跑指令', async () => {
+    const h = createHarness();
+    const sid = 'auto-retry-with-progress';
+    // 生产上定时器只在 host 接管成立后才排期,所以先建立接管态 —— autoRetryLastError
+    // 的 auto 守卫要求它仍然成立(用户接手时它会被清掉,见下面 superseded 那条)。
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: CONTINUE_AFTER_ERROR_PROMPT,
+    });
+    // autoResume 必须透到落库参数:renderer 靠它隐藏气泡,host 靠它跳过额度充值。
+    expect(h.sendToAgent.mock.calls[1]?.[3]?.persistUserMessage?.autoResume).toBe(true);
+    expect(h.onUiRetry).toHaveBeenCalledWith(
+      sid,
+      expect.any(String),
+      'auto',
+      TAKEOVER_INFO.sessionTotal,
+    );
+    // 自动补发不冒充人类动作(userSendAt 是「人最近发过消息」的语义)。
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledTimes(1);
+  });
+
+  it('自动续跑等待 Codex cleanup 窗口后仍在 3 次上限处停止重试', async () => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = 'auto-retry-session-running-budget';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+    h.sendToAgent.mockImplementation(async () =>
+      hostSendFailure('SESSION_RUNNING', '[SESSION_RUNNING] Session is already running a turn'));
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    // Codex reconnect-stalled 的两次 interrupt ACK 各最多等待 10s；不能在
+    // 500ms 内把这条仍可恢复的自动续跑判成失败。
+    await vi.advanceTimersByTimeAsync(9_999);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(4);
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ autoResume: true }),
+    );
+    expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(4);
+  });
+
+  it('自动续跑耗尽后唤醒其后的 scheduler 队列尾部', async () => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = 'auto-retry-budget-drains-scheduler-tail';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    let busyAttempts = 0;
+    h.sendToAgent.mockImplementation(async (_sessionId, message) => {
+      const isContinuePrompt =
+        message === CONTINUE_AFTER_ERROR_PROMPT ||
+        (typeof message !== 'string' && message.content === CONTINUE_AFTER_ERROR_PROMPT);
+      if (isContinuePrompt) {
+        busyAttempts += 1;
+        return hostSendFailure('SESSION_RUNNING', '[SESSION_RUNNING] Session is already running a turn');
+      }
+      return sendSuccess('scheduler-tail');
+    });
+
+    // Keep the auto-resume at the head while the provider is busy, then queue
+    // a scheduler message behind it. Once the provider reports idle, the host
+    // still returns SESSION_RUNNING for three dispatch races; the third busy
+    // result removes only the auto item, so the remaining scheduler item must
+    // still be dispatched.
+    h.setRunning(true);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    h.coordinator.enqueue(sid, makeItem('q-scheduler-tail', 'next heartbeat', {
+      origin: {
+        kind: 'scheduler',
+        scheduleId: 'sch-tail',
+        scheduleName: 'Tail',
+        runId: 'run-tail',
+      },
+    }));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    h.setRunning(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect(busyAttempts).toBe(1);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect(busyAttempts).toBe(2);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+
+    expect(busyAttempts).toBe(3);
+    expect(h.sendToAgent).toHaveBeenCalledTimes(5);
+    expect(h.sendToAgent.mock.calls[4]?.[1]).toEqual({
+      type: 'user',
+      content: 'next heartbeat',
+    });
+    expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+  });
+
+  it('live busy 挡住自动续跑时使用 10s fallback，terminal 边界仍立即唤醒', async () => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = 'auto-retry-live-busy-policy';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    h.setRunning(true);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(9_999);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    // provider cleanup 的终态先到时，事件路径立即 drain，不必等 10s fallback。
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('用户消息接管 auto-resume 队首后把 10s timer 换回 250ms policy', async () => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = 'auto-retry-policy-replaced-by-user';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    h.setRunning(true);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    h.coordinator.enqueue(sid, makeItem('q-user-takeover', 'take over now'));
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    h.setRunning(false);
+    await vi.advanceTimersByTimeAsync(249);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: 'take over now',
+    });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+  });
+
+  it('队列 move 把普通项移到 auto-resume 前时也切换回 250ms policy', async () => {
+    vi.useFakeTimers();
+    const h = createHarness();
+    const sid = 'auto-retry-policy-replaced-by-move';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    h.setRunning(true);
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+
+    h.coordinator.enqueue(sid, makeItem('q-scheduler-next', 'next heartbeat', {
+      origin: {
+        kind: 'scheduler',
+        scheduleId: 'sch-1',
+        scheduleName: '任务 1',
+        runId: 'run-1',
+      },
+    }));
+    await flush();
+    h.coordinator.move(sid, 'q-scheduler-next', 0);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    h.setRunning(false);
+    await vi.advanceTimersByTimeAsync(249);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: 'next heartbeat',
+    });
+  });
+
+  it('人工 retryLastError 不打 autoResume(否则会误跳过额度充值)', async () => {
+    const h = createHarness();
+    const sid = 'manual-retry-no-auto-flag';
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[3]?.persistUserMessage?.autoResume).toBeUndefined();
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledTimes(2);
+  });
+
+  it('自动续跑再次失败后,人工 Retry 会清掉上一轮隐藏标记并重置真人额度', async () => {
+    const h = createHarness();
+    const sid = 'manual-retry-after-auto-failure';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+
+    // 自动续跑已经成为当前 active turn,但随后再次在 vendor 侧失败。
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    expect(latestProjection(h.projections).recovery).toEqual(
+      expect.objectContaining({
+        kind: 'active-turn',
+        item: expect.objectContaining({ autoResume: true }),
+      }),
+    );
+
+    await h.coordinator.retryLastError(sid);
+    await flush();
+
+    const persist = h.sendToAgent.mock.calls[2]?.[3]?.persistUserMessage;
+    expect(persist?.autoResume).toBeUndefined();
+    expect(persist?.autoResumeInfo).toBeUndefined();
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledTimes(2);
+  });
+
+  it('零产出时自动克隆重发原文,并沿用 autoResume 计数守卫', async () => {
+    const h = createHarness();
+    const sid = 'auto-retry-without-progress';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => false);
+    await failAfterDispatch(h, sid);
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+
+    expect(h.sendToAgent).toHaveBeenCalledTimes(2);
+    expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({
+      type: 'user',
+      content: 'original long task',
+    });
+    expect(h.sendToAgent.mock.calls[1]?.[3]?.persistUserMessage?.autoResume).toBe(true);
+    expect(h.onDispatchedUserTurn.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        autoResume: true,
+        autoResumeInfo: TAKEOVER_INFO,
+        supersedesUserClientId: undefined,
+      }),
+    );
+    expect(h.onUiRetry).toHaveBeenCalledWith(
+      sid,
+      expect.any(String),
+      'auto',
+      TAKEOVER_INFO.sessionTotal,
+    );
+    expect(h.supersedeRetriedUserTurn).not.toHaveBeenCalled();
+    // 自动补发不冒充真人输入，守卫不会被重新充值。
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledTimes(1);
+  });
+
+  it('host 接管时不设 error、只置 autoResumePending(红横幅留给最终失败)', async () => {
+    const h = createHarness();
+    const sid = 'takeover-suppresses-banner';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+
+    const projection = latestProjection(h.projections);
+    expect(projection.error, '自愈期间不该弹红横幅').toBeNull();
+    // 展示信息原样透到 projection:活动行据此显示「重新连接中 1/5」与展开详情。
+    expect(projection.autoResumePending).toEqual(TAKEOVER_INFO);
+    // recovery 仍在:救不回来时要靠它回落出「继续任务」。
+    expect(projection.recovery?.kind).toBe('active-turn');
+  });
+
+  it('host 不接管时照常呈现错误(默认行为不变)', async () => {
+    const h = createHarness();
+    const sid = 'no-takeover-keeps-banner';
+    await failAfterDispatch(h, sid);
+
+    const projection = latestProjection(h.projections);
+    expect(projection.error).toBe(truncationMessage);
+    expect(projection.autoResumePending).toBeUndefined();
+  });
+
+  it('补发发出时清 autoResumePending(交棒给「已自动继续」分隔条)', async () => {
+    const h = createHarness();
+    const sid = 'takeover-clears-on-dispatch';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+    expect(latestProjection(h.projections).autoResumePending).toEqual(TAKEOVER_INFO);
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('resumed');
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending).toBeUndefined();
+    expect(projection.error).toBeNull();
+  });
+
+  it('abandonAutoResume 带 message → 错误回落成横幅', async () => {
+    const h = createHarness();
+    const sid = 'abandon-surfaces-banner';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+
+    h.coordinator.abandonAutoResume(sid, truncationMessage);
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending).toBeUndefined();
+    expect(projection.error).toBe(truncationMessage);
+    expect(projection.recovery?.kind).toBe('active-turn');
+  });
+
+  it('abandonAutoResume 不带 message → 只收提示,不弹横幅(用户已自己接手)', async () => {
+    const h = createHarness();
+    const sid = 'abandon-silently';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+
+    h.coordinator.abandonAutoResume(sid);
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending).toBeUndefined();
+    expect(projection.error).toBeNull();
+  });
+
+  it('退避窗口内用户自己发消息 → 接管态立即清除(isAutoResumePending 同步反映)', async () => {
+    const h = createHarness();
+    const sid = 'takeover-cleared-by-user-send';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(true);
+
+    h.coordinator.enqueue(sid, makeItem('q-user', 'user takes over'));
+    await flush();
+
+    // 这条不变量是 host 抑制 error 落库的判据:清晚了会把用户新 turn 的失败一起压掉。
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(false);
+    expect(latestProjection(h.projections).autoResumePending).toBeUndefined();
+  });
+
+  it('用户点「忽略」也清接管态', async () => {
+    const h = createHarness();
+    const sid = 'takeover-cleared-by-clear-error';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    await failAfterDispatch(h, sid);
+    h.onUserEnqueue.mockClear();
+
+    h.coordinator.clearError(sid);
+    await flush();
+
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(false);
+    expect(h.onUserEnqueue, 'host 必须先释放退避簿记与 Agent Island filter').toHaveBeenCalledWith(sid);
+  });
+
+  it('recovery 已被用户清掉时 autoRetryLastError 返回 false(调用方据此回滚额度)', async () => {
+    const h = createHarness();
+    const sid = 'auto-retry-superseded';
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+
+    // 退避窗口内用户自己点了「忽略」。
+    h.coordinator.clearError(sid);
+    await flush();
+
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('superseded');
+    await flush();
+    expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * 「terminal error 早于用户气泡落库完成」这条时序:接管决策只能等到落库完成
+   * (recovery 留不留得住是前提),但红横幅与 error 行落库都发生在决策之前。
+   * 下面四条锁的就是这段窗口 —— 候选期一律先按住,决策落定后按结果放行。
+   */
+  it('候选期 activeTurn 被顶替(同轮 steer)→ 仍要通知 host 补落 error 行', async () => {
+    // activeTurn 被换掉后,drain 会在 isActiveTurnCurrent 处早返、跳过后面所有清理,而 host
+    // 那边 error 行早就被压住了 —— 不在早返之前补落,那次中断在历史里彻底消失(codex P1)。
+    const h = createHarness();
+    const sid = 'deferred-stale-active-flushes';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    expect(h.coordinator.isAutoResumeDeferred(sid)).toBe(true);
+
+    // 同轮 steer 被接受 → activeTurn 换成新对象,原 drain 的后续步骤全部失效。
+    void h.coordinator.steer(sid, makeItem('q-steer', '顺手补一句'));
+    await flush();
+    releasePersist();
+    await flush();
+
+    expect(h.onResumableTurnErrorDiscarded).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ surfaceError: false, owner: expect.any(Object) }),
+    );
+  });
+
+  it('在途重试的刹车:await 读库期间接管态被清(会话关闭)→ 判 superseded,不补发', async () => {
+    // 定时器 fire 那一刻就从 map 里摘掉了,此后 autoRetryLastError 还要 await 读库判产出。
+    // 会话在那段窗口里关掉时 cancelScheduledAutoResume 已经无从取消,而 onSessionClosed
+    // 刻意保留 recovery(手动重试入口),只看 recovery 会让补发把会话重新拉起来(codex P1)。
+    // teardown 清接管态 → coordinator 在 await 之后复核并收手。
+    const h = createHarness();
+    const sid = 'auto-retry-inflight-brake';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    let releaseProgressQuery: () => void = () => {};
+    h.setHasAssistantProgressAfter(async () => {
+      await new Promise<void>((resolve) => {
+        releaseProgressQuery = resolve;
+      });
+      return true;
+    });
+    await failAfterDispatch(h, sid);
+    expect(h.coordinator.isAutoResumePending(sid)).toBe(true);
+
+    const sendCallsBefore = h.sendToAgent.mock.calls.length;
+    const retry = h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal);
+    await flush();
+    // 读库还没回来时会话被关掉 → teardown 清接管态(abandonAutoResume 不带 message)。
+    h.coordinator.abandonAutoResume(sid);
+    releaseProgressQuery();
+
+    await expect(retry).resolves.toBe('superseded');
+    await flush();
+    expect(
+      h.sendToAgent.mock.calls.length,
+      '不许往已经终止的会话补发续跑',
+    ).toBe(sendCallsBefore);
+  });
+
+  it('延后结算:候选期不发布 error(一帧都不闪),接管后只有活动行', async () => {
+    const h = createHarness();
+    const sid = 'deferred-takeover-no-flash';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    // 候选判定为真 → 决策未定这段窗口里**不许**出现红横幅(greptile P1)。
+    expect(
+      latestProjection(h.projections).error,
+      '决策未定就弹横幅 = 接管成功时用户已经先看过一帧红',
+    ).toBeNull();
+    expect(h.coordinator.isAutoResumeDeferred(sid), 'host 据此把 error 行也一起按住').toBe(true);
+
+    releasePersist();
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending).toEqual(TAKEOVER_INFO);
+    expect(projection.error, '接管后必须没有红横幅').toBeNull();
+    expect(h.coordinator.isAutoResumeDeferred(sid), '已决策 → 不再是候选态').toBe(false);
+    expect(h.onResumableTurnErrorDiscarded, '接管成立就不该通知补落').not.toHaveBeenCalled();
+  });
+
+  it('延后结算:host 拒绝接管 → 横幅回落,并通知 host 补落被按住的 error 行', async () => {
+    // 额度耗尽 / 熔断 / 开关关闭都走这里。被按住的 error 行如果没人补落,那次中断在
+    // 历史里彻底消失(不变量 I2)。
+    const h = createHarness();
+    const sid = 'deferred-decline-flushes';
+    h.setResumableTurnErrorTakeover(null);
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    expect(latestProjection(h.projections).error).toBeNull();
+
+    releasePersist();
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending ?? null).toBeNull();
+    expect(projection.error, '不接管就得把横幅还给用户').toBe(truncationMessage);
+    expect(h.onResumableTurnErrorDiscarded).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ surfaceError: true, owner: expect.any(Object) }),
+    );
+  });
+
+  it('延后结算:候选窗口里用户自己发了消息 → 不接管、不消耗额度,回落成常规错误', async () => {
+    // 用户的 enqueue 发生在接管决策**之前**,清接管态清不到这条(它还没接管)。不作废
+    // 的话延后结算会再接管一次,把一条隐藏续跑指令插到用户那条消息前面(greptile P1)。
+    const h = createHarness();
+    const sid = 'deferred-superseded-by-user';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    // 用户在这一小段窗口里自己发了新消息。
+    h.coordinator.enqueue(sid, makeItem('q-user', '换个思路重来'));
+    await flush();
+
+    releasePersist();
+    await flush();
+
+    const projection = latestProjection(h.projections);
+    expect(projection.autoResumePending ?? null, '用户已接手 → 不该再显示重连').toBeNull();
+    expect(projection.error, '回落成常规错误呈现,让用户自己决定要不要续跑').toBe(truncationMessage);
+    expect(h.onResumableTurnError, '连问都不该问(不消耗额度)').not.toHaveBeenCalled();
+    expect(h.onResumableTurnErrorDiscarded).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ surfaceError: false, owner: expect.any(Object) }),
+    );
+  });
+
+  it('退避窗口里用户自己发了消息 → autoRetryLastError 判 superseded(不抢在他前面代发)', async () => {
+    // recovery 不会被 enqueue 清掉(队列的 drain 恰恰被 recovery 挡着),所以只看 recovery
+    // 会让定时器到点仍然代发一条隐藏续跑指令,插在用户消息前面且完全不可见(greptile P1)。
+    const h = createHarness();
+    const sid = 'auto-retry-superseded-by-enqueue';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    h.setHasAssistantProgressAfter(async () => true);
+    await failAfterDispatch(h, sid);
+    expect(latestProjection(h.projections).autoResumePending).toEqual(TAKEOVER_INFO);
+
+    h.coordinator.enqueue(sid, makeItem('q-user', '先看看这个'));
+    await flush();
+    expect(h.coordinator.isAutoResumePending(sid), 'enqueue 同步撤掉接管态').toBe(false);
+
+    const sendCallsBefore = h.sendToAgent.mock.calls.length;
+    await expect(
+      h.coordinator.autoRetryLastError(sid, TAKEOVER_INFO.sessionTotal),
+    ).resolves.toBe('superseded');
+    await flush();
+    expect(
+      h.sendToAgent.mock.calls.length,
+      '不许在用户消息之前插一条自动续跑',
+    ).toBe(sendCallsBefore);
+  });
+
+  it('延后结算:非候选错误照旧立刻呈现(确定性失败不受本机制影响)', async () => {
+    const h = createHarness();
+    const sid = 'deferred-non-candidate';
+    h.setResumableTurnErrorCandidate(() => false);
+    let releasePersist: () => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', 'Invalid API key', { sdkError: 'authentication_failed' });
+    await flush();
+    expect(latestProjection(h.projections).error, '认证失效必须立刻报,不许被按住').toBe(
+      'Invalid API key',
+    );
+    expect(h.coordinator.isAutoResumeDeferred(sid)).toBe(false);
+
+    releasePersist();
+    await flush();
+    expect(h.onResumableTurnErrorDiscarded, '没按住过就不该通知补落').not.toHaveBeenCalled();
+  });
+
+  it('延后结算:用户气泡落库失败 → 被按住的 error 行仍要补落', async () => {
+    // 这条 error 永远走不到接管决策(recovery 已清),host 侧压住的行必须有人补落。
+    const h = createHarness();
+    const sid = 'deferred-persist-failed-flushes';
+    h.setResumableTurnErrorTakeover(TAKEOVER_INFO);
+    let rejectPersist: (err: Error) => void = () => {};
+    mocks.createMessage.mockImplementationOnce(async () => {
+      await new Promise<void>((_resolve, reject) => {
+        rejectPersist = reject;
+      });
+      return {};
+    });
+
+    h.coordinator.enqueue(sid, makeItem('q-first', 'original long task'));
+    await flush();
+    h.coordinator.onTurnEvent(sid, 'error', truncationMessage, truncationSignals);
+    await flush();
+    expect(h.coordinator.isAutoResumeDeferred(sid)).toBe(true);
+
+    rejectPersist(new Error('disk full'));
+    await flush();
+
+    expect(h.onResumableTurnErrorDiscarded).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ surfaceError: true, owner: expect.any(Object) }),
+    );
+    expect(h.onResumableTurnError, '落库失败就没有可续跑的目标,不该消耗额度').not.toHaveBeenCalled();
   });
 });

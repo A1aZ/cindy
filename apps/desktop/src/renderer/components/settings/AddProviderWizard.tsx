@@ -14,21 +14,28 @@
  * 上探测式灰态)。
  */
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, Info, Plus, Search, X } from 'lucide-react';
+import { Check, Info, Plus, Search } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { Spinner } from '@/components/ui/spinner';
-import { Tip } from '@/components/ui/tooltip';
 import { createCustomProvider, type RuntimeKeys } from '@/lib/customProviders';
+import { PROVIDER_SECRET_IDS } from '../../../shared/providerSecrets';
 import { uniqueCustomProviderId } from '@/lib/customProviderId';
 import { providerMonogram } from '@/lib/providerModels';
 import { isChatGptConnectionConnected, useCodexAuth } from '@/hooks/useCodexAuth';
+import { useProviderOAuthDeviceCode } from '@/hooks/useProviderOAuthDeviceCode';
 import { hasProviderLogo, ProviderLogoMark } from '@/components/icons/ProviderLogoMark';
+import { OAuthDeviceCodeCard } from './OAuthDeviceCodeCard';
+import { SettingsTextInput } from './SettingsTextInput';
 
-import { presetDisplayName, sortPresetsForLocale } from '@cindy/model-providers';
+import {
+  isLoopbackProviderUrl,
+  presetDisplayName,
+  sortPresetsForLocale,
+} from '@cindy/model-providers';
 import type {
   AgentKind,
   CustomProviderConfig,
@@ -55,13 +62,17 @@ interface AddProviderWizardProps {
 }
 
 type Selection =
-  { kind: 'oauth'; provider: ProviderView } | { kind: 'preset'; preset: ProviderPreset };
+  | { kind: 'oauth'; provider: ProviderView }
+  | { kind: 'preset'; preset: ProviderPreset }
+  /** 内置 API-key 供应商(如 Gemini 图像来源,2026-07):保存 key 即连接,无自定义供应商落库。 */
+  | { kind: 'builtinApiKey'; provider: ProviderView };
 
 type PresetBaseUrls = Partial<Record<AgentKind, string>>;
 
 const AGENT_LABEL: Record<AgentKind, string> = {
   'claude-code': 'Claude Code',
   codex: 'Codex',
+  pi: 'Pi',
 };
 
 function presetRuntimeBaseUrl(
@@ -98,9 +109,16 @@ function isValidEditablePresetBaseUrl(value: string): boolean {
  * (缺省由 baseUrl 推导 …/v1/models,见 provider-model-fetch);同时内置少量
  * 推荐模型兜底——拉取因网络/限流失败时降级为「仅推荐模型」仍可完成创建,
  * 不把用户堵死(与目录预设同语义;Greptile P1 反馈 2026-07-24)。
- * cc runtime 需 Anthropic 兼容端点、codex 需 OpenAI 兼容端点,故 openai/xai
- * 仅声明 codex(两家无 Anthropic 兼容端点),表单会自动展示「仅支持 X」说明行。
+ * 每个 runtime 都独立声明 wire protocol：Anthropic API 同时提供 Claude Code 的
+ * Messages 与 Codex 桥接所需的 Messages 端点；openai/xai 仅声明 Codex(两家无
+ * Anthropic 兼容端点),表单会自动展示「仅支持 X」说明行。
  */
+const ANTHROPIC_API_MODELS = [
+  { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000 },
+  { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000 },
+  { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', contextWindow: 200_000 },
+];
+
 const OFFICIAL_API_PRESETS: Record<string, ProviderPreset> = {
   anthropic: {
     id: 'anthropic-api',
@@ -112,11 +130,15 @@ const OFFICIAL_API_PRESETS: Record<string, ProviderPreset> = {
         // contextWindow 必须与目录(providers.json)一致:保存时它是窗口的唯一来源
         // (拉取的模型列表不带窗口),缺省会落 200k 默认 → toSdkModelString 剥掉
         // 1M 模型的 [1m] 路由,用户拿到 1/5 窗口。
-        models: [
-          { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: 1_000_000 },
-          { id: 'claude-sonnet-5', name: 'Claude Sonnet 5', contextWindow: 1_000_000 },
-          { id: 'claude-haiku-4-5', name: 'Claude Haiku 4.5', contextWindow: 200_000 },
-        ],
+        models: ANTHROPIC_API_MODELS,
+      },
+      // Codex 通过 Responses → Anthropic Messages 本地桥接访问同一官方 API。
+      // 这不是 Claude.ai OAuth 路由：API key 由该 runtime 独立存储，出站只使用
+      // x-api-key，Codex 自带的 OpenAI Authorization 永不透传到 Anthropic。
+      codex: {
+        wireProtocol: 'anthropic-messages',
+        baseUrl: 'https://api.anthropic.com',
+        models: ANTHROPIC_API_MODELS,
       },
     },
   },
@@ -156,49 +178,14 @@ function cardIcon(sel: { providerId?: string; name: string }): React.ReactNode {
   if (sel.providerId && hasProviderLogo(sel.providerId)) {
     return <ProviderLogoMark providerId={sel.providerId} size={15} />;
   }
-  return <span className="text-12 font-semibold leading-none">{providerMonogram(sel.name)}</span>;
+  return <span className="text-12 font-medium leading-none">{providerMonogram(sel.name)}</span>;
 }
 
-/** 单行供应商名；只有实际发生截断时才在 hover 后展示完整名称。 */
-function ProviderCardName({ name }: { name: string }) {
-  const nameRef = useRef<HTMLSpanElement>(null);
-  const [truncated, setTruncated] = useState(false);
-
-  useLayoutEffect(() => {
-    const element = nameRef.current;
-    if (!element) return;
-    const measure = () => setTruncated(element.scrollWidth > element.clientWidth + 1);
-    measure();
-    if (typeof ResizeObserver === 'undefined') {
-      window.addEventListener('resize', measure);
-      return () => window.removeEventListener('resize', measure);
-    }
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    // Tip 启停会改变子树并重挂 span，truncated 变化时必须把 observer 绑定到新节点。
-    return () => observer.disconnect();
-  }, [name, truncated]);
-
-  const text = (
-    <span
-      ref={nameRef}
-      className="min-w-0 truncate text-13 font-medium"
-      style={{ color: 'var(--settings-section-title)' }}
-    >
-      {name}
-    </span>
-  );
-
-  return truncated ? (
-    <Tip text={name} delay={250} contentClassName="z-[10001] max-w-[320px] [word-break:normal]">
-      {text}
-    </Tip>
-  ) : (
-    text
-  );
-}
-
-function ProviderCard({
+/**
+ * 目录单行(2026-07 定稿:第 1 步由三列卡片宫格改为单列列表)——名称在左、
+ * 鉴权方式靠右;行宽给足后不再需要截断测量 + Tip 组合。
+ */
+function ProviderRow({
   icon,
   name,
   meta,
@@ -213,26 +200,27 @@ function ProviderCard({
     <button
       type="button"
       onClick={onClick}
-      className="flex flex-col gap-1 rounded-xl border p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
-      style={{
-        borderColor: 'var(--border-default)',
-        backgroundColor: 'var(--surface-elevated)',
-      }}
+      title={name}
+      className="flex w-full items-center gap-2.5 rounded-lg px-2 py-[7px] text-left transition-colors hover:bg-[var(--surface-hover)]"
     >
-      <span className="flex items-center gap-2">
-        <span
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md"
-          style={{
-            backgroundColor: 'var(--settings-integration-avatar-bg)',
-            border: '1px solid var(--settings-integration-avatar-border)',
-            color: 'var(--settings-integration-avatar-icon)',
-          }}
-        >
-          {icon}
-        </span>
-        <ProviderCardName name={name} />
+      <span
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+        style={{
+          backgroundColor: 'var(--settings-integration-avatar-bg)',
+          border: '1px solid var(--settings-integration-avatar-border)',
+          color: 'var(--settings-integration-avatar-icon)',
+        }}
+      >
+        {icon}
       </span>
-      <span className="truncate text-11" style={{ color: 'var(--text-tertiary)' }}>
+      <span
+        className="min-w-0 flex-1 truncate text-13 font-medium"
+        style={{ color: 'var(--settings-section-title)' }}
+      >
+        {name}
+      </span>
+      {/* meta 可收缩截断:en 等长文案在窄弹窗下不得把名称挤出(PR #1102 review)。 */}
+      <span className="min-w-0 truncate text-11" style={{ color: 'var(--text-tertiary)' }}>
         {meta}
       </span>
     </button>
@@ -251,8 +239,8 @@ function InfoLine({ text }: { text: string }) {
 function GroupLabel({ children }: { children: React.ReactNode }) {
   return (
     <span
-      className="pb-1.5 pt-3 text-11 font-semibold uppercase"
-      style={{ color: 'var(--text-tertiary)', letterSpacing: '0.4px' }}
+      className="block px-2 pb-1.5 pt-3 text-11 font-medium uppercase"
+      style={{ color: 'var(--text-tertiary)', letterSpacing: '0.5px' }}
     >
       {children}
     </span>
@@ -274,20 +262,38 @@ export function AddProviderWizard({
   // entry(左栏检测建议 / 引导卡直达):目录里找得到该渠道才直达授权步,否则回落目录页。
   const entryProvider =
     entry?.kind === 'builtin' ? providers.find((x) => x.id === entry.providerId) : undefined;
-  const [sel, setSel] = useState<Selection | null>(() =>
-    entryProvider ? { kind: 'oauth', provider: entryProvider } : null,
-  );
+  const [sel, setSel] = useState<Selection | null>(() => {
+    if (!entryProvider) return null;
+    return entryProvider.auth?.method === 'apiKey'
+      ? { kind: 'builtinApiKey', provider: entryProvider }
+      : { kind: 'oauth', provider: entryProvider };
+  });
   // 预设表单态
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [presetBaseUrls, setPresetBaseUrls] = useState<PresetBaseUrls>({});
   const [saving, setSaving] = useState(false);
   const [loggingIn, setLoggingIn] = useState(false);
+  const genericOAuthProviderId =
+    sel?.kind === 'oauth' && sel.provider.auth.oauth ? sel.provider.id : null;
+  const genericDeviceFlow =
+    sel?.kind === 'oauth' && sel.provider.auth.oauth?.flow === 'device-code';
+  const {
+    deviceCode: genericDeviceCode,
+    clearDeviceCode: clearGenericDeviceCode,
+    beginOwnedLogin: beginGenericOwnedLogin,
+    cancelOwnedLogin: cancelGenericOwnedLogin,
+  } = useProviderOAuthDeviceCode(genericOAuthProviderId, {
+    observeProgress: genericDeviceFlow,
+  });
   // Step 3 拉取态
   const [step, setStep] = useState<1 | 2 | 3>(entryProvider ? 2 : 1);
   const [fetchState, setFetchState] = useState<
-    { status: 'idle' } | { status: 'fetching' } | { status: 'done'; failed: boolean }
+    | { status: 'idle' }
+    | { status: 'fetching' }
+    | { status: 'done'; failed: boolean; empty: boolean }
   >({ status: 'idle' });
+  const [manualModelIds, setManualModelIds] = useState<Partial<Record<AgentKind, string>>>({});
   /**
    * 勾选清单:id → { name, checked, recommended, agents }。Map 保序(推荐在前,拉取新增在后)。
    * agents = 该模型归属的 runtime:预设推荐模型归属「预设里列出它的那些 runtime」;拉取新增
@@ -295,7 +301,18 @@ export function AddProviderWizard({
    * 每个 runtime(双 runtime 预设两端模型集可以不同,cc-only 模型不能写进 codex,反之亦然)。
    */
   const [picks, setPicks] = useState<
-    Map<string, { name: string; checked: boolean; recommended: boolean; agents: AgentKind[] }>
+    Map<
+      string,
+      {
+        name: string;
+        checked: boolean;
+        recommended: boolean;
+        agents: AgentKind[];
+        /** 列模型端点上报的上下文窗口,**按 agent 分槽**(同一 id 双端可不同,如
+         *  cc=1M / codex=272K);完成创建时按所属 runtime 取值,预设值优先、本值兜底。 */
+        contextWindows?: Partial<Record<AgentKind, number>>;
+      }
+    >
   >(new Map());
 
   useEffect(() => {
@@ -324,6 +341,19 @@ export function AddProviderWizard({
       ),
     [providers],
   );
+  // 内置 API-key 渠道(auth.method 'apiKey' 的 builtin 条目,今天只有 gemini 图像来源):
+  // 已连接的不再进向导;声明了媒体清单才展示(纯占位条目没有可配置的能力面)。
+  const builtinApiKeyChoices = useMemo(
+    () =>
+      providers.filter(
+        (p) =>
+          p.source === 'builtin' &&
+          p.auth.method === 'apiKey' &&
+          !p.connected &&
+          ((p.imageModels?.length ?? 0) > 0 || (p.videoModels?.length ?? 0) > 0),
+      ),
+    [providers],
+  );
   const sortedPresets = useMemo(
     () => sortPresetsForLocale(presets, i18n.language),
     [presets, i18n.language],
@@ -346,19 +376,30 @@ export function AddProviderWizard({
 
   const pickOauth = useCallback((provider: ProviderView) => {
     fetchSeqRef.current += 1;
+    setManualModelIds({});
     setSel({ kind: 'oauth', provider });
+    setStep(2);
+  }, []);
+  const pickBuiltinApiKey = useCallback((provider: ProviderView) => {
+    fetchSeqRef.current += 1;
+    setManualModelIds({});
+    setSel({ kind: 'builtinApiKey', provider });
+    setApiKey('');
     setStep(2);
   }, []);
   const pickPreset = useCallback(
     (preset: ProviderPreset) => {
       fetchSeqRef.current += 1;
+      setManualModelIds({});
       setSel({ kind: 'preset', preset });
       setName(presetDisplayName(preset, i18n.language));
       setApiKey('');
       setPresetBaseUrls(
         Object.fromEntries(
-          (Object.keys(preset.runtimes) as AgentKind[])
-            .map((agent) => [agent, preset.runtimes[agent]?.baseUrl ?? '']),
+          (Object.keys(preset.runtimes) as AgentKind[]).map((agent) => [
+            agent,
+            preset.runtimes[agent]?.baseUrl ?? '',
+          ]),
         ) as PresetBaseUrls,
       );
       setStep(2);
@@ -387,46 +428,59 @@ export function AddProviderWizard({
   const openaiLoginStartedRef = useRef(false);
 
   // ── OAuth 授权(复用既有鉴权流;成功即完成,无第 3 步)────────────────────
-  const handleAuthorize = useCallback(async () => {
-    if (!sel || sel.kind !== 'oauth') return;
-    const id = sel.provider.id;
-    setLoggingIn(true);
-    try {
-      let ok = false;
-      if (id === 'anthropic') {
-        const r = await window.electronAPI.maker.claudeOAuthLogin();
-        ok = r.ok;
-        if (!r.ok && r.reason === 'not_a_subscription') {
-          toast.error(t('settings.connections.claude.toast.notSubscription'));
-          return;
+  const handleAuthorize = useCallback(
+    async (mode: 'browser' | 'device-code' = 'browser') => {
+      if (!sel || sel.kind !== 'oauth') return;
+      const id = sel.provider.id;
+      clearGenericDeviceCode();
+      setLoggingIn(true);
+      try {
+        let ok = false;
+        if (id === 'anthropic') {
+          const r = await window.electronAPI.maker.claudeOAuthLogin();
+          ok = r.ok;
+          if (!r.ok && r.reason === 'not_a_subscription') {
+            toast.error(t('settings.connections.claude.toast.notSubscription'));
+            return;
+          }
+          if (!r.ok && r.reason === 'login_cancelled') return;
+        } else if (id === 'openai') {
+          openaiLoginStartedRef.current = true;
+          const outcome = await codexAuth.triggerLogin(mode);
+          ok = outcome === 'authenticated';
+          if (outcome === 'cancelled') return;
+        } else if (id === 'xai') {
+          const r = await window.electronAPI.maker.xaiOAuthLogin();
+          ok = r.ok;
+          if (!r.ok && r.reason === 'login_cancelled') return;
+        } else {
+          const ownedLogin = beginGenericOwnedLogin();
+          try {
+            const r = await window.electronAPI.maker.providerOAuthLogin(id, {
+              ownerId: ownedLogin.ownerId,
+            });
+            ok = r.ok;
+            if (!r.ok && r.reason === 'login_cancelled') return;
+          } finally {
+            ownedLogin.finish();
+          }
         }
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      } else if (id === 'openai') {
-        openaiLoginStartedRef.current = true;
-        const outcome = await codexAuth.triggerLogin();
-        ok = outcome === 'authenticated';
-        if (outcome === 'cancelled') return;
-      } else if (id === 'xai') {
-        const r = await window.electronAPI.maker.xaiOAuthLogin();
-        ok = r.ok;
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      } else {
-        const r = await window.electronAPI.maker.providerOAuthLogin(id);
-        ok = r.ok;
-        if (!r.ok && r.reason === 'login_cancelled') return;
-      }
-      if (ok) {
-        toast.success(t('settings.providers.wizard.authorizedToast', { name: sel.provider.name }));
-        onDone(id);
-      } else {
+        if (ok) {
+          toast.success(
+            t('settings.providers.wizard.authorizedToast', { name: sel.provider.name }),
+          );
+          onDone(id);
+        } else {
+          toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+        }
+      } catch {
         toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+      } finally {
+        setLoggingIn(false);
       }
-    } catch {
-      toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
-    } finally {
-      setLoggingIn(false);
-    }
-  }, [sel, codexAuth, onDone, t]);
+    },
+    [sel, clearGenericDeviceCode, beginGenericOwnedLogin, codexAuth, onDone, t],
+  );
 
   /**
    * 取消进行中的 OAuth(与详情头的行为对称):等待授权期间点按钮 / 关弹窗 / 返回
@@ -438,15 +492,33 @@ export function AddProviderWizard({
     if (id === 'anthropic') void window.electronAPI.maker.claudeOAuthCancel();
     else if (id === 'openai') void codexAuth.cancelLogin();
     else if (id === 'xai') void window.electronAPI.maker.xaiOAuthCancel();
-    else void window.electronAPI.maker.providerOAuthCancel(id);
+    else cancelGenericOwnedLogin();
+    clearGenericDeviceCode();
     setLoggingIn(false);
-  }, [sel, codexAuth]);
+  }, [sel, clearGenericDeviceCode, cancelGenericOwnedLogin, codexAuth]);
 
   /** 关闭向导:授权等待中先取消再关,不留挂起的 login runner。 */
   const handleClose = useCallback(() => {
     if (loggingIn) cancelAuthorize();
     onClose();
   }, [loggingIn, cancelAuthorize, onClose]);
+
+  // 遮罩关闭的防误触:从输入框按下、拖到弹窗外松开时,浏览器把合成 click 派发到
+  // 按下点与松开点的最近公共祖先(= 遮罩),target === currentTarget 成立但用户
+  // 并无关闭意图。记录按下是否始于遮罩,按下与松开都在遮罩上才关闭
+  // (PR #1102 review 第七轮)。
+  const overlayMouseDownOnSelfRef = useRef(false);
+
+  // Esc 关闭(DESIGN.md §4:弹窗关闭 = 取消按钮 / Esc / 点遮罩;本弹窗未用 Radix,需自行监听)。
+  // CJK 输入法组合期间的 Esc 是「取消候选词」,不是关闭命令(isComposing / 遗留
+  // keyCode 229),与仓库其他 CJK 输入场景同口径(PR #1102 review 第六轮)。
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.isComposing && e.keyCode !== 229) handleClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [handleClose]);
 
   // OpenAI 走 useCodexAuth:hook 状态翻 connected 时视为完成(triggerLogin 也会返回,
   // oneshot ref 保证只收口一次)。只收口本向导内发起的登录(openaiLoginStartedRef),
@@ -477,7 +549,13 @@ export function AddProviderWizard({
     // 预设推荐模型先入清单(预勾);归属 = 预设里列出该模型的全部 runtime。
     const initial = new Map<
       string,
-      { name: string; checked: boolean; recommended: boolean; agents: AgentKind[] }
+      {
+        name: string;
+        checked: boolean;
+        recommended: boolean;
+        agents: AgentKind[];
+        contextWindows?: Partial<Record<AgentKind, number>>;
+      }
     >();
     for (const agent of Object.keys(preset.runtimes) as AgentKind[]) {
       for (const m of preset.runtimes[agent]?.models ?? []) {
@@ -496,21 +574,58 @@ export function AddProviderWizard({
     // 并行拉取**每个已配置 runtime** 的列模型端点:双 runtime 预设两端各自发现,
     // 返回结果按「实际返回它的端点」归属合并——某模型两端都返回则归属两端。
     const agents = Object.keys(preset.runtimes) as AgentKind[];
+    // 同一个 modelsUrl 被多个 runtime 共用、但预设模型集合不同，说明该端点返回的是
+    // 跨协议总目录（OpenCode Go 即如此），响应本身无法判定模型属于 Messages 还是 Chat。
+    // 这类端点只能用于确认预设已有模型，不能扩大其 agent 归属或加入无法分类的新模型。
+    const discoveryAgentsByUrl = new Map<string, AgentKind[]>();
+    for (const agent of agents) {
+      const modelsUrl = preset.runtimes[agent]?.modelsUrl;
+      if (!modelsUrl) continue;
+      discoveryAgentsByUrl.set(modelsUrl, [...(discoveryAgentsByUrl.get(modelsUrl) ?? []), agent]);
+    }
+    const splitDiscoveryUrls = new Set(
+      [...discoveryAgentsByUrl.entries()]
+        .filter(([, owners]) => {
+          if (owners.length < 2) return false;
+          const modelSets = new Set(
+            owners.map((agent) =>
+              (preset.runtimes[agent]?.models ?? [])
+                .map((model) => model.id)
+                .sort()
+                .join('\u0000'),
+            ),
+          );
+          return modelSets.size > 1;
+        })
+        .map(([modelsUrl]) => modelsUrl),
+    );
     const results = await Promise.all(
       agents.map(async (agent) => {
         const rt = preset.runtimes[agent];
-        if (!rt) return { agent, ok: false, models: [] as { id: string; name: string }[] };
+        if (!rt) {
+          return {
+            agent,
+            ok: false,
+            models: [] as { id: string; name: string; contextWindow?: number }[],
+          };
+        }
         try {
           const r = await window.electronAPI.maker.fetchProviderModels({
             agent,
             baseUrl: presetRuntimeBaseUrl(preset, agent, presetBaseUrls),
+            authMethod: preset.authMethod ?? 'apiKey',
             modelsUrl: rt.modelsUrl ?? null,
             apiKey: apiKey.trim() || null,
+            ...(rt.wireProtocol ? { wireProtocol: rt.wireProtocol } : {}),
             ...(rt.headers ? { headers: rt.headers } : {}),
           });
           return { agent, ok: !!(r.ok && r.models), models: r.models ?? [] };
         } catch {
-          return { agent, ok: false, models: [] as { id: string; name: string }[] };
+          return {
+            agent,
+            ok: false,
+            models: [] as { id: string; name: string; contextWindow?: number }[],
+          };
         }
       }),
     );
@@ -519,30 +634,125 @@ export function AddProviderWizard({
     setPicks((prev) => {
       const next = new Map(prev);
       for (const { agent, models } of results) {
+        const modelsUrl = preset.runtimes[agent]?.modelsUrl;
+        const preservePresetOwnership = !!modelsUrl && splitDiscoveryUrls.has(modelsUrl);
         for (const m of models) {
           const existing = next.get(m.id);
           if (existing) {
-            if (!existing.agents.includes(agent)) {
-              next.set(m.id, { ...existing, agents: [...existing.agents, agent] });
+            const mergedAgents =
+              !preservePresetOwnership && !existing.agents.includes(agent)
+                ? [...existing.agents, agent]
+                : existing.agents;
+            // 端点上报的窗口按 agent 分槽、只补该槽的空(同一 id 双端窗口可以不同,
+            // 不能共享一个值;预设推荐模型的窗口在完成创建时以预设为准,这里补的是
+            // 「预设没写窗口」的兜底)。
+            const backfillWindow =
+              existing.contextWindows?.[agent] === undefined && m.contextWindow !== undefined;
+            if (mergedAgents !== existing.agents || backfillWindow) {
+              next.set(m.id, {
+                ...existing,
+                agents: mergedAgents,
+                ...(backfillWindow
+                  ? { contextWindows: { ...existing.contextWindows, [agent]: m.contextWindow } }
+                  : {}),
+              });
             }
-          } else {
-            next.set(m.id, { name: m.name, checked: false, recommended: false, agents: [agent] });
+          } else if (!preservePresetOwnership) {
+            next.set(m.id, {
+              name: m.name,
+              checked: false,
+              recommended: false,
+              agents: [agent],
+              ...(m.contextWindow !== undefined
+                ? { contextWindows: { [agent]: m.contextWindow } }
+                : {}),
+            });
           }
         }
       }
       return next;
     });
     // 全部端点都失败才算失败(单端失败仍可按另一端 + 预设推荐完成)。
-    setFetchState({ status: 'done', failed: !results.some((r) => r.ok) });
+    setFetchState({
+      status: 'done',
+      failed: !results.some((r) => r.ok),
+      empty: !results.some((r) => r.models.length > 0),
+    });
   }, [sel, apiKey, presetBaseUrls]);
 
+  /**
+   * 零推荐模型的本机代理（例如 LiteLLM）若 `/models` 不可用或返回空清单，仍允许用户
+   * 按 runtime 手填真实模型 ID。归属必须精确到当前 agent，不能把一个 ID 猜测性复制到
+   * 双 runtime；同一 ID 分别加入两端时才合并归属。
+   */
+  const addManualModel = useCallback(
+    (agent: AgentKind) => {
+      if (!sel || sel.kind !== 'preset' || !sel.preset.runtimes[agent]) return;
+      const id = manualModelIds[agent]?.trim() ?? '';
+      if (!id) return;
+      setPicks((prev) => {
+        const next = new Map(prev);
+        const existing = next.get(id);
+        next.set(
+          id,
+          existing
+            ? {
+                ...existing,
+                checked: true,
+                agents: existing.agents.includes(agent)
+                  ? existing.agents
+                  : [...existing.agents, agent],
+              }
+            : {
+                name: id,
+                checked: true,
+                recommended: false,
+                agents: [agent],
+              },
+        );
+        return next;
+      });
+      setManualModelIds((prev) => ({ ...prev, [agent]: '' }));
+    },
+    [sel, manualModelIds],
+  );
+
   // ── 完成创建(预设)────────────────────────────────────────────────────
+  /**
+   * 内置 API-key 供应商(如 Gemini):保存 = 把 key 写进该供应商在册的 safeStorage 键
+   * (providerSecrets SSoT),连接态(provider-service 的 builtinApiKeyConnected)与
+   * 图像通道 ready 都以「key 已存」为准 —— 无自定义供应商落库、无模型拉取步。
+   */
+  const handleSaveBuiltinApiKey = useCallback(async () => {
+    if (!sel || sel.kind !== 'builtinApiKey') return;
+    const id = sel.provider.id;
+    if (!(PROVIDER_SECRET_IDS as readonly string[]).includes(id)) {
+      // 目录出现了未在 providerSecrets 登记的内置 API-key 供应商 = 数据/代码脱节,
+      // 明确报错让问题在配置期暴露,不静默写错键。
+      toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+      return;
+    }
+    const key = apiKey.trim();
+    if (!key) return;
+    setSaving(true);
+    try {
+      // 失败经统一 IPC 错误协议抛出(throwIpcError),这里 catch 即失败。
+      await window.electronAPI.builtinApiKeyStore(id, key);
+      toast.success(t('settings.providers.wizard.authorizedToast', { name: sel.provider.name }));
+      onDone(id);
+    } catch {
+      toast.error(t('settings.providers.wizard.authorizeFailed', { name: sel.provider.name }));
+    } finally {
+      setSaving(false);
+    }
+  }, [sel, apiKey, onDone, t]);
+
   const handleFinish = useCallback(async () => {
     if (!sel || sel.kind !== 'preset') return;
     const preset = sel.preset;
     const selected = [...picks.entries()]
       .filter(([, v]) => v.checked)
-      .map(([id, v]) => ({ id, name: v.name, agents: v.agents }));
+      .map(([id, v]) => ({ id, name: v.name, agents: v.agents, contextWindows: v.contextWindows }));
     if (selected.length === 0) {
       toast.error(t('settings.providers.wizard.noModelSelected'));
       return;
@@ -565,11 +775,19 @@ export function AddProviderWizard({
           .filter((m) => m.agents.includes(agent))
           .map((m) => {
             const presetModel = rt.models.find((candidate) => candidate.id === m.id);
+            // 预设策展值优先;拉取新增模型没有预设条目,落**该 runtime 端点**上报的
+            // 发现值(按 agent 分槽,双端窗口可不同),不再无窗口入库退回 200K 默认。
+            const contextWindow = presetModel?.contextWindow ?? m.contextWindows?.[agent];
             return {
               id: m.id,
               name: m.name,
-              ...(presetModel?.contextWindow !== undefined
-                ? { contextWindow: presetModel.contextWindow }
+              ...(contextWindow !== undefined ? { contextWindow } : {}),
+              ...(presetModel?.supportsImageInput === true ? { supportsImageInput: true } : {}),
+              ...(presetModel?.reasoning === true && presetModel.reasoningEfforts?.length
+                ? {
+                    reasoning: true,
+                    reasoningEfforts: [...presetModel.reasoningEfforts],
+                  }
                 : {}),
             };
           });
@@ -582,15 +800,22 @@ export function AddProviderWizard({
           ...(rt.headers ? { headers: rt.headers } : {}),
           ...(rt.modelsUrl ? { modelsUrl: rt.modelsUrl } : {}),
         };
-        const k = apiKey.trim();
-        if (k) keys[agent] = k;
+        if (preset.authMethod !== 'none') {
+          const k = apiKey.trim();
+          if (k) keys[agent] = k;
+        }
       }
       if (Object.keys(runtimes).length === 0) {
         toast.error(t('settings.providers.wizard.noModelSelected'));
         return;
       }
       await createCustomProvider(
-        { id, name: name.trim() || presetDisplayName(preset, i18n.language), runtimes },
+        {
+          id,
+          name: name.trim() || presetDisplayName(preset, i18n.language),
+          ...(preset.authMethod === 'none' ? { auth: { method: 'none' as const } } : {}),
+          runtimes,
+        },
         keys,
       );
       toast.success(
@@ -606,8 +831,11 @@ export function AddProviderWizard({
     }
   }, [sel, picks, name, apiKey, presetBaseUrls, providers, onDone, t, i18n.language]);
 
-  // ── 步骤指示(OAuth 路径只有 2 步)─────────────────────────────────────
-  const totalSteps = sel?.kind === 'preset' ? 3 : 2;
+  // ── 步骤指示 ─────────────────────────────────────────────────────────
+  // 目录步默认按完整路径显示三步(选择供应商 → 连接 → 选择模型);选中真的
+  // 没有第 3 步的两步流程(OAuth 授权即完成、内置 API Key 保存即连接)才收成
+  // 两步。未选择时就显示两步会让「选择模型」凭空消失/出现(2026-07-30 用户反馈)。
+  const totalSteps = sel == null || sel.kind === 'preset' ? 3 : 2;
   const stepLabels = [
     t('settings.providers.wizard.stepPick'),
     t('settings.providers.wizard.stepConnect'),
@@ -617,15 +845,6 @@ export function AddProviderWizard({
   // 预设单 runtime 时的「仅支持 X」说明(数据驱动的静态灰,见文件头注释)。
   const presetAgents =
     sel?.kind === 'preset' ? (Object.keys(sel.preset.runtimes) as AgentKind[]) : [];
-  const presetBaseUrlsValid =
-    sel?.kind !== 'preset'
-    || presetAgents.every((agent) => {
-      const rt = sel.preset.runtimes[agent];
-      return !rt?.baseUrlEditable
-        || isValidEditablePresetBaseUrl(
-          presetRuntimeBaseUrl(sel.preset, agent, presetBaseUrls),
-        );
-    });
   const presetSingleAgentNote =
     sel?.kind === 'preset' && presetAgents.length === 1
       ? t('settings.providers.wizard.onlyAgentNote', { agent: AGENT_LABEL[presetAgents[0]] })
@@ -636,45 +855,81 @@ export function AddProviderWizard({
           agent: AGENT_LABEL[sel.provider.agents[0]],
         })
       : null;
+  const openAiDeviceLoginPending =
+    sel?.kind === 'oauth' &&
+    sel.provider.id === 'openai' &&
+    loggingIn &&
+    codexAuth.state.kind === 'login-pending' &&
+    codexAuth.state.mode === 'device-code';
+  const openAiDeviceCode =
+    openAiDeviceLoginPending && codexAuth.state.kind === 'login-pending'
+      ? codexAuth.state.deviceCode
+      : undefined;
 
   const checkedCount = [...picks.values()].filter((v) => v.checked).length;
+  const presetHasRecommendedModels =
+    sel?.kind === 'preset' &&
+    presetAgents.some((agent) => (sel.preset.runtimes[agent]?.models.length ?? 0) > 0);
+  const showManualModelFallback =
+    sel?.kind === 'preset' &&
+    fetchState.status === 'done' &&
+    (fetchState.failed || fetchState.empty) &&
+    !presetHasRecommendedModels;
+  const presetNeedsApiKey = sel?.kind === 'preset' && sel.preset.authMethod !== 'none';
+  const presetBaseUrlsValid =
+    sel?.kind === 'preset' &&
+    presetAgents.every((agent) => {
+      const runtime = sel.preset.runtimes[agent];
+      if (!runtime) return false;
+      const value = presetRuntimeBaseUrl(sel.preset, agent, presetBaseUrls);
+      if (sel.preset.authMethod === 'none') {
+        return (
+          isLoopbackProviderUrl(value)
+          && (!runtime.modelsUrl?.trim() || isLoopbackProviderUrl(runtime.modelsUrl.trim()))
+        );
+      }
+      return !runtime.baseUrlEditable || isValidEditablePresetBaseUrl(value);
+    });
+  const presetCanContinue =
+    sel?.kind === 'preset' &&
+    presetBaseUrlsValid &&
+    (!presetNeedsApiKey || apiKey.trim().length > 0);
 
   return (
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--overlay-modal)]">
+    // DESIGN.md §4 Dialog:关闭 = 底部「取消」/ Esc / 点遮罩,不设右上角 ×(与 ConfirmDialog 同构)。
+    <div
+      className="fixed inset-0 z-[10000] flex items-center justify-center bg-[var(--overlay-modal)]"
+      onMouseDown={(e) => {
+        overlayMouseDownOnSelfRef.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && overlayMouseDownOnSelfRef.current) handleClose();
+        overlayMouseDownOnSelfRef.current = false;
+      }}
+    >
       <div
-        className="flex max-h-[85vh] w-[600px] flex-col overflow-hidden rounded-xl border"
+        className="flex max-h-[min(640px,85vh)] w-[min(600px,calc(100vw-32px))] flex-col overflow-hidden rounded-xl border"
         style={{
           backgroundColor: 'var(--surface-elevated)',
           borderColor: 'var(--border-default)',
         }}
       >
-        {/* 头部:标题 + 步骤指示 */}
-        <div className="flex flex-col gap-3 px-6 pb-4 pt-5">
-          <div className="flex items-center justify-between">
-            <h3
-              className="text-16 font-semibold"
-              style={{ color: 'var(--settings-section-title)' }}
-            >
-              {sel
-                ? t('settings.providers.wizard.titleWith', {
-                    name:
-                      sel.kind === 'oauth'
-                        ? sel.provider.name
-                        : presetDisplayName(sel.preset, i18n.language),
-                  })
-                : t('settings.providers.wizard.title')}
-            </h3>
-            <button
-              type="button"
-              onClick={handleClose}
-              aria-label={t('settings.providers.wizard.closeAria')}
-              className="flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--surface-hover)]"
-              style={{ color: 'var(--text-tertiary)' }}
-            >
-              <X size={16} />
-            </button>
-          </div>
-          <div className="flex items-center gap-4">
+        {/* 头部:标题居左 + 步骤指示居右,同一行(2026-07 定稿原型形态)。 */}
+        <div className="flex items-center justify-between gap-4 px-4 pb-3 pt-4">
+          <h3
+            className="min-w-0 truncate text-16 font-medium"
+            style={{ color: 'var(--settings-section-title)' }}
+          >
+            {sel
+              ? t('settings.providers.wizard.titleWith', {
+                  name:
+                    sel.kind === 'preset'
+                      ? presetDisplayName(sel.preset, i18n.language)
+                      : sel.provider.name,
+                })
+              : t('settings.providers.wizard.title')}
+          </h3>
+          <div className="flex shrink-0 items-center gap-4">
             {stepLabels.map((label, i) => {
               const n = i + 1;
               const isCur = n === step || (n === totalSteps && step > totalSteps);
@@ -714,37 +969,52 @@ export function AddProviderWizard({
           </div>
         </div>
 
-        {/* 主体 */}
+        {/* 主体。第 1 步是「固定搜索 + 限高滚动目录 + 钉底自定义入口」的三段结构
+            (滚动区上下以 1px Board 细线与固定区分隔,自定义端点不随目录滚动);
+            第 2/3 步保持整体滚动的表单区。 */}
         <div
-          className="min-h-[320px] flex-1 overflow-y-auto border-t px-6 py-4"
+          className={cn(
+            'min-h-[320px] flex-1',
+            step === 1 ? 'flex min-h-0 flex-col overflow-hidden' : 'overflow-y-auto border-y px-4 py-4',
+          )}
           style={{ borderColor: 'var(--border-default)' }}
         >
           {step === 1 && (
-            <div className="flex flex-col">
-              <div
-                className="flex h-9 items-center gap-2 rounded-full border px-3.5"
-                style={{
-                  borderColor: 'var(--border-default)',
-                  backgroundColor: 'var(--surface-elevated)',
-                }}
-              >
-                <Search size={14} className="shrink-0" style={{ color: 'var(--text-tertiary)' }} />
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={t('settings.providers.wizard.searchPlaceholder')}
-                  className="min-w-0 flex-1 bg-transparent text-13 outline-none placeholder:text-[var(--text-placeholder)]"
-                  style={{ color: 'var(--settings-section-title)' }}
-                />
+            <>
+              <div className="px-4 pb-3">
+                <div
+                  className="flex h-9 items-center gap-2 rounded-full border px-3.5"
+                  style={{
+                    borderColor: 'var(--border-default)',
+                    backgroundColor: 'var(--surface-elevated)',
+                  }}
+                >
+                  <Search
+                    size={14}
+                    className="shrink-0"
+                    style={{ color: 'var(--text-tertiary)' }}
+                  />
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder={t('settings.providers.wizard.searchPlaceholder')}
+                    className="min-w-0 flex-1 bg-transparent text-13 outline-none placeholder:text-[var(--text-placeholder)]"
+                    style={{ color: 'var(--settings-section-title)' }}
+                  />
+                </div>
               </div>
 
-              {filteredOauth.length > 0 && (
-                <>
-                  <GroupLabel>{t('settings.providers.wizard.groupSubscription')}</GroupLabel>
-                  <div className="grid grid-cols-3 gap-2">
+              {/* 目录:单列列表(2026-07 定稿,替代三列卡片宫格),唯一的滚动区。 */}
+              <div
+                className="min-h-0 flex-1 overflow-y-auto border-y px-2 pb-2"
+                style={{ borderColor: 'var(--border-default)' }}
+              >
+                {filteredOauth.length > 0 && (
+                  <>
+                    <GroupLabel>{t('settings.providers.wizard.groupSubscription')}</GroupLabel>
                     {filteredOauth.map((p) => (
-                      <ProviderCard
+                      <ProviderRow
                         key={p.id}
                         icon={cardIcon({ providerId: p.id, name: p.name })}
                         name={p.name}
@@ -756,63 +1026,78 @@ export function AddProviderWizard({
                         onClick={() => pickOauth(p)}
                       />
                     ))}
-                  </div>
-                </>
-              )}
+                  </>
+                )}
 
-              {filteredPresets.length > 0 && (
-                <>
-                  <GroupLabel>{t('settings.providers.wizard.groupApiKey')}</GroupLabel>
-                  <div className="grid grid-cols-3 gap-2">
+                {(filteredPresets.length > 0 || builtinApiKeyChoices.length > 0) && (
+                  <>
+                    <GroupLabel>{t('settings.providers.wizard.groupApiKey')}</GroupLabel>
+                    {builtinApiKeyChoices
+                      .filter((p) => !q || p.name.toLowerCase().includes(q))
+                      .map((p) => (
+                        <ProviderRow
+                          key={p.id}
+                          icon={cardIcon({ providerId: p.id, name: p.name })}
+                          name={p.name}
+                          meta={t('settings.providers.wizard.metaApiKey')}
+                          onClick={() => pickBuiltinApiKey(p)}
+                        />
+                      ))}
                     {filteredPresets.map((p) => (
-                      <ProviderCard
+                      <ProviderRow
                         key={p.id}
                         icon={cardIcon({
                           providerId: p.id,
                           name: presetDisplayName(p, i18n.language),
                         })}
                         name={presetDisplayName(p, i18n.language)}
-                        meta={t('settings.providers.wizard.metaApiKey')}
+                        meta={t(
+                          p.authMethod === 'none'
+                            ? 'settings.providers.wizard.metaNoAuth'
+                            : 'settings.providers.wizard.metaApiKey',
+                        )}
                         onClick={() => pickPreset(p)}
                       />
                     ))}
-                  </div>
-                </>
-              )}
+                  </>
+                )}
+              </div>
 
-              <GroupLabel>{t('settings.providers.wizard.groupCustom')}</GroupLabel>
-              <button
-                type="button"
-                onClick={onOpenCustomForm}
-                className="flex items-center gap-2.5 rounded-xl border border-dashed p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
-                style={{ borderColor: 'var(--settings-btn-secondary-border)' }}
-              >
-                <span
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md"
-                  style={{
-                    border: '1px solid var(--settings-integration-avatar-border)',
-                    color: 'var(--settings-section-desc)',
-                  }}
+              {/* 自定义端点:钉在滚动区外,目录再长也始终可见。 */}
+              <div className="flex flex-col gap-2 px-4 pb-1 pt-3">
+                <button
+                  type="button"
+                  onClick={onOpenCustomForm}
+                  className="flex items-center gap-2.5 rounded-xl border border-dashed p-3 text-left transition-colors hover:bg-[var(--surface-hover)]"
+                  style={{ borderColor: 'var(--settings-btn-secondary-border)' }}
                 >
-                  <Plus size={13} />
-                </span>
-                <span className="flex min-w-0 flex-col">
                   <span
-                    className="text-13 font-medium"
-                    style={{ color: 'var(--settings-section-title)' }}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg"
+                    style={{
+                      border: '1px solid var(--settings-integration-avatar-border)',
+                      color: 'var(--settings-section-desc)',
+                    }}
                   >
-                    {t('settings.providers.wizard.customTitle')}
+                    <Plus size={13} />
                   </span>
-                  <span className="truncate text-11" style={{ color: 'var(--text-tertiary)' }}>
-                    {t('settings.providers.wizard.customMeta')}
+                  <span className="flex min-w-0 flex-col">
+                    <span
+                      className="text-13 font-medium"
+                      style={{ color: 'var(--settings-section-title)' }}
+                    >
+                      {t('settings.providers.wizard.customTitle')}
+                    </span>
+                    <span className="truncate text-11" style={{ color: 'var(--text-tertiary)' }}>
+                      {t('settings.providers.wizard.customMeta')}
+                    </span>
                   </span>
-                </span>
-              </button>
+                </button>
 
-              <p className="pt-4 text-11 leading-snug" style={{ color: 'var(--text-tertiary)' }}>
-                {t('settings.providers.wizard.pickHint')}
-              </p>
-            </div>
+                <p className="text-11 leading-snug" style={{ color: 'var(--text-tertiary)' }}>
+                  {t('settings.providers.wizard.pickHint')}
+                </p>
+              </div>
+            </>
           )}
 
           {step === 2 && sel?.kind === 'oauth' && (
@@ -836,32 +1121,66 @@ export function AddProviderWizard({
                     {sel.provider.name}
                   </span>
                   <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
-                    {t('settings.providers.wizard.oauthDesc')}
+                    {t(
+                      sel.provider.auth.oauth?.flow === 'device-code'
+                        ? 'settings.providers.wizard.deviceOAuthDesc'
+                        : 'settings.providers.wizard.oauthDesc',
+                    )}
                   </span>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 {/* 等待授权中按钮变「取消」(与详情头对称),不禁用——浏览器流挂起时用户必须能中止重试。 */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (loggingIn) cancelAuthorize();
-                    else void handleAuthorize();
-                  }}
-                  className="flex h-9 items-center justify-center gap-2 rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
-                  style={{
-                    backgroundColor: 'var(--settings-btn-secondary-bg)',
-                    borderColor: 'var(--settings-btn-secondary-border)',
-                    color: 'var(--settings-btn-secondary-text)',
-                  }}
-                >
-                  {loggingIn && <Spinner size={13} />}
-                  {t(
-                    loggingIn
-                      ? 'settings.providers.button.cancel'
-                      : 'settings.providers.button.authorize',
-                  )}
-                </button>
+                {loggingIn ? (
+                  <button
+                    type="button"
+                    onClick={cancelAuthorize}
+                    className="flex h-9 items-center justify-center gap-2 rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                    style={{
+                      backgroundColor: 'var(--settings-btn-secondary-bg)',
+                      borderColor: 'var(--settings-btn-secondary-border)',
+                      color: 'var(--settings-btn-secondary-text)',
+                    }}
+                  >
+                    <Spinner size={13} />
+                    {t('settings.providers.button.cancel')}
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleAuthorize('browser')}
+                      className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                      style={{
+                        backgroundColor: 'var(--settings-btn-secondary-bg)',
+                        borderColor: 'var(--settings-btn-secondary-border)',
+                        color: 'var(--settings-btn-secondary-text)',
+                      }}
+                    >
+                      {t(
+                        sel.provider.id === 'openai'
+                          ? 'settings.providers.wizard.authorizeInBrowser'
+                          : sel.provider.auth.oauth?.flow === 'device-code'
+                            ? 'settings.providers.wizard.authorizeWithDeviceCode'
+                            : 'settings.providers.button.authorize',
+                      )}
+                    </button>
+                    {sel.provider.id === 'openai' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleAuthorize('device-code')}
+                        className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+                        style={{
+                          backgroundColor: 'transparent',
+                          borderColor: 'var(--settings-btn-secondary-border)',
+                          color: 'var(--settings-btn-secondary-text)',
+                        }}
+                      >
+                        {t('settings.providers.wizard.authorizeWithDeviceCode')}
+                      </button>
+                    )}
+                  </>
+                )}
                 {/* 替代路径:API 用户没有订阅,OAuth 对其是错误路径——切到该渠道的
                     官方 API 预设表单(填 key),与从目录选预设完全同一条流水线。
                     与「授权」并排的次级描边按钮(White Pill):小灰字形态用户根本
@@ -871,7 +1190,7 @@ export function AddProviderWizard({
                     type="button"
                     onClick={() => pickPreset(OFFICIAL_API_PRESETS[sel.provider.id])}
                     disabled={loggingIn}
-                    className="flex h-9 items-center justify-center rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+                    className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
                     style={{
                       backgroundColor: 'transparent',
                       borderColor: 'var(--settings-btn-secondary-border)',
@@ -882,7 +1201,46 @@ export function AddProviderWizard({
                   </button>
                 )}
               </div>
+              {openAiDeviceLoginPending && <OAuthDeviceCodeCard deviceCode={openAiDeviceCode} />}
+              {genericDeviceFlow && loggingIn && (
+                <OAuthDeviceCodeCard deviceCode={genericDeviceCode} />
+              )}
               {oauthSingleAgentNote && <InfoLine text={oauthSingleAgentNote} />}
+            </div>
+          )}
+
+          {step === 2 && sel?.kind === 'builtinApiKey' && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center gap-3">
+                <span
+                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+                  style={{
+                    backgroundColor: 'var(--settings-integration-avatar-bg)',
+                    border: '1px solid var(--settings-integration-avatar-border)',
+                    color: 'var(--settings-integration-avatar-icon)',
+                  }}
+                >
+                  {cardIcon({ providerId: sel.provider.id, name: sel.provider.name })}
+                </span>
+                <div className="flex min-w-0 flex-col">
+                  <span
+                    className="text-14 font-semibold"
+                    style={{ color: 'var(--settings-section-title)' }}
+                  >
+                    {sel.provider.name}
+                  </span>
+                  <span className="text-12" style={{ color: 'var(--text-tertiary)' }}>
+                    {t('settings.providers.wizard.builtinApiKey.subtitle')}
+                  </span>
+                </div>
+              </div>
+              <InfoLine text={t('settings.providers.wizard.builtinApiKey.note')} />
+              <div className="flex flex-col gap-1.5">
+                <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
+                  {t('settings.providers.custom.fields.apiKey')}
+                </label>
+                <SettingsTextInput value={apiKey} onChange={setApiKey} size="md" mono secret />
+              </div>
             </div>
           )}
 
@@ -904,26 +1262,25 @@ export function AddProviderWizard({
                   }}
                 />
               </div>
-              <div className="flex flex-col gap-1.5">
-                <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
-                  {t('settings.providers.custom.fields.apiKey')}
-                </label>
-                <input
-                  type="password"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder="sk-…"
-                  autoComplete="off"
-                  className="h-9 rounded-full border px-4 font-mono text-13 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
-                  style={{
-                    borderColor: 'var(--border-default)',
-                    backgroundColor: 'var(--surface-elevated)',
-                    color: 'var(--settings-section-title)',
-                  }}
-                />
-              </div>
-              {/* 官方渠道 URL 只读；本机/自托管预设可在创建时改 host/port。
-                  codex + openai-chat 上游标注「Cindy 桥接」,让用户明确该通道是协议转换而非原生。 */}
+              {presetNeedsApiKey ? (
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
+                    {t('settings.providers.custom.fields.apiKey')}
+                  </label>
+                  <SettingsTextInput
+                    value={apiKey}
+                    onChange={setApiKey}
+                    placeholder="sk-…"
+                    size="md"
+                    mono
+                    secret
+                  />
+                </div>
+              ) : (
+                <InfoLine text={t('settings.providers.wizard.noAuthNote')} />
+              )}
+              {/* 官方端点默认只读；本机 / 自托管代理预设可编辑。codex + openai-chat
+                  上游标注「Cindy 桥接」，让用户明确该通道是协议转换而非原生。 */}
               <div className="flex flex-col gap-2">
                 {presetAgents.map((agent) => {
                   const rt = sel.preset.runtimes[agent];
@@ -933,16 +1290,23 @@ export function AddProviderWizard({
                     const valid = isValidEditablePresetBaseUrl(value.trim());
                     return (
                       <label key={agent} className="flex flex-col gap-1.5">
-                        <span className="text-12 font-medium" style={{ color: 'var(--text-secondary)' }}>
-                          {t('settings.providers.custom.fields.baseUrl')} · {AGENT_LABEL[agent]}
+                        <span
+                          className="text-12 font-medium"
+                          style={{ color: 'var(--text-secondary)' }}
+                        >
+                          {t('settings.providers.wizard.endpointLabel', {
+                            agent: AGENT_LABEL[agent],
+                          })}
                         </span>
                         <input
                           type="url"
                           value={value}
-                          onChange={(event) => setPresetBaseUrls((prev) => ({
-                            ...prev,
-                            [agent]: event.target.value,
-                          }))}
+                          onChange={(event) =>
+                            setPresetBaseUrls((prev) => ({
+                              ...prev,
+                              [agent]: event.target.value,
+                            }))
+                          }
                           aria-invalid={!valid}
                           className="h-9 rounded-full border px-4 font-mono text-12 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
                           style={{
@@ -1001,76 +1365,134 @@ export function AddProviderWizard({
                   {fetchState.status === 'done' && fetchState.failed && (
                     <InfoLine text={t('settings.providers.wizard.fetchFailed')} />
                   )}
-                  <div
-                    className="flex flex-col overflow-hidden rounded-xl border"
-                    style={{ borderColor: 'var(--border-default)' }}
-                  >
-                    {[...picks.entries()].map(([id, v], i) => (
-                      <button
-                        key={id}
-                        type="button"
-                        onClick={() =>
-                          setPicks((prev) => {
-                            const next = new Map(prev);
-                            const cur = next.get(id);
-                            if (cur) next.set(id, { ...cur, checked: !cur.checked });
-                            return next;
-                          })
-                        }
-                        className={cn(
-                          'flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-[var(--surface-hover)]',
-                          i > 0 && 'border-t',
-                        )}
-                        style={{ borderColor: 'var(--border-default)' }}
-                      >
-                        <span
-                          className="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
-                          style={
-                            v.checked
-                              ? {
-                                  backgroundColor: 'var(--accent-cta-bg)',
-                                  borderColor: 'var(--accent-cta-bg)',
-                                  color: 'var(--surface-on-card)',
-                                }
-                              : { borderColor: 'var(--text-tertiary)' }
+                  {picks.size > 0 && (
+                    <div
+                      className="flex flex-col overflow-hidden rounded-xl border"
+                      style={{ borderColor: 'var(--border-default)' }}
+                    >
+                      {[...picks.entries()].map(([id, v], i) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() =>
+                            setPicks((prev) => {
+                              const next = new Map(prev);
+                              const cur = next.get(id);
+                              if (cur) next.set(id, { ...cur, checked: !cur.checked });
+                              return next;
+                            })
                           }
+                          className={cn(
+                            'flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-colors hover:bg-[var(--surface-hover)]',
+                            i > 0 && 'border-t',
+                          )}
+                          style={{ borderColor: 'var(--border-default)' }}
                         >
-                          {v.checked && <Check size={11} strokeWidth={3} />}
-                        </span>
-                        <span
-                          className="min-w-0 flex-1 truncate text-13"
-                          style={{ color: 'var(--settings-section-title)' }}
-                        >
-                          {v.name}
-                        </span>
-                        {/* 双 runtime 预设里单端归属的模型,标注能力事实(与管理页同措辞)。 */}
-                        {presetAgents.length > 1 && v.agents.length === 1 && (
                           <span
-                            className="shrink-0 text-12"
-                            style={{ color: 'var(--text-tertiary)' }}
+                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded border"
+                            style={
+                              v.checked
+                                ? {
+                                    backgroundColor: 'var(--accent-cta-bg)',
+                                    borderColor: 'var(--accent-cta-bg)',
+                                    color: 'var(--surface-on-card)',
+                                  }
+                                : { borderColor: 'var(--text-tertiary)' }
+                            }
                           >
-                            {t('settings.providers.models.capabilityNote', {
-                              agent:
-                                AGENT_LABEL[
-                                  v.agents[0] === 'claude-code' ? 'codex' : 'claude-code'
-                                ],
+                            {v.checked && <Check size={11} strokeWidth={3} />}
+                          </span>
+                          <span
+                            className="min-w-0 flex-1 truncate text-13"
+                            style={{ color: 'var(--settings-section-title)' }}
+                          >
+                            {v.name}
+                          </span>
+                          {/* 双 runtime 预设里单端归属的模型,标注能力事实(与管理页同措辞)。 */}
+                          {presetAgents.length > 1 && v.agents.length === 1 && (
+                            <span
+                              className="shrink-0 text-12"
+                              style={{ color: 'var(--text-tertiary)' }}
+                            >
+                              {t('settings.providers.models.capabilityNote', {
+                                agent:
+                                  AGENT_LABEL[
+                                    v.agents[0] === 'claude-code' ? 'codex' : 'claude-code'
+                                  ],
+                              })}
+                            </span>
+                          )}
+                          {v.recommended && (
+                            <span
+                              className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium"
+                              style={{
+                                backgroundColor: 'var(--surface-chip)',
+                                color: 'var(--text-secondary)',
+                              }}
+                            >
+                              {t('settings.providers.wizard.recommended')}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {showManualModelFallback && (
+                    <div
+                      className="flex flex-col gap-3 rounded-xl border p-3.5"
+                      style={{ borderColor: 'var(--border-default)' }}
+                    >
+                      <InfoLine text={t('settings.providers.wizard.manualModelHint')} />
+                      {presetAgents.map((agent) => (
+                        <label key={agent} className="flex flex-col gap-1.5">
+                          <span
+                            className="text-12 font-medium"
+                            style={{ color: 'var(--text-secondary)' }}
+                          >
+                            {t('settings.providers.wizard.manualModelLabel', {
+                              agent: AGENT_LABEL[agent],
                             })}
                           </span>
-                        )}
-                        {v.recommended && (
-                          <span
-                            className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium"
-                            style={{
-                              backgroundColor: 'var(--surface-chip)',
-                              color: 'var(--text-secondary)',
-                            }}
-                          >
-                            {t('settings.providers.wizard.recommended')}
+                          <span className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              value={manualModelIds[agent] ?? ''}
+                              onChange={(event) =>
+                                setManualModelIds((prev) => ({
+                                  ...prev,
+                                  [agent]: event.target.value,
+                                }))
+                              }
+                              onKeyDown={(event) => {
+                                if (event.key !== 'Enter') return;
+                                event.preventDefault();
+                                addManualModel(agent);
+                              }}
+                              placeholder={t('settings.providers.wizard.manualModelPlaceholder')}
+                              className="h-9 min-w-0 flex-1 rounded-full border px-4 font-mono text-12 outline-none focus:ring-2 focus:ring-[var(--focus-ring)]"
+                              style={{
+                                borderColor: 'var(--border-default)',
+                                backgroundColor: 'var(--surface-elevated)',
+                                color: 'var(--settings-section-title)',
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => addManualModel(agent)}
+                              disabled={!manualModelIds[agent]?.trim()}
+                              className="flex h-9 shrink-0 items-center justify-center rounded-full border px-4 text-12 font-medium transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-50"
+                              style={{
+                                borderColor: 'var(--settings-btn-secondary-border)',
+                                color: 'var(--settings-btn-secondary-text)',
+                              }}
+                            >
+                              {t('settings.providers.wizard.addManualModel')}
+                            </button>
                           </span>
-                        )}
-                      </button>
-                    ))}
-                  </div>
+                        </label>
+                      ))}
+                    </div>
+                  )}
                   <p className="text-11 leading-snug" style={{ color: 'var(--text-tertiary)' }}>
                     {t('settings.providers.wizard.modelsHint')}
                   </p>
@@ -1081,10 +1503,8 @@ export function AddProviderWizard({
         </div>
 
         {/* 底部 */}
-        <div
-          className="flex items-center justify-between border-t px-6 py-3.5"
-          style={{ borderColor: 'var(--border-default)' }}
-        >
+        {/* 底部操作行:不再加分割线 —— 弹窗内只保留滚动区上下两条细线(原型定稿)。 */}
+        <div className="flex items-center justify-between px-4 pb-4 pt-2">
           <button
             type="button"
             onClick={() => {
@@ -1110,7 +1530,7 @@ export function AddProviderWizard({
             <button
               type="button"
               onClick={handleClose}
-              className="flex h-9 items-center justify-center rounded-full border px-5 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
+              className="flex h-9 items-center justify-center rounded-full border px-6 text-13 font-medium transition-colors hover:bg-[var(--surface-hover)]"
               style={{
                 borderColor: 'var(--settings-btn-secondary-border)',
                 color: 'var(--settings-btn-secondary-text)',
@@ -1118,16 +1538,31 @@ export function AddProviderWizard({
             >
               {t('settings.providers.wizard.cancel')}
             </button>
+            {sel?.kind === 'builtinApiKey' && step === 2 && (
+              <button
+                type="button"
+                onClick={() => void handleSaveBuiltinApiKey()}
+                disabled={saving || apiKey.trim().length === 0}
+                className={cn(
+                  'flex h-9 items-center justify-center gap-2 rounded-full px-5 text-13 font-medium transition-opacity',
+                  saving || apiKey.trim().length === 0
+                    ? 'cursor-not-allowed opacity-50'
+                    : 'hover:opacity-90',
+                )}
+                style={{ backgroundColor: 'var(--accent-cta-bg)', color: 'var(--surface-on-card)' }}
+              >
+                {saving && <Spinner size={13} />}
+                {t('settings.providers.wizard.finish')}
+              </button>
+            )}
             {sel?.kind === 'preset' && step === 2 && (
               <button
                 type="button"
                 onClick={() => void startFetch()}
-                disabled={apiKey.trim().length === 0 || !presetBaseUrlsValid}
+                disabled={!presetCanContinue}
                 className={cn(
-                  'flex h-9 items-center justify-center rounded-full px-5 text-13 font-medium transition-opacity',
-                  apiKey.trim().length === 0 || !presetBaseUrlsValid
-                    ? 'cursor-not-allowed opacity-50'
-                    : 'hover:opacity-90',
+                  'flex h-9 items-center justify-center rounded-full px-6 text-13 font-medium transition-opacity',
+                  !presetCanContinue ? 'cursor-not-allowed opacity-50' : 'hover:opacity-90',
                 )}
                 style={{ backgroundColor: 'var(--accent-cta-bg)', color: 'var(--surface-on-card)' }}
               >
@@ -1140,7 +1575,7 @@ export function AddProviderWizard({
                 onClick={() => void handleFinish()}
                 disabled={saving || fetchState.status === 'fetching' || checkedCount === 0}
                 className={cn(
-                  'flex h-9 items-center justify-center gap-2 rounded-full px-5 text-13 font-medium transition-opacity',
+                  'flex h-9 items-center justify-center gap-2 rounded-full px-6 text-13 font-medium transition-opacity',
                   saving || fetchState.status === 'fetching' || checkedCount === 0
                     ? 'cursor-not-allowed opacity-50'
                     : 'hover:opacity-90',

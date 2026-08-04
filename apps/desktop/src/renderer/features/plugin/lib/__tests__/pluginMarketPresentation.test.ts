@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { PluginMarketItem } from '../../../../../shared/pluginMarket';
-import { orderPluginCatalogItems, pluginPresentationOrigin } from '../pluginMarketPresentation';
+import {
+  orderPluginCatalogItems,
+  pluginPresentationOrigin,
+  pluginUpdateForInstalledVersion,
+} from '../pluginMarketPresentation';
 
 function marketItem(
   pluginId: string,
@@ -22,24 +26,61 @@ function marketItem(
     icon: null,
     installState,
     enabled: installState === 'not-installed' ? null : true,
+    sourceType: 'server',
+    sourceMarketName: null,
   };
 }
 
 describe('pluginPresentationOrigin', () => {
   it('maps public plugins independently of their default-install policy', () => {
-    expect(pluginPresentationOrigin({ scope: 'public' })).toBe('public');
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'server' })).toBe('public');
   });
 
   it('maps organization plugins to their organization source', () => {
-    expect(pluginPresentationOrigin({ scope: 'organization' })).toBe('organization');
+    expect(
+      pluginPresentationOrigin({ scope: 'organization', sourceType: 'server' }),
+    ).toBe('organization');
   });
 
   it('keeps personal plugins out of the client-facing market taxonomy', () => {
-    expect(pluginPresentationOrigin({ scope: 'personal' })).toBe('local');
+    expect(pluginPresentationOrigin({ scope: 'personal', sourceType: 'server' })).toBe('local');
+  });
+
+  it('maps custom market sources to the custom origin regardless of scope', () => {
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'git-market' })).toBe(
+      'custom',
+    );
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'local-market' })).toBe(
+      'custom',
+    );
   });
 
   it.each([null, undefined])('keeps unmatched installed plugins local', (item) => {
     expect(pluginPresentationOrigin(item)).toBe('local');
+  });
+});
+
+describe('pluginUpdateForInstalledVersion', () => {
+  it('surfaces a real version update', () => {
+    const update = marketItem('plugin-update', 'example', 'update-available');
+    update.version = '2.0.0';
+
+    expect(pluginUpdateForInstalledVersion(update)).toBe(update);
+  });
+
+  it.each([
+    ['same-version metadata refresh', marketItem('plugin-same', 'same', 'installed')],
+    ['already installed', marketItem('plugin-installed', 'installed', 'installed')],
+    ['conflict', marketItem('plugin-conflict', 'conflict', 'conflict')],
+    ['missing market record', null],
+  ] as const)('does not surface %s as a package update', (_label, item) => {
+    expect(pluginUpdateForInstalledVersion(item)).toBeNull();
+  });
+
+  it('keeps a same-version legacy-adopted install updateable', () => {
+    const legacy = marketItem('plugin-legacy', 'legacy', 'update-available');
+
+    expect(pluginUpdateForInstalledVersion(legacy)).toBe(legacy);
   });
 });
 

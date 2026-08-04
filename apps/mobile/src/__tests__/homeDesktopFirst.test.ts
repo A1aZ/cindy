@@ -122,8 +122,11 @@ describe('mobile home desktop-first surface', () => {
     // ——箭头统一后依赖图标区分 agent 类型的场景(创建自动化 chips / 侧栏混排)全部失效。
     expect(desktopVendorIconSource).toContain('ClaudeMark');
     expect(desktopVendorIconSource).toContain('CodexMark');
-    expect(desktopVendorIconSource).toContain("vendor === 'codex' ? <CodexMark size={size} /> : <ClaudeMark size={size} />");
-    expect(desktopVendorIconSource).toContain("vendor: 'cc' | 'codex'");
+    expect(desktopVendorIconSource).toContain("vendor === 'codex' ? (");
+    expect(desktopVendorIconSource).toContain('<CodexMark size={size} />');
+    expect(desktopVendorIconSource).toContain('<ClaudeMark size={size} />');
+    expect(desktopVendorIconSource).toContain("export type VendorIconKind = 'cc' | 'codex' | 'pi'");
+    expect(desktopVendorIconSource).toContain('vendor: VendorIconKind;');
     expect(desktopVendorIconSource).toContain('session-status-breathing');
     expect(vendorIconSource).not.toContain('XD_SYMBOL_PATHS');
     expect(vendorIconSource).not.toContain('XD_INC_MARK_ASPECT_RATIO');
@@ -141,7 +144,7 @@ describe('mobile home desktop-first surface', () => {
     expect(providerMarkSource).not.toContain('CLAUDE_AGENT_PATH');
     expect(providerMarkSource).not.toContain('CODEX_AGENT_FLOWER_PATH');
     expect(vendorIconSource).toContain("import { MobileAgentMark } from './MobileAgentMark';");
-    expect(vendorIconSource).toContain("agentKind={vendor === 'codex' ? 'codex' : 'claude-code'}");
+    expect(vendorIconSource).toContain("agentKind={vendor === 'codex' || vendor === 'pi' ? vendor : 'claude-code'}");
     expect(vendorIconSource).not.toContain('viewBox="136 137 282 158"');
     expect(vendorIconSource).not.toContain('transform="translate(');
     expect(vendorIconSource).toContain('Easing.inOut(Easing.ease)');
@@ -156,7 +159,7 @@ describe('mobile home desktop-first surface', () => {
     expect(homeSource).toContain('width: iconSize.md');
     expect(homeSource).toContain('size={cindyList ? iconSize.sm : isClaudeCodeAgentKind(item.session.agentKind) ? 19 : iconSize.lg}');
     expect(homeSource).toContain("function isClaudeCodeAgentKind(agentKind: string): boolean");
-    expect(homeSource).toContain("return agentKind !== 'codex';");
+    expect(homeSource).toContain("return agentKind === 'cc' || agentKind === 'claude-code';");
     expect(homeSource).not.toContain('sessionAttentionDot: {\n    backgroundColor: colors.statusAccent,\n    borderColor: colors.surface');
     expect(homeSource).not.toContain('sessionAttentionDot: {\n    backgroundColor: colors.statusAccent,\n    borderRadius: 3,\n    borderWidth: 1');
   });
@@ -166,6 +169,8 @@ describe('mobile home desktop-first surface', () => {
     const scheduleIndexSource = readSource('src/session/scheduleIndex.ts');
 
     expect(source).toContain('const [scheduleIndex, setScheduleIndex]');
+    expect(source).toContain('useRemoteScheduleMirrorInvalidations()');
+    expect(source).toContain('invalidateRunningSessionScheduleEntries(current, sessionIds)');
     expect(source).toContain('const [deviceIdentityCacheReady, setDeviceIdentityCacheReady]');
     expect(source).toContain('loadDeviceIdentityCache()');
     expect(source).toContain('reconcileDeviceIdentities(');
@@ -178,7 +183,10 @@ describe('mobile home desktop-first surface', () => {
     expect(source).toContain('if (isAccessRevokedError(error) || isDeviceOfflineError(error)) return false;');
     expect(source).toContain("if (text.includes('REMOTE_DISABLED')) return false;");
     expect(source).toContain('return true;');
-    expect(source).toContain('remoteSessionStore.setActiveSessionSnapshots(device.deviceId, activeSessions)');
+    expect(source).toContain('const [list, activeSessions, activeSessionSnapshotEpoch]');
+    expect(source).toContain('remoteSessionStore.captureActiveSessionSnapshotEpoch()');
+    expect(source).toContain('return [list, activeSessions, activeSessionSnapshotEpoch] as const;');
+    expect(source).toContain('activeSessionSnapshotEpoch,');
     expect(source).toContain('remoteScheduleEventStore.subscribe(() => {');
     expect(source).toContain('const snapshot = remoteScheduleEventStore.getSnapshot(deviceId)');
     expect(source).toContain('const version = snapshot.version');
@@ -236,11 +244,16 @@ describe('mobile home desktop-first surface', () => {
     const source = readSource('app/devices/index.tsx');
 
     expect(source).toContain("type HomeDeviceConnectionState = 'idle' | 'syncing' | 'failed';");
-    expect(source).toContain('const [deviceConnectionStates, setDeviceConnectionStates]');
+    expect(source).toContain('const [rawDeviceConnectionStates, setDeviceConnectionStates]');
+    // 熔断 open 的设备复用 failed 渲染路径:内部态映射(merged memo)覆盖在 hydrate 状态之上
+    expect(source).toContain('const unresponsiveDevices = useUnresponsiveDevices();');
+    expect(source).toContain("for (const deviceId of unresponsiveDevices) merged[deviceId] = 'failed';");
     expect(source).toContain("updateDeviceConnectionState(device.deviceId, 'syncing');");
     expect(source).toContain("updateDeviceConnectionState(device.deviceId, 'failed');");
     expect(source).toContain("updateDeviceConnectionState(device.deviceId, 'idle');");
-    expect(source).toContain("const showConnectionRow = !!connectionError || status !== 'online';");
+    expect(source).toContain(
+      "const showConnectionRow = !!connectionError || status !== 'online' || connectionIssue?.kind === 'unstable';",
+    );
     expect(source).toContain("connectionStates={deviceConnectionStates}");
     expect(source).toContain('function DeviceMenuItem');
     expect(source).toContain("tone={status === 'online' ? 'ready' : 'off'}");

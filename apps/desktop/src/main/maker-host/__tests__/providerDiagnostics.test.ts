@@ -81,6 +81,55 @@ describe('classifyProviderError', () => {
 });
 
 describe('buildProbeRequest', () => {
+  it('Codex Anthropic Messages probe uses x-api-key and Messages endpoint', () => {
+    const { url, init } = buildProbeRequest({
+      agent: 'codex',
+      wireProtocol: 'anthropic-messages',
+      baseUrl: 'https://api.anthropic.com',
+      modelId: 'claude-opus-5',
+      apiKey: 'sk-test',
+      headers: {
+        'Anthropic-Version': 'custom-version',
+        'Content-Type': 'text/plain',
+      },
+    });
+    expect(url).toBe('https://api.anthropic.com/v1/messages');
+    const headers = init.headers as Record<string, string>;
+    expect(headers['anthropic-version']).toBe('custom-version');
+    expect(headers['Anthropic-Version']).toBeUndefined();
+    expect(headers['content-type']).toBe('application/json');
+    expect(headers['Content-Type']).toBeUndefined();
+    expect(headers['x-api-key']).toBe('sk-test');
+    expect(headers.authorization).toBe('Bearer sk-test');
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      model: 'claude-opus-5',
+      max_tokens: 1,
+    });
+  });
+
+  it('Codex Anthropic Messages probe matches runtime joining for a versioned base URL', () => {
+    const { url } = buildProbeRequest({
+      agent: 'codex',
+      wireProtocol: 'anthropic-messages',
+      baseUrl: 'https://provider.example/v1',
+      modelId: 'claude-sonnet-4-6',
+    });
+    expect(url).toBe('https://provider.example/v1/messages');
+  });
+
+  it('Codex Anthropic Messages probe preserves custom path and query joining', () => {
+    const { url } = buildProbeRequest({
+      agent: 'codex',
+      wireProtocol: 'anthropic-messages',
+      baseUrl: 'https://provider.example/api/v1?tenant=alpha',
+      requestPath: '/tenant/messages?beta=true',
+      modelId: 'claude-sonnet-4-6',
+    });
+    expect(url).toBe(
+      'https://provider.example/api/v1/tenant/messages?tenant=alpha&beta=true',
+    );
+  });
+
   it('cc wire：/v1/messages + anthropic-version + 双鉴权头（与 api-key-header 路由分支对齐）', () => {
     const { url, init } = buildProbeRequest({
       agent: 'claude-code',
@@ -202,6 +251,24 @@ describe('buildProbeRequest', () => {
     const headers = init.headers as Record<string, string>;
     expect(headers['x-api-key']).toBeUndefined();
     expect(headers['authorization']).toBeUndefined();
+  });
+
+  it('no-auth 探测剥掉表单残留的大小写混合凭证头', () => {
+    const { init } = buildProbeRequest({
+      agent: 'codex',
+      baseUrl: 'http://127.0.0.1:4000/v1',
+      modelId: 'local-model',
+      authMethod: 'none',
+      headers: {
+        Authorization: 'Bearer must-not-leak',
+        'X-API-Key': 'must-not-leak',
+        'X-Tenant': 'local',
+      },
+    });
+    expect(init.headers).toEqual({
+      'content-type': 'application/json',
+      'x-tenant': 'local',
+    });
   });
 });
 
@@ -325,8 +392,10 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
     });
 
     const headers = buildProbeRequest(spec).init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe('Bearer stale');
-    expect(headers['X-API-Key']).toBe('stale');
+    expect(headers.authorization).toBe('Bearer stale');
+    expect(headers['x-api-key']).toBe('stale');
+    expect(headers.Authorization).toBeUndefined();
+    expect(headers['X-API-Key']).toBeUndefined();
   });
 
   it('api-key-header + openai-chat 供应商:saved 探测带上 wireProtocol → 打 /chat/completions', async () => {
@@ -380,6 +449,41 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
     expect(() => resolveSavedProbeSpec('nope', 'claude-code')).toThrow(/not found/);
     expect(() => resolveSavedProbeSpec('xd', 'claude-code')).toThrow(/not a custom provider/);
     expect(() => resolveSavedProbeSpec('my-relay', 'codex')).toThrow(/no runtime/);
+  });
+
+  it('跳过非聊天模型挑第一个聊天模型探测(issue #882 第 3 点,2026-07 review):探测发的是聊天形状请求,挑到 embedding/image 模型会得到与配置无关的假失败结论', () => {
+    const provider = buildUserProvider(config);
+    setCustomProviders([
+      {
+        ...provider,
+        models: {
+          ...provider.models,
+          'claude-code': [
+            { id: 'text-embedding-3-large', name: 'Embedding', contextWindow: 8191, efforts: [], defaultEffort: null, mode: 'embedding' },
+            { id: 'glm-5.2', name: 'GLM', contextWindow: 128_000, efforts: [], defaultEffort: null },
+          ],
+        },
+      },
+    ]);
+    setDiagnosticsKeyReader(() => 'sk-saved');
+    expect(resolveSavedProbeSpec('my-relay', 'claude-code').modelId).toBe('glm-5.2');
+  });
+
+  it('全是非聊天模型时抛「无聊天模型」错误,而不是静默探测一个 embedding 模型', () => {
+    const provider = buildUserProvider(config);
+    setCustomProviders([
+      {
+        ...provider,
+        models: {
+          ...provider.models,
+          'claude-code': [
+            { id: 'text-embedding-3-large', name: 'Embedding', contextWindow: 8191, efforts: [], defaultEffort: null, mode: 'embedding' },
+          ],
+        },
+      },
+    ]);
+    setDiagnosticsKeyReader(() => 'sk-saved');
+    expect(() => resolveSavedProbeSpec('my-relay', 'claude-code')).toThrow(/no chat models/);
   });
 
   it('testProviderConnection(saved) 端到端（注入 fetch 断言 URL 与 key）', async () => {
@@ -437,6 +541,7 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
         runtimes: {
           'claude-code': {
             ...config.runtimes['claude-code'],
+            baseUrl: 'http://127.0.0.1:4100',
             headers: {
               ...config.runtimes['claude-code'].headers,
               Authorization: 'Bearer must-not-leak',
@@ -451,5 +556,33 @@ describe('resolveSavedProbeSpec / testProviderConnection(saved)', () => {
     const spec = resolveSavedProbeSpec('local-proxy', 'claude-code');
     expect(spec.apiKey).toBeNull();
     expect(spec.headers).toEqual({ 'x-tenant': 't1' });
+  });
+
+  it('拒绝探测已禁用的 saved runtime，绝不进入网络请求', async () => {
+    setCustomProviders([
+      buildUserProvider({
+        id: 'legacy-remote-no-auth',
+        name: 'Legacy remote no-auth',
+        auth: { method: 'none' },
+        runtimes: {
+          codex: {
+            baseUrl: 'https://remote.example/v1',
+            models: [{ id: 'm', name: 'M' }],
+          },
+        },
+      }),
+    ]);
+    let fetchCalled = false;
+
+    await expect(
+      testProviderConnection(
+        { kind: 'saved', providerId: 'legacy-remote-no-auth', agent: 'codex' },
+        async () => {
+          fetchCalled = true;
+          return fakeResponse(200, '{}');
+        },
+      ),
+    ).rejects.toThrow(/disabled/);
+    expect(fetchCalled).toBe(false);
   });
 });

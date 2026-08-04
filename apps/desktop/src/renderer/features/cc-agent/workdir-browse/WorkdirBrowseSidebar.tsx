@@ -5,7 +5,7 @@
  * Layout matches the design稿 (skillhub Market sidebar pattern):
  *
  *   ┌──────────────────────────────────┐
- *   │ ← Back to Projects               │  ← h-9 rounded-full (slot of New Maker)
+ *   │ ← Back to Projects               │  ← h-9 rounded-full (slot of New Chat)
  *   ├──────────────────────────────────┤
  *   │ <workdir name>           [⇡⇣] [↻]│  ← collapse all / refresh
  *   ├──────────────────────────────────┤
@@ -37,6 +37,7 @@ import {
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { toast } from '@/lib/toast';
 import { createLogger } from '@/lib/logger';
+import { extractIpcError, mapIpcErrorToI18nKey } from '@/utils/ipcError';
 
 import { useFileTree, type DirEntry } from './hooks/useFileTree';
 import { fileBrowserApiFor } from '@/lib/fileBrowserTransport';
@@ -502,10 +503,21 @@ export function WorkdirBrowseSidebar({
   const handleOpenInBrowser = useCallback(
     async (entry: DirEntry) => {
       const abs = toOsAbsolutePath(workdir, entry.relPath);
-      const res = await window.electronAPI.openFileInBrowser(abs);
-      if (!res.success) {
-        log.warn('open in browser failed', { relPath: entry.relPath, error: res.error });
-        toast.error(res.error ?? t('chat.markdownRenderer.openInBrowserFailed'));
+      try {
+        await window.electronAPI.openFileInBrowser(abs);
+      } catch (error) {
+        log.warn('open in browser failed', {
+          relPath: entry.relPath,
+          errorCode: extractIpcError(error)?.code ?? 'unknown',
+        });
+        toast.error(
+          t(
+            mapIpcErrorToI18nKey(error, {
+              namespace: 'chat.markdownRenderer',
+              fallback: 'chat.markdownRenderer.openInBrowserFailed',
+            }),
+          ),
+        );
       }
     },
     [workdir, t],
@@ -633,7 +645,7 @@ export function WorkdirBrowseSidebar({
 
   return (
     <div className="flex h-full w-full min-h-0 flex-col">
-      {/* Top slot — same geometry as the "New Maker" button (h-9 rounded-full,
+      {/* Top slot — same geometry as the "New Chat" button (h-9 rounded-full,
           pt-4 pr-3 pb-3.5 pl-3 + gap-0.5). Matches skillhub MarketCell when
           on /skillhub/market. */}
       <div className="flex flex-col gap-0.5 pt-4 pr-3 pb-3.5 pl-3">

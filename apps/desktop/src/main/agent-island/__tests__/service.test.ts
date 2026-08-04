@@ -78,7 +78,21 @@ const mocks = vi.hoisted(() => ({
   tapWindowBroadcast: vi.fn(),
   showMessageBox: vi.fn(),
   openExternal: vi.fn(),
+  readdir: vi.fn<(...args: unknown[]) => Promise<string[]>>(() => Promise.resolve([])),
 }));
+
+// 受保护目录引导会由 Main 亲自 readdir 核实一次;只替换这一个 API,其余 fs/promises
+// 保持真实。默认让读取失败(EPERM),模拟 macOS 真的拒绝了访问。
+vi.mock('node:fs/promises', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs/promises')>()),
+  readdir: mocks.readdir,
+}));
+
+function tccDeniedError(): NodeJS.ErrnoException {
+  const error = new Error('EPERM: operation not permitted, scandir') as NodeJS.ErrnoException;
+  error.code = 'EPERM';
+  return error;
+}
 
 vi.mock('electron', () => {
   return {
@@ -148,6 +162,8 @@ beforeEach(() => {
   mocks.showMessageBox.mockResolvedValue({ response: 1, checkboxChecked: false });
   mocks.openExternal.mockReset();
   mocks.openExternal.mockResolvedValue(undefined);
+  mocks.readdir.mockReset();
+  mocks.readdir.mockRejectedValue(tccDeniedError());
   resetEpermGuidanceForTest();
 });
 
@@ -185,6 +201,14 @@ function terminalErrorEvent(message: string, reason?: string): AgentEvent {
     type: 'error',
     source: 'claude-code',
     data: { message, isTerminal: true, ...(reason ? { reason } : {}) },
+  };
+}
+
+function recoverableErrorEvent(message: string): AgentEvent {
+  return {
+    type: 'error',
+    source: 'codex',
+    data: { message, isTerminal: false, willRetry: true },
   };
 }
 
@@ -927,6 +951,57 @@ describe('AgentIslandService native publishing', () => {
     expect(publish.mock.calls.at(-1)?.[0].pillSnapshot.pendingInteractionCount).toBe(0);
   });
 
+  it('keeps permission routing through recoverable errors and clears it on terminal errors', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn(() => true);
+    const resolver = vi.fn(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+
+    syncEnabledForTest(service, publish);
+    service.setPermissionResolver(resolver);
+    handleInteractionRequestForTest(service,
+      { sessionId: 's1', agentKind: 'codex' },
+      {
+        kind: 'permission',
+        requestId: 'req-reconnecting',
+        toolName: 'Bash',
+        input: { command: 'pnpm test' },
+      },
+    );
+
+    service.handleAgentEvent(
+      { sessionId: 's1', agentKind: 'codex' },
+      recoverableErrorEvent('Reconnecting... 1/5'),
+    );
+    service.handlePermissionAction({ requestId: 'req-reconnecting', action: 'allow' });
+
+    expect(resolver).toHaveBeenCalledWith('req-reconnecting', {
+      kind: 'permission',
+      behavior: 'allow',
+      permissionUpdates: undefined,
+    });
+
+    handleInteractionRequestForTest(service,
+      { sessionId: 's1', agentKind: 'codex' },
+      {
+        kind: 'permission',
+        requestId: 'req-terminal',
+        toolName: 'Bash',
+        input: { command: 'pnpm test' },
+      },
+    );
+    service.handleAgentEvent(
+      { sessionId: 's1', agentKind: 'codex' },
+      terminalErrorEvent('retry exhausted'),
+    );
+    service.handlePermissionAction({ requestId: 'req-terminal', action: 'allow' });
+
+    expect(resolver).toHaveBeenCalledTimes(1);
+  });
+
   it('clears an island permission prompt by request id after app-side approval', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
@@ -1182,10 +1257,39 @@ describe('AgentIslandService native publishing', () => {
       '/goal 测试一下是不是支持目标模式',
     );
     await vi.waitFor(() => expect(mocks.getSessionRowSnapshot).toHaveBeenCalledTimes(1));
+    // cache-miss 加载路径同样要过显示投影:发给 native 的是本地化兜底文案,而不是
+    // DB 里那个 locale-independent 的英文哨兵(PR #1031 review P1)。此前只有读路径
+    // hydrateMeta 做了投影,这条断言正好固化了漏掉的那一半。
     await vi.waitFor(() => expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
-      title: 'New Maker',
+      title: 'Untitled session',
       projectName: null,
     }));
+    // 另一条写路径(metadata patch)同样过投影;权威标题到达后照常原样发布 ——
+    // 投影只作用于哨兵,不会把真实标题也顶掉。
+    service.handleSessionMetadataPatch('s1', { title: '登录失败排查' });
+    await vi.waitFor(() => expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      title: '登录失败排查',
+    }));
+    service.handleSessionMetadataPatch('s1', { title: 'New Maker' });
+    await vi.waitFor(() => expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      title: 'Untitled session',
+    }));
+    // 切换应用语言后必须**立刻**换语言:投影发生在构建 payload 那一刻,而 state / cache
+    // 存的是原始哨兵,所以 refreshLocalization() 的这次 republish 自然带新语言。若把投影
+    // 固化进 state,这里会一直停在上一语言,直到下一次 metadata 事件(PR #1031 review P1)。
+    {
+      const { setMainLocale } = await import('../../i18n.js');
+      setMainLocale('zh-CN');
+      service.refreshLocalization();
+      await vi.waitFor(() => expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+        title: '未命名任务',
+      }));
+      setMainLocale('en');
+      service.refreshLocalization();
+      await vi.waitFor(() => expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+        title: 'Untitled session',
+      }));
+    }
     expect(publish.mock.calls.at(-1)?.[0].strings).toMatchObject({
       appName: BRAND_NAME,
       newMessage: 'New message',
@@ -1608,6 +1712,41 @@ describe('AgentIslandService native publishing', () => {
 
       expect(mocks.showMessageBox).not.toHaveBeenCalled();
       expect(mocks.openExternal).not.toHaveBeenCalled();
+    } finally {
+      platformSpy.mockRestore();
+    }
+  });
+
+  it('stays silent when the folder is readable, and still guides on a later real denial', async () => {
+    const platformSpy = vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin');
+    try {
+      const { AgentIslandService } = await import('../service.js');
+      const service = new AgentIslandService({
+        getMainWindow: () => null,
+        nativeHost: { failed: false, publish: vi.fn(() => true) },
+      });
+      const event: AgentEvent = {
+        type: 'tool_result_full',
+        source: 'claude-code',
+        data: {
+          toolUseId: 'tool-1',
+          fullText: `EPERM: operation not permitted, open '${protectedFolderFile('Documents', 'blocked.txt')}'`,
+        },
+      };
+
+      // 粗筛命中,但 Main 亲自读得动 → 那条 EPERM 与 TCC 无关,不得打扰用户。
+      mocks.readdir.mockResolvedValue([]);
+      service.handleAgentEvent({ sessionId: 's1', agentKind: 'claude-code' }, event);
+      await vi.waitFor(() => expect(mocks.readdir).toHaveBeenCalledTimes(1));
+      expect(mocks.showMessageBox).not.toHaveBeenCalled();
+
+      // 等首轮探测完整收尾并释放同目录的探测占位,否则第二条事件会被串行化挡掉。
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // 且没有吃掉该目录的提醒名额:之后真被系统拒绝时仍然提示。
+      mocks.readdir.mockRejectedValue(tccDeniedError());
+      service.handleAgentEvent({ sessionId: 's2', agentKind: 'claude-code' }, event);
+      await vi.waitFor(() => expect(mocks.showMessageBox).toHaveBeenCalledTimes(1));
     } finally {
       platformSpy.mockRestore();
     }
@@ -2073,6 +2212,63 @@ describe('AgentIslandService native publishing', () => {
       sessionId: meta.sessionId,
       phase: 'completed',
     });
+  });
+
+  it('uses the same replacement boundary when auto-resume withheld the old error', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const playSound = vi.fn<(sound: AgentIslandSoundChoice) => boolean>(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish, playSound },
+    });
+    syncEnabledForTest(service, publish);
+    service.setSoundSettings({
+      enabled: true,
+      sounds: {
+        ...DEFAULT_AGENT_ISLAND_SOUND_SETTINGS.sounds,
+        complete: customSound('complete.wav'),
+      },
+    });
+    const meta = { sessionId: 'auto-resume-replacement', agentKind: 'claude-code' as const };
+    service.handleUserPrompt(meta, 'first turn');
+    service.handleUserPrompt(meta, 'continue automatically', {
+      clientId: 'auto-retry-1',
+      replacesCurrentTurn: true,
+    });
+    service.handleUserPromptDispatching(meta.sessionId);
+    playSound.mockClear();
+
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+    service.handleAgentEvent(
+      meta,
+      { type: 'done', source: 'claude-code', data: { reason: 'turn_interrupted' } },
+    );
+
+    expect(playSound).not.toHaveBeenCalled();
+    expect(publish.mock.calls.at(-1)?.[0].sessions[0]).toMatchObject({
+      sessionId: meta.sessionId,
+      phase: 'running',
+    });
+
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: true, status: 'Thinking...' } },
+    );
+    service.handleAgentEvent(
+      meta,
+      { type: 'status', source: 'claude-code', data: { isRunning: false, status: 'Done' } },
+    );
+
+    expect(playSound).toHaveBeenCalledTimes(1);
+    expect(playSound).toHaveBeenCalledWith(customSound('complete.wav'));
   });
 
   it('accepts replacement-turn interaction requests before its running status arrives', async () => {
@@ -3817,6 +4013,63 @@ describe('AgentIslandService native publishing', () => {
     expect(framesById.get(2)).toMatchObject({ width: 360, contentWidth: 320 });
   });
 
+  it('re-publishes native frames when a wake refresh keeps the same screen signature', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
+      void state;
+      void frameOrFrames;
+      return true;
+    });
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    syncEnabledForTest(service, publish);
+    const setNativeScreenMetrics = (
+      service as unknown as {
+        handleNativeScreenMetrics(metrics: {
+          screens: Array<{
+            displayId: number;
+            frame: { x: number; y: number; width: number; height: number };
+            hasNotch: boolean;
+            notchWidth: number;
+            topBarHeight: number;
+            menuBarHeight: number;
+            safeAreaTop: number;
+            isMain: boolean;
+            signature: string;
+          }>;
+          preferredDisplayId: number | null;
+          forceRefresh?: boolean;
+        }): void;
+      }
+    ).handleNativeScreenMetrics.bind(service);
+    const metrics = {
+      preferredDisplayId: mocks.primaryDisplay.id,
+      screens: [{
+        displayId: mocks.primaryDisplay.id,
+        frame: mocks.primaryDisplay.bounds,
+        hasNotch: false,
+        notchWidth: 0,
+        topBarHeight: 24,
+        menuBarHeight: 24,
+        safeAreaTop: 0,
+        isMain: true,
+        signature: 'primary',
+      }],
+    };
+
+    publish.mockClear();
+    setNativeScreenMetrics(metrics);
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    setNativeScreenMetrics(metrics);
+    expect(publish).toHaveBeenCalledTimes(1);
+
+    setNativeScreenMetrics({ ...metrics, forceRefresh: true });
+    expect(publish).toHaveBeenCalledTimes(2);
+  });
+
   it('uses native notched-display metrics when computing display frames', async () => {
     const { AgentIslandService } = await import('../service.js');
     const publish = vi.fn((state: AgentIslandDisplayState, frameOrFrames: AgentIslandNativeFrame | AgentIslandNativeFrame[]) => {
@@ -4123,5 +4376,51 @@ describe('AgentIslandService session attention cleared bridge (error read semant
     // 显式清除(renderer 确认报错 UI 真实展示):生效并重新 publish。
     service.handleSessionAttentionCleared('s-err', 'explicit');
     expect(publishSpy.mock.calls.length).toBeGreaterThan(publishCountAfterError);
+  });
+});
+
+describe('会话关闭原因决定条目去留', () => {
+  it('进程关闭保留仍在展示的完成卡片,归档/删除照常硬删', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    syncEnabledForTest(service, publish);
+    const sessions = (
+      service as unknown as { state: { sessions: Map<string, unknown> } }
+    ).state.sessions;
+
+    // 临时会话调度的真实时序:done 之后 runner 的 fire finally 立刻 closeSession。
+    // 此刻完成卡片刚弹出来,硬删条目会让它当场消失(用户看到「弹一下就收起」)。
+    service.handleAgentEvent({ sessionId: 'ephemeral' }, doneEvent());
+    expect(sessions.has('ephemeral')).toBe(true);
+    service.handleSessionClosed('ephemeral', { reason: 'process-closed' });
+    expect(sessions.has('ephemeral')).toBe(true);
+
+    // 会话被归档 / 删除(默认 reason)语义是「这条记录不该再存在」→ 照常硬删。
+    service.handleSessionClosed('ephemeral');
+    expect(sessions.has('ephemeral')).toBe(false);
+  });
+
+  it('进程关闭时若已无展示需求,条目照常删除', async () => {
+    const { AgentIslandService } = await import('../service.js');
+    const publish = vi.fn(() => true);
+    const service = new AgentIslandService({
+      getMainWindow: () => null,
+      nativeHost: { failed: false, publish },
+    });
+    syncEnabledForTest(service, publish);
+    const sessions = (
+      service as unknown as { state: { sessions: Map<string, unknown> } }
+    ).state.sessions;
+
+    // 只是跑起来、没有任何终态未读 → 进程一关就没有保留价值。
+    service.handleUserPrompt({ sessionId: 'plain', agentKind: 'codex' }, 'hi');
+    expect(sessions.has('plain')).toBe(true);
+
+    service.handleSessionClosed('plain', { reason: 'process-closed' });
+    expect(sessions.has('plain')).toBe(false);
   });
 });

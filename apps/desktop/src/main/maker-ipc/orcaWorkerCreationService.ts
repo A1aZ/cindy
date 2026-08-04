@@ -2,6 +2,7 @@ import type { AgentKind } from '@cindy/maker-core';
 import type { AuthStrategy } from '@cindy/model-providers';
 
 import { isCredentialModeSwitchBusyError } from '../maker-host/codex-credential-switch.js';
+import { isSubscriptionDirectModel } from '../../shared/subscriptionModels.js';
 import type { DispatchWorkerTaskResult, OrcaWorkerEffort, OrcaWorkerStatus } from './orcaTeamService.js';
 import type { MakerSessionCreateOpts } from './sessionRequest.js';
 
@@ -15,12 +16,19 @@ export interface OrcaTeamSnapshot {
 export interface OrcaLeadSessionSnapshot {
   id: string;
   agentKind: AgentKind;
+  workspaceKind: 'project' | 'dialogue';
   workingDir: string | null;
   model: string;
   effort: string | null;
   permissionMode: string;
   fastMode: boolean;
   providerId: string | null;
+  /**
+   * lead 的 SSH 远端 host id;非空时 worker 必须继承 (在同一个远端跑),
+   * 否则 worker 会以远端 workingDir 在本机 spawn —— 指向不存在或同名的
+   * 本机目录。null = 本地 lead,worker 也是本地。
+   */
+  remoteHostId: string | null;
 }
 
 /** worker limit 与 duplicate label 校验只需要 worker 的身份、label 与占槽状态。 */
@@ -60,6 +68,13 @@ export interface OrcaWorkerProviderSnapshot {
   >;
   /** true 表示该来源必须写入 session provider store 才能注入自己的 API key/OAuth token。 */
   requiresExplicitRoute?: boolean;
+  /**
+   * true 表示 chat-bridged codex 供应商 (wireProtocol=openai-chat, 与
+   * renderer/lib/providerModels.ts 的 isChatBridgedCodexProvider 同语义):
+   * 其 Responses→Chat 翻译只挂在本地 codex-proxy, SSH 远端 worker 不兼容
+   * (codex-connector R23 P2 的拒绝依据)。
+   */
+  chatBridgedCodex?: boolean;
 }
 
 /** 自带凭证或明确无鉴权的第三方路由都不能回落到 worker/lead 的默认上游。 */
@@ -201,6 +216,15 @@ export interface OrcaWorkerCreationDeps {
   createId(): string;
   createSessionId(): string;
   buildCreateOptsWithStderr(opts: MakerSessionCreateOpts): MakerSessionCreateOpts;
+  /**
+   * 远端 session start 前置 (SSH 重连 / agent 安装 / codex daemon MCP 注入)。
+   * remote lead 的 worker 继承了 remoteHostId,创建前必须走与本机
+   * send/resume 相同的 ensure,否则远端 daemon 的协同 MCP 通道不就绪。
+   * 可选:未注入时按本地创建处理 (测试与本地 lead 场景)。
+   */
+  ensureRemoteReadyForSessionStart?: (params: {
+    createOpts: MakerSessionCreateOpts;
+  }) => Promise<void>;
   bootstrapSession(opts: MakerSessionCreateOpts): Promise<{
     session: { id: string; agentKind: AgentKind };
     didInjectOrcaInstructions: boolean;
@@ -341,7 +365,11 @@ function resolveWorkerConfig(params: {
   const { input, lead, defaults, availableModels } = params;
   const model = input.model
     ?? defaults.model
-    ?? (input.agent === lead.agentKind ? lead.model : input.agent === 'codex' ? 'gpt-5.5' : 'claude-sonnet-4-6');
+    // pi 显式列出(与 model-defaults.ts 对齐,避免将来改 cc 默认时 pi 静默跟随)。
+    ?? (input.agent === lead.agentKind ? lead.model
+        : input.agent === 'codex' ? 'gpt-5.5'
+        : input.agent === 'pi' ? 'claude-sonnet-4-6'
+        : 'claude-sonnet-4-6');
   const modelCapabilities = availableModels.find((candidate) => candidate.id === model);
   if (!modelCapabilities) {
     return {
@@ -366,7 +394,7 @@ function resolveWorkerConfig(params: {
       : (input.agent === lead.agentKind ? lead.providerId : null),
     fastMode: modelCapabilities.supportsFastMode === false
       ? false
-      : ((input.agent === 'codex' && input.fast !== undefined)
+      : ((agentConsumesExplicitFast(input.agent) && input.fast !== undefined)
           ? input.fast
           : (defaults.fastMode ?? !!lead.fastMode)),
   };
@@ -382,7 +410,16 @@ export function budgetModelRequiresApiKeyMessage(model: string): string {
 
 /** agent 的人类可读名,用于 preflight 失败信息。 */
 function agentDisplayName(agent: AgentKind): string {
-  return agent === 'codex' ? 'Codex' : 'Claude Code';
+  return agent === 'codex' ? 'Codex' : agent === 'pi' ? 'Pi' : 'Claude Code';
+}
+
+/**
+ * 会消费显式 `fast` 输入的 agent:Codex 与 Pi(两者 agent 层都支持 Fast 模式)。
+ * claude-code 的 fast 在 agent 层是 no-op,故不接线。实际是否生效仍由该 (来源, 模型)
+ * 的 `supportsFastMode` 收口 —— 与 Pi 自动任务路径同口径(runner 按模型能力裁决)。
+ */
+function agentConsumesExplicitFast(agent: AgentKind): boolean {
+  return agent === 'codex' || agent === 'pi';
 }
 
 /**
@@ -395,7 +432,7 @@ export function buildNoProviderMessage(
   availability: Record<AgentKind, OrcaWorkerProviderSnapshot[]>,
 ): string {
   const base = `${agentDisplayName(agent)} 当前没有可用的模型供应商(provider)。请在「设置 → 模型供应商」连接一个支持 ${agentDisplayName(agent)} 的供应商后重试`;
-  const others = (['claude-code', 'codex'] as AgentKind[]).filter(
+  const others = (['claude-code', 'codex', 'pi'] as AgentKind[]).filter(
     (a) => a !== agent && (availability[a]?.length ?? 0) > 0,
   );
   if (others.length === 0) return `${base}。`;
@@ -500,6 +537,19 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
       return { ok: false, errorCode: 'NOT_FOUND', message: `lead session ${params.leadSessionId} not found` };
     }
 
+    // Pi 尚无远程 runtime:PiAgent.startSession 对 remoteHostId 一律 NotSupportedError,
+    // 远端 ensure 又对 pi 跳过,SSH 远程 Lead + Pi worker 必然在 bootstrap 期被包成笼统
+    // INTERNAL —— 在 preflight 就以可操作信息拒绝(codex-connector 报)。lead 侧的
+    // capabilities 层已拒 Pi 远程会话,此闸补上 worker 创建(UI popover / MCP / 批量)路径。
+    if (lead.remoteHostId && params.agent === 'pi') {
+      return {
+        ok: false,
+        errorCode: 'INVALID_PARAMS',
+        message:
+          'Pi workers are not available for SSH remote leads: pi sessions are local-only for now — pick Claude Code or Codex for this worker',
+      };
+    }
+
     const defaults = deps.getWorkerDefaults(params.agent);
     // 标准面板显式选定的来源(非空 string)直接生效,由下方精确 preflight 把关「已连接且
     // 提供该模型」;空串/null/undefined 一律按未显式处理(与 IPC 边界同口径,service 作为
@@ -563,7 +613,7 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
     // 只有该来源确实带了 Fast 元数据才覆盖;无元数据(旧组装方)保留拍平解析。
     if (routeProvider?.fastModels) {
       const providerSupportsFast = routeProvider.fastModels.includes(resolved.model);
-      const requestedFast = params.agent === 'codex' && params.fast !== undefined
+      const requestedFast = agentConsumesExplicitFast(params.agent) && params.fast !== undefined
         ? params.fast
         : (defaults.fastMode ?? !!lead.fastMode);
       resolved.fastMode = providerSupportsFast && requestedFast === true;
@@ -611,6 +661,40 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
         errorCode: 'BUDGET_MODEL_REQUIRES_API_MODE',
         message: budgetModelRequiresApiKeyMessage(resolved.model),
       };
+    }
+
+    // SSH 远端 worker 的模型/来源兼容闸 (codex-connector R23 P2):remote
+    // transport 不经本地 proxy — subscription-direct 模型 (chatgpt/xai) 与
+    // chat-bridged codex 供应商 (wireProtocol=openai-chat, 其 Responses→Chat
+    // 翻译只挂在本地 codex-proxy) 送到远端必失败。ChatInput 对 remoteHostId
+    // 已用 excludeSubscriptionDirect / excludeChatBridgedCodex 隐藏
+    // (renderer/lib/providerModels.ts 同语义), worker 创建 (UI popover 与
+    // MCP 调用) 在此统一拒绝, 失败提前到创建前而非远端运行期。
+    if (lead.remoteHostId) {
+      if (isSubscriptionDirectModel(resolved.model)) {
+        return {
+          ok: false,
+          errorCode: 'INVALID_PARAMS',
+          message:
+            `model "${resolved.model}" is not available for SSH remote workers: ` +
+            'subscription-direct models require the local proxy path — pick an SSH-compatible model',
+        };
+      }
+      // 默认路由 (resolved.providerId=null) 同样要闸 — 且必须按
+      // routeProviderId/routeProvider (上方 583 行) 判定:它已经
+      // 「显式来源 → resolved → resolveDefaultProviderIdForModel」解析出
+      // 实际落点;budgetRouteProviderId 在 worker 未显式传 model 时仍为
+      // null, 只查它会让默认路由的 chat-bridged 漏过 (codex-connector
+      // R24 P2)。
+      if (routeProvider?.chatBridgedCodex === true) {
+        return {
+          ok: false,
+          errorCode: 'INVALID_PARAMS',
+          message:
+            `provider "${routeProvider.id}" is not available for SSH remote workers: ` +
+            'chat-bridged Codex providers require the local proxy path — pick an SSH-compatible provider',
+        };
+      }
     }
 
     if (params.model !== undefined && explicitModelDefaultProviderId === null) {
@@ -707,7 +791,13 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
       const workerOpts = deps.buildCreateOptsWithStderr({
         id: workerSessionId,
         agentKind: params.agent,
+        // Worker 与 Lead 共享同一种 workspace 语义。dialogue Lead 虽然已有 main 自动分配
+        // 的运行目录,也不能把 Worker 落成 project,否则侧栏分组和项目能力都会误判。
+        workspaceKind: lead.workspaceKind,
         workingDir: lead.workingDir ?? '',
+        // remote lead 的 worker 继承 remoteHostId:在同一台远端主机上 spawn,
+        // 与 lead 共享远端 workingDir;本地 lead 不带此字段 (本地 worker)。
+        ...(lead.remoteHostId ? { remoteHostId: lead.remoteHostId } : {}),
         model: resolved.model,
         providerId: resolved.providerId,
         effort: resolved.effort as MakerSessionCreateOpts['effort'],
@@ -720,6 +810,11 @@ export function createOrcaWorkerCreationService(deps: OrcaWorkerCreationDeps): O
 
       let workerSession: { id: string; agentKind: AgentKind };
       try {
+        // 远端 worker:创建前确保 SSH / agent / codex daemon MCP 注入就绪
+        // (本地 lead 时 remoteHostId 为空, ensure 内部直接返回)。
+        if (lead.remoteHostId && deps.ensureRemoteReadyForSessionStart) {
+          await deps.ensureRemoteReadyForSessionStart({ createOpts: workerOpts });
+        }
         const bootstrapped = await deps.bootstrapSession(workerOpts);
         workerSession = bootstrapped.session;
       } catch (err) {

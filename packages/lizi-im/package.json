@@ -15,12 +15,14 @@
     "lint": "eslint src/"
   },
   "author": {
-    "name": "X.D. Network Inc.",
+    "name": "XD Inc.",
     "email": "feedback@cindy.app"
   },
   "license": "Apache-2.0",
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.60.0",
+    "dingtalk-stream": "^2.1.5",
+    "@wecom/aibot-node-sdk": "1.0.7",
     "discord.js": "^14.16.0"
   },
   "devDependencies": {

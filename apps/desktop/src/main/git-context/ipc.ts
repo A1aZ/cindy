@@ -23,8 +23,9 @@ import { GithubClient } from '@cindy/github-client';
 
 import { createLogger } from '../logger.js';
 import { getCurrentDbClientUserId } from '../localDb/client/current';
+import { outboundFetch } from '../maker-host/outbound-fetch.js';
 import { requireString, throwIpcError } from '../utils/ipcValidate';
-import { createGhCliTokenSource } from './ghCliTokenSource.js';
+import { getSharedGhCliTokenSource } from './ghCliTokenSource.js';
 import { GitContextService } from './GitContextService.js';
 import { resolveSessionGitDirLive } from './sessionDirResolver.js';
 import {
@@ -67,8 +68,8 @@ function broadcastToAllWindows(channel: string, payload: unknown): void {
   }
 }
 
-/** gh CLI 登录态来源(模块级单例,内置 5min 正/负缓存)。 */
-const ghCliTokenSource = createGhCliTokenSource();
+/** gh CLI 登录态来源(进程内共享单例,内置 5min 正 / 30s 负缓存)。 */
+const ghCliTokenSource = getSharedGhCliTokenSource();
 
 async function readGithubToken(): Promise<string | null> {
   return ghCliTokenSource.readToken();
@@ -95,7 +96,8 @@ async function fetchUnresolvedCount(client: GithubClient, q: PrStatusQuery): Pro
 }
 
 async function fetchPrRemote(token: string, q: PrStatusQuery): Promise<PrRemoteState> {
-  const client = new GithubClient({ token, owner: q.owner, repo: q.repo });
+  // fetchImpl:api.github.com 是境外端点,走吃系统代理的通道(见 maker-host/outbound-fetch)。
+  const client = new GithubClient({ token, owner: q.owner, repo: q.repo, fetchImpl: outboundFetch });
   // 核心状态走 REST(所有 token 类型通用);未解决数走 GraphQL 增强信号,
   // 失败(老 fine-grained PAT 不支持 GraphQL 等)降级 null,不拖垮整条状态。
   const [pr, unresolved] = await Promise.all([

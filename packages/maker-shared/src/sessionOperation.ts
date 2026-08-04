@@ -144,7 +144,12 @@ export function buildSessionComposerLayout(input: SessionComposerLayoutInput): S
   const hasAttachments = input.attachmentCount > 0;
   const hasQuotes = (input.quoteCount ?? 0) > 0;
   const canSend = hasDraft || hasAttachments || hasQuotes;
-  const sendVisible = canSend || input.sending;
+  // 语音生命周期(listening/submitting/refining)内发送槽常驻(对齐桌面主槽永远占位):
+  // 录音期间发送键就是「结束并发送」,转写落地前后布局都不变——否则首段转写让 canSend
+  // 翻 true 的瞬间发送键才冒出来,右对齐按钮组整体左移,语音按钮让出的位置正好被
+  // 停止任务按钮占据,手指原地再点一下会误停任务。
+  const voiceBusy = isVoiceInputBusy(input.voiceState);
+  const sendVisible = canSend || input.sending || voiceBusy;
   const stopVisible = input.canStop || input.queueBusy;
   const sendUnavailableReason = normalizeOptionalReason(input.sendUnavailableReason);
   const voiceLabel = composerVoiceStateLabel(input.voiceState);
@@ -178,15 +183,23 @@ export function buildSessionComposerLayout(input: SessionComposerLayoutInput): S
     send: {
       // attachmentBusy 必须挡发送:附件仍在异步上传时(典型:粘贴图片,无系统
       // picker 遮挡、UI 完全可交互),抢发会发出不含该附件的消息并把图滞留托盘。
-      disabled: input.sending || input.attachmentBusy || sendUnavailableReason !== null || !canSend,
+      // listening 期间即使草稿还空着也可按(语义是「结束录音并发送」,对齐桌面
+      // finish-and-send);submitting/refining 期间转写还没落地,禁用等润色完成。
+      disabled: input.sending
+        || input.attachmentBusy
+        || sendUnavailableReason !== null
+        || isVoiceInputProcessing(input.voiceState)
+        || (!canSend && input.voiceState !== 'listening'),
       disabledReason: input.sending
         ? '消息正在发送到电脑端。'
         : input.attachmentBusy
           ? '附件上传中，完成后再发送。'
           : sendUnavailableReason
-            ?? (canSend
-              ? null
-              : '输入文字、添加附件或引用后才能发送。'),
+            ?? (isVoiceInputProcessing(input.voiceState)
+              ? '语音正在处理，完成后再发送。'
+              : canSend || input.voiceState === 'listening'
+                ? null
+                : '输入文字、添加附件或引用后才能发送。'),
       label: input.sending ? '发送中' : '发送',
       visible: sendVisible,
     },
@@ -254,7 +267,7 @@ export function buildSessionOperationLayout(input: SessionOperationLayoutInput):
   if (!input.hasCurrentSession) {
     return {
       canUseComposer: false,
-      composerDisabledReason: '当前会话还没有同步完成。',
+      composerDisabledReason: '当前任务还没有同步完成。',
       composerDisabledReasonSource: 'session-syncing',
       composerSlot: 'missing-session',
       messageHistoryMode: 'hidden',
@@ -349,7 +362,7 @@ function buildComposerGuidanceText(input: SessionComposerLayoutInput): string {
   if (input.voiceState === 'listening' && hasDraft) {
     return '点发送会结束语音并发送当前文字；点输入框会结束语音并弹出键盘。';
   }
-  if (input.voiceState === 'listening') return '正在听，文字出现后会显示发送；点输入框可结束语音并弹出键盘。';
+  if (input.voiceState === 'listening') return '正在听；点发送会结束语音并发送识别的文字，点输入框可结束语音并弹出键盘。';
   if (input.voiceState === 'submitting') return '正在转写语音，输入框会暂时锁定。';
   if (input.voiceState === 'refining') return '正在润色语音，完成后会更新输入框。';
   if (input.attachmentBusy) return '正在检查或上传附件，完成后会出现在附件列表。';
@@ -357,7 +370,7 @@ function buildComposerGuidanceText(input: SessionComposerLayoutInput): string {
   if (hasAttachments && hasDraft) return `将发送 ${input.attachmentCount} 个附件和输入框里的文字。`;
   if (hasAttachments) return `将只发送 ${input.attachmentCount} 个附件，也可以补充说明后再发送。`;
   if (input.attachmentPickerOpen) return '可以添加手机上的照片、截图或文件。';
-  if (hasDraft) return '点发送后会进入桌面端队列，按当前会话设置执行。';
+  if (hasDraft) return '点发送后会进入桌面端队列，按当前任务设置执行。';
   if (hasQuotes) return `将发送 ${input.quoteCount} 处引用，也可以补充说明后再发送。`;
   if (input.canStop) return '电脑端正在执行；可继续排队输入，或点停止保留当前队列。';
   return '输入文字开始，使用 / 调命令，使用 @ 引用项目资源。';

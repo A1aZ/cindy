@@ -9,18 +9,21 @@
 
 import { describe, it, expect } from 'vitest';
 
-import { isNetworkishErrorMessage } from '@/utils/networkError';
+import { isNetworkishErrorMessage, parseReconnectAttemptMessage } from '@/utils/networkError';
 
 describe('isNetworkishErrorMessage', () => {
   it.each([
     // Anthropic SDK 重试耗尽后透传的终止型错误原文
     'Request timed out.',
+    'API Error: The operation timed out.',
     'Connection error.',
     // 网关 / errno / fetch 存量场景抽查
     'unexpected status 502 Bad Gateway: upstream unreachable: AggregateError',
     'connect ECONNREFUSED 127.0.0.1:3333',
     'fetch failed',
     'socket hang up',
+    'Reconnecting... 2/5',
+    'Reconnecting… 3/5 (stream disconnected before completion)',
   ])('matches networkish message: %s', (msg) => {
     expect(isNetworkishErrorMessage(msg)).toBe(true);
   });
@@ -29,9 +32,27 @@ describe('isNetworkishErrorMessage', () => {
     'Invalid API key',
     'thread not found',
     'context window exceeded',
+    'Local tool operation timed out.',
+    'Wrapped error: API Error: The operation timed out.',
     // 长数字不因包含 502 片段误伤(\b 词边界)
     'order id 15024 rejected',
   ])('does not match non-network message: %s', (msg) => {
     expect(isNetworkishErrorMessage(msg)).toBe(false);
   });
+});
+
+describe('parseReconnectAttemptMessage', () => {
+  it('extracts valid Codex reconnect progress', () => {
+    expect(parseReconnectAttemptMessage('Reconnecting... 3/5')).toEqual({
+      attempt: 3,
+      maxAttempts: 5,
+    });
+  });
+
+  it.each(['Reconnecting...', 'Reconnecting... 0/5', 'Reconnecting... 6/5'])(
+    'rejects malformed progress: %s',
+    (msg) => {
+      expect(parseReconnectAttemptMessage(msg)).toBeNull();
+    },
+  );
 });

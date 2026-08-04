@@ -3,8 +3,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type { Logger, McpProvider } from '@cindy/maker-core';
 import {
+  getActiveCodexBridgeServerNames,
   getCodexExtraSpawnConfig,
   registerCodexMcpThreadContext,
+  setCodexEnvironmentShutdownHook,
   shutdownCodexEnvironment,
   unregisterCodexMcpThreadContext,
 } from '../codexEnvironment.js';
@@ -78,6 +80,7 @@ function extractUrl(args: string[]): URL {
 
 describe('codexEnvironment', () => {
   afterEach(async () => {
+    setCodexEnvironmentShutdownHook(null);
     await shutdownCodexEnvironment();
   });
 
@@ -103,22 +106,39 @@ describe('codexEnvironment', () => {
     expect(firstUrl.origin).toBe(secondUrl.origin);
     expect(firstUrl.pathname).toBe('/mcp/cindy_test');
     expect(secondUrl.pathname).toBe('/mcp/cindy_test');
+
+    expect(first.buildSessionMcpConfig).toBeTypeOf('function');
+    const boundConfig = first.buildSessionMcpConfig!('instance-1');
+    const boundUrl = new URL(boundConfig['mcp_servers.cindy_test.url'] as string);
+    expect(boundUrl.origin).toBe(firstUrl.origin);
+    expect(boundUrl.pathname).toBe('/mcp/cindy_test');
+    expect(boundUrl.searchParams.get('instance')).toBe('instance-1');
+    expect(boundUrl.searchParams.has('session')).toBe(false);
+
+    const replacementUrl = new URL(
+      first.buildSessionMcpConfig!('instance-2')['mcp_servers.cindy_test.url'] as string,
+    );
+    expect(replacementUrl.searchParams.get('instance')).toBe('instance-2');
+    expect(replacementUrl.toString()).not.toBe(boundUrl.toString());
   });
 
-  it('preserves a thread disabled-tool policy across context re-registration', async () => {
+  it('freezes policy within one session instance but replaces it on thread rebinding', async () => {
     const cfg = await getCodexExtraSpawnConfig({
       mcpProviders: [testProvider()],
       logger: noopLogger(),
     });
     const register = vi.spyOn(cfg.bridge!, 'registerThreadContext');
+    const unregister = vi.spyOn(cfg.bridge!, 'unregisterThreadContext');
 
     registerCodexMcpThreadContext('thread-1', {
       agentKind: 'codex',
+      sessionInstanceId: 'instance-old',
       workingDir: '/project',
       vendorOptions: { [CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY]: ['cindy-ssh'] },
     });
     registerCodexMcpThreadContext('thread-1', {
       agentKind: 'codex',
+      sessionInstanceId: 'instance-old',
       workingDir: '/project',
       vendorOptions: { [CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY]: [] },
     });
@@ -131,7 +151,27 @@ describe('codexEnvironment', () => {
         }),
       }),
     );
-    unregisterCodexMcpThreadContext('thread-1');
+
+    registerCodexMcpThreadContext('thread-1', {
+      agentKind: 'codex',
+      sessionInstanceId: 'instance-new',
+      workingDir: '/project',
+      vendorOptions: { [CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY]: [] },
+    });
+    expect(register).toHaveBeenLastCalledWith(
+      'thread-1',
+      expect.objectContaining({
+        sessionInstanceId: 'instance-new',
+        vendorOptions: expect.objectContaining({
+          [CODEX_DISABLED_BUILTIN_PLUGIN_IDS_KEY]: [],
+        }),
+      }),
+    );
+
+    unregisterCodexMcpThreadContext('thread-1', 'instance-old');
+    expect(unregister).not.toHaveBeenCalled();
+    unregisterCodexMcpThreadContext('thread-1', 'instance-new');
+    expect(unregister).toHaveBeenCalledWith('thread-1', 'instance-new');
   });
 
   it('Slack 在 bridge 启动后完成绑定时，清缓存会按最新 provider gate 重建', async () => {
@@ -186,5 +226,34 @@ describe('codexEnvironment', () => {
     // 同批次的正常 provider 不受影响，原型也没有被污染。
     expect(cfg.extraArgs).toContain('mcp_servers.themis.url="https://themis.example/mcp"');
     expect(Object.getPrototypeOf({} as Record<string, unknown>)).toBe(Object.prototype);
+  });
+
+  it('exposes the active bridge server-name snapshot and clears it on shutdown (R2 P2)', async () => {
+    // stale-bridge 钳制的数据源:活跃 bridge 的 server 集合 (启动时冻结),
+    // 远端 flag 钳制 / drift 判定用它区分「bridge 缺 cindy_memory 的窗口」
+    // 与「无 bridge (lazy 重建在即)」。
+    expect(getActiveCodexBridgeServerNames()).toBeNull(); // 未启动
+
+    await getCodexExtraSpawnConfig({ mcpProviders: [testProvider()], logger: noopLogger() });
+    expect(getActiveCodexBridgeServerNames()).toEqual(['cindy_test']);
+
+    await shutdownCodexEnvironment();
+    expect(getActiveCodexBridgeServerNames()).toBeNull(); // shutdown 后清空
+  });
+
+  it('invokes the shutdown hook after the bridge stops, on every shutdown path (R22 P1)', async () => {
+    // 远端失效钩子折进 shutdownCodexEnvironment 内部:任何调用点 (插件开关 /
+    // custom MCP CRUD / contacts / 账号切换) 都自动覆盖, 不靠逐点挂接。
+    const hook = vi.fn();
+    setCodexEnvironmentShutdownHook(hook);
+    await getCodexExtraSpawnConfig({ mcpProviders: [testProvider()], logger: noopLogger() });
+    expect(hook).not.toHaveBeenCalled(); // 未 shutdown 不调
+
+    await shutdownCodexEnvironment();
+    expect(hook).toHaveBeenCalledTimes(1);
+
+    // 未启动过时 (cached 为空) shutdown 是 no-op, 不调 hook。
+    await shutdownCodexEnvironment();
+    expect(hook).toHaveBeenCalledTimes(1);
   });
 });

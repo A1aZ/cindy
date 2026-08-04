@@ -47,6 +47,25 @@ describe('resolveBoundSessionGenerationRoute', () => {
     })).toEqual({ providerId: 'xd', agentKind: 'claude-code', model: 'claude-sonnet' });
   });
 
+  it('keeps the implicit source for a running session after its model is retired', () => {
+    const retiredProviders = providers.map((provider) => provider.id === 'xd'
+      ? {
+        ...provider,
+        models: {
+          'claude-code': provider.models['claude-code']?.map((model) => ({
+            ...model,
+            status: 'retired' as const,
+          })),
+        },
+      }
+      : provider);
+    expect(resolveBoundSessionGenerationRoute({
+      session: { agentKind: 'claude-code', model: 'claude-sonnet' },
+      sessionProviderId: null,
+      providers: retiredProviders,
+    })).toEqual({ providerId: 'xd', agentKind: 'claude-code', model: 'claude-sonnet' });
+  });
+
   it('fails closed when the bound session has no routable model', () => {
     expect(resolveBoundSessionGenerationRoute({
       session: { agentKind: 'claude-code', model: '' },
@@ -70,6 +89,43 @@ describe('resolveBoundSessionGenerationRoute', () => {
       providers: providers.map((provider) => provider.id === 'xd'
         ? { ...provider, connected: false }
         : provider),
+    })).toBeNull();
+  });
+
+  it('does not relax the chat capability boundary for an implicit resumed source', () => {
+    const nonChatProviders = providers.map((provider) => provider.id === 'xd'
+      ? {
+        ...provider,
+        models: {
+          'claude-code': provider.models['claude-code']?.map((model) => ({
+            ...model,
+            mode: 'embedding',
+          })),
+        },
+      }
+      : provider);
+    expect(resolveBoundSessionGenerationRoute({
+      session: { agentKind: 'claude-code', model: 'claude-sonnet' },
+      sessionProviderId: null,
+      providers: nonChatProviders,
+    })).toBeNull();
+  });
+
+  it('fails closed when the explicit source only offers a non-chat copy of the persisted model id (issue #882 第 3 点, 2026-07 review 第 17 轮)', () => {
+    const providersWithNonChatCopy = providers.map((provider) => provider.id === 'custom-claude'
+      ? {
+        ...provider,
+        models: {
+          'claude-code': [
+            { id: 'claude-connect-4-6', name: 'Claude Connect', contextWindow: 200_000, mode: 'embedding' },
+          ],
+        },
+      }
+      : provider) as unknown as ProviderView[];
+    expect(resolveBoundSessionGenerationRoute({
+      session: { agentKind: 'claude-code', model: 'claude-connect-4-6' },
+      sessionProviderId: 'custom-claude',
+      providers: providersWithNonChatCopy,
     })).toBeNull();
   });
 });

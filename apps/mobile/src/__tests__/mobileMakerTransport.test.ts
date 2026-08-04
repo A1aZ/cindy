@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { REMOTE_INVOKE_ALLOWLIST } from '@cindy/device-link';
+import {
+  CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2,
+  REMOTE_INVOKE_ALLOWLIST,
+} from '@cindy/device-link';
 import {
   createMobileMakerTransport,
   MOBILE_MAKER_CHANNELS,
@@ -42,6 +45,8 @@ describe('mobile maker transport', () => {
       'maker:set-extra-dirs',
       'maker:set-session-model-pref',
       'maker:apply-new-maker-draft-pref',
+      'maker:get-new-maker-defaults',
+      'maker:apply-new-maker-worktree-pref',
       'maker:usage:model-pricing',
       'maker:usage:codex-rate-limits',
       'maker:usage:codex-rate-limit-reset',
@@ -52,6 +57,7 @@ describe('mobile maker transport', () => {
       'device-link:media:fetch',
       'device-link:voice:transcribe',
       'device-link:voice:dictionary-learning',
+      'device-link:voice:dictionary:get',
       'maker:get-pending-interactions',
       'maker:resolve-interaction',
       'maker:get-context-usage',
@@ -62,6 +68,8 @@ describe('mobile maker transport', () => {
       'maker:goal:resume',
       'maker:goal:update',
       'maker:fork',
+      'maker:get-session-tree',
+      'maker:navigate-session-tree',
       'maker:rewind:preview',
       'maker:rewind:commit',
       'maker:message:delete',
@@ -102,6 +110,10 @@ describe('mobile maker transport', () => {
       'fs:list-dir',
       'fs:stat-path',
       'fs:mkdir-p',
+      'worktree:detect-cwd',
+      'worktree:suggest-name',
+      'worktree:create',
+      'worktree:discard-precreated',
       'text-file:read-preview',
       'file-browser:remote-op',
     ]);
@@ -208,7 +220,9 @@ describe('mobile maker transport', () => {
     expect(calls).toEqual([{
       deviceId: 'dev-1',
       channel: 'maker:provider:list',
-      args: [],
+      args: [{
+        capabilities: [CONTROLLER_CAPABILITY_PROVIDER_LOGO_KINDS_V2],
+      }],
     }]);
   });
 
@@ -265,6 +279,7 @@ describe('mobile maker transport', () => {
     await maker.setExtraDirs('s1', ['/repo/docs']);
     await maker.listAgentCommands('claude-code');
     await maker.listAgentSkills('claude-code', { workingDir: '/repo' });
+    await maker.listAgentSkills('codex', {});
     await maker.scanAtResources('claude-code', { workingDir: '/repo', cap: 2000, query: 'session' });
     await maker.fetchRemoteMedia('xdt-image://local/a.png');
     await maker.transcribeVoice({ ossKey: 'voice-key', mimeType: 'audio/mp4', fileName: 'voice.m4a' });
@@ -274,6 +289,7 @@ describe('mobile maker transport', () => {
       beforeText: 'XDMaker',
       afterText: 'XDMaker',
     });
+    await maker.getVoiceDictionary();
     await maker.input.stop('s1', { pauseQueue: true });
     await maker.input.compact('s1');
     await maker.input.retryLastError('s1');
@@ -305,6 +321,7 @@ describe('mobile maker transport', () => {
       ['maker:set-extra-dirs', ['s1', ['/repo/docs']]],
       ['maker:list-agent-commands', ['claude-code']],
       ['maker:list-agent-skills', ['claude-code', { workingDir: '/repo' }]],
+      ['maker:list-agent-skills', ['codex', {}]],
       ['maker:scan-at-resources', ['claude-code', { workingDir: '/repo', cap: 2000, query: 'session' }]],
       ['device-link:media:fetch', [{ url: 'xdt-image://local/a.png' }]],
       ['device-link:voice:transcribe', [{ ossKey: 'voice-key', mimeType: 'audio/mp4', fileName: 'voice.m4a' }]],
@@ -314,6 +331,7 @@ describe('mobile maker transport', () => {
         beforeText: 'XDMaker',
         afterText: 'XDMaker',
       }]],
+      ['device-link:voice:dictionary:get', []],
       ['maker:input:stop', ['s1', { pauseQueue: true }]],
       ['maker:input:compact', ['s1']],
       ['maker:input:retry-last-error', ['s1']],
@@ -336,16 +354,72 @@ describe('mobile maker transport', () => {
     ]);
   });
 
-  it('routes fork, rewind and delete actions through maker namespace', async () => {
+  it('routes worktree probes and new-maker worktree defaults with device-link argument shapes', async () => {
+    const { calls, maker } = harness();
+
+    await maker.getNewMakerDefaults('claude-code');
+    await maker.applyNewMakerWorktreePref(true);
+    await maker.worktree.detectCwd('/repo/app');
+    await maker.worktree.suggestName('/repo');
+    await maker.worktree.create({
+      sessionId: 'preset-session-1',
+      baseRepo: '/repo',
+      name: 'auto-abc123',
+      sourceBranch: 'main',
+      recoveryKey: 'recovery-key-1234567890',
+    });
+    await maker.worktree.discardPrecreated({
+      sessionId: 'preset-session-1',
+      path: '/repo/.cindy-worktrees/auto-abc123',
+    });
+    await maker.worktree.discardPrecreated({
+      sessionId: 'preset-session-2',
+      recoveryKey: 'recovery-key-0987654321',
+    });
+
+    expect(calls.map((call) => [call.channel, call.args])).toEqual([
+      ['maker:get-new-maker-defaults', ['claude-code']],
+      ['maker:apply-new-maker-worktree-pref', [{ worktreeEnabled: true }]],
+      ['worktree:detect-cwd', [{ cwd: '/repo/app' }]],
+      ['worktree:suggest-name', [{ baseRepo: '/repo' }]],
+      ['worktree:create', [{
+        sessionId: 'preset-session-1',
+        baseRepo: '/repo',
+        name: 'auto-abc123',
+        sourceBranch: 'main',
+        recoveryKey: 'recovery-key-1234567890',
+      }]],
+      ['worktree:discard-precreated', [{
+        sessionId: 'preset-session-1',
+        path: '/repo/.cindy-worktrees/auto-abc123',
+      }]],
+      ['worktree:discard-precreated', [{
+        sessionId: 'preset-session-2',
+        recoveryKey: 'recovery-key-0987654321',
+      }]],
+    ]);
+  });
+
+  it('routes fork, native tree, rewind and delete actions through maker namespace', async () => {
     const { calls, maker } = harness();
 
     await maker.fork('s1', 'm2');
+    await maker.getSessionTree('s1');
+    await maker.navigateSessionTree('s1', 'entry-2', {
+      summarize: true,
+      customInstructions: 'Keep the decision context',
+    });
     await maker.rewindPreview('s1', 'm2');
     await maker.rewindCommit('s1', 'm2');
     await maker.deleteMessage('s1', 'm2');
 
     expect(calls.map((call) => [call.channel, call.args])).toEqual([
       ['maker:fork', ['s1', 'm2']],
+      ['maker:get-session-tree', ['s1']],
+      ['maker:navigate-session-tree', ['s1', 'entry-2', {
+        summarize: true,
+        customInstructions: 'Keep the decision context',
+      }]],
       ['maker:rewind:preview', ['s1', 'm2']],
       ['maker:rewind:commit', ['s1', 'm2']],
       ['maker:message:delete', ['s1', 'm2']],

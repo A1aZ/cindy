@@ -57,7 +57,9 @@ import {
   resetTurnPersistState,
   clearSessionPersistState,
   consumeLastAssistantPersistId,
+  consumeLastTopLevelAssistantPersistId,
   markAssistantTurnCompleted,
+  markAssistantTurnFailed,
   noteSessionClearBoundary,
   noteSessionAgentKind,
   enqueueDurableWrite,
@@ -117,6 +119,44 @@ describe('update_plan tool_use persistence', () => {
         toolUseId: 'plan-1',
         toolName: 'update_plan',
         input: { text: '1. Read code\n2. Run tests' },
+      },
+    );
+  });
+
+  it('updates the existing web_search row when completed carries authoritative input', async () => {
+    const firstPersistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'search-1',
+        toolName: 'web_search',
+        input: { query: 'early query', action: { type: 'search', query: 'early query' } },
+      },
+      null,
+    );
+    const secondPersistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'search-1',
+        toolName: 'web_search',
+        input: { query: 'https://example.com/final', action: { type: 'openPage', url: 'https://example.com/final' } },
+      },
+      null,
+    );
+
+    expect(secondPersistId).toBe(firstPersistId);
+
+    await flushWrites();
+    expect(createMessage).toHaveBeenCalledTimes(1);
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      firstPersistId,
+      {
+        toolUseId: 'search-1',
+        toolName: 'web_search',
+        input: {
+          query: 'https://example.com/final',
+          action: { type: 'openPage', url: 'https://example.com/final' },
+        },
       },
     );
   });
@@ -459,6 +499,38 @@ describe('thinking persistence', () => {
       broadcastGuard(),
     );
   });
+
+  it('persists redacted thinking as a structured hidden row', async () => {
+    const finishedAt = Date.parse('2026-06-20T09:11:00.000Z');
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(finishedAt);
+    try {
+      onThinkingEvent(
+        SESSION,
+        { stage: 'redacted', blockId: 'thinking-redacted' },
+        null,
+      );
+      await flushWrites();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    expect(createMessage).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({
+        clientId: 'thinking-redacted',
+        role: 'thinking',
+        content: {
+          kind: 'thinking',
+          text: '',
+          durationMs: 0,
+          isRedacted: true,
+          finishedAt,
+        },
+        createdAt: finishedAt,
+      }),
+      broadcastGuard(),
+    );
+  });
 });
 
 describe('event timestamp persistence', () => {
@@ -762,6 +834,28 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     expect(consumeLastAssistantPersistId(SESSION)).toBe(last);
   });
 
+  it('Subagent 文本最后落库时，usage 仍取最后一条但 title seal 锁定最后一条顶层 Assistant', () => {
+    const topLevel = onAssistantTextEvent(
+      SESSION,
+      { text: '顶层正式答复', isFinal: true },
+      { uuid: 'top-level' },
+    );
+    onToolUseEvent(
+      SESSION,
+      { toolUseId: 'toolu_subagent', toolName: 'Agent', input: {} },
+      null,
+    );
+    const subagent = onAssistantTextEvent(
+      SESSION,
+      { text: 'Subagent 内部文本', isFinal: true },
+      { uuid: 'subagent', parentUuid: 'toolu_subagent' },
+    );
+
+    expect(consumeLastAssistantPersistId(SESSION)).toBe(subagent);
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBe(topLevel);
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBeUndefined();
+  });
+
   it('无 assistant 文本(纯 tool 轮)→ undefined', () => {
     onToolUseEvent(SESSION, { toolUseId: 'tu_only', toolName: 'Bash', input: {} }, null);
     expect(consumeLastAssistantPersistId(SESSION)).toBeUndefined();
@@ -771,6 +865,7 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     onAssistantTextEvent(SESSION, { text: 'gone', isFinal: true }, null);
     clearSessionPersistState(SESSION);
     expect(consumeLastAssistantPersistId(SESSION)).toBeUndefined();
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBeUndefined();
   });
 
   it('done seal 以 durable patch 落库', async () => {
@@ -783,8 +878,19 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     expect(broadcastMessageAgentMetaUpdate).toHaveBeenCalledWith(SESSION, 'assistant-final');
   });
 
+  it('terminal error seal 以 durable patch 写 false', async () => {
+    await expect(markAssistantTurnFailed(SESSION, 'assistant-failed')).resolves.toBe(true);
+    expect(patchMessageAgentMetaWithResult).toHaveBeenCalledWith(
+      SESSION,
+      'assistant-failed',
+      { turnCompleted: false },
+    );
+    expect(broadcastMessageAgentMetaUpdate).toHaveBeenCalledWith(SESSION, 'assistant-failed');
+  });
+
   it('纯 tool turn 没有 assistant 时不写 seal', async () => {
     await expect(markAssistantTurnCompleted(SESSION, undefined)).resolves.toBe(false);
+    await expect(markAssistantTurnFailed(SESSION, undefined)).resolves.toBe(false);
     expect(patchMessageAgentMetaWithResult).not.toHaveBeenCalled();
   });
 });
@@ -844,6 +950,32 @@ describe('onTurnErrorEvent — terminal error 持久化', () => {
     const content = (bodyArg as { content: { message: string; sdkError: string } }).content;
     expect(content.message).toBe('Authorization: [REDACTED]; key=[REDACTED_KEY]');
     expect(content.sdkError).toBe('access_token=[REDACTED]');
+  });
+
+  it('content 携带错误发生时的 provider 快照(session-provider-store 同步取值)', async () => {
+    const { setSessionProvider } = await import('../maker-host/session-provider-store.js');
+    const sid = 'session-provider-snapshot';
+    setSessionProvider(sid, 'xd');
+    try {
+      onTurnErrorEvent(sid, { message: '网关余额不足(provider 快照用例)' });
+      await flushWrites();
+      const body = vi.mocked(createMessage).mock.calls.at(-1)?.[1] as {
+        content: Record<string, unknown>;
+      };
+      expect(body.content.providerId).toBe('xd');
+    } finally {
+      setSessionProvider(sid, null);
+    }
+  });
+
+  it('未显式选择 provider(默认路由)时不写 providerId —— 来源不明的行读侧 fail-closed', async () => {
+    const sid = 'session-provider-unset';
+    onTurnErrorEvent(sid, { message: '无显式 provider 的失败(快照用例)' });
+    await flushWrites();
+    const body = vi.mocked(createMessage).mock.calls.at(-1)?.[1] as {
+      content: Record<string, unknown>;
+    };
+    expect('providerId' in body.content).toBe(false);
   });
 
   it('error 前的在飞 assistant 文本先 flush 落库,error 行排在其后', async () => {

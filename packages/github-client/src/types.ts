@@ -9,6 +9,12 @@ export interface GithubClientConfig {
   owner?: string;
   /** 仓库名,如 'cindy'。user-scope / search / cross-repo 调用可省略。 */
   repo?: string;
+  /**
+   * 出网通道。缺省 = 全局 fetch —— 在 **Node / Electron 主进程**下那是 undici,不读系统
+   * 代理设置也不读代理环境变量,所以代理网络下的宿主应注入自己的代理感知实现
+   * (desktop 注入 main/maker-host/outbound-fetch)。
+   */
+  fetchImpl?: typeof fetch;
 }
 
 export interface GithubUser {
@@ -69,6 +75,8 @@ export interface GithubIssue {
   html_url: string;
   created_at: string;
   updated_at: string;
+  /** 评论数。声明为可选:老调用点不依赖它,search 结果里也不保证出现。 */
+  comments?: number;
   /** issue 是 PR 时 GitHub 会带 pull_request 对象;纯 issue 时无此字段 */
   pull_request?: { url: string; html_url: string } | null;
 }

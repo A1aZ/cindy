@@ -1,5 +1,5 @@
 import { createLogger } from '@/lib/logger';
-import { normalizeProjectKey } from '../../lib/projectGrouping';
+import { normalizeProjectKey, projectKeyComparisonKey } from '../../lib/projectGrouping';
 
 const log = createLogger('SidebarFilterCore');
 /**
@@ -164,6 +164,54 @@ export function nextProjectsAfterToggle(
   return normalizedPrev.concat([projectKey]);
 }
 
+/**
+ * Idempotently includes a project in an existing Project filter.
+ *
+ * `'all'` already includes every project. Array filters append only when the
+ * project is missing, unlike the user-facing toggle action.
+ */
+export function includeProjectInFilter(prev: FilterProjects, workingDir: string): FilterProjects {
+  if (prev === 'all') return prev;
+  const projectKey = normalizeProjectKey(workingDir);
+  if (!projectKey) return prev;
+  const normalizedPrev = normalizeProjectKeyList(prev);
+  if (normalizedPrev.includes(projectKey)) {
+    return arraysEqual(normalizedPrev, prev) ? prev : normalizedPrev;
+  }
+  return normalizedPrev.concat(projectKey);
+}
+
+/**
+ * Idempotently removes projects from an existing Project filter.
+ *
+ * This reducer handles main-process hidden-project snapshots. Repeated
+ * broadcasts cannot toggle a project back in, and removing the final explicit
+ * project falls back to the existing "zero selected means all" behavior.
+ */
+export function removeProjectsFromFilter(
+  prev: FilterProjects,
+  projectKeys: ReadonlySet<string>,
+  localPlatform: string,
+): FilterProjects {
+  if (prev === 'all' || projectKeys.size === 0) return prev;
+  const hiddenComparisonKeys = new Set(
+    normalizeProjectKeyList(Array.from(projectKeys))
+      .map((projectKey) => projectKeyComparisonKey(projectKey, localPlatform))
+      .filter((projectKey): projectKey is string => projectKey != null),
+  );
+  if (hiddenComparisonKeys.size === 0) return prev;
+  const normalizedPrev = normalizeProjectKeyList(prev);
+  const filtered = normalizedPrev.filter((projectKey) => {
+    const comparisonKey = projectKeyComparisonKey(projectKey, localPlatform);
+    return comparisonKey == null || !hiddenComparisonKeys.has(comparisonKey);
+  });
+  if (filtered.length === 0) return 'all';
+  if (filtered.length === normalizedPrev.length) {
+    return arraysEqual(normalizedPrev, prev) ? prev : normalizedPrev;
+  }
+  return filtered;
+}
+
 /* ============================== vendor load/persist ============================== */
 
 const VENDOR_VALUES: ReadonlySet<string> = new Set<FilterVendor>(['all', 'cc', 'codex']);
@@ -198,7 +246,7 @@ const GROUP_BY_VALUES: ReadonlySet<string> = new Set<FilterGroupBy>(['project', 
 
 /**
  * 读 localStorage 中的 groupBy;任何异常 / 非法值 / 未设置 → 'project'。
- * 「按工作目录分组」是 XDMaker 作为工作台的设计基线默认值;用户显式切到
+ * 「按工作目录分组」是 Cindy 作为工作台的设计基线默认值;用户显式切到
  * 'date' 时由 persistGroupBy 写入 storage,下次启动读回,保留其选择。
  */
 export function loadGroupBy(): FilterGroupBy {

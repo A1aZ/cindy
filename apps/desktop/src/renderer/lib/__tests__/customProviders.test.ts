@@ -1,12 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   appendDiscoveredCustomProviderModels,
+  createCustomProvider,
   customProviderModelConfigFromCatalogModel,
   providerViewToCustomProviderConfig,
   replaceCustomProviderModelId,
+  setCustomProviderModelReasoning,
+  setCustomProviderModelReasoningEffort,
+  setCustomProviderModelSupportsImageInput,
+  updateCustomProvider,
 } from '../customProviders';
-import type { ProviderView } from '@cindy/model-providers';
+import type {
+  CatalogModel,
+  ProviderRuntimeModelConfig,
+  ProviderView,
+} from '@cindy/model-providers';
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('replaceCustomProviderModelId', () => {
   it('drops hidden metadata when the model id changes', () => {
@@ -14,6 +26,9 @@ describe('replaceCustomProviderModelId', () => {
       id: 'MiniMax-M3',
       name: 'MiniMax M3',
       contextWindow: 1_000_000,
+      supportsImageInput: true,
+      reasoning: true,
+      reasoningEfforts: ['low', 'high'],
     }, 'another-model')).toEqual({
       id: 'another-model',
       name: 'MiniMax M3',
@@ -27,6 +42,50 @@ describe('replaceCustomProviderModelId', () => {
       contextWindow: 1_000_000,
     };
     expect(replaceCustomProviderModelId(model, model.id)).toBe(model);
+  });
+});
+
+describe('setCustomProviderModelSupportsImageInput', () => {
+  it('updates only the selected model row', () => {
+    const models = [
+      { id: 'text', name: 'Text' },
+      { id: 'vision', name: 'Vision' },
+    ];
+    expect(setCustomProviderModelSupportsImageInput(models, 1, true)).toEqual([
+      models[0],
+      { id: 'vision', name: 'Vision', supportsImageInput: true },
+    ]);
+  });
+});
+
+describe('Pi custom-provider reasoning controls', () => {
+  it('enables conservative default levels and removes the capability when disabled', () => {
+    const models = [{ id: 'reasoner', name: 'Reasoner' }];
+    const enabled = setCustomProviderModelReasoning(models, 0, true);
+    expect(enabled).toEqual([
+      {
+        id: 'reasoner',
+        name: 'Reasoner',
+        reasoning: true,
+        reasoningEfforts: ['minimal', 'low', 'medium', 'high'],
+      },
+    ]);
+    expect(setCustomProviderModelReasoning(enabled, 0, false)).toEqual(models);
+  });
+
+  it('keeps canonical order and refuses to remove the final supported effort', () => {
+    const models: ProviderRuntimeModelConfig[] = [
+      {
+        id: 'reasoner',
+        name: 'Reasoner',
+        reasoning: true,
+        reasoningEfforts: ['high'],
+      },
+    ];
+    const withXhigh = setCustomProviderModelReasoningEffort(models, 0, 'xhigh', true);
+    expect(withXhigh[0]?.reasoningEfforts).toEqual(['high', 'xhigh']);
+    const highOnly = setCustomProviderModelReasoningEffort(withXhigh, 0, 'xhigh', false);
+    expect(setCustomProviderModelReasoningEffort(highOnly, 0, 'high', false)).toEqual(highOnly);
   });
 });
 
@@ -54,6 +113,21 @@ describe('customProviderModelConfigFromCatalogModel', () => {
     });
   });
 
+  it('preserves an explicit override equal to the current default (explicit flag wins)', () => {
+    // 用户显式填了 200000:值恰好等于当前默认,但显式覆盖必须在未来默认升级后
+    // 原样保留——不能靠等值推断丢掉字段(PR review P1)。
+    expect(customProviderModelConfigFromCatalogModel({
+      id: 'pinned-default',
+      name: 'Pinned',
+      contextWindow: 200_000,
+      contextWindowExplicit: true,
+    })).toEqual({
+      id: 'pinned-default',
+      name: 'Pinned',
+      contextWindow: 200_000,
+    });
+  });
+
   it('preserves hidden defaults while round-tripping catalog models', () => {
     expect(customProviderModelConfigFromCatalogModel({
       id: 'discovered',
@@ -64,6 +138,38 @@ describe('customProviderModelConfigFromCatalogModel', () => {
       id: 'discovered',
       name: 'Discovered',
       defaultEnabled: false,
+    });
+  });
+
+  it('preserves an explicit Pi image-input capability through the edit round trip', () => {
+    expect(customProviderModelConfigFromCatalogModel({
+      id: 'vision-model',
+      name: 'Vision Model',
+      contextWindow: 200_000,
+      supportsImageInput: true,
+    })).toEqual({
+      id: 'vision-model',
+      name: 'Vision Model',
+      supportsImageInput: true,
+    });
+  });
+
+  it('reconstructs explicit Pi reasoning capability from catalog efforts only for Pi', () => {
+    const catalogModel = {
+      id: 'reasoner',
+      name: 'Reasoner',
+      contextWindow: 200_000,
+      efforts: ['low', 'high', 'xhigh'] as CatalogModel['efforts'],
+    };
+    expect(customProviderModelConfigFromCatalogModel(catalogModel, 'pi')).toEqual({
+      id: 'reasoner',
+      name: 'Reasoner',
+      reasoning: true,
+      reasoningEfforts: ['low', 'high', 'xhigh'],
+    });
+    expect(customProviderModelConfigFromCatalogModel(catalogModel, 'codex')).toEqual({
+      id: 'reasoner',
+      name: 'Reasoner',
     });
   });
 });
@@ -113,6 +219,45 @@ describe('providerViewToCustomProviderConfig', () => {
       },
     });
   });
+
+  it('round-trips Pi reasoning efforts from a provider view', () => {
+    const provider = {
+      id: 'local-reasoning',
+      name: 'Local Reasoning',
+      source: 'user',
+      agents: ['pi'],
+      auth: { method: 'none' },
+      access: { kind: 'api' },
+      routing: {
+        pi: {
+          upstream: 'http://127.0.0.1:4000/v1',
+          authStrategy: 'none',
+          wireProtocol: 'openai-responses',
+        },
+      },
+      models: {
+        pi: [
+          {
+            id: 'reasoner',
+            name: 'Reasoner',
+            contextWindow: 200_000,
+            efforts: ['low', 'high', 'xhigh'],
+            defaultEffort: 'high',
+          },
+        ],
+      },
+      connected: true,
+    } satisfies ProviderView;
+
+    expect(providerViewToCustomProviderConfig(provider).runtimes.pi?.models).toEqual([
+      {
+        id: 'reasoner',
+        name: 'Reasoner',
+        reasoning: true,
+        reasoningEfforts: ['low', 'high', 'xhigh'],
+      },
+    ]);
+  });
 });
 
 describe('appendDiscoveredCustomProviderModels', () => {
@@ -133,5 +278,135 @@ describe('appendDiscoveredCustomProviderModels', () => {
       ],
       addedIds: ['new'],
     });
+  });
+
+  it('carries the endpoint-declared contextWindow into appended models (#386)', () => {
+    const result = appendDiscoveredCustomProviderModels(
+      [],
+      [
+        { id: 'big', name: 'Big', contextWindow: 1_000_000 },
+        { id: 'plain', name: 'Plain' },
+        { id: 'bogus', name: 'Bogus', contextWindow: -1 },
+      ],
+    );
+    expect(result.models).toEqual([
+      { id: 'big', name: 'Big', contextWindow: 1_000_000, defaultEnabled: false },
+      { id: 'plain', name: 'Plain', defaultEnabled: false },
+      // 非法值不落盘,回落保守默认
+      { id: 'bogus', name: 'Bogus', defaultEnabled: false },
+    ]);
+  });
+});
+
+describe('custom provider credential lifecycle', () => {
+  it('submits create config and keys through one main-process mutation', async () => {
+    const create = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { createCustomProvider: create },
+      },
+    });
+
+    const config = {
+      id: 'new-provider',
+      name: 'New provider',
+      auth: { method: 'apiKey' as const },
+      runtimes: {
+        codex: {
+          baseUrl: 'https://api.example/v1',
+          models: [{ id: 'model', name: 'Model' }],
+        },
+      },
+    };
+    const keys = { codex: 'new-key' };
+    await createCustomProvider(config, keys);
+
+    expect(create).toHaveBeenCalledWith(config, keys);
+  });
+
+  it('surfaces an atomic main-process create failure', async () => {
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: {
+          createCustomProvider: vi.fn().mockRejectedValue(
+            new Error('credential staging failed'),
+          ),
+        },
+      },
+    });
+    const config = {
+      id: 'partial-create',
+      name: 'Partial create',
+      auth: { method: 'apiKey' as const },
+      runtimes: {
+        'claude-code': {
+          baseUrl: 'https://api.example/v1',
+          models: [{ id: 'claude-model', name: 'Claude model' }],
+        },
+        codex: {
+          baseUrl: 'https://api.example/v1',
+          models: [{ id: 'codex-model', name: 'Codex model' }],
+        },
+      },
+    };
+
+    await expect(createCustomProvider(config, {
+      'claude-code': 'first-key',
+      codex: 'second-key',
+    })).rejects.toThrow('credential staging failed');
+  });
+
+  it('submits replacement keys with the config through one main-process mutation', async () => {
+    const update = vi.fn(async () => ({ ok: true }));
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: { updateCustomProvider: update },
+      },
+    });
+
+    const config = {
+      id: 'switch-to-key',
+      name: 'Switch to key',
+      auth: { method: 'apiKey' as const },
+      runtimes: {
+        codex: {
+          baseUrl: 'https://api.example/v1',
+          models: [{ id: 'm1', name: 'M1' }],
+        },
+      },
+    };
+    await updateCustomProvider(
+      config,
+      { codex: 'replacement-key' },
+    );
+
+    expect(update).toHaveBeenCalledWith(config, { codex: 'replacement-key' });
+  });
+
+  it('surfaces an atomic main-process update failure', async () => {
+    vi.stubGlobal('window', {
+      electronAPI: {
+        maker: {
+          updateCustomProvider: vi.fn().mockRejectedValue(new Error('credential rollback failed')),
+        },
+      },
+    });
+
+    await expect(
+      updateCustomProvider(
+        {
+          id: 'switch-to-key',
+          name: 'Switch to key',
+          auth: { method: 'apiKey' },
+          runtimes: {
+            codex: {
+              baseUrl: 'https://api.example/v1',
+              models: [{ id: 'm1', name: 'M1' }],
+            },
+          },
+        },
+        { codex: 'replacement-key' },
+      ),
+    ).rejects.toThrow('credential rollback failed');
   });
 });

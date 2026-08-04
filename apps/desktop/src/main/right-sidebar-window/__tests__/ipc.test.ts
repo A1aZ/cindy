@@ -15,7 +15,7 @@ vi.mock('electron', () => {
 
 import { ipcMain, type BrowserWindow } from 'electron';
 
-import { MAKER_INVOKE } from '../../maker-ipc/channels.js';
+import { MAKER_INVOKE, MAKER_SEND } from '../../maker-ipc/channels.js';
 import { registerRsbWindowIpc } from '../ipc.js';
 import type { RsbWindowController } from '../controller.js';
 
@@ -61,6 +61,37 @@ beforeEach(() => {
 });
 
 describe('right-sidebar-window IPC', () => {
+  it('forwards the optional device-link origin in window context', () => {
+    const controller = makeController();
+    const { mainWebContents } = registerController(controller);
+    const setContextCall = (ipcMain.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      ([channel]) => channel === MAKER_SEND.RSB_WINDOW_SET_CONTEXT,
+    );
+    const setContext = setContextCall?.[1] as
+      | ((event: { sender: unknown }, payload: unknown) => void)
+      | undefined;
+    if (!setContext) throw new Error('RSB_WINDOW_SET_CONTEXT handler not registered');
+
+    setContext(
+      { sender: mainWebContents },
+      {
+        sessionId: 's1',
+        workdir: '/remote/workdir',
+        remoteHostId: null,
+        deviceLinkDeviceId: 'device-1',
+        available: true,
+      },
+    );
+
+    expect(controller.setContext).toHaveBeenCalledWith({
+      sessionId: 's1',
+      workdir: '/remote/workdir',
+      remoteHostId: null,
+      deviceLinkDeviceId: 'device-1',
+      available: true,
+    });
+  });
+
   it('preserves missing vs explicit null worker focus hints in ensure commands', async () => {
     const controller = makeController();
     const { handler, mainWebContents } = registerController(controller);
@@ -227,36 +258,6 @@ describe('right-sidebar-window IPC', () => {
     ).rejects.toThrow(/command.absPath required/);
   });
 
-  it('validates and forwards open-ghost-tab commands (ghostId 走身份卡同一校验)', async () => {
-    const controller = makeController();
-    const { handler, mainWebContents } = registerController(controller);
-
-    await handler(
-      { sender: mainWebContents },
-      {
-        command: { type: 'open-ghost-tab', sessionId: 's1', ghostId: 'tab-demo-a' },
-        allowOpen: true,
-      },
-    );
-    expect(controller.routeCommand).toHaveBeenCalledWith({
-      command: { type: 'open-ghost-tab', sessionId: 's1', ghostId: 'tab-demo-a' },
-      allowOpen: true,
-    });
-
-    // 野值(路径穿越形状 / 缺失)进不了命令通道。
-    for (const ghostId of ['../escape', 'UPPER', '', undefined]) {
-      await expect(
-        handler(
-          { sender: mainWebContents },
-          {
-            command: { type: 'open-ghost-tab', sessionId: 's1', ghostId },
-            allowOpen: true,
-          },
-        ),
-      ).rejects.toThrow(/ghostId/);
-    }
-  });
-
   it('drops commands from secondary renderers but still validates their payloads', async () => {
     const controller = makeController();
     const { handler } = registerController(controller);
@@ -278,6 +279,47 @@ describe('right-sidebar-window IPC', () => {
         { command: { type: 'open-terminal', sessionId: '' }, allowOpen: true },
       ),
     ).rejects.toThrow(/command.sessionId required/);
+  });
+
+  it('forwards userInitiated when present and omits it when absent', async () => {
+    const controller = makeController();
+    const { handler, mainWebContents } = registerController(controller);
+    const command = { type: 'open-web-browser', sessionId: 's1', url: 'https://x.test/' };
+
+    await handler({ sender: mainWebContents }, { command, allowOpen: true, userInitiated: false });
+    await handler({ sender: mainWebContents }, { command, allowOpen: true });
+
+    expect(controller.routeCommand).toHaveBeenNthCalledWith(1, {
+      command,
+      allowOpen: true,
+      userInitiated: false,
+    });
+    // 缺省不注入字段 —— controller 侧自己按 "!== false" 兜到用户手势语义。
+    expect(controller.routeCommand).toHaveBeenNthCalledWith(2, { command, allowOpen: true });
+
+    await expect(
+      handler({ sender: mainWebContents }, { command, allowOpen: true, userInitiated: 'yes' }),
+    ).rejects.toThrow(/request.userInitiated/);
+  });
+
+  it('open payload:缺省/空 = 用户手势;显式 false 透传;野值拒绝', async () => {
+    const controller = makeController();
+    registerController(controller);
+    const handlers = (
+      ipcMain as unknown as { __handlers: Map<string, (e: unknown, p: unknown) => unknown> }
+    ).__handlers;
+    const open = handlers.get(MAKER_INVOKE.RSB_WINDOW_OPEN);
+    if (!open) throw new Error('RSB_WINDOW_OPEN handler not registered');
+
+    open({}, undefined);
+    open({}, {});
+    open({}, { userInitiated: false });
+
+    expect(controller.open).toHaveBeenNthCalledWith(1, { userInitiated: true });
+    expect(controller.open).toHaveBeenNthCalledWith(2, { userInitiated: true });
+    expect(controller.open).toHaveBeenNthCalledWith(3, { userInitiated: false });
+
+    expect(() => open({}, { userInitiated: 1 })).toThrow(/options.userInitiated/);
   });
 
   it('requires an explicit allowOpen boolean in the IPC envelope', async () => {

@@ -53,6 +53,11 @@ import {
   readClaudeSessionRoute,
   resetClaudeSessionRouteRegistryForTest,
 } from '../claude-session-route-registry';
+import { setProviderOAuthTokenReader } from '../provider-route';
+import {
+  registerPiProxySession,
+  resetPiProxySessionsForTest,
+} from '../pi-proxy-session-auth';
 
 const SESSION_HEADER = { 'x-claude-code-session-id': 'sdk-grok' };
 
@@ -96,6 +101,30 @@ describe('cc routingTransform — xAI 会话的辅助请求回落默认路由 (i
     expect(decision).toBeNull();
   });
 
+  it('claude-haiku 分类器请求(provider-oauth spawn 带占位 x-api-key)→ 换网关 key,不 passthrough (#831)', () => {
+    // codex→cc 切换后的 openai/xai 来源会话:cc 子进程 env 里是占位 key,分类器请求带着它
+    // 落到 ② 段。占位 key 不是可用凭证,按「无凭证」处理换网关 key;此前被误判成
+    // gateway-spawn passthrough → 网关确定性 401 → 首次权限请求即 auto→ask 降级。
+    const transform = createModelRoutingTransform();
+    const decision = transform(
+      { model: 'claude-haiku-4-5-20251001' },
+      ctxWith({ ...SESSION_HEADER, 'x-api-key': 'xdt-provider-auth-placeholder-key' }),
+    );
+    expect(decision).toEqual({
+      headerOverride: { 'x-api-key': 'sk-gw', authorization: 'Bearer sk-gw' },
+    });
+  });
+
+  it('占位 x-api-key 且无网关 key → 维持 passthrough(与改动前行为一致,上游 401)', () => {
+    gatewayKey = null;
+    const transform = createModelRoutingTransform();
+    const decision = transform(
+      { model: 'claude-haiku-4-5-20251001' },
+      ctxWith({ ...SESSION_HEADER, 'x-api-key': 'xdt-provider-auth-placeholder-key' }),
+    );
+    expect(decision).toBeNull();
+  });
+
   it('claude-haiku 分类器请求(无网关 key 的 oauth-spawn)→ 直连 Anthropic 订阅', () => {
     gatewayKey = null;
     const transform = createModelRoutingTransform();
@@ -123,5 +152,77 @@ describe('cc routingTransform — xAI 会话的辅助请求回落默认路由 (i
       ctxWith({ ...SESSION_HEADER, authorization: 'Bearer sk-ant-oat01' }),
     );
     expect(readClaudeSessionRoute('sess-grok')).toBe('gateway');
+  });
+});
+
+describe('pi routingTransform — xdt session header selects the Pi provider route', () => {
+  afterEach(() => {
+    clearSessionProvider('sess-pi');
+    setProviderOAuthTokenReader(() => null);
+    resetPiProxySessionsForTest();
+  });
+
+  it('routes an Anthropic Pi request with host-managed OAuth and strips Pi placeholder auth', async () => {
+    setClaudeProxyGatewayKeyReader(() => 'sk-gw');
+    setSessionProvider('sess-pi', 'anthropic');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('pi-claude-token') : null,
+    );
+    registerPiProxySession('sess-pi', 'session-secret');
+    const decision = createModelRoutingTransform()(
+      { model: 'claude-opus-5' },
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'session-secret',
+        'x-api-key': 'cindy-pi-provider-auth-placeholder',
+      }),
+    );
+    await expect(Promise.resolve(decision)).resolves.toEqual({
+      upstreamOverride: 'https://api.anthropic.com',
+      headerOverride: {
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        authorization: 'Bearer pi-claude-token',
+      },
+      headerDelete: [
+        'x-api-key',
+        'x-cindy-pi-session-id',
+        'x-cindy-pi-session-token',
+      ],
+    });
+  });
+
+  it('rejects a forged session id before provider credentials can be selected', async () => {
+    setSessionProvider('sess-pi', 'anthropic');
+    registerPiProxySession('sess-pi', 'real-secret');
+    const decision = await createModelRoutingTransform()(
+      { model: 'claude-opus-5' },
+      ctxWith({
+        'x-cindy-pi-session-id': 'sess-pi',
+        'x-cindy-pi-session-token': 'wrong-secret',
+      }),
+    );
+    expect(decision).toEqual({ localHandler: expect.any(Function) });
+
+    const response = {
+      status: 0,
+      body: '',
+      writeHead(status: number) { this.status = status; },
+      end(body: string) { this.body = body; },
+    };
+    await decision?.localHandler?.({ res: response } as never);
+    expect(response.status).toBe(401);
+    expect(response.body).toContain('invalid_pi_session_token');
+  });
+
+  it('never forwards an orphaned internal Pi token header', async () => {
+    const decision = await Promise.resolve(createModelRoutingTransform()(
+      { model: 'claude-opus-5' },
+      ctxWith({ 'x-cindy-pi-session-token': 'orphaned-secret' }),
+    ));
+    expect(decision).toMatchObject({
+      headerDelete: ['x-cindy-pi-session-id', 'x-cindy-pi-session-token'],
+    });
+    expect(decision?.headerOverride).not.toHaveProperty('x-cindy-pi-session-token');
   });
 });

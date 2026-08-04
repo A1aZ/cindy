@@ -19,6 +19,7 @@ import {
   type ImDefaultSettings,
   isImDefaultAgentKind,
   isImDefaultEffort,
+  isImDefaultPermissionMode,
 } from '../../shared/imDefaultSettings.js';
 import { desktopMakerLogger } from '../maker-host/logger-adapter.js';
 import {
@@ -28,7 +29,7 @@ import {
 import { claimLegacyImPath, ownerScopedImUserDataPath } from './ownerScopedStorage.js';
 
 const log = desktopMakerLogger.child('im-default-settings-store');
-const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION = 3;
 
 interface ImDefaultSettingsDocument {
   schemaVersion: typeof SETTINGS_SCHEMA_VERSION;
@@ -58,6 +59,9 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
   const legacySettings = legacyAgentSettings(r);
   return {
     agentKind,
+    permissionMode: isImDefaultPermissionMode(r.permissionMode)
+      ? r.permissionMode
+      : IM_DEFAULT_SETTINGS.permissionMode,
     agents: {
       'claude-code': normalizeAgentSettings(
         'claude-code',
@@ -67,8 +71,18 @@ function normalizeSettings(raw: unknown): ImDefaultSettings {
         'codex',
         rawAgentOrLegacy(rawAgents, 'codex', agentKind, legacySettings),
       ),
+      // 键序必须与 IM_DEFAULT_SETTINGS.agents 一致:legacy 检测(信号 4)靠
+      // JSON.stringify 与系统默认整体比对,键序漂移会让检测失灵。
+      pi: normalizeAgentSettings(
+        'pi',
+        rawAgentOrLegacy(rawAgents, 'pi', agentKind, legacySettings),
+      ),
     },
   };
+}
+
+function normalizeChannelSettings(raw: unknown): ImDefaultSettings {
+  return normalizeSettings(raw);
 }
 
 function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
@@ -117,7 +131,10 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       global: cloneSettings(legacy),
       channels: Object.fromEntries(
-        IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [channel, cloneSettings(legacy)]),
+        IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
+          channel,
+          normalizeChannelSettings(legacy),
+        ]),
       ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
     };
   }
@@ -129,7 +146,7 @@ function normalizeDocument(raw: unknown): ImDefaultSettingsDocument {
     channels: Object.fromEntries(
       IM_DEFAULT_SETTINGS_CHANNELS.map((channel) => [
         channel,
-        normalizeSettings(rawChannels[channel]),
+        normalizeChannelSettings(rawChannels[channel]),
       ]),
     ) as Record<ImDefaultSettingsChannel, ImDefaultSettings>,
   };
@@ -235,6 +252,12 @@ export function resetImDefaultSettings(): ImDefaultSettings {
   return store.reset().global;
 }
 
+export function resetImDefaultSettingsGlobal(): OverrideSettingsState<ImDefaultSettings> {
+  store.writePatch({ global: cloneSettings(IM_DEFAULT_SETTINGS) });
+  log.info('im default settings reset', { channel: 'global' });
+  return readImDefaultSettingsState();
+}
+
 export function resetImDefaultSettingsChannel(
   channel: ImDefaultSettingsChannel,
 ): OverrideSettingsState<ImDefaultSettings> {
@@ -301,8 +324,11 @@ function settingsOverrides(
 ): Record<string, unknown> {
   const overrides: Record<string, unknown> = {};
   if (value.agentKind !== defaults.agentKind) overrides.agentKind = value.agentKind;
+  if (value.permissionMode !== defaults.permissionMode) {
+    overrides.permissionMode = value.permissionMode;
+  }
   const agents: Partial<Record<ImDefaultAgentKind, ImDefaultAgentSettings>> = {};
-  for (const agentKind of ['claude-code', 'codex'] as const) {
+  for (const agentKind of ['claude-code', 'codex', 'pi'] as const) {
     if (!agentSettingsEqual(value.agents[agentKind], defaults.agents[agentKind])) {
       agents[agentKind] = value.agents[agentKind];
     }
@@ -314,7 +340,8 @@ function settingsOverrides(
 function settingsCustomizedKeys(value: ImDefaultSettings, defaults: ImDefaultSettings): string[] {
   const keys: string[] = [];
   if (value.agentKind !== defaults.agentKind) keys.push('agentKind');
-  for (const agentKind of ['claude-code', 'codex'] as const) {
+  if (value.permissionMode !== defaults.permissionMode) keys.push('permissionMode');
+  for (const agentKind of ['claude-code', 'codex', 'pi'] as const) {
     if (!agentSettingsEqual(value.agents[agentKind], defaults.agents[agentKind])) {
       keys.push(`agents.${agentKind}`);
     }
@@ -329,9 +356,11 @@ function agentSettingsEqual(a: ImDefaultAgentSettings, b: ImDefaultAgentSettings
 function cloneSettings(settings: ImDefaultSettings): ImDefaultSettings {
   return {
     agentKind: settings.agentKind,
+    permissionMode: settings.permissionMode,
     agents: {
       'claude-code': { ...settings.agents['claude-code'] },
       codex: { ...settings.agents.codex },
+      pi: { ...settings.agents.pi },
     },
   };
 }

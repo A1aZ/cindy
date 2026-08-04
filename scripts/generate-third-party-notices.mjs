@@ -5,9 +5,10 @@
  * 生成全工程及桌面端分发产物的第三方开源声明文件 THIRD-PARTY-NOTICES.txt。
  *
  * 范围:根目录及所有 pnpm workspace 包的生产依赖闭包(dependencies +
- * optionalDependencies,递归;workspace 内部包只穿透不收录),外加随安装包
- * 分发的非 npm 资产(ripgrep / Codex CLI / Electron / Android Platform-Tools /
- * vendored 代码)的手工条目。
+ * optionalDependencies,递归;workspace 内部包只穿透不收录),外加产品分发的
+ * 非 npm 资产(安装包内的 ripgrep / Electron，以及运行时下载的 Codex CLI /
+ * pi coding agent，另含
+ * Android Platform-Tools / vendored 代码)的手工条目。
  *
  * 输出(均应提交进仓库,但依赖范围不同):
  *   - <repo>/docs/legal/notices/ (全工程、各分发产物及 SBOM)
@@ -581,6 +582,30 @@ function bundledComponent(component) {
   return { ecosystem: "bundled", ...component };
 }
 
+function buildProviderBrandingEntries() {
+  const entries = [
+    bundledComponent({
+      name: "Lobe Icons SVG paths (vendored)",
+      version: "5.14.0",
+      license: "MIT",
+      url: "https://github.com/lobehub/lobe-icons/tree/v5.14.0",
+      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2023 LobeHub"),
+    }),
+    bundledComponent({
+      name: "LiteLLM mascot SVG path (adapted)",
+      version: "adapted",
+      license: "MIT",
+      url: "https://github.com/BerriAI/litellm-docs/blob/main/static/img/logo.svg",
+      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2026 Berri AI"),
+    }),
+  ];
+  return entries.sort(
+    (a, b) =>
+      (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) ||
+      (a.url < b.url ? -1 : a.url > b.url ? 1 : 0),
+  );
+}
+
 function readBundledLicense(relativePath) {
   return normalizeNoticeText(
     fs.readFileSync(path.join(REPO_ROOT, relativePath), "utf8"),
@@ -588,7 +613,7 @@ function readBundledLicense(relativePath) {
 }
 
 /**
- * 桌面三平台共有的随包分发组件声明。
+ * 桌面三平台共有的非 npm 分发组件声明（含安装包内资产与运行时受管下载资产）。
  *
  * @param sharpPackageNames sharp 预编译包名,可传单个或数组。该包的 README 与
  *   versions.json 是 per-arch 的(见下方 sharp 段),所以一个平台声明覆盖多个架构时
@@ -611,10 +636,10 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
     }),
   );
 
-  // OpenAI Codex CLI — 随包分发的 agent 二进制
+  // OpenAI Codex CLI — 运行时从 CDN 下载到 userData，不进入安装包
   entries.push(
     bundledComponent({
-      name: "OpenAI Codex CLI (bundled binary)",
+      name: "OpenAI Codex CLI (runtime-downloaded binary)",
       version: readToolVersion("codex"),
       license: "Apache-2.0",
       url: "https://github.com/openai/codex",
@@ -622,6 +647,17 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
         (apacheText ||
           "Apache License 2.0 — full text: https://www.apache.org/licenses/LICENSE-2.0") +
         "\n\nCopyright (c) OpenAI",
+    }),
+  );
+
+  // pi coding agent — 运行时从 CDN 下载到 userData，不进入安装包
+  entries.push(
+    bundledComponent({
+      name: "pi coding agent (runtime-downloaded binary)",
+      version: readToolVersion("pi"),
+      license: "MIT",
+      url: "https://github.com/earendil-works/pi",
+      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2025 Mario Zechner"),
     }),
   );
 
@@ -769,16 +805,22 @@ function buildDesktopCommonEntries(apacheText, sharpPackageNames) {
     }),
   );
 
-  // ProviderLogoMark 中随桌面包分发的 xAI / 智谱 SVG 路径。
+  // Tencent's public iLink client is the pinned protocol reference for the
+  // Cindy-owned, host-agnostic implementation under packages/wechat-ilink.
   entries.push(
     bundledComponent({
-      name: "Lobe Icons SVG paths (vendored)",
-      version: "5.14.0",
+      name: "Tencent openclaw-weixin protocol sources (adapted)",
+      version: "2.4.6",
       license: "MIT",
-      url: "https://github.com/lobehub/lobe-icons/tree/v5.14.0",
-      licenseText: MIT_TEXT("MIT License\n\nCopyright (c) 2023 LobeHub"),
+      url: "https://github.com/Tencent/openclaw-weixin/tree/v2.4.6",
+      licenseText: readBundledLicense(
+        "packages/wechat-ilink/LICENSE.tencent-openclaw-weixin",
+      ),
     }),
   );
+
+  // ProviderLogoMark / MobileProviderMark 共享的上游 SVG path，桌面与移动端均随包分发。
+  entries.push(...buildProviderBrandingEntries());
 
   return entries;
 }
@@ -813,6 +855,7 @@ function buildWindowsEntries() {
 
 function buildMobileEntries(apacheText, platform) {
   const entries = [
+    ...buildProviderBrandingEntries(),
     bundledComponent({
       name: "JetBrains Mono fonts",
       version: "bundled",
@@ -890,12 +933,16 @@ function buildOutput({
 
   // —— Section 1: 非 npm 组件 ——
   push("=".repeat(78));
-  push("SECTION 1: Bundled components (non-npm)");
+  push("SECTION 1: Non-npm components");
   push("=".repeat(78));
   for (const e of manualEntries) {
+    const versionSuffix = `(${e.version})`;
+    const heading = e.name.endsWith(versionSuffix)
+      ? e.name
+      : `${e.name} ${e.version}`;
     push();
     push("-".repeat(78));
-    push(`${e.name} ${e.version}`);
+    push(heading);
     push(`License: ${e.license}`);
     if (e.url) push(`Source: ${e.url}`);
     push("-".repeat(78));
@@ -1183,7 +1230,7 @@ function auditArtifact(label, closure, manualEntries) {
     throw new Error(lines.join("\n"));
   }
   console.log(
-    `${label}: ${closure.packages.length} package dependencies + ${manualEntries.length} bundled components`,
+    `${label}: ${closure.packages.length} package dependencies + ${manualEntries.length} non-npm components`,
   );
 }
 

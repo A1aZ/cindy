@@ -34,6 +34,7 @@ vi.mock('../../appSessionState', () => ({
 
 import {
   createProviderSecretStore,
+  readCustomProviderKeyForMutation,
   readGhostSecretTailFromIo,
   setProviderSecretsClearedListener,
   type SecretStorageIo,
@@ -41,6 +42,7 @@ import {
 import {
   providerSecretStorageKey,
   customMcpSecretStorageKey,
+  customProviderHeaderStorageKey,
   customProviderSecretStorageKey,
   providerOAuthStorageKey,
   ghostSecretStorageKey,
@@ -92,6 +94,23 @@ describe('providerSecrets registry', () => {
     expect(isRendererAccessibleSafeStorageKey(customMcpSecretStorageKey('example'))).toBe(true);
   });
 
+  it('keeps the Gemini API key behind its dedicated main-only IPC boundary', () => {
+    expect(isRendererAccessibleSafeStorageKey(providerSecretStorageKey('gemini'))).toBe(false);
+    expect(isRendererAccessibleSafeStorageKey('PROVIDER_KEY_GEMINI')).toBe(false);
+  });
+
+  it('keeps the OpenAI images API key behind its dedicated main-only IPC boundary', () => {
+    expect(isRendererAccessibleSafeStorageKey(providerSecretStorageKey('openai-images'))).toBe(false);
+    expect(isRendererAccessibleSafeStorageKey('PROVIDER_KEY_OPENAI_IMAGES')).toBe(false);
+  });
+
+  it('keeps custom-provider header blobs behind the main-only boundary', () => {
+    const key = customProviderHeaderStorageKey('my_or', 'pi');
+    expect(key).toBe('provider_headers_my_or_pi');
+    expect(isRendererAccessibleSafeStorageKey(key)).toBe(false);
+    expect(() => customProviderHeaderStorageKey('bad/path', 'pi')).toThrow(/illegal characters/);
+  });
+
   it('动态键名构造前校验片段字符集,路径逃逸类 id 直接抛错', () => {
     expect(providerOAuthStorageKey('acme-1')).toBe('provider_oauth_acme-1');
     expect(customProviderSecretStorageKey('my_or', 'claude-code')).toBe('provider_key_my_or_claude-code');
@@ -139,6 +158,21 @@ describe('providerSecrets registry', () => {
     const valid = /^[a-zA-Z0-9_-]+$/;
     for (const id of PROVIDER_SECRET_IDS) {
       expect(providerSecretStorageKey(id)).toMatch(valid);
+    }
+  });
+
+  it('strict custom-provider snapshot treats a missing file as absent when encryption is unavailable', () => {
+    const previousMode = sessionState.mode;
+    const previousOwnerId = sessionState.dataOwnerId;
+    sessionState.mode = 'cloud';
+    sessionState.dataOwnerId = `missing-key-owner-${process.pid}`;
+    try {
+      expect(
+        readCustomProviderKeyForMutation(`missing-key-provider-${process.pid}`, 'codex'),
+      ).toBeNull();
+    } finally {
+      sessionState.mode = previousMode;
+      sessionState.dataOwnerId = previousOwnerId;
     }
   });
 });

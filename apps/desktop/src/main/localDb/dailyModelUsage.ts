@@ -4,17 +4,19 @@ import {
   addRegionalMoney,
   legacyUsdMoney,
   normalizeRegionalMoney,
+  zeroUsageMoney,
   type RegionalMoney,
 } from '../../shared/regionalMoney.js';
 import { dailyModelUsage } from './schema.js';
 import { localDayKey } from './dailySpend.js';
 import { getDbClient } from './client/current.js';
 import { createLogger } from '../logger.js';
+import { currentLedgerCurrency } from '../usage/ledgerCurrency.js';
 
 const log = createLogger('localDb/dailyModelUsage');
 
 export interface DailyModelUsageDelta {
-  agentKind: 'claude-code' | 'codex';
+  agentKind: 'claude-code' | 'codex' | 'pi';
   model: string;
   money?: RegionalMoney | null;
   inputTokensDelta: number;
@@ -42,7 +44,19 @@ export async function incrementDailyModelUsage(
   delta: DailyModelUsageDelta,
   ts: number = Date.now(),
 ): Promise<void> {
+  // 每 (天, agent, 模型, 币种) 一行,各币种各自累加。异币种金额不再被丢弃,也不再覆盖
+  // 当天该模型的已有累计 —— 账本币种会因为换号、跨租户、上游漏发币种而切换,那两种
+  // 做法都会静默丢账。
   const money = delta.money ? normalizeRegionalMoney(delta.money) : undefined;
+  const ledgerCurrency = currentLedgerCurrency();
+  if (money && money.currency !== ledgerCurrency) {
+    log.warn(
+      `daily model usage currency differs from ledger: ${money.currency} != ${ledgerCurrency}; ` +
+        'recording into its own currency row',
+    );
+  }
+  // 纯 token 行(无金额)归到当前账本币种,让它和同轮的金额落在同一行。
+  const rowCurrency = money?.currency ?? ledgerCurrency;
   const inputTokens = sanitizeTokens(delta.inputTokensDelta);
   const outputTokens = sanitizeTokens(delta.outputTokensDelta);
   const cacheReadTokens = sanitizeTokens(delta.cacheReadTokensDelta);
@@ -60,12 +74,6 @@ export async function incrementDailyModelUsage(
   const day = localDayKey(ts);
   const model = delta.model || 'unknown';
   const db = getDbClient().drizzle;
-  // 单币种行:币种守卫必须在同一条 upsert 里用 CASE 表达 —— 先查再写有
-  // TOCTOU 窗口,并发首写会把不同币种的裸数字加进同一行。冲突时原子地只弃
-  // 金额,token 增量照记(throw 会连本轮 token 统计一起丢,损失更大)。
-  const sameCurrency = money
-    ? sql`(${dailyModelUsage.costCurrency} IS NULL OR ${dailyModelUsage.costCurrency} = ${money.currency})`
-    : sql`0`;
   await db
     .insert(dailyModelUsage)
     .values({
@@ -73,7 +81,7 @@ export async function incrementDailyModelUsage(
       agentKind: delta.agentKind,
       model,
       costAmount: money?.amount ?? 0,
-      costCurrency: money?.currency ?? null,
+      costCurrency: rowCurrency,
       costIsApproximate: money?.approximate ?? false,
       inputTokens,
       outputTokens,
@@ -86,11 +94,11 @@ export async function incrementDailyModelUsage(
         dailyModelUsage.day,
         dailyModelUsage.agentKind,
         dailyModelUsage.model,
+        dailyModelUsage.costCurrency,
       ],
       set: {
-        costAmount: sql`CASE WHEN ${sameCurrency} THEN ${dailyModelUsage.costAmount} + ${money?.amount ?? 0} ELSE ${dailyModelUsage.costAmount} END`,
-        costCurrency: sql`CASE WHEN ${sameCurrency} THEN ${money?.currency ?? null} ELSE ${dailyModelUsage.costCurrency} END`,
-        costIsApproximate: sql`CASE WHEN ${sameCurrency} THEN (${dailyModelUsage.costIsApproximate} OR ${money?.approximate ? 1 : 0}) ELSE ${dailyModelUsage.costIsApproximate} END`,
+        costAmount: sql`${dailyModelUsage.costAmount} + ${money?.amount ?? 0}`,
+        costIsApproximate: sql`(${dailyModelUsage.costIsApproximate} OR ${money?.approximate ? 1 : 0})`,
         inputTokens: sql`${dailyModelUsage.inputTokens} + ${inputTokens}`,
         outputTokens: sql`${dailyModelUsage.outputTokens} + ${outputTokens}`,
         cacheReadTokens: sql`${dailyModelUsage.cacheReadTokens} + ${cacheReadTokens}`,
@@ -99,30 +107,11 @@ export async function incrementDailyModelUsage(
       },
     })
     .run();
-  if (money) {
-    const row = await db
-      .select({ costCurrency: dailyModelUsage.costCurrency })
-      .from(dailyModelUsage)
-      .where(
-        sql`${dailyModelUsage.day} = ${day}
-          AND ${dailyModelUsage.agentKind} = ${delta.agentKind}
-          AND ${dailyModelUsage.model} = ${model}`,
-      )
-      .get();
-    if (row?.costCurrency && row.costCurrency !== money.currency) {
-      log.warn(
-        `daily model usage currency conflict on ${day}/${delta.agentKind}/${model}: ` +
-          `keeping ${row.costCurrency}, dropped ${money.currency} amount`,
-      );
-    }
-  }
 }
 
-export async function getModelUsageSince(
-  sinceDayKey: string,
-): Promise<DailyModelUsageRow[]> {
-  const rows = await getDbClient().drizzle
-    .select({
+export async function getModelUsageSince(sinceDayKey: string): Promise<DailyModelUsageRow[]> {
+  const rows = await getDbClient()
+    .drizzle.select({
       day: dailyModelUsage.day,
       agentKind: dailyModelUsage.agentKind,
       model: dailyModelUsage.model,
@@ -158,7 +147,7 @@ export async function getModelUsageSince(
           ? legacy.currency === current.currency
             ? addRegionalMoney([legacy, current])
             : current
-          : current ?? legacy,
+          : (current ?? (legacy.amount > 0 ? legacy : zeroUsageMoney())),
       inputTokens: row.inputTokens,
       outputTokens: row.outputTokens,
       cacheReadTokens: row.cacheReadTokens,

@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
   GHOST_CARD_ACTION_ID_RE,
+  GHOST_CINDY_DEPOSIT_QUOTA_BYTES,
+  GHOST_SLOTS,
   deriveGhostSessionContext,
   diffGhostPermissionItems,
   ghostContentKeys,
@@ -9,6 +11,7 @@ import {
   ghostLocalePathFor,
   ghostNetworkHostMatches,
   ghostPanelKind,
+  ghostPermissionBaselineKey,
   ghostPreviewUrlAllowed,
   parseGhostNodeChildToHostMessage,
   ghostPartition,
@@ -598,6 +601,33 @@ describe('ghost · 清单校验', () => {
     }, parsed.manifest).ok).toBe(false);
   });
 
+  it('locale 外部 key 累加器使用无原型字典，JSON 自有 __proto__ 属性不会丢失', () => {
+    const manifest: GhostManifest = {
+      schemaVersion: 2,
+      id: 'defensive-locale',
+      name: 'Defensive locale',
+      version: '1.0.0',
+      kind: 'chip',
+      entry: 'main.js',
+      slots: ['panel'],
+      panel: { html: 'panel.html' },
+      setup: {
+        requires: [{ anyOf: [{ kind: 'kv', key: '__proto__', label: 'Base label' }] }],
+      },
+    };
+    const rawLocale = JSON.parse('{"setup":{"kv":{"__proto__":{"label":"Localized label"}}}}');
+    const resource = validateGhostManifestLocaleResource(rawLocale, manifest);
+    expect(resource.ok).toBe(true);
+    if (!resource.ok) return;
+    expect(Object.getPrototypeOf(resource.resource.setup?.kv)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(resource.resource.setup?.kv, '__proto__')).toBe(true);
+    expect(resolveGhostManifestLocale(manifest, resource.resource).setup?.requires[0]?.anyOf[0]).toEqual({
+      kind: 'kv',
+      key: '__proto__',
+      label: 'Localized label',
+    });
+  });
+
   it('icon:可选包内相对路径,扩展名白名单;非法路径/扩展名 → 拒', () => {
     const base = validateGhostManifest({ ...goodManifest(), icon: 'assets/icon.png' });
     expect(base.ok && (base as { ok: true; manifest: GhostManifest }).manifest.icon).toBe('assets/icon.png');
@@ -681,7 +711,7 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     expect(diff.removed).toHaveLength(0);
   });
 
-  it('agent 详单必须与槽成对，且目前只接受 background: true', () => {
+  it('agent 详单必须与槽成对，且只接受 background / errand 两项加档', () => {
     expect(
       validateGhostManifest({
         ...goodChipManifest(),
@@ -707,6 +737,56 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
         ...goodChipManifest(),
         slots: ['panel', 'agent'],
         agent: { background: true, command: 'hidden' },
+      }).ok,
+    ).toBe(false);
+  });
+
+  it('agent.errand 派活加档:单列高风险权限,可与 background 并存(2026-07-31)', () => {
+    const errand = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'agent'],
+      agent: { errand: true },
+    });
+    expect(errand.ok).toBe(true);
+    if (!errand.ok) return;
+    expect(errand.manifest.agent).toEqual({ errand: true });
+    expect(ghostPermissionItems(errand.manifest)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'agent:errand',
+          kind: 'agent',
+          labelKey: 'agentErrand',
+          detailKey: 'agentErrandDetail',
+        }),
+      ]),
+    );
+
+    const both = validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'agent'],
+      agent: { background: true, errand: true },
+    });
+    expect(both.ok).toBe(true);
+    if (!both.ok) return;
+    expect(both.manifest.agent).toEqual({ background: true, errand: true });
+    expect(ghostPermissionItems(both.manifest).map((item) => item.key)).toEqual(
+      expect.arrayContaining(['agent:user-action', 'agent:background', 'agent:errand']),
+    );
+
+    // errand: false 与 background 双双非 true = 详单没意义,拒(应省略字段)。
+    expect(
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['panel', 'agent'],
+        agent: { errand: false },
+      }).ok,
+    ).toBe(false);
+    // errand 非布尔 → 拒。
+    expect(
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['panel', 'agent'],
+        agent: { errand: 'yes' },
       }).ok,
     ).toBe(false);
   });
@@ -933,6 +1013,155 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
     ).toBe(false);
   });
 
+  it('@ 资源入口只可引用一个已声明工具，并按已知字段收窄', () => {
+    const base = {
+      ...goodChipManifest(),
+      slots: ['panel', 'tool'],
+      tools: [{ name: 'search_issues', description: '只读搜索议题' }],
+    };
+    const valid = validateGhostManifest({
+      ...base,
+      atResourceProvider: { tool: 'search_issues' },
+    });
+    expect(valid.ok).toBe(true);
+    expect(valid.ok && valid.manifest.atResourceProvider).toEqual({ tool: 'search_issues' });
+
+    const missing = validateGhostManifest({
+      ...base,
+      atResourceProvider: { tool: 'missing' },
+    });
+    const extraField = validateGhostManifest({
+      ...base,
+      atResourceProvider: { tool: 'search_issues', label: 'Issues' },
+    });
+    expect(missing.ok).toBe(true);
+    expect(extraField.ok).toBe(true);
+    expect(missing.ok ? missing.manifest.atResourceProvider : null).toBeUndefined();
+    expect(extraField.ok ? extraField.manifest.atResourceProvider : null).toBeUndefined();
+  });
+
+  it('忽略旧 manifest 中无效的同名未知字段', () => {
+    const base = {
+      ...goodChipManifest(),
+      slots: ['panel', 'tool'],
+      tools: [{ name: 'search_issues', description: '只读搜索议题' }],
+    };
+    for (const legacyValue of [
+      null,
+      true,
+      'legacy',
+      [],
+      {},
+      { label: 'Issues' },
+    ]) {
+      const result = validateGhostManifest({
+        ...base,
+        atResourceProvider: legacyValue,
+      });
+      expect(result.ok, JSON.stringify(legacyValue)).toBe(true);
+      expect(result.ok && result.manifest.atResourceProvider).toBeUndefined();
+    }
+  });
+
+  it('@ 资源入口复用 tool 槽，不新增硬白名单 slot', () => {
+    expect(GHOST_SLOTS).not.toContain('at-resource');
+    expect(validateGhostManifest({
+      ...goodChipManifest(),
+      slots: ['panel', 'tool', 'at-resource'],
+      tools: [{ name: 'search_issues', description: '只读搜索议题' }],
+      atResourceProvider: { tool: 'search_issues' },
+    }).ok).toBe(false);
+  });
+
+  it('@ 资源入口复用原工具执行权，但作为新增调用入口单独披露', () => {
+    const raw = {
+      ...goodChipManifest(),
+      slots: ['panel', 'tool'],
+      tools: [{ name: 'search_issues', description: '只读搜索议题' }],
+    };
+    const before = validateGhostManifest(raw);
+    const after = validateGhostManifest({
+      ...raw,
+      atResourceProvider: { tool: 'search_issues' },
+    });
+    expect(before.ok && after.ok).toBe(true);
+    if (!before.ok || !after.ok) return;
+    expect(ghostPermissionBaselineKey(after.manifest)).not.toBe(
+      ghostPermissionBaselineKey(before.manifest),
+    );
+    expect(diffGhostPermissionItems(before.manifest, after.manifest).added).toEqual([
+      expect.objectContaining({
+        key: 'at-resource:search_issues',
+        kind: 'at-resource',
+        labelKey: 'atResourceProvider',
+      }),
+    ]);
+  });
+
+  it('会进入 locale 对象索引的清单 key 统一拒绝对象保留键名', () => {
+    const reservedKeys = ['__proto__', 'constructor', 'prototype'];
+    const withoutPanel = (manifest: Record<string, unknown>) => {
+      const result = { ...manifest };
+      delete result.panel;
+      return result;
+    };
+
+    for (const key of reservedKeys) {
+      expect(validateGhostManifest(withoutPanel({
+        ...goodManifest(),
+        slots: ['tool'],
+        tools: [{ name: key, description: 'Reserved tool' }],
+      })).ok, `tool ${key}`).toBe(false);
+
+      expect(validateGhostManifest({
+        ...goodManifest(),
+        settingsHtml: 'settings.html',
+        slots: ['panel', 'network'],
+        network: {
+          hosts: ['api.example.com'],
+          secrets: [{
+            key,
+            label: 'Reserved secret',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+          }],
+        },
+      }).ok, `network secret ${key}`).toBe(false);
+
+      expect(validateGhostManifest({
+        ...goodManifest(),
+        settingsHtml: 'settings.html',
+        slots: ['panel', 'network'],
+        network: {
+          hosts: [],
+          connections: [{
+            key,
+            label: 'Reserved connection',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+          }],
+        },
+      }).ok, `network connection ${key}`).toBe(false);
+
+      expect(validateGhostManifest({
+        ...goodManifest(),
+        settingsHtml: 'settings.html',
+        slots: ['panel', 'node'],
+        node: {
+          entry: 'node/worker.cjs',
+          protocol: 'json-rpc-stdio',
+          secretBindings: [{ key, label: 'Reserved node secret', methods: ['run'] }],
+        },
+      }).ok, `node secret ${key}`).toBe(false);
+
+      expect(validateGhostManifest(JSON.parse(JSON.stringify({
+        ...goodManifest(),
+        settingsHtml: 'settings.html',
+        setup: {
+          requires: [{ anyOf: [{ kv: key, label: 'Reserved setup value' }] }],
+        },
+      }))).ok, `setup kv ${key}`).toBe(false);
+    }
+  });
+
   it('panel.html 与 panel 槽必须成对出现', () => {
     // 有 html 无 panel 槽
     expect(validateGhostManifest({ ...goodChipManifest(), slots: ['model'] }).ok).toBe(false);
@@ -1095,12 +1324,70 @@ describe('ghost · cindy 能力详单校验(字段旧名 model 别名兼容)', (
       {},
       { image: ['generate', 'generate'] },
       'image',
+      { media: ['upload'] }, // media 类目只有 deposit
+      { media: [] },
     ]) {
       const v = validateGhostManifest(chipWithModel(bad));
       expect(v.ok, JSON.stringify(bad)).toBe(false);
     }
   });
 
+  // #784:media 类目落位必须独立成键——曾经的 `else cindy.video = …` 兜底
+  // 分支会把新类目的动作静默塞进 video,校验层还照样放行。
+  it('media 类目落进 cindy.media,不串到 video', () => {
+    const v = validateGhostManifest(chipWithModel({ media: ['deposit'] }));
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.ok && v.manifest.cindy).toEqual({ media: ['deposit'] });
+    expect(v.ok && v.manifest.cindy?.video).toBeUndefined();
+  });
+
+  it('三类目可同时声明', () => {
+    const v = validateGhostManifest(
+      chipWithModel({ image: ['generate', 'edit'], video: ['edit'], media: ['deposit'] }),
+    );
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.ok && v.manifest.cindy).toEqual({
+      image: ['generate', 'edit'],
+      video: ['edit'],
+      media: ['deposit'],
+    });
+  });
+
+  // 2026-07-31 快问快答:text 类目独立落位(同 #784 的落位纪律),权限清单
+  // 单独成行(cindy:text.oneshot,带固定说明)。
+  it('text 类目落进 cindy.text,并生成 cindy:text.oneshot 权限行', () => {
+    const v = validateGhostManifest(chipWithModel({ text: ['oneshot'] }));
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    if (!v.ok) return;
+    expect(v.manifest.cindy).toEqual({ text: ['oneshot'] });
+    expect(v.manifest.cindy?.image).toBeUndefined();
+    expect(v.manifest.cindy?.video).toBeUndefined();
+    expect(ghostPermissionItems(v.manifest)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          key: 'cindy:text.oneshot',
+          kind: 'cindy',
+          labelKey: 'cindyTextOneshot',
+          detailKey: 'cindyTextOneshotDetail',
+        }),
+      ]),
+    );
+  });
+
+  it('text 类目未知动作 / 空数组 → 拒;四类目可同时声明', () => {
+    expect(validateGhostManifest(chipWithModel({ text: ['complete'] })).ok).toBe(false);
+    expect(validateGhostManifest(chipWithModel({ text: [] })).ok).toBe(false);
+    const v = validateGhostManifest(
+      chipWithModel({ image: ['generate'], video: ['edit'], media: ['deposit'], text: ['oneshot'] }),
+    );
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    expect(v.ok && v.manifest.cindy).toEqual({
+      image: ['generate'],
+      video: ['edit'],
+      media: ['deposit'],
+      text: ['oneshot'],
+    });
+  });
 });
 
 describe('ghost · model → cindy 旧名兼容(2026-07-11 更名)', () => {
@@ -1139,9 +1426,9 @@ describe('ghost · subscribe 订阅详单校验(卡槽①,2026-07-12)', () => {
   });
 
   it('topics 合法值放行并归一化进清单', () => {
-    const r = validateGhostManifest(withSub({ topics: ['turn', 'session'] }));
+    const r = validateGhostManifest(withSub({ topics: ['turn', 'session', 'activity'] }));
     expect(r.ok).toBe(true);
-    if (r.ok) expect(r.manifest.subscribe).toEqual({ topics: ['turn', 'session'] });
+    if (r.ok) expect(r.manifest.subscribe).toEqual({ topics: ['turn', 'session', 'activity'] });
   });
 
   it('hooks 必须搭配 launch:"resident",否则拒装', () => {
@@ -1186,6 +1473,57 @@ describe('ghost · subscribe 订阅详单校验(卡槽①,2026-07-12)', () => {
     const bare = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'subscribe'] });
     if (bare.ok) {
       expect(ghostPermissionItems(bare.manifest).some((i) => i.kind === 'subscribe')).toBe(false);
+    }
+  });
+
+  it('activity 单列一项权限,从 turn 加订阅 activity 计入扩张;turn/session 清单逐字不变', () => {
+    const turnOnly = validateGhostManifest(withSub({ topics: ['turn'] }));
+    const withActivity = validateGhostManifest(withSub({ topics: ['turn', 'activity'] }));
+    const turnAndSession = validateGhostManifest(withSub({ topics: ['turn', 'session'] }));
+    expect(turnOnly.ok && withActivity.ok && turnAndSession.ok).toBe(true);
+    if (!turnOnly.ok || !withActivity.ok || !turnAndSession.ok) return;
+
+    // activity 是独立一项(带自己的 label/detail),不并进固定的 subscribe:topics。
+    expect(ghostPermissionItems(withActivity.manifest).map((i) => i.key)).toContain(
+      'subscribe:topics:activity',
+    );
+    expect(
+      ghostPermissionItems(withActivity.manifest).find((i) => i.key === 'subscribe:topics:activity'),
+    ).toMatchObject({ labelKey: 'subscribeActivity', detailKey: 'subscribeActivityDetail' });
+
+    // 存量插件更新时新增 activity 必须被权限扩张检测抓到(plugin-market 要求复核)。
+    const added = diffGhostPermissionItems(turnOnly.manifest, withActivity.manifest).added;
+    expect(added.map((i) => i.key)).toEqual(['subscribe:topics:activity']);
+
+    // 只动 turn / session 的存量插件权限清单不 churn(批准状态不受影响)。
+    expect(diffGhostPermissionItems(turnOnly.manifest, turnAndSession.manifest).added).toEqual([]);
+    expect(ghostPermissionItems(turnAndSession.manifest).filter((i) => i.kind === 'subscribe')).toEqual(
+      ghostPermissionItems(turnOnly.manifest).filter((i) => i.kind === 'subscribe'),
+    );
+
+    // 取消订阅 activity 应报为 removed。
+    expect(
+      diffGhostPermissionItems(withActivity.manifest, turnOnly.manifest).removed.map((i) => i.key),
+    ).toEqual(['subscribe:topics:activity']);
+  });
+
+  it('纯 activity 订阅不显示 turn/session 那行:确认框不凭空多报能力', () => {
+    const activityOnly = validateGhostManifest(withSub({ topics: ['activity'] }));
+    expect(activityOnly.ok).toBe(true);
+    if (!activityOnly.ok) return;
+    const keys = ghostPermissionItems(activityOnly.manifest)
+      .filter((i) => i.kind === 'subscribe')
+      .map((i) => i.key);
+    // 网关不会给它投 turn / session,所以固定的 subscribe:topics 一行不该出现。
+    expect(keys).toEqual(['subscribe:topics:activity']);
+  });
+
+  it('订阅 session 或 turn 任一都产出旧 subscribe:topics(存量批准状态不 churn)', () => {
+    for (const topics of [['turn'], ['session'], ['turn', 'session'], ['session', 'activity']]) {
+      const v = validateGhostManifest(withSub({ topics }));
+      expect(v.ok).toBe(true);
+      if (!v.ok) return;
+      expect(ghostPermissionItems(v.manifest).map((i) => i.key)).toContain('subscribe:topics');
     }
   });
 
@@ -1305,10 +1643,34 @@ describe('ghost · cindy 详单 video 类目', () => {
     expect(validateGhostManifest(withCindy({ video: ['generate', 'generate'] })).ok).toBe(false);
   });
 
-  it('未知类目报错列出全部支持类目(image / video)', () => {
+  it('未知类目报错列出全部支持类目(image / video / media)', () => {
     const bad = validateGhostManifest(withCindy({ audio: ['generate'] }));
     expect(bad.ok).toBe(false);
     expect(!bad.ok && bad.reason).toContain('video');
+    expect(!bad.ok && bad.reason).toContain('media');
+  });
+
+  // #784:寄存是唯一"不花钱就写用户媒体库"的能力,确认框必须单独列一行,
+  // 并带上主机固定说明(内含字节上限,由常量插值,不在 locale 里写死数字)。
+  it('权限清单推导:media.deposit 单独成行且带上限说明', () => {
+    const v = validateGhostManifest(withCindy({ media: ['deposit'] }));
+    expect(v.ok, JSON.stringify(v)).toBe(true);
+    if (!v.ok) return;
+    const items = ghostPermissionItems(v.manifest).filter((i) => i.kind === 'cindy');
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      key: 'cindy:media.deposit',
+      labelKey: 'cindyMediaDeposit',
+      detailKey: 'cindyMediaDepositDetail',
+    });
+    // 数字与单位都从常量算出来(locale 里只有 {{quota}} 占位):反解回字节
+    // 必须等于常量本身 —— 上限调成 GB 量级时,写死 "MB" 的文案就是错的。
+    const quota = items[0].detailArgs?.quota ?? '';
+    expect(quota).toMatch(/^\d+ (MB|GB)$/);
+    const [amount, unit] = quota.split(' ');
+    expect(Number(amount) * 1024 * 1024 * (unit === 'GB' ? 1024 : 1)).toBe(
+      GHOST_CINDY_DEPOSIT_QUOTA_BYTES,
+    );
   });
 
   it('权限清单推导:video 详单产出对应权限项(确认框自动吃到)', () => {
@@ -1950,6 +2312,87 @@ describe('ghost · network 详单校验', () => {
     expect(ghostContentKeys(r.manifest)).toContain('slotNotify');
     const item = ghostPermissionItems(r.manifest).find((i) => i.key === 'notify');
     expect(item).toMatchObject({ kind: 'notify', labelKey: 'notify', detailKey: 'notifyDetail' });
+    // 没声明 notify.badge 的老包不该凭空多出未读角标权限。
+    expect(ghostPermissionItems(r.manifest).map((i) => i.key)).not.toContain('badge');
+  });
+
+  it('badge 槽出**独立**权限条目 —— 老包加这一档必须触发扩权重新确认', () => {
+    const before = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'notify'] });
+    const after = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'notify', 'badge'] });
+    expect(before.ok && after.ok).toBe(true);
+    if (!before.ok || !after.ok) return;
+    expect(ghostPermissionItems(after.manifest).find((i) => i.key === 'badge')).toMatchObject({
+      kind: 'notify',
+      labelKey: 'badge',
+      detailKey: 'badgeDetail',
+    });
+    // 关键回归:并进既有 notify key 会让 added 为空,扩权确认框永远不弹
+    // (与 subscribe 的 activity topic 同一先例)。
+    const diff = diffGhostPermissionItems(before.manifest, after.manifest);
+    expect(diff.added.map((i) => i.key)).toEqual(['badge']);
+    expect(diff.removed).toHaveLength(0);
+  });
+
+  it('badge 与 notify 槽并列:不要 toast 也能要绿点(最小必要权限)', () => {
+    const r = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'badge'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const keys = ghostPermissionItems(r.manifest).map((i) => i.key);
+    expect(keys).toContain('badge');
+    expect(keys).not.toContain('notify');
+  });
+
+  it('存量兼容(红线):老包里任何形态的 notify 顶层字段都照旧被忽略,不影响装入', () => {
+    // `notify` 顶层字段从头到尾就没被登记过,校验器「宽进严出」直接忽略。
+    // 现在角标改由 `badge` **卡槽**声明,这个字段更是彻底不参与解释——
+    // 老包里写成什么形态都装得进来,也不会因此白拿角标能力。
+    for (const shape of [true, 'badge', ['badge'], { badge: true }, { sound: true }, {}]) {
+      const r = validateGhostManifest({ ...goodManifest(), slots: ['panel'], notify: shape });
+      expect(r.ok, `notify: ${JSON.stringify(shape)} 不该被判 invalid`).toBe(true);
+      // **关键**:哪怕老包恰好写成 { badge: true } 且有 panel,也不得凭空获得能力
+      // ——它没有经过任何安装/更新确认(codex review P1)。
+      if (r.ok) expect(ghostPermissionItems(r.manifest).map((i) => i.key)).not.toContain('badge');
+    }
+  });
+
+  it('badge 槽是**可证明**的新声明:老包不可能带它(未知槽名一律拒装)', () => {
+    // slots 是硬白名单,当年装老包的客户端遇到未登记的 'badge' 会直接拒绝整份清单。
+    // 所以「清单里有 badge 槽」⇒「这份清单是本能力上线之后写的」,严格校验才安全。
+    const r = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'not-a-real-slot'] });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain('未知卡槽');
+  });
+
+  it('来源投影丢掉 badge 槽时,包里的 badge 必须被识别成「未审权限」', () => {
+    // 场景:服务端市场那份平行校验器不认识 `badge` 槽(它连 `confirm` 都还没有),
+    // 投影出的 manifest 少了这一档 → 确认框漏列;而下载的 .cindy 包里 ghost.json
+    // 原样带着。装入出口就是拿这个 diff 拦下的(codex review P1)。
+    const reviewed = validateGhostManifest({ ...goodManifest(), slots: ['panel'] });
+    const packed = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'badge'] });
+    expect(reviewed.ok && packed.ok).toBe(true);
+    if (!reviewed.ok || !packed.ok) return;
+    const unreviewed = diffGhostPermissionItems(reviewed.manifest, packed.manifest).added;
+    expect(unreviewed.map((i) => i.key)).toEqual(['badge']);
+    // 反向:两份一致时不得误报,否则正常安装会被闸门全拦死。
+    expect(diffGhostPermissionItems(packed.manifest, packed.manifest).added).toHaveLength(0);
+  });
+
+  it('badge 槽与 panel 严格成对:声明了槽却没有面板一律拒装', () => {
+    // 这里可以放心用严格拒绝:带 badge 槽的清单必然是本能力上线之后写的,
+    // 不存在"拒了会让存量插件消失"的问题(见上一条的可证明性)。
+    const noPanel = validateGhostManifest({
+      ...goodManifest(),
+      slots: ['tool', 'badge'],
+      panel: undefined,
+      tools: [{ name: 'ping', description: 'ping' }],
+    });
+    expect(noPanel.ok).toBe(false);
+    if (!noPanel.ok) expect(noPanel.reason).toContain('panel');
+
+    // 有面板就通过,并落成权限项。
+    const ok = validateGhostManifest({ ...goodManifest(), slots: ['panel', 'badge'] });
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ghostPermissionItems(ok.manifest).map((i) => i.key)).toContain('badge');
   });
 });
 

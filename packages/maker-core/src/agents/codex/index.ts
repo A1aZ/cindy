@@ -20,27 +20,30 @@
  *  - renderer 不感知 thread_id / app-server 任何概念
  */
 
-import os from "node:os";
-import path from "node:path";
-import { promises as fs } from "node:fs";
+import os from 'node:os';
+import path from 'node:path';
+import { promises as fs } from 'node:fs';
 
 import {
   BaseAgent,
   OneShotError,
   AgentNotAuthenticatedError,
+  TurnPermissionPolicyUnsupportedError,
   type AgentSessionHandle,
   type AgentDeps,
-  type McpToolApprovalContext,
+  type CodexExtraSpawnConfig,
   type StartSessionOptions,
   type OneShotOptions,
+  type RefreshLocalModelsOptions,
   type SendOptions,
-} from "../base-agent.js";
-import type { AgentCredentialMode } from "../../interfaces/auth-adapter.js";
+  type TurnPermissionPolicy,
+} from '../base-agent.js';
+import type { AgentCredentialMode } from '../../interfaces/auth-adapter.js';
 import type {
   Capabilities,
   EffortDescriptor,
   PermissionModeDescriptor,
-} from "../../types/capabilities.js";
+} from '../../types/capabilities.js';
 import type {
   AgentEvent,
   ForkSdkSessionOptions,
@@ -49,44 +52,57 @@ import type {
   InteractionRequest,
   InteractionResolver,
   UsageSnapshot,
-} from "../../types/events.js";
-import type {
-  AuthState,
-  Effort,
-  PermissionMode,
-  UserMessage,
-} from "../../types/common.js";
+} from '../../types/events.js';
+import type { AuthState, Effort, PermissionMode, UserMessage } from '../../types/common.js';
 import type {
   AgentBuiltinCommand,
   ListAgentSkillsOptions,
   ListAgentSkillsResult,
-} from "../../types/palette.js";
+} from '../../types/palette.js';
 import type {
   ListCustomizationsOptions,
   ListCustomizationsResult,
-} from "../../types/customizations.js";
+} from '../../types/customizations.js';
 import type {
   MemoryStatus,
   MemorySetResult,
   MemoryResetResult,
-} from "../../types/memory.js";
+} from '../../types/memory.js';
 import type {
   AccountRateLimitsResponse,
   ConsumeAccountRateLimitResetCreditParams,
   ConsumeAccountRateLimitResetCreditResponse,
-} from "../../types/account-rate-limits.js";
-import { createAsyncQueue, type AsyncQueue } from "../shared/async-queue.js";
-import { UsageTracker } from "../shared/usage-tracker.js";
-import { getDefaultImageResizer } from "../shared/image-resizer.js";
+} from '../../types/account-rate-limits.js';
 import {
-  pickTurnStartStatus,
-  type OneShotState,
-} from "../shared/turn-start-phrases.js";
-import { buildCodexEnv } from "./env-builder.js";
-import { scanCodexCustomizations } from "./customization-scanner.js";
-import { commandExecutionDisplayInput } from "./command-display.js";
+  capabilitySelectionAddedByPlanEdit,
+  findCapabilityRouteOverride,
+  isCapabilityRouteInvocationAllowed,
+} from '../../types/capability-routing.js';
+import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
+import {
+  composeAutoReviewIntentWithApprovedPlan,
+  composeAutoReviewIntentWithClarification,
+  createAutoReviewUnavailableNotice,
+  extractAutoReviewUserIntent,
+  resolveAutoReviewDecision,
+  type AutoReviewDecision,
+} from '../shared/auto-review-decision.js';
+import { reviewAction, type ReviewableAction } from '../shared/auto-review.js';
+import { UsageTracker } from '../shared/usage-tracker.js';
+import { getDefaultImageResizer } from '../shared/image-resizer.js';
+import { pickTurnStartStatus, type OneShotState } from '../shared/turn-start-phrases.js';
+import {
+  OVERLOAD_RETRY_MAX_ATTEMPTS,
+  overloadRetryDelayMs,
+  parseOverloadError,
+} from '../shared/overload-error.js';
+import { buildCodexEnv } from './env-builder.js';
+import { buildCodexCapabilityConfigOverrides } from './capability-routing.js';
+import { scanCodexCustomizations } from './customization-scanner.js';
+import { commandExecutionDisplayInput } from './command-display.js';
 import {
   newCodexRuntimeState,
+  isAuthRelatedErrorMessage,
   translateErrorNotification,
   translateItemNotification,
   translateReasoningSummaryTextDelta,
@@ -96,25 +112,45 @@ import {
   translatePlanUpdatedNotification,
   extractRolloutUpdatePlanFunctionCallEvent,
   type CodexRuntimeState,
-} from "./translator.js";
+} from './translator.js';
 import {
-  AppServerHost,
-  type ThreadEventHandlers,
-  type ThreadSubscription,
-} from "./app-server/host.js";
-import { createStdioTransport } from "./app-server/stdioTransport.js";
-import { CodexInteractionBroker } from "./interaction-broker.js";
-import { SYSTEM_PROMPT_APPEND as MAKER_CODEX_SYSTEM_PROMPT_APPEND } from "./system-prompt-append.js";
-import { MAKER_MEMORY_RULES } from "../../memory/system-prompt.js";
-import { MemoryFlushController } from "../../memory/flush-controller.js";
-import { CODEX_AGENT_COMMANDS } from "./commands.js";
+  createSubagentLiveCardTracker,
+  type SubagentLiveCardUpdate,
+} from './subagent-live-cards.js';
+import {
+  TurnRetryTracker,
+  RETRY_ESCALATION_MAX_ELAPSED_MS,
+  buildBackendUnreachableMessage,
+  type OutboundPathFact,
+} from './retry-escalation.js';
+import { parseReconnectAttemptMessage } from '../shared/network-error.js';
+import { extractNonSecretErrorSignals } from '@cindy/maker-shared/error-redaction';
+import { AppServerHost, type ThreadEventHandlers, type ThreadSubscription } from './app-server/host.js';
+import { AppServerRequestTimeoutError } from './app-server/client.js';
+import {
+  isTerminalRateLimitRetryExhaustion,
+  TERMINAL_RATE_LIMIT_RETRY_MAX_ATTEMPTS,
+  terminalRateLimitRetryDelayMs,
+} from './terminal-rate-limit-retry.js';
+import { createStdioTransport } from './app-server/stdioTransport.js';
+import { CodexInteractionBroker } from './interaction-broker.js';
+import { SYSTEM_PROMPT_APPEND as MAKER_CODEX_SYSTEM_PROMPT_APPEND } from './system-prompt-append.js';
+import { MAKER_MEMORY_RULES } from '../../memory/system-prompt.js';
+import {
+  CONTACTS_RULES_DISABLED,
+  CONTACTS_RULES_ENABLED,
+} from '../../contacts/system-prompt.js';
+import { MemoryFlushController } from '../../memory/flush-controller.js';
+import { buildMemoryScopeKey } from '../../memory/storage.js';
+import { CODEX_AGENT_COMMANDS } from './commands.js';
 import {
   canReuseCodexHostForCredentialMode,
   resolveAgentCredentialMode,
   resolveEffectiveCredentialModeFromAuthSource,
-} from "../credential-mode.js";
+} from '../credential-mode.js';
 import {
   Method,
+  codexErrorInfoTag,
   type AskForApproval,
   type ApprovalsReviewer,
   type ApprovalDecision,
@@ -158,7 +194,25 @@ import {
   type TurnStartParams,
   type TurnStartResponse,
   type UserInput,
-} from "./app-server/protocol.js";
+} from './app-server/protocol.js';
+
+interface TurnReplayRetryPolicy {
+  kind: 'capacity' | 'terminal-rate-limit';
+  maxAttempts: number;
+  delayMs: (attempt: number) => number;
+}
+
+const CAPACITY_RETRY_POLICY: TurnReplayRetryPolicy = {
+  kind: 'capacity',
+  maxAttempts: OVERLOAD_RETRY_MAX_ATTEMPTS,
+  delayMs: overloadRetryDelayMs,
+};
+
+const TERMINAL_RATE_LIMIT_RETRY_POLICY: TurnReplayRetryPolicy = {
+  kind: 'terminal-rate-limit',
+  maxAttempts: TERMINAL_RATE_LIMIT_RETRY_MAX_ATTEMPTS,
+  delayMs: terminalRateLimitRetryDelayMs,
+};
 
 type CodexEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
@@ -171,87 +225,69 @@ const CODEX_MINIMAL_EFFORT_MODELS = new Set([
  * item.type → chip status 文案 (对齐 claude-code 6 类). null = 该 item 不触发 chip 切换
  * (imageView/plan/userMessage/hookPrompt 等是 completed-only 或 UI 不暴露的 item)。
  */
-function statusTextForItem(item: {
-  type?: string;
-  command?: string;
-  tool?: string;
-}): string | null {
+function statusTextForItem(item: { type?: string; command?: string; tool?: string; kind?: string }): string | null {
   switch (item.type) {
-    case "reasoning":
-      return "Thinking...";
-    case "agentMessage":
-      return "Generating...";
-    case "commandExecution": {
+    case 'reasoning':            return 'Thinking...';
+    case 'agentMessage':         return 'Generating...';
+    case 'commandExecution': {
       // command 首词在 Windows 下可能是 `"C:\\...\\powershell.exe"` 完整路径带引号 —
       // 直接拿会刷出超长 chip。剥引号 → 取 basename → 去 .exe 后缀, 显示 `powershell running...`。
-      const firstToken = (item.command ?? "").trim().split(/\s+/)[0] ?? "";
-      const unquoted = firstToken.replace(/^["']|["']$/g, "");
-      const basename = unquoted.split(/[\\/]/).pop() || "";
-      const head = basename.replace(/\.exe$/i, "") || "shell";
+      const firstToken = (item.command ?? '').trim().split(/\s+/)[0] ?? '';
+      const unquoted = firstToken.replace(/^["']|["']$/g, '');
+      const basename = unquoted.split(/[\\/]/).pop() || '';
+      const head = basename.replace(/\.exe$/i, '') || 'shell';
       return `${head} running...`;
     }
-    case "fileChange":
-      return "Editing files...";
-    case "mcpToolCall":
-      return `${item.tool ?? "mcp"} running...`;
-    case "dynamicToolCall":
-      return `${item.tool ?? "tool"} running...`;
-    case "collabAgentToolCall":
-      return `${item.tool ?? "agent"} running...`;
-    case "webSearch":
-      return "Searching web...";
-    case "imageGeneration":
-      return "Generating image...";
-    case "contextCompaction":
-      return "Compacting...";
-    default:
-      return null;
+    case 'fileChange':           return 'Editing files...';
+    case 'mcpToolCall':          return `${item.tool ?? 'mcp'} running...`;
+    case 'dynamicToolCall':      return `${item.tool ?? 'tool'} running...`;
+    case 'collabAgentToolCall':  return `${item.tool ?? 'agent'} running...`;
+    // interacted/interrupted 活动(followup/send/interrupt 的伴生事件)不是新代理
+    // 启动,不闪启动状态 —— itemStarted 在 translator 静默这些 kind 之前就会推 chip。
+    case 'subAgentActivity':     return item.kind === 'started' ? 'Spawning agent...' : null;
+    case 'webSearch':            return 'Searching web...';
+    case 'imageGeneration':      return 'Generating image...';
+    case 'contextCompaction':    return 'Compacting...';
+    default:                     return null;
   }
 }
 
 /**
  * Codex normally reports shell work as a `commandExecution` item. Some
- * Responses/proxy paths surface the same action as a raw `function_call`
- * (`name: exec_command`) instead, which has no approval callback. Normalize
- * both shapes so the host shell policy remains a deterministic last-mile
- * guard.
+ * Responses/proxy paths surface it as a raw `function_call(exec_command)`
+ * without an approval callback. Normalize both shapes for the host policy.
  */
 function shellCommandFromCodexItem(
   item: unknown,
 ): { command: string; cwd?: string } | null {
-  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
   const record = item as Record<string, unknown>;
-  if (
-    record.type === "commandExecution" &&
-    typeof record.command === "string"
-  ) {
-    return {
-      command: record.command,
-    };
+  if (record.type === 'commandExecution' && typeof record.command === 'string') {
+    return { command: record.command };
   }
   if (
-    record.type !== "function_call" ||
-    record.name !== "exec_command" ||
-    typeof record.arguments !== "string"
+    record.type !== 'function_call' ||
+    record.name !== 'exec_command' ||
+    typeof record.arguments !== 'string'
   ) {
     return null;
   }
   try {
     const args = JSON.parse(record.arguments) as unknown;
-    if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
     const parsed = args as Record<string, unknown>;
     const command =
-      typeof parsed.cmd === "string"
+      typeof parsed.cmd === 'string'
         ? parsed.cmd
-        : typeof parsed.command === "string"
+        : typeof parsed.command === 'string'
           ? parsed.command
           : null;
     if (!command) return null;
     return {
       command,
-      ...(typeof parsed.workdir === "string"
+      ...(typeof parsed.workdir === 'string'
         ? { cwd: parsed.workdir }
-        : typeof parsed.cwd === "string"
+        : typeof parsed.cwd === 'string'
           ? { cwd: parsed.cwd }
           : {}),
     };
@@ -282,42 +318,34 @@ function prefixId(value: string | undefined): string | undefined {
 }
 
 function isRemoteLikePath(p: string): boolean {
-  return p.startsWith("/") && process.platform === "win32";
+  return p.startsWith('/') && process.platform === 'win32';
 }
 
 function isReasoningPayload(payload: unknown): boolean {
   return Boolean(
     payload &&
-    typeof payload === "object" &&
+    typeof payload === 'object' &&
     !Array.isArray(payload) &&
-    (payload as Record<string, unknown>).type === "reasoning",
+    (payload as Record<string, unknown>).type === 'reasoning',
   );
 }
 
 function isImageGenerationPayloadWithoutId(payload: unknown): boolean {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload))
-    return false;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
   const record = payload as Record<string, unknown>;
   const type = record.type;
-  if (typeof type !== "string") return false;
-  if (
-    !type.startsWith("image_generation") &&
-    !type.startsWith("imageGeneration")
-  )
-    return false;
+  if (typeof type !== 'string') return false;
+  if (!type.startsWith('image_generation') && !type.startsWith('imageGeneration')) return false;
   const id = record.id;
-  return typeof id !== "string" || id.trim().length === 0;
+  return typeof id !== 'string' || id.trim().length === 0;
 }
 
 function hasUnsafeForkRolloutPayload(line: string): boolean {
   try {
     const parsed: unknown = JSON.parse(line);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
-      return false;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
     const payload = (parsed as Record<string, unknown>).payload;
-    return (
-      isReasoningPayload(payload) || isImageGenerationPayloadWithoutId(payload)
-    );
+    return isReasoningPayload(payload) || isImageGenerationPayloadWithoutId(payload);
   } catch {
     return false;
   }
@@ -325,6 +353,7 @@ function hasUnsafeForkRolloutPayload(line: string): boolean {
 
 function buildCodexDeveloperInstructions(parts: {
   makerMemoryRules?: string;
+  contactsRules?: string;
   runtimeSystemPrompt?: string;
   makerMemoryIndex?: string;
   userPrompt?: string;
@@ -332,12 +361,13 @@ function buildCodexDeveloperInstructions(parts: {
   return [
     MAKER_CODEX_SYSTEM_PROMPT_APPEND,
     parts.makerMemoryRules,
+    parts.contactsRules,
     parts.runtimeSystemPrompt,
     parts.makerMemoryIndex,
     parts.userPrompt,
   ]
     .filter((s): s is string => !!s && s.trim().length > 0)
-    .join("\n\n");
+    .join('\n\n');
 }
 
 /**
@@ -358,7 +388,19 @@ function buildCodexDeveloperInstructions(parts: {
  * instantiate without full host deps).
  */
 export function hostKey(remoteHostId?: string | null): string {
-  return remoteHostId ? `remote:${remoteHostId}` : "local";
+  return remoteHostId ? `remote:${remoteHostId}` : 'local';
+}
+
+const LOCAL_CONTROL_PLANE_HOST_PREFIX = 'local-control:';
+const CODEX_MODEL_LIST_RPC_TIMEOUT_MS = 20_000;
+const CODEX_MODEL_REFRESH_DEADLINE_MS = 20_000;
+
+function localControlPlaneHostKey(credentialMode: AgentCredentialMode): string {
+  return `${LOCAL_CONTROL_PLANE_HOST_PREFIX}${credentialMode}`;
+}
+
+function isLocalControlPlaneHostKey(key: string): boolean {
+  return key.startsWith(LOCAL_CONTROL_PLANE_HOST_PREFIX);
 }
 
 /**
@@ -373,48 +415,43 @@ type CodexPermissionConfig = {
   approvalsReviewer?: ApprovalsReviewer;
 };
 function mapPermissionToCodex(
-  permissionMode?: string,
-  approvalsReviewerSupported = true,
+  permissionMode: string | undefined,
+  approvalsReviewerProtocolSupported: boolean,
+  approvalsReviewerRouteSupported: boolean,
 ): CodexPermissionConfig {
+  const manualApprovalConfig: CodexPermissionConfig = {
+    approvalPolicy: 'on-request',
+    sandbox: 'workspace-write',
+    ...(approvalsReviewerProtocolSupported ? { approvalsReviewer: 'user' } : {}),
+  };
   // 严格 kebab-case (v2.rs serde rename_all="kebab-case"), camelCase 会被 server -32600 reject
   switch (permissionMode) {
-    case "bypassPermissions":
-      return { approvalPolicy: "never", sandbox: "danger-full-access" };
-    case "auto":
-      if (!approvalsReviewerSupported) {
-        // 旧 app-server 没有 approvalsReviewer 字段时回退到原生 untrusted:
-        // 可信命令自动执行,其余请求交给用户。不能发送未知字段让整次 RPC 失败。
-        return { approvalPolicy: "untrusted", sandbox: "workspace-write" };
+    case 'bypassPermissions':
+      return { approvalPolicy: 'never', sandbox: 'danger-full-access' };
+    case 'auto':
+      if (!approvalsReviewerProtocolSupported || !approvalsReviewerRouteSupported) {
+        // 旧 app-server 或未验证 reviewer 模型路由时回退到人工 on-request。
+        // 不能用 untrusted:它拒绝 require_escalated,即使用户批准普通命令,
+        // 网络/沙箱外写入仍会留在受限 sandbox 内。新版协议显式写 user,
+        // 还可覆盖恢复 thread 中 sticky 的 auto_review;旧版则安全省略未知字段。
+        return manualApprovalConfig;
       }
       // Codex app-server 原生 auto_review 与 Claude Auto 的分工一致:
       // 常规 workspace 动作直接执行,越界动作交给内置 reviewer 判断,而不是交给 UI。
       // workspace-write 仍是硬安全边界; auto_review 只替换审批者,不扩大沙箱。
-      return {
-        approvalPolicy: "on-request",
-        sandbox: "workspace-write",
-        approvalsReviewer: "auto_review",
-      };
+      return { approvalPolicy: 'on-request', sandbox: 'workspace-write', approvalsReviewer: 'auto_review' };
     default:
-      return { approvalPolicy: "on-request", sandbox: "workspace-write" };
+      return manualApprovalConfig;
   }
 }
 
-/**
- * `approvalsReviewer` is verified against the app-server bundled with Codex 0.144.6.
- * Remote hosts may keep an older standalone binary across desktop upgrades, so parse the
- * initialize userAgent and conservatively omit the field unless that verified floor is met.
- */
-function supportsCodexApprovalsReviewer(
+function codexUserAgentAtLeast(
   userAgent: string | undefined,
+  minimum: readonly [number, number, number],
 ): boolean {
-  const match = /\/(\d+)\.(\d+)\.(\d+)(?:[-+ )]|$)/.exec(userAgent ?? "");
+  const match = /\/(\d+)\.(\d+)\.(\d+)(?:[-+ )]|$)/.exec(userAgent ?? '');
   if (!match) return false;
-  const version = [
-    Number(match[1]),
-    Number(match[2]),
-    Number(match[3]),
-  ] as const;
-  const minimum = [0, 144, 6] as const;
+  const version = [Number(match[1]), Number(match[2]), Number(match[3])] as const;
   for (let i = 0; i < minimum.length; i += 1) {
     if (version[i]! > minimum[i]!) return true;
     if (version[i]! < minimum[i]!) return false;
@@ -423,18 +460,43 @@ function supportsCodexApprovalsReviewer(
 }
 
 /**
+ * `approvalsReviewer` is verified against the app-server bundled with Codex 0.144.6.
+ * Remote hosts may keep an older standalone binary across desktop upgrades, so parse the
+ * initialize userAgent and conservatively omit the field unless that verified floor is met.
+ */
+function supportsCodexApprovalsReviewerProtocol(userAgent: string | undefined): boolean {
+  return codexUserAgentAtLeast(userAgent, [0, 144, 6]);
+}
+
+/**
  * Runtime workspace roots and named permission profiles were verified against
  * the app-server bundled with Codex 0.144.6. Keep older remote daemons
  * fail-closed: without profiles, legacy workspace-write would make every
  * runtime root writable.
  */
-function supportsCodexReadonlyReferenceDirs(
-  userAgent: string | undefined,
-): boolean {
-  return supportsCodexApprovalsReviewer(userAgent);
+function supportsCodexReadonlyReferenceDirs(userAgent: string | undefined): boolean {
+  return supportsCodexApprovalsReviewerProtocol(userAgent);
 }
 
-const READONLY_REFERENCES_PERMISSION_PROFILE = "cindy-readonly-references";
+/**
+ * Per-thread plugin config for capability arbitration was verified against
+ * Codex 0.145.0. If the host policy needs those overrides, an older daemon must
+ * be rejected rather than silently starting with the downstream plugins active.
+ */
+function supportsCodexCapabilityRoutingProtocol(userAgent: string | undefined): boolean {
+  return codexUserAgentAtLeast(userAgent, [0, 145, 0]);
+}
+
+/**
+ * `excludeTurns` was introduced in Codex 0.125.0 and later marked experimental.
+ * Older remote daemons can outlive desktop upgrades, so omit the unknown field
+ * and preserve their legacy full-history resume behavior.
+ */
+function supportsCodexResumeExcludeTurns(userAgent: string | undefined): boolean {
+  return codexUserAgentAtLeast(userAgent, [0, 125, 0]);
+}
+
+const READONLY_REFERENCES_PERMISSION_PROFILE = 'cindy-readonly-references';
 
 /**
  * SandboxMode (thread/start 用 kebab enum) → SandboxPolicy (turn/start 用 tag union)。
@@ -448,111 +510,83 @@ const READONLY_REFERENCES_PERMISSION_PROFILE = "cindy-readonly-references";
  * 当前用途: 把 <CODEX_HOME>/memories/ 加进去, 让 codex 自家 MemoryTool 的写入流程
  * (model 用 apply_patch 改 memory_summary.md / MEMORY.md) 不撞预检。
  */
-function sandboxModeToPolicy(
-  mode: SandboxMode,
-  extraWritableRoots: string[] = [],
-): SandboxPolicy {
+function sandboxModeToPolicy(mode: SandboxMode, extraWritableRoots: string[] = []): SandboxPolicy {
   switch (mode) {
-    case "danger-full-access":
-      return { type: "dangerFullAccess" };
-    case "read-only":
-      return { type: "readOnly" };
-    case "workspace-write":
+    case 'danger-full-access':
+      return { type: 'dangerFullAccess' };
+    case 'read-only':
+      return { type: 'readOnly' };
+    case 'workspace-write':
       return {
-        type: "workspaceWrite",
-        ...(extraWritableRoots.length > 0
-          ? { writableRoots: extraWritableRoots }
-          : {}),
+        type: 'workspaceWrite',
+        ...(extraWritableRoots.length > 0 ? { writableRoots: extraWritableRoots } : {}),
       };
   }
 }
 
 /** maker InteractionDecision.behavior → Codex ApprovalDecision (camelCase serde)。 */
-function mapBehaviorToApproval(behavior: "allow" | "deny"): ApprovalDecision {
-  return behavior === "allow" ? "accept" : "decline";
+function mapBehaviorToApproval(behavior: 'allow' | 'deny'): ApprovalDecision {
+  return behavior === 'allow' ? 'accept' : 'decline';
 }
 
-const ASK_USER_DYNAMIC_TOOL_NAMESPACE = "cindy";
-const LEGACY_ASK_USER_DYNAMIC_TOOL_NAMESPACE = "xdt_maker";
-const ASK_USER_DYNAMIC_TOOL_NAME = "ask_user_question";
+const ASK_USER_DYNAMIC_TOOL_NAMESPACE = 'cindy';
+const LEGACY_ASK_USER_DYNAMIC_TOOL_NAMESPACE = 'xdt_maker';
+const ASK_USER_DYNAMIC_TOOL_NAME = 'ask_user_question';
 const ASK_USER_DYNAMIC_TOOL_CANONICAL_NAME =
   `${ASK_USER_DYNAMIC_TOOL_NAMESPACE}__${ASK_USER_DYNAMIC_TOOL_NAME}`;
 const MAX_REQUEST_USER_INPUT_QUESTIONS = 3;
 const MAX_REQUEST_USER_INPUT_OPTIONS = 10;
 const MAX_REQUEST_USER_INPUT_TEXT_CHARS = 1_000;
 const MAX_REQUEST_USER_INPUT_ANSWER_CHARS = 2_000;
-const DISABLE_ASK_USER_DYNAMIC_TOOL_FALLBACK =
-  process.env.XDT_CODEX_DISABLE_ASK_USER_DYNAMIC_TOOL === "1";
-// xAI rejects Codex dynamic tools in its Responses `tools[]` schema.
-const CODEX_DYNAMIC_TOOL_UNSUPPORTED_PROVIDER_IDS = new Set(["xai"]);
+const DISABLE_ASK_USER_DYNAMIC_TOOL_FALLBACK = process.env.XDT_CODEX_DISABLE_ASK_USER_DYNAMIC_TOOL === '1';
+// xAI rejects Codex namespace dynamic tools in its Responses `tools[]` schema.
+const CODEX_DYNAMIC_TOOL_UNSUPPORTED_PROVIDER_IDS = new Set(['xai']);
 
 const ASK_USER_DYNAMIC_TOOL: DynamicToolSpec = {
-  type: "function",
+  type: 'function',
   name: ASK_USER_DYNAMIC_TOOL_CANONICAL_NAME,
   description: [
-    "Use this tool instead of listing choices or asking in prose when the user asks to choose, pick a direction, select an approach, or narrow options before you continue.",
-    "Use it for product preferences, game/design/business directions, business judgments, and choices between materially different approaches.",
-    "Use it when the next useful step depends on the user selecting among options, even if you could provide a generic list yourself.",
-    "Ask 1 to 3 short questions in a single call when those questions are independent; do not make several back-to-back calls for independent clarification questions.",
-    "Use a later follow-up call only when the next question depends on the user answer to an earlier question.",
-    "Do not use it for routine implementation details; choose a reasonable default.",
-    "This tool does not replace authorization for destructive or external actions.",
-  ].join(" "),
+    'Use this tool instead of listing choices or asking in prose when the user asks to choose, pick a direction, select an approach, or narrow options before you continue.',
+    'Use it for product preferences, game/design/business directions, business judgments, and choices between materially different approaches.',
+    'Use it when the next useful step depends on the user selecting among options, even if you could provide a generic list yourself.',
+    'Ask 1 to 3 short questions in a single call when those questions are independent; do not make several back-to-back calls for independent clarification questions.',
+    'Use a later follow-up call only when the next question depends on the user answer to an earlier question.',
+    'Do not use it for routine implementation details; choose a reasonable default.',
+    'This tool does not replace authorization for destructive or external actions.',
+  ].join(' '),
   inputSchema: {
-    type: "object",
+    type: 'object',
     additionalProperties: false,
-    required: ["questions"],
+    required: ['questions'],
     properties: {
       questions: {
-        type: "array",
-        description:
-          "One to three short user-facing questions to ask together. Bundle independent choices into this array instead of calling the tool repeatedly.",
+        type: 'array',
+        description: 'One to three short user-facing questions to ask together. Bundle independent choices into this array instead of calling the tool repeatedly.',
         minItems: 1,
         maxItems: MAX_REQUEST_USER_INPUT_QUESTIONS,
         items: {
-          type: "object",
+          type: 'object',
           additionalProperties: false,
-          required: ["question"],
+          required: ['question'],
           properties: {
-            id: {
-              type: "string",
-              description: "Stable answer key for this question.",
-            },
-            header: {
-              type: "string",
-              description: "Short label shown above the question.",
-            },
-            question: {
-              type: "string",
-              description: "Clear question text for the user.",
-            },
+            id: { type: 'string', description: 'Stable answer key for this question.' },
+            header: { type: 'string', description: 'Short label shown above the question.' },
+            question: { type: 'string', description: 'Clear question text for the user.' },
             options: {
-              type: "array",
-              description:
-                "Optional single-select answer choices. Omit when free-form input is needed.",
+              type: 'array',
+              description: 'Optional single-select answer choices. Omit when free-form input is needed.',
               maxItems: MAX_REQUEST_USER_INPUT_OPTIONS,
               items: {
-                type: "object",
+                type: 'object',
                 additionalProperties: false,
-                required: ["label"],
+                required: ['label'],
                 properties: {
-                  label: {
-                    type: "string",
-                    description: "Short option label returned as the answer.",
-                  },
-                  description: {
-                    type: "string",
-                    description:
-                      "Brief explanation of when this option is appropriate.",
-                  },
+                  label: { type: 'string', description: 'Short option label returned as the answer.' },
+                  description: { type: 'string', description: 'Brief explanation of when this option is appropriate.' },
                 },
               },
             },
-            isOther: {
-              type: "boolean",
-              description:
-                "Whether the user may provide a free-form answer outside the listed options.",
-            },
+            isOther: { type: 'boolean', description: 'Whether the user may provide a free-form answer outside the listed options.' },
           },
         },
       },
@@ -561,20 +595,22 @@ const ASK_USER_DYNAMIC_TOOL: DynamicToolSpec = {
 };
 
 interface ActiveToolContext {
-  type: "mcpToolCall" | "dynamicToolCall";
+  type: 'mcpToolCall' | 'dynamicToolCall';
   turnId?: string | null;
   server?: string | null;
+  /**
+   * Codex attaches the owning plugin id to mcpToolCall items. `null` means the
+   * configured server is user-owned (including a user server shadowing a
+   * plugin server); `undefined` means this app-server did not provide
+   * provenance, so routing must fail closed.
+   */
+  pluginId?: string | null;
   namespace?: string | null;
   tool?: string | null;
 }
 
-function isAskUserDynamicTool(
-  params: Pick<DynamicToolCallParams, "namespace" | "tool">,
-): boolean {
-  if (
-    params.namespace === null &&
-    params.tool === ASK_USER_DYNAMIC_TOOL_CANONICAL_NAME
-  ) {
+function isAskUserDynamicTool(params: Pick<DynamicToolCallParams, 'namespace' | 'tool'>): boolean {
+  if (params.namespace === null && params.tool === ASK_USER_DYNAMIC_TOOL_CANONICAL_NAME) {
     return true;
   }
   return (
@@ -584,49 +620,42 @@ function isAskUserDynamicTool(
   );
 }
 
-function shouldRegisterAskUserDynamicTool(
-  opts: Pick<StartSessionOptions, "model" | "providerId">,
-): boolean {
+function shouldRegisterAskUserDynamicTool(opts: Pick<StartSessionOptions, 'model' | 'providerId'>): boolean {
   if (DISABLE_ASK_USER_DYNAMIC_TOOL_FALLBACK) return false;
   return supportsCodexDynamicTools(opts);
 }
 
 function supportsCodexDynamicTools(
-  opts: Pick<StartSessionOptions, "model" | "providerId">,
+  opts: Pick<StartSessionOptions, 'model' | 'providerId'>,
 ): boolean {
-  const providerId =
-    typeof opts.providerId === "string" ? opts.providerId.trim() : "";
+  const providerId = typeof opts.providerId === 'string' ? opts.providerId.trim() : '';
   if (CODEX_DYNAMIC_TOOL_UNSUPPORTED_PROVIDER_IDS.has(providerId)) return false;
-  if (!providerId && opts.model.startsWith("xai/")) return false;
+  if (!providerId && opts.model.startsWith('xai/')) return false;
   return true;
 }
 
-function dynamicToolKey(
-  tool: Pick<DynamicToolSpec, "name">,
-): string {
+function dynamicToolKey(tool: Pick<DynamicToolSpec, 'name'>): string {
   return `\u0000${tool.name}`;
 }
 
 function dynamicToolCallKey(
-  params: Pick<DynamicToolCallParams, "namespace" | "tool">,
+  params: Pick<DynamicToolCallParams, 'namespace' | 'tool'>,
 ): string {
-  return `${params.namespace ?? ""}\u0000${params.tool}`;
+  return `${params.namespace ?? ''}\u0000${params.tool}`;
 }
 
 function dynamicToolApprovalIdentity(
-  params: Pick<DynamicToolCallParams, "namespace" | "tool">,
+  params: Pick<DynamicToolCallParams, 'namespace' | 'tool'>,
 ): { serverName: string; toolName: string } {
-  if (params.namespace) {
-    return { serverName: params.namespace, toolName: params.tool };
-  }
-  const separatorIndex = params.tool.lastIndexOf("__");
+  if (params.namespace) return { serverName: params.namespace, toolName: params.tool };
+  const separatorIndex = params.tool.lastIndexOf('__');
   if (separatorIndex > 0 && separatorIndex < params.tool.length - 2) {
     return {
       serverName: params.tool.slice(0, separatorIndex),
       toolName: params.tool.slice(separatorIndex + 2),
     };
   }
-  return { serverName: "host_dynamic_tool", toolName: params.tool };
+  return { serverName: 'host_dynamic_tool', toolName: params.tool };
 }
 
 function truncateUserInputText(value: string): string {
@@ -641,10 +670,8 @@ function truncateAnswerText(value: string): string {
     : value;
 }
 
-function emptyUserInputResponse(
-  questions: readonly Pick<ToolRequestUserInputQuestion, "id">[],
-): ToolRequestUserInputResponse {
-  const answers: ToolRequestUserInputResponse["answers"] = {};
+function emptyUserInputResponse(questions: readonly Pick<ToolRequestUserInputQuestion, 'id'>[]): ToolRequestUserInputResponse {
+  const answers: ToolRequestUserInputResponse['answers'] = {};
   for (const q of questions) {
     if (q.id) answers[q.id] = { answers: [] };
   }
@@ -654,73 +681,51 @@ function emptyUserInputResponse(
 function normalizeRequestUserInputQuestions(
   questions: readonly ToolRequestUserInputQuestion[],
 ): ToolRequestUserInputQuestion[] {
-  return questions
-    .slice(0, MAX_REQUEST_USER_INPUT_QUESTIONS)
-    .map((q, index) => ({
-      id: q.id || `question-${index + 1}`,
-      header: truncateUserInputText(q.header || ""),
-      question: truncateUserInputText(
-        q.question || q.header || `Question ${index + 1}`,
-      ),
-      isOther: q.isOther === true,
-      isSecret: q.isSecret === true,
-      options: Array.isArray(q.options)
-        ? q.options
-            .slice(0, MAX_REQUEST_USER_INPUT_OPTIONS)
-            .map((option) => ({
-              label: truncateUserInputText(option.label || ""),
-              description: truncateUserInputText(option.description || ""),
-            }))
-            .filter((option) => option.label.trim().length > 0)
-        : null,
-    }));
+  return questions.slice(0, MAX_REQUEST_USER_INPUT_QUESTIONS).map((q, index) => ({
+    id: q.id || `question-${index + 1}`,
+    header: truncateUserInputText(q.header || ''),
+    question: truncateUserInputText(q.question || q.header || `Question ${index + 1}`),
+    isOther: q.isOther === true,
+    isSecret: q.isSecret === true,
+    options: Array.isArray(q.options)
+      ? q.options.slice(0, MAX_REQUEST_USER_INPUT_OPTIONS).map((option) => ({
+          label: truncateUserInputText(option.label || ''),
+          description: truncateUserInputText(option.description || ''),
+        })).filter((option) => option.label.trim().length > 0)
+      : null,
+  }));
 }
 
-function normalizeDynamicAskUserQuestions(
-  args: unknown,
-): ToolRequestUserInputQuestion[] {
-  const input =
-    args && typeof args === "object" ? (args as { questions?: unknown }) : {};
+function normalizeDynamicAskUserQuestions(args: unknown): ToolRequestUserInputQuestion[] {
+  const input = args && typeof args === 'object' ? args as { questions?: unknown } : {};
   const rawQuestions = Array.isArray(input.questions) ? input.questions : [];
-  const questions: ToolRequestUserInputQuestion[] = rawQuestions.map(
-    (raw, index) => {
-      const q =
-        raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-      const rawOptions = Array.isArray(q.options) ? q.options : null;
-      return {
-        id:
-          typeof q.id === "string" && q.id.trim()
-            ? q.id
-            : `question-${index + 1}`,
-        header: typeof q.header === "string" ? q.header : "",
-        question: typeof q.question === "string" ? q.question : "",
-        isOther: q.isOther === true,
-        // Dynamic fallback is a business-choice tool. It must not collect secrets.
-        isSecret: false,
-        options: rawOptions
-          ? rawOptions.map((rawOption) => {
-              const option =
-                rawOption && typeof rawOption === "object"
-                  ? (rawOption as Record<string, unknown>)
-                  : {};
-              return {
-                label: typeof option.label === "string" ? option.label : "",
-                description:
-                  typeof option.description === "string"
-                    ? option.description
-                    : "",
-              };
-            })
-          : null,
-      };
-    },
-  );
+  const questions: ToolRequestUserInputQuestion[] = rawQuestions.map((raw, index) => {
+    const q = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
+    const rawOptions = Array.isArray(q.options) ? q.options : null;
+    return {
+      id: typeof q.id === 'string' && q.id.trim() ? q.id : `question-${index + 1}`,
+      header: typeof q.header === 'string' ? q.header : '',
+      question: typeof q.question === 'string' ? q.question : '',
+      isOther: q.isOther === true,
+      // Dynamic fallback is a business-choice tool. It must not collect secrets.
+      isSecret: false,
+      options: rawOptions
+        ? rawOptions.map((rawOption) => {
+            const option = rawOption && typeof rawOption === 'object'
+              ? rawOption as Record<string, unknown>
+              : {};
+            return {
+              label: typeof option.label === 'string' ? option.label : '',
+              description: typeof option.description === 'string' ? option.description : '',
+            };
+          })
+        : null,
+    };
+  });
   return normalizeRequestUserInputQuestions(questions);
 }
 
-function questionsToAskUserItems(
-  questions: readonly ToolRequestUserInputQuestion[],
-) {
+function questionsToAskUserItems(questions: readonly ToolRequestUserInputQuestion[]) {
   return questions.map((q) => ({
     question: q.question,
     header: q.header || undefined,
@@ -736,9 +741,9 @@ function responseFromAskUserAnswers(
   questions: readonly ToolRequestUserInputQuestion[],
   answers: Record<string, string>,
 ): ToolRequestUserInputResponse {
-  const out: ToolRequestUserInputResponse["answers"] = {};
+  const out: ToolRequestUserInputResponse['answers'] = {};
   for (const q of questions) {
-    const raw = answers[q.question] ?? answers[q.header] ?? answers[q.id] ?? "";
+    const raw = answers[q.question] ?? answers[q.header] ?? answers[q.id] ?? '';
     if (!raw) {
       out[q.id] = { answers: [] };
       continue;
@@ -746,11 +751,7 @@ function responseFromAskUserAnswers(
     try {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        out[q.id] = {
-          answers: parsed
-            .filter((v): v is string => typeof v === "string")
-            .map(truncateAnswerText),
-        };
+        out[q.id] = { answers: parsed.filter((v): v is string => typeof v === 'string').map(truncateAnswerText) };
         continue;
       }
     } catch {
@@ -763,43 +764,81 @@ function responseFromAskUserAnswers(
 
 function responseFromPermissionDecision(
   questions: readonly ToolRequestUserInputQuestion[],
-  decision: Extract<InteractionDecision, { kind: "permission" }>,
+  decision: Extract<InteractionDecision, { kind: 'permission' }>,
 ): ToolRequestUserInputResponse {
-  if (decision.behavior === "deny") return emptyUserInputResponse(questions);
-  const out: ToolRequestUserInputResponse["answers"] = {};
+  if (decision.behavior === 'deny') return emptyUserInputResponse(questions);
+  const out: ToolRequestUserInputResponse['answers'] = {};
   for (const q of questions) {
     const positiveOption = q.options?.find((option) =>
-      /^(allow|approve|accept|yes|continue|confirm)$/i.test(
-        option.label.trim(),
-      ),
+      /^(allow|approve|accept|yes|continue|confirm)$/i.test(option.label.trim()),
     );
-    const option = positiveOption?.label ?? q.options?.[0]?.label ?? "allow";
+    const option = positiveOption?.label ?? q.options?.[0]?.label ?? 'allow';
     out[q.id] = { answers: [option] };
   }
   return { answers: out };
 }
 
-function dynamicToolResponseFromUserInput(
-  response: ToolRequestUserInputResponse,
-): DynamicToolCallResponse {
+function dynamicToolResponseFromUserInput(response: ToolRequestUserInputResponse): DynamicToolCallResponse {
   return {
     success: true,
-    contentItems: [
-      { type: "inputText", text: JSON.stringify(response.answers) },
-    ],
+    contentItems: [{ type: 'inputText', text: JSON.stringify(response.answers) }],
   };
 }
 
-function normalizeServiceTier(
-  serviceTier: ServiceTier | null | undefined,
-): ServiceTier | null | undefined {
-  return serviceTier === "priority" ? "fast" : serviceTier;
+function userInputQuestionsFingerprint(
+  questions: readonly ToolRequestUserInputQuestion[],
+): string {
+  return JSON.stringify(questions.map((question) => ({
+    header: question.header,
+    question: question.question,
+    isOther: question.isOther === true,
+    options: (question.options ?? []).map((option) => ({
+      label: option.label,
+      description: option.description,
+    })),
+  })));
 }
 
-function isFastServiceTier(
-  serviceTier: ServiceTier | null | undefined,
-): boolean {
-  return normalizeServiceTier(serviceTier) === "fast";
+type UserInputAnswersByPosition = string[][];
+
+interface PendingUserInputInteraction {
+  interactionPromise: Promise<UserInputAnswersByPosition>;
+  cancelledPromise: Promise<void>;
+  cancel: () => void;
+}
+
+function userInputAnswersByPosition(
+  questions: readonly ToolRequestUserInputQuestion[],
+  response: ToolRequestUserInputResponse,
+): UserInputAnswersByPosition {
+  return questions.map((question) =>
+    response.answers[question.id]?.answers.slice() ?? [],
+  );
+}
+
+function responseFromUserInputAnswersByPosition(
+  questions: readonly ToolRequestUserInputQuestion[],
+  answersByPosition: readonly (readonly string[])[],
+): ToolRequestUserInputResponse {
+  const answers: ToolRequestUserInputResponse['answers'] = {};
+  questions.forEach((question, index) => {
+    answers[question.id] = { answers: [...(answersByPosition[index] ?? [])] };
+  });
+  return { answers };
+}
+
+function hasSubmittedUserInput(answersByPosition: readonly (readonly string[])[]): boolean {
+  return answersByPosition.some((answers) =>
+    answers.some((value) => value.trim().length > 0),
+  );
+}
+
+function normalizeServiceTier(serviceTier: ServiceTier | null | undefined): ServiceTier | null | undefined {
+  return serviceTier === 'priority' ? 'fast' : serviceTier;
+}
+
+function isFastServiceTier(serviceTier: ServiceTier | null | undefined): boolean {
+  return normalizeServiceTier(serviceTier) === 'fast';
 }
 
 function skillDescription(skill: SkillMetadata): string | undefined {
@@ -811,12 +850,29 @@ function skillDescription(skill: SkillMetadata): string | undefined {
   );
 }
 
-function parseLeadingSlashToken(
-  text: string,
-): { name: string; rest: string } | null {
+function isPaletteVisibleCodexSkill(skill: SkillMetadata): boolean {
+  if (!skill.enabled || skill.scope === 'system' || skill.scope === 'admin') return false;
+
+  // Codex plugins can contribute internal skills and currently report them as scope=user.
+  // They remain available to Codex's own dispatch, but Cindy's slash palette should only
+  // expose installed user/repo skills instead of every plugin implementation detail.
+  const normalizedPath = skill.path.replace(/\\/g, '/');
+  return !/\/plugins\/cache\/[^/]+\/[^/]+\/[^/]+\/skills\//i.test(normalizedPath);
+}
+
+function parseLeadingSlashToken(text: string): { name: string; rest: string } | null {
   const match = text.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
   if (!match?.[1]) return null;
-  return { name: match[1], rest: match[2] ?? "" };
+  return { name: match[1], rest: match[2] ?? '' };
+}
+
+function isExpectedTurnIdMismatchError(error: unknown): boolean {
+  const code =
+    typeof error === 'object' && error !== null && 'code' in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return code === -32600 && /expected active turn id\b[\s\S]*\bbut found\b/i.test(message);
 }
 
 // 插话 (steer) 时 turn/steer RPC 的 ack 有界等待上限。AppServerClient.request
@@ -829,15 +885,119 @@ const STEER_ACK_TIMEOUT_MS = 10_000;
 // 免审 turn 将无声继续跑 (review #969 第六轮 Greptile P1)。取值与 steer 同款 10s。
 const TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS = 10_000;
 
+// Permission profile refresh / replacement runs before turn/start and therefore
+// sits on the message acceptance path. Keep its app-server acknowledgement
+// bounded so a live-but-unresponsive daemon cannot freeze the queued message or
+// ignore Stop.
+const PROFILE_LIFECYCLE_ACK_TIMEOUT_MS = 10_000;
+
+// thread/start / thread/resume / turn/start 的 RPC 上限。AppServerClient.request
+// 默认无超时 — 远端 daemon 失联 (SSH 隧道半开 / daemon 挂起但 socket 未断) 时
+// 裸 await 永久挂起, session 永远停在 generating (issue #677 同类断链面)。
+// 60s 足够覆盖慢 SSH 链路 + daemon 冷启动, 超时后走既有的「启动失败」收口
+// (terminal error + Done status)。注意: 超时只代表**我们不再等**, server 侧
+// 可能实际已建 thread/turn — 迟到事件按 stale turn 丢弃, 不影响 UI 复位。
+const CRITICAL_THREAD_RPC_TIMEOUT_MS = 60_000;
+
+/**
+ * upstream-response-idle watchdog 阈值 — codex 侧对齐 claude-code 的同名机制
+ * (claude-code/index.ts parseIdleTimeoutMs)。默认 30min, env
+ * `XDT_CODEX_IDLE_TIMEOUT_MS` (ms) 覆盖, 设 0 关闭。
+ *
+ * 背景: codex 此前只有 willRetry 风暴的终局升级 (retry-escalation.ts) —— 那只覆盖
+ * "daemon 在不停重试并如实上报"的情形。daemon **静默**卡死 (后端连接半开、内部
+ * 死锁、app-server 不再投递任何通知) 时没有任何兜底, turn 在 UI 上永远转圈。
+ *
+ * 计时语义与 claude 侧一致: 只在"客户端把 ball 交给上游、等上游回话"期间计时。
+ *  - 有未完成的工具类 item (命令执行 / MCP / 动态工具 / web 搜索 / 图像生成) →
+ *    停表: 工具执行由 daemon 侧承担, 长 build / 拉大表 / 等审批不该被误杀。
+ *  - 任何投递给上层的事件 (reasoning / text delta / status / item 更新) → 重置。
+ * 触发后走 turn/interrupt (与用户手动 Stop 同路径, 不销毁 thread), 并推一条终态
+ * error, reason 与 claude 侧共用 'upstream_response_idle_timeout'。
+ */
+const CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS = 30 * 60_000;
+
+/** upstream-idle 看门狗的计时分片长度(见 armUpstreamIdleSlice)。 */
+const CODEX_UPSTREAM_IDLE_SLICE_MS = 60_000;
+
+/** 分片实际耗时超出片长这么多 → 判为进程被系统挂起过,该片不计入额度。 */
+const CODEX_UPSTREAM_IDLE_SUSPEND_GAP_MS = 30_000;
+
+/**
+ * Codex app-server `Reconnecting... N/M` 的总等待上限。复用 retry-escalation
+ * 的 120s 语义，避免有限重连提示在最后一档之后静默卡住；这是整个重连序列的
+ * deadline，不会因为后续的 `2/5`、`3/5` 提示重新计时。
+ */
+const CODEX_RECONNECT_STALL_TIMEOUT_MS = RETRY_ESCALATION_MAX_ELAPSED_MS;
+
+/** 只含空白、格式字符或控制字符的 text delta 不算重连已经恢复。 */
+const CODEX_INVISIBLE_TEXT_PATTERN = /[\s\p{Cf}\p{Cc}]/gu;
+
+function hasVisibleCodexText(text: unknown): boolean {
+  return typeof text === 'string' && text.replace(CODEX_INVISIBLE_TEXT_PATTERN, '').length > 0;
+}
+
+function parseCodexIdleTimeoutMs(raw: string | undefined): number {
+  if (raw === undefined || raw === '') return CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS;
+  return Math.floor(n);
+}
+
+/**
+ * "球不在上游"的 item 类型白名单:这些 item 在 started → completed 之间由 daemon
+ * 侧执行(或在等用户审批),期间上游不欠我们回话,idle watchdog 必须停表。
+ * 与 translator 的 item 分派保持同一词表(codex/translator.ts)。
+ */
+const CODEX_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set([
+  'commandExecution',
+  'mcpToolCall',
+  'dynamicToolCall',
+  'collabAgentToolCall',
+  'webSearch',
+  'imageGeneration',
+  'imageView',
+  'fileChange',
+]);
+
+/**
+ * Codex 权限档的严格度序（数值越大越严）。Codex 只支持 ask / auto /
+ * bypassPermissions 三档，其余取值走 clamp 后不会到这里；未知值按最严处理，
+ * 让比较偏向「需要中断」而不是放行。
+ *
+ * 用途：判断过载重投持的**冻结**策略是否比当前选择的档更宽。只比较最近一次
+ * 模式转换会漏掉 Full access → Ask → Auto 这类中间态。
+ */
+function codexPermissionStrictnessRank(mode: PermissionMode): number {
+  switch (mode) {
+    case 'bypassPermissions':
+      return 0;
+    case 'auto':
+      return 1;
+    case 'ask':
+      return 2;
+    default:
+      return 2;
+  }
+}
+
 // 计划批准后自动发起实施 turn 的固定输入 — 与官方 TUI 逐字一致
 // (codex-rs/tui/src/chatwidget/plan_implementation.rs 的
 // PLAN_IMPLEMENTATION_CODING_MESSAGE), 模型对这句有训练分布上的既有理解。
-const PLAN_IMPLEMENTATION_MESSAGE = "Implement the plan.";
+const PLAN_IMPLEMENTATION_MESSAGE = 'Implement the plan.';
+const CODEX_INHERITED_CAPABILITY_SELECTION = Symbol('codexInheritedCapabilitySelection');
+// 计划实施/修订 turn 的**审查意图**:这些 turn 的 message 是固定内部串('Implement the plan.'),
+// 直接拿它当 review intent 会让灰区 reviewer 完全看不到用户原始请求与获批计划(codex 报)。
+const CODEX_AUTO_REVIEW_INTENT = Symbol('codexAutoReviewIntent');
+type CodexInternalSendOptions = SendOptions & {
+  [CODEX_INHERITED_CAPABILITY_SELECTION]?: string;
+  [CODEX_AUTO_REVIEW_INTENT]?: string;
+};
 const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
-  "no_listener_attached",
-  "no_interaction_resolver",
-  "interaction_resolver_error",
-  "user_rejected",
+  'no_listener_attached',
+  'no_interaction_resolver',
+  'interaction_resolver_error',
+  'user_rejected',
 ]);
 
 // ── 能力声明 (Phase 3 全开) ──────────────────────────────────────────────────
@@ -847,57 +1007,20 @@ const SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS = new Set([
 // (见 apps/desktop/src/main/maker-host/catalog-to-descriptors.ts)。
 
 const CODEX_EFFORTS: EffortDescriptor[] = [
-  {
-    id: "low",
-    displayName: "Low",
-    description: "Fast responses with minimal reasoning",
-  },
-  {
-    id: "medium",
-    displayName: "Medium",
-    description: "Balanced reasoning depth",
-  },
-  {
-    id: "high",
-    displayName: "High",
-    description: "Deeper reasoning for harder tasks",
-  },
-  {
-    id: "xhigh",
-    displayName: "Extra High",
-    description: "Extended reasoning budget",
-  },
+  { id: 'low', displayName: 'Low', description: 'Fast responses with minimal reasoning' },
+  { id: 'medium', displayName: 'Medium', description: 'Balanced reasoning depth' },
+  { id: 'high', displayName: 'High', description: 'Deeper reasoning for harder tasks' },
+  { id: 'xhigh', displayName: 'Extra High', description: 'Extended reasoning budget' },
   // max/ultra 仅部分模型支持(如 GPT-5.6 Sol);实际是否可选由该模型目录 efforts 决定,
   // 这里只提供 agent 级档名/描述兜底(桌面 i18n effortLevels.* 优先)。
-  {
-    id: "max",
-    displayName: "Max",
-    description: "Very high reasoning budget (model-dependent)",
-  },
-  {
-    id: "ultra",
-    displayName: "Ultra",
-    description: "Maximum reasoning budget (model-dependent)",
-  },
+  { id: 'max', displayName: 'Max', description: 'Very high reasoning budget (model-dependent)' },
+  { id: 'ultra', displayName: 'Ultra', description: 'Maximum reasoning budget (model-dependent)' },
 ];
 
 const CODEX_PERMISSION_MODES: PermissionModeDescriptor[] = [
-  {
-    id: "ask",
-    displayName: "Default permissions",
-    description: "工作区内可读写,需要更多权限时询问",
-  },
-  {
-    id: "auto",
-    displayName: "Auto",
-    description:
-      "工作区沙箱内自动执行,越界操作交给自动审查器;高风险操作可能拒绝或询问",
-  },
-  {
-    id: "bypassPermissions",
-    displayName: "Full access",
-    description: "可改任意文件、跑联网命令,免询问;风险高",
-  },
+  { id: 'ask', displayName: 'Default permissions', description: '工作区内可读写,需要更多权限时询问' },
+  { id: 'auto', displayName: 'Auto', description: '工作区沙箱内自动执行,越界操作交给自动审查器;高风险操作可能拒绝或询问' },
+  { id: 'bypassPermissions', displayName: 'Full access', description: '可改任意文件、跑联网命令,免询问;风险高' },
 ];
 
 const CAPABILITIES: Capabilities = {
@@ -907,9 +1030,14 @@ const CAPABILITIES: Capabilities = {
   hasFastMode: true,
   effort: { supported: true },
   effortLevels: CODEX_EFFORTS,
-  reasoningDisplay: ["off", "summarized"],
+  reasoningDisplay: ['off', 'summarized'],
   permissionModes: CODEX_PERMISSION_MODES,
   setPermissionModeMidSession: { supported: true },
+  turnPermissionPolicy: {
+    supported: { supported: true },
+    // Full access can mutate workspace files without a host approval callback.
+    unsupportedPermissionModes: ['bypassPermissions'],
+  },
   // 计划模式一级开关: app-server experimental collaborationMode ({ mode:'plan' }) +
   // plan item 捕获 → plan_review 审批 → 批准后自动发起实施 turn (对齐官方 TUI 流程)。
   planMode: { supported: true },
@@ -927,10 +1055,9 @@ const CAPABILITIES: Capabilities = {
   sameTurnSteer: { supported: true },
   memory: {
     supported: { supported: true },
-    displayName: "记忆 (实验性)",
-    description:
-      "从聊天中生成新记忆并在新对话中召回 (Codex Feature::MemoryTool, 默认关)",
-    stage: "experimental",
+    displayName: '记忆 (实验性)',
+    description: '从对话中生成新记忆并在后续对话中召回 (Codex Feature::MemoryTool, 默认关)',
+    stage: 'experimental',
     defaultEnabled: false,
     resettable: true,
     // experimentalFeature/enablement/set 是 in-memory 进程级覆盖, server 自动 reload_user_config
@@ -945,7 +1072,7 @@ const CAPABILITIES: Capabilities = {
 // ── UserMessage → app-server UserInput[] ─────────────────────────────────────
 
 function stripFileUrl(raw: string): string {
-  return raw.startsWith("file://") ? raw.slice("file://".length) : raw;
+  return raw.startsWith('file://') ? raw.slice('file://'.length) : raw;
 }
 
 function basenameForMention(rawPath: string): string {
@@ -958,14 +1085,10 @@ function basenameForMention(rawPath: string): string {
     end -= 1;
   }
   const trimmed = pathWithoutScheme.slice(0, end);
-  const lastPosixSlash = trimmed.lastIndexOf("/");
-  const lastWinSlash = trimmed.lastIndexOf("\\");
+  const lastPosixSlash = trimmed.lastIndexOf('/');
+  const lastWinSlash = trimmed.lastIndexOf('\\');
   const lastSlash = Math.max(lastPosixSlash, lastWinSlash);
-  return (
-    (lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed) ||
-    trimmed ||
-    "file"
-  );
+  return (lastSlash >= 0 ? trimmed.slice(lastSlash + 1) : trimmed) || trimmed || 'file';
 }
 
 function isPathSeparator(code: number): boolean {
@@ -978,91 +1101,81 @@ function isAsciiLetter(code: number): boolean {
 
 function isWindowsPath(rawPath: string): boolean {
   return (
-    (rawPath.length >= 3 &&
+    (
+      rawPath.length >= 3 &&
       isAsciiLetter(rawPath.charCodeAt(0)) &&
       rawPath.charCodeAt(1) === 58 &&
-      isPathSeparator(rawPath.charCodeAt(2))) ||
-    rawPath.startsWith("\\\\")
+      isPathSeparator(rawPath.charCodeAt(2))
+    ) ||
+    rawPath.startsWith('\\\\')
   );
 }
 
 function resolveMentionPath(rawPath: string, workingDir?: string): string {
   const stripped = stripFileUrl(rawPath);
   if (!workingDir) return stripped;
-  if (isWindowsPath(stripped) || path.posix.isAbsolute(stripped))
-    return stripped;
-  if (isWindowsPath(workingDir))
-    return path.win32.resolve(workingDir, stripped);
-  if (path.posix.isAbsolute(workingDir))
-    return path.posix.resolve(workingDir, stripped);
+  if (isWindowsPath(stripped) || path.posix.isAbsolute(stripped)) return stripped;
+  if (isWindowsPath(workingDir)) return path.win32.resolve(workingDir, stripped);
+  if (path.posix.isAbsolute(workingDir)) return path.posix.resolve(workingDir, stripped);
   return path.resolve(workingDir, stripped);
 }
 
 function isToolMentionPath(mentionPath: string): boolean {
-  return (
-    mentionPath.startsWith("app://") || mentionPath.startsWith("plugin://")
-  );
+  return mentionPath.startsWith('app://') || mentionPath.startsWith('plugin://');
 }
 
 interface ReferencedPath {
-  kind: "file" | "dir";
+  kind: 'file' | 'dir';
   label: string;
   path: string;
 }
 
-const FILES_MENTIONED_HEADER = "# Files mentioned by the user:";
-const DIRECTORIES_MENTIONED_HEADER = "# Directories mentioned by the user:";
-const USER_REQUEST_HEADER = "## My request for Codex:";
+const FILES_MENTIONED_HEADER = '# Files mentioned by the user:';
+const DIRECTORIES_MENTIONED_HEADER = '# Directories mentioned by the user:';
+const USER_REQUEST_HEADER = '## My request for Codex:';
 
 function referencedPathForBlock(
   rawPath: string,
   workingDir: string | undefined,
-  kind: "file" | "dir" | "agent" | undefined,
+  kind: 'file' | 'dir' | 'agent' | undefined,
 ): ReferencedPath {
   const resolved = resolveMentionPath(rawPath, workingDir);
   return {
-    kind: kind === "dir" ? "dir" : "file",
+    kind: kind === 'dir' ? 'dir' : 'file',
     label: basenameForMention(resolved),
     path: resolved,
   };
 }
 
-function appendReferencedPathSection(
-  lines: string[],
-  header: string,
-  refs: ReferencedPath[],
-): void {
+function appendReferencedPathSection(lines: string[], header: string, refs: ReferencedPath[]): void {
   if (refs.length === 0) return;
-  if (lines.length > 0) lines.push("");
-  lines.push(header, "");
+  if (lines.length > 0) lines.push('');
+  lines.push(header, '');
   for (const ref of refs) {
-    lines.push(`## ${ref.label}: ${ref.path}`, "");
+    lines.push(`## ${ref.label}: ${ref.path}`, '');
   }
   lines.pop();
 }
 
-function formatReferencedPathsForCodex(
-  refs: ReferencedPath[],
-  requestText: string,
-): string {
+function formatReferencedPathsForCodex(refs: ReferencedPath[], requestText: string): string {
   const lines: string[] = [];
-  appendReferencedPathSection(
-    lines,
-    FILES_MENTIONED_HEADER,
-    refs.filter((ref) => ref.kind === "file"),
-  );
-  appendReferencedPathSection(
-    lines,
-    DIRECTORIES_MENTIONED_HEADER,
-    refs.filter((ref) => ref.kind === "dir"),
-  );
+  appendReferencedPathSection(lines, FILES_MENTIONED_HEADER, refs.filter((ref) => ref.kind === 'file'));
+  appendReferencedPathSection(lines, DIRECTORIES_MENTIONED_HEADER, refs.filter((ref) => ref.kind === 'dir'));
 
   if (requestText.length > 0) {
-    if (lines.length > 0) lines.push("");
+    if (lines.length > 0) lines.push('');
     lines.push(USER_REQUEST_HEADER, requestText);
   }
 
-  return lines.join("\n");
+  return lines.join('\n');
+}
+
+function userMessageText(content: UserMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((block): block is Extract<(typeof content)[number], { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n');
 }
 
 /**
@@ -1075,20 +1188,20 @@ function formatReferencedPathsForCodex(
  * 远程 http(s):// 图片不动 (resizer 不抓远程图)。失败安全降级回原 path。
  */
 export async function toAppServerInput(
-  content: UserMessage["content"],
+  content: UserMessage['content'],
   workingDir?: string,
 ): Promise<UserInput[]> {
-  if (typeof content === "string") {
-    return [{ type: "text", text: content }];
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }];
   }
 
   const resizer = getDefaultImageResizer();
   // 同 turn 多张本地图并发缩, semaphore 在 resizer 内部控并发上限
   const localImageJobs = new Map<number, Promise<string>>();
   content.forEach((block, idx) => {
-    if (block.type !== "image") return;
+    if (block.type !== 'image') return;
     const raw = block.path;
-    if (raw.startsWith("http://") || raw.startsWith("https://")) return;
+    if (raw.startsWith('http://') || raw.startsWith('https://')) return;
     localImageJobs.set(idx, resizer.process(stripFileUrl(raw)));
   });
   const resizedPaths = new Map<number, string>();
@@ -1096,10 +1209,7 @@ export async function toAppServerInput(
     resizedPaths.set(idx, await p);
   }
 
-  type PlannedInput =
-    | UserInput
-    | { type: "referencedPathsPreamble" }
-    | { type: "requestText"; text: string };
+  type PlannedInput = UserInput | { type: 'referencedPathsPreamble' } | { type: 'requestText'; text: string };
   const inputs: UserInput[] = [];
   const plannedInputs: PlannedInput[] = [];
   const referencedPaths: ReferencedPath[] = [];
@@ -1108,58 +1218,47 @@ export async function toAppServerInput(
 
   const insertPreambleOnce = (): void => {
     if (preambleInserted) return;
-    plannedInputs.push({ type: "referencedPathsPreamble" });
+    plannedInputs.push({ type: 'referencedPathsPreamble' });
     preambleInserted = true;
   };
 
   content.forEach((block, idx) => {
-    if (block.type === "text") {
+    if (block.type === 'text') {
       requestTexts.push(block.text);
       insertPreambleOnce();
-      plannedInputs.push({ type: "requestText", text: block.text });
-    } else if (block.type === "image") {
+      plannedInputs.push({ type: 'requestText', text: block.text });
+    } else if (block.type === 'image') {
       // 协议两个变体 (v2.rs UserInput):
       //   - Image { url: string }       — 远程 http(s):// URL, server fetch
       //   - LocalImage { path: string } — 本地绝对路径, server 自己读 (path 不带 file:// 前缀!)
       // 桌面端附件 99% 是本地图, 走 LocalImage; 只在 path 是 http(s):// 时走 Image。
       const raw = block.path;
-      if (raw.startsWith("http://") || raw.startsWith("https://")) {
-        plannedInputs.push({ type: "image", url: raw });
+      if (raw.startsWith('http://') || raw.startsWith('https://')) {
+        plannedInputs.push({ type: 'image', url: raw });
       } else {
         // 去掉可能带的 file:// 前缀, server 期望裸路径 (PathBuf)。
         // 优先用 resizer 缩好的副本, miss 时降级回原 path。
         const finalPath = resizedPaths.get(idx) ?? stripFileUrl(raw);
-        plannedInputs.push({ type: "localImage", path: finalPath });
+        plannedInputs.push({ type: 'localImage', path: finalPath });
       }
-    } else if (block.type === "file") {
-      referencedPaths.push(
-        referencedPathForBlock(block.path, workingDir, "file"),
-      );
+    } else if (block.type === 'file') {
+      referencedPaths.push(referencedPathForBlock(block.path, workingDir, 'file'));
       insertPreambleOnce();
-    } else if (block.type === "mention") {
+    } else if (block.type === 'mention') {
       if (!block.kind && isToolMentionPath(block.path)) {
-        plannedInputs.push({
-          type: "mention",
-          name: block.name || basenameForMention(block.path),
-          path: block.path,
-        });
+        plannedInputs.push({ type: 'mention', name: block.name || basenameForMention(block.path), path: block.path });
       } else {
-        referencedPaths.push(
-          referencedPathForBlock(block.path, workingDir, block.kind),
-        );
+        referencedPaths.push(referencedPathForBlock(block.path, workingDir, block.kind));
         insertPreambleOnce();
       }
     }
   });
   if (referencedPaths.length > 0) {
-    const preamble = formatReferencedPathsForCodex(
-      referencedPaths,
-      requestTexts.join("\n"),
-    );
+    const preamble = formatReferencedPathsForCodex(referencedPaths, requestTexts.join('\n'));
     for (const item of plannedInputs) {
-      if (item.type === "referencedPathsPreamble") {
-        inputs.push({ type: "text", text: preamble });
-      } else if (item.type === "requestText") {
+      if (item.type === 'referencedPathsPreamble') {
+        inputs.push({ type: 'text', text: preamble });
+      } else if (item.type === 'requestText') {
         // Text is already folded into the Desktop-style request section.
       } else {
         inputs.push(item);
@@ -1167,23 +1266,23 @@ export async function toAppServerInput(
     }
   } else {
     for (const item of plannedInputs) {
-      if (item.type === "referencedPathsPreamble") {
+      if (item.type === 'referencedPathsPreamble') {
         // No path references: keep the previous per-block text behavior below.
-      } else if (item.type === "requestText") {
-        inputs.push({ type: "text", text: item.text });
+      } else if (item.type === 'requestText') {
+        inputs.push({ type: 'text', text: item.text });
       } else {
         inputs.push(item);
       }
     }
   }
-  if (inputs.length === 0) inputs.push({ type: "text", text: "" });
+  if (inputs.length === 0) inputs.push({ type: 'text', text: '' });
   return inputs;
 }
 
 // ── Agent 实现 ────────────────────────────────────────────────────────────────
 
 export class CodexAgent extends BaseAgent {
-  readonly kind = "codex" as const;
+  readonly kind = 'codex' as const;
   readonly capabilities: Capabilities;
 
   /**
@@ -1203,15 +1302,12 @@ export class CodexAgent extends BaseAgent {
    * 启动期间并发 (skillHubScanner / startSession / IPC list) 各看到 hosts.get(...)=undefined,
    * 各自 spawn 一个 codex app-server 子进程, 第二个会覆盖 hosts.set(...), 第一个变孤儿。
    */
-  private hostPromises = new Map<
-    string,
-    {
-      promise: Promise<AppServerHost>;
-      credentialMode: AgentCredentialMode | undefined;
-      credentialModeResolved: boolean;
-      generation: number;
-    }
-  >();
+  private hostPromises = new Map<string, {
+    promise: Promise<AppServerHost>;
+    credentialMode: AgentCredentialMode | undefined;
+    credentialModeResolved: boolean;
+    generation: number;
+  }>();
 
   /**
    * 本地 app-server 的 spawn-time 凭证形态(超集归一化后的实际 spawn 形态)。
@@ -1222,10 +1318,7 @@ export class CodexAgent extends BaseAgent {
    * 进程服务不了订阅会话。createHost 对本地 gateway-key 诉求做超集归一化(有 OAuth 时
    * 升格为 oauth-bearer spawn),登记的就是归一化后的形态。
    */
-  private hostCredentialModes = new Map<
-    string,
-    AgentCredentialMode | undefined
-  >();
+  private hostCredentialModes = new Map<string, AgentCredentialMode | undefined>();
   /**
    * createHost 时从(本来就要做的)auth.getState 推出的归一化凭证形态。
    * hostCredentialModes 登记实际 spawn 形态 —— getHost 快路径对实际形态与诉求
@@ -1233,10 +1326,7 @@ export class CodexAgent extends BaseAgent {
    * 不等、需要跨形态仲裁时参与 canReuseCodexHostForCredentialMode 比较(review P2:
    * 归一化解析含 fs,不允许进无条件路径)。
    */
-  private hostEffectiveCredentialModes = new Map<
-    string,
-    AgentCredentialMode | undefined
-  >();
+  private hostEffectiveCredentialModes = new Map<string, AgentCredentialMode | undefined>();
 
   /**
    * target host 的生命周期版本。只在 agent 主动替换/销毁 host 时递增。
@@ -1306,22 +1396,20 @@ export class CodexAgent extends BaseAgent {
    * Skill 扫描 —— 与老 listSlashCommands 共享同一套 listSkillsForCwd / 未授权静默处理,
    * 只是包成新的 AgentSkillCommand 形状(kind='agent-skill')。
    */
-  override async listAgentSkills(
-    opts: ListAgentSkillsOptions,
-  ): Promise<ListAgentSkillsResult> {
+  override async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
+    // Codex app-server 的 skills/list 强制要求 cwd；无项目的新对话用 HOME 作为
+    // 查询上下文，既能发现全局 skills，又不会误带任意项目的 repo skills。
+    const workingDir = opts.workingDir || os.homedir();
     try {
-      const { skills, errors } = await this.listSkillsForCwd(
-        opts.workingDir,
-        opts.forceReload ?? false,
-      );
+      const { skills, errors } = await this.listSkillsForCwd(workingDir, opts.forceReload ?? false);
       const out: ListAgentSkillsResult = {
         skills: skills
-          .filter((skill) => skill.enabled)
+          .filter(isPaletteVisibleCodexSkill)
           .map((skill) => ({
-            kind: "agent-skill" as const,
+            kind: 'agent-skill' as const,
             name: skill.name,
             description: skillDescription(skill),
-            source: "skill" as const,
+            source: 'skill' as const,
             path: skill.path,
             scope: skill.scope,
             enabled: skill.enabled,
@@ -1345,33 +1433,24 @@ export class CodexAgent extends BaseAgent {
    * 用于 SkillHub 管理页面（快速发现磁盘上的 skill）。
    * 运行时技能列表（command palette）走 listAgentSkills → RPC，不受影响。
    */
-  async listCustomizations(
-    opts: ListCustomizationsOptions,
-  ): Promise<ListCustomizationsResult> {
+  async listCustomizations(opts: ListCustomizationsOptions): Promise<ListCustomizationsResult> {
     return scanCodexCustomizations(opts);
   }
 
   private async listSkillsForCwd(
     workingDir: string,
     forceReload: boolean,
-  ): Promise<{
-    skills: SkillMetadata[];
-    errors: Array<{ path?: string; message: string }>;
-  }> {
+  ): Promise<{ skills: SkillMetadata[]; errors: Array<{ path?: string; message: string }> }> {
     const { host } = await this.getUtilityHost();
     const response = await host.request<SkillsListResponse>(Method.SkillsList, {
       cwds: [workingDir],
       forceReload,
       perCwdExtraUserRoots: null,
     });
-    const entry =
-      response.data.find((item) => item.cwd === workingDir) ?? response.data[0];
+    const entry = response.data.find((item) => item.cwd === workingDir) ?? response.data[0];
     return {
       skills: entry?.skills ?? [],
-      errors: (entry?.errors ?? []).map((err) => ({
-        path: err.path,
-        message: err.message,
-      })),
+      errors: (entry?.errors ?? []).map((err) => ({ path: err.path, message: err.message })),
     };
   }
 
@@ -1400,21 +1479,18 @@ export class CodexAgent extends BaseAgent {
     currentMode: AgentCredentialMode | undefined,
     requestedMode: AgentCredentialMode | undefined,
   ): boolean {
-    if (!this.canReuseHostCredentialMode(currentMode, requestedMode))
-      return false;
+    if (!this.canReuseHostCredentialMode(currentMode, requestedMode)) return false;
     // provider-oauth(如 xAI)的真实鉴权和 model rewrite 都在 loopback proxy 内完成。
     // 如果当前 host 是 proxy 不可用时退化启动的直连 gateway host, family 虽然可复用,
     // 但请求会绕过 proxy 而误路由;必须重建或由 active-session gate fail closed。
-    if (requestedMode === "provider-oauth" && !host.isCodexProxyActive())
-      return false;
+    if (requestedMode === 'provider-oauth' && !host.isCodexProxyActive()) return false;
     // 超集复用(oauth-bearer host 承载 gateway-key 会话)同样硬依赖 proxy:换网关 key
     // 发生在 proxy 路由层,退化直连的 oauth host 上 key 会话会带 OAuth token 直打网关 → 401。
     if (
-      requestedMode === "gateway-key" &&
-      currentMode === "oauth-bearer" &&
+      requestedMode === 'gateway-key' &&
+      currentMode === 'oauth-bearer' &&
       !host.isCodexProxyActive()
-    )
-      return false;
+    ) return false;
     return true;
   }
 
@@ -1427,15 +1503,12 @@ export class CodexAgent extends BaseAgent {
     currentMode: AgentCredentialMode | undefined,
     requestedMode: AgentCredentialMode | undefined,
   ): Promise<void> {
-    if (currentMode !== "oauth-bearer" || requestedMode !== "gateway-key")
-      return;
-    const state = await this.deps.auth.getState({
-      credentialMode: "gateway-key",
-    });
+    if (currentMode !== 'oauth-bearer' || requestedMode !== 'gateway-key') return;
+    const state = await this.deps.auth.getState({ credentialMode: 'gateway-key' });
     if (!state.authenticated) {
       throw new AgentNotAuthenticatedError(
-        "codex",
-        `codex gateway credentials unavailable: ${state.errorReason ?? "no_credentials"}`,
+        'codex',
+        `codex gateway credentials unavailable: ${state.errorReason ?? 'no_credentials'}`,
       );
     }
   }
@@ -1451,36 +1524,24 @@ export class CodexAgent extends BaseAgent {
     if (requested) return requested;
     try {
       const state = await this.deps.auth.getState();
-      const resolved = resolveEffectiveCredentialModeFromAuthSource(
-        undefined,
-        state.authSource,
-      );
+      const resolved = resolveEffectiveCredentialModeFromAuthSource(undefined, state.authSource);
       if (resolved) {
         // 只在跨形态仲裁时才会走到这里(懒解析),频率低;debug 级避免刷日志。
-        this.deps.logger.debug(
-          "codex getHost: implicit credential mode resolved from auth fallback",
-          {
-            authSource: state.authSource,
-            resolved,
-          },
-        );
+        this.deps.logger.debug('codex getHost: implicit credential mode resolved from auth fallback', {
+          authSource: state.authSource,
+          resolved,
+        });
       } else {
-        this.deps.logger.warn(
-          "codex getHost: implicit credential mode unresolved; keeping legacy strict comparison",
-          {
-            authenticated: state.authenticated,
-            errorReason: state.errorReason,
-          },
-        );
+        this.deps.logger.warn('codex getHost: implicit credential mode unresolved; keeping legacy strict comparison', {
+          authenticated: state.authenticated,
+          errorReason: state.errorReason,
+        });
       }
       return resolved;
     } catch (error) {
-      this.deps.logger.warn(
-        "codex getHost: implicit credential mode resolution failed; keeping legacy strict comparison",
-        {
-          error: error instanceof Error ? error.message : String(error),
-        },
-      );
+      this.deps.logger.warn('codex getHost: implicit credential mode resolution failed; keeping legacy strict comparison', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return undefined;
     }
   }
@@ -1492,10 +1553,7 @@ export class CodexAgent extends BaseAgent {
   }
 
   private acquireHostSessionBindingLease(key: string): () => void {
-    this.hostSessionBindingLeases.set(
-      key,
-      (this.hostSessionBindingLeases.get(key) ?? 0) + 1,
-    );
+    this.hostSessionBindingLeases.set(key, (this.hostSessionBindingLeases.get(key) ?? 0) + 1);
     let released = false;
     return () => {
       if (released) return;
@@ -1513,8 +1571,7 @@ export class CodexAgent extends BaseAgent {
   ): number {
     const bindingLeases = Math.max(
       0,
-      (this.hostSessionBindingLeases.get(key) ?? 0) -
-        (opts.ignoreBindingLeases ?? 0),
+      (this.hostSessionBindingLeases.get(key) ?? 0) - (opts.ignoreBindingLeases ?? 0),
     );
     return host.activeSubscriptions + bindingLeases;
   }
@@ -1531,13 +1588,7 @@ export class CodexAgent extends BaseAgent {
       if (!previous) break;
       await previous.catch(() => undefined);
     }
-    const run = this.shutdownHostForCredentialModeChangeUnlocked(
-      key,
-      host,
-      fromMode,
-      toMode,
-      opts,
-    );
+    const run = this.shutdownHostForCredentialModeChangeUnlocked(key, host, fromMode, toMode, opts);
     this.hostCredentialModeSwitches.set(key, run);
     try {
       await run;
@@ -1557,7 +1608,7 @@ export class CodexAgent extends BaseAgent {
   }
 
   async beginLocalHostCredentialChange(
-    reason = "CodexAgent local credential state changed",
+    reason = 'CodexAgent local credential state changed',
   ): Promise<{
     assertIdle(): void;
     finalize(): Promise<void>;
@@ -1620,10 +1671,8 @@ export class CodexAgent extends BaseAgent {
     if (this.hosts.get(key) !== host) return;
     const currentMode = this.hostCredentialModes.get(key);
     // 仲裁用归一化形态(登记于 createHost,零额外 IO);缺失时回退原始形态。
-    const currentEffective =
-      this.hostEffectiveCredentialModes.get(key) ?? currentMode;
-    if (this.canReuseHostForCredentialRequest(host, currentEffective, toMode))
-      return;
+    const currentEffective = this.hostEffectiveCredentialModes.get(key) ?? currentMode;
+    if (this.canReuseHostForCredentialRequest(host, currentEffective, toMode)) return;
 
     let activeUseCount = this.hostActiveUseCount(key, host, opts);
     const coordinator = this.deps.prepareCodexLocalCredentialModeSwitch;
@@ -1647,15 +1696,12 @@ export class CodexAgent extends BaseAgent {
       );
     }
 
-    this.deps.logger.info(
-      "codex createHost: credential mode changed, restarting local app-server",
-      {
-        key,
-        fromMode: currentMode ?? fromMode ?? "fallback",
-        fromModeEffective: currentEffective ?? "unresolved",
-        toMode: toMode ?? "fallback",
-      },
-    );
+    this.deps.logger.info('codex createHost: credential mode changed, restarting local app-server', {
+      key,
+      fromMode: currentMode ?? fromMode ?? 'fallback',
+      fromModeEffective: currentEffective ?? 'unresolved',
+      toMode: toMode ?? 'fallback',
+    });
     this.hosts.delete(key);
     this.hostCredentialModes.delete(key);
     this.hostEffectiveCredentialModes.delete(key);
@@ -1664,24 +1710,25 @@ export class CodexAgent extends BaseAgent {
     if (key === hostKey()) this.codexHome = null;
     this.createHostSeqByKey.delete(key);
     try {
-      await host.retire("CodexAgent credential mode changed");
+      await host.retire('CodexAgent credential mode changed');
     } catch (error) {
-      this.deps.logger.warn(
-        "codex host shutdown after credential mode change failed",
-        {
-          key,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      );
+      this.deps.logger.warn('codex host shutdown after credential mode change failed', {
+        key,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
   private async getHost(
     remoteHostId?: string,
     credentialMode?: AgentCredentialMode,
-    opts: { ignoreBindingLeases?: number } = {},
+    opts: {
+      ignoreBindingLeases?: number;
+      keyOverride?: string;
+      hostPurpose?: 'control-plane';
+    } = {},
   ): Promise<AppServerHost> {
-    const key = hostKey(remoteHostId);
+    const key = opts.keyOverride ?? hostKey(remoteHostId);
     // spawnMode = 调用方原始诉求(undefined 保持 adapter fallback,spawn 行为不变)。
     // 复用判定分两级(review P2:归一化解析走 getState、含 reconcile/fs,不允许进
     // 无条件路径):
@@ -1691,16 +1738,11 @@ export class CodexAgent extends BaseAgent {
     //           memo,显式诉求无需解析),与登记的归一化形态(createHost 时零额外
     //           IO 推出)做 canReuseCodexHostForCredentialMode 同族比较。
     const spawnMode = remoteHostId ? undefined : credentialMode;
-    let requestedEffectiveMemo: {
-      value: AgentCredentialMode | undefined;
-    } | null = remoteHostId || credentialMode ? { value: spawnMode } : null;
-    const resolveRequestedEffective = async (): Promise<
-      AgentCredentialMode | undefined
-    > => {
+    let requestedEffectiveMemo: { value: AgentCredentialMode | undefined } | null =
+      remoteHostId || credentialMode ? { value: spawnMode } : null;
+    const resolveRequestedEffective = async (): Promise<AgentCredentialMode | undefined> => {
       if (!requestedEffectiveMemo) {
-        requestedEffectiveMemo = {
-          value: await this.resolveEffectiveLocalCredentialMode(undefined),
-        };
+        requestedEffectiveMemo = { value: await this.resolveEffectiveLocalCredentialMode(undefined) };
       }
       return requestedEffectiveMemo.value;
     };
@@ -1710,12 +1752,11 @@ export class CodexAgent extends BaseAgent {
       registeredEffective: AgentCredentialMode | undefined,
     ): Promise<boolean> => {
       if (registeredRaw === spawnMode) {
-        return spawnMode !== "provider-oauth" || host.isCodexProxyActive();
+        return spawnMode !== 'provider-oauth' || host.isCodexProxyActive();
       }
       const requested = await resolveRequestedEffective();
       const current = registeredEffective ?? registeredRaw;
-      if (!this.canReuseHostForCredentialRequest(host, current, requested))
-        return false;
+      if (!this.canReuseHostForCredentialRequest(host, current, requested)) return false;
       await this.assertSupersetRequestedCredentialAvailable(current, requested);
       return true;
     };
@@ -1726,10 +1767,7 @@ export class CodexAgent extends BaseAgent {
       if (existing) {
         const currentMode = this.hostCredentialModes.get(key);
         const currentEffective = this.hostEffectiveCredentialModes.get(key);
-        if (
-          remoteHostId ||
-          (await canReuseRegistered(existing, currentMode, currentEffective))
-        ) {
+        if (remoteHostId || (await canReuseRegistered(existing, currentMode, currentEffective))) {
           return existing;
         }
         await this.shutdownHostForCredentialModeChange(
@@ -1749,27 +1787,18 @@ export class CodexAgent extends BaseAgent {
         // in-flight host 还不知道 codexProxyActive。provider-oauth 只复用同为 provider-oauth
         // 的 in-flight host(该路径 proxy 不可用会 fatal reject);不挂到 gateway/oauth 启动中的
         // host 上,避免它最终退化成 non-proxy 直连进程。
-        const mayReuseInflight = !(
-          spawnMode === "provider-oauth" &&
-          inflight.credentialMode !== "provider-oauth"
-        );
+        const mayReuseInflight = !(spawnMode === 'provider-oauth' && inflight.credentialMode !== 'provider-oauth');
         // gateway-key 冷启动可能在 createHost 内升格成 oauth-bearer。若并发的订阅
         // 会话恰好在 auth fallback 尚未返回时进来，先等同一个 in-flight host 定型，
         // 再按注册后的实际形态仲裁；不能提前 supersede，避免无意义双 spawn。
         const mayResolveAsOauthSuperset =
           !inflight.credentialModeResolved &&
-          spawnMode === "oauth-bearer" &&
-          inflight.credentialMode === "gateway-key";
-        if (
-          remoteHostId ||
-          mayResolveAsOauthSuperset ||
-          (mayReuseInflight &&
-            (inflight.credentialMode === spawnMode ||
-              this.canReuseHostCredentialMode(
-                inflight.credentialMode,
-                await resolveRequestedEffective(),
-              )))
-        ) {
+          spawnMode === 'oauth-bearer' &&
+          inflight.credentialMode === 'gateway-key';
+        if (remoteHostId || mayResolveAsOauthSuperset || (mayReuseInflight && (
+          inflight.credentialMode === spawnMode ||
+          this.canReuseHostCredentialMode(inflight.credentialMode, await resolveRequestedEffective())
+        ))) {
           if (remoteHostId) return inflight.promise;
           let inflightHost: AppServerHost;
           try {
@@ -1780,25 +1809,14 @@ export class CodexAgent extends BaseAgent {
             // 升格成 OAuth 超集 host；若该校验自身失败(缺 key / key 过期),不能把
             // gateway 的失败传染给凭据有效的订阅会话。failed promise 的 finally
             // 已清掉 hostPromises，重新仲裁会独立创建 oauth-bearer host。
-            this.deps.logger.warn(
-              "codex getHost: unresolved gateway inflight failed; retrying OAuth host independently",
-              {
-                error: error instanceof Error ? error.message : String(error),
-              },
-            );
+            this.deps.logger.warn('codex getHost: unresolved gateway inflight failed; retrying OAuth host independently', {
+              error: error instanceof Error ? error.message : String(error),
+            });
             continue;
           }
-          const registeredRaw =
-            this.hostCredentialModes.get(key) ?? inflight.credentialMode;
-          const registeredEffective =
-            this.hostEffectiveCredentialModes.get(key);
-          if (
-            await canReuseRegistered(
-              inflightHost,
-              registeredRaw,
-              registeredEffective,
-            )
-          ) {
+          const registeredRaw = this.hostCredentialModes.get(key) ?? inflight.credentialMode;
+          const registeredEffective = this.hostEffectiveCredentialModes.get(key);
+          if (await canReuseRegistered(inflightHost, registeredRaw, registeredEffective)) {
             return inflightHost;
           }
           continue;
@@ -1808,26 +1826,22 @@ export class CodexAgent extends BaseAgent {
         if (currentInflight?.promise === inflight.promise) {
           this.hostPromises.delete(key);
         }
-        inflight.promise
-          .then(
-            async (inflightHost) => {
-              if (this.hosts.get(key) === inflightHost) {
-                await this.shutdownHostForCredentialModeChange(
-                  key,
-                  inflightHost,
-                  inflight.credentialMode,
-                  requestedEffective,
-                  opts,
-                );
-                return;
-              }
-              await inflightHost.retire(
-                "CodexAgent credential mode changed while host was starting",
+        inflight.promise.then(
+          async (inflightHost) => {
+            if (this.hosts.get(key) === inflightHost) {
+              await this.shutdownHostForCredentialModeChange(
+                key,
+                inflightHost,
+                inflight.credentialMode,
+                requestedEffective,
+                opts,
               );
-            },
-            () => undefined,
-          )
-          .catch(() => undefined);
+              return;
+            }
+            await inflightHost.retire('CodexAgent credential mode changed while host was starting');
+          },
+          () => undefined,
+        ).catch(() => undefined);
       }
 
       const generation = this.bumpHostGeneration(key);
@@ -1850,6 +1864,7 @@ export class CodexAgent extends BaseAgent {
             inflightEntry.credentialModeResolved = true;
           }
         },
+        opts.hostPurpose,
       ).finally(() => {
         // 成功: this.hosts 已赋值, 后续走快路径; 失败: 清掉 promise 让下次调用能重试
         const current = this.hostPromises.get(key);
@@ -1858,8 +1873,7 @@ export class CodexAgent extends BaseAgent {
       inflightEntry = {
         promise,
         credentialMode: spawnMode,
-        credentialModeResolved:
-          remoteHostId !== undefined || spawnMode !== "gateway-key",
+        credentialModeResolved: remoteHostId !== undefined || spawnMode !== 'gateway-key',
         generation,
       };
       this.hostPromises.set(key, inflightEntry);
@@ -1867,10 +1881,7 @@ export class CodexAgent extends BaseAgent {
     }
   }
 
-  private async getUtilityHost(): Promise<{
-    key: string;
-    host: AppServerHost;
-  }> {
+  private async getUtilityHost(): Promise<{ key: string; host: AppServerHost }> {
     const key = hostKey();
     await this.waitForHostCredentialModeSwitch(key);
     const existing = this.hosts.get(key);
@@ -1883,7 +1894,7 @@ export class CodexAgent extends BaseAgent {
 
   /** Start the local OAuth host used by non-model account control-plane RPCs. */
   private async getStartedAccountHost(): Promise<AppServerHost> {
-    const host = await this.getHost(undefined, "oauth-bearer");
+    const host = await this.getHost(undefined, 'oauth-bearer');
     const init = await host.ensureStarted();
     if (init.codexHome) this.codexHome = init.codexHome;
     return host;
@@ -1896,37 +1907,90 @@ export class CodexAgent extends BaseAgent {
    * 成功时未必已经触发模型注册表刷新。`model/list` 是官方 app-server 的权威读取面，
    * 同时也是 cache ready barrier；分页全部读完后才一次性交给宿主，避免 UI 看到半份目录。
    */
-  override async refreshLocalModels(): Promise<boolean> {
-    const { key, host } = await this.getUtilityHost();
+  override async refreshLocalModels(options?: RefreshLocalModelsOptions): Promise<boolean> {
+    const credentialMode = options?.credentialMode;
+    if (!credentialMode) return this.refreshLocalModelsWithinDeadline(options);
+
+    const key = localControlPlaneHostKey(credentialMode);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new AppServerRequestTimeoutError('model refresh', CODEX_MODEL_REFRESH_DEADLINE_MS));
+      }, CODEX_MODEL_REFRESH_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([
+        this.refreshLocalModelsWithinDeadline(options),
+        deadline,
+      ]);
+    } catch (error) {
+      if (error instanceof AppServerRequestTimeoutError) {
+        await this.retireHostKey(key, 'Codex control-plane model refresh timed out', {
+          failIfActive: false,
+          logPrefix: 'codex model refresh',
+        });
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  private async refreshLocalModelsWithinDeadline(
+    options?: RefreshLocalModelsOptions,
+  ): Promise<boolean> {
+    const credentialMode = options?.credentialMode;
+    // 显式 provider 刷新使用独立 control-plane app-server。不能为了发一次 model/list
+    // 切换共享 local host 的凭证形态：切换协调器会关闭空闲会话，忙碌会话则直接拒绝。
+    const key = credentialMode
+      ? localControlPlaneHostKey(credentialMode)
+      : hostKey();
+    const host = credentialMode
+      ? await this.getHost(undefined, credentialMode, {
+        keyOverride: key,
+        hostPurpose: 'control-plane',
+      })
+      : (await this.getUtilityHost()).host;
     const init = await host.ensureStarted();
     if (init.codexHome) this.codexHome = init.codexHome;
 
-    const models: CodexModelListResponse["data"] = [];
+    const models: CodexModelListResponse['data'] = [];
     const seenCursors = new Set<string>();
     let cursor: string | null = null;
-    do {
-      const page: CodexModelListResponse =
-        await host.request<CodexModelListResponse>(Method.ModelList, {
-          cursor,
-          limit: 100,
-          includeHidden: false,
-        });
-      models.push(...(Array.isArray(page.data) ? page.data : []));
-      const next: string | null =
-        typeof page.nextCursor === "string" && page.nextCursor.length > 0
+    try {
+      do {
+        const page: CodexModelListResponse = await host.request<CodexModelListResponse>(
+          Method.ModelList,
+          {
+            cursor,
+            limit: 100,
+            includeHidden: false,
+          },
+          { timeoutMs: CODEX_MODEL_LIST_RPC_TIMEOUT_MS },
+        );
+        models.push(...(Array.isArray(page.data) ? page.data : []));
+        const next: string | null = typeof page.nextCursor === 'string' && page.nextCursor.length > 0
           ? page.nextCursor
           : null;
-      if (next && seenCursors.has(next)) {
-        throw new Error(`Codex app-server model/list repeated cursor: ${next}`);
+        if (next && seenCursors.has(next)) {
+          throw new Error(`Codex app-server model/list repeated cursor: ${next}`);
+        }
+        if (next) seenCursors.add(next);
+        cursor = next;
+      } while (cursor !== null);
+    } catch (error) {
+      if (credentialMode && error instanceof AppServerRequestTimeoutError) {
+        await this.retireHostKey(key, 'Codex control-plane model/list timed out', {
+          failIfActive: false,
+          logPrefix: 'codex model list refresh',
+        });
       }
-      if (next) seenCursors.add(next);
-      cursor = next;
-    } while (cursor !== null);
+      throw error;
+    }
 
     // Auth 切换 / logout 可能在分页请求期间 retire 旧 host。旧账号的迟到响应绝不能
     // 覆盖新账号目录；只有仍登记为当前 local host 的结果才允许交给宿主。
-    if (this.hosts.get(key) !== host || !this.deps.onCodexLocalModelsListed)
-      return false;
+    if (this.hosts.get(key) !== host || !this.deps.onCodexLocalModelsListed) return false;
     await this.deps.onCodexLocalModelsListed(models);
     return true;
   }
@@ -1937,10 +2001,7 @@ export class CodexAgent extends BaseAgent {
     // oauth-bearer prevents a gateway/provider host from reading or mutating the wrong
     // account context; getHost refuses to replace a differently-authenticated active host.
     const host = await this.getStartedAccountHost();
-    return await host.request<AccountRateLimitsResponse>(
-      Method.AccountRateLimitsRead,
-      undefined,
-    );
+    return await host.request<AccountRateLimitsResponse>(Method.AccountRateLimitsRead, undefined);
   }
 
   /** Consume one reset credit on the non-model app-server control plane. */
@@ -1959,9 +2020,8 @@ export class CodexAgent extends BaseAgent {
     key: string,
     credentialMode: AgentCredentialMode | undefined,
     generation: number,
-    onSpawnCredentialModeResolved?: (
-      mode: AgentCredentialMode | undefined,
-    ) => void,
+    onSpawnCredentialModeResolved?: (mode: AgentCredentialMode | undefined) => void,
+    hostPurpose?: 'control-plane',
   ): Promise<AppServerHost> {
     const seq = (this.createHostSeqByKey.get(key) ?? 0) + 1;
     this.createHostSeqByKey.set(key, seq);
@@ -1970,58 +2030,45 @@ export class CodexAgent extends BaseAgent {
     // 正常路径走 info, 异常路径才升级到 error, 避免首次启动刷 ERROR 误导排查。
     const hadHost = this.hosts.has(key);
     const abnormal = seq > 1 || hadHost;
-    const level = abnormal ? "error" : "info";
-    this.deps.logger[level]("codex createHost: spawning app-server", {
+    const level = abnormal ? 'error' : 'info';
+    this.deps.logger[level]('codex createHost: spawning app-server', {
       seq,
       hadHost,
       key,
-      credentialMode: credentialMode ?? "fallback",
+      credentialMode: credentialMode ?? 'fallback',
       generation,
     });
     const assertCurrentGeneration = (stage: string): void => {
       if ((this.hostGenerations.get(key) ?? 0) === generation) return;
-      throw new Error(
-        `Codex app-server host creation was superseded before ${stage}`,
-      );
+      throw new Error(`Codex app-server host creation was superseded before ${stage}`);
     };
     // 方案 A(订阅超集 spawn):本地 gateway-key 诉求且 auth fallback 实际持有 OAuth 时,
     // 升格为 oauth-bearer spawn。超集进程经 proxy 按会话换网关 key(XD/折扣计费不变),
     // 同时还能服务订阅会话 —— 订阅/API 会话真正并行,不再因来源切换重建 host 排队。
     let spawnCredentialMode = credentialMode;
     let requestedGatewayState: AuthState | null = null;
-    if (!remoteHostId && credentialMode === "gateway-key") {
+    if (!remoteHostId && credentialMode === 'gateway-key') {
       // 即使升格为 OAuth spawn,API 会话的出口仍依赖 gateway key,必须先验证原诉求。
-      requestedGatewayState = await this.deps.auth.getState({
-        credentialMode: "gateway-key",
-      });
-      assertCurrentGeneration("gateway credential validation");
+      requestedGatewayState = await this.deps.auth.getState({ credentialMode: 'gateway-key' });
+      assertCurrentGeneration('gateway credential validation');
       if (!requestedGatewayState.authenticated) {
         throw new AgentNotAuthenticatedError(
-          "codex",
-          `codex gateway credentials unavailable: ${requestedGatewayState.errorReason ?? "no_credentials"}`,
+          'codex',
+          `codex gateway credentials unavailable: ${requestedGatewayState.errorReason ?? 'no_credentials'}`,
         );
       }
       try {
         const fallbackState = await this.deps.auth.getState();
-        if (
-          fallbackState.authenticated &&
-          fallbackState.authSource === "oauth"
-        ) {
-          spawnCredentialMode = "oauth-bearer";
-          this.deps.logger.info(
-            "codex createHost: upgrading gateway-key spawn to oauth superset host",
-            { key },
-          );
+        if (fallbackState.authenticated && fallbackState.authSource === 'oauth') {
+          spawnCredentialMode = 'oauth-bearer';
+          this.deps.logger.info('codex createHost: upgrading gateway-key spawn to oauth superset host', { key });
         }
       } catch (error) {
-        this.deps.logger.warn(
-          "codex createHost: superset spawn resolution failed; keeping gateway-key spawn",
-          {
-            error: error instanceof Error ? error.message : String(error),
-          },
-        );
+        this.deps.logger.warn('codex createHost: superset spawn resolution failed; keeping gateway-key spawn', {
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
-      assertCurrentGeneration("superset spawn resolution");
+      assertCurrentGeneration('superset spawn resolution');
     }
 
     // 超集升格硬依赖 proxy。proxy 不可用时降级回原 gateway-key spawn 重来一轮;
@@ -2031,104 +2078,92 @@ export class CodexAgent extends BaseAgent {
     let extraArgs: string[] = [];
     let codexProxyActive = false;
     let remoteCompactionProviderId: string | undefined;
+    let buildSessionMcpConfig: CodexExtraSpawnConfig['buildSessionMcpConfig'];
     for (;;) {
       const upgradedToSuperset = spawnCredentialMode !== credentialMode;
       onSpawnCredentialModeResolved?.(spawnCredentialMode);
-      const authOptions = spawnCredentialMode
-        ? { credentialMode: spawnCredentialMode }
-        : undefined;
+      const authOptions = spawnCredentialMode ? { credentialMode: spawnCredentialMode } : undefined;
       const state =
-        spawnCredentialMode === "gateway-key" && requestedGatewayState
+        spawnCredentialMode === 'gateway-key' && requestedGatewayState
           ? requestedGatewayState
           : await this.deps.auth.getState(authOptions);
-      assertCurrentGeneration("auth");
+      assertCurrentGeneration('auth');
       if (!state.authenticated) {
-        throw new AgentNotAuthenticatedError(
-          "codex",
-          `codex not authenticated: ${state.errorReason ?? "no_credentials"}`,
-        );
+        throw new AgentNotAuthenticatedError('codex', `codex not authenticated: ${state.errorReason ?? 'no_credentials'}`);
       }
       effectiveMode =
-        spawnCredentialMode ??
-        resolveEffectiveCredentialModeFromAuthSource(
-          undefined,
-          state.authSource,
-        );
-      env = await buildCodexEnv(
-        this.deps.auth,
-        this.deps.runtimeConfig,
-        authOptions,
-      );
-      assertCurrentGeneration("env");
+        spawnCredentialMode ?? resolveEffectiveCredentialModeFromAuthSource(undefined, state.authSource);
+      env = await buildCodexEnv(this.deps.auth, this.deps.runtimeConfig, authOptions);
+      assertCurrentGeneration('env');
 
       extraArgs = [];
       codexProxyActive = false;
       remoteCompactionProviderId = undefined;
+      buildSessionMcpConfig = undefined;
       if (this.deps.prepareCodexExtraSpawnConfig) {
         try {
           const cfg = await this.deps.prepareCodexExtraSpawnConfig(
             this.deps.mcpProviders ?? [],
-            { remoteHostId, credentialMode: spawnCredentialMode },
+            {
+              remoteHostId,
+              credentialMode: spawnCredentialMode,
+              ...(hostPurpose ? { hostPurpose } : {}),
+            },
           );
-          assertCurrentGeneration("spawn config");
+          assertCurrentGeneration('spawn config');
           Object.assign(env, cfg.extraEnv);
           extraArgs = cfg.extraArgs;
+          buildSessionMcpConfig = cfg.buildSessionMcpConfig;
           codexProxyActive = cfg.codexProxyActive === true && !remoteHostId;
           // OpenAI 身份 provider 依赖 loopback proxy 路由订阅直连;proxy 不可用
           // (退化直连网关)时不得下发,否则远端压缩请求会打到不支持它的上游。
           if (codexProxyActive && cfg.codexRemoteCompactionProviderId) {
             remoteCompactionProviderId = cfg.codexRemoteCompactionProviderId;
           }
-          this.deps.logger.info("codex MCP bridge ready", {
+          this.deps.logger.info('codex MCP bridge ready', {
             providers: this.deps.mcpProviders?.length ?? 0,
             extraArgsCount: extraArgs.length,
             codexProxyActive,
           });
         } catch (e) {
           const isFatalSpawnConfigError =
-            typeof e === "object" &&
-            e !== null &&
-            (e as { codexSpawnConfigFatal?: unknown }).codexSpawnConfigFatal ===
-              true;
+            (typeof e === 'object' && e !== null &&
+              (e as { codexSpawnConfigFatal?: unknown }).codexSpawnConfigFatal === true);
           if (isFatalSpawnConfigError && upgradedToSuperset) {
-            this.deps.logger.warn(
-              "codex createHost: superset spawn hit fatal proxy error; downgrading to gateway-key spawn",
-              {
-                key,
-                message: (e as Error).message,
-              },
-            );
+            this.deps.logger.warn('codex createHost: superset spawn hit fatal proxy error; downgrading to gateway-key spawn', {
+              key,
+              message: (e as Error).message,
+            });
             spawnCredentialMode = credentialMode;
             continue;
           }
           this.deps.logger.error(
             isFatalSpawnConfigError
-              ? "codex MCP bridge prep failed with fatal spawn config error"
-              : "codex MCP bridge prep failed, continuing without lizi MCP",
+              ? 'codex MCP bridge prep failed with fatal spawn config error'
+              : 'codex MCP bridge prep failed, continuing without lizi MCP',
             { message: (e as Error).message },
           );
           if (isFatalSpawnConfigError) throw e;
         }
       }
       if (upgradedToSuperset && !codexProxyActive) {
-        this.deps.logger.warn(
-          "codex createHost: superset spawn lacks loopback proxy; downgrading to gateway-key spawn",
-          { key },
-        );
+        this.deps.logger.warn('codex createHost: superset spawn lacks loopback proxy; downgrading to gateway-key spawn', { key });
         spawnCredentialMode = credentialMode;
         continue;
       }
       break;
     }
-    assertCurrentGeneration("transport");
+    assertCurrentGeneration('transport');
 
     // 选 transport: 本地 → StdioTransport (spawn codex app-server)
     //               远端 → host 注入的 getRemoteCodexTransport (SSH+daemon+proxy+ws)
-    // 注意: 远端路径下 env/extraArgs/buildCodexEnv 不参与 — 远端 daemon 由远端用户的
-    // ~/.codex 配置驱动, 我们走 daemon control socket 拿到的协议 channel, 不在本地起
-    // 进程, 所以本地的 env / -c overrides 没有意义。MCP 桥接 (lizi_*) 暂不支持远端,
-    // 远端 session 只能用 codex 自带 + 远端用户配置的 MCP。
-    let createTransport: () => import("./app-server/transport.js").Transport;
+    // 注意: 远端路径下 env/extraArgs/buildCodexEnv 不参与 — 远端 daemon 由远端
+    // isolated CODEX_HOME 的配置驱动, 我们走 daemon control socket 拿到的协议
+    // channel, 不在本地起进程, 所以本地的 env / -c overrides 没有意义。MCP 桥接
+    // 改由 desktop 侧在 session start 前置完成 (remote-ssh/codex-remote-mcp.ts):
+    // 往远端 config.toml 写 mcp_servers 段, daemon 经 SSH remote-forward 直连
+    // 本机 HTTP bridge, tool call 按 params._meta.threadId 路由(与本地一致)。
+    let createTransport: () => import('./app-server/transport.js').Transport;
     if (remoteHostId) {
       if (!this.deps.getRemoteCodexTransport) {
         throw new Error(
@@ -2139,12 +2174,11 @@ export class CodexAgent extends BaseAgent {
       createTransport = () => provider(remoteHostId);
     } else {
       const binaryPath = this.deps.binaryPath;
-      createTransport = () =>
-        createStdioTransport({
-          binaryPath,
-          env,
-          extraArgs,
-        });
+      createTransport = () => createStdioTransport({
+        binaryPath,
+        env,
+        extraArgs,
+      });
     }
 
     const host = new AppServerHost({
@@ -2152,52 +2186,46 @@ export class CodexAgent extends BaseAgent {
       logger: this.deps.logger,
       // 自报名只进 codex app-server 的 userAgent 展示串,无门控消费
       // (2026-07-17 随品牌翻转改 cindy;上游 gating 走 originator,与此无关)。
-      clientInfo: { name: "cindy", version: "0.0.0" },
+      clientInfo: { name: 'cindy', version: '0.0.0' },
       codexProxyActive,
       remoteCompactionProviderId,
+      buildSessionMcpConfig,
       // app-server 对失败 RPC 返回 cloudRequirements + Auth/relogin 结构化错误时,当前 host
       // 持有的 token 已不可用。stderr 与工具输出只做诊断,绝不驱动鉴权状态。保留 host 只会
       // 持续撞鉴权失败; auth.invalidate 会触发 logout + 通知 UI 重登。延后到 microtask
       // 防止在 JSON-RPC response 分发回调里同步收割自己。远端也走同一结构化协议路径。
       onAuthInvalidated: (reason) => {
-        this.deps.logger.warn("codex auth invalidated", {
+        const usesLocalAuth = !remoteHostId;
+        this.deps.logger.warn('codex auth invalidated', {
           reason,
           key,
-          localAuthWillInvalidate: key === hostKey(),
+          localAuthWillInvalidate: usesLocalAuth,
         });
         Promise.resolve()
           .then(async () => {
-            if (key === hostKey()) {
+            if (usesLocalAuth) {
               try {
                 await this.deps.auth.invalidate?.(reason);
               } catch (e) {
-                this.deps.logger.error("auth.invalidate threw", {
-                  message: (e as Error).message,
-                });
+                this.deps.logger.error('auth.invalidate threw', { message: (e as Error).message });
               }
             }
             // 防御兜底: 只收掉报错的 host key。远端 daemon 的 auth 失效不应该扩散到
             // local host 或其它 remote host,否则无关会话会绕过 Session.close 变 stale。
             try {
-              await this.retireHostKey(
-                key,
-                `CodexAgent auth invalidated: ${reason}`,
-                {
-                  failIfActive: false,
-                  logPrefix: "codex auth invalidated",
-                },
-              );
-            } catch {
-              /* no-op */
-            }
+              await this.retireHostKey(key, `CodexAgent auth invalidated: ${reason}`, {
+                failIfActive: false,
+                logPrefix: 'codex auth invalidated',
+              });
+            } catch { /* no-op */ }
           })
           .catch(() => undefined);
       },
     });
     try {
-      assertCurrentGeneration("registration");
+      assertCurrentGeneration('registration');
     } catch (error) {
-      await host.retire("CodexAgent host creation superseded");
+      await host.retire('CodexAgent host creation superseded');
       throw error;
     }
     this.hosts.set(key, host);
@@ -2218,15 +2246,13 @@ export class CodexAgent extends BaseAgent {
    * (Codex host 协议没暴露 max_tokens; model 走 thread/start 那已是默认 mini), signal 接通。
    */
   async oneShot(prompt: string, opts?: OneShotOptions): Promise<string> {
-    const log = this.deps.logger.child("codex/oneShot");
+    const log = this.deps.logger.child('codex/oneShot');
     const timeoutMs = opts?.timeoutMs ?? 30_000;
     // OneShotOptions.maxTokens 在 Codex 协议层就没暴露 (protocol.ts ThreadStartParams /
     // TurnStartParams 都没 max_tokens 字段) —— 静默忽略, 但调用方传了就 warn 一下,
     // 避免未来加新 oneShot 场景时 "我设了上限怎么没生效" 的隐性 bug。
     if (opts?.maxTokens !== undefined) {
-      log.warn(
-        `maxTokens=${opts.maxTokens} ignored — Codex host protocol does not expose max_tokens`,
-      );
+      log.warn(`maxTokens=${opts.maxTokens} ignored — Codex host protocol does not expose max_tokens`);
     }
     let subscription: ThreadSubscription | null = null;
     try {
@@ -2234,22 +2260,16 @@ export class CodexAgent extends BaseAgent {
       await host.ensureStarted();
 
       // 创建临时 thread (跟主 session 共享 server 但 thread state 隔离)
-      const startResp = await host.request<ThreadStartResponse>(
-        Method.ThreadStart,
-        {
-          cwd: os.tmpdir(),
-          model: opts?.model ?? "gpt-5.4-mini",
-          approvalPolicy: "never",
-          sandbox: "read-only", // kebab-case (v2.rs SandboxMode)
-        } as ThreadStartParams,
-      );
+      const startResp = await host.request<ThreadStartResponse>(Method.ThreadStart, {
+        cwd: os.tmpdir(),
+        model: opts?.model ?? 'gpt-5.4-mini',
+        approvalPolicy: 'never',
+        sandbox: 'read-only', // kebab-case (v2.rs SandboxMode)
+      } as ThreadStartParams);
       const threadId = startResp.thread.id;
 
       // 等首条 agentMessage.completed 文本; 出 error 通知用 sentinel object 区分超时/正常
-      type OneShotResult =
-        | { kind: "text"; text: string }
-        | { kind: "empty" }
-        | { kind: "error"; message: string };
+      type OneShotResult = { kind: 'text'; text: string } | { kind: 'empty' } | { kind: 'error'; message: string };
       let resolve: (r: OneShotResult) => void = () => {};
       const result = new Promise<OneShotResult>((res) => {
         resolve = res;
@@ -2264,15 +2284,15 @@ export class CodexAgent extends BaseAgent {
         itemCompleted: (params) => {
           if (resolved) return;
           const item = params.item as { type?: string; text?: string };
-          if (item.type === "agentMessage" && typeof item.text === "string") {
+          if (item.type === 'agentMessage' && typeof item.text === 'string') {
             resolved = true;
-            resolve({ kind: "text", text: item.text.trim() });
+            resolve({ kind: 'text', text: item.text.trim() });
           }
         },
         turnCompleted: () => {
           if (!resolved) {
             resolved = true;
-            resolve({ kind: "empty" });
+            resolve({ kind: 'empty' });
           }
         },
         error: (params) => {
@@ -2283,197 +2303,605 @@ export class CodexAgent extends BaseAgent {
           // 一致。忽略它,继续等 agentMessage / turnCompleted / 自家超时,否则像
           // 起标题这种短任务会被一次上游抖动直接打成 OneShotError。
           if (params.willRetry === true) {
-            log.debug("oneShot transient error (will retry), ignored", {
+            log.debug('oneShot transient error (will retry), ignored', {
               message: params.error?.message,
             });
             return;
           }
           resolved = true;
-          log.warn("oneShot error notification", {
-            message: params.error?.message,
-          });
-          resolve({
-            kind: "error",
-            message: params.error?.message ?? "unknown codex error",
-          });
+          log.warn('oneShot error notification', { message: params.error?.message });
+          resolve({ kind: 'error', message: params.error?.message ?? 'unknown codex error' });
         },
       });
 
       await host.request(Method.TurnStart, {
         threadId,
-        input: [{ type: "text", text: prompt }],
+        input: [{ type: 'text', text: prompt }],
       } as TurnStartParams);
 
       // 自家超时 sentinel (kind 'timeout'), 走外部 signal 也走同一通道
       const timeoutP = new Promise<OneShotResult>((res) => {
-        const t = setTimeout(
-          () => res({ kind: "error", message: "__TIMEOUT__" }),
-          timeoutMs,
-        );
-        opts?.signal?.addEventListener("abort", () => {
+        const t = setTimeout(() => res({ kind: 'error', message: '__TIMEOUT__' }), timeoutMs);
+        opts?.signal?.addEventListener('abort', () => {
           clearTimeout(t);
-          res({ kind: "error", message: "__ABORTED__" });
+          res({ kind: 'error', message: '__ABORTED__' });
         });
       });
       const r = await Promise.race([result, timeoutP]);
 
       // 如果 turn 没结束就拿到结果, 主动 interrupt 避免 server 继续算
-      if (r.kind === "text" && currentTurnId) {
-        host
-          .request(Method.TurnInterrupt, { threadId, turnId: currentTurnId })
-          .catch(() => undefined);
+      if (r.kind === 'text' && currentTurnId) {
+        host.request(Method.TurnInterrupt, { threadId, turnId: currentTurnId }).catch(() => undefined);
       }
 
-      if (r.kind === "text") {
-        if (!r.text)
-          throw new OneShotError("malformed", "Empty agentMessage from codex");
+      if (r.kind === 'text') {
+        if (!r.text) throw new OneShotError('malformed', 'Empty agentMessage from codex');
         return r.text;
       }
-      if (r.kind === "empty") {
-        throw new OneShotError(
-          "malformed",
-          "Codex turn completed without agentMessage",
-        );
+      if (r.kind === 'empty') {
+        throw new OneShotError('malformed', 'Codex turn completed without agentMessage');
       }
       // r.kind === 'error'
-      if (r.message === "__TIMEOUT__") {
-        throw new OneShotError(
-          "timeout",
-          `Codex oneShot timed out after ${timeoutMs}ms`,
-        );
+      if (r.message === '__TIMEOUT__') {
+        throw new OneShotError('timeout', `Codex oneShot timed out after ${timeoutMs}ms`);
       }
-      if (r.message === "__ABORTED__") {
+      if (r.message === '__ABORTED__') {
         // 外部 abort 不归类成 OneShotError (跟 claude 端一致)。Claude 端走 SDK 抛 web 标准
         // AbortError (DOMException), 这里手动 abort 也用同款类型, 让调用方一律靠
         // err.name === 'AbortError' 或 signal.aborted 判断, 不用区分 agent。
-        throw new DOMException("aborted", "AbortError");
+        throw new DOMException('aborted', 'AbortError');
       }
-      throw new OneShotError("malformed", `Codex error: ${r.message}`);
+      throw new OneShotError('malformed', `Codex error: ${r.message}`);
     } catch (err) {
       if (err instanceof OneShotError) {
-        log.error("oneShot failed", { reason: err.reason, error: err.message });
+        log.error('oneShot failed', { reason: err.reason, error: err.message });
         throw err;
       }
-      log.error("oneShot failed", { error: String(err) });
+      log.error('oneShot failed', { error: String(err) });
       // 网络/host 启动等未分类失败统一归 'network' (跟 claude 端 mapAnthropicError 一致)
-      throw new OneShotError(
-        "network",
-        err instanceof Error ? err.message : String(err),
-      );
+      throw new OneShotError('network', err instanceof Error ? err.message : String(err));
     } finally {
-      try {
-        await subscription?.release();
-      } catch {
-        /* no-op */
-      }
+      try { await subscription?.release(); } catch { /* no-op */ }
     }
   }
 
   async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
     // scope 带完整 s:<sessionId> 前缀 → host logger 落盘时提取 business sessionId,
     // 路由到 sessions/<id>/<date>.ndjson (logger.ts extractSessionId / sessionAgentSlot)。
-    const sid = opts.sessionId ?? "";
-    const log = this.deps.logger.child(sid ? `s:${sid}/codex` : "codex");
+    const sid = opts.sessionId ?? '';
+    const log = this.deps.logger.child(sid ? `s:${sid}/codex` : 'codex');
 
-    log.info("startSession", {
+    log.info('startSession', {
       model: opts.model,
       providerId: opts.providerId ?? null,
-      effort: opts.effort ?? "default",
-      fastMode: opts.fastMode ?? "default",
+      effort: opts.effort ?? 'default',
+      fastMode: opts.fastMode ?? 'default',
       workDir: opts.workingDir,
-      resume: opts.resumeSessionId ?? "new",
+      resume: opts.resumeSessionId ?? 'new',
       remoteHostId: opts.remoteHostId ?? null,
       mcpProvidersCount: this.deps.mcpProviders?.length ?? 0,
     });
 
     // ── Maker Memory: 启动时预拉 MEMORY.md 索引 + 写入规范段 ────────────────
-    // thread/start 仍把 developerInstructions 写入新 thread; thread/resume 在非 proxy
+    // thread/start 仍把 developerInstructions 写入新 thread; thread/resume 在普通非 proxy
     // 路径只在 host 明确告知历史未含产品 prompt 时补发一次,避免常规 resume 重复堆积。
+    // WS thread 恢复时则始终携带当前值:Codex 的 SessionMeta 不持久化该字段,冷恢复若只
+    // 依赖历史里的旧 developer message,后续 compact 重建 canonical context 时会丢产品
+    // prompt。Codex 0.145 对仍在内存中的 loaded thread 会忽略 resume override,且冷恢复
+    // 首轮的 steady-state diff 不补一条发生变化的 plain developer_instructions；正常
+    // resume 沿用同一份文本时历史里已有它,compact 也会从当前 cold-resume 配置重建。
     // proxy active 时两条路径都用同一份构建结果登记到 registry。跟 userPrompt 同语义 — 启动时快照,跨 session 不实时同步。
-    let makerMemoryRules = "";
-    let makerMemoryIndex = "";
+    let makerMemoryRules = '';
+    let makerMemoryIndex = '';
     let memoryFlushController: MemoryFlushController | null = null;
     // opts.makerMemoryEnabled 优先 (per-session, renderer 透传); fallback 到 runtimeConfig。
     const makerMemoryFlag =
-      opts.makerMemoryEnabled ??
-      this.deps.runtimeConfig.makerMemoryEnabled ??
-      false;
+      opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
     const makerMemory = this.deps.makerMemory;
     const makerMemoryEnabled = makerMemoryFlag === true && !!makerMemory;
+    // SSH remote 的 workingDir 是远端路径 — store 定位统一经 scope key,
+    // 键规则与理由见 buildMemoryScopeKey (memory/storage.ts)。
+    const memoryScopeKey = buildMemoryScopeKey(opts.workingDir, opts.remoteHostId);
     // This per-session injection flag must not mutate the shared manager.
     if (makerMemoryEnabled && makerMemory) {
       try {
-        const store = await makerMemory.getStore(opts.workingDir);
+        const store = await makerMemory.getStore(memoryScopeKey);
         makerMemoryRules = MAKER_MEMORY_RULES;
         makerMemoryIndex = await store.getIndex();
         memoryFlushController = new MemoryFlushController({
-          logger: log.child("memory-flush"),
-          workdir: opts.workingDir,
-          agentKind: "codex",
+          logger: log.child('memory-flush'),
+          workdir: memoryScopeKey,
+          agentKind: 'codex',
         });
-        log.debug("maker memory loaded for session", {
+        log.debug('maker memory loaded for session', {
           rulesBytes: makerMemoryRules.length,
           indexBytes: makerMemoryIndex.length,
         });
       } catch (e) {
-        log.warn(
-          "maker memory load failed at session start (skipping injection)",
-          {
-            error: String(e),
-          },
-        );
+        log.warn('maker memory load failed at session start (skipping injection)', {
+          error: String(e),
+        });
       }
     }
 
     const eventQueue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
     const usageTracker = new UsageTracker();
     const translatorRt: CodexRuntimeState = newCodexRuntimeState();
+    /**
+     * 本 turn 用于**目录查找**的模型 id, 在构造 turnParams 时快照(取 mutableCatalogModel,
+     * 不是送上游的 wire 值 —— 见该变量注释)。
+     *
+     * 不能在 usage 事件里读 mutableModel: setModel 虽然文档写「下一 turn 才生效」,
+     * 赋值却是**即时**的, 于是活跃 turn 期间切模型会让这一 turn 还在产出的用量
+     * 按**下一个**模型的目录窗口收敛。turn 结束后不清空 —— 迟到的 usage 事件
+     * 归属的仍是它那一 turn 的模型。
+     */
+    let activeTurnModel: string | undefined = opts.model;
+    /**
+     * 本 turn 实际路由的 provider,与 activeTurnModel 同时快照。
+     *
+     * 不能用 opts.providerId: 它是**会话创建时**冻结的值,而 idle 会话可以热切 provider ——
+     * host 的 applyRuntimeSetModelChange 会带着 `{ providerId }` 调 setModel。窗口上限按
+     * (provider, model) 解析, 只更新 model 会让下一 turn 拿新模型去问**旧路由**。
+     */
+    let activeTurnProviderId: string | null | undefined = opts.providerId;
+    /**
+     * 把 app-server 上报的 modelContextWindow 收敛到模型目录的真实上限。
+     *
+     * app-server 对网关路由的模型常报**基础模型**的窗口, 忽略该路由的实际限制 ——
+     * 例如目录 372K 的 GPT-5.6-Sol 会被报成 1M。虚高值会让上下文占比被低估,
+     * memory flush 阈值也跟着推迟, 所以两者都有时取小值。
+     *
+     * 两个约束都不是可省的细节:
+     * - **按 turn 归属模型**, 不读 mutableModel: 见 activeTurnModel 注释。
+     * - **取值交给 host 的 resolveVerifiedContextWindow**, 不自己查 availableModels:
+     *   那张表是跨 provider 去重后的扁平结构, 同一 model id 由多个 provider 提供时
+     *   归属已丢(订阅直连发现的 `gpt-5.6-sol` 与网关下发的同 id), 按 id 回查可能命中
+     *   另一条路由的元数据 —— 用错路由的上限收敛比不收敛更糟。host 同时持有完整目录、
+     *   provider 维度与「这个窗口是显式声明还是派生兜底」的信息, 也天然读的是 live 目录
+     *   (模型发现 / 切账号 / 自定义 provider 增删改都即时反映), 见该 dep 的注释。
+     *
+     * 拿不到已核实窗口时(host 未注入、目录未覆盖、'gpt-5' 这类 server 默认哨兵、只有
+     * 兜底值、或 provider 归属有歧义)沿用上报值 —— 即改动前行为; 上报值反过来比它小时
+     * 同样取上报值(路由真被降窗)。
+     */
+    const capContextWindow = (reported: number | null): number | null => {
+      const verified = activeTurnModel
+        ? (this.deps.resolveVerifiedContextWindow?.(activeTurnProviderId, activeTurnModel) ?? null)
+        : null;
+      if (!verified || verified <= 0) return reported;
+      if (!reported || reported <= 0) return verified;
+      return Math.min(verified, reported);
+    };
 
     let sdkSessionId: string | undefined;
     let currentTurnId: string | null = null;
     let isTurnInFlight = false;
+    /**
+     * 本 handle 上「起过多少个 turn」的单调计数器,每次 isTurnInFlight 被置活 +1。
+     *
+     * 存在的唯一理由:延迟很久的善后动作(upstream-idle 看门狗那条要等两次 interrupt
+     * ack、最长 20s)不能只看**当下**有没有 turn 在跑 —— 新 turn 完全可能在这段窗口里
+     * 起来又正常结束,把 isTurnInFlight / currentTurnId 双双复位,善后于是误判成"没人
+     * 用了"并关掉这个已被证明健康的 host(review #944 第十八轮 P1)。存量瞬时状态答不了
+     * "期间有没有发生过新活儿",单调计数器可以。
+     *
+     * 与 sendGeneration 的区别:那个按 send() 计数,起不来 turn 的 send(RPC 失败、
+     * 被拒)也会 +1,而计划实施 turn 这类不经 send 的路径反而不 +1。这里要的恰恰是
+     * "turn 被置活"这件事。
+     */
+    let turnStartGeneration = 0;
     let isTurnStartPending = false;
-    type TurnCompletedParams = Parameters<
-      NonNullable<ThreadEventHandlers["turnCompleted"]>
-    >[0];
+    // turn/start RPC 失败(超时/拒绝)后置位: server 可能实际已建 turn,
+    // 迟到的孤儿 turnStarted 由 turnStarted handler 拦下并补 interrupt。
+    let turnStartFailedWithoutTurnId = false;
+    // 孤儿守卫生效期间又有新 turn/start 在飞时, 到达的 turnStarted 归属不明
+    // (协议不带 request id: 可能是失败 RPC 的孤儿, 也可能是在飞 RPC 合法的
+    // started-before-resp) — 先缓冲隔离, 等响应到了按 turnId 对账: 一致激活,
+    // 不一致 interrupt + 墓碑 (codex R9 P2)。缓冲期间不置 currentTurnId,
+    // 孤儿 turn 的 item 事件不会被渲染到本次 send 下。
+    const bufferedOrphanTurnIds = new Set<string>();
+    type TurnCompletedParams = Parameters<NonNullable<ThreadEventHandlers['turnCompleted']>>[0];
+    // 缓冲隔离期间到达的**所有** turn 事件按 turnId 排队 (greptile R11 P1 +
+    // codex R12 P1): 对账证明合法时激活后按到达序重放 (早期 item/usage 不丢,
+    // 终态自然收口 send), 证明孤儿时整队丢弃。只拦 turnStarted 或只缓存终态
+    // 都会出反例: 前者让孤儿输出渲染到在飞 send 下, 后者把合法 turn 的
+    // 早期输出/终态永久丢掉 (send 卡 generating)。队列元素是重放闭包 —
+    // 重放时 buffer 已清空且 turn 已激活, 闭包重进 handler 走正常路径。
+    const bufferedTurnEventQueues = new Map<string, Array<() => void>>();
     // 正常完成的 turn 也必须保留墓碑:app-server 允许 turn/completed 早于仍在
     // 后台收尾的 item 事件到达。没有这层墓碑时,currentTurnId 已清空,迟到 item
     // 会重新发出 running status,而该 turn 的 done 已消费完,会话将永久假忙。
     // turn id 在同一 thread 内唯一;墓碑随 session handle 释放,不跨 session 泄漏。
     const completedTurnIds = new Set<string>();
     const terminalErroredTurnIds = new Set<string>();
-    const deferredTerminalTurnCompletions = new Map<
-      string,
-      TurnCompletedParams
-    >();
+    // daemon 后端 retry-loop 的终局升级 (issue #677): 远端摸不到 Codex 后端时
+    // daemon 无限 willRetry, turn 永不收口。同 turn 重试超阈值 → 合成终态错误,
+    // 走与终态 error 完全相同的收口路径 (terminalErroredTurnIds + Done status)。
+    const turnRetryTracker = new TurnRetryTracker();
+    const deferredTerminalTurnCompletions = new Map<string, TurnCompletedParams>();
     // 最近一次 thread/tokenUsage/updated 的 last 增量 + contextWindow,
     // 缓存供 turn end 日志读取 (协议本身不在 turn/completed 里带 usage)。
     let lastTurnTokenUsage: TokenUsageBreakdown | null = null;
     let lastModelContextWindow: number | null = null;
+    /**
+     * 已产出过模型内容(item 或 reasoning 增量)的 turn id。
+     *
+     * 只用于判断服务过载错误能否安全重投：容量拒绝发生在 admission 阶段时模型
+     * 一个字都没写过，重投同一份 turnParams 不会重复任何副作用；一旦已经产出过
+     * 内容（写过文件、跑过命令），重放就会让模型重做已完成的工作，那种情况必须
+     * 交回用户决定。
+     *
+     * **按 turn 记账而不是一个会话级标量**: 被 Stop 的旧 send 的隔离 start 若带着缓冲事件
+     * 回包(那要按"有产出"处理), 标量写的是**当前**这一轮的账 —— 而新一轮的 turnStarted 若
+     * 进过缓冲或作为同 turn 通知到达, 都不会把它清掉, 于是新消息一次本来安全的零产出容量
+     * 重投被误判成"有产出, 不重投", 自动重试静默失效(review #844 codex P1)。
+     * 每个写入方都拿得到自己的 turnId, 读取方(scheduleTurnReplayRetry)拿得到死 turn 的 id,
+     * 按 id 记账后跨轮污染在结构上就不成立, 也不再需要"换 turn 才清零"这类时序守卫。
+     */
+    const producedOutputTurnIds = new Set<string>();
+    /**
+     * 服务过载退避重投状态。`retry` 由 send() 每轮登记，闭包持有该 turn 的
+     * turnParams 与响应处理逻辑，因此重投投递的是同一条用户消息、同一套策略，
+     * 不会因为期间 mutable 配置变化而偷偷换参数。
+     */
+    let overloadRetry: {
+      retry: () => Promise<void>;
+      /**
+       * 同一 logical send 已消耗的外层重放次数，所有 provider failure policy 共享。
+       * policy 切换不重置：否则 capacity 4 次 + terminal-rate-limit 2 次会把同一条
+       * 用户输入最多重放 6 次，扩大请求量与重复副作用风险。各 policy 的
+       * maxAttempts 是它愿意接受的**总重放上限**，不是独立配额。
+       */
+      attempt: number;
+      /** 同一逻辑 send 最多接管一次 WS→HTTP body recovery，避免坏响应形成重投环。 */
+      httpRecoveryRetryAttempted: boolean;
+      /**
+       * `error` notification 只登记恢复意图；权威的 turn/completed 到达后才真正重投。
+       * 单一事实源放在 logical send 状态上，不再分散到各个 turn/start 请求条目。
+       */
+      pendingHttpRecovery: { deadTurnId: string; reason: string } | null;
+      timer: ReturnType<typeof setTimeout> | null;
+      /**
+       * 重投的 turn/start RPC 是否在途。计时器到点后 `timer` 已清空、新 turn 又
+       * 尚未激活，中间这段窗口若报 idle，并发 send 会被误接受并把原消息静默丢掉。
+       * 刻意用独立标记而不是复用 `isTurnStartPending`：后者在正常 send 路径上被
+       * 既有语义要求保持 idle（终态先于 turn/start 响应到达时，coordinator 必须
+       * 看到 idle 才能收口，否则 send 挂死），不能一起收紧。
+       */
+      inFlight: boolean;
+      /**
+       * 本轮 send 的取消信号是否已 abort。由 send() 闭包提供 —— `sendOpts` 只在
+       * 那个作用域里可见，而重投的失败收口判断发生在本文件的调度器作用域。
+       */
+      isCancelled: () => boolean;
+      /**
+       * 冻结 turnParams 时生效的权限档。判断「重投持的策略是否比当前更宽」要靠它：
+       * 只看最近一次模式转换会漏掉 Full access → Ask → Auto 这类中间态（Ask→Auto
+       * 不算收紧，会把延迟中断标记清掉，而冻结的 Full access 仍然更宽）。
+       */
+      launchedPermissionMode: PermissionMode;
+      /**
+       * 在途 RPC 期间又收到容量失败 → 那条错误被延后处理（既没排计时器也没收口）。
+       * RPC settle 且新 turn 没能激活时，必须凭这个标记补排一次，否则逻辑 send
+       * 永久悬空：错误已被落墓碑、响应因墓碑拒绝激活、inFlight 又被 finally 清掉，
+       * 没有任何计时器或终态事件残留（review #844 codex P1）。
+       */
+      deferredCapacityFailure: { deadTurnId: string | null } | null;
+      /** 这份重投状态属于哪一轮 send(判断"尾巴动作还有没有权限动全局状态")。 */
+      sendGen: number;
+      /** 摘掉本轮 send 信号的 abort 监听（状态被替换 / 收口时必须调）。 */
+      disposeSignalWatch: (() => void) | null;
+    } | null = null;
+    /**
+     * 在飞的 turn/start 请求登记表: 请求序号 → 该请求自己的状态。
+     *
+     * 为什么必须是**表**而不是几个标量: 这个文件其余部分假定"同一时刻只有一个 start 在
+     * 飞", 但 Stop 会让 handle 变 idle —— 用户可以在被 Stop 的那次 RPC 仍在飞时发下一条
+     * 消息, 于是确实会有两个 start 并存。用标量记"哪一次要被隔离 / 有没有 start 在飞"时,
+     * 后一个请求会把前一个的记账覆盖掉: 被 Stop 的旧 turn 于是逃过隔离、在响应回来时被
+     * 正常激活并继续跑工具; 反过来也可能把合法的新 turn 误杀
+     * (review #844 codex P1, 连续四轮都栽在同一个形状上)。
+     *
+     * 每个 per-request 的事实都住在自己的条目里, 请求 settle 时整条删掉, 天然不串味;
+     * "有没有 start 在飞"一律由 `inFlightStarts.size` 派生, 不再有第二份真相。
+     */
+    const inFlightStarts = new Map<number, {
+      quarantined: boolean;
+      terminalSettled: boolean;
+      capabilitySelectionText: string;
+      sendGen: number;
+    }>();
+    /** 每次 turn/start RPC 的自增序号, 作为登记表的键。 */
+    let turnStartSeq = 0;
+    /**
+     * 每轮 send 的自增世代。
+     *
+     * Stop 会让 handle 变 idle, 于是被 Stop 的那一轮 send 还有"尾巴"在跑(它的 RPC 尚未
+     * settle、迟到的通知、失败清理), 而**下一轮 send 可能已经接管会话**。这些尾巴动作若
+     * 照旧操作全局状态(推终态、把 currentTurnId 当自己的孤儿收掉), 就会二次收口、甚至误杀
+     * 新一轮的合法 turn(review #844 codex/greptile P1)。判据统一为"我这一轮还是最新世代吗"。
+     */
+    let sendGeneration = 0;
+
+    /** 登记一次即将发出的 turn/start, 返回它的序号。 */
+    const beginTurnStart = (
+      ownerSendGen: number,
+      capabilitySelectionText: string,
+    ): number => {
+      const seq = ++turnStartSeq;
+      inFlightStarts.set(seq, {
+        quarantined: false,
+        terminalSettled: false,
+        capabilitySelectionText,
+        sendGen: ownerSendGen,
+      });
+      isTurnStartPending = true;
+      return seq;
+    };
+
+    /**
+     * 注销一次已 settle 的 turn/start。
+     *
+     * `isTurnStartPending` 随之按"还有没有别的 start 在飞"重算 —— 直接置 false 会在两个
+     * start 并存时把属于**另一个**请求的状态清掉(review #844 codex P1)。
+     */
+    const endTurnStart = (seq: number): void => {
+      inFlightStarts.delete(seq);
+      isTurnStartPending = inFlightStarts.size > 0;
+    };
+
+    /**
+     * 除了 `seq` 这一次, 还有别的 turn/start 在飞吗。
+     *
+     * 缓冲集里的歧义 started **无法归属**(协议层分不清失败 RPC 的孤儿与在飞 RPC 的
+     * started-before-resp), 所以一个 id 只有在**所有候选归属方都被排除**之后才能被坐实成
+     * 孤儿 —— 也就是没有别的 start 还在飞的时候。隔离(reject)与对账(resolve)两条路共用这条
+     * 判据(review #844 codex P1)。
+     *
+     * 显式传 seq 而不是判 `inFlightStarts.size > 1`: 后者只在"调用点一定早于本请求
+     * endTurnStart"时才等价, 而那正是本 PR 反复踩过的隐式耦合。
+     */
+    /**
+     * turnId → 生出它的那一次 turn/start 的 seq。
+     *
+     * 用途只有一个: 判断"空 id 的容量拒绝能不能算在当前活跃 turn 头上"。活跃 turn 的
+     * 归属方若已 settle, 而登记表里还躺着**别人**的 start(典型: Stop 留下的旧 RPC), 那条
+     * 空 id 通知就可能是那一位的 —— 算在活跃 turn 头上会把一个正常在跑的 turn 落墓碑并
+     * 重放它的输入(review #844 codex P1)。
+     *
+     * sendGen 则回答"这个 turn 属于哪一轮 send": 退避 / 延后中的重投属于某一轮, 一个**不属于
+     * 那一轮**的 turn 的迟到终态不得替它收口, 也不得顺手撤销它的重投
+     * (review #844 greptile P1)。
+     *
+     * 按 turnId 建索引而不是存一个"当前 turn 的归属方"标量: 后者要跟着 currentTurnId 的
+     * 每一处清理同步, 漏一处就读到上一个 turn 的归属 —— 本 PR 已经在别的标量上踩过。
+     * 键就是 turnId 本身, 旧条目不可能被当成另一个 turn 的答案。
+     */
+    const turnOriginByTurnId = new Map<string, { startSeq: number | null; sendGen: number }>();
+
+    const hasOtherInFlightStart = (seq: number): boolean => {
+      for (const other of inFlightStarts.keys()) if (other !== seq) return true;
+      return false;
+    };
+
+    /**
+     * 标记某次在飞的 start:它的响应回来时**不得激活**带回的 turn, 必须落墓碑 + interrupt。
+     *
+     * 两个来源:
+     *  - 已接管一条**不带 turnId** 的容量拒绝(app-server 尚未回包时的空 id 形状): 要等响应
+     *    回来才知道那条失败说的是哪个 turn —— 记最新那一次(错误紧跟在它之后到达);
+     *  - 挂起重投期间的 Stop / 撤单: 已经推过终态事件, 随后回来的响应若照常激活, 用户看到
+     *    「已停止」而工具还在跑 —— 这种要把**当前所有**在飞的 start 一起隔离, 因为 Stop 的
+     *    语义是"什么都别再跑"。
+     */
+    const quarantineLatestInFlightStart = (): void => {
+      const seqs = [...inFlightStarts.keys()];
+      const latest = seqs[seqs.length - 1];
+      if (latest === undefined) return;
+      const entry = inFlightStarts.get(latest);
+      if (entry) entry.quarantined = true;
+      armLateStartOrphanGuard();
+    };
+    /**
+     * 标记当前所有在飞 start:这一轮已经由 Stop / 撤单推过终态, 它们的失败尾巴不得再推
+     * 第二组终态事件。
+     *
+     * 挂在**每个请求的条目**上而不是一个标量: 两轮 send 先后被 Stop 且各自的 RPC 都还在飞
+     * 时, 后一次会把标量覆盖掉 —— 先那次的 reject 于是又推一组终态, 而事件里不带 send 世代,
+     * 下游可能把这份过期收口套到后一个 turn 上(review #844 codex P1)。条目随 endTurnStart
+     * 一起删, 也不会泄漏。
+     */
+    const markInFlightStartsTerminallySettled = (): void => {
+      for (const entry of inFlightStarts.values()) entry.terminalSettled = true;
+    };
+    const quarantineAllInFlightStarts = (): void => {
+      if (inFlightStarts.size === 0) return;
+      for (const entry of inFlightStarts.values()) entry.quarantined = true;
+      armLateStartOrphanGuard();
+    };
+    /**
+     * 被隔离的 start 也可能在响应之前先推回 turnStarted —— 那个 handler 只看
+     * `turnStartFailedWithoutTurnId`, 不看登记表的 quarantined, 于是会把这个"已经判定不许
+     * 运行"的 turn 正常激活, 工具在 Stop 之后继续跑(review #844 codex P1)。
+     *
+     * 语义上这两件事是同一类: "有一次 start 我们拿不到 id 却已经决定它不许活"。所以复用既有
+     * 的通知级孤儿守卫, 让迟到的未知 started 走缓冲 / 墓碑 + interrupt 那条既有路径, 而不是
+     * 在 turnStarted handler 里再加一份并行判定。
+     */
+    function armLateStartOrphanGuard(): void {
+      turnStartFailedWithoutTurnId = true;
+    }
+
     let closed = false;
     let subscriptionInvalidatedByTransport = false;
     let subscription: ThreadSubscription | null = null;
     let interactionResolver: InteractionResolver | null = null;
+    // Kept across the internal plan implementation/revision turns. A later
+    // explicit Session.send replaces it before turn/start.
+    let activeTurnPermissionPolicy: TurnPermissionPolicy | null = null;
+    // Capability source choice belongs to the server-accepted turn that
+    // carried it. A global "last send text" can be poisoned by a turn/start
+    // that later fails, and can then unlock an unrelated surviving turn.
+    const capabilitySelectionTextByTurnId = new Map<string, string>();
+    type PendingCapabilitySteer = {
+      completion: Promise<void>;
+      resolve: () => void;
+    };
+    const pendingCapabilitySteersByTurnId = new Map<string, Set<PendingCapabilitySteer>>();
+
+    const appendCapabilitySelectionText = (turnId: string, selectionText: string): void => {
+      if (!selectionText) return;
+      capabilitySelectionTextByTurnId.set(
+        turnId,
+        [capabilitySelectionTextByTurnId.get(turnId) ?? '', selectionText]
+          .filter(Boolean)
+          .join('\n'),
+      );
+    };
+
+    const recordAcceptedCapabilitySteer = (
+      turnId: string,
+      selectionText: string,
+    ): void => {
+      if (
+        closed ||
+        !isTurnInFlight ||
+        currentTurnId !== turnId ||
+        completedTurnIds.has(turnId) ||
+        terminalErroredTurnIds.has(turnId)
+      ) {
+        return;
+      }
+      appendCapabilitySelectionText(turnId, selectionText);
+    };
+
+    const registerPendingCapabilitySteer = (
+      turnId: string,
+      selectionText: string,
+    ): ((accepted: boolean) => void) => {
+      let resolve!: () => void;
+      const entry: PendingCapabilitySteer = {
+        completion: new Promise<void>((done) => {
+          resolve = done;
+        }),
+        resolve: () => resolve(),
+      };
+      const entries = pendingCapabilitySteersByTurnId.get(turnId) ?? new Set();
+      entries.add(entry);
+      pendingCapabilitySteersByTurnId.set(turnId, entries);
+      let settled = false;
+      return (accepted) => {
+        if (settled) return;
+        settled = true;
+        if (accepted) recordAcceptedCapabilitySteer(turnId, selectionText);
+        entries.delete(entry);
+        if (entries.size === 0) pendingCapabilitySteersByTurnId.delete(turnId);
+        entry.resolve();
+      };
+    };
+
+    const waitForPendingCapabilitySteers = async (turnId: string): Promise<boolean> => {
+      // More than one direct caller can steer the same turn concurrently. A
+      // controlled MCP request cannot be attributed to one steer RPC, so wait
+      // until every steer that was already in flight has an authoritative ACK.
+      while (true) {
+        const entries = pendingCapabilitySteersByTurnId.get(turnId);
+        if (!entries || entries.size === 0) break;
+        await Promise.all([...entries].map((entry) => entry.completion));
+      }
+      return (
+        !closed &&
+        !completedTurnIds.has(turnId) &&
+        !terminalErroredTurnIds.has(turnId)
+      );
+    };
+
+    const abandonPendingCapabilitySteersForTurn = (turnId: string): void => {
+      const entries = pendingCapabilitySteersByTurnId.get(turnId);
+      if (!entries) return;
+      pendingCapabilitySteersByTurnId.delete(turnId);
+      for (const entry of entries) entry.resolve();
+    };
+
+    const abandonPendingCapabilitySteers = (): void => {
+      for (const turnId of pendingCapabilitySteersByTurnId.keys()) {
+        abandonPendingCapabilitySteersForTurn(turnId);
+      }
+    };
+    const forceTurnConfirmation = (toolName: string, input: unknown): boolean => {
+      const policy = activeTurnPermissionPolicy;
+      if (!policy) return false;
+      try {
+        return policy.forceConfirmToolCall(toolName, input) === true;
+      } catch (error) {
+        log.error('turn permission policy threw -> force confirmation', {
+          toolName,
+          origin: policy.origin,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return true;
+      }
+    };
     let stopRolloutPlanFallback: (() => void) | null = null;
     const seenRolloutPlanCallIds = new Set<string>();
-    const latestPlanByTurn = new Map<
-      string,
-      TurnPlanUpdatedNotification["params"]["plan"]
-    >();
+    const latestPlanByTurn = new Map<string, TurnPlanUpdatedNotification['params']['plan']>();
     // 当前 session 的 one-shot tip 状态 (turn-start status 用):
     //  - displayed: id → 已展示次数 (≥ 该 tip 的 guarantees.length 时退出抽样池)
     //  - pity:      id → 自上次展示以来候选轮次 (pickTurnStartStatus 内部自增 / 触发保底)
     // /clear 等价于开新 session → 重建 handle → 状态自然清零, 无需额外重置。
-    const oneShotTipState: OneShotState = {
-      displayed: new Map(),
-      pity: new Map(),
-    };
+    const oneShotTipState: OneShotState = { displayed: new Map(), pity: new Map() };
 
     /** Phase 3: mutable 配置, 下一个 turn/start 透传; resume 时也透传一次。 */
     let mutableModel = opts.model;
-    let mutableEffort: Effort = opts.effort ?? "high";
-    let mutablePermissionMode: PermissionMode = opts.permissionMode ?? "ask";
+    /**
+     * 运行时 provider 路由(会话创建时取 opts.providerId,setModel 可带新值覆盖)。
+     * host 侧的 provider route 与它必须同步,窗口上限按 (provider, model) 解析。
+     */
+    let mutableProviderId: string | null | undefined = opts.providerId;
+    let currentAutoReviewIntent = '';
+    const autoReviewDecisionCache = new Map<string, Promise<AutoReviewDecision>>();
+    const setAutoReviewIntent = (content: UserMessage['content']): void => {
+      currentAutoReviewIntent = extractAutoReviewUserIntent(content);
+      autoReviewDecisionCache.clear();
+    // 每条新用户消息 = 新一轮,提示重新武装。ErrorBanner 那份只活到下一条非 error 事件
+    // (renderer 的 handleStreamEvent 会清 recoverableError),所以「整个会话只说一次」
+    // 会让用户在后续轮次里完全看不到;改为每轮至多一条 —— 不刷屏,又保证每一轮遇到时
+    // 都有机会看见。持久呈现需要一条真正的会话级 notice 通道,见 issue 外推。
+      autoReviewUnavailableNotice.reset();
+    };
+    // 「自动审核不可用」的会话级一次性提示(issue #1574);与 Claude / Pi 同口径,走既有的
+    // 非终止 error 事件 + `[CODE]` 约定,不新增事件类型。
+    const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice((message) => {
+      eventQueue.push({
+        type: 'error',
+        data: { message, isTerminal: false },
+        source: 'codex',
+      });
+    });
+    /**
+     * 用于**目录查找**的模型 id —— 与 mutableModel(送上游的 wire 值)刻意分开。
+     *
+     * server 的 thread/settings/updated 会把请求的 id 规范化后回带(实测:`gpt-5.4` →
+     * `gpt-5.4-codex`),那个变体在产品目录里并不存在。窗口上限是按目录条目精确查的,
+     * 若拿 wire 值去查就查不到、于是不再收敛,虚高的上报值原样留下。
+     *
+     * 所以只有「用户选的模型」和「'gpt-5' 哨兵被解析成真实模型」这两种情况更新它;
+     * server 的 wire 规范化只动 mutableModel。
+     */
+    let mutableCatalogModel: string | undefined = opts.model;
+    let mutableEffort: Effort = opts.effort ?? 'high';
+    let mutablePermissionMode: PermissionMode = opts.permissionMode ?? 'ask';
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
+    // Named profiles defined through thread/start.config are thread-local. Codex
+    // 0.145.0 cannot resolve that thread-local definition when the selector is
+    // repeated on turn/start, so remember whether the thread is already using it.
+    let readonlyReferencesProfileActive = false;
+    // A fresh thread/start has no rollout yet, so thread/resume fails until a
+    // turn/start may have crossed the server acceptance boundary. Once a turn
+    // was attempted, prefer resume before replacing the thread; "no rollout"
+    // is the only safe proof that the thread is still unused.
+    let threadMayHaveRollout = false;
     // 计划模式(与 permissionMode 正交, **一次性选择**): mutablePlanMode 是 UI 勾选的
     // "武装"态 —— send 消耗它并立即 emit plan_mode_changed(false) 让勾选熄灭;
     // 本轮「计划 → 审阅 → 修订/批准」循环由 planCycleActive 承载:
@@ -2488,11 +2916,22 @@ export class CodexAgent extends BaseAgent {
     let planModeDefaultMarkerNeeded = false;
     // 当前 plan turn 流出的 proposed plan 文本 (plan item / <proposed_plan> 块)。
     let proposedPlanText: string | null = null;
+    const endPlanCycleAfterPreStartFailure = (reason: string): void => {
+      if (!planCycleActive) return;
+      planCycleActive = false;
+      proposedPlanText = null;
+      currentTurnPlanModeActive = false;
+      pendingTurnStartPlanMode = null;
+      log.debug(`${reason} during plan cycle — plan cycle ends`);
+    };
     // plan_review requestId 去重序号 (同一 turn 理论上只有一个 plan item, 防御性加序号)。
     let planReviewSeq = 0;
     // Undefined = 不覆盖 app-server/config 默认; null = explicit standard; 'fast' = Fast mode.
     let mutableServiceTier: ServiceTier | null | undefined =
-      opts.fastMode === undefined ? undefined : opts.fastMode ? "fast" : null;
+      opts.fastMode === undefined ? undefined : opts.fastMode ? 'fast' : null;
+    // Older async thread start/resume responses must not overwrite a newer
+    // Fast mode choice made while the request was in flight.
+    let serviceTierMutationGeneration = 0;
     const vo: Record<string, unknown> = { ...(opts.vendorOptions ?? {}) };
     const hostDynamicToolContext = {
       sessionId: opts.sessionId,
@@ -2502,31 +2941,26 @@ export class CodexAgent extends BaseAgent {
       providerId: opts.providerId,
       vendorOptions: vo,
     };
-    const hostDynamicToolProvider =
-      this.deps.codexHostDynamicToolProvider;
+    const hostDynamicToolProvider = this.deps.codexHostDynamicToolProvider;
     let hostDynamicTools: DynamicToolSpec[] = [];
-    if (
-      !opts.remoteHostId &&
-      supportsCodexDynamicTools(opts) &&
-      hostDynamicToolProvider
-    ) {
+    if (!opts.remoteHostId && supportsCodexDynamicTools(opts) && hostDynamicToolProvider) {
       try {
-        hostDynamicTools = [
-          ...hostDynamicToolProvider.listTools(hostDynamicToolContext),
-        ];
+        hostDynamicTools = [...hostDynamicToolProvider.listTools(hostDynamicToolContext)];
       } catch (error) {
-        log.error("host dynamic tool registration failed closed", {
+        log.error('host dynamic tool registration failed closed', {
           error: error instanceof Error ? error.message : String(error),
         });
       }
     }
-    const registeredHostDynamicToolKeys = new Set(
-      hostDynamicTools.map(dynamicToolKey),
-    );
+    const registeredHostDynamicToolKeys = new Set(hostDynamicTools.map(dynamicToolKey));
+    const sessionDynamicTools = [
+      ...(shouldRegisterAskUserDynamicTool(opts) ? [ASK_USER_DYNAMIC_TOOL] : []),
+      ...hostDynamicTools,
+    ];
     const credentialMode = opts.remoteHostId
       ? undefined
       : resolveAgentCredentialMode({
-          agentKind: "codex",
+          agentKind: 'codex',
           providerId: opts.providerId,
           model: opts.model,
         });
@@ -2534,8 +2968,7 @@ export class CodexAgent extends BaseAgent {
     let releaseHostBindingLease: (() => void) | null = null;
     const acquireHostBindingLeaseIfNeeded = (): void => {
       if (opts.remoteHostId || releaseHostBindingLease) return;
-      releaseHostBindingLease =
-        this.acquireHostSessionBindingLease(currentHostKey);
+      releaseHostBindingLease = this.acquireHostSessionBindingLease(currentHostKey);
     };
     const releaseHostBindingLeaseIfNeeded = (): void => {
       const release = releaseHostBindingLease;
@@ -2543,15 +2976,12 @@ export class CodexAgent extends BaseAgent {
       release?.();
     };
     const getSessionHost = async (): Promise<AppServerHost> => {
-      if (opts.remoteHostId)
-        return await this.getHost(opts.remoteHostId, credentialMode);
+      if (opts.remoteHostId) return await this.getHost(opts.remoteHostId, credentialMode);
       // 本地会话先等已有 credential switch 完成，再占用 startup reservation。否则
       // session 已拿到旧 host、但尚未 thread/start 订阅时，credential 切换看不到它。
       await this.waitForHostCredentialModeSwitch(currentHostKey);
       acquireHostBindingLeaseIfNeeded();
-      return await this.getHost(opts.remoteHostId, credentialMode, {
-        ignoreBindingLeases: 1,
-      });
+      return await this.getHost(opts.remoteHostId, credentialMode, { ignoreBindingLeases: 1 });
     };
     const host = await getSessionHost().catch((error) => {
       releaseHostBindingLeaseIfNeeded();
@@ -2562,63 +2992,107 @@ export class CodexAgent extends BaseAgent {
     const connectionId = host.getConnectionId();
     const isCurrentHost = (): boolean => {
       const currentHost = this.hosts.get(currentHostKey);
-      if ((this.hostGenerations.get(currentHostKey) ?? 0) !== hostGeneration)
-        return false;
-      return capturedHostWasRegistered
-        ? currentHost === host
-        : currentHost === undefined;
+      if ((this.hostGenerations.get(currentHostKey) ?? 0) !== hostGeneration) return false;
+      return capturedHostWasRegistered ? currentHost === host : currentHost === undefined;
     };
     const staleHostError = (operation: string): Error =>
-      new Error(
-        `Codex session expired because its app-server was replaced before ${operation}; restart the session`,
-      );
+      new Error(`Codex session expired because its app-server was replaced before ${operation}; restart the session`);
     const assertCurrentHost = (operation: string): void => {
       if (isCurrentHost()) return;
-      log.warn("codex session handle rejected after app-server replacement", {
+      log.warn('codex session handle rejected after app-server replacement', {
         operation,
         hostKey: currentHostKey,
-        credentialMode: credentialMode ?? "fallback",
+        credentialMode: credentialMode ?? 'fallback',
       });
       throw staleHostError(operation);
     };
     const skipIfStaleHost = (operation: string): boolean => {
       if (isCurrentHost()) return false;
-      log.warn("codex session handle ignored after app-server replacement", {
+      log.warn('codex session handle ignored after app-server replacement', {
         operation,
         hostKey: currentHostKey,
-        credentialMode: credentialMode ?? "fallback",
+        credentialMode: credentialMode ?? 'fallback',
       });
       return true;
     };
-    let initResp: Awaited<ReturnType<AppServerHost["ensureStarted"]>>;
+    let initResp: Awaited<ReturnType<AppServerHost['ensureStarted']>>;
     try {
-      assertCurrentHost("initialize");
-      initResp = await host.ensureStarted();
-      assertCurrentHost("initialize");
+      assertCurrentHost('initialize');
+      // 直调也必须有上界 (codex R13 P1): 冷启动 / transport 重建时
+      // bootstrap 挂死 (远端 daemon 无响应 / SSH 通道死) 会让 startSession
+      // 永不返回, UI 无限卡初始化 — 与 request() 的 startup deadline 同款。
+      initResp = await host.ensureStartedWithTimeout(CRITICAL_THREAD_RPC_TIMEOUT_MS, 'startSession initialize');
+      assertCurrentHost('initialize');
     } catch (error) {
       releaseHostBindingLeaseIfNeeded();
       throw error;
     }
     if (initResp.codexHome) this.codexHome = initResp.codexHome;
-    const approvalsReviewerSupported = supportsCodexApprovalsReviewer(
-      initResp.userAgent,
+    // reviewer 路由的凭证模式判定: 远程 daemon 用的是 auth sync 推过去的
+    // 同一份订阅凭证, reviewer 调用发生在 daemon 本地 — 订阅下走 daemon →
+    // chatgpt.com 直连, 与本地订阅同构 (远端出网由用户网络或 agent-proxy
+    // 隧道保障)。resolveAgentCredentialMode 只看 providerId/model, 远程同样
+    // 可判; 默认远程 session (无 providerId + 无前缀 model) 解析不出时,
+    // 兜底用 host 创建时登记的 effective mode (auth fallback 的实际钥匙 —
+    // 订阅即 oauth-bearer), 与本地默认 session 的兜底链对齐 (codex R17 P1)。
+    // 远程订阅与本地订阅同等启用 (#667 的远程一律回退是隧道方案缺位时的
+    // 保守, 隧道落地后放开)。
+    const sessionCredentialMode = opts.remoteHostId
+      ? resolveAgentCredentialMode({
+          agentKind: 'codex',
+          providerId: opts.providerId,
+          model: opts.model,
+        }) ?? this.hostEffectiveCredentialModes.get(currentHostKey)
+      : credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
+    const approvalsReviewerProtocolSupported =
+      supportsCodexApprovalsReviewerProtocol(initResp.userAgent);
+    const capabilityRoutingPolicy = this.deps.capabilityRouting;
+    const capabilityRoutingConfig = buildCodexCapabilityConfigOverrides(
+      capabilityRoutingPolicy,
+      {
+        // Remote Codex uses its own isolated CODEX_HOME. Cindy currently
+        // prepares provenance-preserving plugin overlays only in the local
+        // home, so remote explicit-only harness plugins must fail closed.
+        isolatedPluginOverlays: !opts.remoteHostId,
+      },
     );
-    const readonlyReferenceDirsSupported = supportsCodexReadonlyReferenceDirs(
-      initResp.userAgent,
-    );
+    const capabilityRoutingProtocolSupported =
+      supportsCodexCapabilityRoutingProtocol(initResp.userAgent);
+    if (
+      Object.keys(capabilityRoutingConfig).length > 0 &&
+      !capabilityRoutingProtocolSupported
+    ) {
+      releaseHostBindingLeaseIfNeeded();
+      throw new Error(
+        `Cindy capability routing requires Codex app-server 0.145.0 or newer (current: ${initResp.userAgent ?? 'unknown'})`,
+      );
+    }
+    // Only the official OpenAI OAuth route uses Codex Guardian. Third-party,
+    // gateway and custom-provider routes use the current session model through
+    // Cindy's host reviewer; they must never borrow the hidden Guardian model.
+    let nativeAutoReviewUnavailable = false;
+    let nativeApprovalsReviewerRouteSupported = sessionCredentialMode === 'oauth-bearer';
+    let approvalsReviewerRouteSupported = nativeApprovalsReviewerRouteSupported;
+    const readonlyReferenceDirsSupported = supportsCodexReadonlyReferenceDirs(initResp.userAgent);
+    const resumeExcludeTurnsSupported = supportsCodexResumeExcludeTurns(initResp.userAgent);
     if (mutableExtraDirs.length > 0 && !readonlyReferenceDirsSupported) {
       releaseHostBindingLeaseIfNeeded();
       throw new Error(
-        `Codex reference directories require app-server 0.144.6 or newer (current: ${initResp.userAgent ?? "unknown"})`,
+        `Codex reference directories require app-server 0.144.6 or newer (current: ${initResp.userAgent ?? 'unknown'})`,
       );
     }
-    if (mutablePermissionMode === "auto" && !approvalsReviewerSupported) {
-      log.warn(
-        "Codex Auto falling back to untrusted approvals: app-server lacks verified auto-review support",
-        {
-          userAgent: initResp.userAgent,
-        },
-      );
+    if (
+      mutablePermissionMode === 'auto' &&
+      !(approvalsReviewerProtocolSupported && approvalsReviewerRouteSupported)
+    ) {
+      log.warn('Codex Auto falling back to user approvals: automatic reviewer is unavailable on this route', {
+        userAgent: initResp.userAgent,
+        providerId: opts.providerId ?? null,
+        credentialMode: sessionCredentialMode ?? 'unknown',
+        remote: Boolean(opts.remoteHostId),
+        protocolSupported: approvalsReviewerProtocolSupported,
+        routeSupported: approvalsReviewerRouteSupported,
+      });
     }
     // 闭包 capture 一次, 整个 session 复用 — codexHome 是 server 进程级常量, host 不变就不变。
     // memories 目录是 codex 自家私域 (<CODEX_HOME>/memories/), 永远塞进 writableRoots,
@@ -2630,32 +3104,56 @@ export class CodexAgent extends BaseAgent {
     // "AbsolutePathBuf deserialized without a base path" -32600。
     // 判断: 以 '/' 开头视为 posix, 其它走平台默认 (Windows 本地 codex daemon)。
     const joinCodexHome = (sub: string) =>
-      this.codexHome?.startsWith("/")
-        ? `${this.codexHome.replace(/\/+$/, "")}/${sub}`
-        : path.join(this.codexHome ?? "", sub);
-    const codexExtraWritableRoots = this.codexHome
-      ? [joinCodexHome("memories")]
-      : [];
-    const runtimeWorkspaceRoots = (): string[] => [
-      opts.workingDir,
-      ...mutableExtraDirs,
-    ];
+      this.codexHome?.startsWith('/')
+        ? `${this.codexHome.replace(/\/+$/, '')}/${sub}`
+        : path.join(this.codexHome ?? '', sub);
+    const codexExtraWritableRoots = this.codexHome ? [joinCodexHome('memories')] : [];
+    const runtimeWorkspaceRoots = (): string[] => [opts.workingDir, ...mutableExtraDirs];
+    // Auto-review 传给 core 的会话平台(决定是否抹平 macOS /private firmlink)。远端会话的 host
+    // process.platform 不代表远端 OS(host 可能 macOS、远端 Linux)——远端 OS 未接入前保守传 'linux'
+    // 关掉抹平 → fail-closed(不把远端 /private/tmp 误当 /tmp 区内)。本地用真实 process.platform。
+    // 定义在此(startSession 作用域,opts=session)以避开 awaitApprovalDecision 内层 opts 的遮蔽。
+    const sessionReviewPlatform: NodeJS.Platform = opts.remoteHostId ? 'linux' : process.platform;
+    const reviewAutoAction = (action: ReviewableAction): Promise<AutoReviewDecision> => {
+      const request = {
+        sessionId: opts.sessionId,
+        agentKind: 'codex' as const,
+        providerId: mutableProviderId,
+        // app-server may normalize the wire model id to an alias that does not
+        // exist in Cindy's catalog. Review through the user's selected catalog
+        // model so the exact current provider route remains resolvable.
+        model: mutableCatalogModel ?? mutableModel,
+        userIntent: currentAutoReviewIntent,
+        action,
+        workspaceRoots: runtimeWorkspaceRoots().filter(
+          (dir): dir is string => typeof dir === 'string' && dir.length > 0,
+        ),
+        platform: sessionReviewPlatform,
+      };
+      const key = JSON.stringify(request);
+      const cached = autoReviewDecisionCache.get(key);
+      if (cached) return cached;
+      const pending = resolveAutoReviewDecision(
+        request,
+        this.deps.reviewAutoPermissionAction,
+      );
+      autoReviewDecisionCache.set(key, pending);
+      return pending;
+    };
     const readonlyReferencesConfig: Record<string, unknown> = {
       [`permissions.${READONLY_REFERENCES_PERMISSION_PROFILE}`]: {
         filesystem: {
-          ":root": "read",
-          ":workspace_roots": "read",
-          ":tmpdir": "write",
-          ":slash_tmp": "write",
+          ':root': 'read',
+          ':workspace_roots': 'read',
+          ':tmpdir': 'write',
+          ':slash_tmp': 'write',
           [opts.workingDir]: {
-            ".": "write",
-            ".git": "read",
-            ".agents": "read",
-            ".codex": "read",
+            '.': 'write',
+            '.git': 'read',
+            '.agents': 'read',
+            '.codex': 'read',
           },
-          ...(codexExtraWritableRoots[0]
-            ? { [codexExtraWritableRoots[0]]: "write" }
-            : {}),
+          ...(codexExtraWritableRoots[0] ? { [codexExtraWritableRoots[0]]: 'write' } : {}),
         },
         network: { enabled: false },
       },
@@ -2666,101 +3164,282 @@ export class CodexAgent extends BaseAgent {
     // 强行写入会让整次 enablement/set 失败，并连带破坏 memory override 热更新。
     // memory 覆盖只在 host 起来后能 push (RPC); 第一次 startSession 触发, 后续 setMemory 自己 push。
     // 失败 → warn + 继续, 不让 memory 配置阻塞主对话。
-    assertCurrentHost("memory override");
+    assertCurrentHost('memory override');
     if (!opts.remoteHostId) {
       await this.ensureMemoryOverridePushed(host, currentHostKey).catch((e) => {
-        log.warn(
-          "ensureMemoryOverridePushed failed, continuing without memory override",
-          {
-            error: e instanceof Error ? e.message : String(e),
-          },
-        );
+        log.warn('ensureMemoryOverridePushed failed, continuing without memory override', {
+          error: e instanceof Error ? e.message : String(e),
+        });
       });
     }
 
     const registerCodexMcpContext = (threadId: string): void => {
-      if (!sid || opts.remoteHostId) return;
+      // remoteHostId 不再跳过:远端 daemon 经 SSH remote-forward 直连本机
+      // HTTP MCP bridge 后,tool call 同样按 params._meta.threadId 路由,
+      // 需要这条注册让 CodexMcpThreadContextStore 能解析 remote thread。
+      if (!sid) return;
       try {
         const register = this.deps.registerCodexMcpThreadContext;
         if (!register) return;
         register({
           threadId,
           sessionId: sid,
+          ...(opts.sessionInstanceId ? { sessionInstanceId: opts.sessionInstanceId } : {}),
           workingDir: opts.workingDir,
+          // remote thread ctx: scope key 语义见 buildMemoryScopeKey。
+          ...(opts.remoteHostId ? { remoteHostId: opts.remoteHostId } : {}),
           vendorOptions: vo,
         });
-        log.debug("codex MCP thread context registered", {
+        log.debug('codex MCP thread context registered', {
           threadId: prefixId(threadId),
           sessionId: prefixId(sid),
-          orcaRole: typeof vo.orcaRole === "string" ? vo.orcaRole : undefined,
-          workerId:
-            typeof vo.orcaWorkerId === "string"
-              ? prefixId(vo.orcaWorkerId)
-              : undefined,
+          orcaRole: typeof vo.orcaRole === 'string' ? vo.orcaRole : undefined,
+          workerId: typeof vo.orcaWorkerId === 'string' ? prefixId(vo.orcaWorkerId) : undefined,
         });
       } catch (e) {
-        log.warn("registerCodexMcpThreadContext threw", { error: String(e) });
+        log.warn('registerCodexMcpThreadContext threw', { error: String(e) });
       }
     };
     const unregisterCodexMcpContext = (threadId: string): void => {
-      if (!sid || opts.remoteHostId) return;
+      // 与 register 对齐:remote thread 同样注册过 context,close 时同样注销。
+      if (!sid) return;
       try {
         const unregister = this.deps.unregisterCodexMcpThreadContext;
         if (!unregister) return;
-        unregister(threadId);
-        log.debug("codex MCP thread context unregistered", {
+        if (opts.sessionInstanceId) unregister(threadId, opts.sessionInstanceId);
+        else unregister(threadId);
+        log.debug('codex MCP thread context unregistered', {
           threadId: prefixId(threadId),
         });
       } catch (e) {
-        log.warn("unregisterCodexMcpThreadContext threw", { error: String(e) });
+        log.warn('unregisterCodexMcpThreadContext threw', { error: String(e) });
       }
     };
+    const descendantMcpThreadIds = new Set<string>();
+    const registerDescendantCodexMcpContext = (descendantThreadId: string): void => {
+      if (descendantThreadId === threadId || descendantMcpThreadIds.has(descendantThreadId)) return;
+      descendantMcpThreadIds.add(descendantThreadId);
+      registerCodexMcpContext(descendantThreadId);
+    };
+    const unregisterDescendantCodexMcpContexts = (): void => {
+      for (const descendantThreadId of descendantMcpThreadIds) {
+        unregisterCodexMcpContext(descendantThreadId);
+      }
+      descendantMcpThreadIds.clear();
+    };
+
+    // ── 子代理卡实时状态(V1 / V2 双轨) ──────────────────────────────────────
+    // 子代理跑在自己的 thread 里,app-server 把子线程的 item / tokenUsage / turn 通知
+    // 一并推给本连接;host 按 lineage 归到 root 后经 descendantNotification 投到这里
+    // (刻意不进主线程 dispatch,否则子代理的 exec 会被渲染成主会话自己的工具调用)。
+    // 聚合逻辑在 subagent-live-cards.ts(纯函数、可单测),这里只负责把快照按 spawn 卡
+    // 的同一 taskId 发成 agent_task_update —— 卡片本体与 Claude 子代理共用
+    // AgentTaskCard,本改动只补 Codex 侧缺失的数据源,不新建 UI。
+    /**
+     * 正在发子代理卡帧 —— eventQueue.push 的探针据此跳过主 turn 存活判定。
+     * 只在同步的 emitSubagentCardUpdate 内为 true(见那里的注释)。
+     */
+    let emittingDescendantUpdate = false;
+    const subagentLiveCards = createSubagentLiveCardTracker();
+
+    const emitSubagentCardUpdate = (update: SubagentLiveCardUpdate): void => {
+      // 子代理帧**不得**参与主 turn 的存活判定。eventQueue.push 上装了探针:每条事件都会刷新
+      // upstreamIdleLastEventAt + armUpstreamIdle(),并喂给 observeReconnectStallEvent ——
+      // 而 `agent_task_update` 正在 isReconnectRecoveryEvent 的白名单里(那对 Claude 的主线程
+      // Task 更新是对的,不能从白名单里删)。于是子线程一有进展就会重置主线程的静默计时、
+      // 清掉 reconnect deadline:主 turn 其实已经哑火,却因为子代理还在跑而永远检测不出来
+      // (review)。子线程有进展 ≠ 主 turn 已恢复。
+      //
+      // push 是同步的,所以这个标志在 set 与 clear 之间不会被别的事件穿插。
+      emittingDescendantUpdate = true;
+      try {
+        eventQueue.push({
+        type: 'agent_task_update',
+        data: {
+          provider: 'codex',
+          taskId: update.taskId,
+          parentToolUseId: update.taskId,
+          status: update.status,
+          ...(update.agentPath ? { title: update.agentPath } : {}),
+          usage: {
+            ...(update.totalTokens > 0 ? { totalTokens: update.totalTokens } : {}),
+            ...(update.toolUses > 0 ? { toolUses: update.toolUses } : {}),
+            durationMs: update.durationMs,
+          },
+        },
+          source: 'codex',
+        });
+      } finally {
+        emittingDescendantUpdate = false;
+      }
+    };
+
+    const handleDescendantNotification = (
+      childThreadId: string,
+      method: string,
+      params: unknown,
+    ): void => {
+      const update = subagentLiveCards.handleDescendantNotification(childThreadId, method, params);
+      if (update) emitSubagentCardUpdate(update);
+    };
+
+    /**
+     * 登记 spawn 映射,并回传"在 translator 之后重新声明真实聚合状态"的补发闭包。
+     *
+     * 发帧点必须在 translateItemNotification **之后**,两个理由:
+     *  - V2:translator 对 spawn 推一帧 status=running(无 usage),而重放出的状态可能
+     *    已是终态 —— 先发会被那帧 running 盖回去(store 字段级 merge,usage 不丢但 status 丢);
+     *  - V1:spawn 是 collabAgentToolCall,translator 在 completed phase 会无条件推一帧
+     *    status=completed —— 那只是 spawn 工具调用自己收口,子线程可能还在跑。不重新声明
+     *    就会把运行中的子代理提前标成完成,还会抹掉先到的 failed/stopped(review)。
+     */
+    const noteSubagentSpawnItem = (item: unknown): (() => void) | null => {
+      const replayed = subagentLiveCards.noteSpawnItem(item);
+      if (!replayed) return null;
+      return () => emitSubagentCardUpdate(replayed);
+    };
+    const terminateHandleAfterThreadCleanupFailure = (reason: string): void => {
+      if (closed) return;
+      closed = true;
+      resetUpstreamIdleForTurnEnd();
+      unregisterCodexMcpContext(threadId);
+      unregisterDescendantCodexMcpContexts();
+      // 与 close() 同规:handle 被终止后子代理卡不会再有消费者。同样先收终态再清 ——
+      // 这条路径(thread cleanup failure / 强制 retire)恰恰是最容易留下永久转圈卡的。
+      for (const update of subagentLiveCards.drainRunningForShutdown()) emitSubagentCardUpdate(update);
+      subagentLiveCards.clear();
+      abandonBufferedTurns(reason);
+      abandonPendingCapabilitySteers();
+      try { dismissAllPending(reason, 'deny'); } catch (e) { log.warn('dismissAllPending threw', { error: String(e) }); }
+      try { dismissAllPendingUserInput(reason); } catch (e) { log.warn('dismissAllPendingUserInput threw', { error: String(e) }); }
+      try { clearAllPendingUserInputInteractions(); } catch (e) { log.warn('clear pending user input threw', { error: String(e) }); }
+      try { stopActiveRolloutPlanFallback(); } catch (e) { log.warn('stop rollout plan fallback threw', { error: String(e) }); }
+      try { discardOverloadRetry(reason); } catch (e) { log.warn('cancel overload retry threw', { error: String(e) }); }
+      subscription = null;
+      try { eventQueue.end(); } catch (e) { log.warn('eventQueue.end threw', { error: String(e) }); }
+    };
+    const retireCapturedHostAfterThreadCleanupFailure = async (
+      reason: string,
+    ): Promise<void> => {
+      if (!isCurrentHost()) {
+        log.warn('thread cleanup failed after host replacement; skipping stale retire', {
+          threadId,
+          hostKey: currentHostKey,
+          reason,
+        });
+        return;
+      }
+      await this.retireHostKey(currentHostKey, reason, {
+        failIfActive: false,
+        logPrefix: 'codex thread cleanup',
+        ...(capturedHostWasRegistered ? { expectedHost: host } : {}),
+        expectedGeneration: hostGeneration,
+      });
+    };
+    const runThreadCleanupOrRetire = async (params: {
+      cleanupThreadId: string;
+      reason: string;
+      cleanup: () => Promise<void>;
+      retireHostOnFailure?: boolean;
+    }): Promise<boolean> => {
+      try {
+        await params.cleanup();
+        return true;
+      } catch (error) {
+        log.warn('Codex thread cleanup failed', {
+          threadId: params.cleanupThreadId,
+          reason: params.reason,
+          error: error instanceof Error ? error.message : String(error),
+          retireHostOnFailure: params.retireHostOnFailure ?? true,
+        });
+        if (params.retireHostOnFailure !== false) {
+          try {
+            await retireCapturedHostAfterThreadCleanupFailure(params.reason);
+          } catch (retireError) {
+            log.warn('Codex host retire after thread cleanup failure threw', {
+              threadId: params.cleanupThreadId,
+              reason: params.reason,
+              error: retireError instanceof Error ? retireError.message : String(retireError),
+            });
+          }
+        }
+        terminateHandleAfterThreadCleanupFailure(params.reason);
+        return false;
+      }
+    };
+    const releaseCurrentThreadSubscription = async (
+      reason: string,
+      opts: { retireHostOnFailure?: boolean } = {},
+    ): Promise<boolean> => {
+      const currentSubscription = subscription;
+      if (!currentSubscription) return true;
+      const released = await runThreadCleanupOrRetire({
+        cleanupThreadId: threadId,
+        reason,
+        cleanup: () => currentSubscription.release(),
+        retireHostOnFailure: opts.retireHostOnFailure ?? true,
+      });
+      if (subscription === currentSubscription) subscription = null;
+      return released;
+    };
+    const unsubscribeDetachedThread = async (
+      detachedThreadId: string,
+      reason: string,
+    ): Promise<boolean> => runThreadCleanupOrRetire({
+      cleanupThreadId: detachedThreadId,
+      reason,
+      cleanup: () => host.unsubscribeThread(detachedThreadId),
+    });
     const hasHostShellCommandPolicy = Boolean(this.deps.getShellCommandPolicy);
     function currentApprovalConfig(): CodexPermissionConfig {
       const config = mapPermissionToCodex(
         mutablePermissionMode,
-        approvalsReviewerSupported,
+        approvalsReviewerProtocolSupported,
+        approvalsReviewerRouteSupported,
       );
-      /**
-       * `never` lets some Codex builds execute a raw Responses
-       * `function_call(exec_command)` without emitting a command-approval
-       * request. When the host supplies a shell policy, keep Full access'
-       * no-prompt UX by using the native trusted-command gate instead: normal
-       * commands are auto-accepted below, while the host can still deny
-       * simulator bypasses before execution.
-       */
-      if (config.approvalPolicy === "never" && hasHostShellCommandPolicy) {
-        return { ...config, approvalPolicy: "untrusted" };
+      // `never` may bypass command approval callbacks. With a Host shell
+      // policy, route execution through Codex's trusted-command gate so broad
+      // Full access remains prompt-free while product denials stay enforceable.
+      if (config.approvalPolicy === 'never' && hasHostShellCommandPolicy) {
+        return { ...config, approvalPolicy: 'untrusted' };
       }
       return config;
     }
 
+    function shouldUseReadonlyReferencesProfile(): boolean {
+      return (
+        readonlyReferenceDirsSupported &&
+        mutableExtraDirs.length > 0 &&
+        mutablePermissionMode !== 'bypassPermissions'
+      );
+    }
+
     function currentThreadWorkspaceConfig(): Pick<
       ThreadStartParams,
-      | "approvalPolicy"
-      | "approvalsReviewer"
-      | "sandbox"
-      | "permissions"
-      | "runtimeWorkspaceRoots"
-      | "config"
+      | 'approvalPolicy'
+      | 'approvalsReviewer'
+      | 'sandbox'
+      | 'permissions'
+      | 'runtimeWorkspaceRoots'
+      | 'config'
     > {
-      const { approvalPolicy, approvalsReviewer, sandbox } =
-        currentApprovalConfig();
+      const { approvalPolicy, approvalsReviewer, sandbox } = currentApprovalConfig();
+      const config = {
+        ...capabilityRoutingConfig,
+        ...(readonlyReferenceDirsSupported ? readonlyReferencesConfig : {}),
+        ...host.getSessionMcpConfig(opts.sessionInstanceId),
+      };
       const shared = {
         approvalPolicy,
         ...(approvalsReviewer ? { approvalsReviewer } : {}),
         ...(readonlyReferenceDirsSupported
           ? {
               runtimeWorkspaceRoots: runtimeWorkspaceRoots(),
-              config: readonlyReferencesConfig,
             }
           : {}),
+        ...(Object.keys(config).length > 0 ? { config } : {}),
       };
-      if (
-        readonlyReferenceDirsSupported &&
-        mutableExtraDirs.length > 0 &&
-        mutablePermissionMode !== "bypassPermissions"
-      ) {
+      if (shouldUseReadonlyReferencesProfile()) {
         return {
           ...shared,
           permissions: READONLY_REFERENCES_PERMISSION_PROFILE,
@@ -2771,14 +3450,21 @@ export class CodexAgent extends BaseAgent {
 
     function currentTurnWorkspaceConfig(): Pick<
       TurnStartParams,
-      | "approvalPolicy"
-      | "approvalsReviewer"
-      | "sandboxPolicy"
-      | "permissions"
-      | "runtimeWorkspaceRoots"
+      | 'approvalPolicy'
+      | 'approvalsReviewer'
+      | 'sandboxPolicy'
+      | 'runtimeWorkspaceRoots'
     > {
-      const { approvalPolicy, approvalsReviewer, sandbox } =
-        currentApprovalConfig();
+      // A policy turn must make execution observable to the host. Read-only +
+      // untrusted routes command/file escalations through the request handlers;
+      // those handlers auto-accept non-forced actions in Auto mode.
+      const turnApprovalConfig: CodexPermissionConfig = activeTurnPermissionPolicy
+        ? {
+            approvalPolicy: 'untrusted',
+            sandbox: 'read-only',
+          }
+        : currentApprovalConfig();
+      const { approvalPolicy, approvalsReviewer, sandbox } = turnApprovalConfig;
       const shared = {
         approvalPolicy,
         ...(approvalsReviewer ? { approvalsReviewer } : {}),
@@ -2787,14 +3473,19 @@ export class CodexAgent extends BaseAgent {
           : {}),
       };
       if (
-        readonlyReferenceDirsSupported &&
-        mutableExtraDirs.length > 0 &&
-        mutablePermissionMode !== "bypassPermissions"
+        shouldUseReadonlyReferencesProfile() &&
+        !activeTurnPermissionPolicy
       ) {
-        return {
-          ...shared,
-          permissions: READONLY_REFERENCES_PERMISSION_PROFILE,
-        };
+        // The profile was selected on thread/start or thread/resume. Repeating
+        // the selector here makes Codex 0.145.0 reload its base config (which
+        // does not contain our per-thread definition) and reject turn/start
+        // with "default_permissions requires a `[permissions]` table".
+        if (!readonlyReferencesProfileActive) {
+          throw new Error(
+            'Codex read-only reference profile is not active for this thread; restore it with thread/resume before turn/start',
+          );
+        }
+        return shared;
       }
       return {
         ...shared,
@@ -2822,7 +3513,7 @@ export class CodexAgent extends BaseAgent {
       // 可能为 true(用户为未来消息重新勾选), 不能影响本 turn 的线上参数。
       if (planThisTurn || continuePlanCycleThisTurn) {
         return {
-          mode: "plan",
+          mode: 'plan',
           settings: {
             model: mutableModel,
             reasoning_effort: clampEffortForCodex(mutableModel, mutableEffort),
@@ -2831,9 +3522,9 @@ export class CodexAgent extends BaseAgent {
         };
       }
       if (threadTouchedPlanMode) {
-        const developerInstructions = planModeDefaultMarkerNeeded ? null : "";
+        const developerInstructions = planModeDefaultMarkerNeeded ? null : '';
         return {
-          mode: "default",
+          mode: 'default',
           settings: {
             model: mutableModel,
             reasoning_effort: clampEffortForCodex(mutableModel, mutableEffort),
@@ -2844,11 +3535,8 @@ export class CodexAgent extends BaseAgent {
       return undefined;
     }
 
-    const toTurnInput = async (
-      content: UserMessage["content"],
-    ): Promise<UserInput[]> => {
-      if (typeof content !== "string")
-        return toAppServerInput(content, opts.workingDir);
+    const toTurnInput = async (content: UserMessage['content']): Promise<UserInput[]> => {
+      if (typeof content !== 'string') return toAppServerInput(content, opts.workingDir);
 
       const slash = parseLeadingSlashToken(content.trim());
       if (!slash) return toAppServerInput(content, opts.workingDir);
@@ -2856,35 +3544,24 @@ export class CodexAgent extends BaseAgent {
       try {
         const { skills } = await this.listSkillsForCwd(opts.workingDir, false);
         const skill = skills.find(
-          (item) =>
-            item.enabled &&
-            item.name.toLowerCase() === slash.name.toLowerCase(),
+          (item) => item.enabled && item.name.toLowerCase() === slash.name.toLowerCase(),
         );
         if (!skill) return toAppServerInput(content, opts.workingDir);
 
-        const inputs: UserInput[] = [
-          { type: "skill", name: skill.name, path: skill.path },
-        ];
-        const prompt =
-          slash.rest.trim() || skill.interface?.defaultPrompt?.trim() || "";
-        if (prompt) inputs.push({ type: "text", text: prompt });
+        const inputs: UserInput[] = [{ type: 'skill', name: skill.name, path: skill.path }];
+        const prompt = slash.rest.trim() || skill.interface?.defaultPrompt?.trim() || '';
+        if (prompt) inputs.push({ type: 'text', text: prompt });
         return inputs;
       } catch (err) {
-        log.warn(
-          "failed to resolve leading slash as Codex skill, sending literal text",
-          {
-            name: slash.name,
-            error: String(err),
-          },
-        );
+        log.warn('failed to resolve leading slash as Codex skill, sending literal text', {
+          name: slash.name,
+          error: String(err),
+        });
         return toAppServerInput(content, opts.workingDir);
       }
     };
 
     const hostUsesCodexProxy = host.isCodexProxyActive();
-    const isCodexProxyChannelReady = (): boolean =>
-      hostUsesCodexProxy &&
-      typeof this.deps.registerCodexSystemPromptForThread === "function";
 
     // ── OpenAI 远端压缩身份(thread 级,start/resume 冻结)────────────────────
     // 仅当 ① host 是 oauth spawn 且下发了 OpenAI 身份 provider(见
@@ -2898,21 +3575,63 @@ export class CodexAgent extends BaseAgent {
       if (opts.remoteHostId) return undefined;
       const providerIdFromHost = host.getRemoteCompactionProviderId?.();
       if (!providerIdFromHost) return undefined;
-      const family =
-        credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
-      return family === "oauth-bearer" ? providerIdFromHost : undefined;
+      const family = credentialMode ?? this.hostEffectiveCredentialModes.get(currentHostKey);
+      return family === 'oauth-bearer' ? providerIdFromHost : undefined;
     })();
 
-    let registeredDeveloperInstructions = "";
-    const registerCodexDeveloperInstructions = (
-      threadId: string,
-      text: string,
-    ): void => {
+    /**
+     * 本 thread 的 Responses 请求是否走 WebSocket。
+     *
+     * 等价于「选了 OpenAI 身份 provider」:spawn args 里只有该 provider 打开了
+     * `supports_websockets`(见 desktop 侧 buildCodexProxySpawnArgs),cindy_gateway
+     * 与其余供应商一律 false。所以 threadModelProvider 非空 ⟺ 该 thread 走 WS。
+     *
+     * 单独起个名字而不是直接用 `!threadModelProvider`:两者当前等价但语义不同 ——
+     * 前者问"走不走 WS"(决定 prompt 注入通道),后者问"选没选那个 provider"
+     * (原本只为远端压缩)。哪天该 provider 不再开 WS,要改的是这里而不是下面的判定。
+     */
+    const threadUsesWebSocket = !!threadModelProvider;
+
+    /**
+     * proxy 的 registry 注入通道本 thread 是否可用。
+     *
+     * 除 host 侧条件外还要求**本 thread 不走 WebSocket**:proxy 的 WS 通道只做 socket
+     * 级透传、看不到请求体,registry 注入不会生效。这类 thread 必须改走 codex 原生的
+     * developerInstructions 字段(下面 thread/start 与 thread/resume 的
+     * `!useProxyChannel` 分支)。
+     *
+     * 刻意复用 threadUsesWebSocket 这一个判定,不另立一套「是不是订阅直连」的推导 ——
+     * 两处推导迟早漂移,而漂移的后果是 prompt 静默丢失(既不注入 registry、也不写
+     * developerInstructions)。
+     */
+    const isCodexProxyChannelReady = (): boolean =>
+      hostUsesCodexProxy
+      && !threadUsesWebSocket
+      && typeof this.deps.registerCodexSystemPromptForThread === 'function';
+
+    let registeredDeveloperInstructions = '';
+    const registerCodexDeveloperInstructions = (threadId: string, text: string): void => {
       if (!text) return;
       registeredDeveloperInstructions = text;
       const register = this.deps.registerCodexSystemPromptForThread;
       if (!register) return;
       register({ sessionId: sid, threadId, text });
+    };
+    const refreshCodexAutoReviewerRoute = (targetThreadId: string): void => {
+      const routeCredentialMode = resolveAgentCredentialMode({
+        agentKind: 'codex',
+        providerId: mutableProviderId,
+        model: mutableModel,
+      }) ?? sessionCredentialMode;
+      nativeApprovalsReviewerRouteSupported =
+        !nativeAutoReviewUnavailable && routeCredentialMode === 'oauth-bearer';
+      approvalsReviewerRouteSupported = nativeApprovalsReviewerRouteSupported;
+      log.debug('codex Auto reviewer route refreshed', {
+        threadId: prefixId(targetThreadId),
+        providerId: mutableProviderId ?? null,
+        model: mutableModel,
+        native: approvalsReviewerRouteSupported,
+      });
     };
 
     // ── thread/start 或 thread/resume ────────────────────────────────────────
@@ -2920,61 +3639,36 @@ export class CodexAgent extends BaseAgent {
     // 或非 UUID 格式 — server 直接 -32600 invalid thread id, 整个 session 起不来。
     // 看到不像 UUID 就走新 thread/start, 不让 ghost id 阻塞用户。
     const isLikelyValidThreadId = (id: string | undefined): id is string =>
-      typeof id === "string" &&
-      id.length > 0 &&
-      !id.startsWith("<") &&
-      /^[0-9a-fA-F-]+$/.test(id);
+      typeof id === 'string' && id.length > 0 && !id.startsWith('<') && /^[0-9a-fA-F-]+$/.test(id);
     if (opts.resumeSessionId && !isLikelyValidThreadId(opts.resumeSessionId)) {
-      log.warn("resumeSessionId looks invalid, falling back to thread/start", {
+      log.warn('resumeSessionId looks invalid, falling back to thread/start', {
         resumeSessionId: opts.resumeSessionId,
       });
     }
+    // 智能通讯录两态段: session 启动求值一次, host 未注入 getContactsPromptState
+    // 则缺省。remote 会话不注入(远端 spawn 无本地 MCP flags, cindy_contacts 不可达)。
+    // host 的有效状态计算已含: 全局开关 ∧ 工作区/用户覆盖 ∧ 实际应用到 running
+    // app-server 的 spawn 快照(失效失败留下 stale 配置时返回 unavailable, 本段
+    // 静默, 不指挥模型调 stale 桥里没有的工具)。
+    const contactsState = opts.remoteHostId
+      ? undefined
+      : this.deps.getContactsPromptState?.({ workingDir: opts.workingDir });
+    const contactsRules =
+      contactsState === 'enabled'
+        ? CONTACTS_RULES_ENABLED
+        : contactsState === 'disabled'
+          ? CONTACTS_RULES_DISABLED
+          : '';
+    const developerInstructions = buildCodexDeveloperInstructions({
+      makerMemoryRules,
+      contactsRules,
+      runtimeSystemPrompt: this.deps.runtimeConfig.systemPrompt,
+      makerMemoryIndex,
+      userPrompt: opts.userPrompt,
+    });
+    const useProxyChannel = isCodexProxyChannelReady();
     let threadId: string;
-    let codexProductPromptDelivery: AgentSessionHandle["codexProductPromptDelivery"];
-
-    const collaborationModeFromText = (
-      text: string,
-    ): "plan" | "default" | null => {
-      const match = /<collaboration_mode>\s*#\s*(Plan|Default)\s+Mode/i.exec(
-        text,
-      );
-      if (!match) return null;
-      return match[1]?.toLowerCase() === "plan" ? "plan" : "default";
-    };
-
-    const textFromResponsesItem = (value: unknown): string[] => {
-      if (!value || typeof value !== "object") return [];
-      if (Array.isArray(value)) return value.flatMap(textFromResponsesItem);
-      const record = value as Record<string, unknown>;
-      const texts: string[] = [];
-      if (typeof record.text === "string") texts.push(record.text);
-      if (Array.isArray(record.content))
-        texts.push(...record.content.flatMap(textFromResponsesItem));
-      return texts;
-    };
-
-    const threadHistoryNeedsDefaultModeMarker = (thread: unknown): boolean => {
-      if (!thread || typeof thread !== "object") return false;
-      const turns = (thread as { turns?: unknown }).turns;
-      if (!Array.isArray(turns)) return false;
-      // Codex 0.142.5 thread/resume includes turns[].items. Only collaboration
-      // markers are authoritative here: ordinary non-Plan-Mode Codex turns can
-      // also persist native `type:'plan'` items.
-      let latestCollaborationMode: "plan" | "default" | null = null;
-      for (const turn of turns) {
-        if (!turn || typeof turn !== "object") continue;
-        const items = (turn as { items?: unknown }).items;
-        if (!Array.isArray(items)) continue;
-        for (const item of items) {
-          if (!item || typeof item !== "object") continue;
-          for (const text of textFromResponsesItem(item)) {
-            latestCollaborationMode =
-              collaborationModeFromText(text) ?? latestCollaborationMode;
-          }
-        }
-      }
-      return latestCollaborationMode === "plan";
-    };
+    let codexProductPromptDelivery: AgentSessionHandle['codexProductPromptDelivery'];
 
     /**
      * 会话中途把单个设置 (serviceTier / model / effort) 立即推给 app-server,
@@ -2995,30 +3689,22 @@ export class CodexAgent extends BaseAgent {
      * 返回入队任务的 promise (链已 catch, 永不 reject), 调用方可 await 到本次发送完成。
      */
     let settingsUpdateChain: Promise<void> = Promise.resolve();
-    const pushThreadSettings = (
-      patch: Omit<ThreadSettingsUpdateParams, "threadId">,
-    ): Promise<void> => {
+    const pushThreadSettings = (patch: Omit<ThreadSettingsUpdateParams, 'threadId'>): Promise<void> => {
       if (!threadId || closed) return Promise.resolve();
       const run = settingsUpdateChain.then(async () => {
         if (!threadId || closed) return; // 排到队头时再校验一次 (期间可能已 close)
-        if (skipIfStaleHost("thread/settings/update")) return;
+        if (skipIfStaleHost('thread/settings/update')) return;
         try {
-          await host.request<ThreadSettingsUpdateResponse>(
-            Method.ThreadSettingsUpdate,
-            {
-              threadId,
-              ...patch,
-            },
-          );
+          await host.request<ThreadSettingsUpdateResponse>(Method.ThreadSettingsUpdate, {
+            threadId,
+            ...patch,
+          });
         } catch (e) {
-          log.warn(
-            "thread/settings/update failed (turn/start carry remains fallback)",
-            {
-              threadId,
-              patchKeys: Object.keys(patch),
-              error: e instanceof Error ? e.message : String(e),
-            },
-          );
+          log.warn('thread/settings/update failed (turn/start carry remains fallback)', {
+            threadId,
+            patchKeys: Object.keys(patch),
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       });
       settingsUpdateChain = run;
@@ -3030,177 +3716,375 @@ export class CodexAgent extends BaseAgent {
         try {
           await this.deps.prepareCodexResumeSession(opts.resumeSessionId);
         } catch (e) {
-          log.warn(
-            "prepareCodexResumeSession failed, continuing to thread/resume",
-            {
-              resumeSessionId: opts.resumeSessionId,
-              error: e instanceof Error ? e.message : String(e),
-            },
-          );
+          log.warn('prepareCodexResumeSession failed, continuing to thread/resume', {
+            resumeSessionId: opts.resumeSessionId,
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       }
-      const developerInstructions = buildCodexDeveloperInstructions({
-        makerMemoryRules,
-        runtimeSystemPrompt: this.deps.runtimeConfig.systemPrompt,
-        makerMemoryIndex,
-        userPrompt: opts.userPrompt,
-      });
-      const useProxyChannel = isCodexProxyChannelReady();
+      // WS proxy 看不到请求体,不能像 HTTP registry 通道那样逐请求补 prompt。即使历史
+      // marker=true,冷恢复时也必须把当前值重新写进 Codex 的 session configuration,
+      // 保证自动 compact 后构建出来的 canonical developer context 仍含 Cindy 指令。
+      // loaded-thread resume 在 Codex 0.145 会忽略 override；同文本仍由既有历史保留。
+      const shouldSendNativeDeveloperInstructions =
+        !!developerInstructions
+        && !useProxyChannel
+        && (threadUsesWebSocket || opts.codexHistoryHasProductPrompt !== true);
       const params: ThreadResumeParams = {
         threadId: opts.resumeSessionId,
+        ...(resumeExcludeTurnsSupported ? { excludeTurns: true } : {}),
         cwd: opts.workingDir,
         ...currentThreadWorkspaceConfig(),
         ...(threadModelProvider ? { modelProvider: threadModelProvider } : {}),
-        ...(mutableModel && mutableModel !== "gpt-5"
-          ? { model: mutableModel }
-          : {}),
-        ...(mutableServiceTier !== undefined
-          ? { serviceTier: mutableServiceTier }
-          : {}),
-        ...(developerInstructions &&
-        !useProxyChannel &&
-        opts.codexHistoryHasProductPrompt !== true
+        ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+        ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+        ...(shouldSendNativeDeveloperInstructions
           ? { developerInstructions }
           : {}),
       };
       try {
         acquireHostBindingLeaseIfNeeded();
-        assertCurrentHost("thread/resume");
-        const resp = await host.request<ThreadResumeResponse>(
-          Method.ThreadResume,
-          params,
-        );
-        assertCurrentHost("thread/resume");
-        if (Object.hasOwn(resp, "serviceTier")) {
+        assertCurrentHost('thread/resume');
+        const resp = await host.request<ThreadResumeResponse>(Method.ThreadResume, params, {
+          timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+        });
+        assertCurrentHost('thread/resume');
+        if (Object.hasOwn(resp, 'serviceTier')) {
           mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
         }
+        if (mutableModel === 'gpt-5' && resp.model) {
+          mutableModel = resp.model;
+          // 'gpt-5' 是「用 server 默认」的占位、本身不是目录条目,解析出的真实 id 才是
+          // 我们能拿到的最佳目录线索(与下方 wire 规范化不同,后者不更新它)。
+          mutableCatalogModel = resp.model;
+        }
         threadId = resp.thread.id;
+        refreshCodexAutoReviewerRoute(threadId);
         if (useProxyChannel) {
           registerCodexDeveloperInstructions(threadId, developerInstructions);
-          codexProductPromptDelivery = {
-            threadId,
-            historyHasProductPrompt: false,
-          };
-        } else if (
-          developerInstructions &&
-          opts.codexHistoryHasProductPrompt !== true
-        ) {
-          codexProductPromptDelivery = {
-            threadId,
-            historyHasProductPrompt: true,
-          };
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: false };
+        } else if (shouldSendNativeDeveloperInstructions) {
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: true };
         }
         sdkSessionId = threadId;
+        readonlyReferencesProfileActive = shouldUseReadonlyReferencesProfile();
+        threadMayHaveRollout = true;
         // Resumed app-server threads may have sticky collaborationMode='plan' from
         // a previous handle whose plan cycle ended without a follow-up turn. Since
         // that sticky state lives server-side, conservatively send mode:'default'
         // on future normal turns after any successful resume.
         threadTouchedPlanMode = true;
-        planModeDefaultMarkerNeeded = threadHistoryNeedsDefaultModeMarker(
-          resp.thread,
-        );
-        log.info("thread/resume ok", {
-          threadId,
-          model: resp.model,
-          serviceTier: mutableServiceTier ?? null,
-        });
+        // excludeTurns intentionally loads no history, so we cannot prove whether
+        // the persisted thread last used Plan Mode. Inject the official Default
+        // marker once; markCollaborationModeAccepted() suppresses repeats.
+        planModeDefaultMarkerNeeded = true;
+        log.info('thread/resume ok', { threadId, model: resp.model, serviceTier: mutableServiceTier ?? null });
       } catch (e) {
         releaseHostBindingLeaseIfNeeded();
-        log.error("thread/resume failed", {
-          error: String(e),
-          resumeSessionId: opts.resumeSessionId,
-        });
+        log.error('thread/resume failed', { error: String(e), resumeSessionId: opts.resumeSessionId });
         const message = `Failed to resume Codex thread: ${String(e)}`;
         eventQueue.push({
-          type: "error",
+          type: 'error',
           data: { message, isTerminal: true },
-          source: "codex",
+          source: 'codex',
         });
         eventQueue.end();
         throw new Error(message);
       }
     } else {
-      // developerInstructions 五段拼接 (协议见 thread/start.developerInstructions):
+      // developerInstructions 六段拼接 (协议见 thread/start.developerInstructions):
       //   [2] MAKER_CODEX_SYSTEM_PROMPT_APPEND — maker engine (system-prompt-append.md)
       //   [3] makerMemoryRules                 — maker memory 写入规范 (条件式)
-      //   [4] runtimeConfig.systemPrompt       — host runtime (host 维护的 .md)
-      //   [5] makerMemoryIndex                 — 当前 workdir MEMORY.md 内容 (条件式,
+      //   [4] contactsRules                    — 智能通讯录两态段 (条件式: host 注入
+      //                                          getContactsPromptState 才有)
+      //   [5] runtimeConfig.systemPrompt       — host runtime (host 维护的 .md)
+      //   [6] makerMemoryIndex                 — 当前 workdir MEMORY.md 内容 (条件式,
       //                                          紧邻 userPrompt 高优先级, 启动时快照)
-      //   [6] opts.userPrompt                  — per-call 用户级 (renderer 本地 storage,
+      //   [7] opts.userPrompt                  — per-call 用户级 (renderer 本地 storage,
       //                                          每次 startSession 透传, 优先级最高)
-      // 跟 claude-code 六段语义对齐。空段被 .filter 跳过,
+      // 段序语义与 claude-code 对齐(claude 的 [1] 是 SDK 内嵌 preset, 此处无对应段,
+      // 故编号从 [2] 起、共六段)。空段被 .filter 跳过,
       // 内容为空时不发送 developerInstructions 字段。
-      const developerInstructions = buildCodexDeveloperInstructions({
-        makerMemoryRules,
-        runtimeSystemPrompt: this.deps.runtimeConfig.systemPrompt,
-        makerMemoryIndex,
-        userPrompt: opts.userPrompt,
-      });
-      const useProxyChannel = isCodexProxyChannelReady();
-      const dynamicTools = [
-        ...(shouldRegisterAskUserDynamicTool(opts)
-          ? [ASK_USER_DYNAMIC_TOOL]
-          : []),
-        ...hostDynamicTools,
-      ];
       const params: ThreadStartParams = {
         cwd: opts.workingDir,
         ...currentThreadWorkspaceConfig(),
-        ...(dynamicTools.length > 0 ? { dynamicTools } : {}),
+        ...(sessionDynamicTools.length > 0 ? { dynamicTools: sessionDynamicTools } : {}),
         ...(threadModelProvider ? { modelProvider: threadModelProvider } : {}),
-        ...(mutableModel && mutableModel !== "gpt-5"
-          ? { model: mutableModel }
-          : {}),
-        ...(mutableServiceTier !== undefined
-          ? { serviceTier: mutableServiceTier }
-          : {}),
-        ...(developerInstructions && !useProxyChannel
-          ? { developerInstructions }
-          : {}),
+        ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+        ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+        ...(developerInstructions && !useProxyChannel ? { developerInstructions } : {}),
       };
       try {
         acquireHostBindingLeaseIfNeeded();
-        assertCurrentHost("thread/start");
-        const resp = await host.request<ThreadStartResponse>(
-          Method.ThreadStart,
-          params,
-        );
-        assertCurrentHost("thread/start");
-        if (Object.hasOwn(resp, "serviceTier")) {
+        assertCurrentHost('thread/start');
+        const resp = await host.request<ThreadStartResponse>(Method.ThreadStart, params, {
+          timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+        });
+        assertCurrentHost('thread/start');
+        if (Object.hasOwn(resp, 'serviceTier')) {
           mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
         }
+        if (mutableModel === 'gpt-5' && resp.model) {
+          mutableModel = resp.model;
+          // 'gpt-5' 是「用 server 默认」的占位、本身不是目录条目,解析出的真实 id 才是
+          // 我们能拿到的最佳目录线索(与下方 wire 规范化不同,后者不更新它)。
+          mutableCatalogModel = resp.model;
+        }
         threadId = resp.thread.id;
+        refreshCodexAutoReviewerRoute(threadId);
         if (useProxyChannel) {
           registerCodexDeveloperInstructions(threadId, developerInstructions);
-          codexProductPromptDelivery = {
-            threadId,
-            historyHasProductPrompt: false,
-          };
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: false };
         } else if (developerInstructions) {
-          codexProductPromptDelivery = {
-            threadId,
-            historyHasProductPrompt: true,
-          };
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: true };
         }
         sdkSessionId = threadId;
-        log.info("thread/start ok", {
-          threadId,
-          model: resp.model,
-          serviceTier: mutableServiceTier ?? null,
-        });
+        readonlyReferencesProfileActive = shouldUseReadonlyReferencesProfile();
+        threadMayHaveRollout = false;
+        log.info('thread/start ok', { threadId, model: resp.model, serviceTier: mutableServiceTier ?? null });
       } catch (e) {
         releaseHostBindingLeaseIfNeeded();
-        log.error("thread/start failed", { error: String(e) });
+        log.error('thread/start failed', { error: String(e) });
         const message = `Failed to start Codex thread: ${String(e)}`;
         eventQueue.push({
-          type: "error",
+          type: 'error',
           data: { message, isTerminal: true },
-          source: "codex",
+          source: 'codex',
         });
         eventQueue.end();
         throw new Error(message);
       }
     }
+
+    const requestProfileLifecycle = <Response>({
+      action,
+      signal,
+      request,
+      onLateResolve,
+    }: {
+      action: 'refresh' | 'replacement';
+      signal?: AbortSignal;
+      request: () => Promise<Response>;
+      onLateResolve?: (response: Response) => Promise<void> | void;
+    }): Promise<Response> =>
+      new Promise<Response>((resolve, reject) => {
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+        };
+        const resolveOnce = (value: Response) => {
+          if (settled) {
+            if (onLateResolve) {
+              void Promise.resolve(onLateResolve(value)).catch((error) => {
+                log.warn(`late read-only reference profile ${action} cleanup threw`, {
+                  error: String(error),
+                  threadId,
+                });
+              });
+            }
+            return;
+          }
+          settled = true;
+          cleanup();
+          resolve(value);
+        };
+        const rejectOnce = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+        const onAbort = () => {
+          rejectOnce(new Error('Codex send cancelled before acceptance'));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        timer = setTimeout(() => {
+          rejectOnce(
+            new Error(
+              `Codex read-only reference profile ${action} did not acknowledge within ${PROFILE_LIFECYCLE_ACK_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, PROFILE_LIFECYCLE_ACK_TIMEOUT_MS);
+        timer.unref?.();
+        try {
+          request().then(
+            resolveOnce,
+            (error) => rejectOnce(
+              error instanceof Error ? error : new Error(String(error)),
+            ),
+          );
+        } catch (error) {
+          rejectOnce(error instanceof Error ? error : new Error(String(error)));
+        }
+      });
+
+    /**
+     * A thread that has not accepted a turn has no rollout and cannot be
+     * resumed. Recreate that unused thread with the current profile instead,
+     * then move the live subscription and thread-scoped registrations.
+     */
+    const replaceUnusedThreadWithCurrentProfile = async (
+      signal?: AbortSignal,
+    ): Promise<void> => {
+      const previousThreadId = threadId;
+      const replacementServiceTierGeneration = serviceTierMutationGeneration;
+      const inheritedHostBindingLease = releaseHostBindingLease !== null;
+      acquireHostBindingLeaseIfNeeded();
+      try {
+        assertCurrentHost('read-only reference profile replacement');
+        const resp = await requestProfileLifecycle<ThreadStartResponse>({
+          action: 'replacement',
+          signal,
+          request: () => host.request<ThreadStartResponse>(Method.ThreadStart, {
+            cwd: opts.workingDir,
+            ...currentThreadWorkspaceConfig(),
+            ...(sessionDynamicTools.length > 0 ? { dynamicTools: sessionDynamicTools } : {}),
+            ...(threadModelProvider ? { modelProvider: threadModelProvider } : {}),
+            ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+            ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+            ...(developerInstructions && !useProxyChannel ? { developerInstructions } : {}),
+          }),
+          onLateResolve: async (lateResp) => {
+            const lateThreadId = lateResp.thread.id;
+            if (lateThreadId === previousThreadId) return;
+            const cleaned = await unsubscribeDetachedThread(
+              lateThreadId,
+              'late unused profile replacement cleanup',
+            );
+            if (!cleaned) return;
+            log.debug('discarded late unused profile replacement', {
+              previousThreadId,
+              threadId: lateThreadId,
+            });
+          },
+        });
+        assertCurrentHost('read-only reference profile replacement');
+        const nextThreadId = resp.thread.id;
+        if (closed) {
+          await unsubscribeDetachedThread(
+            nextThreadId,
+            'unused profile replacement cleanup after close',
+          );
+          throw new Error('Codex session closed during read-only reference profile replacement');
+        }
+        if (
+          Object.hasOwn(resp, 'serviceTier') &&
+          replacementServiceTierGeneration === serviceTierMutationGeneration
+        ) {
+          mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
+        }
+        if (nextThreadId !== previousThreadId) {
+          const released = await releaseCurrentThreadSubscription(
+            'unused profile replacement release',
+          );
+          if (!released) {
+            throw staleHostError('read-only reference profile replacement cleanup');
+          }
+          unregisterCodexMcpContext(previousThreadId);
+          if (closed) {
+            await unsubscribeDetachedThread(
+              nextThreadId,
+              'unused profile replacement cleanup after concurrent close',
+            );
+            throw new Error('Codex session closed during read-only reference profile replacement');
+          }
+          threadId = nextThreadId;
+          sdkSessionId = nextThreadId;
+          subscription = host.subscribeThread(threadId, handlers);
+          registerCodexMcpContext(threadId);
+          refreshCodexAutoReviewerRoute(threadId);
+          eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'codex' });
+          if (replacementServiceTierGeneration !== serviceTierMutationGeneration) {
+            // setFastMode() updated the old thread while thread/start was
+            // pending. turn/start still carries the current value; reapply the
+            // sticky thread setting without blocking dispatch.
+            void pushThreadSettings({ serviceTier: mutableServiceTier ?? null });
+          }
+        }
+        if (useProxyChannel) {
+          registerCodexDeveloperInstructions(threadId, developerInstructions);
+          codexProductPromptDelivery = { threadId, historyHasProductPrompt: false };
+        } else {
+          codexProductPromptDelivery = developerInstructions
+            ? { threadId, historyHasProductPrompt: true }
+            : undefined;
+        }
+        readonlyReferencesProfileActive = shouldUseReadonlyReferencesProfile();
+        threadMayHaveRollout = false;
+        log.debug('unused thread replaced with read-only reference profile', {
+          previousThreadId,
+          threadId,
+          referenceRoots: mutableExtraDirs.length,
+        });
+      } finally {
+        if (!inheritedHostBindingLease) releaseHostBindingLeaseIfNeeded();
+      }
+    };
+
+    /**
+     * turn/start cannot select a profile that only exists in this thread's
+     * per-request config. Most turns simply inherit the profile selected by
+     * thread/start. A live thread only needs a refresh after it previously used
+     * a sandboxPolicy (for example Full access), or when references are added
+     * to a thread that started without them.
+     */
+    const ensureReadonlyReferencesProfileForNextTurn = (
+      signal?: AbortSignal,
+    ): Promise<void> | null => {
+      if (!shouldUseReadonlyReferencesProfile() || readonlyReferencesProfileActive) return null;
+      return (async () => {
+        if (!threadMayHaveRollout) {
+          await replaceUnusedThreadWithCurrentProfile(signal);
+          return;
+        }
+        const resumeThreadWorkspaceConfig = currentThreadWorkspaceConfig();
+        const resumeServiceTierGeneration = serviceTierMutationGeneration;
+        assertCurrentHost('read-only reference profile refresh');
+        let resp: ThreadResumeResponse;
+        try {
+          resp = await requestProfileLifecycle<ThreadResumeResponse>({
+            action: 'refresh',
+            signal,
+            request: () => host.request<ThreadResumeResponse>(Method.ThreadResume, {
+              threadId,
+              ...(resumeExcludeTurnsSupported ? { excludeTurns: true } : {}),
+              cwd: opts.workingDir,
+              ...resumeThreadWorkspaceConfig,
+              ...(threadModelProvider ? { modelProvider: threadModelProvider } : {}),
+              ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+              ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+            }),
+          });
+        } catch (e) {
+          if (!/no rollout found/i.test(String(e))) throw e;
+          if (signal?.aborted) throw new Error('Codex send cancelled before acceptance');
+          threadMayHaveRollout = false;
+          await replaceUnusedThreadWithCurrentProfile(signal);
+          return;
+        }
+        assertCurrentHost('read-only reference profile refresh');
+        if (
+          Object.hasOwn(resp, 'serviceTier') &&
+          resumeServiceTierGeneration === serviceTierMutationGeneration
+        ) {
+          mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
+        } else if (resumeServiceTierGeneration !== serviceTierMutationGeneration) {
+          void pushThreadSettings({ serviceTier: mutableServiceTier ?? null });
+        }
+        readonlyReferencesProfileActive = 'permissions' in resumeThreadWorkspaceConfig;
+        threadMayHaveRollout = true;
+        log.debug('read-only reference profile restored before turn/start', {
+          threadId,
+          referenceRoots: mutableExtraDirs.length,
+        });
+      })();
+    };
 
     // ── dispatchInteraction + pendingApprovals (Claude 同款 dismissAllPending 模式) ──
     //
@@ -3211,74 +4095,71 @@ export class CodexAgent extends BaseAgent {
     // 不维护 pending Map 的话, 切 mode 不影响挂起 dialog → UX bug。
     interface PendingEntry {
       resolve: (decision: ApprovalDecision) => void;
-      kind: "commandExecution" | "fileChange" | "mcpServerElicitation";
+      kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation';
       settled: boolean;
       /** prompt-each-time 高风险审批: 宽松模式也必须弹 UI, dismissAllPending('allow') 不得放行 */
       forcePrompt?: boolean;
     }
     const pendingApprovals = new Map<string, PendingEntry>();
     const seenGuardianReviewIds = new Set<string>();
-    const userInputBroker =
-      new CodexInteractionBroker<ToolRequestUserInputResponse>();
-    const dynamicToolBroker =
-      new CodexInteractionBroker<DynamicToolCallResponse>();
+    const userInputBroker = new CodexInteractionBroker<ToolRequestUserInputResponse>();
+    const dynamicToolBroker = new CodexInteractionBroker<DynamicToolCallResponse>();
     const activeToolContexts = new Map<string, ActiveToolContext>();
+    // A single model turn can surface the same visible question through both
+    // the native requestUserInput request and the dynamic-tool compatibility
+    // path. Join an in-flight interaction, then replay its submitted answers
+    // by question position so protocol-specific ids can still differ.
+    const submittedUserInputByTurn = new Map<
+      string,
+      Map<string, UserInputAnswersByPosition>
+    >();
+    const pendingUserInputByTurn = new Map<
+      string,
+      Map<string, PendingUserInputInteraction>
+    >();
+    const pendingUserInputOwnerByRequestId = new Map<string, {
+      turnId: string;
+      fingerprint: string;
+      pendingForTurn: Map<string, PendingUserInputInteraction>;
+      pendingInteraction: PendingUserInputInteraction;
+    }>();
     registerCodexMcpContext(threadId);
     let mcpElicitationSeq = 0;
 
     const codexSessionApprovalSuggestions = () =>
-      this.createSessionPermissionUpdates({ type: "codexSessionApproval" });
+      this.createSessionPermissionUpdates({ type: 'codexSessionApproval' });
 
     const mapPermissionDecisionToApproval = (
-      decision: Extract<InteractionDecision, { kind: "permission" }>,
+      decision: Extract<InteractionDecision, { kind: 'permission' }>,
     ): ApprovalDecision => {
-      if (
-        decision.behavior === "allow" &&
-        this.permissionDecisionRequestsSessionApproval(decision)
-      ) {
-        return "acceptForSession";
+      if (decision.behavior === 'allow' && this.permissionDecisionRequestsSessionApproval(decision)) {
+        return 'acceptForSession';
       }
       return mapBehaviorToApproval(decision.behavior);
     };
 
-    function defaultInteractionDecision(
-      req: InteractionRequest,
-      reason: string,
-    ): InteractionDecision {
-      if (req.kind === "ask_user_question") {
-        return { kind: "ask_user_question", answers: {} };
+    function defaultInteractionDecision(req: InteractionRequest, reason: string): InteractionDecision {
+      if (req.kind === 'ask_user_question') {
+        return { kind: 'ask_user_question', answers: {} };
       }
-      if (req.kind === "plan_review") {
+      if (req.kind === 'plan_review') {
         // dismissed: 系统性 deny(无 resolver / resolver 抛错), reason 是系统代码,
         // 绝不能被 plan 修订循环当成用户反馈发起修订 turn。
-        return {
-          kind: "plan_review",
-          behavior: "deny",
-          reason,
-          dismissed: true,
-        };
+        return { kind: 'plan_review', behavior: 'deny', reason, dismissed: true };
       }
-      return { kind: "permission", behavior: "deny", reason };
+      return { kind: 'permission', behavior: 'deny', reason };
     }
 
-    async function dispatchInteraction(
-      req: InteractionRequest,
-    ): Promise<InteractionDecision> {
+    async function dispatchInteraction(req: InteractionRequest): Promise<InteractionDecision> {
       if (!interactionResolver) {
-        log.warn("dispatchInteraction without resolver — defaulting to deny", {
-          kind: req.kind,
-          requestId: req.requestId,
-        });
-        return defaultInteractionDecision(req, "no_interaction_resolver");
+        log.warn('dispatchInteraction without resolver — defaulting to deny', { kind: req.kind, requestId: req.requestId });
+        return defaultInteractionDecision(req, 'no_interaction_resolver');
       }
       try {
         return await interactionResolver(req);
       } catch (e) {
-        log.error("interactionResolver threw → deny", {
-          kind: req.kind,
-          message: (e as Error).message,
-        });
-        return defaultInteractionDecision(req, "interaction_resolver_error");
+        log.error('interactionResolver threw → deny', { kind: req.kind, message: (e as Error).message });
+        return defaultInteractionDecision(req, 'interaction_resolver_error');
       }
     }
 
@@ -3297,104 +4178,114 @@ export class CodexAgent extends BaseAgent {
     async function runPlanReviewFlow(
       plan: string,
       turnId: string,
+      inheritedCapabilitySelectionText: string,
     ): Promise<void> {
       planReviewSeq += 1;
       const requestId = `codex-plan-review:${turnId}:${planReviewSeq}`;
-      const emitPlanFollowUpStartFailure = (
-        kind: "implementation" | "revision",
-        error: unknown,
-      ): void => {
+      // 计划审批期间用户可能继续发消息(currentAutoReviewIntent 会被覆盖):实施/修订 turn 的审查
+      // 意图必须锚在**发起计划时**的原始请求上(codex 报)。
+      const planRequestAutoReviewIntent = currentAutoReviewIntent;
+      const planFollowUpSendOptions = (
+        additionalSelectionText = '',
+        autoReviewIntent?: string,
+      ): CodexInternalSendOptions => ({
+        ...(activeTurnPermissionPolicy
+          ? { turnPermissionPolicy: activeTurnPermissionPolicy }
+          : {}),
+        [CODEX_INHERITED_CAPABILITY_SELECTION]: [
+          inheritedCapabilitySelectionText,
+          additionalSelectionText,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        ...(autoReviewIntent ? { [CODEX_AUTO_REVIEW_INTENT]: autoReviewIntent } : {}),
+      });
+      const emitPlanFollowUpStartFailure = (kind: 'implementation' | 'revision', error: unknown): void => {
         log.warn(`plan ${kind} turn failed to start`, { error: String(error) });
         // If handle.send throws before it can emit its own terminal event (for
         // example a stale-host assertion before turn/start), main still needs a
         // terminal signal to release the resolved plan_review busy boundary and
         // re-check queued composer messages.
         eventQueue.push({
-          type: "error",
-          data: {
-            message: `plan ${kind} turn failed to start: ${String(error)}`,
-            isTerminal: true,
-          },
-          source: "codex",
+          type: 'error',
+          data: { message: `plan ${kind} turn failed to start: ${String(error)}`, isTerminal: true },
+          source: 'codex',
         });
         eventQueue.push({
-          type: "status",
-          data: {
-            status: "Done",
-            ...usageTracker.snapshot(),
-            isRunning: false,
-          },
-          source: "codex",
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
         });
       };
-      log.debug("plan review ▶ dispatch", { turnId, planChars: plan.length });
-      const decision = await dispatchInteraction({
-        kind: "plan_review",
-        requestId,
-        plan,
-      });
+      log.debug('plan review ▶ dispatch', { turnId, planChars: plan.length });
+      const decision = await dispatchInteraction({ kind: 'plan_review', requestId, plan });
       if (closed) return;
-      if (decision.kind !== "plan_review") {
-        log.warn("plan review got mismatched decision", {
-          decKind: decision.kind,
-        });
+      if (decision.kind !== 'plan_review') {
+        log.warn('plan review got mismatched decision', { decKind: decision.kind });
         return;
       }
-      if (decision.behavior === "allow") {
+      if (decision.behavior === 'allow') {
         planCycleActive = false;
         // 兜底: 审阅期间用户又重新勾选了计划模式 → 尊重批准语义, 一并消耗掉。
         if (mutablePlanMode) {
           mutablePlanMode = false;
-          eventQueue.push({
-            type: "plan_mode_changed",
-            data: { enabled: false },
-            source: "codex",
-          });
+          eventQueue.push({ type: 'plan_mode_changed', data: { enabled: false }, source: 'codex' });
         }
         const edited = decision.editedPlan?.trim();
-        const message =
-          edited && edited !== plan.trim()
-            ? `${PLAN_IMPLEMENTATION_MESSAGE} Follow this revised plan:\n\n${edited}`
-            : PLAN_IMPLEMENTATION_MESSAGE;
-        log.debug("plan review ◀ approved — starting implementation turn", {
-          turnId,
-          edited: Boolean(edited && edited !== plan.trim()),
-        });
+        const message = edited && edited !== plan.trim()
+          ? `${PLAN_IMPLEMENTATION_MESSAGE} Follow this revised plan:\n\n${edited}`
+          : PLAN_IMPLEMENTATION_MESSAGE;
+        const finalPlan = edited && edited !== plan.trim() ? edited : plan;
+        const implementationAutoReviewIntent = composeAutoReviewIntentWithApprovedPlan(
+          planRequestAutoReviewIntent,
+          finalPlan,
+        );
+        const addedCapabilitySelection = capabilitySelectionAddedByPlanEdit(
+          capabilityRoutingPolicy,
+          'codex',
+          plan,
+          decision.editedPlan,
+        );
+        log.debug('plan review ◀ approved — starting implementation turn', { turnId, edited: Boolean(edited && edited !== plan.trim()) });
         try {
-          await handle.send({ type: "user", content: message });
+          await handle.send(
+            { type: 'user', content: message },
+            planFollowUpSendOptions(
+              addedCapabilitySelection,
+              implementationAutoReviewIntent,
+            ),
+          );
         } catch (e) {
-          emitPlanFollowUpStartFailure("implementation", e);
+          emitPlanFollowUpStartFailure('implementation', e);
         }
         return;
       }
       const feedback = decision.reason?.trim();
       // 系统性 dismissal(abort/close/mode 切换等自动 deny)或无反馈 → 结束本轮循环,
       // 绝不把系统 reason 当用户反馈发修订 turn。
-      if (
-        decision.dismissed ||
-        !feedback ||
-        SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS.has(feedback)
-      ) {
+      if (decision.dismissed || !feedback || SYSTEM_PLAN_REVIEW_DISMISSAL_REASONS.has(feedback)) {
         // 一次性语义: 取消/系统 dismissal 同样结束本轮循环 —— 下一条消息回到常规模式,
         // 想再规划需重新勾选。
         planCycleActive = false;
-        log.debug("plan review ◀ dismissed — plan cycle ends", {
+        log.debug('plan review ◀ dismissed — plan cycle ends', {
           turnId,
           dismissed: decision.dismissed === true,
           reason: decision.reason ?? null,
         });
         return;
       }
-      log.debug(
-        "plan review ◀ revision requested — starting plan revision turn",
-        { turnId },
-      );
+      log.debug('plan review ◀ revision requested — starting plan revision turn', { turnId });
       try {
-        await handle.send({ type: "user", content: feedback });
+        await handle.send(
+          { type: 'user', content: feedback },
+          // 修订轮同样带上原始审查意图快照:否则 send 会把 auto-review intent 覆盖成这条修改意见,
+          // 下一次计划获批后 implementation reviewer 拿到的是"修改意见+计划"而非原始用户请求(codex 报)。
+          planFollowUpSendOptions(feedback, planRequestAutoReviewIntent),
+        );
       } catch (e) {
         planCycleActive = false;
         proposedPlanText = null;
-        emitPlanFollowUpStartFailure("revision", e);
+        emitPlanFollowUpStartFailure('revision', e);
       }
     }
 
@@ -3403,50 +4294,112 @@ export class CodexAgent extends BaseAgent {
      * 一个 Promise<ApprovalDecision>。dispatchInteraction 完成时若 entry 还没 settled
      * 就走用户决策; settled=true 说明 dismissAllPending 已经替它做了决定, 用户后续点了也吞掉。
      */
-    function awaitApprovalDecision(
+    async function awaitApprovalDecision(
       requestId: string,
-      kind: "commandExecution" | "fileChange" | "mcpServerElicitation",
+      kind: 'commandExecution' | 'fileChange' | 'mcpServerElicitation',
       req: InteractionRequest,
-      opts?: { forcePrompt?: boolean },
+      opts?: { forcePrompt?: boolean; autoReviewAction?: ReviewableAction },
     ): Promise<ApprovalDecision> {
-      // Full access 的普通审批不应打断用户。Auto 的越界审批由 app-server
-      // auto_review 负责；如果某个请求仍回到客户端，走 UI 是安全的 fail-to-prompt
-      // 兜底，不能绕过 reviewer 直接放行。forcePrompt 高风险 MCP inner tool
+      let forcePrompt =
+        opts?.forcePrompt === true ||
+        (req.kind === 'permission' &&
+          forceTurnConfirmation(req.toolName, req.input));
+      // Full access 的普通审批不应打断用户。Auto 在已验证路由上由 app-server
+      // auto_review 负责；fallback 路由则由 user reviewer 把越界请求发回客户端，
+      // 再由 Cindy reviewer 静默裁决。
+      // forcePrompt 高风险 MCP inner tool
       // (如 contacts delete/merge/系统回写)在任何模式下都必须拿到用户的逐次确认。
-      if (!opts?.forcePrompt && mutablePermissionMode === "bypassPermissions") {
-        return Promise.resolve("accept");
+      if (
+        !forcePrompt &&
+        mutablePermissionMode === 'bypassPermissions'
+      ) {
+        return Promise.resolve('accept');
       }
+      // Policy turns (unattended: feishu bot / 定时任务) 以 untrusted + read-only 发射,把命令/文件
+      // 升级请求发回 host 后自动接受非强制回调 —— 保留该无人值守语义,但**仍对危险桶 fail-closed**:
+      // 无人值守时没有人能批准一个 destructive / 凭证 / 远程执行动作,应拒绝,而不是让它逃出 read-only
+      // 沙箱静默执行(与交互式 Auto 共用同一张 Cindy core 安全网)。安全 / 仅需升级的动作照常自动
+      // 接受,不影响正常无人值守自动化(真需要跑危险命令的自动化应走 bypassPermissions,不受此影响)。
+      if (
+        !forcePrompt &&
+        activeTurnPermissionPolicy &&
+        mutablePermissionMode === 'auto'
+      ) {
+        if (opts?.autoReviewAction) {
+          const verdict = reviewAction(
+            opts.autoReviewAction,
+            runtimeWorkspaceRoots().filter((d): d is string => typeof d === 'string' && d.length > 0),
+            { platform: sessionReviewPlatform },
+          );
+          // 无人值守:只接受 core 判为 auto-approve 的安全动作。prompt / prompt-each-time 都意味着
+          // "需人确认"而此路径无人在场 → 一律 fail-closed decline(AGENTS.md 无人值守安全底线)。
+          return verdict === 'auto-approve' ? Promise.resolve('accept') : Promise.resolve('decline');
+        }
+        // 命令/文件类审批却没有可分类的 action(如 permissions 能力升级)——无法审查的高权限动作 →
+        // 同样 fail-closed 拒绝。mcpServerElicitation(交互输入)有自己的 forceConfirmToolCall 门,保留 auto-accept。
+        if (kind === 'commandExecution' || kind === 'fileChange') {
+          return Promise.resolve('decline');
+        }
+        return Promise.resolve('accept');
+      }
+      // Auto-review 兜底路径:非 OAuth 路由下 approvalsReviewer='user',app-server 把越界/网络
+      // 等审批请求发回 host(OAuth 原生 auto_review 则由 server 内部裁决、根本不到这里 —— 天然
+      // "原生优先、Cindy 兜底")。明显安全由本地规则放行；灰区调用当前会话模型做轻量
+      // allow/block/ask 裁决。allow/block 不依赖 interactionResolver；只有真正红线 ask 才走 UI，
+      // UI 不可用时 dispatchInteraction 自然 fail-closed decline。
+      if (
+        !forcePrompt &&
+        mutablePermissionMode === 'auto' &&
+        opts?.autoReviewAction
+      ) {
+        const decision = await reviewAutoAction(opts.autoReviewAction);
+        // 热切换收口:reviewAutoAction 是 async,期间 setPermissionMode 可能收紧(Auto→Ask)或
+        // 放宽(→Full)。按**最新**档位决策,否则旧 auto 档 allow 会绕过用户刚要求的确认
+        // (codex review P1;与已修复的 Pi / Claude 线程同口径)。cast 破 TS 收窄:TS 不建模
+        // await 期间经 setPermissionMode 的重赋值,仍视此处为 'auto';运行期确实可能已变。
+        const modeAfterReview = mutablePermissionMode as PermissionMode;
+        if (modeAfterReview === 'bypassPermissions') return 'accept';
+        if (modeAfterReview !== 'auto') {
+          forcePrompt = true;
+        } else if (decision.verdict === 'allow') {
+          return 'accept';
+        } else if (decision.verdict === 'block') {
+          // 审阅器没跑起来 ≠ 模型判定危险:前者是基础设施故障,提示一次让用户能接管;
+          // 后者按 Auto 本意保持静默。动作两种都仍然 decline。
+          if (decision.unavailable) autoReviewUnavailableNotice.notify();
+          return 'decline';
+        } else {
+          // Only red-line decisions reach the user and they cannot be remembered.
+          forcePrompt = true;
+        }
+      }
+      const routedRequest =
+        forcePrompt && req.kind === 'permission'
+          ? { ...req, suggestions: undefined }
+          : req;
       return new Promise<ApprovalDecision>((resolve) => {
-        const entry: PendingEntry = {
-          resolve,
-          kind,
-          settled: false,
-          forcePrompt: opts?.forcePrompt === true,
-        };
+        const entry: PendingEntry = { resolve, kind, settled: false, forcePrompt };
         pendingApprovals.set(requestId, entry);
         const finalize = (d: ApprovalDecision) => {
           if (entry.settled) return;
           entry.settled = true;
           pendingApprovals.delete(requestId);
-          resolve(d);
+          // A stale/custom UI may still return a session grant. Forced policy
+          // confirmation applies to this call only and must never persist.
+          resolve(forcePrompt && d === 'acceptForSession' ? 'accept' : d);
         };
-        dispatchInteraction(req)
+        dispatchInteraction(routedRequest)
           .then((decision) => {
-            if (decision.kind !== "permission") {
-              log.warn("unexpected non-permission decision → decline", {
-                kind: decision.kind,
-              });
-              finalize("decline");
+            if (decision.kind !== 'permission') {
+              log.warn('unexpected non-permission decision → decline', { kind: decision.kind });
+              finalize('decline');
               return;
             }
             finalize(mapPermissionDecisionToApproval(decision));
           })
           .catch((e) => {
-            log.error("dispatchInteraction threw → decline", {
-              requestId,
-              message: (e as Error).message,
-            });
-            finalize("decline");
+            log.error('dispatchInteraction threw → decline', { requestId, message: (e as Error).message });
+            finalize('decline');
           });
       });
     }
@@ -3457,10 +4410,7 @@ export class CodexAgent extends BaseAgent {
      *   - resolveAs='allow' (mode 切到 bypass; forcePrompt 仍 fail-closed): decision='accept'
      *   - resolveAs='deny'  (mode 切到 ask/auto 或 close): decision='decline'
      */
-    function dismissAllPending(
-      reason: string,
-      resolveAs: "allow" | "deny",
-    ): void {
+    function dismissAllPending(reason: string, resolveAs: 'allow' | 'deny'): void {
       if (pendingApprovals.size === 0) return;
       const entries = Array.from(pendingApprovals.entries());
       for (const [requestId, entry] of entries) {
@@ -3470,39 +4420,31 @@ export class CodexAgent extends BaseAgent {
         // forcePrompt(prompt-each-time 高风险审批)不接受"切到宽松模式"的批量放行——
         // 没拿到用户对这一次调用的明确确认就 fail-closed 拒绝, 与 awaitApprovalDecision
         // 里宽松模式仍强制弹 UI 的语义一致。
-        const effectiveResolveAs: "allow" | "deny" =
-          resolveAs === "allow" && entry.forcePrompt === true
-            ? "deny"
-            : resolveAs;
-        entry.resolve(effectiveResolveAs === "allow" ? "accept" : "decline");
+        const effectiveResolveAs: 'allow' | 'deny' =
+          resolveAs === 'allow' && entry.forcePrompt === true ? 'deny' : resolveAs;
+        entry.resolve(effectiveResolveAs === 'allow' ? 'accept' : 'decline');
         eventQueue.push({
-          type: "interaction_dismissed",
+          type: 'interaction_dismissed',
           data: { requestId, reason, resolvedAs: effectiveResolveAs },
-          source: "codex",
+          source: 'codex',
         });
       }
     }
 
-    const cancelledDynamicToolResponse = (
-      reason: string,
-    ): DynamicToolCallResponse => ({
-      contentItems: [
-        { type: "inputText", text: `Request cancelled: ${reason}` },
-      ],
+    const cancelledDynamicToolResponse = (reason: string): DynamicToolCallResponse => ({
+      contentItems: [{ type: 'inputText', text: `Request cancelled: ${reason}` }],
       success: false,
     });
 
     function dismissPendingUserInput(
       reason: string,
-      predicate: (meta: {
-        threadId?: string;
-        turnId?: string | null;
-      }) => boolean,
+      predicate: (meta: { threadId?: string; turnId?: string | null }) => boolean,
     ): void {
       const dismissed = new Set<string>();
-      const cancelledUserInput = userInputBroker.cancelWhere(predicate, {
-        answers: {},
-      });
+      const cancelledUserInput = userInputBroker.cancelWhere(
+        predicate,
+        { answers: {} },
+      );
       const cancelledDynamicTools = dynamicToolBroker.cancelWhere(
         predicate,
         cancelledDynamicToolResponse(reason),
@@ -3511,18 +4453,16 @@ export class CodexAgent extends BaseAgent {
         const requestId = String(meta.requestId);
         if (dismissed.has(requestId)) continue;
         dismissed.add(requestId);
+        forgetPendingUserInputRequest(requestId);
         eventQueue.push({
-          type: "interaction_dismissed",
-          data: { requestId, reason, resolvedAs: "deny" },
-          source: "codex",
+          type: 'interaction_dismissed',
+          data: { requestId, reason, resolvedAs: 'deny' },
+          source: 'codex',
         });
       }
     }
 
-    function dismissPendingUserInputForTurn(
-      turnId: string,
-      reason: string,
-    ): void {
+    function dismissPendingUserInputForTurn(turnId: string, reason: string): void {
       dismissPendingUserInput(reason, (meta) => meta.turnId === turnId);
     }
 
@@ -3545,8 +4485,9 @@ export class CodexAgent extends BaseAgent {
     let pendingTightenInterrupt = false;
     /**
      * 最近一次 send 的 turn 是否以无人值守策略发射 (覆盖在飞与运行中两个阶段)。
-     * auto_review / never 发射的 turn 在收紧时需要中断; user reviewer 发射的 turn
-     * 审批请求照常流经本地、收紧即时生效,即使期间 UI 短暂切过宽松档也不得误杀。
+     * auto_review / never / Auto policy turn 在收紧时需要中断;普通 user reviewer
+     * 发射的 turn 审批请求照常流经本地、收紧即时生效,即使期间 UI 短暂切过
+     * 宽松档也不得误杀。
      */
     let turnLaunchedUnattended = false;
     /**
@@ -3557,23 +4498,28 @@ export class CodexAgent extends BaseAgent {
      * (review #969 第四轮 Codex P2)。send 入口清空 (每个 send 周期独立)。
      */
     const turnsCompletedBeforeStartResp = new Set<string>();
+    /**
+     * @param opts.suppressFailureEvent 终失败时不推 'permission-tighten-interrupt-failed'
+     *        非终态 error。给 upstream-idle watchdog 用:它已经推过一条终态 error,
+     *        再补一条"收紧权限时没能停下任务"既词不达意也是重复打扰;它对失败的处置
+     *        是直接作废 host(见 onUpstreamIdleTimeout)。
+     * @returns true = app-server 确认收到中断;false = 两次 ack 都超时/报错(daemon
+     *          对我们哑火)。调用方据此决定要不要升级处置;忽略返回值即维持原行为。
+     */
     async function interruptTurnForPermissionTighten(
       turnId: string,
-    ): Promise<void> {
-      if (closed) return;
-      if (skipIfStaleHost("turn/interrupt")) return;
-      dismissPendingUserInputForTurn(turnId, "turn_interrupted");
+      opts?: { suppressFailureEvent?: boolean },
+    ): Promise<boolean> {
+      if (closed) return false;
+      if (skipIfStaleHost('turn/interrupt')) return false;
+      dismissPendingUserInputForTurn(turnId, 'turn_interrupted');
       // 每次尝试都设有界超时: app-server / 连接无响应时该 RPC 会永久悬挂, 没有
       // 超时就既不会走重试、也不会透出失败提示, 免审 turn 将无声继续跑
       // (review #969 第六轮 Greptile P1)。超时后迟到的 settle 结果静默吞掉。
       const requestInterruptWithTimeout = (): Promise<void> =>
         new Promise<void>((resolve, reject) => {
           const timer = setTimeout(() => {
-            reject(
-              new Error(
-                `turn/interrupt did not acknowledge within ${TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS}ms`,
-              ),
-            );
+            reject(new Error(`turn/interrupt did not acknowledge within ${TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS}ms`));
           }, TIGHTEN_INTERRUPT_ACK_TIMEOUT_MS);
           host.request(Method.TurnInterrupt, { threadId, turnId }).then(
             () => {
@@ -3588,172 +4534,653 @@ export class CodexAgent extends BaseAgent {
         });
       try {
         await requestInterruptWithTimeout();
+        return true;
       } catch (e) {
         // 这次 RPC 是收紧 fail-safe 的唯一执行手段, 失败不能静默: 重试一次,
         // 仍失败则透出非终态 error —— UI 已按 ask 展示, 但免审 turn 还在跑,
         // 用户需要知情并可手动 stop (review #969 第五轮 Codex P2)。
-        log.warn("turn/interrupt on permission tighten threw — retrying once", {
-          error: String(e),
-        });
+        log.warn('turn/interrupt on permission tighten threw — retrying once', { error: String(e) });
         try {
           await requestInterruptWithTimeout();
+          return true;
         } catch (retryErr) {
-          log.error("turn/interrupt on permission tighten failed after retry", {
-            error: String(retryErr),
-          });
+          log.error('turn/interrupt on permission tighten failed after retry', { error: String(retryErr) });
+          if (opts?.suppressFailureEvent) return false;
           eventQueue.push({
-            type: "error",
+            type: 'error',
             data: {
               // reason 是 renderer i18n 的稳定 key (ERROR_REASON_I18N_KEYS, 规则 18);
               // message 仅作非 renderer 消费方 (IM / orca) 的英文兜底。
-              reason: "permission-tighten-interrupt-failed",
+              reason: 'permission-tighten-interrupt-failed',
               message:
-                "Failed to stop the running task while tightening permissions; it may keep running without approval prompts until it finishes. Stop it manually if needed.",
+                'Failed to stop the running task while tightening permissions; it may keep running without approval prompts until it finishes. Stop it manually if needed.',
               isTerminal: false,
             },
-            source: "codex",
+            source: 'codex',
           });
+          return false;
         }
       }
     }
+
+    // ── upstream-response-idle watchdog ────────────────────────────────────
+    // 见 CODEX_UPSTREAM_IDLE_TIMEOUT_DEFAULT_MS。探针装在 eventQueue.push 上而不是
+    // 逐个 handler 里:所有投递给上层的事件都必经这里,一处覆盖全部通道(item /
+    // reasoning / status / error),不会因为漏改某个 handler 就让 watchdog 少收到
+    // "还活着"的信号。这段刻意放在 interruptTurnForPermissionTighten 之后:它依赖
+    // closed / isTurnInFlight / threadId / 中断实现,全部已在上文声明。
+    const upstreamIdleTimeoutMs = parseCodexIdleTimeoutMs(process.env.XDT_CODEX_IDLE_TIMEOUT_MS);
+    /** 未完成的工具类 item id;非空 = 球不在上游,watchdog 停表。 */
+    const pendingToolItemIds = new Set<string>();
+    let upstreamIdleTimer: ReturnType<typeof setTimeout> | null = null;
+    let upstreamIdleLastEventType: string | null = null;
+    let upstreamIdleLastEventAt = 0;
+    /**
+     * 当前 `Reconnecting... N/M` 序列的总 deadline。这个看门狗与 upstream-idle
+     * 不同：它只在 Codex 明确上报有限重连时启动，后续 attempt 不延长同一轮总时限。
+     */
+    let reconnectStallTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectStallTurnId: string | null = null;
+    let reconnectStallTurnGeneration = 0;
+    // `codex_reconnect_stalled` is surfaced before the bounded interrupt
+    // handshake so Desktop can show the reconnect state immediately. Keep the
+    // provider turn busy until that handshake settles; otherwise the Desktop
+    // auto-resume backoff can admit a new turn while the old server turn is
+    // still running (PR #1410).
+    let reconnectStallCleanupTurnId: string | null = null;
+    let reconnectStallDeferredTurnCompletion: TurnCompletedParams | null = null;
+    /** 还需要清醒等待的重连额度；系统挂起的片段不扣除。 */
+    let reconnectStallRemainingMs = 0;
+    /** 当前重连计时分片的起始壁钟时刻，用于识别系统挂起。 */
+    let reconnectStallSliceStartedAt = 0;
+    /** 还需要"清醒地"静默多久才判上游哑火;按分片递减(见 armUpstreamIdleSlice)。 */
+    let upstreamIdleRemainingMs = 0;
+    /** 当前分片的起始壁钟时刻;片尾据此识别系统挂起。 */
+    let upstreamIdleSliceStartedAt = 0;
+    function clearUpstreamIdle(): void {
+      if (upstreamIdleTimer) {
+        clearTimeout(upstreamIdleTimer);
+        upstreamIdleTimer = null;
+      }
+      upstreamIdleRemainingMs = 0;
+      upstreamIdleSliceStartedAt = 0;
+    }
+    function clearReconnectStall(): void {
+      if (reconnectStallTimer) {
+        clearTimeout(reconnectStallTimer);
+        reconnectStallTimer = null;
+      }
+      reconnectStallTurnId = null;
+      reconnectStallTurnGeneration = 0;
+      reconnectStallRemainingMs = 0;
+      reconnectStallSliceStartedAt = 0;
+    }
+    function clearReconnectStallCleanup(turnId?: string): void {
+      if (turnId && reconnectStallCleanupTurnId !== turnId) return;
+      reconnectStallCleanupTurnId = null;
+      reconnectStallDeferredTurnCompletion = null;
+    }
+    function settleReconnectStallCleanup(
+      turnId: string,
+      fallback?: TurnCompletedParams,
+    ): boolean {
+      if (reconnectStallCleanupTurnId !== turnId) return false;
+      const completion = reconnectStallDeferredTurnCompletion ?? fallback;
+      if (!completion) return false;
+      clearReconnectStallCleanup(turnId);
+      if (!closed) handleTurnCompleted(completion);
+      return true;
+    }
+    function armUpstreamIdle(): void {
+      clearUpstreamIdle();
+      if (upstreamIdleTimeoutMs <= 0) return;
+      if (closed || !isTurnInFlight) return;
+      // 工具执行 / 等审批期间 ball 不在上游,不计 idle 配额。
+      if (pendingToolItemIds.size > 0) return;
+      upstreamIdleRemainingMs = upstreamIdleTimeoutMs;
+      armUpstreamIdleSlice();
+    }
+    /**
+     * 分片计时,片尾核对真实耗时。不能用一个 30 分钟的长定时器直接判定 —— Electron 被
+     * 系统挂起(合盖睡眠)期间没有任何事件,定时器一旦在唤醒后到期就立刻开火,一次午休
+     * 就能让看门狗中断一条完全健康的 turn(review #944 第十二轮 P1,与 Session 层的
+     * armTurnStallSlice、claude-code 的 armUpstreamResponseIdleSlice、scheduler 的
+     * absorbSuspendGap 同源)。
+     */
+    function armUpstreamIdleSlice(): void {
+      const slice = Math.min(upstreamIdleRemainingMs, CODEX_UPSTREAM_IDLE_SLICE_MS);
+      upstreamIdleSliceStartedAt = Date.now();
+      upstreamIdleTimer = setTimeout(() => {
+        upstreamIdleTimer = null;
+        const elapsed = Date.now() - upstreamIdleSliceStartedAt;
+        if (elapsed > slice + CODEX_UPSTREAM_IDLE_SUSPEND_GAP_MS) {
+          log.info('upstream-idle watchdog skipped a suspended slice', {
+            threadId,
+            sliceMs: slice,
+            elapsedMs: elapsed,
+          });
+          // 唤醒后状态可能已变(turn 结束 / 又有工具在跑),走完整重判。
+          armUpstreamIdle();
+          return;
+        }
+        upstreamIdleRemainingMs -= Math.max(0, elapsed);
+        if (upstreamIdleRemainingMs > 0) {
+          armUpstreamIdleSlice();
+          return;
+        }
+        onUpstreamIdleTimeout();
+      }, slice);
+      (upstreamIdleTimer as unknown as { unref?: () => void }).unref?.();
+    }
+    /**
+     * 退役这个已确诊无响应的共享 app-server。写成箭头函数:下面的看门狗是 function
+     * 声明,拿不到实例 this。
+     *
+     * **只退役当初超时的那个 host 实例**:两次 interrupt ack 要等 20s,期间别的路径
+     * (auth / 凭证重启等)完全可能已经把这个 key 下的 host 换成一个新的健康实例。
+     * retireHostKey 只按 key 查删,不加这道闸就会把新 host 退役、连带终止它名下正在
+     * 干活的会话(review #944 第九轮 P1)。isCurrentHost 同时校验实例身份与
+     * hostGeneration,与 skipIfStaleHost 同款判据。
+     */
+    const retireUnresponsiveHost = async (
+      reason: string,
+      opts: { failIfActive?: boolean } = {},
+    ): Promise<void> => {
+      if (!isCurrentHost()) {
+        log.warn('upstream-idle watchdog: host already replaced, skipping retire', {
+          threadId,
+          hostKey: currentHostKey,
+        });
+        return;
+      }
+      await this.retireHostKey(currentHostKey, reason, {
+        failIfActive: opts.failIfActive ?? false,
+        logPrefix: 'codex upstream-idle watchdog',
+        ...(capturedHostWasRegistered ? { expectedHost: host } : {}),
+        expectedGeneration: hostGeneration,
+      });
+    };
+    /** turn 结束 / 中断时收表并清工具项(终态可能先于 item completed 到达)。 */
+    function resetUpstreamIdleForTurnEnd(): void {
+      clearUpstreamIdle();
+      clearReconnectStall();
+      pendingToolItemIds.clear();
+    }
+    /**
+     * itemStarted / itemCompleted 上维护"球在谁手里"。type / id 缺失的 item 不追踪
+     * (宁可少停表:watchdog 仍有 30min 缓冲,也不要因为一个没 id 的 item 永久停表)。
+     */
+    function noteToolItemLifecycle(item: unknown, phase: 'started' | 'completed'): void {
+      const rec = item && typeof item === 'object' ? (item as Record<string, unknown>) : null;
+      if (!rec) return;
+      const type = typeof rec.type === 'string' ? rec.type : null;
+      const id = typeof rec.id === 'string' ? rec.id : null;
+      if (!type || !id || !CODEX_TOOL_ITEM_TYPES.has(type)) return;
+      if (phase === 'started') pendingToolItemIds.add(id);
+      else pendingToolItemIds.delete(id);
+      // 停/起表边界变了,立即重算(最后一个工具收工 → 球回上游,开始计时)。
+      armUpstreamIdle();
+    }
+
+    function isReconnectStallCurrent(): boolean {
+      const pendingTurnStart =
+        !isTurnInFlight &&
+        isTurnStartPending &&
+        currentTurnId === null &&
+        reconnectStallTurnId !== null;
+      return (
+        !closed &&
+        turnStartGeneration === reconnectStallTurnGeneration &&
+        ((isTurnInFlight && currentTurnId === reconnectStallTurnId) || pendingTurnStart)
+      );
+    }
+
+    function armReconnectStallSlice(): void {
+      if (!isReconnectStallCurrent() || reconnectStallRemainingMs <= 0) {
+        clearReconnectStall();
+        return;
+      }
+      const slice = Math.min(reconnectStallRemainingMs, CODEX_UPSTREAM_IDLE_SLICE_MS);
+      reconnectStallSliceStartedAt = Date.now();
+      reconnectStallTimer = setTimeout(() => {
+        reconnectStallTimer = null;
+        const elapsed = Date.now() - reconnectStallSliceStartedAt;
+        if (elapsed > slice + CODEX_UPSTREAM_IDLE_SUSPEND_GAP_MS) {
+          log.info('codex reconnect watchdog skipped a suspended slice', {
+            threadId,
+            sliceMs: slice,
+            elapsedMs: elapsed,
+          });
+          // 系统挂起的时间不计入总 deadline；只重开当前分片，不能重新装满 120s。
+          armReconnectStallSlice();
+          return;
+        }
+        reconnectStallRemainingMs -= Math.max(0, elapsed);
+        if (reconnectStallRemainingMs > 0) {
+          armReconnectStallSlice();
+          return;
+        }
+        if (!isReconnectStallCurrent()) {
+          clearReconnectStall();
+          return;
+        }
+        onUpstreamIdleTimeout({
+          reason: 'codex_reconnect_stalled',
+          timeoutMs: CODEX_RECONNECT_STALL_TIMEOUT_MS,
+          ignorePendingTools: true,
+          allowPendingTurnStart: !isTurnInFlight,
+          logLabel: 'codex reconnect watchdog tripped — interrupting stalled turn',
+          message:
+            `Codex app-server has been reconnecting for ${Math.round(CODEX_RECONNECT_STALL_TIMEOUT_MS / 1000)}s ` +
+            'without making progress; the turn was interrupted automatically. ' +
+            'You can send the next message to continue.',
+        });
+      }, slice);
+      (reconnectStallTimer as unknown as { unref?: () => void }).unref?.();
+    }
+
+    function armReconnectStall(turnId = currentTurnId): void {
+      if (
+        closed ||
+        reconnectStallCleanupTurnId !== null ||
+        (!isTurnInFlight && !isTurnStartPending) ||
+        !turnId
+      ) return;
+      // 同一 turn 的后续 `2/5`、`3/5` 只更新 UI，不重置整个重连序列的 deadline。
+      if (reconnectStallTimer || reconnectStallRemainingMs > 0) return;
+      reconnectStallTurnId = turnId;
+      reconnectStallTurnGeneration = turnStartGeneration;
+      reconnectStallRemainingMs = CODEX_RECONNECT_STALL_TIMEOUT_MS;
+      armReconnectStallSlice();
+    }
+
+    function isReconnectRecoveryEvent(event: AgentEvent): boolean {
+      if (event.type === 'text') {
+        const text = (event.data as { text?: unknown } | null | undefined)?.text;
+        return hasVisibleCodexText(text);
+      }
+      if (
+        event.type === 'thinking' ||
+        event.type === 'tool_use' ||
+        event.type === 'tool_result' ||
+        event.type === 'tool_result_full' ||
+        event.type === 'agent_task_update' ||
+        event.type === 'image' ||
+        event.type === 'done'
+      ) {
+        return true;
+      }
+      if (event.type === 'status') {
+        return (event.data as { isRunning?: unknown } | null | undefined)?.isRunning === false;
+      }
+      if (event.type !== 'error') return false;
+      const data = event.data as { isTerminal?: unknown; willRetry?: unknown } | null | undefined;
+      return data?.isTerminal === true || data?.willRetry === false ||
+        (data?.isTerminal === undefined && data?.willRetry === undefined);
+    }
+
+    function observeReconnectStallEvent(event: AgentEvent): void {
+      const data = event.data as { message?: unknown; isTerminal?: unknown; willRetry?: unknown } | null | undefined;
+      const message = typeof data?.message === 'string' ? data.message : null;
+      const isReconnectNotice =
+        event.type === 'error' &&
+        data?.isTerminal !== true &&
+        data?.willRetry !== false &&
+        message !== null &&
+        parseReconnectAttemptMessage(message) !== null;
+      if (isReconnectNotice) {
+        armReconnectStall();
+        return;
+      }
+      if (reconnectStallTimer && isReconnectRecoveryEvent(event)) {
+        clearReconnectStall();
+      }
+    }
+    /**
+     * 上游连续静默超阈值:daemon 对我们彻底哑火。推一条终态 error 收口(renderer 停
+     * 转圈 / scheduler 把 run 记 failed / IM 转播 finalize),再 turn/interrupt 让
+     * daemon 侧那个 turn 停掉(与用户手动 Stop 同路径,thread 保持可用)。
+     */
+    function onUpstreamIdleTimeout(opts?: {
+      reason?: string;
+      timeoutMs?: number;
+      message?: string;
+      logLabel?: string;
+      ignorePendingTools?: boolean;
+      allowPendingTurnStart?: boolean;
+    }): void {
+      if (closed) return;
+      const pendingTurnId =
+        opts?.allowPendingTurnStart && !isTurnInFlight && isTurnStartPending
+          ? reconnectStallTurnId
+          : null;
+      if (!isTurnInFlight && !pendingTurnId) return;
+      if (!opts?.ignorePendingTools && pendingToolItemIds.size > 0) return;
+      const idleMs = opts?.timeoutMs ?? upstreamIdleTimeoutMs;
+      const msSinceLast =
+        upstreamIdleLastEventAt > 0 ? Date.now() - upstreamIdleLastEventAt : null;
+      const turnId = currentTurnId ?? pendingTurnId;
+      const deferTurnCleanupUntilInterrupt = opts?.reason === 'codex_reconnect_stalled';
+      if (deferTurnCleanupUntilInterrupt && !pendingTurnId && turnId) {
+        // Keep Session.isTurnRunning() true until the interrupt ACK (or the
+        // close/retire fallback) settles. Desktop may already have received
+        // the terminal error and queued a continuation by then.
+        reconnectStallCleanupTurnId = turnId;
+        reconnectStallDeferredTurnCompletion = null;
+      }
+      log.warn(opts?.logLabel ?? 'upstream-response-idle watchdog tripped — interrupting current turn', {
+        idleMs,
+        threadId,
+        turnId,
+        lastEventType: upstreamIdleLastEventType,
+        msSinceLastEvent: msSinceLast,
+      });
+      // 先立终态墓碑:下面合成的本地收口据此走 suppressTerminalUi 分支(只清状态、
+      // 不再推一遍终态 UI),迟到的 item / error 也一并被 stale guard 拦住。
+      if (turnId) terminalErroredTurnIds.add(turnId);
+      eventQueue.push({
+        type: 'error',
+        data: {
+          // reason 与 claude-code 侧共用同一稳定 key(renderer i18n 映射,规则 18);
+          // message 仅作非 renderer 消费方(IM / orca / 日志)的英文兜底。
+          reason: opts?.reason ?? 'upstream_response_idle_timeout',
+          message: opts?.message ??
+            (`The upstream response has been silent for ${Math.round(idleMs / 1000)}s; ` +
+              'the turn was interrupted automatically to avoid hanging forever. ' +
+              'You can send the next message to continue.'),
+          isTerminal: true,
+          idleMs,
+          lastEventType: upstreamIdleLastEventType,
+          msSinceLastEvent: msSinceLast,
+        },
+        source: 'codex',
+      });
+      if (pendingTurnId) {
+        // 重连提示可能早于 turnStarted 到达。此时 turn/start 仍在飞，不能只清掉
+        // 看门狗：迟到的 response / turnStarted 必须被隔离，否则用户已经看到终态后
+        // server 侧的 turn 仍可能被重新激活；同时关闭当前 handle，让下一次 send
+        // 通过 Maker 的 lazy create 重建 transport。
+        terminalErroredTurnIds.add(pendingTurnId);
+        markInFlightStartsTerminallySettled();
+        quarantineAllInFlightStarts();
+        resetUpstreamIdleForTurnEnd();
+        eventQueue.push({
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
+        });
+        void (async () => {
+          // pending turn/start 只证明这一轮 admission 卡住，不等于共享 app-server
+          // 控制面已经死掉。沿用 active-turn watchdog 的双次有界 interrupt 判据：
+          // ACK 成功时只关闭本 handle；只有两次 ACK 都失败才退役共享 host，避免连带
+          // 杀掉同 host 上其它健康 session。
+          const interruptPromise = interruptTurnForPermissionTighten(pendingTurnId, {
+            suppressFailureEvent: true,
+          });
+          try {
+            // thread/unsubscribe 失败不能在 interrupt 结果尚未确认时强退共享 host：
+            // 同 host 上可能还有健康 session。这里只关闭当前 handle，不让 cleanup
+            // 失败提前退役 host；最终 host 退役仍由下面的双 ACK 失败分支决定。
+            await closeSessionHandle({ retireHostOnCleanupFailure: false });
+          } catch (error: unknown) {
+            log.warn('codex reconnect watchdog pending turn close threw', {
+              turnId: pendingTurnId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+          const interrupted = await interruptPromise;
+          if (interrupted) return;
+          try {
+            await retireUnresponsiveHost(
+              `codex app-server unresponsive: reconnecting for ${Math.round(idleMs / 1000)}s before turn/start completed`,
+              // pending turn/start 只证明当前 admission 卡住。两次 ACK 等待期间，
+              // 同一个共享 host 可能已被新 Session 复用；在真正退役点重新检查
+              // active use，避免把新会话一起强杀。
+              { failIfActive: true },
+            );
+          } catch (error: unknown) {
+            log.warn('codex reconnect watchdog pending host retire threw', {
+              turnId: pendingTurnId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        })();
+        return;
+      }
+      resetUpstreamIdleForTurnEnd();
+      if (!turnId) return;
+      // 普通 upstream-idle watchdog 仍立即收本地 turn；只有明确的重连停滞
+      // 路径延后这一步，直到 interrupt ACK 成功。
+      if (!deferTurnCleanupUntilInterrupt) {
+        handleTurnCompleted({
+          threadId,
+          turn: { id: turnId, status: 'failed' },
+        } as TurnCompletedParams);
+      }
+      // 再让 daemon 侧那个 turn 也停下。ACK 成功时才清本地 busy；两次 ACK
+      // 都失败则关闭当前 handle 并退役共享 host，期间排队的自动续跑不会
+      // 进入旧 transport。
+      const turnGenBeforeInterrupt = turnStartGeneration;
+      void (async () => {
+        const interrupted = await interruptTurnForPermissionTighten(turnId, {
+          suppressFailureEvent: true,
+        });
+        if (interrupted) {
+          if (!settleReconnectStallCleanup(turnId, {
+              threadId,
+              turn: { id: turnId, status: 'failed' },
+            } as TurnCompletedParams)) clearReconnectStallCleanup(turnId);
+          return;
+        }
+        if (settleReconnectStallCleanup(turnId)) {
+          log.info('reconnect-stall turn completed while interrupt was settling; keeping shared host', {
+            threadId,
+            turnId,
+          });
+          return;
+        }
+        if (closed) {
+          clearReconnectStallCleanup(turnId);
+          return;
+        }
+        // 重连路径在等待窗口内仍保持原 turn busy；generation / turn 身份复核
+        // 仍保留，防止其它内部路径真的换了 turn 后误关健康 handle。
+        const reconnectCleanupTurnChanged = deferTurnCleanupUntilInterrupt
+          ? !isTurnInFlight || currentTurnId !== turnId || turnStartGeneration !== turnGenBeforeInterrupt
+          : isTurnInFlight || currentTurnId !== null || turnStartGeneration !== turnGenBeforeInterrupt;
+        if (reconnectCleanupTurnChanged) {
+          log.warn(
+            'upstream-idle watchdog: this handle served a newer turn during the interrupt window — skipping close/retire',
+            {
+              threadId,
+              stalledTurnId: turnId,
+              currentTurnId,
+              turnGenBeforeInterrupt,
+              turnStartGeneration,
+            },
+          );
+          clearReconnectStallCleanup(turnId);
+          return;
+        }
+        // 走到这里有两种可能,处置相同:两次 ack 都超时(daemon 哑火),或 host 已被
+        // 替换(stale —— 这个 handle 的 send 本来也会被 assertCurrentHost 拒掉)。
+        // 两种情况下这个 handle 都已不可用,关掉它让上层重建是唯一正确的出路。
+        log.error(
+          'upstream-idle watchdog: turn interrupt not confirmed — closing this codex host so the next send rebuilds it',
+          { threadId, turnId },
+        );
+        try {
+          // thread/unsubscribe 失败本身不能先强退共享 host：同 turn 的权威
+          // completion 仍可能在 close 等待期间到达。先只终止当前 handle，等下方
+          // completion 复核后再决定是否显式退役 host。
+          await closeSessionHandle({ retireHostOnCleanupFailure: false });
+        } catch (e) {
+          log.warn('upstream-idle watchdog close threw', { error: String(e) });
+        }
+        if (settleReconnectStallCleanup(turnId)) {
+          log.info('reconnect-stall turn completed during handle close; keeping shared host', {
+            threadId,
+            turnId,
+          });
+          return;
+        }
+        // closeSessionHandle(...false) 只放掉本 thread 的订阅并结束自己的事件队列,
+        // **共享的 AppServerHost 仍留在 this.hosts 缓存里** —— 下一次 lazy create
+        // 会经 getHost 拿到同一个已确诊无响应的 app-server,立刻再卡一遍,等于没恢复
+        // (review #944 第八轮 P1)。
+        // turn/interrupt 是控制面 RPC,两次 ack 都超时说明整个 host 而不只是这个 thread
+        // 出了问题,所以要连 host 一起退役。
+        //
+        // 放在 close 之后:retireHostKey(failIfActive:false) 会向仍挂着的订阅者广播强制
+        // 退役的终态 transport error(让它们各自收口 turn 状态,见那里的注释);本会话已经
+        // 推过自己的终态 error 并在 close 里解除了订阅,不必再收一遍。
+        try {
+          await retireUnresponsiveHost(
+            `codex app-server unresponsive: no upstream activity for ${Math.round(idleMs / 1000)}s and turn/interrupt was never acknowledged`,
+          );
+        } catch (e) {
+          log.warn('upstream-idle watchdog host retire threw', { error: String(e) });
+        } finally {
+          clearReconnectStallCleanup(turnId);
+        }
+      })();
+    }
+    // 装探针:此处仍远早于 handlers 注册(事件开始流动),不会漏掉任何一条。
+    const rawEventQueuePush = eventQueue.push;
+    eventQueue.push = (ev: AgentEvent): boolean => {
+      // 子代理卡帧只是"子线程有进展",不代表主 turn 还活着 —— 不参与静默计时与
+      // reconnect 恢复判定,否则主 turn 哑火时会被子代理的心跳一直掩盖(review)。
+      if (!emittingDescendantUpdate) {
+        upstreamIdleLastEventType = ev.type;
+        upstreamIdleLastEventAt = Date.now();
+        armUpstreamIdle();
+        observeReconnectStallEvent(ev);
+      }
+      return rawEventQueuePush(ev);
+    };
 
     // ── ServerRequest handlers (Phase 2 approval, Phase 5 dismiss-on-mode-change) ──
     const commandExecutionApproval = async (
       params: CommandExecutionRequestApprovalParams,
     ): Promise<CommandExecutionRequestApprovalResponse> => {
+      // buffered/墓碑 turn 的审批请求不得上 UI (codex R12 P1) — 孤儿直接拒。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) return { decision: 'decline' };
+      if (turnGate instanceof Promise && !(await turnGate)) return { decision: 'decline' };
       const hostPolicy = this.deps.getShellCommandPolicy?.({
-        agentKind: "codex",
-        command: params.command ?? "",
+        agentKind: 'codex',
+        command: params.command ?? '',
         cwd: params.cwd ?? undefined,
       });
-      if (hostPolicy?.decision === "deny") {
-        log.warn("command execution denied by host policy", {
-          command: params.command ?? "",
+      if (hostPolicy?.decision === 'deny') {
+        log.warn('command execution denied by host policy', {
+          command: params.command ?? '',
           cwd: params.cwd ?? null,
           reason: hostPolicy.reason,
         });
-        return { decision: "decline" };
+        return { decision: 'decline' };
       }
       // requestId: approvalId 优先 (zsh-exec-bridge 多 callback 场景); 否则用 itemId
       const requestId = params.approvalId ?? params.itemId;
-      const decision = await awaitApprovalDecision(
+      const decision = await awaitApprovalDecision(requestId, 'commandExecution', {
+        kind: 'permission',
         requestId,
-        "commandExecution",
-        {
-          kind: "permission",
-          requestId,
-          toolName: "exec",
-          input: commandExecutionDisplayInput(
-            params.command ?? "",
-            params.cwd ?? "",
-          ),
-          title: "Allow Codex to run this command?",
-          description: params.reason ?? undefined,
-          suggestions: commandSupportsAcceptForSession(params)
-            ? codexSessionApprovalSuggestions()
-            : undefined,
-          metadata: params.reason ? { reason: params.reason } : undefined,
+        toolName: 'exec',
+        input: commandExecutionDisplayInput(params.command ?? '', params.cwd ?? ''),
+        title: 'Allow Codex to run this command?',
+        description: params.reason ?? undefined,
+        suggestions: commandSupportsAcceptForSession(params) ? codexSessionApprovalSuggestions() : undefined,
+        metadata: params.reason ? { reason: params.reason } : undefined,
+      }, {
+        autoReviewAction: {
+          kind: 'exec',
+          command: params.command ?? '',
+          // 空串/空白 cwd 表示 server 上报了但内容不可用 → 按**未知**处理,不得回落成 workingDir
+          // 当"区内"(copilot 报:那样会把未知/区外 cwd 误判为区内而放行)。
+          ...(params.cwd?.trim()
+            ? { cwd: params.cwd }
+            : params.cwd === undefined
+              ? { cwd: opts.workingDir }
+              : { cwdUnknown: true }),
         },
-      );
+      });
       return { decision };
     };
 
     const fileChangeApproval = async (
       params: FileChangeRequestApprovalParams,
     ): Promise<FileChangeRequestApprovalResponse> => {
+      // buffered/墓碑 turn 的审批请求不得上 UI (codex R12 P1) — 孤儿直接拒。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) return { decision: 'decline' };
+      if (turnGate instanceof Promise && !(await turnGate)) return { decision: 'decline' };
       const requestId = params.itemId;
-      const decision = await awaitApprovalDecision(requestId, "fileChange", {
-        kind: "permission",
+      const decision = await awaitApprovalDecision(requestId, 'fileChange', {
+        kind: 'permission',
         requestId,
-        toolName: "file_change",
+        toolName: 'file_change',
         input: { grantRoot: params.grantRoot ?? null },
-        title: "Allow Codex to change files?",
+        title: 'Allow Codex to change files?',
         description: params.reason ?? undefined,
         suggestions: codexSessionApprovalSuggestions(),
         metadata: params.reason ? { reason: params.reason } : undefined,
-      });
+      }, { autoReviewAction: { kind: 'file-write', path: params.grantRoot ?? undefined } });
       return { decision };
     };
 
     function recordFromUnknown(value: unknown): Record<string, unknown> | null {
-      if (!value || typeof value !== "object" || Array.isArray(value))
-        return null;
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
       return value as Record<string, unknown>;
     }
 
-    function stringFromMeta(
-      meta: Record<string, unknown> | null,
-      key: string,
-    ): string | undefined {
+    function stringFromMeta(meta: Record<string, unknown> | null, key: string): string | undefined {
       const value = meta?.[key];
-      return typeof value === "string" && value.trim() ? value : undefined;
+      return typeof value === 'string' && value.trim() ? value : undefined;
     }
 
-    function commandSupportsAcceptForSession(
-      params: CommandExecutionRequestApprovalParams,
-    ): boolean {
+    function commandSupportsAcceptForSession(params: CommandExecutionRequestApprovalParams): boolean {
       const availableDecisions = params.availableDecisions;
-      return (
-        !Array.isArray(availableDecisions) ||
-        availableDecisions.includes("acceptForSession")
-      );
+      return !Array.isArray(availableDecisions) || availableDecisions.includes('acceptForSession');
     }
 
-    function metaContainsSessionPersist(
-      meta: Record<string, unknown> | null,
-    ): boolean {
+    function metaContainsSessionPersist(meta: Record<string, unknown> | null): boolean {
       const persist = meta?.persist;
-      return (
-        persist === "session" ||
-        (Array.isArray(persist) && persist.includes("session"))
-      );
+      return persist === 'session' || (Array.isArray(persist) && persist.includes('session'));
     }
 
-    function mcpElicitationMeta(
-      params: McpServerElicitationRequestParams,
-    ): Record<string, unknown> | null {
-      if (params.mode !== "form") return null;
+    function mcpElicitationMeta(params: McpServerElicitationRequestParams): Record<string, unknown> | null {
+      if (params.mode !== 'form') return null;
       return recordFromUnknown(params._meta);
     }
 
-    function isMcpToolApprovalElicitation(
-      params: McpServerElicitationRequestParams,
-    ): boolean {
-      return (
-        stringFromMeta(mcpElicitationMeta(params), "codex_approval_kind") ===
-        "mcp_tool_call"
-      );
+    function isMcpToolApprovalElicitation(params: McpServerElicitationRequestParams): boolean {
+      return stringFromMeta(mcpElicitationMeta(params), 'codex_approval_kind') === 'mcp_tool_call';
     }
 
-    function mcpElicitationAllowsSession(
-      params: McpServerElicitationRequestParams,
-    ): boolean {
+    function mcpElicitationAllowsSession(params: McpServerElicitationRequestParams): boolean {
       return metaContainsSessionPersist(mcpElicitationMeta(params));
     }
 
-    function mcpElicitationPermissionInput(
-      params: McpServerElicitationRequestParams,
-    ): Record<string, unknown> {
+    function mcpElicitationPermissionInput(params: McpServerElicitationRequestParams): Record<string, unknown> {
       const meta = mcpElicitationMeta(params);
       const input: Record<string, unknown> = {
         serverName: params.serverName,
         message: params.message,
       };
-      const toolName = stringFromMeta(meta, "tool_name");
-      const toolTitle = stringFromMeta(meta, "tool_title");
-      const toolDescription = stringFromMeta(meta, "tool_description");
+      const toolName = stringFromMeta(meta, 'tool_name');
+      const toolTitle = stringFromMeta(meta, 'tool_title');
+      const toolDescription = stringFromMeta(meta, 'tool_description');
       if (toolName) input.toolName = toolName;
       if (toolTitle) input.toolTitle = toolTitle;
       if (toolDescription) input.toolDescription = toolDescription;
-      if (meta?.tool_params_display != null)
-        input.toolParamsDisplay = meta.tool_params_display;
+      if (meta?.tool_params_display != null) input.toolParamsDisplay = meta.tool_params_display;
       if (meta?.tool_params != null) input.toolParams = meta.tool_params;
       return input;
     }
 
     function mcpToolApprovalContext(params: McpServerElicitationRequestParams) {
       const meta = mcpElicitationMeta(params);
-      const toolName = stringFromMeta(meta, "tool_name");
+      const toolName = stringFromMeta(meta, 'tool_name');
       return {
         serverName: params.serverName,
         ...(toolName ? { toolName } : {}),
@@ -3761,177 +5188,266 @@ export class CodexAgent extends BaseAgent {
       };
     }
 
-    function mcpInnerToolName(
-      params: McpServerElicitationRequestParams,
-    ): string | undefined {
+    function mcpInnerToolName(params: McpServerElicitationRequestParams): string | undefined {
       const context = mcpToolApprovalContext(params);
-      return stringFromMeta(recordFromUnknown(context.toolParams), "name");
+      return stringFromMeta(recordFromUnknown(context.toolParams), 'name');
+    }
+
+    function mcpToolPluginId(
+      params: McpServerElicitationRequestParams,
+    ): string | null | undefined {
+      const toolName = stringFromMeta(mcpElicitationMeta(params), 'tool_name');
+      const matches: ActiveToolContext[] = [];
+      for (const context of activeToolContexts.values()) {
+        if (
+          context.type !== 'mcpToolCall' ||
+          context.turnId !== params.turnId ||
+          context.server !== params.serverName ||
+          (toolName && context.tool !== toolName)
+        ) {
+          continue;
+        }
+        matches.push(context);
+      }
+      if (matches.length === 0 || (!toolName && matches.length !== 1)) {
+        return undefined;
+      }
+      const pluginId = matches[0]?.pluginId;
+      return matches.every((context) => context.pluginId === pluginId)
+        ? pluginId
+        : undefined;
     }
 
     const classifyMcpToolApprovalPolicy = (
-      context: McpToolApprovalContext,
+      context: Parameters<NonNullable<AgentDeps['getMcpToolApprovalPolicy']>>[0],
     ) => {
       const classifier = this.deps.getMcpToolApprovalPolicy;
-      if (!classifier) return "prompt" as const;
+      if (!classifier) return 'prompt' as const;
       try {
         const policy = classifier(context);
-        if (
-          policy === "auto-approve" ||
-          policy === "prompt" ||
-          policy === "prompt-each-time"
-        ) {
+        if (policy === 'auto-approve' || policy === 'prompt' || policy === 'prompt-each-time') {
           return policy;
         }
-        log.error("invalid MCP approval policy -> prompt each time", {
+        log.error('invalid MCP approval policy -> prompt each time', {
           serverName: context.serverName,
           policy,
         });
       } catch (error) {
-        log.error("MCP approval policy threw -> prompt each time", {
+        log.error('MCP approval policy threw -> prompt each time', {
           serverName: context.serverName,
           error: error instanceof Error ? error.message : String(error),
         });
       }
-      return "prompt-each-time" as const;
+      return 'prompt-each-time' as const;
     };
 
-    const mcpToolApprovalPolicy = (
-      params: McpServerElicitationRequestParams,
-    ) => classifyMcpToolApprovalPolicy(mcpToolApprovalContext(params));
+    const mcpToolApprovalPolicy = (params: McpServerElicitationRequestParams) =>
+      classifyMcpToolApprovalPolicy(mcpToolApprovalContext(params));
 
     const mcpServerElicitation = async (
       params: McpServerElicitationRequestParams,
     ): Promise<McpServerElicitationRequestResponse> => {
+      // buffered/墓碑 turn 的 elicitation 不得上 UI / auto-approve (codex R12 P1)。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) return { action: 'decline', content: null, _meta: null };
+      if (turnGate instanceof Promise && !(await turnGate)) {
+        return { action: 'decline', content: null, _meta: null };
+      }
       if (!isMcpToolApprovalElicitation(params)) {
-        log.warn("unsupported MCP server elicitation -> decline", {
+        log.warn('unsupported MCP server elicitation -> decline', {
           serverName: params.serverName,
           mode: params.mode,
         });
-        return { action: "decline", content: null, _meta: null };
+        return { action: 'decline', content: null, _meta: null };
+      }
+
+      const capabilityRoute = findCapabilityRouteOverride(
+        this.deps.capabilityRouting,
+        {
+          harness: 'codex',
+          surface: 'mcp',
+          id: params.serverName,
+        },
+      );
+      if (
+        capabilityRoute &&
+        params.turnId &&
+        !(await waitForPendingCapabilitySteers(params.turnId))
+      ) {
+        log.warn('Codex MCP invocation blocked while its steer turn became inactive', {
+          serverName: params.serverName,
+          turnId: params.turnId,
+          capabilityId: capabilityRoute.capabilityId,
+        });
+        return { action: 'decline', content: null, _meta: null };
+      }
+      const activePluginId = capabilityRoute
+        ? mcpToolPluginId(params)
+        : undefined;
+      if (capabilityRoute && activePluginId === undefined) {
+        log.warn('Codex MCP invocation blocked because plugin provenance is unavailable', {
+          serverName: params.serverName,
+          capabilityId: capabilityRoute.capabilityId,
+        });
+        return { action: 'decline', content: null, _meta: null };
+      }
+      const isRoutedSource =
+        capabilityRoute != null &&
+        activePluginId === capabilityRoute.source.containerId;
+      if (
+        capabilityRoute &&
+        isRoutedSource &&
+        !isCapabilityRouteInvocationAllowed(
+          capabilityRoute,
+          params.turnId
+            ? capabilitySelectionTextByTurnId.get(params.turnId) ?? ''
+            : '',
+        )
+      ) {
+        log.warn('Codex MCP invocation blocked by host capability routing', {
+          serverName: params.serverName,
+          capabilityId: capabilityRoute.capabilityId,
+          invocation: capabilityRoute.invocation,
+        });
+        return { action: 'decline', content: null, _meta: null };
+      }
+      if (capabilityRoute && !isRoutedSource) {
+        log.debug('Codex MCP routing skipped for a non-target source', {
+          serverName: params.serverName,
+          capabilityId: capabilityRoute.capabilityId,
+          activePluginId,
+        });
       }
 
       // Host policy 可在 outer call_tool 的 metadata 中识别渐进式 server 的
       // inner action。查询继续静默，高风险 action 逐次确认且不得持久化授权。
       const approvalPolicy = mcpToolApprovalPolicy(params);
-      if (approvalPolicy === "auto-approve") {
-        log.debug("mcp elicitation auto-approved by host policy", {
+      const policyPermissionInput = mcpElicitationPermissionInput(params);
+      const turnPolicyForcePrompt = forceTurnConfirmation(
+        `mcp:${params.serverName}`,
+        policyPermissionInput,
+      );
+      if (approvalPolicy === 'auto-approve' && !turnPolicyForcePrompt) {
+        log.debug('mcp elicitation auto-approved by host policy', {
           serverName: params.serverName,
           mode: params.mode,
-          toolName: stringFromMeta(mcpElicitationMeta(params), "tool_name"),
+          toolName: stringFromMeta(mcpElicitationMeta(params), 'tool_name'),
           innerToolName: mcpInnerToolName(params),
         });
-        return { action: "accept", content: null, _meta: null };
+        return { action: 'accept', content: null, _meta: null };
       }
 
       const meta = mcpElicitationMeta(params);
-      const toolTitle = stringFromMeta(meta, "tool_title");
+      const toolTitle = stringFromMeta(meta, 'tool_title');
       const innerToolName = mcpInnerToolName(params);
       const requestId = `mcp-elicitation:${params.serverName}:${params.turnId ?? params.threadId}:${++mcpElicitationSeq}`;
       const decision = await awaitApprovalDecision(
         requestId,
-        "mcpServerElicitation",
+        'mcpServerElicitation',
         {
-          kind: "permission",
+          kind: 'permission',
           requestId,
           toolName: `mcp:${params.serverName}`,
-          input: mcpElicitationPermissionInput(params),
+          input: policyPermissionInput,
           title: `Allow Codex to use ${innerToolName ?? toolTitle ?? params.serverName}?`,
           description: params.message,
           suggestions:
-            approvalPolicy !== "prompt-each-time" &&
-            mcpElicitationAllowsSession(params)
+            approvalPolicy !== 'prompt-each-time' && mcpElicitationAllowsSession(params)
               ? codexSessionApprovalSuggestions()
               : undefined,
         },
         // prompt-each-time:Full access 也必须逐次弹 UI,否则高风险 inner tool
         // (contacts delete/merge/系统回写)会被 awaitApprovalDecision 首分支静默放行。
-        { forcePrompt: approvalPolicy === "prompt-each-time" },
+        {
+          forcePrompt:
+            turnPolicyForcePrompt || approvalPolicy === 'prompt-each-time',
+        },
       );
 
-      if (decision === "accept") {
-        return { action: "accept", content: null, _meta: null };
+      if (decision === 'accept') {
+        return { action: 'accept', content: null, _meta: null };
       }
-      if (decision === "acceptForSession") {
-        return approvalPolicy === "prompt-each-time"
-          ? { action: "accept", content: null, _meta: null }
-          : { action: "accept", content: null, _meta: { persist: "session" } };
+      if (decision === 'acceptForSession') {
+        return approvalPolicy === 'prompt-each-time'
+          ? { action: 'accept', content: null, _meta: null }
+          : { action: 'accept', content: null, _meta: { persist: 'session' } };
       }
-      if (decision === "cancel") {
-        return { action: "cancel", content: null, _meta: null };
+      if (decision === 'cancel') {
+        return { action: 'cancel', content: null, _meta: null };
       }
-      return { action: "decline", content: null, _meta: null };
+      return { action: 'decline', content: null, _meta: null };
     };
 
     const permissionsApproval = async (
       params: PermissionsRequestApprovalParams,
     ): Promise<PermissionsRequestApprovalResponse> => {
+      // buffered/墓碑 turn 的审批请求不得上 UI (codex R12 P1) — 孤儿直接拒
+      // (空 permissions 即拒绝授权, 与非 accept 分支同款)。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) return { permissions: {}, scope: 'turn' };
+      if (turnGate instanceof Promise && !(await turnGate)) return { permissions: {}, scope: 'turn' };
       const requestId = params.itemId ?? params.turnId;
-      const decision = await awaitApprovalDecision(
+      // kind 借用 'commandExecution' 仅为复用其 fail-closed 语义(见 awaitApprovalDecision:无 action /
+      // 无人值守时 decline)——权限升级请求本就该 fail-closed。此处不是命令执行,只是共用同一条兜底路径。
+      const decision = await awaitApprovalDecision(requestId, 'commandExecution', {
+        kind: 'permission',
         requestId,
-        "commandExecution",
-        {
-          kind: "permission",
-          requestId,
-          toolName: "permissions",
-          input: { permissions: params.permissions },
-          title: "Allow Codex to use these permissions?",
-          description: params.reason ?? undefined,
-          suggestions: codexSessionApprovalSuggestions(),
-          metadata: params.reason ? { reason: params.reason } : undefined,
-        },
-      );
-      if (decision === "accept") {
-        return {
-          permissions: params.permissions as Record<string, unknown>,
-          scope: "turn",
-        };
+        toolName: 'permissions',
+        input: { permissions: params.permissions },
+        title: 'Allow Codex to use these permissions?',
+        description: params.reason ?? undefined,
+        suggestions: codexSessionApprovalSuggestions(),
+        metadata: params.reason ? { reason: params.reason } : undefined,
+      });
+      if (decision === 'accept') {
+        return { permissions: params.permissions as Record<string, unknown>, scope: 'turn' };
       }
-      if (decision === "acceptForSession") {
-        return {
-          permissions: params.permissions as Record<string, unknown>,
-          scope: "session",
-        };
+      if (decision === 'acceptForSession') {
+        return { permissions: params.permissions as Record<string, unknown>, scope: 'session' };
       }
-      return { permissions: {}, scope: "turn" };
+      return { permissions: {}, scope: 'turn' };
     };
 
     function activeToolContextFromItem(
       item: unknown,
       turnId?: string | null,
     ): { id: string; ctx: ActiveToolContext } | null {
-      if (!item || typeof item !== "object") return null;
+      if (!item || typeof item !== 'object') return null;
       const rec = item as Record<string, unknown>;
-      const id = typeof rec.id === "string" ? rec.id : "";
+      const id = typeof rec.id === 'string' ? rec.id : '';
       if (!id) return null;
-      if (rec.type === "mcpToolCall") {
+      if (rec.type === 'mcpToolCall') {
         return {
           id,
           ctx: {
-            type: "mcpToolCall",
+            type: 'mcpToolCall',
             turnId,
-            server: typeof rec.server === "string" ? rec.server : null,
-            tool: typeof rec.tool === "string" ? rec.tool : null,
+            server: typeof rec.server === 'string' ? rec.server : null,
+            pluginId:
+              typeof rec.pluginId === 'string'
+                ? rec.pluginId
+                : rec.pluginId === null
+                  ? null
+                  : undefined,
+            tool: typeof rec.tool === 'string' ? rec.tool : null,
           },
         };
       }
-      if (rec.type === "dynamicToolCall") {
+      if (rec.type === 'dynamicToolCall') {
         return {
           id,
           ctx: {
-            type: "dynamicToolCall",
+            type: 'dynamicToolCall',
             turnId,
-            namespace: typeof rec.namespace === "string" ? rec.namespace : null,
-            tool: typeof rec.tool === "string" ? rec.tool : null,
+            namespace: typeof rec.namespace === 'string' ? rec.namespace : null,
+            tool: typeof rec.tool === 'string' ? rec.tool : null,
           },
         };
       }
       return null;
     }
 
-    function noteActiveToolContext(
-      item: unknown,
-      turnId?: string | null,
-    ): void {
+    function noteActiveToolContext(item: unknown, turnId?: string | null): void {
       const active = activeToolContextFromItem(item, turnId);
       if (!active) return;
       activeToolContexts.set(active.id, active.ctx);
@@ -3941,49 +5457,190 @@ export class CodexAgent extends BaseAgent {
       for (const [itemId, ctx] of activeToolContexts) {
         if (ctx.turnId === turnId) activeToolContexts.delete(itemId);
       }
+      // Lifecycle callers dismiss the broker entries first. Wake joined waiters
+      // before dropping the lookup maps so they can observe that their request
+      // is no longer pending instead of reopening the interaction.
+      const pendingForTurn = pendingUserInputByTurn.get(turnId);
+      if (pendingForTurn) {
+        for (const pendingInteraction of pendingForTurn.values()) {
+          pendingInteraction.cancel();
+        }
+      }
+      for (const [requestId, pending] of pendingUserInputOwnerByRequestId) {
+        if (pending.turnId === turnId) pendingUserInputOwnerByRequestId.delete(requestId);
+      }
+      submittedUserInputByTurn.delete(turnId);
+      pendingUserInputByTurn.delete(turnId);
     }
 
-    function classifyUserInputRequest(
-      params: ToolRequestUserInputParams,
-    ): "ask_user_question" | "permission" {
-      const ctx = activeToolContexts.get(params.itemId);
-      if (!ctx) return "ask_user_question";
-      if (ctx.type === "mcpToolCall") return "permission";
-      if (ctx.type === "dynamicToolCall") {
-        return isAskUserDynamicTool({
-          namespace: ctx.namespace ?? "",
-          tool: ctx.tool ?? "",
-        })
-          ? "ask_user_question"
-          : "permission";
+    function clearAllPendingUserInputInteractions(): void {
+      // Keep the same broker-dismiss-before-wake ordering as the per-turn path.
+      for (const pendingForTurn of pendingUserInputByTurn.values()) {
+        for (const pendingInteraction of pendingForTurn.values()) {
+          pendingInteraction.cancel();
+        }
       }
-      return "ask_user_question";
+      pendingUserInputByTurn.clear();
+      pendingUserInputOwnerByRequestId.clear();
+    }
+
+    function forgetPendingUserInputRequest(requestId: string): void {
+      const pending = pendingUserInputOwnerByRequestId.get(requestId);
+      if (!pending) return;
+      pendingUserInputOwnerByRequestId.delete(requestId);
+      pending.pendingInteraction.cancel();
+      if (pending.pendingForTurn.get(pending.fingerprint) !== pending.pendingInteraction) return;
+      pending.pendingForTurn.delete(pending.fingerprint);
+      if (
+        pending.pendingForTurn.size === 0
+        && pendingUserInputByTurn.get(pending.turnId) === pending.pendingForTurn
+      ) {
+        pendingUserInputByTurn.delete(pending.turnId);
+      }
+    }
+
+    function classifyUserInputRequest(params: ToolRequestUserInputParams): 'ask_user_question' | 'permission' {
+      const ctx = activeToolContexts.get(params.itemId);
+      if (!ctx) return 'ask_user_question';
+      if (ctx.type === 'mcpToolCall') return 'permission';
+      if (ctx.type === 'dynamicToolCall') {
+        return isAskUserDynamicTool({ namespace: ctx.namespace ?? '', tool: ctx.tool ?? '' })
+          ? 'ask_user_question'
+          : 'permission';
+      }
+      return 'ask_user_question';
     }
 
     async function askUserViaInteraction(
       requestId: string,
       questions: ToolRequestUserInputQuestion[],
+      turnId?: string | null,
+      isRequestPending: () => boolean = () => true,
     ): Promise<ToolRequestUserInputResponse> {
       if (questions.some((q) => q.isSecret)) {
-        log.warn("requestUserInput secret question refused", {
+        log.warn('requestUserInput secret question refused', {
           requestId,
           questionCount: questions.length,
         });
         return emptyUserInputResponse(questions);
       }
-      const decision = await dispatchInteraction({
-        kind: "ask_user_question",
-        requestId,
-        questions: questionsToAskUserItems(questions),
-      });
-      if (decision.kind !== "ask_user_question") {
-        log.warn("requestUserInput got mismatched ask decision", {
+      const fingerprint = turnId ? userInputQuestionsFingerprint(questions) : null;
+      const submittedForTurn = turnId ? submittedUserInputByTurn.get(turnId) : undefined;
+      const replay = fingerprint ? submittedForTurn?.get(fingerprint) : undefined;
+      if (replay) {
+        log.info('reusing submitted answer for duplicate same-turn user input request', {
           requestId,
-          decKind: decision.kind,
+          turnId,
+          questionCount: questions.length,
         });
-        return emptyUserInputResponse(questions);
+        return responseFromUserInputAnswersByPosition(questions, replay);
       }
-      return responseFromAskUserAnswers(questions, decision.answers);
+
+      let pendingForTurn = turnId ? pendingUserInputByTurn.get(turnId) : undefined;
+      const pendingReplay = fingerprint ? pendingForTurn?.get(fingerprint) : undefined;
+      if (pendingReplay) {
+        log.info('joining duplicate same-turn user input request', {
+          requestId,
+          turnId,
+          questionCount: questions.length,
+        });
+        const joined = await Promise.race([
+          pendingReplay.interactionPromise.then((answersByPosition) => ({
+            kind: 'answered' as const,
+            answersByPosition,
+          })),
+          pendingReplay.cancelledPromise.then(() => ({ kind: 'cancelled' as const })),
+        ]);
+        if (joined.kind === 'cancelled') {
+          log.debug('joined duplicate same-turn user input request cancelled', {
+            requestId,
+            turnId,
+          });
+          return isRequestPending()
+            ? askUserViaInteraction(requestId, questions, turnId, isRequestPending)
+            : emptyUserInputResponse(questions);
+        }
+        return responseFromUserInputAnswersByPosition(questions, joined.answersByPosition);
+      }
+
+      const interactionPromise = (async (): Promise<UserInputAnswersByPosition> => {
+        const decision = await dispatchInteraction({
+          kind: 'ask_user_question',
+          requestId,
+          questions: questionsToAskUserItems(questions),
+        });
+        if (decision.kind !== 'ask_user_question') {
+          log.warn('requestUserInput got mismatched ask decision', { requestId, decKind: decision.kind });
+          return questions.map(() => []);
+        }
+        // 澄清答案改变本轮授权范围(把范围从 src/ 收窄到 build/ 后,后续 `rm -rf src` 必须按澄清后的
+        // 意图裁决)→ 并入有界 review intent 并清缓存,与 Claude 侧 AskUserQuestion 对称(codex 报)。
+        setAutoReviewIntent(composeAutoReviewIntentWithClarification(
+          currentAutoReviewIntent,
+          Object.entries(decision.answers ?? {}).map(([question, answer]) => ({ question, answer })),
+        ));
+        return userInputAnswersByPosition(
+          questions,
+          responseFromAskUserAnswers(questions, decision.answers),
+        );
+      })();
+
+      let cancelPendingInteraction!: () => void;
+      const cancelledPromise = new Promise<void>((resolve) => {
+        cancelPendingInteraction = resolve;
+      });
+      const pendingInteraction: PendingUserInputInteraction = {
+        interactionPromise,
+        cancelledPromise,
+        cancel: cancelPendingInteraction,
+      };
+
+      if (turnId && fingerprint) {
+        pendingForTurn ??= new Map<string, PendingUserInputInteraction>();
+        pendingForTurn.set(fingerprint, pendingInteraction);
+        if (!pendingUserInputByTurn.has(turnId)) {
+          pendingUserInputByTurn.set(turnId, pendingForTurn);
+        }
+        pendingUserInputOwnerByRequestId.set(requestId, {
+          turnId,
+          fingerprint,
+          pendingForTurn,
+          pendingInteraction,
+        });
+      }
+
+      try {
+        const answersByPosition = await interactionPromise;
+        if (
+          turnId
+          && fingerprint
+          && pendingUserInputByTurn.get(turnId) === pendingForTurn
+          && pendingForTurn?.get(fingerprint) === pendingInteraction
+          && hasSubmittedUserInput(answersByPosition)
+        ) {
+          const nextSubmittedForTurn = submittedUserInputByTurn.get(turnId)
+            ?? new Map<string, UserInputAnswersByPosition>();
+          nextSubmittedForTurn.set(fingerprint, answersByPosition);
+          if (!submittedUserInputByTurn.has(turnId)) {
+            submittedUserInputByTurn.set(turnId, nextSubmittedForTurn);
+          }
+        }
+        return responseFromUserInputAnswersByPosition(questions, answersByPosition);
+      } finally {
+        const ownedPending = pendingUserInputOwnerByRequestId.get(requestId);
+        if (ownedPending?.pendingInteraction === pendingInteraction) {
+          pendingUserInputOwnerByRequestId.delete(requestId);
+        }
+        if (turnId && fingerprint && pendingForTurn?.get(fingerprint) === pendingInteraction) {
+          pendingForTurn.delete(fingerprint);
+          if (
+            pendingForTurn.size === 0
+            && pendingUserInputByTurn.get(turnId) === pendingForTurn
+          ) {
+            pendingUserInputByTurn.delete(turnId);
+          }
+        }
+      }
     }
 
     async function requestUserInputAsPermission(
@@ -3992,14 +5649,13 @@ export class CodexAgent extends BaseAgent {
       questions: ToolRequestUserInputQuestion[],
     ): Promise<ToolRequestUserInputResponse> {
       const ctx = activeToolContexts.get(params.itemId);
-      const toolName =
-        ctx?.type === "mcpToolCall"
-          ? `mcp:${ctx.server ?? "unknown"}:${ctx.tool ?? "unknown"}`
-          : ctx?.type === "dynamicToolCall"
-            ? `dynamic:${ctx.namespace ? `${ctx.namespace}:` : ""}${ctx.tool ?? "unknown"}`
-            : "request_user_input";
+      const toolName = ctx?.type === 'mcpToolCall'
+        ? `mcp:${ctx.server ?? 'unknown'}:${ctx.tool ?? 'unknown'}`
+        : ctx?.type === 'dynamicToolCall'
+          ? `dynamic:${ctx.namespace ? `${ctx.namespace}:` : ''}${ctx.tool ?? 'unknown'}`
+          : 'request_user_input';
       const decision = await dispatchInteraction({
-        kind: "permission",
+        kind: 'permission',
         requestId,
         toolName,
         input: {
@@ -4011,23 +5667,17 @@ export class CodexAgent extends BaseAgent {
             options: q.options,
           })),
         },
-        title: "Allow this tool to ask for user input?",
-        description: questions
-          .map((q) => q.question)
-          .filter(Boolean)
-          .join("\n"),
+        title: 'Allow this tool to ask for user input?',
+        description: questions.map((q) => q.question).filter(Boolean).join('\n'),
         metadata: {
           threadId: params.threadId,
           turnId: params.turnId,
           itemId: params.itemId,
-          userInputKind: "tool_side_effect",
+          userInputKind: 'tool_side_effect',
         },
       });
-      if (decision.kind !== "permission") {
-        log.warn("requestUserInput permission got mismatched decision", {
-          requestId,
-          decKind: decision.kind,
-        });
+      if (decision.kind !== 'permission') {
+        log.warn('requestUserInput permission got mismatched decision', { requestId, decKind: decision.kind });
         return emptyUserInputResponse(questions);
       }
       return responseFromPermissionDecision(questions, decision);
@@ -4037,11 +5687,19 @@ export class CodexAgent extends BaseAgent {
       params: ToolRequestUserInputParams,
       meta: { requestId: string | number },
     ): Promise<ToolRequestUserInputResponse> => {
+      // buffered/墓碑 turn 的输入请求不得上 UI (codex R12 P1) — 空 answers 即拒。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) return { answers: {} };
+      if (turnGate instanceof Promise && !(await turnGate)) return { answers: {} };
       const requestId = String(meta.requestId);
+      // 挂起期间服务端已取消本请求 (greptile R13 P1): 直接回空响应, 不注册
+      // broker 不上 UI — 否则 UI 会等一个服务端已结束的交互, 用户提交后向
+      // 已结束请求发迟到响应。
+      if (resolvedWhileBufferedRequestIds.delete(requestId)) return { answers: {} };
       const questions = normalizeRequestUserInputQuestions(params.questions);
       if (questions.length === 0) return { answers: {} };
       const kind = classifyUserInputRequest(params);
-      log.debug("native requestUserInput received", {
+      log.debug('native requestUserInput received', {
         requestId,
         threadId: params.threadId,
         turnId: params.turnId,
@@ -4051,7 +5709,7 @@ export class CodexAgent extends BaseAgent {
       });
       return userInputBroker.track(
         {
-          kind: "request_user_input",
+          kind: 'request_user_input',
           connectionId,
           requestId: meta.requestId,
           threadId: params.threadId,
@@ -4059,10 +5717,14 @@ export class CodexAgent extends BaseAgent {
           itemId: params.itemId,
         },
         async (settle) => {
-          const response =
-            kind === "permission"
-              ? await requestUserInputAsPermission(requestId, params, questions)
-              : await askUserViaInteraction(requestId, questions);
+          const response = kind === 'permission'
+            ? await requestUserInputAsPermission(requestId, params, questions)
+            : await askUserViaInteraction(
+                requestId,
+                questions,
+                params.turnId,
+                () => userInputBroker.has({ connectionId, requestId: meta.requestId }),
+              );
           settle(response);
         },
       );
@@ -4072,20 +5734,44 @@ export class CodexAgent extends BaseAgent {
       params: DynamicToolCallParams,
       meta: { requestId: string | number },
     ): Promise<DynamicToolCallResponse> => {
+      // buffered/墓碑 turn 的 tool call 不得上 UI (codex R12 P1)。
+      const turnGate = gateServerRequestTurn(params.turnId);
+      if (turnGate === false) {
+        return {
+          contentItems: [
+            { type: 'inputText', text: 'Request was rejected because the owning turn is no longer active.' },
+          ],
+          success: false,
+        };
+      }
+      if (turnGate instanceof Promise && !(await turnGate)) {
+        return {
+          contentItems: [
+            { type: 'inputText', text: 'Request was rejected because the owning turn is no longer active.' },
+          ],
+          success: false,
+        };
+      }
       if (isAskUserDynamicTool(params)) {
         const requestId = String(meta.requestId);
+        // 挂起期间服务端已取消本请求 (greptile R13 P1): 直接回失败响应, 不注册
+        // broker 不上 UI (与 resolved 的 cancel 响应同款文案)。
+        if (resolvedWhileBufferedRequestIds.delete(requestId)) {
+          return {
+            contentItems: [{ type: 'inputText', text: 'Request was resolved before user input was submitted.' }],
+            success: false,
+          };
+        }
         const questions = normalizeDynamicAskUserQuestions(params.arguments);
         if (questions.length === 0) {
           return {
-            contentItems: [
-              { type: "inputText", text: "No valid questions were provided." },
-            ],
+            contentItems: [{ type: 'inputText', text: 'No valid questions were provided.' }],
             success: false,
           };
         }
         return dynamicToolBroker.track(
           {
-            kind: "dynamic_tool",
+            kind: 'dynamic_tool',
             connectionId,
             requestId: meta.requestId,
             threadId: params.threadId,
@@ -4093,7 +5779,12 @@ export class CodexAgent extends BaseAgent {
             itemId: params.callId,
           },
           async (settle) => {
-            const response = await askUserViaInteraction(requestId, questions);
+            const response = await askUserViaInteraction(
+              requestId,
+              questions,
+              params.turnId,
+              () => dynamicToolBroker.has({ connectionId, requestId: meta.requestId }),
+            );
             settle(dynamicToolResponseFromUserInput(response));
           },
         );
@@ -4104,12 +5795,7 @@ export class CodexAgent extends BaseAgent {
         !registeredHostDynamicToolKeys.has(dynamicToolCallKey(params))
       ) {
         return {
-          contentItems: [
-            {
-              type: "inputText",
-              text: `Unsupported dynamic tool: ${params.tool}`,
-            },
-          ],
+          contentItems: [{ type: 'inputText', text: `Unsupported dynamic tool: ${params.tool}` }],
           success: false,
         };
       }
@@ -4120,52 +5806,38 @@ export class CodexAgent extends BaseAgent {
         toolName,
         toolParams: params.arguments,
       });
-      if (approvalPolicy !== "auto-approve") {
+      if (approvalPolicy !== 'auto-approve') {
         const requestId = `dynamic-tool:${serverName}:${params.turnId}:${params.callId}`;
         const decision = await awaitApprovalDecision(
           requestId,
-          "mcpServerElicitation",
+          'mcpServerElicitation',
           {
-            kind: "permission",
+            kind: 'permission',
             requestId,
             toolName: `dynamic:${serverName}:${toolName}`,
-            input: {
-              serverName,
-              toolName,
-              toolParams: params.arguments,
-            },
+            input: { serverName, toolName, toolParams: params.arguments },
             title: `Allow Codex to use ${serverName}?`,
             description: `Codex requested ${serverName}.${toolName}.`,
           },
-          { forcePrompt: approvalPolicy === "prompt-each-time" },
+          { forcePrompt: approvalPolicy === 'prompt-each-time' },
         );
-        if (decision !== "accept" && decision !== "acceptForSession") {
+        if (decision !== 'accept' && decision !== 'acceptForSession') {
           return {
-            contentItems: [
-              { type: "inputText", text: "The user declined this tool call." },
-            ],
+            contentItems: [{ type: 'inputText', text: 'The user declined this tool call.' }],
             success: false,
           };
         }
       }
 
       try {
-        const response = await hostDynamicToolProvider.callTool(
-          params,
-          hostDynamicToolContext,
-        );
+        const response = await hostDynamicToolProvider.callTool(params, hostDynamicToolContext);
         if (response) return response;
         return {
-          contentItems: [
-            {
-              type: "inputText",
-              text: `Unsupported dynamic tool: ${params.tool}`,
-            },
-          ],
+          contentItems: [{ type: 'inputText', text: `Unsupported dynamic tool: ${params.tool}` }],
           success: false,
         };
       } catch (error) {
-        log.error("host dynamic tool failed", {
+        log.error('host dynamic tool failed', {
           namespace: params.namespace,
           tool: params.tool,
           error: error instanceof Error ? error.message : String(error),
@@ -4173,10 +5845,8 @@ export class CodexAgent extends BaseAgent {
         return {
           contentItems: [
             {
-              type: "inputText",
-              text: `Host dynamic tool failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
+              type: 'inputText',
+              text: `Host dynamic tool failed: ${error instanceof Error ? error.message : String(error)}`,
             },
           ],
           success: false,
@@ -4184,36 +5854,40 @@ export class CodexAgent extends BaseAgent {
       }
     };
 
-    function handleServerRequestResolved(
-      params: ServerRequestResolvedNotification["params"],
-    ): void {
+    function handleServerRequestResolved(params: ServerRequestResolvedNotification['params']): void {
       const requestId = String(params.requestId);
+      const brokerKey = { connectionId, requestId: params.requestId };
+      const userInputPending = userInputBroker.has(brokerKey);
+      const dynamicPending = dynamicToolBroker.has(brokerKey);
+      if (userInputPending || dynamicPending) {
+        // Wake joined duplicates before settling the owner's outer broker
+        // response. This keeps them on the cancellation/reassignment path even
+        // if a resolver starts mirroring broker settlement in the future.
+        forgetPendingUserInputRequest(requestId);
+      }
       const userInputCancelled = userInputBroker.cancel(
-        { connectionId, requestId: params.requestId },
+        brokerKey,
         { answers: {} },
       );
       const dynamicCancelled = dynamicToolBroker.cancel(
-        { connectionId, requestId: params.requestId },
+        brokerKey,
         {
-          contentItems: [
-            {
-              type: "inputText",
-              text: "Request was resolved before user input was submitted.",
-            },
-          ],
+          contentItems: [{ type: 'inputText', text: 'Request was resolved before user input was submitted.' }],
           success: false,
         },
       );
       if (userInputCancelled || dynamicCancelled) {
         eventQueue.push({
-          type: "interaction_dismissed",
-          data: {
-            requestId,
-            reason: "server_request_resolved",
-            resolvedAs: "deny",
-          },
-          source: "codex",
+          type: 'interaction_dismissed',
+          data: { requestId, reason: 'server_request_resolved', resolvedAs: 'deny' },
+          source: 'codex',
         });
+      } else if (bufferedOrphanTurnIds.size > 0) {
+        // cancel 未命中且有 buffered turn: 可能是挂起中的请求 (尚未注册到
+        // broker) 被服务端取消 (greptile R13 P1) — 记下 requestId, 对账放行
+        // 后 handler 自查回空响应, 不上 UI。requestId 是一次性的 (消费即删),
+        // 最坏泄漏 = 一条字符串, 随 session 释放。
+        resolvedWhileBufferedRequestIds.add(requestId);
       }
     }
 
@@ -4224,41 +5898,29 @@ export class CodexAgent extends BaseAgent {
     // 由 renderer 显示最新一条, react batch 自然消化中间抖动。
     function pushStatus(text: string): void {
       eventQueue.push({
-        type: "status",
+        type: 'status',
         data: { status: text, ...usageTracker.snapshot(), isRunning: true },
-        source: "codex",
+        source: 'codex',
       });
     }
 
-    function pushItemStatus(item: {
-      type?: string;
-      command?: string;
-      tool?: string;
-    }): void {
+    function pushItemStatus(item: { type?: string; command?: string; tool?: string }): void {
       const text = statusTextForItem(item);
       if (text) pushStatus(text);
     }
 
-    function rejectIfCancelled(
-      sendOpts: SendOptions | undefined,
-      action: string,
-    ): void {
+    function rejectIfCancelled(sendOpts: SendOptions | undefined, action: string): void {
       if (sendOpts?.signal?.aborted) {
         throw new Error(`Codex ${action} cancelled before acceptance`);
       }
     }
 
-    function rejectClosedOrCancelledSend(
-      sendOpts: SendOptions | undefined,
-      stage: string,
-    ): boolean {
-      rejectIfCancelled(sendOpts, "send");
+    function rejectClosedOrCancelledSend(sendOpts: SendOptions | undefined, stage: string): boolean {
+      rejectIfCancelled(sendOpts, 'send');
       if (!closed) return false;
-      log.warn("send called on closed session", { stage });
+      log.warn('send called on closed session', { stage });
       if (sendOpts?.throwOnStartFailure || sendOpts?.signal) {
-        throw new Error(
-          `Codex send cannot be accepted: session is closed ${stage}`,
-        );
+        throw new Error(`Codex send cannot be accepted: session is closed ${stage}`);
       }
       return true;
     }
@@ -4268,23 +5930,201 @@ export class CodexAgent extends BaseAgent {
       return /Codex send (?:cancelled|cannot be accepted)/i.test(text);
     }
 
-    const shouldIgnoreStaleTurnEvent = (
-      turnId: string | null | undefined,
-    ): boolean => {
+    // idle 孤儿判定 (codex R15 P1): 孤儿守卫生效 + 无 RPC 在飞 + 无活跃 turn
+    // 时, 未知 id 的事件只可能来自失败 RPC 的孤儿 turn (合法 turn 的 id 都
+    // 已知)。与 pending 窗口的 buffer 隔离互补: idle 时没有对账 RPC 在飞,
+    // 事件直接按孤儿处理 (立墓碑), 不缓冲。
+    const isIdleOrphanTurnId = (turnId: string | null | undefined): turnId is string =>
+      Boolean(turnId)
+      && turnStartFailedWithoutTurnId
+      && !isTurnStartPending
+      && currentTurnId === null
+      && !completedTurnIds.has(turnId as string)
+      && !terminalErroredTurnIds.has(turnId as string);
+
+    /**
+     * idle 孤儿落墓碑 —— **同时**补 best-effort interrupt。
+     *
+     * 为什么必须在这里 interrupt: turnStarted 的孤儿分支显式跳过已落墓碑的 id(它假设"已墓碑
+     * = interrupt 已经发过"), 而本函数此前只落墓碑、把 interrupt 留给那个分支。于是
+     * item/started 之类的事件**先于**迟到的 turnStarted 到达时, 两边各自以为对方会发 ——
+     * 谁都没发, 被 server 接受的那个 turn 在 Stop 已经终态收口 UI 之后继续执行工具
+     * (review #844 codex P1)。
+     *
+     * 恰好一次: isIdleOrphanTurnId 要求 id **不在** terminalErroredTurnIds 里, 而本函数第一件
+     * 事就是把它加进去, 所以同一个 turn 只会进来一次。
+     *
+     * turnCompleted 的 idle 孤儿分支**不用**它: 那个 turn 已经结束, interrupt 是纯浪费的 RPC。
+     */
+    const tombstoneIdleOrphanTurn = (turnId: string, reason: string): void => {
+      terminalErroredTurnIds.add(turnId);
+      if (!threadId) return;
+      host.request(Method.TurnInterrupt, { threadId, turnId }).catch((e: unknown) => {
+        log.warn('idle orphan turn interrupt failed (best-effort)', {
+          reason,
+          turnId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      });
+    };
+
+    const shouldIgnoreStaleTurnEvent =(turnId: string | null | undefined): boolean => {
       if (!turnId) return false;
       if (completedTurnIds.has(turnId)) return true;
       if (terminalErroredTurnIds.has(turnId)) return true;
+      // 缓冲隔离中的歧义 turn (codex R9 P2): id 只拦 turnStarted 不够 —
+      // 缓冲期间 currentTurnId 为 null, 孤儿 turn 的 item/usage/error 会穿透
+      // stale guard 被按当前 pending turn 处理 (旧输出显示在新消息下 / 用量
+      // 计错 turn / 孤儿 error 终结合法新 turn, greptile R10 P1)。其事件一律
+      // 忽略; 若响应证明合法 (id 一致)  buffer 已清空, 后续事件正常。
+      if (bufferedOrphanTurnIds.has(turnId)) return true;
+      // idle 孤儿 (codex R15 P1): 立墓碑 + 补 interrupt 并丢弃。interrupt 必须在这里发,
+      // 不能像早先那样留给 turnStarted 的孤儿分支 —— 那个分支跳过已落墓碑的 id, 而墓碑正是
+      // 这里刚落的; 事件先于迟到的 started 到达时谁都不发, 被接受的 turn 在 UI 已收口之后
+      // 继续跑工具 (review #844 codex P1)。
+      if (isIdleOrphanTurnId(turnId)) {
+        tombstoneIdleOrphanTurn(turnId, 'idle orphan event');
+        return true;
+      }
       return currentTurnId !== null && turnId !== currentTurnId;
+    };
+
+    // buffered turn 的事件入口闸 (greptile R11 P1 + codex R12 P1): 命中缓冲
+    // 则把「重进本 handler」的闭包按到达序排进该 turn 的队列, 等对账 —
+    // 合法则激活后按序重放 (早期输出不丢, 终态自然收口), 孤儿则整队丢弃。
+    // 返回 true = 已入队, 调用方直接 return。重放闭包执行时 buffer 已清空
+    // 且 turn 已激活, 重进 handler 会走正常路径, 不会二次入队。
+    //
+    // 孤儿证据可以比它的 turnStarted 先到 (codex R14 P1): error/item 先到
+    // 时 id 尚未入 buffer, 会穿透 stale guard 被按在飞 send 处理 — 孤儿
+    // 守卫生效 + 新 RPC 在飞 + 无活跃 turn 时, 未知 id 视同 started 先进
+    // buffer 再入队, 等对账。
+    /**
+     * 缓冲期间**确实产出过模型 / 工具工作**的 turn。
+     *
+     * 与 bufferedTurnEventQueues 的区别: 队列里什么都有(turn/completed、userMessage echo、
+     * tokenUsage、plan 更新…), 拿"队列非空"当产出证据会把一次零产出的容量拒绝误判成
+     * "已有产出, 不重投", 结果对用户报硬失败 —— 而这一轮其实什么副作用都没发生
+     * (review #844 codex P1)。判据与非缓冲路径统一走 itemRepresentsModelWork。
+     */
+    const bufferedModelWorkTurnIds = new Set<string>();
+
+    const enqueueIfBufferedTurn = (
+      turnId: string | null | undefined,
+      replay: () => void,
+      opts?: { modelWork?: boolean },
+    ): boolean => {
+      if (!turnId) return false;
+      if (!bufferedOrphanTurnIds.has(turnId)) {
+        if (!(turnStartFailedWithoutTurnId && isTurnStartPending && currentTurnId === null)) {
+          return false;
+        }
+        bufferedOrphanTurnIds.add(turnId);
+        log.debug('buffering ambiguous turn event (evidence before turnStarted) until turn/start response arrives', {
+          turnId,
+          threadId,
+        });
+      }
+      const queue = bufferedTurnEventQueues.get(turnId) ?? [];
+      queue.push(replay);
+      bufferedTurnEventQueues.set(turnId, queue);
+      if (opts?.modelWork) bufferedModelWorkTurnIds.add(turnId);
+      return true;
+    };
+
+    // buffered turn 的 server request (审批/输入) 挂起信号 (codex R12 P1):
+    // 归属未定前请求不得上 UI — 用户可能为隐藏的孤儿 turn 批准操作, 而
+    // best-effort interrupt 输了竞态时操作会真实执行。每个 buffered id 一组
+    // waiter, 对账时 settle: 合法 → true 继续正常流程; 孤儿 / RPC 失败 →
+    // false, 调用方返回拒绝响应。挂起窗口 = turn/start RPC 窗口 (最坏
+    // 60s), 远小于 daemon 侧审批等待时长。
+    const bufferedReconcileWaiters = new Map<string, Array<(valid: boolean) => void>>();
+    // 挂起期间到达的 serverRequest/resolved (greptile R13 P1): 请求还没注册
+    // 到 broker, cancel 不命中 — 记下 requestId, 对账放行后 handler 自查:
+    // 服务端已取消的请求直接回空响应, 不再上 UI 让用户向已结束的请求提交。
+    const resolvedWhileBufferedRequestIds = new Set<string>();
+
+    const waitForBufferedTurnReconcile = (turnId: string): Promise<boolean> =>
+      new Promise((resolve) => {
+        const waiters = bufferedReconcileWaiters.get(turnId) ?? [];
+        waiters.push(resolve);
+        bufferedReconcileWaiters.set(turnId, waiters);
+      });
+
+    const settleBufferedTurnReconcile = (turnId: string, valid: boolean): void => {
+      const waiters = bufferedReconcileWaiters.get(turnId);
+      if (!waiters) return;
+      bufferedReconcileWaiters.delete(turnId);
+      for (const resolve of waiters) resolve(valid);
+    };
+
+    // 放弃对账时统一释放 (codex R17 P2): close / cancel 边界直接从 send
+    // return、或 session close 时, buffered turn 的挂起请求永远等不到
+    // settle — handler 永远悬挂, dispatchServerRequest 永不返回, server
+    // 侧请求卡死。所有不走路径对账的退出点都必须调用。
+    const abandonBufferedTurns = (reason: string): void => {
+      if (bufferedOrphanTurnIds.size === 0) return;
+      log.debug('abandoning buffered turns', { reason, turnIds: [...bufferedOrphanTurnIds] });
+      for (const bufferedId of bufferedOrphanTurnIds) {
+        settleBufferedTurnReconcile(bufferedId, false);
+      }
+      bufferedOrphanTurnIds.clear();
+      bufferedTurnEventQueues.clear();
+    };
+
+    // server request 入口闸 (codex R12 P1): true = 放行; false = 拒绝
+    // (terminal/completed 墓碑 turn — 批了也没人消费; buffered 孤儿)。
+    // buffered 归属未定 → 返回 Promise 挂起到对账再定。非 async 签名是故意的:
+    // 同步快速路径不引入 microtask 延迟 — handler 第一行的 broker.track 与
+    // 紧随其后的 serverRequest/resolved 存在竞态, 哪怕一跳 await 也会让
+    // resolved 抢在 track 之前到达 (测试回归实证)。
+    const gateServerRequestTurn = (turnId: string | null | undefined): boolean | Promise<boolean> => {
+      if (!turnId) return true;
+      if (terminalErroredTurnIds.has(turnId) || completedTurnIds.has(turnId)) return false;
+      // idle 孤儿 (greptile R16 P1): 无 RPC 在飞时未知 id 的请求只可能来自
+      // 失败 RPC 的孤儿 turn — 直接拒, 不得放行上 UI (用户响应会发往旧
+      // turn, interrupt 输掉竞态时操作会真实执行)。与 notification 的
+      // idle 孤儿闸同款判定, 立墓碑让后续事件一并拦。
+      if (isIdleOrphanTurnId(turnId)) {
+        // 同上: 落墓碑的同时补 interrupt。只拒掉审批/输入请求不够 —— 那个 turn 还在 server
+        // 上跑, 而 turnStarted 的孤儿分支不会为已落墓碑的 id 补发 (review #844 codex P1)。
+        tombstoneIdleOrphanTurn(turnId, 'idle orphan server request');
+        return false;
+      }
+      // 孤儿守卫 + 已有活跃 turn: id ≠ currentTurnId 的请求来自失败 RPC 的
+      // 孤儿 (codex R17 P1) — 替换 turn 已被接受后, 孤儿迟到的审批/输入
+      // 请求既不是 idle 也不是 buffered, 不得放行上 UI。
+      if (turnStartFailedWithoutTurnId && currentTurnId !== null && turnId !== currentTurnId) {
+        terminalErroredTurnIds.add(turnId);
+        return false;
+      }
+      if (!bufferedOrphanTurnIds.has(turnId)) {
+        // 与 enqueueIfBufferedTurn 同款预缓冲 (codex R15 P1): 孤儿 turn 的
+        // server request 同样可以比它的 turnStarted 先到 — id 未入 buffer
+        // 时若直接放行, 审批框会为隐藏孤儿 turn 上 UI。守卫生效 + RPC 在飞
+        // + 无活跃 turn 时视同 buffered, 挂起到对账。
+        if (!(turnStartFailedWithoutTurnId && isTurnStartPending && currentTurnId === null)) {
+          return true;
+        }
+        bufferedOrphanTurnIds.add(turnId);
+        log.debug('buffering ambiguous turn server request (evidence before turnStarted) until turn/start response arrives', {
+          turnId,
+          threadId,
+        });
+      }
+      // 挂起到对账; waiter 恢复前复查墓碑 (codex R13 P2): 对账先 settle(true)
+      // 再同步重放队列, 队列里若有终态会把该 turn 当场收口 — waiter 在
+      // microtask 里恢复时 turn 已死, 此时再上 UI 就是为一个刚收口的 turn
+      // 批审批。微任务时机保证这次复查一定看到重放后的最终状态。
+      return waitForBufferedTurnReconcile(turnId).then(
+        (valid) => valid && !terminalErroredTurnIds.has(turnId) && !completedTurnIds.has(turnId),
+      );
     };
 
     const stopActiveRolloutPlanFallback = (): void => {
       const stop = stopRolloutPlanFallback;
       stopRolloutPlanFallback = null;
-      try {
-        stop?.();
-      } catch {
-        /* no-op */
-      }
+      try { stop?.(); } catch { /* no-op */ }
     };
 
     const startRolloutPlanFallback = (turnId: string): void => {
@@ -4293,13 +6133,13 @@ export class CodexAgent extends BaseAgent {
 
       let stopped = false;
       let timer: ReturnType<typeof setInterval> | null = null;
-      let rolloutPath = "";
+      let rolloutPath = '';
       let offset = 0;
-      let remainder = "";
+      let remainder = '';
 
       const scanText = (text: string, allowFallbackTurnId: boolean): void => {
         const lines = `${remainder}${text}`.split(/\r?\n/);
-        remainder = lines.pop() ?? "";
+        remainder = lines.pop() ?? '';
         for (const line of lines) {
           if (!line.trim()) continue;
           let entry: unknown;
@@ -4314,8 +6154,7 @@ export class CodexAgent extends BaseAgent {
             { requireTurnId: true },
           );
           if (!parsed) continue;
-          if (parsed.turnId && shouldIgnoreStaleTurnEvent(parsed.turnId))
-            continue;
+          if (parsed.turnId && shouldIgnoreStaleTurnEvent(parsed.turnId)) continue;
           if (parsed.turnId && parsed.turnId !== turnId) continue;
           if (parsed.callId) {
             if (seenRolloutPlanCallIds.has(parsed.callId)) {
@@ -4327,7 +6166,7 @@ export class CodexAgent extends BaseAgent {
           if (parsed.turnId && Array.isArray(input.input?.plan)) {
             latestPlanByTurn.set(
               parsed.turnId,
-              input.input.plan as TurnPlanUpdatedNotification["params"]["plan"],
+              input.input.plan as TurnPlanUpdatedNotification['params']['plan'],
             );
           }
           eventQueue.push(parsed.event);
@@ -4344,7 +6183,7 @@ export class CodexAgent extends BaseAgent {
         }
         if (stat.size < offset) {
           offset = 0;
-          remainder = "";
+          remainder = '';
         }
         if (stat.size === offset) return;
 
@@ -4352,25 +6191,14 @@ export class CodexAgent extends BaseAgent {
         const buffer = Buffer.alloc(length);
         let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
         try {
-          handle = await fs.open(rolloutPath, "r");
+          handle = await fs.open(rolloutPath, 'r');
           const read = await handle.read(buffer, 0, length, offset);
           offset += read.bytesRead;
-          scanText(
-            buffer.subarray(0, read.bytesRead).toString("utf8"),
-            allowFallbackTurnId,
-          );
+          scanText(buffer.subarray(0, read.bytesRead).toString('utf8'), allowFallbackTurnId);
         } catch (e) {
-          log.debug("rollout plan fallback poll failed", {
-            error: String(e),
-            threadId,
-            turnId,
-          });
+          log.debug('rollout plan fallback poll failed', { error: String(e), threadId, turnId });
         } finally {
-          try {
-            await handle?.close();
-          } catch {
-            /* no-op */
-          }
+          try { await handle?.close(); } catch { /* no-op */ }
         }
       };
 
@@ -4383,14 +6211,11 @@ export class CodexAgent extends BaseAgent {
         try {
           rolloutPath = await this.findRolloutPath(threadId);
         } catch (e) {
-          log.debug(
-            "rollout plan fallback disabled: rollout path unavailable",
-            {
-              error: String(e),
-              threadId,
-              turnId,
-            },
-          );
+          log.debug('rollout plan fallback disabled: rollout path unavailable', {
+            error: String(e),
+            threadId,
+            turnId,
+          });
           return;
         }
         if (stopped) return;
@@ -4402,13 +6227,182 @@ export class CodexAgent extends BaseAgent {
 
     const flushDeferredTerminalTurnCompletionsIfIdle = (): void => {
       if (isTurnStartPending || currentTurnId !== null) return;
-      for (const [turnId, params] of Array.from(
-        deferredTerminalTurnCompletions.entries(),
-      )) {
+      for (const [turnId, params] of Array.from(deferredTerminalTurnCompletions.entries())) {
         if (!deferredTerminalTurnCompletions.has(turnId)) continue;
         deferredTerminalTurnCompletions.delete(turnId);
         handleTurnCompleted(params);
       }
+    };
+
+    const armHttpRecoveryForError = (
+      error: { message?: string; additionalDetails?: unknown } | null | undefined,
+    ): string | null => {
+      if (opts.remoteHostId || !this.deps.armCodexHttpRecovery) return null;
+      const message = typeof error?.message === 'string' ? error.message : '';
+      const additionalDetails =
+        typeof error?.additionalDetails === 'string' ? error.additionalDetails : null;
+      if (!message && !additionalDetails) return null;
+      try {
+        return this.deps.armCodexHttpRecovery({
+          sessionId: sid,
+          threadId,
+          message,
+          additionalDetails,
+        });
+      } catch (errorFromHost) {
+        log.warn('codex HTTP recovery arming failed; surfacing original error', {
+          threadId,
+          error: errorFromHost instanceof Error ? errorFromHost.message : String(errorFromHost),
+        });
+        return null;
+      }
+    };
+
+    /**
+     * 已确认是 HTTP proxy 可恢复的 WS 请求校验错误时，立即重投同一份冻结 turnParams。
+     * host 已把 thread 标成 HTTP-only；重投新建 transport 时会收到 426 并走既有
+     * recoveryRules。只接管本 logical send、零产出、无其它 start 在飞的明确 turn。
+     */
+    const retryTurnViaHttpRecovery = (deadTurnId: string, reason: string): boolean => {
+      const state = overloadRetry;
+      if (!state || closed || state.httpRecoveryRetryAttempted || state.isCancelled()) return false;
+      const origin = turnOriginByTurnId.get(deadTurnId);
+      if (origin?.sendGen !== state.sendGen) return false;
+      if (producedOutputTurnIds.has(deadTurnId)) {
+        log.info('codex WS body recovery error after partial output — not auto-retrying', {
+          threadId,
+          deadTurnId,
+          reason,
+        });
+        return false;
+      }
+      if (
+        inFlightStarts.size > 0 ||
+        state.timer !== null ||
+        state.inFlight ||
+        state.deferredCapacityFailure !== null
+      ) {
+        log.warn('codex WS body recovery retry skipped because another retry/start is pending', {
+          threadId,
+          deadTurnId,
+          reason,
+          inFlightStarts: inFlightStarts.size,
+        });
+        return false;
+      }
+
+      state.httpRecoveryRetryAttempted = true;
+      terminalErroredTurnIds.add(deadTurnId);
+      dismissPendingUserInputForTurn(deadTurnId, 'turn_failed');
+      clearActiveToolContextsForTurn(deadTurnId);
+      stopActiveRolloutPlanFallback();
+      isTurnInFlight = false;
+      if (currentTurnId === deadTurnId) currentTurnId = null;
+      if (
+        codexPermissionStrictnessRank(state.launchedPermissionMode)
+        < codexPermissionStrictnessRank(mutablePermissionMode)
+      ) {
+        pendingTightenInterrupt = true;
+      }
+      log.info('codex WS body recovery error — retrying turn through HTTP fallback', {
+        threadId,
+        deadTurnId,
+        reason,
+      });
+
+      void state.retry().catch((retryError) => {
+        if (closed || overloadRetry !== state || state.isCancelled()) {
+          log.info('codex HTTP recovery retry rejected after cancellation — not surfacing', {
+            threadId,
+            reason,
+            error: retryError instanceof Error ? retryError.message : String(retryError),
+          });
+          return;
+        }
+        log.error('codex HTTP recovery turn/start retry failed', {
+          threadId,
+          reason,
+          error: retryError instanceof Error ? retryError.message : String(retryError),
+        });
+        quarantineTurnsAfterStartFailure('HTTP recovery turn/start retry failed', {
+          ownsSession: sendGeneration === state.sendGen,
+        });
+        discardOverloadRetry('HTTP recovery retry failed');
+        eventQueue.push({
+          type: 'error',
+          data: {
+            message: `turn/start HTTP recovery retry failed: ${String(retryError)}`,
+            isTerminal: true,
+          },
+          source: 'codex',
+        });
+        eventQueue.push({
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
+        });
+      });
+      return true;
+    };
+
+    /**
+     * 记录本 logical send 的一次 HTTP recovery 意图。
+     *
+     * `error` notification 只负责登记并保持 UI running；真正重投只由权威的
+     * turn/completed 驱动。这样无论 error / completed / turn-start response
+     * 如何乱序，都只有一个执行入口。
+     */
+    const recordHttpRecoveryIntent = (
+      deadTurnId: string,
+      error: { message?: string; additionalDetails?: unknown } | null | undefined,
+    ): boolean => {
+      const state = overloadRetry;
+      if (
+        !deadTurnId
+        || !state
+        || closed
+        || state.httpRecoveryRetryAttempted
+        || state.isCancelled()
+        || state.timer !== null
+        || state.deferredCapacityFailure !== null
+        || producedOutputTurnIds.has(deadTurnId)
+      ) {
+        return false;
+      }
+      if (state.pendingHttpRecovery) {
+        return state.pendingHttpRecovery.deadTurnId === deadTurnId;
+      }
+
+      const origin = turnOriginByTurnId.get(deadTurnId);
+      const [startSeq, start] =
+        inFlightStarts.size === 1
+          ? Array.from(inFlightStarts.entries())[0] ?? []
+          : [];
+      const ownedByCurrentSend = origin?.sendGen === state.sendGen;
+      const ownedBySolePendingStart =
+        origin === undefined
+        && (currentTurnId === null || currentTurnId === deadTurnId)
+        && startSeq !== undefined
+        && start?.sendGen === state.sendGen
+        && !start.quarantined
+        && !start.terminalSettled;
+      if (!ownedByCurrentSend && !ownedBySolePendingStart) {
+        return false;
+      }
+
+      const reason = armHttpRecoveryForError(error);
+      if (!reason) return false;
+      state.pendingHttpRecovery = {
+        deadTurnId,
+        reason,
+      };
+      log.info('codex WS body recovery recorded; waiting for turn/completed', {
+        threadId,
+        deadTurnId,
+        reason,
+        startSeq: startSeq ?? null,
+      });
+      return true;
     };
 
     /**
@@ -4419,24 +6413,88 @@ export class CodexAgent extends BaseAgent {
      */
     function interceptProposedPlanItem(item: unknown): boolean {
       if (!currentTurnPlanModeActive) return false;
-      const candidate = item as
-        { type?: unknown; text?: unknown } | null | undefined;
-      if (!candidate || candidate.type !== "plan") return false;
-      if (typeof candidate.text === "string") proposedPlanText = candidate.text;
+      const candidate = item as { type?: unknown; text?: unknown } | null | undefined;
+      if (!candidate || candidate.type !== 'plan') return false;
+      if (typeof candidate.text === 'string') proposedPlanText = candidate.text;
       return true;
     }
 
     function handleTurnCompleted(params: TurnCompletedParams): void {
       const turn = params.turn;
+      if (reconnectStallCleanupTurnId === turn.id) {
+        // The watchdog already published the terminal error and is still
+        // waiting for turn/interrupt. Keep the local busy guard until the
+        // handshake settles, but retain this authoritative completion: it
+        // proves the old turn ended and the host event path is alive, so a
+        // double interrupt rejection must not retire healthy sibling sessions.
+        reconnectStallDeferredTurnCompletion ??= params;
+        log.debug('deferring reconnect-stall turn completion until interrupt settles', {
+          threadId,
+          turnId: turn.id,
+        });
+        return;
+      }
+      if (reconnectStallTurnId === turn.id) clearReconnectStall();
+      let recoveryState = overloadRetry;
+      let pendingRecovery =
+        recoveryState?.pendingHttpRecovery?.deadTurnId === turn.id
+          ? recoveryState.pendingHttpRecovery
+          : null;
+      if (
+        turn.status === 'failed'
+        && (!terminalErroredTurnIds.has(turn.id) || pendingRecovery)
+      ) {
+        if (!pendingRecovery && turn.error && recordHttpRecoveryIntent(turn.id, turn.error)) {
+          recoveryState = overloadRetry;
+          pendingRecovery =
+            recoveryState?.pendingHttpRecovery?.deadTurnId === turn.id
+              ? recoveryState.pendingHttpRecovery
+              : null;
+        }
+        if (recoveryState && pendingRecovery) {
+          if (inFlightStarts.size > 0) {
+            const [start] = inFlightStarts.values();
+            if (
+              inFlightStarts.size === 1
+              && start?.sendGen === recoveryState.sendGen
+              && (currentTurnId === null || currentTurnId === turn.id)
+            ) {
+              // 权威 completed 已到、但对应 start RPC 仍未 settle。复用既有终态缓冲，
+              // 等响应建立 turn 归属后再由 completed 这一唯一入口重进并执行重投。
+              turnsCompletedBeforeStartResp.add(turn.id);
+              terminalErroredTurnIds.add(turn.id);
+              dismissPendingUserInputForTurn(turn.id, 'turn_failed');
+              clearActiveToolContextsForTurn(turn.id);
+              stopActiveRolloutPlanFallback();
+              isTurnInFlight = false;
+              if (currentTurnId === turn.id) currentTurnId = null;
+              deferredTerminalTurnCompletions.set(turn.id, params);
+              return;
+            }
+          }
+
+          recoveryState.pendingHttpRecovery = null;
+          if (retryTurnViaHttpRecovery(turn.id, pendingRecovery.reason)) return;
+          // 已登记但归属后来未能坐实时，恢复原终态处理；不能吞掉失败让 UI 悬空。
+          terminalErroredTurnIds.delete(turn.id);
+          log.warn('codex HTTP recovery intent could not be executed; surfacing turn failure', {
+            threadId,
+            deadTurnId: turn.id,
+            reason: pendingRecovery.reason,
+          });
+        }
+      }
+      if (pendingRecovery && recoveryState?.pendingHttpRecovery?.deadTurnId === turn.id) {
+        // 极端协议形状：先报可恢复 terminal error，最终 turn 却不是 failed。
+        // 以权威 completed 为准，取消本次恢复意图并正常收口。
+        recoveryState.pendingHttpRecovery = null;
+        terminalErroredTurnIds.delete(turn.id);
+      }
       // turn/start RPC 响应未回时就收到终态 → 记墓碑, 阻止稍后到达的
       // handleTurnStartResp / 乱序 turnStarted 把已终结的 turn 重新置活。
       if (isTurnStartPending) turnsCompletedBeforeStartResp.add(turn.id);
       const isTerminalErroredTurn = terminalErroredTurnIds.has(turn.id);
-      if (
-        isTerminalErroredTurn &&
-        isTurnStartPending &&
-        currentTurnId !== turn.id
-      ) {
+      if (isTerminalErroredTurn && isTurnStartPending && currentTurnId !== turn.id) {
         deferredTerminalTurnCompletions.set(turn.id, params);
         return;
       }
@@ -4444,6 +6502,13 @@ export class CodexAgent extends BaseAgent {
       // 同一个墓碑也负责拦截该 turn 随后迟到的 item / reasoning / started 事件。
       if (completedTurnIds.has(turn.id)) return;
       completedTurnIds.add(turn.id);
+      // A controlled MCP request may already be waiting for a steer ACK. The
+      // completed tombstone is authoritative, so release it immediately to
+      // decline instead of waiting for the local ACK timeout.
+      abandonPendingCapabilitySteersForTurn(turn.id);
+      const completedCapabilitySelectionText =
+        capabilitySelectionTextByTurnId.get(turn.id) ?? '';
+      capabilitySelectionTextByTurnId.delete(turn.id);
       const suppressTerminalUi = terminalErroredTurnIds.has(turn.id);
       deferredTerminalTurnCompletions.delete(turn.id);
       if (currentTurnId === turn.id || currentTurnId === null) {
@@ -4451,16 +6516,17 @@ export class CodexAgent extends BaseAgent {
       }
       dismissPendingUserInputForTurn(turn.id, `turn_${turn.status}`);
       clearActiveToolContextsForTurn(turn.id);
-      const overlapsActiveTurn =
-        suppressTerminalUi &&
-        currentTurnId !== null &&
-        currentTurnId !== turn.id;
+      const overlapsActiveTurn = suppressTerminalUi && currentTurnId !== null && currentTurnId !== turn.id;
       if (overlapsActiveTurn) return;
       const completedTurnWasPlanMode = currentTurnPlanModeActive;
       if (currentTurnId === turn.id || currentTurnId === null) {
         isTurnInFlight = false;
         currentTurnId = null;
         currentTurnPlanModeActive = false;
+        // 收 idle 表只在**当前** turn 真正结束时做:放在上面的重叠早退之前会把
+        // 仍在跑的活跃 turn 的表一并清掉,而它若正好卡住(无事件可再 arm),watchdog
+        // 就永久失效了。
+        resetUpstreamIdleForTurnEnd();
       }
       const lastSnap = usageTracker.snapshot();
       // turn 桶快照 — endTurn 会清掉 turn 桶, 必须在调用前先取出来
@@ -4477,14 +6543,13 @@ export class CodexAgent extends BaseAgent {
       const endSnap = usageTracker.snapshot();
       const sessionCacheStats = usageTracker.getCacheStats().session;
       const formatBucket = (b: typeof preTurnEndCacheStats.turn) => ({
-        hitRate:
-          b.hitRate === null ? "n/a" : `${(b.hitRate * 100).toFixed(1)}%`,
+        hitRate: b.hitRate === null ? 'n/a' : `${(b.hitRate * 100).toFixed(1)}%`,
         read: b.read,
         create: b.create,
         uncached: b.uncachedInput,
         apiCalls: b.apiCalls,
       });
-      log.debug("SDK ◀ turn end", {
+      log.debug('SDK ◀ turn end', {
         turnId: turn.id,
         status: turn.status,
         startedAt: turn.startedAt ?? null,
@@ -4496,8 +6561,7 @@ export class CodexAgent extends BaseAgent {
         inputTokens: lastTurnTokenUsage?.inputTokens ?? null,
         cachedInputTokens: lastTurnTokenUsage?.cachedInputTokens ?? null,
         outputTokens: lastTurnTokenUsage?.outputTokens ?? null,
-        reasoningOutputTokens:
-          lastTurnTokenUsage?.reasoningOutputTokens ?? null,
+        reasoningOutputTokens: lastTurnTokenUsage?.reasoningOutputTokens ?? null,
         contextWindow: lastModelContextWindow,
         cumulative: endSnap,
         // cache 命中率 — 排查第三方 proxy 透传问题用,
@@ -4513,42 +6577,67 @@ export class CodexAgent extends BaseAgent {
         flushDeferredTerminalTurnCompletionsIfIdle();
         return;
       }
+      // 收口前的归属校验。本函数对**不是当前活跃 turn** 的终态一律按"收口当前这一轮"处理
+      // (既有行为: currentTurnId 为 null 时走 emit done, 非 null 时也照样推 error + done,
+      // 只是不动活跃态), 而挂起 / 延后 / 在飞的重投恰好活在这些窗口里: 被 Stop 的旧 turn 的
+      // 迟到 completed 于是既把新一轮报成失败, 又顺手撤销它的重投 —— 那一轮白白丢掉自动
+      // 重试, 要用户手动重发(review #844 greptile P1)。
+      //
+      // 判据**只看归属, 不看有没有活跃 turn**: 早先版本多要求 currentTurnId === null, 于是
+      // "重投 RPC 在飞 + 它的 turnStarted 已先到"这种状态(活跃 turn 存在且重投仍挂着)整段
+      // 绕过校验, 同一个 bug 换个时序照样成立(review #844 greptile P1)。
+      // 归属未知(拿不到 origin)同样算不属于 —— 未知的一律不许替它收口。
+      if (overloadRetryPending()) {
+        const origin = turnOriginByTurnId.get(turn.id);
+        if (origin?.sendGen !== overloadRetry?.sendGen) {
+          log.info('ignoring a foreign turn terminal state while an overload retry is pending', {
+            turnId: turn.id,
+            status: turn.status,
+            activeTurnId: currentTurnId,
+            turnSendGen: origin?.sendGen ?? null,
+            retrySendGen: overloadRetry?.sendGen ?? null,
+            threadId,
+          });
+          latestPlanByTurn.delete(turn.id);
+          flushDeferredTerminalTurnCompletionsIfIdle();
+          return;
+        }
+      }
+      // 到这里 = 这个 turn 的终态**要出 UI**, 逻辑 send 就此收口。墓碑压掉的那条路在上面
+      // 已经 return, 所以退避中的正常重投(死 turn 恒有墓碑)不会被误撤。
+      revokeOverloadRetryOnTerminalSettle(`turn_${turn.status}`);
 
-      if (turn.status === "failed" || turn.status === "interrupted") {
+      if (turn.status === 'failed' || turn.status === 'interrupted') {
         // 失败 / 中断的 plan turn 不发审批 — 半截计划没有审批意义, 循环就此结束。
         proposedPlanText = null;
         planCycleActive = false;
         currentTurnPlanModeActive = false;
         if (turn.error?.message) {
           eventQueue.push({
-            type: "error",
+            type: 'error',
             data: { message: turn.error.message, isTerminal: true },
-            source: "codex",
+            source: 'codex',
           });
-        } else if (turn.status === "failed") {
+        } else if (turn.status === 'failed') {
           // failed turn 缺 error detail 时也必须推 terminal error —— 否则 renderer
           // 的 state.error 不置位, running→stopped 的通知链路把这次失败当正常完成
           // (桌面/飞书通知显示"已完成")。序列与上面"有 message"的分支同构(error→done)。
           // reason 是稳定 key, renderer 按它走 i18n 文案(规则 18); message 仅作
           // 非 renderer 消费方(IM/orca)的兜底。interrupted(用户主动停)不算失败, 不补。
           eventQueue.push({
-            type: "error",
+            type: 'error',
             data: {
-              message: "任务执行失败（模型未返回错误详情）。",
+              message: '任务执行失败（模型未返回错误详情）。',
               isTerminal: true,
-              reason: "turn-failed",
+              reason: 'turn-failed',
             },
-            source: "codex",
+            source: 'codex',
           });
         }
         eventQueue.push({
-          type: "done",
-          data: {
-            type: "codex/event/task_complete",
-            cancelled: turn.status === "interrupted",
-            raw: turn,
-          },
-          source: "codex",
+          type: 'done',
+          data: { type: 'codex/event/task_complete', cancelled: turn.status === 'interrupted', raw: turn },
+          source: 'codex',
         });
         latestPlanByTurn.delete(turn.id);
         flushDeferredTerminalTurnCompletionsIfIdle();
@@ -4556,9 +6645,9 @@ export class CodexAgent extends BaseAgent {
       }
 
       eventQueue.push({
-        type: "status",
-        data: { status: "Done", ...endSnap, isRunning: false },
-        source: "codex",
+        type: 'status',
+        data: { status: 'Done', ...endSnap, isRunning: false },
+        source: 'codex',
       });
       // 真实 per-turn 用量 (host 的 today chip / daily_model_usage 记账消费):
       //   promptTokens     = 本 turn 未命中缓存的输入 (不再是 contextTokens 上下文快照)
@@ -4576,14 +6665,14 @@ export class CodexAgent extends BaseAgent {
         cachedTokens: realTurnUsage.cacheRead,
       };
       eventQueue.push({
-        type: "done",
+        type: 'done',
         data: {
-          type: "codex/event/task_complete",
+          type: 'codex/event/task_complete',
           usage: codexDoneUsage,
           raw: turn,
           plan: latestPlanByTurn.get(turn.id) ?? null,
         },
-        source: "codex",
+        source: 'codex',
       });
       latestPlanByTurn.delete(turn.id);
       // 计划模式: plan turn 正常收尾且产出了 proposed plan → 发起审批闭环。
@@ -4594,109 +6683,668 @@ export class CodexAgent extends BaseAgent {
       proposedPlanText = null;
       if (completedTurnWasPlanMode && planCycleActive) {
         if (planForReview) {
-          void runPlanReviewFlow(planForReview, turn.id);
+          void runPlanReviewFlow(
+            planForReview,
+            turn.id,
+            completedCapabilitySelectionText,
+          );
         } else {
-          log.debug("plan turn produced no proposed plan — plan cycle ends", {
-            turnId: turn.id,
-          });
+          log.debug('plan turn produced no proposed plan — plan cycle ends', { turnId: turn.id });
           planCycleActive = false;
         }
       }
       flushDeferredTerminalTurnCompletionsIfIdle();
     }
 
-    const GUARDIAN_REVIEW_FAILURE_PREFIX = "Automatic approval review failed:";
+    /**
+     * 该 item 是否代表"模型真的干了活"(有输出或有工具副作用)。
+     *
+     * app-server 会在 turn 开头把用户输入原样 echo 成一个 userMessage item ——
+     * translator 明确不消费它(见 translateItemNotification 里"故意不消费"那份清单)。
+     * 把这种 echo 算进产出, 过载重投的产出守卫会在**正常事件序**下就立刻生效, 自动
+     * 重投等于整体失效(review #844 codex P1)。hookPrompt 与 review 模式开关同理: 既
+     * 不是模型输出也没有工具副作用。
+     *
+     * 未知 / 缺失 type 一律按"有产出"处理: 宁可少重投一次, 不可把可能有副作用的
+     * turn 整体重放。
+     */
+    const ITEM_TYPES_WITHOUT_MODEL_WORK = new Set([
+      'userMessage',
+      'hookPrompt',
+      'enteredReviewMode',
+      'exitedReviewMode',
+    ]);
+    const itemRepresentsModelWork = (item: { type?: unknown } | null | undefined): boolean => {
+      const type = typeof item?.type === 'string' ? item.type : null;
+      return type === null || !ITEM_TYPES_WITHOUT_MODEL_WORK.has(type);
+    };
 
-    const emitGuardianUnavailable = (
-      params: ItemGuardianApprovalReviewCompletedNotification,
-    ): void => {
-      const timedOut = params.review.status === "timedOut";
-      eventQueue.push({
-        type: "error",
-        data: {
-          // Renderer uses reason for localized copy. Keep an English fallback for
-          // non-renderer consumers while always stating the blocked action + downgrade.
-          message: timedOut
-            ? "Codex automatic approval review timed out. The action was blocked and this session is switching to Ask mode."
-            : "Codex automatic approval review failed. The action was blocked and this session is switching to Ask mode.",
-          isTerminal: false,
-          reason: "codex-auto-review-unavailable",
-          reviewId: params.reviewId,
-          reviewRationale: params.review.rationale,
-        },
-        source: "codex",
+    /** 取消挂起的过载重投（会话关闭 / 用户打断 / 新 turn 覆盖时调用）。 */
+    const cancelOverloadRetry = (reason: string): void => {
+      const state = overloadRetry;
+      if (!state?.timer) return;
+      clearTimeout(state.timer);
+      state.timer = null;
+      log.info('codex overload retry cancelled', { reason, threadId });
+    };
+
+    /**
+     * 彻底废弃当前的重投状态：清计时器、摘 signal 监听、置空引用。
+     *
+     * 与 cancelOverloadRetry 的分工：后者只清计时器（scheduleTurnReplayRetry 排新档
+     * 前的 'superseded' 就靠它，那时状态本身还要继续用）。凡是**状态整体作废**的地方
+     * 都必须走这个，否则 signal 的 abort 监听会残留在一个已废弃的闭包上。
+     */
+    const discardOverloadRetry = (reason: string): void => {
+      const state = overloadRetry;
+      if (!state) return;
+      cancelOverloadRetry(reason);
+      state.disposeSignalWatch?.();
+      state.disposeSignalWatch = null;
+      overloadRetry = null;
+    };
+
+    /**
+     * 空 turnId 的容量拒绝, 要等 turn/start 响应回来才知道说的是哪个 turn。
+     *
+     * 认领它并落墓碑, 否则 handleTurnStartResp 会把这个**已经报过容量失败**的 turn
+     * 正常激活: 一边跑着一个已被拒的 turn, 一边还挂着重投计时器 —— 同一条用户输入
+     * 会被执行两遍(review #844 codex P1)。初始 turn/start 与重投 turn/start 两条路
+     * 共用本函数。
+     */
+    const adoptUnidentifiedDeadTurn = (resp: TurnStartResponse, startSeq: number): void => {
+      const entry = inFlightStarts.get(startSeq);
+      if (!entry?.quarantined) return;
+      const turnId = resp.turn?.id;
+      if (!turnId) return;
+      entry.quarantined = false;
+      terminalErroredTurnIds.add(turnId);
+      // 这个 turn 的产出可能正躺在缓冲队列里(孤儿守卫武装期间 item / tool 都会被缓冲, 而
+      // 缓冲**只**表示我们还没渲染 —— daemon 那边命令早就跑了)。此时它自己的产出记账从未
+      // 被置上, 于是补排会照常重放同一条输入, 副作用执行两遍(review #844 codex P1)。
+      //
+      // 判据是"缓冲里有真的模型 / 工具工作", **不是**"队列非空": 队列里 turn/completed、
+      // userMessage echo、tokenUsage 都算一条, 拿长度当证据会把一次零产出的容量拒绝误判成
+      // 有产出, 对用户报硬失败 —— 而那一轮其实什么副作用都没发生(review #844 codex P1)。
+      if (bufferedModelWorkTurnIds.has(turnId)) {
+        producedOutputTurnIds.add(turnId);
+        log.info('codex adopted turn had buffered events — treating as produced output', {
+          turnId,
+          threadId,
+        });
+      }
+      // server 侧这个 turn 可能真的在跑(Stop / 撤单那条来源就是), 落墓碑只挡事件、
+      // 不停执行 —— 必须补一次 best-effort interrupt。容量拒绝那条来源里它本就已死,
+      // interrupt 是无害的空操作。
+      if (threadId) {
+        host.request(Method.TurnInterrupt, { threadId, turnId }).catch((e: unknown) => {
+          log.warn('quarantined pending start turn interrupt failed (best-effort)', {
+            turnId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      }
+      const state = overloadRetry;
+      // 被延后的那条失败也要回填 id, 补排时才能清掉它挂起的审批 / 工具上下文。
+      if (state?.deferredCapacityFailure?.deadTurnId === null) {
+        state.deferredCapacityFailure = { deadTurnId: turnId };
+      }
+      // turnStarted 可能已经先于响应到达并把这个 id 激活。只落墓碑不清活跃态的话,
+      // rescheduleDeferredCapacityFailure 会因为"看起来还有 turn 在跑"而放弃补排(且顺手
+      // 清掉延后标记), 而那个 turn 的 turn/completed 又被墓碑压掉 —— 逻辑 send 既没有
+      // 下一次重投也没有终态事件, 永久悬空(review #844 codex P1)。与错误自带 id 时的
+      // 死 turn 处理保持一致。
+      if (currentTurnId === turnId) {
+        dismissPendingUserInputForTurn(turnId, 'turn_failed');
+        clearActiveToolContextsForTurn(turnId);
+        stopActiveRolloutPlanFallback();
+        currentTurnId = null;
+        isTurnInFlight = false;
+      }
+      log.info('codex adopted turn/start response id for an id-less capacity failure', {
+        turnId,
+        threadId,
       });
     };
 
     /**
-     * Close the race between a Guardian failure notification and the async host
-     * persistence coordinator. The current action is already blocked; changing the
-     * local mode synchronously ensures a message sent immediately afterwards starts
-     * in Ask instead of launching another auto_review turn that is then interrupted.
+     * 挂起的过载重投, 冻结的策略是否比 `mode` 更宽。
+     *
+     * 重投持的是发射那一刻冻结的 turnParams, 期间任何收紧都不会自动作用到它。判据
+     * 必须按严格度直接比"冻结档 vs 目标档", 不能只看"最近一次转换算不算收紧" ——
+     * Full access → Ask → Auto 这类中间态下最近一次是放宽, 而冻结的 Full access 仍然
+     * 比 Auto 宽(review #844 codex P1)。
+     *
+     * 公开的 setPermissionMode 会用它覆盖所有仍可能发生的重投窗口。
      */
-    const switchAutoRuntimeToAskImmediately = (): boolean => {
-      if (mutablePermissionMode !== "auto") return false;
-      dismissAllPending("permission_mode_changed_to_ask", "deny");
-      mutablePermissionMode = "ask";
-      if (!closed && turnLaunchedUnattended) {
-        if (currentTurnId !== null) {
-          void interruptTurnForPermissionTighten(currentTurnId);
-        } else if (isTurnStartPending) {
-          pendingTightenInterrupt = true;
-        }
-      }
-      return true;
+    /**
+     * 本轮 send 的过载重投是否"还会发生"。三种状态都算:
+     *   - `timer != null`：退避等待中，计时器持着原消息；
+     *   - `inFlight`：计时器已到点、重投 RPC 在途、新 turn 尚未激活；
+     *   - `deferredCapacityFailure !== null`：失败已记账、等在途 turn/start settle 后
+     *     补排（那一刻既没有计时器也没有 inFlight）。
+     *   - `pendingHttpRecovery !== null`：WS body 错误已登记、等权威 turn/completed。
+     *
+     * 抽成单一判据是因为它同时决定三件事: 会话忙不忙(isTurnRunning)、取消要不要收口
+     * (signal abort)、权限收紧要不要作用到重投。前几轮每处各写一份, 第三种状态加进来
+     * 时漏了两处(review #844 codex/greptile P1)。
+     */
+    const overloadRetryPending = (
+      state: typeof overloadRetry = overloadRetry,
+    ): state is NonNullable<typeof overloadRetry> =>
+      state != null
+      && (
+        state.timer != null
+        || state.inFlight
+        || state.deferredCapacityFailure !== null
+        || state.pendingHttpRecovery !== null
+      );
+
+    /**
+     * 逻辑 send 被终态收口(terminal error + Done 都已推出)时, 撤销挂起 / 延后的重投。
+     *
+     * 不撤销的话重投会在 UI 已经报失败之后照常发生: 最典型的是延后标记 ——
+     * `turn/completed(failed)` 抢在我们落墓碑之前到达(空 id 容量拒绝那条路要等
+     * turn/start 响应才知道 turn 身份, 这个窗口是真实存在的), 于是 handleTurnCompleted
+     * 正常收口成失败; 标记却还挂着, 等在飞的 turn/start settle 时它的 finally 照常补排
+     * 一次 —— 用户看到的是失败, 原消息却在他看不到的地方重投, 服务端已发生但未上报的
+     * 工具 / 文件操作跟着跑第二遍(review #844 greptile P1)。
+     *
+     * 语义上这就是"重投资格随收口一起作废": 代价只是这一轮要用户自己再发一次(与本功能
+     * 上线前的行为一致), 而另一侧是重复副作用。
+     */
+    const revokeOverloadRetryOnTerminalSettle = (reason: string): void => {
+      if (!overloadRetryPending()) return;
+      log.info('codex overload retry revoked — send already settled terminally', { reason, threadId });
+      discardOverloadRetry(`terminal-settle:${reason}`);
     };
 
-    const notifyAutoPermissionClassifierUnavailable = (
-      params: ItemGuardianApprovalReviewCompletedNotification,
+    const overloadRetryPolicyLooserThan = (mode: PermissionMode): boolean => {
+      const state = overloadRetry;
+      if (!overloadRetryPending(state)) return false;
+      return (
+        codexPermissionStrictnessRank(state.launchedPermissionMode)
+        < codexPermissionStrictnessRank(mode)
+      );
+    };
+
+    /**
+     * 取消一轮过载重投时, 把它**已经激活**的 turn 一起收掉。
+     *
+     * 重投的 turnStarted 可能先于它的 turn/start 响应到达(协议允许的乱序), 那时
+     * currentTurnId 已经指向这个真实存在的 server turn。只推终态事件、不动它, 那个
+     * turn 会在调用方已按"已取消"处理之后继续执行工具(review #844 codex P1)。
+     *
+     * 自己落墓碑是关键: 之后到达的 turn/completed 会被压掉, 所以收口恰好一次 ——
+     * 无论重投响应最终是 resolve(它自己也会落墓碑)还是 reject。
+     * handle.abort() 与 sendOpts.signal 两条取消路径共用本函数。
+     */
+    const teardownActiveTurnForCancellation = (reason: string): void => {
+      const turnId = currentTurnId;
+      if (!turnId) return;
+      terminalErroredTurnIds.add(turnId);
+      dismissPendingUserInputForTurn(turnId, 'turn_interrupted');
+      clearActiveToolContextsForTurn(turnId);
+      if (threadId && !skipIfStaleHost('turn/interrupt')) {
+        host.request(Method.TurnInterrupt, { threadId, turnId }).catch((e: unknown) => {
+          log.warn('cancelled overload retry turn interrupt failed (best-effort)', {
+            reason,
+            turnId,
+            error: e instanceof Error ? e.message : String(e),
+          });
+        });
+      }
+      stopActiveRolloutPlanFallback();
+      currentTurnId = null;
+      isTurnInFlight = false;
+      currentTurnPlanModeActive = false;
+    };
+
+    /**
+     * 退避等待 / 重投 RPC 在途期间发现本轮 send 已被取消时, 收口逻辑 turn。
+     *
+     * 只有"coordinator 只 abort 了 sendOpts.signal、没走 handle.abort()"那条路需要
+     * 它: abort() 自己已经推过终态并把 overloadRetry 置 null, 所以那条路走到这里时
+     * overloadRetry !== state, 不会二次收口。
+     *
+     * 为什么非推不可: signal 在本文件里原本只是**受理前**的取消边界
+     * (rejectIfCancelled 抛 "cancelled before acceptance"), 受理后没人再读它 —— 是
+     * 过载重投第一次在受理后去读 signal.aborted。若读到 aborted 就静默 return, 上层
+     * 永远等不到终态: desktop 的 SessionTurnActivityTracker 只在终态事件后释放派发
+     * 闩, Codex coordinator 刻意等这个事件而不自解锁, hook runner 要等一小时硬超时
+     * (review #844 greptile P1)。
+     */
+    const settleCancelledOverloadRetry = (
+      state: NonNullable<typeof overloadRetry>,
+      reason: string,
     ): void => {
-      if (
-        !switchAutoRuntimeToAskImmediately() ||
-        typeof opts.sessionId !== "string"
-      )
-        return;
-      const notify = this.deps.onAutoPermissionClassifierUnavailable;
-      if (!notify) return;
-      const status = params.review.status === "timedOut" ? 408 : 500;
-      queueMicrotask(() => {
-        try {
-          notify({
-            sessionId: opts.sessionId as string,
-            agentKind: "codex",
-            status,
-          });
-        } catch (error) {
-          log.warn("Codex Auto fallback notification threw", {
-            reviewId: params.reviewId,
-            error: String(error),
-          });
-        }
+      if (closed || overloadRetry !== state) return;
+      discardOverloadRetry(`settle:${reason}`);
+      // 重投的 turnStarted 已先于响应到达时, currentTurnId 指着一个真实在跑的
+      // server turn —— 必须一起收掉, 否则它会在调用方按"已取消"处理后继续执行工具。
+      teardownActiveTurnForCancellation(reason);
+      markInFlightStartsTerminallySettled();
+      // 还有 turn/start 在飞时同理: 它的响应晚于本次收口回来, 不隔离就会被正常激活。
+      // 全部隔离而不只是最新那个: 取消的语义是"这一轮什么都别再跑"。
+      quarantineAllInFlightStarts();
+      log.info('codex overload retry cancelled via send signal — settling logical turn', {
+        reason,
+        threadId,
+      });
+      eventQueue.push({
+        type: 'error',
+        data: {
+          message: 'Codex turn cancelled while waiting for an automatic retry',
+          isTerminal: true,
+          reason: 'codex-turn-replay-retry-cancelled',
+        },
+        source: 'codex',
+      });
+      eventQueue.push({
+        type: 'status',
+        data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+        source: 'codex',
       });
     };
 
-    const handleGuardianReviewCompleted = (
-      params: ItemGuardianApprovalReviewCompletedNotification,
+    /**
+     * 零产出 provider 终态错误的退避重投调度。
+     *
+     * 返回进度表示已接管本次错误，**调用方必须跳过终态收口**（不推 terminal
+     * error、不推 Done status）——否则 UI 会先收口成失败再重投，用户看到一次假
+     * 失败闪烁，非交互入口更会直接把这一轮判死。返回 null 表示不接管，按原
+     * 终止路径报错。
+     *
+     * capacity 必须由我们重投：`Selected model is at capacity` 是模型服务槽位不足，
+     * OpenAI 侧不做任何重试就把 turn 判死（openai/codex#22390 请求 backoff 重试
+     * 至今 open），用户只能手动再发一次。这类抖动通常几秒内自愈，正是客户端该
+     * 兜住的部分。
+     * terminal-rate-limit 则只接 daemon 已明确耗尽自身 retry budget 的 429，再给
+     * 两次较长退避；仍在 willRetry 的 429 与账号额度耗尽都不会进入本函数。
+     *
+     * 为什么不自动换模型：容量故障往往横扫同一模型的所有 effort 档
+     * （2026-06-16 那次 medium/high/xhigh 全线不可用），换档无效；而换模型会
+     * 悄悄改变输出的判断风格，属于隐蔽的质量变更。降级留给用户显式选择。
+     */
+    const scheduleTurnReplayRetry = (
+      deadTurnId: string | null,
+      policy: TurnReplayRetryPolicy = CAPACITY_RETRY_POLICY,
+    ): { attempt: number; maxAttempts: number } | null => {
+      const state = overloadRetry;
+      if (!state || closed) return null;
+      // 本轮已被取消(sendOpts.signal 已 abort)→ 一律不接管, 让这条错误走原终态路径收口。
+      // 不判的话: signal 在"初始 turn/start 还在飞、容量通知尚未到达"时 abort, 那个 {once}
+      // 监听器因为当时无事可做而被消费掉; 随后到达的空 id 容量拒绝照样建出
+      // deferredCapacityFailure, 而补排会在 isCancelled() 上退出 —— 标记留着,
+      // overloadRetryPending() 因此恒真, isTurnRunning() 永远为真(review #844 codex P1)。
+      if (state.isCancelled()) {
+        // 不接管**不等于**什么都不用做: 在飞的 start 必须一起隔离。这条错误随后走终态路径,
+        // 而在飞那次 RPC 若 resolve, 取消边界会在 quarantineTurnsAfterStartFailure 之前就把
+        // 异常抛出去 —— 于是迟到的 turnStarted 既没有隔离也没有墓碑, 会把这个已被取消的 turn
+        // 激活并执行工具(review #844 codex P1)。取消语义是"这一轮什么都别再跑", 所以隔离全部
+        // 在飞 start(与 settleCancelledOverloadRetry 一致); 隔离后响应回来时
+        // adoptUnidentifiedDeadTurn 会落墓碑 + 补 interrupt。
+        // 还要记"已由取消收口过": 这条错误马上就以终态形式发出去了(translator 那边),
+        // 而在飞那次 RPC 若最终 **reject**, finalErr 分支看到 initialStartSettledByCancel
+        // 为 false 会再推一组 terminal error + Done —— 同一轮收口两次, 而事件不带 send 世代,
+        // 期间若已有新一轮 send, 这份过期收口会落到它头上(review #844 codex P1)。
+        // 两件事一起做才与 settleCancelledOverloadRetry 同构(它也是 mark + quarantine)。
+        markInFlightStartsTerminallySettled();
+        quarantineAllInFlightStarts();
+        log.info('codex not taking over a replayable failure for an already-cancelled send', {
+          kind: policy.kind,
+          quarantinedStarts: inFlightStarts.size,
+          threadId,
+        });
+        return null;
+      }
+      // 空 id 的容量拒绝**无法归属**到具体请求(协议里它既不带 turnId 也不带请求关联)。
+      // 只有一个 start 在飞时可以安全地认定就是它; 有两个及以上时(Stop 留下的旧 RPC 仍在飞、
+      // 下一轮 send 又已发出)猜错的代价是: 隔离到错的那一个 → 把**已经在 server 上跑过工具**
+      // 的新 turn 落墓碑并重放它的输入 → 副作用执行两遍(review #844 codex P1)。
+      // 这里选择不接管: 代价只是这一轮要用户自己再发一次, 而错误的一侧是重复副作用。
+      if (!deadTurnId && inFlightStarts.size > 1) {
+        log.warn('codex id-less replayable failure not attributable — declining takeover', {
+          kind: policy.kind,
+          inFlightStarts: inFlightStarts.size,
+          threadId,
+        });
+        return null;
+      }
+      // 本 turn 已产出内容 → 重放会让模型重做已完成的工作（甚至重复副作用），
+      // 交回用户决定是否继续，不自动重投。
+      //
+      // **必须先于下面的 inFlight 延后分支**：重投出来的 turn 完全可能在自己的
+      // turn/start 响应 settle 之前就已经发出 item / tool / reasoning，那时
+      // state.inFlight 仍为 true，先走延后分支就会把这个已有产出的 turn 落墓碑、
+      // 随后重放原消息 —— 已经执行过的命令与文件改动跑第二遍
+      // (review #844 codex P1)。这里返回 null 是安全的：有产出意味着该 turn 早已
+      // 被 turnStarted 激活，不存在"UI 收口后在途 RPC 又把 turn 激活"的悬空风险。
+      // deadTurnId 为空(空 id 容量拒绝)时查不了, 也不必查: 那条路要求 currentTurnId 为
+      // null, 即这个 turn 的 turnStarted 还没到, 它的 item / reasoning 不可能被记到自己
+      // 名下(全被 stale 闸或缓冲挡住)。缓冲事件那种"看不见的产出"由
+      // adoptUnidentifiedDeadTurn 在响应回来、id 已知时补记, 补排再查一次就拦住了。
+      if (deadTurnId && producedOutputTurnIds.has(deadTurnId)) {
+        log.info('codex replayable error after partial output — not auto-retrying', {
+          kind: policy.kind,
+          threadId,
+          deadTurnId,
+          inFlight: state.inFlight,
+        });
+        return null;
+      }
+      // 上一次重投的 turn/start 还在飞 → 绝不能再排一个。cancelOverloadRetry 只能
+      // 清计时器、取消不了在途 RPC，两个请求都可能被 server 接受，同一条用户输入
+      // 的工具副作用就会执行两遍（review #844 codex P1）。在途那次自己会走完
+      // 成功/失败路径，届时若仍缺容量会重新进入本函数。
+      if (inFlightStarts.size > 0) {
+        // terminal 429 只在 turn 身份已经明确、没有其它 start 在途时接管。容量拒绝
+        // 才有完整的空 id / started-before-response 对账协议；把 429 塞进那套延后
+        // 状态会扩大错误归属面，猜错就可能重放已经执行过工具的 turn。
+        if (policy.kind !== 'capacity') {
+          log.warn('codex terminal rate-limit retry declined while turn/start is pending', {
+            inFlightStarts: inFlightStarts.size,
+            threadId,
+            deadTurnId,
+          });
+          return null;
+        }
+        // 关键：**不能返回 null**。null 会让 translator 把这条错误报成终态，把逻辑
+        // turn 判死（review #844 codex P1），而在途那次 RPC 随后还可能成功并激活
+        // turn —— UI 已收口。这里返回当前进度：错误照样透成非终止状态（UI 继续显示
+        // 「正在重试」），但不递增预算、不排新计时器。
+        // 同时记账：这条失败只是被**延后**，retry() 的 finally 会在 RPC settle 后
+        // 补排一次；不记的话没有任何计时器或终态事件残留，逻辑 send 会永久悬空。
+        state.deferredCapacityFailure = { deadTurnId };
+        if (!deadTurnId) quarantineLatestInFlightStart();
+        // 这个 turn 在 app-server 侧已经死了, 必须**当场**把它从"活跃 turn"上摘掉,
+        // 不能等它自己的 turn/completed。事件顺序 turnStarted → 容量错误 →
+        // turn/start 响应 下, retry() 的 finally 跑到补排判定时 currentTurnId 还挂着
+        // 这具尸体 → 补排条件不成立; 而随后到达的 turn/completed 被墓碑压掉, 只清
+        // currentTurnId、不排任何东西 —— 逻辑 send 永久悬空(review #844 codex P1)。
+        // 只在确认是同一个 turn 时清: 真有别的 turn 活着说明这条错误不针对当前轮,
+        // 那时本就不该补排。
+        if (deadTurnId && currentTurnId === deadTurnId) {
+          dismissPendingUserInputForTurn(deadTurnId, 'turn_failed');
+          clearActiveToolContextsForTurn(deadTurnId);
+          stopActiveRolloutPlanFallback();
+          isTurnInFlight = false;
+          currentTurnId = null;
+        }
+        log.info('codex turn replay retry already in flight — deferring this failure to it', {
+          kind: policy.kind,
+          attempt: state.attempt,
+          threadId,
+          deadTurnId,
+        });
+        // 初始 RPC 在飞时 attempt 仍是 0（一次重投都还没发生），报 0/4 既难看也不实。
+        // 延后的这条失败补排时会消耗第 1 档，所以下限取 1。
+        return {
+          attempt: Math.max(1, state.attempt),
+          maxAttempts: policy.maxAttempts,
+        };
+      }
+      // attempt 是 logical send 级共享预算，不按 failure kind 分桶。混合故障时沿用
+      // 已消耗次数，保证策略切换不会续满另一份外层重放额度。
+      if (state.attempt >= policy.maxAttempts) {
+        log.warn('codex turn replay retry budget exhausted — surfacing terminal error', {
+          kind: policy.kind,
+          attempts: state.attempt,
+          threadId,
+        });
+        return null;
+      }
+      // 同一轮 send 只能有一个在飞的重投计时器。
+      cancelOverloadRetry('superseded');
+      const attempt = state.attempt + 1;
+      state.attempt = attempt;
+      const delayMs = policy.delayMs(attempt);
+      // 该 turn 在 app-server 侧确实已经死了：它挂起的审批 / user-input 必须清掉，
+      // 否则重投出来的新 turn 会与旧 turn 的悬空交互混在一起。
+      if (deadTurnId) {
+        dismissPendingUserInputForTurn(deadTurnId, 'turn_failed');
+        clearActiveToolContextsForTurn(deadTurnId);
+      } else {
+        // 空 id: 那个 turn 的身份要等 turn/start 响应才知道(典型是初始投递的
+        // turn/start 还没回包)。不记账的话响应会把这个已被拒的 turn 正常激活,
+        // 与刚排上的重投计时器一起把同一条输入跑两遍(review #844 codex P1)。
+        quarantineLatestInFlightStart();
+      }
+      stopActiveRolloutPlanFallback();
+      isTurnInFlight = false;
+      currentTurnId = null;
+      log.info('codex replayable provider failure — scheduling turn/start retry', {
+        kind: policy.kind,
+        attempt,
+        maxAttempts: policy.maxAttempts,
+        delayMs,
+        threadId,
+        deadTurnId,
+      });
+      // 重投持的是**冻结**策略。排上计时器的这一刻若当前档已经比冻结档更严, 必须
+      // (重新)武装延迟中断标记: 收紧若发生在"失败已延后、计时器还没排上"的窗口里,
+      // 那个标记会先被原始 turn 的 turn/start 响应消费掉(handleTurnStartResp 无条件
+      // 消费它), 等重投真的发出去时已经没有任何东西能拦住它 —— 工具就会在权限已被
+      // 撤销后执行(review #844 codex P1)。这里按状态重新推导, 不依赖标记存活。
+      if (
+        codexPermissionStrictnessRank(state.launchedPermissionMode)
+        < codexPermissionStrictnessRank(mutablePermissionMode)
+      ) {
+        pendingTightenInterrupt = true;
+        log.info('codex overload retry armed a tighten interrupt (frozen policy is looser)', {
+          frozen: state.launchedPermissionMode,
+          current: mutablePermissionMode,
+          threadId,
+        });
+      }
+      state.timer = setTimeout(() => {
+        state.timer = null;
+        if (closed || overloadRetry !== state) return;
+        void state.retry().catch((error) => {
+          // 取消之后 RPC 才 reject：Stop / close / 新 send 都已经各自收口过这一轮
+          // （abort 与新 send 会把 overloadRetry 置 null，close 会置 closed）。
+          // 此时再报一次 terminal error + Done 会让 UI 二次收口，并把用户主动停止
+          // 误报成「重投失败」。只留日志。
+          // 成功路径的同款复检在 retry() 内部（cancelledMidFlight）；reject 会绕过
+          // 那一段直接落到这里，两条路都要判。
+          if (closed || overloadRetry !== state || state.isCancelled()) {
+            log.info('codex overload retry rejected after cancellation — not surfacing', {
+              attempt,
+              error: String(error),
+              threadId,
+            });
+            return;
+          }
+          // 重投本身失败（含容量再次不足）：转终止错误交回用户，不在这里递归重排——
+          // 递归会绕过预算上限，容量故障期把额度烧光。
+          log.error('codex overload retry failed', { attempt, error: String(error), threadId });
+          // 与原始 turn/start 失败同款隔离：这次 RPC 可能已被 server 接受, 只是响应没
+          // 回来。不隔离的话, 先于 reject 到达的 turnStarted 会让 isTurnRunning() 在
+          // UI 收口后永真, 晚到的那种则会把一个没人消费的 turn 激活并执行工具
+          // (review #844 codex P1)。
+          quarantineTurnsAfterStartFailure('overload retry turn/start failed', {
+            ownsSession: sendGeneration === state.sendGen,
+          });
+          eventQueue.push({
+            type: 'error',
+            data: { message: `turn/start retry failed: ${String(error)}`, isTerminal: true },
+            source: 'codex',
+          });
+          eventQueue.push({
+            type: 'status',
+            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+            source: 'codex',
+          });
+        });
+      }, delayMs);
+      return { attempt, maxAttempts: policy.maxAttempts };
+    };
+
+    /**
+     * turn/start RPC 级失败(超时 / 拒绝)后的孤儿隔离。
+     *
+     * RPC 失败**不代表** server 没建 turn —— daemon 可能已经接受了 turn/start, 只是
+     * 响应没回来。所以必须三件事一起做: 立孤儿守卫(之后迟到的 turnStarted 不得重新
+     * 激活会话)、把可能已被 started-before-resp 激活的活跃 turn 收掉(墓碑 + 清状态 +
+     * best-effort interrupt)、把缓冲的歧义 started 坐实成孤儿。
+     *
+     * 过载重投的 RPC 失败走同一套: 只推 terminal error + Done 的话, 迟到的
+     * turnStarted 会在 UI 已收口之后把一个没人消费的 turn 激活并执行工具; 而先于
+     * reject 到达的那种则会让 isTurnRunning() 永真, 下一条 send 被并发守卫挡死
+     * (review #844 codex P1)。
+     */
+    const quarantineTurnsAfterStartFailure = (
+      reason: string,
+      opts?: { ownsSession?: boolean },
     ): void => {
+      turnStartFailedWithoutTurnId = true;
+      // currentTurnId 未必属于**这一次**失败的请求: Stop 之后下一轮 send 可能已经激活了它
+      // 自己的 turn, 这时把它当孤儿收掉 = 误杀一个合法在跑的 turn(review #844 codex P1)。
+      // 只有"我这一轮还拥有会话"时才动它; 否则只留孤儿守卫与缓冲清理。
+      const mayClaimActiveTurn = opts?.ownsSession !== false;
+      if (currentTurnId && mayClaimActiveTurn) {
+        const orphanTurnId = currentTurnId;
+        terminalErroredTurnIds.add(orphanTurnId);
+        if (threadId) {
+          host.request(Method.TurnInterrupt, { threadId, turnId: orphanTurnId }).catch((e2: unknown) => {
+            log.warn('turn/start-failure orphan interrupt failed (best-effort)', {
+              reason,
+              turnId: orphanTurnId,
+              error: e2 instanceof Error ? e2.message : String(e2),
+            });
+          });
+        }
+        currentTurnId = null;
+        isTurnInFlight = false;
+        currentTurnPlanModeActive = false;
+      }
+      // 缓冲集是**会话级共享**的, 只有"没有别的 start 在飞"时才能把里面的 id 整体坐实成
+      // 孤儿。还有 start 在飞时集子里可能躺着**它**的合法 started: Stop 会武装孤儿守卫,
+      // 于是下一轮 send 的 turnStarted 同样先进缓冲等对账。无条件清理会给它落墓碑 +
+      // interrupt, 它的 turn/start 响应随后拒绝激活 —— 那一轮既没有活跃 turn 也没有终态
+      // 事件, 永久卡 generating。ownsSession 挡不住这条: 那个守卫只护 currentTurnId
+      // (review #844 codex P1)。
+      //
+      // 留着不动是正确的收口: 在飞那次的响应本身就是权威对账者(id 不一致的坐实成孤儿并
+      // interrupt, 自己的正常激活); 它若也失败, 轮到它调用本函数时 inFlightStarts 已空,
+      // 集子在那时才被清。本函数的两个调用点都在各自请求 endTurnStart 之后, 所以这里的
+      // size>0 只可能是**别的**请求。
+      if (inFlightStarts.size === 0) {
+        for (const bufferedId of bufferedOrphanTurnIds) {
+          terminalErroredTurnIds.add(bufferedId);
+          settleBufferedTurnReconcile(bufferedId, false);
+          if (threadId) {
+            host.request(Method.TurnInterrupt, { threadId, turnId: bufferedId }).catch((e2: unknown) => {
+              log.warn('buffered orphan turn interrupt failed (best-effort)', {
+                reason,
+                turnId: bufferedId,
+                error: e2 instanceof Error ? e2.message : String(e2),
+              });
+            });
+          }
+        }
+        bufferedOrphanTurnIds.clear();
+        bufferedTurnEventQueues.clear();
+      } else {
+        log.debug('leaving buffered turns to the surviving turn/start response', {
+          reason,
+          bufferedTurnIds: [...bufferedOrphanTurnIds],
+          inFlightStarts: inFlightStarts.size,
+        });
+      }
+    };
+
+    /**
+     * 在途的 turn/start settle 后, 补排那条被延后的容量失败。
+     *
+     * 两条 start 路径共用: 重投自己的 RPC, 以及初始投递的 RPC(空 id 容量拒绝会落在它
+     * 还在飞的窗口里)。只有新 turn 确实没能激活时才补排（它被落了墓碑、响应因此拒绝
+     * 激活）; turn 活了就说明那条错误针对的是别的 turn, 不该重排。预算耗尽时必须自己
+     * 推终态, 否则逻辑 send 永久悬空。
+     *
+     * rpcSettledOk=false（RPC reject / 本地取消边界）时不补排: 那条路各自有终态收口,
+     * 在这里再排一个计时器会与它并存 —— UI 已收口, 原消息却仍被静默重投。
+     */
+    const rescheduleDeferredCapacityFailure = (
+      state: NonNullable<typeof overloadRetry>,
+      rpcSettledOk: boolean,
+    ): void => {
+      const deferred = state.deferredCapacityFailure;
+      if (!deferred) return;
+      // **只有真正接手时才清掉标记**。此前是一进函数就清: 被取消的旧 send 的 finally 把
+      // 当前(属于新 send 的)状态传进来, 随后任一 early return 都会把新 send 的延后失败
+      // 丢掉 —— 那一轮既不重投也不收口, 逻辑 turn 永久悬空(review #844 greptile P1)。
+      if (!rpcSettledOk) {
+        // 只有"标记归属本轮、而本轮 RPC 失败"时才会到这里(见调用点), 那条失败已由终态收口。
+        state.deferredCapacityFailure = null;
+        return;
+      }
+      if (closed || overloadRetry !== state) return;
+      // 已取消却还挂着延后标记 → **必须收口**, 不能静默返回: 标记留着会让
+      // overloadRetryPending() 恒真, isTurnRunning() 永远为真, 上层派发闩不释放
+      // (review #844 codex P1)。settleCancelledOverloadRetry 会 discard 状态(标记随之清掉)
+      // 并推终态; 重复调用是无害的 no-op(它自查 overloadRetry !== state)。
+      if (state.isCancelled()) {
+        settleCancelledOverloadRetry(state, 'deferred capacity failure on a cancelled send');
+        return;
+      }
+      if (currentTurnId !== null || isTurnInFlight) return;
+      // 还有别的 start 在飞 → 这条失败交给那一次的 settle 去补排, 本次不排:
+      // 否则又回到"两个 start 并存"的形状(review #844 codex P1)。
+      if (inFlightStarts.size > 0) return;
+      state.deferredCapacityFailure = null;
+      if (scheduleTurnReplayRetry(deferred.deadTurnId)) return;
+      log.warn('codex deferred capacity failure exhausted the retry budget', {
+        attempt: state.attempt,
+        threadId,
+      });
+      eventQueue.push({
+        type: 'error',
+        data: {
+          message: 'Selected model is at capacity. Please try a different model.',
+          isTerminal: true,
+        },
+        source: 'codex',
+      });
+      eventQueue.push({
+        type: 'status',
+        data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+        source: 'codex',
+      });
+    };
+
+    const GUARDIAN_REVIEW_FAILURE_PREFIX = 'Automatic approval review failed:';
+
+    const handleGuardianReviewCompleted = (params: ItemGuardianApprovalReviewCompletedNotification): void => {
       if (seenGuardianReviewIds.has(params.reviewId)) return;
       seenGuardianReviewIds.add(params.reviewId);
       const rationale = params.review.rationale?.trim();
       const failedClosedBecauseReviewerUnavailable =
-        params.review.status === "denied" &&
+        params.review.status === 'denied' &&
         rationale?.startsWith(GUARDIAN_REVIEW_FAILURE_PREFIX) === true;
-      if (
-        params.review.status === "timedOut" ||
-        failedClosedBecauseReviewerUnavailable
-      ) {
-        emitGuardianUnavailable(params);
-        notifyAutoPermissionClassifierUnavailable(params);
+      if (params.review.status === 'timedOut' || failedClosedBecauseReviewerUnavailable) {
+        nativeAutoReviewUnavailable = true;
+        nativeApprovalsReviewerRouteSupported = false;
+        approvalsReviewerRouteSupported = false;
+        // approvalsReviewer 是 thread sticky setting:只改本地布尔值只会影响下一次 turn/start,
+        // 当前 turn 后续审批仍会继续撞已经失效的 Guardian。立即把当前 thread 的后续审批切到
+        // user protocol,使同一 turn 从下一次审批起进入 Cindy 当前模型 fallback;RPC 失败仍由
+        // 下一 turn 的显式字段兜底(codex 报)。
+        void pushThreadSettings({ approvalsReviewer: 'user' });
+        log.warn('Codex native Auto reviewer unavailable; keeping Auto with Cindy fallback', {
+          reviewId: params.reviewId,
+          turnId: params.turnId,
+          providerId: mutableProviderId ?? null,
+          model: mutableModel,
+          status: params.review.status,
+        });
         return;
       }
-      if (params.review.status === "denied") {
+      if (params.review.status === 'denied') {
         // Match Claude Auto: a real classifier verdict is authoritative. Codex has
         // already blocked the action and returned the denial to the model; do not
         // weaken Auto by offering a user override prompt.
-        log.info("Codex automatic approval review denied action", {
+        log.info('Codex automatic approval review denied action', {
           reviewId: params.reviewId,
           turnId: params.turnId,
           targetItemId: params.targetItemId,
@@ -4713,40 +7361,140 @@ export class CodexAgent extends BaseAgent {
         const sid = params.thread?.id;
         if (sid && sid !== sdkSessionId) sdkSessionId = sid;
         if (sdkSessionId) {
-          eventQueue.push({
-            type: "session_id",
-            data: sdkSessionId,
-            source: "codex",
-          });
+          eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'codex' });
         }
       },
+      descendantThreadStarted: (params) => {
+        const childThreadId = params.thread.id;
+        const parentThreadId = params.thread.parentThreadId;
+        if (!parentThreadId || childThreadId === parentThreadId) return;
+        registerDescendantCodexMcpContext(childThreadId);
+        this.deps.registerCodexChildThreadForParent?.({
+          parentThreadId,
+          childThreadId,
+        });
+        // 嵌套子代理:孙线程的 spawn item 只出现在**子线程自己**的事件流里,主线程的
+        // itemStarted 看不到,所以只能靠血缘把它并进父线程所属的那张卡 —— 否则孙线程的
+        // 工具调用与 token 全部进 pending 且再也没有登记路径可以重放(greptile P1)。
+        const replayed = subagentLiveCards.noteDescendantThread(childThreadId, parentThreadId);
+        if (replayed) emitSubagentCardUpdate(replayed);
+      },
+      descendantNotification: handleDescendantNotification,
       turnStarted: (params) => {
+        // turn/start RPC 已失败(超时/拒绝)但 daemon 实际已建 turn — 迟到的孤儿
+        // turnStarted 不得重新激活已报终态错误的会话 (greptile P1): 立墓碑 +
+        // 补 interrupt 让 daemon 停掉这个没人消费的 turn。分支先于 stale 闸
+        // (codex R15 P1): 闸对 idle 孤儿只立墓碑, turnStarted 必须走这里补
+        // interrupt; 被闸先拦就发不出了。已墓碑/已完成的 id 不重复进分支
+        // (interrupt 不重复发), 交给下面的闸拦。
+        if (
+          turnStartFailedWithoutTurnId
+          && currentTurnId === null
+          && !terminalErroredTurnIds.has(params.turn.id)
+          && !completedTurnIds.has(params.turn.id)
+        ) {
+          if (isTurnStartPending) {
+            // 新 turn/start 在飞 → 归属不明 (失败 RPC 的孤儿 vs 在飞 RPC 合法的
+            // started-before-resp, 协议层无法区分): 缓冲隔离, 等响应按 turnId
+            // 对账 (codex R9 P2)。直接接受会让孤儿 turn 的 item 事件渲染到
+            // 本次 send 下。
+            bufferedOrphanTurnIds.add(params.turn.id);
+            log.debug('buffering ambiguous turnStarted until turn/start response arrives', {
+              turnId: params.turn.id,
+              threadId,
+            });
+            return;
+          }
+          terminalErroredTurnIds.add(params.turn.id);
+          log.warn('ignoring orphan turnStarted from a failed turn/start — interrupting server-side turn', {
+            turnId: params.turn.id,
+            threadId,
+          });
+          if (threadId) {
+            host.request(Method.TurnInterrupt, { threadId, turnId: params.turn.id })
+              .catch((e: unknown) => {
+                log.warn('orphan turn interrupt failed (best-effort)', {
+                  turnId: params.turn.id,
+                  error: e instanceof Error ? e.message : String(e),
+                });
+              });
+          }
+          return;
+        }
         // terminal error 已经为该 turn 收口时，晚到的 start 只能忽略，等待 completed 做清理。
         if (shouldIgnoreStaleTurnEvent(params.turn.id)) return;
         // 终态已先到的 turn (墓碑) 不得被乱序晚到的 started 重新置活。
         if (turnsCompletedBeforeStartResp.has(params.turn.id)) return;
+        threadMayHaveRollout = true;
         const wasSameTurn = currentTurnId === params.turn.id;
+        // started 先于响应到达时归属方只能推断: 只有一个 start 在飞 → 就是它; 多个 → 认不出,
+        // 不登记(读取方按"归属不明"从严处理)。
+        const startedOwnerEntries = [...inFlightStarts.entries()];
+        const startedOwner = startedOwnerEntries.length === 1
+          ? startedOwnerEntries[0]
+          : undefined;
+        turnOriginByTurnId.set(params.turn.id, {
+          startSeq: startedOwner?.[0] ?? null,
+          sendGen: startedOwner?.[1].sendGen ?? sendGeneration,
+        });
+        // Notifications may arrive before the turn/start RPC response. Bind the
+        // selector at the same unique-owner boundary as turnOrigin so an early
+        // MCP elicitation sees the accepted send's capability choice. Multiple
+        // starts, quarantined starts, and already-settled cancellations remain
+        // unbound and therefore fail closed.
+        if (
+          !wasSameTurn &&
+          startedOwner &&
+          !startedOwner[1].quarantined &&
+          !startedOwner[1].terminalSettled
+        ) {
+          capabilitySelectionTextByTurnId.set(
+            params.turn.id,
+            startedOwner[1].capabilitySelectionText,
+          );
+        }
         currentTurnId = params.turn.id;
         isTurnInFlight = true;
+        turnStartGeneration += 1; // 见声明处:延迟善后靠它判断"期间起过新 turn"
+        if (!wasSameTurn) {
+          if (reconnectStallTimer && reconnectStallTurnId === params.turn.id) {
+            reconnectStallTurnGeneration = turnStartGeneration;
+          } else {
+            clearReconnectStall();
+          }
+        }
+        // turn 开始 → 球在上游,起 idle 表(后续任何事件都会重置它)。
+        armUpstreamIdle();
         // turn/start 在飞期间权限被收紧 (turnStarted 通知可能先于 turn/start resp
         // 到达) → 拿到 id 立即补中断, 与 handleTurnStartResp 互斥消费同一标记。
         if (pendingTightenInterrupt) {
           pendingTightenInterrupt = false;
           void interruptTurnForPermissionTighten(params.turn.id);
         }
-        if (!wasSameTurn)
-          currentTurnPlanModeActive =
-            pendingTurnStartPlanMode ?? planCycleActive;
+        if (!wasSameTurn) currentTurnPlanModeActive = pendingTurnStartPlanMode ?? planCycleActive;
         // 新 turn 开始 → 丢弃上一 turn 未消费的 proposed plan (正常路径已在
-        // handleTurnCompleted 清空, 这里防御 stale)。
-        proposedPlanText = null;
+        // handleTurnCompleted 清空, 这里防御 stale)。same-turn 的晚到 started
+        // 不清 (codex R15 P1): buffered turn 的 item 事件可能先于它的 started
+        // 被重放 (interceptProposedPlanItem 已存 plan), 随后到达的同 id
+        // started 若无条件清空, plan 模式下刚重放的 proposed plan 永久丢失。
+        if (!wasSameTurn) proposedPlanText = null;
         terminalErroredTurnIds.delete(params.turn.id);
         // Reset auth retry-loop dedupe key — 让下一个 turn 重新可以 emit 第一条
         // auth error。详见 translator.translateErrorNotification dedupe 逻辑。
         translatorRt.lastAuthErrorKey = null;
-        // 网络类 retry-loop 透出状态同理:新 turn 重新计数,可再透出一条。
+        // 持续重试透出状态同理 (字段名沿旧称 networkRetryNotice, 实际已对任意
+        // 持续性 willRetry 错误透出, 不限 networkish — issue #677): 新 turn
+        // 重新计数, 可再透出一条。
         translatorRt.networkRetryNotice = null;
-        log.debug("SDK ▶ turn start", {
+        // retry 升级计数同样按 turn 隔离 — 新 turn 从零计。
+        turnRetryTracker.reset();
+        // 产出记账**不在这里清**: 它按 turn id 存(producedOutputTurnIds), 新 turn 天然
+        // 从"零产出"起算, 同一 turn 的重复 / 迟到 started 也不会抹掉已记的账 —— 这两条
+        // 以前靠 `if (!wasSameTurn)` 的时序守卫维持(review #844 codex P1), 现在是结构性的。
+        // **不在这里重置 overloadRetry.attempt**:过载重投本身会开出新 turn,
+        // 在这里清预算等于每次重投都续满次数 → 容量故障期无限重试烧额度。
+        // 预算只在 send() 收到用户新消息时重置。
+        log.debug('SDK ▶ turn start', {
           turnId: params.turn.id,
           model: mutableModel,
           effort: mutableEffort,
@@ -4756,17 +7504,17 @@ export class CodexAgent extends BaseAgent {
         });
       },
       tokenUsageUpdated: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.tokenUsageUpdated?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         const last = params.tokenUsage?.last;
         if (!last) return;
         lastTurnTokenUsage = last;
-        lastModelContextWindow = params.tokenUsage?.modelContextWindow ?? null;
+        lastModelContextWindow = capContextWindow(params.tokenUsage?.modelContextWindow ?? null);
         usageTracker.setContextWindow(lastModelContextWindow ?? 0);
         const cached = last.cachedInputTokens ?? 0;
         const totalInput = last.inputTokens ?? 0;
         const uncachedInput = Math.max(0, totalInput - cached);
-        const totalOutput =
-          (last.outputTokens ?? 0) + (last.reasoningOutputTokens ?? 0);
+        const totalOutput = (last.outputTokens ?? 0) + (last.reasoningOutputTokens ?? 0);
         usageTracker.ingestApiCallUsage({
           inputTokens: uncachedInput,
           outputTokens: totalOutput,
@@ -4776,132 +7524,161 @@ export class CodexAgent extends BaseAgent {
         // Maker Memory flush 观察 (A 轻版: 只打日志). makerMemoryEnabled 关时 controller 为 null。
         if (memoryFlushController) {
           const snap = usageTracker.snapshot();
-          memoryFlushController.onUsageUpdate(
-            snap.contextTokens,
-            snap.contextWindow,
-          );
+          memoryFlushController.onUsageUpdate(snap.contextTokens, snap.contextWindow);
         }
       },
       turnCompleted: (params) => {
+        // buffered turn 的终态同样进队列等对账 (greptile R11 P1 + codex R12 P1):
+        // 合法 → 激活后按序重放, handleTurnCompleted 自然收口 send; 孤儿 →
+        // 整队丢弃。直接处理会让孤儿 completed 提前收口在飞 send
+        // (handleTurnCompleted 在 currentTurnId===null 下也收口 emit done);
+        // 直接丢弃会把尸体 turn 激活成 in-flight, send 永久卡 generating。
+        if (enqueueIfBufferedTurn(params.turn.id, () => handlers.turnCompleted?.(params))) return;
+        // 只拦 idle 孤儿 (codex R15 P1): 无 pending 时它的 completed 会走
+        // currentTurnId===null 的收口分支 emit 假 done。这里**只**落墓碑, 不补 interrupt ——
+        // 这个 turn 已经结束了, interrupt 是纯浪费的 RPC(与 tombstoneIdleOrphanTurn 的分工)。
+        // terminal/completed
+        // 墓碑 turn 的迟到 completed 仍走 handleTurnCompleted 的正常
+        // bookkeeping (suppressTerminalUi 分支, 不重复出 UI 事件) — 不能上
+        // 整个 stale 闸。
+        if (isIdleOrphanTurnId(params.turn.id)) {
+          terminalErroredTurnIds.add(params.turn.id);
+          return;
+        }
         handleTurnCompleted(params);
       },
       itemStarted: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.itemStarted?.(params), {
+          modelWork: itemRepresentsModelWork(params.item),
+        })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         if (interceptProposedPlanItem(params.item)) return;
         const shellCommand = shellCommandFromCodexItem(params.item);
         if (shellCommand) {
           const hostPolicy = this.deps.getShellCommandPolicy?.({
-            agentKind: "codex",
+            agentKind: 'codex',
             command: shellCommand.command,
             cwd: shellCommand.cwd,
           });
-          if (hostPolicy?.decision === "deny") {
-            log.warn("command execution interrupted by host policy", {
+          if (hostPolicy?.decision === 'deny') {
+            log.warn('command execution interrupted by host policy', {
               turnId: params.turnId,
               command: shellCommand.command,
               reason: hostPolicy.reason,
             });
             void host
-              .request(Method.TurnInterrupt, {
-                threadId,
-                turnId: params.turnId,
-              })
+              .request(Method.TurnInterrupt, { threadId, turnId: params.turnId })
               .catch(() => undefined);
             eventQueue.push({
-              type: "error",
+              type: 'error',
               data: { message: hostPolicy.reason, isTerminal: false },
-              source: "codex",
+              source: 'codex',
             });
             return;
           }
         }
+        // 模型已开始产出 → 本 turn 不再适合被过载重投整体重放。SDK echo 类 item
+        // (userMessage 等)不算产出, 见 itemRepresentsModelWork。
+        if (itemRepresentsModelWork(params.item)) producedOutputTurnIds.add(params.turnId);
         noteActiveToolContext(params.item, params.turnId);
+        noteToolItemLifecycle(params.item, 'started');
+        // 先登记再翻译:子线程通知可能紧随 spawn item 到达,映射就位才不丢首帧。
+        const emitReplayedSubagentUpdate = noteSubagentSpawnItem(params.item);
         pushItemStatus(params.item);
-        translateItemNotification("started", params, eventQueue, {
+        translateItemNotification('started', params, eventQueue, {
           rt: translatorRt,
           log,
           ...(memoryFlushController
-            ? {
-                onCompactBoundary: () =>
-                  memoryFlushController?.onCompactBoundary(),
-              }
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
             : {}),
         });
+        // 重放帧后发:translator 刚推的 running 帧不得把已重放出的终态盖回去。
+        emitReplayedSubagentUpdate?.();
       },
       itemUpdated: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.itemUpdated?.(params), {
+          modelWork: itemRepresentsModelWork(params.item),
+        })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         if (interceptProposedPlanItem(params.item)) return;
+        if (itemRepresentsModelWork(params.item)) producedOutputTurnIds.add(params.turnId);
         noteActiveToolContext(params.item, params.turnId);
-        translateItemNotification("updated", params, eventQueue, {
+        // updated 也要登记映射,顺序与 started / completed 一致(先登记 → 翻译 → 后发重放帧)。
+        // V1 的 spawn 是长跑 item(started → updated* → completed):started 那帧若没到我们手里
+        // (turn 缓冲、stale turn 丢弃、上游省略),映射就要一直等到 completed 才建立 —— 期间
+        // 子线程的 item / token / turn 终态全被缓冲,卡片在整个运行期(可能好几分钟)没有实时
+        // 数据,最后才一次性补上。那恰好是本 PR 要解决的问题本身(review)。
+        const emitReplayedSubagentUpdateOnUpdated = noteSubagentSpawnItem(params.item);
+        translateItemNotification('updated', params, eventQueue, {
           rt: translatorRt,
           log,
           ...(memoryFlushController
-            ? {
-                onCompactBoundary: () =>
-                  memoryFlushController?.onCompactBoundary(),
-              }
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
             : {}),
         });
+        emitReplayedSubagentUpdateOnUpdated?.();
       },
       itemCompleted: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.itemCompleted?.(params), {
+          modelWork: itemRepresentsModelWork(params.item),
+        })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         if (interceptProposedPlanItem(params.item)) return;
+        if (itemRepresentsModelWork(params.item)) producedOutputTurnIds.add(params.turnId);
         noteActiveToolContext(params.item, params.turnId);
-        translateItemNotification("completed", params, eventQueue, {
+        noteToolItemLifecycle(params.item, 'completed');
+        // 防御:spawn item 的 started phase 若被上游省略,completed 仍能补上映射。
+        const emitReplayedSubagentUpdateOnCompleted = noteSubagentSpawnItem(params.item);
+        translateItemNotification('completed', params, eventQueue, {
           rt: translatorRt,
           log,
           ...(memoryFlushController
-            ? {
-                onCompactBoundary: () =>
-                  memoryFlushController?.onCompactBoundary(),
-              }
+            ? { onCompactBoundary: () => memoryFlushController?.onCompactBoundary() }
             : {}),
         });
+        emitReplayedSubagentUpdateOnCompleted?.();
         // item 完成后, 若 turn 仍在跑, 先回到 'Generating...' 兜底 — 下一条 item 起来会再覆盖。
         // turn/completed 在 turn 结束时会 push 'Done' 终态, 不需要在这里特判。
-        if (isTurnInFlight) pushStatus("Generating...");
+        if (isTurnInFlight) pushStatus('Generating...');
       },
       turnPlanUpdated: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.turnPlanUpdated?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         latestPlanByTurn.set(params.turnId, params.plan);
         translatePlanUpdatedNotification(params, eventQueue);
       },
       reasoningSummaryTextDelta: (params) => {
+        // thinking 流同样算产出(与非缓冲路径一致)。
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.reasoningSummaryTextDelta?.(params), { modelWork: true })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        translateReasoningSummaryTextDelta(params, eventQueue, {
-          rt: translatorRt,
-          log,
-        });
+        // thinking 流也算产出：模型已经在这一轮里工作了，整体重放不再等价。
+        producedOutputTurnIds.add(params.turnId);
+        translateReasoningSummaryTextDelta(params, eventQueue, { rt: translatorRt, log });
       },
       reasoningSummaryPartAdded: (params) => {
+        // thinking 流同样算产出(与非缓冲路径一致)。
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.reasoningSummaryPartAdded?.(params), { modelWork: true })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        translateReasoningSummaryPartAdded(params, eventQueue, {
-          rt: translatorRt,
-          log,
-        });
+        producedOutputTurnIds.add(params.turnId);
+        translateReasoningSummaryPartAdded(params, eventQueue, { rt: translatorRt, log });
       },
       reasoningTextDelta: (params) => {
+        // thinking 流同样算产出(与非缓冲路径一致)。
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.reasoningTextDelta?.(params), { modelWork: true })) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        translateReasoningTextDelta(params, eventQueue, {
-          rt: translatorRt,
-          log,
-        });
+        producedOutputTurnIds.add(params.turnId);
+        translateReasoningTextDelta(params, eventQueue, { rt: translatorRt, log });
       },
       accountRateLimitsUpdated: (params) =>
-        translateAccountRateLimitsUpdated(params, eventQueue, {
-          rt: translatorRt,
-          log,
-        }),
+        translateAccountRateLimitsUpdated(params, eventQueue, { rt: translatorRt, log }),
       threadStatusChanged: (params) => {
         // Idle / NotLoaded / SystemError 由 turn/completed + error 主导, 这里不重复 emit。
         // 只把 Active.activeFlags 翻成 "Waiting on approval/input..." status 文案。
         if (!isTurnInFlight) return;
-        if (params.status.type !== "active") return;
+        if (params.status.type !== 'active') return;
         const flags = params.status.activeFlags;
-        if (flags.includes("waitingOnApproval"))
-          pushStatus("Waiting on approval...");
-        else if (flags.includes("waitingOnUserInput"))
-          pushStatus("Waiting on input...");
+        if (flags.includes('waitingOnApproval')) pushStatus('Waiting on approval...');
+        else if (flags.includes('waitingOnUserInput')) pushStatus('Waiting on input...');
       },
       threadSettingsUpdated: (params) => {
         // server 端权威设置快照 (响应我们的 thread/settings/update, 或 server 自身降级)。
@@ -4910,12 +7687,19 @@ export class CodexAgent extends BaseAgent {
         // 某个 turn 的响应推断。通知恒带完整 ThreadSettings, 故 serviceTier 总是 present。
         const s = params.threadSettings;
         const before = mutableServiceTier ?? null;
+        const beforeModel = mutableModel;
         mutableServiceTier = normalizeServiceTier(s.serviceTier) ?? null;
-        if (typeof s.model === "string" && s.model) mutableModel = s.model;
+        // 只对齐 wire 值: server 会把请求 id 规范化(`gpt-5.4` → `gpt-5.4-codex`),那个变体
+        // 目录里没有。**刻意不动 mutableCatalogModel** —— 否则窗口上限会因为查不到目录条目
+        // 而停止收敛(见该变量注释)。
+        if (typeof s.model === 'string' && s.model) mutableModel = s.model;
+        if (mutableModel !== beforeModel) {
+          refreshCodexAutoReviewerRoute(params.threadId);
+        }
         // ReasoningEffort 的 'none' 不属于 Effort; 排除后其余值都是合法 Effort, 无需 cast。
-        if (s.effort && s.effort !== "none") mutableEffort = s.effort;
+        if (s.effort && s.effort !== 'none') mutableEffort = s.effort;
         if (before !== (mutableServiceTier ?? null)) {
-          log.debug("thread/settings/updated reconciled serviceTier", {
+          log.debug('thread/settings/updated reconciled serviceTier', {
             threadId: params.threadId,
             from: before,
             to: mutableServiceTier ?? null,
@@ -4923,11 +7707,10 @@ export class CodexAgent extends BaseAgent {
           });
         }
       },
-      autoApprovalReviewStarted: (
-        params: ItemGuardianApprovalReviewStartedNotification,
-      ) => {
+      autoApprovalReviewStarted: (params: ItemGuardianApprovalReviewStartedNotification) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.autoApprovalReviewStarted?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        log.debug("Codex automatic approval review started", {
+        log.debug('Codex automatic approval review started', {
           reviewId: params.reviewId,
           turnId: params.turnId,
           targetItemId: params.targetItemId,
@@ -4935,74 +7718,282 @@ export class CodexAgent extends BaseAgent {
         });
       },
       autoApprovalReviewCompleted: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.autoApprovalReviewCompleted?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
         handleGuardianReviewCompleted(params);
       },
       guardianWarning: (params: GuardianWarningNotification) => {
         // The completed review carries the actionable denial/timeout details. Keep the
         // warning for diagnostics to avoid rendering a duplicate error card.
-        log.warn("Codex Guardian warning", {
-          threadId: params.threadId,
-          message: params.message,
-        });
+        log.warn('Codex Guardian warning', { threadId: params.threadId, message: params.message });
       },
       error: (params) => {
+        // buffered turn 的 error (含终态) 同样进队列等对账 (greptile R11 P1 +
+        // codex R12 P1): 合法 → 激活后重放走正常终端路径收口 send; 孤儿 →
+        // 丢弃, 不得让孤儿 error 终结合法 send。
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.error?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        const isTerminalError = params.willRetry !== true;
-        const isTransportError = params.scope === "transport";
+        let effectiveParams = params;
+        let isTerminalError = params.willRetry !== true;
+        const isTransportError = params.scope === 'transport';
         if (isTransportError) {
           subscriptionInvalidatedByTransport = true;
-          dismissAllPendingUserInput("transport_error");
+          // 订阅已作废(app-server 崩了 / IO 断开)→ 后代通知**永远不会再到**,而 tracker 只靠
+          // 后代 turn/completed 写终态。不在这里收口,渲染端会一直留着最后一帧 running:进程
+          // 早就死了,子代理卡还在原地转圈(review)。这条路径与 close() / cleanup-failure 是
+          // 同一类,只是入口不同 —— 复用同一套终态快照 + 清 tracker。
+          for (const update of subagentLiveCards.drainRunningForShutdown()) emitSubagentCardUpdate(update);
+          subagentLiveCards.clear();
+          dismissAllPendingUserInput('transport_error');
           activeToolContexts.clear();
+          submittedUserInputByTurn.clear();
+          clearAllPendingUserInputInteractions();
         }
-        const targetsPendingTurn =
-          isTurnStartPending &&
-          currentTurnId === null &&
-          Boolean(params.turnId);
+        const targetsPendingTurn = isTurnStartPending && currentTurnId === null && Boolean(params.turnId);
+        // 空 turnId 的容量拒绝: 过载重投的 RPC 还在飞、而它的 turnStarted 尚未到达时,
+        // currentTurnId 是 null 且 isTurnInFlight 是 false —— 上面两条既有判据都不成立,
+        // 这条错误会被当 stale 整条丢掉。后果是既不落墓碑也不记账, 随后到达的
+        // turn/start 响应把这个已经报过容量失败的 turn 激活成活跃 turn, 剩余重投预算
+        // 被绕过, 只能等它自己的 turn/completed 收口成硬失败(review #844 codex P1)。
+        // 只对**过载类**放行: 其它空 id 终态错误(含 transport)保持既有行为, 免得把
+        // 与本轮无关的错误误认成"针对当前 turn"。
+        // 判据用 isTurnStartPending 而**不是** overloadRetry.inFlight: 后者只由重投路径
+        // 设置, 初始投递的 turn/start 在飞时永远为 false —— 那个窗口里的空 id 容量拒绝
+        // 一样会被丢掉, 响应随后激活一个已被拒的 turn, 自动重投预算整轮白给
+        // (review #844 codex P1)。
+        // 归属唯一时(只有一个 start 在飞)才认它。两个及以上在飞时这条通知无法归属:
+        // 既不能接管重投(猜错就重放已跑过工具的 turn), 也**不能**让它走终态 —— 后者会
+        // 拿别人的错误把当前这一轮判死, 而那一轮的响应随后照样会被激活, 于是"UI 已收口、
+        // 工具还在跑"(review #844 codex P1)。
+        // 不认 → 落到既有的 `stale codex terminal error ignored` 分支被丢掉, 这是安全的:
+        // 真属于某个 turn 的话, server 随后会为那个 turn 发权威的 turn/completed(failed),
+        // 收口由它完成。
+        // 判定同样优先吃结构化 codexErrorInfo, 文案只作老 daemon 兜底: 这条判据决定
+        // 空 id 的容量拒绝能不能被归属到在飞的 turn/start, 漏判 = 整轮重投预算白给。
+        const idLessCapacityError =
+          params.turnId === ''
+          && isTerminalError
+          && parseOverloadError(
+            params.error?.message ?? '',
+            extractNonSecretErrorSignals(params.error?.message ?? '').errorStatus,
+            codexErrorInfoTag(params.error?.codexErrorInfo),
+          ) !== null;
+        const idLessAttributable = inFlightStarts.size === 1;
+        const targetsIdLessPendingStart =
+          idLessCapacityError
+          && isTurnStartPending
+          && currentTurnId === null
+          && idLessAttributable;
+        // 空 id 的容量拒绝什么时候才算"活跃 turn 的"。
+        //
+        // 判据是**它自己的 admission 还没回包**: 空 turnId 这个形状的含义就是"server 还没能
+        // 告诉你是哪个 turn", 也就是容量在 admission 阶段被拒。活跃 turn 的 turn/start 若已
+        // 经回包, 它早就过了 admission —— 之后真为它发的容量错误一定带得上 turnId。所以此时
+        // 的空 id 通知只可能来自别处(最典型: 被 Stop 的旧 send, 它的 turn id 我们从没学到),
+        // 认在活跃 turn 头上的后果是: scheduleTurnReplayRetry 拿 currentTurnId 当死 turn, 把一
+        // 个正常在跑的 turn 落墓碑、撤销重投、推 Done, 而 server 侧那个 turn 还在执行工具
+        // (review #844 codex/greptile P1)。
+        //
+        // 覆盖三种此前漏掉或猜错的形状, 收敛成一条:
+        //  - 活跃 turn 的 start 已 settle、登记表里躺着**别人**的 start(Stop 留下的旧 RPC);
+        //  - 活跃 turn 的 start 已 settle、且**没有任何** start 在飞(上一条的对称情形);
+        //  - 归属未知(拿不到 origin.startSeq)。
+        // 保留的是唯一合法形状: started-before-resp —— 活跃 turn 是它自己那次仍在飞的 start
+        // 生出来的, 那条空 id 拒绝确实可能是它的 admission。
+        // 只收紧**容量**这一类: 其它空 id 终态错误保持既有行为, 免得顺手改了无关语义。
+        const activeTurnStartSeq =
+          currentTurnId !== null ? turnOriginByTurnId.get(currentTurnId)?.startSeq ?? null : null;
+        const idLessCapacityTargetsActiveTurn =
+          isTurnInFlight
+          && currentTurnId !== null
+          && activeTurnStartSeq !== null
+          && inFlightStarts.has(activeTurnStartSeq)
+          && !hasOtherInFlightStart(activeTurnStartSeq);
         const targetsCurrentTurn =
-          params.turnId === currentTurnId ||
-          (params.turnId === "" && isTurnInFlight) ||
-          targetsPendingTurn;
+          params.turnId === currentTurnId
+          || (params.turnId === ''
+            && isTurnInFlight
+            && (!idLessCapacityError || idLessCapacityTargetsActiveTurn))
+          || targetsPendingTurn
+          || targetsIdLessPendingStart;
+        if (
+          !isTerminalError &&
+          targetsCurrentTurn &&
+          parseReconnectAttemptMessage(params.error?.message ?? '') !== null
+        ) {
+          // error notification 可能抢在 turnStarted / turn/start response 前到达；这里
+          // 先按 params.turnId 绑定 deadline，turnStarted 随后会把 generation 重新绑定
+          // 到已接受的 turn，不让这类乱序事件漏掉静默重连卡死。
+          armReconnectStall(params.turnId || currentTurnId);
+        }
         if (isTerminalError && isTransportError && !targetsCurrentTurn) {
-          translateErrorNotification(params, eventQueue, {
-            rt: translatorRt,
-            log,
-          });
+          translateErrorNotification(effectiveParams, eventQueue, { rt: translatorRt, log });
           return;
         }
         if (isTerminalError && !targetsCurrentTurn) {
-          log.warn("stale codex terminal error ignored", {
+          log.warn('stale codex terminal error ignored', {
             errorTurnId: params.turnId,
             currentTurnId,
             isTurnInFlight,
           });
           return;
         }
+        // ── retry-loop 终局升级 (issue #677) ──
+        // 远端摸不到 Codex 后端时 daemon 无限发 willRetry=true — 协议层设计上
+        // willRetry 不收口, 但持续性不可达 (403 / Network unreachable / timeout)
+        // 意味着 retry 永远不会成功。同 turn 计数/时长超阈值后合成终态错误,
+        // 落入下面与原生终态 error 完全相同的收口路径。
+        // auth 相关错误 (缺失 401 / 无效凭证 marker) 排除: 它们走 auth 修复 UX
+        // (「同步登录态」/ 重新登录), 升级成「后端不可达」会抢路径并误导排查
+        // (review: PR #715 五轮审核 P1 — 判定与 translator 共用 isAuthRelated*)。
+        // rate-limit / usage-limit (429 / quota) 同样排除 (codex R12 P2):
+        // 那是 provider 让等的正常退避窗口, daemon 的 willRetry 会在窗口后
+        // 成功; 升级成「后端不可达」+ proxy/VPN 引导既误杀可恢复重试又误导
+        // 排查方向。willRetry 透出 (networkRetryNotice) 不受影响, 用户仍能
+        // 看到「在限流退避」。
+        if (!isTerminalError && targetsCurrentTurn) {
+          const rawMessage = params.error?.message ?? '';
+          const retrySignals = extractNonSecretErrorSignals(rawMessage);
+          const isRateLimitBackoff = retrySignals.errorStatus === 429 || retrySignals.usageLimit;
+          if (!isAuthRelatedErrorMessage(rawMessage) && !isRateLimitBackoff) {
+            const decision = turnRetryTracker.track(
+              params.turnId || currentTurnId || '(pending)',
+              Date.now(),
+            );
+            if (decision.escalate) {
+              // 本地收口后 daemon 侧原 turn 还在无限 retry — fire-and-forget 补
+              // interrupt, 否则它继续烧远端资源, 还可能与下一轮 send 的新 turn
+              // 撞车 (review: PR #715 五轮审核 P1)。失败仅 warn: 本地已按终态
+              // 处理, daemon 死亡/重启时该 turn 自然消失。
+              if (params.threadId && params.turnId) {
+                host.request(Method.TurnInterrupt, {
+                  threadId: params.threadId,
+                  turnId: params.turnId,
+                }).catch((e: unknown) => {
+                  log.warn('escalated turn interrupt failed (best-effort)', {
+                    turnId: params.turnId,
+                    error: e instanceof Error ? e.message : String(e),
+                  });
+                });
+              }
+              // 出站路径快照只对本地有意义 (远端 daemon 自己出网, 见
+              // buildBackendUnreachableMessage 注释)。必须带 threadId: host 侧靠它
+              // 定位本次请求实际打的上游 (codex 的出口随会话 provider 变), 查不到就
+              // 返回 null 而不是拿「最近一条」凑。读取按 best-effort: 诊断绝不能反过来
+              // 把已经在收口的错误路径搞崩。
+              let outboundPath = null as OutboundPathFact | null;
+              if (!opts.remoteHostId && this.deps.getOutboundPathFact) {
+                try {
+                  outboundPath = this.deps.getOutboundPathFact({
+                    threadId: params.threadId,
+                  }) ?? null;
+                } catch (e) {
+                  log.warn('outbound path fact lookup failed (best-effort)', {
+                    error: e instanceof Error ? e.message : String(e),
+                  });
+                }
+              }
+              const message = buildBackendUnreachableMessage({
+                isRemote: Boolean(opts.remoteHostId),
+                remoteHostId: opts.remoteHostId,
+                retryCount: decision.retryCount,
+                elapsedMs: decision.elapsedMs,
+                lastError: rawMessage,
+                outboundPath,
+              });
+              log.error('codex retry-loop escalated to terminal error (backend unreachable)', {
+                threadId: params.threadId,
+                turnId: params.turnId,
+                retryCount: decision.retryCount,
+                elapsedMs: decision.elapsedMs,
+                // 与用户看到的消息同源;`at` 让排查者判断这条判定有多新
+                // (系统代理判定有 TTL 缓存, 陈旧快照要按陈旧解读)。
+                ...(outboundPath ? { outboundPath } : {}),
+              });
+              effectiveParams = { ...params, willRetry: false, error: { message } };
+              isTerminalError = true;
+            }
+          }
+        }
         const wasTurnRunning = isTurnInFlight || targetsPendingTurn;
-        translateErrorNotification(params, eventQueue, {
+        if (isTerminalError && targetsCurrentTurn && !isTransportError) {
+          const recoveryTurnId = effectiveParams.turnId || currentTurnId || '';
+          // error notification 只登记恢复意图并保持 logical turn 运行；
+          // 权威 turn/completed 才负责收口旧 turn 与发起一次 HTTP 重投。
+          if (recordHttpRecoveryIntent(recoveryTurnId, effectiveParams.error)) return;
+        }
+        // 服务过载(模型容量不足)时接管重投：translator 命中 capacity 才回调，
+        // 拿到进度就把错误透成非终止状态，本函数随后跳过 Done 收口。
+        let turnReplayRetryScheduled = false;
+        translateErrorNotification(effectiveParams, eventQueue, {
           rt: translatorRt,
           log,
+          tryTakeOverOverload: () => {
+            // 只接管 app-server 本来就不重试的容量拒绝(原始 willRetry !== true)。
+            // TurnRetryTracker 把持续 retry 升级成终态的那条路径不接管：那说明
+            // daemon 已经重试很久仍不行，我们再叠一层退避重投属于双层重试。
+            if (params.willRetry === true) return null;
+            const progress = scheduleTurnReplayRetry(effectiveParams.turnId || currentTurnId);
+            if (progress) turnReplayRetryScheduled = true;
+            return progress;
+          },
+          tryTakeOverTerminalRateLimit: () => {
+            // willRetry=true 仍归 daemon 自己退避，绝不叠第二层。这里只接它已经明确
+            // 耗尽内部 retry budget 的终态 429；usageLimitExceeded 由判定器排除。
+            if (params.willRetry === true) return null;
+            const rawMessage = effectiveParams.error?.message ?? '';
+            const signals = extractNonSecretErrorSignals(rawMessage);
+            if (
+              !isTerminalRateLimitRetryExhaustion(
+                rawMessage,
+                signals.errorStatus,
+                effectiveParams.error?.codexErrorInfo,
+              )
+            ) {
+              return null;
+            }
+            const deadTurnId = effectiveParams.turnId || currentTurnId;
+            if (!deadTurnId || inFlightStarts.size > 0) return null;
+            const progress = scheduleTurnReplayRetry(
+              deadTurnId,
+              TERMINAL_RATE_LIMIT_RETRY_POLICY,
+            );
+            if (progress) turnReplayRetryScheduled = true;
+            return progress;
+          },
         });
         // 与 translator 的 terminal 判定保持一致：willRetry=false 或缺省都视为终态。
         if (!isTerminalError) return;
-        const terminalTurnId = params.turnId || currentTurnId;
+        const terminalTurnId = effectiveParams.turnId || currentTurnId;
+        if (turnReplayRetryScheduled) {
+          // 死掉的 turn **必须**落墓碑：app-server 随后还会为它发正常的
+          // turn/completed(failed)，没有墓碑 handleTurnCompleted 就会 emit terminal
+          // error + done，把 UI 与 goal turn 直接收口，我们刚透出的非终止重试状态
+          // 白费。重投会开出新的 turn id，不受这块墓碑影响。
+          if (terminalTurnId) terminalErroredTurnIds.add(terminalTurnId);
+          // **刻意不推任何 status**：renderer 的 handleStreamEvent 会在每个非 error
+          // 事件上清掉 recoverableError，紧跟其后的 status 会立刻把刚透出的本地化
+          // 「模型服务繁忙，正在自动重试（N/M）」横幅冲掉（review #844 codex P1）。
+          // 会话状态本来就还是 running（没推 Done），退避期间的用户可见提示由那条
+          // 非终止 error 横幅承担。
+          return;
+        }
         if (terminalTurnId) {
           terminalErroredTurnIds.add(terminalTurnId);
-          dismissPendingUserInputForTurn(terminalTurnId, "turn_failed");
+          dismissPendingUserInputForTurn(terminalTurnId, 'turn_failed');
           clearActiveToolContextsForTurn(terminalTurnId);
         }
         stopActiveRolloutPlanFallback();
         isTurnInFlight = false;
         currentTurnId = null;
         if (!wasTurnRunning) return;
+        // 没接管(预算耗尽 / 已有产出 / 非容量错误)且这一轮确实在跑 → 下面推 Done 收口。
+        // 同上: 收口即撤销重投资格, 否则延后标记会在别的 start settle 时补排。
+        revokeOverloadRetryOnTerminalSettle('terminal error notification');
         eventQueue.push({
-          type: "status",
-          data: {
-            status: "Done",
-            ...usageTracker.snapshot(),
-            isRunning: false,
-          },
-          source: "codex",
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
         });
       },
       commandExecutionApproval,
@@ -5014,7 +8005,7 @@ export class CodexAgent extends BaseAgent {
       dynamicToolCall,
     };
     try {
-      assertCurrentHost("thread subscription");
+      assertCurrentHost('thread subscription');
       subscription = host.subscribeThread(threadId, handlers);
     } finally {
       releaseHostBindingLeaseIfNeeded();
@@ -5022,41 +8013,96 @@ export class CodexAgent extends BaseAgent {
 
     function resubscribeAfterTransportErrorIfNeeded(): void {
       if (!subscriptionInvalidatedByTransport) return;
-      assertCurrentHost("resubscribe");
+      assertCurrentHost('resubscribe');
       subscription = host.subscribeThread(threadId, handlers);
       subscriptionInvalidatedByTransport = false;
     }
 
+    async function closeSessionHandle(
+      opts: { retireHostOnCleanupFailure?: boolean } = {},
+    ): Promise<void> {
+      if (closed) return;
+      closed = true;
+      clearReconnectStall();
+      resetUpstreamIdleForTurnEnd();
+      unregisterCodexMcpContext(threadId);
+      unregisterDescendantCodexMcpContexts();
+      // 会话收口后子代理卡不再有消费者。清状态**之前**必须先把仍在跑的卡收成终态:
+      // 之后后代通知永远不会再到,只清内部状态会让渲染端一直留着最后一帧 running,卡片
+      // 永久转圈(review)。
+      for (const update of subagentLiveCards.drainRunningForShutdown()) emitSubagentCardUpdate(update);
+      subagentLiveCards.clear();
+      // close 时 buffer 里可能还有等对账的挂起请求 (codex R17 P2):
+      // 统一按拒绝释放, 否则 handler 永远悬挂, dispatchServerRequest
+      // 永不返回, server 侧请求卡死。
+      abandonBufferedTurns('session closed');
+      abandonPendingCapabilitySteers();
+      // 把挂起的 approval 强制 deny + emit interaction_dismissed (UI 关 dialog),
+      // 否则 server 那边没回 response 会卡; UI 上的 PermissionPrompt 也会留尸
+      try { dismissAllPending('session_closed', 'deny'); } catch (e) { log.warn('dismissAllPending threw', { error: String(e) }); }
+      try { dismissAllPendingUserInput('session_closed'); } catch (e) { log.warn('dismissAllPendingUserInput threw', { error: String(e) }); }
+      try { clearAllPendingUserInputInteractions(); } catch (e) { log.warn('clear pending user input threw', { error: String(e) }); }
+      try { stopActiveRolloutPlanFallback(); } catch (e) { log.warn('stop rollout plan fallback threw', { error: String(e) }); }
+      // 挂起的过载重投计时器必须清掉：否则会话已关，计时器到点仍会对已释放的
+      // thread 发 turn/start（assertCurrentHost 会抛，但那是在无人接收的
+      // setTimeout 回调里，白留一次失败与一条误导日志）。
+      try { discardOverloadRetry('session_closed'); } catch (e) { log.warn('cancel overload retry threw', { error: String(e) }); }
+      await releaseCurrentThreadSubscription('session close subscription release', {
+        retireHostOnFailure: opts.retireHostOnCleanupFailure ?? true,
+      });
+      try { eventQueue.end(); } catch (e) { log.warn('eventQueue.end threw', { error: String(e) }); }
+    }
+
     // ── AgentSessionHandle ──────────────────────────────────────────────────
     const handle: AgentSessionHandle = {
-      get id() {
-        return sdkSessionId ?? "<pending>";
-      },
-      agentKind: "codex",
-      get model() {
-        return mutableModel;
-      },
-      get codexProxyActive() {
-        return hostUsesCodexProxy;
-      },
-      get codexProductPromptDelivery() {
-        return codexProductPromptDelivery;
+      get id() { return sdkSessionId ?? '<pending>'; },
+      agentKind: 'codex',
+      get model() { return mutableModel; },
+      get codexProxyActive() { return hostUsesCodexProxy; },
+      get codexProductPromptDelivery() { return codexProductPromptDelivery; },
+
+      validateSendOptions(sendOpts: SendOptions) {
+        if (
+          sendOpts.turnPermissionPolicy &&
+          mutablePermissionMode === 'bypassPermissions'
+        ) {
+          throw new TurnPermissionPolicyUnsupportedError(
+            'codex',
+            mutablePermissionMode,
+          );
+        }
       },
 
       async send(message: UserMessage, sendOpts?: SendOptions) {
-        if (rejectClosedOrCancelledSend(sendOpts, "before start")) {
+        if (rejectClosedOrCancelledSend(sendOpts, 'before start')) {
           return;
         }
-        assertCurrentHost("turn/start");
+        // 用户开启新 turn = 旧重连序列作废；deadline 不得跨 turn 误伤新请求。
+        clearReconnectStall();
+        if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
+        const capabilitySelectionText =
+          (sendOpts as CodexInternalSendOptions | undefined)?.[
+            CODEX_INHERITED_CAPABILITY_SELECTION
+          ] ?? userMessageText(message.content);
+        assertCurrentHost('turn/start');
         resubscribeAfterTransportErrorIfNeeded();
         // 新 turn 总是携带当前 (可能已收紧的) 策略, 上一轮残留的延迟中断标记
         // 不得误伤本 turn (典型: 上次 turn/start 终失败, 标记未被 id 到达点消费)。
         pendingTightenInterrupt = false;
         // 上一 send 周期的墓碑一并清空 (仅用于拦本周期内抢跑的终态)。
         turnsCompletedBeforeStartResp.clear();
+        // 用户发新消息 = 上一轮的过载重投彻底作废(它要重投的是旧消息)。
+        // 这里也是**唯一**重置重投预算的地方，见 turnStarted 的说明。
+        discardOverloadRetry('new send');
+        // 产出记账不需要按 send 归零: 它按 turn id 存, 新一轮读的是新 turn 的账。
+        // 早先的标量要在这里清, 是因为"新 turn 的响应 / 容量错误先于它的 turnStarted
+        // 到达"时会读到上一个 turn 的状态(review #844 codex P1); 按 id 记账后这类乱序
+        // 不再影响判定, 也不会再被别的 turn(含被 Stop 的旧 send 的孤儿)污染。
+        const mySendGen = ++sendGeneration;
         isTurnStartPending = true;
         usageTracker.beginTurn();
-        log.debug("send ▶ user message", {
+        log.debug('send ▶ user message', {
           model: mutableModel,
           effort: mutableEffort,
           permissionMode: mutablePermissionMode,
@@ -5066,44 +8112,70 @@ export class CodexAgent extends BaseAgent {
         });
         // turn-start status: 抽样 recurring + one-shot 引导 (含阶梯 pity 保底)。
         // 命中 one-shot 时推进展示次数, 并清 pity 计数让下一档保底独立累计。
-        const turnStartPick = pickTurnStartStatus(
-          sendOpts?.userName,
-          oneShotTipState,
-        );
+        const turnStartPick = pickTurnStartStatus(sendOpts?.userName, oneShotTipState);
         if (turnStartPick.oneShotId) {
           const id = turnStartPick.oneShotId;
-          oneShotTipState.displayed.set(
-            id,
-            (oneShotTipState.displayed.get(id) ?? 0) + 1,
-          );
+          oneShotTipState.displayed.set(id, (oneShotTipState.displayed.get(id) ?? 0) + 1);
           oneShotTipState.pity.delete(id);
         }
         eventQueue.push({
-          type: "status",
+          type: 'status',
           data: {
             status: turnStartPick.text,
             ...usageTracker.snapshot(),
             isRunning: true,
           },
-          source: "codex",
+          source: 'codex',
         });
 
         // Phase 3: 把 mutable 配置每 turn 透传 — server 接受 per-turn 覆盖。
-        // **关键**: 无引用目录时用 sandboxPolicy: SandboxPolicy；有引用目录时改用
-        // named permissions profile，两者不能同时发送。turn/start 的 legacy 字段也不是
-        // thread/start 的 sandbox: SandboxMode，写错 server 会直接忽略。
+        // **关键**: 无引用目录时用 sandboxPolicy: SandboxPolicy；有引用目录时继承
+        // thread/start / thread/resume 已激活的 named permissions profile。profile
+        // selector 不能在 turn/start 重复发送，见 ensureReadonlyReferencesProfileForNextTurn。
         // effort 同理: 协议层只能在 turn/start 透传 (v2.rs:5800), thread/start 不接;
         // 用户在 session 创建时选的 effort 也是靠 first turn/start 这里传过去才生效。
-        const turnWorkspaceConfig = currentTurnWorkspaceConfig();
+        let turnWorkspaceConfig: ReturnType<typeof currentTurnWorkspaceConfig>;
+        let turnThreadWorkspaceConfig: ReturnType<typeof currentThreadWorkspaceConfig>;
+        try {
+          const profileRefresh = ensureReadonlyReferencesProfileForNextTurn(sendOpts?.signal);
+          if (profileRefresh) await profileRefresh;
+          turnWorkspaceConfig = currentTurnWorkspaceConfig();
+          // A stale-daemon retry must hydrate the exact thread-level profile
+          // that matches this turn, not mutable settings changed while the
+          // original turn/start RPC was pending.
+          turnThreadWorkspaceConfig = currentThreadWorkspaceConfig();
+        } catch (e) {
+          isTurnStartPending = false;
+          endPlanCycleAfterPreStartFailure('read-only reference profile refresh failed');
+          flushDeferredTerminalTurnCompletionsIfIdle();
+          rejectIfCancelled(sendOpts, 'send');
+          const message = `Failed to restore Codex read-only reference permissions: ${String(e)}`;
+          log.error('read-only reference profile refresh failed', { error: String(e), threadId });
+          eventQueue.push({
+            type: 'error',
+            data: { message, isTerminal: true },
+            source: 'codex',
+          });
+          eventQueue.push({
+            type: 'status',
+            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+            source: 'codex',
+          });
+          if (sendOpts?.throwOnStartFailure) throw new Error(message);
+          return;
+        }
         const { approvalPolicy, approvalsReviewer } = turnWorkspaceConfig;
-        // 记录本 turn 是否由无人值守策略发射。Auto-review 需要在切回 Ask
-        // 时中断当前 turn；Full access 即使因 host shell policy 映射为
-        // untrusted，也仍保留同一 fail-safe interrupt 语义。
+        // 记录本 turn 是否由无人值守策略发射。普通降级路由显式使用 user reviewer,
+        // 与 Ask 权限等价；policy turn 则以 untrusted + read-only 发射，并由 host
+        // 自动接受非强制回调，仍属于无人值守执行。
         turnLaunchedUnattended =
-          mutablePermissionMode === "bypassPermissions" ||
-          approvalPolicy === "never" ||
-          approvalsReviewer === "auto_review";
-        let turnInput: TurnStartParams["input"];
+          approvalPolicy === 'never' ||
+          approvalsReviewer === 'auto_review' ||
+          (activeTurnPermissionPolicy !== null && mutablePermissionMode === 'auto');
+        if (!turnLaunchedUnattended) {
+          pendingTightenInterrupt = false;
+        }
+        let turnInput: TurnStartParams['input'];
         try {
           turnInput = await toTurnInput(message.content);
         } catch (e) {
@@ -5111,12 +8183,17 @@ export class CodexAgent extends BaseAgent {
           flushDeferredTerminalTurnCompletionsIfIdle();
           throw e;
         }
-        if (rejectClosedOrCancelledSend(sendOpts, "after input preparation")) {
+        if (rejectClosedOrCancelledSend(sendOpts, 'after input preparation')) {
           isTurnStartPending = false;
+          abandonBufferedTurns('send cancelled after input preparation');
           flushDeferredTerminalTurnCompletionsIfIdle();
           return;
         }
-        assertCurrentHost("turn/start");
+        const autoReviewIntent = (sendOpts as CodexInternalSendOptions | undefined)?.[
+          CODEX_AUTO_REVIEW_INTENT
+        ];
+        setAutoReviewIntent(autoReviewIntent ?? message.content);
+        assertCurrentHost('turn/start');
         // 本条消息的计划意图:sendOpts.planMode 是点击发送瞬间的快照(排队行透传),
         // 权威于 agent 当前武装态;undefined 走旧语义(消耗武装态)。一次性语义:
         // 消耗时 emit plan_mode_changed 让 UI 勾选熄灭;显式 false(排队普通消息后
@@ -5124,25 +8201,17 @@ export class CodexAgent extends BaseAgent {
         // (无 planMode 快照), planCycleActive 仍在 → 继续携带 plan。
         const explicitNormalTurn = sendOpts?.planMode === false;
         const requestedPlanTurn = sendOpts?.planMode ?? mutablePlanMode;
-        const continuePlanCycleThisTurn =
-          planCycleActive && !explicitNormalTurn;
+        const continuePlanCycleThisTurn = planCycleActive && !explicitNormalTurn;
         if (requestedPlanTurn) {
           planCycleActive = true;
           if (mutablePlanMode && sendOpts?.planMode !== false) {
             mutablePlanMode = false;
-            eventQueue.push({
-              type: "plan_mode_changed",
-              data: { enabled: false },
-              source: "codex",
-            });
+            eventQueue.push({ type: 'plan_mode_changed', data: { enabled: false }, source: 'codex' });
           }
         }
         // sticky 语义要求进过 plan 的线程后续持续复位, 见 collaborationModeForTurn。
-        const collaborationMode = collaborationModeForTurn(
-          requestedPlanTurn,
-          continuePlanCycleThisTurn,
-        );
-        const turnStartsInPlanMode = collaborationMode?.mode === "plan";
+        const collaborationMode = collaborationModeForTurn(requestedPlanTurn, continuePlanCycleThisTurn);
+        const turnStartsInPlanMode = collaborationMode?.mode === 'plan';
         const turnParams: TurnStartParams = {
           threadId,
           input: turnInput,
@@ -5151,31 +8220,38 @@ export class CodexAgent extends BaseAgent {
           // 强制 reasoning summary='auto' — 不依赖用户 ~/.codex/config.toml 写没写
           // model_reasoning_summary, 让 thinking 文本在所有用户机器上一致流式出。
           // (v2.rs:5801-5803 turn/start 的 summary 会 override server config)
-          summary: "auto",
-          ...(mutableModel && mutableModel !== "gpt-5"
-            ? { model: mutableModel }
-            : {}),
-          ...(mutableServiceTier !== undefined
-            ? { serviceTier: mutableServiceTier }
-            : {}),
+          summary: 'auto',
+          ...(mutableModel && mutableModel !== 'gpt-5' ? { model: mutableModel } : {}),
+          ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
           ...(collaborationMode ? { collaborationMode } : {}),
         };
-        const markCollaborationModeAccepted = (): void => {
-          if (turnParams.collaborationMode?.mode === "plan") {
+        // 这一 turn 的用量按这里发出去的 (provider, model) 归属上下文窗口 —— 之后 setModel
+        // 立即改这两个值也不会串到还在产出的本 turn (见 activeTurnModel / capContextWindow)。
+        activeTurnModel = mutableCatalogModel;
+        activeTurnProviderId = mutableProviderId;
+        const markTurnConfigAccepted = (): void => {
+          threadMayHaveRollout = true;
+          if (turnParams.collaborationMode?.mode === 'plan') {
             threadTouchedPlanMode = true;
             planModeDefaultMarkerNeeded = true;
             return;
           }
-          if (turnParams.collaborationMode?.mode === "default") {
+          if (turnParams.collaborationMode?.mode === 'default') {
             threadTouchedPlanMode = true;
-            if (
-              turnParams.collaborationMode.settings.developer_instructions ===
-              null
-            ) {
+            if (turnParams.collaborationMode.settings.developer_instructions === null) {
               planModeDefaultMarkerNeeded = false;
             }
           }
         };
+        // A sandboxPolicy overrides the thread-local profile. Invalidate before
+        // the request crosses the acceptance boundary: the peer can accept the
+        // turn even if the local transport loses the response.
+        if ('sandboxPolicy' in turnWorkspaceConfig) {
+          readonlyReferencesProfileActive = false;
+        }
+        // After turn/start is attempted, resume before ever replacing this
+        // thread. Only an explicit "no rollout found" proves it stayed unused.
+        threadMayHaveRollout = true;
         pendingTurnStartPlanMode = turnStartsInPlanMode;
         // turn/start 失败若是 "thread not found" — 通常 daemon 重启 (sync auth /
         // OOM / 服务器 reboot / 我们主动 pkill) 导致 in-memory thread state 丢失,
@@ -5185,64 +8261,316 @@ export class CodexAgent extends BaseAgent {
         // 只动 error path, happy path 完全不变 (规则 19: 不影响 cache hit /
         // 性能 / 准确性 4 指标)。重试只发生在 "thread not found" 字符串匹配时,
         // 普通 LLM 错误 / 超时 / auth 失败照原路径报错。
-        const handleTurnStartResp = (resp: TurnStartResponse): void => {
+        const handleTurnStartResp = (resp: TurnStartResponse, ownerSeq: number): void => {
           if (resp.turn?.id) {
+            const startEntry = inFlightStarts.get(ownerSeq);
+            const pendingHttpRecovery = overloadRetry?.pendingHttpRecovery;
+            if (
+              startEntry
+              && pendingHttpRecovery?.deadTurnId === resp.turn.id
+              && startEntry.sendGen === overloadRetry?.sendGen
+            ) {
+              // completed 已经把该 turn 记为终态，下面不会重新激活；这里仅补权威
+              // 归属，供 start finally flush completed 后的一次 HTTP 重投校验。
+              turnOriginByTurnId.set(resp.turn.id, {
+                startSeq: ownerSeq,
+                sendGen: startEntry.sendGen,
+              });
+            }
+            // 缓冲的歧义 started 对账 (codex R9 P2): 本响应确立在飞 RPC 的
+            // turnId — 缓冲里 id 一致的是它的合法 started (下方正常激活),
+            // 不一致的是失败 RPC 的孤儿 (interrupt + 墓碑, 没人消费)。
+            //
+            // 但"不是我的"只有在**没有别的 start 在飞**时才等于"是孤儿": Stop 会武装孤儿
+            // 守卫, 于是下一轮 send 的 turnStarted 同样先进这个**会话级共享**的缓冲集; 被
+            // Stop 的旧 RPC 若是 resolve(而不是 reject)回来, 它照样走到这里, 把新一轮那条
+            // 合法 started 当孤儿坐实 —— 墓碑 + interrupt 之后新一轮的响应拒绝激活, 那一轮
+            // 永久卡 generating(review #844 codex P1, 与隔离路径同源)。
+            //
+            // 非唯一权威时只做能确定的那一半: 把自己的 id 从缓冲里摘掉(否则 stale 闸会继续
+            // 忽略它已激活 turn 的事件), 其余留给仍在飞的那些 start 去对账。
+            if (bufferedOrphanTurnIds.size > 0) {
+              const wasBuffered = bufferedOrphanTurnIds.has(resp.turn.id);
+              const soleAuthority = !hasOtherInFlightStart(ownerSeq);
+              if (!soleAuthority) {
+                bufferedOrphanTurnIds.delete(resp.turn.id);
+                log.debug('turn/start response is not the sole reconciler — leaving other buffered turns', {
+                  acceptedTurnId: resp.turn.id,
+                  remaining: [...bufferedOrphanTurnIds],
+                  threadId,
+                });
+              }
+              for (const bufferedId of soleAuthority ? bufferedOrphanTurnIds : []) {
+                if (bufferedId === resp.turn.id) continue;
+                terminalErroredTurnIds.add(bufferedId);
+                // 孤儿的事件队列整队丢弃 (greptile R11 P1) — 任何事件都不得
+                // 渲染到 / 收口本次 send; 挂起的审批/输入请求按拒绝释放
+                // (codex R12 P1)。
+                bufferedTurnEventQueues.delete(bufferedId);
+                settleBufferedTurnReconcile(bufferedId, false);
+                log.warn('buffered turnStarted proven orphan by turn/start response — interrupting', {
+                  turnId: bufferedId,
+                  acceptedTurnId: resp.turn.id,
+                  threadId,
+                });
+                if (threadId) {
+                  host.request(Method.TurnInterrupt, { threadId, turnId: bufferedId }).catch((e2: unknown) => {
+                    log.warn('buffered orphan turn interrupt failed (best-effort)', {
+                      turnId: bufferedId,
+                      error: e2 instanceof Error ? e2.message : String(e2),
+                    });
+                  });
+                }
+              }
+              if (soleAuthority) bufferedOrphanTurnIds.clear();
+              if (wasBuffered) {
+                // 合法 started 曾被缓冲: 补做 turnStarted 正常路径被跳过的
+                // per-turn 状态重置 (与 turnStarted handler 同款)。
+                proposedPlanText = null;
+                translatorRt.lastAuthErrorKey = null;
+                translatorRt.networkRetryNotice = null;
+                turnRetryTracker.reset();
+              }
+            }
+            // turn/start 成功后孤儿守卫**保持**, 不解除 (codex R14 P1): 失败
+            // RPC 的孤儿证据 (turnStarted/error/completed) 可能任意晚才到 —
+            // 解除后迟到的孤儿 started 在 currentTurnId===null 窗口会被正常
+            // 激活成假 running (会话永久卡)。守卫保持下: 未知 id 的迟到
+            // started 按孤儿墓碑 + interrupt; 合法 turn 的 started 由
+            // currentTurnId 匹配 (重复 started 幂等) 或 buffered 对账放行,
+            // 不受影响。守卫在 RPC 失败路径 (4413) 已把在飞 buffer 坐实孤儿,
+            // 语义依然自洽。
             // 墓碑: 该 turn 的终态已抢在本响应之前到达 (典型: 收紧补中断后
             // turnCompleted(interrupted) 先回), 不得重新置活, 否则会话卡 running。
-            const alreadyCompleted = turnsCompletedBeforeStartResp.has(
-              resp.turn.id,
-            );
-            if (
-              !alreadyCompleted &&
-              !terminalErroredTurnIds.has(resp.turn.id)
-            ) {
+            const alreadyCompleted = turnsCompletedBeforeStartResp.has(resp.turn.id);
+            if (!alreadyCompleted && !terminalErroredTurnIds.has(resp.turn.id)) {
+              // The app-server has now acknowledged which turn owns this
+              // input. Bind explicit source selection before buffered tool
+              // requests are released, and never on a pre-accept failure.
+              capabilitySelectionTextByTurnId.set(
+                resp.turn.id,
+                capabilitySelectionText,
+              );
+              // 权威归属: 这个 turn 由本次 start 生出, 属于本轮 send。
+              turnOriginByTurnId.set(resp.turn.id, { startSeq: ownerSeq, sendGen: mySendGen });
               currentTurnId = resp.turn.id;
               isTurnInFlight = true;
+              turnStartGeneration += 1; // 见声明处:延迟善后靠它判断"期间起过新 turn"
+              if (reconnectStallTimer && reconnectStallTurnId === resp.turn.id) {
+                reconnectStallTurnGeneration = turnStartGeneration;
+              } else {
+                clearReconnectStall();
+              }
               currentTurnPlanModeActive = turnStartsInPlanMode;
               pendingTurnStartPlanMode = null;
               startRolloutPlanFallback(resp.turn.id);
+              // 合法 buffered turn 激活成功: 挂起的审批/输入请求放行 (走正常
+              // UI 流程), 再按到达序重放缓存事件 (greptile R11 P1 +
+              // codex R12 P1): 早期 item/usage 不再永久丢失; 队列里若有终态
+              // (turn 在缓冲期间已结束), 重放自然收口 send — 不会把尸体 turn
+              // 挂成 in-flight 永久卡 generating。重放闭包重进 handler 时
+              // buffer 已清空 + currentTurnId 已置, 全部走正常路径。
+              settleBufferedTurnReconcile(resp.turn.id, true);
+              const replayQueue = bufferedTurnEventQueues.get(resp.turn.id);
+              if (replayQueue) {
+                bufferedTurnEventQueues.delete(resp.turn.id);
+                log.debug('replaying buffered events for accepted turn', {
+                  turnId: resp.turn.id,
+                  eventCount: replayQueue.length,
+                });
+                for (const replay of replayQueue) replay();
+              }
+            } else {
+              // 未激活 (墓碑): 队列丢弃, 挂起请求按拒绝释放 — 不得穿透。
+              bufferedTurnEventQueues.delete(resp.turn.id);
+              settleBufferedTurnReconcile(resp.turn.id, false);
             }
             // turn/start 在飞期间权限被收紧 → 本 turn 携带的还是旧宽松策略,
             // 拿到 id 立即补中断 (fire-and-forget, 失败仅 warn); turn 已终结则
             // 收紧目的已达成, 消费标记即可, 不再发无意义的 interrupt。
             if (pendingTightenInterrupt) {
               pendingTightenInterrupt = false;
-              if (!alreadyCompleted)
-                void interruptTurnForPermissionTighten(resp.turn.id);
+              if (!alreadyCompleted) void interruptTurnForPermissionTighten(resp.turn.id);
             }
           }
-          if (Object.hasOwn(resp, "serviceTier")) {
+          if (Object.hasOwn(resp, 'serviceTier')) {
             mutableServiceTier = normalizeServiceTier(resp.serviceTier) ?? null;
-            log.debug("turn/start response serviceTier", {
+            log.debug('turn/start response serviceTier', {
               turnId: resp.turn?.id ?? null,
               serviceTier: mutableServiceTier,
               fastMode: isFastServiceTier(mutableServiceTier),
-              note: "serviceTier returned by app-server turn/start response",
+              note: 'serviceTier returned by app-server turn/start response',
             });
           }
         };
+        // 登记本轮的过载重投器。闭包持有 turnParams 与本轮的响应处理逻辑，因此
+        // 重投投递的是同一条用户消息、同一套策略，不受期间 mutable 配置变化影响。
+        //
+        // 刻意**不**复用 happy path 的整段 send 逻辑：`usageTracker.beginTurn()`、
+        // turn-start status 抽样、planMode 武装态消耗都是"用户发了一条消息"的
+        // 一次性副作用，重投是同一条消息的再次投递，重跑那些会让用量统计与
+        // 计划模式状态错乱。
+        overloadRetry = {
+          attempt: 0,
+          httpRecoveryRetryAttempted: false,
+          pendingHttpRecovery: null,
+          timer: null,
+          inFlight: false,
+          isCancelled: () => sendOpts?.signal?.aborted === true,
+          launchedPermissionMode: mutablePermissionMode,
+          sendGen: mySendGen,
+          deferredCapacityFailure: null,
+          disposeSignalWatch: null,
+          retry: async () => {
+            const state = overloadRetry;
+            // 发出前复检：本轮 send 的取消信号在退避等待期间才 abort（coordinator
+            // 撤单、上层超时）时不走 handle.abort()，计时器到点仍会把一条已被取消
+            // 的消息重新投出去。
+            if (closed || !state || state.isCancelled()) {
+              log.info('codex overload retry skipped (send already cancelled)', { threadId });
+              if (state) settleCancelledOverloadRetry(state, 'cancelled before retry send');
+              return;
+            }
+            assertCurrentHost('turn/start overload retry');
+            resubscribeAfterTransportErrorIfNeeded();
+            // RPC 在途也算忙（见 isTurnRunning 注释）：计时器已清、turn 未激活的
+            // 这段窗口若报 idle，并发 send 会把原消息挤掉。
+            state.inFlight = true;
+            const retryStartSeq = beginTurnStart(
+              state.sendGen,
+              capabilitySelectionText,
+            );
+            // RPC 是否走完了成功路径。补排延后的容量失败**只能**在成功路径上做:
+            // finally 先于外层 state.retry().catch 执行, 若 RPC 已经 reject 却在这里
+            // 排上新计时器, 紧随其后的 catch 会推终态 error + Done 收口 UI, 而那个
+            // 计时器没人取消 —— 会话已收口, 原消息却在稍后被静默重投并真的执行工具
+            // 副作用(review #844 codex P1)。失败路径统一由外层 catch 报终态。
+            let rpcSettledOk = false;
+            try {
+              // 必须带超时：AppServerHost.request 默认不超时，daemon / 远端传输
+              // 卡住时这个 RPC 会永久在飞，而 inFlight 被算作忙 → 会话永久卡死
+              // 且无人可解（review #844 codex P1）。与正常 turn/start 同款边界。
+              const resp = await host.request<TurnStartResponse>(Method.TurnStart, turnParams, {
+                timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+              });
+              // **发出后再复检**：RPC 在途期间 Stop / close / 撤单都拦不住它——
+              // 计时器早已清空，cancelOverloadRetry 无从取消；abort() 又因为
+              // currentTurnId 仍是 null 而直接返回。此时若照常激活，一个已被用户
+              // 撤销的 turn 会真的跑起来并执行命令、改文件。
+              // server 侧 turn 已经启动，所以不能只是丢掉响应：落墓碑挡住它的后续
+              // 事件，并 best-effort interrupt 把它停掉（与上方孤儿 turn 同款处理）。
+              const cancelledMidFlight =
+                closed || state.isCancelled() || overloadRetry !== state;
+              if (cancelledMidFlight) {
+                const staleTurnId = resp.turn?.id;
+                log.warn('codex overload retry cancelled while turn/start was in flight', {
+                  threadId,
+                  turnId: staleTurnId ?? null,
+                  closed,
+                  aborted: sendOpts?.signal?.aborted ?? false,
+                });
+                if (staleTurnId) {
+                  terminalErroredTurnIds.add(staleTurnId);
+                  if (threadId) {
+                    host
+                      .request(Method.TurnInterrupt, { threadId, turnId: staleTurnId })
+                      .catch((e: unknown) => {
+                        log.warn('cancelled overload retry interrupt failed (best-effort)', {
+                          turnId: staleTurnId,
+                          error: e instanceof Error ? e.message : String(e),
+                        });
+                      });
+                  }
+                }
+                // server 侧 turn 已挡掉, 但逻辑 turn 还得有人收口(同上)。
+                settleCancelledOverloadRetry(state, 'cancelled while turn/start was in flight');
+                return;
+              }
+              markTurnConfigAccepted();
+              adoptUnidentifiedDeadTurn(resp, retryStartSeq);
+              handleTurnStartResp(resp, retryStartSeq);
+              rpcSettledOk = true;
+            } finally {
+              state.inFlight = false;
+              if (!rpcSettledOk && overloadRetry === state) {
+                state.pendingHttpRecovery = null;
+              }
+              // 注销本次请求(isTurnStartPending 由登记表重算, 不会误清别的请求的状态)。
+              endTurnStart(retryStartSeq);
+              flushDeferredTerminalTurnCompletionsIfIdle();
+              // 在途期间又撞容量、当时被延后的那条失败在这里收尾。只有新 turn 确实
+              // 没能激活时才补排（它被落了墓碑、响应因此拒绝激活）；turn 活了就说明
+              // 那条错误针对的是别的 turn，不该重排。预算耗尽时必须自己推终态，
+              // 否则逻辑 send 永久悬空。
+              // 同上: 延后的失败若属于另一轮仍活着的 send, 与本次 RPC 成败无关。
+              rescheduleDeferredCapacityFailure(
+                overloadRetry ?? state,
+                overloadRetry === state ? rpcSettledOk : true,
+              );
+            }
+          },
+        };
+        // 退避窗口里的取消要**立刻**收口, 不能等计时器到点。isCancelled() 是轮询式的,
+        // 只在 retry() 里被读到; 只 abort signal(不走 handle.abort())时, 会话会在剩余
+        // 退避里继续 isTurnRunning()===true —— 最多 30s 内后续排队消息全被挡住, 上层
+        // 派发闩也不释放(review #844 greptile P1)。
+        const armedRetryState = overloadRetry;
+        const sendSignal = sendOpts?.signal;
+        if (armedRetryState && sendSignal) {
+          const onSendAbort = (): void => {
+            if (overloadRetry !== armedRetryState) return;
+            // 两类要收口的状态:
+            //  1. 重投还会发生(退避等待 / RPC 在途 / 失败已延后等补排);
+            //  2. 重投已经把一个 turn 跑起来了(计时器已消费、inFlight 已清、
+            //     currentTurnId 已置)。这时若直接 return, 取消既不落墓碑也不
+            //     interrupt, 那个 turn 会继续执行命令与文件改动
+            //     (review #844 greptile P1)。
+            // 判据用 attempt > 0 限定在"本轮确实被重投接管过"上: 没发生过重投的
+            // 普通 send 里 signal 仍只是**受理前**的取消边界, 语义不变。
+            const retryOwnsActiveTurn =
+              (armedRetryState.attempt > 0 || armedRetryState.httpRecoveryRetryAttempted)
+              && (currentTurnId !== null || isTurnInFlight);
+            if (!overloadRetryPending(armedRetryState) && !retryOwnsActiveTurn) return;
+            cancelOverloadRetry('send signal aborted');
+            settleCancelledOverloadRetry(armedRetryState, 'send signal aborted');
+          };
+          sendSignal.addEventListener('abort', onSendAbort, { once: true });
+          armedRetryState.disposeSignalWatch = () => {
+            sendSignal.removeEventListener('abort', onSendAbort);
+          };
+        }
         let finalErr: unknown = null;
+        // 初始 RPC 在飞期间到达的空 id 容量拒绝只会被"延后"(不排计时器), 由下面的
+        // finally 在响应处理完之后补排 —— 保证任一时刻只有一个 turn/start 在飞。
+        const initialStartSeq = beginTurnStart(
+          mySendGen,
+          capabilitySelectionText,
+        );
+        let initialStartSettledOk = false;
+        /** 本次请求是否已被 Stop / 撤单收口过(条目会在 finally 里删掉, 所以先取出来)。 */
+        let initialStartSettledByCancel = false;
         try {
-          const resp = await host.request<TurnStartResponse>(
-            Method.TurnStart,
-            turnParams,
-          );
-          markCollaborationModeAccepted();
-          if (rejectClosedOrCancelledSend(sendOpts, "after turn/start")) {
+          const resp = await host.request<TurnStartResponse>(Method.TurnStart, turnParams, {
+            timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+          });
+          markTurnConfigAccepted();
+          adoptUnidentifiedDeadTurn(resp, initialStartSeq);
+          if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start')) {
+            // 本地取消边界直接 return: 挂起的 buffered 请求没有 settle 者
+            // (codex R17 P2), 统一释放。
+            abandonBufferedTurns('send cancelled after turn/start');
             return;
           }
-          handleTurnStartResp(resp);
+          handleTurnStartResp(resp, initialStartSeq);
+          initialStartSettledOk = true;
         } catch (e) {
           if (isLocalAcceptBoundaryError(e)) {
             throw e;
           }
           if (/thread not found/i.test(String(e))) {
-            log.info(
-              'turn/start hit "thread not found" — daemon likely restarted, attempting thread/resume + retry',
-              {
-                threadId,
-              },
-            );
+            log.info('turn/start hit "thread not found" — daemon likely restarted, attempting thread/resume + retry', {
+              threadId,
+            });
             try {
               // **必须先重 subscribe**: daemon 重启会触发 transport error →
               // host.shutdown() 清空 this.subscribers Map (host.ts:373), 原 subscription
@@ -5253,49 +8581,81 @@ export class CodexAgent extends BaseAgent {
               // 用同一个 handlers 对象 re-subscribe (host.subscribers.set 覆盖语义),
               // 顶层 startSession 拿到的原 subscription 句柄仍能正确清理当前 entry,
               // 无需在这里管理新返回的 subscription 句柄。
-              assertCurrentHost("thread/resume retry subscribe");
+              assertCurrentHost('thread/resume retry subscribe');
               host.subscribeThread(threadId, handlers);
+              const resumeModel = mutableModel;
+              const resumeServiceTierGeneration = serviceTierMutationGeneration;
               const resumeParams: ThreadResumeParams = {
                 threadId,
+                ...(resumeExcludeTurnsSupported ? { excludeTurns: true } : {}),
                 cwd: opts.workingDir,
-                ...currentThreadWorkspaceConfig(),
-                ...(mutableModel && mutableModel !== "gpt-5"
-                  ? { model: mutableModel }
-                  : {}),
-                ...(mutableServiceTier !== undefined
-                  ? { serviceTier: mutableServiceTier }
-                  : {}),
+                ...turnThreadWorkspaceConfig,
+                ...(threadModelProvider ? { modelProvider: threadModelProvider } : {}),
+                ...(resumeModel && resumeModel !== 'gpt-5' ? { model: resumeModel } : {}),
+                ...(mutableServiceTier !== undefined ? { serviceTier: mutableServiceTier } : {}),
+                ...(developerInstructions && !useProxyChannel ? { developerInstructions } : {}),
               };
-              const resumeResp = await host.request<ThreadResumeResponse>(
-                Method.ThreadResume,
-                resumeParams,
-              );
-              if (collaborationMode?.mode === "default") {
-                planModeDefaultMarkerNeeded =
-                  threadHistoryNeedsDefaultModeMarker(resumeResp.thread);
-                if (turnParams.collaborationMode?.mode === "default") {
-                  turnParams.collaborationMode.settings.developer_instructions =
-                    planModeDefaultMarkerNeeded ? null : "";
+              const resumeResp = await host.request<ThreadResumeResponse>(Method.ThreadResume, resumeParams, {
+                timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+              });
+              if (mutableModel === resumeModel && resumeModel === 'gpt-5' && resumeResp.model) {
+                mutableModel = resumeResp.model;
+                // 与 thread/start 的哨兵解析同理:'gpt-5' 是占位、不是目录条目, 解析出的真实
+                // id 才能用来查窗口上限。漏掉这行会让恢复后的 turn 一直按 'gpt-5' 去查(查不到
+                // → 不收敛), 这也是本文件第三处哨兵解析, 三处必须一致。
+                mutableCatalogModel = resumeResp.model;
+              }
+              if (
+                Object.hasOwn(resumeResp, 'serviceTier') &&
+                resumeServiceTierGeneration === serviceTierMutationGeneration
+              ) {
+                mutableServiceTier = normalizeServiceTier(resumeResp.serviceTier) ?? null;
+              } else if (resumeServiceTierGeneration !== serviceTierMutationGeneration) {
+                void pushThreadSettings({ serviceTier: mutableServiceTier ?? null });
+              }
+              turnParams.effort = clampEffortForCodex(mutableModel, mutableEffort);
+              if (mutableModel && mutableModel !== 'gpt-5') {
+                turnParams.model = mutableModel;
+              } else {
+                delete turnParams.model;
+              }
+              // 恢复路径可能把 'gpt-5' 哨兵解析成具体路由模型 —— 重投的 turn 用的是新值,
+              // 窗口归属必须跟着改写走, 否则查不到目录条目、沿用 app-server 的基础模型窗口。
+              activeTurnModel = mutableCatalogModel;
+              activeTurnProviderId = mutableProviderId;
+              if (mutableServiceTier !== undefined) {
+                turnParams.serviceTier = mutableServiceTier ?? null;
+              } else {
+                delete turnParams.serviceTier;
+              }
+              if (turnParams.collaborationMode) {
+                turnParams.collaborationMode.settings.model = mutableModel;
+                turnParams.collaborationMode.settings.reasoning_effort =
+                  clampEffortForCodex(mutableModel, mutableEffort);
+              }
+              readonlyReferencesProfileActive = 'permissions' in turnThreadWorkspaceConfig;
+              threadMayHaveRollout = true;
+              if (collaborationMode?.mode === 'default') {
+                planModeDefaultMarkerNeeded = true;
+                if (turnParams.collaborationMode?.mode === 'default') {
+                  turnParams.collaborationMode.settings.developer_instructions = null;
                 }
               }
-              log.info(
-                "thread/resume after stale daemon ok, retrying turn/start",
-                { threadId },
-              );
-              const resp = await host.request<TurnStartResponse>(
-                Method.TurnStart,
-                turnParams,
-              );
-              markCollaborationModeAccepted();
-              if (
-                rejectClosedOrCancelledSend(sendOpts, "after turn/start retry")
-              ) {
+              log.info('thread/resume after stale daemon ok, retrying turn/start', { threadId });
+              const resp = await host.request<TurnStartResponse>(Method.TurnStart, turnParams, {
+                timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS,
+              });
+              markTurnConfigAccepted();
+              adoptUnidentifiedDeadTurn(resp, initialStartSeq);
+              if (rejectClosedOrCancelledSend(sendOpts, 'after turn/start retry')) {
+                abandonBufferedTurns('send cancelled after turn/start retry');
                 return;
               }
-              handleTurnStartResp(resp);
+              handleTurnStartResp(resp, initialStartSeq);
+              initialStartSettledOk = true;
             } catch (retryErr) {
               if (isLocalAcceptBoundaryError(retryErr)) throw retryErr;
-              log.error("thread/resume + retry turn/start failed", {
+              log.error('thread/resume + retry turn/start failed', {
                 originalError: String(e),
                 retryError: String(retryErr),
               });
@@ -5305,71 +8665,115 @@ export class CodexAgent extends BaseAgent {
             finalErr = e;
           }
         } finally {
-          isTurnStartPending = false;
+          // 条目即将被删, 先把"已由取消收口"取出来供下面的 finalErr 分支判断。
+          const initialStartEntry = inFlightStarts.get(initialStartSeq);
+          initialStartSettledByCancel = initialStartEntry?.terminalSettled === true;
+          if (
+            !initialStartSettledOk
+            && overloadRetry?.sendGen === mySendGen
+          ) {
+            overloadRetry.pendingHttpRecovery = null;
+          }
+          // 先注销本次请求(isTurnStartPending 由登记表重算) —— 无条件置 false 会在两个
+          // start 并存时清掉属于**另一个**请求的状态(review #844 codex P1)。注销必须早于
+          // flush: 后者按 idle 与否决定是否放行缓存的终态。
+          endTurnStart(initialStartSeq);
           pendingTurnStartPlanMode = null;
           flushDeferredTerminalTurnCompletionsIfIdle();
+          // 初始 RPC 已 settle → 现在才允许重投计时器排上（顺序见
+          // inFlightStarts 的注释）。终失败路径 settledOk 为 false，不补排；那条由下面的
+          // discardOverloadRetry + terminal error 收口。
+          const armedState = overloadRetry;
+          if (armedState) {
+            // rpcSettledOk 的本意是"我这次 RPC 失败了, 别在推终态之外再排一个计时器"。
+            // 但延后的那条失败可能属于**另一轮仍然活着的** send(它的容量错误在我还在飞时
+            // 到达, 于是只被记账): 那一轮的命运与我这次 RPC 成败无关, 用我的失败去压掉它
+            // 会让它既不重投也不收口(写本轮回归用例时实测到, review 未提)。
+            const ownedByThisSend = armedState.sendGen === mySendGen;
+            rescheduleDeferredCapacityFailure(
+              armedState,
+              ownedByThisSend ? initialStartSettledOk : true,
+            );
+          }
         }
         if (finalErr) {
+          // 容量通知可能先于本次 turn/start 响应到达(协议允许的乱序), 那时重投
+          // 计时器已经排上。原始请求随后终失败 → 下面会推 terminal error + Done,
+          // UI 与调用方都已按失败处理; 若不把重投一起废掉, 计时器到点会重投一条
+          // 已判失败的消息, 副作用在用户看不到的地方执行(review #844 codex P1)。
+          // 只废弃**属于本轮**的重投状态: Stop 之后下一轮 send 可能已经装上了自己的
+          // overloadRetry, 无条件 discard 会把它连同它记账的延后失败一起清掉 —— 那一轮
+          // 于是既不重投也不收口(review #844 codex P1)。
+          if (overloadRetry?.sendGen === mySendGen) {
+            discardOverloadRetry('original turn/start failed');
+          }
           // 计划模式: turn 从未启动就终失败 → 结束半开循环(与 turnCompleted 的
           // failed 分支同语义), 否则 planCycleActive 泄漏, 下一条常规消息仍会
           // 携带 collaborationMode plan(勾选与 chip 早已熄灭, 行为与 UI 脱节)。
-          if (planCycleActive) {
-            planCycleActive = false;
-            proposedPlanText = null;
-            currentTurnPlanModeActive = false;
-            log.debug("turn/start failed during plan cycle — plan cycle ends");
+          endPlanCycleAfterPreStartFailure('turn/start failed');
+          // RPC 级失败(超时/拒绝)不代表 server 没建 turn — daemon 可能已接受
+          // turn/start 只是响应没回来。立孤儿守卫: 之后迟到的 turnStarted 不得
+          // 重新激活会话 (greptile P1: 已报终态错误的会话又回到 generating)。
+          // turnStarted 也可能已先于响应到达并被接受 (started-before-resp 是
+          // 协议允许的乱序) — 此时 currentTurnId/isTurnInFlight 已置位, 失败
+          // 收口必须把这个活跃 turn 一起收掉; 缓冲的歧义 started 同样坐实成孤儿
+          // (greptile R6 P1 + codex R9 P2)。细节见 helper 顶注。
+          quarantineTurnsAfterStartFailure('original turn/start failed', {
+            ownsSession: sendGeneration === mySendGen,
+          });
+          log.error('turn/start failed', { error: String(finalErr) });
+          // Stop / 撤单已经为这一轮推过终态时不得再推一组: 否则取消被改报成"启动失败",
+          // 且 coordinator / 活动状态 / goal 会对同一个 turn 收口两次
+          // (review #844 greptile P1)。
+          if (initialStartSettledByCancel) {
+            log.info('turn/start failure suppressed — this send was already settled by cancel', {
+              threadId,
+            });
+          } else {
+            eventQueue.push({
+              type: 'error',
+              data: { message: `turn/start failed: ${String(finalErr)}`, isTerminal: true },
+              source: 'codex',
+            });
+            eventQueue.push({
+              type: 'status',
+              data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+              source: 'codex',
+            });
           }
-          log.error("turn/start failed", { error: String(finalErr) });
-          eventQueue.push({
-            type: "error",
-            data: {
-              message: `turn/start failed: ${String(finalErr)}`,
-              isTerminal: true,
-            },
-            source: "codex",
-          });
-          eventQueue.push({
-            type: "status",
-            data: {
-              status: "Done",
-              ...usageTracker.snapshot(),
-              isRunning: false,
-            },
-            source: "codex",
-          });
           if (sendOpts?.throwOnStartFailure) {
             throw new Error(`Codex turn/start failed: ${String(finalErr)}`);
           }
         }
-        if (rejectClosedOrCancelledSend(sendOpts, "before resolving send")) {
+        if (rejectClosedOrCancelledSend(sendOpts, 'before resolving send')) {
           return;
         }
       },
 
       async steer(message: UserMessage, sendOpts?: SendOptions) {
-        rejectIfCancelled(sendOpts, "steer");
-        assertCurrentHost("turn/steer");
+        rejectIfCancelled(sendOpts, 'steer');
+        assertCurrentHost('turn/steer');
         if (closed) {
-          log.warn("steer called on closed session");
-          throw new Error("No active Codex turn to steer: session is closed");
+          log.warn('steer called on closed session');
+          throw new Error('No active Codex turn to steer: session is closed');
         }
         const steeredTurnId = currentTurnId;
         if (!isTurnInFlight || !steeredTurnId) {
-          throw new Error("No active Codex turn to steer");
+          throw new Error('No active Codex turn to steer');
         }
         // Validate content before steering. `toTurnInput` can touch local
         // files/images; if that fails, leaving the current turn untouched is
         // better than sending a broken 插话.
         const input = await toTurnInput(message.content);
-        rejectIfCancelled(sendOpts, "steer");
+        rejectIfCancelled(sendOpts, 'steer');
         if (closed) {
-          throw new Error("No active Codex turn to steer: session is closed");
+          throw new Error('No active Codex turn to steer: session is closed');
         }
         if (!isTurnInFlight || currentTurnId !== steeredTurnId) {
           // Conversion can take long enough for a fast turn to finish. Do not
           // silently route a stale 插话 into a later turn; renderer keeps the
           // original queue/composer content and can retry through the normal path.
-          throw new Error("No active Codex turn to steer");
+          throw new Error('No active Codex turn to steer');
         }
         // 同轮注入(2026-07-12 产品决策,与 Claude 对齐):turn/steer 把消息追加进
         // in-flight turn,不打断当前工作,模型在下一个工具调用边界消化这条输入
@@ -5378,10 +8782,11 @@ export class CodexAgent extends BaseAgent {
         // 没有被打断,它们仍然有效。
         // (历史:2026-06 曾以「模型继续旧工具计划」为由改成 interrupt+follow-up,
         // 那正是注入语义的预期行为,现按统一产品决策回归注入。)
-        // expectedTurnId 是 stale-client 防线:server 端 turn 已结束时报
-        // "no active turn to steer" 而不是伪装成功,coordinator 按 NO_ACTIVE_TURN
-        // fallback 成普通派发,消息不丢。
-        log.debug("steer ▶ inject into active turn", {
+        // expectedTurnId 是 stale-client 防线:server 端 turn 已结束时会报
+        // "no active turn to steer",或在当前已有另一 turn 时报告 expected/found
+        // id 不匹配。后者同样是明确的 pre-accept 拒绝,需归一化为 no-active-turn,
+        // 让 coordinator fallback 成普通派发,消息不丢。
+        log.debug('steer ▶ inject into active turn', {
           threadId,
           turnId: steeredTurnId,
         });
@@ -5398,13 +8803,25 @@ export class CodexAgent extends BaseAgent {
         // 据此把该行保留为**暂停队列**交用户决策、不自动重派,堵住"已注入 +
         // turn 结束后队列再发一遍"的重复消费;这里同时给在飞 RPC 挂
         // late-resolution 观察,迟到结果留日志现场。
-        assertCurrentHost("turn/steer");
-        const steerRpc = host.request(Method.TurnSteer, {
-          threadId,
-          input,
-          expectedTurnId: steeredTurnId,
-        });
+        assertCurrentHost('turn/steer');
+        const capabilitySelectionText = userMessageText(message.content);
+        const settleCapabilitySteer = registerPendingCapabilitySteer(
+          steeredTurnId,
+          capabilitySelectionText,
+        );
+        let steerRpc: Promise<unknown>;
+        try {
+          steerRpc = host.request(Method.TurnSteer, {
+            threadId,
+            input,
+            expectedTurnId: steeredTurnId,
+          });
+        } catch (error) {
+          settleCapabilitySteer(false);
+          throw error;
+        }
         let ackSettled = false;
+        let capabilitySteerAccepted = false;
         try {
           await new Promise<void>((resolve, reject) => {
             const onAbort = () => {
@@ -5414,38 +8831,25 @@ export class CodexAgent extends BaseAgent {
               // coordinator 的 Stop 语义已把队列置为暂停保留 / 显式清空的用户
               // 可控态,这里留 warn 现场 + 交给下方 late-resolution 观察器,
               // 文案保留 'cancelled before acceptance' 前缀(测试与日志兼容)。
-              log.warn(
-                "turn/steer aborted while request in flight; delivery uncertain",
-                {
-                  threadId,
-                  turnId: steeredTurnId,
-                },
-              );
-              reject(
-                new Error(
-                  "Codex steer cancelled before acceptance; delivery uncertain (request already dispatched)",
-                ),
-              );
+              log.warn('turn/steer aborted while request in flight; delivery uncertain', {
+                threadId,
+                turnId: steeredTurnId,
+              });
+              reject(new Error('Codex steer cancelled before acceptance; delivery uncertain (request already dispatched)'));
             };
             const timer = setTimeout(() => {
               cleanup();
-              reject(
-                new Error(
-                  `Codex turn/steer did not acknowledge within ${STEER_ACK_TIMEOUT_MS}ms`,
-                ),
-              );
+              reject(new Error(`Codex turn/steer did not acknowledge within ${STEER_ACK_TIMEOUT_MS}ms`));
             }, STEER_ACK_TIMEOUT_MS);
             const cleanup = () => {
               clearTimeout(timer);
-              sendOpts?.signal?.removeEventListener("abort", onAbort);
+              sendOpts?.signal?.removeEventListener('abort', onAbort);
             };
             if (sendOpts?.signal?.aborted) {
               onAbort();
               return;
             }
-            sendOpts?.signal?.addEventListener("abort", onAbort, {
-              once: true,
-            });
+            sendOpts?.signal?.addEventListener('abort', onAbort, { once: true });
             steerRpc.then(
               () => {
                 cleanup();
@@ -5458,20 +8862,37 @@ export class CodexAgent extends BaseAgent {
             );
           });
           ackSettled = true;
+          capabilitySteerAccepted = true;
+        } catch (error) {
+          if (isExpectedTurnIdMismatchError(error)) {
+            // app-server 已明确拒绝该 stale expectedTurnId,消息没有注入其它 turn。
+            // 标记 RPC 已 settle,避免把这类确定性拒绝误当成 timeout/abort 在飞请求。
+            ackSettled = true;
+            throw new Error('No active Codex turn to steer', { cause: error });
+          }
+          throw error;
         } finally {
+          // Only an authoritative ACK may extend this turn's explicit source
+          // selection. Requests emitted before that ACK wait on this entry;
+          // rejection/timeout/abort releases them against the previous state.
+          settleCapabilitySteer(capabilitySteerAccepted);
           if (!ackSettled) {
             // 超时 / abort 后请求仍在飞:迟到成功说明消息已注入但上层已按失败
             // 处理(队列行被暂停保留),留 warn 现场供排查;迟到失败静默吞掉,
             // 防 unhandled rejection。
             steerRpc.then(
               () => {
-                log.warn(
-                  "turn/steer acknowledged after local timeout/abort; message may already be injected",
-                  {
-                    threadId,
-                    turnId: steeredTurnId,
-                  },
+                // The timeout/abort already released waiting MCP requests
+                // against the previous selection. A later authoritative ACK
+                // must still update subsequent requests while this turn lives.
+                recordAcceptedCapabilitySteer(
+                  steeredTurnId,
+                  capabilitySelectionText,
                 );
+                log.warn('turn/steer acknowledged after local timeout/abort; message may already be injected', {
+                  threadId,
+                  turnId: steeredTurnId,
+                });
               },
               () => {},
             );
@@ -5484,27 +8905,66 @@ export class CodexAgent extends BaseAgent {
         // "steer activeTurn 等不到终态事件"的收口责任在 coordinator 侧:它在
         // accepted 落库后自查 isTurnRunning,已终结则立即合成收口,队列不冻结。
         if (!isTurnInFlight || currentTurnId !== steeredTurnId) {
-          log.info(
-            "turn/steer acknowledged after local turn end; treated as delivered",
-            {
-              threadId,
-              turnId: steeredTurnId,
-            },
-          );
+          log.info('turn/steer acknowledged after local turn end; treated as delivered', {
+            threadId,
+            turnId: steeredTurnId,
+          });
         }
+        setAutoReviewIntent(message.content);
       },
 
       async abort() {
-        if (closed || !currentTurnId) return;
-        if (skipIfStaleHost("turn/interrupt")) return;
-        dismissPendingUserInputForTurn(currentTurnId, "turn_interrupted");
-        try {
-          await host.request(Method.TurnInterrupt, {
-            threadId,
-            turnId: currentTurnId,
+        clearReconnectStall();
+        // 用户点 Stop = 明确不想继续这一轮，挂起的过载重投必须一起撤掉。
+        // 放在 currentTurnId 判空之前：重投等待期间 turn 已死、currentTurnId 为
+        // null，此时正是最需要响应 Stop 的时刻（否则计时器到点又发一个新 turn）。
+        const hadPendingRetry = overloadRetryPending();
+        discardOverloadRetry('aborted');
+        if (closed) return;
+        // 有挂起重投时的 Stop **必须**由这里显式收口逻辑 turn —— desktop 的
+        // SessionTurnActivityTracker 只在收到终态事件后才释放派发闩，Codex
+        // coordinator 也刻意等这个事件而不自己解锁，hook runner 同样等到一小时硬
+        // 超时才罢休。不发的话会话永久忙、后续消息无法派发（review #844 codex P1）。
+        //
+        // 两种排序都要覆盖:
+        //  - 退避等待中: server 侧没有 turn 可 interrupt (currentTurnId 为 null);
+        //  - 重投的 turnStarted 已先于它的响应到达: currentTurnId 非空, 但**不能**
+        //    像普通 Stop 那样把收口交给 turn/completed —— 随后到达的重投响应会走
+        //    cancelledMidFlight 把同一个 id 落墓碑, handleTurnCompleted 于是把唯一
+        //    那条完成事件压掉, 派发闩永远不释放（review #844 codex P1）。这里自己
+        //    落墓碑 + interrupt + 推终态, 保证恰好一次收口。
+        if (hadPendingRetry) {
+          teardownActiveTurnForCancellation('stopped while an automatic retry was pending');
+          markInFlightStartsTerminallySettled();
+          // turn/start 还在飞时按下 Stop: 这里马上会推终态事件, 而那个 RPC 的响应随后
+          // 才回来。不武装隔离的话 handleTurnStartResp 会照常激活它 —— 用户看到
+          // 「已停止」, 工具还在跑(review #844 codex P1)。
+          quarantineAllInFlightStarts();
+          eventQueue.push({
+            type: 'error',
+            data: {
+              message: 'Codex turn stopped while waiting for an automatic retry',
+              isTerminal: true,
+              reason: 'codex-turn-replay-retry-aborted',
+            },
+            source: 'codex',
           });
+          eventQueue.push({
+            type: 'status',
+            data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+            source: 'codex',
+          });
+          return;
+        }
+        if (!currentTurnId) return;
+        if (skipIfStaleHost('turn/interrupt')) return;
+        // 中断已在进行:收 idle 表,别让 watchdog 在收口窗口里再开一次火。
+        resetUpstreamIdleForTurnEnd();
+        dismissPendingUserInputForTurn(currentTurnId, 'turn_interrupted');
+        try {
+          await host.request(Method.TurnInterrupt, { threadId, turnId: currentTurnId });
         } catch (e) {
-          log.warn("turn/interrupt threw", { error: String(e) });
+          log.warn('turn/interrupt threw', { error: String(e) });
         }
       },
 
@@ -5513,41 +8973,7 @@ export class CodexAgent extends BaseAgent {
       },
 
       async close() {
-        if (closed) return;
-        closed = true;
-        unregisterCodexMcpContext(threadId);
-        // 把挂起的 approval 强制 deny + emit interaction_dismissed (UI 关 dialog),
-        // 否则 server 那边没回 response 会卡; UI 上的 PermissionPrompt 也会留尸
-        try {
-          dismissAllPending("session_closed", "deny");
-        } catch (e) {
-          log.warn("dismissAllPending threw", { error: String(e) });
-        }
-        try {
-          dismissAllPendingUserInput("session_closed");
-        } catch (e) {
-          log.warn("dismissAllPendingUserInput threw", { error: String(e) });
-        }
-        try {
-          stopActiveRolloutPlanFallback();
-        } catch (e) {
-          log.warn("stop rollout plan fallback threw", { error: String(e) });
-        }
-        try {
-          // The subscription contract is currently typed as void, but app-server
-          // implementations may return a promise while unsubscribing. Attach a
-          // rejection handler without making session close wait on the server.
-          void Promise.resolve(subscription?.release()).catch((e) => {
-            log.warn("release threw", { error: String(e) });
-          });
-        } catch (e) {
-          log.warn("release threw", { error: String(e) });
-        }
-        try {
-          eventQueue.end();
-        } catch (e) {
-          log.warn("eventQueue.end threw", { error: String(e) });
-        }
+        await closeSessionHandle();
       },
 
       events(): AsyncIterable<AgentEvent> {
@@ -5563,15 +8989,48 @@ export class CodexAgent extends BaseAgent {
       },
 
       // ── Phase 3: 运行时切换 (下一 turn 才生效, 内部已是 mutable 闭包) ──
-      async setModel(newModel: string) {
-        if (newModel === mutableModel) return; // 去重: 值没变不重推 (renderer 单次切换会全量重调 set*)
-        log.debug("setModel", { from: mutableModel, to: newModel });
+      async setModel(newModel: string, setOpts?: { providerId?: string | null }) {
+        // provider 可能在 model 不变时单独切换(同一 id 换路由), 所以先记 provider 再做 model 去重。
+        // 窗口上限按 (provider, model) 解析, 漏掉这一步会让后续 turn 拿新模型去问旧路由。
+        const prevProviderId = mutableProviderId;
+        if (setOpts && Object.hasOwn(setOpts, 'providerId')) mutableProviderId = setOpts.providerId;
+        if (newModel === mutableModel) {
+          if (mutableProviderId !== prevProviderId) {
+            autoReviewDecisionCache.clear();
+            autoReviewUnavailableNotice.reset();
+            refreshCodexAutoReviewerRoute(threadId);
+          }
+          return;
+        }
+        const prevModel = mutableModel;
+        const prevCatalogModel = mutableCatalogModel;
+        log.debug('setModel', { from: mutableModel, to: newModel, providerId: mutableProviderId ?? null });
         mutableModel = newModel;
-        // thread 已启动 → 立即经 thread/settings/update 推给 server (sticky); 未启动则由
-        // 首个 thread/start 携带。沿用 turn/start 的 'gpt-5'=server 默认哨兵约定 (省略),
-        // 避免把占位 model id 发给 server。失败时 turn/start 透传仍是兜底。
-        if (newModel && newModel !== "gpt-5")
-          await pushThreadSettings({ model: newModel });
+        autoReviewDecisionCache.clear();
+        // 换模型 / 换路由可能正好修掉了审阅器不可用的原因;换完又不可用值得再提醒一次。
+        autoReviewUnavailableNotice.reset();
+        // 用户显式选的一定是目录 id(选择器就是从目录渲染的)。
+        mutableCatalogModel = newModel;
+        try {
+          refreshCodexAutoReviewerRoute(threadId);
+          // thread 已启动 → 立即经 thread/settings/update 推给 server (sticky); 未启动则由
+          // 首个 thread/start 携带。沿用 turn/start 的 'gpt-5'=server 默认哨兵约定 (省略),
+          // 避免把占位 model id 发给 server。失败时 turn/start 透传仍是兜底。
+          if (newModel && newModel !== 'gpt-5') await pushThreadSettings({ model: newModel });
+        } catch (e) {
+          // 抛回调用方前把三个快照恢复原值。host 的 applyRuntimeSetModelChange 在异常分支
+          // 会把 session 的 provider route 恢复成旧值; 我们这边若留着新值, 下一 turn 就会
+          // 走旧路由却按新 (provider, model) 解析窗口上限 —— 两边分叉正是收敛出错的根源。
+          //
+          // 当前**走不到这里**: 上面两个调用各自内部都已 catch(registerCodexReviewer…
+          // 落 warn 后保留安全路由; pushThreadSettings 吞掉 RPC 失败, 靠 turn/start 透传
+          // 兜底)。留这层是结构性防御 —— 以后有人往这段加会抛的步骤时, 快照不会悄悄与
+          // 实际路由分叉。也因为当前不可达, 没有对应单测能触发它。
+          mutableProviderId = prevProviderId;
+          mutableModel = prevModel;
+          mutableCatalogModel = prevCatalogModel;
+          throw e;
+        }
       },
 
       async setEffort(newEffort: Effort) {
@@ -5585,37 +9044,56 @@ export class CodexAgent extends BaseAgent {
       },
 
       async setPermissionMode(newMode: PermissionMode) {
-        log.debug("setPermissionMode", {
-          from: mutablePermissionMode,
-          to: newMode,
-        });
+        log.debug('setPermissionMode', { from: mutablePermissionMode, to: newMode });
+        // 用户自己动过权限档 → 一次性提示重新武装(与 Claude 同口径)。
+        // 档位变了 → 连**裁决缓存**一起清。缓存 key 不含 permissionMode,切离 Auto 再切回时
+        // 会命中先前那条 `unavailable` block —— 审阅器早就恢复了,同一个动作还是被拒
+        // (greptile P1 of #1574)。一次性提示同步重新武装:用户既然接管过,之后又不可用
+        // 值得再提醒一次。
+        if (newMode !== mutablePermissionMode) {
+          autoReviewDecisionCache.clear();
+          autoReviewUnavailableNotice.reset();
+        }
         // Full access 才能批量放行挂起的 ask。切到 Auto 时，已有请求不能绕过
-        // app-server reviewer，先 fail-closed 关闭；后续重试会按 auto_review 路由。
-        const allowPending = newMode === "bypassPermissions";
-        dismissAllPending(
-          `permission_mode_changed_to_${newMode}`,
-          allowPending ? "allow" : "deny",
-        );
-        const wasAuto = mutablePermissionMode === "auto";
-        const wasBypass = mutablePermissionMode === "bypassPermissions";
+        // reviewer / 人工降级审批，先 fail-closed 关闭；后续重试按当前路由能力
+        // 选择 auto_review 或 user reviewer。
+        const allowPending = newMode === 'bypassPermissions';
+        dismissAllPending(`permission_mode_changed_to_${newMode}`, allowPending ? 'allow' : 'deny');
+        const wasAuto = mutablePermissionMode === 'auto';
+        const wasBypass = mutablePermissionMode === 'bypassPermissions';
         const wasOpen = wasAuto || wasBypass;
         const tightensCurrentTurn =
-          (newMode === "ask" && wasOpen) || (newMode === "auto" && wasBypass);
+          (newMode === 'ask' && wasOpen) ||
+          (newMode === 'auto' && wasBypass);
         mutablePermissionMode = newMode;
-        // 下一 turn 通过 approvalPolicy + permissions profile / sandboxPolicy 透传。
+        // 下一 turn 通过 approvalPolicy + 已激活的 profile / sandboxPolicy 透传。
         //
         // 收紧兜底 (auto/bypass → ask): 见 interruptTurnForPermissionTighten 顶注。
         // turn id 已知 → 立即中断; turn/start 在飞 (id 未回) → 置标记, 由
         // handleTurnStartResp / turnStarted 在拿到 id 的瞬间补中断。放宽则清标记
         // (收紧后又切回宽松档, 在飞的 turn 无需再中断)。
-        if (!tightensCurrentTurn) {
+        // 过载重投持的是**冻结**策略。只看最近一次转换会漏掉 Full access → Ask →
+        // Auto 这类中间态：Ask→Auto 不算收紧会把标记清掉，而冻结的 Full access 仍然
+        // 比 Auto 宽，重投出来的 turn 就能以 Full access 执行（review #844 codex P1）。
+        // 按严格度排序直接比冻结档与当前档。
+        const retryPolicyLooserThanNow = overloadRetryPolicyLooserThan(newMode);
+        if (!tightensCurrentTurn && !retryPolicyLooserThanNow) {
           pendingTightenInterrupt = false;
-        } else if (!closed && turnLaunchedUnattended) {
-          // 只中断 auto_review / never 发射的 turn; user reviewer 发射的 turn 审批请求
-          // 照常流经本地、收紧即时生效,期间 UI 短暂切过宽松档不构成中断理由。
+        } else if (!closed && (turnLaunchedUnattended || retryPolicyLooserThanNow)) {
+          // 只中断 auto_review / never / Auto policy turn;普通 user reviewer 发射的
+          // turn 审批请求照常流经本地、收紧即时生效,期间 UI 短暂切过宽松档
+          // 不构成中断理由。
+          // retryPolicyLooserThanNow 是过载重投的补充判据: 挂起的重投冻结的是发射时
+          // 那档策略, 只看"最近一次转换算不算收紧"会漏掉 Full access → Ask → Auto
+          // 这类中间态(review #844 codex P1)。
           if (currentTurnId !== null) {
             await interruptTurnForPermissionTighten(currentTurnId);
-          } else if (isTurnStartPending) {
+          } else if (isTurnStartPending || overloadRetry?.timer != null || overloadRetry?.inFlight === true) {
+            // 过载退避等待中 / 重投 RPC 在途时，既没有 currentTurnId 也不一定有
+            // isTurnStartPending，但重投持着的 turnParams 是**收紧之前**冻结的旧
+            // 宽松策略。不置这个标记，重投出来的 turn 会在权限已被撤销后继续执行
+            // 工具（review #844 codex P1）。与 turn/start 在飞的处理同构：标记由
+            // handleTurnStartResp 在拿到 turn id 的瞬间消费并补中断。
             pendingTightenInterrupt = true;
           }
         }
@@ -5624,17 +9102,17 @@ export class CodexAgent extends BaseAgent {
       async setExtraDirs(newDirs: string[]) {
         if (newDirs.length > 0 && !readonlyReferenceDirsSupported) {
           throw new Error(
-            `Codex reference directories require app-server 0.144.6 or newer (current: ${initResp.userAgent ?? "unknown"})`,
+            `Codex reference directories require app-server 0.144.6 or newer (current: ${initResp.userAgent ?? 'unknown'})`,
           );
         }
         mutableExtraDirs = [...newDirs];
-        log.debug("setExtraDirs", { count: mutableExtraDirs.length });
+        log.debug('setExtraDirs', { count: mutableExtraDirs.length });
       },
 
       async setPlanMode(enabled: boolean) {
         if (mutablePlanMode === enabled) return;
         mutablePlanMode = enabled;
-        log.debug("setPlanMode", { enabled });
+        log.debug('setPlanMode', { enabled });
         // 下一 turn 经 turn/start.collaborationMode 生效 (与 permissionMode 同款
         // "下一 turn 透传"语义); 中途关闭时挂起的 plan_review 由用户自行处理。
       },
@@ -5647,11 +9125,9 @@ export class CodexAgent extends BaseAgent {
         // 去重以"fast 是否开启"为准: undefined(未覆盖) / null / 'default' 都视为未开,
         // 重复关 fast 或重复开 fast 不重推 (renderer 单次切换会全量重调 set*)。
         if (isFastServiceTier(mutableServiceTier) === enabled) return;
-        const next: ServiceTier | null = enabled ? "fast" : null;
-        log.debug("setFastMode", {
-          from: mutableServiceTier ?? null,
-          to: next,
-        });
+        const next: ServiceTier | null = enabled ? 'fast' : null;
+        log.debug('setFastMode', { from: mutableServiceTier ?? null, to: next });
+        serviceTierMutationGeneration += 1;
         mutableServiceTier = next;
         // thread 已启动 → 立即经 thread/settings/update 生效 (serviceTier 双 Option:
         // 'fast'=开 / null=清空 standard); 未启动则由首个 thread/start 携带。server 端
@@ -5665,7 +9141,10 @@ export class CodexAgent extends BaseAgent {
         // host bridge see runtime Orca role/workflow updates by reference.
         Object.assign(vo, patch);
         registerCodexMcpContext(threadId);
-        log.debug("setVendorOptions", {
+        for (const descendantThreadId of descendantMcpThreadIds) {
+          registerCodexMcpContext(descendantThreadId);
+        }
+        log.debug('setVendorOptions', {
           patchKeys: Object.keys(patch),
         });
       },
@@ -5686,23 +9165,18 @@ export class CodexAgent extends BaseAgent {
       },
 
       async commitRewindFiles(_userUuid, _priorAssistantUuid, rewindOpts) {
-        const tailTurnsToDrop = normalizeTailTurnsToDrop(
-          rewindOpts?.tailTurnsToDrop,
-        );
+        const tailTurnsToDrop = normalizeTailTurnsToDrop(rewindOpts?.tailTurnsToDrop);
         if (tailTurnsToDrop <= 0) {
-          log.warn(
-            "commitRewindFiles called without tailTurnsToDrop; skipping thread/rollback",
-            {
-              threadId,
-            },
-          );
+          log.warn('commitRewindFiles called without tailTurnsToDrop; skipping thread/rollback', {
+            threadId,
+          });
           return { sdkSessionId: threadId };
         }
-        log.info("commitRewindFiles ▶ thread/rollback", {
+        log.info('commitRewindFiles ▶ thread/rollback', {
           threadId,
           tailTurnsToDrop,
         });
-        assertCurrentHost("thread/rollback");
+        assertCurrentHost('thread/rollback');
         const rollbackResp = await host.request<ThreadRollbackResponse>(
           Method.ThreadRollback,
           { threadId, numTurns: tailTurnsToDrop } as ThreadRollbackParams,
@@ -5710,21 +9184,16 @@ export class CodexAgent extends BaseAgent {
         const previousThreadId = threadId;
         const nextThreadId = rollbackResp.thread.id || previousThreadId;
         if (nextThreadId !== previousThreadId) {
-          try {
-            await subscription?.release();
-          } catch {
-            // no-op: stale subscription cleanup should not fail a successful rollback.
+          const released = await releaseCurrentThreadSubscription('thread/rollback subscription release');
+          if (!released) {
+            throw staleHostError('thread/rollback subscription cleanup');
           }
           unregisterCodexMcpContext(previousThreadId);
           if (closed) {
-            try {
-              await host.unsubscribeThread(nextThreadId);
-            } catch (e) {
-              log.warn('thread/unsubscribe replacement after close threw', {
-                error: String(e),
-                threadId: nextThreadId,
-              });
-            }
+            await unsubscribeDetachedThread(
+              nextThreadId,
+              'thread/rollback replacement cleanup after close',
+            );
             log.info('commitRewindFiles discarded replacement after concurrent close', {
               previousThreadId,
               nextThreadId,
@@ -5733,23 +9202,20 @@ export class CodexAgent extends BaseAgent {
           }
           threadId = nextThreadId;
           sdkSessionId = nextThreadId;
+          readonlyReferencesProfileActive = false;
+          threadMayHaveRollout = true;
           subscription = host.subscribeThread(threadId, handlers);
           registerCodexMcpContext(threadId);
-          registerCodexDeveloperInstructions(
-            threadId,
-            registeredDeveloperInstructions,
-          );
-          eventQueue.push({
-            type: "session_id",
-            data: sdkSessionId,
-            source: "codex",
-          });
+          refreshCodexAutoReviewerRoute(threadId);
+          registerCodexDeveloperInstructions(threadId, registeredDeveloperInstructions);
+          eventQueue.push({ type: 'session_id', data: sdkSessionId, source: 'codex' });
         } else {
           sdkSessionId = threadId;
+          threadMayHaveRollout = true;
         }
         currentTurnId = null;
         isTurnInFlight = false;
-        log.info("commitRewindFiles ◀ thread/rollback done", {
+        log.info('commitRewindFiles ◀ thread/rollback done', {
           threadId,
           tailTurnsToDrop,
         });
@@ -5757,7 +9223,21 @@ export class CodexAgent extends BaseAgent {
       },
 
       isTurnRunning() {
-        return isTurnInFlight;
+        // 本方法是 Session.send() 的 in-flight guard 判据（另见上方 turn/start
+        // 失败收口处的注释）。过载重投把这一轮拆成了两段 app-server 侧「没有活着
+        // 的 turn」但逻辑上没结束的窗口，只看 isTurnInFlight 都会漏：并发 send
+        // 被误接受后，send() 开头的 cancelOverloadRetry 会把原消息静默丢掉。
+        //
+        // 三种状态见 overloadRetryPending 的注释(退避等待 / RPC 在途 / 失败已延后
+        // 等补排)。漏掉"已延后"那种时, Session.send() 会把会话当 idle 接受第二条
+        // 消息, 把第一条的重投状态连同它仍在飞的原始 RPC 一起丢掉
+        // (review #844 codex P1)。三者都在 retry() 的 finally /
+        // rescheduleDeferredCapacityFailure / cancelOverloadRetry 里必定复位。
+        // **不把 `isTurnStartPending` 一起算进来**：正常 send 路径上它必须保持
+        // idle 语义——终态先于 turn/start 响应到达时（协议允许的乱序），
+        // coordinator 要看到 idle 才能收口，否则 send 挂死（既有用例
+        // "accepts terminal error before TurnStartResponse…" 锁的就是这条）。
+        return isTurnInFlight || overloadRetryPending();
       },
     };
 
@@ -5775,10 +9255,7 @@ export class CodexAgent extends BaseAgent {
    * opts.upToMessageId 在 Codex 这里被忽略。uuidMap 返回空 — Codex agentMeta 不存
    * message uuid, maker 那边也找不到东西可 remap, 不会 break。
    */
-  private async findRolloutPath(
-    threadId: string,
-    preferredPath?: string,
-  ): Promise<string> {
+  private async findRolloutPath(threadId: string, preferredPath?: string): Promise<string> {
     if (preferredPath && !isRemoteLikePath(preferredPath)) {
       try {
         const stat = await fs.stat(preferredPath);
@@ -5790,18 +9267,18 @@ export class CodexAgent extends BaseAgent {
     }
     const codexHome = this.codexHome;
     if (!codexHome || isRemoteLikePath(codexHome)) {
-      throw new Error("Codex rollout path is unavailable for this session");
+      throw new Error('Codex rollout path is unavailable for this session');
     }
 
     const roots = [
-      path.join(codexHome, "sessions"),
-      path.join(codexHome, "archived_sessions"),
+      path.join(codexHome, 'sessions'),
+      path.join(codexHome, 'archived_sessions'),
     ];
-    let bestPath = "";
+    let bestPath = '';
     let bestMtimeMs = -1;
 
     const visit = async (dir: string): Promise<void> => {
-      let entries: Array<import("node:fs").Dirent>;
+      let entries: Array<import('node:fs').Dirent>;
       try {
         entries = await fs.readdir(dir, { withFileTypes: true });
       } catch {
@@ -5814,11 +9291,7 @@ export class CodexAgent extends BaseAgent {
           continue;
         }
         if (!entry.isFile()) continue;
-        if (
-          !entry.name.startsWith("rollout-") ||
-          !entry.name.endsWith(`${threadId}.jsonl`)
-        )
-          continue;
+        if (!entry.name.startsWith('rollout-') || !entry.name.endsWith(`${threadId}.jsonl`)) continue;
         const stat = await fs.stat(full);
         if (stat.mtimeMs > bestMtimeMs) {
           bestPath = full;
@@ -5836,53 +9309,86 @@ export class CodexAgent extends BaseAgent {
     return bestPath;
   }
 
-  private async createSafeForkRolloutCopy(
-    threadId: string,
-    preferredPath?: string,
-  ): Promise<string> {
+  private async createSafeForkRolloutCopy(threadId: string, preferredPath?: string): Promise<string> {
     const sourcePath = await this.findRolloutPath(threadId, preferredPath);
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xdt-codex-fork-"));
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'xdt-codex-fork-'));
     const copyPath = path.join(tempDir, path.basename(sourcePath));
-    const text = await fs.readFile(sourcePath, "utf8");
+    const text = await fs.readFile(sourcePath, 'utf8');
     const out = text
       .split(/\r?\n/)
       .filter((line) => !line.trim() || !hasUnsafeForkRolloutPayload(line))
-      .join("\n");
-    await fs.writeFile(
-      copyPath,
-      out.endsWith("\n") || out.length === 0 ? out : `${out}\n`,
-      "utf8",
-    );
+      .join('\n');
+    await fs.writeFile(copyPath, out.endsWith('\n') || out.length === 0 ? out : `${out}\n`, 'utf8');
     return copyPath;
   }
 
-  async forkSdkSession(
-    opts: ForkSdkSessionOptions,
-  ): Promise<ForkSdkSessionResult> {
-    const log = this.deps.logger.child("codex/fork");
+  async forkSdkSession(opts: ForkSdkSessionOptions): Promise<ForkSdkSessionResult> {
+    const log = this.deps.logger.child('codex/fork');
     const tailTurnsToDrop = normalizeTailTurnsToDrop(opts.tailTurnsToDrop);
     let stripCopyPath: string | undefined;
-    log.info("forkSdkSession ▶", {
+    let utilityHostKey: string | undefined;
+    let utilityHost: AppServerHost | undefined;
+    let utilityHostGeneration: number | undefined;
+    let utilityHostWasRegistered = false;
+    const createdThreadIds = new Set<string>();
+    const cleanupCreatedThreads = async (): Promise<void> => {
+      if (!utilityHost || !utilityHostKey || createdThreadIds.size === 0) return;
+      for (const threadId of createdThreadIds) {
+        try {
+          // Codex 0.145 keeps a forked child loaded in the shared app-server.
+          // Unload it before the new Cindy Session resumes with its own MCP
+          // instance URL; otherwise thread/resume.config is ignored and the
+          // child remains bound to the utility host's spawn-level URL.
+          await utilityHost.unsubscribeThread(threadId);
+        } catch (error) {
+          const reason = `Codex fork child ${threadId} could not be unloaded safely`;
+          log.warn('fork child cleanup failed; retiring shared app-server', {
+            threadId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          try {
+            await this.retireHostKey(utilityHostKey, reason, {
+              failIfActive: false,
+              logPrefix: 'codex fork child cleanup',
+              ...(utilityHostWasRegistered ? { expectedHost: utilityHost } : {}),
+              ...(utilityHostGeneration !== undefined
+                ? { expectedGeneration: utilityHostGeneration }
+                : {}),
+            });
+          } catch (retireError) {
+            log.warn('fork child cleanup host retire threw', {
+              threadId,
+              error: retireError instanceof Error ? retireError.message : String(retireError),
+            });
+          }
+          throw error;
+        }
+      }
+      createdThreadIds.clear();
+    };
+    log.info('forkSdkSession ▶', {
       sourceSdkSessionId: opts.sourceSdkSessionId,
       upToMessageId: opts.upToMessageId,
       tailTurnsToDrop,
       stripEncryptedReasoning: opts.stripEncryptedReasoning === true,
-      note: "Codex 精确 fork: thread/fork 后按需 thread/rollback 新 thread 尾部 turn",
+      note: 'Codex 精确 fork: thread/fork 后按需 thread/rollback 新 thread 尾部 turn',
     });
     try {
-      const { host } = await this.getUtilityHost();
+      const utility = await this.getUtilityHost();
+      utilityHostKey = utility.key;
+      utilityHost = utility.host;
+      utilityHostGeneration = this.hostGenerations.get(utility.key) ?? 0;
+      utilityHostWasRegistered = this.hosts.get(utility.key) === utility.host;
+      const { host } = utility;
       await host.ensureStarted();
       // Imported Codex threads may still live under another CODEX_HOME. Resume
       // already asks the desktop host to link/adopt their state and rollout;
       // fork must cross the same preparation boundary before thread/fork or the
       // utility app-server cannot resolve a freshly imported thread.
-      const preparedRolloutResult = await this.deps.prepareCodexResumeSession?.(
-        opts.sourceSdkSessionId,
-      );
-      const preparedRolloutPath =
-        typeof preparedRolloutResult === "string"
-          ? preparedRolloutResult
-          : undefined;
+      const preparedRolloutResult = await this.deps.prepareCodexResumeSession?.(opts.sourceSdkSessionId);
+      const preparedRolloutPath = typeof preparedRolloutResult === 'string'
+        ? preparedRolloutResult
+        : undefined;
       // 选项名沿用历史语义;安全副本同时会丢弃会让 Responses fork/retry 失败的坏历史 payload。
       if (opts.stripEncryptedReasoning) {
         stripCopyPath = await this.createSafeForkRolloutCopy(
@@ -5896,11 +9402,9 @@ export class CodexAgent extends BaseAgent {
         ...(stripCopyPath ? { path: stripCopyPath } : {}),
         ...(opts.workingDir ? { cwd: opts.workingDir } : {}),
       };
-      const resp = await host.request<ThreadForkResponse>(
-        Method.ThreadFork,
-        params,
-      );
+      const resp = await host.request<ThreadForkResponse>(Method.ThreadFork, params);
       let newSdkSessionId = resp.thread.id;
+      createdThreadIds.add(newSdkSessionId);
       if (tailTurnsToDrop > 0) {
         const rollbackParams: ThreadRollbackParams = {
           threadId: newSdkSessionId,
@@ -5910,20 +9414,24 @@ export class CodexAgent extends BaseAgent {
           Method.ThreadRollback,
           rollbackParams,
         );
-        newSdkSessionId = rollbackResp.thread.id || newSdkSessionId;
+        const rollbackThreadId = rollbackResp.thread.id || newSdkSessionId;
+        createdThreadIds.add(rollbackThreadId);
+        newSdkSessionId = rollbackThreadId;
       }
-      log.info("forkSdkSession ◀", { newSdkSessionId, tailTurnsToDrop });
+      log.info('forkSdkSession ◀', { newSdkSessionId, tailTurnsToDrop });
       return { newSdkSessionId, uuidMap: new Map() };
     } finally {
-      if (stripCopyPath) {
-        await fs
-          .rm(path.dirname(stripCopyPath), { recursive: true, force: true })
-          .catch((err) => {
-            log.warn("strip encrypted rollout temp cleanup failed", {
+      try {
+        await cleanupCreatedThreads();
+      } finally {
+        if (stripCopyPath) {
+          await fs.rm(path.dirname(stripCopyPath), { recursive: true, force: true }).catch((err) => {
+            log.warn('strip encrypted rollout temp cleanup failed', {
               path: stripCopyPath,
               err: err instanceof Error ? err.message : String(err),
             });
           });
+        }
       }
     }
   }
@@ -5933,7 +9441,7 @@ export class CodexAgent extends BaseAgent {
    * SSH-bridged 各一份)。Windows 不会随父进程死, 必须显式收割。幂等。
    */
   async dispose(): Promise<void> {
-    this.deps.logger.error("codex dispose called", {
+    this.deps.logger.error('codex dispose called', {
       hostCount: this.hosts.size,
       inflightCount: this.hostPromises.size,
       createHostSeqByKey: Object.fromEntries(this.createHostSeqByKey),
@@ -5946,9 +9454,7 @@ export class CodexAgent extends BaseAgent {
     // hostPromise resolve 之前真正的 child spawn 还没发生 (start() 在 ensureStarted
     // 里才调, app-server/host.ts), 所以超时跳过 host.shutdown 不会留孤儿子进程。
     if (this.hostPromises.size > 0) {
-      const inflightSnapshot = Array.from(this.hostPromises.values()).map(
-        (entry) => entry.promise,
-      );
+      const inflightSnapshot = Array.from(this.hostPromises.values()).map((entry) => entry.promise);
       for (const key of this.hostPromises.keys()) {
         this.bumpHostGeneration(key);
       }
@@ -5956,15 +9462,11 @@ export class CodexAgent extends BaseAgent {
         await Promise.race([
           Promise.allSettled(inflightSnapshot),
           new Promise<void>((_, reject) =>
-            setTimeout(
-              () =>
-                reject(new Error("hostPromise timeout in dispose (1500ms)")),
-              1500,
-            ),
+            setTimeout(() => reject(new Error('hostPromise timeout in dispose (1500ms)')), 1500),
           ),
         ]);
       } catch (e) {
-        this.deps.logger.warn("codex dispose: hostPromise await skipped", {
+        this.deps.logger.warn('codex dispose: hostPromise await skipped', {
           message: (e as Error).message,
         });
       }
@@ -5987,7 +9489,7 @@ export class CodexAgent extends BaseAgent {
     if (hostsSnapshot.length > 0) {
       // 并发 shutdown — 互不依赖, 一起更快收完。失败不阻断其他。
       await Promise.allSettled(
-        hostsSnapshot.map((h) => h.retire("CodexAgent.dispose()")),
+        hostsSnapshot.map((h) => h.retire('CodexAgent.dispose()')),
       );
     }
     // dispose 完毕 → 重置 seq, 下次 createHost 重新从 1 开始计数 (logout/切账号场景)
@@ -6000,66 +9502,93 @@ export class CodexAgent extends BaseAgent {
    * 远端 host 使用 remote daemon / remote 用户配置；本地 key、OAuth 或 proxy 注入状态变化
    * 不应该 retire `remote:*` host，否则远端 session 会绕过 Session.close 留下 stale 状态。
    */
-  async disposeLocalHostForCredentialChange(
-    reason = "CodexAgent local credential state changed",
-  ): Promise<void> {
+  async disposeLocalHostForCredentialChange(reason = 'CodexAgent local credential state changed'): Promise<void> {
     const switchGuard = await this.beginLocalHostCredentialChange(reason);
     await switchGuard.finalize();
   }
 
   /**
-   * 本地 Codex OAuth/logout 失效时强制收掉 local host。
+   * 本地 Codex OAuth/logout 失效时强制收掉共享 local host 与独立 control-plane hosts。
    *
-   * 这条路径说明当前 local host 持有的凭证已经不可用，不能因为仍有订阅就继续保留；
-   * 但仍然只处理 local key，不能扩散到 remote host。
+   * 这些 host 都持有本机凭证，账号边界变化后不能继续复用；remote hosts 使用远端
+   * 用户配置，不在本次清理范围内。
    */
-  async forceDisposeLocalHostForAuthChange(
-    reason = "CodexAgent local auth changed",
-  ): Promise<void> {
-    await this.retireHostKey(hostKey(), reason, {
-      failIfActive: false,
-      logPrefix: "codex local auth restart",
-    });
+  async forceDisposeLocalHostForAuthChange(reason = 'CodexAgent local auth changed'): Promise<void> {
+    const keys = new Set<string>([hostKey()]);
+    for (const key of this.hosts.keys()) {
+      if (isLocalControlPlaneHostKey(key)) keys.add(key);
+    }
+    for (const key of this.hostPromises.keys()) {
+      if (isLocalControlPlaneHostKey(key)) keys.add(key);
+    }
+    await Promise.all(Array.from(keys, (key) =>
+      this.retireHostKey(key, reason, {
+        failIfActive: false,
+        logPrefix: 'codex local auth restart',
+      })));
   }
 
-  private async disposeLocalHostForCredentialChangeUnlocked(
-    key: string,
-    reason: string,
-  ): Promise<void> {
+  private async disposeLocalHostForCredentialChangeUnlocked(key: string, reason: string): Promise<void> {
     await this.retireHostKey(key, reason, {
       failIfActive: true,
-      logPrefix: "codex local credential restart",
+      logPrefix: 'codex local credential restart',
     });
   }
 
   private async retireHostKey(
     key: string,
     reason: string,
-    opts: { failIfActive: boolean; logPrefix: string },
+    opts: {
+      failIfActive: boolean;
+      logPrefix: string;
+      /** Optional identity fence for delayed cleanup from an older handle. */
+      expectedHost?: AppServerHost;
+      expectedGeneration?: number;
+    },
   ): Promise<void> {
+    let expectedGeneration = opts.expectedGeneration;
+    const matchesExpectedHost = (): boolean => {
+      if (opts.expectedHost && this.hosts.get(key) !== opts.expectedHost) return false;
+      if (
+        expectedGeneration !== undefined &&
+        (this.hostGenerations.get(key) ?? 0) !== expectedGeneration
+      ) {
+        return false;
+      }
+      return true;
+    };
+    if (!matchesExpectedHost()) {
+      this.deps.logger.warn(`${opts.logPrefix}: stale host cleanup skipped`, {
+        key,
+        reason,
+      });
+      return;
+    }
     const inflight = this.hostPromises.get(key);
     if (inflight) {
-      this.bumpHostGeneration(key);
+      const bumpedGeneration = this.bumpHostGeneration(key);
+      if (expectedGeneration !== undefined) expectedGeneration = bumpedGeneration;
       this.hostPromises.delete(key);
       try {
         await Promise.race([
           inflight.promise.catch(() => undefined),
           new Promise<void>((_, reject) =>
-            setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    "local hostPromise timeout in credential restart (1500ms)",
-                  ),
-                ),
-              1500,
-            ),
+            setTimeout(() => reject(new Error('local hostPromise timeout in credential restart (1500ms)')), 1500),
           ),
         ]);
       } catch (e) {
         this.deps.logger.warn(`${opts.logPrefix}: hostPromise await skipped`, {
           message: (e as Error).message,
         });
+      }
+      // The in-flight entry may have been replaced while we waited for it.
+      // Never let an old handle's delayed cleanup delete the newer host.
+      if (!matchesExpectedHost()) {
+        this.deps.logger.warn(`${opts.logPrefix}: stale host cleanup skipped after await`, {
+          key,
+          reason,
+        });
+        return;
       }
     }
 
@@ -6073,13 +9602,10 @@ export class CodexAgent extends BaseAgent {
       );
     }
     if (!opts.failIfActive && activeUseCount > 0) {
-      this.deps.logger.warn(
-        `${opts.logPrefix}: retiring host with active sessions`,
-        {
-          key,
-          activeUseCount,
-        },
-      );
+      this.deps.logger.warn(`${opts.logPrefix}: retiring host with active sessions`, {
+        key,
+        activeUseCount,
+      });
       // 强杀 host 不走 Session.close —— 先把终态 transport error 广播给订阅者,
       // 让每个 session 自己收口 turn 状态 (isTurnInFlight→false + 补发 isRunning:false)。
       // 不广播的话上层 busy 判定永久 stale:输入排队不派发、Stop 的 abort 锁解不开、
@@ -6122,34 +9648,25 @@ export class CodexAgent extends BaseAgent {
       // 不是用户上次保存的设置。ensureMemoryOverridePushed 内部用 memoryOverridePushed 去重, 已 push 是 no-op。
       await host.ensureStarted();
       await this.ensureMemoryOverridePushed(host, key).catch((e) => {
-        this.deps.logger.warn(
-          "codex.getMemoryStatus: ensureMemoryOverridePushed failed",
-          {
-            error: e instanceof Error ? e.message : String(e),
-          },
-        );
+        this.deps.logger.warn('codex.getMemoryStatus: ensureMemoryOverridePushed failed', {
+          error: e instanceof Error ? e.message : String(e),
+        });
       });
       type ConfigReadResp = { config?: { features?: { memories?: boolean } } };
-      const resp = await host.request<ConfigReadResp>(Method.ConfigRead, {
-        includeLayers: false,
-      });
+      const resp = await host.request<ConfigReadResp>(Method.ConfigRead, { includeLayers: false });
       const enabled = resp.config?.features?.memories ?? false;
       return {
         enabled,
         // memoryOverride 没设过时 enabled 来自 config.toml + server 默认, 算 'user-config';
         // host 显式覆盖过算 'host-runtime'
-        source:
-          this.memoryOverride === undefined ? "user-config" : "host-runtime",
+        source: this.memoryOverride === undefined ? 'user-config' : 'host-runtime',
       };
     } catch (err) {
       if (err instanceof AgentNotAuthenticatedError) {
         // 未授权 → host 起不来, 报推断值 (codex 默认 false)
         return {
           enabled: this.memoryOverride ?? false,
-          source:
-            this.memoryOverride === undefined
-              ? "agent-default"
-              : "host-runtime",
+          source: this.memoryOverride === undefined ? 'agent-default' : 'host-runtime',
         };
       }
       throw err;
@@ -6157,40 +9674,35 @@ export class CodexAgent extends BaseAgent {
   }
 
   async setMemory(enabled: boolean): Promise<MemorySetResult> {
-    const log = this.deps.logger.child("codex/setMemory");
-    log.info("setMemory ▶", { from: this.memoryOverride, to: enabled });
+    const log = this.deps.logger.child('codex/setMemory');
+    log.info('setMemory ▶', { from: this.memoryOverride, to: enabled });
     this.memoryOverride = enabled;
     // 立即 push, 让所有 live thread 通过 server 端 reload_user_config 拿到新值
     try {
-      if (this.hosts.size === 0) {
-        log.info("setMemory ◀ no live app-server, will apply on next session");
-        return { effective: "next-session" };
+      const localSessionHosts = Array.from(this.hosts.entries()).filter(
+        ([key]) => !key.startsWith('remote:') && !isLocalControlPlaneHostKey(key),
+      );
+      if (localSessionHosts.length === 0) {
+        log.info('setMemory ◀ no live app-server, will apply on next session');
+        return { effective: 'next-session' };
       }
-      await Promise.all(
-        Array.from(this.hosts.entries())
-          .filter(([key]) => !key.startsWith("remote:"))
-          .map(async ([key, host]) => {
-            // Remote hosts do not receive Maker Memory, so their native setting is
-            // owned by the target rather than this local manager.
-            await host.request(Method.ExperimentalFeatureEnablementSet, {
-              enablement: { memories: enabled },
-            });
-            this.memoryOverridePushedByHost.set(key, enabled);
-            return key;
-          }),
-      );
-      log.info(
-        "setMemory ◀ pushed to app-server, hot-reloaded all live threads",
-      );
-      return { effective: "immediate" };
+      await Promise.all(localSessionHosts.map(async ([key, host]) => {
+        // Only thread-serving local hosts receive Maker Memory. Remote hosts own
+        // their native setting; model-list control-plane hosts have no live threads.
+        await host.request(Method.ExperimentalFeatureEnablementSet, {
+          enablement: { memories: enabled },
+        });
+        this.memoryOverridePushedByHost.set(key, enabled);
+        return key;
+      }));
+      log.info('setMemory ◀ pushed to app-server, hot-reloaded all live threads');
+      return { effective: 'immediate' };
     } catch (err) {
       if (err instanceof AgentNotAuthenticatedError) {
         // 未授权 → host 起不来, 但 memoryOverride 已记下, 等下次 ensure (startSession 触发) 再 push
-        log.warn(
-          "setMemory: not authenticated, deferring push to next session",
-        );
+        log.warn('setMemory: not authenticated, deferring push to next session');
         this.memoryOverridePushedByHost.clear();
-        return { effective: "next-session" };
+        return { effective: 'next-session' };
       }
       // server 端 RPC 失败 → 把 push flag 重置, 下次 ensure 再试
       this.memoryOverridePushedByHost.clear();
@@ -6199,13 +9711,13 @@ export class CodexAgent extends BaseAgent {
   }
 
   async resetMemory(): Promise<MemoryResetResult> {
-    const log = this.deps.logger.child("codex/resetMemory");
-    log.info("resetMemory ▶");
+    const log = this.deps.logger.child('codex/resetMemory');
+    log.info('resetMemory ▶');
     const { host } = await this.getUtilityHost();
     // server 端清 <CODEX_HOME>/memories/ 目录 + state_*.sqlite 的 memory stage 数据;
     // 不影响各 thread 的 memory_mode (用户随后改 thread/memoryMode/set 才动那个)
     await host.request(Method.MemoryReset, {});
-    log.info("resetMemory ◀ ok");
+    log.info('resetMemory ◀ ok');
     // server 不返回数量统计, removedEntries / removedBytes 留 undefined
     return {};
   }
@@ -6220,18 +9732,14 @@ export class CodexAgent extends BaseAgent {
    * 失败语义: 抛错由调用方决定。startSession 那边会 catch + warn + 继续, 不让
    * memory 配置 block 主对话流。
    */
-  private async ensureMemoryOverridePushed(
-    host: AppServerHost,
-    key: string,
-  ): Promise<void> {
+  private async ensureMemoryOverridePushed(host: AppServerHost, key: string): Promise<void> {
     if (this.memoryOverride === undefined) return; // 没设 override 不动 server, 让 server 走自带配置
-    if (this.memoryOverridePushedByHost.get(key) === this.memoryOverride)
-      return; // 已 push 同值, no-op
+    if (this.memoryOverridePushedByHost.get(key) === this.memoryOverride) return; // 已 push 同值, no-op
     await host.request(Method.ExperimentalFeatureEnablementSet, {
       enablement: { memories: this.memoryOverride },
     });
     this.memoryOverridePushedByHost.set(key, this.memoryOverride);
-    this.deps.logger.info("codex: memoryOverride pushed to app-server", {
+    this.deps.logger.info('codex: memoryOverride pushed to app-server', {
       memories: this.memoryOverride,
     });
   }

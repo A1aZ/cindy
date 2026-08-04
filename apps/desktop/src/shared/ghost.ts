@@ -21,6 +21,12 @@ import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './local
 /** 清单文件名(zip 根部)。 */
 export const GHOST_MANIFEST_FILE = 'ghost.json';
 
+/**
+ * 安装器读取包内 ghost.json 的硬上限。源码目录的发现/预读取可以使用更宽的
+ * 安全预算，但最终写进 .cindy 的清单必须落在这个上限内。
+ */
+export const GHOST_INSTALL_MANIFEST_MAX_BYTES = 256 * 1024;
+
 /** 意识文件扩展名。 */
 export const CINDY_FILE_EXT = '.cindy';
 
@@ -56,7 +62,8 @@ export function parseGhostPartition(partition: unknown): string | null {
 const GHOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 
 /**
- * 十四个卡槽(意识能力的全部出口,docs/dev-rules/plugin-security-and-authoring.md)。
+ * 卡槽清单(意识能力的全部出口,docs/dev-rules/plugin-security-and-authoring.md)。
+ * 数量随迭代增长,以本数组为准——正文不再写死个数。
  * 'cindy' = 请 Cindy 本体代办(借主机自带 AI 能力干活;2026-07-11 Lizi 定案
  * 由 'model' 更名——本质是 Cindy 在干活,与选模型无关;旧名在校验层作
  * 静默别名兼容,已装老包不消失)。
@@ -64,7 +71,14 @@ const GHOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
  * 内的 HTTP 经主机代发(沙箱本身保持零直连),凭证锁主机保险库按声明注入。
  * 'notify' = 系统提示(2026-07-14):意识经管子请主机弹一条轻提示(toast),
  * 意识只供纯文本,整块 UI 主机画并带意识身份头(与订阅槽红条同一信任边界);
- * 无阻塞、无按钮、无回执——确认类交互不在此槽(走面板自绘或卡槽③交互卡)。
+ * 无阻塞、无按钮、无回执——要用户点选/确认走 'confirm' 槽。
+ * 'confirm' = 确认弹窗(2026-07-31):意识经管子请主机弹**主机同款**的二选一确认框
+ * (renderer 的 ConfirmDialogProvider),拿回用户的真实点击。与 notify 的区别是它
+ * **阻塞、有按钮、有回执**,所以骚扰面也大得多,护栏对齐 pick 槽:同插件最小间隔
+ * GHOST_CONFIRM_MIN_INTERVAL_MS、全局同时只允许一个确认框在场(BUSY,不排队)、
+ * 超时/无窗口/载荷非法一律 fail closed 当「没同意」。壳、标题与身份头(图标+名字)
+ * 由主机画,意识只供被净化的正文与按钮字——伪装不了主机文案、冒充不了别的意识,
+ * 也点不了自己的按钮。桌面独占:本机对话框在 device-link 白名单里属永不放行类别。
  * 'fs' = 写文件(2026-07-14):意识经管子请主机代写文件(创建/修改)。三档
  * 目的地:自己的私有数据目录(userData/ghost-fs/<id>,免确认)、当前会话
  * workdir(跟随会话 permission 模式:免批模式直写、逐条模式弹确认卡、
@@ -107,6 +121,8 @@ export const GHOST_SLOTS = [
   'node',
   'network',
   'notify',
+  'badge',
+  'confirm',
   'fs',
   'session-context',
   'pick',
@@ -131,9 +147,21 @@ export interface GhostCardNeeds {
  * 申请 `agent` 槽默认只允许消费宿主在真实用户点击插件卡片时签发的
  * 一次性通行票。`background: true` 额外允许插件在没有当次点击票据时，
  * 对已经由用户建立过关联的会话发起回合；这是更高一档权限，安装时单列。
+ *
+ * `errand: true` = 派活取件(2026-07-31 开闸):允许插件把任务交给 Cindy
+ * agent 在**插件专属 errand 会话**里跑一轮,并把最终回复文字取回。与
+ * background 同为高风险加档,安装时单列。安全边界(全部主机代码强制):
+ * - 任务文本只进普通 user 消息,绝不进 system prompt(与 agent-request 同纪律);
+ * - errand 会话默认跑在专属对话目录、权限档默认 plan(只读);用户可在
+ *   设置里按插件放开到 acceptEdits/auto,**永不提供 bypassPermissions**
+ *   (2026-07-31 Lizi 定案);
+ * - errand 会话在侧边栏可见、可旁观、可随时停,不存在隐身会话;
+ * - 每插件同时最多 1 单在途,任务表在内存(重启即丢,查询按"查无此单、
+ *   可重新提交"处理)。
  */
 export interface GhostAgentNeeds {
   background?: boolean;
+  errand?: boolean;
 }
 
 /** 插件随包本地 Node 工作进程使用的 stdio 协议。 */
@@ -311,7 +339,7 @@ export type GhostLaunchMode = (typeof GHOST_LAUNCH_MODES)[number];
 /**
  * 面板显示形态(相对主聊天窗)。left = 顶层布局树停靠 pane(缺省);
  * 'tab' = 不进布局树,作为右侧栏(right-tabs)里的每会话单例页签
- * (2026-07-24 定案,注册链路见 renderer/cindy-brain/ghostTabPlugins.tsx)。
+ * (2026-08 面板收束:页签面板由插件页 GhostPagePanelHost 独占承载)。
  * right 已退役(2026-07-25 Lizi 定案:右侧是右侧边栏的地盘,插件面板默认
  * 挤过去体验差;用户想放右边用拖拽换位即可)——旧包声明的 right 在校验期
  * 归一化为 left(已装插件每次启动都重过校验,硬拒会把存量插件打没;兼容
@@ -325,7 +353,8 @@ export type GhostPanelPosition = (typeof GHOST_PANEL_POSITIONS)[number];
 export interface GhostPanelDecl {
   /** 面板标准头(PanelChrome)标题;缺省用意识 name。 */
   title?: string;
-  /** 显示形态:left 停靠主聊天窗左侧(缺省),或 'tab' 右侧栏页签;
+  /** 显示形态:left 停靠主聊天窗左侧(缺省),或 'tab' 插件页内独占面板
+   *  (2026-08-02 面板收束:只从插件页打开,离开插件页即关闭);
    *  right 已退役并入 left(2026-07-25 Lizi 定案,见 GHOST_PANEL_POSITIONS 注释)。 */
   position?: GhostPanelPosition;
   /** 面板界面入口(安装目录内相对路径,意识自绘)。 */
@@ -359,6 +388,19 @@ export interface GhostToolDecl {
   parameters?: Record<string, unknown>;
 }
 
+/**
+ * 把一个已经声明、已经过权限确认的工具接入 Composer `@` 资源搜索。
+ *
+ * 这不是新卡槽，也不扩大底层工具权限：旧宿主会按顶层未知字段兼容忽略；新版宿主
+ * 仅在用户明确选中该插件的资源入口后，以固定 `{ query, limit }` 参数调用该工具。
+ * 调用入口会单独进入安装/更新权限清单；工具必须无副作用，返回值由宿主按固定
+ * 资源摘要协议裁剪。
+ */
+export interface GhostAtResourceProviderDecl {
+  /** 必须逐字引用同一 manifest 的 tools[].name。 */
+  tool: string;
+}
+
 /** cindy 槽·图像类可申请的动作(主机代办菜单的"图像"类目)。 */
 export const GHOST_MODEL_IMAGE_ACTIONS = ['generate', 'edit'] as const;
 export type GhostModelImageAction = (typeof GHOST_MODEL_IMAGE_ACTIONS)[number];
@@ -366,6 +408,37 @@ export type GhostModelImageAction = (typeof GHOST_MODEL_IMAGE_ACTIONS)[number];
 /** cindy 槽·视频类可申请的动作(generate=文生视频,edit=参考图生视频)。 */
 export const GHOST_MODEL_VIDEO_ACTIONS = ['generate', 'edit'] as const;
 export type GhostModelVideoAction = (typeof GHOST_MODEL_VIDEO_ACTIONS)[number];
+
+/**
+ * cindy 槽·媒体类可申请的动作(2026-07-29 开闸,makecindy/cindy#784)。
+ *
+ * `deposit` = 寄存:把意识**手里已有**的媒体字节(用户在面板里粘贴/拖入的图、
+ * 面板存量素材)存入媒体总仓、记到本意识名下,换回指纹——从此这些媒体与
+ * 「意识自己生成的图」同权,可以直接当 edit_image / edit_video 的源图。
+ *
+ * 为什么单独成一档能力(而非跟着 image.edit 白送):它是本槽唯一**不经模型、
+ * 不花钱**的入仓通道。声明了 network 槽的意识本就能从白名单域拉字节入仓
+ * (as:'media'),寄存把同样的"写你的媒体库"能力给了没有 network 槽的意识,
+ * 因此必须在装入确认框里单独露出、由用户单独点头。
+ *
+ * 同一能力键同时授权 `release_media`(撤回自己寄存的那条引用):配额有上限,
+ * 没有撤回口的配额等于"用满即永久坏掉",不成立。撤回只删本意识的寄存引用,
+ * 不删字节(字节归回收器按引用归零处理),因此不是额外的信任面。
+ */
+export const GHOST_CINDY_MEDIA_ACTIONS = ['deposit'] as const;
+export type GhostCindyMediaAction = (typeof GHOST_CINDY_MEDIA_ACTIONS)[number];
+
+/**
+ * cindy 槽·文本类可申请的动作(2026-07-31 开闸)。
+ *
+ * `oneshot` = 快问快答:意识递一段文字,主机经**轻量任务模型链**(与会话
+ * 起标题、任务一句话总结同一条通道,见 utility-model/oneShotCandidates.ts)
+ * 直答一次并把文字原样递回。不拉起 agent、无工具、无用户权限、不进任何
+ * 会话——它与 agent 派活(agent 槽 errand)是两条信任面完全不同的路:
+ * 这条只花模型额度,拿不到任何宿主能力。
+ */
+export const GHOST_CINDY_TEXT_ACTIONS = ['oneshot'] as const;
+export type GhostCindyTextAction = (typeof GHOST_CINDY_TEXT_ACTIONS)[number];
 
 /**
  * cindy 槽能力详单(卡槽⑤配套,原名模型槽,2026-07-11 设计定案):声明"这个意识被允许
@@ -378,16 +451,21 @@ export interface GhostCindyNeeds {
   image?: GhostModelImageAction[];
   /** 视频类:generate=文生视频,edit=参考图生视频(源图仅限本意识名下媒体,1–2 张首/尾帧)。 */
   video?: GhostModelVideoAction[];
+  /** 媒体类:deposit=寄存自己手里的媒体字节入总仓(换指纹,兼授权 release_media)。 */
+  media?: GhostCindyMediaAction[];
+  /** 文本类:oneshot=快问快答(轻量任务模型链直答一次,无 agent 无工具)。 */
+  text?: GhostCindyTextAction[];
 }
 
 /**
  * 订阅槽 did- 旁听主题(卡槽①,2026-07-12 开闸)。v1 全部是**元数据级**:
  * turn = 轮次开始/结束(agent/模型/耗时/用量,不含消息内容);
+ * activity = 轮次内思考/审批/等待用户输入的开始结束边界(只含 id 元数据);
  * session = 会话创建/归档/切换(切换 = 用户把哪个会话切到台前,2026-07-13 增)。
  * 正文级主题(消息内容旁听)刻意不开——隐私最重,等真实场景再议,权限文案
  * 也要另分一档。
  */
-export const GHOST_SUBSCRIBE_TOPICS = ['turn', 'session'] as const;
+export const GHOST_SUBSCRIBE_TOPICS = ['turn', 'session', 'activity'] as const;
 export type GhostSubscribeTopic = (typeof GHOST_SUBSCRIBE_TOPICS)[number];
 
 /**
@@ -1049,6 +1127,8 @@ export const GHOST_SETUP_ERROR_CODES = [
   'ACTION_STALE',
   'AUTH_CANCELLED',
   'AUTH_FAILED',
+  'AUTH_NETWORK',
+  'AUTH_SERVICE_UNAVAILABLE',
   'INLINE_INVALID',
   'INLINE_UNAVAILABLE',
   'SAVE_FAILED',
@@ -1145,6 +1225,8 @@ export interface GhostManifest {
   card?: GhostCardNeeds;
   /** 注册给 agent 的工具声明(与 slots 含 'tool' 成对)。 */
   tools?: GhostToolDecl[];
+  /** 可选的 `@` 业务资源搜索入口；复用已声明工具并单独披露调用入口。 */
+  atResourceProvider?: GhostAtResourceProviderDecl;
   /**
    * cindy 槽能力详单(与 slots 含 'cindy' 成对;缺省 = 零能力,任何代办
    * 都会被拒并提示作者补声明)。清单里的旧字段名 model 在校验层作别名
@@ -1289,6 +1371,8 @@ export function ghostContentKeys(manifest: GhostManifest): string[] {
     else if (slot === 'card') keys.push('slotCard');
     else if (slot === 'network') keys.push('slotNetwork');
     else if (slot === 'notify') keys.push('slotNotify');
+    else if (slot === 'badge') keys.push('slotBadge');
+    else if (slot === 'confirm') keys.push('slotConfirm');
     else if (slot === 'fs') keys.push('slotFs');
     // skill 是信任面最高的内容(给主 Agent 灌指令),详情页必须如实露出。
     else if (slot === 'skill') keys.push('slotSkill');
@@ -1354,7 +1438,7 @@ export interface GhostPermissionItem {
   /** 稳定键:更新 diff 按它对齐(内容变化视为移除+新增,如面板换边)。 */
   key: string;
   /** 图标分组(renderer 按 kind 选图标)。 */
-  kind: 'cindy' | 'agent' | 'node' | 'tool' | 'command' | 'panel' | 'code' | 'subscribe' | 'card' | 'network' | 'notify' | 'fs' | 'session-context' | 'pick' | 'preview' | 'skill' | 'workspace';
+  kind: 'cindy' | 'agent' | 'node' | 'tool' | 'at-resource' | 'command' | 'panel' | 'code' | 'subscribe' | 'card' | 'network' | 'notify' | 'confirm' | 'fs' | 'session-context' | 'pick' | 'preview' | 'skill' | 'workspace';
   /** i18n key 后缀,消费方拼 `settings.ghosts.perm.<labelKey>`。 */
   labelKey: string;
   /** i18n 插值参数(工具名、指令名、面板标题等)。 */
@@ -1363,6 +1447,12 @@ export interface GhostPermissionItem {
   detail?: string;
   /** 主机固定说明的 i18n key 后缀(拼法同 labelKey)。 */
   detailKey?: string;
+  /**
+   * detailKey 的 i18n 插值参数(与 labelArgs 分开:说明行里的插值是**主机
+   * 政策数字**,如寄存字节上限,由常量单源注入,不让四份 locale 各写死一个
+   * 数字。没有 detailArgs 的条目行为与从前逐字节相同)。
+   */
+  detailArgs?: Record<string, string>;
 }
 
 /** cindy 详单能力键 → 权限项 labelKey(新增类目/动作在此登记)。 */
@@ -1371,7 +1461,31 @@ const GHOST_CINDY_PERM_LABEL: Record<string, string> = {
   'image.edit': 'cindyImageEdit',
   'video.generate': 'cindyVideoGenerate',
   'video.edit': 'cindyVideoEdit',
+  'media.deposit': 'cindyMediaDeposit',
+  'text.oneshot': 'cindyTextOneshot',
 };
+
+/**
+ * cindy 详单能力键 → 主机固定补充说明的 labelKey(可选;没有条目就不带 detail)。
+ * 寄存是唯一"写你的媒体库"的能力,上限必须在确认框里如实写出来(媒体规则:
+ * 装入确认要展示持久媒体占用上限)。
+ */
+const GHOST_CINDY_PERM_DETAIL: Record<string, string> = {
+  'media.deposit': 'cindyMediaDepositDetail',
+  'text.oneshot': 'cindyTextOneshotDetail',
+};
+
+/**
+ * 字节 → 确认框里给用户看的容量(含单位)。整数向下取整,不给"511.99"这种数;
+ * 整 GB 用 GB 表述(1GB 显示成"1024 MB"读起来像凑数)。单位跟着数字一起从
+ * 常量算出来,locale 里只留 {{quota}} 占位 —— 否则上限改成 GB 量级时,四份
+ * locale 里写死的 "MB" 就成了错的。
+ */
+function formatGhostQuotaSize(bytes: number): string {
+  const mb = Math.floor(bytes / (1024 * 1024));
+  if (mb >= 1024 && mb % 1024 === 0) return `${mb / 1024} GB`;
+  return `${mb} MB`;
+}
 
 /**
  * 从身份卡静态推导逐项权限清单(装入前无需运行任何意识代码)。
@@ -1384,8 +1498,21 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     for (const action of actions ?? []) {
       const cap = `${category}.${action}`;
       const labelKey = GHOST_CINDY_PERM_LABEL[cap];
+      const detailKey = GHOST_CINDY_PERM_DETAIL[cap];
       // 未登记的能力键不该出现(validateGhostManifest 已拦),防御性跳过。
-      if (labelKey) items.push({ key: `cindy:${cap}`, kind: 'cindy', labelKey });
+      if (labelKey) {
+        items.push({
+          key: `cindy:${cap}`,
+          kind: 'cindy',
+          labelKey,
+          ...(detailKey ? { detailKey } : {}),
+          // 寄存上限由常量单源插值进确认框说明(媒体规则要求装入确认展示
+          // 持久媒体占用上限);改常量四份 locale 自动跟随。
+          ...(cap === 'media.deposit'
+            ? { detailArgs: { quota: formatGhostQuotaSize(GHOST_CINDY_DEPOSIT_QUOTA_BYTES) } }
+            : {}),
+        });
+      }
     }
   }
   // network 槽:域名逐条列(用户要逐个看到"将访问谁"),凭证逐条列
@@ -1415,6 +1542,16 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
         kind: 'agent',
         labelKey: 'agentBackground',
         detailKey: 'agentBackgroundDetail',
+      });
+    }
+    // 派活取件与 background 同级高风险,unshift 到清单上部单列——"能让
+    // agent 替它干活并拿走结果"必须在装入前看得清清楚楚。
+    if (manifest.agent?.errand === true) {
+      items.unshift({
+        key: 'agent:errand',
+        kind: 'agent',
+        labelKey: 'agentErrand',
+        detailKey: 'agentErrandDetail',
       });
     }
   }
@@ -1571,6 +1708,15 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       detail: tool.description,
     });
   }
+  if (manifest.atResourceProvider) {
+    items.push({
+      key: `at-resource:${manifest.atResourceProvider.tool}`,
+      kind: 'at-resource',
+      labelKey: 'atResourceProvider',
+      labelArgs: { name: manifest.atResourceProvider.tool },
+      detailKey: 'atResourceProviderDetail',
+    });
+  }
   if (manifest.command) {
     items.push({
       key: `command:${manifest.command}`,
@@ -1592,8 +1738,30 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
     if (slot === 'subscribe') {
       // 订阅两档分列:旁听(元数据)常规位;拦截是全部槽里权限最重的一档,
       // unshift 排到清单最顶(敏感项排最上)。
-      if (manifest.subscribe?.topics?.length) {
-        items.push({ key: 'subscribe:topics', kind: 'subscribe', labelKey: 'subscribeTopics' });
+      const topics = manifest.subscribe?.topics;
+      if (topics?.length) {
+        // 旧 key 只在真订了 turn / session 时产出:纯 activity 插件不该在确认框里
+        // 多出一行"旁听轮次与会话事件"——网关根本不给它投 turn / session,那行是凭空
+        // 多报的能力,用户可能据此误拒。存量已批准插件必然含 turn 或 session(activity
+        // 是本版新增),所以旧 key 对它们照旧产出,批准状态不 churn。
+        if (topics.includes('turn') || topics.includes('session')) {
+          items.push({ key: 'subscribe:topics', kind: 'subscribe', labelKey: 'subscribeTopics' });
+        }
+        // activity 单列一项(不并进 subscribe:topics):它暴露的是"用户此刻正被要求
+        // 批准某个操作 / 正被问问题"的行为时序,比 turn / session 的统计元数据敏感
+        // 一档,文案也要另讲。更要紧的是权限扩张检测——diffGhostPermissionItems 按
+        // key + detail 比对,若 activity 并进固定的 subscribe:topics,已装插件从
+        // topics:["turn"] 更新到 ["turn","activity"] 时 added 为空,plugin-market
+        // 的复核就不会拦,用户会在毫不知情的情况下多给出审批时序。旧 key 保持原样,
+        // 只声明 turn / session 的存量插件权限清单逐字不变(批准状态不 churn)。
+        if (topics.includes('activity')) {
+          items.push({
+            key: 'subscribe:topics:activity',
+            kind: 'subscribe',
+            labelKey: 'subscribeActivity',
+            detailKey: 'subscribeActivityDetail',
+          });
+        }
       }
       if (manifest.subscribe?.hooks?.length) {
         // 拦截钩按点分列(入口=改用户消息、出口=读并重渲 AI 回复,后者更敏感);
@@ -1635,6 +1803,20 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       items.push({ key: 'notify', kind: 'notify', labelKey: 'notify', detailKey: 'notifyDetail' });
     }
   }
+  // 未读角标:与 notify 槽**并列**的独立一档(不是它的子项)——绿点比 toast 克制,
+  // 只想安静点个绿点的意识不该被迫连"能弹全屏顶部提示"一起申请。
+  // key 独立还有一层必要性(同 subscribe 的 activity topic 判例):
+  // diffGhostPermissionItems 按 key + detail 比对,若并进某个固定 key,已装插件
+  // 新增这一档时 added 为空,plugin-market 的扩权确认就不会拦——用户会在毫不
+  // 知情的情况下多给出一个常驻的注意力入口。
+  if (manifest.slots.includes('badge')) {
+    items.push({ key: 'badge', kind: 'notify', labelKey: 'badge', detailKey: 'badgeDetail' });
+  }
+  // confirm 槽:能请主机弹一个二选一确认框(会打断操作)。装入时如实告知"它会来问",
+  // 决定权仍在用户的点击上——detailKey 的固定说明把这层讲清。
+  if (manifest.slots.includes('confirm')) {
+    items.push({ key: 'confirm', kind: 'confirm', labelKey: 'confirm', detailKey: 'confirmDetail' });
+  }
   // 常驻模式如实告知(用户要背一个后台进程);on-demand 是默认行为,不列。
   if (manifest.launch === 'resident') {
     items.push({ key: 'resident', kind: 'code', labelKey: 'resident', detailKey: 'residentDetail' });
@@ -1662,6 +1844,22 @@ export interface GhostPermissionDiff {
   added: GhostPermissionItem[];
   removed: GhostPermissionItem[];
   unchanged: GhostPermissionItem[];
+}
+
+/**
+ * 权限审阅基线指纹:同一份 manifest 推导出的权限条目集合(key + detail)。
+ * 与 diffGhostPermissionItems 同口径(按 key 对齐、detail 变化算差异),
+ * 所以"指纹相同"等价于"权限面没变",可安全沿用先前的审阅结论。
+ *
+ * renderer 审阅时记录基线并随安装请求回传,main 在安装锁内用**当前**已装
+ * manifest 重算比对——两侧必须用同一个实现,否则复核形同虚设,故住在 shared。
+ * 每项 JSON 编码后排序拼接,全可打印、无拼接歧义。
+ */
+export function ghostPermissionBaselineKey(manifest: GhostManifest): string {
+  return ghostPermissionItems(manifest)
+    .map((item) => JSON.stringify([item.key, item.detail ?? '']))
+    .sort()
+    .join('\n');
 }
 
 export function diffGhostPermissionItems(
@@ -1707,6 +1905,12 @@ const GHOST_ICON_MIME_BY_EXT: Record<string, string> = {
   '.gif': 'image/gif',
 };
 
+/**
+ * icon 字节上限。icon 会以 data URL 形态同步下发给 Renderer，因此安装、
+ * 本地读取与 Forge overlay 必须共用同一硬顶，避免“能打包但不能安装”。
+ */
+export const GHOST_ICON_MAX_BYTES = 512 * 1024;
+
 /** icon 路径 → mime;扩展名不在白名单返回 null(即校验不通过)。 */
 export function ghostIconMimeType(p: string): string | null {
   const dot = p.lastIndexOf('.');
@@ -1748,7 +1952,7 @@ export function ghostWebviewEntryPaths(manifest: GhostManifest): string[] {
  * 装入带面板的意识后,把面板停进布局树(main 侧随 install 调用)。
  * - 树上已有同 kind 的 pane(重装)→ 返回 null:不动树,位置记忆保留、原位复活;
  * - 意识没声明面板 → null;
- * - position:'tab' → null:页签形态不进布局树,由右侧栏页签(ghostTabPlugins)承载;
+ * - position:'tab' → null:页签形态不进布局树,由插件页(GhostPagePanelHost)承载;
  * - 否则停在聊天区左侧,宽度占比/最小宽取清单声明。
  * 卸下时**不做**逆操作 —— 树数据保留正是"重装复活"的记忆来源(§6 规则 5)。
  */
@@ -1779,6 +1983,12 @@ export function layoutWithGhostPanel(layout: Layout, manifest: GhostManifest): L
 }
 
 export type ManifestValidation = { ok: true; manifest: GhostManifest } | { ok: false; reason: string };
+
+const GHOST_MANIFEST_RESERVED_RECORD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isGhostManifestReservedRecordKey(value: string): boolean {
+  return GHOST_MANIFEST_RESERVED_RECORD_KEYS.has(value);
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -1828,7 +2038,7 @@ function ghostJsonPointerChild(pointer: string, segment: string | number): strin
 function collectGhostSchemaLocaleShape(
   schema: unknown,
   pointer = '',
-  result: Record<string, GhostSchemaLocaleShape> = {},
+  result: Record<string, GhostSchemaLocaleShape> = Object.create(null) as Record<string, GhostSchemaLocaleShape>,
 ): Record<string, GhostSchemaLocaleShape> {
   if (!isPlainObject(schema)) return result;
   const title = typeof schema.title === 'string';
@@ -1959,7 +2169,7 @@ export function validateGhostManifestLocaleResource(
     const actualNames = Object.keys(raw.tools);
     const unknown = actualNames.find((name) => !expectedNames.has(name));
     if (unknown) return { ok: false, reason: `locale.tools 含未知工具 ${JSON.stringify(unknown)}` };
-    tools = {};
+    tools = Object.create(null) as NonNullable<GhostManifestLocaleResource['tools']>;
     for (const tool of manifest.tools) {
       const localized = raw.tools[tool.name];
       if (localized === undefined) continue; // 缺译:该工具整体回退原文
@@ -2009,7 +2219,7 @@ export function validateGhostManifestLocaleResource(
             reason: `locale.tools[${JSON.stringify(tool.name)}].parameters 含未知路径 ${JSON.stringify(unknownPointer)}`,
           };
         }
-        parameters = {};
+        parameters = Object.create(null) as Record<string, GhostSchemaLocaleText>;
         for (const pointer of parameterPointers) {
           const shape = parameterShape[pointer];
           const localizedText = localized.parameters[pointer];
@@ -2101,7 +2311,7 @@ export function validateGhostManifestLocaleResource(
     if (unknownKey) {
       return { ok: false, reason: `${fieldPath} 含未知 key ${JSON.stringify(unknownKey)}` };
     }
-    const labels: Record<string, { label: string; hint?: string }> = {};
+    const labels = Object.create(null) as Record<string, { label: string; hint?: string }>;
     for (const declaration of declarations) {
       const localized = rawValue[declaration.key];
       if (localized === undefined) continue; // 缺译:该项回退原文
@@ -2207,13 +2417,15 @@ export function validateGhostManifestLocaleResource(
     }
     const kv = validateLocalizedLabels(raw.setup.kv, 'locale.setup.kv', [...setupKvDecls.values()]);
     if (!kv.ok) return kv;
-    setup = kv.labels !== undefined
-      ? {
-          kv: Object.fromEntries(
-            Object.entries(kv.labels).map(([key, localized]) => [key, { label: localized.label }]),
-          ),
-        }
-      : {};
+    if (kv.labels !== undefined) {
+      const localizedKv = Object.create(null) as Record<string, { label: string }>;
+      for (const [key, localized] of Object.entries(kv.labels)) {
+        localizedKv[key] = { label: localized.label };
+      }
+      setup = { kv: localizedKv };
+    } else {
+      setup = {};
+    }
   }
 
   return {
@@ -2581,6 +2793,28 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     }
   }
 
+  /**
+   * 未读角标槽(badge)与 `panel` 严格成对:未读点承诺「点开能看到内容」,
+   * 纯工具型 / 对话型意识没有可打开的界面,点亮了也无处可点,给了就是骗点击。
+   *
+   * **为什么用一个新 slot 而不是 `notify` 下的子字段**(2026-08-03,codex review P1):
+   * `slots` 是硬白名单——未登记的槽名一律拒装。所以任何**已经装在用户机器上**的
+   * 老包都不可能带 `badge` 槽:当初装它的客户端会直接拒绝那份清单。这让「新声明」
+   * 与「老包的同名自定义字段」成为**可证明**可分,而不是靠概率赌。
+   *
+   * 早前的方案把它放在顶层 `notify` 对象里。那个字段在本改动前完全未登记、会被
+   * 校验器静默忽略,于是两头堵:严格校验会让写过同名字段的老包升级后消失(§5 红线),
+   * 放松成"识别到就给"又会让恰好写成 `badge:true` 且有面板的老包在**没有任何安装
+   * 或更新确认**的情况下白拿一个常驻注意力面。换成 slot 后两个问题同时消失,
+   * `notify` 顶层字段也不再被解释——存量清单里有什么形态都照旧忽略。
+   */
+  if (slots.includes('badge') && panel === undefined) {
+    return {
+      ok: false,
+      reason: 'slots 声明了 "badge" 但缺少 panel——未读点承诺「点开能看到内容」,没有面板的意识点亮了也无处可点',
+    };
+  }
+
   // 工具声明(卡槽②):与 slots 含 'tool' 严格成对,规则同 panel。
   let tools: GhostToolDecl[] | undefined;
   if (raw.tools !== undefined) {
@@ -2591,6 +2825,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     const seenNames = new Set<string>();
     for (const t of raw.tools) {
       if (!isPlainObject(t)) return { ok: false, reason: 'tools 每项必须是对象' };
+      if (typeof t.name === 'string' && isGhostManifestReservedRecordKey(t.name)) {
+        return { ok: false, reason: `tools[].name 不允许使用对象保留键名 ${JSON.stringify(t.name)}` };
+      }
       if (typeof t.name !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/.test(t.name)) {
         return { ok: false, reason: 'tools[].name 必须是小写字母开头的 1–64 位小写/数字/下划线/连字符' };
       }
@@ -2623,6 +2860,25 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     return { ok: false, reason: 'slots 声明了 "tool" 但缺少 tools(注册什么工具要写清楚)' };
   }
 
+  /**
+   * `@` 资源入口复用 `tool` 槽，不另造硬白名单 slot：旧版宿主会接受这类包，
+   * 并像其它未知顶层字段一样忽略 atResourceProvider。这个字段在本版之前也可能被
+   * 存量包当作自定义元数据使用，因此这里仅收窄出待审声明；安装运行时还必须命中
+   * Main 在 install/update 后写下的 host receipt。其它历史形态继续忽略，避免客户端
+   * 升级后让已安装插件消失或凭字段形状自动扩权。
+   */
+  let atResourceProvider: GhostAtResourceProviderDecl | undefined;
+  if (isPlainObject(raw.atResourceProvider)) {
+    const providerRaw = raw.atResourceProvider as Record<string, unknown>;
+    if (
+      Object.keys(providerRaw).length === 1
+      && typeof providerRaw.tool === 'string'
+      && tools?.some((tool) => tool.name === providerRaw.tool)
+    ) {
+      atResourceProvider = { tool: providerRaw.tool };
+    }
+  }
+
   // cindy 槽能力详单:与 slots 含 'cindy' 成对(有详单必有槽;有槽无详单
   // 允许装入但运行时零能力——老包不消失,只是代办被拒并提示作者更新)。
   // 字段旧名 model 作别名收入(两个都写以 cindy 为准)。
@@ -2636,11 +2892,14 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       return { ok: false, reason: '声明了 cindy 能力详单但 slots 未包含 "cindy"' };
     }
     cindy = {};
-    // 类目 → 合法动作表(当前包含 image / video 两类;动作集恰好同名,但按
-    // 类目查表,未来某类目动作分叉时这里天然承接)。
+    // 类目 → 合法动作表(image / video / media;image 与 video 的动作集恰好
+    // 同名,但按类目查表,未来某类目动作分叉时这里天然承接)。新增类目必须
+    // 同时在下面的落位分支登记 —— 漏登记会让动作静默落进别的类目。
     const actionTable: Record<string, readonly string[]> = {
       image: GHOST_MODEL_IMAGE_ACTIONS,
       video: GHOST_MODEL_VIDEO_ACTIONS,
+      media: GHOST_CINDY_MEDIA_ACTIONS,
+      text: GHOST_CINDY_TEXT_ACTIONS,
     };
     for (const [category, actionsRaw] of Object.entries(cindyRaw)) {
       const allowed = actionTable[category];
@@ -2666,10 +2925,20 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         }
         actions.push(a);
       }
+      // 逐类目显式落位:不要写成 `else cindy.video = …` 的兜底分支——新增
+      // 类目时漏改这里会把新动作静默塞进 video(actionTable 已放行,校验不报错)。
       if (category === 'image') cindy.image = actions as GhostModelImageAction[];
-      else cindy.video = actions as GhostModelVideoAction[];
+      else if (category === 'video') cindy.video = actions as GhostModelVideoAction[];
+      else if (category === 'media') cindy.media = actions as GhostCindyMediaAction[];
+      else if (category === 'text') cindy.text = actions as GhostCindyTextAction[];
+      else return { ok: false, reason: `cindy 能力类目 ${JSON.stringify(category)} 尚未接线(主机缺陷)` };
     }
-    if (cindy.image === undefined && cindy.video === undefined) {
+    if (
+      cindy.image === undefined &&
+      cindy.video === undefined &&
+      cindy.media === undefined &&
+      cindy.text === undefined
+    ) {
       return { ok: false, reason: 'cindy 能力详单不能是空对象' };
     }
   }
@@ -2685,7 +2954,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       return { ok: false, reason: '声明了 agent 能力详单但 slots 未包含 "agent"' };
     }
     const agentRaw = raw.agent as Record<string, unknown>;
-    const unknownAgentField = Object.keys(agentRaw).find((key) => key !== 'background');
+    const unknownAgentField = Object.keys(agentRaw).find(
+      (key) => key !== 'background' && key !== 'errand',
+    );
     if (unknownAgentField) {
       return {
         ok: false,
@@ -2695,13 +2966,20 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     if (agentRaw.background !== undefined && typeof agentRaw.background !== 'boolean') {
       return { ok: false, reason: 'agent.background 必须是布尔值' };
     }
-    if (agentRaw.background !== true) {
+    if (agentRaw.errand !== undefined && typeof agentRaw.errand !== 'boolean') {
+      return { ok: false, reason: 'agent.errand 必须是布尔值' };
+    }
+    if (agentRaw.background !== true && agentRaw.errand !== true) {
       return {
         ok: false,
-        reason: 'agent 能力详单目前只有 background: true 这一项；仅需用户点击触发时请省略 agent 字段',
+        reason:
+          'agent 能力详单只有 background: true / errand: true 两项加档；仅需用户点击触发时请省略 agent 字段',
       };
     }
-    agent = { background: true };
+    agent = {
+      ...(agentRaw.background === true ? { background: true } : {}),
+      ...(agentRaw.errand === true ? { errand: true } : {}),
+    };
   }
 
   // node 槽详单:只收包内入口 + 固定 stdio 协议 + 生命周期。这里刻意采用
@@ -2831,6 +3109,12 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           return {
             ok: false,
             reason: `node.secretBindings[] 含不允许的字段 ${JSON.stringify(unknownBindingField)}`,
+          };
+        }
+        if (typeof binding.key === 'string' && isGhostManifestReservedRecordKey(binding.key)) {
+          return {
+            ok: false,
+            reason: `node.secretBindings[].key 不允许使用对象保留键名 ${JSON.stringify(binding.key)}`,
           };
         }
         if (typeof binding.key !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(binding.key)) {
@@ -3176,6 +3460,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       const seenKeys = new Set<string>();
       for (const s of n.secrets) {
         if (!isPlainObject(s)) return { ok: false, reason: 'network.secrets 每项必须是对象' };
+        if (typeof s.key === 'string' && isGhostManifestReservedRecordKey(s.key)) {
+          return { ok: false, reason: `network.secrets[].key 不允许使用对象保留键名 ${JSON.stringify(s.key)}` };
+        }
         if (typeof s.key !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(s.key)) {
           return { ok: false, reason: 'network.secrets[].key 必须是小写字母开头的 1–32 位小写/数字/下划线' };
         }
@@ -3731,6 +4018,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       const nodeSecretKeySet = new Set((node?.secretBindings ?? []).map((s) => s.key));
       for (const c of n.connections) {
         if (!isPlainObject(c)) return { ok: false, reason: 'network.connections 每项必须是对象' };
+        if (typeof c.key === 'string' && isGhostManifestReservedRecordKey(c.key)) {
+          return { ok: false, reason: `network.connections[].key 不允许使用对象保留键名 ${JSON.stringify(c.key)}` };
+        }
         if (typeof c.key !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(c.key)) {
           return { ok: false, reason: 'network.connections[].key 必须是小写字母开头的 1–32 位小写/数字/下划线' };
         }
@@ -3857,6 +4147,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
             item = { kind: 'connection', key: refKey };
           }
         } else if (isPlainObject(it)) {
+          if (typeof it.kv === 'string' && isGhostManifestReservedRecordKey(it.kv)) {
+            return { ok: false, reason: `setup kv 条目的 kv 不允许使用对象保留键名 ${JSON.stringify(it.kv)}` };
+          }
           if (typeof it.kv !== 'string' || !GHOST_SETUP_KV_KEY_RE.test(it.kv)) {
             return { ok: false, reason: 'setup kv 条目的 kv 必须是 1–64 位字母/数字/下划线/点/连字符的键名' };
           }
@@ -3942,6 +4235,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       ...(raw.settingsHeight !== undefined ? { settingsHeight: raw.settingsHeight as number } : {}),
       slots,
       ...(tools !== undefined ? { tools } : {}),
+      ...(atResourceProvider !== undefined ? { atResourceProvider } : {}),
       ...(card !== undefined ? { card } : {}),
       ...(cindy !== undefined ? { cindy } : {}),
       ...(agent !== undefined ? { agent } : {}),
@@ -4079,6 +4373,116 @@ export type GhostPipeAgentResult =
         | 'INTERNAL';
       message: string;
     };
+
+/* ── agent 槽·派活取件(errand,2026-07-31 开闸)──────────────────────────
+ * 与 agent-request(把回合发进用户会话,结果给用户看)相对:errand 把任务
+ * 交给插件**专属 errand 会话**里的 agent 跑一轮,最终回复文字取回给插件。
+ * 须声明 'agent' 卡槽 + `agent.errand: true`(装入确认高风险单列)。
+ * agent/模型/effort/fast/供应商/权限档/工作目录由用户在插件详情页配置
+ * (缺省跟随新建草稿偏好;权限档默认 plan 只读,永不提供 bypassPermissions,
+ * 2026-07-31 Lizi 定案);任务文本只进普通 user 消息,绝不进 system prompt。 */
+
+/** 任务描述上限(与 agent-request 的最终消息同量级)。 */
+export const GHOST_ERRAND_MAX_TASK_CHARS = 32_768;
+/** 结构化上下文 JSON 化后的上限(与 agent-request 的 event 同量级)。 */
+export const GHOST_ERRAND_MAX_CONTEXT_JSON_CHARS = 65_536;
+/** 取回结果的截断上限(超长从头保留;截断时结果尾部带明示标记)。 */
+export const GHOST_ERRAND_MAX_RESULT_CHARS = 65_536;
+/** 完成结果保留时长(毫秒;同 cindy 异步代办:过期即清,查询按查无此单)。 */
+export const GHOST_ERRAND_JOB_TTL_MS = 30 * 60_000;
+/** 每插件相邻两次提交的最小间隔(毫秒;与 agent-request 后台档同口径)。
+ *  同步等待(mode:'wait')的绝对上限直接复用 GHOST_PIPE_CALL_MAX_TOTAL_MS。 */
+export const GHOST_ERRAND_MIN_INTERVAL_MS = 10_000;
+/** sessionKey 的合法形状(1–64 位字母/数字/._-;字符集刻意排除 `#`,
+ *  存储层用 `ghostId#sessionKey` 做映射键,ghostId 字符集同样无 `#`,不会歧义)。 */
+export const GHOST_ERRAND_SESSION_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * errand 会话允许的权限档。plan = 只读默认档;acceptEdits / auto 由用户在
+ * 插件详情页显式放开。**bypassPermissions 刻意不在此列**(2026-07-31 定案:
+ * 被骗的插件配上不设防会话 = 无人看守的用户全权,风险不可接受)。
+ */
+export const GHOST_ERRAND_PERMISSION_MODES = ['plan', 'acceptEdits', 'auto'] as const;
+export type GhostErrandPermissionMode = (typeof GHOST_ERRAND_PERMISSION_MODES)[number];
+
+/** 上行:派活提交与取件查询。 */
+export type GhostPipeAgentErrandRequest =
+  | {
+      type: 'agent-errand-request';
+      kind: 'run';
+      /** 任务描述(1–32768 字符;进 errand 会话的普通 user 消息)。 */
+      task: string;
+      /** 可选结构化上下文:主机 JSON.stringify 后附在任务消息尾部(≤64KB)。 */
+      context?: unknown;
+      /** errand 会话标题提示(仅首次创建对应 errand 会话时采用;1–100 字符)。 */
+      title?: string;
+      /**
+       * 可选的分会话钥匙(1–64 位字母/数字/._-)。不传 = 插件共用一间专属
+       * errand 会话(旧行为);传了 = 同一把钥匙复用同一间、不同钥匙各开各
+       * 的间(每单仍受"每插件同时 1 单在途"约束,分会话不放大并发)。适合
+       * 「按业务对象各聊各的」场景,如每条 PR 一间:sessionKey:'pr-123'。
+       */
+      sessionKey?: string;
+      /**
+       * 可选:请求把 errand 会话建在这个目录(绝对路径,≤1024 字符)。
+       * 只是**转述**,不是授权——主机只认用户此前在 pick 槽系统窗口里
+       * 亲手选过的目录(pickGrantsStore 台账);台账里没有 → INVALID_REQUEST。
+       * 用户在「AI 代办」卡里配置了工作目录时以用户配置优先,本字段忽略。
+       */
+      workingDir?: string;
+      /**
+       * 'wait' = 同步吊着等完成(管子自动续命,30 分钟天花板);缺省异步:
+       * 受理后立即返回 jobId,用 kind:'query' 轮询取件。agent 干活是分钟级
+       * 的,推荐缺省异步 + 插件自己掌握轮询节奏。
+       */
+      mode?: 'wait';
+      /** 归因号(tool-call 触发时把 callId 原样带上;同 cindy-request 语义)。 */
+      callId?: string;
+    }
+  | {
+      type: 'agent-errand-request';
+      kind: 'query';
+      /** 提交受理时返回的任务号(仅本插件自己的任务可查)。 */
+      jobId: string;
+    };
+
+/** errand 结构化错误码(稳定契约,新增值不改旧值语义)。 */
+export type GhostAgentErrandErrorCode =
+  | 'INVALID_REQUEST'
+  | 'PERMISSION_DENIED'
+  | 'BUSY'
+  | 'RATE_LIMITED'
+  | 'HOST_NOT_READY'
+  | 'JOB_NOT_FOUND'
+  | 'SESSION_UNAVAILABLE'
+  | 'TURN_FAILED'
+  | 'TIMEOUT'
+  | 'INTERNAL';
+
+/** 下行(invoke 返回值):受理/进行中、完成、失败三态。 */
+export type GhostPipeAgentErrandResult =
+  | {
+      /** 受理(kind:'run' 异步)与查询进行中(kind:'query')共用本分支。 */
+      ok: true;
+      jobId: string;
+      status: 'running';
+      /** errand 会话 id(用户可在侧边栏找到它旁观)。 */
+      sessionId?: string;
+      /** 已耗时(秒;仅查询返回)。 */
+      elapsedSeconds?: number;
+    }
+  | {
+      /** 完成态:text 即 agent 本轮的最终回复(超长按上限截断并带标记)。 */
+      ok: true;
+      jobId: string;
+      status: 'done';
+      sessionId: string;
+      text: string;
+      /** 实际干活的 agent 与模型(用户配置的解析结果;诊断展示用)。 */
+      agentKind?: string;
+      model?: string;
+    }
+  | { ok: false; errorCode: GhostAgentErrandErrorCode; message: string };
 
 /**
  * node-request 长任务绝对上限(毫秒,15 分钟):声明 maxTotalMs 后请求最长
@@ -4511,6 +4915,49 @@ export interface GhostPipeNotify {
 /** notify 的 invoke 返回(失败带人话原因,供意识作者调试;不涉他人信息)。 */
 export type GhostPipeNotifyResult = { ok: true } | { ok: false; message: string };
 
+/**
+ * 上行:未读角标(badge 槽,2026-08-03)。意识告诉主机"我这儿有新内容了",
+ * 主机在插件入口与插件卡上点一颗**绿点**,并把 summary 显示在卡片简介位。
+ *
+ * 与 notify 的分工:notify 是"弹一条即走"的一次性 toast(错过就没了);本消息
+ * 是**持久状态**——用户没去看就一直亮着,打开面板即清零。两者是**并列的两档
+ * 权限**,不是加档关系:要 toast 声明 `notify` 槽,要绿点声明 `badge` 槽,
+ * 谁也不是谁的前置(绿点比 toast 克制,不该被 toast 权限捆绑)。
+ *
+ * 门槛(validateGhostManifest 强制):只有声明了 `panel` 的意识能申请。理由是
+ * 未读点承诺"点开能看到内容",纯工具型/对话型意识没有可打开的界面,给了就是
+ * 骗点击。
+ *
+ * 信任边界与 notify 同款:意识只供纯文本 summary(净化 + 限长),点的颜色、
+ * 位置、身份头全由主机画;意识改不了别人的角标(id 由沙箱绑定,不看载荷自报)。
+ */
+export interface GhostPipeBadge {
+  type: 'badge';
+  /** true = 有未读(点亮);false = 自己清零(如意识内已读)。 */
+  unread: boolean;
+  /**
+   * 最新一条的摘要(纯文本,≤ GHOST_BADGE_SUMMARY_MAX_CHARS)。
+   * 显示在插件卡的简介位,替代静态描述——用户扫一眼就知道新内容是什么。
+   * unread:false 时忽略。
+   */
+  summary?: string;
+}
+
+/** badge 的 invoke 返回(与 notify 同款结构化拒绝,不抛异常穿透沙箱)。 */
+export type GhostPipeBadgeResult = { ok: true } | { ok: false; message: string };
+
+/**
+ * 未读摘要长度上限。比 notify 正文更短:它要挤进卡片一行、单行省略,
+ * 太长的部分用户根本看不到,不如让作者自己裁。
+ */
+export const GHOST_BADGE_SUMMARY_MAX_CHARS = 80;
+
+/**
+ * 同一意识两次角标上报的最小间隔 ms。比 notify 宽松得多——角标是幂等的
+ * 状态写入(不像 toast 每条都打扰用户),但仍要挡住死循环刷写。
+ */
+export const GHOST_BADGE_MIN_INTERVAL_MS = 500;
+
 /** 提示正文长度上限(与订阅槽 block reason ≤200 同量级:一眼能读完的量)。 */
 export const GHOST_NOTIFY_MAX_CHARS = 200;
 
@@ -4529,6 +4976,58 @@ export type GhostHostNoticeKey = (typeof GHOST_HOST_NOTICE_KEYS)[number];
 /** 同一意识两条提示的最小间隔 ms(超发拒收,防 toast 刷屏骚扰)。 */
 export const GHOST_NOTIFY_MIN_INTERVAL_MS = 5000;
 
+/**
+ * 上行:确认弹窗(confirm 槽,2026-07-31)。意识请主机弹**主机同款**的二选一
+ * 确认框(renderer 的 ConfirmDialogProvider),拿回用户的真实点击。
+ *
+ * 与 notify 的分工:notify 是「说一句就走」(无按钮无回执),本槽是「要一个答复」。
+ * 所以它会打断用户,骚扰面更大,护栏对齐 pick 槽(限速 + 全局单飞 + fail closed)。
+ *
+ * 信任边界:弹窗的壳、标题(主机文案「插件「X」请你确认」)与身份头(图标 + 名字)
+ * 全由主机画,身份取自已装清单而非载荷自报;意识只供 `body` 与按钮字,且一律过
+ * sanitizeGhostNoticeText 净化 + 长度上限。意识发起得了请求,点不了自己的按钮。
+ */
+export interface GhostPipeConfirm {
+  type: 'confirm-request';
+  /** 问句正文(纯文本,≤ GHOST_CONFIRM_BODY_MAX_CHARS;允许 \n 换行)。 */
+  body: string;
+  /** 主按钮文案(≤ GHOST_CONFIRM_BUTTON_MAX_CHARS);缺省用主机的「确认」。 */
+  confirmText?: string;
+  /** 次按钮文案(同上上限);缺省用主机的「取消」。 */
+  cancelText?: string;
+  /** 危险动作(删除/覆盖/改用户文件):主按钮走 destructive 语义色。缺省 false。 */
+  danger?: boolean;
+}
+
+/**
+ * confirm 的 invoke 返回。`ok:true` 只代表**问到了**;答案看 `confirmed`——
+ * false = 用户点了取消 / 按了 Esc / 点了弹窗外部。
+ * 失败分档带 errorCode,方便意识作者区分"被限速"与"用户拒绝"(两者处理完全不同)。
+ */
+export type GhostPipeConfirmResult =
+  | { ok: true; confirmed: boolean }
+  | {
+      ok: false;
+      errorCode: 'PERMISSION_DENIED' | 'INVALID_REQUEST' | 'RATE_LIMITED' | 'BUSY' | 'UNAVAILABLE' | 'INTERNAL';
+      message: string;
+    };
+
+/** 问句正文上限(比 notify 的 200 宽一点:确认要把后果说清,但仍是一眼读完的量)。 */
+export const GHOST_CONFIRM_BODY_MAX_CHARS = 300;
+
+/** 按钮文案上限(按钮就那么宽;超长会挤坏弹窗版式)。 */
+export const GHOST_CONFIRM_BUTTON_MAX_CHARS = 12;
+
+/** 同一意识两次确认请求的最小间隔 ms(按尝试记账,与 pick 槽同量级)。 */
+export const GHOST_CONFIRM_MIN_INTERVAL_MS = 3000;
+
+/**
+ * 无人应答的兜底超时 ms:到点当「没同意」。
+ * 90 秒是刻意选的——小于插件面板侧常用的 180 秒请求超时,好让面板拿到一个干净的
+ * "用户没答应"而不是自己先超时、留下一个语义不明的悬空请求。
+ */
+export const GHOST_CONFIRM_TIMEOUT_MS = 90_000;
+
 /** cindy 槽代办的质量档位:意识只表达"要多好",具体模型由主机解析表决定。 */
 export const GHOST_MODEL_TIERS = ['draft', 'standard', 'best'] as const;
 export type GhostModelTier = (typeof GHOST_MODEL_TIERS)[number];
@@ -4541,6 +5040,103 @@ export type GhostModelTier = (typeof GHOST_MODEL_TIERS)[number];
  */
 export const GHOST_IMAGE_ASPECT_RATIOS = ['1:1', '3:2', '2:3'] as const;
 export type GhostImageAspectRatio = (typeof GHOST_IMAGE_ASPECT_RATIOS)[number];
+
+/**
+ * cindy 槽视频代办的画幅比例。与生图的 aspectRatio 分开成两套值域:视频
+ * 后端(video provider 层)的公共集是 16:9 系,与图像后端的原生尺寸枚举
+ * 没有交集,合成一套只会让两边都出现"声明了却兑现不了"的值。这里登记的
+ * 是**所有已注册 provider 都支持**的交集,单个型号的实际支持集由主机在
+ * 解析出选型后二次校验(型号不支持即明拒,不做最近似降级)。
+ */
+export const GHOST_VIDEO_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4'] as const;
+export type GhostVideoRatio = (typeof GHOST_VIDEO_RATIOS)[number];
+
+/** cindy 槽视频代办的分辨率档(同 GHOST_VIDEO_RATIOS 的口径:公共集 + 按型号二次校验)。 */
+export const GHOST_VIDEO_RESOLUTIONS = ['480p', '720p', '1080p'] as const;
+export type GhostVideoResolution = (typeof GHOST_VIDEO_RESOLUTIONS)[number];
+
+/**
+ * edit_video 的参考图用法(2026-07 加法)。同样是「N 张图」,两种模式出片
+ * 完全不同,所以由调用方显式声明,不靠张数隐式推断:
+ *   - `'first_and_last_frame'`(**缺省**):1 张=首帧动画,2 张=首尾帧过渡。
+ *     这是本字段出现之前的唯一行为,不传即走这条,与老协议逐字节同形——
+ *     存量插件不改一行代码、不重新授权,行为不变。
+ *   - `'reference_image'`:多张参考图锁主体/元素/风格,由模型另行构图。
+ *     提示词里须用 `[Image 1]`、`[Image 2]` 指代第几张(上游要求;主机遵守
+ *     提示词 passthrough,不代写),张数上限随型号,由主机按选型二次校验。
+ *
+ * 值域是**所有已注册 provider 的并集**,单个型号支不支持某种用法由主机在
+ * 解析出选型后二次校验(不支持即明拒,不降级成另一种用法——降级会出一条
+ * 用户没要的片子还照样计费)。
+ */
+export const GHOST_VIDEO_REF_MODES = ['first_and_last_frame', 'reference_image'] as const;
+export type GhostVideoRefMode = (typeof GHOST_VIDEO_REF_MODES)[number];
+
+/** 不传 refMode 时的落点。改这个值 = 改存量插件的行为,不要动。 */
+export const GHOST_VIDEO_REF_MODE_DEFAULT: GhostVideoRefMode = 'first_and_last_frame';
+
+/**
+ * 各 refMode 的参考图张数上界(协议层粗筛,与型号无关):
+ *   - 首尾帧:首 + 尾,语义上界就是 2,任何型号都不会更多。
+ *   - 参考图:9,当前所有 provider 的最大值。
+ * 型号实际上限更低(如 happyhorse 首尾帧模式只有首帧,上限 1)由主机在
+ * 解析出选型后二次校验。
+ *
+ * 张数之外还有一道按模式分档的**总字节闸**
+ * (GHOST_VIDEO_REF_IMAGE_MAX_TOTAL_BYTES_BY_REF_MODE):9 张小图与 2 张巨图
+ * 是不同的失败面。
+ */
+export const GHOST_VIDEO_MAX_SOURCES_BY_REF_MODE: Readonly<Record<GhostVideoRefMode, number>> = {
+  first_and_last_frame: 2,
+  reference_image: 9,
+};
+
+/**
+ * 单次图生视频的**参考图总字节**上限。张数闸(见
+ * GHOST_VIDEO_MAX_SOURCES_BY_REF_MODE)管"几张",这道闸管"多大" —— 主机要把
+ * 每张读成 base64 data URI 交给上游,链上会同时存在原始 Buffer(1×)+ base64
+ * 字符串(4/3×)+ JSON 请求体(再 4/3×),峰值约聚合量的 3.7 倍。
+ *
+ * **按 refMode 分档,不能统一取一个数**:两种模式的约束不相交 —— 存量路径
+ * 要的是"一单都不许比改之前更严",新路径要的是"最坏值必须有界",能同时满足
+ * 两者的统一数不存在(见下)。null = 该模式不设闸。
+ */
+export const GHOST_VIDEO_REF_IMAGE_MAX_TOTAL_BYTES_BY_REF_MODE: Readonly<
+  Record<GhostVideoRefMode, number | null>
+> = {
+  /*
+   * 存量路径:**不设闸,原样保留**。
+   *
+   * 这条路径在多参考图之前没有任何字节闸,而源图远不止来自寄存 ——
+   * resolveOwnedMedia 走 ledger.ghostCanRead,放行的还有 ghost-gallery
+   * (network as:'media' 落仓,单张硬顶 GHOST_FETCH_MEDIA_MAX_BYTES = 256MB)
+   * 与 ghost-grant(用户随附件引渡,上限另算)。所以"源图 ≤ 寄存上限 50MB"
+   * 不成立,任何有限预算都可能拒掉一单改之前跑得通的活。
+   *
+   * 这条路径的 OOM 暴露面是**既有**问题(edit_image 吃源图同样没有闸),
+   * 收紧它要改存量行为,不在本 PR 范围,已列入 PR 风险区跟踪。
+   */
+  first_and_last_frame: null,
+  /*
+   * 新路径:张数放到 9,不设闸最坏能拖进 9 × 256MB。这个模式是随本 PR 新开
+   * 的,没有存量插件依赖,所以从第一天就给个保守边界。
+   *
+   * 100MB 聚合 → 峰值约 370MB(原始 Buffer 1× + base64 4/3× + JSON 请求体
+   * 再 4/3×),是 main 进程能吞下的量级;9 张均摊 11MB,对参考图绰绰有余
+   * (1080p 级单张通常几 MB)。不与寄存上限挂钩:那个数管"单张能存多大",
+   * 与"一单能读多少"不是同一件事,挂上去只会绑出假的联动。
+   */
+  reference_image: 100 * 1024 * 1024,
+};
+
+/**
+ * 视频时长/帧率的形状上限(秒 / fps)。这两项各型号差异大(如 seedance
+ * 支持 4/6/8/10 秒,happyhorse 只有 5 秒),协议层不枚举值域,只做"正整数
+ * 且不离谱"的粗筛,真正的可用集由主机按解析出的型号校验并在拒绝话术里
+ * 列出。粗筛的意义是挡住沙箱乱填(负数、小数、天文数字)。
+ */
+export const GHOST_VIDEO_MAX_DURATION_SECONDS = 60;
+export const GHOST_VIDEO_MAX_FPS = 120;
 
 /**
  * 异步代办(mode:'submit')完成结果的保留时长(毫秒,30 分钟):完成后
@@ -4557,6 +5153,61 @@ export const GHOST_CINDY_JOB_TTL_MS = 30 * 60_000;
  * inflightLimit(同时约束同步+异步)更严时以更严者为准。
  */
 export const GHOST_CINDY_MAX_ASYNC_JOBS = 2;
+
+/**
+ * ── deposit_media 政策参数(makecindy/cindy#784)─────────────────────────
+ *
+ * 寄存是插件写持久媒体的第三条路,而且是唯一**两道闸都没有**的一条:模型
+ * 代办要花钱(成本即天然限流),network `as:'media'` 限 manifest 白名单域名,
+ * 寄存收的是本地字节 —— 不花钱、不出网、可程序化循环调用。因此这条通道
+ * 自带三重硬闸:单次上限、每意识累计配额、令牌桶频控。
+ */
+
+/**
+ * 单次寄存上限(解码后字节;超限整单拒)。
+ *
+ * 2026-07-29 由 16MB(fs 槽单次写量级)上调至 50MB:实拍照片与短视频素材
+ * 常态超过 16MB,压到 16MB 以下要插件自己转码,与"画布上的图直接能改"的
+ * 目标冲突。下游没有新的天花板 —— network `as:'media'` 的入仓硬顶本就是
+ * GHOST_FETCH_MEDIA_MAX_BYTES(256MB),blobStore 不设上限。
+ *
+ * 代价说明白:寄存的字节以 base64 走一次 ghost-pipe IPC(50MB → 约 67MB
+ * 字符串的瞬时分配),这是本通道与 network 通道的结构性差别 —— 后者字节
+ * 全程在主机手里、不过 IPC。因此这个数不宜再往上抬;真需要更大的素材,
+ * 正确解法是插件侧压缩或分片,不是继续抬上限。
+ */
+export const GHOST_CINDY_DEPOSIT_MAX_BYTES = 50 * 1024 * 1024;
+
+/**
+ * 每意识寄存累计配额(字节)。只统计**寄存**引用(refKind 'ghost-deposit'),
+ * 不含模型产物与 network 下载 —— 否则一个出图很多的意识会连一张参考图都
+ * 存不进来。内容寻址天然去重:同一张图反复寄存不重复占额。
+ * 用满的释放口是 release_media(面板删素材时撤回),不做静默 LRU 淘汰
+ * ——"昨天能改今天改不了"正是 #784 要消灭的体验。
+ *
+ * 2026-07-29 由 512MB 上调至 1GB:单次上限同步抬到 50MB 后,原配额只够存
+ * 十来件大素材,重度使用的无限画布会频繁撞顶。
+ */
+export const GHOST_CINDY_DEPOSIT_QUOTA_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * 频控令牌桶:容量 = 允许的突发张数(用户一次粘一批图要立刻可用),
+ * 之后按 refill 间隔匀速回补。防的是程序化死循环刷仓,不是拦正常批量粘贴。
+ */
+export const GHOST_CINDY_DEPOSIT_BURST = 8;
+export const GHOST_CINDY_DEPOSIT_REFILL_MS = 1000;
+
+/**
+ * ── oneshot_text 政策参数(2026-07-31 开闸)────────────────────────────
+ * 快问快答走轻量任务模型链,秒级到几十秒,只有同步形态(没有 submit 档:
+ * 一单等不起的文本问答本身就是用错了通道)。上限对齐 agent-request 的
+ * 消息量级;回答预算钳在小额度——这是"快问快答",不是长文生成通道。
+ */
+export const GHOST_ONESHOT_TEXT_MAX_PROMPT_CHARS = 32_768;
+export const GHOST_ONESHOT_TEXT_MAX_TOKENS = 4096;
+export const GHOST_ONESHOT_TEXT_DEFAULT_MAX_TOKENS = 1024;
+/** 单次快问快答的等待上限(毫秒;超时按结构化失败收单,不吊管子)。 */
+export const GHOST_ONESHOT_TEXT_TIMEOUT_MS = 60_000;
 
 /**
  * 上行:cindy 槽代办请求(请 Cindy 本体出图 / 改图)。协议 type 为
@@ -4578,8 +5229,8 @@ export type GhostPipeCindyRequest =
       /**
        * 画幅比例(可选):'1:1' 方图 / '3:2' 横图 / '2:3' 竖图;不传 =
        * 后端自定(auto)。比例是意图声明,主机映射为该后端的具体尺寸,
-       * 实际像素以返回的 width/height 为准。仅生图支持——改图跟随源图
-       * 画幅,视频画幅由 provider 层自治,带了会被明拒。
+       * 实际像素以返回的 width/height 为准。图像类代办(生图/改图)专用,
+       * 视频类请改用 ratio(值域不同),带错了会被明拒。
        */
       aspectRatio?: GhostImageAspectRatio;
       /**
@@ -4600,6 +5251,11 @@ export type GhostPipeCindyRequest =
       hashes: string[];
       tier?: GhostModelTier;
       model?: string;
+      /**
+       * 画幅比例(可选,语义同 gen_image 分支)。不传 = 跟随源图画幅
+       * (后端 auto),这也是历史行为;传了则按该比例重绘。
+       */
+      aspectRatio?: GhostImageAspectRatio;
       /** 归因号(同 gen_image 分支)。 */
       callId?: string;
     }
@@ -4609,6 +5265,35 @@ export type GhostPipeCindyRequest =
       prompt: string;
       tier?: GhostModelTier;
       model?: string;
+      /**
+       * 画面参数(全部可选):不传 = 该型号的出厂默认(与历史行为逐字节
+       * 同形)。ratio/resolution 的值域见 GHOST_VIDEO_RATIOS /
+       * GHOST_VIDEO_RESOLUTIONS;duration(秒)与 fps 各型号支持集不同,
+       * 主机按解析出的选型校验,不支持即明拒并列出可用值。实际生效的
+       * 参数随结果回传(见 GhostPipeModelResult 的 videoParams)。
+       */
+      ratio?: GhostVideoRatio;
+      resolution?: GhostVideoResolution;
+      duration?: number;
+      fps?: number;
+      /**
+       * 要不要同时生成音频(对白 / 音效 / 背景音乐;2026-08 加法)。
+       *
+       * **三态,不传与传 false 不是一回事**:
+       *   - 不传(**缺省**):主机不向上游传递任何音频字段,出声与否随该型号
+       *     的上游默认——与本字段出现之前逐字节同形。存量插件不改一行代码,
+       *     产出不变。
+       *   - `true`:显式要求带音轨。台词/音效/配乐的具体内容写在 prompt 里
+       *     (主机遵守提示词 passthrough,不代写)。
+       *   - `false`:显式要求静音。
+       *
+       * 不是所有型号都有音轨能力:主机按解析出的选型二次校验,不支持的型号
+       * 上**显式传**本字段即明拒(不静默忽略——静默出一条无声/有声都不是
+       * 用户要的片子,还照样计费)。不传则永远不会因此被拒。
+       *
+       * 实际生效值随结果回传(见 GhostVideoResultParams 的 audio)。
+       */
+      audio?: boolean;
       /** 归因号(同 gen_image 分支)。 */
       callId?: string;
       /**
@@ -4624,12 +5309,28 @@ export type GhostPipeCindyRequest =
       kind: 'edit_video';
       prompt: string;
       /**
-       * 参考图指纹(sha256,1–2 张:1 张=首帧动画,2 张=首尾帧过渡)。
-       * 归属规则同 edit_image:只能引用本意识名下的媒体。
+       * 参考图指纹(sha256)。张数上限随 `refMode` 变化:
+       *   - `first_and_last_frame`(缺省):1–2 张(1 张=首帧动画,2 张=首尾帧过渡)。
+       *   - `reference_image`:1–N 张,N 随型号(主机按选型二次校验后明拒)。
+       * 归属规则同 edit_image:只能引用本意识名下的媒体。**顺序有意义**——
+       * 首尾帧模式下是首/尾,参考图模式下是提示词里 `[Image 1]`…的序号。
        */
       hashes: string[];
+      /**
+       * 参考图用法(见 GHOST_VIDEO_REF_MODES)。不传 = `first_and_last_frame`,
+       * 与本字段出现之前逐字节同形。注意别和下面的 `mode`(异步受理)搞混:
+       * 那个管的是同步还是后台跑,两者正交,可同时传。
+       */
+      refMode?: GhostVideoRefMode;
       tier?: GhostModelTier;
       model?: string;
+      /** 画面参数(同 gen_video 分支;参考图不改变这几项的语义)。 */
+      ratio?: GhostVideoRatio;
+      resolution?: GhostVideoResolution;
+      duration?: number;
+      fps?: number;
+      /** 音频开关(同 gen_video 分支的三态语义;参考图不改变它的含义)。 */
+      audio?: boolean;
       /** 归因号(同 gen_image 分支)。 */
       callId?: string;
       /** 异步模式(同 gen_video 分支)。 */
@@ -4640,7 +5341,98 @@ export type GhostPipeCindyRequest =
       kind: 'query_job';
       /** mode:'submit' 受理时返回的任务号(仅本意识自己的任务可查)。 */
       jobId: string;
+    }
+  | {
+      /**
+       * 寄存:把意识手里已有的媒体字节存入总仓、记到本意识名下,换回指纹
+       * (makecindy/cindy#784)。典型来源是面板里用户粘贴/拖入的图与面板存量
+       * 素材——它们的字节只在面板侧(IndexedDB / 面板内存),不在总仓,因此
+       * 在寄存之前不能当 edit_image / edit_video 的源图。
+       *
+       * 不经模型、不花钱、不产出新内容:这条通道只是"字节换指纹"。因此它
+       * **不进 ghost_call 产物账**(不会被当成生成物自动送进聊天/IM——用户
+       * 自己粘的参考图被回推到 IM 会是隐私事故),也不进画廊(粘贴的参考图
+       * 不是这个意识的"作品")。
+       *
+       * 须声明 'cindy' 卡槽 + `cindy.media: ["deposit"]`。
+       */
+      type: 'cindy-request';
+      kind: 'deposit_media';
+      /**
+       * 媒体字节的 base64(不含 data: 前缀;解码后 ≤
+       * GHOST_CINDY_DEPOSIT_MAX_BYTES = 50MB)。真实类型由主机按字节魔数
+       * 判定,识别不出受支持媒体一律拒收——自报的 mime / 扩展名不作为依据。
+       */
+      data: string;
+      /** 可选备注(入账 label;仅供主机侧账目与排查,不进聊天)。 */
+      label?: string;
+      /** 归因号(仅日志归因;寄存不计入产物账,见上)。 */
+      callId?: string;
+    }
+  | {
+      /**
+       * 撤回寄存:删掉本意识对该指纹的寄存引用(配额随之释放)。面板上那件
+       * 素材被用户删掉时调用,是 deposit 配额的正常释放口。
+       *
+       * 只删**本意识自己的寄存引用**:别人的引用、画廊引用、聊天消息引用都
+       * 不受影响;字节本身交回收器按"引用归零"统一处理,本请求删不掉字节。
+       * 与 deposit 共用 `cindy.media: ["deposit"]` 授权。
+       */
+      type: 'cindy-request';
+      kind: 'release_media';
+      /** 要撤回的寄存指纹(sha256)。 */
+      hash: string;
+    }
+  | {
+      /**
+       * 快问快答(2026-07-31 开闸):把 prompt 交给主机的轻量任务模型链
+       * 直答一次,答案文字随本次 invoke 的返回值递回。不拉起 agent、无
+       * 工具、无用户权限、不进任何会话。须声明 'cindy' 卡槽 +
+       * `cindy.text: ["oneshot"]`。
+       *
+       * 选型不在意识手里:走主机的轻量任务模型链(用户在设置里配置的
+       * 快速通道,与会话起标题同一条),链上无可用候选时收到
+       * errorCode:'NO_CANDIDATE' 的结构化失败——意识必须把它当正常失败面
+       * 处理(典型场景:用户只登了订阅、没配可用的快速通道凭证)。
+       */
+      type: 'cindy-request';
+      kind: 'oneshot_text';
+      /** 要问的内容(1–32768 字符)。 */
+      prompt: string;
+      /**
+       * 期望模型只输出 JSON:主机在提示里注明并校验返回可解析,解析失败
+       * 按 errorCode:'BAD_MODEL_OUTPUT' 收单(text 里带原始输出,便于排查)。
+       * 具体字段结构写进 prompt 里描述;主机不做 schema 逐字段校验。
+       */
+      expectJson?: boolean;
+      /** 回答长度预算(token;1–4096,缺省 1024)。 */
+      maxTokens?: number;
+      /** 归因号(同 gen_image 分支)。 */
+      callId?: string;
     };
+
+/**
+ * 视频代办实际生效的画面参数回执(仅视频类代办)。取值优先用上游任务
+ * 上报的真实值,上游没报的那项回落主机提交值;各字段仍可能缺省(上游
+ * 没报且主机也没显式指定时)。类型是宽松的 string/number 而非请求侧的
+ * 枚举——回执是**上游说的**,不能假设它落在主机的值域里。
+ *
+ * 用途:老宿主会静默忽略请求里的新画面参数,意识拿这份回执才分得清
+ * "宿主不支持,给了默认档"与"宿主兑现了我要的档"。
+ */
+export interface GhostVideoResultParams {
+  durationSeconds?: number;
+  resolution?: string;
+  ratio?: string;
+  fps?: number;
+  /**
+   * 本单是否带音轨。缺省 = 主机说不上来(该型号没有音轨能力,或老宿主根本
+   * 不认识这个字段),**不等于"无声"**——想确认有没有兑现就看这个字段在不在,
+   * 别把缺省读成 false。当前上游任务不回报音频状态,所以这里的值来自主机
+   * 提交值 / 该型号的已知默认,不是上游上报的实测结果。
+   */
+  audio?: boolean;
+}
 
 /** cindy 槽代办的返回(cindy.send 的 resolve 值)。 */
 export type GhostPipeModelResult =
@@ -4663,6 +5455,8 @@ export type GhostPipeModelResult =
        */
       width?: number;
       height?: number;
+      /** 视频代办实际生效的画面参数(仅视频类代办;图像类不带此字段)。 */
+      videoParams?: GhostVideoResultParams;
     }
   | {
       ok: true;
@@ -4687,8 +5481,56 @@ export type GhostPipeModelResult =
       ext: string;
       model: string;
       modelLabel: string;
+      /** 与同步成功分支同形(异步代办只有视频,这里通常必带)。 */
+      videoParams?: GhostVideoResultParams;
     }
-  | { ok: false; message: string };
+  | {
+      /**
+       * deposit_media 成功(独立成员:有 `bytes`、无 `model`/`status`,
+       * 可与生成分支可靠判别)。指纹拿到手即可直接当 edit_image /
+       * edit_video 的源图,也可经 cindy-ghost://<id>/media/<指纹><后缀>
+       * 在面板里取件。
+       */
+      ok: true;
+      url: string;
+      hash: string;
+      ext: string;
+      /** 落仓字节数(去重命中时为既有内容的字节数)。 */
+      bytes: number;
+      /** 该字节此前已在总仓(全局内容去重命中)。 */
+      deduplicated: boolean;
+      /** 寄存配额:本意识已用 / 上限(字节)。作者据此提前提示用户。 */
+      quotaUsedBytes: number;
+      quotaLimitBytes: number;
+    }
+  | {
+      /** release_media 成功。released=false 表示本就没有这条寄存引用(幂等)。 */
+      ok: true;
+      released: boolean;
+      quotaUsedBytes: number;
+      quotaLimitBytes: number;
+    }
+  | {
+      /**
+       * oneshot_text 成功(独立成员:有 `text`、无 `url`/`status`,可与
+       * 其它成功分支可靠判别)。
+       */
+      ok: true;
+      text: string;
+      /** 实际应答的供应商/模型标识(轻量链解析结果;仅诊断展示用)。 */
+      model?: string;
+    }
+  | {
+      ok: false;
+      message: string;
+      /**
+       * 结构化错误码(2026-07-31 起 oneshot_text 填写;媒体代办暂只有
+       * message)。稳定值:'NO_CANDIDATE'(快速通道无可用模型/凭证)、
+       * 'BAD_MODEL_OUTPUT'(expectJson 下输出不可解析)、'RATE_LIMITED'、
+       * 'TIMEOUT'、'PERMISSION_DENIED'、'INVALID_PARAMS'、'INTERNAL'。
+       */
+      errorCode?: string;
+    };
 
 /* ── 订阅槽①:事件协议(2026-07-12 定案:一种事件模型,两个类型)──────
  * did- 旁听:fire-and-forget,主机投完即走,意识崩/慢不影响任何会话;
@@ -4710,13 +5552,23 @@ export const GHOST_HOOK_FUSE_THRESHOLD = 3;
  *  撑爆消息;提示词优化产物通常远小于此。 */
 export const GHOST_HOOK_REWRITE_MAX_CHARS = 16_000;
 
-/** did- 旁听事件名(topic 归属:turn / session)。 */
+/** activity topic 的旁听事件名。 */
+export type GhostActivityEventName =
+  | 'did-thinking-start'
+  | 'did-thinking-end'
+  | 'did-approval-start'
+  | 'did-approval-end'
+  | 'did-user-input-start'
+  | 'did-user-input-end';
+
+/** did- 旁听事件名(topic 归属:turn / session / activity)。 */
 export type GhostDidEventName =
   | 'did-turn-start'
   | 'did-turn-end'
   | 'did-session-created'
   | 'did-session-archived'
-  | 'did-session-switched';
+  | 'did-session-switched'
+  | GhostActivityEventName;
 
 /** did-turn-start 载荷(全元数据,无消息内容)。 */
 export interface GhostEventTurnStartData {
@@ -4746,6 +5598,41 @@ export interface GhostEventSessionData {
 }
 
 /**
+ * thinking 活动边界；只暴露 blockId，不暴露 reasoning 正文。
+ *
+ * `blockId` 是**主机生成的不透明配对键**（见 `ghostActivityId`），不是 provider 侧原值：
+ * 只保证同一段 thinking 的 start / end 拿到同一个值、不同会话不同值，不承载任何语义，
+ * 也不能用来关联主机或 provider 的任何其他标识。
+ */
+export interface GhostEventThinkingData {
+  sessionId: string;
+  blockId: string;
+}
+
+/**
+ * 审批/用户输入活动边界；只暴露 requestId，不暴露请求或回答内容。
+ *
+ * `requestId` 同样是**主机生成的不透明配对键**（见 `ghostActivityId`），不是 provider 侧
+ * 原值——provider 的 id 不保证语义中立（codex 的 MCP elicitation 会把服务名拼进去），
+ * 原样转发会越过"只知道时机"的隐私边界。只保证 start / end 配对。
+ */
+export interface GhostEventInteractionActivityData {
+  sessionId: string;
+  requestId: string;
+}
+
+export type GhostEventActivityData =
+  | GhostEventThinkingData
+  | GhostEventInteractionActivityData;
+
+/** 所有 did- 旁听事件共享的安全元数据载荷。 */
+export type GhostDidEventData =
+  | GhostEventTurnStartData
+  | GhostEventTurnEndData
+  | GhostEventSessionData
+  | GhostEventActivityData;
+
+/**
  * 下行:主机 → 意识的事件推送(经管子 onHostMessage 到达)。
  * did- 分支带 topic/seq(每意识单调递增,可自查漏收;dropped = 上一段
  * 熄灯期溢出丢弃数);will- 分支带 hookId,意识须在超时窗内回
@@ -4759,7 +5646,7 @@ export type GhostPipeEventPush =
       seq: number;
       ts: number;
       dropped?: number;
-      data: GhostEventTurnStartData | GhostEventTurnEndData | GhostEventSessionData;
+      data: GhostDidEventData;
     }
   | {
       type: 'event';

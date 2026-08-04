@@ -10,6 +10,7 @@
 export type {
   AgentKind,
   ProviderWireProtocol,
+  CodexCompatibilityWireProtocol,
   Effort,
   ProviderSource,
   AuthMethod,
@@ -23,6 +24,7 @@ export type {
   CustomProviderConfig,
   CustomProviderRuntimeConfig,
   ProviderRuntimeModelConfig,
+  PiReasoningEffort,
   ProviderPreset,
   ProviderPresetRuntime,
   OAuthAuthorizationCodeDescriptor,
@@ -30,10 +32,18 @@ export type {
   OAuthProviderDescriptor,
 } from './types.js';
 
+export { PI_REASONING_EFFORTS } from './types.js';
+
+export { resolveCodexCompatibilityWireProtocol } from './codexCompatibility.js';
+
 export { BUNDLED_CATALOG, BUILTIN_PROVIDERS, parseCatalog, presetDisplayName, sanitizePresets, sortPresetsForLocale } from './catalog.js';
 
 export { buildUserProvider, DEFAULT_CUSTOM_CONTEXT_WINDOW } from './user-provider.js';
-export { appendProviderRequestPath, isProviderRequestPath } from './provider-url.js';
+export {
+  appendProviderRequestPath,
+  isLoopbackProviderUrl,
+  isProviderRequestPath,
+} from './provider-url.js';
 export { findReservedOAuthExtraParam } from './provider-oauth.js';
 
 export {
@@ -44,8 +54,35 @@ export {
   resolveFallbackCatalogUrl,
   mergeWithBundled,
   loadCatalog,
+  loadCatalogWithSource,
 } from './source.js';
-export type { CatalogSourceConfig, CatalogIO } from './source.js';
+
+export {
+  compareModelRegistryRevisions,
+  decideModelRegistrySnapshot,
+  findModelRegistryRoute,
+  resolveModelReferencePrice,
+} from './modelRegistry.js';
+export { modelRegistryCanonicalJson } from '@cindy/model-access-protocol';
+export type {
+  ResolvedModelReferencePrice,
+  ResolveModelReferencePriceOptions,
+  ModelRegistryRevisionRelation,
+  ModelRegistrySnapshotDecision,
+} from './modelRegistry.js';
+export type {
+  ModelReferencePrice,
+  ModelReferencePriceSource,
+  ModelRegistry,
+  ModelRegistryEntry,
+  ModelRegistryRoute,
+} from '@cindy/model-access-protocol';
+export type {
+  CatalogSourceConfig,
+  CatalogIO,
+  CatalogLoadResult,
+  CatalogLoadSource,
+} from './source.js';
 
 export {
   buildRegistry,
@@ -53,14 +90,30 @@ export {
   connectedProvidersForAgent,
   nativeDefaultSourceId,
   effectiveSourceIdForModel,
+  actualSourceIdForModel,
   providerOffersModel,
   getModel,
   sourcesForModel,
+  chatEligibleSourcesForModel,
   resolveRoute,
   modelSupportsFastMode,
   sessionModelSupportsFastMode,
 } from './registry.js';
-export type { ConnectionState, ProviderView, ResolvedRoute } from './registry.js';
+export type {
+  ConnectionState,
+  ModelDiscoveryFailureState,
+  ProviderModelDiscoveryFailure,
+  ProviderModelDiscoveryFailureView,
+  ProviderView,
+  ResolvedRoute,
+} from './registry.js';
+
+export {
+  modelDisableKey,
+  isModelDisabled,
+  isProviderDisabled,
+} from './disableOverrides.js';
+export type { ModelDisableOverrides } from './disableOverrides.js';
 
 export { isModelVisible, buildProviderSections, visibleModelUnion, resolveModelIconKind } from './sections.js';
 export type { SectionModel, ProviderSection, ModelIconKind } from './sections.js';
@@ -94,8 +147,13 @@ export {
   SUBSCRIPTION_DIRECT_MODEL_PREFIXES,
   isSubscriptionDirectModel,
   CATEGORY_ORDER,
+  CHAT_VENDOR_CATEGORY_ORDER,
   categorize,
+  classifyModel,
+  isChatEligible,
   groupOf,
+  isAgentSelectableModel,
+  isModelSelectableForNewRoute,
   groupModelsForDisplay,
   isBudgetModel,
   modelBadges,

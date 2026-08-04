@@ -1,9 +1,10 @@
 /**
- * custom-provider-store —— 用户自定义供应商**配置**的 localDb CRUD（不含密钥）。
+ * custom-provider-store —— 用户自定义供应商**非凭证配置**的 localDb CRUD。
  *
  * 存储：localDb `custom_providers` 表。DB 文件本身按 userId 切片
  * （`<userData>/xdt-maker-<userId>.db`，换账号 closeDb 重开），故本表天然账号隔离、
- * 无 owner 列（与 `sessions` 一致）。API key 不在此——按 runtime 单独走 safeStorage（见 routing）。
+ * 无 owner 列（与 `sessions` 一致）。API key 与 runtime headers 均不在此——按 runtime
+ * 单独走 safeStorage（见 custom-provider-header-secrets / routing）。
  *
  * 形状：行 ↔ `@cindy/model-providers` 的 `CustomProviderConfig`（per-runtime）。`runtimes` 列以
  * TEXT 存 JSON，出入口转换、反序列化失败安全兜底（{}），不抛错。
@@ -12,17 +13,21 @@
  * （测试用 `setCurrentDbClient` 注入内存 db，见 __tests__）。
  */
 
-import { asc, eq } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 
 import type {
   AgentKind,
   CustomProviderConfig,
   CustomProviderRuntimeConfig,
   OAuthProviderDescriptor,
+  PiReasoningEffort,
+  ProviderRuntimeModelConfig,
 } from '@cindy/model-providers';
 import {
   findReservedOAuthExtraParam,
+  isLoopbackProviderUrl,
   isProviderRequestPath,
+  PI_REASONING_EFFORTS,
 } from '@cindy/model-providers';
 
 import { getDbClient } from '../localDb/client/current.js';
@@ -31,8 +36,10 @@ import { customProviders } from '../localDb/schema.js';
 /** provider id slug 规则（与 safeStorage key 名 `provider_key_<id>_<agent>` 合法字符对齐）。 */
 export const CUSTOM_PROVIDER_ID_RE = /^[a-z0-9_-]+$/;
 /** 不可占用的内置来源 id。 */
-const RESERVED_IDS = new Set(['anthropic', 'openai', 'xd']);
-const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex'];
+// 'cindy' 是 pi models.json 里网关 provider 的保留 id;自定义 provider 撞名会让其模型
+// 既被排除出网关块又不写入原生块 → --model 校验失败,故一并保留。
+const RESERVED_IDS = new Set(['anthropic', 'openai', 'xd', 'cindy']);
+const VALID_AGENTS: readonly AgentKind[] = ['claude-code', 'codex', 'pi'];
 const MAX_ID_LEN = 40;
 const MAX_NAME_LEN = 60;
 
@@ -43,6 +50,48 @@ export type ValidationResult =
 
 function invalid(message: string): ValidationResult {
   return { ok: false, code: 'INVALID_PARAMS', message };
+}
+
+function isPiReasoningEffort(value: unknown): value is PiReasoningEffort {
+  return (
+    typeof value === 'string' &&
+    (PI_REASONING_EFFORTS as readonly string[]).includes(value)
+  );
+}
+
+function parseStoredPiReasoningCapability(
+  agent: AgentKind,
+  model: Record<string, unknown>,
+): Partial<ProviderRuntimeModelConfig> {
+  if (agent !== 'pi' || model.reasoning !== true || !Array.isArray(model.reasoningEfforts)) {
+    return {};
+  }
+  const efforts = model.reasoningEfforts.filter(isPiReasoningEffort);
+  if (
+    efforts.length === 0 ||
+    efforts.length !== model.reasoningEfforts.length ||
+    new Set(efforts).size !== efforts.length
+  ) {
+    return {};
+  }
+  return { reasoning: true, reasoningEfforts: efforts };
+}
+
+function validateNoAuthLoopbackBoundary(
+  auth: CustomProviderConfig['auth'],
+  runtimes: Partial<Record<AgentKind, CustomProviderRuntimeConfig>>,
+): ValidationResult {
+  if (auth?.method !== 'none') return { ok: true };
+  for (const [agent, runtime] of Object.entries(runtimes)) {
+    if (!runtime) continue;
+    if (!isLoopbackProviderUrl(runtime.baseUrl)) {
+      return invalid(`runtime '${agent}' baseUrl must be loopback when auth method is none`);
+    }
+    if (runtime.modelsUrl !== undefined && !isLoopbackProviderUrl(runtime.modelsUrl)) {
+      return invalid(`runtime '${agent}' modelsUrl must be loopback when auth method is none`);
+    }
+  }
+  return { ok: true };
 }
 
 function validateRuntime(agent: string, rt: unknown): ValidationResult {
@@ -91,11 +140,36 @@ function validateRuntime(agent: string, rt: unknown): ValidationResult {
     if (mm.defaultEnabled !== undefined && typeof mm.defaultEnabled !== 'boolean') {
       return invalid(`runtime '${agent}' model.defaultEnabled must be a boolean`);
     }
+    if (mm.supportsImageInput !== undefined && typeof mm.supportsImageInput !== 'boolean') {
+      return invalid(`runtime '${agent}' model.supportsImageInput must be a boolean`);
+    }
+    const hasReasoningCapability = mm.reasoning !== undefined || mm.reasoningEfforts !== undefined;
+    if (hasReasoningCapability && agent !== 'pi') {
+      return invalid(`runtime '${agent}' reasoning capability is only supported for pi models`);
+    }
+    if (mm.reasoning !== undefined && typeof mm.reasoning !== 'boolean') {
+      return invalid(`runtime '${agent}' model.reasoning must be a boolean`);
+    }
+    if (mm.reasoning === true) {
+      if (!Array.isArray(mm.reasoningEfforts) || mm.reasoningEfforts.length === 0) {
+        return invalid(`runtime '${agent}' model.reasoningEfforts must be a non-empty array`);
+      }
+      if (
+        mm.reasoningEfforts.some((effort) => !isPiReasoningEffort(effort)) ||
+        new Set(mm.reasoningEfforts).size !== mm.reasoningEfforts.length
+      ) {
+        return invalid(`runtime '${agent}' model.reasoningEfforts invalid`);
+      }
+    } else if (mm.reasoningEfforts !== undefined) {
+      return invalid(`runtime '${agent}' model.reasoningEfforts requires reasoning=true`);
+    }
   }
   if (r.wireProtocol !== undefined) {
+    // Pi 是多协议 harness；Codex 也具备 Responses / Chat / Anthropic bridge。
+    // Claude Code 只接受原生 Anthropic Messages。
     const allowed = agent === 'claude-code'
       ? ['anthropic-messages']
-      : ['openai-responses', 'openai-chat'];
+      : ['openai-responses', 'openai-chat', 'anthropic-messages'];
     if (typeof r.wireProtocol !== 'string' || !allowed.includes(r.wireProtocol)) {
       return invalid(`runtime '${agent}' wireProtocol invalid`);
     }
@@ -144,6 +218,30 @@ function validateAuthSection(auth: unknown): ValidationResult {
   if (flow !== 'authorization-code' && flow !== 'device-code') {
     return invalid("auth.oauth.flow must be 'authorization-code' | 'device-code'");
   }
+  const allowedFields = new Set(
+    flow === 'device-code'
+      ? [
+          'flow',
+          'tokenUrl',
+          'clientId',
+          'scopes',
+          'modelsDiscoveryUrl',
+          'deviceAuthorizationUrl',
+          'extraDeviceParams',
+        ]
+      : [
+          'flow',
+          'tokenUrl',
+          'clientId',
+          'scopes',
+          'modelsDiscoveryUrl',
+          'authorizeUrl',
+          'redirectPort',
+          'extraAuthParams',
+        ],
+  );
+  const unknownField = Object.keys(o).find((field) => !allowedFields.has(field));
+  if (unknownField) return invalid(`auth.oauth.${unknownField} is not allowed`);
   if (
     flow === 'authorization-code'
     && (o.deviceAuthorizationUrl !== undefined || o.extraDeviceParams !== undefined)
@@ -262,11 +360,17 @@ export function validateCustomProviderConfig(config: unknown): ValidationResult 
     const r = validateRuntime(k, rts[k]);
     if (!r.ok) return r;
   }
-  return { ok: true };
+  return validateNoAuthLoopbackBoundary(
+    c.auth as CustomProviderConfig['auth'],
+    rts as Partial<Record<AgentKind, CustomProviderRuntimeConfig>>,
+  );
 }
 
 /** 规整单个 runtime（trim baseUrl、去重 models、裁 headers）。 */
-function normalizeRuntime(rt: CustomProviderRuntimeConfig): CustomProviderRuntimeConfig {
+function normalizeRuntime(
+  agent: AgentKind,
+  rt: CustomProviderRuntimeConfig,
+): CustomProviderRuntimeConfig {
   const seen = new Set<string>();
   const models = rt.models
     .map((m) => ({
@@ -274,18 +378,19 @@ function normalizeRuntime(rt: CustomProviderRuntimeConfig): CustomProviderRuntim
       name: m.name.trim(),
       ...(m.contextWindow !== undefined ? { contextWindow: m.contextWindow } : {}),
       ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
+      ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
+      ...(agent === 'pi' && m.reasoning === true && m.reasoningEfforts?.length
+        ? { reasoning: true, reasoningEfforts: [...m.reasoningEfforts] }
+        : {}),
     }))
     .filter((m) => {
       if (!m.id || !m.name || seen.has(m.id)) return false;
       seen.add(m.id);
       return true;
     });
-  const headers =
-    rt.headers && Object.keys(rt.headers).length > 0 ? { ...rt.headers } : undefined;
   const out: CustomProviderRuntimeConfig = { baseUrl: rt.baseUrl.trim(), models };
   if (rt.wireProtocol) out.wireProtocol = rt.wireProtocol;
   if (rt.requestPath && rt.requestPath.trim()) out.requestPath = rt.requestPath.trim();
-  if (headers) out.headers = headers;
   if (rt.modelsUrl && rt.modelsUrl.trim()) out.modelsUrl = rt.modelsUrl.trim();
   return out;
 }
@@ -295,7 +400,7 @@ function normalizeConfig(config: CustomProviderConfig): CustomProviderConfig {
   const runtimes: Partial<Record<AgentKind, CustomProviderRuntimeConfig>> = {};
   for (const agent of VALID_AGENTS) {
     const rt = config.runtimes[agent];
-    if (rt) runtimes[agent] = normalizeRuntime(rt);
+    if (rt) runtimes[agent] = normalizeRuntime(agent, rt);
   }
   const out: CustomProviderConfig = { id: config.id, name: config.name.trim(), runtimes };
   // auth 规整：apiKey（默认形态）不落 auth 字段；none / oauth 显式落盘。
@@ -342,7 +447,7 @@ function normalizeConfig(config: CustomProviderConfig): CustomProviderConfig {
 export function mergeDiscoveredModelsIntoConfig(
   config: CustomProviderConfig,
   agent: AgentKind,
-  discovered: { id: string; name: string }[],
+  discovered: { id: string; name: string; contextWindow?: number }[],
 ): CustomProviderConfig | null {
   const rt = config.runtimes[agent];
   if (!rt) return null;
@@ -353,7 +458,20 @@ export function mergeDiscoveredModelsIntoConfig(
     ...config,
     runtimes: {
       ...config.runtimes,
-      [agent]: { ...rt, models: [...rt.models, ...fresh.map((m) => ({ id: m.id, name: m.name }))] },
+      [agent]: {
+        ...rt,
+        models: [
+          ...rt.models,
+          // 端点声明了上下文长度就随发现落盘,缺省则回落保守默认(#386)。
+          ...fresh.map((m) => ({
+            id: m.id,
+            name: m.name,
+            ...(typeof m.contextWindow === 'number' && Number.isFinite(m.contextWindow) && m.contextWindow > 0
+              ? { contextWindow: Math.floor(m.contextWindow) }
+              : {}),
+          })),
+        ],
+      },
     },
   };
 }
@@ -403,6 +521,8 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
               ? { contextWindow: m.contextWindow }
               : {}),
             ...(m.defaultEnabled === false ? { defaultEnabled: false } : {}),
+            ...(m.supportsImageInput === true ? { supportsImageInput: true } : {}),
+            ...parseStoredPiReasoningCapability(agent, m),
           }))
       : [];
     const entry: CustomProviderRuntimeConfig = {
@@ -429,7 +549,16 @@ function parseRuntimes(raw: string): Partial<Record<AgentKind, CustomProviderRun
 
 function rowToConfig(row: typeof customProviders.$inferSelect): CustomProviderConfig {
   const auth = parseAuth(row.auth);
-  return { id: row.id, name: row.name, ...(auth ? { auth } : {}), runtimes: parseRuntimes(row.runtimes) };
+  const runtimes = parseRuntimes(row.runtimes);
+  // #527 之前保存的远程 auth:none 记录保留原始表单数据，供设置页展示和修复。
+  // buildUserProvider 会把不满足当前 loopback 边界的 runtime 标成 disabled；路由解析
+  // 一律拒绝 disabled 描述符，因此不会把历史远程 endpoint 重新解释成 API-key 路由。
+  return {
+    id: row.id,
+    name: row.name,
+    ...(auth ? { auth } : {}),
+    runtimes,
+  };
 }
 
 /** 列出当前账号的全部自定义供应商（按 sortOrder 升序，再按 createdAt）。 */
@@ -497,10 +626,47 @@ export async function updateCustomProvider(
       name: c.name,
       runtimes: JSON.stringify(c.runtimes),
       auth: c.auth ? JSON.stringify(c.auth) : null,
-      updatedAt: now,
+      updatedAt: Math.max(now, existing.updatedAt + 1),
     })
     .where(eq(customProviders.id, id));
   return c;
+}
+
+/**
+ * 仅当配置仍与调用方读取的快照一致时更新。供 OAuth 登录后的异步模型发现使用：
+ * 用户若在网络请求期间编辑了供应商，旧结果不能覆盖新配置。
+ */
+export async function updateCustomProviderIfUnchanged(
+  id: string,
+  expected: CustomProviderConfig,
+  config: CustomProviderConfig,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const expectedConfig = normalizeConfig({ ...expected, id });
+  const nextConfig = normalizeConfig({ ...config, id });
+  const db = getDbClient().drizzle;
+  const existing = await db.select().from(customProviders).where(eq(customProviders.id, id)).get();
+  if (!existing) return false;
+  const expectedRuntimes = JSON.stringify(expectedConfig.runtimes);
+  const expectedAuth = expectedConfig.auth ? JSON.stringify(expectedConfig.auth) : null;
+  if (
+    existing.name !== expectedConfig.name
+    || existing.runtimes !== expectedRuntimes
+    || existing.auth !== expectedAuth
+  ) return false;
+  const result = await db
+    .update(customProviders)
+    .set({
+      name: nextConfig.name,
+      runtimes: JSON.stringify(nextConfig.runtimes),
+      auth: nextConfig.auth ? JSON.stringify(nextConfig.auth) : null,
+      updatedAt: Math.max(now, existing.updatedAt + 1),
+    })
+    .where(and(
+      eq(customProviders.id, id),
+      eq(customProviders.updatedAt, existing.updatedAt),
+    ));
+  return result.changes === 1;
 }
 
 /** 删除（幂等：不存在也不报错）。 */

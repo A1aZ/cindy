@@ -39,11 +39,13 @@ import {
   updateMessageContent as updateDbMessageContent,
 } from './localDb/ipc/messages.js';
 import { getDbClient } from './localDb/client/current.js';
+import { isTopLevelTitleAssistant } from './localDb/latestMessageText.logic.js';
 import { messages as messagesTable } from './localDb/schema.js';
 import { createLogger } from './logger.js';
 import { tapWindowBroadcast } from './device-link/broadcast-tap.js';
 import { takeMediaToolResult } from './mcp-integrations/mediaToolResultFallback.js';
 import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
+import { getSessionProvider } from './maker-host/session-provider-store.js';
 import type { AgentMeta } from '../renderer/lib/ccAgent.types';
 
 const log = createLogger('messagePersistBroadcaster');
@@ -81,13 +83,13 @@ type CreateDbMessageBody = Parameters<typeof createDbMessage>[1];
  * session.agent_kind 只代表"当前引擎",历史行的 agent_meta 必须按写入时引擎解析。
  * clearSessionPersistState 时清理。
  */
-const dbAgentKindBySession = new Map<string, 'cc' | 'codex'>();
+const dbAgentKindBySession = new Map<string, 'cc' | 'codex' | 'pi'>();
 
-export function noteSessionAgentKind(sessionId: string, dbAgentKind: 'cc' | 'codex'): void {
+export function noteSessionAgentKind(sessionId: string, dbAgentKind: 'cc' | 'codex' | 'pi'): void {
   dbAgentKindBySession.set(sessionId, dbAgentKind);
 }
 
-export function getSessionDbAgentKind(sessionId: string): 'cc' | 'codex' | null {
+export function getSessionDbAgentKind(sessionId: string): 'cc' | 'codex' | 'pi' | null {
   return dbAgentKindBySession.get(sessionId) ?? null;
 }
 
@@ -211,15 +213,43 @@ function notePersistedMessage(sessionId: string, role: string, persistId: string
  * 每会话"本 turn 最后一条已入队落库的 assistant 文本"的 persistId。turn 结束(done)
  * 时由 register.ts 经 consumeLastAssistantPersistId 取走,用于把 per-turn 费用挂到该
  * 条消息的 agent_meta 上。consume 即清(get + delete):纯 tool 轮取到 undefined 不挂;
- * terminal error 结束的轮也 consume 丢弃,防 persistId 串到下一轮。
+ * terminal error 调用方用同一 id 写失败边界，并可交接给稍后的 paired done。
  */
 const lastAssistantPersistIdBySession = new Map<string, string>();
+/**
+ * 标题 turn seal 必须落在最后一条顶层 Assistant；Subagent 行会被标题选择器过滤，
+ * 若 seal 写到它上面，顶层施工播报仍会退回 legacy final。
+ */
+const lastTopLevelAssistantPersistIdBySession = new Map<string, string>();
+const EMPTY_TOOL_USE_IDS: ReadonlySet<string> = new Set<string>();
 
 /** 取出并清除本 turn 最后一条 assistant 的 persistId(没有则 undefined)。 */
 export function consumeLastAssistantPersistId(sessionId: string): string | undefined {
   const id = lastAssistantPersistIdBySession.get(sessionId);
   lastAssistantPersistIdBySession.delete(sessionId);
   return id;
+}
+
+/** 取出并清除本 turn 最后一条顶层 Assistant 的 persistId。 */
+export function consumeLastTopLevelAssistantPersistId(sessionId: string): string | undefined {
+  const id = lastTopLevelAssistantPersistIdBySession.get(sessionId);
+  lastTopLevelAssistantPersistIdBySession.delete(sessionId);
+  return id;
+}
+
+function markAssistantTurnBoundary(
+  sessionId: string,
+  clientId: string | undefined,
+  completed: boolean,
+): Promise<boolean> {
+  if (!sessionId || !clientId) return Promise.resolve(false);
+  return enqueueDurableWrite(`turn-boundary:${sessionId}:${clientId}:${completed}`, async () => {
+    const patched = await patchMessageAgentMetaWithResult(sessionId, clientId, {
+      turnCompleted: completed,
+    });
+    if (!patched) return false;
+    return broadcastMessageAgentMetaUpdate(sessionId, clientId);
+  });
 }
 
 /**
@@ -231,10 +261,39 @@ export function markAssistantTurnCompleted(
   sessionId: string,
   clientId: string | undefined,
 ): Promise<boolean> {
+  return markAssistantTurnBoundary(sessionId, clientId, true);
+}
+
+/**
+ * Terminal error 没有可选作正式答复的 Assistant，但仍需留下现代 turn 边界，
+ * 防止后续成功轮次出现后把失败轮的最后一条施工播报误当成 legacy final。
+ */
+export function markAssistantTurnFailed(
+  sessionId: string,
+  clientId: string | undefined,
+): Promise<boolean> {
+  return markAssistantTurnBoundary(sessionId, clientId, false);
+}
+
+/**
+ * 给一条自动续跑（中断自愈）的 user 消息补上**结果**。
+ *
+ * 为什么必须有这一步:那条消息在「续跑指令发出去」的瞬间就落库了,而那时还完全不知道
+ * 有没有真的连上。只按落库渲染就会出现「明明重连失败了,历史里却写着已重新连接」——
+ * 连续 5 次全失败会留下 5 句假话。所以结果由后续事件回填:
+ *  - `succeeded`:模型产出了实质内容(text / tool_use),这才是"连上了"的证据。
+ *  - `failed`:又被打断、或最终落到 error。
+ * 未回填(两者都没发生)= 还在等结果,renderer 继续显示"重新连接中"。
+ */
+export function markAutoResumeOutcome(
+  sessionId: string,
+  clientId: string | undefined,
+  outcome: 'succeeded' | 'failed',
+): Promise<boolean> {
   if (!sessionId || !clientId) return Promise.resolve(false);
-  return enqueueDurableWrite(`turn-completed:${sessionId}:${clientId}`, async () => {
+  return enqueueDurableWrite(`auto-resume-outcome:${sessionId}:${clientId}`, async () => {
     const patched = await patchMessageAgentMetaWithResult(sessionId, clientId, {
-      turnCompleted: true,
+      autoResumeOutcome: outcome,
     });
     if (!patched) return false;
     return broadcastMessageAgentMetaUpdate(sessionId, clientId);
@@ -332,6 +391,14 @@ function enqueuePersistAssistant(
   });
   notePersistedMessage(sessionId, 'assistant', clientId, content);
   lastAssistantPersistIdBySession.set(sessionId, clientId);
+  if (
+    isTopLevelTitleAssistant(
+      agentMeta as Record<string, unknown> | null,
+      knownToolUseIdsBySession.get(sessionId) ?? EMPTY_TOOL_USE_IDS,
+    )
+  ) {
+    lastTopLevelAssistantPersistIdBySession.set(sessionId, clientId);
+  }
 }
 
 /**
@@ -346,7 +413,7 @@ const toolUseCreatedAtBySession = new Map<string, Map<string, number>>();
  * 需要按 tool_use 的 input.args 去 mediaToolResultFallback 池里认领结果。
  */
 const toolUseInfoBySession = new Map<string, Map<string, { toolName: string; input: unknown }>>();
-const planToolUsePersistIdBySession = new Map<string, Map<string, string>>();
+const updatableToolUsePersistIdBySession = new Map<string, Map<string, string>>();
 
 function rememberToolUseId(sessionId: string, toolUseId: string, createdAt: number): void {
   let set = knownToolUseIdsBySession.get(sessionId);
@@ -384,11 +451,15 @@ function clampAfterLatestToolUse(sessionId: string, toolUseIds: string[], create
   return latestToolUseCreatedAt + 1;
 }
 
-function rememberPlanToolUsePersistId(sessionId: string, toolUseId: string, persistId: string): void {
-  let idMap = planToolUsePersistIdBySession.get(sessionId);
+function isUpdatableToolUse(toolName: string): boolean {
+  return toolName === 'update_plan' || toolName === 'web_search';
+}
+
+function rememberUpdatableToolUsePersistId(sessionId: string, toolUseId: string, persistId: string): void {
+  let idMap = updatableToolUsePersistIdBySession.get(sessionId);
   if (!idMap) {
     idMap = new Map();
-    planToolUsePersistIdBySession.set(sessionId, idMap);
+    updatableToolUsePersistIdBySession.set(sessionId, idMap);
   }
   idMap.set(toolUseId, persistId);
 }
@@ -414,16 +485,16 @@ export function onToolUseEvent(
       input: data.input,
     });
   }
-  const existingPlanPersistId = toolName === 'update_plan' && toolUseId
-    ? planToolUsePersistIdBySession.get(sessionId)?.get(toolUseId)
+  const existingPersistId = isUpdatableToolUse(toolName) && toolUseId
+    ? updatableToolUsePersistIdBySession.get(sessionId)?.get(toolUseId)
     : undefined;
-  if (existingPlanPersistId) {
+  if (existingPersistId) {
     const content = { toolUseId, toolName, input: data.input };
-    enqueueWrite(`tool_use_update:${sessionId}:${existingPlanPersistId}`, () =>
-      updateDbMessageContent(sessionId, existingPlanPersistId, content),
+    enqueueWrite(`tool_use_update:${sessionId}:${existingPersistId}`, () =>
+      updateDbMessageContent(sessionId, existingPersistId, content),
     );
-    notePersistedMessage(sessionId, 'tool_use', existingPlanPersistId);
-    return existingPlanPersistId;
+    notePersistedMessage(sessionId, 'tool_use', existingPersistId);
+    return existingPersistId;
   }
   const persistId = createId();
   const meta = agentMeta ?? lastAgentMetaBySession.get(sessionId) ?? null;
@@ -436,8 +507,8 @@ export function onToolUseEvent(
     agentMeta: meta,
     createdAt,
   });
-  if (toolName === 'update_plan' && toolUseId) {
-    rememberPlanToolUsePersistId(sessionId, toolUseId, persistId);
+  if (isUpdatableToolUse(toolName) && toolUseId) {
+    rememberUpdatableToolUsePersistId(sessionId, toolUseId, persistId);
   }
   notePersistedMessage(sessionId, 'tool_use', persistId);
   return persistId;
@@ -875,7 +946,7 @@ export function resetTurnPersistState(sessionId: string): void {
   knownToolUseIdsBySession.delete(sessionId);
   toolUseCreatedAtBySession.delete(sessionId);
   toolUseInfoBySession.delete(sessionId);
-  planToolUsePersistIdBySession.delete(sessionId);
+  updatableToolUsePersistIdBySession.delete(sessionId);
   lastAgentMetaBySession.delete(sessionId);
   _turnStartedAtBySession.delete(sessionId);
   _turnDedupIdBySession.delete(sessionId);
@@ -886,6 +957,7 @@ export function resetTurnPersistState(sessionId: string): void {
   // 不经 notePersistedMessage),若跨 turn 保留,turn1 burst "X" → 用户发消息(不更新 main
   // tracker)→ turn2 又 burst "X" 会被误判重复、跳 create → turn2 回复丢失。清在这里堵死。
   lastPersistedMsgBySession.delete(sessionId);
+  lastTopLevelAssistantPersistIdBySession.delete(sessionId);
 }
 
 /**
@@ -1082,6 +1154,14 @@ export function onTurnErrorEvent(
   if (typeof data?.sdkError === 'string' && data.sdkError) {
     content.sdkError = redactSensitiveText(data.sdkError);
   }
+  // 错误来源 provider 的**同步**快照(session-provider-store 内存态):错误分类必须
+  // 绑定到错误发生时的 provider —— session.providerId 可在任务中途切换并持久化,
+  // 恢复历史错误时用它会把别家 provider 的 insufficient_quota 误判成 Cindy AI 余额
+  // 不足(或反向丢失充值入口)。在入队前取值,写队列延迟消费不影响快照语义。
+  // null(未显式选择,走默认路由)时不写字段:来源不明确的错误行,读侧一律不启用
+  // 余额分类(fail-closed),与 live 路径「显式 providerId 才分类」同一判据。
+  const providerIdAtError = getSessionProvider(sessionId);
+  if (providerIdAtError) content.providerId = providerIdAtError;
   const meta = agentMeta ?? lastAgentMetaBySession.get(sessionId) ?? null;
   const dbAgentKindSnapshot = getSessionDbAgentKind(sessionId) ?? undefined;
   enqueueWrite(`turn_error:${sessionId}:${persistId}`, async () => {
@@ -1148,12 +1228,13 @@ export function clearSessionPersistState(sessionId: string): void {
   knownToolUseIdsBySession.delete(sessionId);
   toolUseCreatedAtBySession.delete(sessionId);
   toolUseInfoBySession.delete(sessionId);
-  planToolUsePersistIdBySession.delete(sessionId);
+  updatableToolUsePersistIdBySession.delete(sessionId);
   toolResultIdByToolUseId.delete(sessionId);
   pendingFullTextByToolUseId.delete(sessionId);
   toolResultContentByClientId.delete(sessionId);
   lastPersistedMsgBySession.delete(sessionId);
   lastAssistantPersistIdBySession.delete(sessionId);
+  lastTopLevelAssistantPersistIdBySession.delete(sessionId);
   lastAssistantTranscriptUuidBySession.delete(sessionId);
   dbAgentKindBySession.delete(sessionId);
   _turnStartedAtBySession.delete(sessionId);

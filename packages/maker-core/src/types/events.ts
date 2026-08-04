@@ -9,6 +9,8 @@
  * 与现有 ccAgent.types StreamEvent 接近，但精简了未启用字段。
  */
 
+import type { WorkflowProgressEntry } from '@cindy/maker-shared/agent-task';
+
 export type AgentEventType =
   | 'text'                  // 流式文本输出（增量或完整）
   | 'thinking'              // reasoning 输出（增量或完整）
@@ -55,7 +57,7 @@ export interface AgentTaskUsage {
 }
 
 export interface AgentTaskUpdateEventData {
-  provider: 'claude-code' | 'codex';
+  provider: 'claude-code' | 'codex' | 'pi';
   /** Provider task id when available; falls back to the parent tool call id. */
   taskId: string;
   /** The tool_use id that launched or controls this subagent task. */
@@ -75,6 +77,12 @@ export interface AgentTaskUpdateEventData {
   model?: string;
   reasoningEffort?: string;
   receiverThreadIds?: string[];
+  /**
+   * workflow 逐 agent 进度树(taskType=local_workflow 时 task_progress 事件携带,
+   * 经 `@cindy/maker-shared/agent-task` 的 normalizeWorkflowProgressEntries 收窄截断)。
+   * CLI 对纯心跳帧节流省略本字段(undefined = 沿用上一帧),下游 merge 不得清空。
+   */
+  workflowProgress?: WorkflowProgressEntry[];
   raw?: unknown;
 }
 
@@ -106,13 +114,15 @@ export interface AgentEvent {
   type: AgentEventType;
   data: unknown;
   /** 事件来源标识，便于调试 */
-  source?: 'claude-code' | 'codex';
+  source?: 'claude-code' | 'codex' | 'pi';
   /**
    * 本事件所属 turn 的发起来源,由 Session 在事件 fan-out 前打标(见 session.ts
    * 的 currentTurnOrigin)。turn 结束(isTerminalTurnEvent)后清空,不污染下一轮。
    * translator 不产生此字段;消费方(IM 转播等)按需读取,默认忽略。
    */
   turnOrigin?: SendOrigin;
+  /** Host-owned per-turn correlation for lifecycle bookkeeping; never comes from vendor metadata. */
+  turnAttemptToken?: number;
   /**
    * Vendor-specific 元数据透传 (claude-code 的 SDK uuid / parentUuid / sdkSessionId /
    * model / stopReason / requestId / usage 等)。host 落库时塞进 messages.agent_meta 列,

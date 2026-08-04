@@ -274,6 +274,8 @@ function dispatchTx(readyDb, payload) {
       return claudeImportMessages(readyDb, request.args);
     case 'rewind.commit':
       return rewindCommit(readyDb, request.args);
+    case 'session.treeRehydrate':
+      return sessionTreeRehydrate(readyDb, request.args);
     case 'fork.session':
       return forkSession(readyDb, request.args);
     case 'embedding.markDone':
@@ -945,6 +947,150 @@ function rewindCommit(readyDb, args) {
   })();
 }
 
+function parsedTreeObjectJson(value) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function treeEntryUuid(agentMeta) {
+  const parsed = parsedTreeObjectJson(agentMeta);
+  return parsed && typeof parsed.uuid === 'string' && parsed.uuid ? parsed.uuid : null;
+}
+
+function linkedPiEntryId(agentMeta) {
+  const parsed = parsedTreeObjectJson(agentMeta);
+  return parsed && typeof parsed.piEntryId === 'string' && parsed.piEntryId ? parsed.piEntryId : null;
+}
+
+function normalizedTreeUserText(content) {
+  const parsed = parsedTreeObjectJson(content);
+  if (!parsed || typeof parsed.text !== 'string') return null;
+  return parsed.text
+    .split(/\\r?\\n/)
+    .filter((line) => line.trim() !== '[image]')
+    .join('\\n')
+    .replace(/\\s+/g, ' ')
+    .trim();
+}
+
+function mergeTreeUserAttachments(content, source) {
+  if (!source) return content;
+  const next = parsedTreeObjectJson(content);
+  const previous = parsedTreeObjectJson(source.content);
+  if (!next || !previous) return content;
+  const merged = { ...next };
+  if (!Object.hasOwn(next, 'images') && Array.isArray(previous.images)) merged.images = previous.images;
+  if (!Object.hasOwn(next, 'files') && Array.isArray(previous.files)) merged.files = previous.files;
+  return JSON.stringify(merged);
+}
+
+const TREE_HOST_AGENT_META_KEYS = ['origin', 'autoResume', 'autoResumeInfo'];
+
+function mergeTreeUserAgentMeta(agentMeta, source) {
+  if (!source) return agentMeta;
+  const previous = parsedTreeObjectJson(source.agent_meta);
+  if (!previous) return agentMeta;
+  const projected = parsedTreeObjectJson(agentMeta) || {};
+  const merged = { ...projected };
+  let changed = false;
+  for (const key of TREE_HOST_AGENT_META_KEYS) {
+    if (!Object.hasOwn(previous, key)) continue;
+    merged[key] = previous[key];
+    changed = true;
+  }
+  return changed ? JSON.stringify(merged) : agentMeta;
+}
+
+function sessionTreeRehydrate(readyDb, args) {
+  const payload = asRecord(args, 'session.treeRehydrate args');
+  const sessionId = expectString(payload.sessionId, 'sessionId');
+  const now = expectNumber(payload.now, 'now');
+  const contextTokens = expectNumber(payload.contextTokens, 'contextTokens');
+  if (contextTokens < 0) throw new TypeError('contextTokens must be non-negative');
+  const contextWindow = expectNumber(payload.contextWindow, 'contextWindow');
+  if (contextWindow < 0) throw new TypeError('contextWindow must be non-negative');
+  const rows = expectArray(payload.messages, 'messages').map((raw, index) => {
+    const row = asRecord(raw, 'messages.' + index);
+    return {
+      id: expectString(row.id, 'messages.' + index + '.id'),
+      clientId: expectString(row.clientId, 'messages.' + index + '.clientId'),
+      role: expectString(row.role, 'messages.' + index + '.role'),
+      content: expectString(row.content, 'messages.' + index + '.content'),
+      toolUseId: nullableString(row.toolUseId),
+      agentMeta: nullableString(row.agentMeta),
+      agentKind: expectString(row.agentKind, 'messages.' + index + '.agentKind'),
+      createdAt: expectNumber(row.createdAt, 'messages.' + index + '.createdAt'),
+    };
+  });
+  const selectVisibleClientIds = readyDb.prepare(
+    'SELECT client_id FROM messages WHERE session_id = ? AND rewind_at IS NULL',
+  );
+  const selectUserAttachmentSources = readyDb.prepare(
+    "SELECT client_id, content, agent_meta, created_at, rewind_at FROM messages WHERE session_id = ? AND role = 'user' ORDER BY created_at ASC, id ASC",
+  );
+  const hideVisible = readyDb.prepare(
+    'UPDATE messages SET rewind_at = ? WHERE session_id = ? AND rewind_at IS NULL',
+  );
+  const upsert = readyDb.prepare(
+    'INSERT INTO messages (id, client_id, session_id, role, content, tool_use_id, agent_meta, agent_kind, created_at, rewind_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(session_id, client_id) DO UPDATE SET role = excluded.role, content = excluded.content, tool_use_id = excluded.tool_use_id, agent_meta = excluded.agent_meta, agent_kind = excluded.agent_kind, created_at = excluded.created_at, rewind_at = NULL',
+  );
+  const hiddenClientIds = readyDb.transaction(() => {
+    const session = readyDb.prepare('SELECT id FROM sessions WHERE id = ? LIMIT 1').get(sessionId);
+    if (!session) throw Object.assign(new Error('Session 不存在: ' + sessionId), { code: 'NOT_FOUND' });
+    // Keep this fallback mirror in sync with worker/opHandlers/tx.ts: preserve only
+    // Cindy-managed attachments matched by stable id/uuid/piEntryId or a verified visible prefix.
+    const attachmentSources = selectUserAttachmentSources.all(sessionId);
+    const byClientId = new Map(attachmentSources.map((row) => [row.client_id, row]));
+    const byUuid = new Map();
+    const byLinkedPiEntryId = new Map();
+    for (const source of attachmentSources) {
+      const uuid = treeEntryUuid(source.agent_meta);
+      if (uuid) byUuid.set(uuid, source);
+      const piEntryId = linkedPiEntryId(source.agent_meta);
+      if (piEntryId) byLinkedPiEntryId.set(piEntryId, source);
+    }
+    const visibleUserSources = attachmentSources.filter((row) => row.rewind_at === null);
+    let visiblePrefixIndex = 0;
+    let visiblePrefixIntact = true;
+    // 与 worker/opHandlers/tx.ts 保持同步:原子快照可见集再隐藏,导航期间并发落库的消息也纳入。
+    const captured = selectVisibleClientIds.all(sessionId).map((row) => row.client_id);
+    hideVisible.run(now, sessionId);
+    for (const row of rows) {
+      let content = row.content;
+      let agentMeta = row.agentMeta;
+      if (row.role === 'user') {
+        const uuid = treeEntryUuid(row.agentMeta);
+        let source = byClientId.get(row.clientId)
+          || (uuid ? byUuid.get(uuid) : null)
+          || (uuid ? byLinkedPiEntryId.get(uuid) : null)
+          || null;
+        const candidate = visibleUserSources[visiblePrefixIndex] || null;
+        if (source && visiblePrefixIntact && source !== candidate) {
+          visiblePrefixIntact = false;
+        } else if (!source && visiblePrefixIntact) {
+          const samePrefix = candidate &&
+            candidate.created_at === row.createdAt &&
+            normalizedTreeUserText(candidate.content) === normalizedTreeUserText(row.content);
+          if (samePrefix) source = candidate;
+          else visiblePrefixIntact = false;
+        }
+        visiblePrefixIndex += 1;
+        content = mergeTreeUserAttachments(row.content, source);
+        agentMeta = mergeTreeUserAgentMeta(row.agentMeta, source);
+      }
+      upsert.run(row.id, row.clientId, sessionId, row.role, content, row.toolUseId, agentMeta, row.agentKind, row.createdAt);
+    }
+    readyDb.prepare('UPDATE sessions SET cleared_at = NULL, context_tokens = ?, context_window = ?, updated_at = ? WHERE id = ?').run(contextTokens, contextWindow, now, sessionId);
+    return captured;
+  })();
+  return { messageCount: rows.length, hiddenClientIds };
+}
+
 function selectRewindMessageIds(rows, opts) {
   // Keep this mirror in sync with worker/opHandlers/tx.ts.
   const targetCreatedAt = opts.targetCreatedAt;
@@ -1198,11 +1344,69 @@ function readExistingMessageFingerprints(readyDb, sessionId, importClientIdPrefi
 
 function isLikelyLocalDuplicate(existing, row) {
   const next = messageFingerprint(row.role, row.text, row.createdAt);
-  return existing.some((prev) => prev.role === next.role && prev.text === next.text && Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS);
+  // 普通消息原文精确比较;canon 有损比较只在「至少一侧含原始标记字面量」时启用
+  // (升级前旧标记行 vs 已归一化导入行),避免仅 Markdown 格式不同的正常回复被
+  // 误判成重复。口径同 opHandlers/tx.ts。
+  return existing.some((prev) => prev.role === next.role
+    && Math.abs(prev.createdAt - next.createdAt) <= LOCAL_DUPLICATE_WINDOW_MS
+    && (prev.plain === next.plain
+      || (prev.canonical !== undefined && next.canonical !== undefined
+        && (prev.hasMarker || next.hasMarker)
+        && prev.canonical === next.canonical)));
 }
 
 function messageFingerprint(role, text, createdAt) {
-  return { role, text: normalizeFingerprintText(text), createdAt };
+  const plain = normalizeFingerprintText(text);
+  const hasMarker = role === 'assistant' && text.includes(CODEX_CITATION_OPEN);
+  const canonical = role === 'assistant'
+    ? normalizeFingerprintText(canonicalizeCodexCitations(text))
+    : undefined;
+  const out = { role, plain, hasMarker, createdAt };
+  if (canonical !== undefined) out.canonical = canonical;
+  return out;
+}
+
+// 与 opHandlers/tx.ts 的指纹规范形同构;SSoT 注释见该文件,口径变更需同步。
+const CODEX_CITATION_RE = /:codex-file-citation\\{((?:[^"{}]|"(?:[^"\\\\]|\\\\.)*")*)\\}/g;
+const CODEX_CITATION_OPEN = ':codex-file-citation{';
+
+function codexCitationClose(text, attrsStart) {
+  let inQuote = false;
+  for (let i = attrsStart; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inQuote && ch === '\\\\') i += 1;
+    else if (ch === '"') inQuote = !inQuote;
+    else if (!inQuote && ch === '}') return i;
+    else if (!inQuote && ch === '{') return -2;
+  }
+  return -1;
+}
+
+function decodeCitationPathForFingerprint(attrs) {
+  const m = /(?:^|\\s)path="((?:[^"\\\\]|\\\\.)*)"/.exec(attrs);
+  if (!m) return '';
+  const raw = m[1];
+  const nativeUnc = raw.startsWith('\\\\\\\\') && raw[2] !== '\\\\';
+  const head = nativeUnc ? '\\\\\\\\' : '';
+  return head + (nativeUnc ? raw.slice(2) : raw).replace(/\\\\([\\\\"])/g, '$1');
+}
+
+function canonicalizeCodexCitations(text) {
+  let out = text;
+  let from = 0;
+  for (;;) {
+    const open = out.indexOf(CODEX_CITATION_OPEN, from);
+    if (open === -1) break;
+    const close = codexCitationClose(out, open + CODEX_CITATION_OPEN.length);
+    if (close === -1) { out = out.slice(0, open); break; }
+    from = close === -2 ? open + CODEX_CITATION_OPEN.length : close + 1;
+  }
+  for (let i = 0; i < 5; i += 1) {
+    const next = out.replace(CODEX_CITATION_RE, (_all, attrs) => decodeCitationPathForFingerprint(attrs));
+    if (next === out) break;
+    out = next;
+  }
+  return out.replace(/\`+/g, '').replace(/\\s+/g, ' ');
 }
 
 function normalizeStoredMessageText(raw) {

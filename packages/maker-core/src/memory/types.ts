@@ -12,7 +12,21 @@
  *    硬错误 (schema / 撞名 / 路径非法) 走 throw MemoryError。
  */
 
-export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
+/**
+ * Curated 类型:LLM 可写(memory_write 工具)+ 进 MEMORY.md 索引 + 进 system prompt。
+ */
+export const CURATED_MEMORY_TYPES = ['user', 'feedback', 'project', 'reference'] as const;
+/**
+ * 全部 storage 允许的类型 = curated + `digest`。
+ *
+ * `digest` 是**系统内部类型**(当前:pi 压缩上下文时把被丢弃内容的摘要沉淀进来)。它:
+ *  - 可写入 store、进 FTS —— `memory_search` 能按需检索;
+ *  - **排除出 MEMORY.md 索引**(rebuildIndex 只列 CURATED_MEMORY_TYPES),故**不自动注入
+ *    system prompt**、不撑大上下文、不污染 curated 记忆;
+ *  - **不暴露给 LLM 的 memory_write 工具**(该工具自带 4 类 curated enum,与此处解耦)。
+ * 改动前请读 docs/dev-rules/pi-remaining-work.md「压缩即记忆」与 pi-harness.md。
+ */
+export const MEMORY_TYPES = ['user', 'feedback', 'project', 'reference', 'digest'] as const;
 export type MemoryType = (typeof MEMORY_TYPES)[number];
 
 export function isMemoryType(v: unknown): v is MemoryType {
@@ -71,12 +85,25 @@ export interface WriteOptions {
 
 export type WriteWarning = 'shard-size-exceeded' | 'index-size-exceeded';
 
+/** 软警告的数值明细: 让调用方判断超了多少, 而不是盲目瘦身 (见 #891) */
+export interface WriteWarningDetail {
+  kind: WriteWarning;
+  /** 超限对象当前字节数 (分片 body 或 MEMORY.md 索引) */
+  sizeBytes: number;
+  /** 软上限 (默认分片 2048 / 索引 4096) */
+  softLimitBytes: number;
+  /** 分片硬上限 (默认 8192, 超过将被 reject); 索引警告无硬上限, 不带此字段 */
+  hardLimitBytes?: number;
+}
+
 export interface WriteResult {
   ok: true;
   /** 写入后文件相对 storage dir 的名字 (e.g. 'feedback_xxx.md') */
   filename: string;
   /** 软警告: 调用方按 prompt 引导 consolidate */
   warning?: WriteWarning;
+  /** 软警告数值明细, 与 warning 同生同灭 */
+  warningDetail?: WriteWarningDetail;
 }
 
 export interface MemoryConfig {

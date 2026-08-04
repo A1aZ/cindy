@@ -59,6 +59,10 @@ export class TabRegistry {
   private readonly records = new Map<string, TabRecord>(); // tabId → record
   /** tabId set of automation-active tabs that must not be LRU-evicted. */
   private readonly pinned = new Set<string>();
+  /** Legacy/manual pin ownership, kept separate from scoped backend leases. */
+  private readonly manualPins = new Set<string>();
+  /** Unique leases prevent a late old-generation release from touching a new pin. */
+  private readonly pinLeases = new Map<string, Set<symbol>>();
   /**
    * tabId → destroyed-listener cleanup. Keyed by tabId (not webContentsId) so
    * that pathological cases — two different tabs reported with the same
@@ -68,6 +72,7 @@ export class TabRegistry {
    */
   private readonly destroyedCleanup = new Map<string, () => void>();
   private readonly pinListeners = new Set<PinChangeListener>();
+  private readonly reportListeners = new Set<(record: TabRecord) => void>();
 
   constructor(private readonly opts: TabRegistryOptions) {}
 
@@ -83,6 +88,23 @@ export class TabRegistry {
     this.detachDestroyedListener(record.tabId);
     this.records.set(record.tabId, record);
     this.attachDestroyedListener(record);
+    for (const l of this.reportListeners) {
+      try {
+        l(record);
+      } catch (err) {
+        this.opts.logger.warn('report listener threw (ignored)', err);
+      }
+    }
+  }
+
+  /**
+   * 订阅 report 到达事件。popup 归属等待用:guest 的 window.open 可能先于
+   * renderer 的 report 抵达 main,等待方靠这个事件在 report 落地的瞬间完成
+   * 反查,而不是靠固定轮询窗口赌时序。返回退订函数。
+   */
+  onReport(listener: (record: TabRecord) => void): () => void {
+    this.reportListeners.add(listener);
+    return () => this.reportListeners.delete(listener);
   }
 
   /**
@@ -111,6 +133,8 @@ export class TabRegistry {
     }
     this.detachDestroyedListener(tabId);
     this.records.delete(tabId);
+    this.manualPins.delete(tabId);
+    this.pinLeases.delete(tabId);
     if (this.pinned.delete(tabId)) {
       this.firePinChange(tabId, false);
     }
@@ -150,6 +174,19 @@ export class TabRegistry {
     };
   }
 
+  /**
+   * webContentsId 反查 tab 记录。popup 路由用:guest 内 window.open 触发时,
+   * 只有发起方 guest 的 webContentsId 可拿,要靠它找回 opener tab 及其归属
+   * session,popup 才能落进正确的 bucket。线性扫——records 是每 session 个位数
+   * 的 tab,规模上限远小于任何需要索引的量级。
+   */
+  findByWebContentsId(webContentsId: number): TabRecord | null {
+    for (const record of this.records.values()) {
+      if (record.webContentsId === webContentsId) return record;
+    }
+    return null;
+  }
+
   /** Read by tab id. Returns null if unknown OR if the webContents is dead. */
   getWebContentsByTabId(tabId: string): WebContents | null {
     const record = this.records.get(tabId);
@@ -186,6 +223,8 @@ export class TabRegistry {
    * reads `isPinned`, automation behavior is consistent.
    */
   pin(tabId: string): boolean {
+    if (this.manualPins.has(tabId)) return false;
+    this.manualPins.add(tabId);
     if (this.pinned.has(tabId)) return false;
     this.pinned.add(tabId);
     this.firePinChange(tabId, true);
@@ -193,9 +232,38 @@ export class TabRegistry {
   }
 
   unpin(tabId: string): boolean {
+    if (!this.manualPins.delete(tabId)) return false;
+    if ((this.pinLeases.get(tabId)?.size ?? 0) > 0) return false;
     if (!this.pinned.delete(tabId)) return false;
     this.firePinChange(tabId, false);
     return true;
+  }
+
+  /**
+   * Acquire a scoped automation pin. The returned release is idempotent and
+   * token-specific, so disposal of one backend generation cannot remove a
+   * replacement generation's protection for the same tab.
+   */
+  acquirePinLease(tabId: string): () => void {
+    const token = Symbol(tabId);
+    const leases = this.pinLeases.get(tabId) ?? new Set<symbol>();
+    leases.add(token);
+    this.pinLeases.set(tabId, leases);
+    if (!this.pinned.has(tabId)) {
+      this.pinned.add(tabId);
+      this.firePinChange(tabId, true);
+    }
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      const current = this.pinLeases.get(tabId);
+      if (!current?.delete(token)) return;
+      if (current.size > 0) return;
+      this.pinLeases.delete(tabId);
+      if (this.manualPins.has(tabId)) return;
+      if (this.pinned.delete(tabId)) this.firePinChange(tabId, false);
+    };
   }
 
   isPinned(tabId: string): boolean {

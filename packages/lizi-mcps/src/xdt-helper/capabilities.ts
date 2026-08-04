@@ -1,7 +1,7 @@
 /**
  * xdt-helper/capabilities.ts
  * ---------------------------------------------------------------------------
- * XDMaker 用户视角能力清单的"单一事实源"。
+ * Cindy 用户视角能力清单的"单一事实源"。
  *
  * 编辑规则:
  *  - one-liner 给模型用,要让模型一眼判断要不要拉 detail。控制在 ~50 字。
@@ -14,7 +14,7 @@
  *  - "用户产品功能" 一类一个 bucket(ai-chat / session-management / scheduler 等)
  *  - "外部数据源 / 服务的 MCP 接入" 各自独立 bucket(jira / confluence / google-sheets / ai-art)
  *  - 飞书较特殊:"基础接入(登录/通知/MCP 文档表格等)" 与 "移动办公接管 session" 拆两个 bucket,
- *    因为后者是 XDMaker 最差异化的能力,值得独立索引项让模型一眼能查到。
+ *    因为后者是 Cindy 最差异化的能力,值得独立索引项让模型一眼能查到。
  */
 
 import { BRAND_NAME } from '@cindy/maker-shared/branding';
@@ -27,6 +27,18 @@ export interface CapabilityEntry {
 }
 
 export const CAPABILITIES: readonly CapabilityEntry[] = [
+  {
+    key: 'about-cindy',
+    title: `${BRAND_NAME} 自身信息(产品身份 / 开源仓库 / 源码位置)`,
+    oneLiner: `${BRAND_NAME} 是什么、谁做的、开不开源、源码在哪、agent 跑在哪、版本号怎么查, 以及模型接入(官方服务 / 复用 Coding Plan / 自带 API key / 本地模型)与分区域官网下载定价。`,
+    detail: [
+      `【是什么】${BRAND_NAME} 是 XD Inc. 出品的开源 AI 助手(open-source AI assistant), 以桌面 / 移动客户端形态交付, 源码 https://github.com/makecindy/cindy (Apache-2.0)。官网分区域: 中国大陆 https://cindy.cn, 国际版 https://cindy.app —— 给下载 / 定价链接前先确认用户所在区域, 不要一律给国际版。`,
+      `【身份归本条, 执行位置不归】问"你是谁 / 你是什么"以本条为准, 不要用训练数据猜, 也不要凭工作目录路径或工具名反推。但 ${BRAND_NAME} 只是编排方(管会话、工具、上下文与 memory; 底层 harness 是 Claude Code 或 Codex, 可中途切换且上下文连续), 不代表代码在哪执行: agent 进程与 workdir 可能在本机, 也可能在 SSH 远程工作区的远端主机(文件与进程都在远端), 或经设备互联隧道驱动的被控桌面端。问"你跑在哪 / 文件在哪台机器"时以当前会话实际工作区为准, 拿不准就说明, 不要断言。`,
+      `【源码范围】该仓库是客户端本体(desktop、mobile 及共享 packages 的 pnpm monorepo), 服务端不在其中也不开源。安装版不携带源码, agent 侧无法推断用户是否 clone 过、clone 在哪: 要读改源码就让用户给路径或用工程模式打开, 不要假设固定路径, 更不要因为工作目录里出现品牌名就断定当前目录是源码仓库。`,
+      `【版本号不要猜】本条不含版本号。CN 版可在"设置 → 关于"看到客户端版本; 国际版该页当前不展示它(只有更新开关与 agent 二进制版本), 别把用户支使过去空找。用 submit_github_issue 提反馈时客户端版本 / OS / 界面语言由系统自动附加, 不用 agent 填。`,
+      `【模型怎么来】登录官方 ${BRAND_NAME} 服务按量透明扣费、授权已付费的 Claude Code / Codex Coding Plan 继续用(不重复付费)、接自己的 API key, 或跑本地模型。价格见对应区域官网。`,
+    ].join(' '),
+  },
   {
     key: 'ai-chat',
     title: 'AI 对话',
@@ -58,7 +70,7 @@ export const CAPABILITIES: readonly CapabilityEntry[] = [
       '【硬边界】Worker session 不能再开 team(嵌套禁止, 返 WORKER_CANNOT_NEST);Claude Code / Codex 本地项目 session 都可以作为 Lead 调 start_team;Worker 不能结束自己所在 team(返 WORKER_CANNOT_DISABLE);要求 Lead session 有 workingDir。',
       '【工具归属】13 个 team 工具(start_team / create_worker / create_workers / send_to_worker / list_worker_queue / update_queued_message / cancel_queued_message / list_workers / switch_focus / idle_worker / end_team / archive_worker / list_available_models)在独立的 cindy_orca server 直接顶层注册, 对应"协同模式"可关插件(Settings → Connections → Built-in Tools)。通用 session handoff 原语 send_to_session 在 essential 的 cindy_helper 的 handoff 类目下(走 call_tool, 常开, 供 skill 路由用)。',
       `【与 Claude Code Task tool / Codex subagent 的区别】Task / subagent 是 agent 框架内的子任务派发机制(子 agent 跑在同一 SDK 进程内、有限工具集、生命周期短、对话历史归属父 turn);${BRAND_NAME} 协同模式是业务层的 session 级编排(Lead/Worker 都是完整独立的 ${BRAND_NAME} session, 独立进程、UI 栏位、完整工具、独立对话历史, 长生命周期, 通过 main 进程 IPC + MCP bridge 通信)。两者不互斥, Worker 内部仍可用 Task/subagent 派子任务。`,
-      '【手动入口】ChatInput 工具行的橙色 puzzle pill(CollaborationModeToggle), 用户也能手动开/关, 与本工具走同一份业务代码。',
+      '【手动入口】ChatInput「+」菜单里的「协同模式」项,开启态用橙色 UsersRound 图标与文字标识;用户也能在这里手动开/关,与本工具走同一份业务代码。',
     ].join(' '),
   },
   {

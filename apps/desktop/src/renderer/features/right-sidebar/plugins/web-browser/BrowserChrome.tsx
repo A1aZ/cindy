@@ -79,6 +79,8 @@ export interface BrowserChromeProps {
    * 评论写进去无处可发(且会误弹成功 toast)——故子窗口传 false 隐藏该按钮。
    */
   commentSupported?: boolean;
+  /** 当前页是否能交给系统默认浏览器打开。 */
+  canOpenInSystemBrowser: boolean;
   /** 「更多」菜单项:用系统默认浏览器打开当前页(main 端 shell.openExternal)。 */
   onOpenInSystemBrowser: () => void;
   /** 「更多」菜单项:复制当前页链接到剪贴板(反馈 toast 由 TabBody 做)。 */
@@ -107,6 +109,7 @@ export const BrowserChrome = forwardRef<BrowserChromeHandle, BrowserChromeProps>
       commentActive,
       onToggleComment,
       commentSupported = true,
+      canOpenInSystemBrowser,
       onOpenInSystemBrowser,
       onCopyLink,
     },
@@ -196,8 +199,9 @@ export const BrowserChrome = forwardRef<BrowserChromeHandle, BrowserChromeProps>
   // 是否 https:左侧 lock icon 决定。about:blank 等非 web 协议显示 unlock 占位。
   const isSecure = url.startsWith('https://');
 
-  // 「更多」菜单里"系统浏览器打开 / 复制链接"两项:仅当存在有效页面 URL(非空、非
-  // about:blank)时可用,新标签空白态置灰。判据与 displayValue 一致。
+  // 「更多」菜单里复制链接只要求有有效页面 URL;系统浏览器打开还要由宿主确认
+  // 当前协议/页面类型有对应的安全 IPC 能力。比如本地 HTML 走 openFileInBrowser,
+  // 其它 file/data/custom scheme 不应显示一个点击必失败的可用菜单项。
   const hasValidLink = Boolean(url) && url !== 'about:blank';
 
   return (
@@ -216,7 +220,9 @@ export const BrowserChrome = forwardRef<BrowserChromeHandle, BrowserChromeProps>
         tooltip={t('rightSidebar.browser.goForward')}
       />
       <ChromeIconButton
-        icon={isLoading ? XIcon : RotateCw}
+        icon={RotateCw}
+        reducedMotionIcon={isLoading ? XIcon : undefined}
+        spinning={isLoading}
         onClick={isLoading ? onStop : onReload}
         tooltip={
           isLoading
@@ -302,7 +308,10 @@ export const BrowserChrome = forwardRef<BrowserChromeHandle, BrowserChromeProps>
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="min-w-[9rem]">
-          <DropdownMenuItem disabled={!hasValidLink} onSelect={onOpenInSystemBrowser}>
+          <DropdownMenuItem
+            disabled={!hasValidLink || !canOpenInSystemBrowser}
+            onSelect={onOpenInSystemBrowser}
+          >
             <ExternalLink size={14} strokeWidth={2} className="mr-2 shrink-0" />
             {t('rightSidebar.browser.openInSystemBrowser')}
           </DropdownMenuItem>
@@ -322,19 +331,29 @@ export const BrowserChrome = forwardRef<BrowserChromeHandle, BrowserChromeProps>
  */
 function ChromeIconButton({
   icon: Icon,
+  reducedMotionIcon: ReducedMotionIcon,
   size = 14,
   inlinePill = false,
   disabled = false,
   active = false,
+  spinning = false,
   onClick,
   tooltip,
 }: {
   icon: React.ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;
+  /** reduced-motion 下用静态动作图标表达 loading 状态，避免刷新/空闲态无法区分。 */
+  reducedMotionIcon?: React.ComponentType<{
+    size?: number;
+    strokeWidth?: number;
+    className?: string;
+  }>;
   size?: number;
   inlinePill?: boolean;
   disabled?: boolean;
   /** 常亮 active 态(如评论模式进行中):反色底,提示当前处于该工具的模式里。 */
   active?: boolean;
+  /** 加载态旋转放在 HTML wrapper 上,避免 SVG 常驻动画触发主线程重绘。 */
+  spinning?: boolean;
   onClick: () => void;
   tooltip: string;
 }) {
@@ -345,6 +364,7 @@ function ChromeIconButton({
       onClick={onClick}
       title={tooltip}
       aria-label={tooltip}
+      aria-busy={spinning || undefined}
       className={cn(
         'flex shrink-0 items-center justify-center rounded-md transition-colors',
         inlinePill ? 'size-[18px]' : 'size-6',
@@ -355,7 +375,25 @@ function ChromeIconButton({
             : 'text-sidebar-action-icon hover:bg-sidebar-item-active hover:text-sidebar-item-active-foreground',
       )}
     >
-      <Icon size={size} strokeWidth={2} />
+      {spinning && ReducedMotionIcon ? (
+        <>
+          <span className="inline-flex animate-spinner motion-reduce:hidden">
+            <Icon size={size} strokeWidth={2} />
+          </span>
+          <span className="hidden motion-reduce:inline-flex">
+            <ReducedMotionIcon size={size} strokeWidth={2} />
+          </span>
+        </>
+      ) : (
+        <span
+          className={cn(
+            'inline-flex',
+            spinning && 'animate-spinner motion-reduce:animate-none',
+          )}
+        >
+          <Icon size={size} strokeWidth={2} />
+        </span>
+      )}
     </button>
   );
 }

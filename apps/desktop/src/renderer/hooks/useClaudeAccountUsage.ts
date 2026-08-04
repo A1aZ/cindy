@@ -21,17 +21,22 @@
  *
  * enabled 语义 (而非 vendorKey): 这份 quota 是"XD gateway key 在 LiteLLM 上的 spend",
  * 与发起请求的 agent 无关。cc 固然要看; codex 的 'api' 鉴权模式复用同一把 XD key 走
- * 同一个 AI Gateway, 所以也该看同一份 quota。调用方据此决定 enabled (cc || codex-api),
- * 本 hook 不感知 vendor。
+ * 同一个 AI Gateway, 所以也该看同一份 quota。调用方只在当前会话实际走 Gateway 时
+ * 启用；自定义供应商即使复用相同 host 也不会读这份账号配额。
  */
 
 import { useEffect, useState } from 'react';
+
+import type { MoneyCurrency } from '../../shared/regionalMoney';
+import { useAuth } from '../contexts/AuthContext';
 
 export interface ClaudeAccountUsageSnapshot {
   /** 月度周期跨客户端累计，保持 Gateway 部署区域的原生金额。 */
   spend: number;
   /** 月度周期上限，保持 Gateway 部署区域的原生金额。 */
   maxBudget: number;
+  /** Gateway 账号金额的原生币种。 */
+  currency: MoneyCurrency;
   /** 下次月度 reset 时间 ISO8601。 */
   budgetResetAt?: string | null;
   /**
@@ -44,7 +49,12 @@ export interface ClaudeAccountUsageSnapshot {
   fetchedAt: number;
 }
 
-let lastSnapshot: ClaudeAccountUsageSnapshot | null = null;
+interface OwnerBoundSnapshot {
+  ownerKey: string;
+  usage: ClaudeAccountUsageSnapshot;
+}
+
+let lastSnapshot: OwnerBoundSnapshot | null = null;
 
 function isSnapshot(v: unknown): v is ClaudeAccountUsageSnapshot {
   if (!v || typeof v !== 'object') return false;
@@ -53,6 +63,7 @@ function isSnapshot(v: unknown): v is ClaudeAccountUsageSnapshot {
     typeof r.spend === 'number' &&
     typeof r.maxBudget === 'number' &&
     r.maxBudget > 0 &&
+    (r.currency === 'CNY' || r.currency === 'USD') &&
     (typeof r.todaySpend === 'number' || r.todaySpend === null)
   );
 }
@@ -60,40 +71,46 @@ function isSnapshot(v: unknown): v is ClaudeAccountUsageSnapshot {
 export function useClaudeAccountUsage(
   enabled: boolean,
 ): ClaudeAccountUsageSnapshot | null {
-  const [snapshot, setSnapshot] = useState<ClaudeAccountUsageSnapshot | null>(() =>
-    enabled ? lastSnapshot : null,
+  const { dataOwnerId, mode, user } = useAuth();
+  const ownerKey =
+    enabled &&
+    dataOwnerId &&
+    (mode === 'local' || (mode === 'cloud' && user?.membershipKind === 'org'))
+      ? `${mode}:${dataOwnerId}`
+      : null;
+  const [snapshot, setSnapshot] = useState<OwnerBoundSnapshot | null>(() =>
+    ownerKey && lastSnapshot?.ownerKey === ownerKey ? lastSnapshot : null,
   );
-
-  useEffect(() => {
-    setSnapshot(enabled ? lastSnapshot : null);
-  }, [enabled]);
 
   // mount 拉一次 (warm-start: main 若无 snapshot 会 force 刷新, 那一次的结果走 push 通道补帧)
   useEffect(() => {
-    if (!enabled) return;
+    if (!ownerKey) return;
     let cancelled = false;
-    void window.electronAPI.maker.usage.getAccount('claude-code').then((res) => {
-      if (cancelled) return;
-      if (!isSnapshot(res)) return;
-      lastSnapshot = res;
-      setSnapshot(res);
-    }).catch(() => {
-      /* best-effort warm-start */
-    });
+    void window.electronAPI.maker.usage
+      .getAccount('claude-code')
+      .then((res) => {
+        if (cancelled) return;
+        if (!isSnapshot(res)) return;
+        lastSnapshot = { ownerKey, usage: res };
+        setSnapshot(lastSnapshot);
+      })
+      .catch(() => {
+        /* best-effort warm-start */
+      });
     return () => {
       cancelled = true;
     };
-  }, [enabled]);
+  }, [ownerKey]);
 
   // 订阅 push (cc / codex-api turn done 后 main 推 — 都是同一把 XD key 的 spend)
   useEffect(() => {
-    if (!enabled) return;
+    if (!ownerKey) return;
     return window.electronAPI.maker.usage.onClaudeAccountChanged((p) => {
       if (!isSnapshot(p)) return;
-      lastSnapshot = p;
-      setSnapshot(p);
+      lastSnapshot = { ownerKey, usage: p };
+      setSnapshot(lastSnapshot);
     });
-  }, [enabled]);
+  }, [ownerKey]);
 
-  return snapshot;
+  return ownerKey && snapshot?.ownerKey === ownerKey ? snapshot.usage : null;
 }

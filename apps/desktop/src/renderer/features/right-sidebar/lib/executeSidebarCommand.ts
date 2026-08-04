@@ -1,6 +1,5 @@
 /** 执行 main 已裁决并推给当前 renderer host 的 RSB command。 */
 
-import { ghostPanelKind } from '../../../../shared/ghost';
 import type { RsbWindowCommand } from '../../../../shared/rightSidebarWindow';
 import { addOrFocusSingletonTab, ensureHydrated } from '../store';
 import {
@@ -12,6 +11,7 @@ import {
   openExternalFileInSidebarFileBrowser,
   openFileInSidebarFileBrowser,
 } from './openInSidebarFileBrowser';
+import { openBackgroundTasksTab } from './openBackgroundTasksTab';
 import { openUrlInSidebarBrowser } from './openInSidebarBrowser';
 
 /** 在 main 已选定的当前 renderer host 中执行命令，不自行选择宿主。 */
@@ -42,10 +42,12 @@ export async function executeSidebarCommand(command: RsbWindowCommand): Promise<
     await closeOrcaWorkersTabAfterTeamEnd(command.sessionId);
     return;
   }
-  if (command.type === 'open-ghost-tab') {
-    // 插件页签与 review/terminal 同款单例语义:已开则聚焦,未开则新建。
-    await ensureHydrated(command.sessionId);
-    await addOrFocusSingletonTab(command.sessionId, ghostPanelKind(command.ghostId));
+  if (command.type === 'open-background-tasks-tab') {
+    // 被路由端再调 openBackgroundTasksTab:其内部 routeSidebarCommand 在子窗口
+    // 直接裁决 'attached',落本地 store(与 open-file-browser 的复用同构)。
+    await openBackgroundTasksTab(command.sessionId, {
+      ...(command.focusTaskId ? { focusTaskId: command.focusTaskId } : {}),
+    });
     return;
   }
   await ensureHydrated(command.sessionId);

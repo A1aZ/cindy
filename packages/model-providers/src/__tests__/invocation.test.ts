@@ -185,6 +185,7 @@ function providers(): ProviderView[] {
       id: 'anthropic',
       name: 'anthropic',
       agents: ['claude-code'],
+      routing: { 'claude-code': {} },
       models: { 'claude-code': [model('claude-opus-5')] },
       connected: true,
       access: { kind: 'subscription', product: 'Claude.ai' },
@@ -193,6 +194,7 @@ function providers(): ProviderView[] {
       id: 'xd',
       name: 'xd',
       agents: ['claude-code', 'codex'],
+      routing: { 'claude-code': {}, codex: {} },
       models: {
         'claude-code': [model('claude-opus-5'), model('claude-sonnet-4-6')],
         codex: [model('gpt-5.5', { efforts: ['low', 'medium', 'high', 'xhigh'] })],
@@ -204,27 +206,55 @@ function providers(): ProviderView[] {
       id: 'openai',
       name: 'openai',
       agents: ['codex'],
+      routing: { codex: {} },
       models: { codex: [model('gpt-5.5')] },
       connected: false,
+    },
+    {
+      id: 'pi-native',
+      name: 'pi-native',
+      agents: ['pi'],
+      routing: { pi: {} },
+      models: { pi: [model('pi-model')] },
+      connected: true,
+      access: { kind: 'api' },
     },
   ] as ProviderView[];
 }
 
 const SCENARIO = {
   agentKind: 'claude-code' as AgentKind,
-  modelFor: (agent: AgentKind) => (agent === 'codex' ? 'gpt-5.5' : 'claude-sonnet-4-6'),
+  modelFor: (agent: AgentKind) =>
+    agent === 'codex' ? 'gpt-5.5' : agent === 'pi' ? 'pi-model' : 'claude-sonnet-4-6',
   noEffortFallback: undefined,
   permissionMode: 'bypassPermissions',
 };
 
 const PERM_MODES = (agent: AgentKind): readonly string[] =>
-  agent === 'codex' ? ['ask', 'auto', 'bypassPermissions'] : ['ask', 'acceptEdits', 'auto', 'bypassPermissions'];
+  agent === 'claude-code'
+    ? ['ask', 'acceptEdits', 'auto', 'bypassPermissions']
+    : ['ask', 'auto', 'bypassPermissions'];
 
 function ctx(over: Partial<InvocationCatalogContext> = {}): InvocationCatalogContext {
   return { providers: providers(), getPermissionModes: PERM_MODES, ...over };
 }
 
 describe('resolveModelInvocation — 六元组回落链', () => {
+  it('keeps an explicit Pi invocation instead of falling back to the scenario agent', () => {
+    const r = resolveModelInvocation(
+      { agentKind: 'pi', model: 'pi-model', permissionMode: 'auto' },
+      SCENARIO,
+      ctx(),
+    );
+    expect(r).toMatchObject({
+      agentKind: 'pi',
+      model: 'pi-model',
+      providerId: null,
+      permissionMode: 'auto',
+    });
+    expect(r.fallbacksApplied).not.toContain('agent:scenario-default');
+  });
+
   it('全显式且全可用 → 原样直传,零回落', () => {
     const r = resolveModelInvocation(
       {
@@ -281,6 +311,40 @@ describe('resolveModelInvocation — 六元组回落链', () => {
     expect(r2.fallbacksApplied).toContain('model:first-available');
   });
 
+  it('retired 模型不参与显式选择、场景默认或首个可用 fallback', () => {
+    const retiredOpus = providers().map((provider) => ({
+      ...provider,
+      models: {
+        ...provider.models,
+        'claude-code': (provider.models['claude-code'] ?? []).map((entry) =>
+          entry.id === 'claude-opus-5' ? { ...entry, status: 'retired' as const } : entry,
+        ),
+      },
+    })) as ProviderView[];
+    const explicit = resolveModelInvocation(
+      { model: 'claude-opus-5' },
+      SCENARIO,
+      ctx({ providers: retiredOpus }),
+    );
+    expect(explicit.model).toBe('claude-sonnet-4-6');
+
+    const retiredDefaults = retiredOpus.map((provider) => ({
+      ...provider,
+      models: {
+        ...provider.models,
+        'claude-code': (provider.models['claude-code'] ?? []).map((entry) =>
+          entry.id === 'claude-sonnet-4-6' ? { ...entry, status: 'retired' as const } : entry,
+        ),
+      },
+    })) as ProviderView[];
+    const noFallback = resolveModelInvocation(
+      { model: 'gone-model' },
+      SCENARIO,
+      ctx({ providers: retiredDefaults }),
+    );
+    expect(noFallback.fallbacksApplied).toContain('model:no-available-models');
+  });
+
   it('目录与 caps 全不可用 → 场景默认裸值(宁发可能非法的 id 不发空串,历史降级)', () => {
     const r = resolveModelInvocation({}, SCENARIO, ctx({ providers: null }));
     expect(r.model).toBe('claude-sonnet-4-6');
@@ -326,6 +390,24 @@ describe('resolveModelInvocation — 六元组回落链', () => {
       ctx(),
     );
     // openai 断开 → xd(已连接且提供 gpt-5.5)顶上,不回 null
+    expect(r.providerId).toBe('xd');
+    expect(r.fallbacksApplied).toContain('provider:visible-fallback');
+  });
+
+  it('providerId: 点名来源这份具体条目是非聊天 mode → 不算「真实提供」,收敛到聊天可用的替代源(issue #882 第 3 点,2026-07 review 第 18 轮)', () => {
+    // anthropic 的 claude-opus-5 被网关标成非聊天(如 embedding);xd 上同 id 仍是正常
+    // 聊天模型 —— 只看 id 存在(旧 providerOffersModel)会误留在 anthropic 上,必须
+    // 收敛到 xd。故意不传 ctx.isVisible,复现修复前「无可见性回调时直接放行」的路径。
+    const withNonChatCopy: ProviderView[] = providers().map((p) =>
+      p.id === 'anthropic'
+        ? { ...p, models: { 'claude-code': [model('claude-opus-5', { mode: 'embedding' })] } }
+        : p,
+    ) as ProviderView[];
+    const r = resolveModelInvocation(
+      { model: 'claude-opus-5', providerId: 'anthropic' },
+      SCENARIO,
+      ctx({ providers: withNonChatCopy }),
+    );
     expect(r.providerId).toBe('xd');
     expect(r.fallbacksApplied).toContain('provider:visible-fallback');
   });
@@ -534,6 +616,7 @@ describe('resolveModelInvocation — codex review 三轮:回落保真度', () =>
         id: 'pa',
         name: 'pa',
         agents: ['codex'],
+        routing: { codex: {} },
         models: { codex: [] },
         connected: true,
       },
@@ -541,6 +624,7 @@ describe('resolveModelInvocation — codex review 三轮:回落保真度', () =>
         id: 'pb',
         name: 'pb',
         agents: ['claude-code'],
+        routing: { 'claude-code': {} },
         models: { 'claude-code': [model('claude-sonnet-4-6'), model('gpt-5.5')] },
         connected: true,
       },
@@ -564,6 +648,7 @@ describe('resolveModelInvocation — codex review 三轮:回落保真度', () =>
         id: 'anthropic',
         name: 'anthropic',
         agents: ['claude-code'],
+        routing: { 'claude-code': {} },
         models: { 'claude-code': [model('a-first')] },
         connected: true,
       },
@@ -571,6 +656,7 @@ describe('resolveModelInvocation — codex review 三轮:回落保真度', () =>
         id: 'xd',
         name: 'xd',
         agents: ['claude-code'],
+        routing: { 'claude-code': {} },
         models: { 'claude-code': [model('xd-first'), model('a-first')] },
         connected: true,
       },
@@ -620,6 +706,7 @@ describe('resolveModelInvocation — codex review 四轮:无点名路径与 prov
         id: 'pa',
         name: 'pa',
         agents: ['codex'],
+        routing: { codex: {} },
         models: { codex: [] },
         connected: true,
       },
@@ -627,6 +714,7 @@ describe('resolveModelInvocation — codex review 四轮:无点名路径与 prov
         id: 'pb',
         name: 'pb',
         agents: ['claude-code'],
+        routing: { 'claude-code': {} },
         models: { 'claude-code': [model('claude-sonnet-4-6')] },
         connected: true,
       },
@@ -671,5 +759,64 @@ describe('resolveModelInvocation — codex review 五轮:native 兜底行级可�
     const r = resolveModelInvocation({}, SCENARIO, ctx());
     expect(r.permissionMode).toBe('bypassPermissions');
     expect(r.fallbacksApplied).not.toContain('permission:scenario-strictest-fallback');
+  });
+});
+
+describe('resolveModelInvocation — model 候选清单本身先过 chat 准入(issue #882 第 3 点,2026-07 review 第 20 轮)', () => {
+  it('native 源上首模型是非聊天类型 → 跳过它,兜底选该源下一个聊天模型,不是裸 available[0]', () => {
+    // xd(native)目录 [opus(非聊天), sonnet]:旧实现的 availableModelsFor 不过滤 mode,
+    // has()/fromNative/available[0] 都可能选中 opus;providerId 步骤只能校验"选中的
+    // 来源",无法撤销已经选错的模型。
+    const provs = providers().map((p) =>
+      p.id === 'xd'
+        ? {
+            ...p,
+            models: {
+              ...p.models,
+              'claude-code': [
+                model('claude-opus-5', { mode: 'embedding' }),
+                model('claude-sonnet-4-6'),
+              ],
+            },
+          }
+        : p,
+    ) as ProviderView[];
+    const r = resolveModelInvocation(
+      { model: 'gone' },
+      { ...SCENARIO, modelFor: () => 'also-gone' },
+      { providers: provs, getPermissionModes: PERM_MODES },
+    );
+    expect(r.model).toBe('claude-sonnet-4-6');
+    expect(r.fallbacksApplied).toContain('model:first-available');
+  });
+
+  it('显式偏好的模型 id 在所有来源都只以非聊天类型存在 → 不算「可用」,回落场景默认', () => {
+    // 两个来源的 claude-opus-5 都改成非聊天,确保没有任何一份聊天可用的同 id 条目
+    // 能让 has() 误放行。
+    const provs = providers().map((p) => {
+      if (p.id === 'anthropic') {
+        return { ...p, models: { 'claude-code': [model('claude-opus-5', { mode: 'embedding' })] } };
+      }
+      if (p.id === 'xd') {
+        return {
+          ...p,
+          models: {
+            ...p.models,
+            'claude-code': [
+              model('claude-opus-5', { mode: 'embedding' }),
+              model('claude-sonnet-4-6'),
+            ],
+          },
+        };
+      }
+      return p;
+    }) as ProviderView[];
+    const r = resolveModelInvocation(
+      { model: 'claude-opus-5' },
+      SCENARIO,
+      { providers: provs, getPermissionModes: PERM_MODES },
+    );
+    expect(r.model).toBe('claude-sonnet-4-6');
+    expect(r.fallbacksApplied).toContain('model:scenario-default');
   });
 });

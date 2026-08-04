@@ -8,21 +8,38 @@ vi.mock('../../appCapabilities.js', () => ({
   getAppCapabilities: mockGetAppCapabilities,
 }));
 
-import { BUNDLED_CATALOG, buildUserProvider, type AgentKind, type RoutingDescriptor } from '@cindy/model-providers';
+import {
+  BUNDLED_CATALOG,
+  buildRegistry,
+  buildUserProvider,
+  type AgentKind,
+  type RoutingDescriptor,
+} from '@cindy/model-providers';
 
 import {
+  beginProviderRouteMutation,
   buildLocalHandlerHeaders,
   buildRouteDecision,
+  getSessionRoutingDescriptor,
+  resolveSessionRoute,
   resolveSessionRouteDecision,
+  resolveImplicitLocalBridgeRoute,
   inferProviderIdForModel,
   isUserProviderSession,
   setCustomProviderKeyReader,
   setProviderOAuthTokenReader,
+  setProviderViewsReader,
   resolveImplicitProviderOAuthRouteDecision,
   rewriteImplicitModelIdForRoute,
   rewriteSessionModelIdForRoute,
 } from '../provider-route.js';
-import { setCustomProviders, setDiscoveredCodexModels, setXdGatewayModels } from '../active-catalog.js';
+import {
+  getActiveCatalog,
+  setAnthropicDiscoveredModels,
+  setCustomProviders,
+  setDiscoveredCodexModels,
+  setXdGatewayModels,
+} from '../active-catalog.js';
 import { setSessionProvider, clearSessionProvider } from '../session-provider-store.js';
 import { ANTHROPIC_DIRECT_UPSTREAM } from '../claude-gateway-config.js';
 
@@ -56,7 +73,35 @@ afterEach(() => {
   setProviderOAuthTokenReader(() => null);
   clearSessionProvider('s-xai');
   clearSessionProvider('s-xai-rewrite');
+  clearSessionProvider('s-anthropic-codex');
+  clearSessionProvider('s-xd-model-wire');
   setXdGatewayModels([]);
+  setAnthropicDiscoveredModels([]);
+  setProviderViewsReader(async () => []);
+});
+
+describe('implicit local bridge resume routing', () => {
+  it('keeps the connected source when a running session model becomes retired', async () => {
+    setAnthropicDiscoveredModels([
+      {
+        id: 'claude-retired-live',
+        name: 'Claude Retired Live',
+        contextWindow: 200_000,
+        efforts: [],
+        defaultEffort: null,
+        status: 'retired',
+      },
+    ]);
+    setProviderViewsReader(async () =>
+      buildRegistry(getActiveCatalog(), { anthropic: true }, {}),
+    );
+
+    await expect(resolveImplicitLocalBridgeRoute('claude-retired-live', 'codex')).resolves
+      .toMatchObject({
+        providerId: 'anthropic',
+        routing: { wireProtocol: 'anthropic-messages' },
+      });
+  });
 });
 
 describe('local mode Cindy gateway gate', () => {
@@ -123,6 +168,56 @@ describe('codex: buildRouteDecision no-break 基线', () => {
       headerOverride: { authorization: 'Bearer xdt-missing-provider-oauth-token' },
     }));
   });
+
+  it('Anthropic subscription → Claude.ai bearer + OAuth beta,不透传 Codex 账号头', () => {
+    const fromCatalog = buildRouteDecision(
+      descriptor('anthropic', 'codex'),
+      KEY,
+      'codex',
+      null,
+      'claude-subscription-token',
+    );
+    expect(fromCatalog).toEqual({
+      upstreamOverride: 'https://api.anthropic.com',
+      headerOverride: {
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+        authorization: 'Bearer claude-subscription-token',
+      },
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+});
+
+describe('pi: provider-aware Anthropic wire routing', () => {
+  afterEach(() => {
+    clearSessionProvider('s-pi');
+    setProviderOAuthTokenReader(() => null);
+  });
+
+  it('XD uses both Anthropic auth headers so the Pi client never leaks its placeholder', () => {
+    expect(buildRouteDecision(descriptor('xd', 'pi'), KEY, 'pi')).toEqual({
+      headerOverride: { 'x-api-key': KEY, authorization: `Bearer ${KEY}` },
+    });
+  });
+
+  it('Anthropic injects the host OAuth token and required OAuth beta headers', async () => {
+    setSessionProvider('s-pi', 'anthropic');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'anthropic' && agent === 'pi' ? Promise.resolve('claude-live-token') : null,
+    );
+    await expect(
+      Promise.resolve(resolveSessionRouteDecision('s-pi', 'pi', KEY, 'claude-opus-5')),
+    ).resolves.toEqual({
+      upstreamOverride: ANTHROPIC_DIRECT_UPSTREAM,
+      headerOverride: {
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'oauth-2025-04-20',
+        authorization: 'Bearer claude-live-token',
+      },
+      headerDelete: ['x-api-key'],
+    });
+  });
 });
 
 describe('resolveSessionRouteDecision (per-session 选择 → 路由;no-break fallback)', () => {
@@ -150,6 +245,36 @@ describe('resolveSessionRouteDecision (per-session 选择 → 路由;no-break fa
     expect(resolveSessionRouteDecision('s-xc', 'codex', KEY)).toEqual({
       headerOverride: { authorization: `Bearer ${KEY}` },
     });
+  });
+
+  it('codex 会话选 XD:原生模型保持 Responses,Claude-only 投影模型派生 Anthropic bridge wire', async () => {
+    setXdGatewayModels([
+      { id: 'gpt-native', agents: ['claude-code', 'codex'] },
+      { id: 'claude-bridge', agents: ['claude-code'] },
+    ]);
+    setSessionProvider('s-xd-model-wire', 'xd');
+
+    expect(getSessionRoutingDescriptor('s-xd-model-wire', 'codex', 'gpt-native'))
+      .toMatchObject({
+        authStrategy: 'gateway-key',
+      });
+    expect(getSessionRoutingDescriptor('s-xd-model-wire', 'codex', 'gpt-native')?.wireProtocol)
+      .toBeUndefined();
+
+    expect(getSessionRoutingDescriptor('s-xd-model-wire', 'codex', 'claude-bridge[1m]'))
+      .toMatchObject({
+        authStrategy: 'gateway-key',
+        wireProtocol: 'anthropic-messages',
+      });
+    await expect(resolveSessionRoute('s-xd-model-wire', 'codex', 'claude-bridge[1m]'))
+      .resolves.toMatchObject({
+        providerId: 'xd',
+        providerSource: 'builtin',
+        routing: {
+          authStrategy: 'gateway-key',
+          wireProtocol: 'anthropic-messages',
+        },
+      });
   });
 
   it('codex 会话选 xAI → 异步读取 xAI OAuth token 并路由到 api.x.ai', async () => {
@@ -189,9 +314,44 @@ describe('resolveSessionRouteDecision (per-session 选择 → 路由;no-break fa
     setProviderOAuthTokenReader(() => null);
   });
 
-  it('选的供应商对该 agent 无效(Anthropic 用在 codex)→ null(回落默认)', () => {
-    setSessionProvider('s-mismatch', 'anthropic');
-    expect(resolveSessionRouteDecision('s-mismatch', 'codex', KEY)).toBeNull();
+  it('codex 会话选 Anthropic → 本地桥读取 Claude.ai OAuth，缺失时也 fail closed', async () => {
+    setSessionProvider('s-anthropic-codex', 'anthropic');
+    setProviderOAuthTokenReader((providerId, agent) =>
+      providerId === 'anthropic' && agent === 'codex'
+        ? Promise.resolve('claude-subscription-token')
+        : null,
+    );
+    const route = await resolveSessionRoute(
+      's-anthropic-codex',
+      'codex',
+      'claude-opus-5',
+    );
+    expect(route).toMatchObject({
+      providerId: 'anthropic',
+      providerSource: 'builtin',
+      oauthToken: 'claude-subscription-token',
+      routing: {
+        wireProtocol: 'anthropic-messages',
+        authStrategy: 'provider-oauth-header',
+      },
+    });
+    expect(buildLocalHandlerHeaders(route!, 'codex')).toEqual({
+      headers: {
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
+        authorization: 'Bearer claude-subscription-token',
+      },
+      headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+
+    setProviderOAuthTokenReader(() => null);
+    const missing = await resolveSessionRoute(
+      's-anthropic-codex',
+      'codex',
+      'claude-opus-5',
+    );
+    expect(buildLocalHandlerHeaders(missing!, 'codex').headers.authorization)
+      .toBe('Bearer xdt-missing-provider-oauth-token');
   });
 
   it('按 catalog modelIdRewrite 剥 xAI 内部前缀', () => {
@@ -473,6 +633,38 @@ describe('none (无鉴权自定义代理 buildRouteDecision)', () => {
     });
   });
 
+  it('disabled 的历史远程无鉴权路由直接 fail closed', async () => {
+    const decision = buildRouteDecision(
+      {
+        upstream: 'https://remote.example/v1',
+        authStrategy: 'none',
+        disabled: true,
+      },
+      KEY,
+      'codex',
+      null,
+    );
+    expect(decision).toEqual({ localHandler: expect.any(Function) });
+
+    const end = vi.fn();
+    await decision!.localHandler!({
+      rawBody: Buffer.from('{}'),
+      parsedBody: { model: 'legacy-model' },
+      ctx: {
+        reqId: 1,
+        method: 'POST',
+        url: '/responses',
+        headers: {},
+      },
+      res: { writeHead: vi.fn(), end } as never,
+    });
+    expect(JSON.parse(end.mock.calls[0][0])).toMatchObject({
+      error: {
+        message: 'The selected provider is disabled; update its endpoint or authentication settings before retrying.',
+      },
+    });
+  });
+
   it('本地 Chat 桥也剥掉复制配置里残留的鉴权与账号头', () => {
     expect(
       buildLocalHandlerHeaders({
@@ -528,6 +720,75 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     });
   });
 
+  it('blocks new routes while endpoint and key switch as one logical mutation', async () => {
+    setCustomProviders([
+      buildUserProvider({
+        id: 'openrouter',
+        name: 'OpenRouter',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://old.example/v1',
+            models: [{ id: 'custom-model', name: 'Custom Model' }],
+          },
+        },
+      }),
+    ]);
+    setCustomProviderKeyReader(() => 'old-key');
+    setSessionProvider('s-user', 'openrouter');
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toMatchObject({
+      upstreamOverride: 'https://old.example/v1',
+      headerOverride: { authorization: 'Bearer old-key' },
+    });
+
+    const finishMutation = beginProviderRouteMutation('openrouter');
+    try {
+      // Secret writes are synchronous and may become visible before the catalog refresh awaits.
+      setCustomProviderKeyReader(() => 'new-key');
+      const decision = await Promise.resolve(
+        resolveSessionRouteDecision('s-user', 'codex', KEY),
+      );
+      expect(decision).toEqual({ localHandler: expect.any(Function) });
+      const writeHead = vi.fn();
+      const end = vi.fn();
+      await decision!.localHandler!({
+        rawBody: Buffer.from('{}'),
+        parsedBody: { model: 'custom-model' },
+        ctx: { reqId: 1, method: 'POST', url: '/responses', headers: {} },
+        res: { writeHead, end } as never,
+      });
+      expect(writeHead).toHaveBeenCalledWith(503, {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': 'no-store',
+        'retry-after': '1',
+      });
+      expect(JSON.parse(end.mock.calls[0][0])).toMatchObject({
+        error: {
+          type: 'provider_route_updating',
+          code: 'provider_route_updating',
+        },
+      });
+    } finally {
+      finishMutation();
+    }
+
+    setCustomProviders([
+      buildUserProvider({
+        id: 'openrouter',
+        name: 'OpenRouter',
+        runtimes: {
+          codex: {
+            baseUrl: 'https://new.example/v1',
+            models: [{ id: 'custom-model', name: 'Custom Model' }],
+          },
+        },
+      }),
+    ]);
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY)).toMatchObject({
+      upstreamOverride: 'https://new.example/v1',
+      headerOverride: { authorization: 'Bearer new-key' },
+    });
+  });
+
   it('精确请求路径只覆盖带 model 的推理请求，不改写无 body 的控制面请求', () => {
     setCustomProviders([
       buildUserProvider({
@@ -555,6 +816,52 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
       headerOverride: { authorization: 'Bearer sk-exact' },
       upstreamOverride: 'https://gateway.example/api',
       headerDelete: CODEX_ACCOUNT_HEADER_DELETE,
+    });
+  });
+
+  it('disabled runtime 返回本地错误，不允许 proxy 回落到默认供应商', async () => {
+    const disabled = buildUserProvider({
+      id: 'legacy-remote',
+      name: 'Legacy Remote',
+      runtimes: {
+        codex: {
+          baseUrl: 'https://remote.example/v1',
+          models: [{ id: 'legacy-model', name: 'Legacy Model' }],
+        },
+      },
+      auth: { method: 'none' },
+    });
+    expect(disabled.routing.codex?.disabled).toBe(true);
+    setCustomProviders([disabled]);
+    setSessionProvider('s-user', 'legacy-remote');
+
+    const decision = await Promise.resolve(
+      resolveSessionRouteDecision('s-user', 'codex', KEY, 'legacy-model'),
+    );
+    expect(decision).toEqual({ localHandler: expect.any(Function) });
+
+    const writeHead = vi.fn();
+    const end = vi.fn();
+    await decision!.localHandler!({
+      rawBody: Buffer.from('{}'),
+      parsedBody: { model: 'legacy-model' },
+      ctx: {
+        reqId: 1,
+        method: 'POST',
+        url: '/responses',
+        headers: {},
+      },
+      res: { writeHead, end } as never,
+    });
+    expect(writeHead).toHaveBeenCalledWith(503, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+    });
+    expect(JSON.parse(end.mock.calls[0][0])).toMatchObject({
+      error: {
+        type: 'provider_route_disabled',
+        code: 'provider_route_disabled',
+      },
     });
   });
 

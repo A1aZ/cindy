@@ -43,7 +43,13 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { createLogger } from '@/lib/logger';
 import { BrowserBackendSubsection } from './BrowserBackendSubsection';
-import { androidDeviceLabel, androidStatusFallback, describeAndroidDeviceStatus } from './androidStatusPresentation';
+import type { BrowserBackendHealth } from '../../../shared/browserBackend';
+import {
+  androidDeviceLabel,
+  androidStatusFallback,
+  describeAndroidDeviceStatus,
+  getAndroidConnectionGuideKind,
+} from './androidStatusPresentation';
 import {
   getComputerPermissionSwitchChecked,
   isComputerPermissionPreflightInconclusive,
@@ -72,6 +78,17 @@ const ACTION_BUTTON_CLASS = cn(
   'disabled:opacity-50 disabled:pointer-events-none',
 );
 const ANDROID_AUTO_DEVICE_VALUE = '__auto__';
+
+function browserBackendHealthFallback(
+  active: 'external' | 'rsb-webview',
+): BrowserBackendHealth {
+  return {
+    active,
+    status: 'error',
+    canRecover: active === 'rsb-webview',
+    reason: 'status-failed',
+  };
+}
 
 function androidSourceLabelKey(source: AndroidAdbPathSource | null | undefined): string {
   switch (source) {
@@ -391,6 +408,8 @@ export function ComputerUseSection({
     'external' | 'rsb-webview' | null
   >(null);
   const [browserBackendPending, setBrowserBackendPending] = useState(false);
+  const [browserBackendRecovering, setBrowserBackendRecovering] = useState(false);
+  const [browserBackendHealth, setBrowserBackendHealth] = useState<BrowserBackendHealth | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -474,7 +493,8 @@ export function ComputerUseSection({
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [browserState, computerState, avail, computer, backendState] = await Promise.all([
+      let backendHealthError: unknown;
+      const [browserState, computerState, avail, computer, backendState, backendHealth] = await Promise.all([
         // `browser` is hidden from plugins.list() (HOSTED_ELSEWHERE), so read its
         // enable state directly by id — list().find() would always be undefined
         // and the toggle would wrongly reset to enabled on every remount.
@@ -511,8 +531,13 @@ export function ComputerUseSection({
             error: String(err),
           } as ComputerDriverStatus;
         }),
-        window.electronAPI.browserBackend?.getState().catch((err) => {
+        window.electronAPI.browserBackend?.getState?.().catch((err) => {
           log.warn('browserBackend.getState failed', err);
+          return null;
+        }) ?? Promise.resolve(null),
+        window.electronAPI.browserBackend?.getHealth?.().catch((err) => {
+          backendHealthError = err;
+          log.warn('browserBackend.getHealth failed', err);
           return null;
         }) ?? Promise.resolve(null),
       ]);
@@ -528,7 +553,15 @@ export function ComputerUseSection({
       // Phase 5: backend kind 拉不到时(老版本 preload / IPC 缺失)安全 fallback
       // 到 'external',保持现有 Chrome 探测 / 登录 UI 可见 — 总比因为 IPC 失败
       // 让卡片整张瘫成内置态强。
-      setBrowserBackendKind(backendState?.active ?? 'external');
+      const activeBackend = backendState?.active ?? 'external';
+      setBrowserBackendKind(activeBackend);
+      setBrowserBackendHealth(
+        backendHealth?.active === activeBackend
+          ? backendHealth
+          : backendHealthError
+            ? browserBackendHealthFallback(activeBackend)
+            : null,
+      );
     })();
     return () => {
       cancelled = true;
@@ -548,6 +581,12 @@ export function ComputerUseSection({
         // main 返回 active 是权威 — 万一同一次 swap 失败 router 拒了我们 fallback
         // 到 main 端的真实值。
         setBrowserBackendKind(res.active);
+        try {
+          setBrowserBackendHealth(await window.electronAPI.browserBackend.getHealth());
+        } catch (healthErr) {
+          log.warn('browserBackend.getHealth after setKind failed', healthErr);
+          setBrowserBackendHealth(browserBackendHealthFallback(res.active));
+        }
       } catch (err) {
         log.error('browserBackend.setKind failed', err);
         setBrowserBackendKind(prev);
@@ -558,6 +597,27 @@ export function ComputerUseSection({
     },
     [browserBackendKind, browserBackendPending, t],
   );
+
+  const handleRecoverBrowserBackend = useCallback(async () => {
+    if (browserBackendPending || browserBackendRecovering) return;
+    setBrowserBackendRecovering(true);
+    try {
+      const result = await window.electronAPI.browserBackend.recover();
+      setBrowserBackendKind(result.health.active);
+      setBrowserBackendHealth(result.health);
+      if (result.ok) {
+        toast.success(t('settings.computerUse.browserBackend.health.recovered'));
+      } else if (result.health.status === 'error') {
+        toast.error(t('settings.computerUse.browserBackend.health.recoverFailed'));
+      }
+    } catch (err) {
+      log.error('browserBackend.recover failed', err);
+      setBrowserBackendHealth(browserBackendHealthFallback('rsb-webview'));
+      toast.error(t('settings.computerUse.browserBackend.health.recoverFailed'));
+    } finally {
+      setBrowserBackendRecovering(false);
+    }
+  }, [browserBackendPending, browserBackendRecovering, t]);
 
   // driver 已安装时安静地查一次是否有新版本。失败或无更新都不渲染任何 UI,
   // 不弹 toast、不做启动检查、不后台轮询 —— 更新入口只是设置里的一个可选项。
@@ -1135,6 +1195,7 @@ export function ComputerUseSection({
     && !androidDevices.some((device) => device.device_serial === configuredDefaultAndroidDevice),
   );
   const androidDeviceStatusText = describeAndroidDeviceStatus(androidStatus, t);
+  const androidConnectionGuideKind = getAndroidConnectionGuideKind(androidStatus);
   const androidAdbSource = androidStatus?.adb_path_source ?? androidStatus?.adb_preparation?.source ?? null;
   const androidAdbSourceText = androidPreparePending
     ? t('settings.computerUse.android.adb.preparing')
@@ -1206,8 +1267,11 @@ export function ComputerUseSection({
         {browserBackendKind !== null ? (
           <BrowserBackendSubsection
             active={browserBackendKind}
-            pending={browserBackendPending}
+            pending={browserBackendPending || browserBackendRecovering}
+            recovering={browserBackendRecovering}
+            health={browserBackendHealth}
             onSelect={(kind) => void handleSelectBackend(kind)}
+            onRecover={() => void handleRecoverBrowserBackend()}
           />
         ) : null}
         {/* 只在 backend === 'external' 时展示 Chrome 探测 + 登录入口。内置 webview
@@ -1635,6 +1699,41 @@ export function ComputerUseSection({
             </button>
           </div>
         </div>
+        {androidConnectionGuideKind ? (
+          <div className="border-t border-[var(--settings-theme-card-border)] px-4 py-3">
+            <div className="rounded-xl bg-[var(--settings-input-bg)] px-3 py-3">
+              <p className="text-12 font-medium leading-[1.5] text-[var(--settings-section-title)]">
+                {t(
+                  `settings.computerUse.android.connectionGuide.${androidConnectionGuideKind}.title`,
+                )}
+              </p>
+              {androidConnectionGuideKind === 'connect' ? (
+                <>
+                  <p className="mt-1.5 text-12 leading-[1.5] text-[var(--settings-section-desc)]">
+                    {t(
+                      'settings.computerUse.android.connectionGuide.connect.adbNote',
+                    )}
+                  </p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-4 text-12 leading-[1.5] text-[var(--settings-section-desc)]">
+                    {[1, 2, 3, 4].map((step) => (
+                      <li key={step}>
+                        {t(
+                          `settings.computerUse.android.connectionGuide.connect.step${step}`,
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              ) : (
+                <p className="mt-1.5 text-12 leading-[1.5] text-[var(--settings-section-desc)]">
+                  {t(
+                    `settings.computerUse.android.connectionGuide.${androidConnectionGuideKind}.body`,
+                  )}
+                </p>
+              )}
+            </div>
+          </div>
+        ) : null}
         <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--settings-theme-card-border)] px-4 py-[14px]">
           <div className="flex min-w-0 flex-col gap-1">
             <p className="text-12 font-medium leading-[1.5] text-[var(--settings-section-title)]">

@@ -97,6 +97,7 @@ vi.mock('@/lib/composerDraftStore', () => ({
 import { makerChatStore, type ChatMessage } from '@/lib/makerChatStore';
 import * as messageService from '@/lib/messageService';
 import * as sessionService from '@/lib/sessionService';
+import * as sessionsBus from '@/lib/sessionsBus';
 import { CONTINUE_AFTER_APP_EXIT_PROMPT } from '../../shared/interruptedTurn';
 
 const SESSION_ID = 'text-delta-batching';
@@ -416,6 +417,93 @@ describe('makerChatStore text delta batching', () => {
     expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool_use']);
     expect(messages[0]?.content).toBe('a');
     expect(messages[0]?.clientId).toBe('assistant-1');
+  });
+
+  it('updates a repeated web_search tool_use row in place', () => {
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: {
+          toolUseId: 'search-1',
+          toolName: 'web_search',
+          input: { query: 'early query' },
+        },
+      },
+      persistId: 'search-message-1',
+    });
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: {
+          toolUseId: 'search-1',
+          toolName: 'web_search',
+          input: {
+            query: 'https://example.com/final',
+            action: { type: 'openPage', url: 'https://example.com/final' },
+          },
+        },
+      },
+      persistId: 'search-message-1',
+    });
+
+    const messages = makerChatStore.getSnapshot(SESSION_ID).messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      clientId: 'search-message-1',
+      role: 'tool_use',
+      toolUseId: 'search-1',
+      toolName: 'web_search',
+      toolInput: {
+        query: 'https://example.com/final',
+        action: { type: 'openPage', url: 'https://example.com/final' },
+      },
+    });
+  });
+
+  it('refreshes the plan update timestamp when update_plan completes in place', () => {
+    const startedAt = 1_700_000_000_000;
+    vi.setSystemTime(startedAt);
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: {
+          toolUseId: 'plan-1',
+          toolName: 'update_plan',
+          input: { plan: [{ step: 'Finish work', status: 'in_progress' }] },
+        },
+      },
+      persistId: 'plan-message-1',
+    });
+
+    vi.setSystemTime(startedAt + 5_000);
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: {
+          toolUseId: 'plan-1',
+          toolName: 'update_plan',
+          input: { plan: [{ step: 'Finish work', status: 'completed' }] },
+        },
+      },
+      persistId: 'plan-message-1',
+    });
+
+    const messages = makerChatStore.getSnapshot(SESSION_ID).messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      clientId: 'plan-message-1',
+      createdAt: new Date(startedAt).toISOString(),
+      planUpdatedAtMs: startedAt + 5_000,
+      toolInput: { plan: [{ step: 'Finish work', status: 'completed' }] },
+    });
   });
 
   it('flushes pending text before a permission interaction request on the separate IPC channel', () => {
@@ -953,6 +1041,124 @@ describe('makerChatStore text delta batching', () => {
     unsubscribe();
   });
 
+  it('coalesces 1000 high-frequency thinking updates into one subscriber notification', () => {
+    let notifyCount = 0;
+    const unsubscribe = makerChatStore.subscribe(SESSION_ID, () => {
+      notifyCount += 1;
+    });
+
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'thinking',
+        source: 'codex',
+        data: { stage: 'start', blockId: 'thinking-flood', startedAt: Date.now() },
+      },
+    });
+    for (let i = 0; i < 999; i++) {
+      onEvent?.({
+        sessionId: SESSION_ID,
+        event: {
+          type: 'thinking',
+          source: 'codex',
+          data: { stage: 'delta', blockId: 'thinking-flood', text: 'x' },
+        },
+      });
+    }
+
+    expect(notifyCount).toBe(0);
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages[0]).toMatchObject({
+      clientId: 'thinking-flood',
+      content: 'x'.repeat(999),
+    });
+
+    vi.advanceTimersByTime(32);
+    expect(notifyCount).toBe(1);
+    unsubscribe();
+  });
+
+  it('keeps coalescing live tool DB echoes after Stop has optimistically gone idle', () => {
+    emitStatus({ status: 'Running', isRunning: true });
+    makerChatStore.stopSession(SESSION_ID);
+    expect(makerChatStore.getSnapshot(SESSION_ID).agentStatus.isRunning).toBe(false);
+    const eventCount = 800;
+    let notifyCount = 0;
+    const unsubscribe = makerChatStore.subscribe(SESSION_ID, () => {
+      notifyCount += 1;
+    });
+    vi.mocked(sessionsBus.emitPatch).mockClear();
+
+    for (let i = 0; i < eventCount; i++) {
+      onEvent?.({
+        sessionId: SESSION_ID,
+        event: {
+          type: 'tool_use',
+          source: 'codex',
+          data: {
+            toolUseId: `tool-use-${i}`,
+            toolName: 'Read',
+            input: { file_path: `file-${i}.ts` },
+          },
+        },
+        persistId: `tool-row-${i}`,
+      });
+      emitDbMessageCreated({
+        clientId: `tool-row-${i}`,
+        role: 'tool_use',
+        content: {
+          toolUseId: `tool-use-${i}`,
+          toolName: 'Read',
+          input: { file_path: `file-${i}.ts` },
+        },
+        toolUseId: `tool-use-${i}`,
+        createdAt: new Date(Date.UTC(2026, 5, 15) + i).toISOString(),
+      });
+    }
+
+    expect(notifyCount).toBe(0);
+    expect(sessionsBus.emitPatch).not.toHaveBeenCalled();
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages).toHaveLength(eventCount);
+    expect(makerChatStore.getSnapshot(SESSION_ID).messages[eventCount - 1]).toMatchObject({
+      clientId: 'tool-row-799',
+      role: 'tool_use',
+      toolUseId: 'tool-use-799',
+      toolName: 'Read',
+    });
+
+    vi.advanceTimersByTime(32);
+    expect(notifyCount).toBe(1);
+    expect(sessionsBus.emitPatch).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('flushes a pending high-frequency batch immediately when terminal done arrives', () => {
+    let notifyCount = 0;
+    const unsubscribe = makerChatStore.subscribe(SESSION_ID, () => {
+      notifyCount += 1;
+    });
+
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: { toolUseId: 'tool-flood', toolName: 'exec', input: {} },
+      },
+      persistId: 'tool-flood-row',
+    });
+    expect(notifyCount).toBe(0);
+
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: { type: 'done', source: 'codex', data: {} },
+    });
+    expect(notifyCount).toBe(1);
+
+    vi.advanceTimersByTime(32);
+    expect(notifyCount).toBe(1);
+    unsubscribe();
+  });
+
   it('flushes at most 8 streaming sessions per timer tick', () => {
     for (const [index, sessionId] of MULTI_SESSION_IDS.entries()) {
       emitTextDelta(`s${index}`, sessionId);
@@ -978,6 +1184,66 @@ describe('makerChatStore text delta batching', () => {
         }),
       ]);
     }
+  });
+
+  it('does not starve a Map-only sidebar patch behind 8 continuously active sessions', () => {
+    const patchOnlySessionId = MULTI_SESSION_IDS[8];
+    onEvent?.({
+      sessionId: patchOnlySessionId,
+      event: {
+        type: 'tool_use',
+        source: 'codex',
+        data: { toolUseId: 'fair-tool', toolName: 'Read', input: { file_path: 'fair.ts' } },
+      },
+      persistId: 'fair-tool-row',
+    });
+    const persistedTool = {
+      clientId: 'fair-tool-row',
+      role: 'tool_use' as const,
+      content: {
+        toolUseId: 'fair-tool',
+        toolName: 'Read',
+        input: { file_path: 'fair.ts' },
+      },
+      toolUseId: 'fair-tool',
+      createdAt: '2026-06-15T00:00:00.000Z',
+    };
+    emitDbMessageCreated(persistedTool, patchOnlySessionId);
+    vi.advanceTimersByTime(32);
+    vi.mocked(sessionsBus.emitPatch).mockClear();
+
+    for (const sessionId of MULTI_SESSION_IDS.slice(0, 8)) {
+      onEvent?.({
+        sessionId,
+        event: {
+          type: 'thinking',
+          source: 'codex',
+          data: { stage: 'delta', blockId: 'fairness', text: 'a' },
+        },
+      });
+    }
+    // 完全相同的 DB echo 让 setState 走 no-op，只剩 sidebar patch 待发。
+    emitDbMessageCreated(persistedTool, patchOnlySessionId);
+
+    vi.advanceTimersByTime(32);
+    expect(sessionsBus.emitPatch).not.toHaveBeenCalled();
+
+    for (const sessionId of MULTI_SESSION_IDS.slice(0, 8)) {
+      onEvent?.({
+        sessionId,
+        event: {
+          type: 'thinking',
+          source: 'codex',
+          data: { stage: 'delta', blockId: 'fairness', text: 'b' },
+        },
+      });
+    }
+    vi.advanceTimersByTime(32);
+
+    expect(sessionsBus.emitPatch).toHaveBeenCalledTimes(1);
+    expect(sessionsBus.emitPatch).toHaveBeenCalledWith(patchOnlySessionId, {
+      updatedAt: expect.any(String),
+    });
   });
 
   it('flushes pending text before a closed status finalizes the session', () => {
@@ -1009,6 +1275,27 @@ describe('makerChatStore text delta batching', () => {
         isStreaming: false,
       }),
     ]);
+  });
+
+  it('sends Stop IPC before flushing pending renderer work', () => {
+    emitStatus({ status: 'Running', isRunning: true });
+    const order: string[] = [];
+    input.stop.mockImplementationOnce(async (sessionId: string) => {
+      order.push('ipc');
+      return projection(sessionId);
+    });
+    const unsubscribe = makerChatStore.subscribe(SESSION_ID, () => {
+      order.push('notify');
+    });
+    emitTextDelta('pending');
+
+    makerChatStore.stopSession(SESSION_ID);
+
+    expect(input.stop).toHaveBeenCalledWith(SESSION_ID, undefined);
+    expect(order[0]).toBe('ipc');
+    expect(order).toContain('notify');
+    expect(makerChatStore.getSnapshot(SESSION_ID).agentStatus.isRunning).toBe(false);
+    unsubscribe();
   });
 
   it('ignores placeholder 0/0 context snapshots on Done status', () => {
@@ -1255,7 +1542,7 @@ describe('makerChatStore text delta batching', () => {
     );
   });
 
-  it('persists the original remote auth error when retry enqueue rejects asynchronously', async () => {
+  it('does not run the legacy remote auth retry path for Codex auth errors', async () => {
     vi.mocked(sessionService.get).mockResolvedValue({
       agentKind: 'codex',
       remoteHostId: 'remote-host',
@@ -1268,7 +1555,55 @@ describe('makerChatStore text delta batching', () => {
       model: MODEL,
       effort: EFFORT,
       permissionMode: PERMISSION_MODE,
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
+    makerChatStore.ensureInitialMessages(SESSION_ID);
+    await flushPromises();
+    emitDbMessageCreated({
+      id: 'user-row',
+      clientId: 'user-client',
+      role: 'user',
+      content: 'show sync auth',
+      createdAt: '2026-01-01T00:00:01.000Z',
+    });
+
+    onEvent?.({
+      sessionId: SESSION_ID,
+      event: {
+        type: 'error',
+        source: 'codex',
+        data: { errorStatus: 401, message: 'Authorization: [REDACTED]' },
+        // 真实 Codex 事件没有 agentMeta（SDK 无 uuid 概念）——不注入合成值，
+        // 正好覆盖双写修复：renderer 不再 deferred 补落，main 热路径唯一落库。
+        agentMeta: null,
+      },
+    });
+    await flushPromises();
+
+    expect(window.electronAPI.safeStorageRead).not.toHaveBeenCalled();
+    expect(window.electronAPI.maker.closeSession).not.toHaveBeenCalled();
+    expect(input.enqueue).not.toHaveBeenCalled();
+    // main 侧 isRemoteAuthRetryErrorEvent 对 codex 返回 false，error 行走正常
+    // onTurnErrorEvent 落库；renderer 再 deferred 会双写（dedup key 对不上）。
+    expect(input.persistTurnErrorDeferred).not.toHaveBeenCalled();
+    expect(makerChatStore.getSnapshot(SESSION_ID).error).toBe(
+      'Authorization: [REDACTED] (HTTP 401)',
+    );
+  });
+
+  it('persists the original remote auth error when retry enqueue rejects asynchronously', async () => {
+    vi.mocked(sessionService.get).mockResolvedValue({
+      agentKind: 'cc',
+      remoteHostId: 'remote-host',
+      sdkSessionId: null,
+      fastMode: false,
+      contextTokens: 0,
+      contextWindow: 0,
+      totalCostUsd: 0,
+      workingDir: WORKING_DIR,
+      model: MODEL,
+      effort: EFFORT,
+      permissionMode: PERMISSION_MODE,
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
     makerChatStore.ensureInitialMessages(SESSION_ID);
     await flushPromises();
     emitDbMessageCreated({
@@ -1284,7 +1619,7 @@ describe('makerChatStore text delta batching', () => {
       sessionId: SESSION_ID,
       event: {
         type: 'error',
-        source: 'codex',
+        source: 'claude-code',
         data: { errorStatus: 401, message: 'Authorization: [REDACTED]' },
         agentMeta: { sdkSessionId: 'sdk-1' },
       },
@@ -1302,7 +1637,7 @@ describe('makerChatStore text delta batching', () => {
 
   it('persists the original remote auth error when an accepted retry returns a projection error', async () => {
     vi.mocked(sessionService.get).mockResolvedValue({
-      agentKind: 'codex',
+      agentKind: 'cc',
       remoteHostId: 'remote-host',
       sdkSessionId: null,
       fastMode: false,
@@ -1313,7 +1648,7 @@ describe('makerChatStore text delta batching', () => {
       model: MODEL,
       effort: EFFORT,
       permissionMode: PERMISSION_MODE,
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
     makerChatStore.ensureInitialMessages(SESSION_ID);
     await flushPromises();
     emitDbMessageCreated({
@@ -1335,7 +1670,7 @@ describe('makerChatStore text delta batching', () => {
       sessionId: SESSION_ID,
       event: {
         type: 'error',
-        source: 'codex',
+        source: 'claude-code',
         data: { sdkError: 'authentication_failed', message: '401 expired' },
         agentMeta: { sdkSessionId: 'sdk-1' },
       },
@@ -1362,7 +1697,7 @@ describe('makerChatStore text delta batching', () => {
       },
     ];
     vi.mocked(sessionService.get).mockResolvedValue({
-      agentKind: 'codex',
+      agentKind: 'cc',
       remoteHostId: 'remote-host',
       sdkSessionId: null,
       fastMode: false,
@@ -1373,7 +1708,7 @@ describe('makerChatStore text delta batching', () => {
       model: MODEL,
       effort: EFFORT,
       permissionMode: PERMISSION_MODE,
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
     makerChatStore.ensureInitialMessages(SESSION_ID);
     await flushPromises();
     input.enqueue.mockImplementationOnce(async (sessionId: string) => projection(sessionId));
@@ -1398,7 +1733,7 @@ describe('makerChatStore text delta batching', () => {
       sessionId: SESSION_ID,
       event: {
         type: 'error',
-        source: 'codex',
+        source: 'claude-code',
         data: { sdkError: 'authentication_failed', message: '401 expired' },
       },
     });
@@ -2448,7 +2783,7 @@ describe('makerChatStore text delta batching', () => {
       model: MODEL,
       effort: EFFORT,
       permissionMode: PERMISSION_MODE,
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
     input.enqueue.mockImplementationOnce(async (sessionId: string) => projection(sessionId));
     emitDbMessageCreated({
       clientId: 'persisted-error-tail',
@@ -2547,7 +2882,7 @@ describe('makerChatStore text delta batching', () => {
     expect(makerChatStore.getSnapshot(SESSION_ID).messages.at(-1)?.errorDismissed).not.toBe(true);
   });
 
-  it('forces DB-hydrated SSH UI triggers off controller-local Maker Memory', async () => {
+  it('keeps DB-hydrated SSH UI triggers on the controller-global Maker Memory setting', async () => {
     vi.mocked(sessionService.get).mockResolvedValueOnce({
       agentKind: 'codex',
       remoteHostId: 'remote-host',
@@ -2560,7 +2895,7 @@ describe('makerChatStore text delta batching', () => {
       model: MODEL,
       effort: EFFORT,
       permissionMode: PERMISSION_MODE,
-    } as Awaited<ReturnType<typeof sessionService.get>>);
+    } as unknown as Awaited<ReturnType<typeof sessionService.get>>);
     input.enqueue.mockImplementationOnce(async (sessionId: string) => projection(sessionId));
 
     await makerChatStore.sendUiTrigger(SESSION_ID, '[UI_ACTION_TRIGGER] retry');
@@ -2570,7 +2905,10 @@ describe('makerChatStore text delta batching', () => {
       expect.objectContaining({
         createOpts: expect.objectContaining({
           remoteHostId: 'remote-host',
-          makerMemoryEnabled: false,
+          // SSH remote 与本地同语义:跟随控制端全局 Maker Memory 设置
+          // (默认开启), 不再被强制 false;scope 隔离由 maker-core 按
+          // remoteHostId+workingDir 处理。
+          makerMemoryEnabled: true,
         }),
       }),
       expect.any(Object),

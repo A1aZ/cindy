@@ -39,6 +39,7 @@ function provider(
     id,
     name: id,
     agents: opts.agents ?? ['codex'],
+    routing: Object.fromEntries((opts.agents ?? ['codex']).map((agent) => [agent, {}])),
     connected: opts.connected ?? true,
     models: { codex: opts.codex, 'claude-code': opts.cc },
   } as unknown as ProviderView;
@@ -228,6 +229,20 @@ describe('isSelectedSourceDisconnected', () => {
       loading: false,
       error: null,
     })).toBe(false);
+  });
+
+  it('reports disconnected when the selected source\'s copy of the id is non-chat (issue #882, 2026-07 review: same as desktop sourceSwitch.ts)', () => {
+    const nonChatProviders = [
+      provider('xd', { codex: [{ ...model('shared-id'), mode: 'image_generation' }] }),
+    ];
+    expect(isSelectedSourceDisconnected({
+      providers: nonChatProviders,
+      providerId: 'xd',
+      modelId: 'shared-id',
+      agentKind: 'codex',
+      loading: false,
+      error: null,
+    })).toBe(true);
   });
 });
 

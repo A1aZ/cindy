@@ -9,6 +9,10 @@ import type {
   CindyGhostSetupPlan,
   CindyGhostsMcpDeps,
 } from "../types.js";
+import {
+  buildForgeGuideToc,
+  extractForgeGuideSection,
+} from "./forgeGuideSections.js";
 
 /**
  * ghost 总机(docs/dev-rules/plugin-security-and-authoring.md 的网关模式):
@@ -28,12 +32,18 @@ const D_GHOST_LIST = [
   "(例外:用户消息的[插件指令]已附带目标插件的工具清单时,可直接 ghost_call 免查)。",
   "返回条目含 id、name、command(用户显式点名用的 $指令)与 tools(名称/说明/参数)。",
   "调用具体工具用 ghost_call({ghost_id, tool, args})。清单为空 = 用户没有可用的插件工具。",
+  "若某插件 tools 仅含 list_tools / call_tool,它是二级分派型:具体操作名须作 call_tool 的",
+  "name 参数下发(args:{name:\"<操作名>\", args:{...}}),不能直接当 tool 调。",
 ].join("\n");
 
 const D_GHOST_CALL = [
   "调用某个插件(Ghost)提供的工具。ghost_id 与 tool 来自 ghost_list 的返回,",
   "或用户消息[插件指令]附带的工具清单;",
   "args 按该工具声明的参数 schema 传 JSON 对象。",
+  "部分插件(如 cindy-github / cindy-gitlab)采用二级分派:ghost_list 只暴露 list_tools 与",
+  "call_tool 两个工具,具体操作(如 create_pull_request_review)不是顶层 tool,必须经 call_tool",
+  '下发——ghost_call({ghost_id, tool:"call_tool", args:{name:"<操作名>", args:{...}}});',
+  "把操作名当 tool 直接调会返回 TOOL_NOT_FOUND,此时按上述形态改写重试,不要判定插件无此能力。",
   "执行发生在该插件的独立沙箱中(无文件/网络访问,用 AI 走主机统一通道)。",
   "用户的图片/媒体文件要交给插件处理时,把其地址放进顶层 attachments",
   "(不是塞进 args):主机会把图过户给该插件并以指纹注入 args.attachments,插件",
@@ -42,24 +52,30 @@ const D_GHOST_CALL = [
   "顶层 dir(不是塞进 args):主机会收集文件并以",
   "一次性票据注入 args.dir_deposit,插件凭票上传——这是插件触碰用户目录的唯一通道。",
   "过户钳制(attachments / dir / save_dir 通用):路径在当前会话工作目录内直接放行;",
-  "工作目录外会向用户弹确认卡,用户点允许才继续——被拒绝/超时会返回对应错误,",
-  "此时不要重试,转告用户即可。已允许过的不重复弹卡:同一文件(按内容指纹)对",
-  "同一插件永久生效,同一目录在本会话内生效。",
-  "批量预授权:计划连续多次调用同一插件、每次用一个工作目录外文件时(如逐张图生成视频),",
-  "**必须**先发一次 grant_only:true + attachments 列出整批文件(≤32 张,tool 随便填会被忽略)",
-  "——用户只需在一张卡上批一次;跳过预授权会让用户被迫一张张点允许。",
+  "工作目录外若是本地 Full Access(bypassPermissions)会话则自动过户、不弹卡;其它权限档及",
+  "远程会话仍向用户弹确认卡,被拒绝/超时后不要重试,转告用户即可。Full Access 自动交接",
+  "不写人工永久授权,热切回其它权限档后会恢复确认;用户已明确允许的同一文件(按内容指纹)",
+  "对同一插件永久生效,同一目录在本会话内生效。",
+  "批量预授权:非 Full Access 下计划连续多次调用同一插件、每次用一个工作目录外文件时",
+  "(如逐张图生成视频),**必须**先发一次 grant_only:true + attachments 列出整批文件",
+  "(≤32 张,tool 随便填会被忽略)——用户只需在一张卡上批一次。Full Access 下普通调用本就",
+  "自动过户;grant_only 只做提前交接,不会建立降档后仍生效的人工授权。",
   "结构化错误:GHOST_NOT_FOUND(未安装或已卸载)/ GHOST_ASLEEP(未启用,可提示用户到主界面侧边栏「插件」中启用)/",
   "GHOST_DISABLED_IN_WORKDIR(用户在当前工作目录停用了该插件——不要重试,改用其它方式完成)/",
-  "TOOL_NOT_FOUND / GHOST_CRASHED / TIMEOUT / ATTACHMENT_INVALID(附件过户失败,查 message)/",
+  "TOOL_NOT_FOUND(常见是把二级分派操作名当成了顶层 tool,按上文 call_tool 形态改写后重试)/ GHOST_CRASHED /",
+  "TIMEOUT / ATTACHMENT_INVALID(附件过户失败,查 message)/",
   "DIR_INVALID(目录过户失败,查 message)/ INTERNAL。遇到 NOT_FOUND 类错误先重新 ghost_list。",
 ].join("\n");
 
 const D_GHOST_FORGE_GUIDE = [
   "获取《插件(Ghost)编写手册》——为用户制作/修改插件(.cindy 能力包)前必读。",
-  "手册随主机版本走,包含:ghost.json 身份卡全字段、十个卡槽、管子 API(cindy.send)、",
-  '面板与主题、沙箱红线、打包与测试流程。用户说"帮我做一个 XX 插件 / 改一下某插件"时,',
-  "先调本工具拿手册,新插件可用 ghost_forge_scaffold 生成骨架,修改完成后再用",
-  "ghost_forge_pack 打包装入。",
+  "手册随主机版本走,包含:设计对齐提问清单、ghost.json 身份卡全字段、全部卡槽、",
+  "管子 API(cindy.send)、面板与主题、沙箱红线、打包与测试流程。整本超出单次工具",
+  '结果上限,分章取用:不传参数返回目录,传 section(章号如 "4.7" 或章标题关键词如',
+  '"network")返回单章正文。用户说"帮我做一个 XX 插件 / 改一下某插件"时,先取目录、',
+  "先按第 0 章「设计对齐」用带选项的提问卡片和用户确认界面形态(停靠面板/插件页内",
+  "面板/纯工具)等关键决策,再按需读相关章;新插件可用 ghost_forge_scaffold 生成骨架,",
+  "修改完成后再用 ghost_forge_pack 打包装入。",
 ].join("\n");
 
 const D_GHOST_FORGE_SCAFFOLD = [
@@ -73,7 +89,9 @@ const D_GHOST_FORGE_PACK = [
   "把一个插件源码目录校验并打包成 .cindy,随后主机会弹出装入确认框(同 id 已装则显示",
   '"更新 vX → vY")——装不装永远由用户在弹窗上决定,本工具不会私自装入。',
   "dir 传源码目录的绝对路径(目录里须有 ghost.json;打包自动跳过 .git / node_modules /",
-  "隐藏文件 / *.cindy)。失败返回结构化错误(MANIFEST_INVALID 等,message 带具体原因),",
+  "隐藏文件 / *.cindy)。仅当用户明确选择 AI 生成图标时,可把图片工具结果的",
+  "xdt_image_url 取单张地址；若只有 xdt_image_urls 则取数组第一项，再把得到的 cindy-media:// 地址传给 icon_source;主机会 best-effort 嵌入,失败保留默认图标继续打包。",
+  "失败返回结构化错误(MANIFEST_INVALID 等,message 带具体原因),",
   "按 message 修正源码后重新打包即可。打包成功 ≠ 已装入:告知用户去点确认框。",
 ].join("\n");
 
@@ -612,10 +630,29 @@ export async function handleGhostCall(
 /** ghost_forge_guide 的 handler 主体(导出供单测)。 */
 export async function handleForgeGuide(
   deps: CindyGhostsMcpDeps,
+  input?: { section?: string },
 ): Promise<McpTextResult> {
   try {
     const guide = await deps.forgeGuide();
-    return { content: [{ type: "text", text: guide }] };
+    // 空串/纯空白与未传等价:与工具描述"不传返回目录"一致
+    const section = input?.section?.trim();
+    if (!section) {
+      return { content: [{ type: "text", text: buildForgeGuideToc(guide) }] };
+    }
+    const hit = extractForgeGuideSection(guide, section);
+    if (hit.ok) {
+      return { content: [{ type: "text", text: hit.text }] };
+    }
+    return textResult(
+      {
+        ok: false,
+        errorCode: "SECTION_NOT_FOUND",
+        message: hit.ambiguous
+          ? `section "${section}" 命中多章,换更精确的章号:\n${hit.candidates.join("\n")}`
+          : `section "${section}" 未命中任何章节,可用章节:\n${hit.candidates.join("\n")}`,
+      },
+      true,
+    );
   } catch (err) {
     return textResult(
       {
@@ -664,10 +701,13 @@ export async function handleForgeScaffold(
 /** ghost_forge_pack 的 handler 主体(导出供单测)。 */
 export async function handleForgePack(
   deps: CindyGhostsMcpDeps,
-  input: { dir: string },
+  input: { dir: string; icon_source?: string },
 ): Promise<McpTextResult> {
   try {
-    const result = await deps.forgePack({ dir: input.dir });
+    const result = await deps.forgePack({
+      dir: input.dir,
+      ...(input.icon_source !== undefined ? { iconSource: input.icon_source } : {}),
+    });
     if (!result.ok) {
       deps.logger?.warn("ghost_forge_pack rejected", {
         dir: input.dir,
@@ -699,17 +739,21 @@ export function createCindyGhostsMcpServer(
     version: "1.0.0",
   });
 
-  // 花名册快照:装配时取一次,拼进两件工具的描述(语义召回的数据源;
+  // 花名册快照:装配时取一次,只拼进 ghost_list 的描述(语义召回的数据源;
   // 会话内恒定,缓存安全)。无花名册 dep / 空清单 = 描述保持基线。
+  //
+  // 只拼一处:两件工具的描述都进 system prompt 固定前缀,同一份花名册拼两遍
+  // 等于让整份已装插件清单在上下文里出现两次(12 个插件实测约 1.5k 字符/份)。
+  // ghost_call 的调用前提是已知 ghost_id + tool,那必然来自 ghost_list 的描述
+  // 或返回值(D_GHOST_CALL 首行已写明这点),再挂一份花名册对路由没有增量作用。
   const roster = formatGhostRoster(deps.getRosterItems?.() ?? []);
   const dGhostList = roster ? `${D_GHOST_LIST}\n\n${roster}` : D_GHOST_LIST;
-  const dGhostCall = roster ? `${D_GHOST_CALL}\n\n${roster}` : D_GHOST_CALL;
 
   server.tool("ghost_list", dGhostList, {}, async () => handleGhostList(deps));
 
   server.tool(
     "ghost_call",
-    dGhostCall,
+    D_GHOST_CALL,
     {
       ghost_id: z.string().describe("目标插件 id(来自 ghost_list)"),
       tool: z.string().describe("工具名(来自 ghost_list 该插件的 tools)"),
@@ -721,26 +765,26 @@ export function createCindyGhostsMcpServer(
         .boolean()
         .optional()
         .describe(
-          "可选:true = 本次调用只做 attachments 批量预授权、不执行工具(tool/args/dir/save_dir 全部被忽略)。计划连续多次调用同一插件使用多个工作目录外文件时必须先走一次,attachments 上限放宽到 32 张;用户在一张确认卡上批完,后续调用不再弹卡。",
+          "可选:true = 本次调用只做 attachments 批量交接、不执行工具(tool/args/dir/save_dir 全部被忽略)。非 Full Access 下计划连续使用多个工作目录外文件时必须先走一次,attachments 上限放宽到 32 张,让用户在一张确认卡上批完。Full Access 下不弹卡,且该自动交接不会建立降档后仍生效的人工永久授权。",
         ),
       attachments: z
         .array(z.string())
         .max(32)
         .optional()
         .describe(
-          "可选,普通调用 ≤4 张(grant_only 预授权 ≤32 张):要交给插件的图片/媒体文件。地址原样透传即可,四种写法都认:xdt-image://<会话ID>/<文件名>、cindy-media://blobs/<指纹>.<后缀>、消息里给出的本机绝对路径(主机会归一化并验归属),或本机媒体文件(图/视频/音频)的绝对路径——工作目录内直接放行,工作目录外主机会弹确认卡由用户决定。不要自己拼地址。主机过户给该插件后以指纹注入 args.attachments。仅在用户明确要拿自己的文件给插件处理时使用;非媒体类型文件改用顶层 dir。",
+          "可选,普通调用 ≤4 张(grant_only 批量交接 ≤32 张):要交给插件的图片/媒体文件。地址原样透传即可,四种写法都认:xdt-image://<会话ID>/<文件名>、cindy-media://blobs/<指纹>.<后缀>、消息里给出的本机绝对路径(主机会归一化并验归属),或本机媒体文件(图/视频/音频)的绝对路径——工作目录内直接放行;工作目录外在本地 Full Access 下自动过户,其它权限档及远程会话弹确认卡。不要自己拼地址。主机过户给该插件后以指纹注入 args.attachments。仅在用户明确要拿自己的文件给插件处理时使用;非媒体类型文件改用顶层 dir。",
         ),
       dir: z
         .string()
         .optional()
         .describe(
-          "可选:要交给插件上传的本地目录或单个文件的绝对路径(如站点部署的构建产物目录、要传的附件文件)。位于当前会话工作目录内直接放行,工作目录外主机会弹确认卡由用户决定;主机收集文件(自动排除 node_modules/.git/.env 等)并以一次性票据注入 args.dir_deposit,插件凭票上传,摸不到路径与字节。仅当目标工具的说明要求交付目录/文件时使用。",
+          "可选:要交给插件上传的本地目录或单个文件的绝对路径(如站点部署的构建产物目录、要传的附件文件)。位于当前会话工作目录内直接放行;工作目录外在本地 Full Access 下自动过户,其它权限档及远程会话弹确认卡。主机收集文件(自动排除 node_modules/.git/.env 等)并以一次性票据注入 args.dir_deposit,插件凭票上传,摸不到路径与字节。仅当目标工具的说明要求交付目录/文件时使用。",
         ),
       save_dir: z
         .string()
         .optional()
         .describe(
-          "可选:让插件把下载的文件存进的本地目录绝对路径(如附件下载目标目录)。必须是已存在的目录;位于当前会话工作目录内直接放行,工作目录外主机会弹确认卡由用户决定。主机发限时票据注入 args.save_deposit = { token, dir_name },插件凭票让主机把下载字节直接写进该目录(文件名主机消毒、不覆盖已有文件),插件摸不到绝对路径与字节。仅当目标工具的说明要求提供落盘目录时使用。",
+          "可选:让插件把下载的文件存进的本地目录绝对路径(如附件下载目标目录)。必须是已存在的目录;位于当前会话工作目录内直接放行;工作目录外在本地 Full Access 下自动过户,其它权限档及远程会话弹确认卡。主机发限时票据注入 args.save_deposit = { token, dir_name },插件凭票让主机把下载字节直接写进该目录(文件名主机消毒、不覆盖已有文件),插件摸不到绝对路径与字节。仅当目标工具的说明要求提供落盘目录时使用。",
         ),
       setup_plan: ghostSetupPlanInputSchema
         .optional()
@@ -752,8 +796,16 @@ export function createCindyGhostsMcpServer(
       handleGhostCall(deps, input, extractAgentToolUseId(extra)),
   );
 
-  server.tool("ghost_forge_guide", D_GHOST_FORGE_GUIDE, {}, async () =>
-    handleForgeGuide(deps),
+  server.tool(
+    "ghost_forge_guide",
+    D_GHOST_FORGE_GUIDE,
+    {
+      section: z
+        .string()
+        .optional()
+        .describe('章号(如 "4.7")或章标题关键词(如 "network");不传返回目录'),
+    },
+    async (input) => handleForgeGuide(deps, input),
   );
 
   server.tool(
@@ -783,6 +835,12 @@ export function createCindyGhostsMcpServer(
     D_GHOST_FORGE_PACK,
     {
       dir: z.string().describe("插件源码目录的绝对路径(目录里须有 ghost.json)"),
+      icon_source: z
+        .string()
+        .optional()
+        .describe(
+          "可选；仅当用户明确选择 AI 生成图标时，传图片工具结果的 xdt_image_url，或 xdt_image_urls 数组第一项(cindy-media:// 地址)；失败会保留默认图标继续打包",
+        ),
     },
     async (input) => handleForgePack(deps, input),
   );

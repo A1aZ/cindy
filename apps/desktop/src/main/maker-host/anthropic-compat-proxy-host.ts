@@ -19,20 +19,27 @@
 import {
   createAnthropicCompatProxy,
   createActiveStripTransform,
+  createDuplicateToolUseIdRecoveryRule,
+  createEmptyAssistantMessageRecoveryRule,
   createEmptyTextRecoveryRule,
   createEmptyThinkingRecoveryRule,
   createEncryptedContentRecoveryRule,
+  createToolExchangeAdjacencyRecoveryRule,
   createToolUseProviderSpecificFieldsRecoveryRule,
+  dedupeDuplicateToolUseIds,
+  repairToolExchangeAdjacency,
+  stripEmptyAssistantMessagesFromBody,
   stripEmptyTextFromBody,
   stripEmptyThinkingFromBody,
   stripEncryptedContentFromBody,
   stripNonAnthropicFields,
   stripToolUseProviderSpecificFields,
   type ProxyHandle,
+  type RoutingDecision,
   type RoutingTransform,
 } from '@cindy/anthropic-compat-proxy';
 
-import { ANTHROPIC_DIRECT_UPSTREAM, anthropicCatalogModelIds, isAnthropicWireModel } from './claude-gateway-config.js';
+import { ANTHROPIC_DIRECT_UPSTREAM, CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY, anthropicCatalogModelIds, isAnthropicWireModel } from './claude-gateway-config.js';
 import { getActiveCatalog } from './active-catalog.js';
 import { getResponsesBridgeHandler } from './anthropic-responses-bridge-host.js';
 import { getSessionEffort, getSessionFastMode } from './session-effort-store.js';
@@ -41,7 +48,13 @@ import {
   composeResponseObservers,
   createClaudeRateLimitHeadersObserver,
 } from './claude-rate-limit-headers-observer.js';
-import { recordClaudeSessionRoute } from './claude-session-route-registry.js';
+import {
+  noteClaudeSessionRequest,
+  recordClaudeRequestRoute,
+  recordClaudeSessionRoute,
+  type ClaudeSessionBillingRoute,
+} from './claude-session-route-registry.js';
+import { createClaudeGatewayErrorObserver } from './claude-gateway-error-observer.js';
 import { getSessionProvider } from './session-provider-store.js';
 import {
   gatewayDefaultRouteDecision,
@@ -51,6 +64,7 @@ import {
 import { createProviderUpstreamErrorObserver } from './provider-upstream-error-observer.js';
 import { createClaudeAutoClassifierFailureObserver } from './claude-auto-permission-fallback.js';
 import {
+  emptyAssistantStripController,
   emptyTextStripController,
   emptyThinkingStripController,
   encryptedStripController,
@@ -71,6 +85,7 @@ import {
   createClaudeSessionActivityResponseObserver,
   recordClaudeApiActivity,
 } from './claude-session-background-activity.js';
+import { authenticatePiProxySession } from './pi-proxy-session-auth.js';
 
 // scope = 'cc-proxy' → logger.ts 的 emit() 路由把这条流量并入统一 agent 流
 // (agent-*.ndjson, source=proxy)。child(sub) 会继续保持 'cc-proxy/sub' 前缀, routing 一致。
@@ -115,13 +130,13 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** 大小写不敏感地判断请求是否带某 header(且非空)。 */
-function hasHeader(headers: Readonly<Record<string, string>>, name: string): boolean {
+/** 大小写不敏感取 header 值;缺失或空串 → null。 */
+function headerValue(headers: Readonly<Record<string, string>>, name: string): string | null {
   const lower = name.toLowerCase();
   for (const [k, v] of Object.entries(headers)) {
-    if (k.toLowerCase() === lower && typeof v === 'string' && v.length > 0) return true;
+    if (k.toLowerCase() === lower && typeof v === 'string' && v.length > 0) return v;
   }
-  return false;
+  return null;
 }
 
 /**
@@ -141,19 +156,54 @@ function hasHeader(headers: Readonly<Record<string, string>>, name: string): boo
  * chip 用全局活性状态重算会与 child 真实路由发散。export 仅供单测。
  */
 export function createModelRoutingTransform(): RoutingTransform {
-  return (body, ctx) => {
+  const route: RoutingTransform = (body, ctx) => {
+    const claimedPiSessionId = headerValue(ctx.headers, 'x-cindy-pi-session-id');
+    if (
+      claimedPiSessionId
+      && !authenticatePiProxySession(
+        claimedPiSessionId,
+        headerValue(ctx.headers, 'x-cindy-pi-session-token'),
+      )
+    ) {
+      // Loopback is not an authentication boundary: another local process can
+      // forge a business session id. Reject before provider routing so it can
+      // never borrow that session's OAuth token or gateway key.
+      return {
+        localHandler: async ({ res }) => {
+          const payload = JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'authentication_error',
+              code: 'invalid_pi_session_token',
+              message: 'Invalid or expired Pi proxy session token.',
+            },
+          });
+          res.writeHead(401, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          });
+          res.end(payload);
+        },
+      };
+    }
+    const piSessionId = claimedPiSessionId;
+    const requestAgent = piSessionId ? 'pi' : 'claude-code';
     // 后台活动检测(claude-session-background-activity):凡带 cc 会话标头的请求
-    // 都记一笔活动时刻。注意 routingTransform 只在 JSON POST 上被调用(server.ts
-    // 按 content-type 门控),GET / 非 JSON 请求不经过这里 —— 它们由响应侧的
-    // createClaudeSessionActivityResponseObserver 覆盖(观察器对所有响应生效)。
+    // 都记一笔活动时刻。routingTransform 会处理无 body 控制面请求与 JSON 请求；
+    // 非 JSON 的 POST/PUT/PATCH 不经过这里,由响应侧 observer 兜底观察活动。
     // 开销 = 一次 header 读 + 一次活跃会话表反解 + Map.set,非 per-token 路径。
-    const activitySdkSessionId = ctx.headers['x-claude-code-session-id'];
-    if (activitySdkSessionId) {
+    const sdkSessionId = ctx.headers['x-claude-code-session-id'];
+    const ccSessionId = sdkSessionId && _resolveCcSessionId
+      ? _resolveCcSessionId(sdkSessionId)
+      : null;
+    const sessionId = piSessionId ?? ccSessionId;
+    if (sdkSessionId) {
       recordClaudeApiActivity(
-        activitySdkSessionId,
-        _resolveCcSessionId ? _resolveCcSessionId(activitySdkSessionId) : null,
+        sdkSessionId,
+        ccSessionId,
       );
     }
+    if (ccSessionId) noteClaudeSessionRequest(ccSessionId, ctx.reqId);
     if (!isPlainObject(body)) return null;
     const wireModel = typeof body.model === 'string' ? body.model : '';
 
@@ -173,10 +223,8 @@ export function createModelRoutingTransform(): RoutingTransform {
       }
       // 会话态(思维深度 / Fast)在决策点解析后**闭包**进 handler —— CC 不会把 bridge 模型的
       // effort / fast 放进请求体,而引擎保持零会话概念,不走任何伪 header。
-      const sdkSessionId = ctx.headers['x-claude-code-session-id'];
-      const xdtSessionId = sdkSessionId && _resolveCcSessionId ? _resolveCcSessionId(sdkSessionId) : null;
-      const effort = xdtSessionId ? getSessionEffort(xdtSessionId) : null;
-      const fast = xdtSessionId ? getSessionFastMode(xdtSessionId) : false;
+      const effort = sessionId ? getSessionEffort(sessionId) : null;
+      const fast = sessionId ? getSessionFastMode(sessionId) : false;
       return {
         localHandler: (args) =>
           bridgeHandler.handle({ ...args, prefs: { reasoningEffort: effort ?? undefined, fast } }),
@@ -184,41 +232,81 @@ export function createModelRoutingTransform(): RoutingTransform {
     }
 
     const gatewayKey = _readGatewayKey();
+    const selectedProviderId = sessionId ? getSessionProvider(sessionId) : null;
 
     // ① 该会话显式选了供应商 → 据 catalog 统一路由。
     //    x-claude-code-session-id = cc sdkSessionId,经注入的 resolver 反解成 xdt sessionId。
-    const sdkSessionId = ctx.headers['x-claude-code-session-id'];
-    const sessionId = sdkSessionId && _resolveCcSessionId
-      ? _resolveCcSessionId(sdkSessionId)
-      : null;
     if (sessionId) {
       // wireModel 传给 scope 门:cc 内部辅助调用(权限 auto 分类器等 claude-* 小模型请求)
       // 不在订阅直连供应商(xai / openai-cc)声明的 modelPrefixes 范围内 → 返回 null,
       // 落到下方 ② 段 spawn 默认路由,分类器照常走网关/直连(issue #886)。
-      const perSession = resolveSessionRouteDecision(sessionId, 'claude-code', gatewayKey, wireModel);
-      if (perSession) return perSession;
+      const perSession = resolveSessionRouteDecision(sessionId, requestAgent, gatewayKey, wireModel);
+      const recordSelectedRoute = <T extends object | null>(route: T): T => {
+        if (
+          requestAgent === 'claude-code'
+          && route
+          && (selectedProviderId === 'xd' || selectedProviderId === 'anthropic')
+        ) {
+          recordClaudeRequestRoute(
+            ctx.reqId,
+            sessionId,
+            selectedProviderId === 'xd' ? 'gateway' : 'subscription',
+          );
+        }
+        return route;
+      };
+      if (perSession instanceof Promise) return perSession.then(recordSelectedRoute);
+      if (perSession) return recordSelectedRoute(perSession);
     }
 
     // ② 未显式选供应商 → 据请求凭证判定 spawn 形态(见上方注释)。
     // 计费路由旁路只记「未显式选供应商」的会话(registry 声明的语义,消费方也只在
     // providerId=null 时读)——显式选了供应商但被 scope 门放下来的辅助请求(如 xai 会话
     // 的 claude-* 分类器调用)不该往表里写死记录。
-    const recordDefaultRoute = sessionId !== null && getSessionProvider(sessionId) == null;
-    if (hasHeader(ctx.headers, 'x-api-key')) {
+    const recordDefaultRoute =
+      requestAgent === 'claude-code'
+      && sessionId !== null
+      && getSessionProvider(sessionId) == null;
+    const recordResolvedDefaultRoute = (route: ClaudeSessionBillingRoute): void => {
+      if (!recordDefaultRoute) return;
+      recordClaudeSessionRoute(sessionId, route);
+      recordClaudeRequestRoute(ctx.reqId, sessionId, route);
+    };
+    // provider-oauth spawn 的占位 key **不是可用凭证**:scope 门放下来的辅助请求
+    // (如 openai / xai 来源 cc 会话里 CLI 自发的 claude-* 权限分类器调用)带着它
+    // passthrough 会在网关吃确定性 401 → 误触发 auto→ask 降级(#831)。与 codex
+    // ①.5 段 #890 修复同语义:占位 key 按「无可用凭证」处理,走下方换网关 key 的
+    // 默认路由;真实 key(gateway-spawn)照旧 passthrough。
+    const apiKeyHeader = headerValue(ctx.headers, 'x-api-key');
+    const hasUsableApiKey =
+      apiKeyHeader !== null && apiKeyHeader !== CLAUDE_PROVIDER_AUTH_PLACEHOLDER_KEY;
+    if (hasUsableApiKey) {
       // gateway-spawn:自带网关 key,passthrough。
-      if (recordDefaultRoute) recordClaudeSessionRoute(sessionId, 'gateway');
+      if (requestAgent === 'claude-code' && sessionId && selectedProviderId === 'xd') {
+        // 显式 XD 会话在 live gateway key 被清除后,仍可能携带 spawn 时冻结的 x-api-key。
+        // resolveSessionRouteDecision 会因缺 key 返回 null,但这条 passthrough 仍实际进入 XD Gateway。
+        recordClaudeRequestRoute(ctx.reqId, sessionId, 'gateway');
+      } else {
+        recordResolvedDefaultRoute('gateway');
+      }
       return null;
     }
-    const decision = gatewayDefaultRouteDecision('claude-code', gatewayKey);
+    const decision = gatewayDefaultRouteDecision(requestAgent, gatewayKey);
     if (decision) {
       // oauth-spawn 默认:全量换网关 key(防订阅 token 泄漏到网关)。
-      if (recordDefaultRoute) recordClaudeSessionRoute(sessionId, 'gateway');
+      recordResolvedDefaultRoute('gateway');
       return decision;
+    }
+    if (apiKeyHeader !== null) {
+      // 占位 key 且无网关 key:保持改动前行为(passthrough,上游 401)——下方的
+      // Anthropic 直连支路是给 oauth-spawn 订阅 token 准备的,占位 key 不适用。
+      log.warn('provider-oauth cc spawn 占位 key 且无网关 key; passthrough (预期 401)', { wireModel });
+      return null;
     }
     // 没网关 key:Anthropic 模型只能直连(唯一出路),其余 passthrough + 记一条诊断。
     // 判据 = 前缀地板 ∪ 目录 anthropic 供应商模型集合(新家族改 OSS 目录即可,无需发版)。
     if (isAnthropicWireModel(wireModel, anthropicCatalogModelIds(getActiveCatalog()))) {
-      if (recordDefaultRoute) recordClaudeSessionRoute(sessionId, 'subscription');
+      recordResolvedDefaultRoute('subscription');
       return { upstreamOverride: ANTHROPIC_DIRECT_UPSTREAM };
     }
     if (wireModel) {
@@ -226,6 +314,31 @@ export function createModelRoutingTransform(): RoutingTransform {
       log.warn('claude oauth-spawn but no gateway key; non-anthropic passthrough (可能 401)', { wireModel });
     }
     return null;
+  };
+  return (body, ctx) => {
+    const decision = route(body, ctx);
+    const hasInternalPiHeader =
+      headerValue(ctx.headers, 'x-cindy-pi-session-id') !== null
+      || headerValue(ctx.headers, 'x-cindy-pi-session-token') !== null;
+    if (!hasInternalPiHeader) return decision;
+    const stripInternalPiHeaders = (
+      resolved: RoutingDecision | null,
+    ): RoutingDecision | null => {
+      if (resolved?.localHandler) return resolved;
+      return {
+        ...(resolved ?? {}),
+        headerDelete: [
+          ...new Set([
+            ...(resolved?.headerDelete ?? []),
+            'x-cindy-pi-session-id',
+            'x-cindy-pi-session-token',
+          ]),
+        ],
+      };
+    };
+    return decision instanceof Promise
+      ? decision.then(stripInternalPiHeaders)
+      : stripInternalPiHeaders(decision);
   };
 }
 
@@ -251,20 +364,25 @@ export async function ensureAnthropicCompatProxyReady(): Promise<void> {
       //   - fast mode 链路核验:tee SSE 抽上游 usage.speed(debug-gated);
       //   - 订阅余量旁路:读 anthropic-ratelimit-unified-* headers(仅订阅直连响应,
       //     同步读 header、零 body 开销),交 usageBroadcaster 落库 + 广播;
-      //   - Auto 权限分类器错误检测(status≥400,含 4xx/5xx):只在错误路径解析 request
-      //     body,通知 session coordinator 降级到 ask;不 tee/改写响应;
+      //   - Auto 权限分类器错误检测:确定性 4xx 立即通知 coordinator 降级到 ask;
+      //     瞬时 408/429/5xx 按 episode 阈值记账、持续故障才降级(见
+      //     claude-auto-permission-fallback.ts);只在错误路径与「该会话有瞬时记账」的
+      //     成功路径解析 request body;不 tee/改写响应;缺会话头 / id 反解失败这两类
+      //     漏检走限流 warn + 识别记账落到同一份 log(否则自救通道静默失效无线索);
       //   - 自定义供应商上游错误分类广播(status≥400 且会话路由到 user 供应商时才 tee,
       //     成功路径零开销;30s 节流,见 provider-upstream-error-observer)。
       responseObserver: composeResponseObservers(
         createClaudeSubagentUsageResponseObserver(),
         createClaudeFastModeResponseObserver(log),
         createClaudeRateLimitHeadersObserver(),
+        createClaudeGatewayErrorObserver(),
         // 后台活动检测:响应流按节流刷新活动时刻(覆盖长 SSE 跨过 turn 结束点仍在吐字的场景)。
         createClaudeSessionActivityResponseObserver((sdkSessionId) =>
           _resolveCcSessionId ? _resolveCcSessionId(sdkSessionId) : null,
         ),
-        createClaudeAutoClassifierFailureObserver((sdkSessionId) =>
-          _resolveCcSessionId ? _resolveCcSessionId(sdkSessionId) : null,
+        createClaudeAutoClassifierFailureObserver(
+          (sdkSessionId) => (_resolveCcSessionId ? _resolveCcSessionId(sdkSessionId) : null),
+          { logger: log },
         ),
         createProviderUpstreamErrorObserver({
           agent: 'claude-code',
@@ -300,6 +418,25 @@ export async function ensureAnthropicCompatProxyReady(): Promise<void> {
           enabled: () => true,
           strip: stripEmptyTextFromBody,
         }),
+        // 空 assistant 消息主动剥离 —— always-on,独立 controller(moonshot/kimi 空
+        // thinking 占位被中断持久化后回放 400 "with role 'assistant' must not be empty";
+        // 与 kimi code 官方客户端的发送前兜底同构)。
+        createActiveStripTransform({
+          controller: emptyAssistantStripController,
+          enabled: () => true,
+          strip: stripEmptyAssistantMessagesFromBody,
+        }),
+        // tool 配对断裂修复 —— always-on 检测即修(孤儿/前置/超编 result 丢弃 +
+        // 错位前移 + 非 trailing 缺失合成占位;与 kimi code projector 的
+        // consumed-scan 接力配对同构)。**必须在 dedupe 之前**:它产出的结构
+        // 合法历史上 result 与 call 严格同序,dedupe 的顺序配对才等于真实配对
+        // (复审实测反例: 前置 result 白占序号会致 dedupe 张冠李戴)。
+        repairToolExchangeAdjacency,
+        // 重复 tool_use id 唯一化 —— always-on 检测即修(moonshot/kimi 序号 id
+        // 跨 turn 复用致会话安静瘫痪,2026-07 两个会话实测 `Edit_306`/`Bash_256`
+        // 各复用 20+ 次;重写方案与 kosong normalize 同构,详见 transform.ts 头注)。
+        // 无重复返回 null 字节透传,不需要 controller(异常在请求体里可直接检测)。
+        dedupeDuplicateToolUseIds,
         // LiteLLM/provider adapter 可能把 provider_specific_fields(null) 挂到 tool_use 上，
         // 严格 Anthropic 入站 schema 不接受该扩展字段。
         stripToolUseProviderSpecificFields,
@@ -320,7 +457,23 @@ export async function ensureAnthropicCompatProxyReady(): Promise<void> {
           enabled: () => true,
           onRetry: (threadId, model) => emptyTextStripController.markActive(threadId, model),
         }),
+        // 空 assistant 消息 400 → 丢空消息重发,always-on(moonshot/kimi 空 thinking
+        // 占位污染的会话;恢复一次后该 thread 发送前主动预剥,不再每轮撞 400)。
+        createEmptyAssistantMessageRecoveryRule({
+          enabled: () => true,
+          onRetry: (threadId, model) => emptyAssistantStripController.markActive(threadId, model),
+        }),
         createToolUseProviderSpecificFieldsRecoveryRule(),
+        // tool 配对断裂 400(moonshot `tool_call_id is not found` / Anthropic
+        // `unexpected tool_use_id` / `tool_use ids were found without tool_result`
+        // / OpenAI 系 wording)→ 组合结构修复重发,always-on。
+        // 两条 tool exchange 规则的 strip 同为 repairToolExchangeStructureFromBody
+        // (内建 repair → dedupe 顺序,与上方主动链一致;命中顺序不再影响正确性)。
+        createToolExchangeAdjacencyRecoveryRule(),
+        // 重复 tool_use id 400(``tool_use` ids must be unique`)→ 组合结构修复
+        // 重发,always-on(moonshot 实测不报错,但 LiteLLM 版本差 / 真 Anthropic
+        // 上游会报;主动 transform 已检测即修,此为第二道防线)。
+        createDuplicateToolUseIdRecoveryRule(),
       ],
       logger: log,
       // 请求体 dump 默认关(dev trace 级别 + agent 高并发会刷爆 main event loop

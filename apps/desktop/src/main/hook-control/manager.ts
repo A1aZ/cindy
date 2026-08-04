@@ -1,10 +1,13 @@
 /**
  * hook-control/manager.ts
  * ---------------------------------------------------------------------------
- * Cindy IM relay 连接编排(同一产品、多 provider): Slack 与 Telegram 各自
- * 持有独立 transport 与服务能力快照，任务执行链和本机目录配置继续共享。
+ * Cindy IM relay 连接编排(同一产品、多 provider): Slack 走 legacy 专属帧
+ * (bind.* / prefs.* / tool.*), 其余 provider 走 provider-neutral 帧
+ * (provider.bind.* / provider.prefs.*), 后者的连接状态机是表驱动的
+ * NeutralProviderLane —— 新增 provider 只追加一行 config, 不复制状态机。
+ * 任务执行链和本机目录配置在所有 provider 间共享。
  *
- * 两个服务都由公司中心部署、地址内置、鉴权走登录 JWT(token 源注入)，但
+ * 每个服务都由公司中心部署、地址内置、鉴权走登录 JWT(token 源注入)，但
  * 部署和故障域彼此独立；dispatcher 以 provider 命名空间复用同一 session runner。
  *
  * 依赖全部注入(store / transport 工厂 / token 源 / 设备信息 / 状态回调),
@@ -14,30 +17,41 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  HOOK_FEATURE_GROUP_RELAY,
+  HOOK_FEATURE_GROUP_RELAY_RECIPIENT,
+  HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT,
   HOOK_FEATURE_MULTI_TEAM,
   HOOK_FEATURE_PROVIDER_BIND,
+  HOOK_FEATURE_PROVIDER_BEHAVIOR,
   HOOK_FEATURE_PROVIDER_PREFS,
   HOOK_FEATURE_PROVIDER_TELEGRAM,
+  HOOK_FEATURE_PROVIDER_X,
   HOOK_FEATURE_SESSION_PICKER,
   HOOK_FEATURE_SLACK_TOOLS,
   makeBindRevoke,
   makeBindStart,
   makeHello,
+  makeLifecyclePreference,
   makePrefsGet,
   makePrefsSet,
   makeProviderBindCancel,
   makeProviderBindRevoke,
   makeProviderBindStart,
+  makeProviderBehaviorGet,
+  makeProviderBehaviorSet,
   makeProviderPrefsGet,
   makeProviderPrefsSet,
   makeQueryResponse,
   makeTaskAck,
   makeToolRequest,
   type BindUpdatePayload,
+  type GroupMessagePayload,
   type HelloInput,
   type HookMessage,
   type HookProvider,
   type ProviderBindStatusPayload,
+  type ProviderBehaviorSetPayload,
+  type ProviderBehaviorStatePayload,
   type QuerySessionEntry,
 } from '@cindy/slack-hook-protocol';
 
@@ -53,15 +67,36 @@ import type {
   HookPendingBindView,
   HookPrefsPatch,
   HookPrefsView,
+  HookProvider as ClientHookProvider,
   ProviderBindingView,
+  ProviderHookView,
   ProviderPrefsView,
+  TelegramHookBehaviorPatch,
+  TelegramHookBehaviorState,
+  TelegramHookGroupActivationMode,
   HookTeamBindingView,
   SlackHookView,
 } from '../../shared/hookControlIpc.js';
-import type { SlackHookStore } from './store.js';
+import {
+  DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
+  type ProviderBindingCacheEntry,
+  type SlackHookConfigState,
+  type SlackHookStore,
+} from './store.js';
 import type { HookDispatcher } from './dispatcher.js';
 import { buildQueryResponse, type AgentModelSource } from './queryResponder.js';
+import {
+  autoRegisterTelegramSpeaker,
+  resetTelegramSpeakerRegistrationCache,
+} from '../im/telegram/contactsAutoRegister.js';
+import {
+  groupLaneOf,
+  recordGroupMessage,
+  resetGroupContextCursors,
+  sweepGroupWindowExpired,
+} from './groupWindow.js';
 import { parseTelegramConnectUrl } from './telegramDeepLink.js';
+import { parseXConnectUrl, xProfileUrlOrNull } from './xDeepLink.js';
 import type { HookTransport, HookTransportOpts, HookTransportStatus } from './transport.js';
 
 /** dispatcher / bindings 的 connectionId 基础键；运行时追加账号与 provider。 */
@@ -78,9 +113,9 @@ function isLegacySlackDmExternalKey(externalKey: string): boolean {
 }
 
 /**
- * Route only the two providers implemented by this client.  Missing source is
- * retained solely for legacy Slack servers; Telegram always has both an
- * explicit source and the provider-prefixed lane key from its wire contract.
+ * Route only the providers implemented by this client.  Missing source is
+ * retained solely for legacy Slack servers; Telegram and X always have both an
+ * explicit source and the provider-prefixed lane key from their wire contracts.
  * A source/key disagreement fails closed instead of letting a future or
  * compromised provider inherit Slack permissions and prompt semantics.
  */
@@ -88,6 +123,7 @@ export function providerForTaskDispatch(
   payload: Pick<import('@cindy/slack-hook-protocol').TaskDispatchPayload, 'externalKey' | 'source'>,
 ): HookProvider | null {
   const telegramKey = payload.externalKey.startsWith('telegram:');
+  const xKey = payload.externalKey.startsWith('x:');
   const slackKey =
     payload.externalKey.startsWith('slack:') ||
     payload.externalKey.startsWith('team-slack:') ||
@@ -97,6 +133,7 @@ export function providerForTaskDispatch(
   const source = payload.source?.im;
   if (source === undefined) return slackKey ? 'slack' : null;
   if (source === 'telegram') return telegramKey ? 'telegram' : null;
+  if (source === 'x') return xKey ? 'x' : null;
   if (source === 'slack') return slackKey ? 'slack' : null;
   return null;
 }
@@ -104,6 +141,7 @@ export function providerForTaskDispatch(
 /** Route archive frames only for lane-key formats owned by implemented providers. */
 export function providerForExternalKey(externalKey: string): HookProvider | null {
   if (externalKey.startsWith('telegram:')) return 'telegram';
+  if (externalKey.startsWith('x:')) return 'x';
   if (
     externalKey.startsWith('slack:') ||
     externalKey.startsWith('team-slack:') ||
@@ -115,6 +153,29 @@ export function providerForExternalKey(externalKey: string): HookProvider | null
   return null;
 }
 
+/**
+ * group.message 的本地持久化 owner 只能来自 server 针对本次扇出的权威
+ * recipient,不能用帧到达时的当前 binding 猜测。旧 server 未协商 recipient
+ * 能力、字段缺席或切号后的任一代际不匹配都 fail closed。
+ */
+export function telegramGroupMessageOwner(
+  payload: GroupMessagePayload,
+  binding: ProviderBindingView | null,
+  recipientCapabilityReady: boolean,
+): string | null {
+  if (
+    payload.provider !== 'telegram' ||
+    !recipientCapabilityReady ||
+    binding?.state !== 'confirmed' ||
+    payload.recipient === undefined ||
+    payload.recipient.bindingId !== binding.bindingId ||
+    payload.recipient.principalId !== binding.principalId
+  ) {
+    return null;
+  }
+  return payload.recipient.principalId;
+}
+
 export interface HookControlManagerDeps {
   store: SlackHookStore;
   /** Runtime capability gate; false stops the transport without changing user prefs/bindings. */
@@ -123,6 +184,8 @@ export interface HookControlManagerDeps {
   createTransport: (opts: HookTransportOpts) => HookTransport;
   /** Telegram 平级服务端点；空字符串表示当前环境尚未部署该服务。 */
   getTelegramUrl: () => string;
+  /** X (Twitter) 平级服务端点；空字符串表示当前环境尚未部署该服务。 */
+  getXUrl: () => string;
   /** 登录 accessToken 源(transport 每次建连实时取; null = 未登录)。 */
   getAuthToken: () => Promise<string | null>;
   /** upgrade 401 后强制刷新一次登录凭证；成功后 transport 立即重连。 */
@@ -145,8 +208,11 @@ export interface HookControlManagerDeps {
   /** 目录偏好快照推送(prefs.state 到达时广播; 含请求回执与 /model 卡主动推)。 */
   notifyPrefs?: (view: HookPrefsView) => void;
   notifyProviderPrefs?: (view: ProviderPrefsView) => void;
+  notifyTelegramBehavior?: (view: TelegramHookBehaviorState) => void;
   /** prefs 读写往返超时(默认 10s; 测试注短)。 */
   prefsTimeoutMs?: number;
+  /** multi-team 自动首绑延迟窗；仅测试注短，生产默认 300ms。 */
+  autoBindDeferMs?: number;
   /** Slack 网关工具往返超时(默认 60s —— 搜索/长查询比 prefs 慢得多; 测试注短)。 */
   toolTimeoutMs?: number;
   /**
@@ -178,6 +244,8 @@ export interface HookControlManagerDeps {
    * renderer 主动触发的打开动作能等待系统 shell 的真实结果。
    */
   openTelegramUrl?: (url: string) => void | Promise<void>;
+  /** X URL 的 main 安全边界(语义同 openTelegramUrl, 校验走 validateXExternalUrl)。 */
+  openXUrl?: (url: string) => void | Promise<void>;
   log: { info(msg: string): void; warn(msg: string): void };
 }
 
@@ -192,6 +260,8 @@ export interface HookControlManager {
   refreshHello(): boolean;
   /** 渲染层快照。 */
   snapshot(): SlackHookView;
+  /** 持久化并尽力实时同步 Slack 上下线通知偏好。 */
+  setLifecycleAnnouncement(enabled: boolean): void;
   /**
    * 发起 Slack 账号绑定(SIWS OIDC): 发 bind.start(无参); server 回
    * bind.update(pending, authorizeUrl), main 打开系统浏览器。false = 连接不在线。
@@ -258,16 +328,30 @@ export interface HookControlManager {
     teamId?: string | null,
   ): Promise<HookPrefsView>;
   setProviderEnabled(provider: HookProvider, enabled: boolean): void;
-  providerBindStart(provider: 'telegram'): boolean;
-  providerBindCancel(provider: 'telegram'): boolean;
-  providerBindRevoke(provider: 'telegram'): boolean;
-  openTelegramAction(action: 'connect' | 'provider' | 'add-to-group'): Promise<boolean>;
-  getProviderWorkspacePrefs(provider: 'telegram'): Promise<ProviderPrefsView>;
+  providerBindStart(provider: NeutralHookProvider): boolean;
+  providerBindCancel(provider: NeutralHookProvider): boolean;
+  providerBindRevoke(provider: NeutralHookProvider): boolean;
+  /** 在本机安全打开 provider 的绑定链接 / bot 主页 / 加群链接(main 边界校验)。 */
+  openProviderAction(
+    provider: NeutralHookProvider,
+    action: 'connect' | 'provider' | 'add-to-group',
+  ): Promise<boolean>;
+  getProviderWorkspacePrefs(provider: NeutralHookProvider): Promise<ProviderPrefsView>;
   setProviderWorkspacePrefs(
-    provider: 'telegram',
+    provider: NeutralHookProvider,
     workspace: string,
     patch: HookPrefsPatch,
   ): Promise<ProviderPrefsView>;
+  getTelegramBehavior(bindingId: string): Promise<TelegramHookBehaviorState>;
+  setTelegramBehavior(
+    bindingId: string,
+    patch: TelegramHookBehaviorPatch,
+  ): Promise<TelegramHookBehaviorState>;
+  setTelegramGroupActivation(
+    bindingId: string,
+    chatId: string,
+    mode: TelegramHookGroupActivationMode,
+  ): Promise<TelegramHookBehaviorState>;
   /** 登录/切账号后重新打开 account ingress。 */
   activateAccount(): void;
   /** 同步关闭 ingress、取消/中止旧账号任务并等它们越过最终异步边界。 */
@@ -317,9 +401,11 @@ export class HookNotConnectedError extends Error {
     super(
       provider === 'telegram'
         ? 'telegram provider connection is not connected'
-        : provider === 'slack'
-          ? 'slack hook connection is not connected'
-          : 'hook connection is not connected',
+        : provider === 'x'
+          ? 'x provider connection is not connected'
+          : provider === 'slack'
+            ? 'slack hook connection is not connected'
+            : 'hook connection is not connected',
     );
     this.name = 'HookNotConnectedError';
     this.provider = provider;
@@ -336,9 +422,11 @@ export class HookNotConnectedError extends Error {
 export function hookNotConnectedIpcMessage(provider: HookProvider | null): string {
   return provider === 'telegram'
     ? 'Telegram provider is not connected'
-    : provider === 'slack'
-      ? 'slack hook is not connected'
-      : 'hook is not connected';
+    : provider === 'x'
+      ? 'X provider is not connected'
+      : provider === 'slack'
+        ? 'slack hook is not connected'
+        : 'hook is not connected';
 }
 
 /** prefs 往返超时 —— server 大概率是不认识 prefs.* 帧的旧版本(丢帧不应答)。 */
@@ -397,11 +485,122 @@ function toViewStatus(s: HookTransportStatus | null, enabled: boolean): HookConn
   }
 }
 
-/** Latest local Telegram binding mutation used to reject superseded wire replies. */
-type TelegramBindRequest =
+/** Latest local provider binding mutation used to reject superseded wire replies. */
+type ProviderBindRequest =
   | { kind: 'start'; requestId: string }
   | { kind: 'cancel'; requestId: string; attemptId: string }
   | { kind: 'revoke'; requestId: string; bindingId: string };
+
+/**
+ * Provider-neutral 连接线的 provider 值域(Slack 走 legacy 专属帧, 不进本表)。
+ *
+ * 从**客户端支持集**(IPC 契约的 ClientHookProvider)派生, 而不是协议全集:
+ * 协议按 append-only 演进, 客户端尚未实现的 provider 不得漏进 renderer 可见
+ * 类型。X 渠道已随 xConfig lane 与设置页落地(makecindy/cindy#691),
+ * ClientHookProvider 已同步放宽为含 'x'。
+ */
+export type NeutralHookProvider = Exclude<ClientHookProvider, 'slack'>;
+
+/**
+ * 该 provider 的默认工作目录别名(null = 用内置「对话」伪目录)。
+ *
+ * 只有 provider-neutral 的两条线有: Slack 的默认值走它自己那张卡。协议里
+ * `hello.defaultWorkspace` 本身是 provider 无关字段, 每条 lane 各带自己那份。
+ */
+function defaultWorkspaceOf(
+  config: Pick<SlackHookConfigState, 'telegramDefaultWorkspace' | 'xDefaultWorkspace'>,
+  provider: HookProvider | undefined,
+): string | null {
+  if (provider === 'telegram') return config.telegramDefaultWorkspace;
+  if (provider === 'x') return config.xDefaultWorkspace;
+  return null;
+}
+
+/** renderer 请求打开 provider 相关链接的动作(openProviderAction 的值域)。 */
+type ProviderOpenAction = 'connect' | 'provider' | 'add-to-group';
+
+/**
+ * Provider-neutral 连接线的静态描述 —— 一个 provider 一行, 接线期
+ * (createHookControlManager 构造时)定死, 运行期只读。除 provider 标识外全部
+ * 是行为注入: 端点、能力集、绑定缓存读写与 provider 专属的 URL 校验/生成都
+ * 收在 config 里, 状态机主体(lane 函数组)保持 provider 无关 —— 新增 provider
+ * (如 X)只需要追加一行 config, 不再复制状态机。
+ */
+interface NeutralProviderConfig {
+  provider: NeutralHookProvider;
+  /** 日志用显示名(如 'Telegram'); 不进 IPC 视图。 */
+  label: string;
+  /** 服务端点(空串 = 当前环境尚未部署该服务)。 */
+  getUrl: () => string;
+  /** 端点未配置时的 lastError 文案。 */
+  notConfiguredError: string;
+  /** welcome.features 必须全部包含才视为该 provider 可用(能力协商)。 */
+  requiredFeatures: readonly string[];
+  /** hello.features 声明(只声明该服务实际使用的能力, 保持兼容面最小)。 */
+  helloFeatures: readonly string[];
+  /** provider 独立开关(store 持久位)的读写。 */
+  isEnabled: () => boolean;
+  setEnabled: (enabled: boolean) => void;
+  /** 从本地缓存恢复 confirmed 绑定视图(无缓存返回 null), 供冷启动/账号重激活。 */
+  restoreCachedBinding: () => ProviderBindingView | null;
+  /** confirmed 绑定缓存写入(null = 清缓存); 状态判定在通用 persistLaneBinding。 */
+  writeBindingCache: (entry: ProviderBindingCacheEntry | null) => void;
+  /**
+   * pending 帧的 connectUrl 校验与归一(provider 专属安全边界, 如 Telegram 的
+   * t.me deep-link allowlist)。返回归一后的 payload; 非法时 throw(状态机置
+   * failed + invalid-connect-url, 被拒的链接不进任何 renderer 可见快照)。
+   */
+  normalizePendingPayload: (payload: ProviderBindStatusPayload) => ProviderBindStatusPayload;
+  /** renderer 动作 → 待打开的 provider URL(null = 该动作当前不可用)。 */
+  actionUrl: (action: ProviderOpenAction, binding: ProviderBindingView) => string | null;
+  /** main 安全边界内打开 provider URL(未注入 = 不支持自动打开, 仅剩复制链接)。 */
+  openUrl?: (url: string) => void | Promise<void>;
+}
+
+/**
+ * Provider-neutral 连接线的运行时状态。字段语义与历史 telegram* 散装变量一一
+ * 对应, 生命周期全部跟随本线 transport(Slack legacy 线不共享)。
+ */
+interface NeutralProviderLane {
+  config: NeutralProviderConfig;
+  transport: HookTransport | null;
+  status: HookTransportStatus | null;
+  lastError: string | null;
+  /** Provider-neutral state; confirmed cache survives provider disable/restart. */
+  binding: ProviderBindingView | null;
+  /** Toggle-on waits for welcome + authoritative state before starting a new attempt. */
+  autoBindIntent: boolean;
+  /** Only a locally initiated attempt may automatically open the provider once. */
+  openRequestId: string | null;
+  /** Only the newest local mutation may consume a provider.bind.update reply. */
+  bindRequest: ProviderBindRequest | null;
+  /** The first state frame after each welcome may replace a persisted offline cache. */
+  awaitingStateSnapshot: boolean;
+  bindWatchdog: NodeJS.Timeout | null;
+  /** 本线独立的能力协商与发布生命周期(最近一次成功 welcome 的 features 快照)。 */
+  serverFeatures: string[];
+  serverWelcomeReceived: boolean;
+  /** 在途的 provider prefs 往返(requestId -> 挂起 promise; replyTo 配对)。 */
+  pendingPrefs: Map<
+    string,
+    {
+      bindingId: string;
+      resolve: (v: ProviderPrefsView) => void;
+      reject: (e: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >;
+  /** 官方 Telegram 行为配置往返；其它 provider 保持空表。 */
+  pendingBehavior: Map<
+    string,
+    {
+      bindingId: string;
+      resolve: (v: TelegramHookBehaviorState) => void;
+      reject: (e: Error) => void;
+      timer: NodeJS.Timeout;
+    }
+  >;
+}
 
 export function createHookControlManager(deps: HookControlManagerDeps): HookControlManager {
   const {
@@ -409,6 +608,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     isAvailable = () => true,
     createTransport,
     getTelegramUrl,
+    getXUrl,
     getAuthToken,
     refreshAuthToken,
     deviceInfo,
@@ -416,7 +616,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     notifyStatus,
     onSlackToolProviderEnabledChanged,
     notifyPrefs,
+    notifyTelegramBehavior,
     prefsTimeoutMs,
+    autoBindDeferMs = AUTO_BIND_DEFER_MS,
     toolTimeoutMs,
     bindPendingTimeoutMs,
     installWaitTimeoutMs,
@@ -427,17 +629,15 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     accountInitiallyActive,
     openExternalUrl,
     openTelegramUrl,
+    openXUrl,
     log,
   } = deps;
   const id = SLACK_HOOK_CONNECTION_ID;
 
-  /** Slack 与 Telegram 是平级部署，不能共享 transport 或连接状态。 */
+  /** Slack 与各 provider-neutral 线是平级部署，不能共享 transport 或连接状态。 */
   let transport: HookTransport | null = null;
   let status: HookTransportStatus | null = null;
   let lastError: string | null = null;
-  let telegramTransport: HookTransport | null = null;
-  let telegramStatus: HookTransportStatus | null = null;
-  let telegramLastError: string | null = null;
   /**
    * server 推送的最新绑定状态(bind.update); 未推送过为 null。
    * 仅老 server(单绑定)路径维护 —— multi-team 模式下对外的 legacy binding
@@ -455,38 +655,188 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   /** (multi-team)在途授权状态(添加/重绑 workspace 的 pending 与其终止态)。 */
   let pendingBind: HookPendingBindView | null = null;
 
-  /** 从当前账号缓存恢复 confirmed Telegram 视图，供构造期与账号重激活共用。 */
-  function restoreCachedTelegramBinding(): ProviderBindingView | null {
-    const cached = store.get().telegramBindingCache;
-    if (cached === null) return null;
+  // ── provider-neutral 连接线注册表(Telegram 与 X; 新 provider 在此追加) ────
+
+  // 服务端用客户端 hello.features 判定 provider 协商结果，因此客户端要求
+  // 服务端具备的基础能力也必须全部自报；共用一份清单避免双向契约再次漂移。
+  const telegramProviderBaseFeatures = [
+    HOOK_FEATURE_PROVIDER_BIND,
+    HOOK_FEATURE_PROVIDER_PREFS,
+    HOOK_FEATURE_SESSION_PICKER,
+    HOOK_FEATURE_PROVIDER_TELEGRAM,
+  ] as const;
+
+  const telegramConfig: NeutralProviderConfig = {
+    provider: 'telegram',
+    label: 'Telegram',
+    getUrl: getTelegramUrl,
+    notConfiguredError: 'Telegram service endpoint is not configured',
+    requiredFeatures: telegramProviderBaseFeatures,
+    helloFeatures: [
+      ...telegramProviderBaseFeatures,
+      HOOK_FEATURE_GROUP_RELAY,
+      HOOK_FEATURE_GROUP_RELAY_RECIPIENT,
+      HOOK_FEATURE_PROVIDER_BEHAVIOR,
+    ],
+    isEnabled: () => store.get().telegramEnabled,
+    setEnabled: (enabled) => {
+      store.setProviderEnabled('telegram', enabled);
+    },
+    restoreCachedBinding: () => {
+      const cached = store.get().telegramBindingCache;
+      if (cached === null) return null;
+      return {
+        provider: 'telegram',
+        state: 'confirmed',
+        attemptId: null,
+        bindingId: cached.bindingId,
+        principalId: cached.principalId,
+        principalName: cached.principalName,
+        scopeId: cached.scopeId,
+        scopeName: cached.scopeName,
+        connectUrl: null,
+        expiresAt: null,
+        reason: null,
+        remediationUrl: `https://t.me/${cached.scopeName}`,
+        actions: ['revoke', 'open_provider', 'add_to_group'],
+      };
+    },
+    writeBindingCache: (entry) => {
+      store.setProviderBindingCache('telegram', entry);
+    },
+    normalizePendingPayload: (payload) => {
+      const connectLink = parseTelegramConnectUrl(payload.connectUrl ?? '');
+      if (
+        payload.scopeName !== null &&
+        connectLink.botUsername.toLowerCase() !== payload.scopeName.toLowerCase()
+      ) {
+        throw new Error('Telegram binding bot does not match the negotiated scope');
+      }
+      return {
+        ...payload,
+        scopeName: payload.scopeName ?? connectLink.botUsername,
+        connectUrl: connectLink.url,
+      };
+    },
+    actionUrl: (action, bindingView) => {
+      if (action === 'connect' && bindingView.actions.includes('open_connect_url')) {
+        return bindingView.connectUrl;
+      }
+      if (bindingView.scopeName) {
+        if (action === 'add-to-group' && bindingView.actions.includes('add_to_group')) {
+          return `https://t.me/${bindingView.scopeName}?startgroup=true`;
+        }
+        if (action === 'provider' && bindingView.actions.includes('open_provider')) {
+          return `https://t.me/${bindingView.scopeName}`;
+        }
+      }
+      return null;
+    },
+    openUrl: openTelegramUrl,
+  };
+
+  const xConfig: NeutralProviderConfig = {
+    provider: 'x',
+    label: 'X',
+    getUrl: getXUrl,
+    notConfiguredError: 'X service endpoint is not configured',
+    requiredFeatures: [
+      HOOK_FEATURE_PROVIDER_BIND,
+      HOOK_FEATURE_PROVIDER_PREFS,
+      HOOK_FEATURE_SESSION_PICKER,
+      HOOK_FEATURE_PROVIDER_X,
+    ],
+    // X v1 没有群消息中继(group relay 是 Telegram 专属能力), 不声明。
+    helloFeatures: [
+      HOOK_FEATURE_PROVIDER_BIND,
+      HOOK_FEATURE_PROVIDER_PREFS,
+      HOOK_FEATURE_SESSION_PICKER,
+    ],
+    isEnabled: () => store.get().xEnabled,
+    setEnabled: (enabled) => {
+      store.setProviderEnabled('x', enabled);
+    },
+    restoreCachedBinding: () => {
+      const cached = store.get().xBindingCache;
+      if (cached === null) return null;
+      return {
+        provider: 'x',
+        state: 'confirmed',
+        attemptId: null,
+        bindingId: cached.bindingId,
+        principalId: cached.principalId,
+        principalName: cached.principalName,
+        scopeId: cached.scopeId,
+        scopeName: cached.scopeName,
+        connectUrl: null,
+        expiresAt: null,
+        reason: null,
+        // scopeName 是 bot handle(如 '@CindyBot'); 形状不合法时容错为 null,
+        // 缓存恢复路径不抛错。
+        remediationUrl: xProfileUrlOrNull(cached.scopeName),
+        actions: ['revoke', 'open_provider'],
+      };
+    },
+    writeBindingCache: (entry) => {
+      store.setProviderBindingCache('x', entry);
+    },
+    normalizePendingPayload: (payload) => {
+      // connectUrl 是 X OAuth2 (PKCE) 授权页 —— host/path/参数集精确校验,
+      // 授权 URL 不含 bot 身份, scopeName 原样保留(由 server 侧协商下发)。
+      const connectLink = parseXConnectUrl(payload.connectUrl ?? '');
+      return { ...payload, connectUrl: connectLink.url };
+    },
+    actionUrl: (action, bindingView) => {
+      if (action === 'connect' && bindingView.actions.includes('open_connect_url')) {
+        return bindingView.connectUrl;
+      }
+      if (action === 'provider' && bindingView.actions.includes('open_provider')) {
+        return xProfileUrlOrNull(bindingView.scopeName);
+      }
+      return null; // X 没有加群概念, add-to-group 恒不可用
+    },
+    ...(openXUrl !== undefined ? { openUrl: openXUrl } : {}),
+  };
+
+  function createNeutralLane(config: NeutralProviderConfig): NeutralProviderLane {
     return {
-      provider: 'telegram',
-      state: 'confirmed',
-      attemptId: null,
-      bindingId: cached.bindingId,
-      principalId: cached.principalId,
-      principalName: cached.principalName,
-      scopeId: cached.scopeId,
-      scopeName: cached.scopeName,
-      connectUrl: null,
-      expiresAt: null,
-      reason: null,
-      remediationUrl: `https://t.me/${cached.scopeName}`,
-      actions: ['revoke', 'open_provider', 'add_to_group'],
+      config,
+      transport: null,
+      status: null,
+      lastError: null,
+      binding: config.restoreCachedBinding(),
+      autoBindIntent: false,
+      openRequestId: null,
+      bindRequest: null,
+      awaitingStateSnapshot: false,
+      bindWatchdog: null,
+      serverFeatures: [],
+      serverWelcomeReceived: false,
+      pendingPrefs: new Map(),
+      pendingBehavior: new Map(),
     };
   }
 
-  /** Telegram provider-neutral state; confirmed cache survives provider disable/restart. */
-  let telegramBinding: ProviderBindingView | null = restoreCachedTelegramBinding();
-  /** Toggle-on waits for welcome + authoritative state before starting a new attempt. */
-  let telegramAutoBindIntent = false;
-  /** Only a locally initiated attempt may automatically open Telegram once. */
-  let telegramOpenRequestId: string | null = null;
-  /** Only the newest local mutation may consume a provider.bind.update reply. */
-  let telegramBindRequest: TelegramBindRequest | null = null;
-  /** The first state frame after each welcome may replace a persisted offline cache. */
-  let telegramAwaitingStateSnapshot = false;
-  let telegramBindWatchdog: NodeJS.Timeout | null = null;
+  const telegramLane = createNeutralLane(telegramConfig);
+  const xLane = createNeutralLane(xConfig);
+  /** 全部 provider-neutral 线; 遍历顺序即启动 / hello 重发顺序。 */
+  const lanes: readonly NeutralProviderLane[] = [telegramLane, xLane];
+  // key 收窄到 NeutralHookProvider: 'slack' 走 legacy 线, 在编译期就挡在本表外
+  const laneByProvider = new Map<NeutralHookProvider, NeutralProviderLane>(
+    lanes.map((lane) => [lane.config.provider, lane]),
+  );
+  /**
+   * 协议全集的 provider → 客户端实际跑着的那条 lane。两类值在这里都归为 null,
+   * 调用方按「没有这条线」处理:
+   *   - 'slack': 走 legacy 专属帧, 本就不进本表;
+   *   - 协议按 append-only 先行加入、客户端尚未实现的 provider(当前是 'x',
+   *     见 makecindy/cindy#691) —— 没有 lane config, 也没有设置页入口。
+   * 直接用 laneByProvider.get() 会因 key 已收窄而在这类入口处编译不过, 那正是
+   * 本函数要收的边界: 收窄发生一次, 而不是在每个调用点各写一遍断言。
+   */
+  function neutralLaneFor(provider: HookProvider): NeutralProviderLane | null {
+    return lanes.find((lane) => lane.config.provider === provider) ?? null;
+  }
   /**
    * (multi-team)自动首绑的延迟触发器: 空 bind.state + autoBindIntent 时不能
    * 立即发 bind.start —— server 的 hello 同步可能紧跟一帧 pending 回放(旧
@@ -523,15 +873,6 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     string,
     { resolve: (v: HookPrefsView) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }
   >();
-  const pendingProviderPrefs = new Map<
-    string,
-    {
-      bindingId: string;
-      resolve: (v: ProviderPrefsView) => void;
-      reject: (e: Error) => void;
-      timer: NodeJS.Timeout;
-    }
-  >();
   /** 在途的 Slack 工具往返(requestId -> resolve; tool.response.replyTo 配对)。 */
   const pendingTools = new Map<
     string,
@@ -544,9 +885,6 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   let serverFeatures: string[] = [];
   /** Distinguish a negotiated old Slack server with features=[] from no welcome yet. */
   let serverWelcomeReceived = false;
-  /** Telegram service has its own capability negotiation and rollout lifecycle. */
-  let telegramServerFeatures: string[] = [];
-  let telegramServerWelcomeReceived = false;
   /** cindy_slack provider 的构建期 gate 当前值；初始未绑定 = false。 */
   let slackToolProviderEnabled = false;
   let disposed = false;
@@ -573,13 +911,13 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     return serverFeatures.includes(HOOK_FEATURE_MULTI_TEAM);
   }
 
-  function serverTelegram(): boolean {
-    return (
-      telegramServerFeatures.includes(HOOK_FEATURE_PROVIDER_BIND) &&
-      telegramServerFeatures.includes(HOOK_FEATURE_PROVIDER_PREFS) &&
-      telegramServerFeatures.includes(HOOK_FEATURE_SESSION_PICKER) &&
-      telegramServerFeatures.includes(HOOK_FEATURE_PROVIDER_TELEGRAM)
-    );
+  /** 本线 server 是否已宣告全部必需能力(最近一次成功 welcome 快照)。 */
+  function laneCapabilityReady(lane: NeutralProviderLane): boolean {
+    return lane.config.requiredFeatures.every((f) => lane.serverFeatures.includes(f));
+  }
+
+  function lifecycleAnnouncementEnabled(): boolean {
+    return store.get().lifecycleAnnouncementOverride ?? DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT;
   }
 
   function dispatchId(provider: HookProvider): string {
@@ -590,9 +928,12 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   function activateCurrentAccount(): void {
     if (accountActive || disposed) return;
     accountActive = true;
+    // 群窗口生命周期兼容入口(永久保留模式下是 no-op)。仍纳入
+    // pendingAccountOps，保证未来若恢复本地维护动作也受账号 DB 边界保护。
+    trackAccountOp(sweepGroupWindowExpired());
     dispatcher?.activateAccount();
     multiBindings = store.get().bindingsCache.map((entry) => ({ ...entry, displaced: false }));
-    telegramBinding = restoreCachedTelegramBinding();
+    for (const lane of lanes) lane.binding = lane.config.restoreCachedBinding();
     startEnabledProviders();
     notifyStatus(toView());
   }
@@ -631,13 +972,21 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     pendingPrefs.clear();
   }
 
-  /** Telegram 断线不应让 Slack prefs 请求失败，反之亦然。 */
-  function drainPendingProviderPrefs(): void {
-    for (const [, pending] of pendingProviderPrefs) {
+  /** 单线断线只 fail 本线的 provider prefs 请求, 不波及 Slack 或其它线。 */
+  function drainLanePendingPrefs(lane: NeutralProviderLane): void {
+    for (const [, pending] of lane.pendingPrefs) {
       clearTimeout(pending.timer);
-      pending.reject(new HookNotConnectedError('telegram'));
+      pending.reject(new HookNotConnectedError(lane.config.provider));
     }
-    pendingProviderPrefs.clear();
+    lane.pendingPrefs.clear();
+  }
+
+  function drainLanePendingBehavior(lane: NeutralProviderLane): void {
+    for (const [, pending] of lane.pendingBehavior) {
+      clearTimeout(pending.timer);
+      pending.reject(new HookNotConnectedError(lane.config.provider));
+    }
+    lane.pendingBehavior.clear();
   }
 
   /** 断线/重建时在途工具请求快速失败(resolve 结构化错误, 语义与 prefs 对齐)。 */
@@ -674,33 +1023,78 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     });
   }
 
-  function sendProviderPrefsRequest(
+  function sendLanePrefsRequest(
+    lane: NeutralProviderLane,
     build: (requestId: string, bindingId: string) => HookMessage,
   ): Promise<ProviderPrefsView> {
-    const t = telegramTransport;
-    const bindingId = telegramBinding?.state === 'confirmed' ? telegramBinding.bindingId : null;
+    const t = lane.transport;
+    const bindingId = lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
     if (
       t === null ||
-      telegramStatus !== 'connected' ||
-      !serverTelegram() ||
-      !store.get().telegramEnabled ||
+      lane.status !== 'connected' ||
+      !laneCapabilityReady(lane) ||
+      !lane.config.isEnabled() ||
       bindingId === null
     ) {
-      return Promise.reject(new HookNotConnectedError('telegram'));
+      return Promise.reject(new HookNotConnectedError(lane.config.provider));
     }
     const requestId = randomUUID();
     return new Promise<ProviderPrefsView>((resolve, reject) => {
       if (!t.send(build(requestId, bindingId))) {
+        reject(new HookNotConnectedError(lane.config.provider));
+        return;
+      }
+      const timer = setTimeout(() => {
+        lane.pendingPrefs.delete(requestId);
+        reject(new HookPrefsTimeoutError());
+      }, prefsTimeoutMs ?? DEFAULT_PREFS_TIMEOUT_MS);
+      timer.unref?.();
+      lane.pendingPrefs.set(requestId, { bindingId, resolve, reject, timer });
+    });
+  }
+
+  function sendTelegramBehaviorRequest(
+    expectedBindingId: string,
+    build: (requestId: string, bindingId: string) => HookMessage,
+  ): Promise<TelegramHookBehaviorState> {
+    const lane = telegramLane;
+    const transport = lane.transport;
+    const bindingId = lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
+    if (
+      transport === null ||
+      lane.status !== 'connected' ||
+      !laneCapabilityReady(lane) ||
+      !lane.serverFeatures.includes(HOOK_FEATURE_PROVIDER_BEHAVIOR) ||
+      !lane.config.isEnabled() ||
+      bindingId === null ||
+      bindingId !== expectedBindingId
+    ) {
+      return Promise.reject(new HookNotConnectedError('telegram'));
+    }
+    const requestId = randomUUID();
+    return new Promise<TelegramHookBehaviorState>((resolve, reject) => {
+      if (!transport.send(build(requestId, bindingId))) {
         reject(new HookNotConnectedError('telegram'));
         return;
       }
       const timer = setTimeout(() => {
-        pendingProviderPrefs.delete(requestId);
+        lane.pendingBehavior.delete(requestId);
         reject(new HookPrefsTimeoutError());
       }, prefsTimeoutMs ?? DEFAULT_PREFS_TIMEOUT_MS);
       timer.unref?.();
-      pendingProviderPrefs.set(requestId, { bindingId, resolve, reject, timer });
+      lane.pendingBehavior.set(requestId, { bindingId, resolve, reject, timer });
     });
+  }
+
+  function telegramBehaviorView(payload: ProviderBehaviorStatePayload): TelegramHookBehaviorState {
+    return {
+      bindingId: payload.bindingId,
+      bound: payload.bound,
+      emojiReactions: payload.emojiReactions,
+      replyQuoteDm: payload.replyQuoteDm,
+      replyQuoteGroup: payload.replyQuoteGroup,
+      groupActivation: { ...payload.groupActivation },
+    };
   }
 
   /**
@@ -747,11 +1141,38 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     };
   }
 
+  /** 本线的 IPC 视图切片(形状与历史 SlackHookView.telegram 字段完全一致)。 */
+  function laneView(lane: NeutralProviderLane): ProviderHookView {
+    const enabled = lane.config.isEnabled();
+    const url = lane.config.getUrl().trim();
+    return {
+      enabled,
+      url,
+      status: enabled && url.length === 0 ? 'error' : toViewStatus(lane.status, enabled),
+      lastError:
+        enabled && url.length === 0
+          ? lane.config.notConfiguredError
+          : enabled
+            ? lane.lastError
+            : null,
+      available: laneCapabilityReady(lane),
+      capabilityPending: enabled && url.length > 0 && !lane.serverWelcomeReceived,
+      behaviorAvailable:
+        lane.config.provider === 'telegram' &&
+        lane.serverFeatures.includes(HOOK_FEATURE_PROVIDER_BEHAVIOR),
+      binding:
+        lane.binding === null ? null : { ...lane.binding, actions: [...lane.binding.actions] },
+      // store 侧已保证读出来的别名仍然有效(目录删掉即归零), 这里直投。
+      defaultWorkspace: defaultWorkspaceOf(store.get(), lane.config.provider),
+    };
+  }
+
   function toView(): SlackHookView {
     const config = store.get();
-    const telegramUrl = getTelegramUrl().trim();
     return {
       enabled: config.enabled,
+      lifecycleAnnouncement:
+        config.lifecycleAnnouncementOverride ?? DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT,
       url: store.effectiveUrl(),
       workspaces: { ...config.workspaces },
       status: toViewStatus(status, config.enabled),
@@ -760,27 +1181,8 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       bindings: multiBindings.map((b) => ({ ...b })),
       pendingBind: pendingBind !== null ? { ...pendingBind } : null,
       serverMultiTeam: serverMultiTeam(),
-      telegram: {
-        enabled: config.telegramEnabled,
-        url: telegramUrl,
-        status:
-          config.telegramEnabled && telegramUrl.length === 0
-            ? 'error'
-            : toViewStatus(telegramStatus, config.telegramEnabled),
-        lastError:
-          config.telegramEnabled && telegramUrl.length === 0
-            ? 'Telegram service endpoint is not configured'
-            : config.telegramEnabled
-              ? telegramLastError
-              : null,
-        available: serverTelegram(),
-        capabilityPending:
-          config.telegramEnabled && telegramUrl.length > 0 && !telegramServerWelcomeReceived,
-        binding:
-          telegramBinding === null
-            ? null
-            : { ...telegramBinding, actions: [...telegramBinding.actions] },
-      },
+      telegram: laneView(telegramLane),
+      x: laneView(xLane),
     };
   }
 
@@ -835,26 +1237,23 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     }
   }
 
-  function clearTelegramBindWatchdog(): void {
-    if (telegramBindWatchdog !== null) {
-      clearTimeout(telegramBindWatchdog);
-      telegramBindWatchdog = null;
+  function clearLaneBindWatchdog(lane: NeutralProviderLane): void {
+    if (lane.bindWatchdog !== null) {
+      clearTimeout(lane.bindWatchdog);
+      lane.bindWatchdog = null;
     }
   }
 
-  function armTelegramBindWatchdog(expiresAt: number): void {
-    clearTelegramBindWatchdog();
+  function armLaneBindWatchdog(lane: NeutralProviderLane, expiresAt: number): void {
+    clearLaneBindWatchdog(lane);
     const delay = Math.min(DEFAULT_PROVIDER_BIND_TIMEOUT_MS, Math.max(0, expiresAt - Date.now()));
-    telegramBindWatchdog = setTimeout(() => {
-      telegramBindWatchdog = null;
-      if (
-        telegramBinding?.state !== 'pending' &&
-        telegramBinding?.state !== 'awaiting_confirmation'
-      ) {
+    lane.bindWatchdog = setTimeout(() => {
+      lane.bindWatchdog = null;
+      if (lane.binding?.state !== 'pending' && lane.binding?.state !== 'awaiting_confirmation') {
         return;
       }
-      telegramBinding = {
-        ...telegramBinding,
+      lane.binding = {
+        ...lane.binding,
         state: 'expired',
         connectUrl: null,
         expiresAt: null,
@@ -863,12 +1262,21 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       };
       notifyStatus(toView());
     }, delay);
-    telegramBindWatchdog.unref?.();
+    lane.bindWatchdog.unref?.();
   }
 
-  function providerBindingView(payload: ProviderBindStatusPayload): ProviderBindingView {
+  /**
+   * provider 取本地 lane config 而不是 payload: 调用方已用
+   * `payload.provider !== lane.config.provider` 丢过走错线的帧, 两者必然相等,
+   * 而 lane config 是接线期定死的可信值 —— renderer 可见快照里的渠道标识不从
+   * 网线上的值取。
+   */
+  function providerBindingView(
+    provider: NeutralHookProvider,
+    payload: ProviderBindStatusPayload,
+  ): ProviderBindingView {
     return {
-      provider: payload.provider,
+      provider,
       state: payload.state,
       attemptId: payload.attemptId,
       bindingId: payload.bindingId,
@@ -884,7 +1292,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     };
   }
 
-  function persistTelegramBinding(view: ProviderBindingView): void {
+  function persistLaneBinding(lane: NeutralProviderLane, view: ProviderBindingView): void {
     try {
       if (
         view.state === 'confirmed' &&
@@ -893,7 +1301,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         view.scopeId &&
         view.scopeName
       ) {
-        store.setTelegramBindingCache({
+        lane.config.writeBindingCache({
           bindingId: view.bindingId,
           principalId: view.principalId,
           principalName: view.principalName,
@@ -901,13 +1309,13 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
           scopeName: view.scopeName,
         });
       } else if (view.state === 'revoked' || view.state === 'none' || view.state === 'superseded') {
-        store.setTelegramBindingCache(null);
+        lane.config.writeBindingCache(null);
       }
     } catch (err) {
       // The server owns binding truth; a read-only/full local disk may reduce
       // restart convenience but must not suppress the live confirmed state.
       log.warn(
-        `persist Telegram binding cache failed (${err instanceof Error ? err.name : 'unknown'})`,
+        `persist ${lane.config.label} binding cache failed (${err instanceof Error ? err.name : 'unknown'})`,
       );
     }
   }
@@ -923,51 +1331,53 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   }
 
   /**
-   * Bind replies are not globally ordered with Telegram callbacks. Keep the
+   * Bind replies are not globally ordered with the provider's own callbacks
+   * (for example a user completing the bind inside the provider app). Keep the
    * local state monotonic by accepting only the newest request reply and only
    * events that name the current attempt/binding. The first state snapshot
    * after a welcome is the sole exception: it is authoritative and may clear
    * an offline persisted cache, unless a newer local mutation already began.
    */
   function shouldApplyProviderBindStatus(
+    lane: NeutralProviderLane,
     payload: ProviderBindStatusPayload,
     isStateSnapshot: boolean,
   ): boolean {
     if (payload.replyTo !== null) {
-      const request = telegramBindRequest;
+      const request = lane.bindRequest;
       if (request === null || request.requestId !== payload.replyTo) {
-        log.warn('stale Telegram bind reply dropped');
+        log.warn(`stale ${lane.config.label} bind reply dropped`);
         return false;
       }
       // One request has one reply. Clear before validating its identity so a
       // malformed response cannot keep blocking later unsolicited truth.
-      telegramBindRequest = null;
+      lane.bindRequest = null;
       if (request.kind === 'start') {
         return payload.state !== 'revoked' && payload.state !== 'superseded';
       }
       if (request.kind === 'cancel') {
-        const ownsCurrentAttempt = telegramBinding?.attemptId === request.attemptId;
+        const ownsCurrentAttempt = lane.binding?.attemptId === request.attemptId;
         if (payload.state === 'confirmed') return ownsCurrentAttempt;
         return ownsCurrentAttempt && payload.attemptId === request.attemptId;
       }
       // A failed revoke must not replace the durable confirmed binding with an
       // attempt-shaped error. The server can retry/reconcile from its snapshot.
       if (isProviderAttemptState(payload.state)) {
-        log.warn('Telegram revoke failure kept the confirmed binding');
+        log.warn(`${lane.config.label} revoke failure kept the confirmed binding`);
         return false;
       }
       return (
-        telegramBinding?.bindingId === request.bindingId && payload.bindingId === request.bindingId
+        lane.binding?.bindingId === request.bindingId && payload.bindingId === request.bindingId
       );
     }
 
-    if (isStateSnapshot && telegramAwaitingStateSnapshot) {
-      telegramAwaitingStateSnapshot = false;
-      telegramBindRequest = null;
+    if (isStateSnapshot && lane.awaitingStateSnapshot) {
+      lane.awaitingStateSnapshot = false;
+      lane.bindRequest = null;
       return true;
     }
 
-    const current = telegramBinding;
+    const current = lane.binding;
     if (current === null) {
       return (
         payload.state === 'none' ||
@@ -985,7 +1395,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       );
     }
     if (isProviderAttemptState(payload.state)) {
-      if (telegramBindRequest?.kind === 'cancel') return false;
+      if (lane.bindRequest?.kind === 'cancel') return false;
       return payload.attemptId !== null && current.attemptId === payload.attemptId;
     }
     if (payload.state === 'confirmed') {
@@ -1001,27 +1411,30 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     return false;
   }
 
-  function initiateProviderBind(provider: 'telegram'): boolean {
+  function initiateProviderBind(lane: NeutralProviderLane): boolean {
     if (
-      provider !== 'telegram' ||
-      telegramTransport === null ||
-      telegramStatus !== 'connected' ||
-      !serverTelegram() ||
-      !store.get().telegramEnabled
+      lane.transport === null ||
+      lane.status !== 'connected' ||
+      !laneCapabilityReady(lane) ||
+      !lane.config.isEnabled()
     ) {
       return false;
     }
     // Pending/awaiting flows deliberately allow an explicit retry so a stale
     // one-time link can be superseded. A durable confirmed binding must never
     // be replaced by a duplicate/stale renderer invocation.
-    if (telegramBinding?.state === 'confirmed') return false;
+    if (lane.binding?.state === 'confirmed') return false;
     const requestId = randomUUID();
-    if (!telegramTransport.send(makeProviderBindStart({ requestId, provider }))) return false;
-    telegramAwaitingStateSnapshot = false;
-    telegramBindRequest = { kind: 'start', requestId };
-    telegramOpenRequestId = requestId;
-    telegramBinding = {
-      provider,
+    if (
+      !lane.transport.send(makeProviderBindStart({ requestId, provider: lane.config.provider }))
+    ) {
+      return false;
+    }
+    lane.awaitingStateSnapshot = false;
+    lane.bindRequest = { kind: 'start', requestId };
+    lane.openRequestId = requestId;
+    lane.binding = {
+      provider: lane.config.provider,
       state: 'pending',
       attemptId: null,
       bindingId: null,
@@ -1040,43 +1453,39 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
   }
 
   function handleProviderBindStatus(
+    lane: NeutralProviderLane,
     payload: ProviderBindStatusPayload,
     isStateSnapshot: boolean,
   ): void {
-    if (payload.provider !== 'telegram' || !serverTelegram()) {
-      log.warn('provider bind state dropped before Telegram capability negotiation');
+    const { label } = lane.config;
+    // 两种丢帧原因分开记日志: 走错线(多 lane 下另一类问题)≠ 能力协商未完成
+    if (payload.provider !== lane.config.provider) {
+      log.warn(`provider bind state for ${payload.provider} dropped on ${label} lane`);
       return;
     }
-    if (!shouldApplyProviderBindStatus(payload, isStateSnapshot)) {
-      if (payload.replyTo !== null && payload.replyTo === telegramOpenRequestId) {
-        telegramOpenRequestId = null;
+    if (!laneCapabilityReady(lane)) {
+      log.warn(`provider bind state dropped before ${label} capability negotiation`);
+      return;
+    }
+    if (!shouldApplyProviderBindStatus(lane, payload, isStateSnapshot)) {
+      if (payload.replyTo !== null && payload.replyTo === lane.openRequestId) {
+        lane.openRequestId = null;
       }
       return;
     }
     let acceptedPayload = payload;
     if (payload.state === 'pending') {
       try {
-        const connectLink = parseTelegramConnectUrl(payload.connectUrl ?? '');
-        if (
-          payload.scopeName !== null &&
-          connectLink.botUsername.toLowerCase() !== payload.scopeName.toLowerCase()
-        ) {
-          throw new Error('Telegram binding bot does not match the negotiated scope');
-        }
-        acceptedPayload = {
-          ...payload,
-          scopeName: payload.scopeName ?? connectLink.botUsername,
-          connectUrl: connectLink.url,
-        };
+        acceptedPayload = lane.config.normalizePendingPayload(payload);
       } catch {
         // The renderer can copy a bind link without crossing shell.openExternal,
         // so validate the server value before it enters any renderer-visible
         // snapshot. Keep the token and rejected URL out of logs.
-        telegramOpenRequestId = null;
-        telegramAutoBindIntent = false;
-        clearTelegramBindWatchdog();
-        telegramBinding = {
-          provider: 'telegram',
+        lane.openRequestId = null;
+        lane.autoBindIntent = false;
+        clearLaneBindWatchdog(lane);
+        lane.binding = {
+          provider: lane.config.provider,
           state: 'failed',
           attemptId: payload.attemptId,
           bindingId: null,
@@ -1090,71 +1499,75 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
           remediationUrl: null,
           actions: ['retry'],
         };
-        log.warn('invalid Telegram binding URL dropped');
+        log.warn(`invalid ${label} binding URL dropped`);
         notifyStatus(toView());
         return;
       }
     }
     // An update accepted after welcome is newer than the still-in-flight
     // initial snapshot; do not let that older snapshot roll it back.
-    if (!isStateSnapshot) telegramAwaitingStateSnapshot = false;
-    const previousBindingId =
-      telegramBinding?.state === 'confirmed' ? telegramBinding.bindingId : null;
-    const view = providerBindingView(acceptedPayload);
-    telegramBinding = view;
+    if (!isStateSnapshot) lane.awaitingStateSnapshot = false;
+    const previousBindingId = lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
+    const view = providerBindingView(lane.config.provider, acceptedPayload);
+    lane.binding = view;
     const currentBindingId = view.state === 'confirmed' ? view.bindingId : null;
     if (previousBindingId !== null && previousBindingId !== currentBindingId) {
       // Binding identity is the prefs isolation key. Fail every old request
       // immediately instead of leaving the editor pending until a stale reply
       // or the generic timeout happens to arrive.
-      drainPendingProviderPrefs();
+      drainLanePendingPrefs(lane);
+      drainLanePendingBehavior(lane);
+      if (lane.config.provider === 'telegram') {
+        resetGroupContextCursors();
+        resetTelegramSpeakerRegistrationCache();
+      }
     }
-    persistTelegramBinding(view);
+    persistLaneBinding(lane, view);
     if (
       (view.state === 'pending' || view.state === 'awaiting_confirmation') &&
       view.expiresAt !== null
     ) {
-      armTelegramBindWatchdog(view.expiresAt);
+      armLaneBindWatchdog(lane, view.expiresAt);
     } else {
-      clearTelegramBindWatchdog();
+      clearLaneBindWatchdog(lane);
     }
     if (
-      telegramOpenRequestId !== null &&
-      acceptedPayload.replyTo === telegramOpenRequestId &&
+      lane.openRequestId !== null &&
+      acceptedPayload.replyTo === lane.openRequestId &&
       view.state === 'pending' &&
       view.connectUrl &&
       view.actions.includes('open_connect_url')
     ) {
-      telegramOpenRequestId = null;
+      lane.openRequestId = null;
       // Auto-open is best-effort. The link remains in the view so
       // remote-control users can copy it when the local shell rejects.
       void Promise.resolve()
-        .then(() => openTelegramUrl?.(view.connectUrl!))
+        .then(() => lane.config.openUrl?.(view.connectUrl!))
         .catch((err: unknown) => {
           log.warn(
-            `open Telegram binding URL failed (${err instanceof Error ? err.name : 'unknown'})`,
+            `open ${label} binding URL failed (${err instanceof Error ? err.name : 'unknown'})`,
           );
         });
     }
-    if (view.state !== 'pending' && view.state !== 'none') telegramOpenRequestId = null;
+    if (view.state !== 'pending' && view.state !== 'none') lane.openRequestId = null;
     if (
       view.state === 'confirmed' ||
       view.state === 'revoked' ||
       view.state === 'superseded' ||
       view.state === 'none'
     ) {
-      telegramBindRequest = null;
+      lane.bindRequest = null;
     }
     if (
-      telegramAutoBindIntent &&
+      lane.autoBindIntent &&
       view.state === 'none' &&
-      store.get().telegramEnabled &&
-      initiateProviderBind('telegram')
+      lane.config.isEnabled() &&
+      initiateProviderBind(lane)
     ) {
-      telegramAutoBindIntent = false;
+      lane.autoBindIntent = false;
       return;
     }
-    telegramAutoBindIntent = false;
+    lane.autoBindIntent = false;
     notifyStatus(toView());
   }
 
@@ -1313,21 +1726,38 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     }
   }
 
-  function buildHello(provider: HookProvider): HelloInput {
+  /** Slack legacy 线的 hello 能力声明(provider-neutral 线各自在 config.helloFeatures)。 */
+  const SLACK_HELLO_FEATURES: readonly string[] = [
+    HOOK_FEATURE_MULTI_TEAM,
+    HOOK_FEATURE_SESSION_PICKER,
+  ];
+
+  function buildHello(
+    features: readonly string[],
+    includeLifecycleAnnouncement = false,
+    provider?: NeutralHookProvider,
+  ): HelloInput {
     // 每次连接成功都重读配置 —— 别名映射变更后重连即生效
     const device = deviceInfo();
+    const config = store.get();
+    const defaultWorkspace = defaultWorkspaceOf(config, provider);
     return {
       deviceId: device.deviceId,
       deviceName: device.deviceName,
       // 内置「对话」伪目录恒在清单第一位(与真实目录同级; Set 去重防存量撞名)
-      workspaces: [...new Set([HOOK_CHAT_WORKSPACE_ALIAS, ...Object.keys(store.get().workspaces)])],
+      workspaces: [...new Set([HOOK_CHAT_WORKSPACE_ALIAS, ...Object.keys(config.workspaces)])],
       agents,
-      // 每条连接只声明其服务会实际使用的能力，避免把 Telegram wire 误投到
-      // Slack 服务，也保持老 Slack hello 的兼容面最小。
-      features:
-        provider === 'telegram'
-          ? [HOOK_FEATURE_PROVIDER_BIND, HOOK_FEATURE_PROVIDER_PREFS, HOOK_FEATURE_SESSION_PICKER]
-          : [HOOK_FEATURE_MULTI_TEAM, HOOK_FEATURE_SESSION_PICKER],
+      // 每条连接只声明其服务会实际使用的能力，避免把 provider-neutral wire 误投
+      // 到 Slack 服务，也保持老 Slack hello 的兼容面最小。
+      features: [...features],
+      ...(includeLifecycleAnnouncement
+        ? { lifecycleAnnouncement: lifecycleAnnouncementEnabled() }
+        : {}),
+      // 默认工作目录: X 与 Telegram 都有(Slack 的默认仍走它自己的卡)。
+      // store 侧已保证读出来的别名仍在 workspaces 里(目录删掉即归零), 所以这里
+      // 不再复核 —— 复核两遍反而会让"哪边是权威"变模糊。
+      // 只算一次再复用: 判断与赋值必须是同一个值(将来这个函数变复杂也不会分叉)。
+      ...(defaultWorkspace !== null ? { defaultWorkspace } : {}),
     };
   }
 
@@ -1512,18 +1942,20 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       log.info(`hook frame dropped after account ingress closed: ${msg.type}`);
       return;
     }
-    const telegramOnly =
+    const lane = neutralLaneFor(expectedProvider);
+    const neutralOnly =
       msg.type === 'provider.bind.update' ||
       msg.type === 'provider.bind.state' ||
-      msg.type === 'provider.prefs.state';
+      msg.type === 'provider.prefs.state' ||
+      msg.type === 'provider.behavior.state';
     const slackOnly =
       msg.type === 'bind.state' ||
       msg.type === 'bind.update' ||
       msg.type === 'prefs.state' ||
       msg.type === 'tool.response';
     if (
-      (expectedProvider === 'slack' && telegramOnly) ||
-      (expectedProvider === 'telegram' && slackOnly)
+      (expectedProvider === 'slack' && neutralOnly) ||
+      (expectedProvider !== 'slack' && slackOnly)
     ) {
       log.warn(`${msg.type} dropped on wrong ${expectedProvider} transport`);
       return;
@@ -1531,13 +1963,14 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     const transportReady =
       expectedProvider === 'slack'
         ? status === 'connected'
-        : telegramStatus === 'connected' && serverTelegram();
+        : lane !== null && lane.status === 'connected' && laneCapabilityReady(lane);
     if (!transportReady) {
-      // A socket before welcome, or Telegram reaching an old/partially
-      // rolled-out node, is not an authenticated business channel. Fail closed
-      // before any local workspace/model/session data source or dispatcher is
-      // touched, while still returning terminal replies for request/ack-shaped
-      // frames so the server does not leave an operation hanging.
+      // A socket before welcome, or a provider-neutral lane reaching an
+      // old/partially rolled-out node, is not an authenticated business
+      // channel. Fail closed before any local workspace/model/session data
+      // source or dispatcher is touched, while still returning terminal
+      // replies for request/ack-shaped frames so the server does not leave an
+      // operation hanging.
       if (msg.type === 'query.request') {
         send(
           makeQueryResponse({
@@ -1562,7 +1995,10 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       return;
     }
     if (msg.type === 'provider.bind.update' || msg.type === 'provider.bind.state') {
-      handleProviderBindStatus(msg.payload, msg.type === 'provider.bind.state');
+      // transportReady 已保证 lane 非空(neutral 帧不会带 null lane 走到这里)
+      if (lane !== null) {
+        handleProviderBindStatus(lane, msg.payload, msg.type === 'provider.bind.state');
+      }
       return;
     }
     if (msg.type === 'bind.state') {
@@ -1597,7 +2033,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
             if (!autoBindIntent || !store.get().enabled) return;
             if (pendingBind !== null) return; // 回放先到, 已交给 pending 路径
             if (initiateMultiBind(null)) autoBindIntent = false;
-          }, AUTO_BIND_DEFER_MS);
+          }, autoBindDeferMs);
           autoBindDefer.unref?.();
         }
       }
@@ -1645,51 +2081,99 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       return;
     }
     if (msg.type === 'provider.prefs.state') {
-      if (msg.payload.provider !== 'telegram' || !serverTelegram()) {
-        log.warn('provider prefs state dropped before Telegram capability negotiation');
+      // transportReady 已保证 lane 非空且能力协商完成; 这里只再校验帧的 provider
+      // 归属, 两种丢帧原因分开记日志(同 handleProviderBindStatus)
+      if (lane === null) {
+        log.warn(`provider prefs state dropped before ${expectedProvider} transport handshake`);
+        return;
+      }
+      if (msg.payload.provider !== lane.config.provider) {
+        log.warn(
+          `provider prefs state for ${msg.payload.provider} dropped on ${lane.config.label} lane`,
+        );
         return;
       }
       const view: ProviderPrefsView = {
-        provider: msg.payload.provider,
+        // 同 providerBindingView: 上面已丢过走错线的帧, 渠道标识取可信的 lane config。
+        provider: lane.config.provider,
         bindingId: msg.payload.bindingId,
         scopeId: msg.payload.scopeId,
         bound: msg.payload.bound,
         prefs: msg.payload.prefs.map((pref) => ({ ...pref })),
       };
       if (msg.payload.replyTo !== null) {
-        const pending = pendingProviderPrefs.get(msg.payload.replyTo);
+        const pending = lane.pendingPrefs.get(msg.payload.replyTo);
         if (pending === undefined) {
           log.warn('provider prefs state for unknown requestId, dropped (late?)');
           return;
         }
         if (msg.payload.bindingId !== pending.bindingId) {
-          pendingProviderPrefs.delete(msg.payload.replyTo);
+          lane.pendingPrefs.delete(msg.payload.replyTo);
           clearTimeout(pending.timer);
-          pending.reject(new HookNotConnectedError('telegram'));
+          pending.reject(new HookNotConnectedError(lane.config.provider));
           log.warn('provider prefs state bindingId mismatch, dropped');
           return;
         }
         const currentBindingId =
-          telegramBinding?.state === 'confirmed' ? telegramBinding.bindingId : null;
+          lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
         if (msg.payload.bindingId !== currentBindingId) {
-          pendingProviderPrefs.delete(msg.payload.replyTo);
+          lane.pendingPrefs.delete(msg.payload.replyTo);
           clearTimeout(pending.timer);
-          pending.reject(new HookNotConnectedError('telegram'));
+          pending.reject(new HookNotConnectedError(lane.config.provider));
           log.warn('provider prefs reply for a superseded binding, dropped');
           return;
         }
-        pendingProviderPrefs.delete(msg.payload.replyTo);
+        lane.pendingPrefs.delete(msg.payload.replyTo);
         clearTimeout(pending.timer);
         pending.resolve(view);
       } else {
         const currentBindingId =
-          telegramBinding?.state === 'confirmed' ? telegramBinding.bindingId : null;
+          lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
         if (msg.payload.bindingId !== currentBindingId) {
           log.warn('stale provider prefs push for a different binding, dropped');
           return;
         }
       }
       deps.notifyProviderPrefs?.(view);
+      return;
+    }
+    if (msg.type === 'provider.behavior.state') {
+      if (
+        lane === null ||
+        lane.config.provider !== 'telegram' ||
+        msg.payload.provider !== 'telegram' ||
+        !lane.serverFeatures.includes(HOOK_FEATURE_PROVIDER_BEHAVIOR)
+      ) {
+        log.warn(`provider behavior state dropped on ${expectedProvider} lane`);
+        return;
+      }
+      const currentBindingId = lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
+      if (msg.payload.replyTo !== null) {
+        const pending = lane.pendingBehavior.get(msg.payload.replyTo);
+        if (pending === undefined) {
+          log.warn('provider behavior state for unknown requestId, dropped (late?)');
+          return;
+        }
+        lane.pendingBehavior.delete(msg.payload.replyTo);
+        clearTimeout(pending.timer);
+        if (
+          msg.payload.bindingId !== pending.bindingId ||
+          msg.payload.bindingId !== currentBindingId
+        ) {
+          pending.reject(new HookNotConnectedError('telegram'));
+          log.warn('provider behavior state bindingId mismatch, dropped');
+          return;
+        }
+        const view = telegramBehaviorView(msg.payload);
+        pending.resolve(view);
+        notifyTelegramBehavior?.(view);
+        return;
+      }
+      if (msg.payload.bindingId !== currentBindingId) {
+        log.warn('stale provider behavior push for a different binding, dropped');
+        return;
+      }
+      notifyTelegramBehavior?.(telegramBehaviorView(msg.payload));
       return;
     }
     if (msg.type === 'bind.update') {
@@ -1807,7 +2291,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
             ],
             listAgentModels: () => listAgentModels?.() ?? [],
             listSessions: () =>
-              (expectedProvider === 'telegram' ? telegramServerFeatures : serverFeatures).includes(
+              (lane !== null ? lane.serverFeatures : serverFeatures).includes(
                 HOOK_FEATURE_SESSION_PICKER,
               )
                 ? (listRecentSessions?.() ?? [])
@@ -1834,7 +2318,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       // Provider lane /new 换代 -> 归档旧代会话(幂等, 无绑定即 no-op)
       if (dispatcher) {
         const provider = providerForExternalKey(msg.payload.externalKey);
-        if (provider !== expectedProvider || (provider === 'telegram' && !serverTelegram())) {
+        if (provider !== expectedProvider || (lane !== null && !laneCapabilityReady(lane))) {
           log.warn(
             `session.archive ignored for unsupported or mismatched provider: ${provider ?? 'unknown'}`,
           );
@@ -1860,13 +2344,23 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     }
     if (msg.type === 'task.dispatch') {
       const provider = providerForTaskDispatch(msg.payload);
+      const telegramGroupLane =
+        provider === 'telegram' ? groupLaneOf(msg.payload.externalKey) : null;
+      const telegramGroupPrincipalMismatch =
+        telegramGroupLane !== null &&
+        (lane?.binding?.state !== 'confirmed' ||
+          lane.binding.principalId !== telegramGroupLane.principalId);
       // 接收日志: 复用已有会话的派发在 dispatcher 里是静默路径(只有新建才留
       // worktree 痕迹), 没有这条就无法区分「没收到」和「静默复用」。lane
       // key 含 IM 用户/聊天标识，不写日志。
       log.info(
         `task.dispatch received: requestId=${msg.payload.requestId} provider=${provider ?? 'unknown'} sessionId=${msg.payload.sessionId ?? '(new/bound)'}`,
       );
-      if (provider !== expectedProvider || (provider === 'telegram' && !serverTelegram())) {
+      if (
+        provider !== expectedProvider ||
+        (lane !== null && !laneCapabilityReady(lane)) ||
+        telegramGroupPrincipalMismatch
+      ) {
         log.warn(
           `task.dispatch rejected for unsupported or mismatched provider: requestId=${msg.payload.requestId}`,
         );
@@ -1897,6 +2391,52 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       );
       return;
     }
+    if (msg.type === 'group.message') {
+      // 群消息实时中继入本地窗口(group-relay-v1)。只接受来自对应 provider
+      // transport 的帧(错误路由的连接不得写窗口); fire-and-forget:
+      // 失败只记日志, 窗口是上下文增强, 不影响任务链路。内容不写日志。
+      if (msg.payload.provider !== expectedProvider) {
+        log.warn(
+          `group.message ignored: provider=${msg.payload.provider} on ${expectedProvider} transport`,
+        );
+        return;
+      }
+      // 账号边界: 写入纳入 pendingAccountOps, 登出/切号等待落库完成后再
+      // 销毁 DB client, 不留 use-after-dispose。
+      const ownerId = telegramGroupMessageOwner(
+        msg.payload,
+        lane?.config.provider === 'telegram' ? lane.binding : null,
+        lane?.serverFeatures.includes(HOOK_FEATURE_GROUP_RELAY_RECIPIENT) === true,
+      );
+      trackAccountOp(
+        (async () => {
+          if (ownerId === null) {
+            log.warn('group.message ignored: Telegram binding principal is unavailable');
+            return;
+          }
+          const inserted = await recordGroupMessage(msg.payload, ownerId);
+          if (
+            inserted &&
+            expectedProvider === 'telegram' &&
+            msg.payload.author.id !== undefined &&
+            msg.payload.author.isBot !== true
+          ) {
+            autoRegisterTelegramSpeaker(
+              {
+                id: msg.payload.author.id,
+                name: msg.payload.author.name,
+                ...(msg.payload.author.username !== undefined
+                  ? { username: msg.payload.author.username }
+                  : {}),
+                isOwner: msg.payload.author.id === ownerId,
+              },
+              { chatName: msg.payload.chatName },
+            );
+          }
+        })().catch((err) => log.warn(`group window record failed: ${String(err)}`)),
+      );
+      return;
+    }
     // task.ack / turn.end 不该由 server 发给 desktop; 未知业务帧只记日志
     log.warn(`unexpected message type=${msg.type}, ignored`);
   }
@@ -1917,28 +2457,29 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     t.dispose();
   }
 
-  function stopTelegram(): void {
-    clearTelegramBindWatchdog();
-    telegramOpenRequestId = null;
-    telegramBindRequest = null;
-    telegramAwaitingStateSnapshot = false;
-    const t = telegramTransport;
-    telegramTransport = null;
-    telegramStatus = null;
-    telegramLastError = null;
-    dispatcher?.onDisconnected(dispatchId('telegram'));
+  function stopLane(lane: NeutralProviderLane): void {
+    clearLaneBindWatchdog(lane);
+    lane.openRequestId = null;
+    lane.bindRequest = null;
+    lane.awaitingStateSnapshot = false;
+    const t = lane.transport;
+    lane.transport = null;
+    lane.status = null;
+    lane.lastError = null;
+    dispatcher?.onDisconnected(dispatchId(lane.config.provider));
     // Capability state belongs to this transport lifecycle. Keeping a previous
     // welcome after disable/sync makes the stopped provider look available and
     // can let a later enable act on stale rollout information.
-    telegramServerFeatures = [];
-    telegramServerWelcomeReceived = false;
-    drainPendingProviderPrefs();
+    lane.serverFeatures = [];
+    lane.serverWelcomeReceived = false;
+    drainLanePendingPrefs(lane);
+    drainLanePendingBehavior(lane);
     t?.dispose();
   }
 
   function stopAll(): void {
     stopSlack();
-    stopTelegram();
+    for (const lane of lanes) stopLane(lane);
   }
 
   function startSlack(): void {
@@ -1951,6 +2492,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     ) {
       return;
     }
+    // serverFeatures intentionally survives reconnects for stable tool exposure,
+    // but capability-gated frames must wait for this transport's own welcome.
+    serverWelcomeReceived = false;
     // created 先声明后赋值: transport 工厂同步触发首个 onStatus(connecting),
     // 此时按"未注册"丢弃(status 随后统一置 connecting, 不丢信息)
     let created: HookTransport | null = null;
@@ -1958,13 +2502,22 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       url: store.effectiveUrl(),
       getAuthToken,
       refreshAuthToken,
-      buildHello: () => buildHello('slack'),
+      buildHello: () => buildHello(SLACK_HELLO_FEATURES, true),
       onMessage: (msg, send) => handleBusinessMessage('slack', msg, send),
       onWelcome: (payload) => {
         if (created === null || transport !== created) return;
         // server 能力集以最新一次握手为准(重连可能落到另一版本实例)
         serverFeatures = [...payload.features];
         serverWelcomeReceived = true;
+        // hello 发出后、welcome 返回前用户仍可能切换设置。能力协商完成时
+        // 补发当前有效值，避免 server 留在 hello 携带的旧快照。
+        if (serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)) {
+          created.send(
+            makeLifecyclePreference({
+              enabled: lifecycleAnnouncementEnabled(),
+            }),
+          );
+        }
         // 落回老 server(无 multi-team): 多绑定列表与缓存作废 —— 老 server 是
         // 单绑定权威(它会经 bind.update 推现状), 残留的多绑定行会让 toView
         // 误走 multi 映射、渲染层误开列表 UI。pendingBind 无条件清: 滚动发布
@@ -1986,6 +2539,7 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         lastError = err;
         // 掉线(含退避重连中): 在途往返快速失败, 不让调用方挂满超时
         if (s !== 'connected') {
+          serverWelcomeReceived = false;
           dispatcher?.onDisconnected(dispatchId('slack'));
           drainPendingPrefs();
           drainPendingTools();
@@ -1993,7 +2547,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         // 握手完成 → dispatcher 刷新发送函数并补发离线积压的 turn.end
         if (s === 'connected') {
           const t = created;
-          dispatcher?.onConnected(dispatchId('slack'), (m) => t.send(m));
+          // features 一并交出去: dispatcher 的 turn.reopen 回流按 server 本次
+          // 握手宣告的能力开关(滚动发布时重连可能落到不支持的旧实例)。
+          dispatcher?.onConnected(dispatchId('slack'), (m) => t.send(m), serverFeatures);
           // 阶段 4 起绑定走 SIWS OIDC, 由用户点「连接 Slack」显式发起(需开浏览器),
           // 不再随连接就绪自动绑 —— 抢占式绑定若自动补绑会让两台设备互相顶。
         }
@@ -2005,87 +2561,92 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     status = 'connecting';
   }
 
-  function startTelegram(): void {
+  function startLane(lane: NeutralProviderLane): void {
     if (
       !accountActive ||
       disposed ||
       !isAvailable() ||
-      !store.get().telegramEnabled ||
-      telegramTransport !== null
+      !lane.config.isEnabled() ||
+      lane.transport !== null
     ) {
       return;
     }
-    const url = getTelegramUrl().trim();
+    const { provider, label } = lane.config;
+    const url = lane.config.getUrl().trim();
     if (url.length === 0) {
-      telegramServerFeatures = [];
-      telegramServerWelcomeReceived = true;
-      telegramStatus = 'error';
-      telegramLastError = 'Telegram service endpoint is not configured';
+      lane.serverFeatures = [];
+      lane.serverWelcomeReceived = true;
+      lane.status = 'error';
+      lane.lastError = lane.config.notConfiguredError;
       notifyStatus(toView());
       return;
     }
-    telegramServerWelcomeReceived = false;
+    lane.serverWelcomeReceived = false;
     let created: HookTransport | null = null;
     created = createTransport({
       url,
       getAuthToken,
       refreshAuthToken,
-      buildHello: () => buildHello('telegram'),
-      onMessage: (msg, send) => handleBusinessMessage('telegram', msg, send),
+      buildHello: () => buildHello(lane.config.helloFeatures, false, lane.config.provider),
+      onMessage: (msg, send) => handleBusinessMessage(provider, msg, send),
       onWelcome: (payload) => {
-        if (created === null || telegramTransport !== created) return;
-        telegramServerFeatures = [...payload.features];
-        telegramServerWelcomeReceived = true;
-        const telegramSupported = serverTelegram();
-        telegramAwaitingStateSnapshot = telegramSupported;
-        if (!telegramSupported) {
+        if (created === null || lane.transport !== created) return;
+        lane.serverFeatures = [...payload.features];
+        lane.serverWelcomeReceived = true;
+        const supported = laneCapabilityReady(lane);
+        lane.awaitingStateSnapshot = supported;
+        if (!supported) {
           // A rolling deployment may briefly route this enabled client to an
           // older node. Preserve the user's explicit preference and keep the
           // transport alive so a later reconnect can negotiate capabilities
           // again. The auto-bind intent is also preserved: a toggle-on that
           // landed on an old node should complete after rollout without a
           // second user action. Only clear wire attempts tied to this node.
-          telegramOpenRequestId = null;
-          telegramBindRequest = null;
-          clearTelegramBindWatchdog();
-          drainPendingProviderPrefs();
-          dispatcher?.onDisconnected(dispatchId('telegram'));
+          lane.openRequestId = null;
+          lane.bindRequest = null;
+          clearLaneBindWatchdog(lane);
+          drainLanePendingPrefs(lane);
+          drainLanePendingBehavior(lane);
+          dispatcher?.onDisconnected(dispatchId(provider));
           log.warn(
-            'Telegram provider unavailable because Telegram service capability negotiation failed',
+            `${label} provider unavailable because ${label} service capability negotiation failed`,
           );
-        } else if (telegramStatus === 'connected') {
+        } else if (lane.status === 'connected') {
           // refreshHello() can upgrade an already-open socket after a rolling
           // deploy without another status transition.
           const t = created;
-          dispatcher?.onConnected(dispatchId('telegram'), (m) => t.send(m));
+          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m), lane.serverFeatures);
         }
         notifyStatus(toView());
       },
       onStatus: (s, err) => {
-        if (created === null || telegramTransport !== created) return;
-        telegramStatus = s;
-        telegramLastError = err;
-        if (s !== 'connected' || !serverTelegram()) {
-          dispatcher?.onDisconnected(dispatchId('telegram'));
-          drainPendingProviderPrefs();
+        if (created === null || lane.transport !== created) return;
+        lane.status = s;
+        lane.lastError = err;
+        if (s !== 'connected' || !laneCapabilityReady(lane)) {
+          dispatcher?.onDisconnected(dispatchId(provider));
+          drainLanePendingPrefs(lane);
+          drainLanePendingBehavior(lane);
         }
-        if (s === 'connected' && serverTelegram()) {
+        if (s === 'connected' && laneCapabilityReady(lane)) {
           const t = created;
-          dispatcher?.onConnected(dispatchId('telegram'), (m) => t.send(m));
+          dispatcher?.onConnected(dispatchId(provider), (m) => t.send(m), lane.serverFeatures);
         }
         notifyStatus(toView());
       },
       log,
     });
-    telegramTransport = created;
-    telegramStatus = 'connecting';
-    telegramLastError = null;
+    lane.transport = created;
+    lane.status = 'connecting';
+    lane.lastError = null;
   }
 
   function startEnabledProviders(): void {
     if (!accountActive || disposed) return;
     if (store.get().enabled) startSlack();
-    if (store.get().telegramEnabled) startTelegram();
+    for (const lane of lanes) {
+      if (lane.config.isEnabled()) startLane(lane);
+    }
   }
 
   return {
@@ -2099,16 +2660,38 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       notifyStatus(toView());
     },
     snapshot: () => toView(),
+    setLifecycleAnnouncement(enabled) {
+      store.setLifecycleAnnouncementOverride(enabled);
+      if (
+        transport !== null &&
+        status === 'connected' &&
+        serverWelcomeReceived &&
+        serverFeatures.includes(HOOK_FEATURE_LIFECYCLE_ANNOUNCEMENT)
+      ) {
+        const sent = transport.send(makeLifecyclePreference({ enabled }));
+        if (!sent) {
+          // 连接状态与 socket readyState 可能在 close 回调前短暂错位。偏好已经
+          // 持久化；主动重建连接，让下一次 hello 立即携带最新值，避免等待旧
+          // transport 的退避/回调后 server 继续沿用旧偏好。
+          log.warn('lifecycle preference send failed; reconnecting to resync persisted value');
+          stopSlack();
+          startSlack();
+        }
+      }
+      notifyStatus(toView());
+    },
     refreshHello() {
       let attempted = false;
       let sent = true;
       if (transport !== null && status === 'connected') {
         attempted = true;
-        sent = transport.send(makeHello(buildHello('slack'))) && sent;
+        sent = transport.send(makeHello(buildHello(SLACK_HELLO_FEATURES, true))) && sent;
       }
-      if (telegramTransport !== null && telegramStatus === 'connected') {
-        attempted = true;
-        sent = telegramTransport.send(makeHello(buildHello('telegram'))) && sent;
+      for (const lane of lanes) {
+        if (lane.transport !== null && lane.status === 'connected') {
+          attempted = true;
+          sent = lane.transport.send(makeHello(buildHello(lane.config.helloFeatures, false, lane.config.provider))) && sent;
+        }
       }
       return attempted && sent;
     },
@@ -2283,66 +2866,75 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         notifyStatus(toView());
         return;
       }
-      store.setProviderEnabled('telegram', enabled);
+      const lane = neutralLaneFor(provider);
+      if (lane === null) return;
+      lane.config.setEnabled(enabled);
       if (!enabled) {
-        telegramAutoBindIntent = false;
-        telegramOpenRequestId = null;
-        telegramBindRequest = null;
-        clearTelegramBindWatchdog();
-        const attemptId = telegramBinding?.attemptId;
+        lane.autoBindIntent = false;
+        lane.openRequestId = null;
+        lane.bindRequest = null;
+        clearLaneBindWatchdog(lane);
+        const attemptId = lane.binding?.attemptId;
         if (
           attemptId &&
-          telegramTransport !== null &&
-          telegramStatus === 'connected' &&
-          serverTelegram()
+          lane.transport !== null &&
+          lane.status === 'connected' &&
+          laneCapabilityReady(lane)
         ) {
-          telegramTransport.send(
-            makeProviderBindCancel({ requestId: randomUUID(), provider: 'telegram', attemptId }),
+          lane.transport.send(
+            makeProviderBindCancel({
+              requestId: randomUUID(),
+              provider: lane.config.provider,
+              attemptId,
+            }),
           );
         }
-        stopTelegram();
+        stopLane(lane);
         notifyStatus(toView());
         return;
       }
       // Cached state is presentation-only until the server's authoritative
       // snapshot arrives. Always arm explicit enable; a confirmed snapshot
       // clears the intent, while none/revoked starts a fresh one-time bind.
-      telegramAutoBindIntent = true;
-      if (telegramTransport === null) {
-        startTelegram();
-      } else if (telegramStatus === 'connected' && serverTelegram()) {
-        if (telegramBinding?.state === 'confirmed') telegramAutoBindIntent = false;
-        else if (initiateProviderBind('telegram')) telegramAutoBindIntent = false;
+      lane.autoBindIntent = true;
+      if (lane.transport === null) {
+        startLane(lane);
+      } else if (lane.status === 'connected' && laneCapabilityReady(lane)) {
+        if (lane.binding?.state === 'confirmed') lane.autoBindIntent = false;
+        else if (initiateProviderBind(lane)) lane.autoBindIntent = false;
       }
       notifyStatus(toView());
     },
     providerBindStart(provider) {
-      telegramAutoBindIntent = false;
-      return initiateProviderBind(provider);
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined) return false;
+      lane.autoBindIntent = false;
+      return initiateProviderBind(lane);
     },
     providerBindCancel(provider) {
-      const current = telegramBinding;
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined) return false;
+      const current = lane.binding;
       const attemptId = current?.attemptId;
       if (
-        provider !== 'telegram' ||
         current === null ||
         !attemptId ||
         !current.actions.includes('cancel') ||
-        telegramTransport === null ||
-        telegramStatus !== 'connected' ||
-        !serverTelegram()
+        lane.transport === null ||
+        lane.status !== 'connected' ||
+        !laneCapabilityReady(lane)
       ) {
         return false;
       }
       const requestId = randomUUID();
-      const sent = telegramTransport.send(
-        makeProviderBindCancel({ requestId, provider, attemptId }),
+      const sent = lane.transport.send(
+        makeProviderBindCancel({ requestId, provider: lane.config.provider, attemptId }),
       );
       if (sent) {
-        telegramBindRequest = { kind: 'cancel', requestId, attemptId };
-        clearTelegramBindWatchdog();
-        telegramOpenRequestId = null;
-        telegramBinding = {
+        lane.bindRequest = { kind: 'cancel', requestId, attemptId };
+        clearLaneBindWatchdog(lane);
+        lane.openRequestId = null;
+        lane.binding = {
           ...current,
           state: 'failed',
           connectUrl: null,
@@ -2355,42 +2947,37 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       return sent;
     },
     providerBindRevoke(provider) {
-      const bindingId = telegramBinding?.state === 'confirmed' ? telegramBinding.bindingId : null;
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined) return false;
+      const bindingId = lane.binding?.state === 'confirmed' ? lane.binding.bindingId : null;
       if (
-        provider !== 'telegram' ||
         !bindingId ||
-        !telegramBinding?.actions.includes('revoke') ||
-        telegramTransport === null ||
-        telegramStatus !== 'connected' ||
-        !serverTelegram()
+        !lane.binding?.actions.includes('revoke') ||
+        lane.transport === null ||
+        lane.status !== 'connected' ||
+        !laneCapabilityReady(lane)
       ) {
         return false;
       }
       const requestId = randomUUID();
-      const sent = telegramTransport.send(
-        makeProviderBindRevoke({ requestId, provider, bindingId }),
+      const sent = lane.transport.send(
+        makeProviderBindRevoke({ requestId, provider: lane.config.provider, bindingId }),
       );
-      if (sent) telegramBindRequest = { kind: 'revoke', requestId, bindingId };
+      if (sent) lane.bindRequest = { kind: 'revoke', requestId, bindingId };
       return sent;
     },
-    async openTelegramAction(action) {
-      if (!openTelegramUrl || telegramBinding === null) return false;
-      let url: string | null = null;
-      if (action === 'connect' && telegramBinding.actions.includes('open_connect_url')) {
-        url = telegramBinding.connectUrl;
-      } else if (telegramBinding.scopeName) {
-        if (action === 'add-to-group' && telegramBinding.actions.includes('add_to_group')) {
-          url = `https://t.me/${telegramBinding.scopeName}?startgroup=true`;
-        } else if (action === 'provider' && telegramBinding.actions.includes('open_provider')) {
-          url = `https://t.me/${telegramBinding.scopeName}`;
-        }
-      }
+    async openProviderAction(provider, action) {
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined || !lane.config.openUrl || lane.binding === null) return false;
+      const url = lane.config.actionUrl(action, lane.binding);
       if (!url) return false;
-      await openTelegramUrl(url);
+      await lane.config.openUrl(url);
       return true;
     },
     getProviderWorkspacePrefs(provider) {
-      return sendProviderPrefsRequest((requestId, bindingId) =>
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined) return Promise.reject(new HookNotConnectedError(provider));
+      return sendLanePrefsRequest(lane, (requestId, bindingId) =>
         makeProviderPrefsGet({
           requestId,
           provider,
@@ -2400,7 +2987,9 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       );
     },
     setProviderWorkspacePrefs(provider, workspace, patch) {
-      return sendProviderPrefsRequest((requestId, bindingId) =>
+      const lane = laneByProvider.get(provider);
+      if (lane === undefined) return Promise.reject(new HookNotConnectedError(provider));
+      return sendLanePrefsRequest(lane, (requestId, bindingId) =>
         makeProviderPrefsSet({
           requestId,
           provider,
@@ -2411,6 +3000,40 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
           ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
           ...(patch.agentKind !== undefined ? { agentKind: patch.agentKind } : {}),
           ...(patch.permissionMode !== undefined ? { permissionMode: patch.permissionMode } : {}),
+        }),
+      );
+    },
+    getTelegramBehavior(bindingId) {
+      return sendTelegramBehaviorRequest(bindingId, (requestId, currentBindingId) =>
+        makeProviderBehaviorGet({
+          requestId,
+          provider: 'telegram',
+          bindingId: currentBindingId,
+        }),
+      );
+    },
+    setTelegramBehavior(bindingId, patch) {
+      return sendTelegramBehaviorRequest(bindingId, (requestId, currentBindingId) => {
+        const payload: ProviderBehaviorSetPayload = {
+          requestId,
+          provider: 'telegram',
+          bindingId: currentBindingId,
+          ...(patch.emojiReactions !== undefined ? { emojiReactions: patch.emojiReactions } : {}),
+          ...(patch.replyQuoteDm !== undefined ? { replyQuoteDm: patch.replyQuoteDm } : {}),
+          ...(patch.replyQuoteGroup !== undefined
+            ? { replyQuoteGroup: patch.replyQuoteGroup }
+            : {}),
+        };
+        return makeProviderBehaviorSet(payload);
+      });
+    },
+    setTelegramGroupActivation(bindingId, chatId, mode) {
+      return sendTelegramBehaviorRequest(bindingId, (requestId, currentBindingId) =>
+        makeProviderBehaviorSet({
+          requestId,
+          provider: 'telegram',
+          bindingId: currentBindingId,
+          groupActivation: { chatId, value: mode === 'always' ? 'always' : null },
         }),
       );
     },
@@ -2429,9 +3052,11 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
       // when another caller is already waiting on the same physical drain.
       accountActive = false;
       accountGeneration += 1;
-      telegramOpenRequestId = null;
-      telegramBindRequest = null;
-      telegramAutoBindIntent = false;
+      for (const lane of lanes) {
+        lane.openRequestId = null;
+        lane.bindRequest = null;
+        lane.autoBindIntent = false;
+      }
       if (accountDeactivation !== null) {
         await accountDeactivation;
         return;
@@ -2446,11 +3071,15 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
         binding = null;
         multiBindings = [];
         pendingBind = null;
-        telegramBinding = null;
         serverFeatures = [];
         serverWelcomeReceived = false;
-        telegramServerFeatures = [];
-        telegramServerWelcomeReceived = false;
+        for (const lane of lanes) {
+          lane.binding = null;
+          lane.serverFeatures = [];
+          lane.serverWelcomeReceived = false;
+        }
+        resetGroupContextCursors();
+        resetTelegramSpeakerRegistrationCache();
         notifySlackToolProviderEnabledIfChanged();
         notifyStatus(toView());
       })();
@@ -2505,6 +3134,10 @@ export function createHookControlManager(deps: HookControlManagerDeps): HookCont
     dispose() {
       disposed = true;
       stopAll();
+      // dispatcher 由本 manager 独占持有(ipc.ts 在同一处创建两者), 所以它的
+      // 进程级信号订阅也随本次 dispose 一起退掉, 否则重建 manager 会叠加一个
+      // 对着废弃 dispatcher 状态跑的续跑监听。
+      dispatcher?.dispose();
     },
   };
 }

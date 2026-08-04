@@ -3301,7 +3301,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
         detail?: string;
         at: number;
       } | null;
-      standby: boolean;
       controlledBy: Array<{ deviceId: string; name: string }>;
       revokedControllers: string[];
       disabledControlDeviceIds: string[];
@@ -3381,11 +3380,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onOwnershipChanged: fanOutDeviceLinkOwnershipChanged,
     /** 控制端:目标设备「无响应」熔断状态翻转,payload: { deviceId, unresponsive } */
     onResponsivenessChanged: fanOutDeviceLinkResponsivenessChanged,
-    /**
-     * 同机单持有者仲裁角色变化,payload: { standby: boolean }。
-     * standby=true = 本机另一个 Cindy 实例正持有 device-link,本实例不连 relay。
-     */
-    onOwnershipChanged: fanOutDeviceLinkOwnershipChanged,
     /**
      * 控制端:远程会话镜像的本地冷缓存(main 落 userData,见 main/device-link/mirrorCacheStore.ts)。
      * 只做首屏加速,非权威;fresh 数据一到由 renderer 整体接管。

@@ -94,8 +94,6 @@ export const DEVICE_LINK_PUSH = {
    * payload: { keepAwake: boolean } —— renderer 据此同步开关显示状态。
    */
   KEEP_AWAKE_CHANGED: 'device-link:keep-awake-changed',
-  /** 同机单持有者仲裁角色变化。payload: { standby: boolean }。 */
-  OWNERSHIP_CHANGED: 'device-link:ownership-changed',
   /**
    * 同机单持有者仲裁的角色变化。payload: { standby: boolean }。
    * standby=true 表示本机另一个 Cindy 实例正持有 device-link 连接,本实例不连 relay ——

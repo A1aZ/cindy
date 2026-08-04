@@ -302,7 +302,6 @@ export class DeviceLinkOwnershipArbiter {
       if (canceled()) return;
       if (row === OP_TIMEOUT) {
         log.warn('ownership read timed out locally, aborting round');
-        this.setStandby(false);
         return;
       }
       if (!row) {
@@ -376,7 +375,6 @@ export class DeviceLinkOwnershipArbiter {
       this.setStandby(true);
     } catch (err) {
       log.warn('ownership tick failed (will retry next tick)', err);
-      this.setStandby(false);
       // 持有者续期持续抛错(如 DbClient worker 崩溃):与 store 不可用同栏,
       // 超过自我降级期限先停 client,避免同伴按 staleMs 接管后回到互踢。
       // 用新鲜时钟 —— 本轮的 now 是 await 之前捕获的,RPC 拖延后已经过时。

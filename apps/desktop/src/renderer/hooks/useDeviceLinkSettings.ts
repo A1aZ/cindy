@@ -159,9 +159,6 @@ export function useDeviceLinkSettings(active = true): DeviceLinkSettings {
     const offIssue = window.electronAPI.deviceLink.onConnectionIssue((p) => {
       setConnectionIssue(p.issue);
     });
-    const offOwnership = window.electronAPI.deviceLink.onOwnershipChanged((p) => {
-      setStandby(p.standby === true);
-    });
     const offControlled = window.electronAPI.deviceLink.onControlledState((p) => {
       setControlledBy(p.controllers ?? []);
     });

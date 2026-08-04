@@ -264,9 +264,10 @@ describe('armShutdownHardKillWatchdog', () => {
   });
 
   it('win32: wscript 单进程 watchdog — CreationDate+ExecutablePath 双校验, 无 PowerShell、无子进程', async () => {
-    const { armShutdownHardKillWatchdog, SHUTDOWN_HARD_KILL_GRACE_SECONDS } =
+    const { armShutdownHardKillWatchdog, prepareShutdownWatchdogScript, SHUTDOWN_HARD_KILL_GRACE_SECONDS } =
       await freshLifecycle();
     const { spawn, child } = fakeSpawn();
+    const scriptPath = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir })!;
 
     armShutdownHardKillWatchdog({
       spawn,
@@ -287,9 +288,9 @@ describe('armShutdownHardKillWatchdog', () => {
     expect(cmd).toBe(
       `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\wscript.exe`,
     );
-    const scriptPath = join(watchdogTmpDir, 'cindy-shutdown-watchdog.js');
-    // //B 批处理模式: 脚本错误静默退出不弹框; pid/宽限期(ms)/execPath 全走参数,
-    // 脚本内容与具体一次运行无关。
+    // 路径在 mkdtemp 唯一目录下, 不可被同 tmpdir 下其他进程预测或篡改。
+    expect(scriptPath).toMatch(/cindy-wd-/);
+    expect(scriptPath).toMatch(/watchdog\.js$/);
     expect(args).toEqual([
       '//B',
       '//E:JScript',
@@ -318,7 +319,7 @@ describe('armShutdownHardKillWatchdog', () => {
     expect(content).not.toMatch(/\b(const|let)\b|=>/);
   });
 
-  it('prepareShutdownWatchdogScript: 非 win32 no-op; win32 幂等复用同一路径', async () => {
+  it('prepareShutdownWatchdogScript: 非 win32 no-op; win32 幂等复用同一路径 (mkdtemp 唯一目录)', async () => {
     const { prepareShutdownWatchdogScript } = await freshLifecycle();
 
     expect(
@@ -326,7 +327,10 @@ describe('armShutdownHardKillWatchdog', () => {
     ).toBeNull();
 
     const first = prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: watchdogTmpDir });
-    expect(first).toBe(join(watchdogTmpDir, 'cindy-shutdown-watchdog.js'));
+    expect(first).not.toBeNull();
+    expect(first!).toMatch(/cindy-wd-/);
+    expect(first!).toMatch(/watchdog\.js$/);
+    expect(existsSync(first!)).toBe(true);
     // 幂等: 第二次 (即使传别的目录) 复用已生成的路径, 不重复写盘
     expect(
       prepareShutdownWatchdogScript({ platform: 'win32', tmpDir: join(watchdogTmpDir, 'other') }),

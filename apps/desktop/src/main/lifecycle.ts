@@ -34,7 +34,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -252,13 +252,15 @@ const WATCHDOG_SCRIPT_CONTENT = [
 ].join('\r\n');
 
 let _watchdogScriptPath: string | null = null;
+let _watchdogScriptPrepareFailed = false;
 
 /**
- * 预生成 win32 watchdog 脚本到临时目录 (固定文件名, 内容为上面的常量)。
+ * 预生成 win32 watchdog 脚本到 mkdtemp 唯一目录 (不可预测路径)。
  * 在 installQuitHandler (启动期) 调用, 让 shutdown 热路径上的布防保持零盘
  * IO —— 布防注释 (beginShutdown) 依赖这一点。写盘失败直接抛给调用方:
- * 启动期调用点只 warn (布防时还会内联重试一次), 布防期调用点走 spawn 失败
- * 的重试/缺席标记路径。非 win32 平台 no-op 返回 null。幂等: 成功一次后复用。
+ * 启动期调用点只 warn (布防期不再重试写盘, 直接走缺席标记路径)。
+ * 非 win32 平台 no-op 返回 null。幂等: 成功一次后复用; 失败一次后不再重试
+ * (避免退出热路径被无响应存储阻塞)。
  */
 export function prepareShutdownWatchdogScript(
   options: { platform?: NodeJS.Platform; tmpDir?: string } = {},
@@ -266,10 +268,17 @@ export function prepareShutdownWatchdogScript(
   const platform = options.platform ?? process.platform;
   if (platform !== 'win32') return null;
   if (_watchdogScriptPath) return _watchdogScriptPath;
-  const scriptPath = join(options.tmpDir ?? tmpdir(), 'cindy-shutdown-watchdog.js');
-  writeFileSync(scriptPath, WATCHDOG_SCRIPT_CONTENT);
-  _watchdogScriptPath = scriptPath;
-  return scriptPath;
+  if (_watchdogScriptPrepareFailed) return null;
+  try {
+    const dir = mkdtempSync(join(options.tmpDir ?? tmpdir(), 'cindy-wd-'));
+    const scriptPath = join(dir, 'watchdog.js');
+    writeFileSync(scriptPath, WATCHDOG_SCRIPT_CONTENT);
+    _watchdogScriptPath = scriptPath;
+    return scriptPath;
+  } catch (e) {
+    _watchdogScriptPrepareFailed = true;
+    throw e;
+  }
 }
 
 let _watchdogArmed = false;

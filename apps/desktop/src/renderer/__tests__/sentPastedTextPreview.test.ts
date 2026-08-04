@@ -34,7 +34,7 @@ import {
 import type { PastedTextRange } from '@/lib/imageRef';
 
 const sourcePath = resolve(__dirname, '..', 'components', 'chat', 'UserMessage.tsx');
-const source = readFileSync(sourcePath, 'utf8');
+const source = readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n');
 
 const LOCALES = ['zh-CN', 'en', 'ja', 'ko'] as const;
 

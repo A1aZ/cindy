@@ -29,13 +29,13 @@ import { checkSkillMdConsistency } from './skillSlot.js';
 // to be written again.
 const RECEIPT_SCHEMA_VERSION = 2;
 const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
+const MAX_PENDING_MUTATION_BYTES = 64 * 1024;
 const MAX_ICON_DATA_URL_BYTES = 768 * 1024;
 /**
  * 受管 icon 快照的完整形态:声明的图片 mime + 严格 base64 载荷。载荷字符集也要
  * 校验 —— 只认前缀会让被改写的 receipt 把任意字符串塞进 renderer 的 img src。
  */
-const ICON_DATA_URL_RE =
-  /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
+const ICON_DATA_URL_RE = /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/;
 
 /**
  * 一次明确批准的插件安装事实；只允许 Host 写入安装目录之外的状态根。
@@ -74,6 +74,12 @@ export type GhostInstallReceiptReadResult =
   | { state: 'approved'; receipt: GhostInstallReceipt }
   | { state: 'legacy-unapproved' }
   | { state: 'invalid'; reason: string };
+
+export type GhostInstallReceiptRecoveryReadResult =
+  | { state: 'approved'; receipt: GhostInstallReceipt }
+  | { state: 'missing' }
+  | { state: 'invalid'; reason: string }
+  | { state: 'unreadable'; reason: string };
 
 /**
  * 一次性 legacy 迁移的落地台账。存在即表示"本机已跑过一轮从旧安装布局 backfill
@@ -126,17 +132,31 @@ export interface GhostLegacyMigrationLedger {
  * 不等/缺失 = 未提交。两者都是已落盘事实,判定不引入额外写窗口。
  */
 export type GhostPendingMutation =
-  | { kind: 'install'; packageSha256: string }
-  | { kind: 'update'; packageSha256: string; backupDirName: string }
+  | { kind: 'install'; packageSha256: string; clearBuiltinTombstone?: boolean }
+  | {
+      kind: 'update';
+      packageSha256: string;
+      backupDirName: string;
+      /** Durable phase for distinguishing pre-rename crashes from swapped content. */
+      phase?: 'prepared' | 'backed-up' | 'published';
+      /** Hash of the previously approved bytes, when an approval existed. */
+      oldPackageSha256?: string;
+    }
   // uninstall 不带 packageSha256:它的提交信号不是"receipt 写到某版本",而是"receipt +
   // 内容目录都已移除"。恢复见到它就把两者删干净(顺序无关,幂等)。
-  | { kind: 'uninstall' };
+  | { kind: 'uninstall'; builtinTombstone?: boolean };
+
+export type GhostPendingMutationReadResult =
+  | { state: 'valid'; mutation: GhostPendingMutation }
+  | { state: 'missing' }
+  | { state: 'invalid'; reason: string }
+  | { state: 'unreadable'; reason: string };
+
+export type GhostPendingMutationListResult =
+  { state: 'ok'; ids: string[]; blocked: boolean } | { state: 'unreadable'; reason: string };
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
-  /** receipt 首写后的自动落账写失败(进程内关门标志,见 migrationDoorClosed)。 */
-  private autoLedgerWriteFailed = false;
-
   constructor(private readonly getRootDir: () => string) {}
 
   rootDir(): string {
@@ -144,34 +164,49 @@ export class GhostInstallReceiptStore {
   }
 
   read(id: string): GhostInstallReceiptReadResult {
+    const result = this.readForRecovery(id);
+    if (result.state === 'approved') return result;
+    if (result.state === 'missing') return { state: 'legacy-unapproved' };
+    return { state: 'invalid', reason: result.reason };
+  }
+
+  /** Recovery must not confuse transient state-root IO with missing/corrupt approval state. */
+  readForRecovery(id: string): GhostInstallReceiptRecoveryReadResult {
     const receiptPath = this.receiptPath(id);
     let stat: fs.Stats;
     try {
       stat = fs.lstatSync(receiptPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { state: 'legacy-unapproved' };
+        return { state: 'missing' };
       }
       return {
-        state: 'invalid',
+        state: 'unreadable',
         reason: error instanceof Error ? error.message : String(error),
       };
     }
     if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) {
       return { state: 'invalid', reason: 'receipt 不是普通文件或超过大小上限' };
     }
+    let text: string;
     try {
-      const parsed = JSON.parse(fs.readFileSync(receiptPath, 'utf8')) as unknown;
-      const validated = validateReceipt(parsed, id);
-      return validated.ok
-        ? { state: 'approved', receipt: validated.receipt }
-        : { state: 'invalid', reason: validated.reason };
+      text = fs.readFileSync(receiptPath, 'utf8');
     } catch (error) {
       return {
-        state: 'invalid',
+        state: 'unreadable',
         reason: error instanceof Error ? error.message : String(error),
       };
     }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch (error) {
+      return { state: 'invalid', reason: error instanceof Error ? error.message : String(error) };
+    }
+    const validated = validateReceipt(parsed, id);
+    return validated.ok
+      ? { state: 'approved', receipt: validated.receipt }
+      : { state: 'invalid', reason: validated.reason };
   }
 
   /**
@@ -187,7 +222,8 @@ export class GhostInstallReceiptStore {
     options: { skillSourceDir?: string; requireSkillSnapshot?: boolean } = {},
   ): Promise<void> {
     const validated = validateReceipt(receipt, receipt.id);
-    if (!validated.ok) throw new Error(`refusing to write invalid ghost receipt: ${validated.reason}`);
+    if (!validated.ok)
+      throw new Error(`refusing to write invalid ghost receipt: ${validated.reason}`);
 
     const root = this.rootDir();
     await fs.promises.mkdir(root, { recursive: true });
@@ -195,6 +231,19 @@ export class GhostInstallReceiptStore {
       await this.ensureSkillSnapshot(receipt, options.skillSourceDir);
     } catch (error) {
       if (options.requireSkillSnapshot !== false) throw error;
+    }
+    // Migration ledger 是 receipt 对外生效的前置提交记录。正常装入/更新若先写
+    // receipt、后 best-effort 落 ledger，会自然制造“有效 receipt + 无 ledger”的
+    // mixed 状态；下一版既不能安全判断其它无 receipt 目录是 legacy 还是被删批准。
+    // legacy migration/recovery 已在首个 backfill 前写好 in-progress，因此这里仅在
+    // **完全没有** ledger 时先写 completed，且失败必须阻断 receipt 提交。
+    if (!this.hasMigrationLedger()) {
+      await this.writeMigrationLedger({
+        version: 1,
+        migratedAt: new Date().toISOString(),
+        migratedIds: [],
+        state: 'completed',
+      });
     }
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
@@ -211,46 +260,25 @@ export class GhostInstallReceiptStore {
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }
-    // 首次写 receipt 即落迁移台账,把一次性门在"新模型开始活动"那一刻关死。
-    // 不落的话有一个窗口:新装 receipt 后、下一轮 reconcile 前,删掉唯一的 receipt
-    // 会让 hasAnyReceipt 判据也失效(ledger 尚未写),"改 manifest → 删 receipt →
-    // 骗 backfill"就能凭空铸出扩权批准。台账写失败不阻断本次批准(状态根刚写成功,
-    // 失败面极窄),下一轮迁移检查的 hasAnyReceipt 判据会兜住并补写。
-    // 只在**完全没有**台账时落 completed:迁移进行中(in-progress)的台账绝不能被
-    // backfill 自己的 receipt 首写覆盖成"已完成",否则中途崩溃后剩余插件永不迁。
-    if (!this.hasMigrationLedger()) {
-      await this
-        .writeMigrationLedger({
-          version: 1,
-          migratedAt: new Date().toISOString(),
-          migratedIds: [],
-          state: 'completed',
-        })
-        .catch(() => {
-          // 不作 best-effort 吞掉:置进程内关门标志(migrationDoorClosed 优先读它),
-          // 消除"落账失败 + 同会话删 receipt → 骗重铸"的窗口。批准本身不回滚 ——
-          // receipt 刚写进同一目录,此处失败面极窄,且下次启动会经 hasAnyValidReceipt
-          // 判据补写台账。
-          this.autoLedgerWriteFailed = true;
-        });
-    }
     await this.pruneStaleSkillSnapshots(receipt);
   }
 
   async remove(id: string): Promise<void> {
-    await fs.promises.rm(this.receiptPath(id), { force: true });
-    // `skill-snapshots` 段必须是真目录才能递归删 `<id>`:该段被换成 junction 时,
-    // recursive rm 会穿透删外部目录内容。`<id>` 自身是链接没关系 —— rm 按 lstat
-    // 语义只摘链接本体,不进目标。段可疑/缺失就跳过(receipt 已删,批准已失效)。
-    const snapshotsDir = path.join(this.rootDir(), 'skill-snapshots');
-    let kind: string;
-    try {
-      kind = await classifyGhostDirEntry(snapshotsDir);
-    } catch {
-      return;
+    const receiptPath = this.receiptPath(id);
+    const receiptKind = await classifyCleanupEntry(receiptPath);
+    if (receiptKind === 'missing') {
+      // ENOENT is already-clean and must remain idempotent.
+    } else if (receiptKind !== 'file') {
+      throw new Error(`ghost receipt path is not a regular file: ${receiptPath}`);
+    } else {
+      await fs.promises.rm(receiptPath, { force: true });
     }
-    if (kind !== 'directory') return;
-    await fs.promises.rm(path.join(snapshotsDir, id), {
+    // Validate both managed snapshot path segments before recursive deletion.
+    // Missing segments mean cleanup is already complete; links, non-directories,
+    // and transient IO failures remain observable so the caller keeps its journal.
+    const snapshotPath = await this.assertManagedSnapshotParent(id, { createMissing: false });
+    if (!snapshotPath) return;
+    await fs.promises.rm(snapshotPath, {
       recursive: true,
       force: true,
     });
@@ -258,16 +286,18 @@ export class GhostInstallReceiptStore {
 
   /** `remove` 的同步版:启动恢复(构造期同步)收尾未完成卸载用,判据同 `remove`。 */
   removeSync(id: string): void {
-    fs.rmSync(this.receiptPath(id), { force: true });
-    const snapshotsDir = path.join(this.rootDir(), 'skill-snapshots');
-    let kind: string;
-    try {
-      kind = classifyGhostDirEntrySync(snapshotsDir);
-    } catch {
-      return;
+    const receiptPath = this.receiptPath(id);
+    const receiptKind = classifyCleanupEntrySync(receiptPath);
+    if (receiptKind === 'missing') {
+      // ENOENT is already-clean and must remain idempotent.
+    } else if (receiptKind !== 'file') {
+      throw new Error(`ghost receipt path is not a regular file: ${receiptPath}`);
+    } else {
+      fs.rmSync(receiptPath, { force: true });
     }
-    if (kind !== 'directory') return;
-    fs.rmSync(path.join(snapshotsDir, id), { recursive: true, force: true });
+    const snapshotPath = this.assertManagedSnapshotParentSync(id, { createMissing: false });
+    if (!snapshotPath) return;
+    fs.rmSync(snapshotPath, { recursive: true, force: true });
   }
 
   skillSnapshotRoot(id: string, revision: string): string {
@@ -329,35 +359,44 @@ export class GhostInstallReceiptStore {
     return current;
   }
 
+  private assertManagedSnapshotParentSync(
+    id: string,
+    opts: { createMissing: boolean },
+  ): string | null {
+    if (!isValidGhostId(id)) throw new Error('invalid ghost id for snapshot path');
+    const root = this.rootDir();
+    let current = root;
+    for (const segment of ['skill-snapshots', id]) {
+      current = path.join(current, segment);
+      let kind: ReturnType<typeof classifyGhostDirEntrySync> | null;
+      try {
+        kind = classifyGhostDirEntrySync(current);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        kind = null;
+      }
+      if (kind === null) {
+        if (!opts.createMissing) return null;
+        fs.mkdirSync(current);
+        continue;
+      }
+      if (kind !== 'directory') {
+        throw new Error(
+          `skill snapshot path segment is not a real directory: ${segment} (${kind})`,
+        );
+      }
+    }
+    const realRoot = fs.realpathSync(root);
+    const realParent = fs.realpathSync(current);
+    if (!isPathInsideDir(realRoot, realParent)) {
+      throw new Error('skill snapshot parent escaped the approval state root');
+    }
+    return current;
+  }
+
   /** 迁移台账路径。点开头,不会与任何合法 ghost id 的 `<id>.json` receipt 撞名。 */
   private migrationLedgerPath(): string {
     return path.join(this.rootDir(), '.legacy-migration.json');
-  }
-
-  /**
-   * 状态根里是否已有任何**有效** receipt。它是迁移门的第二道判据:有有效 receipt
-   * = 新模型已在本机运转过,此后缺某个 receipt 只能是删除,不再触发迁移 ——
-   * 否则"空目录首启不落 ledger"(为给 legacy 恢复流程留门)会让删 receipt 骗迁移
-   * 复活。ENOENT = 状态根未诞生,按无 receipt 处理。
-   *
-   * 只认**有效**而不是"存在 json 文件":损坏/旧 schema 的 receipt 正是 §5 要求迁移
-   * 治愈的对象(如从未发布的 v1 格式),把它当"活动过"会把治愈路径堵死。能把 receipt
-   * 改坏的进程需要状态根写权限,与 §7 登记的"可伪造合法 receipt"是同一攻击者类,
-   * 此判据不给它新增能力。
-   */
-  hasAnyValidReceipt(): boolean {
-    try {
-      return fs
-        .readdirSync(this.rootDir(), { withFileTypes: true })
-        .some((entry) => {
-          if (!entry.isFile() || !entry.name.endsWith('.json')) return false;
-          const id = entry.name.slice(0, -'.json'.length);
-          return isValidGhostId(id) && this.read(id).state === 'approved';
-        });
-    } catch (error) {
-      // 与 hasMigrationLedger 同一保守方向:读不动就当"有",绝不因此把迁移放开。
-      return (error as NodeJS.ErrnoException).code !== 'ENOENT';
-    }
   }
 
   /** 读迁移台账(缺失/损坏返回 null;追加 id 时用,判定门只看 hasMigrationLedger)。 */
@@ -366,11 +405,25 @@ export class GhostInstallReceiptStore {
       const raw = JSON.parse(
         fs.readFileSync(this.migrationLedgerPath(), 'utf8'),
       ) as GhostLegacyMigrationLedger;
-      if (!raw || raw.version !== 1 || !Array.isArray(raw.migratedIds)) return null;
+      if (
+        !raw ||
+        raw.version !== 1 ||
+        typeof raw.migratedAt !== 'string' ||
+        !isValidUniqueGhostIdArray(raw.migratedIds)
+      ) {
+        return null;
+      }
       if (raw.state !== undefined && raw.state !== 'in-progress' && raw.state !== 'completed') {
         return null;
       }
-      if (raw.state === 'in-progress' && !Array.isArray(raw.pendingIds)) return null;
+      if (raw.failedIds !== undefined && !isValidUniqueGhostIdArray(raw.failedIds)) return null;
+      if (
+        raw.state === 'in-progress' &&
+        (!isValidUniqueGhostIdArray(raw.pendingIds) || raw.pendingIds.length === 0)
+      ) {
+        return null;
+      }
+      if (raw.state !== 'in-progress' && raw.pendingIds !== undefined) return null;
       return raw;
     } catch {
       return null;
@@ -387,11 +440,6 @@ export class GhostInstallReceiptStore {
    * 给这类进程送一条重铸授权的路。调用方发现"存在但读不出"应记 error 日志。
    */
   migrationDoorClosed(): boolean {
-    // 进程内保险门:receipt 首写后的自动落账写失败时置位(见 write())。没有它,
-    // "落账失败 + 同会话内 receipt 又被删"的组合会让 hasAnyValidReceipt 判据也
-    // 失效,可变 manifest 就能骗一次重铸 —— 状态根刚成功写过 receipt,门在本进程
-    // 内必须视为已关;下次启动 hasAnyValidReceipt 或补写成功的台账接棒。
-    if (this.autoLedgerWriteFailed) return true;
     if (!this.hasMigrationLedger()) return false;
     const ledger = this.readMigrationLedger();
     return ledger === null || ledger.state !== 'in-progress';
@@ -465,38 +513,132 @@ export class GhostInstallReceiptStore {
     fs.rmSync(this.pendingMutationPath(id), { force: true });
   }
 
-  readPendingMutationSync(id: string): GhostPendingMutation | null {
+  readPendingMutationSync(id: string): GhostPendingMutationReadResult {
     let raw: Record<string, unknown>;
+    const markerPath = this.pendingMutationPath(id);
     try {
-      raw = JSON.parse(fs.readFileSync(this.pendingMutationPath(id), 'utf8')) as Record<string, unknown>;
-    } catch {
-      return null;
+      const stat = fs.lstatSync(markerPath);
+      if (!stat.isFile() || stat.size > MAX_PENDING_MUTATION_BYTES) {
+        return { state: 'invalid', reason: 'journal is not a regular file or exceeds size limit' };
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'missing' };
+      return {
+        state: 'unreadable',
+        reason: error instanceof Error ? error.message : String(error),
+      };
     }
-    if (raw.kind === 'uninstall') return { kind: 'uninstall' };
+    let text: string;
+    try {
+      text = fs.readFileSync(markerPath, 'utf8');
+    } catch (error) {
+      return {
+        state: 'unreadable',
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch (error) {
+      return { state: 'invalid', reason: error instanceof Error ? error.message : String(error) };
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { state: 'invalid', reason: 'journal must be an object' };
+    }
+    raw = parsed as Record<string, unknown>;
+    if (raw.version !== 1 || raw.id !== id) {
+      return { state: 'invalid', reason: 'journal version/id mismatch' };
+    }
+    if (raw.kind === 'uninstall') {
+      if (raw.builtinTombstone !== undefined && typeof raw.builtinTombstone !== 'boolean') {
+        return { state: 'invalid', reason: 'journal builtinTombstone is invalid' };
+      }
+      return {
+        state: 'valid',
+        mutation: {
+          kind: 'uninstall',
+          ...(raw.builtinTombstone === true ? { builtinTombstone: true } : {}),
+        },
+      };
+    }
     if (typeof raw.packageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.packageSha256)) {
-      return null;
+      return { state: 'invalid', reason: 'journal packageSha256 is invalid' };
     }
-    if (raw.kind === 'install') return { kind: 'install', packageSha256: raw.packageSha256 };
-    if (raw.kind === 'update' && typeof raw.backupDirName === 'string') {
-      return { kind: 'update', packageSha256: raw.packageSha256, backupDirName: raw.backupDirName };
+    if (raw.kind === 'install') {
+      if (
+        raw.clearBuiltinTombstone !== undefined &&
+        typeof raw.clearBuiltinTombstone !== 'boolean'
+      ) {
+        return { state: 'invalid', reason: 'journal clearBuiltinTombstone is invalid' };
+      }
+      return {
+        state: 'valid',
+        mutation: {
+          kind: 'install',
+          packageSha256: raw.packageSha256,
+          ...(raw.clearBuiltinTombstone === true ? { clearBuiltinTombstone: true } : {}),
+        },
+      };
     }
-    return null;
+    if (
+      raw.kind === 'update' &&
+      typeof raw.backupDirName === 'string' &&
+      isManagedBackupDirName(id, raw.backupDirName)
+    ) {
+      const phase = raw.phase === undefined ? undefined : raw.phase;
+      if (
+        phase !== undefined &&
+        phase !== 'prepared' &&
+        phase !== 'backed-up' &&
+        phase !== 'published'
+      ) {
+        return { state: 'invalid', reason: 'journal update phase is invalid' };
+      }
+      const oldPackageSha256 = raw.oldPackageSha256;
+      if (
+        oldPackageSha256 !== undefined &&
+        (typeof oldPackageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(oldPackageSha256))
+      ) {
+        return { state: 'invalid', reason: 'journal oldPackageSha256 is invalid' };
+      }
+      return {
+        state: 'valid',
+        mutation: {
+          kind: 'update',
+          packageSha256: raw.packageSha256,
+          backupDirName: raw.backupDirName,
+          ...(phase !== undefined ? { phase } : {}),
+          ...(oldPackageSha256 !== undefined ? { oldPackageSha256 } : {}),
+        },
+      };
+    }
+    return { state: 'invalid', reason: 'journal kind/backupDirName is invalid' };
   }
 
   /** 状态根里所有未清的事务标记 id(启动恢复用)。 */
-  listPendingMutationIdsSync(): string[] {
+  listPendingMutationIdsSync(): GhostPendingMutationListResult {
     let names: string[];
     try {
       names = fs.readdirSync(this.rootDir());
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { state: 'ok', ids: [], blocked: false };
+      }
+      return {
+        state: 'unreadable',
+        reason: error instanceof Error ? error.message : String(error),
+      };
     }
     const ids: string[] = [];
+    let blocked = false;
     for (const name of names) {
       const match = /^\.pending-(.+)\.json$/.exec(name);
-      if (match && isValidGhostId(match[1])) ids.push(match[1]);
+      if (!match) continue;
+      if (isValidGhostId(match[1])) ids.push(match[1]);
+      else blocked = true;
     }
-    return ids;
+    return { state: 'ok', ids, blocked };
   }
 
   private receiptPath(id: string): string {
@@ -658,9 +800,7 @@ export class GhostInstallReceiptStore {
     receipt: GhostInstallReceipt,
     snapshotDir: string,
   ): Promise<boolean> {
-    const actual = await hashApprovedSkillContent(receipt.manifest, snapshotDir).catch(
-      () => null,
-    );
+    const actual = await hashApprovedSkillContent(receipt.manifest, snapshotDir).catch(() => null);
     if (!actual) return false;
     return (receipt.manifest.skill?.items ?? []).every(
       (item) => actual[item.dir] === receipt.skillContentSha256[item.dir],
@@ -703,6 +843,42 @@ export class GhostInstallReceiptStore {
             .catch(() => undefined),
         ),
     );
+  }
+}
+
+function isValidUniqueGhostIdArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.every((id) => isValidGhostId(id)) &&
+    new Set(value).size === value.length
+  );
+}
+
+function isManagedBackupDirName(id: string, name: string): boolean {
+  return new RegExp(`^\\.cindy-updating-${escapeRegExp(id)}-[0-9a-f]{8}$`).test(name);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+type CleanupEntryKind = 'missing' | 'file' | 'directory' | 'link' | 'other';
+
+async function classifyCleanupEntry(absPath: string): Promise<CleanupEntryKind> {
+  try {
+    return await classifyGhostDirEntry(absPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    throw error;
+  }
+}
+
+function classifyCleanupEntrySync(absPath: string): CleanupEntryKind {
+  try {
+    return classifyGhostDirEntrySync(absPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+    throw error;
   }
 }
 
@@ -851,23 +1027,23 @@ function validateReceipt(
   }
   if (
     value.iconDataUrl !== undefined &&
-    (
-      typeof value.iconDataUrl !== 'string' ||
+    (typeof value.iconDataUrl !== 'string' ||
       Buffer.byteLength(value.iconDataUrl, 'utf8') > MAX_ICON_DATA_URL_BYTES ||
-      !ICON_DATA_URL_RE.test(value.iconDataUrl)
-    )
+      !ICON_DATA_URL_RE.test(value.iconDataUrl))
   ) {
     return { ok: false, reason: 'receipt iconDataUrl 不合法' };
   }
-  if (!value.localeResources || typeof value.localeResources !== 'object' || Array.isArray(value.localeResources)) {
+  if (
+    !value.localeResources ||
+    typeof value.localeResources !== 'object' ||
+    Array.isArray(value.localeResources)
+  ) {
     return { ok: false, reason: 'receipt localeResources 不合法' };
   }
   const expectedLocalePaths = [
     ...new Set(Object.values(manifestResult.manifest.locales ?? {})),
   ].sort();
-  const actualLocalePaths = Object.keys(
-    value.localeResources as Record<string, unknown>,
-  ).sort();
+  const actualLocalePaths = Object.keys(value.localeResources as Record<string, unknown>).sort();
   if (
     expectedLocalePaths.length !== actualLocalePaths.length ||
     expectedLocalePaths.some((localePath, index) => localePath !== actualLocalePaths[index])
@@ -896,18 +1072,14 @@ function validateReceipt(
       enabled: value.enabled,
       trust,
       skillContentSha256,
-      ...(typeof value.packageSha256 === 'string'
-        ? { packageSha256: value.packageSha256 }
-        : {}),
+      ...(typeof value.packageSha256 === 'string' ? { packageSha256: value.packageSha256 } : {}),
       ...(typeof value.iconDataUrl === 'string' ? { iconDataUrl: value.iconDataUrl } : {}),
     },
   };
 }
 
 function isRevision(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
-    value,
-  );
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 }
 
 async function copyRegularDirectory(source: string, target: string): Promise<void> {
@@ -948,11 +1120,7 @@ function validateTrust(raw: unknown): GhostTrustInfo | null {
   ) {
     return null;
   }
-  const optionalStrings = [
-    'publisherName',
-    'publisherKeyId',
-    'reviewerName',
-  ] as const;
+  const optionalStrings = ['publisherName', 'publisherKeyId', 'reviewerName'] as const;
   for (const key of optionalStrings) {
     if (value[key] !== undefined && typeof value[key] !== 'string') return null;
   }

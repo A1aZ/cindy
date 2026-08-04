@@ -4,7 +4,15 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { fingerprintDirContent, provisionBuiltinGhosts } from '../builtinGhostProvisioner.js';
+import {
+  fingerprintDirContent,
+  isTrustedBuiltinSeedSource,
+  PROVISIONING_STATE_FILE,
+  provisionBuiltinGhosts,
+  readBuiltinTombstones,
+  recordBuiltinTombstone,
+  renameBuiltinTombstone,
+} from '../builtinGhostProvisioner.js';
 
 const tempDirs: string[] = [];
 
@@ -15,9 +23,244 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     tempDirs.splice(0).map((dir) => fs.promises.rm(dir, { recursive: true, force: true })),
   );
+});
+
+async function writeMinimalSeed(seedRoot: string, id: string): Promise<string> {
+  const seedDir = path.join(seedRoot, id);
+  await fs.promises.mkdir(seedDir, { recursive: true });
+  await fs.promises.writeFile(
+    path.join(seedDir, 'ghost.json'),
+    JSON.stringify({
+      schemaVersion: 2,
+      id,
+      name: id,
+      version: '1.0.0',
+      kind: 'chip',
+      entry: 'main.js',
+      slots: ['tool'],
+      tools: [{ name: 'run', description: 'Run it' }],
+    }),
+  );
+  await fs.promises.writeFile(path.join(seedDir, 'main.js'), '// brain');
+  return seedDir;
+}
+
+describe('builtin provisioning durable state', () => {
+  it('writes tombstones through an atomic replacement without leaving temp files', async () => {
+    const repoRoot = await makeTempDir();
+
+    recordBuiltinTombstone(repoRoot, 'builtin-test');
+
+    expect(readBuiltinTombstones(repoRoot)).toEqual(['builtin-test']);
+    expect((await fs.promises.readdir(repoRoot)).filter((name) => name.includes('.tmp-'))).toEqual(
+      [],
+    );
+  });
+
+  it('reports tombstone replacement failure instead of claiming the uninstall intent persisted', async () => {
+    const repoRoot = await makeTempDir();
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      const error = new Error('access denied') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    expect(() => recordBuiltinTombstone(repoRoot, 'builtin-test')).toThrow(
+      'builtin provisioning state write failed',
+    );
+    expect(fs.existsSync(path.join(repoRoot, PROVISIONING_STATE_FILE))).toBe(false);
+    rename.mockRestore();
+  });
+
+  it('moves renamed tombstones in one atomic state update', async () => {
+    const repoRoot = await makeTempDir();
+    recordBuiltinTombstone(repoRoot, 'builtin-old');
+
+    expect(renameBuiltinTombstone(repoRoot, 'builtin-old', 'builtin-new')).toBe(true);
+    expect(readBuiltinTombstones(repoRoot)).toEqual(['builtin-new']);
+  });
+
+  it('preserves the old tombstone when an atomic rename update cannot commit', async () => {
+    const repoRoot = await makeTempDir();
+    recordBuiltinTombstone(repoRoot, 'builtin-old');
+    const rename = vi.spyOn(fs, 'renameSync').mockImplementationOnce(() => {
+      const error = new Error('access denied') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    expect(() => renameBuiltinTombstone(repoRoot, 'builtin-old', 'builtin-new')).toThrow(
+      'builtin provisioning state write failed',
+    );
+    expect(readBuiltinTombstones(repoRoot)).toEqual(['builtin-old']);
+    rename.mockRestore();
+  });
+
+  it('fails closed on a corrupt ledger instead of overwriting it or reseeding', async () => {
+    const root = await makeTempDir();
+    const seedRoot = path.join(root, 'seeds');
+    const repoRoot = path.join(root, 'installed');
+    await writeMinimalSeed(seedRoot, 'builtin-test');
+    await fs.promises.mkdir(repoRoot, { recursive: true });
+    const stateFile = path.join(repoRoot, PROVISIONING_STATE_FILE);
+    await fs.promises.writeFile(stateFile, '{broken');
+    const warn = vi.fn();
+
+    const outcome = await provisionBuiltinGhosts({
+      seedRootDirs: [seedRoot],
+      repoRootDir: repoRoot,
+      log: { info: vi.fn(), warn },
+    });
+
+    expect(outcome.skipped).toEqual(['builtin-test']);
+    expect(fs.existsSync(path.join(repoRoot, 'builtin-test'))).toBe(false);
+    expect(await fs.promises.readFile(stateFile, 'utf8')).toBe('{broken');
+    expect(() => readBuiltinTombstones(repoRoot)).toThrow(
+      'builtin provisioning state is unreadable',
+    );
+    expect(warn).toHaveBeenCalledWith(
+      'builtin provisioning state unreadable',
+      expect.objectContaining({ file: stateFile }),
+    );
+  });
+
+  it('fails closed on path-traversal ids in the seeded ledger', async () => {
+    const root = await makeTempDir();
+    const seedRoot = path.join(root, 'seeds');
+    const repoRoot = path.join(root, 'installed');
+    const outside = path.join(root, 'outside');
+    await writeMinimalSeed(seedRoot, 'builtin-test');
+    await fs.promises.mkdir(repoRoot, { recursive: true });
+    const stateFile = path.join(repoRoot, PROVISIONING_STATE_FILE);
+    await fs.promises.writeFile(
+      stateFile,
+      JSON.stringify({ removed: [], seeded: ['..\\outside'] }),
+    );
+    const warn = vi.fn();
+
+    const outcome = await provisionBuiltinGhosts({
+      seedRootDirs: [seedRoot],
+      repoRootDir: repoRoot,
+      log: { info: vi.fn(), warn },
+    });
+
+    expect(outcome.installed).toEqual([]);
+    expect(fs.existsSync(outside)).toBe(false);
+    expect(await fs.promises.readFile(stateFile, 'utf8')).toContain('..\\\\outside');
+    expect(warn).toHaveBeenCalledWith(
+      'builtin provisioning state contains invalid ghost id',
+      expect.objectContaining({ file: stateFile }),
+    );
+  });
+
+  it('retains seeded ownership when audience cleanup fails so the next pass retries', async () => {
+    const root = await makeTempDir();
+    const seedRoot = path.join(root, 'seeds');
+    const repoRoot = path.join(root, 'installed');
+    await writeMinimalSeed(seedRoot, 'builtin-test');
+    await writeMinimalSeed(repoRoot, 'builtin-test');
+    await fs.promises.writeFile(
+      path.join(seedRoot, 'provisioning.json'),
+      JSON.stringify({
+        ghosts: { 'builtin-test': { audience: { userIds: ['allowed-user'] } } },
+      }),
+    );
+    const stateFile = path.join(repoRoot, PROVISIONING_STATE_FILE);
+    await fs.promises.writeFile(
+      stateFile,
+      JSON.stringify({ removed: [], seeded: ['builtin-test'] }),
+    );
+    const beforeRemove = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(new Error('journal temporarily unavailable'))
+      .mockResolvedValueOnce(undefined);
+
+    const first = await provisionBuiltinGhosts({
+      seedRootDirs: [seedRoot],
+      repoRootDir: repoRoot,
+      identity: { userId: 'denied-user', email: null },
+      beforeRemove,
+    });
+
+    expect(first.removed).toEqual([]);
+    expect(fs.existsSync(path.join(repoRoot, 'builtin-test'))).toBe(true);
+    expect(JSON.parse(await fs.promises.readFile(stateFile, 'utf8'))).toMatchObject({
+      seeded: ['builtin-test'],
+    });
+
+    const second = await provisionBuiltinGhosts({
+      seedRootDirs: [seedRoot],
+      repoRootDir: repoRoot,
+      identity: { userId: 'denied-user', email: null },
+      beforeRemove,
+    });
+
+    expect(beforeRemove).toHaveBeenCalledTimes(2);
+    expect(second.removed).toEqual(['builtin-test']);
+    expect(fs.existsSync(path.join(repoRoot, 'builtin-test'))).toBe(false);
+    expect(JSON.parse(await fs.promises.readFile(stateFile, 'utf8'))).toMatchObject({ seeded: [] });
+  });
+
+  it('persists seeded ownership before replacing installed bytes', async () => {
+    const root = await makeTempDir();
+    const seedRoot = path.join(root, 'seeds');
+    const repoRoot = path.join(root, 'installed');
+    await writeMinimalSeed(seedRoot, 'builtin-test');
+    const installedDir = await writeMinimalSeed(repoRoot, 'builtin-test');
+    await fs.promises.writeFile(path.join(installedDir, 'main.js'), '// old bytes');
+    const beforeReplace = vi.fn(() => {
+      const state = JSON.parse(
+        fs.readFileSync(path.join(repoRoot, PROVISIONING_STATE_FILE), 'utf8'),
+      ) as { seeded?: string[] };
+      expect(state.seeded).toContain('builtin-test');
+    });
+
+    await provisionBuiltinGhosts({ seedRootDirs: [seedRoot], repoRootDir: repoRoot, beforeReplace });
+    expect(beforeReplace).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('builtin seed source boundary', () => {
+  it('accepts the exact link-free seed directory', async () => {
+    const root = await makeTempDir();
+    const seedRoot = path.join(root, 'seeds');
+    const seedDir = await writeMinimalSeed(seedRoot, 'builtin-test');
+
+    expect(isTrustedBuiltinSeedSource([seedRoot], 'builtin-test', seedDir)).toBe(true);
+  });
+
+  it('rejects a seed root reached through a symlink or junction', async () => {
+    const root = await makeTempDir();
+    const realRoot = path.join(root, 'real-seeds');
+    await writeMinimalSeed(realRoot, 'builtin-test');
+    const linkedRoot = path.join(root, 'linked-seeds');
+    try {
+      await fs.promises.symlink(
+        realRoot,
+        linkedRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return;
+    }
+
+    expect(
+      isTrustedBuiltinSeedSource(
+        [linkedRoot],
+        'builtin-test',
+        path.join(linkedRoot, 'builtin-test'),
+      ),
+    ).toBe(false);
+    const outcome = await provisionBuiltinGhosts({
+      seedRootDirs: [linkedRoot],
+      repoRootDir: path.join(root, 'installed'),
+    });
+    expect(outcome.installed).toEqual([]);
+  });
 });
 
 describe('fingerprintDirContent', () => {
@@ -80,7 +323,8 @@ describe('fingerprintDirContent', () => {
     expect(linkSide.hasNonRegularEntry).toBe(true);
     // 即便两侧哈希相同也不会被误判为一致 —— 判定还要看类型状态。
     expect(
-      fileSide.hash === linkSide.hash && fileSide.hasNonRegularEntry === linkSide.hasNonRegularEntry,
+      fileSide.hash === linkSide.hash &&
+        fileSide.hasNonRegularEntry === linkSide.hasNonRegularEntry,
     ).toBe(false);
   });
 
@@ -148,13 +392,16 @@ describe('builtinGhostProvisioner 安装目录被塞入链接时重新播种', (
       return; // 该环境建不了链接(无权限),跳过;判定逻辑与其他平台同源。
     }
 
+    const beforeReplace = vi.fn();
     const outcome = await provisionBuiltinGhosts({
       seedRootDirs: [seedRoot],
       repoRootDir: repoRoot,
+      beforeReplace,
       log: { info: vi.fn(), warn: vi.fn() },
     });
 
     expect(outcome.updated.map((m) => m.id)).toContain('linked-seed');
+    expect(beforeReplace).toHaveBeenCalledWith('linked-seed');
     expect(outcome.skipped).not.toContain('linked-seed');
     // 重新播种后安装目录回到随包字节:链接消失,普通文件回来。
     expect((await fs.promises.lstat(path.join(installedDir, 'entry'))).isFile()).toBe(true);

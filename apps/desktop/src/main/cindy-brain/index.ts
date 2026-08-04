@@ -39,7 +39,12 @@ import {
   type ActiveAppSession,
 } from '../appSessionState.js';
 import { getLayoutStore } from '../layout/index.js';
-import { GhostManager, type InstallRejection, type UninstallRejection } from './GhostManager.js';
+import {
+  GhostManager,
+  type GhostExclusiveMutation,
+  type InstallRejection,
+  type UninstallRejection,
+} from './GhostManager.js';
 import { exportGhostPackage } from './exportGhostPackage.js';
 import { GhostMutationCoordinator } from './ghostMutationCoordinator.js';
 import { createOneShotTicketStore } from './oneShotTickets.js';
@@ -49,9 +54,11 @@ import {
   listBuiltinSeedIds,
   listEnterpriseSeedIds,
   listRestorableBuiltinGhosts,
+  isTrustedBuiltinSeedSource,
   provisionBuiltinGhosts,
   readBuiltinTombstones,
   recordBuiltinTombstone,
+  renameBuiltinTombstone,
   type ProvisionIdentity,
 } from './builtinGhostProvisioner.js';
 import { getAccessToken, getAuthState, onAuthStateChange } from '../authManager.js';
@@ -87,13 +94,20 @@ import {
 } from './ghostSetupStatus.js';
 import { getGhostSetupChangeBus } from './ghostSetupChangeBus.js';
 import { GhostSetupManifestTracker } from './ghostSetupManifestTracker.js';
-import type { GhostSetupActionResult } from './ghostSetupCoordinator.js';
-import type { GhostSetupInteractionResponseTarget } from './ghostSetupInteractionBridge.js';
+import {
+  getGhostSetupCoordinator,
+  type GhostSetupActionResult,
+} from './ghostSetupCoordinator.js';
+import {
+  getGhostSetupInteractionBridge,
+  type GhostSetupInteractionResponseTarget,
+} from './ghostSetupInteractionBridge.js';
 import { executeGhostSetupInlineSubmission } from './ghostSetupInlineExecutor.js';
 import { handleGhostSecretsRequest } from './runtime/ghostSecretsEndpoint.js';
 import { handleGhostOauthRequest } from './runtime/ghostOauthEndpoint.js';
 import { handleGhostConnectionsRequest } from './runtime/ghostConnectionsEndpoint.js';
 import { GhostOauthAccountManager, type GhostOauthDecl } from './ghostOauthAccounts.js';
+import { cancelActiveGhostOauthFlow } from './ghostOauthFlow.js';
 import { mapGhostOauthConnectError } from './ghostOauthSetupError.js';
 import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
@@ -330,6 +344,15 @@ function beginGhostMutation(expectedOwner?: ActiveAppSession): () => void {
   return ghostMutationCoordinator.acquire();
 }
 
+/** MCP calls hold the same owner lease across setup, grant confirmation, and dispatch. */
+export function captureGhostMutationOwnerForMcp(): ActiveAppSession {
+  return captureGhostMutationOwner();
+}
+
+export function acquireGhostMutationLeaseForMcp(expectedOwner: ActiveAppSession): () => void {
+  return beginGhostMutation(expectedOwner);
+}
+
 function isSameAppSession(a: ActiveAppSession, b: ActiveAppSession): boolean {
   return a.mode === b.mode && a.dataOwnerId === b.dataOwnerId && a.generation === b.generation;
 }
@@ -537,7 +560,7 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
       }
       const builtinReconcileSucceeded =
         result.deferredReason !== 'concurrent-live-instances' &&
-        await scheduleBuiltinReconcile('legacy-recovery');
+        (await scheduleBuiltinReconcile('legacy-recovery'));
       if (shouldAbort()) return getLegacyGhostRecoveryStatusForActiveSession();
       const ghosts = getGhostManager().list();
       for (const ghost of ghosts) {
@@ -573,14 +596,23 @@ export function isGhostAvailableForActiveSession(id: string): boolean {
 }
 
 function availableGhosts(): InstalledGhost[] {
+  if (isAppSessionBoundaryPending()) return [];
   return getGhostManager().list().filter((ghost) =>
     isGhostAvailableForActiveSession(ghost.manifest.id),
   );
 }
 
 function findAvailableGhost(id: string): InstalledGhost | null {
-  if (!isGhostAvailableForActiveSession(id)) return null;
-  return getGhostManager().list().find((ghost) => ghost.manifest.id === id) ?? null;
+  return availableGhosts().find((ghost) => ghost.manifest.id === id) ?? null;
+}
+
+/** Runtime-authorized lookup for integrations outside this module. */
+export function findAvailableGhostForAuthorization(id: string): InstalledGhost | null {
+  return findAvailableGhost(id);
+}
+
+export function listAvailableGhostsForAuthorization(): InstalledGhost[] {
+  return availableGhosts();
 }
 
 function requireGhostAvailableForActiveSession(id: string): void {
@@ -595,9 +627,26 @@ export function suspendCindyAccountGhosts(): void {
   for (const id of CINDY_ACCOUNT_GHOST_IDS) runtimeSingleton.stop(id);
 }
 
+/**
+ * Cancel owner-bound calls before waiting for their mutation leases.
+ *
+ * The lease itself stays held until each call unwinds, so attachment grants,
+ * setup writes, and post-dispatch cleanup cannot cross into the next owner.
+ */
+export async function interruptGhostCallsForAccountBoundary(): Promise<void> {
+  cancelActiveGhostOauthFlow();
+  getGhostSetupInteractionBridge()?.cleanupAll('session_aborted');
+  getGhostGrantConfirmBridge()?.cleanupAll('session_aborted');
+  getGhostConfirmDialogBridge()?.cancelAll();
+  runtimeSingleton?.destroyAll();
+  resetNodeRuntimeBrokerForAccountBoundary();
+  await getGhostSetupCoordinator()?.waitForActionsIdle();
+}
+
 /** Stop every sandbox before changing the active data owner. */
 export function suspendAllGhosts(): void {
   runtimeSingleton?.destroyAll();
+  resetNodeRuntimeBrokerForAccountBoundary();
   brainRootCache = null;
 }
 let ipcRegistered = false;
@@ -630,6 +679,20 @@ function builtinSeedRootDirs(): string[] {
     ? path.join(process.resourcesPath, 'builtin-ghosts')
     : path.join(app.getAppPath(), 'resources', 'builtin-ghosts');
   return [path.join(base, 'official'), path.join(base, 'xd')];
+}
+
+function isTrustedBundledSource(id: string, sourceDir: string): boolean {
+  return isTrustedBuiltinSeedSource(builtinSeedRootDirs(), id, sourceDir);
+}
+
+function hasDisabledMarker(dir: string): boolean {
+  try {
+    fs.lstatSync(path.join(dir, '.disabled'));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return true;
+  }
 }
 
 /** 当前登录身份 → 播种受众判定的输入(登出 = null)。 */
@@ -779,8 +842,8 @@ async function reconcileBuiltinGhosts(reason: string): Promise<void> {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    await manager.runExclusiveMutation(() =>
-      reconcileBuiltinGhostsLocked(reason, manager),
+    await manager.runExclusiveMutation((mutation) =>
+      reconcileBuiltinGhostsLocked(reason, manager, mutation),
     );
   } finally {
     releaseMutation();
@@ -790,6 +853,7 @@ async function reconcileBuiltinGhosts(reason: string): Promise<void> {
 async function reconcileBuiltinGhostsLocked(
   reason: string,
   manager: GhostManager,
+  mutation: GhostExclusiveMutation,
 ): Promise<void> {
   // 改名前置:用户自主状态(墓碑=卸载过 / .disabled=停用)随改名带到新 id,
   // 不能让"明确卸载/停用过"的用户在升级后被以新 id 重新装上并点亮(播种器
@@ -798,15 +862,12 @@ async function reconcileBuiltinGhostsLocked(
   // 本处反复重新盖墓)。停用态:抓在播种前(孤儿回收会删旧目录),装上后补。
   const renameDisabledCarry = new Map<string, boolean>();
   for (const [fromId, toId] of RENAMED_BUILTIN_GHOSTS) {
-    const tombstones = readBuiltinTombstones(brainRootDir());
-    if (tombstones.includes(fromId)) {
-      if (!tombstones.includes(toId)) recordBuiltinTombstone(brainRootDir(), toId, log);
-      clearBuiltinTombstone(brainRootDir(), fromId, log);
+    if (renameBuiltinTombstone(brainRootDir(), fromId, toId, log)) {
       log.info('builtin ghost tombstone carried over rename', { fromId, toId });
     }
     renameDisabledCarry.set(
       toId,
-      fs.existsSync(path.join(brainRootDir(), fromId, '.disabled')),
+      hasDisabledMarker(path.join(brainRootDir(), fromId)),
     );
   }
   // "播种进行中"胶囊提示:只在真的动手(装/覆盖/回收)时亮起,no-op 对账
@@ -824,8 +885,29 @@ async function reconcileBuiltinGhostsLocked(
         getGhostNodeRuntimeBroker().stop(id);
         getGhostAgentSlot().clearGhost(id);
         getGhostErrandSlot().clearGhost(id);
-        await manager.removeInstallApproval(id);
+        // 内置回收也必须走 Host 的 uninstall journal；只撤 receipt 再由
+        // provisioner 直接 rm 会在 receipt 删除失败+崩溃时留下孤立批准。
+        const removal = await mutation.uninstall(id, {
+          notify: false,
+          // Audience/orphan reconciliation is Host lifecycle cleanup, not a
+          // durable user choice to keep this builtin uninstalled.
+          recordBuiltinTombstone: false,
+        });
+        if ('rejection' in removal) {
+          throw new Error(`builtin ghost uninstall failed: ${removal.rejection.reason}`);
+        }
       },
+      beforeReplace: async (id) => {
+        // Revoke the old receipt before swapping mutable installed bytes. If a
+        // crash occurs during provisioning, the new bytes cannot run under the
+        // previous approval; the next reconcile mints a receipt from the
+        // immutable seed after the swap is complete.
+        if (!(await mutation.removeInstallApproval(id))) {
+          throw new Error(`builtin ghost approval revoke failed: ${id}`);
+        }
+      },
+      publishSeed: (id, seedDir, options) =>
+        mutation.publishTrustedBundledSeed(id, seedDir, options),
       onApplyStart: () => {
         tipShown = true;
         broadcastGhostProvisioning(true);
@@ -858,7 +940,7 @@ async function reconcileBuiltinGhostsLocked(
   for (const manifest of outcome.installed) {
     if (!renameDisabledCarry.get(manifest.id)) continue;
     try {
-      fs.writeFileSync(path.join(brainRootDir(), manifest.id, '.disabled'), '');
+      mutation.writeDisabledMarker(manifest.id);
       log.info('builtin ghost disabled state carried over rename', { id: manifest.id });
     } catch (err) {
       log.warn('builtin ghost disabled carry failed', {
@@ -871,12 +953,13 @@ async function reconcileBuiltinGhostsLocked(
   for (const manifest of outcome.approved) {
     try {
       approvalChanged =
-        (await manager.approveTrustedBundledInstall(
+        (await mutation.approveTrustedBundledInstall(
           manifest,
           // `.disabled` 镜像的读数只作停用方向的输入:receipt 已钉停用时,镜像被
           // 外部移除不会把插件翻回启用(合并规则见 approveTrustedBundledInstall
           // 头注释;重新启用只有用户显式 setEnabled 一条路)。
-          !fs.existsSync(path.join(brainRootDir(), manifest.id, '.disabled')),
+          !hasDisabledMarker(path.join(brainRootDir(), manifest.id)),
+          { sourceDir: outcome.approvedSourceDirs[manifest.id] },
         )) || approvalChanged;
       // 本会话内被撤销熄灯的常驻实例,批准补回即恢复点火(隔离态下批准必然重写,
       // approvalChanged 已为 true,不会被下面的 no-op 早退拦住)。
@@ -893,7 +976,7 @@ async function reconcileBuiltinGhostsLocked(
       // 隔离。所以这里不需要、也不应该再自己判断撤销成不成功:那正是上一版在
       // cleanup 失败时留下 fail-open 的地方。随包插件下一轮启动对账会重新补批准，
       // 自愈，不需要用户介入。
-      await manager.removeInstallApproval(manifest.id);
+      await mutation.removeInstallApproval(manifest.id);
       // 撤销只让后续的 Host 能力调用与技能落链失效,不会自己结束已经跑起来的沙箱
       // 进程 —— 登录触发对账时插件可能正在运行。与 beforeRemove 同款四连熄灯
       // (含 errand slot:漏掉它会让节流状态与在途任务记录留到同会话的自愈之后,
@@ -961,12 +1044,16 @@ export function getGhostManager(): GhostManager {
     managerSingleton = new GhostManager({
       getRootDir: brainRootDir,
       getStateDir: () => ownerScopedUserDataPath('ghost-install-state'),
+      getOwnerContextKey: activeOwnerScopeKey,
       onChanged: broadcastGhostsChanged,
       getLocale: getResolvedMainLocale,
       trustRegistry: loadGhostTrustRegistry(),
       // 随包批准入口的 builtin-only 边界:id 必须对应一颗随包种子。该入口不经用户
       // 确认就铸出批准,不能只靠"唯一调用者是随包对账"这条纪律。
       isTrustedBundledId: (id) => listBuiltinSeedIds(builtinSeedRootDirs()).includes(id),
+      isTrustedBundledSource,
+      recordBuiltinTombstone: (id) => recordBuiltinTombstone(brainRootDir(), id, log),
+      clearBuiltinTombstone: (id) => clearBuiltinTombstone(brainRootDir(), id, log),
       log,
     });
     getGhostSetupManifestTracker().seed(managerSingleton.list());
@@ -1071,7 +1158,7 @@ let agentSlotSingleton: GhostAgentSlot | null = null;
 export function getGhostAgentSlot(): GhostAgentSlot {
   if (!agentSlotSingleton) {
     agentSlotSingleton = new GhostAgentSlot({
-      getGhost: (id) => getGhostManager().list().find((g) => g.manifest.id === id) ?? null,
+      getGhost: findAvailableGhost,
       log,
     });
   }
@@ -1089,7 +1176,7 @@ let errandSlotSingleton: GhostErrandSlot | null = null;
 export function getGhostErrandSlot(): GhostErrandSlot {
   if (!errandSlotSingleton) {
     errandSlotSingleton = new GhostErrandSlot({
-      getGhost: (id) => getGhostManager().list().find((g) => g.manifest.id === id) ?? null,
+      getGhost: findAvailableGhost,
       // wait 模式的署名单在途期间替管子那头的 tool-call 续命(同 cindy 槽契约)。
       holdPipeCall: (ghostId, callId, budgetMs) =>
         getGhostPipeDispatcher().holdCall(ghostId, callId, budgetMs),
@@ -1107,16 +1194,29 @@ export function setGhostErrandRunner(runner: GhostErrandRunner | null): void {
 
 /** 插件展示名(errand 会话默认标题等宿主侧使用;未装返回 null)。 */
 export function getInstalledGhostName(id: string): string | null {
-  return getGhostManager().list().find((g) => g.manifest.id === id)?.manifest.name ?? null;
+  return findAvailableGhost(id)?.manifest.name ?? null;
 }
 
 let nodeRuntimeBrokerSingleton: GhostNodeRuntimeBroker | null = null;
+
+/**
+ * `GhostNodeRuntimeBroker.destroyAll()` is a terminal host-exit operation. An
+ * account boundary still needs the old broker terminally stopped so delayed
+ * retries cannot cross owners, but the singleton slot must then be cleared so
+ * the next owner gets a fresh, startable broker.
+ */
+function resetNodeRuntimeBrokerForAccountBoundary(): void {
+  const broker = nodeRuntimeBrokerSingleton;
+  if (!broker) return;
+  broker.destroyAll();
+  if (nodeRuntimeBrokerSingleton === broker) nodeRuntimeBrokerSingleton = null;
+}
 
 /** 随包 Node 工作进程单例：每个活跃插件一个进程，main.js 经主机中继调用。 */
 export function getGhostNodeRuntimeBroker(): GhostNodeRuntimeBroker {
   if (!nodeRuntimeBrokerSingleton) {
     nodeRuntimeBrokerSingleton = new GhostNodeRuntimeBroker({
-      getGhost: (id) => getGhostManager().list().find((g) => g.manifest.id === id) ?? null,
+      getGhost: findAvailableGhost,
       readSecret: (ghostId, secretKey) => readGhostSecret(ghostId, secretKey),
       sendToGhost: (ghostId, payload) => {
         sendToGhostLogic(ghostId, payload);
@@ -2915,8 +3015,9 @@ export async function installAndDock(
       : {}),
   });
   if ('rejection' in result) throwInstallError(result.rejection);
-  // 用户手动重装同 id 的内置意识 = 重新跟随包内版本(清墓碑,播种恢复对账)。
-  clearBuiltinTombstone(brainRootDir(), result.ghost.manifest.id, log);
+  // Builtin tombstone clearing is part of GhostManager's durable install
+  // journal. A transient state write failure keeps the marker for startup
+  // recovery without turning an already committed install into a false error.
   // 声明了面板的意识装入后立即停进布局树(树上已有 = 重装,原位复活不动树)。
   // 顺序刻意:manager.install 内已广播 ghosts:changed(renderer 先注册面板),
   // 这里再 setLayout 触发 layout:changed(pane 出现时面板组件必然已就位,规则 7)。
@@ -3134,9 +3235,6 @@ export async function uninstallGhostAndCleanup(
         id,
         error: err instanceof Error ? err.message : String(err),
       });
-    }
-    if (listBuiltinSeedIds(builtinSeedRootDirs()).includes(id)) {
-      recordBuiltinTombstone(brainRootDir(), id, log);
     }
     let recentIds: string[] | null = null;
     try {
@@ -4208,8 +4306,9 @@ export function registerGhostIpc(): void {
     owner: ActiveAppSession;
     id: string;
     manifestSha256: string;
+    approvalProjectionSha256: string;
   }>({ ttlMs: 10 * 60 * 1000, maxEntries: 64 });
-  ipcMain.handle('ghosts:reapprove-inspect', (event, id: unknown) => {
+  ipcMain.handle('ghosts:reapprove-inspect', async (event, id: unknown) => {
     assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
@@ -4218,14 +4317,22 @@ export function registerGhostIpc(): void {
     rejectReservedGhostId(id);
     // owner 在读事实**之前**捕获(边界期直接抛):票据钉的是"这份事实属于哪个 owner"。
     const owner = captureGhostMutationOwner();
-    const result = manager.inspectInstalledReapproval(id);
+    const result = await manager.inspectInstalledReapproval(id);
     if ('rejection' in result) throwInstallError(result.rejection);
     const inspectTicket = reapproveTickets.issue({
       owner,
       id,
       manifestSha256: result.manifestSha256,
+      approvalProjectionSha256: result.approvalProjectionSha256,
     });
-    return { ...result, inspectTicket };
+    return {
+      manifest: result.manifest,
+      trust: result.trust,
+      manifestSha256: result.manifestSha256,
+      approvalProjectionSha256: result.approvalProjectionSha256,
+      previouslyEnabled: result.previouslyEnabled,
+      inspectTicket,
+    };
   });
 
   // 第三条恢复路径第二步:用户点过确认卡后开 receipt。expectedManifestSha256 绑定
@@ -4244,6 +4351,7 @@ export function registerGhostIpc(): void {
       | {
           enable?: unknown;
           expectedManifestSha256?: unknown;
+          expectedApprovalProjectionSha256?: unknown;
           expectedInstalledApproval?: unknown;
           inspectTicket?: unknown;
         }
@@ -4257,6 +4365,15 @@ export function registerGhostIpc(): void {
     ) {
       throwIpcError('INVALID_PARAMS', 'expectedManifestSha256 must come from ghosts:reapprove-inspect');
     }
+    if (
+      typeof options.expectedApprovalProjectionSha256 !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(options.expectedApprovalProjectionSha256)
+    ) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'expectedApprovalProjectionSha256 must come from ghosts:reapprove-inspect',
+      );
+    }
     if (!isGhostInstallApprovalToken(options.expectedInstalledApproval)) {
       throwIpcError('INVALID_PARAMS', 'expectedInstalledApproval must come from ghosts:list');
     }
@@ -4268,7 +4385,8 @@ export function registerGhostIpc(): void {
     if (
       !ticket ||
       ticket.id !== id ||
-      ticket.manifestSha256 !== options.expectedManifestSha256
+      ticket.manifestSha256 !== options.expectedManifestSha256 ||
+      ticket.approvalProjectionSha256 !== options.expectedApprovalProjectionSha256
     ) {
       throwIpcError('PRECONDITION_FAILED', '确认卡已过期或与检查时不一致,请重新打开确认');
     }
@@ -4278,9 +4396,10 @@ export function registerGhostIpc(): void {
     let result: Awaited<ReturnType<typeof manager.reapproveInstalled>>;
     try {
       result = await manager.reapproveInstalled(id, {
-        enable: options.enable,
-        expectedManifestSha256: options.expectedManifestSha256,
-        expectedInstalledApproval: options.expectedInstalledApproval,
+          enable: options.enable,
+          expectedManifestSha256: options.expectedManifestSha256,
+          expectedApprovalProjectionSha256: options.expectedApprovalProjectionSha256,
+          expectedInstalledApproval: options.expectedInstalledApproval,
       });
     } finally {
       releaseMutation();

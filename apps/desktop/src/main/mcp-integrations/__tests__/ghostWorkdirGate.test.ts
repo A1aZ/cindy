@@ -59,6 +59,11 @@ const sessionSnapshotMock = vi.fn(async () => ({
 }));
 vi.mock('../../cindy-brain/index.js', () => ({
   getGhostManager: () => ({ list: listMock }),
+  listAvailableGhostsForAuthorization: () => listMock(),
+  findAvailableGhostForAuthorization: (id: string) =>
+    listMock().find((ghost: any) => ghost.manifest?.id === id) ?? null,
+  captureGhostMutationOwnerForMcp: () => ({ mode: 'local', dataOwnerId: 'test', generation: 0 }),
+  acquireGhostMutationLeaseForMcp: () => () => {},
   getGhostPipeDispatcher: () => ({ callGhostTool: dispatchMock }),
   getGhostCardService: () => ({ registerCall: () => {}, finalizeCall: () => null }),
   getGhostSetupAssessment: setupAssessmentMock,

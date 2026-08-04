@@ -1165,6 +1165,8 @@ interface ElectronAPI {
       trust: import('../shared/ghost').GhostTrustInfo;
       /** 确认卡展示时的清单字节指纹;确认时回传,防确认间隙清单被换。 */
       manifestSha256: string;
+      /** 确认卡展示时的完整批准投影指纹;覆盖技能、locale、icon、trust。 */
+      approvalProjectionSha256: string;
       /** 升级前的启停偏好(.disabled 镜像读数):确认卡勾选默认值。 */
       previouslyEnabled: boolean;
       /** 一次性票据(Host 进程内钉住 inspect 时点的 owner 与事实,confirm 原子消费)。 */
@@ -1176,6 +1178,7 @@ interface ElectronAPI {
       opts: {
         enable: boolean;
         expectedManifestSha256: string;
+        expectedApprovalProjectionSha256: string;
         expectedInstalledApproval: string;
         inspectTicket: string;
       },

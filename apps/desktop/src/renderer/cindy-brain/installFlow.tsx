@@ -247,6 +247,7 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
   let manifest: GhostManifest;
   let trust: GhostTrustInfo;
   let manifestSha256: string;
+  let approvalProjectionSha256: string;
   let previouslyEnabled: boolean;
   let inspectTicket: string;
   try {
@@ -254,6 +255,7 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
     manifest = inspected.manifest;
     trust = inspected.trust;
     manifestSha256 = inspected.manifestSha256;
+    approvalProjectionSha256 = inspected.approvalProjectionSha256;
     previouslyEnabled = inspected.previouslyEnabled;
     inspectTicket = inspected.inspectTicket;
   } catch (err) {
@@ -295,6 +297,7 @@ export async function reapproveInstalledGhost(ghostId: string, deps: InstallFlow
     const { ghost } = await window.electronAPI.ghosts.reapproveInstalled(ghostId, {
       enable,
       expectedManifestSha256: manifestSha256,
+      expectedApprovalProjectionSha256: approvalProjectionSha256,
       expectedInstalledApproval: ghostInstallApprovalToken(installed.approval),
       inspectTicket,
     });

@@ -283,7 +283,8 @@
   改写成 `completed`;`completed`/存在但读不出 = 门关死,此后缺 receipt 一律 fail closed
   ——否则删 receipt 就能骗一次"从可变安装目录重建授权";`in-progress` = 上一轮中途崩溃,
   续跑**只认清单内的 id**,迁移窗口期间新装再删 receipt 的 id 骗不到重铸;receipt 首写
-  自动补落的 completed 台账只在"完全没有台账"时动笔,不覆盖 in-progress。该门是充分
+  在 receipt rename 生效**之前**先补落 completed 台账,且落账失败就拒绝本次批准；它只在
+  "完全没有台账"时动笔,不覆盖 in-progress。该门是充分
   守卫,因为能删/改 ledger 的进程本就能直接写伪造 receipt,见下「批准状态根无写保护」)、**不扩权**(权限集原样取当前 `ghost.json`，等价于旧模型无条件
   授权的那一组，此后任何 manifest/权限变化照旧走完整确认)、**只写状态根不动安装目录**
   (三份旧文件原样保留，回滚到旧客户端时仍按安装目录判定，符合第 5 节兜底第 4 条)。核心
@@ -295,11 +296,14 @@
   → 确认卡全量权限清单 → `ghosts:reapprove-installed`，清单字节以 manifestSha256 绑定
   确认间隙，trust 走与迁移同一个封顶读取器，装入侧的指令查重／tokenBroker／保留前缀
   门禁照走）—— 不要求用户重新提供原始 `.cindy`，不存在不可恢复状态；随包插件不走人工
-  确认，由启动对账自动补（UI 提示「重启应用即恢复」）。一次性门的完整判据（三道，缺一
-  即漏）：ledger 存在不迁；状态根有任何**有效** receipt 不迁并补写 ledger（损坏/旧
-  schema 的 receipt 不算「活动过」——它们正是本条要治愈的对象，能改坏 receipt 的进程与
-  §「状态根无写保护」登记的伪造者同类）；**首次写任何 receipt 时自动落 ledger**（不落
-  的话，「新装 receipt 后、下一轮对账前」删 receipt 可骗一次按已扩权 manifest 的重铸）。
+  确认，由启动对账自动补（UI 提示「重启应用即恢复」）。一次性门的完整判据：ledger
+  `completed`（或存在但读不出）永久关门；`in-progress` 只按动笔前钉死的 `pendingIds`
+  续跑；无 ledger 时先扫描完整安装根，不能因某一个有效 receipt 提前关门——曾短暂合入
+  后回滚的 #1080 可能留下「部分有效 receipt + 其余 legacy 安装 + 无 ledger」的历史 mixed
+  状态，提前关门会让其余插件永久失效。新代码必须在**首次写任何 receipt 前**先原子落
+  completed ledger，落账失败则 receipt 不得生效（否则「新装 receipt 后、下一轮对账前」
+  删 receipt 可骗一次按已扩权 manifest 的重铸）；legacy migration/recovery 已先落
+  in-progress，因此首份 backfill receipt 不会覆盖迁移清单。
   安装根为空/未诞生时**不落 ledger**——门要留给 owner 命名空间 legacy 恢复流程随后搬入
   的旧目录；恢复流程对刚搬入的 id 走 `backfillRecoveredLegacyGhosts` 旁路（信任级与首轮
   迁移等同，只作用于恢复流程自己搬动的 id）。安装根读失败（非 ENOENT）整轮放弃且不落

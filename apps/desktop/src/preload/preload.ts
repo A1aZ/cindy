@@ -907,6 +907,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       manifest: unknown;
       trust: unknown;
       manifestSha256: string;
+      approvalProjectionSha256: string;
       previouslyEnabled: boolean;
       inspectTicket: string;
     }> => ipcRenderer.invoke('ghosts:reapprove-inspect', id),
@@ -916,6 +917,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       opts: {
         enable: boolean;
         expectedManifestSha256: string;
+        expectedApprovalProjectionSha256: string;
         expectedInstalledApproval: string;
         inspectTicket: string;
       },

@@ -20,16 +20,25 @@ let rootDir: string;
 let onChanged: ReturnType<typeof vi.fn>;
 let manager: GhostManager;
 let hostLocale: string;
+let trustedBundledIds: Set<string>;
+let recordBuiltinTombstone: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-ghost-test-'));
   rootDir = path.join(workDir, 'ghosts');
   onChanged = vi.fn();
   hostLocale = 'zh-CN';
+  trustedBundledIds = new Set();
+  recordBuiltinTombstone = vi.fn();
   manager = new GhostManager({
     getRootDir: () => rootDir,
     getLocale: () => hostLocale,
     onChanged,
+    isTrustedBundledId: (id) => trustedBundledIds.has(id),
+    isTrustedBundledSource: (id, sourceDir) =>
+      trustedBundledIds.has(id) &&
+      path.resolve(sourceDir) === path.resolve(workDir, 'bundled-seeds', id),
+    recordBuiltinTombstone,
   });
 });
 
@@ -382,6 +391,37 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
   });
 
+  it('已有 receipt 瞬时不可读时不从可变安装目录重铸,保留原批准并持久重试', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
+    const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
+    // 模拟 #1080 历史状态没有 ledger；receipt 本身只是在本轮被 AV/权限瞬时锁住。
+    await fs.promises.rm(migrationLedgerPath());
+    const realLstatSync = fs.lstatSync;
+    const lstatSpy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(receiptPath)) {
+        lstatSpy.mockRestore();
+        throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
+      }
+      return realLstatSync(target, options as never);
+    });
+
+    const first = await manager.migrateLegacyApprovalsOnce();
+
+    expect(first).toEqual({ migrated: [], skipped: [], failed: [], retryPending: ['hello'] });
+    expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
+    expect(
+      JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')),
+    ).toMatchObject({ state: 'in-progress', pendingIds: ['hello'] });
+
+    await manager.migrateLegacyApprovalsOnce();
+    expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
+    expect(
+      (JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as { state?: string })
+        .state,
+    ).toBe('completed');
+  });
+
   it('首轮迁移治愈损坏/旧 schema 的 receipt(格式升级不落到用户重新确认)', async () => {
     // issue #1243 验收第 4 条的实现形态:schema/编码 bump 后的旧 receipt 判 invalid,
     // 但**首轮迁移**会把它当"已判损坏"从安装目录 backfill 重建 —— 一次内部格式变更
@@ -401,6 +441,35 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(outcome.migrated).toEqual(['hello']);
     // 治愈后为有效批准;用户的停用决定(.disabled)照旧保留。
     expect(manager.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'approved' },
+    });
+  });
+
+  it('修复 #1080 历史 mixed 状态:有效 receipt 不封死其余 legacy/旧 schema 插件', async () => {
+    await manager.install(await makeCindy('approved.cindy', goodManifest('approved')));
+    const approvedReceiptPath = path.join(workDir, 'ghosts-install-state', 'approved.json');
+    const approvedReceiptBefore = await fs.promises.readFile(approvedReceiptPath, 'utf8');
+
+    // Fixture 模拟曾短暂合入后回滚的 #1080:部分插件已有 v2 receipt,但当时没有
+    // legacy migration ledger；同 owner 下其余旧安装仍无 receipt。删除 ledger 只是
+    // 构造这份历史状态，不代表安装根攻击者能操作状态根。
+    await fs.promises.rm(migrationLedgerPath());
+    await writeLegacyInstall('legacy', goodManifest('legacy'));
+    await writeLegacyInstall('old-schema', goodManifest('old-schema'), { disabled: true });
+    await fs.promises.writeFile(
+      path.join(workDir, 'ghosts-install-state', 'old-schema.json'),
+      JSON.stringify({ schemaVersion: 1, id: 'old-schema', legacy: true }),
+    );
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+
+    expect(outcome.migrated).toEqual(['legacy', 'old-schema']);
+    expect(await fs.promises.readFile(approvedReceiptPath, 'utf8')).toBe(approvedReceiptBefore);
+    const byId = Object.fromEntries(manager.list().map((ghost) => [ghost.manifest.id, ghost]));
+    expect(byId.approved.approval.state).toBe('approved');
+    expect(byId.legacy).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+    expect(byId['old-schema']).toMatchObject({
       enabled: false,
       approval: { state: 'approved' },
     });
@@ -432,6 +501,59 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(outcome.failed).toEqual(['hello']);
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
     expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+  });
+});
+
+describe('GhostManager · owner 受管根路径', () => {
+  it('允许 userData 祖先通过 symlink/junction 重定位', async () => {
+    const physicalUserData = path.join(workDir, 'physical-user-data');
+    const linkedUserData = path.join(workDir, 'linked-user-data');
+    await fs.promises.mkdir(path.join(physicalUserData, 'owners', 'owner-a'), { recursive: true });
+    try {
+      await fs.promises.symlink(
+        physicalUserData,
+        linkedUserData,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return;
+    }
+
+    const relocated = new GhostManager({
+      getRootDir: () => path.join(linkedUserData, 'owners', 'owner-a', 'cindy-brain'),
+      getStateDir: () => path.join(linkedUserData, 'owners', 'owner-a', 'ghost-install-state'),
+    });
+
+    expect(relocated.list()).toEqual([]);
+  });
+
+  it('允许全新 owner 的多层受管根尚未创建', () => {
+    const freshOwner = path.join(workDir, 'owners', 'fresh-owner');
+    const fresh = new GhostManager({
+      getRootDir: () => path.join(freshOwner, 'cindy-brain'),
+      getStateDir: () => path.join(freshOwner, 'ghost-install-state'),
+    });
+
+    expect(fresh.list()).toEqual([]);
+  });
+
+  it('仍拒绝受管根本身是 symlink/junction', async () => {
+    const outside = path.join(workDir, 'outside-root');
+    const linkedRoot = path.join(workDir, 'linked-root');
+    await fs.promises.mkdir(outside, { recursive: true });
+    try {
+      await fs.promises.symlink(outside, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return;
+    }
+
+    expect(
+      () =>
+        new GhostManager({
+          getRootDir: () => linkedRoot,
+          getStateDir: () => path.join(workDir, 'state-root'),
+        }),
+    ).toThrow(/ghost content root is not a real directory/);
   });
 });
 
@@ -526,6 +648,33 @@ describe('GhostManager · 迁移崩溃安全(in-progress 状态机)与隔离命�
     expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe('{ not valid json');
   });
 
+  it.each([
+    ['empty pendingIds', []],
+    ['non-string pending id', [null]],
+    ['path-traversal pending id', ['../x']],
+    ['mixed valid and invalid pending ids', ['aaa', '../x']],
+  ])('非法 in-progress 台账(%s)保守关门且不被重写成 completed', async (_label, pendingIds) => {
+    await writeLegacyInstall('aaa', goodManifest('aaa'));
+    await fs.promises.mkdir(path.dirname(migrationLedgerPath()), { recursive: true });
+    const raw = JSON.stringify({
+      version: 1,
+      migratedAt: '2026-08-01T00:00:00.000Z',
+      migratedIds: [],
+      state: 'in-progress',
+      pendingIds,
+    });
+    await fs.promises.writeFile(migrationLedgerPath(), raw);
+
+    expect(await manager.migrateLegacyApprovalsOnce()).toEqual({
+      migrated: [],
+      skipped: [],
+      failed: [],
+      retryPending: [],
+    });
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe(raw);
+  });
+
   it('启用失败的回滚按"镜像先前是否在盘上",不吞掉旧客户端的停用决定', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     // 旧客户端只写镜像:receipt.enabled=true + .disabled 在盘 → 读时合并 = 停用。
@@ -609,7 +758,7 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
 
-    const inspected = manager.inspectInstalledReapproval('hello');
+    const inspected = await manager.inspectInstalledReapproval('hello');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     expect(inspected.manifest.id).toBe('hello');
     expect(inspected.manifestSha256).toMatch(/^[a-f0-9]{64}$/);
@@ -617,6 +766,7 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     const result = await manager.reapproveInstalled('hello', {
       enable: true,
       expectedManifestSha256: inspected.manifestSha256,
+      expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
       expectedInstalledApproval: 'legacy-unapproved',
     });
     if ('rejection' in result) throw new Error(JSON.stringify(result.rejection));
@@ -627,22 +777,81 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
 
   it('确认间隙 ghost.json 被换 → 拒(确认卡展示的与批准的必须是同一份字节)', async () => {
     await writeLegacyInstall('hello', goodManifest());
-    const inspected = manager.inspectInstalledReapproval('hello');
+    const inspected = await manager.inspectInstalledReapproval('hello');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
 
     // 攻击窗口:用户看的是权限集 A,confirm 落地前清单被换成声明更多权限的 B。
     await fs.promises.writeFile(
       path.join(rootDir, 'hello', 'ghost.json'),
-      JSON.stringify({ ...goodManifest(), slots: ['tool', 'skill'], skill: { items: [{ dir: 'skills/x', name: 'x', description: 'x' }] } }),
+      JSON.stringify({ ...goodManifest(), name: 'Changed after review' }),
     );
     const result = await manager.reapproveInstalled('hello', {
       enable: true,
       expectedManifestSha256: inspected.manifestSha256,
+      expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
       expectedInstalledApproval: 'legacy-unapproved',
     });
     expect('rejection' in result && result.rejection.code).toBe('state-changed');
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
+
+  it.each(['skill', 'locale', 'icon', 'trust'] as const)(
+    '确认间隙 %s 批准投影被换 → 拒绝重新确认',
+    async (kind) => {
+      const manifest = {
+        ...goodManifest(),
+        author: 'Original author',
+        icon: 'assets/icon.png',
+        locales: { en: 'locales/en.json' },
+        slots: ['tool', 'skill'],
+        skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+      };
+      await writeLegacyInstall('hello', manifest, {
+        files: {
+          'assets/icon.png': 'ORIGINAL ICON',
+          'locales/en.json': JSON.stringify({ name: 'Original name' }),
+          'skills/demo/SKILL.md':
+            '---\nname: demo\ndescription: Demo skill\n---\n\nOriginal instructions\n',
+        },
+      });
+      const inspected = await manager.inspectInstalledReapproval('hello');
+      if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+
+      if (kind === 'skill') {
+        await fs.promises.writeFile(
+          path.join(rootDir, 'hello', 'skills', 'demo', 'SKILL.md'),
+          '---\nname: demo\ndescription: Demo skill\n---\n\nReplaced instructions\n',
+        );
+      } else if (kind === 'locale') {
+        await fs.promises.writeFile(
+          path.join(rootDir, 'hello', 'locales', 'en.json'),
+          JSON.stringify({ name: 'Replaced name' }),
+        );
+      } else if (kind === 'icon') {
+        await fs.promises.writeFile(path.join(rootDir, 'hello', 'assets', 'icon.png'), 'REPLACED ICON');
+      } else {
+        await fs.promises.writeFile(
+          path.join(rootDir, 'hello', '.cindy-trust.json'),
+          JSON.stringify({
+            level: 'verified-publisher',
+            publisherSigned: true,
+            publisherVerified: true,
+            reviewed: true,
+            publisherName: 'Different publisher',
+          }),
+        );
+      }
+
+      const result = await manager.reapproveInstalled('hello', {
+        enable: true,
+        expectedManifestSha256: inspected.manifestSha256,
+        expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+        expectedInstalledApproval: 'legacy-unapproved',
+      });
+      expect('rejection' in result && result.rejection.code).toBe('state-changed');
+      expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    },
+  );
 
   it('随包插件拒走人工重新确认(由启动对账自动补批准)', async () => {
     const guarded = new GhostManager({
@@ -651,13 +860,13 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
       isTrustedBundledId: (id) => id === 'hello',
     });
     await writeLegacyInstall('hello', goodManifest());
-    const inspected = guarded.inspectInstalledReapproval('hello');
+    const inspected = await guarded.inspectInstalledReapproval('hello');
     expect('rejection' in inspected && inspected.rejection.code).toBe('file-invalid');
   });
 
   it('已是 approved 的插件拒重复确认(不给覆盖既有批准开口子)', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
-    const inspected = manager.inspectInstalledReapproval('hello');
+    const inspected = await manager.inspectInstalledReapproval('hello');
     expect('rejection' in inspected && inspected.rejection.code).toBe('state-changed');
   });
 
@@ -670,7 +879,7 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
         reviewed: true,
       },
     });
-    const inspected = manager.inspectInstalledReapproval('hello');
+    const inspected = await manager.inspectInstalledReapproval('hello');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     expect(inspected.trust.level).toBe('unverified');
   });
@@ -789,6 +998,78 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
 
+  it('P0-2:首次批准先提交 migration ledger,落账失败时不留下有效 receipt', async () => {
+    const renameTargets: string[] = [];
+    const realRename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      const target = String(to);
+      renameTargets.push(target);
+      if (target.endsWith('.legacy-migration.json')) {
+        throw Object.assign(new Error('EACCES: migration ledger locked'), { code: 'EACCES' });
+      }
+      return realRename(from as never, to as never);
+    });
+    try {
+      const result = await manager.install(await makeCindy('a.cindy', goodManifest()));
+      expect('rejection' in result && result.rejection.code).toBe('io');
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(renameTargets.some((target) => target.endsWith('.legacy-migration.json'))).toBe(true);
+    expect(renameTargets.some((target) => target.endsWith(`${path.sep}hello.json`))).toBe(false);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+    // Ledger commit failed before the receipt became visible, so the install
+    // transaction rolls back the final directory as well; no ghost is listed.
+    expect(manager.list()).toEqual([]);
+  });
+
+  it('首次批准与目录回滚同时失败时保留 install journal,不让迁移收编未提交字节', async () => {
+    const finalDir = path.join(rootDir, 'hello');
+    const pendingPath = path.join(workDir, 'ghosts-install-state', '.pending-hello.json');
+    const realRename = fs.promises.rename;
+    const realRm = fs.promises.rm;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('.legacy-migration.json')) {
+        throw Object.assign(new Error('EACCES: migration ledger locked'), { code: 'EACCES' });
+      }
+      return realRename(from as never, to as never);
+    });
+    const rmSpy = vi.spyOn(fs.promises, 'rm').mockImplementation(async (target, options) => {
+      if (path.resolve(String(target)) === path.resolve(finalDir)) {
+        throw Object.assign(new Error('EBUSY: installed directory locked'), { code: 'EBUSY' });
+      }
+      return realRm(target, options);
+    });
+    try {
+      await expect(manager.install(await makeCindy('a.cindy', goodManifest()))).resolves.toMatchObject(
+        { rejection: { code: 'io' } },
+      );
+    } finally {
+      renameSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+
+    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(fs.existsSync(pendingPath)).toBe(true);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+    expect(fs.existsSync(migrationLedgerPath())).toBe(false);
+
+    const migration = await manager.migrateLegacyApprovalsOnce();
+    expect(migration.migrated).toEqual([]);
+    expect(migration.skipped).toContain('hello');
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+    });
+    expect(recovered.list()).toEqual([]);
+    expect(fs.existsSync(finalDir)).toBe(false);
+    expect(fs.existsSync(pendingPath)).toBe(false);
+  });
+
   it('P0-2:安装根读失败(EACCES 类)本轮放弃且不落台账,不把迁移永久封死', async () => {
     await writeLegacyInstall('hello', goodManifest());
     const realReaddir = fs.readdirSync;
@@ -824,16 +1105,98 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(byId.planted).toBe('legacy-unapproved');
   });
 
+  it('恢复旁路遇到 unreadable receipt 同样只排队重试,不重铸批准', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
+    const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
+    await fs.promises.rm(migrationLedgerPath());
+    const realLstatSync = fs.lstatSync;
+    const lstatSpy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(receiptPath)) {
+        lstatSpy.mockRestore();
+        throw Object.assign(new Error('EIO: receipt temporarily unreadable'), { code: 'EIO' });
+      }
+      return realLstatSync(target, options as never);
+    });
+
+    expect(await manager.backfillRecoveredLegacyGhosts(['hello'])).toEqual({
+      migrated: [],
+      failed: [],
+    });
+    expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
+    expect(
+      JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')),
+    ).toMatchObject({ state: 'in-progress', pendingIds: ['hello'] });
+  });
+
+  it('persists transient recovered-legacy backfill failures in the migration work queue', async () => {
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+    const realRename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith(`${path.sep}recovered.json`)) {
+        renameSpy.mockRestore();
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realRename(from, to);
+    });
+
+    const first = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    expect(first).toEqual({ migrated: [], failed: [] });
+    const pendingLedger = JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as {
+      state?: string;
+      pendingIds?: string[];
+    };
+    expect(pendingLedger.state).toBe('in-progress');
+    expect(pendingLedger.pendingIds).toEqual(['recovered']);
+
+    const second = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    expect(second.migrated).toEqual(['recovered']);
+    const completedLedger = JSON.parse(
+      await fs.promises.readFile(migrationLedgerPath(), 'utf8'),
+    ) as { state?: string; pendingIds?: string[] };
+    expect(completedLedger.state).toBe('completed');
+    expect(completedLedger.pendingIds).toBeUndefined();
+  });
+
+  it('persists recovered ids before the first receipt write starts', async () => {
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+    const realRename = fs.promises.rename;
+    let queueSeenBeforeReceipt = false;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith(`${path.sep}recovered.json`)) {
+        const ledger = JSON.parse(
+          await fs.promises.readFile(migrationLedgerPath(), 'utf8'),
+        ) as { state?: string; pendingIds?: string[] };
+        queueSeenBeforeReceipt =
+          ledger.state === 'in-progress' && ledger.pendingIds?.includes('recovered') === true;
+        const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return realRename(from, to);
+    });
+
+    try {
+      await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    } finally {
+      renameSpy.mockRestore();
+    }
+    expect(queueSeenBeforeReceipt).toBe(true);
+  });
+
   it('P1-6:重新确认拒绝与已装插件撞名的指令', async () => {
     await manager.install(
       await makeCindy('holder.cindy', chipManifestWithCommand('holder', 'draw')),
     );
     await writeLegacyInstall('clasher', chipManifestWithCommand('clasher', 'Draw'));
-    const inspected = manager.inspectInstalledReapproval('clasher');
+    const inspected = await manager.inspectInstalledReapproval('clasher');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     const result = await manager.reapproveInstalled('clasher', {
       enable: true,
       expectedManifestSha256: inspected.manifestSha256,
+      expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
       expectedInstalledApproval: 'legacy-unapproved',
     });
     expect('rejection' in result && result.rejection.code).toBe('command-conflict');
@@ -853,13 +1216,13 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
         ],
       },
     });
-    const inspected = manager.inspectInstalledReapproval('brokered');
+    const inspected = await manager.inspectInstalledReapproval('brokered');
     expect('rejection' in inspected && inspected.rejection.code).toBe('file-invalid');
   });
 
   it('P1-7:重新确认的启停默认值取镜像读数,不重置用户停用偏好', async () => {
     await writeLegacyInstall('hello', goodManifest(), { disabled: true });
-    const inspected = manager.inspectInstalledReapproval('hello');
+    const inspected = await manager.inspectInstalledReapproval('hello');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     expect(inspected.previouslyEnabled).toBe(false);
   });
@@ -882,6 +1245,9 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       if (!('rejection' in result)) return;
       expect(result.rejection.code).toBe('io');
       expect(result.rejection.code === 'io' && result.rejection.rollbackFailed).toBe(true);
+      expect(
+        fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json')),
+      ).toBe(true);
     } finally {
       spy.mockRestore();
     }
@@ -913,6 +1279,466 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
     expect(fs.existsSync(pendingMarkerPath())).toBe(false);
     const outcome = await recovered.migrateLegacyApprovalsOnce();
     expect(outcome.migrated).toEqual([]); // 目录已被删,迁移无对象
+  });
+
+  it('keeps a committed builtin restore successful and retries tombstone clearing from its journal', async () => {
+    trustedBundledIds.add('hello');
+    const clearBuiltinTombstone = vi
+      .fn<(id: string) => void>()
+      .mockImplementationOnce(() => {
+        throw new Error('state root temporarily unavailable');
+      })
+      .mockImplementation(() => undefined);
+    const restoringManager = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: (id) => trustedBundledIds.has(id),
+      clearBuiltinTombstone,
+    });
+
+    const installed = await restoringManager.install(
+      await makeCindy('builtin-restore.cindy', goodManifest()),
+    );
+
+    expect('ghost' in installed).toBe(true);
+    expect(restoringManager.list()[0]).toMatchObject({ approval: { state: 'approved' } });
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(JSON.parse(await fs.promises.readFile(pendingMarkerPath(), 'utf8'))).toMatchObject({
+      kind: 'install',
+      clearBuiltinTombstone: true,
+    });
+
+    const recoveredAfterClearFailure = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: (id) => trustedBundledIds.has(id),
+      clearBuiltinTombstone,
+    });
+
+    expect(clearBuiltinTombstone).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+    expect(recoveredAfterClearFailure.list()[0]).toMatchObject({
+      approval: { state: 'approved' },
+    });
+  });
+
+  it('install 恢复必须用 packageSha256 证明旧 receipt 属于这次安装', async () => {
+    await manager.install(await makeCindy('old.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    await fs.promises.rm(finalDir, { recursive: true, force: true });
+    await fs.promises.mkdir(finalDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(finalDir, 'ghost.json'),
+      JSON.stringify({ ...goodManifest(), version: '2.0.0' }),
+    );
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), 'new-bytes');
+    await fs.promises.mkdir(path.dirname(pendingMarkerPath()), { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'install',
+        packageSha256: 'f'.repeat(64),
+      }),
+    );
+
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale, onChanged });
+    expect(fs.existsSync(finalDir)).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+  });
+
+  it('非法 pending marker 会阻断 orphan backup 启发式，不删除待人工恢复的 backup', async () => {
+    await manager.install(await makeCindy('old.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupName = '.cindy-updating-hello-abcdef12';
+    await fs.promises.rename(finalDir, path.join(rootDir, backupName));
+    await fs.promises.mkdir(finalDir, { recursive: true });
+    await fs.promises.writeFile(path.join(finalDir, 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), 'new');
+    await fs.promises.mkdir(path.dirname(pendingMarkerPath()), { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: '..\\outside',
+      }),
+    );
+
+    const recovered = freshManager();
+    expect(fs.existsSync(path.join(rootDir, backupName))).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(recovered.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
+  it('invalid pending marker filename blocks orphan-backup heuristics', async () => {
+    await manager.install(await makeCindy('old.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    await fs.promises.rename(finalDir, backupDir);
+    await fs.promises.mkdir(finalDir, { recursive: true });
+    await fs.promises.writeFile(path.join(finalDir, 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), 'new');
+    const invalidMarker = path.join(path.dirname(pendingMarkerPath()), '.pending-BAD!.json');
+    await fs.promises.writeFile(invalidMarker, '{}');
+
+    const recovered = freshManager();
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(invalidMarker)).toBe(true);
+    expect(recovered.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
+  it('pending marker JSON 为 null 时按 invalid 保留现场，不让构造期恢复崩溃', async () => {
+    await manager.install(await makeCindy('old.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    await fs.promises.rename(finalDir, backupDir);
+    await fs.promises.mkdir(finalDir, { recursive: true });
+    await fs.promises.writeFile(path.join(finalDir, 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(finalDir, 'main.js'), 'new');
+    await fs.promises.writeFile(pendingMarkerPath(), 'null');
+
+    const recovered = freshManager();
+    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(recovered.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
+  it('状态根 journal 扫描 EACCES 时跳过全部恢复启发式，任何现场都不动', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const stateRoot = path.dirname(pendingMarkerPath());
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    const stagingDir = path.join(rootDir, '.cindy-installing-hello-deadbeef');
+    await fs.promises.mkdir(backupDir, { recursive: true });
+    await fs.promises.mkdir(stagingDir, { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: path.basename(backupDir),
+      }),
+    );
+    const realReaddirSync = fs.readdirSync;
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((target: fs.PathLike, options?: unknown) => {
+      if (path.resolve(String(target)) === path.resolve(stateRoot)) {
+        throw Object.assign(new Error('EACCES: state root locked'), { code: 'EACCES' });
+      }
+      return (realReaddirSync as (...args: unknown[]) => unknown)(target, options);
+    }) as typeof fs.readdirSync);
+    try {
+      const recovered = freshManager();
+      expect(recovered.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'invalid' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 未提交 update 已先移除 final；backup 不可读时保留整笔 journal，
+    // 因而此刻 final 仍缺失，等待下次可读时再由 recovery 收敛。
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(receiptPath())).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(stagingDir)).toBe(true);
+  });
+
+  it('journal root unreadable blocks the whole owner even when installed ids cannot be enumerated yet', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const stateRoot = path.dirname(pendingMarkerPath());
+    const realReaddirSync = fs.readdirSync;
+    const spy = vi.spyOn(fs, 'readdirSync').mockImplementation(((target: fs.PathLike, options?: unknown) => {
+      const resolved = path.resolve(String(target));
+      if (resolved === path.resolve(stateRoot) || resolved === path.resolve(rootDir)) {
+        throw Object.assign(new Error('EACCES: managed root locked'), { code: 'EACCES' });
+      }
+      return (realReaddirSync as (...args: unknown[]) => unknown)(target, options);
+    }) as typeof fs.readdirSync);
+
+    let recovered: GhostManager;
+    try {
+      recovered = freshManager();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(recovered.list()[0]).toMatchObject({
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+  });
+
+  it('pending marker 读取 EACCES 时保留 marker/final/backup，不降级到 orphan cleanup', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    await fs.promises.mkdir(backupDir, { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: path.basename(backupDir),
+      }),
+    );
+    const realReadFileSync = fs.readFileSync;
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+      if (path.resolve(String(target)) === path.resolve(pendingMarkerPath())) {
+        throw Object.assign(new Error('EACCES: marker locked'), { code: 'EACCES' });
+      }
+      return (realReadFileSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.readFileSync);
+    try {
+      const recovered = freshManager();
+      expect(recovered.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'invalid' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(fs.existsSync(backupDir)).toBe(true);
+  });
+
+  it('已提交 install 的 receipt 瞬时不可读时保留 final/receipt/journal 等待重试', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const packageSha256 = (JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256: string;
+    }).packageSha256;
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({ version: 1, id: 'hello', kind: 'install', packageSha256 }),
+    );
+    const realReadFileSync = fs.readFileSync;
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+      if (path.resolve(String(target)) === path.resolve(receiptPath())) {
+        throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
+      }
+      return (realReadFileSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.readFileSync);
+    try {
+      const recovered = freshManager();
+      expect(recovered.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'invalid' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(receiptPath())).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+  });
+
+  it('已提交 update 的 receipt lstat EACCES 时保留 final/backup/receipt/journal', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const packageSha256 = (JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256: string;
+    }).packageSha256;
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    await fs.promises.mkdir(backupDir, { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256,
+        backupDirName: path.basename(backupDir),
+      }),
+    );
+    const realLstatSync = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+      if (path.resolve(String(target)) === path.resolve(receiptPath())) {
+        throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
+      }
+      return (realLstatSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.lstatSync);
+    try {
+      const recovered = freshManager();
+      expect(recovered.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'invalid' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(receiptPath())).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+  });
+
+  it('update backup lstat EACCES 时保留整笔 journal，不清 marker 继续猜恢复', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef12');
+    await fs.promises.mkdir(backupDir, { recursive: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: path.basename(backupDir),
+      }),
+    );
+    const realLstatSync = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+      if (path.resolve(String(target)) === path.resolve(backupDir)) {
+        throw Object.assign(new Error('EACCES: backup locked'), { code: 'EACCES' });
+      }
+      return (realLstatSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.lstatSync);
+    try {
+      const recovered = freshManager();
+      expect(recovered.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'invalid' },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(backupDir)).toBe(true);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+  });
+
+  it('动态 owner 根切换时，首次读取会先恢复新 owner 的 pending mutation', async () => {
+    const rootA = rootDir;
+    const rootB = path.join(workDir, 'ghosts-b');
+    const stateA = path.join(workDir, 'state-a');
+    const stateB = path.join(workDir, 'state-b');
+    let activeRoot = rootA;
+    let activeState = stateA;
+    const backupName = '.cindy-updating-hello-abcdef12';
+    const finalDir = path.join(rootB, 'hello');
+    await fs.promises.mkdir(path.join(rootB, backupName), { recursive: true });
+    await fs.promises.writeFile(path.join(rootB, backupName, 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(rootB, backupName, 'main.js'), 'old');
+    await fs.promises.mkdir(stateB, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(stateB, '.pending-hello.json'),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: backupName,
+      }),
+    );
+    const owned = new GhostManager({
+      getRootDir: () => activeRoot,
+      getStateDir: () => activeState,
+      getLocale: () => hostLocale,
+    });
+    activeRoot = rootB;
+    activeState = stateB;
+    expect(owned.list().map((ghost) => ghost.manifest.id)).toEqual(['hello']);
+    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(fs.existsSync(path.join(rootB, backupName))).toBe(false);
+  });
+
+  it('排队中的 mutation 在 owner 代际变化后拒绝执行', async () => {
+    const rootA = rootDir;
+    const rootB = path.join(workDir, 'ghosts-b');
+    const stateA = path.join(workDir, 'state-a');
+    const stateB = path.join(workDir, 'state-b');
+    let activeRoot = rootA;
+    let activeState = stateA;
+    let ownerGeneration = 0;
+    const owned = new GhostManager({
+      getRootDir: () => activeRoot,
+      getStateDir: () => activeState,
+      getOwnerContextKey: () => `owner:${ownerGeneration}`,
+      getLocale: () => hostLocale,
+    });
+
+    let markStarted!: () => void;
+    let releaseFirst!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const first = owned.runExclusiveMutation(async () => {
+      markStarted();
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+    });
+    await started;
+
+    const second = owned.runExclusiveMutation(async () => {
+      await fs.promises.mkdir(activeRoot, { recursive: true });
+      await fs.promises.writeFile(path.join(activeRoot, 'queued-write'), 'must not run');
+    });
+    const rejected = expect(second).rejects.toThrow(/owner context changed/);
+    activeRoot = rootB;
+    activeState = stateB;
+    ownerGeneration += 1;
+    releaseFirst();
+
+    await first;
+    await rejected;
+    expect(fs.existsSync(path.join(rootA, 'queued-write'))).toBe(false);
+    expect(fs.existsSync(path.join(rootB, 'queued-write'))).toBe(false);
+  });
+
+  it('执行中的独占 mutation 钉住 owner 内容根与状态根，不把后半段写进新 owner', async () => {
+    const rootA = path.join(workDir, 'owned-a');
+    const rootB = path.join(workDir, 'owned-b');
+    const stateA = path.join(workDir, 'owned-state-a');
+    const stateB = path.join(workDir, 'owned-state-b');
+    let activeRoot = rootA;
+    let activeState = stateA;
+    let ownerGeneration = 0;
+    const owned = new GhostManager({
+      getRootDir: () => activeRoot,
+      getStateDir: () => activeState,
+      getOwnerContextKey: () => `owner:${ownerGeneration}`,
+      getLocale: () => hostLocale,
+    });
+    await owned.install(await makeCindy('owned.cindy', goodManifest()));
+    await fs.promises.mkdir(path.join(rootB, 'hello'), { recursive: true });
+    await fs.promises.writeFile(path.join(rootB, 'hello', 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(rootB, 'hello', 'main.js'), 'owner-b');
+
+    await owned.runExclusiveMutation(async (mutation) => {
+      activeRoot = rootB;
+      activeState = stateB;
+      ownerGeneration += 1;
+      expect(await mutation.uninstall('hello', { notify: false })).toEqual({ ok: true });
+    });
+
+    expect(fs.existsSync(path.join(rootA, 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(stateA, 'hello.json'))).toBe(false);
+    expect(fs.existsSync(path.join(rootB, 'hello', 'main.js'))).toBe(true);
+    expect(owned.list().find((ghost) => ghost.manifest.id === 'hello')?.approval.state).toBe(
+      'legacy-unapproved',
+    );
   });
 
   it('未提交的更新(新字节+旧 receipt+update 标记)回滚到 backup,不固化成按旧批准跑新代码', async () => {
@@ -1054,6 +1880,39 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
     await expectRejection(result, 'not-installed');
     // 关键:没有往 junction 目标(安装根之外)写 .disabled。
     expect(fs.existsSync(path.join(outside, '.disabled'))).toBe(false);
+  });
+});
+
+describe('GhostManager · update pre-rename recovery', () => {
+  it('marker 落盘但尚未 rename 时保留旧 final 与 receipt', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const stagingDir = path.join(rootDir, '.cindy-installing-hello-deadbeef');
+    await fs.promises.mkdir(stagingDir, { recursive: true });
+    const stateReceiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
+    const statePendingPath = path.join(workDir, 'ghosts-install-state', '.pending-hello.json');
+    const receipt = JSON.parse(await fs.promises.readFile(stateReceiptPath, 'utf8')) as {
+      packageSha256?: string;
+    };
+    await fs.promises.writeFile(
+      statePendingPath,
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: 'f'.repeat(64),
+        backupDirName: '.cindy-updating-hello-deadbeef',
+        phase: 'prepared',
+        oldPackageSha256: receipt.packageSha256,
+      }),
+    );
+
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale, onChanged });
+
+    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(fs.existsSync(stateReceiptPath)).toBe(true);
+    expect(fs.existsSync(statePendingPath)).toBe(false);
+    expect(fs.existsSync(stagingDir)).toBe(false);
   });
 });
 
@@ -1369,6 +2228,95 @@ describe('GhostManager · uninstall', () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
+  it('persists builtin tombstone intent before removing approval or installed bytes', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    trustedBundledIds.add('hello');
+    recordBuiltinTombstone.mockImplementationOnce(() => {
+      expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+      expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(true);
+    });
+
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toEqual({ ok: true });
+
+    expect(recordBuiltinTombstone).toHaveBeenCalledWith('hello');
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+  });
+
+  it('does not turn Host reconciliation cleanup into a user builtin tombstone', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    trustedBundledIds.add('hello');
+
+    await expect(
+      manager.uninstall('hello', { notify: false, recordBuiltinTombstone: false }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(recordBuiltinTombstone).not.toHaveBeenCalled();
+    expect(manager.list()).toEqual([]);
+  });
+
+  it('keeps builtin uninstall journal and bytes quarantined when tombstone persistence fails', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    trustedBundledIds.add('hello');
+    recordBuiltinTombstone.mockImplementationOnce(() => {
+      const error = new Error('access denied') as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+
+    await expect(manager.uninstall('hello', { notify: false })).resolves.toMatchObject({
+      rejection: { code: 'io' },
+    });
+
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(true);
+    expect(manager.list()[0]).toMatchObject({
+      manifest: { id: 'hello' },
+      enabled: false,
+      approval: { state: 'invalid' },
+    });
+    expect(
+      JSON.parse(
+        await fs.promises.readFile(
+          path.join(workDir, 'ghosts-install-state', '.pending-hello.json'),
+          'utf8',
+        ),
+      ),
+    ).toMatchObject({ kind: 'uninstall', builtinTombstone: true });
+  });
+
+  it('recovers a crashed builtin uninstall by persisting its tombstone before deletion', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const stateDir = path.join(workDir, 'ghosts-install-state');
+    await fs.promises.mkdir(stateDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(stateDir, '.pending-hello.json'),
+      `${JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'uninstall',
+        builtinTombstone: true,
+      })}\n`,
+    );
+    const recoveredTombstone = vi.fn(() => {
+      expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true);
+      expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(true);
+    });
+
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: (id) => id === 'hello',
+      recordBuiltinTombstone: recoveredTombstone,
+    });
+
+    expect(recoveredTombstone).toHaveBeenCalledWith('hello');
+    expect(recovered.list()).toEqual([]);
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+    expect(fs.existsSync(path.join(stateDir, '.pending-hello.json'))).toBe(false);
+  });
+
   it('卸未装的 id → not-installed', async () => {
     const result = await manager.uninstall('ghost');
     expect((result as { rejection: { code: string } }).rejection.code).toBe('not-installed');
@@ -1429,6 +2377,22 @@ describe('GhostManager · Host approval receipt', () => {
   const realCopyFile = fs.promises.copyFile;
   const receiptPath = (id = 'hello') =>
     path.join(workDir, 'ghosts-install-state', `${id}.json`);
+  const writeBundledSource = async (
+    manifest: InstalledGhost['manifest'],
+    files: Record<string, string> = { 'main.js': '// bundled seed' },
+  ): Promise<{ sourceDir: string }> => {
+    const sourceDir = path.join(workDir, 'bundled-seeds', manifest.id);
+    await fs.promises.rm(sourceDir, { recursive: true, force: true });
+    await fs.promises.mkdir(sourceDir, { recursive: true });
+    trustedBundledIds.add(manifest.id);
+    await fs.promises.writeFile(path.join(sourceDir, 'ghost.json'), JSON.stringify(manifest));
+    for (const [relativePath, content] of Object.entries(files)) {
+      const target = path.join(sourceDir, relativePath);
+      await fs.promises.mkdir(path.dirname(target), { recursive: true });
+      await fs.promises.writeFile(target, content);
+    }
+    return { sourceDir };
+  };
 
   /** 带 skill 槽的清单 + 配套包内文件(技能快照相关用例共用)。 */
   const skillManifest = (): Record<string, unknown> => ({
@@ -1563,7 +2527,7 @@ describe('GhostManager · Host approval receipt', () => {
     expect(fs.existsSync(listed.approvedSkillRoot!)).toBe(false);
   });
 
-  it('treats receipt cleanup failure after content removal as a completed uninstall', async () => {
+  it('keeps an uninstall journal when receipt cleanup fails after content removal', async () => {
     await manager.install(await makeCindy('approved.cindy', goodManifest()));
     await fs.promises.rm(receiptPath());
     await fs.promises.mkdir(receiptPath());
@@ -1574,6 +2538,19 @@ describe('GhostManager · Host approval receipt', () => {
     expect(result).toEqual({ ok: true });
     expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
     expect(manager.list()).toEqual([]);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json'))).toBe(
+      true,
+    );
+    await fs.promises.rm(receiptPath(), { recursive: true, force: true });
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+    });
+    expect(recovered.list()).toEqual([]);
+    expect(
+      fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json')),
+    ).toBe(false);
   });
 
   it('keeps disabling possible when the approved skill snapshot is gone, and rebuilds it on enable', async () => {
@@ -1941,11 +2918,99 @@ describe('GhostManager · Host approval receipt', () => {
     await expectRejection(await manager.setEnabled('hello', true), 'approval-required');
 
     // 下一轮启动对账重新补批准即自愈,不需要用户介入。
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect(
+      await manager.approveTrustedBundledInstall(
+        approvedManifest,
+        true,
+        await writeBundledSource(approvedManifest),
+      ),
+    ).toBe(true);
     expect(manager.list()[0]).toMatchObject({
       enabled: true,
       approval: { state: 'approved' },
     });
+  });
+
+  it('uses the immutable bundled source directory when minting the approval receipt', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const approvedManifest = manager.list()[0].manifest;
+    const sourceDir = path.join(workDir, 'bundled-seeds', approvedManifest.id);
+    trustedBundledIds.add(approvedManifest.id);
+    await fs.promises.mkdir(sourceDir, { recursive: true });
+    await fs.promises.writeFile(path.join(sourceDir, 'ghost.json'), JSON.stringify(approvedManifest));
+    await fs.promises.writeFile(path.join(sourceDir, 'main.js'), 'immutable bundled bytes');
+    await fs.promises.writeFile(path.join(rootDir, approvedManifest.id, 'main.js'), 'mutable bytes');
+
+    const unsafeCall = manager.approveTrustedBundledInstall as unknown as (
+      manifest: InstalledGhost['manifest'],
+      markerEnabled: boolean,
+    ) => Promise<boolean>;
+    await expect(unsafeCall.call(manager, approvedManifest, true)).rejects.toThrow(
+      /verified bundled source directory/,
+    );
+    await expect(
+      manager.approveTrustedBundledInstall(approvedManifest, true, {
+        sourceDir: path.join(rootDir, approvedManifest.id),
+      }),
+    ).rejects.toThrow(/mutable installed directory/);
+    const arbitrarySourceDir = path.join(workDir, 'arbitrary-source', approvedManifest.id);
+    await fs.promises.mkdir(arbitrarySourceDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(arbitrarySourceDir, 'ghost.json'),
+      JSON.stringify(approvedManifest),
+    );
+    await expect(
+      manager.approveTrustedBundledInstall(approvedManifest, true, {
+        sourceDir: arbitrarySourceDir,
+      }),
+    ).rejects.toThrow(/trusted seed roster/);
+
+    expect(
+      await manager.approveTrustedBundledInstall(approvedManifest, true, { sourceDir }),
+    ).toBe(true);
+    const receipt = JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256?: string;
+    };
+    const sourcePackageSha256 = receipt.packageSha256;
+    await fs.promises.writeFile(path.join(rootDir, approvedManifest.id, 'main.js'), 'different mutable bytes');
+    await manager.approveTrustedBundledInstall(approvedManifest, true, { sourceDir });
+    const stableReceipt = JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256?: string;
+    };
+    expect(stableReceipt.packageSha256).toBe(sourcePackageSha256);
+  });
+
+  it('publishes bundled replacements through the pending journal and commits on receipt write', async () => {
+    await manager.install(await makeCindy('old.cindy', goodManifest()));
+    const approvedManifest = manager.list()[0].manifest;
+    const { sourceDir } = await writeBundledSource(approvedManifest, {
+      'main.js': 'immutable replacement bytes',
+    });
+    const stateRoot = manager.approvalStateRoot();
+    const pendingPath = path.join(stateRoot, '.pending-hello.json');
+
+    await manager.runExclusiveMutation(async (mutation) => {
+      expect(await mutation.removeInstallApproval('hello')).toBe(true);
+      await mutation.publishTrustedBundledSeed('hello', sourceDir, { disabled: false });
+      expect(fs.existsSync(pendingPath)).toBe(true);
+      expect(
+        (await fs.promises.readdir(rootDir)).some((name) =>
+          name.startsWith('.cindy-updating-hello-'),
+        ),
+      ).toBe(true);
+      await mutation.approveTrustedBundledInstall(approvedManifest, true, { sourceDir });
+    });
+
+    expect(await fs.promises.readFile(path.join(rootDir, 'hello', 'main.js'), 'utf8')).toBe(
+      'immutable replacement bytes',
+    );
+    expect(fs.existsSync(pendingPath)).toBe(false);
+    expect(
+      (await fs.promises.readdir(rootDir)).some((name) =>
+        name.startsWith('.cindy-updating-hello-'),
+      ),
+    ).toBe(false);
+    expect(manager.list()[0].approval.state).toBe('approved');
   });
 
   it('keeps a receipt-pinned disable when the .disabled mirror was lost, and rewrites the mirror', async () => {
@@ -1953,8 +3018,9 @@ describe('GhostManager · Host approval receipt', () => {
     const { manifest: approvedManifest } = JSON.parse(
       await fs.promises.readFile(receiptPath(), 'utf8'),
     ) as { manifest: InstalledGhost['manifest'] };
+    const source = await writeBundledSource(approvedManifest);
     // 随包对账首轮把安装收编成 bundled 批准(trust 归一),后续轮次走稳态分支。
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true, source)).toBe(true);
     expect('ok' in (await manager.setEnabled('hello', false))).toBe(true);
 
     // 外部因素(AV 隔离恢复 / 同步冲突解析 / 手动清理)移除了兼容镜像文件。
@@ -1962,7 +3028,7 @@ describe('GhostManager · Host approval receipt', () => {
 
     // 下一轮对账把镜像读数(启用)喂进来:不得据此翻转 receipt —— 否则用户显式
     // 停用的插件被静默重新启用,无确认、无审计。重新启用只有 setEnabled 一条路。
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(false);
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true, source)).toBe(false);
     expect(manager.list()[0].enabled).toBe(false);
     // 镜像被补写回去:回滚到旧客户端(只认镜像文件)时仍按停用对待。
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(true);
@@ -1973,12 +3039,13 @@ describe('GhostManager · Host approval receipt', () => {
     const { manifest: approvedManifest } = JSON.parse(
       await fs.promises.readFile(receiptPath(), 'utf8'),
     ) as { manifest: InstalledGhost['manifest'] };
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    const source = await writeBundledSource(approvedManifest);
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, true, source)).toBe(true);
 
     // 旧客户端只会写镜像文件、不会写 receipt。停用是安全方向,合并必须照办 ——
     // 非对称的另一半:镜像只能把启停态往下拉,不能往上翻。
     await fs.promises.writeFile(path.join(rootDir, 'hello', '.disabled'), '');
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, false)).toBe(true);
+    expect(await manager.approveTrustedBundledInstall(approvedManifest, false, source)).toBe(true);
     expect(manager.list()[0].enabled).toBe(false);
   });
 
@@ -1987,14 +3054,26 @@ describe('GhostManager · Host approval receipt', () => {
     const { manifest: approvedManifest } = JSON.parse(
       await fs.promises.readFile(receiptPath(), 'utf8'),
     ) as { manifest: InstalledGhost['manifest'] };
-    expect(await manager.approveTrustedBundledInstall(approvedManifest, true)).toBe(true);
+    expect(
+      await manager.approveTrustedBundledInstall(
+        approvedManifest,
+        true,
+        await writeBundledSource(approvedManifest),
+      ),
+    ).toBe(true);
     expect('ok' in (await manager.setEnabled('hello', false))).toBe(true);
     await fs.promises.rm(path.join(rootDir, 'hello', '.disabled'));
 
     // 随包更新那一轮走的是"建全新 receipt"分支,与稳态分支共用同一条合并规则:
     // 只堵稳态分支的话,镜像在更新 tick 之前丢失仍会静默重新启用,同一个洞换条路。
     const bumped = { ...approvedManifest, version: '1.0.1' };
-    expect(await manager.approveTrustedBundledInstall(bumped, true)).toBe(true);
+    expect(
+      await manager.approveTrustedBundledInstall(
+        bumped,
+        true,
+        await writeBundledSource(bumped),
+      ),
+    ).toBe(true);
     expect(manager.list()[0]).toMatchObject({
       enabled: false,
       manifest: { version: '1.0.1' },
@@ -2013,7 +3092,11 @@ describe('GhostManager · Host approval receipt', () => {
     const validated = validateGhostManifest(goodManifest());
     if (!validated.ok) throw new Error(validated.reason);
     await expect(
-      guarded.approveTrustedBundledInstall(validated.manifest, true),
+      guarded.approveTrustedBundledInstall(
+        validated.manifest,
+        true,
+        await writeBundledSource(validated.manifest),
+      ),
     ).rejects.toThrow(/种子清单/);
   });
 
@@ -2097,6 +3180,60 @@ describe('GhostManager · 更新崩溃恢复(两次 rename 之间)', () => {
     expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
     expect(restarted.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
     expect(fs.existsSync(path.join(rootDir, '.cindy-updating-hello-abcdef01'))).toBe(false);
+  });
+
+  it('final 是普通文件时不删除唯一 backup', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef01');
+    await fs.promises.rename(finalDir, backupDir);
+    await fs.promises.writeFile(finalDir, 'unexpected file');
+
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+
+    expect((await fs.promises.lstat(finalDir)).isFile()).toBe(true);
+    expect(fs.existsSync(path.join(backupDir, 'ghost.json'))).toBe(true);
+  });
+
+  it('final 是 junction/链接时不删除唯一 backup', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef01');
+    const outsideDir = path.join(workDir, 'outside-final-target');
+    await fs.promises.rename(finalDir, backupDir);
+    await fs.promises.mkdir(outsideDir, { recursive: true });
+    try {
+      await fs.promises.symlink(outsideDir, finalDir, process.platform === 'win32' ? 'junction' : 'dir');
+    } catch {
+      return; // Windows 环境未授予建链接权限时跳过；生产判据仍由 lstat 钉住。
+    }
+
+    new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+
+    expect((await fs.promises.lstat(finalDir)).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(path.join(backupDir, 'ghost.json'))).toBe(true);
+  });
+
+  it('final lstat EACCES 时不删除唯一 backup', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const finalDir = path.join(rootDir, 'hello');
+    const backupDir = path.join(rootDir, '.cindy-updating-hello-abcdef01');
+    await fs.promises.rename(finalDir, backupDir);
+    const realLstatSync = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+      if (path.resolve(String(target)) === path.resolve(finalDir)) {
+        throw Object.assign(new Error('EACCES: final path locked'), { code: 'EACCES' });
+      }
+      return (realLstatSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.lstatSync);
+    try {
+      new GhostManager({ getRootDir: () => rootDir, getLocale: () => hostLocale });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(path.join(backupDir, 'ghost.json'))).toBe(true);
+    expect(fs.existsSync(finalDir)).toBe(false);
   });
 
   it('final 在位的陈旧 backup 与 staging 残留 → 回收;同 id 多个 backup 不猜、原样保留', async () => {

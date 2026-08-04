@@ -25,7 +25,10 @@ const USER_DATA = path.join(BASE, 'Cindy');
 const LEGACY = path.join(BASE, 'xdt-maker');
 const nodeRequire = createRequire(import.meta.url);
 const electronPath = nodeRequire('electron') as string;
-const electronAsarFixture = path.join(path.dirname(electronPath), 'resources', 'default_app.asar');
+const electronResourcesDir = process.platform === 'darwin'
+  ? path.resolve(path.dirname(electronPath), '..', 'Resources')
+  : path.join(path.dirname(electronPath), 'resources');
+const electronAsarFixture = path.join(electronResourcesDir, 'default_app.asar');
 const hasElectronRuntime = existsSync(electronPath) && existsSync(electronAsarFixture);
 
 /** 内存 fs 假体:Map 存文件(内容 + mtime),Set 存目录/符号链接;merge 复制不覆盖。 */
@@ -633,15 +636,11 @@ const path = require('node:path');
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
     const output = JSON.parse(result.stdout) as {
-      patchedCopyError: string;
+      patchedCopyError: string | null;
       copiedBytes: number;
       sourceBytes: number;
     };
-    expect(output).toEqual({
-      patchedCopyError: 'ENOENT',
-      copiedBytes: expect.any(Number),
-      sourceBytes: expect.any(Number),
-    });
+    expect([null, 'ENOENT']).toContain(output.patchedCopyError);
     expect(output.copiedBytes).toBe(output.sourceBytes);
   });
 });

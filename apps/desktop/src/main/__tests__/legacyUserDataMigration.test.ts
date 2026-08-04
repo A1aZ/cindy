@@ -1,11 +1,13 @@
 /**
  * legacyUserDataMigration.test — 首登轻量数据迁移(mToc)核心流程单测。
  *
- * 全部走内存 fs 假体(LegacyMigrationFsDeps 注入),不碰真实磁盘;
- * electron 依赖经 vitest alias 落到 electron-stub(本文件只测纯 DI 入口
- * runLegacyUserDataMigration,不触发默认 electron 实现)。
+ * Core migration tests use injected in-memory filesystem dependencies. A final
+ * subprocess test runs against Electron itself to cover physical .asar access.
  */
 
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -21,6 +23,10 @@ import {
 const BASE = path.join(path.sep, 'base');
 const USER_DATA = path.join(BASE, 'Cindy');
 const LEGACY = path.join(BASE, 'xdt-maker');
+const nodeRequire = createRequire(import.meta.url);
+const electronPath = nodeRequire('electron') as string;
+const electronAsarFixture = path.join(path.dirname(electronPath), 'resources', 'default_app.asar');
+const hasElectronRuntime = existsSync(electronPath) && existsSync(electronAsarFixture);
 
 /** 内存 fs 假体:Map 存文件(内容 + mtime),Set 存目录/符号链接;merge 复制不覆盖。 */
 function createMemFs() {
@@ -573,5 +579,69 @@ describe('shouldSkipLegacyMigrationForDevSandbox', () => {
         envUserDataDir: path.join(BASE, 'anything'),
       }),
     ).toBe(false);
+  });
+});
+
+describe.skipIf(!hasElectronRuntime)('Electron physical .asar access', () => {
+  it('copies a physical .asar through original-fs', () => {
+    const script = `
+const nodeFs = require('node:fs').promises;
+const originalFs = require('original-fs').promises;
+const os = require('node:os');
+const path = require('node:path');
+
+(async () => {
+  const source = ${JSON.stringify(electronAsarFixture)};
+  const tempDir = await originalFs.mkdtemp(path.join(os.tmpdir(), 'cindy-asar-copy-'));
+  const destination = path.join(tempDir, 'copied.asar');
+  let patchedCopyError = null;
+
+  try {
+    try {
+      await nodeFs.copyFile(source, destination);
+    } catch (error) {
+      patchedCopyError = error.code;
+    }
+
+    await originalFs.copyFile(source, destination);
+    const [sourceStat, destinationStat] = await Promise.all([
+      originalFs.stat(source),
+      originalFs.stat(destination),
+    ]);
+    process.stdout.write(JSON.stringify({
+      patchedCopyError,
+      copiedBytes: destinationStat.size,
+      sourceBytes: sourceStat.size,
+    }));
+  } finally {
+    await originalFs.rm(tempDir, { recursive: true, force: true });
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+`;
+
+    const result = spawnSync(electronPath, ['-e', script], {
+      encoding: 'utf8',
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      timeout: 20_000,
+    });
+
+    expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull();
+    expect(result.stderr).toBe('');
+    expect(result.status).toBe(0);
+    const output = JSON.parse(result.stdout) as {
+      patchedCopyError: string;
+      copiedBytes: number;
+      sourceBytes: number;
+    };
+    expect(output).toEqual({
+      patchedCopyError: 'ENOENT',
+      copiedBytes: expect.any(Number),
+      sourceBytes: expect.any(Number),
+    });
+    expect(output.copiedBytes).toBe(output.sourceBytes);
   });
 });

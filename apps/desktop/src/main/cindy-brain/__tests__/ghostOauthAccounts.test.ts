@@ -9,7 +9,7 @@ import {
   GHOST_OAUTH_INVALID_GRANT_RECHECK_DELAY_MS,
   GHOST_OAUTH_MAX_ACCOUNTS,
   GhostOauthAccountManager,
-  isScopeStale,
+  missingAuthScopes,
   type GhostOauthDecl,
   type GhostOauthVault,
 } from '../ghostOauthAccounts.js';
@@ -79,7 +79,7 @@ function seededVault(rt = 'rt-seed'): ReturnType<typeof memoryVault> {
   });
 }
 
-describe('isScopeStale', () => {
+describe('missingAuthScopes(快照推断)', () => {
   it.each([
     ['全量快照没有新增 scope', ['scope.a'], { authFace: 'full', authScopes: ['scope.a'] }, false],
     [
@@ -97,7 +97,7 @@ describe('isScopeStale', () => {
     ['老账号无快照不猜', ['scope.a', 'scope.b'], {}, false],
     ['只有 scope 面没有 full 标记不猜', ['scope.a', 'scope.b'], { authScopes: ['scope.a'] }, false],
   ] as const)('%s', (_name, declScopes, row, expected) => {
-    expect(isScopeStale(declScopes, row)).toBe(expected);
+    expect(missingAuthScopes(declScopes, row).length > 0).toBe(expected);
   });
 
   it('老清单与非法快照继续宽松读取，不误报陈旧授权', () => {
@@ -220,7 +220,7 @@ describe('isScopeStale', () => {
     ['纯空白', ['   ']],
     ['单项超长', ['x'.repeat(257)]],
     ['条数超限', Array.from({ length: 65 }, (_, index) => `scope.${index}`)],
-  ])('%s 的持久化错误证据按 undefined 读取', (_name, insufficientScopes) => {
+  ])('%s 的持久化坏证据对判定惰性(按当前声明过滤,不整包丢弃)', (_name, insufficientScopes) => {
     const vault = memoryVault({
       [`${KEY}-accounts`]: JSON.stringify({
         defaultAccountId: 'acc-1',
@@ -294,8 +294,11 @@ describe('isScopeStale', () => {
       openExternal: vi.fn(),
     });
 
-    expect(mgr.reportInsufficientScopes(GHOST, KEY, ['scope.a', 'scope.b', 'scope.b'])).toBe(true);
-    expect(mgr.reportInsufficientScopes(GHOST, KEY, ['scope.b'])).toBe(true);
+    const decl = ['scope.a', 'scope.b'];
+    expect(mgr.reportInsufficientScopes(GHOST, KEY, ['scope.a', 'scope.b', 'scope.b'], decl)).toBe(
+      'stored',
+    );
+    expect(mgr.reportInsufficientScopes(GHOST, KEY, ['scope.b'], decl)).toBe('unchanged');
     const accounts = JSON.parse(vault.read(GHOST, `${KEY}-accounts`) ?? '{}').accounts;
     expect(accounts[0]).not.toHaveProperty('insufficientScopes');
     expect(accounts[1].insufficientScopes).toEqual(['scope.a', 'scope.b']);
@@ -304,8 +307,36 @@ describe('isScopeStale', () => {
         vault: memoryVault(),
         fetchImpl: vi.fn() as unknown as typeof fetch,
         openExternal: vi.fn(),
-      }).reportInsufficientScopes(GHOST, KEY, ['scope.a']),
+      }).reportInsufficientScopes(GHOST, KEY, ['scope.a'], decl),
     ).toBe(false);
+  });
+
+  it('合并时按当前声明面裁剪,清单换代后的过期证据被淘汰,条数不越积越多', () => {
+    const vault = memoryVault({
+      [`${KEY}-accounts`]: JSON.stringify({
+        defaultAccountId: 'acc-1',
+        accounts: [
+          {
+            id: 'acc-1',
+            label: 'a@example.com',
+            status: 'connected',
+            createdAt: 1,
+            insufficientScopes: ['scope.old', 'scope.b'],
+          },
+        ],
+      }),
+    });
+    const mgr = new GhostOauthAccountManager({
+      vault,
+      fetchImpl: vi.fn() as unknown as typeof fetch,
+      openExternal: vi.fn(),
+    });
+
+    expect(mgr.reportInsufficientScopes(GHOST, KEY, ['scope.c'], ['scope.b', 'scope.c'])).toBe(
+      'stored',
+    );
+    const accounts = JSON.parse(vault.read(GHOST, `${KEY}-accounts`) ?? '{}').accounts;
+    expect(accounts[0].insufficientScopes).toEqual(['scope.b', 'scope.c']);
   });
 });
 
@@ -1624,9 +1655,7 @@ describe('identity.displayTemplate 展示名', () => {
       read: baseVault.read,
       remove: baseVault.remove,
       store: (ghostId, storageKey, value) =>
-        storageKey === `${KEY}-accounts`
-          ? false
-          : baseVault.store(ghostId, storageKey, value),
+        storageKey === `${KEY}-accounts` ? false : baseVault.store(ghostId, storageKey, value),
     };
     const mgr = new GhostOauthAccountManager({
       vault,

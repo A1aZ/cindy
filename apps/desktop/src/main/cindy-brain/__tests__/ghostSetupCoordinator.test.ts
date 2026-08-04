@@ -306,6 +306,27 @@ describe('GhostSetupCoordinator', () => {
     expect(h.executeAction).not.toHaveBeenCalled();
   });
 
+  it('ready + reauthSuggest 但未带 plan 时不弹卡直接放行(建议非阻塞)', async () => {
+    const h = harness(readyWithReauth());
+    await expect(
+      h.coordinator.ensureReady({ sessionId: 'session-1', ghostId: 'gmail', tool: 'search' }),
+    ).resolves.toMatchObject({ ok: true, assessment: { state: 'ready' } });
+    expect(h.bridge.pendingSnapshots()).toEqual([]);
+  });
+
+  it('ready + reauthSuggest + plan 但无交互面(IM/定时任务)时丢弃 plan 放行，不拦成 SETUP_REQUIRED', async () => {
+    const h = harness(readyWithReauth());
+    await expect(
+      h.coordinator.ensureReady({
+        sessionId: null,
+        ghostId: 'gmail',
+        tool: 'search',
+        plan: reauthPlan(),
+      }),
+    ).resolves.toMatchObject({ ok: true, assessment: { state: 'ready' } });
+    expect(h.bridge.pendingSnapshots()).toEqual([]);
+  });
+
   it('ready 无 reauthSuggest 时忽略随调用携带的 plan，直接放行', async () => {
     const h = harness(ready(7));
     await expect(

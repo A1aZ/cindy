@@ -160,7 +160,11 @@ export class GhostSetupCoordinator {
       unsubscribe();
       return this.internalFailure('插件配置状态读取失败', error);
     }
-    const reauthAssessment = request.plan ? toReauthInteractionAssessment(assessment) : null;
+    // ready 态的重连建议是非阻塞的:仅 Agent 主动带 plan 且本回合有交互面时才进
+    // 卡流程;无 sessionId 的回合(IM/定时任务)丢弃 plan 直接放行,绝不把 ready
+    // 插件拦成 SETUP_REQUIRED。
+    const reauthAssessment =
+      request.plan && request.sessionId ? toReauthInteractionAssessment(assessment) : null;
     const reauthMode = reauthAssessment !== null;
     if (assessment.state === 'ready' && !reauthMode) {
       unsubscribe();

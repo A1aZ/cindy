@@ -588,6 +588,11 @@ export interface GhostSecretExchangeDecl {
  * xd-feishu 补审批/表情/导入等能力到 41 条后,上限随最大存量演进。注意本校验
  * 取值级"严出"(plugin-security-and-authoring.md §7):超 32 条的包在旧版客户端
  * 拒装,插件市场铺开须等携带本值的客户端先行发布。
+ *
+ * 涨过 64 前必须同步两处只留了防御余量的 64 上限,否则会拒绝合法的缺权上报
+ * /静默判废 assessment:insufficient-scopes 端点的整包条数上限
+ * (runtime/ghostOauthEndpoint.ts)与 cindy-tools 的 SETUP_REAUTH_SCOPE_MAX
+ * (ghost/mcpServer.ts,包依赖方向不允许直接引用本常量)。
  */
 export const GHOST_OAUTH_SCOPES_MAX = 48;
 /** OAuth broker 模式可声明的备用 clientId 上限(默认 clientId 不计入)。 */

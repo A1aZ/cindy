@@ -233,15 +233,11 @@ function parseManifest(raw: string | null): AccountsManifest {
           ? { authScopes: [...r.authScopes] }
           : {}),
         ...(r.authFace === 'full' || r.authFace === 'subset' ? { authFace: r.authFace } : {}),
+        // 与 authScopes 同风格宽松读取:上限由写侧(端点校验 + 合并裁剪)钳制,
+        // 库里的坏值对消费方惰性(判定前先按当前声明过滤),不整包丢弃证据。
         ...(Array.isArray(r.insufficientScopes) &&
-          r.insufficientScopes.length > 0 &&
-          r.insufficientScopes.length <= 64 &&
-          r.insufficientScopes.every(
-            (scope) =>
-              typeof scope === 'string' &&
-              scope.trim().length > 0 &&
-              scope.length <= 256,
-          )
+        r.insufficientScopes.length > 0 &&
+        r.insufficientScopes.every((scope) => typeof scope === 'string')
           ? { insufficientScopes: [...new Set(r.insufficientScopes)] }
           : {}),
       });
@@ -277,8 +273,9 @@ function toView(
 }
 
 /**
- * 仅在可证明“当时拿的是全量面”时列出新增 scope；老数据与降面授权不猜
- * (返回空数组)。这是陈旧判定的唯一实现,isScopeStale 只是它的布尔投影。
+ * 快照推断分量:仅在可证明“当时拿的是全量面”时列出新增 scope；老数据与
+ * 降面授权不猜(返回空数组)。合并后的判定入口是 accountMissingScopes
+ * (真实错误证据优先,本函数只做无证据时的兜底)。
  */
 export function missingAuthScopes(
   declScopes: readonly string[],
@@ -287,13 +284,6 @@ export function missingAuthScopes(
   if (row.authFace !== 'full' || row.authScopes === undefined) return [];
   const granted = new Set(row.authScopes);
   return declScopes.filter((scope) => !granted.has(scope));
-}
-
-export function isScopeStale(
-  declScopes: readonly string[],
-  row: { authScopes?: readonly string[]; authFace?: 'full' | 'subset' },
-): boolean {
-  return missingAuthScopes(declScopes, row).length > 0;
 }
 
 /** 真实错误证据优先；没有证据时才退回授权面快照推断。 */
@@ -458,15 +448,32 @@ export class GhostOauthAccountManager {
     return row ? accountMissingScopes(decl.scopes ?? [], row) : [];
   }
 
-  /** 把真实权限错误证据合并到当前默认账号；无默认账号或写失败返回 false。 */
-  reportInsufficientScopes(ghostId: string, secretKey: string, scopes: readonly string[]): boolean {
+  /**
+   * 把真实权限错误证据合并到当前默认账号,并按当前声明面裁剪——顺手淘汰清单
+   * 换代后的过期证据,恒有条数 ≤ 声明上限(GHOST_OAUTH_SCOPES_MAX)。返回
+   * 'unchanged' = 证据已在库未重写(调用方据此跳过广播);false = 无默认账号
+   * 或写失败。
+   */
+  reportInsufficientScopes(
+    ghostId: string,
+    secretKey: string,
+    scopes: readonly string[],
+    declScopes: readonly string[],
+  ): 'stored' | 'unchanged' | false {
     const manifest = parseManifest(this.deps.vault.read(ghostId, accountsKey(secretKey)));
     const row = manifest.accounts.find((account) => account.id === manifest.defaultAccountId);
     if (!row) return false;
-    const merged = [...new Set([...(row.insufficientScopes ?? []), ...scopes])];
-    if (row.insufficientScopes && sameScopeFace(row.insufficientScopes, merged)) return true;
+    const declared = new Set(declScopes);
+    const merged = [...new Set([...(row.insufficientScopes ?? []), ...scopes])].filter((scope) =>
+      declared.has(scope),
+    );
+    if (row.insufficientScopes && sameScopeFace(row.insufficientScopes, merged)) {
+      return 'unchanged';
+    }
     row.insufficientScopes = merged;
-    return this.deps.vault.store(ghostId, accountsKey(secretKey), JSON.stringify(manifest));
+    return this.deps.vault.store(ghostId, accountsKey(secretKey), JSON.stringify(manifest))
+      ? 'stored'
+      : false;
   }
 
   /** 头像 data URL 读取(形状校验兜底:库里的坏值当无头像,不喂给 <img>)。 */

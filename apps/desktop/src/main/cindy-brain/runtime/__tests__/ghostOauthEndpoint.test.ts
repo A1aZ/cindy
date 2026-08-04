@@ -51,7 +51,7 @@ function fakeManager(
     })),
     disconnectAccount: vi.fn(),
     setDefaultAccount: vi.fn(() => true),
-    reportInsufficientScopes: vi.fn(() => true),
+    reportInsufficientScopes: vi.fn(() => 'stored' as const),
     ...overrides,
   };
 }
@@ -299,7 +299,7 @@ describe('POST /oauth/<key>/insufficient-scopes', () => {
     });
   }
 
-  it('合法证据去重后落默认账号并广播变更，成功 204', async () => {
+  it('合法证据落默认账号并广播变更(重复条目由存取层去重)，成功 204', async () => {
     const manager = fakeManager();
     const onChanged = vi.fn();
     const outcome = await report(
@@ -308,17 +308,32 @@ describe('POST /oauth/<key>/insufficient-scopes', () => {
       onChanged,
     );
     expect(outcome.status).toBe(204);
-    expect(manager.reportInsufficientScopes).toHaveBeenCalledWith(GHOST, 'acct', [
-      'scope.1',
-      'scope.2',
-    ]);
+    expect(manager.reportInsufficientScopes).toHaveBeenCalledWith(
+      GHOST,
+      'acct',
+      ['scope.1', 'scope.1', 'scope.2'],
+      DECLARED_SCOPES,
+    );
     expect(onChanged).toHaveBeenCalledWith('acct');
+  });
+
+  it('证据未变时成功 204 但不广播,重复上报不空转投影与配置卡重评估', async () => {
+    const manager = fakeManager({ reportInsufficientScopes: vi.fn(() => 'unchanged' as const) });
+    const onChanged = vi.fn();
+    const outcome = await report(JSON.stringify({ scopes: ['scope.1'] }), manager, onChanged);
+    expect(outcome.status).toBe(204);
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it('64 条边界放行；65 条拒绝', async () => {
     const accepted = fakeManager();
     expect((await report(JSON.stringify({ scopes: DECLARED_SCOPES }), accepted)).status).toBe(204);
-    expect(accepted.reportInsufficientScopes).toHaveBeenCalledWith(GHOST, 'acct', DECLARED_SCOPES);
+    expect(accepted.reportInsufficientScopes).toHaveBeenCalledWith(
+      GHOST,
+      'acct',
+      DECLARED_SCOPES,
+      DECLARED_SCOPES,
+    );
 
     const rejected = fakeManager();
     expect(
@@ -378,7 +393,7 @@ describe('POST /oauth/<key>/insufficient-scopes', () => {
       (
         await report(
           JSON.stringify({ scopes: ['scope.1'] }),
-          fakeManager({ reportInsufficientScopes: vi.fn(() => false) }),
+          fakeManager({ reportInsufficientScopes: vi.fn(() => false as const) }),
         )
       ).status,
     ).toBe(500);

@@ -33,7 +33,7 @@ const D_GHOST_LIST = [
   "返回条目含 id、name、command(用户显式点名用的 $指令)与 tools(名称/说明/参数)。",
   "调用具体工具用 ghost_call({ghost_id, tool, args})。清单为空 = 用户没有可用的插件工具。",
   "若某插件 tools 仅含 list_tools / call_tool,它是二级分派型:具体操作名须作 call_tool 的",
-  'name 参数下发(args:{name:"<操作名>", args:{...}}),不能直接当 tool 调。',
+  "name 参数下发(args:{name:\"<操作名>\", args:{...}}),不能直接当 tool 调。",
 ].join("\n");
 
 const D_GHOST_CALL = [
@@ -217,6 +217,8 @@ const SETUP_REQUIREMENT_KINDS = new Set([
   "client_config",
 ]);
 const SETUP_REQUIREMENT_STATES = new Set(["missing", "expired", "satisfied"]);
+// 对主机声明上限 GHOST_OAUTH_SCOPES_MAX(desktop shared/ghost.ts,当前 48;包依赖
+// 方向不允许引用)只留防御余量;该值涨过 64 时必须同步,否则整份 assessment 判废。
 const SETUP_REAUTH_SCOPE_MAX = 64;
 
 function sanitizeSetupAction(
@@ -357,8 +359,7 @@ export function sanitizeGhostSetupAssessment(
   let reauthSuggest: CindyGhostSetupAssessment["reauthSuggest"];
   if (value.reauthSuggest !== undefined) {
     // 在场即严:非法 reauthSuggest 判废整份 assessment,与缺省合法互补。
-    reauthSuggest =
-      sanitizeSetupReauthSuggest(value.reauthSuggest) ?? undefined;
+    reauthSuggest = sanitizeSetupReauthSuggest(value.reauthSuggest) ?? undefined;
     if (!reauthSuggest) return null;
   }
   return {
@@ -380,12 +381,7 @@ function sanitizeSetupReauthSuggest(
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const suggest = raw as Record<string, unknown>;
   const requirement = suggest.requirement;
-  if (
-    !requirement ||
-    typeof requirement !== "object" ||
-    Array.isArray(requirement)
-  )
-    return null;
+  if (!requirement || typeof requirement !== "object" || Array.isArray(requirement)) return null;
   const req = requirement as Record<string, unknown>;
   const action = sanitizeSetupAction(req.action);
   if (!action || action.kind !== "oauth_connect") return null;
@@ -400,8 +396,7 @@ function sanitizeSetupReauthSuggest(
     suggest.missingScopes.length === 0 ||
     suggest.missingScopes.length > SETUP_REAUTH_SCOPE_MAX ||
     !suggest.missingScopes.every(
-      (scope) =>
-        typeof scope === "string" && scope.length > 0 && scope.length <= 256,
+      (scope) => typeof scope === "string" && scope.length > 0 && scope.length <= 256,
     ) ||
     suggest.missingScopeCount !== suggest.missingScopes.length ||
     typeof req.ref !== "string" ||
@@ -639,8 +634,7 @@ export async function handleGhostCall(
     // (声明是意图表达,能覆盖 render:false 抑制等语义)。
     const { producedMedia, setup: unsafeSetup, ...resultForModel } = result;
     const setup = sanitizeGhostSetupAssessment(unsafeSetup);
-    const advisory =
-      setup?.state === "ready" && setup.reauthSuggest ? { setup } : {};
+    const advisory = setup?.state === "ready" && setup.reauthSuggest ? { setup } : {};
     const declaredMedia = [
       "xdt_image_urls",
       "xdt_video_urls",
@@ -777,9 +771,7 @@ export async function handleForgePack(
   try {
     const result = await deps.forgePack({
       dir: input.dir,
-      ...(input.icon_source !== undefined
-        ? { iconSource: input.icon_source }
-        : {}),
+      ...(input.icon_source !== undefined ? { iconSource: input.icon_source } : {}),
     });
     if (!result.ok) {
       deps.logger?.warn("ghost_forge_pack rejected", {

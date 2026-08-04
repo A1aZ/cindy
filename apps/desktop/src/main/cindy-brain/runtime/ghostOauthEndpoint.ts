@@ -69,7 +69,13 @@ export interface GhostOauthEndpointManager {
   ): Promise<GhostOauthConnectResult>;
   disconnectAccount(ghostId: string, secretKey: string, accountId: string): void;
   setDefaultAccount(ghostId: string, secretKey: string, accountId: string): boolean;
-  reportInsufficientScopes(ghostId: string, secretKey: string, scopes: readonly string[]): boolean;
+  /** 'unchanged' = 证据已在库未重写(调用方跳过广播);false = 无默认账号或写失败。 */
+  reportInsufficientScopes(
+    ghostId: string,
+    secretKey: string,
+    scopes: readonly string[],
+    declScopes: readonly string[],
+  ): 'stored' | 'unchanged' | false;
 }
 
 export async function handleGhostOauthRequest(args: {
@@ -280,22 +286,25 @@ export async function handleGhostOauthRequest(args: {
     if (!Array.isArray(rawScopes) || rawScopes.length === 0 || rawScopes.length > 64) {
       return { status: 400 };
     }
+    // 逐字属于声明面即形状合法(清单校验已保证声明 scope ≤200 字符、无空白),
+    // 任一越界整包 400;重复条目由存取层合并去重。
     const declared = new Set(decl.scopes ?? []);
     const scopes: string[] = [];
     for (const scope of rawScopes) {
-      if (
-        typeof scope !== 'string' ||
-        scope.trim().length === 0 ||
-        scope.length > 256 ||
-        !declared.has(scope)
-      ) {
-        return { status: 400 };
-      }
-      if (!scopes.includes(scope)) scopes.push(scope);
+      if (typeof scope !== 'string' || !declared.has(scope)) return { status: 400 };
+      scopes.push(scope);
     }
     try {
-      if (!manager.reportInsufficientScopes(ghostId, secretKey, scopes)) return { status: 500 };
-      notifyChanged(secretKey);
+      const stored = manager.reportInsufficientScopes(
+        ghostId,
+        secretKey,
+        scopes,
+        decl.scopes ?? [],
+      );
+      if (stored === false) return { status: 500 };
+      // 证据未变时不广播:插件在用户重连前会反复撞同一权限错误并 fire-and-forget
+      // 重报,无变更广播只会空转投影与在途配置卡的重评估循环。
+      if (stored === 'stored') notifyChanged(secretKey);
       return { status: 204 };
     } catch (err) {
       log?.warn('ghost oauth 缺失 scope 证据入库失败', { ghostId, secretKey, err: String(err) });

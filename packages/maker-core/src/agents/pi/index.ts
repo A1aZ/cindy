@@ -31,6 +31,7 @@ import {
   type AgentDeps,
   type AgentSessionHandle,
   type PiExtraSpawnConfig,
+  type PiNativeModelSpec,
   type PiNativeProviderSpec,
   type SendOptions,
   type StartSessionOptions,
@@ -39,8 +40,14 @@ import {
   CINDY_BRIDGE_EXTENSION_FILENAME,
   CINDY_BRIDGE_EXTENSION_SOURCE,
 } from './cindy-bridge-source.js';
+import {
+  CINDY_SUBAGENT_ENV,
+  CINDY_SUBAGENT_EXTENSION_FILENAME,
+  CINDY_SUBAGENT_EXTENSION_SOURCE,
+} from './cindy-subagent-source.js';
 import { normalizePiToolForAutoReview } from './auto-review-policy.js';
 import {
+  createAutoReviewUnavailableNotice,
   extractAutoReviewUserIntent,
   resolveAutoReviewDecision,
   type AutoReviewDecision,
@@ -173,6 +180,36 @@ function mergeLoopbackNoProxy(env: NodeJS.ProcessEnv): void {
 /** cindy Effort → pi thinking level(pi 无 ultra;cindy 无 off)。 */
 function effortToPiThinkingLevel(effort: Effort): string {
   return effort === 'ultra' ? 'max' : effort;
+}
+
+const PI_NATIVE_THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/** 从本次启动写入 models.json 的 native model 快照提取可用 effort。 */
+function startupEffortsOfNativeModel(model: PiNativeModelSpec | undefined): readonly Effort[] | undefined {
+  if (!model) return undefined;
+  if (model.thinkingLevelMap) {
+    return PI_NATIVE_THINKING_LEVELS.filter((effort) => model.thinkingLevelMap?.[effort] != null);
+  }
+  // writeModelsJson 对缺省 reasoning 同样序列化为 false；因此缺省与显式 false
+  // 都必须冻结为空能力，不能把 renderer 后续热刷出的 effort 放行给旧进程。
+  return model.reasoning === true ? undefined : [];
+}
+
+/**
+ * 启动时把任务里持久化的旧 effort 与当前 provider/model 的能力重新对齐。
+ * 已支持档原样保留；能力未知/未声明档位时维持旧行为；只有明确不支持时才落到
+ * 当前模型的合法默认档（病态 default 再落首档），避免 thinkingLevelMap 将旧档映成 null。
+ */
+function reconcilePiStartupEffort(
+  requested: Effort | undefined,
+  model: ModelDescriptor | undefined,
+): Effort | undefined {
+  if (!requested || !model || model.efforts.length === 0) return requested;
+  if (model.efforts.includes(requested)) return requested;
+  if (model.defaultEffort && model.efforts.includes(model.defaultEffort)) {
+    return model.defaultEffort;
+  }
+  return model.efforts[0];
 }
 
 /**
@@ -377,22 +414,28 @@ export class PiAgent extends BaseAgent {
     const runtimeModels = retainedRuntimeModel && !publicModels.some((m) => m.id === retainedRuntimeModel.id)
       ? [...publicModels, retainedRuntimeModel]
       : publicModels;
-    const models = runtimeModels
-      .map((m: ModelDescriptor) => ({
-      id: m.id,
-      name: m.displayName,
-      reasoning: m.efforts.length > 0,
-      input: ['text', 'image'],
-      contextWindow: m.contextWindow > 0 ? m.contextWindow : 200_000,
-      maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : 32_000,
-      // 计费单位与目录一致($/1M tokens);pi 按此自行计价,usage 事件的 cost 才有真值。
-      cost: {
-        input: m.cost?.input ?? 0,
-        output: m.cost?.output ?? 0,
-        cacheRead: m.cost?.cacheRead ?? 0,
-        cacheWrite: m.cost?.cacheWrite ?? 0,
-      },
-    }));
+    const models = runtimeModels.map((publicModel: ModelDescriptor) => {
+      // availableModels 为跨 provider 拍平的公开能力；BYOM 同 id 冲突时 effort
+      // 会按设计收敛成交集。cindy gateway 块则代表内置路由，必须回查其
+      // provider-aware 描述符，不能被同名 non-reasoning BYOM 清空 reasoning。
+      // host 未注入 resolver 或只有 BYOM 条目时保留旧 flat fallback。
+      const m = this.deps.resolvePiGatewayModelDescriptor?.(publicModel.id) ?? publicModel;
+      return {
+        id: m.id,
+        name: m.displayName,
+        reasoning: m.efforts.length > 0,
+        input: ['text', 'image'],
+        contextWindow: m.contextWindow > 0 ? m.contextWindow : 200_000,
+        maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : 32_000,
+        // 计费单位与目录一致($/1M tokens);pi 按此自行计价,usage 事件的 cost 才有真值。
+        cost: {
+          input: m.cost?.input ?? 0,
+          output: m.cost?.output ?? 0,
+          cacheRead: m.cost?.cacheRead ?? 0,
+          cacheWrite: m.cost?.cacheWrite ?? 0,
+        },
+      };
+    });
     const providers: Record<string, unknown> = {
       [PI_PROVIDER_ID]: {
         name: 'Cindy AI',
@@ -422,6 +465,7 @@ export class PiAgent extends BaseAgent {
           id: m.id,
           name: m.name ?? m.id,
           reasoning: m.reasoning ?? false,
+          ...(m.thinkingLevelMap ? { thinkingLevelMap: { ...m.thinkingLevelMap } } : {}),
           input: m.input ?? ['text'],
           contextWindow: m.contextWindow && m.contextWindow > 0 ? m.contextWindow : 128_000,
           maxTokens: m.maxTokens && m.maxTokens > 0 ? m.maxTokens : 16_000,
@@ -523,20 +567,33 @@ export class PiAgent extends BaseAgent {
     }
     const initialProvider = resolveProviderForModel(opts.model, opts.providerId);
 
-    // availableModels 是公开的新选择面,retired/disabled 会被有意过滤;但恢复中的旧 Pi
-    // 会话仍需要 models.json 内存在当前模型,Pi 才能解析持久化的 --model。仅对真实 resume
-    // 且公开清单缺失的 compat 模型请求 host 补一个私有描述符;不回写 capabilities,也不
-    // 放宽 setModel / route guard。
+    // availableModels 是跨 provider 拍平的公开选择面；启动旧任务时必须按实际来源重查
+    // provider-aware 描述符，不能拿同 id 的内置/BYOM 首见条目校验持久化 effort。
+    // 新建时若模型连公开清单都不在，仍不调用私有解析器（不借此放宽新选择准入）；resume
+    // 才允许读取 disabled/retired 描述符继续运行。
+    const publicRuntimeModel = this.capabilities.availableModels.find(
+      (model) => model.id === opts.model,
+    );
+    const runtimeProviderId =
+      opts.providerId === undefined && initialProvider !== PI_PROVIDER_ID
+        ? initialProvider
+        : opts.providerId;
+    const mayResolveRuntimeModel = publicRuntimeModel !== undefined || !!opts.resumeSessionId;
+    const selectedRuntimeModel = mayResolveRuntimeModel
+      ? this.deps.resolvePiRuntimeModelDescriptor?.(runtimeProviderId, opts.model)
+        ?? publicRuntimeModel
+      : undefined;
+
+    // 恢复中的旧 Pi 网关会话仍需要 models.json 内存在当前模型,Pi 才能解析持久化的
+    // --model。仅对真实 resume 且公开清单缺失的 compat 模型补一个私有描述符；不回写
+    // capabilities,也不放宽 setModel / route guard。
     let retainedRuntimeModel: ModelDescriptor | undefined;
     if (
       opts.resumeSessionId &&
       initialProvider === PI_PROVIDER_ID &&
-      !this.capabilities.availableModels.some((model) => model.id === opts.model)
+      !publicRuntimeModel
     ) {
-      retainedRuntimeModel = this.deps.resolvePiRuntimeModelDescriptor?.(
-        opts.providerId,
-        opts.model,
-      ) ?? undefined;
+      retainedRuntimeModel = selectedRuntimeModel;
       if (!retainedRuntimeModel) {
         this.deps.logger.warn('pi: selected model missing from public and retained runtime catalogs', {
           model: opts.model,
@@ -544,6 +601,49 @@ export class PiAgent extends BaseAgent {
         });
       }
     }
+    const startupEffort = reconcilePiStartupEffort(opts.effort, selectedRuntimeModel);
+    if (opts.effort && startupEffort !== opts.effort) {
+      this.deps.logger.info('pi: reconciled persisted effort against current runtime model', {
+        model: opts.model,
+        providerId: runtimeProviderId ?? null,
+        requestedEffort: opts.effort,
+        resolvedEffort: startupEffort ?? null,
+      });
+    }
+
+    // Pi 子进程只读取本次启动生成的 models.json。renderer 目录热更新后，不能把新出现的
+    // effort 直接发送给仍在运行的旧进程；否则 Pi 会把 thinkingLevelMap 中的 null 当作
+    // 关闭 reasoning。这里冻结每个可路由模型在该启动快照中的能力，setModel 成功后只
+    // 切换到同一快照里已有的目标模型能力。
+    const resolveStartupEffortSnapshot = (
+      providerId: string,
+      modelId: string,
+    ): readonly Effort[] | undefined => {
+      if (providerId !== PI_PROVIDER_ID) {
+        return startupEffortsOfNativeModel(
+          nativeProviderById.get(providerId)?.models.find((model) => model.id === modelId),
+        );
+      }
+      const gatewayModel = modelId === opts.model && selectedRuntimeModel
+        ? selectedRuntimeModel
+        : this.deps.resolvePiGatewayModelDescriptor?.(modelId)
+          ?? this.capabilities.availableModels.find((model) => model.id === modelId);
+      return gatewayModel?.efforts;
+    };
+    const initialEffortSnapshot = resolveStartupEffortSnapshot(initialProvider, opts.model);
+    const assertStartupEffortAllowed = (
+      snapshot: readonly Effort[] | undefined,
+      effort: Effort,
+    ): void => {
+      // efforts:[] 仍可能收到 resolveEffort 的 UI 占位值 low；它代表“不支持切换”，
+      // 只需跳过 RPC。其它档位必须拒绝，避免热刷目录后的新 effort 绕过启动快照。
+      if (!snapshot || (snapshot.length === 0 && effort === 'low')) return;
+      if (snapshot.includes(effort)) return;
+      throw new Error(
+        `pi set_thinking_level refused: effort '${effort}' is not available in this session's ` +
+          'startup model snapshot; restart the Pi session after changing provider capabilities.',
+      );
+    };
 
     // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，
     // 仍必须能从 model→provider 映射识别纯 BYOM，不能误落 Cindy gateway 登录门。
@@ -598,6 +698,13 @@ export class PiAgent extends BaseAgent {
       path.join(extensionsDir, CINDY_BRIDGE_EXTENSION_FILENAME),
       CINDY_BRIDGE_EXTENSION_SOURCE,
     );
+    // cindy-subagent extension:与 bridge 并列的独立扩展(职责分离 —— bridge 管权限门与
+    // MCP 桥,这个只管子代理)。子进程继承 PI_CODING_AGENT_DIR,因此同样加载 bridge,
+    // 权限门对子代理照样生效;递归由扩展内的 depth env 自己截断。
+    await fs.writeFile(
+      path.join(extensionsDir, CINDY_SUBAGENT_EXTENSION_FILENAME),
+      CINDY_SUBAGENT_EXTENSION_SOURCE,
+    );
 
     // 权限档文件:extension 每次 tool_call 现读(热切换);读不到按 ask fail-closed。
     const runtimeDir = path.join(agentHome, 'runtime');
@@ -609,10 +716,41 @@ export class PiAgent extends BaseAgent {
     if (sid !== undefined && (sid === '.' || sid === '..' || /[\\/\0]/.test(sid))) {
       throw new Error(`pi: unsafe sessionId for runtime path: ${JSON.stringify(sid)}`);
     }
+    // 每运行时 nonce —— 与 configHome(`agentHome/run-tmp/<hex>`)同一套隔离思路。
+    //
+    // dev + 打包版共用同一个 userData、以及 `--passive` 任意多开,都是**明确支持**的工作流
+    // (单实例锁按 flavor 分域,passive 完全跳过锁;见 `bootstrap-electron.ts` 的单实例锁注释)。
+    // 那种拓扑下 runtimeDir 里只按 sessionId 命名的文件会被另一个**活着的**实例覆盖:
+    //   - 路由快照被覆盖 → 本实例的父会话还在自己的路由上,它的下一个子代理却按另一个进程的
+    //     provider 起来 —— 提示词发往用户在**这个**实例里并没选的端点(review);
+    //   - 权限档被覆盖 → 另一个实例切到 Full Access,本实例的 bridge 下一次 tool_call 现读到
+    //     bypassPermissions,本实例的破坏性工具不再确认。这是跨实例权限提升,比路由更严重,
+    //     属于「本 PR 代码路径会走到的权限类缺陷」,一并收口而不是外推。
+    // 代价是文件按 startSession 而非 sessionId 唯一 → 必须显式回收,见 cleanupRuntimeFiles。
+    const runtimeInstanceId = randomBytes(8).toString('hex');
     const permissionFile = path.join(
       runtimeDir,
-      `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}.json`,
+      `perm-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}.json`,
     );
+    // 子代理运行期快照(model + provider)。与权限档同机制:文件而非 env —— env 在 spawn
+    // 时定型,会话中途 setModel 后子代理会继续用启动时的旧模型(greptile P1),而 BYOM /
+    // 本地 provider 不一起传还会让同名模型落到错误 endpoint(codex P2,pi-harness §3 要求
+    // BYOM 直连原生 provider)。扩展每次派子代理现读本文件。
+    const subagentRuntimeFile = path.join(
+      runtimeDir,
+      `subagent-${sid ?? `anon-${process.pid}-${Date.now()}`}-${runtimeInstanceId}.json`,
+    );
+    let runtimeFilesCleaned = false;
+    /**
+     * 回收本运行时的两个 runtime 文件(幂等)。带 nonce 之后它们不再按 sessionId 复用,
+     * 不回收就会随每次 startSession 无界堆积在 runtimeDir 里。
+     */
+    const cleanupRuntimeFiles = (): void => {
+      if (runtimeFilesCleaned) return;
+      runtimeFilesCleaned = true;
+      void fs.rm(permissionFile, { force: true }).catch(() => {});
+      void fs.rm(subagentRuntimeFile, { force: true }).catch(() => {});
+    };
     // auto 保留(Cindy 侧 dispatcher 用);bridge 只特判 bypassPermissions,auto 在
     // 桥内行为同 ask(非只读全部冒泡)。其余档(default/acceptEdits/plan)归 ask 最严。
     const normalizePermissionMode = (mode: string | undefined): 'ask' | 'auto' | 'bypassPermissions' =>
@@ -689,6 +827,66 @@ export class PiAgent extends BaseAgent {
       return run;
     };
     await writePermissionFile(requestedPermissionSnapshot);
+
+    // 子代理运行期快照的写入:代际串行,最新意图胜出(理由同权限档 —— 并发/连续 setModel
+    // 时无串行的 writeFile 可能让较早的模型写在较新的之后落盘,子代理就会读到过期模型)。
+    //
+    // **返回 Promise 且调用方必须 await**:不能 fire-and-forget。startSession 要在会话对外
+    // 暴露(模型能调 subagent)**之前**落盘初始 provider/model,否则 BYOM / 本地 provider 或
+    // 非默认模型的会话一开始就调子代理时,文件还不存在 → 扩展不传 --provider/--model → 子进程
+    // 走 pi 默认解析,直接跑错 endpoint(review)。setModel 同理:切完模型立刻派子代理必须
+    // 已经能看到新值。
+    //
+    // **写失败一律 fail-closed,不许 catch 成功**(review):runtime 目录只读 / 磁盘满时,
+    // 若把失败吞成成功,子代理会带着空快照或旧快照继续跑 —— BYOM / 本地 provider 的请求
+    // 就发到错误 endpoint 去了。返回 false 表示"本次未能持久化",调用方据此**禁用本次会话
+    // 的子代理路由**;失败时还会 best-effort 删掉该文件,让扩展在使用点也失败关闭
+    // (它把"读不到快照"当作不可用,而不是退回 pi 默认解析)。
+    let subagentRuntimeWriteChain: Promise<void> = Promise.resolve();
+    let subagentRuntimeWriteGen = 0;
+    /**
+     * 首次快照持久化失败 → 本次会话根本不注入 runtime 文件 env,扩展因此不注册 subagent 工具。
+     *
+     * **只在 spawn 之前有意义**:它的唯一消费点是下面构造 spawnEnv 的那一处。进程一旦起来,改它
+     * 既收不回已注入的 env、也拦不住扩展继续读快照文件 —— 所以**禁止**在 setModel 等运行期路径上
+     * 用它当"撤销开关"(上一版就是这么用的,那是个空操作,review 连点两轮)。运行期要收回子代理
+     * 能力只有一条可证明有效的路:终止会话。
+     */
+    let subagentRoutingEnabled = true;
+    const writeSubagentRuntimeFile = async (
+      next: { model?: string; provider?: string; pending?: boolean },
+    ): Promise<boolean> => {
+      const gen = ++subagentRuntimeWriteGen;
+      const snapshot = {
+        ...(next.model ? { model: next.model } : {}),
+        ...(next.provider ? { provider: next.provider } : {}),
+        // `pending: true` = 这条路由**尚未**被 pi 确认。扩展见到它就拒绝派发(fail-closed),
+        // 于是模型切换的等待窗口里一个子进程都起不来 —— 详见 setModel 的注释。
+        ...(next.pending ? { pending: true } : {}),
+      };
+      const run = subagentRuntimeWriteChain.then(async (): Promise<boolean> => {
+        // 已被更晚的意图取代:旧内容不得在新内容之后落盘(视作成功,最新那次负责收口)。
+        if (gen !== subagentRuntimeWriteGen) return true;
+        await fs.writeFile(subagentRuntimeFile, JSON.stringify(snapshot) + '\n');
+        return true;
+      });
+      // 链永不停在 rejected 上(同权限档):否则一次写失败后续写永远追加不进去。
+      subagentRuntimeWriteChain = run.then(() => {}, () => {});
+      try {
+        return await run;
+      } catch (error) {
+        this.deps.logger.error('pi subagent runtime snapshot write failed; disabling subagent routing', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        // 留着旧内容比没有更危险(会把请求发到过期 provider),删掉让使用点也失败关闭。
+        await fs.rm(subagentRuntimeFile, { force: true }).catch(() => {});
+        return false;
+      }
+    };
+    // 会话暴露前先落初始快照(await:模型第一次调 subagent 时文件必须已经在)。
+    if (!(await writeSubagentRuntimeFile({ model: opts.model, provider: initialProvider }))) {
+      subagentRoutingEnabled = false;
+    }
 
     // MCP:host 把 in-process providers 暴露成 localhost streamable-HTTP，也可给出
     // 外部 HTTP server 描述（header 真值另走 mcpEnv，不进入描述符）。
@@ -791,12 +989,27 @@ export class PiAgent extends BaseAgent {
     // null/订阅来源会归一到 cindy，setModel 未显式传来源时也必须跟随本次解析结果。
     let mutablePiProviderId = initialProvider;
     let mutableProviderId: string | null | undefined = opts.providerId ?? authProviderId;
+    let activeEffortSnapshot = initialEffortSnapshot;
     let currentAutoReviewIntent = '';
     const autoReviewDecisionCache = new Map<string, Promise<AutoReviewDecision>>();
     const setAutoReviewIntent = (content: UserMessage['content']): void => {
       currentAutoReviewIntent = extractAutoReviewUserIntent(content);
       autoReviewDecisionCache.clear();
+    // 每条新用户消息 = 新一轮,提示重新武装。ErrorBanner 那份只活到下一条非 error 事件
+    // (renderer 的 handleStreamEvent 会清 recoverableError),所以「整个会话只说一次」
+    // 会让用户在后续轮次里完全看不到;改为每轮至多一条 —— 不刷屏,又保证每一轮遇到时
+    // 都有机会看见。持久呈现需要一条真正的会话级 notice 通道,见 issue 外推。
+      autoReviewUnavailableNotice.reset();
     };
+    // 「自动审核不可用」的会话级一次性提示(issue #1574);与 Claude / Codex 同口径,走既有的
+    // 非终止 error 事件 + `[CODE]` 约定,不新增事件类型。
+    const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice((message) => {
+      queue.push({
+        type: 'error',
+        data: { message, isTerminal: false },
+        source: 'pi',
+      });
+    });
     const reviewAutoAction = (action: ReviewableAction): Promise<AutoReviewDecision> => {
       const request = {
         sessionId: opts.sessionId,
@@ -861,6 +1074,12 @@ export class PiAgent extends BaseAgent {
         ...Object.keys(nativeEnv),
         ...Object.keys(mcpEnv),
         ...(mcpBridge && mcpBridge.servers.length > 0 ? [PI_MCP_BRIDGE_ENV] : []),
+        // 子代理路由快照:虽然不是凭证,但它是**控制面** —— 一次获批的 bash 拿到路径就能改写
+        // provider/model,让后续每次委派都打到攻击者选定的 endpoint(提示词与代码随之外泄)。
+        // 与 CINDY_PI_PERMISSION_FILE 同一类:靠改写受信文件给后续调用永久换向(review)。
+        // 只从 bash/模型工具的 spawn 边界剥离;子代理自己的 spawn 不走 bridge 的 bash 钩子,
+        // 扩展照旧现读快照,能力不受影响。
+        CINDY_SUBAGENT_ENV.runtimeFile,
       ]));
       const spawnEnv: NodeJS.ProcessEnv = {
         ...process.env,
@@ -875,6 +1094,13 @@ export class PiAgent extends BaseAgent {
         [PI_SECRET_ENV_NAMES_ENV]: JSON.stringify(piSecretEnvNames),
         PI_CODING_AGENT_DIR: configHome,
         CINDY_PI_PERMISSION_FILE: permissionFile,
+        // 子代理:cindy-subagent 扩展据此 spawn 子 pi 进程。给二进制路径而不是让扩展猜
+        // process.execPath —— host 本来就知道本次会话用的是哪个 pi。
+        [CINDY_SUBAGENT_ENV.binary]: this.deps.binaryPath,
+        // 只给文件路径:model/provider 由扩展每次现读,setModel 后立即生效。
+        // 快照没能持久化时**不传**该 env —— 扩展据此完全不注册 subagent 工具(fail-closed,
+        // 宁可本次会话没有子代理,也不让它带着空/旧快照把请求发到错误 endpoint)。
+        ...(subagentRoutingEnabled ? { [CINDY_SUBAGENT_ENV.runtimeFile]: subagentRuntimeFile } : {}),
         // 嵌入式 runtime 不做启动期联网:关掉 pi 的版本检查与安装遥测
         // (pi.dev/api/latest-version、report-install)。LLM 请求走 provider 通道不受影响。
         PI_OFFLINE: '1',
@@ -900,6 +1126,7 @@ export class PiAgent extends BaseAgent {
               workspaceRoots: [opts.workingDir],
               readRoots: [opts.workingDir, ...mutableExtraDirs],
               reviewAutoAction,
+              notifyAutoReviewUnavailable: () => autoReviewUnavailableNotice.notify(),
             }));
             return;
           }
@@ -933,8 +1160,9 @@ export class PiAgent extends BaseAgent {
               });
             }
           }
-          // 进程已死:隔离的 configHome(models.json + extension)不再被读,清理。
+          // 进程已死:隔离的 configHome(models.json + extension)与 runtime 文件不再被读,清理。
           cleanupConfigHome();
+          cleanupRuntimeFiles();
           queue.end();
         },
       });
@@ -945,6 +1173,7 @@ export class PiAgent extends BaseAgent {
         /* best-effort:注销失败不掩盖原始构造错误 */
       }
       cleanupConfigHome();
+      cleanupRuntimeFiles();
       throw err;
     }
 
@@ -1079,13 +1308,13 @@ export class PiAgent extends BaseAgent {
         }
       }
 
-      if (opts.effort) {
+      if (startupEffort) {
         const resp = await proc.request({
           type: 'set_thinking_level',
-          level: effortToPiThinkingLevel(opts.effort),
+          level: effortToPiThinkingLevel(startupEffort),
         });
         if (!resp.success) {
-          this.deps.logger.warn('pi set_thinking_level rejected', { effort: opts.effort, error: resp.error });
+          this.deps.logger.warn('pi set_thinking_level rejected', { effort: startupEffort, error: resp.error });
         }
       }
 
@@ -1135,6 +1364,7 @@ export class PiAgent extends BaseAgent {
       }
       await proc.close().catch(() => {});
       cleanupConfigHome();
+      cleanupRuntimeFiles();
       throw err;
     }
 
@@ -1158,6 +1388,155 @@ export class PiAgent extends BaseAgent {
         ?.models.find((candidate) => candidate.id === mutableModel);
       if (nativeModel?.input?.includes('image')) return;
       throw new PiImageInputUnsupportedError();
+    };
+
+    /** setModel 的串行闸(见 handle.setModel)。 */
+    let setModelChain: Promise<void> = Promise.resolve();
+    /**
+     * setModel 的临界区正文。经 `setModelChain` 串行化后调用 —— 不要直接调它,
+     * 并发进入会让 pending / 落定两次写交错。
+     */
+    const switchModel = async (
+      model: string,
+      setOpts?: { providerId?: string | null; effort?: Effort },
+    ): Promise<void> => {
+      const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
+        ? setOpts.providerId
+        : undefined;
+      // 显式选一个启动快照 nativeProviderById 里“无法服务该 model”的 BYOM provider 时 fail
+      // closed:要么该 provider 是会话启动后才新增的(不在快照),要么它虽在、但用户编辑
+      // 配置后从中删/改了这个 model。两种都会让 resolveProviderForModel 静默回落 cindy 网关;
+      // 若该 model id 也在网关目录里则 set_model “成功”、后续 prompt 发往网关而非用户选的
+      // 本地/自定义端点(codex review P1)。提示重启会话以刷新启动快照,而不是静默换目的地。
+      if (explicitByomUnresolvable(requestedProviderId, model)) {
+        throw new Error(
+          `pi: BYOM provider '${requestedProviderId}' cannot serve model '${model}' in this session's ` +
+            'startup provider set (provider not present, or it no longer offers this model); restart the ' +
+            'session to use it (refusing to fall back to the Cindy gateway).',
+        );
+      }
+      const provider = resolveProviderForModel(model, requestedProviderId);
+      // effort 能力校验必须排在写路由快照**之前**:它会抛错中止本次切换,而快照一旦落盘就
+      // 指向了新 provider —— 那正是父子路由分叉的形状(upstream #1451 与本 PR 的合并点)。
+      const nextEffortSnapshot = resolveStartupEffortSnapshot(provider, model);
+      if (setOpts?.effort) {
+        assertStartupEffortAllowed(nextEffortSnapshot, setOpts.effort);
+      }
+      // 子代理路由快照必须**先落盘、再切 pi 侧模型**,顺序不能反(review)。
+      //
+      // 上一版是先 set_model 成功、再写快照,写失败就置 `subagentRoutingEnabled = false`。
+      // 那个撤销是**无效的**:该标志只在构造 spawnEnv 时读一次(会话启动、进程 spawn 之前),
+      // 进程起来之后改它既不能收回已注入的 env、也不能让扩展停止读那个文件。于是"写失败 +
+      // 删除也失败"(只读挂载 / 磁盘满)时,父会话已经切到新 provider,而子代理还在按**上一个
+      // 有效快照**跑 —— 委派请求发往旧 endpoint,提示词与代码随之外泄到用户并没选的目的地。
+      //
+      // 改为:写不成就**让整个模型切换失败**,一个字节都不改。父子路由要么一起前进、要么都
+      // 不动,不存在"父已切、子没切"的中间态。代价是只读文件系统下切不了模型 —— 那是显式
+      // 报错、用户看得见,远好过静默把委派发到错误端点。
+      //
+      // 但"先落盘"单独还不够。落的若是**新路由**,那么从这一刻到 RPC 回包之间存在一个等待
+      // 窗口:pi 侧仍在旧模型上,而这段时间里模型发起的 subagent 派发会现读快照、按新 provider
+      // 起子进程。RPC 随后返回 `success: false` 时,回滚快照撤不回已经起来的子进程 —— 它已经
+      // 在用一个 pi 明确拒绝了的 endpoint 干活(review)。
+      //
+      // 所以这一步落的是**带 pending 标记的**新路由:内容已经就位(证明可写、内容可回滚),但
+      // 扩展见到 `pending: true` 就拒绝派发。等待窗口里一个子进程都起不来,既不会用未确认的新
+      // 路由、也不会用与父不一致的旧路由;确认后再清掉标记放行。
+      const previousSnapshot = { model: mutableModel, provider: mutablePiProviderId };
+      if (!(await writeSubagentRuntimeFile({ model, provider, pending: true }))) {
+        throw new Error(
+          'pi: 无法持久化子代理路由快照,已取消本次模型切换(避免父会话切到新 provider 而子代理仍按旧路由派发)。'
+          + '请检查运行目录是否可写后重试。',
+        );
+      }
+      let resp;
+      try {
+        resp = await proc.request({ type: 'set_model', provider, modelId: model });
+      } catch (err) {
+        // RPC **reject / 超时 / 写 stdin 失败 / 进程已退出**:与 `success:false` 有本质区别 ——
+        // 那种情况我们**知道**没生效,可以回滚;这里我们**不知道** pi 侧到底切没切。
+        //
+        // 因此两条路都不能走:回滚可能与真实状态正好相反(RPC 其实生效了,回滚后父会话在新
+        // 模型、快照指向旧模型);放行则可能相反(RPC 没生效,快照却指向新模型)。任一方向都是
+        // 父子路由分叉 —— 下一次委派打到用户并未启用的端点(错误计费 + 提示词外泄)。
+        //
+        // 也没选"重新读取并校准":`get_state` 在本文件消费的形状里只暴露 `contextWindow`,
+        // 拿不到权威的 model / provider 身份;靠未经验证的字段去猜,比直接失败更糟。而且 RPC
+        // 刚超时,紧接着再发一条 RPC 很可能同样挂住。
+        //
+        // 所以按 fail-closed 收口:终止会话,让这个 pi 进程不再有下一次派发。快照**刻意**保持
+        // `pending: true` 不动:它既不是已确认的新路由、也不是旧路由,扩展会一律拒绝派发 ——
+        // 这条路径上留着 pending 正是我们想要的终态,不要"顺手"回滚成旧值。
+        deps.logger.error('pi: set_model RPC did not confirm; terminating session to avoid split subagent routing', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+        try {
+          await proc.close();
+        } catch (closeErr) {
+          deps.logger.warn('pi: session termination after unconfirmed set_model also failed', {
+            message: closeErr instanceof Error ? closeErr.message : String(closeErr),
+          });
+        }
+        throw new Error(
+          'pi: 模型切换请求未收到确认(超时或链路错误),无法确定 pi 侧是否已生效;'
+          + '已终止本会话以避免子代理按不确定的路由派发。请重开会话后再切换模型。',
+        );
+      }
+      if (!resp.success) {
+        // pi 侧没切成:快照必须回滚成上一份**已确认**的路由,否则子代理会一直被 pending 挡住。
+        // 这次回滚是安全的 —— 等待窗口里 pending 标记挡住了全部派发,不存在"已经起来的子进程
+        // 正在用被拒绝的 provider"这种撤不回的状态(review)。
+        if (!(await writeSubagentRuntimeFile(previousSnapshot))) {
+          // 回滚也失败(第一次写成功之后文件系统才转只读之类):此刻盘上的快照指向**被拒绝的**
+          // provider/model,而父会话仍在旧路由 —— 子代理的下一次派发就会打到用户并未启用的
+          // 端点(错误计费 + 提示词与仓库上下文外泄)。
+          //
+          // 这里**不能**再退回 `subagentRoutingEnabled = false`(上一版就是这么写的,而它是个
+          // 空操作,我在上面的注释里已经承认过):该标志只在构造 spawnEnv 时读一次,进程早就
+          // 起来了,改它既收不回已注入的 env,也拦不住扩展继续读那个文件。删除文件同样已经
+          // 试过并失败 —— 使用点的 fail-closed 因此也指望不上。
+          //
+          // 写不了、删不掉,唯一还能保证的手段就是**让这个 pi 进程不再有下一次派发**:直接
+          // 终止会话。代价明确(会话中断,用户要重开),但它是可证明有效的;继续跑下去的代价
+          // 是把提示词发到错误端点,那个不可接受。
+          deps.logger.error(
+            'pi: set_model failed and the subagent routing snapshot could not be rolled back; '
+            + 'terminating the session because subagent delegation would otherwise route to the rejected provider',
+          );
+          try {
+            await proc.close();
+          } catch (err) {
+            deps.logger.warn('pi: session termination after routing rollback failure also failed', {
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+          throw new Error(
+            'pi: 模型切换失败且子代理路由快照无法回滚,已终止本会话以避免委派请求发往未启用的端点。'
+            + '请检查运行目录是否可写后重开会话。',
+          );
+        }
+        throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
+      }
+      // pi 已确认 → 清掉 pending 标记放行派发。写失败时**不**抛错:模型切换本身确实成功了,
+      // 谎报失败会让上层与 UI 状态和 pi 真实状态背离。代价是这个会话的子代理一直被 pending
+      // 挡住(可见的降级、拒绝时有明确文案),而它是安全方向 —— 绝不会把委派发到错误 endpoint。
+      if (!(await writeSubagentRuntimeFile({ model, provider }))) {
+        deps.logger.error(
+          'pi: model switch confirmed but the subagent routing snapshot stayed pending; '
+          + 'subagent delegation stays disabled for this session (fail-closed)',
+        );
+      }
+      mutableModel = model;
+      mutablePiProviderId = provider;
+      activeEffortSnapshot = nextEffortSnapshot;
+      if (setOpts && Object.hasOwn(setOpts, 'providerId')) mutableProviderId = setOpts.providerId;
+      autoReviewDecisionCache.clear();
+      // 换模型 / 换路由可能正好修掉了审阅器不可用的原因;换完又不可用值得再提醒一次。
+      autoReviewUnavailableNotice.reset();
+      const data = (resp.data ?? {}) as { contextWindow?: number };
+      if (typeof data.contextWindow === 'number' && data.contextWindow > 0) {
+        ctx.contextWindow = data.contextWindow;
+      }
     };
 
     const handle: AgentSessionHandle = {
@@ -1241,8 +1620,9 @@ export class PiAgent extends BaseAgent {
           });
         }
         await proc.close();
-        // 会话结束:清理隔离的 configHome(onExit 幂等,二者先到先清)。
+        // 会话结束:清理隔离的 configHome 与 runtime 文件(onExit 幂等,二者先到先清)。
         cleanupConfigHome();
+        cleanupRuntimeFiles();
       },
 
       events(): AsyncIterable<AgentEvent> {
@@ -1257,36 +1637,20 @@ export class PiAgent extends BaseAgent {
         interactionResolver = resolver;
       },
 
-      async setModel(model: string, setOpts?: { providerId?: string | null }): Promise<void> {
-        const requestedProviderId = setOpts && Object.hasOwn(setOpts, 'providerId')
-          ? setOpts.providerId
-          : undefined;
-        // 显式选一个启动快照 nativeProviderById 里“无法服务该 model”的 BYOM provider 时 fail
-        // closed:要么该 provider 是会话启动后才新增的(不在快照),要么它虽在、但用户编辑
-        // 配置后从中删/改了这个 model。两种都会让 resolveProviderForModel 静默回落 cindy 网关;
-        // 若该 model id 也在网关目录里则 set_model “成功”、后续 prompt 发往网关而非用户选的
-        // 本地/自定义端点(codex review P1)。提示重启会话以刷新启动快照,而不是静默换目的地。
-        if (explicitByomUnresolvable(requestedProviderId, model)) {
-          throw new Error(
-            `pi: BYOM provider '${requestedProviderId}' cannot serve model '${model}' in this session's ` +
-              'startup provider set (provider not present, or it no longer offers this model); restart the ' +
-              'session to use it (refusing to fall back to the Cindy gateway).',
-          );
-        }
-        const provider = resolveProviderForModel(model, requestedProviderId);
-        const resp = await proc.request({ type: 'set_model', provider, modelId: model });
-        if (!resp.success) throw new Error(`pi set_model failed: ${resp.error ?? 'unknown'}`);
-        mutableModel = model;
-        mutablePiProviderId = provider;
-        if (setOpts && Object.hasOwn(setOpts, 'providerId')) mutableProviderId = setOpts.providerId;
-        autoReviewDecisionCache.clear();
-        const data = (resp.data ?? {}) as { contextWindow?: number };
-        if (typeof data.contextWindow === 'number' && data.contextWindow > 0) {
-          ctx.contextWindow = data.contextWindow;
-        }
+      async setModel(model: string, setOpts?: { providerId?: string | null; effort?: Effort }): Promise<void> {
+        // 会话级串行闸:整段"写待切换快照 → set_model RPC → 落定/回滚"必须是一个临界区。
+        // 并发或连点切换(本地 + 远程控制端同时切)若交错,A 写 pending、B 写 pending、A 落定 B 的
+        // 内容,盘上就会出现没人确认过的组合。串行化之后每次切换都看到确定的前一状态,
+        // `previousSnapshot` 才是真正可回滚的那一份(review)。
+        const run = setModelChain.then(() => switchModel(model, setOpts));
+        // 链永不停在 rejected 上:一次失败之后的切换仍要能排进来。
+        setModelChain = run.then(() => {}, () => {});
+        return run;
       },
 
       async setEffort(effort: Effort): Promise<void> {
+        assertStartupEffortAllowed(activeEffortSnapshot, effort);
+        if (activeEffortSnapshot?.length === 0) return;
         const resp = await proc.request({
           type: 'set_thinking_level',
           level: effortToPiThinkingLevel(effort),
@@ -1297,9 +1661,19 @@ export class PiAgent extends BaseAgent {
       async setPermissionMode(mode): Promise<void> {
         // ask/auto/bypass 三档;extension 每次 tool_call 现读,写完即生效。
         // auto 的差异在 Cindy 侧 dispatcher(handleExtensionUiRequest),bridge 无感知。
+        const nextMode = normalizePermissionMode(mode);
+        // 用户自己动过权限档 → 一次性提示重新武装(与 Claude / Codex 同口径)。
+        // 档位变了 → 连**裁决缓存**一起清。缓存 key 不含 permissionMode,切离 Auto 再切回时
+        // 会命中先前那条 `unavailable` block —— 审阅器早就恢复了,同一个动作还是被拒
+        // (greptile P1 of #1574)。一次性提示同步重新武装:用户既然接管过,之后又不可用
+        // 值得再提醒一次。
+        if (nextMode !== requestedPermissionSnapshot.mode) {
+          autoReviewDecisionCache.clear();
+          autoReviewUnavailableNotice.reset();
+        }
         await writePermissionSnapshotOrFailClosed({
           ...requestedPermissionSnapshot,
-          mode: normalizePermissionMode(mode),
+          mode: nextMode,
         });
       },
 
@@ -1735,6 +2109,8 @@ export class PiAgent extends BaseAgent {
       workspaceRoots: string[];
       readRoots: string[];
       reviewAutoAction: (action: ReviewableAction) => Promise<AutoReviewDecision>;
+      /** 审阅器不可用时的会话级一次性提示;去重与重置由会话侧持有(issue #1574)。 */
+      notifyAutoReviewUnavailable: () => void;
     },
   ): void {
     const method = typeof event.method === 'string' ? event.method : '';
@@ -1760,6 +2136,7 @@ export class PiAgent extends BaseAgent {
         workspaceRoots,
         readRoots,
         reviewAutoAction,
+        notifyAutoReviewUnavailable,
       } = getPermissionCtx();
       const requestUserConfirmation = async (): Promise<boolean> => {
         if (!resolver) {
@@ -1827,9 +2204,13 @@ export class PiAgent extends BaseAgent {
             return;
           }
           if (decision.verdict === 'block') {
+            // 审阅器没跑起来 ≠ 模型判定危险:前者是基础设施故障,提示一次让用户能接管;
+            // 后者按 Auto 本意保持静默。动作两种都仍然 confirmed:false。
+            if (decision.unavailable) notifyAutoReviewUnavailable();
             this.deps.logger.debug('pi auto-review blocked tool call', {
               toolName,
               reason: decision.reason,
+              unavailable: decision.unavailable === true,
             });
           }
           proc.send({

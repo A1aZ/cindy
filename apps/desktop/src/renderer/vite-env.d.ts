@@ -1401,6 +1401,12 @@ interface ElectronAPI {
       action: 'status' | 'spawn' | 'stop' | 'crash',
       id?: string,
     ) => Promise<{ states?: Record<string, string>; state?: string }>;
+    /** dev-only：经正式插件派发/权限链调用一个已声明工具。 */
+    devCall: (
+      id: string,
+      tool: string,
+      args: Record<string, unknown>,
+    ) => Promise<unknown>;
   };
 
   /** Plugin Protocol v2 市场；网络、下载与安装全部在 main 进程完成。 */

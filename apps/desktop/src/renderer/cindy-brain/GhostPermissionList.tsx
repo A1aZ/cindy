@@ -76,6 +76,7 @@ function itemIcon(item: GhostPermissionItem): LucideIcon {
   if (
     item.labelKey === 'networkSecret' ||
     item.labelKey === 'networkSecretOauth' ||
+    item.labelKey === 'networkSecretOrganizationIdentity' ||
     item.labelKey === 'nodeSecret'
   )
     return KeyRound;

@@ -11,6 +11,8 @@ import {
   GHOST_CARD_HEIGHT_DEFAULT,
   GHOST_CARD_HEIGHT_MAX,
   GHOST_CARD_HEIGHT_MIN,
+  GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  GHOST_MANIFEST_FILE,
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   ghostPermissionBaselineKey,
@@ -20,6 +22,7 @@ import {
   isOfficialGhostId,
   isValidGhostId,
   layoutWithGhostPanel,
+  validateGhostManifest,
   type GhostHostNoticeKey,
   type GhostImageAspectRatio,
   type GhostManifest,
@@ -185,10 +188,22 @@ import {
   initGhostConfirmDialogBridge,
 } from './ghostConfirmDialogBridge.js';
 import { GhostNetworkSlot } from './networkSlot.js';
+import {
+  type ConnectionAudienceResolution,
+  isConnectionSecretReady,
+  loadConnectionAudienceResolver,
+  type ConnectionAudienceResolver,
+} from './connectionAudienceResolver.js';
+import {
+  ConnectionTokenProvider,
+  type IssuedConnectionToken,
+} from './connectionTokenProvider.js';
 import { GhostFsSlot } from './fsSlot.js';
 import { getGhostGrantConfirmBridge } from './ghostGrantConfirmBridge.js';
 import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
 import { getDirDepositVault, getSaveDepositVault, isPathInsideDir } from './dirDeposit.js';
+import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
+import { ghostManifestDigest, PluginMarketLedger } from '../plugin-market/ledger.js';
 import {
   GhostSubscriptionGateway,
   GhostActivityTracker,
@@ -1648,6 +1663,82 @@ export function noteGhostSessionFocused(sessionId: string | null): void {
 let cindySlotSingleton: GhostCindySlot | null = null;
 let networkSlotSingleton: GhostNetworkSlot | null = null;
 let notifySlotSingleton: GhostNotifySlot | null = null;
+let connectionAudienceResolverSingleton: ConnectionAudienceResolver | null = null;
+let connectionTokenProviderSingleton: ConnectionTokenProvider | null = null;
+let pluginMarketLedgerSingleton: PluginMarketLedger | null = null;
+
+function getPluginMarketLedger(): PluginMarketLedger {
+  if (!pluginMarketLedgerSingleton) {
+    pluginMarketLedgerSingleton = new PluginMarketLedger(() =>
+      ownerScopedUserDataPath('plugin-market', 'ledger.v1.json'),
+    );
+  }
+  return pluginMarketLedgerSingleton;
+}
+
+/** Read the locale-independent manifest digest from the installed package. */
+function readInstalledGhostManifestDigest(ghostId: string): string | null {
+  const ghost = getGhostManager().list().find((candidate) => candidate.manifest.id === ghostId);
+  if (!ghost) return null;
+  try {
+    const bytes = readBoundedFileNoFollowSync(
+      path.join(ghost.dir, GHOST_MANIFEST_FILE),
+      GHOST_INSTALL_MANIFEST_MAX_BYTES,
+    );
+    if (bytes === null) return null;
+    const validated = validateGhostManifest(JSON.parse(bytes.toString('utf8')) as unknown);
+    return validated.ok ? ghostManifestDigest(validated.manifest) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve Connection metadata only from a trusted organization market install. */
+function getConnectionAudienceResolver(): ConnectionAudienceResolver {
+  if (!connectionAudienceResolverSingleton) {
+    connectionAudienceResolverSingleton = loadConnectionAudienceResolver({
+      readInstalledManifest: (ghostId) =>
+        getGhostManager()
+          .list()
+          .find((candidate) => candidate.manifest.id === ghostId)?.manifest ?? null,
+      readInstalledManifestDigest: readInstalledGhostManifestDigest,
+      readMarketInstallation: (ghostId) => getPluginMarketLedger().installationForGhost(ghostId),
+      log,
+    });
+  }
+  return connectionAudienceResolverSingleton;
+}
+
+function resolveConnectionAudienceForGhost(
+  ghostId: string,
+): ConnectionAudienceResolution | null {
+  const state = getAuthState();
+  const user = state.isAuthenticated ? state.user : null;
+  if (!user) return null;
+  return getConnectionAudienceResolver().resolve(ghostId, {
+    membershipId: user.id,
+    membershipKind: user.membershipKind,
+    orgId: user.orgId,
+    orgSlug: user.orgSlug,
+  });
+}
+
+/** Main-memory-only Connection token issuer/cache. */
+function getConnectionTokenProvider(): ConnectionTokenProvider {
+  if (!connectionTokenProviderSingleton) {
+    connectionTokenProviderSingleton = new ConnectionTokenProvider({
+      issue: (audience) =>
+        serverApiFetch<IssuedConnectionToken>('/api/auth/connections/token', {
+          method: 'POST',
+          body: { audience },
+          baseUrl: () => getClientEndpoint('authApiBaseUrl'),
+          timeoutMs: 15_000,
+          redactErrorDetails: true,
+        }),
+    });
+  }
+  return connectionTokenProviderSingleton;
+}
 
 /** 意识系统提示通道(main → 全窗口 renderer;宿主 Toast 渲染,带意识身份头)。 */
 export const GHOST_NOTIFY_CHANNEL = 'ghosts:notify';
@@ -2964,6 +3055,13 @@ export function getGhostNetworkSlot(): GhostNetworkSlot {
         invalidateAccessToken: (ghostId, secretKey, accountId) =>
           getGhostOauthAccountManager().invalidateAccessToken(ghostId, secretKey, accountId),
       },
+      // Cindy Connection JWT:audience 只由 Host 根据组织和插件 id 推导，令牌只留在
+      // Main 内存并由 networkSlot 直接注入，插件与 Node Worker 都拿不到。
+      connectionTokens: {
+        resolve: resolveConnectionAudienceForGhost,
+        getToken: (input) => getConnectionTokenProvider().getToken(input),
+        invalidate: (input) => getConnectionTokenProvider().invalidate(input),
+      },
       // 多连接凭证(network.connections):按在装清单逐 decl 查连接管理器——
       // 用户添加的地址并入动态白名单(hostsFor),出网时按 hostname 精确
       // 匹配注入那条连接自己的 token(tokenFor;同一 hostname 命中多个 decl
@@ -3555,9 +3653,14 @@ export function registerGhostIpc(): void {
     const networkSecretDecls = ghost.manifest.network?.secrets ?? [];
     const nodeSecretDecls = ghost.manifest.node?.secretBindings ?? [];
     const userSecretKeys = networkSecretDecls
-      // login-email(派生)与 oauth(主机托管授权)都没有"用户填值"这回事,
+      // Host 派生与 oauth(主机托管授权)都没有"用户填值"这回事,
       // 不进 /secrets 收单键集(oauth 的 client 凭证走 /oauth 端点)。
-      .filter((s) => s.source !== 'login-email' && s.source !== 'oauth')
+      .filter(
+        (s) =>
+          s.source !== 'login-email'
+          && s.source !== 'oauth'
+          && s.source !== 'oidc-token',
+      )
       .map((s) => s.key)
       .concat(nodeSecretDecls.map((s) => s.key));
     // login-email 派生身份:GET 状态回查附 identity(= 当前登录邮箱,设置页
@@ -3566,12 +3669,30 @@ export function registerGhostIpc(): void {
     const identitySecretKeys = networkSecretDecls
       .filter((s) => s.source === 'login-email')
       .map((s) => s.key);
+    const managedSecretDecls = networkSecretDecls.filter(
+      (s) => s.source === 'oidc-token',
+    );
+    const connectionResolution =
+      managedSecretDecls.length > 0
+        ? (() => {
+            try {
+              return resolveConnectionAudienceForGhost(ghostId);
+            } catch {
+              return null;
+            }
+          })()
+        : null;
+    const managedSecretStates = managedSecretDecls.map((s) => ({
+      key: s.key,
+      saved: isConnectionSecretReady(s.inject.hosts ?? [], connectionResolution),
+    }));
     return handleGhostSecretsRequest({
       method,
       pathname,
       readBodyText,
       userSecretKeys,
       identitySecretKeys,
+      managedSecretStates,
       getLoginEmail: () => getAuthState().user?.email ?? null,
       ghostId,
       vault: {
@@ -3912,6 +4033,10 @@ export function registerGhostIpc(): void {
       activateGhostsAndMigrateLegacyAccounts,
     );
     onAuthStateChange(() => {
+      // Login/logout, Membership switches, and refresh integration all cross
+      // an auth notification boundary. Discard every short-lived Connection
+      // assertion so a late request can never reuse the previous identity.
+      connectionTokenProviderSingleton?.clearAll();
       if (!getAppCapabilities().canUseCindyAccountServices) suspendCindyAccountGhosts();
       // Even when provisioning itself is a no-op, the renderer and agent
       // roster must immediately reflect the new session capability set.
@@ -4729,7 +4854,8 @@ export function registerGhostIpc(): void {
   // dev-only 运行时控制通道(QA:能起 / 能停 / 能崩 / 能看状态)。
   // packaged 版不注册;正式的按需拉起 / 闲置熄灯由上层自动策略负责。
   if (!app.isPackaged) {
-    ipcMain.handle('ghosts:dev-runtime', async (_event, action: unknown, id: unknown) => {
+    ipcMain.handle('ghosts:dev-runtime', async (event, action: unknown, id: unknown, payload: unknown) => {
+      assertTrustedAppRendererEvent(event);
       if (action === 'status') return { states: runtime.listStates() };
       if (typeof id !== 'string' || id.trim().length === 0) {
         throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
@@ -4750,6 +4876,37 @@ export function registerGhostIpc(): void {
         case 'crash':
           if (!runtime.crashForTest(id)) throwIpcError('INVALID_PARAMS', `意识 ${id} 不在运行中`);
           return { state: runtime.stateOf(id) };
+        case 'call': {
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throwIpcError('INVALID_PARAMS', 'call payload must be an object');
+          }
+          const request = payload as { tool?: unknown; args?: unknown };
+          if (
+            typeof request.tool !== 'string' ||
+            !/^[a-z][a-z0-9_-]{0,63}$/.test(request.tool)
+          ) {
+            throwIpcError('INVALID_PARAMS', 'tool must be a valid plugin tool name');
+          }
+          const args = request.args ?? {};
+          if (!args || typeof args !== 'object' || Array.isArray(args)) {
+            throwIpcError('INVALID_PARAMS', 'args must be an object');
+          }
+          let encodedArgs: string;
+          try {
+            encodedArgs = JSON.stringify(args);
+          } catch {
+            throwIpcError('INVALID_PARAMS', 'args must be JSON serializable');
+          }
+          if (encodedArgs.length > 256 * 1024) {
+            throwIpcError('INVALID_PARAMS', 'args are too large');
+          }
+          requireGhostAvailableForActiveSession(id);
+          return getGhostPipeDispatcher().callGhostTool({
+            ghostId: id,
+            tool: request.tool,
+            args: args as Record<string, unknown>,
+          });
+        }
         default:
           throwIpcError('INVALID_PARAMS', `未知 action ${JSON.stringify(action)}`);
       }

@@ -17815,7 +17815,8 @@ describe('CodexAgent reconnect-stall watchdog', () => {
 });
 
 describe('CodexAgent context window reporting', () => {
-  // agent 侧只负责两件事:按 turn 归属模型、把 host 给的已核实上限与上报值取小。
+  // agent 侧只负责两件事:按 turn 归属模型、已核实上限存在时优先用它(2026-08-04 起
+  // 不再与上报值取小,见 capContextWindow 注释)。
   // 「目录里这个窗口算不算已核实、该用哪条路由的」判定在 host
   // (apps/desktop/.../catalog-to-descriptors.ts 的 resolveVerifiedContextWindow,有独立用例)。
   const GATEWAY_MODEL = 'codex/gpt-5.6-sol';
@@ -17897,7 +17898,12 @@ describe('CodexAgent context window reporting', () => {
     ).toBe(372_000);
   });
 
-  it('上报值本来就更小时取上报值(路由真被降窗)', async () => {
+  // 2026-08-04 语义变更: 上报值更小时**不再**取上报值。原先的 min() 前提是「上报值可信,
+  // 只是可能虚高」, 实测证伪 —— 会话中途切模型后 codex 继续上报切换前那个模型的窗口
+  // (旧模型 258400 vs 新模型的真实窗口), min() 会把已核实的正确窗口拉回旧值, 上下文占比
+  // 与 memory flush 阈值全程按错的窗口走。「路由真被降窗」与「上报值陈旧」在协议上无法
+  // 区分(都只是一个更小的数字), 二选一时信我们自己按 (provider, model) 核实过的那份。
+  it('上报值更小时仍取已核实窗口(与陈旧上报值无法区分,不采信)', async () => {
     expect(
       await reportedContextWindow(
         agentWithWindows({ [GATEWAY_MODEL]: 372_000 }),
@@ -17905,7 +17911,37 @@ describe('CodexAgent context window reporting', () => {
         GATEWAY_MODEL,
         128_000,
       ),
-    ).toBe(128_000);
+    ).toBe(372_000);
+  });
+
+  // 本次故障的核心回归 (rollout 019fcd52 实测): 切模型后 codex 一直上报旧模型的
+  // 258400, 新模型的已核实窗口必须压过它 —— 否则整个会话按旧窗口核算上下文。
+  it('切模型后上游仍报旧模型窗口时,按新模型的已核实窗口核算', async () => {
+    const agent = agentWithVerified((_p, modelId) =>
+      modelId === 'claude-opus-5' ? 1_000_000 : 258_400,
+    );
+    const host = installTurnCapableHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-ctxwin-model-switch',
+      model: GATEWAY_MODEL,
+      workingDir: '/repo',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers) throw new Error('expected thread handlers');
+
+    await handle.send({ type: 'user', content: 'go' });
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+    pushUsage(handlers, 'turn-1', 258_400);
+    expect(handle.getUsageSnapshot().contextWindow).toBe(258_400);
+
+    if (!handle.setModel) throw new Error('expected setModel support');
+    await handle.setModel('claude-opus-5');
+    // 切模型后的新 turn: 上游**仍**报 258400(这正是上游的 bug), 我们必须按新模型算。
+    await handle.send({ type: 'user', content: 'again' });
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-2' } } as never);
+    pushUsage(handlers, 'turn-2', 258_400);
+    expect(handle.getUsageSnapshot().contextWindow).toBe(1_000_000);
+    await handle.close();
   });
 
   // host 返回 null 覆盖了所有「不该收敛」的情形:目录未覆盖、只有派生兜底值(自定义 provider
@@ -18316,5 +18352,313 @@ describe('CodexAgent context window reporting', () => {
     await handle.close();
     await flush();
     expect(cardFrames()).toHaveLength(afterTerminal);
+  });
+});
+
+describe('CodexAgent compaction storm escalation', () => {
+  /**
+   * 复刻 rollout 019fcd52 (2026-08-04) 的故障:会话中途切模型后 codex 按旧模型窗口
+   * 反复压缩,每次压完水位纹丝不动。本仓修不了上游的窗口核算,但必须熔断并让用户看见。
+   */
+  function installStormHost(agent: CodexAgent) {
+    usageTotal = 0; // 每个用例独立累加,避免跨用例污染 total
+    let turnSeq = 0;
+    return installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+      if (method === Method.TurnInterrupt) return {};
+      if (method === Method.ThreadSettingsUpdate) return {};
+      return undefined;
+    });
+  }
+
+  function collectEvents(handle: Awaited<ReturnType<CodexAgent['startSession']>>): AgentEvent[] {
+    const seen: AgentEvent[] = [];
+    void (async () => {
+      for await (const ev of handle.events()) seen.push(ev);
+    })();
+    return seen;
+  }
+
+  let usageTotal = 0;
+
+  function pushUsageTokens(
+    handlers: ThreadEventHandlers,
+    turnId: string,
+    inputTokens: number,
+  ): void {
+    usageTotal += inputTokens;
+    handlers.tokenUsageUpdated?.({
+      threadId: 'start-thread-id',
+      turnId,
+      tokenUsage: {
+        // total 是累加值,与 last 不同量级 —— 不把两者设成相同,否则测不出字段映射。
+        total: { inputTokens: usageTotal, cachedInputTokens: 0, outputTokens: 0 },
+        last: { inputTokens, cachedInputTokens: 0, outputTokens: 0 },
+        // 上游的 bug:切模型后仍报旧模型的 258400。
+        modelContextWindow: 258_400,
+      },
+    } as never);
+  }
+
+  /**
+   * 一轮真实压缩:压缩前水位 → contextCompaction → 一条 0(codex 的压缩完成标记)
+   * → 压缩后水位。实测每轮都是这个形状(rollout 019fcd52),那条 0 必须照实喂 ——
+   * 少了它,测的就是一个现实里不存在的时序。
+   */
+  function pushCompactionCycle(
+    handlers: ThreadEventHandlers,
+    turnId: string,
+    seq: number,
+    pre: number,
+    post: number,
+  ): void {
+    pushUsageTokens(handlers, turnId, pre);
+    handlers.itemCompleted?.({
+      threadId: 'start-thread-id',
+      turnId,
+      item: { id: `compact-${seq}`, type: 'contextCompaction' },
+    } as never);
+    pushUsageTokens(handlers, turnId, 0);
+    pushUsageTokens(handlers, turnId, post);
+  }
+
+  /** 实测风暴的前四轮 (pre, post):历史已压到底只剩 30k,总量却仍是 326k。 */
+  const STORM_ROUNDS: ReadonlyArray<readonly [number, number]> = [
+    [176_539, 326_503],
+    [32_283, 325_868],
+    [30_544, 325_922],
+    [30_513, 327_909],
+  ];
+
+  /** 健康的长 turn:每轮都把 ~200k 的历史压回 30k 上下(floor 之间不单调下降)。 */
+  const HEALTHY_ROUNDS: ReadonlyArray<readonly [number, number]> = [
+    [210_000, 30_000],
+    [205_000, 31_000],
+    [198_000, 29_000],
+    [212_000, 32_000],
+    [207_000, 30_500],
+  ];
+
+  /** eventQueue 消费端是 async 迭代器,同步推完事件要让出两拍才收得到。 */
+  const flushEvents = async (): Promise<void> => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  };
+
+  /** 熔断有两条 reason(有无切模型证据),两条都要认。 */
+  const STORM_REASONS = [
+    'codex_compaction_not_converging',
+    'codex_compaction_not_converging_model_switch',
+  ];
+
+  function findStormError(seen: AgentEvent[]): AgentEvent | undefined {
+    return seen.find(
+      (ev) =>
+        ev.type === 'error' &&
+        STORM_REASONS.includes((ev.data as { reason?: string } | null)?.reason ?? ''),
+    );
+  }
+
+  it('连续无效压缩 → 推终态 error 并 interrupt turn', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installStormHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-compaction-storm',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const seen = collectEvents(handle);
+    await handle.send({ type: 'user', content: 'go' });
+    const handlers = host.getThreadHandlers();
+    if (!handlers) throw new Error('expected thread handlers');
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+    // 实测风暴序列:把 30k 的历史压完,总量仍是 326k。
+    for (const [i, [pre, post]] of STORM_ROUNDS.entries()) {
+      pushCompactionCycle(handlers, 'turn-1', i, pre, post);
+    }
+
+    await flushEvents();
+    const terminal = findStormError(seen);
+    expect(terminal).toBeDefined();
+    expect((terminal!.data as { isTerminal?: boolean }).isTerminal).toBe(true);
+    expect(
+      host.request.mock.calls.some(
+        ([method, params]) =>
+          method === Method.TurnInterrupt && (params as { turnId?: string }).turnId === 'turn-1',
+      ),
+    ).toBe(true);
+    await handle.close();
+  });
+
+  it('压缩确实生效时不熔断 —— 正常长会话不被误杀', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installStormHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-compaction-healthy',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const seen = collectEvents(handle);
+    await handle.send({ type: 'user', content: 'go' });
+    const handlers = host.getThreadHandlers();
+    if (!handlers) throw new Error('expected thread handlers');
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+    // 健康长 turn:每轮都把大历史压回 floor,floor 之间不要求单调下降。
+    for (const [i, [pre, post]] of HEALTHY_ROUNDS.entries()) {
+      pushCompactionCycle(handlers, 'turn-1', i, pre, post);
+    }
+
+    await flushEvents();
+    expect(findStormError(seen)).toBeUndefined();
+    expect(
+      host.request.mock.calls.some(([method]) => method === Method.TurnInterrupt),
+    ).toBe(false);
+    await handle.close();
+  });
+
+  /** 跑到熔断, 返回终态错误消息正文 (诊断文案由 modelSwitchRecord 决定)。 */
+  async function stormTerminalAfterSwitches(
+    sessionId: string,
+    switches: readonly string[],
+    /**
+     * server 把请求 id 规范化后的 wire 变体(如 'model-a-codex')。推一条
+     * thread/settings/updated 让 mutableModel 变成它 —— mutableCatalogModel 按设计
+     * 保持目录 id 不动。真实环境里 codex 就是这么干的,不模拟就测不到口径混用。
+     */
+    normalizedWireModel?: string,
+  ): Promise<{ message: string; reason: string }> {
+    const agent = new CodexAgent(createDeps());
+    const host = installStormHost(agent);
+    const handle = await agent.startSession({ sessionId, model: 'model-a', workingDir: '/repo' });
+    const seen = collectEvents(handle);
+    await handle.send({ type: 'user', content: 'go' });
+    const handlers = host.getThreadHandlers();
+    if (!handlers) throw new Error('expected thread handlers');
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+    if (normalizedWireModel) {
+      handlers.threadSettingsUpdated?.({
+        threadId: 'start-thread-id',
+        threadSettings: { model: normalizedWireModel, serviceTier: 'default' },
+      } as never);
+    }
+
+    if (!handle.setModel) throw new Error('expected setModel support');
+    for (const m of switches) await handle.setModel(m);
+
+    for (const [i, [pre, post]] of STORM_ROUNDS.entries()) {
+      pushCompactionCycle(handlers, 'turn-1', i, pre, post);
+    }
+    await flushEvents();
+    const terminal = findStormError(seen);
+    expect(terminal).toBeDefined();
+    await handle.close();
+    return terminal!.data as { message: string; reason: string };
+  }
+
+  // 回归 (Codex review, 2026-08-05): server 会把请求 id 规范化成只在 wire 上存在的
+  // 变体('model-a' → 'model-a-codex'), 而 threadSettingsUpdated 刻意只更新
+  // mutableModel、不动 mutableCatalogModel。切换记录若拿 mutableModel 当基准, A→B→A
+  // 时 'model-a' !== 'model-a-codex' 会导致记录清不掉 —— 熔断文案继续声称切换过模型,
+  // 还让用户"切回 model-a-codex"这个选择器里根本不存在的 id。
+  it('server 规范化 wire id 后, A→B→A 仍能正确清除记录', async () => {
+    const { message, reason } = await stormTerminalAfterSwitches(
+      'session-storm-aba-wire',
+      ['model-b', 'model-a'],
+      'model-a-codex',
+    );
+    expect(reason).toBe('codex_compaction_not_converging');
+    expect(message).not.toContain('switched model');
+    // 尤其不能把 wire 变体透给用户 —— 它不在模型选择器里。
+    expect(message).not.toContain('model-a-codex');
+  });
+
+  it('server 规范化 wire id 后, A→B→C 的诊断仍用目录 id', async () => {
+    const { message, reason } = await stormTerminalAfterSwitches(
+      'session-storm-abc-wire',
+      ['model-b', 'model-c'],
+      'model-a-codex',
+    );
+    expect(reason).toBe('codex_compaction_not_converging_model_switch');
+    expect(message).toContain('switched model from "model-a" to "model-c"');
+    expect(message).toContain('Switch back to "model-a"');
+    // wire 变体不得出现在给用户的文案里。
+    expect(message).not.toContain('model-a-codex');
+  });
+
+  // Codex review: A→B→A 原先会记成 {from:A,to:A}, 文案变成"从 A 切到 A, 请切回 A"。
+  // reason 也必须跟着退回通用那条 —— renderer 拿 reason 的本地化文案盖掉 message,
+  // 只把 message 改成不猜原因是没用的, 用户看到的仍是 reason 对应的那句。
+  it('A→B→A 切回原模型后不点名模型, 且用通用 reason', async () => {
+    const { message, reason } = await stormTerminalAfterSwitches(
+      'session-storm-aba',
+      ['model-b', 'model-a'],
+    );
+    expect(reason).toBe('codex_compaction_not_converging');
+    expect(message).not.toContain('switched model');
+    // 落到不猜原因的兜底文案。
+    expect(message).toContain('system prompt and tool definitions');
+  });
+
+  // A→B→C: from 保持最初的 A(codex 一直按它算窗口), to 是最新的 C。
+  it('A→B→C 保留最初来源与最新目标, 且用切模型专用 reason', async () => {
+    const { message, reason } = await stormTerminalAfterSwitches(
+      'session-storm-abc',
+      ['model-b', 'model-c'],
+    );
+    expect(reason).toBe('codex_compaction_not_converging_model_switch');
+    expect(message).toContain('switched model from "model-a" to "model-c"');
+    expect(message).toContain('Switch back to "model-a"');
+    expect(message).not.toContain('model-b');
+  });
+
+  it('开着 Maker Memory 时同样熔断(改成无条件回调没打断 flush 路径)', async () => {
+    // 上面两条用例走的是默认的 makerMemory 关闭态 —— 那正是改动前的空洞:
+    // onCompactBoundary 只在 memoryFlushController 存在时注册, 关掉 Maker Memory
+    // 的用户连压缩边界都收不到。这条补另一侧: 开着 memory 时熔断照旧, memory flush
+    // 的通知语义没被无条件化改坏。
+    // 记 debug 日志确认真的走进了 memory 开启分支 —— stub 形状不对时代码会静默
+    // 退回 controller=null, 这条用例就会悄悄退化成上面那条的副本。
+    const debugMessages: string[] = [];
+    const spyLogger: Logger = {
+      trace() {}, debug(msg: string) { debugMessages.push(msg); }, info() {},
+      warn() {}, error() {}, fatal() {},
+      child() { return spyLogger; },
+    };
+    const agent = new CodexAgent(
+      createDeps(
+        { makerMemoryEnabled: true },
+        {
+          logger: spyLogger,
+          makerMemory: {
+            async getStore() {
+              return { async getIndex() { return ''; } };
+            },
+          },
+        } as never,
+      ),
+    );
+    const host = installStormHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-compaction-no-memory',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const seen = collectEvents(handle);
+    await handle.send({ type: 'user', content: 'go' });
+    const handlers = host.getThreadHandlers();
+    if (!handlers) throw new Error('expected thread handlers');
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-1' } } as never);
+
+    for (const [i, [pre, post]] of STORM_ROUNDS.entries()) {
+      pushCompactionCycle(handlers, 'turn-1', i, pre, post);
+    }
+
+    await flushEvents();
+    expect(debugMessages).toContain('maker memory loaded for session');
+    expect(findStormError(seen)).toBeDefined();
+    await handle.close();
   });
 });

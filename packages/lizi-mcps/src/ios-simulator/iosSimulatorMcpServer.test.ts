@@ -55,6 +55,7 @@ describe("createIOSSimulatorMcpServer", () => {
     const payload = JSON.parse(readResultText(result));
     expect(payload.tools.map((tool: { name: string }) => tool.name)).toEqual([
       "check_environment",
+      "doctor",
       "list_devices",
       "list_instances",
       "create_instance",
@@ -65,8 +66,13 @@ describe("createIOSSimulatorMcpServer", () => {
       "get_screen_map",
       "audit_accessibility",
       "compare_screen_maps",
+      "wait_for_ui",
       "tap",
       "swipe",
+      "drag",
+      "long_press",
+      "key_press",
+      "batch",
       "touch_path",
       "touch2_path",
       "type_text",
@@ -106,6 +112,88 @@ describe("createIOSSimulatorMcpServer", () => {
           tool.name === "start_instance",
       )?.description,
     ).toContain("Cindy's viewer");
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it("includes Host capability availability in progressive discovery", async () => {
+    const describeTools = vi.fn(async () => ({
+      ready: true,
+      instanceCount: 1,
+      runningInstanceCount: 1,
+      tools: {
+        doctor: { state: "available" as const, backend: "host" as const },
+        wait_for_ui: { state: "available" as const, backend: "wda" as const },
+        drag: { state: "available" as const, backend: "native-hid" as const },
+      },
+    }));
+    const { client, server } = await connect(
+      { callTool: vi.fn(), describeTools },
+      "session-a",
+    );
+
+    const result = await client.callTool({ name: "list_tools", arguments: {} });
+    const payload = JSON.parse(readResultText(result));
+
+    expect(describeTools).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      origin: "agent",
+    });
+    expect(payload.availability).toMatchObject({
+      ready: true,
+      instanceCount: 1,
+      runningInstanceCount: 1,
+    });
+    expect(
+      payload.tools.find((tool: { name: string }) => tool.name === "drag"),
+    ).toMatchObject({
+      availability: { state: "available", backend: "native-hid" },
+    });
+    await Promise.all([client.close(), server.close()]);
+  });
+
+  it("rejects invalid high-level UI arguments before calling the Host", async () => {
+    const callTool = vi.fn();
+    const { client, server } = await connect({ callTool }, "session-a");
+    const route = {
+      instanceId: "instance-a",
+      generation: 1,
+      leaseId: "lease-a",
+      snapshotId: "dbe4ecda-0e96-43d7-8419-d73dc62b5d03",
+    };
+    const invalidCalls = [
+      {
+        name: "wait_for_ui",
+        args: {
+          ...route,
+          condition: { kind: "element_exists", selector: {} },
+        },
+      },
+      { name: "tap", args: { ...route, elementId: "element-a", observeAfter: "later" } },
+      {
+        name: "long_press",
+        args: { ...route, elementId: "element-a", durationMs: 299 },
+      },
+      { name: "key_press", args: { ...route, key: "space" } },
+      {
+        name: "batch",
+        args: {
+          ...route,
+          actions: Array.from({ length: 17 }, () => ({ type: "key_press", key: "return" })),
+        },
+      },
+    ];
+
+    for (const invocation of invalidCalls) {
+      const result = await client.callTool({
+        name: "call_tool",
+        arguments: invocation,
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(readResultText(result))).toMatchObject({
+        errorCode: "INVALID_ARGS",
+      });
+    }
+    expect(callTool).not.toHaveBeenCalled();
     await Promise.all([client.close(), server.close()]);
   });
 

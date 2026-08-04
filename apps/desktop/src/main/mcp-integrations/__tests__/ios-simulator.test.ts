@@ -1290,10 +1290,14 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true });
-    expect(wdaDriver.tap).toHaveBeenCalledWith('wda-session', {
-      x: 196.5,
-      y: 639,
-    });
+    expect(wdaDriver.tap).toHaveBeenCalledWith(
+      'wda-session',
+      {
+        x: 196.5,
+        y: 639,
+      },
+      expect.any(AbortSignal),
+    );
     await expect(
       host.callTool(
         'swipe',
@@ -1909,6 +1913,28 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { screenMap: { generation: instance.generation, elements: [{ label: 'Continue' }] } },
     });
+    const doctor = await host.callTool(
+      'doctor',
+      {},
+      { sessionId: 'session-a', origin: 'agent' },
+    );
+    expect(doctor).toMatchObject({
+      ok: true,
+      data: {
+        availability: {
+          ready: true,
+          instanceCount: 1,
+          runningInstanceCount: 1,
+          tools: {
+            drag: { state: 'available', backend: 'wda' },
+            touch_path: { state: 'unavailable', reasonCode: 'NATIVE_HID_NOT_ADMITTED' },
+          },
+        },
+        resource: { runningCount: 1 },
+      },
+    });
+    expect(JSON.stringify(doctor)).not.toContain('/Users/example');
+    expect(JSON.stringify(doctor)).not.toContain('SimulatorKit.framework');
     const capturedState = await host.callTool('capture_state', route, {
       sessionId: 'session-a',
       origin: 'agent',
@@ -2090,8 +2116,108 @@ describe('iOS Simulator host', () => {
       origin: 'agent',
     });
     if (!refreshedScreenResult.ok) throw new Error('expected a refreshed screen map');
-    const screenMap = (
+    let screenMap = (
       refreshedScreenResult.data as {
+        screenMap: { snapshotId: string; elements: Array<{ elementId: string }> };
+      }
+    ).screenMap;
+    driver.getAccessibilityTree.mockResolvedValueOnce({
+      capturedAt: '2026-07-22T12:00:01.000Z',
+      tree: {
+        type: 'XCUIElementTypeButton',
+        label: 'Done',
+        enabled: true,
+        visible: true,
+        rect: { x: 20, y: 40, width: 100, height: 40 },
+      },
+    });
+    await expect(
+      host.callTool(
+        'tap',
+        {
+          ...route,
+          snapshotId: screenMap.snapshotId,
+          elementId: screenMap.elements[0]!.elementId,
+          observeAfter: 'immediate',
+        },
+        { sessionId: 'session-a', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        interaction: 'tap',
+        screenMapInvalidated: false,
+        observation: {
+          mode: 'immediate',
+          screenMap: { elements: [{ label: 'Done' }] },
+        },
+      },
+    });
+
+    driver.getAccessibilityTree.mockResolvedValueOnce({
+      capturedAt: '2026-07-22T12:00:02.000Z',
+      tree: {
+        type: 'XCUIElementTypeStaticText',
+        label: 'Loading',
+        enabled: true,
+        visible: true,
+        rect: { x: 20, y: 40, width: 100, height: 40 },
+      },
+    });
+    driver.getAccessibilityTree.mockResolvedValueOnce({
+      capturedAt: '2026-07-22T12:00:03.000Z',
+      tree: {
+        type: 'XCUIElementTypeButton',
+        label: 'Done',
+        enabled: true,
+        visible: true,
+        rect: { x: 20, y: 40, width: 100, height: 40 },
+      },
+    });
+    await expect(
+      host.callTool(
+        'wait_for_ui',
+        {
+          ...route,
+          condition: { kind: 'element_exists', selector: { labelContains: 'Done' } },
+          timeoutMs: 1_000,
+          pollIntervalMs: 100,
+          stableForMs: 100,
+        },
+        { sessionId: 'session-a', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        timedOut: false,
+        screenMap: { elements: [{ label: 'Done' }] },
+      },
+    });
+    await expect(
+      host.callTool(
+        'wait_for_ui',
+        {
+          ...route,
+          condition: { kind: 'element_exists', selector: { labelContains: 'Never appears' } },
+          timeoutMs: 100,
+          pollIntervalMs: 100,
+          stableForMs: 100,
+        },
+        { sessionId: 'session-a', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'UI_WAIT_TIMEOUT' });
+    expect(actor.mutationState(instance.instanceId)).toMatchObject({
+      activeSource: null,
+      takeoverPending: false,
+    });
+
+    const postObservationScreen = await host.callTool('get_screen_map', route, {
+      sessionId: 'session-a',
+      origin: 'agent',
+    });
+    if (!postObservationScreen.ok) throw new Error('expected post-observation screen map');
+    screenMap = (
+      postObservationScreen.data as {
         screenMap: { snapshotId: string; elements: Array<{ elementId: string }> };
       }
     ).screenMap;
@@ -2103,7 +2229,11 @@ describe('iOS Simulator host', () => {
     await expect(
       host.callTool('tap', tapArgs, { sessionId: 'session-a', origin: 'agent' }),
     ).resolves.toMatchObject({ ok: true });
-    expect(driver.tap).toHaveBeenCalledWith('wda-session', { x: 70, y: 60 });
+    expect(driver.tap).toHaveBeenCalledWith(
+      'wda-session',
+      { x: 70, y: 60 },
+      expect.any(AbortSignal),
+    );
     await expect(
       host.callTool('tap', tapArgs, { sessionId: 'session-a', origin: 'agent' }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'STALE_UI_SNAPSHOT' });
@@ -2115,7 +2245,11 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true });
-    expect(driver.tap).toHaveBeenLastCalledWith('wda-session', { x: 196.5, y: 213 });
+    expect(driver.tap).toHaveBeenLastCalledWith(
+      'wda-session',
+      { x: 196.5, y: 213 },
+      expect.any(AbortSignal),
+    );
     await expect(
       host.callTool(
         'swipe',
@@ -2320,7 +2454,11 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true });
-    expect(driver.typeText).toHaveBeenLastCalledWith('wda-session', 'Hello');
+    expect(driver.typeText).toHaveBeenLastCalledWith(
+      'wda-session',
+      'Hello',
+      expect.any(AbortSignal),
+    );
     await expect(
       host.callTool('press_home', route, { sessionId: 'session-a', origin: 'user' }),
     ).resolves.toMatchObject({ ok: true });

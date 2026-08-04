@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import type { IOSSimulatorMcpErrorCode } from "../types.js";
+import type {
+  IOSSimulatorMcpErrorCode,
+  IOSSimulatorToolAvailability,
+} from "../types.js";
 
 export type IOSSimulatorToolContentBlock = { type: "text"; text: string };
 
@@ -69,12 +72,30 @@ export class IOSSimulatorToolRegistry {
     } as unknown as IOSSimulatorToolDefinition);
   }
 
-  list(): Array<{ name: string; description: string; readOnly: boolean }> {
+  list(
+    availability: Record<string, IOSSimulatorToolAvailability> = {},
+  ): Array<{
+    name: string;
+    description: string;
+    readOnly: boolean;
+    availability?: IOSSimulatorToolAvailability;
+  }> {
+    const hasAvailability = Object.keys(availability).length > 0;
     return Array.from(this.tools.values()).map(
       ({ name, description, readOnly }) => ({
         name,
         description,
         readOnly,
+        ...(hasAvailability
+          ? {
+              availability:
+                availability[name] ??
+                ({
+                  state: "unavailable",
+                  reasonCode: "TOOL_NOT_REPORTED",
+                } satisfies IOSSimulatorToolAvailability),
+            }
+          : {}),
       }),
     );
   }

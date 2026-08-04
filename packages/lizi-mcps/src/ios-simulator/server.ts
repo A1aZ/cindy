@@ -50,20 +50,29 @@ export function createIOSSimulatorMcpServer(
     "list_tools",
     "Discover Cindy's embedded iOS Simulator tools. This is the preferred entry point for opening, running, testing, or debugging an iOS app in Cindy. Do not use cindy_computer to launch macOS Simulator.app unless the user explicitly requests an external system window. Start with check_environment before selecting a device.",
     { category: z.enum(["ios_simulator"]).optional() },
-    async () => ({
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify({
-            ok: true,
-            category: "ios_simulator",
-            tools: registry.list(),
-            workflow:
-              "Use this embedded viewer workflow: check_environment, then list_devices and either create_instance or attach_device, then start_instance. Build, install, and launch the app through this server. Route mutations with instanceId, generation, and leaseId.",
-          }),
-        },
-      ],
-    }),
+    async () => {
+      const availability = options.getSessionContext
+        ? await deps.describeTools?.({
+            sessionId: options.getSessionContext().sessionId,
+            origin: "agent",
+          })
+        : await deps.describeTools?.({ sessionId: options.sessionId, origin: "agent" });
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              ok: true,
+              category: "ios_simulator",
+              tools: registry.list(availability?.tools),
+              ...(availability ? { availability } : {}),
+              workflow:
+                "Use this embedded viewer workflow: check_environment, then list_devices and either create_instance or attach_device, then start_instance. Build, install, and launch the app through this server. Route mutations with instanceId, generation, and leaseId.",
+            }),
+          },
+        ],
+      };
+    },
   );
   server.tool(
     "call_tool",

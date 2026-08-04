@@ -60,6 +60,8 @@ import type {
   IOSSimulatorMcpDeps,
   IOSSimulatorMcpErrorCode,
   IOSSimulatorMcpToolName,
+  IOSSimulatorToolAvailability,
+  IOSSimulatorToolAvailabilityReport,
 } from '@cindy/mcps';
 
 import type {
@@ -154,6 +156,7 @@ export interface IOSSimulatorHost {
   /** Stop host-owned WDA/recording resources without changing simulator ownership. */
   dispose(): Promise<void>;
   reconcileOwnership(): Promise<void>;
+  describeTools(sessionId: string): Promise<IOSSimulatorToolAvailabilityReport>;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   callTool(
     name: IOSSimulatorMcpToolName,
@@ -1059,6 +1062,351 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     });
   }
 
+  async function describeToolsForSession(
+    sessionId: string,
+    environment?: IOSSimulatorEnvironmentReport,
+  ): Promise<IOSSimulatorToolAvailabilityReport> {
+    const inspected = environment ?? (await runtime.inspect());
+    const instances = actor.list(sessionId);
+    const running = instances
+      .map((instance) => ({ instance, driver: getDriverManager().get(instance.instanceId) }))
+      .filter((entry) => entry.driver !== null);
+    const capabilityReports = running
+      .map((entry) => entry.driver?.driverRouter?.capabilityReport?.())
+      .filter((report): report is NonNullable<typeof report> => Boolean(report));
+    const hasNativeInput = capabilityReports.some(
+      (report) => report.routes.continuousInput.selected === 'native-sidecar' && !report.routes.continuousInput.fallback,
+    );
+    const hasMultiTouch = capabilityReports.some(
+      (report) => report.nativeSidecar.capabilities?.multiTouch === true && report.nativeSidecar.available,
+    );
+    const hasInstance = instances.length > 0;
+    const hasRunning = running.length > 0;
+    const requiresInstance: IOSSimulatorToolAvailability = {
+      state: hasInstance ? (hasRunning ? 'available' : 'instance-dependent') : 'requires-instance',
+      ...(hasInstance ? {} : { reasonCode: 'INSTANCE_REQUIRED' }),
+    };
+    const tools: Record<string, IOSSimulatorToolAvailability> = {
+      check_environment: { state: 'available', backend: 'host' },
+      doctor: { state: 'available', backend: 'host' },
+      list_devices: inspected.ready
+        ? { state: 'available', backend: 'simctl' }
+        : { state: 'unavailable', reasonCode: inspected.issue ?? 'ENVIRONMENT_NOT_READY' },
+      list_instances: { state: 'available', backend: 'host' },
+      create_instance: inspected.ready
+        ? { state: 'available', backend: 'simctl' }
+        : { state: 'unavailable', reasonCode: inspected.issue ?? 'ENVIRONMENT_NOT_READY' },
+      attach_device: inspected.ready
+        ? { state: 'available', backend: 'host' }
+        : { state: 'unavailable', reasonCode: inspected.issue ?? 'ENVIRONMENT_NOT_READY' },
+      start_instance: { ...requiresInstance, backend: 'simctl' },
+      stop_instance: { ...requiresInstance, backend: 'simctl' },
+      detach_device: { ...requiresInstance, backend: 'host' },
+      get_screen_map: { ...requiresInstance, backend: 'wda' },
+      audit_accessibility: { ...requiresInstance, backend: 'wda' },
+      compare_screen_maps: { ...requiresInstance, backend: 'wda' },
+      wait_for_ui: { ...requiresInstance, backend: 'wda' },
+      tap: { ...requiresInstance, backend: hasNativeInput ? 'native-hid' : 'wda' },
+      swipe: { ...requiresInstance, backend: hasNativeInput ? 'native-hid' : 'wda' },
+      drag: { ...requiresInstance, backend: hasNativeInput ? 'native-hid' : 'wda' },
+      long_press: { ...requiresInstance, backend: hasNativeInput ? 'native-hid' : 'wda' },
+      key_press: { ...requiresInstance, backend: 'wda' },
+      batch: { ...requiresInstance, backend: hasNativeInput ? 'native-hid' : 'wda' },
+      touch_path: hasNativeInput
+        ? { state: 'available', backend: 'native-hid' }
+        : {
+            state: hasInstance ? 'unavailable' : 'requires-instance',
+            reasonCode: hasInstance ? 'NATIVE_HID_NOT_ADMITTED' : 'INSTANCE_REQUIRED',
+          },
+      touch2_path: hasMultiTouch
+        ? { state: 'available', backend: 'native-hid' }
+        : {
+            state: hasInstance ? 'unavailable' : 'requires-instance',
+            reasonCode: hasInstance ? 'MULTI_TOUCH_NOT_ADMITTED' : 'INSTANCE_REQUIRED',
+          },
+    };
+    for (const name of [
+      'type_text',
+      'press_home',
+      'set_orientation',
+      'set_appearance',
+      'set_increase_contrast',
+      'set_content_size',
+      'set_location',
+      'start_location_route',
+      'clear_location',
+      'set_privacy',
+      'push_notification',
+      'set_status_bar',
+      'clear_status_bar',
+      'lock_screen',
+      'unlock_screen',
+      'build_app',
+      'read_build_diagnostics',
+      'install_app',
+      'launch_app',
+      'terminate_app',
+      'open_url',
+      'take_screenshot',
+      'capture_visual_baseline',
+      'visual_diff',
+      'capture_state',
+      'get_diagnostics',
+      'start_recording',
+      'stop_recording',
+    ]) {
+      tools[name] = { ...requiresInstance, backend: name === 'build_app' ? 'host' : 'wda' };
+    }
+    return {
+      ready: inspected.ready,
+      instanceCount: instances.length,
+      runningInstanceCount: running.length,
+      tools,
+    };
+  }
+
+  function screenMapFingerprint(screenMap: IOSSimulatorScreenMap): string {
+    return createHash('sha256').update(JSON.stringify(screenMap.elements)).digest('hex');
+  }
+
+  function sleepWithAbort(delayMs: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      return Promise.reject(
+        new IOSSimulatorInstanceError('MUTATION_CANCELLED', 'The UI operation was cancelled.', true),
+      );
+    }
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(
+          new IOSSimulatorInstanceError('MUTATION_CANCELLED', 'The UI operation was cancelled.', true),
+        );
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  function elementMatches(
+    element: IOSSimulatorScreenMap['elements'][number],
+    selector: Record<string, unknown>,
+  ): boolean {
+    if (typeof selector.elementId === 'string' && element.elementId !== selector.elementId) {
+      return false;
+    }
+    if (typeof selector.role === 'string' && element.role !== selector.role) return false;
+    if (
+      typeof selector.labelContains === 'string' &&
+      !element.label?.toLocaleLowerCase().includes(selector.labelContains.toLocaleLowerCase())
+    ) {
+      return false;
+    }
+    if (
+      typeof selector.valueContains === 'string' &&
+      !element.value?.toLocaleLowerCase().includes(selector.valueContains.toLocaleLowerCase())
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  function elementPoint(screenMap: IOSSimulatorScreenMap, elementId: string) {
+    const element = screenMap.elements.find((candidate) => candidate.elementId === elementId);
+    if (!element?.frame || element.enabled === false || element.visible === false) {
+      throw new IOSSimulatorInstanceError(
+        'STALE_UI_SNAPSHOT',
+        'The target is no longer interactable. Read a new screen map.',
+        true,
+      );
+    }
+    return {
+      x: element.frame.x + element.frame.width / 2,
+      y: element.frame.y + element.frame.height / 2,
+    };
+  }
+
+  async function waitForUiCondition(input: {
+    instance: IOSSimulatorInstance;
+    running: WdaRunningInstance;
+    condition: Record<string, unknown>;
+    timeoutMs: number;
+    pollIntervalMs: number;
+    stableForMs: number;
+    signal: AbortSignal;
+    throwOnTimeout: boolean;
+  }): Promise<{
+    screenMap: IOSSimulatorScreenMap;
+    elapsedMs: number;
+    stable: boolean;
+    timedOut: boolean;
+  }> {
+    const startedAt = Date.now();
+    let previousFingerprint: string | null = null;
+    let stableSince = startedAt;
+    let lastScreenMap: IOSSimulatorScreenMap | null = null;
+    let baselineFingerprint: string | null = null;
+    const kind = readString(input.condition, 'kind');
+    if (kind === 'screen_changed') {
+      const baseline = screenMaps.requireCurrent({
+        instanceId: input.instance.instanceId,
+        generation: input.instance.generation,
+        snapshotId: readString(input.condition, 'snapshotId'),
+      });
+      baselineFingerprint = screenMapFingerprint(baseline);
+    }
+    while (true) {
+      const screenMap = await refreshInteractionSnapshot(input.instance, input.running);
+      lastScreenMap = screenMap;
+      const fingerprint = screenMapFingerprint(screenMap);
+      const now = Date.now();
+      if (fingerprint !== previousFingerprint) {
+        previousFingerprint = fingerprint;
+        stableSince = now;
+      }
+      let matched = false;
+      if (kind === 'element_exists' || kind === 'element_missing') {
+        const selector = readObject(input.condition, 'selector');
+        const exists = screenMap.elements.some((element) => elementMatches(element, selector));
+        matched = kind === 'element_exists' ? exists : !exists;
+      } else if (kind === 'screen_changed') {
+        matched = fingerprint !== baselineFingerprint;
+      } else if (kind === 'screen_stable') {
+        matched = now - stableSince >= input.stableForMs;
+      } else {
+        throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'Unsupported UI wait condition.');
+      }
+      if (matched) {
+        return {
+          screenMap,
+          elapsedMs: now - startedAt,
+          stable: kind === 'screen_stable',
+          timedOut: false,
+        };
+      }
+      if (now - startedAt >= input.timeoutMs) {
+        if (input.throwOnTimeout) {
+          throw new IOSSimulatorInstanceError(
+            'UI_WAIT_TIMEOUT',
+            'The requested UI condition did not become true before the timeout.',
+            true,
+          );
+        }
+        return {
+          screenMap: lastScreenMap,
+          elapsedMs: now - startedAt,
+          stable: false,
+          timedOut: true,
+        };
+      }
+      await sleepWithAbort(input.pollIntervalMs, input.signal);
+    }
+  }
+
+  async function observeAfterInteraction(
+    instance: IOSSimulatorInstance,
+    running: WdaRunningInstance,
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+  ) {
+    const mode = args.observeAfter === undefined ? 'none' : readString(args, 'observeAfter');
+    if (mode === 'none') return null;
+    if (mode === 'immediate') {
+      return {
+        mode,
+        screenMap: await refreshInteractionSnapshot(instance, running),
+        stable: false,
+        timedOut: false,
+        elapsedMs: 0,
+      };
+    }
+    if (mode !== 'stable') {
+      throw new IOSSimulatorInstanceError(
+        'INVALID_ARGUMENT',
+        'observeAfter must be none, immediate, or stable',
+      );
+    }
+    const observed = await waitForUiCondition({
+      instance,
+      running,
+      condition: { kind: 'screen_stable' },
+      timeoutMs: readPositiveInteger(args, 'observeTimeoutMs'),
+      pollIntervalMs: 100,
+      stableForMs: readPositiveInteger(args, 'stableForMs'),
+      signal,
+      throwOnTimeout: false,
+    });
+    return { mode, ...observed };
+  }
+
+  async function performSwipe(
+    instance: IOSSimulatorInstance,
+    running: WdaRunningInstance,
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    durationMs: number,
+    signal: AbortSignal,
+  ): Promise<'native-hid' | 'wda'> {
+    const nativeInput = running.driverRouter?.continuousInput();
+    if (nativeInput && durationMs >= 8) {
+      const viewport =
+        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+      await nativeInput.touchPath(nativeSwipePath(start, end, durationMs, viewport), signal);
+      return 'native-hid';
+    }
+    await running.driver.swipe(running.driverSessionId, start, end, durationMs, signal);
+    return 'wda';
+  }
+
+  async function performLongPress(
+    instance: IOSSimulatorInstance,
+    running: WdaRunningInstance,
+    point: { x: number; y: number },
+    durationMs: number,
+    signal: AbortSignal,
+  ): Promise<'native-hid' | 'wda'> {
+    const nativeInput = running.driverRouter?.continuousInput();
+    if (nativeInput) {
+      const viewport =
+        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+      const normalized = normalizedPointFromViewport(point, viewport);
+      await nativeInput.touchPath(
+        [
+          { ...normalized, phase: 'down', dtMs: 0, edge: 'none' },
+          { ...normalized, phase: 'up', dtMs: durationMs, edge: 'none' },
+        ],
+        signal,
+      );
+      return 'native-hid';
+    }
+    await running.driver.swipe(running.driverSessionId, point, point, durationMs, signal);
+    return 'wda';
+  }
+
+  const webDriverKeys: Record<string, string> = {
+    return: '\uE007',
+    tab: '\uE004',
+    escape: '\uE00C',
+    delete: '\uE017',
+    arrow_up: '\uE013',
+    arrow_down: '\uE015',
+    arrow_left: '\uE012',
+    arrow_right: '\uE014',
+  };
+
+  async function performKeyPress(
+    running: WdaRunningInstance,
+    key: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const value = webDriverKeys[key];
+    if (!value) throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'Unsupported key.');
+    await running.driver.typeText(running.driverSessionId, value, signal);
+  }
+
   function pointFromViewer(
     args: Record<string, unknown>,
     viewerViewport: IOSSimulatorPublicViewport,
@@ -1338,6 +1686,22 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
 
   return {
     reconcileOwnership: reconcilePersistedOwnership,
+    async describeTools(sessionId) {
+      const resolved = await resolveSession(sessionId);
+      if (!resolved.ok) {
+        return {
+          ready: false,
+          instanceCount: 0,
+          runningInstanceCount: 0,
+          tools: {
+            doctor: { state: 'available', backend: 'host' },
+            check_environment: { state: 'available', backend: 'host' },
+            list_devices: { state: 'unavailable', reasonCode: resolved.errorCode },
+          },
+        };
+      }
+      return describeToolsForSession(resolved.sessionId);
+    },
     getStatus: inspectForSession,
     async setViewerVisibility(sessionId, route, visible, preferredEncoding = 'jpeg') {
       try {
@@ -1745,6 +2109,25 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           });
           return { ok: true, data: captured };
         }
+        if (name === 'wait_for_ui') {
+          const route = readMutationRoute(sessionId, args);
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
+            requireControlGrant(instance, context);
+            const running = requireDriver(instance.instanceId);
+            const condition = readObject(args, 'condition');
+            return waitForUiCondition({
+              instance,
+              running,
+              condition,
+              timeoutMs: readPositiveInteger(args, 'timeoutMs'),
+              pollIntervalMs: readPositiveInteger(args, 'pollIntervalMs'),
+              stableForMs: readPositiveInteger(args, 'stableForMs'),
+              signal,
+              throwOnTimeout: true,
+            });
+          });
+          return { ok: true, data: captured };
+        }
         if (name === 'audit_accessibility') {
           const route = readMutationRoute(sessionId, args);
           const maxViolations =
@@ -1786,7 +2169,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (name === 'tap') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance, signal) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             const elementId = typeof args.elementId === 'string' ? args.elementId.trim() : '';
@@ -1796,20 +2179,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 context?.origin === 'user'
                   ? await refreshInteractionSnapshot(instance, running)
                   : requireAgentInteractionSnapshot(instance, args);
-              const element = screenMap.elements.find(
-                (candidate) => candidate.elementId === elementId,
-              );
-              if (!element?.frame || element.enabled === false || element.visible === false) {
-                throw new IOSSimulatorInstanceError(
-                  'STALE_UI_SNAPSHOT',
-                  'The target is no longer interactable. Read a new screen map.',
-                  true,
-                );
-              }
-              point = {
-                x: element.frame.x + element.frame.width / 2,
-                y: element.frame.y + element.frame.height / 2,
-              };
+              point = elementPoint(screenMap, elementId);
             } else if (context?.origin === 'user') {
               const { viewer, driver } = await currentViewports(running);
               point = pointFromViewer(args, viewer, driver, 'xRatio', 'yRatio');
@@ -1833,15 +2203,26 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 signal,
               );
             } else {
-              await running.driver.tap(running.driverSessionId, point);
+              await running.driver.tap(running.driverSessionId, point, signal);
             }
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: nativeInput ? 'native-hid' : 'wda',
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'tap', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'tap',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
         }
         if (name === 'swipe') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance, signal) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             const viewport = context?.origin === 'user' ? await currentViewports(running) : null;
@@ -1867,26 +2248,214 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                   y: readFiniteCoordinate(args, 'endY'),
                 };
             const durationMs = readPositiveInteger(args, 'durationMs');
-            const nativeInput = running.driverRouter?.continuousInput();
-            if (nativeInput && durationMs >= 8) {
-              const nativeViewport =
-                viewport?.driver ??
-                driverViewports.get(instance.instanceId) ??
-                (await readDriverViewport(running));
-              await nativeInput.touchPath(
-                nativeSwipePath(start, end, durationMs, nativeViewport),
-                signal,
-              );
-            } else {
-              await running.driver.swipe(running.driverSessionId, start, end, durationMs, signal);
-            }
+            const backend = await performSwipe(instance, running, start, end, durationMs, signal);
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'swipe', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'swipe',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
+        }
+        if (name === 'drag') {
+          const route = readMutationRoute(sessionId, args);
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
+            requireControlGrant(instance, context);
+            const running = requireDriver(instance.instanceId);
+            const screenMap =
+              context?.origin === 'user'
+                ? await refreshInteractionSnapshot(instance, running)
+                : requireAgentInteractionSnapshot(instance, args);
+            const start = elementPoint(screenMap, readString(args, 'fromElementId'));
+            const end = elementPoint(screenMap, readString(args, 'toElementId'));
+            const backend = await performSwipe(
+              instance,
+              running,
+              start,
+              end,
+              readPositiveInteger(args, 'durationMs'),
+              signal,
+            );
+            screenMaps.invalidate(instance.instanceId);
+            return {
+              backend,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
+          });
+          return {
+            ok: true,
+            data: {
+              interaction: 'drag',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
+        }
+        if (name === 'long_press') {
+          const route = readMutationRoute(sessionId, args);
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
+            requireControlGrant(instance, context);
+            const running = requireDriver(instance.instanceId);
+            const screenMap =
+              context?.origin === 'user'
+                ? await refreshInteractionSnapshot(instance, running)
+                : requireAgentInteractionSnapshot(instance, args);
+            const point = elementPoint(screenMap, readString(args, 'elementId'));
+            const backend = await performLongPress(
+              instance,
+              running,
+              point,
+              readPositiveInteger(args, 'durationMs'),
+              signal,
+            );
+            screenMaps.invalidate(instance.instanceId);
+            return {
+              backend,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
+          });
+          return {
+            ok: true,
+            data: {
+              interaction: 'long_press',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
+        }
+        if (name === 'key_press') {
+          const route = readMutationRoute(sessionId, args);
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
+            requireControlGrant(instance, context);
+            const running = requireDriver(instance.instanceId);
+            if (context?.origin !== 'user') requireAgentInteractionSnapshot(instance, args);
+            await performKeyPress(running, readString(args, 'key'), signal);
+            screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: 'wda' as const,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
+          });
+          return {
+            ok: true,
+            data: {
+              interaction: 'key_press',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
+        }
+        if (name === 'batch') {
+          const route = readMutationRoute(sessionId, args);
+          const actions = args.actions;
+          if (!Array.isArray(actions) || actions.length === 0 || actions.length > 16) {
+            throw new IOSSimulatorInstanceError(
+              'INVALID_ARGUMENT',
+              'actions must contain between 1 and 16 UI actions',
+            );
+          }
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
+            requireControlGrant(instance, context);
+            const running = requireDriver(instance.instanceId);
+            let screenMap =
+              context?.origin === 'user'
+                ? await refreshInteractionSnapshot(instance, running)
+                : requireAgentInteractionSnapshot(instance, args);
+            const completed: Array<{ index: number; type: string; backend: string }> = [];
+            for (const [index, rawAction] of actions.entries()) {
+              const action = rawAction as Record<string, unknown>;
+              const type = readString(action, 'type');
+              let backend = 'wda';
+              if (type === 'tap') {
+                const point = elementPoint(screenMap, readString(action, 'elementId'));
+                const nativeInput = running.driverRouter?.continuousInput();
+                if (nativeInput) {
+                  const viewport =
+                    driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+                  const normalized = normalizedPointFromViewport(point, viewport);
+                  await nativeInput.touchPath(
+                    [
+                      { ...normalized, phase: 'down', dtMs: 0, edge: 'none' },
+                      { ...normalized, phase: 'up', dtMs: 8, edge: 'none' },
+                    ],
+                    signal,
+                  );
+                  backend = 'native-hid';
+                } else {
+                  await running.driver.tap(running.driverSessionId, point, signal);
+                }
+              } else if (type === 'swipe') {
+                backend = await performSwipe(
+                  instance,
+                  running,
+                  {
+                    x: readFiniteCoordinate(action, 'startX'),
+                    y: readFiniteCoordinate(action, 'startY'),
+                  },
+                  {
+                    x: readFiniteCoordinate(action, 'endX'),
+                    y: readFiniteCoordinate(action, 'endY'),
+                  },
+                  readPositiveInteger(action, 'durationMs'),
+                  signal,
+                );
+              } else if (type === 'drag') {
+                backend = await performSwipe(
+                  instance,
+                  running,
+                  elementPoint(screenMap, readString(action, 'fromElementId')),
+                  elementPoint(screenMap, readString(action, 'toElementId')),
+                  readPositiveInteger(action, 'durationMs'),
+                  signal,
+                );
+              } else if (type === 'long_press') {
+                backend = await performLongPress(
+                  instance,
+                  running,
+                  elementPoint(screenMap, readString(action, 'elementId')),
+                  readPositiveInteger(action, 'durationMs'),
+                  signal,
+                );
+              } else if (type === 'type_text') {
+                const text = action.text;
+                if (typeof text !== 'string' || text.length > 10_000) {
+                  throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'Invalid batch text.');
+                }
+                await running.driver.typeText(running.driverSessionId, text, signal);
+              } else if (type === 'key_press') {
+                await performKeyPress(running, readString(action, 'key'), signal);
+              } else {
+                throw new IOSSimulatorInstanceError(
+                  'INVALID_ARGUMENT',
+                  `Unsupported batch action: ${type}`,
+                );
+              }
+              screenMaps.invalidate(instance.instanceId);
+              screenMap = await refreshInteractionSnapshot(instance, running);
+              completed.push({ index, type, backend });
+            }
+            const observation = await observeAfterInteraction(instance, running, args, signal);
+            return { completed, observation: observation ?? { mode: 'immediate', screenMap } };
+          });
+          return {
+            ok: true,
+            data: {
+              interaction: 'batch',
+              screenMapInvalidated: false,
+              ...captured,
+            },
+          };
         }
         if (name === 'touch_path') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance, signal) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
@@ -1907,12 +2476,23 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               signal,
             );
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: 'native-hid' as const,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'touch_path', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'touch_path',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
         }
         if (name === 'touch2_path') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance, signal) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
@@ -1934,12 +2514,23 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               signal,
             );
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: 'native-hid' as const,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'touch2_path', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'touch2_path',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
         }
         if (name === 'type_text') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
@@ -1952,23 +2543,45 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'text must be a string of at most 10000 characters',
               );
             }
-            await running.driver.typeText(running.driverSessionId, text);
+            await running.driver.typeText(running.driverSessionId, text, signal);
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: 'wda' as const,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'type_text', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'type_text',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
         }
         if (name === 'press_home') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
               requireAgentInteractionSnapshot(instance, args);
             }
-            await running.driver.home();
+            await running.driver.home(signal);
             screenMaps.invalidate(instance.instanceId);
+            return {
+              backend: 'wda' as const,
+              observation: await observeAfterInteraction(instance, running, args, signal),
+            };
           });
-          return { ok: true, data: { interaction: 'press_home', screenMapInvalidated: true } };
+          return {
+            ok: true,
+            data: {
+              interaction: 'press_home',
+              screenMapInvalidated: !Boolean(captured.observation),
+              ...captured,
+            },
+          };
         }
         if (name === 'set_orientation') {
           const route = readMutationRoute(sessionId, args);
@@ -2736,6 +3349,46 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (name === 'check_environment') {
           return { ok: true, data: publicEnvironment(environment) };
         }
+        if (name === 'doctor') {
+          const availability = await describeToolsForSession(sessionId, environment);
+          const instances = actor.list(sessionId).map((instance) => {
+            const driver = getDriverManager().get(instance.instanceId);
+            const diagnostics = getDriverManager().diagnostics?.(instance.instanceId);
+            return {
+              instance: publicInstance(instance),
+              running: Boolean(driver),
+              mutation: actor.mutationState(instance.instanceId),
+              capabilityReport: diagnostics?.capabilityReport ?? null,
+              nativeSidecar: publicNativeSidecarDiagnostics(diagnostics?.nativeSidecar),
+              logTail: publicDriverLogTail(diagnostics?.logTail ?? ''),
+            };
+          });
+          const recommendedActions: string[] = [];
+          if (!environment.ready) recommendedActions.push('check_environment');
+          if (environment.ready && instances.length === 0) {
+            recommendedActions.push('list_devices', 'create_instance_or_attach_device');
+          }
+          if (instances.some((entry) => !entry.running)) recommendedActions.push('start_instance');
+          if (
+            instances.some(
+              (entry) =>
+                entry.running &&
+                entry.capabilityReport?.routes.continuousInput.fallback === true,
+            )
+          ) {
+            recommendedActions.push('continue_with_wda_mjpeg_fallback');
+          }
+          return {
+            ok: true,
+            data: {
+              environment: publicEnvironment(environment),
+              availability,
+              resource: { runningCount: resourceScheduler.runningCount(), hardLimit: 4 },
+              instances,
+              recommendedActions,
+            },
+          };
+        }
         if (!environment.ready) {
           const safeEnvironment = publicEnvironment(environment);
           return {
@@ -2954,6 +3607,32 @@ export function getIOSSimulatorMcpDeps(
 ): IOSSimulatorMcpDeps {
   const host = options.host ?? defaultIOSSimulatorHost;
   return {
+    describeTools: async (context) => {
+      const sessionId = context?.sessionId?.trim();
+      if (!sessionId) {
+        return {
+          ready: false,
+          instanceCount: 0,
+          runningInstanceCount: 0,
+          tools: {
+            doctor: { state: 'unavailable', reasonCode: 'SESSION_CONTEXT_REQUIRED' },
+            check_environment: { state: 'unavailable', reasonCode: 'SESSION_CONTEXT_REQUIRED' },
+          },
+        };
+      }
+      if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled()) {
+        return {
+          ready: false,
+          instanceCount: 0,
+          runningInstanceCount: 0,
+          tools: {
+            doctor: { state: 'unavailable', reasonCode: 'IOS_SIMULATOR_DISABLED' },
+            check_environment: { state: 'unavailable', reasonCode: 'IOS_SIMULATOR_DISABLED' },
+          },
+        };
+      }
+      return host.describeTools(sessionId);
+    },
     callTool: async (name, args, context) => {
       if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled()) {
         return {

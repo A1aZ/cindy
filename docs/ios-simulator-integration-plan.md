@@ -8,7 +8,7 @@
 >
 > 适用平台：macOS
 >
-> 更新时间：2026-07-25
+> 更新时间：2026-08-04
 
 ## 0. 当前实施状态
 
@@ -263,33 +263,92 @@ MiniSim 是 Swift/AppKit 菜单栏应用。它通过 `xcrun simctl list ... -j` 
 | 最多 4 个 pane         | Phase 3 才有多实例         | 保持 Phase 3 实施，但从 Phase 1 起数据模型和 UI registry 不假设 singleton device |
 | 截图/录屏到 Desktop    | `cindy-media`              | 保持 Cindy 专属差异，所有持久媒体进总仓                                          |
 
-## 6. 已验证技术边界
+### 5.6 插件化、MCP 与 Host Capability 的边界
 
-### 6.1 Apple 官方工具能做什么
+Cindy 的 MCP 是 Agent 调用宿主能力的结构化入口，但它不是模拟器画面传输层，也不是
+Sidecar 的生命周期 owner。插件化设计应把工作流和垂直交互与宿主级原生能力分开。
 
-`simctl` 适合：
+#### 5.6.1 Cindy 当前 MCP 的调用链
 
-- list/create/clone/boot/bootstatus/shutdown/delete/erase。
-- install/uninstall/launch/terminate/openurl。
-- privacy、push、location、status bar、appearance 等设备状态操作。
-- screenshot 和 video record。
+当前 iOS Simulator 能力由 Cindy Host 注册并注入 Agent-facing MCP provider：
 
-`xcodebuild` 适合：
+~~~text
+Agent
+  ↓  cindy_ios_simulator MCP
+Lizi MCP server / tool registry
+  ↓  带 sessionId 的结构化请求
+Cindy Desktop main host
+  ↓  ownership / lease / device grant / generation / admission
+WDA 或 Native Sidecar
+  ↓
+CoreSimulator device
+~~~
 
-- project/workspace/scheme/configuration/destination 构建。
-- test 和 `.xcresult` 产出。
-- 构建日志与错误定位。
+cindy_ios_simulator 由 Host 创建并绑定当前 Session。它通过 list_tools 暴露稳定的
+设备工作流，再通过 call_tool 调用经过 registry 校验的具体工具。请求包含当前 Session
+上下文；设备 mutation 还必须携带 instance、generation 和 lease，不能由模型自行指定一个
+任意设备或绕过 Host policy。
 
-它们不直接提供：
+因此，Agent 可以通过这个 MCP 请求：
 
-- 通用的 tap、swipe、输入文本、Home 等交互 API。
-- 可嵌入 Electron 的实时 Simulator surface。
-- Session 归属和多实例仲裁。
+- 检查环境、列出设备、创建或 attach instance；
+- 启动、停止、解绑和恢复 Simulator instance；
+- build、install、launch、terminate、open URL；
+- 获取 screen map、截图和诊断；
+- 执行 tap、swipe、文本输入、Home、连续单指和双指 HID。
 
-### 6.2 截图轮询不能当实时流
+这些动作最终都进入 Desktop main 的同一个 Host 状态机；右侧栏 UI 不会另起一套生命周期。
 
-本机 Xcode 26.4、1206×2622 PNG 的 `simctl io screenshot` 实测约 7.3 FPS。该数字只说明可以用于低频快照或极低资源预览，不能满足流畅的人机协同：
+#### 5.6.2 MCP、Host IPC 与 Native Sidecar 的分工
 
+三条链路职责不同：
+
+| 层 | 负责什么 | 不负责什么 |
+| --- | --- | --- |
+| Agent-facing MCP | 工具发现、参数校验、结构化调用和业务错误 | 不直接读 IOSurface、不拥有设备、不执行 Sidecar |
+| Host service / typed IPC | Session ownership、grant、admission、生命周期、恢复、WDA/Sidecar 选择；向 Renderer 推送状态和媒体帧 | 不把原始宿主路径、token 或 Sidecar 句柄暴露给插件/Agent |
+| Native Sidecar protocol | Host 与 Swift helper 的 stdio framed transport；IOSurface capture、VideoToolbox H.264、native HID | 不决定是否可信、不决定是否准入、不直接服务模型 |
+
+H.264 和 JPEG 不通过 MCP 传输。MCP 返回操作结果或短诊断；持续媒体由 Main 的 frame pump
+经 typed IPC 送到 Renderer，再由 Renderer 解码/显示。点击和滑动也不是 MCP 自己模拟
+出来的：Agent 通过 MCP 发出结构化 mutation，Host 根据 capability route 选择 WDA 语义
+操作或 Native HID。
+
+#### 5.6.3 与插件的边界
+
+推荐的混合形态是：
+
+~~~text
+Cindy Host
+├── IOSSimulatorCapabilitySlot
+├── ownership / lease / grant / lifecycle / recovery
+├── WDA + MJPEG fallback
+├── Native Sidecar + IOSurface / H.264 / HID
+├── artifact trust / sandbox / admission
+└── 内嵌右侧 Simulator panel
+
+可选 iOS 工作流插件
+├── build/debug/performance Skills
+├── Xcode／构建／测试工具的 MCP 配置
+├── workflow prompts、诊断模板和项目约定
+├── 可选浏览器 preview adapter
+└── 可选 Sidecar artifact candidate（只能交给 Host 验证）
+~~~
+
+插件负责工作流、工具声明、结构化 UI 和项目适配；Host 负责通用且必须受控的原生能力。
+插件可以携带外部工具文件或 Sidecar candidate，但不能自行执行它们，也不能把
+source: plugin 当成可信证明。Host 必须在启动前重新验证签名、摘要、架构以及 Xcode/iOS
+runtime 的精确兼容矩阵，再决定是否授予 H.264、连续 HID 或其它 capability。
+
+插件禁用、升级、卸载和崩溃只调用 Host 的 provider/supervisor 生命周期入口。Sidecar
+artifact 的最终执行权、设备 ownership、媒体传输、权限和恢复都不下放给插件沙箱。
+
+结论：不要把完整 iOS Simulator runtime 塞进 .cindy 插件。将来可以把 iOS 开发工作流
+做成官方插件，但 Cindy 的内嵌画面、低延迟点击/拖动和原生生命周期必须继续由 Host-owned
+capability slot 提供。
+
+本节是 Phase 4E 的产品边界补充：Phase 4E 抽象的是 Host capability provider、artifact
+resolver、admission policy 与 supervisor，不意味着把完整 native runtime 移入插件沙箱。
 - PNG 编码、文件 IO 和 Electron 解码成本过高。
 - 输入后的视觉反馈延迟明显。
 - 多实例时资源消耗线性放大。
@@ -956,6 +1015,18 @@ MVP 规则：
 | `take_screenshot`         | 显式持久化截图到 `cindy-media`                       |
 | `start_recording`         | 开始显式录屏                                         |
 | `stop_recording`          | 停止并摄入 `cindy-media`                             |
+
+### 13.1.1 稳定性扩展工具与动作契约
+
+在 MVP 工具之上，Host 已提供一组面向 Agent 的确定性稳定性能力：
+
+- `doctor`：一次有界诊断，汇总环境、实例归属、driver/capability、资源状态、脱敏日志尾部和下一步建议；不返回端口、绝对路径、token 或 private framework 细节。
+- `wait_for_ui`：按 `element_exists`、`element_missing`、`screen_changed` 或 `screen_stable` 轮询无障碍 screen map；有超时和 takeover AbortSignal，超时返回稳定的 `UI_WAIT_TIMEOUT`。
+- `observeAfter`：`tap`、`swipe`、`touch_path`、`touch2_path`、`type_text`、`press_home`、`drag`、`long_press` 和 `key_press` 可选择 `none`、`immediate` 或有界 `stable` 观察，并在成功时返回新的 screen map。
+- 语义动作：`drag` 与 `long_press` 使用 screen map 元素中心点，优先 Native HID、否则 WDA；`key_press` 只接受受限 WebDriver key 集合。
+- `batch`：最多 16 步、只允许 tap/swipe/drag/long_press/type_text/key_press；固定同一 instance/generation/lease，每步刷新 screen map，首个失败立即停止，不包含生命周期、构建、权限或文件操作。
+
+`list_tools` 在 MCP 和 Codex dynamic gateway 两条入口都带 Host 计算出的 capability availability（`available`、`requires-instance`、`instance-dependent`、`unavailable` 以及 backend/reasonCode）。availability 只用于发现和解释，最终执行仍由 Host 的 ownership、lease、generation 和 admission policy 再次校验。
 
 Agent 对设备的控制、install/launch、tap/type 和模型截图在首次使用设备时必须先经过 UI 的 per-device consent；授权操作本身不暴露给 Agent 工具。用户拒绝后，pane 的查看和手动输入仍可用，Agent mutation 返回 `DEVICE_CONTROL_NOT_GRANTED`。`build_app` 与 `open_url` 还要分别经过现有 Session permission mode，设备授权不能替代它们。
 

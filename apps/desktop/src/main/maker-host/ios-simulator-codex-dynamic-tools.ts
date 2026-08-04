@@ -141,10 +141,15 @@ export function createIOSSimulatorCodexDynamicToolProvider(options: {
             false,
           );
         }
+        const availability = await options.deps.describeTools?.({
+          sessionId: context.sessionId,
+          origin: 'agent',
+        });
         return textResponse({
           ok: true,
           category: 'ios_simulator',
-          tools: registry.list(),
+          tools: registry.list(availability?.tools),
+          ...(availability ? { availability } : {}),
           workflow:
             'Use this embedded viewer workflow: check_environment, then list_devices and either create_instance or attach_device, then start_instance. Build, install, and launch the app through this gateway. Route mutations with instanceId, generation, and leaseId.',
         });

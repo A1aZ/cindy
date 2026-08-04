@@ -59,6 +59,75 @@ async function callHost(
   }
 }
 
+const observeAfterShape = {
+  observeAfter: z.enum(["none", "immediate", "stable"]).default("none"),
+  observeTimeoutMs: z.number().int().min(100).max(15_000).default(3_000),
+  stableForMs: z.number().int().min(100).max(2_000).default(300),
+};
+
+const uiElementConditionShape = {
+  elementId: z.string().min(1).max(128).optional(),
+  role: z.string().min(1).max(128).optional(),
+  labelContains: z.string().min(1).max(500).optional(),
+  valueContains: z.string().min(1).max(500).optional(),
+};
+
+const uiElementCondition = z
+  .object(uiElementConditionShape)
+  .strict()
+  .refine((value) => Object.values(value).some((entry) => entry !== undefined), {
+    message: "At least one element selector is required.",
+  });
+
+const waitCondition = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("element_exists"), selector: uiElementCondition }).strict(),
+  z.object({ kind: z.literal("element_missing"), selector: uiElementCondition }).strict(),
+  z.object({ kind: z.literal("screen_changed"), snapshotId: z.string().uuid() }).strict(),
+  z.object({ kind: z.literal("screen_stable") }).strict(),
+]);
+
+const keyName = z.enum([
+  "return",
+  "tab",
+  "escape",
+  "delete",
+  "arrow_up",
+  "arrow_down",
+  "arrow_left",
+  "arrow_right",
+]);
+
+const batchAction = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("tap"), elementId: z.string().min(1).max(128) }).strict(),
+  z
+    .object({
+      type: z.literal("swipe"),
+      startX: z.number().finite().nonnegative().max(1_000_000),
+      startY: z.number().finite().nonnegative().max(1_000_000),
+      endX: z.number().finite().nonnegative().max(1_000_000),
+      endY: z.number().finite().nonnegative().max(1_000_000),
+      durationMs: z.number().int().min(50).max(10_000).default(300),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("drag"),
+      fromElementId: z.string().min(1).max(128),
+      toElementId: z.string().min(1).max(128),
+      durationMs: z.number().int().min(100).max(10_000).default(500),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("long_press"),
+      elementId: z.string().min(1).max(128),
+      durationMs: z.number().int().min(300).max(10_000).default(750),
+    })
+    .strict(),
+  z.object({ type: z.literal("type_text"), text: z.string().max(10_000) }).strict(),
+  z.object({ type: z.literal("key_press"), key: keyName }).strict(),
+]);
+
 export function registerIOSSimulatorTools(
   registry: IOSSimulatorToolRegistry,
   deps: IOSSimulatorMcpDeps,
@@ -72,6 +141,14 @@ export function registerIOSSimulatorTools(
     inputShape: {},
     handler: async () =>
       callHost(deps, "check_environment", {}, getContext?.()),
+  });
+  registry.register({
+    name: "doctor",
+    description:
+      "Run one bounded Host diagnosis for the current Cindy session, including environment, ownership, drivers, admitted capabilities, tool availability, and recommended next actions.",
+    readOnly: true,
+    inputShape: {},
+    handler: async () => callHost(deps, "doctor", {}, getContext?.()),
   });
   registry.register({
     name: "list_devices",
@@ -226,6 +303,20 @@ export function registerIOSSimulatorTools(
       callHost(deps, "compare_screen_maps", args, getContext?.()),
   });
   registry.register({
+    name: "wait_for_ui",
+    description:
+      "Wait for one bounded accessibility condition without fixed sleeps, then return a fresh screen map.",
+    readOnly: true,
+    inputShape: {
+      ...routeShape,
+      condition: waitCondition,
+      timeoutMs: z.number().int().min(100).max(30_000).default(10_000),
+      pollIntervalMs: z.number().int().min(100).max(2_000).default(250),
+      stableForMs: z.number().int().min(100).max(2_000).default(300),
+    },
+    handler: async (args) => callHost(deps, "wait_for_ui", args, getContext?.()),
+  });
+  registry.register({
     name: "tap",
     description:
       "Tap an element from the current screen map, or explicit device coordinates as a fallback.",
@@ -234,6 +325,7 @@ export function registerIOSSimulatorTools(
       elementId: z.string().min(1).max(128).optional(),
       x: z.number().finite().nonnegative().max(1_000_000).optional(),
       y: z.number().finite().nonnegative().max(1_000_000).optional(),
+      ...observeAfterShape,
     },
     handler: async (args) => callHost(deps, "tap", args, getContext?.()),
   });
@@ -248,8 +340,58 @@ export function registerIOSSimulatorTools(
       endX: z.number().finite().nonnegative().max(1_000_000),
       endY: z.number().finite().nonnegative().max(1_000_000),
       durationMs: z.number().int().min(50).max(60_000).default(300),
+      ...observeAfterShape,
     },
     handler: async (args) => callHost(deps, "swipe", args, getContext?.()),
+  });
+  registry.register({
+    name: "drag",
+    description:
+      "Drag from one element in the current screen map to another using native HID when admitted and WDA otherwise.",
+    inputShape: {
+      ...snapshotRouteShape,
+      fromElementId: z.string().min(1).max(128),
+      toElementId: z.string().min(1).max(128),
+      durationMs: z.number().int().min(100).max(10_000).default(500),
+      ...observeAfterShape,
+    },
+    handler: async (args) => callHost(deps, "drag", args, getContext?.()),
+  });
+  registry.register({
+    name: "long_press",
+    description:
+      "Long-press an element from the current screen map for a bounded duration.",
+    inputShape: {
+      ...snapshotRouteShape,
+      elementId: z.string().min(1).max(128),
+      durationMs: z.number().int().min(300).max(10_000).default(750),
+      ...observeAfterShape,
+    },
+    handler: async (args) => callHost(deps, "long_press", args, getContext?.()),
+  });
+  registry.register({
+    name: "key_press",
+    description:
+      "Send one bounded WebDriver keyboard key to the currently focused control.",
+    inputShape: {
+      ...snapshotRouteShape,
+      key: keyName,
+      ...observeAfterShape,
+    },
+    handler: async (args) => callHost(deps, "key_press", args, getContext?.()),
+  });
+  registry.register({
+    name: "batch",
+    description:
+      "Run up to 16 low-risk UI actions against one instance route, stopping on the first failure and returning a final observation.",
+    inputShape: {
+      ...snapshotRouteShape,
+      actions: z.array(batchAction).min(1).max(16),
+      observeAfter: z.enum(["immediate", "stable"]).default("stable"),
+      observeTimeoutMs: z.number().int().min(100).max(15_000).default(3_000),
+      stableForMs: z.number().int().min(100).max(2_000).default(300),
+    },
+    handler: async (args) => callHost(deps, "batch", args, getContext?.()),
   });
   const touchSampleShape = z.object({
     phase: z.enum(["down", "move", "up", "cancel"]),
@@ -265,6 +407,7 @@ export function registerIOSSimulatorTools(
       ...snapshotRouteShape,
       points: z.array(touchSampleShape).min(2).max(4_096),
       edge: z.enum(["none", "left", "top", "bottom", "right"]).default("none"),
+      ...observeAfterShape,
     },
     handler: async (args) => callHost(deps, "touch_path", args, getContext?.()),
   });
@@ -276,6 +419,7 @@ export function registerIOSSimulatorTools(
       ...snapshotRouteShape,
       first: z.array(touchSampleShape).min(2).max(4_096),
       second: z.array(touchSampleShape).min(2).max(4_096),
+      ...observeAfterShape,
     },
     handler: async (args) =>
       callHost(deps, "touch2_path", args, getContext?.()),
@@ -286,6 +430,7 @@ export function registerIOSSimulatorTools(
     inputShape: {
       ...snapshotRouteShape,
       text: z.string().max(10_000),
+      ...observeAfterShape,
     },
     handler: async (args) => callHost(deps, "type_text", args, getContext?.()),
   });
@@ -293,7 +438,7 @@ export function registerIOSSimulatorTools(
     name: "press_home",
     description:
       "Press the simulated Home button after observing the current screen map.",
-    inputShape: snapshotRouteShape,
+    inputShape: { ...snapshotRouteShape, ...observeAfterShape },
     handler: async (args) => callHost(deps, "press_home", args, getContext?.()),
   });
   registry.register({

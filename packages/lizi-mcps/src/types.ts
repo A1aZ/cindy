@@ -725,8 +725,28 @@ export type IOSSimulatorMcpErrorCode =
   | "ORIENTATION_UNSUPPORTED"
   | "IOS_SIMULATOR_HOST_ERROR";
 
+export type IOSSimulatorToolAvailabilityState =
+  | "available"
+  | "requires-instance"
+  | "instance-dependent"
+  | "unavailable";
+
+export interface IOSSimulatorToolAvailability {
+  state: IOSSimulatorToolAvailabilityState;
+  reasonCode?: string;
+  backend?: "wda" | "native-hid" | "simctl" | "host";
+}
+
+export interface IOSSimulatorToolAvailabilityReport {
+  ready: boolean;
+  instanceCount: number;
+  runningInstanceCount: number;
+  tools: Record<string, IOSSimulatorToolAvailability>;
+}
+
 export type IOSSimulatorMcpToolName =
   | "check_environment"
+  | "doctor"
   | "list_devices"
   | "list_instances"
   | "create_instance"
@@ -737,8 +757,13 @@ export type IOSSimulatorMcpToolName =
   | "get_screen_map"
   | "audit_accessibility"
   | "compare_screen_maps"
+  | "wait_for_ui"
   | "tap"
   | "swipe"
+  | "drag"
+  | "long_press"
+  | "key_press"
+  | "batch"
   | "touch_path"
   | "touch2_path"
   | "type_text"
@@ -783,6 +808,9 @@ export interface IOSSimulatorMcpDeps {
     args: Record<string, unknown>,
     context?: IOSSimulatorMcpCallContext,
   ): Promise<unknown>;
+  describeTools?(
+    context?: IOSSimulatorMcpCallContext,
+  ): Promise<IOSSimulatorToolAvailabilityReport>;
   logger?: LiziMcpLogger;
 }
 

@@ -967,6 +967,32 @@ describe('PluginMarketService migration and defaultInstall', () => {
     },
   );
 
+  it('purges when the ledger provenance digest matches the installed package', async () => {
+    const notice = removal();
+    const h = harness([], [notice]);
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-installed-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(manifest()));
+    runtime.ghosts = [{ ...ghostEntry(notice.ghostId), dir: installDir }];
+    mockUninstallDropsGhost();
+    h.ledger.upsertInstallation(
+      removalRecord({ manifestDigest: ghostManifestDigest(manifest()) }),
+    );
+
+    await expect(h.service.snapshot()).resolves.toMatchObject({
+      unavailableReason: null,
+    });
+
+    expect(runtime.uninstall).toHaveBeenCalledWith(notice.ghostId, {
+      skipMarketLedger: true,
+    });
+    expect(h.ledger.installationForGhost(notice.ghostId)?.installed).toBe(false);
+    expect(h.service.consumeRemovalNotice()).toEqual({
+      count: 1,
+      name: 'Test Plugin',
+    });
+  });
+
   it.each([
     ['missing ledger record', null],
     ['different pluginId', removalRecord({ pluginId: `c${'b'.repeat(24)}` })],
@@ -980,6 +1006,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     ],
     ['already removed record', removalRecord({ installed: false })],
     ['public scope record', removalRecord({ scope: 'public', organizationId: null })],
+    // 记录带溯源摘要但运行时包对不上(此处 ghost.json 不可读=摘要 null):占位的
+    // 已不是市场装的那份包,按 fail-closed 口径不删。
+    ['stale manifest digest', removalRecord({ manifestDigest: 'f'.repeat(64) })],
   ] as const)(
     'skips a server removal with %s without touching the ledger',
     async (_label, record) => {

@@ -1506,10 +1506,8 @@ export class PluginMarketService {
       try {
         const removed = await this.withMutation(removal.pluginId, async () => {
           requireSameMarketOwner(owner);
-          const reason = ledgerGateReason(
-            ledger.installationForGhost(removal.ghostId),
-            removal,
-          );
+          const record = ledger.installationForGhost(removal.ghostId);
+          const reason = ledgerGateReason(record, removal);
           if (reason) return skip(removal, reason);
 
           ghostsById ??= new Map(
@@ -1517,6 +1515,17 @@ export class PluginMarketService {
           );
           const installed = ghostsById.get(removal.ghostId);
           if (!installed) return skip(removal, 'runtime-not-installed');
+          // 溯源摘要闸:账本记录只证明"市场装过这个 ghostId",不证明现在占位的
+          // 还是那份包——本地 .cindy 可原位替换,替换不写市场账本。摘要对不上
+          // (含 ghost.json 读不出)即视为非服务端安装,不删,与更新路径/连接授权
+          // 的 fail-closed 判据同口径。缺摘要的存量记录放行:被下架的插件已不在
+          // 目录里,digest 迁移永远补不上,fail-closed 会让老安装的合法清理永久失效。
+          if (
+            record?.manifestDigest != null &&
+            installedGhostRawManifestDigest(installed.dir) !== record.manifestDigest
+          ) {
+            return skip(removal, 'manifest-digest-mismatch');
+          }
 
           await uninstallGhostAndCleanup(removal.ghostId, { skipMarketLedger: true });
           await this.withCapturedLedgerMutation(ledger, () => {

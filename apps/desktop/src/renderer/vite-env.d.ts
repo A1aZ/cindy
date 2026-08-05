@@ -1407,6 +1407,25 @@ interface ElectronAPI {
         url: string;
       }) => void,
     ) => () => void;
+    /**
+     * agent 槽 schedule 加档:插件请求打开自动化创建面板并预填。
+     * main 已做资格审 / 文本净化截断 / 频率钳制 / 限速;身份三件套由 main 按
+     * 已装清单填(不信沙箱自报)。**只开面板** —— 任务由用户选模型后亲手保存。
+     *
+     * 投递是**单窗口**的:main 只投一个挂了完整主壳的窗口(打断式操作广播出去会让
+     * 每个窗口都跳页弹表单)。独立的插件面板窗 / 右侧栏窗收不到本推送。
+     */
+    onScheduleDraft: (
+      callback: (payload: {
+        requestId: string;
+        ghostId: string;
+        ghostName: string;
+        iconDataUrl?: string;
+        name: string;
+        prompt: string;
+        intervalMs?: number;
+      }) => void,
+    ) => () => void;
     /** 运行时状态快照(错误接管态首帧数据源)。 */
     runtimeStates: () => Promise<{ states: Record<string, string> }>;
     /** 面板错误态「重载意识」:清熔断记账 + 重新拉起沙箱。 */

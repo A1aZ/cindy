@@ -46,6 +46,7 @@ describe('buildDesktopCapabilityRoutingPolicy', () => {
     const routes = buildDesktopCapabilityRoutingPolicy({
       cindyBrowserEnabled: true,
       codexBrowserUseAvailable: true,
+      codexBrowserUseProvisioned: true,
     }).overrides;
 
     expect(routes).toContainEqual(expect.objectContaining({
@@ -55,10 +56,29 @@ describe('buildDesktopCapabilityRoutingPolicy', () => {
     }));
   });
 
+  it('keeps the node_repl disable when the provisioned companion fails its readiness probe', () => {
+    // Spawn supplied a full node_repl transport (provisioned), then the
+    // session-time Chrome readiness probe failed. The per-thread disable
+    // merges onto the real transport and is required — dropping it would
+    // leave the privileged node_repl surface enabled.
+    const policy = buildDesktopCapabilityRoutingPolicy({
+      cindyBrowserEnabled: false,
+      codexBrowserUseAvailable: false,
+      codexBrowserUseProvisioned: true,
+    });
+
+    const nodeReplRoute = policy.overrides.find(
+      (route) => route.source.surface === 'mcp' && route.source.id === 'node_repl',
+    );
+    expect(nodeReplRoute).toMatchObject({ invocation: 'disabled' });
+    expect(nodeReplRoute?.replacement).toBeUndefined();
+  });
+
   it('fails closed without claiming a replacement when neither browser runtime is available', () => {
     const policy = buildDesktopCapabilityRoutingPolicy({
       cindyBrowserEnabled: false,
       codexBrowserUseAvailable: false,
+      codexBrowserUseProvisioned: false,
     });
     const routes = policy.overrides.filter(
       (route) =>
@@ -83,6 +103,7 @@ describe('buildDesktopCapabilityRoutingPolicy', () => {
     const policy = buildDesktopCapabilityRoutingPolicy({
       cindyBrowserEnabled: true,
       codexBrowserUseAvailable: false,
+      codexBrowserUseProvisioned: false,
     });
 
     expect(policy.overrides.some(

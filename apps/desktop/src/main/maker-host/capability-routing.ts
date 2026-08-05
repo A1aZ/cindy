@@ -194,15 +194,20 @@ const CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES = CODEX_CHROME_USE_OVERRIDES.map(
  * entry only when the verified Browser companion was provisioned; without it,
  * the per-thread `mcp_servers.node_repl.enabled=false` override synthesizes a
  * transport-less entry and every thread/start fails with "invalid transport"
- * (-32600). Emit the node_repl MCP route only when the entry exists — when it
- * does not, the capability is already absent and fail-closed holds without
- * the directive.
+ * (-32600). Emit the node_repl MCP route only when the spawn transport exists
+ * — when it does not, the capability is already absent and fail-closed holds
+ * without the directive.
+ *
+ * The gate is spawn-time provisioning, NOT session-time availability: a
+ * provisioned companion whose Chrome readiness probe failed still has the
+ * full node_repl transport in its spawn config, so the disable both merges
+ * cleanly and is required to keep the privileged surface off.
  */
 function withoutUnprovisionedNodeReplRoute(
   overrides: readonly CapabilityRouteOverride[],
-  codexBrowserUseAvailable: boolean | undefined,
+  codexBrowserUseProvisioned: boolean | undefined,
 ): CapabilityRouteOverride[] {
-  if (codexBrowserUseAvailable === true) return [...overrides];
+  if (codexBrowserUseProvisioned === true) return [...overrides];
   return overrides.filter(
     (override) =>
       !(override.source.surface === 'mcp' && override.source.id === 'node_repl'),
@@ -215,7 +220,14 @@ export function buildDesktopCapabilityRoutingPolicy(opts: {
   cindyComputerAvailable?: boolean;
   /** Workspace-scoped Cindy Browser ownership snapshot. */
   cindyBrowserEnabled?: boolean;
+  /** Session-time snapshot: companion provisioned AND Chrome currently ready. */
   codexBrowserUseAvailable?: boolean;
+  /**
+   * Spawn-time snapshot: the verified companion supplied a full node_repl
+   * transport to this app-server. Gates the mcp node_repl route (a per-thread
+   * disable is only valid — and only needed — when the entry exists).
+   */
+  codexBrowserUseProvisioned?: boolean;
   /** Remote Codex cannot invoke the local Cindy Browser plugin bridge. */
   remoteHostId?: string | null;
 }): CapabilityRoutingPolicy {
@@ -232,12 +244,12 @@ export function buildDesktopCapabilityRoutingPolicy(opts: {
     : cindyBrowserEnabled
     ? withoutUnprovisionedNodeReplRoute(
         CODEX_CHROME_USE_OVERRIDES,
-        opts.codexBrowserUseAvailable,
+        opts.codexBrowserUseProvisioned,
       )
     : opts.codexBrowserUseAvailable === false
       ? withoutUnprovisionedNodeReplRoute(
           CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES,
-          opts.codexBrowserUseAvailable,
+          opts.codexBrowserUseProvisioned,
         )
       : [];
   return {

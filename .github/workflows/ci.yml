@@ -84,6 +84,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 默认 unit tier 会排除 migration 测试,而 CI 的常规安装也会跳过 Electron
+      # 二进制。只有相关路径变化时才补下载锁定 runtime,强制跑真实 .asar 复制回归。
+      - name: Run Electron ASAR migration regression
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          CINDY_REQUIRE_ELECTRON_RUNTIME_TEST: '1'
+          ELECTRON_OVERRIDE_DIST_PATH: ''
+          ELECTRON_SKIP_BINARY_DOWNLOAD: ''
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --quiet "$PR_BASE_SHA"...HEAD -- \
+            .github/workflows/ci.yml \
+            package.json \
+            pnpm-lock.yaml \
+            apps/desktop/package.json \
+            apps/desktop/vite.main.config.ts \
+            apps/desktop/vitest.config.ts \
+            apps/desktop/src/main/legacyUserDataMigration.ts \
+            apps/desktop/src/main/__tests__/legacyUserDataMigration.test.ts; then
+            echo "Electron ASAR migration paths unchanged; skipping runtime regression."
+            exit 0
+          fi
+          pnpm rebuild electron
+          pnpm --filter desktop exec vitest run src/main/__tests__/legacyUserDataMigration.test.ts
+
       # XDT_SKIP_AGENT_BIN_INSTALL 跳过了 postinstall 的全部 agent 二进制,但
       # runtime-configs.ts 模块顶层的 bundledRipgrepDir() 缺 rg 时直接 throw,
       # 会让 apps/desktop 单测在收集阶段全挂——ripgrep 必须单独装回来。

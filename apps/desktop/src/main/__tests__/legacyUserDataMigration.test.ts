@@ -30,6 +30,13 @@ const electronResourcesDir = process.platform === 'darwin'
   : path.join(path.dirname(electronPath), 'resources');
 const electronAsarFixture = path.join(electronResourcesDir, 'default_app.asar');
 const hasElectronRuntime = existsSync(electronPath) && existsSync(electronAsarFixture);
+const requireElectronRuntime = process.env.CINDY_REQUIRE_ELECTRON_RUNTIME_TEST === '1';
+
+if (requireElectronRuntime && !hasElectronRuntime) {
+  throw new Error(
+    'CINDY_REQUIRE_ELECTRON_RUNTIME_TEST requires an installed Electron runtime and default_app.asar',
+  );
+}
 
 /** 内存 fs 假体:Map 存文件(内容 + mtime),Set 存目录/符号链接;merge 复制不覆盖。 */
 function createMemFs() {

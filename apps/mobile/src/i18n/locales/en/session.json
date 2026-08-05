@@ -167,6 +167,8 @@
     "selectWorktreeBranchA11y": "Select the worktree source branch. Current: {{branch}}",
     "worktreeBranchesLoading": "Loading branches…",
     "worktreeBranchSaving": "Syncing the selected branch…",
+    "worktreeBranchSyncFailed": "Could not confirm the saved source branch — retry the branch selection",
+    "worktreeSettingsSaving": "Syncing the worktree setting…",
     "worktreeBranchesRetry": "Could not load branches. Tap to retry",
     "worktreeDetecting": "Detecting environment…",
     "worktreeRecovering": "Reconnecting and retrying automatically…",

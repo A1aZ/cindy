@@ -126,7 +126,12 @@ describe('NewMakerDraftRoute worktree send flow', () => {
     expect(reservationGuard).toBeGreaterThan(retainedGuard);
     expect(worktreeCreate).toBeGreaterThan(reservationGuard);
     expect(worktreeCreate).toBeGreaterThan(retainedGuard);
-    expect(source.slice(worktreeCreate, worktreeCreate + 420)).toContain('recoveryKey,');
+    const createRequest = source.lastIndexOf(
+      'const createRequest: RemoteWorktreeCreateRequest = {',
+      worktreeCreate,
+    );
+    expect(createRequest).toBeGreaterThan(reservationGuard);
+    expect(source.slice(createRequest, worktreeCreate)).toContain('recoveryKey,');
     expect(ledgerRegistration).toBeGreaterThan(worktreeCreate);
     expect(source.slice(ledgerRegistration, ledgerRegistration + 220)).toContain('deviceId,');
   });

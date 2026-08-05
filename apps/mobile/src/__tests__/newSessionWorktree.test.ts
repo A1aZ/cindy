@@ -13,9 +13,14 @@ import type { MobileWorktreeDetectCwdResult } from '@/device-link/mobileMakerTra
 import {
   applyWorktreePreferenceOnHost,
   buildWorktreeCreateRequest,
+  classifyWorktreePreferenceSeed,
   fallbackWorktreeName,
   formatWorktreeCreateFailure,
+  isExactRemoteSessionClaimed,
+  isValidWorktreeBranchPreferenceSnapshot,
+  isWorktreeChannelNotAllowedError,
   normalizeSuggestedWorktreeName,
+  parseWorktreeCreateResult,
   resolveWorktreeEligibility,
   seedWorktreeEnabled,
   shouldBlockNewSessionCreateForWorktree,
@@ -24,6 +29,7 @@ import {
   worktreeEligibilityForTarget,
   worktreeEligibilityCaptionKey,
   worktreeEligibilityFromError,
+  worktreeSourceBranchFromPreference,
   worktreeSourceBranchForTarget,
   type NewSessionWorktreeEligibility,
 } from '@/session/newSessionWorktree';
@@ -156,6 +162,112 @@ describe('worktreeSourceBranchForTarget', () => {
   });
 });
 
+describe('worktreeSourceBranchFromPreference', () => {
+  const eligible: NewSessionWorktreeEligibility = {
+    status: 'eligible',
+    baseRepo: '/repo/a',
+    sourceBranch: 'main',
+  };
+
+  it('uses only the current repo authoritative snapshot', () => {
+    const snapshot = {
+      baseRepo: '/repo/a',
+      sourceBranch: 'feature/host',
+      revision: 7,
+    };
+    expect(isValidWorktreeBranchPreferenceSnapshot(snapshot, '/repo/a')).toBe(true);
+    expect(worktreeSourceBranchFromPreference(snapshot, eligible)).toBe('feature/host');
+  });
+
+  it('GET null, wrong-repo, and malformed snapshots fall back to detect-cwd instead of stale selection', () => {
+    expect(worktreeSourceBranchFromPreference(null, eligible)).toBe('main');
+    expect(worktreeSourceBranchFromPreference({
+      baseRepo: '/repo/other',
+      sourceBranch: 'stale',
+      revision: 8,
+    }, eligible)).toBe('main');
+    expect(worktreeSourceBranchFromPreference({
+      baseRepo: '/repo/a',
+      sourceBranch: '',
+      revision: 8,
+    }, eligible)).toBe('main');
+    expect(isValidWorktreeBranchPreferenceSnapshot({
+      baseRepo: '/repo/a',
+      sourceBranch: 'feature/x',
+      revision: -1,
+    }, '/repo/a')).toBe(false);
+  });
+});
+
+describe('isExactRemoteSessionClaimed', () => {
+  it('accepts only the exact pre-generated id', async () => {
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => ({ id: 'session-1' })),
+    )).resolves.toBe(true);
+  });
+
+  it('propagates timeout/offline so recovery retains the ledger and never discards blindly', async () => {
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => {
+        throw new Error('INVOKE_TIMEOUT');
+      }),
+    )).rejects.toThrow('INVOKE_TIMEOUT');
+  });
+
+  it('treats explicit NOT_FOUND as unclaimed but rejects malformed or wrong-id ownership replies', async () => {
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => { throw Object.assign(new Error('missing'), { code: 'NOT_FOUND' }); }),
+    )).resolves.toBe(false);
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => { throw new Error('[NOT_FOUND] missing'); }),
+    )).resolves.toBe(false);
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => {
+        throw new Error('Error invoking remote method: Error: [NOT_FOUND] missing');
+      }),
+    )).resolves.toBe(false);
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => {
+        throw new Error(
+          "Error invoking remote method 'local-db:sessions:get': Error: [NOT_FOUND] missing",
+        );
+      }),
+    )).resolves.toBe(false);
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => null),
+    )).rejects.toThrow('Invalid remote session ownership response');
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => undefined),
+    )).rejects.toThrow('Invalid remote session ownership response');
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => ({})),
+    )).rejects.toThrow('Invalid remote session ownership response');
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => ({ id: 'session-2' })),
+    )).rejects.toThrow('Invalid remote session ownership response');
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => { throw new Error('request text happened to contain NOT_FOUND'); }),
+    )).rejects.toThrow('request text happened to contain NOT_FOUND');
+    await expect(isExactRemoteSessionClaimed(
+      'session-1',
+      vi.fn(async () => {
+        throw new Error('proxy context: Error: [NOT_FOUND] incidental');
+      }),
+    )).rejects.toThrow('proxy context: Error: [NOT_FOUND] incidental');
+  });
+});
+
 describe('shouldAcceptWorktreeBranchListResult', () => {
   const targetA = { deviceId: 'dev-a', workingDir: '/repo/a' };
 
@@ -219,6 +331,14 @@ describe('worktreeEligibilityFromError', () => {
   it('未知非瞬时错误→ detect-failed(行保留、开关禁用)', () => {
     expect(worktreeEligibilityFromError(undefined)).toEqual({ status: 'detect-failed' });
   });
+
+  it('only explicit channel-not-allowed errors qualify for compatibility fallback', () => {
+    expect(isWorktreeChannelNotAllowedError(
+      Object.assign(new Error('remote rejected'), { code: 'CHANNEL_NOT_ALLOWED' }),
+    )).toBe(true);
+    expect(isWorktreeChannelNotAllowedError(new Error('INVOKE_TIMEOUT'))).toBe(false);
+    expect(isWorktreeChannelNotAllowedError(new Error('socket closed'))).toBe(false);
+  });
 });
 
 describe('seedWorktreeEnabled', () => {
@@ -232,10 +352,25 @@ describe('seedWorktreeEnabled', () => {
   });
 });
 
+describe('classifyWorktreePreferenceSeed', () => {
+  it('separates explicit booleans, temporarily missing cache fields, and malformed values', () => {
+    expect(classifyWorktreePreferenceSeed({ worktreeEnabled: true })).toEqual({
+      status: 'ready', enabled: true,
+    });
+    expect(classifyWorktreePreferenceSeed({ worktreeEnabled: false })).toEqual({
+      status: 'ready', enabled: false,
+    });
+    expect(classifyWorktreePreferenceSeed(null)).toEqual({ status: 'invalid' });
+    expect(classifyWorktreePreferenceSeed({})).toEqual({ status: 'missing' });
+    expect(classifyWorktreePreferenceSeed({ worktreeEnabled: 1 })).toEqual({ status: 'invalid' });
+    expect(classifyWorktreePreferenceSeed('bad')).toEqual({ status: 'invalid' });
+  });
+});
+
 describe('applyWorktreePreferenceOnHost', () => {
-  it('工作端接受后才更新手机镜像', async () => {
+  it('工作端接受后等待权威回声，不自行更新手机镜像', async () => {
     const order: string[] = [];
-    await applyWorktreePreferenceOnHost({
+    await expect(applyWorktreePreferenceOnHost({
       enabled: true,
       apply: vi.fn(async () => {
         order.push('host');
@@ -243,8 +378,8 @@ describe('applyWorktreePreferenceOnHost', () => {
       mirror: vi.fn(() => {
         order.push('mobile-mirror');
       }),
-    });
-    expect(order).toEqual(['host', 'mobile-mirror']);
+    })).resolves.toBe('accepted');
+    expect(order).toEqual(['host']);
   });
 
   it('工作端写入失败时不改手机镜像', async () => {
@@ -264,12 +399,12 @@ describe('applyWorktreePreferenceOnHost', () => {
       code: 'CHANNEL_NOT_ALLOWED',
     });
     const mirror = vi.fn();
-    await applyWorktreePreferenceOnHost({
+    await expect(applyWorktreePreferenceOnHost({
       enabled: false,
       apply: vi.fn(async () => { throw channelNotAllowed; }),
       mirror,
       allowUnsupportedDisableFallback: true,
-    });
+    })).resolves.toBe('compatibility-mirrored');
     expect(mirror).toHaveBeenCalledWith(false);
 
     mirror.mockClear();
@@ -417,6 +552,46 @@ describe('worktree 名与 create 入参', () => {
       now: 1_750_000_000_000,
     });
     expect(request.name).toMatch(/^auto-[a-z0-9]{1,6}$/);
+  });
+
+  it('only accepts complete request-matching worktree:create responses', () => {
+    const request = {
+      sessionId: 'session-1',
+      baseRepo: '/repo',
+      sourceBranch: 'main',
+      recoveryKey: 'recovery-1',
+    };
+    const success = {
+      ok: true as const,
+      meta: {
+        sessionId: 'session-1',
+        name: 'goal',
+        path: '/repo/.worktrees/goal',
+        baseRepo: '/repo',
+        branch: 'goal',
+        sourceBranch: 'main',
+        createdAt: '2026-08-05T00:00:00.000Z',
+        recoveryKey: 'recovery-1',
+      },
+    };
+    expect(parseWorktreeCreateResult(success, request)).toEqual(success);
+    expect(parseWorktreeCreateResult({ ok: false, error: { kind: 'CONFLICT', message: 'exists' } }, request))
+      .toEqual({ ok: false, error: { kind: 'CONFLICT', message: 'exists' } });
+    for (const malformed of [
+      null,
+      {},
+      { ok: false, error: { kind: 'CONFLICT' } },
+      { ok: false, error: { kind: 'CONFLICT', message: 'exists' }, meta: success.meta },
+      { ok: true, meta: success.meta, error: { kind: 'CONFLICT', message: 'exists' } },
+      { ...success, meta: { ...success.meta, path: '' } },
+      { ...success, meta: { ...success.meta, sessionId: 'other' } },
+      { ...success, meta: { ...success.meta, baseRepo: '/other' } },
+      { ...success, meta: { ...success.meta, sourceBranch: 'develop' } },
+      { ...success, meta: { ...success.meta, recoveryKey: undefined } },
+      { ...success, meta: { ...success.meta, recoveryKey: 'other' } },
+    ]) {
+      expect(parseWorktreeCreateResult(malformed, request)).toBeNull();
+    }
   });
 });
 

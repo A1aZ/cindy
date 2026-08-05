@@ -1082,22 +1082,26 @@ describe('new session worktree wiring (source locks)', () => {
   const newSource = readTextLf(resolve(process.cwd(), 'app/sessions/new.tsx'), 'utf8');
 
   it('runs worktree:create before the optimistic pipeline with the same preset sessionId', () => {
-    const createIdx = newSource.indexOf('maker.worktree.create(buildWorktreeCreateRequest({');
+    const requestIdx = newSource.indexOf('const createRequest = buildWorktreeCreateRequest({');
+    const createIdx = newSource.indexOf('await maker.worktree.create(createRequest)', requestIdx);
+    const parseIdx = newSource.indexOf('parseWorktreeCreateResult(', requestIdx);
     const pipelineIdx = newSource.indexOf('startNewSessionCreation({');
+    expect(requestIdx).toBeGreaterThan(0);
     expect(createIdx).toBeGreaterThan(0);
+    expect(parseIdx).toBeGreaterThan(requestIdx);
     expect(pipelineIdx).toBeGreaterThan(createIdx);
     expect(newSource).toContain('effectiveDraft = { ...effectiveDraft, workingDir: resp.meta.path };');
     expect(newSource).toContain('setError(formatWorktreeCreateFailure(resp.error));');
     // 勾选生效三条件:project 模式 × 用户勾选 × 资格探测通过。
-    expect(newSource).toContain(
-      "if (effectiveDraft.workspaceKind === 'project' && worktreeEnabled && worktreeEligibility.status === 'eligible') {",
-    );
+    expect(newSource).toContain('worktreeIntent.applicable');
+    expect(newSource).toContain('&& worktreeIntent.enabled');
+    expect(newSource).toContain("&& worktreeIntent.eligibility.status === 'eligible'");
   });
 
   it('keeps the workstation-owned preference semantics (seed + explicit write-through)', () => {
     // 播种:openLink + 瞬态重试(app 后台恢复的重连窗口不得把工作端偏好静默播成未勾)。
     expect(newSource).toContain(
-      "if (!selectedDeviceId || deviceLinkStatus !== 'online') return;",
+      "if (!selectedDeviceId || !syncKey || deviceLinkStatus !== 'online') return undefined;",
     );
     expect(newSource).toContain('return maker.getNewMakerDefaults(worktreeSeedAgentKindRef.current);');
     expect(newSource).toContain(
@@ -1109,13 +1113,13 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain(
       'useRemoteNewMakerWorktreePreference(selectedDeviceId)',
     );
-    expect(newSource).toContain('if (enabled === null) return;');
+    expect(newSource).toContain("classification.status === 'missing'");
+    expect(newSource).toContain('worktreeHostSupportsRecoveryKeyDiscard === false');
     expect(newSource).not.toContain(
       'remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, false);',
     );
-    expect(newSource).toMatch(
-      /\}, \[\s*connectionEpoch,\s*deviceLinkStatus,\s*presenceVersion,\s*selectedDeviceId,\s*maker,\s*openLink,\s*\]\);/,
-    );
+    expect(newSource).toContain('worktreePreferenceSyncKey,');
+    expect(newSource).toContain('worktreeSeedRetryNonce,');
     // 显式点击才写穿工作端记忆;工作端接受后才更新手机镜像。
     expect(newSource).toContain('applyWorktreePreferenceOnHost({');
     expect(newSource).toContain('apply: maker.applyNewMakerWorktreePref,');
@@ -1130,14 +1134,14 @@ describe('new session worktree wiring (source locks)', () => {
     // 对话工作区不应被一份与当前创建无关的偏好写入卡住。
     expect(newSource).toContain('&& !worktreeCreateBlocked;');
     expect(newSource).toContain(
-      "applicable: draft.workspaceKind === 'project' && draft.workingDir.trim().length > 0,",
+      'applicable: worktreeApplicable,',
     );
     const createEntry = newSource.indexOf('const create = useCallback(async () => {');
     const createBody = newSource.slice(createEntry, createEntry + 1_200);
     expect(createBody).not.toContain('|| worktreePreferenceSaving');
     expect(createBody).toContain('if (worktreeCreateBlocked) {');
     expect(newSource).toContain('worktreeBranchPreferenceSaving');
-    expect(newSource).toContain('worktreeCreateBlocked && worktreeCaptionKey');
+    expect(newSource).toContain('worktreeCreateBlocked && worktreeControlCaptionKey');
   });
 
   it('re-probes worktree eligibility when the relay or workstation reconnects', () => {
@@ -1170,7 +1174,7 @@ describe('new session worktree wiring (source locks)', () => {
       pendingGuard,
     );
     const worktreeCreate = newSource.indexOf(
-      'maker.worktree.create(buildWorktreeCreateRequest({',
+      'await maker.worktree.create(createRequest)',
       sessionId,
     );
 
@@ -1221,7 +1225,7 @@ describe('new session worktree wiring (source locks)', () => {
       reservation,
     );
     const remoteCreate = newSource.indexOf(
-      'maker.worktree.create(buildWorktreeCreateRequest({',
+      'await maker.worktree.create(createRequest)',
       failedPersistence,
     );
 
@@ -1247,9 +1251,11 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('const worktreeTarget = {');
     expect(newSource).toContain('deviceId: selectedDeviceId ??');
     expect(newSource).toContain('worktreeEligibilityForTarget(worktreeProbe, worktreeTarget)');
-    expect(newSource).toContain('worktreeSourceBranchForTarget(');
+    expect(newSource).toContain('worktreeSourceBranchFromPreference(');
     expect(newSource).toContain('shouldAcceptWorktreeBranchListResult({');
-    expect(newSource).toContain('sourceBranch: worktreeSourceBranch,');
+    expect(newSource).toContain('sourceBranch: worktreeIntent.sourceBranch,');
+    expect(newSource).toContain('const worktreeIntent = captureWorktreeCreateIntent();');
+    expect(newSource).toContain('isWorktreeCreateIntentCurrent(worktreeIntent)');
     expect(newSource).toContain('precreatedWorktree = {');
     expect(newSource).toContain('recoveryKey,');
     expect(newSource).toContain('originalWorkingDir: effectiveDraft.workingDir,');
@@ -1274,6 +1280,64 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('testID="newSession.worktreeToggle"');
     expect(newSource).toContain("t('session.new.worktreeShortLabel')");
     expect(newSource).not.toContain('>worktree</Text>');
+  });
+
+  it('keeps Goal on the same worktree contract as ordinary creation', () => {
+    const goalStart = newSource.indexOf('const createGoalSession = useCallback(');
+    const goalEnd = newSource.indexOf('\n\n  return (', goalStart);
+    const goalBody = newSource.slice(goalStart, goalEnd);
+    const gate = goalBody.indexOf('if (worktreeCreateBlocked) {');
+    const worktreeCreate = goalBody.indexOf(
+      'await maker.worktree.create(createRequest)',
+    );
+    const sessionCreate = goalBody.indexOf('maker.createSession(createOpts)');
+
+    expect(goalStart).toBeGreaterThan(-1);
+    expect(gate).toBeGreaterThan(-1);
+    expect(worktreeCreate).toBeGreaterThan(gate);
+    expect(sessionCreate).toBeGreaterThan(worktreeCreate);
+    expect(goalBody).toContain('id: sessionId,');
+    expect(goalBody).toContain('effectiveDraft = { ...draft, workingDir: response.meta.path };');
+    expect(goalBody).toContain('sessionId: precreatedWorktree!.sessionId');
+    expect(goalBody).toContain('sessionId: precreatedWorktree.sessionId');
+  });
+
+  it('does not couple OFF creation to branch writes, while closing checkbox and branch same-tick races', () => {
+    expect(newSource).toContain('|| (worktreeEnabled && worktreeBranchPreferenceSaving)');
+    expect(newSource).toContain('worktreePreferenceWriteTargetRef.current = targetDeviceId;');
+    expect(newSource).toContain('worktreeBranchPreferenceWriteTargetRef.current = key;');
+    const createStart = newSource.indexOf('const create = useCallback(async () => {');
+    const goalStart = newSource.indexOf('const createGoalSession = useCallback(');
+    expect(newSource.slice(createStart, goalStart)).toContain(
+      'worktreePreferenceWriteTargetRef.current === selectedDeviceId',
+    );
+    expect(newSource.slice(goalStart, goalStart + 2_000)).toContain(
+      'worktreePreferenceWriteTargetRef.current === selectedDeviceId',
+    );
+    expect(newSource.slice(createStart, goalStart)).toContain(
+      'worktreeBranchPreferenceWriteTargetRef.current === worktreeBranchPreferenceKey',
+    );
+    expect(newSource.slice(goalStart, goalStart + 2_500)).toContain(
+      'worktreeBranchPreferenceWriteTargetRef.current === worktreeBranchPreferenceKey',
+    );
+    expect(newSource).toContain('disabled={worktreeCreateBlocked}');
+  });
+
+  it('keeps branch preference GET fail-closed except for explicit old-channel compatibility', () => {
+    const pullStart = newSource.indexOf('const seq = ++worktreeBranchPreferencePullSeqRef.current;');
+    const pullEnd = newSource.indexOf('\n  }, [', pullStart);
+    const pullBody = newSource.slice(pullStart, pullEnd);
+    expect(pullBody).toContain('if (isWorktreeChannelNotAllowedError(err))');
+    expect(pullBody).not.toContain('setWorktreeBranchPreferenceReadyKey(syncKey);\n      });');
+    expect(pullBody).toContain('const newerPush = remoteSessionStore.getNewMakerWorktreeBranchPreference(');
+    expect(pullBody).toContain('worktreeBranchPreferenceReadyKeyRef.current = null;');
+    expect(pullBody).toContain('isValidWorktreeBranchPreferenceSnapshot(snapshot, baseRepo)');
+  });
+
+  it('propagates recovery ownership probe failures instead of treating them as unclaimed', () => {
+    const recoveryCalls = newSource.match(/isExactRemoteSessionClaimed\(/g) ?? [];
+    expect(recoveryCalls).toHaveLength(3); // ordinary + Goal recovery + Goal compensation
+    expect(newSource).not.toContain('return false;\n            }\n          },\n          shouldDefer:');
   });
 
   it('applies the protocol timeout override map to mobile invokes (worktree:create needs 60s)', () => {

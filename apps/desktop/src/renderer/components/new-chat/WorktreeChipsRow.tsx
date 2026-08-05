@@ -8,7 +8,7 @@
  *
  * 状态不变量:**勾选状态只属于用户**——
  *   - 系统/环境因素(切项目、探测结果、播种)永远不改 checkbox;资格不满足只是
- *     禁用 + tooltip,发送时由上层按「勾选 && 合格」静默降级,记忆永不被抹;
+ *     在 OFF 时禁用开启；若已 ON 则保留可见的关闭入口,发送仍由上层 fail closed;
  *   - 唯一改动路径 = 用户点击 checkbox 本体,并写入工作端勾选记忆;
  *   - 分支选择始终只修改 worktree 源分支,永远不联动 checkbox。
  *
@@ -68,7 +68,12 @@ export interface WorktreeChipsRowProps {
   onRecoveryKeyDiscardSupportChange?: (supported: boolean | null) => void;
   onSuggestedNameChange?: (name: string) => void;
   worktreeDisabled?: boolean;
+  /** Shared creation/environment gate for both halves of the joined control. */
   disabled?: boolean;
+  /** Branch preference read/write gate; must not disable the checkbox half. */
+  branchDisabled?: boolean;
+  /** Checkbox preference write gate; must not disable the branch half. */
+  checkboxDisabled?: boolean;
   /**
    * device-link 被控端 deviceId。非空表示 cwd 是被控端路径,git 探测 / 分支列表 /
    * 建议名全部经隧道在被控端执行(本机 git 对远程路径必然误报"不是 git 仓库")。
@@ -107,6 +112,8 @@ export function WorktreeChipsRow({
   onSuggestedNameChange,
   worktreeDisabled,
   disabled,
+  branchDisabled,
+  checkboxDisabled,
   deviceLinkDeviceId,
   deviceLinkReconnectEpoch = 0,
   variant = 'full',
@@ -121,9 +128,15 @@ export function WorktreeChipsRow({
     deviceLinkDeviceId,
     deviceLinkReconnectEpoch,
   );
-  const baseRepo = detect.data?.repoRoot ?? null;
+  const baseRepo =
+    detect.data?.gitInstalled === true &&
+    detect.data.isGitRepo &&
+    !detect.data.isInsideWorktree
+      ? (detect.data.repoRoot ?? null)
+      : null;
 
-  // repoRoot 参与发送侧 worktree 创建，必须在 paint / 下一次用户输入前同步收敛；
+  // 只有明确具备 worktree 资格的仓库才向发送侧提供 repoRoot；linked worktree、非 Git
+  // 目录或探测失败都传 null。发送 / Goal 的 ON 门会据此 fail closed，不能静默降级。
   // useDetectCwd 同时按 {cwd, deviceId} 做 render 阶段 fence，切目标时这里先写 null。
   useLayoutEffect(() => {
     onBaseRepoChange?.(baseRepo);
@@ -147,10 +160,11 @@ export function WorktreeChipsRow({
     return null;
   }, [detect.data, detect.loading, t]);
 
-  const switchDisabled = disabled || worktreeDisabled || !!cantUseReason || detect.loading || !cwd;
+  const environmentDisabled = worktreeDisabled || !!cantUseReason || detect.loading || !cwd;
+  const switchDisabled = disabled || checkboxDisabled || (environmentDisabled && !enabled);
 
   // 状态不变量:这里**没有**任何自动改写 enabled 的 effect——勾选状态只属于用户,
-  // 资格不满足只体现为 checkbox 禁用(switchDisabled)+发送侧「勾选 && 合格」降级。
+  // 资格不满足时 OFF 不能开启；已 ON 必须仍能显式关闭，发送侧同时保留输入并阻塞创建。
 
   const effectiveWorktreeEnabled = enabled && !advancedHidden && !worktreeDisabled;
   // 分支列表懒加载 latch:worktree 未开时不预拉,首次点开分支 chip 菜单才拉,
@@ -161,11 +175,6 @@ export function WorktreeChipsRow({
     deviceLinkDeviceId,
   );
   const suggested = useSuggestName(effectiveWorktreeEnabled ? baseRepo : null, deviceLinkDeviceId);
-
-  useEffect(() => {
-    if (!effectiveWorktreeEnabled || sourceBranch || !branches.current) return;
-    onSourceBranchChange(branches.current);
-  }, [effectiveWorktreeEnabled, sourceBranch, branches.current, onSourceBranchChange]);
 
   const lastNameRef = useRef('');
   useEffect(() => {
@@ -199,9 +208,9 @@ export function WorktreeChipsRow({
   // 分支与 checkbox 独立:未勾时也要回显用户刚选的源分支,否则菜单虽然可点、
   // 选择后却仍显示当前 HEAD,看起来像没有生效。首次未选择时回退当前 checkout。
   const branchLabel = sourceBranch || currentBranch || 'HEAD';
-  const showBranchChip = !advancedHidden && !!detect.data?.isGitRepo;
+  const showBranchChip = !advancedHidden && (enabled || !!detect.data?.isGitRepo);
   // 分支选择与 checkbox 是两条独立轴；仅环境不具备 worktree 资格或创建在途时禁用。
-  const branchInteractive = !switchDisabled;
+  const branchInteractive = !(disabled || branchDisabled || environmentDisabled);
 
   const handleBranchPick = useCallback(
     (picked: string) => {
@@ -238,7 +247,7 @@ export function WorktreeChipsRow({
   ) : null;
 
   // advancedOnly:项目选择交给页面自己的 pill,这里出 [分支 │ ☑ worktree] 联合控件
-  // (cwd 为空 / 非 git 仓库时整体不渲染)。
+  // (cwd 为空时不渲染；环境失效但记忆仍 ON 时保留关闭入口)。
   if (variant === 'advancedOnly') {
     if (advancedHidden) return null;
     return branchWorktree;
@@ -406,7 +415,8 @@ function BranchWorktreeChip({
   const branchSegment = (
     <button
       type="button"
-      disabled={!branchInteractive}
+      aria-disabled={!branchInteractive}
+      tabIndex={branchInteractive ? 0 : -1}
       data-testid="create-agent-branch-chip"
       className={cn(
         'inline-flex h-full min-w-0 items-center transition-colors',

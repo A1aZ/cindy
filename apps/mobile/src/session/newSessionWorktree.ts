@@ -11,6 +11,8 @@
  */
 import type {
   MobileNewMakerDefaults,
+  MobileWorktreeBranchPreferenceSnapshot,
+  MobileWorktreeCreateResult,
   MobileWorktreeDetectCwdResult,
 } from '@/device-link/mobileMakerTransport';
 import { isTransientRemoteError } from '@/device-link/remoteRetry';
@@ -47,6 +49,8 @@ export interface NewSessionWorktreeProbeTarget {
 export interface NewSessionWorktreeProbeSnapshot {
   target: NewSessionWorktreeProbeTarget;
   eligibility: NewSessionWorktreeEligibility;
+  /** Raw host capability, independent from the current cwd's eligibility. */
+  supportsRecoveryKeyDiscard?: boolean;
 }
 
 /** 用户显式选择的源分支只属于发起选择时的设备 + 工作目录，不得跨目标复用。 */
@@ -109,7 +113,86 @@ export function worktreeSourceBranchForTarget(
 }
 
 /**
- * 把工作端 detect-cwd 回包归并为资格状态。判定顺序对齐桌面 WorktreeChipsRow:
+ * Host 的 repo-scoped branch preference 是创建时的权威值。只有形状完整、repo 与
+ * 当前 target-fenced eligibility 一致的快照才可覆盖 detect-cwd 的当前分支；这样
+ * GET(null)、重连清缓存或畸形回包都不会继续沿用组件里上一帧的 selection。
+ */
+export function worktreeSourceBranchFromPreference(
+  snapshot: MobileWorktreeBranchPreferenceSnapshot | null,
+  eligibility: NewSessionWorktreeEligibility,
+): string {
+  if (
+    eligibility.status === 'eligible'
+    && isValidWorktreeBranchPreferenceSnapshot(snapshot, eligibility.baseRepo)
+  ) {
+    return snapshot.sourceBranch.trim();
+  }
+  return eligibility.status === 'eligible'
+    ? eligibility.sourceBranch.trim() || 'HEAD'
+    : 'HEAD';
+}
+
+/** Runtime guard for untrusted Device Link responses. */
+export function isValidWorktreeBranchPreferenceSnapshot(
+  snapshot: unknown,
+  expectedBaseRepo: string,
+): snapshot is MobileWorktreeBranchPreferenceSnapshot {
+  if (!snapshot || typeof snapshot !== 'object') return false;
+  const candidate = snapshot as Partial<MobileWorktreeBranchPreferenceSnapshot>;
+  return typeof candidate.baseRepo === 'string'
+    && candidate.baseRepo.trim() === expectedBaseRepo.trim()
+    && typeof candidate.sourceBranch === 'string'
+    && candidate.sourceBranch.trim().length > 0
+    && typeof candidate.revision === 'number'
+    && Number.isInteger(candidate.revision)
+    && candidate.revision >= 0;
+}
+
+/**
+ * Recovery 在任何破坏性 discard 前必须精确确认 session 未认领。transport 的
+ * timeout/offline/未知错误原样抛给 recoverer，让它保留 ledger 并稍后重试；绝不能
+ * 把“暂时查不到”降级成 false 后删除可能已被活跃 session 使用的 worktree。
+ */
+export async function isExactRemoteSessionClaimed(
+  sessionId: string,
+  getSession: (sessionId: string) => Promise<unknown>,
+): Promise<boolean> {
+  try {
+    const session = await getSession(sessionId);
+    if (
+      !session
+      || typeof session !== 'object'
+      || Array.isArray(session)
+      || (session as { id?: unknown }).id !== sessionId
+    ) {
+      throw new Error('Invalid remote session ownership response');
+    }
+    return true;
+  } catch (error) {
+    if (isExplicitRemoteNotFoundError(error)) return false;
+    throw error;
+  }
+}
+
+/**
+ * Only an exact structured code, or the anchored Electron IPC error prefix,
+ * proves absence. Incidental text containing NOT_FOUND remains unknown.
+ */
+export function isExplicitRemoteNotFoundError(error: unknown): boolean {
+  if (error && typeof error === 'object' && !Array.isArray(error)) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code.trim().toUpperCase() === 'NOT_FOUND') {
+      return true;
+    }
+  }
+  if (!(error instanceof Error)) return false;
+  return /^(?:\[NOT_FOUND\]|Error invoking remote method(?: '[^']+')?: Error: \[NOT_FOUND\])(?:\s|$)/
+    .test(error.message);
+}
+
+/**
+ * 把工作端 detect-cwd 回包归并为资格状态。远程恢复能力先于目录资格：缺少
+ * recoveryKey discard 的旧端无论目录如何都不能进入远程两步创建；新版端再按
  * gitInstalled → isGitRepo → isInsideWorktree 逐项短路。
  * baseRepo 取 repoRoot(工作端 git rev-parse --show-toplevel),缺失回落 workingDir;
  * sourceBranch 先取当前分支，作为移动端分支选择器尚未显式选择时的默认值；
@@ -124,10 +207,10 @@ export function resolveWorktreeEligibility(
   result: MobileWorktreeDetectCwdResult,
   workingDir: string,
 ): NewSessionWorktreeEligibility {
+  if (result.supportsRecoveryKeyDiscard !== true) return { status: 'unsupported' };
   if (!result.gitInstalled) return { status: 'ineligible', reason: 'gitMissing' };
   if (!result.isGitRepo) return { status: 'ineligible', reason: 'notGitRepo' };
   if (result.isInsideWorktree) return { status: 'ineligible', reason: 'alreadyInWorktree' };
-  if (result.supportsRecoveryKeyDiscard !== true) return { status: 'unsupported' };
   return {
     status: 'eligible',
     baseRepo: result.repoRoot?.trim() || workingDir,
@@ -147,7 +230,7 @@ export function resolveWorktreeEligibility(
  * 字符串错误的兜底;同时容忍 relay 包装的 DEVICE_LINK_CHANNEL_NOT_ALLOWED 变体。
  */
 export function worktreeEligibilityFromError(error: unknown): NewSessionWorktreeEligibility {
-  if (isChannelNotAllowedError(error)) return { status: 'unsupported' };
+  if (isWorktreeChannelNotAllowedError(error)) return { status: 'unsupported' };
   // DEVICE_UNRESPONSIVE 是本机熔断器为了阻止原地重试风暴而产出的快速失败，
   // 对页面生命周期仍是可恢复状态：Context 的代表性探测会自动关熔断，本页定时
   // 重探即可，不能把它固化成“目录环境错误”。
@@ -168,10 +251,35 @@ export function seedWorktreeEnabled(
     : null;
 }
 
+export type WorktreePreferenceSeedClassification =
+  | { status: 'ready'; enabled: boolean }
+  | { status: 'missing' }
+  | { status: 'invalid' };
+
 /**
- * 手机只是远程控制器:checkbox 偏好先由工作端接受,再更新手机内存镜像。
- * apply 失败时通常不执行 mirror；唯一例外是老端明确没有偏好 channel，且用户
- * 显式关闭一份阻塞创建的旧 ON 镜像。瞬时错误绝不触发兼容退出。
+ * A populated current host exposes an explicit boolean. An absent field is
+ * ambiguous: it can be an old host or a current host whose renderer-backed
+ * defaults cache has not arrived yet. Callers combine `missing` with the
+ * independently probed recovery capability; malformed values remain invalid.
+ */
+export function classifyWorktreePreferenceSeed(
+  defaults: unknown,
+): WorktreePreferenceSeedClassification {
+  if (defaults === null || defaults === undefined) return { status: 'invalid' };
+  if (typeof defaults !== 'object') return { status: 'invalid' };
+  if (!Object.prototype.hasOwnProperty.call(defaults, 'worktreeEnabled')) {
+    return { status: 'missing' };
+  }
+  const enabled = (defaults as { worktreeEnabled?: unknown }).worktreeEnabled;
+  return typeof enabled === 'boolean'
+    ? { status: 'ready', enabled }
+    : { status: 'invalid' };
+}
+
+/**
+ * 手机只是远程控制器。invoke 成功只证明 Desktop main 已接受并广播，renderer
+ * 仍需落真实草稿并经 push/GET 回声确认；因此成功路径绝不自行改手机镜像。
+ * 唯一例外是老端明确没有偏好 channel，且用户显式关闭阻塞创建的旧 ON 镜像。
  */
 export async function applyWorktreePreferenceOnHost(input: {
   enabled: boolean;
@@ -182,17 +290,19 @@ export async function applyWorktreePreferenceOnHost(input: {
    * 仅 CHANNEL_NOT_ALLOWED + OFF 生效；瞬时失败仍保留 ON 并继续 fail closed。
    */
   allowUnsupportedDisableFallback?: boolean;
-}): Promise<void> {
+}): Promise<'accepted' | 'compatibility-mirrored'> {
   try {
     await input.apply(input.enabled);
+    return 'accepted';
   } catch (error) {
     if (
       input.enabled
       || input.allowUnsupportedDisableFallback !== true
-      || !isChannelNotAllowedError(error)
+      || !isWorktreeChannelNotAllowedError(error)
     ) throw error;
   }
   input.mirror(input.enabled);
+  return 'compatibility-mirrored';
 }
 
 function remoteErrorText(error: unknown): string {
@@ -201,7 +311,12 @@ function remoteErrorText(error: unknown): string {
   return `${typeof code === 'string' ? code : ''} ${message}`;
 }
 
-function isChannelNotAllowedError(error: unknown): boolean {
+/**
+ * Compatibility fallback is allowed only for the explicit channel-not-allowed
+ * boundary. Unknown, transient, or timeout errors must not be treated as a
+ * successful preference read/write.
+ */
+export function isWorktreeChannelNotAllowedError(error: unknown): boolean {
   return remoteErrorText(error).includes('CHANNEL_NOT_ALLOWED');
 }
 
@@ -285,6 +400,54 @@ export interface WorktreeCreateRequest {
   name: string;
   sourceBranch: string;
   recoveryKey: string;
+}
+
+/**
+ * Device Link responses are untrusted. Only a complete, request-matching
+ * result may authorize forgetting the recovery reservation or consuming a
+ * managed path. Any malformed shape remains cleanup-pending.
+ */
+export function parseWorktreeCreateResult(
+  value: unknown,
+  request: Pick<
+    WorktreeCreateRequest,
+    'sessionId' | 'baseRepo' | 'sourceBranch' | 'recoveryKey'
+  >,
+): MobileWorktreeCreateResult | null {
+  if (!value || typeof value !== 'object') return null;
+  const candidate = value as {
+    ok?: unknown;
+    meta?: Record<string, unknown>;
+    error?: Record<string, unknown>;
+  };
+  if (candidate.ok === false) {
+    if (candidate.meta !== undefined) return null;
+    const error = candidate.error;
+    if (
+      !error
+      || typeof error.kind !== 'string'
+      || !error.kind.trim()
+      || typeof error.message !== 'string'
+      || !error.message.trim()
+    ) return null;
+    if (error.hint !== undefined && typeof error.hint !== 'string') return null;
+    if (error.rawStderr !== undefined && typeof error.rawStderr !== 'string') return null;
+    return value as MobileWorktreeCreateResult;
+  }
+  if (candidate.ok !== true || !candidate.meta || candidate.error !== undefined) return null;
+  const meta = candidate.meta;
+  for (const field of ['sessionId', 'name', 'path', 'baseRepo', 'branch', 'sourceBranch', 'createdAt']) {
+    if (typeof meta[field] !== 'string' || !(meta[field] as string).trim()) return null;
+  }
+  if ((meta.sessionId as string) !== request.sessionId) return null;
+  if ((meta.baseRepo as string).trim() !== request.baseRepo.trim()) return null;
+  if ((meta.sourceBranch as string).trim() !== request.sourceBranch.trim()) return null;
+  // This parser is only used by the remote two-step flow, whose eligibility
+  // already requires recovery-key support. A missing key therefore cannot be
+  // treated as a compatible success: without the exact echo we cannot prove
+  // which persisted reservation owns this managed directory.
+  if (typeof meta.recoveryKey !== 'string' || meta.recoveryKey !== request.recoveryKey) return null;
+  return value as MobileWorktreeCreateResult;
 }
 
 /** 组装 worktree:create 入参(第一步;第二步 createSession 复用同 sessionId + meta.path)。 */

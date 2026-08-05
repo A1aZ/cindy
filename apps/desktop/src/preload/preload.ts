@@ -3156,6 +3156,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openPath: (filePathOrUrl: string): Promise<{ success: boolean; error?: string }> =>
     ipcRenderer.invoke('shell:open-path', filePathOrUrl),
 
+  // 文件 chip 右键「打开方式」。appId 只能是 listOpenWithApps 返回的 id,
+  // main 侧反查可执行体;renderer 无法让 main 执行任意路径。
+  listOpenWithApps: (params: {
+    filePath: string;
+  }): Promise<{
+    success: boolean;
+    apps: Array<{ id: string; label: string; iconDataUrl?: string }>;
+    error?: string;
+  }> => ipcRenderer.invoke('open-with:list', params),
+  openFileWithApp: (params: { filePath: string; appId: string }): Promise<void> =>
+    ipcRenderer.invoke('open-with:open', params),
+
   // 危险本地附件入托盘前先复制成受控缓存里的 `.bin` 副本。显示名仍由
   // renderer 单独保留，后续只能经“另存为”恢复原始扩展名。
   stageChatAttachment: (params: {

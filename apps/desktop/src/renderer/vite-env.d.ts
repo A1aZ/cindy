@@ -2554,6 +2554,18 @@ interface ElectronAPI {
    */
   openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
 
+  /**
+   * 文件 chip 右键「打开方式」:枚举可打开该文件的应用(Windows 注册表;
+   * 其余平台空列表)。appId 只在 main 侧映射到可执行体,renderer 原样回传。
+   */
+  listOpenWithApps: (params: { filePath: string }) => Promise<{
+    success: boolean;
+    apps: Array<{ id: string; label: string; iconDataUrl?: string }>;
+    error?: string;
+  }>;
+  /** 用 listOpenWithApps 返回的 appId 指定应用打开文件;失败以 IPC 错误抛出。 */
+  openFileWithApp: (params: { filePath: string; appId: string }) => Promise<void>;
+
   /** Copy a dangerous local attachment into the controlled inert cache. */
   stageChatAttachment: (params: { sourcePath: string; suggestedName: string }) => Promise<
     | { success: true; path: string }
@@ -2690,7 +2702,12 @@ interface ElectronAPI {
       entries: { name: string; kind: 'dir' | 'symlink'; path: string }[];
       parent: string | null;
     }>;
-    statPath: (path: string) => Promise<{ kind: 'dir' | 'file' | 'missing'; resolvedPath: string }>;
+    statPath: (path: string) => Promise<{
+      kind: 'dir' | 'file' | 'missing';
+      resolvedPath: string;
+      mtimeMs?: number;
+      birthtimeMs?: number;
+    }>;
     mkdirP: (path: string) => Promise<{ resolvedPath: string }>;
   };
 

@@ -252,6 +252,7 @@ import {
   isPathAllowedAgainst,
 } from './filePathPolicy';
 import { readFileThumbnail } from './fileThumbnail';
+import { createOpenWithHandlers, decodeRegOutput, parseChcpCodepage } from './openWithApps';
 import { resolveShellOpenPathTarget } from './shellOpenPath';
 import { handleOpenFileInBrowser } from './openFileInBrowser';
 import { createWindowsFileUrlOpener } from './windowsFileUrlOpener';
@@ -5232,6 +5233,78 @@ const registerIpcHandlers = () => {
     },
   );
 
+  // 文件 chip 右键「打开方式」:枚举 / 指定应用打开 / 系统选择对话框。
+  // 业务体在 openWithApps.ts(依赖注入,单测直接调 handler body);appId → exe
+  // 映射只存 main 侧,renderer 传路径执行在结构上不可表达(该文件头注释)。
+  {
+    // app.getFileIcon 会偶发挂死(见 fileThumbnail.ts),这里同款硬超时 + 按
+    // exe 路径的进程内缓存(打开方式菜单反复展开不重复付原生调用成本)。
+    const appIconCache = new Map<string, string | null>();
+    const getAppIcon = async (exePath: string): Promise<string | null> => {
+      const key = exePath.toLowerCase();
+      const cached = appIconCache.get(key);
+      if (cached !== undefined) return cached;
+      try {
+        const icon = await Promise.race([
+          app.getFileIcon(exePath, { size: 'small' }),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+        ]);
+        const dataUrl = icon && !icon.isEmpty() ? icon.toDataURL() : null;
+        appIconCache.set(key, dataUrl);
+        return dataUrl;
+      } catch {
+        appIconCache.set(key, null);
+        return null;
+      }
+    };
+    // reg.exe 重定向输出走控制台代码页(中文系统 GBK)而非 UTF-8,按字节取回、
+    // 用 chcp 探测到的代码页解码,否则中文应用名会变 U+FFFD 乱码。
+    let consoleCodepagePromise: Promise<number | null> | null = null;
+    const getConsoleCodepage = (): Promise<number | null> => {
+      consoleCodepagePromise ??= new Promise((resolve) => {
+        execFile('chcp.com', { windowsHide: true, timeout: 3000 }, (err, stdout) => {
+          resolve(err ? null : parseChcpCodepage(String(stdout ?? '')));
+        });
+      });
+      return consoleCodepagePromise;
+    };
+    const openWith = createOpenWithHandlers({
+      platform: process.platform,
+      isPathAllowed,
+      fileExists: (p) => fs.existsSync(p),
+      regQuery: async (keyPath, args = []) => {
+        const codepage = await getConsoleCodepage();
+        return new Promise<string>((resolve) => {
+          execFile(
+            'reg.exe',
+            ['query', keyPath, ...args],
+            { windowsHide: true, timeout: 5000, encoding: 'buffer' },
+            (err, stdout) => resolve(err ? '' : decodeRegOutput(stdout ?? Buffer.alloc(0), codepage)),
+          );
+        });
+      },
+      getAppIcon,
+      spawnDetached: (command, args) => {
+        const child = spawn(command, args, { detached: true, stdio: 'ignore', windowsHide: false });
+        // detached 子进程无人监听 'error' 会变成 EventEmitter 未处理错误直接压垮
+        // main(典型:existsSync 通过后 exe 被卸载的窗口期)。spawn 错误是异步的,
+        // IPC 已返回,只能记日志兜底(PR #1835 review)。
+        child.once('error', (err) => {
+          createLogger('open-with').warn('spawn failed', { command, message: err.message });
+        });
+        child.unref();
+      },
+    });
+    ipcMain.handle('open-with:list', (event, params: { filePath: string }) => {
+      assertTrustedAppRendererEvent(event);
+      return openWith.list(params);
+    });
+    ipcMain.handle('open-with:open', (event, params: { filePath: string; appId: string }) => {
+      assertTrustedAppRendererEvent(event);
+      return openWith.open(params);
+    });
+  }
+
   // 安全降级附件“另存为”：源文件必须通过统一路径策略，解析真实路径后还要
   // 位于聊天附件/远程文件缓存内；建议名在 main 侧清洗，复制完成后不调用
   // openPath，避免符号链接越界或恢复原扩展名后被自动执行。
@@ -5434,6 +5507,9 @@ const registerIpcHandlers = () => {
         if (!absPath) {
           return { success: false, error: 'url 或 filePath 必须二选一' };
         }
+        // Windows Explorer /select 不认正斜杠路径(showItemInFolder 会静默无反应),
+        // 归一成本机分隔符;POSIX 幂等。
+        absPath = path.normalize(absPath);
         if (!isPathAllowed(absPath)) {
           return { success: false, error: '不允许访问该路径' };
         }

@@ -305,6 +305,30 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain('wtBranchWriteSeqRef.current');
   });
 
+  it('only commits a branch write after host authority observes that exact requested branch', () => {
+    const branchHandler = newMakerDraftRouteSource.slice(
+      newMakerDraftRouteSource.indexOf('const handleWtSourceBranchChange = useCallback('),
+      newMakerDraftRouteSource.indexOf('const handleWtBaseRepoChange = useCallback('),
+    );
+
+    // A successful invoke is not sufficient: its snapshot must both advance
+    // the revision seen at write start and contain this exact requested branch.
+    expect(branchHandler).toContain('parsedSnapshot!.sourceBranch === normalized');
+    expect(branchHandler).toContain('parsedSnapshot!.revision > revisionAtStart');
+
+    // Both the resolved-invalid-payload and rejected/lost-ACK reconciliation
+    // paths may use a concurrent push, but only when it confirms the same branch.
+    expect((branchHandler.match(/current\.sourceBranch === normalized/g) ?? []).length).toBe(2);
+    expect(branchHandler).not.toContain('armWtBranchCommittedValue(parsedSnapshot!.sourceBranch)');
+    expect(branchHandler).not.toContain('armWtBranchCommittedValue(current.sourceBranch)');
+
+    // A newer authoritative value for another branch remains the retry floor;
+    // it must not release the create fence or replace the user's requested UI.
+    expect(branchHandler).not.toContain('wtBranchSyncRef.current = null;');
+    expect(branchHandler).toContain('setWtSourceBranch(normalized);');
+    expect(branchHandler).toContain('setWtBranchPreferenceError(true);');
+  });
+
   it('creates managed worktrees before starting either local or device-link goals', () => {
     const goal = newMakerDraftRouteSource.slice(
       newMakerDraftRouteSource.indexOf('const handleCreateGoal = useCallback('),

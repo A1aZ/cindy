@@ -2637,8 +2637,13 @@ export function NewMakerDraftRoute() {
       .then((snapshot) => {
         if (writeSeq !== wtBranchWriteSeqRef.current) return;
         const parsedSnapshot = parseDraftWorktreeBranchSnapshot(snapshot);
-        if (acceptWtBranchSnapshot(target, snapshot)) {
-          armWtBranchCommittedValue(parsedSnapshot!.sourceBranch);
+        const accepted = acceptWtBranchSnapshot(target, snapshot);
+        if (
+          accepted
+          && parsedSnapshot!.sourceBranch === normalized
+          && parsedSnapshot!.revision > revisionAtStart
+        ) {
+          armWtBranchCommittedValue(normalized);
           return;
         }
         const current = wtBranchSyncRef.current;
@@ -2647,16 +2652,16 @@ export function NewMakerDraftRoute() {
           && current.deviceId === target.deviceId
           && current.baseRepo === target.baseRepo
           && current.revision > revisionAtStart
-          && current.sourceBranch
+          && current.sourceBranch === normalized
         ) {
-          armWtBranchCommittedValue(current.sourceBranch);
+          armWtBranchCommittedValue(normalized);
           return;
         }
-        // A resolved invoke with an invalid/wrong-target payload is not a
-        // confirmed write. Keep Worktree ON fail-closed and let the branch
-        // half remain interactive for an explicit retry.
-        wtBranchSyncRef.current = null;
-        setWtBranchSync(null);
+        // A newer snapshot for another branch is still useful as the next
+        // retry's revision floor, but it cannot confirm this write. Keep the
+        // requested value visible and Worktree ON fail-closed until the user
+        // explicitly retries and host authority observes this exact branch.
+        setWtSourceBranch(normalized);
         wtBranchPreferenceErrorRef.current = true;
         setWtBranchPreferenceError(true);
       })
@@ -2668,9 +2673,9 @@ export function NewMakerDraftRoute() {
           && current.deviceId === target.deviceId
           && current.baseRepo === target.baseRepo
           && current.revision > revisionAtStart
-          && current.sourceBranch
+          && current.sourceBranch === normalized
         ) {
-          armWtBranchCommittedValue(current.sourceBranch);
+          armWtBranchCommittedValue(normalized);
           return;
         }
         // 只有结构化 CHANNEL_NOT_ALLOWED 才允许旧端兼容：本次选择留在
@@ -2684,6 +2689,7 @@ export function NewMakerDraftRoute() {
           }
           return;
         }
+        setWtSourceBranch(normalized);
         wtBranchPreferenceErrorRef.current = true;
         setWtBranchPreferenceError(true);
       })

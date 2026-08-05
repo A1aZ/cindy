@@ -516,6 +516,8 @@ interface AuthStateChangePayload {
   deviceId: string;
   hasAccountDeletionReceipt: boolean;
   accountDeletionRestored: boolean;
+  /** 持久凭证库(safeStorage)连续多个刷新周期不可用(#1687);旧版 main 不带此字段。 */
+  credentialStoreUnavailable?: boolean;
 }
 
 /**
@@ -1181,6 +1183,11 @@ interface ElectronAPI {
         options: Array<{ id: string; label: string }>;
         defaultModel: { id: string; label: string } | null;
       };
+      /** 向量类(文本转向量):同 image/video 走目录派生。 */
+      embed: {
+        options: Array<{ id: string; label: string }>;
+        defaultModel: { id: string; label: string } | null;
+      };
     };
     /** 写/清一项覆盖(model=null 即恢复跟随默认);返回该意识最新覆盖表。 */
     setCindyPref: (
@@ -1413,6 +1420,25 @@ interface ElectronAPI {
         url: string;
       }) => void,
     ) => () => void;
+    /**
+     * agent 槽 schedule 加档:插件请求打开自动化创建面板并预填。
+     * main 已做资格审 / 文本净化截断 / 频率钳制 / 限速;身份三件套由 main 按
+     * 已装清单填(不信沙箱自报)。**只开面板** —— 任务由用户选模型后亲手保存。
+     *
+     * 投递是**单窗口**的:main 只投一个挂了完整主壳的窗口(打断式操作广播出去会让
+     * 每个窗口都跳页弹表单)。独立的插件面板窗 / 右侧栏窗收不到本推送。
+     */
+    onScheduleDraft: (
+      callback: (payload: {
+        requestId: string;
+        ghostId: string;
+        ghostName: string;
+        iconDataUrl?: string;
+        name: string;
+        prompt: string;
+        intervalMs?: number;
+      }) => void,
+    ) => () => void;
     /** 运行时状态快照(错误接管态首帧数据源)。 */
     runtimeStates: () => Promise<{ states: Record<string, string> }>;
     /** 面板错误态「重载意识」:清熔断记账 + 重新拉起沙箱。 */
@@ -1445,6 +1471,10 @@ interface ElectronAPI {
       options: import('../shared/pluginMarket').PluginMarketInstallOptions,
     ) => Promise<import('../shared/pluginMarket').PluginMarketInstallResult>;
     uninstall: (pluginId: string) => Promise<{ ok: true }>;
+    consumeRemovalNotice: () => Promise<
+      import('../shared/pluginMarket').PluginRemovalUserNotice | null
+    >;
+    onRemovalNoticeAvailable: (callback: () => void) => () => void;
     listSources: () => Promise<import('../shared/pluginMarket').MarketSourceSummary[]>;
     pickLocalSource: (
       defaultPath?: string,
@@ -1792,6 +1822,8 @@ interface ElectronAPI {
     deviceId: string;
     hasAccountDeletionReceipt: boolean;
     accountDeletionRestored: boolean;
+    /** 持久凭证库(safeStorage)连续多个刷新周期不可用(#1687)。 */
+    credentialStoreUnavailable?: boolean;
   }>;
   authGetLoginState: () => Promise<DesktopLoginActionResult>;
   authDispatchLoginAction: (action: DesktopLoginAction) => Promise<DesktopLoginActionResult>;
@@ -1877,6 +1909,7 @@ interface ElectronAPI {
     getStatus: () => Promise<{
       status: DiscordBotTransportStatus;
       ownerUserId: string | null;
+      lifecycleAnnouncement: boolean;
     }>;
     setConfig: (payload: { token: string; ownerUserId: string }) => Promise<{
       status: DiscordBotTransportStatus;
@@ -1885,6 +1918,10 @@ interface ElectronAPI {
     }>;
     disconnect: () => Promise<{
       status: DiscordBotTransportStatus;
+    }>;
+    setLifecycleAnnouncement: (enabled: boolean) => Promise<{
+      ok: boolean;
+      lifecycleAnnouncement: boolean;
     }>;
     checkSessionAuth: () => Promise<DiscordBotSessionAuthCheckResult>;
     onStatusChange: (
@@ -3672,6 +3709,7 @@ interface ElectronAPI {
       sessionId: string;
       workingDir: string | null;
       worktreePath: string | null;
+      remoteHostId?: string | null;
     }) => Promise<import('@/lib/gitContext.types').SessionGitDirResult>;
     watch: (workdir: string) => Promise<void>;
     unwatch: (workdir: string) => Promise<void>;
@@ -5490,6 +5528,8 @@ interface ElectronAPI {
         model?: string;
         /** 绑定会话任务:workingDir 空时 main 按会话 meta.workDir 解析落盘/自测目录。 */
         targetSessionId?: string;
+        /** 绑定任务的缺省模型/来源维度由 targetSessionId 的会话路由补齐。 */
+        resolveBoundSessionRoute?: boolean;
         currentCommand?: string;
       }) => Promise<
         | {

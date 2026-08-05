@@ -332,7 +332,7 @@ describe('NewMakerDraftRoute CREATE AGENT visual contract', () => {
     // currentBranch=null 是合法的 detached HEAD，不等于“不是 git 仓库”。
     // 未勾选时仍展示 HEAD；若环境后来失效但记忆为 ON，也必须保留关闭入口。
     expect(worktreeChipsRowSource).toContain(
-      "const branchLabel = sourceBranch || currentBranch || 'HEAD';",
+      "const branchLabel = sourceBranch || branches.current || currentBranch || 'HEAD';",
     );
     expect(worktreeChipsRowSource).toContain(
       'const showBranchChip = !advancedHidden && (enabled || !!detect.data?.isGitRepo);',

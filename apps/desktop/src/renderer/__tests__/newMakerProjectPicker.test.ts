@@ -331,14 +331,21 @@ describe('Shared create project picker', () => {
     expect(worktreeChipsSource).toContain('function BranchWorktreeChip');
     expect(worktreeChipsSource).toContain('data-testid="create-agent-branch-worktree"');
     expect(worktreeChipsSource).toContain(
-      'const branchInteractive = !(disabled || branchDisabled || environmentDisabled)',
+      '!(disabled || branchDisabled || environmentDisabled) && baseRepo !== null',
     );
     expect(worktreeChipsSource).toContain('aria-disabled={!branchInteractive}');
     expect(worktreeChipsSource).toContain('tabIndex={branchInteractive ? 0 : -1}');
     expect(worktreeChipsSource).not.toMatch(/\n\s+disabled=\{!branchInteractive\}/);
     expect(worktreeChipsSource).toContain(
-      "const branchLabel = sourceBranch || currentBranch || 'HEAD'",
+      "const branchLabel = sourceBranch || branches.current || currentBranch || 'HEAD'",
     );
+    expect(worktreeChipsSource).toContain(
+      'effectiveWorktreeEnabled || branchListWanted ? baseRepo : null',
+    );
+    expect(worktreeChipsSource).not.toContain(
+      'useBranches(effectiveWorktreeEnabled ? baseRepo : null',
+    );
+    expect(worktreeChipsSource).toContain('checked || branchSourceSelected');
     expect(worktreeChipsSource).toContain('group-hover:opacity-0');
     expect(worktreeChipsSource).not.toContain('function BranchChip');
     expect(worktreeChipsSource).not.toContain('function WorktreeChip(');
@@ -352,8 +359,10 @@ describe('Shared create project picker', () => {
     expect(newMakerDraftRouteSource).toContain(
       'deviceLinkReconnectEpoch={remoteDraftRefreshEpoch}',
     );
-    expect(worktreeChipsSource).toContain("sourceBranch || currentBranch || 'HEAD'");
-    expect(worktreeChipsSource).not.toContain("sourceBranch || currentBranch || 'main'");
+    expect(worktreeChipsSource).toContain(
+      "sourceBranch || branches.current || currentBranch || 'HEAD'",
+    );
+    expect(worktreeChipsSource).not.toContain("sourceBranch || branches.current || 'main'");
   });
 
   it('invalidates worktree probe-derived fields when the selected project changes', () => {

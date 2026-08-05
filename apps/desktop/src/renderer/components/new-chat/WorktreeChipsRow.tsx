@@ -56,7 +56,10 @@ export interface WorktreeChipsRowProps {
   onAddRemoteProject?: () => void;
   emptyProjectLabel?: string;
   enabled: boolean;
-  /** 用户点击 checkbox 本体切换 worktree。系统/分支路径不得调用。 */
+  /**
+   * 用户点击 checkbox 本体切换 worktree——**唯一**的状态改动路径,上层必持久化
+   * (写工作端勾选记忆)。系统任何路径都不得调用它替用户翻状态。
+   */
   onEnabledChange: (v: boolean) => void;
   sourceBranch: string;
   onSourceBranchChange: (v: string) => void;
@@ -143,12 +146,7 @@ export function WorktreeChipsRow({
     onRecoveryKeyDiscardSupportChange?.(
       detect.data ? detect.data.supportsRecoveryKeyDiscard === true : null,
     );
-  }, [
-    baseRepo,
-    detect.data,
-    onBaseRepoChange,
-    onRecoveryKeyDiscardSupportChange,
-  ]);
+  }, [baseRepo, detect.data, onBaseRepoChange, onRecoveryKeyDiscardSupportChange]);
 
   const cantUseReason = useMemo<string | null>(() => {
     if (detect.loading) return t('newChat.worktree.detecting');
@@ -160,7 +158,8 @@ export function WorktreeChipsRow({
     return null;
   }, [detect.data, detect.loading, t]);
 
-  const environmentDisabled = worktreeDisabled || !!cantUseReason || detect.loading || !cwd;
+  const environmentDisabled =
+    worktreeDisabled || !!cantUseReason || detect.loading || !cwd || baseRepo === null;
   const switchDisabled = disabled || checkboxDisabled || (environmentDisabled && !enabled);
 
   // 状态不变量:这里**没有**任何自动改写 enabled 的 effect——勾选状态只属于用户,
@@ -207,10 +206,11 @@ export function WorktreeChipsRow({
   const currentBranch = detect.data?.currentBranch ?? null;
   // 分支与 checkbox 独立:未勾时也要回显用户刚选的源分支,否则菜单虽然可点、
   // 选择后却仍显示当前 HEAD,看起来像没有生效。首次未选择时回退当前 checkout。
-  const branchLabel = sourceBranch || currentBranch || 'HEAD';
+  const branchLabel = sourceBranch || branches.current || currentBranch || 'HEAD';
   const showBranchChip = !advancedHidden && (enabled || !!detect.data?.isGitRepo);
   // 分支选择与 checkbox 是两条独立轴；仅环境不具备 worktree 资格或创建在途时禁用。
-  const branchInteractive = !(disabled || branchDisabled || environmentDisabled);
+  const branchInteractive =
+    !(disabled || branchDisabled || environmentDisabled) && baseRepo !== null;
 
   const handleBranchPick = useCallback(
     (picked: string) => {

@@ -58,6 +58,19 @@
     --motion-ease-out: cubic-bezier(0.16, 1, 0.3, 1); /* 入场/展开 */
     --motion-ease-in: cubic-bezier(0.4, 0, 1, 1); /* 退场 */
     --motion-ease-move: cubic-bezier(0.4, 0, 0.2, 1); /* 位置/尺寸插值 */
+
+    /* Claude 额度条的首帧 alias 与 ColorRegistry 一致：只复用已批准语义槽。 */
+    --quota-bar-fill: var(--text-secondary);
+    --quota-bar-warn: var(--warning-fg);
+    --quota-bar-crit: var(--error-flat);
+    --quota-bar-track: var(--surface-chip);
+  }
+
+  .dark {
+    --quota-bar-fill: var(--text-secondary);
+    --quota-bar-warn: var(--warning-fg);
+    --quota-bar-crit: var(--error-flat);
+    --quota-bar-track: var(--surface-chip);
   }
 
   body {

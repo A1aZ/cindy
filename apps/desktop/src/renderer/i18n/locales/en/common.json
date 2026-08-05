@@ -4181,6 +4181,29 @@
       "latestUserTurnTitle": "Latest user-turn total"
     }
   },
+  "quotaCard": {
+    "fiveHourLabel": "5 hours",
+    "weeklyLabel": "Weekly",
+    "modelWeeklyLabel": "{{model}} weekly",
+    "windowsRegionLabel": "Quota Windows",
+    "usedPercent": "Used {{percent}}%",
+    "resetAt": "Resets {{at}}",
+    "noWindows": "No quota window data available",
+    "limitRejected": "Plan limit reached; requests may be rejected",
+    "limitWarning": "Approaching plan limit",
+    "extraUsageEnabled": "Extra usage enabled",
+    "costLine": "Cost this message: {{cost}}",
+    "valueLine": "Token value this message: {{cost}}",
+    "noBilledCost": "Cost unavailable for this message; showing usage only",
+    "latestMessageTitle": "Latest message total",
+    "turnCostUnavailable": "Cost unavailable for this message",
+    "tokenLabel": "Tokens",
+    "tokenBreakdown": "(input {{input}} · output {{output}})",
+    "cacheLabel": "Cache",
+    "modelLabel": "Model",
+    "staleData": "Data updated {{minutes}} minutes ago",
+    "waiting": "Claude subscription usage will update after the next request completes."
+  },
   "usageDetails": {
     "costLine": "Cost this turn: {{cost}}",
     "valueLine": "Token value this turn: {{cost}}",

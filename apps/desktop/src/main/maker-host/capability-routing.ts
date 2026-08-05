@@ -187,6 +187,28 @@ const CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES = CODEX_CHROME_USE_OVERRIDES.map(
   }),
 ) satisfies CapabilityRoutingPolicy['overrides'];
 
+/**
+ * codex 0.145.0's config loader requires every `mcp_servers` entry to carry a
+ * complete transport even when disabled, and thread/start validates per-thread
+ * overrides against the same loader. The spawn config defines a node_repl
+ * entry only when the verified Browser companion was provisioned; without it,
+ * the per-thread `mcp_servers.node_repl.enabled=false` override synthesizes a
+ * transport-less entry and every thread/start fails with "invalid transport"
+ * (-32600). Emit the node_repl MCP route only when the entry exists — when it
+ * does not, the capability is already absent and fail-closed holds without
+ * the directive.
+ */
+function withoutUnprovisionedNodeReplRoute(
+  overrides: readonly CapabilityRouteOverride[],
+  codexBrowserUseAvailable: boolean | undefined,
+): CapabilityRouteOverride[] {
+  if (codexBrowserUseAvailable === true) return [...overrides];
+  return overrides.filter(
+    (override) =>
+      !(override.source.surface === 'mcp' && override.source.id === 'node_repl'),
+  );
+}
+
 /** Freeze workspace-scoped capability arbitration for one new runtime. */
 export function buildDesktopCapabilityRoutingPolicy(opts: {
   /** Whether the current Codex bridge exposes Cindy's Computer Use host. */
@@ -208,9 +230,15 @@ export function buildDesktopCapabilityRoutingPolicy(opts: {
   const chromeOverrides = cindyBrowserEnabled === undefined
     ? []
     : cindyBrowserEnabled
-    ? CODEX_CHROME_USE_OVERRIDES
+    ? withoutUnprovisionedNodeReplRoute(
+        CODEX_CHROME_USE_OVERRIDES,
+        opts.codexBrowserUseAvailable,
+      )
     : opts.codexBrowserUseAvailable === false
-      ? CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES
+      ? withoutUnprovisionedNodeReplRoute(
+          CODEX_CHROME_USE_UNAVAILABLE_OVERRIDES,
+          opts.codexBrowserUseAvailable,
+        )
       : [];
   return {
     overrides: [

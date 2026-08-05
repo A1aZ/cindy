@@ -70,14 +70,30 @@ describe('buildDesktopCapabilityRoutingPolicy', () => {
       'chrome@openai-bundled',
     ]);
     expect(routes.every((route) => route.replacement === undefined)).toBe(true);
-    const nodeReplRoute = policy.overrides.find(
+    // The unprovisioned spawn config has no node_repl entry; a per-thread
+    // `mcp_servers.node_repl.enabled=false` on codex 0.145.0 would synthesize
+    // a transport-less entry and fail every thread/start with "invalid
+    // transport" (-32600). The route must be absent, not merely unreplaced.
+    expect(policy.overrides.some(
       (route) => route.source.surface === 'mcp' && route.source.id === 'node_repl',
-    );
-    expect(nodeReplRoute).toMatchObject({
-      invocation: 'disabled',
-      source: expect.objectContaining({ surface: 'mcp', id: 'node_repl' }),
+    )).toBe(false);
+  });
+
+  it('drops the node_repl MCP route when Cindy Browser owns the capability but the companion was not provisioned', () => {
+    const policy = buildDesktopCapabilityRoutingPolicy({
+      cindyBrowserEnabled: true,
+      codexBrowserUseAvailable: false,
     });
-    expect(nodeReplRoute?.replacement).toBeUndefined();
+
+    expect(policy.overrides.some(
+      (route) => route.source.surface === 'mcp' && route.source.id === 'node_repl',
+    )).toBe(false);
+    // The plugin-wide disable does not synthesize an mcp_servers entry and
+    // must stay in force.
+    expect(policy.overrides).toContainEqual(expect.objectContaining({
+      invocation: 'disabled',
+      source: expect.objectContaining({ surface: 'plugin', id: 'chrome@openai-bundled' }),
+    }));
   });
 
   it('keeps remote Chrome available without claiming the local Cindy Browser replacement', () => {

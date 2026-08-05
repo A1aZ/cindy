@@ -106,7 +106,7 @@ jobs:
             echo "Electron ASAR migration paths unchanged; skipping runtime regression."
             exit 0
           fi
-          pnpm rebuild electron
+          node node_modules/electron/install.js
           pnpm --filter desktop exec vitest run src/main/__tests__/legacyUserDataMigration.test.ts
 
       # XDT_SKIP_AGENT_BIN_INSTALL 跳过了 postinstall 的全部 agent 二进制,但

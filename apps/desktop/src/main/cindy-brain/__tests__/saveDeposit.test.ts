@@ -5,10 +5,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SaveDepositVault, sanitizeSaveFileName } from '../dirDeposit.js';
-import { GHOST_SAVE_DEPOSIT_MAX_USES, GHOST_SAVE_DEPOSIT_TTL_MS } from '../../../shared/ghost.js';
+import {
+  GHOST_SAVE_DEPOSIT_MAX_TOTAL_BYTES,
+  GHOST_SAVE_DEPOSIT_MAX_USES,
+  GHOST_SAVE_DEPOSIT_TTL_MS,
+} from '../../../shared/ghost.js';
 
 let workdir: string;
 let saveDir: string;
@@ -97,6 +101,100 @@ describe('SaveDepositVault', () => {
     }
     expect(await vault.write('g1', ok2.receipt.token, 'over.bin', new Uint8Array([1]))).toBeNull();
   });
+
+  it('并发写入不超预算且同名文件原子去重', async () => {
+    const vault = new SaveDepositVault();
+    const ok = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!ok.ok) throw new Error('deposit failed');
+
+    const results = await Promise.all(
+      Array.from({ length: GHOST_SAVE_DEPOSIT_MAX_USES + 2 }, () =>
+        vault.write('g1', ok.receipt.token, 'parallel.txt', new Uint8Array([1])),
+      ),
+    );
+    const successful = results.filter((result): result is { fileName: string } => result !== null);
+    expect(successful).toHaveLength(GHOST_SAVE_DEPOSIT_MAX_USES);
+    expect(new Set(successful.map((result) => result.fileName)).size).toBe(successful.length);
+    expect(
+      successful.reduce((sum, result) => sum + fs.statSync(path.join(saveDir, result.fileName)).size, 0),
+    ).toBeLessThanOrEqual(GHOST_SAVE_DEPOSIT_MAX_TOTAL_BYTES);
+  });
+
+  it('出票后目标目录被替换为链接时拒绝越界写入', async () => {
+    const parent = await fs.promises.mkdtemp(path.join(workdir, 'save-parent-'));
+    const approved = path.join(parent, 'approved');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-ticket-outside-'));
+    try {
+      await fs.promises.mkdir(approved);
+      const vault = new SaveDepositVault();
+      const result = vault.deposit({ ghostId: 'g1', dirAbs: approved, workdirAbs: workdir });
+      if (!result.ok) throw new Error('deposit failed');
+      await fs.promises.rename(approved, path.join(parent, 'approved-old'));
+      try {
+        await fs.promises.symlink(
+          outside,
+          approved,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch {
+        return;
+      }
+      expect(await vault.write('g1', result.receipt.token, 'escaped.txt', new Uint8Array([1]))).toBeNull();
+      expect(fs.existsSync(path.join(outside, 'escaped.txt'))).toBe(false);
+    } finally {
+      await fs.promises.rm(parent, { recursive: true, force: true });
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('目录在校验后、独占创建前被替换时不把响应字节写出批准目录', async () => {
+    const parent = await fs.promises.mkdtemp(path.join(workdir, 'save-race-parent-'));
+    const approved = path.join(parent, 'approved');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-race-outside-'));
+    const probe = path.join(parent, 'probe-link');
+    try {
+      await fs.promises.mkdir(approved);
+      try {
+        await fs.promises.symlink(
+          outside,
+          probe,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+        await fs.promises.rm(probe, { force: true });
+      } catch {
+        return;
+      }
+
+      const vault = new SaveDepositVault();
+      const result = vault.deposit({ ghostId: 'g1', dirAbs: approved, workdirAbs: workdir });
+      if (!result.ok) throw new Error('deposit failed');
+      const originalOpenSync = fs.openSync;
+      let swapped = false;
+      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation((filePath, flags, mode) => {
+        if (!swapped && String(filePath).endsWith('escaped.txt')) {
+          swapped = true;
+          fs.renameSync(approved, path.join(parent, 'approved-old'));
+          fs.symlinkSync(
+            outside,
+            approved,
+            process.platform === 'win32' ? 'junction' : 'dir',
+          );
+        }
+        return originalOpenSync(filePath, flags, mode);
+      });
+      try {
+        expect(
+          await vault.write('g1', result.receipt.token, 'escaped.txt', new Uint8Array([1, 2, 3])),
+        ).toBeNull();
+      } finally {
+        openSpy.mockRestore();
+      }
+      expect(fs.existsSync(path.join(outside, 'escaped.txt'))).toBe(false);
+    } finally {
+      await fs.promises.rm(parent, { recursive: true, force: true });
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('SaveDepositVault userGranted 旁路(workdir 外确认卡通过后)', () => {
@@ -105,7 +203,13 @@ describe('SaveDepositVault userGranted 旁路(workdir 外确认卡通过后)', (
     try {
       const vault = new SaveDepositVault();
       expect(vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: workdir }).ok).toBe(false);
-      const r = vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: workdir, userGranted: true });
+      const r = vault.deposit({
+        ghostId: 'g1',
+        dirAbs: outside,
+        workdirAbs: workdir,
+        userGranted: true,
+        approvedRealPath: outside,
+      });
       expect(r.ok).toBe(true);
       if (r.ok) {
         const written = await vault.write('g1', r.receipt.token, 'a.txt', new TextEncoder().encode('hi'));

@@ -20,8 +20,11 @@ import { promisify } from 'node:util';
 import JSZip from 'jszip';
 
 import {
+  GHOST_LOCALE_MAX_BYTES,
   GHOST_MANIFEST_FILE,
+  GHOST_MANIFEST_MAX_BYTES,
   GHOST_SKILL_MD_MAX_BYTES,
+  validateGhostManifestLocaleResource,
   validateGhostManifest,
   type GhostManifest,
 } from '../../shared/ghost.js';
@@ -29,7 +32,6 @@ import {
   classifyGhostDirEntry,
   resolveGhostContentPath,
 } from './ghostContentTree.js';
-import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
 import { isPathInsideDir } from './dirDeposit.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
 
@@ -40,6 +42,218 @@ const MAX_BASIC_TOTAL_BYTES = 32 * 1024 * 1024;
 const MAX_NODE_TOTAL_BYTES = 256 * 1024 * 1024;
 const MAX_BASIC_CINDY_BYTES = 8 * 1024 * 1024;
 const MAX_NODE_CINDY_BYTES = 128 * 1024 * 1024;
+
+class ForgeSourceChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForgeSourceChangedError';
+  }
+}
+
+class ForgeSizeLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ForgeSizeLimitError';
+  }
+}
+
+function sameForgeFileIdentity(expected: fs.Stats, current: fs.Stats): boolean {
+  if (!current.isFile() || expected.size !== current.size || expected.mtimeMs !== current.mtimeMs) {
+    return false;
+  }
+  // Some Windows filesystems report zero dev/ino. Size + mtime is the portable
+  // fallback there; when identity is available, replacement through a swapped
+  // ancestor must also match the original object.
+  return (expected.dev === 0 && expected.ino === 0) ||
+    (expected.dev === current.dev && expected.ino === current.ino);
+}
+
+function sameForgeDirectoryIdentity(expected: fs.Stats, current: fs.Stats): boolean {
+  if (!current.isDirectory()) return false;
+  return (expected.dev === 0 && expected.ino === 0) ||
+    (expected.dev === current.dev && expected.ino === current.ino);
+}
+
+function sameForgeCanonicalPath(left: string, right: string): boolean {
+  const fold = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  return fold(path.resolve(left)) === fold(path.resolve(right));
+}
+
+async function readForgeFileStable(
+  absPath: string,
+  sourceRoot: string,
+  expectedFromWalk?: fs.Stats,
+  maxBytes?: number,
+): Promise<Buffer> {
+  const realBeforeOpen = await realpathNative(absPath);
+  if (!isPathInsideDir(sourceRoot, realBeforeOpen)) {
+    throw new ForgeSourceChangedError('Forge source entry escaped the validated source root');
+  }
+  const pathStat = await fs.promises.lstat(absPath);
+  if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+    throw new ForgeSourceChangedError('Forge source entry changed after classification');
+  }
+  if (expectedFromWalk && !sameForgeFileIdentity(expectedFromWalk, pathStat)) {
+    throw new ForgeSourceChangedError('Forge source file changed after classification');
+  }
+
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let handle: Awaited<ReturnType<typeof fs.promises.open>>;
+  try {
+    handle = await fs.promises.open(absPath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'ENOENT' || code === 'EISDIR' || code === 'ENOTDIR') {
+      throw new ForgeSourceChangedError('Forge source entry changed before open');
+    }
+    throw error;
+  }
+  try {
+    const opened = await handle.stat();
+    if (!sameForgeFileIdentity(pathStat, opened)) {
+      throw new ForgeSourceChangedError('Forge source file identity changed before read');
+    }
+    if (opened.nlink !== 1) {
+      throw new ForgeSourceChangedError('Forge source file has aliases outside the validated tree');
+    }
+    if (maxBytes !== undefined && opened.size > maxBytes) {
+      throw new ForgeSizeLimitError(`Forge source file exceeds the remaining size limit: ${absPath}`);
+    }
+    const bytes = Buffer.allocUnsafe(opened.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await handle.read(
+        bytes,
+        offset,
+        bytes.byteLength - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset !== bytes.byteLength) {
+      throw new ForgeSourceChangedError('Forge source file shrank while being read');
+    }
+    const after = await handle.stat();
+    if (!sameForgeFileIdentity(pathStat, after)) {
+      throw new ForgeSourceChangedError('Forge source file changed while being read');
+    }
+    const realAfterRead = await realpathNative(absPath);
+    if (!sameForgeCanonicalPath(realBeforeOpen, realAfterRead) ||
+        !isPathInsideDir(sourceRoot, realAfterRead)) {
+      throw new ForgeSourceChangedError('Forge source entry changed during read');
+    }
+    return bytes;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+async function readForgeDirectoryEntriesStable(
+  absPath: string,
+  sourceRoot: string,
+): Promise<fs.Dirent[]> {
+  const before = await fs.promises.lstat(absPath);
+  if (!before.isDirectory() || before.isSymbolicLink()) {
+    throw new ForgeSourceChangedError('Forge source directory changed after classification');
+  }
+  const realBefore = await realpathNative(absPath);
+  if (!isPathInsideDir(sourceRoot, realBefore)) {
+    throw new ForgeSourceChangedError('Forge source directory escaped the validated source root');
+  }
+  const entries = await fs.promises.readdir(absPath, { withFileTypes: true });
+  const after = await fs.promises.lstat(absPath);
+  const realAfter = await realpathNative(absPath);
+  if (!sameForgeDirectoryIdentity(before, after) ||
+      !sameForgeCanonicalPath(realBefore, realAfter) ||
+      !isPathInsideDir(sourceRoot, realAfter)) {
+    throw new ForgeSourceChangedError('Forge source directory changed while being read');
+  }
+  return entries;
+}
+
+async function writeForgeFileStable(
+  absPath: string,
+  parentDir: string,
+  bytes: Uint8Array,
+): Promise<void> {
+  const expectedParent = await fs.promises.lstat(parentDir);
+  if (!expectedParent.isDirectory() || expectedParent.isSymbolicLink()) {
+    throw new ForgeSourceChangedError('Forge output parent is not a regular directory');
+  }
+  const expectedParentReal = await realpathNative(parentDir);
+  if (!sameForgeCanonicalPath(expectedParentReal, parentDir)) {
+    throw new ForgeSourceChangedError('Forge output parent changed before write');
+  }
+
+  let expectedTarget: fs.Stats | null = null;
+  try {
+    expectedTarget = await fs.promises.lstat(absPath);
+    if (!expectedTarget.isFile() || expectedTarget.isSymbolicLink()) {
+      throw new ForgeSourceChangedError('Forge output path is not a regular file');
+    }
+    if (expectedTarget.nlink !== 1) {
+      throw new ForgeSourceChangedError('Forge output path has aliases outside the validated tree');
+    }
+  } catch (error) {
+    if (!isMissingFsError(error)) throw error;
+  }
+
+  let handle: Awaited<ReturnType<typeof fs.promises.open>>;
+  const createdTarget = expectedTarget === null;
+  try {
+    handle = await fs.promises.open(absPath, expectedTarget ? 'r+' : 'wx');
+  } catch (error) {
+    if (!expectedTarget && isMissingFsError(error)) {
+      throw new ForgeSourceChangedError('Forge output disappeared before write');
+    }
+    throw error;
+  }
+  try {
+    const openedTarget = await handle.stat();
+    const currentParent = await fs.promises.lstat(parentDir);
+    const currentParentReal = await realpathNative(parentDir);
+    if (!sameForgeDirectoryIdentity(expectedParent, currentParent) ||
+        !sameForgeCanonicalPath(expectedParentReal, currentParentReal) ||
+        !sameForgeCanonicalPath(currentParentReal, parentDir)) {
+      throw new ForgeSourceChangedError('Forge output parent changed before bytes were written');
+    }
+    const currentTarget = await fs.promises.lstat(absPath);
+    if (!currentTarget.isFile() || currentTarget.isSymbolicLink() ||
+        currentTarget.nlink !== 1 ||
+        !sameForgeFileIdentity(openedTarget, currentTarget) ||
+        (expectedTarget && !sameForgeFileIdentity(expectedTarget, openedTarget))) {
+      throw new ForgeSourceChangedError('Forge output path changed before bytes were written');
+    }
+    await handle.truncate(0);
+    await handle.writeFile(bytes);
+    const afterParent = await fs.promises.lstat(parentDir);
+    const afterParentReal = await realpathNative(parentDir);
+    if (!sameForgeDirectoryIdentity(expectedParent, afterParent) ||
+        !sameForgeCanonicalPath(expectedParentReal, afterParentReal)) {
+      throw new ForgeSourceChangedError('Forge output parent changed while writing');
+    }
+  } catch (error) {
+    if (createdTarget) {
+      try {
+        const currentTarget = await fs.promises.lstat(absPath);
+        const openedTarget = await handle.stat();
+        if (sameForgeFileIdentity(currentTarget, openedTarget)) {
+          await fs.promises.unlink(absPath);
+        }
+      } catch {
+        // Best-effort cleanup only; never turn a boundary rejection into a write.
+      }
+    }
+    throw error;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+function isMissingFsError(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
 
 /** 打包时跳过的目录/文件(源码目录里的开发残留,不属于意识本体)。 */
 function shouldSkip(name: string): boolean {
@@ -55,6 +269,9 @@ export type ForgePackResult =
       ok: false;
       errorCode:
         | 'DIR_NOT_FOUND'
+        | 'SOURCE_OUTSIDE_WORKDIR'
+        | 'WORKDIR_NOT_LOCAL'
+        | 'WORKDIR_READ_ONLY'
         | 'SOURCE_IS_INSTALLED_PLUGIN'
         | 'MANIFEST_INVALID'
         | 'ENTRY_MISSING'
@@ -82,7 +299,7 @@ export type ForgeScaffoldResult =
     }
   | {
       ok: false;
-      errorCode: 'INVALID_INPUT' | 'TARGET_EXISTS' | 'INTERNAL';
+      errorCode: 'INVALID_INPUT' | 'TARGET_EXISTS' | 'WORKDIR_NOT_LOCAL' | 'WORKDIR_READ_ONLY' | 'INTERNAL';
       message: string;
     };
 
@@ -93,6 +310,25 @@ interface ForgeScaffoldInput {
   name: string;
   description?: string;
 }
+
+export interface ForgeScaffoldWriteRequest {
+  parentDir: string;
+  targetName: string;
+  expectedParent: {
+    realPath: string;
+    dev: number;
+    ino: number;
+  };
+  files: Array<{ path: string; base64: string }>;
+}
+
+export type ForgeScaffoldWriteResult =
+  | { ok: true }
+  | { ok: false; errorCode: 'TARGET_EXISTS' | 'INTERNAL'; message: string };
+
+export type ForgeScaffoldWriter = (
+  request: ForgeScaffoldWriteRequest,
+) => Promise<ForgeScaffoldWriteResult>;
 
 /** 生成插件清单；先走正式校验，再允许任何文件落盘。 */
 function scaffoldManifest(input: ForgeScaffoldInput): Record<string, unknown> {
@@ -426,7 +662,11 @@ const realpathNative = promisify(fs.realpath.native);
  */
 export async function scaffoldGhostDir(
   input: ForgeScaffoldInput,
-  options?: { sessionWorkdir?: string | null; forbiddenRootDirs?: readonly string[] },
+  options?: {
+    sessionWorkdir?: string | null;
+    forbiddenRootDirs?: readonly string[];
+    writeScaffold?: ForgeScaffoldWriter;
+  },
 ): Promise<ForgeScaffoldResult> {
   const template = input.template;
   if (!FORGE_SCAFFOLD_TEMPLATES.includes(template)) {
@@ -494,6 +734,7 @@ export async function scaffoldGhostDir(
       };
     }
   }
+  const targetDir = path.resolve(input.dir);
   const files = scaffoldFiles(input);
   // 显式收窄而非 as 断言:manifest 恒为 JSON 字符串,二进制项(占位图标)另存;
   // 未来若误把 manifest 写成 Buffer,这里在编译/测试期就报,而不是运行期 parse 炸。
@@ -510,7 +751,6 @@ export async function scaffoldGhostDir(
     };
   }
 
-  const targetDir = path.resolve(input.dir);
   try {
     await fs.promises.lstat(targetDir);
     return {
@@ -529,52 +769,81 @@ export async function scaffoldGhostDir(
   }
 
   const parentDir = path.dirname(targetDir);
-  let stagingDir: string | null = null;
+  let parentStat: fs.Stats;
+  let parentRealPath: string;
   try {
-    await fs.promises.mkdir(parentDir, { recursive: true });
-    stagingDir = await fs.promises.mkdtemp(
-      path.join(parentDir, `.${path.basename(targetDir)}-scaffold-`),
-    );
-    for (const [rel, content] of Object.entries(files)) {
-      const abs = path.join(stagingDir, rel);
-      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-      await fs.promises.writeFile(abs, content, { encoding: 'utf8', flag: 'wx' });
+    parentStat = await fs.promises.lstat(parentDir);
+    if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_INPUT',
+        message: 'dir 的父目录必须是工作目录内已存在的普通目录',
+      };
     }
-    try {
-      await fs.promises.rename(stagingDir, targetDir);
-      stagingDir = null;
-    } catch (err) {
-      if (hasFsErrorCode(err, 'EEXIST') || hasFsErrorCode(err, 'ENOTEMPTY')) {
-        return {
-          ok: false,
-          errorCode: 'TARGET_EXISTS',
-          message: `目标已经存在，不会覆盖:${targetDir}`,
-        };
-      }
-      throw err;
+    parentRealPath = await realpathNative(parentDir);
+    if (
+      !sameForgeCanonicalPath(parentRealPath, parentDir) ||
+      !isPathInsideDir(realWorkdir, parentRealPath)
+    ) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_INPUT',
+        message: 'dir 的父目录必须是工作目录内已存在且没有链接祖先的普通目录',
+      };
     }
-    return {
-      ok: true,
-      dir: targetDir,
-      template,
-      files: Object.keys(files).sort(),
-      nextSteps: [
-        '按需要修改 ghost.json、main.js 和 worker 源码。',
-        '调用 ghost_forge_pack 打包并让用户确认安装。',
-        'Node 模板不允许在安装或首次运行时执行 npm install、npx 或 postinstall。',
-      ],
-    };
   } catch (err) {
+    if (hasFsErrorCode(err, 'ENOENT')) {
+      return {
+        ok: false,
+        errorCode: 'INVALID_INPUT',
+        message: 'dir 的父目录必须先创建，并且必须位于当前工作目录内',
+      };
+    }
     return {
       ok: false,
       errorCode: 'INTERNAL',
       message: err instanceof Error ? err.message : String(err),
     };
-  } finally {
-    if (stagingDir) {
-      await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-    }
   }
+
+  if (!options?.writeScaffold) {
+    return {
+      ok: false,
+      errorCode: 'INTERNAL',
+      message: 'Forge scaffold stable-directory capability is unavailable',
+    };
+  }
+  const writeResult = await options.writeScaffold({
+    parentDir,
+    targetName: path.basename(targetDir),
+    expectedParent: {
+      realPath: parentRealPath,
+      dev: parentStat.dev,
+      ino: parentStat.ino,
+    },
+    files: Object.entries(files).map(([rel, content]) => ({
+      path: rel,
+      base64: (typeof content === 'string' ? Buffer.from(content, 'utf8') : content).toString('base64'),
+    })),
+  });
+  if (!writeResult.ok) {
+    return {
+      ok: false,
+      errorCode: writeResult.errorCode,
+      message: writeResult.message,
+    };
+  }
+  return {
+    ok: true,
+    dir: targetDir,
+    template,
+    files: Object.keys(files).sort(),
+    nextSteps: [
+      '按需要修改 ghost.json、main.js 和 worker 源码。',
+      '调用 ghost_forge_pack 打包并让用户确认安装。',
+      'Node 模板不允许在安装或首次运行时执行 npm install、npx 或 postinstall。',
+    ],
+  };
 }
 
 /**
@@ -584,9 +853,26 @@ export async function scaffoldGhostDir(
  */
 export async function packGhostDir(
   dir: string,
-  options: { forbiddenRootDirs?: readonly string[] } = {},
+  options: { sessionWorkdir?: string | null; forbiddenRootDirs?: readonly string[] } = {},
 ): Promise<ForgePackResult> {
   try {
+    if (!options.sessionWorkdir) {
+      return {
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+        message: 'Forge pack requires an active session workdir',
+      };
+    }
+    let realWorkdir: string;
+    try {
+      realWorkdir = await realpathNative(path.resolve(options.sessionWorkdir));
+    } catch {
+      return {
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+        message: 'The current session workdir does not exist',
+      };
+    }
     let stat: fs.Stats;
     try {
       stat = await fs.promises.stat(dir);
@@ -597,6 +883,35 @@ export async function packGhostDir(
       return { ok: false, errorCode: 'DIR_NOT_FOUND', message: `不是目录:${dir}` };
     }
     const realSourceDir = await realpathNative(dir);
+    if (!isPathInsideDir(realWorkdir, realSourceDir)) {
+      return {
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+        message: 'Forge source must be inside the current session workdir',
+      };
+    }
+    const sourceBoundaryError = (): ForgePackResult => ({
+      ok: false,
+      errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+      message: 'Forge source changed after workdir validation',
+    });
+    const ensureSourceBoundary = async (): Promise<ForgePackResult | null> => {
+      let currentSourceDir: string;
+      try {
+        currentSourceDir = await realpathNative(dir);
+      } catch {
+        return sourceBoundaryError();
+      }
+      const sameSource =
+        isPathInsideDir(realSourceDir, currentSourceDir) &&
+        isPathInsideDir(currentSourceDir, realSourceDir);
+      return sameSource && isPathInsideDir(realWorkdir, currentSourceDir)
+        ? null
+        : sourceBoundaryError();
+    };
+    const boundaryError = await ensureSourceBoundary();
+    if (boundaryError) return boundaryError;
+    const sourceDir = realSourceDir;
     for (const forbiddenRoot of options.forbiddenRootDirs ?? []) {
       const resolvedForbiddenRoot = await resolveThroughExistingAncestor(forbiddenRoot);
       // 判定必须**双向**:源目录落在受管根内要拒(拿已安装插件当源码),源目录是受管根的
@@ -617,12 +932,25 @@ export async function packGhostDir(
     }
 
     // 1) 清单先行:与装入侧同一套校验,错在打包期就报清楚。
+    const validatedFileSnapshots = new Map<string, { rel: string; bytes: Buffer }>();
+    const rememberValidatedSnapshot = (rel: string, bytes: Buffer): void => {
+      validatedFileSnapshots.set(rel.toLowerCase(), { rel, bytes });
+    };
     let manifestRaw: unknown;
+    const boundaryBeforeManifest = await ensureSourceBoundary();
+    if (boundaryBeforeManifest) return boundaryBeforeManifest;
     try {
-      manifestRaw = JSON.parse(
-        await fs.promises.readFile(path.join(dir, GHOST_MANIFEST_FILE), 'utf-8'),
+      const manifestBytes = await readForgeFileStable(
+        path.join(sourceDir, GHOST_MANIFEST_FILE),
+        sourceDir,
+        undefined,
+        GHOST_MANIFEST_MAX_BYTES,
       );
+      manifestRaw = JSON.parse(manifestBytes.toString('utf8'));
+      rememberValidatedSnapshot(GHOST_MANIFEST_FILE, manifestBytes);
     } catch (err) {
+      if (err instanceof ForgeSourceChangedError) throw err;
+      if (err instanceof ForgeSizeLimitError) throw err;
       return {
         ok: false,
         errorCode: 'MANIFEST_INVALID',
@@ -637,13 +965,40 @@ export async function packGhostDir(
 
     // 2) locale 资源必须真实、可解析且提供的条目合法(缺译回退原文,不拒)。
     // 与装入侧使用同一 validator，避免 Forge 能打包、安装却被拒的契约漂移。
-    const localeValidation = validateGhostLocaleResourcesInDirectory(dir, manifest);
-    if (!localeValidation.ok) {
-      return {
-        ok: false,
-        errorCode: 'MANIFEST_INVALID',
-        message: localeValidation.reason,
-      };
+    for (const [locale, relativePath] of Object.entries(manifest.locales ?? {})) {
+      const boundaryBeforeLocale = await ensureSourceBoundary();
+      if (boundaryBeforeLocale) return boundaryBeforeLocale;
+      try {
+        const localePath = await resolveGhostContentPath(sourceDir, relativePath, {
+          expect: 'file',
+          label: `locales.${locale}`,
+        });
+        const localeBytes = await readForgeFileStable(
+          localePath,
+          sourceDir,
+          undefined,
+          GHOST_LOCALE_MAX_BYTES,
+        );
+        const localized = validateGhostManifestLocaleResource(
+          JSON.parse(localeBytes.toString('utf8')) as unknown,
+          manifest,
+        );
+        if (!localized.ok) {
+          return {
+            ok: false,
+            errorCode: 'MANIFEST_INVALID',
+            message: `locales.${locale} 不合格(${relativePath}):${localized.reason}`,
+          };
+        }
+        rememberValidatedSnapshot(relativePath, localeBytes);
+      } catch (error) {
+        if (error instanceof ForgeSourceChangedError) throw error;
+        return {
+          ok: false,
+          errorCode: 'MANIFEST_INVALID',
+          message: `locales.${locale} 不可用(${relativePath}):${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
     }
 
     // 3) 清单声明的入口文件必须真实在场(打包期拦,别等装入后沙箱 404)。
@@ -652,13 +1007,17 @@ export async function packGhostDir(
     if (manifest.node?.entry) mustExist.push(manifest.node.entry);
     if (manifest.panel?.html) mustExist.push(manifest.panel.html);
     if (manifest.settingsHtml) mustExist.push(manifest.settingsHtml);
+    for (const relativePath of Object.values(manifest.locales ?? {})) mustExist.push(relativePath);
     for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
+    const requiredPackPaths = new Set(mustExist.map((rel) => rel.toLowerCase()));
     for (const rel of mustExist) {
       try {
+        const boundaryBeforeEntry = await ensureSourceBoundary();
+        if (boundaryBeforeEntry) return boundaryBeforeEntry;
         // 逐段解析(判据同装入侧 ghostContentTree):`stat` 会穿透链接,让"声明的
         // 文件是链接"通过检查,而下面的收集步按类型跳过链接 —— 包就少了这个文件,
         // 错误延迟到用户装入时才现形。这里直接拒,报清楚。
-        await resolveGhostContentPath(dir, rel, { expect: 'file', label: 'forge source' });
+        await resolveGhostContentPath(sourceDir, rel, { expect: 'file', label: 'forge source' });
       } catch {
         return {
           ok: false,
@@ -671,11 +1030,23 @@ export async function packGhostDir(
     // 3.5) skill 槽:SKILL.md frontmatter 与清单声明必须逐字一致。与装入侧
     // (GhostManager.parse)共用同一裁判,避免"Forge 能打包、安装被拒"的漂移。
     for (const item of manifest.skill?.items ?? []) {
-      const skillMdPath = path.join(dir, ...item.dir.split('/'), 'SKILL.md');
+      const boundaryBeforeSkill = await ensureSourceBoundary();
+      if (boundaryBeforeSkill) return boundaryBeforeSkill;
+      const skillMdPath = path.join(sourceDir, ...item.dir.split('/'), 'SKILL.md');
       let content: string;
       try {
-        content = await fs.promises.readFile(skillMdPath, 'utf-8');
+        content = (
+          await readForgeFileStable(skillMdPath, sourceDir, undefined, GHOST_SKILL_MD_MAX_BYTES)
+        ).toString('utf8');
       } catch (err) {
+        if (err instanceof ForgeSourceChangedError) throw err;
+        if (err instanceof ForgeSizeLimitError) {
+          return {
+            ok: false,
+            errorCode: 'MANIFEST_INVALID',
+            message: `${item.dir}/SKILL.md 过大(上限 ${GHOST_SKILL_MD_MAX_BYTES} 字节)`,
+          };
+        }
         return {
           ok: false,
           errorCode: 'ENTRY_MISSING',
@@ -697,16 +1068,19 @@ export async function packGhostDir(
           message: `skill 条目 ${item.dir}:${consistencyError}`,
         };
       }
+      rememberValidatedSnapshot(`${item.dir}/SKILL.md`, Buffer.from(content, 'utf8'));
     }
 
     // 4) 收集文件(递归,跳过开发残留),数量/体积设限。
-    const files: Array<{ rel: string; abs: string }> = [];
+    const files: Array<{ rel: string; bytes: Buffer }> = [];
     let totalBytes = 0;
     const maxFiles = manifest.node ? MAX_NODE_FILES : MAX_BASIC_FILES;
     const maxTotalBytes = manifest.node ? MAX_NODE_TOTAL_BYTES : MAX_BASIC_TOTAL_BYTES;
     const seenPackPaths = new Set<string>();
     const walk = async (cur: string, relBase: string): Promise<ForgePackResult | null> => {
-      const entries = await fs.promises.readdir(cur, { withFileTypes: true });
+      const boundaryBeforeRead = await ensureSourceBoundary();
+      if (boundaryBeforeRead) return boundaryBeforeRead;
+      const entries = await readForgeDirectoryEntriesStable(cur, sourceDir);
       for (const e of entries) {
         if (shouldSkip(e.name)) continue;
         const abs = path.join(cur, e.name);
@@ -730,8 +1104,28 @@ export async function packGhostDir(
           const bad = await walk(abs, rel);
           if (bad) return bad;
         } else if (kind === 'file') {
-          files.push({ rel, abs });
-          totalBytes += (await fs.promises.stat(abs)).size;
+          if (files.length >= maxFiles) {
+            return { ok: false, errorCode: 'TOO_LARGE', message: `文件过多(上限 ${maxFiles} 个)` };
+          }
+          const validatedSnapshot = validatedFileSnapshots.get(foldedRel);
+          if (validatedSnapshot && validatedSnapshot.rel !== rel) {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `manifest 声明路径大小写不一致:${validatedSnapshot.rel} / ${rel}`,
+            };
+          }
+          const bytes = validatedSnapshot?.bytes ??
+            await readForgeFileStable(abs, sourceDir, undefined, maxTotalBytes - totalBytes);
+          if (bytes.byteLength > maxTotalBytes - totalBytes) {
+            return {
+              ok: false,
+              errorCode: 'TOO_LARGE',
+              message: `总体积超上限(${maxTotalBytes} 字节)`,
+            };
+          }
+          files.push({ rel, bytes });
+          totalBytes += bytes.byteLength;
           if (files.length > maxFiles) {
             return { ok: false, errorCode: 'TOO_LARGE', message: `文件过多(上限 ${maxFiles} 个)` };
           }
@@ -742,19 +1136,37 @@ export async function packGhostDir(
               message: `总体积超上限(${maxTotalBytes} 字节)`,
             };
           }
+        } else if (requiredPackPaths.has(foldedRel)) {
+          return {
+            ok: false,
+            errorCode: 'ENTRY_MISSING',
+            message: `清单声明的文件不存在或不是普通文件(链接不可打包):${rel}`,
+          };
         }
       }
       return null;
     };
-    const tooLarge = await walk(dir, '');
+    const tooLarge = await walk(sourceDir, '');
     if (tooLarge) return tooLarge;
+    const packedPaths = new Set(files.map((file) => file.rel.toLowerCase()));
+    for (const required of requiredPackPaths) {
+      if (!packedPaths.has(required)) {
+        return {
+          ok: false,
+          errorCode: 'ENTRY_MISSING',
+          message: `清单声明的文件不存在或不是普通文件(链接不可打包):${required}`,
+        };
+      }
+    }
 
     // 5) 打包到源码目录自身(2026-07 Lizi 定案:产物跟源码住一起,拿取直观)。
     // 文件收集在写盘之前完成 + shouldSkip 跳过 *.cindy,自身产物不会进包;
     // 同名覆盖:同 id 同版本重打包语义上就是同一个包。
     const zip = new JSZip();
     for (const f of files) {
-      zip.file(f.rel, await fs.promises.readFile(f.abs));
+      const boundaryBeforeZipRead = await ensureSourceBoundary();
+      if (boundaryBeforeZipRead) return boundaryBeforeZipRead;
+      zip.file(f.rel, f.bytes);
     }
     const buf = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
     const maxCindyBytes = manifest.node ? MAX_NODE_CINDY_BYTES : MAX_BASIC_CINDY_BYTES;
@@ -765,10 +1177,26 @@ export async function packGhostDir(
         message: `压缩包体积超上限(${maxCindyBytes} 字节)`,
       };
     }
-    const cindyPath = path.join(dir, `${manifest.id}-${manifest.version}.cindy`);
-    await fs.promises.writeFile(cindyPath, buf);
+    const boundaryBeforeWrite = await ensureSourceBoundary();
+    if (boundaryBeforeWrite) return boundaryBeforeWrite;
+    const cindyPath = path.join(sourceDir, `${manifest.id}-${manifest.version}.cindy`);
+    await writeForgeFileStable(cindyPath, sourceDir, buf);
     return { ok: true, cindyPath, manifest };
   } catch (err) {
+    if (err instanceof ForgeSourceChangedError) {
+      return {
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+        message: err.message,
+      };
+    }
+    if (err instanceof ForgeSizeLimitError) {
+      return {
+        ok: false,
+        errorCode: 'TOO_LARGE',
+        message: err.message,
+      };
+    }
     return {
       ok: false,
       errorCode: 'INTERNAL',
@@ -2844,7 +3272,7 @@ if (r.ok && r.confirmed) {
 
 1. 新插件先调 \`ghost_forge_scaffold\` 生成骨架，或把已有源码放在用户工作目录下的
    一个文件夹里(如 \`my-ghost/\`)；脚手架目标必须是新目录，绝不覆盖已有文件，
-   也不能落在已安装插件目录或 Host 状态目录内(会被拒，理由同下一条)；
+   其父目录必须是工作目录内已存在的普通目录；也不能落在已安装插件目录或 Host 状态目录内(会被拒，理由同下一条)；
 2. **Forge 源码必须是当前会话工作目录里的独立作者目录**。已安装插件目录以及
    Host 管理的状态目录都不是源码区，禁止直接修改、打包或用路径别名绕过；若要继续
    开发已有插件，先把源码复制/迁出到工作目录中的新目录，再从该副本制作；

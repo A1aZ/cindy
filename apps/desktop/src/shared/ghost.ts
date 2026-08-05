@@ -20,6 +20,8 @@ import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './local
 
 /** 清单文件名(zip 根部)。 */
 export const GHOST_MANIFEST_FILE = 'ghost.json';
+/** Maximum manifest bytes accepted by both Forge and package ingestion. */
+export const GHOST_MANIFEST_MAX_BYTES = 256 * 1024;
 
 /** 意识文件扩展名。 */
 export const CINDY_FILE_EXT = '.cindy';

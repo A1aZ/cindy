@@ -928,7 +928,7 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // the auth-change activation pass after the new boundary is committed.
   await interruptGhostCallsForAccountBoundary();
   await waitForGhostMutations();
-  suspendAllGhosts();
+  await suspendAllGhosts();
   // Personal IM channels have the same DB boundary. Relogin restarts them from
   // the next owner DB-ready callback; app:ready-for-bot remains a compatibility
   // retry after the new DbClient is ready.

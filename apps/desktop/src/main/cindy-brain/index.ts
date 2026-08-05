@@ -112,7 +112,7 @@ import { mapGhostOauthConnectError } from './ghostOauthSetupError.js';
 import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
 import { getResolvedMainLocale, t } from '../i18n.js';
-import { reconcileGhostSkillLinks } from './skillSlot.js';
+import { reconcileGhostSkillLinks, removeGhostSkillLinksForRoots } from './skillSlot.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import {
   FILO_GOOGLE_GHOST_ID,
@@ -252,8 +252,10 @@ import * as localDbSchema from '../localDb/schema.js';
 import { eq } from 'drizzle-orm';
 import { requireAppCapability } from '../appCapabilities.js';
 import {
+  acknowledgeRecoveredLegacyGhosts,
   getLegacyGhostRecoveryStatus,
   hasLegacyOwnerNamespaceClaim,
+  listLegacyOwnerProjectionRoots,
   listLegacyGhostPluginSources,
   listLegacyGhostTombstoneRoots,
   recoverLegacyGhostPlugins,
@@ -376,9 +378,21 @@ function getLegacyGhostRecoveryStatusForActiveSession(): LegacyGhostRecoveryStat
     ownerId === null
       ? new Set<string>()
       : new Set(
-          listLegacyGhostTombstoneRoots(ownerId, app.getPath('userData')).flatMap((root) =>
-            readBuiltinTombstones(root),
-          ),
+          listLegacyGhostTombstoneRoots(ownerId, app.getPath('userData')).flatMap((root) => {
+            try {
+              return readBuiltinTombstones(root);
+            } catch (err) {
+              // 一份损坏的 legacy .builtin-provisioning.json 不能打死整个恢复入口(状态查询
+              // 与重试都经此)。降级为"该根无墓碑"并记录;漏掉的 builtin 排除仍由 backfill 的
+              // isTrustedBundledId 闸兜底,不会因此把随包 id 误迁 —— 对齐 ghosts:builtin-status
+              // 的降级语义,而不是让 recovery UI 整体不可用(§5 恢复入口必须可用)。
+              log.warn('legacy builtin tombstone root unreadable during recovery status; treated as empty', {
+                root,
+                error: err instanceof Error ? err.message : String(err),
+              });
+              return [] as string[];
+            }
+          }),
         );
   const reservedBuiltinCommands = new Set(
     listEligibleBuiltinCommands(
@@ -403,6 +417,7 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
   }
   const initialStatus = getLegacyGhostRecoveryStatusForActiveSession();
   if (!initialStatus.canRetry) return initialStatus;
+  if (initialStatus.deferredReason === 'legacy-discovery-incomplete') return initialStatus;
 
   const releaseMutation = beginGhostMutation(expectedOwner);
   try {
@@ -411,6 +426,7 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
     if (shouldAbort()) return getLegacyGhostRecoveryStatusForActiveSession();
     const authorizedStatus = getLegacyGhostRecoveryStatusForActiveSession();
     if (!authorizedStatus.canRetry) return authorizedStatus;
+    if (authorizedStatus.deferredReason === 'legacy-discovery-incomplete') return authorizedStatus;
 
     const existingGhosts = getGhostManager().list();
     const existingGhostById = new Map(
@@ -520,11 +536,15 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
       throw error;
     }
     if (shouldAbort()) return getLegacyGhostRecoveryStatusForActiveSession();
-    if (result.moved === 0 && !result.provisioningStateMoved) {
+    if (
+      result.moved === 0 &&
+      !result.provisioningStateMoved &&
+      !result.recoveredIds?.length
+    ) {
       restartStoppedActiveGhosts();
       return getLegacyGhostRecoveryStatusForActiveSession();
     }
-    if (result.moved > 0 || result.provisioningStateMoved) {
+    if (result.moved > 0 || result.provisioningStateMoved || result.recoveredIds?.length) {
       brainRootCache = null;
       const restoredBeforeReconcile = getGhostManager().list();
       const movedGhostIds = new Set<string>();
@@ -539,24 +559,26 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
           getGhostNodeRuntimeBroker().stop(ghost.manifest.id);
         }
       }
-      // 恢复搬进来的旧布局目录补 backfill:首轮迁移可能早已跑过并落了一次性 ledger
-      // (当时安装根还是空的),不补的话这批旧插件会全部卡在 legacy-unapproved,违反
-      // §5 升级无感红线。旁路只作用于本次恢复实际搬动/新增的 id(信任级与首轮迁移
-      // 等同:来源是恢复流程刚认领的旧世界布局,不是安装根里凭空冒出的目录)。
-      const recoveredLegacyIds = [
-        ...movedGhostIds,
-        ...restoredBeforeReconcile
-          .filter((ghost) => !existingGhostDirs.has(ghost.manifest.id))
-          .map((ghost) => ghost.manifest.id),
-      ];
+      // 只有 owner recovery 在 rename 前写入并在本轮确认的 durable marker 才能进入
+      // receipt backfill。不能从安装根扫描结果推断“刚搬入”，否则同一时间窗内由其他
+      // 写者放入的无 receipt 目录会被当成 legacy 事实自动铸造批准。
+      const recoveredLegacyIds = [...(result.recoveredIds ?? [])];
       if (recoveredLegacyIds.length > 0) {
-        await getGhostManager()
-          .backfillRecoveredLegacyGhosts(recoveredLegacyIds)
-          .catch((err) =>
-            log.warn('recovered legacy ghost backfill pass failed', {
-              error: err instanceof Error ? err.message : String(err),
-            }),
+        try {
+          const backfill = await getGhostManager().backfillRecoveredLegacyGhosts(
+            recoveredLegacyIds,
+            { includePending: true },
           );
+          const pending = new Set(backfill.pending ?? []);
+          await acknowledgeRecoveredLegacyGhosts(
+            expectedOwner.dataOwnerId,
+            recoveredLegacyIds.filter((id) => !pending.has(id)),
+          );
+        } catch (err) {
+          log.warn('recovered legacy ghost backfill pass failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       const builtinReconcileSucceeded =
         result.deferredReason !== 'concurrent-live-instances' &&
@@ -643,11 +665,25 @@ export async function interruptGhostCallsForAccountBoundary(): Promise<void> {
   await getGhostSetupCoordinator()?.waitForActionsIdle();
 }
 
-/** Stop every sandbox before changing the active data owner. */
-export function suspendAllGhosts(): void {
+function listGhostOwnerProjectionRoots(): string[] {
+  const activeOwnerRoot = ownerScopedUserDataPath();
+  return [...new Set([
+    path.join(activeOwnerRoot, 'brain'),
+    path.join(activeOwnerRoot, 'cindy-brain'),
+    path.join(activeOwnerRoot, 'ghost-install-state'),
+    ...listLegacyOwnerProjectionRoots(app.getPath('userData')),
+  ])];
+}
+
+/** Stop every sandbox and revoke global skill projections before changing the active data owner. */
+export async function suspendAllGhosts(): Promise<void> {
   runtimeSingleton?.destroyAll();
   resetNodeRuntimeBrokerForAccountBoundary();
   brainRootCache = null;
+  const skillCleanup = await removeGhostSkillLinksForRoots(listGhostOwnerProjectionRoots());
+  for (const warning of skillCleanup.warnings) {
+    log.warn('ghost owner skill cleanup warning', { warning });
+  }
 }
 let ipcRegistered = false;
 
@@ -683,6 +719,16 @@ function builtinSeedRootDirs(): string[] {
 
 function isTrustedBundledSource(id: string, sourceDir: string): boolean {
   return isTrustedBuiltinSeedSource(builtinSeedRootDirs(), id, sourceDir);
+}
+
+/**
+ * Forge scaffold/pack 绝不允许写入的 Host 受管根:安装内容根 + 批准状态根(来自
+ * `managedRootDirs()`)+ **随包 seed 根**。seed 根漏在外面时,把 `.cindy` 产物写进
+ * seed 目录会翻转播种指纹,下次启动触发整目录重播种(B-4);seed 根与内容/状态根
+ * 物理不相交,不在 `managedRootDirs()` 内,必须在此显式并入。
+ */
+export function ghostForgeForbiddenRootDirs(): string[] {
+  return [...getGhostManager().managedRootDirs(), ...builtinSeedRootDirs()];
 }
 
 function hasDisabledMarker(dir: string): boolean {
@@ -4596,7 +4642,8 @@ export function registerGhostIpc(): void {
   ipcMain.handle('ghosts:runtime-states', () => ({ states: runtime.listStates() }));
 
   // 面板错误态的「重载意识」:清熔断记账 + 重新拉起沙箱。
-  ipcMain.handle('ghosts:reload', async (_event, id: unknown) => {
+  ipcMain.handle('ghosts:reload', async (event, id: unknown) => {
+    assertTrustedAppRendererEvent(event);
     if (typeof id !== 'string' || id.trim().length === 0) {
       throwIpcError('INVALID_PARAMS', 'id must be a non-empty string');
     }

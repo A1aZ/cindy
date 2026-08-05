@@ -162,13 +162,49 @@ describe('DirDepositVault', () => {
 });
 
 describe('DirDepositVault userGranted 旁路(workdir 外确认卡通过后)', () => {
+  it('rejects a canonical path that changed after confirmation', async () => {
+    const first = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-approved-first-'));
+    const second = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-approved-second-'));
+    const linkPath = path.join(workdir, 'approved-link');
+    try {
+      await fs.promises.writeFile(path.join(first, 'a.txt'), 'first');
+      await fs.promises.writeFile(path.join(second, 'b.txt'), 'second');
+      try {
+        await fs.promises.symlink(first, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+      } catch {
+        return;
+      }
+      await fs.promises.rm(linkPath, { recursive: true, force: true });
+      await fs.promises.symlink(second, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+
+      const vault = new DirDepositVault();
+      const result = vault.deposit({
+        ghostId: 'g1',
+        dirAbs: linkPath,
+        workdirAbs: workdir,
+        userGranted: true,
+        approvedRealPath: first,
+      });
+      expect(result.ok).toBe(false);
+    } finally {
+      await fs.promises.rm(first, { recursive: true, force: true });
+      await fs.promises.rm(second, { recursive: true, force: true });
+      await fs.promises.rm(linkPath, { recursive: true, force: true });
+    }
+  });
   it('workdir 外目录:未获确认拒,userGranted=true 放行且票据可正常取货', async () => {
     const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-outside-'));
     try {
       await fs.promises.writeFile(path.join(outside, 'a.txt'), 'hello');
       const vault = new DirDepositVault();
       expect(vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: workdir }).ok).toBe(false);
-      const r = vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: workdir, userGranted: true });
+      const r = vault.deposit({
+        ghostId: 'g1',
+        dirAbs: outside,
+        workdirAbs: workdir,
+        userGranted: true,
+        approvedRealPath: outside,
+      });
       expect(r.ok).toBe(true);
       if (r.ok) {
         const taken = vault.take('g1', r.receipt.token);
@@ -188,6 +224,36 @@ describe('DirDepositVault userGranted 旁路(workdir 外确认卡通过后)', ()
       expect(vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: null }).ok).toBe(false);
       expect(vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: null, userGranted: true }).ok).toBe(true);
     } finally {
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('出票后目录被替换为链接时,消费点拒绝跟链读取', async () => {
+    const approvedParent = await fs.promises.mkdtemp(path.join(workdir, 'approved-parent-'));
+    const sourceDir = path.join(approvedParent, 'source');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-ticket-outside-'));
+    try {
+      await fs.promises.mkdir(sourceDir, { recursive: true });
+      await fs.promises.writeFile(path.join(sourceDir, 'safe.txt'), 'safe');
+      await fs.promises.writeFile(path.join(outside, 'safe.txt'), 'outside');
+      const vault = new DirDepositVault();
+      const result = vault.deposit({ ghostId: 'g1', dirAbs: sourceDir, workdirAbs: workdir });
+      if (!result.ok) throw new Error('deposit failed');
+
+      await fs.promises.rename(sourceDir, path.join(approvedParent, 'source-old'));
+      try {
+        await fs.promises.symlink(
+          outside,
+          sourceDir,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch {
+        return;
+      }
+      const taken = vault.take('g1', result.receipt.token);
+      await expect(taken!.files[0].read()).rejects.toThrow(/changed after confirmation|identity changed/);
+    } finally {
+      await fs.promises.rm(approvedParent, { recursive: true, force: true });
       await fs.promises.rm(outside, { recursive: true, force: true });
     }
   });

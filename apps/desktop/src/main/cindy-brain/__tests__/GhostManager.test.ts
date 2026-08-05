@@ -391,6 +391,31 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
   });
 
+  it('legacy .disabled marker IO errors stay pending instead of becoming disabled', async () => {
+    await writeLegacyInstall('hello', goodManifest());
+    const markerPath = path.join(rootDir, 'hello', '.disabled');
+    const realLstatSync = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(markerPath)) {
+        spy.mockRestore();
+        throw Object.assign(new Error('EIO: marker temporarily unreadable'), { code: 'EIO' });
+      }
+      return realLstatSync(target, options as never);
+    });
+
+    const first = await manager.migrateLegacyApprovalsOnce();
+    expect(first).toMatchObject({ migrated: [], failed: [], retryPending: ['hello'] });
+    expect(JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8'))).toMatchObject({
+      state: 'in-progress',
+      pendingIds: ['hello'],
+    });
+    expect(manager.list()[0]).toMatchObject({ approval: { state: 'legacy-unapproved' } });
+
+    const second = await manager.migrateLegacyApprovalsOnce();
+    expect(second.migrated).toEqual(['hello']);
+    expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
+  });
+
   it('已有 receipt 瞬时不可读时不从可变安装目录重铸,保留原批准并持久重试', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
@@ -1105,6 +1130,28 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(byId.planted).toBe('legacy-unapproved');
   });
 
+  it('closes the recovery ledger when a queued id is already approved', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    await fs.promises.writeFile(
+      migrationLedgerPath(),
+      JSON.stringify({
+        version: 1,
+        migratedAt: new Date().toISOString(),
+        migratedIds: [],
+        state: 'in-progress',
+        pendingIds: ['hello'],
+      }),
+    );
+
+    await expect(manager.backfillRecoveredLegacyGhosts(['hello'])).resolves.toEqual({
+      migrated: [],
+      failed: [],
+    });
+    expect(JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8'))).toMatchObject({
+      state: 'completed',
+    });
+  });
+
   it('恢复旁路遇到 unreadable receipt 同样只排队重试,不重铸批准', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
@@ -1184,6 +1231,37 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       renameSpy.mockRestore();
     }
     expect(queueSeenBeforeReceipt).toBe(true);
+  });
+
+  it('does not overwrite an existing recovery queue when the migration ledger is unreadable', async () => {
+    await fs.promises.mkdir(path.dirname(migrationLedgerPath()), { recursive: true });
+    const originalLedger = {
+      version: 1,
+      migratedAt: new Date().toISOString(),
+      migratedIds: [],
+      state: 'in-progress',
+      pendingIds: ['existing'],
+    };
+    await fs.promises.writeFile(migrationLedgerPath(), JSON.stringify(originalLedger));
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+    const realReadFileSync = fs.readFileSync;
+    const readSpy = vi.spyOn(fs, 'readFileSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(migrationLedgerPath())) {
+        throw Object.assign(new Error('EIO: ledger temporarily unreadable'), { code: 'EIO' });
+      }
+      return realReadFileSync(target, options as never);
+    });
+
+    try {
+      await expect(manager.backfillRecoveredLegacyGhosts(['recovered'])).rejects.toThrow(
+        /ledger exists but is unreadable/,
+      );
+    } finally {
+      readSpy.mockRestore();
+    }
+    expect(JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8'))).toEqual(
+      originalLedger,
+    );
   });
 
   it('P1-6:重新确认拒绝与已装插件撞名的指令', async () => {
@@ -1779,9 +1857,10 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
 
   it('已提交的更新(标记 packageSha256 == receipt)保留新字节,只回收陈旧 backup', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
-    const committedPkg = (JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+    const committedReceipt = JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
       packageSha256: string;
-    }).packageSha256;
+      revision: string;
+    };
     const backupName = '.cindy-updating-hello-abcdef34';
     await fs.promises.mkdir(path.join(rootDir, backupName));
     await fs.promises.writeFile(path.join(rootDir, backupName, 'stale.txt'), 'old');
@@ -1792,8 +1871,10 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
         version: 1,
         id: 'hello',
         kind: 'update',
-        packageSha256: committedPkg, // 与 receipt 相符 = 已提交
+        packageSha256: committedReceipt.packageSha256,
+        receiptRevision: committedReceipt.revision,
         backupDirName: backupName,
+        phase: 'published',
       }),
     );
 
@@ -1802,6 +1883,87 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
     expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(true); // 新版保留
     expect(fs.existsSync(pendingMarkerPath())).toBe(false);
     expect(manager.list()[0].approval.state).toBe('approved');
+  });
+
+  it('same-hash backed-up update restores the only backup instead of deleting it', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receiptBefore = await fs.promises.readFile(receiptPath(), 'utf8');
+    const receipt = JSON.parse(receiptBefore) as { packageSha256: string };
+    const finalDir = path.join(rootDir, 'hello');
+    const backupName = '.cindy-updating-hello-acde0011';
+    await fs.promises.rename(finalDir, path.join(rootDir, backupName));
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: receipt.packageSha256,
+        oldPackageSha256: receipt.packageSha256,
+        receiptRevision: '11111111-1111-4111-8111-111111111111',
+        backupDirName: backupName,
+        phase: 'backed-up',
+      }),
+    );
+
+    freshManager();
+    expect(fs.existsSync(finalDir)).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, backupName))).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+    expect(await fs.promises.readFile(receiptPath(), 'utf8')).toBe(receiptBefore);
+  });
+
+  it('same-hash backed-up update rolls back a final whose receipt revision is still old', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receipt = JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256: string;
+    };
+    const finalDir = path.join(rootDir, 'hello');
+    const backupName = '.cindy-updating-hello-acde0022';
+    await fs.promises.rename(finalDir, path.join(rootDir, backupName));
+    await fs.promises.mkdir(finalDir);
+    await fs.promises.writeFile(path.join(finalDir, 'new.txt'), 'uncommitted');
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'update',
+        packageSha256: receipt.packageSha256,
+        oldPackageSha256: receipt.packageSha256,
+        receiptRevision: '22222222-2222-4222-8222-222222222222',
+        backupDirName: backupName,
+        phase: 'backed-up',
+      }),
+    );
+
+    freshManager();
+    expect(fs.existsSync(path.join(finalDir, 'new.txt'))).toBe(false);
+    expect(fs.existsSync(path.join(finalDir, 'ghost.json'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, backupName))).toBe(false);
+    expect(fs.existsSync(pendingMarkerPath())).toBe(false);
+  });
+
+  it('legacy install marker with an old same-hash receipt and no final stays isolated', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    const receipt = JSON.parse(await fs.promises.readFile(receiptPath(), 'utf8')) as {
+      packageSha256: string;
+    };
+    await fs.promises.rm(path.join(rootDir, 'hello'), { recursive: true, force: true });
+    await fs.promises.writeFile(
+      pendingMarkerPath(),
+      JSON.stringify({
+        version: 1,
+        id: 'hello',
+        kind: 'install',
+        packageSha256: receipt.packageSha256,
+      }),
+    );
+
+    freshManager();
+    expect(fs.existsSync(pendingMarkerPath())).toBe(true);
+    expect(fs.existsSync(receiptPath())).toBe(true);
+    expect(manager.list()).toEqual([]);
   });
 
   it('卸载先撤批准再删目录:删目录失败时不留"孤立 approved receipt + 目录在"(防借尸还魂)', async () => {
@@ -2061,6 +2223,34 @@ describe('GhostManager · install', () => {
     expect(manager.list().map((c) => c.manifest.id)).toEqual(['hello']);
     expect(onChanged).toHaveBeenCalledTimes(1);
     expect(onChanged.mock.calls[0][0].map((c: InstalledGhost) => c.manifest.id)).toEqual(['hello']);
+  });
+
+  it('returns the quarantined projection when install journal cleanup fails', async () => {
+    const store = (
+      manager as unknown as {
+        receiptStore: { clearPendingMutation(id: string): Promise<void> };
+      }
+    ).receiptStore;
+    const clearSpy = vi
+      .spyOn(store, 'clearPendingMutation')
+      .mockRejectedValueOnce(new Error('journal cleanup blocked'));
+    let result: Awaited<ReturnType<GhostManager['install']>>;
+    try {
+      result = await manager.install(await makeCindy('valid.cindy', goodManifest()));
+    } finally {
+      clearSpy.mockRestore();
+    }
+    expect('ghost' in result).toBe(true);
+    if (!('ghost' in result)) throw new Error('expected committed install projection');
+    expect(result.ghost).toMatchObject({ approval: { state: 'invalid' }, enabled: false });
+    expect(manager.list()[0]).toMatchObject({ approval: { state: 'invalid' }, enabled: false });
+
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+    });
+    expect(recovered.list()[0]).toMatchObject({ approval: { state: 'approved' } });
   });
 
   it('initiallyEnabled=false:装入即沉睡(.disabled 与目录同帧就位,首个广播就是沉睡态)', async () => {
@@ -2505,6 +2695,89 @@ describe('GhostManager · Host approval receipt', () => {
     expect(manager.list()[0].manifest.version).toBe('2.0.0');
   });
 
+  it('quarantines an update while the new directory is published but receipt is not committed', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const v2 = await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' });
+    const originalRename = fs.promises.rename;
+    let releasePublish!: () => void;
+    let publishStarted!: () => void;
+    const publishStartedPromise = new Promise<void>((resolve) => {
+      publishStarted = resolve;
+    });
+    const publishGate = new Promise<void>((resolve) => {
+      releasePublish = resolve;
+    });
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(from).includes('.cindy-installing-hello-')) {
+        const result = await originalRename(from, to);
+        publishStarted();
+        await publishGate;
+        return result;
+      }
+      return originalRename(from, to);
+    });
+    try {
+      const updatePromise = manager.update(v2, {
+        expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0].approval),
+      });
+      await publishStartedPromise;
+      expect(manager.list()[0]).toMatchObject({ approval: { state: 'invalid' }, enabled: false });
+      releasePublish();
+      expect('ghost' in (await updatePromise)).toBe(true);
+    } finally {
+      releasePublish();
+      renameSpy.mockRestore();
+    }
+  });
+
+  it('keeps a committed update quarantined until its durable journal is cleared', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const v2 = await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' });
+    const store = (
+      manager as unknown as {
+        receiptStore: { clearPendingMutation(id: string): Promise<void> };
+      }
+    ).receiptStore;
+    const clearSpy = vi
+      .spyOn(store, 'clearPendingMutation')
+      .mockRejectedValueOnce(new Error('journal cleanup blocked'));
+    try {
+      const result = await manager.update(v2, {
+        expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0].approval),
+      });
+      expect('ghost' in result).toBe(true);
+      if (!('ghost' in result)) throw new Error('expected committed update projection');
+      expect(result.ghost).toMatchObject({
+        manifest: { version: '2.0.0' },
+        approval: { state: 'invalid' },
+        enabled: false,
+      });
+      expect(manager.list()[0]).toMatchObject({
+        manifest: { version: '2.0.0' },
+        approval: { state: 'invalid' },
+        enabled: false,
+      });
+      expect(
+        fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json')),
+      ).toBe(true);
+    } finally {
+      clearSpy.mockRestore();
+    }
+
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+    });
+    expect(recovered.list()[0]).toMatchObject({
+      manifest: { version: '2.0.0' },
+      approval: { state: 'approved' },
+    });
+    expect(
+      fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json')),
+    ).toBe(false);
+  });
+
   it('removes the receipt and approved skill snapshots on uninstall', async () => {
     const manifest = {
       ...goodManifest('skilled'),
@@ -2869,6 +3142,27 @@ describe('GhostManager · Host approval receipt', () => {
     expect(manager.list()[0].enabled).toBe(true);
     expect(
       await fs.promises.readFile(path.join(snapshotRoot, 'skills', 'demo', 'SKILL.md'), 'utf8'),
+    ).toContain('Approved instructions');
+  });
+
+  it('bundled unchanged approval repairs a deleted skill snapshot without toggling enabled state', async () => {
+    const manifest = skillManifest();
+    await manager.install(await makeCindy('skill.cindy', manifest, skillFiles()));
+    const listed = manager.list()[0];
+    const source = await writeBundledSource(listed.manifest, skillFiles());
+    const snapshotRoot = listed.approvedSkillRoot!;
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+
+    expect(
+      await manager.approveTrustedBundledInstall(listed.manifest, listed.enabled, source),
+    ).toBe(true);
+    expect(manager.list()[0].enabled).toBe(listed.enabled);
+    const repairedSnapshotRoot = manager.list()[0].approvedSkillRoot!;
+    expect(
+      await fs.promises.readFile(
+        path.join(repairedSnapshotRoot, 'skills', 'demo', 'SKILL.md'),
+        'utf8',
+      ),
     ).toContain('Approved instructions');
   });
 

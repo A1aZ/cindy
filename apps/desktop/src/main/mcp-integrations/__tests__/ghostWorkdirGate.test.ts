@@ -23,6 +23,14 @@ const tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'ghost-workdir-gate-')
 const prefsFile = () => path.join(tmpUserData, 'ghost-workdir-prefs.json');
 const logWarnMock = vi.fn();
 const grantAttachmentsMock = vi.fn();
+const { packGhostDirMock } = vi.hoisted(() => ({ packGhostDirMock: vi.fn() }));
+const releaseMutationMock = vi.fn();
+const captureMutationOwnerMock = vi.fn(() => ({
+  mode: 'local' as const,
+  dataOwnerId: 'test',
+  generation: 0,
+}));
+const acquireMutationLeaseMock = vi.fn(() => releaseMutationMock);
 
 vi.mock('electron', () => ({ app: { getPath: () => tmpUserData } }));
 vi.mock('../../appSessionState.js', () => ({
@@ -51,19 +59,25 @@ const ensureReadyMock = vi.fn(
     assessment: { state: 'ready' as const, revision: 0, groups: [] },
   }),
 );
-const sessionSnapshotMock = vi.fn(async () => ({
+const sessionSnapshotMock = vi.fn(async (): Promise<{
+  workingDir: string;
+  permissionMode: string;
+  planModeEnabled: boolean;
+  remoteHostId: string | null;
+}> => ({
   workingDir: WORKDIR,
   permissionMode: 'auto',
   planModeEnabled: false,
   remoteHostId: null,
 }));
 vi.mock('../../cindy-brain/index.js', () => ({
-  getGhostManager: () => ({ list: listMock }),
+  getGhostManager: () => ({ list: listMock, managedRootDirs: () => [] }),
+  ghostForgeForbiddenRootDirs: () => [],
   listAvailableGhostsForAuthorization: () => listMock(),
   findAvailableGhostForAuthorization: (id: string) =>
     listMock().find((ghost: any) => ghost.manifest?.id === id) ?? null,
-  captureGhostMutationOwnerForMcp: () => ({ mode: 'local', dataOwnerId: 'test', generation: 0 }),
-  acquireGhostMutationLeaseForMcp: () => () => {},
+  captureGhostMutationOwnerForMcp: captureMutationOwnerMock,
+  acquireGhostMutationLeaseForMcp: acquireMutationLeaseMock,
   getGhostPipeDispatcher: () => ({ callGhostTool: dispatchMock }),
   getGhostCardService: () => ({ registerCall: () => {}, finalizeCall: () => null }),
   getGhostSetupAssessment: setupAssessmentMock,
@@ -90,7 +104,11 @@ vi.mock('../../cindy-brain/dirDeposit.js', () => ({
 vi.mock('../../cindy-brain/ghostGrantConfirmBridge.js', () => ({ getGhostGrantConfirmBridge: vi.fn() }));
 vi.mock('../../cindy-brain/ghostLocalPathGrant.js', () => ({ classifyLocalAttachmentPath: vi.fn() }));
 vi.mock('../../cindy-brain/cardService.js', () => ({ withCardToken: (r: unknown) => r }));
-vi.mock('../../cindy-brain/forge.js', () => ({ FORGE_GUIDE: 'guide', packGhostDir: vi.fn() }));
+vi.mock('../../cindy-brain/forge.js', () => ({
+  FORGE_GUIDE: 'guide',
+  packGhostDir: packGhostDirMock,
+  scaffoldGhostDir: vi.fn(),
+}));
 vi.mock('../../cindy-brain/openFileInstall.js', () => ({ handleIncomingCindyFile: vi.fn() }));
 vi.mock('../../localDb/ipc/sessions.js', () => ({
   getSessionFsSnapshot: sessionSnapshotMock,
@@ -148,6 +166,9 @@ beforeEach(() => {
   });
   grantAttachmentsMock.mockReset();
   logWarnMock.mockClear();
+  releaseMutationMock.mockClear();
+  captureMutationOwnerMock.mockClear();
+  acquireMutationLeaseMock.mockClear();
   sessionSnapshotMock.mockReset();
   sessionSnapshotMock.mockResolvedValue({
     workingDir: WORKDIR,
@@ -155,7 +176,60 @@ beforeEach(() => {
     planModeEnabled: false,
     remoteHostId: null,
   });
+  packGhostDirMock.mockReset();
+  packGhostDirMock.mockResolvedValue({
+    ok: false,
+    errorCode: 'MANIFEST_INVALID',
+    message: 'stop after gate assertion',
+  });
   clearAllPrefs();
+});
+
+describe('Forge session workdir gate', () => {
+  it('holds the owner mutation lease across the Forge operation', async () => {
+    const operation = makeDeps().forgePack({ dir: path.join(WORKDIR, 'plugin-src') });
+    expect(captureMutationOwnerMock).toHaveBeenCalledTimes(1);
+    expect(acquireMutationLeaseMock).toHaveBeenCalledTimes(1);
+    expect(releaseMutationMock).not.toHaveBeenCalled();
+    await operation;
+    expect(releaseMutationMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes the active session workdir into packGhostDir', async () => {
+    await makeDeps().forgePack({ dir: path.join(WORKDIR, 'plugin-src') });
+    expect(packGhostDirMock).toHaveBeenCalledWith(path.join(WORKDIR, 'plugin-src'), {
+      sessionWorkdir: WORKDIR,
+      forbiddenRootDirs: [],
+    });
+  });
+
+  it('rejects remote workdirs before touching local Forge fs', async () => {
+    sessionSnapshotMock.mockResolvedValueOnce({
+      workingDir: '/remote/project',
+      permissionMode: 'auto',
+      planModeEnabled: false,
+      remoteHostId: 'ssh-1',
+    });
+    const deps = makeDeps();
+    await expect(deps.forgePack({ dir: '/remote/project/plugin-src' })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'WORKDIR_NOT_LOCAL',
+    });
+    expect(packGhostDirMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects Forge writes in read-only or plan sessions', async () => {
+    sessionSnapshotMock.mockResolvedValueOnce({
+      workingDir: WORKDIR,
+      permissionMode: 'ask',
+      planModeEnabled: true,
+      remoteHostId: null,
+    });
+    const deps = makeDeps();
+    await expect(
+      deps.forgeScaffold({ dir: path.join(WORKDIR, 'new-plugin'), template: 'plain', id: 'x', name: 'X' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'WORKDIR_READ_ONLY' });
+  });
 });
 
 afterAll(() => {

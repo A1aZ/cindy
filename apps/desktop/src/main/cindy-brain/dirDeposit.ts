@@ -41,9 +41,14 @@ import {
 export interface CollectedDirFile {
   /** 绝对路径(主机读盘用,不出主机)。 */
   absPath: string;
+  /** 出票时解析出的物理路径;消费时必须仍指向同一对象。 */
+  realPath: string;
   /** 相对目录根的 POSIX 风格路径(multipart filename,服务端按它还原结构)。 */
   relPath: string;
   size: number;
+  dev: number;
+  ino: number;
+  mtimeMs: number;
 }
 
 /** 过户成功后注入 args.dir_deposit 的元数据(意识可见的全部信息)。 */
@@ -88,6 +93,15 @@ export function collectDirFiles(
   let totalBytes = 0;
 
   const walk = (current: string): string | null => {
+    try {
+      const currentStat = fs.lstatSync(current);
+      const currentReal = fs.realpathSync.native(current);
+      if (!currentStat.isDirectory() || !isPathInsideDir(dirAbs, currentReal)) {
+        return `目录结构在收集期间越出批准根:${path.relative(dirAbs, current)}`;
+      }
+    } catch {
+      return null;
+    }
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(current, { withFileTypes: true });
@@ -102,9 +116,22 @@ export function collectDirFiles(
         if (err) return err;
       } else if (entry.isFile()) {
         if (EXCLUDE_FILE_NAMES.has(entry.name) || isEnvFile(entry.name)) continue;
+        let fileStat: fs.Stats;
+        let fileReal: string;
+        try {
+          const listed = fs.lstatSync(abs);
+          if (!listed.isFile()) continue;
+          fileReal = fs.realpathSync.native(abs);
+          if (!isPathInsideDir(dirAbs, fileReal)) {
+            return `文件结构在收集期间越出批准根:${path.relative(dirAbs, abs)}`;
+          }
+          fileStat = fs.statSync(abs);
+        } catch {
+          continue;
+        }
         let size: number;
         try {
-          size = fs.statSync(abs).size;
+          size = fileStat.size;
         } catch {
           continue;
         }
@@ -112,7 +139,15 @@ export function collectDirFiles(
           return `单文件超过限额 ${GHOST_FETCH_DIR_UPLOAD_MAX_BYTES_PER_FILE} 字节:${path.relative(dirAbs, abs)}`;
         }
         const rel = path.relative(dirAbs, abs).split(path.sep).join('/');
-        files.push({ absPath: abs, relPath: rel, size });
+        files.push({
+          absPath: abs,
+          realPath: fileReal,
+          relPath: rel,
+          size,
+          dev: fileStat.dev,
+          ino: fileStat.ino,
+          mtimeMs: fileStat.mtimeMs,
+        });
         totalBytes += size;
         if (files.length > GHOST_FETCH_DIR_UPLOAD_MAX_FILES) {
           return `文件数超过限额 ${GHOST_FETCH_DIR_UPLOAD_MAX_FILES},请清理无关文件或拆分上传`;
@@ -138,6 +173,41 @@ export function isPathInsideDir(parentAbs: string, childAbs: string): boolean {
   const fold = (p: string) => (process.platform === 'win32' ? p.toLowerCase() : p);
   const rel = path.relative(fold(path.resolve(parentAbs)), fold(path.resolve(childAbs)));
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+function sameCanonicalPath(left: string, right: string): boolean {
+  const fold = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value);
+  return fold(path.resolve(left)) === fold(path.resolve(right));
+}
+
+function sameCollectedFileIdentity(stat: fs.Stats, file: CollectedDirFile): boolean {
+  if (stat.size !== file.size || stat.mtimeMs !== file.mtimeMs) return false;
+  // Windows filesystems may report zero inode/device values. Size + mtime is
+  // the fallback there; on POSIX, dev+ino also catches replacement by a file
+  // reached through a swapped ancestor.
+  return (file.dev === 0 && file.ino === 0) || (stat.dev === file.dev && stat.ino === file.ino);
+}
+
+async function readCollectedFile(file: CollectedDirFile): Promise<Uint8Array> {
+  const currentRealPath = await fs.promises.realpath(file.absPath);
+  if (!sameCanonicalPath(currentRealPath, file.realPath)) {
+    throw new Error('deposited file path changed after confirmation');
+  }
+  const handle = await fs.promises.open(file.absPath, 'r');
+  try {
+    const before = await handle.stat();
+    if (!sameCollectedFileIdentity(before, file)) {
+      throw new Error('deposited file identity changed after confirmation');
+    }
+    const bytes = await handle.readFile();
+    const after = await handle.stat();
+    if (!sameCollectedFileIdentity(after, file)) {
+      throw new Error('deposited file changed while being read');
+    }
+    return new Uint8Array(bytes);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 interface VaultEntry {
@@ -167,8 +237,9 @@ export class DirDepositVault {
     dirAbs: string;
     workdirAbs: string | null;
     userGranted?: boolean;
+    approvedRealPath?: string;
   }): { ok: true; receipt: DirDepositReceipt } | { ok: false; message: string } {
-    const { ghostId, dirAbs, workdirAbs, userGranted } = params;
+    const { ghostId, dirAbs, workdirAbs, userGranted, approvedRealPath } = params;
     if (!path.isAbsolute(dirAbs)) {
       return { ok: false, message: `dir 必须是绝对路径,得到:${dirAbs}` };
     }
@@ -201,6 +272,12 @@ export class DirDepositVault {
     } catch {
       return { ok: false, message: `目录不存在:${dirAbs}` };
     }
+    if (userGranted && workdirAbs && !approvedRealPath) {
+      return { ok: false, message: 'approved path is required for an outside-workdir grant' };
+    }
+    if (approvedRealPath && !sameCanonicalPath(realDir, approvedRealPath)) {
+      return { ok: false, message: 'approved directory changed after confirmation' };
+    }
     if (!userGranted && (!realWorkdir || !isPathInsideDir(realWorkdir, realDir))) {
       return { ok: false, message: '目录必须位于当前会话的工作目录内(不许过户 workdir 之外的路径)' };
     }
@@ -215,7 +292,19 @@ export class DirDepositVault {
       if (stat.size > GHOST_FETCH_DIR_UPLOAD_MAX_BYTES_PER_FILE) {
         return { ok: false, message: `单文件超过限额 ${GHOST_FETCH_DIR_UPLOAD_MAX_BYTES_PER_FILE} 字节:${name}` };
       }
-      collected = { ok: true, files: [{ absPath: realDir, relPath: name, size: stat.size }], totalBytes: stat.size };
+      collected = {
+        ok: true,
+        files: [{
+          absPath: realDir,
+          realPath: realDir,
+          relPath: name,
+          size: stat.size,
+          dev: stat.dev,
+          ino: stat.ino,
+          mtimeMs: stat.mtimeMs,
+        }],
+        totalBytes: stat.size,
+      };
     } else if (stat.isDirectory()) {
       collected = collectDirFiles(realDir);
     } else {
@@ -257,7 +346,7 @@ export class DirDepositVault {
       files: entry.files.map((f) => ({
         relPath: f.relPath,
         size: f.size,
-        read: () => fs.promises.readFile(f.absPath).then((b) => new Uint8Array(b)),
+        read: () => readCollectedFile(f),
       })),
     };
   }
@@ -297,9 +386,51 @@ export interface SaveDepositReceipt {
 interface SaveVaultEntry {
   ghostId: string;
   dirAbs: string;
+  dirDev: number;
+  dirIno: number;
   usesLeft: number;
   bytesLeft: number;
   expiresAt: number;
+}
+
+function sameFsIdentity(a: fs.Stats, b: fs.Stats): boolean {
+  return a.dev !== 0 && a.ino !== 0 && b.dev === a.dev && b.ino === a.ino;
+}
+
+function writeAllToFd(fd: number, bytes: Uint8Array): Promise<void> {
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return new Promise((resolve, reject) => {
+    let offset = 0;
+    const writeNext = (): void => {
+      if (offset >= buffer.byteLength) {
+        resolve();
+        return;
+      }
+      fs.write(fd, buffer, offset, buffer.byteLength - offset, null, (error, written) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        if (written <= 0) {
+          reject(new Error('save deposit write made no progress'));
+          return;
+        }
+        offset += written;
+        writeNext();
+      });
+    };
+    writeNext();
+  });
+}
+
+function removeOpenedSaveFile(candidatePath: string, openedStat: fs.Stats): void {
+  try {
+    const current = fs.lstatSync(candidatePath);
+    if (!current.isFile() || !sameFsIdentity(openedStat, current)) return;
+    fs.rmSync(candidatePath, { force: true });
+  } catch {
+    // Best-effort cleanup only. Never delete a path whose identity changed.
+  }
 }
 
 /** Windows 保留设备名(不区分大小写;带任意扩展名同样命中,如 NUL.pdf)。 */
@@ -326,17 +457,6 @@ export function sanitizeSaveFileName(raw: string | undefined): string {
   return cleaned;
 }
 
-/** 防覆盖去重:已存在时在扩展名前插 " (n)"。 */
-function dedupeFileName(dirAbs: string, fileName: string): string {
-  let candidate = fileName;
-  const ext = path.extname(fileName);
-  const stem = fileName.slice(0, fileName.length - ext.length);
-  for (let n = 1; fs.existsSync(path.join(dirAbs, candidate)); n++) {
-    candidate = `${stem} (${n})${ext}`;
-  }
-  return candidate;
-}
-
 /**
  * 下行落盘票据库:deposit 发票(验证目录在 workdir 内),use 验票拿写入
  * 闭包(TTL + ghostId 绑定 + 次数/字节双预算;写满自动作废)。
@@ -351,8 +471,9 @@ export class SaveDepositVault {
     dirAbs: string;
     workdirAbs: string | null;
     userGranted?: boolean;
+    approvedRealPath?: string;
   }): { ok: true; receipt: SaveDepositReceipt } | { ok: false; message: string } {
-    const { ghostId, dirAbs, workdirAbs, userGranted } = params;
+    const { ghostId, dirAbs, workdirAbs, userGranted, approvedRealPath } = params;
     if (!path.isAbsolute(dirAbs)) {
       return { ok: false, message: `save_dir 必须是绝对路径,得到:${dirAbs}` };
     }
@@ -382,6 +503,12 @@ export class SaveDepositVault {
     if (!stat.isDirectory()) {
       return { ok: false, message: `save_dir 不是目录:${dirAbs}` };
     }
+    if (userGranted && workdirAbs && !approvedRealPath) {
+      return { ok: false, message: 'approved path is required for an outside-workdir grant' };
+    }
+    if (approvedRealPath && !sameCanonicalPath(realDir, approvedRealPath)) {
+      return { ok: false, message: 'approved directory changed after confirmation' };
+    }
     if (!userGranted && (!realWorkdir || !isPathInsideDir(realWorkdir, realDir))) {
       return { ok: false, message: '落盘目录必须位于当前会话的工作目录内(不许写 workdir 之外)' };
     }
@@ -390,6 +517,8 @@ export class SaveDepositVault {
     this.entries.set(token, {
       ghostId,
       dirAbs: realDir,
+      dirDev: stat.dev,
+      dirIno: stat.ino,
       usesLeft: GHOST_SAVE_DEPOSIT_MAX_USES,
       bytesLeft: GHOST_SAVE_DEPOSIT_MAX_TOTAL_BYTES,
       expiresAt: this.now() + GHOST_SAVE_DEPOSIT_TTL_MS,
@@ -415,19 +544,101 @@ export class SaveDepositVault {
       this.entries.delete(token);
       return null;
     }
-    if (entry.usesLeft <= 0 || bytes.byteLength > entry.bytesLeft) return null;
-    const finalName = dedupeFileName(entry.dirAbs, sanitizeSaveFileName(fileName));
     try {
-      // 异步写:上限 256MB,同步写会把 main event loop 卡住数百 ms 到秒级
-      //(遇杀软实时扫描更糟),期间全部 IPC / 窗口交互冻结(规则 15)。
-      await fs.promises.writeFile(path.join(entry.dirAbs, finalName), bytes);
+      const currentReal = fs.realpathSync.native(entry.dirAbs);
+      const currentStat = fs.statSync(entry.dirAbs);
+      if (
+        !sameCanonicalPath(currentReal, entry.dirAbs) ||
+        ((entry.dirDev !== 0 || entry.dirIno !== 0) &&
+          (currentStat.dev !== entry.dirDev || currentStat.ino !== entry.dirIno))
+      ) {
+        return null;
+      }
     } catch {
       return null;
     }
+    if (entry.usesLeft <= 0 || bytes.byteLength > entry.bytesLeft) return null;
+
+    // Reserve the finite budget before the first await. Otherwise parallel
+    // callers all observe the same old allowance and can exceed both limits.
     entry.usesLeft -= 1;
     entry.bytesLeft -= bytes.byteLength;
+    const reservedUses = 1;
+    const reservedBytes = bytes.byteLength;
+    const baseName = sanitizeSaveFileName(fileName);
+    const ext = path.extname(baseName);
+    const stem = baseName.slice(0, baseName.length - ext.length);
+    let finalName: string | null = null;
+    let openedPath: string | null = null;
+    let openedStat: fs.Stats | null = null;
+    let fd: number | null = null;
+    try {
+      // Reserve a name atomically. exists-then-write allows parallel calls to
+      // choose the same path and overwrite each other.
+      for (let n = 0; ; n += 1) {
+        const candidate = n === 0 ? baseName : `${stem} (${n})${ext}`;
+        const candidatePath = path.join(entry.dirAbs, candidate);
+        try {
+          // Open synchronously before the first await, then write through the
+          // stable descriptor. Revalidate both the approved parent and the
+          // opened directory entry before any response bytes are written.
+          fd = fs.openSync(candidatePath, 'wx', 0o600);
+          openedPath = candidatePath;
+          openedStat = fs.fstatSync(fd);
+          const currentReal = fs.realpathSync.native(entry.dirAbs);
+          const currentDirStat = fs.statSync(entry.dirAbs);
+          const currentPathStat = fs.statSync(candidatePath);
+          const currentFileReal = fs.realpathSync.native(candidatePath);
+          if (
+            !sameCanonicalPath(currentReal, entry.dirAbs) ||
+            ((entry.dirDev !== 0 || entry.dirIno !== 0) &&
+              (currentDirStat.dev !== entry.dirDev || currentDirStat.ino !== entry.dirIno)) ||
+            !sameCanonicalPath(path.dirname(currentFileReal), entry.dirAbs) ||
+            (openedStat.dev !== 0 && openedStat.ino !== 0 &&
+              !sameFsIdentity(openedStat, currentPathStat))
+          ) {
+            throw new Error('save deposit directory changed while opening target');
+          }
+          finalName = candidate;
+          break;
+        } catch (err) {
+          if (fd !== null) {
+            try {
+              fs.closeSync(fd);
+            } catch {
+              // Ignore close failure; the write is already rejected.
+            }
+            fd = null;
+          }
+          if (openedPath && openedStat) removeOpenedSaveFile(openedPath, openedStat);
+          openedPath = null;
+          openedStat = null;
+          if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
+          throw err;
+        }
+      }
+      await writeAllToFd(fd!, bytes);
+      fs.closeSync(fd!);
+      fd = null;
+    } catch {
+      if (fd !== null) {
+        try {
+          fs.closeSync(fd);
+        } catch {
+          // Ignore close failure; the write is already rejected.
+        }
+      }
+      if (openedPath && openedStat) removeOpenedSaveFile(openedPath, openedStat);
+      // Return only this call's reservation. Keep another caller's reservations
+      // intact and do not resurrect an expired/replaced ticket.
+      if (this.entries.get(token) === entry) {
+        entry.usesLeft += reservedUses;
+        entry.bytesLeft += reservedBytes;
+      }
+      return null;
+    }
     if (entry.usesLeft <= 0 || entry.bytesLeft <= 0) this.entries.delete(token);
-    return { fileName: finalName };
+    return { fileName: finalName! };
   }
 
   private sweep(): void {

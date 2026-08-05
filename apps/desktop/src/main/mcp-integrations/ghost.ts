@@ -55,6 +55,7 @@ import { drainGhostCallMedia } from '../cindy-brain/ghostMediaLedger.js';
 import {
   getGhostCardService,
   getGhostManager,
+  ghostForgeForbiddenRootDirs,
   getGhostPipeDispatcher,
   getGhostSetupAssessment,
   acquireGhostMutationLeaseForMcp,
@@ -66,6 +67,7 @@ import {
 import { getGhostSetupCoordinator } from '../cindy-brain/ghostSetupCoordinator.js';
 import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir } from '../cindy-brain/forge.js';
+import { writeForgeScaffoldWithStableParent } from '../cindy-brain/forgeScaffoldCapability.js';
 import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import { handleIncomingCindyFile } from '../cindy-brain/openFileInstall.js';
 import * as blobStore from '../cindy-media/blobStore.js';
@@ -148,6 +150,60 @@ async function buildGhostSessionContext(
         }
       : null,
   );
+}
+
+type ForgeSessionFsGate =
+  | { ok: true; workingDir: string }
+  | {
+      ok: false;
+      errorCode: 'WORKDIR_NOT_LOCAL' | 'WORKDIR_READ_ONLY';
+      message: string;
+    };
+
+async function withForgeOwnerLease<T>(operation: () => Promise<T>): Promise<T> {
+  const owner = captureGhostMutationOwnerForMcp();
+  const release = acquireGhostMutationLeaseForMcp(owner);
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Forge performs Host-side local filesystem writes. A raw MCP workingDir is
+ * only a label; the authoritative session row decides whether it is local and
+ * whether writes are currently allowed. Keep this gate next to the session
+ * snapshot builder so scaffold/pack cannot silently drift into independent
+ * caller-supplied path checks.
+ */
+async function getForgeSessionFsGate(
+  sessionContext: LiziMcpSessionContext | undefined,
+): Promise<ForgeSessionFsGate> {
+  const sessionId = sessionContext?.sessionId ?? null;
+  if (!sessionId) {
+    return {
+      ok: false,
+      errorCode: 'WORKDIR_NOT_LOCAL',
+      message: 'Forge requires an authoritative local session workdir',
+    };
+  }
+  const snapshot = await getSessionFsSnapshot(sessionId);
+  if (!snapshot?.workingDir || snapshot.remoteHostId) {
+    return {
+      ok: false,
+      errorCode: 'WORKDIR_NOT_LOCAL',
+      message: 'Forge cannot use a remote or unverified session workdir on the local host',
+    };
+  }
+  if (workdirWriteVerdict(snapshot.permissionMode, snapshot.planModeEnabled) === 'deny') {
+    return {
+      ok: false,
+      errorCode: 'WORKDIR_READ_ONLY',
+      message: 'Forge is disabled while the current session workdir is read-only or in plan mode',
+    };
+  }
+  return { ok: true, workingDir: snapshot.workingDir };
 }
 
 /** 意识显示名(确认卡标题用;查不到回落 id)。 */
@@ -384,7 +440,11 @@ async function confirmDepositOutsideWorkdir(params: {
   lane: 'dir' | 'save_dir';
   dirAbs: string;
   workdirAbs: string | null;
-}): Promise<{ ok: true; userGranted: boolean } | { ok: false; message: string }> {
+}): Promise<
+  | { ok: true; userGranted: false }
+  | { ok: true; userGranted: true; approvedRealPath: string }
+  | { ok: false; message: string }
+> {
   if (!path.isAbsolute(params.dirAbs)) return { ok: true, userGranted: false };
   let real: string;
   let stat: fs.Stats;
@@ -401,7 +461,7 @@ async function confirmDepositOutsideWorkdir(params: {
     params.sessionId &&
     dirGrantMemory.has(dirGrantMemoryKey(params.sessionId, params.ghostId, params.lane, real))
   ) {
-    return { ok: true, userGranted: true };
+    return { ok: true, userGranted: true, approvedRealPath: real };
   }
 
   let item: GhostGrantFileItem;
@@ -441,7 +501,7 @@ async function confirmDepositOutsideWorkdir(params: {
     ghostId: params.ghostId,
     lane: params.lane,
   });
-  return { ok: true, userGranted: true };
+  return { ok: true, userGranted: true, approvedRealPath: real };
 }
 
 /**
@@ -889,6 +949,7 @@ export function getCindyGhostsMcpDeps(sessionCtx?: LiziMcpSessionContext): Cindy
             dirAbs: dir,
             workdirAbs: sessionWorkdir,
             userGranted: dirConfirm.userGranted,
+            ...(dirConfirm.userGranted ? { approvedRealPath: dirConfirm.approvedRealPath } : {}),
           });
           if (!deposited.ok) {
             return { ok: false, errorCode: 'DIR_INVALID', message: deposited.message };
@@ -914,6 +975,7 @@ export function getCindyGhostsMcpDeps(sessionCtx?: LiziMcpSessionContext): Cindy
             dirAbs: saveDir,
             workdirAbs: sessionWorkdir,
             userGranted: saveConfirm.userGranted,
+            ...(saveConfirm.userGranted ? { approvedRealPath: saveConfirm.approvedRealPath } : {}),
           });
           if (!saveDeposited.ok) {
             return { ok: false, errorCode: 'DIR_INVALID', message: saveDeposited.message };
@@ -1071,37 +1133,46 @@ export function getCindyGhostsMcpDeps(sessionCtx?: LiziMcpSessionContext): Cindy
       return FORGE_GUIDE;
     },
     async forgeScaffold(request): Promise<CindyForgeScaffoldResult> {
-      const sessionWorkdir = resolveSessionContext()?.workingDir ?? null;
-      const result = await scaffoldGhostDir(request, {
-        sessionWorkdir,
-        forbiddenRootDirs: getGhostManager().managedRootDirs(),
-      });
-      if (result.ok) {
-        log.info('ghost forge scaffold created', {
-          dir: result.dir,
-          template: result.template,
-          files: result.files,
+      return withForgeOwnerLease(async () => {
+        const gate = await getForgeSessionFsGate(resolveSessionContext());
+        if (!gate.ok) return gate;
+        const result = await scaffoldGhostDir(request, {
+          sessionWorkdir: gate.workingDir,
+          forbiddenRootDirs: ghostForgeForbiddenRootDirs(),
+          writeScaffold: writeForgeScaffoldWithStableParent,
         });
-      }
-      return result;
+        if (result.ok) {
+          log.info('ghost forge scaffold created', {
+            dir: result.dir,
+            template: result.template,
+            files: result.files,
+          });
+        }
+        return result;
+      });
     },
     async forgePack({ dir }): Promise<CindyForgePackResult> {
-      const packed = await packGhostDir(dir, {
-        forbiddenRootDirs: getGhostManager().managedRootDirs(),
+      return withForgeOwnerLease(async () => {
+        const gate = await getForgeSessionFsGate(resolveSessionContext());
+        if (!gate.ok) return gate;
+        const packed = await packGhostDir(dir, {
+          sessionWorkdir: gate.workingDir,
+          forbiddenRootDirs: ghostForgeForbiddenRootDirs(),
+        });
+        if (!packed.ok) return packed;
+        // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
+        // 自动转"更新 vX → vY"),用户点头才真装。
+        await handleIncomingCindyFile(packed.cindyPath, 'ghost-forge');
+        log.info('ghost forge packed', { dir, cindyPath: packed.cindyPath, id: packed.manifest.id });
+        return {
+          ok: true,
+          cindyPath: packed.cindyPath,
+          id: packed.manifest.id,
+          name: packed.manifest.name,
+          version: packed.manifest.version,
+          note: '已打包并弹出装入/更新确认框,请告知用户在应用内确认(装入默认沉睡)。',
+        };
       });
-      if (!packed.ok) return packed;
-      // 与双击 .cindy 同一条转交通道:renderer 弹标准确认框(同 id 已装则
-      // 自动转"更新 vX → vY"),用户点头才真装。
-      await handleIncomingCindyFile(packed.cindyPath, 'ghost-forge');
-      log.info('ghost forge packed', { dir, cindyPath: packed.cindyPath, id: packed.manifest.id });
-      return {
-        ok: true,
-        cindyPath: packed.cindyPath,
-        id: packed.manifest.id,
-        name: packed.manifest.name,
-        version: packed.manifest.version,
-        note: '已打包并弹出装入/更新确认框,请告知用户在应用内确认(装入默认沉睡)。',
-      };
     },
     logger: log,
   };

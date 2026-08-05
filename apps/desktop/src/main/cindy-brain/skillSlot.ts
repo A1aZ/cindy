@@ -37,6 +37,7 @@
  */
 
 import { promises as fsp } from 'node:fs';
+import type { Dirent } from 'node:fs';
 import path from 'node:path';
 
 import matter from 'gray-matter';
@@ -97,6 +98,100 @@ export interface ReconcileGhostSkillLinksResult {
   warnings: string[];
 }
 
+/**
+ * Remove Cindy-managed global skill projections for every owner root during an
+ * account boundary. This is intentionally separate from the active-owner
+ * reconcile: the latter must preserve user-owned foreign links, while a
+ * boundary must revoke all Cindy-owned projections before the next owner is
+ * visible.
+ *
+ * Best-effort by contract: the shared skill roots are world-writable and shared
+ * with other tools, so a single unrelated bad entry (a self-referential link, an
+ * inaccessible target segment) must NOT abort the whole revocation. Every failure
+ * is collected into `warnings` and the sweep continues; callers log the warnings
+ * but proceed with the account boundary. Throwing here would both strand old
+ * owner links across the boundary (I-2) and block logout entirely (the teardown
+ * path does not wrap this call).
+ */
+export async function removeGhostSkillLinksForRoots(
+  managedRoots: readonly string[],
+  homeDir?: string,
+): Promise<{ changed: boolean; warnings: string[] }> {
+  const warnings: string[] = [];
+  let changed = false;
+  const paths = sharedGlobalSkillsPaths(homeDir);
+  const lexicalRoots = [...new Set(managedRoots.map(normalizeForCompare))];
+  const resolvedRoots: string[] = [];
+  for (const root of managedRoots) {
+    try {
+      const rootStat = await fsp.lstat(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+        warnings.push(`Managed owner skill root is not a regular directory: ${root}`);
+        continue;
+      }
+      resolvedRoots.push(normalizeForCompare(await fsp.realpath(root)));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        warnings.push(`Unable to resolve managed owner skill root ${root}: ${(err as Error).message}`);
+      }
+    }
+  }
+  if (lexicalRoots.length === 0) return { changed, warnings };
+
+  for (const dir of [paths.sharedSkillsDir, paths.claudeSkillsDir, paths.codexSkillsDir]) {
+    let entries: Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      warnings.push(`Unable to read global skill root ${dir}: ${(err as Error).message}`);
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isSymbolicLink()) continue;
+      const linkPath = path.join(dir, entry.name);
+      let target: string;
+      let roots = resolvedRoots;
+      try {
+        target = normalizeForCompare(await fsp.realpath(linkPath));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          // 无关的坏链(自环 ELOOP、目标段 EACCES)不能中断整轮撤链:记 warning 跳过。
+          warnings.push(`Unable to resolve owner skill link ${linkPath}: ${(err as Error).message}`);
+          continue;
+        }
+        let rawTarget: string;
+        try {
+          rawTarget = await fsp.readlink(linkPath);
+        } catch (readlinkError) {
+          if ((readlinkError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          warnings.push(
+            `Unable to read dangling owner skill link ${linkPath}: ${(readlinkError as Error).message}`,
+          );
+          continue;
+        }
+        target = normalizeForCompare(path.resolve(path.dirname(linkPath), rawTarget));
+        roots = lexicalRoots;
+      }
+      if (!roots.some((root) => isSameOrInside(target, root))) continue;
+      try {
+        const stat = await fsp.lstat(linkPath);
+        if (!stat.isSymbolicLink()) {
+          warnings.push(`Skipped owner skill link that changed before removal: ${linkPath}`);
+          continue;
+        }
+        await fsp.unlink(linkPath);
+        changed = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        warnings.push(`Unable to remove owner skill link ${linkPath}: ${(err as Error).message}`);
+        continue;
+      }
+    }
+  }
+  return { changed, warnings };
+}
+
 interface ReconcileOptions {
   ghosts: InstalledGhost[];
   /** 当前 owner 的插件安装根(userData/.../cindy-brain)。 */
@@ -146,6 +241,7 @@ function targetLooksGhostManaged(
   target: string,
   linkName: string,
   approvalStateDirName: string,
+  managedRoots: readonly string[],
 ): boolean {
   // 链接名必须完整符合我们自己的命名契约:`<合法 ghostId>--<合法技能名>`
   // (按最后一个 `--` 拆分,与 ghostSkillLinkName 同规)。只看 includes('--')
@@ -165,6 +261,8 @@ function targetLooksGhostManaged(
   const segments = target.split(/[\\/]/).map((segment) => segment.toLowerCase());
   const stateDirName = approvalStateDirName.toLowerCase();
   const idLower = ghostId.toLowerCase();
+  const normalizedTarget = normalizeForCompare(target);
+  if (!managedRoots.some((root) => isSameOrInside(normalizedTarget, root))) return false;
   return segments.some(
     (segment, index) =>
       (segment === 'cindy-brain' && segments[index + 1] === idLower) ||
@@ -285,7 +383,7 @@ export async function reconcileGhostSkillLinks(
     const absTarget = path.isAbsolute(rawTarget)
       ? rawTarget
       : path.resolve(sharedSkillsDir, rawTarget);
-    if (targetLooksGhostManaged(absTarget, entName, approvalStateDirName)) {
+    if (targetLooksGhostManaged(absTarget, entName, approvalStateDirName, managedRootCompares)) {
       toRemove.push(entName);
     }
   }

@@ -9,12 +9,73 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import JSZip from 'jszip';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FORGE_GUIDE, packGhostDir, scaffoldGhostDir, type ForgeScaffoldTemplate } from '../forge';
+import {
+  FORGE_GUIDE,
+  packGhostDir as packGhostDirRaw,
+  scaffoldGhostDir as scaffoldGhostDirRaw,
+  type ForgeScaffoldWriteRequest,
+  type ForgeScaffoldTemplate,
+} from '../forge';
 import { GhostManager } from '../GhostManager';
 
 let workDir: string;
+
+async function testScaffoldWriter(request: ForgeScaffoldWriteRequest) {
+  const parentStats = await fs.promises.lstat(request.parentDir);
+  if (!parentStats.isDirectory() || parentStats.isSymbolicLink()) {
+    return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'unsafe parent' };
+  }
+  if (
+    !(request.expectedParent.dev === 0 && request.expectedParent.ino === 0) &&
+    (parentStats.dev !== request.expectedParent.dev || parentStats.ino !== request.expectedParent.ino)
+  ) {
+    return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'parent changed' };
+  }
+  const target = path.join(request.parentDir, request.targetName);
+  try {
+    await fs.promises.lstat(target);
+    return { ok: false as const, errorCode: 'TARGET_EXISTS' as const, message: 'exists' };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const staging = await fs.promises.mkdtemp(path.join(request.parentDir, `.${request.targetName}-scaffold-`));
+  try {
+    for (const file of request.files) {
+      const abs = path.join(staging, file.path);
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+      await fs.promises.writeFile(abs, Buffer.from(file.base64, 'base64'), { flag: 'wx' });
+    }
+    try {
+      await fs.promises.rename(staging, target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST' || (error as NodeJS.ErrnoException).code === 'ENOTEMPTY') {
+        return { ok: false as const, errorCode: 'TARGET_EXISTS' as const, message: 'exists' };
+      }
+      throw error;
+    }
+    return { ok: true as const };
+  } catch (error) {
+    await fs.promises.rm(staging, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function scaffoldGhostDir(
+  input: Parameters<typeof scaffoldGhostDirRaw>[0],
+  options: Omit<NonNullable<Parameters<typeof scaffoldGhostDirRaw>[1]>, 'writeScaffold'> = {},
+) {
+  return scaffoldGhostDirRaw(input, { ...options, writeScaffold: testScaffoldWriter });
+}
+
+function packGhostDir(
+  dir: string,
+  options: Omit<NonNullable<Parameters<typeof packGhostDirRaw>[1]>, 'sessionWorkdir'> = {},
+) {
+  return packGhostDirRaw(dir, { sessionWorkdir: workDir, ...options });
+}
 
 beforeEach(async () => {
   workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-test-'));
@@ -47,6 +108,130 @@ async function makeSrcDir(files: Record<string, string>): Promise<string> {
 }
 
 describe('packGhostDir', () => {
+  it('writes an in-workdir alias output to the canonical source directory', async () => {
+    const sourceTarget = path.join(workDir, 'source-target');
+    const sourceAlias = path.join(workDir, 'source-alias');
+    await fs.promises.mkdir(sourceTarget, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(sourceTarget, 'ghost.json'),
+      JSON.stringify({ ...GOOD_MANIFEST, id: 'inside' }),
+    );
+    await fs.promises.writeFile(path.join(sourceTarget, 'main.js'), 'export default {}');
+    await fs.promises.symlink(
+      sourceTarget,
+      sourceAlias,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const packed = await packGhostDir(sourceAlias);
+    expect(packed).toMatchObject({ ok: true, cindyPath: path.join(sourceTarget, 'inside-1.0.0.cindy') });
+    await expect(fs.promises.access(path.join(sourceTarget, 'inside-1.0.0.cindy'))).resolves.toBeUndefined();
+  });
+
+  it('rejects a file replaced by a link after classification', async () => {
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': 'export default {};',
+    });
+    const outsideRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-file-race-'));
+    const outsideFile = path.join(outsideRoot, 'secret.js');
+    await fs.promises.writeFile(outsideFile, 'outside-secret');
+    const originalLstat = fs.promises.lstat.bind(fs.promises);
+    let swapped = false;
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation(async (file) => {
+      const result = await originalLstat(file);
+      if (!swapped && path.basename(String(file)) === 'main.js') {
+        swapped = true;
+        await fs.promises.rm(String(file), { force: true });
+        await fs.promises.symlink(
+          outsideFile,
+          String(file),
+          process.platform === 'win32' ? 'file' : undefined,
+        );
+      }
+      return result;
+    });
+    try {
+      const packed = await packGhostDir(dir);
+      expect(packed).toMatchObject({ ok: false, errorCode: 'ENTRY_MISSING' });
+      await expect(fs.promises.access(path.join(dir, 'demo-1.0.0.cindy'))).rejects.toThrow();
+    } finally {
+      lstatSpy.mockRestore();
+      await fs.promises.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a child directory replaced by a junction before recursion', async () => {
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': 'export default {};',
+      'assets/readme.txt': 'inside',
+    });
+    const outsideRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-dir-race-'));
+    const outsideDir = path.join(outsideRoot, 'assets');
+    await fs.promises.mkdir(outsideDir, { recursive: true });
+    await fs.promises.writeFile(path.join(outsideDir, 'secret.txt'), 'outside-secret');
+    const assetsDir = path.join(dir, 'assets');
+    const originalLstat = fs.promises.lstat.bind(fs.promises);
+    let swapped = false;
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation(async (file) => {
+      const result = await originalLstat(file);
+      if (!swapped && path.resolve(String(file)) === path.resolve(assetsDir)) {
+        swapped = true;
+        await fs.promises.rm(assetsDir, { recursive: true, force: true });
+        await fs.promises.symlink(
+          outsideDir,
+          assetsDir,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      }
+      return result;
+    });
+    try {
+      const packed = await packGhostDir(dir);
+      expect(packed).toMatchObject({ ok: false, errorCode: 'SOURCE_OUTSIDE_WORKDIR' });
+      await expect(fs.promises.access(path.join(dir, 'demo-1.0.0.cindy'))).rejects.toThrow();
+    } finally {
+      lstatSpy.mockRestore();
+      await fs.promises.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('requires the source to stay inside the current session workdir', async () => {
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': 'export default {}',
+    });
+    await expect(packGhostDirRaw(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+    });
+    await expect(
+      packGhostDirRaw(dir, { sessionWorkdir: path.join(workDir, 'missing-workdir') }),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+    });
+
+    const outsideRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-outside-'));
+    try {
+      const outsideDir = path.join(outsideRoot, 'src');
+      await fs.promises.cp(dir, outsideDir, { recursive: true });
+      await expect(packGhostDirRaw(outsideDir, { sessionWorkdir: workDir })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+      });
+
+      const alias = path.join(workDir, 'outside-alias');
+      await fs.promises.symlink(outsideDir, alias, 'junction');
+      await expect(packGhostDirRaw(alias, { sessionWorkdir: workDir })).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'SOURCE_OUTSIDE_WORKDIR',
+      });
+    } finally {
+      await fs.promises.rm(outsideRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rejects Host-managed roots, descendants, case aliases, and junction aliases', async () => {
     const managedRoot = path.join(workDir, 'managed');
     const installedDir = path.join(managedRoot, 'demo');
@@ -204,6 +389,37 @@ describe('packGhostDir', () => {
     expect('manifest' in inspected, JSON.stringify(inspected)).toBe(true);
 
     await fs.promises.rm(r.cindyPath, { force: true });
+  });
+
+  it('把已校验的 manifest 快照直接用于产物，避免校验 A、打包 B', async () => {
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(GOOD_MANIFEST),
+      'main.js': 'export default {};',
+    });
+    const originalReaddir = fs.promises.readdir.bind(fs.promises);
+    let mutated = false;
+    const readdirSpy = vi.spyOn(fs.promises, 'readdir').mockImplementation(async (directory, options) => {
+      const entries = await originalReaddir(directory, options as never);
+      if (!mutated && path.resolve(String(directory)) === path.resolve(dir)) {
+        mutated = true;
+        await fs.promises.writeFile(
+          path.join(dir, 'ghost.json'),
+          JSON.stringify({ ...GOOD_MANIFEST, id: 'bravo', version: '9.0.0' }),
+        );
+      }
+      return entries as never;
+    });
+    try {
+      const packed = await packGhostDir(dir);
+      expect(packed).toMatchObject({ ok: true, manifest: GOOD_MANIFEST });
+      if (!packed.ok) return;
+      const zip = await JSZip.loadAsync(await fs.promises.readFile(packed.cindyPath));
+      const manifest = await zip.file('ghost.json')?.async('string');
+      expect(manifest).toContain('"id":"demo"');
+      expect(manifest).not.toContain('"id":"bravo"');
+    } finally {
+      readdirSpy.mockRestore();
+    }
   });
 
   it('打包跳过开发残留:.git / node_modules / 隐藏文件 / 旧 .cindy 不进包', async () => {

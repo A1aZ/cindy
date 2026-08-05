@@ -2,14 +2,15 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { GhostManifest, InstalledGhost } from '../../../shared/ghost';
-import { packGhostDir } from '../forge';
+import { packGhostDir as packGhostDirRaw } from '../forge';
 import { GhostManager } from '../GhostManager';
 import {
   checkSkillMdConsistency,
   ghostSkillLinkName,
+  removeGhostSkillLinksForRoots,
   reconcileGhostSkillLinks as reconcileGhostSkillLinksRaw,
 } from '../skillSlot';
 
@@ -19,6 +20,10 @@ let homeDir: string;
 let brainRoot: string;
 /** 与 GhostManager 缺省状态根同名(`<安装根>-install-state`),判据口径一致。 */
 let approvalStateRoot: string;
+
+function packGhostDir(dir: string) {
+  return packGhostDirRaw(dir, { sessionWorkdir: workDir });
+}
 
 beforeEach(async () => {
   workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-skill-slot-test-'));
@@ -326,7 +331,7 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
-    expect(fs.existsSync(legacyLink)).toBe(false);
+    expect(fs.lstatSync(legacyLink).isSymbolicLink()).toBe(true);
   });
 
   it('他 owner 的活链接不碰(多账号隔离);他 owner 的断链回收(防积尘)', async () => {
@@ -352,6 +357,74 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
     await fs.promises.rm(path.join(otherBrainRoot, 'other-ghost'), { recursive: true, force: true });
     await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
     expect(fs.existsSync(liveLink)).toBe(false); // 断链回收(目标带 cindy-brain 段)
+  });
+
+  it('账号边界按 owner 根撤销全局 Cindy skill 投影,不删除外来链接', async () => {
+    const ownerRoot = path.join(workDir, 'owners', 'bbb');
+    const managedTarget = path.join(ownerRoot, 'cindy-brain', 'other-ghost', 'skills', 'foo');
+    const foreignTarget = path.join(workDir, 'projects', 'other-ghost', 'skills', 'foo');
+    await fs.promises.mkdir(managedTarget, { recursive: true });
+    await fs.promises.mkdir(foreignTarget, { recursive: true });
+    await fs.promises.mkdir(sharedDir(), { recursive: true });
+    const managedLink = path.join(sharedDir(), 'other-ghost--foo');
+    const foreignLink = path.join(sharedDir(), 'foreign--foo');
+    await fs.promises.symlink(managedTarget, managedLink, process.platform === 'win32' ? 'junction' : 'dir');
+    await fs.promises.symlink(foreignTarget, foreignLink, process.platform === 'win32' ? 'junction' : 'dir');
+
+    const result = await removeGhostSkillLinksForRoots([path.join(ownerRoot, 'cindy-brain')], homeDir);
+    expect(result.changed).toBe(true);
+    expect(fs.existsSync(managedLink)).toBe(false);
+    expect(fs.existsSync(foreignLink)).toBe(true);
+  });
+
+  it('账号边界会按 raw link target 撤销已不存在 owner 根下的悬空投影', async () => {
+    const ownerRoot = path.join(workDir, 'owners', 'bbb');
+    const managedRoot = path.join(ownerRoot, 'cindy-brain');
+    const managedTarget = path.join(managedRoot, 'other-ghost', 'skills', 'foo');
+    await fs.promises.mkdir(managedTarget, { recursive: true });
+    await fs.promises.mkdir(sharedDir(), { recursive: true });
+    const managedLink = path.join(sharedDir(), 'other-ghost--foo');
+    await fs.promises.symlink(
+      managedTarget,
+      managedLink,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fs.promises.rm(managedRoot, { recursive: true, force: true });
+
+    const result = await removeGhostSkillLinksForRoots([managedRoot], homeDir);
+
+    expect(result.changed).toBe(true);
+    expect(fs.existsSync(managedLink)).toBe(false);
+  });
+
+  it('账号边界读取全局技能根失败:记 warning 继续,不抛错阻断边界', async () => {
+    // 撤链是尽力而为契约:读不动某个共享根不能把整轮撤链(以及登出)整体炸掉,
+    // 否则一条无关坏项就能堵死账号边界。读失败记 warning,调用正常返回。
+    const ownerRoot = path.join(workDir, 'owners', 'bbb', 'cindy-brain');
+    await fs.promises.mkdir(ownerRoot, { recursive: true });
+    const readdir = vi.spyOn(fs.promises, 'readdir').mockRejectedValueOnce(
+      Object.assign(new Error('denied'), { code: 'EACCES' }),
+    );
+    try {
+      const result = await removeGhostSkillLinksForRoots([ownerRoot], homeDir);
+      expect(result.warnings.some((w) => w.includes('Unable to read global skill root'))).toBe(true);
+    } finally {
+      readdir.mockRestore();
+    }
+  });
+
+  it('账号边界不会把被替换成 symlink 的 owner 根当作受管根:记 warning 跳过,不抛错', async () => {
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-skill-outside-'));
+    const ownerRoot = path.join(workDir, 'owners', 'bbb', 'cindy-brain');
+    try {
+      await fs.promises.mkdir(path.dirname(ownerRoot), { recursive: true });
+      await fs.promises.symlink(outside, ownerRoot, process.platform === 'win32' ? 'junction' : 'dir');
+      const result = await removeGhostSkillLinksForRoots([ownerRoot], homeDir);
+      // 该根被记 warning 并跳过(不进 resolvedRoots),既不抛错也不把 symlink 目标当受管根。
+      expect(result.warnings.some((w) => w.includes(ownerRoot))).toBe(true);
+    } finally {
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('目标缺 SKILL.md(如更新备份窗口)→ skip + warning,不建半截链', async () => {

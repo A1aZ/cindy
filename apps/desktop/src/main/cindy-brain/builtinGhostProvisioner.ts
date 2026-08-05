@@ -244,7 +244,12 @@ function listSeedIdsInRoot(seedRootDir: string): string[] {
     .sort();
 }
 
-/** 读墓碑列表(状态文件缺失 / 损坏一律当空,不阻断播种)。 */
+/**
+ * 读墓碑列表。状态文件缺失 = 无墓碑(返回空);**损坏/读不出则抛错 fail closed**
+ * ——把损坏当空会让已卸载的随包意识复活(丢失卸载事实)。播种路径依赖这个抛错保持
+ * fail closed;不能阻断的消费者(如 legacy 恢复状态查询)必须自己 try/catch 降级,
+ * 而不是把损坏当空(见 getLegacyGhostRecoveryStatusForActiveSession)。
+ */
 export function readBuiltinTombstones(repoRootDir: string): string[] {
   const result = readState(repoRootDir);
   if (!result.readable) {

@@ -7,6 +7,7 @@ import JSZip from 'jszip';
 
 import {
   GHOST_MANIFEST_FILE,
+  GHOST_MANIFEST_MAX_BYTES,
   GHOST_LOCALE_MAX_BYTES,
   GHOST_SKILL_MD_MAX_BYTES,
   ghostLocalePathFor,
@@ -48,7 +49,41 @@ import {
 export const MAX_BASIC_CINDY_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_NODE_CINDY_FILE_BYTES = 128 * 1024 * 1024;
 /** 身份卡本身只应是小 JSON；先限流读取，避免在识别包类型前被单文件撑爆内存。 */
-const MAX_GHOST_MANIFEST_BYTES = 256 * 1024;
+const MAX_GHOST_MANIFEST_BYTES = GHOST_MANIFEST_MAX_BYTES;
+
+async function readRegularFileStableWithLimit(
+  filePath: string,
+  maxBytes: number,
+): Promise<Buffer> {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow);
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.isSymbolicLink()) {
+      throw new Error('source is not a regular file');
+    }
+    if (opened.size > maxBytes) {
+      throw new Error(`source exceeds ${maxBytes} bytes`);
+    }
+    const bytes = Buffer.allocUnsafe(opened.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.byteLength - offset, null);
+      if (bytesRead === 0) throw new Error('source file shrank while being read');
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    const sameIdentity = after.isFile() &&
+      after.size === opened.size &&
+      after.mtimeMs === opened.mtimeMs &&
+      ((opened.dev === 0 && opened.ino === 0) ||
+        (after.dev === opened.dev && after.ino === opened.ino));
+    if (!sameIdentity) throw new Error('source file changed while being read');
+    return bytes;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
 /**
  * icon 文件大小上限。icon 以 data URL 形态随 ghosts:list(sendSync)下发,
  * 上限同时保护装载与首帧同步 IPC 的载荷体积。
@@ -446,26 +481,40 @@ export class GhostManager {
           if (marker.kind === 'install') {
             // 未提交装入(无已批准 receipt)= 不完整安装,删 finalDir;有已批准 receipt = 完整
             // 安装,保留(绝不删有有效批准的插件)。只删真目录,junction/链接跳过(避免穿透)。
-            const committed =
+            const finalKind = this.recoveryEntryKind(finalDir);
+            const receiptCommitted =
               approval.state === 'approved' &&
-              approval.receipt.packageSha256 === marker.packageSha256;
+              (marker.receiptRevision !== undefined
+                ? approval.receipt.revision === marker.receiptRevision
+                : approval.receipt.packageSha256 === marker.packageSha256);
+            const committed = receiptCommitted && finalKind === 'directory';
+            if (receiptCommitted && finalKind !== 'directory') {
+              throw new Error('committed install receipt has no published directory');
+            }
             if (committed && marker.clearBuiltinTombstone) {
               if (!this.options.clearBuiltinTombstone) {
                 throw new Error('builtin install recovery has no tombstone clearer');
               }
               this.options.clearBuiltinTombstone(id);
             }
-            if (!committed && this.recoveryEntryKind(finalDir) === 'directory') {
+            if (!committed && finalKind === 'directory') {
               fs.rmSync(finalDir, { recursive: true, force: true });
             }
           } else {
             handledBackupNames.add(marker.backupDirName);
             const backupPath = path.join(root, marker.backupDirName);
+            const backupKind = this.recoveryEntryKind(backupPath);
+            const finalKind = this.recoveryEntryKind(finalDir);
             const committed =
               approval.state === 'approved' &&
-              approval.receipt.packageSha256 === marker.packageSha256;
+              finalKind === 'directory' &&
+              (marker.receiptRevision !== undefined
+                ? approval.receipt.revision === marker.receiptRevision
+                : approval.receipt.packageSha256 === marker.packageSha256 &&
+                  (marker.oldPackageSha256 !== undefined
+                    ? marker.oldPackageSha256 !== marker.packageSha256
+                    : marker.phase === 'published'));
             if (committed) {
-              const backupKind = this.recoveryEntryKind(backupPath);
               if (backupKind === 'directory') {
                 fs.rmSync(backupPath, { recursive: true, force: true }); // 陈旧旧字节
               } else if (backupKind !== 'missing') {
@@ -473,8 +522,14 @@ export class GhostManager {
               }
             } else {
               // 回滚:finalDir 可能是未提交新字节,删;backup 若在则搬回(旧字节+旧 receipt)。
-              const backupKind = this.recoveryEntryKind(backupPath);
-              const finalKind = this.recoveryEntryKind(finalDir);
+              if (
+                marker.receiptRevision !== undefined &&
+                approval.state === 'approved' &&
+                approval.receipt.revision === marker.receiptRevision &&
+                finalKind !== 'directory'
+              ) {
+                throw new Error('committed update receipt has no published directory');
+              }
               // A prepared (or legacy phase-less) marker with no backup means the
               // process crashed before final -> backup. Preserve the old final and
               // receipt instead of deleting valid installed bytes.
@@ -711,6 +766,19 @@ export class GhostManager {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
       return true;
+    }
+  }
+
+  /** Migration-only marker read: preserve transient fs errors for retry. */
+  private readLegacyDisabledMarkerForMigration(dir: string): boolean {
+    const marker = path.join(dir, DISABLED_MARKER_FILE);
+    try {
+      const kind = classifyGhostDirEntrySync(marker);
+      if (kind === 'file') return true;
+      throw new Error('legacy disabled marker is not a regular file');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
     }
   }
 
@@ -987,8 +1055,7 @@ export class GhostManager {
       // 有未清的事务标记 = 一次装入/更新崩在半途、启动恢复还没收干净(通常恢复已在
       // 构造期把它清掉,这里兜住"恢复删 finalDir 失败"的残留)。绝不迁移这种目录 ——
       // 它的字节来源不是"用户确认过的旧安装",而是一次未完成事务的中间态。
-      const pendingMutation = this.receiptStore.readPendingMutationSync(id);
-      if (pendingMutation.state !== 'missing') {
+      if (this.hasPendingMutationJournal(id)) {
         result.skipped.push(id);
         blockedByPendingJournal.push(id);
         continue;
@@ -1100,14 +1167,31 @@ export class GhostManager {
    * 没有有效 receipt 时 backfill,随包 id 照旧交给 provisioning。结果并进 ledger,
    * 事后可分辨来源。
    */
+  /**
+   * 有未清事务标记 = 一次装入/更新崩在半途、启动恢复还没收干净。任何会**写 receipt**
+   * 的入口(主迁移、legacy backfill、用户重新确认)都必须让路:绝不对一次未完成事务的
+   * 中间态字节铸出批准 —— 否则 journal 之后的恢复会回滚字节却留下这份 receipt/技能快照,
+   * 形成永不自愈的错位授权(约束 B-2/B-5/I-1)。journal 由启动恢复负责收敛,收敛后这些
+   * 入口自然放行;若恢复被卡死,退出通道由批量恢复入口负责(见约束文档 §8 已知项),
+   * 而不是靠这里对中间态铸批准。
+   */
+  private hasPendingMutationJournal(id: string): boolean {
+    return this.receiptStore.readPendingMutationSync(id).state !== 'missing';
+  }
+
   async backfillRecoveredLegacyGhosts(
     ids: readonly string[],
-  ): Promise<{ migrated: string[]; failed: string[] }> {
+    options: { includePending?: boolean } = {},
+  ): Promise<{ migrated: string[]; failed: string[]; pending?: string[] }> {
     return this.runExclusiveMutation(async () => {
       const out = { migrated: [] as string[], failed: [] as string[] };
       const retryIds: string[] = [];
       const root = this.contentRootDir();
+      const hasLedger = this.receiptStore.hasMigrationLedger();
       const prev = this.receiptStore.readMigrationLedger();
+      if (hasLedger && !prev) {
+        throw new Error('legacy migration ledger exists but is unreadable; recovery queue preserved');
+      }
       const pendingForRetry = new Set(prev?.pendingIds ?? []);
       const workIds = [...new Set(ids)].filter(
         (id): id is string =>
@@ -1117,6 +1201,7 @@ export class GhostManager {
       // first receipt write or subsequent processing crashes, receiptStore.write()
       // cannot auto-close the migration door and the remaining ids are still durable.
       const queuedIds = [...new Set([...pendingForRetry, ...workIds])].sort();
+      const hadQueuedWork = queuedIds.length > 0;
       if (queuedIds.length > 0) {
         await this.receiptStore.writeMigrationLedger({
           version: 1,
@@ -1140,6 +1225,16 @@ export class GhostManager {
           this.options.log?.warn('recovered legacy receipt unreadable; will retry', {
             id,
             reason: approval.reason,
+          });
+          continue;
+        }
+        if (this.hasPendingMutationJournal(id)) {
+          // 与主迁移循环 candidates 阶段同一道闸:恢复未收敛前绝不对中间态字节铸批准,
+          // 留在重试队列,等启动恢复收敛 journal 后下一轮再处理。
+          retryIds.push(id);
+          pendingForRetry.add(id);
+          this.options.log?.warn('recovered legacy ghost has an unsettled mutation journal; will retry', {
+            id,
           });
           continue;
         }
@@ -1170,6 +1265,7 @@ export class GhostManager {
         }
       }
       if (
+        hadQueuedWork ||
         out.migrated.length > 0 ||
         out.failed.length > 0 ||
         retryIds.length > 0 ||
@@ -1188,7 +1284,8 @@ export class GhostManager {
         });
       }
       if (out.migrated.length > 0) this.options.onChanged?.(this.list());
-      return out;
+      const pending = [...new Set(retryIds)].sort();
+      return options.includePending && pending.length > 0 ? { ...out, pending } : out;
     });
   }
 
@@ -1237,7 +1334,7 @@ export class GhostManager {
     if (!validated.ok) throw new Error(`invalid manifest: ${validated.reason}`);
     if (validated.manifest.id !== id) throw new Error('manifest id != install dir name');
 
-    const enabled = !this.isDisabledMarkerPresentSync(dir);
+    const enabled = !this.readLegacyDisabledMarkerForMigration(dir);
     const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
       level: 'unverified',
       publisherSigned: false,
@@ -1305,6 +1402,17 @@ export class GhostManager {
     }
     if (this.readApproval(id).state === 'approved') {
       return { rejection: { code: 'state-changed', reason: '插件批准状态已恢复,无需重新确认' } };
+    }
+    // 有未清事务标记时绝不铸批准:否则启动恢复回滚字节后会留下这份 receipt/技能快照,
+    // 形成永不自愈的错位授权(B-2/B-5/I-1)。确认第二步会经此再查一次(持互斥锁,
+    // 与 install/update 不交错),所以只在这里设闸即可覆盖 inspect 与 confirm 两步。
+    if (this.hasPendingMutationJournal(id)) {
+      return {
+        rejection: {
+          code: 'state-changed',
+          reason: '插件有未完成的安装/更新事务正在恢复,请重启应用完成恢复后再重新确认',
+        },
+      };
     }
     const dir = path.join(this.contentRootDir(), id);
     try {
@@ -1491,9 +1599,18 @@ export class GhostManager {
       };
     }
     this.untrustedApprovals.delete(this.isolationKey(id));
-    // 与 setEnabled 同款:启停镜像同步维护,回滚到旧客户端不错位。
+    // 与 setEnabled 同款:启停镜像同步维护,回滚到旧客户端不错位。写入前先 no-follow
+    // 复核 marker 是受管普通文件(B-3):安装目录可变,marker 被换成符号链接时裸
+    // writeFile 会穿透截断链接目标,与 setEnabled/writeDisabledMarkerSync 判据保持一致。
     try {
       const marker = path.join(dir, DISABLED_MARKER_FILE);
+      try {
+        if (classifyGhostDirEntrySync(marker) !== 'file') {
+          throw new Error('ghost disabled marker is not a regular file');
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
       if (opts.enable) await fs.promises.rm(marker, { force: true });
       else await fs.promises.writeFile(marker, '');
     } catch {
@@ -1609,6 +1726,28 @@ export class GhostManager {
     }
     result.sort((a, b) => a.manifest.id.localeCompare(b.manifest.id));
     return result;
+  }
+
+  /**
+   * Mutation callers may immediately use the returned object to spawn a
+   * resident runtime.  Always return the same authorization projection that
+   * list()/runtime lookup can currently observe instead of a hand-built
+   * "approved" object that could bypass an active quarantine.
+   */
+  private projectCommittedMutationResult(fallback: InstalledGhost): {
+    ghost: InstalledGhost;
+    list: InstalledGhost[];
+  } {
+    const list = this.list();
+    const ghost =
+      list.find((item) => item.manifest.id === fallback.manifest.id) ??
+      ({
+        ...fallback,
+        enabled: false,
+        approval: { state: 'invalid' },
+        approvedSkillRoot: undefined,
+      } satisfies InstalledGhost);
+    return { ghost, list };
   }
 
   /** receipt 内的 base manifest + 已批准 locale 资源；不再读取可变安装目录。 */
@@ -1878,22 +2017,18 @@ export class GhostManager {
     // 1) 读源文件(带体积上限)
     let buf: Buffer;
     try {
-      const stat = await fs.promises.stat(lizFilePath);
-      if (!stat.isFile()) {
-        return { rejection: { code: 'source-not-found', reason: '路径不是文件' } };
-      }
-      if (stat.size > MAX_NODE_CINDY_FILE_BYTES) {
-        return {
-          rejection: {
-            code: 'file-invalid',
-            reason: `文件过大:${stat.size} 字节(上限 ${MAX_NODE_CINDY_FILE_BYTES})`,
-          },
-        };
-      }
-      buf = await fs.promises.readFile(lizFilePath);
+      buf = await readRegularFileStableWithLimit(lizFilePath, MAX_NODE_CINDY_FILE_BYTES);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return { rejection: { code: 'source-not-found', reason: '文件不存在' } };
+      }
+      if (err instanceof Error && err.message.includes('exceeds')) {
+        return {
+          rejection: {
+            code: 'file-invalid',
+            reason: `文件超过 ${MAX_NODE_CINDY_FILE_BYTES} 字节上限`,
+          },
+        };
       }
       return {
         rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
@@ -2249,6 +2384,7 @@ export class GhostManager {
       root,
       `.cindy-installing-${manifest.id}-${crypto.randomBytes(4).toString('hex')}`,
     );
+    const receiptRevision = crypto.randomUUID();
     // receipt 在内容落到 finalDir 之后才创建:技能字节指纹必须从这次批准的内容
     // 目录现算,不能凭空构造。
     let receipt: GhostInstallReceipt | undefined;
@@ -2269,8 +2405,10 @@ export class GhostManager {
       await this.receiptStore.writePendingMutation(manifest.id, {
         kind: 'install',
         packageSha256,
+        receiptRevision,
         ...(clearBuiltinTombstoneOnCommit ? { clearBuiltinTombstone: true } : {}),
       });
+      this.untrustedApprovals.add(this.isolationKey(manifest.id));
       await fs.promises.rename(stagingDir, finalDir);
       try {
         receipt = createGhostInstallReceipt({
@@ -2286,6 +2424,7 @@ export class GhostManager {
             prefix,
           ),
           packageSha256,
+          revision: receiptRevision,
           ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
         });
         await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
@@ -2308,13 +2447,23 @@ export class GhostManager {
         // receipt 已就位 = 事务提交,清标记。清失败只多留一份标记,下轮恢复见
         // receipt.packageSha256 与标记相符即判已提交、幂等清理。
         if (!tombstoneClearPending) {
-          await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
+          try {
+            await this.receiptStore.clearPendingMutation(manifest.id);
+            this.untrustedApprovals.delete(this.isolationKey(manifest.id));
+          } catch {
+            // Keep quarantine while the durable journal remains.
+          }
+        } else {
+          // The receipt and installed bytes are committed.  The remaining
+          // journal only records a deferred builtin tombstone side effect and
+          // must not keep an otherwise valid builtin disabled in-process.
+          this.untrustedApprovals.delete(this.isolationKey(manifest.id));
         }
-        this.untrustedApprovals.delete(this.isolationKey(manifest.id));
       } catch (error) {
         try {
           await fs.promises.rm(finalDir, { recursive: true, force: true });
           await this.receiptStore.clearPendingMutation(manifest.id);
+          this.untrustedApprovals.delete(this.isolationKey(manifest.id));
         } catch (rollbackError) {
           // Keep the install journal whenever rollback cannot prove the published
           // directory is gone. Migration treats that journal as a hard block, and
@@ -2354,8 +2503,9 @@ export class GhostManager {
       ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
     };
     this.options.log?.info('ghost installed', { id: manifest.id, version: manifest.version });
-    this.options.onChanged?.(this.list());
-    return { ghost };
+    const projected = this.projectCommittedMutationResult(ghost);
+    this.options.onChanged?.(projected.list);
+    return { ghost: projected.ghost };
   }
 
   /**
@@ -2474,11 +2624,13 @@ export class GhostManager {
     // 留下"新字节 + 旧 receipt";恢复器旧逻辑(final 在位就删 backup)会把它固化成"按旧
     // 批准跑新代码"。标记带本次 packageSha256 + backup 目录名,让恢复能判定 receipt 是否
     // 已提交:未提交则回滚到 backup。
+    const receiptRevision = crypto.randomUUID();
     try {
       await this.receiptStore.writePendingMutation(manifest.id, {
         kind: 'update',
         packageSha256,
         backupDirName: path.basename(backupDir),
+        receiptRevision,
         phase: 'prepared',
         ...(approvalResult.state === 'approved' && approvalResult.receipt.packageSha256
           ? { oldPackageSha256: approvalResult.receipt.packageSha256 }
@@ -2490,12 +2642,27 @@ export class GhostManager {
         rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
       };
     }
+    // The durable update journal is the start of the live transaction, not just
+    // a restart-recovery hint.  Quarantine the id before the first directory
+    // exchange so concurrent list/spawn/host calls cannot project the old
+    // receipt onto the new finalDir while the new receipt and skill snapshot
+    // are still being committed.
+    this.untrustedApprovals.add(this.isolationKey(manifest.id));
+    const clearUpdateQuarantineAfterRollback = async (): Promise<void> => {
+      try {
+        await this.receiptStore.clearPendingMutation(manifest.id);
+        this.untrustedApprovals.delete(this.isolationKey(manifest.id));
+      } catch {
+        // Keep the in-process quarantine if the journal cannot be cleared;
+        // restart recovery must see the marker before authorization resumes.
+      }
+    };
     // 换目录:旧版先挪去备份位,新版 rename 失败即滚回,保证任何时刻都有一份完整版本在位。
     try {
       await fs.promises.rename(finalDir, backupDir);
     } catch (err) {
       await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
+      await clearUpdateQuarantineAfterRollback();
       return {
         rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
       };
@@ -2508,6 +2675,7 @@ export class GhostManager {
         kind: 'update',
         packageSha256,
         backupDirName: path.basename(backupDir),
+        receiptRevision,
         phase: 'backed-up',
         ...(approvalResult.state === 'approved' && approvalResult.receipt.packageSha256
           ? { oldPackageSha256: approvalResult.receipt.packageSha256 }
@@ -2543,7 +2711,7 @@ export class GhostManager {
       // 只有回滚成功时才能清标记。回滚失败必须保留 journal，让下次启动继续收敛；
       // 清掉它会让 orphan-backup 启发式把新字节与旧 receipt 固化在一起。
       if (rolledBack) {
-        await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
+        await clearUpdateQuarantineAfterRollback();
       }
       return {
         rejection: {
@@ -2568,10 +2736,10 @@ export class GhostManager {
           prefix,
         ),
         packageSha256,
+        revision: receiptRevision,
         ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
       });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
-      this.untrustedApprovals.delete(this.isolationKey(manifest.id));
     } catch (err) {
       let rolledBack = true;
       await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
@@ -2588,7 +2756,7 @@ export class GhostManager {
         );
       });
       if (rolledBack) {
-        await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
+        await clearUpdateQuarantineAfterRollback();
       }
       return {
         rejection: {
@@ -2599,7 +2767,12 @@ export class GhostManager {
       };
     }
     // receipt 已就位 = 事务提交,清标记后再回收 backup;顺序保证"标记在 ⟺ 可能未提交"。
-    await this.receiptStore.clearPendingMutation(manifest.id).catch(() => undefined);
+    try {
+      await this.receiptStore.clearPendingMutation(manifest.id);
+      this.untrustedApprovals.delete(this.isolationKey(manifest.id));
+    } catch {
+      // Keep quarantine while the durable journal remains; recovery retries it.
+    }
     await fs.promises.rm(backupDir, { recursive: true, force: true }).catch(() => {});
 
     const ghost: InstalledGhost = {
@@ -2611,8 +2784,9 @@ export class GhostManager {
       ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
     };
     this.options.log?.info('ghost updated', { id: manifest.id, version: manifest.version });
-    this.options.onChanged?.(this.list());
-    return { ghost };
+    const projected = this.projectCommittedMutationResult(ghost);
+    this.options.onChanged?.(projected.list);
+    return { ghost: projected.ghost };
   }
 
   /**
@@ -2667,6 +2841,7 @@ export class GhostManager {
       }
       if (finalKind === 'missing') {
         await this.receiptStore.writePendingMutation(id, { kind: 'install', packageSha256 });
+        this.untrustedApprovals.add(this.isolationKey(id));
         await fs.promises.rename(stagingDir, finalDir);
         return;
       }
@@ -2677,6 +2852,7 @@ export class GhostManager {
         backupDirName: path.basename(backupDir),
         phase: 'prepared',
       });
+      this.untrustedApprovals.add(this.isolationKey(id));
       await fs.promises.rename(finalDir, backupDir);
       await this.receiptStore.writePendingMutation(id, {
         kind: 'update',
@@ -2705,11 +2881,17 @@ export class GhostManager {
         try {
           await fs.promises.rename(backupDir, finalDir);
           await this.receiptStore.clearPendingMutation(id);
+          this.untrustedApprovals.delete(this.isolationKey(id));
         } catch {
           // Keep the journal for startup recovery when rollback cannot complete now.
         }
       } else if (backupKind === null && publishedKind === null) {
-        await this.receiptStore.clearPendingMutation(id).catch(() => undefined);
+        try {
+          await this.receiptStore.clearPendingMutation(id);
+          this.untrustedApprovals.delete(this.isolationKey(id));
+        } catch {
+          // Keep the in-process quarantine while the journal remains.
+        }
       }
       throw error;
     }
@@ -2815,6 +2997,23 @@ export class GhostManager {
       current.receipt.packageSha256 === packageSha256 &&
       current.receipt.iconDataUrl === iconDataUrl
     ) {
+      // Receipt equality is not enough for a no-op: the skill snapshot is a
+      // separately materialized authorization projection and may have been
+      // deleted or modified by an external cleanup/sync process. Re-enter the
+      // normal receipt writer when the derived snapshot is unhealthy so the
+      // immutable bundled seed can rebuild it without user action.
+      const snapshotHealthy =
+        (manifest.skill?.items.length ?? 0) === 0 ||
+        (await this.receiptStore.skillSnapshotMatchesReceipt(
+          current.receipt,
+          this.receiptStore.skillSnapshotRoot(manifest.id, current.receipt.revision),
+        ));
+      if (!snapshotHealthy) {
+        await this.receiptStore.write(current.receipt, { skillSourceDir: sourceDir });
+        await this.finishTrustedBundledPublish(manifest.id, pendingPublish);
+        this.untrustedApprovals.delete(this.isolationKey(manifest.id));
+        return true;
+      }
       if (current.receipt.enabled !== enabled) {
         await this.receiptStore.write({
           ...current.receipt,

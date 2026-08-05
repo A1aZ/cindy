@@ -126,17 +126,24 @@ export interface GhostLegacyMigrationLedger {
  *   "新字节 + 旧 receipt",恢复器旧逻辑(final 在位就删 backup)会把它固化成"按旧批准
  *   跑新代码"。
  *
- * `packageSha256` 是判定「提交是否完成」的唯一信号:装入/更新写出的 receipt 一定带上
- * 这次 `.cindy` 的哈希,所以启动恢复只需**同步**读 receipt、比对
- * `receipt.packageSha256 === marker.packageSha256` —— 相等 = receipt 已写(提交完成),
- * 不等/缺失 = 未提交。两者都是已落盘事实,判定不引入额外写窗口。
+ * 新 marker 用 `receiptRevision` 作为本次事务的提交 nonce，避免更新前后包 hash 相同
+ * 时把旧 receipt 误认成本次提交。`packageSha256` 与 phase 只用于兼容旧 marker；无法
+ * 区分新旧 receipt 时必须走保守恢复方向，不得删除唯一 backup。
  */
 export type GhostPendingMutation =
-  | { kind: 'install'; packageSha256: string; clearBuiltinTombstone?: boolean }
+  | {
+      kind: 'install';
+      packageSha256: string;
+      /** Revision of the receipt this transaction intends to publish. */
+      receiptRevision?: string;
+      clearBuiltinTombstone?: boolean;
+    }
   | {
       kind: 'update';
       packageSha256: string;
       backupDirName: string;
+      /** Revision of the receipt this transaction intends to publish. */
+      receiptRevision?: string;
       /** Durable phase for distinguishing pre-rename crashes from swapped content. */
       phase?: 'prepared' | 'backed-up' | 'published';
       /** Hash of the previously approved bytes, when an approval existed. */
@@ -567,6 +574,12 @@ export class GhostInstallReceiptStore {
     }
     if (raw.kind === 'install') {
       if (
+        raw.receiptRevision !== undefined &&
+        (typeof raw.receiptRevision !== 'string' || !isRevision(raw.receiptRevision))
+      ) {
+        return { state: 'invalid', reason: 'journal receiptRevision is invalid' };
+      }
+      if (
         raw.clearBuiltinTombstone !== undefined &&
         typeof raw.clearBuiltinTombstone !== 'boolean'
       ) {
@@ -577,6 +590,9 @@ export class GhostInstallReceiptStore {
         mutation: {
           kind: 'install',
           packageSha256: raw.packageSha256,
+          ...(typeof raw.receiptRevision === 'string'
+            ? { receiptRevision: raw.receiptRevision }
+            : {}),
           ...(raw.clearBuiltinTombstone === true ? { clearBuiltinTombstone: true } : {}),
         },
       };
@@ -596,6 +612,13 @@ export class GhostInstallReceiptStore {
         return { state: 'invalid', reason: 'journal update phase is invalid' };
       }
       const oldPackageSha256 = raw.oldPackageSha256;
+      const receiptRevision = raw.receiptRevision;
+      if (
+        receiptRevision !== undefined &&
+        (typeof receiptRevision !== 'string' || !isRevision(receiptRevision))
+      ) {
+        return { state: 'invalid', reason: 'journal receiptRevision is invalid' };
+      }
       if (
         oldPackageSha256 !== undefined &&
         (typeof oldPackageSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(oldPackageSha256))
@@ -608,6 +631,7 @@ export class GhostInstallReceiptStore {
           kind: 'update',
           packageSha256: raw.packageSha256,
           backupDirName: raw.backupDirName,
+          ...(receiptRevision !== undefined ? { receiptRevision } : {}),
           ...(phase !== undefined ? { phase } : {}),
           ...(oldPackageSha256 !== undefined ? { oldPackageSha256 } : {}),
         },
@@ -916,12 +940,13 @@ export function createGhostInstallReceipt(input: {
   /** 由 `hashApprovedSkillContent` 从**这次批准的内容目录**现算，不可沿用旧值。 */
   skillContentSha256: Record<string, string>;
   packageSha256?: string;
+  revision?: string;
   iconDataUrl?: string;
 }): GhostInstallReceipt {
   return {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     id: input.manifest.id,
-    revision: crypto.randomUUID(),
+    revision: input.revision ?? crypto.randomUUID(),
     manifest: input.manifest,
     localeResources: input.localeResources,
     enabled: input.enabled,

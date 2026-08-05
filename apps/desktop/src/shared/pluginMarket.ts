@@ -40,10 +40,10 @@ export interface PluginMarketSnapshot {
   customSourceNames: string[];
 }
 
-/** 一轮服务端清理完成后供 Renderer 消费的一次性汇总提示。 */
+/** 服务端清理的一次性汇总提示：按 owner 缓存，consume 前跨多轮对账累加，consume 后即清。 */
 export interface PluginRemovalUserNotice {
   count: number;
-  /** 单条清理时展示插件名；批量清理时为 null，只展示数量。 */
+  /** 累计单条且插件名经安全过滤后非空时为插件名；其余情况为 null，只展示数量。 */
   name: string | null;
 }
 

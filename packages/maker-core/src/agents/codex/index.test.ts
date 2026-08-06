@@ -19182,6 +19182,71 @@ describe('CodexAgent context window reporting', () => {
     await handle.close();
   });
 
+  it('ignores descendant diffs that arrive after the child turn is terminal', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-terminal-descendant-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-terminal-child' } });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-terminal-diff', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-terminal-diff', 'turn/diff/updated', {
+      threadId: 'child-terminal-diff',
+      turnId: 'child-terminal-turn',
+      diff: 'diff --git a/child.txt b/child.txt\n--- a/child.txt\n+++ b/child.txt\n@@ -1 +1 @@\n-old\n+child-final\n',
+    });
+    handlers.descendantNotification('child-terminal-diff', 'turn/completed', {
+      threadId: 'child-terminal-diff',
+      turn: { id: 'child-terminal-turn', status: 'completed' },
+    });
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { diff?: string } | undefined)?.diff).toContain('+child-final');
+    });
+    handlers.turnCompleted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-terminal-child', status: 'completed' },
+    });
+    handlers.turnStarted?.({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-after-terminal-child' },
+    });
+    handlers.descendantNotification('child-terminal-diff', 'turn/diff/updated', {
+      threadId: 'child-terminal-diff',
+      turnId: 'child-terminal-turn',
+      diff: 'diff --git a/child.txt b/child.txt\n--- a/child.txt\n+++ b/child.txt\n@@ -1 +1 @@\n-old\n+stale-late-child\n',
+    });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-after-terminal-child',
+      diff: 'diff --git a/root.txt b/root.txt\n--- a/root.txt\n+++ b/root.txt\n@@ -1 +1 @@\n-old\n+root-current\n',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const diff = (last?.data as { diff?: string } | undefined)?.diff ?? '';
+      expect(last?.data).toMatchObject({ turnId: 'turn-after-terminal-child' });
+      expect(diff).toContain('+root-current');
+      expect(diff).not.toContain('+child-final');
+      expect(diff).not.toContain('+stale-late-child');
+    });
+
+    await handle.close();
+  });
+
   it('merges same-file descendant hunks without duplicating the diff block', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent);

@@ -3595,6 +3595,7 @@ export class CodexAgent extends BaseAgent {
         const diffParams = params as { turnId?: unknown; diff?: unknown } | null;
         if (
           currentTurnId
+          && !descendantTurnIsTerminal
           && diffParams
           && typeof diffParams.turnId === 'string'
           && typeof diffParams.diff === 'string'

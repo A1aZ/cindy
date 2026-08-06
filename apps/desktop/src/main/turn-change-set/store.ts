@@ -874,6 +874,12 @@ function safeRelativeTarget(cwd: string, targetPath: string): { absolutePath: st
   return { absolutePath, relativePath: relativePath.split(path.sep).join('/') };
 }
 
+function captureFileKey(absolutePath: string): string {
+  return process.platform === 'win32'
+    ? absolutePath.toLocaleLowerCase('en-US')
+    : absolutePath;
+}
+
 function isInsideRoot(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
@@ -939,8 +945,9 @@ export async function captureKnownFileBefore(input: KnownFileWriteCapture): Prom
     addIncompleteReason(pending, 'sensitive-file');
     return;
   }
-  if (pending.capturedFiles.has(target.absolutePath)) return;
-  const inFlight = pending.captureTasks.get(target.absolutePath);
+  const captureKey = captureFileKey(target.absolutePath);
+  if (pending.capturedFiles.has(captureKey)) return;
+  const inFlight = pending.captureTasks.get(captureKey);
   if (inFlight) return inFlight;
   const captureTask = (async () => {
     if (!await isRealTargetInsideWorkspace(input.cwd, target.absolutePath)) {
@@ -961,15 +968,15 @@ export async function captureKnownFileBefore(input: KnownFileWriteCapture): Prom
       addIncompleteReason(pending, 'diff-too-large');
       return;
     }
-    pending.capturedFiles.set(target.absolutePath, {
+    pending.capturedFiles.set(captureKey, {
       ...target,
       beforeExists: before.exists,
       beforeText: before.text,
       beforeMode: before.mode,
     });
     pending.capturedBytes += captureBytes;
-  })().finally(() => pending.captureTasks.delete(target.absolutePath));
-  pending.captureTasks.set(target.absolutePath, captureTask);
+  })().finally(() => pending.captureTasks.delete(captureKey));
+  pending.captureTasks.set(captureKey, captureTask);
   return captureTask;
 }
 

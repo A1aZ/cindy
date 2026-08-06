@@ -707,6 +707,43 @@ describe('turn change-set sidecar store', () => {
     expect(summary?.files[0]).toMatchObject({ path: 'a.ts', additions: 1, deletions: 1 });
   });
 
+  it.runIf(process.platform === 'win32')(
+    'deduplicates case-insensitive Windows paths before building an exact patch',
+    async () => {
+      const target = path.join(workdir, 'Foo.ts');
+      await fs.writeFile(target, 'old\n', 'utf8');
+      await beginTurnChangeSet({
+        sessionId: 'session-1',
+        anchorClientId: 'user-1',
+        provider: 'claude-code',
+        cwd: workdir,
+      });
+      await captureKnownFileBefore({
+        sessionId: 'session-1',
+        provider: 'claude-code',
+        cwd: workdir,
+        targetPath: 'Foo.ts',
+      });
+      await fs.writeFile(target, 'middle\n', 'utf8');
+      await captureKnownFileBefore({
+        sessionId: 'session-1',
+        provider: 'claude-code',
+        cwd: workdir,
+        targetPath: 'foo.ts',
+      });
+      await fs.writeFile(target, 'new\n', 'utf8');
+      await finalizeTurnChangeSet('session-1', null, 'complete');
+
+      const [recorded] = await listTurnChangeSets('session-1');
+      expect(recorded).toMatchObject({ fileCount: 1, isReversible: true });
+
+      await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+      expect(await fs.readFile(target, 'utf8')).toBe('old\n');
+      await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+      expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+    },
+  );
+
   it('filters sensitive files from a native Codex patch', async () => {
     await beginTurnChangeSet({
       sessionId: 'session-1',

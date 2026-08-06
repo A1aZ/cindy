@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 interface Request {
-  expectedParent: { realPath: string; dev: number; ino: number };
+  expectedParent: { realPath: string; dev: bigint; ino: bigint };
   targetName: string;
   files: Array<{ path: string; base64: string }>;
 }
@@ -31,14 +31,14 @@ function hasCode(error: unknown, code: string): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === code);
 }
 
-function sameParentIdentity(stats: fs.Stats, expected: Request['expectedParent']): boolean {
+function sameParentIdentity(stats: fs.BigIntStats, expected: Request['expectedParent']): boolean {
   if (!stats.isDirectory() || stats.isSymbolicLink()) return false;
-  return (expected.dev === 0 && expected.ino === 0) ||
+  return (expected.dev === 0n && expected.ino === 0n) ||
     (stats.dev === expected.dev && stats.ino === expected.ino);
 }
 
 async function verifyParent(expected: Request['expectedParent']): Promise<void> {
-  const stats = await fs.promises.lstat('.');
+  const stats = await fs.promises.lstat('.', { bigint: true });
   if (!sameParentIdentity(stats, expected)) throw new Error('Forge scaffold parent identity changed');
   const real = await fs.promises.realpath('.');
   if (!samePath(real, expected.realPath)) throw new Error('Forge scaffold parent path changed');

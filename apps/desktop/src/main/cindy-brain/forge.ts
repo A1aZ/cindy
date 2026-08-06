@@ -151,8 +151,8 @@ export interface ForgeScaffoldWriteRequest {
   targetName: string;
   expectedParent: {
     realPath: string;
-    dev: number;
-    ino: number;
+    dev: bigint;
+    ino: bigint;
   };
   files: Array<{ path: string; base64: string }>;
 }
@@ -568,10 +568,10 @@ export async function scaffoldGhostDir(
   }
 
   const parentDir = path.dirname(targetDir);
-  let parentStat: fs.Stats;
+  let parentStat: fs.BigIntStats;
   let parentRealPath: string;
   try {
-    parentStat = await fs.promises.lstat(parentDir);
+    parentStat = await fs.promises.lstat(parentDir, { bigint: true });
     if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) {
       return { ok: false, errorCode: 'INVALID_INPUT', message: 'dir 的父目录必须是工作目录内已存在的普通目录' };
     }

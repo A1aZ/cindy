@@ -3671,6 +3671,24 @@ describe('GhostManager · setEnabled(启用/停用)', () => {
 });
 
 describe('GhostManager · inspect(只验不装)', () => {
+  it('allows a top-level .cindy symlink and installs the inspected target bytes', async () => {
+    const target = await makeCindy('symlink-target.cindy', goodManifest());
+    const linked = path.join(workDir, 'symlink-source.cindy');
+    try {
+      await fs.promises.symlink(target, linked, 'file');
+    } catch {
+      return; // Windows without file-symlink capability cannot exercise this POSIX regression.
+    }
+
+    const inspected = await manager.inspect(linked);
+    expect('packageSha256' in inspected).toBe(true);
+    if (!('packageSha256' in inspected)) return;
+    const installed = await manager.install(linked, {
+      expectedPackageSha256: inspected.packageSha256,
+    });
+    expect('ghost' in installed).toBe(true);
+  });
+
   it('合法 .cindy → 返回清单,且零副作用(仓库目录不被创建)', async () => {
     const cindy = await makeCindy('a.cindy', goodManifest());
     const result = await manager.inspect(cindy);

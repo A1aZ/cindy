@@ -58,8 +58,9 @@ async function readRegularFileStableWithLimit(
   filePath: string,
   maxBytes: number,
 ): Promise<Buffer> {
-  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | noFollow);
+  // 顶层 .cindy 路径允许是用户选择的 symlink；确认前后由整包 sha256 对账，
+  // 单次读取则始终绑定同一个已打开句柄，避免 stat/read 的二次解析窗口。
+  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY);
   try {
     const opened = await handle.stat();
     if (!opened.isFile() || opened.isSymbolicLink()) {

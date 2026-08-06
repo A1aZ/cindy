@@ -47,12 +47,12 @@ const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir';
 let workDir: string;
 
 async function testScaffoldWriter(request: ForgeScaffoldWriteRequest) {
-  const parentStats = await fs.promises.lstat(request.parentDir);
+  const parentStats = await fs.promises.lstat(request.parentDir, { bigint: true });
   if (!parentStats.isDirectory() || parentStats.isSymbolicLink()) {
     return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'unsafe parent' };
   }
   if (
-    !(request.expectedParent.dev === 0 && request.expectedParent.ino === 0) &&
+    !(request.expectedParent.dev === 0n && request.expectedParent.ino === 0n) &&
     (parentStats.dev !== request.expectedParent.dev || parentStats.ino !== request.expectedParent.ino)
   ) {
     return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'parent changed' };
@@ -967,6 +967,35 @@ describe('packGhostDir', () => {
 });
 
 describe('scaffoldGhostDir', () => {
+  it('passes the stable parent identity as lossless bigint values', async () => {
+    const parentStat = await fs.promises.lstat(workDir, { bigint: true });
+    let captured: ForgeScaffoldWriteRequest | undefined;
+    const result = await scaffoldGhostDirRaw(
+      {
+        dir: path.join(workDir, 'bigint-parent'),
+        template: 'plain',
+        id: 'bigint-parent',
+        name: 'BigInt parent',
+      },
+      {
+        sessionWorkdir: workDir,
+        writeScaffold: async (request) => {
+          captured = request;
+          return { ok: true };
+        },
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(captured?.expectedParent).toEqual({
+      realPath: await fs.promises.realpath(workDir),
+      dev: parentStat.dev,
+      ino: parentStat.ino,
+    });
+    expect(typeof captured?.expectedParent.dev).toBe('bigint');
+    expect(typeof captured?.expectedParent.ino).toBe('bigint');
+  });
+
   it.each<ForgeScaffoldTemplate>(['plain', 'agent-action', 'node-json-rpc', 'node-mcp'])(
     '生成 %s 模板，随后可以直接打包并通过装入检查',
     async (template) => {

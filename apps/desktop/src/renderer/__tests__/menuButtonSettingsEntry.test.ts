@@ -26,10 +26,11 @@ describe('MenuButton — settings menu item (#1881)', () => {
     expect(source).toContain("t('titleBar.menuItems.settings')");
   });
 
-  it('navigates to /settings with a same-path guard', () => {
-    // 与 MainLayout 'open-settings' / UserInfoSection 相同的防重复导航语义
+  it('navigates to /settings with the open-settings same-path guard (pathname + search)', () => {
+    // 与 MainLayout 'open-settings' 相同判定(currentPathRef = pathname + search):
+    // 已在设置默认页不重复导航;在 /settings?tab=xxx 子页回到设置默认页。
     expect(source).toMatch(
-      /if \(location\.pathname !== '\/settings'\) \{\s*\n\s*navigate\('\/settings'\);/,
+      /if \(`\$\{location\.pathname\}\$\{location\.search\}` !== '\/settings'\) \{\s*\n\s*navigate\('\/settings'\);/,
     );
     expect(source).toContain("import { useLocation, useNavigate } from 'react-router-dom';");
   });

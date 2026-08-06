@@ -121,6 +121,43 @@ describe('turn change-set sidecar store', () => {
     });
   });
 
+  it('marks a safely composed Codex subset partial when another file conflict was omitted', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-partial-compose',
+        cwd: workdir,
+        isComplete: false,
+        diff: [
+          'diff --git a/safe.ts b/safe.ts',
+          '--- a/safe.ts',
+          '+++ b/safe.ts',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    finalizeTurnChangeSet('session-1', 'turn-partial-compose', 'complete');
+
+    await vi.waitFor(async () => expect(await listTurnChangeSets('session-1')).toHaveLength(1));
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({
+      state: 'partial',
+      incompleteReasons: ['provider-diff-conflict'],
+      isReversible: true,
+      fileCount: 1,
+    });
+  });
+
   it('serializes exact captures for sessions sharing one workspace', async () => {
     const target = path.join(workdir, 'shared.txt');
     await fs.writeFile(target, 'old\n', 'utf8');
@@ -209,6 +246,40 @@ describe('turn change-set sidecar store', () => {
     const reapply = await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
     expect(await fs.readFile(target, 'utf8')).toBe('new\n');
     expect(reapply.summary.workspaceState).toBe('applied');
+  });
+
+  it('keeps a zero-context deletion reviewable without offering unsafe actions', async () => {
+    const target = path.join(workdir, 'a.ts');
+    await fs.writeFile(target, 'head\ntail\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-zero-context-delete',
+        cwd: workdir,
+        diff: [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -2 +1,0 @@',
+          '-old',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-zero-context-delete', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+
+    expect(recorded).toMatchObject({ isReversible: false, fileCount: 1 });
+    await expect(applyTurnChangeSetAction('session-1', recorded!.id, 'undo'))
+      .rejects.toMatchObject({ kind: 'unsupported' });
+    expect(await fs.readFile(target, 'utf8')).toBe('head\ntail\n');
   });
 
   it('reports a missing Git executable without changing the workspace', async () => {

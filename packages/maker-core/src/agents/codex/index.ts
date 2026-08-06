@@ -23,6 +23,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
+import { structuredPatch } from 'diff';
 
 import {
   BaseAgent,
@@ -1221,6 +1222,268 @@ export async function toAppServerInput(
   }
   if (inputs.length === 0) inputs.push({ type: 'text', text: '' });
   return inputs;
+}
+
+interface ParsedTurnDiffHunk {
+  raw: string;
+  section: string;
+  oldStart: number;
+  oldCount: number;
+  newStart: number;
+  newCount: number;
+  lines: string[];
+  oldLines: string[];
+  newLines: string[];
+}
+
+type CanonicalTurnDiffHunk = ParsedTurnDiffHunk;
+
+interface ComposedTurnDiffBlock {
+  block: string;
+  complete: boolean;
+}
+
+const MAX_TURN_DIFF_COMPOSE_LINES = 20_000;
+const MAX_TURN_DIFF_COMPOSE_HUNKS = 512;
+const TURN_DIFF_COMPOSE_TIMEOUT_MS = 50;
+
+function parseTurnDiffHunk(raw: string): ParsedTurnDiffHunk | null {
+  const normalized = raw.replace(/\n+$/, '');
+  const lineBreak = normalized.indexOf('\n');
+  const header = lineBreak >= 0 ? normalized.slice(0, lineBreak) : normalized;
+  const match = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/.exec(header);
+  if (!match) return null;
+  const lines = lineBreak >= 0 ? normalized.slice(lineBreak + 1).split('\n') : [];
+  const oldLines: string[] = [];
+  const newLines: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith('\\')) return null;
+    const prefix = line[0];
+    const content = line.slice(1);
+    if (prefix === ' ' || prefix === '-') oldLines.push(content);
+    if (prefix === ' ' || prefix === '+') newLines.push(content);
+    if (prefix !== ' ' && prefix !== '-' && prefix !== '+') return null;
+  }
+  const oldCount = match[2] === undefined ? 1 : Number(match[2]);
+  const newCount = match[4] === undefined ? 1 : Number(match[4]);
+  if (oldLines.length !== oldCount || newLines.length !== newCount) return null;
+  return {
+    raw: normalized,
+    section: match[5] ?? '',
+    oldStart: Number(match[1]),
+    oldCount,
+    newStart: Number(match[3]),
+    newCount,
+    lines,
+    oldLines,
+    newLines,
+  };
+}
+
+function formatTurnDiffRange(start: number, count: number): string {
+  return count === 1 ? String(start) : `${start},${count}`;
+}
+
+function serializeTurnDiffHunk(hunk: CanonicalTurnDiffHunk): string {
+  const header = `@@ -${formatTurnDiffRange(hunk.oldStart, hunk.oldCount)} +${formatTurnDiffRange(hunk.newStart, hunk.newCount)} @@${hunk.section}`;
+  return hunk.lines.length > 0 ? `${header}\n${hunk.lines.join('\n')}` : header;
+}
+
+function turnDiffHunksOverlap(
+  hunk: CanonicalTurnDiffHunk,
+  start: number,
+  count: number,
+): boolean {
+  const hunkEnd = hunk.newStart + hunk.newCount;
+  const incomingEnd = start + count;
+  if (count === 0) return start >= hunk.newStart && start <= hunkEnd;
+  if (hunk.newCount === 0) return hunk.newStart >= start && hunk.newStart <= incomingEnd;
+  return Math.max(hunk.newStart, start) < Math.min(hunkEnd, incomingEnd);
+}
+
+function mapCurrentTurnDiffPositionToBase(
+  position: number,
+  hunks: readonly CanonicalTurnDiffHunk[],
+): number {
+  let delta = 0;
+  for (const hunk of hunks) {
+    if (hunk.newStart + hunk.newCount <= position) {
+      delta += hunk.newCount - hunk.oldCount;
+    }
+  }
+  return position - delta;
+}
+
+function createCanonicalTurnDiffHunks(
+  oldLines: string[],
+  newLines: string[],
+  oldStart: number,
+  newStart: number,
+): CanonicalTurnDiffHunk[] | null {
+  if (oldLines.length + newLines.length > MAX_TURN_DIFF_COMPOSE_LINES) return null;
+  const patch = structuredPatch(
+    'a',
+    'b',
+    oldLines.length > 0 ? `${oldLines.join('\n')}\n` : '',
+    newLines.length > 0 ? `${newLines.join('\n')}\n` : '',
+    '',
+    '',
+    { context: 3, timeout: TURN_DIFF_COMPOSE_TIMEOUT_MS },
+  );
+  if (!patch) return null;
+  return patch.hunks.map((hunk) => {
+    const lines = [...hunk.lines];
+    const oldSide: string[] = [];
+    const newSide: string[] = [];
+    for (const line of lines) {
+      const content = line.slice(1);
+      if (line[0] === ' ' || line[0] === '-') oldSide.push(content);
+      if (line[0] === ' ' || line[0] === '+') newSide.push(content);
+    }
+    const canonical: CanonicalTurnDiffHunk = {
+      raw: '',
+      section: '',
+      oldStart: oldStart + hunk.oldStart - (hunk.oldLines === 0 ? 2 : 1),
+      oldCount: hunk.oldLines,
+      newStart: newStart + hunk.newStart - (hunk.newLines === 0 ? 2 : 1),
+      newCount: hunk.newLines,
+      lines,
+      oldLines: oldSide,
+      newLines: newSide,
+    };
+    canonical.raw = serializeTurnDiffHunk(canonical);
+    return canonical;
+  });
+}
+
+function applyTurnDiffHunk(
+  current: CanonicalTurnDiffHunk[],
+  incoming: ParsedTurnDiffHunk,
+  applyStart: number,
+): boolean {
+  const overlapping = current.filter((hunk) =>
+    turnDiffHunksOverlap(hunk, applyStart, incoming.oldCount));
+  const delta = incoming.newCount - incoming.oldCount;
+  if (overlapping.length === 0) {
+    const mappedOldStart = mapCurrentTurnDiffPositionToBase(applyStart, current);
+    for (const hunk of current) {
+      if (hunk.newStart >= applyStart + incoming.oldCount) hunk.newStart += delta;
+    }
+    current.push({
+      ...incoming,
+      oldStart: incoming.oldCount === 0 ? mappedOldStart - 1 : mappedOldStart,
+      newStart: incoming.newCount === 0 ? applyStart - 1 : applyStart,
+    });
+    return current.length <= MAX_TURN_DIFF_COMPOSE_HUNKS;
+  }
+
+  overlapping.sort((a, b) => a.newStart - b.newStart);
+  const overlappingSet = new Set(overlapping);
+  const regionStart = Math.min(applyStart, overlapping[0]!.newStart);
+  const regionEnd = Math.max(
+    applyStart + incoming.oldCount,
+    ...overlapping.map((hunk) => hunk.newStart + hunk.newCount),
+  );
+  const regionLength = regionEnd - regionStart;
+  if (regionLength > MAX_TURN_DIFF_COMPOSE_LINES) return false;
+  const currentRegion: Array<string | undefined> = new Array(regionLength);
+  const placeLines = (start: number, lines: readonly string[]): boolean => {
+    const offset = start - regionStart;
+    for (let index = 0; index < lines.length; index += 1) {
+      const position = offset + index;
+      if (position < 0 || position >= currentRegion.length) return false;
+      const existing = currentRegion[position];
+      if (existing !== undefined && existing !== lines[index]) return false;
+      currentRegion[position] = lines[index];
+    }
+    return true;
+  };
+  for (const hunk of overlapping) {
+    if (!placeLines(hunk.newStart, hunk.newLines)) return false;
+  }
+  if (!placeLines(applyStart, incoming.oldLines)) return false;
+  if (currentRegion.some((line) => line === undefined)) return false;
+  const knownCurrentRegion = currentRegion as string[];
+
+  const baseRegion: string[] = [];
+  let cursor = regionStart;
+  for (const hunk of overlapping) {
+    const gapEnd = hunk.newStart - regionStart;
+    baseRegion.push(...knownCurrentRegion.slice(cursor - regionStart, gapEnd));
+    baseRegion.push(...hunk.oldLines);
+    cursor = hunk.newStart + hunk.newCount;
+  }
+  baseRegion.push(...knownCurrentRegion.slice(cursor - regionStart));
+
+  const replacementOffset = applyStart - regionStart;
+  const finalRegion = [
+    ...knownCurrentRegion.slice(0, replacementOffset),
+    ...incoming.newLines,
+    ...knownCurrentRegion.slice(replacementOffset + incoming.oldCount),
+  ];
+  const oldStart = mapCurrentTurnDiffPositionToBase(
+    regionStart,
+    current.filter((hunk) => !overlappingSet.has(hunk)),
+  );
+  const composed = createCanonicalTurnDiffHunks(baseRegion, finalRegion, oldStart, regionStart);
+  if (!composed) return false;
+
+  const remaining = current.filter((hunk) => !overlappingSet.has(hunk));
+  for (const hunk of remaining) {
+    if (hunk.newStart >= regionEnd) hunk.newStart += delta;
+  }
+  current.splice(0, current.length, ...remaining, ...composed);
+  return current.length <= MAX_TURN_DIFF_COMPOSE_HUNKS;
+}
+
+function composeTurnDiffBlocks(
+  blocks: string[],
+  splitBlock: (block: string) => { header: string; hunks: string[] },
+): ComposedTurnDiffBlock {
+  const parsedBlocks = blocks.map(splitBlock);
+  const rawHunks = parsedBlocks.flatMap((block) => block.hunks);
+  if (
+    rawHunks.length > MAX_TURN_DIFF_COMPOSE_HUNKS
+    || rawHunks.reduce((sum, hunk) => sum + hunk.split('\n').length - 1, 0)
+      > MAX_TURN_DIFF_COMPOSE_LINES
+  ) return { block: '', complete: false };
+  const stripIndexLine = (header: string): string => header
+    .split('\n')
+    .filter((line) => !line.startsWith('index '))
+    .join('\n');
+  const header = stripIndexLine(parsedBlocks[0]?.header ?? '');
+  if (
+    !header
+    || parsedBlocks.some((block) =>
+      stripIndexLine(block.header) !== header || block.hunks.length === 0)
+  ) return { block: '', complete: false };
+  const firstHunks = parsedBlocks[0]!.hunks.map(parseTurnDiffHunk);
+  if (firstHunks.some((hunk) => hunk === null)) return { block: '', complete: false };
+  const canonical = firstHunks as CanonicalTurnDiffHunk[];
+  const seenHunks = new Set(canonical.map((hunk) => hunk.raw));
+  for (const block of parsedBlocks.slice(1)) {
+    let blockDelta = 0;
+    for (const rawHunk of block.hunks) {
+      const incoming = parseTurnDiffHunk(rawHunk);
+      if (incoming && seenHunks.has(incoming.raw)) {
+        blockDelta += incoming.newCount - incoming.oldCount;
+        continue;
+      }
+      const applyStart = incoming
+        ? incoming.oldStart + blockDelta + (incoming.oldCount === 0 ? 1 : 0)
+        : 0;
+      if (!incoming || !applyTurnDiffHunk(canonical, incoming, applyStart)) {
+        return { block: '', complete: false };
+      }
+      seenHunks.add(incoming.raw);
+      blockDelta += incoming.newCount - incoming.oldCount;
+    }
+  }
+  const body = canonical
+    .sort((a, b) => a.oldStart - b.oldStart || a.newStart - b.newStart)
+    .map(serializeTurnDiffHunk)
+    .join('\n');
+  return { block: `${header}${body ? `\n${body}` : ''}\n`, complete: true };
 }
 
 // ── Agent 实现 ────────────────────────────────────────────────────────────────
@@ -2477,46 +2740,42 @@ export class CodexAgent extends BaseAgent {
         hunks: normalized.slice(firstHunk).split(/(?=^@@ )/m).filter(Boolean),
       };
     };
-    const hunkPosition = (hunk: string): { oldStart: number; newStart: number } => {
-      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(hunk);
-      return {
-        oldStart: match ? Number(match[1]) : Number.MAX_SAFE_INTEGER,
-        newStart: match ? Number(match[2]) : Number.MAX_SAFE_INTEGER,
-      };
-    };
-    const mergeTurnDiffSnapshots = (): string => {
-      const blocks = new Map<string, { header: string; hunks: string[] }>();
+    const mergeTurnDiffSnapshots = (): { diff: string; complete: boolean } => {
+      const blocks = new Map<string, string[]>();
       for (const snapshot of turnDiffSnapshots.values()) {
         for (const block of splitTurnDiffBlocks(snapshot)) {
           const parsed = splitTurnDiffBlockHunks(block);
           const key = parsed.header.split('\n', 1)[0] ?? parsed.header;
-          const existing = blocks.get(key);
-          if (!existing || (parsed.hunks.length === 0 && existing.hunks.length === 0)) {
-            blocks.set(key, parsed);
-            continue;
-          }
-          for (const hunk of parsed.hunks) {
-            if (!existing.hunks.includes(hunk)) existing.hunks.push(hunk);
-          }
+          const existing = blocks.get(key) ?? [];
+          existing.push(block);
+          blocks.set(key, existing);
         }
       }
-      return [...blocks.values()]
-        .map(({ header, hunks }) => {
-          const orderedHunks = [...hunks].sort((left, right) => {
-            const a = hunkPosition(left);
-            const b = hunkPosition(right);
-            return a.oldStart - b.oldStart || a.newStart - b.newStart;
-          });
-          return `${header}${orderedHunks.length > 0 ? `\n${orderedHunks.join('\n')}` : ''}\n`;
-        })
-        .join('');
+      let complete = true;
+      let diff = '';
+      for (const fileBlocks of blocks.values()) {
+        if (fileBlocks.length === 1) {
+          diff += fileBlocks[0]!.endsWith('\n') ? fileBlocks[0] : `${fileBlocks[0]}\n`;
+          continue;
+        }
+        const composed = composeTurnDiffBlocks(fileBlocks, splitTurnDiffBlockHunks);
+        complete &&= composed.complete;
+        diff += composed.block;
+      }
+      return { diff, complete };
     };
     const publishTurnDiff = (threadKey: string, turnId: string, diff: string): void => {
       if (diff) turnDiffSnapshots.set(threadKey, diff);
       else turnDiffSnapshots.delete(threadKey);
+      const merged = mergeTurnDiffSnapshots();
       eventQueue.push({
         type: 'turn_diff',
-        data: { turnId, diff: mergeTurnDiffSnapshots(), cwd: opts.workingDir },
+        data: {
+          turnId,
+          diff: merged.diff,
+          cwd: opts.workingDir,
+          isComplete: merged.complete,
+        },
         source: 'codex',
       });
     };

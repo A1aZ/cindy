@@ -37,6 +37,8 @@ export interface TurnDiffEventData {
   diff: string;
   /** Workspace root used when the provider computed the patch. */
   cwd: string;
+  /** False when concurrent provider snapshots could not be safely composed. */
+  isComplete?: boolean;
 }
 
 export interface AgentErrorEventData {

@@ -15,6 +15,7 @@ export type TurnChangeIncompleteReason =
   | 'sensitive-file'
   | 'read-failed'
   | 'diff-too-large'
+  | 'provider-diff-conflict'
   | 'turn-failed';
 
 export interface TurnChangeFileSummary {

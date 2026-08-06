@@ -92,6 +92,7 @@ const INCOMPLETE_REASONS = new Set<TurnChangeIncompleteReason>([
   'sensitive-file',
   'read-failed',
   'diff-too-large',
+  'provider-diff-conflict',
   'turn-failed',
 ]);
 const FILE_STATUSES = new Set<FileDiff['status']>([
@@ -263,6 +264,14 @@ function isReversiblePatch(value: PersistedTurnChangeSetV1): boolean {
     if (diff.oldPath && !safeRelativeTarget(value.cwd, diff.oldPath)) return false;
     if (diff.status === 'renamed' && !diff.oldPath) return false;
     if (diff.status === 'modified' && diff.hunks.length === 0) return false;
+    // A zero-context insertion/deletion inside an existing file cannot prove
+    // that its location stayed attached to the same surrounding content after
+    // unrelated line shifts. Whole-file add/delete remains safe because Git
+    // validates the file's existence or complete contents.
+    if (
+      (diff.status === 'modified' || diff.status === 'renamed')
+      && diff.hunks.some((hunk) => hunk.oldLines === 0 || hunk.newLines === 0)
+    ) return false;
     if ((diff.status === 'added' || diff.status === 'deleted') && diff.hunks.length === 0) {
       return false;
     }
@@ -980,6 +989,8 @@ export function noteTurnDiffEvent(sessionId: string, event: AgentEvent): void {
   if (pending.incompleteReasons.has('remote-session')) return;
   if (pending.providerTurnId && pending.providerTurnId !== data.turnId) return;
   pending.providerTurnId = data.turnId;
+  if (data.isComplete === false) addIncompleteReason(pending, 'provider-diff-conflict');
+  else pending.incompleteReasons.delete('provider-diff-conflict');
   pending.incompleteReasons.delete('sensitive-file');
   pending.incompleteReasons.delete('diff-too-large');
   const safeDiff = filterSensitiveDiffBlocks(pending, data.diff);

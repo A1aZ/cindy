@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import { promises as fs } from 'node:fs';
+import { applyPatch, formatPatch, parsePatch, reversePatch } from 'diff';
 
 import { CodexAgent } from './index.js';
 import { Method } from './app-server/protocol.js';
@@ -19290,6 +19291,288 @@ describe('CodexAgent context window reporting', () => {
     expect((merged.match(/^@@ /gm) ?? []).length).toBe(2);
     expect(merged).not.toContain('+++ b/shared.txt\n\n@@');
     expect(merged.endsWith('\n')).toBe(true);
+
+    await handle.close();
+  });
+
+  it('composes overlapping descendant hunks into the final same-file patch', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-overlapping-file-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-overlap' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-overlap',
+      diff: 'diff --git a/shared.txt b/shared.txt\nindex 1111111..2222222 100644\n--- a/shared.txt\n+++ b/shared.txt\n@@ -2,2 +2,2 @@\n-old-b\n+root-b\n tail',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-overlap', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-overlap', 'turn/diff/updated', {
+      threadId: 'child-overlap',
+      turnId: 'child-overlap-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\nindex 2222222..3333333 100644\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1,3 +1,3 @@\n head\n-root-b\n+child-b\n tail',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const data = last?.data as { diff?: string; isComplete?: boolean } | undefined;
+      expect(data?.isComplete).toBe(true);
+      expect(data?.diff).toContain('-old-b');
+      expect(data?.diff).toContain('+child-b');
+    });
+    const merged = (events.filter((event) => event.type === 'turn_diff').at(-1)?.data as { diff: string }).diff;
+    expect((merged.match(/^diff --git /gm) ?? []).length).toBe(1);
+    expect((merged.match(/^@@ /gm) ?? []).length).toBe(1);
+    expect(merged).not.toContain('index ');
+    expect(merged).not.toContain('root-b');
+    expect(merged).toContain(' head');
+    expect(merged).toContain(' tail');
+    const original = 'head\nold-b\ntail\n';
+    const applied = applyPatch(original, merged);
+    expect(applied).toBe('head\nchild-b\ntail\n');
+    expect(applyPatch(applied as string, formatPatch(reversePatch(parsePatch(merged))))).toBe(original);
+
+    await handle.close();
+  });
+
+  it('composes an overlapping pure deletion at the preimage line', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-overlapping-delete-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-overlap-delete' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-overlap-delete',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -2 +2 @@\n-old\n+root',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-overlap-delete', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-overlap-delete', 'turn/diff/updated', {
+      threadId: 'child-overlap-delete',
+      turnId: 'child-overlap-delete-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -2 +1,0 @@\n-root',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { isComplete?: boolean } | undefined)?.isComplete).toBe(true);
+    });
+    const merged = (events.filter((event) => event.type === 'turn_diff').at(-1)?.data as { diff: string }).diff;
+    expect(merged).toContain('@@ -2 +1,0 @@');
+    const original = 'head\nold\ntail\n';
+    const applied = applyPatch(original, merged);
+    expect(applied).toBe('head\ntail\n');
+    expect(applyPatch(applied as string, formatPatch(reversePatch(parsePatch(merged))))).toBe(original);
+    expect(merged).not.toContain('root');
+
+    await handle.close();
+  });
+
+  it('composes an overlapping pure insertion at the preimage boundary', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-overlapping-insert-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-overlap-insert' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-overlap-insert',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1,0 +2 @@\n+root',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-overlap-insert', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-overlap-insert', 'turn/diff/updated', {
+      threadId: 'child-overlap-insert',
+      turnId: 'child-overlap-insert-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -2 +2 @@\n-root\n+child',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { isComplete?: boolean } | undefined)?.isComplete).toBe(true);
+    });
+    const merged = (events.filter((event) => event.type === 'turn_diff').at(-1)?.data as { diff: string }).diff;
+    expect(merged).toContain('@@ -1,0 +2 @@');
+    const original = 'head\ntail\n';
+    const applied = applyPatch(original, merged);
+    expect(applied).toBe('head\nchild\ntail\n');
+    expect(applyPatch(applied as string, formatPatch(reversePatch(parsePatch(merged))))).toBe(original);
+
+    await handle.close();
+  });
+
+  it('maps a non-overlapping pure deletion across an earlier insertion', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-shifted-delete-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-shifted-delete' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-shifted-delete',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1,2 @@\n+inserted\n line-1',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-shifted-delete', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-shifted-delete', 'turn/diff/updated', {
+      threadId: 'child-shifted-delete',
+      turnId: 'child-shifted-delete-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -20 +19,0 @@\n-remove-me',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { isComplete?: boolean } | undefined)?.isComplete).toBe(true);
+    });
+    const merged = (events.filter((event) => event.type === 'turn_diff').at(-1)?.data as { diff: string }).diff;
+    const original = `${Array.from({ length: 18 }, (_, index) => `line-${index + 1}`).join('\n')}\nremove-me\n`;
+    const expected = `inserted\n${Array.from({ length: 18 }, (_, index) => `line-${index + 1}`).join('\n')}\n`;
+    const applied = applyPatch(original, merged);
+    expect(applied).toBe(expected);
+    expect(applyPatch(applied as string, formatPatch(reversePatch(parsePatch(merged))))).toBe(original);
+    expect(merged).toContain('@@ -19 +19,0 @@');
+
+    await handle.close();
+  });
+
+  it('marks incompatible overlapping descendant hunks incomplete instead of publishing an invalid patch', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-conflicting-file-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-conflict' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-conflict',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-old\n+root',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-conflict', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-conflict', 'turn/diff/updated', {
+      threadId: 'child-conflict',
+      turnId: 'child-conflict-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-unrelated\n+child',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const data = last?.data as { diff?: string; isComplete?: boolean } | undefined;
+      expect(data?.isComplete).toBe(false);
+      expect(data?.diff).toBe('');
+    });
+
+    await handle.close();
+  });
+
+  it('fails closed when same-file composition exceeds the hunk budget', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-over-budget-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+    const rootHunks = Array.from({ length: 512 }, (_, index) => {
+      const line = index * 10 + 1;
+      return `@@ -${line} +${line} @@\n-old-${index}\n+root-${index}`;
+    }).join('\n');
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-over-budget' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-over-budget',
+      diff: `diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n${rootHunks}`,
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-over-budget', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-over-budget', 'turn/diff/updated', {
+      threadId: 'child-over-budget',
+      turnId: 'child-over-budget-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -6000 +6000 @@\n-old-child\n+child',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const data = last?.data as { diff?: string; isComplete?: boolean } | undefined;
+      expect(data?.isComplete).toBe(false);
+      expect(data?.diff).toBe('');
+    });
 
     await handle.close();
   });

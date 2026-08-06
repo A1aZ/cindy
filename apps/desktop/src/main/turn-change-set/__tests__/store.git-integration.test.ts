@@ -1134,6 +1134,58 @@ describe('turn change-set sidecar store', () => {
     expect(detail?.diffs).toHaveLength(55);
   });
 
+  it('matches detail summaries independently of persisted property order', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-reordered-summary',
+        cwd: workdir,
+        diff: [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-reordered-summary', 'complete');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    const indexPath = path.join(
+      mocks.userDataRoot,
+      'turn-change-sets',
+      'session-1',
+      'index.json',
+    );
+    const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+      entries: Array<Record<string, unknown>>;
+    };
+    const entry = index.entries[0]!;
+    const files = (entry.files as Array<Record<string, unknown>>).map((file) =>
+      Object.fromEntries(Object.entries(file).reverse()));
+    index.entries[0] = Object.fromEntries(
+      Object.entries({ ...entry, files }).reverse(),
+    );
+    await fs.writeFile(indexPath, `${JSON.stringify(index)}\n`, 'utf8');
+
+    const [detail] = await getTurnChangeSets('session-1', [summary!.id]);
+    expect(detail).toMatchObject({
+      id: summary!.id,
+      providerTurnId: 'turn-reordered-summary',
+    });
+    expect(detail?.diffs).toHaveLength(1);
+  });
+
   it('removes orphan detail files after the next successful index publish', async () => {
     const sidecarDir = path.join(
       mocks.userDataRoot,

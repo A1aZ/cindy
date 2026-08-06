@@ -4,6 +4,7 @@ import { createTwoFilesPatch, formatPatch, parsePatch, reversePatch } from 'diff
 import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 import type { AgentEvent, TurnDiffEventData } from '@cindy/maker-core';
 import type {
@@ -1465,7 +1466,7 @@ export async function getTurnChangeSets(
       const detailSummary = toSummary(value, summary.workspaceState);
       const detailIdentity = { ...detailSummary, workspaceState: 'applied' as const, isReversible: false };
       const summaryIdentity = { ...summary, workspaceState: 'applied' as const, isReversible: false };
-      if (JSON.stringify(detailIdentity) !== JSON.stringify(summaryIdentity)) continue;
+      if (!isDeepStrictEqual(detailIdentity, summaryIdentity)) continue;
       details.push({ ...detailSummary, diffs: parseDiffs(value.id, value.unifiedDiff) });
     } catch (error) {
       log.warn('turn change-set detail read failed', { sessionId, id, error });

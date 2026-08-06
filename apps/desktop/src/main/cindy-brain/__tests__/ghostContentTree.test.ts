@@ -328,6 +328,57 @@ describe('hashGhostContentFiles', () => {
     }
   });
 
+  it('rejects a leaf file renamed away and replaced while its opened bytes are being hashed', async () => {
+    const root = path.join(workDir, 'plugin');
+    const file = path.join(root, 'main.js');
+    const detachedFile = path.join(root, 'detached.js');
+    const originalBytes = Buffer.from('approved bytes');
+    await fs.promises.mkdir(root, { recursive: true });
+    await fs.promises.writeFile(file, originalBytes);
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    const realOpen = fs.promises.open;
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.promises.open>
+    ) => {
+      const handle = await realOpen(...args);
+      if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      let pinnedHandleStat: fs.BigIntStats | undefined;
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === 'stat') {
+            return async () => {
+              pinnedHandleStat ??= await handle.stat({ bigint: true });
+              return pinnedHandleStat;
+            };
+          }
+          if (key === 'createReadStream') {
+            return () => Readable.from((async function*() {
+              const bytes = Buffer.alloc(originalBytes.byteLength);
+              const read = await handle.read(bytes, 0, bytes.byteLength, 0);
+              await fs.promises.rename(file, detachedFile);
+              await fs.promises.writeFile(file, 'replacement bytes');
+              yield bytes.subarray(0, read.bytesRead);
+            })());
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    }) as typeof fs.promises.open);
+    try {
+      await expect(
+        hashGhostContentFiles(root, tree.files, tree.rootIdentity),
+      ).rejects.toThrow(/entry path changed while reading/);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('rejects the content root being replaced between collection and hashing', async () => {
     const root = path.join(workDir, 'plugin');
     await fs.promises.mkdir(root, { recursive: true });

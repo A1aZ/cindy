@@ -383,6 +383,14 @@ export async function hashGhostContentFiles(
       if (!sameStableFileState(handleStat, afterReadStat)) {
         throw new Error(`ghost content entry changed while reading: ${relativePath}`);
       }
+      const afterReadPathStat = await fs.promises.lstat(filePath, { bigint: true });
+      if (
+        afterReadPathStat.isSymbolicLink() ||
+        !afterReadPathStat.isFile() ||
+        !sameFileIdentity(afterReadPathStat, afterReadStat)
+      ) {
+        throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
+      }
       assertGhostContentAncestorIdentities(
         ancestorIdentities,
         await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),

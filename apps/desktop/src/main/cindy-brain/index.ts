@@ -701,9 +701,10 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
             { includePending: true },
           );
           const pending = new Set(backfill.pending ?? []);
+          const failed = new Set(backfill.failed);
           await acknowledgeRecoveredLegacyGhosts(
             expectedOwner.dataOwnerId,
-            recoveredLegacyIds.filter((id) => !pending.has(id)),
+            recoveredLegacyIds.filter((id) => !pending.has(id) && !failed.has(id)),
           );
         } catch (err) {
           log.warn('recovered legacy ghost backfill pass failed', {

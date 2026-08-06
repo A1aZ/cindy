@@ -19349,6 +19349,49 @@ describe('CodexAgent context window reporting', () => {
     await handle.close();
   });
 
+  it('composes overlapping descendant hunks with no-newline metadata', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-overlapping-no-newline-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-overlap-no-newline' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-overlap-no-newline',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+root\n\\ No newline at end of file',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-overlap-no-newline', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-overlap-no-newline', 'turn/diff/updated', {
+      threadId: 'child-overlap-no-newline',
+      turnId: 'child-overlap-no-newline-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-root\n\\ No newline at end of file\n+child\n\\ No newline at end of file',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const data = last?.data as { diff?: string; isComplete?: boolean } | undefined;
+      expect(data?.isComplete).toBe(true);
+      expect(data?.diff).toContain('-old');
+      expect(data?.diff).toContain('+child');
+    });
+
+    await handle.close();
+  });
+
   it('composes an overlapping pure deletion at the preimage line', async () => {
     const agent = new CodexAgent(createDeps());
     const host = installFakeHost(agent);

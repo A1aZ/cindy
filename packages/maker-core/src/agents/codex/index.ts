@@ -1257,6 +1257,7 @@ function parseTurnDiffHunk(raw: string): ParsedTurnDiffHunk | null {
   const oldLines: string[] = [];
   const newLines: string[] = [];
   for (const line of lines) {
+    if (line === '\\ No newline at end of file') continue;
     if (line.startsWith('\\')) return null;
     const prefix = line[0];
     const content = line.slice(1);

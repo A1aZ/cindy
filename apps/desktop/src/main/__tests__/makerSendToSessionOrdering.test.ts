@@ -63,18 +63,21 @@ describe('sendToSession ordering', () => {
       'async function createWorker',
     );
 
-    expect(helperBlock).toContain('return resolveCollabDispatchResult(');
+    expect(helperBlock).toContain('const result = await resolveCollabDispatchResult(');
     expect(helperBlock).toContain('() => session.send(agentMessage, {');
     expect(helperBlock).toContain('planMode: false,');
     expect(helperBlock).toContain('throwOnStartFailure: true,');
     expect(helperBlock).toContain('onAccepted: async () => {');
     expect(helperBlock).toContain('await deps.createDbMessage(session.id, {');
+    expect(helperBlock).toContain('await deps.beginDirectTurnChangeSet(session.id, clientId);');
+    expect(helperBlock).toContain('deps.abortDirectTurnChangeSet(session.id);');
     expect(helperBlock).toContain('{ source, context },');
     expectOrder(helperBlock, 'onAccepted: async () => {', 'await deps.createDbMessage(session.id, {');
     // 顺序硬约束: 先落库再跑 accepted 副作用。createDbMessage 失败时 Session.send 按
     // 派发前失败处理不启动 turn, 副作用若先跑会留下没有 terminal event 清理的幽灵
     // running/autoBridgePending 状态(Codex review P2)。
-    expectOrder(helperBlock, 'await deps.createDbMessage(session.id, {', 'await runAcceptedCallback(onAccepted, session.id, clientId, deps.log ?? defaultLog);');
+    expectOrder(helperBlock, 'await deps.createDbMessage(session.id, {', 'await deps.beginDirectTurnChangeSet(session.id, clientId);');
+    expectOrder(helperBlock, 'await deps.beginDirectTurnChangeSet(session.id, clientId);', 'await runAcceptedCallback(onAccepted, session.id, clientId, deps.log ?? defaultLog);');
 
     expect(source).not.toContain('async function dispatchInitialTaskToOrcaWorker');
     expect(serviceDispatchBlock).toContain('result = await deps.dispatchWorkerMessage({');
@@ -285,28 +288,35 @@ describe('sendToSession ordering', () => {
     expect(source).toContain('assertDesktopSendDispatched');
     expect(orcaInterAgentDispatcherSource).toContain('resolveCollabDispatchResult');
     expect(helperBlock).toContain('Promise<CollabDirectDispatchResult>');
-    expect(helperBlock).toContain('return resolveCollabDispatchResult(');
+    expect(helperBlock).toContain('const result = await resolveCollabDispatchResult(');
     expect(helperBlock).toContain('() => session.send(agentMessage, {');
     expect(helperBlock).toContain('planMode: false,');
     expect(helperBlock).toContain('throwOnStartFailure: true,');
     expect(helperBlock).not.toContain('await session.send(agentMessage, {');
     expect(helperBlock).not.toContain('assertDesktopSendDispatched(sendResult');
-    expect(createBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {');
+    expect(createBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {');
     expect(createBranch).toContain('planMode: false,');
     expect(createBranch).toContain("assertDesktopSendDispatched(sendResult, 'send_to_session create');");
     expect(liveBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(');
     expect(liveBranch).toContain('live,');
+    expectOrder(liveBranch, 'message,', 'clientId,');
     expect(liveBranch).toContain('onAccepted: persistUserMessage,');
     expect(liveBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
     expect(liveBranch).toContain("assertDesktopSendDispatched(sendResult, 'send_to_session live');");
     expect(resumedBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(');
     expect(resumedBranch).toContain('session,');
+    expectOrder(resumedBranch, 'message,', 'clientId,');
     expect(resumedBranch).toContain('onAccepted: persistUserMessage,');
     expect(resumedBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
     expect(resumedBranch).toContain("assertDesktopSendDispatched(sendResult, 'send_to_session resumed');");
   });
 
   it('awaits Git baseline capture after send_to_session user row persistence and before dispatch', () => {
+    const changeSetBlock = extractBetween(
+      source,
+      'async function beginTurnChangeSetAtDispatch',
+      'async function sendUserMessageWithAwaitedGitBaseline',
+    );
     const helperBlock = extractBetween(
       source,
       'async function sendUserMessageWithAwaitedGitBaseline',
@@ -316,16 +326,39 @@ describe('sendToSession ordering', () => {
 
     expect(helperBlock).toContain('onAccepted: async () => {');
     expect(helperBlock).toContain('await opts.onAccepted?.();');
+    expect(helperBlock).toContain('await beginTurnChangeSetAtDispatch(session, anchorClientId);');
     expect(helperBlock).toContain('await gitSnapshotCoordinator.onTurnStart(session.id);');
     expect(helperBlock).toContain('const pendingHandoff = await agentHandoffPending.peek(session.id);');
-    expect(helperBlock).toContain('prependHandoffToUserMessage({ type: \'user\', content: message }, pendingHandoff)');
+    expect(helperBlock).toContain('prependHandoffToUserMessage(');
+    expect(helperBlock).toContain("{ type: 'user', content: message },");
     expect(helperBlock).toContain('const sendResult = await session.send(outgoingMessage, {');
     expect(helperBlock).toContain('agentHandoffPending.consume(session.id);');
+    expect(helperBlock).toContain('if (turnChangeSetStarted && !sendResult.accepted) {');
+    expect(helperBlock).toContain('clearPendingTurnChangeSets(session.id);');
     expect(helperBlock).toContain('if (baselineStarted && !sendResult.accepted) {');
     expect(helperBlock).toContain('gitSnapshotCoordinator?.onTurnAbort(session.id);');
+    expect(changeSetBlock).toContain('await waitForTurnChangeSetSeal(session.id);');
+    expect(changeSetBlock).toContain("await finalizeTurnChangeSet(session.id, null, 'partial');");
+    expect(changeSetBlock).toContain('anchorClientId,');
+    expect(changeSetBlock).toContain('provider: session.agentKind,');
+    expect(changeSetBlock).toContain('cwd: session.workDir,');
+    expect(changeSetBlock).toContain('remote: session.remoteHostId !== null,');
+    const firstSeal = changeSetBlock.indexOf('await waitForTurnChangeSetSeal(session.id);');
+    const finalize = changeSetBlock.indexOf("await finalizeTurnChangeSet(session.id, null, 'partial');");
+    const secondSeal = changeSetBlock.indexOf('await waitForTurnChangeSetSeal(session.id);', firstSeal + 1);
+    const begin = changeSetBlock.indexOf('await beginTurnChangeSet({');
+    expect(firstSeal).toBeGreaterThanOrEqual(0);
+    expect(finalize).toBeGreaterThan(firstSeal);
+    expect(secondSeal).toBeGreaterThan(finalize);
+    expect(begin).toBeGreaterThan(secondSeal);
     expectOrder(
       helperBlock,
       'await opts.onAccepted?.();',
+      'await beginTurnChangeSetAtDispatch(session, anchorClientId);',
+    );
+    expectOrder(
+      helperBlock,
+      'await beginTurnChangeSetAtDispatch(session, anchorClientId);',
       'await gitSnapshotCoordinator.onTurnStart(session.id);',
     );
     expect(countOccurrences(block, 'sendUserMessageWithAwaitedGitBaseline(')).toBe(3);
@@ -342,7 +375,7 @@ describe('sendToSession ordering', () => {
     );
 
     expect(createBranch).toContain('onAccepted: async () => {');
-    expect(createBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {');
+    expect(createBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {');
     expect(createBranch).toContain('planMode: false,');
     expectOrder(createBranch, 'onAccepted: async () => {', 'notifyAgentIslandUserPrompt(session, persistedContent ?? message, {');
     expectOrder(createBranch, 'notifyAgentIslandUserPrompt(session, persistedContent ?? message, {', 'await createDbMessage(session.id, {');

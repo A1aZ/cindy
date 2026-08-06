@@ -55,6 +55,7 @@ interface CapturedFile {
 
 interface PendingTurnChangeSet {
   id: string;
+  ownerScope: broadcastTap.DataOwnerBroadcastScope;
   provider: TurnChangeProvider;
   providerTurnId: string | null;
   cwd: string;
@@ -771,6 +772,7 @@ function ensurePending(
   if (current) return current;
   const pending: PendingTurnChangeSet = {
     id: createId(),
+    ownerScope: broadcastTap.captureDataOwnerBroadcastScope(),
     provider,
     providerTurnId: null,
     cwd,
@@ -1101,7 +1103,7 @@ async function persistPending(
     };
   }
   await persistValue(value);
-  broadcastUpdated({ sessionId, summary: toSummary(value) });
+  broadcastUpdated({ sessionId, summary: toSummary(value) }, pending.ownerScope);
 }
 
 export function finalizeTurnChangeSet(

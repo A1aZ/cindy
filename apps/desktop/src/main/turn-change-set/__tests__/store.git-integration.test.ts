@@ -8,19 +8,30 @@ const mocks = vi.hoisted(() => ({
   userDataRoot: '',
   query: vi.fn(),
   send: vi.fn(),
+  rendererSend: vi.fn(),
   ownerCurrent: true,
+  ownerScopeKey: 'owner-a',
 }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => mocks.userDataRoot },
-  BrowserWindow: { getAllWindows: () => [] },
+  BrowserWindow: {
+    getAllWindows: () => [{
+      isDestroyed: () => false,
+      webContents: { send: mocks.rendererSend },
+    }],
+  },
 }));
 vi.mock('../../localDb/client/current.js', () => ({
   getDbClient: () => ({ query: mocks.query }),
 }));
 vi.mock('../../device-link/broadcast-tap.js', () => ({
-  captureDataOwnerBroadcastScope: () => ({ ownerStamp: undefined }),
-  isDataOwnerBroadcastScopeCurrent: () => mocks.ownerCurrent,
+  captureDataOwnerBroadcastScope: () => ({
+    ownerScopeKey: mocks.ownerScopeKey,
+    ownerStamp: undefined,
+  }),
+  isDataOwnerBroadcastScopeCurrent: (scope: { ownerScopeKey?: string }) =>
+    mocks.ownerCurrent && scope.ownerScopeKey === mocks.ownerScopeKey,
   tapWindowBroadcast: mocks.send,
 }));
 
@@ -48,7 +59,9 @@ describe('turn change-set sidecar store', () => {
     mocks.userDataRoot = path.join(root, 'user-data');
     mocks.query.mockReset();
     mocks.send.mockReset();
+    mocks.rendererSend.mockReset();
     mocks.ownerCurrent = true;
+    mocks.ownerScopeKey = 'owner-a';
     mocks.query.mockImplementation(async (sql: string, params?: readonly unknown[]) => {
       if (sql.includes('working_dir AS workingDir')) {
         return [{ workingDir: workdir, remoteHostId: null }];
@@ -489,6 +502,39 @@ describe('turn change-set sidecar store', () => {
     mocks.ownerCurrent = true;
     expect((await listTurnChangeSets('session-1'))[0]?.workspaceState).toBe('applied');
     expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('does not broadcast a completed turn into a newer data-owner scope', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-old-owner',
+        cwd: workdir,
+        diff: [
+          'diff --git a/owner.txt b/owner.txt',
+          '--- a/owner.txt',
+          '+++ b/owner.txt',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+
+    const finalized = finalizeTurnChangeSet('session-1', 'turn-old-owner', 'complete');
+    mocks.ownerScopeKey = 'owner-b';
+    await finalized;
+
+    expect(await listTurnChangeSets('session-1')).toHaveLength(1);
+    expect(mocks.rendererSend).not.toHaveBeenCalled();
   });
 
   it('reverses and reapplies a pure Codex rename through Git apply', async () => {

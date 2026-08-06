@@ -24,8 +24,10 @@ import {
 } from '@/contexts/dataOwnerGeneration';
 import {
   diffGhostPermissionItems,
+  ghostInstallApprovalToken,
   ghostPermissionBaselineKey,
   type GhostManifest,
+  type InstalledGhost,
 } from '../../../../shared/ghost';
 import type {
   PluginMarketItem,
@@ -189,10 +191,12 @@ export function setUpdateAllBatchHooks(next: UpdateAllBatchHooks): () => void {
   };
 }
 
+function installedGhostOf(ghostId: string): InstalledGhost | null {
+  return readInstalledGhostsSnapshot().find((ghost) => ghost.manifest.id === ghostId) ?? null;
+}
+
 function installedManifestOf(ghostId: string): GhostManifest | null {
-  return (
-    readInstalledGhostsSnapshot().find((ghost) => ghost.manifest.id === ghostId)?.manifest ?? null
-  );
+  return installedGhostOf(ghostId)?.manifest ?? null;
 }
 
 function holdPackageReview(
@@ -307,13 +311,14 @@ async function runQueue(generation: number): Promise<void> {
           patchRow(generation, next.pluginId, { status: 'done' });
           continue;
         }
-        const installedManifest = installedManifestOf(next.ghostId);
-        if (!installedManifest) {
+        const installedGhost = installedGhostOf(next.ghostId);
+        if (!installedGhost) {
           // 批量期间插件已被卸载:绝不拿市场 manifest 兜底继续安装
           // (那会把用户刚卸载的插件重新装回来),该行按跳过收束。
           patchRow(generation, next.pluginId, { status: 'skipped' });
           continue;
         }
+        const installedManifest = installedGhost.manifest;
         const diff = diffGhostPermissionItems(installedManifest, detail.manifest);
         if (diff.added.length > 0) {
           // 扩权不自动放行:停在待确认,由用户在弹窗里逐项同意或跳过。
@@ -329,6 +334,7 @@ async function runQueue(generation: number): Promise<void> {
         }
         const result = await window.electronAPI.pluginMarket.install(next.pluginId, {
           expectedReleaseId: detail.releaseId,
+          expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval),
           ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
         });
         if (result.reviewRequired) {
@@ -446,7 +452,7 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
   const row = state.rows?.find((candidate) => candidate.pluginId === pluginId);
   // 排在前面的批准可能已经把本行推进过(重复点同一项),只处理仍待确认的。
   if (!row || row.status !== 'needs-confirm' || !row.releaseId) return;
-  if (installedManifestOf(row.ghostId) === null) {
+  if (installedGhostOf(row.ghostId) === null) {
     // 待确认期间插件被卸载:同意也不重装,按跳过收束。
     patchRow(generation, pluginId, { status: 'skipped' });
     return;
@@ -475,11 +481,12 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
     }
     // **detail 之后重读已装 manifest**:这段往返里「从文件更新」等路径可能整体
     // 换掉它,拿 await 之前的快照判断 = 拿过期事实做安全决策。
-    const installed = installedManifestOf(row.ghostId);
-    if (installed === null) {
+    const installedGhost = installedGhostOf(row.ghostId);
+    if (installedGhost === null) {
       patchRow(generation, pluginId, { status: 'skipped' });
       return;
     }
+    const installed = installedGhost.manifest;
     if (detail.installState === 'installed') {
       // 目标 release 已由别的路径装上:直接收束,不重复下载安装。
       // (return 后仍走 finally 的统一收尾——刷新市场快照 + 完成 toast。)
@@ -573,6 +580,7 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
     if (reviewStillValid) {
       const didInstall = await installOrHoldForReReview({
         expectedReleaseId: row.releaseId,
+        expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval),
         ...(row.expectedManifest ? { expectedManifest: row.expectedManifest } : {}),
         allowPermissionExpansion: true,
         // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
@@ -596,6 +604,7 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
       // 不匹配拒绝,不能把它落成终态失败。
       const ok = await installOrHoldForReReview({
         expectedReleaseId: detail.releaseId,
+        expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval),
         ...(detail.sourceType !== 'server' ? { expectedManifest: detail.manifest } : {}),
       });
       if (!ok) return;

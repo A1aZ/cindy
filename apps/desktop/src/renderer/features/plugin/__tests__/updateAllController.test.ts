@@ -11,7 +11,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@/i18n', () => ({ i18n: { t: (key: string) => key } }));
 vi.mock('@/lib/toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
-let installedGhosts: Array<{ manifest: GhostManifest }> = [];
+let installedGhosts: Array<{
+  manifest: GhostManifest;
+  approval?: { state: 'approved'; revision: string };
+}> = [];
 vi.mock('@/cindy-brain/useInstalledGhosts', () => ({
   readInstalledGhostsSnapshot: () => installedGhosts,
 }));
@@ -114,6 +117,25 @@ describe('updateAllController', () => {
     expect(installMock).not.toHaveBeenCalled();
   });
 
+  it('binds an automatic update to the installed receipt approval revision', async () => {
+    const revision = '11111111-1111-4111-8111-111111111111';
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'approved', revision },
+      },
+    ];
+    stubDetail({ manifest: manifest({}), sourceType: 'server' });
+
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedInstalledApproval: `approved:${revision}`,
+    });
+  });
+
   it('holds actual package permissions for approval', async () => {
     stubDetail({ manifest: manifest({}), sourceType: 'server' });
     const review = {
@@ -166,6 +188,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
@@ -184,6 +207,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
       expectedManifest: nextManifest,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
@@ -192,6 +216,13 @@ describe('updateAllController', () => {
   });
 
   it('omits expectedManifest when approving a server-source expansion', async () => {
+    const revision = '22222222-2222-4222-8222-222222222222';
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'approved', revision },
+      },
+    ];
     stubDetail({
       manifest: manifest({ network: { hosts: ['api.example.com'] } }),
       sourceType: 'server',
@@ -203,6 +234,7 @@ describe('updateAllController', () => {
 
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: `approved:${revision}`,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
     });
@@ -236,7 +268,13 @@ describe('updateAllController', () => {
     // 「从文件更新」把插件装成了第三个版本,且它已自带原先要审的 network 权限:
     // 审阅过的 diff 与 allowPermissionExpansion 都不再对应现实。
     installedGhosts = [
-      { manifest: manifest({ version: '1.0.5', network: { hosts: ['api.example.com'] } }) },
+      {
+        manifest: manifest({ version: '1.0.5', network: { hosts: ['api.example.com'] } }),
+        approval: {
+          state: 'approved',
+          revision: '33333333-3333-4333-8333-333333333333',
+        },
+      },
     ];
     reconcileUpdateAllBatch();
     const held = getUpdateAllBatchState().rows?.[0];
@@ -245,7 +283,10 @@ describe('updateAllController', () => {
 
     await approveUpdateExpansion('plugin-a');
     // 相对当前已装 manifest 已无扩权 → 按普通更新安装,不带 allowPermissionExpansion。
-    expect(installMock).toHaveBeenCalledWith('plugin-a', { expectedReleaseId: 'release-2' });
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'approved:33333333-3333-4333-8333-333333333333',
+    });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
 
@@ -285,7 +326,10 @@ describe('updateAllController', () => {
     ];
     await approveUpdateExpansion('plugin-a');
 
-    expect(installMock).toHaveBeenCalledWith('plugin-a', { expectedReleaseId: 'release-2' });
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
+    });
   });
 
   it('invalidates the review when a same-version manifest swap widened permissions', async () => {
@@ -333,6 +377,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
     });
@@ -404,6 +449,7 @@ describe('updateAllController', () => {
     // 目标 release 仍未落账 → 必须真正安装,不得凭版本号收成完成。
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
     });
@@ -624,6 +670,7 @@ describe('updateAllController', () => {
 
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
       expectedManifest: expect.anything(),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
@@ -753,6 +800,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'legacy-unapproved',
       expectedManifest: swappedManifest,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),

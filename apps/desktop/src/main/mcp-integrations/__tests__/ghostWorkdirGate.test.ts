@@ -159,7 +159,11 @@ const { setGhostDisabledForWorkdir, listDisabledGhostIdsForWorkdir, isGhostDisab
   await import('../../cindy-brain/ghostWorkdirPrefs');
 import type { LiziMcpSessionContext } from '@cindy/mcps';
 
-function chipGhost(id: string, slots: string[] = ['tool']): unknown {
+function chipGhost(
+  id: string,
+  slots: string[] = ['tool'],
+  extra: Record<string, unknown> = {},
+): unknown {
   return {
     enabled: true,
     manifest: {
@@ -168,6 +172,7 @@ function chipGhost(id: string, slots: string[] = ['tool']): unknown {
       kind: 'chip',
       slots,
       tools: [{ name: 'run', description: 'd' }],
+      ...extra,
     },
   };
 }
@@ -347,6 +352,27 @@ describe('花名册 / ghost_list 过滤', () => {
     const deps = makeDeps();
     expect((deps.getRosterItems?.() ?? []).map((r) => r.id)).toEqual(['art', 'other']);
     expect((await deps.listAwakeGhosts()).map((g) => g.id)).toEqual(['art', 'other']);
+  });
+
+  it('ghost_list 召回线索优先 whenToUse，缺省回落 description', async () => {
+    listMock.mockReturnValue([
+      chipGhost('when', ['tool'], {
+        name: 'When',
+        description: '给人的介绍',
+        whenToUse: '给模型的召回场景',
+      }),
+      chipGhost('fallback', ['tool'], {
+        name: 'Fallback',
+        description: '缺少 whenToUse 时的回落介绍',
+      }),
+    ]);
+
+    const ghosts = await makeDeps().listAwakeGhosts();
+
+    expect(ghosts.map(({ id, recall }) => ({ id, recall }))).toEqual([
+      { id: 'when', recall: '给模型的召回场景' },
+      { id: 'fallback', recall: '缺少 whenToUse 时的回落介绍' },
+    ]);
   });
 
   it('单插件 setup assessment 失败只省略该 setup，不拖垮健康清单', async () => {

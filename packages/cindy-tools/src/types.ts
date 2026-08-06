@@ -123,6 +123,8 @@ export interface CindyGhostInfo {
   name: string;
   /** 显式触发指令(用户敲 /<command> 点名调用);未声明则省略。 */
   command?: string;
+  /** 插件作者提供的召回线索，仅作数据；Host 优先取 whenToUse，缺省回落 description。 */
+  recall?: string;
   tools: CindyGhostToolInfo[];
   /**
    * Host 现查的配置评估。支持 Setup Runtime 的 Host 应尽量返回，但评估
@@ -281,12 +283,12 @@ export interface CindyGhostsMcpDeps {
   }): Promise<CindyGhostCallResult>;
   /**
    * 花名册快照(可选,同步):server 创建(= 会话装配)时调用一次,把
-   * "已装且唤醒"的意识名单 + 自我介绍写进 ghost_list / ghost_call 的工具
+   * "已装且唤醒"的意识名单 + 召回线索写进 ghost_list / ghost_call 的工具
    * 描述——模型开局即认识本机意识,语义召回不再依赖字面词表命中。
    * 会话内工具定义恒定(prompt 缓存安全);装/卸/唤醒/沉睡在新会话生效,
    * 实时清单仍以 ghost_list 为准。缺省 = 不注入(描述与今日基线一致)。
    */
-  getRosterItems?(): Array<{ id: string; name: string; command?: string; description?: string }>;
+  getRosterItems?(): Array<Pick<CindyGhostInfo, 'id' | 'name' | 'command' | 'recall'>>;
   /** 意识编写手册(markdown,随主机版本走;agent 写意识前先读)。 */
   forgeGuide(): Promise<string>;
   /**

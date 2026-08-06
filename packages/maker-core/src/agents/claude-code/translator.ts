@@ -21,7 +21,6 @@ import {
   extractNonSecretErrorSignals,
   redactSensitiveText,
 } from '@cindy/maker-shared/error-redaction';
-import type { createAsyncQueue } from '../shared/async-queue.js';
 import { stripTerminalControlSequences } from '../shared/terminal-output.js';
 import { formatOverloadRetryMessage, parseOverloadError } from '../shared/overload-error.js';
 import {
@@ -407,7 +406,7 @@ function formatCacheBucket(b: {
 const TURN_END_LOGGER_KEY = 'SDK ◀ turn end (result)';
 void TURN_END_LOGGER_KEY; // 只是给调用方对照参考
 
-type EventQueue = ReturnType<typeof createAsyncQueue<AgentEvent>>;
+type EventQueue = { push(event: AgentEvent): boolean };
 interface TranslatorLog {
   debug(msg: string, ctx?: Record<string, unknown>): void;
   info(msg: string, ctx?: Record<string, unknown>): void;

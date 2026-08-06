@@ -2908,6 +2908,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       activeBridgeRewindResumeAt = undefined;
       pendingToolIds.clear();
       runningBackgroundTasks.clear();
+      terminalBackgroundTaskIds.clear();
       closed = true;
       try { dismissAllPending('session_closed', 'deny'); } catch (e) {
         log.warn(`${logLabel}: dismissAllPending threw`, { error: String(e) });
@@ -2960,12 +2961,15 @@ export class ClaudeCodeAgent extends BaseAgent {
         continuationTerminalBoundaryEvents.add(doneEvent);
         pendingContinuationTerminalBoundaries += 1;
       }
-      if (!eventQueue.push(doneEvent) && trackContinuationTerminal) {
-        continuationTerminalBoundaryEvents.delete(doneEvent);
-        pendingContinuationTerminalBoundaries = Math.max(
-          0,
-          pendingContinuationTerminalBoundaries - 1,
-        );
+      const accepted = eventQueue.push(doneEvent);
+      if (trackContinuationTerminal) {
+        if (!accepted) {
+          continuationTerminalBoundaryEvents.delete(doneEvent);
+          pendingContinuationTerminalBoundaries = Math.max(
+            0,
+            pendingContinuationTerminalBoundaries - 1,
+          );
+        }
       }
     }
 
@@ -2993,6 +2997,12 @@ export class ClaudeCodeAgent extends BaseAgent {
       string,
       { wake: boolean; taskType?: string; toolUseId?: string; title?: string }
     >();
+    // SDK task progress can race behind its terminal notification. Once a task
+    // is terminal within the current Query generation, a late running/progress
+    // patch must not resurrect it into runningBackgroundTasks and manufacture
+    // a fresh continuation claim at the next done.
+    const terminalBackgroundTaskIds = new Set<string>();
+    const ignoredLateTerminalTaskEvents = new WeakSet<AgentEvent>();
 
     type ContinuationTaskState = 'running' | 'completed' | 'failed' | 'stopped';
     type ContinuationClaim = {
@@ -3009,6 +3019,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     // result-only continuation cannot change what the host later observes.
     let nextContinuationId = 1;
     let activeContinuationId: number | null = null;
+    // User Stop can close an awaiting product continuation while the provider
+    // still has buffered activity. Suppress that cancelled tail until the next
+    // explicit user input is accepted (or the Query is replaced).
+    let continuationCancellationGeneration: number | null = null;
     const continuationClaims = new Map<number, ContinuationClaim>();
     const continuationListeners = new Set<(
       continuationId: number,
@@ -3103,6 +3117,16 @@ export class ClaudeCodeAgent extends BaseAgent {
         // attaching a fresh claim to this done when another automatic turn is
         // now expected.
       }
+      // A result produced by the generation being interrupted is already a
+      // terminal boundary. Even if a wake task remains in the provider table,
+      // user Stop has revoked the right to create another automatic segment.
+      if (
+        (turnState.interruptRequested &&
+          turnState.interruptGeneration === turnState.generation) ||
+        continuationCancellationGeneration === turnState.generation
+      ) {
+        return wasActiveContinuation;
+      }
       const wakeTasks = [...runningBackgroundTasks.entries()].filter(([, info]) => info.wake);
       for (const [taskId] of wakeTasks) {
         if (!carriedTasks.has(taskId)) carriedTasks.set(taskId, 'running');
@@ -3141,8 +3165,12 @@ export class ClaudeCodeAgent extends BaseAgent {
       const claim = activeContinuationClaim();
       for (const taskId of taskIds) {
         const info = runningBackgroundTasks.get(taskId);
-        if (!info?.wake) continue;
+        const claimTracksWakeTask =
+          (claim?.state === 'awaiting' || claim?.state === 'active') &&
+          claim.tasks.has(taskId);
+        if (!info?.wake && !claimTracksWakeTask) continue;
         runningBackgroundTasks.delete(taskId);
+        terminalBackgroundTaskIds.add(taskId);
         if (claim?.state === 'awaiting' || claim?.state === 'active') {
           claim.tasks.set(taskId, 'stopped');
         }
@@ -3169,6 +3197,19 @@ export class ClaudeCodeAgent extends BaseAgent {
       if (!taskId) return null;
       const status = data?.status;
       if (status === 'running') {
+        if (continuationCancellationGeneration !== null) {
+          log.debug('ignoring task activity after user-cancelled continuation', {
+            taskId,
+            cancellationGeneration: continuationCancellationGeneration,
+          });
+          ignoredLateTerminalTaskEvents.add(e);
+          return null;
+        }
+        if (terminalBackgroundTaskIds.has(taskId)) {
+          log.debug('ignoring late running update for terminal background task', { taskId });
+          ignoredLateTerminalTaskEvents.add(e);
+          return null;
+        }
         const prev = runningBackgroundTasks.get(taskId);
         const wake =
           prev?.wake === true ||
@@ -3190,6 +3231,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       } else if (status === 'completed' || status === 'failed' || status === 'stopped') {
         const prev = runningBackgroundTasks.get(taskId);
         runningBackgroundTasks.delete(taskId);
+        terminalBackgroundTaskIds.add(taskId);
         const claim = activeContinuationClaim();
         if (
           (claim?.state === 'awaiting' || claim?.state === 'active') &&
@@ -3343,7 +3385,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       deferResumeFailureBoundary = false;
     }
     let pendingTerminalStatusEvent: AgentEvent | undefined;
-    const forwardEventSink: AsyncQueue<AgentEvent> = {
+    const forwardEventSink: Pick<AsyncQueue<AgentEvent>, 'push'> = {
       // Claude's translator emits `status(isRunning=false)` immediately before
       // the matching `done`. Hold that status long enough to copy the
       // provider continuation claim from `done`; otherwise every generic
@@ -3356,6 +3398,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         }
         // 后台任务表旁路观察(O(1) type check,task 事件低频,不碰热路径逻辑)。
         const cancelledContinuation = noteBackgroundTaskEvent(e);
+        if (ignoredLateTerminalTaskEvents.delete(e)) return true;
         if (queuedBridgeTurns > 0) {
           if (e.type === 'done') {
             rememberBridgeSuppressedDoneData(e.data);
@@ -3415,6 +3458,15 @@ export class ClaudeCodeAgent extends BaseAgent {
           pendingContinuationTerminalBoundaries += 1;
         }
         const accepted = eventQueue.push(e);
+        if (isContinuationTerminalDone) {
+          if (!accepted) {
+            continuationTerminalBoundaryEvents.delete(e);
+            pendingContinuationTerminalBoundaries = Math.max(
+              0,
+              pendingContinuationTerminalBoundaries - 1,
+            );
+          }
+        }
         // A stopped notification is part of the visible turn history. Preserve
         // its order, then append a real product-turn boundary so Session can
         // close the current generation even though the SDK will not emit a
@@ -3424,19 +3476,6 @@ export class ClaudeCodeAgent extends BaseAgent {
         }
         return accepted;
       },
-      end: () => {
-        if (pendingTerminalStatusEvent) {
-          eventQueue.push(pendingTerminalStatusEvent);
-          pendingTerminalStatusEvent = undefined;
-        }
-        eventQueue.end();
-      },
-      clear: () => {
-        pendingTerminalStatusEvent = undefined;
-        eventQueue.clear();
-      },
-      get pending() { return eventQueue.pending; },
-      [Symbol.asyncIterator]: () => eventQueue[Symbol.asyncIterator](),
     };
 
     // ── 事件 forward loop（SDK 原始事件 → maker-core AgentEvent） ─────────────
@@ -3479,10 +3518,12 @@ export class ClaudeCodeAgent extends BaseAgent {
       // q 换代: 上一代 q 的 pending interrupted result 不可能从新 q drain 出来,
       // 残留的 interruptRequested 会错误抑制新 q 首个真实 is_error 终态 —— 兜底清。
       turnState.interruptRequested = false;
+      continuationCancellationGeneration = null;
       discardActiveContinuation('query_replaced');
       // q 换代 = 旧 CLI 子进程已死,其后台任务全部随之终止 —— 清表防 stale 条目
       // 让下次 abort 对不存在的任务空发 stopTask。
       runningBackgroundTasks.clear();
+      terminalBackgroundTaskIds.clear();
       void (async () => {
         try {
           for await (const rawMsg of currentQ) {
@@ -3499,6 +3540,16 @@ export class ClaudeCodeAgent extends BaseAgent {
               bridgeSuppressedDoneData = undefined;
             }
             const rawType = (rawMsg as { type?: string } | null)?.type;
+            if (
+              continuationCancellationGeneration !== null &&
+              (rawType === 'assistant' || rawType === 'stream_event' || rawType === 'result')
+            ) {
+              log.debug('ignoring provider activity after user-cancelled continuation', {
+                rawType,
+                cancellationGeneration: continuationCancellationGeneration,
+              });
+              continue;
+            }
             if (noteSdkInitMcpServerNames(rawMsg)) {
               await refreshSdkMcpProvenance(currentQ);
             }
@@ -4459,6 +4510,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             throw new Error('Claude input queue is closed');
           }
           userInputAccepted = true;
+          continuationCancellationGeneration = null;
           activeCapabilitySelectionText = userMessageTextForCapabilityRouting(message.content);
           setAutoReviewIntent(message.content);
           replayableUserInput = sdkInput;
@@ -4580,6 +4632,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           const cancelledContinuation = cancelActiveContinuation('bridge_aborted');
           if (!cancelledContinuation) settleActiveContinuation('bridge_aborted');
           runningBackgroundTasks.clear();
+          terminalBackgroundTaskIds.clear();
           turnInFlight = false;
           turnState.interruptRequested = false;
           emitTurnBoundary(
@@ -4599,12 +4652,56 @@ export class ClaudeCodeAgent extends BaseAgent {
           turnState.interruptRequested = true;
           turnState.interruptGeneration = turnState.generation;
         }
+        const awaitingContinuationAtUserStop = activeContinuationClaim();
+        const awaitingContinuationIdAtUserStop =
+          awaitingContinuationAtUserStop?.state === 'awaiting'
+            ? awaitingContinuationAtUserStop.id
+            : null;
+        const continuationGenerationAtUserStop = turnState.generation;
         // 用户 Stop 的产品语义 = 本会话所有模型调用停止:先发 stopTask 再 interrupt
         // (同一控制通道按序处理),封掉「interrupt 后任务恰好完成 → task_notification
         // 自动续跑新 turn」的竞态窗口。fire-and-forget,不阻塞 interrupt。
         stopRunningWakeBackgroundTasks('user_stop');
         try {
           await q.interrupt();
+          // Stop is the authoritative cancellation boundary. An awaiting
+          // continuation may already have lost every task from the running
+          // table, so neither stopTask nor an idle interrupt is guaranteed to
+          // produce another provider result. Close it explicitly after the
+          // control action succeeds and append the ordered product terminal.
+          const cancelledContinuation = cancelActiveContinuation('user_stop');
+          if (awaitingContinuationIdAtUserStop !== null) {
+            const continuationAfterInterrupt = activeContinuationClaim();
+            if (
+              continuationAfterInterrupt?.id === awaitingContinuationIdAtUserStop &&
+              continuationAfterInterrupt.state === 'active'
+            ) {
+              // Provider activity may have activated the snapshotted claim
+              // while interrupt was in flight. Let its interrupted result run
+              // the normal turn teardown, but forbid that result from minting
+              // another continuation claim.
+              turnState.interruptRequested = true;
+              turnState.interruptGeneration = turnState.generation;
+            } else if (continuationAfterInterrupt?.id !== awaitingContinuationIdAtUserStop) {
+              // stopTask may have won the race and cancelled the same claim
+              // before interrupt resolved. The successful interrupt still
+              // authorizes the same cancelled-tail tombstone.
+              continuationCancellationGeneration = continuationGenerationAtUserStop;
+            }
+          }
+          if (cancelledContinuation) {
+            // The successful Stop revokes these tasks' continuation contract.
+            // Retire their tracking entries as well, so a late provider
+            // result or running patch cannot rebuild the claim we just
+            // cancelled. This is product-side cancellation bookkeeping; the
+            // best-effort stopTask RPCs above remain responsible for stopping
+            // the provider tasks themselves.
+            for (const taskId of cancelledContinuation.tasks.keys()) {
+              runningBackgroundTasks.delete(taskId);
+              terminalBackgroundTaskIds.add(taskId);
+            }
+            emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
+          }
         } catch (e) {
           // interrupt 失败 → 无 result 消费标记, 回收防误抑制(同 watchdog)。
           turnState.interruptRequested = false;
@@ -4677,6 +4774,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           abortController.abort();
           // close 会终结 CLI 子进程(本地)/ 远端 session,后台任务随之死亡。
           runningBackgroundTasks.clear();
+          terminalBackgroundTaskIds.clear();
         } catch (e) {
           log.warn('close threw', { error: String(e) });
         }
@@ -4698,11 +4796,14 @@ export class ClaudeCodeAgent extends BaseAgent {
         ? {
             async detach() {
               if (closed) return;
+              discardActiveContinuation('session_detached');
               closed = true;
               try {
                 dismissAllPending('session_closed', 'deny');
                 inputQueue.end();
                 abortController.abort();
+                runningBackgroundTasks.clear();
+                terminalBackgroundTaskIds.clear();
               } catch (e) {
                 log.warn('detach threw', { error: String(e) });
               }

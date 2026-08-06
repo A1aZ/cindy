@@ -24,6 +24,21 @@ async function tempRoot(): Promise<string> {
   return root;
 }
 
+async function canCreateFileSymlink(): Promise<boolean> {
+  const probeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'owner-namespace-symlink-probe-'));
+  try {
+    const target = path.join(probeRoot, 'target.txt');
+    const link = path.join(probeRoot, 'link.txt');
+    await fs.writeFile(target, 'probe');
+    await fs.symlink(target, link, process.platform === 'win32' ? 'file' : undefined);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await fs.rm(probeRoot, { recursive: true, force: true });
+  }
+}
+
 /**
  * Chromium uses a relative file symlink for SingletonLock on macOS/Linux.
  * Windows local test hosts may not have file-symlink privileges, so use a
@@ -488,6 +503,7 @@ describe('claimLegacyOwnerNamespace', () => {
   });
 
   it('does not move a symlinked legacy credential into the owner namespace', async () => {
+    if (!(await canCreateFileSymlink())) return;
     const root = await tempRoot();
     const external = await tempRoot();
     const source = path.join(root, 'model-access-credentials.json');

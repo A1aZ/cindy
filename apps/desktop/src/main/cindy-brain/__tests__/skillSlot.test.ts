@@ -174,8 +174,43 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
     // 模拟崩溃残留:插件目录整个没了,链接悬空
     await fs.promises.rm(path.join(brainRoot, 'my-ghost'), { recursive: true, force: true });
     const result = await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
-    expect(fs.existsSync(path.join(sharedDir(), ghostSkillLinkName('my-ghost', 'foo')))).toBe(false);
+    await expect(
+      fs.promises.lstat(path.join(sharedDir(), ghostSkillLinkName('my-ghost', 'foo'))),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
     expect(result.changed).toBe(true);
+  });
+
+  it('回收词法根与物理根表示不同的悬空技能链接', async () => {
+    const physicalOwner = path.join(workDir, 'physical-owner');
+    const lexicalOwner = path.join(workDir, 'owner-alias');
+    await fs.promises.mkdir(physicalOwner, { recursive: true });
+    try {
+      await fs.promises.symlink(
+        physicalOwner,
+        lexicalOwner,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return;
+    }
+    brainRoot = path.join(lexicalOwner, 'cindy-brain');
+    approvalStateRoot = path.join(lexicalOwner, 'cindy-brain-install-state');
+    await fs.promises.mkdir(brainRoot, { recursive: true });
+    await writeSkillDir('my-ghost', 'skills/foo', 'foo');
+    const ghosts = [ghost('my-ghost', [{ dir: 'skills/foo', name: 'foo' }])];
+    await reconcileGhostSkillLinks({ ghosts, brainRoot, approvalStateRoot, homeDir });
+    const linkPath = path.join(sharedDir(), ghostSkillLinkName('my-ghost', 'foo'));
+
+    await fs.promises.rm(path.join(brainRoot, 'my-ghost'), { recursive: true, force: true });
+    const result = await reconcileGhostSkillLinks({
+      ghosts: [],
+      brainRoot,
+      approvalStateRoot,
+      homeDir,
+    });
+
+    expect(result.changed).toBe(true);
+    await expect(fs.promises.lstat(linkPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('技能改名/换目录 → 旧链撤、新链立', async () => {

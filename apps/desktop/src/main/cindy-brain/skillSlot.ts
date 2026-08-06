@@ -286,10 +286,19 @@ export async function reconcileGhostSkillLinks(
   const { sharedSkillsDir } = sharedGlobalSkillsPaths(opts.homeDir);
   // realpath 兼容 brainRoot 或其祖先是 symlink 的场景(relocated home dir)——
   // 活链接 realpath 后必须与归一化的物理根比较才可靠。resolve 失败退化到词法。
+  const lexicalManagedRootCompares = [
+    normalizeForCompare(opts.brainRoot),
+    normalizeForCompare(opts.approvalStateRoot),
+  ];
   const managedRootCompares = [
     (await realPathOrNull(opts.brainRoot)) ?? normalizeForCompare(opts.brainRoot),
     (await realPathOrNull(opts.approvalStateRoot)) ??
       normalizeForCompare(opts.approvalStateRoot),
+  ];
+  // 活链接按 realpath 归属当前 owner；断链只能读到 raw target，它可能保留 Windows
+  // 8.3 短路径或 symlink 祖先的词法表示，所以用物理根 + 词法根的并集判断。
+  const danglingManagedRootCompares = [
+    ...new Set([...managedRootCompares, ...lexicalManagedRootCompares]),
   ];
   const approvalStateDirName = path.basename(path.resolve(opts.approvalStateRoot));
 
@@ -383,7 +392,14 @@ export async function reconcileGhostSkillLinks(
     const absTarget = path.isAbsolute(rawTarget)
       ? rawTarget
       : path.resolve(sharedSkillsDir, rawTarget);
-    if (targetLooksGhostManaged(absTarget, entName, approvalStateDirName, managedRootCompares)) {
+    if (
+      targetLooksGhostManaged(
+        absTarget,
+        entName,
+        approvalStateDirName,
+        danglingManagedRootCompares,
+      )
+    ) {
       toRemove.push(entName);
     }
   }

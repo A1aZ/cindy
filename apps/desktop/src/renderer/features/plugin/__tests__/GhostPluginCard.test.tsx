@@ -28,6 +28,7 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 import {
   __installedPluginLayoutForTests,
+  diffMarketUpdatePermissionItems,
   GhostPluginCard,
   LegacyGhostRecoveryNotice,
   MarketPluginCard,
@@ -46,6 +47,41 @@ const {
   MAX_VISIBLE_INSTALLED_PLUGINS,
   visibleInstalledPluginItems,
 } = __installedPluginLayoutForTests;
+
+describe('diffMarketUpdatePermissionItems', () => {
+  it.each(['legacy-unapproved', 'invalid'] as const)(
+    'reviews every target permission for a %s install',
+    (approvalState) => {
+      const manifest = {
+        schemaVersion: 2 as const,
+        id: 'legacy-plugin',
+        name: 'Legacy Plugin',
+        description: 'Legacy approval regression fixture',
+        author: 'Cindy',
+        version: '1.0.0',
+        kind: 'chip' as const,
+        entry: 'main.js',
+        slots: ['notify'] as ['notify'],
+      };
+      const installed = {
+        manifest,
+        dir: 'C:\\plugins\\legacy-plugin',
+        enabled: false,
+        approval: { state: approvalState },
+      };
+      const next = {
+        ...manifest,
+        version: '2.0.0',
+        slots: ['notify', 'fs'] as ['notify', 'fs'],
+      };
+
+      const diff = diffMarketUpdatePermissionItems(installed, next);
+      expect(diff.added.map((item) => item.key)).toEqual(expect.arrayContaining(['notify', 'fs']));
+      expect(diff.removed).toEqual([]);
+      expect(diff.unchanged).toEqual([]);
+    },
+  );
+});
 
 const commandPlugin: GhostPluginListItem = {
   id: 'filo-google',
@@ -414,9 +450,7 @@ describe('MarketPluginCard', () => {
     expect((cardBody as HTMLButtonElement).disabled).toBe(true);
     expect(cardBody.className).toContain('cursor-not-allowed');
     expect(cardBody.className).not.toContain('cursor-wait');
-    const conflictDescription = screen.getByText(
-      'settings.ghosts.market.conflictDescription',
-    );
+    const conflictDescription = screen.getByText('settings.ghosts.market.conflictDescription');
     expect(conflictDescription.id).toBeTruthy();
     expect(cardBody.getAttribute('aria-describedby')).toBe(conflictDescription.id);
     const conflictAction = screen.getByRole('button', {

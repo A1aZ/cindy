@@ -35,11 +35,17 @@ afterEach(async () => {
 /** 建目录链接;该环境无权限时返回 false 让用例跳过(判定逻辑与其他平台同源)。 */
 async function tryLinkDir(target: string, linkPath: string): Promise<boolean> {
   try {
-    await fs.promises.symlink(
-      target,
-      linkPath,
-      process.platform === 'win32' ? 'junction' : 'dir',
-    );
+    await fs.promises.symlink(target, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 建文件链接；Windows 无权限时返回 false。 */
+async function tryLinkFile(target: string, linkPath: string): Promise<boolean> {
+  try {
+    await fs.promises.symlink(target, linkPath, 'file');
     return true;
   } catch {
     return false;
@@ -208,6 +214,85 @@ describe('hashGhostContentFiles', () => {
       await hashGhostContentFiles(twoFiles, twoTree.files),
     );
   });
+
+  it('rejects an intermediate directory replaced by an outside link after collection', async () => {
+    const root = path.join(workDir, 'plugin');
+    const outside = path.join(workDir, 'outside');
+    await fs.promises.mkdir(path.join(root, 'nested'), { recursive: true });
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.writeFile(path.join(root, 'nested', 'x.txt'), 'inside');
+    await fs.promises.writeFile(path.join(outside, 'x.txt'), 'outside');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    await fs.promises.rm(path.join(root, 'nested'), { recursive: true, force: true });
+    if (!(await tryLinkDir(outside, path.join(root, 'nested')))) return;
+
+    await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow(
+      /escaped its root|changed into a link/,
+    );
+  });
+
+  it('rejects an intermediate directory replaced by a link within the content root', async () => {
+    const root = path.join(workDir, 'plugin');
+    const alternate = path.join(root, 'alternate');
+    await fs.promises.mkdir(path.join(root, 'nested'), { recursive: true });
+    await fs.promises.mkdir(alternate, { recursive: true });
+    await fs.promises.writeFile(path.join(root, 'nested', 'x.txt'), 'inside');
+    await fs.promises.writeFile(path.join(alternate, 'x.txt'), 'alternate');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    await fs.promises.rm(path.join(root, 'nested'), { recursive: true, force: true });
+    if (!(await tryLinkDir(alternate, path.join(root, 'nested')))) return;
+
+    await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow(
+      /ancestor changed into a link/,
+    );
+  });
+
+  it('rejects a leaf file replaced by a link after collection', async () => {
+    const root = path.join(workDir, 'plugin');
+    const outside = path.join(workDir, 'outside.txt');
+    await fs.promises.mkdir(root, { recursive: true });
+    await fs.promises.writeFile(path.join(root, 'main.js'), 'inside');
+    await fs.promises.writeFile(outside, 'outside');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    await fs.promises.rm(path.join(root, 'main.js'));
+    if (!(await tryLinkFile(outside, path.join(root, 'main.js')))) return;
+
+    await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow();
+  });
+
+  it('rejects the content root being replaced between collection and hashing', async () => {
+    const root = path.join(workDir, 'plugin');
+    await fs.promises.mkdir(root, { recursive: true });
+    await fs.promises.writeFile(path.join(root, 'main.js'), 'inside');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    await fs.promises.rm(root, { recursive: true, force: true });
+    await fs.promises.mkdir(root);
+    await fs.promises.writeFile(path.join(root, 'main.js'), 'replacement');
+
+    await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow(
+      /root changed/,
+    );
+  });
 });
 
 describe('hashGhostContentBuffers', () => {
@@ -223,12 +308,12 @@ describe('hashGhostContentBuffers', () => {
       for (const [rel, content] of Object.entries(tree)) {
         await fs.promises.writeFile(path.join(root, ...rel.split('/')), content);
       }
-      const { files } = await collectGhostContentFiles(root, {
+      const collected = await collectGhostContentFiles(root, {
         dotEntries: 'include',
         nonRegular: 'throw',
         label: 'test',
       });
-      const fromDisk = await hashGhostContentFiles(root, files);
+      const fromDisk = await hashGhostContentFiles(root, collected.files, collected.rootIdentity);
       const fromMemory = hashGhostContentBuffers(
         Object.entries(tree).map(([p2, c]) => ({ path: p2, bytes: Buffer.from(c) })),
       );

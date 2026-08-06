@@ -3445,12 +3445,12 @@ async function copyBundledSeedDirectory(from: string, to: string): Promise<void>
  * 本身就是缺陷温床。
  */
 async function hashApprovedDirectory(root: string): Promise<string> {
-  const { files } = await collectGhostContentFiles(root, {
+  const tree = await collectGhostContentFiles(root, {
     dotEntries: 'skip',
     nonRegular: 'throw',
     label: 'bundled Plugin',
   });
-  return hashGhostContentFiles(root, files);
+  return hashGhostContentFiles(root, tree.files, tree.rootIdentity);
 }
 
 /**

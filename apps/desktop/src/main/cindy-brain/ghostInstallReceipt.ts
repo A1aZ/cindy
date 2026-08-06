@@ -979,12 +979,12 @@ export async function hashApprovedSkillContent(
       expect: 'directory',
       label: 'approved skill',
     });
-    const { files } = await collectGhostContentFiles(itemRoot, {
+    const tree = await collectGhostContentFiles(itemRoot, {
       dotEntries: 'include',
       nonRegular: 'throw',
       label: `approved skill ${item.dir}`,
     });
-    result[item.dir] = await hashGhostContentFiles(itemRoot, files);
+    result[item.dir] = await hashGhostContentFiles(itemRoot, tree.files, tree.rootIdentity);
   }
   return result;
 }

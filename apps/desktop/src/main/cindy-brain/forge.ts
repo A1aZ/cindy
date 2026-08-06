@@ -39,11 +39,6 @@ import { checkSkillMdConsistency } from './skillSlot.js';
  */
 const realpathNative = promisify(fs.realpath.native);
 
-function sameForgeCanonicalPath(left: string, right: string): boolean {
-  const fold = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value);
-  return fold(path.resolve(left)) === fold(path.resolve(right));
-}
-
 /**
  * 解析已存在祖先的真身、保留尚不存在的尾段,让受管根在首次落盘前就可比对。
  */
@@ -62,6 +57,25 @@ async function resolveThroughExistingAncestor(inputPath: string): Promise<string
       cursor = parent;
     }
   }
+}
+
+/**
+ * 逐段确认一个已存在目录路径没有 symlink / junction 祖先。
+ *
+ * 不能用 `realpath(path) === path` 判断：Windows 的 8.3 短路径会被 realpath
+ * 展开成长路径，二者文本不同但每一段仍都是普通目录。逐段 lstat 才能既放行
+ * 这种合法别名，又继续拒绝真正的 reparse-point 祖先。
+ */
+async function pathHasLinkSegment(inputPath: string): Promise<boolean> {
+  const resolved = path.resolve(inputPath);
+  const root = path.parse(resolved).root;
+  let current = root;
+  const relative = path.relative(root, resolved);
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    if ((await fs.promises.lstat(current)).isSymbolicLink()) return true;
+  }
+  return false;
 }
 
 /** 与 GhostManager 装入侧同一量级的上限(打包侧提前拦,fail fast)。 */
@@ -563,7 +577,7 @@ export async function scaffoldGhostDir(
     }
     parentRealPath = await realpathNative(parentDir);
     if (
-      !sameForgeCanonicalPath(parentRealPath, parentDir) ||
+      (await pathHasLinkSegment(parentDir)) ||
       !isPathInsideDir(realWorkdir, parentRealPath)
     ) {
       return {

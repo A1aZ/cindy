@@ -924,7 +924,7 @@ export async function fingerprintDirContent(dir: string): Promise<DirContentFing
     label: 'builtin seed content',
   });
   return {
-    hash: await hashGhostContentFiles(dir, tree.files),
+    hash: await hashGhostContentFiles(dir, tree.files, tree.rootIdentity),
     hasNonRegularEntry: tree.hasNonRegularEntry,
   };
 }

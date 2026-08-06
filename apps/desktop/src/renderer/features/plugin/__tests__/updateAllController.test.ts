@@ -13,10 +13,19 @@ vi.mock('@/lib/toast', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 let installedGhosts: Array<{
   manifest: GhostManifest;
-  approval?: { state: 'approved'; revision: string };
+  approval?: GhostInstallApproval;
 }> = [];
 vi.mock('@/cindy-brain/useInstalledGhosts', () => ({
-  readInstalledGhostsSnapshot: () => installedGhosts,
+  readInstalledGhostsSnapshot: () =>
+    installedGhosts.map((ghost) => ({
+      ...ghost,
+      dir: 'C:/test/ghost',
+      enabled: true,
+      approval: ghost.approval ?? {
+        state: 'approved',
+        revision: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      },
+    })),
 }));
 
 import {
@@ -24,7 +33,11 @@ import {
   setDataOwnerGeneration,
 } from '@/contexts/dataOwnerGeneration';
 import { toast } from '@/lib/toast';
-import { ghostPermissionBaselineKey, type GhostManifest } from '../../../../shared/ghost';
+import {
+  ghostPermissionBaselineKey,
+  type GhostInstallApproval,
+  type GhostManifest,
+} from '../../../../shared/ghost';
 import type { PluginMarketDetail, PluginMarketItem } from '../../../../shared/pluginMarket';
 import {
   __resetUpdateAllBatchForTest,
@@ -69,6 +82,7 @@ function marketItem(overrides: Partial<PluginMarketItem>): PluginMarketItem {
 
 const detailMock = vi.fn<(pluginId: string) => Promise<PluginMarketDetail>>();
 const installMock = vi.fn(async () => ({ ghost: { manifest: manifest({}) } }) as never);
+const DEFAULT_APPROVAL_TOKEN = 'approved:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 function stubDetail(overrides: {
   manifest: GhostManifest;
@@ -136,6 +150,137 @@ describe('updateAllController', () => {
     });
   });
 
+  it.each(['legacy-unapproved', 'invalid'] as const)(
+    'requires a full permission review for a %s install even when its live manifest matches',
+    async (approvalState) => {
+      const samePermissions = manifest({
+        version: '1.0.0',
+        network: { hosts: ['api.example.com'] },
+      });
+      installedGhosts = [{ manifest: samePermissions, approval: { state: approvalState } }];
+      stubDetail({
+        manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+        sourceType: 'server',
+      });
+
+      startUpdateAllBatch([marketItem({})]);
+      await waitForSettledBatch();
+
+      const held = getUpdateAllBatchState().rows?.[0];
+      expect(held).toMatchObject({
+        status: 'needs-confirm',
+        reviewedApproval: approvalState,
+      });
+      expect(held?.permissionDiff?.added.some((item) => item.kind === 'network')).toBe(true);
+      expect(held?.permissionDiff?.unchanged).toEqual([]);
+      expect(installMock).not.toHaveBeenCalled();
+
+      await approveUpdateExpansion('plugin-a');
+      expect(installMock).toHaveBeenCalledWith('plugin-a', {
+        expectedReleaseId: 'release-2',
+        expectedInstalledApproval: approvalState,
+        allowPermissionExpansion: true,
+        reviewedBaseline: expect.any(String),
+      });
+    },
+  );
+
+  it('requires an explicit confirmation for an unapproved plugin with no optional capabilities', async () => {
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'legacy-unapproved' },
+      },
+    ];
+    stubDetail({ manifest: manifest({}), sourceType: 'server' });
+
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    expect(getUpdateAllBatchState().rows?.[0]).toMatchObject({
+      status: 'needs-confirm',
+      reviewedApproval: 'legacy-unapproved',
+      permissionDiff: { removed: [], unchanged: [] },
+    });
+    expect(getUpdateAllBatchState().rows?.[0]?.permissionDiff?.added).toEqual([
+      expect.objectContaining({ kind: 'code' }),
+    ]);
+    expect(installMock).not.toHaveBeenCalled();
+  });
+
+  it('invalidates an approved review when its receipt becomes invalid before confirmation', async () => {
+    const revision = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'approved', revision },
+      },
+    ];
+    stubDetail({
+      manifest: manifest({ network: { hosts: ['api.example.com'] } }),
+      sourceType: 'server',
+    });
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'invalid' },
+      },
+    ];
+    await approveUpdateExpansion('plugin-a');
+
+    const rereview = getUpdateAllBatchState().rows?.[0];
+    expect(rereview).toMatchObject({
+      status: 'needs-confirm',
+      staleReview: false,
+      reviewedApproval: 'invalid',
+    });
+    expect(rereview?.permissionDiff?.added.some((item) => item.kind === 'network')).toBe(true);
+    expect(installMock).not.toHaveBeenCalled();
+
+    await approveUpdateExpansion('plugin-a');
+    expect(installMock).toHaveBeenCalledWith('plugin-a', {
+      expectedReleaseId: 'release-2',
+      expectedInstalledApproval: 'invalid',
+      allowPermissionExpansion: true,
+      reviewedBaseline: expect.any(String),
+    });
+  });
+
+  it('keeps package-review permissions complete for an unapproved plugin', async () => {
+    installedGhosts = [
+      {
+        manifest: manifest({ version: '1.0.0' }),
+        approval: { state: 'legacy-unapproved' },
+      },
+    ];
+    const published = manifest({ network: { hosts: ['api.example.com'] } });
+    const actual = manifest({ network: { hosts: ['api.example.com', 'cdn.example.com'] } });
+    stubDetail({ manifest: published, sourceType: 'server' });
+    installMock.mockResolvedValueOnce({
+      reviewRequired: {
+        manifest: actual,
+        packageSha256: 'b'.repeat(64),
+        installedBaseline: ghostPermissionBaselineKey(installedGhosts[0].manifest),
+      },
+    } as never);
+
+    startUpdateAllBatch([marketItem({})]);
+    await waitForSettledBatch();
+    await approveUpdateExpansion('plugin-a');
+
+    const held = getUpdateAllBatchState().rows?.[0];
+    expect(held).toMatchObject({
+      status: 'needs-confirm',
+      reviewedApproval: 'legacy-unapproved',
+      packageReview: { packageSha256: 'b'.repeat(64) },
+    });
+    expect(held?.permissionDiff?.added.some((item) => item.kind === 'network')).toBe(true);
+    expect(held?.permissionDiff?.unchanged).toEqual([]);
+  });
+
   it('holds actual package permissions for approval', async () => {
     stubDetail({ manifest: manifest({}), sourceType: 'server' });
     const review = {
@@ -188,7 +333,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
@@ -207,7 +352,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: nextManifest,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
@@ -328,7 +473,7 @@ describe('updateAllController', () => {
 
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
     });
   });
 
@@ -377,7 +522,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
     });
@@ -449,7 +594,7 @@ describe('updateAllController', () => {
     // 目标 release 仍未落账 → 必须真正安装,不得凭版本号收成完成。
     expect(installMock).toHaveBeenCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),
     });
@@ -670,7 +815,7 @@ describe('updateAllController', () => {
 
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: expect.anything(),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
@@ -800,7 +945,7 @@ describe('updateAllController', () => {
     await approveUpdateExpansion('plugin-a');
     expect(installMock).toHaveBeenLastCalledWith('plugin-a', {
       expectedReleaseId: 'release-2',
-      expectedInstalledApproval: 'legacy-unapproved',
+      expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: swappedManifest,
       allowPermissionExpansion: true,
       reviewedBaseline: expect.any(String),

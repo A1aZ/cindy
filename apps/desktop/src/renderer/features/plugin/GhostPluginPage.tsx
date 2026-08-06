@@ -71,7 +71,6 @@ import { getLastWorkingDir, subscribeToLastWorkingDir } from '@/state/lastWorkin
 import { findSplitChildByPanelKind } from '../../../shared/layoutTree';
 import { resolveSystemLocale } from '../../../shared/locale';
 import {
-  diffGhostPermissionItems,
   diffInstalledGhostPermissionItems,
   ghostInstallApprovalToken,
   ghostPanelKind,
@@ -267,6 +266,13 @@ export const __installedPluginLayoutForTests = {
   InstalledPluginOverflow,
   InstalledPluginDisclosure,
 };
+
+export function diffMarketUpdatePermissionItems(
+  installed: InstalledGhost,
+  next: PluginMarketDetail['manifest'],
+) {
+  return diffInstalledGhostPermissionItems(installed, next);
+}
 
 /** 读「忽略本轮更新」的持久值(键按数据归属分桶,见 ignoredRoundStorageKey)。 */
 function readIgnoredRound(storageKey: string): string {
@@ -836,14 +842,8 @@ export function GhostPluginPage() {
     async (ghostId: string) => {
       const marketItem = marketByGhostId.get(ghostId);
       if (!marketItem) return;
-      const installedGhost =
-        ghosts.find((ghost) => ghost.manifest.id === ghostId) ?? null;
-      if (
-        !marketReviewTargetsInstalledGhost(
-          marketItem,
-          installedGhost?.approval.state,
-        )
-      ) {
+      const installedGhost = ghosts.find((ghost) => ghost.manifest.id === ghostId) ?? null;
+      if (!marketReviewTargetsInstalledGhost(marketItem, installedGhost?.approval.state)) {
         return;
       }
       if (!installedGhost) {
@@ -857,7 +857,7 @@ export function GhostPluginPage() {
       try {
         const next = await window.electronAPI.pluginMarket.detail(marketItem.pluginId);
         if (!isMarketBusyLeaseActive(marketBusyLease)) return;
-        const diff = diffInstalledGhostPermissionItems(installedGhost, next.manifest);
+        const diff = diffMarketUpdatePermissionItems(installedGhost, next.manifest);
         const approved = await confirm({
           title: t('settings.ghosts.updateConfirm.title', { name: next.name }),
           description: t('settings.ghosts.updateConfirm.body', {
@@ -1242,7 +1242,7 @@ export function GhostPluginPage() {
         return;
       }
       const diff = isUpdate
-        ? diffGhostPermissionItems(installedGhost!.manifest, marketDetail.manifest)
+        ? diffMarketUpdatePermissionItems(installedGhost!, marketDetail.manifest)
         : null;
       try {
         const confirmed = await confirm({
@@ -1830,9 +1830,7 @@ export function MarketPluginCard({
   const unavailable = busy || item.installState === 'conflict';
   const conflictDescriptionId = useId();
   const conflictDescription =
-    item.installState === 'conflict'
-      ? t('settings.ghosts.market.conflictDescription')
-      : undefined;
+    item.installState === 'conflict' ? t('settings.ghosts.market.conflictDescription') : undefined;
   return (
     <article
       className={cn(

@@ -156,6 +156,91 @@ export interface GhostContentTree {
   files: string[];
   /** 是否遇到过非普通条目(仅 `nonRegular: 'flag'` 时可能为 true)。 */
   hasNonRegularEntry: boolean;
+  /** 收集开始时钉住的规范根身份，供后续流式哈希拒绝 collect→hash 间的根替换。 */
+  rootIdentity: GhostContentRootIdentity;
+}
+
+export interface GhostContentRootIdentity {
+  realPath: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+interface GhostContentAncestorIdentity {
+  relativePath: string;
+  dev: bigint;
+  ino: bigint;
+}
+
+function sameFileIdentity(
+  a: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+  b: Pick<fs.BigIntStats, 'dev' | 'ino'>,
+): boolean {
+  if (a.dev === 0n || a.ino === 0n || b.dev === 0n || b.ino === 0n) return false;
+  return a.dev === b.dev && a.ino === b.ino;
+}
+
+async function captureGhostContentRootIdentity(rootDir: string): Promise<GhostContentRootIdentity> {
+  const realPath = await fs.promises.realpath(rootDir);
+  const [pathStat, realStat] = await Promise.all([
+    fs.promises.stat(rootDir, { bigint: true }),
+    fs.promises.stat(realPath, { bigint: true }),
+  ]);
+  if (!pathStat.isDirectory() || !realStat.isDirectory() || !sameFileIdentity(pathStat, realStat)) {
+    throw new Error(`ghost content root is not a stable directory: ${rootDir}`);
+  }
+  return { realPath, dev: realStat.dev, ino: realStat.ino };
+}
+
+async function assertGhostContentRootIdentity(
+  rootDir: string,
+  expected: GhostContentRootIdentity,
+): Promise<void> {
+  const current = await captureGhostContentRootIdentity(rootDir);
+  if (
+    current.realPath !== expected.realPath ||
+    current.dev !== expected.dev ||
+    current.ino !== expected.ino
+  ) {
+    throw new Error(`ghost content root changed while reading: ${rootDir}`);
+  }
+}
+
+async function captureGhostContentAncestorIdentities(
+  rootRealPath: string,
+  relativePath: string,
+): Promise<GhostContentAncestorIdentity[]> {
+  const identities: GhostContentAncestorIdentity[] = [];
+  const segments = relativePath.split('/').slice(0, -1);
+  let absolutePath = rootRealPath;
+  let currentRelativePath = '';
+  for (const segment of segments) {
+    absolutePath = path.join(absolutePath, segment);
+    currentRelativePath = currentRelativePath ? `${currentRelativePath}/${segment}` : segment;
+    const stat = await fs.promises.lstat(absolutePath, { bigint: true });
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`ghost content ancestor changed into a link: ${currentRelativePath}`);
+    }
+    identities.push({ relativePath: currentRelativePath, dev: stat.dev, ino: stat.ino });
+  }
+  return identities;
+}
+
+function assertGhostContentAncestorIdentities(
+  expected: readonly GhostContentAncestorIdentity[],
+  current: readonly GhostContentAncestorIdentity[],
+): void {
+  if (
+    current.length !== expected.length ||
+    current.some(
+      (identity, index) =>
+        identity.relativePath !== expected[index]?.relativePath ||
+        identity.dev !== expected[index]?.dev ||
+        identity.ino !== expected[index]?.ino,
+    )
+  ) {
+    throw new Error('ghost content ancestor changed while reading');
+  }
 }
 
 /** 递归收集目录里的普通文件相对路径;类型判定与策略见 `CollectGhostContentOptions`。 */
@@ -163,11 +248,12 @@ export async function collectGhostContentFiles(
   rootDir: string,
   options: CollectGhostContentOptions,
 ): Promise<GhostContentTree> {
+  const rootIdentity = await captureGhostContentRootIdentity(rootDir);
   const files: string[] = [];
   let hasNonRegularEntry = false;
 
   const collect = async (relativeDir: string): Promise<void> => {
-    const absoluteDir = path.join(rootDir, ...relativeDir.split('/').filter(Boolean));
+    const absoluteDir = path.join(rootIdentity.realPath, ...relativeDir.split('/').filter(Boolean));
     for (const entry of await fs.promises.readdir(absoluteDir, { withFileTypes: true })) {
       const isDotEntry = entry.name.startsWith('.');
       const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
@@ -193,8 +279,9 @@ export async function collectGhostContentFiles(
   };
 
   await collect('');
+  await assertGhostContentRootIdentity(rootDir, rootIdentity);
   files.sort();
-  return { files, hasNonRegularEntry };
+  return { files, hasNonRegularEntry, rootIdentity };
 }
 
 /**
@@ -214,11 +301,9 @@ export async function collectGhostContentFiles(
  * JSZip 投影)算批准基线,而不是从已公开的可变安装目录首读 —— 后者在 publish 与
  * 首次 hash 之间被换过的字节会自洽地成为批准事实(权威判据被污染源初始化)。
  */
-export function hashGhostContentBuffers(
-  files: readonly { path: string; bytes: Buffer }[],
-): string {
+export function hashGhostContentBuffers(files: readonly { path: string; bytes: Buffer }[]): string {
   const hash = crypto.createHash('sha256');
-  hash.update('cindy-ghost-content-v2 ');
+  hash.update('cindy-ghost-content-v2\0');
   const sorted = [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   for (const file of sorted) {
     const pathBytes = Buffer.from(file.path, 'utf8');
@@ -234,10 +319,14 @@ export function hashGhostContentBuffers(
 export async function hashGhostContentFiles(
   rootDir: string,
   files: readonly string[],
+  collectedRootIdentity?: GhostContentRootIdentity,
 ): Promise<string> {
+  const rootIdentity = collectedRootIdentity ?? (await captureGhostContentRootIdentity(rootDir));
+  await assertGhostContentRootIdentity(rootDir, rootIdentity);
   const hash = crypto.createHash('sha256');
   hash.update('cindy-ghost-content-v2\0');
   for (const relativePath of files) {
+    await assertGhostContentRootIdentity(rootDir, rootIdentity);
     const pathBytes = Buffer.from(relativePath, 'utf8');
     const pathLength = Buffer.allocUnsafe(8);
     pathLength.writeBigUInt64BE(BigInt(pathBytes.byteLength));
@@ -245,9 +334,52 @@ export async function hashGhostContentFiles(
     hash.update(pathBytes);
 
     const fileHash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(path.join(rootDir, ...relativePath.split('/')));
-    for await (const chunk of stream) fileHash.update(chunk as Buffer);
+    const filePath = path.join(rootIdentity.realPath, ...relativePath.split('/'));
+    const ancestorIdentities = await captureGhostContentAncestorIdentities(
+      rootIdentity.realPath,
+      relativePath,
+    );
+    const noFollow = fs.constants.O_NOFOLLOW ?? null;
+    const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
+    try {
+      const handleStat = await handle.stat({ bigint: true });
+      if (!handleStat.isFile()) {
+        throw new Error(`ghost content entry is not a regular file: ${relativePath}`);
+      }
+      assertGhostContentAncestorIdentities(
+        ancestorIdentities,
+        await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
+      );
+      if (noFollow === null) {
+        const linkStat = await fs.promises.lstat(filePath, { bigint: true });
+        if (linkStat.isSymbolicLink() || !sameFileIdentity(linkStat, handleStat)) {
+          throw new Error(`ghost content entry changed into a link: ${relativePath}`);
+        }
+      }
+      const [pathStat, realFilePath] = await Promise.all([
+        fs.promises.stat(filePath, { bigint: true }),
+        fs.promises.realpath(filePath),
+      ]);
+      const relativeRealPath = path.relative(rootIdentity.realPath, realFilePath);
+      const outsideRoot =
+        relativeRealPath === '..' ||
+        relativeRealPath.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relativeRealPath);
+      if (!sameFileIdentity(pathStat, handleStat) || outsideRoot) {
+        throw new Error(`ghost content entry escaped its root: ${relativePath}`);
+      }
+
+      const stream = handle.createReadStream({ autoClose: false });
+      for await (const chunk of stream) fileHash.update(chunk as Buffer);
+      assertGhostContentAncestorIdentities(
+        ancestorIdentities,
+        await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
+      );
+    } finally {
+      await handle.close();
+    }
     hash.update(fileHash.digest());
   }
+  await assertGhostContentRootIdentity(rootDir, rootIdentity);
   return hash.digest('hex');
 }

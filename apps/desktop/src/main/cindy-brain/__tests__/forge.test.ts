@@ -100,6 +100,16 @@ function packGhostDir(
   return packGhostDirRaw(dir, { sessionWorkdir: workDir, ...options });
 }
 
+async function expectSameExistingRealPath(actual: string, expected: string): Promise<void> {
+  const normalize = (value: string) =>
+    process.platform === 'win32' ? value.toLowerCase() : value;
+  const [actualReal, expectedReal] = await Promise.all([
+    fs.promises.realpath(actual),
+    fs.promises.realpath(expected),
+  ]);
+  expect(normalize(actualReal)).toBe(normalize(expectedReal));
+}
+
 beforeEach(async () => {
   workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-forge-test-'));
 });
@@ -146,7 +156,12 @@ describe('packGhostDir', () => {
       process.platform === 'win32' ? 'junction' : 'dir',
     );
     const packed = await packGhostDir(sourceAlias);
-    expect(packed).toMatchObject({ ok: true, cindyPath: path.join(sourceTarget, 'inside-1.0.0.cindy') });
+    expect(packed).toMatchObject({ ok: true });
+    if (!packed.ok) return;
+    await expectSameExistingRealPath(
+      packed.cindyPath,
+      path.join(sourceTarget, 'inside-1.0.0.cindy'),
+    );
     await expect(fs.promises.access(path.join(sourceTarget, 'inside-1.0.0.cindy'))).resolves.toBeUndefined();
   });
 
@@ -411,7 +426,7 @@ describe('packGhostDir', () => {
     const r = await packGhostDir(dir);
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
-    expect(r.cindyPath).toBe(path.join(dir, 'demo-1.0.0.cindy'));
+    await expectSameExistingRealPath(r.cindyPath, path.join(dir, 'demo-1.0.0.cindy'));
     expect(r.manifest.id).toBe('demo');
 
     // 装入侧同一契约验证:inspect 直接吃打包产物。
@@ -1092,6 +1107,26 @@ describe('scaffoldGhostDir', () => {
         },
       ),
     ).toMatchObject({ ok: true, dir });
+  });
+
+  it('拒绝仍指向工作目录内部的链接祖先，不把 8.3 路径兼容变成链接放行', async () => {
+    const realRoot = path.join(workDir, 'real-author-root');
+    const aliasRoot = path.join(workDir, 'author-alias');
+    await fs.promises.mkdir(path.join(realRoot, 'nested'), { recursive: true });
+    try {
+      await fs.promises.symlink(realRoot, aliasRoot, directoryLinkType);
+    } catch {
+      return;
+    }
+
+    const dir = path.join(aliasRoot, 'nested', 'plugin');
+    expect(
+      await scaffoldGhostDir(
+        { dir, template: 'plain', id: 'linked-parent', name: 'Linked parent' },
+        { sessionWorkdir: workDir },
+      ),
+    ).toMatchObject({ ok: false, errorCode: 'INVALID_INPUT' });
+    expect(fs.existsSync(path.join(realRoot, 'nested', 'plugin'))).toBe(false);
   });
 
   it('软链祖先把字面在工作目录内的路径引到外面 → 拒绝且外面不落盘', async () => {

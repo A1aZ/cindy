@@ -4,17 +4,14 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ghostPermissionBaselineKey } from '../../../shared/ghost.js';
+import { ghostPermissionBaselineKey, type GhostInstallApproval } from '../../../shared/ghost.js';
 
 const runtime = vi.hoisted(() => ({
   ghosts: [] as Array<{
     manifest: Record<string, unknown>;
     dir: string;
     enabled: boolean;
-    approval?: {
-      state: 'approved';
-      revision: string;
-    };
+    approval?: GhostInstallApproval;
   }>,
   install: vi.fn(),
   uninstall: vi.fn(),
@@ -88,8 +85,7 @@ import type { PluginMarketApi } from '../api';
 
 const roots: string[] = [];
 const PLUGIN_ID = `c${'a'.repeat(24)}`;
-const APPROVED_INSTALL_TOKEN =
-  'approved:00000000-0000-4000-8000-000000000001';
+const APPROVED_INSTALL_TOKEN = 'approved:00000000-0000-4000-8000-000000000001';
 
 /** 手动可控 deferred,用于精确编排"安装在飞行中"的交错。 */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -134,9 +130,7 @@ function manifest(
   };
 }
 
-function summary(
-  overrides: Partial<VisiblePluginSummary> = {},
-): VisiblePluginSummary {
+function summary(overrides: Partial<VisiblePluginSummary> = {}): VisiblePluginSummary {
   return {
     id: PLUGIN_ID,
     ghostId: 'cindy-test',
@@ -158,7 +152,10 @@ function summary(
   };
 }
 
-function detail(item = summary(), slots: ['notify'] | ['notify', 'fs'] = ['notify']): VisiblePluginDetail {
+function detail(
+  item = summary(),
+  slots: ['notify'] | ['notify', 'fs'] = ['notify'],
+): VisiblePluginDetail {
   return {
     ...item,
     currentRelease: {
@@ -168,9 +165,7 @@ function detail(item = summary(), slots: ['notify'] | ['notify', 'fs'] = ['notif
   };
 }
 
-function removal(
-  overrides: Partial<PluginRemovalNotice> = {},
-): PluginRemovalNotice {
+function removal(overrides: Partial<PluginRemovalNotice> = {}): PluginRemovalNotice {
   return {
     pluginId: PLUGIN_ID,
     ghostId: 'cindy-test',
@@ -182,10 +177,7 @@ function removal(
   };
 }
 
-function harness(
-  items: VisiblePluginSummary[],
-  removals: PluginRemovalNotice[] = [],
-) {
+function harness(items: VisiblePluginSummary[], removals: PluginRemovalNotice[] = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-plugin-service-'));
   roots.push(root);
   const ledger = new PluginMarketLedger(path.join(root, 'ledger.json'));
@@ -214,10 +206,7 @@ function harness(
 function removalRecord(
   overrides: Partial<PluginMarketInstallationRecord> = {},
 ): PluginMarketInstallationRecord {
-  return recordForTest(
-    summary({ scope: 'organization', organizationId: 'org-1' }),
-    overrides,
-  );
+  return recordForTest(summary({ scope: 'organization', organizationId: 'org-1' }), overrides);
 }
 
 /** 清理通告测试的运行时 Ghost 目录项。 */
@@ -290,12 +279,14 @@ describe('PluginMarketService migration and defaultInstall', () => {
       url: 'https://oss.example.invalid/icons/test.png',
       expiresAt: '2026-07-23T00:05:00.000Z',
     };
-    const h = harness([summary({
-      currentRelease: {
-        ...summary().currentRelease,
-        icon,
-      },
-    })]);
+    const h = harness([
+      summary({
+        currentRelease: {
+          ...summary().currentRelease,
+          icon,
+        },
+      }),
+    ]);
 
     await expect(h.service.snapshot()).resolves.toMatchObject({
       items: [{ icon }],
@@ -304,10 +295,12 @@ describe('PluginMarketService migration and defaultInstall', () => {
   });
 
   it('takes bounded local snapshots instead of reading the ledger per market item', async () => {
-    const items = Array.from({ length: 50 }, (_, index) => summary({
-      id: `c${index.toString(36).padStart(24, '0')}`,
-      ghostId: `cindy-test-${index}`,
-    }));
+    const items = Array.from({ length: 50 }, (_, index) =>
+      summary({
+        id: `c${index.toString(36).padStart(24, '0')}`,
+        ghostId: `cindy-test-${index}`,
+      }),
+    );
     const h = harness(items);
     const read = vi.spyOn(h.ledger, 'read');
 
@@ -454,14 +447,11 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     const snapshot = await h.service.snapshot();
 
-    expect(runtime.install).toHaveBeenCalledWith(
-      expect.stringMatching(/\.cindy$/),
-      {
-        ghostId: 'cindy-test',
-        version: '1.0.0',
-        reviewedManifest: expect.objectContaining({ id: 'cindy-test' }),
-      },
-    );
+    expect(runtime.install).toHaveBeenCalledWith(expect.stringMatching(/\.cindy$/), {
+      ghostId: 'cindy-test',
+      version: '1.0.0',
+      reviewedManifest: expect.objectContaining({ id: 'cindy-test' }),
+    });
     expect(snapshot.items[0]).toMatchObject({
       installState: 'installed',
       enabled: true,
@@ -538,16 +528,15 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     const h = harness([item]);
 
-    const { ghost } = await h.service.install(item.id, { expectedReleaseId: item.currentRelease.id });
+    const { ghost } = await h.service.install(item.id, {
+      expectedReleaseId: item.currentRelease.id,
+    });
 
-    expect(runtime.install).toHaveBeenCalledWith(
-      expect.stringMatching(/\.cindy$/),
-      {
-        ghostId: 'cindy-test',
-        version: '1.0.0',
-        reviewedManifest: expect.objectContaining({ id: 'cindy-test' }),
-      },
-    );
+    expect(runtime.install).toHaveBeenCalledWith(expect.stringMatching(/\.cindy$/), {
+      ghostId: 'cindy-test',
+      version: '1.0.0',
+      reviewedManifest: expect.objectContaining({ id: 'cindy-test' }),
+    });
     // 锁定装完即开的最终结果:装入入口返回的 ghost 必须是启用态。
     expect(ghost?.enabled).toBe(true);
   });
@@ -583,9 +572,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       packageSha256: 'a'.repeat(64),
       installedBaseline: null,
     };
-    runtime.install.mockRejectedValueOnce(
-      new GhostPackagePermissionReviewRequiredError(review),
-    );
+    runtime.install.mockRejectedValueOnce(new GhostPackagePermissionReviewRequiredError(review));
     const h = harness([item]);
 
     await expect(
@@ -633,7 +620,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
   });
 
-  it('uses a digest-matched installed manifest as the legacy approval baseline', async () => {
+  it('uses a digest-matched installed manifest as the approved receipt baseline', async () => {
     const item = summary({
       currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
     });
@@ -646,6 +633,10 @@ describe('PluginMarketService migration and defaultInstall', () => {
         manifest: { ...installed, name: 'Localized Test Plugin' },
         dir: installedDir,
         enabled: true,
+        approval: {
+          state: 'approved',
+          revision: '00000000-0000-4000-8000-000000000001',
+        },
       },
     ];
     runtime.install.mockResolvedValue({
@@ -742,16 +733,13 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     const snapshot = await h.service.snapshot();
 
-    expect(runtime.install).toHaveBeenCalledWith(
-      expect.stringMatching(/\.cindy$/),
-      {
-        ghostId: item.ghostId,
-        version: item.currentRelease.version,
-        // 权限绑定:用户确认的服务端清单(main 命名 reviewedManifest)必须随包传给装入侧
-        // 比对(P0:服务端记录与包内 ghost.json 不一致时,不能让"看到 A 权限、批准 B 权限"发生)。
-        reviewedManifest: expect.objectContaining({ id: item.ghostId }),
-      },
-    );
+    expect(runtime.install).toHaveBeenCalledWith(expect.stringMatching(/\.cindy$/), {
+      ghostId: item.ghostId,
+      version: item.currentRelease.version,
+      // 权限绑定:用户确认的服务端清单(main 命名 reviewedManifest)必须随包传给装入侧
+      // 比对(P0:服务端记录与包内 ghost.json 不一致时,不能让"看到 A 权限、批准 B 权限"发生)。
+      reviewedManifest: expect.objectContaining({ id: item.ghostId }),
+    });
     expect(snapshot.items[0]).toMatchObject({
       installState: 'installed',
       enabled: true,
@@ -772,7 +760,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     const h = harness([item]);
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).resolves.toMatchObject({
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).resolves.toMatchObject({
       ghost: { manifest: { id: 'cindy-test' }, enabled: false },
     });
     expect(h.api.download).toHaveBeenCalledWith(item.id, item.currentRelease.id);
@@ -831,7 +821,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     const h = harness([item]);
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).rejects.toThrow('[NOT_FOUND]');
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[NOT_FOUND]');
     expect(h.api.detail).not.toHaveBeenCalled();
     expect(runtime.install).not.toHaveBeenCalled();
   });
@@ -992,9 +984,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(manifest()));
     runtime.ghosts = [{ ...ghostEntry(notice.ghostId), dir: installDir }];
     mockUninstallDropsGhost();
-    h.ledger.upsertInstallation(
-      removalRecord({ manifestDigest: ghostManifestDigest(manifest()) }),
-    );
+    h.ledger.upsertInstallation(removalRecord({ manifestDigest: ghostManifestDigest(manifest()) }));
 
     await expect(h.service.snapshot()).resolves.toMatchObject({
       unavailableReason: null,
@@ -1114,15 +1104,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
   it('purges a batch and exposes one combined user notice', async () => {
     const secondPluginId = `c${'b'.repeat(24)}`;
-    const notices = [
-      removal(),
-      removal({ pluginId: secondPluginId, ghostId: 'cindy-second' }),
-    ];
+    const notices = [removal(), removal({ pluginId: secondPluginId, ghostId: 'cindy-second' })];
     const h = harness([], notices);
-    runtime.ghosts = [
-      ghostEntry('cindy-test'),
-      ghostEntry('cindy-second', 'Second Plugin'),
-    ];
+    runtime.ghosts = [ghostEntry('cindy-test'), ghostEntry('cindy-second', 'Second Plugin')];
     mockUninstallDropsGhost();
     h.ledger.upsertInstallation(removalRecord());
     h.ledger.upsertInstallation(
@@ -1176,15 +1160,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
   it('continues the snapshot and later removals when one purge fails', async () => {
     const secondPluginId = `c${'b'.repeat(24)}`;
-    const notices = [
-      removal(),
-      removal({ pluginId: secondPluginId, ghostId: 'cindy-second' }),
-    ];
+    const notices = [removal(), removal({ pluginId: secondPluginId, ghostId: 'cindy-second' })];
     const h = harness([], notices);
-    runtime.ghosts = [
-      ghostEntry('cindy-test'),
-      ghostEntry('cindy-second', 'Second Plugin'),
-    ];
+    runtime.ghosts = [ghostEntry('cindy-test'), ghostEntry('cindy-second', 'Second Plugin')];
     mockUninstallDropsGhost('cindy-test');
     h.ledger.upsertInstallation(removalRecord());
     h.ledger.upsertInstallation(
@@ -1251,7 +1229,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       installed: false,
     });
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).rejects.toThrow('[ALREADY_EXISTS]');
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[ALREADY_EXISTS]');
     expect(runtime.install).not.toHaveBeenCalled();
   });
 
@@ -1283,7 +1263,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     h.api.detail.mockResolvedValue(detail(item, ['notify', 'fs']));
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).rejects.toThrow('[PRECONDITION_FAILED]');
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
     expect(runtime.install).not.toHaveBeenCalled();
 
     await expect(
@@ -1297,6 +1279,66 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     expect(runtime.install).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['legacy-unapproved', 'invalid'] as const)(
+    'requires a full Host-side review before a %s install can be re-approved',
+    async (approvalState) => {
+      const item = summary({
+        currentRelease: {
+          ...summary().currentRelease,
+          id: 'release-2',
+          version: '2.0.0',
+        },
+      });
+      const installedManifest = manifest('cindy-test', '1.0.0', ['notify']);
+      const installedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-installed-ghost-'));
+      roots.push(installedDir);
+      fs.writeFileSync(path.join(installedDir, 'ghost.json'), JSON.stringify(installedManifest));
+      runtime.ghosts = [
+        {
+          manifest: installedManifest,
+          dir: installedDir,
+          enabled: true,
+          approval: { state: approvalState },
+        },
+      ];
+      runtime.install.mockResolvedValue({
+        manifest: manifest('cindy-test', '2.0.0', ['notify']),
+        dir: '/userData/cindy-brain/cindy-test',
+        enabled: true,
+      });
+      const h = harness([item]);
+      h.ledger.upsertInstallation({
+        ...recordForTest(item),
+        releaseId: 'release-1',
+        version: '1.0.0',
+        manifestDigest: ghostManifestDigest(installedManifest),
+      });
+      h.api.detail.mockResolvedValue(detail(item, ['notify']));
+
+      await expect(
+        h.service.install(item.id, {
+          expectedReleaseId: item.currentRelease.id,
+          expectedInstalledApproval: approvalState,
+        }),
+      ).rejects.toThrow('[PRECONDITION_FAILED]');
+      expect(runtime.install).not.toHaveBeenCalled();
+
+      await expect(
+        h.service.install(item.id, {
+          expectedReleaseId: item.currentRelease.id,
+          expectedInstalledApproval: approvalState,
+          allowPermissionExpansion: true,
+          reviewedBaseline: ghostPermissionBaselineKey(installedManifest),
+        }),
+      ).resolves.toMatchObject({ ghost: { manifest: { version: '2.0.0' } } });
+      expect(runtime.install).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({ expectedInstalledApproval: approvalState }),
+      );
+      expect(runtime.install.mock.calls[0]?.[1]).not.toHaveProperty('previouslyInstalledManifest');
+    },
+  );
 
   it('re-checks the reviewed baseline inside the install lock before honouring an expansion', async () => {
     const item = summary({
@@ -1319,7 +1361,11 @@ describe('PluginMarketService migration and defaultInstall', () => {
       enabled: true,
     });
     const h = harness([item]);
-    h.ledger.upsertInstallation({ ...recordForTest(item), releaseId: 'release-1', version: '1.0.0' });
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+    });
     h.api.detail.mockResolvedValue(detail(item, ['notify', 'fs']));
 
     await expect(
@@ -1358,16 +1404,18 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
     // 下载窗口期(锁外复核已通过之后)本地 ghosts:update 把已装换成只有 notify
     // 的包——此刻目标包相对当前已装多出 fs,而这条从没被审阅过。
-    const downloadMock = vi.mocked(
-      (await import('../download.js')).downloadVerifiedPlugin,
-    );
+    const downloadMock = vi.mocked((await import('../download.js')).downloadVerifiedPlugin);
     downloadMock.mockImplementationOnce(async () => {
       runtime.ghosts = [
         { manifest: manifest(), dir: '/userData/cindy-brain/cindy-test', enabled: true },
       ];
     });
     const h = harness([item]);
-    h.ledger.upsertInstallation({ ...recordForTest(item), releaseId: 'release-1', version: '1.0.0' });
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+    });
     h.api.detail.mockResolvedValue(detail(item, ['notify', 'fs']));
 
     await expect(
@@ -1517,7 +1565,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       sizeBytes: item.currentRelease.sizeBytes,
     });
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).rejects.toThrow('[PRECONDITION_FAILED]');
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
     expect(runtime.install).not.toHaveBeenCalled();
   });
 
@@ -1533,7 +1583,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       return { plugins: [item], removals: [] };
     });
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).rejects.toThrow('[PRECONDITION_FAILED]');
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).rejects.toThrow('[PRECONDITION_FAILED]');
     expect(runtime.install).not.toHaveBeenCalled();
     expect(h.ledger.installationForGhost(item.ghostId)).toBeNull();
   });
@@ -1556,7 +1608,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
       return installedGhost;
     });
 
-    await expect(h.service.install(item.id, { expectedReleaseId: item.currentRelease.id })).resolves.toEqual({
+    await expect(
+      h.service.install(item.id, { expectedReleaseId: item.currentRelease.id }),
+    ).resolves.toEqual({
       ghost: installedGhost,
     });
     expect(h.ledger.installationForGhost(item.ghostId)).toMatchObject({

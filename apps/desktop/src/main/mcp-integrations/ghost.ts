@@ -54,6 +54,7 @@ import {
   deriveGhostSessionContext,
   type GhostSessionContextInjected,
   type GhostSetupAssessment,
+  type InstalledGhost,
 } from '../../shared/ghost.js';
 import { withCardToken } from '../cindy-brain/cardService.js';
 import { drainGhostCallMedia } from '../cindy-brain/ghostMediaLedger.js';
@@ -794,6 +795,23 @@ async function grantAttachmentUrls(params: {
   );
 }
 
+function visibleChipGhosts(workdir: string | null): InstalledGhost[] {
+  return getGhostManager()
+    .list()
+    .filter(
+      (ghost) =>
+        ghost.enabled &&
+        isGhostAvailableForActiveSession(ghost.manifest.id) &&
+        ghost.manifest.kind === 'chip' &&
+        (ghost.manifest.tools?.length ?? 0) > 0 &&
+        !isGhostDisabledForWorkdir(ghost.manifest.id, workdir),
+    );
+}
+
+function ghostRecall(ghost: InstalledGhost): string | undefined {
+  return ghost.manifest.whenToUse ?? ghost.manifest.description;
+}
+
 /**
  * 构造总机 deps(每次工具调用都现查,无任何缓存层)。
  *
@@ -822,23 +840,14 @@ export function getCindyGhostsMcpDeps(
     // 描述花名册全量,运行期 ghost_list / ghost_call 仍按真实 workdir 拦)。
     getRosterItems() {
       const workdir = resolveSessionContext()?.workingDir ?? null;
-      return getGhostManager()
-        .list()
-        .filter(
-          (g) =>
-            g.enabled &&
-            isGhostAvailableForActiveSession(g.manifest.id) &&
-            g.manifest.kind === 'chip' &&
-            (g.manifest.tools?.length ?? 0) > 0 &&
-            !isGhostDisabledForWorkdir(g.manifest.id, workdir),
-        )
+      return visibleChipGhosts(workdir)
         .map((g) => {
-          const recall = g.manifest.whenToUse ?? g.manifest.description;
+          const recall = ghostRecall(g);
           return {
             id: g.manifest.id,
             name: g.manifest.name,
             ...(g.manifest.command ? { command: g.manifest.command } : {}),
-            ...(recall ? { description: recall } : {}),
+            ...(recall ? { recall } : {}),
           };
         });
     },
@@ -846,17 +855,9 @@ export function getCindyGhostsMcpDeps(
       // 现查同样按会话 workdir 滤掉目录级禁用的意识(ALS 恢复的真实语境
       // 优先)——模型主动 ghost_list 也看不到被禁用的条目,清单层面干净。
       const workdir = resolveSessionContext()?.workingDir ?? null;
-      return getGhostManager()
-        .list()
-        .filter(
-          (g) =>
-            g.enabled &&
-            isGhostAvailableForActiveSession(g.manifest.id) &&
-            g.manifest.kind === 'chip' &&
-            (g.manifest.tools?.length ?? 0) > 0 &&
-            !isGhostDisabledForWorkdir(g.manifest.id, workdir),
-        )
+      return visibleChipGhosts(workdir)
         .map((g) => {
+          const recall = ghostRecall(g);
           let setup: CindyGhostInfo['setup'];
           try {
             setup = getGhostSetupAssessment(g.manifest.id);
@@ -873,6 +874,7 @@ export function getCindyGhostsMcpDeps(
             id: g.manifest.id,
             name: g.manifest.name,
             ...(g.manifest.command ? { command: g.manifest.command } : {}),
+            ...(recall ? { recall } : {}),
             ...(setup ? { setup } : {}),
             tools: (g.manifest.tools ?? []).map((t) => ({
               name: t.name,

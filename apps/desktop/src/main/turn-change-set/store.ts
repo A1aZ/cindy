@@ -130,12 +130,24 @@ export interface BeginTurnChangeSetInput {
 const pendingBySession = new Map<string, PendingTurnChangeSet>();
 const sessionWriteChains = new Map<string, Promise<unknown>>();
 const workspaceActionChains = new Map<string, Promise<unknown>>();
+const workspaceCaptureChains = new Map<string, Promise<void>>();
+const workspaceCaptureLeasesBySession = new Map<string, WorkspaceCaptureLease>();
 const pendingWorkspaceBySession = new Map<string, string>();
 const pendingWorkspaceCounts = new Map<string, number>();
 const retainedSessionDirs = new Map<string, number>();
 const activeActionPromises = new Set<Promise<unknown>>();
 const legacyReversibleCapabilityByDetailPath = new Map<string, boolean>();
 let storageWriteChain = Promise.resolve();
+
+interface WorkspaceCaptureLease {
+  key: string;
+  anchorClientId: string;
+  ready: Promise<void>;
+  resolveReady: () => void;
+  rejectReady: (error: unknown) => void;
+  cancelled: boolean;
+  release: () => void;
+}
 
 function byteLength(value: string): number {
   return Buffer.byteLength(value, 'utf8');
@@ -518,6 +530,61 @@ function unregisterPendingWorkspace(sessionId: string): void {
   else pendingWorkspaceCounts.set(key, next);
 }
 
+function releaseWorkspaceCaptureLease(sessionId: string): void {
+  const lease = workspaceCaptureLeasesBySession.get(sessionId);
+  if (!lease) return;
+  workspaceCaptureLeasesBySession.delete(sessionId);
+  lease.rejectReady(new Error('Turn change-set capture was cancelled.'));
+  lease.release();
+}
+
+/**
+ * Reserve the workspace synchronously before the first await in beginTurnChangeSet.
+ * This makes concurrent dispatches for one local workdir queue behind the prior
+ * turn's after-image capture instead of interleaving before/after snapshots.
+ */
+function reserveWorkspaceCaptureLease(sessionId: string, cwd: string, anchorClientId: string): {
+  previous: Promise<void>;
+  lease: WorkspaceCaptureLease;
+} {
+  const key = workspaceKey(cwd);
+  const previous = workspaceCaptureChains.get(key) ?? Promise.resolve();
+  let resolveCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    resolveCurrent = resolve;
+  });
+  workspaceCaptureChains.set(key, current);
+
+  let resolveReady!: () => void;
+  let rejectReady!: (error: unknown) => void;
+  const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  // A rejected readiness promise is only an internal coordination signal. Keep
+  // it from becoming an unhandled rejection when no re-entrant caller awaits it.
+  void ready.catch(() => undefined);
+
+  let released = false;
+  const lease: WorkspaceCaptureLease = {
+    key,
+    anchorClientId,
+    ready,
+    resolveReady,
+    rejectReady,
+    cancelled: false,
+    release: () => {
+      if (released) return;
+      released = true;
+      lease.cancelled = true;
+      resolveCurrent();
+      if (workspaceCaptureChains.get(key) === current) workspaceCaptureChains.delete(key);
+    },
+  };
+  workspaceCaptureLeasesBySession.set(sessionId, lease);
+  return { previous, lease };
+}
+
 async function waitForWorkspaceActions(cwd: string): Promise<void> {
   const key = workspaceKey(cwd);
   for (;;) {
@@ -720,16 +787,42 @@ export async function beginTurnChangeSet(input: BeginTurnChangeSetInput): Promis
     pendingBySession.delete(input.sessionId);
     unregisterPendingWorkspace(input.sessionId);
   }
-  await waitForWorkspaceActions(input.cwd);
-  existing = pendingBySession.get(input.sessionId);
-  if (existing?.anchorClientId === input.anchorClientId) return;
-  if (existing) {
-    pendingBySession.delete(input.sessionId);
-    unregisterPendingWorkspace(input.sessionId);
+  const existingLease = workspaceCaptureLeasesBySession.get(input.sessionId);
+  if (existingLease) {
+    if (existingLease.anchorClientId === input.anchorClientId) {
+      await existingLease.ready;
+      return;
+    }
+    releaseWorkspaceCaptureLease(input.sessionId);
   }
-  const pending = ensurePending(input.sessionId, input.provider, input.cwd);
-  pending.anchorClientId = input.anchorClientId;
-  if (input.remote) addIncompleteReason(pending, 'remote-session');
+  const { previous, lease } = reserveWorkspaceCaptureLease(
+    input.sessionId,
+    input.cwd,
+    input.anchorClientId,
+  );
+  try {
+    await previous.catch(() => undefined);
+    if (lease.cancelled || workspaceCaptureLeasesBySession.get(input.sessionId) !== lease) return;
+    await waitForWorkspaceActions(input.cwd);
+    if (lease.cancelled || workspaceCaptureLeasesBySession.get(input.sessionId) !== lease) return;
+    existing = pendingBySession.get(input.sessionId);
+    if (existing?.anchorClientId === input.anchorClientId) {
+      lease.resolveReady();
+      return;
+    }
+    if (existing) {
+      pendingBySession.delete(input.sessionId);
+      unregisterPendingWorkspace(input.sessionId);
+    }
+    const pending = ensurePending(input.sessionId, input.provider, input.cwd);
+    pending.anchorClientId = input.anchorClientId;
+    if (input.remote) addIncompleteReason(pending, 'remote-session');
+    lease.resolveReady();
+  } catch (error) {
+    lease.rejectReady(error);
+    releaseWorkspaceCaptureLease(input.sessionId);
+    throw error;
+  }
 }
 
 function addIncompleteReason(
@@ -1007,7 +1100,10 @@ export function finalizeTurnChangeSet(
   pendingBySession.delete(sessionId);
   return enqueueSessionWrite(sessionId, () => persistPending(sessionId, pending, terminalState))
     .catch((error) => log.warn('turn change-set persist failed', { sessionId, error }))
-    .finally(() => unregisterPendingWorkspace(sessionId));
+    .finally(() => {
+      unregisterPendingWorkspace(sessionId);
+      releaseWorkspaceCaptureLease(sessionId);
+    });
 }
 
 /** Prevents the next product turn from mutating files before the prior after-image is sealed. */
@@ -1281,6 +1377,7 @@ export function applyTurnChangeSetAction(
 export function clearPendingTurnChangeSets(sessionId: string): void {
   pendingBySession.delete(sessionId);
   unregisterPendingWorkspace(sessionId);
+  releaseWorkspaceCaptureLease(sessionId);
 }
 
 async function validAnchorIds(sessionId: string, summaries: readonly TurnChangeSetSummary[]): Promise<Set<string>> {
@@ -1337,6 +1434,7 @@ export async function getTurnChangeSets(
 export async function removeTurnChangeSetsForSession(sessionId: string): Promise<void> {
   pendingBySession.delete(sessionId);
   unregisterPendingWorkspace(sessionId);
+  releaseWorkspaceCaptureLease(sessionId);
   await enqueueSessionWrite(sessionId, async () => {
     await fs.rm(sessionDir(sessionId), { recursive: true, force: true });
   });

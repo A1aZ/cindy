@@ -49,12 +49,14 @@ describe('turn change-set sidecar store', () => {
     mocks.query.mockReset();
     mocks.send.mockReset();
     mocks.ownerCurrent = true;
-    mocks.query.mockImplementation(async (sql: string) => {
+    mocks.query.mockImplementation(async (sql: string, params?: readonly unknown[]) => {
       if (sql.includes('working_dir AS workingDir')) {
         return [{ workingDir: workdir, remoteHostId: null }];
       }
-      if (sql.includes('SELECT id FROM sessions')) return [{ id: 'session-1' }];
-      if (sql.includes('client_id IN')) return [{ clientId: 'user-1' }];
+      if (sql.includes('SELECT id FROM sessions')) {
+        return [{ id: String(params?.[0] ?? 'session-1') }];
+      }
+      if (sql.includes('client_id IN')) return [{ clientId: 'user-1' }, { clientId: 'user-2' }];
       return [];
     });
     clearPendingTurnChangeSets('session-1');
@@ -104,6 +106,56 @@ describe('turn change-set sidecar store', () => {
       additions: 1,
       deletions: 1,
     });
+  });
+
+  it('serializes exact captures for sessions sharing one workspace', async () => {
+    const target = path.join(workdir, 'shared.txt');
+    await fs.writeFile(target, 'old\n', 'utf8');
+
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'shared.txt',
+    });
+
+    let secondResolved = false;
+    const second = beginTurnChangeSet({
+      sessionId: 'session-2',
+      anchorClientId: 'user-2',
+      provider: 'pi',
+      cwd: workdir,
+    }).then(() => {
+      secondResolved = true;
+    });
+    await Promise.resolve();
+    expect(secondResolved).toBe(false);
+
+    await fs.writeFile(target, 'first\n', 'utf8');
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    await second;
+
+    await captureKnownFileBefore({
+      sessionId: 'session-2',
+      provider: 'pi',
+      cwd: workdir,
+      targetPath: 'shared.txt',
+    });
+    await fs.writeFile(target, 'second\n', 'utf8');
+    await finalizeTurnChangeSet('session-2', null, 'complete');
+
+    const [first] = await getTurnChangeSets('session-1', (await listTurnChangeSets('session-1')).map(({ id }) => id));
+    const [secondDetail] = await getTurnChangeSets('session-2', (await listTurnChangeSets('session-2')).map(({ id }) => id));
+    expect(first?.diffs[0]?.rawPatch).toContain('-old');
+    expect(first?.diffs[0]?.rawPatch).toContain('+first');
+    expect(secondDetail?.diffs[0]?.rawPatch).toContain('-first');
+    expect(secondDetail?.diffs[0]?.rawPatch).toContain('+second');
   });
 
   it('undoes and reapplies an exact text patch without changing chat history', async () => {

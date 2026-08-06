@@ -58,7 +58,6 @@ import type {
 } from '@/lib/gitReview.types';
 import { formatSidebarTime } from '@/features/cc-agent/lib/formatSidebarTime';
 import { makerChatStore } from '@/lib/makerChatStore';
-import { makerApiFor } from '@/lib/makerTransport';
 import type { TurnChangeSetDetail } from '../../../../../shared/turnChangeSet';
 import { extractIpcError } from '@/utils/ipcError';
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';

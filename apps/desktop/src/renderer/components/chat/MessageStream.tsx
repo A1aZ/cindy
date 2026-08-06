@@ -50,7 +50,6 @@ import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
 import type { KnownLocalFileRef } from '@/lib/localPathResolver';
 import {
   isRemoteSessionSticky,
-  makerApiFor,
   subscribeTurnChangeSetUpdated,
 } from '@/lib/makerTransport';
 import { createLogger } from '@/lib/logger';

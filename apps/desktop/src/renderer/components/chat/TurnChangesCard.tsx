@@ -110,6 +110,7 @@ export function TurnChangesCard({
   const hiddenCount = changeSet.fileCount - visibleFiles.length;
   const omittedCount = Math.max(0, changeSet.fileCount - files.length);
   const workspaceState = workspaceStateOverride ?? changeSet.workspaceState;
+  const appliesCapturedSubset = changeSet.state === 'partial' && changeSet.isReversible;
 
   useEffect(() => {
     setWorkspaceStateOverride((current) => (
@@ -144,9 +145,13 @@ export function TurnChangesCard({
           : result.summary.workspaceState,
       );
       toast.success(t(
-        action === 'undo'
-          ? 'chat.turnChanges.undoSuccess'
-          : 'chat.turnChanges.reapplySuccess',
+        appliesCapturedSubset
+          ? action === 'undo'
+            ? 'chat.turnChanges.undoPartialSuccess'
+            : 'chat.turnChanges.reapplyPartialSuccess'
+          : action === 'undo'
+            ? 'chat.turnChanges.undoSuccess'
+            : 'chat.turnChanges.reapplySuccess',
       ));
     } catch (error) {
       const code = extractIpcError(error)?.code;
@@ -182,7 +187,11 @@ export function TurnChangesCard({
           {changeSet.state === 'partial' && (
             <div className="mt-1 flex items-center gap-1 text-[11px] text-[var(--warning-fg)]">
               <AlertTriangle size={12} />
-              <span>{t('chat.turnChanges.partial')}</span>
+              <span>{t(
+                appliesCapturedSubset
+                  ? 'chat.turnChanges.partialReversible'
+                  : 'chat.turnChanges.partial',
+              )}</span>
             </div>
           )}
         </div>
@@ -191,10 +200,17 @@ export function TurnChangesCard({
             <button
               type="button"
               disabled={applying}
+              title={appliesCapturedSubset
+                ? t('chat.turnChanges.partialActionHint')
+                : undefined}
               aria-label={t(
-                workspaceState === 'undone'
-                  ? 'chat.turnChanges.reapplyAria'
-                  : 'chat.turnChanges.undoAria',
+                appliesCapturedSubset
+                  ? workspaceState === 'undone'
+                    ? 'chat.turnChanges.reapplyPartialAria'
+                    : 'chat.turnChanges.undoPartialAria'
+                  : workspaceState === 'undone'
+                    ? 'chat.turnChanges.reapplyAria'
+                    : 'chat.turnChanges.undoAria',
               )}
               onClick={() => void applyTurnChange()}
               className={cn(

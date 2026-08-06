@@ -39,7 +39,7 @@ export interface TurnChangeSetSummary {
   state: TurnChangeSetState;
   /** Last successful patch direction recorded by Main. */
   workspaceState: TurnChangeWorkspaceState;
-  /** Whether the immutable payload can be safely applied in either direction. */
+  /** Whether the exact recorded payload can be safely applied in either direction. */
   isReversible: boolean;
   incompleteReasons: TurnChangeIncompleteReason[];
   createdAt: number;

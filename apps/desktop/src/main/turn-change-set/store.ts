@@ -68,8 +68,8 @@ interface PendingTurnChangeSet {
   incompleteReasons: Set<TurnChangeIncompleteReason>;
 }
 
-interface TurnChangeIndexV2 {
-  version: 2;
+interface TurnChangeIndexV3 {
+  version: 3;
   entries: TurnChangeSetSummary[];
   detailBytes: Record<string, number>;
 }
@@ -134,6 +134,7 @@ const pendingWorkspaceBySession = new Map<string, string>();
 const pendingWorkspaceCounts = new Map<string, number>();
 const retainedSessionDirs = new Map<string, number>();
 const activeActionPromises = new Set<Promise<unknown>>();
+const legacyReversibleCapabilityByDetailPath = new Map<string, boolean>();
 let storageWriteChain = Promise.resolve();
 
 function byteLength(value: string): number {
@@ -214,7 +215,6 @@ function filterSensitiveDiffBlocks(
 function isReversiblePatch(value: PersistedTurnChangeSetV1): boolean {
   if (
     value.reversibleFormat !== 'exact-text-v1'
-    || value.state !== 'complete'
     || value.unifiedDiff.length === 0
     || value.files.length === 0
   ) {
@@ -402,17 +402,21 @@ async function pruneActionState(
   writeActionStateFile(sessionId, { version: 1, states });
 }
 
-async function readIndexState(sessionId: string): Promise<TurnChangeIndexV2> {
+async function readIndexState(sessionId: string): Promise<TurnChangeIndexV3> {
   try {
     const raw = await fs.readFile(path.join(sessionDir(sessionId), INDEX_FILE), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<Omit<TurnChangeIndexV2, 'version'>> & {
+    const parsed = JSON.parse(raw) as Partial<Omit<TurnChangeIndexV3, 'version'>> & {
       version?: unknown;
     };
-    if ((parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.entries)) {
-      return { version: 2, entries: [], detailBytes: {} };
+    if (
+      (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3)
+      || !Array.isArray(parsed.entries)
+    ) {
+      return { version: 3, entries: [], detailBytes: {} };
     }
-    const reversibleIndex = parsed.version === 2;
-    const entries = parsed.entries
+    const sourceVersion = parsed.version;
+    const reversibleIndex = sourceVersion >= 2;
+    let entries = parsed.entries
       .filter((entry) => isSummary(entry, sessionId))
       .map((entry) => ({
         ...entry,
@@ -437,12 +441,32 @@ async function readIndexState(sessionId: string): Promise<TurnChangeIndexV2> {
       const stat = await fs.stat(detailPath(sessionId, entry.id)).catch(() => null);
       if (stat?.isFile()) detailBytes[entry.id] = stat.size;
     }
-    return { version: 2, entries, detailBytes };
+
+    if (sourceVersion < 3) {
+      entries = await Promise.all(entries.map(async (entry) => {
+        const needsCapabilityUpgrade = sourceVersion === 1 || entry.state === 'partial';
+        if (!needsCapabilityUpgrade) return entry;
+        const currentDetailPath = detailPath(sessionId, entry.id);
+        let isReversible = legacyReversibleCapabilityByDetailPath.get(currentDetailPath);
+        if (isReversible === undefined) {
+          const rawDetail = await fs.readFile(currentDetailPath, 'utf8').catch(() => null);
+          const detail = rawDetail === null ? null : parsePersisted(rawDetail);
+          isReversible = detail ? isReversiblePatch(detail) : false;
+          // A transient read failure must remain retryable. Otherwise the next normal
+          // persist could write a false capability into v3 permanently.
+          if (rawDetail !== null) {
+            legacyReversibleCapabilityByDetailPath.set(currentDetailPath, isReversible);
+          }
+        }
+        return { ...entry, isReversible };
+      }));
+    }
+    return { version: 3, entries, detailBytes };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       log.warn('turn change-set index read failed', { sessionId, error });
     }
-    return { version: 2, entries: [], detailBytes: {} };
+    return { version: 3, entries: [], detailBytes: {} };
   }
 }
 
@@ -620,7 +644,7 @@ async function persistValue(value: PersistedTurnChangeSetV1): Promise<void> {
       );
       atomicWriteFileSync(
         path.join(dir, INDEX_FILE),
-        `${JSON.stringify({ version: 2, entries: next, detailBytes: nextDetailBytes } satisfies TurnChangeIndexV2)}\n`,
+        `${JSON.stringify({ version: 3, entries: next, detailBytes: nextDetailBytes } satisfies TurnChangeIndexV3)}\n`,
       );
       indexPublished = true;
       const storedFiles = await fs.readdir(dir).catch(() => []);

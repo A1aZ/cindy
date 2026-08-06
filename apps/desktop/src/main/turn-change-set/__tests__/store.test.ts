@@ -559,7 +559,82 @@ describe('turn change-set sidecar store', () => {
 
     await vi.waitFor(async () => expect(await listTurnChangeSets('session-1')).toHaveLength(1));
     const [summary] = await listTurnChangeSets('session-1');
-    expect(summary).toMatchObject({ state: 'partial', incompleteReasons: ['opaque-tool'] });
+    expect(summary).toMatchObject({
+      state: 'partial',
+      incompleteReasons: ['opaque-tool'],
+      isReversible: true,
+    });
+
+    await applyTurnChangeSetAction('session-1', summary!.id, 'undo');
+    expect(await fs.readFile(target, 'utf8')).toBe('old\n');
+    await applyTurnChangeSetAction('session-1', summary!.id, 'reapply');
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+  });
+
+  it('reads a v2 partial index with the exact captured-subset capability', async () => {
+    const target = path.join(workdir, 'legacy-partial.ts');
+    await fs.writeFile(target, 'old\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: target,
+    });
+    await fs.writeFile(target, 'new\n', 'utf8');
+    noteOpaqueTurnChange({ sessionId: 'session-1', provider: 'claude-code', cwd: workdir });
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+
+    await vi.waitFor(async () => expect(await listTurnChangeSets('session-1')).toHaveLength(1));
+    const indexPath = path.join(
+      mocks.userDataRoot,
+      'cc-agent',
+      'turn-change-sets',
+      'session-1',
+      'index.json',
+    );
+    const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+      version: number;
+      entries: Array<{ isReversible: boolean }>;
+    };
+    index.version = 2;
+    index.entries[0]!.isReversible = false;
+    await fs.writeFile(indexPath, `${JSON.stringify(index)}\n`, 'utf8');
+
+    const [legacySummary] = await listTurnChangeSets('session-1');
+    expect(legacySummary?.isReversible).toBe(true);
+    expect(JSON.parse(await fs.readFile(indexPath, 'utf8'))).toMatchObject({ version: 2 });
+
+    const nextTarget = path.join(workdir, 'next.ts');
+    await fs.writeFile(nextTarget, 'before\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: nextTarget,
+    });
+    await fs.writeFile(nextTarget, 'after\n', 'utf8');
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    expect(await listTurnChangeSets('session-1')).toHaveLength(2);
+
+    const upgradedIndex = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+      version: number;
+      entries: Array<{ id: string; isReversible: boolean }>;
+    };
+    expect(upgradedIndex.version).toBe(3);
+    expect(upgradedIndex.entries.find((entry) => entry.id === legacySummary!.id))
+      .toMatchObject({ isReversible: true });
   });
 
   it('persists a zero-file partial entry for an opaque tool with unknown targets', async () => {
@@ -578,6 +653,7 @@ describe('turn change-set sidecar store', () => {
       incompleteReasons: ['opaque-tool'],
       fileCount: 0,
       files: [],
+      isReversible: false,
     });
   });
 

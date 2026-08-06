@@ -178,7 +178,43 @@ describe('TurnChangesCard file actions', () => {
     expect(mocks.toastSuccess).toHaveBeenCalledWith('chat.turnChanges.undoSuccess');
   });
 
-  it('does not offer undo for a partial or otherwise non-reversible patch', () => {
+  it('offers partial undo for the exactly captured subset and explains the boundary', async () => {
+    const partial: TurnChangeSetSummary = {
+      ...CHANGE_SET,
+      state: 'partial',
+      isReversible: true,
+      incompleteReasons: ['opaque-tool'],
+    };
+    mocks.applyTurnChangeSet
+      .mockResolvedValueOnce({
+        action: 'undo',
+        changed: true,
+        summary: { ...partial, workspaceState: 'undone' },
+      })
+      .mockResolvedValueOnce({
+        action: 'reapply',
+        changed: true,
+        summary: { ...partial, workspaceState: 'applied' },
+      });
+    render(<TurnChangesCard sessionId="session-1" changeSet={partial} />);
+
+    expect(screen.getByText('chat.turnChanges.partialReversible')).toBeTruthy();
+    const undo = screen.getByRole('button', { name: 'chat.turnChanges.undoPartialAria' });
+    expect(undo.getAttribute('title')).toBe('chat.turnChanges.partialActionHint');
+    fireEvent.click(undo);
+
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      'chat.turnChanges.undoPartialSuccess',
+    ));
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'chat.turnChanges.reapplyPartialAria',
+    }));
+    await waitFor(() => expect(mocks.toastSuccess).toHaveBeenCalledWith(
+      'chat.turnChanges.reapplyPartialSuccess',
+    ));
+  });
+
+  it('does not offer undo for a non-reversible patch', () => {
     render(
       <TurnChangesCard
         sessionId="session-1"

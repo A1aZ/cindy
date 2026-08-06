@@ -453,6 +453,8 @@ import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
 import {
   TURN_CHANGE_SET_DETAIL_ID_LIMIT,
+  TurnChangeSetActionError,
+  applyTurnChangeSetAction,
   beginTurnChangeSet,
   clearPendingTurnChangeSets,
   finalizeTurnChangeSet,
@@ -672,7 +674,10 @@ import {
   SessionTurnActivityTracker,
 } from './sessionTurnActivityTracker.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
-import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import {
+  captureDataOwnerBroadcastScope,
+  tapWindowBroadcast,
+} from '../device-link/broadcast-tap.js';
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
   markRemoteSettingPersistedInsideHandler,
@@ -4777,6 +4782,60 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INVALID_PARAMS', 'Invalid turn change-set ids');
       }
       return getTurnChangeSets(sessionId, ids as string[]);
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SET_APPLY,
+    async (event, sessionId: unknown, id: unknown, action: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      const ownerScope = captureDataOwnerBroadcastScope();
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set id');
+      }
+      if (action !== 'undo' && action !== 'reapply') {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set action');
+      }
+      const meta = await maker.getSessionMeta(sessionId);
+      if (!meta) throwIpcError('NOT_FOUND', 'Task not found.');
+      if (meta.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Remote workspace restore is not available.');
+      }
+      const normalizedWorkDir = process.platform === 'win32'
+        ? path.resolve(meta.workDir).toLocaleLowerCase('en-US')
+        : path.resolve(meta.workDir);
+      const workspaceIsBusy = (): boolean => maker.listActiveSessions().some((session) => {
+        if (session.remoteHostId) return false;
+        const currentWorkDir = process.platform === 'win32'
+          ? path.resolve(session.workDir).toLocaleLowerCase('en-US')
+          : path.resolve(session.workDir);
+        return currentWorkDir === normalizedWorkDir
+          && (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id));
+      });
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      await waitForTurnChangeSetSeal(sessionId);
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      try {
+        return await applyTurnChangeSetAction(sessionId, id, action, ownerScope);
+      } catch (error) {
+        if (!(error instanceof TurnChangeSetActionError)) {
+          log.warn('turn change-set action failed', { sessionId, id, action, error });
+          throwIpcError('INTERNAL', 'The recorded changes could not be applied.');
+        }
+        if (error.kind === 'not-found') throwIpcError('NOT_FOUND', error.message);
+        if (error.kind === 'busy') throwIpcError('SESSION_RUNNING', error.message);
+        if (error.kind === 'wrong-state') throwIpcError('PRECONDITION_FAILED', error.message);
+        if (error.kind === 'unsupported') throwIpcError('UNSUPPORTED_CAPABILITY', error.message);
+        if (error.kind === 'conflict') throwIpcError('STALE_DIFF', error.message);
+        throwIpcError('INTERNAL', error.message);
+      }
     },
   );
 
@@ -9669,7 +9728,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await waitForTurnChangeSetSeal(sessionId);
       const liveSession = maker.getSession(sessionId);
       if (liveSession) {
-        beginTurnChangeSet({
+        await beginTurnChangeSet({
           sessionId,
           anchorClientId: item.clientId,
           provider: liveSession.agentKind,

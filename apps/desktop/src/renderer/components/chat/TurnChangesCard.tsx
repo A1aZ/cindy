@@ -1,11 +1,22 @@
-import { useRef, useState } from 'react';
-import { AlertTriangle, ChevronDown, ChevronUp, FileDiff, FileText } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronUp,
+  FileDiff,
+  FileText,
+  LoaderCircle,
+  Redo2,
+  Undo2,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { openTurnReview } from '@/features/right-sidebar/lib/openTurnReview';
 import { shouldOpenTextLightboxForOrigin } from '@/lib/filePreview';
 import { resolveToolFilePath } from '@/lib/localPathResolver';
+import { toast } from '@/lib/toast';
 import { basename, cn } from '@/lib/utils';
+import { extractIpcError } from '@/utils/ipcError';
 import { isBrowserOpenablePath } from '../../../shared/browserOpenableExts';
 import type { TurnChangeFileSummary, TurnChangeSetSummary } from '../../../shared/turnChangeSet';
 import { useChatSessionFile } from './ChatSessionFileContext';
@@ -88,15 +99,68 @@ export function TurnChangesCard({
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [workspaceStateOverride, setWorkspaceStateOverride] = useState<
+    TurnChangeSetSummary['workspaceState'] | null
+  >(null);
+  const latestWorkspaceStateRef = useRef(changeSet.workspaceState);
+  latestWorkspaceStateRef.current = changeSet.workspaceState;
   const files = changeSet.files;
   const visibleFiles = expanded ? files : files.slice(0, MAX_VISIBLE_FILES);
   const hiddenCount = changeSet.fileCount - visibleFiles.length;
   const omittedCount = Math.max(0, changeSet.fileCount - files.length);
+  const workspaceState = workspaceStateOverride ?? changeSet.workspaceState;
+
+  useEffect(() => {
+    setWorkspaceStateOverride((current) => (
+      current === changeSet.workspaceState ? null : current
+    ));
+  }, [changeSet.workspaceState]);
+
+  useEffect(() => {
+    setWorkspaceStateOverride(null);
+    setApplying(false);
+  }, [changeSet.id]);
 
   const openReview = (selectedDiffId?: string): void => {
     void openTurnReview(sessionId, [changeSet.id], {
       selectedDiffId: selectedDiffId ?? null,
     });
+  };
+
+  const applyTurnChange = async (): Promise<void> => {
+    if (applying || !changeSet.isReversible) return;
+    const action = workspaceState === 'undone' ? 'reapply' : 'undo';
+    setApplying(true);
+    try {
+      const result = await window.electronAPI.maker.applyTurnChangeSet(
+        sessionId,
+        changeSet.id,
+        action,
+      );
+      setWorkspaceStateOverride(
+        result.summary.workspaceState === latestWorkspaceStateRef.current
+          ? null
+          : result.summary.workspaceState,
+      );
+      toast.success(t(
+        action === 'undo'
+          ? 'chat.turnChanges.undoSuccess'
+          : 'chat.turnChanges.reapplySuccess',
+      ));
+    } catch (error) {
+      const code = extractIpcError(error)?.code;
+      const key = code === 'SESSION_RUNNING'
+        ? 'chat.turnChanges.actionRunning'
+        : code === 'STALE_DIFF' || code === 'PRECONDITION_FAILED'
+          ? 'chat.turnChanges.actionConflict'
+          : code === 'UNSUPPORTED_CAPABILITY'
+            ? 'chat.turnChanges.actionUnavailable'
+            : 'chat.turnChanges.actionFailed';
+      toast.error(t(key));
+    } finally {
+      setApplying(false);
+    }
   };
 
   return (
@@ -122,13 +186,43 @@ export function TurnChangesCard({
             </div>
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => openReview()}
-          className="h-8 shrink-0 rounded-lg border border-[var(--border-default)] px-3 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
-        >
-          {t('chat.turnChanges.review')}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          {changeSet.isReversible && (
+            <button
+              type="button"
+              disabled={applying}
+              aria-label={t(
+                workspaceState === 'undone'
+                  ? 'chat.turnChanges.reapplyAria'
+                  : 'chat.turnChanges.undoAria',
+              )}
+              onClick={() => void applyTurnChange()}
+              className={cn(
+                'flex h-8 items-center gap-1.5 rounded-lg px-2 text-[13px] font-medium',
+                'text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]',
+                'disabled:cursor-not-allowed disabled:opacity-50',
+              )}
+            >
+              {applying
+                ? <LoaderCircle size={15} className="animate-spin" />
+                : workspaceState === 'undone'
+                  ? <Redo2 size={15} />
+                  : <Undo2 size={15} />}
+              {t(
+                workspaceState === 'undone'
+                  ? 'chat.turnChanges.reapply'
+                  : 'chat.turnChanges.undo',
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => openReview()}
+            className="h-8 rounded-lg border border-[var(--border-default)] px-3 text-[13px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+          >
+            {t('chat.turnChanges.review')}
+          </button>
+        </div>
       </div>
 
       {files.length > 0 && (

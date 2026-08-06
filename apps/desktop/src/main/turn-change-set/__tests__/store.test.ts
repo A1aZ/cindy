@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { runGit } from '../../git-review/gitRunner';
 
 const mocks = vi.hoisted(() => ({
   userDataRoot: '',
   query: vi.fn(),
   send: vi.fn(),
+  ownerCurrent: true,
 }));
 
 vi.mock('electron', () => ({
@@ -18,11 +20,13 @@ vi.mock('../../localDb/client/current.js', () => ({
 }));
 vi.mock('../../device-link/broadcast-tap.js', () => ({
   captureDataOwnerBroadcastScope: () => ({ ownerStamp: undefined }),
-  isDataOwnerBroadcastScopeCurrent: () => true,
+  isDataOwnerBroadcastScopeCurrent: () => mocks.ownerCurrent,
   tapWindowBroadcast: mocks.send,
 }));
 
 import {
+  TurnChangeSetActionError,
+  applyTurnChangeSetAction,
   beginTurnChangeSet,
   captureKnownFileBefore,
   clearPendingTurnChangeSets,
@@ -44,21 +48,27 @@ describe('turn change-set sidecar store', () => {
     mocks.userDataRoot = path.join(root, 'user-data');
     mocks.query.mockReset();
     mocks.send.mockReset();
+    mocks.ownerCurrent = true;
     mocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('working_dir AS workingDir')) {
+        return [{ workingDir: workdir, remoteHostId: null }];
+      }
       if (sql.includes('SELECT id FROM sessions')) return [{ id: 'session-1' }];
       if (sql.includes('client_id IN')) return [{ clientId: 'user-1' }];
       return [];
     });
     clearPendingTurnChangeSets('session-1');
+    clearPendingTurnChangeSets('session-2');
   });
 
   afterEach(async () => {
     clearPendingTurnChangeSets('session-1');
+    clearPendingTurnChangeSets('session-2');
     await fs.rm(root, { recursive: true, force: true });
   });
 
   it('persists the native Codex patch under the dispatch anchor without a database write', async () => {
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'codex',
@@ -96,10 +106,368 @@ describe('turn change-set sidecar store', () => {
     });
   });
 
+  it('undoes and reapplies an exact text patch without changing chat history', async () => {
+    const target = path.join(workdir, 'a.ts');
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-action',
+        cwd: workdir,
+        diff: [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-action', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+
+    const undo = await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+    expect(await fs.readFile(target, 'utf8')).toBe('old\n');
+    expect(undo).toMatchObject({ action: 'undo', changed: true });
+    expect(undo.summary.workspaceState).toBe('undone');
+    expect((await listTurnChangeSets('session-1'))[0]?.workspaceState).toBe('undone');
+
+    const reapply = await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+    expect(reapply.summary.workspaceState).toBe('applied');
+  });
+
+  it('keeps every file unchanged when one hunk conflicts', async () => {
+    const first = path.join(workdir, 'a.ts');
+    const second = path.join(workdir, 'b.ts');
+    await fs.writeFile(first, 'new-a\n', 'utf8');
+    await fs.writeFile(second, 'new-b\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-conflict',
+        cwd: workdir,
+        diff: [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-old-a',
+          '+new-a',
+          'diff --git a/b.ts b/b.ts',
+          '--- a/b.ts',
+          '+++ b/b.ts',
+          '@@ -1 +1 @@',
+          '-old-b',
+          '+new-b',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-conflict', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+    await fs.writeFile(second, 'user-edit\n', 'utf8');
+
+    await expect(applyTurnChangeSetAction('session-1', recorded!.id, 'undo'))
+      .rejects.toMatchObject({ kind: 'conflict' } satisfies Partial<TurnChangeSetActionError>);
+    expect(await fs.readFile(first, 'utf8')).toBe('new-a\n');
+    expect(await fs.readFile(second, 'utf8')).toBe('user-edit\n');
+    expect((await listTurnChangeSets('session-1'))[0]?.workspaceState).toBe('applied');
+  });
+
+  it('undoes and reapplies a newly created file for Claude without a Git repository', async () => {
+    const target = path.join(workdir, 'created.txt');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'created.txt',
+    });
+    await fs.writeFile(target, 'created\n', 'utf8');
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+    await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+    expect(await fs.readFile(target, 'utf8')).toBe('created\n');
+  });
+
+  it('undoes and reapplies a deleted file for Pi without a Git repository', async () => {
+    const target = path.join(workdir, 'deleted.txt');
+    await fs.writeFile(target, 'before deletion\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'pi',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'pi',
+      cwd: workdir,
+      targetPath: 'deleted.txt',
+    });
+    await fs.rm(target);
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+    expect(await fs.readFile(target, 'utf8')).toBe('before deletion\n');
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+    await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('preserves a UTF-8 BOM byte-for-byte through Claude undo and reapply', async () => {
+    const target = path.join(workdir, 'bom.txt');
+    const before = Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('old\n')]);
+    const after = Buffer.from([0xef, 0xbb, 0xbf, ...Buffer.from('new\n')]);
+    await fs.writeFile(target, before);
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'bom.txt',
+    });
+    await fs.writeFile(target, after);
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+    expect(await fs.readFile(target)).toEqual(before);
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+    expect(await fs.readFile(target)).toEqual(after);
+  });
+
+  it('keeps legacy sidecar patches review-only', async () => {
+    const target = path.join(workdir, 'legacy.txt');
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-legacy',
+        cwd: workdir,
+        diff: [
+          'diff --git a/legacy.txt b/legacy.txt',
+          '--- a/legacy.txt',
+          '+++ b/legacy.txt',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-legacy', 'complete');
+    const sidecarDir = path.join(mocks.userDataRoot, 'cc-agent', 'turn-change-sets', 'session-1');
+    const indexPath = path.join(sidecarDir, 'index.json');
+    const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+      version: number;
+      entries: Array<{ id: string }>;
+    };
+    index.version = 1;
+    await fs.writeFile(indexPath, `${JSON.stringify(index)}\n`, 'utf8');
+    const detailPath = path.join(sidecarDir, `${index.entries[0]!.id}.json`);
+    const detail = JSON.parse(await fs.readFile(detailPath, 'utf8')) as {
+      reversibleFormat?: string;
+    };
+    delete detail.reversibleFormat;
+    await fs.writeFile(detailPath, `${JSON.stringify(detail)}\n`, 'utf8');
+
+    expect((await listTurnChangeSets('session-1'))[0]?.isReversible).toBe(false);
+    await expect(applyTurnChangeSetAction('session-1', index.entries[0]!.id, 'undo'))
+      .rejects.toMatchObject({ kind: 'unsupported' } satisfies Partial<TurnChangeSetActionError>);
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+  });
+
+  it('rejects undo while another task is changing the same workspace', async () => {
+    const target = path.join(workdir, 'busy.txt');
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-busy',
+        cwd: workdir,
+        diff: [
+          'diff --git a/busy.txt b/busy.txt',
+          '--- a/busy.txt',
+          '+++ b/busy.txt',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-busy', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+    await beginTurnChangeSet({
+      sessionId: 'session-2',
+      anchorClientId: 'user-2',
+      provider: 'pi',
+      cwd: workdir,
+    });
+
+    await expect(applyTurnChangeSetAction('session-1', recorded!.id, 'undo'))
+      .rejects.toMatchObject({ kind: 'busy' } satisfies Partial<TurnChangeSetActionError>);
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+    clearPendingTurnChangeSets('session-2');
+  });
+
+  it('fails closed before mutation when the data-owner scope is stale', async () => {
+    const target = path.join(workdir, 'owner.txt');
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-owner',
+        cwd: workdir,
+        diff: [
+          'diff --git a/owner.txt b/owner.txt',
+          '--- a/owner.txt',
+          '+++ b/owner.txt',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-owner', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+    mocks.ownerCurrent = false;
+
+    await expect(applyTurnChangeSetAction('session-1', recorded!.id, 'undo'))
+      .rejects.toMatchObject({ kind: 'busy' } satisfies Partial<TurnChangeSetActionError>);
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+    mocks.ownerCurrent = true;
+    expect((await listTurnChangeSets('session-1'))[0]?.workspaceState).toBe('applied');
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('reverses and reapplies a pure Codex rename through Git apply', async () => {
+    await runGit(['init', '-q'], { cwd: workdir });
+    const oldTarget = path.join(workdir, 'old.txt');
+    const newTarget = path.join(workdir, 'new.txt');
+    await fs.writeFile(oldTarget, 'same\n', 'utf8');
+    await runGit(['add', 'old.txt'], { cwd: workdir });
+    await fs.rename(oldTarget, newTarget);
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-rename',
+        cwd: workdir,
+        diff: [
+          'diff --git a/old.txt b/new.txt',
+          'similarity index 100%',
+          'rename from old.txt',
+          'rename to new.txt',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-rename', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+    expect(recorded?.isReversible).toBe(true);
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'undo');
+    expect(await fs.readFile(oldTarget, 'utf8')).toBe('same\n');
+    await expect(fs.stat(newTarget)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    await applyTurnChangeSetAction('session-1', recorded!.id, 'reapply');
+    expect(await fs.readFile(newTarget, 'utf8')).toBe('same\n');
+    await expect(fs.stat(oldTarget)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('does not advertise a binary-only native patch as reversible', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-binary',
+        cwd: workdir,
+        diff: [
+          'diff --git a/image.png b/image.png',
+          'index 1111111..2222222 100644',
+          'Binary files a/image.png and b/image.png differ',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-binary', 'complete');
+
+    const [recorded] = await listTurnChangeSets('session-1');
+    expect(recorded).toMatchObject({ isReversible: false });
+  });
+
   it('captures only the first preimage for a known-path Claude write', async () => {
     const target = path.join(workdir, 'a.ts');
     await fs.writeFile(target, 'old\n', 'utf8');
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'claude-code',
@@ -128,7 +496,7 @@ describe('turn change-set sidecar store', () => {
   });
 
   it('filters sensitive files from a native Codex patch', async () => {
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'codex',
@@ -173,7 +541,7 @@ describe('turn change-set sidecar store', () => {
   it('labels the captured subset partial after an opaque Pi tool result', async () => {
     const target = path.join(workdir, 'a.ts');
     await fs.writeFile(target, 'old\n', 'utf8');
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'pi',
@@ -195,7 +563,7 @@ describe('turn change-set sidecar store', () => {
   });
 
   it('persists a zero-file partial entry for an opaque tool with unknown targets', async () => {
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'pi',
@@ -214,7 +582,7 @@ describe('turn change-set sidecar store', () => {
   });
 
   it('does not persist remote workspace patches while remote review is unsupported', async () => {
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'codex',
@@ -244,7 +612,7 @@ describe('turn change-set sidecar store', () => {
   });
 
   it('bounds the card index while preserving the complete patch for exact review', async () => {
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'codex',
@@ -284,7 +652,7 @@ describe('turn change-set sidecar store', () => {
     const orphanPath = path.join(sidecarDir, 'orphan.json');
     await fs.writeFile(orphanPath, '{}\n', 'utf8');
 
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'pi',
@@ -302,7 +670,7 @@ describe('turn change-set sidecar store', () => {
     const secretTarget = path.join(workdir, '.env');
     await fs.writeFile(safeTarget, 'old\n', 'utf8');
     await fs.writeFile(secretTarget, 'TOKEN=old\n', 'utf8');
-    beginTurnChangeSet({
+    await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'claude-code',

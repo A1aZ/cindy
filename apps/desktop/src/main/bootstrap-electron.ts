@@ -37,6 +37,7 @@ import {
 } from './devStartupStatus';
 import { prewarmMacComputerPermissionGuideHelper } from './computer-permission-guide/MacComputerPermissionGuideNativeHost.js';
 import { handleOpenChatGPTApp } from './chatgpt-app.js';
+import { waitForTurnChangeSetActions } from './turn-change-set/store.js';
 
 const PROCESS_STARTED_AT_MS = Date.now();
 // Official Linux binaries total hundreds of MB. Keep one shared deadline for
@@ -78,6 +79,8 @@ app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 // Windows 上 codex app-server 子进程不会随父死 → 残留孤儿, 持有 binary 文件锁,
 // 用户下次启动时撞 EBUSY / 端口占用 (anthropic-compat-proxy 等)。
 async function shutdownMaker(): Promise<void> {
+  // Do not terminate Main while one workspace patch command is settling.
+  await waitForTurnChangeSetActions();
   // 退出前先把 onClose 重副作用(worktree stash/删除、临时附件清理)一刀切抑制掉:
   // shutdown 触发的批量 onClose 是 fire-and-forget 的,不会被 await,worktree 回收会
   // 和 app.exit 竞争——可能 stash 了一半进程就没了,留下半拆的 worktree。退出期不做
@@ -1011,6 +1014,9 @@ async function ensureLifecycleDbClient(userId: string) {
 }
 
 async function teardownAuthAccountBoundary(reason: string): Promise<void> {
+  // The boundary is already marked pending by every caller. New actions now
+  // fail closed; drain an action that crossed the boundary before closing its DB.
+  await waitForTurnChangeSetActions();
   skillhubAutoSyncService.cancelInFlight();
   // Custom provider routes are owner-scoped but the active catalog is process-global.
   // Clear synchronously at the boundary; the next owner's tracked readiness reloads them

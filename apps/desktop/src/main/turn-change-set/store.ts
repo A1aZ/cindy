@@ -1,12 +1,15 @@
 import { app, BrowserWindow } from 'electron';
 import { createId } from '@paralleldrive/cuid2';
-import { createTwoFilesPatch } from 'diff';
+import { createTwoFilesPatch, formatPatch, parsePatch, reversePatch } from 'diff';
+import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import type { AgentEvent, TurnDiffEventData } from '@cindy/maker-core';
 import type {
   PersistedTurnChangeSetV1,
+  TurnChangeAction,
+  TurnChangeActionResult,
   TurnChangeFileSummary,
   TurnChangeIncompleteReason,
   TurnChangeProvider,
@@ -14,10 +17,12 @@ import type {
   TurnChangeSetState,
   TurnChangeSetSummary,
   TurnChangeSetUpdatedPayload,
+  TurnChangeWorkspaceState,
 } from '../../shared/turnChangeSet.js';
 import { TURN_CHANGE_SET_MAX_DIFF_BYTES } from '../../shared/turnChangeSet.js';
 import type { FileDiff } from '../../shared/gitReviewWire.js';
 import { parseGitDiffs } from '../git-review/diffParser.js';
+import { GitRunError, runGit } from '../git-review/gitRunner.js';
 import { getDbClient } from '../localDb/client/current.js';
 import { createLogger } from '../logger.js';
 import { detectSensitivePath } from '../security/sensitivePath.js';
@@ -38,12 +43,14 @@ const MAX_DETAIL_STORAGE_BYTES = 16 * 1024 * 1024;
 const MAX_SESSION_DETAIL_BYTES = 32 * 1024 * 1024;
 const MAX_STORED_SESSION_DIRS = 32;
 const INDEX_FILE = 'index.json';
+const ACTION_STATE_FILE = 'action-state.json';
 
 interface CapturedFile {
   absolutePath: string;
   relativePath: string;
   beforeExists: boolean;
   beforeText: string;
+  beforeMode: number | null;
 }
 
 interface PendingTurnChangeSet {
@@ -61,14 +68,20 @@ interface PendingTurnChangeSet {
   incompleteReasons: Set<TurnChangeIncompleteReason>;
 }
 
-interface TurnChangeIndexV1 {
-  version: 1;
+interface TurnChangeIndexV2 {
+  version: 2;
   entries: TurnChangeSetSummary[];
   detailBytes: Record<string, number>;
 }
 
+interface TurnChangeActionStateV1 {
+  version: 1;
+  states: Record<string, { workspaceState: TurnChangeWorkspaceState; updatedAt: number }>;
+}
+
 const PROVIDERS = new Set<TurnChangeProvider>(['codex', 'claude-code', 'pi']);
 const STATES = new Set<TurnChangeSetState>(['complete', 'partial']);
+const WORKSPACE_STATES = new Set<TurnChangeWorkspaceState>(['applied', 'undone']);
 const INCOMPLETE_REASONS = new Set<TurnChangeIncompleteReason>([
   'opaque-tool',
   'outside-workspace',
@@ -115,7 +128,12 @@ export interface BeginTurnChangeSetInput {
 }
 
 const pendingBySession = new Map<string, PendingTurnChangeSet>();
-const sessionWriteChains = new Map<string, Promise<void>>();
+const sessionWriteChains = new Map<string, Promise<unknown>>();
+const workspaceActionChains = new Map<string, Promise<unknown>>();
+const pendingWorkspaceBySession = new Map<string, string>();
+const pendingWorkspaceCounts = new Map<string, number>();
+const retainedSessionDirs = new Map<string, number>();
+const activeActionPromises = new Set<Promise<unknown>>();
 let storageWriteChain = Promise.resolve();
 
 function byteLength(value: string): number {
@@ -193,7 +211,42 @@ function filterSensitiveDiffBlocks(
   return safeBlocks.join('');
 }
 
-function toSummary(value: PersistedTurnChangeSetV1): TurnChangeSetSummary {
+function isReversiblePatch(value: PersistedTurnChangeSetV1): boolean {
+  if (
+    value.reversibleFormat !== 'exact-text-v1'
+    || value.state !== 'complete'
+    || value.unifiedDiff.length === 0
+    || value.files.length === 0
+  ) {
+    return false;
+  }
+  if (/^(?:GIT binary patch|Binary files .* differ)$/m.test(value.unifiedDiff)) return false;
+  if (/^(?:old mode|new mode)\s+/m.test(value.unifiedDiff)) return false;
+  if (/\b160000\b/.test(value.unifiedDiff)) return false;
+  const fileModes = [...value.unifiedDiff.matchAll(/^(?:new file mode|deleted file mode)\s+(\d+)$/gm)];
+  // Reformatting add/delete patches makes them work outside Git repositories, but
+  // does not carry executable-bit metadata. Keep those records review-only.
+  if (fileModes.some((match) => match[1] !== '100644')) return false;
+
+  const diffs = parseDiffs(value.id, value.unifiedDiff);
+  if (diffs.length !== value.files.length) return false;
+  return diffs.every((diff) => {
+    if (!['added', 'modified', 'deleted', 'renamed'].includes(diff.status)) return false;
+    if (!safeRelativeTarget(value.cwd, diff.path)) return false;
+    if (diff.oldPath && !safeRelativeTarget(value.cwd, diff.oldPath)) return false;
+    if (diff.status === 'renamed' && !diff.oldPath) return false;
+    if (diff.status === 'modified' && diff.hunks.length === 0) return false;
+    if ((diff.status === 'added' || diff.status === 'deleted') && diff.hunks.length === 0) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function toSummary(
+  value: PersistedTurnChangeSetV1,
+  workspaceState: TurnChangeWorkspaceState = 'applied',
+): TurnChangeSetSummary {
   return {
     id: value.id,
     sessionId: value.sessionId,
@@ -202,6 +255,8 @@ function toSummary(value: PersistedTurnChangeSetV1): TurnChangeSetSummary {
     providerTurnId: value.providerTurnId,
     cwd: value.cwd,
     state: value.state,
+    workspaceState,
+    isReversible: isReversiblePatch(value),
     incompleteReasons: value.incompleteReasons,
     createdAt: value.createdAt,
     completedAt: value.completedAt,
@@ -237,6 +292,9 @@ function isSummary(value: unknown, sessionId: string): value is TurnChangeSetSum
     && (summary.providerTurnId === null || typeof summary.providerTurnId === 'string')
     && typeof summary.cwd === 'string'
     && STATES.has(summary.state as TurnChangeSetState)
+    && (summary.workspaceState === undefined
+      || WORKSPACE_STATES.has(summary.workspaceState as TurnChangeWorkspaceState))
+    && (summary.isReversible === undefined || typeof summary.isReversible === 'boolean')
     && Array.isArray(summary.incompleteReasons)
     && summary.incompleteReasons.every((reason) => INCOMPLETE_REASONS.has(reason))
     && isFiniteNonNegative(summary.createdAt)
@@ -268,6 +326,7 @@ function parsePersisted(raw: string): PersistedTurnChangeSetV1 | null {
       || !isFiniteNonNegative(value.createdAt)
       || !isFiniteNonNegative(value.completedAt)
       || typeof value.unifiedDiff !== 'string'
+      || (value.reversibleFormat !== undefined && value.reversibleFormat !== 'exact-text-v1')
       || !Array.isArray(value.files)
       || !value.files.every(isFileSummary)
     ) return null;
@@ -277,15 +336,93 @@ function parsePersisted(raw: string): PersistedTurnChangeSetV1 | null {
   }
 }
 
-async function readIndexState(sessionId: string): Promise<TurnChangeIndexV1> {
+async function readActionState(sessionId: string): Promise<TurnChangeActionStateV1> {
+  try {
+    const raw = await fs.readFile(path.join(sessionDir(sessionId), ACTION_STATE_FILE), 'utf8');
+    const parsed = JSON.parse(raw) as Partial<TurnChangeActionStateV1>;
+    if (parsed.version !== 1 || !parsed.states || typeof parsed.states !== 'object') {
+      return { version: 1, states: {} };
+    }
+    const states: TurnChangeActionStateV1['states'] = {};
+    for (const [id, entry] of Object.entries(parsed.states).slice(-MAX_LIST_ROWS)) {
+      if (
+        !id
+        || id.length > 256
+        || !entry
+        || typeof entry !== 'object'
+        || !WORKSPACE_STATES.has(entry.workspaceState)
+        || !isFiniteNonNegative(entry.updatedAt)
+      ) continue;
+      states[id] = {
+        workspaceState: entry.workspaceState,
+        updatedAt: entry.updatedAt,
+      };
+    }
+    return { version: 1, states };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      log.warn('turn change-set action state read failed', { sessionId, error });
+    }
+    return { version: 1, states: {} };
+  }
+}
+
+function writeActionStateFile(sessionId: string, state: TurnChangeActionStateV1): void {
+  atomicWriteFileSync(
+    path.join(sessionDir(sessionId), ACTION_STATE_FILE),
+    `${JSON.stringify(state)}\n`,
+  );
+}
+
+async function persistWorkspaceState(
+  sessionId: string,
+  id: string,
+  workspaceState: TurnChangeWorkspaceState,
+): Promise<void> {
+  await enqueueStorageWrite(async () => {
+    const current = await readActionState(sessionId);
+    current.states[id] = { workspaceState, updatedAt: Date.now() };
+    writeActionStateFile(sessionId, current);
+  });
+}
+
+async function pruneActionState(
+  sessionId: string,
+  retainedIds: ReadonlySet<string>,
+): Promise<void> {
+  const current = await readActionState(sessionId);
+  const states = Object.fromEntries(
+    Object.entries(current.states).filter(([id]) => retainedIds.has(id)),
+  );
+  if (Object.keys(states).length === Object.keys(current.states).length) return;
+  if (Object.keys(states).length === 0) {
+    await fs.rm(path.join(sessionDir(sessionId), ACTION_STATE_FILE), { force: true });
+    return;
+  }
+  writeActionStateFile(sessionId, { version: 1, states });
+}
+
+async function readIndexState(sessionId: string): Promise<TurnChangeIndexV2> {
   try {
     const raw = await fs.readFile(path.join(sessionDir(sessionId), INDEX_FILE), 'utf8');
-    const parsed = JSON.parse(raw) as Partial<TurnChangeIndexV1>;
-    if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
-      return { version: 1, entries: [], detailBytes: {} };
+    const parsed = JSON.parse(raw) as Partial<Omit<TurnChangeIndexV2, 'version'>> & {
+      version?: unknown;
+    };
+    if ((parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.entries)) {
+      return { version: 2, entries: [], detailBytes: {} };
     }
+    const reversibleIndex = parsed.version === 2;
     const entries = parsed.entries
       .filter((entry) => isSummary(entry, sessionId))
+      .map((entry) => ({
+        ...entry,
+        workspaceState: WORKSPACE_STATES.has(entry.workspaceState)
+          ? entry.workspaceState
+          : 'applied' as const,
+        isReversible: reversibleIndex && typeof entry.isReversible === 'boolean'
+          ? entry.isReversible
+          : false,
+      }))
       .slice(-MAX_LIST_ROWS);
     const rawDetailBytes = parsed.detailBytes && typeof parsed.detailBytes === 'object'
       ? parsed.detailBytes
@@ -300,26 +437,112 @@ async function readIndexState(sessionId: string): Promise<TurnChangeIndexV1> {
       const stat = await fs.stat(detailPath(sessionId, entry.id)).catch(() => null);
       if (stat?.isFile()) detailBytes[entry.id] = stat.size;
     }
-    return { version: 1, entries, detailBytes };
+    return { version: 2, entries, detailBytes };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       log.warn('turn change-set index read failed', { sessionId, error });
     }
-    return { version: 1, entries: [], detailBytes: {} };
+    return { version: 2, entries: [], detailBytes: {} };
   }
 }
 
 async function readIndex(sessionId: string): Promise<TurnChangeSetSummary[]> {
-  return (await readIndexState(sessionId)).entries;
+  const [index, actionState] = await Promise.all([
+    readIndexState(sessionId),
+    readActionState(sessionId),
+  ]);
+  return index.entries.map((entry) => ({
+    ...entry,
+    workspaceState: actionState.states[entry.id]?.workspaceState ?? 'applied',
+  }));
 }
 
-function enqueueSessionWrite(sessionId: string, operation: () => Promise<void>): Promise<void> {
+function enqueueSessionWrite<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
   const previous = sessionWriteChains.get(sessionId) ?? Promise.resolve();
   const current = previous.catch(() => undefined).then(operation).finally(() => {
     if (sessionWriteChains.get(sessionId) === current) sessionWriteChains.delete(sessionId);
   });
   sessionWriteChains.set(sessionId, current);
   return current;
+}
+
+function workspaceKey(cwd: string): string {
+  const lexical = path.resolve(cwd);
+  let resolved = lexical;
+  try {
+    resolved = realpathSync.native(lexical);
+  } catch {
+    // A removed workspace cannot be mutated; retain the stable lexical key so
+    // concurrent failure paths still serialize with one another.
+  }
+  return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
+}
+
+function registerPendingWorkspace(sessionId: string, cwd: string): void {
+  if (pendingWorkspaceBySession.has(sessionId)) return;
+  const key = workspaceKey(cwd);
+  pendingWorkspaceBySession.set(sessionId, key);
+  pendingWorkspaceCounts.set(key, (pendingWorkspaceCounts.get(key) ?? 0) + 1);
+}
+
+function unregisterPendingWorkspace(sessionId: string): void {
+  const key = pendingWorkspaceBySession.get(sessionId);
+  if (!key) return;
+  pendingWorkspaceBySession.delete(sessionId);
+  const next = (pendingWorkspaceCounts.get(key) ?? 1) - 1;
+  if (next <= 0) pendingWorkspaceCounts.delete(key);
+  else pendingWorkspaceCounts.set(key, next);
+}
+
+async function waitForWorkspaceActions(cwd: string): Promise<void> {
+  const key = workspaceKey(cwd);
+  for (;;) {
+    const current = workspaceActionChains.get(key);
+    if (!current) return;
+    await current.catch(() => undefined);
+    if (workspaceActionChains.get(key) === current) return;
+  }
+}
+
+async function enqueueWorkspaceAction<T>(
+  cwd: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const key = workspaceKey(cwd);
+  if ((pendingWorkspaceCounts.get(key) ?? 0) > 0) {
+    throw new TurnChangeSetActionError('busy', 'The workspace is still producing file changes.');
+  }
+  const previous = workspaceActionChains.get(key) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation).finally(() => {
+    if (workspaceActionChains.get(key) === current) workspaceActionChains.delete(key);
+  });
+  workspaceActionChains.set(key, current);
+  return current;
+}
+
+function retainSessionDir(sessionId: string): () => void {
+  retainedSessionDirs.set(sessionId, (retainedSessionDirs.get(sessionId) ?? 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = (retainedSessionDirs.get(sessionId) ?? 1) - 1;
+    if (next <= 0) retainedSessionDirs.delete(sessionId);
+    else retainedSessionDirs.set(sessionId, next);
+  };
+}
+
+function trackAction<T>(promise: Promise<T>): Promise<T> {
+  activeActionPromises.add(promise);
+  void promise.finally(() => activeActionPromises.delete(promise)).catch(() => undefined);
+  return promise;
+}
+
+/** Drains destructive workspace actions before an account owner is torn down. */
+export async function waitForTurnChangeSetActions(): Promise<void> {
+  while (activeActionPromises.size > 0) {
+    await Promise.allSettled([...activeActionPromises]);
+  }
 }
 
 function enqueueStorageWrite(operation: () => Promise<void>): Promise<void> {
@@ -333,7 +556,10 @@ async function pruneStoredSessionDirs(currentSessionId: string): Promise<void> {
   const dirents = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
   const candidates = await Promise.all(
     dirents
-      .filter((entry) => entry.isDirectory() && entry.name !== currentSessionId)
+      .filter((entry) =>
+        entry.isDirectory()
+        && entry.name !== currentSessionId
+        && !retainedSessionDirs.has(entry.name))
       .map(async (entry) => {
         const dir = path.join(root, entry.name);
         const stat = await fs.lstat(dir).catch(() => null);
@@ -346,7 +572,12 @@ async function pruneStoredSessionDirs(currentSessionId: string): Promise<void> {
     .filter((entry): entry is { dir: string; updatedAt: number } => entry !== null)
     .sort((a, b) => b.updatedAt - a.updatedAt)
     .slice(Math.max(0, MAX_STORED_SESSION_DIRS - 1));
-  await Promise.all(removable.map((entry) => fs.rm(entry.dir, { recursive: true, force: true })));
+  await Promise.all(removable.map((entry) => {
+    const sessionId = path.basename(entry.dir);
+    return retainedSessionDirs.has(sessionId)
+      ? Promise.resolve()
+      : fs.rm(entry.dir, { recursive: true, force: true });
+  }));
 }
 
 async function persistValue(value: PersistedTurnChangeSetV1): Promise<void> {
@@ -389,17 +620,20 @@ async function persistValue(value: PersistedTurnChangeSetV1): Promise<void> {
       );
       atomicWriteFileSync(
         path.join(dir, INDEX_FILE),
-        `${JSON.stringify({ version: 1, entries: next, detailBytes: nextDetailBytes } satisfies TurnChangeIndexV1)}\n`,
+        `${JSON.stringify({ version: 2, entries: next, detailBytes: nextDetailBytes } satisfies TurnChangeIndexV2)}\n`,
       );
       indexPublished = true;
       const storedFiles = await fs.readdir(dir).catch(() => []);
       await Promise.all(storedFiles.map((name) => {
-        if (name === INDEX_FILE || !name.endsWith('.json')) return Promise.resolve();
+        if (name === INDEX_FILE || name === ACTION_STATE_FILE || !name.endsWith('.json')) {
+          return Promise.resolve();
+        }
         const id = name.slice(0, -'.json'.length);
         return retainedIds.has(id)
           ? Promise.resolve()
           : fs.rm(path.join(dir, name), { force: true });
       }));
+      await pruneActionState(value.sessionId, retainedIds);
       await pruneStoredSessionDirs(value.sessionId);
     } catch (error) {
       if (!indexPublished) await fs.rm(currentDetailPath, { force: true }).catch(() => undefined);
@@ -408,8 +642,10 @@ async function persistValue(value: PersistedTurnChangeSetV1): Promise<void> {
   });
 }
 
-function broadcastUpdated(payload: TurnChangeSetUpdatedPayload): void {
-  const ownerScope = broadcastTap.captureDataOwnerBroadcastScope();
+function broadcastUpdated(
+  payload: TurnChangeSetUpdatedPayload,
+  ownerScope = broadcastTap.captureDataOwnerBroadcastScope(),
+): void {
   if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(ownerScope)) return;
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.isDestroyed()) continue;
@@ -443,12 +679,13 @@ function ensurePending(
     incompleteReasons: new Set(),
   };
   pendingBySession.set(sessionId, pending);
+  registerPendingWorkspace(sessionId, cwd);
   return pending;
 }
 
 /** Establishes the Cindy product-turn identity before vendor dispatch. */
-export function beginTurnChangeSet(input: BeginTurnChangeSetInput): void {
-  const existing = pendingBySession.get(input.sessionId);
+export async function beginTurnChangeSet(input: BeginTurnChangeSetInput): Promise<void> {
+  let existing = pendingBySession.get(input.sessionId);
   if (existing) {
     if (existing.anchorClientId === input.anchorClientId) return;
     log.warn('replacing unfinished turn change-set at dispatch boundary', {
@@ -457,6 +694,14 @@ export function beginTurnChangeSet(input: BeginTurnChangeSetInput): void {
       anchorClientId: input.anchorClientId,
     });
     pendingBySession.delete(input.sessionId);
+    unregisterPendingWorkspace(input.sessionId);
+  }
+  await waitForWorkspaceActions(input.cwd);
+  existing = pendingBySession.get(input.sessionId);
+  if (existing?.anchorClientId === input.anchorClientId) return;
+  if (existing) {
+    pendingBySession.delete(input.sessionId);
+    unregisterPendingWorkspace(input.sessionId);
   }
   const pending = ensurePending(input.sessionId, input.provider, input.cwd);
   pending.anchorClientId = input.anchorClientId;
@@ -512,7 +757,7 @@ async function isRealTargetInsideWorkspace(cwd: string, absolutePath: string): P
 async function readTextFileForCapture(
   absolutePath: string,
   remainingBytes = MAX_CAPTURE_FILE_BYTES,
-): Promise<{ exists: boolean; text: string } | TurnChangeIncompleteReason> {
+): Promise<{ exists: boolean; text: string; mode: number | null } | TurnChangeIncompleteReason> {
   try {
     const stat = await fs.stat(absolutePath);
     if (!stat.isFile()) return 'read-failed';
@@ -520,12 +765,18 @@ async function readTextFileForCapture(
     if (stat.size > remainingBytes) return 'diff-too-large';
     const data = await fs.readFile(absolutePath);
     try {
-      return { exists: true, text: new TextDecoder('utf-8', { fatal: true }).decode(data) };
+      return {
+        exists: true,
+        text: new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data),
+        mode: stat.mode,
+      };
     } catch {
       return 'binary-file';
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false, text: '' };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { exists: false, text: '', mode: null };
+    }
     return 'read-failed';
   }
 }
@@ -572,6 +823,7 @@ export async function captureKnownFileBefore(input: KnownFileWriteCapture): Prom
       ...target,
       beforeExists: before.exists,
       beforeText: before.text,
+      beforeMode: before.mode,
     });
     pending.capturedBytes += captureBytes;
   })().finally(() => pending.captureTasks.delete(target.absolutePath));
@@ -610,14 +862,25 @@ export function noteTurnDiffEvent(sessionId: string, event: AgentEvent): void {
   pending.nativeFiles = [];
 }
 
-function createCapturedFilePatch(file: CapturedFile, afterExists: boolean, afterText: string): string {
+function gitFileMode(mode: number | null): '100644' | '100755' {
+  return mode !== null && (mode & 0o111) !== 0 ? '100755' : '100644';
+}
+
+function createCapturedFilePatch(
+  file: CapturedFile,
+  afterExists: boolean,
+  afterText: string,
+  afterMode: number | null,
+): string {
   const oldName = file.beforeExists ? `a/${file.relativePath}` : '/dev/null';
   const newName = afterExists ? `b/${file.relativePath}` : '/dev/null';
   const mode = !file.beforeExists && afterExists
-    ? 'new file mode 100644\n'
+    ? `new file mode ${gitFileMode(afterMode)}\n`
     : file.beforeExists && !afterExists
-      ? 'deleted file mode 100644\n'
-      : '';
+      ? `deleted file mode ${gitFileMode(file.beforeMode)}\n`
+      : file.beforeExists && afterExists && gitFileMode(file.beforeMode) !== gitFileMode(afterMode)
+        ? `old mode ${gitFileMode(file.beforeMode)}\nnew mode ${gitFileMode(afterMode)}\n`
+        : '';
   return [
     `diff --git a/${file.relativePath} b/${file.relativePath}\n`,
     mode,
@@ -645,7 +908,7 @@ async function buildCapturedPatch(pending: PendingTurnChangeSet): Promise<string
     }
     afterImageBytes += byteLength(after.text);
     if (file.beforeExists === after.exists && file.beforeText === after.text) continue;
-    const nextPatch = createCapturedFilePatch(file, after.exists, after.text);
+    const nextPatch = createCapturedFilePatch(file, after.exists, after.text, after.mode);
     if (byteLength(unifiedDiff) + byteLength(nextPatch) > TURN_CHANGE_SET_MAX_DIFF_BYTES) {
       addIncompleteReason(pending, 'diff-too-large');
       break;
@@ -681,6 +944,7 @@ async function persistPending(
   const incompleteReasons = [...pending.incompleteReasons];
   let value: PersistedTurnChangeSetV1 = {
     version: 1,
+    reversibleFormat: 'exact-text-v1',
     id: pending.id,
     sessionId,
     anchorClientId,
@@ -718,7 +982,8 @@ export function finalizeTurnChangeSet(
   if (!pending) return Promise.resolve();
   pendingBySession.delete(sessionId);
   return enqueueSessionWrite(sessionId, () => persistPending(sessionId, pending, terminalState))
-    .catch((error) => log.warn('turn change-set persist failed', { sessionId, error }));
+    .catch((error) => log.warn('turn change-set persist failed', { sessionId, error }))
+    .finally(() => unregisterPendingWorkspace(sessionId));
 }
 
 /** Prevents the next product turn from mutating files before the prior after-image is sealed. */
@@ -726,8 +991,251 @@ export async function waitForTurnChangeSetSeal(sessionId: string): Promise<void>
   await (sessionWriteChains.get(sessionId) ?? Promise.resolve());
 }
 
+export type TurnChangeSetActionErrorKind =
+  | 'not-found'
+  | 'busy'
+  | 'wrong-state'
+  | 'unsupported'
+  | 'conflict'
+  | 'apply-failed';
+
+export class TurnChangeSetActionError extends Error {
+  constructor(readonly kind: TurnChangeSetActionErrorKind, message: string, cause?: unknown) {
+    super(message);
+    this.name = 'TurnChangeSetActionError';
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+async function loadLocalSessionWorkspace(sessionId: string): Promise<string> {
+  const rows = await getDbClient().query<{ workingDir: string; remoteHostId: string | null }>(
+    `SELECT working_dir AS workingDir, remote_host_id AS remoteHostId
+       FROM sessions WHERE id = ? LIMIT 1`,
+    [sessionId],
+  );
+  const session = rows[0];
+  if (!session) {
+    throw new TurnChangeSetActionError('not-found', 'The owning task was not found.');
+  }
+  if (session.remoteHostId) {
+    throw new TurnChangeSetActionError('unsupported', 'Remote workspace restore is not available.');
+  }
+  return session.workingDir;
+}
+
+function assertTurnChangeSetWorkspace(value: PersistedTurnChangeSetV1, workingDir: string): void {
+  const expected = path.resolve(workingDir);
+  const recorded = path.resolve(value.cwd);
+  const matches = process.platform === 'win32'
+    ? expected.toLocaleLowerCase('en-US') === recorded.toLocaleLowerCase('en-US')
+    : expected === recorded;
+  if (!matches) {
+    throw new TurnChangeSetActionError(
+      'unsupported',
+      'The task workspace no longer matches the recorded patch.',
+    );
+  }
+}
+
+function assertOwnerScopeCurrent(scope: broadcastTap.DataOwnerBroadcastScope): void {
+  if (!broadcastTap.isDataOwnerBroadcastScopeCurrent(scope)) {
+    throw new TurnChangeSetActionError('busy', 'The active account is changing.');
+  }
+}
+
+async function validatePatchTargets(value: PersistedTurnChangeSetV1): Promise<void> {
+  const diffs = parseDiffs(value.id, value.unifiedDiff);
+  if (diffs.length !== value.files.length) {
+    throw new TurnChangeSetActionError('unsupported', 'The recorded patch is incomplete.');
+  }
+  const seen = new Set<string>();
+  for (const diff of diffs) {
+    const currentDiffPaths = new Set<string>();
+    for (const relativePath of [diff.oldPath, diff.path]) {
+      if (!relativePath) continue;
+      const target = safeRelativeTarget(value.cwd, relativePath);
+      if (!target || !await isRealTargetInsideWorkspace(value.cwd, target.absolutePath)) {
+        throw new TurnChangeSetActionError('unsupported', 'The recorded patch contains an unsafe path.');
+      }
+      const normalized = process.platform === 'win32'
+        ? target.absolutePath.toLocaleLowerCase('en-US')
+        : target.absolutePath;
+      if (currentDiffPaths.has(normalized)) continue;
+      if (seen.has(normalized)) {
+        throw new TurnChangeSetActionError('unsupported', 'The recorded patch contains overlapping paths.');
+      }
+      currentDiffPaths.add(normalized);
+      seen.add(normalized);
+    }
+  }
+}
+
+function patchApplyArgs(revert: boolean, check: boolean): string[] {
+  // The patch already records its line endings. Global autocrlf must not rewrite
+  // a non-Git workspace (or make check/apply disagree with the captured bytes).
+  const args = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false', 'apply'];
+  if (revert) args.push('-R');
+  if (check) args.push('--check');
+  args.push('--binary', '--whitespace=nowarn', '-');
+  return args;
+}
+
+function usesPortableTextPatch(value: PersistedTurnChangeSetV1): boolean {
+  const diffs = parseDiffs(value.id, value.unifiedDiff);
+  return diffs.length > 0
+    && diffs.every((diff) => ['added', 'modified', 'deleted'].includes(diff.status));
+}
+
+function directionalPatch(
+  value: PersistedTurnChangeSetV1,
+  revert: boolean,
+): { patch: string; useReverseFlag: boolean } {
+  if (!usesPortableTextPatch(value)) {
+    // Rename metadata is not represented by `diff`'s StructuredPatch type.
+    // Preserve the vendor patch verbatim and let Git reverse it as one unit.
+    return { patch: value.unifiedDiff, useReverseFlag: revert };
+  }
+  const patches = parsePatch(value.unifiedDiff);
+  if (patches.length !== value.files.length || patches.some((patch) => patch.hunks.length === 0)) {
+    throw new TurnChangeSetActionError('unsupported', 'The recorded text patch is malformed.');
+  }
+  return {
+    patch: formatPatch(revert ? reversePatch(patches) : patches),
+    useReverseFlag: false,
+  };
+}
+
+async function canApplyRecordedPatch(
+  value: PersistedTurnChangeSetV1,
+  revert: boolean,
+): Promise<boolean> {
+  const directed = directionalPatch(value, revert);
+  try {
+    await runGit(patchApplyArgs(directed.useReverseFlag, true), {
+      cwd: value.cwd,
+      stdin: directed.patch,
+      timeoutMs: 30_000,
+    });
+    return true;
+  } catch (error) {
+    if (error instanceof GitRunError && error.exitCode !== null) return false;
+    throw new TurnChangeSetActionError(
+      'unsupported',
+      'Git is required to apply the recorded patch.',
+      error,
+    );
+  }
+}
+
+async function applyRecordedPatch(
+  value: PersistedTurnChangeSetV1,
+  revert: boolean,
+): Promise<void> {
+  const directed = directionalPatch(value, revert);
+  try {
+    await runGit(patchApplyArgs(directed.useReverseFlag, false), {
+      cwd: value.cwd,
+      stdin: directed.patch,
+      timeoutMs: 30_000,
+    });
+  } catch (error) {
+    if (error instanceof GitRunError && error.exitCode !== null) {
+      throw new TurnChangeSetActionError(
+        'conflict',
+        'The workspace changed before the patch could be applied.',
+        error,
+      );
+    }
+    throw new TurnChangeSetActionError(
+      'apply-failed',
+      'The recorded patch could not be applied.',
+      error,
+    );
+  }
+}
+
+/** Applies the immutable turn patch without mutating chat history or Git's index. */
+export function applyTurnChangeSetAction(
+  sessionId: string,
+  id: string,
+  action: TurnChangeAction,
+  ownerScope = broadcastTap.captureDataOwnerBroadcastScope(),
+): Promise<TurnChangeActionResult> {
+  const releaseSessionDir = retainSessionDir(sessionId);
+  const operation = (async () => {
+    try {
+      // If pruning was already in flight when the lease was acquired, let that
+      // storage operation settle before reading the immutable detail.
+      await storageWriteChain.catch(() => undefined);
+      return await enqueueSessionWrite(sessionId, async () => {
+        assertOwnerScopeCurrent(ownerScope);
+        const workingDir = await loadLocalSessionWorkspace(sessionId);
+        return enqueueWorkspaceAction(workingDir, async () => {
+          assertOwnerScopeCurrent(ownerScope);
+          if (pendingBySession.has(sessionId)) {
+            throw new TurnChangeSetActionError('busy', 'The task is still producing file changes.');
+          }
+          const summaries = await listTurnChangeSets(sessionId);
+          const currentSummary = summaries.find((summary) => summary.id === id);
+          if (!currentSummary) {
+            throw new TurnChangeSetActionError('not-found', 'The recorded turn change set was not found.');
+          }
+          const expectedState: TurnChangeWorkspaceState = action === 'undo' ? 'applied' : 'undone';
+          const nextState: TurnChangeWorkspaceState = action === 'undo' ? 'undone' : 'applied';
+          if (currentSummary.workspaceState !== expectedState) {
+            throw new TurnChangeSetActionError('wrong-state', 'The recorded patch state has changed.');
+          }
+
+          const value = parsePersisted(await fs.readFile(detailPath(sessionId, id), 'utf8'));
+          if (!value || value.id !== id || value.sessionId !== sessionId) {
+            throw new TurnChangeSetActionError('not-found', 'The recorded turn change set was not found.');
+          }
+          if (!isReversiblePatch(value)) {
+            throw new TurnChangeSetActionError(
+              'unsupported',
+              'This turn was not captured as a reversible text patch.',
+            );
+          }
+          assertTurnChangeSetWorkspace(value, workingDir);
+          await validatePatchTargets(value);
+
+          const revert = action === 'undo';
+          const canApply = await canApplyRecordedPatch(value, revert);
+          assertOwnerScopeCurrent(ownerScope);
+          if (!canApply) {
+            // A workspace mutation may have succeeded immediately before a state-file write failed.
+            // Heal that narrow crash window when the opposite direction proves the target state.
+            const targetAlreadyApplied = await canApplyRecordedPatch(value, !revert);
+            assertOwnerScopeCurrent(ownerScope);
+            if (!targetAlreadyApplied) {
+              throw new TurnChangeSetActionError(
+                'conflict',
+                'The workspace no longer matches the recorded patch.',
+              );
+            }
+            await persistWorkspaceState(sessionId, id, nextState);
+            const summary = toSummary(value, nextState);
+            broadcastUpdated({ sessionId, summary }, ownerScope);
+            return { action, changed: false, summary };
+          }
+
+          await applyRecordedPatch(value, revert);
+          await persistWorkspaceState(sessionId, id, nextState);
+          const summary = toSummary(value, nextState);
+          broadcastUpdated({ sessionId, summary }, ownerScope);
+          return { action, changed: true, summary };
+        });
+      });
+    } finally {
+      releaseSessionDir();
+    }
+  })();
+  return trackAction(operation);
+}
+
 export function clearPendingTurnChangeSets(sessionId: string): void {
   pendingBySession.delete(sessionId);
+  unregisterPendingWorkspace(sessionId);
 }
 
 async function validAnchorIds(sessionId: string, summaries: readonly TurnChangeSetSummary[]): Promise<Set<string>> {
@@ -769,8 +1277,10 @@ export async function getTurnChangeSets(
     try {
       const value = parsePersisted(await fs.readFile(detailPath(sessionId, id), 'utf8'));
       if (!value || value.id !== id || value.sessionId !== sessionId) continue;
-      const detailSummary = toSummary(value);
-      if (JSON.stringify(detailSummary) !== JSON.stringify(summary)) continue;
+      const detailSummary = toSummary(value, summary.workspaceState);
+      const detailIdentity = { ...detailSummary, workspaceState: 'applied' as const, isReversible: false };
+      const summaryIdentity = { ...summary, workspaceState: 'applied' as const, isReversible: false };
+      if (JSON.stringify(detailIdentity) !== JSON.stringify(summaryIdentity)) continue;
       details.push({ ...detailSummary, diffs: parseDiffs(value.id, value.unifiedDiff) });
     } catch (error) {
       log.warn('turn change-set detail read failed', { sessionId, id, error });
@@ -781,6 +1291,7 @@ export async function getTurnChangeSets(
 
 export async function removeTurnChangeSetsForSession(sessionId: string): Promise<void> {
   pendingBySession.delete(sessionId);
+  unregisterPendingWorkspace(sessionId);
   await enqueueSessionWrite(sessionId, async () => {
     await fs.rm(sessionDir(sessionId), { recursive: true, force: true });
   });

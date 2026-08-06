@@ -286,6 +286,8 @@ describe('buildRenderItems — key stability', () => {
       providerTurnId: 'turn-1',
       cwd: 'C:/work',
       state: 'complete',
+      workspaceState: 'applied',
+      isReversible: true,
       incompleteReasons: [],
       createdAt: 1,
       completedAt: 2,

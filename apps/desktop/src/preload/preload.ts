@@ -4712,6 +4712,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ids: string[],
     ): Promise<import('../shared/turnChangeSet').TurnChangeSetDetail[]> =>
       ipcRenderer.invoke('maker:turn-change-sets:get', sessionId, ids),
+    applyTurnChangeSet: (
+      sessionId: string,
+      id: string,
+      action: import('../shared/turnChangeSet').TurnChangeAction,
+    ): Promise<import('../shared/turnChangeSet').TurnChangeActionResult> =>
+      ipcRenderer.invoke('maker:turn-change-set:apply', sessionId, id, action),
 
     // workflow 逐 agent 进度树(只读)。读不到 / 解析失败返回 null,由 renderer 回退到
     // workflow 级卡片。数据源是 Claude Code 内部记录文件(见 main workflow-progress/reader)。

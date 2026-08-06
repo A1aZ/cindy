@@ -9,6 +9,7 @@ export const MAKER_INVOKE = {
   CREATE_SESSION: 'maker:create-session',
   TURN_CHANGE_SETS_LIST: 'maker:turn-change-sets:list',
   TURN_CHANGE_SETS_GET: 'maker:turn-change-sets:get',
+  TURN_CHANGE_SET_APPLY: 'maker:turn-change-set:apply',
   MARK_ORCA_ROLE: 'maker:mark-orca-role',
   /**
    * F-COLLAB: 中途开关协同模式 (Orca workflow toggle)。

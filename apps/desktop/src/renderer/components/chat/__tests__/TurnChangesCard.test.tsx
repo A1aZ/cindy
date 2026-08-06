@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -8,6 +8,9 @@ const mocks = vi.hoisted(() => ({
   onContextMenu: vi.fn(),
   openTurnReview: vi.fn(async () => undefined),
   shouldOpenTextLightboxForOrigin: vi.fn(async () => true),
+  applyTurnChangeSet: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
   useFileChipContextMenu: vi.fn(),
 }));
 
@@ -24,6 +27,10 @@ vi.mock('@/features/right-sidebar/lib/openTurnReview', () => ({
 
 vi.mock('@/lib/filePreview', () => ({
   shouldOpenTextLightboxForOrigin: mocks.shouldOpenTextLightboxForOrigin,
+}));
+
+vi.mock('@/lib/toast', () => ({
+  toast: { success: mocks.toastSuccess, error: mocks.toastError },
 }));
 
 vi.mock('../TextLightbox', () => ({
@@ -47,6 +54,8 @@ const CHANGE_SET: TurnChangeSetSummary = {
   providerTurnId: 'turn-1',
   cwd: 'C:\\repo',
   state: 'complete',
+  workspaceState: 'applied',
+  isReversible: true,
   incompleteReasons: [],
   createdAt: 1,
   completedAt: 2,
@@ -75,6 +84,10 @@ const HTML_CHANGE_SET: TurnChangeSetSummary = {
 describe('TurnChangesCard file actions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: { maker: { applyTurnChangeSet: mocks.applyTurnChangeSet } },
+    });
     mocks.useFileChipContextMenu.mockReturnValue({
       onContextMenu: mocks.onContextMenu,
       openAt: vi.fn(),
@@ -144,5 +157,74 @@ describe('TurnChangesCard file actions', () => {
       ['change-1'],
       { selectedDiffId: 'file-1' },
     );
+  });
+
+  it('switches from undo to reapply only after Main applies the patch', async () => {
+    mocks.applyTurnChangeSet.mockResolvedValue({
+      action: 'undo',
+      changed: true,
+      summary: { ...CHANGE_SET, workspaceState: 'undone' },
+    });
+    render(<TurnChangesCard sessionId="session-1" changeSet={CHANGE_SET} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' }));
+
+    await waitFor(() => expect(mocks.applyTurnChangeSet).toHaveBeenCalledWith(
+      'session-1',
+      'change-1',
+      'undo',
+    ));
+    expect(await screen.findByRole('button', { name: 'chat.turnChanges.reapplyAria' })).toBeTruthy();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('chat.turnChanges.undoSuccess');
+  });
+
+  it('does not offer undo for a partial or otherwise non-reversible patch', () => {
+    render(
+      <TurnChangesCard
+        sessionId="session-1"
+        changeSet={{ ...CHANGE_SET, state: 'partial', isReversible: false }}
+      />,
+    );
+
+    expect(screen.queryByRole('button', { name: 'chat.turnChanges.undoAria' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'chat.turnChanges.review' })).toBeTruthy();
+  });
+
+  it('does not retain a stale local state when the Main push arrives before the IPC result', async () => {
+    let resolveApply!: (value: unknown) => void;
+    mocks.applyTurnChangeSet.mockReturnValue(new Promise((resolve) => {
+      resolveApply = resolve;
+    }));
+    const view = render(<TurnChangesCard sessionId="session-1" changeSet={CHANGE_SET} />);
+    fireEvent.click(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' }));
+
+    view.rerender(
+      <TurnChangesCard
+        sessionId="session-1"
+        changeSet={{ ...CHANGE_SET, workspaceState: 'undone' }}
+      />,
+    );
+    await act(async () => {
+      resolveApply({
+        action: 'undo',
+        changed: true,
+        summary: { ...CHANGE_SET, workspaceState: 'undone' },
+      });
+    });
+    view.rerender(<TurnChangesCard sessionId="session-1" changeSet={CHANGE_SET} />);
+
+    expect(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' })).toBeTruthy();
+  });
+
+  it('keeps the current action when Main rejects a stale workspace', async () => {
+    mocks.applyTurnChangeSet.mockRejectedValue(new Error('[STALE_DIFF] stale'));
+    render(<TurnChangesCard sessionId="session-1" changeSet={CHANGE_SET} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' }));
+
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(
+      'chat.turnChanges.actionConflict',
+    ));
+    expect(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' })).toBeTruthy();
   });
 });

@@ -755,10 +755,13 @@ async function buildGhostPackage(
     // 3) 清单声明的入口文件必须真实在场(打包期拦,别等装入后沙箱 404)。
     const mustExist: string[] = [];
     if (manifest.entry) mustExist.push(manifest.entry);
-    if (manifest.node?.entry) mustExist.push(manifest.node.entry);
+    if (manifest.node?.entry) {
+      mustExist.push(manifest.node.entry, ...(manifest.node.entries ?? []));
+    }
     if (manifest.panel?.html) mustExist.push(manifest.panel.html);
     if (manifest.settingsHtml) mustExist.push(manifest.settingsHtml);
     for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
+    if (iconPng === undefined && manifest.icon) mustExist.push(manifest.icon);
     for (const rel of mustExist) {
       try {
         // lstat 与收集侧(walk 的 Dirent)同一语义:声明的入口若是符号链接,
@@ -901,6 +904,17 @@ async function buildGhostPackage(
     };
     const tooLarge = await walk(dir, '');
     if (tooLarge) return tooLarge;
+    const collectedPackPaths = new Set(files.map((file) => file.rel));
+    const omittedRequiredPath = mustExist.find(
+      (requiredPath) => !collectedPackPaths.has(requiredPath),
+    );
+    if (omittedRequiredPath) {
+      return {
+        ok: false,
+        errorCode: 'ENTRY_MISSING',
+        message: `清单声明的文件未进入打包内容:${omittedRequiredPath}`,
+      };
+    }
     // AI icon overlay changes both the manifest snapshot and the icon bytes. A
     // source tree carrying a publisher/reviewer signature cannot be modified
     // here without re-signing, so let the host fall back to the original icon

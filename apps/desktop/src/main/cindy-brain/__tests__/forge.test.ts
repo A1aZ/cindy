@@ -406,6 +406,92 @@ describe('packGhostDir', () => {
     });
   });
 
+  it('rejects a declared file below a linked ancestor instead of omitting it from the package', async () => {
+    const manifest = {
+      ...GOOD_MANIFEST,
+      slots: ['tool', 'panel'],
+      panel: { title: 'Linked panel', html: 'linked/panel.html', minWidth: 240 },
+    };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// authoring source',
+    });
+    const realPanelDir = path.join(workDir, 'real-panel');
+    await fs.promises.mkdir(realPanelDir);
+    await fs.promises.writeFile(path.join(realPanelDir, 'panel.html'), '<main>linked</main>');
+    try {
+      await fs.promises.symlink(realPanelDir, path.join(dir, 'linked'), directoryLinkType);
+    } catch {
+      return;
+    }
+
+    await expect(packGhostDir(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ENTRY_MISSING',
+    });
+  });
+
+  it('rejects a required path whose casing differs from the collected ZIP entry', async () => {
+    const manifest = { ...GOOD_MANIFEST, entry: 'Main.js' };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// actual lower-case path',
+    });
+    const declaredEntry = path.join(dir, 'Main.js');
+    const actualEntry = path.join(dir, 'main.js');
+    const originalLstat = fs.promises.lstat.bind(fs.promises);
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation(async (file: fs.PathLike, options?: fs.StatOptions) => {
+      const target = path.resolve(String(file)) === path.resolve(declaredEntry) ? actualEntry : file;
+      return (
+        originalLstat as (p: fs.PathLike, o?: fs.StatOptions) => Promise<fs.Stats & fs.BigIntStats>
+      )(target, options);
+    });
+    try {
+      await expect(packGhostDir(dir)).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'ENTRY_MISSING',
+      });
+    } finally {
+      lstatSpy.mockRestore();
+    }
+  });
+
+  it('rejects a missing extra node entry instead of producing a partially runnable package', async () => {
+    const manifest = {
+      ...GOOD_MANIFEST,
+      slots: ['node'],
+      tools: undefined,
+      node: {
+        entry: 'node/worker.cjs',
+        entries: ['node/secondary.cjs'],
+        protocol: 'json-rpc-stdio',
+      },
+    };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// browser brain',
+      'node/worker.cjs': '// primary worker',
+    });
+
+    await expect(packGhostDir(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ENTRY_MISSING',
+    });
+  });
+
+  it('rejects a missing declared icon when no icon overlay is supplied', async () => {
+    const manifest = { ...GOOD_MANIFEST, icon: 'assets/icon.png' };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// browser brain',
+    });
+
+    await expect(packGhostDir(dir)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'ENTRY_MISSING',
+    });
+  });
+
   it('allows an independent authoring directory outside managed roots', async () => {
     const dir = await makeSrcDir({
       'ghost.json': JSON.stringify(GOOD_MANIFEST),

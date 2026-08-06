@@ -1,4 +1,5 @@
 import type {
+  IOSSimulatorNativeH264StreamProfileRequest,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../shared/iosSimulatorIpc.js';
@@ -45,6 +46,7 @@ export interface IOSSimulatorHandlerDeps {
     sessionId: string,
     route: { instanceId: string; generation: number; leaseId: string },
     profile: { framesPerSecond: number; jpegQuality: number; scalingPercent: number },
+    nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
   ): Promise<IOSSimulatorToolResponse>;
   getLatestFrame(
     sessionId: string,
@@ -256,11 +258,38 @@ export function registerIOSSimulatorHandlers(
     ) {
       throwIpcError('INVALID_PARAMS', 'profile values must be integers');
     }
-    return resolved.setViewerStreamProfile(sessionId, readViewerRoute(record), {
-      framesPerSecond: Number(candidate.framesPerSecond),
-      jpegQuality: Number(candidate.jpegQuality),
-      scalingPercent: Number(candidate.scalingPercent),
-    });
+    const rawNativeProfile = record.nativeProfile;
+    let nativeProfile: IOSSimulatorNativeH264StreamProfileRequest | undefined;
+    if (rawNativeProfile !== undefined) {
+      if (
+        !rawNativeProfile ||
+        typeof rawNativeProfile !== 'object' ||
+        Array.isArray(rawNativeProfile)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'nativeProfile must be an object');
+      }
+      const nativeCandidate = rawNativeProfile as Record<string, unknown>;
+      if (
+        !Number.isSafeInteger(nativeCandidate.framesPerSecond) ||
+        !Number.isSafeInteger(nativeCandidate.scalingPercent)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'nativeProfile values must be integers');
+      }
+      nativeProfile = {
+        framesPerSecond: Number(nativeCandidate.framesPerSecond),
+        scalingPercent: Number(nativeCandidate.scalingPercent),
+      };
+    }
+    return resolved.setViewerStreamProfile(
+      sessionId,
+      readViewerRoute(record),
+      {
+        framesPerSecond: Number(candidate.framesPerSecond),
+        jpegQuality: Number(candidate.jpegQuality),
+        scalingPercent: Number(candidate.scalingPercent),
+      },
+      nativeProfile,
+    );
   });
   registry.handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (_event, payload) => {
     const record = readRecord(payload);

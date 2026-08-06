@@ -10,6 +10,7 @@ import type {
   IOSSimulatorRouteStatusPush,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
+  IOSSimulatorViewerVisibilityRequest,
 } from '../../../../../../shared/iosSimulatorIpc';
 import type { TabKindHostContext } from '../../../types';
 
@@ -102,6 +103,44 @@ function readyStatus(instance = readyInstance()): IOSSimulatorSessionStatus {
   };
 }
 
+function preparePointerTarget(container: HTMLElement): HTMLImageElement {
+  const image = container.querySelector('img') as HTMLImageElement | null;
+  if (!image) throw new Error('Expected the simulator viewer image.');
+  Object.defineProperties(image, {
+    setPointerCapture: { configurable: true, value: vi.fn() },
+    hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+    releasePointerCapture: { configurable: true, value: vi.fn() },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => ({ left: 0, top: 0, width: 200, height: 400 }),
+    },
+  });
+  return image;
+}
+
+function installFakeH264DecoderRuntime(): void {
+  class FakeVideoDecoder {
+    static async isConfigSupported() {
+      return { supported: true };
+    }
+    constructor() {}
+    configure() {}
+    decode() {}
+    close() {}
+  }
+  class FakeEncodedVideoChunk {
+    constructor(readonly init: unknown) {}
+  }
+  Object.defineProperty(globalThis, 'VideoDecoder', {
+    configurable: true,
+    value: FakeVideoDecoder,
+  });
+  Object.defineProperty(globalThis, 'EncodedVideoChunk', {
+    configurable: true,
+    value: FakeEncodedVideoChunk,
+  });
+}
+
 function installStatus(statusValue: IOSSimulatorSessionStatus) {
   let currentStatusValue = statusValue;
   const status = vi.fn(async () => currentStatusValue);
@@ -110,10 +149,15 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     data: {},
   }));
   const setAgentControl = vi.fn(async () => ({ ok: true as const, data: {} }));
-  const setViewerVisibility = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
-    ok: true,
-    data: { stream: null },
-  }));
+  const setViewerVisibility = vi.fn(
+    async (request: IOSSimulatorViewerVisibilityRequest): Promise<IOSSimulatorToolResponse> => {
+      void request;
+      return {
+        ok: true,
+        data: { stream: null },
+      };
+    },
+  );
   const setStreamProfile = vi.fn(async () => ({ ok: true as const, data: {} }));
   let h264FrameListener: ((payload: IOSSimulatorH264FramePush) => void) | null = null;
   let routeStatusListener: ((payload: IOSSimulatorRouteStatusPush) => void) | null = null;
@@ -129,7 +173,9 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
       if (routeStatusListener === callback) routeStatusListener = null;
     };
   });
-  const liveTouch = vi.fn(async (request: IOSSimulatorLiveTouchRequest) => {
+  const liveTouch = vi.fn(async (
+    request: IOSSimulatorLiveTouchRequest,
+  ): Promise<IOSSimulatorToolResponse> => {
     void request;
     return {
       ok: true as const,
@@ -383,6 +429,150 @@ describe('IOSSimulatorTabBody', () => {
     expect(screen.getByText('rightSidebar.iosSimulator.route.nativeHid')).toBeTruthy();
   });
 
+  it('offers 60 FPS only for active Native H.264 and keeps a 20 FPS WDA fallback', async () => {
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    const nativeRouteStatus: IOSSimulatorRouteStatusPush = {
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: '2026-08-06T00:00:00.000Z',
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'active',
+        reasonCode: 'native-active',
+      },
+      input: {
+        adapter: 'wda',
+        state: 'fallback',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'native-capability-unavailable',
+      },
+    };
+    statusValue.routeStatuses = [
+      {
+        ...nativeRouteStatus,
+        updatedAt: '2026-08-05T23:59:59.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-sidecar-unavailable',
+        },
+      },
+    ];
+    const api = installStatus(statusValue);
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+
+    const rendered = render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+
+    const profileSelect = await screen.findByRole('combobox');
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    expect(
+      screen.queryByRole('option', {
+        name: 'rightSidebar.iosSimulator.streamProfiles.experimental60',
+      }),
+    ).toBeNull();
+    act(() => api.emitRouteStatus(nativeRouteStatus));
+    await waitFor(() => {
+      expect(
+        screen.getByRole('option', {
+          name: 'rightSidebar.iosSimulator.streamProfiles.highNative',
+        }),
+      ).toBeTruthy();
+      expect(
+        screen.getByRole('option', {
+          name: 'rightSidebar.iosSimulator.streamProfiles.experimental60',
+        }),
+      ).toBeTruthy();
+    });
+
+    fireEvent.change(profileSelect, { target: { value: 'high' } });
+    await waitFor(() => {
+      expect(api.setStreamProfile).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+        profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
+        nativeProfile: { framesPerSecond: 30, scalingPercent: 100 },
+      });
+    });
+
+    fireEvent.change(profileSelect, { target: { value: 'experimental60' } });
+    await waitFor(() => {
+      expect(api.setStreamProfile).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+        profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
+        nativeProfile: { framesPerSecond: 60, scalingPercent: 70 },
+      });
+    });
+
+    api.setStreamProfile.mockClear();
+    const image = rendered.container.querySelector('img') as HTMLImageElement;
+    Object.defineProperties(image, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width: 200, height: 400 }),
+      },
+    });
+    fireEvent.pointerDown(image, { pointerId: 9, button: 0, clientX: 20, clientY: 40 });
+    fireEvent.pointerUp(image, { pointerId: 9, clientX: 180, clientY: 360 });
+    await waitFor(() => {
+      expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual(['begin', 'end']);
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+    });
+    expect(api.setStreamProfile).not.toHaveBeenCalled();
+
+    act(() => {
+      api.emitRouteStatus({
+        ...nativeRouteStatus,
+        updatedAt: '2026-08-06T00:00:01.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-stream-disconnected',
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('option', {
+          name: 'rightSidebar.iosSimulator.streamProfiles.experimental60',
+        }),
+      ).toBeNull();
+      expect((profileSelect as HTMLSelectElement).value).toBe('high');
+      expect(api.setStreamProfile).toHaveBeenLastCalledWith({
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+        profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
+      });
+    });
+  });
+
   it('starts frame polling only while the pane is active and visible', async () => {
     const api = installStatus({
       ok: true,
@@ -491,6 +681,380 @@ describe('IOSSimulatorTabBody', () => {
     });
   });
 
+  it('re-arms a native fallback once on foreground and backs off repeated attempts', async () => {
+    installFakeH264DecoderRuntime();
+    let visibilityState: DocumentVisibilityState = 'visible';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibilityState);
+    let now = 10_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    const nativeActive: IOSSimulatorRouteStatusPush = {
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: '2026-08-06T00:00:00.000Z',
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'active',
+        reasonCode: 'native-active',
+      },
+      input: {
+        adapter: 'native-sidecar',
+        state: 'active',
+        continuous: true,
+        multiTouch: true,
+        reasonCode: 'native-active',
+      },
+    };
+    const nativeFallback: IOSSimulatorRouteStatusPush = {
+      ...nativeActive,
+      updatedAt: '2026-08-06T00:00:01.000Z',
+      stream: {
+        adapter: 'wda',
+        encoding: 'jpeg',
+        state: 'fallback',
+        reasonCode: 'native-stream-disconnected',
+      },
+      input: {
+        adapter: 'wda',
+        state: 'fallback',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'native-sidecar-unavailable',
+      },
+    };
+    statusValue.routeStatuses = [nativeActive];
+    const api = installStatus(statusValue);
+    const connectingH264: IOSSimulatorToolResponse = {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: instance.instanceId,
+          generation: instance.generation,
+          state: 'connecting',
+          reconnectAttempt: 0,
+          latestFrame: null,
+        },
+        viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
+      },
+    };
+    api.setViewerVisibility.mockResolvedValue(connectingH264);
+    api.latestFrame.mockResolvedValue(connectingH264);
+
+    render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'h264' }),
+      );
+    });
+    api.setViewerVisibility.mockClear();
+
+    act(() => api.emitRouteStatus(nativeFallback));
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    });
+    const foreground = () => {
+      act(() => {
+        visibilityState = 'hidden';
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      act(() => {
+        visibilityState = 'visible';
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+    };
+    const nativeRecoveryRequests = () =>
+      api.setViewerVisibility.mock.calls
+        .map(([request]) => request)
+        .filter((request) => request.visible && request.preferredEncoding === 'h264');
+
+    foreground();
+    await waitFor(() => expect(nativeRecoveryRequests()).toHaveLength(1));
+    foreground();
+    await act(async () => Promise.resolve());
+    expect(nativeRecoveryRequests()).toHaveLength(1);
+
+    now = 15_001;
+    foreground();
+    await waitFor(() => expect(nativeRecoveryRequests()).toHaveLength(2));
+
+    act(() =>
+      api.emitRouteStatus({
+        ...nativeActive,
+        updatedAt: '2026-08-06T00:00:02.000Z',
+        input: nativeFallback.input,
+      }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.nativeH264')).toBeTruthy();
+    });
+    act(() =>
+      api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:03.000Z' }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    });
+    foreground();
+    await act(async () => Promise.resolve());
+    expect(nativeRecoveryRequests()).toHaveLength(2);
+
+    act(() => api.emitRouteStatus({ ...nativeActive, updatedAt: '2026-08-06T00:00:04.000Z' }));
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.nativeH264')).toBeTruthy();
+    });
+    act(() =>
+      api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:05.000Z' }),
+    );
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    });
+    foreground();
+    await waitFor(() => expect(nativeRecoveryRequests()).toHaveLength(3));
+  });
+
+  it('does not retry an explicit H.264 decoder fallback when returning foreground', async () => {
+    installFakeH264DecoderRuntime();
+    let visibilityState: DocumentVisibilityState = 'visible';
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibilityState);
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    const nativeActive: IOSSimulatorRouteStatusPush = {
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: '2026-08-06T00:00:00.000Z',
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'active',
+        reasonCode: 'native-active',
+      },
+      input: {
+        adapter: 'native-sidecar',
+        state: 'active',
+        continuous: true,
+        multiTouch: true,
+        reasonCode: 'native-active',
+      },
+    };
+    statusValue.routeStatuses = [nativeActive];
+    const api = installStatus(statusValue);
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+
+    render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+    await waitFor(() => expect(api.setViewerVisibility).toHaveBeenCalled());
+    api.setViewerVisibility.mockClear();
+    act(() => {
+      api.emitRouteStatus({
+        ...nativeActive,
+        updatedAt: '2026-08-06T00:00:01.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-decoder-fallback',
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    });
+
+    act(() => {
+      visibilityState = 'hidden';
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    act(() => {
+      visibilityState = 'visible';
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await act(async () => Promise.resolve());
+    expect(
+      api.setViewerVisibility.mock.calls.some(
+        ([request]) => request.visible && request.preferredEncoding === 'h264',
+      ),
+    ).toBe(false);
+  });
+
+  it('re-arms once when the simulator pane reopens and uses WDA during recovery backoff', async () => {
+    installFakeH264DecoderRuntime();
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    statusValue.routeStatuses = [
+      {
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        updatedAt: '2026-08-06T00:00:00.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-stream-disconnected',
+        },
+        input: {
+          adapter: 'wda',
+          state: 'fallback',
+          continuous: false,
+          multiTouch: false,
+          reasonCode: 'native-sidecar-unavailable',
+        },
+      },
+    ];
+    const api = installStatus(statusValue);
+    const connectingH264: IOSSimulatorToolResponse = {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: instance.instanceId,
+          generation: instance.generation,
+          state: 'connecting',
+          reconnectAttempt: 0,
+          latestFrame: null,
+        },
+      },
+    };
+    api.setViewerVisibility.mockResolvedValue(connectingH264);
+    api.latestFrame.mockResolvedValue(connectingH264);
+    const rendered = render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active={false}
+        shellVisible
+      />,
+    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: false }),
+      );
+    });
+    api.setViewerVisibility.mockClear();
+
+    rendered.rerender(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'h264' }),
+      );
+    });
+
+    rendered.rerender(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active={false}
+        shellVisible
+      />,
+    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: false }),
+      );
+    });
+    api.setViewerVisibility.mockClear();
+    rendered.rerender(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'jpeg' }),
+      );
+    });
+    expect(
+      api.setViewerVisibility.mock.calls.some(
+        ([request]) => request.visible && request.preferredEncoding === 'h264',
+      ),
+    ).toBe(false);
+  });
+
+  it('keeps the compatibility viewer active when pane re-arm rejects', async () => {
+    installFakeH264DecoderRuntime();
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    statusValue.routeStatuses = [
+      {
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        updatedAt: '2026-08-06T00:00:00.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-stream-disconnected',
+        },
+        input: {
+          adapter: 'wda',
+          state: 'fallback',
+          continuous: false,
+          multiTouch: false,
+          reasonCode: 'native-sidecar-unavailable',
+        },
+      },
+    ];
+    const api = installStatus(statusValue);
+    api.setViewerVisibility.mockImplementation(async (request) => {
+      if (request.visible && request.preferredEncoding === 'h264') {
+        throw new Error('Native re-arm failed.');
+      }
+      return streamingJpegResult();
+    });
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+
+    const rendered = render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'h264' }),
+      );
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'jpeg' }),
+      );
+      expect(rendered.container.querySelector('img')).toBeTruthy();
+    });
+  });
+
   it('streams pointer samples through native touch and temporarily boosts frame rate', async () => {
     const api = installStatus({
       ok: true,
@@ -555,7 +1119,7 @@ describe('IOSSimulatorTabBody', () => {
     });
 
     fireEvent.pointerDown(image, { pointerId: 7, button: 0, clientX: 20, clientY: 40 });
-    fireEvent.pointerMove(image, { pointerId: 7, clientX: 100, clientY: 200 });
+    fireEvent.pointerMove(image, { pointerId: 7, buttons: 1, clientX: 100, clientY: 200 });
     fireEvent.pointerUp(image, { pointerId: 7, clientX: 180, clientY: 360 });
 
     await waitFor(() => {
@@ -597,6 +1161,181 @@ describe('IOSSimulatorTabBody', () => {
     expect(api.call).not.toHaveBeenCalledWith(
       expect.objectContaining({ name: expect.stringMatching(/^(tap|swipe)$/) }),
     );
+  });
+
+  it('finishes a captured gesture when pointer movement reports that the button is released', async () => {
+    const api = installStatus(readyStatus());
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const image = preparePointerTarget(rendered.container);
+
+    fireEvent.pointerDown(image, {
+      pointerId: 8,
+      button: 0,
+      buttons: 1,
+      clientX: 20,
+      clientY: 40,
+    });
+    fireEvent.pointerMove(image, {
+      pointerId: 8,
+      buttons: 0,
+      clientX: 180,
+      clientY: 360,
+    });
+
+    await waitFor(() => {
+      expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual(['begin', 'end']);
+    });
+    fireEvent.pointerMove(image, {
+      pointerId: 8,
+      buttons: 0,
+      clientX: 100,
+      clientY: 200,
+    });
+    expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual(['begin', 'end']);
+    expect(image.releasePointerCapture).toHaveBeenCalledWith(8);
+    expect(api.call).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: expect.stringMatching(/^(tap|swipe)$/) }),
+    );
+  });
+
+  it('cancels native touch when pointer capture is lost', async () => {
+    const api = installStatus(readyStatus());
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const image = preparePointerTarget(rendered.container);
+
+    fireEvent.pointerDown(image, {
+      pointerId: 9,
+      button: 0,
+      buttons: 1,
+      clientX: 20,
+      clientY: 40,
+    });
+    fireEvent.lostPointerCapture(image, { pointerId: 9 });
+
+    await waitFor(() => {
+      expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual([
+        'begin',
+        'cancel',
+      ]);
+    });
+    expect(api.call).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: expect.stringMatching(/^(tap|swipe)$/) }),
+    );
+  });
+
+  it('releases a partially delivered native gesture without replaying the swipe', async () => {
+    const api = installStatus(readyStatus());
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    api.liveTouch.mockImplementation(
+      async (request): Promise<IOSSimulatorToolResponse> =>
+        request.phase === 'move'
+          ? {
+            ok: false,
+              errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+              message: 'The native move failed.',
+            }
+          : { ok: true, data: {} },
+    );
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const image = preparePointerTarget(rendered.container);
+
+    fireEvent.pointerDown(image, {
+      pointerId: 10,
+      button: 0,
+      buttons: 1,
+      clientX: 20,
+      clientY: 40,
+    });
+    fireEvent.pointerMove(image, {
+      pointerId: 10,
+      buttons: 1,
+      clientX: 100,
+      clientY: 200,
+    });
+
+    await waitFor(() => {
+      expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual([
+        'begin',
+        'move',
+        'cancel',
+      ]);
+    });
+    fireEvent.pointerUp(image, { pointerId: 10, clientX: 180, clientY: 360 });
+    expect(api.call).not.toHaveBeenCalledWith(
+      expect.objectContaining({ name: expect.stringMatching(/^(tap|swipe)$/) }),
+    );
+
+    fireEvent.pointerDown(image, {
+      pointerId: 11,
+      button: 0,
+      buttons: 1,
+      clientX: 20,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(image, { pointerId: 11, clientX: 20, clientY: 40 });
+    await waitFor(() => {
+      expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual([
+        'begin',
+        'move',
+        'cancel',
+        'begin',
+        'end',
+      ]);
+    });
+  });
+
+  it('uses the discrete compatibility route only when native touch never began', async () => {
+    const api = installStatus(readyStatus());
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    api.liveTouch.mockResolvedValue({
+      ok: false,
+      errorCode: 'NATIVE_INPUT_UNAVAILABLE',
+      message: 'Continuous native input is unavailable.',
+    });
+    const rendered = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    const image = preparePointerTarget(rendered.container);
+
+    fireEvent.pointerDown(image, {
+      pointerId: 12,
+      button: 0,
+      buttons: 1,
+      clientX: 20,
+      clientY: 40,
+    });
+    fireEvent.pointerUp(image, { pointerId: 12, clientX: 180, clientY: 360 });
+
+    await waitFor(() => {
+      expect(api.call).toHaveBeenCalledWith({
+        sessionId: 'session-a',
+        name: 'swipe',
+        args: expect.objectContaining({
+          instanceId: 'instance-a',
+          startXRatio: 0.1,
+          startYRatio: 0.1,
+          endXRatio: 0.9,
+          endYRatio: 0.9,
+        }),
+      });
+    });
+    expect(api.liveTouch.mock.calls.map(([request]) => request.phase)).toEqual(['begin']);
   });
 
   it('rejects a frame that belongs to an obsolete simulator generation', async () => {
@@ -904,6 +1643,81 @@ describe('IOSSimulatorTabBody', () => {
     await waitFor(() => {
       expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 1206, 2622);
       expect(rendered.container.querySelector('canvas')?.getAttribute('aria-hidden')).toBe('false');
+    });
+  });
+
+  it('retries H.264 after a transient stream disconnect instead of silently selecting JPEG', async () => {
+    class FakeVideoDecoder {
+      static async isConfigSupported() {
+        return { supported: true };
+      }
+      constructor() {}
+      configure() {}
+      decode() {}
+      close() {}
+    }
+    class FakeEncodedVideoChunk {
+      constructor(readonly init: unknown) {}
+    }
+    Object.defineProperty(globalThis, 'VideoDecoder', {
+      configurable: true,
+      value: FakeVideoDecoder,
+    });
+    Object.defineProperty(globalThis, 'EncodedVideoChunk', {
+      configurable: true,
+      value: FakeEncodedVideoChunk,
+    });
+    const api = installStatus(readyStatus());
+    const disconnectedH264: IOSSimulatorToolResponse = {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: 'instance-a',
+          generation: 2,
+          state: 'disconnected',
+          reconnectAttempt: 1,
+          latestFrame: null,
+        },
+        viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
+      },
+    };
+    const connectingH264: IOSSimulatorToolResponse = {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: 'instance-a',
+          generation: 2,
+          state: 'connecting',
+          reconnectAttempt: 1,
+          latestFrame: null,
+        },
+        viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
+      },
+    };
+    api.setViewerVisibility
+      .mockResolvedValueOnce(disconnectedH264)
+      .mockResolvedValue(connectingH264);
+    api.latestFrame.mockResolvedValue(connectingH264);
+
+    render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    await waitFor(() => {
+      const visibleRequests = api.setViewerVisibility.mock.calls
+        .map(([request]) => request)
+        .filter((request) => request.visible);
+      expect(visibleRequests.length).toBeGreaterThanOrEqual(2);
+      expect(visibleRequests).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ visible: true, preferredEncoding: 'h264' }),
+        ]),
+      );
+      expect(visibleRequests).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ visible: true, preferredEncoding: 'jpeg' }),
+        ]),
+      );
     });
   });
 

@@ -4,6 +4,7 @@ import type {
   IOSSimulatorDeviceGrant,
   IOSSimulatorInstance,
   IOSSimulatorMutationState,
+  IOSSimulatorNativeStreamProfile,
   IOSSimulatorOrientation,
   IOSSimulatorRuntimeInfo,
   IOSSimulatorStreamProfile,
@@ -138,8 +139,16 @@ export interface IOSSimulatorViewerVisibilityRequest extends IOSSimulatorViewerR
   fallbackReason?: 'native-decoder-fallback';
 }
 
+export type IOSSimulatorNativeH264StreamProfileRequest = Pick<
+  IOSSimulatorNativeStreamProfile,
+  'framesPerSecond' | 'scalingPercent'
+>;
+
 export interface IOSSimulatorStreamProfileRequest extends IOSSimulatorViewerRouteRequest {
+  /** Exact compatibility profile kept ready for WDA/MJPEG fallback. */
   profile: IOSSimulatorStreamProfile;
+  /** Optional product profile accepted only while Native H.264 is active. */
+  nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest;
 }
 
 export interface IOSSimulatorMutationControlRequest extends IOSSimulatorViewerRouteRequest {

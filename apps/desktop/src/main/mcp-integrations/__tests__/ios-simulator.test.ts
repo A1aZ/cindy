@@ -1279,6 +1279,12 @@ describe('iOS Simulator host', () => {
     const wdaDriver = {
       getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
       getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+      configureStream: vi.fn(
+        async (
+          _sessionId: string,
+          profile: { framesPerSecond: number; jpegQuality: number; scalingPercent: number },
+        ) => profile,
+      ),
       setOrientation: vi.fn(async () => undefined),
       tap: vi.fn(async () => undefined),
       swipe: vi.fn(
@@ -1355,7 +1361,7 @@ describe('iOS Simulator host', () => {
     };
     let h264Snapshot = {
       ...jpegSnapshot,
-      state: 'connecting' as 'connecting' | 'disconnected',
+      state: 'connecting' as 'connecting' | 'streaming' | 'disconnected',
     };
     const framePump = {
       setVisible: vi.fn((request: { instanceId: string; generation: number }) => {
@@ -1441,6 +1447,58 @@ describe('iOS Simulator host', () => {
       },
     });
 
+    const fallbackHighProfile = {
+      framesPerSecond: 20,
+      jpegQuality: 70,
+      scalingPercent: 100,
+    };
+    const experimentalNativeProfile = {
+      framesPerSecond: 60,
+      scalingPercent: 70,
+    };
+    await expect(
+      host.setViewerStreamProfile(
+        'session-a',
+        route,
+        fallbackHighProfile,
+        experimentalNativeProfile,
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT' });
+    expect(wdaDriver.configureStream).not.toHaveBeenCalled();
+
+    h264Snapshot = { ...h264Snapshot, state: 'streaming' };
+    await expect(
+      host.setViewerStreamProfile(
+        'session-a',
+        route,
+        fallbackHighProfile,
+        experimentalNativeProfile,
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        profile: fallbackHighProfile,
+        nativeProfile: experimentalNativeProfile,
+      },
+    });
+    expect(wdaDriver.configureStream).toHaveBeenLastCalledWith('wda-session', fallbackHighProfile);
+    expect(h264FramePump.setVisible).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        profile: expect.objectContaining({
+          encoding: 'h264',
+          framesPerSecond: 60,
+          scalingPercent: 70,
+        }),
+      }),
+    );
+    await expect(
+      host.setViewerStreamProfile('session-a', route, {
+        framesPerSecond: 60,
+        jpegQuality: 70,
+        scalingPercent: 70,
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT' });
+
     wdaDriver.setOrientation.mockRejectedValueOnce(
       new WdaError(
         'ORIENTATION_UNSUPPORTED',
@@ -1516,6 +1574,15 @@ describe('iOS Simulator host', () => {
         viewport: { width: 393, height: 852, orientation: 'PORTRAIT' },
       },
     });
+    expect(h264FramePump.setVisible).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        profile: expect.objectContaining({
+          framesPerSecond: 60,
+          scalingPercent: 70,
+          orientation: 'PORTRAIT',
+        }),
+      }),
+    );
 
     h264Snapshot = { ...h264Snapshot, state: 'disconnected' };
     nativeAvailable = false;

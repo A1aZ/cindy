@@ -69,10 +69,10 @@ interface PendingDecode {
 }
 
 const ANNEX_B_START_CODE = new Uint8Array([0, 0, 0, 1]);
-// The producer forces an IDR every two seconds and supports up to 30 FPS.
-// Waiting 60 access units prevents a late-attaching renderer from falling
+// The producer forces an IDR every two seconds and supports up to 60 FPS.
+// Waiting 120 access units prevents a late-attaching renderer from falling
 // back immediately before the next valid key frame arrives.
-const DEFAULT_MAX_FRAMES_AWAITING_KEY_FRAME = 60;
+const DEFAULT_MAX_FRAMES_AWAITING_KEY_FRAME = 120;
 
 function readStartCode(bytes: Uint8Array, offset: number): number {
   if (offset + 3 > bytes.byteLength || bytes[offset] !== 0 || bytes[offset + 1] !== 0) return 0;

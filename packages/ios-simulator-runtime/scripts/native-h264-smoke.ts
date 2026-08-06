@@ -50,9 +50,14 @@ const framesPerSecond = positiveIntegerArgument("--fps", 5);
 const maxFrames = positiveIntegerArgument("--frames", 30);
 const scalingPercent = positiveIntegerArgument("--scaling", 50);
 const productMode = hasFlag("--product");
-if (framesPerSecond > 30 || maxFrames > 900 || scalingPercent > 100) {
+const maxFramesPerSecond = productMode ? 60 : 30;
+if (
+  framesPerSecond > maxFramesPerSecond ||
+  maxFrames > 900 ||
+  scalingPercent > 100
+) {
   throw new Error(
-    "--fps must be <= 30, --frames must be <= 900, and --scaling must be <= 100",
+    `--fps must be <= ${maxFramesPerSecond}, --frames must be <= 900, and --scaling must be <= 100`,
   );
 }
 

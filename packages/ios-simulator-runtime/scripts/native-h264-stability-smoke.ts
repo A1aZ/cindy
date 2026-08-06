@@ -55,9 +55,9 @@ const scalingPercent = positiveIntegerEnvironment(
   "CINDY_IOS_H264_STABILITY_SCALING",
   50,
 );
-if (durationSeconds > 60 * 60 || framesPerSecond > 30 || scalingPercent > 100) {
+if (durationSeconds > 60 * 60 || framesPerSecond > 60 || scalingPercent > 100) {
   throw new Error(
-    "Stability smoke is bounded to 60 minutes, 30 FPS, and 100% scaling",
+    "Stability smoke is bounded to 60 minutes, 60 FPS, and 100% scaling",
   );
 }
 const maxFrames = durationSeconds * framesPerSecond;

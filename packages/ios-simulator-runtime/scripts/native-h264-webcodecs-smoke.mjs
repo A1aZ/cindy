@@ -43,9 +43,9 @@ if (
 const framesPerSecond = positiveIntegerArgument("--fps", 5);
 const maxFrames = positiveIntegerArgument("--frames", 5);
 const scalingPercent = positiveIntegerArgument("--scaling", 50);
-if (framesPerSecond > 30 || maxFrames > 30 || scalingPercent > 100) {
+if (framesPerSecond > 60 || maxFrames > 60 || scalingPercent > 100) {
   throw new Error(
-    "--fps and --frames must be <= 30, and --scaling must be <= 100",
+    "--fps and --frames must be <= 60, and --scaling must be <= 100",
   );
 }
 

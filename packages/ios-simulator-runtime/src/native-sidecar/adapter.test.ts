@@ -104,7 +104,7 @@ describe("IOSSimulatorNativeSidecarAdapter", () => {
     });
     await adapter.configureNativeStream({
       encoding: "h264",
-      framesPerSecond: 30,
+      framesPerSecond: 60,
       scalingPercent: 50,
     });
     await adapter.tap({ x: 10, y: 20 });
@@ -440,7 +440,7 @@ describe("IOSSimulatorNativeSidecarAdapter", () => {
     await expect(
       adapter.configureNativeStream({
         encoding: "h264",
-        framesPerSecond: 121,
+        framesPerSecond: 61,
         scalingPercent: 50,
       }),
     ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });

@@ -55,18 +55,69 @@ interface IOSSimulatorTabBodyProps {
 }
 
 type Operation = 'attach' | 'start' | 'stop' | 'detach' | 'grant' | 'control' | null;
-type StreamProfileName = 'low' | 'balanced' | 'high';
+type StandardStreamProfileName = 'low' | 'balanced' | 'high';
+type StreamProfileName = StandardStreamProfileName | 'experimental60';
+type StreamProfile = { framesPerSecond: number; jpegQuality: number; scalingPercent: number };
+type NativeStreamProfile = { framesPerSecond: number; scalingPercent: number };
 
-const STREAM_PROFILES: Record<
-  StreamProfileName,
-  { framesPerSecond: number; jpegQuality: number; scalingPercent: number }
-> = {
+const WDA_STREAM_PROFILES: Record<StandardStreamProfileName, StreamProfile> = {
   low: { framesPerSecond: 5, jpegQuality: 25, scalingPercent: 50 },
   balanced: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 },
   high: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
 };
 
+const NATIVE_STREAM_PROFILES: Record<StreamProfileName, NativeStreamProfile> = {
+  low: { framesPerSecond: 5, scalingPercent: 50 },
+  balanced: { framesPerSecond: 20, scalingPercent: 70 },
+  high: { framesPerSecond: 30, scalingPercent: 100 },
+  experimental60: { framesPerSecond: 60, scalingPercent: 70 },
+};
+
+function viewerStreamProfile(
+  name: StreamProfileName,
+  nativeActive: boolean,
+): { profile: StreamProfile; nativeProfile?: NativeStreamProfile } {
+  const fallbackName = name === 'experimental60' ? 'high' : name;
+  return {
+    profile: WDA_STREAM_PROFILES[fallbackName],
+    ...(nativeActive ? { nativeProfile: NATIVE_STREAM_PROFILES[name] } : {}),
+  };
+}
+
 const FRAME_FRESHNESS_TIMEOUT_MS = 3_000;
+const POINTER_GESTURE_IDLE_TIMEOUT_MS = 5_000;
+const NATIVE_RECOVERY_BACKOFF_BASE_MS = 5_000;
+const NATIVE_RECOVERY_BACKOFF_MAX_MS = 60_000;
+
+interface NativeRecoveryGate {
+  routeKey: string | null;
+  attemptCount: number;
+  retryAfter: number;
+  inFlight: boolean;
+}
+
+function resetNativeRecoveryGate(gate: NativeRecoveryGate, routeKey: string | null): void {
+  gate.routeKey = routeKey;
+  gate.attemptCount = 0;
+  gate.retryAfter = 0;
+  gate.inFlight = false;
+}
+
+function nativeRecoveryBackoff(attemptCount: number): number {
+  return Math.min(
+    NATIVE_RECOVERY_BACKOFF_MAX_MS,
+    NATIVE_RECOVERY_BACKOFF_BASE_MS * 2 ** Math.max(0, attemptCount - 1),
+  );
+}
+
+function isRecoverableNativeFallback(status: IOSSimulatorPublicRouteStatus | null): boolean {
+  if (!status) return false;
+  return (
+    status.stream.reasonCode === 'native-stream-disconnected' ||
+    status.stream.reasonCode === 'native-sidecar-unavailable' ||
+    status.input.reasonCode === 'native-sidecar-unavailable'
+  );
+}
 
 /** Translate stable discovery codes instead of leaking host-side English guidance into the UI. */
 export function setupStepKeys(issue: IOSSimulatorRuntimeErrorCode | null): string[] {
@@ -159,6 +210,7 @@ interface PointerGesture {
   pointerId: number;
   gestureId: string;
   route: ReturnType<typeof routeFor>;
+  captureTarget: HTMLImageElement | HTMLCanvasElement;
   startedAt: number;
   startClientX: number;
   startClientY: number;
@@ -168,7 +220,27 @@ interface PointerGesture {
   lastYRatio: number;
   pendingMove: { xRatio: number; yRatio: number } | null;
   moveDrainQueued: boolean;
+  beginAcknowledged: boolean;
+  failed: boolean;
+  terminalQueued: boolean;
+  idleTimer: number | null;
   tail: Promise<void>;
+}
+
+function clearPointerGestureIdleTimer(gesture: PointerGesture): void {
+  if (gesture.idleTimer === null) return;
+  window.clearTimeout(gesture.idleTimer);
+  gesture.idleTimer = null;
+}
+
+function releaseGesturePointerCapture(gesture: PointerGesture): void {
+  try {
+    if (gesture.captureTarget.hasPointerCapture(gesture.pointerId)) {
+      gesture.captureTarget.releasePointerCapture(gesture.pointerId);
+    }
+  } catch {
+    // The element or pointer may already have lost capture during teardown.
+  }
 }
 
 export function IOSSimulatorTabBody({
@@ -202,12 +274,28 @@ export function IOSSimulatorTabBody({
   const pointerGestureRef = useRef<PointerGesture | null>(null);
   const gestureSequenceRef = useRef(0);
   const streamProfileRef = useRef<StreamProfileName>('balanced');
+  const profileRouteRef = useRef<{
+    routeKey: string | null;
+    nativeSelected: boolean;
+    nativeActive: boolean;
+  } | null>(null);
+  const nativeProfileAppliedRef = useRef<{
+    routeKey: string;
+    profile: StreamProfileName;
+  } | null>(null);
   const interactiveProfileActiveRef = useRef(false);
   const profileRestoreTimerRef = useRef<number | null>(null);
   const h264CanvasRef = useRef<HTMLCanvasElement | null>(null);
   const frameUrlRef = useRef<string | null>(null);
   const presentationEpochRef = useRef(0);
   const frameFreshnessTimerRef = useRef<number | null>(null);
+  const currentRouteStatusRef = useRef<IOSSimulatorPublicRouteStatus | null>(null);
+  const nativeRecoveryGateRef = useRef<NativeRecoveryGate>({
+    routeKey: null,
+    attemptCount: 0,
+    retryAfter: 0,
+    inFlight: false,
+  });
 
   const replaceFrameUrl = useCallback((next: string | null) => {
     const previous = frameUrlRef.current;
@@ -242,6 +330,14 @@ export function IOSSimulatorTabBody({
 
   const markFramePresented = useCallback(
     (routeKey: string, presentation: 'jpeg' | 'h264') => {
+      const now = performance.now();
+      if (fpsWindowRef.current.startedAt === 0) fpsWindowRef.current.startedAt = now;
+      fpsWindowRef.current.frames += 1;
+      const elapsed = now - fpsWindowRef.current.startedAt;
+      if (elapsed >= 1_000) {
+        setStreamFps((fpsWindowRef.current.frames * 1_000) / elapsed);
+        fpsWindowRef.current = { startedAt: now, frames: 0 };
+      }
       if (frameFreshnessTimerRef.current !== null) {
         window.clearTimeout(frameFreshnessTimerRef.current);
       }
@@ -310,6 +406,13 @@ export function IOSSimulatorTabBody({
     ? `${attachedInstance.instanceId}:${attachedInstance.generation}`
     : null;
   const routeStatus = viewerRouteKey ? routeStatuses[viewerRouteKey] ?? null : null;
+  currentRouteStatusRef.current = routeStatus;
+  const nativeH264Selected = Boolean(
+    routeStatus?.stream.adapter === 'native-sidecar' && routeStatus.stream.encoding === 'h264',
+  );
+  const nativeH264Active = Boolean(nativeH264Selected && routeStatus?.stream.state === 'active');
+  const showExperimental60 =
+    nativeH264Active || (nativeH264Selected && streamProfile === 'experimental60');
   const grant =
     status?.ok && attachedInstance
       ? status.deviceGrants.find(
@@ -364,6 +467,27 @@ export function IOSSimulatorTabBody({
     : t('rightSidebar.iosSimulator.route.state.detecting');
 
   useEffect(() => {
+    const gate = nativeRecoveryGateRef.current;
+    if (gate.routeKey !== viewerRouteKey) resetNativeRecoveryGate(gate, viewerRouteKey);
+    const nativeActive = Boolean(
+      (routeStatus?.stream.adapter === 'native-sidecar' &&
+        routeStatus.stream.state === 'active') ||
+        (routeStatus?.input.adapter === 'native-sidecar' && routeStatus.input.state === 'active'),
+    );
+    if (nativeActive && !isRecoverableNativeFallback(routeStatus)) {
+      resetNativeRecoveryGate(gate, viewerRouteKey);
+    }
+  }, [
+    routeStatus?.input.adapter,
+    routeStatus?.input.reasonCode,
+    routeStatus?.input.state,
+    routeStatus?.stream.adapter,
+    routeStatus?.stream.reasonCode,
+    routeStatus?.stream.state,
+    viewerRouteKey,
+  ]);
+
+  useEffect(() => {
     const nextId = attachedInstance?.instanceId ?? null;
     if ((state.instanceId ?? null) !== nextId) ctx.patchState({ instanceId: nextId });
   }, [attachedInstance?.instanceId, ctx, state.instanceId]);
@@ -389,6 +513,7 @@ export function IOSSimulatorTabBody({
     let nativeDecoderFallback = false;
     let mediaDisconnected = false;
     let routeInactive = false;
+    let foregroundRecoveryArmed = document.visibilityState !== 'visible';
     const routeKey = `${route.instanceId}:${route.generation}`;
     const decoderRuntime = createBrowserIOSSimulatorH264DecoderRuntime();
     let decoder: IOSSimulatorH264Decoder | null = null;
@@ -399,9 +524,6 @@ export function IOSSimulatorTabBody({
     const disconnectViewer = () => {
       if (cancelled) return;
       mediaDisconnected = true;
-      preferredEncoding = 'jpeg';
-      decoder?.close();
-      decoder = null;
       clearViewerPresentation('disconnected');
     };
     const acceptStream = (stream: IOSSimulatorFramePumpSnapshot | null) => {
@@ -423,20 +545,10 @@ export function IOSSimulatorTabBody({
       }
       if (!frame || frame.sequence <= frameSequenceRef.current) return;
       frameSequenceRef.current = frame.sequence;
-      const now = performance.now();
-      if (fpsWindowRef.current.startedAt === 0) fpsWindowRef.current.startedAt = now;
-      fpsWindowRef.current.frames += 1;
-      const elapsed = now - fpsWindowRef.current.startedAt;
-      if (elapsed >= 1_000) {
-        setStreamFps((fpsWindowRef.current.frames * 1_000) / elapsed);
-        fpsWindowRef.current = { startedAt: now, frames: 0 };
-      }
       if (frame.encoding === 'h264') {
-        preferredEncoding = 'h264';
         void decoder?.decode(frame, stream.generation);
         return;
       }
-      preferredEncoding = 'jpeg';
       const bytes = frame.bytes instanceof Uint8Array ? frame.bytes : new Uint8Array(frame.bytes);
       const candidateUrl = URL.createObjectURL(
         new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'image/jpeg' }),
@@ -490,6 +602,58 @@ export function IOSSimulatorTabBody({
       const nextMutation = resultMutation(result);
       if (!cancelled && nextMutation) setLiveMutation(nextMutation);
     };
+    const attemptNativeRecovery = async (): Promise<IOSSimulatorToolResponse | null> => {
+      if (
+        cancelled ||
+        !viewerVisible ||
+        preferredEncoding !== 'h264' ||
+        nativeDecoderFallback ||
+        document.visibilityState !== 'visible' ||
+        !isRecoverableNativeFallback(currentRouteStatusRef.current)
+      ) {
+        return null;
+      }
+      const gate = nativeRecoveryGateRef.current;
+      if (gate.routeKey !== routeKey) resetNativeRecoveryGate(gate, routeKey);
+      const now = performance.now();
+      if (gate.inFlight || now < gate.retryAfter) return null;
+      gate.inFlight = true;
+      gate.attemptCount += 1;
+      gate.retryAfter = now + nativeRecoveryBackoff(gate.attemptCount);
+      try {
+        return await window.electronAPI.maker.iosSimulator.setViewerVisibility({
+          ...route,
+          visible: true,
+          preferredEncoding: 'h264',
+        });
+      } finally {
+        if (nativeRecoveryGateRef.current.routeKey === routeKey) {
+          nativeRecoveryGateRef.current.inFlight = false;
+        }
+      }
+    };
+    const activateCompatibilityViewer = () =>
+      window.electronAPI.maker.iosSimulator.setViewerVisibility({
+        ...route,
+        visible: true,
+        preferredEncoding: 'jpeg',
+      });
+    const recoverNativeOnForeground = () => {
+      if (document.visibilityState !== 'visible') {
+        foregroundRecoveryArmed = true;
+        return;
+      }
+      if (!foregroundRecoveryArmed) return;
+      foregroundRecoveryArmed = false;
+      if (!viewerVisible || nativeDecoderFallback || preferredEncoding !== 'h264') return;
+      void attemptNativeRecovery()
+        .then((result) => {
+          // A failed optional recovery must not blank the healthy WDA fallback.
+          if (result?.ok) acceptViewerResult(result);
+        })
+        .catch(() => undefined);
+    };
+    document.addEventListener('visibilitychange', recoverNativeOnForeground);
     const acceptPushedH264Frame = (payload: IOSSimulatorH264FramePush) => {
       if (
         cancelled ||
@@ -579,7 +743,7 @@ export function IOSSimulatorTabBody({
           const recovered = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
             ...route,
             visible: true,
-            preferredEncoding: 'jpeg',
+            preferredEncoding,
             ...(nativeDecoderFallback
               ? { fallbackReason: 'native-decoder-fallback' as const }
               : {}),
@@ -619,16 +783,35 @@ export function IOSSimulatorTabBody({
           pollTimer = null;
           void poll().finally(schedulePoll);
         },
-        mediaDisconnected ? 250 : preferredEncoding === 'h264' ? 1_000 : 50,
+        mediaDisconnected
+          ? 250
+          : frameEncodingRef.current === 'jpeg' || preferredEncoding === 'jpeg'
+            ? 50
+            : 1_000,
       );
     };
     const startViewer = async () => {
       try {
-        const result = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
-          ...route,
-          visible: viewerVisible,
-          preferredEncoding,
-        });
+        let result: IOSSimulatorToolResponse;
+        if (viewerVisible && preferredEncoding === 'h264' && !nativeDecoderFallback) {
+          const nativeResult = isRecoverableNativeFallback(currentRouteStatusRef.current)
+            ? await attemptNativeRecovery().catch(() => null)
+            : await window.electronAPI.maker.iosSimulator
+                .setViewerVisibility({
+                  ...route,
+                  visible: true,
+                  preferredEncoding: 'h264',
+                })
+                .catch(() => null);
+          if (cancelled) return;
+          result = nativeResult?.ok ? nativeResult : await activateCompatibilityViewer();
+        } else {
+          result = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
+            ...route,
+            visible: viewerVisible,
+            preferredEncoding,
+          });
+        }
         acceptViewerResult(result);
       } catch {
         disconnectViewer();
@@ -642,6 +825,7 @@ export function IOSSimulatorTabBody({
       cancelled = true;
       decoder?.close();
       unsubscribeH264Frame();
+      document.removeEventListener('visibilitychange', recoverNativeOnForeground);
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       void window.electronAPI.maker.iosSimulator
         .setViewerVisibility({ ...route, visible: false })
@@ -742,20 +926,42 @@ export function IOSSimulatorTabBody({
     }
   }, [attachedInstance, ctx.sessionId, mutation?.agentPaused, t]);
 
+  const sendStreamProfile = useCallback(
+    async (
+      profileName: StreamProfileName,
+      useNativeProfile: boolean,
+    ): Promise<IOSSimulatorToolResponse | null> => {
+      if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return null;
+      const route = routeFor(attachedInstance);
+      const result = await window.electronAPI.maker.iosSimulator.setStreamProfile({
+        sessionId: ctx.sessionId,
+        ...route,
+        ...viewerStreamProfile(profileName, useNativeProfile),
+      });
+      if (result.ok) {
+        nativeProfileAppliedRef.current = useNativeProfile
+          ? {
+              routeKey: `${route.instanceId}:${route.generation}`,
+              profile: profileName,
+            }
+          : null;
+      }
+      return result;
+    },
+    [attachedInstance, ctx.sessionId],
+  );
+
   const applyStreamProfile = useCallback(
-    async (next: StreamProfileName) => {
+    async (requested: StreamProfileName) => {
       if (!attachedInstance) return;
+      const next = requested === 'experimental60' && !nativeH264Active ? 'high' : requested;
       const previous = streamProfile;
       setStreamProfile(next);
       streamProfileRef.current = next;
       setActionError(null);
       try {
-        const result = await window.electronAPI.maker.iosSimulator.setStreamProfile({
-          sessionId: ctx.sessionId,
-          ...routeFor(attachedInstance),
-          profile: STREAM_PROFILES[next],
-        });
-        if (!result.ok) {
+        const result = await sendStreamProfile(next, nativeH264Active);
+        if (result && !result.ok) {
           setStreamProfile(previous);
           streamProfileRef.current = previous;
           setActionError(result.message);
@@ -766,48 +972,83 @@ export function IOSSimulatorTabBody({
         setActionError(t('rightSidebar.iosSimulator.operationError'));
       }
     },
-    [attachedInstance, ctx.sessionId, streamProfile, t],
+    [attachedInstance, nativeH264Active, sendStreamProfile, streamProfile, t],
   );
 
   useEffect(() => {
     setStreamProfile('balanced');
     streamProfileRef.current = 'balanced';
+    nativeProfileAppliedRef.current = null;
     if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
     void window.electronAPI.maker.iosSimulator
       .setStreamProfile({
         sessionId: ctx.sessionId,
         ...routeFor(attachedInstance),
-        profile: STREAM_PROFILES.balanced,
+        ...viewerStreamProfile('balanced', false),
       })
       .catch(() => undefined);
-  }, [attachedInstance, ctx.sessionId]);
+  }, [
+    attachedInstance?.generation,
+    attachedInstance?.instanceId,
+    attachedInstance?.lease.id,
+    attachedInstance?.lifecycleState,
+    ctx.sessionId,
+  ]);
 
   const applyTransientStreamProfile = useCallback(
     async (profile: StreamProfileName) => {
-      if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
-      await window.electronAPI.maker.iosSimulator
-        .setStreamProfile({
-          sessionId: ctx.sessionId,
-          ...routeFor(attachedInstance),
-          profile: STREAM_PROFILES[profile],
-        })
-        .catch(() => undefined);
+      await sendStreamProfile(profile, nativeH264Active).catch(() => undefined);
     },
-    [attachedInstance, ctx.sessionId],
+    [nativeH264Active, sendStreamProfile],
   );
+
+  useEffect(() => {
+    const previous = profileRouteRef.current;
+    const nextRoute = {
+      routeKey: viewerRouteKey,
+      nativeSelected: nativeH264Selected,
+      nativeActive: nativeH264Active,
+    };
+    profileRouteRef.current = nextRoute;
+    if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
+
+    if (!nativeH264Selected) {
+      if (previous?.nativeSelected || streamProfileRef.current === 'experimental60') {
+        const nextProfile =
+          streamProfileRef.current === 'experimental60' ? 'high' : streamProfileRef.current;
+        setStreamProfile(nextProfile);
+        streamProfileRef.current = nextProfile;
+        void sendStreamProfile(nextProfile, false).catch(() => undefined);
+      }
+      return;
+    }
+    if (!nativeH264Active || !viewerRouteKey) return;
+    const applied = nativeProfileAppliedRef.current;
+    if (applied?.routeKey === viewerRouteKey && applied.profile === streamProfileRef.current)
+      return;
+    void sendStreamProfile(streamProfileRef.current, true)
+      .then((result) => {
+        if (result && !result.ok) setActionError(result.message);
+      })
+      .catch(() => undefined);
+  }, [attachedInstance, nativeH264Active, nativeH264Selected, sendStreamProfile, viewerRouteKey]);
 
   const beginInteractiveFrameRate = useCallback(() => {
     if (profileRestoreTimerRef.current !== null) {
       window.clearTimeout(profileRestoreTimerRef.current);
       profileRestoreTimerRef.current = null;
     }
-    if (!interactiveProfileActiveRef.current && streamProfileRef.current !== 'high') {
+    if (
+      !interactiveProfileActiveRef.current &&
+      (streamProfileRef.current === 'low' || streamProfileRef.current === 'balanced')
+    ) {
       interactiveProfileActiveRef.current = true;
       void applyTransientStreamProfile('high');
     }
   }, [applyTransientStreamProfile]);
 
   const endInteractiveFrameRate = useCallback(() => {
+    if (!interactiveProfileActiveRef.current) return;
     if (profileRestoreTimerRef.current !== null) {
       window.clearTimeout(profileRestoreTimerRef.current);
     }
@@ -906,21 +1147,117 @@ export function IOSSimulatorTabBody({
     [ctx.sessionId, viewerInteractive],
   );
 
+  const finishPointerGesture = useCallback(
+    (
+      gesture: PointerGesture,
+      options: {
+        phase: 'end' | 'cancel';
+        point: { xRatio: number; yRatio: number };
+        fallback?: { name: 'tap' | 'swipe'; args: Record<string, unknown> };
+        restoreProfile?: boolean;
+      },
+    ) => {
+      if (gesture.terminalQueued) return;
+      gesture.terminalQueued = true;
+      if (options.phase === 'cancel') gesture.pendingMove = null;
+      clearPointerGestureIdleTimer(gesture);
+      if (pointerGestureRef.current === gesture) pointerGestureRef.current = null;
+      releaseGesturePointerCapture(gesture);
+
+      const restoreProfile = options.restoreProfile !== false;
+      if (!restoreProfile) {
+        if (profileRestoreTimerRef.current !== null) {
+          window.clearTimeout(profileRestoreTimerRef.current);
+          profileRestoreTimerRef.current = null;
+        }
+        interactiveProfileActiveRef.current = false;
+      }
+
+      gesture.tail = gesture.tail
+        .then(async () => {
+          if (options.phase === 'cancel') {
+            if (gesture.beginAcknowledged) {
+              await invokeLiveTouch(gesture, 'cancel', options.point).catch(() => undefined);
+            }
+            return;
+          }
+
+          if (!gesture.failed) {
+            try {
+              await invokeLiveTouch(gesture, 'end', options.point);
+              return;
+            } catch {
+              gesture.failed = true;
+            }
+          }
+
+          if (gesture.beginAcknowledged) {
+            await invokeLiveTouch(gesture, 'cancel', options.point).catch(() => undefined);
+            return;
+          }
+
+          if (options.fallback) {
+            await runInteraction(options.fallback.name, options.fallback.args);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          if (restoreProfile) endInteractiveFrameRate();
+        });
+      void gesture.tail;
+    },
+    [endInteractiveFrameRate, invokeLiveTouch, runInteraction],
+  );
+
+  const cancelPointerGesture = useCallback(
+    (gesture: PointerGesture, restoreProfile = true) => {
+      finishPointerGesture(gesture, {
+        phase: 'cancel',
+        point: { xRatio: gesture.lastXRatio, yRatio: gesture.lastYRatio },
+        restoreProfile,
+      });
+    },
+    [finishPointerGesture],
+  );
+
+  const armPointerGestureWatchdog = useCallback(
+    (gesture: PointerGesture) => {
+      clearPointerGestureIdleTimer(gesture);
+      gesture.idleTimer = window.setTimeout(() => {
+        gesture.idleTimer = null;
+        if (pointerGestureRef.current === gesture) cancelPointerGesture(gesture);
+      }, POINTER_GESTURE_IDLE_TIMEOUT_MS);
+    },
+    [cancelPointerGesture],
+  );
+
   const queueLiveMove = useCallback(
     (gesture: PointerGesture, point: { xRatio: number; yRatio: number }) => {
+      if (gesture.terminalQueued || gesture.failed) return;
       gesture.pendingMove = point;
       if (gesture.moveDrainQueued) return;
       gesture.moveDrainQueued = true;
       gesture.tail = gesture.tail.then(async () => {
-        while (gesture.pendingMove) {
-          const latest = gesture.pendingMove;
+        try {
+          while (!gesture.failed && gesture.pendingMove) {
+            const latest = gesture.pendingMove;
+            gesture.pendingMove = null;
+            await invokeLiveTouch(gesture, 'move', latest);
+          }
+        } catch {
+          gesture.failed = true;
           gesture.pendingMove = null;
-          await invokeLiveTouch(gesture, 'move', latest);
+        } finally {
+          gesture.moveDrainQueued = false;
         }
-        gesture.moveDrainQueued = false;
+      });
+      void gesture.tail.then(() => {
+        if (gesture.failed && gesture.beginAcknowledged && !gesture.terminalQueued) {
+          cancelPointerGesture(gesture);
+        }
       });
     },
-    [invokeLiveTouch],
+    [cancelPointerGesture, invokeLiveTouch],
   );
 
   const onViewerPointerDown = useCallback(
@@ -934,10 +1271,16 @@ export function IOSSimulatorTabBody({
         return;
       }
       const point = pointerRatio(event);
+      try {
+        event.currentTarget.setPointerCapture(event.pointerId);
+      } catch {
+        return;
+      }
       const gesture: PointerGesture = {
         pointerId: event.pointerId,
         gestureId: `viewer-${Date.now()}-${++gestureSequenceRef.current}`,
         route: routeFor(attachedInstance),
+        captureTarget: event.currentTarget,
         startedAt: performance.now(),
         startClientX: event.clientX,
         startClientY: event.clientY,
@@ -947,21 +1290,76 @@ export function IOSSimulatorTabBody({
         lastYRatio: point.yRatio,
         pendingMove: null,
         moveDrainQueued: false,
+        beginAcknowledged: false,
+        failed: false,
+        terminalQueued: false,
+        idleTimer: null,
         tail: Promise.resolve(),
       };
-      gesture.tail = invokeLiveTouch(gesture, 'begin', point);
+      gesture.tail = invokeLiveTouch(gesture, 'begin', point)
+        .then(() => {
+          gesture.beginAcknowledged = true;
+        })
+        .catch(() => {
+          gesture.failed = true;
+        });
       pointerGestureRef.current = gesture;
       beginInteractiveFrameRate();
-      event.currentTarget.setPointerCapture(event.pointerId);
+      armPointerGestureWatchdog(gesture);
       event.preventDefault();
     },
-    [attachedInstance, beginInteractiveFrameRate, invokeLiveTouch, pointerRatio, viewerInteractive],
+    [
+      armPointerGestureWatchdog,
+      attachedInstance,
+      beginInteractiveFrameRate,
+      invokeLiveTouch,
+      pointerRatio,
+      viewerInteractive,
+    ],
+  );
+
+  const completeViewerPointerGesture = useCallback(
+    (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
+      const gesture = pointerGestureRef.current;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      const end = pointerRatio(event);
+      gesture.lastXRatio = end.xRatio;
+      gesture.lastYRatio = end.yRatio;
+      const distance = Math.hypot(
+        event.clientX - gesture.startClientX,
+        event.clientY - gesture.startClientY,
+      );
+      const durationMs = Math.min(2_000, Math.max(100, performance.now() - gesture.startedAt));
+      finishPointerGesture(gesture, {
+        phase: 'end',
+        point: end,
+        fallback:
+          distance < 8
+            ? { name: 'tap', args: { xRatio: end.xRatio, yRatio: end.yRatio } }
+            : {
+                name: 'swipe',
+                args: {
+                  startXRatio: gesture.startXRatio,
+                  startYRatio: gesture.startYRatio,
+                  endXRatio: end.xRatio,
+                  endYRatio: end.yRatio,
+                  durationMs: Math.round(durationMs),
+                },
+              },
+      });
+      event.preventDefault();
+    },
+    [finishPointerGesture, pointerRatio],
   );
 
   const onViewerPointerMove = useCallback(
     (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
       const gesture = pointerGestureRef.current;
       if (!viewerInteractive || !gesture || gesture.pointerId !== event.pointerId) return;
+      if ((event.buttons & 1) === 0) {
+        completeViewerPointerGesture(event);
+        return;
+      }
       const coalesced = event.nativeEvent.getCoalescedEvents?.() ?? [event.nativeEvent];
       const latest = coalesced.at(-1) ?? event.nativeEvent;
       const bounds = event.currentTarget.getBoundingClientRect();
@@ -971,86 +1369,37 @@ export function IOSSimulatorTabBody({
       };
       gesture.lastXRatio = point.xRatio;
       gesture.lastYRatio = point.yRatio;
+      armPointerGestureWatchdog(gesture);
       queueLiveMove(gesture, point);
       event.preventDefault();
     },
-    [queueLiveMove, viewerInteractive],
+    [armPointerGestureWatchdog, completeViewerPointerGesture, queueLiveMove, viewerInteractive],
   );
 
-  const onViewerPointerUp = useCallback(
-    (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
-      const gesture = pointerGestureRef.current;
-      if (!gesture || gesture.pointerId !== event.pointerId) return;
-      pointerGestureRef.current = null;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-      const end = pointerRatio(event);
-      gesture.lastXRatio = end.xRatio;
-      gesture.lastYRatio = end.yRatio;
-      const distance = Math.hypot(
-        event.clientX - gesture.startClientX,
-        event.clientY - gesture.startClientY,
-      );
-      const durationMs = Math.min(2_000, Math.max(100, performance.now() - gesture.startedAt));
-      if (distance >= 8) queueLiveMove(gesture, end);
-      gesture.tail = gesture.tail
-        .then(() => invokeLiveTouch(gesture, 'end', end))
-        .catch(async () => {
-          await invokeLiveTouch(gesture, 'cancel', end).catch(() => undefined);
-          if (distance < 8) {
-            await runInteraction('tap', { xRatio: end.xRatio, yRatio: end.yRatio });
-          } else {
-            await runInteraction('swipe', {
-              startXRatio: gesture.startXRatio,
-              startYRatio: gesture.startYRatio,
-              endXRatio: end.xRatio,
-              endYRatio: end.yRatio,
-              durationMs: Math.round(durationMs),
-            });
-          }
-        })
-        .finally(endInteractiveFrameRate);
-    },
-    [endInteractiveFrameRate, invokeLiveTouch, pointerRatio, queueLiveMove, runInteraction],
-  );
+  const onViewerPointerUp = completeViewerPointerGesture;
 
   const onViewerPointerCancel = useCallback(
     (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
-      if (pointerGestureRef.current?.pointerId === event.pointerId) {
-        const gesture = pointerGestureRef.current;
-        pointerGestureRef.current = null;
-        const point = { xRatio: gesture.lastXRatio, yRatio: gesture.lastYRatio };
-        gesture.pendingMove = null;
-        gesture.tail = gesture.tail
-          .catch(() => undefined)
-          .then(() => invokeLiveTouch(gesture, 'cancel', point))
-          .catch(() => undefined)
-          .finally(endInteractiveFrameRate);
-      }
+      const gesture = pointerGestureRef.current;
+      if (gesture?.pointerId === event.pointerId) cancelPointerGesture(gesture);
     },
-    [endInteractiveFrameRate, invokeLiveTouch],
+    [cancelPointerGesture],
+  );
+
+  const onViewerLostPointerCapture = useCallback(
+    (event: ReactPointerEvent<HTMLImageElement | HTMLCanvasElement>) => {
+      const gesture = pointerGestureRef.current;
+      if (gesture?.pointerId === event.pointerId) cancelPointerGesture(gesture);
+    },
+    [cancelPointerGesture],
   );
 
   const cancelActivePointerGesture = useCallback(
     (restoreProfile: boolean) => {
       const gesture = pointerGestureRef.current;
       const hadInteractiveProfile = interactiveProfileActiveRef.current;
-      pointerGestureRef.current = null;
       if (gesture) {
-        gesture.pendingMove = null;
-        void gesture.tail
-          .catch(() => undefined)
-          .then(() =>
-            invokeLiveTouch(gesture, 'cancel', {
-              xRatio: gesture.lastXRatio,
-              yRatio: gesture.lastYRatio,
-            }),
-          )
-          .catch(() => undefined)
-          .finally(() => {
-            if (restoreProfile) endInteractiveFrameRate();
-          });
+        cancelPointerGesture(gesture, restoreProfile);
       } else if (restoreProfile && hadInteractiveProfile) {
         endInteractiveFrameRate();
       }
@@ -1062,12 +1411,25 @@ export function IOSSimulatorTabBody({
         interactiveProfileActiveRef.current = false;
       }
     },
-    [endInteractiveFrameRate, invokeLiveTouch],
+    [cancelPointerGesture, endInteractiveFrameRate],
   );
 
   useEffect(() => {
     if (!viewerInteractive) cancelActivePointerGesture(true);
   }, [cancelActivePointerGesture, viewerInteractive]);
+
+  useEffect(() => {
+    const cancelForLostContext = () => cancelActivePointerGesture(true);
+    const cancelWhenHidden = () => {
+      if (document.visibilityState !== 'visible') cancelForLostContext();
+    };
+    window.addEventListener('blur', cancelForLostContext);
+    document.addEventListener('visibilitychange', cancelWhenHidden);
+    return () => {
+      window.removeEventListener('blur', cancelForLostContext);
+      document.removeEventListener('visibilitychange', cancelWhenHidden);
+    };
+  }, [cancelActivePointerGesture]);
 
   useEffect(
     () => () => {
@@ -1299,11 +1661,24 @@ export function IOSSimulatorTabBody({
                           {t('rightSidebar.iosSimulator.streamProfiles.low')}
                         </option>
                         <option value="balanced">
-                          {t('rightSidebar.iosSimulator.streamProfiles.balanced')}
+                          {t(
+                            nativeH264Active
+                              ? 'rightSidebar.iosSimulator.streamProfiles.balancedNative'
+                              : 'rightSidebar.iosSimulator.streamProfiles.balanced',
+                          )}
                         </option>
                         <option value="high">
-                          {t('rightSidebar.iosSimulator.streamProfiles.high')}
+                          {t(
+                            nativeH264Active
+                              ? 'rightSidebar.iosSimulator.streamProfiles.highNative'
+                              : 'rightSidebar.iosSimulator.streamProfiles.high',
+                          )}
                         </option>
+                        {showExperimental60 && (
+                          <option value="experimental60">
+                            {t('rightSidebar.iosSimulator.streamProfiles.experimental60')}
+                          </option>
+                        )}
                       </select>
                     </div>
                     <div
@@ -1349,6 +1724,7 @@ export function IOSSimulatorTabBody({
                             onPointerMove={onViewerPointerMove}
                             onPointerUp={onViewerPointerUp}
                             onPointerCancel={onViewerPointerCancel}
+                            onLostPointerCapture={onViewerLostPointerCapture}
                           />
                         )}
                         <canvas
@@ -1374,6 +1750,7 @@ export function IOSSimulatorTabBody({
                           onPointerMove={onViewerPointerMove}
                           onPointerUp={onViewerPointerUp}
                           onPointerCancel={onViewerPointerCancel}
+                          onLostPointerCapture={onViewerLostPointerCapture}
                         />
                         {!presentationMatchesRoute && (
                           <div className="flex flex-col items-center gap-2 p-8 text-center text-[11px] text-[var(--text-secondary)]">

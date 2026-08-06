@@ -67,6 +67,7 @@ import type {
 } from '@cindy/mcps';
 
 import type {
+  IOSSimulatorNativeH264StreamProfileRequest,
   IOSSimulatorPublicEnvironmentReport,
   IOSSimulatorPublicInstance,
   IOSSimulatorPublicViewport,
@@ -90,6 +91,8 @@ const BUILD_DIAGNOSTICS_TTL_MS = 30 * 60_000;
 const MAX_BUILD_DIAGNOSTICS = 32;
 const MANAGED_BUILD_RESULT_BUNDLE_PATTERN = /^CindyBuild(?:-[0-9a-f-]+)?\.xcresult$/i;
 const DEFAULT_DEVICE_LIVENESS_INTERVAL_MS = 1_000;
+const MAX_WDA_VIEWER_FRAMES_PER_SECOND = 20;
+const MAX_NATIVE_H264_VIEWER_FRAMES_PER_SECOND = 60;
 
 interface IOSSimulatorSessionSnapshot {
   id: string;
@@ -203,6 +206,7 @@ export interface IOSSimulatorHost {
     sessionId: string,
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
     profile: IOSSimulatorStreamProfile,
+    nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
   ): Promise<IOSSimulatorHostResult>;
   updateViewerTouch(
     sessionId: string,
@@ -655,6 +659,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const driverViewports = new Map<string, IOSSimulatorPublicViewport>();
   const viewerOrientationOverrides = new Map<string, 'PORTRAIT' | 'LANDSCAPE'>();
   const streamProfiles = new Map<string, IOSSimulatorStreamProfile>();
+  const nativeStreamProfiles = new Map<string, IOSSimulatorNativeH264StreamProfileRequest>();
   const viewerEncodings = new Map<string, 'jpeg' | 'h264'>();
   const viewerPreferredEncodings = new Map<string, 'jpeg' | 'h264'>();
   const viewerFallbackReasons = new Map<string, IOSSimulatorPublicRouteReasonCode>();
@@ -1227,6 +1232,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     viewerFallbackReasons.delete(instance.instanceId);
     viewerSessions.delete(instance.instanceId);
     streamProfiles.delete(instance.instanceId);
+    nativeStreamProfiles.delete(instance.instanceId);
     clearViewportState(instance.instanceId);
     screenMaps.clear(instance.instanceId);
     clearVisualBaselines(instance.instanceId);
@@ -1401,6 +1407,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         viewerSessions.delete(instance.instanceId);
         clearViewportState(instance.instanceId);
         streamProfiles.delete(instance.instanceId);
+        nativeStreamProfiles.delete(instance.instanceId);
         let cleanupSucceeded = await discardInstanceMedia(instance);
         let driverCleanupSucceeded = true;
         if (driverManager) {
@@ -2286,6 +2293,27 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     return route.source;
   }
 
+  function nativeViewerProfile(
+    instanceId: string,
+    fallback: IOSSimulatorStreamProfile,
+  ): IOSSimulatorNativeH264StreamProfileRequest {
+    return (
+      nativeStreamProfiles.get(instanceId) ?? {
+        framesPerSecond: fallback.framesPerSecond,
+        scalingPercent: fallback.scalingPercent,
+      }
+    );
+  }
+
+  function activeNativeH264Driver(
+    instanceId: string,
+    running: WdaRunningInstance,
+  ): IOSSimulatorNativeSidecarDriver | null {
+    if (viewerEncodings.get(instanceId) !== 'h264') return null;
+    if (h264FramePump.snapshot(instanceId)?.state !== 'streaming') return null;
+    return nativeH264Driver(running);
+  }
+
   function startViewerStream(
     instance: IOSSimulatorInstance,
     running: WdaRunningInstance,
@@ -2308,19 +2336,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         driver: running.driver,
         visible: false,
       });
-      const profile = streamProfiles.get(instance.instanceId) ?? {
+      const fallbackProfile = streamProfiles.get(instance.instanceId) ?? {
         framesPerSecond: 5,
         jpegQuality: 25,
         scalingPercent: 50,
       };
+      const nativeProfile = nativeViewerProfile(instance.instanceId, fallbackProfile);
       const snapshot = h264FramePump.setVisible({
         instanceId: instance.instanceId,
         generation: instance.generation,
         driver: nativeDriver,
         profile: {
           encoding: 'h264',
-          framesPerSecond: profile.framesPerSecond,
-          scalingPercent: profile.scalingPercent,
+          framesPerSecond: nativeProfile.framesPerSecond,
+          scalingPercent: nativeProfile.scalingPercent,
           orientation,
         },
         visible: true,
@@ -2675,7 +2704,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, `viewer_touch_${touch.phase}`);
       }
     },
-    async setViewerStreamProfile(sessionId, route, profile) {
+    async setViewerStreamProfile(sessionId, route, profile, nativeProfile) {
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
@@ -2684,7 +2713,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (
           !Number.isSafeInteger(profile.framesPerSecond) ||
           profile.framesPerSecond < 1 ||
-          profile.framesPerSecond > 60 ||
+          profile.framesPerSecond > MAX_WDA_VIEWER_FRAMES_PER_SECOND ||
           !Number.isSafeInteger(profile.jpegQuality) ||
           profile.jpegQuality < 1 ||
           profile.jpegQuality > 100 ||
@@ -2694,39 +2723,73 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         ) {
           throw new IOSSimulatorInstanceError(
             'INVALID_ARGUMENT',
-            'Stream profile values are outside the supported range.',
+            'WDA fallback profile values are outside the supported range.',
+          );
+        }
+        if (
+          nativeProfile &&
+          (!Number.isSafeInteger(nativeProfile.framesPerSecond) ||
+            nativeProfile.framesPerSecond < 1 ||
+            nativeProfile.framesPerSecond > MAX_NATIVE_H264_VIEWER_FRAMES_PER_SECOND ||
+            !Number.isSafeInteger(nativeProfile.scalingPercent) ||
+            nativeProfile.scalingPercent < 1 ||
+            nativeProfile.scalingPercent > 100)
+        ) {
+          throw new IOSSimulatorInstanceError(
+            'INVALID_ARGUMENT',
+            'Native H.264 profile values are outside the supported range.',
           );
         }
         const instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
         const running = getDriverManager().get(instance.instanceId);
+        const activeNativeDriver =
+          nativeProfile && running ? activeNativeH264Driver(instance.instanceId, running) : null;
+        if (nativeProfile && !activeNativeDriver) {
+          throw new IOSSimulatorInstanceError(
+            'INVALID_ARGUMENT',
+            'Native H.264 profile changes require an active Native H.264 viewer.',
+          );
+        }
         if (!running) {
-          // The viewer may request its profile while WDA is still being rebuilt.
-          // Keep the desired profile so ensureDriver applies it after the session
-          // becomes available instead of dropping the request as a disconnect.
+          // The viewer may request its fallback profile while WDA is being rebuilt.
+          // Native-only intent is rejected above because no active route can prove it.
           streamProfiles.set(instance.instanceId, profile);
+          nativeStreamProfiles.delete(instance.instanceId);
           return { ok: true, data: { profile } };
         }
         const applied = await running.driver.configureStream(running.driverSessionId, profile);
         assertHostActive();
         streamProfiles.set(instance.instanceId, applied);
+        if (nativeProfile) nativeStreamProfiles.set(instance.instanceId, nativeProfile);
+        else nativeStreamProfiles.delete(instance.instanceId);
         if (viewerEncodings.get(instance.instanceId) === 'h264') {
-          const nativeDriver = nativeH264Driver(running);
+          const nativeDriver = activeNativeDriver ?? nativeH264Driver(running);
           if (nativeDriver) {
+            const appliedNativeProfile = nativeProfile ?? {
+              framesPerSecond: applied.framesPerSecond,
+              scalingPercent: applied.scalingPercent,
+            };
             h264FramePump.setVisible({
               instanceId: instance.instanceId,
               generation: instance.generation,
               driver: nativeDriver,
               profile: {
                 encoding: 'h264',
-                framesPerSecond: applied.framesPerSecond,
-                scalingPercent: applied.scalingPercent,
+                framesPerSecond: appliedNativeProfile.framesPerSecond,
+                scalingPercent: appliedNativeProfile.scalingPercent,
                 orientation: viewports.get(instance.instanceId)?.orientation ?? 'PORTRAIT',
               },
               visible: true,
             });
           }
         }
-        return { ok: true, data: { profile: applied } };
+        return {
+          ok: true,
+          data: {
+            profile: applied,
+            ...(nativeProfile ? { nativeProfile: { ...nativeProfile } } : {}),
+          },
+        };
       } catch (error) {
         return safeHostError(error, sessionId, 'set_viewer_stream_profile');
       }
@@ -3360,19 +3423,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               }
               const driverViewport =
                 driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
-              const profile = streamProfiles.get(instance.instanceId) ?? {
+              const fallbackProfile = streamProfiles.get(instance.instanceId) ?? {
                 framesPerSecond: 5,
                 jpegQuality: 25,
                 scalingPercent: 50,
               };
+              const nativeProfile = nativeViewerProfile(instance.instanceId, fallbackProfile);
               h264FramePump.setVisible({
                 instanceId: instance.instanceId,
                 generation: instance.generation,
                 driver: nativeDriver,
                 profile: {
                   encoding: 'h264',
-                  framesPerSecond: profile.framesPerSecond,
-                  scalingPercent: profile.scalingPercent,
+                  framesPerSecond: nativeProfile.framesPerSecond,
+                  scalingPercent: nativeProfile.scalingPercent,
                   orientation,
                 },
                 visible: true,
@@ -3392,19 +3456,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             if (mode === 'device' && viewerEncodings.get(instance.instanceId) === 'h264') {
               const nativeDriver = nativeH264Driver(running);
               if (nativeDriver) {
-                const profile = streamProfiles.get(instance.instanceId) ?? {
+                const fallbackProfile = streamProfiles.get(instance.instanceId) ?? {
                   framesPerSecond: 5,
                   jpegQuality: 25,
                   scalingPercent: 50,
                 };
+                const nativeProfile = nativeViewerProfile(instance.instanceId, fallbackProfile);
                 h264FramePump.setVisible({
                   instanceId: instance.instanceId,
                   generation: instance.generation,
                   driver: nativeDriver,
                   profile: {
                     encoding: 'h264',
-                    framesPerSecond: profile.framesPerSecond,
-                    scalingPercent: profile.scalingPercent,
+                    framesPerSecond: nativeProfile.framesPerSecond,
+                    scalingPercent: nativeProfile.scalingPercent,
                     orientation,
                   },
                   visible: true,
@@ -4290,6 +4355,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             viewerSessions.delete(instance.instanceId);
             clearViewportState(instance.instanceId);
             streamProfiles.delete(instance.instanceId);
+            nativeStreamProfiles.delete(instance.instanceId);
           }),
         );
         routeStatusCache.clear();
@@ -4363,8 +4429,14 @@ export function setIOSSimulatorViewerStreamProfile(
   sessionId: string,
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
   profile: IOSSimulatorStreamProfile,
+  nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setViewerStreamProfile(sessionId, route, profile);
+  return defaultIOSSimulatorHost.setViewerStreamProfile(
+    sessionId,
+    route,
+    profile,
+    nativeProfile,
+  );
 }
 
 export function updateIOSSimulatorViewerTouch(

@@ -86,9 +86,14 @@ import { useMobileMakerTransport } from '@/device-link/useMobileMakerTransport';
 import { createMobileMakerTransport } from '@/device-link/mobileMakerTransport';
 import { startFocusedTopicSubscription } from '@/device-link/focusedTopicSubscription';
 import { InteractionPanel, type MobilePlanViewerState } from '@/session/InteractionPanel';
-import { MessageRenderer, type MobileMessageDraft } from '@/session/MessageRenderer';
+import {
+  MessageRenderer,
+  type MobileMessageActionBusyKind,
+  type MobileMessageDraft,
+} from '@/session/MessageRenderer';
 import { ComposerRichInput, type ComposerRichInputHandle } from '@/session/ComposerRichInput';
 import { InlineQueueSection } from '@/session/InlineQueueSection';
+import { inputProjectionErrorI18nKey } from '@/session/inputProjectionError';
 import { RewindPreviewPanel } from '@/session/RewindPreviewPanel';
 import { BlurBackdrop } from '@/session/BlurBackdrop';
 import { SheetModal } from '@/session/SheetModal';
@@ -1116,7 +1121,10 @@ export default function SessionScreen() {
   const lastPendingPlanRequestIdRef = useRef<string | null>(null);
   const [queueBusy, setQueueBusy] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
-  const [messageActionBusy, setMessageActionBusy] = useState<string | null>(null);
+  const [messageActionBusy, setMessageActionBusy] = useState<{
+    clientId: string;
+    kind: MobileMessageActionBusyKind;
+  } | null>(null);
   const [rewindState, setRewindState] = useState<RewindPreviewState>({ kind: 'idle' });
   // 切 session 时同步(render 阶段)重置回撤确认框 / busy / loading 态并递增「请求代际」。SessionScreen 切
   // session 复用实例、不 remount,这些本地 UI state 不会自动重置,残留会让确认框跨 session 出现且
@@ -2226,6 +2234,40 @@ export default function SessionScreen() {
       visible
     />
   );
+  // 模型 pill:展开态进 toolbar,收起态进 leading(见 renderComposerCollapsedLeading)。
+  // 两处共用同一颗,避免收起时只能进选择器才知道当前模型(#900)。
+  // 收起态另传 maxWidth:长/自定义 label 不得把 inputFrame 挤没(toolbar 仍不设上限)。
+  const renderComposerModelPill = (testID: string, maxWidth?: number) => (
+    composerRuntimeSummary ? (
+      <ComposerRuntimePill
+        fastOn={composerPillFastOn}
+        label={composerRuntimeLabel}
+        leading={agentSwitchIntent ? (
+          <MobileAgentMark
+            agentKind={agentSwitchIntent.targetAgentKind}
+            color={colors.textSecondary}
+            size={iconSize.sm}
+          />
+        ) : composerPillSourceId ? (
+          // 正常态显示真正生效来源；断开态显示 DB 中的真实来源并使用状态色，
+          // 不静默换成 activeSourceId 的默认回退 Logo。
+          <MobileModelIconMark
+            color={composerSelectedSourceDisconnected ? colors.statusError : undefined}
+            icon={currentSession && composerPillSourceProvider
+              ? getModel(composerPillSourceProvider, currentSession.model, sessionAgentKind)?.icon
+              : undefined}
+            name={composerPillSourceProvider?.name ?? composerPillSourceId}
+            providerId={composerPillSourceId}
+            routing={composerPillSourceProvider?.routing}
+            logoKind={composerPillSourceProvider?.logoKind}
+          />
+        ) : null}
+        maxWidth={maxWidth}
+        onPress={toggleComposerModelPicker}
+        testID={testID}
+      />
+    ) : null
+  );
   // 聚焦卡片形态的底部工具排:[+][模型] …… [语音][停止/发送]。
   // + 号打开 Context 面板(附件 / 计划模式 / 目标模式收在面板内);权限模式入口收进会话设置。
   // 权限模式图标钮(2026-07-29 用户裁决,对齐 Codex,与新建页同位同款):
@@ -2274,34 +2316,7 @@ export default function SessionScreen() {
         />
       ) : null}
       <ComposerToolbarSpacer />
-      {composerRuntimeSummary ? (
-        <ComposerRuntimePill
-          fastOn={composerPillFastOn}
-          label={composerRuntimeLabel}
-          leading={agentSwitchIntent ? (
-            <MobileAgentMark
-              agentKind={agentSwitchIntent.targetAgentKind}
-              color={colors.textSecondary}
-              size={iconSize.sm}
-            />
-          ) : composerPillSourceId ? (
-            // 正常态显示真正生效来源；断开态显示 DB 中的真实来源并使用状态色，
-            // 不静默换成 activeSourceId 的默认回退 Logo。
-            <MobileModelIconMark
-              color={composerSelectedSourceDisconnected ? colors.statusError : undefined}
-              icon={currentSession && composerPillSourceProvider
-                ? getModel(composerPillSourceProvider, currentSession.model, sessionAgentKind)?.icon
-                : undefined}
-              name={composerPillSourceProvider?.name ?? composerPillSourceId}
-              providerId={composerPillSourceId}
-              routing={composerPillSourceProvider?.routing}
-              logoKind={composerPillSourceProvider?.logoKind}
-            />
-          ) : null}
-          onPress={toggleComposerModelPicker}
-          testID="session.composerModelButton"
-        />
-      ) : null}
+      {renderComposerModelPill('session.composerModelButton')}
       {/* 工具排右段顺序:[模型][停止任务][语音占位][发送槽](spacer 已在模型左侧,
           模型右对齐对齐 Codex)。停止任务在语音左边(对齐桌面),语音占位宽度随录音
           胶囊(红点+计时)展开,把停止任务推开——语音右缘与发送槽的邻接关系全程不变。 */}
@@ -5959,6 +5974,16 @@ export default function SessionScreen() {
     />
   ) : null);
 
+  // 收起态 leading:[模型 chip][附件徽标]。模型常驻可见、点开选择器(#900);
+  // card 态 leading 被 MobileComposerInputRow 收掉,改由 toolbar 的同款 pill 承接。
+  // pill maxWidth 200:长 label 截断;与 inputFrameMinWidth 120 互为兜底。
+  const renderComposerCollapsedLeading = () => (
+    <>
+      {renderComposerModelPill('session.composerCollapsedModelButton', 200)}
+      {renderComposerCollapsedAttachmentBadge()}
+    </>
+  );
+
   // 停止任务按钮(实心中性方块)。两处使用:语音/发送左边的独立槽(inline)、
   // 发送位顶替(sendSlotIsStop);同一颗按钮的两个宿主位置,样式与行为一致。
   const renderComposerStopButton = () => (
@@ -7378,7 +7403,7 @@ export default function SessionScreen() {
   const previewRewindAtMessage = useCallback(async (clientId: string, draft: MobileMessageDraft) => {
     if (messageActionBusy) return;
     const seq = ++rewindRequestSeqRef.current;
-    setMessageActionBusy(clientId);
+    setMessageActionBusy({ clientId, kind: 'rewind' });
     setError(null);
     setRewindState({
       kind: 'loading',
@@ -7420,7 +7445,7 @@ export default function SessionScreen() {
 
   const performForkAtMessage = useCallback(async (clientId: string, draft?: MobileMessageDraft) => {
     if (!deviceId || messageActionBusy) return;
-    setMessageActionBusy(clientId);
+    setMessageActionBusy({ clientId, kind: 'fork' });
     setError(null);
     try {
       const forked = await maker.fork(sessionId, clientId);
@@ -7438,11 +7463,13 @@ export default function SessionScreen() {
         params: { sessionId: forked.id, deviceId, deviceName },
       });
     } catch (err) {
-      setError(formatRemoteError(err));
+      const detail = formatRemoteError(err);
+      const projectionKey = inputProjectionErrorI18nKey(detail);
+      setError(projectionKey ? t(projectionKey) : detail);
     } finally {
       setMessageActionBusy(null);
     }
-  }, [deviceId, deviceName, maker, messageActionBusy, router, sessionId]);
+  }, [deviceId, deviceName, maker, messageActionBusy, router, sessionId, t]);
 
   const forkAtMessage = useCallback((clientId: string, draft?: MobileMessageDraft) => {
     if (!deviceId || messageActionBusy) return;
@@ -7612,7 +7639,7 @@ export default function SessionScreen() {
         style: 'destructive',
         onPress: () => {
           void (async () => {
-            setMessageActionBusy(clientId);
+            setMessageActionBusy({ clientId, kind: 'delete' });
             setError(null);
             try {
               const result = await maker.deleteMessage(sessionId, clientId);
@@ -7641,7 +7668,7 @@ export default function SessionScreen() {
     if (!deviceId || messageActionBusy || !isCommitReadyRewindState(rewindState)) return;
     const state = rewindState;
     const seq = ++rewindRequestSeqRef.current;
-    setMessageActionBusy(state.clientId);
+    setMessageActionBusy({ clientId: state.clientId, kind: 'rewind' });
     setError(null);
     try {
       const updated = await maker.rewindCommit(sessionId, state.clientId);
@@ -8078,7 +8105,8 @@ export default function SessionScreen() {
                   <MessageRenderer
                     bottomOverlayHeight={bottomOverlayHeight}
                     topOverlayHeight={topOverlayHeight}
-                    busyClientId={messageActionBusy}
+                    busyAction={messageActionBusy?.kind ?? null}
+                    busyClientId={messageActionBusy?.clientId ?? null}
                     canLoadEarlier={hasOlderMessages && messages.length > 0}
                     emptyTestID="session.messageList.empty"
                     focusedItemKey={focusedMessageItemKey ?? null}
@@ -8449,6 +8477,8 @@ export default function SessionScreen() {
                     // 听写期间把输入区撑到 44pt 触控目标:命中层盖在 inputFrame 上,
                     // hitSlop 越不过父边界(见常量注释)。
                     inputFrameMinHeight={voiceIsListening ? MOBILE_COMPOSER_MIN_TOUCH_TARGET : undefined}
+                    // 收起态 leading 有模型 pill:给输入区留可见/可点宽度;展开态无 leading,不必占位。
+                    inputFrameMinWidth={composerCardActive ? undefined : 120}
                     inputElement={(
                       <ComposerRichInput
                         ref={composerInputRef}
@@ -8486,7 +8516,7 @@ export default function SessionScreen() {
                     inputOverlay={renderComposerInputOverlay()}
                     inputStyle={voiceIsListening ? styles.inputVoiceHidden : undefined}
                     inputTestID="session.composerInput"
-                    leading={renderComposerCollapsedAttachmentBadge()}
+                    leading={renderComposerCollapsedLeading()}
                     maxHeight={composerResize.inputMaxHeight}
                     multilineShape={!composerCardActive && composerInputIsMultiline}
                     onBlur={() => {
@@ -9118,6 +9148,7 @@ function ComposerRuntimePill({
   fastOn = false,
   label,
   leading,
+  maxWidth,
   onPress,
   testID,
   tone,
@@ -9128,6 +9159,8 @@ function ComposerRuntimePill({
   label: string;
   /** 前缀节点(模型药丸传来源官方 mark);与 icon 二选一。 */
   leading?: ReactNode;
+  /** 收起态 leading 用:限制长/自定义 label 宽度;工具排调用不传(故意不设上限)。 */
+  maxWidth?: number;
   onPress(): void;
   testID: string;
   tone?: 'bypassPermissions';
@@ -9140,7 +9173,7 @@ function ComposerRuntimePill({
       accessibilityLabel={label}
       hitSlop={COMPOSER_CONTROL_HIT_SLOP}
       onPress={onPress}
-      style={styles.composerRuntimePill}
+      style={[styles.composerRuntimePill, maxWidth != null && { maxWidth }]}
       testID={testID}
     >
       {leading ?? null}
@@ -9670,8 +9703,9 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     fontWeight: fontWeight.medium,
     lineHeight: lineHeight.caption,
   },
-  // 不设 maxWidth 硬上限:模型名尽量显示全,只在工具排空间不足时才收缩截断
+  // 工具排默认不设 maxWidth 硬上限:模型名尽量显示全,空间不足时再收缩截断
   // (flexShrink + 文本 numberOfLines,剩余空间归 toolbarSpacer)。
+  // 收起态 leading 经 ComposerRuntimePill.maxWidth 另行封顶,避免挤掉输入区。
   composerRuntimePill: {
     alignItems: 'center',
     backgroundColor: colors.sheetActionSurface,

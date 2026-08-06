@@ -43,6 +43,8 @@ import piSystemPrompt from './pi-system-prompt.md?raw';
 import { createLogger } from '../logger.js';
 import { readMemorySettings } from './memory-settings-store.js';
 import { registerPiProxySession } from './pi-proxy-session-auth.js';
+import { getDesktopMcpToolApprovalPolicy } from './mcp-tool-approval-policy.js';
+import { getRipgrepBinaryPath } from './runtime-configs.js';
 
 const log = createLogger('pi-host');
 
@@ -152,9 +154,13 @@ export function composePiSystemPrompt(hostPrompt: string, agentPrompt: string): 
 }
 
 function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
+  const ripgrepPath = getRipgrepBinaryPath();
   const config: AgentRuntimeConfig = {
     // 保留 host 共用身份段,再追加 Pi 专属行为段；maker-core 会整体追加到 Pi 原生 prompt。
     systemPrompt: composePiSystemPrompt(hostSystemPrompt, piSystemPrompt),
+    // Pi 的 grep 以及 Cindy 覆盖的 find 都固定复用随 Desktop 校验、打包的 rg。
+    // 下发绝对路径而非 PATH，避免 Windows 从不受信工作目录优先命中同名 rg.exe。
+    managedExecutablePaths: { ripgrep: ripgrepPath },
     userDataPath: app.getPath('userData'),
   };
   // 网关 endpoint 随 model-access 凭据同步就绪,用 getter 惰性读(与 claude remoteEndpoint 同理)。
@@ -359,6 +365,9 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     reviewAutoPermissionAction: opts.reviewAutoPermissionAction,
     mcpProviders: opts.mcpProviders,
     makerMemory: opts.makerMemory,
+    // 与 Claude Code / Codex 同一份第一方 MCP 审批真源。Pi 之前没接,导致 orca 这类
+    // 可信 server 的工具落进 Auto-review 灰区被模型静默 block(详见 pi/index.ts 权限门)。
+    getMcpToolApprovalPolicy: getDesktopMcpToolApprovalPolicy,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
     preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
     registerPiProxySession,

@@ -299,9 +299,11 @@ describe('resolveTurnCost', () => {
     expect(claude.money?.amount).toBe(5);
   });
 
-  it('uses the conservative ledger fallback for SDK cost when the Gateway quote is missing', () => {
-    // 冷启动且目录尚未同步时，账本币种使用 ledgerCurrency 的保守回退值，而不是
-    // 按构建区域猜测。SDK 自报费用是 USD，因此当前 USD fallback 可以安全记账。
+  it('falls back to USD for the SDK amount when the ledger currency is unknown — never the build region', () => {
+    // 没有活动账本币种(冷启动、目录还没同步下来)时按 ledgerCurrency.ts 的回退链
+    // 落到 USD,绝不按构建区域猜(#1302:按区域回落会让同一账号的账本币种反复翻转,
+    // 覆盖当天累计)。SDK 的 costDelta 本来就是 USD 口径,与兜底币种同口径,因此
+    // 无论 cn / global 构建,这一轮都按 USD 原值兜底记账,断言两种构建下同形。
     __resetActiveLedgerCurrencyForTesting();
     const result = resolveTurnCost({
       rawModel: 'unknown-model',

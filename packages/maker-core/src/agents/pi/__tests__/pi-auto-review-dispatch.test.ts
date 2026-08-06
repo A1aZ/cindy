@@ -1,8 +1,8 @@
 /**
  * pi auto 档 dispatcher + spawn 配置回归 —— mock PiRpcProcess(不 spawn 真 pi),
  * 捕获构造参数与 send() 帧,验证:
- *   1. spawn args:改用 --append-system-prompt(保留 pi 默认 prompt),不再 --system-prompt;
- *   2. spawn env:PI_OFFLINE=1(嵌入式不做启动期联网)、PI_CACHE_RETENTION=long、
+ *   1. spawn args:保留 pi 默认 prompt，不用 --tools 筛掉动态 MCP/subagent;
+ *   2. spawn env:PI_OFFLINE=1(嵌入式不做启动期联网)、受管工具绝对路径、PI_CACHE_RETENTION=long、
  *      NO_PROXY 含 loopback 且吞并小写 no_proxy;
  *   3. auto 档:区内写静默 confirmed:true;灰区交当前模型 reviewer,仅 reviewer 明确
  *      ask / 本地红线才弹 resolver;reviewer 缺失时 fail-closed deny;
@@ -86,6 +86,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   let agentHome = '';
   let cwd = '';
+  let managedRipgrepPath = '';
   let savedNoProxy: string | undefined;
   let savedNoProxyLower: string | undefined;
 
@@ -103,6 +104,13 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     captured.closed = false;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-home-'));
     cwd = mkdtempSync(path.join(tmpdir(), 'pi-dispatch-cwd-'));
+    managedRipgrepPath = path.join(
+      agentHome,
+      'managed-tools',
+      process.platform === 'win32' ? 'rg.exe' : 'rg',
+    );
+    mkdirSync(path.dirname(managedRipgrepPath), { recursive: true });
+    writeFileSync(managedRipgrepPath, 'fake managed ripgrep');
     savedNoProxy = process.env.NO_PROXY;
     savedNoProxyLower = process.env.no_proxy;
   });
@@ -114,18 +122,44 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     if (savedNoProxyLower === undefined) delete process.env.no_proxy; else process.env.no_proxy = savedNoProxyLower;
   });
 
+  interface McpSetup {
+    /** 本会话「已注册」的桥接 MCP server 名(经 preparePiExtraSpawnConfig 下发)。 */
+    serverNames?: string[];
+    policy?: AgentDeps['getMcpToolApprovalPolicy'];
+  }
+
   function buildDeps(
     reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'],
     includeNextModel = false,
+    mcp?: McpSetup,
   ): AgentDeps {
     return {
+      ...(mcp?.policy ? { getMcpToolApprovalPolicy: mcp.policy } : {}),
+      ...(mcp?.serverNames
+        ? {
+          preparePiExtraSpawnConfig: async () => ({
+            mcpBridge: {
+              token: 'bridge-token',
+              servers: mcp.serverNames!.map((name) => ({
+                name,
+                url: `http://127.0.0.1:1/${name}`,
+              })),
+            },
+            mcpEnv: {},
+          }),
+        }
+        : {}),
       auth: {
         getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
         triggerLogin: async () => ({ authenticated: true }),
         logout: async () => {},
         getAuthEnv: async () => ({}),
       },
-      runtimeConfig: { endpoint: 'http://127.0.0.1:9', systemPrompt: 'You are Cindy.' },
+      runtimeConfig: {
+        endpoint: 'http://127.0.0.1:9',
+        systemPrompt: 'You are Cindy.',
+        managedExecutablePaths: { ripgrep: managedRipgrepPath },
+      },
       binaryPath: path.join(agentHome, 'pi'),
       logger: noopLogger,
       capabilityAdditions: {
@@ -162,14 +196,29 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     permissionMode?: string,
     reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'],
     includeNextModel = false,
+    mcp?: McpSetup,
   ): Promise<AgentSessionHandle> {
-    const agent = new PiAgent(buildDeps(reviewAutoPermissionAction, includeNextModel));
+    const agent = new PiAgent(buildDeps(reviewAutoPermissionAction, includeNextModel, mcp));
     return agent.startSession({
       sessionId: 's1',
       workingDir: cwd,
       model: 'm',
       ...(permissionMode ? { permissionMode: permissionMode as never } : {}),
     });
+  }
+
+  /**
+   * 等某个权限请求的回帧落地。用「等信号 + 有界超时」而不是固定 flush ——
+   * 档位热切换会多经一次串行写入队列,靠 setTimeout(0) 的轮数猜等待就是计时型脆弱用例。
+   */
+  async function waitForResponse(id: string): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + 2_000;
+    for (;;) {
+      const hit = captured.sent.find((m) => m.id === id);
+      if (hit) return hit;
+      if (Date.now() > deadline) throw new Error(`no extension_ui_response for ${id}`);
+      await new Promise((r) => setTimeout(r, 5));
+    }
   }
 
   function firePermissionRequest(id: string, toolName: string, input: Record<string, unknown>): void {
@@ -182,7 +231,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     });
   }
 
-  it('spawns with --append-system-prompt (default pi prompt preserved) and offline/no-proxy env', async () => {
+  it('spawns with a private managed rg path, default prompt and no restrictive tool allowlist', async () => {
     if (process.platform === 'win32') {
       // Windows 的环境变量键不区分大小写，无法同时构造“仅有小写键”的进程环境。
       process.env.NO_PROXY = 'corp.internal';
@@ -195,8 +244,17 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     const idx = captured.args.indexOf('--append-system-prompt');
     expect(idx).toBeGreaterThan(-1);
     expect(captured.args[idx + 1]).toBe('You are Cindy.');
+    expect(captured.args).not.toContain('--tools');
     expect(captured.env.PI_OFFLINE).toBe('1');
     expect(captured.env.PI_CACHE_RETENTION).toBe('long');
+    const privateRgPath = captured.env.CINDY_PI_MANAGED_RG_PATH;
+    expect(privateRgPath).toBe(path.join(
+      captured.env.PI_CODING_AGENT_DIR!,
+      'bin',
+      process.platform === 'win32' ? 'rg.exe' : 'rg',
+    ));
+    expect(path.isAbsolute(privateRgPath!)).toBe(true);
+    expect(readFileSync(privateRgPath!, 'utf8')).toBe('fake managed ripgrep');
     expect(captured.proxyRegistration).toEqual({
       sessionId: 's1',
       token: captured.env.CINDY_PI_SESSION_TOKEN,
@@ -207,6 +265,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
         'CINDY_PI_API_KEY',
         'CINDY_PI_SESSION_ID',
         'CINDY_PI_SESSION_TOKEN',
+        'CINDY_PI_MANAGED_RG_PATH',
         // 子代理路由快照是**控制面**:一次获批的 bash 拿到路径就能改写 provider/model,
         // 让后续每次委派打到攻击者选定的 endpoint。与 permission file 同类,必须从
         // bash/模型工具的 spawn 边界剥离(review)。
@@ -218,6 +277,26 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       expect(noProxy).toContain(entry);
     }
     expect(captured.env.no_proxy).toBeUndefined();
+  });
+
+  it('does not inherit an unmanaged ripgrep path from the host process env', async () => {
+    const previous = process.env.CINDY_PI_MANAGED_RG_PATH;
+    process.env.CINDY_PI_MANAGED_RG_PATH = path.join(cwd, 'rogue-rg');
+    let handle: AgentSessionHandle | undefined;
+    try {
+      const deps = buildDeps();
+      delete deps.runtimeConfig.managedExecutablePaths;
+      handle = await new PiAgent(deps).startSession({
+        sessionId: 'unmanaged-rg',
+        workingDir: cwd,
+        model: 'm',
+      });
+      expect(captured.env.CINDY_PI_MANAGED_RG_PATH).toBeUndefined();
+    } finally {
+      await handle?.close();
+      if (previous === undefined) delete process.env.CINDY_PI_MANAGED_RG_PATH;
+      else process.env.CINDY_PI_MANAGED_RG_PATH = previous;
+    }
   });
 
 
@@ -448,7 +527,10 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     const { readFileSync } = await import('node:fs');
     const configHome = captured.env.PI_CODING_AGENT_DIR as string;
     const bridge = readFileSync(path.join(configHome, 'extensions', 'cindy-bridge.ts'), 'utf8');
-    expect(bridge).toContain("import { createBashTool } from '@earendil-works/pi-coding-agent'");
+    expect(bridge).toContain('createBashTool,');
+    expect(bridge).toContain('createFindTool,');
+    expect(bridge).toContain('createGrepTool,');
+    expect(bridge).toContain('createLsTool,');
     expect(bridge).toContain('env: withoutPiSecrets(env)');
     expect(bridge).toContain('exposeSessionEnvironment: false');
     expect(bridge).toContain("'CINDY_PI_PERMISSION_FILE'");
@@ -571,6 +653,75 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r2', confirmed: true });
   });
 
+  /**
+   * 桥接 MCP 工具走 host 审批策略,不进 Auto-review 灰区(与 Claude Code / Codex 同一份
+   * 真源)。回归的真实缺陷:Pi 没接这条策略时,`start_team` 落进灰区交模型判,模型按
+   * 「有更安全替代方案就 block」判成"这点小事不必开团队"→ block 对用户静默 → bridge
+   * 报 "User denied this tool call via Cindy",协同团队永远建不起来且没有任何弹窗。
+   */
+  it('auto-approves trusted first-party MCP tools via host policy without consulting the reviewer', async () => {
+    const review = vi.fn(async () => ({ verdict: 'block' as const, reason: 'should never be asked' }));
+    const handle = await start('auto', review, false, {
+      serverNames: ['cindy_orca'],
+      policy: ({ serverName }) => (serverName === 'cindy_orca' ? 'auto-approve' : 'prompt'),
+    });
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
+      return { kind: 'permission', behavior: 'allow' } as never;
+    });
+    await handle.send({ type: 'user', content: '修一下登录页的样式错位' });
+    firePermissionRequest('r20', 'mcp__cindy_orca__start_team', {});
+    await flush();
+    // 关键三点:不问模型、不弹卡、直接放行。userIntent 与协同无关也不影响(正是原缺陷的触发条件)。
+    expect(review).not.toHaveBeenCalled();
+    expect(resolverCalls).toBe(0);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r20', confirmed: true });
+  });
+
+  it('still asks the user for MCP servers the host policy does not trust', async () => {
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await start('auto', review, false, {
+      serverNames: ['cindy_ssh'],
+      policy: ({ serverName }) => (serverName === 'cindy_orca' ? 'auto-approve' : 'prompt-each-time'),
+    });
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
+      return { kind: 'permission', behavior: 'allow' } as never;
+    });
+    await handle.send({ type: 'user', content: 'check the remote host' });
+    firePermissionRequest('r21', 'mcp__cindy_ssh__ssh_exec', { command: 'uptime' });
+    await flush();
+    // 不可信 server 仍逐次确认,且同样不该消耗模型审阅(它不是安全分类器该管的事)。
+    expect(review).not.toHaveBeenCalled();
+    expect(resolverCalls).toBe(1);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r21', confirmed: true });
+  });
+
+  /**
+   * server 名可以含 `__`,盲切 `mcp__` 后首段会把第三方 `cindy_orca__evil` 认成第一方
+   * `cindy_orca` 并继承静默放行 —— 一条实打实的提权路径。归属判定取最长匹配。
+   */
+  it('does not let a look-alike server name inherit first-party trust', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'allow' as const }), false, {
+      serverNames: ['cindy_orca', 'cindy_orca__evil'],
+      policy: ({ serverName }) => (serverName === 'cindy_orca' ? 'auto-approve' : 'prompt-each-time'),
+    });
+    const seen: string[] = [];
+    handle.setInteractionResolver?.(async (req) => {
+      seen.push((req as { toolName: string }).toolName);
+      return { kind: 'permission', behavior: 'deny' } as never;
+    });
+    await handle.send({ type: 'user', content: 'go' });
+    firePermissionRequest('r22', 'mcp__cindy_orca__evil__start_team', {});
+    await flush();
+    expect(seen).toEqual(['mcp__cindy_orca__evil__start_team']);
+    expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r22', confirmed: false });
+  });
+
+  // host 未提供 getMcpToolApprovalPolicy(或 server 未注册)时的兜底:归属查不到就不查
+  // 策略,MCP 工具继续走原灰区路径,行为与接策略之前一致。
   it('auto mode gives the current-model reviewer complete MCP tool evidence', async () => {
     const review = vi.fn(async () => ({ verdict: 'allow' as const }));
     const handle = await start('auto', review);
@@ -658,6 +809,178 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     await flush();
     expect(resolverCalls).toBe(1);
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r5', confirmed: true });
+  });
+
+  /**
+   * Full access 的语义是「不问、全放行」,必须压在 MCP 策略分支与灰区审阅之前。bridge 按 perm
+   * 文件现读本已把 bypass 拦在冒泡前,但档位可热切换 —— confirm 冒泡后用户仍可能切到 Full
+   * access,此时不该再弹卡,也不该因为没有 resolver 就把工具调用拒掉(review P1)。
+   */
+  it('honors a hot switch to Full access ahead of the MCP policy branch', async () => {
+    const review = vi.fn(async () => ({ verdict: 'block' as const }));
+    const handle = await start('ask', review, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt-each-time',
+    });
+    let resolverCalls = 0;
+    handle.setInteractionResolver?.(async () => {
+      resolverCalls++;
+      return { kind: 'permission', behavior: 'deny' } as never;
+    });
+    await handle.setPermissionMode?.('bypassPermissions');
+    firePermissionRequest('r23', 'mcp__cindy_ssh__ssh_exec', { command: 'uptime' });
+    expect(await waitForResponse('r23')).toEqual({
+      type: 'extension_ui_response', id: 'r23', confirmed: true,
+    });
+    expect(resolverCalls).toBe(0);
+    expect(review).not.toHaveBeenCalled();
+  });
+
+  it('allows a Full access call whose session has no interaction resolver at all', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt',
+    });
+    await handle.setPermissionMode?.('bypassPermissions');
+    // 没有 setInteractionResolver:Full access 下不能因为拿不到决策就中断工具调用。
+    firePermissionRequest('r24', 'mcp__cindy_ssh__ssh_exec', { command: 'uptime' });
+    expect(await waitForResponse('r24')).toEqual({
+      type: 'extension_ui_response', id: 'r24', confirmed: true,
+    });
+  });
+
+  /**
+   * 弹卡**等待中**切到 Full access:必须当场 settle 那张卡让调用继续,而不是干等用户回答一张
+   * 已经失效的卡。此前 resolver 只挂在卡上、切档不会唤醒它,工具调用会一直卡住(codex P1)。
+   * 与 Claude / Codex 的 dismissAllPending 同口径,并发 interaction_dismissed 让 UI 收卡。
+   */
+  it('settles an in-flight permission card when the mode widens to Full access', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_browser'],
+      // prompt(非 prompt-each-time)→ 放宽档位时接受替用户放行。
+      policy: () => 'prompt',
+    });
+    const events: Array<Record<string, unknown>> = [];
+    void (async () => {
+      for await (const e of handle.events()) events.push(e as Record<string, unknown>);
+    })();
+    let cardShown = false;
+    handle.setInteractionResolver?.(async () => {
+      cardShown = true;
+      // 卡挂着不回答 —— 模拟用户没点按钮,直接去改权限档。
+      return await new Promise(() => {});
+    });
+    firePermissionRequest('r26', 'mcp__cindy_browser__call_tool', { name: 'browser' });
+    await flush();
+    expect(cardShown).toBe(true);
+    // 此刻还没有回帧:调用正等在卡上。
+    expect(captured.sent.find((m) => m.id === 'r26')).toBeUndefined();
+
+    await handle.setPermissionMode?.('bypassPermissions');
+    expect(await waitForResponse('r26')).toEqual({
+      type: 'extension_ui_response', id: 'r26', confirmed: true,
+    });
+    // UI 侧必须收到 dismissed,否则卡会留在界面上而工具已经继续执行。
+    const dismissed = events.find((e) => e.type === 'interaction_dismissed');
+    expect(dismissed?.data).toMatchObject({ requestId: 'r26', resolvedAs: 'allow' });
+  });
+
+  /**
+   * 只有 Full access 算「放宽」。Auto 的语义是「区内放行、越界升级」而不是全放行,挂起的卡
+   * 本就是被升级的越界动作 —— 切到 Auto 必须 deny 这张 stale 卡,让重试重新过 fail-closed 的
+   * Auto dispatcher,不能替用户橡皮图章(与 CC 的 moreOpen 裁决一致,codex review P1)。
+   */
+  it('denies a pending card when switching to Auto instead of rubber-stamping it', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_browser'],
+      policy: () => 'prompt',
+    });
+    handle.setInteractionResolver?.(async () => await new Promise(() => {}));
+    firePermissionRequest('r28', 'mcp__cindy_browser__call_tool', { name: 'browser' });
+    await flush();
+    await handle.setPermissionMode?.('auto');
+    expect(await waitForResponse('r28')).toEqual({
+      type: 'extension_ui_response', id: 'r28', confirmed: false,
+    });
+  });
+
+  /**
+   * 并发切档:被更晚意图取代的那次写会在代际检查处提前返回、但 promise 仍 resolve 成功。旧
+   * continuation 若照自己捕获的 transition 收卡,就会用一次早已作废的放宽把 pending 调用错误
+   * 放行(codex review P1)。这里 ask → bypass 紧接着再切回 ask,最终必须是拒绝。
+   */
+  it('ignores a superseded mode change when settling pending prompts', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt',
+    });
+    handle.setInteractionResolver?.(async () => await new Promise(() => {}));
+    firePermissionRequest('r29', 'mcp__cindy_ssh__ssh_exec', { command: 'uptime' });
+    await flush();
+    // 两次切换连续发起,第一次(放宽)会被第二次(收紧)取代。
+    const widening = handle.setPermissionMode?.('bypassPermissions');
+    const tightening = handle.setPermissionMode?.('ask');
+    await Promise.allSettled([widening, tightening]);
+    expect(await waitForResponse('r29')).toEqual({
+      type: 'extension_ui_response', id: 'r29', confirmed: false,
+    });
+  });
+
+  /**
+   * 放宽档位不得替用户批准他还没表态的**高风险**调用:prompt-each-time 的挂起卡在切到
+   * Full access 时仍按 fail-closed 拒绝(与 CC / Codex 的 forcePrompt 语义一致)。
+   */
+  it('keeps a pending prompt-each-time card fail-closed even when the mode widens', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt-each-time',
+    });
+    handle.setInteractionResolver?.(async () => await new Promise(() => {}));
+    firePermissionRequest('r27', 'mcp__cindy_ssh__ssh_exec', { command: 'rm -rf /' });
+    await flush();
+    await handle.setPermissionMode?.('bypassPermissions');
+    expect(await waitForResponse('r27')).toEqual({
+      type: 'extension_ui_response', id: 'r27', confirmed: false,
+    });
+  });
+
+  /**
+   * 反向边界:用户明确拒绝之后再切到 Full access,不能把这次拒绝追认成放行 —— 档位放宽只
+   * 影响「拿不到决策」的情形,不覆盖用户已经表过的态。
+   */
+  it('does not let a later Full access switch overturn an explicit denial', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt-each-time',
+    });
+    handle.setInteractionResolver?.(async () => {
+      // 用户点「拒绝」的同一时刻切到 Full access。
+      await handle.setPermissionMode?.('bypassPermissions');
+      return { kind: 'permission', behavior: 'deny' } as never;
+    });
+    firePermissionRequest('r25', 'mcp__cindy_ssh__ssh_exec', { command: 'rm -rf /' });
+    expect(await waitForResponse('r25')).toEqual({
+      type: 'extension_ui_response', id: 'r25', confirmed: false,
+    });
+  });
+
+  /**
+   * resolver 是 host 注入的外部回调,可能同步 throw(或返回非 Promise)。直接 `.then` 会让同步
+   * 异常绕过 finalize —— pending 条目不注销、请求永不 settle,调用悬挂(copilot 报)。同步失败
+   * 必须落进 fail-closed 分支:回帧 confirmed:false,而不是卡死。
+   */
+  it('fails closed when the interaction resolver throws synchronously', async () => {
+    const handle = await start('ask', undefined, false, {
+      serverNames: ['cindy_ssh'],
+      policy: () => 'prompt',
+    });
+    handle.setInteractionResolver?.((() => {
+      throw new Error('resolver blew up synchronously');
+    }) as never);
+    firePermissionRequest('r30', 'mcp__cindy_ssh__ssh_exec', { command: 'uptime' });
+    expect(await waitForResponse('r30')).toEqual({
+      type: 'extension_ui_response', id: 'r30', confirmed: false,
+    });
   });
 
   it('hot-switching to auto via setPermissionMode takes effect for subsequent calls', async () => {

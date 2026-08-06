@@ -78,6 +78,7 @@ import { useSessionBoundSchedules, scheduleFocusPath } from '@/features/schedule
 import { loadScheduleSidebarIndexRuns } from '@/features/scheduler/lib/scheduleSidebarIndexRuns';
 import { resolveSidebarRightStatus } from './sidebarRightStatus';
 import { SidebarRightStatusIndicator } from './SidebarRightStatusIndicator';
+import { shouldPrefetchSessionOnPointerDown } from './sessionSwitchPrefetch';
 
 const log = createLogger('SessionCard');
 
@@ -523,6 +524,11 @@ export function SessionCard({
       data-sidebar-session-row="true"
       role="button"
       tabIndex={0}
+      onPointerDown={(e) => {
+        if (shouldPrefetchSessionOnPointerDown(e, { isActive, isEditing })) {
+          makerChatStore.ensureInitialMessages(session.id);
+        }
+      }}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onKeyDown={(e) => {
@@ -758,7 +764,7 @@ export function SessionCard({
         <div className="relative">
           <div
             className={cn(
-              'min-w-0 text-[12.5px] font-bold leading-[1.22] tracking-[-0.005em]',
+              'min-w-0 text-[12.5px] font-semibold leading-[1.22] tracking-[-0.005em]',
               '[display:-webkit-box] [-webkit-box-orient:vertical] [-webkit-line-clamp:2] overflow-hidden',
               isActive ? 'text-sidebar-item-active-foreground' : 'text-foreground',
               isEditing && 'invisible',
@@ -789,7 +795,7 @@ export function SessionCard({
                 setIsEditing(false);
               }}
               containerClassName="absolute inset-x-0 top-1/2 -translate-y-1/2"
-              inputClassName="h-6 text-[12.5px] font-bold text-foreground"
+              inputClassName="h-6 text-[12.5px] font-semibold text-foreground"
               activeForeground={isActive}
             />
           )}

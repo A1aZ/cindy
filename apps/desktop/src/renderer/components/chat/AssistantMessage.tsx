@@ -6,7 +6,7 @@
  * F-MSG-1: assistant message styling (left-aligned, no bubble)
  * F-MSG-2: Markdown rendering
  * message-actions V1.2: hover-revealed bar below the markdown body, left-aligned,
- *   order [copy][time]. Streaming messages do NOT mount the bar (per spec
+ *   order [copy][fork][more][time][cost]. Streaming messages do NOT mount the bar (per spec
  *   "流式期间不挂载"); 且仅当父层标记本消息为 turn 收尾正文(showActionBar)
  *   时才挂载 —— 任务执行过程中的中间句没有操作行。The bar
  *   owns its own fade lifecycle (see MessageActionBar) so this component
@@ -182,6 +182,8 @@ interface AssistantMessageProps {
   userTurnCostIsEstimate?: boolean;
   /** Per-turn token/cache 明细。 */
   turnUsageDetails?: TurnUsageDetails;
+  /** 同一用户轮跨多个 SDK segment 聚合后的 token/cache/model 明细。 */
+  userTurnUsageDetails?: TurnUsageDetails;
   /** 本轮模型降级标记(main turn 结束检测命中时挂到收尾 assistant 上),
    *  正文下方渲染一条常显的降级提示行。 */
   modelMismatch?: { selected: string; actual: string };
@@ -211,6 +213,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   userTurnCostUsd,
   userTurnCostIsEstimate,
   turnUsageDetails,
+  userTurnUsageDetails,
   modelMismatch,
   ghostReplyPending,
 }: AssistantMessageProps) {
@@ -376,7 +379,7 @@ export const AssistantMessage = memo(function AssistantMessage({
           userTurnMoney={userTurnMoney}
           userTurnCostUsd={userTurnCostUsd}
           userTurnCostIsEstimate={userTurnCostIsEstimate}
-          turnUsageDetails={turnUsageDetails}
+          turnUsageDetails={userTurnUsageDetails ?? turnUsageDetails}
         />
       )}
     </div>

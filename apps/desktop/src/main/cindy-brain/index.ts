@@ -16,6 +16,7 @@ import {
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   isGhostInstallApprovalToken,
+  diffGhostPermissionItems,
   ghostPermissionBaselineKey,
   unreviewedGhostPermissionItems,
   ghostWebviewEntryPaths,
@@ -36,7 +37,7 @@ import {
   type GhostVideoResultParams,
   type InstalledGhost,
 } from '../../shared/ghost.js';
-import type { PluginMarketPackageReview } from '../../shared/pluginMarket.js';
+import type { PluginMarketPackageReviewFacts } from '../../shared/pluginMarket.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import {
   activeOwnerScopeKey,
@@ -3809,16 +3810,12 @@ export async function installOrUpdateMarketGhostPackage(
     /** receipt 模型并发护栏:更新分支比对 receipt 派生 token(与 main 硬化叠加,决策 A)。 */
     expectedInstalledApproval?: string;
     /**
-     * 装入确认框实际展示给用户的那份 manifest(来源方给的)。给了就逐项比对:
-     * 包里多出来的权限会暂停落位并交由上层复核。两条市场路径都必须给;
-     * 本地 `.cindy` 装入不经此出口,确认框读的就是包本身,没有这层漂移。
+     * 安装前实际展示给用户的 manifest。真实包若声明了未展示权限，会在
+     * 落盘前暂停并把同一份已验证包交给上层复核。
      */
     reviewedManifest?: GhostManifest;
-    /**
-     * 经市场账本摘要认证的旧版已安装清单。历史详情投影漏掉、但用户此前
-     * 已批准的权限可继续作为基线;未被该基线覆盖的真实包权限仍走复核。
-     */
-    previouslyInstalledManifest?: GhostManifest;
+    /** 经来源账本摘要认证的已装清单；缺失时不得回退到可变运行时清单。 */
+    permissionBaselineManifest?: GhostManifest;
     /** 用户确认过的真实下载包 SHA 与确认时的已装权限基线。 */
     approvedPackageSha256?: string;
     reviewedBaseline?: string;
@@ -3839,7 +3836,7 @@ async function installOrUpdateMarketGhostPackageLocked(
     version: string;
     expectedInstalledApproval?: string;
     reviewedManifest?: GhostManifest;
-    previouslyInstalledManifest?: GhostManifest;
+    permissionBaselineManifest?: GhostManifest;
     approvedPackageSha256?: string;
     reviewedBaseline?: string;
   },
@@ -3878,12 +3875,11 @@ async function installOrUpdateMarketGhostPackageLocked(
      */
     const installed = manager.list().find((ghost) => ghost.manifest.id === expected.ghostId);
     if (expected.reviewedManifest) {
-      const installedBaseline = installed
-        ? ghostPermissionBaselineKey(installed.manifest)
+      const baselineManifest = expected.permissionBaselineManifest ?? null;
+      const installedBaseline = baselineManifest
+        ? ghostPermissionBaselineKey(baselineManifest)
         : null;
-      // 真实包复核的批准必须始终绑定当时那份包与已装权限面，不能只在
-      // 当前仍存在来源清单差异时才校验。否则两次请求间包字节发生变化、
-      // 新包恰好不再多权限时，会绕过旧批准的 SHA/基线绑定直接落位。
+      // 批准始终绑定 Main 实际检查过的包 SHA 与本地已装权限基线。
       if (
         expected.approvedPackageSha256 !== undefined &&
         (expected.approvedPackageSha256 !== inspected.packageSha256 ||
@@ -3894,21 +3890,24 @@ async function installOrUpdateMarketGhostPackageLocked(
           'Downloaded Plugin package changed after permission review',
         );
       }
-      const added = unreviewedGhostPermissionItems(
+      const unreviewed = unreviewedGhostPermissionItems(
         expected.reviewedManifest,
-        expected.previouslyInstalledManifest,
+        baselineManifest ?? undefined,
         inspected.canonicalManifest,
       );
-      if (added.length > 0) {
-        const review: PluginMarketPackageReview = {
+      if (unreviewed.length > 0) {
+        const review: PluginMarketPackageReviewFacts = {
           manifest: inspected.manifest,
+          permissionDiff: baselineManifest
+            ? diffGhostPermissionItems(baselineManifest, inspected.canonicalManifest)
+            : null,
           packageSha256: inspected.packageSha256,
           installedBaseline,
         };
         if (expected.approvedPackageSha256 === undefined) {
-          log.warn('market package declares unreviewed permissions', {
+          log.info('market package requires permission review', {
             ghostId: expected.ghostId,
-            keys: added.map((item) => item.key),
+            keys: unreviewed.map((item) => item.key),
           });
           throw new GhostPackagePermissionReviewRequiredError(review);
         }

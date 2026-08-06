@@ -125,38 +125,6 @@ describe('ghost · id 规则', () => {
 });
 
 describe('ghost · 清单校验', () => {
-  it('更新保留已安装清单中已批准的权限，即使发布元数据遗漏这些权限', () => {
-    const makeToolManifest = (tools: Array<{ name: string; description: string }>) => {
-      const raw = { ...goodManifest(), slots: ['tool'], tools } as Record<string, unknown>;
-      delete raw.panel;
-      const result = validateGhostManifest(raw);
-      if (!result.ok) throw new Error(result.reason);
-      return result.manifest;
-    };
-    const installed = makeToolManifest([{ name: 'gen_image', description: 'Generate images' }]);
-    const reviewed = makeToolManifest([{ name: 'gen_image', description: 'Projected description' }]);
-    const samePackage = makeToolManifest([{ name: 'gen_image', description: 'Generate images' }]);
-    const expandedPackage = makeToolManifest([
-      { name: 'gen_image', description: 'Generate images' },
-      { name: 'edit_image', description: 'Edit images' },
-    ]);
-    const changedPackage = makeToolManifest([
-      { name: 'gen_image', description: 'A third, unreviewed description' },
-    ]);
-
-    expect(unreviewedGhostPermissionItems(reviewed, installed, samePackage)).toEqual([]);
-    expect(
-      unreviewedGhostPermissionItems(reviewed, installed, expandedPackage).map((item) => item.key),
-    ).toEqual([
-      'tool:edit_image',
-    ]);
-    expect(
-      unreviewedGhostPermissionItems(reviewed, installed, changedPackage).map((item) => item.key),
-    ).toEqual([
-      'tool:gen_image',
-    ]);
-  });
-
   it('全字段合法清单通过,并按已知字段收窄输出', () => {
     const v = validateGhostManifest({ ...goodManifest(), unknownField: 'ignored' });
     expect(v.ok).toBe(true);
@@ -3271,6 +3239,34 @@ describe('ghost · skill 槽(捆绑 Agent Skills,2026-07-25)', () => {
 });
 
 describe('ghostPermissionProjectionFingerprint', () => {
+  it('same-key/different-labelArgs 同时作废 baseline、diff 与真实包复核', () => {
+    const reviewed = validateGhostManifest({
+      ...goodChipManifest(),
+      panel: { title: '已审阅面板', html: 'panel.html', minWidth: 240 },
+    });
+    const actual = validateGhostManifest({
+      ...goodChipManifest(),
+      panel: { title: '实际下载面板', html: 'panel.html', minWidth: 240 },
+    });
+    expect(reviewed.ok && actual.ok).toBe(true);
+    if (!reviewed.ok || !actual.ok) return;
+
+    expect(ghostPermissionBaselineKey(reviewed.manifest)).not.toBe(
+      ghostPermissionBaselineKey(actual.manifest),
+    );
+    const diff = diffGhostPermissionItems(reviewed.manifest, actual.manifest);
+    expect(diff.added).toEqual([
+      expect.objectContaining({ key: expect.stringMatching(/^panel:/) }),
+    ]);
+    expect(diff.removed).toEqual([
+      expect.objectContaining({ key: expect.stringMatching(/^panel:/) }),
+    ]);
+    expect(diff.unchanged.some((item) => item.key.startsWith('panel:'))).toBe(false);
+    expect(
+      unreviewedGhostPermissionItems(reviewed.manifest, undefined, actual.manifest),
+    ).toEqual([expect.objectContaining({ key: expect.stringMatching(/^panel:/) })]);
+  });
+
   it('same-key/different-detail 必须判不同(preview hosts / 工具描述都在 detail 侧)', () => {
     const base = {
       ...goodChipManifest(),

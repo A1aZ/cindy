@@ -1637,20 +1637,28 @@ function formatGhostQuotaSize(bytes: number): string {
  * receipt 钉的是 B。字段序列化按固定字段序 + labelArgs/detailArgs 键排序,与对象
  * 构造顺序无关。
  */
-export function ghostPermissionProjectionFingerprint(manifest: GhostManifest): string {
+function ghostPermissionProjectionTuple(item: GhostPermissionItem): unknown[] {
   const sortRecord = (record: Record<string, string> | undefined): [string, string][] =>
     Object.entries(record ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return [
+    item.key,
+    item.kind,
+    item.labelKey,
+    sortRecord(item.labelArgs),
+    item.detail ?? null,
+    item.detailKey ?? null,
+    sortRecord(item.detailArgs),
+  ];
+}
+
+function ghostPermissionProjectionKey(item: GhostPermissionItem): string {
+  return JSON.stringify(ghostPermissionProjectionTuple(item));
+}
+
+export function ghostPermissionProjectionFingerprint(manifest: GhostManifest): string {
   return JSON.stringify(
     ghostPermissionItems(manifest)
-      .map((item) => [
-        item.key,
-        item.kind,
-        item.labelKey,
-        sortRecord(item.labelArgs),
-        item.detail ?? null,
-        item.detailKey ?? null,
-        sortRecord(item.detailArgs),
-      ])
+      .map(ghostPermissionProjectionTuple)
       .sort((a, b) => {
         const ka = JSON.stringify(a);
         const kb = JSON.stringify(b);
@@ -2032,8 +2040,8 @@ export interface GhostPermissionDiff {
 }
 
 /**
- * 权限审阅基线指纹:同一份 manifest 推导出的权限条目集合(key + detail)。
- * 与 diffGhostPermissionItems 同口径(按 key 对齐、detail 变化算差异),
+ * 权限审阅基线指纹：同一份 manifest 推导出的完整用户可见权限投影。
+ * 与 diffGhostPermissionItems 同口径（按稳定 key 对齐、任一展示字段变化算差异），
  * 所以"指纹相同"等价于"权限面没变",可安全沿用先前的审阅结论。
  *
  * renderer 审阅时记录基线并随安装请求回传,main 在安装锁内用**当前**已装
@@ -2041,10 +2049,7 @@ export interface GhostPermissionDiff {
  * 每项 JSON 编码后排序拼接,全可打印、无拼接歧义。
  */
 export function ghostPermissionBaselineKey(manifest: GhostManifest): string {
-  return ghostPermissionItems(manifest)
-    .map((item) => JSON.stringify([item.key, item.detail ?? '']))
-    .sort()
-    .join('\n');
+  return ghostPermissionProjectionFingerprint(manifest);
 }
 
 export function diffGhostPermissionItems(
@@ -2055,14 +2060,19 @@ export function diffGhostPermissionItems(
   const nextItems = ghostPermissionItems(next);
   const prevKeys = new Set(prevItems.map((i) => i.key));
   const nextKeys = new Set(nextItems.map((i) => i.key));
-  const prevDetailByKey = new Map(prevItems.map((i) => [i.key, i.detail ?? '']));
+  const prevProjectionByKey = new Map(
+    prevItems.map((item) => [item.key, ghostPermissionProjectionKey(item)]),
+  );
+  const nextProjectionByKey = new Map(
+    nextItems.map((item) => [item.key, ghostPermissionProjectionKey(item)]),
+  );
   const added: GhostPermissionItem[] = [];
   const removed: GhostPermissionItem[] = [];
   const unchanged: GhostPermissionItem[] = [];
   for (const item of nextItems) {
     if (!prevKeys.has(item.key)) {
       added.push(item);
-    } else if ((item.detail ?? '') !== prevDetailByKey.get(item.key)) {
+    } else if (ghostPermissionProjectionKey(item) !== prevProjectionByKey.get(item.key)) {
       added.push(item);
     } else {
       unchanged.push(item);
@@ -2071,7 +2081,7 @@ export function diffGhostPermissionItems(
   for (const item of prevItems) {
     if (!nextKeys.has(item.key)) {
       removed.push(item);
-    } else if ((item.detail ?? '') !== (nextItems.find((n) => n.key === item.key)?.detail ?? '')) {
+    } else if (ghostPermissionProjectionKey(item) !== nextProjectionByKey.get(item.key)) {
       removed.push(item);
     }
   }
@@ -2112,13 +2122,13 @@ export function unreviewedGhostPermissionItems(
   previouslyInstalled: GhostManifest | undefined,
   actual: GhostManifest,
 ): GhostPermissionItem[] {
-  const approvalKey = (item: GhostPermissionItem): string =>
-    JSON.stringify([item.key, item.detail ?? '']);
-  const approved = new Set(ghostPermissionItems(reviewed).map(approvalKey));
+  const approved = new Set(ghostPermissionItems(reviewed).map(ghostPermissionProjectionKey));
   for (const item of ghostPermissionItems(previouslyInstalled ?? reviewed)) {
-    approved.add(approvalKey(item));
+    approved.add(ghostPermissionProjectionKey(item));
   }
-  return ghostPermissionItems(actual).filter((item) => !approved.has(approvalKey(item)));
+  return ghostPermissionItems(actual).filter(
+    (item) => !approved.has(ghostPermissionProjectionKey(item)),
+  );
 }
 
 /**

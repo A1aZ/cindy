@@ -7848,6 +7848,19 @@ export class CodexAgent extends BaseAgent {
           });
         }
       },
+      turnDiffUpdated: (params) => {
+        if (enqueueIfBufferedTurn(params.turnId, () => handlers.turnDiffUpdated?.(params))) return;
+        if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
+        eventQueue.push({
+          type: 'turn_diff',
+          data: {
+            turnId: params.turnId,
+            diff: params.diff,
+            cwd: opts.workingDir,
+          },
+          source: 'codex',
+        });
+      },
       turnCompleted: (params) => {
         // buffered turn 的终态同样进队列等对账 (greptile R11 P1 + codex R12 P1):
         // 合法 → 激活后按序重放, handleTurnCompleted 自然收口 send; 孤儿 →

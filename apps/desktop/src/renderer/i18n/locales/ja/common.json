@@ -4468,6 +4468,14 @@
       "spawnFailed": "ターミナルを起動できません: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "このターンの変更",
+        "currentWorkspace": "現在のワークスペース",
+        "localOnly": "ターン単位の正確な変更は、リモートタスクではまだ利用できません。",
+        "partialNotice": "このターンには正確に追跡できないコマンドまたはツールの書き込みが含まれます。以下は取得できた一部のみで、完全なパッチではありません。",
+        "emptyTitle": "記録された変更はありません",
+        "emptyDesc": "このターンで保存されたパッチに表示可能なファイル変更はありません。"
+      },
       "fileCount_one": "{{count}} ファイル",
       "fileCount_other": "{{count}} ファイル",
       "emptyTitle": "変更はまだありません",
@@ -6186,9 +6194,13 @@
       "DEVICE_LINK_CONTROL_DISABLED": "このデバイスの操作はオフです。メッセージは送信されていません。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "添付ファイルの転送に失敗しました。メッセージは送信されていません。もう一度お試しください。"
     },
-    "generatedFiles": {
-      "title": "このターンで生成されたファイル",
-      "showMore": "さらに {{count}} 件を表示",
+    "turnChanges": {
+      "title": "{{count}} ファイルを変更",
+      "partialTitle": "このターンのファイル変更を完全には取得できませんでした",
+      "review": "レビュー",
+      "partial": "正確に取得できた変更のみ表示しています",
+      "showMore": "さらに {{count}} ファイルを表示",
+      "reviewRemaining": "残り {{count}} ファイルをレビューで表示",
       "showLess": "折りたたむ"
     },
     "agentActions": {

@@ -4470,6 +4470,14 @@
       "spawnFailed": "Failed to start terminal: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "Changes from this turn",
+        "currentWorkspace": "Current workspace",
+        "localOnly": "Exact turn changes are not available for remote sessions yet.",
+        "partialNotice": "This turn includes command or tool writes that could not be tracked exactly. Only the captured subset is shown; it is not a complete patch.",
+        "emptyTitle": "No recorded changes",
+        "emptyDesc": "The recorded patch for this turn has no displayable file changes."
+      },
       "fileCount_one": "{{count}} file",
       "fileCount_other": "{{count}} files",
       "emptyTitle": "No changes yet",
@@ -6188,9 +6196,13 @@
       "DEVICE_LINK_CONTROL_DISABLED": "Control for this device is off; the message was not sent.",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "Attachment transfer failed; the message was not sent. Please try again."
     },
-    "generatedFiles": {
-      "title": "Files created this turn",
-      "showMore": "Show {{count}} more",
+    "turnChanges": {
+      "title": "Changed {{count}} files",
+      "partialTitle": "File changes were not fully captured",
+      "review": "Review",
+      "partial": "Only the changes captured exactly are shown",
+      "showMore": "Show {{count}} more files",
+      "reviewRemaining": "Review {{count}} more files",
       "showLess": "Show less"
     },
     "agentActions": {

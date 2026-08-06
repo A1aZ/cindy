@@ -548,6 +548,7 @@ const fanOutHookControlWorkspaceProviderSource = createIpcFanOut(
 
 // ─── Maker Core 一阶段重构（新链路）── 与 cc-agent:* / codex:* 双轨并行 ─────
 const fanOutMakerEvent = createIpcFanOut('maker:event');
+const fanOutMakerTurnChangeSetUpdated = createIpcFanOut('maker:turn-change-set:updated');
 const fanOutMakerStatusChanged = createIpcFanOut('maker:status-changed');
 const fanOutMakerInputProjection = createIpcFanOut('maker:input:projection');
 const fanOutMakerInteractionRequest = createIpcFanOut('maker:interaction-request');
@@ -4702,6 +4703,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:list-available-agents'),
     getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi'): Promise<unknown> =>
       ipcRenderer.invoke('maker:get-capabilities', agentKind),
+    listTurnChangeSets: (
+      sessionId: string,
+    ): Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]> =>
+      ipcRenderer.invoke('maker:turn-change-sets:list', sessionId),
+    getTurnChangeSets: (
+      sessionId: string,
+      ids: string[],
+    ): Promise<import('../shared/turnChangeSet').TurnChangeSetDetail[]> =>
+      ipcRenderer.invoke('maker:turn-change-sets:get', sessionId, ids),
 
     // workflow 逐 agent 进度树(只读)。读不到 / 解析失败返回 null,由 renderer 回退到
     // workflow 级卡片。数据源是 Claude Code 内部记录文件(见 main workflow-progress/reader)。
@@ -5674,6 +5684,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 事件订阅
     onEvent: fanOutMakerEvent,
+    onTurnChangeSetUpdated: fanOutMakerTurnChangeSetUpdated,
     onStatusChanged: fanOutMakerStatusChanged,
     onInputProjection: fanOutMakerInputProjection,
     onInteractionRequest: fanOutMakerInteractionRequest,
@@ -5686,6 +5697,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // dev-only 调用, prod renderer 不会 HMR 也不会调。
     __resetMakerFanOuts: (): void => {
       fanOutMakerEvent.__reset();
+      fanOutMakerTurnChangeSetUpdated.__reset();
       fanOutMakerStatusChanged.__reset();
       fanOutMakerInputProjection.__reset();
       fanOutMakerInteractionRequest.__reset();

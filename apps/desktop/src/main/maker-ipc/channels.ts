@@ -7,6 +7,8 @@
 
 export const MAKER_INVOKE = {
   CREATE_SESSION: 'maker:create-session',
+  TURN_CHANGE_SETS_LIST: 'maker:turn-change-sets:list',
+  TURN_CHANGE_SETS_GET: 'maker:turn-change-sets:get',
   MARK_ORCA_ROLE: 'maker:mark-orca-role',
   /**
    * F-COLLAB: 中途开关协同模式 (Orca workflow toggle)。
@@ -727,6 +729,7 @@ export const MAKER_SEND = {
 
 export const MAKER_PUSH = {
   EVENT: 'maker:event',
+  TURN_CHANGE_SET_UPDATED: 'maker:turn-change-set:updated',
   STATUS_CHANGED: 'maker:status-changed',
   /** 用户从独立 Computer Use 授权引导浮窗主动取消。 */
   COMPUTER_PERMISSION_GUIDE_CANCELLED: 'maker:computer:permission-guide-cancelled',

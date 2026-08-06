@@ -48,7 +48,11 @@ import { Spinner } from '@/components/ui/spinner';
 import { useMessageNavRailPreference } from '@/hooks/useMessageNavRailPreference';
 import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
 import type { KnownLocalFileRef } from '@/lib/localPathResolver';
-import { collectGeneratedFiles, type GeneratedFileRef } from '@/lib/generatedFiles';
+import {
+  isRemoteSessionSticky,
+  makerApiFor,
+  subscribeTurnChangeSetUpdated,
+} from '@/lib/makerTransport';
 import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
 import {
@@ -155,7 +159,7 @@ import { NewMessageIndicator } from './NewMessageIndicator';
 import { ThinkingCard } from './ThinkingCard';
 import { AgentActionsBlock } from './AgentActionsBlock';
 import { AgentTaskCard } from './AgentTaskCard';
-import { GeneratedFilesCard } from './GeneratedFilesCard';
+import { TurnChangesCard } from './TurnChangesCard';
 import { WorkGroupBlock, type WorkGroupChild } from './WorkGroupBlock';
 import {
   extractAnchorCardId,
@@ -213,6 +217,7 @@ import { useNavigationKeyListener } from './useNavigationKeyListener';
 import { suppressScrollbarActivation } from '@/lib/scrollbarAutoHide';
 import { collectAssistantTurnUsageDetails } from '@/lib/userTurnUsage';
 import type { TurnUsageDetails } from '../../../shared/turnUsageDetails';
+import type { TurnChangeSetSummary } from '../../../shared/turnChangeSet';
 
 interface MessageStreamProps {
   /** Active session id — used to reset scroll state on session switch. */
@@ -318,16 +323,11 @@ type ForkOriginRenderItem = {
   parentSessionId: string;
   forkedAtMessageId: string;
 };
-type GeneratedFilesRenderItem = {
-  /** 每个 user turn 结尾聚合的「本轮 agent 新建文件」卡(Codex artifact 卡对标)。
-   *  纯派生自 turn 内 tool_use;存在性过滤在组件里做,全不存在则整卡不渲染。 */
-  type: 'generated_files';
+type TurnChangesRenderItem = {
+  /** Exact provider patches attached to one visible user turn. */
+  type: 'turn_changes';
   key: string;
-  files: GeneratedFileRef[];
-  /** 本轮首条消息时间(unix ms);command 候选的时间窗下界校验用,不可得为 null。 */
-  turnStartMs: number | null;
-  /** 下一条 user 边界时间(unix ms);已结束 turn 的 command 候选时间窗上界。 */
-  turnEndMs: number | null;
+  changeSet: TurnChangeSetSummary;
 };
 
 /** 原子工作子项:tool / agent task / thinking / assistant 工作文字。 */
@@ -358,7 +358,7 @@ export type RenderItem =
   | ToolSegmentRenderItem
   | AgentTaskRenderItem
   | ForkOriginRenderItem
-  | GeneratedFilesRenderItem
+  | TurnChangesRenderItem
   | {
       /** tool-result-media: 把 tool_result 里的 xdt_image_url(s) / xdt_video_urls
        *  提取出来作为独立视觉消息渲染,跳出 tool_segment 折叠卡片。统一容器,
@@ -905,8 +905,8 @@ export function buildRenderItems(
      * 「父调用在不在 messages 里」做的归属判定都不可信,必须放宽而不是丢弃。
      */
     historyWindowIncomplete?: boolean;
-    /** 会话工作目录:把 tool_use 里的相对路径解析成绝对路径供「本轮产出文件」卡使用。 */
-    workingDir?: string;
+    /** Main-persisted exact patches, anchored to their visible user message. */
+    turnChangeSets?: readonly TurnChangeSetSummary[];
   },
 ): {
   items: RenderItem[];
@@ -1051,46 +1051,30 @@ export function buildRenderItems(
     pendingSegmentGhostCards = [];
   };
 
-  // 「本轮产出文件」卡:按 user turn 切片派生新建文件,在**下一个** user 边界
-  // (或流末尾)把上一轮的产出 flush 到该轮所有内容之下。turnStartIdx 指向当前
-  // turn 的首条消息。workingDir 缺省时跳过(无从解析相对路径,不出卡)。
-  const workingDir = opts?.workingDir ?? '';
   let turnStartIdx = 0;
-  const flushGeneratedFiles = (lo: number, hi: number): void => {
-    if (!workingDir || hi <= lo) return;
-    const slice = messages.slice(lo, hi);
-    const files = collectGeneratedFiles(slice, workingDir);
-    if (files.length === 0) return;
-    // 本轮时间窗:下界取切片内最早 createdAt;上界取 hi 处的下一条 user
-    // 边界。历史 command 候选必须同时落在这个窗口内,否则后续 turn 在同一路径
-    // 创建/改写文件时,旧卡会被当前 stat 的新时间戳错误点亮(PR #1835 review)。
-    let turnStartMs: number | null = null;
-    for (const m of slice) {
-      const ts = m.createdAt ? Date.parse(m.createdAt) : NaN;
-      if (Number.isFinite(ts) && (turnStartMs === null || ts < turnStartMs)) turnStartMs = ts;
+  const flushTurnChanges = (lo: number, hi: number): void => {
+    if (hi <= lo) return;
+    const anchorClientId = messages[lo]?.clientId;
+    if (!anchorClientId) return;
+    const changeSets = (opts?.turnChangeSets ?? []).filter(
+      (changeSet) => changeSet.anchorClientId === anchorClientId,
+    );
+    for (const changeSet of changeSets) {
+      items.push({
+        type: 'turn_changes',
+        key: `turnchanges-${changeSet.id}`,
+        changeSet,
+      });
     }
-    const boundaryCreatedAt = hi < messages.length ? messages[hi]?.createdAt : undefined;
-    const parsedTurnEndMs = boundaryCreatedAt ? Date.parse(boundaryCreatedAt) : NaN;
-    const turnEndMs = Number.isFinite(parsedTurnEndMs) ? parsedTurnEndMs : null;
-    // key 锚定该 turn 首条消息 clientId,窗口滚动 / 流式增量下稳定。
-    items.push({
-      type: 'generated_files',
-      key: `genfiles-${messages[lo].clientId}`,
-      files,
-      turnStartMs,
-      turnEndMs,
-    });
   };
-
   let i = 0;
   while (i < messages.length) {
     const msg = messages[i];
 
-    // user turn 边界(非 steer、非合成触发):先 flush 上一轮的产出文件卡,
-    // 再进入常规处理。第一条 user 消息时 lo==hi,flushGeneratedFiles 自身 no-op。
+    // User turn boundary: attach the sealed patch after the turn it belongs to.
     if (msg.role === 'user' && msg.delivery !== 'steer' && !msg.isSyntheticTrigger) {
       flushSegment();
-      flushGeneratedFiles(turnStartIdx, i);
+      flushTurnChanges(turnStartIdx, i);
       turnStartIdx = i;
     }
 
@@ -1389,7 +1373,7 @@ export function buildRenderItems(
   // ends mid-segment (no closing text yet).
   flushSegment();
   // 末尾 turn 的产出文件卡(没有后续 user 边界触发)。
-  flushGeneratedFiles(turnStartIdx, messages.length);
+  flushTurnChanges(turnStartIdx, messages.length);
 
   if (taskUpdates) {
     // 父会话自己的 Bash 调用集合:local_bash 任务卡(#247 的「后台命令」卡,含
@@ -2405,6 +2389,41 @@ export function MessageStream({
     }
   }, [messages]);
 
+  const [turnChangeSets, setTurnChangeSets] = useState<TurnChangeSetSummary[]>([]);
+  useEffect(() => {
+    if (!sessionId || remoteHostId !== null || isRemoteSessionSticky(sessionId)) {
+      setTurnChangeSets([]);
+      return;
+    }
+    let cancelled = false;
+    setTurnChangeSets([]);
+    const off = subscribeTurnChangeSetUpdated(sessionId, ({ summary }) => {
+      if (cancelled) return;
+      setTurnChangeSets((current) => {
+        const next = current.filter((item) => item.id !== summary.id);
+        next.push(summary);
+        next.sort((a, b) => a.createdAt - b.createdAt);
+        return next;
+      });
+    });
+    void window.electronAPI.maker.listTurnChangeSets(sessionId)
+      .then((next) => {
+        if (cancelled) return;
+        setTurnChangeSets((current) => {
+          const merged = new Map(next.map((item) => [item.id, item]));
+          for (const item of current) merged.set(item.id, item);
+          return Array.from(merged.values()).sort((a, b) => a.createdAt - b.createdAt);
+        });
+      })
+      .catch(() => {
+        // A live push may already have arrived; keep it instead of clearing the card.
+      });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [remoteHostId, sessionId]);
+
   // 全量 build:折叠 / 丢弃 / 反向膨胀的所有规则一次性吸收 — 窗口看到的就是
   // 用户看到的。流式中每 token messages 引用变 → 这里跑一次 O(n) 单线性扫描,
   // 实测 N=1000 < 2ms (Windows),如果未来发现瓶颈再走增量化(out of scope)。
@@ -2412,9 +2431,9 @@ export function MessageStream({
     () =>
       buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
         historyWindowIncomplete: Boolean(hasMoreMessages),
-        workingDir,
+        turnChangeSets,
       }),
-    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages, workingDir],
+    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages, turnChangeSets],
   );
   const assistantsWithFollowingUserBoundary = useMemo(
     () => collectAssistantsWithFollowingUserBoundary(messages),
@@ -3723,13 +3742,13 @@ export function MessageStream({
                       return <ForkOriginMarker key={item.key} onClick={onOpenForkOrigin} />;
                     }
 
-                    if (item.type === 'generated_files') {
+                    if (item.type === 'turn_changes') {
+                      if (!sessionId) return null;
                       return (
-                        <GeneratedFilesCard
+                        <TurnChangesCard
                           key={item.key}
-                          files={item.files}
-                          turnStartMs={item.turnStartMs}
-                          turnEndMs={item.turnEndMs}
+                          sessionId={sessionId}
+                          changeSet={item.changeSet}
                         />
                       );
                     }

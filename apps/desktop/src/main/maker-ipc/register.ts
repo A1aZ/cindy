@@ -451,6 +451,16 @@ import {
 } from './handoffWorktree.js';
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
+import {
+  TURN_CHANGE_SET_DETAIL_ID_LIMIT,
+  beginTurnChangeSet,
+  clearPendingTurnChangeSets,
+  finalizeTurnChangeSet,
+  getTurnChangeSets,
+  listTurnChangeSets,
+  noteTurnDiffEvent,
+  waitForTurnChangeSetSeal,
+} from '../turn-change-set/store.js';
 import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
 import { registerNewMakerWorktreePreferenceHandler } from './newMakerWorktreePreferenceHandler.js';
 import { registerNewMakerWorktreeBranchPreferenceHandler } from './newMakerWorktreeBranchPreferenceHandler.js';
@@ -3107,6 +3117,7 @@ function settleSilentStopDone(
   sessionId: string,
   reason: 'exhausted' | 'skip' | 'send-failed',
 ): void {
+  void finalizeTurnChangeSet(sessionId, null, 'complete');
   sessionTurnActivityTracker.scheduleIdleAfterTerminalBroadcast(sessionId);
   noteClaudeSessionTurnState(sessionId, false);
   agentInputCoordinatorHolder?.onTurnEvent(sessionId, 'done');
@@ -3267,9 +3278,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   registration.disposers.push(() => {
     ghostSessionTap.dispose();
     installInteractionLifecycleObserver(session, null);
+    clearPendingTurnChangeSets(session.id);
   });
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      noteTurnDiffEvent(session.id, event);
       ghostSessionTap.handleEvent(
         event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
       );
@@ -3280,6 +3293,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      // Exact patches are main-owned durable data. They have a dedicated summary push and
+      // on-demand detail IPC; forwarding the raw diff through maker:event would duplicate a
+      // potentially multi-megabyte payload to every renderer and device-link controller.
+      if (event.type === 'turn_diff') return;
       // 自动续跑的 pending 不能只靠 status(isRunning=true) 清理：Pi/Claude 的
       // terminal-only 路径可能首个事件就是 error。Session 已把 host-owned token
       // 盖到事件上，首个匹配 token 的事件即视为 provider accepted。
@@ -3423,6 +3440,16 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
       }
       if (event.type === 'done') {
+        const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
+        const isSilentStopDone =
+          (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          finalizeTurnChangeSet(
+            session.id,
+            typeof rawTurn?.id === 'string' ? rawTurn.id : null,
+            rawTurn && rawTurn.status !== 'completed' ? 'partial' : 'complete',
+          );
+        }
         // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
         // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
         const doneAttemptToken = event.turnAttemptToken;
@@ -3430,8 +3457,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           autoResumeBookkeeping.settleOutcome(session.id, doneAttemptToken, 'failed');
           interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
         }
-        const isSilentStopDone =
-          (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
         // silent-stop done:自动续跑会在 1.5s 后启动新 turn(或弹耗尽横幅),
         // 不标 idle/不触发 goal idle/不通知 coordinator done——避免 renderer
         // 在 500ms 完成去抖窗口内显示假完成通知,下一个 turn 开始后又跳回 running。
@@ -3468,6 +3493,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       let isPlannedUpgradeClose = false;
       let isRemoteAuthRetry = false;
       if (isTerminalTurnErrorEvent(event)) {
+        finalizeTurnChangeSet(session.id, null, 'partial');
         // **任何**终态失败都先把上一条重连记录钉成失败 —— 不管这次错误本身是否值得自愈。
         // 只在"命中白名单、准备再接管"时才 settle 的话,非白名单的终态(认证 / 计费 /
         // invalid-request)会让记录悬空,随后一个无关 turn 的首个产出事件就把它标成
@@ -4727,6 +4753,32 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.LIST_AVAILABLE_AGENTS, () => {
     return maker.listAvailableAgents();
   });
+
+  ipcMain.handle(MAKER_INVOKE.TURN_CHANGE_SETS_LIST, async (event, sessionId: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+      throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+    }
+    return listTurnChangeSets(sessionId);
+  });
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SETS_GET,
+    async (event, sessionId: unknown, ids: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (
+        !Array.isArray(ids)
+        || ids.length > TURN_CHANGE_SET_DETAIL_ID_LIMIT
+        || ids.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set ids');
+      }
+      return getTurnChangeSets(sessionId, ids as string[]);
+    },
+  );
 
   ipcMain.handle(MAKER_INVOKE.ANY_SESSION_IN_TURN, () => {
     return anySessionInTurn(maker);
@@ -9610,18 +9662,32 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }),
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
-    beforeDispatchUserTurn: (sessionId, item) => {
+    beforeDispatchUserTurn: async (sessionId, item) => {
       autoResumeBookkeeping.markReplacementDispatching(sessionId, item.clientId);
+      await waitForTurnChangeSetSeal(sessionId);
+      await finalizeTurnChangeSet(sessionId, null, 'partial');
+      await waitForTurnChangeSetSeal(sessionId);
+      const liveSession = maker.getSession(sessionId);
+      if (liveSession) {
+        beginTurnChangeSet({
+          sessionId,
+          anchorClientId: item.clientId,
+          provider: liveSession.agentKind,
+          cwd: liveSession.workDir,
+          remote: liveSession.remoteHostId !== null,
+        });
+      }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
       // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
       // 结构上不可能被误认。详见 uiContinuationSignal 的模块注释。
       publishUiTurnDispatching(sessionId, item.clientId);
-      return gitSnapshotCoordinator?.onTurnStart(sessionId);
+      await gitSnapshotCoordinator?.onTurnStart(sessionId);
     },
     onUndispatchedUserTurn: (sessionId, item, disposition) => {
       // 目标轮落库了却没能 dispatch(取消 / 失败): 记账该立刻还回去, 而不是等超时。
       publishUiTurnUndispatched(sessionId, item.clientId);
+      clearPendingTurnChangeSets(sessionId);
       gitSnapshotCoordinator?.onTurnAbort(sessionId);
       autoResumeBookkeeping.rollbackReplacementPreview(sessionId, item.clientId);
       const autoResume = item.autoResume === true;

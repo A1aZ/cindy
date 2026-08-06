@@ -5293,6 +5293,16 @@ interface ElectronAPI {
     xaiOAuthCancel: () => Promise<{ authorized: boolean }>;
 
     // Push channels
+    listTurnChangeSets: (
+      sessionId: string,
+    ) => Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]>;
+    getTurnChangeSets: (
+      sessionId: string,
+      ids: string[],
+    ) => Promise<import('../shared/turnChangeSet').TurnChangeSetDetail[]>;
+    onTurnChangeSetUpdated: (
+      cb: (data: unknown, ownerStamp?: unknown) => void,
+    ) => () => void;
     onEvent: (cb: (data: unknown) => void) => () => void;
     onStatusChanged: (cb: (data: unknown) => void) => () => void;
     onInteractionRequest: (cb: (data: unknown) => void) => () => void;

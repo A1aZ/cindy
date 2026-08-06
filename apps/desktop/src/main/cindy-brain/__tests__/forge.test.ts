@@ -25,6 +25,7 @@ import {
   type ForgeScaffoldTemplate,
 } from '../forge';
 import { GhostManager } from '../GhostManager';
+import { sameForgeScaffoldParentIdentity } from '../forgeScaffoldIdentity';
 import { GHOST_SIGNATURE_FILE, signGhostPackage } from '../ghostSignature';
 import { GHOST_INSTALL_MANIFEST_MAX_BYTES } from '../../../shared/ghost';
 
@@ -48,13 +49,7 @@ let workDir: string;
 
 async function testScaffoldWriter(request: ForgeScaffoldWriteRequest) {
   const parentStats = await fs.promises.lstat(request.parentDir, { bigint: true });
-  if (!parentStats.isDirectory() || parentStats.isSymbolicLink()) {
-    return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'unsafe parent' };
-  }
-  if (
-    !(request.expectedParent.dev === 0n && request.expectedParent.ino === 0n) &&
-    (parentStats.dev !== request.expectedParent.dev || parentStats.ino !== request.expectedParent.ino)
-  ) {
+  if (!sameForgeScaffoldParentIdentity(parentStats, request.expectedParent)) {
     return { ok: false as const, errorCode: 'INTERNAL' as const, message: 'parent changed' };
   }
   const target = path.join(request.parentDir, request.targetName);
@@ -1053,6 +1048,29 @@ describe('packGhostDir', () => {
 });
 
 describe('scaffoldGhostDir', () => {
+  it('fails closed when the scaffold parent has no trustworthy filesystem identity', async () => {
+    const parentStat = await fs.promises.lstat(workDir, { bigint: true });
+    const realPath = await fs.promises.realpath(workDir);
+    expect(
+      sameForgeScaffoldParentIdentity(parentStat, { realPath, dev: 0n, ino: 0n }),
+    ).toBe(false);
+
+    const zeroIdentityStat = new Proxy(parentStat, {
+      get(target, key) {
+        if (key === 'dev' || key === 'ino') return 0n;
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    expect(
+      sameForgeScaffoldParentIdentity(zeroIdentityStat, {
+        realPath,
+        dev: parentStat.dev,
+        ino: parentStat.ino,
+      }),
+    ).toBe(false);
+  });
+
   it('passes the stable parent identity as lossless bigint values', async () => {
     const parentStat = await fs.promises.lstat(workDir, { bigint: true });
     let captured: ForgeScaffoldWriteRequest | undefined;

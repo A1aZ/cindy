@@ -1587,7 +1587,39 @@ export class GhostManager {
         };
       }
     }
-    const dir = path.join(this.contentRootDir(), id);
+    const contentRoot = this.contentRootDir();
+    const dir = path.join(contentRoot, id);
+    if (!this.isRealDirChild(contentRoot, id)) {
+      return {
+        rejection: { code: 'state-changed', reason: '插件安装目录在确认后发生了变化,请重新确认' },
+      };
+    }
+    const marker = path.join(dir, DISABLED_MARKER_FILE);
+    let markerExisted = false;
+    try {
+      try {
+        if (classifyGhostDirEntrySync(marker) !== 'file') {
+          throw new Error('ghost disabled marker is not a regular file');
+        }
+        markerExisted = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      // 先提交兼容镜像，再提交权威 receipt。否则 marker 失败会留下“返回成功但实际
+      // 启停态与 receipt 矛盾”的部分成功。没有状态变化时不触碰 marker。
+      if (opts.enable) {
+        if (markerExisted) await fs.promises.rm(marker, { force: true });
+      } else if (!markerExisted) {
+        await fs.promises.writeFile(marker, '', { flag: 'wx' });
+      }
+    } catch (err) {
+      return {
+        rejection: {
+          code: 'io',
+          reason: `启停标记写入失败:${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
     try {
       const localeResources = inspected.localeResources;
       const iconDataUrl = inspected.iconDataUrl;
@@ -1604,28 +1636,40 @@ export class GhostManager {
         { skillSourceDir: dir },
       );
     } catch (err) {
+      const markerChanged = opts.enable ? markerExisted : !markerExisted;
+      if (markerChanged) {
+        try {
+          if (!this.isRealDirChild(contentRoot, id)) {
+            throw new Error('ghost install directory changed before marker rollback');
+          }
+          if (markerExisted) {
+            try {
+              if (classifyGhostDirEntrySync(marker) !== 'file') {
+                throw new Error('ghost disabled marker is not a regular file');
+              }
+            } catch (markerError) {
+              if ((markerError as NodeJS.ErrnoException).code !== 'ENOENT') throw markerError;
+              await fs.promises.writeFile(marker, '', { flag: 'wx' });
+            }
+          } else {
+            await fs.promises.rm(marker, { force: true });
+          }
+        } catch (rollbackErr) {
+          (this.options.log?.error ?? this.options.log?.warn)?.call(
+            this.options.log,
+            'ghost reapproval receipt failed and marker rollback also failed',
+            {
+              id,
+              error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            },
+          );
+        }
+      }
       return {
         rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
       };
     }
     this.untrustedApprovals.delete(this.isolationKey(id));
-    // 与 setEnabled 同款:启停镜像同步维护,回滚到旧客户端不错位。写入前先 no-follow
-    // 复核 marker 是受管普通文件(B-3):安装目录可变,marker 被换成符号链接时裸
-    // writeFile 会穿透截断链接目标,与 setEnabled/writeDisabledMarkerSync 判据保持一致。
-    try {
-      const marker = path.join(dir, DISABLED_MARKER_FILE);
-      try {
-        if (classifyGhostDirEntrySync(marker) !== 'file') {
-          throw new Error('ghost disabled marker is not a regular file');
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      }
-      if (opts.enable) await fs.promises.rm(marker, { force: true });
-      else await fs.promises.writeFile(marker, '');
-    } catch {
-      // 镜像写不动不影响批准事实;receipt 是权威。
-    }
     this.options.log?.info('ghost reapproved from installed dir', {
       id,
       enabled: opts.enable,

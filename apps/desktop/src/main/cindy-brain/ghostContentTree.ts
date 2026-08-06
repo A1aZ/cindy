@@ -180,6 +180,14 @@ function sameFileIdentity(
   return a.dev === b.dev && a.ino === b.ino;
 }
 
+function sameStableFileState(before: fs.BigIntStats, after: fs.BigIntStats): boolean {
+  return after.isFile() &&
+    sameFileIdentity(before, after) &&
+    before.size === after.size &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs;
+}
+
 async function captureGhostContentRootIdentity(rootDir: string): Promise<GhostContentRootIdentity> {
   const realPath = await fs.promises.realpath(rootDir);
   const [pathStat, realStat] = await Promise.all([
@@ -371,6 +379,10 @@ export async function hashGhostContentFiles(
 
       const stream = handle.createReadStream({ autoClose: false });
       for await (const chunk of stream) fileHash.update(chunk as Buffer);
+      const afterReadStat = await handle.stat({ bigint: true });
+      if (!sameStableFileState(handleStat, afterReadStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
       assertGhostContentAncestorIdentities(
         ancestorIdentities,
         await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),

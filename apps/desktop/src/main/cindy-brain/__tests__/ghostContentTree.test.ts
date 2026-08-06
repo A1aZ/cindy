@@ -9,8 +9,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   classifyGhostDirEntry,
@@ -273,6 +274,58 @@ describe('hashGhostContentFiles', () => {
     if (!(await tryLinkFile(outside, path.join(root, 'main.js')))) return;
 
     await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow();
+  });
+
+  it('rejects a same-inode leaf file rewritten while its bytes are being hashed', async () => {
+    const root = path.join(workDir, 'plugin');
+    const file = path.join(root, 'main.js');
+    const originalBytes = Buffer.from('old-prefix|old-suffix');
+    const replacementBytes = Buffer.from('new-prefix|new-suffix');
+    expect(replacementBytes.byteLength).toBe(originalBytes.byteLength);
+    await fs.promises.mkdir(root, { recursive: true });
+    await fs.promises.writeFile(file, originalBytes);
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    const splitAt = 'old-prefix|'.length;
+    const realOpen = fs.promises.open;
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.promises.open>
+    ) => {
+      const handle = await realOpen(...args);
+      if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      return new Proxy(handle, {
+        get(target, key) {
+          if (key === 'createReadStream') {
+            return () => Readable.from((async function*() {
+              const first = Buffer.alloc(splitAt);
+              const firstRead = await handle.read(first, 0, first.byteLength, 0);
+              yield first.subarray(0, firstRead.bytesRead);
+
+              await fs.promises.writeFile(file, replacementBytes);
+              const changedAt = new Date(Date.now() + 5_000);
+              await fs.promises.utimes(file, changedAt, changedAt);
+
+              const rest = Buffer.alloc(replacementBytes.byteLength - splitAt);
+              const restRead = await handle.read(rest, 0, rest.byteLength, splitAt);
+              yield rest.subarray(0, restRead.bytesRead);
+            })());
+          }
+          const value = Reflect.get(target, key);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+    }) as typeof fs.promises.open);
+    try {
+      await expect(
+        hashGhostContentFiles(root, tree.files, tree.rootIdentity),
+      ).rejects.toThrow(/entry changed while reading/);
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 
   it('rejects the content root being replaced between collection and hashing', async () => {

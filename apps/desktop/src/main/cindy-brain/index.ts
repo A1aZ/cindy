@@ -838,6 +838,12 @@ export async function suspendAllGhosts(): Promise<void> {
   for (const warning of skillCleanup.warnings) {
     log.warn('ghost owner skill cleanup warning', { warning });
   }
+  if (skillCleanup.blockers.length > 0) {
+    for (const blocker of skillCleanup.blockers) {
+      log.error('ghost owner skill cleanup blocked account boundary', { blocker });
+    }
+    throw new Error(`ghost owner skill cleanup incomplete (${skillCleanup.blockers.length})`);
+  }
 }
 let ipcRegistered = false;
 

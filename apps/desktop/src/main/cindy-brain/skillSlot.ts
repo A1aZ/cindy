@@ -105,19 +105,17 @@ export interface ReconcileGhostSkillLinksResult {
  * boundary must revoke all Cindy-owned projections before the next owner is
  * visible.
  *
- * Best-effort by contract: the shared skill roots are world-writable and shared
- * with other tools, so a single unrelated bad entry (a self-referential link, an
- * inaccessible target segment) must NOT abort the whole revocation. Every failure
- * is collected into `warnings` and the sweep continues; callers log the warnings
- * but proceed with the account boundary. Throwing here would both strand old
- * owner links across the boundary (I-2) and block logout entirely (the teardown
- * path does not wrap this call).
+ * The sweep keeps unrelated foreign-link failures as warnings, but separately
+ * reports blockers whenever it cannot prove a shared root is clean or cannot
+ * remove an identified owner projection. The account boundary must not expose a
+ * new owner while one of those blockers remains (I-2).
  */
 export async function removeGhostSkillLinksForRoots(
   managedRoots: readonly string[],
   homeDir?: string,
-): Promise<{ changed: boolean; warnings: string[] }> {
+): Promise<{ changed: boolean; warnings: string[]; blockers: string[] }> {
   const warnings: string[] = [];
+  const blockers: string[] = [];
   let changed = false;
   const paths = sharedGlobalSkillsPaths(homeDir);
   const lexicalRoots = [...new Set(managedRoots.map(normalizeForCompare))];
@@ -126,17 +124,21 @@ export async function removeGhostSkillLinksForRoots(
     try {
       const rootStat = await fsp.lstat(root);
       if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-        warnings.push(`Managed owner skill root is not a regular directory: ${root}`);
+        const message = `Managed owner skill root is not a regular directory: ${root}`;
+        warnings.push(message);
+        blockers.push(message);
         continue;
       }
       resolvedRoots.push(normalizeForCompare(await fsp.realpath(root)));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        warnings.push(`Unable to resolve managed owner skill root ${root}: ${(err as Error).message}`);
+        const message = `Unable to resolve managed owner skill root ${root}: ${(err as Error).message}`;
+        warnings.push(message);
+        blockers.push(message);
       }
     }
   }
-  if (lexicalRoots.length === 0) return { changed, warnings };
+  if (lexicalRoots.length === 0) return { changed, warnings, blockers };
 
   for (const dir of [paths.sharedSkillsDir, paths.claudeSkillsDir, paths.codexSkillsDir]) {
     let entries: Dirent[];
@@ -144,52 +146,67 @@ export async function removeGhostSkillLinksForRoots(
       entries = await fsp.readdir(dir, { withFileTypes: true });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      warnings.push(`Unable to read global skill root ${dir}: ${(err as Error).message}`);
+      const message = `Unable to read global skill root ${dir}: ${(err as Error).message}`;
+      warnings.push(message);
+      blockers.push(message);
       continue;
     }
     for (const entry of entries) {
-      if (!entry.isSymbolicLink()) continue;
       const linkPath = path.join(dir, entry.name);
-      let target: string;
-      let roots = resolvedRoots;
       try {
-        target = normalizeForCompare(await fsp.realpath(linkPath));
+        // Dirent.d_type can be unknown on network filesystems and can become stale
+        // before this sweep reaches the entry. lstat is the ownership/type verdict.
+        if (!(await fsp.lstat(linkPath)).isSymbolicLink()) continue;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        const message = `Unable to inspect global skill entry ${linkPath}: ${(err as Error).message}`;
+        warnings.push(message);
+        blockers.push(message);
+        continue;
+      }
+      let rawTarget: string;
+      try {
+        rawTarget = await fsp.readlink(linkPath);
+      } catch (readlinkError) {
+        if ((readlinkError as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        const message = `Unable to read owner skill link ${linkPath}: ${(readlinkError as Error).message}`;
+        warnings.push(message);
+        blockers.push(message);
+        continue;
+      }
+      const lexicalTarget = normalizeForCompare(path.resolve(path.dirname(linkPath), rawTarget));
+      let managed = lexicalRoots.some((root) => isSameOrInside(lexicalTarget, root));
+      try {
+        const resolvedTarget = normalizeForCompare(await fsp.realpath(linkPath));
+        managed ||= resolvedRoots.some((root) => isSameOrInside(resolvedTarget, root));
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          // 无关的坏链(自环 ELOOP、目标段 EACCES)不能中断整轮撤链:记 warning 跳过。
+          // A resolvable raw target still lets us distinguish an unrelated bad link
+          // from an owner projection whose target is temporarily inaccessible.
           warnings.push(`Unable to resolve owner skill link ${linkPath}: ${(err as Error).message}`);
-          continue;
         }
-        let rawTarget: string;
-        try {
-          rawTarget = await fsp.readlink(linkPath);
-        } catch (readlinkError) {
-          if ((readlinkError as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          warnings.push(
-            `Unable to read dangling owner skill link ${linkPath}: ${(readlinkError as Error).message}`,
-          );
-          continue;
-        }
-        target = normalizeForCompare(path.resolve(path.dirname(linkPath), rawTarget));
-        roots = lexicalRoots;
       }
-      if (!roots.some((root) => isSameOrInside(target, root))) continue;
+      if (!managed) continue;
       try {
         const stat = await fsp.lstat(linkPath);
         if (!stat.isSymbolicLink()) {
-          warnings.push(`Skipped owner skill link that changed before removal: ${linkPath}`);
+          const message = `Skipped owner skill link that changed before removal: ${linkPath}`;
+          warnings.push(message);
+          blockers.push(message);
           continue;
         }
         await fsp.unlink(linkPath);
         changed = true;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        warnings.push(`Unable to remove owner skill link ${linkPath}: ${(err as Error).message}`);
+        const message = `Unable to remove owner skill link ${linkPath}: ${(err as Error).message}`;
+        warnings.push(message);
+        blockers.push(message);
         continue;
       }
     }
   }
-  return { changed, warnings };
+  return { changed, warnings, blockers };
 }
 
 interface ReconcileOptions {

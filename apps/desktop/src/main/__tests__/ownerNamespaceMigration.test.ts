@@ -564,6 +564,41 @@ it('fails closed when owner projection roots cannot be enumerated', () => {
   }
 });
 
+it('lstats owner projection namespaces when readdir returns unknown Dirent types', async () => {
+  const root = await tempRoot();
+  const ownerKey = dataOwnerStorageKey('cloud-a');
+  await fs.mkdir(path.join(root, 'owners', ownerKey), { recursive: true });
+  const directoryType = vi.spyOn(fsSync.Dirent.prototype, 'isDirectory').mockReturnValue(false);
+  try {
+    expect(listLegacyOwnerProjectionRoots(root)).toEqual(expect.arrayContaining([
+      path.join(root, 'owners', ownerKey, 'brain'),
+      path.join(root, 'owners', ownerKey, 'cindy-brain'),
+      path.join(root, 'owners', ownerKey, 'ghost-install-state'),
+    ]));
+  } finally {
+    directoryType.mockRestore();
+  }
+});
+
+it('fails closed when an owner projection namespace is replaced by a link', async () => {
+  const root = await tempRoot();
+  const external = await tempRoot();
+  const ownerKey = dataOwnerStorageKey('cloud-a');
+  await fs.mkdir(path.join(root, 'owners'), { recursive: true });
+  try {
+    await fs.symlink(
+      external,
+      path.join(root, 'owners', ownerKey),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+  } catch {
+    return;
+  }
+  expect(() => listLegacyOwnerProjectionRoots(root)).toThrow(
+    'owner projection namespace is not a regular directory',
+  );
+});
+
 describe('legacy Ghost plugin recovery', () => {
   it('persists a durable backfill queue before moving a legacy plugin', async () => {
     const root = await tempRoot();

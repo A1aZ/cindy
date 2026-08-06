@@ -807,6 +807,140 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
   });
 
+  it('重新确认要求立即启用时，删除停用镜像失败必须拒绝且不提交批准', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const inspected = await manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    const marker = path.join(rootDir, 'hello', '.disabled');
+    const realRm = fs.promises.rm;
+    const rmSpy = vi.spyOn(fs.promises, 'rm').mockImplementation(async (target, options) => {
+      if (path.resolve(String(target)) === path.resolve(marker)) {
+        throw Object.assign(new Error('EACCES: marker locked'), { code: 'EACCES' });
+      }
+      return realRm(target, options);
+    });
+    try {
+      const result = await manager.reapproveInstalled('hello', {
+        enable: true,
+        expectedManifestSha256: inspected.manifestSha256,
+        expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+        expectedInstalledApproval: 'legacy-unapproved',
+      });
+      expect('rejection' in result && result.rejection.code).toBe('io');
+      expect(manager.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'legacy-unapproved' },
+      });
+      expect(fs.existsSync(marker)).toBe(true);
+    } finally {
+      rmSpy.mockRestore();
+    }
+  });
+
+  it('重新确认要求立即启用时，receipt 提交失败必须恢复原停用镜像', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const inspected = await manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    const marker = path.join(rootDir, 'hello', '.disabled');
+    const realRename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('hello.json')) throw new Error('state root unwritable');
+      return realRename(from, to);
+    });
+    try {
+      const result = await manager.reapproveInstalled('hello', {
+        enable: true,
+        expectedManifestSha256: inspected.manifestSha256,
+        expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+        expectedInstalledApproval: 'legacy-unapproved',
+      });
+      expect('rejection' in result && result.rejection.code).toBe('io');
+      expect(manager.list()[0]).toMatchObject({
+        enabled: false,
+        approval: { state: 'legacy-unapproved' },
+      });
+      expect(fs.existsSync(marker)).toBe(true);
+    } finally {
+      renameSpy.mockRestore();
+    }
+  });
+
+  it('重新确认不跟随确认后被换成 junction 的安装目录写删停用镜像', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const inspected = await manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    const dir = path.join(rootDir, 'hello');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-outside-'));
+    const outsideMarker = path.join(outside, '.disabled');
+    await fs.promises.writeFile(outsideMarker, 'sentinel');
+    const probe = path.join(workDir, 'reapprove-junction-probe');
+    try {
+      await fs.promises.symlink(outside, probe, process.platform === 'win32' ? 'junction' : 'dir');
+      await fs.promises.rm(probe, { force: true });
+    } catch {
+      await fs.promises.rm(outside, { recursive: true, force: true });
+      return;
+    }
+    const realInspect = manager.inspectInstalledReapproval.bind(manager);
+    const inspectSpy = vi.spyOn(manager, 'inspectInstalledReapproval').mockImplementation(async (ghostId) => {
+      const result = await realInspect(ghostId);
+      await fs.promises.rm(dir, { recursive: true, force: true });
+      await fs.promises.symlink(outside, dir, process.platform === 'win32' ? 'junction' : 'dir');
+      return result;
+    });
+    try {
+      const result = await manager.reapproveInstalled('hello', {
+        enable: true,
+        expectedManifestSha256: inspected.manifestSha256,
+        expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+        expectedInstalledApproval: 'legacy-unapproved',
+      });
+      expect('rejection' in result && result.rejection.code).toBe('state-changed');
+      expect(await fs.promises.readFile(outsideMarker, 'utf8')).toBe('sentinel');
+      expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(false);
+    } finally {
+      inspectSpy.mockRestore();
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('重新确认 receipt 失败回滚前目录被换成 junction 时不得写入外部目标', async () => {
+    await writeLegacyInstall('hello', goodManifest(), { disabled: true });
+    const inspected = await manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+    const dir = path.join(rootDir, 'hello');
+    const displaced = path.join(rootDir, 'hello-displaced');
+    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-rollback-'));
+    let linkCreated = false;
+    const realRename = fs.promises.rename;
+    const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {
+      if (String(to).endsWith('hello.json')) {
+        await realRename(dir, displaced);
+        try {
+          await fs.promises.symlink(outside, dir, process.platform === 'win32' ? 'junction' : 'dir');
+          linkCreated = true;
+        } catch {
+          await realRename(displaced, dir);
+        }
+        throw new Error('state root unwritable');
+      }
+      return realRename(from, to);
+    });
+    try {
+      const result = await manager.reapproveInstalled('hello', {
+        enable: true,
+        expectedManifestSha256: inspected.manifestSha256,
+        expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+        expectedInstalledApproval: 'legacy-unapproved',
+      });
+      expect('rejection' in result && result.rejection.code).toBe('io');
+      if (linkCreated) expect(fs.existsSync(path.join(outside, '.disabled'))).toBe(false);
+    } finally {
+      renameSpy.mockRestore();
+      await fs.promises.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('确认间隙 ghost.json 被换 → 拒(确认卡展示的与批准的必须是同一份字节)', async () => {
     await writeLegacyInstall('hello', goodManifest());
     const inspected = await manager.inspectInstalledReapproval('hello');

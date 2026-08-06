@@ -6196,6 +6196,11 @@
       "DEVICE_LINK_CONTROL_DISABLED": "Control for this device is off; the message was not sent.",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "Attachment transfer failed; the message was not sent. Please try again."
     },
+    "generatedFiles": {
+      "title": "Files created this message",
+      "showMore": "Show {{count}} more",
+      "showLess": "Show less"
+    },
     "turnChanges": {
       "title": "Changed {{count}} files",
       "partialTitle": "File changes were not fully captured",

@@ -6194,6 +6194,11 @@
       "DEVICE_LINK_CONTROL_DISABLED": "このデバイスの操作はオフです。メッセージは送信されていません。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "添付ファイルの転送に失敗しました。メッセージは送信されていません。もう一度お試しください。"
     },
+    "generatedFiles": {
+      "title": "このメッセージで作成されたファイル",
+      "showMore": "さらに {{count}} 件表示",
+      "showLess": "折りたたむ"
+    },
     "turnChanges": {
       "title": "{{count}} ファイルを変更",
       "partialTitle": "このターンのファイル変更を完全には取得できませんでした",

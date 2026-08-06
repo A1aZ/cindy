@@ -327,6 +327,58 @@ describe('buildRenderItems — key stability', () => {
     expect(items.indexOf(cards[0])).toBeGreaterThan(items.findIndex((item) => item.key === 'msg-a1'));
   });
 
+  it('keeps opaque command artifacts as fallback chips without duplicating exact files', () => {
+    const messages = [
+      mkUser('u1'),
+      mkTool('bash-1', 'Bash', { command: 'python gen.py > C:/work/out/report.xlsx' }),
+      mkResult('bash-result', 'tu-bash-1'),
+      mkUser('u2'),
+    ];
+    const exact: TurnChangeSetSummary = {
+      id: 'cs-opaque',
+      sessionId: 's1',
+      anchorClientId: 'u1',
+      provider: 'codex',
+      providerTurnId: 'turn-1',
+      cwd: 'C:/work',
+      state: 'partial',
+      workspaceState: 'applied',
+      isReversible: false,
+      incompleteReasons: ['opaque-tool'],
+      createdAt: 1,
+      completedAt: 2,
+      files: [],
+      fileCount: 0,
+      additions: 0,
+      deletions: 0,
+    };
+    const fallback = buildRenderItems(messages, undefined, undefined, {
+      workingDir: 'C:/work',
+      turnChangeSets: [exact],
+    }).items.filter((item): item is Extract<RenderItem, { type: 'generated_files' }> => item.type === 'generated_files');
+    expect(fallback).toHaveLength(1);
+    expect(fallback[0]?.files[0]?.name).toBe('report.xlsx');
+
+    const exactFile = {
+      ...exact,
+      files: [{
+        id: 'turn-1:out/report.xlsx',
+        path: 'out/report.xlsx',
+        oldPath: null,
+        status: 'added' as const,
+        additions: 1,
+        deletions: 0,
+      }],
+      fileCount: 1,
+      additions: 1,
+    };
+    const deduped = buildRenderItems(messages, undefined, undefined, {
+      workingDir: 'C:/work',
+      turnChangeSets: [exactFile],
+    }).items.filter((item): item is Extract<RenderItem, { type: 'generated_files' }> => item.type === 'generated_files');
+    expect(deduped).toHaveLength(0);
+  });
+
   it('streaming token append to an assistant message keeps the same item key', () => {
     const m1: ChatMessage = { ...mkAssistant('a1', 'partial'), isStreaming: true };
     const before = buildRenderItems([mkUser('u1'), m1]);

@@ -47,7 +47,8 @@ import type {
 import { Spinner } from '@/components/ui/spinner';
 import { useMessageNavRailPreference } from '@/hooks/useMessageNavRailPreference';
 import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
-import type { KnownLocalFileRef } from '@/lib/localPathResolver';
+import { resolveToolFilePath, type KnownLocalFileRef } from '@/lib/localPathResolver';
+import { collectGeneratedFiles, type GeneratedFileRef } from '@/lib/generatedFiles';
 import {
   isRemoteSessionSticky,
   subscribeTurnChangeSetUpdated,
@@ -159,6 +160,7 @@ import { ThinkingCard } from './ThinkingCard';
 import { AgentActionsBlock } from './AgentActionsBlock';
 import { AgentTaskCard } from './AgentTaskCard';
 import { TurnChangesCard } from './TurnChangesCard';
+import { GeneratedFilesCard } from './GeneratedFilesCard';
 import { WorkGroupBlock, type WorkGroupChild } from './WorkGroupBlock';
 import {
   extractAnchorCardId,
@@ -328,6 +330,13 @@ type TurnChangesRenderItem = {
   key: string;
   changeSet: TurnChangeSetSummary;
 };
+type GeneratedFilesRenderItem = {
+  type: 'generated_files';
+  key: string;
+  files: GeneratedFileRef[];
+  turnStartMs: number | null;
+  turnEndMs: number | null;
+};
 
 /** 原子工作子项:tool / agent task / thinking / assistant 工作文字。 */
 export type WorkChildItem = ToolSegmentRenderItem | AgentTaskRenderItem | MessageRenderItem;
@@ -358,6 +367,7 @@ export type RenderItem =
   | AgentTaskRenderItem
   | ForkOriginRenderItem
   | TurnChangesRenderItem
+  | GeneratedFilesRenderItem
   | {
       /** tool-result-media: 把 tool_result 里的 xdt_image_url(s) / xdt_video_urls
        *  提取出来作为独立视觉消息渲染,跳出 tool_segment 折叠卡片。统一容器,
@@ -906,6 +916,8 @@ export function buildRenderItems(
     historyWindowIncomplete?: boolean;
     /** Main-persisted exact patches, anchored to their visible user message. */
     turnChangeSets?: readonly TurnChangeSetSummary[];
+    /** Session working directory for opaque generated-file fallback chips. */
+    workingDir?: string;
   },
 ): {
   items: RenderItem[];
@@ -1058,6 +1070,18 @@ export function buildRenderItems(
     const changeSets = (opts?.turnChangeSets ?? []).filter(
       (changeSet) => changeSet.anchorClientId === anchorClientId,
     );
+    const exactPaths = new Set<string>();
+    const pathKey = (value: string): string => {
+      const normalized = value.replace(/\\/g, '/');
+      const windowsShape = /^[a-zA-Z]:[\\/]/.test(value) || value.includes('\\');
+      return windowsShape ? normalized.toLowerCase() : normalized;
+    };
+    for (const changeSet of changeSets) {
+      for (const file of changeSet.files) {
+        exactPaths.add(pathKey(resolveToolFilePath(file.path, changeSet.cwd)));
+        if (file.oldPath) exactPaths.add(pathKey(resolveToolFilePath(file.oldPath, changeSet.cwd)));
+      }
+    }
     for (const changeSet of changeSets) {
       items.push({
         type: 'turn_changes',
@@ -1065,6 +1089,29 @@ export function buildRenderItems(
         changeSet,
       });
     }
+    const workingDir = opts?.workingDir ?? '';
+    if (!workingDir || hi <= lo) return;
+    const slice = messages.slice(lo, hi);
+    const generatedFiles = collectGeneratedFiles(slice, workingDir).filter((file) => {
+      const normalized = pathKey(file.path);
+      return !exactPaths.has(normalized) || changeSets.length === 0;
+    });
+    if (generatedFiles.length === 0) return;
+    let turnStartMs: number | null = null;
+    for (const message of slice) {
+      const timestamp = Date.parse(message.createdAt ?? '');
+      if (Number.isFinite(timestamp) && (turnStartMs === null || timestamp < turnStartMs)) {
+        turnStartMs = timestamp;
+      }
+    }
+    const boundaryTimestamp = Date.parse(messages[hi]?.createdAt ?? '');
+    items.push({
+      type: 'generated_files',
+      key: `genfiles-${messages[lo].clientId}`,
+      files: generatedFiles,
+      turnStartMs,
+      turnEndMs: Number.isFinite(boundaryTimestamp) ? boundaryTimestamp : null,
+    });
   };
   let i = 0;
   while (i < messages.length) {
@@ -2431,8 +2478,9 @@ export function MessageStream({
       buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
         historyWindowIncomplete: Boolean(hasMoreMessages),
         turnChangeSets,
+        workingDir,
       }),
-    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages, turnChangeSets],
+    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages, turnChangeSets, workingDir],
   );
   const assistantsWithFollowingUserBoundary = useMemo(
     () => collectAssistantsWithFollowingUserBoundary(messages),
@@ -3748,6 +3796,17 @@ export function MessageStream({
                           key={item.key}
                           sessionId={sessionId}
                           changeSet={item.changeSet}
+                        />
+                      );
+                    }
+
+                    if (item.type === 'generated_files') {
+                      return (
+                        <GeneratedFilesCard
+                          key={item.key}
+                          files={item.files}
+                          turnStartMs={item.turnStartMs}
+                          turnEndMs={item.turnEndMs}
                         />
                       );
                     }

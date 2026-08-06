@@ -6194,6 +6194,11 @@
       "DEVICE_LINK_CONTROL_DISABLED": "已关闭对该设备的控制，消息未发送。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "附件传输失败，消息未发送。请重试。"
     },
+    "generatedFiles": {
+      "title": "本条消息生成的文件",
+      "showMore": "显示另外 {{count}} 个",
+      "showLess": "收起"
+    },
     "turnChanges": {
       "title": "已更改 {{count}} 个文件",
       "partialTitle": "本轮文件变更未完整记录",

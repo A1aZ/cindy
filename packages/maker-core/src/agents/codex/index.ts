@@ -2461,6 +2461,32 @@ export class CodexAgent extends BaseAgent {
 
     let sdkSessionId: string | undefined;
     let currentTurnId: string | null = null;
+    // app-server emits one cumulative diff per thread. Descendant threads use
+    // different turn ids, but their changes belong to the active root turn;
+    // retain each thread's latest snapshot and publish one merged diff.
+    const turnDiffSnapshots = new Map<string, string>();
+    const splitTurnDiffBlocks = (diff: string): string[] => diff
+      .split(/(?=^diff --git )/m)
+      .filter((block) => block.startsWith('diff --git '));
+    const mergeTurnDiffSnapshots = (): string => {
+      const blocks = new Map<string, string>();
+      for (const snapshot of turnDiffSnapshots.values()) {
+        for (const block of splitTurnDiffBlocks(snapshot)) {
+          const header = block.split('\n', 1)[0] ?? block;
+          blocks.set(header, block);
+        }
+      }
+      return [...blocks.values()].join('');
+    };
+    const publishTurnDiff = (threadKey: string, turnId: string, diff: string): void => {
+      if (!diff) return;
+      turnDiffSnapshots.set(threadKey, diff);
+      eventQueue.push({
+        type: 'turn_diff',
+        data: { turnId, diff: mergeTurnDiffSnapshots(), cwd: opts.workingDir },
+        source: 'codex',
+      });
+    };
     let isTurnInFlight = false;
     /**
      * 本 handle 上「起过多少个 turn」的单调计数器,每次 isTurnInFlight 被置活 +1。
@@ -3530,6 +3556,17 @@ export class CodexAgent extends BaseAgent {
             );
             if (replayedNested) emitSubagentCardUpdate(replayedNested);
           }
+        }
+      }
+      if (method === 'turn/diff/updated') {
+        const diffParams = params as { turnId?: unknown; diff?: unknown } | null;
+        if (
+          currentTurnId
+          && diffParams
+          && typeof diffParams.turnId === 'string'
+          && typeof diffParams.diff === 'string'
+        ) {
+          publishTurnDiff(childThreadId, currentTurnId, diffParams.diff);
         }
       }
       const update = subagentLiveCards.handleDescendantNotification(childThreadId, method, params);
@@ -7734,6 +7771,7 @@ export class CodexAgent extends BaseAgent {
           );
         }
         currentTurnId = params.turn.id;
+        if (!wasSameTurn) turnDiffSnapshots.clear();
         isTurnInFlight = true;
         turnStartGeneration += 1; // 见声明处:延迟善后靠它判断"期间起过新 turn"
         if (!wasSameTurn) {
@@ -7851,15 +7889,7 @@ export class CodexAgent extends BaseAgent {
       turnDiffUpdated: (params) => {
         if (enqueueIfBufferedTurn(params.turnId, () => handlers.turnDiffUpdated?.(params))) return;
         if (shouldIgnoreStaleTurnEvent(params.turnId)) return;
-        eventQueue.push({
-          type: 'turn_diff',
-          data: {
-            turnId: params.turnId,
-            diff: params.diff,
-            cwd: opts.workingDir,
-          },
-          source: 'codex',
-        });
+        publishTurnDiff(threadId, params.turnId, params.diff);
       },
       turnCompleted: (params) => {
         // buffered turn 的终态同样进队列等对账 (greptile R11 P1 + codex R12 P1):

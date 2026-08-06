@@ -6194,6 +6194,11 @@
       "DEVICE_LINK_CONTROL_DISABLED": "이 기기의 제어가 꺼져 있어 메시지가 전송되지 않았습니다.",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "첨부 파일 전송에 실패했습니다. 메시지가 전송되지 않았습니다. 다시 시도하세요."
     },
+    "generatedFiles": {
+      "title": "이 메시지에서 생성된 파일",
+      "showMore": "{{count}}개 더 보기",
+      "showLess": "간략히 보기"
+    },
     "turnChanges": {
       "title": "파일 {{count}}개 변경",
       "partialTitle": "이번 턴의 파일 변경 사항이 완전히 캡처되지 않았습니다",

@@ -19130,6 +19130,58 @@ describe('CodexAgent context window reporting', () => {
     await handle.close();
   });
 
+  it('forwards root and descendant Codex diffs into one merged turn capture event', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-descendant-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-root-diff' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-root-diff',
+      diff: 'diff --git a/root.txt b/root.txt\n--- a/root.txt\n+++ b/root.txt\n@@ -1 +1 @@\n-old\n+root\n',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-diff-thread', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'grandchild-diff-thread', parentThreadId: 'child-diff-thread' },
+    });
+    handlers.descendantNotification('child-diff-thread', 'turn/diff/updated', {
+      threadId: 'child-diff-thread',
+      turnId: 'child-diff-turn',
+      diff: 'diff --git a/child.txt b/child.txt\n--- a/child.txt\n+++ b/child.txt\n@@ -1 +1 @@\n-old\n+child\n',
+    });
+    handlers.descendantNotification('grandchild-diff-thread', 'turn/diff/updated', {
+      threadId: 'grandchild-diff-thread',
+      turnId: 'grandchild-diff-turn',
+      diff: 'diff --git a/grandchild.txt b/grandchild.txt\n--- a/grandchild.txt\n+++ b/grandchild.txt\n@@ -1 +1 @@\n-old\n+grandchild\n',
+    });
+
+    await vi.waitFor(() => {
+      const diffs = events.filter((event) => event.type === 'turn_diff');
+      expect(diffs.length).toBeGreaterThanOrEqual(3);
+    });
+    const lastDiff = events.filter((event) => event.type === 'turn_diff').at(-1);
+    expect(lastDiff?.data).toMatchObject({ turnId: 'turn-root-diff', cwd: '/repo' });
+    expect((lastDiff?.data as { diff: string }).diff).toContain('root.txt');
+    expect((lastDiff?.data as { diff: string }).diff).toContain('child.txt');
+    expect((lastDiff?.data as { diff: string }).diff).toContain('grandchild.txt');
+
+    await handle.close();
+  });
+
   it('completes the subagent card without any thread/started (codex 0.145 real behavior)', async () => {
     // 生产实测(2026-08-04):0.145 只在显式 thread/start / fork RPC 时发
     // thread/started,spawn 出的子线程从来不发。血缘必须在识别 spawn item 的那一刻

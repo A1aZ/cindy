@@ -751,6 +751,114 @@ describe('turn change-set sidecar store', () => {
     });
   });
 
+  it.each([
+    ['absolute path', 'diff --git /outside.txt /outside.txt'],
+    ['parent traversal', 'diff --git a/../escape.txt b/../escape.txt'],
+  ])('fails closed for Codex diffs with an unsafe %s', async (_label, header) => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-unsafe-path',
+        cwd: workdir,
+        diff: [
+          header,
+          '--- a/../escape.txt',
+          '+++ b/../escape.txt',
+          '@@ -1 +1 @@',
+          '-secret',
+          '+leaked',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-unsafe-path', 'complete');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({
+      state: 'partial',
+      fileCount: 0,
+      incompleteReasons: ['outside-workspace'],
+    });
+    const [detail] = await getTurnChangeSets('session-1', [summary!.id]);
+    expect(detail?.diffs).toHaveLength(0);
+    expect(JSON.stringify(detail)).not.toContain('secret');
+  });
+
+  it('fails closed for a malformed Codex diff block while retaining valid blocks', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-malformed-diff',
+        cwd: workdir,
+        diff: [
+          'diff --git',
+          '---',
+          '+++',
+          '',
+          'diff --git a/ok.txt b/ok.txt',
+          '--- a/ok.txt',
+          '+++ b/ok.txt',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-malformed-diff', 'complete');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({
+      state: 'partial',
+      fileCount: 1,
+      incompleteReasons: ['outside-workspace'],
+    });
+    expect(summary?.files[0]?.path).toBe('ok.txt');
+  });
+
+  it('fails closed when a rename diff oldPath escapes the workspace', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-rename-unsafe',
+        cwd: workdir,
+        diff: [
+          'diff --git a/../secret.txt b/renamed.txt',
+          'similarity index 100%',
+          'rename from ../secret.txt',
+          'rename to renamed.txt',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-rename-unsafe', 'complete');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary?.fileCount).toBe(0);
+    expect(summary?.incompleteReasons).toContain('outside-workspace');
+  });
+
   it('does not persist remote workspace patches while remote review is unsupported', async () => {
     await beginTurnChangeSet({
       sessionId: 'session-1',

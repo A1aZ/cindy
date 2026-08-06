@@ -211,6 +211,20 @@ function filterSensitiveDiffBlocks(
   const safeBlocks: string[] = [];
   for (const block of blocks) {
     const files = parseDiffs(pending.id, block);
+    // Diff payloads are persisted in the sidecar before any Undo/Reapply
+    // validation runs.  Fail closed here so malformed or out-of-workspace
+    // paths can never be written to userData or exposed by the review UI.
+    if (
+      files.length !== 1
+      || files.some((file) => (
+        !file.path
+        || !safeRelativeTarget(pending.cwd, file.path)
+        || (file.oldPath !== null && (!file.oldPath || !safeRelativeTarget(pending.cwd, file.oldPath)))
+      ))
+    ) {
+      addIncompleteReason(pending, 'outside-workspace');
+      continue;
+    }
     const isSensitive = files.some((file) =>
       detectSensitivePath(file.path, { allowEnvTemplates: true })
       || (file.oldPath && detectSensitivePath(file.oldPath, { allowEnvTemplates: true })),

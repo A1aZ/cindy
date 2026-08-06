@@ -461,6 +461,7 @@ import {
   getTurnChangeSets,
   listTurnChangeSets,
   noteTurnDiffEvent,
+  normalizeTurnChangeSetWorkspaceKey,
   waitForTurnChangeSetSeal,
 } from '../turn-change-set/store.js';
 import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
@@ -4831,14 +4832,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (meta.remoteHostId) {
         throwIpcError('UNSUPPORTED_CAPABILITY', 'Remote workspace restore is not available.');
       }
-      const normalizedWorkDir = process.platform === 'win32'
-        ? path.resolve(meta.workDir).toLocaleLowerCase('en-US')
-        : path.resolve(meta.workDir);
+      const normalizedWorkDir = normalizeTurnChangeSetWorkspaceKey(meta.workDir);
       const workspaceIsBusy = (): boolean => maker.listActiveSessions().some((session) => {
         if (session.remoteHostId) return false;
-        const currentWorkDir = process.platform === 'win32'
-          ? path.resolve(session.workDir).toLocaleLowerCase('en-US')
-          : path.resolve(session.workDir);
+        const currentWorkDir = normalizeTurnChangeSetWorkspaceKey(session.workDir);
         return currentWorkDir === normalizedWorkDir
           && (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id));
       });

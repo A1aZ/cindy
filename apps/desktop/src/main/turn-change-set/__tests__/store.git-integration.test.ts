@@ -44,6 +44,7 @@ import {
   finalizeTurnChangeSet,
   getTurnChangeSets,
   listTurnChangeSets,
+  normalizeTurnChangeSetWorkspaceKey,
   noteOpaqueTurnChange,
   noteTurnDiffEvent,
   waitForTurnChangeSetPersistence,
@@ -195,7 +196,11 @@ describe('turn change-set sidecar store', () => {
 
   it('serializes exact captures for sessions sharing one workspace', async () => {
     const target = path.join(workdir, 'shared.txt');
+    const workspaceAlias = path.join(root, 'workspace-alias');
     await fs.writeFile(target, 'old\n', 'utf8');
+    await fs.symlink(workdir, workspaceAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    expect(normalizeTurnChangeSetWorkspaceKey(workspaceAlias))
+      .toBe(normalizeTurnChangeSetWorkspaceKey(workdir));
 
     await beginTurnChangeSet({
       sessionId: 'session-1',
@@ -215,7 +220,7 @@ describe('turn change-set sidecar store', () => {
       sessionId: 'session-2',
       anchorClientId: 'user-2',
       provider: 'pi',
-      cwd: workdir,
+      cwd: workspaceAlias,
     }).then(() => {
       secondResolved = true;
     });
@@ -229,7 +234,7 @@ describe('turn change-set sidecar store', () => {
     await captureKnownFileBefore({
       sessionId: 'session-2',
       provider: 'pi',
-      cwd: workdir,
+      cwd: workspaceAlias,
       targetPath: 'shared.txt',
     });
     await fs.writeFile(target, 'second\n', 'utf8');

@@ -55,6 +55,7 @@ import {
   rebroadcastAgentSwitchBoundary,
 } from './messages';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
+import { removeTurnChangeSetsForSession } from '../../turn-change-set/store.js';
 
 const log = createLogger('sessions');
 const REMOTE_EDITABLE_META = new Set(['status', 'title', 'pinnedAt']);
@@ -796,7 +797,6 @@ export async function clearSessionContextInDb(sessionId: string, atMs?: number):
   const effectiveClearedAt = updated?.clearedAt ?? ts;
   const effectiveUpdatedAt = updated?.updatedAt ?? effectiveClearedAt;
   try {
-    const { removeTurnChangeSetsForSession } = await import('../../turn-change-set/store.js');
     await removeTurnChangeSetsForSession(sessionId);
   } catch (error) {
     log.warn('turn change-set cleanup after clear failed', {
@@ -1619,8 +1619,7 @@ export async function setSessionsStatusInDb(
 function removeHookAttachmentDir(sessionId: string, status: unknown): void {
   if (status !== 'deleted' && status !== 'archived') return;
   if (status === 'deleted') {
-    void import('../../turn-change-set/store.js')
-      .then(({ removeTurnChangeSetsForSession }) => removeTurnChangeSetsForSession(sessionId))
+    void removeTurnChangeSetsForSession(sessionId)
       .catch((err) => {
         log.warn('turn change-set cleanup failed', {
           sessionId,

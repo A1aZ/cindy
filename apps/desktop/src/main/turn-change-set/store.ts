@@ -527,7 +527,7 @@ function enqueueSessionWrite<T>(sessionId: string, operation: () => Promise<T>):
   return current;
 }
 
-function workspaceKey(cwd: string): string {
+export function normalizeTurnChangeSetWorkspaceKey(cwd: string): string {
   const lexical = path.resolve(cwd);
   let resolved = lexical;
   try {
@@ -541,7 +541,7 @@ function workspaceKey(cwd: string): string {
 
 function registerPendingWorkspace(sessionId: string, cwd: string): void {
   if (pendingWorkspaceBySession.has(sessionId)) return;
-  const key = workspaceKey(cwd);
+  const key = normalizeTurnChangeSetWorkspaceKey(cwd);
   pendingWorkspaceBySession.set(sessionId, key);
   pendingWorkspaceCounts.set(key, (pendingWorkspaceCounts.get(key) ?? 0) + 1);
 }
@@ -572,7 +572,7 @@ function reserveWorkspaceCaptureLease(sessionId: string, cwd: string, anchorClie
   previous: Promise<void>;
   lease: WorkspaceCaptureLease;
 } {
-  const key = workspaceKey(cwd);
+  const key = normalizeTurnChangeSetWorkspaceKey(cwd);
   const previous = workspaceCaptureChains.get(key) ?? Promise.resolve();
   let resolveCurrent!: () => void;
   const current = new Promise<void>((resolve) => {
@@ -611,7 +611,7 @@ function reserveWorkspaceCaptureLease(sessionId: string, cwd: string, anchorClie
 }
 
 async function waitForWorkspaceActions(cwd: string): Promise<void> {
-  const key = workspaceKey(cwd);
+  const key = normalizeTurnChangeSetWorkspaceKey(cwd);
   for (;;) {
     const current = workspaceActionChains.get(key);
     if (!current) return;
@@ -624,7 +624,7 @@ async function enqueueWorkspaceAction<T>(
   cwd: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  const key = workspaceKey(cwd);
+  const key = normalizeTurnChangeSetWorkspaceKey(cwd);
   if ((pendingWorkspaceCounts.get(key) ?? 0) > 0) {
     throw new TurnChangeSetActionError('busy', 'The workspace is still producing file changes.');
   }

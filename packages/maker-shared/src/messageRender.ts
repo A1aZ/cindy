@@ -11,6 +11,8 @@ export interface MessageRenderSourceMessageLike {
   role?: string | null;
   content?: unknown;
   createdAt?: string;
+  /** Renderer-local time of the latest in-place plan payload update. */
+  planUpdatedAtMs?: number;
   toolName?: string | null;
   toolInput?: unknown;
   /** SDK tool-use id — used to link a Task/collab tool-call to its live `agent_task_update`. */
@@ -187,11 +189,22 @@ export interface MessageRenderTodoInsertion {
   key: string;
   todos: MessageRenderTodoItem[];
   createdAt?: string;
+  updatedAtMs?: number;
   source: MessageRenderTodoSource;
+}
+
+export interface MessageRenderLatestTodoState {
+  insertion: MessageRenderTodoInsertion | null;
+  hasPlanEvent: boolean;
+  isResolved: boolean;
+  latestPlanIndex: number;
+  latestInsertionIndex: number;
 }
 
 export interface MessageRenderTodoGroupingOptions {
   keyPrefix?: string;
+  /** True when the loaded window may omit TaskCreate events or contain history gaps. */
+  taskHistoryMayBeIncomplete?: boolean;
 }
 
 const TASK_PLAN_TOOL_NAMES = new Set(['TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet']);
@@ -421,9 +434,14 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
     const source = agentPlanSource(toolNameOf(message));
     if (!source) continue;
 
+    const resultText = resultByToolUseId.get(toolUseIdOf(message) ?? '');
     const previous = lastSessionBySource.get(source);
     const previousAllDone = previous?.todos.every((todo) => todo.status === 'completed');
-    const startsNewSession = !previous || Boolean(previousAllDone);
+    const continuesCompletedTaskSession =
+      source === 'task'
+      && Boolean(previousAllDone)
+      && taskToolTargetsExistingTask(message, resultText, taskState);
+    const startsNewSession = !previous || (Boolean(previousAllDone) && !continuesCompletedTaskSession);
     if (source === 'task' && startsNewSession) {
       taskState.clear();
     }
@@ -433,7 +451,7 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
       ?? applyTaskPlanTool(
         taskState,
         message,
-        resultByToolUseId.get(toolUseIdOf(message) ?? ''),
+        resultText,
       );
     if (!parsed) continue;
 
@@ -454,10 +472,72 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
       key: `${keyPrefix}-${sourceClientId(first)}`,
       todos: session.todos,
       createdAt: messages[session.lastIndex]?.createdAt,
+      updatedAtMs: messages[session.lastIndex]?.planUpdatedAtMs,
       source: session.source,
     });
   }
   return out;
+}
+
+/**
+ * 常驻计划面板(composer 上方钉住式)用:取整段会话里**最近一次更新**的 plan
+ * session 快照 —— 跨 source(TodoWrite / update_plan / Task*)按 lastIndex 取
+ * 最大者。面板只展示"当前计划"一份,历史 session 不再逐张呈现。
+ * 没有任何 plan 调用时返回 null(面板不渲染、不占位)。
+ */
+export function findLatestMessageTodoInsertion<TMessage extends MessageRenderSourceMessageLike>(
+  messages: readonly TMessage[],
+  options: MessageRenderTodoGroupingOptions = {},
+): MessageRenderTodoInsertion | null {
+  return getLatestMessageTodoState(messages, options).insertion;
+}
+
+export function getLatestMessageTodoState<TMessage extends MessageRenderSourceMessageLike>(
+  messages: readonly TMessage[],
+  options: MessageRenderTodoGroupingOptions = {},
+): MessageRenderLatestTodoState {
+  let latestPlanIndex = -1;
+  let latestPlanMessage: TMessage | null = null;
+  for (let index = 0; index < messages.length; index++) {
+    const message = messages[index];
+    if (!isAgentPlanToolName(toolNameOf(message))) continue;
+    latestPlanIndex = index;
+    latestPlanMessage = message;
+  }
+
+  let latest: MessageRenderTodoInsertion | null = null;
+  let latestIndex = -1;
+  for (const [index, insertion] of findMessageTodoInsertions(messages, options)) {
+    if (index > latestIndex) {
+      latestIndex = index;
+      latest = insertion;
+    }
+  }
+  const hasPlanEvent = latestPlanIndex >= 0;
+  const latestTaskWindowResolved =
+    latestPlanMessage === null ||
+    agentPlanSource(toolNameOf(latestPlanMessage)) !== 'task' ||
+    isTaskPlanWindowResolved(
+      messages,
+      latestPlanIndex,
+      options.taskHistoryMayBeIncomplete === true,
+    );
+  const insertionBelongsToLatestEvent =
+    latestIndex === latestPlanIndex && latestTaskWindowResolved;
+  const latestEventClearsPlan =
+    latestPlanMessage !== null &&
+    (isExplicitPlanClearEvent(latestPlanMessage) ||
+      latestTaskEventClearsPlan(messages, latestPlanIndex));
+  return {
+    insertion: insertionBelongsToLatestEvent ? latest : null,
+    hasPlanEvent,
+    isResolved:
+      !hasPlanEvent ||
+      insertionBelongsToLatestEvent ||
+      (latestTaskWindowResolved && latestEventClearsPlan),
+    latestPlanIndex,
+    latestInsertionIndex: latestIndex,
+  };
 }
 
 export interface CodexPlanSnapshotApplyResult<
@@ -475,6 +555,7 @@ export function applyCodexPlanSnapshotOnDone<
   snapshot: unknown,
   turnId?: string | null,
   terminalStatus?: unknown,
+  planUpdatedAtMs?: number,
 ): CodexPlanSnapshotApplyResult<TMessage> {
   const authoritativeSnapshot = Array.isArray(snapshot) ? snapshot : null;
   const hasAuthoritativeSnapshot = authoritativeSnapshot !== null;
@@ -522,6 +603,9 @@ export function applyCodexPlanSnapshotOnDone<
     const next = [...messages];
     next[index] = {
       ...message,
+      ...(typeof planUpdatedAtMs === 'number' && Number.isFinite(planUpdatedAtMs)
+        ? { planUpdatedAtMs }
+        : {}),
       ...(message.toolInput !== undefined
         ? { toolInput: { ...input, plan: nextSnapshot } }
         : {}),
@@ -584,6 +668,166 @@ export function extractTodos(toolInput: unknown): MessageRenderTodoItem[] | null
   return out.length > 0 ? out : null;
 }
 
+function isExplicitPlanClearEvent(message: MessageRenderSourceMessageLike): boolean {
+  const toolName = toolNameOf(message);
+  const input = readRecord(toolInputOf(message));
+  if (toolName === 'TodoWrite') return Array.isArray(input?.todos) && input.todos.length === 0;
+  if (toolName === 'update_plan') {
+    return (
+      (Array.isArray(input?.items) && input.items.length === 0) ||
+      (Array.isArray(input?.plan) && input.plan.length === 0) ||
+      (typeof input?.text === 'string' && input.text.trim().length === 0) ||
+      (input !== null && Object.keys(input).length === 0)
+    );
+  }
+  return false;
+}
+
+function latestTaskEventClearsPlan<TMessage extends MessageRenderSourceMessageLike>(
+  messages: readonly TMessage[],
+  latestPlanIndex: number,
+): boolean {
+  const latest = messages[latestPlanIndex];
+  const latestToolName = toolNameOf(latest);
+  const resultByToolUseId = buildToolResultLookup(messages);
+  const latestResultText = resultByToolUseId.get(toolUseIdOf(latest) ?? '');
+  if (latestToolName === 'TaskList') return taskListResultClearsPlan(latestResultText);
+  if (latestToolName !== 'TaskUpdate' && latestToolName !== 'TaskGet') return false;
+  if (taskToolStatus(latest, latestResultText) !== 'deleted') return false;
+
+  const taskState = new Map<string, MessageRenderTodoItem>();
+  let previousTaskTodos: MessageRenderTodoItem[] | null = null;
+  let resolvedTaskContext = false;
+
+  for (let index = 0; index <= latestPlanIndex; index += 1) {
+    const message = messages[index];
+    if (agentPlanSource(toolNameOf(message)) !== 'task') continue;
+
+    const resultText = resultByToolUseId.get(toolUseIdOf(message) ?? '');
+    const startsNewSession =
+      previousTaskTodos === null ||
+      (
+        previousTaskTodos.every((todo) => todo.status === 'completed') &&
+        !taskToolTargetsExistingTask(message, resultText, taskState)
+      );
+    if (startsNewSession) taskState.clear();
+
+    const hadTaskContext = taskState.size > 0;
+    const parsed = applyTaskPlanTool(
+      taskState,
+      message,
+      resultText,
+    );
+    if (parsed) {
+      resolvedTaskContext = true;
+      previousTaskTodos = parsed;
+      continue;
+    }
+    if (index === latestPlanIndex) {
+      return resolvedTaskContext && hadTaskContext && taskState.size === 0;
+    }
+  }
+  return false;
+}
+
+/**
+ * A paged history window is only a complete Task-plan snapshot when every
+ * status/read event in the current task session can be tied back to a visible
+ * TaskCreate or an authoritative TaskList snapshot. Otherwise an unrelated
+ * visible task can make the latest update look resolved and stop history
+ * backfill before the rest of the plan has been reconstructed.
+ */
+function isTaskPlanWindowResolved<TMessage extends MessageRenderSourceMessageLike>(
+  messages: readonly TMessage[],
+  latestPlanIndex: number,
+  hasEarlierMessages: boolean,
+): boolean {
+  const resultByToolUseId = buildToolResultLookup(messages);
+  const taskState = new Map<string, MessageRenderTodoItem>();
+  const unresolvedTaskStatuses = new Map<
+    string,
+    MessageRenderTodoItem['status'] | 'deleted'
+  >();
+  let previousTaskTodos: MessageRenderTodoItem[] | null = null;
+  let sawTaskEvent = false;
+  let currentSessionBoundaryKnown = !hasEarlierMessages;
+
+  for (let index = 0; index <= latestPlanIndex; index += 1) {
+    const message = messages[index];
+    if (agentPlanSource(toolNameOf(message)) !== 'task') continue;
+
+    const resultText = resultByToolUseId.get(toolUseIdOf(message) ?? '');
+    const resultTasks = taskRecordsFromResult(resultText);
+    const input = readRecord(toolInputOf(message)) ?? {};
+    const targetTaskId = taskId(input) ?? taskId(resultTasks[0]);
+    const hasPreviousTaskContext =
+      previousTaskTodos !== null || unresolvedTaskStatuses.size > 0;
+    const previousAllDone =
+      hasPreviousTaskContext &&
+      (previousTaskTodos?.every((todo) => todo.status === 'completed') ?? true) &&
+      [...unresolvedTaskStatuses.values()].every(
+        (status) => status === 'completed' || status === 'deleted',
+      );
+    const continuesCompletedTaskSession =
+      previousAllDone &&
+      (taskToolTargetsExistingTask(message, resultText, taskState) ||
+        Boolean(targetTaskId && unresolvedTaskStatuses.has(targetTaskId)));
+    const startsNewSession =
+      !sawTaskEvent ||
+      (previousAllDone && !continuesCompletedTaskSession);
+    if (startsNewSession) {
+      taskState.clear();
+      unresolvedTaskStatuses.clear();
+      previousTaskTodos = null;
+      if (sawTaskEvent) currentSessionBoundaryKnown = true;
+    }
+    sawTaskEvent = true;
+
+    const toolName = toolNameOf(message);
+    if (toolName === 'TaskList') {
+      if (taskListResultIsAuthoritative(resultText)) {
+        currentSessionBoundaryKnown = true;
+      }
+      if (resultTasks.length > 0) {
+        const previousTaskState = new Map(taskState);
+        unresolvedTaskStatuses.clear();
+        for (const task of resultTasks) {
+          const id = taskId(task);
+          const status = normalizeTaskStatus(task.status) ?? 'pending';
+          if (!id || status === 'deleted') continue;
+          if (!taskContent(task) && !previousTaskState.has(id)) {
+            unresolvedTaskStatuses.set(id, status);
+          }
+        }
+      } else if (taskListResultClearsPlan(resultText)) {
+        unresolvedTaskStatuses.clear();
+      }
+    } else if (toolName !== 'TaskCreate') {
+      const resultTask = resultTasks[0];
+      const id = taskId(input) ?? taskId(resultTask);
+      if (id && !taskState.has(id)) {
+        unresolvedTaskStatuses.set(
+          id,
+          taskToolStatus(message, resultText) ?? 'pending',
+        );
+      }
+    }
+
+    const parsed = applyTaskPlanTool(taskState, message, resultText);
+    for (const id of taskState.keys()) unresolvedTaskStatuses.delete(id);
+    previousTaskTodos = parsed ?? currentTaskTodos(taskState);
+    if (
+      previousTaskTodos === null &&
+      unresolvedTaskStatuses.size === 0 &&
+      taskState.size === 0
+    ) {
+      previousTaskTodos = [];
+    }
+  }
+
+  return currentSessionBoundaryKnown && unresolvedTaskStatuses.size === 0;
+}
+
 function buildToolResultLookup<TMessage extends MessageRenderSourceMessageLike>(
   messages: readonly TMessage[],
 ): Map<string, string> {
@@ -638,6 +882,36 @@ function normalizeTaskStatus(status: unknown): MessageRenderTodoItem['status'] |
   return null;
 }
 
+function taskToolStatus(
+  message: MessageRenderSourceMessageLike,
+  resultText: string | undefined,
+): MessageRenderTodoItem['status'] | 'deleted' | null {
+  const toolName = toolNameOf(message);
+  const input = readRecord(toolInputOf(message));
+  const resultTask = taskRecordsFromResult(resultText)[0];
+  if (toolName === 'TaskGet' && resultTask) return normalizeTaskStatus(resultTask.status);
+  return normalizeTaskStatus(input?.status ?? resultTask?.status);
+}
+
+function taskToolTargetsExistingTask(
+  message: MessageRenderSourceMessageLike,
+  resultText: string | undefined,
+  taskState: ReadonlyMap<string, MessageRenderTodoItem>,
+): boolean {
+  const toolName = toolNameOf(message);
+  if (toolName === 'TaskList') {
+    return taskRecordsFromResult(resultText).some((task) => {
+      const id = taskId(task);
+      return Boolean(id && taskState.has(id));
+    });
+  }
+  if (toolName !== 'TaskUpdate' && toolName !== 'TaskGet') return false;
+  const input = readRecord(toolInputOf(message));
+  const resultTask = taskRecordsFromResult(resultText)[0];
+  const id = taskId(input ?? undefined) ?? taskId(resultTask);
+  return Boolean(id && taskState.has(id));
+}
+
 function extractStructuredPlanItems(items: unknown): MessageRenderTodoItem[] | null {
   if (!Array.isArray(items) || items.length === 0) return null;
   const todos = items
@@ -674,7 +948,13 @@ function applyTaskPlanTool(
   const resultTasks = taskRecordsFromResult(resultText);
 
   if (toolName === 'TaskList') {
-    if (resultTasks.length === 0) return currentTaskTodos(taskState);
+    if (resultTasks.length === 0) {
+      if (taskListResultClearsPlan(resultText)) {
+        taskState.clear();
+        return null;
+      }
+      return currentTaskTodos(taskState);
+    }
     const previousTaskState = new Map(taskState);
     taskState.clear();
     for (const task of resultTasks) {
@@ -708,8 +988,16 @@ function applyTaskPlanTool(
   const id = taskId(input) ?? taskId(resultTask);
   if (!id) return currentTaskTodos(taskState);
 
+  // A status-only TaskUpdate / TaskGet can only be applied after the target task
+  // has been reconstructed from an earlier TaskCreate or TaskList snapshot. In a
+  // paged history window, returning some other tasks here would make the latest
+  // event look resolved and stop backfill early, producing a partial plan such
+  // as "Step 1 / 1" for what was actually the fourth task.
+  const existing = taskState.get(id);
+  const suppliedContent = taskContent(input) ?? taskContent(resultTask);
+  if (!existing && !suppliedContent) return null;
+
   if (toolName === 'TaskGet' && resultTask) {
-    const existing = taskState.get(id);
     const status = normalizeTaskStatus(resultTask.status) ?? taskState.get(id)?.status ?? 'pending';
     if (status === 'deleted') {
       taskState.delete(id);
@@ -724,19 +1012,32 @@ function applyTaskPlanTool(
     return currentTaskTodos(taskState);
   }
 
-  const existing = taskState.get(id);
   const status = normalizeTaskStatus(input.status ?? resultTask?.status) ?? existing?.status ?? 'pending';
   if (status === 'deleted') {
     taskState.delete(id);
     return currentTaskTodos(taskState);
   }
-  const content = taskContent(input) ?? taskContent(resultTask) ?? existing?.content;
+  const content = suppliedContent ?? existing?.content;
   if (!content) return currentTaskTodos(taskState);
   taskState.set(id, {
     content,
     status,
   });
   return currentTaskTodos(taskState);
+}
+
+function taskListResultClearsPlan(resultText: string | undefined): boolean {
+  const parsed = tryParseJsonRecord(resultText);
+  if (!parsed || !Array.isArray(parsed.tasks)) return false;
+  return parsed.tasks.every((task) => {
+    const record = readRecord(task);
+    return Boolean(record && normalizeTaskStatus(record.status) === 'deleted');
+  });
+}
+
+function taskListResultIsAuthoritative(resultText: string | undefined): boolean {
+  const parsed = tryParseJsonRecord(resultText);
+  return Boolean(parsed && Array.isArray(parsed.tasks));
 }
 
 function currentTaskTodos(taskState: Map<string, MessageRenderTodoItem>): MessageRenderTodoItem[] | null {

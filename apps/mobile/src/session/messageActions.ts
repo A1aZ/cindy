@@ -1,5 +1,6 @@
 import type { NormalizedRemoteMessage } from '@/session/messageNormalize';
 import { stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
+import { formatCompactTokens } from '@cindy/maker-shared/usage-format';
 import { i18n } from '@/i18n';
 import {
   remoteMoneySymbol,
@@ -48,7 +49,7 @@ export interface MobileMessageActionBarInput {
 }
 
 /**
- * 消息行是否挂完成态操作条(复制 / 时间 / 花费 / More)。三条规则都对齐桌面:
+ * 消息行是否挂完成态操作条(复制 / 新任务 / 时间 / 花费 / More)。三条规则都对齐桌面:
  * - 流式 assistant 只显示「生成中」,不挂完成态操作;
  * - assistant 只有每轮收尾正文挂(桌面 AssistantMessage 的 showActionBar,#456);
  * - 系统边界卡整行不挂:它不是任何人的发言,没有复制 / 分叉 / 消息锚点 / 发送时间
@@ -140,9 +141,23 @@ export function formatMessageAbsoluteTime(createdAt: string): string {
 export function formatMessageTurnCost(money: RemoteMoney | undefined): string {
   if (!money || !Number.isFinite(money.amount) || money.amount <= 0) return '';
   const value = formatTurnCost(money);
-  return money.kind === 'value-estimate'
-    ? i18n.t('message.actions.turnCostValue', { value })
-    : value;
+  if (money.kind === 'value-estimate') {
+    return i18n.t('message.actions.turnCostValue', { value });
+  }
+  return value;
+}
+
+/**
+ * 金额缺席时操作行显示的本轮 token 总量(桌面算不出模型报价的轮次)。
+ * 紧凑口径由 @cindy/maker-shared 提供,与桌面同一个函数,同一轮两端读到同一个数。
+ */
+export function formatMessageTurnTokens(totalTokens: number | undefined): string {
+  if (typeof totalTokens !== 'number' || !Number.isFinite(totalTokens) || totalTokens <= 0) {
+    return '';
+  }
+  return i18n.t('message.actions.turnTokens', {
+    tokens: formatCompactTokens(Math.floor(totalTokens)),
+  });
 }
 
 /**

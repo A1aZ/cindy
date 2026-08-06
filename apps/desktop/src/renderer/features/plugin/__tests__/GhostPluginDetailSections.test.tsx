@@ -10,6 +10,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const toastMocks = vi.hoisted(() => ({ success: vi.fn(), error: vi.fn() }));
 
 vi.mock('@/lib/toast', () => ({ toast: toastMocks }));
+vi.mock('@/cindy-brain/GhostSettingsWebview', () => ({
+  GhostSettingsWebview: () => <div data-testid="ghost-settings-webview" />,
+}));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
@@ -46,6 +49,8 @@ vi.mock('react-i18next', () => ({
         'settings.ghosts.detail.collapseInfoValue': `Collapse ${String(options?.label ?? '')}`,
         'settings.ghosts.detail.panelNotDocked': 'Not docked',
         'settings.ghosts.detail.cindyPrefs.noModels': 'No models available',
+        'settings.ghosts.detail.oauthScopeStale':
+          'This authorization does not include newly added permissions. Reconnect to enable them.',
       };
       return labels[key] ?? key;
     },
@@ -101,6 +106,7 @@ const detail: GhostPluginDetail = {
   canUse: true,
   approvalState: 'approved',
   builtin: false,
+  tabPanel: false,
   author: 'XD',
   contents: ['code'],
   permissions: [],
@@ -128,6 +134,51 @@ afterEach(() => {
 });
 
 describe('Ghost plugin detail sections', () => {
+  it('shows a non-blocking stale OAuth scope badge inside the configuration section', () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    render(
+      <GhostPluginDetailView
+        ghost={{
+          manifest: {
+            schemaVersion: 2,
+            id: detail.id,
+            name: detail.name,
+            version: detail.version,
+            kind: 'chip',
+            entry: 'main.js',
+            slots: [],
+            settingsHtml: 'settings.html',
+          },
+          dir: detail.installDir ?? '/tmp/plugin',
+          enabled: true,
+          approval: { state: 'approved', revision: 'rev-1' },
+          oauthScopeStale: { secretKey: 'account', missingScopeCount: 2 },
+        }}
+        detail={{ ...detail, hasSettingsUi: true }}
+        panelStatus="Docked"
+        onBack={vi.fn()}
+        onToggle={vi.fn()}
+        onUse={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
+        onUninstall={vi.fn()}
+        toggleDisabled={false}
+      />,
+    );
+
+    const badge = screen.getByRole('status');
+    expect(badge.textContent).toContain('newly added permissions');
+    expect(badge.className).toContain('bg-[var(--warning-bg-soft)]');
+    expect(screen.getByTestId('ghost-settings-webview')).toBeTruthy();
+  });
+
   it('keeps the detail surface on one centered content grid', () => {
     vi.stubGlobal(
       'ResizeObserver',
@@ -148,6 +199,7 @@ describe('Ghost plugin detail sections', () => {
         onUse={vi.fn()}
         onUpdate={vi.fn()}
         onReapprove={vi.fn()}
+        onUpdateFromFile={vi.fn()}
         onUninstall={vi.fn()}
         toggleDisabled={false}
       />,
@@ -197,6 +249,7 @@ describe('Ghost plugin detail sections', () => {
         onUse={vi.fn()}
         onUpdate={vi.fn()}
         onReapprove={vi.fn()}
+        onUpdateFromFile={vi.fn()}
         onUninstall={vi.fn()}
         toggleDisabled={false}
         onIconLoadError={onIconLoadError}
@@ -228,6 +281,7 @@ describe('Ghost plugin detail sections', () => {
         onUse={vi.fn()}
         onUpdate={onUpdate}
         onReapprove={vi.fn()}
+        onUpdateFromFile={vi.fn()}
         updateVersion={detail.version}
         onUninstall={vi.fn()}
         toggleDisabled={false}
@@ -268,6 +322,7 @@ describe('Ghost plugin detail sections', () => {
         onUse={vi.fn()}
         onUpdate={onUpdate}
         onReapprove={onReapprove}
+        onUpdateFromFile={vi.fn()}
         updateVersion="1.2.4"
         onUninstall={vi.fn()}
         toggleDisabled={false}
@@ -278,12 +333,17 @@ describe('Ghost plugin detail sections', () => {
     expect(screen.getByText(bodyKey)).toBeTruthy();
     // 缺批准时"使用"与"更新"都不该顶在最前面,主动作是重新确认。
     expect(screen.queryByRole('button', { name: 'settings.ghosts.market.updateTo' })).toBeNull();
+    // detail fixture 是指令型插件(canUse:true / tabPanel:false → 'command'),主动作按钮
+    // 标 chatAction;缺批准时 primaryEnabled=false → 禁用。
     expect(
-      (screen.getByRole('button', { name: 'settings.ghosts.detail.useAction' }) as HTMLButtonElement)
+      (screen.getByRole('button', { name: 'settings.ghosts.detail.chatAction' }) as HTMLButtonElement)
         .disabled,
     ).toBe(true);
 
-    const toggle = screen.getByRole('switch') as HTMLButtonElement;
+    // 启用开关(改版为带 aria-pressed 的按钮,非原生 switch)缺批准时禁用,点了不触发 onToggle。
+    const toggle = screen.getByRole('button', {
+      name: 'settings.ghosts.enableAria',
+    }) as HTMLButtonElement;
     expect(toggle.disabled).toBe(true);
     fireEvent.click(toggle);
     expect(onToggle).not.toHaveBeenCalled();
@@ -314,7 +374,7 @@ describe('Ghost plugin detail sections', () => {
         onUse={vi.fn()}
         onUpdate={onUpdate}
         onReapprove={vi.fn()}
-        updateLabel="Update from market"
+        onUpdateFromFile={vi.fn()}
         updateVersion="1.2.4"
         updateBusy
         onUninstall={vi.fn()}
@@ -331,10 +391,93 @@ describe('Ghost plugin detail sections', () => {
       screen.getByRole('button', { name: 'settings.ghosts.detail.moreActions' }),
       { button: 0, ctrlKey: false },
     );
-    const menuUpdate = screen.getByRole('menuitem', { name: 'Update from market' });
+    // ⋮ 菜单固定为「从文件更新」兜底路径(市场更新已提级到头部 CTA),
+    // 更新进行中同样置灰。
+    const menuUpdate = screen.getByRole('menuitem', {
+      name: 'settings.ghosts.detail.updateFromFile',
+    });
     expect(menuUpdate.getAttribute('aria-disabled')).toBe('true');
     fireEvent.click(menuUpdate);
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it('hides the local .cindy update entry for reserved official ids outside dev builds', async () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    // packaged 构建上 Main 会对 cindy- / filo- / xd- 前缀直接 GHOST_ID_RESERVED,
+    // 把这个必失败动作留在菜单里等于让用户选完文件才吃错误。
+    // vitest 默认 DEV=true,这里显式模拟打包产物(DEV=false)。
+    vi.stubEnv('DEV', false);
+    // 显式标注类型:JSX prop 位置的内联展开会让 tsc 现推一个巨大的匿名类型,
+    // desktop 的 typecheck 本就贴着 CI 的 4GB 堆上限跑,能省则省。
+    const officialDetail: GhostPluginDetail = { ...detail, id: 'cindy-art' };
+    render(
+      <GhostPluginDetailView
+        ghost={null}
+        detail={officialDetail}
+        panelStatus={null}
+        onBack={vi.fn()}
+        onToggle={vi.fn()}
+        onUse={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
+        onUninstall={vi.fn()}
+        toggleDisabled={false}
+      />,
+    );
+
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: 'settings.ghosts.detail.moreActions' }),
+      { button: 0, ctrlKey: false },
+    );
+    expect(
+      screen.queryByRole('menuitem', { name: 'settings.ghosts.detail.updateFromFile' }),
+    ).toBeNull();
+    // 卸载等其余菜单项不受影响。
+    expect(screen.getByRole('menuitem', { name: 'settings.ghosts.uninstall' })).toBeTruthy();
+    vi.unstubAllEnvs();
+  });
+
+  it('keeps the local .cindy update entry for ordinary third-party plugins', async () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    // 同样是打包产物,但非保留前缀:Main 不会拒,入口必须留着。
+    vi.stubEnv('DEV', false);
+    render(
+      <GhostPluginDetailView
+        ghost={null}
+        detail={detail}
+        panelStatus={null}
+        onBack={vi.fn()}
+        onToggle={vi.fn()}
+        onUse={vi.fn()}
+        onUpdate={vi.fn()}
+        onUpdateFromFile={vi.fn()}
+        onUninstall={vi.fn()}
+        toggleDisabled={false}
+      />,
+    );
+
+    fireEvent.pointerDown(
+      screen.getByRole('button', { name: 'settings.ghosts.detail.moreActions' }),
+      { button: 0, ctrlKey: false },
+    );
+    expect(
+      screen.getByRole('menuitem', { name: 'settings.ghosts.detail.updateFromFile' }),
+    ).toBeTruthy();
+    vi.unstubAllEnvs();
   });
 
   it('renders an export menu item only when onExport is provided', async () => {
@@ -354,6 +497,7 @@ describe('Ghost plugin detail sections', () => {
       onToggle: vi.fn(),
       onUse: vi.fn(),
       onUpdate: vi.fn(),
+      onUpdateFromFile: vi.fn(),
       onUninstall: vi.fn(),
       onReapprove: vi.fn(),
       toggleDisabled: false,

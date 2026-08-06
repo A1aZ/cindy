@@ -67,6 +67,20 @@ export interface SlackHookConfigState {
   lifecycleAnnouncementOverride: boolean | null;
   telegramBindingCache: ProviderBindingCacheEntry | null;
   xBindingCache: ProviderBindingCacheEntry | null;
+  /**
+   * 该 provider 派发任务时使用的默认工作目录别名; null = 用内置「对话」伪目录。
+   * 生效顺序恒为 **会话显式映射 > 默认工作目录 > 「对话」**(判定在 hook server)。
+   *
+   * X 一次交互只允许回一条公开推文, 没有承载选择面板的位置, 所以它最先需要;
+   * Telegram 虽有 inline keyboard 可以当场 /workspace, 但那是**每会话各自**设的 ——
+   * 用户在设置页绑好目录后进一个新群, agent 仍在无仓库模式跑, 与他的预期不符。
+   *
+   * **读出来恒是有效值**: 目录清单收缩时会把失效别名从存档里删掉, viewOf 再复核
+   * 一次 —— 否则 hello 会带上清单外的别名, 被协议校验拒收, 连接直接断在握手上。
+   */
+  xDefaultWorkspace: string | null;
+  /** 同上, Telegram 侧(私聊 / 群 / 话题一律适用)。 */
+  telegramDefaultWorkspace: string | null;
 }
 
 export const DEFAULT_SLACK_LIFECYCLE_ANNOUNCEMENT = false;
@@ -167,6 +181,15 @@ export interface SlackHookStore {
     provider: 'telegram' | 'x',
     entry: ProviderBindingCacheEntry | null,
   ): SlackHookConfigState;
+  /**
+   * 设置某个 provider 的默认工作目录别名(null / 「对话」= 用内置伪目录)。
+   * 别名必须已存在于 workspaces(或恰是「对话」保留名), 否则抛校验错 ——
+   * 写进去的非法值会在下次握手时被协议拒收, 那时已经离用户操作很远了。
+   */
+  setProviderDefaultWorkspace(
+    provider: 'telegram' | 'x',
+    alias: string | null,
+  ): SlackHookConfigState;
 }
 
 export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
@@ -178,8 +201,16 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
       bindingsCache: HookBindingCacheEntry[];
       lifecycleAnnouncementOverride: boolean | null;
     };
-    telegram: { enabled: boolean; bindingCache: ProviderBindingCacheEntry | null };
-    x: { enabled: boolean; bindingCache: ProviderBindingCacheEntry | null };
+    telegram: {
+      enabled: boolean;
+      bindingCache: ProviderBindingCacheEntry | null;
+      defaultWorkspace: string | null;
+    };
+    x: {
+      enabled: boolean;
+      bindingCache: ProviderBindingCacheEntry | null;
+      defaultWorkspace: string | null;
+    };
   }
 
   interface StoredDocument {
@@ -223,6 +254,8 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
         lifecycleAnnouncementOverride: null,
         telegramBindingCache: null,
         xBindingCache: null,
+        xDefaultWorkspace: null,
+        telegramDefaultWorkspace: null,
       };
       // 清理旧文件与旧 secret(best-effort, 失败只记日志)
       const legacyIds = rows.map((r) => (typeof r.id === 'string' ? r.id : '')).filter(Boolean);
@@ -252,8 +285,8 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
       bindingsCache: [],
       lifecycleAnnouncementOverride: null,
     },
-    telegram: { enabled: false, bindingCache: null },
-    x: { enabled: false, bindingCache: null },
+    telegram: { enabled: false, bindingCache: null, defaultWorkspace: null },
+    x: { enabled: false, bindingCache: null, defaultWorkspace: null },
   });
 
   /** 绑定缓存条目形状校验(坏条目静默丢弃 —— 缓存是可再生数据, 不值得报错)。 */
@@ -326,10 +359,17 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
       telegram: {
         enabled: telegram.enabled === true,
         bindingCache: parseProviderBindingCache(telegram.bindingCache),
+        // 同 x: 成员关系留给 viewOf 复核(这里 workspaces 还没读进来)。
+        // 旧配置文件没有这个键 —— 读成 null 即"没设过", 不需要迁移动作。
+        defaultWorkspace:
+          typeof telegram.defaultWorkspace === 'string' ? telegram.defaultWorkspace : null,
       },
       x: {
         enabled: x.enabled === true,
         bindingCache: parseProviderBindingCache(x.bindingCache),
+        // 成员关系不在这里卡: 解析时 workspaces 还没读进来。留给 viewOf 复核,
+        // 那里才同时握有两者。
+        defaultWorkspace: typeof x.defaultWorkspace === 'string' ? x.defaultWorkspace : null,
       },
     };
   }
@@ -359,8 +399,8 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
           bindingsCache: state.bindingsCache.map((e) => ({ ...e })),
           lifecycleAnnouncementOverride: state.lifecycleAnnouncementOverride,
         },
-        telegram: { enabled: false, bindingCache: null },
-        x: { enabled: false, bindingCache: null },
+        telegram: { enabled: false, bindingCache: null, defaultWorkspace: null },
+        x: { enabled: false, bindingCache: null, defaultWorkspace: null },
       },
     };
   }
@@ -417,6 +457,8 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
         lifecycleAnnouncementOverride: null,
         telegramBindingCache: null,
         xBindingCache: null,
+        xDefaultWorkspace: null,
+        telegramDefaultWorkspace: null,
       });
     } catch (err) {
       log.warn(
@@ -443,6 +485,53 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
     return { document, fingerprint, changed };
   }
 
+  /**
+   * X 默认工作目录的**定义域**:workspaces 清单 + 内置「对话」伪目录。
+   *
+   * 清单是文档级的、默认值是账号级的, 两者由不同入口写入, 所以这条不变量必须
+   * 有一个共用判据 —— 否则读侧和写侧各写各的, 迟早分叉。
+   */
+  function isSelectableWorkspace(document: StoredDocument, alias: string): boolean {
+    // 「对话」不是 workspaces 的键, 但它恒在 hello 清单里, 所以放行。
+    return (
+      alias === HOOK_CHAT_WORKSPACE_ALIAS ||
+      Object.prototype.hasOwnProperty.call(document.workspaces, alias)
+    );
+  }
+
+  /**
+   * 把已不在定义域内的默认别名从**存档**里删掉, 返回是否改动过。
+   *
+   * 只靠 viewOf 把它投影成 null 不够: 旧别名仍留在盘上, 用户之后重新添加一个
+   * 同名别名(哪怕指向的是另一个目录)就会让它无声复活, X 任务被派发到用户从未
+   * 选过的目录。清单收缩是唯一会让默认值失效的操作, 所以在那里落盘删除。
+   */
+  function pruneStaleDefaultWorkspaces(document: StoredDocument): boolean {
+    let changed = false;
+    const accounts = [...Object.values(document.accounts), document.legacyAccount];
+    for (const account of accounts) {
+      if (account === undefined) continue;
+      // 两个 provider 都要清: 只清一个会让另一个的失效别名留在盘上, 用户之后
+      // 重新添加同名别名(哪怕指向另一个目录)就把它无声复活。
+      for (const provider of ['telegram', 'x'] as const) {
+        const alias = account[provider].defaultWorkspace;
+        if (alias === null || alias === undefined) continue;
+        if (isSelectableWorkspace(document, alias)) continue;
+        account[provider].defaultWorkspace = null;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  /** 读侧复核: 别名不在当前清单内就投影成 null(见 viewOf 上方注释)。 */
+  function selectableDefaultWorkspace(
+    document: StoredDocument,
+    alias: string | null,
+  ): string | null {
+    return alias !== null && isSelectableWorkspace(document, alias) ? alias : null;
+  }
+
   function viewOf(document: StoredDocument, fingerprint: string | null): SlackHookConfigState {
     const account = fingerprint
       ? (document.accounts[fingerprint] ?? EMPTY_ACCOUNT())
@@ -459,6 +548,15 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
         ? { ...account.telegram.bindingCache }
         : null,
       xBindingCache: account.x.bindingCache ? { ...account.x.bindingCache } : null,
+      // 读侧兜底: 正常路径上 setWorkspaces 已把失效别名从存档里删了, 这里只兜
+      // 手改配置文件、或将来新增了别的清单写入口的情况。代价不对称 —— 漏兜的
+      // 后果是 hello 带上清单外别名被协议拒收, **该 provider 的连接**断在握手上
+      // 且没有任何用户可见线索(Telegram / X 两条线同样适用), 所以这层留着。
+      xDefaultWorkspace: selectableDefaultWorkspace(document, account.x.defaultWorkspace),
+      telegramDefaultWorkspace: selectableDefaultWorkspace(
+        document,
+        account.telegram.defaultWorkspace,
+      ),
     };
   }
 
@@ -499,6 +597,7 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
     setWorkspaces(workspaces) {
       const current = currentDocument();
       current.document.workspaces = validateWorkspaces(workspaces);
+      pruneStaleDefaultWorkspaces(current.document);
       writeDocument(current.document);
       return viewOf(current.document, current.fingerprint);
     },
@@ -516,6 +615,22 @@ export function createSlackHookStore(deps: SlackHookStoreDeps): SlackHookStore {
     setProviderBindingCache(provider, entry) {
       return mutateAccount((account) => {
         account[provider].bindingCache = entry ? { ...entry } : null;
+      });
+    },
+    setProviderDefaultWorkspace(provider, alias) {
+      // 「对话」伪目录不在 workspaces 里, 但它恒在 hello 清单中 —— 归一成 null
+      // (二者语义相同, 存 null 让"没设过"和"选了对话"只有一种表示)。
+      const normalized = alias === null || alias === HOOK_CHAT_WORKSPACE_ALIAS ? null : alias;
+      if (normalized !== null) {
+        const current = read();
+        if (!Object.prototype.hasOwnProperty.call(current.workspaces, normalized)) {
+          throw new HookConnectionValidationError(
+            `workspace alias "${normalized}" is not configured`,
+          );
+        }
+      }
+      return mutateAccount((account) => {
+        account[provider].defaultWorkspace = normalized;
       });
     },
   };

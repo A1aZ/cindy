@@ -28,6 +28,8 @@ function marketItem(
     icon: null,
     installState,
     enabled: installState === 'not-installed' ? null : true,
+    sourceType: 'server',
+    sourceMarketName: null,
   };
 }
 
@@ -78,15 +80,26 @@ describe('ghostReapprovalRoute', () => {
 
 describe('pluginPresentationOrigin', () => {
   it('maps public plugins independently of their default-install policy', () => {
-    expect(pluginPresentationOrigin({ scope: 'public' })).toBe('public');
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'server' })).toBe('public');
   });
 
   it('maps organization plugins to their organization source', () => {
-    expect(pluginPresentationOrigin({ scope: 'organization' })).toBe('organization');
+    expect(
+      pluginPresentationOrigin({ scope: 'organization', sourceType: 'server' }),
+    ).toBe('organization');
   });
 
   it('keeps personal plugins out of the client-facing market taxonomy', () => {
-    expect(pluginPresentationOrigin({ scope: 'personal' })).toBe('local');
+    expect(pluginPresentationOrigin({ scope: 'personal', sourceType: 'server' })).toBe('local');
+  });
+
+  it('maps custom market sources to the custom origin regardless of scope', () => {
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'git-market' })).toBe(
+      'custom',
+    );
+    expect(pluginPresentationOrigin({ scope: 'public', sourceType: 'local-market' })).toBe(
+      'custom',
+    );
   });
 
   it.each([null, undefined])('keeps unmatched installed plugins local', (item) => {

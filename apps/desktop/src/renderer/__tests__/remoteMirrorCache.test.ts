@@ -61,6 +61,26 @@ function dbMessage(sessionId: string, id: string, content: string, ts: string): 
   };
 }
 
+function dbPlanToolMessage(sessionId: string, id: string, ts: string): Message {
+  const toolUseId = `tool-${id}`;
+  return {
+    id,
+    clientId: `client-${id}`,
+    sessionId,
+    role: 'tool_use',
+    content: {
+      toolName: 'update_plan',
+      toolUseId,
+      input: {
+        plan: [{ content: 'Cached remote plan', status: 'in_progress' }],
+      },
+    },
+    toolUseId,
+    agentMeta: null,
+    createdAt: ts,
+  } as unknown as Message;
+}
+
 /** 被控端经隧道返回的权威列表;可换成挂起的 promise 模拟慢隧道 / 离线。 */
 let remoteList: Message[] = [];
 let remoteListPromise: Promise<Message[]> | null = null;
@@ -219,6 +239,26 @@ describe('冷缓存 hydrate', () => {
     expect(snapshot.historyLoaded).toBe(false);
     // 缓存窗口不接管分页游标:不发注定失败的隧道翻页。
     expect(snapshot.hasMoreMessages).toBe(false);
+  });
+
+  it('缓存页只有计划工具行时仍种入,供 PinnedPlanPanel 派生计划', async () => {
+    const s = sid();
+    cachedMessages.set(`${DEVICE_ID}::${s}`, [
+      dbPlanToolMessage(s, 'plan', '2026-01-01T00:00:00.000Z') as unknown as Record<
+        string,
+        unknown
+      >,
+    ]);
+    registerRemote(s);
+    remoteListPromise = new Promise<Message[]>(() => {});
+
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+
+    const snapshot = makerChatStore.getSnapshot(s);
+    expect(snapshot.messages.map((m) => m.clientId)).toEqual(['client-plan']);
+    expect(snapshot.messages[0].cacheHydrated).toBe(true);
+    expect(snapshot.historyLoaded).toBe(false);
   });
 
   it('fresh 落地后整批剔除缓存行:权威页里没有的缓存消息不残留', async () => {
@@ -684,6 +724,39 @@ describe('在途最新页遇上权威作废', () => {
     await flush(20);
 
     expect(putMessages).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('首拉在途遇上消息代际失效', () => {
+  it('messages:deleted 作废首拉后自动重拉当前代,不让 historyLoaded 永久卡 false', async () => {
+    const s = sid();
+    registerRemote(s);
+    let resolveInitial: (rows: Message[]) => void = () => {};
+    remoteListPromise = new Promise<Message[]>((resolve) => {
+      resolveInitial = resolve;
+    });
+
+    makerChatStore.ensureInitialMessages(s);
+    await flush();
+    expect(
+      invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:list'),
+    ).toHaveLength(1);
+
+    // messages:deleted 与其它 renderer 删除入口共用 removeMessagesByClientIds，
+    // 即使当前窗口没有这条消息也会 bump epoch 作废在途首拉。
+    makerChatStore.removeMessagesByClientIds(s, ['client-deleted']);
+    remoteListPromise = Promise.resolve([
+      dbMessage(s, 'fresh', '当前代的消息', '2026-01-02T00:00:00.000Z'),
+    ]);
+    resolveInitial([dbMessage(s, 'stale', '上一代的迟到消息', '2026-01-01T00:00:00.000Z')]);
+    await flush(40);
+
+    expect(
+      invoke.mock.calls.filter(([, channel]) => channel === 'local-db:messages:list'),
+    ).toHaveLength(2);
+    const snapshot = makerChatStore.getSnapshot(s);
+    expect(snapshot.historyLoaded).toBe(true);
+    expect(snapshot.messages.map((message) => message.clientId)).toEqual(['client-fresh']);
   });
 });
 

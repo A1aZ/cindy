@@ -71,14 +71,25 @@ describe('ghost 写路径 IPC 的 owner 租约(源码契约)', () => {
   it('ghosts:uninstall 经 uninstallGhostAndCleanup 持租约(入口同步取,无异步窗口故无需 capture)', () => {
     const block = handlerBlock(source, 'ghosts:uninstall');
     expect(block).toContain('uninstallGhostAndCleanup(');
-    const start = source.indexOf('export async function uninstallGhostAndCleanup');
+    // main 的 per-ghost 屏障重构后,外层委托 withGhostInstallLock,实际清理与租约在
+    // ...Locked 内(lock 内取租约,包住整段清理)。契约钉在真正干活的 Locked 函数上。
+    const outerStart = source.indexOf('export async function uninstallGhostAndCleanup');
+    expect(outerStart).toBeGreaterThan(-1);
+    const outer = source.slice(outerStart, source.indexOf('\n}', outerStart));
+    expect(outer).toContain('withGhostInstallLock(');
+    const start = source.indexOf('async function uninstallGhostAndCleanupLocked');
     expect(start).toBeGreaterThan(-1);
     const fn = source.slice(start, source.indexOf('\n}', start));
     expect(fn).toContain('beginGhostMutation(');
   });
 
   it('市场装入/更新持租约(installOrUpdateMarketGhostPackage)', () => {
-    const start = source.indexOf('export async function installOrUpdateMarketGhostPackage');
+    // 同上:外层委托 withGhostInstallLock,owner 捕获 + 起租约在 ...Locked 内。
+    const outerStart = source.indexOf('export async function installOrUpdateMarketGhostPackage');
+    expect(outerStart).toBeGreaterThan(-1);
+    const outer = source.slice(outerStart, source.indexOf('\n}', outerStart));
+    expect(outer).toContain('withGhostInstallLock(');
+    const start = source.indexOf('async function installOrUpdateMarketGhostPackageLocked');
     expect(start).toBeGreaterThan(-1);
     const block = source.slice(start, source.indexOf('\n}', start));
     expect(block).toContain('captureGhostMutationOwner()');

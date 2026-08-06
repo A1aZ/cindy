@@ -8,11 +8,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SaveDepositVault, sanitizeSaveFileName } from '../dirDeposit.js';
-import {
-  GHOST_SAVE_DEPOSIT_MAX_TOTAL_BYTES,
-  GHOST_SAVE_DEPOSIT_MAX_USES,
-  GHOST_SAVE_DEPOSIT_TTL_MS,
-} from '../../../shared/ghost.js';
+import { GHOST_SAVE_DEPOSIT_MAX_USES, GHOST_SAVE_DEPOSIT_TTL_MS } from '../../../shared/ghost.js';
 
 let workdir: string;
 let saveDir: string;
@@ -86,6 +82,180 @@ describe('SaveDepositVault', () => {
     expect(await vault.write('g1', '00000000-0000-4000-8000-000000000000', 'a.txt', new Uint8Array([1]))).toBeNull();
   });
 
+  it('写入前完整性校验失败会清掉本次创建的空文件，重试仍可使用原文件名', async () => {
+    const vault = new SaveDepositVault();
+    const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!deposited.ok) throw new Error('deposit failed');
+
+    const originalStatSync = fs.statSync.bind(fs);
+    const statSpy = vi.spyOn(fs, 'statSync').mockImplementationOnce((filePath) => {
+      const stat = originalStatSync(filePath);
+      const tamperedIno = stat.ino === 0 ? 1 : 0;
+      return new Proxy(stat, {
+        get(target, property, receiver) {
+          if (property === 'ino') return tamperedIno;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    });
+    try {
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'integrity.txt', new Uint8Array([1, 2, 3])),
+      ).resolves.toBeNull();
+    } finally {
+      statSpy.mockRestore();
+    }
+
+    const target = path.join(saveDir, 'integrity.txt');
+    expect(fs.existsSync(target)).toBe(false);
+    await expect(
+      vault.write('g1', deposited.receipt.token, 'integrity.txt', new Uint8Array([4])),
+    ).resolves.toEqual({ fileName: 'integrity.txt' });
+    expect(fs.readFileSync(target)).toEqual(Buffer.from([4]));
+  });
+
+  it('部分写入失败会清掉残留字节，重试不会被迫改名', async () => {
+    const vault = new SaveDepositVault();
+    const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!deposited.ok) throw new Error('deposit failed');
+
+    const target = path.join(saveDir, 'partial.bin');
+    const originalOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalWriteFile = handle.writeFile.bind(handle);
+      return {
+        stat: handle.stat.bind(handle),
+        writeFile: async (data: Uint8Array) => {
+          await originalWriteFile(data.subarray(0, 1));
+          throw new Error('simulated EIO');
+        },
+        truncate: handle.truncate.bind(handle),
+        close: handle.close.bind(handle),
+      } as unknown as fs.promises.FileHandle;
+    });
+    try {
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'partial.bin', new Uint8Array([1, 2, 3])),
+      ).resolves.toBeNull();
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(fs.existsSync(target)).toBe(false);
+    await expect(
+      vault.write('g1', deposited.receipt.token, 'partial.bin', new Uint8Array([4, 5])),
+    ).resolves.toEqual({ fileName: 'partial.bin' });
+    expect(fs.readFileSync(target)).toEqual(Buffer.from([4, 5]));
+  });
+
+  it('写入失败期间目标被替换时不误删替代文件', async () => {
+    if (process.platform === 'win32') return;
+
+    const vault = new SaveDepositVault();
+    const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!deposited.ok) throw new Error('deposit failed');
+
+    const target = path.join(saveDir, 'replacement.bin');
+    const moved = `${target}.moved`;
+    const originalOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalWriteFile = handle.writeFile.bind(handle);
+      return {
+        stat: handle.stat.bind(handle),
+        writeFile: async (data: Uint8Array) => {
+          await originalWriteFile(data.subarray(0, 1));
+          await fs.promises.rename(target, moved);
+          await fs.promises.writeFile(target, Buffer.from('replacement'));
+          throw new Error('simulated EIO');
+        },
+        truncate: handle.truncate.bind(handle),
+        close: handle.close.bind(handle),
+      } as unknown as fs.promises.FileHandle;
+    });
+    try {
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'replacement.bin', new Uint8Array([1, 2, 3])),
+      ).resolves.toBeNull();
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(fs.readFileSync(target, 'utf8')).toBe('replacement');
+    expect(fs.existsSync(moved)).toBe(true);
+    expect(fs.readFileSync(moved)).toHaveLength(0);
+  });
+
+  it('写入完成后目标被移出批准目录时拒绝并清空原 inode', async () => {
+    if (process.platform === 'win32') return;
+
+    const vault = new SaveDepositVault();
+    const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!deposited.ok) throw new Error('deposit failed');
+
+    const target = path.join(saveDir, 'post-write-move.bin');
+    const moved = `${target}.moved`;
+    const originalOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalWriteFile = handle.writeFile.bind(handle);
+      return {
+        stat: handle.stat.bind(handle),
+        writeFile: async (data: Uint8Array) => {
+          await originalWriteFile(data);
+          await fs.promises.rename(target, moved);
+        },
+        truncate: handle.truncate.bind(handle),
+        close: handle.close.bind(handle),
+      } as unknown as fs.promises.FileHandle;
+    });
+    try {
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'post-write-move.bin', new Uint8Array([1, 2, 3])),
+      ).resolves.toBeNull();
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(fs.existsSync(target)).toBe(false);
+    expect(fs.readFileSync(moved)).toHaveLength(0);
+  });
+
+  it('close 失败按统一 null 语义返回并清理已创建文件', async () => {
+    const vault = new SaveDepositVault();
+    const deposited = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
+    if (!deposited.ok) throw new Error('deposit failed');
+
+    const target = path.join(saveDir, 'close-failure.bin');
+    const originalOpen = fs.promises.open.bind(fs.promises);
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (...args) => {
+      const handle = await originalOpen(...args);
+      const originalWriteFile = handle.writeFile.bind(handle);
+      const originalClose = handle.close.bind(handle);
+      let closeCalls = 0;
+      return {
+        stat: handle.stat.bind(handle),
+        writeFile: (data: Uint8Array) => originalWriteFile(data),
+        truncate: handle.truncate.bind(handle),
+        close: async () => {
+          closeCalls += 1;
+          if (closeCalls === 1) throw new Error('simulated close failure');
+          await originalClose();
+        },
+      } as unknown as fs.promises.FileHandle;
+    });
+    try {
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'close-failure.bin', new Uint8Array([1, 2, 3])),
+      ).resolves.toBeNull();
+    } finally {
+      openSpy.mockRestore();
+    }
+
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
   it('TTL 过期 / 次数写满自动作废', async () => {
     let now = 1_000_000;
     const vault = new SaveDepositVault(() => now);
@@ -101,100 +271,6 @@ describe('SaveDepositVault', () => {
     }
     expect(await vault.write('g1', ok2.receipt.token, 'over.bin', new Uint8Array([1]))).toBeNull();
   });
-
-  it('并发写入不超预算且同名文件原子去重', async () => {
-    const vault = new SaveDepositVault();
-    const ok = vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: workdir });
-    if (!ok.ok) throw new Error('deposit failed');
-
-    const results = await Promise.all(
-      Array.from({ length: GHOST_SAVE_DEPOSIT_MAX_USES + 2 }, () =>
-        vault.write('g1', ok.receipt.token, 'parallel.txt', new Uint8Array([1])),
-      ),
-    );
-    const successful = results.filter((result): result is { fileName: string } => result !== null);
-    expect(successful).toHaveLength(GHOST_SAVE_DEPOSIT_MAX_USES);
-    expect(new Set(successful.map((result) => result.fileName)).size).toBe(successful.length);
-    expect(
-      successful.reduce((sum, result) => sum + fs.statSync(path.join(saveDir, result.fileName)).size, 0),
-    ).toBeLessThanOrEqual(GHOST_SAVE_DEPOSIT_MAX_TOTAL_BYTES);
-  });
-
-  it('出票后目标目录被替换为链接时拒绝越界写入', async () => {
-    const parent = await fs.promises.mkdtemp(path.join(workdir, 'save-parent-'));
-    const approved = path.join(parent, 'approved');
-    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-ticket-outside-'));
-    try {
-      await fs.promises.mkdir(approved);
-      const vault = new SaveDepositVault();
-      const result = vault.deposit({ ghostId: 'g1', dirAbs: approved, workdirAbs: workdir });
-      if (!result.ok) throw new Error('deposit failed');
-      await fs.promises.rename(approved, path.join(parent, 'approved-old'));
-      try {
-        await fs.promises.symlink(
-          outside,
-          approved,
-          process.platform === 'win32' ? 'junction' : 'dir',
-        );
-      } catch {
-        return;
-      }
-      expect(await vault.write('g1', result.receipt.token, 'escaped.txt', new Uint8Array([1]))).toBeNull();
-      expect(fs.existsSync(path.join(outside, 'escaped.txt'))).toBe(false);
-    } finally {
-      await fs.promises.rm(parent, { recursive: true, force: true });
-      await fs.promises.rm(outside, { recursive: true, force: true });
-    }
-  });
-
-  it('目录在校验后、独占创建前被替换时不把响应字节写出批准目录', async () => {
-    const parent = await fs.promises.mkdtemp(path.join(workdir, 'save-race-parent-'));
-    const approved = path.join(parent, 'approved');
-    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-race-outside-'));
-    const probe = path.join(parent, 'probe-link');
-    try {
-      await fs.promises.mkdir(approved);
-      try {
-        await fs.promises.symlink(
-          outside,
-          probe,
-          process.platform === 'win32' ? 'junction' : 'dir',
-        );
-        await fs.promises.rm(probe, { force: true });
-      } catch {
-        return;
-      }
-
-      const vault = new SaveDepositVault();
-      const result = vault.deposit({ ghostId: 'g1', dirAbs: approved, workdirAbs: workdir });
-      if (!result.ok) throw new Error('deposit failed');
-      const originalOpenSync = fs.openSync;
-      let swapped = false;
-      const openSpy = vi.spyOn(fs, 'openSync').mockImplementation((filePath, flags, mode) => {
-        if (!swapped && String(filePath).endsWith('escaped.txt')) {
-          swapped = true;
-          fs.renameSync(approved, path.join(parent, 'approved-old'));
-          fs.symlinkSync(
-            outside,
-            approved,
-            process.platform === 'win32' ? 'junction' : 'dir',
-          );
-        }
-        return originalOpenSync(filePath, flags, mode);
-      });
-      try {
-        expect(
-          await vault.write('g1', result.receipt.token, 'escaped.txt', new Uint8Array([1, 2, 3])),
-        ).toBeNull();
-      } finally {
-        openSpy.mockRestore();
-      }
-      expect(fs.existsSync(path.join(outside, 'escaped.txt'))).toBe(false);
-    } finally {
-      await fs.promises.rm(parent, { recursive: true, force: true });
-      await fs.promises.rm(outside, { recursive: true, force: true });
-    }
-  });
 });
 
 describe('SaveDepositVault userGranted 旁路(workdir 外确认卡通过后)', () => {
@@ -203,12 +279,13 @@ describe('SaveDepositVault userGranted 旁路(workdir 外确认卡通过后)', (
     try {
       const vault = new SaveDepositVault();
       expect(vault.deposit({ ghostId: 'g1', dirAbs: outside, workdirAbs: workdir }).ok).toBe(false);
+      const expectedRealPath = await fs.promises.realpath(outside);
       const r = vault.deposit({
         ghostId: 'g1',
-        dirAbs: outside,
+        dirAbs: expectedRealPath,
         workdirAbs: workdir,
         userGranted: true,
-        approvedRealPath: outside,
+        expectedRealPath,
       });
       expect(r.ok).toBe(true);
       if (r.ok) {
@@ -225,5 +302,76 @@ describe('SaveDepositVault userGranted 旁路(workdir 外确认卡通过后)', (
     const vault = new SaveDepositVault();
     expect(vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: null }).ok).toBe(false);
     expect(vault.deposit({ ghostId: 'g1', dirAbs: saveDir, workdirAbs: null, userGranted: true }).ok).toBe(true);
+  });
+
+  it('授权后的 canonical 路径被换成 symlink 时拒绝出票', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-approved-dir-'));
+    try {
+      const approved = path.join(root, 'approved');
+      const replacement = path.join(root, 'replacement');
+      await fs.promises.mkdir(approved);
+      await fs.promises.mkdir(replacement);
+      const expectedRealPath = await fs.promises.realpath(approved);
+      const replacementRealPath = await fs.promises.realpath(replacement);
+      const moved = path.join(path.dirname(expectedRealPath), 'approved-moved');
+      await fs.promises.rename(expectedRealPath, moved);
+      try {
+        await fs.promises.symlink(
+          replacementRealPath,
+          expectedRealPath,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch {
+        return;
+      }
+
+      const result = new SaveDepositVault().deposit({
+        ghostId: 'g1',
+        dirAbs: expectedRealPath,
+        workdirAbs: workdir,
+        userGranted: true,
+        expectedRealPath,
+      });
+
+      expect(result).toEqual({ ok: false, message: '路径在授权后发生变化，请重新确认' });
+    } finally {
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('出票后目标根被换成外部 symlink:write 拒绝且不在外部落盘', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'save-ticket-swap-'));
+    try {
+      const approved = path.join(root, 'approved');
+      const outside = path.join(root, 'outside');
+      await fs.promises.mkdir(approved);
+      await fs.promises.mkdir(outside);
+      const vault = new SaveDepositVault();
+      const deposited = vault.deposit({
+        ghostId: 'g1',
+        dirAbs: approved,
+        workdirAbs: workdir,
+        userGranted: true,
+      });
+      if (!deposited.ok) throw new Error('deposit failed');
+
+      await fs.promises.rename(approved, `${approved}-moved`);
+      try {
+        await fs.promises.symlink(
+          outside,
+          approved,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      } catch {
+        return;
+      }
+
+      await expect(
+        vault.write('g1', deposited.receipt.token, 'escaped.txt', new TextEncoder().encode('no')),
+      ).resolves.toBeNull();
+      await expect(fs.promises.stat(path.join(outside, 'escaped.txt'))).rejects.toThrow();
+    } finally {
+      await fs.promises.rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -60,6 +60,13 @@ function goodManifest(id = 'hello'): Record<string, unknown> {
   };
 }
 
+function atResourceManifest(id = 'hello'): Record<string, unknown> {
+  return {
+    ...goodManifest(id),
+    atResourceProvider: { tool: 'do_thing' },
+  };
+}
+
 /** 带显式指令的芯片型清单(command 查重用例)。 */
 function chipManifestWithCommand(id: string, command: string): Record<string, unknown> {
   return {
@@ -2253,6 +2260,23 @@ describe('GhostManager · install', () => {
     expect(recovered.list()[0]).toMatchObject({ approval: { state: 'approved' } });
   });
 
+  it('@ 资源入口必须命中主机安装 receipt，旧安装元数据不会在升级后自动扩权', async () => {
+    const cindy = await makeCindy('at-resource.cindy', atResourceManifest());
+    const installed = await manager.install(cindy);
+
+    const metadataPath = path.join(rootDir, 'hello', '.cindy-trust.json');
+    const metadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8')) as Record<string, unknown>;
+
+    delete metadata.approvedAtResourceProvider;
+    await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
+    expect(manager.list()[0].manifest.tools).toEqual([
+      { name: 'do_thing', description: '做点事' },
+    ]);
+
+    metadata.approvedAtResourceProvider = { tool: 'other_tool' };
+    await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
+  });
+
   it('initiallyEnabled=false:装入即沉睡(.disabled 与目录同帧就位,首个广播就是沉睡态)', async () => {
     const cindy = await makeCindy('hello.cindy', goodManifest());
     const result = await manager.install(cindy, { initiallyEnabled: false });
@@ -3657,6 +3681,37 @@ describe('GhostManager · inspect(只验不装)', () => {
     expect(onChanged).not.toHaveBeenCalled();
   });
 
+  it('本地化展示清单与包内 canonical 清单分离', async () => {
+    hostLocale = 'zh-CN';
+    const base = {
+      ...goodManifest(),
+      name: 'Base name',
+      locales: {
+        en: 'locales/en.json',
+        'zh-CN': 'locales/zh-CN.json',
+      },
+    };
+    const cindy = await makeCindy('canonical.cindy', base, {
+      'locales/en.json': JSON.stringify({ name: 'English name' }),
+      'locales/zh-CN.json': JSON.stringify({
+        name: '中文名称',
+        tools: { do_thing: { description: '中文工具说明' } },
+      }),
+    });
+
+    const inspected = await manager.inspect(cindy);
+    expect(inspected).toMatchObject({
+      manifest: {
+        name: '中文名称',
+        tools: [{ name: 'do_thing', description: '中文工具说明' }],
+      },
+      canonicalManifest: {
+        name: 'Base name',
+        tools: [{ name: 'do_thing', description: '做点事' }],
+      },
+    });
+  });
+
   it('确认后源文件被替换时，整包指纹不一致会拒绝安装', async () => {
     const cindy = await makeCindy('swap.cindy', goodManifest(), { 'payload.txt': 'before' });
     const inspected = await manager.inspect(cindy);
@@ -3719,6 +3774,11 @@ describe('GhostManager · author / icon(身份卡展示字段)', () => {
     const cindy = await makeCindy('icon2.cindy', iconManifest(), { 'assets/icon.png': 'PNGDATA' });
     await manager.install(cindy);
     await fs.promises.rm(path.join(rootDir, 'hello', 'assets', 'icon.png'));
+    // 受体模型:已批准投影的 icon 来自 receipt 快照(GhostManager.ts:1684),
+    // 装后删盘上 icon 文件不改变 list() 输出——快照即批准时钉下的图标。
+    // main 旧的"删文件/换软链 → 降级为无图标"两个用例前提在受体模型下不再成立
+    // (已批准根本不读盘);活读路径(legacy 未批准)的无泄漏由本文件
+    // 'never reads icon bytes from outside the plugin dir...' 用例覆盖。
     const listed = manager.list();
     expect(listed).toHaveLength(1);
     expect(listed[0].iconDataUrl).toBe('data:image/png;base64,UE5HREFUQQ==');

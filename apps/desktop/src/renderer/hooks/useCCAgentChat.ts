@@ -34,6 +34,7 @@ import {
   type AskUserDraft,
   type AskUserViewerState,
   type ChatMessage,
+  type ContinuationInFlightProjectionCapability,
   type PendingPermission,
   type PendingAskUser,
   type PendingPluginSetup,
@@ -64,6 +65,7 @@ export type {
   AskUserDraft,
   AskUserViewerState,
   ChatMessage,
+  ContinuationInFlightProjectionCapability,
   PendingPermission,
   PendingAskUser,
   PendingPlanReview,
@@ -124,6 +126,8 @@ interface UseCCAgentChatReturn {
       agentReferences?: AgentInputReference[];
       pastedTextRanges?: PastedTextRange[];
       slashCommandRanges?: SlashCommandRange[];
+      beforeEnqueue?: () => Promise<boolean>;
+      onRemoteOptimisticFailure?: (clientId: string, error?: unknown) => void;
     },
   ) => Promise<boolean>;
   compactSession: (
@@ -147,6 +151,8 @@ interface UseCCAgentChatReturn {
       agentReferences?: AgentInputReference[];
       pastedTextRanges?: PastedTextRange[];
       slashCommandRanges?: SlashCommandRange[];
+      beforeEnqueue?: () => Promise<boolean>;
+      onRemoteOptimisticFailure?: (clientId: string, error?: unknown) => void;
     },
   ) => Promise<boolean>;
   steerQueuedMessage: (clientId: string) => Promise<boolean>;
@@ -184,10 +190,15 @@ interface UseCCAgentChatReturn {
   credentialSwitchWait: { clientId?: string; blockedBySessionIds: string[] } | null;
   /** 已离队、正在 coordinator dispatch/turn 边界内的 Continue clientId。 */
   continuationInFlightClientId: string | null;
+  /** 当前 vendor turn 的续跑发起项 clientId，steer 后及 Renderer 重载仍保持。 */
+  continuationTurnClientId: string | null;
+  /** 续跑边界投影能力；legacy 时保留旧被控端的兼容兜底。 */
+  continuationInFlightProjectionCapability: ContinuationInFlightProjectionCapability;
   /** F-SYNC-2: Load older messages (prepend to top) */
   loadOlderMessages: () => void;
   isLoadingMore: boolean;
   hasMoreMessages: boolean;
+  historyWindowHasIsland: boolean;
   /** F-PERM-2: Currently pending permission request */
   pendingPermission: PendingPermission | null;
   /** F-PERM-2: Respond to a pending permission request */
@@ -393,6 +404,8 @@ export function useCCAgentChat(
         agentReferences?: AgentInputReference[];
         pastedTextRanges?: PastedTextRange[];
         slashCommandRanges?: SlashCommandRange[];
+        beforeEnqueue?: () => Promise<boolean>;
+        onRemoteOptimisticFailure?: (clientId: string, error?: unknown) => void;
       },
     ): Promise<boolean> => {
       if (!sessionId) return Promise.resolve(false);
@@ -447,6 +460,8 @@ export function useCCAgentChat(
         agentReferences?: AgentInputReference[];
         pastedTextRanges?: PastedTextRange[];
         slashCommandRanges?: SlashCommandRange[];
+        beforeEnqueue?: () => Promise<boolean>;
+        onRemoteOptimisticFailure?: (clientId: string, error?: unknown) => void;
       },
     ) => {
       if (!sessionId) return Promise.resolve(false);
@@ -826,16 +841,21 @@ export function useCCAgentChat(
     errorReason:
       lightState.error != null
         ? (lightState.errorReason ?? null)
-        : (lightState.recoverableError != null ? (lightState.errorReason ?? null) : null),
+        : lightState.recoverableError != null
+          ? (lightState.errorReason ?? null)
+          : null,
     // 当前 error 是非终止 recoverableError(turn 在跑,daemon 自动重试中):
     // ErrorBanner 网络分支据此显示「正在自动重试…」而非「可点击重试」。
     errorIsRecoverable: !lightState.error && lightState.recoverableError != null,
     errorRetryText: lightState.errorRetryText,
     credentialSwitchWait: lightState.credentialSwitchWait,
     continuationInFlightClientId: lightState.continuationInFlightClientId,
+    continuationTurnClientId: lightState.continuationTurnClientId,
+    continuationInFlightProjectionCapability: lightState.continuationInFlightProjectionCapability,
     loadOlderMessages,
     isLoadingMore: lightState.isLoadingMore,
     hasMoreMessages: lightState.hasMoreMessages,
+    historyWindowHasIsland: lightState.historyWindowHasIsland === true,
     pendingPermission: lightState.pendingPermission,
     respondToPermission,
     pendingAskUser: lightState.pendingAskUser,

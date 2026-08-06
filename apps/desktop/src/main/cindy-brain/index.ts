@@ -3097,9 +3097,10 @@ function getGhostOauthReauthSuggest(runtimeManifest: GhostManifest): GhostSetupR
 }
 
 /**
- * Runtime-authoritative setup assessment used by ghost_list and ghost_call.
- * Unlike the legacy plugin-page projection this path is strict: storage or
- * manifest drift errors propagate and therefore block dispatch.
+ * Runtime-authoritative setup assessment used by ghost_info, ghost_list and
+ * ghost_call. Discovery callers treat assessment failures as best-effort and
+ * omit setup; ghost_call preflight is strict, so storage or manifest drift
+ * errors block dispatch.
  */
 export function getGhostSetupAssessment(ghostId: string): GhostSetupAssessment {
   const ghost = findAvailableGhost(ghostId);

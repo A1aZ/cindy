@@ -4,6 +4,7 @@ export {
   handleForgePack,
   handleForgeScaffold,
   handleGhostCall,
+  handleGhostInfo,
   handleGhostList,
   sanitizeGhostSetupAssessment,
 } from './ghost/mcpServer.js';
@@ -15,6 +16,8 @@ export type {
   CindyGhostCallErrorCode,
   CindyGhostCallResult,
   CindyGhostInfo,
+  CindyGhostInfoErrorCode,
+  CindyGhostInfoResult,
   CindyGhostSetupAllowedAction,
   CindyGhostSetupAssessment,
   CindyGhostSetupPlan,

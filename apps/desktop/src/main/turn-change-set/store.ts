@@ -660,6 +660,14 @@ export async function waitForTurnChangeSetActions(): Promise<void> {
   }
 }
 
+/** Drains queued sidecar persistence before the Desktop process exits. */
+export async function waitForTurnChangeSetPersistence(): Promise<void> {
+  while (sessionWriteChains.size > 0) {
+    await Promise.allSettled([...sessionWriteChains.values()]);
+  }
+  await storageWriteChain.catch(() => undefined);
+}
+
 function enqueueStorageWrite(operation: () => Promise<void>): Promise<void> {
   const current = storageWriteChain.catch(() => undefined).then(operation);
   storageWriteChain = current.catch(() => undefined);

@@ -37,7 +37,10 @@ import {
 } from './devStartupStatus';
 import { prewarmMacComputerPermissionGuideHelper } from './computer-permission-guide/MacComputerPermissionGuideNativeHost.js';
 import { handleOpenChatGPTApp } from './chatgpt-app.js';
-import { waitForTurnChangeSetActions } from './turn-change-set/store.js';
+import {
+  waitForTurnChangeSetActions,
+  waitForTurnChangeSetPersistence,
+} from './turn-change-set/store.js';
 
 const PROCESS_STARTED_AT_MS = Date.now();
 // Official Linux binaries total hundreds of MB. Keep one shared deadline for
@@ -101,6 +104,9 @@ async function shutdownMaker(): Promise<void> {
     // 注意: getMakerCore 未就绪时抛的是 sync error, await m.shutdown() 也走这里。
     console.error('[main] maker.shutdown failed (or not ready):', err);
   }
+  // Session shutdown may enqueue the final turn sidecar write. Drain only
+  // after maker.shutdown() has closed every session and emitted those writes.
+  await waitForTurnChangeSetPersistence();
   WorktreePool.parkAll();
 }
 

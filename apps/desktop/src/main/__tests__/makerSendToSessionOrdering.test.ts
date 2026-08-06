@@ -109,7 +109,7 @@ describe('sendToSession ordering', () => {
     const policyGuardBlock = extractBetween(
       source,
       'async function assertLeadCollabProjectEnabled',
-      'type SendToSessionDispatchSession',
+      'async function sendUserMessageWithAwaitedGitBaseline',
     );
 
     expect(policyGuardBlock).toContain(
@@ -132,7 +132,7 @@ describe('sendToSession ordering', () => {
   it('uses the same trusted collab scope helper and acknowledges the accepted workspace kind', () => {
     const pluginStateBlock = extractBetween(
       source,
-      'ipcMain.handle(MAKER_INVOKE.PLUGINS_GET_STATE',
+      'ipcMain.handle(\n    MAKER_INVOKE.PLUGINS_GET_STATE',
       'ipcMain.handle(MAKER_INVOKE.PLUGINS_SET_ENABLED',
     );
 
@@ -152,7 +152,7 @@ describe('sendToSession ordering', () => {
     const createWorkerReadyBlock = extractBetween(
       source,
       'sendWorkerReadyMessage: (session) => {',
-      '      broadcastSessionCreated,',
+      '    broadcastSessionCreated,',
     );
     const workerReadyPlaceholderBlock = extractBetween(
       source,
@@ -174,7 +174,8 @@ describe('sendToSession ordering', () => {
     expect(queuedCreateOptsBlock).toContain('planMode: false,');
     expect(orcaInterAgentDispatcherSource).toContain('planMode: false,');
     expect(schedulerRunnerSource).toContain('planMode: false,');
-    expect(goalControllerSource).toContain("{ origin: { kind: 'goal', goalSessionId: sessionId }, planMode: false },");
+    expect(goalControllerSource).toContain("origin: { kind: 'goal', goalSessionId: sessionId },");
+    expect(goalControllerSource).toContain('planMode: false,');
     expect(imTurnRunnerSource).toContain('planMode: false,');
     expect(orcaWorkflowSource).toContain('planMode: false,');
   });
@@ -315,7 +316,7 @@ describe('sendToSession ordering', () => {
     const changeSetBlock = extractBetween(
       source,
       'async function beginTurnChangeSetAtDispatch',
-      'async function sendUserMessageWithAwaitedGitBaseline',
+      'export interface RegisterMakerIpcOptions',
     );
     const helperBlock = extractBetween(
       source,
@@ -433,7 +434,7 @@ describe('sendToSession ordering', () => {
   it('serializes SET_MODEL behind the send-time agent switch for the same session', () => {
     const setModelBlock = extractBetween(
       source,
-      'ipcMain.handle(MAKER_INVOKE.SET_MODEL',
+      'ipcMain.handle(\n    MAKER_INVOKE.SET_MODEL',
       'ipcMain.handle(MAKER_INVOKE.SET_EFFORT',
     );
     const directSendSwitchBlock = extractBetween(
@@ -510,7 +511,7 @@ describe('sendToSession ordering', () => {
   it('仅 Device Link 归一化 SET_MODEL 的 JSON null 可选占位,本地仍走严格校验', () => {
     const setModelBlock = extractBetween(
       source,
-      'ipcMain.handle(MAKER_INVOKE.SET_MODEL',
+      'ipcMain.handle(\n    MAKER_INVOKE.SET_MODEL',
       'ipcMain.handle(MAKER_INVOKE.SET_EFFORT',
     );
     expect(setModelBlock).toContain('normalizeDeviceLinkSetModelWireArgs(');
@@ -526,8 +527,8 @@ describe('sendToSession ordering', () => {
   it('publishes Agent Island prompt preview from send intent and wires commit rollback', () => {
     const makerSendCreateDbMessageBlock = extractBetween(
       source,
-      'createDbMessage: async (sessionId, message, opts) => {',
-      '    previewUserPrompt: (session, content, options) => {',
+      'const createUserMessageDurably:',
+      'const { sendToAgentAccepted: sendToAgentAcceptedUnlocked }',
     );
     const makerSendPreviewHookBlock = extractBetween(
       source,
@@ -535,8 +536,9 @@ describe('sendToSession ordering', () => {
       '    isSessionRunningError,',
     );
 
-    expect(makerSendCreateDbMessageBlock).toContain('const result = await enqueueDurableWrite');
+    expect(makerSendCreateDbMessageBlock).toContain('return await enqueueDurableWrite');
     expect(makerSendCreateDbMessageBlock).not.toContain('notifyAgentIslandUserPrompt(');
+    expect(source).toContain('createDbMessage: createUserMessageDurably,');
     expect(makerSendPreviewHookBlock).toContain('previewUserPrompt: (session, content, options) => {');
     expect(makerSendPreviewHookBlock).toContain(
       'const previewed = notifyAgentIslandUserPrompt(session, content, {',
@@ -776,11 +778,14 @@ describe('sendToSession ordering', () => {
   });
 
   it('keeps worker idle/archive adapters passing the caller lead session id', () => {
-    expect(preloadSource).toContain("idleWorker: (leadSessionId: string, workerId: string, expectedStatus?: 'done'): Promise<unknown> =>");
-    expect(preloadSource).toContain("ipcRenderer.invoke('maker:worker:idle', {");
-    expect(preloadSource).toContain("ipcRenderer.invoke('maker:worker:acknowledge-done', {");
-    expect(preloadSource).toContain("archiveWorker: (leadSessionId: string, workerId: string): Promise<unknown> =>");
-    expect(preloadSource).toContain("ipcRenderer.invoke('maker:worker:archive', { leadSessionId, workerId })");
+    const workerAdapterBlock = extractBetween(preloadSource, 'idleWorker: (', 'endTeam:');
+    expect(workerAdapterBlock).toContain('leadSessionId: string,');
+    expect(workerAdapterBlock).toContain('workerId: string,');
+    expect(workerAdapterBlock).toContain("expectedStatus?: 'done',");
+    expect(workerAdapterBlock).toContain("ipcRenderer.invoke('maker:worker:idle', {");
+    expect(workerAdapterBlock).toContain("ipcRenderer.invoke('maker:worker:acknowledge-done', {");
+    expect(workerAdapterBlock).toContain('archiveWorker: (leadSessionId: string, workerId: string)');
+    expect(workerAdapterBlock).toContain("ipcRenderer.invoke('maker:worker:archive', { leadSessionId, workerId })");
     // device-link:归档入口(现居 useOrcaWorkerSelection)经 orcaWorkflowsFor 按 lead 来源路由
     // (本机直连 / 远程隧道),但仍把 (leadSessionId, workerId) 传给 archiveWorker ——
     // 本不变式守的是「带上 caller lead id」;正则容忍链式调用换行。

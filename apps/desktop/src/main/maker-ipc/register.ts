@@ -4668,6 +4668,31 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
  */
 export const wireSessionToIpcExternal = wireSessionToIpc;
 
+type SendToSessionDispatchSession = {
+  id: string;
+  agentKind: AgentKind;
+  workDir: string;
+  remoteHostId: string | null;
+  send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
+};
+
+/** Starts exact turn capture at the accepted, durable user-message boundary. */
+export async function beginTurnChangeSetAtDispatch(
+  session: SendToSessionDispatchSession,
+  anchorClientId: string,
+): Promise<void> {
+  await waitForTurnChangeSetSeal(session.id);
+  await finalizeTurnChangeSet(session.id, null, 'partial');
+  await waitForTurnChangeSetSeal(session.id);
+  await beginTurnChangeSet({
+    sessionId: session.id,
+    anchorClientId,
+    provider: session.agentKind,
+    cwd: session.workDir,
+    remote: session.remoteHostId !== null,
+  });
+}
+
 export interface RegisterMakerIpcOptions {
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
@@ -6599,30 +6624,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       (pluginId, workingDir) => getPluginRegistry().isEnabled(pluginId, workingDir),
       (workingDir) => matchDialogueWorkspacePath(workingDir, dialogueWorkspaceRootDir()) !== null,
     );
-  }
-
-  type SendToSessionDispatchSession = {
-    id: string;
-    agentKind: AgentKind;
-    workDir: string;
-    remoteHostId: string | null;
-    send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
-  };
-
-  async function beginTurnChangeSetAtDispatch(
-    session: SendToSessionDispatchSession,
-    anchorClientId: string,
-  ): Promise<void> {
-    await waitForTurnChangeSetSeal(session.id);
-    await finalizeTurnChangeSet(session.id, null, 'partial');
-    await waitForTurnChangeSetSeal(session.id);
-    await beginTurnChangeSet({
-      sessionId: session.id,
-      anchorClientId,
-      provider: session.agentKind,
-      cwd: session.workDir,
-      remote: session.remoteHostId !== null,
-    });
   }
 
   async function sendUserMessageWithAwaitedGitBaseline(

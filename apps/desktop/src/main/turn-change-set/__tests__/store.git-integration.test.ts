@@ -46,6 +46,7 @@ import {
   listTurnChangeSets,
   noteOpaqueTurnChange,
   noteTurnDiffEvent,
+  waitForTurnChangeSetPersistence,
 } from '../store';
 
 describe('turn change-set sidecar store', () => {
@@ -119,6 +120,40 @@ describe('turn change-set sidecar store', () => {
       additions: 1,
       deletions: 1,
     });
+  });
+
+  it('drains queued sidecar persistence before shutdown returns', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-shutdown-drain',
+        cwd: workdir,
+        diff: [
+          'diff --git a/a.ts b/a.ts',
+          '--- a/a.ts',
+          '+++ b/a.ts',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+
+    void finalizeTurnChangeSet('session-1', 'turn-shutdown-drain', 'complete');
+    await waitForTurnChangeSetPersistence();
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({ anchorClientId: 'user-1', state: 'complete' });
+    const [detail] = await getTurnChangeSets('session-1', [summary!.id]);
+    expect(detail?.diffs[0]?.rawPatch).toContain('diff --git a/a.ts b/a.ts');
   });
 
   it('marks a safely composed Codex subset partial when another file conflict was omitted', async () => {

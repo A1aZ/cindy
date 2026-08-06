@@ -19182,6 +19182,108 @@ describe('CodexAgent context window reporting', () => {
     await handle.close();
   });
 
+  it('merges same-file descendant hunks without duplicating the diff block', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-same-file-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-same-file' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-same-file',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-old-root\n+root-change',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-same-file', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-same-file', 'turn/diff/updated', {
+      threadId: 'child-same-file',
+      turnId: 'child-same-file-turn',
+      diff: 'diff --git a/shared.txt b/shared.txt\n--- a/shared.txt\n+++ b/shared.txt\n@@ -20 +20 @@\n-old-child\n+child-change',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      const diff = (last?.data as { diff?: string } | undefined)?.diff ?? '';
+      expect(diff).toContain('+root-change');
+      expect(diff).toContain('+child-change');
+    });
+    const merged = (events.filter((event) => event.type === 'turn_diff').at(-1)?.data as { diff: string }).diff;
+    expect((merged.match(/^diff --git /gm) ?? []).length).toBe(1);
+    expect((merged.match(/^@@ /gm) ?? []).length).toBe(2);
+    expect(merged).not.toContain('+++ b/shared.txt\n\n@@');
+    expect(merged.endsWith('\n')).toBe(true);
+
+    await handle.close();
+  });
+
+  it('clears an empty descendant snapshot from the merged turn diff', async () => {
+    const agent = new CodexAgent(createDeps());
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-empty-descendant-diff',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+    });
+    const events: AgentEvent[] = [];
+    void (async () => {
+      for await (const event of handle.events()) events.push(event);
+    })();
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.descendantThreadStarted || !handlers.descendantNotification) {
+      throw new Error('expected descendant handlers');
+    }
+
+    handlers.turnStarted?.({ threadId: 'start-thread-id', turn: { id: 'turn-empty-diff' } });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-empty-diff',
+      diff: 'diff --git a/root.txt b/root.txt\n--- a/root.txt\n+++ b/root.txt\n@@ -1 +1 @@\n-old\n+root',
+    });
+    handlers.descendantThreadStarted({
+      thread: { id: 'child-empty-diff', parentThreadId: 'start-thread-id' },
+    });
+    handlers.descendantNotification('child-empty-diff', 'turn/diff/updated', {
+      threadId: 'child-empty-diff',
+      turnId: 'child-empty-diff-turn',
+      diff: 'diff --git a/child.txt b/child.txt\n--- a/child.txt\n+++ b/child.txt\n@@ -1 +1 @@\n-old\n+child',
+    });
+    handlers.descendantNotification('child-empty-diff', 'turn/diff/updated', {
+      threadId: 'child-empty-diff',
+      turnId: 'child-empty-diff-turn',
+      diff: '',
+    });
+
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { diff?: string } | undefined)?.diff).toContain('root.txt');
+      expect((last?.data as { diff?: string } | undefined)?.diff).not.toContain('child.txt');
+    });
+    handlers.turnDiffUpdated?.({
+      threadId: 'start-thread-id',
+      turnId: 'turn-empty-diff',
+      diff: '',
+    });
+    await vi.waitFor(() => {
+      const last = events.filter((event) => event.type === 'turn_diff').at(-1);
+      expect((last?.data as { diff?: string } | undefined)?.diff).toBe('');
+    });
+
+    await handle.close();
+  });
+
   it('completes the subagent card without any thread/started (codex 0.145 real behavior)', async () => {
     // 生产实测(2026-08-04):0.145 只在显式 thread/start / fork RPC 时发
     // thread/started,spawn 出的子线程从来不发。血缘必须在识别 spawn item 的那一刻

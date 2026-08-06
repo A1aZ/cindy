@@ -2468,19 +2468,52 @@ export class CodexAgent extends BaseAgent {
     const splitTurnDiffBlocks = (diff: string): string[] => diff
       .split(/(?=^diff --git )/m)
       .filter((block) => block.startsWith('diff --git '));
+    const splitTurnDiffBlockHunks = (block: string): { header: string; hunks: string[] } => {
+      const normalized = block.endsWith('\n') ? block.slice(0, -1) : block;
+      const firstHunk = normalized.search(/^@@ /m);
+      if (firstHunk < 0) return { header: normalized, hunks: [] };
+      return {
+        header: normalized.slice(0, firstHunk).replace(/\n+$/, ''),
+        hunks: normalized.slice(firstHunk).split(/(?=^@@ )/m).filter(Boolean),
+      };
+    };
+    const hunkPosition = (hunk: string): { oldStart: number; newStart: number } => {
+      const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(hunk);
+      return {
+        oldStart: match ? Number(match[1]) : Number.MAX_SAFE_INTEGER,
+        newStart: match ? Number(match[2]) : Number.MAX_SAFE_INTEGER,
+      };
+    };
     const mergeTurnDiffSnapshots = (): string => {
-      const blocks = new Map<string, string>();
+      const blocks = new Map<string, { header: string; hunks: string[] }>();
       for (const snapshot of turnDiffSnapshots.values()) {
         for (const block of splitTurnDiffBlocks(snapshot)) {
-          const header = block.split('\n', 1)[0] ?? block;
-          blocks.set(header, block);
+          const parsed = splitTurnDiffBlockHunks(block);
+          const key = parsed.header.split('\n', 1)[0] ?? parsed.header;
+          const existing = blocks.get(key);
+          if (!existing || (parsed.hunks.length === 0 && existing.hunks.length === 0)) {
+            blocks.set(key, parsed);
+            continue;
+          }
+          for (const hunk of parsed.hunks) {
+            if (!existing.hunks.includes(hunk)) existing.hunks.push(hunk);
+          }
         }
       }
-      return [...blocks.values()].join('');
+      return [...blocks.values()]
+        .map(({ header, hunks }) => {
+          const orderedHunks = [...hunks].sort((left, right) => {
+            const a = hunkPosition(left);
+            const b = hunkPosition(right);
+            return a.oldStart - b.oldStart || a.newStart - b.newStart;
+          });
+          return `${header}${orderedHunks.length > 0 ? `\n${orderedHunks.join('\n')}` : ''}\n`;
+        })
+        .join('');
     };
     const publishTurnDiff = (threadKey: string, turnId: string, diff: string): void => {
-      if (!diff) return;
-      turnDiffSnapshots.set(threadKey, diff);
+      if (diff) turnDiffSnapshots.set(threadKey, diff);
+      else turnDiffSnapshots.delete(threadKey);
       eventQueue.push({
         type: 'turn_diff',
         data: { turnId, diff: mergeTurnDiffSnapshots(), cwd: opts.workingDir },

@@ -3287,7 +3287,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   });
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
-      noteTurnDiffEvent(session.id, event);
+      noteTurnDiffEvent(session.id, event, session.remoteHostId !== null);
       ghostSessionTap.handleEvent(
         event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
       );

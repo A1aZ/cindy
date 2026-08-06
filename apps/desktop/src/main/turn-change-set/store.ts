@@ -801,6 +801,10 @@ function ensurePending(
 
 /** Establishes the Cindy product-turn identity before vendor dispatch. */
 export async function beginTurnChangeSet(input: BeginTurnChangeSetInput): Promise<void> {
+  if (input.remote) {
+    clearPendingTurnChangeSets(input.sessionId);
+    return;
+  }
   let existing = pendingBySession.get(input.sessionId);
   if (existing) {
     if (existing.anchorClientId === input.anchorClientId) return;
@@ -841,7 +845,6 @@ export async function beginTurnChangeSet(input: BeginTurnChangeSetInput): Promis
     }
     const pending = ensurePending(input.sessionId, input.provider, input.cwd);
     pending.anchorClientId = input.anchorClientId;
-    if (input.remote) addIncompleteReason(pending, 'remote-session');
     lease.resolveReady();
   } catch (error) {
     lease.rejectReady(error);
@@ -925,11 +928,8 @@ async function readTextFileForCapture(
 
 /** Low-I/O copy-on-write capture for tools whose target path is known before execution. */
 export async function captureKnownFileBefore(input: KnownFileWriteCapture): Promise<void> {
+  if (input.remote) return;
   const pending = ensurePending(input.sessionId, input.provider, input.cwd);
-  if (input.remote) {
-    addIncompleteReason(pending, 'remote-session');
-    return;
-  }
   const target = safeRelativeTarget(input.cwd, input.targetPath);
   if (!target) {
     addIncompleteReason(pending, 'outside-workspace');
@@ -975,18 +975,19 @@ export async function captureKnownFileBefore(input: KnownFileWriteCapture): Prom
 
 /** Marks an executed tool whose filesystem writes cannot be determined ahead of time. */
 export function noteOpaqueTurnChange(input: OpaqueTurnChangeCapture): void {
+  if (input.remote) return;
   const pending = ensurePending(input.sessionId, input.provider, input.cwd);
-  addIncompleteReason(pending, input.remote ? 'remote-session' : 'opaque-tool');
+  addIncompleteReason(pending, 'opaque-tool');
 }
 
-export function noteTurnDiffEvent(sessionId: string, event: AgentEvent): void {
+export function noteTurnDiffEvent(sessionId: string, event: AgentEvent, remote = false): void {
+  if (remote) return;
   if (event.type !== 'turn_diff' || event.source !== 'codex') return;
   const data = event.data as Partial<TurnDiffEventData> | null;
   if (!data || typeof data.turnId !== 'string' || typeof data.diff !== 'string' || typeof data.cwd !== 'string') {
     return;
   }
   const pending = ensurePending(sessionId, 'codex', data.cwd);
-  if (pending.incompleteReasons.has('remote-session')) return;
   if (pending.providerTurnId && pending.providerTurnId !== data.turnId) return;
   pending.providerTurnId = data.turnId;
   if (data.isComplete === false) addIncompleteReason(pending, 'provider-diff-conflict');

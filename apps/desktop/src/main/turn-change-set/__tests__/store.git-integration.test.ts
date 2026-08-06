@@ -976,11 +976,24 @@ describe('turn change-set sidecar store', () => {
     expect(summary?.incompleteReasons).toContain('outside-workspace');
   });
 
-  it('does not persist remote workspace patches while remote review is unsupported', async () => {
+  it('skips local workspace capture locks while remote review is unsupported', async () => {
     await beginTurnChangeSet({
       sessionId: 'session-1',
       anchorClientId: 'user-1',
       provider: 'codex',
+      cwd: workdir,
+      remote: true,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'a.ts',
+      remote: true,
+    });
+    noteOpaqueTurnChange({
+      sessionId: 'session-1',
+      provider: 'pi',
       cwd: workdir,
       remote: true,
     });
@@ -1000,7 +1013,20 @@ describe('turn change-set sidecar store', () => {
           '',
         ].join('\n'),
       },
+    }, true);
+
+    let localBeginResolved = false;
+    const localBegin = beginTurnChangeSet({
+      sessionId: 'session-2',
+      anchorClientId: 'user-2',
+      provider: 'pi',
+      cwd: workdir,
+    }).then(() => {
+      localBeginResolved = true;
     });
+    await vi.waitFor(() => expect(localBeginResolved).toBe(true));
+    await localBegin;
+    await finalizeTurnChangeSet('session-2', null, 'complete');
     await finalizeTurnChangeSet('session-1', 'turn-remote', 'complete');
 
     expect(await listTurnChangeSets('session-1')).toEqual([]);

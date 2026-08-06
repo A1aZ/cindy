@@ -35,6 +35,7 @@ import type {
 import type {
   IOSSimulatorPublicInstance,
   IOSSimulatorPublicViewport,
+  IOSSimulatorPublicRouteStatus,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../../../../shared/iosSimulatorIpc';
@@ -133,6 +134,27 @@ function resultMutation(result: IOSSimulatorToolResponse): IOSSimulatorMutationS
   return mutation && typeof mutation === 'object' ? (mutation as IOSSimulatorMutationState) : null;
 }
 
+function mergeRouteStatus(
+  previous: Record<string, IOSSimulatorPublicRouteStatus>,
+  incoming: IOSSimulatorPublicRouteStatus,
+  replaceEqualTimestamp = true,
+): Record<string, IOSSimulatorPublicRouteStatus> {
+  const key = `${incoming.instanceId}:${incoming.generation}`;
+  const current = previous[key];
+  const currentTimestamp = current ? Date.parse(current.updatedAt) : Number.NaN;
+  const incomingTimestamp = Date.parse(incoming.updatedAt);
+  if (
+    current &&
+    Number.isFinite(currentTimestamp) &&
+    Number.isFinite(incomingTimestamp) &&
+    (currentTimestamp > incomingTimestamp ||
+      (!replaceEqualTimestamp && currentTimestamp === incomingTimestamp))
+  ) {
+    return previous;
+  }
+  return { ...previous, [key]: incoming };
+}
+
 interface PointerGesture {
   pointerId: number;
   gestureId: string;
@@ -157,6 +179,7 @@ export function IOSSimulatorTabBody({
 }: IOSSimulatorTabBodyProps) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<IOSSimulatorSessionStatus | null>(null);
+  const [routeStatuses, setRouteStatuses] = useState<Record<string, IOSSimulatorPublicRouteStatus>>({});
   const [transportError, setTransportError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -258,6 +281,27 @@ export function IOSSimulatorTabBody({
     };
   }, [refresh]);
 
+  useEffect(() => {
+    if (!status?.ok || !status.routeStatuses) return;
+    const nextStatuses = status.routeStatuses;
+    setRouteStatuses((previous) => {
+      let next = previous;
+      for (const routeStatus of nextStatuses) {
+        next = mergeRouteStatus(next, routeStatus, false);
+      }
+      return next;
+    });
+  }, [status]);
+
+  useEffect(() => {
+    const subscribe = window.electronAPI.maker.iosSimulator.onRouteStatus;
+    if (typeof subscribe !== 'function') return undefined;
+    return subscribe((routeStatus) => {
+      if (routeStatus.sessionId !== ctx.sessionId) return;
+      setRouteStatuses((previous) => mergeRouteStatus(previous, routeStatus));
+    });
+  }, [ctx.sessionId]);
+
   const environment = status?.ok ? status.environment : null;
   const instances = status?.ok ? status.instances : [];
   const attachedInstance =
@@ -265,6 +309,7 @@ export function IOSSimulatorTabBody({
   const viewerRouteKey = attachedInstance
     ? `${attachedInstance.instanceId}:${attachedInstance.generation}`
     : null;
+  const routeStatus = viewerRouteKey ? routeStatuses[viewerRouteKey] ?? null : null;
   const grant =
     status?.ok && attachedInstance
       ? status.deviceGrants.find(
@@ -299,6 +344,24 @@ export function IOSSimulatorTabBody({
       frameFresh &&
       !busy,
   );
+  const streamRouteLabel =
+    routeStatus?.stream.adapter === 'native-sidecar' && routeStatus.stream.encoding === 'h264'
+      ? t('rightSidebar.iosSimulator.route.nativeH264')
+      : routeStatus?.stream.adapter === 'wda'
+        ? t('rightSidebar.iosSimulator.route.wdaJpeg')
+        : t('rightSidebar.iosSimulator.route.hidden');
+  const inputRouteLabel =
+    routeStatus?.input.adapter === 'native-sidecar'
+      ? t('rightSidebar.iosSimulator.route.nativeHid')
+      : routeStatus?.input.adapter === 'wda'
+        ? t('rightSidebar.iosSimulator.route.wdaInput')
+        : t('rightSidebar.iosSimulator.route.hidden');
+  const streamRouteStateLabel = routeStatus
+    ? t(`rightSidebar.iosSimulator.route.state.${routeStatus.stream.state}`)
+    : t('rightSidebar.iosSimulator.route.state.detecting');
+  const inputRouteStateLabel = routeStatus
+    ? t(`rightSidebar.iosSimulator.route.state.${routeStatus.input.state}`)
+    : t('rightSidebar.iosSimulator.route.state.detecting');
 
   useEffect(() => {
     const nextId = attachedInstance?.instanceId ?? null;
@@ -323,6 +386,7 @@ export function IOSSimulatorTabBody({
     let routeRecoveryPending = false;
     let pollTimer: number | null = null;
     let preferredEncoding: 'jpeg' | 'h264' = 'jpeg';
+    let nativeDecoderFallback = false;
     let mediaDisconnected = false;
     let routeInactive = false;
     const routeKey = `${route.instanceId}:${route.generation}`;
@@ -466,6 +530,22 @@ export function IOSSimulatorTabBody({
         },
         onFallback() {
           if (cancelled) return;
+          nativeDecoderFallback = true;
+          setRouteStatuses((previous) => {
+            const current = previous[routeKey];
+            if (!current) return previous;
+            return mergeRouteStatus(previous, {
+              ...current,
+              updatedAt: new Date().toISOString(),
+              stream: {
+                ...current.stream,
+                adapter: 'wda',
+                encoding: 'jpeg',
+                state: 'fallback',
+                reasonCode: 'native-decoder-fallback',
+              },
+            });
+          });
           preferredEncoding = 'jpeg';
           decoder?.close();
           decoder = null;
@@ -476,6 +556,7 @@ export function IOSSimulatorTabBody({
               ...route,
               visible: true,
               preferredEncoding: 'jpeg',
+              fallbackReason: 'native-decoder-fallback',
             })
             .then(acceptViewerResult)
             .catch(() => {
@@ -499,6 +580,9 @@ export function IOSSimulatorTabBody({
             ...route,
             visible: true,
             preferredEncoding: 'jpeg',
+            ...(nativeDecoderFallback
+              ? { fallbackReason: 'native-decoder-fallback' as const }
+              : {}),
           });
           acceptViewerResult(recovered);
           return;
@@ -516,6 +600,9 @@ export function IOSSimulatorTabBody({
             ...route,
             visible: true,
             preferredEncoding,
+            ...(nativeDecoderFallback
+              ? { fallbackReason: 'native-decoder-fallback' as const }
+              : {}),
           });
           acceptViewerResult(recovered);
         }
@@ -1218,6 +1305,26 @@ export function IOSSimulatorTabBody({
                           {t('rightSidebar.iosSimulator.streamProfiles.high')}
                         </option>
                       </select>
+                    </div>
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-[var(--text-secondary)] select-none"
+                    >
+                      <span>{streamRouteLabel}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{streamRouteStateLabel}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{inputRouteLabel}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>{inputRouteStateLabel}</span>
+                      {routeStatus?.input.adapter === 'native-sidecar' &&
+                        !routeStatus.input.multiTouch && (
+                          <>
+                            <span aria-hidden="true">·</span>
+                            <span>{t('rightSidebar.iosSimulator.route.multiTouchUnavailable')}</span>
+                          </>
+                        )}
                     </div>
                     <div className="mt-3 overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface)]">
                       <div className="relative flex min-h-48 items-center justify-center p-2">

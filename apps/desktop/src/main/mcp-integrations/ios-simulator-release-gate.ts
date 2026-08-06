@@ -321,6 +321,9 @@ export async function runIOSSimulatorReleaseGate(
       decision: evaluateIOSSimulatorNativeCapabilityAdmission({
         policy,
         processState: 'idle',
+        // Release promotion remains strict even though product runtime
+        // admission soft-opens unknown combinations for probing.
+        requireVerifiedCompatibility: true,
       }),
     };
   });

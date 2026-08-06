@@ -7,6 +7,7 @@ import type {
   IOSSimulatorH264FramePush,
   IOSSimulatorLiveTouchRequest,
   IOSSimulatorPublicInstance,
+  IOSSimulatorRouteStatusPush,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../../../../../shared/iosSimulatorIpc';
@@ -102,7 +103,8 @@ function readyStatus(instance = readyInstance()): IOSSimulatorSessionStatus {
 }
 
 function installStatus(statusValue: IOSSimulatorSessionStatus) {
-  const status = vi.fn(async () => statusValue);
+  let currentStatusValue = statusValue;
+  const status = vi.fn(async () => currentStatusValue);
   const call = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
     ok: true as const,
     data: {},
@@ -114,10 +116,17 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
   }));
   const setStreamProfile = vi.fn(async () => ({ ok: true as const, data: {} }));
   let h264FrameListener: ((payload: IOSSimulatorH264FramePush) => void) | null = null;
+  let routeStatusListener: ((payload: IOSSimulatorRouteStatusPush) => void) | null = null;
   const onH264Frame = vi.fn((callback: (payload: IOSSimulatorH264FramePush) => void) => {
     h264FrameListener = callback;
     return () => {
       if (h264FrameListener === callback) h264FrameListener = null;
+    };
+  });
+  const onRouteStatus = vi.fn((callback: (payload: IOSSimulatorRouteStatusPush) => void) => {
+    routeStatusListener = callback;
+    return () => {
+      if (routeStatusListener === callback) routeStatusListener = null;
     };
   });
   const liveTouch = vi.fn(async (request: IOSSimulatorLiveTouchRequest) => {
@@ -144,6 +153,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
             setStreamProfile: typeof setStreamProfile;
             liveTouch: typeof liveTouch;
             onH264Frame: typeof onH264Frame;
+            onRouteStatus: typeof onRouteStatus;
           };
         };
       };
@@ -159,6 +169,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
         setStreamProfile,
         liveTouch,
         onH264Frame,
+        onRouteStatus,
       },
     },
   };
@@ -171,8 +182,15 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     setStreamProfile,
     liveTouch,
     onH264Frame,
+    onRouteStatus,
+    setStatusValue(value: IOSSimulatorSessionStatus) {
+      currentStatusValue = value;
+    },
     emitH264Frame(payload: IOSSimulatorH264FramePush) {
       h264FrameListener?.(payload);
+    },
+    emitRouteStatus(payload: IOSSimulatorRouteStatusPush) {
+      routeStatusListener?.(payload);
     },
   };
 }
@@ -282,6 +300,87 @@ describe('IOSSimulatorTabBody', () => {
     await waitFor(() => {
       expect(screen.getByText('rightSidebar.iosSimulator.remoteUnsupported')).toBeTruthy();
     });
+  });
+
+  it('shows H.264 and input routes independently and applies host route updates', async () => {
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    const initialRouteStatus: IOSSimulatorRouteStatusPush = {
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: '2026-08-05T00:00:00.000Z',
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'active',
+        reasonCode: 'native-active',
+      },
+      input: {
+        adapter: 'wda',
+        state: 'fallback',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'native-capability-unavailable',
+      },
+    };
+    statusValue.routeStatuses = [initialRouteStatus];
+    const api = installStatus(statusValue);
+
+    render(<IOSSimulatorTabBody state={{ instanceId: instance.instanceId }} ctx={ctx} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.nativeH264')).toBeTruthy();
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaInput')).toBeTruthy();
+      expect(screen.getByText('rightSidebar.iosSimulator.route.state.active')).toBeTruthy();
+      expect(screen.getByText('rightSidebar.iosSimulator.route.state.fallback')).toBeTruthy();
+    });
+    expect(api.onRouteStatus).toHaveBeenCalledOnce();
+
+    act(() => {
+      api.emitRouteStatus({
+        ...initialRouteStatus,
+        updatedAt: '2026-08-05T00:00:01.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-decoder-fallback',
+        },
+        input: {
+          adapter: 'native-sidecar',
+          state: 'active',
+          continuous: true,
+          multiTouch: false,
+          reasonCode: 'native-active',
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+      expect(screen.getByText('rightSidebar.iosSimulator.route.nativeHid')).toBeTruthy();
+      expect(
+        screen.getByText('rightSidebar.iosSimulator.route.multiTouchUnavailable'),
+      ).toBeTruthy();
+    });
+
+    api.setStatusValue({
+      ...statusValue,
+      routeStatuses: [
+        {
+          ...initialRouteStatus,
+          updatedAt: '2026-08-05T00:00:00.500Z',
+        },
+      ],
+    });
+    fireEvent.click(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.refresh' }),
+    );
+    await waitFor(() => expect(api.status).toHaveBeenCalledTimes(2));
+    expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    expect(screen.getByText('rightSidebar.iosSimulator.route.nativeHid')).toBeTruthy();
   });
 
   it('starts frame polling only while the pane is active and visible', async () => {

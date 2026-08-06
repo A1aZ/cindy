@@ -1,3 +1,5 @@
+import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../../shared/iosSimulatorIpc.js';
+
 /**
  * maker:* IPC channel 名常量。统一收口，禁止 hardcode 字符串。
  *
@@ -840,6 +842,8 @@ export const MAKER_PUSH = {
   RSB_WINDOW_COMMAND: 'maker:rsb-window:command',
   /** Main-owned H.264 access unit pushed without Renderer polling. */
   IOS_SIMULATOR_H264_FRAME: 'maker:ios-simulator:h264-frame',
+  /** Main-owned public route selection/status for the iOS Simulator viewer. */
+  IOS_SIMULATOR_ROUTE_STATUS: IOS_SIMULATOR_ROUTE_STATUS_CHANNEL,
   /**
    * 插件面板独立窗口状态广播(全量 GhostPanelWindowsState)——发所有窗口
    * (主窗布局过滤 + 各子窗口自身都消费)。

@@ -90,29 +90,35 @@ describe('iOS Simulator Desktop native admission policy', () => {
     ).toMatchObject({ allowed: true });
   });
 
-  it('keeps a near-miss packaged runtime on WDA/MJPEG', () => {
+  it('soft-opens a near-miss packaged runtime for capability probing', () => {
     const decision = evaluateIOSSimulatorNativeCapabilityAdmission({
       policy: policy({ runtimeBuildVersion: '23E245' }),
       processState: 'idle',
     });
     expect(decision).toMatchObject({
       launch: {
-        allowed: false,
-        reasonCode: 'COMPATIBILITY_UNVERIFIED',
+        allowed: true,
+      },
+      capabilities: {
+        h264Stream: { compatible: null, reasonCode: 'AWAITING_PROBE' },
+        continuousInput: { compatible: null, reasonCode: 'AWAITING_PROBE' },
       },
       fallbackRoute: 'wda-mjpeg',
     });
   });
 
-  it('keeps a near-miss host OS release on WDA/MJPEG', () => {
+  it('soft-opens a near-miss host OS release for capability probing', () => {
     const decision = evaluateIOSSimulatorNativeCapabilityAdmission({
       policy: policy({ hostOsRelease: '25.4.0' }),
       processState: 'idle',
     });
     expect(decision).toMatchObject({
       launch: {
-        allowed: false,
-        reasonCode: 'COMPATIBILITY_UNVERIFIED',
+        allowed: true,
+      },
+      capabilities: {
+        h264Stream: { compatible: null, reasonCode: 'AWAITING_PROBE' },
+        continuousInput: { compatible: null, reasonCode: 'AWAITING_PROBE' },
       },
       fallbackRoute: 'wda-mjpeg',
     });

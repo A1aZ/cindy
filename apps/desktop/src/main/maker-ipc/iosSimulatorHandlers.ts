@@ -39,6 +39,7 @@ export interface IOSSimulatorHandlerDeps {
     route: { instanceId: string; generation: number; leaseId: string },
     visible: boolean,
     preferredEncoding?: 'jpeg' | 'h264',
+    fallbackReason?: 'native-decoder-fallback',
   ): Promise<IOSSimulatorToolResponse>;
   setViewerStreamProfile(
     sessionId: string,
@@ -209,14 +210,24 @@ export function registerIOSSimulatorHandlers(
     ) {
       throwIpcError('INVALID_PARAMS', 'preferredEncoding must be jpeg or h264');
     }
-    return preferredEncoding === undefined
-      ? resolved.setViewerVisibility(sessionId, readViewerRoute(record), record.visible)
-      : resolved.setViewerVisibility(
-          sessionId,
-          readViewerRoute(record),
-          record.visible,
-          preferredEncoding,
-        );
+    const fallbackReason = record.fallbackReason;
+    if (fallbackReason !== undefined && fallbackReason !== 'native-decoder-fallback') {
+      throwIpcError('INVALID_PARAMS', 'fallbackReason is not supported');
+    }
+    const route = readViewerRoute(record);
+    if (preferredEncoding === undefined && fallbackReason === undefined) {
+      return resolved.setViewerVisibility(sessionId, route, record.visible);
+    }
+    if (fallbackReason === undefined) {
+      return resolved.setViewerVisibility(sessionId, route, record.visible, preferredEncoding);
+    }
+    return resolved.setViewerVisibility(
+      sessionId,
+      route,
+      record.visible,
+      preferredEncoding,
+      fallbackReason,
+    );
   });
   registry.handle(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, async (_event, payload) => {
     const record = readRecord(payload);

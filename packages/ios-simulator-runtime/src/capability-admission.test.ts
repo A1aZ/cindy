@@ -117,7 +117,7 @@ describe("native capability admission", () => {
     });
   });
 
-  it("requires verified compatibility before packaged native admission", () => {
+  it("soft-opens unknown packaged combinations and waits for the sidecar probe", () => {
     const unknown = evaluateIOSSimulatorNativeCapabilityAdmission({
       policy: packagedPolicy({
         compatibility: {
@@ -131,6 +131,63 @@ describe("native capability admission", () => {
       processState: "running",
     });
     expect(unknown.launch).toMatchObject({
+      allowed: true,
+      active: true,
+      reasonCode: "ADMITTED",
+    });
+    expect(unknown.capabilities).toMatchObject({
+      h264Stream: { policyAllowed: true, active: true },
+      continuousInput: { policyAllowed: true, active: true },
+    });
+
+    const probing = evaluateIOSSimulatorNativeCapabilityAdmission({
+      policy: packagedPolicy({
+        compatibility: {
+          sidecar: "unknown",
+          h264Stream: "unknown",
+          continuousInput: "unknown",
+          multiTouch: "unknown",
+        },
+      }),
+      processState: "idle",
+    });
+    expect(probing.capabilities.h264Stream).toMatchObject({
+      policyAllowed: true,
+      detected: null,
+      reasonCode: "AWAITING_PROBE",
+    });
+
+    const failedBeforeHandshake = evaluateIOSSimulatorNativeCapabilityAdmission({
+      policy: packagedPolicy({
+        compatibility: {
+          sidecar: "unknown",
+          h264Stream: "unknown",
+          continuousInput: "unknown",
+          multiTouch: "unknown",
+        },
+      }),
+      processState: "failed",
+    });
+    expect(failedBeforeHandshake.capabilities.h264Stream).toMatchObject({
+      detected: null,
+      active: false,
+      reasonCode: "PROCESS_NOT_RUNNING",
+    });
+
+    const strict = evaluateIOSSimulatorNativeCapabilityAdmission({
+      policy: packagedPolicy({
+        compatibility: {
+          sidecar: "unknown",
+          h264Stream: "unknown",
+          continuousInput: "unknown",
+          multiTouch: "unknown",
+        },
+      }),
+      detectedCapabilities: DETECTED,
+      processState: "running",
+      requireVerifiedCompatibility: true,
+    });
+    expect(strict.launch).toMatchObject({
       allowed: false,
       reasonCode: "COMPATIBILITY_UNVERIFIED",
     });
@@ -143,6 +200,45 @@ describe("native capability admission", () => {
     expect(eligible.launch.active).toBe(true);
     expect(eligible.capabilities.h264Stream.active).toBe(true);
     expect(eligible.capabilities.continuousInput.active).toBe(true);
+  });
+
+  it("still hard-rejects known-bad compatibility while keeping capabilities independent", () => {
+    const capabilityIneligible = evaluateIOSSimulatorNativeCapabilityAdmission({
+      policy: packagedPolicy({
+        compatibility: {
+          sidecar: "eligible",
+          h264Stream: "ineligible",
+          continuousInput: "unknown",
+          multiTouch: "unknown",
+        },
+      }),
+      detectedCapabilities: DETECTED,
+      processState: "running",
+    });
+    expect(capabilityIneligible.launch.allowed).toBe(true);
+    expect(capabilityIneligible.capabilities.h264Stream).toMatchObject({
+      active: false,
+      reasonCode: "COMPATIBILITY_INELIGIBLE",
+    });
+    expect(capabilityIneligible.capabilities.continuousInput.active).toBe(true);
+
+    const sidecarIneligible = evaluateIOSSimulatorNativeCapabilityAdmission({
+      policy: packagedPolicy({
+        compatibility: {
+          sidecar: "ineligible",
+          h264Stream: "unknown",
+          continuousInput: "unknown",
+          multiTouch: "unknown",
+        },
+      }),
+      detectedCapabilities: DETECTED,
+      processState: "running",
+    });
+    expect(sidecarIneligible.launch).toMatchObject({
+      allowed: false,
+      reasonCode: "COMPATIBILITY_INELIGIBLE",
+    });
+    expect(sidecarIneligible.capabilities.continuousInput.active).toBe(false);
   });
 
   it("admits H.264 and HID independently and keeps product BGRA disabled", () => {

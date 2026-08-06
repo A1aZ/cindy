@@ -123,6 +123,12 @@ describe('iOS Simulator IPC handlers', () => {
       visible: true,
       preferredEncoding: 'h264',
     });
+    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+      ...route,
+      visible: true,
+      preferredEncoding: 'jpeg',
+      fallbackReason: 'native-decoder-fallback',
+    });
     await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route);
 
     expect(setViewerVisibility).toHaveBeenCalledWith(
@@ -135,6 +141,13 @@ describe('iOS Simulator IPC handlers', () => {
       { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
       true,
       'h264',
+    );
+    expect(setViewerVisibility).toHaveBeenCalledWith(
+      'session-a',
+      { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
+      true,
+      'jpeg',
+      'native-decoder-fallback',
     );
     expect(getLatestFrame).toHaveBeenCalledWith('session-a', {
       instanceId: 'instance-a',
@@ -158,6 +171,14 @@ describe('iOS Simulator IPC handlers', () => {
         ...route,
         visible: true,
         preferredEncoding: 'hevc',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+        ...route,
+        visible: true,
+        preferredEncoding: 'jpeg',
+        fallbackReason: 'renderer-error',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });

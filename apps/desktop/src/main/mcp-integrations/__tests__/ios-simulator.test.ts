@@ -18,6 +18,7 @@ import {
   type IOSSimulatorTouchPoint,
   type WdaRunningInstance,
 } from '@cindy/ios-simulator-runtime';
+import type { IOSSimulatorPublicRouteStatus } from '../../../shared/iosSimulatorIpc';
 import {
   createIOSSimulatorHost,
   getIOSSimulatorMcpDeps,
@@ -1296,6 +1297,7 @@ describe('iOS Simulator host', () => {
     };
     let nativeAvailable = true;
     let selectedNativeDriver = nativeDriver;
+    const routeStatuses: IOSSimulatorPublicRouteStatus[] = [];
     const running = {
       instanceId: started.instanceId,
       simulatorUdid: started.simulatorUdid,
@@ -1320,6 +1322,26 @@ describe('iOS Simulator host', () => {
         ),
         capabilityReport: vi.fn(() => ({
           nativeSidecar: { available: nativeAvailable },
+          routes: {
+            continuousInput: {
+              selected: 'wda',
+              fallback: true,
+              reason: 'Native continuous input is unavailable.',
+            },
+            stream: {
+              h264: nativeAvailable
+                ? {
+                    selected: 'native-sidecar',
+                    fallback: false,
+                    reason: null,
+                  }
+                : {
+                    selected: 'wda',
+                    fallback: true,
+                    reason: 'Native sidecar process is not running.',
+                  },
+            },
+          },
         })),
       },
       driverSessionId: 'wda-session',
@@ -1327,7 +1349,7 @@ describe('iOS Simulator host', () => {
     let jpegSnapshot = {
       instanceId: started.instanceId,
       generation: started.generation,
-      state: 'connecting' as const,
+      state: 'connecting' as 'connecting' | 'reconnecting' | 'disconnected',
       reconnectAttempt: 0,
       latestFrame: null,
     };
@@ -1377,6 +1399,7 @@ describe('iOS Simulator host', () => {
       h264FramePump: h264FramePump as never,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession: vi.fn(async (id) => localSession(id)),
+      pushRouteStatus: (status) => routeStatuses.push(status),
     });
     await host.reconcileOwnership();
     const reconciled = actor.getOwned('session-a', started.instanceId);
@@ -1406,6 +1429,17 @@ describe('iOS Simulator host', () => {
       }),
     );
     expect(framePump.setVisible).toHaveBeenCalledWith(expect.objectContaining({ visible: false }));
+    expect(routeStatuses.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+      instanceId: started.instanceId,
+      generation: route.generation,
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'detecting',
+        reasonCode: 'native-probe-pending',
+      },
+    });
 
     wdaDriver.setOrientation.mockRejectedValueOnce(
       new WdaError(
@@ -1499,6 +1533,31 @@ describe('iOS Simulator host', () => {
     expect(framePump.setVisible).toHaveBeenLastCalledWith(
       expect.objectContaining({ visible: true }),
     );
+    expect(routeStatuses.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+      instanceId: started.instanceId,
+      generation: latestRoute.generation,
+      stream: {
+        adapter: 'wda',
+        encoding: 'jpeg',
+        state: 'detecting',
+        reasonCode: 'native-stream-disconnected',
+      },
+    });
+
+    jpegSnapshot = { ...jpegSnapshot, state: 'reconnecting' };
+    await expect(host.getLatestFrame('session-a', latestRoute)).resolves.toMatchObject({
+      ok: true,
+      data: { stream: { state: 'reconnecting' } },
+    });
+    expect(routeStatuses.at(-1)).toMatchObject({
+      stream: {
+        adapter: 'wda',
+        encoding: 'jpeg',
+        state: 'reconnecting',
+        reasonCode: 'native-stream-disconnected',
+      },
+    });
 
     h264Snapshot = { ...h264Snapshot, state: 'connecting' };
     await expect(

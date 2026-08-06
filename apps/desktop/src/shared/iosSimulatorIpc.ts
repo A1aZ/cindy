@@ -31,6 +31,56 @@ export interface IOSSimulatorPublicViewport {
   orientation: IOSSimulatorOrientation;
 }
 
+export type IOSSimulatorPublicRouteAdapter = 'native-sidecar' | 'wda' | null;
+
+export type IOSSimulatorPublicRouteState =
+  | 'idle'
+  | 'detecting'
+  | 'active'
+  | 'fallback'
+  | 'reconnecting'
+  | 'unavailable';
+
+/** Stable, renderer-safe reason codes for the selected simulator routes. */
+export type IOSSimulatorPublicRouteReasonCode =
+  | 'viewer-hidden'
+  | 'instance-not-ready'
+  | 'native-probe-pending'
+  | 'native-active'
+  | 'native-capability-unavailable'
+  | 'native-sidecar-unavailable'
+  | 'native-stream-disconnected'
+  | 'native-decoder-fallback'
+  | 'wda-fallback'
+  | 'wda-active'
+  | 'route-stopped'
+  | 'route-error'
+  | null;
+
+export interface IOSSimulatorPublicRouteStatus {
+  sessionId: string;
+  instanceId: string;
+  generation: number;
+  updatedAt: string;
+  stream: {
+    adapter: IOSSimulatorPublicRouteAdapter;
+    encoding: 'h264' | 'jpeg' | null;
+    state: IOSSimulatorPublicRouteState;
+    reasonCode: IOSSimulatorPublicRouteReasonCode;
+  };
+  input: {
+    adapter: IOSSimulatorPublicRouteAdapter;
+    state: IOSSimulatorPublicRouteState;
+    continuous: boolean;
+    multiTouch: boolean;
+    reasonCode: IOSSimulatorPublicRouteReasonCode;
+  };
+}
+
+/** Shared channel name so main, preload and renderer cannot drift. */
+export const IOS_SIMULATOR_ROUTE_STATUS_CHANNEL =
+  'maker:ios-simulator:route-status' as const;
+
 export type IOSSimulatorSessionStatus =
   | {
       ok: true;
@@ -39,6 +89,8 @@ export type IOSSimulatorSessionStatus =
       instances: IOSSimulatorPublicInstance[];
       deviceGrants: IOSSimulatorDeviceGrant[];
       mutationStates: IOSSimulatorMutationState[];
+      /** Optional for compatibility with older detached/sidebar renderers. */
+      routeStatuses?: IOSSimulatorPublicRouteStatus[];
     }
   | {
       ok: false;
@@ -82,6 +134,8 @@ export interface IOSSimulatorViewerRouteRequest {
 export interface IOSSimulatorViewerVisibilityRequest extends IOSSimulatorViewerRouteRequest {
   visible: boolean;
   preferredEncoding?: 'jpeg' | 'h264';
+  /** Renderer decoder failed after a native stream was selected. */
+  fallbackReason?: 'native-decoder-fallback';
 }
 
 export interface IOSSimulatorStreamProfileRequest extends IOSSimulatorViewerRouteRequest {
@@ -107,3 +161,5 @@ export interface IOSSimulatorFocusRequest {
 export type IOSSimulatorH264FramePush = {
   frame: Omit<IOSSimulatorLatestH264Frame, 'bytes'> & { bytes: ArrayBuffer };
 };
+
+export type IOSSimulatorRouteStatusPush = IOSSimulatorPublicRouteStatus;

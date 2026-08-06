@@ -87,6 +87,8 @@ export interface EvaluateIOSSimulatorNativeCapabilityAdmissionInput {
   policy: IOSSimulatorNativeCapabilityAdmissionPolicy;
   detectedCapabilities?: Readonly<IOSSimulatorDriverCapabilities> | null;
   processState?: IOSSimulatorNativeRuntimeState;
+  /** Runtime admission soft-opens unknown matrix entries; release probes opt in to strict promotion. */
+  requireVerifiedCompatibility?: boolean;
   now?: () => Date;
 }
 
@@ -132,10 +134,10 @@ function compatibilityValue(
 
 function compatibilityGate(
   verdict: IOSSimulatorNativeCompatibilityVerdict,
-  mode: IOSSimulatorNativeHostMode,
+  requireVerifiedCompatibility: boolean,
 ): IOSSimulatorNativeAdmissionReasonCode | null {
   if (verdict === "ineligible") return "COMPATIBILITY_INELIGIBLE";
-  if (verdict === "unknown" && mode === "packaged") {
+  if (verdict === "unknown" && requireVerifiedCompatibility) {
     return "COMPATIBILITY_UNVERIFIED";
   }
   return null;
@@ -143,6 +145,7 @@ function compatibilityGate(
 
 function launchGate(
   policy: IOSSimulatorNativeCapabilityAdmissionPolicy,
+  requireVerifiedCompatibility: boolean,
 ): IOSSimulatorNativeAdmissionReasonCode | null {
   if (!isSupportedHost(policy)) return "HOST_UNSUPPORTED";
   if (policy.artifact.trust === "untrusted") return "ARTIFACT_UNTRUSTED";
@@ -154,7 +157,7 @@ function launchGate(
   }
   const compatibility = compatibilityGate(
     policy.compatibility.sidecar,
-    policy.host.mode,
+    requireVerifiedCompatibility,
   );
   if (compatibility) return compatibility;
   if (policy.resourceAdmission === "denied") return "RESOURCE_DENIED";
@@ -170,7 +173,7 @@ function inactiveProcessReason(
 function capabilityEntry(input: {
   requested: boolean;
   compatibility: IOSSimulatorNativeCompatibilityVerdict;
-  hostMode: IOSSimulatorNativeHostMode;
+  requireVerifiedCompatibility: boolean;
   detected: boolean | null;
   processState: IOSSimulatorNativeRuntimeState;
   launchDenied: IOSSimulatorNativeAdmissionReasonCode | null;
@@ -181,7 +184,10 @@ function capabilityEntry(input: {
   if (!denied && input.productDisabled) denied = "PRODUCT_DISABLED";
   if (!denied && !input.requested) denied = "NOT_REQUESTED";
   if (!denied) {
-    denied = compatibilityGate(input.compatibility, input.hostMode);
+    denied = compatibilityGate(
+      input.compatibility,
+      input.requireVerifiedCompatibility,
+    );
   }
   if (!denied && input.dependencyAllowed === false) {
     denied = "DEPENDENCY_DENIED";
@@ -193,7 +199,10 @@ function capabilityEntry(input: {
   if (denied) {
     reasonCode = denied;
   } else if (input.detected === null) {
-    reasonCode = "AWAITING_PROBE";
+    reasonCode =
+      input.processState === "idle" || input.processState === "running"
+        ? "AWAITING_PROBE"
+        : inactiveProcessReason(input.processState);
   } else if (!input.detected) {
     reasonCode = "NOT_DETECTED";
   } else if (!active) {
@@ -222,7 +231,8 @@ export function evaluateIOSSimulatorNativeCapabilityAdmission(
 ): IOSSimulatorNativeCapabilityAdmissionDecision {
   const processState = input.processState ?? "idle";
   const detected = input.detectedCapabilities ?? null;
-  const launchDenied = launchGate(input.policy);
+  const requireVerifiedCompatibility = input.requireVerifiedCompatibility === true;
+  const launchDenied = launchGate(input.policy, requireVerifiedCompatibility);
   const launchAllowed = launchDenied === null;
   const launchActive = launchAllowed && processState === "running";
   const launchReasonCode = launchDenied
@@ -233,7 +243,7 @@ export function evaluateIOSSimulatorNativeCapabilityAdmission(
   const h264 = capabilityEntry({
     requested: input.policy.requested.h264Stream,
     compatibility: input.policy.compatibility.h264Stream,
-    hostMode: input.policy.host.mode,
+    requireVerifiedCompatibility,
     detected: detected?.h264Stream ?? null,
     processState,
     launchDenied,
@@ -241,7 +251,7 @@ export function evaluateIOSSimulatorNativeCapabilityAdmission(
   const continuousInput = capabilityEntry({
     requested: input.policy.requested.continuousInput,
     compatibility: input.policy.compatibility.continuousInput,
-    hostMode: input.policy.host.mode,
+    requireVerifiedCompatibility,
     detected: detected?.continuousInput ?? null,
     processState,
     launchDenied,
@@ -249,7 +259,7 @@ export function evaluateIOSSimulatorNativeCapabilityAdmission(
   const multiTouch = capabilityEntry({
     requested: input.policy.requested.continuousInput,
     compatibility: input.policy.compatibility.multiTouch,
-    hostMode: input.policy.host.mode,
+    requireVerifiedCompatibility,
     detected: detected?.multiTouch ?? null,
     processState,
     launchDenied,
@@ -271,7 +281,7 @@ export function evaluateIOSSimulatorNativeCapabilityAdmission(
       bgraStream: capabilityEntry({
         requested: false,
         compatibility: input.policy.compatibility.h264Stream,
-        hostMode: input.policy.host.mode,
+        requireVerifiedCompatibility,
         detected: detected?.bgraStream ?? null,
         processState,
         launchDenied,

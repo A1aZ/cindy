@@ -70,8 +70,12 @@ import type {
   IOSSimulatorPublicEnvironmentReport,
   IOSSimulatorPublicInstance,
   IOSSimulatorPublicViewport,
+  IOSSimulatorPublicRouteReasonCode,
+  IOSSimulatorPublicRouteState,
+  IOSSimulatorPublicRouteStatus,
   IOSSimulatorSessionStatus,
 } from '../../shared/iosSimulatorIpc.js';
+import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../../shared/iosSimulatorIpc.js';
 import { createLogger } from '../logger.js';
 import { desktopSessionStorage } from '../maker-host/session-storage.js';
 import {
@@ -159,6 +163,8 @@ export interface IOSSimulatorHostOptions {
   getSession?: (sessionId: string) => Promise<IOSSimulatorSessionSnapshot | null>;
   resolveWorktreeRoot?: (workDir: string) => Promise<string>;
   requestViewerFocus?: (sessionId: string, instanceId: string) => void;
+  /** Main → renderer route diagnostics seam; injected in tests, broadcast by default. */
+  pushRouteStatus?: (status: IOSSimulatorPublicRouteStatus) => void;
 }
 
 export interface IOSSimulatorHost {
@@ -187,6 +193,7 @@ export interface IOSSimulatorHost {
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
     visible: boolean,
     preferredEncoding?: 'jpeg' | 'h264',
+    fallbackReason?: 'native-decoder-fallback',
   ): Promise<IOSSimulatorHostResult>;
   getLatestFrame(
     sessionId: string,
@@ -279,8 +286,10 @@ function createDefaultDriverManager(): IOSSimulatorDriverManager {
         artifact,
         start,
         developmentRequests: {
-          h264Stream: process.env.CINDY_IOS_SIMULATOR_NATIVE_H264 === '1',
-          continuousInput: process.env.CINDY_IOS_SIMULATOR_NATIVE_HID === '1',
+          // Native routes are probe-first by default in development too. A
+          // deliberate `0` remains an escape hatch for diagnosing WDA-only.
+          h264Stream: process.env.CINDY_IOS_SIMULATOR_NATIVE_H264 !== '0',
+          continuousInput: process.env.CINDY_IOS_SIMULATOR_NATIVE_HID !== '0',
         },
       }),
   };
@@ -566,6 +575,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const agentControlLeases = new Map<string, string>();
   const screenMaps = new IOSSimulatorScreenMapStore();
   const framePump = options.framePump ?? new IOSSimulatorFramePump();
+  const viewerSessions = new Map<string, string>();
   const h264FramePump =
     options.h264FramePump ??
     new IOSSimulatorH264FramePump({
@@ -584,6 +594,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             logger.debug('iOS Simulator H.264 frame push skipped', {
               error: error instanceof Error ? error.message : String(error),
             });
+          }
+        }
+        const sessionId = viewerSessions.get(frame.instanceId);
+        if (sessionId) {
+          try {
+            const instance = actor.getOwned(sessionId, frame.instanceId);
+            if (instance.generation === frame.generation) {
+              publishRouteStatusForInstance(instance);
+            }
+          } catch {
+            // The instance may have been detached while the encoded frame was
+            // already queued. The generation check above keeps this harmless.
           }
         }
       },
@@ -634,6 +656,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const viewerOrientationOverrides = new Map<string, 'PORTRAIT' | 'LANDSCAPE'>();
   const streamProfiles = new Map<string, IOSSimulatorStreamProfile>();
   const viewerEncodings = new Map<string, 'jpeg' | 'h264'>();
+  const viewerPreferredEncodings = new Map<string, 'jpeg' | 'h264'>();
+  const viewerFallbackReasons = new Map<string, IOSSimulatorPublicRouteReasonCode>();
+  const routeStatusCache = new Map<string, string>();
   const configuredDeviceLivenessIntervalMs =
     options.deviceLivenessIntervalMs ?? DEFAULT_DEVICE_LIVENESS_INTERVAL_MS;
   const deviceLivenessIntervalMs =
@@ -652,6 +677,21 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   let ownershipReconciled = false;
   let ownershipReconcilePromise: Promise<void> | null = null;
   let disposePromise: Promise<void> | null = null;
+  const pushRouteStatus =
+    options.pushRouteStatus ??
+    ((status: IOSSimulatorPublicRouteStatus) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (window.isDestroyed()) continue;
+        try {
+          window.webContents.send(IOS_SIMULATOR_ROUTE_STATUS_CHANNEL, status);
+        } catch (error) {
+          logger.debug('iOS Simulator route status push skipped', {
+            instanceId: status.instanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    });
   const hostDisposedResult = (): IOSSimulatorHostResult => ({
     ok: false,
     errorCode: 'IOS_SIMULATOR_HOST_ERROR',
@@ -927,6 +967,168 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     const manager = getDriverManager();
     return manager.probe ? manager.probe(instanceId) : manager.get(instanceId);
   };
+
+  function publicRouteState(
+    state: IOSSimulatorFramePumpSnapshot['state'] | null,
+  ): IOSSimulatorPublicRouteState {
+    switch (state) {
+      case 'connecting':
+        return 'detecting';
+      case 'streaming':
+        return 'active';
+      case 'reconnecting':
+        return 'reconnecting';
+      case 'disconnected':
+        return 'unavailable';
+      case 'paused':
+      case 'idle':
+      default:
+        return 'idle';
+    }
+  }
+
+  function routeStatusForInstance(
+    instance: IOSSimulatorInstance,
+    running: WdaRunningInstance | null = getDriverManager().get(instance.instanceId),
+  ): IOSSimulatorPublicRouteStatus {
+    const now = new Date().toISOString();
+    const notReady = instance.lifecycleState !== 'ready';
+    const selectedEncoding = viewerEncodings.get(instance.instanceId) ?? null;
+    const preferredEncoding = viewerPreferredEncodings.get(instance.instanceId) ?? null;
+    const streamSnapshot =
+      selectedEncoding === 'h264'
+        ? h264FramePump.snapshot(instance.instanceId)
+        : selectedEncoding === 'jpeg'
+          ? framePump.snapshot(instance.instanceId)
+          : null;
+    const capabilityReport = running?.driverRouter?.capabilityReport;
+    const report =
+      typeof capabilityReport === 'function' ? capabilityReport.call(running?.driverRouter) : null;
+    const nativeStreamRoute = report?.routes?.stream?.h264;
+    const nativeInputRoute = report?.routes?.continuousInput;
+    const nativeAdmission = report?.nativeSidecar.admission;
+
+    let stream: IOSSimulatorPublicRouteStatus['stream'];
+    if (notReady) {
+      stream = {
+        adapter: null,
+        encoding: null,
+        state: 'unavailable',
+        reasonCode: instance.lifecycleState === 'stopped' ? 'route-stopped' : 'instance-not-ready',
+      };
+    } else if (!selectedEncoding) {
+      stream = {
+        adapter: null,
+        encoding: null,
+        state: 'idle',
+        reasonCode: 'viewer-hidden',
+      };
+    } else if (selectedEncoding === 'h264') {
+      const routeIsNative = nativeStreamRoute?.selected === 'native-sidecar' && !nativeStreamRoute.fallback;
+      const pumpState = publicRouteState(streamSnapshot?.state ?? null);
+      stream = {
+        adapter: routeIsNative ? 'native-sidecar' : 'wda',
+        encoding: routeIsNative ? 'h264' : 'jpeg',
+        state: routeIsNative ? pumpState : 'fallback',
+        reasonCode: routeIsNative
+          ? streamSnapshot?.state === 'disconnected'
+            ? 'native-stream-disconnected'
+            : streamSnapshot?.state === 'connecting'
+              ? 'native-probe-pending'
+              : 'native-active'
+          : !report || report.nativeSidecar.available === false
+            ? 'native-sidecar-unavailable'
+            : 'native-capability-unavailable',
+      };
+    } else {
+      const pumpState = publicRouteState(streamSnapshot?.state ?? null);
+      const fallback = preferredEncoding === 'h264';
+      stream = {
+        adapter: 'wda',
+        encoding: 'jpeg',
+        // The route label already communicates compatibility mode. Preserve
+        // the JPEG pump's live health so reconnecting/disconnected is visible.
+        state: fallback && pumpState === 'idle' ? 'fallback' : pumpState,
+        reasonCode: fallback
+          ? viewerFallbackReasons.get(instance.instanceId) ?? 'wda-fallback'
+          : streamSnapshot?.state === 'disconnected'
+            ? 'route-error'
+            : 'wda-active',
+      };
+    }
+
+    let input: IOSSimulatorPublicRouteStatus['input'];
+    if (notReady) {
+      input = {
+        adapter: null,
+        state: 'unavailable',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'instance-not-ready',
+      };
+    } else if (!running) {
+      input = {
+        adapter: null,
+        state: 'detecting',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'native-probe-pending',
+      };
+    } else if (!report) {
+      input = {
+        adapter: 'wda',
+        state: 'fallback',
+        continuous: false,
+        multiTouch: false,
+        reasonCode: 'native-sidecar-unavailable',
+      };
+    } else {
+      const nativeInputActive =
+        nativeInputRoute?.selected === 'native-sidecar' && !nativeInputRoute.fallback;
+      const probing = nativeAdmission?.capabilities.continuousInput.reasonCode === 'AWAITING_PROBE';
+      const nativeMultiTouch = Boolean(nativeAdmission?.capabilities.multiTouch.active);
+      input = {
+        adapter: nativeInputActive ? 'native-sidecar' : 'wda',
+        state: probing ? 'detecting' : nativeInputActive ? 'active' : 'fallback',
+        continuous: nativeInputActive,
+        multiTouch: nativeInputActive && nativeMultiTouch,
+        reasonCode: probing
+          ? 'native-probe-pending'
+          : nativeInputActive
+            ? 'native-active'
+            : report.nativeSidecar.available
+              ? 'native-capability-unavailable'
+              : 'native-sidecar-unavailable',
+      };
+    }
+    return {
+      sessionId: instance.sessionId,
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: now,
+      stream,
+      input,
+    };
+  }
+
+  function publishRouteStatus(status: IOSSimulatorPublicRouteStatus): void {
+    // Do not make the timestamp defeat coalescing; frame delivery may call
+    // this helper frequently while the public route itself remains unchanged.
+    const fingerprint = JSON.stringify({ ...status, updatedAt: '' });
+    if (routeStatusCache.get(status.instanceId) === fingerprint) return;
+    routeStatusCache.set(status.instanceId, fingerprint);
+    pushRouteStatus(status);
+  }
+
+  function publishRouteStatusForInstance(
+    instance: IOSSimulatorInstance,
+    running?: WdaRunningInstance | null,
+  ): IOSSimulatorPublicRouteStatus {
+    const status = routeStatusForInstance(instance, running);
+    publishRouteStatus(status);
+    return status;
+  }
+
   const getSession =
     options.getSession ??
     (async (sessionId: string) => {
@@ -1000,6 +1202,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   }
 
   function viewerRouteRefreshResult(instance: IOSSimulatorInstance): IOSSimulatorHostResult {
+    publishRouteStatusForInstance(instance);
     return {
       ok: true,
       data: {
@@ -1020,6 +1223,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     framePump.clear(instance.instanceId);
     h264FramePump.clear(instance.instanceId);
     viewerEncodings.delete(instance.instanceId);
+    viewerPreferredEncodings.delete(instance.instanceId);
+    viewerFallbackReasons.delete(instance.instanceId);
+    viewerSessions.delete(instance.instanceId);
     streamProfiles.delete(instance.instanceId);
     clearViewportState(instance.instanceId);
     screenMaps.clear(instance.instanceId);
@@ -1153,6 +1359,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       instances: instances.map(publicInstance),
       deviceGrants: instances.map((instance) => grantStore.get(instance.simulatorUdid)),
       mutationStates: instances.map((instance) => actor.mutationState(instance.instanceId)),
+      routeStatuses: instances.map((instance) => publishRouteStatusForInstance(instance)),
     };
   }
 
@@ -1189,6 +1396,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         framePump.clear(instance.instanceId);
         h264FramePump.clear(instance.instanceId);
         viewerEncodings.delete(instance.instanceId);
+        viewerPreferredEncodings.delete(instance.instanceId);
+        viewerFallbackReasons.delete(instance.instanceId);
+        viewerSessions.delete(instance.instanceId);
         clearViewportState(instance.instanceId);
         streamProfiles.delete(instance.instanceId);
         let cleanupSucceeded = await discardInstanceMedia(instance);
@@ -2047,21 +2257,27 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
 
   function stopViewerMedia(instance: IOSSimulatorInstance): IOSSimulatorFramePumpSnapshot | null {
     const running = getDriverManager().get(instance.instanceId);
+    viewerSessions.delete(instance.instanceId);
     h264FramePump.clear(instance.instanceId);
     viewerEncodings.delete(instance.instanceId);
+    viewerPreferredEncodings.delete(instance.instanceId);
+    viewerFallbackReasons.delete(instance.instanceId);
     if (!running) {
       cancelIdleRecycle(instance.instanceId);
       framePump.clear(instance.instanceId);
       clearViewportState(instance.instanceId);
+      publishRouteStatusForInstance(instance, null);
       return null;
     }
     scheduleIdleRecycle(instance);
-    return framePump.setVisible({
+    const snapshot = framePump.setVisible({
       instanceId: instance.instanceId,
       generation: instance.generation,
       driver: running.driver,
       visible: false,
     });
+    publishRouteStatusForInstance(instance, running);
+    return snapshot;
   }
 
   function nativeH264Driver(running: WdaRunningInstance): IOSSimulatorNativeSidecarDriver | null {
@@ -2075,10 +2291,17 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     running: WdaRunningInstance,
     preferredEncoding: 'jpeg' | 'h264',
     orientation: 'PORTRAIT' | 'LANDSCAPE' = 'PORTRAIT',
+    fallbackReason: IOSSimulatorPublicRouteReasonCode = null,
   ): IOSSimulatorFramePumpSnapshot {
+    viewerSessions.set(instance.instanceId, instance.sessionId);
+    viewerPreferredEncodings.set(
+      instance.instanceId,
+      fallbackReason ? 'h264' : preferredEncoding,
+    );
     const nativeDriver = preferredEncoding === 'h264' ? nativeH264Driver(running) : null;
     if (nativeDriver) {
       viewerEncodings.set(instance.instanceId, 'h264');
+      viewerFallbackReasons.delete(instance.instanceId);
       framePump.setVisible({
         instanceId: instance.instanceId,
         generation: instance.generation,
@@ -2090,7 +2313,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         jpegQuality: 25,
         scalingPercent: 50,
       };
-      return h264FramePump.setVisible({
+      const snapshot = h264FramePump.setVisible({
         instanceId: instance.instanceId,
         generation: instance.generation,
         driver: nativeDriver,
@@ -2102,16 +2325,31 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         },
         visible: true,
       });
+      publishRouteStatusForInstance(instance, running);
+      return snapshot;
     }
     viewerEncodings.set(instance.instanceId, 'jpeg');
+    if (preferredEncoding === 'h264' || fallbackReason) {
+      const report = running.driverRouter?.capabilityReport();
+      viewerFallbackReasons.set(
+        instance.instanceId,
+        fallbackReason ?? (!report || report.nativeSidecar.available === false
+          ? 'native-sidecar-unavailable'
+          : 'native-capability-unavailable'),
+      );
+    } else {
+      viewerFallbackReasons.delete(instance.instanceId);
+    }
     clearViewerOrientationOverride(instance.instanceId);
     h264FramePump.clear(instance.instanceId);
-    return framePump.setVisible({
+    const snapshot = framePump.setVisible({
       instanceId: instance.instanceId,
       generation: instance.generation,
       driver: running.driver,
       visible: true,
     });
+    publishRouteStatusForInstance(instance, running);
+    return snapshot;
   }
 
   return {
@@ -2133,7 +2371,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return describeToolsForSession(resolved.sessionId);
     },
     getStatus: inspectForSession,
-    async setViewerVisibility(sessionId, route, visible, preferredEncoding = 'jpeg') {
+    async setViewerVisibility(
+      sessionId,
+      route,
+      visible,
+      preferredEncoding = 'jpeg',
+      fallbackReason,
+    ) {
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
@@ -2246,6 +2490,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           running,
           preferredEncoding,
           viewport.orientation,
+          fallbackReason ?? null,
         );
         return {
           ok: true,
@@ -2295,7 +2540,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const running = await getHealthyDriver(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
           if (running) {
-            snapshot = startViewerStream(instance, running, 'jpeg');
+            snapshot = startViewerStream(
+              instance,
+              running,
+              'jpeg',
+              viewports.get(instance.instanceId)?.orientation ?? 'PORTRAIT',
+              'native-stream-disconnected',
+            );
             selectedEncoding = 'jpeg';
           } else {
             viewerEncodings.delete(instance.instanceId);
@@ -2306,7 +2557,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
           viewerEncodings.delete(instance.instanceId);
+          viewerPreferredEncodings.delete(instance.instanceId);
+          viewerFallbackReasons.delete(instance.instanceId);
+          viewerSessions.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
+          publishRouteStatusForInstance(instance);
           return {
             ok: true,
             data: {
@@ -2317,6 +2572,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             },
           };
         }
+        publishRouteStatusForInstance(instance);
         return {
           ok: true,
           data: {
@@ -2525,7 +2781,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
           viewerEncodings.delete(instance.instanceId);
+          viewerPreferredEncodings.delete(instance.instanceId);
+          viewerFallbackReasons.delete(instance.instanceId);
+          viewerSessions.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
+          publishRouteStatusForInstance(instance, getDriverManager().get(instance.instanceId));
           requestViewerFocus(sessionId, instance.instanceId);
           return {
             ok: true,
@@ -2545,10 +2805,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           framePump.clear(route.instanceId);
           h264FramePump.clear(route.instanceId);
           viewerEncodings.delete(route.instanceId);
+          viewerPreferredEncodings.delete(route.instanceId);
+          viewerFallbackReasons.delete(route.instanceId);
+          viewerSessions.delete(route.instanceId);
           clearViewportState(route.instanceId);
+          const stopped = await actor.stop(route);
+          publishRouteStatusForInstance(stopped, null);
           return {
             ok: true,
-            data: instanceData(await actor.stop(route)),
+            data: instanceData(stopped),
           };
         }
         if (name === 'detach_device') {
@@ -2563,6 +2828,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           framePump.clear(route.instanceId);
           h264FramePump.clear(route.instanceId);
           viewerEncodings.delete(route.instanceId);
+          viewerPreferredEncodings.delete(route.instanceId);
+          viewerFallbackReasons.delete(route.instanceId);
+          viewerSessions.delete(route.instanceId);
           clearViewportState(route.instanceId);
           agentControlLeases.delete(route.instanceId);
           return {
@@ -3965,6 +4233,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
           viewerEncodings.delete(instance.instanceId);
+          viewerPreferredEncodings.delete(instance.instanceId);
+          viewerFallbackReasons.delete(instance.instanceId);
+          viewerSessions.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
           return {
             ok: true,
@@ -4014,10 +4285,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             framePump.clear(instance.instanceId);
             h264FramePump.clear(instance.instanceId);
             viewerEncodings.delete(instance.instanceId);
+            viewerPreferredEncodings.delete(instance.instanceId);
+            viewerFallbackReasons.delete(instance.instanceId);
+            viewerSessions.delete(instance.instanceId);
             clearViewportState(instance.instanceId);
             streamProfiles.delete(instance.instanceId);
           }),
         );
+        routeStatusCache.clear();
       })();
       return disposePromise;
     },

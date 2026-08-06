@@ -122,6 +122,7 @@ import type {
   IOSSimulatorAgentControlRequest,
   IOSSimulatorFocusRequest,
   IOSSimulatorH264FramePush,
+  IOSSimulatorRouteStatusPush,
   IOSSimulatorLiveTouchRequest,
   IOSSimulatorMutationControlRequest,
   IOSSimulatorStatusRequest,
@@ -131,6 +132,7 @@ import type {
   IOSSimulatorViewerVisibilityRequest,
   IOSSimulatorStreamProfileRequest,
 } from '../shared/iosSimulatorIpc';
+import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../shared/iosSimulatorIpc';
 import { BILLING_INVOKE, type BillingRendererApi } from '../shared/billing';
 import {
   REMOTE_PRECREATED_WORKTREE_LEDGER_CHANNELS,
@@ -578,6 +580,7 @@ const fanOutMakerSessionCredentialSwitchApplied = createIpcFanOut(
 const fanOutMakerClaudeSessionRouteChanged = createIpcFanOut('maker:claude-session-route-changed');
 const fanOutIOSSimulatorFocusRequest = createIpcFanOut('maker:ios-simulator:focus-request');
 const fanOutIOSSimulatorH264Frame = createIpcFanOut('maker:ios-simulator:h264-frame');
+const fanOutIOSSimulatorRouteStatus = createIpcFanOut(IOS_SIMULATOR_ROUTE_STATUS_CHANNEL);
 // 会话后台活动翻转广播(payload = { sessionId, active }):turn 已结束但 CC 子进程仍在调模型。
 const fanOutMakerSessionBackgroundActivityChanged = createIpcFanOut(
   'maker:session-background-activity-changed',
@@ -6120,6 +6123,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('maker:ios-simulator:live-touch', request),
       onH264Frame: (callback: (payload: IOSSimulatorH264FramePush) => void) =>
         fanOutIOSSimulatorH264Frame((payload) => callback(payload as IOSSimulatorH264FramePush)),
+      onRouteStatus: (callback: (payload: IOSSimulatorRouteStatusPush) => void) =>
+        fanOutIOSSimulatorRouteStatus((payload) => callback(payload as IOSSimulatorRouteStatusPush)),
       onFocusRequest: (callback: (request: IOSSimulatorFocusRequest) => void) =>
         fanOutIOSSimulatorFocusRequest((request) => callback(request as IOSSimulatorFocusRequest)),
     },

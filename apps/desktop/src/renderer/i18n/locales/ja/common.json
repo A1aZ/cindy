@@ -4446,6 +4446,22 @@
         "balanced": "バランス · 10 FPS",
         "high": "高 · 20 FPS"
       },
+      "route": {
+        "nativeH264": "Native H.264",
+        "wdaJpeg": "WDA JPEG · 互換モード",
+        "nativeHid": "Native HID",
+        "wdaInput": "WDA 入力 · 互換モード",
+        "hidden": "ビューアー待機中",
+        "multiTouchUnavailable": "マルチタッチは利用できません",
+        "state": {
+          "idle": "待機中",
+          "detecting": "ネイティブ機能を検出中…",
+          "active": "有効",
+          "fallback": "互換モード",
+          "reconnecting": "再接続中…",
+          "unavailable": "利用不可"
+        }
+      },
       "stream": {
         "idle": "待機中",
         "connecting": "接続中",

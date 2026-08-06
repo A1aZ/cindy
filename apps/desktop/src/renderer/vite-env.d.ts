@@ -32,6 +32,7 @@ type IOSSimulatorAgentControlRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorAgentControlRequest;
 type IOSSimulatorFocusRequest = import('../shared/iosSimulatorIpc').IOSSimulatorFocusRequest;
 type IOSSimulatorH264FramePush = import('../shared/iosSimulatorIpc').IOSSimulatorH264FramePush;
+type IOSSimulatorRouteStatusPush = import('../shared/iosSimulatorIpc').IOSSimulatorRouteStatusPush;
 type IOSSimulatorLiveTouchRequest =
   import('../shared/iosSimulatorIpc').IOSSimulatorLiveTouchRequest;
 type IOSSimulatorMutationControlRequest =
@@ -5666,6 +5667,7 @@ interface ElectronAPI {
       ) => Promise<IOSSimulatorToolResponse>;
       liveTouch: (request: IOSSimulatorLiveTouchRequest) => Promise<IOSSimulatorToolResponse>;
       onH264Frame: (callback: (payload: IOSSimulatorH264FramePush) => void) => () => void;
+      onRouteStatus: (callback: (payload: IOSSimulatorRouteStatusPush) => void) => () => void;
       onFocusRequest: (callback: (request: IOSSimulatorFocusRequest) => void) => () => void;
     };
     computer: {

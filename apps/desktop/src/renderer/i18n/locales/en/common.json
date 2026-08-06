@@ -6211,6 +6211,7 @@
       "undoPartialSuccess": "Exactly captured changes were undone; uncaptured changes were not undone",
       "reapplyPartialSuccess": "Exactly captured changes were reapplied; uncaptured changes were not reapplied",
       "actionRunning": "Wait for the current response to finish before changing the workspace",
+      "gitUnavailable": "Git was not detected. Install Git, make sure it is on the system PATH, and restart Cindy to use the full Undo and Reapply functionality.",
       "actionConflict": "The workspace has changed, so this patch cannot be applied safely. Review the current changes first",
       "actionUnavailable": "This turn includes file changes that cannot be safely undone",
       "actionFailed": "The changes could not be applied. Try again",

@@ -263,4 +263,18 @@ describe('TurnChangesCard file actions', () => {
     ));
     expect(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' })).toBeTruthy();
   });
+
+  it('prompts the user to install Git when the action cannot find it', async () => {
+    mocks.applyTurnChangeSet.mockRejectedValue(
+      new Error('[TURN_CHANGE_GIT_UNAVAILABLE] Git is not installed'),
+    );
+    render(<TurnChangesCard sessionId="session-1" changeSet={CHANGE_SET} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' }));
+
+    await waitFor(() => expect(mocks.toastError).toHaveBeenCalledWith(
+      'chat.turnChanges.gitUnavailable',
+    ));
+    expect(screen.getByRole('button', { name: 'chat.turnChanges.undoAria' })).toBeTruthy();
+  });
 });

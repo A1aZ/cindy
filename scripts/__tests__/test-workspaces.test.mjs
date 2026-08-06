@@ -462,6 +462,8 @@ test("default desktop unit keeps real Git subprocess coverage to one smoke", () 
 		"apps/desktop/src/main/git-review/__tests__/gitReviewSmoke.test.ts",
 		// This file mocks child_process.spawn and tests the adapter itself.
 		"apps/desktop/src/main/git-review/__tests__/gitRunner.test.ts",
+		// Turn change-set actions exercise the real Git apply subprocess.
+		"apps/desktop/src/main/turn-change-set/__tests__/store.test.ts",
 		// This file mocks child_process.execFile and tests gitExec's timeout
 		// process-tree termination itself; no real Git subprocess is spawned.
 		"apps/desktop/src/main/worktree/__tests__/gitExec.test.ts",

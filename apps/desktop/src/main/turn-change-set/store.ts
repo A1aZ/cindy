@@ -156,7 +156,7 @@ function assertSafeSegment(value: string, label: string): void {
 }
 
 function storageRoot(): string {
-  return path.join(app.getPath('userData'), 'cc-agent', 'turn-change-sets');
+  return path.join(app.getPath('userData'), 'turn-change-sets');
 }
 
 function sessionDir(sessionId: string): string {
@@ -1019,6 +1019,7 @@ export type TurnChangeSetActionErrorKind =
   | 'not-found'
   | 'busy'
   | 'wrong-state'
+  | 'git-missing'
   | 'unsupported'
   | 'conflict'
   | 'apply-failed';
@@ -1104,6 +1105,12 @@ function patchApplyArgs(revert: boolean, check: boolean): string[] {
   return args;
 }
 
+function isGitMissingError(error: unknown): boolean {
+  return error instanceof GitRunError
+    && error.exitCode === null
+    && (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+}
+
 function usesPortableTextPatch(value: PersistedTurnChangeSetV1): boolean {
   const diffs = parseDiffs(value.id, value.unifiedDiff);
   return diffs.length > 0
@@ -1142,6 +1149,13 @@ async function canApplyRecordedPatch(
     });
     return true;
   } catch (error) {
+    if (isGitMissingError(error)) {
+      throw new TurnChangeSetActionError(
+        'git-missing',
+        'Git is not installed or is not available on PATH.',
+        error,
+      );
+    }
     if (error instanceof GitRunError && error.exitCode !== null) return false;
     throw new TurnChangeSetActionError(
       'unsupported',
@@ -1163,6 +1177,13 @@ async function applyRecordedPatch(
       timeoutMs: 30_000,
     });
   } catch (error) {
+    if (isGitMissingError(error)) {
+      throw new TurnChangeSetActionError(
+        'git-missing',
+        'Git is not installed or is not available on PATH.',
+        error,
+      );
+    }
     if (error instanceof GitRunError && error.exitCode !== null) {
       throw new TurnChangeSetActionError(
         'conflict',

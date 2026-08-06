@@ -157,6 +157,8 @@ export function TurnChangesCard({
       const code = extractIpcError(error)?.code;
       const key = code === 'SESSION_RUNNING'
         ? 'chat.turnChanges.actionRunning'
+        : code === 'TURN_CHANGE_GIT_UNAVAILABLE'
+          ? 'chat.turnChanges.gitUnavailable'
         : code === 'STALE_DIFF' || code === 'PRECONDITION_FAILED'
           ? 'chat.turnChanges.actionConflict'
           : code === 'UNSUPPORTED_CAPABILITY'

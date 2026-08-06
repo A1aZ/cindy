@@ -3445,9 +3445,17 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
       }
       if (event.type === 'done') {
+        const doneAttemptToken = event.turnAttemptToken;
+        if (typeof doneAttemptToken === 'number' && !isContinuationBoundary) {
+          autoResumeBookkeeping.settleOutcome(session.id, doneAttemptToken, 'failed');
+          interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
+        }
         const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
         const isSilentStopDone =
           (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          shouldMarkTurnTerminalIdleAfterBroadcast = true;
+        }
         if (!isContinuationBoundary && !isSilentStopDone) {
           finalizeTurnChangeSet(
             session.id,
@@ -3457,11 +3465,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
         // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
         // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
-        const doneAttemptToken = event.turnAttemptToken;
-        if (typeof doneAttemptToken === 'number' && !isContinuationBoundary) {
-          autoResumeBookkeeping.settleOutcome(session.id, doneAttemptToken, 'failed');
-          interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
-        }
         // silent-stop done:自动续跑会在 1.5s 后启动新 turn(或弹耗尽横幅),
         // 不标 idle/不触发 goal idle/不通知 coordinator done——避免 renderer
         // 在 500ms 完成去抖窗口内显示假完成通知,下一个 turn 开始后又跳回 running。
@@ -3473,7 +3476,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           // 兜底: 有些 vendor 的 done 不必先发 status:isRunning=false。
           // 但 idle 恢复不能挡在 EVENT broadcast 前，否则隐藏窗口可能在 done
           // 还没进入 renderer 时就重新被 Chromium 节流。
-          shouldMarkTurnTerminalIdleAfterBroadcast = true;
           agentInputCoordinatorHolder?.onTurnEvent(session.id, 'done');
         } else {
           // silent-stop 自动续跑:translator 判定本 turn 被上游空内容消息静默收尾时在
@@ -4832,6 +4834,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         if (error.kind === 'not-found') throwIpcError('NOT_FOUND', error.message);
         if (error.kind === 'busy') throwIpcError('SESSION_RUNNING', error.message);
         if (error.kind === 'wrong-state') throwIpcError('PRECONDITION_FAILED', error.message);
+        if (error.kind === 'git-missing') {
+          throwIpcError('TURN_CHANGE_GIT_UNAVAILABLE', error.message);
+        }
         if (error.kind === 'unsupported') throwIpcError('UNSUPPORTED_CAPABILITY', error.message);
         if (error.kind === 'conflict') throwIpcError('STALE_DIFF', error.message);
         throwIpcError('INTERNAL', error.message);

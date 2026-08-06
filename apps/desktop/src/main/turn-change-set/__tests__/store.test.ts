@@ -146,6 +146,49 @@ describe('turn change-set sidecar store', () => {
     expect(reapply.summary.workspaceState).toBe('applied');
   });
 
+  it('reports a missing Git executable without changing the workspace', async () => {
+    const target = path.join(workdir, 'missing-git.ts');
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'codex',
+      cwd: workdir,
+    });
+    noteTurnDiffEvent('session-1', {
+      type: 'turn_diff',
+      source: 'codex',
+      data: {
+        turnId: 'turn-missing-git',
+        cwd: workdir,
+        diff: [
+          'diff --git a/missing-git.ts b/missing-git.ts',
+          '--- a/missing-git.ts',
+          '+++ b/missing-git.ts',
+          '@@ -1 +1 @@',
+          '-old',
+          '+new',
+          '',
+        ].join('\n'),
+      },
+    });
+    await finalizeTurnChangeSet('session-1', 'turn-missing-git', 'complete');
+    const [recorded] = await listTurnChangeSets('session-1');
+    const originalPath = process.env.PATH;
+
+    try {
+      process.env.PATH = root;
+      await expect(applyTurnChangeSetAction('session-1', recorded!.id, 'undo'))
+        .rejects.toMatchObject({ kind: 'git-missing' } satisfies Partial<TurnChangeSetActionError>);
+    } finally {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+    }
+
+    expect(await fs.readFile(target, 'utf8')).toBe('new\n');
+    expect((await listTurnChangeSets('session-1'))[0]?.workspaceState).toBe('applied');
+  });
+
   it('keeps every file unchanged when one hunk conflicts', async () => {
     const first = path.join(workdir, 'a.ts');
     const second = path.join(workdir, 'b.ts');
@@ -296,7 +339,7 @@ describe('turn change-set sidecar store', () => {
       },
     });
     await finalizeTurnChangeSet('session-1', 'turn-legacy', 'complete');
-    const sidecarDir = path.join(mocks.userDataRoot, 'cc-agent', 'turn-change-sets', 'session-1');
+    const sidecarDir = path.join(mocks.userDataRoot, 'turn-change-sets', 'session-1');
     const indexPath = path.join(sidecarDir, 'index.json');
     const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
       version: number;
@@ -532,7 +575,7 @@ describe('turn change-set sidecar store', () => {
     expect(summary).toMatchObject({ state: 'partial', incompleteReasons: ['sensitive-file'] });
     expect(summary?.files.map((file) => file.path)).toEqual(['a.ts']);
     const detailRaw = await fs.readFile(
-      path.join(mocks.userDataRoot, 'cc-agent', 'turn-change-sets', 'session-1', `${summary?.id}.json`),
+      path.join(mocks.userDataRoot, 'turn-change-sets', 'session-1', `${summary?.id}.json`),
       'utf8',
     );
     expect(detailRaw).not.toContain('TOKEN=');
@@ -593,7 +636,6 @@ describe('turn change-set sidecar store', () => {
     await vi.waitFor(async () => expect(await listTurnChangeSets('session-1')).toHaveLength(1));
     const indexPath = path.join(
       mocks.userDataRoot,
-      'cc-agent',
       'turn-change-sets',
       'session-1',
       'index.json',
@@ -720,7 +762,6 @@ describe('turn change-set sidecar store', () => {
   it('removes orphan detail files after the next successful index publish', async () => {
     const sidecarDir = path.join(
       mocks.userDataRoot,
-      'cc-agent',
       'turn-change-sets',
       'session-1',
     );
@@ -773,7 +814,7 @@ describe('turn change-set sidecar store', () => {
     expect(summary).toMatchObject({ state: 'partial', incompleteReasons: ['sensitive-file'] });
     expect(summary?.files.map((file) => file.path)).toEqual(['a.ts']);
     const detailRaw = await fs.readFile(
-      path.join(mocks.userDataRoot, 'cc-agent', 'turn-change-sets', 'session-1', `${summary?.id}.json`),
+      path.join(mocks.userDataRoot, 'turn-change-sets', 'session-1', `${summary?.id}.json`),
       'utf8',
     );
     expect(detailRaw).not.toContain('TOKEN=');

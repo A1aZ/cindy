@@ -6209,6 +6209,7 @@
       "undoPartialSuccess": "已撤销精确记录的改动；未记录的改动未被撤销",
       "reapplyPartialSuccess": "已重新应用精确记录的改动；未记录的改动未被重新应用",
       "actionRunning": "请等待当前回复结束后再更改工作区",
+      "gitUnavailable": "未检测到 Git。请在本机安装 Git 并确保它已加入系统 PATH，然后重启 Cindy，即可使用完整的撤销和重新应用功能。",
       "actionConflict": "工作区内容已变化，无法安全应用本轮补丁；请先审查当前改动",
       "actionUnavailable": "本轮包含无法安全撤销的文件变更",
       "actionFailed": "未能应用本轮改动，请重试",

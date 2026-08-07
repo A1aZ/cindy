@@ -350,6 +350,7 @@ export async function hashGhostContentFiles(
     const noFollow = fs.constants.O_NOFOLLOW ?? null;
     const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
     let handleStat: fs.BigIntStats;
+    let initialRealFilePath: string | undefined;
     try {
       handleStat = await handle.stat({ bigint: true });
       if (!handleStat.isFile()) {
@@ -369,6 +370,7 @@ export async function hashGhostContentFiles(
         fs.promises.stat(filePath, { bigint: true }),
         fs.promises.realpath(filePath),
       ]);
+      initialRealFilePath = realFilePath;
       const relativeRealPath = path.relative(rootIdentity.realPath, realFilePath);
       const outsideRoot =
         relativeRealPath === '..' ||
@@ -387,21 +389,40 @@ export async function hashGhostContentFiles(
     } finally {
       await handle.close();
     }
-    const afterReadPathStat = await fs.promises.lstat(filePath, { bigint: true });
-    if (
-      afterReadPathStat.isSymbolicLink() ||
-      !afterReadPathStat.isFile() ||
-      !sameFileIdentity(afterReadPathStat, handleStat)
-    ) {
-      throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
-    }
-    if (!sameStableFileState(handleStat, afterReadPathStat)) {
-      throw new Error(`ghost content entry changed while reading: ${relativePath}`);
-    }
-    assertGhostContentAncestorIdentities(
-      ancestorIdentities,
-      await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
+    // Windows 的按路径 stat/lstat 在 rename/replace 后可能继续返回旧目录元数据。
+    // 重新打开同一路径，用新句柄的状态确认它仍是刚才读取的那一份文件。
+    const verificationHandle = await fs.promises.open(
+      filePath,
+      fs.constants.O_RDONLY | (noFollow ?? 0),
     );
+    try {
+      const verificationStat = await verificationHandle.stat({ bigint: true });
+      if (!sameStableFileState(handleStat, verificationStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
+      const [afterReadPathStat, afterReadRealFilePath] = await Promise.all([
+        fs.promises.lstat(filePath, { bigint: true }),
+        fs.promises.realpath(filePath),
+      ]);
+      if (
+        initialRealFilePath === undefined ||
+        afterReadPathStat.isSymbolicLink() ||
+        !afterReadPathStat.isFile() ||
+        !sameFileIdentity(afterReadPathStat, verificationStat) ||
+        afterReadRealFilePath !== initialRealFilePath
+      ) {
+        throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
+      }
+      if (!sameStableFileState(verificationStat, afterReadPathStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
+      assertGhostContentAncestorIdentities(
+        ancestorIdentities,
+        await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
+      );
+    } finally {
+      await verificationHandle.close();
+    }
     hash.update(fileHash.digest());
   }
   await assertGhostContentRootIdentity(rootDir, rootIdentity);

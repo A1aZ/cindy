@@ -53,32 +53,24 @@ async function tryLinkFile(target: string, linkPath: string): Promise<boolean> {
   }
 }
 
-async function mockStaleLeafStatUntilHandleClose(file: string): Promise<{
-  handleOpened: () => void;
-  handleClosed: () => void;
+async function mockStaleLeafPathStatAfterMutation(file: string): Promise<{
   markMutated: () => void;
   restore: () => void;
 }> {
+  // GitHub Windows runner 上，句柄关闭后按路径 lstat 仍可能短暂返回 mutation 前的状态。
   const initialStat = await fs.promises.lstat(file, { bigint: true });
   const realLstat = fs.promises.lstat;
-  let handleOpen = false;
   let mutated = false;
   const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation((async (
     candidate: fs.PathLike,
     options?: fs.StatOptions,
   ) => {
-    if (handleOpen && mutated && path.resolve(String(candidate)) === path.resolve(file)) {
+    if (mutated && path.resolve(String(candidate)) === path.resolve(file)) {
       return initialStat;
     }
     return (realLstat as (...args: unknown[]) => Promise<fs.BigIntStats>)(candidate, options);
   }) as typeof fs.promises.lstat);
   return {
-    handleOpened: () => {
-      handleOpen = true;
-    },
-    handleClosed: () => {
-      handleOpen = false;
-    },
     markMutated: () => {
       mutated = true;
     },
@@ -324,14 +316,13 @@ describe('hashGhostContentFiles', () => {
     });
 
     const splitAt = 'old-prefix|'.length;
-    const stalePathStat = await mockStaleLeafStatUntilHandleClose(file);
+    const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
     const realOpen = fs.promises.open;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
-      stalePathStat.handleOpened();
       let pinnedHandleStat: fs.BigIntStats | undefined;
       return new Proxy(handle, {
         get(target, key) {
@@ -356,15 +347,6 @@ describe('hashGhostContentFiles', () => {
               const restRead = await handle.read(rest, 0, rest.byteLength, splitAt);
               yield rest.subarray(0, restRead.bytesRead);
             })());
-          }
-          if (key === 'close') {
-            return async () => {
-              try {
-                await handle.close();
-              } finally {
-                stalePathStat.handleClosed();
-              }
-            };
           }
           const value = Reflect.get(target, key);
           return typeof value === 'function' ? value.bind(target) : value;
@@ -394,14 +376,13 @@ describe('hashGhostContentFiles', () => {
       label: 'test',
     });
 
-    const stalePathStat = await mockStaleLeafStatUntilHandleClose(file);
+    const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
     const realOpen = fs.promises.open;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
-      stalePathStat.handleOpened();
       let pinnedHandleStat: fs.BigIntStats | undefined;
       return new Proxy(handle, {
         get(target, key) {
@@ -420,15 +401,6 @@ describe('hashGhostContentFiles', () => {
               stalePathStat.markMutated();
               yield bytes.subarray(0, read.bytesRead);
             })());
-          }
-          if (key === 'close') {
-            return async () => {
-              try {
-                await handle.close();
-              } finally {
-                stalePathStat.handleClosed();
-              }
-            };
           }
           const value = Reflect.get(target, key);
           return typeof value === 'function' ? value.bind(target) : value;

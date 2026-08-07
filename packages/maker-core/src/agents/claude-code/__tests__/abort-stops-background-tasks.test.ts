@@ -1440,6 +1440,34 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('Stop ACK retires wake tasks without a stopped echo, so the next ordinary done stays unclaimed', async () => {
+    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+
+    await handle.abort();
+    expect(fakeQuery.stopTask).toHaveBeenCalledWith('task-agent');
+    expect(fakeQuery.interrupt).toHaveBeenCalledTimes(1);
+    // The provider does not echo task_notification(stopped); the successful
+    // interrupt ACK still retires the locally tracked wake task.
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    stream.emit(interruptedTurnResult());
+    await waitFor(() => handle.isTurnRunning?.() === false, 'stopped foreground turn settled');
+
+    await handle.send({ type: 'user', content: 'ordinary next turn' });
+    stream.emit(turnResult('ordinary turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'ordinary terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'ordinary turn settled');
+    expect(events.filter((event) => event.type === 'done').at(-1)?.turnContinuationId).toBeUndefined();
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('does not stop tasks that already reached a terminal status', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

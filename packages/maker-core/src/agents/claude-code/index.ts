@@ -3380,13 +3380,13 @@ export class ClaudeCodeAgent extends BaseAgent {
     // fire-and-forget 逐个 stopTask:单个失败(任务恰好已自然结束 / 远端 daemon
     // 版本差)只 warn,绝不阻塞随后的 q.interrupt()。SDK 对每个被停任务会回吐
     // status:'stopped' 的 task_notification → 现有事件链把任务出表并让 UI 确定性收口。
-    function stopRunningWakeBackgroundTasks(reason: string): void {
-      if (runningBackgroundTasks.size === 0) return;
+    function stopRunningWakeBackgroundTasks(reason: string): string[] {
+      if (runningBackgroundTasks.size === 0) return [];
       const wakeIds: string[] = [];
       for (const [taskId, info] of runningBackgroundTasks) {
         if (info.wake) wakeIds.push(taskId);
       }
-      if (wakeIds.length === 0) return;
+      if (wakeIds.length === 0) return [];
       // 远端老 daemon / 老 SDK 没有 stopTask:退化为原行为(interrupt-only),
       // proxy 活动检测 + 「全部停止」兜底仍在。
       if (typeof q.stopTask !== 'function') {
@@ -3394,7 +3394,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           reason,
           wakeIds,
         });
-        return;
+        return [];
       }
       log.info('stopping running background wake tasks', { reason, wakeIds });
       for (const taskId of wakeIds) {
@@ -3419,6 +3419,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           },
         );
       }
+      return wakeIds;
     }
 
     // ── Middle-turn 事件过滤 (Codex review 3534925347 / 3535259132 / 3535293200) ──
@@ -4860,15 +4861,19 @@ export class ClaudeCodeAgent extends BaseAgent {
         // 用户 Stop 的产品语义 = 本会话所有模型调用停止:先发 stopTask 再 interrupt
         // (同一控制通道按序处理),封掉「interrupt 后任务恰好完成 → task_notification
         // 自动续跑新 turn」的竞态窗口。fire-and-forget,不阻塞 interrupt。
-        stopRunningWakeBackgroundTasks('user_stop');
+        const stopRequestedWakeIds = stopRunningWakeBackgroundTasks('user_stop');
         try {
           await q.interrupt();
+          // interrupt ACK authorizes retiring every wake task whose stop RPC
+          // was issued. A provider stopped echo is optional; without this
+          // local accounting, the next ordinary done can mint a ghost claim.
+          const stoppedClaim = markWakeTasksStopped(stopRequestedWakeIds, 'user_stop');
           // Stop is the authoritative cancellation boundary. An awaiting
           // continuation may already have lost every task from the running
           // table, so neither stopTask nor an idle interrupt is guaranteed to
           // produce another provider result. Close it explicitly after the
           // control action succeeds and append the ordered product terminal.
-          const cancelledContinuation = cancelActiveContinuation('user_stop');
+          const cancelledContinuation = stoppedClaim ?? cancelActiveContinuation('user_stop');
           if (cancelledContinuation) {
             // The successful Stop revokes these tasks' continuation contract.
             // Retire their tracking entries as well, so a late provider

@@ -349,8 +349,9 @@ export async function hashGhostContentFiles(
     );
     const noFollow = fs.constants.O_NOFOLLOW ?? null;
     const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
+    let handleStat: fs.BigIntStats;
     try {
-      const handleStat = await handle.stat({ bigint: true });
+      handleStat = await handle.stat({ bigint: true });
       if (!handleStat.isFile()) {
         throw new Error(`ghost content entry is not a regular file: ${relativePath}`);
       }
@@ -383,24 +384,24 @@ export async function hashGhostContentFiles(
       if (!sameStableFileState(handleStat, afterReadStat)) {
         throw new Error(`ghost content entry changed while reading: ${relativePath}`);
       }
-      const afterReadPathStat = await fs.promises.lstat(filePath, { bigint: true });
-      if (
-        afterReadPathStat.isSymbolicLink() ||
-        !afterReadPathStat.isFile() ||
-        !sameFileIdentity(afterReadPathStat, afterReadStat)
-      ) {
-        throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
-      }
-      if (!sameStableFileState(handleStat, afterReadPathStat)) {
-        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
-      }
-      assertGhostContentAncestorIdentities(
-        ancestorIdentities,
-        await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
-      );
     } finally {
       await handle.close();
     }
+    const afterReadPathStat = await fs.promises.lstat(filePath, { bigint: true });
+    if (
+      afterReadPathStat.isSymbolicLink() ||
+      !afterReadPathStat.isFile() ||
+      !sameFileIdentity(afterReadPathStat, handleStat)
+    ) {
+      throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
+    }
+    if (!sameStableFileState(handleStat, afterReadPathStat)) {
+      throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+    }
+    assertGhostContentAncestorIdentities(
+      ancestorIdentities,
+      await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),
+    );
     hash.update(fileHash.digest());
   }
   await assertGhostContentRootIdentity(rootDir, rootIdentity);

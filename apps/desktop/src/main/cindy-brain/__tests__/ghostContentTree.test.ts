@@ -53,6 +53,39 @@ async function tryLinkFile(target: string, linkPath: string): Promise<boolean> {
   }
 }
 
+async function mockStaleLeafStatUntilHandleClose(file: string): Promise<{
+  handleOpened: () => void;
+  handleClosed: () => void;
+  markMutated: () => void;
+  restore: () => void;
+}> {
+  const initialStat = await fs.promises.lstat(file, { bigint: true });
+  const realLstat = fs.promises.lstat;
+  let handleOpen = false;
+  let mutated = false;
+  const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation((async (
+    candidate: fs.PathLike,
+    options?: fs.StatOptions,
+  ) => {
+    if (handleOpen && mutated && path.resolve(String(candidate)) === path.resolve(file)) {
+      return initialStat;
+    }
+    return (realLstat as (...args: unknown[]) => Promise<fs.BigIntStats>)(candidate, options);
+  }) as typeof fs.promises.lstat);
+  return {
+    handleOpened: () => {
+      handleOpen = true;
+    },
+    handleClosed: () => {
+      handleOpen = false;
+    },
+    markMutated: () => {
+      mutated = true;
+    },
+    restore: () => lstatSpy.mockRestore(),
+  };
+}
+
 describe('classifyGhostDirEntry', () => {
   it('separates regular files, real directories and links', async () => {
     const file = path.join(workDir, 'a.txt');
@@ -291,12 +324,14 @@ describe('hashGhostContentFiles', () => {
     });
 
     const splitAt = 'old-prefix|'.length;
+    const stalePathStat = await mockStaleLeafStatUntilHandleClose(file);
     const realOpen = fs.promises.open;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      stalePathStat.handleOpened();
       let pinnedHandleStat: fs.BigIntStats | undefined;
       return new Proxy(handle, {
         get(target, key) {
@@ -315,11 +350,21 @@ describe('hashGhostContentFiles', () => {
               await fs.promises.writeFile(file, replacementBytes);
               const changedAt = new Date(Date.now() + 5_000);
               await fs.promises.utimes(file, changedAt, changedAt);
+              stalePathStat.markMutated();
 
               const rest = Buffer.alloc(replacementBytes.byteLength - splitAt);
               const restRead = await handle.read(rest, 0, rest.byteLength, splitAt);
               yield rest.subarray(0, restRead.bytesRead);
             })());
+          }
+          if (key === 'close') {
+            return async () => {
+              try {
+                await handle.close();
+              } finally {
+                stalePathStat.handleClosed();
+              }
+            };
           }
           const value = Reflect.get(target, key);
           return typeof value === 'function' ? value.bind(target) : value;
@@ -332,6 +377,7 @@ describe('hashGhostContentFiles', () => {
       ).rejects.toThrow(/entry changed while reading/);
     } finally {
       openSpy.mockRestore();
+      stalePathStat.restore();
     }
   });
 
@@ -348,12 +394,14 @@ describe('hashGhostContentFiles', () => {
       label: 'test',
     });
 
+    const stalePathStat = await mockStaleLeafStatUntilHandleClose(file);
     const realOpen = fs.promises.open;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      stalePathStat.handleOpened();
       let pinnedHandleStat: fs.BigIntStats | undefined;
       return new Proxy(handle, {
         get(target, key) {
@@ -369,8 +417,18 @@ describe('hashGhostContentFiles', () => {
               const read = await handle.read(bytes, 0, bytes.byteLength, 0);
               await fs.promises.rename(file, detachedFile);
               await fs.promises.writeFile(file, 'replacement bytes');
+              stalePathStat.markMutated();
               yield bytes.subarray(0, read.bytesRead);
             })());
+          }
+          if (key === 'close') {
+            return async () => {
+              try {
+                await handle.close();
+              } finally {
+                stalePathStat.handleClosed();
+              }
+            };
           }
           const value = Reflect.get(target, key);
           return typeof value === 'function' ? value.bind(target) : value;
@@ -383,6 +441,7 @@ describe('hashGhostContentFiles', () => {
       ).rejects.toThrow(/entry (?:changed|path changed) while reading/);
     } finally {
       openSpy.mockRestore();
+      stalePathStat.restore();
     }
   });
 

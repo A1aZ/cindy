@@ -1764,11 +1764,13 @@ describe('iOS Simulator host', () => {
       expect.objectContaining({ instanceId: instance.instanceId }),
     );
 
-    let releaseStaleViewport: ((value: { width: number; height: number }) => void) | null = null;
+    const staleViewportDeferred: {
+      resolve: ((value: { width: number; height: number }) => void) | null;
+    } = { resolve: null };
     getWindowSize.mockImplementationOnce(
       () =>
         new Promise((resolve) => {
-          releaseStaleViewport = resolve;
+          staleViewportDeferred.resolve = resolve;
         }),
     );
     const staleRemount = host.setViewerVisibility(
@@ -1780,7 +1782,7 @@ describe('iOS Simulator host', () => {
       88,
       'viewer-d-stale',
     );
-    await vi.waitFor(() => expect(releaseStaleViewport).not.toBeNull());
+    await vi.waitFor(() => expect(staleViewportDeferred.resolve).not.toBeNull());
     await expect(
       host.setViewerVisibility(
         'session-a',
@@ -1792,7 +1794,7 @@ describe('iOS Simulator host', () => {
         'viewer-e-current',
       ),
     ).resolves.toMatchObject({ ok: true });
-    releaseStaleViewport?.({ width: 393, height: 852 });
+    staleViewportDeferred.resolve?.({ width: 393, height: 852 });
     await expect(staleRemount).resolves.toMatchObject({
       ok: false,
       errorCode: 'INSTANCE_NOT_OWNED',

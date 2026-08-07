@@ -3660,13 +3660,23 @@ export class ClaudeCodeAgent extends BaseAgent {
             //    而吞掉终态,turn 永远收不了尾。
             //  - queuedBridgeTurns > 0:桥接 /compact 序列里 turnInFlight 本就被
             //    onTurnEnd 保持,不会走进本分支;计数守卫只是防御性一致。
+            // 子 Agent 的 sidechain assistant/stream_event 也会穿过同一 Query，且
+            // 常在它自己的 task_notification 之前到达。它只证明后台任务仍在跑，
+            // 不能证明顶层自动 continuation 已开始；否则会过早把 awaiting claim
+            // 转 active，随后同一任务的 completed 会被误当成“active 段期间完成的
+            // 下一任务”，让第二个顶层 result 再铸造一个永远等不到后续活动的 claim。
+            const rawParentToolUseId = (
+              rawMsg as { parent_tool_use_id?: unknown } | null
+            )?.parent_tool_use_id;
+            const isTopLevelProviderActivity =
+              typeof rawParentToolUseId !== 'string' || rawParentToolUseId.length === 0;
             if (
               !turnInFlight &&
               !turnState.interruptRequested &&
               queuedBridgeTurns === 0 &&
               (
-                rawType === 'assistant' ||
-                rawType === 'stream_event' ||
+                ((rawType === 'assistant' || rawType === 'stream_event') &&
+                  isTopLevelProviderActivity) ||
                 (activeContinuationClaim()?.state === 'awaiting' && rawType === 'result')
               )
             ) {

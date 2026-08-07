@@ -335,9 +335,10 @@ function interruptedTurnResult(): Record<string, unknown> {
   };
 }
 
-function assistantText(text: string): Record<string, unknown> {
+function assistantText(text: string, parentToolUseId?: string): Record<string, unknown> {
   return {
     type: 'assistant',
+    parent_tool_use_id: parentToolUseId ?? null,
     message: {
       role: 'assistant',
       content: [{ type: 'text', text }],
@@ -990,6 +991,66 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
 
     stream.end();
     await handle.close().catch(() => undefined);
+  });
+
+  it('子 Agent 的 sidechain assistant 不会提前激活父 continuation 并制造第二个 claim', async () => {
+    const { handle, stream } = await startSessionWithStream(
+      undefined,
+      { autoCollect: false },
+    );
+    const session = wrapInSession(handle);
+    const seen: AgentEvent[] = [];
+    session.onEvent((event) => seen.push(event));
+
+    await session.send('spawn one background agent', { turnAttemptToken: 201 });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(seen).length >= 1, 'background agent observed');
+    stream.emit(turnResult('background agent still running'));
+    await waitFor(
+      () => seen.some((event) => event.type === 'done' && event.turnContinuationId !== undefined),
+      'parent continuation boundary observed',
+    );
+    const firstClaimId = seen.find((event) => event.type === 'done')?.turnContinuationId;
+    expect(firstClaimId).toBeTypeOf('number');
+    expect(handle.beginTurnContinuationWait?.(firstClaimId)).toBe('awaiting');
+
+    // 真实 SDK 顺序:父 result 后，后台 Agent 自己的 Bash/tool activity 会以
+    // parent_tool_use_id 非空的 sidechain assistant 先进入同一 Query。它不是
+    // task_notification 触发的顶层 continuation，不能把 claim 提前转 active。
+    stream.emit({
+      type: 'stream_event',
+      parent_tool_use_id: 'toolu-background-agent',
+      event: {
+        type: 'message_start',
+        message: { model: 'claude-haiku-4-5', usage: { input_tokens: 0 } },
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handle.beginTurnContinuationWait?.(firstClaimId)).toBe('awaiting');
+
+    stream.emit(assistantText('subagent is invoking Bash', 'toolu-background-agent'));
+    await waitFor(
+      () => seen.some((event) => event.type === 'text'),
+      'sidechain assistant output observed',
+    );
+    expect(handle.beginTurnContinuationWait?.(firstClaimId)).toBe('awaiting');
+
+    stream.emit(taskNotification('task-agent', 'completed'));
+    await waitFor(() => taskEvents(seen).length >= 2, 'completion notification observed');
+    expect(handle.beginTurnContinuationWait?.(firstClaimId)).toBe('awaiting');
+
+    stream.emit(assistantText('E2E_TOP_DONE'));
+    stream.emit(turnResult('E2E_TOP_DONE'));
+    await waitFor(() => seen.filter(isProductTerminal).length === 1, 'product turn settled');
+
+    const doneEvents = seen.filter((event) => event.type === 'done');
+    expect(doneEvents).toHaveLength(2);
+    expect(doneEvents[1]?.turnContinuationId).toBeUndefined();
+    expect(handle.beginTurnContinuationWait?.(firstClaimId)).toBeNull();
+    expect(session.isTurnRunning()).toBe(false);
+
+    stream.end();
+    await session.close().catch(() => undefined);
   });
 
   it('合并 continuation 只把仍 running 的任务带入下一 claim', async () => {

@@ -47,6 +47,11 @@ export interface PluginRemovalUserNotice {
   name: string | null;
 }
 
+export interface PluginUpgradeUserNotice {
+  count: number;
+  name: string | null;
+}
+
 /** 详情携带安装前展示给用户的 manifest；官方来自 release，自定义来自本地发现。 */
 export interface PluginMarketDetail extends PluginMarketItem {
   manifest: GhostManifest;

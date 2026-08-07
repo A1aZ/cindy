@@ -5674,6 +5674,24 @@
       "turnTokens": "{{tokens}} tokens",
       "userTurnCostDetailsTitle": "Request details"
     },
+    "shareImage": {
+      "entry": "Share as Image",
+      "title": "Share Conversation",
+      "subtitle_one": "{{count}} message selected",
+      "subtitle_other": "{{count}} messages selected",
+      "selectAll": "Select All",
+      "clearAll": "Deselect All",
+      "checkboxLabel": "Select this message",
+      "cancel": "Cancel",
+      "download": "Save Image",
+      "copy": "Copy Image",
+      "generating": "Generating…",
+      "copied": "Image copied",
+      "saved": "Image saved",
+      "notMounted": "Some selected messages are not currently visible. Scroll back to show them, then try again",
+      "tooLarge": "The selection is too long or wide. Select less content and try again",
+      "failed": "Couldn't generate the image — try again"
+    },
     "errorBanner": {
       "retryTitle": "Resend the last message",
       "cancelTitle": "Dismiss error",

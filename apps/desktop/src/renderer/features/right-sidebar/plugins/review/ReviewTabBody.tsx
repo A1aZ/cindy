@@ -57,6 +57,8 @@ import type {
   ReviewStageOperationSummary,
 } from '@/lib/gitReview.types';
 import { formatSidebarTime } from '@/features/cc-agent/lib/formatSidebarTime';
+import { isDeviceTooOldError } from '@/lib/fileBrowserTransport';
+import { gitReviewApiFor, isReviewRemoteOversizeError } from '@/lib/gitReviewTransport';
 import { makerChatStore } from '@/lib/makerChatStore';
 import type { TurnChangeSetDetail } from '../../../../../shared/turnChangeSet';
 import { extractIpcError } from '@/utils/ipcError';
@@ -574,11 +576,15 @@ function TurnChangeSetReviewBody({ state, ctx, setSource, setSelectedCommitOid }
 function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, setSelectedCommitOid }: GitReviewBodyProps) {
   const { t } = useTranslation();
   const { confirm } = useConfirmDialog();
+  // device-link 远程会话:session 行在被控设备的 DB 里,只读查询经 gitReviewTransport
+  // 隧道到被控端执行(被控端以它自己的 session 记录解析 workdir);写操作与本机
+  // 文件打开在控制端禁用(readOnly 经 writeDisabledReasons 的 remote-device 档)。
+  const deviceLinkDeviceId = ctx.deviceLinkDeviceId ?? null;
   const sessionId = ctx.sessionId || null;
   const hideWhitespace = state.hideWhitespace ?? false;
   const branchBaseRef = state.branchBaseRef ?? null;
-  const { data, loading, error, refresh, setData: setReviewData } = useReviewGitState(sessionId, hideWhitespace);
-  const commitsState = useReviewCommits(sessionId, branchBaseRef);
+  const { data, loading, error, refresh, setData: setReviewData } = useReviewGitState(sessionId, hideWhitespace, deviceLinkDeviceId);
+  const commitsState = useReviewCommits(sessionId, branchBaseRef, deviceLinkDeviceId);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
   const [operationSummary, setOperationSummary] = useState<ReviewStageOperationSummary | null>(null);
@@ -612,8 +618,8 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
   const staged = useMemo(() => filterWhitespaceHiddenDiffs(rawStaged, hideWhitespace), [hideWhitespace, rawStaged]);
   const commits = commitsState.data?.commits ?? [];
   const effectiveCommitOid = source === 'commit' ? selectedCommitOid : null;
-  const commitDiffState = useReviewCommitDiff(sessionId, effectiveCommitOid, hideWhitespace);
-  const branchDiffState = useReviewBranchDiff(sessionId, branchBaseRef, hideWhitespace, source === 'branch');
+  const commitDiffState = useReviewCommitDiff(sessionId, effectiveCommitOid, hideWhitespace, deviceLinkDeviceId);
+  const branchDiffState = useReviewBranchDiff(sessionId, branchBaseRef, hideWhitespace, source === 'branch', deviceLinkDeviceId);
   const currentBranchDiffData = getCurrentBranchDiffData(branchDiffState.data, branchBaseRef);
   const availableLastTurnDiffs = useMemo(
     () => rawUnstaged.concat(rawStaged).filter((diff) => lastTurnPaths.has(diff.path)),
@@ -638,7 +644,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
       ignoreWhitespace: hideWhitespace,
     }));
   }, [hideWhitespace, lastTurnCapped, lastTurnCappedEntries, source]);
-  const lastTurnHydratedDiffState = useReviewFileDiffs(sessionId, lastTurnHydrationRequests);
+  const lastTurnHydratedDiffState = useReviewFileDiffs(sessionId, lastTurnHydrationRequests, deviceLinkDeviceId);
   const hydratedLastTurnDiffs = useMemo(
     () => lastTurnHydratedDiffState.data?.map((item) => item.diff).filter((diff): diff is FileDiff => diff !== null) ?? [],
     [lastTurnHydratedDiffState.data],
@@ -701,7 +707,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
     branchBaseRef: selectedCappedSummaryDiff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
     ignoreWhitespace: hideWhitespace,
   } : null;
-  const cappedFileDiffState = useReviewFileDiff(sessionId, cappedFileDiffRequest, reviewWriteVersion);
+  const cappedFileDiffState = useReviewFileDiff(sessionId, cappedFileDiffRequest, reviewWriteVersion, deviceLinkDeviceId);
   const cappedFileDiffData = cappedFileDiffState.data;
   const maybeCappedLoadedDiff = cappedFileDiffData?.diff ?? null;
   const cappedLoadedDiff = maybeCappedLoadedDiff?.id === selectedCappedSummaryDiff?.id
@@ -722,22 +728,22 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
   );
   const loadImagePreview = useCallback<LoadImagePreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));
-    return window.electronAPI.gitReview.imagePreview({
+    return gitReviewApiFor(deviceLinkDeviceId).imagePreview({
       sessionId,
       diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
     });
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, effectiveCommitOid, sessionId]);
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId]);
   const loadMarkdownPreview = useCallback<LoadMarkdownPreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));
-    return window.electronAPI.gitReview.markdownPreview({
+    return gitReviewApiFor(deviceLinkDeviceId).markdownPreview({
       sessionId,
       diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
     });
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, effectiveCommitOid, sessionId]);
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId]);
   const openReviewFile = useCallback((diff: FileDiff) => {
     if (!sessionId) return;
     void window.electronAPI.gitReview.openFile({ sessionId, path: diff.path })
@@ -746,12 +752,21 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
         toast.error(t('rightSidebar.review.openFileFailed', { error: message }));
       });
   }, [sessionId, t]);
+  // device-link 远程会话没有本机文件可打开:传 undefined 让「打开文件」入口整体不渲染。
+  const openFileHandler = deviceLinkDeviceId ? undefined : openReviewFile;
+  // 次级视图(提交 / 分支 / 单文件)错误串的 OVERSIZE 标记 → 可读文案;其余原样。
+  const localizeReviewError = useCallback(<T extends string | null>(message: T): T | string => {
+    if (message && isReviewRemoteOversizeError(message)) return t('rightSidebar.review.remote.oversizeDesc');
+    return message;
+  }, [t]);
   const writeDisabledReasons = data?.status?.writeDisabledReasons ?? [];
   const effectiveWriteDisabledReasons = useMemo(() => {
     const reasons = [...writeDisabledReasons];
+    // device-link 首期只读:被控端 handler 也不实现写 op,这里是同一契约的 UI 面。
+    if (deviceLinkDeviceId) reasons.push('remote-device');
     if (agentRunning) reasons.push('agent-running');
     return reasons;
-  }, [agentRunning, writeDisabledReasons]);
+  }, [agentRunning, deviceLinkDeviceId, writeDisabledReasons]);
   const canWrite = Boolean(data?.status && effectiveWriteDisabledReasons.length === 0 && !pendingKey);
   const commitOrPushPending = pendingKey === 'commit' || pendingKey === 'commit-push' || pendingKey === 'push';
   const pushPending = pendingKey === 'push' || pendingKey === 'commit-push';
@@ -1095,6 +1110,28 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
   }
 
   if (error && !data) {
+    // device-link 远程会话的两类确定性失败给专属占位:老被控端无 remote-op
+    // channel(升级即解决,刷新无用),以及响应超设备互联帧预算。
+    if (deviceLinkDeviceId && isDeviceTooOldError(error)) {
+      return (
+        <CenteredState
+          icon={<AlertTriangle size={24} />}
+          title={t('rightSidebar.review.remote.deviceTooOldTitle')}
+          desc={t('rightSidebar.review.remote.deviceTooOldDesc')}
+        />
+      );
+    }
+    if (deviceLinkDeviceId && isReviewRemoteOversizeError(error)) {
+      return (
+        <CenteredState
+          icon={<AlertTriangle size={24} />}
+          title={t('rightSidebar.review.remote.oversizeTitle')}
+          desc={t('rightSidebar.review.remote.oversizeDesc')}
+          actionLabel={t('rightSidebar.review.refresh')}
+          onAction={refresh}
+        />
+      );
+    }
     return <CenteredState icon={<AlertTriangle size={24} />} title={t('rightSidebar.review.errorTitle')} desc={error} actionLabel={t('rightSidebar.review.refresh')} onAction={refresh} />;
   }
 
@@ -1278,7 +1315,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           selectedSummaryDiff={selectedCappedSummaryDiff}
           loadedDiff={cappedLoadedDiff}
           loading={cappedFileDiffState.loading && !cappedLoadedDiff}
-          error={cappedFileDiffState.error}
+          error={localizeReviewError(cappedFileDiffState.error)}
           onSelectFile={selectCappedFile}
           onRefresh={refreshAll}
           refreshPending={reviewRefreshPending}
@@ -1303,7 +1340,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           loadImagePreview={loadImagePreview}
           loadMarkdownPreview={loadMarkdownPreview}
           richMarkdownPreview={richMarkdownPreview}
-          onOpenFile={openReviewFile}
+          onOpenFile={openFileHandler}
           writeAction={source === 'unstaged' ? {
             canWrite,
             pendingKey,
@@ -1335,7 +1372,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           diffs={commitDiffs}
           rawDiffCount={rawCommitDiffs.length}
           diffLoading={commitDiffState.loading && !selectedCommitDiff}
-          diffError={commitDiffState.error}
+          diffError={localizeReviewError(commitDiffState.error)}
           onRefreshDiff={commitDiffState.refresh}
           onRefresh={refreshAll}
           refreshPending={reviewRefreshPending}
@@ -1351,7 +1388,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           loadImagePreview={loadImagePreview}
           loadMarkdownPreview={loadMarkdownPreview}
           richMarkdownPreview={richMarkdownPreview}
-          onOpenFile={openReviewFile}
+          onOpenFile={openFileHandler}
         />
       ) : source === 'branch' ? (
         <BranchSourceView
@@ -1361,7 +1398,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           diffs={branchDiffs}
           rawDiffCount={rawBranchDiffs.length}
           diffLoading={branchDiffState.loading && !currentBranchDiffData}
-          diffError={branchDiffState.error}
+          diffError={localizeReviewError(branchDiffState.error)}
           onSelectBase={setBranchBaseRef}
           onRefreshDiff={branchDiffState.refresh}
           onRefresh={refreshAll}
@@ -1378,7 +1415,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           loadImagePreview={loadImagePreview}
           loadMarkdownPreview={loadMarkdownPreview}
           richMarkdownPreview={richMarkdownPreview}
-          onOpenFile={openReviewFile}
+          onOpenFile={openFileHandler}
         />
       ) : source === 'staged' ? (
         <StagedSourceView
@@ -1404,7 +1441,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           loadImagePreview={loadImagePreview}
           loadMarkdownPreview={loadMarkdownPreview}
           richMarkdownPreview={richMarkdownPreview}
-          onOpenFile={openReviewFile}
+          onOpenFile={openFileHandler}
           hunkActionsEnabled={canUsePatchBasedReviewActions(hideWhitespace)}
         />
       ) : source === 'last-turn' && lastTurnHydrating ? (
@@ -1417,7 +1454,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
         <CenteredState
           icon={<AlertTriangle size={24} />}
           title={t('rightSidebar.review.errorTitle')}
-          desc={lastTurnHydrationError}
+          desc={localizeReviewError(lastTurnHydrationError)}
           actionLabel={t('rightSidebar.review.refresh')}
           onAction={refreshAll}
         />
@@ -1450,7 +1487,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
           loadImagePreview={loadImagePreview}
           loadMarkdownPreview={loadMarkdownPreview}
           richMarkdownPreview={richMarkdownPreview}
-          onOpenFile={openReviewFile}
+          onOpenFile={openFileHandler}
           writeAction={source === 'last-turn' ? undefined : {
             canWrite,
             pendingKey,
@@ -2571,7 +2608,7 @@ function DiffList({
   loadImagePreview: LoadImagePreview;
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
   writeAction?: WriteActionProps;
 }) {
   const parentRef = useRef<HTMLDivElement | null>(null);
@@ -3312,7 +3349,7 @@ export function CappedSourceView({
   loadImagePreview: LoadImagePreview;
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
   writeAction?: WriteActionProps;
 }) {
   const { t } = useTranslation();
@@ -3490,7 +3527,7 @@ function CommitSourceView({
   loadImagePreview: LoadImagePreview;
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
 }) {
   const { t } = useTranslation();
 
@@ -3581,7 +3618,7 @@ function BranchSourceView({
   loadImagePreview: LoadImagePreview;
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
 }) {
   const { t } = useTranslation();
   const blockingWarning = warning && warning.code !== 'base-missing' ? warning : null;
@@ -3840,7 +3877,7 @@ function StagedSourceView({
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
   hunkActionsEnabled: boolean;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
 }) {
   const { t } = useTranslation();
   const filteredEmpty = diffs.length === 0 && stagedCount > 0;
@@ -3911,7 +3948,7 @@ function FileRow({
   loadMarkdownPreview: LoadMarkdownPreview;
   richMarkdownPreview: boolean;
   onImagePreviewLoad: () => void;
-  onOpenFile: (diff: FileDiff) => void;
+  onOpenFile?: (diff: FileDiff) => void;
 }) {
   const { t } = useTranslation();
   const fileName = basename(diff.path);

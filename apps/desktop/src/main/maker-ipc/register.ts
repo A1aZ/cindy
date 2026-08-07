@@ -214,6 +214,10 @@ import {
   updateWorkerStatus,
 } from '../localDb/orcaTeamStore.js';
 import { messages, orcaTeams, orcaWorkers, sessions } from '../localDb/schema.js';
+import {
+  isOrcaWorkerPermissionMode,
+  type OrcaWorkerPermissionMode,
+} from '../../shared/orca-worker-permission-mode.js';
 import { t } from '../i18n.js';
 import { createLogger } from '../logger.js';
 import {
@@ -270,10 +274,12 @@ import type { GitSnapshotCoordinator } from '../git-snapshot/gitSnapshotCoordina
 import {
   getRemoteNewMakerDefaults,
   getWorkerDefaultsFromNewMaker,
+  getWorkerPermissionModeFromCreationPrefs,
   type NewMakerDraftSnapshot,
   type ProviderModelMemorySnapshot,
   setNewMakerDraftCache,
   setProviderModelMemoryCache,
+  setWorkerCreationPrefsCache,
 } from '../maker-host/newMakerDefaultsCache.js';
 import {
   applyNewMakerWorktreeBranchPreference,
@@ -468,11 +474,14 @@ import {
   type OrcaInterAgentDispatcher,
   type OrcaInterAgentMessageSource,
 } from './orcaInterAgentDispatcher.js';
+import { OrcaWorkerPermissionConfirmBridge } from './orcaWorkerPermissionConfirmBridge.js';
 import {
   getOrcaWorkspaceInfoReadOnly,
   getOrcaWorkerDiagnosticStatusReadOnly,
   readOrcaWorkerOutputReadOnly,
 } from './orcaDiagnostics.js';
+import { startOrcaTeamWithPermissionGate } from './orcaStartTeamPermissionGate.js';
+import { createWorkerCreationPrefsSyncHandler } from './workerCreationPrefsSyncHandler.js';
 import { createMakerSendTransaction } from './makerSendTransaction.js';
 import {
   installDesktopInteractionHandler,
@@ -1325,13 +1334,23 @@ interface OrcaCollabService {
     workerSessionId: string;
     workerId: string;
     dispatched: boolean;
+    workerPermissionMode: OrcaWorkerPermissionMode;
     dispatchOutcome?: CollabDispatchOutcome;
   }>;
   disableOrca: (leadSessionId: string) => Promise<{ ok: true }>;
   /** start_team 只建立 team，不隐式创建 worker。 */
   startTeam: (params: {
     leadSessionId: string;
-  }) => Promise<{ ok: true; teamId: string } | { ok: false; errorCode: string; message: string }>;
+    workerPermissionMode?: OrcaWorkerPermissionMode;
+  }) => Promise<
+    | {
+        ok: true;
+        teamId: string;
+        workerPermissionMode: OrcaWorkerPermissionMode;
+        reused?: boolean;
+      }
+    | { ok: false; errorCode: string; message: string }
+  >;
   createWorker: (params: {
     leadSessionId: string;
     role: string;
@@ -1339,6 +1358,7 @@ interface OrcaCollabService {
     model?: string;
     effort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
     fast?: boolean;
+    workerPermissionMode?: OrcaWorkerPermissionMode;
     label: string;
     initialTask?: string;
   }) => Promise<
@@ -1514,6 +1534,8 @@ interface EnableOrcaOptions {
   fast?: boolean;
   /** 显式选定的模型来源;语义见 OrcaWorkerCreateParams.providerId。 */
   providerId?: string | null;
+  /** Worker 创建默认权限；缺省沿用当前偏好，显式值会更新偏好。 */
+  workerPermissionMode?: OrcaWorkerPermissionMode;
 }
 
 let orcaCollabServiceHolder: OrcaCollabService | null = null;
@@ -1730,6 +1752,11 @@ const renameSessionsConfirmBridge = new RenameSessionsConfirmBridge({
     desktopConfirmImNotifier(sessionId, '「批量重命名任务」的确认卡'),
 });
 
+const orcaWorkerPermissionConfirmBridge = new OrcaWorkerPermissionConfirmBridge({
+  broadcast: (channel, payload) => broadcastToAllWindows(channel, payload),
+  logger: log,
+});
+
 /**
  * ghost_call 过户 workdir 外文件的确认桥(kind='ghost_grant_confirm')。
  * 单例挂在 cindy-brain 模块里(ghost.ts 经 getGhostGrantConfirmBridge 消费),
@@ -1878,6 +1905,9 @@ function getPendingInteractionsForSession(sessionId: string): PendingInteraction
   out.push(
     ...issueConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
     ...renameSessionsConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
+    ...orcaWorkerPermissionConfirmBridge
+      .pendingSnapshots(sessionId)
+      .map(({ request }) => ({ request })),
     ...ghostGrantConfirmBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
     ...ghostSetupInteractionBridge.pendingSnapshots(sessionId).map(({ request }) => ({ request })),
   );
@@ -2047,6 +2077,10 @@ function cleanupPendingInteractionsForSession(sessionId: string, reason: string)
     reason === 'session_closed' ? 'session_closed' : 'session_aborted',
   );
   renameSessionsConfirmBridge.cleanupForSession(
+    sessionId,
+    reason === 'session_closed' ? 'session_closed' : 'session_aborted',
+  );
+  orcaWorkerPermissionConfirmBridge.cleanupForSession(
     sessionId,
     reason === 'session_closed' ? 'session_closed' : 'session_aborted',
   );
@@ -4713,6 +4747,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     broadcastNewMakerDraftChanged();
   });
 
+  // Worker 创建偏好与模型默认值同样以 renderer localStorage 为真源。main 只保留
+  // 权限模式镜像，供 Orca UI / MCP 创建路径读取。
+  ipcMain.on(
+    MAKER_SEND.SYNC_WORKER_CREATION_PREFS,
+    createWorkerCreationPrefsSyncHandler({
+      assertTrustedSender: (event) =>
+        assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+      setWorkerPermissionMode: (workerPermissionMode) =>
+        setWorkerCreationPrefsCache({ workerPermissionMode }),
+    }),
+  );
+
+  const applyWorkerPermissionModePreference = (
+    workerPermissionMode: OrcaWorkerPermissionMode,
+  ): void => {
+    setWorkerCreationPrefsCache({ workerPermissionMode });
+    broadcastToAllWindows(MAKER_PUSH.WORKER_CREATION_PREFS_APPLY, {
+      workerPermissionMode,
+    });
+  };
+
   // device-link:被控端 providerModelMemory(草稿列表行的真实读源)全量镜像给 main。旧的
   // newMakerDraft.effortByModel 已不再写非选中模型,故必须把这一层也同步出去,控制端才能完整镜像
   // 被控端草稿模型列表。镜像更新后同样广播 NEW_MAKER_DRAFT_CHANGED(payload 含 providerModelMemory)。
@@ -4844,6 +4899,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // v2 因果能力：同引擎 no-op 返回 revision，后续 SET_MODEL 在 session 锁内 CAS。
       // 新 desktop 控制端据此与只有基础切换能力的旧 host 做安全兼容门控。
       supportsSessionAgentSwitchCas: true,
+      // 新控制端只有看到此位才允许给被控端 Orca Team 选择 Worker Full access。
+      // 旧 desktop 缺省为 false，避免显式 bypassPermissions 被旧 handler 静默忽略。
+      supportsOrcaWorkerPermissionMode: true,
       // 调度更新支持 intervalMs:null 的显式清空表达(IPC 入口归一化成引擎的
       // 「带 key 的 undefined」)。旧 desktop 缺省为 false——旧引擎会把 null 当
       // 已设间隔算出 now+null 立即触发,mobile 必须据此回退旧 wire 形态(省略
@@ -6427,6 +6485,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     workerSessionId: string;
     workerId: string;
     dispatched: boolean;
+    workerPermissionMode: OrcaWorkerPermissionMode;
     dispatchOutcome?: CollabDispatchOutcome;
   }> {
     await assertLeadCollabProjectEnabled(leadSessionId);
@@ -6440,6 +6499,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       fast: opts.fast,
       providerId: opts.providerId,
       delegateTask: opts.delegateTask,
+      workerPermissionMode: opts.workerPermissionMode,
     });
     if (!result.ok) throwOrcaServiceFailure(result);
     log.info('enableOrca done', {
@@ -6455,6 +6515,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       workerSessionId: result.workerSessionId,
       workerId: result.workerId,
       dispatched: result.dispatched,
+      workerPermissionMode: result.workerPermissionMode,
       ...(result.dispatchOutcome ? { dispatchOutcome: result.dispatchOutcome } : {}),
     };
   }
@@ -7535,10 +7596,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         effort?: unknown;
         fast?: unknown;
         providerId?: unknown;
+        workerPermissionMode?: unknown;
       };
       const workerAgent: AgentKind =
         body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
       const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
+      if (
+        body.workerPermissionMode !== undefined
+        && !isOrcaWorkerPermissionMode(body.workerPermissionMode)
+      ) {
+        throwIpcError(
+          'INVALID_PARAMS',
+          'workerPermissionMode must be auto or bypassPermissions',
+        );
+      }
       return enableOrcaInternal(leadSessionId, {
         workerAgent,
         delegateTask,
@@ -7552,6 +7623,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           typeof body.providerId === 'string' && body.providerId.trim().length > 0
             ? body.providerId.trim()
             : undefined,
+        workerPermissionMode: body.workerPermissionMode,
       });
     },
   );
@@ -7701,6 +7773,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           ? ('pi' as const)
           : ('claude-code' as const);
     const model = typeof b.model === 'string' && b.model.length > 0 ? b.model : undefined;
+    if (
+      b.workerPermissionMode !== undefined
+      && !isOrcaWorkerPermissionMode(b.workerPermissionMode)
+    ) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'workerPermissionMode must be auto or bypassPermissions',
+      );
+    }
     await assertLeadCollabProjectEnabled(b.leadSessionId);
     const result = await orcaLifecycleService.createWorker({
       leadSessionId: b.leadSessionId,
@@ -7714,6 +7795,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         typeof b.providerId === 'string' && b.providerId.trim().length > 0
           ? b.providerId.trim()
           : undefined,
+      workerPermissionMode: b.workerPermissionMode,
       label: label.value,
       initialTask:
         typeof b.initialTask === 'string' && b.initialTask.length > 0 ? b.initialTask : undefined,
@@ -7952,6 +8034,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       };
     },
     getWorkerDefaults: getWorkerDefaultsFromNewMaker,
+    getWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
     getAvailableModels: (agent) => maker.getCapabilities(agent).availableModels,
     getProviderRoutingContext: async () => {
       const catalog = getDesktopSelectableCatalog();
@@ -8059,6 +8142,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const orcaLifecycleService = createOrcaLifecycleService({
     getActiveTeamByLead,
     createActiveTeam: async (leadSessionId) => createActiveTeam({ leadSessionId }),
+    getWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
+    setWorkerPermissionMode: applyWorkerPermissionModePreference,
     createWorkerInTeam: (params) => orcaWorkerCreationService.createWorkerInTeam(params),
     dispatchWorkerTask: (params) => orcaTeamService.dispatchWorkerTask(params),
     markTeamEnded,
@@ -8241,10 +8326,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     listWorkerQueuedMessages: (params) => orcaTeamService.listWorkerQueuedMessages(params),
     updateWorkerQueuedMessage: (params) => orcaTeamService.updateWorkerQueuedMessage(params),
     cancelWorkerQueuedMessage: (params) => orcaTeamService.cancelWorkerQueuedMessage(params),
-    startTeam: async ({ leadSessionId }) => {
+    startTeam: async ({ leadSessionId, workerPermissionMode }) => {
       try {
         await assertLeadCollabProjectEnabled(leadSessionId);
-        return await orcaLifecycleService.startTeam({ leadSessionId });
+        return await startOrcaTeamWithPermissionGate(
+          { leadSessionId, workerPermissionMode },
+          {
+            getCurrentWorkerPermissionMode: getWorkerPermissionModeFromCreationPrefs,
+            requestFullAccessConfirmation: (sessionId) =>
+              orcaWorkerPermissionConfirmBridge.request(sessionId, {
+                title: t('newChat.chatInput.fullAccessConfirmation.title'),
+                description: `${t('newChat.chatInput.fullAccessConfirmation.description')} ${t('newChat.chatInput.fullAccessConfirmation.note')}`,
+              }),
+            startTeam: (params) => orcaLifecycleService.startTeam(params),
+          },
+        );
       } catch (err) {
         return {
           ok: false,
@@ -11089,6 +11185,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         // 三边都 miss 才告警。
         if (issueConfirmBridge.resolve(requestId, decision)) return;
         if (renameSessionsConfirmBridge.resolve(requestId, decision)) return;
+        if (
+          orcaWorkerPermissionConfirmBridge.resolveFromIpc(requestId, decision, {
+            isDeviceLink: isDeviceLinkInvoke(),
+            assertTrustedSender: () => assertTrustedAppRendererEvent(event),
+          })
+        ) {
+          return;
+        }
         if (ghostGrantConfirmBridge.resolve(requestId, decision)) return;
         if (ghostSetupInteractionBridge.resolve(requestId, decision, pluginSetupResponseTarget)) {
           return;

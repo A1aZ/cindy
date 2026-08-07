@@ -218,6 +218,7 @@ import { useNavigationKeyListener } from './useNavigationKeyListener';
 import { suppressScrollbarActivation } from '@/lib/scrollbarAutoHide';
 import { collectAssistantTurnUsageDetails } from '@/lib/userTurnUsage';
 import type { TurnUsageDetails } from '../../../shared/turnUsageDetails';
+import { hasReviewableTurnChanges } from '../../../shared/turnChangeSet';
 import type { TurnChangeSetSummary } from '../../../shared/turnChangeSet';
 
 interface MessageStreamProps {
@@ -1083,6 +1084,9 @@ export function buildRenderItems(
       }
     }
     for (const changeSet of changeSets) {
+      // Zero-file entries without change evidence (e.g. only opaque tools ran)
+      // would render a card whose review pane is empty — skip the dead end.
+      if (!hasReviewableTurnChanges(changeSet)) continue;
       items.push({
         type: 'turn_changes',
         key: `turnchanges-${changeSet.id}`,

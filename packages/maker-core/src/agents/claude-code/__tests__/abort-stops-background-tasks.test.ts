@@ -1572,6 +1572,58 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('只退休 stopTask 成功的 wake 任务，失败任务保留并正常记账', async () => {
+    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn parallel background work' });
+    stream.emit(taskStarted('task-success', 'local_agent'));
+    stream.emit(taskStarted('task-failed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 2, 'parallel wake tasks observed');
+
+    const successfulStop = createDeferred<void>();
+    const failedStop = createDeferred<void>();
+    fakeQuery.stopTask!.mockImplementation((taskId: string) =>
+      taskId === 'task-success' ? successfulStop.promise : failedStop.promise,
+    );
+    const abortPromise = handle.abort();
+    await waitFor(() => fakeQuery.stopTask!.mock.calls.length === 2, 'both stopTask RPCs dispatched');
+    expect(handle.listBackgroundTasks?.().map((task) => task.taskId).sort()).toEqual([
+      'task-failed',
+      'task-success',
+    ]);
+
+    successfulStop.resolve(undefined);
+    failedStop.reject(new Error('task still running remotely'));
+    await abortPromise;
+
+    // Only the fulfilled stopTask is retired. The rejected task remains visible
+    // until its provider completion arrives, so it cannot continue untracked.
+    expect(handle.listBackgroundTasks?.().map((task) => task.taskId)).toEqual(['task-failed']);
+
+    stream.emit(interruptedTurnResult());
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'stopped foreground terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'stopped foreground turn settled');
+
+    stream.emit(taskNotification('task-failed', 'completed'));
+    await waitFor(
+      () => taskEvents(events).some((event) =>
+        (event.data as { taskId?: unknown; status?: unknown } | null | undefined)?.taskId === 'task-failed' &&
+        (event.data as { status?: unknown } | null | undefined)?.status === 'completed',
+      ),
+      'failed stop task completion observed',
+    );
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    await handle.send({ type: 'user', content: 'ordinary next turn' });
+    stream.emit(turnResult('ordinary turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'ordinary terminal observed');
+    expect(events.filter((event) => event.type === 'done').at(-1)?.turnContinuationId).toBeUndefined();
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('stopTask 成功但 interrupt 失败时不伪造 continuation 收口', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

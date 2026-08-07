@@ -34,10 +34,17 @@ const sdkMock = vi.hoisted(() => ({
 const asyncQueueMock = vi.hoisted(() => ({
   rejectNextDone: false,
 }));
+const imageResizerMock = vi.hoisted(() => ({
+  process: vi.fn(async (p: string) => p),
+}));
 
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   forkSession: sdkMock.forkSession,
   query: sdkMock.query,
+}));
+
+vi.mock('../../shared/image-resizer.js', () => ({
+  getDefaultImageResizer: () => imageResizerMock,
 }));
 
 vi.mock('../../shared/async-queue.js', async (importOriginal) => {
@@ -75,6 +82,7 @@ import { Session } from '../../../session.js';
 
 const tempDirs: string[] = [];
 const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+const originalIdleTimeout = process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS;
 
 const TEST_MODELS: ModelDescriptor[] = [
   {
@@ -456,6 +464,11 @@ afterEach(async () => {
     delete process.env.CLAUDE_CONFIG_DIR;
   } else {
     process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
+  }
+  if (originalIdleTimeout === undefined) {
+    delete process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS;
+  } else {
+    process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS = originalIdleTimeout;
   }
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
@@ -2449,6 +2462,123 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     streams[2]?.emit(turnResult('retry user complete'));
     await waitFor(() => events.filter(isProductTerminal).length === 3, 'retry terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'retry settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('watchdog bridge waits for the retired Query close before retry rebuild', async () => {
+    process.env.XDT_CC_SSE_IDLE_TIMEOUT_MS = '50';
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit({
+      type: 'stream_event',
+      event: { type: 'message_delta', usage: { input_tokens: 400_000, output_tokens: 0 } },
+    });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await handle.setModel?.('claude-sonnet-5');
+    await handle.send({ type: 'user', content: 'must be cancelled by watchdog' });
+    expect(fakeQueries).toHaveLength(2);
+    const bridgePrompt = (sdkMock.query.mock.calls[1]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
+    expect(bridgePrompt).toBeDefined();
+    const bridgePromptIter = bridgePrompt![Symbol.asyncIterator]();
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('must be cancelled by watchdog');
+
+    const closeDeferred = createDeferred<void>();
+    fakeQueries[1]?.close.mockImplementationOnce(() => closeDeferred.promise);
+    await waitFor(
+      () => events.some(
+        (event) => event.type === 'error' &&
+          (event.data as { reason?: unknown } | null | undefined)?.reason ===
+            'upstream_response_idle_timeout',
+      ),
+      'watchdog timeout observed',
+    );
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+
+    const retryPromise = handle.send({ type: 'user', content: 'retry after watchdog close' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fakeQueries).toHaveLength(2);
+
+    closeDeferred.resolve(undefined);
+    await retryPromise;
+    expect(fakeQueries).toHaveLength(3);
+
+    streams[2]?.emit(turnResult('retry compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    streams[2]?.emit(turnResult('retry user complete'));
+    await waitFor(() => handle.isTurnRunning?.() === false, 'watchdog retry settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('abandoned bridge send waits for the retired Query close before retry rebuild', async () => {
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit({
+      type: 'stream_event',
+      event: { type: 'message_delta', usage: { input_tokens: 400_000, output_tokens: 0 } },
+    });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await handle.setModel?.('claude-sonnet-5');
+    let resolveResize!: (value: string) => void;
+    imageResizerMock.process.mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveResize = resolve; }),
+    );
+    const controller = new AbortController();
+    const sendPromise = handle.send(
+      { type: 'user', content: [{ type: 'image', path: path.join(os.tmpdir(), 'abandoned-send.png') }] },
+      { signal: controller.signal },
+    );
+    await waitFor(() => fakeQueries.length === 2, 'cancellation bridge query created');
+    const bridgePrompt = (sdkMock.query.mock.calls[1]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
+    expect(bridgePrompt).toBeDefined();
+    const bridgePromptIter = bridgePrompt![Symbol.asyncIterator]();
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('/compact');
+
+    const closeDeferred = createDeferred<void>();
+    fakeQueries[1]?.close.mockImplementationOnce(() => closeDeferred.promise);
+    controller.abort();
+    resolveResize(path.join(os.tmpdir(), 'abandoned-send.png'));
+    await expect(sendPromise).rejects.toThrow('Claude send cancelled before acceptance');
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+
+    const retryPromise = handle.send({ type: 'user', content: 'retry after abandoned send close' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fakeQueries).toHaveLength(2);
+
+    closeDeferred.resolve(undefined);
+    await retryPromise;
+    expect(fakeQueries).toHaveLength(3);
+
+    streams[2]?.emit(turnResult('retry compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    streams[2]?.emit(turnResult('retry user complete'));
+    await waitFor(() => handle.isTurnRunning?.() === false, 'abandoned send retry settled');
 
     stream.end();
     await handle.close().catch(() => undefined);

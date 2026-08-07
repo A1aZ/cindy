@@ -2127,11 +2127,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           log.warn('upstream-idle watchdog during bridge: inputQueue.end threw', { error: String(e) });
         }
         canceledBridgeQueries.add(q);
-        try {
-          q.close();
-        } catch (e) {
-          log.warn('upstream-idle watchdog during bridge: q.close threw', { error: String(e) });
-        }
+        recordCanceledQueryClose(q, 'upstream idle watchdog during bridge');
         turnInFlight = false;
         turnState.interruptRequested = false;
         pendingToolIds.clear();
@@ -4589,11 +4585,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               log.warn('send failed after bridge /compact injection: inputQueue.end threw', { error: String(endError) });
             }
             canceledBridgeQueries.add(q);
-            try {
-              q.close();
-            } catch (closeError) {
-              log.warn('send failed after bridge /compact injection: q.close threw', { error: String(closeError) });
-            }
+            recordCanceledQueryClose(q, 'bridge send abandoned');
             turnInFlight = false;
             turnState.interruptRequested = false;
             pendingToolIds.clear();

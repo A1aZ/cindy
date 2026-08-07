@@ -228,6 +228,7 @@ describe('update_plan tool_use persistence', () => {
           ],
         },
         terminalPlanSnapshot: true,
+        terminalPlanAtMs: expect.any(Number),
       },
     );
     expect(broadcastMessageRow).toHaveBeenCalledWith(
@@ -264,6 +265,7 @@ describe('update_plan tool_use persistence', () => {
       toolName: 'update_plan',
       input: { plan: openPlan },
       terminalPlanSnapshot: true,
+      terminalPlanAtMs: expect.any(Number),
     });
   });
 
@@ -292,6 +294,7 @@ describe('update_plan tool_use persistence', () => {
         toolName: 'update_plan',
         input: { plan: [{ step: 'Ship', status: 'completed' }] },
         terminalPlanSnapshot: true,
+        terminalPlanAtMs: expect.any(Number),
       },
     );
     expect(broadcastMessageRow).toHaveBeenCalledWith(

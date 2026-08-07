@@ -1053,7 +1053,7 @@ describe('remoteSessionStore', () => {
     });
   });
 
-  it('keeps synthetic completion when done precedes the initial plan DB row', () => {
+  it('keeps the honest live snapshot when done precedes the initial plan DB row', () => {
     remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
       sessionId: 's1',
       persistId: 'plan-row-1',
@@ -1105,17 +1105,19 @@ describe('remoteSessionStore', () => {
       },
     });
 
+    // 成功收尾封的是生命周期,不改步骤事实:agent 报告什么就显示什么,
+    // 晚到的 DB 行也不能把 live 快照拉回更旧的内容。
     expect(remoteSessionStore.getMessages('s1')[0].content).toMatchObject({
       input: {
         plan: [
-          { step: 'Inspect', status: 'completed' },
-          { step: 'Patch', status: 'completed' },
+          { step: 'Inspect', status: 'in_progress' },
+          { step: 'Patch', status: 'pending' },
         ],
       },
     });
   });
 
-  it('does not let a delayed message window revert synthetic completion', () => {
+  it('does not let a delayed message window revert the live plan snapshot', () => {
     const stalePlanRow = {
       ...message('plan-row-1', 's1'),
       role: 'tool_use' as const,
@@ -1153,8 +1155,9 @@ describe('remoteSessionStore', () => {
 
     remoteSessionStore.setLatestMessageWindow('s1', [stalePlanRow]);
 
+    // 步骤保持 agent 实际报告的状态,不因成功收尾被改写成 completed。
     expect(remoteSessionStore.getMessages('s1')[0].content).toMatchObject({
-      input: { plan: [{ step: 'Inspect', status: 'completed' }] },
+      input: { plan: [{ step: 'Inspect', status: 'in_progress' }] },
     });
   });
 

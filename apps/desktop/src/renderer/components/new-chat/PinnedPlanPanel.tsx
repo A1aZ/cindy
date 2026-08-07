@@ -15,6 +15,8 @@
  *
  * 盖章后同样保留 2 秒再收起,时刻锚在章上(章落库,所以重载/新窗口看到的是
  * 同一个时刻,不会重新数 2 秒)。旧数据没有章,按"全勾完"兜底,行为不变。
+ * 兜底只属于旧数据:turn 还在流式时,未盖章的 codex 计划正在等 host 的终态章,
+ * 这时候按"全勾完"抢跑退场,会在章晚到(>2s)时先消失再被章复活闪回 2 秒。
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -33,6 +35,7 @@ export function PinnedPlanPanel({
   width,
   taskHistoryMayBeIncomplete = false,
   visible = true,
+  streaming = false,
   className,
 }: {
   sessionId: string | null;
@@ -44,6 +47,8 @@ export function PinnedPlanPanel({
   taskHistoryMayBeIncomplete?: boolean;
   /** 交互卡接管底部区域时只隐藏视图,保留完成后的计时与已收起状态。 */
   visible?: boolean;
+  /** turn 还在流式:未盖章的 codex 计划正在等终态章,不走"全勾完"兜底退场。 */
+  streaming?: boolean;
   className?: string;
 }): React.ReactElement | null {
   const insertion = useMemo(
@@ -55,8 +60,13 @@ export function PinnedPlanPanel({
     insertion.todos.length > 0 &&
     insertion.todos.every((todo) => todo.status === 'completed'),
   );
+  // codex 计划在 turn 流式期间是"等章"状态:host 的终态章才是权威,agent 提前把
+  // 步骤全勾完不算数——按 allDone 抢跑会在章晚到时产生"消失再闪回"。TodoWrite /
+  // Task 永远不会有章,codex 旧历史数据也不会再有,它们照旧走全勾完兜底。
+  const awaitingSeal = insertion?.source === 'codex' && insertion.sealed !== true && streaming;
   // 退场 = host 盖了终态章(权威),或计划自己勾完了(没有章的旧数据兜底)。
-  const retired = Boolean(insertion) && (insertion?.sealed === true || allDone);
+  const retired =
+    Boolean(insertion) && (insertion?.sealed === true || (allDone && !awaitingSeal));
   const completedAtMs =
     insertion?.sealedAtMs ?? insertion?.updatedAtMs ?? Date.parse(insertion?.createdAt ?? '');
   const persistedCompletionDeadlineMs =

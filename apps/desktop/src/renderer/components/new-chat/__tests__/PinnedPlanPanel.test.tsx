@@ -436,4 +436,99 @@ describe('PinnedPlanPanel terminal seal', () => {
 
     expect(screen.queryByTestId('plan-pill')).not.toBeNull();
   });
+
+  it('does not retire an unsealed all-done codex plan while the turn is still streaming', () => {
+    // 真实复现:Codex 在终态事件前就把全部步骤勾成 completed,随后最终回复流式
+    // 超过 2 秒。若 allDone 兜底在等章期间抢跑,胶囊会先消失,章一到又带着新
+    // sealedAtMs 复活 2 秒——消失再闪回。等章期间必须留在原地。
+    const allDoneStreaming = planMessage('completed', T0, T0);
+    const view = render(
+      <PinnedPlanPanel
+        sessionId="streaming-all-done"
+        messages={[allDoneStreaming]}
+        animated
+        streaming
+        width={400}
+      />,
+    );
+
+    act(() => vi.advanceTimersByTime(4_000));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+
+    // 章落地:退场计时从 sealedAtMs 起数,整个过程无中断、无闪回。
+    vi.setSystemTime(T0 + 4_000);
+    view.rerender(
+      <PinnedPlanPanel
+        sessionId="streaming-all-done"
+        messages={[
+          {
+            ...allDoneStreaming,
+            terminalPlanSnapshot: true,
+            terminalPlanAtMs: T0 + 4_000,
+          },
+        ]}
+        animated={false}
+        streaming={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1_999));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('still retires an all-done codex plan from old history data without a seal', () => {
+    // 旧数据没有章(升级前落库),也永远不会再有:全勾完兜底照旧生效,
+    // 否则旧会话的计划会永远挂在屏幕上。非流式 = 没有在等章的 turn。
+    render(
+      <PinnedPlanPanel
+        sessionId="old-history-all-done"
+        messages={[planMessage('completed', T0, T0)]}
+        animated={false}
+        streaming={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('keeps the all-done fallback for TodoWrite plans even while streaming', () => {
+    // TodoWrite / Task 计划永远不会被盖章,全勾完兜底是它们唯一的退场路径,
+    // 流式与否都不该被"等章"逻辑挡住。
+    const todoAllDone: ChatMessage = {
+      clientId: 'todo-1',
+      role: 'tool_use',
+      content: '',
+      toolName: 'TodoWrite',
+      toolUseId: 'todo:turn-1',
+      toolInput: {
+        todos: [
+          { content: 'Step 1', status: 'completed' },
+          { content: 'Step 2', status: 'completed' },
+        ],
+      },
+      createdAt: new Date(T0).toISOString(),
+      planUpdatedAtMs: T0,
+    };
+
+    render(
+      <PinnedPlanPanel
+        sessionId="todo-streaming-all-done"
+        messages={[todoAllDone]}
+        animated
+        streaming
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
 });

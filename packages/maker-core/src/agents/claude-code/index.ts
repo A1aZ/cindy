@@ -4939,6 +4939,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // interrupt ACK guarantees these earlier stop requests have settled,
           // so allSettled intentionally has no timeout or extra watchdog.
           const settledStops = await Promise.allSettled(stopRequests.map(({ promise }) => promise));
+          const hasRejectedStops = settledStops.some((stop) => stop.status === 'rejected');
           const fulfilledWakeIds = stopRequests
             .filter((_, index) => settledStops[index]?.status === 'fulfilled')
             .map(({ taskId }) => taskId);
@@ -4950,15 +4951,18 @@ export class ClaudeCodeAgent extends BaseAgent {
           // Stop is the authoritative cancellation boundary. An awaiting
           // continuation may already have lost every task from the running
           // table, so neither stopTask nor an idle interrupt is guaranteed to
-          // produce another provider result. Close it explicitly after the
-          // control action succeeds and append the ordered product terminal.
+          // produce another provider result. A rejected stop is likewise
+          // unconfirmed even when a completed notification already removed
+          // that task from the local table; the old Query must still be closed
+          // to prevent a queued automatic continuation from escaping Stop.
           const cancelledContinuation = stoppedClaim ?? cancelActiveContinuation('user_stop');
           const hasUnconfirmedWakeTasks = [...runningBackgroundTasks.values()].some((info) => info.wake);
-          if (cancelledContinuation || hasUnconfirmedWakeTasks) {
-            // Both cancellation sources share one terminal state: a cancelled
-            // continuation claim or an unconfirmed wake task means this Query
-            // must be retired. The provider tail is fenced by the per-query
-            // marker, then the next send/rewind installs a fresh Query.
+          if (cancelledContinuation || hasUnconfirmedWakeTasks || hasRejectedStops) {
+            // All cancellation sources share one terminal state: a cancelled
+            // continuation claim, an unconfirmed wake task, or a rejected stop
+            // means this Query must be retired. The provider tail is fenced by
+            // the per-query marker, then the next send/rewind installs a fresh
+            // Query.
             const cancelledQuery = q;
             const foregroundNeedsTerminal = turnInFlight;
             canceledBridgeQueries.add(cancelledQuery);

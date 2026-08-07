@@ -1597,6 +1597,46 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('Stop closes when a rejected stop is followed by completed notification before interrupt ACK', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+    const interrupt = createDeferred<void>();
+
+    await handle.send({ type: 'user', content: 'foreground turn with racing completion' });
+    stream.emit(taskStarted('task-completed-during-stop', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('task already completed remotely'));
+    fakeQuery.interrupt.mockImplementationOnce(() => interrupt.promise);
+
+    const abortPromise = handle.abort();
+    await waitFor(() => fakeQuery.interrupt.mock.calls.length === 1, 'interrupt dispatched');
+    stream.emit(taskNotification('task-completed-during-stop', 'completed'));
+    await waitFor(
+      () => taskEvents(events).some((event) =>
+        (event.data as { taskId?: unknown; status?: unknown } | null | undefined)?.taskId === 'task-completed-during-stop' &&
+        (event.data as { status?: unknown } | null | undefined)?.status === 'completed',
+      ),
+      'completed notification observed before interrupt ACK',
+    );
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    interrupt.resolve(undefined);
+    await abortPromise;
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'fresh turn after rejected stop' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('fresh turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'fresh terminal observed');
+    expect(events.filter(isProductTerminal)).toHaveLength(2);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('natural foreground result before Stop ACK is not duplicated when the Query closes', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

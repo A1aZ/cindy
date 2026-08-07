@@ -1467,6 +1467,9 @@ Phase 4F-3 验收门槛：只有精确收录组合能得到 per-capability `elig
 
 #### Phase 4F-4：Packaged release qualification gate
 
+面向发布维护者的精简操作步骤见
+[Cindy iOS 模拟器发版说明](./ios-simulator-release-guide.md)。
+
 - Desktop 主进程新增只用于 packaged release qualification 的短路入口：`--ios-simulator-release-gate=static|native`。入口先于数据库、窗口、登录、插件和普通 smoke 初始化，只构造 iOS Simulator 环境、固定 bundled artifact resolver 与 Host admission policy；成功输出 schema v1 JSON 后退出，失败只输出稳定 gate error code。
 - 外部 runner 直接启动最终 `.app/Contents/MacOS/<AppName>`，使用独立临时 userData，并只向 packaged 进程传递 `DEVELOPER_DIR`、基础 locale、PATH、SHELL、HOME 与 TMPDIR。发布 token、签名密码、代理、用户凭证和其它 Desktop 环境不会进入受测进程；临时 userData 在成功和失败路径都自动删除。
 - macOS 打包流程在 Helper 与主 App 最终签名完成之后运行 gate。Developer ID 路径固定在 notarization/staple 之后、DMG/热更 ZIP 之前验证 `trust: verified`；ad-hoc 路径固定在最终 ad-hoc 签名之后、App ZIP 之前验证 `trust: untrusted`、`ARTIFACT_UNTRUSTED` 与 WDA/MJPEG fallback。gate 失败会中止产物归集，不能生成看似可发布的归档。

@@ -658,6 +658,71 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it.each(['resolve', 'reject'] as const)(
+    'interrupt pending 时 provider stopped 先收口，interrupt %s 后仍保持单终态并可继续发送',
+    async (interruptOutcome) => {
+      const { handle, stream, streams, events, fakeQuery, fakeQueries } =
+        await startSessionWithStream();
+
+      await handle.send({ type: 'user', content: 'spawn background work' });
+      stream.emit(taskStarted('task-agent', 'local_agent'));
+      await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+      stream.emit(turnResult('waiting'));
+      await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+      const continuationId = events.find((event) => event.type === 'done')?.turnContinuationId;
+      expect(continuationId).toBeTypeOf('number');
+
+      const interrupt = createDeferred<void>();
+      fakeQuery.interrupt.mockImplementationOnce(() => interrupt.promise);
+      const abortPromise = handle.abort();
+      await waitFor(() => fakeQuery.interrupt.mock.calls.length === 1, 'interrupt dispatched');
+
+      // Provider confirmation is authoritative even while the idle interrupt
+      // control request is unresolved: all tracked wake tasks are stopped, so
+      // no automatic continuation or second provider done can still arrive.
+      stream.emit(taskNotification('task-agent', 'stopped'));
+      await waitFor(() => taskEvents(events).length >= 2, 'stopped notification observed');
+      await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+      await waitFor(() => handle.isTurnRunning?.() === false, 'all-stopped claim settled');
+      expect(handle.beginTurnContinuationWait?.(continuationId)).toBeNull();
+      expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+      // The synthetic terminal installs the cancelled-query fence immediately,
+      // before interrupt settles. Buffered provider tail must not add content
+      // or a second product terminal.
+      const eventCountBeforeOldTail = events.length;
+      streams[0]?.emit(assistantText('late old-query assistant'));
+      streams[0]?.emit(turnResult('late old-query result'));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(events).toHaveLength(eventCountBeforeOldTail);
+      expect(events.filter(isProductTerminal)).toHaveLength(1);
+
+      if (interruptOutcome === 'resolve') {
+        interrupt.resolve(undefined);
+      } else {
+        interrupt.reject(new Error('idle interrupt rejected'));
+      }
+      await abortPromise;
+      expect(handle.isTurnRunning?.()).toBe(false);
+      expect(events.filter(isProductTerminal)).toHaveLength(1);
+      expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+      await handle.send({ type: 'user', content: 'next turn after stopped echo' });
+      expect(fakeQueries).toHaveLength(2);
+      stream.emit(assistantText('new-query output'));
+      await waitFor(
+        () => events.some((event) => event.type === 'text'),
+        'replacement query output observed',
+      );
+      stream.emit(turnResult('replacement query complete'));
+      await waitFor(() => events.filter(isProductTerminal).length === 2, 'replacement terminal observed');
+      await waitFor(() => handle.isTurnRunning?.() === false, 'replacement turn settled');
+
+      stream.end();
+      await handle.close().catch(() => undefined);
+    },
+  );
+
   it.each([
     ['success', () => turnResult('late old-generation success')],
     ['is_error', interruptedTurnResult],

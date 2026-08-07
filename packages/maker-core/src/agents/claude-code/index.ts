@@ -3175,6 +3175,13 @@ export class ClaudeCodeAgent extends BaseAgent {
       const states = [...claim.tasks.values()];
       // A completed/failed wake task still has the SDK continuation contract;
       // only an all-stopped group proves that a second `done` cannot arrive.
+      // Authority model: q.interrupt ACK is required when user Stop has no
+      // provider confirmation and must revoke a completed/failed continuation
+      // contract itself. An all-stopped snapshot is already provider-confirmed
+      // fact: every tracked task can no longer continue, while an awaiting
+      // claim has no foreground turn. It therefore settles independently of a
+      // concurrent interrupt resolving or rejecting; waiting for that control
+      // result would leak the claim when no further provider event can exist.
       if (
         states.length > 0 &&
         states.every((state) => state === 'stopped')

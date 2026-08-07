@@ -305,8 +305,29 @@ describe("cindy_ghosts · ghost_info(单插件精准查询)", () => {
     expect(parsePayload(result)).toEqual({ ok: true, ghost });
   });
 
+  it("GHOST_NOT_FOUND 引导回查清单或改道，且不要重复重试同一目标", async () => {
+    const result = await handleGhostInfo(
+      fakeDeps({
+        getAwakeGhost: async () =>
+          ({
+            ok: false,
+            errorCode: "GHOST_NOT_FOUND",
+            message: "目标插件不存在",
+            internalDebug: "不可出境",
+          }) as never,
+      }),
+      { ghost_id: "art" },
+    );
+    expect(result.isError).toBe(true);
+    expect(parsePayload(result)).toEqual({
+      ok: false,
+      errorCode: "GHOST_NOT_FOUND",
+      message:
+        "目标插件不存在；不要重复重试同一目标；可调用 ghost_list 回查当前可用插件，或改用其它可用方式完成。",
+    });
+  });
+
   it.each([
-    ["GHOST_NOT_FOUND", "目标插件不存在"],
     ["GHOST_ASLEEP", "目标插件未启用"],
     ["GHOST_DISABLED_IN_WORKDIR", "当前工作目录已停用"],
   ] as const)("%s 只返回公开结构化错误字段", async (errorCode, message) => {

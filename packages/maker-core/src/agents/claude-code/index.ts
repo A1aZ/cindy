@@ -4875,6 +4875,9 @@ export class ClaudeCodeAgent extends BaseAgent {
         const stopRequests = stopRunningWakeBackgroundTasks('user_stop');
         try {
           await q.interrupt();
+          // stopTask and interrupt share an ordered control channel: an
+          // interrupt ACK guarantees these earlier stop requests have settled,
+          // so allSettled intentionally has no timeout or extra watchdog.
           const settledStops = await Promise.allSettled(stopRequests.map(({ promise }) => promise));
           const fulfilledWakeIds = stopRequests
             .filter((_, index) => settledStops[index]?.status === 'fulfilled')

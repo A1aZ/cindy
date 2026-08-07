@@ -1624,7 +1624,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
-  it('stopTask reject 后为未确认 wake 安装栅栏，迟到自动续跑被丢弃', async () => {
+  it('stopTask reject 后允许本代 success result 收口并封住迟到续跑', async () => {
     const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
 
     await handle.send({ type: 'user', content: 'spawn background work' });
@@ -1633,7 +1633,9 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
 
     fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
     await handle.abort();
-    stream.emit(interruptedTurnResult());
+    // The foreground turn can naturally finish before the interrupt takes
+    // effect; its success result must still settle this fenced generation.
+    stream.emit(turnResult('natural completion raced with stop'));
     await waitFor(() => events.filter(isProductTerminal).length === 1, 'foreground stop terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'foreground stop settled');
 

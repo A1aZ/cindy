@@ -1147,6 +1147,50 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     expect(mocks.feishuIm.sendText).toHaveBeenCalledTimes(1);
   });
 
+  it('releases the policy route and host lease when beforeProviderStart fails', async () => {
+    const h = setupSession(async () => ({ accepted: true }));
+    const policy = {
+      origin: { kind: 'im', channel: 'feishu', taskId: 'task-pre-dispatch-failure' },
+      confirmationSurface: 'channel',
+      forceConfirmToolCall: () => true,
+    } as const;
+    const localRunner = createTurnRunner(fakeAdapter, fakeRepo, fakeCards);
+
+    const failed = await localRunner.dispatchAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'ou_user',
+      userMessageId: 'msg-pre-dispatch-failure',
+      text: 'first policy turn',
+      attachments: [],
+      queueMode: 'external',
+      turnPermissionPolicy: policy,
+      beforeProviderStart: async () => {
+        throw new Error('provider setup failed');
+      },
+    });
+
+    expect(failed).toMatchObject({ kind: 'rejected', reason: 'Error' });
+    expect(h.acquireTurnLease).toHaveBeenCalledOnce();
+    expect(h.releaseTurnLease).toHaveBeenCalledOnce();
+
+    const recovered = await localRunner.dispatchAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'ou_user',
+      userMessageId: 'msg-pre-dispatch-recovery',
+      text: 'second policy turn',
+      attachments: [],
+      queueMode: 'external',
+      turnPermissionPolicy: policy,
+      beforeProviderStart: async () => undefined,
+    });
+
+    expect(recovered.kind).toBe('accepted');
+    expect(h.acquireTurnLease).toHaveBeenCalledTimes(2);
+    h.emit({ type: 'done', data: {} });
+    if (recovered.kind === 'accepted') await recovered.terminal;
+    expect(h.releaseTurnLease).toHaveBeenCalledTimes(2);
+  });
+
   it('waits for ack removal before callback and failure notification on pre-dispatch failure', async () => {
     const order: string[] = [];
     let resolveReaction: ((reactionId: string) => void) | undefined;

@@ -1638,6 +1638,13 @@ export class PluginMarketService {
           if (hasPendingGhostCalls(summary.ghostId) || hasRunningGhostErrand(summary.ghostId)) {
             throw new SilentUpgradeBusyError('Plugin is busy');
           }
+          const freshLocal = this.localInstallSnapshot(ledger);
+          if (this.toItem(summary, freshLocal).installState !== 'update-available') {
+            log.debug?.('default plugin upgrade already reconciled', {
+              pluginId: summary.id,
+            });
+            return;
+          }
           const detail = await this.api.detail(summary.id);
           requireSameMarketOwner(owner);
           assertDetailMatchesSummary(summary, detail);

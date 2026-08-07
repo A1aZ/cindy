@@ -457,6 +457,19 @@ import {
 } from './handoffWorktree.js';
 import { validateHandoffWorkingDir } from './handoffWorkingDir.js';
 import { registerProjectPluginPolicyHandlers } from './projectPluginPolicyHandlers.js';
+import {
+  TURN_CHANGE_SET_DETAIL_ID_LIMIT,
+  TurnChangeSetActionError,
+  applyTurnChangeSetAction,
+  beginTurnChangeSet,
+  clearPendingTurnChangeSets,
+  finalizeTurnChangeSet,
+  getTurnChangeSets,
+  listTurnChangeSets,
+  noteTurnDiffEvent,
+  normalizeTurnChangeSetWorkspaceKey,
+  waitForTurnChangeSetSeal,
+} from '../turn-change-set/store.js';
 import { registerPrecreatedWorktreeDiscardHandler } from './precreatedWorktreeDiscardHandler.js';
 import { registerNewMakerWorktreePreferenceHandler } from './newMakerWorktreePreferenceHandler.js';
 import { registerNewMakerWorktreeBranchPreferenceHandler } from './newMakerWorktreeBranchPreferenceHandler.js';
@@ -671,7 +684,10 @@ import {
   SessionTurnActivityTracker,
 } from './sessionTurnActivityTracker.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
-import { tapWindowBroadcast } from '../device-link/broadcast-tap.js';
+import {
+  captureDataOwnerBroadcastScope,
+  tapWindowBroadcast,
+} from '../device-link/broadcast-tap.js';
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
   markRemoteSettingPersistedInsideHandler,
@@ -3141,6 +3157,7 @@ function settleSilentStopDone(
   sessionId: string,
   reason: 'exhausted' | 'skip' | 'send-failed',
 ): void {
+  void finalizeTurnChangeSet(sessionId, null, 'complete');
   sessionTurnActivityTracker.scheduleIdleAfterTerminalBroadcast(sessionId);
   noteClaudeSessionTurnState(sessionId, false);
   agentInputCoordinatorHolder?.onTurnEvent(sessionId, 'done');
@@ -3301,9 +3318,11 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   registration.disposers.push(() => {
     ghostSessionTap.dispose();
     installInteractionLifecycleObserver(session, null);
+    clearPendingTurnChangeSets(session.id);
   });
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      noteTurnDiffEvent(session.id, event, session.remoteHostId !== null);
       ghostSessionTap.handleEvent(
         event as { type: string; data?: unknown; source?: string; turnOrigin?: { kind?: string } },
       );
@@ -3314,6 +3333,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   // 让 renderer chat store 不必扫所有 vendor-raw 找它。
   registration.disposers.push(
     session.onEvent((event: AgentEvent) => {
+      // Exact patches are main-owned durable data. They have a dedicated summary push and
+      // on-demand detail IPC; forwarding the raw diff through maker:event would duplicate a
+      // potentially multi-megabyte payload to every renderer and device-link controller.
+      if (event.type === 'turn_diff') return;
       // 自动续跑的 pending 不能只靠 status(isRunning=true) 清理：Pi/Claude 的
       // terminal-only 路径可能首个事件就是 error。Session 已把 host-owned token
       // 盖到事件上，首个匹配 token 的事件即视为 provider accepted。
@@ -3457,15 +3480,26 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
       }
       if (event.type === 'done') {
-        // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
-        // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
         const doneAttemptToken = event.turnAttemptToken;
         if (typeof doneAttemptToken === 'number' && !isContinuationBoundary) {
           autoResumeBookkeeping.settleOutcome(session.id, doneAttemptToken, 'failed');
           interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
         }
+        const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
         const isSilentStopDone =
           (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          shouldMarkTurnTerminalIdleAfterBroadcast = true;
+        }
+        if (!isContinuationBoundary && !isSilentStopDone) {
+          finalizeTurnChangeSet(
+            session.id,
+            typeof rawTurn?.id === 'string' ? rawTurn.id : null,
+            rawTurn && rawTurn.status !== 'completed' ? 'partial' : 'complete',
+          );
+        }
+        // turn 正常收尾但一路没有实质产出时,上一条重连记录同样不能停在"结果未回填":
+        // 成功路径已在产出事件里 settle 成 succeeded(此处 no-op),走到这里就是没产出。
         // silent-stop done:自动续跑会在 1.5s 后启动新 turn(或弹耗尽横幅),
         // 不标 idle/不触发 goal idle/不通知 coordinator done——避免 renderer
         // 在 500ms 完成去抖窗口内显示假完成通知,下一个 turn 开始后又跳回 running。
@@ -3477,7 +3511,6 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           // 兜底: 有些 vendor 的 done 不必先发 status:isRunning=false。
           // 但 idle 恢复不能挡在 EVENT broadcast 前，否则隐藏窗口可能在 done
           // 还没进入 renderer 时就重新被 Chromium 节流。
-          shouldMarkTurnTerminalIdleAfterBroadcast = true;
           agentInputCoordinatorHolder?.onTurnEvent(session.id, 'done');
         } else {
           // silent-stop 自动续跑:translator 判定本 turn 被上游空内容消息静默收尾时在
@@ -3502,6 +3535,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       let isPlannedUpgradeClose = false;
       let isRemoteAuthRetry = false;
       if (isTerminalTurnErrorEvent(event)) {
+        finalizeTurnChangeSet(session.id, null, 'partial');
         // **任何**终态失败都先把上一条重连记录钉成失败 —— 不管这次错误本身是否值得自愈。
         // 只在"命中白名单、准备再接管"时才 settle 的话,非白名单的终态(认证 / 计费 /
         // invalid-request)会让记录悬空,随后一个无关 turn 的首个产出事件就把它标成
@@ -4669,6 +4703,31 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
  */
 export const wireSessionToIpcExternal = wireSessionToIpc;
 
+type SendToSessionDispatchSession = {
+  id: string;
+  agentKind: AgentKind;
+  workDir: string;
+  remoteHostId: string | null;
+  send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
+};
+
+/** Starts exact turn capture at the accepted, durable user-message boundary. */
+export async function beginTurnChangeSetAtDispatch(
+  session: SendToSessionDispatchSession,
+  anchorClientId: string,
+): Promise<void> {
+  await waitForTurnChangeSetSeal(session.id);
+  await finalizeTurnChangeSet(session.id, null, 'partial');
+  await waitForTurnChangeSetSeal(session.id);
+  await beginTurnChangeSet({
+    sessionId: session.id,
+    anchorClientId,
+    provider: session.agentKind,
+    cwd: session.workDir,
+    remote: session.remoteHostId !== null,
+  });
+}
+
 export interface RegisterMakerIpcOptions {
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
@@ -4782,6 +4841,85 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.LIST_AVAILABLE_AGENTS, () => {
     return maker.listAvailableAgents();
   });
+
+  ipcMain.handle(MAKER_INVOKE.TURN_CHANGE_SETS_LIST, async (event, sessionId: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+      throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+    }
+    return listTurnChangeSets(sessionId);
+  });
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SETS_GET,
+    async (event, sessionId: unknown, ids: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (
+        !Array.isArray(ids)
+        || ids.length > TURN_CHANGE_SET_DETAIL_ID_LIMIT
+        || ids.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256)
+      ) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set ids');
+      }
+      return getTurnChangeSets(sessionId, ids as string[]);
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_INVOKE.TURN_CHANGE_SET_APPLY,
+    async (event, sessionId: unknown, id: unknown, action: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      const ownerScope = captureDataOwnerBroadcastScope();
+      if (typeof sessionId !== 'string' || sessionId.length === 0 || sessionId.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
+      }
+      if (typeof id !== 'string' || id.length === 0 || id.length > 256) {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set id');
+      }
+      if (action !== 'undo' && action !== 'reapply') {
+        throwIpcError('INVALID_PARAMS', 'Invalid turn change-set action');
+      }
+      const meta = await maker.getSessionMeta(sessionId);
+      if (!meta) throwIpcError('NOT_FOUND', 'Task not found.');
+      if (meta.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Remote workspace restore is not available.');
+      }
+      const normalizedWorkDir = normalizeTurnChangeSetWorkspaceKey(meta.workDir);
+      const workspaceIsBusy = (): boolean => maker.listActiveSessions().some((session) => {
+        if (session.remoteHostId) return false;
+        const currentWorkDir = normalizeTurnChangeSetWorkspaceKey(session.workDir);
+        return currentWorkDir === normalizedWorkDir
+          && (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id));
+      });
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      await waitForTurnChangeSetSeal(sessionId);
+      if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
+        throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
+      }
+      try {
+        return await applyTurnChangeSetAction(sessionId, id, action, ownerScope);
+      } catch (error) {
+        if (!(error instanceof TurnChangeSetActionError)) {
+          log.warn('turn change-set action failed', { sessionId, id, action, error });
+          throwIpcError('INTERNAL', 'The recorded changes could not be applied.');
+        }
+        if (error.kind === 'not-found') throwIpcError('NOT_FOUND', error.message);
+        if (error.kind === 'busy') throwIpcError('SESSION_RUNNING', error.message);
+        if (error.kind === 'wrong-state') throwIpcError('PRECONDITION_FAILED', error.message);
+        if (error.kind === 'git-missing') {
+          throwIpcError('TURN_CHANGE_GIT_UNAVAILABLE', error.message);
+        }
+        if (error.kind === 'unsupported') throwIpcError('UNSUPPORTED_CAPABILITY', error.message);
+        if (error.kind === 'conflict') throwIpcError('STALE_DIFF', error.message);
+        throwIpcError('INTERNAL', error.message);
+      }
+    },
+  );
 
   ipcMain.handle(MAKER_INVOKE.ANY_SESSION_IN_TURN, () => {
     return anySessionInTurn(maker);
@@ -6546,17 +6684,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     );
   }
 
-  type SendToSessionDispatchSession = {
-    id: string;
-    send(message: UserMessage | string, opts?: SessionSendOptions): Promise<SessionSendResult>;
-  };
-
   async function sendUserMessageWithAwaitedGitBaseline(
     session: SendToSessionDispatchSession,
     message: string,
+    anchorClientId: string,
     opts: SessionSendOptions,
   ): Promise<SessionSendResult> {
     let baselineStarted = false;
+    let turnChangeSetStarted = false;
     const pendingHandoff = await agentHandoffPending.peek(session.id);
     const outgoingMessage: UserMessage = pendingHandoff
       ? (prependHandoffToUserMessage(
@@ -6569,12 +6704,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...opts,
         onAccepted: async () => {
           await opts.onAccepted?.();
+          await beginTurnChangeSetAtDispatch(session, anchorClientId);
+          turnChangeSetStarted = true;
           if (gitSnapshotCoordinator) {
             await gitSnapshotCoordinator.onTurnStart(session.id);
             baselineStarted = true;
           }
         },
       });
+      if (turnChangeSetStarted && !sendResult.accepted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted && !sendResult.accepted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6583,6 +6723,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       return sendResult;
     } catch (err) {
+      if (turnChangeSetStarted) {
+        clearPendingTurnChangeSets(session.id);
+      }
       if (baselineStarted) {
         gitSnapshotCoordinator?.onTurnAbort(session.id);
       }
@@ -6780,7 +6923,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const clientId = createId();
         createdPreviewSessionId = session.id;
         createdPreviewClientId = clientId;
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
           planMode: false,
           onAccepted: async () => {
             notifyAgentIslandUserPrompt(session, persistedContent ?? message, {
@@ -7036,11 +7179,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (live) {
         try {
-          const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, {
-            planMode: false,
-            onAccepted: persistUserMessage,
-            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-          });
+          const sendResult = await sendUserMessageWithAwaitedGitBaseline(
+            live,
+            message,
+            clientId,
+            {
+              planMode: false,
+              onAccepted: persistUserMessage,
+              onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+            },
+          );
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
               commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7134,11 +7282,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         await ensureRemoteReadyForSessionStart({ createOpts });
         const { session } = await bootstrapSession(createOpts);
         await markOrcaRoleIfNeeded(session.id, createOpts.orcaRole);
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, {
-          planMode: false,
-          onAccepted: persistUserMessage,
-          onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-        });
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(
+          session,
+          message,
+          clientId,
+          {
+            planMode: false,
+            onAccepted: persistUserMessage,
+            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          },
+        );
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7569,6 +7722,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     sendToSessionInternal,
     createDbMessage,
+    beginDirectTurnChangeSet: async (sessionId, clientId) => {
+      const liveSession = maker.getSession(sessionId);
+      if (!liveSession) {
+        throw new Error('Target session became unavailable before direct turn dispatch.');
+      }
+      await beginTurnChangeSetAtDispatch(liveSession, clientId);
+    },
+    abortDirectTurnChangeSet: clearPendingTurnChangeSets,
     resolveWorkerSenderLabel: async (workerId, fallback) => {
       const link = await getWorkerLink({ workerId });
       if (!link) return fallback;
@@ -9706,18 +9867,23 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }),
     onUserMessageRewritten: (sessionId, item, info) =>
       broadcastGhostMessageRewritten({ sessionId, clientId: item.clientId, ...info }),
-    beforeDispatchUserTurn: (sessionId, item) => {
+    beforeDispatchUserTurn: async (sessionId, item) => {
       autoResumeBookkeeping.markReplacementDispatching(sessionId, item.clientId);
+      const liveSession = maker.getSession(sessionId);
+      if (liveSession) {
+        await beginTurnChangeSetAtDispatch(liveSession, item.clientId);
+      }
       // hook 续跑回流的**权威归属点**: 在 vendor dispatch 之前(本回调被 await), 所以
       // 观察器挂上就不丢正文开头, 而 live session 此刻必然已就绪。clientId 对得上的
       // 才是目标续跑轮 —— 绕过 coordinator 的 turn(silent-stop 自动续跑)不走这里,
       // 结构上不可能被误认。详见 uiContinuationSignal 的模块注释。
       publishUiTurnDispatching(sessionId, item.clientId);
-      return gitSnapshotCoordinator?.onTurnStart(sessionId);
+      await gitSnapshotCoordinator?.onTurnStart(sessionId);
     },
     onUndispatchedUserTurn: (sessionId, item, disposition) => {
       // 目标轮落库了却没能 dispatch(取消 / 失败): 记账该立刻还回去, 而不是等超时。
       publishUiTurnUndispatched(sessionId, item.clientId);
+      clearPendingTurnChangeSets(sessionId);
       gitSnapshotCoordinator?.onTurnAbort(sessionId);
       autoResumeBookkeeping.rollbackReplacementPreview(sessionId, item.clientId);
       const autoResume = item.autoResume === true;

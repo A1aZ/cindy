@@ -38,6 +38,10 @@ const h = vi.hoisted(() => {
     createMessage: vi.fn(async () => {
       calls.push('createMessage');
     }),
+    beginTurnChangeSetAtDispatch: vi.fn(async (session: { id: string }, anchorClientId: string) => {
+      calls.push(`beginChangeSet:${session.id}:${anchorClientId}`);
+    }),
+    clearPendingTurnChangeSets: vi.fn(),
     setSessionProviderIdInDb: vi.fn(async (id: string, providerId: string) => {
       calls.push(`providerDb:${id}:${providerId}`);
     }),
@@ -96,11 +100,15 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({
   tapWindowBroadcast: h.tapWindowBroadcast,
 }));
 vi.mock('../../maker-ipc/register.js', () => ({
+  beginTurnChangeSetAtDispatch: h.beginTurnChangeSetAtDispatch,
   wireSessionToIpc: vi.fn(),
   isSessionInTurn: () => false,
   installDesktopInteractionListener: h.installDesktopInteractionListener,
   noteSilentStopUserSend: vi.fn(),
   onSilentStopSettled: vi.fn(() => () => {}),
+}));
+vi.mock('../../turn-change-set/store.js', () => ({
+  clearPendingTurnChangeSets: h.clearPendingTurnChangeSets,
 }));
 vi.mock('../../maker-host/send-outcome.js', () => ({
   toDesktopSessionDispatchOutcome: () => ({ dispatched: true as const }),
@@ -2969,5 +2977,25 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     expect(events.at(-1)).toBe('end:error');
     expect(ends[0]?.errorMessage).toContain('no activity');
     expect(h.eventCbs.has('sess-live')).toBe(false);
+  });
+});
+
+describe('hook turn change-set anchor', () => {
+  it('uses the durable accepted user message client id', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+    const outcome = await runner.run(baseReq({}));
+
+    expect(outcome.status).toBe('ok');
+    const [, message] = h.createMessage.mock.calls[0] as unknown as [
+      string,
+      { clientId: string },
+    ];
+    expect(h.beginTurnChangeSetAtDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-new' }),
+      message.clientId,
+    );
+    expect(h.calls.indexOf('createMessage')).toBeLessThan(
+      h.calls.indexOf(`beginChangeSet:sess-new:${message.clientId}`),
+    );
   });
 });

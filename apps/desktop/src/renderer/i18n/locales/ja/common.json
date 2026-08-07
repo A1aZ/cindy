@@ -4468,6 +4468,14 @@
       "spawnFailed": "ターミナルを起動できません: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "このメッセージの変更",
+        "currentWorkspace": "現在のワークスペース",
+        "localOnly": "メッセージ単位の正確な変更は、リモートタスクではまだ利用できません。",
+        "partialNotice": "このメッセージには正確に追跡できないコマンドまたはツールの書き込みが含まれます。以下は取得できた一部のみで、完全なパッチではありません。",
+        "emptyTitle": "記録された変更はありません",
+        "emptyDesc": "このメッセージで保存されたパッチに表示可能なファイル変更はありません。"
+      },
       "fileCount_one": "{{count}} ファイル",
       "fileCount_other": "{{count}} ファイル",
       "emptyTitle": "変更はまだありません",
@@ -6187,8 +6195,34 @@
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "添付ファイルの転送に失敗しました。メッセージは送信されていません。もう一度お試しください。"
     },
     "generatedFiles": {
-      "title": "このターンで生成されたファイル",
-      "showMore": "さらに {{count}} 件を表示",
+      "title": "このメッセージで作成されたファイル",
+      "showMore": "さらに {{count}} 件表示",
+      "showLess": "折りたたむ"
+    },
+    "turnChanges": {
+      "title": "{{count}} ファイルを変更",
+      "partialTitle": "このメッセージのファイル変更を完全には取得できませんでした",
+      "review": "レビュー",
+      "undo": "元に戻す",
+      "undoAria": "このメッセージの変更を元に戻す",
+      "undoPartialAria": "このメッセージで正確に取得された変更を元に戻す",
+      "reapply": "再適用",
+      "reapplyAria": "このメッセージの変更を再適用する",
+      "reapplyPartialAria": "このメッセージで正確に取得された変更を再適用する",
+      "undoSuccess": "このメッセージの変更を元に戻しました",
+      "reapplySuccess": "このメッセージの変更を再適用しました",
+      "undoPartialSuccess": "正確に取得された変更を元に戻しました。取得されていない変更は元に戻していません",
+      "reapplyPartialSuccess": "正確に取得された変更を再適用しました。取得されていない変更は再適用していません",
+      "actionRunning": "現在の応答が完了してからワークスペースを変更してください",
+      "gitUnavailable": "Git が検出されませんでした。Git をインストールしてシステムの PATH に追加し、Cindy を再起動すると、元に戻す・再適用の全機能を利用できます。",
+      "actionConflict": "ワークスペースが変更されたため、このパッチを安全に適用できません。現在の変更を先にレビューしてください",
+      "actionUnavailable": "このメッセージには安全に元に戻せないファイル変更が含まれています",
+      "actionFailed": "変更を適用できませんでした。もう一度お試しください",
+      "partial": "正確に取得できた変更のみ表示しています",
+      "partialReversible": "元に戻す操作と再適用の対象は正確に取得された変更のみです。取得されていない変更は処理されません",
+      "partialActionHint": "正確に取得されたファイル変更のみを元に戻すか再適用します",
+      "showMore": "さらに {{count}} ファイルを表示",
+      "reviewRemaining": "残り {{count}} ファイルをレビューで表示",
       "showLess": "折りたたむ"
     },
     "agentActions": {

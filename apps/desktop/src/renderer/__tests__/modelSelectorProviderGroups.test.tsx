@@ -282,12 +282,12 @@ async function openDropdown(): Promise<void> {
   });
 }
 
-async function hoverModelRowWithIntent(row: HTMLElement): Promise<void> {
+async function openModelOptionsPanel(row: HTMLElement): Promise<void> {
   await act(async () => {
-    // MorphPopover requires a real pointer delta before revealing row options. Model that
-    // contract explicitly instead of depending on jsdom's synthetic `isTrusted` value.
-    fireEvent.pointerMove(row, { screenX: 0, screenY: 0 });
-    fireEvent.pointerMove(row, { screenX: 8, screenY: 0 });
+    // These tests cover floating-panel geometry and anchor replacement. ArrowLeft
+    // is an explicitly supported entry point that invokes the reveal path without
+    // coupling the assertion to pointer trust or focus/blur timing under CI load.
+    fireEvent.keyDown(row, { key: 'ArrowLeft' });
   });
 }
 
@@ -321,7 +321,7 @@ describe('ModelSelector provider groups', () => {
 
     const modelList = screen.getByRole('listbox', { name: 'Model list' });
     const row = within(modelList).getByRole('option', { name: /Opus 4\.8/ });
-    await hoverModelRowWithIntent(row);
+    await openModelOptionsPanel(row);
 
     const secondaryPanel = await screen.findByTestId('model-options-floating-panel');
     const positioner = secondaryPanel.closest<HTMLElement>('[data-radix-popper-content-wrapper]');
@@ -415,7 +415,7 @@ describe('ModelSelector provider groups', () => {
 
     const modelList = screen.getByRole('listbox', { name: 'Model list' });
     const originalRow = within(modelList).getByRole('option', { name: /Opus 4\.8/ });
-    await hoverModelRowWithIntent(originalRow);
+    await openModelOptionsPanel(originalRow);
     await screen.findByTestId('model-options-floating-panel');
 
     const originalFloatingOptions = floatingUiMocks.useFloating.mock.calls.at(-1)?.[0] as {
@@ -440,7 +440,7 @@ describe('ModelSelector provider groups', () => {
     expect(screen.queryByTestId('model-options-floating-panel')).toBeNull();
     expect(floatingUiMocks.useFloating).toHaveBeenCalledTimes(floatingCallCountAfterFilter);
 
-    await hoverModelRowWithIntent(restoredRow);
+    await openModelOptionsPanel(restoredRow);
     await screen.findByTestId('model-options-floating-panel');
 
     const restoredFloatingOptions = floatingUiMocks.useFloating.mock.calls.at(-1)?.[0] as {

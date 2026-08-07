@@ -128,6 +128,10 @@ import {
 } from './codex-proxy-host.js';
 import { createDesktopMcpProviders } from '../mcp-integrations/mcp-providers.js';
 import { readContactsSettings } from './contacts-settings-store.js';
+import {
+  captureKnownFileBefore,
+  noteOpaqueTurnChange,
+} from '../turn-change-set/store.js';
 
 /**
  * 最近一次成功构建的 codex spawn 配置里, 通讯录开关的实际取值(null = 尚未
@@ -743,6 +747,10 @@ export function getMaker(): Maker {
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
       logger: desktopMakerLogger,
+      turnChangeCapture: {
+        beforeKnownFileWrite: captureKnownFileBefore,
+        noteOpaqueWrite: noteOpaqueTurnChange,
+      },
       reviewAutoPermissionAction,
       // 每个 session 的 cc 子进程 debug 写到 sessions/<id>/cc-debug.raw.log (logger 拼路径
       // + mkdir), tailer 再归一化汇入该 session 的 <date>.ndjson。
@@ -1425,6 +1433,10 @@ export function getMaker(): Maker {
 
     const piAgent = buildPiAgent({
       logger: desktopMakerLogger,
+      turnChangeCapture: {
+        beforeKnownFileWrite: captureKnownFileBefore,
+        noteOpaqueWrite: noteOpaqueTurnChange,
+      },
       reviewAutoPermissionAction,
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),

@@ -4470,6 +4470,14 @@
       "spawnFailed": "Failed to start terminal: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "Changes from this message",
+        "currentWorkspace": "Current workspace",
+        "localOnly": "Exact message changes are not available for remote sessions yet.",
+        "partialNotice": "This message includes command or tool writes that could not be tracked exactly. Only the captured subset is shown; it is not a complete patch.",
+        "emptyTitle": "No recorded changes",
+        "emptyDesc": "The recorded patch for this message has no displayable file changes."
+      },
       "fileCount_one": "{{count}} file",
       "fileCount_other": "{{count}} files",
       "emptyTitle": "No changes yet",
@@ -6189,8 +6197,34 @@
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "Attachment transfer failed; the message was not sent. Please try again."
     },
     "generatedFiles": {
-      "title": "Files created this turn",
+      "title": "Files created this message",
       "showMore": "Show {{count}} more",
+      "showLess": "Show less"
+    },
+    "turnChanges": {
+      "title": "Changed {{count}} files",
+      "partialTitle": "File changes were not fully captured",
+      "review": "Review",
+      "undo": "Undo",
+      "undoAria": "Undo changes from this message",
+      "undoPartialAria": "Undo exactly captured changes from this message",
+      "reapply": "Reapply",
+      "reapplyAria": "Reapply changes from this message",
+      "reapplyPartialAria": "Reapply exactly captured changes from this message",
+      "undoSuccess": "Changes from this message were undone",
+      "reapplySuccess": "Changes from this message were reapplied",
+      "undoPartialSuccess": "Exactly captured changes were undone; uncaptured changes were not undone",
+      "reapplyPartialSuccess": "Exactly captured changes were reapplied; uncaptured changes were not reapplied",
+      "actionRunning": "Wait for the current response to finish before changing the workspace",
+      "gitUnavailable": "Git was not detected. Install Git, make sure it is on the system PATH, and restart Cindy to use the full Undo and Reapply functionality.",
+      "actionConflict": "The workspace has changed, so this patch cannot be applied safely. Review the current changes first",
+      "actionUnavailable": "This message includes file changes that cannot be safely undone",
+      "actionFailed": "The changes could not be applied. Try again",
+      "partial": "Only the changes captured exactly are shown",
+      "partialReversible": "Only exactly captured changes can be undone or reapplied; uncaptured changes are not handled",
+      "partialActionHint": "Only undo or reapply exactly captured file changes",
+      "showMore": "Show {{count}} more files",
+      "reviewRemaining": "Review {{count}} more files",
       "showLess": "Show less"
     },
     "agentActions": {

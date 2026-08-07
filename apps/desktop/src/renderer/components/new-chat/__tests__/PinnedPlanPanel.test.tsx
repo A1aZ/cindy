@@ -297,3 +297,143 @@ describe('PinnedPlanPanel completed plan lifetime', () => {
     expect(screen.queryByTestId('plan-pill')).toBeNull();
   });
 });
+
+/**
+ * 终态盖章。main 只在「这一轮成功收尾」时给该计划行盖 terminalPlanSnapshot;
+ * 胶囊的退场只认这枚章,不看勾选状态——agent 收尾时没把每一步勾完是常态
+ * (Codex 官方同样如实保留未勾项),要求"全勾完才退场"等于要求它撒谎。
+ *
+ * 反过来,中断、失败、断线自动续跑都不盖章,计划照旧挂着:任务还活着,用户
+ * 正要接着指挥,这时候摘牌比不摘更糟。
+ */
+describe('PinnedPlanPanel terminal seal', () => {
+  function sealedPlanMessage(planUpdatedAtMs?: number, stepCount = 2): ChatMessage {
+    return {
+      ...planMessage('in_progress', T0, planUpdatedAtMs, stepCount),
+      terminalPlanSnapshot: true,
+    };
+  }
+
+  it('starts the grace period at the terminal seal, not when the plan was created', () => {
+    // 真实复现:计划先展示了 4 秒,agent 才回答完成。若拿 createdAt 算 2 秒,
+    // 章一到就已过期,用户会看到泡泡在收尾瞬间直接消失。
+    vi.setSystemTime(T0 + 4_000);
+    const sealedLater: ChatMessage = {
+      ...planMessage('in_progress', T0),
+      terminalPlanSnapshot: true,
+      terminalPlanAtMs: T0 + 4_000,
+    };
+
+    render(
+      <PinnedPlanPanel
+        sessionId="late-seal"
+        messages={[sealedLater]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1_999));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('retires a sealed plan that still has open steps', () => {
+    render(
+      <PinnedPlanPanel
+        sessionId="sealed-open-steps"
+        messages={[sealedPlanMessage(T0)]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1_999));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('keeps a sealed plan hidden when the task is reopened later', () => {
+    vi.setSystemTime(T0 + 60_000);
+    render(
+      <PinnedPlanPanel
+        sessionId="sealed-reopened"
+        messages={[sealedPlanMessage()]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('keeps an unsealed plan visible while the turn is still open', () => {
+    render(
+      <PinnedPlanPanel
+        sessionId="unsealed"
+        messages={[planMessage('in_progress')]}
+        animated
+        width={400}
+      />,
+    );
+
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+  });
+
+  it('keeps the plan visible when the turn was interrupted instead of finished', () => {
+    // main 对中断/失败的匹配 turn 只打 turnCompleted:false,不盖终态章。
+    const interrupted: ChatMessage = {
+      ...planMessage('in_progress'),
+      turnCompleted: false,
+    };
+
+    render(
+      <PinnedPlanPanel
+        sessionId="interrupted-turn"
+        messages={[interrupted]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+  });
+
+  it('shows the capsule again when a new plan update clears the seal', () => {
+    const view = render(
+      <PinnedPlanPanel
+        sessionId="sealed-then-updated"
+        messages={[sealedPlanMessage(T0)]}
+        animated={false}
+        width={400}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+
+    // 新一轮真的更新了计划:store 把章清成 false,胶囊重新亮牌。
+    view.rerender(
+      <PinnedPlanPanel
+        sessionId="sealed-then-updated"
+        messages={[
+          {
+            ...planMessage('in_progress', T0, T0 + 5_000, 3),
+            terminalPlanSnapshot: false,
+          },
+        ]}
+        animated
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+  });
+});

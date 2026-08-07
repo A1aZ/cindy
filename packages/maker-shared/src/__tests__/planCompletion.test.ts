@@ -89,12 +89,13 @@ describe('applyCodexPlanSnapshotOnDone', () => {
     });
   });
 
-  it('marks the matching plan complete when a successful turn has no final snapshot', () => {
+  it('seals the matching plan on a successful turn without ticking its open steps', () => {
     const completedAtMs = 1_700_000_005_000;
-    const message = planMessage('plan:done', [
+    const openSteps = [
       { step: 'Inspect', status: 'in_progress' },
       { step: 'Patch', status: 'pending' },
-    ]);
+    ];
+    const message = planMessage('plan:done', openSteps);
     const result = applyCodexPlanSnapshotOnDone(
       [message],
       null,
@@ -105,54 +106,54 @@ describe('applyCodexPlanSnapshotOnDone', () => {
 
     expect(result.changed).toBe(true);
     expect(result.toolUseId).toBe('plan:done');
+    // 章封生命周期,步骤事实保持原样:agent 没报告完成的事不能替它宣布完成。
     expect(result.messages[0]).toMatchObject({
+      terminalPlanSnapshot: true,
       planUpdatedAtMs: completedAtMs,
-      toolInput: {
-        plan: [
-          { step: 'Inspect', status: 'completed' },
-          { step: 'Patch', status: 'completed' },
-        ],
-      },
-      content: {
-        input: {
-          plan: [
-            { step: 'Inspect', status: 'completed' },
-            { step: 'Patch', status: 'completed' },
-          ],
-        },
-      },
+      toolInput: { plan: openSteps },
+      content: { input: { plan: openSteps } },
     });
   });
 
-  it('treats an unfinished done snapshot as cached progress for a successful turn', () => {
+  it('seals an already-sealed row only once so the capsule grace does not restart', () => {
+    const message = {
+      ...planMessage('plan:done', [{ step: 'Inspect', status: 'in_progress' }]),
+      terminalPlanSnapshot: true,
+    };
+    const messages = [message];
+
+    expect(applyCodexPlanSnapshotOnDone(messages, null, 'done', 'completed')).toEqual({
+      messages,
+      changed: false,
+      toolUseId: 'plan:done',
+    });
+  });
+
+  it('applies an explicit unfinished snapshot verbatim and seals it', () => {
     const message = planMessage('plan:done', [
       { step: 'Inspect', status: 'in_progress' },
       { step: 'Patch', status: 'pending' },
     ]);
-    const cachedProgress = [
+    const reportedProgress = [
       { step: 'Inspect', status: 'completed', description: 'kept from latest update' },
       { step: 'Patch', status: 'in_progress' },
     ];
 
     const result = applyCodexPlanSnapshotOnDone(
       [message],
-      cachedProgress,
+      reportedProgress,
       'done',
       'completed',
     );
 
     expect(result.changed).toBe(true);
     expect(result.messages[0]).toMatchObject({
-      toolInput: {
-        plan: [
-          { step: 'Inspect', status: 'completed', description: 'kept from latest update' },
-          { step: 'Patch', status: 'completed' },
-        ],
-      },
+      terminalPlanSnapshot: true,
+      toolInput: { plan: reportedProgress },
     });
   });
 
-  it('does not infer completion without a matching turn id', () => {
+  it('does not seal without a matching turn id', () => {
     const message = planMessage('plan:unrelated', [
       { step: 'Inspect', status: 'in_progress' },
     ]);
@@ -166,7 +167,7 @@ describe('applyCodexPlanSnapshotOnDone', () => {
     )).toEqual({ messages, changed: false, toolUseId: null });
   });
 
-  it('does not infer completion for a failed or interrupted turn', () => {
+  it('does not seal a failed or interrupted turn', () => {
     const message = planMessage('plan:stopped', [{ step: 'Inspect', status: 'in_progress' }]);
     const messages = [message];
 

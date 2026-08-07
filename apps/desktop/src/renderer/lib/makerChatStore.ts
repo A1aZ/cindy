@@ -371,6 +371,8 @@ export interface ChatMessage {
   planUpdatedAtMs?: number;
   /** Main stamped this persisted Codex plan at the successful done boundary. */
   terminalPlanSnapshot?: boolean;
+  /** Host time when the successful Codex plan seal was applied. */
+  terminalPlanAtMs?: number;
   /**
    * 产生这条消息的模型 raw id(读自 agentMeta.model)。对 subagent 子消息而言
    * 即子代理实际跑的模型(如 'claude-haiku-4-5-20251001')。仅 SDK 带 model 的
@@ -14321,7 +14323,12 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         toolName,
         toolInput,
         ...(toolName === 'update_plan' && c.terminalPlanSnapshot === true
-          ? { terminalPlanSnapshot: true }
+          ? {
+              terminalPlanSnapshot: true,
+              ...(typeof c.terminalPlanAtMs === 'number'
+                ? { terminalPlanAtMs: c.terminalPlanAtMs }
+                : {}),
+            }
           : {}),
         ...(toolName === 'update_plan' && c.turnCompleted === false
           ? { turnCompleted: false }

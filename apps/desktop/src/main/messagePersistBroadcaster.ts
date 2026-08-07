@@ -31,7 +31,6 @@ import { createId } from '@paralleldrive/cuid2';
 
 import { BrowserWindow } from 'electron';
 import { desc, eq } from 'drizzle-orm';
-import { resolveCodexPlanSnapshotOnDone } from '@cindy/maker-shared/message-render';
 
 import {
   broadcastMessageRow,
@@ -618,13 +617,15 @@ export function persistCodexPlanOnDone(
   if (!input || !Array.isArray(input.plan)) return false;
 
   const isSuccessfulTerminal = isSuccessfulCodexDoneEventData(data);
-  const nextPlan =
-    resolveCodexPlanSnapshotOnDone(input.plan, data?.plan, isSuccessfulTerminal) ??
-    (isSuccessfulTerminal ? null : input.plan);
-  if (!nextPlan) return false;
+  // Only an explicit snapshot from Codex may change step statuses. A successful
+  // turn that left items open is recorded as-is and closed by the seal below —
+  // ticking them here would make the stored plan claim work the agent never
+  // reported doing.
+  const nextPlan = Array.isArray(data?.plan) ? data.plan : input.plan;
   // Even when Codex already emitted the exact completed/empty plan, stamp the
   // durable row at done. Renderer must distinguish this authoritative write
   // from an older ordinary DB echo that merely happens to look completed.
+  const terminalPlanAtMs = Date.now();
   const nextInput = { ...input, plan: nextPlan };
   infoMap?.set(toolUseId, { ...info, input: nextInput });
   enqueueWrite(`codex_plan_done:${sessionId}:${persistId}`, async (ownerScope) => {
@@ -633,7 +634,7 @@ export function persistCodexPlanOnDone(
       toolName: 'update_plan',
       input: nextInput,
       ...(isSuccessfulTerminal
-        ? { terminalPlanSnapshot: true }
+        ? { terminalPlanSnapshot: true, terminalPlanAtMs }
         : { turnCompleted: false }),
     });
     // Reuse the existing upsert-style row broadcast so a renderer that mounts

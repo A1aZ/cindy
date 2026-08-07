@@ -6,7 +6,15 @@
  * 鼠标悬停时完整清单以浮层向上展开,原地实时更新,不会被后续消息冲走。
  * 数据从会话消息派生(findLatestMessageTodoInsertion):跨 source(TodoWrite /
  * update_plan / Task*)取最近更新的 plan session 快照;历史 session 不再逐张
- * 展示。无计划时返回 null,不占位;计划完成后保留 2 秒再收起。
+ * 展示。无计划时返回 null,不占位。
+ *
+ * **退场条件是 host 的终态章,不是"步骤全勾完"**(`insertion.sealed`,来源见
+ * maker-shared 的 `terminalPlanSnapshot`)。agent 收尾时漏勾最后几步是常态,
+ * 以"全勾完"为退场条件会让干完的活儿永远挂在屏幕上;而中断、失败、断线自动
+ * 续跑都不盖章,那种情况计划必须留着——任务还活着,用户正要接着指挥。
+ *
+ * 盖章后同样保留 2 秒再收起,时刻锚在章上(章落库,所以重载/新窗口看到的是
+ * 同一个时刻,不会重新数 2 秒)。旧数据没有章,按"全勾完"兜底,行为不变。
  */
 
 import { useEffect, useMemo, useState } from 'react';
@@ -47,9 +55,12 @@ export function PinnedPlanPanel({
     insertion.todos.length > 0 &&
     insertion.todos.every((todo) => todo.status === 'completed'),
   );
-  const completedAtMs = insertion?.updatedAtMs ?? Date.parse(insertion?.createdAt ?? '');
+  // 退场 = host 盖了终态章(权威),或计划自己勾完了(没有章的旧数据兜底)。
+  const retired = Boolean(insertion) && (insertion?.sealed === true || allDone);
+  const completedAtMs =
+    insertion?.sealedAtMs ?? insertion?.updatedAtMs ?? Date.parse(insertion?.createdAt ?? '');
   const persistedCompletionDeadlineMs =
-    allDone && Number.isFinite(completedAtMs) ? completedAtMs + COMPLETED_PLAN_VISIBLE_MS : null;
+    retired && Number.isFinite(completedAtMs) ? completedAtMs + COMPLETED_PLAN_VISIBLE_MS : null;
   const [fallbackCompletionVisibility, setFallbackCompletionVisibility] = useState<{
     identity: string;
     deadlineMs: number;
@@ -57,7 +68,7 @@ export function PinnedPlanPanel({
   const completionIdentity = insertion ? `${sessionId ?? 'unknown'}:${insertion.key}` : null;
   const completionDeadlineMs =
     persistedCompletionDeadlineMs ??
-    (allDone && fallbackCompletionVisibility?.identity === completionIdentity
+    (retired && fallbackCompletionVisibility?.identity === completionIdentity
       ? fallbackCompletionVisibility.deadlineMs
       : null);
   const completedPlanExpired = Boolean(
@@ -66,7 +77,7 @@ export function PinnedPlanPanel({
   const [hiddenInsertionKey, setHiddenInsertionKey] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!insertion || !allDone) {
+    if (!insertion || !retired) {
       setHiddenInsertionKey(null);
       setFallbackCompletionVisibility(null);
       return;
@@ -92,7 +103,7 @@ export function PinnedPlanPanel({
       setHiddenInsertionKey(insertion.key);
     }, remainingMs);
     return () => window.clearTimeout(timer);
-  }, [allDone, completionDeadlineMs, completionIdentity, insertion?.key]);
+  }, [retired, completionDeadlineMs, completionIdentity, insertion?.key]);
 
   if (
     !visible ||

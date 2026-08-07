@@ -19,6 +19,15 @@ export interface MessageRenderSourceMessageLike {
   toolUseId?: string | null;
   /** Host-persisted SDK turn boundary on the final assistant or owning Codex plan row. */
   turnCompleted?: boolean;
+  /**
+   * Host sealed this Codex plan row because its owning turn ended successfully.
+   * The seal closes the plan's lifecycle only — step statuses stay exactly as the
+   * agent last reported them. Interrupted, failed, and auto-resumed turns never
+   * seal, so their plan stays open while the task itself is still alive.
+   */
+  terminalPlanSnapshot?: boolean;
+  /** Host time when the successful turn seal was applied. */
+  terminalPlanAtMs?: number;
 }
 
 export type MessageRenderNormalizedMessageKind =
@@ -193,6 +202,14 @@ export interface MessageRenderTodoInsertion {
   createdAt?: string;
   updatedAtMs?: number;
   source: MessageRenderTodoSource;
+  /**
+   * 这份计划所属的 turn 已被 host 判定为成功收尾(见
+   * `MessageRenderSourceMessageLike.terminalPlanSnapshot`)。常驻面板据此退场,
+   * 不看勾选状态;未盖章就一直挂着。
+   */
+  sealed?: boolean;
+  /** Persisted host time of the successful terminal seal. */
+  sealedAtMs?: number;
 }
 
 export interface MessageRenderLatestTodoState {
@@ -476,6 +493,14 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
       createdAt: messages[session.lastIndex]?.createdAt,
       updatedAtMs: messages[session.lastIndex]?.planUpdatedAtMs,
       source: session.source,
+      ...(messages[session.lastIndex]?.terminalPlanSnapshot === true
+        ? {
+            sealed: true,
+            ...(typeof messages[session.lastIndex]?.terminalPlanAtMs === 'number'
+              ? { sealedAtMs: messages[session.lastIndex].terminalPlanAtMs }
+              : {}),
+          }
+        : {}),
     });
   }
   return out;
@@ -551,28 +576,23 @@ export interface CodexPlanSnapshotApplyResult<
 }
 
 /**
- * Resolve the plan payload that should survive a Codex turn terminal event.
- * A successful turn is authoritative even when Codex only returns its last
- * cached in-progress snapshot: every remaining item belongs to that finished
- * turn and must converge to completed. Other terminal states may only apply an
- * explicit snapshot; they must never infer completion from stale progress.
+ * Close out a Codex plan at its owning turn's terminal event.
+ *
+ * Two independent things happen here, and keeping them separate is the whole
+ * point:
+ *  - **Content**: an explicit `turn/plan/updated` snapshot carried by `done` is
+ *    applied verbatim. Nothing else ever rewrites a step. Codex leaves open
+ *    items on a successful turn routinely (its own prompt asks the model to tick
+ *    them, and the model complies most of the time — not always), and inventing
+ *    the missing ticks makes the transcript claim work that was never reported.
+ *  - **Lifecycle**: a successful, ownership-matched turn *seals* the row. The
+ *    seal is what retires the pinned capsule, so retiring no longer depends on
+ *    the agent having ticked every box.
+ *
+ * Interrupted / failed turns, and any turn whose id does not match, seal
+ * nothing: the task is still alive and the user is usually about to steer it,
+ * so the plan must stay on screen.
  */
-export function resolveCodexPlanSnapshotOnDone(
-  currentPlan: readonly unknown[],
-  snapshot: unknown,
-  inferCompletion: boolean,
-): unknown[] | null {
-  const authoritativeSnapshot = Array.isArray(snapshot) ? snapshot : null;
-  if (!authoritativeSnapshot && !inferCompletion) return null;
-
-  const snapshotSource = authoritativeSnapshot ?? currentPlan;
-  if (!inferCompletion) return authoritativeSnapshot;
-  return snapshotSource.map((item) => {
-    const record = readRecord(item);
-    return record ? { ...record, status: 'completed' } : item;
-  });
-}
-
 export function applyCodexPlanSnapshotOnDone<
   TMessage extends MessageRenderSourceMessageLike,
 >(
@@ -583,9 +603,8 @@ export function applyCodexPlanSnapshotOnDone<
   planUpdatedAtMs?: number,
 ): CodexPlanSnapshotApplyResult<TMessage> {
   const authoritativeSnapshot = Array.isArray(snapshot) ? snapshot : null;
-  const hasAuthoritativeSnapshot = authoritativeSnapshot !== null;
-  const canInferCompletion = terminalStatus === 'completed' && Boolean(turnId);
-  if (!hasAuthoritativeSnapshot && !canInferCompletion) {
+  const sealsTurn = terminalStatus === 'completed' && Boolean(turnId);
+  if (!authoritativeSnapshot && !sealsTurn) {
     return { messages, changed: false, toolUseId: null };
   }
   const expectedToolUseId = turnId ? `plan:${turnId}` : null;
@@ -600,36 +619,36 @@ export function applyCodexPlanSnapshotOnDone<
 
     const input = readRecord(toolInputOf(message));
     if (!Array.isArray(input?.plan)) continue;
-    // maker-core attaches the latest cached turn/plan/updated snapshot to done.
-    // When Codex omits its final plan update, that array still contains open
-    // items and is in progress rather than a terminal snapshot. Converge that
-    // cached progress (or the persisted row when no snapshot exists) only for a
-    // matching, explicitly successful turn. Without a turn id, an array can
-    // still be applied as supplied but completion must never be inferred for an
-    // unrelated last plan row.
-    const nextSnapshot = resolveCodexPlanSnapshotOnDone(
-      input.plan,
-      authoritativeSnapshot,
-      canInferCompletion,
-    );
-    if (!nextSnapshot) {
-      return { messages, changed: false, toolUseId: null };
-    }
-    if (samePlanSnapshot(input.plan, nextSnapshot)) {
+
+    const nextPlan = authoritativeSnapshot ?? input.plan;
+    const planChanged =
+      authoritativeSnapshot !== null && !samePlanSnapshot(input.plan, authoritativeSnapshot);
+    // Seal an already-sealed row again would be a no-op update that still
+    // restarts the capsule's grace timer, so treat it as unchanged.
+    const sealChanged = sealsTurn && message.terminalPlanSnapshot !== true;
+    if (!planChanged && !sealChanged) {
       return { messages, changed: false, toolUseId };
     }
 
     const next = [...messages];
     next[index] = {
       ...message,
+      ...(sealsTurn
+        ? {
+            terminalPlanSnapshot: true,
+            ...(typeof planUpdatedAtMs === 'number' && Number.isFinite(planUpdatedAtMs)
+              ? { terminalPlanAtMs: planUpdatedAtMs }
+              : {}),
+          }
+        : {}),
       ...(typeof planUpdatedAtMs === 'number' && Number.isFinite(planUpdatedAtMs)
         ? { planUpdatedAtMs }
         : {}),
       ...(message.toolInput !== undefined
-        ? { toolInput: { ...input, plan: nextSnapshot } }
+        ? { toolInput: { ...input, plan: nextPlan } }
         : {}),
       ...(content
-        ? { content: { ...content, input: { ...input, plan: nextSnapshot } } }
+        ? { content: { ...content, input: { ...input, plan: nextPlan } } }
         : {}),
     };
     return { messages: next, changed: true, toolUseId };

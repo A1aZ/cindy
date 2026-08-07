@@ -186,7 +186,7 @@ describe('update_plan tool_use persistence', () => {
     );
   });
 
-  it('persists a successful turn plan as completed so reload cannot resurrect progress', async () => {
+  it('seals a successful turn plan as-is so reload cannot resurrect it', async () => {
     const persistId = onToolUseEvent(
       SESSION,
       {
@@ -218,11 +218,13 @@ describe('update_plan tool_use persistence', () => {
       {
         toolUseId: 'plan:turn-1',
         toolName: 'update_plan',
+        // 步骤原样落库(Codex 报的就是 in_progress),退场靠下面这枚章,
+        // 不靠把没干完的步骤改成 completed。
         input: {
           explanation: 'keep this field',
           plan: [
             { step: 'Inspect', status: 'completed' },
-            { step: 'Start dev', status: 'completed' },
+            { step: 'Start dev', status: 'in_progress' },
           ],
         },
         terminalPlanSnapshot: true,
@@ -233,6 +235,36 @@ describe('update_plan tool_use persistence', () => {
       expect.any(Object),
       ownerScopeState.scope,
     );
+  });
+
+  /**
+   * 现场 bug 的确切形态:活儿干完了,Codex 收尾时没有再发一次 plan 更新,
+   * 于是 done 上压根没有 plan 快照,库里那份仍停在 in_progress/pending。
+   * 必须只靠章收口——胶囊据此退场,步骤事实一个不动。
+   */
+  it('seals a successful turn that ended without any final plan snapshot', async () => {
+    const openPlan = [
+      { step: 'Find the capsule', status: 'completed' },
+      { step: 'Reopen the task', status: 'in_progress' },
+      { step: 'Confirm it stays gone', status: 'pending' },
+    ];
+    const persistId = onToolUseEvent(
+      SESSION,
+      { toolUseId: 'plan:turn-no-snapshot', toolName: 'update_plan', input: { plan: openPlan } },
+      null,
+    );
+
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-no-snapshot', status: 'completed' },
+    })).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(SESSION, persistId, {
+      toolUseId: 'plan:turn-no-snapshot',
+      toolName: 'update_plan',
+      input: { plan: openPlan },
+      terminalPlanSnapshot: true,
+    });
   });
 
   it('stamps an already-completed plan as terminal at the successful done boundary', async () => {

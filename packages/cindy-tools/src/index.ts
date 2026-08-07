@@ -18,6 +18,7 @@ export type {
   CindyGhostCallResult,
   CindyGhostInfo,
   CindyGhostInfoErrorCode,
+  CindyGhostInfoHostResult,
   CindyGhostInfoResult,
   CindyGhostSetupAllowedAction,
   CindyGhostSetupAssessment,

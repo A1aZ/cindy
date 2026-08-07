@@ -153,9 +153,15 @@ export type CindyGhostInfoErrorCode = Extract<
   'GHOST_NOT_FOUND' | 'GHOST_ASLEEP' | 'GHOST_DISABLED_IN_WORKDIR'
 >;
 
-export type CindyGhostInfoResult =
+/** host 可见性判序回调(getAwakeGhost)的返回:只产可见性三码,不产 INTERNAL。 */
+export type CindyGhostInfoHostResult =
   | { ok: true; ghost: CindyGhostInfo }
   | { ok: false; errorCode: CindyGhostInfoErrorCode; message: string };
+
+/** ghost_info 给模型的 wire 结果:host 结果之上,handler 兜底 catch 可产 INTERNAL。 */
+export type CindyGhostInfoResult =
+  | CindyGhostInfoHostResult
+  | { ok: false; errorCode: 'INTERNAL'; message: string; errorType?: string };
 
 export type CindyGhostCallResult =
   | {
@@ -235,7 +241,7 @@ export interface CindyGhostsMcpDeps {
    * 按 id 现查单个当前可用插件；与 ghost_call 共享同一可见性判定。
    * 判序：不存在 → 未登录 → 当前工作目录停用 → 未启用。
    */
-  getAwakeGhost(ghostId: string): Promise<CindyGhostInfoResult>;
+  getAwakeGhost(ghostId: string): Promise<CindyGhostInfoHostResult>;
   /**
    * 把工具调用派进目标意识的电子脑并等待结果(按需拉起沙箱、超时、
    * 崩溃分类全在 host 侧处理)。

@@ -14,6 +14,7 @@ import {
 } from "../ghost/mcpServer.js";
 import type {
   CindyGhostInfo,
+  CindyGhostInfoResult,
   CindyGhostSetupAssessment,
   CindyGhostsMcpDeps,
 } from "../types.js";
@@ -372,12 +373,14 @@ describe("cindy_ghosts · ghost_info(单插件精准查询)", () => {
       { ghost_id: "x".repeat(100) },
     );
     expect(result.isError).toBe(true);
-    expect(parsePayload(result)).toEqual({
+    // 字面量带类型标注:INTERNAL 兜底必须能被 wire 类型表达,漏码会在编译期报错。
+    const internalWire: CindyGhostInfoResult = {
       ok: false,
       errorCode: "INTERNAL",
       message: "插件详情查询失败;不要重试,可调用 ghost_list 查看当前可用插件。",
       errorType: "TypeError",
-    });
+    };
+    expect(parsePayload(result)).toEqual(internalWire);
     expect(JSON.stringify(parsePayload(result))).not.toContain("host secret detail");
     expect(warn).toHaveBeenCalledWith("ghost_info failed", {
       ghostId: "x".repeat(64),

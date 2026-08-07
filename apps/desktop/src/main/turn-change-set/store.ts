@@ -1096,7 +1096,13 @@ async function persistPending(
   const files = diffs.length > 0 ? summarizeDiffs(diffs) : pending.nativeFiles;
   // An opaque tool with no known paths is still important turn metadata. Persist a
   // zero-file partial entry so the UI never silently represents it as fully tracked.
-  if (files.length === 0 && pending.incompleteReasons.size === 0) return;
+  // 'turn-failed' alone is not such evidence: a turn that failed without any capture
+  // activity (no tools, no files) cannot have changed the workspace, so persisting
+  // an empty partial card would claim untracked changes that never existed.
+  if (
+    files.length === 0
+    && [...pending.incompleteReasons].every((reason) => reason === 'turn-failed')
+  ) return;
   const anchorClientId = pending.anchorClientId;
   if (!anchorClientId) {
     log.warn('turn change-set has no visible user anchor', { sessionId, id: pending.id });
@@ -1442,10 +1448,21 @@ async function validAnchorIds(sessionId: string, summaries: readonly TurnChangeS
   return new Set(rows.map((row) => row.clientId));
 }
 
+/**
+ * A zero-file entry whose only incomplete reason is 'turn-failed' carries no change
+ * information (see persistPending). Earlier builds persisted such entries for every
+ * failed turn; hide them on read so legacy sidecars self-heal without a migration.
+ */
+function isEmptyFailedTurnEntry(summary: TurnChangeSetSummary): boolean {
+  return summary.fileCount === 0
+    && summary.incompleteReasons.every((reason) => reason === 'turn-failed');
+}
+
 export async function listTurnChangeSets(sessionId: string): Promise<TurnChangeSetSummary[]> {
   const summaries = await readIndex(sessionId);
   const anchors = await validAnchorIds(sessionId, summaries);
-  return summaries.filter((summary) => anchors.has(summary.anchorClientId));
+  return summaries.filter((summary) =>
+    anchors.has(summary.anchorClientId) && !isEmptyFailedTurnEntry(summary));
 }
 
 export async function getTurnChangeSets(

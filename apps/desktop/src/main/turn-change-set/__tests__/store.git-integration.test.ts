@@ -945,6 +945,110 @@ describe('turn change-set sidecar store', () => {
     });
   });
 
+  it('drops the change set when a turn fails without any capture activity', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await finalizeTurnChangeSet('session-1', null, 'partial');
+
+    expect(await listTurnChangeSets('session-1')).toHaveLength(0);
+  });
+
+  it('drops the change set when a failed turn only touched files without changing them', async () => {
+    const target = path.join(workdir, 'a.ts');
+    await fs.writeFile(target, 'same\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'a.ts',
+    });
+    await finalizeTurnChangeSet('session-1', null, 'partial');
+
+    expect(await listTurnChangeSets('session-1')).toHaveLength(0);
+  });
+
+  it('persists a partial entry with turn-failed when a failed turn changed files', async () => {
+    const target = path.join(workdir, 'a.ts');
+    await fs.writeFile(target, 'old\n', 'utf8');
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'claude-code',
+      cwd: workdir,
+    });
+    await captureKnownFileBefore({
+      sessionId: 'session-1',
+      provider: 'claude-code',
+      cwd: workdir,
+      targetPath: 'a.ts',
+    });
+    await fs.writeFile(target, 'new\n', 'utf8');
+    await finalizeTurnChangeSet('session-1', null, 'partial');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({
+      state: 'partial',
+      incompleteReasons: ['turn-failed'],
+      fileCount: 1,
+      additions: 1,
+      deletions: 1,
+    });
+  });
+
+  it('hides legacy zero-file turn-failed-only entries persisted by earlier builds', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'pi',
+      cwd: workdir,
+    });
+    noteOpaqueTurnChange({ sessionId: 'session-1', provider: 'pi', cwd: workdir });
+    await finalizeTurnChangeSet('session-1', null, 'complete');
+    expect(await listTurnChangeSets('session-1')).toHaveLength(1);
+
+    // Rewrite the sidecar as an earlier build would have persisted a failed turn
+    // with no capture activity: zero files, incompleteReasons = ['turn-failed'].
+    const sidecarDir = path.join(mocks.userDataRoot, 'turn-change-sets', 'session-1');
+    const indexPath = path.join(sidecarDir, 'index.json');
+    const index = JSON.parse(await fs.readFile(indexPath, 'utf8')) as {
+      version: number;
+      entries: Array<{ id: string; incompleteReasons: string[] }>;
+    };
+    index.entries[0]!.incompleteReasons = ['turn-failed'];
+    await fs.writeFile(indexPath, `${JSON.stringify(index)}\n`, 'utf8');
+
+    expect(await listTurnChangeSets('session-1')).toHaveLength(0);
+  });
+
+  it('keeps the zero-file partial entry when a failed turn also ran an opaque tool', async () => {
+    await beginTurnChangeSet({
+      sessionId: 'session-1',
+      anchorClientId: 'user-1',
+      provider: 'pi',
+      cwd: workdir,
+    });
+    noteOpaqueTurnChange({ sessionId: 'session-1', provider: 'pi', cwd: workdir });
+    await finalizeTurnChangeSet('session-1', null, 'partial');
+
+    const [summary] = await listTurnChangeSets('session-1');
+    expect(summary).toMatchObject({
+      state: 'partial',
+      incompleteReasons: expect.arrayContaining(['opaque-tool', 'turn-failed']),
+      fileCount: 0,
+      files: [],
+    });
+  });
+
   it.each([
     ['absolute path', 'diff --git /outside.txt /outside.txt'],
     ['parent traversal', 'diff --git a/../escape.txt b/../escape.txt'],

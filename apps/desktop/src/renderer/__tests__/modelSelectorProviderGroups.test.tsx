@@ -284,10 +284,10 @@ async function openDropdown(): Promise<void> {
 
 async function openModelOptionsPanel(row: HTMLElement): Promise<void> {
   await act(async () => {
-    // These tests cover floating-panel geometry and anchor replacement. Focus is
-    // an equivalent supported entry point and avoids platform-specific pointer
-    // event trust/coordinate behavior obscuring those contracts.
-    fireEvent.focus(row);
+    // These tests cover floating-panel geometry and anchor replacement. ArrowLeft
+    // is an explicitly supported entry point that invokes the reveal path without
+    // coupling the assertion to pointer trust or focus/blur timing under CI load.
+    fireEvent.keyDown(row, { key: 'ArrowLeft' });
   });
 }
 

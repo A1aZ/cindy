@@ -25,6 +25,7 @@ import type { AgentDeps, AgentSessionHandle } from '../../base-agent.js';
 import type { AuthAdapter } from '../../../interfaces/auth-adapter.js';
 import type { AgentEvent } from '../../../types/events.js';
 import type { Logger } from '../../../interfaces/logger.js';
+import type { ModelDescriptor } from '../../../types/capabilities.js';
 
 const sdkMock = vi.hoisted(() => ({
   forkSession: vi.fn(),
@@ -74,6 +75,23 @@ import { Session } from '../../../session.js';
 
 const tempDirs: string[] = [];
 const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+
+const TEST_MODELS: ModelDescriptor[] = [
+  {
+    id: 'claude-opus-4-6',
+    displayName: 'Claude Opus 4.6',
+    contextWindow: 1_000_000,
+    efforts: ['low', 'medium', 'high', 'max'],
+    defaultEffort: 'high',
+  },
+  {
+    id: 'claude-sonnet-5',
+    displayName: 'Claude Sonnet 5',
+    contextWindow: 500_000,
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    defaultEffort: 'high',
+  },
+];
 
 function createNoopLogger(): Logger {
   const logger: Logger = {
@@ -187,7 +205,12 @@ async function makeTempDir(): Promise<string> {
 
 async function startSessionWithStream(
   queryOpts?: { omitStopTask?: boolean },
-  opts?: { autoCollect?: boolean; vendorOptions?: Record<string, unknown> },
+  opts?: {
+    autoCollect?: boolean;
+    vendorOptions?: Record<string, unknown>;
+    autoCompactThresholdPct?: number;
+    capturePrompts?: boolean;
+  },
 ) {
   const configDir = await makeTempDir();
   process.env.CLAUDE_CONFIG_DIR = configDir;
@@ -195,6 +218,8 @@ async function startSessionWithStream(
 
   const streams: Array<ReturnType<typeof createControlledStream>> = [];
   const fakeQueries: Array<ReturnType<typeof createFakeQuery>> = [];
+  const queryInputs: unknown[][] = [];
+  const prompts: Array<AsyncIterable<unknown> | undefined> = [];
   const stream = {
     emit(message: unknown): void {
       const current = streams.at(-1);
@@ -208,14 +233,17 @@ async function startSessionWithStream(
   sdkMock.query.mockImplementation((options: unknown) => {
     const queryStream = createControlledStream();
     const fakeQuery = createFakeQuery(queryStream, queryOpts);
+    const inputs: unknown[] = [];
     streams.push(queryStream);
     fakeQueries.push(fakeQuery);
+    queryInputs.push(inputs);
     const prompt = (options as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
-    if (prompt) {
+    prompts.push(prompt);
+    if (prompt && !opts?.capturePrompts) {
       void (async () => {
         try {
           for await (const ignored of prompt) {
-            void ignored; // discard — 只对齐 pending 语义
+            inputs.push(ignored);
           }
         } catch { /* end / abort 都算正常收尾 */ }
       })();
@@ -223,7 +251,16 @@ async function startSessionWithStream(
     return fakeQuery;
   });
 
-  const agent = new ClaudeCodeAgent(createDeps());
+  const agent = new ClaudeCodeAgent({
+    ...createDeps({
+      runtimeConfig: {
+        ...(opts?.autoCompactThresholdPct === undefined
+          ? {}
+          : { autoCompactThresholdPct: opts.autoCompactThresholdPct }),
+      },
+    }),
+    capabilityAdditions: { availableModels: TEST_MODELS },
+  });
   const handle = await agent.startSession({
     sessionId: 'session-stop-task',
     model: 'claude-opus-4-6',
@@ -243,7 +280,18 @@ async function startSessionWithStream(
 
   const fakeQuery = fakeQueries[0];
   if (!fakeQuery) throw new Error('initial fake query was not created');
-  return { agent, handle, stream, streams, fakeQuery, fakeQueries, events, collected };
+  return {
+    agent,
+    handle,
+    stream,
+    streams,
+    fakeQuery,
+    fakeQueries,
+    queryInputs,
+    prompts,
+    events,
+    collected,
+  };
 }
 
 async function startRemoteSessionWithStream(opts?: { autoCollect?: boolean }) {
@@ -1703,6 +1751,114 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     stream.emit(turnResult('rewound turn complete'));
     await waitFor(() => events.filter(isProductTerminal).length === 2, 'rewound turn terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'rewound turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('synthetic cancellation rebuilds with compact before the next user message after a small-window switch', async () => {
+    const { handle, stream, streams, events, fakeQueries, prompts } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit({
+      type: 'stream_event',
+      event: { type: 'message_delta', usage: { input_tokens: 400_000, output_tokens: 0 } },
+    });
+    await vi.waitFor(() => {
+      expect(handle.getUsageSnapshot().contextTokens).toBe(400_000);
+    });
+    expect(handle.getUsageSnapshot().contextWindow).toBe(1_000_000);
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await expect(handle.setModel?.('claude-sonnet-5')).resolves.toBeUndefined();
+    expect(handle.getUsageSnapshot().contextWindow).toBe(500_000);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'user after cancellation' });
+    expect(fakeQueries).toHaveLength(2);
+    expect(streams).toHaveLength(2);
+    const prompt = prompts[1];
+    expect(prompt).toBeDefined();
+    const promptIter = prompt![Symbol.asyncIterator]();
+    expect((await promptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await promptIter.next()).value?.message?.content).toBe('user after cancellation');
+
+    streams[1]?.emit(turnResult('compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.isTurnRunning?.()).toBe(true);
+
+    streams[1]?.emit(turnResult('user complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'user terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'user turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('Stop during a cancellation compact bridge retries with a fresh query and no rewind target', async () => {
+    const { handle, stream, streams, events, fakeQueries, prompts } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await handle.setModel?.('claude-sonnet-5');
+    await handle.send({ type: 'user', content: 'must be cancelled with compact' });
+    expect(fakeQueries).toHaveLength(2);
+    const bridgePrompt = prompts[1];
+    expect(bridgePrompt).toBeDefined();
+    const bridgePromptIter = bridgePrompt![Symbol.asyncIterator]();
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe(
+      'must be cancelled with compact',
+    );
+
+    await handle.abort();
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'bridge Stop terminal observed');
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'retry after cancellation bridge Stop' });
+    expect(fakeQueries).toHaveLength(3);
+    const retryArgs = sdkMock.query.mock.calls[2]?.[0] as {
+      options?: Record<string, unknown>;
+    };
+    expect(retryArgs.options).not.toHaveProperty('resumeSessionAt');
+    expect(retryArgs.options).not.toHaveProperty('forkSession');
+    const retryPrompt = prompts[2];
+    expect(retryPrompt).toBeDefined();
+    const retryPromptIter = retryPrompt![Symbol.asyncIterator]();
+    expect((await retryPromptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await retryPromptIter.next()).value?.message?.content).toBe(
+      'retry after cancellation bridge Stop',
+    );
+
+    streams[2]?.emit(turnResult('retry compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events.filter(isProductTerminal)).toHaveLength(2);
+    expect(handle.isTurnRunning?.()).toBe(true);
+    streams[2]?.emit(turnResult('retry user complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 3, 'retry terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'retry settled');
 
     stream.end();
     await handle.close().catch(() => undefined);

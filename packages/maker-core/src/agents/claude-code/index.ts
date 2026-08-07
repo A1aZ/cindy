@@ -1972,12 +1972,16 @@ export class ClaudeCodeAgent extends BaseAgent {
      * 的边界事件正常放行、清 turnInFlight。计数 = "已注入但 SDK 还没跑完的桥接 turn 数"。
      */
     let queuedBridgeTurns = 0;
-    // Bridge /compact 只在 rewind rebuild 尾部注入。若用户 Stop 打在该 bridge turn
+    type ActiveBridgeKind = 'rewind' | 'cancellation';
+    let activeBridgeKind: ActiveBridgeKind | null = null;
+    // Bridge /compact 由 rewind 或 cancellation rebuild 尾部注入。若用户 Stop 打在该 bridge turn
     // 上, 已被 SDK eager-drain 的后续真实用户输入无法再从 inputQueue.clear() 追回;
     // 必须 close 当前 Query, 并在下一次 send 用同一个 resume point 重建, 才能从 SDK
     // 侧取消整条 compact → user 序列。
     let activeBridgeRewindResumeAt: string | undefined;
     let bridgeCompactUsageSnapshot: ReturnType<AutoCompactController['getLatestSnapshot']> = null;
+    const bridgeStateActive = (): boolean =>
+      queuedBridgeTurns > 0 || activeBridgeKind !== null || activeBridgeRewindResumeAt !== undefined;
     let q: Query;
     function restoreBridgeAutoCompactSnapshot(reason: string): void {
       const snapshot = bridgeCompactUsageSnapshot;
@@ -2088,7 +2092,9 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 也可能只中断当前 /compact turn,让已 drain 的真实消息继续跑。这里走与
       // abort() 相同的 close-and-rebuild 路径,并保留 rewind resume point 给下一次
       // send 重建。
-      if (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined) {
+      if (bridgeStateActive()) {
+        const timedOutBridgeKind = activeBridgeKind;
+        const timedOutRewindResumeAt = activeBridgeRewindResumeAt;
         log.warn('upstream-idle watchdog fired during bridge — closing query and preserving rewind resume point', {
           queuedBridgeTurns,
           queuedInput: inputQueue.pending,
@@ -2128,6 +2134,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         turnInFlight = false;
         turnState.interruptRequested = false;
         pendingToolIds.clear();
+        preserveBridgeRetryTarget(timedOutBridgeKind, timedOutRewindResumeAt);
         emitTurnBoundary('upstream_response_idle_timeout', takeBridgeSuppressedDoneData());
         return;
       }
@@ -2198,6 +2205,34 @@ export class ClaudeCodeAgent extends BaseAgent {
       });
       armUpstreamResponseIdle();
       return true;
+    }
+
+    function queueAutoCompactBridge(kind: ActiveBridgeKind, resumeAt?: string): boolean {
+      const queued = triggerAutoCompactIfNeeded();
+      if (!queued) return false;
+      bridgeCompactUsageSnapshot = autoCompactController?.getLatestSnapshot() ?? null;
+      activeBridgeKind = kind;
+      if (kind === 'rewind') activeBridgeRewindResumeAt = resumeAt;
+      queuedBridgeTurns += 1;
+      log.debug('rebuild: bridge /compact injected', {
+        bridgeKind: kind,
+        queuedBridgeTurns,
+        activeBridgeRewindResumeAt,
+      });
+      return true;
+    }
+
+    function preserveBridgeRetryTarget(
+      kind: ActiveBridgeKind | null,
+      rewindResumeAt: string | undefined,
+    ): void {
+      if (kind === 'rewind' && rewindResumeAt !== undefined) {
+        pendingRewindTo = rewindResumeAt;
+      } else if (kind === 'cancellation') {
+        continuationCancellationRequiresQueryRebuild = true;
+      }
+      activeBridgeKind = null;
+      activeBridgeRewindResumeAt = undefined;
     }
 
     // 当前 session 的 one-shot tip 状态 (turn-start status 用):
@@ -2905,6 +2940,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       // handle 死透 → 后续没有排队 turn 可跑, counter 归零避免残留污染下一 handle 重建
       // (虽然 closed=true + inputQueue.end 已经让新消息进不来, 归零是防御性一致)
       queuedBridgeTurns = 0;
+      activeBridgeKind = null;
       activeBridgeRewindResumeAt = undefined;
       pendingToolIds.clear();
       runningBackgroundTasks.clear();
@@ -3605,11 +3641,13 @@ export class ClaudeCodeAgent extends BaseAgent {
             if (canceledBridgeQueries.has(currentQ) || rewindTransitionQueries.has(currentQ)) {
               continue;
             }
-            if (activeBridgeRewindResumeAt !== undefined && queuedBridgeTurns === 0) {
+            if (activeBridgeKind !== null && queuedBridgeTurns === 0) {
               log.debug('bridge follow-up turn started — clearing bridge rewind resume point', {
+                bridgeKind: activeBridgeKind,
                 activeBridgeRewindResumeAt,
               });
               activeBridgeRewindResumeAt = undefined;
+              activeBridgeKind = null;
               bridgeCompactUsageSnapshot = null;
               bridgeSuppressedDoneData = undefined;
             }
@@ -3824,16 +3862,18 @@ export class ClaudeCodeAgent extends BaseAgent {
                 canceledBridge: canceledBridgeQueries.has(currentQ),
               });
               queuedBridgeTurns = 0;
+              activeBridgeKind = null;
             }
             if (isCurrentQuery(currentQ)) {
               pendingToolIds.clear();
             }
-          } else if (activeBridgeRewindResumeAt) {
+          } else if (activeBridgeKind !== null) {
             // Bridge /compact query 自发结束(非 Stop/watchdog 主动 close)说明底层 SDK
             // stream 已死;不能当 rewind transition 静默,否则 queuedBridgeTurns/turnInFlight
             // 会污染下一条真实用户 turn。
             log.warn('event loop ended unexpectedly during bridge turn');
             queuedBridgeTurns = 0;
+            activeBridgeKind = null;
             eventQueue.push({
               type: 'error',
               data: {
@@ -3926,13 +3966,14 @@ export class ClaudeCodeAgent extends BaseAgent {
                 canceledBridge: canceledBridgeQueries.has(currentQ),
               });
               queuedBridgeTurns = 0;
+              activeBridgeKind = null;
             }
             // rewind/bridge cancel 过渡: 老 q 留下的 pending tool_use_id 不能跨到新 q, 否则新 turn
             // 起来 armUpstreamResponseIdle 被旧 id 短路, watchdog 永久失效。
             if (isCurrentQuery(currentQ)) {
               pendingToolIds.clear();
             }
-          } else if (activeBridgeRewindResumeAt) {
+          } else if (activeBridgeKind !== null) {
             flushDeferredResumeFailure();
             log.error('event loop crashed during bridge turn', {
               error: String(e),
@@ -3940,6 +3981,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               queuedBridgeTurns,
             });
             queuedBridgeTurns = 0;
+            activeBridgeKind = null;
             eventQueue.push({
               type: 'error',
               data: { message: String(e), isTerminal: true, reason: 'bridge_sdk_stream_crashed' },
@@ -4258,8 +4300,8 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
       log.warn(`${label}: runtime drift kept changing while replaying; leaving remaining drift to the next setter/rebuild`);
     }
-    async function rebuildCancelledContinuationQuery(signal?: AbortSignal): Promise<void> {
-      if (!continuationCancellationRequiresQueryRebuild) return;
+    async function rebuildCancelledContinuationQuery(signal?: AbortSignal): Promise<boolean> {
+      if (!continuationCancellationRequiresQueryRebuild) return false;
       const staleQuery = q;
       const runtimeSnapshot: QueryRuntimeSnapshot = {
         model: mutableModel,
@@ -4298,7 +4340,13 @@ export class ClaudeCodeAgent extends BaseAgent {
         startForwardLoop(q);
         notifySupportedModels(q);
         await replayRuntimeDrift(runtimeSnapshot, 'cancelled continuation rebuild');
+        // Cancellation rebuilds are fresh queries without a rewind checkpoint, but the
+        // model/window drift that was deferred while the cancelled query was fenced still
+        // needs the same compact→user bridge as rewind.  Register the bridge before the
+        // caller pushes the next user message; do not invent activeBridgeRewindResumeAt.
+        const bridgeCompactQueued = queueAutoCompactBridge('cancellation');
         continuationCancellationRequiresQueryRebuild = false;
+        return bridgeCompactQueued;
       } finally {
         acceptingRebuiltSend = false;
       }
@@ -4332,6 +4380,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           throw new Error('Claude send cancelled before acceptance');
         }
         if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        let bridgeCompactQueued = false;
         // 保持普通 send / rewind send 原有的同步前置语义：即使 async helper 立即
         // return，裸 await 也会让出一个 microtask，导致调用方在 Query rebuild 真正
         // 开始前观察到半初始化窗口。只有确实存在 cancellation tombstone 时才进入
@@ -4341,7 +4390,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           pendingRewindTo === undefined &&
           activeBridgeRewindResumeAt === undefined
         ) {
-          await rebuildCancelledContinuationQuery(sendOpts?.signal);
+          bridgeCompactQueued = await rebuildCancelledContinuationQuery(sendOpts?.signal);
         }
         activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
         // 仅用于诊断日志: 调用方每次 send 都可以带 logTitle (取自 storage 的最新值);
@@ -4411,19 +4460,20 @@ export class ClaudeCodeAgent extends BaseAgent {
         // ── Rewind 三件套重启 ──────────────────────────────────────────────
         // commitRewindFiles 只设标记, 真正的 SDK Query 重起延迟到这里 —— 老 agentManager
         // 同款设计 (CLI 拿到 input 才会发 init, 避免"无 input → 30s timeout"死锁)。
-        let bridgeCompactQueued = false;
         let runtimeReplaySnapshot: QueryRuntimeSnapshot | undefined;
         const finishSendBeforeUserInput = (reason: string, error?: unknown): void => {
           if (
             bridgeCompactQueued &&
             !canceledBridgeQueries.has(q) &&
-            (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined)
+            bridgeStateActive()
           ) {
             log.warn('send failed after bridge /compact injection — canceling bridge query and preserving rewind resume point', {
               error: error === undefined ? undefined : String(error),
               queuedBridgeTurns,
               activeBridgeRewindResumeAt,
             });
+            const abandonedBridgeKind = activeBridgeKind;
+            const abandonedRewindResumeAt = activeBridgeRewindResumeAt;
             queuedBridgeTurns = 0;
             restoreBridgeAutoCompactSnapshot('bridge_send_abandoned');
             autoCompactController?.onCompactCanceled('bridge_send_abandoned');
@@ -4443,8 +4493,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             turnState.interruptRequested = false;
             pendingToolIds.clear();
             acceptingRebuiltSend = false;
-            pendingRewindTo = activeBridgeRewindResumeAt;
-            activeBridgeRewindResumeAt = undefined;
+            preserveBridgeRetryTarget(abandonedBridgeKind, abandonedRewindResumeAt);
             emitTurnBoundary('bridge_send_abandoned', takeBridgeSuppressedDoneData());
             return;
           }
@@ -4533,6 +4582,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             pendingRewindTo = resumeAt;
             activeBridgeRewindResumeAt = undefined;
             queuedBridgeTurns = 0;
+            activeBridgeKind = null;
             acceptingRebuiltSend = false;
             inputQueue.end();
             canceledBridgeQueries.add(q);
@@ -4552,15 +4602,9 @@ export class ClaudeCodeAgent extends BaseAgent {
           // 轮直接撞上下文上限。
           // 桥接 turn 计数: 实际 push /compact 时 +1, 让后续 middle-turn suppress /
           // onTurnEnd 保持 turnInFlight 靠精确计数, 不受 SDK prompt 消费模式影响。
-          bridgeCompactQueued = triggerAutoCompactIfNeeded();
+          bridgeCompactQueued = queueAutoCompactBridge('rewind', resumeAt);
           if (bridgeCompactQueued) {
-            bridgeCompactUsageSnapshot = autoCompactController?.getLatestSnapshot() ?? null;
-            activeBridgeRewindResumeAt = resumeAt;
-            queuedBridgeTurns += 1;
-            log.debug('rebuild: bridge /compact injected', {
-              queuedBridgeTurns,
-              activeBridgeRewindResumeAt,
-            });
+            // queueAutoCompactBridge owns the bridge counter and rewind resume point.
           }
           // 本次 send 的 bridge state 已注册;guard 继续保持到下面 turnInFlight=true,
           // 防止 runtime setter 在 user turn 尚未登记时把 /compact 注入成未标记 turn。
@@ -4666,7 +4710,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           if (
             bridgeCompactQueued &&
             !canceledBridgeQueries.has(q) &&
-            (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined)
+            bridgeStateActive()
           ) {
             finishSendBeforeUserInput('bridge_send_abandoned', e);
           } else if (sendOpts?.signal?.aborted) {
@@ -4749,7 +4793,9 @@ export class ClaudeCodeAgent extends BaseAgent {
         // inputQueue.clear() 只能丢 maker-core 本地尚未被拉取的 item;SDK 可能已经 eager-drain
         // 了真实用户消息。此时必须 close 当前 Query 并保留 activeBridgeRewindResumeAt,让下一次
         // send 从同一个 rewind resume point 重建,从 SDK 侧取消已 drain 的后续输入。
-        if (turnInFlight && (queuedBridgeTurns > 0 || activeBridgeRewindResumeAt !== undefined)) {
+        if (turnInFlight && bridgeStateActive()) {
+          const abortedBridgeKind = activeBridgeKind;
+          const abortedRewindResumeAt = activeBridgeRewindResumeAt;
           log.info('abort during bridge turn — closing query and preserving rewind resume point', {
             queuedBridgeTurns,
             queuedInput: inputQueue.pending,
@@ -4778,6 +4824,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           terminalBackgroundTaskIds.clear();
           turnInFlight = false;
           turnState.interruptRequested = false;
+          preserveBridgeRetryTarget(abortedBridgeKind, abortedRewindResumeAt);
           emitTurnBoundary(
             'bridge_aborted',
             takeBridgeSuppressedDoneData(),
@@ -5353,6 +5400,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         // bridge counter 兜底: rewind idle 时应该已经归零, 但如果上一轮 bridge 中途异常
         // (SDK 崩 / abort 未 drain result) counter 可能残留, 会污染 rebuild 后的第一 turn。
         queuedBridgeTurns = 0;
+        activeBridgeKind = null;
         log.info('commitRewindFiles ◀ pendingRewindTo set, awaiting next send to rebuild');
         return undefined;
       },

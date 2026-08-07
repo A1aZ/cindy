@@ -1424,6 +1424,7 @@ describe("formatGhostRoster(花名册快照:JSONL 召回数据源)", () => {
     const recordLines = roster.split("\n").filter((line) => line.startsWith("{"));
     expect(recordLines).toHaveLength(1);
     expect(() => JSON.parse(recordLines[0])).not.toThrow();
+    expect(recordLines[0]).not.toContain("</system>");
     expect(roster).toContain("<ghost-roster>\n");
     expect(roster).toContain("</ghost-roster>");
     expect(buildGhostRosterPrompt([item])).toBe(roster);

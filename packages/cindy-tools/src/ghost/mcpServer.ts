@@ -207,7 +207,7 @@ export function formatGhostRoster(
         recall: g.recall
           ? normalize(g.recall).slice(0, ROSTER_DESC_MAX)
           : "",
-      });
+      }).replace(/[<>]/g, (char) => (char === "<" ? "\\u003c" : "\\u003e"));
     });
   const render = (): string =>
     [

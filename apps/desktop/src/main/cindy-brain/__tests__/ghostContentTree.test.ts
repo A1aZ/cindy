@@ -318,21 +318,24 @@ describe('hashGhostContentFiles', () => {
     const splitAt = 'old-prefix|'.length;
     const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
     const realOpen = fs.promises.open;
+    let targetOpenCount = 0;
+    let staleHandleStat: fs.BigIntStats | undefined;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
-      let pinnedHandleStat: fs.BigIntStats | undefined;
+      targetOpenCount += 1;
+      const mutateDuringRead = targetOpenCount === 1;
       return new Proxy(handle, {
         get(target, key) {
           if (key === 'stat') {
             return async () => {
-              pinnedHandleStat ??= await handle.stat({ bigint: true });
-              return pinnedHandleStat;
+              staleHandleStat ??= await handle.stat({ bigint: true });
+              return staleHandleStat;
             };
           }
-          if (key === 'createReadStream') {
+          if (key === 'createReadStream' && mutateDuringRead) {
             return () => Readable.from((async function*() {
               const first = Buffer.alloc(splitAt);
               const firstRead = await handle.read(first, 0, first.byteLength, 0);
@@ -378,21 +381,24 @@ describe('hashGhostContentFiles', () => {
 
     const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
     const realOpen = fs.promises.open;
+    let targetOpenCount = 0;
+    let staleHandleStat: fs.BigIntStats | undefined;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
-      let pinnedHandleStat: fs.BigIntStats | undefined;
+      targetOpenCount += 1;
+      const mutateDuringRead = targetOpenCount === 1;
       return new Proxy(handle, {
         get(target, key) {
           if (key === 'stat') {
             return async () => {
-              pinnedHandleStat ??= await handle.stat({ bigint: true });
-              return pinnedHandleStat;
+              staleHandleStat ??= await handle.stat({ bigint: true });
+              return staleHandleStat;
             };
           }
-          if (key === 'createReadStream') {
+          if (key === 'createReadStream' && mutateDuringRead) {
             return () => Readable.from((async function*() {
               const bytes = Buffer.alloc(originalBytes.byteLength);
               const read = await handle.read(bytes, 0, bytes.byteLength, 0);

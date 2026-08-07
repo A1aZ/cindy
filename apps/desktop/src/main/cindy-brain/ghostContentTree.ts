@@ -389,8 +389,9 @@ export async function hashGhostContentFiles(
     } finally {
       await handle.close();
     }
+    const fileDigest = fileHash.digest();
     // Windows 的按路径 stat/lstat 在 rename/replace 后可能继续返回旧目录元数据。
-    // 重新打开同一路径，用新句柄的状态确认它仍是刚才读取的那一份文件。
+    // 重新打开同一路径，并再次流式摘要；新句柄的 stat 也可能陈旧，字节对账才是最终证据。
     const verificationHandle = await fs.promises.open(
       filePath,
       fs.constants.O_RDONLY | (noFollow ?? 0),
@@ -398,6 +399,16 @@ export async function hashGhostContentFiles(
     try {
       const verificationStat = await verificationHandle.stat({ bigint: true });
       if (!sameStableFileState(handleStat, verificationStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
+      const verificationFileHash = crypto.createHash('sha256');
+      const verificationStream = verificationHandle.createReadStream({ autoClose: false });
+      for await (const chunk of verificationStream) verificationFileHash.update(chunk as Buffer);
+      const afterVerificationReadStat = await verificationHandle.stat({ bigint: true });
+      if (!sameStableFileState(verificationStat, afterVerificationReadStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
+      if (!crypto.timingSafeEqual(fileDigest, verificationFileHash.digest())) {
         throw new Error(`ghost content entry changed while reading: ${relativePath}`);
       }
       const [afterReadPathStat, afterReadRealFilePath] = await Promise.all([
@@ -408,12 +419,12 @@ export async function hashGhostContentFiles(
         initialRealFilePath === undefined ||
         afterReadPathStat.isSymbolicLink() ||
         !afterReadPathStat.isFile() ||
-        !sameFileIdentity(afterReadPathStat, verificationStat) ||
+        !sameFileIdentity(afterReadPathStat, afterVerificationReadStat) ||
         afterReadRealFilePath !== initialRealFilePath
       ) {
         throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
       }
-      if (!sameStableFileState(verificationStat, afterReadPathStat)) {
+      if (!sameStableFileState(afterVerificationReadStat, afterReadPathStat)) {
         throw new Error(`ghost content entry changed while reading: ${relativePath}`);
       }
       assertGhostContentAncestorIdentities(
@@ -423,7 +434,7 @@ export async function hashGhostContentFiles(
     } finally {
       await verificationHandle.close();
     }
-    hash.update(fileHash.digest());
+    hash.update(fileDigest);
   }
   await assertGhostContentRootIdentity(rootDir, rootIdentity);
   return hash.digest('hex');

@@ -1,4 +1,4 @@
-import { GHOST_OAUTH_SCOPES_MAX } from '@cindy/plugin-protocol';
+import { GHOST_OAUTH_SCOPES_MAX, isValidCindyVersion } from '@cindy/plugin-protocol';
 import { findSplitChildByPanelKind, insertRootSplitPane, type Layout } from './layoutTree';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './locale';
 
@@ -1264,6 +1264,8 @@ export interface GhostManifest {
   name: string;
   /** 版本字符串(不强制 semver,仅展示用)。 */
   version: string;
+  /** 安装此 Release 所需的最低 Cindy 客户端 SemVer；缺省表示不限制。 */
+  minCindyVersion?: string;
   /** 作者展示名(仅展示用)。 */
   author?: string;
   /**
@@ -2708,6 +2710,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
   }
   if (typeof raw.version !== 'string' || raw.version.trim().length === 0 || raw.version.length > 32) {
     return { ok: false, reason: 'version 必须是 1–32 字符的非空字符串' };
+  }
+  if (raw.minCindyVersion !== undefined && !isValidCindyVersion(raw.minCindyVersion)) {
+    return { ok: false, reason: 'minCindyVersion 必须是合法的 SemVer 字符串' };
   }
   // kind 可省略(2026-07-12 晚定案:单形态后字段纯冗余,缺省即 chip);
   // 写了就必须是 chip——写错值仍拒,不静默纠正(规则 9)。
@@ -4438,6 +4443,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       id: raw.id,
       name: raw.name,
       version: raw.version,
+      ...(raw.minCindyVersion !== undefined
+        ? { minCindyVersion: raw.minCindyVersion as string }
+        : {}),
       kind: 'chip',
       ...(raw.author !== undefined ? { author: raw.author as string } : {}),
       ...(locales !== undefined ? { locales } : {}),

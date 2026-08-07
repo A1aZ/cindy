@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
+import { supportsCindyVersion } from '@cindy/plugin-protocol';
+
 import { createLogger } from '../logger.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import {
@@ -3498,6 +3500,14 @@ function throwUninstallError(rejection: UninstallRejection): never {
   }
 }
 
+function assertGhostSupportsCurrentCindy(manifest: GhostManifest): void {
+  if (supportsCindyVersion(app.getVersion(), manifest.minCindyVersion)) return;
+  throwIpcError(
+    'GHOST_FILE_INVALID',
+    `该插件需要 Cindy ${manifest.minCindyVersion} 或更高版本`,
+  );
+}
+
 /**
  * 装入 + 停靠(共享主体):ghosts:install(显式路径)、
  * ghosts:install-via-dialog(系统文件选择框)与双击 .cindy
@@ -3604,6 +3614,7 @@ async function installOrUpdateMarketGhostPackageLocked(
     const manager = getGhostManager();
     const inspected = await manager.inspect(cindyFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
+    assertGhostSupportsCurrentCindy(inspected.canonicalManifest);
     if (
       inspected.canonicalManifest.id !== expected.ghostId ||
       inspected.canonicalManifest.version !== expected.version
@@ -4864,6 +4875,7 @@ export function registerGhostIpc(): void {
     }
     const probe = await manager.inspect(lizFilePath);
     if ('rejection' in probe) throwInstallError(probe.rejection);
+    assertGhostSupportsCurrentCindy(probe.canonicalManifest);
     if (probe.packageSha256 !== expectedPackageSha256) {
       throwIpcError('GHOST_FILE_INVALID', '插件文件在确认后发生了变化，请重新选择并确认');
     }
@@ -4900,6 +4912,7 @@ export function registerGhostIpc(): void {
     }
     const inspected = await manager.inspect(lizFilePath);
     if ('rejection' in inspected) throwInstallError(inspected.rejection);
+    assertGhostSupportsCurrentCindy(inspected.canonicalManifest);
     if (inspected.packageSha256 !== expectedPackageSha256) {
       throwIpcError('GHOST_FILE_INVALID', '插件文件在确认后发生了变化，请重新选择并确认');
     }
@@ -4969,6 +4982,7 @@ export function registerGhostIpc(): void {
     }
     const result = await manager.inspect(lizFilePath);
     if ('rejection' in result) throwInstallError(result.rejection);
+    assertGhostSupportsCurrentCindy(result.canonicalManifest);
     // 官方前缀在 inspect 就拒(确认弹窗都不该弹出来),install/update 双保险再拦。
     rejectReservedGhostId(result.manifest.id);
     rejectUnauthorizedTokenBroker(result.manifest);

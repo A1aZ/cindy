@@ -158,6 +158,14 @@ describe('ghost · 清单校验', () => {
     expect(validateGhostManifest({ ...goodManifest(), version: 'v'.repeat(33) }).ok).toBe(false);
   });
 
+  it('minCindyVersion 缺省兼容旧插件，声明时只接受 SemVer', () => {
+    expect(validateGhostManifest(goodManifest()).ok).toBe(true);
+    const declared = validateGhostManifest({ ...goodManifest(), minCindyVersion: '1.2.3' });
+    expect(declared.ok && declared.manifest.minCindyVersion).toBe('1.2.3');
+    expect(validateGhostManifest({ ...goodManifest(), minCindyVersion: 'v1.2.3' }).ok).toBe(false);
+    expect(validateGhostManifest({ ...goodManifest(), minCindyVersion: '1.2' }).ok).toBe(false);
+  });
+
   it('kind 可省略:缺省归一化为 chip(2026-07-12 晚定案,单形态后纯冗余)', () => {
     const m = goodManifest();
     delete m.kind;

@@ -9,7 +9,7 @@ Collaboration ("协同" / Collab) lets one session — the **lead** — bring in
 **Turning it on:**
 
 - In any regular project or dialogue session, open the composer's **+** menu and choose **Collaboration mode**. You can also choose it before sending the first message of a new task. Claude Code and Codex can lead locally or over SSH; Pi can lead in local sessions.
-- Pick the first worker's agent (Claude Code, Codex, or Pi), and optionally its role / model / effort / an initial task. SSH remote leads currently use Claude Code or Codex workers. Worker permissions initially default to **Auto-review**. You can choose **Full access** after confirming the higher-risk permission, and that choice becomes the default for the next Worker you create.
+- Pick the first worker's agent (Claude Code, Codex, or Pi), and optionally its role / model / effort / an initial task. SSH remote leads currently use Claude Code or Codex workers. Worker permissions initially default to **Full access**. You can switch to **Auto-review**, and whichever mode you create the Worker with becomes the default for the next Worker.
 - Start. This creates the team plus that first worker.
 
 **Adding more workers:**

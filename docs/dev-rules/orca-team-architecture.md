@@ -119,7 +119,7 @@ PR #101 之后，Orca 的 main 侧业务由独立 service 承接，`register.ts`
 Worker 权限是 **Worker 创建偏好**，与 Agent、模型、effort、Fast 的“下次创建默认值”同类，不是 Lead 权限的继承项，也不是 Team 数据库字段：
 
 - 真源是 renderer `workerCreationPrefs` localStorage；main 只保存内存镜像，应用启动和偏好变化时由 renderer 同步。
-- 首次使用默认 `auto`（Auto-review）。UI 每次创建 Worker 都可选择 `auto` 或 `bypassPermissions`（Full access），提交后成为下一次默认值。
+- 首次使用默认 `bypassPermissions`（Full access）。UI 每次创建 Worker 都可选择 `auto` 或 `bypassPermissions`，提交后成为下一次默认值；已经保存过的选择继续优先，不随产品默认值变化而改写。
 - MCP `start_team` 可显式指定 `worker_permission_mode`；省略时沿用当前偏好。显式从 `auto` 升级到 `bypassPermissions` 时，Main 必须在写入偏好或创建 Team 前等待宿主持有的用户确认，不能只依赖 MCP 审批、tool 描述或 prompt；取消／超时不得产生副作用。确认通过后才更新 main 镜像，并通知 renderer 回写同一份 localStorage。已由用户保存为 `bypassPermissions` 时，后续沿用不重复确认。
 - `create_worker` / `create_workers` 省略权限参数，统一读取当前偏好；不继承 Lead 的 `sessions.permission_mode`，也不修改已经创建的 Worker。
 - device-link 新控制端只有在被控端 capabilities 明确声明支持 Worker 权限选择时才允许开启协同；已有旧版远程 Team 继续兼容旧创建行为，不宣称或回写该端不支持的偏好。

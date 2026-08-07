@@ -75,7 +75,7 @@ export function setWorkerCreationPrefsCache(snapshot: WorkerCreationPrefsSnapsho
   };
 }
 
-/** 缓存未就绪时使用产品默认 Auto-review。 */
+/** 缓存未就绪时使用产品默认 Full access。 */
 export function getWorkerPermissionModeFromCreationPrefs(): OrcaWorkerPermissionMode {
   return workerCreationPrefsCache?.workerPermissionMode ?? DEFAULT_ORCA_WORKER_PERMISSION_MODE;
 }

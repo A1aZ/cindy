@@ -3170,7 +3170,9 @@ describe('CodexAgent.startSession developerInstructions', () => {
       'ALWAYS call send_to_lead when complete or blocked.',
       'worker_id=worker-test-id',
     ].join('\n');
-    const baselineAgent = new CodexAgent(createDeps(runtimeConfig));
+    const baselineAgent = new CodexAgent(createDeps(runtimeConfig, {
+      getGhostRosterPrompt: vi.fn(() => 'GHOST ROSTER PROMPT'),
+    }));
     const baselineHost = installFakeHost(baselineAgent);
     const registerCodexSystemPromptForThread = vi.fn();
     const proxyAgent = new CodexAgent(createDeps(runtimeConfig, {
@@ -3209,6 +3211,7 @@ describe('CodexAgent.startSession developerInstructions', () => {
       historyHasProductPrompt: false,
     });
     expect(baselineParams.developerInstructions).toContain('HOST PRODUCT PROMPT');
+    expect(baselineParams.developerInstructions).toContain('GHOST ROSTER PROMPT');
     expect(baselineParams.developerInstructions).toContain('send_to_lead');
     expect(baselineParams.developerInstructions).toContain('worker_id=worker-test-id');
 

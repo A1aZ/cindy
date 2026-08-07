@@ -806,6 +806,27 @@ describe('prompt-each-time never turns into a persisted grant', () => {
 });
 
 describe('a custom server cannot take over a builtin name', () => {
+  it('把 session 花名册快照追加到 Claude systemPrompt', async () => {
+    const configDir = await makeTempDir();
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const workingDir = await makeTempDir();
+    sdkMock.query.mockReturnValue(createFakeQuery());
+    const deps = createDeps();
+    deps.getGhostRosterPrompt = vi.fn(() => 'GHOST ROSTER PROMPT');
+    const handle = await new ClaudeCodeAgent(deps).startSession({
+      sessionId: 'session-roster-prompt',
+      model: 'claude-opus-4-6',
+      workingDir,
+      permissionMode: 'default',
+    });
+    const options = sdkMock.query.mock.calls.at(-1)?.[0]?.options as {
+      systemPrompt?: { append?: string };
+    };
+    expect(options.systemPrompt?.append).toContain('GHOST ROSTER PROMPT');
+    expect(deps.getGhostRosterPrompt).toHaveBeenCalledWith({ workingDir });
+    await handle.close();
+  });
+
   it('passes the runtime session instance id into Claude MCP provider context', async () => {
     const configDir = await makeTempDir();
     process.env.CLAUDE_CONFIG_DIR = configDir;

@@ -46,6 +46,12 @@ type PendingRemotePrecreatedWorktreeTarget =
 type RemotePrecreatedWorktreeLedgerSnapshot =
   import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
 
+interface NewMakerWorktreeBranchPreferenceSnapshot {
+  baseRepo: string;
+  sourceBranch: string;
+  revision: number;
+}
+
 /* ── Environment check ── */
 
 interface EnvCheckResult {
@@ -2133,6 +2139,22 @@ interface ElectronAPI {
 
   /** 被控端本地 main → 自身 renderer:控制端写穿的「新建会话默认启用 worktree」(patchDraft 写真实草稿)。 */
   onMakerWorktreePrefApply: (cb: (payload: { worktreeEnabled: boolean }) => void) => () => void;
+
+  /** 工作端 canonical baseRepo scoped 的新建 worktree 源分支；未选过返回 null。 */
+  getNewMakerWorktreeBranchPreference: (
+    baseRepo: string,
+  ) => Promise<NewMakerWorktreeBranchPreferenceSnapshot | null>;
+
+  /** 写穿本机工作端的源分支选择，返回 host 接受后的权威 snapshot。 */
+  applyNewMakerWorktreeBranchPreference: (
+    baseRepo: string,
+    sourceBranch: string,
+  ) => Promise<NewMakerWorktreeBranchPreferenceSnapshot>;
+
+  /** 本机或远程控制端改动本工作端源分支后的权威广播。 */
+  onNewMakerWorktreeBranchChanged: (
+    cb: (snapshot: NewMakerWorktreeBranchPreferenceSnapshot) => void,
+  ) => () => void;
 
   /** 被控端本地 main → 自身 renderer:控制端写穿的会话「模型 effort/fast」pref(调本地 setter)。 */
   onMakerSessionPrefApply: (

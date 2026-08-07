@@ -6395,6 +6395,7 @@
     "draft": {
       "createSessionFailed": "세션 생성에 실패했습니다. 다시 시도하세요",
       "piRemoteUnsupported": "Pi는 로컬에서만 실행되어 SSH 원격 호스트를 사용할 수 없습니다. 이 호스트를 사용하려면 Claude 또는 Codex로 전환하세요.",
+      "localWorktreeCleanupPending": "이전 로컬 worktree 세션 정리가 아직 완료되지 않았습니다. 정리가 끝난 후 다시 시도하세요.",
       "remoteWorktreeCleanupPending": "이전 원격 worktree가 아직 정리 대기 중입니다. 기기를 다시 연결한 후 재시도하세요.",
       "remoteProviderUpdating": "제공자 자격 증명을 업데이트하는 중입니다. 잠시 후 다시 시도하세요",
       "remoteProviderUnsupported": "이 제공자는 SSH 원격 세션을 지원하지 않습니다. 다른 소스를 선택하세요",

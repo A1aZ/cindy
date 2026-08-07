@@ -16,7 +16,9 @@ export type TurnChangeIncompleteReason =
   | 'read-failed'
   | 'diff-too-large'
   | 'provider-diff-conflict'
-  | 'turn-failed';
+  | 'turn-failed'
+  /** Another session's turn overlapped in the same workspace; capture attribution is best-effort and never undoable. */
+  | 'concurrent-workspace';
 
 export interface TurnChangeFileSummary {
   id: string;

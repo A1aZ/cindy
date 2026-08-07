@@ -3070,6 +3070,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     // Query is replaced before the next explicit user turn.
     let continuationCancellationGeneration: number | null = null;
     let continuationCancellationRequiresQueryRebuild = false;
+    let cancelledTailInterruptResultPending = false;
     const continuationClaims = new Map<number, ContinuationClaim>();
     const continuationListeners = new Set<(
       continuationId: number,
@@ -3646,6 +3647,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 残留的 interruptRequested 会错误抑制新 q 首个真实 is_error 终态 —— 兜底清。
       turnState.interruptRequested = false;
       continuationCancellationGeneration = null;
+      cancelledTailInterruptResultPending = false;
       // Any successfully installed replacement Query isolates the cancelled
       // provider tail. This also covers rewind / invalid-resume rebuilds, so a
       // later send must not create a redundant intermediate Query.
@@ -3670,9 +3672,15 @@ export class ClaudeCodeAgent extends BaseAgent {
               clearBridgeState();
             }
             const rawType = (rawMsg as { type?: string } | null)?.type;
+            // Keep the foreground result that acknowledges user Stop; only
+            // subsequent result/activity messages belong to the fenced tail.
+            const isExpectedInterruptResult =
+              cancelledTailInterruptResultPending &&
+              rawType === 'result';
             if (
               continuationCancellationGeneration !== null &&
-              (rawType === 'assistant' || rawType === 'stream_event' || rawType === 'result')
+              (rawType === 'assistant' || rawType === 'stream_event' || rawType === 'result') &&
+              !isExpectedInterruptResult
             ) {
               log.debug('ignoring provider activity from cancelled continuation query', {
                 rawType,
@@ -3865,6 +3873,7 @@ export class ClaudeCodeAgent extends BaseAgent {
                   }
                 : {}),
             });
+            if (isExpectedInterruptResult) cancelledTailInterruptResultPending = false;
             if (shouldCorrelateResumeFailure) {
               deferResumeFailureBoundary = false;
               deferredResumeFailureTimer = setTimeout(
@@ -4922,6 +4931,22 @@ export class ClaudeCodeAgent extends BaseAgent {
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
             turnInFlight = false;
+          }
+          const hasUnconfirmedWakeTasks = [...runningBackgroundTasks.values()].some((info) => info.wake);
+          if (
+            hasUnconfirmedWakeTasks &&
+            continuationCancellationGeneration !== turnState.generation
+          ) {
+            // A successful interrupt without a cancelled claim still leaves
+            // wake tasks whose stop was rejected or unsupported. Keep the
+            // product turn idle, but fence their queued auto-continuation
+            // until the next send installs a fresh Query.
+            continuationCancellationGeneration = turnState.generation;
+            continuationCancellationRequiresQueryRebuild = true;
+            cancelledTailInterruptResultPending = turnInFlight;
+            log.info('installed cancelled-tail fence for unconfirmed wake tasks after user stop', {
+              generation: turnState.generation,
+            });
           }
         } catch (e) {
           // interrupt 失败 → 无 result 消费标记, 回收防误抑制(同 watchdog)。

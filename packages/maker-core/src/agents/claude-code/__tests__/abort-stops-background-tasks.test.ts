@@ -1624,6 +1624,87 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('stopTask reject 后为未确认 wake 安装栅栏，迟到自动续跑被丢弃', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-unconfirmed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
+    await handle.abort();
+    stream.emit(interruptedTurnResult());
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'foreground stop terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'foreground stop settled');
+
+    // The terminal task notification remains visible and clears local task
+    // accounting; only the same-generation automatic continuation tail is fenced.
+    stream.emit(taskNotification('task-unconfirmed', 'completed'));
+    await waitFor(
+      () => taskEvents(events).some((event) =>
+        (event.data as { taskId?: unknown; status?: unknown } | null | undefined)?.taskId === 'task-unconfirmed' &&
+        (event.data as { status?: unknown } | null | undefined)?.status === 'completed',
+      ),
+      'unconfirmed task completion observed',
+    );
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    const eventCountBeforeLateTail = events.length;
+    stream.emit(assistantText('late untracked continuation'));
+    stream.emit(turnResult('late untracked result'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toHaveLength(eventCountBeforeLateTail);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'fresh turn after fenced continuation' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('fresh turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'fresh turn terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'fresh turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('老 daemon 无 stopTask 时也为未确认 wake 安装栅栏并在下一 send 换代', async () => {
+    const { handle, stream, events, fakeQueries } = await startSessionWithStream({ omitStopTask: true });
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-legacy', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'legacy wake task observed');
+
+    await handle.abort();
+    stream.emit(interruptedTurnResult());
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'legacy stop terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'legacy stop settled');
+
+    stream.emit(taskNotification('task-legacy', 'completed'));
+    await waitFor(
+      () => taskEvents(events).some((event) =>
+        (event.data as { taskId?: unknown; status?: unknown } | null | undefined)?.taskId === 'task-legacy' &&
+        (event.data as { status?: unknown } | null | undefined)?.status === 'completed',
+      ),
+      'legacy task completion observed',
+    );
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    const eventCountBeforeLateTail = events.length;
+    stream.emit(assistantText('late legacy continuation'));
+    stream.emit(turnResult('late legacy result'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toHaveLength(eventCountBeforeLateTail);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'fresh turn after legacy fence' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('fresh legacy turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'fresh legacy terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'fresh legacy turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('stopTask 成功但 interrupt 失败时不伪造 continuation 收口', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

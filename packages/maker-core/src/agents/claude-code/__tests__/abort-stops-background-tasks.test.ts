@@ -218,8 +218,6 @@ async function startSessionWithStream(
 
   const streams: Array<ReturnType<typeof createControlledStream>> = [];
   const fakeQueries: Array<ReturnType<typeof createFakeQuery>> = [];
-  const queryInputs: unknown[][] = [];
-  const prompts: Array<AsyncIterable<unknown> | undefined> = [];
   const stream = {
     emit(message: unknown): void {
       const current = streams.at(-1);
@@ -233,17 +231,14 @@ async function startSessionWithStream(
   sdkMock.query.mockImplementation((options: unknown) => {
     const queryStream = createControlledStream();
     const fakeQuery = createFakeQuery(queryStream, queryOpts);
-    const inputs: unknown[] = [];
     streams.push(queryStream);
     fakeQueries.push(fakeQuery);
-    queryInputs.push(inputs);
     const prompt = (options as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
-    prompts.push(prompt);
     if (prompt && !opts?.capturePrompts) {
       void (async () => {
         try {
           for await (const ignored of prompt) {
-            inputs.push(ignored);
+            void ignored;
           }
         } catch { /* end / abort 都算正常收尾 */ }
       })();
@@ -287,8 +282,6 @@ async function startSessionWithStream(
     streams,
     fakeQuery,
     fakeQueries,
-    queryInputs,
-    prompts,
     events,
     collected,
   };
@@ -1757,7 +1750,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
   });
 
   it('synthetic cancellation rebuilds with compact before the next user message after a small-window switch', async () => {
-    const { handle, stream, streams, events, fakeQueries, prompts } = await startSessionWithStream(
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
       undefined,
       { autoCompactThresholdPct: 50, capturePrompts: true },
     );
@@ -1787,7 +1780,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.send({ type: 'user', content: 'user after cancellation' });
     expect(fakeQueries).toHaveLength(2);
     expect(streams).toHaveLength(2);
-    const prompt = prompts[1];
+    const prompt = (sdkMock.query.mock.calls[1]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
     expect(prompt).toBeDefined();
     const promptIter = prompt![Symbol.asyncIterator]();
     expect((await promptIter.next()).value?.message?.content).toBe('/compact');
@@ -1807,7 +1800,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
   });
 
   it('Stop during a cancellation compact bridge retries with a fresh query and no rewind target', async () => {
-    const { handle, stream, streams, events, fakeQueries, prompts } = await startSessionWithStream(
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
       undefined,
       { autoCompactThresholdPct: 50, capturePrompts: true },
     );
@@ -1824,7 +1817,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.setModel?.('claude-sonnet-5');
     await handle.send({ type: 'user', content: 'must be cancelled with compact' });
     expect(fakeQueries).toHaveLength(2);
-    const bridgePrompt = prompts[1];
+    const bridgePrompt = (sdkMock.query.mock.calls[1]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
     expect(bridgePrompt).toBeDefined();
     const bridgePromptIter = bridgePrompt![Symbol.asyncIterator]();
     expect((await bridgePromptIter.next()).value?.message?.content).toBe('/compact');
@@ -1844,7 +1837,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     };
     expect(retryArgs.options).not.toHaveProperty('resumeSessionAt');
     expect(retryArgs.options).not.toHaveProperty('forkSession');
-    const retryPrompt = prompts[2];
+    const retryPrompt = (sdkMock.query.mock.calls[2]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
     expect(retryPrompt).toBeDefined();
     const retryPromptIter = retryPrompt![Symbol.asyncIterator]();
     expect((await retryPromptIter.next()).value?.message?.content).toBe('/compact');

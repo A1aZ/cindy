@@ -3315,9 +3315,9 @@
         "retry": "重试恢复",
         "retrying": "正在恢复…"
       },
-      "disabledTag": "未生效",
-      "projectDisabledTag": "本项目未生效",
-      "projectSwitchLockedTip": "该插件已在全局停用；请先切回「全局」视图开启",
+      "disabledTag": "已停用",
+      "projectDisabledTag": "本项目已停用",
+      "projectSwitchLockedTip": "该插件已在全局停用；请先切回「全局」视图启用",
       "projectBanner": {
         "title": "正在配置项目「{{name}}」",
         "desc": "开关只影响此项目：关闭的插件在该项目中不可用",
@@ -3325,10 +3325,10 @@
       },
       "scopePicker": {
         "global": "全局(默认)",
-        "ariaLabel": "选择插件生效范围",
+        "ariaLabel": "选择插件启用范围",
         "browse": "选择其它目录…"
       },
-      "enableAria": "使 {{name}} 生效",
+      "enableAria": "启用 {{name}}",
       "uninstall": "卸载",
       "uninstallConfirm": {
         "title": "卸载「{{name}}」？",
@@ -3347,7 +3347,7 @@
       "toast": {
         "installed": "已安装「{{name}}」",
         "uninstalled": "已卸载「{{name}}」",
-        "installedAsleep": "已安装「{{name}}」(未生效，可在此开启)",
+        "installedAsleep": "已安装「{{name}}」（已停用，可随时在此启用）",
         "updated": "「{{name}}」已更新到 v{{version}}",
         "exported": "已导出「{{name}}」的 .cindy 文件",
         "exportFailed": "导出「{{name}}」失败，请重试",
@@ -3466,6 +3466,8 @@
         "sessionContextDetail": "只在它为当前任务干活时告知位置信息(任务编号与项目文件夹路径)，不包含文件内容，也不因此获得文件访问权。",
         "preview": "可在右侧栏浏览器中打开以下网站的预览页面",
         "previewDetail": "只能打开下方列出的网站；每次打开都会提示是哪个插件打开的。",
+        "iosSimulator": "可查看当前任务的内置 iOS 模拟器状态并打开控制面板",
+        "iosSimulatorDetail": "模拟器生命周期、WDA、Native Sidecar、画面与输入仍由 Cindy 主机管理；插件拿不到画面字节、输入权限、原生 Helper 或其它任务的编号。",
         "nodeChildSpawn": "Node 程序可请宿主再启动包内申报过的子进程",
         "nodeChildSpawnDetail": "只能启动它自己包里申报过的 JS 文件(与主程序同样的本机权限)，不能执行任意命令；插件停用或退出时子进程一并关闭。",
         "skill": "为 AI 助手添加技能「{{name}}」",
@@ -3480,6 +3482,7 @@
       },
       "errors": {
         "fileInvalid": "不是合法的 .cindy 插件文件",
+        "hostUnsupported": "这个插件需要当前版本尚未提供的 Cindy 能力。请先升级 Cindy，再重新安装。",
         "alreadyInstalled": "这个插件已经安装",
         "commandConflict": "它的指令和已装插件撞名了，先卸载占用方或让作者改名",
         "idReserved": "该 id 使用了官方保留前缀 cindy-，仅随应用内置的插件可用",
@@ -3488,7 +3491,7 @@
         "updateIdMismatch": "所选文件是插件「{{id}}」，与当前插件「{{expected}}」不一致"
       },
       "detail": {
-        "enable": "生效",
+        "enable": "启用",
         "backToList": "返回插件列表",
         "infoTitle": "详细信息",
         "infoId": "标识",
@@ -3512,7 +3515,7 @@
         "infoContents": "包含",
         "infoVersion": "版本",
         "updateTitle": "更新版本",
-        "updateDesc": "选择新的 .cindy 文件原位替换；生效状态与面板位置保持不变。",
+        "updateDesc": "选择新的 .cindy 文件原位替换；启用状态与面板位置保持不变。",
         "cindyPrefs": {
           "title": "Cindy 能力",
           "desc": "这个插件申请的每项 Cindy 代办能力，可单独指定用哪个模型；默认跟随系统(自带 Proxy)。",
@@ -3542,14 +3545,14 @@
         "toolsTitle": "Tools",
         "permissionsTitle": "权限",
         "infoDescription": "描述",
-        "customSlotAsleep": "插件未生效，生效后这里将显示它的设置界面。",
+        "customSlotAsleep": "插件已停用，启用后这里将显示它的设置界面。",
         "descriptionExpand": "展开",
         "descriptionCollapse": "收起",
         "useAction": "使用",
         "chatAction": "对话",
         "enabledLabel": "已启用",
         "disabledLabel": "已停用",
-        "useDisabled": "请先开启插件",
+        "useDisabled": "请先启用插件",
         "moreActions": "更多插件操作",
         "updateFromFile": "从 .cindy 文件更新…",
         "exportPackage": "导出 .cindy 文件…",
@@ -3581,7 +3584,8 @@
         "slotBadge": "未读角标",
         "slotFs": "写文件",
         "slotSkill": "Agent 技能",
-        "slotWorkspace": "工作区任务"
+        "slotWorkspace": "工作区任务",
+        "slotIOSSimulator": "内置 iOS 模拟器"
       },
       "commandPaletteTag": "插件指令",
       "updateConfirm": {
@@ -4390,6 +4394,7 @@
     },
     "iosSimulator": {
       "title": "iOS 模拟器",
+      "startPrompt": "帮我打开 iOS 模拟器。",
       "description": "查看当前本地任务可用的 Xcode 环境和模拟器设备。",
       "refresh": "刷新",
       "checking": "正在检查",
@@ -4405,6 +4410,14 @@
       "instancesCount": "{{count}} 台就绪",
       "openDevice": "打开设备",
       "noDevices": "未找到 iPhone 或 iPad 模拟器。",
+      "noAvailableDevices": "没有可连接的 iPhone 或 iPad 模拟器。",
+      "unavailableDevicesTitle": "不可用设备",
+      "unavailableDevicesCount": "{{count}} 台",
+      "unavailableDevicesDescription": "这些设备当前不能连接。查看原因并按提示修复后，再刷新状态。",
+      "missingRuntime": "缺少 {{runtime}} Runtime",
+      "missingRuntimeHelp": "请在 Xcode 中安装对应 Runtime，然后刷新状态。",
+      "deviceUnavailable": "Xcode 已将此设备标记为不可用",
+      "deviceUnavailableHelp": "请在 Xcode 中检查或重新创建该模拟器，然后刷新状态。",
       "booted": "已启动",
       "shutdown": "已关机",
       "runtime": "运行时",
@@ -4421,6 +4434,22 @@
       "disableAgentControl": "停用 Agent 控制",
       "operationError": "Cindy 无法完成模拟器操作。",
       "retryHint": "请刷新状态后重试。",
+      "operationErrorWithRecovery": "Cindy 无法完成模拟器操作。请刷新状态后重试。",
+      "deviceInUseByOtherTask": "另一个 Cindy 任务正在使用此设备。请选择其他设备，或先在原任务中断开它。",
+      "taskDeviceLimitReached": "当前任务已连接 {{limit}} 台设备。请先断开一台，再连接其他设备。",
+      "runningDeviceLimitReached": "Cindy 已同时运行 {{limit}} 台模拟器。请先停止一台，再连接此已启动设备。",
+      "resourceSoftLimitTitle": "当前正在运行 {{count}} 台模拟器",
+      "resourceSoftLimitDescription": "继续启动更多设备时，Cindy 会先检查系统内存；不足时会保留现有设备并阻止新启动。",
+      "resourceHardLimitTitle": "已达到同时运行上限（{{limit}} 台）",
+      "resourceHardLimitDescription": "请先停止一台正在运行的模拟器，再启动新设备。",
+      "errors": {
+        "attachedElsewhere": "另一个 Cindy 任务正在使用此设备。请选择其他设备，或先在原任务中断开它。",
+        "taskLimitReached": "当前任务最多连接 {{taskLimit}} 台设备。请先断开一台再重试。",
+        "resourceLimitReached": "Cindy 已达到同时运行上限（{{hardLimit}} 台）。请先停止一台模拟器再重试。",
+        "memoryPressure": "系统内存压力较高，暂时无法启动更多模拟器。请先停止一台模拟器，或稍后重试。",
+        "deviceNotFound": "所选设备已不存在。请刷新状态并选择其他设备。",
+        "deviceStateChanged": "设备状态已变化。请刷新状态后重试。"
+      },
       "streamAlt": "{{device}} 的实时模拟器画面",
       "waitingForFrame": "画面连接后会显示在这里。",
       "viewerStoppedTitle": "模拟器已停止",
@@ -6163,13 +6192,17 @@
       "mention": "提及插件 · {{names}}",
       "mentionExpandAria": "查看追加给模型的提示原文",
       "mentionDirectiveLabel": "追加给模型的提示",
+      "hostCapabilityExpandAria": "查看所选 Cindy 能力的路由说明",
+      "hostCapabilityDirectiveLabel": "发送给 Agent 的 Cindy 能力路由",
+      "hostCapabilityLegend": "高亮 = 当前选择 · 其余为 Cindy 固定路由说明",
       "semanticExpandAria": "查看本次调用说明",
       "semanticNote": "AI 根据消息语义自主调用了这个插件；本条消息未追加任何机器指令。",
       "listSeparator": "、",
       "status": {
         "running": "调用中…",
         "called": "已调用",
-        "done": "已完成"
+        "done": "已完成",
+        "selected": "已选择"
       }
     },
     "userMessage": {
@@ -8588,7 +8621,8 @@
     "tooltipCount": "{{count}} 个附加引用目录",
     "addFiles": "添加文件、图片或视频…",
     "pluginsTitle": "已安装的插件",
-    "pluginDisabled": "未生效",
+    "pluginDisabled": "已停用",
+    "pluginAgentInvoked": "Agent 自动调用",
     "pluginNoCommand": "不可直接使用",
     "sectionTitle": "引用目录(只读)",
     "empty": "还没有引用目录",

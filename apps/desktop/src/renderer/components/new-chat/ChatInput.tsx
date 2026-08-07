@@ -113,7 +113,6 @@ import {
 } from './effortChangeQueue';
 import { captureComposerSendSnapshot, isComposerSendSnapshotCurrent } from './composerSendSnapshot';
 import { useRemoteSessionConnection } from '@/features/cc-agent/hooks/useRemoteSessionConnection';
-
 import {
   confirmAgentSwitchRisk,
   isAgentSwitchResponseFresh,
@@ -137,7 +136,12 @@ import {
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { PermissionSelector } from './PermissionSelector';
 import { ExtraDirsButton, type CollaborationMenuConfig } from './ExtraDirsButton';
-import { focusComposerEndNextFrame, placeGhostAtComposerStart } from './ghostComposerPlacement';
+import {
+  focusComposerEndNextFrame,
+  hostCapabilityForGhost,
+  placeGhostAtComposerStart,
+  placeHostCapabilityAtComposerStart,
+} from './ghostComposerPlacement';
 import { NewGoalDialog } from './NewGoalDialog';
 import { PlanModeIndicator } from './PlanModeIndicator';
 import { PendingQueuePanel } from './PendingQueuePanel';
@@ -149,6 +153,7 @@ import {
   findGhostByCommand,
   parseGhostCommandWord,
 } from '@/cindy-brain/ghostCommand';
+import { expandHostCapabilityInvocation } from '@/cindy-brain/hostCapabilityInvocation';
 import { filterGhostsForWorkdir } from '@/cindy-brain/ghostWorkdirFilter';
 import { useInstalledGhosts } from '@/cindy-brain/useInstalledGhosts';
 import {
@@ -2196,6 +2201,11 @@ export function ChatInput({
             attachments: existing?.attachments ?? [],
             quotes: existing?.quotes ?? [],
             browserComments: existing?.browserComments ?? [],
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
           },
           { silent: true },
         );
@@ -2385,33 +2395,26 @@ export function ChatInput({
   );
   const pluginAvailableIds = useMemo(
     () =>
-      new Set(
-        ghostsForCommand
-          .filter((ghost) => ghost.enabled && ghost.manifest.command)
-          .map((ghost) => ghost.manifest.id),
-      ),
+      new Set(ghostsForCommand.filter((ghost) => ghost.enabled).map((ghost) => ghost.manifest.id)),
     [ghostsForCommand],
   );
-  const atPluginItems = useMemo<AtResourceItem[]>(
-    () => {
-      // device-link 远程会话的插件运行在被控端；控制端清单既不代表远端
-      // 已安装状态，选择后也无法用本地 InstalledGhost 解析并插入命令。
-      if (deviceLinkDeviceId) return [];
-      return pluginsForMenu
-        .filter((ghost) => pluginAvailableIds.has(ghost.manifest.id) && ghost.manifest.command)
-        .map((ghost) => ({
-          type: 'plugin-command',
-          name: ghost.manifest.name,
-          relPath: ghost.manifest.command!,
-          pluginId: ghost.manifest.id,
-          ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
-          sourceLabel: ghost.manifest.command!,
-          _nameLower: `${ghost.manifest.name} ${ghost.manifest.command}`.toLowerCase(),
-          _relPathLower: `${ghost.manifest.command} ${ghost.manifest.id}`.toLowerCase(),
-        }));
-    },
-    [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds],
-  );
+  const atPluginItems = useMemo<AtResourceItem[]>(() => {
+    // device-link 远程会话的插件运行在被控端；控制端清单既不代表远端
+    // 已安装状态，选择后也无法用本地 InstalledGhost 解析并插入命令。
+    if (deviceLinkDeviceId) return [];
+    return pluginsForMenu
+      .filter((ghost) => pluginAvailableIds.has(ghost.manifest.id) && ghost.manifest.command)
+      .map((ghost) => ({
+        type: 'plugin-command',
+        name: ghost.manifest.name,
+        relPath: ghost.manifest.command!,
+        pluginId: ghost.manifest.id,
+        ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
+        sourceLabel: ghost.manifest.command!,
+        _nameLower: `${ghost.manifest.name} ${ghost.manifest.command}`.toLowerCase(),
+        _relPathLower: `${ghost.manifest.command} ${ghost.manifest.id}`.toLowerCase(),
+      }));
+  }, [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds]);
   useEffect(() => {
     setGhostCommandRoster(editor, ghostsForCommand);
   }, [editor, ghostsForCommand]);
@@ -2421,6 +2424,15 @@ export function ChatInput({
       placeGhostAtComposerStart(editor, ghost, installedGhosts);
     },
     [editor, installedGhosts],
+  );
+  const handlePluginCapabilitySelect = useCallback(
+    (ghost: (typeof pluginsForMenu)[number]) => {
+      if (remoteHostId || deviceLinkDeviceId || !ghost.manifest.slots.includes('ios-simulator'))
+        return;
+      if (!editor || editor.isDestroyed) return;
+      placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
+    },
+    [deviceLinkDeviceId, editor, installedGhosts, remoteHostId],
   );
 
   const handleVoiceInputPermissionRequired = useCallback(async () => {
@@ -2903,6 +2915,11 @@ export function ChatInput({
           attachments: existing?.attachments ?? [],
           quotes: existing?.quotes ?? [],
           browserComments: existing?.browserComments ?? [],
+          ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+          ...(existing?.pendingHostCapabilityGhostId
+            ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+            : {}),
+          ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
         },
         { silent: true },
       );
@@ -3114,9 +3131,9 @@ export function ChatInput({
   }, [editor, storageKey]);
 
   // Plugin page routed entry: wait until the editor has hydrated its existing
-  // draft, then reuse the exact same insertion/focus path as the in-composer
-  // `$` / `+` selectors. This preserves body text and replaces an existing
-  // Plugin command instead of treating the command as prefilled plain text.
+  // draft, then reuse the same placement path as the in-composer selectors.
+  // Command and Host-capability Plugins intentionally use separate handoff
+  // fields because only commands expand through `ghost_call`.
   useEffect(() => {
     if (!editor || !storageKey || !hasHydratedRef.current) return;
     const draft = getComposerDraft(storageKey);
@@ -3137,6 +3154,23 @@ export function ChatInput({
         { silent: true },
       );
       placeGhostAtComposerStart(editor, ghost, installedGhosts);
+      return;
+    }
+
+    if (draft.pendingHostCapabilityGhostId) {
+      const ghost = ghostsForCommand.find(
+        (candidate) => candidate.manifest.id === draft.pendingHostCapabilityGhostId,
+      );
+      saveComposerDraft(
+        storageKey,
+        {
+          ...draft,
+          pendingHostCapabilityGhostId: undefined,
+          focusAtEnd: false,
+        },
+        { silent: true },
+      );
+      if (ghost) placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
       return;
     }
 
@@ -3185,6 +3219,11 @@ export function ChatInput({
             attachments: existing?.attachments ?? [],
             quotes: existing?.quotes ?? [],
             browserComments: next,
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
           },
           { silent: true },
         );
@@ -3278,9 +3317,7 @@ export function ChatInput({
   );
 
   // ── Slash / At panel state ─────────────────────────────────────────
-  const trigger: TriggerState = editor
-    ? detectTrigger(editor)
-    : { kind: 'none' };
+  const trigger: TriggerState = editor ? detectTrigger(editor) : { kind: 'none' };
 
   // Slash commands — palette refactor 后改成 loadAllCommands 一次性拉三源(desktop +
   // agent-builtin + agent-skill); 内部并发, mergeCommands 按优先级合并去重。
@@ -3408,9 +3445,10 @@ export function ChatInput({
             if (atScanSeqRef.current !== seq || !partial.success) return;
             setAtState((prev) => ({
               kind: 'ready',
-              items: preservePreviousItems && prev.kind === 'ready'
-                ? mergeAtResourceItems(prev.items, [...atPluginItems, ...partial.items])
-                : [...atPluginItems, ...partial.items],
+              items:
+                preservePreviousItems && prev.kind === 'ready'
+                  ? mergeAtResourceItems(prev.items, [...atPluginItems, ...partial.items])
+                  : [...atPluginItems, ...partial.items],
               truncated: partial.truncated || (prev.kind === 'ready' && prev.truncated),
               searching: true,
             }));
@@ -3439,7 +3477,15 @@ export function ChatInput({
           setAtState({ kind: 'error', message: m });
         });
     },
-    [workingDir, paletteAgentKind, isRemoteSession, sessionId, deviceLinkDeviceId, t, atPluginItems],
+    [
+      workingDir,
+      paletteAgentKind,
+      isRemoteSession,
+      sessionId,
+      deviceLinkDeviceId,
+      t,
+      atPluginItems,
+    ],
   );
 
   const atQuery = trigger.kind === 'at' ? trigger.query : '';
@@ -3455,9 +3501,10 @@ export function ChatInput({
   const filteredAt = useMemo(() => {
     if (!atQuery && trigger.kind !== 'at') return [];
     if (atState.kind !== 'ready') return [];
-    const items = workingDir && localAttachmentPickerEnabled
-      ? [AT_FILE_PICKER_RESOURCE, ...atState.items]
-      : atState.items;
+    const items =
+      workingDir && localAttachmentPickerEnabled
+        ? [AT_FILE_PICKER_RESOURCE, ...atState.items]
+        : atState.items;
     return filterAtResources(items, atQuery);
   }, [atState, atQuery, trigger.kind, workingDir, localAttachmentPickerEnabled]);
 
@@ -3482,13 +3529,14 @@ export function ChatInput({
     if (normalizedQuery === atLastScanQueryRef.current) return;
     atLastScanQueryRef.current = normalizedQuery;
     const seq = ++atScanSeqRef.current;
-    setAtState((prev) => prev.kind === 'ready'
-      ? { ...prev, searching: true }
-      : prev);
-    atQueryScanTimerRef.current = window.setTimeout(() => {
-      atQueryScanTimerRef.current = null;
-      runAtScan(normalizedQuery, seq);
-    }, normalizedQuery ? 200 : 0);
+    setAtState((prev) => (prev.kind === 'ready' ? { ...prev, searching: true } : prev));
+    atQueryScanTimerRef.current = window.setTimeout(
+      () => {
+        atQueryScanTimerRef.current = null;
+        runAtScan(normalizedQuery, seq);
+      },
+      normalizedQuery ? 200 : 0,
+    );
     return () => {
       if (atQueryScanTimerRef.current !== null) {
         window.clearTimeout(atQueryScanTimerRef.current);
@@ -3521,8 +3569,7 @@ export function ChatInput({
   }, [trigger, suppressedSlashAt, suppressedAtAt]);
 
   const slashOpen = trigger.kind === 'slash' && suppressedSlashAt !== trigger.from;
-  const atOpen =
-    trigger.kind === 'at' && !isRemoteSession && suppressedAtAt !== trigger.from;
+  const atOpen = trigger.kind === 'at' && !isRemoteSession && suppressedAtAt !== trigger.from;
 
   useEffect(() => {
     if (!slashOpen) return;
@@ -3683,13 +3730,16 @@ export function ChatInput({
             workingDir ? { defaultPath: workingDir } : undefined,
           );
           if (!picked.success || !picked.path || !picked.kind) return;
-          if (!isAtResourceInsertTargetCurrent(
-            editor,
-            editorRef.current,
-            originDoc,
-            originStorageKey,
-            currentStorageKeyRef.current,
-          )) return;
+          if (
+            !isAtResourceInsertTargetCurrent(
+              editor,
+              editorRef.current,
+              originDoc,
+              originStorageKey,
+              currentStorageKeyRef.current,
+            )
+          )
+            return;
           const nativeResource = createAtResourceFromNativePath(
             picked.path,
             picked.kind,
@@ -3841,20 +3891,58 @@ export function ChatInput({
           }
           serializedContent = serializeEditorContent(editor);
         }
-        let {
-          text: editorText,
+        const {
+          text: serializedEditorText,
           mentions,
           hasQuotes,
-          agentReferences,
+          agentReferences: serializedAgentReferences,
           pastedTextRanges,
           slashCommandRanges,
+          hostCapability: serializedHostCapability,
         } = serializedContent;
+        let editorText = serializedEditorText;
+        let agentReferences = serializedAgentReferences;
         const attachmentsForSend = optimisticallyClearRemoteComposer
           ? attachmentsBeforeOptimisticClear
           : [...latestAttachmentsRef.current];
         const commentsForSend = optimisticallyClearRemoteComposer
           ? commentsBeforeOptimisticClear
           : [...browserCommentsRef.current];
+        // Resolve the structured capability atom against the current enabled,
+        // workdir-scoped Plugin roster. Draft data is presentation state only;
+        // it cannot grant a Host route after the Plugin is disabled/uninstalled.
+        const eligibleGhosts = filterGhostsForWorkdir(
+          installedGhostsRef.current,
+          workingDirRef.current,
+        );
+        const hostCapabilityGhost = serializedHostCapability
+          ? (eligibleGhosts.find(
+              (candidate) =>
+                candidate.manifest.id === serializedHostCapability.ghostId &&
+                hostCapabilityForGhost(candidate) === serializedHostCapability.capability,
+            ) ?? null)
+          : null;
+        if (serializedHostCapability && !hostCapabilityGhost) {
+          toast.warning(t('newChat.pluginSetup.error.TARGET_UNAVAILABLE'));
+          return;
+        }
+        const hostCapability =
+          serializedHostCapability && hostCapabilityGhost
+            ? {
+                capability: serializedHostCapability.capability,
+                ghostId: hostCapabilityGhost.manifest.id,
+                name: hostCapabilityGhost.manifest.name,
+              }
+            : null;
+        // A capability chip is metadata, not an automatic visible prefix. Use
+        // the localized default only when the user sent the chip by itself;
+        // otherwise preserve their body byte-for-byte and avoid duplication.
+        if (hostCapability && !editorText.trim()) {
+          editorText =
+            hostCapability.capability === 'ios-simulator'
+              ? t('rightSidebar.iosSimulator.startPrompt')
+              : hostCapability.name;
+        }
         // composerQuote 在其正文位置序列化成 markdown blockquote,支持引用与回复交错。
         // browser-comment-chip:页面评论序列化为 `# Browser comments:` 段拼在正文后
         // (截图在下方并入 filesToSend,与文本块里的 "attached as a labeled image"
@@ -3943,15 +4031,19 @@ export function ChatInput({
         // 追加"必须走 cindy 总机"的机器指令;未命中原样发送。
         // 读取 useInstalledGhosts 的最新窗口级快照。ghosts:changed 会原子更新
         // 该快照;发送路径无需同步 IPC,仍按当前工作目录执行同一禁用判定。
-        const eligibleGhosts = filterGhostsForWorkdir(
-          installedGhostsRef.current,
-          workingDirRef.current,
-        );
         const ghostCommandWord = parseGhostCommandWord(text);
-        const usedGhost = ghostCommandWord
-          ? findGhostByCommand(eligibleGhosts, ghostCommandWord)
-          : null;
-        const textToSend = expandGhostCommand(text, eligibleGhosts);
+        const usedGhost = hostCapabilityGhost
+          ? hostCapabilityGhost
+          : ghostCommandWord
+            ? findGhostByCommand(eligibleGhosts, ghostCommandWord)
+            : null;
+        const textToSend = hostCapability
+          ? expandHostCapabilityInvocation(
+              text,
+              hostCapability,
+              t('rightSidebar.iosSimulator.startPrompt'),
+            )
+          : expandGhostCommand(text, eligibleGhosts);
         const sendSnapshot = captureComposerSendSnapshot(
           editor.getJSON(),
           latestAttachmentsRef.current,
@@ -4083,6 +4175,11 @@ export function ChatInput({
                   attachments: [...next.attachments],
                   quotes: existing?.quotes ?? [],
                   browserComments: [...next.browserComments],
+                  ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+                  ...(existing?.pendingHostCapabilityGhostId
+                    ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+                    : {}),
+                  ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
                 },
                 { silent: true, preserveRemoteOptimisticRecovery: true },
               );
@@ -4996,10 +5093,7 @@ export function ChatInput({
 
       // model-only 不改变当前生效来源；effort 能力也必须按该来源精确解析，避免同 id 的
       // 内置模型档位穿进 BYOM。恢复优先级:模型预设 > 旧 per-model 记忆 > 沿用当前 > 模型默认。
-      const { efforts, defaultEffort } = resolveModelEfforts(
-        newModelId,
-        effectiveSourceId,
-      );
+      const { efforts, defaultEffort } = resolveModelEfforts(newModelId, effectiveSourceId);
       const providerEffort =
         modelMemory && currentModelAgentKind && effectiveSourceId
           ? modelMemory.getEffort(currentModelAgentKind, effectiveSourceId, newModelId)
@@ -6262,6 +6356,9 @@ export function ChatInput({
                   plugins={pluginsForMenu}
                   pluginAvailableIds={pluginAvailableIds}
                   onPluginSelect={handlePluginSelect}
+                  onPluginCapabilitySelect={
+                    !remoteHostId && !deviceLinkDeviceId ? handlePluginCapabilitySelect : undefined
+                  }
                   onChange={onExtraDirsChange}
                   onNewGoal={
                     inSessionGoalEnabled || onNewGoal

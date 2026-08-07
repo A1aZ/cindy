@@ -5,7 +5,7 @@
  *   - 添加文件、图片或视频→ 复用 composer 既有附件管线。
  *   - 新建目标(`onNewGoal` 提供时显示;仅会话中,父组件按 sessionId 决定)→ 打开 NewGoalDialog。
  *   - 计划模式 / 协同模式→ 与新建目标同级的模式入口。
- *   - 已安装 Plugin:选择后由 ChatInput 把 command 放到消息开头,保留正文并聚焦末尾。
+ *   - 已安装 Plugin:command 插件写入正文;Host capability 插件写入能力 Chip。
  *   - 附加只读引用目录(Claude vendor;`onChange` 提供时显示)→ 列表 / 添加。
  *
  * 创建时和 session 中途共用同一组件:父组件传 onChange 决定目录持久化路径:
@@ -80,12 +80,14 @@ export interface ExtraDirsButtonProps {
   planMode?: { enabled: boolean; onToggle: (next: boolean) => void };
   /** 协同模式入口;与新建目标、计划模式同级显示在「+」菜单。 */
   collaboration?: CollaborationMenuConfig;
-  /** 已安装 Plugin 清单;无指令或未生效项仍展示,但不可选。 */
+  /** 已安装 Plugin 清单;无指令、无 Host 入口或未生效项仍展示,但不可选。 */
   plugins?: readonly InstalledGhost[];
-  /** 当前会话范围内可直接使用的 Plugin id;未命中项保留展示但置灰。 */
+  /** 当前会话范围内已启用的 Plugin id;未命中项保留展示但置灰。 */
   pluginAvailableIds?: ReadonlySet<string>;
   /** 选择后由 ChatInput 把 Plugin command 放到正文开头并把光标落到全文末尾。 */
   onPluginSelect?: (ghost: InstalledGhost) => void;
+  /** 选择 Host capability 插件后交给 ChatInput 写入能力 Chip。 */
+  onPluginCapabilitySelect?: (ghost: InstalledGhost) => void;
   disabled?: boolean;
   /** 窄容器下把 trigger 字号/图标各压一档,默认 false。 */
   dense?: boolean;
@@ -152,6 +154,7 @@ export function ExtraDirsButton({
   plugins = [],
   pluginAvailableIds,
   onPluginSelect,
+  onPluginCapabilitySelect,
   disabled,
   dense = false,
   visualVariant = 'default',
@@ -277,7 +280,9 @@ export function ExtraDirsButton({
             />
           )}
           <Tip
-            text={count === 0 ? t('extraDirs.tooltipEmpty') : t('extraDirs.tooltipCount', { count })}
+            text={
+              count === 0 ? t('extraDirs.tooltipEmpty') : t('extraDirs.tooltipCount', { count })
+            }
             side="top"
           >
             <button
@@ -303,10 +308,7 @@ export function ExtraDirsButton({
               )}
               aria-label={t('extraDirs.menuAria')}
             >
-              <Plus
-                size={isCreateAgentVariant ? 11 : dense ? 14 : 14}
-                className="shrink-0"
-              />
+              <Plus size={isCreateAgentVariant ? 11 : dense ? 14 : 14} className="shrink-0" />
               {count > 0 && hasReferenceDirs && (
                 <span
                   className={cn(
@@ -348,233 +350,239 @@ export function ExtraDirsButton({
         </>
       )}
 
-        {/* 新建目标(仅会话中;点击关菜单并由父组件打开 NewGoalDialog) */}
-        {onNewGoal && (
-          <button
-            type="button"
-            onClick={() => {
-              setOpen(false);
-              onNewGoal();
-            }}
-            className={cn(
-              'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
-              'transition-colors hover:bg-[var(--model-item-hover)]',
-            )}
-          >
-            <Target size={14} className="shrink-0 text-[var(--model-item-text)]" />
-            <span className="text-[13px] text-[var(--model-item-text)]">
-              {t('goal.newGoalMenuItem')}
-            </span>
-          </button>
-        )}
+      {/* 新建目标(仅会话中;点击关菜单并由父组件打开 NewGoalDialog) */}
+      {onNewGoal && (
+        <button
+          type="button"
+          onClick={() => {
+            setOpen(false);
+            onNewGoal();
+          }}
+          className={cn(
+            'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
+            'transition-colors hover:bg-[var(--model-item-hover)]',
+          )}
+        >
+          <Target size={14} className="shrink-0 text-[var(--model-item-text)]" />
+          <span className="text-[13px] text-[var(--model-item-text)]">
+            {t('goal.newGoalMenuItem')}
+          </span>
+        </button>
+      )}
 
-        {/* 计划模式 toggle(与「新建目标」同级):勾选态右侧打勾;点击切换并关菜单。 */}
-        {planMode && (
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={planMode.enabled}
-            onClick={() => {
-              setOpen(false);
-              planMode.onToggle(!planMode.enabled);
-            }}
-            className={cn(
-              'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
-              'transition-colors hover:bg-[var(--model-item-hover)]',
-            )}
-          >
-            <ClipboardList size={14} className="shrink-0 text-[var(--model-item-text)]" />
-            <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
-              {t('planMode.menuItem')}
-            </span>
-            {planMode.enabled && (
-              <Check size={13} className="shrink-0 text-[var(--model-item-check)]" />
-            )}
-          </button>
-        )}
+      {/* 计划模式 toggle(与「新建目标」同级):勾选态右侧打勾;点击切换并关菜单。 */}
+      {planMode && (
+        <button
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked={planMode.enabled}
+          onClick={() => {
+            setOpen(false);
+            planMode.onToggle(!planMode.enabled);
+          }}
+          className={cn(
+            'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
+            'transition-colors hover:bg-[var(--model-item-hover)]',
+          )}
+        >
+          <ClipboardList size={14} className="shrink-0 text-[var(--model-item-text)]" />
+          <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+            {t('planMode.menuItem')}
+          </span>
+          {planMode.enabled && (
+            <Check size={13} className="shrink-0 text-[var(--model-item-check)]" />
+          )}
+        </button>
+      )}
 
-        {/* 协同模式与目标/计划同级。开启态保留 Thinking Orange,右侧对勾表示当前状态。 */}
-        {collaboration && (
-          <Tip
-            text={collaborationPolicyDisabled ? collaboration.disabledReason : null}
-            side="right"
-          >
-            <span className="block">
-              <button
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={collaboration.enabled}
-                aria-label={collaborationAriaLabel}
-                aria-disabled={
-                  collaborationPolicyDisabled && !collaborationRetryable ? true : undefined
-                }
-                disabled={disabled || (collaborationPolicyDisabled && !collaborationRetryable)}
-                onClick={handleCollaborationActivate}
-                className={cn(
-                  'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
-                  'transition-colors hover:bg-[var(--model-item-hover)]',
-                  collaboration.enabled && 'bg-[var(--model-item-hover)]',
-                  (disabled || collaborationPolicyDisabled) && 'opacity-50',
-                  (disabled || (collaborationPolicyDisabled && !collaborationRetryable)) &&
-                    'cursor-not-allowed',
-                )}
-              >
-                <UsersRound
-                  size={14}
-                  className={cn(
-                    'shrink-0',
-                    collaboration.enabled
-                      ? 'text-[var(--warning-accent)]'
-                      : 'text-[var(--model-item-text)]',
-                  )}
-                />
-                <span
-                  className={cn(
-                    'min-w-0 flex-1 truncate text-left text-[13px]',
-                    collaboration.enabled
-                      ? 'font-medium text-[var(--warning-accent)]'
-                      : 'text-[var(--model-item-text)]',
-                  )}
-                >
-                  {t('newChat.collaboration.modeLabel')}
-                </span>
-                {collaboration.enabled && (
-                  <Check size={13} className="shrink-0 text-[var(--model-item-check)]" />
-                )}
-              </button>
-            </span>
-          </Tip>
-        )}
-
-        {plugins.length > 0 && (
-          <>
-            {(onNewGoal || planMode || collaboration) && (
-              <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
-            )}
-            <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
-              {t('extraDirs.pluginsTitle')}
-            </div>
-            <div
-              role="list"
-              aria-label={t('extraDirs.pluginsTitle')}
-              className="morph-panel-list-scroll plugin-motion-root -mr-2 max-h-[200px] overflow-y-auto [scrollbar-gutter:stable]"
-            >
-              {plugins.map((ghost) => {
-                const availableInScope = pluginAvailableIds
-                  ? pluginAvailableIds.has(ghost.manifest.id)
-                  : ghost.enabled;
-                const selectable = Boolean(
-                  availableInScope && ghost.manifest.command && onPluginSelect,
-                );
-                return (
-                  <button
-                    key={ghost.manifest.id}
-                    type="button"
-                    disabled={!selectable}
-                    onClick={() => {
-                      setOpen(false);
-                      onPluginSelect?.(ghost);
-                    }}
-                    className={cn(
-                      'flex w-full items-center gap-2 rounded-[8px] px-3 py-2 text-left',
-                      'transition-colors hover:bg-[var(--model-item-hover)]',
-                      'disabled:cursor-not-allowed disabled:opacity-45',
-                    )}
-                  >
-                    <GhostPluginIcon
-                      iconDataUrl={ghost.iconDataUrl}
-                      iconId={ghost.manifest.id}
-                      iconName={ghost.manifest.name}
-                      size="menu"
-                    />
-                    <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
-                      {ghost.manifest.name}
-                    </span>
-                    {!selectable ? (
-                      <span className="shrink-0 text-[12px] text-[var(--model-trigger-text)] opacity-70">
-                        {t(
-                          ghost.manifest.command
-                            ? 'extraDirs.pluginDisabled'
-                            : 'extraDirs.pluginNoCommand',
-                        )}
-                      </span>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-          </>
-        )}
-
-        {/* 引用目录段:Claude 与 Codex 共用；未接 onChange 时不暴露空操作入口。 */}
-        {hasReferenceDirs && (
-          <>
-            {(onNewGoal || planMode || collaboration || plugins.length > 0) && (
-              <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
-            )}
-
-            <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
-              {t('extraDirs.sectionTitle')}
-            </div>
-
-            {count > 0 ? (
-              <div role="list" aria-label="Extra reference directories" className="mb-1">
-                {extraDirs.map((p) => (
-                  <div
-                    key={p}
-                    className={cn(
-                      'group flex items-center gap-2 rounded-[8px] px-3 py-2',
-                      'hover:bg-[var(--model-item-hover)]',
-                    )}
-                  >
-                    <FolderPlus
-                      size={14}
-                      className="shrink-0 text-[var(--model-item-text)] opacity-60"
-                    />
-                    <Tip text={p} mono side="top">
-                      <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
-                        {basename(p)}
-                      </span>
-                    </Tip>
-                    <button
-                      type="button"
-                      onClick={() => void handleRemove(p)}
-                      className={cn(
-                        'rounded-full p-1 opacity-0 transition-opacity',
-                        'hover:bg-[var(--model-item-hover)]',
-                        'group-hover:opacity-70 hover:!opacity-100',
-                      )}
-                      aria-label={t('extraDirs.remove', { name: basename(p) })}
-                    >
-                      <X size={12} className="text-[var(--model-item-text)]" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="px-3 py-2 text-[12px] text-[var(--model-item-text)] opacity-50">
-                {t('extraDirs.empty')}
-              </div>
-            )}
-
+      {/* 协同模式与目标/计划同级。开启态保留 Thinking Orange,右侧对勾表示当前状态。 */}
+      {collaboration && (
+        <Tip text={collaborationPolicyDisabled ? collaboration.disabledReason : null} side="right">
+          <span className="block">
             <button
               type="button"
-              onClick={() => void handleAdd()}
-              disabled={atLimit}
+              role="menuitemcheckbox"
+              aria-checked={collaboration.enabled}
+              aria-label={collaborationAriaLabel}
+              aria-disabled={
+                collaborationPolicyDisabled && !collaborationRetryable ? true : undefined
+              }
+              disabled={disabled || (collaborationPolicyDisabled && !collaborationRetryable)}
+              onClick={handleCollaborationActivate}
               className={cn(
                 'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
-                'transition-colors',
-                'hover:bg-[var(--model-item-hover)]',
-                'disabled:cursor-not-allowed disabled:opacity-50',
+                'transition-colors hover:bg-[var(--model-item-hover)]',
+                collaboration.enabled && 'bg-[var(--model-item-hover)]',
+                (disabled || collaborationPolicyDisabled) && 'opacity-50',
+                (disabled || (collaborationPolicyDisabled && !collaborationRetryable)) &&
+                  'cursor-not-allowed',
               )}
             >
-              <FolderPlus size={14} className="shrink-0 text-[var(--model-item-text)]" />
-              <span className="text-[13px] text-[var(--model-item-text)]">
-                {atLimit ? t('extraDirs.atLimit', { max: MAX_EXTRA_DIRS }) : t('extraDirs.add')}
+              <UsersRound
+                size={14}
+                className={cn(
+                  'shrink-0',
+                  collaboration.enabled
+                    ? 'text-[var(--warning-accent)]'
+                    : 'text-[var(--model-item-text)]',
+                )}
+              />
+              <span
+                className={cn(
+                  'min-w-0 flex-1 truncate text-left text-[13px]',
+                  collaboration.enabled
+                    ? 'font-medium text-[var(--warning-accent)]'
+                    : 'text-[var(--model-item-text)]',
+                )}
+              >
+                {t('newChat.collaboration.modeLabel')}
               </span>
+              {collaboration.enabled && (
+                <Check size={13} className="shrink-0 text-[var(--model-item-check)]" />
+              )}
             </button>
-          </>
-        )}
+          </span>
+        </Tip>
+      )}
+
+      {plugins.length > 0 && (
+        <>
+          {(onNewGoal || planMode || collaboration) && (
+            <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
+          )}
+          <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+            {t('extraDirs.pluginsTitle')}
+          </div>
+          <div
+            role="list"
+            aria-label={t('extraDirs.pluginsTitle')}
+            className="morph-panel-list-scroll plugin-motion-root -mr-2 max-h-[200px] overflow-y-auto [scrollbar-gutter:stable]"
+          >
+            {plugins.map((ghost) => {
+              const availableInScope = pluginAvailableIds
+                ? pluginAvailableIds.has(ghost.manifest.id)
+                : ghost.enabled;
+              const hasHostCapabilityEntry = ghost.manifest.slots.includes('ios-simulator');
+              const selectable = Boolean(
+                availableInScope &&
+                ((ghost.manifest.command && onPluginSelect) ||
+                  (hasHostCapabilityEntry && onPluginCapabilitySelect)),
+              );
+              return (
+                <button
+                  key={ghost.manifest.id}
+                  type="button"
+                  disabled={!selectable}
+                  onClick={() => {
+                    setOpen(false);
+                    if (ghost.manifest.command) {
+                      onPluginSelect?.(ghost);
+                    } else if (hasHostCapabilityEntry) {
+                      onPluginCapabilitySelect?.(ghost);
+                    }
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-[8px] px-3 py-2 text-left',
+                    'transition-colors hover:bg-[var(--model-item-hover)]',
+                    'disabled:cursor-not-allowed disabled:opacity-45',
+                  )}
+                >
+                  <GhostPluginIcon
+                    iconDataUrl={ghost.iconDataUrl}
+                    iconId={ghost.manifest.id}
+                    iconName={ghost.manifest.name}
+                    size="menu"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+                    {ghost.manifest.name}
+                  </span>
+                  {!selectable ? (
+                    <span className="shrink-0 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+                      {t(
+                        !availableInScope
+                          ? 'extraDirs.pluginDisabled'
+                          : ghost.manifest.slots.includes('skill')
+                            ? 'extraDirs.pluginAgentInvoked'
+                            : 'extraDirs.pluginNoCommand',
+                      )}
+                    </span>
+                  ) : null}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {/* 引用目录段:Claude 与 Codex 共用；未接 onChange 时不暴露空操作入口。 */}
+      {hasReferenceDirs && (
+        <>
+          {(onNewGoal || planMode || collaboration || plugins.length > 0) && (
+            <div className="my-1 h-px bg-[var(--model-dropdown-border)]" />
+          )}
+
+          <div className="px-2 pb-1 pt-1 text-[12px] text-[var(--model-trigger-text)] opacity-70">
+            {t('extraDirs.sectionTitle')}
+          </div>
+
+          {count > 0 ? (
+            <div role="list" aria-label="Extra reference directories" className="mb-1">
+              {extraDirs.map((p) => (
+                <div
+                  key={p}
+                  className={cn(
+                    'group flex items-center gap-2 rounded-[8px] px-3 py-2',
+                    'hover:bg-[var(--model-item-hover)]',
+                  )}
+                >
+                  <FolderPlus
+                    size={14}
+                    className="shrink-0 text-[var(--model-item-text)] opacity-60"
+                  />
+                  <Tip text={p} mono side="top">
+                    <span className="min-w-0 flex-1 truncate text-left text-[13px] text-[var(--model-item-text)]">
+                      {basename(p)}
+                    </span>
+                  </Tip>
+                  <button
+                    type="button"
+                    onClick={() => void handleRemove(p)}
+                    className={cn(
+                      'rounded-full p-1 opacity-0 transition-opacity',
+                      'hover:bg-[var(--model-item-hover)]',
+                      'group-hover:opacity-70 hover:!opacity-100',
+                    )}
+                    aria-label={t('extraDirs.remove', { name: basename(p) })}
+                  >
+                    <X size={12} className="text-[var(--model-item-text)]" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="px-3 py-2 text-[12px] text-[var(--model-item-text)] opacity-50">
+              {t('extraDirs.empty')}
+            </div>
+          )}
+
+          <button
+            type="button"
+            onClick={() => void handleAdd()}
+            disabled={atLimit}
+            className={cn(
+              'flex w-full items-center gap-2 rounded-[8px] px-3 py-2',
+              'transition-colors',
+              'hover:bg-[var(--model-item-hover)]',
+              'disabled:cursor-not-allowed disabled:opacity-50',
+            )}
+          >
+            <FolderPlus size={14} className="shrink-0 text-[var(--model-item-text)]" />
+            <span className="text-[13px] text-[var(--model-item-text)]">
+              {atLimit ? t('extraDirs.atLimit', { max: MAX_EXTRA_DIRS }) : t('extraDirs.add')}
+            </span>
+          </button>
+        </>
+      )}
     </MorphPopover>
   );
 }

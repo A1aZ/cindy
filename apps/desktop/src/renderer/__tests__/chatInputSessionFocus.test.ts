@@ -93,13 +93,31 @@ describe('ChatInput session switch focus contract', () => {
     expect(chatInputSource).toContain('return isInteractiveFocusedElement(activeElement);');
   });
 
-  it('reuses in-composer Plugin placement for routed Use and end-focuses Create with Cindy', () => {
+  it('reuses composer entry paths for Plugin commands and Host capabilities', () => {
+    const capabilitySelectionBlock = extractBetween(
+      chatInputSource,
+      'const handlePluginCapabilitySelect = useCallback(',
+      'const handleVoiceInputPermissionRequired = useCallback',
+    );
+
     expect(pluginPageSource).toContain('pendingGhostId: ghost.manifest.id');
+    expect(pluginPageSource).toContain('pendingHostCapabilityGhostId: ghost.manifest.id');
     expect(pluginPageSource.match(/focusAtEnd: true/g)).toHaveLength(1);
     expect(
       chatInputSource.match(/placeGhostAtComposerStart\(editor, ghost, installedGhosts\)/g),
     ).toHaveLength(2);
     expect(chatInputSource).toContain('pendingGhostId: undefined');
+    expect(chatInputSource).toContain('pendingHostCapabilityGhostId: undefined');
+    expect(
+      chatInputSource.match(
+        /placeHostCapabilityAtComposerStart\(editor, ghost, installedGhosts\)/g,
+      ),
+    ).toHaveLength(2);
+    expect(capabilitySelectionBlock).toContain(
+      'placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);',
+    );
+    expect(capabilitySelectionBlock).not.toContain('sessionId');
+    expect(capabilitySelectionBlock).not.toContain('focusIOSSimulatorPanel');
     expect(chatInputSource).toContain('focusComposerEndNextFrame(editor);');
   });
 
@@ -126,9 +144,7 @@ describe('ChatInput session switch focus contract', () => {
     const transitionBegin = chatInputSource.indexOf(
       'makerChatStore.beginRemoteOptimisticComposerTransition(',
     );
-    const optimisticClear = chatInputSource.indexOf(
-      'if (optimisticallyClearRemoteComposer) {',
-    );
+    const optimisticClear = chatInputSource.indexOf('if (optimisticallyClearRemoteComposer) {');
     const frozenReferenceHydration = chatInputSource.search(
       /agentReferences\s*=\s*await resolveSerializedSessionMessageReferencesForSend\(agentReferences\);/,
     );
@@ -162,7 +178,9 @@ describe('ChatInput session switch focus contract', () => {
     expect(chatInputSource).toContain(
       'latestStorageKeyRef.current === sourceStorageKey &&\n            storageKeyForDraftRef.current === sourceStorageKey',
     );
-    expect(chatInputSource).toContain('restoreRemoteOptimisticDraft(\n            sourceStorageKey,');
+    expect(chatInputSource).toContain(
+      'restoreRemoteOptimisticDraft(\n            sourceStorageKey,',
+    );
     expect(chatInputSource).toContain('!isDataOwnerGenerationCurrent(dataOwnerAtOptimisticClear)');
     expect(chatInputSource).toContain('restoreOptimisticallyClearedComposer(clientId, {');
     expect(chatInputSource).toContain('isRemoteOptimisticDataOwnerBoundaryError(error)');

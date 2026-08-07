@@ -85,6 +85,8 @@ interface TabBarProps {
    *  "拖面板"手势面(窗口拖拽区收不到鼠标事件,二者物理互斥;拖窗走左栏顶行);
    *  detached 子窗口等其它宿主不传,默认 true 维持经典拖窗行为。 */
   chromeWindowDrag?: boolean;
+  /** Whether the installed product plugin currently exposes the Host viewer. */
+  iosSimulatorAvailable?: boolean;
 }
 
 interface TabStripProps {
@@ -114,6 +116,8 @@ interface TabStripProps {
    */
   addButtonWrapperClassName?: string;
   addButtonClassName?: string;
+  /** Whether the installed product plugin currently exposes the Host viewer. */
+  iosSimulatorAvailable?: boolean;
 }
 
 const KIND_ICON: Record<BuiltinTabKindId, LucideIcon> = {
@@ -194,6 +198,7 @@ export function TabBar({
   onCloseAll,
   onDetach,
   chromeWindowDrag = true,
+  iosSimulatorAvailable = false,
 }: TabBarProps) {
   const { t } = useTranslation();
 
@@ -218,6 +223,7 @@ export function TabBar({
         onCloseAll={onCloseAll}
         addButtonWrapperClassName="h-[36px]"
         addButtonClassName="mt-[3px]"
+        iosSimulatorAvailable={iosSimulatorAvailable}
       />
 
       {/* Right: window controls. 仅 showWindowControls=true(Win 端)时渲染;
@@ -277,6 +283,7 @@ export function TabStrip({
   pillVariant = 'flush',
   addButtonWrapperClassName,
   addButtonClassName,
+  iosSimulatorAvailable = false,
 }: TabStripProps) {
   const { t } = useTranslation();
   const reducedMotion = useReducedMotion();
@@ -432,6 +439,7 @@ export function TabStrip({
               setDropdownOpen(false);
             }}
             existingKinds={existingKinds}
+            iosSimulatorAvailable={iosSimulatorAvailable}
           />
         )}
       </div>

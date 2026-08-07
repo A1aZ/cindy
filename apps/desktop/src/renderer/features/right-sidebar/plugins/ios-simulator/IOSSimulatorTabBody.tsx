@@ -8,6 +8,7 @@ import {
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   House,
   Keyboard,
   Loader2,
@@ -34,6 +35,7 @@ import type {
 } from '@cindy/ios-simulator-runtime';
 import type {
   IOSSimulatorPublicInstance,
+  IOSSimulatorPublicDevice,
   IOSSimulatorPublicViewport,
   IOSSimulatorPublicRouteStatus,
   IOSSimulatorSessionStatus,
@@ -59,6 +61,32 @@ type StandardStreamProfileName = 'low' | 'balanced' | 'high';
 type StreamProfileName = StandardStreamProfileName | 'experimental60';
 type StreamProfile = { framesPerSecond: number; jpegQuality: number; scalingPercent: number };
 type NativeStreamProfile = { framesPerSecond: number; scalingPercent: number };
+
+function actionErrorI18nKey(errorCode: string): string {
+  switch (errorCode) {
+    case 'SIMULATOR_ATTACHED_ELSEWHERE':
+      return 'rightSidebar.iosSimulator.errors.attachedElsewhere';
+    case 'SESSION_INSTANCE_LIMIT_REACHED':
+      return 'rightSidebar.iosSimulator.errors.taskLimitReached';
+    case 'RESOURCE_LIMIT_REACHED':
+      return 'rightSidebar.iosSimulator.errors.resourceLimitReached';
+    case 'MEMORY_PRESSURE':
+      return 'rightSidebar.iosSimulator.errors.memoryPressure';
+    case 'SIMULATOR_NOT_FOUND':
+      return 'rightSidebar.iosSimulator.errors.deviceNotFound';
+    case 'LEASE_EXPIRED':
+    case 'STALE_GENERATION':
+      return 'rightSidebar.iosSimulator.errors.deviceStateChanged';
+    default:
+      return 'rightSidebar.iosSimulator.operationErrorWithRecovery';
+  }
+}
+
+function unavailableDeviceReasonKey(device: IOSSimulatorPublicDevice): string {
+  return device.unavailableReason?.code === 'missing-runtime'
+    ? 'rightSidebar.iosSimulator.missingRuntime'
+    : 'rightSidebar.iosSimulator.deviceUnavailable';
+}
 
 const WDA_STREAM_PROFILES: Record<StandardStreamProfileName, StreamProfile> = {
   low: { framesPerSecond: 5, jpegQuality: 25, scalingPercent: 50 },
@@ -251,11 +279,14 @@ export function IOSSimulatorTabBody({
 }: IOSSimulatorTabBodyProps) {
   const { t } = useTranslation();
   const [status, setStatus] = useState<IOSSimulatorSessionStatus | null>(null);
-  const [routeStatuses, setRouteStatuses] = useState<Record<string, IOSSimulatorPublicRouteStatus>>({});
+  const [routeStatuses, setRouteStatuses] = useState<Record<string, IOSSimulatorPublicRouteStatus>>(
+    {},
+  );
   const [transportError, setTransportError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [operation, setOperation] = useState<Operation>(null);
+  const [unavailableDevicesExpanded, setUnavailableDevicesExpanded] = useState(false);
   const [frameUrl, setFrameUrl] = useState<string | null>(null);
   const [framePresentation, setFramePresentation] = useState<'jpeg' | 'h264' | null>(null);
   const [presentationRouteKey, setPresentationRouteKey] = useState<string | null>(null);
@@ -328,29 +359,26 @@ export function IOSSimulatorTabBody({
     [replaceFrameUrl],
   );
 
-  const markFramePresented = useCallback(
-    (routeKey: string, presentation: 'jpeg' | 'h264') => {
-      const now = performance.now();
-      if (fpsWindowRef.current.startedAt === 0) fpsWindowRef.current.startedAt = now;
-      fpsWindowRef.current.frames += 1;
-      const elapsed = now - fpsWindowRef.current.startedAt;
-      if (elapsed >= 1_000) {
-        setStreamFps((fpsWindowRef.current.frames * 1_000) / elapsed);
-        fpsWindowRef.current = { startedAt: now, frames: 0 };
-      }
-      if (frameFreshnessTimerRef.current !== null) {
-        window.clearTimeout(frameFreshnessTimerRef.current);
-      }
-      setPresentationRouteKey(routeKey);
-      setFramePresentation(presentation);
-      setFrameFresh(true);
-      frameFreshnessTimerRef.current = window.setTimeout(() => {
-        frameFreshnessTimerRef.current = null;
-        setFrameFresh(false);
-      }, FRAME_FRESHNESS_TIMEOUT_MS);
-    },
-    [],
-  );
+  const markFramePresented = useCallback((routeKey: string, presentation: 'jpeg' | 'h264') => {
+    const now = performance.now();
+    if (fpsWindowRef.current.startedAt === 0) fpsWindowRef.current.startedAt = now;
+    fpsWindowRef.current.frames += 1;
+    const elapsed = now - fpsWindowRef.current.startedAt;
+    if (elapsed >= 1_000) {
+      setStreamFps((fpsWindowRef.current.frames * 1_000) / elapsed);
+      fpsWindowRef.current = { startedAt: now, frames: 0 };
+    }
+    if (frameFreshnessTimerRef.current !== null) {
+      window.clearTimeout(frameFreshnessTimerRef.current);
+    }
+    setPresentationRouteKey(routeKey);
+    setFramePresentation(presentation);
+    setFrameFresh(true);
+    frameFreshnessTimerRef.current = window.setTimeout(() => {
+      frameFreshnessTimerRef.current = null;
+      setFrameFresh(false);
+    }, FRAME_FRESHNESS_TIMEOUT_MS);
+  }, []);
 
   const refresh = useCallback(async () => {
     const requestVersion = ++requestVersionRef.current;
@@ -400,12 +428,17 @@ export function IOSSimulatorTabBody({
 
   const environment = status?.ok ? status.environment : null;
   const instances = status?.ok ? status.instances : [];
+  const resource = status?.ok ? (status.resource ?? null) : null;
+  const maxInstancesPerTask = resource?.maxInstancesPerTask ?? 4;
+  const availableDevices = environment?.devices.filter((device) => device.isAvailable) ?? [];
+  const unavailableDevices = environment?.devices.filter((device) => !device.isAvailable) ?? [];
+  const globalHardLimitReached = Boolean(resource && resource.runningCount >= resource.hardLimit);
   const attachedInstance =
     instances.find((instance) => instance.instanceId === state.instanceId) ?? instances[0] ?? null;
   const viewerRouteKey = attachedInstance
     ? `${attachedInstance.instanceId}:${attachedInstance.generation}`
     : null;
-  const routeStatus = viewerRouteKey ? routeStatuses[viewerRouteKey] ?? null : null;
+  const routeStatus = viewerRouteKey ? (routeStatuses[viewerRouteKey] ?? null) : null;
   currentRouteStatusRef.current = routeStatus;
   const nativeH264Selected = Boolean(
     routeStatus?.stream.adapter === 'native-sidecar' && routeStatus.stream.encoding === 'h264',
@@ -441,11 +474,7 @@ export function IOSSimulatorTabBody({
     viewerRouteKey && presentationRouteKey === viewerRouteKey && framePresentation !== null,
   );
   const viewerInteractive = Boolean(
-    viewerVisible &&
-      streamState === 'streaming' &&
-      presentationMatchesRoute &&
-      frameFresh &&
-      !busy,
+    viewerVisible && streamState === 'streaming' && presentationMatchesRoute && frameFresh && !busy,
   );
   const streamRouteLabel =
     routeStatus?.stream.adapter === 'native-sidecar' && routeStatus.stream.encoding === 'h264'
@@ -465,14 +494,21 @@ export function IOSSimulatorTabBody({
   const inputRouteStateLabel = routeStatus
     ? t(`rightSidebar.iosSimulator.route.state.${routeStatus.input.state}`)
     : t('rightSidebar.iosSimulator.route.state.detecting');
+  const formatActionError = useCallback(
+    (result: Extract<IOSSimulatorToolResponse, { ok: false }>) =>
+      t(actionErrorI18nKey(result.errorCode), {
+        hardLimit: resource?.hardLimit ?? 4,
+        taskLimit: maxInstancesPerTask,
+      }),
+    [maxInstancesPerTask, resource?.hardLimit, t],
+  );
 
   useEffect(() => {
     const gate = nativeRecoveryGateRef.current;
     if (gate.routeKey !== viewerRouteKey) resetNativeRecoveryGate(gate, viewerRouteKey);
     const nativeActive = Boolean(
-      (routeStatus?.stream.adapter === 'native-sidecar' &&
-        routeStatus.stream.state === 'active') ||
-        (routeStatus?.input.adapter === 'native-sidecar' && routeStatus.input.state === 'active'),
+      (routeStatus?.stream.adapter === 'native-sidecar' && routeStatus.stream.state === 'active') ||
+      (routeStatus?.input.adapter === 'native-sidecar' && routeStatus.input.state === 'active'),
     );
     if (nativeActive && !isRecoverableNativeFallback(routeStatus)) {
       resetNativeRecoveryGate(gate, viewerRouteKey);
@@ -618,8 +654,8 @@ export function IOSSimulatorTabBody({
       const now = performance.now();
       if (gate.inFlight || now < gate.retryAfter) return null;
       gate.inFlight = true;
-      gate.attemptCount += 1;
-      gate.retryAfter = now + nativeRecoveryBackoff(gate.attemptCount);
+      const attemptCount = gate.attemptCount + 1;
+      gate.attemptCount = attemptCount;
       try {
         return await window.electronAPI.maker.iosSimulator.setViewerVisibility({
           ...route,
@@ -627,8 +663,14 @@ export function IOSSimulatorTabBody({
           preferredEncoding: 'h264',
         });
       } finally {
-        if (nativeRecoveryGateRef.current.routeKey === routeKey) {
-          nativeRecoveryGateRef.current.inFlight = false;
+        const currentGate = nativeRecoveryGateRef.current;
+        if (
+          currentGate.routeKey === routeKey &&
+          currentGate.inFlight &&
+          currentGate.attemptCount === attemptCount
+        ) {
+          currentGate.inFlight = false;
+          currentGate.retryAfter = performance.now() + nativeRecoveryBackoff(attemptCount);
         }
       }
     };
@@ -770,6 +812,16 @@ export function IOSSimulatorTabBody({
           });
           acceptViewerResult(recovered);
         }
+        if (stream?.state !== 'disconnected') {
+          // Keep presenting the healthy WDA/JPEG fallback while an optional
+          // Sidecar recovery runs independently. The per-route gate prevents
+          // parallel attempts and applies bounded exponential backoff.
+          void attemptNativeRecovery()
+            .then((recovered) => {
+              if (recovered?.ok) acceptViewerResult(recovered);
+            })
+            .catch(() => undefined);
+        }
       } catch {
         disconnectViewer();
       } finally {
@@ -869,7 +921,7 @@ export function IOSSimulatorTabBody({
           args,
         });
         if (!result.ok) {
-          setActionError(result.message);
+          setActionError(formatActionError(result));
           return;
         }
         const instance = resultInstance(result);
@@ -877,12 +929,12 @@ export function IOSSimulatorTabBody({
         else if (instance) ctx.patchState({ instanceId: instance.instanceId });
         await refresh();
       } catch {
-        setActionError(t('rightSidebar.iosSimulator.operationError'));
+        setActionError(t('rightSidebar.iosSimulator.operationErrorWithRecovery'));
       } finally {
         setOperation(null);
       }
     },
-    [ctx, refresh, t],
+    [ctx, formatActionError, refresh, t],
   );
 
   const setAgentControl = useCallback(async () => {
@@ -895,14 +947,14 @@ export function IOSSimulatorTabBody({
         instanceId: attachedInstance.instanceId,
         decision: grant?.agentControl === 'allowed' ? 'denied' : 'allowed',
       });
-      if (!result.ok) setActionError(result.message);
+      if (!result.ok) setActionError(formatActionError(result));
       else await refresh();
     } catch {
-      setActionError(t('rightSidebar.iosSimulator.operationError'));
+      setActionError(t('rightSidebar.iosSimulator.operationErrorWithRecovery'));
     } finally {
       setOperation(null);
     }
-  }, [attachedInstance, ctx.sessionId, grant?.agentControl, refresh, t]);
+  }, [attachedInstance, ctx.sessionId, formatActionError, grant?.agentControl, refresh, t]);
 
   const setMutationControl = useCallback(async () => {
     if (!attachedInstance) return;
@@ -914,17 +966,17 @@ export function IOSSimulatorTabBody({
         ...routeFor(attachedInstance),
         paused: !mutation?.agentPaused,
       });
-      if (!result.ok) setActionError(result.message);
+      if (!result.ok) setActionError(formatActionError(result));
       else {
         const nextMutation = resultMutation(result);
         if (nextMutation) setLiveMutation(nextMutation);
       }
     } catch {
-      setActionError(t('rightSidebar.iosSimulator.operationError'));
+      setActionError(t('rightSidebar.iosSimulator.operationErrorWithRecovery'));
     } finally {
       setOperation(null);
     }
-  }, [attachedInstance, ctx.sessionId, mutation?.agentPaused, t]);
+  }, [attachedInstance, ctx.sessionId, formatActionError, mutation?.agentPaused, t]);
 
   const sendStreamProfile = useCallback(
     async (
@@ -964,15 +1016,15 @@ export function IOSSimulatorTabBody({
         if (result && !result.ok) {
           setStreamProfile(previous);
           streamProfileRef.current = previous;
-          setActionError(result.message);
+          setActionError(formatActionError(result));
         }
       } catch {
         setStreamProfile(previous);
         streamProfileRef.current = previous;
-        setActionError(t('rightSidebar.iosSimulator.operationError'));
+        setActionError(t('rightSidebar.iosSimulator.operationErrorWithRecovery'));
       }
     },
-    [attachedInstance, nativeH264Active, sendStreamProfile, streamProfile, t],
+    [attachedInstance, formatActionError, nativeH264Active, sendStreamProfile, streamProfile, t],
   );
 
   useEffect(() => {
@@ -1028,10 +1080,17 @@ export function IOSSimulatorTabBody({
       return;
     void sendStreamProfile(streamProfileRef.current, true)
       .then((result) => {
-        if (result && !result.ok) setActionError(result.message);
+        if (result && !result.ok) setActionError(formatActionError(result));
       })
       .catch(() => undefined);
-  }, [attachedInstance, nativeH264Active, nativeH264Selected, sendStreamProfile, viewerRouteKey]);
+  }, [
+    attachedInstance,
+    formatActionError,
+    nativeH264Active,
+    nativeH264Selected,
+    sendStreamProfile,
+    viewerRouteKey,
+  ]);
 
   const beginInteractiveFrameRate = useCallback(() => {
     if (profileRestoreTimerRef.current !== null) {
@@ -1101,18 +1160,18 @@ export function IOSSimulatorTabBody({
           }
         }
         if (!result.ok) {
-          setActionError(result.message);
+          setActionError(formatActionError(result));
           return false;
         }
         return true;
       } catch {
-        setActionError(t('rightSidebar.iosSimulator.operationError'));
+        setActionError(t('rightSidebar.iosSimulator.operationErrorWithRecovery'));
         return false;
       } finally {
         setInteractionBusy(false);
       }
     },
-    [attachedInstance, ctx.sessionId, refresh, t, viewerInteractive],
+    [attachedInstance, ctx.sessionId, formatActionError, refresh, t, viewerInteractive],
   );
 
   const pointerRatio = useCallback(
@@ -1496,7 +1555,7 @@ export function IOSSimulatorTabBody({
             role="alert"
             className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-[12px] text-[var(--text-primary)]"
           >
-            {actionError} {t('rightSidebar.iosSimulator.retryHint')}
+            {actionError}
           </div>
         )}
 
@@ -1697,7 +1756,9 @@ export function IOSSimulatorTabBody({
                         !routeStatus.input.multiTouch && (
                           <>
                             <span aria-hidden="true">·</span>
-                            <span>{t('rightSidebar.iosSimulator.route.multiTouchUnavailable')}</span>
+                            <span>
+                              {t('rightSidebar.iosSimulator.route.multiTouchUnavailable')}
+                            </span>
                           </>
                         )}
                     </div>
@@ -1909,6 +1970,39 @@ export function IOSSimulatorTabBody({
               </section>
             )}
 
+            {resource && resource.runningCount >= resource.softLimit && (
+              <div
+                role="status"
+                className="flex items-start gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3"
+              >
+                <AlertTriangle
+                  size={14}
+                  className="mt-0.5 shrink-0 text-[var(--text-secondary)]"
+                  aria-hidden="true"
+                />
+                <div className="min-w-0">
+                  <div className="text-[12px] font-medium text-[var(--text-primary)]">
+                    {t(
+                      globalHardLimitReached
+                        ? 'rightSidebar.iosSimulator.resourceHardLimitTitle'
+                        : 'rightSidebar.iosSimulator.resourceSoftLimitTitle',
+                      {
+                        count: resource.runningCount,
+                        limit: resource.hardLimit,
+                      },
+                    )}
+                  </div>
+                  <div className="mt-1 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                    {t(
+                      globalHardLimitReached
+                        ? 'rightSidebar.iosSimulator.resourceHardLimitDescription'
+                        : 'rightSidebar.iosSimulator.resourceSoftLimitDescription',
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
             <section>
               <h3 className="mb-2 text-[12px] font-medium">
                 {t('rightSidebar.iosSimulator.devicesTitle')}
@@ -1917,9 +2011,13 @@ export function IOSSimulatorTabBody({
                 <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-[12px] text-[var(--text-secondary)]">
                   {t('rightSidebar.iosSimulator.noDevices')}
                 </div>
+              ) : availableDevices.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-[12px] text-[var(--text-secondary)]">
+                  {t('rightSidebar.iosSimulator.noAvailableDevices')}
+                </div>
               ) : (
                 <ul className="space-y-2">
-                  {environment.devices.map((device) => {
+                  {availableDevices.map((device) => {
                     const boundInstance = instances.find(
                       (instance) => instance.simulatorUdid === device.udid,
                     );
@@ -1928,13 +2026,26 @@ export function IOSSimulatorTabBody({
                       boundInstance &&
                       attachedInstance.instanceId === boundInstance.instanceId,
                     );
+                    const connectionBlockReason = boundInstance
+                      ? null
+                      : device.ownership === 'other-task'
+                        ? t('rightSidebar.iosSimulator.deviceInUseByOtherTask')
+                        : instances.length >= maxInstancesPerTask
+                          ? t('rightSidebar.iosSimulator.taskDeviceLimitReached', {
+                              limit: maxInstancesPerTask,
+                            })
+                          : globalHardLimitReached && device.state.toLowerCase() === 'booted'
+                            ? t('rightSidebar.iosSimulator.runningDeviceLimitReached', {
+                                limit: resource?.hardLimit ?? 4,
+                              })
+                            : null;
+                    const connectionBlockDescriptionId = connectionBlockReason
+                      ? `${ctx.tabId}-${device.udid}-connection-blocked`
+                      : undefined;
                     return (
                       <li
                         key={device.udid}
-                        className={cn(
-                          'rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3',
-                          !device.isAvailable && 'opacity-60',
-                        )}
+                        className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
@@ -1964,19 +2075,117 @@ export function IOSSimulatorTabBody({
                             <ActionButton
                               label={t('rightSidebar.iosSimulator.attachDevice')}
                               icon={Link2}
-                              disabled={busy || !device.isAvailable || instances.length >= 4}
+                              disabled={busy || Boolean(connectionBlockReason)}
+                              describedBy={connectionBlockDescriptionId}
                               onClick={() =>
                                 void call('attach', 'attach_device', { udid: device.udid })
                               }
                             />
                           )}
                         </div>
+                        {connectionBlockReason && (
+                          <div
+                            id={connectionBlockDescriptionId}
+                            className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[var(--text-secondary)]"
+                          >
+                            <AlertTriangle
+                              size={12}
+                              className="mt-0.5 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span>{connectionBlockReason}</span>
+                          </div>
+                        )}
                       </li>
                     );
                   })}
                 </ul>
               )}
             </section>
+
+            {unavailableDevices.length > 0 && (
+              <section>
+                <h3>
+                  <button
+                    type="button"
+                    aria-expanded={unavailableDevicesExpanded}
+                    aria-controls={`${ctx.tabId}-ios-simulator-unavailable-devices`}
+                    onClick={() => setUnavailableDevicesExpanded((expanded) => !expanded)}
+                    className="flex w-full select-none items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 py-2.5 text-left text-[12px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                  >
+                    <AlertTriangle
+                      size={14}
+                      className="shrink-0 text-[var(--text-secondary)]"
+                      aria-hidden="true"
+                    />
+                    <span className="min-w-0 flex-1">
+                      {t('rightSidebar.iosSimulator.unavailableDevicesTitle')}
+                    </span>
+                    <span className="rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-[10px] font-normal text-[var(--text-secondary)]">
+                      {t('rightSidebar.iosSimulator.unavailableDevicesCount', {
+                        count: unavailableDevices.length,
+                      })}
+                    </span>
+                    <ChevronDown
+                      size={14}
+                      aria-hidden="true"
+                      className={cn(
+                        'shrink-0 text-[var(--text-secondary)] transition-transform motion-reduce:transition-none',
+                        unavailableDevicesExpanded && 'rotate-180',
+                      )}
+                    />
+                  </button>
+                </h3>
+                {unavailableDevicesExpanded && (
+                  <div id={`${ctx.tabId}-ios-simulator-unavailable-devices`} className="mt-2">
+                    <p className="mb-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                      {t('rightSidebar.iosSimulator.unavailableDevicesDescription')}
+                    </p>
+                    <ul className="space-y-2">
+                      {unavailableDevices.map((device) => {
+                        const missingRuntime = device.unavailableReason?.code === 'missing-runtime';
+                        return (
+                          <li
+                            key={device.udid}
+                            className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3"
+                          >
+                            <div className="truncate text-[12px] font-medium">{device.name}</div>
+                            <div className="mt-1 truncate text-[11px] text-[var(--text-secondary)]">
+                              {device.runtimeName} · {device.state}
+                            </div>
+                            <div className="mt-1 truncate font-mono text-[10px] text-[var(--text-tertiary)]">
+                              {device.udid}
+                            </div>
+                            <div className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[var(--text-primary)]">
+                              <AlertTriangle
+                                size={12}
+                                className="mt-0.5 shrink-0 text-[var(--text-secondary)]"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {t(unavailableDeviceReasonKey(device), {
+                                  runtime:
+                                    device.unavailableReason?.code === 'missing-runtime'
+                                      ? device.unavailableReason.runtimeName
+                                      : device.runtimeName,
+                                })}
+                              </span>
+                            </div>
+                            <p className="mt-1 pl-[18px] text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                              {t(
+                                missingRuntime
+                                  ? 'rightSidebar.iosSimulator.missingRuntimeHelp'
+                                  : 'rightSidebar.iosSimulator.deviceUnavailableHelp',
+                              )}
+                            </p>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                )}
+              </section>
+            )}
           </>
         )}
       </div>
@@ -1988,11 +2197,13 @@ function ActionButton({
   label,
   icon: Icon,
   disabled,
+  describedBy,
   onClick,
 }: {
   label: string;
   icon: typeof AlertTriangle;
   disabled?: boolean;
+  describedBy?: string;
   onClick(): void;
 }) {
   return (
@@ -2000,6 +2211,7 @@ function ActionButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
+      aria-describedby={describedBy}
       className="inline-flex h-8 shrink-0 select-none items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 text-[11px] text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:opacity-50"
     >
       <Icon size={12} aria-hidden="true" />

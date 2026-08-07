@@ -273,6 +273,7 @@ describe("WdaProcessManager", () => {
         crashCount: 0,
         probe: null,
         lastFailure: null,
+        lastTermination: null,
         admission: nativeAdmission,
       })),
       admission: vi.fn(() => nativeAdmission),

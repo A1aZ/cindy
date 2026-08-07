@@ -12,7 +12,17 @@ import type {
 } from '@cindy/ios-simulator-runtime';
 import type { IOSSimulatorMcpErrorCode, IOSSimulatorMcpToolName } from '@cindy/mcps';
 
-export type IOSSimulatorPublicDevice = Omit<IOSSimulatorDevice, 'availabilityError'>;
+export type IOSSimulatorPublicDeviceOwnership = 'unowned' | 'current-task' | 'other-task';
+
+export type IOSSimulatorPublicDeviceUnavailableReason =
+  { code: 'missing-runtime'; runtimeName: string } | { code: 'device-unavailable' };
+
+export type IOSSimulatorPublicDevice = Omit<IOSSimulatorDevice, 'availabilityError'> & {
+  /** Optional so an older Host status remains consumable by a newer renderer. */
+  ownership?: IOSSimulatorPublicDeviceOwnership;
+  /** Renderer-safe diagnosis; raw CoreSimulator errors stay in Main. */
+  unavailableReason?: IOSSimulatorPublicDeviceUnavailableReason | null;
+};
 
 export type IOSSimulatorPublicRuntime = Omit<IOSSimulatorRuntimeInfo, 'availabilityError'>;
 
@@ -32,15 +42,17 @@ export interface IOSSimulatorPublicViewport {
   orientation: IOSSimulatorOrientation;
 }
 
+export interface IOSSimulatorPublicResourceStatus {
+  runningCount: number;
+  softLimit: number;
+  hardLimit: number;
+  maxInstancesPerTask: number;
+}
+
 export type IOSSimulatorPublicRouteAdapter = 'native-sidecar' | 'wda' | null;
 
 export type IOSSimulatorPublicRouteState =
-  | 'idle'
-  | 'detecting'
-  | 'active'
-  | 'fallback'
-  | 'reconnecting'
-  | 'unavailable';
+  'idle' | 'detecting' | 'active' | 'fallback' | 'reconnecting' | 'unavailable';
 
 /** Stable, renderer-safe reason codes for the selected simulator routes. */
 export type IOSSimulatorPublicRouteReasonCode =
@@ -79,8 +91,7 @@ export interface IOSSimulatorPublicRouteStatus {
 }
 
 /** Shared channel name so main, preload and renderer cannot drift. */
-export const IOS_SIMULATOR_ROUTE_STATUS_CHANNEL =
-  'maker:ios-simulator:route-status' as const;
+export const IOS_SIMULATOR_ROUTE_STATUS_CHANNEL = 'maker:ios-simulator:route-status' as const;
 
 export type IOSSimulatorSessionStatus =
   | {
@@ -90,6 +101,8 @@ export type IOSSimulatorSessionStatus =
       instances: IOSSimulatorPublicInstance[];
       deviceGrants: IOSSimulatorDeviceGrant[];
       mutationStates: IOSSimulatorMutationState[];
+      /** Optional for compatibility with older Host builds. */
+      resource?: IOSSimulatorPublicResourceStatus;
       /** Optional for compatibility with older detached/sidebar renderers. */
       routeStatuses?: IOSSimulatorPublicRouteStatus[];
     }
@@ -164,7 +177,10 @@ export interface IOSSimulatorLiveTouchRequest extends IOSSimulatorViewerRouteReq
 
 export interface IOSSimulatorFocusRequest {
   sessionId: string;
-  instanceId: string;
+  /** Omitted when a Host capability only needs to open the unbound simulator panel. */
+  instanceId?: string;
+  /** false for plugin/automation requests that must not steal focus as a direct user gesture. */
+  userInitiated?: boolean;
 }
 
 export type IOSSimulatorH264FramePush = {

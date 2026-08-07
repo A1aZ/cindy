@@ -173,15 +173,15 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
       if (routeStatusListener === callback) routeStatusListener = null;
     };
   });
-  const liveTouch = vi.fn(async (
-    request: IOSSimulatorLiveTouchRequest,
-  ): Promise<IOSSimulatorToolResponse> => {
-    void request;
-    return {
-      ok: true as const,
-      data: {},
-    };
-  });
+  const liveTouch = vi.fn(
+    async (request: IOSSimulatorLiveTouchRequest): Promise<IOSSimulatorToolResponse> => {
+      void request;
+      return {
+        ok: true as const,
+        data: {},
+      };
+    },
+  );
   const latestFrame = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
     ok: true,
     data: { stream: null },
@@ -328,6 +328,120 @@ describe('IOSSimulatorTabBody', () => {
     });
   });
 
+  it('explains task ownership and folds unavailable devices with a safe reason', async () => {
+    installStatus({
+      ok: true,
+      sessionId: 'session-a',
+      instances: [],
+      deviceGrants: [],
+      mutationStates: [],
+      resource: {
+        runningCount: 2,
+        softLimit: 2,
+        hardLimit: 4,
+        maxInstancesPerTask: 4,
+      },
+      environment: {
+        platform: 'darwin',
+        supported: true,
+        ready: true,
+        xcodeVersion: 'Xcode 26.4',
+        runtimes: [],
+        devices: [
+          {
+            udid: 'DEVICE-UDID-123',
+            name: 'iPhone 17 Pro',
+            state: 'Booted',
+            isAvailable: true,
+            ownership: 'other-task',
+            runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-26-4',
+            runtimeName: 'iOS 26.4',
+            runtimeVersion: '26.4',
+            deviceTypeIdentifier: null,
+            lastBootedAt: null,
+          },
+          {
+            udid: 'UNAVAILABLE-DEVICE-UDID',
+            name: 'iPhone 16',
+            state: 'Shutdown',
+            isAvailable: false,
+            ownership: 'unowned',
+            unavailableReason: { code: 'missing-runtime', runtimeName: 'iOS 18.4' },
+            runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-18-4',
+            runtimeName: 'iOS 18-4',
+            runtimeVersion: null,
+            deviceTypeIdentifier: null,
+            lastBootedAt: null,
+          },
+        ],
+        issue: null,
+        error: null,
+        setupSteps: [],
+      },
+    });
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await waitFor(() => expect(screen.getByText('iPhone 17 Pro')).toBeTruthy());
+    expect(screen.getByText('rightSidebar.iosSimulator.deviceInUseByOtherTask')).toBeTruthy();
+    expect(screen.getByText('rightSidebar.iosSimulator.resourceSoftLimitTitle')).toBeTruthy();
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'rightSidebar.iosSimulator.attachDevice',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(screen.queryByText('iPhone 16')).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole('button', {
+        name: /rightSidebar\.iosSimulator\.unavailableDevicesTitle/,
+      }),
+    );
+
+    expect(screen.getByText('iPhone 16')).toBeTruthy();
+    expect(screen.getByText('rightSidebar.iosSimulator.missingRuntime')).toBeTruthy();
+    expect(screen.getByText('rightSidebar.iosSimulator.missingRuntimeHelp')).toBeTruthy();
+  });
+
+  it('maps an ownership race to an actionable localized error', async () => {
+    const statusValue = readyStatus();
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    statusValue.instances = [];
+    statusValue.environment.devices = [
+      {
+        udid: 'DEVICE-UDID-123',
+        name: 'iPhone 17 Pro',
+        state: 'Shutdown',
+        isAvailable: true,
+        ownership: 'unowned',
+        runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-26-4',
+        runtimeName: 'iOS 26.4',
+        runtimeVersion: '26.4',
+        deviceTypeIdentifier: null,
+        lastBootedAt: null,
+      },
+    ];
+    const api = installStatus(statusValue);
+    api.call.mockResolvedValueOnce({
+      ok: false,
+      errorCode: 'SIMULATOR_ATTACHED_ELSEWHERE',
+      message: 'The simulator is attached to another Cindy session.',
+    });
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+    await waitFor(() => expect(screen.getByText('iPhone 17 Pro')).toBeTruthy());
+    fireEvent.click(screen.getByRole('button', { name: 'rightSidebar.iosSimulator.attachDevice' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toBe(
+        'rightSidebar.iosSimulator.errors.attachedElsewhere',
+      );
+    });
+    expect(screen.queryByText(/The simulator is attached/)).toBeNull();
+  });
+
   it('shows a localized unsupported state for remote sessions', async () => {
     installStatus({
       ok: false,
@@ -421,9 +535,7 @@ describe('IOSSimulatorTabBody', () => {
         },
       ],
     });
-    fireEvent.click(
-      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.refresh' }),
-    );
+    fireEvent.click(screen.getByRole('button', { name: 'rightSidebar.iosSimulator.refresh' }));
     await waitFor(() => expect(api.status).toHaveBeenCalledTimes(2));
     expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
     expect(screen.getByText('rightSidebar.iosSimulator.route.nativeHid')).toBeTruthy();
@@ -799,9 +911,7 @@ describe('IOSSimulatorTabBody', () => {
     await waitFor(() => {
       expect(screen.getByText('rightSidebar.iosSimulator.route.nativeH264')).toBeTruthy();
     });
-    act(() =>
-      api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:03.000Z' }),
-    );
+    act(() => api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:03.000Z' }));
     await waitFor(() => {
       expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
     });
@@ -813,14 +923,90 @@ describe('IOSSimulatorTabBody', () => {
     await waitFor(() => {
       expect(screen.getByText('rightSidebar.iosSimulator.route.nativeH264')).toBeTruthy();
     });
-    act(() =>
-      api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:05.000Z' }),
-    );
+    act(() => api.emitRouteStatus({ ...nativeFallback, updatedAt: '2026-08-06T00:00:05.000Z' }));
     await waitFor(() => {
       expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
     });
     foreground();
     await waitFor(() => expect(nativeRecoveryRequests()).toHaveLength(3));
+  });
+
+  it('recovers Native in the background while keeping a healthy WDA frame visible', async () => {
+    installFakeH264DecoderRuntime();
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    const nativeActive: IOSSimulatorRouteStatusPush = {
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      updatedAt: '2026-08-06T00:00:00.000Z',
+      stream: {
+        adapter: 'native-sidecar',
+        encoding: 'h264',
+        state: 'active',
+        reasonCode: 'native-active',
+      },
+      input: {
+        adapter: 'native-sidecar',
+        state: 'active',
+        continuous: true,
+        multiTouch: true,
+        reasonCode: 'native-active',
+      },
+    };
+    statusValue.routeStatuses = [nativeActive];
+    const api = installStatus(statusValue);
+    api.setViewerVisibility.mockResolvedValue({
+      ok: true,
+      data: {
+        stream: {
+          instanceId: instance.instanceId,
+          generation: instance.generation,
+          state: 'connecting',
+          reconnectAttempt: 0,
+          latestFrame: null,
+        },
+      },
+    });
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+    const rendered = render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+
+    await waitFor(() => expect(rendered.container.querySelector('img')).toBeTruthy());
+    api.setViewerVisibility.mockClear();
+    act(() =>
+      api.emitRouteStatus({
+        ...nativeActive,
+        updatedAt: '2026-08-06T00:00:01.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-stream-disconnected',
+        },
+        input: {
+          adapter: 'wda',
+          state: 'fallback',
+          continuous: false,
+          multiTouch: false,
+          reasonCode: 'native-sidecar-unavailable',
+        },
+      }),
+    );
+
+    await waitFor(() =>
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ visible: true, preferredEncoding: 'h264' }),
+      ),
+    );
+    expect(rendered.container.querySelector('img')).toBeTruthy();
   });
 
   it('does not retry an explicit H.264 decoder fallback when returning foreground', async () => {
@@ -1237,15 +1423,14 @@ describe('IOSSimulatorTabBody', () => {
     const api = installStatus(readyStatus());
     api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
     api.latestFrame.mockResolvedValue(streamingJpegResult());
-    api.liveTouch.mockImplementation(
-      async (request): Promise<IOSSimulatorToolResponse> =>
-        request.phase === 'move'
-          ? {
+    api.liveTouch.mockImplementation(async (request): Promise<IOSSimulatorToolResponse> =>
+      request.phase === 'move'
+        ? {
             ok: false,
-              errorCode: 'IOS_SIMULATOR_HOST_ERROR',
-              message: 'The native move failed.',
-            }
-          : { ok: true, data: {} },
+            errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+            message: 'The native move failed.',
+          }
+        : { ok: true, data: {} },
     );
     const rendered = render(
       <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
@@ -1374,15 +1559,17 @@ describe('IOSSimulatorTabBody', () => {
     api.latestFrame.mockImplementation(() => new Promise<IOSSimulatorToolResponse>(() => {}));
     let expireFreshness: (() => void) | null = null;
     const originalSetTimeout = window.setTimeout.bind(window);
-    vi.spyOn(window, 'setTimeout').mockImplementation(
-      ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
-        if (timeout === 3_000 && typeof handler === 'function') {
-          expireFreshness = () => handler(...args);
-          return 30_001;
-        }
-        return originalSetTimeout(handler, timeout, ...args);
-      }) as typeof window.setTimeout,
-    );
+    vi.spyOn(window, 'setTimeout').mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (timeout === 3_000 && typeof handler === 'function') {
+        expireFreshness = () => handler(...args);
+        return 30_001;
+      }
+      return originalSetTimeout(handler, timeout, ...args);
+    }) as typeof window.setTimeout);
 
     const rendered = render(
       <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,

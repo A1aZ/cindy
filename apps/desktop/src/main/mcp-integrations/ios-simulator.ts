@@ -77,6 +77,10 @@ import type {
   IOSSimulatorSessionStatus,
 } from '../../shared/iosSimulatorIpc.js';
 import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../../shared/iosSimulatorIpc.js';
+import type {
+  GhostIOSSimulatorStatusProbeResult,
+  GhostIOSSimulatorStatusSnapshot,
+} from '../../shared/ghost.js';
 import { createLogger } from '../logger.js';
 import { desktopSessionStorage } from '../maker-host/session-storage.js';
 import {
@@ -88,11 +92,13 @@ import { compareIOSSimulatorPngBuffers, IOSSimulatorMediaCapture } from './ios-s
 
 const logger = createLogger('mcp/cindy_ios_simulator');
 const BUILD_DIAGNOSTICS_TTL_MS = 30 * 60_000;
+const PLUGIN_ENVIRONMENT_CACHE_MS = 30_000;
 const MAX_BUILD_DIAGNOSTICS = 32;
 const MANAGED_BUILD_RESULT_BUNDLE_PATTERN = /^CindyBuild(?:-[0-9a-f-]+)?\.xcresult$/i;
 const DEFAULT_DEVICE_LIVENESS_INTERVAL_MS = 1_000;
 const MAX_WDA_VIEWER_FRAMES_PER_SECOND = 20;
 const MAX_NATIVE_H264_VIEWER_FRAMES_PER_SECOND = 60;
+const MAX_INSTANCES_PER_SESSION = 4;
 
 interface IOSSimulatorSessionSnapshot {
   id: string;
@@ -176,6 +182,8 @@ export interface IOSSimulatorHost {
   reconcileOwnership(): Promise<void>;
   describeTools(sessionId: string): Promise<IOSSimulatorToolAvailabilityReport>;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
+  /** Read-only, redacted plugin projection; never reconciles or renews an ownership lease. */
+  getPluginStatus(sessionId: string): Promise<GhostIOSSimulatorStatusProbeResult>;
   callTool(
     name: IOSSimulatorMcpToolName,
     args: Record<string, unknown>,
@@ -240,7 +248,7 @@ function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulato
   );
   let writeTail = Promise.resolve();
   const store = new IOSSimulatorOwnershipStore({
-    maxInstancesPerSession: 4,
+    maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
     initialInstances: registry.loadSync(),
     onChange: (instances) => {
       writeTail = writeTail
@@ -455,8 +463,25 @@ function instanceData(instance: IOSSimulatorInstance): { instance: IOSSimulatorP
   return { instance: publicInstance(instance) };
 }
 
+function displayRuntimeName(device: IOSSimulatorEnvironmentReport['devices'][number]): string {
+  const identifierMatch = device.runtimeIdentifier.match(
+    /\.SimRuntime\.([A-Za-z]+)-(\d+(?:-\d+)*)$/,
+  );
+  if (identifierMatch) {
+    return `${identifierMatch[1]} ${identifierMatch[2].replace(/-/g, '.')}`;
+  }
+  return device.runtimeName.replace(
+    /^(iOS) (\d+(?:-\d+)+)$/,
+    (_match, platform, version) => `${platform} ${String(version).replace(/-/g, '.')}`,
+  );
+}
+
 function publicEnvironment(
   environment: IOSSimulatorEnvironmentReport,
+  options: {
+    sessionId?: string;
+    instances?: readonly IOSSimulatorInstance[];
+  } = {},
 ): IOSSimulatorPublicEnvironmentReport {
   const { xcodeSelectPath, runtimes, devices, ...safe } = environment;
   void xcodeSelectPath;
@@ -480,9 +505,35 @@ function publicEnvironment(
       return safeRuntime;
     }),
     devices: devices.map((device) => {
-      const { availabilityError: _availabilityError, ...safeDevice } = device;
-      void _availabilityError;
-      return safeDevice;
+      const { availabilityError, ...safeDevice } = device;
+      const runtimeAvailabilityError = runtimes.find(
+        (runtime) => runtime.identifier === device.runtimeIdentifier,
+      )?.availabilityError;
+      const owner = options.instances?.find(
+        (instance) => instance.simulatorUdid.toUpperCase() === device.udid.toUpperCase(),
+      );
+      const ownership = options.sessionId
+        ? owner?.sessionId === options.sessionId
+          ? 'current-task'
+          : owner
+            ? 'other-task'
+            : 'unowned'
+        : undefined;
+      const unavailableReason = device.isAvailable
+        ? undefined
+        : [availabilityError, runtimeAvailabilityError].some(
+              (detail) => detail && /runtime profile not found/i.test(detail),
+            )
+          ? ({ code: 'missing-runtime', runtimeName: displayRuntimeName(device) } as const)
+          : ({ code: 'device-unavailable' } as const);
+      return {
+        ...safeDevice,
+        ...(unavailableReason?.code === 'missing-runtime'
+          ? { runtimeName: unavailableReason.runtimeName }
+          : {}),
+        ...(ownership ? { ownership } : {}),
+        ...(unavailableReason ? { unavailableReason } : {}),
+      };
     }),
   };
 }
@@ -491,6 +542,10 @@ function publicDriverLogTail(value: string): string {
   return value
     .replace(/https?:\/\/[^\s)]+/gi, '<redacted-url>')
     .replace(/(?:\/Users\/|\/private\/var\/|\/tmp\/)[^\s)]+/g, '<redacted-path>')
+    .replace(
+      /\b(authorization|cookie|password|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi,
+      '$1$2<redacted>',
+    )
     .slice(-8_000);
 }
 
@@ -503,6 +558,15 @@ function publicNativeSidecarDiagnostics(
     // Sidecar/framework text is an untrusted implementation detail. The
     // structured probe and admission decision carry the public diagnosis.
     lastFailure: diagnostics.lastFailure ? 'Native sidecar is unavailable.' : null,
+    lastTermination: diagnostics.lastTermination
+      ? {
+          ...diagnostics.lastTermination,
+          message: publicDriverLogTail(diagnostics.lastTermination.message).slice(-2_000),
+          stderrTail: diagnostics.lastTermination.stderrTail
+            ? publicDriverLogTail(diagnostics.lastTermination.stderrTail)
+            : null,
+        }
+      : null,
   };
 }
 
@@ -664,6 +728,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const viewerPreferredEncodings = new Map<string, 'jpeg' | 'h264'>();
   const viewerFallbackReasons = new Map<string, IOSSimulatorPublicRouteReasonCode>();
   const routeStatusCache = new Map<string, string>();
+  let pluginEnvironmentCache: {
+    expiresAt: number;
+    value: GhostIOSSimulatorStatusSnapshot['environment'];
+  } | null = null;
+  let pluginEnvironmentInFlight: Promise<GhostIOSSimulatorStatusSnapshot['environment']> | null =
+    null;
   const configuredDeviceLivenessIntervalMs =
     options.deviceLivenessIntervalMs ?? DEFAULT_DEVICE_LIVENESS_INTERVAL_MS;
   const deviceLivenessIntervalMs =
@@ -1029,7 +1099,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         reasonCode: 'viewer-hidden',
       };
     } else if (selectedEncoding === 'h264') {
-      const routeIsNative = nativeStreamRoute?.selected === 'native-sidecar' && !nativeStreamRoute.fallback;
+      const routeIsNative =
+        nativeStreamRoute?.selected === 'native-sidecar' && !nativeStreamRoute.fallback;
       const pumpState = publicRouteState(streamSnapshot?.state ?? null);
       stream = {
         adapter: routeIsNative ? 'native-sidecar' : 'wda',
@@ -1055,7 +1126,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // the JPEG pump's live health so reconnecting/disconnected is visible.
         state: fallback && pumpState === 'idle' ? 'fallback' : pumpState,
         reasonCode: fallback
-          ? viewerFallbackReasons.get(instance.instanceId) ?? 'wda-fallback'
+          ? (viewerFallbackReasons.get(instance.instanceId) ?? 'wda-fallback')
           : streamSnapshot?.state === 'disconnected'
             ? 'route-error'
             : 'wda-active',
@@ -1153,6 +1224,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           window.webContents.send('maker:ios-simulator:focus-request', {
             sessionId,
             instanceId,
+            userInitiated: false,
           });
         }
       }
@@ -1344,6 +1416,104 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     );
   }
 
+  function projectPluginEnvironment(
+    environment: IOSSimulatorEnvironmentReport,
+  ): GhostIOSSimulatorStatusSnapshot['environment'] {
+    return {
+      platform: environment.platform,
+      supported: environment.supported,
+      ready: environment.ready,
+      xcodeVersion: environment.xcodeVersion,
+      availableDeviceCount: environment.devices.filter((device) => device.isAvailable).length,
+    };
+  }
+
+  async function readPluginEnvironment(): Promise<GhostIOSSimulatorStatusSnapshot['environment']> {
+    const now = Date.now();
+    if (pluginEnvironmentCache && pluginEnvironmentCache.expiresAt > now) {
+      return pluginEnvironmentCache.value;
+    }
+    if (pluginEnvironmentInFlight) return pluginEnvironmentInFlight;
+    pluginEnvironmentInFlight = runtime.inspect().then((environment) => {
+      const value = projectPluginEnvironment(environment);
+      if (!disposePromise) {
+        pluginEnvironmentCache = { value, expiresAt: Date.now() + PLUGIN_ENVIRONMENT_CACHE_MS };
+      }
+      return value;
+    });
+    try {
+      return await pluginEnvironmentInFlight;
+    } finally {
+      pluginEnvironmentInFlight = null;
+    }
+  }
+
+  async function inspectForPlugin(sessionId: string): Promise<GhostIOSSimulatorStatusProbeResult> {
+    if (disposePromise) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator host is shutting down.',
+      };
+    }
+    const resolved = await resolveSession(sessionId);
+    if (!resolved.ok)
+      return { ok: false, errorCode: resolved.errorCode, message: resolved.message };
+    try {
+      const environment = await readPluginEnvironment();
+      if (disposePromise) {
+        return {
+          ok: false,
+          errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+          message: 'The iOS Simulator host is shutting down.',
+        };
+      }
+      const instances = actor.list(resolved.sessionId);
+      return {
+        ok: true,
+        status: {
+          environment,
+          instances: instances.map((instance) => ({
+            instanceId: instance.instanceId,
+            simulatorName: instance.simulatorName,
+            generation: instance.generation,
+            lifecycleState: instance.lifecycleState,
+            healthState: instance.healthState,
+          })),
+          routeStatuses: instances.map((instance) => {
+            const route = routeStatusForInstance(
+              instance,
+              driverManager?.get(instance.instanceId) ?? null,
+            );
+            return {
+              instanceId: route.instanceId,
+              generation: route.generation,
+              stream: {
+                adapter: route.stream.adapter,
+                encoding: route.stream.encoding,
+                state: route.stream.state,
+              },
+              input: {
+                adapter: route.input.adapter,
+                state: route.input.state,
+              },
+            };
+          }),
+        },
+      };
+    } catch (error) {
+      logger.warn('iOS Simulator plugin status snapshot failed', {
+        sessionId: resolved.sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
+  }
+
   async function inspectForSession(sessionId: string): Promise<IOSSimulatorSessionStatus> {
     if (disposePromise) return hostDisposedStatus(sessionId);
     const resolved = await resolveSession(sessionId);
@@ -1361,10 +1531,17 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     return {
       ok: true,
       sessionId: resolved.sessionId,
-      environment: publicEnvironment(environment),
+      environment: publicEnvironment(environment, {
+        sessionId: resolved.sessionId,
+        instances: actor.listAll(),
+      }),
       instances: instances.map(publicInstance),
       deviceGrants: instances.map((instance) => grantStore.get(instance.simulatorUdid)),
       mutationStates: instances.map((instance) => actor.mutationState(instance.instanceId)),
+      resource: {
+        ...resourceScheduler.snapshot(),
+        maxInstancesPerTask: MAX_INSTANCES_PER_SESSION,
+      },
       routeStatuses: instances.map((instance) => publishRouteStatusForInstance(instance)),
     };
   }
@@ -2322,10 +2499,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     fallbackReason: IOSSimulatorPublicRouteReasonCode = null,
   ): IOSSimulatorFramePumpSnapshot {
     viewerSessions.set(instance.instanceId, instance.sessionId);
-    viewerPreferredEncodings.set(
-      instance.instanceId,
-      fallbackReason ? 'h264' : preferredEncoding,
-    );
+    viewerPreferredEncodings.set(instance.instanceId, fallbackReason ? 'h264' : preferredEncoding);
     const nativeDriver = preferredEncoding === 'h264' ? nativeH264Driver(running) : null;
     if (nativeDriver) {
       viewerEncodings.set(instance.instanceId, 'h264');
@@ -2362,9 +2536,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       const report = running.driverRouter?.capabilityReport();
       viewerFallbackReasons.set(
         instance.instanceId,
-        fallbackReason ?? (!report || report.nativeSidecar.available === false
-          ? 'native-sidecar-unavailable'
-          : 'native-capability-unavailable'),
+        fallbackReason ??
+          (!report || report.nativeSidecar.available === false
+            ? 'native-sidecar-unavailable'
+            : 'native-capability-unavailable'),
       );
     } else {
       viewerFallbackReasons.delete(instance.instanceId);
@@ -2400,6 +2575,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return describeToolsForSession(resolved.sessionId);
     },
     getStatus: inspectForSession,
+    getPluginStatus: inspectForPlugin,
     async setViewerVisibility(
       sessionId,
       route,
@@ -2431,6 +2607,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             },
           };
         }
+        // A visible viewer session may retry an optional Native route in the
+        // background, but those retries must respect the Sidecar crash budget.
+        // Only an explicit close -> reopen starts a new viewer session that may
+        // re-arm a parked Sidecar.
+        const rearmNativeSidecar = !viewerSessions.has(instance.instanceId);
         instance = await reconcileLiveDevice(instance);
         assertHostActive();
         if (instance.lifecycleState !== 'ready') {
@@ -2491,8 +2672,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           driverManager.recoverNativeSidecar
         ) {
           running =
-            (await driverManager.recoverNativeSidecar(instance.instanceId, { rearm: true })) ??
-            running;
+            (await driverManager.recoverNativeSidecar(instance.instanceId, {
+              rearm: rearmNativeSidecar,
+            })) ?? running;
           assertHostActive();
           current = currentReadyGeneration(instance);
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
@@ -4218,7 +4400,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             data: {
               environment: publicEnvironment(environment),
               availability,
-              resource: { runningCount: resourceScheduler.runningCount(), hardLimit: 4 },
+              resource: resourceScheduler.snapshot(),
               instances,
               recommendedActions,
             },
@@ -4271,10 +4453,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const device = environment.devices.find(
             (candidate) => candidate.udid.toUpperCase() === udid,
           );
-          if (!device) {
+          if (!device || !device.isAvailable) {
             throw new IOSSimulatorInstanceError(
               'SIMULATOR_NOT_FOUND',
-              'The selected iOS Simulator device does not exist.',
+              'The selected iOS Simulator device does not exist or is unavailable.',
             );
           }
           const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
@@ -4359,6 +4541,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           }),
         );
         routeStatusCache.clear();
+        pluginEnvironmentCache = null;
       })();
       return disposePromise;
     },
@@ -4371,6 +4554,12 @@ export function getIOSSimulatorSessionStatus(
   sessionId: string,
 ): Promise<IOSSimulatorSessionStatus> {
   return defaultIOSSimulatorHost.getStatus(sessionId);
+}
+
+export function getIOSSimulatorPluginStatus(
+  sessionId: string,
+): Promise<GhostIOSSimulatorStatusProbeResult> {
+  return defaultIOSSimulatorHost.getPluginStatus(sessionId);
 }
 
 export function callIOSSimulatorHostTool(
@@ -4431,12 +4620,7 @@ export function setIOSSimulatorViewerStreamProfile(
   profile: IOSSimulatorStreamProfile,
   nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setViewerStreamProfile(
-    sessionId,
-    route,
-    profile,
-    nativeProfile,
-  );
+  return defaultIOSSimulatorHost.setViewerStreamProfile(sessionId, route, profile, nativeProfile);
 }
 
 export function updateIOSSimulatorViewerTouch(

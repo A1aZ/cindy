@@ -10,7 +10,10 @@ import type {
 } from "../driver.js";
 import { createIOSSimulatorNativeDevelopmentAdmissionPolicy } from "../capability-admission.js";
 import type { IOSSimulatorNativeSidecarCommand } from "./adapter.js";
-import type { IOSSimulatorNativeSidecarChannelState } from "./channel.js";
+import type {
+  IOSSimulatorNativeSidecarChannelState,
+  IOSSimulatorNativeSidecarTermination,
+} from "./channel.js";
 import {
   createIOSSimulatorNativeSidecarArguments,
   createIOSSimulatorNativeSidecarEnvironment,
@@ -38,6 +41,7 @@ class FakeChannel implements IOSSimulatorNativeSidecarManagedChannel {
   state: IOSSimulatorNativeSidecarChannelState = "idle";
   crashCount = 0;
   stderrTail = "";
+  lastTermination: IOSSimulatorNativeSidecarTermination | null = null;
   readonly requests: IOSSimulatorNativeSidecarCommand[] = [];
   readonly stop = vi.fn(async () => {
     this.state = "stopped";
@@ -273,6 +277,13 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
         expect(
           (await stat(path.join(temporaryRoot, privateDirectory))).mode & 0o777,
         ).toBe(0o700);
+        expect(
+          (
+            await stat(
+              path.join(temporaryRoot, privateDirectory, "metal-cache"),
+            )
+          ).mode & 0o777,
+        ).toBe(0o700);
         await manager.stop(input().instanceId);
         expect(await readdir(temporaryRoot)).toEqual([]);
 
@@ -356,10 +367,28 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     const first = await manager.start(input());
     channel.state = "failed";
     channel.crashCount = 1;
+    channel.lastTermination = {
+      reasonCode: "process-exit",
+      message:
+        "Native sidecar exited beside /Users/example/private/SimulatorKit.framework.",
+      exitCode: 23,
+      signal: null,
+      occurredAt: "2026-07-23T00:00:01.000Z",
+      stderrTail:
+        "token=private-value VideoToolbox failed at /Users/example/private/CoreSimulator.framework",
+    };
 
     expect(manager.diagnostics("instance-a")).toMatchObject({
       running: false,
       state: "failed",
+      lastFailure: "Native sidecar exited beside <redacted-path>",
+      lastTermination: {
+        reasonCode: "process-exit",
+        exitCode: 23,
+        signal: null,
+        occurredAt: "2026-07-23T00:00:01.000Z",
+        stderrTail: "token=<redacted> VideoToolbox failed at <redacted-path>",
+      },
       admission: {
         processState: "failed",
         launch: { active: false, reasonCode: "PROCESS_NOT_RUNNING" },
@@ -385,8 +414,20 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
       state: "running",
       crashCount: 1,
       lastFailure: null,
+      lastTermination: {
+        reasonCode: "process-exit",
+        exitCode: 23,
+      },
     });
     await manager.stop("instance-a");
+    expect(manager.diagnostics("instance-a")).toMatchObject({
+      running: false,
+      state: "stopped",
+      lastTermination: {
+        reasonCode: "process-exit",
+        exitCode: 23,
+      },
+    });
   });
 
   it("converges an in-flight start to stopped without leaving a late binding", async () => {
@@ -530,8 +571,7 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     const start = {
       ...input(),
       runtime: {
-        runtimeIdentifier:
-          "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
         runtimeBuildVersion: "23E244",
         xcodeBuild: "Xcode 26.4\nBuild version 17E192",
         architecture: "arm64" as const,

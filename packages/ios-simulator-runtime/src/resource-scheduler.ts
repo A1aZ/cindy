@@ -22,6 +22,12 @@ export interface IOSSimulatorResourceSchedulerOptions {
   freeMemoryBytes?: () => number;
 }
 
+export interface IOSSimulatorResourceSchedulerSnapshot {
+  runningCount: number;
+  softLimit: number;
+  hardLimit: number;
+}
+
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 const CRITICAL_FREE_PERCENTAGE = 10;
@@ -122,6 +128,14 @@ export class IOSSimulatorResourceScheduler {
 
   runningCount(): number {
     return this.#running.size;
+  }
+
+  snapshot(): IOSSimulatorResourceSchedulerSnapshot {
+    return {
+      runningCount: this.#running.size,
+      softLimit: this.#softLimit,
+      hardLimit: this.#hardLimit,
+    };
   }
 
   markStopped(instanceId: string): void {

@@ -3466,6 +3466,8 @@
         "sessionContextDetail": "현재 세션을 위해 작동할 때만 위치 정보(세션 ID와 프로젝트 폴더 경로)를 전달합니다. 파일 내용은 포함되지 않으며 파일 접근 권한도 부여되지 않습니다.",
         "preview": "아래 사이트의 미리보기 페이지를 사이드바 브라우저에서 열 수 있습니다",
         "previewDetail": "아래에 나열된 사이트만 열 수 있으며, 페이지를 열 때마다 어떤 플러그인이 열었는지 표시됩니다.",
+        "iosSimulator": "현재 작업의 내장 iOS 시뮬레이터 상태를 확인하고 제어 패널을 열 수 있습니다",
+        "iosSimulatorDetail": "시뮬레이터 수명 주기, WDA, Native Sidecar, 영상과 입력은 계속 Cindy Host가 관리합니다. 플러그인은 프레임 데이터, 입력 권한, 네이티브 Helper 또는 다른 작업 ID를 받을 수 없습니다.",
         "nodeChildSpawn": "Node 프로그램이 패키지에 신고된 하위 프로세스 시작을 호스트에 요청할 수 있습니다",
         "nodeChildSpawnDetail": "자신의 패키지 안에 신고된 JS 파일만 시작할 수 있으며(메인 프로그램과 동일한 로컬 권한), 임의의 명령은 실행할 수 없습니다. 플러그인이 비활성화되거나 종료되면 하위 프로세스도 함께 종료됩니다.",
         "skill": "AI 어시스턴트에 스킬 \"{{name}}\"을(를) 추가합니다",
@@ -3480,6 +3482,7 @@
       },
       "errors": {
         "fileInvalid": "유효한 .cindy 플러그인 파일이 아닙니다",
+        "hostUnsupported": "이 플러그인에는 현재 버전에서 제공하지 않는 Cindy 기능이 필요합니다. Cindy를 업데이트한 후 다시 설치하세요.",
         "alreadyInstalled": "이 플러그인은 이미 설치되어 있습니다",
         "commandConflict": "명령어가 설치된 플러그인과 충돌합니다. 먼저 상대를 제거하거나 명령어 이름을 변경하세요.",
         "idReserved": "이 id는 공식 예약 접두사 cindy-를 사용합니다. 앱에 내장된 플러그인만 사용할 수 있습니다",
@@ -3581,7 +3584,8 @@
         "slotBadge": "읽지 않음 배지",
         "slotFs": "파일 쓰기",
         "slotSkill": "에이전트 스킬",
-        "slotWorkspace": "워크스페이스 세션"
+        "slotWorkspace": "워크스페이스 세션",
+        "slotIOSSimulator": "내장 iOS 시뮬레이터"
       },
       "commandPaletteTag": "플러그인 명령",
       "updateConfirm": {
@@ -4390,6 +4394,7 @@
     },
     "iosSimulator": {
       "title": "iOS 시뮬레이터",
+      "startPrompt": "iOS 시뮬레이터를 열어 주세요.",
       "description": "이 로컬 세션에서 사용할 수 있는 Xcode 환경과 시뮬레이터를 확인합니다.",
       "refresh": "새로 고침",
       "checking": "확인 중",
@@ -4405,6 +4410,14 @@
       "instancesCount": "{{count}}개 준비됨",
       "openDevice": "기기 열기",
       "noDevices": "iPhone 또는 iPad 시뮬레이터를 찾지 못했습니다.",
+      "noAvailableDevices": "연결할 수 있는 iPhone 또는 iPad 시뮬레이터가 없습니다.",
+      "unavailableDevicesTitle": "사용할 수 없는 기기",
+      "unavailableDevicesCount": "{{count}}대",
+      "unavailableDevicesDescription": "현재 연결할 수 없는 기기입니다. 원인을 확인하고 해결한 후 상태를 새로 고치세요.",
+      "missingRuntime": "{{runtime}} Runtime이 없습니다",
+      "missingRuntimeHelp": "해당 Runtime을 Xcode에서 설치한 후 상태를 새로 고치세요.",
+      "deviceUnavailable": "Xcode에서 이 기기를 사용할 수 없는 상태로 표시했습니다",
+      "deviceUnavailableHelp": "Xcode에서 시뮬레이터를 확인하거나 다시 생성한 후 상태를 새로 고치세요.",
       "booted": "부팅됨",
       "shutdown": "종료됨",
       "runtime": "런타임",
@@ -4421,6 +4434,22 @@
       "disableAgentControl": "Agent 제어 사용 중지",
       "operationError": "Cindy가 시뮬레이터 작업을 완료하지 못했습니다.",
       "retryHint": "상태를 새로 고친 후 다시 시도하세요.",
+      "operationErrorWithRecovery": "Cindy가 시뮬레이터 작업을 완료하지 못했습니다. 상태를 새로 고친 후 다시 시도하세요.",
+      "deviceInUseByOtherTask": "다른 Cindy 작업에서 이 기기를 사용 중입니다. 다른 기기를 선택하거나 기존 작업에서 먼저 연결을 해제하세요.",
+      "taskDeviceLimitReached": "현재 작업에 {{limit}}대의 기기가 연결되어 있습니다. 한 대의 연결을 해제한 후 다른 기기를 연결하세요.",
+      "runningDeviceLimitReached": "Cindy에서 이미 {{limit}}대의 시뮬레이터를 동시에 실행 중입니다. 한 대를 중지한 후 이 부팅된 기기를 연결하세요.",
+      "resourceSoftLimitTitle": "현재 {{count}}대의 시뮬레이터가 실행 중입니다",
+      "resourceSoftLimitDescription": "기기를 더 시작하기 전에 Cindy가 시스템 메모리를 확인합니다. 새 시작이 차단되어도 기존 기기는 계속 실행됩니다.",
+      "resourceHardLimitTitle": "동시 실행 한도({{limit}}대)에 도달했습니다",
+      "resourceHardLimitDescription": "실행 중인 시뮬레이터 한 대를 중지한 후 새 기기를 시작하세요.",
+      "errors": {
+        "attachedElsewhere": "다른 Cindy 작업에서 이 기기를 사용 중입니다. 다른 기기를 선택하거나 기존 작업에서 먼저 연결을 해제하세요.",
+        "taskLimitReached": "이 작업에는 최대 {{taskLimit}}대의 기기를 연결할 수 있습니다. 한 대의 연결을 해제한 후 다시 시도하세요.",
+        "resourceLimitReached": "Cindy의 시뮬레이터 동시 실행 한도({{hardLimit}}대)에 도달했습니다. 한 대를 중지한 후 다시 시도하세요.",
+        "memoryPressure": "시스템 메모리 압력이 높아 시뮬레이터를 더 시작할 수 없습니다. 한 대를 중지하거나 나중에 다시 시도하세요.",
+        "deviceNotFound": "선택한 기기가 더 이상 존재하지 않습니다. 상태를 새로 고치고 다른 기기를 선택하세요.",
+        "deviceStateChanged": "기기 상태가 변경되었습니다. 상태를 새로 고친 후 다시 시도하세요."
+      },
       "streamAlt": "{{device}}의 실시간 시뮬레이터 화면",
       "waitingForFrame": "연결되면 실시간 화면이 여기에 표시됩니다.",
       "viewerStoppedTitle": "시뮬레이터가 중지됨",
@@ -6163,13 +6192,17 @@
       "mention": "플러그인 언급 · {{names}}",
       "mentionExpandAria": "모델에 추가된 힌트 보기",
       "mentionDirectiveLabel": "모델에 추가된 힌트",
+      "hostCapabilityExpandAria": "선택한 Cindy 기능 경로 보기",
+      "hostCapabilityDirectiveLabel": "Agent에 전송된 Cindy 기능 경로",
+      "hostCapabilityLegend": "강조 표시 = 현재 선택 · 나머지는 Cindy의 고정 경로 설명",
       "semanticExpandAria": "이 호출에 대한 설명 보기",
       "semanticNote": "AI가 메시지의 의미를 바탕으로 이 플러그인을 스스로 호출했습니다. 이 메시지에는 기계 지시문이 추가되지 않았습니다.",
       "listSeparator": ", ",
       "status": {
         "running": "호출 중…",
         "called": "호출됨",
-        "done": "완료됨"
+        "done": "완료됨",
+        "selected": "선택됨"
       }
     },
     "userMessage": {
@@ -8589,6 +8622,7 @@
     "addFiles": "파일, 이미지 또는 동영상 추가…",
     "pluginsTitle": "설치된 플러그인",
     "pluginDisabled": "비활성화됨",
+    "pluginAgentInvoked": "Agent가 자동으로 사용",
     "pluginNoCommand": "여기에서 사용할 수 없음",
     "sectionTitle": "참조 디렉터리(읽기 전용)",
     "empty": "아직 참조 디렉터리가 없습니다",

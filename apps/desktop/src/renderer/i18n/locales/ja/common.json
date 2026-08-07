@@ -3466,6 +3466,8 @@
         "sessionContextDetail": "現在のセッションのために動作するときだけ、場所の情報(セッション ID とプロジェクトフォルダのパス)を伝えます。ファイルの内容は含まれず、ファイルへのアクセス権も与えられません。",
         "preview": "以下のサイトのプレビューページをサイドバーのブラウザで開けます",
         "previewDetail": "開けるのは下に列挙されたサイトだけです。ページを開くたびに、どのプラグインが開いたかが表示されます。",
+        "iosSimulator": "現在のタスクの内蔵 iOS シミュレータ状態を確認し、操作パネルを開けます",
+        "iosSimulatorDetail": "シミュレータのライフサイクル、WDA、Native Sidecar、映像、入力は引き続き Cindy Host が管理します。プラグインはフレームデータ、入力権限、ネイティブ Helper、ほかのタスク ID を取得できません。",
         "nodeChildSpawn": "Node プログラムは、パッケージ内で申告済みのサブプロセスの起動をホストに依頼できます",
         "nodeChildSpawnDetail": "起動できるのは自身のパッケージ内で申告済みの JS ファイルだけです(メインプログラムと同じローカル権限)。任意のコマンドは実行できません。プラグインの無効化や終了時にはサブプロセスも一緒に閉じられます。",
         "skill": "AI アシスタントにスキル「{{name}}」を追加します",
@@ -3480,6 +3482,7 @@
       },
       "errors": {
         "fileInvalid": "有効な .cindy プラグインファイルではありません",
+        "hostUnsupported": "このプラグインには、現在のバージョンでは提供されていない Cindy の機能が必要です。Cindy を更新してから、もう一度インストールしてください。",
         "alreadyInstalled": "このプラグインは既にインストールされています",
         "commandConflict": "コマンドがインストール済みのプラグインと重複しています。先に相手をアンインストールするか、コマンド名を変更してください。",
         "idReserved": "この id は公式予約プレフィックス cindy- を使用しています。アプリに同梱されたプラグインのみ使用できます",
@@ -3581,7 +3584,8 @@
         "slotBadge": "未読バッジ",
         "slotFs": "ファイル書き込み",
         "slotSkill": "エージェントスキル",
-        "slotWorkspace": "ワークスペースセッション"
+        "slotWorkspace": "ワークスペースセッション",
+        "slotIOSSimulator": "内蔵 iOS シミュレータ"
       },
       "commandPaletteTag": "プラグインコマンド",
       "updateConfirm": {
@@ -4390,6 +4394,7 @@
     },
     "iosSimulator": {
       "title": "iOS シミュレータ",
+      "startPrompt": "iOS シミュレータを開いてください。",
       "description": "このローカルセッションで使用できる Xcode 環境とシミュレータを確認します。",
       "refresh": "更新",
       "checking": "確認中",
@@ -4405,6 +4410,14 @@
       "instancesCount": "{{count}} 台準備完了",
       "openDevice": "デバイスを開く",
       "noDevices": "iPhone または iPad シミュレータが見つかりません。",
+      "noAvailableDevices": "接続できる iPhone または iPad シミュレータがありません。",
+      "unavailableDevicesTitle": "使用できないデバイス",
+      "unavailableDevicesCount": "{{count}} 台",
+      "unavailableDevicesDescription": "これらのデバイスは現在接続できません。理由を確認して問題を解決した後、状態を更新してください。",
+      "missingRuntime": "{{runtime}} Runtime がありません",
+      "missingRuntimeHelp": "対応する Runtime を Xcode でインストールしてから、状態を更新してください。",
+      "deviceUnavailable": "Xcode でこのデバイスが使用不可になっています",
+      "deviceUnavailableHelp": "Xcode でシミュレータを確認または再作成してから、状態を更新してください。",
       "booted": "起動中",
       "shutdown": "停止中",
       "runtime": "ランタイム",
@@ -4421,6 +4434,22 @@
       "disableAgentControl": "Agent の操作を無効化",
       "operationError": "Cindy はシミュレータの操作を完了できませんでした。",
       "retryHint": "状態を更新してから、もう一度お試しください。",
+      "operationErrorWithRecovery": "Cindy はシミュレータの操作を完了できませんでした。状態を更新してから、もう一度お試しください。",
+      "deviceInUseByOtherTask": "別の Cindy タスクがこのデバイスを使用しています。別のデバイスを選ぶか、元のタスクで先に接続を解除してください。",
+      "taskDeviceLimitReached": "現在のタスクには {{limit}} 台のデバイスが接続されています。1 台の接続を解除してから、別のデバイスを接続してください。",
+      "runningDeviceLimitReached": "Cindy はすでに {{limit}} 台のシミュレータを同時に実行しています。1 台を停止してから、この起動済みデバイスを接続してください。",
+      "resourceSoftLimitTitle": "現在 {{count}} 台のシミュレータを実行中です",
+      "resourceSoftLimitDescription": "さらにデバイスを起動する前に、Cindy がシステムメモリを確認します。起動できない場合も、既存のデバイスはそのまま動作します。",
+      "resourceHardLimitTitle": "同時実行の上限（{{limit}} 台）に達しました",
+      "resourceHardLimitDescription": "実行中のシミュレータを 1 台停止してから、新しいデバイスを起動してください。",
+      "errors": {
+        "attachedElsewhere": "別の Cindy タスクがこのデバイスを使用しています。別のデバイスを選ぶか、元のタスクで先に接続を解除してください。",
+        "taskLimitReached": "このタスクには最大 {{taskLimit}} 台のデバイスを接続できます。1 台の接続を解除してから、もう一度お試しください。",
+        "resourceLimitReached": "Cindy はシミュレータの同時実行上限（{{hardLimit}} 台）に達しています。1 台を停止してから、もう一度お試しください。",
+        "memoryPressure": "システムのメモリ負荷が高いため、シミュレータを追加で起動できません。1 台を停止するか、しばらくしてからもう一度お試しください。",
+        "deviceNotFound": "選択したデバイスは存在しません。状態を更新して、別のデバイスを選んでください。",
+        "deviceStateChanged": "デバイスの状態が変わりました。状態を更新してから、もう一度お試しください。"
+      },
       "streamAlt": "{{device}} のライブシミュレータ画面",
       "waitingForFrame": "接続されると、ここにライブ画面が表示されます。",
       "viewerStoppedTitle": "シミュレータは停止しました",
@@ -6163,13 +6192,17 @@
       "mention": "プラグインに言及 · {{names}}",
       "mentionExpandAria": "モデルに追加されたヒントを表示",
       "mentionDirectiveLabel": "モデルに追加されたヒント",
+      "hostCapabilityExpandAria": "選択した Cindy 機能のルートを表示",
+      "hostCapabilityDirectiveLabel": "Agent に送信された Cindy 機能ルート",
+      "hostCapabilityLegend": "ハイライト = 現在の選択 · それ以外は Cindy の固定ルート説明",
       "semanticExpandAria": "この呼び出しの説明を表示",
       "semanticNote": "AI がメッセージの意味に基づいてこのプラグインを自律的に呼び出しました。このメッセージに機械指示は追加されていません。",
       "listSeparator": "、",
       "status": {
         "running": "呼び出し中…",
         "called": "呼び出し済み",
-        "done": "完了"
+        "done": "完了",
+        "selected": "選択済み"
       }
     },
     "userMessage": {
@@ -8589,6 +8622,7 @@
     "addFiles": "ファイル、画像、動画を追加…",
     "pluginsTitle": "インストール済みプラグイン",
     "pluginDisabled": "無効",
+    "pluginAgentInvoked": "Agent が自動で使用",
     "pluginNoCommand": "ここでは使用できません",
     "sectionTitle": "参照ディレクトリ(読み取り専用)",
     "empty": "参照ディレクトリはまだありません",

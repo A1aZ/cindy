@@ -68,6 +68,52 @@ const installedMermaidPlugin: InstalledGhost = {
   enabled: true,
 };
 
+const installedIOSSimulatorPlugin: InstalledGhost = {
+  manifest: {
+    schemaVersion: 2,
+    id: 'ios-simulator',
+    name: 'iOS Simulator',
+    version: '0.2.0',
+    kind: 'chip',
+    entry: 'main.js',
+    slots: ['skill', 'ios-simulator'],
+    skill: {
+      items: [
+        {
+          dir: 'skills/cindy-ios-simulator',
+          name: 'cindy-ios-simulator',
+          description: 'Use the Host-owned iOS Simulator.',
+        },
+      ],
+    },
+  },
+  dir: '/tmp/ios-simulator',
+  enabled: true,
+};
+
+const installedSkillOnlyPlugin: InstalledGhost = {
+  manifest: {
+    schemaVersion: 2,
+    id: 'skill-only',
+    name: 'Skill only',
+    version: '1.0.0',
+    kind: 'chip',
+    entry: 'main.js',
+    slots: ['skill'],
+    skill: {
+      items: [
+        {
+          dir: 'skills/example',
+          name: 'example',
+          description: 'Example workflow.',
+        },
+      ],
+    },
+  },
+  dir: '/tmp/skill-only',
+  enabled: true,
+};
+
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -291,6 +337,46 @@ describe('ExtraDirsButton 模式菜单项', () => {
     const pluginRow = screen.getByRole('button', { name: 'Mermaid' });
     expect(pluginRow.querySelector('svg.lucide-workflow')).toBeTruthy();
     expect(pluginRow.querySelector('svg.lucide-package')).toBeNull();
+  });
+
+  it('Host capability 插件可从菜单交给 composer 处理，不伪造 command', () => {
+    const onPluginCapabilitySelect = vi.fn();
+    render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        plugins: [installedIOSSimulatorPlugin],
+        pluginAvailableIds: new Set(['ios-simulator']),
+        onPluginCapabilitySelect,
+      }),
+    );
+
+    fireEvent.click(screen.getByLabelText('extraDirs.menuAria'));
+    const pluginRow = screen.getByRole('button', { name: 'iOS Simulator' });
+    expect((pluginRow as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(pluginRow);
+    expect(onPluginCapabilitySelect).toHaveBeenCalledWith(installedIOSSimulatorPlugin);
+  });
+
+  it('已停用优先显示停用状态；可用但无直接入口的 Skill 标为 Agent 自动调用', () => {
+    const { rerender } = render(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        plugins: [installedIOSSimulatorPlugin],
+        pluginAvailableIds: new Set<string>(),
+        onPluginCapabilitySelect: vi.fn(),
+      }),
+    );
+    fireEvent.click(screen.getByLabelText('extraDirs.menuAria'));
+    expect(screen.getByText('extraDirs.pluginDisabled')).toBeTruthy();
+
+    rerender(
+      createElement(ExtraDirsButton, {
+        extraDirs: [],
+        plugins: [installedSkillOnlyPlugin],
+        pluginAvailableIds: new Set(['skill-only']),
+      }),
+    );
+    expect(screen.getByText('extraDirs.pluginAgentInvoked')).toBeTruthy();
   });
 });
 

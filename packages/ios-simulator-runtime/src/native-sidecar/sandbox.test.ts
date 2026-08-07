@@ -62,6 +62,7 @@ describe("IOSSimulator native sidecar sandbox", () => {
       `(subpath ${JSON.stringify(path.join("/Users/example", "Library", "Developer", "CoreSimulator"))})`,
     );
     expect(profile).not.toContain("(allow network");
+    expect(profile).not.toContain("com.apple.bsd.dirhelper");
     expect(profile).not.toMatch(/\(allow mach-lookup\)\s*$/m);
     expect(profile).not.toMatch(/\(allow iokit-open\)\s*$/m);
     expect(profile).not.toContain("(allow signal");
@@ -148,6 +149,7 @@ describe("IOSSimulator native sidecar sandbox", () => {
       HOME: "/Users/example",
       DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
       TMPDIR: `${temp}${path.sep}`,
+      CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.join(temp, "metal-cache"),
     });
     expect(plan.diagnostics).toMatchObject({
       required: true,

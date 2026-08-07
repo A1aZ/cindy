@@ -78,6 +78,57 @@ func fail(_ message: String) -> Never {
     exit(2)
 }
 
+typealias MTLSetShaderCachePathFunction = @convention(c) (NSString) -> Void
+
+/**
+ * Metal normally discovers its shader-cache root through
+ * confstr(_CS_DARWIN_USER_CACHE_DIR), which requires the broad dirhelper
+ * service. Route it into this Sidecar instance's Host-owned 0700 temp root
+ * before SimulatorKit or VideoToolbox initializes instead of opening the
+ * user's real cache directory to the sandbox.
+ */
+func configurePrivateMetalShaderCache() {
+    let environment = ProcessInfo.processInfo.environment
+    // Unsandboxed correctness harnesses do not provide a private cache root;
+    // they retain Metal's normal system cache behavior.
+    guard let configuredCacheDirectory = environment[
+        "CINDY_IOS_SIDECAR_METAL_CACHE_DIR"
+    ] else { return }
+    guard let rawTemporaryDirectory = environment["TMPDIR"] else {
+        fail("private Metal cache requires TMPDIR")
+    }
+    let temporaryDirectory = URL(
+        fileURLWithPath: rawTemporaryDirectory,
+        isDirectory: true
+    ).standardizedFileURL
+    guard temporaryDirectory.path.hasPrefix("/"),
+          temporaryDirectory.path != "/" else {
+        fail("private Metal cache requires an absolute private TMPDIR")
+    }
+    let expectedCacheDirectory = temporaryDirectory.appendingPathComponent(
+        "metal-cache",
+        isDirectory: true
+    ).standardizedFileURL.path
+    let cacheDirectory = URL(
+        fileURLWithPath: configuredCacheDirectory,
+        isDirectory: true
+    ).standardizedFileURL.path
+    guard cacheDirectory == expectedCacheDirectory else {
+        fail("private Metal cache must be inside the Host-owned TMPDIR")
+    }
+
+    let metalPath = "/System/Library/Frameworks/Metal.framework/Metal"
+    guard let metal = dlopen(metalPath, RTLD_LAZY | RTLD_LOCAL),
+          let symbol = dlsym(metal, "MTLSetShaderCachePath") else {
+        fail("private Metal cache routing is unavailable")
+    }
+    let setShaderCachePath = unsafeBitCast(
+        symbol,
+        to: MTLSetShaderCachePathFunction.self
+    )
+    setShaderCachePath(cacheDirectory as NSString)
+}
+
 func argument(_ name: String) -> String {
     guard let index = CommandLine.arguments.firstIndex(of: name),
           index + 1 < CommandLine.arguments.count else {
@@ -98,6 +149,7 @@ guard !simulatorUdid.isEmpty else {
 guard let generation = Int(argument("--generation")), generation > 0 else {
     fail("generation must be a positive integer")
 }
+configurePrivateMetalShaderCache()
 
 enum FramebufferCaptureError: Error {
     case nativeSymbolsUnavailable

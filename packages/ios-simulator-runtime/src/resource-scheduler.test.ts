@@ -129,4 +129,24 @@ describe("IOSSimulatorResourceScheduler", () => {
       code: "RESOURCE_LIMIT_REACHED",
     });
   });
+
+  it("reports the configured limits and current running count", async () => {
+    const scheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 2,
+      hardLimit: 4,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+
+    expect(scheduler.snapshot()).toEqual({
+      runningCount: 0,
+      softLimit: 2,
+      hardLimit: 4,
+    });
+    await scheduler.runStart("a", async () => undefined);
+    expect(scheduler.snapshot()).toEqual({
+      runningCount: 1,
+      softLimit: 2,
+      hardLimit: 4,
+    });
+  });
 });

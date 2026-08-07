@@ -3467,6 +3467,8 @@
         "sessionContextDetail": "Shares only location facts (session ID and project folder path) while it works for the current session — no file contents, and no file access is granted.",
         "preview": "Can open preview pages from the sites below in the sidebar browser",
         "previewDetail": "Only the sites listed below can be opened; every page it opens is attributed to this plugin.",
+        "iosSimulator": "Can view the current task's embedded iOS Simulator status and open its controls",
+        "iosSimulatorDetail": "The Cindy Host still owns simulator lifecycle, WDA, Native Sidecar, video, and input. The plugin receives no frame bytes, input privileges, native Helper access, or IDs from other tasks.",
         "nodeChildSpawn": "Its Node program can ask the host to start declared sub-processes from its package",
         "nodeChildSpawnDetail": "Only JS files declared inside its own package can be started (same local permissions as the main program); arbitrary commands cannot be executed. Sub-processes are closed together when the plugin is disabled or exits.",
         "skill": "Adds the skill \"{{name}}\" to your AI assistants",
@@ -3481,6 +3483,7 @@
       },
       "errors": {
         "fileInvalid": "Not a valid .cindy plugin file",
+        "hostUnsupported": "This plugin needs Cindy capabilities that this version does not provide. Update Cindy, then install it again.",
         "alreadyInstalled": "This plugin is already installed",
         "commandConflict": "Its command conflicts with an installed plugin. Uninstall the other one or rename the command.",
         "idReserved": "This id uses the reserved official prefix cindy-; it is only available to plugins bundled with the app",
@@ -3582,7 +3585,8 @@
         "slotBadge": "Unread badge",
         "slotFs": "File writing",
         "slotSkill": "Agent skills",
-        "slotWorkspace": "Workspace sessions"
+        "slotWorkspace": "Workspace sessions",
+        "slotIOSSimulator": "Embedded iOS Simulator"
       },
       "commandPaletteTag": "Plugin command",
       "updateConfirm": {
@@ -4392,6 +4396,7 @@
     },
     "iosSimulator": {
       "title": "iOS Simulator",
+      "startPrompt": "Open the iOS Simulator for me.",
       "description": "Inspect the Xcode environment and simulators available to this local session.",
       "refresh": "Refresh",
       "checking": "Checking",
@@ -4407,6 +4412,14 @@
       "instancesCount": "{{count}} ready",
       "openDevice": "Open Device",
       "noDevices": "No iPhone or iPad simulators were found.",
+      "noAvailableDevices": "No connectable iPhone or iPad simulators were found.",
+      "unavailableDevicesTitle": "Unavailable Devices",
+      "unavailableDevicesCount": "{{count}}",
+      "unavailableDevicesDescription": "These devices cannot be connected right now. Review the reason, resolve it, then refresh the status.",
+      "missingRuntime": "{{runtime}} Runtime is missing",
+      "missingRuntimeHelp": "Install the matching Runtime in Xcode, then refresh the status.",
+      "deviceUnavailable": "Xcode marks this device as unavailable",
+      "deviceUnavailableHelp": "Check or recreate the simulator in Xcode, then refresh the status.",
       "booted": "Booted",
       "shutdown": "Shutdown",
       "runtime": "Runtime",
@@ -4423,6 +4436,22 @@
       "disableAgentControl": "Disable Agent Control",
       "operationError": "Cindy could not complete the simulator operation.",
       "retryHint": "Refresh the status and try again.",
+      "operationErrorWithRecovery": "Cindy could not complete the simulator operation. Refresh the status and try again.",
+      "deviceInUseByOtherTask": "Another Cindy task is using this device. Choose another device, or disconnect it from the original task first.",
+      "taskDeviceLimitReached": "This task already has {{limit}} connected devices. Disconnect one before connecting another device.",
+      "runningDeviceLimitReached": "Cindy is already running {{limit}} simulators. Stop one before connecting this booted device.",
+      "resourceSoftLimitTitle": "{{count}} simulators are currently running",
+      "resourceSoftLimitDescription": "Before starting more devices, Cindy checks system memory. Existing devices stay active if a new start is blocked.",
+      "resourceHardLimitTitle": "Concurrent simulator limit reached ({{limit}})",
+      "resourceHardLimitDescription": "Stop a running simulator before starting another device.",
+      "errors": {
+        "attachedElsewhere": "Another Cindy task is using this device. Choose another device, or disconnect it from the original task first.",
+        "taskLimitReached": "This task can connect up to {{taskLimit}} devices. Disconnect one and try again.",
+        "resourceLimitReached": "Cindy has reached the concurrent simulator limit ({{hardLimit}}). Stop a simulator and try again.",
+        "memoryPressure": "System memory pressure is too high to start another simulator. Stop a simulator or try again later.",
+        "deviceNotFound": "The selected device no longer exists. Refresh the status and choose another device.",
+        "deviceStateChanged": "The device state changed. Refresh the status and try again."
+      },
       "streamAlt": "Live simulator view for {{device}}",
       "waitingForFrame": "The live view will appear here when connected.",
       "viewerStoppedTitle": "Simulator stopped",
@@ -6165,13 +6194,17 @@
       "mention": "Plugin mentioned · {{names}}",
       "mentionExpandAria": "Show the hint appended for the model",
       "mentionDirectiveLabel": "Hint appended for the model",
+      "hostCapabilityExpandAria": "Show the selected Cindy capability route",
+      "hostCapabilityDirectiveLabel": "Cindy capability route sent to the agent",
+      "hostCapabilityLegend": "Highlighted = current selection · the rest is Cindy's fixed routing text",
       "semanticExpandAria": "Show how this plugin was used",
       "semanticNote": "The AI used this plugin on its own based on the meaning of your message; no machine directive was appended to it.",
       "listSeparator": ", ",
       "status": {
         "running": "Calling…",
         "called": "Called",
-        "done": "Finished"
+        "done": "Finished",
+        "selected": "Selected"
       }
     },
     "userMessage": {
@@ -8602,6 +8635,7 @@
     "addFiles": "Add files, images, or videos…",
     "pluginsTitle": "Installed Plugins",
     "pluginDisabled": "Disabled",
+    "pluginAgentInvoked": "Used automatically by Agent",
     "pluginNoCommand": "Not available here",
     "sectionTitle": "Reference directories (read-only)",
     "empty": "No reference directories yet",

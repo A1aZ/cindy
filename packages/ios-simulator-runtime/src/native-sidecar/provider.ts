@@ -181,8 +181,7 @@ function sameIdentity(
     left.simulatorUdid === right.simulatorUdid &&
     left.generation === right.generation &&
     left.runtime?.runtimeIdentifier === right.runtime?.runtimeIdentifier &&
-    left.runtime?.runtimeBuildVersion ===
-      right.runtime?.runtimeBuildVersion &&
+    left.runtime?.runtimeBuildVersion === right.runtime?.runtimeBuildVersion &&
     left.runtime?.xcodeBuild === right.runtime?.xcodeBuild &&
     left.runtime?.architecture === right.runtime?.architecture
   );
@@ -572,6 +571,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
       crashCount: 0,
       probe: null,
       lastFailure: "Native capability provider admission was denied.",
+      lastTermination: null,
       admission: decision,
     });
     throw new IOSSimulatorCapabilityProviderError(

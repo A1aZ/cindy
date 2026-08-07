@@ -266,6 +266,43 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     await channel.stop();
   });
 
+  it("retains structured process-exit evidence with a bounded stderr tail", async () => {
+    const { channel, processes } = harness();
+    await channel.start();
+    processes[0]!.stderr.write(
+      "VideoToolbox failed at /Users/example/private/SimulatorKit.framework\n",
+    );
+    processes[0]!.exit(23, null);
+
+    expect(channel.lastTermination).toEqual({
+      reasonCode: "process-exit",
+      message: "Native sidecar exited (23).",
+      exitCode: 23,
+      signal: null,
+      occurredAt: "2026-07-23T00:00:00.000Z",
+      stderrTail:
+        "VideoToolbox failed at /Users/example/private/SimulatorKit.framework\n",
+    });
+  });
+
+  it("adds the final signal when stdout closes before the process exit event", async () => {
+    const { channel, processes } = harness();
+    await channel.start();
+    const process = processes[0]!;
+    process.emitExitOnKill = false;
+    process.stderr.write("encoder stopped\n");
+    process.stdout.end();
+    await vi.waitFor(() => expect(channel.state).toBe("failed"));
+    process.exit(null, "SIGABRT");
+
+    expect(channel.lastTermination).toMatchObject({
+      reasonCode: "stdout-closed",
+      exitCode: null,
+      signal: "SIGABRT",
+      stderrTail: "encoder stopped\n",
+    });
+  });
+
   it("does not let a retired process exit invalidate its replacement", async () => {
     const { channel, processes } = harness();
     await channel.start();

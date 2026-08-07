@@ -361,6 +361,10 @@ export function createIOSSimulatorNativeSidecarSandboxLaunchPlan(
     HOME: input.policy.homeDirectory,
     DEVELOPER_DIR: input.policy.developerDirectory,
     TMPDIR: `${input.temporaryDirectory}${path.sep}`,
+    CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.join(
+      input.temporaryDirectory,
+      "metal-cache",
+    ),
   };
   if (input.environment.LC_ALL) {
     environment.LC_ALL = input.environment.LC_ALL;

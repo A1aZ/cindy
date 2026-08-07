@@ -112,6 +112,7 @@ export type IpcErrorCode =
   | 'TERMINAL_ALREADY_DISPOSED' // 在已 dispose 的 session 上调 restart 等操作
   // 意识(.cindy 装入)
   | 'GHOST_FILE_INVALID' // 不是合法 zip / 缺 ghost.json / 清单不合格 / 超限
+  | 'GHOST_HOST_UNSUPPORTED' // 插件包合法，但当前 Cindy 不认识其 schema / capability slot
   | 'GHOST_COMMAND_CONFLICT' // 显式指令与已装意识撞名(装入拒绝)
   | 'GHOST_ID_RESERVED' // id 属官方保留前缀(cindy-),用户通道拒装(防抢注蹭凭证别名)
   // 自定义插件市场源(Git / 本地文件夹)
@@ -247,6 +248,7 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'TERMINAL_SHELL_NOT_FOUND',
   'TERMINAL_ALREADY_DISPOSED',
   'GHOST_FILE_INVALID',
+  'GHOST_HOST_UNSUPPORTED',
   'GHOST_COMMAND_CONFLICT',
   'GHOST_ID_RESERVED',
   'MARKET_SOURCE_INVALID',

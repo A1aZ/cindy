@@ -152,6 +152,7 @@ class FakeRuntime implements IOSSimulatorSidecarRuntime {
       crashCount: 0,
       probe: null,
       lastFailure: null,
+      lastTermination: null,
       admission: running.admission,
     };
   }

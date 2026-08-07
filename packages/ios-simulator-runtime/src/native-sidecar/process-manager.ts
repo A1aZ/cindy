@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, chmod, mkdtemp, rm } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -22,6 +22,8 @@ import {
   createNodeIOSSimulatorNativeSidecarLauncher,
   IOSSimulatorNativeSidecarChannel,
   type IOSSimulatorNativeSidecarChannelState,
+  type IOSSimulatorNativeSidecarTermination,
+  type IOSSimulatorNativeSidecarTerminationReasonCode,
 } from "./channel.js";
 import { IOS_SIMULATOR_NATIVE_SIDECAR_PROTOCOL_VERSION } from "./protocol.js";
 import {
@@ -42,6 +44,7 @@ export interface IOSSimulatorNativeSidecarManagedChannel extends IOSSimulatorNat
   readonly state: IOSSimulatorNativeSidecarChannelState;
   readonly crashCount: number;
   readonly stderrTail: string;
+  readonly lastTermination: IOSSimulatorNativeSidecarTermination | null;
   start(): Promise<void>;
   restart(): Promise<void>;
   rearm(): void;
@@ -100,8 +103,19 @@ export interface IOSSimulatorNativeSidecarDiagnostics {
   crashCount: number;
   probe: IOSSimulatorNativeSidecarProbe | null;
   lastFailure: string | null;
+  lastTermination: IOSSimulatorNativeSidecarTerminationDiagnostics | null;
   admission: IOSSimulatorNativeCapabilityAdmissionDecision | null;
   sandbox?: IOSSimulatorNativeSidecarSandboxDiagnostics;
+}
+
+export interface IOSSimulatorNativeSidecarTerminationDiagnostics {
+  reasonCode: IOSSimulatorNativeSidecarTerminationReasonCode;
+  message: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  occurredAt: string;
+  /** Bounded and redacted; raw channel stderr never crosses this boundary. */
+  stderrTail: string | null;
 }
 
 export interface IOSSimulatorNativeSidecarRunningInstance {
@@ -202,6 +216,40 @@ function safeProcessManagerFailure(
     "UNAVAILABLE",
     fallbackMessage,
   );
+}
+
+function safeNativeSidecarDiagnosticText(
+  value: string,
+  maxLength: number,
+): string {
+  return value
+    .replace(/https?:\/\/[^\s)]+/gi, "<redacted-url>")
+    .replace(
+      /(?:\/Users\/|\/private\/|\/var\/folders\/|\/tmp\/|\/Applications\/|\/Library\/)[^\s"'(),;]+/g,
+      "<redacted-path>",
+    )
+    .replace(
+      /\b(authorization|cookie|password|secret|token)(\s*[:=]\s*)([^\s,;]+)/gi,
+      "$1$2<redacted>",
+    )
+    .slice(-maxLength);
+}
+
+function safeNativeSidecarTermination(
+  termination: IOSSimulatorNativeSidecarTermination,
+): IOSSimulatorNativeSidecarTerminationDiagnostics {
+  const stderrTail = safeNativeSidecarDiagnosticText(
+    termination.stderrTail,
+    8_000,
+  ).trim();
+  return {
+    reasonCode: termination.reasonCode,
+    message: safeNativeSidecarDiagnosticText(termination.message, 2_000),
+    exitCode: termination.exitCode,
+    signal: termination.signal,
+    occurredAt: termination.occurredAt,
+    stderrTail: stderrTail || null,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -517,6 +565,10 @@ export class IOSSimulatorNativeSidecarProcessManager {
     IOSSimulatorNativeSidecarProbe | null
   >();
   readonly #lastFailure = new Map<string, string>();
+  readonly #lastTermination = new Map<
+    string,
+    IOSSimulatorNativeSidecarTerminationDiagnostics
+  >();
   readonly #lastAdmission = new Map<
     string,
     IOSSimulatorNativeCapabilityAdmissionDecision
@@ -570,13 +622,26 @@ export class IOSSimulatorNativeSidecarProcessManager {
   diagnostics(instanceId: string): IOSSimulatorNativeSidecarDiagnostics {
     const running = this.#running.get(instanceId);
     const admission = this.admission(instanceId);
+    const channelTermination = running?.channel.lastTermination ?? null;
+    if (channelTermination) {
+      this.#lastTermination.set(
+        instanceId,
+        safeNativeSidecarTermination(channelTermination),
+      );
+    }
+    const lastTermination = this.#lastTermination.get(instanceId) ?? null;
     return {
       running: running?.channel.state === "running",
       state: running?.channel.state ?? admission?.processState ?? "idle",
       crashCount: running?.channel.crashCount ?? 0,
       probe:
         running?.handshake.probe ?? this.#lastProbe.get(instanceId) ?? null,
-      lastFailure: this.#lastFailure.get(instanceId) ?? null,
+      lastFailure:
+        this.#lastFailure.get(instanceId) ??
+        (running && running.channel.state !== "running"
+          ? (lastTermination?.message ?? null)
+          : null),
+      lastTermination,
       admission,
       sandbox:
         running?.sandbox.diagnostics ??
@@ -635,6 +700,7 @@ export class IOSSimulatorNativeSidecarProcessManager {
     operation: PendingSidecarOperation,
   ): Promise<IOSSimulatorNativeSidecarRunningInstance> {
     this.#lastFailure.delete(input.instanceId);
+    this.#lastTermination.delete(input.instanceId);
     const policy = this.#resolveAdmissionPolicy(input);
     operation.policy = policy;
     const preflight = evaluateIOSSimulatorNativeCapabilityAdmission({
@@ -706,6 +772,13 @@ export class IOSSimulatorNativeSidecarProcessManager {
       this.#running.set(input.instanceId, running);
       return this.get(input.instanceId)!;
     } catch (error) {
+      const channelTermination = channel.lastTermination;
+      if (channelTermination) {
+        this.#lastTermination.set(
+          input.instanceId,
+          safeNativeSidecarTermination(channelTermination),
+        );
+      }
       const failure = safeProcessManagerFailure(
         error,
         "Native sidecar process failed to start.",
@@ -869,6 +942,13 @@ export class IOSSimulatorNativeSidecarProcessManager {
       this.#lastSandbox.set(input.instanceId, running.sandbox.diagnostics);
       return this.get(input.instanceId)!;
     } catch (error) {
+      const channelTermination = running.channel.lastTermination;
+      if (channelTermination) {
+        this.#lastTermination.set(
+          input.instanceId,
+          safeNativeSidecarTermination(channelTermination),
+        );
+      }
       const failure = safeProcessManagerFailure(
         error,
         operation.stopRequested
@@ -1000,12 +1080,26 @@ export class IOSSimulatorNativeSidecarProcessManager {
 
   async #stop(instanceId: string): Promise<void> {
     const pending = this.#starting.get(instanceId);
+    const pendingTermination = pending?.channel?.lastTermination;
+    if (pendingTermination) {
+      this.#lastTermination.set(
+        instanceId,
+        safeNativeSidecarTermination(pendingTermination),
+      );
+    }
     if (pending) {
       pending.stopRequested = true;
       await pending.channel?.stop().catch(() => undefined);
     }
     let running = this.#running.get(instanceId);
     const stoppedRunning = running;
+    const runningTermination = running?.channel.lastTermination;
+    if (runningTermination) {
+      this.#lastTermination.set(
+        instanceId,
+        safeNativeSidecarTermination(runningTermination),
+      );
+    }
     if (running) {
       this.#running.delete(instanceId);
       await running.adapter.detach().catch(() => undefined);
@@ -1139,6 +1233,9 @@ export class IOSSimulatorNativeSidecarProcessManager {
         ),
       );
       await chmod(temporaryDirectory, 0o700);
+      const metalCacheDirectory = path.join(temporaryDirectory, "metal-cache");
+      await mkdir(metalCacheDirectory, { mode: 0o700 });
+      await chmod(metalCacheDirectory, 0o700);
       const diagnostics = createIOSSimulatorNativeSidecarSandboxLaunchPlan({
         policy,
         binaryPath: this.#options.binaryPath,

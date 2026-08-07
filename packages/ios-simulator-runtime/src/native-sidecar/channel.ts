@@ -34,6 +34,25 @@ const MAX_CLOSED_STREAMS = 64;
 export type IOSSimulatorNativeSidecarChannelState =
   "idle" | "running" | "failed" | "parked" | "stopped";
 
+export type IOSSimulatorNativeSidecarTerminationReasonCode =
+  | "launch-failed"
+  | "process-error"
+  | "process-exit"
+  | "stdout-closed"
+  | "protocol-error"
+  | "request-timeout"
+  | "write-failed";
+
+/** Raw channel-local evidence. Callers must sanitize text before exposing it. */
+export interface IOSSimulatorNativeSidecarTermination {
+  reasonCode: IOSSimulatorNativeSidecarTerminationReasonCode;
+  message: string;
+  exitCode: number | null;
+  signal: NodeJS.Signals | null;
+  occurredAt: string;
+  stderrTail: string;
+}
+
 export interface IOSSimulatorNativeSidecarManagedProcess {
   readonly pid?: number;
   readonly stdin: Writable;
@@ -290,6 +309,9 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
   #crashCount = 0;
   #consecutiveTimeouts = 0;
   #stderr = "";
+  #lastTermination: IOSSimulatorNativeSidecarTermination | null = null;
+  #lastTerminationProcess: IOSSimulatorNativeSidecarManagedProcess | null =
+    null;
   #earlyStreamBytes = 0;
   #stopRequested = false;
 
@@ -329,6 +351,10 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     return this.#stderr;
   }
 
+  get lastTermination(): IOSSimulatorNativeSidecarTermination | null {
+    return this.#lastTermination ? { ...this.#lastTermination } : null;
+  }
+
   async start(): Promise<void> {
     if (this.#state === "running" && this.#process) return;
     if (this.#state === "parked") {
@@ -339,6 +365,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     }
     this.#stopRequested = false;
     let process: IOSSimulatorNativeSidecarManagedProcess;
+    this.#stderr = "";
     try {
       process = this.#launcher.launch();
     } catch (error) {
@@ -346,6 +373,8 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         "PROCESS_EXITED",
         `Unable to launch native sidecar: ${error instanceof Error ? error.message : String(error)}`,
       );
+      this.#recordTermination(wrapped, { reasonCode: "launch-failed" });
+      this.#lastTerminationProcess = null;
       this.#recordCrash();
       throw wrapped;
     }
@@ -369,6 +398,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
                 error instanceof Error ? error.message : String(error),
               ),
           true,
+          { reasonCode: "protocol-error" },
         );
       }
     });
@@ -383,6 +413,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
             error instanceof Error ? error.message : String(error),
           ),
           true,
+          { reasonCode: "protocol-error" },
         );
         return;
       }
@@ -393,6 +424,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
           "Native sidecar stdout closed.",
         ),
         true,
+        { reasonCode: "stdout-closed" },
       );
     });
     process.stderr.on("data", (chunk: Buffer | Uint8Array | string) => {
@@ -411,9 +443,17 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
           `Native sidecar process error: ${error.message}`,
         ),
         true,
+        { reasonCode: "process-error" },
       ),
     );
-    process.once("exit", (code, signal) =>
+    process.once("exit", (code, signal) => {
+      if (
+        this.#process !== process &&
+        this.#lastTerminationProcess === process
+      ) {
+        this.#augmentTerminationExit(code, signal);
+        return;
+      }
       this.#terminateProcess(
         process,
         new IOSSimulatorNativeSidecarChannelError(
@@ -421,8 +461,9 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
           `Native sidecar exited (${signal ?? code ?? "unknown"}).`,
         ),
         false,
-      ),
-    );
+        { reasonCode: "process-exit", exitCode: code, signal },
+      );
+    });
   }
 
   async restart(): Promise<void> {
@@ -623,6 +664,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
               `Unable to write to native sidecar: ${error.message}`,
             ),
             true,
+            { reasonCode: "write-failed" },
           );
         });
       } catch (error) {
@@ -967,16 +1009,57 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     process: IOSSimulatorNativeSidecarManagedProcess | null,
     error: IOSSimulatorNativeSidecarChannelError,
     kill: boolean,
+    termination: {
+      reasonCode: IOSSimulatorNativeSidecarTerminationReasonCode;
+      exitCode?: number | null;
+      signal?: NodeJS.Signals | null;
+    } = {
+      reasonCode:
+        error.code === "TIMEOUT" ? "request-timeout" : "process-error",
+    },
   ): void {
     if (!process || this.#process !== process) return;
     this.#process = null;
     if (this.#stopRequested) {
       this.#state = "stopped";
     } else {
+      this.#recordTermination(error, termination);
+      this.#lastTerminationProcess = process;
       this.#recordCrash();
     }
     this.#rejectAll(error);
     if (kill) process.kill("SIGTERM");
+  }
+
+  #recordTermination(
+    error: IOSSimulatorNativeSidecarChannelError,
+    termination: {
+      reasonCode: IOSSimulatorNativeSidecarTerminationReasonCode;
+      exitCode?: number | null;
+      signal?: NodeJS.Signals | null;
+    },
+  ): void {
+    this.#lastTermination = {
+      reasonCode: termination.reasonCode,
+      message: error.message,
+      exitCode: termination.exitCode ?? null,
+      signal: termination.signal ?? null,
+      occurredAt: this.#timestamp(),
+      stderrTail: this.#stderr,
+    };
+  }
+
+  #augmentTerminationExit(
+    exitCode: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (!this.#lastTermination) return;
+    this.#lastTermination = {
+      ...this.#lastTermination,
+      exitCode,
+      signal,
+      stderrTail: this.#stderr,
+    };
   }
 
   #rejectAll(error: unknown): void {

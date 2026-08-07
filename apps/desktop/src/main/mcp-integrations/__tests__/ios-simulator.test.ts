@@ -93,6 +93,146 @@ describe('iOS Simulator host', () => {
     expect(environment).not.toHaveProperty('data.devices.0.availabilityError');
   });
 
+  it('projects task ownership, resource limits, and safe unavailable-device reasons', async () => {
+    const unavailableDevice = {
+      ...READY_REPORT.devices[0]!,
+      udid: 'E223400C-3148-4BE5-9538-A60FE457EF38',
+      name: 'iPhone 16',
+      state: 'Shutdown',
+      isAvailable: false,
+      availabilityError: 'runtime profile not found using "System" match policy',
+      runtimeIdentifier: 'com.apple.CoreSimulator.SimRuntime.iOS-18-4',
+      runtimeName: 'iOS 18-4',
+      runtimeVersion: null,
+    };
+    const report: IOSSimulatorEnvironmentReport = {
+      ...READY_REPORT,
+      devices: [READY_REPORT.devices[0]!, unavailableDevice],
+    };
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'session-b',
+      worktreeRoot: '/tmp/session-b',
+      sourceFingerprint: 'fingerprint-b',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    const resourceScheduler = testResourceScheduler();
+    await resourceScheduler.runStart('running-instance', async () => undefined);
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      runtime: { inspect: vi.fn(async () => report) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    const status = await host.getStatus('session-a');
+
+    expect(status).toMatchObject({
+      ok: true,
+      resource: {
+        runningCount: 1,
+        softLimit: 2,
+        hardLimit: 4,
+        maxInstancesPerTask: 4,
+      },
+      environment: {
+        devices: [
+          { udid: READY_REPORT.devices[0]!.udid, ownership: 'other-task' },
+          {
+            udid: unavailableDevice.udid,
+            runtimeName: 'iOS 18.4',
+            ownership: 'unowned',
+            unavailableReason: { code: 'missing-runtime', runtimeName: 'iOS 18.4' },
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(status)).not.toContain('runtime profile not found');
+    expect(JSON.stringify(status)).not.toContain('availabilityError');
+    expect(JSON.stringify(status)).not.toContain('session-b');
+    await expect(
+      host.callTool(
+        'attach_device',
+        { udid: unavailableDevice.udid },
+        { sessionId: 'session-a', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'SIMULATOR_NOT_FOUND' });
+    await host.dispose();
+  });
+
+  it('projects cached plugin status without reconciling or renewing ownership', async () => {
+    const runtimeInspect = vi.fn(async () => READY_REPORT);
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle: {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      },
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'private-fingerprint',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    const before = actor.getOwned('session-a', attached.instanceId);
+    const host = createIOSSimulatorHost({
+      actor,
+      runtime: { inspect: runtimeInspect },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    const first = await host.getPluginStatus('session-a');
+    const second = await host.getPluginStatus('session-a');
+    expect(first).toEqual(second);
+    expect(first).toMatchObject({
+      ok: true,
+      status: {
+        environment: {
+          platform: 'darwin',
+          ready: true,
+          availableDeviceCount: 1,
+        },
+        instances: [
+          {
+            instanceId: attached.instanceId,
+            simulatorName: 'iPhone 17 Pro',
+            generation: attached.generation,
+          },
+        ],
+      },
+    });
+    expect(runtimeInspect).toHaveBeenCalledTimes(1);
+    const serialized = JSON.stringify(first);
+    expect(serialized).not.toContain('session-a');
+    expect(serialized).not.toContain('1A9D41E0-E031-4AD0-A8B5-847480802E8E');
+    expect(serialized).not.toContain('private-fingerprint');
+    expect(serialized).not.toContain('lease');
+    expect(serialized).not.toContain('deviceGrants');
+    expect(serialized).not.toContain('mutationStates');
+
+    const after = actor.getOwned('session-a', attached.instanceId);
+    expect(after.generation).toBe(before.generation);
+    expect(after.lease).toEqual(before.lease);
+    await host.dispose();
+  });
+
   it('keeps build diagnostics host-available without a running simulator instance', async () => {
     const actor = new IOSSimulatorInstanceActor({
       store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
@@ -1634,7 +1774,7 @@ describe('iOS Simulator host', () => {
       data: { stream: { state: 'connecting' } },
     });
     expect(driverManager.recoverNativeSidecar).toHaveBeenCalledWith(started.instanceId, {
-      rearm: true,
+      rearm: false,
     });
     expect(h264FramePump.setVisible).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -1642,6 +1782,17 @@ describe('iOS Simulator host', () => {
         visible: true,
       }),
     );
+
+    await expect(host.setViewerVisibility('session-a', latestRoute, false)).resolves.toMatchObject({
+      ok: true,
+    });
+    nativeAvailable = false;
+    await expect(
+      host.setViewerVisibility('session-a', latestRoute, true, 'h264'),
+    ).resolves.toMatchObject({ ok: true });
+    expect(driverManager.recoverNativeSidecar).toHaveBeenLastCalledWith(started.instanceId, {
+      rearm: true,
+    });
   });
 
   it('stops the embedded viewer when the exact external simulator is shut down', async () => {
@@ -2396,6 +2547,15 @@ describe('iOS Simulator host', () => {
           crashCount: 3,
           probe: null,
           lastFailure: 'IOSurface lookup failed at /Users/example/private/SimulatorKit.framework',
+          lastTermination: {
+            reasonCode: 'process-exit' as const,
+            message: 'Native sidecar exited beside /Users/example/private/SimulatorKit.framework',
+            exitCode: 23,
+            signal: null,
+            occurredAt: '2026-07-25T00:00:01.000Z',
+            stderrTail:
+              'token=private-value VideoToolbox failed at /Users/example/private/CoreSimulator.framework',
+          },
           admission: nativeAdmission,
         },
       })),
@@ -2504,6 +2664,13 @@ describe('iOS Simulator host', () => {
           nativeSidecar: {
             state: 'parked',
             lastFailure: 'Native sidecar is unavailable.',
+            lastTermination: {
+              reasonCode: 'process-exit',
+              exitCode: 23,
+              signal: null,
+              occurredAt: '2026-07-25T00:00:01.000Z',
+              stderrTail: 'token=<redacted> VideoToolbox failed at <redacted-path>',
+            },
             admission: {
               generatedAt: '2026-07-25T00:00:00.000Z',
               processState: 'parked',
@@ -2518,6 +2685,8 @@ describe('iOS Simulator host', () => {
     });
     expect(JSON.stringify(capturedState)).not.toContain('/Users/example');
     expect(JSON.stringify(capturedState)).not.toContain('SimulatorKit.framework');
+    expect(JSON.stringify(capturedState)).not.toContain('private-value');
+    expect(JSON.stringify(capturedState)).not.toContain('CoreSimulator.framework');
     const baseline = (screenResult as { ok: true; data: { screenMap: unknown } }).data.screenMap;
     await expect(
       host.callTool(

@@ -297,8 +297,15 @@ describe('hashGhostContentFiles', () => {
     ) => {
       const handle = await realOpen(...args);
       if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      let pinnedHandleStat: fs.BigIntStats | undefined;
       return new Proxy(handle, {
         get(target, key) {
+          if (key === 'stat') {
+            return async () => {
+              pinnedHandleStat ??= await handle.stat({ bigint: true });
+              return pinnedHandleStat;
+            };
+          }
           if (key === 'createReadStream') {
             return () => Readable.from((async function*() {
               const first = Buffer.alloc(splitAt);
@@ -373,7 +380,7 @@ describe('hashGhostContentFiles', () => {
     try {
       await expect(
         hashGhostContentFiles(root, tree.files, tree.rootIdentity),
-      ).rejects.toThrow(/entry path changed while reading/);
+      ).rejects.toThrow(/entry (?:changed|path changed) while reading/);
     } finally {
       openSpy.mockRestore();
     }

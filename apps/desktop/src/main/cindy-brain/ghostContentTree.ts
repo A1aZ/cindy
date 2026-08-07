@@ -391,6 +391,9 @@ export async function hashGhostContentFiles(
       ) {
         throw new Error(`ghost content entry path changed while reading: ${relativePath}`);
       }
+      if (!sameStableFileState(handleStat, afterReadPathStat)) {
+        throw new Error(`ghost content entry changed while reading: ${relativePath}`);
+      }
       assertGhostContentAncestorIdentities(
         ancestorIdentities,
         await captureGhostContentAncestorIdentities(rootIdentity.realPath, relativePath),

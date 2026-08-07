@@ -16,10 +16,13 @@ export function usePluginUpgradeNoticeToast(): void {
         const notice = await window.electronAPI.pluginMarket.consumeUpgradeNotice();
         if (cancelled || !notice) return;
         const permissions = notice.permissions
-          ?.map((permission) =>
-            i18n.t(`settings.ghosts.perm.${permission.labelKey}`, permission.labelArgs),
-          )
-          .join(', ');
+          ? new Intl.ListFormat(i18n.language, {
+              type: 'conjunction',
+              style: 'narrow',
+            }).format(notice.permissions.map((permission) =>
+              i18n.t(`settings.ghosts.perm.${permission.labelKey}`, permission.labelArgs),
+            ))
+          : undefined;
         const message =
           notice.count === 1 && notice.name
             ? notice.hasPermissionExpansion && permissions

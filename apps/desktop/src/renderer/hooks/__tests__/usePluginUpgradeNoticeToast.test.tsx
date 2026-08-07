@@ -11,10 +11,11 @@ const mocks = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   toastInfo: vi.fn(),
   translate: vi.fn((key: string) => key),
+  language: 'en',
   warn: vi.fn(),
 }));
 
-vi.mock('@/i18n', () => ({ i18n: { t: mocks.translate } }));
+vi.mock('@/i18n', () => ({ i18n: { t: mocks.translate, language: mocks.language } }));
 vi.mock('@/lib/secondaryWindow', () => ({ isSecondaryWindow: () => mocks.secondary }));
 vi.mock('@/lib/toast', () => ({ toast: { info: mocks.toastInfo } }));
 vi.mock('@/lib/logger', () => ({ createLogger: () => ({ warn: mocks.warn }) }));
@@ -79,6 +80,7 @@ describe('usePluginUpgradeNoticeToast', () => {
       name: 'Team Plugin',
       permissions: [
         { key: 'networkHost:api.example.com', labelKey: 'networkHost', labelArgs: { host: 'api.example.com' } },
+        { key: 'fs', labelKey: 'fsWrite' },
       ],
       hasPermissionExpansion: true,
     });
@@ -89,7 +91,10 @@ describe('usePluginUpgradeNoticeToast', () => {
     });
     expect(mocks.translate).toHaveBeenCalledWith(
       'settings.ghosts.market.upgradeNotice.singleWithPermissions',
-      expect.objectContaining({ name: 'Team Plugin', permissions: expect.stringContaining('networkHost') }),
+      expect.objectContaining({
+        name: 'Team Plugin',
+        permissions: expect.stringContaining(', '),
+      }),
     );
   });
 

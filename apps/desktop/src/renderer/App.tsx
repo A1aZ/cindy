@@ -32,7 +32,6 @@ import { installSystemNetworkErrorToastListener } from '@/lib/systemNetworkError
 import { installSilentInstallToastListener } from '@/lib/silentInstallToast';
 import { installProviderUpstreamErrorToastListener } from '@/lib/providerUpstreamErrorToast';
 import { installAutoPermissionFallbackToastListener } from '@/lib/autoPermissionFallbackToast';
-import { usePluginUpgradeNoticeToast } from '@/hooks/usePluginUpgradeNoticeToast';
 import { agentKindToVendor } from '@/components/sidebar/VendorIcon';
 import { installCcMgrUpgradeListener } from '@/state/ccMgrUpgradeStore';
 import {
@@ -111,11 +110,6 @@ function MakerBootstrap() {
   useEffect(() => {
     void preloadLocalCatalogSnapshot();
   }, [dataOwnerId]);
-  return null;
-}
-
-function PluginUpgradeNoticeHost() {
-  usePluginUpgradeNoticeToast();
   return null;
 }
 
@@ -355,7 +349,6 @@ export function App() {
                               都挂、谁收到谁弹,不按窗口类型 gate。 */}
                           <GhostConfirmDialogHost />
                           <PluginMarketPermissionReviewHost />
-                          <PluginUpgradeNoticeHost />
                           <OwnerScopedRouter />
                         </EnvCheckGuard>
                       </LoginHandoffHost>

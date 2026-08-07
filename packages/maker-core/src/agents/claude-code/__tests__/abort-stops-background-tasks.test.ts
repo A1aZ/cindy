@@ -1543,6 +1543,60 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('Stop rebuild waits for an in-flight remote Query close before creating the replacement', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+    const closeDeferred = createDeferred<void>();
+
+    await handle.send({ type: 'user', content: 'foreground turn with remote wake task' });
+    stream.emit(taskStarted('task-unconfirmed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
+    fakeQuery.close.mockImplementationOnce(() => closeDeferred.promise);
+
+    await handle.abort();
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+
+    const sendPromise = handle.send({ type: 'user', content: 'send after remote close' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fakeQueries).toHaveLength(1);
+
+    closeDeferred.resolve(undefined);
+    await sendPromise;
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('replacement turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'replacement terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'replacement turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('Stop rebuild proceeds when the retired remote Query close rejects', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+    const closeDeferred = createDeferred<void>();
+
+    await handle.send({ type: 'user', content: 'foreground turn with rejected close' });
+    stream.emit(taskStarted('task-unconfirmed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
+    fakeQuery.close.mockImplementationOnce(() => closeDeferred.promise);
+
+    await handle.abort();
+    const sendPromise = handle.send({ type: 'user', content: 'send after rejected close' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fakeQueries).toHaveLength(1);
+
+    closeDeferred.reject(new Error('remote close rejected'));
+    await sendPromise;
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('replacement after rejected close'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'replacement terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'replacement turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('natural foreground result before Stop ACK is not duplicated when the Query closes', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

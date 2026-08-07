@@ -3028,6 +3028,25 @@ export class ClaudeCodeAgent extends BaseAgent {
     }
 
     const canceledBridgeQueries = new WeakSet<Query>();
+    // RemoteQuery.close() is asynchronous. User Stop records the in-flight
+    // close promise here so an immediate send/rewind can wait for the remote
+    // session to become dead before creating its replacement Query.
+    const canceledQueryClosePromises = new WeakMap<Query, Promise<void>>();
+    function recordCanceledQueryClose(query: Query, reason: string): void {
+      let closePromise: Promise<void>;
+      try {
+        closePromise = Promise.resolve(query.close());
+      } catch (error) {
+        log.warn(`${reason}: q.close threw`, { error: String(error) });
+        closePromise = Promise.reject(error);
+      }
+      canceledQueryClosePromises.set(query, closePromise);
+      // Attach a handler immediately so a remote close rejection cannot
+      // become unhandled before rebuild awaits the recorded promise.
+      void closePromise.catch((error) => {
+        log.warn(`${reason}: q.close rejected`, { error: String(error) });
+      });
+    }
     // Despite the historical name, this per-query fence also marks an old
     // Query closed after user Stop cancels an awaiting continuation. Its
     // forward loop must silently discard any buffered tail until the next
@@ -4368,7 +4387,14 @@ export class ClaudeCodeAgent extends BaseAgent {
       abortController = new AbortController();
       runtimeState.lastResultUsageAggregate = null;
       rewindTransitionQueries.add(staleQuery);
-      if (!canceledBridgeQueries.has(staleQuery)) {
+      const recordedClose = canceledQueryClosePromises.get(staleQuery);
+      if (recordedClose) {
+        try {
+          await recordedClose;
+        } catch (error) {
+          log.warn('cancelled continuation query close rejected before rebuild', { error: String(error) });
+        }
+      } else {
         try {
           await Promise.resolve(staleQuery.close());
         } catch (e) {
@@ -4963,11 +4989,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             } catch (e) {
               log.warn('user_stop cancellation: inputQueue.end threw', { error: String(e) });
             }
-            try {
-              cancelledQuery.close();
-            } catch (e) {
-              log.warn('user_stop cancellation: q.close threw', { error: String(e) });
-            }
+            recordCanceledQueryClose(cancelledQuery, 'user_stop cancellation');
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
             turnInFlight = false;

@@ -995,6 +995,7 @@ describe('remote sessions share the same permission semantics', () => {
       permissionMode?: PermissionMode;
       initMcpServerNames?: readonly string[];
       failedInitMcpServerNames?: readonly string[];
+      getGhostRosterPrompt?: AgentDeps['getGhostRosterPrompt'];
     },
   ) {
     const configDir = await makeTempDir();
@@ -1003,6 +1004,7 @@ describe('remote sessions share the same permission semantics', () => {
 
     let onApprovalRequest: ((raw: unknown) => Promise<{ behavior?: string }>) | undefined;
     const deps = createDeps(policy);
+    deps.getGhostRosterPrompt = options?.getGhostRosterPrompt;
     deps.capabilityRouting = options?.capabilityRouting;
     // 远端只装得到 stdio / sse / http 类 server —— in-process 的会被 filter 掉。
     deps.mcpProviders = (
@@ -1060,6 +1062,18 @@ describe('remote sessions share the same permission semantics', () => {
       sessionId: 'session-remote-mcp-policy',
       sessionInstanceId: 'instance-remote-mcp-policy',
     });
+    await handle.close();
+  });
+
+  it('does not inject the local ghost roster into remote Claude sessions', async () => {
+    const getGhostRosterPrompt = vi.fn(() => 'GHOST ROSTER PROMPT');
+    const { handle, remoteStartParams } = await startRemoteSession(() => 'auto-approve', {
+      getGhostRosterPrompt,
+    });
+
+    expect(remoteStartParams).toBeDefined();
+    expect(JSON.stringify(remoteStartParams)).not.toContain('GHOST ROSTER PROMPT');
+    expect(getGhostRosterPrompt).not.toHaveBeenCalled();
     await handle.close();
   });
 

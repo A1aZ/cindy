@@ -3689,10 +3689,12 @@ describe('CodexAgent.startSession developerInstructions', () => {
 
   it('keeps developerInstructions for remote sessions when their host is not proxy-active', async () => {
     const registerCodexSystemPromptForThread = vi.fn();
+    const getGhostRosterPrompt = vi.fn(() => 'GHOST ROSTER PROMPT');
     const agent = new CodexAgent(createDeps(
       { systemPrompt: 'HOST PRODUCT PROMPT' },
       {
         registerCodexSystemPromptForThread,
+        getGhostRosterPrompt,
       },
     ));
     const host = installFakeHost(agent);
@@ -3709,6 +3711,8 @@ describe('CodexAgent.startSession developerInstructions', () => {
       developerInstructions?: string;
     };
     expect(startParams.developerInstructions).toContain('HOST PRODUCT PROMPT');
+    expect(startParams.developerInstructions).not.toContain('GHOST ROSTER PROMPT');
+    expect(getGhostRosterPrompt).not.toHaveBeenCalled();
     expect(registerCodexSystemPromptForThread).not.toHaveBeenCalled();
     await handle.close();
   });

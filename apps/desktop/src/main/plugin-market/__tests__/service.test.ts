@@ -1084,7 +1084,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       }),
     );
     expect(snapshot.items[0]).toMatchObject({ installState: 'installed', enabled: false });
-    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin', permissions: null, hasPermissionExpansion: false });
   });
 
   it('integration: snapshot upgrades an organization defaultInstall release and consumes its notice', async () => {
@@ -1126,7 +1126,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.api.detail).toHaveBeenCalledWith(item.id);
     expect(h.api.download).toHaveBeenCalledWith(item.id, 'release-2');
     expect(runtime.install).toHaveBeenCalledTimes(1);
-    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin', permissions: null, hasPermissionExpansion: false });
     expect(h.service.consumeUpgradeNotice()).toBeNull();
   });
 
@@ -1163,11 +1163,11 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     expect(h.api.download).toHaveBeenCalledTimes(1);
     expect(runtime.install).toHaveBeenCalledTimes(1);
-    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin', permissions: null, hasPermissionExpansion: false });
     expect(h.service.consumeUpgradeNotice()).toBeNull();
   });
 
-  it('skips organization upgrades that expand catalog permissions and keeps update-available', async () => {
+  it('silently upgrades organization plugins that expand catalog permissions and reports the new permissions', async () => {
     const item = summary({
       scope: 'organization',
       organizationId: 'org-1',
@@ -1192,11 +1192,21 @@ describe('PluginMarketService migration and defaultInstall', () => {
       currentRelease: { ...item.currentRelease, manifest: expanded },
     } as never);
 
-    await expect(h.service.snapshot()).resolves.toMatchObject({
-      items: [{ installState: 'update-available' }],
+    const upgraded = manifest(item.ghostId, '2.0.0', ['notify', 'fs']);
+    runtime.install.mockImplementationOnce(async () => {
+      runtime.ghosts = [{ manifest: upgraded, dir: installDir, enabled: true }];
+      return runtime.ghosts[0];
     });
-    expect(runtime.install).not.toHaveBeenCalled();
-    expect(h.service.consumeUpgradeNotice()).toBeNull();
+    await expect(h.service.snapshot()).resolves.toMatchObject({
+      items: [{ installState: 'installed', version: '2.0.0' }],
+    });
+    expect(runtime.install).toHaveBeenCalledTimes(1);
+    expect(h.service.consumeUpgradeNotice()).toEqual({
+      count: 1,
+      name: 'Test Plugin',
+      permissions: [{ key: 'fs', labelKey: 'fsWrite' }],
+      hasPermissionExpansion: true,
+    });
   });
 
   it('skips organization upgrades when the downloaded package drifts to extra permissions', async () => {
@@ -1234,6 +1244,42 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.service.consumeUpgradeNotice()).toBeNull();
   });
 
+  it('abandons a silent upgrade when the installed permission baseline changes in the lock', async () => {
+    const item = summary({
+      scope: 'organization',
+      organizationId: 'org-1',
+      defaultInstall: true,
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    const oldManifest = manifest(item.ghostId, '1.0.0');
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-stale-baseline-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+    runtime.ghosts = [{ manifest: oldManifest, dir: installDir, enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+      manifestDigest: ghostManifestDigest(oldManifest),
+    });
+    const expanded = manifest(item.ghostId, '2.0.0', ['notify', 'fs']);
+    h.api.detail.mockImplementationOnce(async () => {
+      const changed = manifest(item.ghostId, '1.0.0', ['notify', 'workspace'] as never);
+      runtime.ghosts = [{ manifest: changed, dir: installDir, enabled: true }];
+      return {
+        ...item,
+        currentRelease: { ...item.currentRelease, manifest: expanded },
+      } as never;
+    });
+
+    await expect(h.service.snapshot()).resolves.toMatchObject({
+      items: [{ installState: 'update-available' }],
+    });
+    expect(runtime.install).not.toHaveBeenCalled();
+    expect(h.service.consumeUpgradeNotice()).toBeNull();
+  });
+
   it.each(['pendingCalls', 'runningErrand'] as const)(
     'skips a busy organization upgrade and retries on the next snapshot (%s)',
     async (signal) => {
@@ -1267,7 +1313,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       runtime[signal] = false;
       await h.service.snapshot();
       expect(runtime.install).toHaveBeenCalledTimes(1);
-      expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+      expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin', permissions: null, hasPermissionExpansion: false });
     },
   );
 
@@ -1341,7 +1387,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     await expect(h.service.snapshot()).resolves.toMatchObject({ unavailableReason: null });
     expect(runtime.install).toHaveBeenCalledTimes(2);
-    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Second Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Second Plugin', permissions: null, hasPermissionExpansion: false });
   });
 
   it('does not silently update public or non-defaultInstall plugins', async () => {
@@ -1387,8 +1433,56 @@ describe('PluginMarketService migration and defaultInstall', () => {
     runtime.install.mockResolvedValueOnce({ manifest: upgraded, dir: installDir, enabled: true });
 
     await h.service.snapshot();
-    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Secret Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Secret Plugin', permissions: null, hasPermissionExpansion: false });
     expect(h.service.consumeUpgradeNotice()).toBeNull();
+  });
+
+  it('aggregates multiple upgrades and flags permission expansion without listing names', async () => {
+    const first = summary({
+      scope: 'organization', organizationId: 'org-1', defaultInstall: true,
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    const second = summary({
+      id: `c${'b'.repeat(24)}`, ghostId: 'cindy-second', name: 'Second Plugin',
+      scope: 'organization', organizationId: 'org-1', defaultInstall: true,
+      currentRelease: { ...summary().currentRelease, id: 'release-2b', version: '2.0.0' },
+    });
+    const firstDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-upgrade-'));
+    const secondDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-upgrade-'));
+    roots.push(firstDir, secondDir);
+    const firstManifest = manifest(first.ghostId, '1.0.0');
+    const secondManifest = manifest(second.ghostId, '1.0.0');
+    fs.writeFileSync(path.join(firstDir, 'ghost.json'), JSON.stringify(firstManifest));
+    fs.writeFileSync(path.join(secondDir, 'ghost.json'), JSON.stringify(secondManifest));
+    runtime.ghosts = [
+      { manifest: firstManifest, dir: firstDir, enabled: true },
+      { manifest: secondManifest, dir: secondDir, enabled: true },
+    ];
+    const h = harness([first, second]);
+    h.ledger.upsertInstallation({ ...recordForTest(first), releaseId: 'release-1', version: '1.0.0', manifestDigest: ghostManifestDigest(firstManifest) });
+    h.ledger.upsertInstallation({ ...recordForTest(second), releaseId: 'release-1b', version: '1.0.0', manifestDigest: ghostManifestDigest(secondManifest) });
+    h.api.detail.mockImplementation(async (id) => {
+      const plugin = id === first.id ? first : second;
+      const nextManifest = id === first.id
+        ? manifest(plugin.ghostId, '2.0.0', ['notify', 'fs'])
+        : manifest(plugin.ghostId, '2.0.0');
+      return { ...plugin, currentRelease: { ...plugin.currentRelease, manifest: nextManifest } } as never;
+    });
+    runtime.install.mockImplementation(async (_file, expected) => {
+      const dir = expected.ghostId === first.ghostId ? firstDir : secondDir;
+      const upgraded = { ...manifest(expected.ghostId, '2.0.0', expected.ghostId === first.ghostId ? ['notify', 'fs'] : ['notify']), name: expected.ghostId === second.ghostId ? 'Second Plugin' : 'Test Plugin' };
+      const ghost = { manifest: upgraded, dir, enabled: true };
+      runtime.ghosts = runtime.ghosts.map((candidate) => candidate.manifest.id === expected.ghostId ? ghost : candidate);
+      return ghost;
+    });
+
+    await h.service.snapshot();
+    expect(h.service.consumeUpgradeNotice()).toEqual({
+      count: 2,
+      name: null,
+      permissions: null,
+      hasPermissionExpansion: true,
+    });
   });
 
   it('installs a public market plugin in account-free local mode', async () => {

@@ -29,6 +29,7 @@ import type {
   PluginMarketPackageReviewFacts,
   PluginMarketSnapshot,
   PluginRemovalUserNotice,
+  PluginUpgradePermissionNotice,
   PluginUpgradeUserNotice,
 } from '../../shared/pluginMarket.js';
 import {
@@ -83,6 +84,7 @@ type PackagePermissionReviewer = (
 ) => Promise<boolean>;
 
 class SilentUpgradeBusyError extends Error {}
+class SilentUpgradeStaleBaselineError extends Error {}
 
 /**
  * 来源增删改的互斥键。自定义市场安装的提交段也要拿这把锁，保证所选来源从
@@ -1109,6 +1111,7 @@ export class PluginMarketService {
       /** 真实包比展示清单多权限时，在当前安装事务内立即询问发起窗口。 */
       reviewPackagePermissions?: PackagePermissionReviewer;
       beforeCommitInLock?: () => void;
+      silentBaselineMismatch?: boolean;
       /** 确认操作时的安装意图;下载窗口期目标被另一窗口卸载时拒绝滑入首装。 */
       expectedInstalled: boolean;
     } = { expectedInstalled: false },
@@ -1138,6 +1141,7 @@ export class PluginMarketService {
       reviewedManifest?.manifest,
       options.allowPermissionExpansion,
       options.reviewedBaseline,
+      options.silentBaselineMismatch,
     );
 
     const download = await this.api.download(plugin.id, plugin.currentRelease.id);
@@ -1172,6 +1176,7 @@ export class PluginMarketService {
             allowPermissionExpansion: options.allowPermissionExpansion,
             reviewedBaseline: options.reviewedBaseline,
             beforeCommitInLock: options.beforeCommitInLock,
+            silentBaselineMismatch: options.silentBaselineMismatch,
           },
           owner,
           ledger,
@@ -1195,6 +1200,7 @@ export class PluginMarketService {
             approvedPackageSha256: error.review.packageSha256,
             approvedPackageBaseline: error.review.installedBaseline,
             beforeCommitInLock: options.beforeCommitInLock,
+            silentBaselineMismatch: options.silentBaselineMismatch,
           },
           owner,
           ledger,
@@ -1216,6 +1222,7 @@ export class PluginMarketService {
       approvedPackageSha256?: string;
       approvedPackageBaseline?: string | null;
       beforeCommitInLock?: () => void;
+      silentBaselineMismatch?: boolean;
       expectedInstalled: boolean;
     },
     owner: ActiveAppSession,
@@ -1246,6 +1253,7 @@ export class PluginMarketService {
         options.reviewedManifest,
         options.allowPermissionExpansion,
         options.reviewedBaseline,
+        options.silentBaselineMismatch,
       );
       const installedRawManifest = installedNow
         ? installedGhostRawManifest(installedNow.dir)
@@ -1292,6 +1300,7 @@ export class PluginMarketService {
     reviewedManifest: GhostManifest | undefined,
     allowPermissionExpansion: boolean | undefined,
     reviewedBaseline: string | undefined,
+    silentBaselineMismatch = false,
   ): void {
     if (
       !installed ||
@@ -1302,6 +1311,13 @@ export class PluginMarketService {
     }
     if (allowPermissionExpansion !== true) {
       throwIpcError('PRECONDITION_FAILED', 'Plugin permissions changed and require review');
+    }
+    if (
+      silentBaselineMismatch &&
+      reviewedBaseline !== undefined &&
+      ghostPermissionBaselineKey(installed) !== reviewedBaseline
+    ) {
+      throw new SilentUpgradeStaleBaselineError('Installed Plugin permissions changed');
     }
     assertReviewedBaselineFresh(installed, reviewedBaseline);
   }
@@ -1627,7 +1643,10 @@ export class PluginMarketService {
     ledger: PluginMarketLedger,
   ): Promise<void> {
     const local = this.localInstallSnapshot(ledger);
-    const completed: Array<string | null> = [];
+    const completed: Array<{
+      name: string | null;
+      permissions: PluginUpgradePermissionNotice[];
+    }> = [];
     for (const summary of plugins) {
       if (!summary.defaultInstall || summary.scope !== 'organization') continue;
       if (this.toItem(summary, local).installState !== 'update-available') continue;
@@ -1645,6 +1664,10 @@ export class PluginMarketService {
             });
             return;
           }
+          const freshInstalled = freshLocal.ghostsById.get(summary.ghostId);
+          const reviewedBaseline = freshInstalled
+            ? ghostPermissionBaselineKey(freshInstalled.manifest)
+            : undefined;
           const detail = await this.api.detail(summary.id);
           requireSameMarketOwner(owner);
           assertDetailMatchesSummary(summary, detail);
@@ -1660,16 +1683,32 @@ export class PluginMarketService {
           const installed = await this.installDetail(detail, {
             expectedInstalled: true,
             reviewedManifest: reviewedManifest.manifest,
+            allowPermissionExpansion: true,
+            reviewedBaseline,
+            silentBaselineMismatch: true,
             beforeCommitInLock: () => {
               if (hasPendingGhostCalls(summary.ghostId) || hasRunningGhostErrand(summary.ghostId)) {
                 throw new SilentUpgradeBusyError('Plugin is busy');
               }
             },
           }, owner, ledger);
-          if (installed) completed.push(stripDirectionalControls(installed.manifest.name) || null);
+          if (installed) {
+            const addedPermissions = freshInstalled
+              ? diffGhostPermissionItems(freshInstalled.manifest, reviewedManifest.manifest).added
+                  .map(({ key, labelKey, labelArgs }) => ({
+                    key,
+                    labelKey,
+                    ...(labelArgs ? { labelArgs } : {}),
+                  }))
+              : [];
+            completed.push({
+              name: stripDirectionalControls(installed.manifest.name) || null,
+              permissions: addedPermissions,
+            });
+          }
         });
       } catch (error) {
-        if (!(error instanceof SilentUpgradeBusyError)) {
+        if (!(error instanceof SilentUpgradeBusyError || error instanceof SilentUpgradeStaleBaselineError)) {
           log.warn('default plugin upgrade failed', {
             pluginId: summary.id,
             error: error instanceof Error ? error.message : String(error),
@@ -1680,9 +1719,17 @@ export class PluginMarketService {
     if (completed.length > 0) {
       const key = upgradeNoticeKey(owner);
       const count = (this.pendingUpgradeNotices.get(key)?.count ?? 0) + completed.length;
+      const hasPermissionExpansion =
+        (this.pendingUpgradeNotices.get(key)?.hasPermissionExpansion ?? false) ||
+        completed.some((entry) => entry.permissions.length > 0);
       this.pendingUpgradeNotices.set(key, {
         count,
-        name: count === 1 ? (completed[0] ?? null) : null,
+        name: count === 1 ? (completed[0]?.name ?? null) : null,
+        permissions:
+          count === 1 && completed[0]?.permissions.length
+            ? completed[0].permissions
+            : null,
+        hasPermissionExpansion,
       });
     }
   }

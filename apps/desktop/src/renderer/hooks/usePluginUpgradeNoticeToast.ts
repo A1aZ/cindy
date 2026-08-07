@@ -15,10 +15,24 @@ export function usePluginUpgradeNoticeToast(): void {
       try {
         const notice = await window.electronAPI.pluginMarket.consumeUpgradeNotice();
         if (cancelled || !notice) return;
+        const permissions = notice.permissions
+          ?.map((permission) =>
+            i18n.t(`settings.ghosts.perm.${permission.labelKey}`, permission.labelArgs),
+          )
+          .join(', ');
         const message =
           notice.count === 1 && notice.name
-            ? i18n.t('settings.ghosts.market.upgradeNotice.single', { name: notice.name })
-            : i18n.t('settings.ghosts.market.upgradeNotice.multiple', { count: notice.count });
+            ? notice.hasPermissionExpansion && permissions
+              ? i18n.t('settings.ghosts.market.upgradeNotice.singleWithPermissions', {
+                  name: notice.name,
+                  permissions,
+                })
+              : i18n.t('settings.ghosts.market.upgradeNotice.single', { name: notice.name })
+            : notice.hasPermissionExpansion
+              ? i18n.t('settings.ghosts.market.upgradeNotice.multipleWithPermissions', {
+                  count: notice.count,
+                })
+              : i18n.t('settings.ghosts.market.upgradeNotice.multiple', { count: notice.count });
         toast.info(message, { duration: 8000 });
       } catch (error) {
         log.warn('failed to consume plugin upgrade notice:', error);

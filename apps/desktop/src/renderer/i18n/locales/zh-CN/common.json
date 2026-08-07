@@ -3242,7 +3242,9 @@
         "notConfigured": "当前环境未配置插件市场；已安装插件仍可正常管理和使用。",
         "upgradeNotice": {
           "single": "已自动更新企业插件“{{name}}”",
-          "multiple": "已自动更新 {{count}} 个企业插件"
+          "multiple": "已自动更新 {{count}} 个企业插件",
+          "singleWithPermissions": "已自动更新企业插件“{{name}}”，新增权限：{{permissions}}",
+          "multipleWithPermissions": "已自动更新 {{count}} 个企业插件，其中有插件新增了权限"
         },
         "removalNotice": {
           "single": "插件“{{name}}”已被组织移除，本机副本与数据已清理",

@@ -41,7 +41,12 @@ describe('usePluginUpgradeNoticeToast', () => {
   afterEach(() => cleanup());
 
   it('single notice includes plugin name', async () => {
-    mocks.consume.mockResolvedValueOnce({ count: 1, name: 'Team Plugin' });
+    mocks.consume.mockResolvedValueOnce({
+      count: 1,
+      name: 'Team Plugin',
+      permissions: null,
+      hasPermissionExpansion: false,
+    });
     renderHook(() => usePluginUpgradeNoticeToast());
     await waitFor(() => expect(mocks.toastInfo).toHaveBeenCalledTimes(1));
     expect(mocks.translate).toHaveBeenCalledWith('settings.ghosts.market.upgradeNotice.single', {
@@ -52,11 +57,54 @@ describe('usePluginUpgradeNoticeToast', () => {
   it('multiple notice reports count and consumes push signals', async () => {
     renderHook(() => usePluginUpgradeNoticeToast());
     await waitFor(() => expect(mocks.consume).toHaveBeenCalledTimes(1));
-    mocks.consume.mockResolvedValueOnce({ count: 2, name: null });
+    mocks.consume.mockResolvedValueOnce({
+      count: 2,
+      name: null,
+      permissions: null,
+      hasPermissionExpansion: false,
+    });
     act(() => mocks.listener?.());
     await waitFor(() => expect(mocks.translate).toHaveBeenCalledWith(
       'settings.ghosts.market.upgradeNotice.multiple',
       { count: 2 },
     ));
+  });
+
+  it('single expansion notice translates and names new permissions', async () => {
+    mocks.translate.mockImplementation((key: string, args?: Record<string, string>) =>
+      args ? `${key}:${JSON.stringify(args)}` : key,
+    );
+    mocks.consume.mockResolvedValueOnce({
+      count: 1,
+      name: 'Team Plugin',
+      permissions: [
+        { key: 'networkHost:api.example.com', labelKey: 'networkHost', labelArgs: { host: 'api.example.com' } },
+      ],
+      hasPermissionExpansion: true,
+    });
+    renderHook(() => usePluginUpgradeNoticeToast());
+    await waitFor(() => expect(mocks.toastInfo).toHaveBeenCalledTimes(1));
+    expect(mocks.translate).toHaveBeenCalledWith('settings.ghosts.perm.networkHost', {
+      host: 'api.example.com',
+    });
+    expect(mocks.translate).toHaveBeenCalledWith(
+      'settings.ghosts.market.upgradeNotice.singleWithPermissions',
+      expect.objectContaining({ name: 'Team Plugin', permissions: expect.stringContaining('networkHost') }),
+    );
+  });
+
+  it('multiple expansion notice uses aggregated copy', async () => {
+    mocks.consume.mockResolvedValueOnce({
+      count: 2,
+      name: null,
+      permissions: null,
+      hasPermissionExpansion: true,
+    });
+    renderHook(() => usePluginUpgradeNoticeToast());
+    await waitFor(() => expect(mocks.toastInfo).toHaveBeenCalledTimes(1));
+    expect(mocks.translate).toHaveBeenCalledWith(
+      'settings.ghosts.market.upgradeNotice.multipleWithPermissions',
+      { count: 2 },
+    );
   });
 });

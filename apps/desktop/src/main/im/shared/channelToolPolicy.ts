@@ -28,6 +28,11 @@ function record(value: unknown): Record<string, unknown> | null {
  */
 const DESTRUCTIVE_INNER_NAME_RE = /(?:^|_)(?:merge|system_write|overwrite)(?:_|$)/i;
 
+function isOpaqueWriteToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'file_change' || normalized === 'permissions';
+}
+
 /** 一个待判定的内层调用:动作名 + 供 shell 命令检查的入参对象。 */
 interface InnerCall {
   name: string;
@@ -111,14 +116,12 @@ export function channelForceConfirmToolCall(toolName: string, input: unknown): b
 
   // 2. 包装 / 二级分派的内层动作。
   for (const inner of unwrapInnerCalls(toolName, input)) {
-    if (
-      DESTRUCTIVE_INNER_NAME_RE.test(inner.name)
-    ) {
+    if (isOpaqueWriteToolName(inner.name) || DESTRUCTIVE_INNER_NAME_RE.test(inner.name)) {
       return true;
     }
   }
 
   // 3. Codex 不透明写:fileChangeApproval 不带 patch 正文,permissions 升权可授权
   //    不透明写入 —— 保守地强制确认,而不是自动放行一次可能的删除。
-  return toolName === 'file_change' || toolName === 'permissions';
+  return isOpaqueWriteToolName(toolName);
 }

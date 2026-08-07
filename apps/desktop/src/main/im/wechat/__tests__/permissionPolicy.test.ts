@@ -46,6 +46,19 @@ describe('personal WeChat turn permission policy', () => {
         },
       }),
     ).toBe(true);
+    expect(
+      policy.forceConfirmToolCall('mcp__cindy__call_tool', {
+        name: 'file_change',
+        args: { grantRoot: null },
+      }),
+    ).toBe(true);
+    expect(
+      policy.forceConfirmToolCall('mcp__cindy__ghost_call', {
+        ghost_id: 'files',
+        tool: 'permissions',
+        args: { permissions: { network: true } },
+      }),
+    ).toBe(true);
   });
 
   it('keeps read-only calls automatic but treats opaque Codex writes conservatively', () => {

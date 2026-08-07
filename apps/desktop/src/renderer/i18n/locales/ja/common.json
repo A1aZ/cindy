@@ -4254,6 +4254,9 @@
     "cacheLabel": "キャッシュ",
     "modelLabel": "モデル",
     "staleData": "データは {{minutes}} 分前に更新されました",
+    "paceTrendFast": "現在の平均使用ペースは速めです（おおよその傾向）",
+    "paceTrendNormal": "現在の平均使用ペースは通常です（おおよその傾向）",
+    "paceTrendSlow": "現在の平均使用ペースは遅めです（おおよその傾向）",
     "waiting": "Claude サブスクリプションの使用量は次のリクエスト完了後に更新されます。"
   },
   "usageDetails": {

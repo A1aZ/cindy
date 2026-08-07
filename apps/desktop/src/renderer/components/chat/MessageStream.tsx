@@ -218,8 +218,7 @@ import { useNavigationKeyListener } from './useNavigationKeyListener';
 import { suppressScrollbarActivation } from '@/lib/scrollbarAutoHide';
 import { collectAssistantTurnUsageDetails } from '@/lib/userTurnUsage';
 import type { TurnUsageDetails } from '../../../shared/turnUsageDetails';
-import { hasReviewableTurnChanges } from '../../../shared/turnChangeSet';
-import type { TurnChangeSetSummary } from '../../../shared/turnChangeSet';
+import { hasReviewableTurnChanges, type TurnChangeSetSummary } from '../../../shared/turnChangeSet';
 
 interface MessageStreamProps {
   /** Active session id — used to reset scroll state on session switch. */

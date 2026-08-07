@@ -1426,9 +1426,12 @@ async function validAnchorIds(sessionId: string, summaries: readonly TurnChangeS
 }
 
 /**
- * A zero-file entry whose only incomplete reason is 'turn-failed' carries no change
- * information (see persistPending). Earlier builds persisted such entries for every
- * failed turn; hide them on read so legacy sidecars self-heal without a migration.
+ * A zero-file entry whose incomplete reasons are at most 'turn-failed' carries no
+ * change information (see persistPending). Earlier builds persisted such entries for
+ * every failed turn; hide them on read so legacy sidecars self-heal without a
+ * migration. The reasons-empty shape is deliberately included: no build has ever
+ * persisted it (the write guard drops it), and if a corrupted sidecar produced one
+ * it would render an equally information-free "+0 -0" card, so it is hidden too.
  */
 function isEmptyFailedTurnEntry(summary: TurnChangeSetSummary): boolean {
   return summary.fileCount === 0

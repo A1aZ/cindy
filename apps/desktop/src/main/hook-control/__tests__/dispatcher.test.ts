@@ -34,6 +34,7 @@ import type { HookConnectionConfig } from '../store';
 const noopLog = { info: () => {}, warn: () => {} };
 
 const WS_DIR = path.resolve('/repos/xdmaker');
+const DIALOGUE_ROOT = path.resolve('/userdata/dialogues');
 
 const CONFIG: HookConnectionConfig = {
   id: 'conn-1',
@@ -43,6 +44,21 @@ const CONFIG: HookConnectionConfig = {
   workspaces: { xdmaker: WS_DIR },
   createdAt: 0,
 };
+
+function dialogueDep() {
+  const allocated: string[] = [];
+  return {
+    allocated,
+    dep: {
+      rootDir: () => DIALOGUE_ROOT,
+      allocateDir: async (sessionId: string) => {
+        const dir = path.join(DIALOGUE_ROOT, '2026-07-07', sessionId);
+        allocated.push(dir);
+        return dir;
+      },
+    },
+  };
+}
 
 /** 内存 binding(与文件实现同语义: 只存 externalKey -> sessionId)。 */
 function memoryBindings(): HookBindingStore {
@@ -83,8 +99,7 @@ function memoryTerminalLedger(): HookRequestLedger & { records: HookTerminalReco
     },
     markSent(connectionId, requestId) {
       const record = records.findLast(
-        (candidate) =>
-          candidate.connectionId === connectionId && candidate.requestId === requestId,
+        (candidate) => candidate.connectionId === connectionId && candidate.requestId === requestId,
       );
       if (!record) return false;
       record.delivery = 'sent';
@@ -163,11 +178,13 @@ async function tick(times = 10): Promise<void> {
 }
 
 function makeDispatcher(overrides?: {
+  getConnection?: HookDispatcherDeps['getConnection'];
   runner?: HookSessionRunner;
   bindings?: HookBindingStore;
   terminalLedger?: HookRequestLedger;
   config?: HookConnectionConfig | null;
   prepareWorktree?: HookDispatcherDeps['prepareWorktree'];
+  buildContextPrefix?: HookDispatcherDeps['buildContextPrefix'];
   dialogue?: HookDispatcherDeps['dialogue'];
   abortSession?: HookDispatcherDeps['abortSession'];
   subscribeUiContinuation?: HookDispatcherDeps['subscribeUiContinuation'];
@@ -181,11 +198,14 @@ function makeDispatcher(overrides?: {
   const fr = fakeRunner();
   const runner = overrides?.runner ?? fr.runner;
   const d = createHookDispatcher({
-    getConnection: () => (overrides?.config === undefined ? CONFIG : overrides.config),
+    getConnection:
+      overrides?.getConnection ??
+      (() => (overrides?.config === undefined ? CONFIG : overrides.config)),
     bindings,
     terminalLedger: overrides?.terminalLedger,
     runner,
     prepareWorktree: overrides?.prepareWorktree,
+    buildContextPrefix: overrides?.buildContextPrefix,
     dialogue: overrides?.dialogue,
     abortSession: overrides?.abortSession,
     subscribeUiContinuation: overrides?.subscribeUiContinuation,
@@ -401,6 +421,55 @@ describe('dispatcher 核心语义', () => {
       requestId: 'new-account',
       finalText: 'new account result',
     });
+  });
+
+  it('切账号清排队时不提交未受理群游标，并为已 queued 任务补 cancelled 终态', async () => {
+    const fr = fakeRunner();
+    const rollbacks: string[] = [];
+    let commitCount = 0;
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      buildContextPrefix: async () => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit: async () => {
+          commitCount += 1;
+          const label = `commit-${commitCount}`;
+          return {
+            rollback: async () => {
+              rollbacks.push(label);
+            },
+          };
+        },
+      }),
+    });
+    const c = collector();
+    const externalKey = 'telegram:group:bot:-900:9:g0';
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'running', externalKey }), c.send);
+    await tick();
+    await fr.calls[0]?.onProviderAccepted?.();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'queued-1', externalKey }), c.send);
+    await tick();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'queued-2', externalKey }), c.send);
+    await tick();
+
+    expect(c.ofType('task.ack').map((message) => message.payload.result)).toEqual([
+      'accepted',
+      'queued',
+      'queued',
+    ]);
+    const draining = d.deactivateAccount();
+    fr.finish({ finalText: '旧账号任务' });
+    await draining;
+
+    expect(commitCount).toBe(1);
+    expect(rollbacks).toEqual([]);
+    expect(
+      c.ofType('turn.end').map((message) => [message.payload.requestId, message.payload.status]),
+    ).toEqual([
+      ['queued-1', 'cancelled'],
+      ['queued-2', 'cancelled'],
+    ]);
   });
 
   it('收口期间的重新激活会被后到的关闭请求作废', async () => {
@@ -1109,12 +1178,11 @@ describe('dispatcher 核心语义', () => {
     });
   });
 
-  it('接管: session 存在且在白名单内 -> 复用并重绑; 不存在/越界分别拒绝', async () => {
+  it('接管: 可用 session 在白名单内则复用并重绑, 越界仍拒绝', async () => {
     const fr = fakeRunner({
       sessions: {
         'sess-in': { workingDir: path.join(WS_DIR, 'sub'), usable: true },
         'sess-out': { workingDir: path.resolve('/private/dir'), usable: true },
-        'sess-dead': { workingDir: WS_DIR, usable: false },
       },
     });
     const bindings = memoryBindings();
@@ -1137,10 +1205,461 @@ describe('dispatcher 核心语义', () => {
       result: 'rejected',
       reason: 'workspace_not_allowed',
     });
+  });
+
+  it('接管白名单按 inspect 完成后的当前映射判定', async () => {
+    let currentConfig: HookConnectionConfig = CONFIG;
+    const fr = fakeRunner({
+      sessions: {
+        'sess-in': { workingDir: path.join(WS_DIR, 'sub'), usable: true },
+      },
+    });
+    const runner: HookSessionRunner = {
+      ...fr.runner,
+      inspect: async (id) => {
+        const info = await fr.runner.inspect(id);
+        currentConfig = {
+          ...CONFIG,
+          workspaces: { moved: path.resolve('/repos/moved') },
+        };
+        return info;
+      },
+    };
+    const { d } = makeDispatcher({ runner, getConnection: () => currentConfig });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'sess-in', workspace: null }), c.send);
+    await tick();
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      result: 'rejected',
+      reason: 'workspace_not_allowed',
+    });
+  });
+
+  it('连续携带同一失效 sessionId 时复用第一次替换出的 session 并排队', async () => {
+    const dd = dialogueDep();
+    const fr = fakeRunner();
+    const externalKey = 'team-slack:C1:repeat-stale';
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
 
     d.handleDispatch(
       'conn-1',
-      dispatch({ requestId: 'r3', sessionId: 'ghost', workspace: null }),
+      dispatch({ requestId: 'stale-1', externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+    const firstSessionId = fr.calls[0]?.sessionId;
+    expect(firstSessionId).toBeTruthy();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-2', externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+
+    expect(fr.calls).toHaveLength(1);
+    expect(c.ofType('task.ack').map((message) => message.payload)).toEqual([
+      expect.objectContaining({
+        requestId: 'stale-1',
+        result: 'accepted',
+        sessionId: firstSessionId,
+      }),
+      expect.objectContaining({
+        requestId: 'stale-2',
+        result: 'queued',
+        sessionId: firstSessionId,
+      }),
+    ]);
+
+    fr.finish();
+    await tick();
+    expect(fr.calls).toHaveLength(2);
+    expect(fr.calls[1]?.sessionId).toBe(firstSessionId);
+    fr.finish();
+  });
+
+  it('首轮 replacement 未落库时显式带回 ACK sessionId: 复用同一任务并排队', async () => {
+    const dd = dialogueDep();
+    const fr = fakeRunner();
+    const externalKey = 'team-slack:C1:ack-replacement';
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-first', externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+    const replacementSessionId = c.last('task.ack')?.payload.sessionId;
+    expect(replacementSessionId).toEqual(expect.any(String));
+    expect(fr.calls).toHaveLength(1);
+
+    // server 已接受首条 ACK，随后把 replacement id 当作显式目标带回；首轮仍在
+    // agent.startSession、尚未落库，所以 inspect 会返回 null。
+    d.handleDispatch(
+      'conn-1',
+      dispatch({
+        requestId: 'replacement-follow-up',
+        externalKey,
+        sessionId: replacementSessionId,
+        workspace: null,
+      }),
+      c.send,
+    );
+    await tick();
+
+    expect(fr.calls).toHaveLength(1);
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      requestId: 'replacement-follow-up',
+      result: 'queued',
+      sessionId: replacementSessionId,
+    });
+
+    fr.finish({ finalText: 'first done' });
+    await tick();
+    expect(fr.calls).toHaveLength(2);
+    expect(fr.calls[1]?.sessionId).toBe(replacementSessionId);
+    fr.finish({ finalText: 'follow-up done' });
+  });
+
+  it('首轮 replacement 未落库但目录已撤权: 显式带回 ACK sessionId 仍拒绝', async () => {
+    const config: HookConnectionConfig = { ...CONFIG, workspaces: { xdmaker: WS_DIR } };
+    const bindings = memoryBindings();
+    const fr = fakeRunner();
+    const externalKey = 'team-slack:C1:ack-replacement-revoked';
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, config });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-first', externalKey, sessionId: 'ghost' }),
+      c.send,
+    );
+    await tick();
+    const replacementSessionId = c.last('task.ack')?.payload.sessionId;
+    expect(replacementSessionId).toEqual(expect.any(String));
+    expect(fr.calls).toHaveLength(1);
+
+    config.workspaces = {};
+    d.handleDispatch(
+      'conn-1',
+      dispatch({
+        requestId: 'replacement-revoked',
+        externalKey,
+        sessionId: replacementSessionId,
+        workspace: null,
+      }),
+      c.send,
+    );
+    await tick();
+
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      requestId: 'replacement-revoked',
+      result: 'rejected',
+      reason: 'workspace_not_allowed',
+    });
+    expect(fr.calls).toHaveLength(1);
+    expect(bindings.get('conn-1', externalKey)).toBe(replacementSessionId);
+    fr.finish();
+  });
+
+  it('首轮 replacement 已落库且不可投递: 显式带回 ACK sessionId 时重新创建任务', async () => {
+    const dd = dialogueDep();
+    const sessions: Record<string, { workingDir: string; usable: boolean }> = {};
+    const fr = fakeRunner({ sessions });
+    const externalKey = 'team-slack:C1:ack-replacement-unusable';
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-first', externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+    const replacementSessionId = c.last('task.ack')?.payload.sessionId;
+    expect(replacementSessionId).toEqual(expect.any(String));
+    sessions[replacementSessionId!] = {
+      workingDir: path.join(DIALOGUE_ROOT, '2026-07-07', replacementSessionId!),
+      usable: false,
+    };
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({
+        requestId: 'replacement-unusable',
+        externalKey,
+        sessionId: replacementSessionId,
+        workspace: null,
+      }),
+      c.send,
+    );
+    await tick();
+
+    expect(fr.calls).toHaveLength(2);
+    expect(fr.calls[1]?.sessionId).not.toBe(replacementSessionId);
+    expect(fr.calls[1]).toMatchObject({ isNew: true });
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      requestId: 'replacement-unusable',
+      result: 'accepted',
+      sessionId: fr.calls[1]?.sessionId,
+    });
+
+    fr.finish();
+    fr.finish();
+  });
+
+  it('显式接管检查失败时拒绝且保留原 binding, 不静默创建替代任务', async () => {
+    const dd = dialogueDep();
+    const bindings = memoryBindings();
+    const externalKey = 'team-slack:C1:inspect-error';
+    bindings.set('conn-1', externalKey, 'existing-binding');
+    const fr = fakeRunner();
+    const runner: HookSessionRunner = {
+      ...fr.runner,
+      inspect: async () => {
+        throw new Error('database unavailable');
+      },
+    };
+    const { d } = makeDispatcher({ runner, bindings, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'inspect-error', externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      requestId: 'inspect-error',
+      result: 'rejected',
+      reason: 'invalid',
+    });
+    expect(bindings.get('conn-1', externalKey)).toBe('existing-binding');
+    expect(fr.calls).toHaveLength(0);
+  });
+
+  it('同一消息线切换到另一个失效 sessionId 时创建新的替代 session', async () => {
+    const dd = dialogueDep();
+    const fr = fakeRunner();
+    const externalKey = 'team-slack:C1:different-stale';
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-a', externalKey, sessionId: 'ghost-a', workspace: null }),
+      c.send,
+    );
+    await tick();
+    const firstSessionId = fr.calls[0]?.sessionId;
+    expect(firstSessionId).toBeTruthy();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'stale-b', externalKey, sessionId: 'ghost-b', workspace: null }),
+      c.send,
+    );
+    await tick();
+
+    expect(fr.calls).toHaveLength(2);
+    const secondSessionId = fr.calls[1]?.sessionId;
+    expect(secondSessionId).toBeTruthy();
+    expect(secondSessionId).not.toBe(firstSessionId);
+    expect(c.ofType('task.ack').map((message) => message.payload)).toEqual([
+      expect.objectContaining({
+        requestId: 'stale-a',
+        result: 'accepted',
+        sessionId: firstSessionId,
+      }),
+      expect.objectContaining({
+        requestId: 'stale-b',
+        result: 'accepted',
+        sessionId: secondSessionId,
+      }),
+    ]);
+
+    fr.finish();
+    fr.finish();
+  });
+
+  it('显式目标不存在且无可用提示时静默新建 chat，并替换当前及旧版 binding', async () => {
+    const dd = dialogueDep();
+    const bindings = memoryBindings();
+    const externalKey = 'team-slack:C1:fresh';
+    bindings.set('slack:account-one:slack', externalKey, 'unrelated-current');
+    bindings.set('slack', externalKey, 'unrelated-legacy');
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({ runner: fr.runner, bindings, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch(
+      'slack:account-one:slack',
+      dispatch({ externalKey, sessionId: 'ghost', workspace: null }),
+      c.send,
+    );
+    await tick();
+    const ack = c.last('task.ack')!.payload;
+    expect(ack.result).toBe('accepted');
+    expect(ack.sessionId).not.toBe('ghost');
+    expect(ack.sessionId).not.toBe('unrelated-current');
+    expect(bindings.get('slack:account-one:slack', externalKey)).toBe(ack.sessionId);
+    expect(bindings.get('slack', externalKey)).toBeNull();
+    expect(fr.calls[0]).toMatchObject({
+      sessionId: ack.sessionId,
+      isNew: true,
+      workspaceKind: 'dialogue',
+      workspaceAlias: 'chat',
+    });
+    expect(dd.allocated).toEqual([fr.calls[0].workingDir]);
+
+    fr.finish({ finalText: 'fresh result' });
+    await tick();
+    expect(c.last('turn.end')?.payload.finalText).toBe('fresh result');
+  });
+
+  it('已归档项目任务只沿旧路径推断工作区，并从映射根创建新 worktree', async () => {
+    const nestedRoot = path.join(WS_DIR, 'nested-project');
+    const staleWorktree = path.join(nestedRoot, '.xdt-worktrees', 'archived-session');
+    const freshWorktree = path.join(nestedRoot, '.xdt-worktrees', 'fresh-session');
+    const config = {
+      ...CONFIG,
+      workspaces: { broad: WS_DIR, nested: nestedRoot },
+    };
+    const fr = fakeRunner({
+      sessions: {
+        'sess-dead': { workingDir: staleWorktree, usable: false },
+      },
+    });
+    const prepareWorktree = vi.fn(async (dir: string): Promise<PrepareWorktreeResult> => ({
+      ok: true,
+      sessionId: 'fresh-session',
+      path: path.join(dir, '.xdt-worktrees', 'fresh-session'),
+      cleanup: async () => {},
+    }));
+    const { d } = makeDispatcher({ runner: fr.runner, config, prepareWorktree });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'sess-dead', workspace: null }), c.send);
+    await tick();
+    expect(prepareWorktree).toHaveBeenCalledWith(nestedRoot);
+    expect(c.last('task.ack')?.payload).toMatchObject({
+      result: 'accepted',
+      sessionId: 'fresh-session',
+    });
+    expect(fr.calls[0]).toMatchObject({
+      isNew: true,
+      workingDir: freshWorktree,
+      workspaceAlias: 'nested',
+    });
+    expect(fr.calls[0].workingDir).not.toBe(staleWorktree);
+    fr.finish();
+  });
+
+  it('已归档 dialogue 任务分配新的对话目录', async () => {
+    const dd = dialogueDep();
+    const staleDir = path.join(DIALOGUE_ROOT, '2026-07-01', 'sess-dead');
+    const fr = fakeRunner({
+      sessions: {
+        'sess-dead': { workingDir: staleDir, usable: false },
+      },
+    });
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'sess-dead', workspace: 'xdmaker' }), c.send);
+    await tick();
+    expect(c.last('task.ack')?.payload.result).toBe('accepted');
+    expect(fr.calls[0]).toMatchObject({
+      isNew: true,
+      workspaceKind: 'dialogue',
+      workspaceAlias: 'chat',
+    });
+    expect(fr.calls[0].workingDir).not.toBe(staleDir);
+    expect(dd.allocated).toEqual([fr.calls[0].workingDir]);
+    fr.finish();
+  });
+
+  it('显式目标不存在时可使用仍有效的 workspace 提示新建任务', async () => {
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({ runner: fr.runner });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'ghost', workspace: 'xdmaker' }), c.send);
+    await tick();
+    expect(c.last('task.ack')?.payload.result).toBe('accepted');
+    expect(fr.calls[0]).toMatchObject({
+      isNew: true,
+      workingDir: WS_DIR,
+      workspaceAlias: 'xdmaker',
+    });
+    fr.finish();
+  });
+
+  it('显式目标不存在且 workspace 提示无效时安全回退 chat', async () => {
+    const dd = dialogueDep();
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({ runner: fr.runner, dialogue: dd.dep });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'ghost', workspace: 'nope' }), c.send);
+    await tick();
+    expect(c.last('task.ack')?.payload.result).toBe('accepted');
+    expect(fr.calls[0]).toMatchObject({
+      isNew: true,
+      workspaceKind: 'dialogue',
+      workspaceAlias: 'chat',
+    });
+    expect(isPathWithin(DIALOGUE_ROOT, fr.calls[0].workingDir)).toBe(true);
+    fr.finish();
+  });
+
+  it('不可用目标在映射外时只回退受管 chat，绝不运行旧路径', async () => {
+    const dd = dialogueDep();
+    const staleDir = path.resolve('/private/archived-worktree');
+    const fr = fakeRunner({
+      sessions: {
+        'sess-dead': { workingDir: staleDir, usable: false },
+      },
+    });
+    const prepareWorktree = vi.fn();
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      dialogue: dd.dep,
+      prepareWorktree,
+    });
+    const c = collector();
+
+    d.handleDispatch('conn-1', dispatch({ sessionId: 'sess-dead', workspace: 'nope' }), c.send);
+    await tick();
+    expect(c.last('task.ack')?.payload.result).toBe('accepted');
+    expect(fr.calls[0]).toMatchObject({
+      isNew: true,
+      workspaceKind: 'dialogue',
+      workspaceAlias: 'chat',
+    });
+    expect(fr.calls[0].workingDir).not.toBe(staleDir);
+    expect(isPathWithin(DIALOGUE_ROOT, fr.calls[0].workingDir)).toBe(true);
+    expect(prepareWorktree).not.toHaveBeenCalled();
+    fr.finish();
+  });
+
+  it('旧宿主没有 dialogue 且无安全落点时保留 session_not_found 与原 binding', async () => {
+    const bindings = memoryBindings();
+    const externalKey = 'team-slack:C1:legacy-host';
+    bindings.set('slack:account-one:slack', externalKey, 'unrelated-current');
+    bindings.set('slack', externalKey, 'unrelated-legacy');
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({ runner: fr.runner, bindings });
+    const c = collector();
+
+    d.handleDispatch(
+      'slack:account-one:slack',
+      dispatch({ externalKey, sessionId: 'ghost', workspace: null }),
       c.send,
     );
     await tick();
@@ -1148,17 +1667,8 @@ describe('dispatcher 核心语义', () => {
       result: 'rejected',
       reason: 'session_not_found',
     });
-
-    d.handleDispatch(
-      'conn-1',
-      dispatch({ requestId: 'r4', sessionId: 'sess-dead', workspace: null }),
-      c.send,
-    );
-    await tick();
-    expect(c.last('task.ack')?.payload).toMatchObject({
-      result: 'rejected',
-      reason: 'session_not_found',
-    });
+    expect(bindings.get('slack:account-one:slack', externalKey)).toBe('unrelated-current');
+    expect(bindings.get('slack', externalKey)).toBe('unrelated-legacy');
   });
 
   it('busy 排队: 第二条 queued(位置0), 第一条收口后自动 drain, FIFO', async () => {
@@ -1196,6 +1706,197 @@ describe('dispatcher 核心语义', () => {
     ]);
   });
 
+  it('排队任务只在真正开始时 commit, 取消队列前项不丢后项上下文', async () => {
+    const fr = fakeRunner();
+    const committed: string[] = [];
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      buildContextPrefix: async (payload) => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit: () => {
+          committed.push(payload.requestId);
+        },
+      }),
+    });
+    const c = collector();
+    const externalKey = 'telegram:group:bot:-900:9:g0';
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'running', externalKey }), c.send);
+    await tick();
+    await fr.calls[0]?.onProviderAccepted?.();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'queued-a', externalKey }), c.send);
+    await tick();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'queued-b', externalKey }), c.send);
+    await tick();
+
+    expect(committed).toEqual(['running']);
+    d.cancel('conn-1', 'queued-a');
+    await tick();
+    expect(committed).toEqual(['running']);
+
+    fr.finish({ finalText: 'running done' });
+    await tick();
+    expect(fr.calls).toHaveLength(2);
+    await fr.calls[1]?.onProviderAccepted?.();
+    expect(committed).toEqual(['running', 'queued-b']);
+
+    fr.finish({ finalText: 'queued b done' });
+    await tick();
+    expect(c.ofType('turn.end').map((m) => m.payload.requestId)).toEqual([
+      'queued-a',
+      'running',
+      'queued-b',
+    ]);
+  });
+
+  it('已出队但 provider 未受理的群任务在切账号时 cancelled 且不提交游标', async () => {
+    const committed: string[] = [];
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      abortSession: async () => undefined,
+      buildContextPrefix: async (payload) => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit: async () => {
+          committed.push(payload.requestId);
+        },
+      }),
+    });
+    const c = collector();
+    const externalKey = 'telegram:group:bot:-900:9:g0';
+
+    d.handleDispatch('conn-1', dispatch({ requestId: 'running', externalKey }), c.send);
+    await tick();
+    await fr.calls[0]?.onProviderAccepted?.();
+    d.handleDispatch('conn-1', dispatch({ requestId: 'queued-inflight', externalKey }), c.send);
+    await tick();
+
+    fr.finish({ finalText: 'running done' });
+    await tick();
+    expect(fr.calls).toHaveLength(2);
+    expect(committed).toEqual(['running']);
+
+    const draining = d.deactivateAccount();
+    await tick();
+    expect(
+      c.ofType('turn.end').find((message) => message.payload.requestId === 'queued-inflight')
+        ?.payload,
+    ).toMatchObject({ status: 'cancelled' });
+
+    fr.finish({ finalText: 'must not cross account boundary' });
+    await draining;
+    expect(committed).toEqual(['running']);
+  });
+
+  it('直达任务 provider 未受理前账号失效不提交游标，并补 cancelled 终态', async () => {
+    const rollback = vi.fn(async () => undefined);
+    const commit = vi.fn(async () => ({ rollback }));
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      abortSession: async () => undefined,
+      buildContextPrefix: async () => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit,
+      }),
+    });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'not-accepted', externalKey: 'telegram:group:bot:-900:9:g0' }),
+      c.send,
+    );
+    await tick();
+    expect(c.last('task.ack')?.payload.result).toBe('accepted');
+    expect(fr.calls).toHaveLength(1);
+    expect(commit).not.toHaveBeenCalled();
+
+    const draining = d.deactivateAccount();
+    fr.finish({ finalText: '旧账号任务' });
+    await draining;
+
+    expect(commit).not.toHaveBeenCalled();
+    expect(rollback).not.toHaveBeenCalled();
+    expect(
+      c.ofType('turn.end').filter((message) => message.payload.requestId === 'not-accepted'),
+    ).toHaveLength(1);
+    expect(
+      c.ofType('turn.end').find((message) => message.payload.requestId === 'not-accepted')?.payload,
+    ).toMatchObject({ status: 'cancelled' });
+  });
+
+  it('直达任务只在 provider 受理后提交一次群游标', async () => {
+    const commit = vi.fn(async () => undefined);
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      buildContextPrefix: async () => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit,
+      }),
+    });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'accepted-once', externalKey: 'telegram:group:bot:-900:9:g0' }),
+      c.send,
+    );
+    await tick();
+    expect(commit).not.toHaveBeenCalled();
+
+    await fr.calls[0]?.onProviderAccepted?.();
+    expect(commit).toHaveBeenCalledTimes(1);
+
+    fr.finish({ finalText: 'done' });
+    await tick();
+    expect(c.last('turn.end')?.payload).toMatchObject({
+      requestId: 'accepted-once',
+      status: 'ok',
+    });
+  });
+
+  it('provider 受理后的群游标持久化失败不反转任务，旧游标留待下次重带', async () => {
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const commit = vi.fn(async () => {
+      throw new Error('database is readonly');
+    });
+    const fr = fakeRunner();
+    const { d } = makeDispatcher({
+      runner: fr.runner,
+      log,
+      buildContextPrefix: async () => ({
+        prefix: '<group_chat_context>背景</group_chat_context>',
+        commit,
+      }),
+    });
+    const c = collector();
+
+    d.handleDispatch(
+      'conn-1',
+      dispatch({ requestId: 'persist-failed', externalKey: 'telegram:group:bot:-900:9:g0' }),
+      c.send,
+    );
+    await tick();
+    await fr.calls[0]?.onProviderAccepted?.();
+
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'group context cursor commit failed after provider acceptance: requestId=persist-failed',
+      ),
+    );
+
+    fr.finish({ finalText: '磁盘失败也要继续' });
+    await tick();
+    expect(c.last('turn.end')?.payload).toMatchObject({
+      requestId: 'persist-failed',
+      status: 'ok',
+      finalText: '磁盘失败也要继续',
+    });
+  });
+
   it('runner 失败 -> turn.end status=error 且 errorMessage 非空', async () => {
     const fr = fakeRunner();
     const { d } = makeDispatcher({ runner: fr.runner });
@@ -1218,7 +1919,8 @@ describe('dispatcher 核心语义', () => {
     // 同一同步 tick 内连发(ws 同步 emit 场景) —— 修复前会各开一个新 session
     d.handleDispatch('conn-1', dispatch({ requestId: 'r1' }), c.send);
     d.handleDispatch('conn-1', dispatch({ requestId: 'r2' }), c.send);
-    await tick(6);
+    // 会话定位与受理链含多个微任务；多给几轮，不改变 FIFO 语义。
+    await tick(30);
 
     const acks = c.ofType('task.ack').map((m) => m.payload);
     expect(acks).toHaveLength(2);
@@ -1348,11 +2050,7 @@ describe('dispatcher 核心语义', () => {
 
     const { d } = makeDispatcher({ runner: fr.runner, terminalLedger });
     const c = collector();
-    d.handleDispatch(
-      'conn-1',
-      dispatch({ requestId: 'pending-replay-fallback' }),
-      c.send,
-    );
+    d.handleDispatch('conn-1', dispatch({ requestId: 'pending-replay-fallback' }), c.send);
     await tick();
 
     expect(fr.calls).toHaveLength(0);
@@ -1526,7 +2224,8 @@ describe('dispatcher 核心语义', () => {
     await tick();
     for (let i = 0; i < 21; i++) {
       d.handleDispatch('conn-1', dispatch({ requestId: `q${i}` }), c.send);
-      await tick();
+      // 会话定位与受理链含多个微任务；多给几轮，不改变 FIFO 语义。
+      await tick(30);
     }
     const acks = c.ofType('task.ack').map((m) => m.payload);
     const overflow = acks[acks.length - 1];
@@ -2546,22 +3245,6 @@ describe('interaction.decision 路由', () => {
 });
 
 describe('内置「对话」伪目录(chat 保留别名)', () => {
-  const DIALOGUE_ROOT = path.resolve('/userdata/dialogues');
-  function dialogueDep() {
-    const allocated: string[] = [];
-    return {
-      allocated,
-      dep: {
-        rootDir: () => DIALOGUE_ROOT,
-        allocateDir: async (sessionId: string) => {
-          const dir = path.join(DIALOGUE_ROOT, '2026-07-07', sessionId);
-          allocated.push(dir);
-          return dir;
-        },
-      },
-    };
-  }
-
   it('chat 新建: 分配对话目录、不做 worktree、workspaceKind=dialogue、ack accepted', async () => {
     const dd = dialogueDep();
     const prepareWorktree = vi.fn();

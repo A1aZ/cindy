@@ -16,3 +16,4 @@ import './terminal';
 import './review';
 import './orca-workers';
 import './background-tasks';
+import './resource-usage';

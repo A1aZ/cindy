@@ -20,6 +20,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Activity,
   FolderTree,
   Globe,
   Smartphone,
@@ -128,6 +129,7 @@ const KIND_ICON: Record<BuiltinTabKindId, LucideIcon> = {
   review: GitPullRequestArrow,
   'orca-workers': UsersRound,
   'background-tasks': ListTodo,
+  'resource-usage': Activity,
 };
 
 const KIND_LABEL_KEY: Record<BuiltinTabKindId, string> = {
@@ -138,6 +140,7 @@ const KIND_LABEL_KEY: Record<BuiltinTabKindId, string> = {
   review: 'rightSidebar.tabs.kinds.review',
   'orca-workers': 'rightSidebar.tabs.kinds.collaboration',
   'background-tasks': 'rightSidebar.tabs.kinds.backgroundTasks',
+  'resource-usage': 'rightSidebar.tabs.kinds.resourceUsage',
 };
 
 /**

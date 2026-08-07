@@ -37,6 +37,10 @@ import {
 } from './devStartupStatus';
 import { prewarmMacComputerPermissionGuideHelper } from './computer-permission-guide/MacComputerPermissionGuideNativeHost.js';
 import { handleOpenChatGPTApp } from './chatgpt-app.js';
+import {
+  waitForTurnChangeSetActions,
+  waitForTurnChangeSetPersistence,
+} from './turn-change-set/store.js';
 
 const PROCESS_STARTED_AT_MS = Date.now();
 // Official Linux binaries total hundreds of MB. Keep one shared deadline for
@@ -78,6 +82,8 @@ app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
 // Windows 上 codex app-server 子进程不会随父死 → 残留孤儿, 持有 binary 文件锁,
 // 用户下次启动时撞 EBUSY / 端口占用 (anthropic-compat-proxy 等)。
 async function shutdownMaker(): Promise<void> {
+  // Do not terminate Main while one workspace patch command is settling.
+  await waitForTurnChangeSetActions();
   // 退出前先把 onClose 重副作用(worktree stash/删除、临时附件清理)一刀切抑制掉:
   // shutdown 触发的批量 onClose 是 fire-and-forget 的,不会被 await,worktree 回收会
   // 和 app.exit 竞争——可能 stash 了一半进程就没了,留下半拆的 worktree。退出期不做
@@ -98,6 +104,9 @@ async function shutdownMaker(): Promise<void> {
     // 注意: getMakerCore 未就绪时抛的是 sync error, await m.shutdown() 也走这里。
     console.error('[main] maker.shutdown failed (or not ready):', err);
   }
+  // Session shutdown may enqueue the final turn sidecar write. Drain only
+  // after maker.shutdown() has closed every session and emitted those writes.
+  await waitForTurnChangeSetPersistence();
   WorktreePool.parkAll();
 }
 
@@ -315,6 +324,7 @@ import {
 } from './voice-input/powerReleaseNotifier';
 import { reapClaudeOrphansSync } from './claude-orphan-reaper';
 import { startAgentProcessPriorityWatcher } from './agent-process-priority';
+import { registerProcessMonitorIpc } from './process-monitor/ipc.js';
 import { initAppBadgeService, clearAllSessionAttention } from './appBadgeService';
 import { initNotificationService } from './notificationService';
 import { initWecomGroupNotificationIpc } from './wecomGroupNotification';
@@ -329,6 +339,7 @@ import { isIpcError } from '../shared/ipc-errors';
 import { readFileBytesForPreview } from './fileReadBytes.js';
 import { initHeartbeatService } from './heartbeatService';
 import { initAnalyticsSettingsService, noteAuthColdStartState } from './analyticsSettingsService';
+import { initLogUploadService, scheduleStartupBackfill } from './log-upload';
 import { WindowManualDragController } from './windowManualDrag';
 // 设备互联(跨设备远程控制): relay 连接 host + 开关/设备列表 IPC
 import {
@@ -403,6 +414,7 @@ import {
   waitForInitialCustomMcpRefresh,
 } from './maker-host/index.js';
 import { createDynamicMaker } from './maker-host/dynamic-maker.js';
+import { ensureBundledRipgrepReady } from './maker-host/runtime-configs.js';
 import {
   ensureActiveCatalogLoaded,
   refreshCustomProvidersIntoCatalog,
@@ -984,9 +996,16 @@ import {
 initLogger();
 const dbClientLog = createLogger('DbClient');
 const authBoundaryLog = createLogger('auth-boundary');
+// 镜像缓存清理失败会把 MirrorCachePurgeError 的 root/remaining 本地缓存路径写进日志,单独一个
+// 子 scope,好让日志上报的来源白名单把它排除掉(auth-boundary 根只留不带路径的服务停止诊断)。
+const authBoundaryPurgeLog = createLogger('auth-boundary:mirror-cache-purge');
 // 主窗 renderer 加载失败可观测性 + dev 启动看门狗(见 renderer-boot-guard.ts 顶部注释)。
 const rendererGuardLog = createLogger('renderer-guard');
 const safeStorageReadLog = createLogger('safe-storage:read');
+// 渲染进程 console 转发**单独一个 scope**:内容是渲染进程的任意 console 正文,可能带用户
+// 内容,因此不进日志上报的来源白名单;而 renderer-guard 的加载失败信号无用户内容、白屏排查
+// 必需,是放行的。两者不能共用 scope,详见 console-message 监听处的注释。
+const rendererConsoleLog = createLogger('renderer-console');
 const updatePresentationLog = createLogger('update-presentation');
 const voicePowerBroadcastLog = createLogger('voice-input-power');
 let rendererBootGuard: RendererBootGuard | null = null;
@@ -1012,6 +1031,9 @@ async function ensureLifecycleDbClient(userId: string) {
 }
 
 async function teardownAuthAccountBoundary(reason: string): Promise<void> {
+  // The boundary is already marked pending by every caller. New actions now
+  // fail closed; drain an action that crossed the boundary before closing its DB.
+  await waitForTurnChangeSetActions();
   skillhubAutoSyncService.cancelInFlight();
   // Custom provider routes are owner-scoped but the active catalog is process-global.
   // Clear synchronously at the boundary; the next owner's tracked readiness reloads them
@@ -1028,19 +1050,19 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   try {
     await drainPurgeQueue();
   } catch (err) {
-    authBoundaryLog.warn(`drain mirror cache purge queue on ${reason} failed:`, err);
+    authBoundaryPurgeLog.warn(`drain mirror cache purge queue on ${reason} failed:`, err);
   }
   try {
     await getMirrorCache().clearAll();
   } catch (err) {
-    authBoundaryLog.error(`clear device-link mirror cache on ${reason} failed:`, err);
+    authBoundaryPurgeLog.error(`clear device-link mirror cache on ${reason} failed:`, err);
     if (err instanceof MirrorCachePurgeError) {
       // remaining / barriers / tombstones 三样都要带上(同 IPC 侧的 queuePurgeRetry):
       // 只传 root 的话,补删成功后队列既不知道该补自增哪个作废计数,也不会退役 `_account`
       // 墓碑 —— 墓碑一直挂着就等于这个 owner 的缓存读被永久压住(review: codex P1)。
       await enqueuePurge(err.root, err.remaining, err.barriers, err.tombstones).catch(
         (enqueueErr: unknown) => {
-          authBoundaryLog.error('failed to enqueue mirror cache purge retry:', enqueueErr);
+          authBoundaryPurgeLog.error('failed to enqueue mirror cache purge retry:', enqueueErr);
         },
       );
     }
@@ -1053,7 +1075,9 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   } catch (err) {
     authBoundaryLog.error(`stopHookControlAccount on ${reason} failed (non-fatal):`, err);
   } finally {
-    resetHookControlOwnerBoundary();
+    // Auth/runtime boundaries keep durable group cursors for a later relogin;
+    // only explicit account deletion is a data-removal boundary.
+    resetHookControlOwnerBoundary({ clearPersisted: reason === 'account-deletion' });
   }
   // Every Ghost sandbox can retain live OAuth, subscription, or in-memory
   // state. Stop them before changing owners; resident Ghosts are recreated by
@@ -1358,6 +1382,11 @@ registerBrowserBackendIpc();
 // ipcMain.handle 在 app ready 前注册也有效。
 registerAppShortcutIpc();
 registerAppearanceSettingsIpc();
+
+// ── 资源用量面板 IPC ─────────────────────────────────────────────────
+// 订阅驱动采样(面板不开不采样),interval 已 unref 不拖退出;terminate 只认
+// 本产品 spawn 的 agent 根进程。见 main/process-monitor/。
+registerProcessMonitorIpc();
 
 // ── 主界面布局树存储 IPC──────────────────────────────────────────────
 // renderer 首帧 sendSync 拉布局(规则 7 无跳变)、set/reset 写路径、changed
@@ -2557,6 +2586,9 @@ const createWindow = () => {
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     if (!app.isPackaged) markDesktopDevWindowReady();
+    // 日志上报的启动补传:采集 + 脱敏是同步的重活,必须让主窗口先出来(内部再延迟 15s,
+    // 避开首帧的 IO 争用)。没有待补传标记时是零成本 no-op。
+    scheduleStartupBackfill();
     // `open` may successfully start the updated process while macOS refuses
     // frontmost activation at the lock/login window. Presentation is not an
     // installation-health signal; retain a one-shot focus grant for unlock.
@@ -2667,13 +2699,20 @@ const createWindow = () => {
   });
   mainWindow.webContents.on('console-message', (details) => {
     // error 恒记;warning 仅 dev(react dev 告警等噪音不进生产日志)。截断防超长堆栈刷屏。
+    //
+    // ⚠️ 这里刻意用 `renderer-console` 而不是 `renderer-guard`:转发的是**渲染进程任意
+    // console 正文**,可能带用户内容(功能代码的 console.error 里的消息文本、搜索词、
+    // 第三方库打出的 payload、React 错误边界里的 props)。日志上报的来源白名单只放行
+    // `renderer-guard`(preload-error / 加载失败 / boot guard —— 白屏排查必需且无用户内容),
+    // `renderer-console` 不在名单内。两者混用同一个 scope 会让整类渲染进程内容跟着放行,
+    // 违反「渲染进程转发的日志整类丢弃」(docs/dev-rules/log-upload-and-redaction.md §1.2)。
     const { level, message, lineNumber, sourceId } = details;
     if (level === 'error') {
-      rendererGuardLog.error(
+      rendererConsoleLog.error(
         `renderer console.error ${sourceId}:${lineNumber} ${message.slice(0, 2000)}`,
       );
     } else if (level === 'warning' && !app.isPackaged) {
-      rendererGuardLog.warn(
+      rendererConsoleLog.warn(
         `renderer console.warn ${sourceId}:${lineNumber} ${message.slice(0, 2000)}`,
       );
     }
@@ -4338,6 +4377,29 @@ const registerIpcHandlers = () => {
       };
     }
 
+    // ── Phase 2.5: bundled ripgrep(必需,codex spawn env 与 file-browser 搜索的
+    // 硬依赖)──────────────────────────────────────────────────────────────
+    // 探测已惰性化(import 不再触发,issue #1956),启动期 fail-fast 落在 splash
+    // 这里:缺失时与 claude/codex binary 缺失同一体验(splash failed + 可重试,
+    // dev 补跑 pnpm install:ripgrep 后重试即过),而不是 import 期硬崩、也不是
+    // maker:* IPC 静默不注册的降级启动。memoize 后此处探测近零成本。
+    try {
+      ensureBundledRipgrepReady();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      // splash 失败态 UI 不渲染 error 字段,这行日志是缺 rg 时唯一的诊断出口
+      // (补装指引在 message 里);与下方 pi 失败的 console.warn 同一既有惯例。
+      console.error('[bootstrap-electron] bundled ripgrep check failed:', message);
+      return {
+        claudeCode: { status: 'passed' as const, path: claudeRes.path },
+        codex: { status: 'passed' as const, path: codexRes.path },
+        pi: { status: 'skipped' as const },
+        ripgrep: { status: 'failed' as const, error: message },
+        allPassed: false,
+        platform,
+      };
+    }
+
     // ── Phase 3: pi 段（可选,失败不阻塞启动）──────────────────────────────────
     // broadcastFailure: false —— pi 下载失败不能把 splash 打进失败态;静默禁用
     // 本次 pi 注册，Claude Code / Codex 与 Cindy 本身仍照常可用。
@@ -4385,6 +4447,7 @@ const registerIpcHandlers = () => {
       claudeCode: { status: 'passed' as const, path: claudeRes.path },
       codex: { status: 'passed' as const, path: codexRes.path },
       pi: piInfo,
+      ripgrep: { status: 'passed' as const },
       allPassed: true,
       platform,
     };
@@ -6551,6 +6614,10 @@ app.on('ready', async () => {
   // handler 还没注册的话那次 invoke 会 reject,而它是 fail closed 的 —— 已同意
   // 的用户会一直不上报,直到手动去设置里拨一下开关。
   initAnalyticsSettingsService();
+  // 日志上报:同样必须在 createWindow 之前注册 —— 设置页一挂载就 invoke
+  // log-upload:settings-get 决定入口可用性;更重要的是崩溃即时路径要在
+  // onFatalShutdown 上就位,否则 createWindow 之后立刻崩的那一次拿不到标记。
+  initLogUploadService();
   startupWindowCreationAllowed = true;
   createWindow();
   // 预热仅服务 dev macOS，延迟执行避免和启动关键路径争用 CPU；失败由入口内部吞掉。

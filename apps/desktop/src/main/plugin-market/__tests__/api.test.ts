@@ -5,9 +5,14 @@ import { PluginMarketApi } from '../api';
 const logger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
+const serverApi = vi.hoisted(() => ({ serverApiFetch: vi.fn() }));
 
 vi.mock('../../logger.js', () => ({
   createLogger: () => ({ info: vi.fn(), warn: logger.warn, error: vi.fn() }),
+}));
+vi.mock('../../serverApiClient.js', () => ({ serverApiFetch: serverApi.serverApiFetch }));
+vi.mock('../../clientEndpointsService.js', () => ({
+  getClientEndpoint: () => 'https://plugins.example.com',
 }));
 
 const PLUGIN_A = `c${'a'.repeat(24)}`;
@@ -53,6 +58,18 @@ function pagedFetcher(...pages: Array<Record<string, unknown>>) {
   return fetcher;
 }
 
+describe('PluginMarketApi 默认 fetcher 的日志隐私', () => {
+  it('⚠️ 默认 fetcher 走 serverApiFetch 时带 redactErrorDetails + logLabel（不外泄插件 ID）', async () => {
+    // 2026-08-06 review：plugin 的 path 带用户装的插件 ID,4xx/5xx 日志不得外泄它。
+    serverApi.serverApiFetch.mockReset();
+    serverApi.serverApiFetch.mockRejectedValueOnce(new Error('nope'));
+    await expect(new PluginMarketApi().detail('cindy-github')).rejects.toBeTruthy();
+    const opts = serverApi.serverApiFetch.mock.calls[0]?.[1] ?? {};
+    expect(opts.redactErrorDetails).toBe(true);
+    expect(opts.logLabel).toBe('/api/plugins');
+  });
+});
+
 describe('PluginMarketApi', () => {
   it('paginates with opaque cursors and deduplicates repeated ids', async () => {
     const fetcher = pagedFetcher(
@@ -62,13 +79,16 @@ describe('PluginMarketApi', () => {
         nextCursor: null,
       },
     );
-    const api = new PluginMarketApi(fetcher);
+    const api = new PluginMarketApi(fetcher, () => '1.2.3');
 
     await expect(api.listAll()).resolves.toMatchObject({
       plugins: [{ id: PLUGIN_A }, { id: PLUGIN_B }],
       removals: [],
     });
     expect(fetcher.mock.calls[1]?.[0]).toContain(`cursor=${PLUGIN_A}`);
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      headers: { 'x-cindy-version': '1.2.3' },
+    });
   });
 
   it('deduplicates removals by pluginId across pages keeping the first-seen notice', async () => {

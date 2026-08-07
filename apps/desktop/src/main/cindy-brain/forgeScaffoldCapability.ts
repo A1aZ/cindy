@@ -28,9 +28,15 @@ export function writeForgeScaffoldWithStableParent(
     stdio: ['ignore', 'pipe', 'pipe'],
     serviceName: 'cindy-forge-scaffold',
   });
+  const maxStderrBytes = 16 * 1024;
   const stderrChunks: Buffer[] = [];
+  let stderrBytes = 0;
   child.stderr?.on('data', (chunk: Buffer) => {
-    if (Buffer.concat(stderrChunks).length < 16 * 1024) stderrChunks.push(Buffer.from(chunk));
+    const remaining = maxStderrBytes - stderrBytes;
+    if (remaining <= 0) return;
+    const bounded = Buffer.from(chunk.subarray(0, remaining));
+    stderrChunks.push(bounded);
+    stderrBytes += bounded.length;
   });
 
   return new Promise((resolve) => {
@@ -83,10 +89,9 @@ export function writeForgeScaffoldWithStableParent(
       });
     });
     child.on('exit', (code: number) => {
-      if (!settled && code !== 0) {
-        const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-        finish({ ok: false, errorCode: 'INTERNAL', message: stderr || `Forge scaffold worker exited (${code})` });
-      }
+      if (settled) return;
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+      finish({ ok: false, errorCode: 'INTERNAL', message: stderr || `Forge scaffold worker exited (${code})` });
     });
   });
 }

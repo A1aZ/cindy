@@ -1087,6 +1087,49 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
   });
 
+  it('integration: snapshot upgrades an organization defaultInstall release and consumes its notice', async () => {
+    const item = summary({
+      scope: 'organization',
+      organizationId: 'org-1',
+      defaultInstall: true,
+      currentRelease: {
+        ...summary().currentRelease,
+        id: 'release-2',
+        version: '2.0.0',
+      },
+    });
+    const oldManifest = manifest(item.ghostId, '1.0.0');
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-integration-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+    runtime.ghosts = [{ manifest: oldManifest, dir: installDir, enabled: true }];
+
+    const h = harness([item]);
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+      manifestDigest: ghostManifestDigest(oldManifest),
+    });
+    const upgraded = manifest(item.ghostId, '2.0.0');
+    runtime.install.mockImplementationOnce(async () => {
+      const ghost = { manifest: upgraded, dir: installDir, enabled: true };
+      runtime.ghosts = [ghost];
+      return ghost;
+    });
+
+    await expect(h.service.snapshot()).resolves.toMatchObject({
+      items: [{ installState: 'installed', version: '2.0.0' }],
+      unavailableReason: null,
+    });
+    expect(h.api.listAll).toHaveBeenCalledTimes(1);
+    expect(h.api.detail).toHaveBeenCalledWith(item.id);
+    expect(h.api.download).toHaveBeenCalledWith(item.id, 'release-2');
+    expect(runtime.install).toHaveBeenCalledTimes(1);
+    expect(h.service.consumeUpgradeNotice()).toEqual({ count: 1, name: 'Test Plugin' });
+    expect(h.service.consumeUpgradeNotice()).toBeNull();
+  });
+
   it('skips organization upgrades that expand catalog permissions and keeps update-available', async () => {
     const item = summary({
       scope: 'organization',

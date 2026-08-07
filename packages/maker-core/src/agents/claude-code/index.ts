@@ -3016,6 +3016,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     }
 
     const canceledBridgeQueries = new WeakSet<Query>();
+    // Despite the historical name, this per-query fence also marks an old
+    // Query closed after user Stop cancels an awaiting continuation. Its
+    // forward loop must silently discard any buffered tail until the next
+    // fresh Query is installed.
     // Rewind commit 会 close 当前 Query,但它的 forward loop 可能晚于下一次 send 的
     // rebuild 完成才退出。pendingRewindTo 是共享状态,会在新 q 接管后清掉;旧 q 自身仍
     // 需要一个 per-query 标记,否则迟到的 stream_end/abort 会被误判为当前新 q 的崩溃。
@@ -4874,6 +4878,26 @@ export class ClaudeCodeAgent extends BaseAgent {
             // the provider tasks themselves.
             retireContinuationTasks(cancelledContinuation);
             emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
+            // The provider may already have queued the automatic continuation
+            // on this Query. Close it now so that cancellation fences process
+            // termination and canUseTool callbacks as well as event output;
+            // the next send will perform the existing fresh-query rebuild.
+            const cancelledQuery = q;
+            canceledBridgeQueries.add(cancelledQuery);
+            inputQueue.clear();
+            try {
+              inputQueue.end();
+            } catch (e) {
+              log.warn('user_stop continuation cancellation: inputQueue.end threw', { error: String(e) });
+            }
+            try {
+              cancelledQuery.close();
+            } catch (e) {
+              log.warn('user_stop continuation cancellation: q.close threw', { error: String(e) });
+            }
+            runningBackgroundTasks.clear();
+            terminalBackgroundTaskIds.clear();
+            turnInFlight = false;
           }
         } catch (e) {
           // interrupt 失败 → 无 result 消费标记, 回收防误抑制(同 watchdog)。

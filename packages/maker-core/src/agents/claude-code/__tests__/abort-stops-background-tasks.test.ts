@@ -650,6 +650,68 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('user Stop 取消 awaiting claim 后立即关闭旧 Query，并在下一次 send 使用 fresh Query', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit(turnResult('waiting for background task'));
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    stream.emit(taskNotification('task-agent', 'completed'));
+    await waitFor(() => taskEvents(events).length >= 2, 'task completion observed');
+    expect(handle.isTurnRunning?.()).toBe(true);
+
+    await handle.abort();
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+    // 下一条 send 的 rebuildCancelledContinuationQuery 会对已关闭 stale Query
+    // 再做一次幂等 close；这里锁定的是 send 之前立即发生的第一次 close。
+    const closeCallsBeforeSend = fakeQuery.close.mock.calls.length;
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await handle.send({ type: 'user', content: 'fresh turn after cancellation' });
+    expect(fakeQueries).toHaveLength(2);
+    expect(closeCallsBeforeSend).toBe(1);
+    expect(fakeQueries[1]?.close).not.toHaveBeenCalled();
+    stream.emit(turnResult('fresh turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'fresh turn terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'fresh turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('立即关闭后旧 Query 的迟到 assistant/result 不会产生新事件或终态', async () => {
+    const { handle, stream, streams, events, fakeQuery } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit(turnResult('waiting for background task'));
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    stream.emit(taskNotification('task-agent', 'completed'));
+    await waitFor(() => taskEvents(events).length >= 2, 'task completion observed');
+
+    await handle.abort();
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    const eventCountAfterCancellation = events.length;
+
+    streams[0]?.emit(assistantText('late old-query assistant'));
+    streams[0]?.emit(turnResult('late old-query result'));
+    streams[0]?.emit(taskProgress('task-agent'));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(events).toHaveLength(eventCountAfterCancellation);
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.beginTurnContinuationWait?.(1)).toBeNull();
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('interrupt ACK 前真实 continuation done 先到时不再追加 synthetic 终态', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 

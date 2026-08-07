@@ -135,6 +135,8 @@ interface SessionSharePreview {
   fidelity: 'full' | 'partial' | 'db-only';
   messageCount: number;
   mediaCount: number;
+  /** 协同包携带的 Worker 会话数;普通包为 0。 */
+  orcaWorkerCount: number;
 }
 
 interface LocalSshKeyInfo {
@@ -4134,6 +4136,8 @@ interface ElectronAPI {
             fidelity: 'full' | 'partial' | 'db-only';
             missingTranscripts: string[];
             mediaMissing: number;
+            /** 随包携带的协同 Worker 会话数(非协同包为 0)。 */
+            orcaWorkers: number;
           }
         | { status: 'canceled' }
         | { status: 'oversize'; totalBytes: number; mediaBytes: number; limitBytes: number }
@@ -4166,6 +4170,8 @@ interface ElectronAPI {
         sessionId: string;
         fidelity: 'full' | 'partial' | 'db-only';
         notes: string[];
+        /** 随协同包一并导入的 Worker 会话数;普通包为 0。 */
+        orcaWorkers: number;
       }>;
       cancel: (request: { draftId: string }) => Promise<{ ok: boolean }>;
       classifyPath: (request: {

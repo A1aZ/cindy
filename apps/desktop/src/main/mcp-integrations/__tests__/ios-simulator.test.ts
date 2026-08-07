@@ -979,14 +979,26 @@ describe('iOS Simulator host', () => {
     );
     const resultBundlePath = path.join(projectRoot, `CindyBuild-${crypto.randomUUID()}.xcresult`);
     await mkdir(resultBundlePath, { recursive: true });
-    let finishBuild!: (
-      result: Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>,
-    ) => void;
+    let buildSignal: AbortSignal | undefined;
     const build = vi.fn(
-      () =>
-        new Promise<Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>>((resolve) => {
-          finishBuild = resolve;
-        }),
+      (input: Parameters<IOSSimulatorProjectBuilderAdapter['build']>[0]) =>
+        new Promise<Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>>(
+          (_, reject) => {
+            buildSignal = input.signal;
+            input.signal?.addEventListener('abort', () => {
+              reject(
+                new IOSSimulatorProjectBuildError(
+                  'APP_BUILD_FAILED',
+                  'cancelled',
+                  '',
+                  resultBundlePath,
+                  false,
+                  true,
+                ),
+              );
+            });
+          },
+        ),
     );
     const host = createIOSSimulatorHost({
       actor,
@@ -1008,17 +1020,9 @@ describe('iOS Simulator host', () => {
     );
     await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
 
-    await host.dispose();
-    finishBuild({
-      kind: 'xcode-project',
-      worktreeRoot: instance.worktreeRoot,
-      projectRoot: path.join(instance.worktreeRoot, 'ios'),
-      containerPath: path.join(instance.worktreeRoot, 'ios', 'Demo.xcodeproj'),
-      scheme: 'Demo',
-      appPath: path.join(instance.worktreeRoot, 'build', 'Demo.app'),
-      resultBundlePath,
-      buildLogTail: 'BUILD SUCCEEDED',
-    });
+    const disposePromise = host.dispose();
+    await vi.waitFor(() => expect(buildSignal?.aborted).toBe(true));
+    await disposePromise;
 
     try {
       await expect(callPromise).resolves.toMatchObject({
@@ -1030,6 +1034,75 @@ describe('iOS Simulator host', () => {
     } finally {
       await rm(projectRoot, { recursive: true, force: true });
     }
+  });
+
+  it('synchronously aborts active builds before updater force-quit', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'force-quit-build-session',
+      worktreeRoot: '/tmp/force-quit-build-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    let buildSignal: AbortSignal | undefined;
+    const build = vi.fn(
+      (input: Parameters<IOSSimulatorProjectBuilderAdapter['build']>[0]) =>
+        new Promise<Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>>(
+          (_, reject) => {
+            buildSignal = input.signal;
+            input.signal?.addEventListener('abort', () => {
+              reject(
+                new IOSSimulatorProjectBuildError(
+                  'APP_BUILD_FAILED',
+                  'cancelled',
+                  '',
+                  null,
+                  false,
+                  true,
+                ),
+              );
+            });
+          },
+        ),
+    );
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      projectBuilder: { build },
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => localSession('force-quit-build-session')),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('force-quit-build-session', instance.instanceId);
+    const callPromise = host.callTool(
+      'build_app',
+      {
+        instanceId: current.instanceId,
+        generation: current.generation,
+        leaseId: current.lease.id,
+      },
+      { sessionId: 'force-quit-build-session', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(build).toHaveBeenCalledOnce());
+
+    host.abortOperationsForExit();
+
+    expect(buildSignal?.aborted).toBe(true);
+    await expect(callPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await host.dispose();
   });
 
   it('rejects SSH sessions before touching local Apple tooling', async () => {
@@ -1063,6 +1136,49 @@ describe('iOS Simulator host', () => {
       errorCode: 'IOS_SIMULATOR_DISABLED',
     });
     await expect(host.getStatus('session-a')).resolves.toMatchObject({ ok: true });
+  });
+
+  it('evaluates the MCP plugin gate against the current project workdir', async () => {
+    const host = createIOSSimulatorHost({
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    const isIOSSimulatorEnabled = vi.fn(
+      (context?: { workingDir?: string }) => context?.workingDir === '/projects/enabled-ios',
+    );
+    const deps = getIOSSimulatorMcpDeps({ host, isIOSSimulatorEnabled });
+
+    await expect(
+      deps.callTool(
+        'check_environment',
+        {},
+        {
+          sessionId: 'session-a',
+          workingDir: '/projects/enabled-ios',
+        },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      deps.callTool(
+        'check_environment',
+        {},
+        {
+          sessionId: 'session-a',
+          workingDir: '/projects/disabled-ios',
+        },
+      ),
+    ).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'IOS_SIMULATOR_DISABLED',
+    });
+    expect(isIOSSimulatorEnabled).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ workingDir: '/projects/enabled-ios' }),
+    );
+    expect(isIOSSimulatorEnabled).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ workingDir: '/projects/disabled-ios' }),
+    );
   });
 
   it('does not expose WDA endpoints or raw driver errors to callers', async () => {
@@ -1341,11 +1457,11 @@ describe('iOS Simulator host', () => {
     };
 
     await expect(
-      host.setViewerVisibility('session-a', initialRoute, true, 'h264'),
+      host.setViewerVisibility('session-a', initialRoute, true, 'h264', undefined, 17),
     ).resolves.toMatchObject({ ok: true });
     h264FramePump.clear.mockClear();
     now += 101;
-    await expect(host.getLatestFrame('session-a', initialRoute)).resolves.toMatchObject({
+    await expect(host.getLatestFrame('session-a', initialRoute, 17)).resolves.toMatchObject({
       ok: false,
       errorCode: 'LEASE_EXPIRED',
     });
@@ -1734,12 +1850,12 @@ describe('iOS Simulator host', () => {
       leaseId: reconciled.lease.id,
     };
 
-    await expect(host.setViewerVisibility('session-a', route, true, 'h264')).resolves.toMatchObject(
-      {
-        ok: true,
-        data: { stream: { state: 'connecting' } },
-      },
-    );
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 77),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { stream: { state: 'connecting' } },
+    });
     expect(h264FramePump.setVisible).toHaveBeenCalledWith(
       expect.objectContaining({
         instanceId: started.instanceId,
@@ -1765,6 +1881,15 @@ describe('iOS Simulator host', () => {
         reasonCode: 'native-probe-pending',
       },
     });
+
+    h264FramePump.snapshot.mockClear();
+    framePump.snapshot.mockClear();
+    await expect(host.getLatestFrame('session-a', route, 88)).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+    expect(h264FramePump.snapshot).not.toHaveBeenCalled();
+    expect(framePump.snapshot).not.toHaveBeenCalled();
 
     const fallbackHighProfile = {
       framesPerSecond: 20,
@@ -1911,7 +2036,7 @@ describe('iOS Simulator host', () => {
       generation: afterOrientation.generation,
       leaseId: afterOrientation.lease.id,
     };
-    await expect(host.getLatestFrame('session-a', latestRoute)).resolves.toMatchObject({
+    await expect(host.getLatestFrame('session-a', latestRoute, 77)).resolves.toMatchObject({
       ok: true,
       data: { stream: { state: 'connecting' } },
     });
@@ -1932,7 +2057,7 @@ describe('iOS Simulator host', () => {
     });
 
     jpegSnapshot = { ...jpegSnapshot, state: 'reconnecting' };
-    await expect(host.getLatestFrame('session-a', latestRoute)).resolves.toMatchObject({
+    await expect(host.getLatestFrame('session-a', latestRoute, 77)).resolves.toMatchObject({
       ok: true,
       data: { stream: { state: 'reconnecting' } },
     });
@@ -1962,12 +2087,12 @@ describe('iOS Simulator host', () => {
       }),
     );
 
-    await expect(host.setViewerVisibility('session-a', latestRoute, false)).resolves.toMatchObject({
-      ok: true,
-    });
+    await expect(
+      host.setViewerVisibility('session-a', latestRoute, false, 'jpeg', undefined, 77),
+    ).resolves.toMatchObject({ ok: true });
     nativeAvailable = false;
     await expect(
-      host.setViewerVisibility('session-a', latestRoute, true, 'h264'),
+      host.setViewerVisibility('session-a', latestRoute, true, 'h264', undefined, 77),
     ).resolves.toMatchObject({ ok: true });
     expect(driverManager.recoverNativeSidecar).toHaveBeenLastCalledWith(started.instanceId, {
       rearm: true,
@@ -2132,6 +2257,109 @@ describe('iOS Simulator host', () => {
     });
     expect(framePump.setVisible).not.toHaveBeenCalled();
     expect(driverManager.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not unblock builds when an external shutdown overlaps instance activation', async () => {
+    const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
+    const environment = { ...READY_REPORT, devices: [shutdownDevice] };
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => shutdownDevice),
+      bootExact: vi.fn(async () => ({ ...READY_REPORT.devices[0]!, state: 'Booted' })),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: shutdownDevice,
+    });
+    const running = {
+      instanceId: attached.instanceId,
+      simulatorUdid: attached.simulatorUdid,
+      pid: 42,
+      driver: {},
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance;
+    const driverManager = {
+      get: vi.fn(() => null),
+      start: vi.fn(async () => running),
+      stop: vi.fn(async () => undefined),
+    };
+    const build = vi.fn<IOSSimulatorProjectBuilderAdapter['build']>();
+    const resourceScheduler = testResourceScheduler();
+    const runStart = resourceScheduler.runStart.bind(resourceScheduler);
+    let signalActivationReady!: () => void;
+    const activationReady = new Promise<void>((resolve) => {
+      signalActivationReady = resolve;
+    });
+    let releaseActivation!: () => void;
+    const activationGate = new Promise<void>((resolve) => {
+      releaseActivation = resolve;
+    });
+    vi.spyOn(resourceScheduler, 'runStart').mockImplementation(async (instanceId, task) => {
+      const result = await runStart(instanceId, task);
+      signalActivationReady();
+      await activationGate;
+      return result;
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      projectBuilder: { build },
+      runtime: { inspect: vi.fn(async () => environment) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resourceScheduler,
+      deviceLivenessIntervalMs: 0,
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('session-a', attached.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
+
+    const startPromise = host.callTool('start_instance', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await activationReady;
+    await expect(host.getStatus('session-a')).resolves.toMatchObject({
+      ok: true,
+      instances: [
+        {
+          instanceId: attached.instanceId,
+          lifecycleState: 'stopped',
+        },
+      ],
+    });
+    releaseActivation();
+
+    await expect(startPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    const stopped = actor.getOwned('session-a', attached.instanceId);
+    await expect(
+      host.callTool(
+        'build_app',
+        {
+          instanceId: stopped.instanceId,
+          generation: stopped.generation,
+          leaseId: stopped.lease.id,
+        },
+        { sessionId: 'session-a', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'MUTATION_CANCELLED' });
+    expect(build).not.toHaveBeenCalled();
+    await host.dispose();
   });
 
   it('ignores an exact-device probe that finishes after the binding is detached', async () => {
@@ -2605,7 +2833,7 @@ describe('iOS Simulator host', () => {
     expect(requestViewerFocus).not.toHaveBeenCalled();
   });
 
-  it('releases scheduler capacity when a ready preexisting device is detached', async () => {
+  it('cancels an active build before detaching and releasing scheduler capacity', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
       bootExact: vi.fn(),
@@ -2617,8 +2845,38 @@ describe('iOS Simulator host', () => {
       store: new IOSSimulatorOwnershipStore(),
       lifecycle,
     });
+    const actorStart = vi.spyOn(actor, 'start');
+    const actorAttach = vi.spyOn(actor, 'attachSerialized');
     const resourceScheduler = testResourceScheduler();
     let running: WdaRunningInstance | null = null;
+    let buildSignal: AbortSignal | undefined;
+    let finishDetachCleanup!: () => void;
+    const discardInstance = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDetachCleanup = resolve;
+        }),
+    );
+    const build = vi.fn(
+      (input: Parameters<IOSSimulatorProjectBuilderAdapter['build']>[0]) =>
+        new Promise<Awaited<ReturnType<IOSSimulatorProjectBuilderAdapter['build']>>>(
+          (_, reject) => {
+            buildSignal = input.signal;
+            input.signal?.addEventListener('abort', () => {
+              reject(
+                new IOSSimulatorProjectBuildError(
+                  'APP_BUILD_FAILED',
+                  'cancelled',
+                  '',
+                  null,
+                  false,
+                  true,
+                ),
+              );
+            });
+          },
+        ),
+    );
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
@@ -2626,6 +2884,7 @@ describe('iOS Simulator host', () => {
       getSession: vi.fn(async (id) => localSession(id)),
       resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
       resourceScheduler,
+      projectBuilder: { build },
       driverManager: {
         get: vi.fn(() => running),
         start: vi.fn(async (options) => {
@@ -2643,7 +2902,7 @@ describe('iOS Simulator host', () => {
         }),
       },
       mediaCapture: {
-        discardInstance: vi.fn(async () => undefined),
+        discardInstance,
       } as unknown as IOSSimulatorMediaCaptureAdapter,
     });
 
@@ -2654,21 +2913,119 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true });
+    actorAttach.mockClear();
     expect(resourceScheduler.runningCount()).toBe(1);
     const attached = actor.list('session-a')[0]!;
+    const route = {
+      instanceId: attached.instanceId,
+      generation: attached.generation,
+      leaseId: attached.lease.id,
+    };
+    const buildPromise = host.callTool('build_app', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await vi.waitFor(() => expect(build).toHaveBeenCalledOnce());
 
+    const detachPromise = host.callTool('detach_device', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await vi.waitFor(() => expect(discardInstance).toHaveBeenCalledOnce());
+    expect(buildSignal?.aborted).toBe(true);
+    await expect(buildPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(
+      host.callTool('build_app', route, { sessionId: 'session-a', origin: 'user' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'MUTATION_CANCELLED' });
+    await expect(
+      host.callTool('start_instance', route, { sessionId: 'session-a', origin: 'user' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'MUTATION_CANCELLED' });
     await expect(
       host.callTool(
-        'detach_device',
-        {
-          instanceId: attached.instanceId,
-          generation: attached.generation,
-          leaseId: attached.lease.id,
-        },
+        'attach_device',
+        { udid: READY_REPORT.devices[0]!.udid },
         { sessionId: 'session-a', origin: 'user' },
       ),
-    ).resolves.toMatchObject({ ok: true });
+    ).resolves.toMatchObject({ ok: false, errorCode: 'MUTATION_CANCELLED' });
+    expect(build).toHaveBeenCalledOnce();
+    expect(actorStart).not.toHaveBeenCalled();
+    expect(actorAttach).not.toHaveBeenCalled();
+    finishDetachCleanup();
+    await expect(detachPromise).resolves.toMatchObject({ ok: true });
     expect(resourceScheduler.runningCount()).toBe(0);
+    await host.dispose();
+  });
+
+  it('does not register a build after its task is archived at the reconcile boundary', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    let armed = false;
+    let armedReadCount = 0;
+    let signalFinalRead!: () => void;
+    const finalReadStarted = new Promise<void>((resolve) => {
+      signalFinalRead = resolve;
+    });
+    let resolveFinalRead!: () => void;
+    const getSession = vi.fn(async (id: string) => {
+      const snapshot = { ...localSession(id), status: 'active' as const };
+      if (armed && ++armedReadCount === 2) {
+        signalFinalRead();
+        await new Promise<void>((resolve) => {
+          resolveFinalRead = resolve;
+        });
+      }
+      return snapshot;
+    });
+    const build = vi.fn<IOSSimulatorProjectBuilderAdapter['build']>();
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession,
+      projectBuilder: { build },
+    });
+
+    await host.reconcileOwnership();
+    const instance = actor.list('session-a')[0]!;
+    armed = true;
+
+    const buildPromise = host.callTool(
+      'build_app',
+      {
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+      },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await finalReadStarted;
+    await host.cancelSessionOperations('session-a');
+    resolveFinalRead();
+
+    await expect(buildPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    expect(build).not.toHaveBeenCalled();
     await host.dispose();
   });
 

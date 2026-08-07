@@ -17,6 +17,10 @@ import {
 import { ingestMedia, type IngestedMedia } from '../cindy-media/ingest.js';
 
 const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
+// cindy-media currently ingests buffers. Keep the recording ceiling bounded to
+// an amount Electron Main can safely validate and ingest without multi-GiB
+// allocations; larger captures are rejected before readFile.
+const MAX_BUFFERED_RECORDING_BYTES = 128 * 1024 * 1024;
 const RECORDING_STOP_TIMEOUT_MS = 5_000;
 
 export interface IOSSimulatorMediaCaptureOptions {
@@ -238,7 +242,7 @@ export class IOSSimulatorMediaCapture {
     try {
       await terminateRecordingProcess(recording.process);
       const info = await stat(recording.videoPath);
-      if (!info.isFile() || info.size <= 0 || info.size > 2 * 1024 ** 3) {
+      if (!info.isFile() || info.size <= 0 || info.size > MAX_BUFFERED_RECORDING_BYTES) {
         throw new IOSSimulatorInstanceError(
           'RECORDING_FAILED',
           'The simulator recording is invalid.',

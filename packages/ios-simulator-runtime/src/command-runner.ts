@@ -12,6 +12,9 @@ const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner {
   return {
     run(command, args, options = {}): Promise<IOSSimulatorCommandResult> {
+      if (options.signal?.aborted) {
+        return Promise.resolve({ stdout: "", stderr: "", exitCode: null });
+      }
       return new Promise((resolve) => {
         const child = spawn(command, [...args], {
           cwd: options.cwd,
@@ -30,6 +33,14 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         let outputTruncated = false;
         let settled = false;
         let timedOut = false;
+        let aborted = false;
+        const onAbort = () => {
+          if (settled || aborted) return;
+          aborted = true;
+          killProcessTree(child, "SIGKILL");
+        };
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        if (options.signal?.aborted) onAbort();
         let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
           timedOut = true;
           killProcessTree(child);
@@ -42,6 +53,7 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
           if (settled) return;
           settled = true;
           if (timer) clearTimeout(timer);
+          options.signal?.removeEventListener("abort", onAbort);
           const stdout = chunks
             .filter((chunk) => chunk.stream === "stdout")
             .map((chunk) => chunk.bytes);
@@ -80,21 +92,26 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
         child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
         child.once("error", () => finish(null));
-        child.once("close", (code) => finish(timedOut ? null : code));
+        child.once("close", (code) =>
+          finish(timedOut || aborted ? null : code),
+        );
       });
     },
   };
 }
 
-function killProcessTree(child: ReturnType<typeof spawn>): void {
+function killProcessTree(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals = "SIGTERM",
+): void {
   if (!child.pid) return;
   if (process.platform !== "win32") {
     try {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-child.pid, signal);
       return;
     } catch {
       // The process group may have already exited; fall back to the child.
     }
   }
-  child.kill("SIGTERM");
+  child.kill(signal);
 }

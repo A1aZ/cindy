@@ -449,7 +449,10 @@ import {
 } from './sessionReferenceResolver.js';
 import { registerAndroidAutomationHandlers } from './androidHandlers.js';
 import { registerIOSSimulatorHandlers } from './iosSimulatorHandlers.js';
-import { reconcileIOSSimulatorOwnership } from '../mcp-integrations/ios-simulator.js';
+import {
+  cancelIOSSimulatorSessionOperations,
+  reconcileIOSSimulatorOwnership,
+} from '../mcp-integrations/ios-simulator.js';
 import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
 import { runAcceptedCallback } from './acceptedCallbackRunner.js';
@@ -7936,6 +7939,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         // active + hidden + unreachable —— 一并补齐归档,否则它们会成为永远触达不到的孤儿 worker。
         const orphanedWorkerSessionIds = await reconcileInactiveTeamWorkersForLead(leadSessionId);
         for (const sid of orphanedWorkerSessionIds) {
+          await cancelIOSSimulatorSessionOperations(sid);
           cleanupPendingInteractionsForSession(sid, 'orca_disable');
           forgetKnownOrcaWorkerSession(sid);
         }
@@ -7956,6 +7960,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const activeWorkers = workers.filter((w) => w.teamId === team.id);
     for (const w of activeWorkers) {
       orcaTeamService.clearAutoBridgeState(w.sessionId);
+      await cancelIOSSimulatorSessionOperations(w.sessionId);
       const sess = maker.getSession(w.sessionId);
       if (sess) {
         try {
@@ -7983,7 +7988,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     await markTeamEnded(team.id, 'completed');
     await markWorkersStatusByTeam(team.id, 'done');
-    await archiveWorkersByTeam(team.id);
+    const archivedWorkerSessionIds = await archiveWorkersByTeam(team.id);
+    await Promise.all(
+      archivedWorkerSessionIds.map((sessionId) =>
+        cancelIOSSimulatorSessionOperations(sessionId),
+      ),
+    );
 
     await clearLeadOrcaRoleState(leadSessionId);
 
@@ -8148,6 +8158,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     markWorkerIdleIfStatus,
     restoreWorkerDoneIfIdle,
+    cancelWorkerSessionOperations: cancelIOSSimulatorSessionOperations,
     closeWorkerSession: async (sessionId) => {
       const sess = maker.getSession(sessionId);
       if (sess) {
@@ -8435,12 +8446,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     },
     rollbackCreatedWorker: async ({ workerId, workerSessionId }) => {
+      await cancelIOSSimulatorSessionOperations(workerSessionId);
       const workerSession = maker.getSession(workerSessionId);
       if (workerSession) {
         await maker.closeSession(workerSessionId).catch(() => undefined);
       }
       forgetKnownOrcaWorkerSession(workerSessionId);
       await archiveSingleWorkerSession(workerSessionId).catch(() => undefined);
+      await cancelIOSSimulatorSessionOperations(workerSessionId);
       await removeWorker(workerId);
     },
     broadcastSessionCreated,

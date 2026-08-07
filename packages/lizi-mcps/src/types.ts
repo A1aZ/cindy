@@ -829,6 +829,8 @@ export type IOSSimulatorMcpToolName =
 
 export interface IOSSimulatorMcpCallContext {
   sessionId?: string;
+  /** Workdir bound by the Host for project-scoped capability policy. */
+  workingDir?: string;
   /** Host-internal origin. MCP transport always uses agent; renderer IPC uses user. */
   origin?: 'agent' | 'user';
 }

@@ -89,6 +89,7 @@ import {
   verifyIOSSimulatorSidecarDigest,
 } from './ios-simulator-artifact.js';
 import { resolveIOSSimulatorDesktopAdmissionPolicy } from './ios-simulator-admission.js';
+import { registerIOSSimulatorExitAbortHandler } from './ios-simulator-exit.js';
 import { compareIOSSimulatorPngBuffers, IOSSimulatorMediaCapture } from './ios-simulator-media.js';
 
 const logger = createLogger('mcp/cindy_ios_simulator');
@@ -182,6 +183,10 @@ export interface IOSSimulatorHostOptions {
 export interface IOSSimulatorHost {
   /** Stop host-owned WDA/recording resources without changing simulator ownership. */
   dispose(): Promise<void>;
+  /** Synchronously signal child process trees before updater force-quit bypasses async cleanup. */
+  abortOperationsForExit(): void;
+  /** Cancel build processes before a task is archived, deleted, or its worktree is recycled. */
+  cancelSessionOperations(sessionId: string): Promise<void>;
   reconcileOwnership(): Promise<void>;
   describeTools(sessionId: string): Promise<IOSSimulatorToolAvailabilityReport>;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
@@ -214,6 +219,7 @@ export interface IOSSimulatorHost {
   getLatestFrame(
     sessionId: string,
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+    viewerWebContentsId: number,
   ): Promise<IOSSimulatorHostResult>;
   setViewerStreamProfile(
     sessionId: string,
@@ -728,6 +734,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const pendingBuildDiagnosticRemoval = new Map<string, BuildDiagnosticRecord>();
   let buildResultBundlesReconciled = false;
   let buildResultBundlesReconcilePromise: Promise<void> | null = null;
+  type ActiveBuild = {
+    sessionId: string;
+    controller: AbortController;
+    settled: Promise<void>;
+    resolveSettled: () => void;
+  };
+  const activeBuilds = new Map<string, ActiveBuild>();
+  const sessionBuildAdmissionEpochs = new Map<string, number>();
+  const blockedBuildInstances = new Set<string>();
+  const instanceLifecycleBarriers = new Map<
+    string,
+    { epoch: number; pendingTeardowns: number }
+  >();
   const mediaCapture = options.mediaCapture ?? new IOSSimulatorMediaCapture();
   const visualBaselines = new Map<
     string,
@@ -803,6 +822,107 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     errorCode: 'IOS_SIMULATOR_HOST_ERROR',
     message: 'The iOS Simulator host is shutting down.',
   });
+  function beginBuild(instance: IOSSimulatorInstance, expectedSessionEpoch: number): ActiveBuild {
+    if (disposePromise) throw new IOSSimulatorHostDisposedError();
+    if ((sessionBuildAdmissionEpochs.get(instance.sessionId) ?? 0) !== expectedSessionEpoch) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The app build was cancelled because its Cindy task lifecycle changed.',
+        true,
+      );
+    }
+    if (blockedBuildInstances.has(instance.instanceId)) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The app build was cancelled because the simulator lifecycle is changing.',
+        true,
+      );
+    }
+    if (activeBuilds.has(instance.instanceId)) {
+      throw new IOSSimulatorInstanceError(
+        'DEVICE_BUSY',
+        'This simulator already has an app build in progress.',
+        true,
+      );
+    }
+    let resolveSettled: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    const build: ActiveBuild = {
+      sessionId: instance.sessionId,
+      controller: new AbortController(),
+      settled,
+      resolveSettled,
+    };
+    activeBuilds.set(instance.instanceId, build);
+    return build;
+  }
+  function finishBuild(instanceId: string, build: ActiveBuild): void {
+    if (activeBuilds.get(instanceId) === build) activeBuilds.delete(instanceId);
+    build.resolveSettled();
+  }
+  async function cancelBuild(instanceId: string): Promise<void> {
+    const build = activeBuilds.get(instanceId);
+    if (!build) return;
+    build.controller.abort();
+    await build.settled;
+  }
+  async function cancelSessionBuilds(sessionId: string): Promise<void> {
+    sessionBuildAdmissionEpochs.set(
+      sessionId,
+      (sessionBuildAdmissionEpochs.get(sessionId) ?? 0) + 1,
+    );
+    const builds = [...activeBuilds.entries()].filter(([, build]) => build.sessionId === sessionId);
+    for (const [, build] of builds) build.controller.abort();
+    await Promise.all(builds.map(([, build]) => build.settled));
+  }
+  function lifecycleBarrier(instanceId: string): { epoch: number; pendingTeardowns: number } {
+    return instanceLifecycleBarriers.get(instanceId) ?? { epoch: 0, pendingTeardowns: 0 };
+  }
+  function beginInstanceTeardown(instanceId: string): void {
+    const current = lifecycleBarrier(instanceId);
+    instanceLifecycleBarriers.set(instanceId, {
+      epoch: current.epoch + 1,
+      pendingTeardowns: current.pendingTeardowns + 1,
+    });
+    blockedBuildInstances.add(instanceId);
+  }
+  function finishInstanceTeardown(instanceId: string): void {
+    const current = lifecycleBarrier(instanceId);
+    instanceLifecycleBarriers.set(instanceId, {
+      epoch: current.epoch,
+      pendingTeardowns: Math.max(0, current.pendingTeardowns - 1),
+    });
+  }
+  function captureInstanceActivation(instanceId: string): number {
+    const current = lifecycleBarrier(instanceId);
+    if (current.pendingTeardowns > 0) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The simulator cannot be activated while its lifecycle is changing.',
+        true,
+      );
+    }
+    return current.epoch;
+  }
+  function completeInstanceActivation(instance: IOSSimulatorInstance, expectedEpoch: number): void {
+    const current = lifecycleBarrier(instance.instanceId);
+    if (current.epoch !== expectedEpoch || current.pendingTeardowns > 0) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The simulator activation was cancelled because its lifecycle changed.',
+        true,
+      );
+    }
+    actor.assertRoute({
+      sessionId: instance.sessionId,
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    });
+    blockedBuildInstances.delete(instance.instanceId);
+  }
   function managedBuildResultsRoot(): string {
     return path.join(app.getPath('userData'), 'ios-simulator', 'projects');
   }
@@ -1321,33 +1441,39 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   }
 
   async function releaseExternallyStoppedRuntime(instance: IOSSimulatorInstance): Promise<void> {
-    cancelIdleRecycle(instance.instanceId);
-    framePump.clear(instance.instanceId);
-    h264FramePump.clear(instance.instanceId);
-    viewerEncodings.delete(instance.instanceId);
-    viewerPreferredEncodings.delete(instance.instanceId);
-    viewerFallbackReasons.delete(instance.instanceId);
-    viewerSessions.delete(instance.instanceId);
-    streamProfiles.delete(instance.instanceId);
-    nativeStreamProfiles.delete(instance.instanceId);
-    clearViewportState(instance.instanceId);
-    screenMaps.clear(instance.instanceId);
-    clearVisualBaselines(instance.instanceId);
-    await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
-      logger.warn('iOS Simulator external stop could not discard recording', {
-        instanceId: instance.instanceId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-    if (driverManager) {
-      await driverManager.stop(instance.instanceId).catch((error) => {
-        logger.warn('iOS Simulator external stop could not stop driver runtime', {
+    beginInstanceTeardown(instance.instanceId);
+    try {
+      await cancelBuild(instance.instanceId);
+      cancelIdleRecycle(instance.instanceId);
+      framePump.clear(instance.instanceId);
+      h264FramePump.clear(instance.instanceId);
+      viewerEncodings.delete(instance.instanceId);
+      viewerPreferredEncodings.delete(instance.instanceId);
+      viewerFallbackReasons.delete(instance.instanceId);
+      viewerSessions.delete(instance.instanceId);
+      streamProfiles.delete(instance.instanceId);
+      nativeStreamProfiles.delete(instance.instanceId);
+      clearViewportState(instance.instanceId);
+      screenMaps.clear(instance.instanceId);
+      clearVisualBaselines(instance.instanceId);
+      await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
+        logger.warn('iOS Simulator external stop could not discard recording', {
           instanceId: instance.instanceId,
           error: error instanceof Error ? error.message : String(error),
         });
       });
+      if (driverManager) {
+        await driverManager.stop(instance.instanceId).catch((error) => {
+          logger.warn('iOS Simulator external stop could not stop driver runtime', {
+            instanceId: instance.instanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      resourceScheduler.markStopped(instance.instanceId);
+    } finally {
+      finishInstanceTeardown(instance.instanceId);
     }
-    resourceScheduler.markStopped(instance.instanceId);
   }
 
   async function reconcileLiveDevice(
@@ -1600,31 +1726,37 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
       };
       const releaseInstanceRuntime = async (instance: IOSSimulatorInstance): Promise<boolean> => {
-        cancelIdleRecycle(instance.instanceId);
-        framePump.clear(instance.instanceId);
-        h264FramePump.clear(instance.instanceId);
-        viewerEncodings.delete(instance.instanceId);
-        viewerPreferredEncodings.delete(instance.instanceId);
-        viewerFallbackReasons.delete(instance.instanceId);
-        viewerSessions.delete(instance.instanceId);
-        clearViewportState(instance.instanceId);
-        streamProfiles.delete(instance.instanceId);
-        nativeStreamProfiles.delete(instance.instanceId);
-        let cleanupSucceeded = await discardInstanceMedia(instance);
-        let driverCleanupSucceeded = true;
-        if (driverManager) {
-          await driverManager.stop(instance.instanceId).catch((error) => {
-            driverCleanupSucceeded = false;
-            cleanupSucceeded = false;
-            complete = false;
-            logger.warn('iOS Simulator ownership reconcile could not stop driver runtime', {
-              instanceId: instance.instanceId,
-              error: error instanceof Error ? error.message : String(error),
+        beginInstanceTeardown(instance.instanceId);
+        try {
+          await cancelBuild(instance.instanceId);
+          cancelIdleRecycle(instance.instanceId);
+          framePump.clear(instance.instanceId);
+          h264FramePump.clear(instance.instanceId);
+          viewerEncodings.delete(instance.instanceId);
+          viewerPreferredEncodings.delete(instance.instanceId);
+          viewerFallbackReasons.delete(instance.instanceId);
+          viewerSessions.delete(instance.instanceId);
+          clearViewportState(instance.instanceId);
+          streamProfiles.delete(instance.instanceId);
+          nativeStreamProfiles.delete(instance.instanceId);
+          let cleanupSucceeded = await discardInstanceMedia(instance);
+          let driverCleanupSucceeded = true;
+          if (driverManager) {
+            await driverManager.stop(instance.instanceId).catch((error) => {
+              driverCleanupSucceeded = false;
+              cleanupSucceeded = false;
+              complete = false;
+              logger.warn('iOS Simulator ownership reconcile could not stop driver runtime', {
+                instanceId: instance.instanceId,
+                error: error instanceof Error ? error.message : String(error),
+              });
             });
-          });
+          }
+          if (driverCleanupSucceeded) resourceScheduler.markStopped(instance.instanceId);
+          return cleanupSucceeded;
+        } finally {
+          finishInstanceTeardown(instance.instanceId);
         }
-        if (driverCleanupSucceeded) resourceScheduler.markStopped(instance.instanceId);
-        return cleanupSucceeded;
       };
       const releaseStaleBinding = async (
         instance: IOSSimulatorInstance,
@@ -2775,12 +2907,25 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, 'set_viewer_visibility');
       }
     },
-    async getLatestFrame(sessionId, route) {
+    async getLatestFrame(sessionId, route, viewerWebContentsId) {
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
         if (!resolved.ok) return resolved;
         assertHostActive();
+        const viewer = viewerSessions.get(route.instanceId);
+        if (
+          !viewer ||
+          viewer.sessionId !== resolved.sessionId ||
+          viewer.webContentsId === null ||
+          viewer.webContentsId !== viewerWebContentsId
+        ) {
+          return {
+            ok: false,
+            errorCode: 'INSTANCE_NOT_OWNED',
+            message: 'This simulator viewer is not owned by the current Cindy window.',
+          };
+        }
         let instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
         instance = await reconcileLiveDevice(instance);
         assertHostActive();
@@ -3060,6 +3205,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (name === 'start_instance') {
           const route = readMutationRoute(sessionId, args);
           requireControlGrant(actor.getOwned(sessionId, route.instanceId), context);
+          const activationEpoch = captureInstanceActivation(route.instanceId);
           const environment = await runtime.inspect();
           if (!environment.ready) {
             const safeEnvironment = publicEnvironment(environment);
@@ -3075,6 +3221,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             await ensureDriver(started, environment);
             return actor.heartbeatOwned(sessionId, started.instanceId);
           });
+          completeInstanceActivation(instance, activationEpoch);
           screenMaps.clear(instance.instanceId);
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
@@ -3094,49 +3241,61 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const route = readMutationRoute(sessionId, args);
           requireControlGrant(actor.getOwned(sessionId, route.instanceId), context);
           actor.assertRoute(route);
-          cancelIdleRecycle(route.instanceId);
-          await mediaCapture.discardInstance(route.instanceId);
-          clearVisualBaselines(route.instanceId);
-          await getDriverManager().stop(route.instanceId);
-          resourceScheduler.markStopped(route.instanceId);
-          screenMaps.clear(route.instanceId);
-          framePump.clear(route.instanceId);
-          h264FramePump.clear(route.instanceId);
-          viewerEncodings.delete(route.instanceId);
-          viewerPreferredEncodings.delete(route.instanceId);
-          viewerFallbackReasons.delete(route.instanceId);
-          viewerSessions.delete(route.instanceId);
-          clearViewportState(route.instanceId);
-          const stopped = await actor.stop(route);
-          publishRouteStatusForInstance(stopped, null);
-          return {
-            ok: true,
-            data: instanceData(stopped),
-          };
+          beginInstanceTeardown(route.instanceId);
+          try {
+            await cancelBuild(route.instanceId);
+            cancelIdleRecycle(route.instanceId);
+            await mediaCapture.discardInstance(route.instanceId);
+            clearVisualBaselines(route.instanceId);
+            await getDriverManager().stop(route.instanceId);
+            resourceScheduler.markStopped(route.instanceId);
+            screenMaps.clear(route.instanceId);
+            framePump.clear(route.instanceId);
+            h264FramePump.clear(route.instanceId);
+            viewerEncodings.delete(route.instanceId);
+            viewerPreferredEncodings.delete(route.instanceId);
+            viewerFallbackReasons.delete(route.instanceId);
+            viewerSessions.delete(route.instanceId);
+            clearViewportState(route.instanceId);
+            const stopped = await actor.stop(route);
+            publishRouteStatusForInstance(stopped, null);
+            return {
+              ok: true,
+              data: instanceData(stopped),
+            };
+          } finally {
+            finishInstanceTeardown(route.instanceId);
+          }
         }
         if (name === 'detach_device') {
           const route = readMutationRoute(sessionId, args);
           requireControlGrant(actor.getOwned(sessionId, route.instanceId), context);
           actor.assertRoute(route);
-          cancelIdleRecycle(route.instanceId);
-          await mediaCapture.discardInstance(route.instanceId);
-          clearVisualBaselines(route.instanceId);
-          await getDriverManager().stop(route.instanceId);
-          screenMaps.clear(route.instanceId);
-          framePump.clear(route.instanceId);
-          h264FramePump.clear(route.instanceId);
-          viewerEncodings.delete(route.instanceId);
-          viewerPreferredEncodings.delete(route.instanceId);
-          viewerFallbackReasons.delete(route.instanceId);
-          viewerSessions.delete(route.instanceId);
-          clearViewportState(route.instanceId);
-          agentControlLeases.delete(route.instanceId);
-          return {
-            ok: true,
-            data: instanceData(
-              await actor.detach(route, () => resourceScheduler.markStopped(route.instanceId)),
-            ),
-          };
+          beginInstanceTeardown(route.instanceId);
+          try {
+            await cancelBuild(route.instanceId);
+            cancelIdleRecycle(route.instanceId);
+            await mediaCapture.discardInstance(route.instanceId);
+            clearVisualBaselines(route.instanceId);
+            await getDriverManager().stop(route.instanceId);
+            screenMaps.clear(route.instanceId);
+            framePump.clear(route.instanceId);
+            h264FramePump.clear(route.instanceId);
+            viewerEncodings.delete(route.instanceId);
+            viewerPreferredEncodings.delete(route.instanceId);
+            viewerFallbackReasons.delete(route.instanceId);
+            viewerSessions.delete(route.instanceId);
+            clearViewportState(route.instanceId);
+            agentControlLeases.delete(route.instanceId);
+            return {
+              ok: true,
+              data: instanceData(
+                await actor.detach(route, () => resourceScheduler.markStopped(route.instanceId)),
+              ),
+            };
+          } finally {
+            finishInstanceTeardown(route.instanceId);
+          }
         }
         if (name === 'get_screen_map') {
           const route = readMutationRoute(sessionId, args);
@@ -4002,91 +4161,133 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           return { ok: true, data: { interaction: name, screenMapInvalidated: true } };
         }
         if (name === 'build_app') {
-          const route = readMutationRoute(sessionId, args);
+          // Revalidate immediately before registering the build. The shared
+          // ownership reconciliation above can yield long enough for the task
+          // to be archived and its worktree recycled. There must be no await
+          // between this check and beginBuild: if archival wins first this
+          // call fails closed; if beginBuild wins first archival observes and
+          // cancels the registered operation.
+          const buildAdmissionEpoch = sessionBuildAdmissionEpochs.get(sessionId) ?? 0;
+          const buildSession = await resolveSession(sessionId);
+          if (!buildSession.ok) return buildSession;
+          assertHostActive();
+          const route = readMutationRoute(buildSession.sessionId, args);
           const instance = actor.assertRoute(route);
+          const activeBuild = beginBuild(instance, buildAdmissionEpoch);
           const derivedDataPath = path.join(
             app.getPath('userData'),
             'ios-simulator',
             'projects',
             createHash('sha256').update(instance.instanceId).digest('hex').slice(0, 20),
           );
-          let built: IOSSimulatorProjectBuildResult;
           try {
-            built = await projectBuilder.build({
-              worktreeRoot: instance.worktreeRoot,
-              derivedDataPath,
-              containerPath: readOptionalString(args, 'containerPath', 4_096),
-              scheme: typeof args.scheme === 'string' ? args.scheme : undefined,
-            });
-          } catch (error) {
-            if (!(error instanceof IOSSimulatorProjectBuildError)) throw error;
+            let built: IOSSimulatorProjectBuildResult;
+            try {
+              built = await projectBuilder.build({
+                worktreeRoot: instance.worktreeRoot,
+                derivedDataPath,
+                containerPath: readOptionalString(args, 'containerPath', 4_096),
+                scheme: typeof args.scheme === 'string' ? args.scheme : undefined,
+                signal: activeBuild.controller.signal,
+              });
+            } catch (error) {
+              if (disposePromise) {
+                await discardManagedBuildResultBundle(
+                  error instanceof IOSSimulatorProjectBuildError ? error.resultBundlePath : null,
+                );
+                throw new IOSSimulatorHostDisposedError();
+              }
+              if (activeBuild.controller.signal.aborted) {
+                throw new IOSSimulatorInstanceError(
+                  'MUTATION_CANCELLED',
+                  'The app build was cancelled because its simulator session ended.',
+                  true,
+                );
+              }
+              if (!(error instanceof IOSSimulatorProjectBuildError)) throw error;
+              const diagnostics = await storeBuildDiagnostics({
+                sessionId: instance.sessionId,
+                instanceId: instance.instanceId,
+                logTail: error.buildLogTail,
+                resultBundlePath: error.resultBundlePath,
+                outputTruncated: error.outputTruncated,
+              });
+              return buildFailureWithDiagnostics(error, sessionId, diagnostics);
+            }
             if (disposePromise) {
-              await discardManagedBuildResultBundle(error.resultBundlePath);
+              await discardManagedBuildResultBundle(built.resultBundlePath ?? null);
               throw new IOSSimulatorHostDisposedError();
             }
+            if (activeBuild.controller.signal.aborted) {
+              await discardManagedBuildResultBundle(built.resultBundlePath ?? null);
+              throw new IOSSimulatorInstanceError(
+                'MUTATION_CANCELLED',
+                'The app build was cancelled because its simulator session ended.',
+                true,
+              );
+            }
+            actor.assertRoute(route);
             const diagnostics = await storeBuildDiagnostics({
               sessionId: instance.sessionId,
               instanceId: instance.instanceId,
-              logTail: error.buildLogTail,
-              resultBundlePath: error.resultBundlePath,
-              outputTruncated: error.outputTruncated,
+              logTail: built.buildLogTail ?? '',
+              resultBundlePath: built.resultBundlePath ?? null,
+              outputTruncated: built.outputTruncated,
             });
-            return buildFailureWithDiagnostics(error, sessionId, diagnostics);
-          }
-          if (disposePromise) {
-            await discardManagedBuildResultBundle(built.resultBundlePath ?? null);
-            throw new IOSSimulatorHostDisposedError();
-          }
-          const diagnostics = await storeBuildDiagnostics({
-            sessionId: instance.sessionId,
-            instanceId: instance.instanceId,
-            logTail: built.buildLogTail ?? '',
-            resultBundlePath: built.resultBundlePath ?? null,
-            outputTruncated: built.outputTruncated,
-          });
-          assertHostActive();
-          let artifact: IOSSimulatorAppArtifact;
-          try {
+            assertHostActive();
+            let artifact: IOSSimulatorAppArtifact;
             try {
-              artifact = await appLifecycle.inspectArtifact(instance.worktreeRoot, built.appPath);
-            } catch (error) {
-              if (
-                !(error instanceof IOSSimulatorInstanceError) ||
-                error.code !== 'APP_ARTIFACT_INVALID'
-              ) {
-                throw error;
+              try {
+                artifact = await appLifecycle.inspectArtifact(instance.worktreeRoot, built.appPath);
+              } catch (error) {
+                if (
+                  !(error instanceof IOSSimulatorInstanceError) ||
+                  error.code !== 'APP_ARTIFACT_INVALID'
+                ) {
+                  throw error;
+                }
+                artifact = await appLifecycle.inspectArtifact(
+                  instance.worktreeRoot,
+                  built.appPath,
+                  derivedDataPath,
+                );
               }
-              artifact = await appLifecycle.inspectArtifact(
-                instance.worktreeRoot,
-                built.appPath,
-                derivedDataPath,
+            } catch (error) {
+              if (disposePromise || error instanceof IOSSimulatorHostDisposedError) {
+                throw new IOSSimulatorHostDisposedError();
+              }
+              return buildFailureWithDiagnostics(error, sessionId, diagnostics);
+            }
+            assertHostActive();
+            if (activeBuild.controller.signal.aborted) {
+              throw new IOSSimulatorInstanceError(
+                'MUTATION_CANCELLED',
+                'The app build was cancelled because its simulator session ended.',
+                true,
               );
             }
-          } catch (error) {
-            if (disposePromise || error instanceof IOSSimulatorHostDisposedError) {
-              throw new IOSSimulatorHostDisposedError();
-            }
-            return buildFailureWithDiagnostics(error, sessionId, diagnostics);
-          }
-          assertHostActive();
-          appArtifacts.set(artifact.artifactId, {
-            instanceId: instance.instanceId,
-            projectKind: built.kind,
-            artifact,
-          });
-          return {
-            ok: true,
-            data: {
-              artifact: {
-                artifactId: artifact.artifactId,
-                bundleId: artifact.bundleId,
-                projectKind: built.kind,
-                scheme: built.scheme,
-                createdAt: artifact.createdAt,
+            actor.assertRoute(route);
+            appArtifacts.set(artifact.artifactId, {
+              instanceId: instance.instanceId,
+              projectKind: built.kind,
+              artifact,
+            });
+            return {
+              ok: true,
+              data: {
+                artifact: {
+                  artifactId: artifact.artifactId,
+                  bundleId: artifact.bundleId,
+                  projectKind: built.kind,
+                  scheme: built.scheme,
+                  createdAt: artifact.createdAt,
+                },
+                diagnostics,
               },
-              diagnostics,
-            },
-          };
+            };
+          } finally {
+            finishBuild(instance.instanceId, activeBuild);
+          }
         }
         if (name === 'read_build_diagnostics') {
           const diagnosticsId = readString(args, 'diagnosticsId');
@@ -4514,35 +4715,53 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'The selected iOS Simulator device does not exist or is unavailable.',
             );
           }
-          const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
-          const instance = await actor.attachSerialized({
-            sessionId,
-            worktreeRoot,
-            sourceFingerprint: sourceFingerprint(worktreeRoot),
-            device,
-            creationProvenance: 'external',
-            bootProvenance: device.state.toLowerCase() === 'booted' ? 'preexisting' : 'user-booted',
-          });
-          if (context?.origin === 'agent') {
-            agentControlLeases.set(instance.instanceId, sessionId);
-          }
-          if (instance.lifecycleState === 'ready') {
-            await resourceScheduler.runStart(instance.instanceId, async () => {
-              await ensureDriver(instance, environment);
+          const existingInstance = actor
+            .listAll()
+            .find((candidate) => candidate.simulatorUdid.toUpperCase() === udid);
+          const existingActivationEpoch = existingInstance
+            ? captureInstanceActivation(existingInstance.instanceId)
+            : null;
+          const attach = async (): Promise<IOSSimulatorHostResult> => {
+            assertHostActive();
+            const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
+            const instance = await actor.attachSerialized({
+              sessionId,
+              worktreeRoot,
+              sourceFingerprint: sourceFingerprint(worktreeRoot),
+              device,
+              creationProvenance: 'external',
+              bootProvenance:
+                device.state.toLowerCase() === 'booted' ? 'preexisting' : 'user-booted',
             });
-          }
-          screenMaps.clear(instance.instanceId);
-          framePump.clear(instance.instanceId);
-          h264FramePump.clear(instance.instanceId);
-          viewerEncodings.delete(instance.instanceId);
-          viewerPreferredEncodings.delete(instance.instanceId);
-          viewerFallbackReasons.delete(instance.instanceId);
-          viewerSessions.delete(instance.instanceId);
-          clearViewportState(instance.instanceId);
-          return {
-            ok: true,
-            data: instanceData(actor.getOwned(sessionId, instance.instanceId)),
+            const activationEpoch =
+              existingInstance?.instanceId === instance.instanceId &&
+              existingActivationEpoch !== null
+                ? existingActivationEpoch
+                : captureInstanceActivation(instance.instanceId);
+            if (instance.lifecycleState === 'ready') {
+              await resourceScheduler.runStart(instance.instanceId, async () => {
+                await ensureDriver(instance, environment);
+              });
+            }
+            const current = actor.getOwned(sessionId, instance.instanceId);
+            completeInstanceActivation(current, activationEpoch);
+            if (context?.origin === 'agent') {
+              agentControlLeases.set(instance.instanceId, sessionId);
+            }
+            screenMaps.clear(instance.instanceId);
+            framePump.clear(instance.instanceId);
+            h264FramePump.clear(instance.instanceId);
+            viewerEncodings.delete(instance.instanceId);
+            viewerPreferredEncodings.delete(instance.instanceId);
+            viewerFallbackReasons.delete(instance.instanceId);
+            viewerSessions.delete(instance.instanceId);
+            clearViewportState(instance.instanceId);
+            return {
+              ok: true,
+              data: instanceData(current),
+            };
           };
+          return await attach();
         }
         return {
           ok: false,
@@ -4554,9 +4773,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, name);
       }
     },
+    cancelSessionOperations(sessionId) {
+      return cancelSessionBuilds(sessionId.trim());
+    },
+    abortOperationsForExit() {
+      for (const build of activeBuilds.values()) build.controller.abort();
+    },
     dispose() {
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
+        const builds = [...activeBuilds.values()];
+        for (const build of builds) build.controller.abort();
+        await Promise.all(builds.map((build) => build.settled));
         clearVisualBaselines();
         await Promise.all(
           [...buildDiagnostics.entries()].map(([diagnosticsId, diagnostic]) =>
@@ -4607,6 +4835,9 @@ const defaultIOSSimulatorLifecycle = createIOSSimulatorSimctlLifecycle();
 const defaultIOSSimulatorHost = createIOSSimulatorHost({
   lifecycle: defaultIOSSimulatorLifecycle,
   actor: createDefaultActor(defaultIOSSimulatorLifecycle),
+});
+const releaseIOSSimulatorExitAbortHandler = registerIOSSimulatorExitAbortHandler(() => {
+  defaultIOSSimulatorHost.abortOperationsForExit();
 });
 
 export function getIOSSimulatorSessionStatus(
@@ -4668,8 +4899,9 @@ export function setIOSSimulatorAgentMutationPaused(
 export function getIOSSimulatorLatestFrame(
   sessionId: string,
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+  viewerWebContentsId: number,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.getLatestFrame(sessionId, route);
+  return defaultIOSSimulatorHost.getLatestFrame(sessionId, route, viewerWebContentsId);
 }
 
 export async function flushIOSSimulatorOwnershipRegistry(): Promise<void> {
@@ -4685,8 +4917,13 @@ export async function disposeIOSSimulatorHost(): Promise<void> {
     await defaultIOSSimulatorHost.dispose();
     await defaultRegistryFlush?.();
   } finally {
+    releaseIOSSimulatorExitAbortHandler();
     defaultRegistryRelease?.();
   }
+}
+
+export function cancelIOSSimulatorSessionOperations(sessionId: string): Promise<void> {
+  return defaultIOSSimulatorHost.cancelSessionOperations(sessionId);
 }
 
 export function setIOSSimulatorViewerStreamProfile(
@@ -4712,7 +4949,7 @@ export function updateIOSSimulatorViewerTouch(
 }
 
 export interface IOSSimulatorMcpDepsOptions {
-  isIOSSimulatorEnabled?: () => boolean;
+  isIOSSimulatorEnabled?: (context?: IOSSimulatorMcpCallContext) => boolean;
   host?: IOSSimulatorHost;
 }
 
@@ -4734,7 +4971,7 @@ export function getIOSSimulatorMcpDeps(
           },
         };
       }
-      if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled()) {
+      if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled(context)) {
         return {
           ready: false,
           instanceCount: 0,
@@ -4748,7 +4985,7 @@ export function getIOSSimulatorMcpDeps(
       return host.describeTools(sessionId);
     },
     callTool: async (name, args, context) => {
-      if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled()) {
+      if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled(context)) {
         return {
           ok: false,
           errorCode: 'IOS_SIMULATOR_DISABLED',

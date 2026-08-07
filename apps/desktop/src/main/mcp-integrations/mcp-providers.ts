@@ -90,7 +90,8 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
       // Project-scoped gating is applied by the provider wrapper below using
       // the live MCP session context. This host-level check preserves the
       // existing global fallback for non-session callers.
-      isIOSSimulatorEnabled: () => pluginRegistry.isEnabled('ios-simulator'),
+      isIOSSimulatorEnabled: (context) =>
+        pluginRegistry.isEnabled('ios-simulator', context?.workingDir),
     }),
     browser: getBrowserMcpDeps(),
     computer: getComputerMcpDeps({

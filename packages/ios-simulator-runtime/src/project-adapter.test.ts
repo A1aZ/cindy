@@ -15,6 +15,7 @@ import {
   IOSSimulatorProjectBuildError,
   IOSSimulatorProjectBuilder,
 } from "./project-adapter.js";
+import type { IOSSimulatorCommandRunner } from "./types.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -386,6 +387,66 @@ describe("IOSSimulatorProjectBuilder", () => {
         /CindyBuild-[0-9a-f-]+\.xcresult$/,
       ),
       outputTruncated: true,
+    });
+  });
+
+  it("cancels an in-flight Xcode build before running later build steps", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-project-"));
+    roots.push(root);
+    await mkdir(path.join(root, "Example.xcworkspace"));
+    const controller = new AbortController();
+    let resultBundlePath = "";
+    const run = vi.fn(
+      async (
+        _command: string,
+        args: readonly string[],
+        options?: Parameters<IOSSimulatorCommandRunner["run"]>[2],
+      ) => {
+        if (args.includes("-list")) {
+          return {
+            stdout: JSON.stringify({ workspace: { schemes: ["Example"] } }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        const resultBundleIndex = args.indexOf("-resultBundlePath");
+        if (resultBundleIndex >= 0) {
+          resultBundlePath = args[resultBundleIndex + 1]!;
+          await mkdir(resultBundlePath, { recursive: true });
+          await new Promise<void>((resolve) => {
+            if (options?.signal?.aborted) resolve();
+            else
+              options?.signal?.addEventListener("abort", () => resolve(), {
+                once: true,
+              });
+          });
+          return { stdout: "", stderr: "", exitCode: null };
+        }
+        throw new Error("build continued after cancellation");
+      },
+    );
+    const buildPromise = new IOSSimulatorProjectBuilder({
+      commandRunner: { run },
+    }).build({
+      worktreeRoot: root,
+      derivedDataPath: path.join(root, "derived"),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(resultBundlePath).not.toBe(""));
+
+    controller.abort();
+
+    await expect(buildPromise).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(
+      run.mock.calls.every(
+        ([, , options]) => options?.signal === controller.signal,
+      ),
+    ).toBe(true);
+    await expect(realpath(resultBundlePath)).rejects.toMatchObject({
+      code: "ENOENT",
     });
   });
 });

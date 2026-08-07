@@ -67,6 +67,7 @@ export interface IOSSimulatorCommandRunner {
       maxBufferBytes?: number;
       cwd?: string;
       env?: NodeJS.ProcessEnv;
+      signal?: AbortSignal;
     },
   ): Promise<IOSSimulatorCommandResult>;
 }

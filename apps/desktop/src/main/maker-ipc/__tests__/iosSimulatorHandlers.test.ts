@@ -167,7 +167,7 @@ describe('iOS Simulator IPC handlers', () => {
       preferredEncoding: 'jpeg',
       fallbackReason: 'native-decoder-fallback',
     });
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route);
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route);
 
     expect(setViewerVisibility).toHaveBeenCalledWith(
       'session-a',
@@ -196,11 +196,18 @@ describe('iOS Simulator IPC handlers', () => {
       17,
       undefined,
     );
-    expect(getLatestFrame).toHaveBeenCalledWith('session-a', {
-      instanceId: 'instance-a',
-      generation: 3,
-      leaseId: 'lease-a',
-    });
+    expect(getLatestFrame).toHaveBeenCalledWith(
+      'session-a',
+      {
+        instanceId: 'instance-a',
+        generation: 3,
+        leaseId: 'lease-a',
+      },
+      17,
+    );
+    await expect(
+      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, {
         ...route,

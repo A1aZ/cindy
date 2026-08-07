@@ -1,6 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import { afterEach, describe, expect, it } from "vitest";
 
 import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
+
+const tempRoots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    tempRoots
+      .splice(0)
+      .map((root) => rm(root, { recursive: true, force: true })),
+  );
+});
 
 describe("createNodeIOSSimulatorCommandRunner", () => {
   it("keeps draining a successful process after the output buffer fills", async () => {
@@ -25,4 +39,38 @@ describe("createNodeIOSSimulatorCommandRunner", () => {
       Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr),
     ).toBeLessThanOrEqual(128);
   });
+
+  it.runIf(process.platform !== "win32")(
+    "kills the detached process group when a build is aborted",
+    async () => {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "cindy-command-abort-"),
+      );
+      tempRoots.push(root);
+      const markerPath = path.join(root, "late-child.txt");
+      const controller = new AbortController();
+      const resultPromise = createNodeIOSSimulatorCommandRunner().run(
+        process.execPath,
+        [
+          "-e",
+          [
+            "const { spawn } = require('node:child_process');",
+            `spawn(process.execPath, ['-e', ${JSON.stringify(
+              `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'late'), 500)`,
+            )}], { stdio: 'ignore' });`,
+            "setInterval(() => undefined, 1000);",
+          ].join("\n"),
+        ],
+        { timeoutMs: 5_000, signal: controller.signal },
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      controller.abort();
+      await expect(resultPromise).resolves.toMatchObject({ exitCode: null });
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      await expect(readFile(markerPath, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
 });

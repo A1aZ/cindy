@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { readdir, readFile, realpath, rm, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
@@ -129,6 +129,23 @@ function summarize(values: readonly string[], limit = 8): string {
   return `${bounded.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}`;
 }
 
+async function throwIfBuildCancelled(
+  signal?: AbortSignal,
+  resultBundlePath?: string,
+): Promise<void> {
+  if (!signal?.aborted) return;
+  if (resultBundlePath) {
+    await rm(resultBundlePath, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
+  throw new IOSSimulatorInstanceError(
+    "MUTATION_CANCELLED",
+    "The app build was cancelled because its simulator session ended.",
+    true,
+  );
+}
+
 /** Detects Cindy Mobile or one unambiguous generic Xcode container and builds without a shell. */
 export class IOSSimulatorProjectBuilder {
   readonly #runner: IOSSimulatorCommandRunner;
@@ -251,8 +268,11 @@ export class IOSSimulatorProjectBuilder {
     derivedDataPath: string;
     containerPath?: string;
     scheme?: string;
+    signal?: AbortSignal;
   }): Promise<IOSSimulatorProjectBuildResult> {
+    await throwIfBuildCancelled(input.signal);
     const project = await this.inspect(input.worktreeRoot, input.containerPath);
+    await throwIfBuildCancelled(input.signal);
     if (project.kind === "cindy-mobile") {
       const result = await this.#runner.run(
         "pnpm",
@@ -261,8 +281,10 @@ export class IOSSimulatorProjectBuilder {
           cwd: project.worktreeRoot,
           timeoutMs: this.#buildTimeoutMs,
           maxBufferBytes: 1024 * 1024,
+          signal: input.signal,
         },
       );
+      await throwIfBuildCancelled(input.signal);
       if (result.exitCode !== 0) {
         throw new IOSSimulatorProjectBuildError(
           "APP_BUILD_FAILED",
@@ -284,6 +306,7 @@ export class IOSSimulatorProjectBuilder {
       const apps = (await readdir(products)).filter((name) =>
         name.endsWith(".app"),
       );
+      await throwIfBuildCancelled(input.signal);
       if (apps.length !== 1) {
         throw new IOSSimulatorProjectBuildError(
           "APP_ARTIFACT_INVALID",
@@ -293,10 +316,12 @@ export class IOSSimulatorProjectBuilder {
           Boolean(result.outputTruncated),
         );
       }
+      const appPath = await realpath(path.join(products, apps[0]!));
+      await throwIfBuildCancelled(input.signal);
       return {
         ...project,
         scheme: apps[0]!.slice(0, -4),
-        appPath: await realpath(path.join(products, apps[0]!)),
+        appPath,
         resultBundlePath: null,
         buildLogTail: commandLogTail([result]),
         outputTruncated: Boolean(result.outputTruncated),
@@ -312,8 +337,10 @@ export class IOSSimulatorProjectBuilder {
         cwd: project.projectRoot,
         timeoutMs: 60_000,
         maxBufferBytes: 1024 * 1024,
+        signal: input.signal,
       },
     );
+    await throwIfBuildCancelled(input.signal);
     if (list.exitCode !== 0 || list.outputTruncated) {
       throw new IOSSimulatorProjectBuildError(
         "APP_BUILD_FAILED",
@@ -379,11 +406,14 @@ export class IOSSimulatorProjectBuilder {
         cwd: project.projectRoot,
         timeoutMs: this.#buildTimeoutMs,
         maxBufferBytes: 1024 * 1024,
+        signal: input.signal,
       },
     );
+    await throwIfBuildCancelled(input.signal, resultBundlePath);
     const availableResultBundlePath = (await exists(resultBundlePath))
       ? resultBundlePath
       : null;
+    await throwIfBuildCancelled(input.signal, resultBundlePath);
     if (build.exitCode !== 0) {
       throw new IOSSimulatorProjectBuildError(
         "APP_BUILD_FAILED",
@@ -401,8 +431,10 @@ export class IOSSimulatorProjectBuilder {
         cwd: project.projectRoot,
         timeoutMs: 60_000,
         maxBufferBytes: 4 * 1024 * 1024,
+        signal: input.signal,
       },
     );
+    await throwIfBuildCancelled(input.signal, resultBundlePath);
     if (settings.exitCode !== 0 || settings.outputTruncated) {
       throw new IOSSimulatorProjectBuildError(
         "APP_ARTIFACT_INVALID",
@@ -439,10 +471,13 @@ export class IOSSimulatorProjectBuilder {
         Boolean(build.outputTruncated),
       );
     }
+    await throwIfBuildCancelled(input.signal, resultBundlePath);
+    const appPath = await realpath(uniqueApps[0]!);
+    await throwIfBuildCancelled(input.signal, resultBundlePath);
     return {
       ...project,
       scheme,
-      appPath: await realpath(uniqueApps[0]!),
+      appPath,
       resultBundlePath: availableResultBundlePath,
       buildLogTail: commandLogTail([build]),
       outputTruncated: Boolean(build.outputTruncated),

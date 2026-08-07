@@ -22,9 +22,17 @@ export interface IOSSimulatorMcpServerOptions {
 function readContext(
   options: IOSSimulatorMcpServerOptions,
 ): IOSSimulatorMcpCallContext | undefined {
-  const sessionId =
-    options.getSessionContext?.().sessionId ?? options.sessionId;
-  return sessionId ? { sessionId, origin: "agent" } : undefined;
+  const sessionContext = options.getSessionContext?.();
+  const sessionId = sessionContext?.sessionId ?? options.sessionId;
+  return sessionId
+    ? {
+        sessionId,
+        ...(sessionContext?.workingDir
+          ? { workingDir: sessionContext.workingDir }
+          : {}),
+        origin: "agent",
+      }
+    : undefined;
 }
 
 export function createIOSSimulatorMcpServer(
@@ -51,12 +59,7 @@ export function createIOSSimulatorMcpServer(
     "Discover Cindy's embedded iOS Simulator tools. This is the preferred entry point for opening, running, testing, or debugging an iOS app in Cindy. Do not use cindy_computer to launch macOS Simulator.app unless the user explicitly requests an external system window. Start with check_environment before selecting a device.",
     { category: z.enum(["ios_simulator"]).optional() },
     async () => {
-      const availability = options.getSessionContext
-        ? await deps.describeTools?.({
-            sessionId: options.getSessionContext().sessionId,
-            origin: "agent",
-          })
-        : await deps.describeTools?.({ sessionId: options.sessionId, origin: "agent" });
+      const availability = await deps.describeTools?.(readContext(options));
       return {
         content: [
           {

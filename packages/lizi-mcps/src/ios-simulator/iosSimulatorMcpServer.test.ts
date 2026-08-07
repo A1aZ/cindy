@@ -5,8 +5,23 @@ import { describe, expect, it, vi } from "vitest";
 import type { IOSSimulatorMcpDeps } from "../types.js";
 import { createIOSSimulatorMcpServer } from "./server.js";
 
-async function connect(deps: IOSSimulatorMcpDeps, sessionId?: string) {
-  const server = createIOSSimulatorMcpServer(deps, { sessionId });
+async function connect(
+  deps: IOSSimulatorMcpDeps,
+  sessionId?: string,
+  workingDir?: string,
+) {
+  const server = createIOSSimulatorMcpServer(deps, {
+    sessionId,
+    ...(workingDir
+      ? {
+          getSessionContext: () => ({
+            agentKind: "claude-code",
+            workingDir,
+            sessionId,
+          }),
+        }
+      : {}),
+  });
   const client = new Client({ name: "test-client", version: "0.0.0" });
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
@@ -218,7 +233,11 @@ describe("createIOSSimulatorMcpServer", () => {
 
   it("forwards the authoritative session context to the host", async () => {
     const callTool = vi.fn(async () => ({ ok: true, data: { ready: true } }));
-    const { client, server } = await connect({ callTool }, "session-a");
+    const { client, server } = await connect(
+      { callTool },
+      "session-a",
+      "/projects/enabled-ios",
+    );
     const result = await client.callTool({
       name: "call_tool",
       arguments: { name: "check_environment", args: {} },
@@ -229,6 +248,7 @@ describe("createIOSSimulatorMcpServer", () => {
       {},
       {
         sessionId: "session-a",
+        workingDir: "/projects/enabled-ios",
         origin: "agent",
       },
     );

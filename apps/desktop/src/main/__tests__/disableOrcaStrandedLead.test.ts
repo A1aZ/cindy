@@ -29,6 +29,12 @@ describe('disableOrcaInternal stranded-lead recovery', () => {
     // If the prior disable was interrupted before archiveWorkersByTeam, the lead's worker
     // sessions stay active+hidden+unreachable; the recovery must reconcile them too.
     expect(registerSource).toContain('await reconcileInactiveTeamWorkersForLead(leadSessionId)');
+    expect(registerSource).toContain('await cancelIOSSimulatorSessionOperations(sid)');
+  });
+
+  it('cancels Host-owned worker operations before normal team archival', () => {
+    expect(registerSource).toContain('await cancelIOSSimulatorSessionOperations(w.sessionId)');
+    expect(registerSource).toContain('const archivedWorkerSessionIds = await archiveWorkersByTeam(team.id)');
   });
 
   it('reuses clearLeadOrcaRoleState on BOTH the normal-close and stranded-recovery paths', () => {

@@ -56,6 +56,7 @@ import {
 } from './messages';
 import { assertTrustedAppRendererEvent } from '../../security/trustedAppRenderer.js';
 import { removeTurnChangeSetsForSession } from '../../turn-change-set/store.js';
+import { quiesceSessionBeforeWorktreeRecycle } from './sessionRemovalOperations.js';
 
 const log = createLogger('sessions');
 const REMOTE_EDITABLE_META = new Set(['status', 'title', 'pinnedAt']);
@@ -160,19 +161,26 @@ export async function recycleSessionWorktreeForStatusChange(
 ): Promise<void> {
   if (status !== 'deleted' && status !== 'archived') return;
   try {
-    const [mh, recycle, routeLock] = await Promise.all([
+    const [mh, recycle, routeLock, iosSimulator] = await Promise.all([
       import('../../maker-host/index.js'),
       import('../../worktree/sessionRemovalRecycle.js'),
       import('../../maker-ipc/register.js'),
+      import('../../mcp-integrations/ios-simulator.js'),
     ]);
     if (!(await recycle.isSessionStillRemovable(sessionId))) return;
-    await routeLock.withSendToSessionLock(sessionId, async () => {
-      if (!(await recycle.isSessionStillRemovable(sessionId))) return;
-      await mh
-        .getMakerIfReady()
-        ?.closeSession(sessionId)
-        .catch(() => undefined);
-    });
+    const shouldRecycle = await routeLock.withSendToSessionLock(sessionId, async () =>
+      quiesceSessionBeforeWorktreeRecycle(sessionId, {
+        isSessionStillRemovable: recycle.isSessionStillRemovable,
+        cancelSessionOperations: iosSimulator.cancelIOSSimulatorSessionOperations,
+        closeSession: async (id) => {
+          await mh
+            .getMakerIfReady()
+            ?.closeSession(id)
+            .catch(() => undefined);
+        },
+      }),
+    );
+    if (!shouldRecycle) return;
     await recycle.recycleWorktreeForRemovedSession(sessionId);
   } catch (err) {
     log.warn('worktree recycle after session status change failed', {

@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
     async (_sessionId: string, task: () => Promise<unknown>) => task(),
   ),
   isSessionStillRemovable: vi.fn(),
+  cancelSessionOperations: vi.fn(),
   recycleWorktreeForRemovedSession: vi.fn(),
   userDataPath: '',
   agentIslandService: {
@@ -61,6 +62,9 @@ vi.mock('../worktree/sessionRemovalRecycle.js', () => ({
   isSessionStillRemovable: h.isSessionStillRemovable,
   recycleWorktreeForRemovedSession: h.recycleWorktreeForRemovedSession,
 }));
+vi.mock('../mcp-integrations/ios-simulator.js', () => ({
+  cancelIOSSimulatorSessionOperations: h.cancelSessionOperations,
+}));
 
 import {
   recycleSessionWorktreeForStatusChange,
@@ -72,6 +76,7 @@ beforeEach(() => {
   h.userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-set-sessions-status-'));
   h.closeSession.mockResolvedValue(undefined);
   h.isSessionStillRemovable.mockResolvedValue(true);
+  h.cancelSessionOperations.mockResolvedValue(undefined);
   h.recycleWorktreeForRemovedSession.mockResolvedValue(undefined);
 });
 
@@ -146,6 +151,7 @@ describe('setSessionsStatusInDb', () => {
     });
 
     expect(h.withSendToSessionLock).not.toHaveBeenCalled();
+    expect(h.cancelSessionOperations).not.toHaveBeenCalled();
     expect(h.closeSession).not.toHaveBeenCalled();
     expect(h.recycleWorktreeForRemovedSession).not.toHaveBeenCalled();
   });
@@ -161,7 +167,8 @@ describe('setSessionsStatusInDb', () => {
     });
 
     expect(h.withSendToSessionLock).toHaveBeenCalledWith('s1', expect.any(Function));
-    expect(h.isSessionStillRemovable).toHaveBeenCalledTimes(2);
+    expect(h.isSessionStillRemovable).toHaveBeenCalledTimes(3);
+    expect(h.cancelSessionOperations).toHaveBeenCalledWith('s1');
     expect(h.recycleWorktreeForRemovedSession).toHaveBeenCalledWith('s1');
   });
 
@@ -234,7 +241,8 @@ describe('recycleSessionWorktreeForStatusChange', () => {
     await recycleSessionWorktreeForStatusChange('s1', 'deleted');
 
     expect(h.withSendToSessionLock).toHaveBeenCalledWith('s1', expect.any(Function));
-    expect(h.isSessionStillRemovable).toHaveBeenCalledTimes(2);
+    expect(h.isSessionStillRemovable).toHaveBeenCalledTimes(3);
+    expect(h.cancelSessionOperations).toHaveBeenCalledWith('s1');
     expect(h.closeSession).toHaveBeenCalledWith('s1');
     expect(h.recycleWorktreeForRemovedSession).toHaveBeenCalledWith('s1');
     expect(h.webContentsSend).toHaveBeenCalledWith('worktree:changed', { sessionId: 's1' });

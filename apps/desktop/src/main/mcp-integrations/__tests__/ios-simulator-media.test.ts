@@ -1,4 +1,4 @@
-import { mkdir, stat, writeFile } from 'node:fs/promises';
+import { mkdir, stat, truncate, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -108,6 +108,48 @@ describe('IOSSimulatorMediaCapture', () => {
       }),
     );
     await expect(stat(path.dirname(launchArgs.at(-1)!))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('rejects oversized recordings before buffering them in Electron Main', async () => {
+    const ingest = vi.fn();
+    let videoPath = '';
+    let resolveExit: () => void = () => undefined;
+    const capture = new IOSSimulatorMediaCapture({
+      ingest,
+      recordingLauncher: {
+        launch: vi.fn((args: readonly string[]) => {
+          videoPath = args.at(-1)!;
+          return {
+            exited: new Promise<void>((resolve) => {
+              resolveExit = resolve;
+            }),
+            kill: vi.fn(async () => {
+              await writeFile(videoPath, Buffer.alloc(0));
+              await truncate(videoPath, 128 * 1024 * 1024 + 1);
+              resolveExit();
+            }),
+          };
+        }),
+      },
+    });
+    const started = await capture.startRecording({
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 3,
+      source: 'agent',
+    });
+
+    await expect(
+      capture.stopRecording({
+        recordingId: started.recordingId,
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        generation: 3,
+      }),
+    ).rejects.toMatchObject({ code: 'RECORDING_FAILED' });
+    expect(ingest).not.toHaveBeenCalled();
+    await expect(stat(path.dirname(videoPath))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('terminates and removes active recording state when an instance is discarded', async () => {

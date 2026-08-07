@@ -56,6 +56,7 @@ export interface IOSSimulatorHandlerDeps {
   getLatestFrame(
     sessionId: string,
     route: { instanceId: string; generation: number; leaseId: string },
+    viewerWebContentsId: number,
   ): Promise<IOSSimulatorToolResponse>;
   updateViewerTouch(
     sessionId: string,
@@ -250,9 +251,13 @@ export function registerIOSSimulatorHandlers(
     }
     return resolved.setAgentMutationPaused(sessionId, readViewerRoute(record), record.paused);
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, async (event, payload) => {
     const record = readRecord(payload);
-    return resolved.getLatestFrame(readSessionId(record), readViewerRoute(record));
+    return resolved.getLatestFrame(
+      readSessionId(record),
+      readViewerRoute(record),
+      readSenderWebContentsId(event),
+    );
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (_event, payload) => {
     const record = readRecord(payload);

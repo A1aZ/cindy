@@ -1244,7 +1244,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.service.consumeUpgradeNotice()).toBeNull();
   });
 
-  it('abandons a silent upgrade when the installed permission baseline changes in the lock', async () => {
+  it('abandons a silent upgrade before download when the installed permission baseline changes', async () => {
     const item = summary({
       scope: 'organization',
       organizationId: 'org-1',
@@ -1274,6 +1274,53 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
 
     await expect(h.service.snapshot()).resolves.toMatchObject({
+      items: [{ installState: 'update-available' }],
+    });
+    expect(runtime.install).not.toHaveBeenCalled();
+    expect(h.service.consumeUpgradeNotice()).toBeNull();
+  });
+
+  it('abandons a silent upgrade when the installed permission baseline changes during download', async () => {
+    const item = summary({
+      scope: 'organization',
+      organizationId: 'org-1',
+      defaultInstall: true,
+      currentRelease: { ...summary().currentRelease, id: 'release-2', version: '2.0.0' },
+    });
+    const oldManifest = manifest(item.ghostId, '1.0.0');
+    const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-stale-baseline-lock-'));
+    roots.push(installDir);
+    fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+    runtime.ghosts = [{ manifest: oldManifest, dir: installDir, enabled: true }];
+    const h = harness([item]);
+    h.ledger.upsertInstallation({
+      ...recordForTest(item),
+      releaseId: 'release-1',
+      version: '1.0.0',
+      manifestDigest: ghostManifestDigest(oldManifest),
+    });
+    const expanded = manifest(item.ghostId, '2.0.0', ['notify', 'fs']);
+    h.api.detail.mockResolvedValueOnce({
+      ...item,
+      currentRelease: { ...item.currentRelease, manifest: expanded },
+    } as never);
+    const downloadMock = vi.mocked(
+      (await import('../download.js')).downloadVerifiedPlugin,
+    );
+    const downloadStarted = deferred();
+    const downloadGate = deferred();
+    downloadMock.mockImplementationOnce(async () => {
+      downloadStarted.resolve();
+      await downloadGate.promise;
+    });
+
+    const snapshotPromise = h.service.snapshot();
+    await downloadStarted.promise;
+    const changed = manifest(item.ghostId, '1.0.0', ['notify', 'workspace'] as never);
+    runtime.ghosts = [{ manifest: changed, dir: installDir, enabled: true }];
+    downloadGate.resolve();
+
+    await expect(snapshotPromise).resolves.toMatchObject({
       items: [{ installState: 'update-available' }],
     });
     expect(runtime.install).not.toHaveBeenCalled();

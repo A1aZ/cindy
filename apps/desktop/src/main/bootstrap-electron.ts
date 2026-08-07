@@ -4142,6 +4142,17 @@ const registerIpcHandlers = () => {
         refreshXdGatewayModels,
         waitForAccountProviderModelsReady: waitForCurrentAccountProviderModelsReady,
         onProviderModelAutoRefreshConfigured: markMakerProviderRefreshConfigured,
+        resolveIOSSimulatorRendererUrl: (event) => {
+          const sender = (event as { sender?: { getURL?: () => string } })?.sender;
+          if (!sender) return '';
+          if (sender === rsbWindowController.getSidebarWebContents()) {
+            const mainWindow = mainWindowRef;
+            return mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()
+              ? mainWindow.webContents.getURL()
+              : '';
+          }
+          return typeof sender.getURL === 'function' ? sender.getURL() : '';
+        },
       });
       registerMakerTitleIpc({ isSessionTurnPendingCompletion });
       registerMakerHelpIpc(ipcMaker);

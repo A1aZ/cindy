@@ -771,43 +771,129 @@ describe('iOS Simulator host', () => {
     expect(actor.listAll()).toEqual([]);
   });
 
-  it('keeps archived ownership when Cindy cleanup fails so a later restart can retry', async () => {
+  it.each(['Booted', 'Booting'] as const)(
+    'keeps archived ownership and scheduler capacity when %s shutdown fails',
+    async (deviceState) => {
+      const sessionId = `archived-cleanup-failure-${deviceState.toLowerCase()}`;
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(async () => {
+          throw new Error('simctl shutdown failed');
+        }),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(async () => undefined),
+      };
+      const store = new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() });
+      const actor = new IOSSimulatorInstanceActor({ store, lifecycle });
+      const instance = actor.attach({
+        sessionId,
+        worktreeRoot: '/tmp/archived-cleanup-failure',
+        sourceFingerprint: 'fingerprint-a',
+        creationProvenance: 'cindy',
+        bootProvenance: 'agent-booted',
+        device: { ...READY_REPORT.devices[0]!, state: deviceState },
+      });
+      const resourceScheduler = testResourceScheduler();
+      await resourceScheduler.runStart(instance.instanceId, async () => undefined);
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        resourceScheduler,
+        runtime: {
+          inspect: vi.fn(async () => ({
+            ...READY_REPORT,
+            devices: [{ ...READY_REPORT.devices[0]!, state: deviceState }],
+          })),
+        },
+        getSession: vi.fn(async () => ({
+          ...localSession(sessionId),
+          status: 'archived' as const,
+        })),
+      });
+
+      await host.reconcileOwnership();
+
+      expect(actor.getOwned(sessionId, instance.instanceId)).toMatchObject({
+        healthState: 'degraded',
+        errorCode: 'ARCHIVED_CLEANUP_FAILED',
+      });
+      expect(resourceScheduler.runningCount()).toBe(1);
+      expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+    },
+  );
+
+  it('releases scheduler capacity only after Simulator shutdown succeeds', async () => {
+    const shutdownExact = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(
+        new IOSSimulatorInstanceError(
+          'SIMULATOR_SHUTDOWN_FAILED',
+          'simctl shutdown failed',
+          true,
+        ),
+      )
+      .mockResolvedValue(undefined);
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
       bootExact: vi.fn(),
-      shutdownExact: vi.fn(async () => {
-        throw new Error('simctl shutdown failed');
-      }),
+      shutdownExact,
       createExact: vi.fn(),
-      deleteExact: vi.fn(async () => undefined),
+      deleteExact: vi.fn(),
     };
-    const store = new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() });
-    const actor = new IOSSimulatorInstanceActor({ store, lifecycle });
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
     const instance = actor.attach({
-      sessionId: 'archived-cleanup-failure',
-      worktreeRoot: '/tmp/archived-cleanup-failure',
+      sessionId: 'shutdown-retry-session',
+      worktreeRoot: '/tmp/shutdown-retry-session',
       sourceFingerprint: 'fingerprint-a',
-      creationProvenance: 'cindy',
-      bootProvenance: 'agent-booted',
       device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
     });
+    const resourceScheduler = testResourceScheduler();
+    await resourceScheduler.runStart(instance.instanceId, async () => undefined);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
+      resourceScheduler,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+      },
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
-      getSession: vi.fn(async () => ({
-        ...localSession('archived-cleanup-failure'),
-        status: 'archived' as const,
-      })),
+      getSession: vi.fn(async () => localSession('shutdown-retry-session')),
     });
-
     await host.reconcileOwnership();
+    const current = actor.getOwned('shutdown-retry-session', instance.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
 
-    expect(actor.getOwned('archived-cleanup-failure', instance.instanceId)).toMatchObject({
-      healthState: 'degraded',
-      errorCode: 'ARCHIVED_CLEANUP_FAILED',
+    await expect(
+      host.callTool('stop_instance', route, {
+        sessionId: 'shutdown-retry-session',
+        origin: 'user',
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'SIMULATOR_SHUTDOWN_FAILED' });
+    expect(resourceScheduler.runningCount()).toBe(1);
+    expect(actor.getOwned('shutdown-retry-session', instance.instanceId)).toMatchObject({
+      lifecycleState: 'error',
+      errorCode: 'SIMULATOR_SHUTDOWN_FAILED',
     });
-    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+
+    await expect(
+      host.callTool('stop_instance', route, {
+        sessionId: 'shutdown-retry-session',
+        origin: 'user',
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(resourceScheduler.runningCount()).toBe(0);
+    expect(shutdownExact).toHaveBeenCalledTimes(2);
+    await host.dispose();
   });
 
   it('disposes WDA and recording resources on host shutdown without changing ownership', async () => {
@@ -1561,8 +1647,9 @@ describe('iOS Simulator host', () => {
       configureNativeStream: vi.fn(async (profile) => profile),
       streamNativeFrames,
     } as unknown as IOSSimulatorNativeSidecarDriver;
+    const getWindowSize = vi.fn(async () => ({ width: 393, height: 852 }));
     const wdaDriver = {
-      getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
+      getWindowSize,
       getOrientation: vi.fn(async () => 'PORTRAIT' as const),
     };
     const capabilityReport = () => ({
@@ -1599,6 +1686,7 @@ describe('iOS Simulator host', () => {
       },
     } as unknown as WdaRunningInstance;
     const pushH264Frame = vi.fn();
+    const liveViewerIds = new Set([77, 88]);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
@@ -1610,6 +1698,7 @@ describe('iOS Simulator host', () => {
         stop: vi.fn(async () => undefined),
       },
       pushH264Frame,
+      isViewerWebContentsAlive: (webContentsId) => liveViewerIds.has(webContentsId),
     });
     const route = {
       instanceId: instance.instanceId,
@@ -1647,13 +1736,20 @@ describe('iOS Simulator host', () => {
 
     await expect(
       host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-b'),
-    ).resolves.toMatchObject({ ok: true });
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INSTANCE_NOT_OWNED' });
     await emitFrame({ ...firstFrame, timestampMicros: 2 });
     expect(pushH264Frame).toHaveBeenCalledTimes(2);
     expect(pushH264Frame).toHaveBeenLastCalledWith(
-      88,
+      77,
       expect.objectContaining({ instanceId: instance.instanceId }),
     );
+
+    await expect(
+      host.setViewerVisibility('session-a', route, false, 'h264', undefined, 77, 'viewer-a'),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-b'),
+    ).resolves.toMatchObject({ ok: true });
 
     await expect(
       host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-c'),
@@ -1668,6 +1764,63 @@ describe('iOS Simulator host', () => {
       expect.objectContaining({ instanceId: instance.instanceId }),
     );
 
+    let releaseStaleViewport: ((value: { width: number; height: number }) => void) | null = null;
+    getWindowSize.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseStaleViewport = resolve;
+        }),
+    );
+    const staleRemount = host.setViewerVisibility(
+      'session-a',
+      route,
+      true,
+      'h264',
+      undefined,
+      88,
+      'viewer-d-stale',
+    );
+    await vi.waitFor(() => expect(releaseStaleViewport).not.toBeNull());
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        true,
+        'h264',
+        undefined,
+        88,
+        'viewer-e-current',
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    releaseStaleViewport?.({ width: 393, height: 852 });
+    await expect(staleRemount).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        false,
+        'h264',
+        undefined,
+        88,
+        'viewer-d-stale',
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+
+    liveViewerIds.delete(88);
+    liveViewerIds.add(99);
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 99, 'viewer-f'),
+    ).resolves.toMatchObject({ ok: true });
+    await emitFrame({ ...firstFrame, timestampMicros: 4 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(4);
+    expect(pushH264Frame).toHaveBeenLastCalledWith(
+      99,
+      expect.objectContaining({ instanceId: instance.instanceId }),
+    );
+
     const current = actor.getOwned('session-a', instance.instanceId);
     await actor.stop({
       sessionId: current.sessionId,
@@ -1675,8 +1828,8 @@ describe('iOS Simulator host', () => {
       generation: current.generation,
       leaseId: current.lease.id,
     });
-    await emitFrame({ ...firstFrame, timestampMicros: 4 });
-    expect(pushH264Frame).toHaveBeenCalledTimes(3);
+    await emitFrame({ ...firstFrame, timestampMicros: 5 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(4);
     await host.dispose();
   });
 

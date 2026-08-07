@@ -178,6 +178,8 @@ export interface IOSSimulatorHostOptions {
   pushRouteStatus?: (status: IOSSimulatorPublicRouteStatus) => void;
   /** Main → exact owning viewer frame seam; injected in tests, fail-closed by default. */
   pushH264Frame?: (viewerWebContentsId: number, frame: IOSSimulatorLatestH264Frame) => void;
+  /** Exact viewer liveness seam used to prevent cross-window ownership replacement. */
+  isViewerWebContentsAlive?: (viewerWebContentsId: number) => boolean;
 }
 
 export interface IOSSimulatorHost {
@@ -688,6 +690,16 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         },
       });
     });
+  const isViewerWebContentsAlive =
+    options.isViewerWebContentsAlive ??
+    ((viewerWebContentsId: number) =>
+      BrowserWindow.getAllWindows().some(
+        (candidate) =>
+          !candidate.isDestroyed() &&
+          !candidate.webContents.isDestroyed() &&
+          candidate.webContents.id === viewerWebContentsId &&
+          isTrustedAppRendererWindow(candidate),
+      ));
   const h264FramePump =
     options.h264FramePump ??
     new IOSSimulatorH264FramePump({
@@ -1741,10 +1753,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           streamProfiles.delete(instance.instanceId);
           nativeStreamProfiles.delete(instance.instanceId);
           let cleanupSucceeded = await discardInstanceMedia(instance);
-          let driverCleanupSucceeded = true;
           if (driverManager) {
             await driverManager.stop(instance.instanceId).catch((error) => {
-              driverCleanupSucceeded = false;
               cleanupSucceeded = false;
               complete = false;
               logger.warn('iOS Simulator ownership reconcile could not stop driver runtime', {
@@ -1753,7 +1763,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               });
             });
           }
-          if (driverCleanupSucceeded) resourceScheduler.markStopped(instance.instanceId);
           return cleanupSucceeded;
         } finally {
           finishInstanceTeardown(instance.instanceId);
@@ -1767,20 +1776,25 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // provenance rule as detach/quit: only shut down a device Cindy or an
         // Agent booted; never mutate a user-owned external device. Cindy-created
         // devices are safe to delete after they are stopped.
+        const deviceState = device?.state.trim().toLowerCase() ?? null;
+        let deviceStopped = !device || deviceState === 'shutdown';
         let cleanupSucceeded = await releaseInstanceRuntime(instance);
-        if (
-          cleanupSucceeded &&
-          device?.state.toLowerCase() === 'booted' &&
-          (instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy')
-        ) {
-          await lifecycle.shutdownExact(instance.simulatorUdid).catch((error) => {
+        const hostOwnsBoot =
+          instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
+        let schedulerReleaseAllowed = cleanupSucceeded && (!hostOwnsBoot || deviceStopped);
+        if (cleanupSucceeded && hostOwnsBoot && !deviceStopped) {
+          try {
+            await lifecycle.shutdownExact(instance.simulatorUdid);
+            deviceStopped = true;
+            schedulerReleaseAllowed = true;
+          } catch (error) {
             cleanupSucceeded = false;
             complete = false;
             logger.warn('iOS Simulator stale binding cleanup could not shut down device', {
               instanceId: instance.instanceId,
               error: error instanceof Error ? error.message : String(error),
             });
-          });
+          }
         }
         if (instance.creationProvenance === 'cindy' && cleanupSucceeded) {
           await lifecycle.deleteExact(instance.simulatorUdid).catch((error) => {
@@ -1792,6 +1806,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             });
           });
         }
+        if (schedulerReleaseAllowed) resourceScheduler.markStopped(instance.instanceId);
         if (cleanupSucceeded) {
           actor.forget(instance.instanceId, instance.sessionId);
         } else {
@@ -1800,7 +1815,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           actor.reconcile(
             instance.instanceId,
             instance.sessionId,
-            device?.state.toLowerCase() === 'booted' ? 'ready' : 'stopped',
+            deviceStopped ? 'stopped' : 'error',
             'degraded',
             'ARCHIVED_CLEANUP_FAILED',
           );
@@ -1837,6 +1852,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             // External/preexisting devices remain untouched, but the archived
             // Session must no longer retain an unroutable ownership record.
             if (await releaseInstanceRuntime(instance)) {
+              resourceScheduler.markStopped(instance.instanceId);
               actor.forget(instance.instanceId, instance.sessionId);
             } else {
               actor.reconcile(
@@ -1851,7 +1867,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           continue;
         }
         if (session.remoteHostId || !device) {
-          await releaseInstanceRuntime(instance);
+          const runtimeReleased = await releaseInstanceRuntime(instance);
+          if (
+            runtimeReleased &&
+            (!device || device.state.trim().toLowerCase() === 'shutdown')
+          ) {
+            resourceScheduler.markStopped(instance.instanceId);
+          }
           actor.reconcile(
             instance.instanceId,
             instance.sessionId,
@@ -1861,14 +1883,30 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           );
           continue;
         }
-        if (device.state.toLowerCase() !== 'booted') {
+        const deviceState = device.state.trim().toLowerCase();
+        if (deviceState === 'shutdown') {
+          if (await releaseInstanceRuntime(instance)) {
+            resourceScheduler.markStopped(instance.instanceId);
+          }
+        } else if (deviceState !== 'booted') {
+          // Booting / Shutting Down / unknown concrete states may still own a
+          // CoreSimulator process. Tear down Cindy media but keep scheduler
+          // occupancy until a later probe proves the device is Shutdown.
           await releaseInstanceRuntime(instance);
         }
         actor.reconcile(
           instance.instanceId,
           instance.sessionId,
-          device.state.toLowerCase() === 'booted' ? 'ready' : 'stopped',
-          'healthy',
+          deviceState === 'booted'
+            ? 'ready'
+            : deviceState === 'shutdown'
+              ? 'stopped'
+              : deviceState.includes('boot')
+                ? 'booting'
+                : deviceState.includes('shutting')
+                  ? 'stopping'
+                  : 'error',
+          deviceState === 'booted' || deviceState === 'shutdown' ? 'healthy' : 'recovering',
           null,
         );
       }
@@ -2669,6 +2707,71 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     }
   }
 
+  function assertViewerClaimAvailable(
+    sessionId: string,
+    instanceId: string,
+    viewerWebContentsId?: number,
+  ): void {
+    if (viewerWebContentsId === undefined) return;
+    const activeViewer = viewerSessions.get(instanceId);
+    if (
+      activeViewer?.webContentsId !== null &&
+      activeViewer?.webContentsId !== undefined &&
+      activeViewer.webContentsId !== viewerWebContentsId &&
+      isViewerWebContentsAlive(activeViewer.webContentsId)
+    ) {
+      throw new IOSSimulatorInstanceError(
+        'INSTANCE_NOT_OWNED',
+        'This simulator already has an active viewer in another Cindy window.',
+        true,
+      );
+    }
+    if (activeViewer && activeViewer.sessionId !== sessionId) {
+      throw new IOSSimulatorInstanceError(
+        'INSTANCE_NOT_OWNED',
+        'This simulator viewer belongs to another Cindy task.',
+        true,
+      );
+    }
+  }
+
+  function reserveViewerClaim(
+    sessionId: string,
+    instanceId: string,
+    viewerWebContentsId?: number,
+    viewerToken?: string,
+  ): { assertCurrent(): void; rollback(): void } | null {
+    if (viewerWebContentsId === undefined) return null;
+    assertViewerClaimAvailable(sessionId, instanceId, viewerWebContentsId);
+    const previous = viewerSessions.get(instanceId);
+    const claim = {
+      sessionId,
+      webContentsId: viewerWebContentsId,
+      viewerToken:
+        viewerToken ??
+        (previous?.webContentsId === viewerWebContentsId ? previous.viewerToken : null),
+    };
+    viewerSessions.set(instanceId, claim);
+    return {
+      assertCurrent: () => {
+        if (viewerSessions.get(instanceId) === claim) return;
+        throw new IOSSimulatorInstanceError(
+          'INSTANCE_NOT_OWNED',
+          'This simulator viewer was replaced by a newer viewer request.',
+          true,
+        );
+      },
+      rollback: () => {
+        if (viewerSessions.get(instanceId) !== claim) return;
+        if (previous?.webContentsId === viewerWebContentsId) {
+          viewerSessions.set(instanceId, previous);
+        } else {
+          viewerSessions.delete(instanceId);
+        }
+      },
+    };
+  }
+
   function startViewerStream(
     instance: IOSSimulatorInstance,
     running: WdaRunningInstance,
@@ -2679,11 +2782,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     viewerToken?: string,
   ): IOSSimulatorFramePumpSnapshot {
     const previousViewer = viewerSessions.get(instance.instanceId);
-    viewerSessions.set(instance.instanceId, {
-      sessionId: instance.sessionId,
-      webContentsId: viewerWebContentsId ?? previousViewer?.webContentsId ?? null,
-      viewerToken: viewerToken ?? previousViewer?.viewerToken ?? null,
-    });
+    const nextViewerWebContentsId = viewerWebContentsId ?? previousViewer?.webContentsId ?? null;
+    const nextViewerToken = viewerToken ?? previousViewer?.viewerToken ?? null;
+    if (
+      !previousViewer ||
+      previousViewer.sessionId !== instance.sessionId ||
+      previousViewer.webContentsId !== nextViewerWebContentsId ||
+      previousViewer.viewerToken !== nextViewerToken
+    ) {
+      viewerSessions.set(instance.instanceId, {
+        sessionId: instance.sessionId,
+        webContentsId: nextViewerWebContentsId,
+        viewerToken: nextViewerToken,
+      });
+    }
     viewerPreferredEncodings.set(instance.instanceId, fallbackReason ? 'h264' : preferredEncoding);
     const nativeDriver = preferredEncoding === 'h264' ? nativeH264Driver(running) : null;
     if (nativeDriver) {
@@ -2770,12 +2882,16 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       viewerWebContentsId,
       viewerToken,
     ) {
+      let viewerClaimReservation: ReturnType<typeof reserveViewerClaim> = null;
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
         if (!resolved.ok) return resolved;
         assertHostActive();
         const mutationRoute = { ...route, sessionId: resolved.sessionId };
+        if (visible) {
+          assertViewerClaimAvailable(resolved.sessionId, route.instanceId, viewerWebContentsId);
+        }
         let instance = visible
           ? actor.heartbeat(mutationRoute)
           : assertViewerDeactivationRoute(mutationRoute);
@@ -2888,6 +3004,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
           instance = current;
         }
+        viewerClaimReservation = reserveViewerClaim(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
         let viewport: IOSSimulatorPublicViewport;
         try {
           viewport = await readViewport(running);
@@ -2904,6 +3026,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // more after all slow startup work so the successful response always
         // carries a live viewer route.
         instance = actor.heartbeatOwned(resolved.sessionId, instance.instanceId);
+        viewerClaimReservation?.assertCurrent();
+        if (viewerWebContentsId !== undefined) {
+          assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
+        }
         const stream = startViewerStream(
           instance,
           running,
@@ -2913,6 +3039,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           viewerWebContentsId,
           viewerToken,
         );
+        viewerClaimReservation = null;
         return {
           ok: true,
           data: {
@@ -2930,6 +3057,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         };
       } catch (error) {
         return safeHostError(error, sessionId, 'set_viewer_visibility');
+      } finally {
+        viewerClaimReservation?.rollback();
       }
     },
     async getLatestFrame(sessionId, route, viewerWebContentsId) {
@@ -3287,7 +3416,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             await mediaCapture.discardInstance(route.instanceId);
             clearVisualBaselines(route.instanceId);
             await getDriverManager().stop(route.instanceId);
-            resourceScheduler.markStopped(route.instanceId);
             screenMaps.clear(route.instanceId);
             framePump.clear(route.instanceId);
             h264FramePump.clear(route.instanceId);
@@ -3297,6 +3425,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             viewerSessions.delete(route.instanceId);
             clearViewportState(route.instanceId);
             const stopped = await actor.stop(route);
+            resourceScheduler.markStopped(route.instanceId);
             publishRouteStatusForInstance(stopped, null);
             return {
               ok: true,

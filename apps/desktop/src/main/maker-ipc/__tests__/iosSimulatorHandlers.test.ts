@@ -11,6 +11,7 @@ describe('iOS Simulator IPC handlers', () => {
   function registerTrusted(harness: IpcHarness, deps: Partial<IOSSimulatorHandlerDeps> = {}): void {
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
+      getRendererUrl: () => 'file:///app/index.html#/cc-agent/session-a',
       ...deps,
     });
   }
@@ -50,7 +51,7 @@ describe('iOS Simulator IPC handlers', () => {
     registerTrusted(harness, { getStatus });
 
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
         sessionId: ' session-a ',
       }),
     ).resolves.toMatchObject({ sessionId: 'session-a' });
@@ -66,13 +67,40 @@ describe('iOS Simulator IPC handlers', () => {
     });
   });
 
+  it('rejects cross-task status and lifecycle calls from another renderer window', async () => {
+    const harness = new IpcHarness();
+    const getStatus = vi.fn();
+    const callTool = vi.fn();
+    registerIOSSimulatorHandlers(harness, {
+      assertTrustedSender: () => undefined,
+      getRendererUrl: () => 'file:///app/index.html#/cc-agent/session-b',
+      getStatus,
+      callTool,
+    });
+
+    await expect(
+      harness.invokeFrom(18, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(
+      harness.invokeFrom(18, MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+        sessionId: 'session-a',
+        name: 'stop_instance',
+        args: { instanceId: 'instance-a', generation: 1, leaseId: 'lease-a' },
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(getStatus).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   it('validates and routes user lifecycle calls through the shared host', async () => {
     const harness = new IpcHarness();
     const callTool = vi.fn(async () => ({ ok: true as const, data: { instances: [] } }));
     registerTrusted(harness, { callTool });
 
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_CALL, {
         sessionId: 'session-a',
         name: 'attach_device',
         args: {},
@@ -81,7 +109,7 @@ describe('iOS Simulator IPC handlers', () => {
     expect(callTool).toHaveBeenCalledWith('attach_device', {}, 'session-a');
     for (const name of ['build_app', 'open_url', 'push_notification', 'delete_everything']) {
       await expect(
-        harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+        harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_CALL, {
           sessionId: 'session-a',
           name,
           args: {},
@@ -96,14 +124,14 @@ describe('iOS Simulator IPC handlers', () => {
     const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
     registerTrusted(harness, { setAgentControlGrant });
 
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
       sessionId: 'session-a',
       instanceId: 'instance-a',
       decision: 'allowed',
     });
     expect(setAgentControlGrant).toHaveBeenCalledWith('session-a', 'instance-a', 'allowed');
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
         sessionId: 'session-a',
         instanceId: 'instance-a',
         decision: 'unknown',
@@ -122,7 +150,7 @@ describe('iOS Simulator IPC handlers', () => {
       leaseId: 'lease-a',
     };
 
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, {
       ...route,
       paused: true,
     });
@@ -132,7 +160,7 @@ describe('iOS Simulator IPC handlers', () => {
       true,
     );
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, {
         ...route,
         paused: 'yes',
       }),
@@ -209,7 +237,7 @@ describe('iOS Simulator IPC handlers', () => {
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, route),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, {
         ...route,
         generation: 0,
       }),
@@ -254,7 +282,7 @@ describe('iOS Simulator IPC handlers', () => {
       generation: 3,
       leaseId: 'lease-a',
     };
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
       ...route,
       profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
       nativeProfile: { framesPerSecond: 60, scalingPercent: 70 },
@@ -266,13 +294,13 @@ describe('iOS Simulator IPC handlers', () => {
       { framesPerSecond: 60, scalingPercent: 70 },
     );
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
         ...route,
         profile: { framesPerSecond: '10', jpegQuality: 45, scalingPercent: 70 },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
         ...route,
         profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
         nativeProfile: { framesPerSecond: '60', scalingPercent: 70 },
@@ -318,7 +346,7 @@ describe('iOS Simulator IPC handlers', () => {
       }),
     ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
         ...route,
         gestureId: 'viewer-7',
         phase: 'move',

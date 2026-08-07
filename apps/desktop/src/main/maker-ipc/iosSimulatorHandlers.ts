@@ -5,6 +5,7 @@ import type {
   IOSSimulatorToolResponse,
 } from '../../shared/iosSimulatorIpc.js';
 import { IOS_SIMULATOR_RENDERER_TOOL_NAMES } from '../../shared/iosSimulatorIpc.js';
+import { atContextVisibleSessionIdsFromRendererUrl } from '../../shared/atContextRouteScope.js';
 import {
   callIOSSimulatorHostTool,
   getIOSSimulatorLatestFrame,
@@ -22,6 +23,7 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 export interface IOSSimulatorHandlerDeps {
   assertTrustedSender(event: unknown): void;
+  getRendererUrl(event: unknown): string;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   callTool(
     name: IOSSimulatorRendererToolName,
@@ -74,6 +76,7 @@ export interface IOSSimulatorHandlerDeps {
 const defaultDeps: IOSSimulatorHandlerDeps = {
   assertTrustedSender: (event) =>
     assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  getRendererUrl: readSenderWebContentsUrl,
   getStatus: getIOSSimulatorSessionStatus,
   callTool: callIOSSimulatorHostTool,
   setAgentControlGrant: setIOSSimulatorAgentControlGrant,
@@ -130,6 +133,18 @@ function readSenderWebContentsId(event: unknown): number {
   return Number(id);
 }
 
+function readSenderWebContentsUrl(event: unknown): string {
+  const getURL = (event as { sender?: { getURL?: unknown } })?.sender?.getURL;
+  if (typeof getURL !== 'function') {
+    throwIpcError('PERMISSION_DENIED', 'trusted renderer sender URL is required');
+  }
+  try {
+    return String(getURL.call((event as { sender: unknown }).sender));
+  } catch {
+    throwIpcError('PERMISSION_DENIED', 'trusted renderer sender URL is required');
+  }
+}
+
 export function registerIOSSimulatorHandlers(
   registry: IpcHandlerRegistry,
   deps: Partial<IOSSimulatorHandlerDeps> = {},
@@ -141,17 +156,26 @@ export function registerIOSSimulatorHandlers(
       return handler(event, ...args);
     });
   };
-  handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (_event, payload) => {
+  const assertSenderSession = (event: unknown, sessionId: string): number => {
+    const webContentsId = readSenderWebContentsId(event);
+    if (!atContextVisibleSessionIdsFromRendererUrl(resolved.getRendererUrl(event)).has(sessionId)) {
+      throwIpcError('PERMISSION_DENIED', 'iOS Simulator access is limited to the current task');
+    }
+    return webContentsId;
+  };
+  handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (event, payload) => {
     const sessionId = readSessionId(payload);
+    assertSenderSession(event, sessionId);
     try {
       return await resolved.getStatus(sessionId);
     } catch (error) {
       throwIpcError('INTERNAL', error instanceof Error ? error.message : String(error));
     }
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    assertSenderSession(event, sessionId);
     const name = record.name;
     const args = record.args;
     if (
@@ -169,9 +193,10 @@ export function registerIOSSimulatorHandlers(
       sessionId,
     );
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    assertSenderSession(event, sessionId);
     const instanceId = record.instanceId;
     const decision = record.decision;
     if (typeof instanceId !== 'string' || !instanceId.trim()) {
@@ -185,6 +210,7 @@ export function registerIOSSimulatorHandlers(
   handle(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    const viewerWebContentsId = assertSenderSession(event, sessionId);
     if (typeof record.visible !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'visible (boolean) required');
     }
@@ -211,7 +237,6 @@ export function registerIOSSimulatorHandlers(
       );
     }
     const route = readViewerRoute(record);
-    const viewerWebContentsId = readSenderWebContentsId(event);
     if (preferredEncoding === undefined && fallbackReason === undefined) {
       return resolved.setViewerVisibility(
         sessionId,
@@ -244,9 +269,10 @@ export function registerIOSSimulatorHandlers(
       viewerToken?.trim(),
     );
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    assertSenderSession(event, sessionId);
     if (typeof record.paused !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'paused (boolean) required');
     }
@@ -254,15 +280,17 @@ export function registerIOSSimulatorHandlers(
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, async (event, payload) => {
     const record = readRecord(payload);
+    const sessionId = readSessionId(record);
     return resolved.getLatestFrame(
-      readSessionId(record),
+      sessionId,
       readViewerRoute(record),
-      readSenderWebContentsId(event),
+      assertSenderSession(event, sessionId),
     );
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    assertSenderSession(event, sessionId);
     const profile = record.profile;
     if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
       throwIpcError('INVALID_PARAMS', 'profile must be an object');
@@ -311,6 +339,7 @@ export function registerIOSSimulatorHandlers(
   handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
+    const viewerWebContentsId = assertSenderSession(event, sessionId);
     const gestureId = record.gestureId;
     const phase = record.phase;
     if (typeof gestureId !== 'string' || !gestureId.trim() || gestureId.trim().length > 128) {
@@ -331,16 +360,11 @@ export function registerIOSSimulatorHandlers(
     ) {
       throwIpcError('INVALID_PARAMS', 'touch coordinates must be normalized');
     }
-    return resolved.updateViewerTouch(
-      sessionId,
-      readViewerRoute(record),
-      readSenderWebContentsId(event),
-      {
-        gestureId: gestureId.trim(),
-        phase,
-        xRatio: record.xRatio,
-        yRatio: record.yRatio,
-      },
-    );
+    return resolved.updateViewerTouch(sessionId, readViewerRoute(record), viewerWebContentsId, {
+      gestureId: gestureId.trim(),
+      phase,
+      xRatio: record.xRatio,
+      yRatio: record.yRatio,
+    });
   });
 }

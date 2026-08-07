@@ -33,18 +33,31 @@ class FakeSidecarProcess
   });
   readonly pid = 123;
   emitExitOnKill = true;
+  readonly killSignals: NodeJS.Signals[] = [];
+  readonly exited: Promise<void>;
+  #resolveExited!: () => void;
+
+  constructor() {
+    super();
+    this.exited = new Promise<void>((resolve) => {
+      this.#resolveExited = resolve;
+    });
+  }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killSignals.push(signal);
     if (this.emitExitOnKill) {
       this.stdout.end();
       this.stderr.end();
-      this.emit("exit", null, signal);
+      this.exit(null, signal);
     }
     return true;
   }
 
   exit(code: number | null = 1, signal: NodeJS.Signals | null = null): void {
     this.emit("exit", code, signal);
+    this.#resolveExited();
+    this.emit("close", code, signal);
   }
 }
 
@@ -178,6 +191,31 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     await channel.stop();
   });
 
+  it("waits for exit and escalates a stuck sidecar process group", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel, launcher, processes } = harness({ stopTimeoutMs: 5 });
+      await channel.start();
+      const process = processes[0]!;
+      process.emitExitOnKill = false;
+
+      const stop = channel.stop();
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+      const restart = channel.start();
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(5);
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      process.exit(null, "SIGKILL");
+      await stop;
+      await restart;
+      expect(launcher.launch).toHaveBeenCalledTimes(2);
+      await channel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("terminates the process after consecutive request timeouts", async () => {
     const { channel } = harness({
       requestTimeoutMs: 5,
@@ -201,6 +239,42 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
       IOSSimulatorNativeSidecarChannelError,
     );
     expect(channel.state).toBe("failed");
+  });
+
+  it("waits for a faulted process to close before stop or restart completes", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel, launcher, processes } = harness({ stopTimeoutMs: 5 });
+      await channel.start();
+      const process = processes[0]!;
+      process.emitExitOnKill = false;
+      const pending = channel.request(command("availability"));
+
+      process.stdout.write(new Uint8Array([0, 0, 0, 0, 255]));
+      await expect(pending).rejects.toMatchObject({ code: "PROTOCOL_ERROR" });
+      expect(channel.state).toBe("failed");
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+
+      const stop = channel.stop();
+      const restart = channel.start();
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5);
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      let settled = false;
+      void Promise.all([stop, restart]).then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      process.exit(null, "SIGKILL");
+      await stop;
+      await restart;
+      expect(launcher.launch).toHaveBeenCalledTimes(2);
+      await channel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops a stream at maxFrames and rejects stale stream identities", async () => {
@@ -303,7 +377,7 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     });
   });
 
-  it("does not let a retired process exit invalidate its replacement", async () => {
+  it("waits for a retired process before launching an isolated replacement", async () => {
     const { channel, processes } = harness();
     await channel.start();
     const retired = processes[0]!;
@@ -311,9 +385,11 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     const pending = channel.request(command("availability"));
     retired.stdout.write(new Uint8Array([0, 0, 0, 0, 255]));
     await expect(pending).rejects.toMatchObject({ code: "PROTOCOL_ERROR" });
-    await channel.restart();
-    expect(channel.state).toBe("running");
+    const restart = channel.restart();
+    await Promise.resolve();
+    expect(processes).toHaveLength(1);
     retired.exit(1, "SIGKILL");
+    await restart;
     expect(channel.state).toBe("running");
     const replacementRequest = channel.request(command("availability"));
     processes[1]!.stdout.write(

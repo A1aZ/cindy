@@ -25,6 +25,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_CRASHES = 3;
 const DEFAULT_MAX_CONSECUTIVE_TIMEOUTS = 2;
 const DEFAULT_RESTART_BASE_DELAY_MS = 250;
+const DEFAULT_STOP_TIMEOUT_MS = 2_000;
 const MAX_STDERR_TAIL_BYTES = 64 * 1024;
 const MAX_EARLY_STREAM_EVENTS_PER_STREAM = 4;
 const MAX_EARLY_STREAMS = 8;
@@ -58,6 +59,8 @@ export interface IOSSimulatorNativeSidecarManagedProcess {
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  /** Resolves only after the process and its inherited stdio handles close. */
+  readonly exited: Promise<void>;
   once(event: "error", listener: (error: Error) => void): this;
   once(
     event: "exit",
@@ -105,12 +108,16 @@ class NodeIOSSimulatorNativeSidecarManagedProcess implements IOSSimulatorNativeS
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  readonly exited: Promise<void>;
 
   constructor(readonly child: ChildProcessWithoutNullStreams) {
     this.pid = child.pid;
     this.stdin = child.stdin;
     this.stdout = child.stdout;
     this.stderr = child.stderr;
+    this.exited = new Promise<void>((resolve) => {
+      child.once("close", () => resolve());
+    });
   }
 
   once(event: "error", listener: (error: Error) => void): this;
@@ -157,6 +164,7 @@ export interface IOSSimulatorNativeSidecarChannelOptions {
   maxCrashes?: number;
   maxConsecutiveTimeouts?: number;
   restartBaseDelayMs?: number;
+  stopTimeoutMs?: number;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
 }
@@ -291,6 +299,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
       | "maxCrashes"
       | "maxConsecutiveTimeouts"
       | "restartBaseDelayMs"
+      | "stopTimeoutMs"
     >
   > &
     Pick<IOSSimulatorNativeSidecarChannelOptions, "sleep" | "now">;
@@ -314,6 +323,8 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     null;
   #earlyStreamBytes = 0;
   #stopRequested = false;
+  #stopPromise: Promise<void> | null = null;
+  #stoppingProcess: IOSSimulatorNativeSidecarManagedProcess | null = null;
 
   constructor(options: IOSSimulatorNativeSidecarChannelOptions) {
     this.#launcher = options.launcher;
@@ -324,6 +335,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         options.maxConsecutiveTimeouts ?? DEFAULT_MAX_CONSECUTIVE_TIMEOUTS,
       restartBaseDelayMs:
         options.restartBaseDelayMs ?? DEFAULT_RESTART_BASE_DELAY_MS,
+      stopTimeoutMs: options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS,
       sleep: options.sleep,
       now: options.now,
     };
@@ -337,6 +349,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
       this.#options.restartBaseDelayMs,
       "restartBaseDelayMs",
     );
+    requirePositiveInteger(this.#options.stopTimeoutMs, "stopTimeoutMs");
   }
 
   get state(): IOSSimulatorNativeSidecarChannelState {
@@ -356,6 +369,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
   }
 
   async start(): Promise<void> {
+    if (this.#stopPromise) await this.#stopPromise;
     if (this.#state === "running" && this.#process) return;
     if (this.#state === "parked") {
       throw new IOSSimulatorNativeSidecarChannelError(
@@ -502,7 +516,70 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         "Native sidecar channel stopped.",
       ),
     );
-    if (process) process.kill("SIGTERM");
+    if (process) return this.#ensureProcessClosed(process, true);
+    if (this.#stopPromise) return this.#stopPromise;
+  }
+
+  #ensureProcessClosed(
+    process: IOSSimulatorNativeSidecarManagedProcess,
+    terminate: boolean,
+  ): Promise<void> {
+    if (this.#stopPromise && this.#stoppingProcess === process) {
+      return this.#stopPromise;
+    }
+    if (this.#stopPromise) {
+      return this.#stopPromise.then(() =>
+        this.#ensureProcessClosed(process, terminate),
+      );
+    }
+    const operation = terminate
+      ? this.#terminateStoppedProcess(process)
+      : process.exited;
+    const stopPromise = operation.finally(() => {
+      if (this.#stopPromise === stopPromise) {
+        this.#stopPromise = null;
+        this.#stoppingProcess = null;
+      }
+    });
+    this.#stoppingProcess = process;
+    this.#stopPromise = stopPromise;
+    return stopPromise;
+  }
+
+  async #terminateStoppedProcess(
+    process: IOSSimulatorNativeSidecarManagedProcess,
+  ): Promise<void> {
+    const terminated = this.#waitForProcessExit(
+      process,
+      this.#options.stopTimeoutMs,
+    );
+    process.kill("SIGTERM");
+    if (await terminated) return;
+    const killed = this.#waitForProcessExit(
+      process,
+      this.#options.stopTimeoutMs,
+    );
+    process.kill("SIGKILL");
+    if (!(await killed)) await process.exited;
+  }
+
+  #waitForProcessExit(
+    process: IOSSimulatorNativeSidecarManagedProcess,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        settled = true;
+        resolve(false);
+      }, timeoutMs);
+      void process.exited.then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   request(
@@ -1028,7 +1105,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
       this.#recordCrash();
     }
     this.#rejectAll(error);
-    if (kill) process.kill("SIGTERM");
+    void this.#ensureProcessClosed(process, kill).catch(() => undefined);
   }
 
   #recordTermination(

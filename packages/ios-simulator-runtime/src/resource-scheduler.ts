@@ -142,7 +142,10 @@ export class IOSSimulatorResourceScheduler {
     this.#running.delete(instanceId);
   }
 
-  runStart<T>(instanceId: string, task: () => Promise<T>): Promise<T> {
+  runStart<T>(
+    instanceId: string,
+    task: (commitRunning: () => void) => Promise<T>,
+  ): Promise<T> {
     const previous = this.#startTail;
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
@@ -154,7 +157,8 @@ export class IOSSimulatorResourceScheduler {
       .then(async () => {
         try {
           if (!this.#running.has(instanceId)) await this.#assertAdmission();
-          const result = await task();
+          const commitRunning = () => this.#running.add(instanceId);
+          const result = await task(commitRunning);
           this.#running.add(instanceId);
           return result;
         } finally {

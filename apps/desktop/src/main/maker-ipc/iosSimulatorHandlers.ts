@@ -61,6 +61,7 @@ export interface IOSSimulatorHandlerDeps {
   updateViewerTouch(
     sessionId: string,
     route: { instanceId: string; generation: number; leaseId: string },
+    viewerWebContentsId: number,
     touch: {
       gestureId: string;
       phase: 'begin' | 'move' | 'end' | 'cancel';
@@ -307,7 +308,7 @@ export function registerIOSSimulatorHandlers(
       nativeProfile,
     );
   });
-  handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     const gestureId = record.gestureId;
@@ -330,11 +331,16 @@ export function registerIOSSimulatorHandlers(
     ) {
       throwIpcError('INVALID_PARAMS', 'touch coordinates must be normalized');
     }
-    return resolved.updateViewerTouch(sessionId, readViewerRoute(record), {
-      gestureId: gestureId.trim(),
-      phase,
-      xRatio: record.xRatio,
-      yRatio: record.yRatio,
-    });
+    return resolved.updateViewerTouch(
+      sessionId,
+      readViewerRoute(record),
+      readSenderWebContentsId(event),
+      {
+        gestureId: gestureId.trim(),
+        phase,
+        xRatio: record.xRatio,
+        yRatio: record.yRatio,
+      },
+    );
   });
 }

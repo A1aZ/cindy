@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -174,7 +175,7 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
 
   const itMac = process.platform === "darwin" ? it : it.skip;
   itMac(
-    "holds the production advisory lock until the parent descriptor closes",
+    "holds the production advisory lock on Main's descriptor until it closes",
     async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
       try {
@@ -183,7 +184,30 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
         const second = new IOSSimulatorOwnershipRegistryFile(filePath);
         expect(first.acquireWriterSync()).toBe(true);
         expect(second.acquireWriterSync()).toBe(false);
+        const contender = `
+          const { closeSync, constants, openSync } = require("node:fs");
+          try {
+            const fd = openSync(
+              process.argv[1],
+              constants.O_CREAT | constants.O_RDWR | constants.O_NONBLOCK | 0x20,
+              0o600,
+            );
+            closeSync(fd);
+          } catch (error) {
+            process.exit(error?.code === "EAGAIN" || error?.code === "EWOULDBLOCK" ? 75 : 1);
+          }
+        `;
+        expect(
+          spawnSync(process.execPath, ["-e", contender, first.lockPath], {
+            stdio: "ignore",
+          }).status,
+        ).toBe(75);
         first.releaseWriterSync();
+        expect(
+          spawnSync(process.execPath, ["-e", contender, first.lockPath], {
+            stdio: "ignore",
+          }).status,
+        ).toBe(0);
         expect(second.acquireWriterSync()).toBe(true);
         second.releaseWriterSync();
       } finally {

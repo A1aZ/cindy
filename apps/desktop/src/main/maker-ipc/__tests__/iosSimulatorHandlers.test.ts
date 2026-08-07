@@ -290,7 +290,7 @@ describe('iOS Simulator IPC handlers', () => {
       generation: 3,
       leaseId: 'lease-a',
     };
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
       ...route,
       gestureId: 'viewer-7',
       phase: 'move',
@@ -300,6 +300,7 @@ describe('iOS Simulator IPC handlers', () => {
     expect(updateViewerTouch).toHaveBeenCalledWith(
       'session-a',
       { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
+      17,
       {
         gestureId: 'viewer-7',
         phase: 'move',
@@ -307,6 +308,15 @@ describe('iOS Simulator IPC handlers', () => {
         yRatio: 0.75,
       },
     );
+    await expect(
+      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
+        ...route,
+        gestureId: 'viewer-7',
+        phase: 'move',
+        xRatio: 0.25,
+        yRatio: 0.75,
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
     await expect(
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, {
         ...route,

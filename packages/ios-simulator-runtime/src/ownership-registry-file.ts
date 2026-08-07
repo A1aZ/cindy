@@ -1,7 +1,7 @@
-import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
+  constants as fsConstants,
   mkdirSync,
   openSync,
   readFileSync,
@@ -15,6 +15,8 @@ import { IOSSimulatorInstanceError } from "./instance-errors.js";
 import type { IOSSimulatorInstance } from "./instance-types.js";
 
 const REGISTRY_VERSION = 1;
+// Darwin-only flag from <sys/fcntl.h>. Node does not expose O_EXLOCK.
+const DARWIN_O_EXLOCK = 0x00000020;
 
 export interface IOSSimulatorRegistrySnapshot {
   version: 1;
@@ -32,7 +34,7 @@ export type IOSSimulatorRegistryWriterLeaseFactory = (
 ) => IOSSimulatorRegistryWriterLease | null;
 
 export interface IOSSimulatorOwnershipRegistryFileOptions {
-  /** Cross-platform deterministic seam; production uses macOS lockf. */
+  /** Cross-platform deterministic seam; production uses Darwin O_EXLOCK. */
   acquireWriterLease?: IOSSimulatorRegistryWriterLeaseFactory;
 }
 
@@ -106,10 +108,9 @@ function parseSnapshot(value: unknown): IOSSimulatorInstance[] {
 }
 
 /**
- * macOS `lockf` uses BSD flock semantics. Acquiring through an inherited file
- * descriptor leaves the lock attached to the parent's open file description
- * after the short-lived lockf process exits. Closing the descriptor (including
- * process exit/crash) releases the lease without stale-file deletion races.
+ * Darwin can atomically acquire a BSD flock while opening via O_EXLOCK. The
+ * resulting descriptor is held directly by Electron Main for its lifetime;
+ * close (including process exit/crash) releases it without stale-file races.
  */
 function acquireDarwinWriterLease(
   lockPath: string,
@@ -117,14 +118,14 @@ function acquireDarwinWriterLease(
   if (process.platform !== "darwin") return null;
   let fd: number | null = null;
   try {
-    fd = openSync(lockPath, "a+", 0o600);
-    const result = spawnSync("/usr/bin/lockf", ["-s", "-t", "0", "3"], {
-      stdio: ["ignore", "ignore", "ignore", fd],
-    });
-    if (result.status !== 0) {
-      closeSync(fd);
-      return null;
-    }
+    fd = openSync(
+      lockPath,
+      fsConstants.O_CREAT |
+        fsConstants.O_RDWR |
+        fsConstants.O_NONBLOCK |
+        DARWIN_O_EXLOCK,
+      0o600,
+    );
     let held = true;
     return {
       isHeld: () => held,

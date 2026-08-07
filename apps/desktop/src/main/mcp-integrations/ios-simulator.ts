@@ -230,6 +230,7 @@ export interface IOSSimulatorHost {
   updateViewerTouch(
     sessionId: string,
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+    viewerWebContentsId: number,
     touch: {
       gestureId: string;
       phase: 'begin' | 'move' | 'end' | 'cancel';
@@ -2648,6 +2649,26 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     return nativeH264Driver(running);
   }
 
+  function assertCurrentViewer(
+    sessionId: string,
+    instanceId: string,
+    viewerWebContentsId: number,
+  ): void {
+    const viewer = viewerSessions.get(instanceId);
+    if (
+      !viewer ||
+      viewer.sessionId !== sessionId ||
+      viewer.webContentsId === null ||
+      viewer.webContentsId !== viewerWebContentsId
+    ) {
+      throw new IOSSimulatorInstanceError(
+        'INSTANCE_NOT_OWNED',
+        'This simulator viewer is not owned by the current Cindy window.',
+        true,
+      );
+    }
+  }
+
   function startViewerStream(
     instance: IOSSimulatorInstance,
     running: WdaRunningInstance,
@@ -2838,8 +2859,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             return viewerRouteRefreshResult(instance);
           }
           try {
-            running = await resourceScheduler.runStart(instance.instanceId, () =>
-              ensureDriver(instance, environment),
+            running = await resourceScheduler.runStart(
+              instance.instanceId,
+              async (commitRunning) => {
+                commitRunning();
+                return ensureDriver(instance, environment);
+              },
             );
           } catch (error) {
             if (isInstanceError(error, 'STALE_GENERATION')) {
@@ -2913,19 +2938,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         const resolved = await resolveSession(sessionId);
         if (!resolved.ok) return resolved;
         assertHostActive();
-        const viewer = viewerSessions.get(route.instanceId);
-        if (
-          !viewer ||
-          viewer.sessionId !== resolved.sessionId ||
-          viewer.webContentsId === null ||
-          viewer.webContentsId !== viewerWebContentsId
-        ) {
-          return {
-            ok: false,
-            errorCode: 'INSTANCE_NOT_OWNED',
-            message: 'This simulator viewer is not owned by the current Cindy window.',
-          };
-        }
+        assertCurrentViewer(resolved.sessionId, route.instanceId, viewerWebContentsId);
         let instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
         instance = await reconcileLiveDevice(instance);
         assertHostActive();
@@ -3040,17 +3053,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, 'set_agent_mutation_paused');
       }
     },
-    async updateViewerTouch(sessionId, route, touch) {
+    async updateViewerTouch(sessionId, route, viewerWebContentsId, touch) {
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
         if (!resolved.ok) return resolved;
         assertHostActive();
+        assertCurrentViewer(resolved.sessionId, route.instanceId, viewerWebContentsId);
         const mutationRoute = { ...route, sessionId: resolved.sessionId };
         await runHostMutation(
           mutationRoute,
           { sessionId: resolved.sessionId, origin: 'user' },
           async (instance, signal) => {
+            assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
             const running = requireDriver(instance.instanceId);
             const nativeInput = running.driverRouter?.continuousInput();
             if (!nativeInput) {
@@ -3061,6 +3076,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               );
             }
             const { viewer, driver } = await currentViewports(running);
+            assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
             const driverPoint = pointFromViewer(
               { xRatio: touch.xRatio, yRatio: touch.yRatio },
               viewer,
@@ -3215,12 +3231,35 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               message: safeEnvironment.error ?? 'iOS Simulator is not ready.',
             };
           }
-          const instance = await resourceScheduler.runStart(route.instanceId, async () => {
-            assertHostActive();
-            const started = await actor.start(route);
-            await ensureDriver(started, environment);
-            return actor.heartbeatOwned(sessionId, started.instanceId);
-          });
+          const instance = await resourceScheduler.runStart(
+            route.instanceId,
+            async (commitRunning) => {
+              assertHostActive();
+              const starting = actor.getOwned(sessionId, route.instanceId);
+              try {
+                const started = await actor.start(route);
+                commitRunning();
+                await ensureDriver(started, environment);
+                return actor.heartbeatOwned(sessionId, started.instanceId);
+              } catch (error) {
+                // simctl can boot the device and then fail while waiting for
+                // readiness. Preserve the real resource occupancy even when
+                // actor.start() never returns its ready snapshot.
+                try {
+                  const device = await lifecycle.findExact(starting.simulatorUdid);
+                  if (device && device.state.trim().toLowerCase() !== 'shutdown') {
+                    commitRunning();
+                  }
+                } catch {
+                  // An ambiguous probe cannot prove that CoreSimulator
+                  // released the resource. Fail closed while preserving the
+                  // original startup failure as the authoritative error.
+                  commitRunning();
+                }
+                throw error;
+              }
+            },
+          );
           completeInstanceActivation(instance, activationEpoch);
           screenMaps.clear(instance.instanceId);
           framePump.clear(instance.instanceId);
@@ -4739,7 +4778,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 ? existingActivationEpoch
                 : captureInstanceActivation(instance.instanceId);
             if (instance.lifecycleState === 'ready') {
-              await resourceScheduler.runStart(instance.instanceId, async () => {
+              await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+                commitRunning();
                 await ensureDriver(instance, environment);
               });
             }
@@ -4938,6 +4978,7 @@ export function setIOSSimulatorViewerStreamProfile(
 export function updateIOSSimulatorViewerTouch(
   sessionId: string,
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+  viewerWebContentsId: number,
   touch: {
     gestureId: string;
     phase: 'begin' | 'move' | 'end' | 'cancel';
@@ -4945,7 +4986,7 @@ export function updateIOSSimulatorViewerTouch(
     yRatio: number;
   },
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.updateViewerTouch(sessionId, route, touch);
+  return defaultIOSSimulatorHost.updateViewerTouch(sessionId, route, viewerWebContentsId, touch);
 }
 
 export interface IOSSimulatorMcpDepsOptions {

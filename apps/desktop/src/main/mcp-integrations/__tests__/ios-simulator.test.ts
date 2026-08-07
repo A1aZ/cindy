@@ -8,6 +8,7 @@ import {
   createIOSSimulatorNativeDevelopmentAdmissionPolicy,
   evaluateIOSSimulatorNativeCapabilityAdmission,
   IOSSimulatorInstanceActor,
+  IOSSimulatorInstanceError,
   IOSSimulatorOwnershipStore,
   IOSSimulatorProjectBuildError,
   IOSSimulatorResourceScheduler,
@@ -2788,16 +2789,25 @@ describe('iOS Simulator host', () => {
       lifecycle,
     });
     const requestViewerFocus = vi.fn();
+    const resourceScheduler = testResourceScheduler();
+    const driverManager = {
+      get: vi.fn(() => null),
+      start: vi.fn(async (options: { instanceId: string; simulatorUdid: string }) => {
+        return {
+          instanceId: options.instanceId,
+          simulatorUdid: options.simulatorUdid,
+          pid: 42,
+          driver: {},
+          driverSessionId: 'wda-session',
+        } as unknown as WdaRunningInstance;
+      }),
+      stop: vi.fn(async () => undefined),
+    };
+    driverManager.start.mockRejectedValueOnce(new WdaError('UNREACHABLE', 'driver failed'));
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
-      driverManager: {
-        get: vi.fn(() => null),
-        start: vi.fn(async () => {
-          throw new WdaError('UNREACHABLE', 'driver failed');
-        }),
-        stop: vi.fn(async () => undefined),
-      },
+      driverManager,
       requestViewerFocus,
       runtime: {
         inspect: vi.fn(async () => ({
@@ -2807,7 +2817,7 @@ describe('iOS Simulator host', () => {
       },
       getSession: vi.fn(async (id) => localSession(id)),
       resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
-      resourceScheduler: testResourceScheduler(),
+      resourceScheduler,
     });
 
     await host.callTool(
@@ -2831,7 +2841,100 @@ describe('iOS Simulator host', () => {
       errorCode: 'DRIVER_DISCONNECTED',
     });
     expect(requestViewerFocus).not.toHaveBeenCalled();
+    expect(resourceScheduler.runningCount()).toBe(1);
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    const retryInstance = actor.list('failed-session')[0]!;
+    expect(retryInstance).toMatchObject({
+      lifecycleState: 'ready',
+      healthState: 'degraded',
+      errorCode: 'WDA_UNAVAILABLE',
+    });
+    await expect(
+      host.callTool(
+        'start_instance',
+        {
+          instanceId: retryInstance.instanceId,
+          generation: retryInstance.generation,
+          leaseId: retryInstance.lease.id,
+        },
+        { sessionId: 'failed-session', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(lifecycle.bootExact).toHaveBeenCalledOnce();
+    expect(driverManager.start).toHaveBeenCalledTimes(2);
+    expect(resourceScheduler.runningCount()).toBe(1);
   });
+
+  it.each(['booting', 'probe-error'] as const)(
+    'keeps scheduler occupancy when readiness fails with a %s exact probe',
+    async (probeMode) => {
+      const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
+      const bootingDevice = { ...READY_REPORT.devices[0]!, state: 'Booting' as const };
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(async () => {
+          if (probeMode === 'probe-error') throw new Error('simctl probe failed');
+          return bootingDevice;
+        }),
+        bootExact: vi.fn(async () => {
+          throw new IOSSimulatorInstanceError(
+            'SIMULATOR_BOOT_TIMEOUT',
+            'Device boot started but readiness timed out.',
+            true,
+          );
+        }),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      };
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore(),
+        lifecycle,
+      });
+      const resourceScheduler = testResourceScheduler();
+      const driverManager = {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+      };
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        driverManager,
+        runtime: {
+          inspect: vi.fn(async () => ({ ...READY_REPORT, devices: [shutdownDevice] })),
+        },
+        getSession: vi.fn(async (id) => localSession(id)),
+        resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+        resourceScheduler,
+        deviceLivenessIntervalMs: 0,
+      });
+
+      await host.callTool(
+        'attach_device',
+        { udid: shutdownDevice.udid },
+        { sessionId: 'boot-timeout-session', origin: 'user' },
+      );
+      const attached = actor.list('boot-timeout-session')[0]!;
+      await expect(
+        host.callTool(
+          'start_instance',
+          {
+            instanceId: attached.instanceId,
+            generation: attached.generation,
+            leaseId: attached.lease.id,
+          },
+          { sessionId: 'boot-timeout-session', origin: 'user' },
+        ),
+      ).resolves.toMatchObject({ ok: false, errorCode: 'SIMULATOR_BOOT_TIMEOUT' });
+      expect(resourceScheduler.runningCount()).toBe(1);
+      expect(driverManager.start).not.toHaveBeenCalled();
+      expect(actor.list('boot-timeout-session')[0]).toMatchObject({
+        lifecycleState: 'error',
+        errorCode: 'SIMULATOR_BOOT_TIMEOUT',
+      });
+      await host.dispose();
+    },
+  );
 
   it('cancels an active build before detaching and releasing scheduler capacity', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
@@ -3227,6 +3330,9 @@ describe('iOS Simulator host', () => {
       data: { profile: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 } },
     });
     await expect(
+      host.setViewerVisibility('session-a', route, true, 'jpeg', undefined, 17, 'viewer-token'),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
       host.callTool('stop_instance', route, { sessionId: 'session-a', origin: 'agent' }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'DEVICE_CONTROL_NOT_GRANTED' });
     await expect(
@@ -3605,7 +3711,16 @@ describe('iOS Simulator host', () => {
     expect(swipeCall[3]).toBe(250);
     nativeInputEnabled = true;
     await expect(
-      host.updateViewerTouch('session-a', route, {
+      host.updateViewerTouch('session-a', route, 18, {
+        gestureId: 'viewer-1',
+        phase: 'begin',
+        xRatio: 0.1,
+        yRatio: 0.2,
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INSTANCE_NOT_OWNED' });
+    expect(nativeInput.beginTouch).not.toHaveBeenCalled();
+    await expect(
+      host.updateViewerTouch('session-a', route, 17, {
         gestureId: 'viewer-1',
         phase: 'begin',
         xRatio: 0.1,
@@ -3613,7 +3728,7 @@ describe('iOS Simulator host', () => {
       }),
     ).resolves.toMatchObject({ ok: true });
     await expect(
-      host.updateViewerTouch('session-a', route, {
+      host.updateViewerTouch('session-a', route, 17, {
         gestureId: 'viewer-1',
         phase: 'move',
         xRatio: 0.5,
@@ -3621,7 +3736,7 @@ describe('iOS Simulator host', () => {
       }),
     ).resolves.toMatchObject({ ok: true });
     await expect(
-      host.updateViewerTouch('session-a', route, {
+      host.updateViewerTouch('session-a', route, 17, {
         gestureId: 'viewer-1',
         phase: 'end',
         xRatio: 0.9,

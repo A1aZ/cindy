@@ -115,6 +115,29 @@ describe("IOSSimulatorResourceScheduler", () => {
     );
   });
 
+  it("keeps a booted instance admitted when later startup work fails", async () => {
+    const scheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 1,
+      hardLimit: 1,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+
+    await expect(
+      scheduler.runStart("a", async (commitRunning) => {
+        commitRunning();
+        throw new Error("driver failed");
+      }),
+    ).rejects.toThrow("driver failed");
+    expect(scheduler.runningCount()).toBe(1);
+    await expect(
+      scheduler.runStart("b", async () => undefined),
+    ).rejects.toMatchObject({ code: "RESOURCE_LIMIT_REACHED" });
+    await expect(
+      scheduler.runStart("a", async () => "recovered"),
+    ).resolves.toBe("recovered");
+    expect(scheduler.runningCount()).toBe(1);
+  });
+
   it("uses a hard architectural cap of four", async () => {
     const scheduler = new IOSSimulatorResourceScheduler({
       softLimit: 4,

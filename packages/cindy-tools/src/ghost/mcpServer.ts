@@ -108,7 +108,8 @@ const D_GHOST_FORGE_PACK = [
 ].join("\n");
 
 /**
- * 花名册单条自述截断上限与 manifest 的 description / whenToUse 校验同源。
+ * 花名册 recall 召回线索(whenToUse 优先、description 回落)的截断上限,
+ * 与 manifest 的 description / whenToUse 校验同源。
  * 正常路径 manifest 已保证不超限；slice 仅作防御，避免异常数据撑爆缓存前缀。
  */
 const ROSTER_DESC_MAX = GHOST_MANIFEST_SUMMARY_MAX_CHARS;

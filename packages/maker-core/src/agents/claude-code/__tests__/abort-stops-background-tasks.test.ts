@@ -2169,6 +2169,52 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('并发 cancellation rebuild 只创建一个 Query 和一条事件流', async () => {
+    const { handle, stream, events, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit(turnResult('waiting for task'));
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+
+    const buildDeferred = createDeferred<void>();
+    const buildReplacement = sdkMock.query.getMockImplementation();
+    if (!buildReplacement) throw new Error('query mock implementation is unavailable');
+    sdkMock.query.mockImplementationOnce((options: unknown) =>
+      buildDeferred.promise.then(() => buildReplacement(options)),
+    );
+
+    const firstPreview = handle.previewRewindFiles?.('user-uuid-1');
+    await waitFor(() => sdkMock.query.mock.calls.length === 2, 'replacement query build started');
+    const secondPreview = handle.previewRewindFiles?.('user-uuid-2');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(sdkMock.query).toHaveBeenCalledTimes(2);
+    expect(fakeQueries).toHaveLength(1);
+    expect(fakeQueries[0]?.close).toHaveBeenCalledTimes(1);
+
+    buildDeferred.resolve(undefined);
+    await Promise.all([firstPreview, secondPreview]);
+
+    expect(sdkMock.query).toHaveBeenCalledTimes(2);
+    expect(fakeQueries).toHaveLength(2);
+    expect(fakeQueries[0]?.close).toHaveBeenCalledTimes(1);
+    expect(fakeQueries[1]?.rewindFiles).toHaveBeenCalledTimes(2);
+
+    await handle.send({ type: 'user', content: 'send after concurrent previews' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('concurrent preview follow-up complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'follow-up terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'follow-up turn settled');
+    expect(events.filter(isProductTerminal)).toHaveLength(2);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('Stop 后直接 commitRewindFiles 会在可用 Query 上回滚并保留后续重建状态', async () => {
     const { handle, stream, events, fakeQueries } = await startSessionWithStream();
 

@@ -4284,6 +4284,8 @@ export class ClaudeCodeAgent extends BaseAgent {
     // onAccepted 已持久化/ack 消息,抛普通 Error 会把瞬时重建变成孤儿用户消息(desktop
     // 只对 SESSION_RUNNING 前缀 requeue)。恢复结束(成功或失败)后 resolve 放行。
     let idleResumeRebuildGate: Promise<void> | null = null;
+    // Idle-resume recovery and cancelled-continuation rebuilds have independent gates.
+    let cancellationRebuildGate: Promise<void> | null = null;
     // runtime control request 可写性判定: commitRewindFiles 后旧 Query 已 close、新 Query
     // 等下一次 send 重建;或 bridge Stop/watchdog 已 close 当前 Query、等待下一次
     // send 从同一 rewind point 重建。这些窗口里对 q 发 control request 会抛
@@ -4373,71 +4375,84 @@ export class ClaudeCodeAgent extends BaseAgent {
       signal?: AbortSignal,
       options?: { queueCompactBridge?: boolean },
     ): Promise<boolean> {
-      if (!continuationCancellationRequiresQueryRebuild) return false;
-      const staleQuery = q;
-      const runtimeSnapshot: QueryRuntimeSnapshot = {
-        model: mutableModel,
-        effort: mutableEffort,
-        fastMode: mutableFastMode,
-        sdkPermissionMode: currentTurnSdkPermissionMode(),
-      };
-      acceptingRebuiltSend = true;
-      inputQueue.end();
-      inputQueue = createAsyncQueue<SdkUserInput>();
-      abortController = new AbortController();
-      runtimeState.lastResultUsageAggregate = null;
-      rewindTransitionQueries.add(staleQuery);
-      const recordedClose = canceledQueryClosePromises.get(staleQuery);
-      if (recordedClose) {
-        try {
-          await recordedClose;
-        } catch (error) {
-          log.warn('cancelled continuation query close rejected before rebuild', { error: String(error) });
-        }
-      } else {
-        try {
-          await Promise.resolve(staleQuery.close());
-        } catch (e) {
-          log.warn('cancelled continuation query close threw before rebuild', { error: String(e) });
-        }
+      while (cancellationRebuildGate) {
+        await cancellationRebuildGate;
       }
+      if (!continuationCancellationRequiresQueryRebuild) return false;
+
+      let releaseCancellationRebuildGate: (() => void) | undefined;
+      cancellationRebuildGate = new Promise<void>((resolve) => {
+        releaseCancellationRebuildGate = resolve;
+      });
       try {
-        q = await buildQuery({
-          permissionMode: runtimeSnapshot.sdkPermissionMode,
-          fresh: true,
-        });
-        if (signal?.aborted) {
-          inputQueue.end();
-          rewindTransitionQueries.add(q);
+        const staleQuery = q;
+        const runtimeSnapshot: QueryRuntimeSnapshot = {
+          model: mutableModel,
+          effort: mutableEffort,
+          fastMode: mutableFastMode,
+          sdkPermissionMode: currentTurnSdkPermissionMode(),
+        };
+        acceptingRebuiltSend = true;
+        inputQueue.end();
+        inputQueue = createAsyncQueue<SdkUserInput>();
+        abortController = new AbortController();
+        runtimeState.lastResultUsageAggregate = null;
+        rewindTransitionQueries.add(staleQuery);
+        const recordedClose = canceledQueryClosePromises.get(staleQuery);
+        if (recordedClose) {
           try {
-            await Promise.resolve(q.close());
-          } catch (e) {
-            log.warn('cancelled continuation rebuild close threw after send cancellation', {
-              error: String(e),
-            });
+            await recordedClose;
+          } catch (error) {
+            log.warn('cancelled continuation query close rejected before rebuild', { error: String(error) });
           }
-          throw new Error('Claude send cancelled before acceptance');
+        } else {
+          try {
+            await Promise.resolve(staleQuery.close());
+          } catch (e) {
+            log.warn('cancelled continuation query close threw before rebuild', { error: String(e) });
+          }
         }
-        startForwardLoop(q);
-        notifySupportedModels(q);
-        await replayRuntimeDrift(runtimeSnapshot, 'cancelled continuation rebuild');
-        // Cancellation rebuilds used by send need the compact→user bridge for deferred
-        // model/window drift. Rewind preview/commit use the same fresh-query isolation but
-        // must not start a product turn or inject /compact before rewindFiles runs.
-        const skipCompactBridge = options?.queueCompactBridge === false;
-        const bridgeCompactQueued = skipCompactBridge
-          ? false
-          : queueAutoCompactBridge('cancellation');
-        // Preview/commit must not generate, but a deferred compact caused by a
-        // blocked model/window switch must survive until the next send. Keep
-        // the tombstone only for that case; otherwise the fresh Query is ready
-        // and the cancellation rebuild state can be cleared normally.
-        continuationCancellationRequiresQueryRebuild = skipCompactBridge
-          ? shouldRearmAutoCompactAfterRewindControl()
-          : false;
-        return bridgeCompactQueued;
+        try {
+          q = await buildQuery({
+            permissionMode: runtimeSnapshot.sdkPermissionMode,
+            fresh: true,
+          });
+          if (signal?.aborted) {
+            inputQueue.end();
+            rewindTransitionQueries.add(q);
+            try {
+              await Promise.resolve(q.close());
+            } catch (e) {
+              log.warn('cancelled continuation rebuild close threw after send cancellation', {
+                error: String(e),
+              });
+            }
+            throw new Error('Claude send cancelled before acceptance');
+          }
+          startForwardLoop(q);
+          notifySupportedModels(q);
+          await replayRuntimeDrift(runtimeSnapshot, 'cancelled continuation rebuild');
+          // Cancellation rebuilds used by send need the compact→user bridge for deferred
+          // model/window drift. Rewind preview/commit use the same fresh-query isolation but
+          // must not start a product turn or inject /compact before rewindFiles runs.
+          const skipCompactBridge = options?.queueCompactBridge === false;
+          const bridgeCompactQueued = skipCompactBridge
+            ? false
+            : queueAutoCompactBridge('cancellation');
+          // Preview/commit must not generate, but a deferred compact caused by a
+          // blocked model/window switch must survive until the next send. Keep
+          // the tombstone only for that case; otherwise the fresh Query is ready
+          // and the cancellation rebuild state can be cleared normally.
+          continuationCancellationRequiresQueryRebuild = skipCompactBridge
+            ? shouldRearmAutoCompactAfterRewindControl()
+            : false;
+          return bridgeCompactQueued;
+        } finally {
+          acceptingRebuiltSend = false;
+        }
       } finally {
-        acceptingRebuiltSend = false;
+        cancellationRebuildGate = null;
+        releaseCancellationRebuildGate?.();
       }
     }
     const handle: AgentSessionHandle = {

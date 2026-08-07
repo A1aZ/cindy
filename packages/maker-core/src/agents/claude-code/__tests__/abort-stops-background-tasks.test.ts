@@ -1507,6 +1507,70 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('Stop closes a foreground Query when a wake stop is unconfirmed', async () => {
+    const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'foreground turn with wake task' });
+    stream.emit(taskStarted('task-unconfirmed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
+    await handle.abort();
+
+    // The ACK succeeds, so the old provider process is retired even though its
+    // stopTask RPC was rejected. A synthetic foreground terminal replaces the
+    // interrupted result that close() intentionally prevents from arriving.
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic foreground terminal observed');
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.isTurnRunning?.()).toBe(false);
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
+
+    const eventCountAfterStop = events.length;
+    stream.emit(assistantText('late old-query assistant'));
+    stream.emit(turnResult('late old-query result'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events).toHaveLength(eventCountAfterStop);
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+
+    await handle.send({ type: 'user', content: 'fresh turn after query close' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('fresh turn complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'fresh terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'fresh turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('natural foreground result before Stop ACK is not duplicated when the Query closes', async () => {
+    const { handle, stream, events, fakeQuery } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'natural result races Stop' });
+    stream.emit(taskStarted('task-unconfirmed', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+
+    fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
+    const interrupt = createDeferred<void>();
+    fakeQuery.interrupt.mockImplementationOnce(() => interrupt.promise);
+    const abortPromise = handle.abort();
+    await waitFor(() => fakeQuery.interrupt.mock.calls.length === 1, 'interrupt dispatched');
+
+    // The provider's natural success result wins before interrupt ACK. The
+    // later close must not synthesize a second product terminal.
+    stream.emit(turnResult('natural completion'));
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'natural terminal observed');
+    interrupt.resolve(undefined);
+    await abortPromise;
+
+    expect(fakeQuery.close).toHaveBeenCalledTimes(1);
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('stopTask rejection does not leak an awaiting claim after interrupt succeeds', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 
@@ -1572,7 +1636,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
-  it('只退休 stopTask 成功的 wake 任务，失败任务保留并正常记账', async () => {
+  it('Stop 成功后关闭 Query，stopTask 失败任务不再留在本地表', async () => {
     const { handle, stream, events, fakeQuery } = await startSessionWithStream();
 
     await handle.send({ type: 'user', content: 'spawn parallel background work' });
@@ -1596,9 +1660,11 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     failedStop.reject(new Error('task still running remotely'));
     await abortPromise;
 
-    // Only the fulfilled stopTask is retired. The rejected task remains visible
-    // until its provider completion arrives, so it cannot continue untracked.
-    expect(handle.listBackgroundTasks?.().map((task) => task.taskId)).toEqual(['task-failed']);
+    // Stop now closes the Query as well as installing the cancellation fence.
+    // A rejected stopTask cannot continue in a closed provider process, so its
+    // local row is cleared instead of waiting for a notification that close()
+    // guarantees will never arrive.
+    expect(handle.listBackgroundTasks?.()).toEqual([]);
 
     stream.emit(interruptedTurnResult());
     await waitFor(() => events.filter(isProductTerminal).length === 1, 'stopped foreground terminal observed');
@@ -1624,7 +1690,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
-  it('stopTask reject 后允许本代 success result 收口并封住迟到续跑', async () => {
+  it('stopTask reject 后关闭 Query，合成终态并封住迟到续跑', async () => {
     const { handle, stream, events, fakeQuery, fakeQueries } = await startSessionWithStream();
 
     await handle.send({ type: 'user', content: 'spawn background work' });
@@ -1633,14 +1699,15 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
 
     fakeQuery.stopTask!.mockRejectedValueOnce(new Error('remote stop rejected'));
     await handle.abort();
-    // The foreground turn can naturally finish before the interrupt takes
-    // effect; its success result must still settle this fenced generation.
+    // Stop ACK retires this Query immediately; the synthetic terminal settles
+    // the foreground turn while the old provider tail is discarded.
     stream.emit(turnResult('natural completion raced with stop'));
     await waitFor(() => events.filter(isProductTerminal).length === 1, 'foreground stop terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'foreground stop settled');
 
-    // The terminal task notification remains visible and clears local task
-    // accounting; only the same-generation automatic continuation tail is fenced.
+    // Terminal task notifications still pass through the retired-query path
+    // and clear local task accounting; only the automatic continuation tail is
+    // discarded.
     stream.emit(taskNotification('task-unconfirmed', 'completed'));
     await waitFor(
       () => taskEvents(events).some((event) =>
@@ -1668,7 +1735,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
-  it('老 daemon 无 stopTask 时也为未确认 wake 安装栅栏并在下一 send 换代', async () => {
+  it('老 daemon 无 stopTask 时关闭 Query 并在下一 send 换代', async () => {
     const { handle, stream, events, fakeQueries } = await startSessionWithStream({ omitStopTask: true });
 
     await handle.send({ type: 'user', content: 'spawn background work' });
@@ -1676,6 +1743,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await waitFor(() => taskEvents(events).length >= 1, 'legacy wake task observed');
 
     await handle.abort();
+    expect(fakeQueries[0]?.close).toHaveBeenCalledTimes(1);
     stream.emit(interruptedTurnResult());
     await waitFor(() => events.filter(isProductTerminal).length === 1, 'legacy stop terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'legacy stop settled');
@@ -1948,7 +2016,7 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     },
   );
 
-  it('synthetic cancellation 后先 rewind 只重建一个 Query', async () => {
+  it('synthetic cancellation 后先 rewind 保持 checkpoint 重建链路', async () => {
     const { handle, stream, events, fakeQueries } = await startSessionWithStream();
 
     await handle.send({ type: 'user', content: 'spawn background work' });
@@ -1963,12 +2031,123 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
 
     await handle.commitRewindFiles?.('user-uuid-1', 'assistant-uuid-1');
     await handle.send({ type: 'user', content: 'send after rewind' });
-    expect(fakeQueries).toHaveLength(2);
-    expect(fakeQueries[1]?.close).not.toHaveBeenCalled();
+    // Cancellation Stop closed query 0. Direct commit first installs query 1
+    // solely to access rewindFiles, then closes it and the normal rewind send
+    // installs query 2 at the checkpoint; three Query objects are intentional.
+    expect(fakeQueries).toHaveLength(3);
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+    expect(fakeQueries[2]?.close).not.toHaveBeenCalled();
 
     stream.emit(turnResult('rewound turn complete'));
     await waitFor(() => events.filter(isProductTerminal).length === 2, 'rewound turn terminal observed');
     await waitFor(() => handle.isTurnRunning?.() === false, 'rewound turn settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('Stop 后直接 previewRewindFiles 会先换 fresh Query 再访问 rewindFiles', async () => {
+    const { handle, stream, events, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit(turnResult('waiting for task'));
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+
+    const preview = await handle.previewRewindFiles?.('user-uuid-1');
+    expect(preview?.canRewind).toBe(false);
+    expect(fakeQueries).toHaveLength(2);
+    expect(fakeQueries[0]?.rewindFiles).not.toHaveBeenCalled();
+    expect(fakeQueries[1]?.rewindFiles).toHaveBeenCalledWith('user-uuid-1', { dryRun: true });
+    expect(fakeQueries[0]?.close).toHaveBeenCalledTimes(1);
+    expect(fakeQueries[1]?.close).not.toHaveBeenCalled();
+
+    await handle.send({ type: 'user', content: 'send after rewind preview' });
+    expect(fakeQueries).toHaveLength(2);
+    stream.emit(turnResult('preview follow-up complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'preview follow-up terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'preview follow-up settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('Stop 后直接 commitRewindFiles 会在可用 Query 上回滚并保留后续重建状态', async () => {
+    const { handle, stream, events, fakeQueries } = await startSessionWithStream();
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit(turnResult('waiting for task'));
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+
+    await handle.commitRewindFiles?.('user-uuid-1', 'assistant-uuid-1');
+    expect(fakeQueries).toHaveLength(2);
+    expect(fakeQueries[0]?.rewindFiles).not.toHaveBeenCalled();
+    expect(fakeQueries[1]?.rewindFiles).toHaveBeenCalledWith('user-uuid-1', { dryRun: false });
+    expect(fakeQueries[0]?.close).toHaveBeenCalledTimes(1);
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+
+    await handle.send({ type: 'user', content: 'send after direct rewind commit' });
+    expect(fakeQueries).toHaveLength(3);
+    stream.emit(turnResult('rewind follow-up complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'rewind follow-up terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'rewind follow-up settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('preview 重建跳过 compact 后，下一 send 仍先补 compact 再入队消息', async () => {
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit({
+      type: 'stream_event',
+      event: { type: 'message_delta', usage: { input_tokens: 400_000, output_tokens: 0 } },
+    });
+    await vi.waitFor(() => {
+      expect(handle.getUsageSnapshot().contextTokens).toBe(400_000);
+    });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await handle.setModel?.('claude-sonnet-5');
+    expect(handle.getUsageSnapshot().contextWindow).toBe(500_000);
+
+    const preview = await handle.previewRewindFiles?.('user-uuid-1');
+    expect(preview?.canRewind).toBe(false);
+    expect(fakeQueries).toHaveLength(2);
+    expect(fakeQueries[1]?.rewindFiles).toHaveBeenCalledWith('user-uuid-1', { dryRun: true });
+    expect(handle.isTurnRunning?.()).toBe(false);
+
+    await handle.send({ type: 'user', content: 'send after preview compact rearm' });
+    expect(fakeQueries).toHaveLength(3);
+    const sendPrompt = (sdkMock.query.mock.calls[2]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
+    expect(sendPrompt).toBeDefined();
+    const sendPromptIter = sendPrompt![Symbol.asyncIterator]();
+    expect((await sendPromptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await sendPromptIter.next()).value?.message?.content).toBe('send after preview compact rearm');
+
+    streams[2]?.emit(turnResult('compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events.filter(isProductTerminal)).toHaveLength(1);
+    expect(handle.isTurnRunning?.()).toBe(true);
+    streams[2]?.emit(turnResult('user complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 2, 'user terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'user turn settled');
 
     stream.end();
     await handle.close().catch(() => undefined);

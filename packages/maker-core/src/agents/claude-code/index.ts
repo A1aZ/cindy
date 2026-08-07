@@ -2208,6 +2208,18 @@ export class ClaudeCodeAgent extends BaseAgent {
       return true;
     }
 
+    // Rewind preview/commit intentionally skip injecting /compact because they
+    // are control operations, not product turns. If a blocked model/window
+    // switch crossed the threshold while the old Query was retired, leave the
+    // cancellation rebuild tombstone armed so the next send can inject the
+    // compact bridge on a fresh Query before accepting user input.
+    function shouldRearmAutoCompactAfterRewindControl(): boolean {
+      const snapshot = autoCompactController?.getLatestSnapshot();
+      const threshold = autoCompactController?.getCurrentThresholdPct();
+      return snapshot !== null && snapshot !== undefined &&
+        threshold !== undefined && snapshot.ratio >= threshold / 100;
+    }
+
     function queueAutoCompactBridge(kind: ActiveBridgeKind, resumeAt?: string): boolean {
       const queued = triggerAutoCompactIfNeeded();
       if (!queued) return false;
@@ -3070,7 +3082,6 @@ export class ClaudeCodeAgent extends BaseAgent {
     // Query is replaced before the next explicit user turn.
     let continuationCancellationGeneration: number | null = null;
     let continuationCancellationRequiresQueryRebuild = false;
-    let cancelledTailInterruptResultPending = false;
     const continuationClaims = new Map<number, ContinuationClaim>();
     const continuationListeners = new Set<(
       continuationId: number,
@@ -3647,7 +3658,6 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 残留的 interruptRequested 会错误抑制新 q 首个真实 is_error 终态 —— 兜底清。
       turnState.interruptRequested = false;
       continuationCancellationGeneration = null;
-      cancelledTailInterruptResultPending = false;
       // Any successfully installed replacement Query isolates the cancelled
       // provider tail. This also covers rewind / invalid-resume rebuilds, so a
       // later send must not create a redundant intermediate Query.
@@ -3661,7 +3671,17 @@ export class ClaudeCodeAgent extends BaseAgent {
         try {
           for await (const rawMsg of currentQ) {
             if (closed) break;
-            if (canceledBridgeQueries.has(currentQ) || rewindTransitionQueries.has(currentQ)) {
+            const rawType = (rawMsg as { type?: string } | null)?.type;
+            const rawSubtype = (rawMsg as { subtype?: string } | null)?.subtype;
+            const rawStatus = (rawMsg as { status?: string } | null)?.status;
+            const isTerminalTaskNotification =
+              rawType === 'system' &&
+              rawSubtype === 'task_notification' &&
+              (rawStatus === 'completed' || rawStatus === 'failed' || rawStatus === 'stopped');
+            if (
+              (canceledBridgeQueries.has(currentQ) || rewindTransitionQueries.has(currentQ)) &&
+              !(canceledBridgeQueries.has(currentQ) && isTerminalTaskNotification)
+            ) {
               continue;
             }
             if (activeBridgeKind !== null && queuedBridgeTurns === 0) {
@@ -3671,16 +3691,9 @@ export class ClaudeCodeAgent extends BaseAgent {
               });
               clearBridgeState();
             }
-            const rawType = (rawMsg as { type?: string } | null)?.type;
-            // Keep the foreground result that acknowledges user Stop; only
-            // subsequent result/activity messages belong to the fenced tail.
-            const isExpectedInterruptResult =
-              cancelledTailInterruptResultPending &&
-              rawType === 'result';
             if (
               continuationCancellationGeneration !== null &&
-              (rawType === 'assistant' || rawType === 'stream_event' || rawType === 'result') &&
-              !isExpectedInterruptResult
+              (rawType === 'assistant' || rawType === 'stream_event' || rawType === 'result')
             ) {
               log.debug('ignoring provider activity from cancelled continuation query', {
                 rawType,
@@ -3873,7 +3886,6 @@ export class ClaudeCodeAgent extends BaseAgent {
                   }
                 : {}),
             });
-            if (isExpectedInterruptResult) cancelledTailInterruptResultPending = false;
             if (shouldCorrelateResumeFailure) {
               deferResumeFailureBoundary = false;
               deferredResumeFailureTimer = setTimeout(
@@ -4338,7 +4350,10 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
       log.warn(`${label}: runtime drift kept changing while replaying; leaving remaining drift to the next setter/rebuild`);
     }
-    async function rebuildCancelledContinuationQuery(signal?: AbortSignal): Promise<boolean> {
+    async function rebuildCancelledContinuationQuery(
+      signal?: AbortSignal,
+      options?: { queueCompactBridge?: boolean },
+    ): Promise<boolean> {
       if (!continuationCancellationRequiresQueryRebuild) return false;
       const staleQuery = q;
       const runtimeSnapshot: QueryRuntimeSnapshot = {
@@ -4353,10 +4368,12 @@ export class ClaudeCodeAgent extends BaseAgent {
       abortController = new AbortController();
       runtimeState.lastResultUsageAggregate = null;
       rewindTransitionQueries.add(staleQuery);
-      try {
-        await Promise.resolve(staleQuery.close());
-      } catch (e) {
-        log.warn('cancelled continuation query close threw before rebuild', { error: String(e) });
+      if (!canceledBridgeQueries.has(staleQuery)) {
+        try {
+          await Promise.resolve(staleQuery.close());
+        } catch (e) {
+          log.warn('cancelled continuation query close threw before rebuild', { error: String(e) });
+        }
       }
       try {
         q = await buildQuery({
@@ -4378,12 +4395,20 @@ export class ClaudeCodeAgent extends BaseAgent {
         startForwardLoop(q);
         notifySupportedModels(q);
         await replayRuntimeDrift(runtimeSnapshot, 'cancelled continuation rebuild');
-        // Cancellation rebuilds are fresh queries without a rewind checkpoint, but the
-        // model/window drift that was deferred while the cancelled query was fenced still
-        // needs the same compact→user bridge as rewind.  Register the bridge before the
-        // caller pushes the next user message; do not invent activeBridgeRewindResumeAt.
-        const bridgeCompactQueued = queueAutoCompactBridge('cancellation');
-        continuationCancellationRequiresQueryRebuild = false;
+        // Cancellation rebuilds used by send need the compact→user bridge for deferred
+        // model/window drift. Rewind preview/commit use the same fresh-query isolation but
+        // must not start a product turn or inject /compact before rewindFiles runs.
+        const skipCompactBridge = options?.queueCompactBridge === false;
+        const bridgeCompactQueued = skipCompactBridge
+          ? false
+          : queueAutoCompactBridge('cancellation');
+        // Preview/commit must not generate, but a deferred compact caused by a
+        // blocked model/window switch must survive until the next send. Keep
+        // the tombstone only for that case; otherwise the fresh Query is ready
+        // and the cancellation rebuild state can be cleared normally.
+        continuationCancellationRequiresQueryRebuild = skipCompactBridge
+          ? shouldRearmAutoCompactAfterRewindControl()
+          : false;
         return bridgeCompactQueued;
       } finally {
         acceptingRebuiltSend = false;
@@ -4902,51 +4927,50 @@ export class ClaudeCodeAgent extends BaseAgent {
           // produce another provider result. Close it explicitly after the
           // control action succeeds and append the ordered product terminal.
           const cancelledContinuation = stoppedClaim ?? cancelActiveContinuation('user_stop');
-          if (cancelledContinuation) {
-            // The successful Stop revokes these tasks' continuation contract.
-            // Retire their tracking entries as well, so a late provider
-            // result or running patch cannot rebuild the claim we just
-            // cancelled. This is product-side cancellation bookkeeping; the
-            // best-effort stopTask RPCs above remain responsible for stopping
-            // the provider tasks themselves.
-            retireContinuationTasks(cancelledContinuation);
-            // The provider may already have queued the automatic continuation
-            // on this Query. Close it now so that cancellation fences process
-            // termination and canUseTool callbacks as well as event output;
-            // the next send will perform the existing fresh-query rebuild.
+          const hasUnconfirmedWakeTasks = [...runningBackgroundTasks.values()].some((info) => info.wake);
+          if (cancelledContinuation || hasUnconfirmedWakeTasks) {
+            // Both cancellation sources share one terminal state: a cancelled
+            // continuation claim or an unconfirmed wake task means this Query
+            // must be retired. The provider tail is fenced by the per-query
+            // marker, then the next send/rewind installs a fresh Query.
             const cancelledQuery = q;
+            const foregroundNeedsTerminal = turnInFlight;
             canceledBridgeQueries.add(cancelledQuery);
-            emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
+            // Query retirement always leaves a rebuild tombstone, even if the
+            // synthetic boundary is rejected because the event queue is
+            // already closing. The next explicit send/rewind must never push
+            // into this retired query.
+            continuationCancellationGeneration = turnState.generation;
+            continuationCancellationRequiresQueryRebuild = true;
+            if (cancelledContinuation) {
+              // The successful Stop revokes the continuation contract. Retire
+              // its task ledger before closing the provider process.
+              retireContinuationTasks(cancelledContinuation);
+              emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
+            } else {
+              log.info('closing Query after user Stop with unconfirmed wake tasks', {
+                generation: turnState.generation,
+              });
+              // close() prevents the interrupted result from arriving. If the
+              // foreground turn has not already produced a terminal, replace
+              // it with one synthetic boundary; a raced natural result leaves
+              // turnInFlight=false and therefore does not get a duplicate.
+              if (foregroundNeedsTerminal) emitTurnBoundary('user_stop_unconfirmed_wake_tasks');
+            }
             inputQueue.clear();
             try {
               inputQueue.end();
             } catch (e) {
-              log.warn('user_stop continuation cancellation: inputQueue.end threw', { error: String(e) });
+              log.warn('user_stop cancellation: inputQueue.end threw', { error: String(e) });
             }
             try {
               cancelledQuery.close();
             } catch (e) {
-              log.warn('user_stop continuation cancellation: q.close threw', { error: String(e) });
+              log.warn('user_stop cancellation: q.close threw', { error: String(e) });
             }
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
             turnInFlight = false;
-          }
-          const hasUnconfirmedWakeTasks = [...runningBackgroundTasks.values()].some((info) => info.wake);
-          if (
-            hasUnconfirmedWakeTasks &&
-            continuationCancellationGeneration !== turnState.generation
-          ) {
-            // A successful interrupt without a cancelled claim still leaves
-            // wake tasks whose stop was rejected or unsupported. Keep the
-            // product turn idle, but fence their queued auto-continuation
-            // until the next send installs a fresh Query.
-            continuationCancellationGeneration = turnState.generation;
-            continuationCancellationRequiresQueryRebuild = true;
-            cancelledTailInterruptResultPending = turnInFlight;
-            log.info('installed cancelled-tail fence for unconfirmed wake tasks after user stop', {
-              generation: turnState.generation,
-            });
           }
         } catch (e) {
           // interrupt 失败 → 无 result 消费标记, 回收防误抑制(同 watchdog)。
@@ -5429,6 +5453,14 @@ export class ClaudeCodeAgent extends BaseAgent {
         while (idleResumeRebuildGate) {
           await idleResumeRebuildGate;
         }
+        if (continuationCancellationRequiresQueryRebuild) {
+          // Stop may have already closed the old Query while leaving the
+          // cancellation rebuild tombstone for the next explicit turn. A
+          // rewind preview is also a valid next control action: install an
+          // isolated fresh Query first, but do not inject the send-only
+          // /compact bridge or start a product turn.
+          await rebuildCancelledContinuationQuery(undefined, { queueCompactBridge: false });
+        }
         log.info('previewRewindFiles', { userUuid, sdkSessionId });
         try {
           const result = await q.rewindFiles(userUuid, { dryRun: true });
@@ -5460,6 +5492,11 @@ export class ClaudeCodeAgent extends BaseAgent {
         // 否则 pendingRewindTo 会指向一个已不存在的会话时点。等替换 query 就绪再走。
         while (idleResumeRebuildGate) {
           await idleResumeRebuildGate;
+        }
+        if (continuationCancellationRequiresQueryRebuild) {
+          // See previewRewindFiles: rebuild the fenced Query without the
+          // compact bridge so rewindFiles retains its checkpoint semantics.
+          await rebuildCancelledContinuationQuery(undefined, { queueCompactBridge: false });
         }
         log.info('commitRewindFiles ▶', { userUuid, priorAssistantUuid, sdkSessionId });
         // ① 立即把文件回滚到 target 时点 (失败 warn + 继续, forkSession=true 兜底)

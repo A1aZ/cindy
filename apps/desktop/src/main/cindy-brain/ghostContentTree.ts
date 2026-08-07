@@ -164,12 +164,16 @@ export interface GhostContentRootIdentity {
   realPath: string;
   dev: bigint;
   ino: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
 }
 
 interface GhostContentAncestorIdentity {
   relativePath: string;
   dev: bigint;
   ino: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
 }
 
 function sameFileIdentity(
@@ -188,16 +192,31 @@ function sameStableFileState(before: fs.BigIntStats, after: fs.BigIntStats): boo
     before.ctimeNs === after.ctimeNs;
 }
 
+function sameStableDirectoryState(before: fs.BigIntStats, after: fs.BigIntStats): boolean {
+  // Filesystems may immediately reuse a deleted directory's inode. Timestamps
+  // keep that replacement distinct and also expose namespace changes below it.
+  return after.isDirectory() &&
+    sameFileIdentity(before, after) &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs;
+}
+
 async function captureGhostContentRootIdentity(rootDir: string): Promise<GhostContentRootIdentity> {
   const realPath = await fs.promises.realpath(rootDir);
   const [pathStat, realStat] = await Promise.all([
     fs.promises.stat(rootDir, { bigint: true }),
     fs.promises.stat(realPath, { bigint: true }),
   ]);
-  if (!pathStat.isDirectory() || !realStat.isDirectory() || !sameFileIdentity(pathStat, realStat)) {
+  if (!pathStat.isDirectory() || !sameStableDirectoryState(pathStat, realStat)) {
     throw new Error(`ghost content root is not a stable directory: ${rootDir}`);
   }
-  return { realPath, dev: realStat.dev, ino: realStat.ino };
+  return {
+    realPath,
+    dev: realStat.dev,
+    ino: realStat.ino,
+    mtimeNs: realStat.mtimeNs,
+    ctimeNs: realStat.ctimeNs,
+  };
 }
 
 async function assertGhostContentRootIdentity(
@@ -208,7 +227,9 @@ async function assertGhostContentRootIdentity(
   if (
     current.realPath !== expected.realPath ||
     current.dev !== expected.dev ||
-    current.ino !== expected.ino
+    current.ino !== expected.ino ||
+    current.mtimeNs !== expected.mtimeNs ||
+    current.ctimeNs !== expected.ctimeNs
   ) {
     throw new Error(`ghost content root changed while reading: ${rootDir}`);
   }
@@ -229,7 +250,13 @@ async function captureGhostContentAncestorIdentities(
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new Error(`ghost content ancestor changed into a link: ${currentRelativePath}`);
     }
-    identities.push({ relativePath: currentRelativePath, dev: stat.dev, ino: stat.ino });
+    identities.push({
+      relativePath: currentRelativePath,
+      dev: stat.dev,
+      ino: stat.ino,
+      mtimeNs: stat.mtimeNs,
+      ctimeNs: stat.ctimeNs,
+    });
   }
   return identities;
 }
@@ -244,7 +271,9 @@ function assertGhostContentAncestorIdentities(
       (identity, index) =>
         identity.relativePath !== expected[index]?.relativePath ||
         identity.dev !== expected[index]?.dev ||
-        identity.ino !== expected[index]?.ino,
+        identity.ino !== expected[index]?.ino ||
+        identity.mtimeNs !== expected[index]?.mtimeNs ||
+        identity.ctimeNs !== expected[index]?.ctimeNs,
     )
   ) {
     throw new Error('ghost content ancestor changed while reading');

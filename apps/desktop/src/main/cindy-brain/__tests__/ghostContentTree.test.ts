@@ -78,6 +78,27 @@ async function mockStaleLeafPathStatAfterMutation(file: string): Promise<{
   };
 }
 
+async function writeDurably(file: string, bytes: Buffer | string, flags: string): Promise<void> {
+  const handle = await fs.promises.open(file, flags);
+  try {
+    if (flags === 'r+') await handle.truncate(0);
+    await handle.writeFile(bytes);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function shiftDirectoryTimes(stat: fs.BigIntStats): fs.BigIntStats {
+  return new Proxy(stat, {
+    get(target, key) {
+      if (key === 'mtimeNs' || key === 'ctimeNs') return target[key] + 1n;
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 describe('classifyGhostDirEntry', () => {
   it('separates regular files, real directories and links', async () => {
     const file = path.join(workDir, 'a.txt');
@@ -258,7 +279,7 @@ describe('hashGhostContentFiles', () => {
     if (!(await tryLinkDir(outside, path.join(root, 'nested')))) return;
 
     await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow(
-      /escaped its root|changed into a link/,
+      /root changed|escaped its root|changed into a link/,
     );
   });
 
@@ -279,7 +300,7 @@ describe('hashGhostContentFiles', () => {
     if (!(await tryLinkDir(alternate, path.join(root, 'nested')))) return;
 
     await expect(hashGhostContentFiles(root, tree.files, tree.rootIdentity)).rejects.toThrow(
-      /ancestor changed into a link/,
+      /root changed|ancestor changed into a link/,
     );
   });
 
@@ -314,17 +335,20 @@ describe('hashGhostContentFiles', () => {
       nonRegular: 'throw',
       label: 'test',
     });
+    const canonicalFile = path.join(tree.rootIdentity.realPath, 'main.js');
 
     const splitAt = 'old-prefix|'.length;
-    const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
+    const stalePathStat = await mockStaleLeafPathStatAfterMutation(canonicalFile);
     const realOpen = fs.promises.open;
     let targetOpenCount = 0;
+    let mutationRan = false;
     let staleHandleStat: fs.BigIntStats | undefined;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
-      if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      if (path.resolve(String(args[0])) !== canonicalFile) return handle;
+      if (typeof args[1] !== 'number') return handle;
       targetOpenCount += 1;
       const mutateDuringRead = targetOpenCount === 1;
       return new Proxy(handle, {
@@ -341,10 +365,12 @@ describe('hashGhostContentFiles', () => {
               const firstRead = await handle.read(first, 0, first.byteLength, 0);
               yield first.subarray(0, firstRead.bytesRead);
 
-              await fs.promises.writeFile(file, replacementBytes);
+              await writeDurably(canonicalFile, replacementBytes, 'r+');
               const changedAt = new Date(Date.now() + 5_000);
-              await fs.promises.utimes(file, changedAt, changedAt);
+              await fs.promises.utimes(canonicalFile, changedAt, changedAt);
+              await expect(fs.promises.readFile(canonicalFile)).resolves.toEqual(replacementBytes);
               stalePathStat.markMutated();
+              mutationRan = true;
 
               const rest = Buffer.alloc(replacementBytes.byteLength - splitAt);
               const restRead = await handle.read(rest, 0, rest.byteLength, splitAt);
@@ -364,30 +390,37 @@ describe('hashGhostContentFiles', () => {
       openSpy.mockRestore();
       stalePathStat.restore();
     }
+    expect(targetOpenCount).toBe(2);
+    expect(mutationRan).toBe(true);
   });
 
   it('rejects a leaf file renamed away and replaced while its opened bytes are being hashed', async () => {
     const root = path.join(workDir, 'plugin');
     const file = path.join(root, 'main.js');
-    const detachedFile = path.join(root, 'detached.js');
+    const stagedFile = path.join(workDir, 'replacement.js');
     const originalBytes = Buffer.from('approved bytes');
+    const replacementBytes = Buffer.from('replacement bytes');
     await fs.promises.mkdir(root, { recursive: true });
     await fs.promises.writeFile(file, originalBytes);
+    await writeDurably(stagedFile, replacementBytes, 'wx');
     const tree = await collectGhostContentFiles(root, {
       dotEntries: 'include',
       nonRegular: 'throw',
       label: 'test',
     });
+    const canonicalFile = path.join(tree.rootIdentity.realPath, 'main.js');
+    const canonicalDetachedFile = path.join(tree.rootIdentity.realPath, 'detached.js');
 
-    const stalePathStat = await mockStaleLeafPathStatAfterMutation(file);
+    const stalePathStat = await mockStaleLeafPathStatAfterMutation(canonicalFile);
     const realOpen = fs.promises.open;
     let targetOpenCount = 0;
+    let mutationRan = false;
     let staleHandleStat: fs.BigIntStats | undefined;
     const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
       ...args: Parameters<typeof fs.promises.open>
     ) => {
       const handle = await realOpen(...args);
-      if (path.resolve(String(args[0])) !== path.resolve(file)) return handle;
+      if (path.resolve(String(args[0])) !== canonicalFile) return handle;
       targetOpenCount += 1;
       const mutateDuringRead = targetOpenCount === 1;
       return new Proxy(handle, {
@@ -402,9 +435,11 @@ describe('hashGhostContentFiles', () => {
             return () => Readable.from((async function*() {
               const bytes = Buffer.alloc(originalBytes.byteLength);
               const read = await handle.read(bytes, 0, bytes.byteLength, 0);
-              await fs.promises.rename(file, detachedFile);
-              await fs.promises.writeFile(file, 'replacement bytes');
+              await fs.promises.rename(canonicalFile, canonicalDetachedFile);
+              await fs.promises.rename(stagedFile, canonicalFile);
+              await expect(fs.promises.readFile(canonicalFile)).resolves.toEqual(replacementBytes);
               stalePathStat.markMutated();
+              mutationRan = true;
               yield bytes.subarray(0, read.bytesRead);
             })());
           }
@@ -421,6 +456,72 @@ describe('hashGhostContentFiles', () => {
       openSpy.mockRestore();
       stalePathStat.restore();
     }
+    expect(targetOpenCount).toBe(2);
+    expect(mutationRan).toBe(true);
+  });
+
+  it('rejects root generation drift even when dev and ino are reused', async () => {
+    const root = path.join(workDir, 'plugin');
+    await fs.promises.mkdir(root, { recursive: true });
+    await fs.promises.writeFile(path.join(root, 'main.js'), 'stable bytes');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+
+    const realStat = fs.promises.stat;
+    const statSpy = vi.spyOn(fs.promises, 'stat').mockImplementation((async (
+      candidate: fs.PathLike,
+    ) => {
+      const stat = await realStat(candidate, { bigint: true });
+      if (stat.dev === tree.rootIdentity.dev && stat.ino === tree.rootIdentity.ino) {
+        return shiftDirectoryTimes(stat);
+      }
+      return stat;
+    }) as typeof fs.promises.stat);
+    try {
+      await expect(
+        hashGhostContentFiles(root, tree.files, tree.rootIdentity),
+      ).rejects.toThrow(/root changed/);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it('rejects ancestor generation drift even when dev and ino are unchanged', async () => {
+    const root = path.join(workDir, 'plugin');
+    const nested = path.join(root, 'nested');
+    await fs.promises.mkdir(nested, { recursive: true });
+    await fs.promises.writeFile(path.join(nested, 'main.js'), 'stable bytes');
+    const tree = await collectGhostContentFiles(root, {
+      dotEntries: 'include',
+      nonRegular: 'throw',
+      label: 'test',
+    });
+    const canonicalNested = path.join(tree.rootIdentity.realPath, 'nested');
+    const nestedIdentity = await fs.promises.lstat(canonicalNested, { bigint: true });
+
+    const realLstat = fs.promises.lstat;
+    let nestedLstatCount = 0;
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation((async (
+      candidate: fs.PathLike,
+    ) => {
+      const stat = await realLstat(candidate, { bigint: true });
+      if (stat.dev === nestedIdentity.dev && stat.ino === nestedIdentity.ino) {
+        nestedLstatCount += 1;
+        return nestedLstatCount === 1 ? stat : shiftDirectoryTimes(stat);
+      }
+      return stat;
+    }) as typeof fs.promises.lstat);
+    try {
+      await expect(
+        hashGhostContentFiles(root, tree.files, tree.rootIdentity),
+      ).rejects.toThrow(/ancestor changed/);
+    } finally {
+      lstatSpy.mockRestore();
+    }
+    expect(nestedLstatCount).toBe(2);
   });
 
   it('rejects the content root being replaced between collection and hashing', async () => {

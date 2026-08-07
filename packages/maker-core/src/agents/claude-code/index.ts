@@ -4877,13 +4877,13 @@ export class ClaudeCodeAgent extends BaseAgent {
             // best-effort stopTask RPCs above remain responsible for stopping
             // the provider tasks themselves.
             retireContinuationTasks(cancelledContinuation);
-            emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
             // The provider may already have queued the automatic continuation
             // on this Query. Close it now so that cancellation fences process
             // termination and canUseTool callbacks as well as event output;
             // the next send will perform the existing fresh-query rebuild.
             const cancelledQuery = q;
             canceledBridgeQueries.add(cancelledQuery);
+            emitCancelledContinuationBoundary(cancelledContinuation, 'user_stop');
             inputQueue.clear();
             try {
               inputQueue.end();

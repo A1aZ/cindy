@@ -86,12 +86,14 @@ import { persistUserMessage } from '../messagePersistence';
 import { bindingStore } from '../binding';
 import { buildImUserMessage } from './inboundMessage';
 import {
+  beginTurnChangeSetAtDispatch,
   wireSessionToIpcExternal,
   takePendingInteractionsForSession,
   noteSilentStopUserSend,
   noteSilentStopSessionReset,
   onSilentStopSettled,
 } from '../../maker-ipc/register';
+import { clearPendingTurnChangeSets } from '../../turn-change-set/store';
 import {
   beginInteractionRoute,
   type InteractionRouteLease,
@@ -821,6 +823,7 @@ export function createTurnRunner(
       `enqueued turn for session=${rowId.slice(-8)} queueDepth=${state.queue.length} pendingSends=${state.sendQueue.length}`,
     );
     let acceptedAt = 0;
+    let turnChangeSetStarted = false;
 
     let releaseAgentSwitchLock = (): void => {};
     try {
@@ -933,6 +936,10 @@ export function createTurnRunner(
             userMessageId: item.turn.userMessageId,
             persisted: persisted !== null,
           });
+          if (persisted) {
+            await beginTurnChangeSetAtDispatch(state.makerSession, persisted.clientId);
+            turnChangeSetStarted = true;
+          }
         },
       });
       if (pendingHandoff && sendResult.accepted) {
@@ -943,6 +950,7 @@ export function createTurnRunner(
         context: buildSendContext(rowId),
       });
       if (!outcome.dispatched) {
+        if (turnChangeSetStarted) clearPendingTurnChangeSets(rowId);
         await handleSendPreDispatchFailure(state, userId, {
           turn: item.turn,
           source: outcome.source,
@@ -953,6 +961,7 @@ export function createTurnRunner(
       }
       return { kind: 'accepted', acceptedAt: acceptedAt || Date.now() };
     } catch (err) {
+      if (turnChangeSetStarted) clearPendingTurnChangeSets(rowId);
       const normalized = normalizeSendError(err);
       if (normalized.reason === 'SESSION_RUNNING') {
         releaseTurnInteractionRoute(item.turn, 'session_running_race');

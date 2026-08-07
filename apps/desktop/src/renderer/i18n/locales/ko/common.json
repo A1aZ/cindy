@@ -3424,6 +3424,8 @@
         "cindyTextOneshotDetail": "시스템의 경량 작업 모델 체인(자동 제목과 같은 경로)을 사용합니다. Agent를 사용하지 않고 파일에도 접근하지 않습니다. 모델 비용이 발생할 수 있습니다.",
         "cindyEmbedText": "텍스트를 벡터로 변환할 수 있습니다(의미 검색용)",
         "cindyEmbedTextDetail": "텍스트가 시스템 벡터 모델로 전송되어 숫자 배열로 변환됩니다. 한 번에 최대 {{max}}개이며 모델 요금이 발생할 수 있습니다. 생성된 벡터는 플러그인만 보관하며 사용자 라이브러리에는 기록되지 않습니다.",
+        "cindySearchWeb": "Cindy AI로 공개 웹을 검색할 수 있음",
+        "cindySearchWebDetail": "검색 요청은 공개 웹에 접근하며 Cindy AI 사용량을 소모할 수 있습니다.",
         "agentUserAction": "플러그인 카드를 클릭한 뒤 Agent의 새 작업을 시작할 수 있음",
         "agentUserActionDetail": "클릭 한 번마다 한 번만 시작할 수 있으며, 해당 카드가 속한 세션에서만 사용할 수 있습니다.",
         "agentBackground": "백그라운드에서 Agent의 새 작업을 자동으로 시작할 수 있음",
@@ -4466,6 +4468,14 @@
       "spawnFailed": "터미널을 시작할 수 없습니다: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "이 메시지의 변경 사항",
+        "currentWorkspace": "현재 작업 공간",
+        "localOnly": "메시지별 정확한 변경 사항은 아직 원격 작업에서 사용할 수 없습니다.",
+        "partialNotice": "이 메시지에는 정확히 추적할 수 없는 명령 또는 도구 쓰기가 포함되어 있습니다. 아래에는 캡처된 일부만 표시되며 완전한 패치가 아닙니다.",
+        "emptyTitle": "기록된 변경 사항 없음",
+        "emptyDesc": "이 메시지에 저장된 패치에는 표시할 수 있는 파일 변경 사항이 없습니다."
+      },
       "fileCount_one": "{{count}}개 파일",
       "fileCount_other": "{{count}}개 파일",
       "emptyTitle": "아직 변경 사항이 없습니다",
@@ -6185,8 +6195,34 @@
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "첨부 파일 전송에 실패했습니다. 메시지가 전송되지 않았습니다. 다시 시도하세요."
     },
     "generatedFiles": {
-      "title": "이번 턴에 생성된 파일",
+      "title": "이 메시지에서 생성된 파일",
       "showMore": "{{count}}개 더 보기",
+      "showLess": "간략히 보기"
+    },
+    "turnChanges": {
+      "title": "파일 {{count}}개 변경",
+      "partialTitle": "이 메시지의 파일 변경 사항이 완전히 캡처되지 않았습니다",
+      "review": "검토",
+      "undo": "실행 취소",
+      "undoAria": "이 메시지의 변경 사항 실행 취소",
+      "undoPartialAria": "이 메시지에서 정확히 캡처된 변경 사항 실행 취소",
+      "reapply": "다시 적용",
+      "reapplyAria": "이 메시지의 변경 사항 다시 적용",
+      "reapplyPartialAria": "이 메시지에서 정확히 캡처된 변경 사항 다시 적용",
+      "undoSuccess": "이 메시지의 변경 사항을 실행 취소했습니다",
+      "reapplySuccess": "이 메시지의 변경 사항을 다시 적용했습니다",
+      "undoPartialSuccess": "정확히 캡처된 변경 사항을 실행 취소했습니다. 캡처되지 않은 변경 사항은 실행 취소하지 않았습니다",
+      "reapplyPartialSuccess": "정확히 캡처된 변경 사항을 다시 적용했습니다. 캡처되지 않은 변경 사항은 다시 적용하지 않았습니다",
+      "actionRunning": "현재 응답이 끝난 후 작업 공간을 변경하세요",
+      "gitUnavailable": "Git이 감지되지 않았습니다. Git을 설치하고 시스템 PATH에 추가한 뒤 Cindy를 다시 시작하면 실행 취소 및 다시 적용의 전체 기능을 사용할 수 있습니다.",
+      "actionConflict": "작업 공간이 변경되어 이 패치를 안전하게 적용할 수 없습니다. 현재 변경 사항을 먼저 검토하세요",
+      "actionUnavailable": "이 메시지에는 안전하게 실행 취소할 수 없는 파일 변경 사항이 포함되어 있습니다",
+      "actionFailed": "변경 사항을 적용하지 못했습니다. 다시 시도하세요",
+      "partial": "정확히 캡처된 변경 사항만 표시됩니다",
+      "partialReversible": "실행 취소와 다시 적용은 정확히 캡처된 변경 사항만 처리하며 캡처되지 않은 변경 사항은 처리하지 않습니다",
+      "partialActionHint": "정확히 캡처된 파일 변경 사항만 실행 취소하거나 다시 적용합니다",
+      "showMore": "파일 {{count}}개 더 보기",
+      "reviewRemaining": "나머지 파일 {{count}}개를 검토에서 보기",
       "showLess": "접기"
     },
     "agentActions": {
@@ -6393,6 +6429,7 @@
     "draft": {
       "createSessionFailed": "세션 생성에 실패했습니다. 다시 시도하세요",
       "piRemoteUnsupported": "Pi는 로컬에서만 실행되어 SSH 원격 호스트를 사용할 수 없습니다. 이 호스트를 사용하려면 Claude 또는 Codex로 전환하세요.",
+      "localWorktreeCleanupPending": "이전 로컬 worktree 세션 정리가 아직 완료되지 않았습니다. 정리가 끝난 후 다시 시도하세요.",
       "remoteWorktreeCleanupPending": "이전 원격 worktree가 아직 정리 대기 중입니다. 기기를 다시 연결한 후 재시도하세요.",
       "remoteProviderUpdating": "제공자 자격 증명을 업데이트하는 중입니다. 잠시 후 다시 시도하세요",
       "remoteProviderUnsupported": "이 제공자는 SSH 원격 세션을 지원하지 않습니다. 다른 소스를 선택하세요",

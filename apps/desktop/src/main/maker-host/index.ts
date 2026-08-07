@@ -101,6 +101,7 @@ import {
 import {
   buildDesktopClaudeRuntimeConfig,
   desktopCodexRuntimeConfig,
+  ensureBundledRipgrepReady,
 } from './runtime-configs.js';
 import { getClaudeEndpoint, setClaudeProxyGatewayKeyReader, setClaudeProxyOAuthSpawnChecker } from './anthropic-compat-proxy-host.js';
 import { resolveRemoteClaudeRoute } from './remote-claude-route.js';
@@ -128,6 +129,10 @@ import {
 } from './codex-proxy-host.js';
 import { createDesktopMcpProviders } from '../mcp-integrations/mcp-providers.js';
 import { readContactsSettings } from './contacts-settings-store.js';
+import {
+  captureKnownFileBefore,
+  noteOpaqueTurnChange,
+} from '../turn-change-set/store.js';
 
 /**
  * 最近一次成功构建的 codex spawn 配置里, 通讯录开关的实际取值(null = 尚未
@@ -594,6 +599,12 @@ export function getMaker(): Maker {
     if (!codexPath) {
       throw new Error('getMaker: Codex binary not provisioned (bootstrap must run agent-binaries.prepare("codex") before getMaker)');
     }
+    // bundled ripgrep 检查与上面 claude/codex 二进制同层:真正的启动期 fail-fast
+    // 在 splash check-environment(Phase 2.5,缺 rg 时 splash 进失败态可重试);
+    // 这里是防御性断言 —— 走到本函数说明 bootstrap 已完成环境检查,缺 rg 即顺序
+    // 错误,早抛比 spawn 时再炸清晰(throw 会被 bootstrap 的 register catch 兜住
+    // 并留 ERROR 日志,与 claude/codex 缺失的处理一致)。
+    ensureBundledRipgrepReady();
 
     // 图片送进模型前的 last-mile resize (省 vision token)。host 注入 logger
     // 让 sharp 失败 / 超时 / LRU 淘汰等告警进项目日志, 而不是默默丢黑洞。
@@ -743,6 +754,10 @@ export function getMaker(): Maker {
       runtimeConfig: buildDesktopClaudeRuntimeConfig(getClaudeEndpoint),
       binaryPath: claudePath,
       logger: desktopMakerLogger,
+      turnChangeCapture: {
+        beforeKnownFileWrite: captureKnownFileBefore,
+        noteOpaqueWrite: noteOpaqueTurnChange,
+      },
       reviewAutoPermissionAction,
       // 每个 session 的 cc 子进程 debug 写到 sessions/<id>/cc-debug.raw.log (logger 拼路径
       // + mkdir), tailer 再归一化汇入该 session 的 <date>.ndjson。
@@ -1425,6 +1440,10 @@ export function getMaker(): Maker {
 
     const piAgent = buildPiAgent({
       logger: desktopMakerLogger,
+      turnChangeCapture: {
+        beforeKnownFileWrite: captureKnownFileBefore,
+        noteOpaqueWrite: noteOpaqueTurnChange,
+      },
       reviewAutoPermissionAction,
       capabilityAdditions: {
         availableModels: deriveAvailableModels(getDesktopSelectableCatalog(), 'pi'),

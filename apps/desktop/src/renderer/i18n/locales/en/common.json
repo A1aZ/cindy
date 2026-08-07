@@ -3425,6 +3425,8 @@
         "cindyTextOneshotDetail": "Uses the system's lightweight utility model chain (the same lane as auto titles). No Agent involved and no file access. Model charges may apply.",
         "cindyEmbedText": "Can send text to be turned into vectors (for semantic search)",
         "cindyEmbedTextDetail": "Text is sent to the system embedding model and turned into numbers, up to {{max}} items per call. Model charges may apply. The vectors go only to the plugin — nothing is written to your own library.",
+        "cindySearchWeb": "Can search the public web with Cindy AI",
+        "cindySearchWebDetail": "Search requests access the public web and may consume Cindy AI quota.",
         "agentUserAction": "Can start a new Agent turn after you click a plugin card",
         "agentUserActionDetail": "Each click permits one turn only, and only in the session that owns the card.",
         "agentBackground": "Can automatically start new Agent turns in the background",
@@ -4468,6 +4470,14 @@
       "spawnFailed": "Failed to start terminal: {{detail}}"
     },
     "review": {
+      "turn": {
+        "title": "Changes from this message",
+        "currentWorkspace": "Current workspace",
+        "localOnly": "Exact message changes are not available for remote sessions yet.",
+        "partialNotice": "This message includes command or tool writes that could not be tracked exactly. Only the captured subset is shown; it is not a complete patch.",
+        "emptyTitle": "No recorded changes",
+        "emptyDesc": "The recorded patch for this message has no displayable file changes."
+      },
       "fileCount_one": "{{count}} file",
       "fileCount_other": "{{count}} files",
       "emptyTitle": "No changes yet",
@@ -6187,8 +6197,34 @@
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "Attachment transfer failed; the message was not sent. Please try again."
     },
     "generatedFiles": {
-      "title": "Files created this turn",
+      "title": "Files created this message",
       "showMore": "Show {{count}} more",
+      "showLess": "Show less"
+    },
+    "turnChanges": {
+      "title": "Changed {{count}} files",
+      "partialTitle": "File changes were not fully captured",
+      "review": "Review",
+      "undo": "Undo",
+      "undoAria": "Undo changes from this message",
+      "undoPartialAria": "Undo exactly captured changes from this message",
+      "reapply": "Reapply",
+      "reapplyAria": "Reapply changes from this message",
+      "reapplyPartialAria": "Reapply exactly captured changes from this message",
+      "undoSuccess": "Changes from this message were undone",
+      "reapplySuccess": "Changes from this message were reapplied",
+      "undoPartialSuccess": "Exactly captured changes were undone; uncaptured changes were not undone",
+      "reapplyPartialSuccess": "Exactly captured changes were reapplied; uncaptured changes were not reapplied",
+      "actionRunning": "Wait for the current response to finish before changing the workspace",
+      "gitUnavailable": "Git was not detected. Install Git, make sure it is on the system PATH, and restart Cindy to use the full Undo and Reapply functionality.",
+      "actionConflict": "The workspace has changed, so this patch cannot be applied safely. Review the current changes first",
+      "actionUnavailable": "This message includes file changes that cannot be safely undone",
+      "actionFailed": "The changes could not be applied. Try again",
+      "partial": "Only the changes captured exactly are shown",
+      "partialReversible": "Only exactly captured changes can be undone or reapplied; uncaptured changes are not handled",
+      "partialActionHint": "Only undo or reapply exactly captured file changes",
+      "showMore": "Show {{count}} more files",
+      "reviewRemaining": "Review {{count}} more files",
       "showLess": "Show less"
     },
     "agentActions": {
@@ -6404,6 +6440,7 @@
     "draft": {
       "createSessionFailed": "Failed to create session, please retry",
       "piRemoteUnsupported": "Pi runs locally only and can't use SSH remote hosts. Switch to Claude or Codex to use this host.",
+      "localWorktreeCleanupPending": "The previous local worktree session is still awaiting cleanup. Try again after cleanup finishes.",
       "remoteWorktreeCleanupPending": "The previous remote worktree is still awaiting cleanup. Reconnect the device and try again.",
       "remoteProviderUpdating": "Provider credentials are being updated — retry in a moment",
       "remoteProviderUnsupported": "This provider is not supported in SSH remote sessions — pick another source",

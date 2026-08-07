@@ -548,6 +548,7 @@ const fanOutHookControlWorkspaceProviderSource = createIpcFanOut(
 
 // ─── Maker Core 一阶段重构（新链路）── 与 cc-agent:* / codex:* 双轨并行 ─────
 const fanOutMakerEvent = createIpcFanOut('maker:event');
+const fanOutMakerTurnChangeSetUpdated = createIpcFanOut('maker:turn-change-set:updated');
 const fanOutMakerStatusChanged = createIpcFanOut('maker:status-changed');
 const fanOutMakerInputProjection = createIpcFanOut('maker:input:projection');
 const fanOutMakerInteractionRequest = createIpcFanOut('maker:interaction-request');
@@ -609,6 +610,10 @@ const fanOutDeviceLinkResponsivenessChanged = createIpcFanOut('device-link:respo
 // 交给 renderer 调它原来的本地 setter。仅被控端进程会收到(控制端从不收 → 监听不误触发)。
 const fanOutMakerDraftPrefApply = createIpcFanOut('maker:draft-pref:apply');
 const fanOutMakerWorktreePrefApply = createIpcFanOut('maker:worktree-pref:apply');
+const fanOutNewMakerWorktreeBranchChanged = createIpcFanOut(
+  'maker:new-maker-worktree-branch:changed',
+);
+const fanOutWorkerCreationPrefsApply = createIpcFanOut('maker:worker-creation-prefs:apply');
 const fanOutMakerSessionPrefApply = createIpcFanOut('maker:session-pref:apply');
 const fanOutAppearanceSettingsChanged = createIpcFanOut('appearance-settings:changed');
 
@@ -1969,7 +1974,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }): void => ipcRenderer.send('desktop:cc-prefs-changed', prefs),
 
   /**
-   * renderer 把 newMakerDraft 的 vendor/model 偏好快照推给 main 缓存 ——
+   * renderer 把 newMakerDraft 的 vendor/model 偏好与显式选择状态快照推给 main 缓存 ——
    * collab mode spawn worker (enableOrca / orca-bridge.create_worker) 读这份
    * 缓存决定 worker 的 model/effort/fastMode, 让 worker 默认 = "用户在 New Maker
    * 面板该 vendor 当前的选择"。启动时推一次 + 用户每次改 New Maker 偏好都推,
@@ -1978,15 +1983,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncNewMakerDraft: (snapshot: {
     lastByVendor: Partial<
       Record<
-        'cc' | 'codex',
+        'cc' | 'codex' | 'pi',
         { model?: string; effort?: string; permissionMode?: string; providerId?: string | null }
       >
     >;
+    /** 每个 vendor 是否由用户在 New Maker 中明确选过模型；device-link 默认校准据此保护显式选择。 */
+    modelChosenByVendor: Partial<Record<'cc' | 'codex' | 'pi', boolean>>;
     fastModeByModel: Record<string, boolean>;
     effortByModel: Record<string, string>;
     /** 「新建会话默认启用 worktree」勾选记忆(vendor 无关根字段,远程草稿播种用)。 */
     worktreeEnabled: boolean;
   }): void => ipcRenderer.send('maker:sync-new-maker-draft', snapshot),
+
+  /** Renderer localStorage workerCreationPrefs → main 内存镜像。 */
+  syncWorkerCreationPrefs: (snapshot: {
+    workerPermissionMode: 'auto' | 'bypassPermissions';
+  }): void => ipcRenderer.send('maker:sync-worker-creation-prefs', snapshot),
 
   /**
    * 被控端 renderer → 自身 main:providerModelMemory 全量快照镜像。device-link 草稿列表行的真实
@@ -2020,8 +2032,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
   /**
    * 被控端本地 main → 自身 renderer:控制端写穿的「新建会话默认启用 worktree」,
    * renderer 收到后 patchDraft 写真实草稿。仅被控端进程消费。
-   */
+  */
   onMakerWorktreePrefApply: fanOutMakerWorktreePrefApply,
+  /** 读取工作端 canonical baseRepo 对应的 live 源分支选择；未选择返回 null。 */
+  getNewMakerWorktreeBranchPreference: (baseRepo: string): Promise<{
+    baseRepo: string;
+    sourceBranch: string;
+    revision: number;
+  } | null> => ipcRenderer.invoke('maker:get-new-maker-worktree-branch-pref', { baseRepo }),
+  /** 写入工作端 repo-scoped 源分支选择并返回 host 接受后的权威 snapshot。 */
+  applyNewMakerWorktreeBranchPreference: (
+    baseRepo: string,
+    sourceBranch: string,
+  ): Promise<{ baseRepo: string; sourceBranch: string; revision: number }> =>
+    ipcRenderer.invoke('maker:apply-new-maker-worktree-branch-pref', {
+      baseRepo,
+      sourceBranch,
+    }),
+  /** 本机或任一 device-link 控制端改动该工作端分支选择后的权威广播。 */
+  onNewMakerWorktreeBranchChanged: fanOutNewMakerWorktreeBranchChanged,
+  /** Orca tool 显式修改 Worker 默认权限后，回写 renderer localStorage。 */
+  onWorkerCreationPrefsApply: fanOutWorkerCreationPrefsApply,
   onMakerSessionPrefApply: fanOutMakerSessionPrefApply,
 
   binding: {
@@ -4682,6 +4713,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:list-available-agents'),
     getCapabilities: (agentKind: 'claude-code' | 'codex' | 'pi'): Promise<unknown> =>
       ipcRenderer.invoke('maker:get-capabilities', agentKind),
+    listTurnChangeSets: (
+      sessionId: string,
+    ): Promise<import('../shared/turnChangeSet').TurnChangeSetSummary[]> =>
+      ipcRenderer.invoke('maker:turn-change-sets:list', sessionId),
+    getTurnChangeSets: (
+      sessionId: string,
+      ids: string[],
+    ): Promise<import('../shared/turnChangeSet').TurnChangeSetDetail[]> =>
+      ipcRenderer.invoke('maker:turn-change-sets:get', sessionId, ids),
+    applyTurnChangeSet: (
+      sessionId: string,
+      id: string,
+      action: import('../shared/turnChangeSet').TurnChangeAction,
+    ): Promise<import('../shared/turnChangeSet').TurnChangeActionResult> =>
+      ipcRenderer.invoke('maker:turn-change-set:apply', sessionId, id, action),
 
     // workflow 逐 agent 进度树(只读)。读不到 / 解析失败返回 null,由 renderer 回退到
     // workflow 级卡片。数据源是 Claude Code 内部记录文件(见 main workflow-progress/reader)。
@@ -5122,9 +5168,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
         fast?: boolean;
         /** 显式选定的模型来源(标准面板 per-worker 选择);缺省 = 跟随默认路由解析。 */
         providerId?: string | null;
+        /** Worker 创建默认权限；缺省沿用当前偏好，显式值会更新偏好。 */
+        workerPermissionMode?: 'auto' | 'bypassPermissions';
       },
       // main handler 实际返回 teamId(见 enableOrcaInternal);此前类型写成 workflowId 是漂移。
-    ): Promise<{ teamId: string; workerSessionId: string; workerId: string }> =>
+    ): Promise<{
+      teamId: string;
+      workerSessionId: string;
+      workerId: string;
+      workerPermissionMode: 'auto' | 'bypassPermissions';
+    }> =>
       ipcRenderer.invoke('maker:session:enable-orca', leadSessionId, opts),
 
     /**
@@ -5654,6 +5707,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     // 事件订阅
     onEvent: fanOutMakerEvent,
+    onTurnChangeSetUpdated: fanOutMakerTurnChangeSetUpdated,
     onStatusChanged: fanOutMakerStatusChanged,
     onInputProjection: fanOutMakerInputProjection,
     onInteractionRequest: fanOutMakerInteractionRequest,
@@ -5666,6 +5720,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // dev-only 调用, prod renderer 不会 HMR 也不会调。
     __resetMakerFanOuts: (): void => {
       fanOutMakerEvent.__reset();
+      fanOutMakerTurnChangeSetUpdated.__reset();
       fanOutMakerStatusChanged.__reset();
       fanOutMakerInputProjection.__reset();
       fanOutMakerInteractionRequest.__reset();

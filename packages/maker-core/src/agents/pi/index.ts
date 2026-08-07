@@ -1248,6 +1248,9 @@ export class PiAgent extends BaseAgent {
               registeredMcpServerNames,
               registerPendingPrompt,
               turnPermissionPolicy: activeTurnPermissionPolicy,
+              sessionId: opts.sessionId ?? '',
+              workingDir: opts.workingDir ?? '',
+              remote: Boolean(opts.remoteHostId),
             }));
             return;
           }
@@ -2302,6 +2305,9 @@ export class PiAgent extends BaseAgent {
       notifyAutoReviewUnavailable: () => void;
       /** 本会话实际注册过的桥接 MCP server 名;MCP 归属判定只认这批(防冒名顶替)。 */
       registeredMcpServerNames: ReadonlySet<string>;
+      sessionId: string;
+      workingDir: string;
+      remote: boolean;
       /**
        * 把一张挂起的权限卡登记进会话级表,返回注销函数。档位切换 / 关闭会话时由
        * `dismissAllPendingPrompts` 强制 settle,避免放宽档位后调用仍卡在失效的卡上。
@@ -2321,6 +2327,50 @@ export class PiAgent extends BaseAgent {
     const method = typeof event.method === 'string' ? event.method : '';
     const id = typeof event.id === 'string' ? event.id : undefined;
     if (!id) return;
+
+    if (method === 'confirm' && event.title === 'cindy:turn-change-capture') {
+      let toolName = '';
+      let input: Record<string, unknown> = {};
+      try {
+        const payload = JSON.parse(typeof event.message === 'string' ? event.message : '{}') as {
+          toolName?: unknown;
+          input?: unknown;
+        };
+        if (typeof payload.toolName === 'string') toolName = payload.toolName;
+        if (payload.input && typeof payload.input === 'object') input = payload.input as Record<string, unknown>;
+      } catch {
+        // Malformed capture payload is non-fatal; let the tool proceed and mark it opaque.
+      }
+      const context = getPermissionCtx();
+      void (async () => {
+        if (!context.sessionId || !context.workingDir) return;
+        const targetPath = typeof input.path === 'string' ? input.path : null;
+        if (targetPath && (toolName === 'edit' || toolName === 'write')) {
+          await this.deps.turnChangeCapture?.beforeKnownFileWrite({
+            sessionId: context.sessionId,
+            provider: 'pi',
+            cwd: context.workingDir,
+            targetPath,
+            ...(context.remote ? { remote: true } : {}),
+          });
+        } else {
+          this.deps.turnChangeCapture?.noteOpaqueWrite({
+            sessionId: context.sessionId,
+            provider: 'pi',
+            cwd: context.workingDir,
+            ...(context.remote ? { remote: true } : {}),
+          });
+        }
+      })().catch((error) => {
+        this.deps.logger.warn('pi turn change capture failed', {
+          toolName,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }).finally(() => {
+        proc.send({ type: 'extension_ui_response', id, confirmed: true });
+      });
+      return;
+    }
 
     if (method === 'confirm' && event.title === 'cindy:permission') {
       let toolName = 'tool';

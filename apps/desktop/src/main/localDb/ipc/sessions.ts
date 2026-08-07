@@ -63,6 +63,16 @@ const REMOTE_EDITABLE_META = new Set(['status', 'title', 'pinnedAt']);
 const initialSessionListLogged = new Set<string>();
 const SLOW_SESSION_LIST_MS = 250;
 type OwnerScope = ReturnType<typeof broadcastTap.captureDataOwnerBroadcastScope> | null;
+type SessionRemovalCancelOperations = (sessionId: string) => Promise<void>;
+
+let sessionRemovalCancelOperations: SessionRemovalCancelOperations | null = null;
+
+/** Composition-root injection for Host-owned operations that must stop before worktree recycle. */
+export function setSessionRemovalCancelOperations(
+  cancelOperations: SessionRemovalCancelOperations | null,
+): void {
+  sessionRemovalCancelOperations = cancelOperations;
+}
 
 function captureOwnerScope(): OwnerScope {
   try {
@@ -149,8 +159,9 @@ function broadcastWorktreeChanged(sessionId: string): void {
  *
  * fire-and-forget:回收失败不影响状态写库(启动期 reconcile 兜底 deleted 场景)。
  * 先关子进程再回收——Windows 下 CLI 子进程 cwd 在 worktree 内会锁目录。
- * 动态 import 避免 localDb → maker-host / worktree 的静态模块环(worktreeStore
- * 反向 import 本文件的 setWorktreePathInDb)。
+ * 既有动态 import 避免 localDb → maker-host / worktree 的静态模块环(worktreeStore
+ * 反向 import 本文件的 setWorktreePathInDb)。Simulator 清理由启动组合层静态注入，
+ * 避免在回收临界路径上延迟加载带原生副作用的 Host 模块。
  *
  * 回收链结束后(无论成功、跳过还是失败)都广播一次 worktree:changed —— 失败/跳过
  * 时条目仍在 store 里,重拉拿到的就是"徽标还在"这个真实状态,同样是对的。
@@ -161,17 +172,20 @@ export async function recycleSessionWorktreeForStatusChange(
 ): Promise<void> {
   if (status !== 'deleted' && status !== 'archived') return;
   try {
-    const [mh, recycle, routeLock, iosSimulator] = await Promise.all([
+    const cancelOperations = sessionRemovalCancelOperations;
+    if (!cancelOperations) {
+      throw new Error('iOS Simulator session cleanup is not configured');
+    }
+    const [mh, recycle, routeLock] = await Promise.all([
       import('../../maker-host/index.js'),
       import('../../worktree/sessionRemovalRecycle.js'),
       import('../../maker-ipc/register.js'),
-      import('../../mcp-integrations/ios-simulator.js'),
     ]);
     if (!(await recycle.isSessionStillRemovable(sessionId))) return;
     const shouldRecycle = await routeLock.withSendToSessionLock(sessionId, async () =>
       quiesceSessionBeforeWorktreeRecycle(sessionId, {
         isSessionStillRemovable: recycle.isSessionStillRemovable,
-        cancelSessionOperations: iosSimulator.cancelIOSSimulatorSessionOperations,
+        cancelSessionOperations: cancelOperations,
         closeSession: async (id) => {
           await mh
             .getMakerIfReady()

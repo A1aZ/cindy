@@ -23,6 +23,7 @@ import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'r
 import { useTranslation } from 'react-i18next';
 
 import { createLogger } from '@/lib/logger';
+import { isSecondaryWindow } from '@/lib/secondaryWindow';
 import { useAppShortcut } from '@/hooks/useAppShortcut';
 import { useMacFullscreen } from '@/hooks/useMacFullscreen';
 import { RightSidebarDetach } from '@/components/layout/RightSidebarDetach';
@@ -163,7 +164,11 @@ export function RightSidebarShell({
   const { t } = useTranslation();
   const installedGhosts = useInstalledGhosts();
   const iosSimulatorPluginAvailable = useMemo(
-    () => isIOSSimulatorPluginAvailable(installedGhosts),
+    // Session secondary windows do not own the Main/RSB capability family and
+    // intentionally skip the Host focus bridge. Hide (but preserve) persisted
+    // Simulator tabs there instead of exposing an authorization action that
+    // can never succeed.
+    () => !isSecondaryWindow() && isIOSSimulatorPluginAvailable(installedGhosts),
     [installedGhosts],
   );
 

@@ -47,6 +47,10 @@ describeMac('embedded iOS Simulator shell policy', () => {
     'env FOO=1 /usr/bin/xcrun simctl shutdown DEVICE',
     'FOO=1 exec env BAR=2 xcrun simctl boot DEVICE',
     "bash -lc 'xcrun simctl shutdown DEVICE'",
+    "/bin/csh -c 'xcrun simctl shutdown DEVICE'",
+    "/bin/tcsh -c 'xcrun simctl shutdown DEVICE'",
+    "/bin/ksh -c 'xcrun simctl shutdown DEVICE'",
+    "fish -c 'xcrun simctl shutdown DEVICE'",
     "eval 'xcrun simctl erase DEVICE'",
     'echo "$(xcrun simctl shutdown DEVICE)"',
     'echo >(xcrun simctl shutdown DEVICE)',
@@ -67,13 +71,57 @@ describeMac('embedded iOS Simulator shell policy', () => {
     '$(/usr/bin/xcrun --find simctl) shutdown DEVICE',
     '/usr/bin/xc[r]un simctl shutdown DEVICE',
     'TOOL=simctl; /usr/bin/xcrun "$TOOL" shutdown DEVICE',
+    'xargs /usr/bin/xcrun simctl shutdown DEVICE',
+    "find . -maxdepth 0 -exec /usr/bin/xcrun simctl shutdown DEVICE ';'",
+    `printf 'simctl shutdown DEVICE' | xargs /usr/bin/xcrun`,
+    'xcrun "$(printf simctl)" shutdown DEVICE',
+    'xcrun $(printf simctl) shutdown DEVICE',
+    'xcrun $(echo simctl) shutdown DEVICE',
+    'TOOL=$(printf simctl); xcrun "$TOOL" shutdown DEVICE',
+    'launchctl submit -l cindy-test -- /usr/bin/xcrun simctl shutdown DEVICE',
+    `sandbox-exec -p '(version 1) (allow default)' /usr/bin/xcrun simctl shutdown DEVICE`,
   ])('denies Simulator mutation hidden behind shell execution: %s', (command) => {
+    expect(getDesktopShellCommandPolicy(command)).toMatchObject({ decision: 'deny' });
+  });
+
+  it.each([
+    `python3 -c 'import subprocess; subprocess.run(["/usr/bin/xcrun", "simctl", "shutdown", "DEVICE"])'`,
+    `node -e 'require("node:child_process").execFileSync("xcrun", ["simctl", "erase", "DEVICE"])'`,
+    `ruby -e 'system("xcrun simctl boot DEVICE")'`,
+    `perl -e 'system("simctl shutdown DEVICE")'`,
+    `env FOO=1 python3.12 -c 'import os; os.system("xcrun simctl install DEVICE /tmp/App.app")'`,
+    `/usr/bin/python3 -c 'import os; os.system("simctl shutdown DEVICE")'`,
+    `awk 'BEGIN { system("xcrun simctl erase DEVICE") }'`,
+    `osascript -e 'do shell script "/usr/bin/xcrun simctl shutdown DEVICE"'`,
+    `osascript -e 'do shell script "open -a Simulator"'`,
+    `printf '%s' 'import os; os.system("xcrun simctl shutdown DEVICE")' | python3`,
+    `python3 <<'PY'
+import os
+os.system("xcrun simctl shutdown DEVICE")
+PY`,
+    `osascript -e 'set cmd to "/usr/bin/xcrun simctl shutdown DEVICE"' -e 'do shell script cmd'`,
+    `osascript -l JavaScript -e 'ObjC.import("Foundation"); const task = $.NSTask.alloc.init; task.launchPath = "/usr/bin/xcrun"; task.arguments = ["simctl", "shutdown", "DEVICE"]; task.launch'`,
+    `python3 -c 'import subprocess; subprocess.run(["/usr/bin/open","-a","Simulator"])'`,
+    `node -e 'require("child_process").spawnSync("/usr/bin/open",["-na","Simulator"])'`,
+    `ruby -e 'system("/usr/bin/open", "-a", "Simulator")'`,
+    `/usr/bin/expect -c 'spawn /usr/bin/xcrun simctl shutdown DEVICE; expect eof'`,
+    `printf '%s' 'exec /usr/bin/xcrun simctl shutdown DEVICE' | /usr/bin/tclsh`,
+    `printf '%s' 'import os; os.system("xcrun simctl shutdown DEVICE")' |& python3`,
+    `bash <<< 'xcrun simctl shutdown DEVICE'`,
+    `zsh <<< 'open -a Simulator'`,
+    `bash -c 'source /dev/stdin' <<< 'xcrun simctl shutdown DEVICE'`,
+    `bash -c 'eval "$(cat)"' <<< 'xcrun simctl shutdown DEVICE'`,
+    `printf 'xcrun simctl shutdown DEVICE' | bash -c 'eval "$(cat)"'`,
+  ])('denies Simulator mutation hidden behind a programmable interpreter: %s', (command) => {
     expect(getDesktopShellCommandPolicy(command)).toMatchObject({ decision: 'deny' });
   });
 
   it.each([
     'xcrun simctl list devices',
     'xcrun simctl listapps DEVICE',
+    'xcrun simctl list "$DEVICE"',
+    'xcrun simctl getenv "$DEVICE" HOME',
+    'xcrun --sdk "$SDK" simctl list devices',
     'exec xcrun simctl list devices',
     'command -p xcrun simctl listapps DEVICE',
     "bash -lc 'xcrun simctl list devices'",
@@ -83,6 +131,23 @@ describeMac('embedded iOS Simulator shell policy', () => {
     'open -a Xcode',
     'echo "open -a Simulator"',
     'osascript -e \'tell application "Simulator" to quit\'',
+    `python3 -c 'print("ordinary project build")'`,
+    `python3 -c 'print("Simulator")'`,
+    `node -e 'console.log("ordinary project build")'`,
+    'swift test --filter IOSSimulatorTests',
+    'swift build --product IOSSimulatorRuntime',
+    'find . -maxdepth 1 -name simctl',
+    'git grep simctl',
+    'git log --grep=simctl',
+    `sed -n '/simctl/p' README.md`,
+    `jq '.simctl' config.json`,
+    'diff simctl-before.txt simctl-after.txt',
+    'cp simctl-notes.txt backup.txt',
+    'git grep simctl && python3 scripts/check.py',
+    'git grep simctl | python3 formatter.py',
+    `git grep simctl | awk '{print $1}'`,
+    `python3 -c 'print("ordinary")'; git grep simctl`,
+    'git grep simctl || python3',
   ])('allows a non-bypass command: %s', (command) => {
     expect(getDesktopShellCommandPolicy(command)).toBeUndefined();
   });

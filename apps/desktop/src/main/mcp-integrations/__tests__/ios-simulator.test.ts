@@ -1,4 +1,5 @@
-import { mkdir, rm, stat, utimes } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import { app } from 'electron';
@@ -10,6 +11,7 @@ import {
   IOSSimulatorInstanceActor,
   IOSSimulatorInstanceError,
   IOSSimulatorOwnershipStore,
+  IOSSimulatorOwnershipRegistryFile,
   IOSSimulatorProjectBuildError,
   IOSSimulatorResourceScheduler,
   WdaError,
@@ -25,6 +27,7 @@ import {
 import type { IOSSimulatorPublicRouteStatus } from '../../../shared/iosSimulatorIpc';
 import {
   createIOSSimulatorHost,
+  createRegistryBackedIOSSimulatorActor,
   getIOSSimulatorMcpDeps,
   type IOSSimulatorAppLifecycleAdapter,
   type IOSSimulatorMediaCaptureAdapter,
@@ -95,6 +98,71 @@ describe('iOS Simulator host', () => {
     const environment = await host.callTool('check_environment', {}, { sessionId: 'session-a' });
     expect(environment).not.toHaveProperty('data.xcodeSelectPath');
     expect(environment).not.toHaveProperty('data.devices.0.availabilityError');
+  });
+
+  it('keeps Desktop available while a malformed ownership registry fails Simulator closed', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-registry-'));
+    const registry = new IOSSimulatorOwnershipRegistryFile(path.join(root, 'registry.json'), {
+      acquireWriterLease: () => {
+        let held = true;
+        return {
+          isHeld: () => held,
+          release: () => {
+            held = false;
+          },
+        };
+      },
+    });
+    await writeFile(registry.filePath, '{"version":1,"instances":[');
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+
+    try {
+      const persisted = createRegistryBackedIOSSimulatorActor(lifecycle, registry);
+      await expect(
+        persisted.actor.create({
+          sessionId: 'session-a',
+          worktreeRoot: '/tmp/session-a',
+          sourceFingerprint: 'fingerprint-a',
+          name: 'Must not be created',
+          templateDevice: {
+            ...READY_REPORT.devices[0]!,
+            deviceTypeIdentifier: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'DEVICE_BUSY' });
+      expect(lifecycle.createExact).not.toHaveBeenCalled();
+      const host = createIOSSimulatorHost({
+        actor: persisted.actor,
+        lifecycle,
+        runtime: { inspect: vi.fn(async () => READY_REPORT) },
+        getSession: vi.fn(async (id) => localSession(id)),
+        resolveWorktreeRoot: vi.fn(async () => '/tmp/session-a'),
+      });
+
+      await expect(
+        host.callTool(
+          'attach_device',
+          { udid: READY_REPORT.devices[0]!.udid },
+          { sessionId: 'session-a', origin: 'user' },
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'DEVICE_BUSY',
+        message: expect.stringContaining('ownership registry is invalid'),
+      });
+      expect(registry.isWriter).toBe(true);
+      await persisted.flush();
+      persisted.release();
+      await host.dispose();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('projects task ownership, resource limits, and safe unavailable-device reasons', async () => {
@@ -1087,10 +1155,14 @@ describe('iOS Simulator host', () => {
           },
         ),
     );
+    const disposeMedia = vi.fn(async () => undefined);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
       projectBuilder: { build },
+      mediaCapture: {
+        dispose: disposeMedia,
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession: vi.fn(async () => localSession('dispose-build-session')),
     });
@@ -1108,6 +1180,7 @@ describe('iOS Simulator host', () => {
     await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
 
     const disposePromise = host.dispose();
+    expect(disposeMedia).toHaveBeenCalledOnce();
     await vi.waitFor(() => expect(buildSignal?.aborted).toBe(true));
     await disposePromise;
 
@@ -1162,10 +1235,15 @@ describe('iOS Simulator host', () => {
           },
         ),
     );
+    const abortRecording = vi.fn();
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
       projectBuilder: { build },
+      mediaCapture: {
+        abortOperationsForExit: abortRecording,
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession: vi.fn(async () => localSession('force-quit-build-session')),
     });
@@ -1185,6 +1263,7 @@ describe('iOS Simulator host', () => {
     host.abortOperationsForExit();
 
     expect(buildSignal?.aborted).toBe(true);
+    expect(abortRecording).toHaveBeenCalledOnce();
     await expect(callPromise).resolves.toMatchObject({
       ok: false,
       errorCode: 'MUTATION_CANCELLED',
@@ -1632,6 +1711,9 @@ describe('iOS Simulator host', () => {
         } satisfies IOSSimulatorStreamStats;
       },
     );
+    const beginTouch = vi.fn(async () => undefined);
+    const moveTouch = vi.fn(async () => undefined);
+    const endTouch = vi.fn(async () => undefined);
     const nativeDriver = {
       kind: 'native-sidecar',
       capabilities: {
@@ -1646,6 +1728,9 @@ describe('iOS Simulator host', () => {
       },
       configureNativeStream: vi.fn(async (profile) => profile),
       streamNativeFrames,
+      beginTouch,
+      moveTouch,
+      endTouch,
     } as unknown as IOSSimulatorNativeSidecarDriver;
     const getWindowSize = vi.fn(async () => ({ width: 393, height: 852 }));
     const wdaDriver = {
@@ -1683,6 +1768,7 @@ describe('iOS Simulator host', () => {
           source: nativeDriver,
         })),
         capabilityReport,
+        continuousInput: vi.fn(() => nativeDriver),
       },
     } as unknown as WdaRunningInstance;
     const pushH264Frame = vi.fn();
@@ -1811,17 +1897,58 @@ describe('iOS Simulator host', () => {
       ),
     ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
 
+    await expect(
+      host.updateViewerTouch('session-a', route, 88, {
+        gestureId: 'gesture-old-viewer',
+        phase: 'begin',
+        xRatio: 0.4,
+        yRatio: 0.4,
+      }),
+    ).resolves.toMatchObject({ ok: true });
     liveViewerIds.delete(88);
     liveViewerIds.add(99);
     await expect(
       host.setViewerVisibility('session-a', route, true, 'h264', undefined, 99, 'viewer-f'),
     ).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() =>
+      expect(endTouch).toHaveBeenCalledWith(
+        'gesture-old-viewer',
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+        true,
+      ),
+    );
+    endTouch.mockClear();
     await emitFrame({ ...firstFrame, timestampMicros: 4 });
     expect(pushH264Frame).toHaveBeenCalledTimes(4);
     expect(pushH264Frame).toHaveBeenLastCalledWith(
       99,
       expect.objectContaining({ instanceId: instance.instanceId }),
     );
+
+    await expect(
+      host.updateViewerTouch('session-a', route, 99, {
+        gestureId: 'gesture-1',
+        phase: 'begin',
+        xRatio: 0.5,
+        yRatio: 0.5,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(beginTouch).toHaveBeenCalledTimes(2);
+    expect(host.revokeRendererViewer('session-b', 99)).toBe(0);
+    expect(host.revokeRendererViewer('session-a', 98)).toBe(0);
+    await emitFrame({ ...firstFrame, timestampMicros: 5 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(5);
+
+    expect(host.revokeRendererViewer('session-a', 99)).toBe(1);
+    await vi.waitFor(() =>
+      expect(endTouch).toHaveBeenCalledWith(
+        'gesture-1',
+        expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+        true,
+      ),
+    );
+    await emitFrame({ ...firstFrame, timestampMicros: 6 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(5);
 
     const current = actor.getOwned('session-a', instance.instanceId);
     await actor.stop({
@@ -1830,8 +1957,8 @@ describe('iOS Simulator host', () => {
       generation: current.generation,
       leaseId: current.lease.id,
     });
-    await emitFrame({ ...firstFrame, timestampMicros: 5 });
-    expect(pushH264Frame).toHaveBeenCalledTimes(4);
+    await emitFrame({ ...firstFrame, timestampMicros: 7 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(5);
     await host.dispose();
   });
 

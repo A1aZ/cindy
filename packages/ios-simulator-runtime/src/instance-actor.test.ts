@@ -435,6 +435,45 @@ describe("IOSSimulatorInstanceActor", () => {
     });
   });
 
+  it("deletes a newly created device when the ownership write fails after preflight", async () => {
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    let mutationChecks = 0;
+    const assertMutationAllowed = vi.fn(() => {
+      mutationChecks += 1;
+      if (mutationChecks > 1) throw new Error("writer lease lost");
+    });
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(async () => ({
+        udid: createdUdid,
+        name: "Cindy iPhone",
+        runtimeIdentifier: DEVICE.runtimeIdentifier,
+        deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+      })),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      lifecycle,
+      assertMutationAllowed,
+      store: new IOSSimulatorOwnershipStore({ assertMutationAllowed }),
+    });
+
+    await expect(
+      actor.create({
+        sessionId: "session-a",
+        worktreeRoot: "/tmp/session-a",
+        sourceFingerprint: "abc",
+        name: "Cindy iPhone",
+        templateDevice: DEVICE,
+      }),
+    ).rejects.toThrow("writer lease lost");
+    expect(lifecycle.createExact).toHaveBeenCalledTimes(1);
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdUdid);
+    expect(actor.listAll()).toEqual([]);
+  });
+
   it("serializes bounded driver mutations and revalidates their route", async () => {
     const harness = createHarness({ booted: true });
     const order: string[] = [];

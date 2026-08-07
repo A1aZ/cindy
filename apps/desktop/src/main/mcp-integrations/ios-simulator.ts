@@ -41,6 +41,7 @@ import {
   type IOSSimulatorGrantDecision,
   type IOSSimulatorInstance,
   type IOSSimulatorLocationRouteOptions,
+  type IOSSimulatorLiveTouchPoint,
   type IOSSimulatorContentSize,
   type IOSSimulatorScreenMap,
   type IOSSimulatorMutationRoute,
@@ -76,7 +77,6 @@ import type {
   IOSSimulatorPublicRouteStatus,
   IOSSimulatorSessionStatus,
 } from '../../shared/iosSimulatorIpc.js';
-import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../../shared/iosSimulatorIpc.js';
 import type {
   GhostIOSSimulatorStatusProbeResult,
   GhostIOSSimulatorStatusSnapshot,
@@ -91,6 +91,13 @@ import {
 import { resolveIOSSimulatorDesktopAdmissionPolicy } from './ios-simulator-admission.js';
 import { registerIOSSimulatorExitAbortHandler } from './ios-simulator-exit.js';
 import { compareIOSSimulatorPngBuffers, IOSSimulatorMediaCapture } from './ios-simulator-media.js';
+import {
+  clearIOSSimulatorRendererAccess,
+  configureIOSSimulatorRendererAccessRevocationObserver,
+  focusIOSSimulatorRendererSession,
+  pushIOSSimulatorRouteStatusToGrantedRenderers,
+  revokeIOSSimulatorRendererSession,
+} from './ios-simulator-renderer-access.js';
 
 const logger = createLogger('mcp/cindy_ios_simulator');
 const BUILD_DIAGNOSTICS_TTL_MS = 30 * 60_000;
@@ -143,7 +150,8 @@ export type IOSSimulatorMediaCaptureAdapter = Pick<
   | 'startRecording'
   | 'stopRecording'
   | 'discardInstance'
->;
+> &
+  Partial<Pick<IOSSimulatorMediaCapture, 'dispose' | 'abortOperationsForExit'>>;
 
 export type IOSSimulatorHostResult =
   | { ok: true; data: unknown }
@@ -194,6 +202,8 @@ export interface IOSSimulatorHost {
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   /** Read-only, redacted plugin projection; never reconciles or renews an ownership lease. */
   getPluginStatus(sessionId: string): Promise<GhostIOSSimulatorStatusProbeResult>;
+  /** Synchronously retire media/input owned by one exact revoked renderer grant. */
+  revokeRendererViewer(sessionId: string, viewerWebContentsId: number): number;
   callTool(
     name: IOSSimulatorMcpToolName,
     args: Record<string, unknown>,
@@ -257,32 +267,81 @@ function sessionError(
 let defaultRegistryFlush: (() => Promise<void>) | null = null;
 let defaultRegistryRelease: (() => void) | null = null;
 
-function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
-  const registry = new IOSSimulatorOwnershipRegistryFile(
-    path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
-  );
-  const ownsWriterLease = registry.acquireWriterSync();
+export function createRegistryBackedIOSSimulatorActor(
+  lifecycle: IOSSimulatorSimctlLifecycle,
+  registry: IOSSimulatorOwnershipRegistryFile,
+): {
+  actor: IOSSimulatorInstanceActor;
+  flush: () => Promise<void>;
+  release: () => void;
+} {
+  let ownsWriterLease = false;
+  let startupError: unknown = null;
   try {
+    ownsWriterLease = registry.acquireWriterSync();
+  } catch (error) {
+    startupError = new IOSSimulatorInstanceError(
+      'DEVICE_BUSY',
+      'Cindy cannot safely manage iOS Simulator devices because the ownership registry is unavailable.',
+      false,
+    );
+    logger.error('iOS Simulator ownership registry writer could not start', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    let initialInstances: IOSSimulatorInstance[] = [];
+    if (ownsWriterLease && !startupError) {
+      try {
+        initialInstances = registry.loadSync();
+      } catch (error) {
+        // A corrupt/partially-written registry must fail closed for Simulator
+        // ownership without preventing the rest of Desktop Main from starting.
+        // Keep the writer lease and refuse every ownership mutation so another
+        // process cannot claim the same devices or overwrite recovery evidence.
+        startupError = new IOSSimulatorInstanceError(
+          'DEVICE_BUSY',
+          'Cindy cannot safely manage iOS Simulator devices because the ownership registry is invalid.',
+          false,
+        );
+        logger.error('iOS Simulator ownership registry is unavailable', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    const assertMutationAllowed = (): void => {
+      if (startupError) throw startupError;
+      registry.assertWriter();
+    };
     const store = new IOSSimulatorOwnershipStore({
       maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
-      initialInstances: ownsWriterLease ? registry.loadSync() : [],
-      assertMutationAllowed: () => registry.assertWriter(),
+      initialInstances,
+      assertMutationAllowed,
       // Persist in the same mutation transaction. If the writer lease is lost or
       // the atomic write fails, OwnershipStore rolls its in-memory mutation back.
       onChange: (instances) => registry.saveSync(instances),
     });
-    defaultRegistryFlush = async () => {
-      if (registry.isWriter) registry.saveSync(store.listAll());
+    return {
+      actor: new IOSSimulatorInstanceActor({ store, lifecycle, assertMutationAllowed }),
+      flush: async () => {
+        if (registry.isWriter && !startupError) registry.saveSync(store.listAll());
+      },
+      release: () => registry.releaseWriterSync(),
     };
-    defaultRegistryRelease = () => registry.releaseWriterSync();
-    return new IOSSimulatorInstanceActor({
-      store,
-      lifecycle,
-    });
   } catch (error) {
     registry.releaseWriterSync();
     throw error;
   }
+}
+
+function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
+  const registry = new IOSSimulatorOwnershipRegistryFile(
+    path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
+  );
+  const persisted = createRegistryBackedIOSSimulatorActor(lifecycle, registry);
+  defaultRegistryFlush = persisted.flush;
+  defaultRegistryRelease = persisted.release;
+  return persisted.actor;
 }
 
 function createInMemoryActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
@@ -675,6 +734,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     string,
     { sessionId: string; webContentsId: number | null; viewerToken: string | null }
   >();
+  const activeViewerTouches = new Map<string, Map<string, IOSSimulatorLiveTouchPoint>>();
   const pushH264Frame =
     options.pushH264Frame ??
     ((viewerWebContentsId: number, frame: IOSSimulatorLatestH264Frame) => {
@@ -812,16 +872,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const pushRouteStatus =
     options.pushRouteStatus ??
     ((status: IOSSimulatorPublicRouteStatus) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (window.isDestroyed()) continue;
-        try {
-          window.webContents.send(IOS_SIMULATOR_ROUTE_STATUS_CHANNEL, status);
-        } catch (error) {
-          logger.debug('iOS Simulator route status push skipped', {
-            instanceId: status.instanceId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+      if (pushIOSSimulatorRouteStatusToGrantedRenderers(status) === 0) {
+        logger.debug('iOS Simulator route status has no granted renderer', {
+          sessionId: status.sessionId,
+          instanceId: status.instanceId,
+        });
       }
     });
   const hostDisposedResult = (): IOSSimulatorHostResult => ({
@@ -900,6 +955,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       pendingTeardowns: current.pendingTeardowns + 1,
     });
     blockedBuildInstances.add(instanceId);
+    releaseViewerTouches(instanceId);
   }
   function finishInstanceTeardown(instanceId: string): void {
     const current = lifecycleBarrier(instanceId);
@@ -1377,14 +1433,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const requestViewerFocus =
     options.requestViewerFocus ??
     ((sessionId: string, instanceId: string) => {
-      for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed()) {
-          window.webContents.send('maker:ios-simulator:focus-request', {
-            sessionId,
-            instanceId,
-            userInitiated: false,
-          });
-        }
+      if (!focusIOSSimulatorRendererSession(sessionId, instanceId)) {
+        logger.debug('iOS Simulator focus request has no Main-owned renderer target', {
+          sessionId,
+          instanceId,
+        });
       }
     });
 
@@ -2635,8 +2688,34 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     idleRecycleTimers.set(instance.instanceId, timer);
   }
 
+  function releaseViewerTouches(instanceId: string): void {
+    const touches = activeViewerTouches.get(instanceId);
+    activeViewerTouches.delete(instanceId);
+    if (!touches || touches.size === 0) return;
+    const nativeInput = getDriverManager().get(instanceId)?.driverRouter?.continuousInput();
+    if (!nativeInput) return;
+    for (const [gestureId, point] of touches) {
+      try {
+        void nativeInput.endTouch(gestureId, point, true).catch((error) => {
+          logger.warn('iOS Simulator viewer touch release failed', {
+            instanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      } catch (error) {
+        logger.warn('iOS Simulator viewer touch release failed', {
+          instanceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
   function stopViewerMedia(instance: IOSSimulatorInstance): IOSSimulatorFramePumpSnapshot | null {
     const running = getDriverManager().get(instance.instanceId);
+    // Enqueue Native HID cancellation before clearing the stream/viewer claim.
+    // Renderer cleanup IPC may already be denied after its capability is revoked.
+    releaseViewerTouches(instance.instanceId);
     viewerSessions.delete(instance.instanceId);
     h264FramePump.clear(instance.instanceId);
     viewerEncodings.delete(instance.instanceId);
@@ -2751,6 +2830,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         viewerToken ??
         (previous?.webContentsId === viewerWebContentsId ? previous.viewerToken : null),
     };
+    if (
+      previous &&
+      (previous.sessionId !== claim.sessionId ||
+        previous.webContentsId !== claim.webContentsId ||
+        previous.viewerToken !== claim.viewerToken)
+    ) {
+      releaseViewerTouches(instanceId);
+    }
     viewerSessions.set(instanceId, claim);
     return {
       assertCurrent: () => {
@@ -2790,6 +2877,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       previousViewer.webContentsId !== nextViewerWebContentsId ||
       previousViewer.viewerToken !== nextViewerToken
     ) {
+      if (previousViewer) releaseViewerTouches(instance.instanceId);
       viewerSessions.set(instance.instanceId, {
         sessionId: instance.sessionId,
         webContentsId: nextViewerWebContentsId,
@@ -2873,6 +2961,29 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     },
     getStatus: inspectForSession,
     getPluginStatus: inspectForPlugin,
+    revokeRendererViewer(sessionId, viewerWebContentsId) {
+      let revoked = 0;
+      for (const [instanceId, viewer] of [...viewerSessions]) {
+        if (viewer.sessionId !== sessionId || viewer.webContentsId !== viewerWebContentsId) continue;
+        revoked += 1;
+        try {
+          stopViewerMedia(actor.getOwned(sessionId, instanceId));
+        } catch {
+          // Ownership can disappear before the renderer grant. Clear every
+          // process-local viewer resource without trying to recover a route.
+          releaseViewerTouches(instanceId);
+          viewerSessions.delete(instanceId);
+          cancelIdleRecycle(instanceId);
+          framePump.clear(instanceId);
+          h264FramePump.clear(instanceId);
+          viewerEncodings.delete(instanceId);
+          viewerPreferredEncodings.delete(instanceId);
+          viewerFallbackReasons.delete(instanceId);
+          clearViewportState(instanceId);
+        }
+      }
+      return revoked;
+    },
     async setViewerVisibility(
       sessionId,
       route,
@@ -3105,6 +3216,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           }
         }
         if (snapshot && snapshot.generation !== instance.generation) {
+          releaseViewerTouches(instance.instanceId);
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
           viewerEncodings.delete(instance.instanceId);
@@ -3216,10 +3328,30 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             const point = normalizedPointFromViewport(driverPoint, driver);
             if (touch.phase === 'begin') {
               await nativeInput.beginTouch(touch.gestureId, point, signal);
+              try {
+                assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
+              } catch (error) {
+                await nativeInput.endTouch(touch.gestureId, point, true).catch(() => undefined);
+                throw error;
+              }
+              const touches = activeViewerTouches.get(instance.instanceId) ?? new Map();
+              touches.set(touch.gestureId, point);
+              activeViewerTouches.set(instance.instanceId, touches);
             } else if (touch.phase === 'move') {
               await nativeInput.moveTouch(touch.gestureId, point, signal);
+              try {
+                assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
+              } catch (error) {
+                await nativeInput.endTouch(touch.gestureId, point, true).catch(() => undefined);
+                activeViewerTouches.get(instance.instanceId)?.delete(touch.gestureId);
+                throw error;
+              }
+              activeViewerTouches.get(instance.instanceId)?.set(touch.gestureId, point);
             } else {
               await nativeInput.endTouch(touch.gestureId, point, touch.phase === 'cancel', signal);
+              const touches = activeViewerTouches.get(instance.instanceId);
+              touches?.delete(touch.gestureId);
+              if (touches?.size === 0) activeViewerTouches.delete(instance.instanceId);
             }
             screenMaps.invalidate(instance.instanceId);
           },
@@ -3390,6 +3522,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             },
           );
           completeInstanceActivation(instance, activationEpoch);
+          releaseViewerTouches(instance.instanceId);
           screenMaps.clear(instance.instanceId);
           framePump.clear(instance.instanceId);
           h264FramePump.clear(instance.instanceId);
@@ -3398,8 +3531,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           viewerFallbackReasons.delete(instance.instanceId);
           viewerSessions.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
-          publishRouteStatusForInstance(instance, getDriverManager().get(instance.instanceId));
           requestViewerFocus(sessionId, instance.instanceId);
+          publishRouteStatusForInstance(instance, getDriverManager().get(instance.instanceId));
           return {
             ok: true,
             data: instanceData(instance),
@@ -4917,6 +5050,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             if (context?.origin === 'agent') {
               agentControlLeases.set(instance.instanceId, sessionId);
             }
+            releaseViewerTouches(instance.instanceId);
             screenMaps.clear(instance.instanceId);
             framePump.clear(instance.instanceId);
             h264FramePump.clear(instance.instanceId);
@@ -4947,12 +5081,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     },
     abortOperationsForExit() {
       for (const build of activeBuilds.values()) build.controller.abort();
+      mediaCapture.abortOperationsForExit?.();
     },
     dispose() {
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
         const builds = [...activeBuilds.values()];
         for (const build of builds) build.controller.abort();
+        // Close the recording start gate immediately, before waiting for a
+        // potentially slow xcodebuild process to acknowledge cancellation.
+        const mediaDispose = mediaCapture.dispose?.().catch((error) => {
+          logger.warn('iOS Simulator dispose could not close media capture', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
         await Promise.all(builds.map((build) => build.settled));
         clearVisualBaselines();
         await Promise.all(
@@ -4964,14 +5106,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         for (const timer of idleRecycleTimers.values()) clearTimeout(timer);
         idleRecycleTimers.clear();
         const instances = actor.listAll();
+        await mediaDispose;
         await Promise.all(
           instances.map(async (instance) => {
-            await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
-              logger.warn('iOS Simulator dispose could not discard recording', {
-                instanceId: instance.instanceId,
-                error: error instanceof Error ? error.message : String(error),
+            releaseViewerTouches(instance.instanceId);
+            if (!mediaCapture.dispose) {
+              await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
+                logger.warn('iOS Simulator dispose could not discard recording', {
+                  instanceId: instance.instanceId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
               });
-            });
+            }
             if (driverManager) {
               await driverManager.stop(instance.instanceId).catch((error) => {
                 logger.warn('iOS Simulator dispose could not stop WDA', {
@@ -4992,6 +5138,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             nativeStreamProfiles.delete(instance.instanceId);
           }),
         );
+        activeViewerTouches.clear();
+        viewerSessions.clear();
         routeStatusCache.clear();
         pluginEnvironmentCache = null;
       })();
@@ -5004,6 +5152,11 @@ const defaultIOSSimulatorLifecycle = createIOSSimulatorSimctlLifecycle();
 const defaultIOSSimulatorHost = createIOSSimulatorHost({
   lifecycle: defaultIOSSimulatorLifecycle,
   actor: createDefaultActor(defaultIOSSimulatorLifecycle),
+});
+configureIOSSimulatorRendererAccessRevocationObserver((grants) => {
+  for (const grant of grants) {
+    defaultIOSSimulatorHost.revokeRendererViewer(grant.sessionId, grant.target.id);
+  }
 });
 const releaseIOSSimulatorExitAbortHandler = registerIOSSimulatorExitAbortHandler(() => {
   defaultIOSSimulatorHost.abortOperationsForExit();
@@ -5083,15 +5236,18 @@ export function reconcileIOSSimulatorOwnership(): Promise<void> {
 
 export async function disposeIOSSimulatorHost(): Promise<void> {
   try {
+    clearIOSSimulatorRendererAccess();
     await defaultIOSSimulatorHost.dispose();
     await defaultRegistryFlush?.();
   } finally {
+    configureIOSSimulatorRendererAccessRevocationObserver(null);
     releaseIOSSimulatorExitAbortHandler();
     defaultRegistryRelease?.();
   }
 }
 
 export function cancelIOSSimulatorSessionOperations(sessionId: string): Promise<void> {
+  revokeIOSSimulatorRendererSession(sessionId);
   return defaultIOSSimulatorHost.cancelSessionOperations(sessionId);
 }
 

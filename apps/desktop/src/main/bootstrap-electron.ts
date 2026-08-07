@@ -15,6 +15,7 @@ import {
   session,
   shell,
   Tray,
+  type WebContents,
 } from 'electron';
 import { resolveVibrancyConfig } from './vibrancyConfig';
 import { applyVibrancyToSecondaryWindows } from './secondary-windows';
@@ -270,6 +271,7 @@ import { fetchReleaseNotes, fetchReleaseNotesIndex } from './releaseNotesService
 import { resolveWorkspacePathCached, resolveWorkspacePathBatchCached } from './pathResolver';
 import { registerLocalDbIpc } from './localDb/ipc/registerAll';
 import { listPersistedChatAttachmentPaths } from './localDb/ipc/messages';
+import { getSessionRowSnapshot } from './localDb/ipc/sessions';
 import {
   registerLegacyMigrationIpc,
   runLegacyUserDataMigrationForUser,
@@ -305,9 +307,16 @@ import { outboundFetch } from './maker-host/outbound-fetch';
 import { registerDevEmbeddingIpc } from './ipc/dev/embedding';
 import { onQuit, installQuitHandler } from './lifecycle';
 import {
+  cancelIOSSimulatorSessionOperations,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
 } from './mcp-integrations/ios-simulator';
+import {
+  clearIOSSimulatorRendererAccess,
+  configureIOSSimulatorRendererAccessConfirmation,
+  configureIOSSimulatorRendererTargets,
+  inheritIOSSimulatorRendererSessionAccess,
+} from './mcp-integrations/ios-simulator-renderer-access';
 import {
   parseIOSSimulatorReleaseGateArgs,
   runIOSSimulatorReleaseGate,
@@ -334,7 +343,12 @@ import {
   isFocusedAppContentWindow,
   markAppContentWindow,
 } from './windowFocusClassifier.js';
-import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer.js';
+import {
+  assertTrustedAppRendererEvent,
+  isTrustedAppRendererWindow,
+} from './security/trustedAppRenderer.js';
+import { isMainShellWindowUrl } from './cindy-brain/scheduleSlot.js';
+import { sanitizeGhostNoticeText } from './cindy-brain/notifySlot.js';
 import { isIpcError } from '../shared/ipc-errors';
 import { readFileBytesForPreview } from './fileReadBytes.js';
 import { initHeartbeatService } from './heartbeatService';
@@ -1248,7 +1262,17 @@ installWebviewHardener();
 // 调用时机远晚于此处构造),状态机本体见 right-sidebar-window/controller.ts。
 const rsbWindowController = new RsbWindowController({
   settings: { read: readRsbWindowSettings, writePatch: writeRsbWindowSettingsPatch },
-  createWindow: (opts) => createRightSidebarWindow(opts),
+  createWindow: (opts) => {
+    const window = createRightSidebarWindow(opts);
+    const mainTarget =
+      mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()
+        ? mainWindowRef.webContents
+        : null;
+    if (mainTarget) {
+      inheritIOSSimulatorRendererSessionAccess(mainTarget, window.webContents);
+    }
+    return window;
+  },
   getMainWindow: () => mainWindowRef,
   broadcastState: (state) => {
     for (const win of BrowserWindow.getAllWindows()) {
@@ -1272,6 +1296,82 @@ const rsbWindowController = new RsbWindowController({
   isQuitting: () => isQuitting,
   canCloseWindow: () => !hasActiveRsbNativePopupSurfaces(),
   log: createLogger('right-sidebar-window-controller'),
+});
+
+function isIOSSimulatorPluginActive(ghosts = getGhostManager().list()): boolean {
+  return ghosts.some(
+    (ghost) =>
+      ghost.enabled === true &&
+      ghost.manifest.slots.includes('ios-simulator') &&
+      isGhostAvailableForActiveSession(ghost.manifest.id),
+  );
+}
+
+function resolveIOSSimulatorRendererWindow(
+  target: Parameters<typeof BrowserWindow.fromWebContents>[0],
+): BrowserWindow | null {
+  const owner = BrowserWindow.fromWebContents(target);
+  if (!owner || !isTrustedAppRendererWindow(owner)) return null;
+  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const isSidebar = sidebarTarget === target;
+  if (!isSidebar && !isMainShellWindowUrl(owner.webContents.getURL())) return null;
+  return owner;
+}
+
+configureIOSSimulatorRendererTargets((preferredTarget) => {
+  if (!isIOSSimulatorPluginActive()) return null;
+  const mainTarget =
+    mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()
+      ? mainWindowRef.webContents
+      : null;
+  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const belongsToMainFamily =
+    !preferredTarget || preferredTarget === mainTarget || preferredTarget === sidebarTarget;
+  if (!belongsToMainFamily) {
+    if (!preferredTarget || !resolveIOSSimulatorRendererWindow(preferredTarget as WebContents)) {
+      return null;
+    }
+    return {
+      grantTargets: [preferredTarget],
+      focusTarget: preferredTarget,
+    };
+  }
+  const grantTargets = [mainTarget, sidebarTarget].filter(
+    (target): target is NonNullable<typeof target> => Boolean(target),
+  );
+  const focusTarget = rsbWindowController.getHostWebContents() ?? preferredTarget ?? mainTarget;
+  return focusTarget ? { grantTargets, focusTarget } : null;
+});
+configureIOSSimulatorRendererAccessConfirmation(async (target, sessionId) => {
+  if (!isIOSSimulatorPluginActive()) return false;
+  const owner = resolveIOSSimulatorRendererWindow(target as WebContents);
+  if (!owner) return false;
+  const row = await getSessionRowSnapshot(sessionId);
+  if (!row || row.status !== 'active' || row.remoteHostId) return false;
+
+  const taskLabel =
+    sanitizeGhostNoticeText(row.title ?? '')
+      .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 120) || t('rightSidebar.iosSimulator.accessDialogUntitledTask');
+  const result = await dialog.showMessageBox(owner, {
+    type: 'question',
+    title: t('rightSidebar.iosSimulator.accessDialogTitle'),
+    message: t('rightSidebar.iosSimulator.accessDialogMessage').replaceAll('{{task}}', taskLabel),
+    detail: t('rightSidebar.iosSimulator.accessDialogDetail'),
+    buttons: [
+      t('rightSidebar.iosSimulator.accessDialogAllow'),
+      t('rightSidebar.iosSimulator.accessDialogCancel'),
+    ],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (result.response !== 0 || owner.isDestroyed() || target.isDestroyed()) return false;
+  const current = await getSessionRowSnapshot(sessionId);
+  return Boolean(
+    current && current.status === 'active' && !current.remoteHostId && isIOSSimulatorPluginActive(),
+  );
 });
 registerRsbWindowIpc({
   controller: rsbWindowController,
@@ -1322,7 +1422,10 @@ const ghostPanelWindowsController = new GhostPanelWindowsController({
   log: createLogger('ghost-panel-window-controller'),
 });
 registerGhostPanelWindowIpc(ghostPanelWindowsController);
-setGhostsChangedObserver((ghosts) => ghostPanelWindowsController.reconcile(ghosts));
+setGhostsChangedObserver((ghosts) => {
+  ghostPanelWindowsController.reconcile(ghosts);
+  if (!isIOSSimulatorPluginActive(ghosts)) clearIOSSimulatorRendererAccess();
+});
 
 const rsbBrowserRegistry = getRsbBrowserBridge();
 registerRsbNativePopupSurfaceIpc(rsbBrowserRegistry);
@@ -4142,17 +4245,6 @@ const registerIpcHandlers = () => {
         refreshXdGatewayModels,
         waitForAccountProviderModelsReady: waitForCurrentAccountProviderModelsReady,
         onProviderModelAutoRefreshConfigured: markMakerProviderRefreshConfigured,
-        resolveIOSSimulatorRendererUrl: (event) => {
-          const sender = (event as { sender?: { getURL?: () => string } })?.sender;
-          if (!sender) return '';
-          if (sender === rsbWindowController.getSidebarWebContents()) {
-            const mainWindow = mainWindowRef;
-            return mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()
-              ? mainWindow.webContents.getURL()
-              : '';
-          }
-          return typeof sender.getURL === 'function' ? sender.getURL() : '';
-        },
       });
       registerMakerTitleIpc({ isSessionTurnPendingCompletion });
       registerMakerHelpIpc(ipcMaker);
@@ -6289,6 +6381,7 @@ app.on('ready', async () => {
   // 保证 beforeEnsureReady 推送 confirm 态时 renderer 已能 invoke 确认通道。
   registerLegacyMigrationIpc();
   registerLocalDbIpc({
+    cancelSessionOperations: cancelIOSSimulatorSessionOperations,
     isOwnerCurrent: (userId) =>
       isLocalDbOwnerCurrent(authManager.getAuthState(), userId, isAppSessionBoundaryPending()),
     discardStaleOwner: (userId) =>

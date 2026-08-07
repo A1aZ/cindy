@@ -27,6 +27,9 @@ type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
 type IOSSimulatorSessionStatus = import('../shared/iosSimulatorIpc').IOSSimulatorSessionStatus;
+type IOSSimulatorAccessRequest = import('../shared/iosSimulatorIpc').IOSSimulatorAccessRequest;
+type IOSSimulatorAccessRequestResult =
+  import('../shared/iosSimulatorIpc').IOSSimulatorAccessRequestResult;
 type IOSSimulatorStatusRequest = import('../shared/iosSimulatorIpc').IOSSimulatorStatusRequest;
 type IOSSimulatorToolRequest = import('../shared/iosSimulatorIpc').IOSSimulatorToolRequest;
 type IOSSimulatorToolResponse = import('../shared/iosSimulatorIpc').IOSSimulatorToolResponse;
@@ -5778,6 +5781,9 @@ interface ElectronAPI {
       prepareAdb: () => Promise<AndroidAdbPreparationState>;
     };
     iosSimulator: {
+      requestAccess: (
+        request: IOSSimulatorAccessRequest,
+      ) => Promise<IOSSimulatorAccessRequestResult>;
       status: (request: IOSSimulatorStatusRequest) => Promise<IOSSimulatorSessionStatus>;
       call: (request: IOSSimulatorToolRequest) => Promise<IOSSimulatorToolResponse>;
       setAgentControl: (

@@ -4770,8 +4770,6 @@ export async function beginTurnChangeSetAtDispatch(
 
 export interface RegisterMakerIpcOptions {
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
-  /** Resolve detached sidebar calls against the Main-owned host window route. */
-  resolveIOSSimulatorRendererUrl?: (event: unknown) => string;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
   refreshXdGatewayModels(): Promise<void>;
   /** DB 可读后仍在后台运行的账号模型发现；新建 / 懒恢复路由前必须等待。 */
@@ -12306,9 +12304,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // ── iOS Simulator pane / Agent discovery ────────────────────────────────
   registerIOSSimulatorHandlers(
     createElectronIpcHandlerRegistry(),
-    options.resolveIOSSimulatorRendererUrl
-      ? { getRendererUrl: options.resolveIOSSimulatorRendererUrl }
-      : {},
   );
   void reconcileIOSSimulatorOwnership().catch((error) => {
     log.warn('iOS Simulator ownership reconcile failed during IPC bootstrap', error);

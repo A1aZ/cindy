@@ -11,7 +11,7 @@ import { ipcMain } from 'electron';
 
 import { closeDb, ensureReady, getCurrentUserId } from '../index';
 import { getCurrentDbClientUserId } from '../client/current';
-import { registerSessionIpc } from './sessions';
+import { registerSessionIpc, setSessionRemovalCancelOperations } from './sessions';
 import { registerMessageIpc } from './messages';
 import { registerOrcaWorkflowIpc } from './orcaTeams';
 import { registerSessionImportIpc } from './session-import';
@@ -36,6 +36,8 @@ export interface RegisterLocalDbIpcOpts {
   discardStaleOwner?: (userId: string) => void | Promise<void>;
   /** ensureReady 打开/创建目标库前执行；失败时阻断，避免跳过认领后创建空库。 */
   beforeEnsureReady?: (userId: string) => void | Promise<void>;
+  /** Stop Host-owned session operations before an archived/deleted worktree is recycled. */
+  cancelSessionOperations?: (sessionId: string) => Promise<void>;
   /**
    * 可选回调：localDb.ensureReady 成功（含已就绪复用路径）后触发。
    * 用途：启动依赖 localDb 的 host 单例（如 scheduler-host）。失败时协调器会
@@ -50,6 +52,7 @@ export interface RegisterLocalDbIpcOpts {
 }
 
 export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
+  setSessionRemovalCancelOperations(opts.cancelSessionOperations ?? null);
   const runEnsureReady = createOwnerEnsureCoordinator({
     isOwnerCurrent: opts.isOwnerCurrent ?? (() => true),
     beforeEnsureReady: opts.beforeEnsureReady,

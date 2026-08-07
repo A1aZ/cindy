@@ -62,12 +62,9 @@ vi.mock('../worktree/sessionRemovalRecycle.js', () => ({
   isSessionStillRemovable: h.isSessionStillRemovable,
   recycleWorktreeForRemovedSession: h.recycleWorktreeForRemovedSession,
 }));
-vi.mock('../mcp-integrations/ios-simulator.js', () => ({
-  cancelIOSSimulatorSessionOperations: h.cancelSessionOperations,
-}));
-
 import {
   recycleSessionWorktreeForStatusChange,
+  setSessionRemovalCancelOperations,
   setSessionsStatusInDb,
 } from '../localDb/ipc/sessions.js';
 
@@ -78,9 +75,11 @@ beforeEach(() => {
   h.isSessionStillRemovable.mockResolvedValue(true);
   h.cancelSessionOperations.mockResolvedValue(undefined);
   h.recycleWorktreeForRemovedSession.mockResolvedValue(undefined);
+  setSessionRemovalCancelOperations(h.cancelSessionOperations);
 });
 
 afterEach(() => {
+  setSessionRemovalCancelOperations(null);
   fs.rmSync(h.userDataPath, { recursive: true, force: true });
 });
 
@@ -255,5 +254,21 @@ describe('recycleSessionWorktreeForStatusChange', () => {
     expect(h.closeSession).not.toHaveBeenCalled();
     expect(h.recycleWorktreeForRemovedSession).not.toHaveBeenCalled();
     expect(h.webContentsSend).not.toHaveBeenCalledWith('worktree:changed', expect.anything());
+  });
+
+  it('fails closed before closing or recycling when Host cleanup is not configured', async () => {
+    setSessionRemovalCancelOperations(null);
+
+    await recycleSessionWorktreeForStatusChange('s1', 'deleted');
+
+    expect(h.isSessionStillRemovable).not.toHaveBeenCalled();
+    expect(h.closeSession).not.toHaveBeenCalled();
+    expect(h.recycleWorktreeForRemovedSession).not.toHaveBeenCalled();
+    expect(h.webContentsSend).toHaveBeenCalledWith('worktree:changed', { sessionId: 's1' });
+  });
+
+  it('does not dynamically import the Simulator Host from the recycle path', () => {
+    const source = fs.readFileSync(new URL('../localDb/ipc/sessions.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain("import('../../mcp-integrations/ios-simulator.js')");
   });
 });

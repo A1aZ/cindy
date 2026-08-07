@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -94,11 +94,40 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
       await writeFile(
         filePath,
         JSON.stringify({
-          version: 999,
+          version: 1,
           instances: [{ simulatorUdid: DEVICE.udid }],
         }),
       );
-      expect(await registry.load()).toEqual([]);
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
+      await writeFile(
+        filePath,
+        JSON.stringify({ version: 999, instances: [] }),
+      );
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
+      const validStore = new IOSSimulatorOwnershipStore({
+        createId: () => "valid-instance",
+      });
+      const valid = validStore.attach({
+        sessionId: "session-a",
+        worktreeRoot: "/tmp/project-a",
+        sourceFingerprint: "fingerprint-a",
+        device: DEVICE,
+      });
+      await registry.save([valid]);
+      const invalidDateSnapshot = JSON.parse(
+        await readFile(registry.filePath, "utf8"),
+      ) as {
+        instances: Array<{ lease: { expiresAt: string } }>;
+      };
+      invalidDateSnapshot.instances[0]!.lease.expiresAt = "not-a-date";
+      await writeFile(filePath, JSON.stringify(invalidDateSnapshot));
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
       const store = new IOSSimulatorOwnershipStore({
         createId: () => crypto.randomUUID(),
       });
@@ -108,9 +137,83 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
         sourceFingerprint: "fingerprint-a",
         device: DEVICE,
       });
-      const duplicate = { ...first, instanceId: "different-instance" };
+      const duplicate = {
+        ...first,
+        instanceId: "different-instance",
+        simulatorUdid: first.simulatorUdid.toLowerCase(),
+      };
       await registry.save([first, duplicate]);
-      expect(await registry.load()).toEqual([]);
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("canonicalizes persisted UDIDs before restoring ownership", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
+    try {
+      const registry = new IOSSimulatorOwnershipRegistryFile(
+        path.join(root, "registry.json"),
+        { acquireWriterLease: createWriterLeaseFactory() },
+      );
+      expect(registry.acquireWriterSync()).toBe(true);
+      const source = new IOSSimulatorOwnershipStore({
+        createId: (() => {
+          let index = 0;
+          return () => `restored-id-${++index}`;
+        })(),
+      }).attach({
+        sessionId: "session-a",
+        worktreeRoot: "/tmp/project-a",
+        sourceFingerprint: "fingerprint-a",
+        device: DEVICE,
+      });
+      await registry.save([
+        { ...source, simulatorUdid: source.simulatorUdid.toLowerCase() },
+      ]);
+
+      const loaded = await registry.load();
+      expect(loaded[0]?.simulatorUdid).toBe(DEVICE.udid);
+      const restored = new IOSSimulatorOwnershipStore({
+        initialInstances: loaded,
+      });
+      expect(() =>
+        restored.attach({
+          sessionId: "session-b",
+          worktreeRoot: "/tmp/project-b",
+          sourceFingerprint: "fingerprint-b",
+          device: DEVICE,
+        }),
+      ).toThrowError(
+        expect.objectContaining({ code: "SIMULATOR_ATTACHED_ELSEWHERE" }),
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats only a missing registry as an empty first-run profile", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
+    try {
+      const registry = new IOSSimulatorOwnershipRegistryFile(
+        path.join(root, "missing-registry.json"),
+        { acquireWriterLease: createWriterLeaseFactory() },
+      );
+      expect(registry.acquireWriterSync()).toBe(true);
+      await expect(registry.load()).resolves.toEqual([]);
+
+      await writeFile(registry.filePath, '{"version":1,"instances":[');
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
+
+      await rm(registry.filePath, { force: true });
+      await mkdir(registry.filePath);
+      await expect(registry.load()).rejects.toMatchObject({
+        code: "DEVICE_BUSY",
+      });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

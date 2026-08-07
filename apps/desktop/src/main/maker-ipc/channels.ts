@@ -613,6 +613,7 @@ export const MAKER_INVOKE = {
   ANDROID_SET_ADB_PATH: 'maker:android:set-adb-path',
   ANDROID_PREPARE_ADB: 'maker:android:prepare-adb',
   // iOS Simulator pane and Agent discovery. Session id is required and checked in main.
+  IOS_SIMULATOR_REQUEST_ACCESS: 'maker:ios-simulator:request-access',
   IOS_SIMULATOR_STATUS: 'maker:ios-simulator:status',
   IOS_SIMULATOR_CALL: 'maker:ios-simulator:call',
   IOS_SIMULATOR_SET_AGENT_CONTROL: 'maker:ios-simulator:set-agent-control',

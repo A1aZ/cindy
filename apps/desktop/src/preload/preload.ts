@@ -133,6 +133,8 @@ import type {
   DesktopLoginActionResult,
 } from '../shared/authIpc';
 import type {
+  IOSSimulatorAccessRequest,
+  IOSSimulatorAccessRequestResult,
   IOSSimulatorSessionStatus,
   IOSSimulatorAgentControlRequest,
   IOSSimulatorFocusRequest,
@@ -6252,6 +6254,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
         ipcRenderer.invoke('maker:android:prepare-adb'),
     },
     iosSimulator: {
+      requestAccess: (
+        request: IOSSimulatorAccessRequest,
+      ): Promise<IOSSimulatorAccessRequestResult> =>
+        ipcRenderer.invoke('maker:ios-simulator:request-access', request),
       status: (request: IOSSimulatorStatusRequest): Promise<IOSSimulatorSessionStatus> =>
         ipcRenderer.invoke('maker:ios-simulator:status', request),
       call: (request: IOSSimulatorToolRequest): Promise<IOSSimulatorToolResponse> =>

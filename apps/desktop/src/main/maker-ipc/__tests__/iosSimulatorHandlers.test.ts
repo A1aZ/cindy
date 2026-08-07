@@ -11,12 +11,13 @@ describe('iOS Simulator IPC handlers', () => {
   function registerTrusted(harness: IpcHarness, deps: Partial<IOSSimulatorHandlerDeps> = {}): void {
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
-      getRendererUrl: () => 'file:///app/index.html#/cc-agent/session-a',
+      hasSessionAccess: (_target, sessionId) => sessionId === 'session-a',
       ...deps,
     });
   }
 
   it.each([
+    MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS,
     MAKER_INVOKE.IOS_SIMULATOR_STATUS,
     MAKER_INVOKE.IOS_SIMULATOR_CALL,
     MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL,
@@ -38,6 +39,53 @@ describe('iOS Simulator IPC handlers', () => {
     });
     expect(assertTrustedSender).toHaveBeenCalledOnce();
     expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns an existing Main-owned grant without opening confirmation', async () => {
+    const harness = new IpcHarness();
+    const requestSessionAccess = vi.fn(async () => false);
+    registerTrusted(harness, { requestSessionAccess });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
+        sessionId: ' session-a ',
+      }),
+    ).resolves.toEqual({ granted: true });
+    expect(requestSessionAccess).not.toHaveBeenCalled();
+  });
+
+  it('returns the explicit native confirmation result for a manual access request', async () => {
+    const harness = new IpcHarness();
+    const requestSessionAccess = vi.fn(async () => true);
+    registerTrusted(harness, {
+      hasSessionAccess: () => false,
+      requestSessionAccess,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
+        sessionId: ' session-a ',
+      }),
+    ).resolves.toEqual({ granted: true });
+    expect(requestSessionAccess).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 17 }),
+      'session-a',
+    );
+  });
+
+  it('keeps a cancelled manual access request ungranted', async () => {
+    const harness = new IpcHarness();
+    const requestSessionAccess = vi.fn(async () => false);
+    registerTrusted(harness, {
+      hasSessionAccess: () => false,
+      requestSessionAccess,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
+        sessionId: 'session-a',
+      }),
+    ).resolves.toEqual({ granted: false });
   });
 
   it('passes a validated session id to the host', async () => {
@@ -73,7 +121,7 @@ describe('iOS Simulator IPC handlers', () => {
     const callTool = vi.fn();
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
-      getRendererUrl: () => 'file:///app/index.html#/cc-agent/session-b',
+      hasSessionAccess: () => false,
       getStatus,
       callTool,
     });

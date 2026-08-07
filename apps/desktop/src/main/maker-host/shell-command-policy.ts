@@ -4,8 +4,11 @@
  * Agent skills may contain legacy `simctl` / `open -a Simulator` recipes. Those
  * commands bypass Cindy's ownership, admission, viewer, and cleanup contracts,
  * so prompt guidance alone is not a sufficient boundary. This module detects
- * executable shell segments and denies only the bypass paths; Cindy's own main
- * process still uses simctl through the runtime adapter and is unaffected.
+ * literal executable shell segments and denies only the bypass paths; Cindy's
+ * own main process still uses simctl through the runtime adapter and is
+ * unaffected. This is defense in depth for command text, not an OS process
+ * sandbox: scripts whose contents are absent from the command cannot be proven
+ * safe here and remain subject to the normal shell permission boundary.
  */
 
 export interface ShellCommandPolicyDenial {
@@ -137,8 +140,39 @@ interface UnwrappedCommand {
 }
 
 const MAX_WRAPPER_UNWRAP_DEPTH = 16;
-const SHELL_EXECUTABLES = new Set(['bash', 'dash', 'sh', 'zsh']);
+const SHELL_EXECUTABLES = new Set(['bash', 'csh', 'dash', 'fish', 'ksh', 'sh', 'tcsh', 'zsh']);
+const NON_EXECUTING_REFERENCE_COMMANDS = new Set([
+  'cat',
+  'echo',
+  'egrep',
+  'fgrep',
+  'file',
+  'grep',
+  'head',
+  'less',
+  'ls',
+  'more',
+  'printf',
+  'rg',
+  'stat',
+  'tail',
+  'wc',
+]);
+const OPAQUE_EXECUTION_WRAPPERS = new Set([
+  'doas',
+  'gtimeout',
+  'launchctl',
+  'parallel',
+  'sandbox-exec',
+  'script',
+  'sudo',
+  'timeout',
+  'watch',
+  'xargs',
+]);
 const SHELL_POSITIONAL_REFERENCE = /\$(?:[0-9]+|[@*#-]|\{(?:[0-9]+|[@*#-])\})/;
+const PROGRAMMABLE_INTERPRETER =
+  /^(?:python(?:\d+(?:\.\d+)*)?|pypy(?:\d+(?:\.\d+)*)?|node|nodejs|bun|deno|ruby(?:\d+(?:\.\d+)*)?|perl(?:\d+(?:\.\d+)*)?|php(?:\d+(?:\.\d+)*)?|lua(?:\d+(?:\.\d+)*)?|luajit|swift|expect(?:\d+(?:\.\d+)*)?|tclsh(?:\d+(?:\.\d+)*)?|wish(?:\d+(?:\.\d+)*)?|(?:g|m|n)?awk)$/;
 
 /** Peel only wrappers whose argv shape is fully understood; unknown options fail closed. */
 function unwrapCommand(input: string[]): UnwrappedCommand {
@@ -480,6 +514,55 @@ function containsSimulatorExecutor(tokens: string[]): boolean {
   );
 }
 
+function containsLiteralSimulatorExecutor(value: string): boolean {
+  const argvLike = value.replace(/[^A-Za-z0-9_./-]+/g, ' ').trim();
+  return (
+    /\b(?:xcrun|simctl)\b/i.test(value) ||
+    /\bSimulator\.app\b/i.test(value) ||
+    /\bcom\.apple\.iphonesimulator\b/i.test(value) ||
+    /(?:^|\s)(?:\S*\/)?open(?:\s+-[A-Za-z]+)*\s+Simulator(?:\.app)?(?:\s|$)/i.test(argvLike)
+  );
+}
+
+/**
+ * General-purpose interpreters can spawn simctl without making it the shell
+ * executable. Treat a literal Simulator executor in their payload/argv as a
+ * mutation-capable wrapper; command-text policy cannot safely inspect the
+ * language semantics beneath this point.
+ */
+function containsInterpreterSimulatorPayload(tokens: string[]): boolean {
+  const interpreter = executableName(tokens[0]);
+  const payload = tokens.slice(1).join('\n');
+  if (PROGRAMMABLE_INTERPRETER.test(interpreter)) {
+    return containsLiteralSimulatorExecutor(payload);
+  }
+  if (interpreter === 'osascript') {
+    // AppleScript can execute through `do shell script`, while JavaScript for
+    // Automation can reach NSTask/NSProcessInfo directly. Once an osascript
+    // payload contains a literal Simulator executor, command-text policy cannot
+    // safely distinguish an inert reference from executable code.
+    return containsLiteralSimulatorExecutor(payload);
+  }
+  return false;
+}
+
+/**
+ * Fail closed when a command passes a literal Simulator executor to an opaque
+ * execution wrapper (for example xargs or find -exec). Commands whose only
+ * purpose is displaying/searching text remain outside this boundary.
+ */
+function containsOpaqueSimulatorExecution(tokens: string[]): boolean {
+  const head = executableName(tokens[0]);
+  if (!head || NON_EXECUTING_REFERENCE_COMMANDS.has(head) || head === 'osascript') return false;
+  const findExec =
+    head === 'find' && tokens.some((token) => /^-(?:exec|execdir|ok|okdir)$/.test(token));
+  if (!findExec && !OPAQUE_EXECUTION_WRAPPERS.has(head)) return false;
+  // Direct simctl commands have already been classified above, including the
+  // explicitly read-only allowlist.
+  if (simctlSubcommand(tokens) !== null) return false;
+  return containsLiteralSimulatorExecutor(tokens.slice(1).join(' '));
+}
+
 /** Extract command/process substitutions because they execute even inside an otherwise safe command. */
 function shellSubcommands(command: string): string[] {
   const subcommands: string[] = [];
@@ -546,6 +629,55 @@ function shellSubcommands(command: string): string[] {
   return subcommands;
 }
 
+/** Split independent command clauses while retaining pipeline boundaries. */
+function shellClauses(command: string): string[] {
+  const clauses: string[] = [];
+  let current = '';
+  let quote: "'" | '"' | null = null;
+  let escaped = false;
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      current += char;
+      quote = char;
+      continue;
+    }
+    if (char === '|' && command[index + 1] === '|') {
+      if (current.trim()) clauses.push(current.trim());
+      current = '';
+      index += 1;
+      continue;
+    }
+    if (char === '&' && current.trimEnd().endsWith('|')) {
+      current += char;
+      continue;
+    }
+    if (char === '\n' || char === ';' || char === '&') {
+      if (current.trim()) clauses.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) clauses.push(current.trim());
+  return clauses;
+}
+
 function isLiteralSimulatorBypass(command: string): boolean {
   for (const segment of shellSegments(command)) {
     const unwrapped = unwrapCommand(tokenizeShellSegment(segment));
@@ -587,6 +719,11 @@ function containsTaintedVariableExecution(command: string): boolean {
     segment,
     tokens: tokenizeShellSegment(segment),
   }));
+  for (const { segment } of tokenizedSegments) {
+    for (const match of segment.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)=\$\(([^)]*)\)/g)) {
+      if (containsLiteralSimulatorExecutor(match[2] ?? '')) tainted.add(match[1]!);
+    }
+  }
   for (const { tokens } of tokenizedSegments) {
     for (const token of tokens) {
       const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(token);
@@ -619,16 +756,134 @@ function containsTaintedVariableExecution(command: string): boolean {
   return false;
 }
 
-/** A literal command piped or passed to a shell becomes executable shell input. */
+function nestedShellConsumesStdinAsProgram(command: string): boolean {
+  return (
+    /(?:^|[;&|]\s*)(?:source|\.)\s+(?:\/dev\/stdin|\/dev\/fd\/0|-)(?:\s|$)/i.test(command) ||
+    /\beval\b[\s\S]*\$\(\s*cat(?:\s+(?:-|\/dev\/stdin|\/dev\/fd\/0))?\s*\)/i.test(command)
+  );
+}
+
+function consumesStdinAsProgram(tokens: string[]): boolean {
+  const unwrapped = unwrapCommand(tokens);
+  if (unwrapped.nestedShell !== null) {
+    return !unwrapped.unresolvedWrapper && nestedShellConsumesStdinAsProgram(unwrapped.nestedShell);
+  }
+  if (unwrapped.unresolvedWrapper) return false;
+  const executable = executableName(unwrapped.tokens[0]);
+  const args = unwrapped.tokens.slice(1);
+  if (SHELL_EXECUTABLES.has(executable)) {
+    if (args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))) return false;
+    if (args.some((arg) => /^-[A-Za-z]*s[A-Za-z]*$/.test(arg))) return true;
+  } else if (executable === 'osascript') {
+    if (args.some((arg) => arg === '-e' || arg.startsWith('-e'))) return false;
+  } else if (PROGRAMMABLE_INTERPRETER.test(executable)) {
+    if (/^(?:(?:g|m|n)?awk)$/.test(executable)) return false;
+    if (args.some((arg) => /^(?:-c|-e|-p|-m|--eval|--print|--input-type|--module)$/.test(arg))) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+  const positional = args.find((arg) => !arg.startsWith('-'));
+  return positional === undefined || positional === '-';
+}
+
+function containsInterpreterHeredocBypass(command: string): boolean {
+  const lines = command.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    const marker = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
+    if (!marker) continue;
+    if (
+      !shellSegments(line.slice(0, marker.index)).some((segment) =>
+        consumesStdinAsProgram(tokenizeShellSegment(segment)),
+      )
+    ) {
+      continue;
+    }
+    const delimiter = marker[2]!;
+    const body: string[] = [];
+    for (index += 1; index < lines.length; index += 1) {
+      if ((lines[index] ?? '').replace(/^\t+/, '').trim() === delimiter) break;
+      body.push(lines[index] ?? '');
+    }
+    if (containsLiteralSimulatorExecutor(body.join('\n'))) return true;
+  }
+  return false;
+}
+
+/** A here-string is executable stdin just like a heredoc or producer pipeline. */
+function containsInterpreterHereStringBypass(command: string): boolean {
+  for (const clause of shellClauses(command)) {
+    let quote: "'" | '"' | null = null;
+    let escaped = false;
+    for (let index = 0; index < clause.length - 2; index += 1) {
+      const char = clause[index]!;
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === '\\' && quote !== "'") {
+        escaped = true;
+        continue;
+      }
+      if (char === "'" || char === '"') {
+        if (quote === char) quote = null;
+        else if (quote === null) quote = char;
+        continue;
+      }
+      if (quote || clause.slice(index, index + 3) !== '<<<') continue;
+      const consumer = clause.slice(0, index).trim();
+      const payload = clause.slice(index + 3);
+      if (
+        shellSegments(consumer).some((segment) =>
+          consumesStdinAsProgram(tokenizeShellSegment(segment)),
+        ) &&
+        containsLiteralSimulatorExecutor(payload)
+      ) {
+        return true;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
+/** A literal command piped to a code-reading interpreter becomes executable input. */
 function containsShellConsumedLiteralBypass(command: string): boolean {
-  const segments = shellSegments(command).map(tokenizeShellSegment);
-  const invokesShell = segments.some((tokens) =>
-    SHELL_EXECUTABLES.has(executableName(unwrapCommand(tokens).tokens[0])),
-  );
-  if (!invokesShell) return false;
-  return segments.some((tokens) =>
-    tokens.some((token) => token.includes(' ') && isLiteralSimulatorBypass(token)),
-  );
+  if (containsInterpreterHeredocBypass(command) || containsInterpreterHereStringBypass(command)) {
+    return true;
+  }
+  for (const clause of shellClauses(command)) {
+    if (!clause.includes('|')) continue;
+    const segments = shellSegments(clause);
+    if (
+      segments.some((segment) => consumesStdinAsProgram(tokenizeShellSegment(segment))) &&
+      containsLiteralSimulatorExecutor(clause)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasUnresolvedXcrunTool(tokens: string[]): boolean {
+  if (executableName(tokens[0]) !== 'xcrun') return false;
+  let index = 1;
+  while (index < tokens.length && tokens[index]!.startsWith('-')) {
+    const option = tokens[index]!;
+    index +=
+      option === '--sdk' || option === '-sdk' || option === '--toolchain' || option === '-toolchain'
+        ? 2
+        : 1;
+  }
+  const firstToolToken = tokens[index] ?? '';
+  if (!/[$`*?\[]/.test(firstToolToken)) return false;
+  let end = index + 1;
+  if (firstToolToken.includes('$(') && !firstToolToken.includes(')')) {
+    while (end < tokens.length && !tokens[end - 1]!.includes(')')) end += 1;
+  }
+  return containsLiteralSimulatorExecutor(tokens.slice(index, end).join(' '));
 }
 
 /** Function bodies are executable later, so reject unsafe bodies at definition time. */
@@ -654,6 +909,11 @@ function containsSimulatorBypass(command: string, depth = 0): boolean {
     if (containsSimulatorBypass(nested, depth + 1)) return true;
   }
   for (const segment of shellSegments(command)) {
+    // Function bodies were classified recursively above. The leading
+    // `name(){` token is not an execution wrapper in its own right.
+    if (/^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?\s*\{/.test(segment)) {
+      continue;
+    }
     const tokens = tokenizeShellSegment(segment);
     if (hasUnresolvedExecutableExpansion(segment, tokens)) return true;
     const unwrapped = unwrapCommand(tokens);
@@ -665,7 +925,13 @@ function containsSimulatorBypass(command: string, depth = 0): boolean {
       continue;
     }
     if (unwrapped.unresolvedWrapper && containsSimulatorExecutor(unwrapped.tokens)) return true;
-    if (isExternalSimulatorLaunch(unwrapped.tokens) || isSimulatorMutation(unwrapped.tokens)) {
+    if (
+      hasUnresolvedXcrunTool(unwrapped.tokens) ||
+      containsInterpreterSimulatorPayload(unwrapped.tokens) ||
+      isExternalSimulatorLaunch(unwrapped.tokens) ||
+      isSimulatorMutation(unwrapped.tokens) ||
+      containsOpaqueSimulatorExecution(unwrapped.tokens)
+    ) {
       return true;
     }
   }

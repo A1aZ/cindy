@@ -41,6 +41,63 @@ describe("createNodeIOSSimulatorCommandRunner", () => {
   });
 
   it.runIf(process.platform !== "win32")(
+    "escalates a timed-out process group and settles even when SIGTERM is ignored",
+    async () => {
+      const startedAt = Date.now();
+      const result = await createNodeIOSSimulatorCommandRunner().run(
+        process.execPath,
+        [
+          "-e",
+          [
+            "process.on('SIGTERM', () => undefined);",
+            "setInterval(() => undefined, 1000);",
+          ].join("\n"),
+        ],
+        { timeoutMs: 100 },
+      );
+
+      expect(result.exitCode).toBeNull();
+      expect(Date.now() - startedAt).toBeLessThan(3_000);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "keeps the escalation alive when the leader exits before its descendant",
+    async () => {
+      const root = await mkdtemp(
+        path.join(os.tmpdir(), "cindy-command-timeout-descendant-"),
+      );
+      tempRoots.push(root);
+      const markerPath = path.join(root, "late-descendant.txt");
+      const result = await createNodeIOSSimulatorCommandRunner().run(
+        process.execPath,
+        [
+          "-e",
+          [
+            "const { spawn } = require('node:child_process');",
+            `spawn(process.execPath, ['-e', ${JSON.stringify(
+              [
+                "process.on('SIGTERM', () => undefined);",
+                `setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(markerPath)}, 'late'), 1500);`,
+                "setInterval(() => undefined, 1000);",
+              ].join("\n"),
+            )}], { stdio: 'ignore' });`,
+            "process.on('SIGTERM', () => process.exit(0));",
+            "setInterval(() => undefined, 1000);",
+          ].join("\n"),
+        ],
+        { timeoutMs: 100 },
+      );
+
+      expect(result.exitCode).toBeNull();
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await expect(readFile(markerPath, "utf8")).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
     "kills the detached process group when a build is aborted",
     async () => {
       const root = await mkdtemp(

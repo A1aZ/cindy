@@ -117,6 +117,14 @@ export interface IOSSimulatorStatusRequest {
   sessionId: string;
 }
 
+export interface IOSSimulatorAccessRequest {
+  sessionId: string;
+}
+
+export interface IOSSimulatorAccessRequestResult {
+  granted: boolean;
+}
+
 /**
  * Renderer-owned simulator actions. Agent-only build, install, URL, push, media,
  * and diagnostic tools must stay behind the MCP approval/control boundary.

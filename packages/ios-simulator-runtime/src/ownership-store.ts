@@ -81,7 +81,13 @@ export class IOSSimulatorOwnershipStore {
   }
 
   #restore(instance: IOSSimulatorInstance): void {
-    const copy = copyInstance(instance);
+    const copy = {
+      ...copyInstance(instance),
+      simulatorUdid: requireNonEmpty(
+        instance.simulatorUdid,
+        "simulatorUdid",
+      ).toUpperCase(),
+    };
     if (
       this.#instances.has(copy.instanceId) ||
       this.#instanceByUdid.has(copy.simulatorUdid)

@@ -28,6 +28,7 @@ import {
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
+import { extractIpcError } from '@/utils/ipcError';
 import type {
   IOSSimulatorFramePumpSnapshot,
   IOSSimulatorMutationState,
@@ -283,6 +284,8 @@ export function IOSSimulatorTabBody({
     {},
   );
   const [transportError, setTransportError] = useState(false);
+  const [accessRequired, setAccessRequired] = useState(false);
+  const [requestingAccess, setRequestingAccess] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [operation, setOperation] = useState<Operation>(null);
@@ -388,15 +391,44 @@ export function IOSSimulatorTabBody({
       const next = await window.electronAPI.maker.iosSimulator.status({
         sessionId: ctx.sessionId,
       });
-      if (requestVersion === requestVersionRef.current) setStatus(next);
+      if (requestVersion === requestVersionRef.current) {
+        setAccessRequired(false);
+        setStatus(next);
+      }
       return next;
-    } catch {
-      if (requestVersion === requestVersionRef.current) setTransportError(true);
+    } catch (error) {
+      if (requestVersion === requestVersionRef.current) {
+        if (extractIpcError(error)?.code === 'PERMISSION_DENIED') {
+          setAccessRequired(true);
+          setStatus(null);
+          setRouteStatuses({});
+        } else {
+          setTransportError(true);
+        }
+      }
       return null;
     } finally {
       if (requestVersion === requestVersionRef.current) setRefreshing(false);
     }
   }, [ctx.sessionId]);
+
+  const requestAccess = useCallback(async () => {
+    setRequestingAccess(true);
+    setTransportError(false);
+    try {
+      const result = await window.electronAPI.maker.iosSimulator.requestAccess({
+        sessionId: ctx.sessionId,
+      });
+      if (result.granted) {
+        setAccessRequired(false);
+        await refresh();
+      }
+    } catch {
+      setTransportError(true);
+    } finally {
+      setRequestingAccess(false);
+    }
+  }, [ctx.sessionId, refresh]);
 
   useEffect(() => {
     void refresh();
@@ -425,6 +457,18 @@ export function IOSSimulatorTabBody({
       setRouteStatuses((previous) => mergeRouteStatus(previous, routeStatus));
     });
   }, [ctx.sessionId]);
+
+  useEffect(() => {
+    const subscribe = window.electronAPI.maker.iosSimulator.onFocusRequest;
+    if (typeof subscribe !== 'function') return undefined;
+    return subscribe((request) => {
+      if (request.sessionId !== ctx.sessionId) return;
+      // Main sends this only after minting a Host-owned renderer grant. A
+      // restored tab can therefore leave its access-required state without a
+      // remount when an Agent/Host flow opens the same Simulator session.
+      void refresh();
+    });
+  }, [ctx.sessionId, refresh]);
 
   const environment = status?.ok ? status.environment : null;
   const instances = status?.ok ? status.instances : [];
@@ -1506,7 +1550,7 @@ export function IOSSimulatorTabBody({
   return (
     <div
       className="h-full overflow-y-auto bg-[var(--surface)] text-[var(--text-primary)]"
-      aria-busy={busy || refreshing}
+      aria-busy={busy || refreshing || requestingAccess}
     >
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4">
         <header className="flex items-start justify-between gap-3">
@@ -1527,8 +1571,39 @@ export function IOSSimulatorTabBody({
           />
         </header>
 
-        {!status && !transportError && (
+        {!status && !transportError && !accessRequired && (
           <StatusCard icon={RefreshCw} title={t('rightSidebar.iosSimulator.checking')} />
+        )}
+
+        {accessRequired && (
+          <div className="flex gap-2.5 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3">
+            <ShieldCheck
+              size={15}
+              className="mt-0.5 shrink-0 text-[var(--text-secondary)]"
+              aria-hidden="true"
+            />
+            <div className="min-w-0">
+              <div className="text-[12px] font-medium">
+                {t('rightSidebar.iosSimulator.accessRequiredTitle')}
+              </div>
+              <div className="mt-1 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                {t('rightSidebar.iosSimulator.accessRequiredDescription')}
+              </div>
+              <div className="mt-3">
+                <ActionButton
+                  onClick={() => void requestAccess()}
+                  disabled={requestingAccess}
+                  label={t(
+                    requestingAccess
+                      ? 'rightSidebar.iosSimulator.requestingAccess'
+                      : 'rightSidebar.iosSimulator.allowTaskAccess',
+                  )}
+                  icon={requestingAccess ? Loader2 : ShieldCheck}
+                  spinning={requestingAccess}
+                />
+              </div>
+            </div>
+          </div>
         )}
 
         {transportError && (
@@ -2199,12 +2274,14 @@ function ActionButton({
   icon: Icon,
   disabled,
   describedBy,
+  spinning,
   onClick,
 }: {
   label: string;
   icon: typeof AlertTriangle;
   disabled?: boolean;
   describedBy?: string;
+  spinning?: boolean;
   onClick(): void;
 }) {
   return (
@@ -2215,7 +2292,7 @@ function ActionButton({
       aria-describedby={describedBy}
       className="inline-flex h-8 shrink-0 select-none items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 text-[11px] text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:opacity-50"
     >
-      <Icon size={12} aria-hidden="true" />
+      <Icon size={12} className={spinning ? 'animate-spin' : undefined} aria-hidden="true" />
       {label}
     </button>
   );

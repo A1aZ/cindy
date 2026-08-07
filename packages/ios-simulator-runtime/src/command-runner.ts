@@ -7,6 +7,13 @@ import type {
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const TERMINATION_GRACE_MS = 1_000;
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === "object" && "unref" in timer) {
+    (timer as NodeJS.Timeout).unref();
+  }
+}
 
 /** Node adapter for the runtime command seam. Commands are always argv-based. */
 export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner {
@@ -34,26 +41,21 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         let settled = false;
         let timedOut = false;
         let aborted = false;
-        const onAbort = () => {
-          if (settled || aborted) return;
-          aborted = true;
-          killProcessTree(child, "SIGKILL");
-        };
-        options.signal?.addEventListener("abort", onAbort, { once: true });
-        if (options.signal?.aborted) onAbort();
-        let timer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
-          timedOut = true;
-          killProcessTree(child);
-        }, timeoutMs);
-        if (timer && typeof timer === "object" && "unref" in timer) {
-          (timer as NodeJS.Timeout).unref();
-        }
-
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
         const finish = (exitCode: number | null) => {
           if (settled) return;
           settled = true;
           if (timer) clearTimeout(timer);
+          if (forceKillTimer) clearTimeout(forceKillTimer);
           options.signal?.removeEventListener("abort", onAbort);
+          if (timedOut || aborted) {
+            child.stdout?.removeAllListeners("data");
+            child.stderr?.removeAllListeners("data");
+            child.stdout?.destroy();
+            child.stderr?.destroy();
+            child.unref();
+          }
           const stdout = chunks
             .filter((chunk) => chunk.stream === "stdout")
             .map((chunk) => chunk.bytes);
@@ -67,6 +69,29 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
             outputTruncated,
           });
         };
+        const onAbort = () => {
+          if (settled || aborted) return;
+          aborted = true;
+          killProcessTree(child, "SIGKILL");
+          finish(null);
+        };
+        timer = setTimeout(() => {
+          if (settled) return;
+          timedOut = true;
+          killProcessTree(child);
+          forceKillTimer = setTimeout(() => {
+            if (settled) return;
+            killProcessTree(child, "SIGKILL");
+            // Do not depend on a hostile or wedged child emitting `close`.
+            finish(null);
+          }, TERMINATION_GRACE_MS);
+          // Keep the escalation watchdog referenced. The leader and its pipes
+          // may close after SIGTERM while a detached descendant remains alive;
+          // allowing this timer to unref could exit Main before SIGKILL.
+        }, timeoutMs);
+        unrefTimer(timer);
+        options.signal?.addEventListener("abort", onAbort, { once: true });
+        if (options.signal?.aborted) onAbort();
         const append = (stream: "stdout" | "stderr", chunk: Buffer) => {
           if (settled || chunk.byteLength === 0) return;
           if (maxBufferBytes <= 0) {
@@ -91,13 +116,32 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         };
         child.stdout?.on("data", (chunk: Buffer) => append("stdout", chunk));
         child.stderr?.on("data", (chunk: Buffer) => append("stderr", chunk));
-        child.once("error", () => finish(null));
-        child.once("close", (code) =>
-          finish(timedOut || aborted ? null : code),
-        );
+        child.once("error", () => {
+          // Once termination starts, a child error must not cancel the process-
+          // group escalation watchdog. It remains authoritative until the
+          // group is gone or the bounded SIGKILL fallback fires.
+          if (timedOut || aborted) return;
+          finish(null);
+        });
+        child.once("close", (code) => {
+          // The leader may exit on SIGTERM while a same-group descendant stays
+          // alive. Keep the escalation watchdog in that case.
+          if (timedOut && isProcessGroupAlive(child)) return;
+          finish(timedOut || aborted ? null : code);
+        });
       });
     },
   };
+}
+
+function isProcessGroupAlive(child: ReturnType<typeof spawn>): boolean {
+  if (!child.pid || process.platform === "win32") return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === "EPERM";
+  }
 }
 
 function killProcessTree(

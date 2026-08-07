@@ -5,7 +5,6 @@ import type {
   IOSSimulatorToolResponse,
 } from '../../shared/iosSimulatorIpc.js';
 import { IOS_SIMULATOR_RENDERER_TOOL_NAMES } from '../../shared/iosSimulatorIpc.js';
-import { atContextVisibleSessionIdsFromRendererUrl } from '../../shared/atContextRouteScope.js';
 import {
   callIOSSimulatorHostTool,
   getIOSSimulatorLatestFrame,
@@ -16,6 +15,11 @@ import {
   setIOSSimulatorViewerStreamProfile,
   updateIOSSimulatorViewerTouch,
 } from '../mcp-integrations/ios-simulator.js';
+import {
+  hasIOSSimulatorRendererSessionAccess,
+  requestIOSSimulatorRendererSessionAccess,
+  type IOSSimulatorRendererWebContents,
+} from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
@@ -23,7 +27,11 @@ import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 export interface IOSSimulatorHandlerDeps {
   assertTrustedSender(event: unknown): void;
-  getRendererUrl(event: unknown): string;
+  hasSessionAccess(target: IOSSimulatorRendererWebContents, sessionId: string): boolean;
+  requestSessionAccess(
+    target: IOSSimulatorRendererWebContents,
+    sessionId: string,
+  ): Promise<boolean>;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   callTool(
     name: IOSSimulatorRendererToolName,
@@ -76,7 +84,8 @@ export interface IOSSimulatorHandlerDeps {
 const defaultDeps: IOSSimulatorHandlerDeps = {
   assertTrustedSender: (event) =>
     assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
-  getRendererUrl: readSenderWebContentsUrl,
+  hasSessionAccess: hasIOSSimulatorRendererSessionAccess,
+  requestSessionAccess: requestIOSSimulatorRendererSessionAccess,
   getStatus: getIOSSimulatorSessionStatus,
   callTool: callIOSSimulatorHostTool,
   setAgentControlGrant: setIOSSimulatorAgentControlGrant,
@@ -125,24 +134,13 @@ function readViewerRoute(record: Record<string, unknown>) {
   return { instanceId: instanceId.trim(), generation: Number(generation), leaseId: leaseId.trim() };
 }
 
-function readSenderWebContentsId(event: unknown): number {
-  const id = (event as { sender?: { id?: unknown } })?.sender?.id;
+function readSenderWebContents(event: unknown): IOSSimulatorRendererWebContents {
+  const sender = (event as { sender?: { id?: unknown } })?.sender;
+  const id = sender?.id;
   if (!Number.isSafeInteger(id) || Number(id) <= 0) {
     throwIpcError('PERMISSION_DENIED', 'trusted renderer sender is required');
   }
-  return Number(id);
-}
-
-function readSenderWebContentsUrl(event: unknown): string {
-  const getURL = (event as { sender?: { getURL?: unknown } })?.sender?.getURL;
-  if (typeof getURL !== 'function') {
-    throwIpcError('PERMISSION_DENIED', 'trusted renderer sender URL is required');
-  }
-  try {
-    return String(getURL.call((event as { sender: unknown }).sender));
-  } catch {
-    throwIpcError('PERMISSION_DENIED', 'trusted renderer sender URL is required');
-  }
+  return sender as IOSSimulatorRendererWebContents;
 }
 
 export function registerIOSSimulatorHandlers(
@@ -157,12 +155,22 @@ export function registerIOSSimulatorHandlers(
     });
   };
   const assertSenderSession = (event: unknown, sessionId: string): number => {
-    const webContentsId = readSenderWebContentsId(event);
-    if (!atContextVisibleSessionIdsFromRendererUrl(resolved.getRendererUrl(event)).has(sessionId)) {
+    const sender = readSenderWebContents(event);
+    if (!resolved.hasSessionAccess(sender, sessionId)) {
       throwIpcError('PERMISSION_DENIED', 'iOS Simulator access is limited to the current task');
     }
-    return webContentsId;
+    return sender.id;
   };
+  handle(MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, async (event, payload) => {
+    const sessionId = readSessionId(payload);
+    const sender = readSenderWebContents(event);
+    if (resolved.hasSessionAccess(sender, sessionId)) return { granted: true };
+    try {
+      return { granted: await resolved.requestSessionAccess(sender, sessionId) };
+    } catch (error) {
+      throwIpcError('INTERNAL', error instanceof Error ? error.message : String(error));
+    }
+  });
   handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (event, payload) => {
     const sessionId = readSessionId(payload);
     assertSenderSession(event, sessionId);

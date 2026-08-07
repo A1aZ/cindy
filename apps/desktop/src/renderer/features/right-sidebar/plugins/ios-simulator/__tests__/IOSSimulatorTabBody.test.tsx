@@ -4,6 +4,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
+  IOSSimulatorAccessRequest,
+  IOSSimulatorAccessRequestResult,
+  IOSSimulatorFocusRequest,
   IOSSimulatorH264FramePush,
   IOSSimulatorLiveTouchRequest,
   IOSSimulatorPublicInstance,
@@ -144,6 +147,11 @@ function installFakeH264DecoderRuntime(): void {
 function installStatus(statusValue: IOSSimulatorSessionStatus) {
   let currentStatusValue = statusValue;
   const status = vi.fn(async () => currentStatusValue);
+  const requestAccess = vi.fn(
+    async (_request: IOSSimulatorAccessRequest): Promise<IOSSimulatorAccessRequestResult> => ({
+      granted: true,
+    }),
+  );
   const call = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
     ok: true as const,
     data: {},
@@ -161,6 +169,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
   const setStreamProfile = vi.fn(async () => ({ ok: true as const, data: {} }));
   let h264FrameListener: ((payload: IOSSimulatorH264FramePush) => void) | null = null;
   let routeStatusListener: ((payload: IOSSimulatorRouteStatusPush) => void) | null = null;
+  let focusRequestListener: ((payload: IOSSimulatorFocusRequest) => void) | null = null;
   const onH264Frame = vi.fn((callback: (payload: IOSSimulatorH264FramePush) => void) => {
     h264FrameListener = callback;
     return () => {
@@ -171,6 +180,12 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     routeStatusListener = callback;
     return () => {
       if (routeStatusListener === callback) routeStatusListener = null;
+    };
+  });
+  const onFocusRequest = vi.fn((callback: (payload: IOSSimulatorFocusRequest) => void) => {
+    focusRequestListener = callback;
+    return () => {
+      if (focusRequestListener === callback) focusRequestListener = null;
     };
   });
   const liveTouch = vi.fn(
@@ -191,6 +206,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
       electronAPI: {
         maker: {
           iosSimulator: {
+            requestAccess: typeof requestAccess;
             status: typeof status;
             call: typeof call;
             setAgentControl: typeof setAgentControl;
@@ -200,6 +216,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
             liveTouch: typeof liveTouch;
             onH264Frame: typeof onH264Frame;
             onRouteStatus: typeof onRouteStatus;
+            onFocusRequest: typeof onFocusRequest;
           };
         };
       };
@@ -207,6 +224,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
   ).electronAPI = {
     maker: {
       iosSimulator: {
+        requestAccess,
         status,
         call,
         setAgentControl,
@@ -216,10 +234,12 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
         liveTouch,
         onH264Frame,
         onRouteStatus,
+        onFocusRequest,
       },
     },
   };
   return {
+    requestAccess,
     status,
     call,
     setAgentControl,
@@ -229,6 +249,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     liveTouch,
     onH264Frame,
     onRouteStatus,
+    onFocusRequest,
     setStatusValue(value: IOSSimulatorSessionStatus) {
       currentStatusValue = value;
     },
@@ -237,6 +258,9 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
     },
     emitRouteStatus(payload: IOSSimulatorRouteStatusPush) {
       routeStatusListener?.(payload);
+    },
+    emitFocusRequest(payload: IOSSimulatorFocusRequest) {
+      focusRequestListener?.(payload);
     },
   };
 }
@@ -279,6 +303,79 @@ afterEach(() => {
 });
 
 describe('IOSSimulatorTabBody', () => {
+  it('requires a user gesture before requesting native access for a restored panel', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [PERMISSION_DENIED] iOS Simulator access is limited to the current task',
+      ),
+    );
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeTruthy();
+    });
+    expect(api.requestAccess).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.allowTaskAccess' }),
+    );
+
+    await waitFor(() => {
+      expect(api.requestAccess).toHaveBeenCalledWith({ sessionId: 'session-a' });
+      expect(api.status).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
+  });
+
+  it('keeps the access action visible when native confirmation is cancelled', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [PERMISSION_DENIED] iOS Simulator access is limited to the current task',
+      ),
+    );
+    api.requestAccess.mockResolvedValueOnce({ granted: false });
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    const button = await screen.findByRole('button', {
+      name: 'rightSidebar.iosSimulator.allowTaskAccess',
+    });
+    fireEvent.click(button);
+
+    await waitFor(() => expect(api.requestAccess).toHaveBeenCalledOnce());
+    expect(
+      screen.getByRole('button', { name: 'rightSidebar.iosSimulator.allowTaskAccess' }),
+    ).toBeTruthy();
+    expect(api.status).toHaveBeenCalledOnce();
+  });
+
+  it('refreshes a restored access-required tab after an authoritative Host focus grant', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [PERMISSION_DENIED] iOS Simulator access is limited to the current task',
+      ),
+    );
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+
+    await screen.findByText('rightSidebar.iosSimulator.accessRequiredTitle');
+    act(() => {
+      api.emitFocusRequest({
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        userInitiated: false,
+      });
+    });
+
+    await waitFor(() => expect(api.status).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
+    expect(screen.getByText('iPhone 17 Pro')).toBeTruthy();
+  });
+
   it('renders exact device identity from the main-owned status report', async () => {
     const api = installStatus({
       ok: true,

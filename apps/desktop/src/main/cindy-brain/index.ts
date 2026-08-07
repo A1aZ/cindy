@@ -195,6 +195,11 @@ import { GhostPreviewSlot } from './previewSlot.js';
 import { GhostScheduleSlot, isMainShellWindowUrl } from './scheduleSlot.js';
 import { GhostWorkspaceSlot, type WorkspaceSessionService } from './workspaceSlot.js';
 import { GhostIOSSimulatorSlot, type IOSSimulatorSlotFocusContext } from './iosSimulatorSlot.js';
+import {
+  clearIOSSimulatorRendererAccess,
+  focusIOSSimulatorRendererSession,
+  revokeIOSSimulatorRendererAccessForSessionChange,
+} from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { getIOSSimulatorPluginStatus } from '../mcp-integrations/ios-simulator.js';
 import type { GhostTrustRegistry } from './ghostSignature.js';
 import { GhostNotifySlot, sanitizeGhostNoticeText } from './notifySlot.js';
@@ -1842,6 +1847,10 @@ const ghostSessionFocusTrackedWebContents = new Set<number>();
 let ghostSessionFocusRevision = 0;
 
 function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | null): void {
+  // Renderer route reports are not an authority to grant Simulator access. They
+  // may only remove a stale Main-owned grant when this window family moves away
+  // from the task for which it was explicitly authorized.
+  revokeIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
   const previous = ghostSessionFocusByWebContents.get(sender.id);
   if (previous?.sessionId === sessionId) return;
   ghostSessionFocusRevision += 1;
@@ -1919,12 +1928,11 @@ export function getGhostIOSSimulatorSlot(): GhostIOSSimulatorSlot {
         if (!window) return false;
         try {
           if (window.isDestroyed() || window.webContents.isDestroyed()) return false;
-          window.webContents.send('maker:ios-simulator:focus-request', {
-            sessionId: context.sessionId,
-            ...(instanceId ? { instanceId } : {}),
-            userInitiated: false,
-          });
-          return true;
+          return focusIOSSimulatorRendererSession(
+            context.sessionId,
+            instanceId,
+            window.webContents,
+          );
         } catch {
           return false;
         }
@@ -4551,6 +4559,7 @@ export function registerGhostIpc(): void {
       connectionTokenProviderSingleton?.clearAll();
       // 当前任务绑定属于窗口内的 owner 上下文，切账号/会员身份后不得沿用旧快照。
       ghostSessionFocusByWebContents.clear();
+      clearIOSSimulatorRendererAccess();
       if (!getAppCapabilities().canUseCindyAccountServices) suspendCindyAccountGhosts();
       // Even when provisioning itself is a no-op, the renderer and agent
       // roster must immediately reflect the new session capability set.

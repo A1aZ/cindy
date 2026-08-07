@@ -17,6 +17,8 @@ export interface IOSSimulatorScheduler {
 export interface IOSSimulatorInstanceActorOptions {
   store: IOSSimulatorOwnershipStore;
   lifecycle: IOSSimulatorSimctlLifecycle;
+  /** Fail-closed preflight before lifecycle side effects that precede store mutation. */
+  assertMutationAllowed?: () => void;
   clock?: IOSSimulatorClock;
   scheduler?: IOSSimulatorScheduler;
   detachGraceMs?: number;
@@ -73,6 +75,7 @@ export class IOSSimulatorInstanceActor {
   readonly #clock: IOSSimulatorClock;
   readonly #scheduler: IOSSimulatorScheduler;
   readonly #detachGraceMs: number;
+  readonly #assertMutationAllowed: (() => void) | null;
   readonly #tails = new Map<string, Promise<void>>();
   readonly #cancelGrace = new Map<string, () => void>();
   readonly #mutationStates = new Map<string, MutableMutationState>();
@@ -84,6 +87,7 @@ export class IOSSimulatorInstanceActor {
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#scheduler = options.scheduler ?? defaultScheduler();
     this.#detachGraceMs = options.detachGraceMs ?? DEFAULT_DETACH_GRACE_MS;
+    this.#assertMutationAllowed = options.assertMutationAllowed ?? null;
     if (
       !Number.isSafeInteger(this.#detachGraceMs) ||
       this.#detachGraceMs <= 0
@@ -153,6 +157,7 @@ export class IOSSimulatorInstanceActor {
           "The template simulator does not expose a device type identifier.",
         );
       }
+      this.#assertMutationAllowed?.();
       const created = await this.#lifecycle.createExact({
         name: input.name,
         deviceTypeIdentifier,
@@ -656,6 +661,7 @@ export class IOSSimulatorInstanceActor {
             ) {
               return;
             }
+            this.#assertMutationAllowed?.();
             await this.#lifecycle.shutdownExact(current.simulatorUdid);
             const afterShutdown = this.#store.get(detached.instanceId);
             if (
@@ -692,6 +698,7 @@ export class IOSSimulatorInstanceActor {
           "Only simulators created by Cindy can be deleted.",
         );
       }
+      this.#assertMutationAllowed?.();
       if (instance.lifecycleState === "ready") {
         await this.#lifecycle.shutdownExact(instance.simulatorUdid);
       }

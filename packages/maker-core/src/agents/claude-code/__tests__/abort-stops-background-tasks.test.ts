@@ -748,4 +748,64 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     stream.end();
     await handle.close().catch(() => undefined);
   });
+
+  it('clears turnInFlight immediately, not after interrupt resolves', async () => {
+    const { handle, stream, fakeQuery } = await startSessionWithStream();
+
+    // 模拟 SDK 在 retry backoff 中不立即响应 interrupt(如全池冷却 503)。
+    let interruptResolved = false;
+    fakeQuery.interrupt.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+      interruptResolved = true;
+    });
+
+    await handle.send({ type: 'user', content: 'test' });
+    stream.emit(assistantText('thinking...'));
+    await waitFor(() => handle.isTurnRunning?.() === true, 'turn is running');
+
+    const abortPromise = handle.abort();
+
+    // turnInFlight 应在 interrupt 返回前就已清除。
+    await new Promise((r) => setTimeout(r, 10));
+    expect(handle.isTurnRunning?.()).toBe(false);
+    expect(interruptResolved).toBe(false);
+
+    await abortPromise;
+    expect(interruptResolved).toBe(true);
+    expect(fakeQuery.interrupt).toHaveBeenCalled();
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
+  it('calls q.close when interrupt does not respond within timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const { handle, stream, fakeQuery } = await startSessionWithStream();
+
+      // interrupt 永远不响应(simulate hung SDK in retry backoff)。
+      fakeQuery.interrupt.mockImplementation(() => new Promise(() => {}));
+
+      await handle.send({ type: 'user', content: 'test' });
+      stream.emit(assistantText('thinking...'));
+      await waitFor(() => handle.isTurnRunning?.() === true, 'turn is running');
+
+      const abortPromise = handle.abort();
+
+      // turnInFlight 应立刻清除。
+      await vi.advanceTimersByTimeAsync(10);
+      expect(handle.isTurnRunning?.()).toBe(false);
+
+      // 快进到 10s 超时。
+      await vi.advanceTimersByTimeAsync(11_000);
+
+      expect(fakeQuery.close).toHaveBeenCalled();
+
+      stream.end();
+      await abortPromise;
+      await handle.close().catch(() => undefined);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

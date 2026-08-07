@@ -99,12 +99,12 @@ export const STALL_ABORT_RECOVERY_GRACE_MS = 10_000;
 /**
  * 手动 abort(用户按 Stop)之后的复核宽限。
  *
- * 比看门狗那条(10s)长得多是刻意的:看门狗开火前已经确诊"整条链路零事件"，可以果断;
- * 手动 Stop 只说明用户想停，transport 很可能完全健康，只是这一次 interrupt 往返慢
- * (远端 daemon / SSH 隧道)。用 10s 判它"没生效"会把正常会话误关。60s 远超任何健康
- * 往返，又给"按了 Stop 却永远停不下来"留了有界出路(review #944 第十一轮 P1)。
+ * agent 层的 abort() 已自带 interrupt 超时(10s) + turnInFlight 即刻清除;
+ * 超时后走 q.close() → U2 兜底收口。本宽限是最后的保险:只保 agent 层 timeout
+ * 和 q.close() 都失败(极度罕见)的极端情况。从 60s 缩到 15s, 与 agent 层互不叠加,
+ * 端到端最长不超过 15s(review #944 第十一轮末尾调优)。
  */
-export const MANUAL_ABORT_RECOVERY_GRACE_MS = 60_000;
+export const MANUAL_ABORT_RECOVERY_GRACE_MS = 15_000;
 
 /**
  * turn 零事件看门狗的计时分片长度。额度按片累加,片尾核对真实经过时间,

@@ -4912,11 +4912,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             log.warn('abort during bridge turn: inputQueue.end threw', { error: String(e) });
           }
           canceledBridgeQueries.add(q);
-          try {
-            q.close();
-          } catch (e) {
-            log.warn('abort during bridge turn: q.close threw', { error: String(e) });
-          }
+          recordCanceledQueryClose(q, 'bridge aborted');
           // close 本地会连 CLI 子进程一起杀(远端为 daemon 侧 interrupt + 输入流收口,
           // SDK 退出前有极窄残留窗口,由下次 q 换代清表兜底),后台任务随之终止,清表即可。
           const cancelledContinuation = cancelActiveContinuation('bridge_aborted');

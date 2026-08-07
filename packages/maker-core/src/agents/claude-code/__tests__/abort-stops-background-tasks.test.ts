@@ -2401,6 +2401,59 @@ describe('ClaudeCodeAgent abort stops background wake tasks', () => {
     await handle.close().catch(() => undefined);
   });
 
+  it('bridge Stop waits for the retired Query close before retry rebuild', async () => {
+    const { handle, stream, streams, events, fakeQueries } = await startSessionWithStream(
+      undefined,
+      { autoCompactThresholdPct: 50, capturePrompts: true },
+    );
+
+    await handle.send({ type: 'user', content: 'spawn background work' });
+    stream.emit(taskStarted('task-agent', 'local_agent'));
+    await waitFor(() => taskEvents(events).length >= 1, 'wake task observed');
+    stream.emit({ ...turnResult('waiting'), usage: { input_tokens: 400_000, output_tokens: 1 } });
+    await waitFor(() => events.some((event) => event.type === 'done'), 'parent done observed');
+    await handle.abort();
+    await waitFor(() => events.filter(isProductTerminal).length === 1, 'synthetic terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'synthetic terminal acknowledged');
+
+    await handle.setModel?.('claude-sonnet-5');
+    await handle.send({ type: 'user', content: 'must be cancelled with compact' });
+    expect(fakeQueries).toHaveLength(2);
+    const bridgePrompt = (sdkMock.query.mock.calls[1]?.[0] as { prompt?: AsyncIterable<unknown> } | undefined)?.prompt;
+    expect(bridgePrompt).toBeDefined();
+    const bridgePromptIter = bridgePrompt![Symbol.asyncIterator]();
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('/compact');
+    expect((await bridgePromptIter.next()).value?.message?.content).toBe('must be cancelled with compact');
+    streams[1]?.emit(turnResult('compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(handle.isTurnRunning?.()).toBe(true);
+
+    const closeDeferred = createDeferred<void>();
+    fakeQueries[1]?.close.mockImplementationOnce(() => closeDeferred.promise);
+    await handle.abort();
+    expect(fakeQueries[1]?.close).toHaveBeenCalledTimes(1);
+
+    const retryPromise = handle.send({ type: 'user', content: 'retry after deferred bridge close' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fakeQueries).toHaveLength(2);
+
+    closeDeferred.resolve(undefined);
+    await retryPromise;
+    expect(fakeQueries).toHaveLength(3);
+
+    streams[2]?.emit(turnResult('retry compact complete'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // 初始 Stop synthetic + bridge Stop synthetic 已各自产生一个产品终态；
+    // retry 的 compact result 仍被 bridge 语义 suppress。
+    expect(events.filter(isProductTerminal)).toHaveLength(2);
+    streams[2]?.emit(turnResult('retry user complete'));
+    await waitFor(() => events.filter(isProductTerminal).length === 3, 'retry terminal observed');
+    await waitFor(() => handle.isTurnRunning?.() === false, 'retry settled');
+
+    stream.end();
+    await handle.close().catch(() => undefined);
+  });
+
   it('cancellation rebuild 不重复初始 resumeSessionAt / forkSession', async () => {
     const { handle, stream, events, fakeQueries } = await startSessionWithStream(undefined, {
       vendorOptions: {

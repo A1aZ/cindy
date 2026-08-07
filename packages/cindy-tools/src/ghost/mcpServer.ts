@@ -482,7 +482,10 @@ export async function handleGhostInfo(
         {
           ok: false,
           errorCode: result.errorCode,
-          message: result.message,
+          message:
+            result.errorCode === "GHOST_NOT_FOUND"
+              ? `${result.message}；不要重复重试同一目标；可调用 ghost_list 回查当前可用插件，或改用其它可用方式完成。`
+              : result.message,
         },
         true,
       );

@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
+import { buildGhostRosterPrompt } from 'cindy-tools';
 import type {
   CindyForgePackResult,
   CindyForgeScaffoldResult,
@@ -821,6 +822,20 @@ function ghostRecall(ghost: InstalledGhost): string | undefined {
   return ghost.manifest.whenToUse ?? ghost.manifest.description;
 }
 
+/** 供各 harness 会话装配 system/developer 段；每次调用按 workdir 取一次数据。 */
+export function getGhostRosterPrompt({ workingDir }: { workingDir?: string }): string {
+  const items = visibleChipGhosts(workingDir ?? null).map((ghost) => {
+    const recall = ghostRecall(ghost);
+    return {
+      id: ghost.manifest.id,
+      name: ghost.manifest.name,
+      ...(ghost.manifest.command ? { command: ghost.manifest.command } : {}),
+      ...(recall ? { recall } : {}),
+    };
+  });
+  return buildGhostRosterPrompt(items);
+}
+
 function toCindyGhostInfo(ghost: InstalledGhost): CindyGhostInfo {
   const recall = ghostRecall(ghost);
   let setup: CindyGhostInfo['setup'];
@@ -865,7 +880,9 @@ export function getCindyGhostsMcpDeps(
     getLiziMcpSessionContext() ?? sessionCtx;
   return {
     // 花名册快照(server 装配时取一次):唤醒的芯片意识 + 召回线索,进
-    // ghost_list 工具描述做语义召回。线索优先 whenToUse(给模型
+    // ghost_list 工具描述做语义召回。system 段由 getGhostRosterPrompt 在每个
+    // session 装配时按 workdir 单独取数,更准确;实时真相以 ghost_list 调用返回为准。
+    // 线索优先 whenToUse(给模型
     // 的场景枚举,可独立调优),缺省回落 description(给人的自我介绍);
     // 两者皆无的意识只列名字与指令(作者该去补——手册已教)。
     //

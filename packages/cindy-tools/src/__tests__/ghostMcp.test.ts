@@ -978,7 +978,7 @@ describe("cindy_ghosts · server 构建", () => {
     ]);
     const infoDescription = server._registeredTools.ghost_info?.description ?? "";
     expect(infoDescription).toContain("精准查询单个当前可用插件");
-    expect(infoDescription).toContain("不知道用户装了什么时才用 ghost_list");
+    expect(infoDescription).toContain("完全没有目标线索时才用 ghost_list");
     expect(infoDescription).toContain("不要缓存");
     expect(infoDescription).toContain(
       "GHOST_NOT_FOUND(不存在、已卸载或当前账号不可用)",
@@ -1389,6 +1389,23 @@ describe("formatGhostRoster(花名册快照:语义召回数据源)", () => {
     expect(callDesc).toContain("Full Access(bypassPermissions)");
     expect(callDesc).toContain("远程会话仍向用户弹确认卡");
     expect(callDesc).toContain("不写人工永久授权");
+  });
+
+  it("system 段 builder 与 ghost_list 共用行格式且空清单不注入", async () => {
+    const { buildGhostRosterPrompt, formatGhostRoster } = await import(
+      "../ghost/mcpServer"
+    );
+    const items = [
+      { id: "z", name: "Z", recall: "场景 Z" },
+      { id: "a", name: "A", recall: "场景 A" },
+    ];
+    const prompt = buildGhostRosterPrompt(items);
+    expect(prompt).toContain("直接调用 ghost_info({ghost_id})");
+    expect(prompt).toContain(formatGhostRoster(items));
+    expect(prompt.indexOf("- A(id: a)")).toBeLessThan(
+      prompt.indexOf("- Z(id: z)"),
+    );
+    expect(buildGhostRosterPrompt([])).toBe("");
   });
 });
 

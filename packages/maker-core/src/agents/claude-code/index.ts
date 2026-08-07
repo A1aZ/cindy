@@ -997,6 +997,9 @@ export class ClaudeCodeAgent extends BaseAgent {
       });
     }
     const hostSystemPrompt = this.deps.runtimeConfig.systemPrompt;
+    const ghostRosterPrompt = opts.remoteHostId
+      ? ''
+      : (this.deps.getGhostRosterPrompt?.({ workingDir: opts.workingDir }) ?? '');
 
     // mutable closure — setVendorOptions 在 handle 上对外暴露,**原地合并** patch。
     // 关键: 不能用 `vo = {...vo, ...patch}` 重赋值 — Claude SDK 在 startSession 时
@@ -2367,6 +2370,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               MAKER_SYSTEM_PROMPT_APPEND,
               makerMemoryRules,
               contactsRules,
+              ghostRosterPrompt,
               hostSystemPrompt,
               makerMemoryIndex,
               opts.userPrompt,

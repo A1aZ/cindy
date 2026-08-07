@@ -21,6 +21,7 @@ const runtime = vi.hoisted(() => ({
   accountGhostAvailable: true,
   pendingCalls: false,
   runningErrand: false,
+  cindyWork: false,
   boundaryPending: false,
   pluginApiBaseUrl: 'https://plugin.test.invalid' as string | null,
   session: {
@@ -60,6 +61,7 @@ vi.mock('../../cindy-brain/index.js', () => ({
   installOrUpdateMarketGhostPackage: runtime.install,
   hasPendingGhostCalls: vi.fn(() => runtime.pendingCalls),
   hasRunningGhostErrand: vi.fn(() => runtime.runningErrand),
+  hasRunningGhostCindyWork: vi.fn(() => runtime.cindyWork),
   isBuiltinGhostRemovedByUser: (id: string) => runtime.builtinRemoved.has(id),
   uninstallGhostAndCleanup: runtime.uninstall,
 }));
@@ -103,6 +105,7 @@ afterEach(() => {
   runtime.accountGhostAvailable = true;
   runtime.pendingCalls = false;
   runtime.runningErrand = false;
+  runtime.cindyWork = false;
   runtime.boundaryPending = false;
   runtime.pluginApiBaseUrl = 'https://plugin.test.invalid';
   runtime.session = {
@@ -1327,7 +1330,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(h.service.consumeUpgradeNotice()).toBeNull();
   });
 
-  it.each(['pendingCalls', 'runningErrand'] as const)(
+  it.each(['pendingCalls', 'runningErrand', 'cindyWork'] as const)(
     'skips a busy organization upgrade and retries on the next snapshot (%s)',
     async (signal) => {
       const item = summary({

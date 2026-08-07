@@ -1138,6 +1138,10 @@ export function hasRunningGhostErrand(ghostId: string): boolean {
   return getGhostErrandSlot().hasActiveErrandFor(ghostId);
 }
 
+export function hasRunningGhostCindyWork(ghostId: string): boolean {
+  return getGhostCindySlot().hasInflightWorkFor(ghostId);
+}
+
 /** maker-ipc 完成初始化后注入真实派活 runner;传 null 用于退出清理。 */
 export function setGhostErrandRunner(runner: GhostErrandRunner | null): void {
   getGhostErrandSlot().setRunner(runner);

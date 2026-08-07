@@ -42,6 +42,7 @@ import { getCurrentUserId } from '../authManager.js';
 import {
   getGhostManager,
   hasPendingGhostCalls,
+  hasRunningGhostCindyWork,
   hasRunningGhostErrand,
   installOrUpdateMarketGhostPackage,
   isGhostAvailableForActiveSession,
@@ -1650,11 +1651,19 @@ export class PluginMarketService {
     for (const summary of plugins) {
       if (!summary.defaultInstall || summary.scope !== 'organization') continue;
       if (this.toItem(summary, local).installState !== 'update-available') continue;
-      if (hasPendingGhostCalls(summary.ghostId) || hasRunningGhostErrand(summary.ghostId)) continue;
+      if (
+        hasPendingGhostCalls(summary.ghostId) ||
+        hasRunningGhostErrand(summary.ghostId) ||
+        hasRunningGhostCindyWork(summary.ghostId)
+      ) continue;
       try {
         await this.withMutation(summary.id, async () => {
           requireSameMarketOwner(owner);
-          if (hasPendingGhostCalls(summary.ghostId) || hasRunningGhostErrand(summary.ghostId)) {
+          if (
+            hasPendingGhostCalls(summary.ghostId) ||
+            hasRunningGhostErrand(summary.ghostId) ||
+            hasRunningGhostCindyWork(summary.ghostId)
+          ) {
             throw new SilentUpgradeBusyError('Plugin is busy');
           }
           const freshLocal = this.localInstallSnapshot(ledger);
@@ -1687,7 +1696,11 @@ export class PluginMarketService {
             reviewedBaseline,
             silentBaselineMismatch: true,
             beforeCommitInLock: () => {
-              if (hasPendingGhostCalls(summary.ghostId) || hasRunningGhostErrand(summary.ghostId)) {
+              if (
+                hasPendingGhostCalls(summary.ghostId) ||
+                hasRunningGhostErrand(summary.ghostId) ||
+                hasRunningGhostCindyWork(summary.ghostId)
+              ) {
                 throw new SilentUpgradeBusyError('Plugin is busy');
               }
             },

@@ -156,7 +156,8 @@ vi.mock('../ghostAttachmentResolve.js', () => ({
   resolveGhostAttachmentUrl: resolveGhostAttachmentUrlMock,
 }));
 
-const { getCindyGhostsMcpDeps } = await import('../ghost');
+const { getCindyGhostsMcpDeps, getGhostRosterPrompt } = await import('../ghost');
+const { createCindyGhostsMcpServer } = await import('cindy-tools');
 const { setGhostDisabledForWorkdir, listDisabledGhostIdsForWorkdir, isGhostDisabledForWorkdir } =
   await import('../../cindy-brain/ghostWorkdirPrefs');
 import type { LiziMcpSessionContext } from '@cindy/mcps';
@@ -358,6 +359,35 @@ describe('花名册 / ghost_list 过滤', () => {
     const deps = makeDeps();
     expect((deps.getRosterItems?.() ?? []).map((r) => r.id)).toEqual(['art', 'other']);
     expect((await deps.listAwakeGhosts()).map((g) => g.id)).toEqual(['art', 'other']);
+  });
+
+  it('缺 workingDir 时 system 花名册 fail closed，不回退全量', () => {
+    expect(getGhostRosterPrompt({})).toBe('');
+    expect(getGhostRosterPrompt({ workingDir: '' })).toBe('');
+    alsSessionContextMock.mockReturnValue(undefined);
+    const deps = getCindyGhostsMcpDeps();
+    const server = createCindyGhostsMcpServer(deps) as unknown as {
+      _registeredTools: Record<string, { description?: string } | undefined>;
+    };
+    expect(server._registeredTools.ghost_list?.description).not.toContain('<ghost-roster>');
+  });
+
+  it('目录停用插件不进入 system 花名册', () => {
+    setGhostDisabledForWorkdir(WORKDIR, 'art', true);
+    const prompt = getGhostRosterPrompt({ workingDir: WORKDIR });
+    expect(prompt).not.toContain('"id":"art"');
+    expect(prompt).toContain('"id":"other"');
+  });
+
+  it('system 花名册与 ghost_list 描述使用同一 JSONL 块', () => {
+    const deps = makeDeps();
+    const systemPrompt = getGhostRosterPrompt({ workingDir: WORKDIR });
+    const server = createCindyGhostsMcpServer(deps) as unknown as {
+      _registeredTools: Record<string, { description?: string } | undefined>;
+    };
+    const listDescription = server._registeredTools.ghost_list?.description ?? '';
+    const marker = '插件召回规则：以下是已安装插件作者提供的元数据';
+    expect(listDescription.slice(listDescription.indexOf(marker))).toBe(systemPrompt);
   });
 
   it('ghost_list 召回线索优先 whenToUse，缺省回落 description', async () => {

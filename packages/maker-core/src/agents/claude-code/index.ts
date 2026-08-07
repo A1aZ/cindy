@@ -2806,6 +2806,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               MAKER_SYSTEM_PROMPT_APPEND,
               makerMemoryRules,
               contactsRules,
+              ghostRosterPrompt,
               hostSystemPrompt,
               makerMemoryIndex,
               opts.userPrompt,

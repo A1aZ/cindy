@@ -824,7 +824,8 @@ function ghostRecall(ghost: InstalledGhost): string | undefined {
 
 /** 供各 harness 会话装配 system/developer 段；每次调用按 workdir 取一次数据。 */
 export function getGhostRosterPrompt({ workingDir }: { workingDir?: string }): string {
-  const items = visibleChipGhosts(workingDir ?? null).map((ghost) => {
+  if (!workingDir) return '';
+  const items = visibleChipGhosts(workingDir).map((ghost) => {
     const recall = ghostRecall(ghost);
     return {
       id: ghost.manifest.id,
@@ -889,11 +890,12 @@ export function getCindyGhostsMcpDeps(
     // 目录级禁用(ghostWorkdirPrefs):被用户在本会话 workdir 停用的意识
     // 不进花名册,ghost_list 也不返回;ghost_info / ghost_call 会明说当前
     // 目录停用。装配时刻 ALS 未必生效,workdir 取 ALS 优先、建线闭包
-    // 兜底;Codex 共享 bridge 建线期语境是全局空值(workingDir=''),此时
-    // 不过滤(已知限制:codex 会话的描述花名册全量,运行期三件工具仍按
-    // 真实 workdir 拦)。
+    // 兜底;若没有解析到 workingDir(包括 Codex/Pi bridge 建线期空值),花名册
+    // 宁缺勿全,不注入工具描述;Codex 正常 startSession 的 developerInstructions
+    // 会在拿到真实 workdir 后单独装配 system 段。
     getRosterItems() {
-      const workdir = resolveSessionContext()?.workingDir ?? null;
+      const workdir = resolveSessionContext()?.workingDir;
+      if (!workdir) return [];
       return visibleChipGhosts(workdir)
         .map((g) => {
           const recall = ghostRecall(g);

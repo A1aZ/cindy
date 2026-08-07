@@ -908,7 +908,12 @@ export function createTurnRunner(
                   ),
                   onCancel: (requestId, decision) =>
                     adapter.cancelTextInteraction?.(userId, requestId, decision) === true
-                    || cancelPending(requestId, 'interaction_route_released'),
+                    || cancelPending(
+                      requestId,
+                      'reason' in decision
+                        ? decision.reason ?? 'interaction_route_released'
+                        : 'interaction_route_released',
+                    ),
                 });
           await item.beforeProviderStart?.();
           acceptedAt = Date.now();

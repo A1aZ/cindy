@@ -51,6 +51,7 @@ const mocks = vi.hoisted(() => ({
   onSilentStopSettled: vi.fn(() => vi.fn()),
   installDesktopInteractionListener: vi.fn(),
   takePendingInteractionsForSession: vi.fn(),
+  cancelPending: vi.fn(() => false),
   rejectAllPending: vi.fn(),
   registerPending: vi.fn(),
   registerPendingExternal: vi.fn(),
@@ -140,6 +141,7 @@ vi.mock('../../../turn-change-set/store', () => ({
 }));
 
 vi.mock('../pendingInteractions', () => ({
+  cancelPending: mocks.cancelPending,
   registerPending: mocks.registerPending,
   registerPendingExternal: mocks.registerPendingExternal,
   rejectAllPending: mocks.rejectAllPending,
@@ -530,6 +532,7 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       close: vi.fn(),
     });
     mocks.takePendingInteractionsForSession.mockReturnValue([]);
+    mocks.cancelPending.mockReturnValue(false);
     mocks.checkDestructiveToolCall.mockReturnValue({ destructive: false });
     mocks.materializeLocalMarkdownImages.mockResolvedValue({ absPaths: [], text: '' });
   });
@@ -823,6 +826,79 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     );
     expect(h.releaseTurnLease).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    {
+      label: 'returns false',
+      createCancelTextInteraction: () => vi.fn(() => false),
+    },
+    {
+      label: 'is not implemented',
+      createCancelTextInteraction: () => undefined,
+    },
+  ])(
+    'preserves the router cancellation reason when channel cancelTextInteraction $label',
+    async ({ createCancelTextInteraction }) => {
+      const h = setupSession(async () => ({ accepted: true }));
+      const handleTextInteraction = vi.fn(
+        async () => new Promise<InteractionDecision>(() => undefined),
+      );
+      const cancelTextInteraction = createCancelTextInteraction();
+      const channelAdapter: ImChannelAdapter = {
+        ...fakeAdapter,
+        channel: 'wechat',
+        output: {
+          kind: 'chunked-text',
+          im: mocks.feishuIm as unknown as ChannelIM,
+          commitFinal: vi.fn(async () => undefined),
+        },
+        handleTextInteraction,
+        ...(cancelTextInteraction ? { cancelTextInteraction } : {}),
+      };
+      const localRunner = createTurnRunner(channelAdapter, fakeRepo, fakeCards);
+
+      await localRunner.runAgentTurn({
+        botContextId: 'cli_test_bot',
+        userId: 'ou_user',
+        userMessageId: 'msg-policy-fallback',
+        text: 'run with policy',
+        attachments: [],
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-policy-fallback' },
+          confirmationSurface: 'channel',
+          confirmationTimeoutMs: 30_000,
+          forceConfirmToolCall: () => true,
+        },
+      });
+      const decision = h.dispatchInteraction({
+        kind: 'permission',
+        requestId: 'interaction-fallback',
+        toolName: 'bash',
+        input: { command: 'pnpm test' },
+      });
+      await waitForAssertion(() => expect(handleTextInteraction).toHaveBeenCalledOnce());
+
+      await localRunner.disposeAllSessions();
+      await expect(decision).resolves.toMatchObject({
+        kind: 'permission',
+        behavior: 'deny',
+        reason: 'session_cleanup',
+      });
+      expect(mocks.cancelPending).toHaveBeenCalledWith(
+        'interaction-fallback',
+        'session_cleanup',
+      );
+      expect(mocks.cancelPending).toHaveBeenCalledOnce();
+      if (cancelTextInteraction) {
+        expect(cancelTextInteraction).toHaveBeenCalledWith(
+          'ou_user',
+          'interaction-fallback',
+          expect.objectContaining({ behavior: 'deny', reason: 'session_cleanup' }),
+        );
+      }
+      expect(h.releaseTurnLease).toHaveBeenCalledOnce();
+    },
+  );
 
   it('does not reacquire attached IM headless state from a late acceptance callback', async () => {
     let lateOnAccepted: NonNullable<Parameters<Session['send']>[1]>['onAccepted'];

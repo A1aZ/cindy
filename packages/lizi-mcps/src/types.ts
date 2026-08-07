@@ -608,8 +608,6 @@ export interface ComputerMcpDeps {
   getStatus(): Promise<ComputerDriverStatus>;
   /** Resolve process provenance without trusting model-supplied app labels. */
   resolveProcessIdentity?(pid: number): Promise<ComputerProcessIdentity | null>;
-  /** Host-issued authorization for an explicitly requested external iOS UI workflow. */
-  isExternalIosWorkflowAllowed?(context?: ComputerMcpCallContext): boolean;
   callTool(
     name: ComputerMcpToolName,
     args: Record<string, unknown>,

@@ -13,7 +13,10 @@ import {
   IOSSimulatorResourceScheduler,
   WdaError,
   type IOSSimulatorEnvironmentReport,
+  type IOSSimulatorH264Frame,
+  type IOSSimulatorNativeSidecarDriver,
   type IOSSimulatorSimctlLifecycle,
+  type IOSSimulatorStreamStats,
   type IOSSimulatorStreamProfile,
   type IOSSimulatorTouchPoint,
   type WdaRunningInstance,
@@ -1384,6 +1387,182 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it('pushes H.264 frames only to the exact current viewer and rejects stale generations', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => READY_REPORT.devices[0]!),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    let frameSink: ((frame: IOSSimulatorH264Frame) => void | Promise<void>) | null = null;
+    const emitFrame = async (frame: IOSSimulatorH264Frame): Promise<void> => {
+      const sink = frameSink as ((nextFrame: IOSSimulatorH264Frame) => void | Promise<void>) | null;
+      if (!sink) throw new Error('native frame sink was not registered');
+      await sink(frame);
+    };
+    const streamNativeFrames = vi.fn<IOSSimulatorNativeSidecarDriver['streamNativeFrames']>(
+      async (options) => {
+        frameSink = options.onFrame;
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) resolve();
+          else options.signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return {
+          frameCount: 1,
+          byteCount: 4,
+          startedAt: '2026-08-07T00:00:00.000Z',
+          firstFrameAt: '2026-08-07T00:00:00.001Z',
+          endedAt: '2026-08-07T00:00:00.002Z',
+          endReason: 'aborted',
+        } satisfies IOSSimulatorStreamStats;
+      },
+    );
+    const nativeDriver = {
+      kind: 'native-sidecar',
+      capabilities: {
+        accessibility: false,
+        sessions: false,
+        jpegStream: false,
+        h264Stream: true,
+        bgraStream: true,
+        discreteInput: false,
+        continuousInput: true,
+        multiTouch: true,
+      },
+      configureNativeStream: vi.fn(async (profile) => profile),
+      streamNativeFrames,
+    } as unknown as IOSSimulatorNativeSidecarDriver;
+    const wdaDriver = {
+      getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
+      getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+    };
+    const capabilityReport = () => ({
+      nativeSidecar: { available: true },
+      routes: {
+        continuousInput: {
+          selected: 'native-sidecar',
+          fallback: false,
+          reason: null,
+        },
+        stream: {
+          h264: {
+            selected: 'native-sidecar',
+            fallback: false,
+            reason: null,
+          },
+        },
+      },
+    });
+    const running = {
+      instanceId: instance.instanceId,
+      simulatorUdid: instance.simulatorUdid,
+      pid: 42,
+      driver: wdaDriver,
+      driverSessionId: 'wda-session',
+      driverRouter: {
+        stream: vi.fn(() => ({
+          adapter: 'native-sidecar',
+          fallback: false,
+          reason: null,
+          source: nativeDriver,
+        })),
+        capabilityReport,
+      },
+    } as unknown as WdaRunningInstance;
+    const pushH264Frame = vi.fn();
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      driverManager: {
+        get: vi.fn(() => running),
+        start: vi.fn(async () => running),
+        stop: vi.fn(async () => undefined),
+      },
+      pushH264Frame,
+    });
+    const route = {
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    };
+
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 77, 'viewer-a'),
+    ).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(streamNativeFrames).toHaveBeenCalledOnce());
+    const firstFrame: IOSSimulatorH264Frame = {
+      encoding: 'h264',
+      format: 'annex-b',
+      bytes: Uint8Array.from([0, 0, 0, 1]),
+      receivedAt: '2026-08-07T00:00:00.001Z',
+      width: 393,
+      height: 852,
+      orientation: 'PORTRAIT',
+      scale: 1,
+      colorSpace: 'srgb',
+      timestampMicros: 1,
+      keyFrame: true,
+    };
+    await emitFrame(firstFrame);
+    expect(pushH264Frame).toHaveBeenCalledOnce();
+    expect(pushH264Frame).toHaveBeenCalledWith(
+      77,
+      expect.objectContaining({
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        encoding: 'h264',
+      }),
+    );
+
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-b'),
+    ).resolves.toMatchObject({ ok: true });
+    await emitFrame({ ...firstFrame, timestampMicros: 2 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(2);
+    expect(pushH264Frame).toHaveBeenLastCalledWith(
+      88,
+      expect.objectContaining({ instanceId: instance.instanceId }),
+    );
+
+    await expect(
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-c'),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      host.setViewerVisibility('session-a', route, false, 'h264', undefined, 88, 'viewer-b'),
+    ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+    await emitFrame({ ...firstFrame, timestampMicros: 3 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(3);
+    expect(pushH264Frame).toHaveBeenLastCalledWith(
+      88,
+      expect.objectContaining({ instanceId: instance.instanceId }),
+    );
+
+    const current = actor.getOwned('session-a', instance.instanceId);
+    await actor.stop({
+      sessionId: current.sessionId,
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    });
+    await emitFrame({ ...firstFrame, timestampMicros: 4 });
+    expect(pushH264Frame).toHaveBeenCalledTimes(3);
+    await host.dispose();
+  });
+
   it('selects H.264, falls back to JPEG, and re-arms native streaming on the next viewer request', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
@@ -2426,6 +2605,73 @@ describe('iOS Simulator host', () => {
     expect(requestViewerFocus).not.toHaveBeenCalled();
   });
 
+  it('releases scheduler capacity when a ready preexisting device is detached', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const resourceScheduler = testResourceScheduler();
+    let running: WdaRunningInstance | null = null;
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+      resourceScheduler,
+      driverManager: {
+        get: vi.fn(() => running),
+        start: vi.fn(async (options) => {
+          running = {
+            instanceId: options.instanceId,
+            simulatorUdid: options.simulatorUdid,
+            pid: 42,
+            driver: {} as WdaRunningInstance['driver'],
+            driverSessionId: 'wda-session',
+          } as WdaRunningInstance;
+          return running;
+        }),
+        stop: vi.fn(async () => {
+          running = null;
+        }),
+      },
+      mediaCapture: {
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+
+    await expect(
+      host.callTool(
+        'attach_device',
+        { udid: READY_REPORT.devices[0]!.udid },
+        { sessionId: 'session-a', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(resourceScheduler.runningCount()).toBe(1);
+    const attached = actor.list('session-a')[0]!;
+
+    await expect(
+      host.callTool(
+        'detach_device',
+        {
+          instanceId: attached.instanceId,
+          generation: attached.generation,
+          leaseId: attached.lease.id,
+        },
+        { sessionId: 'session-a', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(resourceScheduler.runningCount()).toBe(0);
+    await host.dispose();
+  });
+
   it('shares exact attachment and lifecycle state while rejecting another session', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
@@ -2573,12 +2819,13 @@ describe('iOS Simulator host', () => {
       startRecording: vi.fn(),
       stopRecording: vi.fn(),
     } as unknown as IOSSimulatorMediaCaptureAdapter;
+    const resourceScheduler = testResourceScheduler();
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
       driverManager,
       mediaCapture,
-      resourceScheduler: testResourceScheduler(),
+      resourceScheduler,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession: vi.fn(async (id) => localSession(id)),
       resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
@@ -2593,6 +2840,7 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { instance: { sessionId: 'session-a', lifecycleState: 'ready' } },
     });
+    expect(resourceScheduler.runningCount()).toBe(1);
     expect(attached).not.toHaveProperty('data.instance.worktreeRoot');
     await expect(
       host.callTool(
@@ -3298,6 +3546,7 @@ describe('iOS Simulator host', () => {
       ),
     ).resolves.toMatchObject({ ok: true });
     expect(discardInstance).toHaveBeenCalledTimes(2);
+    expect(resourceScheduler.runningCount()).toBe(0);
   });
 
   it('routes build, install, launch, terminate, and URL actions through injected adapters', async () => {

@@ -266,7 +266,7 @@ export function createComputerMcpServer(
         inputSchema: z.toJSONSchema(z.object(tool.inputShape).strict()),
       })),
       workflow:
-        'Start with status and check_permissions. For iOS work, use cindy_ios_simulator first; only use this server to inspect or launch macOS Simulator.app when the user explicitly requests an external window and launch_app receives use_external_simulator=true. Otherwise use get_accessibility_tree/list_windows, optionally narrow list_windows with query/workspace_root/process_name (for example, {"process_name":"Simulator"}), inspect a target with get_window_state, perform one action, and call get_window_state again to verify. Targeted actions such as click/type_text require pid; include window_id whenever the target window is known, and always for coordinates. Use get_window_state with {"capture_mode":"vision"} for screenshots and normally omit screenshot_out_file. Element indices are only valid for the latest snapshot of the same pid/window_id: pass the snapshot_id from get_window_state along with element_index, and re-observe when an action is rejected with STALE_SNAPSHOT. Use start_recording/stop_recording/replay_trajectory only when the user explicitly asks for recording or replay.',
+        'Start with status and check_permissions. For iOS work, use cindy_ios_simulator first; this server may inspect the external Xcode/Simulator desktop UI read-only, but mutating external iOS workflows are not available until Cindy has a host-issued authorization flow. Otherwise use get_accessibility_tree/list_windows, optionally narrow list_windows with query/workspace_root/process_name (for example, {"process_name":"Simulator"}), inspect a target with get_window_state, perform one action, and call get_window_state again to verify. Targeted actions such as click/type_text require pid; include window_id whenever the target window is known, and always for coordinates. Use get_window_state with {"capture_mode":"vision"} for screenshots and normally omit screenshot_out_file. Element indices are only valid for the latest snapshot of the same pid/window_id: pass the snapshot_id from get_window_state along with element_index, and re-observe when an action is rejected with STALE_SNAPSHOT. Use start_recording/stop_recording/replay_trajectory only when the user explicitly asks for recording or replay.',
     }),
   );
 
@@ -314,13 +314,8 @@ export function createComputerMcpServer(
     const externalIosGuard = await guardExternalIosDesktopWorkflow(
       name as ComputerMcpToolName,
       parsedData,
-      callContext,
     );
     if (externalIosGuard) return externalIosGuard;
-    // These MCP-only routing flags are consumed by the guard and must never be
-    // forwarded to the underlying desktop driver.
-    delete parsedData.use_external_simulator;
-    delete parsedData.use_external_ios_workflow;
 
     // 快照代际护栏:element_index 指向"某次 get_window_state 的第几项",观察和
     // 动作之间 UI 树变化时会静默作用到错误元素。带 snapshot_id 的动作在此校验
@@ -375,25 +370,17 @@ export function createComputerMcpServer(
   async function guardExternalIosDesktopWorkflow(
     name: ComputerMcpToolName,
     parsedData: Record<string, unknown>,
-    callContext: ComputerMcpCallContext | undefined,
   ) {
-    const hostAuthorized = deps.isExternalIosWorkflowAllowed?.(callContext) === true;
     if (name === 'launch_app') {
       const target = classifyExternalIosTarget({
         name: parsedData.name,
         bundleId: parsedData.bundle_id,
         executable: parsedData.name,
       });
-      if (
-        target === 'simulator' &&
-        !(hostAuthorized && parsedData.use_external_simulator === true)
-      ) {
+      if (target === 'simulator') {
         return embeddedIosSimulatorPreferredResult('Simulator.app');
       }
-      if (
-        target === 'xcode' &&
-        !(hostAuthorized && parsedData.use_external_ios_workflow === true)
-      ) {
+      if (target === 'xcode') {
         return embeddedIosSimulatorPreferredResult('Xcode');
       }
       return null;
@@ -401,14 +388,11 @@ export function createComputerMcpServer(
 
     if (
       !TARGETED_MUTATING_TOOLS.has(name) ||
-      typeof parsedData.pid !== 'number' ||
-      !deps.resolveProcessIdentity
+      typeof parsedData.pid !== 'number'
     ) {
       return null;
     }
-    if (hostAuthorized && parsedData.use_external_ios_workflow === true) {
-      return null;
-    }
+    if (!deps.resolveProcessIdentity) return targetProvenanceUnavailableResult();
 
     let identity;
     try {
@@ -419,9 +403,18 @@ export function createComputerMcpServer(
         tool: name,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      return targetProvenanceUnavailableResult();
     }
-    const target = classifyExternalIosTarget(identity ?? {});
+    if (
+      !identity ||
+      identity.pid !== parsedData.pid ||
+      ![identity.name, identity.command, identity.executable, identity.bundleId].some(
+        (value) => typeof value === 'string' && value.trim().length > 0,
+      )
+    ) {
+      return targetProvenanceUnavailableResult();
+    }
+    const target = classifyExternalIosTarget(identity);
     if (!target) return null;
 
     return embeddedIosSimulatorPreferredResult(target === 'xcode' ? 'Xcode' : 'Simulator.app');
@@ -438,6 +431,7 @@ export function createComputerMcpServer(
     const command = typeof input.command === 'string' ? input.command.trim().toLowerCase() : '';
     const executable = typeof input.executable === 'string' ? input.executable.trim().toLowerCase() : '';
     const provenance = [name, command, executable].filter(Boolean).join(' ');
+    const nameBasename = name.replace(/\\/g, '/').split('/').at(-1) ?? '';
 
     if (
       bundleId === 'com.apple.iphonesimulator' ||
@@ -447,6 +441,7 @@ export function createComputerMcpServer(
     }
     if (
       bundleId === 'com.apple.dt.xcode' ||
+      /^xcode(?:[-_.][a-z0-9][a-z0-9._-]*)?(?:\.app)?$/i.test(nameBasename) ||
       /(^|[\s/])xcode(?:\.app)?(?:[\s/]|$)/.test(provenance)
     ) {
       return 'xcode';
@@ -461,9 +456,23 @@ export function createComputerMcpServer(
         errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
         data: {
           message:
-            `Use cindy_ios_simulator for Cindy's embedded viewer. External ${target} automation is disabled by default; use the explicit external-iOS override only when the user requested that desktop workflow.`,
+            `Use cindy_ios_simulator for Cindy's embedded viewer. External ${target} automation is unavailable until Cindy can issue an explicit host authorization.`,
           next_tool: 'cindy_ios_simulator',
           blocked_target: target,
+        },
+      },
+      true,
+    );
+  }
+
+  function targetProvenanceUnavailableResult() {
+    return textResult(
+      {
+        ok: false,
+        errorCode: 'TARGET_PROVENANCE_UNAVAILABLE',
+        data: {
+          message:
+            'Cindy could not verify the target process identity, so this mutating desktop action was blocked. Refresh the target window and try again.',
         },
       },
       true,

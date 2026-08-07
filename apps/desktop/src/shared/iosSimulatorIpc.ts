@@ -117,9 +117,29 @@ export interface IOSSimulatorStatusRequest {
   sessionId: string;
 }
 
+/**
+ * Renderer-owned simulator actions. Agent-only build, install, URL, push, media,
+ * and diagnostic tools must stay behind the MCP approval/control boundary.
+ */
+export const IOS_SIMULATOR_RENDERER_TOOL_NAMES = [
+  'attach_device',
+  'detach_device',
+  'start_instance',
+  'stop_instance',
+  'tap',
+  'swipe',
+  'type_text',
+  'press_home',
+  'set_orientation',
+  'lock_screen',
+  'unlock_screen',
+] as const satisfies readonly IOSSimulatorMcpToolName[];
+
+export type IOSSimulatorRendererToolName = (typeof IOS_SIMULATOR_RENDERER_TOOL_NAMES)[number];
+
 export interface IOSSimulatorToolRequest {
   sessionId: string;
-  name: IOSSimulatorMcpToolName;
+  name: IOSSimulatorRendererToolName;
   args: Record<string, unknown>;
 }
 
@@ -147,6 +167,8 @@ export interface IOSSimulatorViewerRouteRequest {
 
 export interface IOSSimulatorViewerVisibilityRequest extends IOSSimulatorViewerRouteRequest {
   visible: boolean;
+  /** Identifies one renderer effect lifetime so a stale close cannot stop its replacement. */
+  viewerToken?: string;
   preferredEncoding?: 'jpeg' | 'h264';
   /** Renderer decoder failed after a native stream was selected. */
   fallbackReason?: 'native-decoder-fallback';

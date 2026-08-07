@@ -540,6 +540,7 @@ export function IOSSimulatorTabBody({
   useEffect(() => {
     if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
     const route = { sessionId: ctx.sessionId, ...routeFor(attachedInstance) };
+    const viewerRoute = { ...route, viewerToken: window.crypto.randomUUID() };
     let cancelled = false;
     let polling = false;
     let nextRecoveryAt = 0;
@@ -658,7 +659,7 @@ export function IOSSimulatorTabBody({
       gate.attemptCount = attemptCount;
       try {
         return await window.electronAPI.maker.iosSimulator.setViewerVisibility({
-          ...route,
+          ...viewerRoute,
           visible: true,
           preferredEncoding: 'h264',
         });
@@ -676,7 +677,7 @@ export function IOSSimulatorTabBody({
     };
     const activateCompatibilityViewer = () =>
       window.electronAPI.maker.iosSimulator.setViewerVisibility({
-        ...route,
+        ...viewerRoute,
         visible: true,
         preferredEncoding: 'jpeg',
       });
@@ -759,7 +760,7 @@ export function IOSSimulatorTabBody({
           pollTimer = null;
           void window.electronAPI.maker.iosSimulator
             .setViewerVisibility({
-              ...route,
+              ...viewerRoute,
               visible: true,
               preferredEncoding: 'jpeg',
               fallbackReason: 'native-decoder-fallback',
@@ -783,7 +784,7 @@ export function IOSSimulatorTabBody({
         ) {
           nextRecoveryAt = performance.now() + 3_000;
           const recovered = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
-            ...route,
+            ...viewerRoute,
             visible: true,
             preferredEncoding,
             ...(nativeDecoderFallback
@@ -803,7 +804,7 @@ export function IOSSimulatorTabBody({
         ) {
           nextRecoveryAt = performance.now() + 3_000;
           const recovered = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
-            ...route,
+            ...viewerRoute,
             visible: true,
             preferredEncoding,
             ...(nativeDecoderFallback
@@ -850,7 +851,7 @@ export function IOSSimulatorTabBody({
             ? await attemptNativeRecovery().catch(() => null)
             : await window.electronAPI.maker.iosSimulator
                 .setViewerVisibility({
-                  ...route,
+                  ...viewerRoute,
                   visible: true,
                   preferredEncoding: 'h264',
                 })
@@ -859,7 +860,7 @@ export function IOSSimulatorTabBody({
           result = nativeResult?.ok ? nativeResult : await activateCompatibilityViewer();
         } else {
           result = await window.electronAPI.maker.iosSimulator.setViewerVisibility({
-            ...route,
+            ...viewerRoute,
             visible: viewerVisible,
             preferredEncoding,
           });
@@ -880,7 +881,7 @@ export function IOSSimulatorTabBody({
       document.removeEventListener('visibilitychange', recoverNativeOnForeground);
       if (pollTimer !== null) window.clearTimeout(pollTimer);
       void window.electronAPI.maker.iosSimulator
-        .setViewerVisibility({ ...route, visible: false })
+        .setViewerVisibility({ ...viewerRoute, visible: false })
         .catch(() => undefined);
     };
   }, [

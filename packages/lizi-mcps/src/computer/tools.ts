@@ -20,18 +20,6 @@ const SNAPSHOT_ID_ARG = z
     'snapshot_id returned by the get_window_state call this element_index comes from. Recommended whenever element_index is used: if the window has been observed again since, the action is rejected with STALE_SNAPSHOT so you can re-observe instead of acting on the wrong element.',
   );
 
-/**
- * Explicit escape hatch for user-requested automation of Apple's standalone
- * Xcode/Simulator UI. It is consumed by the MCP routing guard and never sent
- * to cua-driver.
- */
-const EXTERNAL_IOS_WORKFLOW_ARG = z
-  .boolean()
-  .optional()
-  .describe(
-    'Set true only when the user explicitly requests an external Xcode/Simulator desktop workflow instead of Cindy\'s embedded iOS simulator.',
-  );
-
 export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
   {
     name: 'status',
@@ -58,7 +46,7 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
   {
     name: 'launch_app',
     description:
-      'Launch or locate a desktop application without stealing focus. Prefer this over shell open/Start-Process for GUI apps. For iOS work, use cindy_ios_simulator for Cindy\'s embedded viewer by default; do not launch macOS Simulator.app here unless the user explicitly requests an external system window and you set use_external_simulator=true. If an explicitly requested external Simulator is not discoverable here, use list_windows with {"process_name":"Simulator"}.',
+      'Launch or locate a desktop application without stealing focus. Prefer this over shell open/Start-Process for GUI apps. For iOS work, use cindy_ios_simulator for Cindy\'s embedded viewer; launching Xcode or macOS Simulator.app is unavailable until Cindy can issue an explicit host authorization. Use list_windows with {"process_name":"Simulator"} for read-only external Simulator window discovery.',
     inputShape: {
       name: z.string().optional(),
       bundle_id: z.string().optional(),
@@ -67,11 +55,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       webkit_inspector_port: z.number().int().optional(),
       creates_new_application_instance: z.boolean().optional(),
       additional_arguments: z.array(z.string()).optional(),
-      use_external_simulator: z
-        .boolean()
-        .optional()
-        .describe('Required only for an explicit user request to open macOS Simulator.app instead of Cindy\'s embedded simulator.'),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -124,7 +107,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       debug_image_out: z.string().optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -139,7 +121,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       y: z.number().optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -155,7 +136,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       modifier: z.array(z.string()).optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -174,7 +154,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       modifier: z.array(z.string()).optional(),
       from_zoom: z.boolean().optional(),
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -189,7 +168,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       delay_ms: z.number().int().min(0).max(200).optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -203,7 +181,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       value: z.string(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -217,7 +194,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       window_id: z.number().int().nonnegative().optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -228,7 +204,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       keys: z.array(z.string()).min(2),
       window_id: z.number().int().nonnegative().optional(),
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {
@@ -243,7 +218,6 @@ export const COMPUTER_TOOLS: readonly ComputerToolDef[] = [
       by: z.enum(['line', 'page']).optional(),
       snapshot_id: SNAPSHOT_ID_ARG,
       session: z.string().optional(),
-      use_external_ios_workflow: EXTERNAL_IOS_WORKFLOW_ARG,
     },
   },
   {

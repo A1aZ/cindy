@@ -5,12 +5,14 @@ import { describe, expect, it } from "vitest";
 import { createWdaBuildPlan, createWdaChildEnvironment } from "./build-plan.js";
 
 const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
+const CHECKOUT_PATH = path.resolve("/tmp/wda");
+const DERIVED_DATA_PATH = path.resolve("/tmp/wda-derived");
 
 describe("createWdaBuildPlan", () => {
   it("builds exact argv plans for a pinned simulator destination", () => {
     const plan = createWdaBuildPlan({
-      checkoutPath: "/tmp/wda",
-      derivedDataPath: "/tmp/wda-derived",
+      checkoutPath: CHECKOUT_PATH,
+      derivedDataPath: DERIVED_DATA_PATH,
       simulatorUdid: UDID.toLowerCase(),
       architecture: "arm64",
       controlPort: 18_100,
@@ -18,11 +20,11 @@ describe("createWdaBuildPlan", () => {
     });
 
     expect(plan.projectPath).toBe(
-      path.join("/tmp/wda", "WebDriverAgent.xcodeproj"),
+      path.join(CHECKOUT_PATH, "WebDriverAgent.xcodeproj"),
     );
     expect(plan.build).toMatchObject({
       command: "/usr/bin/xcodebuild",
-      cwd: "/tmp/wda",
+      cwd: CHECKOUT_PATH,
     });
     expect(plan.build.args).toContain(
       `platform=iOS Simulator,id=${UDID},arch=arm64`,
@@ -68,15 +70,15 @@ describe("createWdaBuildPlan", () => {
     ).toThrow("checkoutPath must be an absolute path");
     expect(() =>
       createWdaBuildPlan({
-        checkoutPath: "/tmp/wda",
-        derivedDataPath: "/tmp/derived",
+        checkoutPath: CHECKOUT_PATH,
+        derivedDataPath: path.resolve("/tmp/derived"),
         simulatorUdid: "not-a-udid",
       }),
     ).toThrow("simulatorUdid must be an exact simulator UUID");
     expect(() =>
       createWdaBuildPlan({
-        checkoutPath: "/tmp/wda",
-        derivedDataPath: "/tmp/derived",
+        checkoutPath: CHECKOUT_PATH,
+        derivedDataPath: path.resolve("/tmp/derived"),
         simulatorUdid: UDID,
         controlPort: 8100,
         mjpegPort: 8100,

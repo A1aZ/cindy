@@ -1,10 +1,13 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { IOSSimulatorOwnershipRegistryFile } from "./ownership-registry-file.js";
+import {
+  IOSSimulatorOwnershipRegistryFile,
+  type IOSSimulatorRegistryWriterLeaseFactory,
+} from "./ownership-registry-file.js";
 import { IOSSimulatorOwnershipStore } from "./ownership-store.js";
 import type { IOSSimulatorDevice } from "./types.js";
 
@@ -21,13 +24,33 @@ const DEVICE: IOSSimulatorDevice = {
   lastBootedAt: null,
 };
 
+function createWriterLeaseFactory(): IOSSimulatorRegistryWriterLeaseFactory {
+  const heldPaths = new Set<string>();
+  return (lockPath) => {
+    if (heldPaths.has(lockPath)) return null;
+    heldPaths.add(lockPath);
+    let held = true;
+    return {
+      isHeld: () => held,
+      release: () => {
+        if (!held) return;
+        held = false;
+        heldPaths.delete(lockPath);
+      },
+    };
+  };
+}
+
 describe("IOSSimulatorOwnershipRegistryFile", () => {
   it("round-trips a bounded ownership snapshot atomically", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
     try {
+      const acquireWriterLease = createWriterLeaseFactory();
       const registry = new IOSSimulatorOwnershipRegistryFile(
         path.join(root, "registry.json"),
+        { acquireWriterLease },
       );
+      expect(registry.acquireWriterSync()).toBe(true);
       let snapshot: ReturnType<IOSSimulatorOwnershipStore["listAll"]> = [];
       const store = new IOSSimulatorOwnershipStore({
         createId: (() => {
@@ -62,11 +85,12 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
     try {
       const filePath = path.join(root, "registry.json");
-      const registry = new IOSSimulatorOwnershipRegistryFile(filePath);
+      const registry = new IOSSimulatorOwnershipRegistryFile(filePath, {
+        acquireWriterLease: createWriterLeaseFactory(),
+      });
+      expect(registry.acquireWriterSync()).toBe(true);
       await registry.save([]);
-      await (
-        await import("node:fs/promises")
-      ).writeFile(
+      await writeFile(
         filePath,
         JSON.stringify({
           version: 999,
@@ -90,4 +114,81 @@ describe("IOSSimulatorOwnershipRegistryFile", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("admits only one profile writer and rejects loser reads and writes", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
+    try {
+      const filePath = path.join(root, "registry.json");
+      const acquireWriterLease = createWriterLeaseFactory();
+      const first = new IOSSimulatorOwnershipRegistryFile(filePath, {
+        acquireWriterLease,
+      });
+      const second = new IOSSimulatorOwnershipRegistryFile(filePath, {
+        acquireWriterLease,
+      });
+
+      expect(first.acquireWriterSync()).toBe(true);
+      expect(second.acquireWriterSync()).toBe(false);
+      expect(() => second.loadSync()).toThrowError(
+        expect.objectContaining({ code: "DEVICE_BUSY" }),
+      );
+      expect(() => second.saveSync([])).toThrowError(
+        expect.objectContaining({ code: "DEVICE_BUSY" }),
+      );
+
+      first.releaseWriterSync();
+      expect(second.acquireWriterSync()).toBe(true);
+      expect(second.isWriter).toBe(true);
+      second.releaseWriterSync();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("releases a writer lease without letting an old owner affect its replacement", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
+    try {
+      const filePath = path.join(root, "registry.json");
+      const acquireWriterLease = createWriterLeaseFactory();
+      const first = new IOSSimulatorOwnershipRegistryFile(filePath, {
+        acquireWriterLease,
+      });
+      expect(first.acquireWriterSync()).toBe(true);
+
+      const replacement = new IOSSimulatorOwnershipRegistryFile(filePath, {
+        acquireWriterLease,
+      });
+      expect(replacement.acquireWriterSync()).toBe(false);
+      first.releaseWriterSync();
+      expect(replacement.acquireWriterSync()).toBe(true);
+      expect(replacement.isWriter).toBe(true);
+
+      // A delayed release from the old owner must not remove the replacement.
+      first.releaseWriterSync();
+      expect(replacement.isWriter).toBe(true);
+      replacement.releaseWriterSync();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  const itMac = process.platform === "darwin" ? it : it.skip;
+  itMac(
+    "holds the production advisory lock until the parent descriptor closes",
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-registry-"));
+      try {
+        const filePath = path.join(root, "registry.json");
+        const first = new IOSSimulatorOwnershipRegistryFile(filePath);
+        const second = new IOSSimulatorOwnershipRegistryFile(filePath);
+        expect(first.acquireWriterSync()).toBe(true);
+        expect(second.acquireWriterSync()).toBe(false);
+        first.releaseWriterSync();
+        expect(second.acquireWriterSync()).toBe(true);
+        second.releaseWriterSync();
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

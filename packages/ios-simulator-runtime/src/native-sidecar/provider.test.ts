@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import {
   createIOSSimulatorNativeDevelopmentAdmissionPolicy,
   evaluateIOSSimulatorNativeCapabilityAdmission,
@@ -46,7 +48,7 @@ const CAPABILITIES = Object.freeze({
 function bundledArtifact(
   patch: Partial<IOSSimulatorSidecarArtifactDescriptor> = {},
 ): IOSSimulatorSidecarArtifactDescriptor {
-  return {
+  const descriptor: IOSSimulatorSidecarArtifactDescriptor = {
     artifactId: "cindy.ios-simulator-sidecar",
     source: "bundled",
     version: "1.0.0",
@@ -55,6 +57,10 @@ function bundledArtifact(
     trust: "development",
     sha256: null,
     ...patch,
+  };
+  return {
+    ...descriptor,
+    executablePath: path.normalize(descriptor.executablePath),
   };
 }
 

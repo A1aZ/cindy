@@ -15,6 +15,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 const UDID = "A1B2C3D4-1111-2222-3333-444455556666";
+const DARWIN_TEMPORARY_ROOT = "/private/tmp";
+const DARWIN_TEMPORARY_DIRECTORY = `${DARWIN_TEMPORARY_ROOT}/cindy-ios-sandbox-test`;
 const temporaryDirectories: string[] = [];
 
 async function temporaryDirectory(): Promise<string> {
@@ -35,11 +37,11 @@ afterEach(async () => {
 
 describe("IOSSimulator native sidecar sandbox", () => {
   it("builds a deny-by-default, stdio-only profile without network or broad user-data access", async () => {
-    const temp = await temporaryDirectory();
+    const temp = DARWIN_TEMPORARY_DIRECTORY;
     const policy = createIOSSimulatorNativeSidecarSandboxPolicy({
       platform: "darwin",
       homeDirectory: "/Users/example",
-      temporaryRoot: os.tmpdir(),
+      temporaryRoot: DARWIN_TEMPORARY_ROOT,
       developerDirectory: "/Applications/Xcode.app/Contents/Developer",
     });
     const profile = createIOSSimulatorNativeSidecarSandboxProfile({
@@ -59,7 +61,7 @@ describe("IOSSimulator native sidecar sandbox", () => {
     );
     expect(profile).toContain('(iokit-user-client-class "AGXDeviceUserClient"');
     expect(profile).toContain(
-      `(subpath ${JSON.stringify(path.join("/Users/example", "Library", "Developer", "CoreSimulator"))})`,
+      `(subpath ${JSON.stringify(path.posix.join("/Users/example", "Library", "Developer", "CoreSimulator"))})`,
     );
     expect(profile).not.toContain("(allow network");
     expect(profile).not.toContain("com.apple.bsd.dirhelper");
@@ -74,7 +76,7 @@ describe("IOSSimulator native sidecar sandbox", () => {
   });
 
   it("rejects non-macOS hosts, ambiguous device identities, and temp-directory escapes", async () => {
-    const temp = await temporaryDirectory();
+    const temp = DARWIN_TEMPORARY_DIRECTORY;
     const policy = createIOSSimulatorNativeSidecarSandboxPolicy({
       platform: "linux",
       homeDirectory: "/home/example",
@@ -94,7 +96,12 @@ describe("IOSSimulator native sidecar sandbox", () => {
       }),
     );
 
-    const macPolicy = { ...policy, platform: "darwin" as const };
+    const macPolicy = createIOSSimulatorNativeSidecarSandboxPolicy({
+      platform: "darwin",
+      homeDirectory: "/Users/example",
+      temporaryRoot: DARWIN_TEMPORARY_ROOT,
+      developerDirectory: "/Applications/Xcode.app/Contents/Developer",
+    });
     expect(() =>
       createIOSSimulatorNativeSidecarSandboxProfile({
         policy: macPolicy,
@@ -118,12 +125,12 @@ describe("IOSSimulator native sidecar sandbox", () => {
   });
 
   it("passes only the private temp directory and selected developer directory to the sandboxed process", async () => {
-    const temp = await temporaryDirectory();
+    const temp = DARWIN_TEMPORARY_DIRECTORY;
     const plan = createIOSSimulatorNativeSidecarSandboxLaunchPlan({
       policy: createIOSSimulatorNativeSidecarSandboxPolicy({
         platform: "darwin",
         homeDirectory: "/Users/example",
-        temporaryRoot: os.tmpdir(),
+        temporaryRoot: DARWIN_TEMPORARY_ROOT,
         developerDirectory: "/Applications/Xcode.app/Contents/Developer",
       }),
       binaryPath: "/opt/cindy/ios-simulator-sidecar",
@@ -148,8 +155,8 @@ describe("IOSSimulator native sidecar sandbox", () => {
       LANG: "en_US.UTF-8",
       HOME: "/Users/example",
       DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
-      TMPDIR: `${temp}${path.sep}`,
-      CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.join(temp, "metal-cache"),
+      TMPDIR: `${temp}${path.posix.sep}`,
+      CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.posix.join(temp, "metal-cache"),
     });
     expect(plan.diagnostics).toMatchObject({
       required: true,

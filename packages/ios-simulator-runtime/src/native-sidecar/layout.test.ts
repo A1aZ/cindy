@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -13,7 +15,13 @@ describe("native sidecar artifact layout", () => {
         "arm64",
       ),
     ).toBe(
-      "/workspace/apps/desktop/resources/ios-simulator/native/arm64/ios-simulator-sidecar",
+      path.join(
+        "/workspace/apps/desktop/resources",
+        "ios-simulator",
+        "native",
+        "arm64",
+        "ios-simulator-sidecar",
+      ),
     );
   });
 
@@ -23,7 +31,13 @@ describe("native sidecar artifact layout", () => {
         "/Applications/Cindy.app/Contents/Resources",
       ),
     ).toBe(
-      "/Applications/Cindy.app/Contents/Helpers/Cindy iOS Simulator Helper.app/Contents/MacOS/ios-simulator-sidecar",
+      path.join(
+        "/Applications/Cindy.app/Contents/Helpers",
+        "Cindy iOS Simulator Helper.app",
+        "Contents",
+        "MacOS",
+        "ios-simulator-sidecar",
+      ),
     );
   });
 });

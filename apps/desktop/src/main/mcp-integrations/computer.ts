@@ -354,8 +354,6 @@ export interface ComputerDriverPermissionGrantResult {
 
 export interface ComputerMcpDepsOptions {
   isComputerUseEnabled?: (context?: ComputerMcpCallContext) => boolean;
-  /** Host-issued grant; model-supplied MCP flags are never sufficient. */
-  isExternalIosWorkflowAllowed?: (context?: ComputerMcpCallContext) => boolean;
   /** Optional provider gate before the first status/tool request. */
   prepareRuntimeBeforeUse?: () => Promise<void>;
 }
@@ -3479,7 +3477,6 @@ export function getComputerMcpDeps(options: ComputerMcpDepsOptions = {}): Comput
         executable: processInfo.executable,
       };
     },
-    isExternalIosWorkflowAllowed: options.isExternalIosWorkflowAllowed,
     callTool: async (name, args, context) => {
       if (options.isComputerUseEnabled && !options.isComputerUseEnabled(context)) {
         throw new ComputerDriverError('Computer Use is disabled in Settings.');

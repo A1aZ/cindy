@@ -105,6 +105,40 @@ export class IOSSimulatorInstanceActor {
     });
   }
 
+  /** Serialize a user reattachment with any in-flight grace-period cleanup. */
+  attachSerialized(
+    input: IOSSimulatorAttachInput,
+  ): Promise<IOSSimulatorInstance> {
+    const normalizedUdid = input.device.udid.trim().toUpperCase();
+    const existing = this.#store
+      .listAll()
+      .find(
+        (instance) => instance.simulatorUdid.toUpperCase() === normalizedUdid,
+      );
+    return this.#serialize(
+      existing?.instanceId ?? `attach:${normalizedUdid}`,
+      async () => {
+        if (!existing) {
+          return this.attach(input);
+        }
+        const currentDevice = await this.#lifecycle.findExact(normalizedUdid);
+        if (currentDevice === null) {
+          throw new IOSSimulatorInstanceError(
+            "SIMULATOR_NOT_FOUND",
+            "The selected iOS Simulator device no longer exists.",
+            true,
+          );
+        }
+        return this.attach({
+          ...input,
+          // Some test adapters omit the optional lookup result. Production
+          // lifecycle adapters return either an exact device or null.
+          device: currentDevice ?? input.device,
+        });
+      },
+    );
+  }
+
   create(
     input: Omit<IOSSimulatorAttachInput, "device"> & {
       name: string;
@@ -581,45 +615,70 @@ export class IOSSimulatorInstanceActor {
 
   async detach(
     route: IOSSimulatorMutationRoute,
+    onResourceReleased: (
+      instance: IOSSimulatorInstance,
+    ) => void | Promise<void> = () => undefined,
   ): Promise<IOSSimulatorInstance> {
-    const instance = this.#store.assertMutationRoute(route);
-    this.#cancelGrace.get(instance.instanceId)?.();
-    this.#cancelGrace.delete(instance.instanceId);
-    if (instance.bootProvenance !== "agent-booted") {
-      return this.#store.release(instance.instanceId, instance.sessionId);
-    }
+    return this.#serialize(route.instanceId, async () => {
+      const instance = this.#store.assertMutationRoute(route);
+      this.#cancelGrace.get(instance.instanceId)?.();
+      this.#cancelGrace.delete(instance.instanceId);
+      if (instance.bootProvenance !== "agent-booted") {
+        const released = this.#store.release(
+          instance.instanceId,
+          instance.sessionId,
+        );
+        await onResourceReleased(released);
+        return released;
+      }
 
-    const graceExpiresAt = new Date(
-      this.#clock.now() + this.#detachGraceMs,
-    ).toISOString();
-    const detached = this.#store.update(
-      instance.instanceId,
-      instance.sessionId,
-      {
-        viewerState: "detached",
-        graceExpiresAt,
-      },
-    );
-    const expectedGeneration = detached.generation;
-    const cancel = this.#scheduler.schedule(this.#detachGraceMs, async () => {
-      const current = this.#store.get(detached.instanceId);
-      if (
-        !current ||
-        current.viewerState !== "detached" ||
-        current.generation !== expectedGeneration ||
-        current.graceExpiresAt !== graceExpiresAt
-      ) {
-        return;
-      }
-      try {
-        await this.#lifecycle.shutdownExact(current.simulatorUdid);
-        this.#store.release(current.instanceId, current.sessionId);
-      } finally {
-        this.#cancelGrace.delete(current.instanceId);
-      }
+      const graceExpiresAt = new Date(
+        this.#clock.now() + this.#detachGraceMs,
+      ).toISOString();
+      const detached = this.#store.update(
+        instance.instanceId,
+        instance.sessionId,
+        {
+          viewerState: "detached",
+          graceExpiresAt,
+        },
+      );
+      const expectedGeneration = detached.generation;
+      const cancel = this.#scheduler.schedule(this.#detachGraceMs, async () => {
+        try {
+          await this.#serialize(detached.instanceId, async () => {
+            const current = this.#store.get(detached.instanceId);
+            if (
+              !current ||
+              current.viewerState !== "detached" ||
+              current.generation !== expectedGeneration ||
+              current.graceExpiresAt !== graceExpiresAt
+            ) {
+              return;
+            }
+            await this.#lifecycle.shutdownExact(current.simulatorUdid);
+            const afterShutdown = this.#store.get(detached.instanceId);
+            if (
+              !afterShutdown ||
+              afterShutdown.viewerState !== "detached" ||
+              afterShutdown.generation !== expectedGeneration ||
+              afterShutdown.graceExpiresAt !== graceExpiresAt
+            ) {
+              return;
+            }
+            const released = this.#store.release(
+              afterShutdown.instanceId,
+              afterShutdown.sessionId,
+            );
+            await onResourceReleased(released);
+          });
+        } finally {
+          this.#cancelGrace.delete(detached.instanceId);
+        }
+      });
+      this.#cancelGrace.set(detached.instanceId, cancel);
+      return detached;
     });
-    this.#cancelGrace.set(detached.instanceId, cancel);
-    return detached;
   }
 
   async delete(

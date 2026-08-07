@@ -1,10 +1,44 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { MAKER_INVOKE } from '../channels';
-import { registerIOSSimulatorHandlers } from '../iosSimulatorHandlers';
+import {
+  registerIOSSimulatorHandlers,
+  type IOSSimulatorHandlerDeps,
+} from '../iosSimulatorHandlers';
 import { IpcHarness } from './helpers/ipcHarness';
 
 describe('iOS Simulator IPC handlers', () => {
+  function registerTrusted(harness: IpcHarness, deps: Partial<IOSSimulatorHandlerDeps> = {}): void {
+    registerIOSSimulatorHandlers(harness, {
+      assertTrustedSender: () => undefined,
+      ...deps,
+    });
+  }
+
+  it.each([
+    MAKER_INVOKE.IOS_SIMULATOR_STATUS,
+    MAKER_INVOKE.IOS_SIMULATOR_CALL,
+    MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL,
+    MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL,
+    MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY,
+    MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME,
+    MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE,
+    MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH,
+  ])('checks the trusted sender before parsing %s', async (channel) => {
+    const harness = new IpcHarness();
+    const getStatus = vi.fn();
+    const assertTrustedSender = vi.fn(() => {
+      throw Object.assign(new Error('untrusted sender'), { code: 'PERMISSION_DENIED' });
+    });
+    registerIOSSimulatorHandlers(harness, { assertTrustedSender, getStatus });
+
+    await expect(harness.invoke(channel, undefined)).rejects.toMatchObject({
+      code: 'PERMISSION_DENIED',
+    });
+    expect(assertTrustedSender).toHaveBeenCalledOnce();
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
   it('passes a validated session id to the host', async () => {
     const harness = new IpcHarness();
     const getStatus = vi.fn(async (sessionId: string) => ({
@@ -13,7 +47,7 @@ describe('iOS Simulator IPC handlers', () => {
       errorCode: 'UNSUPPORTED_SESSION_KIND' as const,
       message: 'Remote session',
     }));
-    registerIOSSimulatorHandlers(harness, { getStatus });
+    registerTrusted(harness, { getStatus });
 
     await expect(
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
@@ -25,7 +59,7 @@ describe('iOS Simulator IPC handlers', () => {
 
   it('rejects missing session ids', async () => {
     const harness = new IpcHarness();
-    registerIOSSimulatorHandlers(harness, { getStatus: vi.fn() });
+    registerTrusted(harness, { getStatus: vi.fn() });
 
     await expect(harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_STATUS, {})).rejects.toMatchObject({
       code: 'INVALID_PARAMS',
@@ -35,29 +69,32 @@ describe('iOS Simulator IPC handlers', () => {
   it('validates and routes user lifecycle calls through the shared host', async () => {
     const harness = new IpcHarness();
     const callTool = vi.fn(async () => ({ ok: true as const, data: { instances: [] } }));
-    registerIOSSimulatorHandlers(harness, { callTool });
+    registerTrusted(harness, { callTool });
 
     await expect(
       harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_CALL, {
         sessionId: 'session-a',
-        name: 'list_instances',
+        name: 'attach_device',
         args: {},
       }),
     ).resolves.toMatchObject({ ok: true });
-    expect(callTool).toHaveBeenCalledWith('list_instances', {}, 'session-a');
-    await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_CALL, {
-        sessionId: 'session-a',
-        name: 'delete_everything',
-        args: {},
-      }),
-    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(callTool).toHaveBeenCalledWith('attach_device', {}, 'session-a');
+    for (const name of ['build_app', 'open_url', 'push_notification', 'delete_everything']) {
+      await expect(
+        harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+          sessionId: 'session-a',
+          name,
+          args: {},
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    }
+    expect(callTool).toHaveBeenCalledTimes(1);
   });
 
   it('allows only explicit agent-control grant decisions', async () => {
     const harness = new IpcHarness();
     const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
-    registerIOSSimulatorHandlers(harness, { setAgentControlGrant });
+    registerTrusted(harness, { setAgentControlGrant });
 
     await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
       sessionId: 'session-a',
@@ -77,7 +114,7 @@ describe('iOS Simulator IPC handlers', () => {
   it('validates and routes explicit Agent mutation pause state', async () => {
     const harness = new IpcHarness();
     const setAgentMutationPaused = vi.fn(async () => ({ ok: true as const, data: {} }));
-    registerIOSSimulatorHandlers(harness, { setAgentMutationPaused });
+    registerTrusted(harness, { setAgentMutationPaused });
     const route = {
       sessionId: 'session-a',
       instanceId: 'instance-a',
@@ -106,7 +143,7 @@ describe('iOS Simulator IPC handlers', () => {
     const harness = new IpcHarness();
     const setViewerVisibility = vi.fn(async () => ({ ok: true as const, data: {} }));
     const getLatestFrame = vi.fn(async () => ({ ok: true as const, data: { stream: null } }));
-    registerIOSSimulatorHandlers(harness, { setViewerVisibility, getLatestFrame });
+    registerTrusted(harness, { setViewerVisibility, getLatestFrame });
     const route = {
       sessionId: 'session-a',
       instanceId: 'instance-a',
@@ -114,16 +151,17 @@ describe('iOS Simulator IPC handlers', () => {
       leaseId: 'lease-a',
     };
 
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
       ...route,
       visible: true,
+      viewerToken: 'viewer-a',
     });
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
       ...route,
       visible: true,
       preferredEncoding: 'h264',
     });
-    await harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
       ...route,
       visible: true,
       preferredEncoding: 'jpeg',
@@ -135,12 +173,19 @@ describe('iOS Simulator IPC handlers', () => {
       'session-a',
       { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
       true,
+      undefined,
+      undefined,
+      17,
+      'viewer-a',
     );
     expect(setViewerVisibility).toHaveBeenCalledWith(
       'session-a',
       { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
       true,
       'h264',
+      undefined,
+      17,
+      undefined,
     );
     expect(setViewerVisibility).toHaveBeenCalledWith(
       'session-a',
@@ -148,6 +193,8 @@ describe('iOS Simulator IPC handlers', () => {
       true,
       'jpeg',
       'native-decoder-fallback',
+      17,
+      undefined,
     );
     expect(getLatestFrame).toHaveBeenCalledWith('session-a', {
       instanceId: 'instance-a',
@@ -161,24 +208,31 @@ describe('iOS Simulator IPC handlers', () => {
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
         ...route,
         visible: 'yes',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
         ...route,
         visible: true,
         preferredEncoding: 'hevc',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
-      harness.invoke(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
         ...route,
         visible: true,
         preferredEncoding: 'jpeg',
         fallbackReason: 'renderer-error',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, {
+        ...route,
+        visible: true,
+        viewerToken: '',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });
@@ -186,7 +240,7 @@ describe('iOS Simulator IPC handlers', () => {
   it('validates and routes bounded stream profiles', async () => {
     const harness = new IpcHarness();
     const setViewerStreamProfile = vi.fn(async () => ({ ok: true as const, data: {} }));
-    registerIOSSimulatorHandlers(harness, { setViewerStreamProfile });
+    registerTrusted(harness, { setViewerStreamProfile });
     const route = {
       sessionId: 'session-a',
       instanceId: 'instance-a',
@@ -222,7 +276,7 @@ describe('iOS Simulator IPC handlers', () => {
   it('validates and routes host-owned live touch samples', async () => {
     const harness = new IpcHarness();
     const updateViewerTouch = vi.fn(async () => ({ ok: true as const, data: {} }));
-    registerIOSSimulatorHandlers(harness, { updateViewerTouch });
+    registerTrusted(harness, { updateViewerTouch });
     const route = {
       sessionId: 'session-a',
       instanceId: 'instance-a',

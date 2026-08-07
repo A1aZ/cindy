@@ -83,6 +83,7 @@ import type {
 } from '../../shared/ghost.js';
 import { createLogger } from '../logger.js';
 import { desktopSessionStorage } from '../maker-host/session-storage.js';
+import { isTrustedAppRendererWindow } from '../security/trustedAppRenderer.js';
 import {
   IOSSimulatorPackagedSidecarArtifactResolver,
   verifyIOSSimulatorSidecarDigest,
@@ -174,6 +175,8 @@ export interface IOSSimulatorHostOptions {
   requestViewerFocus?: (sessionId: string, instanceId: string) => void;
   /** Main → renderer route diagnostics seam; injected in tests, broadcast by default. */
   pushRouteStatus?: (status: IOSSimulatorPublicRouteStatus) => void;
+  /** Main → exact owning viewer frame seam; injected in tests, fail-closed by default. */
+  pushH264Frame?: (viewerWebContentsId: number, frame: IOSSimulatorLatestH264Frame) => void;
 }
 
 export interface IOSSimulatorHost {
@@ -205,6 +208,8 @@ export interface IOSSimulatorHost {
     visible: boolean,
     preferredEncoding?: 'jpeg' | 'h264',
     fallbackReason?: 'native-decoder-fallback',
+    viewerWebContentsId?: number,
+    viewerToken?: string,
   ): Promise<IOSSimulatorHostResult>;
   getLatestFrame(
     sessionId: string,
@@ -241,29 +246,41 @@ function sessionError(
 }
 
 let defaultRegistryFlush: (() => Promise<void>) | null = null;
+let defaultRegistryRelease: (() => void) | null = null;
 
 function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
   const registry = new IOSSimulatorOwnershipRegistryFile(
     path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
   );
-  let writeTail = Promise.resolve();
-  const store = new IOSSimulatorOwnershipStore({
-    maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
-    initialInstances: registry.loadSync(),
-    onChange: (instances) => {
-      writeTail = writeTail
-        .catch(() => undefined)
-        .then(() => registry.save(instances))
-        .catch((error) => {
-          logger.warn('iOS Simulator ownership registry persistence failed', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        });
-    },
-  });
-  defaultRegistryFlush = () => writeTail;
+  const ownsWriterLease = registry.acquireWriterSync();
+  try {
+    const store = new IOSSimulatorOwnershipStore({
+      maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
+      initialInstances: ownsWriterLease ? registry.loadSync() : [],
+      assertMutationAllowed: () => registry.assertWriter(),
+      // Persist in the same mutation transaction. If the writer lease is lost or
+      // the atomic write fails, OwnershipStore rolls its in-memory mutation back.
+      onChange: (instances) => registry.saveSync(instances),
+    });
+    defaultRegistryFlush = async () => {
+      if (registry.isWriter) registry.saveSync(store.listAll());
+    };
+    defaultRegistryRelease = () => registry.releaseWriterSync();
+    return new IOSSimulatorInstanceActor({
+      store,
+      lifecycle,
+    });
+  } catch (error) {
+    registry.releaseWriterSync();
+    throw error;
+  }
+}
+
+function createInMemoryActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
   return new IOSSimulatorInstanceActor({
-    store,
+    store: new IOSSimulatorOwnershipStore({
+      maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
+    }),
     lifecycle,
   });
 }
@@ -632,7 +649,9 @@ function safeHostError(
 export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): IOSSimulatorHost {
   const runtime = options.runtime ?? createIOSSimulatorRuntime();
   const lifecycle = options.lifecycle ?? createIOSSimulatorSimctlLifecycle();
-  const actor = options.actor ?? createDefaultActor(lifecycle);
+  // The exported factory is an isolated test/embedding seam. Only the module
+  // singleton below owns the profile-persisted registry and its writer lease.
+  const actor = options.actor ?? createInMemoryActor(lifecycle);
   const grantStore = options.grantStore ?? new IOSSimulatorDeviceGrantStore();
   /**
    * A successful agent-created/agent-attached binding gets a host-issued,
@@ -643,38 +662,44 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const agentControlLeases = new Map<string, string>();
   const screenMaps = new IOSSimulatorScreenMapStore();
   const framePump = options.framePump ?? new IOSSimulatorFramePump();
-  const viewerSessions = new Map<string, string>();
+  const viewerSessions = new Map<
+    string,
+    { sessionId: string; webContentsId: number | null; viewerToken: string | null }
+  >();
+  const pushH264Frame =
+    options.pushH264Frame ??
+    ((viewerWebContentsId: number, frame: IOSSimulatorLatestH264Frame) => {
+      const target = BrowserWindow.getAllWindows().find(
+        (candidate) => candidate.webContents.id === viewerWebContentsId,
+      );
+      if (!target || !isTrustedAppRendererWindow(target)) return;
+      const bytes = frame.bytes.slice().buffer as ArrayBuffer;
+      target.webContents.send('maker:ios-simulator:h264-frame', {
+        frame: {
+          ...frame,
+          bytes,
+        },
+      });
+    });
   const h264FramePump =
     options.h264FramePump ??
     new IOSSimulatorH264FramePump({
       onFrame: (frame: IOSSimulatorLatestH264Frame) => {
-        for (const window of BrowserWindow.getAllWindows()) {
-          if (window.isDestroyed()) continue;
-          try {
-            const bytes = frame.bytes.slice().buffer as ArrayBuffer;
-            window.webContents.send('maker:ios-simulator:h264-frame', {
-              frame: {
-                ...frame,
-                bytes,
-              },
-            });
-          } catch (error) {
-            logger.debug('iOS Simulator H.264 frame push skipped', {
-              error: error instanceof Error ? error.message : String(error),
-            });
+        const viewer = viewerSessions.get(frame.instanceId);
+        if (!viewer) return;
+        try {
+          const instance = actor.getOwned(viewer.sessionId, frame.instanceId);
+          if (instance.generation !== frame.generation) return;
+          if (viewer.webContentsId !== null) {
+            pushH264Frame(viewer.webContentsId, frame);
           }
-        }
-        const sessionId = viewerSessions.get(frame.instanceId);
-        if (sessionId) {
-          try {
-            const instance = actor.getOwned(sessionId, frame.instanceId);
-            if (instance.generation === frame.generation) {
-              publishRouteStatusForInstance(instance);
-            }
-          } catch {
-            // The instance may have been detached while the encoded frame was
-            // already queued. The generation check above keeps this harmless.
-          }
+          publishRouteStatusForInstance(instance);
+        } catch (error) {
+          // The instance or exact viewer may have disappeared while this frame
+          // was queued. Never fall back to broadcasting encoded screen data.
+          logger.debug('iOS Simulator H.264 frame push skipped', {
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       },
     });
@@ -2497,8 +2522,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     preferredEncoding: 'jpeg' | 'h264',
     orientation: 'PORTRAIT' | 'LANDSCAPE' = 'PORTRAIT',
     fallbackReason: IOSSimulatorPublicRouteReasonCode = null,
+    viewerWebContentsId?: number,
+    viewerToken?: string,
   ): IOSSimulatorFramePumpSnapshot {
-    viewerSessions.set(instance.instanceId, instance.sessionId);
+    const previousViewer = viewerSessions.get(instance.instanceId);
+    viewerSessions.set(instance.instanceId, {
+      sessionId: instance.sessionId,
+      webContentsId: viewerWebContentsId ?? previousViewer?.webContentsId ?? null,
+      viewerToken: viewerToken ?? previousViewer?.viewerToken ?? null,
+    });
     viewerPreferredEncodings.set(instance.instanceId, fallbackReason ? 'h264' : preferredEncoding);
     const nativeDriver = preferredEncoding === 'h264' ? nativeH264Driver(running) : null;
     if (nativeDriver) {
@@ -2582,6 +2614,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       visible,
       preferredEncoding = 'jpeg',
       fallbackReason,
+      viewerWebContentsId,
+      viewerToken,
     ) {
       try {
         assertHostActive();
@@ -2593,6 +2627,23 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           ? actor.heartbeat(mutationRoute)
           : assertViewerDeactivationRoute(mutationRoute);
         if (!visible) {
+          const activeViewer = viewerSessions.get(instance.instanceId);
+          if (
+            activeViewer &&
+            (activeViewer.sessionId !== resolved.sessionId ||
+              (activeViewer.webContentsId !== null &&
+                activeViewer.webContentsId !== viewerWebContentsId) ||
+              (activeViewer.viewerToken !== null && activeViewer.viewerToken !== viewerToken))
+          ) {
+            return {
+              ok: true,
+              data: {
+                stream: null,
+                ignored: true,
+                mutation: actor.mutationState(instance.instanceId),
+              },
+            };
+          }
           const stream = stopViewerMedia(instance);
           return {
             ok: true,
@@ -2702,6 +2753,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           preferredEncoding,
           viewport.orientation,
           fallbackReason ?? null,
+          viewerWebContentsId,
+          viewerToken,
         );
         return {
           ok: true,
@@ -3080,7 +3133,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           agentControlLeases.delete(route.instanceId);
           return {
             ok: true,
-            data: instanceData(await actor.detach(route)),
+            data: instanceData(
+              await actor.detach(route, () => resourceScheduler.markStopped(route.instanceId)),
+            ),
           };
         }
         if (name === 'get_screen_map') {
@@ -4460,7 +4515,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             );
           }
           const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
-          const instance = actor.attach({
+          const instance = await actor.attachSerialized({
             sessionId,
             worktreeRoot,
             sourceFingerprint: sourceFingerprint(worktreeRoot),
@@ -4548,7 +4603,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   };
 }
 
-const defaultIOSSimulatorHost = createIOSSimulatorHost();
+const defaultIOSSimulatorLifecycle = createIOSSimulatorSimctlLifecycle();
+const defaultIOSSimulatorHost = createIOSSimulatorHost({
+  lifecycle: defaultIOSSimulatorLifecycle,
+  actor: createDefaultActor(defaultIOSSimulatorLifecycle),
+});
 
 export function getIOSSimulatorSessionStatus(
   sessionId: string,
@@ -4583,8 +4642,19 @@ export function setIOSSimulatorViewerVisibility(
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
   visible: boolean,
   preferredEncoding?: 'jpeg' | 'h264',
+  fallbackReason?: 'native-decoder-fallback',
+  viewerWebContentsId?: number,
+  viewerToken?: string,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setViewerVisibility(sessionId, route, visible, preferredEncoding);
+  return defaultIOSSimulatorHost.setViewerVisibility(
+    sessionId,
+    route,
+    visible,
+    preferredEncoding,
+    fallbackReason,
+    viewerWebContentsId,
+    viewerToken,
+  );
 }
 
 export function setIOSSimulatorAgentMutationPaused(
@@ -4610,8 +4680,13 @@ export function reconcileIOSSimulatorOwnership(): Promise<void> {
   return defaultIOSSimulatorHost.reconcileOwnership();
 }
 
-export function disposeIOSSimulatorHost(): Promise<void> {
-  return defaultIOSSimulatorHost.dispose();
+export async function disposeIOSSimulatorHost(): Promise<void> {
+  try {
+    await defaultIOSSimulatorHost.dispose();
+    await defaultRegistryFlush?.();
+  } finally {
+    defaultRegistryRelease?.();
+  }
 }
 
 export function setIOSSimulatorViewerStreamProfile(

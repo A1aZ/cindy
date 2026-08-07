@@ -20,8 +20,19 @@ function textPayload(result: unknown): unknown {
   return JSON.parse(first.text);
 }
 
-async function makeHarness(deps: ComputerMcpDeps, options?: Parameters<typeof createComputerMcpServer>[1]) {
-  const server = createComputerMcpServer(deps, options);
+async function makeHarness(
+  deps: ComputerMcpDeps,
+  options?: Parameters<typeof createComputerMcpServer>[1],
+  testOptions: { injectDefaultProcessResolver?: boolean } = {},
+) {
+  const resolvedDeps =
+    testOptions.injectDefaultProcessResolver === false || deps.resolveProcessIdentity
+      ? deps
+      : {
+          ...deps,
+          resolveProcessIdentity: vi.fn(async (pid: number) => ({ pid, name: 'Code' })),
+        };
+  const server = createComputerMcpServer(resolvedDeps, options);
   const [clientTx, serverTx] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: 'computer-test-client', version: '0.0.0' });
   await Promise.all([server.connect(serverTx), client.connect(clientTx)]);
@@ -73,8 +84,10 @@ describe('createComputerMcpServer', () => {
       .toContain('Always include pid');
     expect(payload.tools.find((tool) => tool.name === 'launch_app')?.description)
       .toContain('{"process_name":"Simulator"}');
-    expect(payload.tools.find((tool) => tool.name === 'launch_app')?.description)
-      .toContain('use_external_simulator=true');
+    expect(payload.tools.find((tool) => tool.name === 'launch_app')?.inputSchema?.properties)
+      .not.toHaveProperty('use_external_simulator');
+    expect(payload.tools.find((tool) => tool.name === 'hotkey')?.inputSchema?.properties)
+      .not.toHaveProperty('use_external_ios_workflow');
     expect(payload.workflow).toContain('always for coordinates');
     expect(payload.workflow).toContain('{"capture_mode":"vision"}');
     await h.cleanup();
@@ -512,6 +525,33 @@ describe('createComputerMcpServer', () => {
     await h.cleanup();
   });
 
+  it.each(['/Applications/Xcode-beta.app', '/Applications/Xcode_26.app'])(
+    'routes renamed Xcode bundle %s to the embedded simulator workflow',
+    async (name) => {
+      const deps: ComputerMcpDeps = {
+        getStatus: vi.fn(),
+        callTool: vi.fn(),
+      };
+      const h = await makeHarness(deps);
+
+      const result = await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'launch_app',
+          args: { name },
+        },
+      });
+      expect(textPayload(result)).toMatchObject({
+        ok: false,
+        errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+        data: { blocked_target: 'Xcode' },
+      });
+      expect(result.isError).toBe(true);
+      expect(deps.callTool).not.toHaveBeenCalled();
+      await h.cleanup();
+    },
+  );
+
   it('blocks Xcode hotkeys using host-resolved PID provenance', async () => {
     const deps: ComputerMcpDeps = {
       getStatus: vi.fn(),
@@ -640,67 +680,44 @@ describe('createComputerMcpServer', () => {
     await h.cleanup();
   });
 
-  it('allows an explicitly requested external Xcode workflow and strips the routing flag', async () => {
+  it.each([
+    ['missing resolver', undefined],
+    ['resolver failure', vi.fn(async () => { throw new Error('process snapshot unavailable'); })],
+    ['missing process', vi.fn(async () => null)],
+    ['empty identity', vi.fn(async (pid: number) => ({ pid }))],
+    ['mismatched pid', vi.fn(async () => ({ pid: 999, name: 'Code' }))],
+  ])('fails closed for mutating actions with %s', async (_label, resolveProcessIdentity) => {
+    const callTool = vi.fn();
     const deps: ComputerMcpDeps = {
       getStatus: vi.fn(),
-      isExternalIosWorkflowAllowed: vi.fn(() => true),
-      resolveProcessIdentity: vi.fn(async (pid) => ({ pid, name: 'Xcode' })),
-      callTool: vi.fn(async () => ({ ok: true })),
+      ...(resolveProcessIdentity ? { resolveProcessIdentity } : {}),
+      callTool,
     };
-    const h = await makeHarness(deps, { sessionId: 'agent-session-1' });
-
-    const payload = textPayload(await h.client.callTool({
-      name: 'call_tool',
-      arguments: {
-        name: 'hotkey',
-        args: {
-          pid: 686,
-          window_id: 282,
-          keys: ['cmd', 'r'],
-          use_external_ios_workflow: true,
-        },
-      },
-    })) as { ok: boolean };
-
-    expect(payload.ok).toBe(true);
-    expect(deps.resolveProcessIdentity).not.toHaveBeenCalled();
-    expect(deps.callTool).toHaveBeenCalledWith('hotkey', {
-      pid: 686,
-      window_id: 282,
-      keys: ['cmd', 'r'],
-      session: 'agent-session-1',
-    }, { sessionId: 'agent-session-1' });
-    await h.cleanup();
-  });
-
-  it('allows an explicitly requested external Simulator.app and strips the routing flag', async () => {
-    const deps: ComputerMcpDeps = {
-      getStatus: vi.fn(),
-      isExternalIosWorkflowAllowed: vi.fn(() => true),
-      callTool: vi.fn(async () => ({ ok: true })),
-    };
-    const h = await makeHarness(deps);
+    const h = await makeHarness(
+      deps,
+      undefined,
+      { injectDefaultProcessResolver: false },
+    );
 
     const result = await h.client.callTool({
       name: 'call_tool',
       arguments: {
-        name: 'launch_app',
-        args: {
-          bundle_id: 'com.apple.iphonesimulator',
-          use_external_simulator: true,
-        },
+        name: 'click',
+        args: { pid: 123, window_id: 7, x: 10, y: 20 },
       },
     });
-    const payload = textPayload(result) as { ok: boolean };
+    const payload = textPayload(result) as { ok: boolean; errorCode: string };
 
-    expect(payload.ok).toBe(true);
-    expect(deps.callTool).toHaveBeenCalledWith('launch_app', {
-      bundle_id: 'com.apple.iphonesimulator',
+    expect(payload).toMatchObject({
+      ok: false,
+      errorCode: 'TARGET_PROVENANCE_UNAVAILABLE',
     });
+    expect(result.isError).toBe(true);
+    expect(callTool).not.toHaveBeenCalled();
     await h.cleanup();
   });
 
-  it('does not treat a model-supplied external override as user authorization', async () => {
+  it('rejects model-supplied external iOS override fields before dispatch', async () => {
     const deps: ComputerMcpDeps = {
       getStatus: vi.fn(),
       callTool: vi.fn(),
@@ -721,7 +738,7 @@ describe('createComputerMcpServer', () => {
 
     expect(payload).toMatchObject({
       ok: false,
-      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      errorCode: 'INVALID_ARGS',
     });
     expect(deps.callTool).not.toHaveBeenCalled();
     await h.cleanup();

@@ -21,6 +21,8 @@ export interface IOSSimulatorOwnershipStoreOptions {
   initialInstances?: IOSSimulatorInstance[];
   /** Called after each mutation so a host can persist a bounded snapshot. */
   onChange?: (instances: IOSSimulatorInstance[]) => void;
+  /** Fail-closed gate used by persisted stores before changing ownership. */
+  assertMutationAllowed?: () => void;
 }
 
 const DEFAULT_LEASE_DURATION_MS = 60_000;
@@ -50,6 +52,7 @@ export class IOSSimulatorOwnershipStore {
   readonly #leaseDurationMs: number;
   readonly #maxInstancesPerSession: number;
   readonly #onChange: ((instances: IOSSimulatorInstance[]) => void) | null;
+  readonly #assertMutationAllowed: (() => void) | null;
   readonly #instances = new Map<string, IOSSimulatorInstance>();
   readonly #instanceByUdid = new Map<string, string>();
 
@@ -60,6 +63,7 @@ export class IOSSimulatorOwnershipStore {
       options.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
     this.#maxInstancesPerSession = options.maxInstancesPerSession ?? 1;
     this.#onChange = options.onChange ?? null;
+    this.#assertMutationAllowed = options.assertMutationAllowed ?? null;
     if (
       !Number.isSafeInteger(this.#leaseDurationMs) ||
       this.#leaseDurationMs <= 0 ||
@@ -126,6 +130,7 @@ export class IOSSimulatorOwnershipStore {
         "This Cindy session already has the maximum number of simulator instances.",
       );
     }
+    this.#assertMutationAllowed?.();
 
     const now = this.#clock.now();
     const state =
@@ -166,7 +171,13 @@ export class IOSSimulatorOwnershipStore {
     };
     this.#instances.set(instance.instanceId, instance);
     this.#instanceByUdid.set(udid, instance.instanceId);
-    this.#changed();
+    try {
+      this.#changed();
+    } catch (error) {
+      this.#instances.delete(instance.instanceId);
+      this.#instanceByUdid.delete(udid);
+      throw error;
+    }
     return copyInstance(instance);
   }
 
@@ -241,12 +252,17 @@ export class IOSSimulatorOwnershipStore {
     });
   }
 
-  /** Extend an active lease without changing its id; expired leases are replaced. */
+  /** Extend an active lease as needed; hot input paths do not persist on every sample. */
   heartbeat(instanceId: string, sessionId: string): IOSSimulatorInstance {
     const instance = this.requireOwned(instanceId, sessionId);
+    this.#assertMutationAllowed?.();
     const now = this.#clock.now();
+    const expiresAt = Date.parse(instance.lease.expiresAt);
+    if (expiresAt > now && expiresAt - now > this.#leaseDurationMs / 2) {
+      return instance;
+    }
     const lease =
-      Date.parse(instance.lease.expiresAt) <= now
+      expiresAt <= now
         ? this.#newLease(now)
         : {
             ...instance.lease,
@@ -266,21 +282,34 @@ export class IOSSimulatorOwnershipStore {
     >,
   ): IOSSimulatorInstance {
     const current = this.requireOwned(instanceId, sessionId);
+    this.#assertMutationAllowed?.();
     const next: IOSSimulatorInstance = {
       ...current,
       ...patch,
       lease: patch.lease ? { ...patch.lease } : current.lease,
     };
     this.#instances.set(instanceId, next);
-    this.#changed();
+    try {
+      this.#changed();
+    } catch (error) {
+      this.#instances.set(instanceId, current);
+      throw error;
+    }
     return copyInstance(next);
   }
 
   release(instanceId: string, sessionId: string): IOSSimulatorInstance {
     const current = this.requireOwned(instanceId, sessionId);
+    this.#assertMutationAllowed?.();
     this.#instances.delete(instanceId);
     this.#instanceByUdid.delete(current.simulatorUdid);
-    this.#changed();
+    try {
+      this.#changed();
+    } catch (error) {
+      this.#instances.set(instanceId, current);
+      this.#instanceByUdid.set(current.simulatorUdid, instanceId);
+      throw error;
+    }
     return current;
   }
 }

@@ -741,14 +741,17 @@ describe('IOSSimulatorTabBody', () => {
     );
 
     await waitFor(() => {
-      expect(api.setViewerVisibility).toHaveBeenCalledWith({
-        sessionId: 'session-a',
-        instanceId: 'instance-a',
-        generation: 2,
-        leaseId: 'lease-a',
-        visible: false,
-        preferredEncoding: 'jpeg',
-      });
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'session-a',
+          instanceId: 'instance-a',
+          generation: 2,
+          leaseId: 'lease-a',
+          visible: false,
+          preferredEncoding: 'jpeg',
+          viewerToken: expect.any(String),
+        }),
+      );
       expect(api.setStreamProfile).toHaveBeenCalledWith({
         sessionId: 'session-a',
         instanceId: 'instance-a',

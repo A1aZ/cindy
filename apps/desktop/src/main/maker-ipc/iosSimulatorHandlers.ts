@@ -1,8 +1,10 @@
 import type {
   IOSSimulatorNativeH264StreamProfileRequest,
+  IOSSimulatorRendererToolName,
   IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../shared/iosSimulatorIpc.js';
+import { IOS_SIMULATOR_RENDERER_TOOL_NAMES } from '../../shared/iosSimulatorIpc.js';
 import {
   callIOSSimulatorHostTool,
   getIOSSimulatorLatestFrame,
@@ -13,15 +15,16 @@ import {
   setIOSSimulatorViewerStreamProfile,
   updateIOSSimulatorViewerTouch,
 } from '../mcp-integrations/ios-simulator.js';
-import type { IOSSimulatorMcpToolName } from '@cindy/mcps';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
 
 export interface IOSSimulatorHandlerDeps {
+  assertTrustedSender(event: unknown): void;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   callTool(
-    name: IOSSimulatorMcpToolName,
+    name: IOSSimulatorRendererToolName,
     args: Record<string, unknown>,
     sessionId: string,
   ): Promise<IOSSimulatorToolResponse>;
@@ -41,6 +44,8 @@ export interface IOSSimulatorHandlerDeps {
     visible: boolean,
     preferredEncoding?: 'jpeg' | 'h264',
     fallbackReason?: 'native-decoder-fallback',
+    viewerWebContentsId?: number,
+    viewerToken?: string,
   ): Promise<IOSSimulatorToolResponse>;
   setViewerStreamProfile(
     sessionId: string,
@@ -65,6 +70,8 @@ export interface IOSSimulatorHandlerDeps {
 }
 
 const defaultDeps: IOSSimulatorHandlerDeps = {
+  assertTrustedSender: (event) =>
+    assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
   getStatus: getIOSSimulatorSessionStatus,
   callTool: callIOSSimulatorHostTool,
   setAgentControlGrant: setIOSSimulatorAgentControlGrant,
@@ -75,51 +82,9 @@ const defaultDeps: IOSSimulatorHandlerDeps = {
   updateViewerTouch: updateIOSSimulatorViewerTouch,
 };
 
-const TOOL_NAMES = new Set<IOSSimulatorMcpToolName>([
-  'check_environment',
-  'list_devices',
-  'list_instances',
-  'create_instance',
-  'attach_device',
-  'detach_device',
-  'start_instance',
-  'stop_instance',
-  'get_screen_map',
-  'audit_accessibility',
-  'compare_screen_maps',
-  'tap',
-  'swipe',
-  'touch_path',
-  'touch2_path',
-  'type_text',
-  'press_home',
-  'set_orientation',
-  'set_appearance',
-  'set_increase_contrast',
-  'set_content_size',
-  'set_location',
-  'start_location_route',
-  'clear_location',
-  'set_privacy',
-  'push_notification',
-  'set_status_bar',
-  'clear_status_bar',
-  'lock_screen',
-  'unlock_screen',
-  'build_app',
-  'read_build_diagnostics',
-  'install_app',
-  'launch_app',
-  'terminate_app',
-  'open_url',
-  'take_screenshot',
-  'capture_visual_baseline',
-  'visual_diff',
-  'capture_state',
-  'get_diagnostics',
-  'start_recording',
-  'stop_recording',
-]);
+const RENDERER_TOOL_NAMES = new Set<IOSSimulatorRendererToolName>(
+  IOS_SIMULATOR_RENDERER_TOOL_NAMES,
+);
 
 function readSessionId(payload: unknown): string {
   if (!payload || typeof payload !== 'object') {
@@ -155,12 +120,26 @@ function readViewerRoute(record: Record<string, unknown>) {
   return { instanceId: instanceId.trim(), generation: Number(generation), leaseId: leaseId.trim() };
 }
 
+function readSenderWebContentsId(event: unknown): number {
+  const id = (event as { sender?: { id?: unknown } })?.sender?.id;
+  if (!Number.isSafeInteger(id) || Number(id) <= 0) {
+    throwIpcError('PERMISSION_DENIED', 'trusted renderer sender is required');
+  }
+  return Number(id);
+}
+
 export function registerIOSSimulatorHandlers(
   registry: IpcHandlerRegistry,
   deps: Partial<IOSSimulatorHandlerDeps> = {},
 ): void {
   const resolved = { ...defaultDeps, ...deps };
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (_event, payload) => {
+  const handle: IpcHandlerRegistry['handle'] = (channel, handler) => {
+    registry.handle(channel, (event, ...args) => {
+      resolved.assertTrustedSender(event);
+      return handler(event, ...args);
+    });
+  };
+  handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (_event, payload) => {
     const sessionId = readSessionId(payload);
     try {
       return await resolved.getStatus(sessionId);
@@ -168,24 +147,27 @@ export function registerIOSSimulatorHandlers(
       throwIpcError('INTERNAL', error instanceof Error ? error.message : String(error));
     }
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (_event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     const name = record.name;
     const args = record.args;
-    if (typeof name !== 'string' || !TOOL_NAMES.has(name as IOSSimulatorMcpToolName)) {
+    if (
+      typeof name !== 'string' ||
+      !RENDERER_TOOL_NAMES.has(name as IOSSimulatorRendererToolName)
+    ) {
       throwIpcError('INVALID_PARAMS', 'name must be a supported iOS Simulator tool');
     }
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
       throwIpcError('INVALID_PARAMS', 'args must be an object');
     }
     return resolved.callTool(
-      name as IOSSimulatorMcpToolName,
+      name as IOSSimulatorRendererToolName,
       args as Record<string, unknown>,
       sessionId,
     );
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, async (_event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     const instanceId = record.instanceId;
@@ -198,7 +180,7 @@ export function registerIOSSimulatorHandlers(
     }
     return resolved.setAgentControlGrant(sessionId, instanceId.trim(), decision);
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     if (typeof record.visible !== 'boolean') {
@@ -216,12 +198,39 @@ export function registerIOSSimulatorHandlers(
     if (fallbackReason !== undefined && fallbackReason !== 'native-decoder-fallback') {
       throwIpcError('INVALID_PARAMS', 'fallbackReason is not supported');
     }
+    const viewerToken = record.viewerToken;
+    if (
+      viewerToken !== undefined &&
+      (typeof viewerToken !== 'string' || !viewerToken.trim() || viewerToken.length > 128)
+    ) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'viewerToken must be a non-empty string of at most 128 chars',
+      );
+    }
     const route = readViewerRoute(record);
+    const viewerWebContentsId = readSenderWebContentsId(event);
     if (preferredEncoding === undefined && fallbackReason === undefined) {
-      return resolved.setViewerVisibility(sessionId, route, record.visible);
+      return resolved.setViewerVisibility(
+        sessionId,
+        route,
+        record.visible,
+        undefined,
+        undefined,
+        viewerWebContentsId,
+        viewerToken?.trim(),
+      );
     }
     if (fallbackReason === undefined) {
-      return resolved.setViewerVisibility(sessionId, route, record.visible, preferredEncoding);
+      return resolved.setViewerVisibility(
+        sessionId,
+        route,
+        record.visible,
+        preferredEncoding,
+        undefined,
+        viewerWebContentsId,
+        viewerToken?.trim(),
+      );
     }
     return resolved.setViewerVisibility(
       sessionId,
@@ -229,9 +238,11 @@ export function registerIOSSimulatorHandlers(
       record.visible,
       preferredEncoding,
       fallbackReason,
+      viewerWebContentsId,
+      viewerToken?.trim(),
     );
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, async (_event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     if (typeof record.paused !== 'boolean') {
@@ -239,11 +250,11 @@ export function registerIOSSimulatorHandlers(
     }
     return resolved.setAgentMutationPaused(sessionId, readViewerRoute(record), record.paused);
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, async (_event, payload) => {
     const record = readRecord(payload);
     return resolved.getLatestFrame(readSessionId(record), readViewerRoute(record));
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (_event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     const profile = record.profile;
@@ -291,7 +302,7 @@ export function registerIOSSimulatorHandlers(
       nativeProfile,
     );
   });
-  registry.handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (_event, payload) => {
+  handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (_event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     const gestureId = record.gestureId;

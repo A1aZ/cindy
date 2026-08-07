@@ -1,8 +1,12 @@
+import path from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { IOSSimulatorCommandRunner } from "../types.js";
 import { inspectWdaCheckout } from "./checkout.js";
 import { WDA_SOURCE_PIN } from "./source-pin.js";
+
+const CHECKOUT_PATH = path.resolve("/tmp/wda");
 
 function runnerWithRevision(revision: string): IOSSimulatorCommandRunner {
   return {
@@ -26,7 +30,7 @@ function runnerWithRevision(revision: string): IOSSimulatorCommandRunner {
 describe("inspectWdaCheckout", () => {
   it("accepts only the pinned revision and required scheme", async () => {
     const runner = runnerWithRevision(WDA_SOURCE_PIN.revision);
-    const result = await inspectWdaCheckout("/tmp/wda", runner);
+    const result = await inspectWdaCheckout(CHECKOUT_PATH, runner);
 
     expect(result).toMatchObject({
       ready: true,
@@ -35,21 +39,26 @@ describe("inspectWdaCheckout", () => {
     });
     expect(runner.run).toHaveBeenNthCalledWith(1, "/usr/bin/git", [
       "-C",
-      "/tmp/wda",
+      CHECKOUT_PATH,
       "rev-parse",
       "HEAD",
     ]);
     expect(runner.run).toHaveBeenNthCalledWith(
       2,
       "/usr/bin/xcodebuild",
-      ["-project", "/tmp/wda/WebDriverAgent.xcodeproj", "-list", "-json"],
+      [
+        "-project",
+        path.join(CHECKOUT_PATH, "WebDriverAgent.xcodeproj"),
+        "-list",
+        "-json",
+      ],
       { timeoutMs: 60_000, maxBufferBytes: 2 * 1024 * 1024 },
     );
   });
 
   it("fails before Xcode inspection when the revision differs", async () => {
     const runner = runnerWithRevision("deadbeef");
-    const result = await inspectWdaCheckout("/tmp/wda", runner);
+    const result = await inspectWdaCheckout(CHECKOUT_PATH, runner);
 
     expect(result).toMatchObject({ ready: false, issue: "REVISION_MISMATCH" });
     expect(runner.run).toHaveBeenCalledTimes(1);
@@ -70,7 +79,7 @@ describe("inspectWdaCheckout", () => {
           exitCode: 0,
         }),
     };
-    const result = await inspectWdaCheckout("/tmp/wda", runner);
+    const result = await inspectWdaCheckout(CHECKOUT_PATH, runner);
 
     expect(result).toMatchObject({ ready: false, issue: "SCHEME_NOT_FOUND" });
   });

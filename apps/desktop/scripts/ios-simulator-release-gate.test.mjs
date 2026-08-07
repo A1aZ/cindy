@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -44,7 +46,7 @@ describe('iOS Simulator packaged release gate CLI', () => {
         '--require-native',
       ]),
     ).toMatchObject({
-      appPath: '/tmp/Cindy.app',
+      appPath: path.resolve('/tmp/Cindy.app'),
       arch: 'arm64',
       expectedTrust: 'verified',
       requireNative: true,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { IOSSimulatorInstanceError } from "./instance-errors.js";
 import { IOSSimulatorOwnershipStore } from "./ownership-store.js";
 import type { IOSSimulatorDevice } from "./types.js";
 
@@ -92,6 +93,10 @@ describe("IOSSimulatorOwnershipStore", () => {
     });
     const instance = store.attach(input("session-a"));
 
+    now = 1_100;
+    const coalesced = store.heartbeat(instance.instanceId, "session-a");
+    expect(coalesced.lease).toEqual(instance.lease);
+
     now = 1_500;
     const active = store.heartbeat(instance.instanceId, "session-a");
     expect(active.lease.id).toBe(instance.lease.id);
@@ -101,6 +106,28 @@ describe("IOSSimulatorOwnershipStore", () => {
     const replaced = store.heartbeat(instance.instanceId, "session-a");
     expect(replaced.lease.id).not.toBe(instance.lease.id);
     expect(replaced.lease.expiresAt).toBe(new Date(4_000).toISOString());
+  });
+
+  it("fails a coalesced heartbeat after the persisted writer lease is lost", () => {
+    let writerAvailable = true;
+    const store = new IOSSimulatorOwnershipStore({
+      assertMutationAllowed: () => {
+        if (!writerAvailable) {
+          throw new IOSSimulatorInstanceError(
+            "DEVICE_BUSY",
+            "writer unavailable",
+            true,
+          );
+        }
+      },
+    });
+    const instance = store.attach(input("session-a"));
+    writerAvailable = false;
+
+    expect(() =>
+      store.heartbeat(instance.instanceId, instance.sessionId),
+    ).toThrowError(expect.objectContaining({ code: "DEVICE_BUSY" }));
+    expect(store.get(instance.instanceId)).toEqual(instance);
   });
 
   it("can raise the per-session cap without weakening global ownership", () => {
@@ -118,5 +145,59 @@ describe("IOSSimulatorOwnershipStore", () => {
       );
     }
     expect(store.listForSession("session-a")).toHaveLength(4);
+  });
+
+  it("fails before mutation when the persisted writer lease is unavailable", () => {
+    const store = new IOSSimulatorOwnershipStore({
+      assertMutationAllowed: () => {
+        throw new IOSSimulatorInstanceError(
+          "DEVICE_BUSY",
+          "writer unavailable",
+          true,
+        );
+      },
+    });
+
+    expect(() => store.attach(input("session-a"))).toThrowError(
+      expect.objectContaining({ code: "DEVICE_BUSY" }),
+    );
+    expect(store.listAll()).toEqual([]);
+  });
+
+  it("rolls attach, update, and release back when persistence fails", () => {
+    let failPersistence = true;
+    const attachStore = new IOSSimulatorOwnershipStore({
+      createId: () => "attach-id",
+      onChange: () => {
+        if (failPersistence) throw new Error("disk unavailable");
+      },
+    });
+    expect(() => attachStore.attach(input("session-a"))).toThrow(
+      "disk unavailable",
+    );
+    expect(attachStore.listAll()).toEqual([]);
+
+    failPersistence = false;
+    let id = 0;
+    const store = new IOSSimulatorOwnershipStore({
+      createId: () => `id-${++id}`,
+      onChange: () => {
+        if (failPersistence) throw new Error("disk unavailable");
+      },
+    });
+    const instance = store.attach(input("session-a"));
+    failPersistence = true;
+
+    expect(() =>
+      store.update(instance.instanceId, instance.sessionId, {
+        healthState: "error",
+      }),
+    ).toThrow("disk unavailable");
+    expect(store.get(instance.instanceId)).toEqual(instance);
+
+    expect(() =>
+      store.release(instance.instanceId, instance.sessionId),
+    ).toThrow("disk unavailable");
+    expect(store.get(instance.instanceId)).toEqual(instance);
   });
 });

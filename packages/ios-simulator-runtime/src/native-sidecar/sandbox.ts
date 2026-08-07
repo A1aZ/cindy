@@ -72,9 +72,18 @@ export class IOSSimulatorNativeSidecarSandboxError extends Error {
 const EXACT_SIMULATOR_UDID =
   /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/;
 
-function requireAbsolutePath(value: string, name: string): string {
-  const normalized = path.normalize(value);
-  if (!path.isAbsolute(normalized)) {
+type PathDialect = Pick<
+  typeof path.posix,
+  "isAbsolute" | "join" | "normalize" | "relative" | "sep"
+>;
+
+function requireAbsolutePath(
+  value: string,
+  name: string,
+  dialect: PathDialect = path,
+): string {
+  const normalized = dialect.normalize(value);
+  if (!dialect.isAbsolute(normalized)) {
     throw new IOSSimulatorNativeSidecarSandboxError(
       "SANDBOX_PROFILE_INVALID",
       `${name} must be absolute`,
@@ -87,14 +96,15 @@ function requireContainedPath(
   value: string,
   parent: string,
   name: string,
+  dialect: PathDialect = path,
 ): string {
-  const normalized = requireAbsolutePath(value, name);
-  const relative = path.relative(parent, normalized);
+  const normalized = requireAbsolutePath(value, name, dialect);
+  const relative = dialect.relative(parent, normalized);
   if (
     relative === "" ||
-    relative.startsWith(`..${path.sep}`) ||
+    relative.startsWith(`..${dialect.sep}`) ||
     relative === ".." ||
-    path.isAbsolute(relative)
+    dialect.isAbsolute(relative)
   ) {
     throw new IOSSimulatorNativeSidecarSandboxError(
       "SANDBOX_PROFILE_INVALID",
@@ -119,17 +129,21 @@ function pathRule(
 export function createIOSSimulatorNativeSidecarSandboxPolicy(
   input: IOSSimulatorNativeSidecarSandboxPolicyInput = {},
 ): IOSSimulatorNativeSidecarSandboxPolicy {
+  const platform = input.platform ?? process.platform;
+  const dialect: PathDialect = platform === "darwin" ? path.posix : path;
   const homeDirectory = requireAbsolutePath(
     input.homeDirectory ?? os.homedir(),
     "homeDirectory",
+    dialect,
   );
   return Object.freeze({
     required: input.required ?? true,
-    platform: input.platform ?? process.platform,
+    platform,
     sandboxExecutablePath: requireAbsolutePath(
       input.sandboxExecutablePath ??
         IOS_SIMULATOR_NATIVE_SIDECAR_SANDBOX_EXECUTABLE,
       "sandboxExecutablePath",
+      dialect,
     ),
     homeDirectory,
     developerDirectory: requireAbsolutePath(
@@ -137,15 +151,18 @@ export function createIOSSimulatorNativeSidecarSandboxPolicy(
         process.env.DEVELOPER_DIR ??
         "/Applications/Xcode.app/Contents/Developer",
       "developerDirectory",
+      dialect,
     ),
     coreSimulatorRoot: requireAbsolutePath(
       input.coreSimulatorRoot ??
-        path.join(homeDirectory, "Library", "Developer", "CoreSimulator"),
+        dialect.join(homeDirectory, "Library", "Developer", "CoreSimulator"),
       "coreSimulatorRoot",
+      dialect,
     ),
     temporaryRoot: requireAbsolutePath(
       input.temporaryRoot ?? os.tmpdir(),
       "temporaryRoot",
+      dialect,
     ),
   });
 }
@@ -202,23 +219,32 @@ export function createIOSSimulatorNativeSidecarSandboxProfile(
       "Native sidecar sandboxing is supported only on macOS",
     );
   }
-  const binaryPath = requireAbsolutePath(input.binaryPath, "binaryPath");
+  const dialect = path.posix;
+  const binaryPath = requireAbsolutePath(
+    input.binaryPath,
+    "binaryPath",
+    dialect,
+  );
   const developerDirectory = requireAbsolutePath(
     policy.developerDirectory,
     "developerDirectory",
+    dialect,
   );
   const coreSimulatorRoot = requireAbsolutePath(
     policy.coreSimulatorRoot,
     "coreSimulatorRoot",
+    dialect,
   );
   const temporaryRoot = requireAbsolutePath(
     policy.temporaryRoot,
     "temporaryRoot",
+    dialect,
   );
   const temporaryDirectory = requireContainedPath(
     input.temporaryDirectory,
     temporaryRoot,
     "temporaryDirectory",
+    dialect,
   );
   const simulatorUdid = input.simulatorUdid.toUpperCase();
   if (!EXACT_SIMULATOR_UDID.test(simulatorUdid)) {
@@ -360,8 +386,8 @@ export function createIOSSimulatorNativeSidecarSandboxLaunchPlan(
     LANG: input.environment.LANG ?? "en_US.UTF-8",
     HOME: input.policy.homeDirectory,
     DEVELOPER_DIR: input.policy.developerDirectory,
-    TMPDIR: `${input.temporaryDirectory}${path.sep}`,
-    CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.join(
+    TMPDIR: `${input.temporaryDirectory}${path.posix.sep}`,
+    CINDY_IOS_SIDECAR_METAL_CACHE_DIR: path.posix.join(
       input.temporaryDirectory,
       "metal-cache",
     ),

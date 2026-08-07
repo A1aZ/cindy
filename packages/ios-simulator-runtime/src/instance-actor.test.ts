@@ -267,24 +267,119 @@ describe("IOSSimulatorInstanceActor", () => {
   it("keeps agent-booted devices for grace then shuts down and releases", async () => {
     const harness = createHarness();
     const started = await harness.actor.start(harness.route());
+    const onResourceReleased = vi.fn();
     harness.setNow(2_000);
-    const detached = await harness.actor.detach(harness.route(started));
+    const detached = await harness.actor.detach(
+      harness.route(started),
+      onResourceReleased,
+    );
 
     expect(detached.viewerState).toBe("detached");
     expect(detached.graceExpiresAt).toBe(new Date(602_000).toISOString());
     expect(harness.scheduled).toHaveLength(1);
+    expect(onResourceReleased).not.toHaveBeenCalled();
     await harness.scheduled[0]?.();
     expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
     expect(harness.store.get(detached.instanceId)).toBeNull();
+    expect(onResourceReleased).toHaveBeenCalledWith(
+      expect.objectContaining({ instanceId: detached.instanceId }),
+    );
   });
 
   it("releases preexisting devices immediately without shutdown", async () => {
     const harness = createHarness({ booted: true });
-    const detached = await harness.actor.detach(harness.route());
+    const onResourceReleased = vi.fn();
+    const detached = await harness.actor.detach(
+      harness.route(),
+      onResourceReleased,
+    );
 
     expect(detached.bootProvenance).toBe("preexisting");
     expect(harness.store.get(detached.instanceId)).toBeNull();
     expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(onResourceReleased).toHaveBeenCalledWith(detached);
+  });
+
+  it("keeps the resource counted when grace shutdown fails", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    const onResourceReleased = vi.fn();
+    vi.mocked(harness.lifecycle.shutdownExact).mockRejectedValueOnce(
+      new Error("shutdown failed"),
+    );
+
+    const detached = await harness.actor.detach(
+      harness.route(started),
+      onResourceReleased,
+    );
+    await expect(harness.scheduled[0]?.()).rejects.toThrow("shutdown failed");
+
+    expect(harness.store.get(detached.instanceId)).not.toBeNull();
+    expect(onResourceReleased).not.toHaveBeenCalled();
+  });
+
+  it("cancels deferred resource release when a detached device is reattached", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    const onResourceReleased = vi.fn();
+    await harness.actor.detach(harness.route(started), onResourceReleased);
+    expect(harness.scheduled).toHaveLength(1);
+
+    harness.actor.attach({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      device: { ...DEVICE, state: "Booted" },
+      creationProvenance: "external",
+      bootProvenance: "agent-booted",
+    });
+
+    expect(harness.scheduled).toHaveLength(0);
+    expect(onResourceReleased).not.toHaveBeenCalled();
+  });
+
+  it("serializes reattachment behind an in-flight grace shutdown", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    const onResourceReleased = vi.fn();
+    let finishShutdown: () => void = () => undefined;
+    vi.mocked(harness.lifecycle.shutdownExact).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishShutdown = resolve;
+        }),
+    );
+    await harness.actor.detach(harness.route(started), onResourceReleased);
+
+    const cleanup = Promise.resolve(harness.scheduled[0]?.());
+    await vi.waitFor(() =>
+      expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID),
+    );
+    let reattached = false;
+    const reattach = harness.actor
+      .attachSerialized({
+        sessionId: "session-a",
+        worktreeRoot: "/tmp/session-a",
+        sourceFingerprint: "abc",
+        device: { ...DEVICE, state: "Booted" },
+        creationProvenance: "external",
+        bootProvenance: "agent-booted",
+      })
+      .then((instance) => {
+        reattached = true;
+        return instance;
+      });
+    await Promise.resolve();
+    expect(reattached).toBe(false);
+
+    finishShutdown();
+    await cleanup;
+    const next = await reattach;
+    expect(next.instanceId).not.toBe(started.instanceId);
+    expect(harness.store.listAll()).toEqual([next]);
+    expect(onResourceReleased).toHaveBeenCalledWith(
+      expect.objectContaining({ instanceId: started.instanceId }),
+    );
   });
 
   it("never deletes an external simulator", async () => {

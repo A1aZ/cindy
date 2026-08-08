@@ -83,6 +83,7 @@ import type {
   GhostIOSSimulatorStatusProbeResult,
   GhostIOSSimulatorStatusSnapshot,
 } from '../../shared/ghost.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import { createLogger } from '../logger.js';
 import { redact } from '../log-upload/redact.js';
 import { withSessionRouteLock } from '../localDb/sessionRouteLock.js';
@@ -185,6 +186,10 @@ export interface IOSSimulatorHostOptions {
   resourceScheduler?: IOSSimulatorResourceScheduler;
   /** Fail-closed gate supplied by the persisted registry owner. */
   canReconcilePendingCreates?: () => boolean;
+  /** Main-owned account generation used to scope persisted ownership reconciliation. */
+  getOwnerScopeKey?: () => string;
+  /** Fail closed while the active account runtime is being replaced. */
+  isOwnerBoundaryPending?: () => boolean;
   /** Recycle an idle WDA process while retaining the booted simulator binding. */
   idleRecycleMs?: number;
   /** Minimum interval between exact-UDID CoreSimulator liveness checks. */
@@ -1021,8 +1026,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       promise: Promise<IOSSimulatorInstance> | null;
     }
   >();
-  let ownershipReconciled = false;
-  let ownershipReconcilePromise: Promise<void> | null = null;
+  const getOwnerScopeKey = options.getOwnerScopeKey ?? activeOwnerScopeKey;
+  const isOwnerBoundaryPending =
+    options.isOwnerBoundaryPending ?? isAppSessionBoundaryPending;
+  let ownershipReconciledScopeKey: string | null = null;
+  let ownershipReconcilePromise: { scopeKey: string; promise: Promise<void> } | null = null;
   let pendingCreateReconcileController: AbortController | null = null;
   let pendingCreateReconcilePromise: Promise<unknown> | null = null;
   let startupPendingCreateRecoveryAttempted = false;
@@ -1951,7 +1959,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (cleanupSucceeded) {
       actor.forget(instance.instanceId, instance.sessionId);
     } else {
-      ownershipReconciled = false;
+      ownershipReconciledScopeKey = null;
       actor.reconcile(
         instance.instanceId,
         instance.sessionId,
@@ -2377,9 +2385,40 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
 
   async function reconcilePersistedOwnership(): Promise<void> {
     if (disposePromise) return;
-    if (ownershipReconciled) return;
-    if (ownershipReconcilePromise) return ownershipReconcilePromise;
-    ownershipReconcilePromise = (async () => {
+    if (isOwnerBoundaryPending()) return;
+    const requestedScopeKey = getOwnerScopeKey();
+    if (ownershipReconciledScopeKey === requestedScopeKey) return;
+    const inFlight = ownershipReconcilePromise;
+    if (inFlight) {
+      try {
+        await inFlight.promise;
+      } catch (error) {
+        if (disposePromise || isOwnerBoundaryPending()) return;
+        if (getOwnerScopeKey() !== requestedScopeKey) return;
+        // A failed old-owner pass is not the new owner's result. Retry against
+        // the current DB instead of surfacing stale-owner failure or leaving
+        // the old scheduler occupancy latched until the next process start.
+        if (inFlight.scopeKey !== requestedScopeKey) {
+          return reconcilePersistedOwnership();
+        }
+        throw error;
+      }
+      if (disposePromise || isOwnerBoundaryPending()) return;
+      // A new owner must not treat the previous owner's reconciliation as its
+      // own. Wait for the old pass to settle, then run a fresh pass against
+      // the new owner DB. A caller whose own scope became stale simply exits.
+      if (getOwnerScopeKey() !== requestedScopeKey) return;
+      if (
+        inFlight.scopeKey !== requestedScopeKey &&
+        ownershipReconciledScopeKey !== requestedScopeKey
+      ) {
+        return reconcilePersistedOwnership();
+      }
+      return;
+    }
+    const scopeKey = requestedScopeKey;
+    let reconciliation!: Promise<void>;
+    reconciliation = (async () => {
       let complete = true;
       if (!startupPendingCreateRecoveryAttempted && lifecycle.recoverPendingCreatesAtStartup) {
         if (!canReconcilePendingCreates()) {
@@ -2452,11 +2491,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         );
         if (!instanceComplete) complete = false;
       }
-      ownershipReconciled = complete;
+      // Every DB/session read above belongs to the captured owner generation.
+      // Never latch it across an account boundary or let an old in-flight pass
+      // suppress the new owner's required cleanup and scheduler reconciliation.
+      if (!isOwnerBoundaryPending() && getOwnerScopeKey() === scopeKey) {
+        ownershipReconciledScopeKey = complete ? scopeKey : null;
+      }
     })().finally(() => {
-      ownershipReconcilePromise = null;
+      if (ownershipReconcilePromise?.promise === reconciliation) {
+        ownershipReconcilePromise = null;
+      }
     });
-    return ownershipReconcilePromise;
+    ownershipReconcilePromise = { scopeKey, promise: reconciliation };
+    return reconciliation;
   }
 
   async function ensureDriver(

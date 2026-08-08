@@ -649,6 +649,176 @@ describe('iOS Simulator host', () => {
     });
   });
 
+  it('reconciles ownership again for a new account generation and releases stale capacity', async () => {
+    let ownerScopeKey = 'cloud:owner-a:1';
+    let ownerBoundaryPending = false;
+    let sessionExists = true;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'owner-a-session',
+      worktreeRoot: '/tmp/owner-a-session',
+      sourceFingerprint: 'owner-a-fingerprint',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'agent-booted',
+    });
+    const resourceScheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 1,
+      hardLimit: 1,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+    const inspect = vi.fn(async () => READY_REPORT);
+    const getSession = vi.fn(async (id: string) => (sessionExists ? localSession(id) : null));
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      runtime: { inspect },
+      getSession,
+      getOwnerScopeKey: () => ownerScopeKey,
+      isOwnerBoundaryPending: () => ownerBoundaryPending,
+    });
+
+    try {
+      await host.reconcileOwnership();
+      expect(actor.getOwned(attached.sessionId, attached.instanceId)).toBeDefined();
+      expect(resourceScheduler.runningCount()).toBe(1);
+      expect(inspect).toHaveBeenCalledTimes(1);
+
+      await host.reconcileOwnership();
+      expect(inspect).toHaveBeenCalledTimes(1);
+
+      ownerScopeKey = 'cloud:owner-b:2';
+      sessionExists = false;
+      ownerBoundaryPending = true;
+      await host.reconcileOwnership();
+      expect(inspect).toHaveBeenCalledTimes(1);
+      expect(resourceScheduler.runningCount()).toBe(1);
+
+      ownerBoundaryPending = false;
+      await host.reconcileOwnership();
+      expect(inspect).toHaveBeenCalledTimes(2);
+      expect(getSession).toHaveBeenCalledTimes(2);
+      expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+        attached.simulatorUdid,
+        expect.any(AbortSignal),
+      );
+      expect(actor.listAll()).toEqual([]);
+      expect(resourceScheduler.runningCount()).toBe(0);
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it.each(['success', 'failure'] as const)(
+    'waits for an old-owner reconciliation (%s) and then reruns for the current owner',
+    async (oldOwnerResult) => {
+      let ownerScopeKey = 'cloud:owner-a:1';
+      let resolveFirstInspectionStarted: (() => void) | undefined;
+      let releaseFirstInspection: (() => void) | undefined;
+      const firstInspectionStarted = new Promise<void>((resolve) => {
+        resolveFirstInspectionStarted = resolve;
+      });
+      const firstInspectionGate = new Promise<void>((resolve) => {
+        releaseFirstInspection = resolve;
+      });
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(async () => undefined),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      };
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+        lifecycle,
+      });
+      const attached = actor.attach({
+        sessionId: 'owner-a-session',
+        worktreeRoot: '/tmp/owner-a-session',
+        sourceFingerprint: 'owner-a-fingerprint',
+        device: READY_REPORT.devices[0]!,
+        bootProvenance: 'agent-booted',
+      });
+      const resourceScheduler = new IOSSimulatorResourceScheduler({
+        softLimit: 1,
+        hardLimit: 1,
+        freeMemoryBytes: () => 100 * 1024 ** 3,
+      });
+      let sessionReadCount = 0;
+      const getSession = vi.fn(async (id: string) => {
+        sessionReadCount += 1;
+        if (oldOwnerResult === 'success' && sessionReadCount === 1) {
+          return localSession(id);
+        }
+        return null;
+      });
+      let inspectionCount = 0;
+      const inspect = vi.fn(async () => {
+        inspectionCount += 1;
+        if (inspectionCount === 1) {
+          resolveFirstInspectionStarted?.();
+          await firstInspectionGate;
+          if (oldOwnerResult === 'failure') throw new Error('old owner DB closed');
+        }
+        return READY_REPORT;
+      });
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        resourceScheduler,
+        runtime: { inspect },
+        getSession,
+        getOwnerScopeKey: () => ownerScopeKey,
+        isOwnerBoundaryPending: () => false,
+      });
+
+      try {
+        const ownerAReconcile = host.reconcileOwnership();
+        const ownerAOutcome = ownerAReconcile.then(
+          () => ({ ok: true as const, error: null }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        await firstInspectionStarted;
+        ownerScopeKey = 'cloud:owner-b:2';
+        const ownerBReconcile = host.reconcileOwnership();
+        releaseFirstInspection?.();
+        await ownerBReconcile;
+        const ownerASettled = await ownerAOutcome;
+
+        if (oldOwnerResult === 'failure') {
+          expect(ownerASettled).toMatchObject({
+            ok: false,
+            error: expect.objectContaining({ message: 'old owner DB closed' }),
+          });
+        } else {
+          expect(ownerASettled).toEqual({ ok: true, error: null });
+        }
+
+        expect(getSession).toHaveBeenCalledTimes(oldOwnerResult === 'failure' ? 1 : 2);
+        expect(inspect).toHaveBeenCalledTimes(2);
+        expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+          attached.simulatorUdid,
+          expect.any(AbortSignal),
+        );
+        expect(actor.listAll()).toEqual([]);
+        expect(resourceScheduler.runningCount()).toBe(0);
+      } finally {
+        releaseFirstInspection?.();
+        await host.dispose();
+      }
+    },
+  );
+
   it('restores persisted detach grace and releases scheduler capacity at its deadline', async () => {
     let now = 1_000;
     const lifecycle: IOSSimulatorSimctlLifecycle = {

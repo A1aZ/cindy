@@ -3145,6 +3145,19 @@ export class ClaudeCodeAgent extends BaseAgent {
     // still has buffered activity. Suppress that cancelled tail until its
     // Query is replaced before the next explicit user turn.
     let continuationCancellationGeneration: number | null = null;
+    /**
+     * 本次 Stop 已经发过终态 boundary 的那一代。
+     *
+     * accept 阶段的 foreground 终态归 send 的 finishSendBeforeUserInput 发, 但
+     * abort 若同时取消了一个 awaiting continuation, 它已经先发过
+     * turn_continuation_cancelled —— 同一次 Stop 再补一个 done 就是双终态,
+     * Session 不按 generation 去重, 所有监听方都会收到两条。
+     *
+     * 单独记一个代次而不是复用 continuationCancellationGeneration: 后者在关
+     * query 分支里**无条件**设置(哪怕那一轮根本没发 boundary), 拿它当去重依据
+     * 会把 send 该发的那个终态一起吞掉。
+     */
+    let stopTerminalEmittedGeneration: number | null = null;
     let continuationCancellationRequiresQueryRebuild = false;
     const continuationClaims = new Map<number, ContinuationClaim>();
     const continuationListeners = new Set<(
@@ -3415,6 +3428,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         continuationId: claim.id,
       });
       if (emitTurnBoundary('turn_continuation_cancelled', undefined, true)) {
+        // 这一代的终态已经出去了 —— accept 阶段的 send 醒来后不要再补一个。
+        stopTerminalEmittedGeneration = turnState.generation;
         // Install the cancelled-tail fence at the same enqueue boundary as
         // the synthetic product terminal. stopTask can win before interrupt
         // resolves, so waiting for the interrupt ACK leaves a double-terminal
@@ -4702,7 +4717,11 @@ export class ClaudeCodeAgent extends BaseAgent {
           pendingToolIds.clear();
           acceptingRebuiltSend = false;
           clearUpstreamResponseIdle();
-          emitTurnBoundary(reason);
+          // 同一次 Stop 只发一个终态: abort 若已为被取消的 continuation 发过
+          // turn_continuation_cancelled(同一代), 这里只清状态、不再补 done。
+          if (stopTerminalEmittedGeneration !== turnState.generation) {
+            emitTurnBoundary(reason);
+          }
         };
         if (pendingRewindTo || activeBridgeRewindResumeAt) {
           const resumeAt = pendingRewindTo ?? activeBridgeRewindResumeAt;

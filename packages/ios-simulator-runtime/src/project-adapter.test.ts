@@ -542,4 +542,52 @@ describe("IOSSimulatorProjectBuilder", () => {
       code: "ENOENT",
     });
   });
+
+  it("cancels an in-flight xcresult read through the command runner", async () => {
+    const controller = new AbortController();
+    const run = vi.fn(
+      async (
+        _command: string,
+        _args: readonly string[],
+        options?: Parameters<IOSSimulatorCommandRunner["run"]>[2],
+      ) => {
+        await new Promise<void>((resolve) => {
+          if (options?.signal?.aborted) resolve();
+          else
+            options?.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+        });
+        return { stdout: "", stderr: "", exitCode: null };
+      },
+    );
+    const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
+    const readPromise = builder.readXcresult(
+      "/tmp/CindyBuild-cancelled.xcresult",
+      1024,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(run).toHaveBeenCalledOnce());
+
+    controller.abort();
+
+    await expect(readPromise).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    expect(run).toHaveBeenCalledWith(
+      "xcrun",
+      [
+        "xcresulttool",
+        "get",
+        "--path",
+        "/tmp/CindyBuild-cancelled.xcresult",
+        "--format",
+        "json",
+      ],
+      expect.objectContaining({
+        signal: controller.signal,
+        maxBufferBytes: 1024,
+      }),
+    );
+  });
 });

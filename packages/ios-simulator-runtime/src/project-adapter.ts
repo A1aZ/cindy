@@ -582,6 +582,7 @@ export class IOSSimulatorProjectBuilder {
   async readXcresult(
     resultBundlePath: string,
     maxBufferBytes = 2 * 1024 * 1024,
+    signal?: AbortSignal,
   ): Promise<string> {
     const result = await this.#runner.run(
       "xcrun",
@@ -590,8 +591,16 @@ export class IOSSimulatorProjectBuilder {
         timeoutMs: 60_000,
         maxBufferBytes,
         env: this.#childEnvironment,
+        signal,
       },
     );
+    if (signal?.aborted) {
+      throw new IOSSimulatorInstanceError(
+        "MUTATION_CANCELLED",
+        "The Xcode result bundle read was cancelled because the simulator host is shutting down.",
+        true,
+      );
+    }
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "APP_BUILD_FAILED",

@@ -2218,6 +2218,116 @@ describe('iOS Simulator host', () => {
     }
   });
 
+  it('aborts and drains active xcresult readers before host disposal completes', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'force-quit-xcresult-session',
+      worktreeRoot: '/tmp/force-quit-xcresult-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const resultBundlePath = `/tmp/CindyBuild-${crypto.randomUUID()}.xcresult`;
+    const build = vi.fn<IOSSimulatorProjectBuilderAdapter['build']>(async (input) => ({
+      kind: 'xcode-project',
+      worktreeRoot: input.worktreeRoot,
+      projectRoot: input.worktreeRoot,
+      containerPath: `${input.worktreeRoot}/Demo.xcodeproj`,
+      scheme: 'Demo',
+      appPath: `${input.worktreeRoot}/Demo.app`,
+      resultBundlePath,
+      buildLogTail: 'build succeeded',
+    }));
+    let readSignal: AbortSignal | undefined;
+    let releaseRead!: () => void;
+    let projectBuilder!: IOSSimulatorProjectBuilderAdapter;
+    const readXcresult = vi.fn(function (
+      this: IOSSimulatorProjectBuilderAdapter,
+      _path: string,
+      _maxBufferBytes?: number,
+      signal?: AbortSignal,
+    ) {
+      expect(this).toBe(projectBuilder);
+      return new Promise<string>((resolve) => {
+        readSignal = signal;
+        releaseRead = () => {
+          resolve('late xcresult content that must not be cached');
+        };
+      });
+    });
+    projectBuilder = { build, readXcresult };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      projectBuilder,
+      appLifecycle: {
+        inspectArtifact: vi.fn(async () => ({
+          artifactId: 'artifact-xcresult',
+          worktreeRoot: '/tmp/force-quit-xcresult-session',
+          appPath: '/tmp/force-quit-xcresult-session/Demo.app',
+          bundleId: 'com.example.demo',
+          createdAt: '2026-08-08T00:00:00.000Z',
+        })),
+        installExact: vi.fn(async () => undefined),
+        launchExact: vi.fn(async () => undefined),
+        terminateExact: vi.fn(async () => undefined),
+        openUrlExact: vi.fn(async () => undefined),
+      },
+      mediaCapture: {
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => localSession('force-quit-xcresult-session')),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('force-quit-xcresult-session', instance.instanceId);
+    const built = await host.callTool(
+      'build_app',
+      {
+        instanceId: current.instanceId,
+        generation: current.generation,
+        leaseId: current.lease.id,
+      },
+      { sessionId: current.sessionId, origin: 'user' },
+    );
+    expect(built).toMatchObject({ ok: true });
+    const diagnosticsId = (built as { ok: true; data: { diagnostics: { diagnosticsId: string } } })
+      .data.diagnostics.diagnosticsId;
+    const readPromise = host.callTool(
+      'read_build_diagnostics',
+      { diagnosticsId, source: 'xcresult' },
+      { sessionId: current.sessionId, origin: 'agent' },
+    );
+    await vi.waitFor(() => expect(readXcresult).toHaveBeenCalledOnce());
+
+    expect(() => host.abortOperationsForExit()).not.toThrow();
+    expect(readSignal?.aborted).toBe(true);
+    let disposeSettled = false;
+    const disposePromise = host.dispose().then(() => {
+      disposeSettled = true;
+    });
+    await Promise.resolve();
+    expect(disposeSettled).toBe(false);
+
+    releaseRead();
+
+    await disposePromise;
+    await expect(readPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    expect(readXcresult).toHaveBeenCalledWith(resultBundlePath, undefined, readSignal);
+  });
+
   it('synchronously aborts active builds before updater force-quit', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),

@@ -917,6 +917,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const buildDiagnostics = new Map<string, BuildDiagnosticRecord>();
   const buildDiagnosticExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const buildDiagnosticReaders = new Map<string, number>();
+  const buildDiagnosticReadExitController = new AbortController();
+  const activeBuildDiagnosticReads = new Set<Promise<void>>();
   const pendingBuildDiagnosticRemoval = new Map<string, BuildDiagnosticRecord>();
   let buildResultBundlesReconciled = false;
   let buildResultBundlesReconcilePromise: Promise<void> | null = null;
@@ -5385,16 +5387,36 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               };
             }
             if (diagnostic.xcresultText === null) {
-              buildDiagnosticReaders.set(
-                diagnosticsId,
-                (buildDiagnosticReaders.get(diagnosticsId) ?? 0) + 1,
-              );
-              try {
-                diagnostic.xcresultText = publicBuildText(
-                  await projectBuilder.readXcresult(diagnostic.resultBundlePath),
+              const readXcresult = projectBuilder.readXcresult.bind(projectBuilder);
+              const readOperation = (async () => {
+                buildDiagnosticReaders.set(
+                  diagnosticsId,
+                  (buildDiagnosticReaders.get(diagnosticsId) ?? 0) + 1,
                 );
+                try {
+                  const rawXcresult = await readXcresult(
+                    diagnostic.resultBundlePath!,
+                    undefined,
+                    buildDiagnosticReadExitController.signal,
+                  );
+                  if (buildDiagnosticReadExitController.signal.aborted) {
+                    throw new IOSSimulatorInstanceError(
+                      'MUTATION_CANCELLED',
+                      'The Xcode result bundle read was cancelled because the simulator host is shutting down.',
+                      true,
+                    );
+                  }
+                  assertHostActive();
+                  diagnostic.xcresultText = publicBuildText(rawXcresult);
+                } finally {
+                  await releaseBuildDiagnosticReader(diagnosticsId);
+                }
+              })();
+              activeBuildDiagnosticReads.add(readOperation);
+              try {
+                await readOperation;
               } finally {
-                await releaseBuildDiagnosticReader(diagnosticsId);
+                activeBuildDiagnosticReads.delete(readOperation);
               }
             }
             text = diagnostic.xcresultText;
@@ -5911,6 +5933,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     },
     abortOperationsForExit() {
       void abortPendingCreateReconciliation();
+      buildDiagnosticReadExitController.abort();
       try {
         actor.abortOperationsForExit();
       } catch (error) {
@@ -5946,6 +5969,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
         const pendingCreateReconciliation = abortPendingCreateReconciliation();
+        buildDiagnosticReadExitController.abort();
+        const buildDiagnosticReads = [...activeBuildDiagnosticReads];
         actor.abortOperationsForExit();
         const lifecycleStarts = actor.cancelAllLifecycleStarts();
         const mutations = actor.cancelAllMutations();
@@ -5963,6 +5988,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           lifecycleStarts,
           mutations,
           ...builds.map((build) => build.settled),
+          Promise.allSettled(buildDiagnosticReads).then(() => undefined),
         ]);
         clearVisualBaselines();
         await Promise.all(

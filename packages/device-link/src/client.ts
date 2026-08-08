@@ -265,6 +265,18 @@ const DEFAULT_TIMING: DeviceLinkTiming = {
 };
 
 /**
+ * 单趟帧预算的规范化:`Partial<DeviceLinkTiming>` 很容易把字段「可选值直塞」成
+ * undefined,object spread 会**覆盖**默认值,于是 Math.max(1, undefined) = NaN、
+ * `framesLeft <= 0` 恒为 false —— 预算被静默关掉,悄悄退回「一趟灌完整窗口」
+ * (copilot review)。非有限值 / ≤0 一律回退到常量默认,并向下取整。
+ */
+function normalizeRetryPassBudget(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return TRANSPORT_RETRY_PASS_BUDGET;
+  const floored = Math.floor(value);
+  return floored >= 1 ? floored : TRANSPORT_RETRY_PASS_BUDGET;
+}
+
+/**
  * 重连延迟计算(包内部工具,为确定性单测保持具名导出;**不属于稳定公共
  * API 面**,外部不应依赖):普通指数退避与拥塞冷却下限取 max,再做向下抖动
  * (0.7x–1.0x,与 scheduleReconnect 既有抖动语义一致)。
@@ -1168,7 +1180,8 @@ export class DeviceLinkClient {
       pending.attempts = 0;
       pending.lastSentAt = 0;
       pending.sent = false;
-      this.retryPending(dst, true);
+      // 生成 skip 占位不证明对端可达:立刻发,但仍受单趟预算约束(codex P2)。
+      this.retryPending(dst, { ignoreInterval: true, unlimited: false });
       return;
     }
   }
@@ -2294,7 +2307,8 @@ export class DeviceLinkClient {
     return true;
   }
 
-  private sendReliableFrames(peer: PeerTransportState, pending: PendingReliableMessage): void {
+  /** @returns 实际写进 ws 的**帧**数(一条逻辑消息可能分多帧);抛错时为已写出的帧数。 */
+  private sendReliableFrames(peer: PeerTransportState, pending: PendingReliableMessage): number {
     const frames = encodeReliableFrames(
       pending.envelope,
       peer.streamId,
@@ -2302,20 +2316,21 @@ export class DeviceLinkClient {
       this.getTransportBaseSeq(peer),
     );
     this.assertWebSocketCapacity(this.measureReliableFrames(frames));
-    let sentAny = false;
+    let sent = 0;
     try {
       for (const frame of frames) {
         this.sendEnvelope(frame);
         pending.sent = true;
-        sentAny = true;
+        sent += 1;
       }
     } finally {
-      if (sentAny) {
+      if (sent > 0) {
         pending.sent = true;
         pending.attempts++;
         pending.lastSentAt = Date.now();
       }
     }
+    return sent;
   }
 
   private measureReliableFrames(frames: readonly Envelope[]): number {
@@ -2739,17 +2754,24 @@ export class DeviceLinkClient {
     const peer = this.getPeerTransport(dst);
     if (peer.retryTimer) return;
     peer.retryTimer = setInterval(
-      () => this.retryPending(dst, false),
+      () => this.retryPending(dst, { ignoreInterval: false, unlimited: false }),
       this.timing.transportRetryIntervalMs,
     );
   }
 
   /**
-   * @param force true = 由「可达性刚被证明」的事件驱动(收到对端 link-accept 后的
-   *   replayPending、skip 占位替换),整趟不限条数;false = 定时器驱动,按
-   *   transportRetryPassBudget 限流(理由与线上证据见 TRANSPORT_RETRY_PASS_BUDGET)。
+   * 一趟重发。两个开关**刻意分开**——它们是两个独立的量,合成一个 `force` 会让「生成
+   * skip 占位」这类既不证明可达性、又需要立刻发出的路径顺带拿到无限预算(codex P2):
+   *
+   * @param opts.ignoreInterval 忽略 transportRetryIntervalMs 的最小间隔,本趟立刻发。
+   * @param opts.unlimited 不受单趟帧预算约束。**只有可达性刚被证明的路径才配**:收到
+   *   对端 link-accept 后的 replayPending。其余一切(定时器、skip 占位替换)都必须
+   *   受预算约束(理由与线上证据见 TRANSPORT_RETRY_PASS_BUDGET)。
    */
-  private retryPending(dst: string, force: boolean): void {
+  private retryPending(
+    dst: string,
+    opts: { ignoreInterval: boolean; unlimited: boolean },
+  ): void {
     const peer = this.peerTransport.get(dst);
     if (
       !peer
@@ -2763,21 +2785,30 @@ export class DeviceLinkClient {
     // 对端长期不 ACK 时预算会一直压在队头那几条上,这**不是饥饿**而是正确形状:接收端
     // 在拿到队头之前无法消费后面的 seq,重发队尾是无效工作。队头被累计 ACK 掉、窗口
     // 前移之后,后面的消息自然轮到(有交错用例锚定这两段行为)。
-    let budget = force ? Number.POSITIVE_INFINITY : Math.max(1, this.timing.transportRetryPassBudget);
+    //
+    // 预算按**帧**计而不是按逻辑消息计:压垮 relay 的是帧数,而一条 4MB 消息会被分成
+    // 32 片,按消息计数会让 8 条预算放出 ~256 帧,等于没限(greptile P1)。分片不能跨趟
+    // 拆开(接收端要整条重组),所以每趟**至少发一条**,发完再按帧数结算是否超预算。
+    let framesLeft = opts.unlimited
+      ? Number.POSITIVE_INFINITY
+      : normalizeRetryPassBudget(this.timing.transportRetryPassBudget);
     for (const pending of peer.pending.values()) {
-      if (!force && now - pending.lastSentAt < this.timing.transportRetryIntervalMs) continue;
+      if (!opts.ignoreInterval && now - pending.lastSentAt < this.timing.transportRetryIntervalMs) {
+        continue;
+      }
       if (pending.attempts >= this.timing.transportMaxRetryAttempts) {
         this.handleReliableRetryExhausted(dst, pending.seq);
         return;
       }
+      let sentFrames = 0;
       try {
-        this.sendReliableFrames(peer, pending);
+        sentFrames = this.sendReliableFrames(peer, pending);
       } catch (err) {
         this.log.debug(`reliable transport retry failed for ${dst.slice(0, 8)}`, err);
         break;
       }
-      budget -= 1;
-      if (budget <= 0) break;
+      framesLeft -= Math.max(1, sentFrames);
+      if (framesLeft <= 0) break;
     }
   }
 
@@ -2797,7 +2828,8 @@ export class DeviceLinkClient {
         pending.lastSentAt = 0;
       }
     }
-    this.retryPending(dst, true);
+    // 可达性刚被对端 link-accept 证明过:本趟不限预算,尽快把积压交付出去。
+    this.retryPending(dst, { ignoreInterval: true, unlimited: true });
     this.ensureRetryTimer(dst);
   }
 

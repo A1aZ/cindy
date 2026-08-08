@@ -1104,18 +1104,19 @@ export function resetTurnPersistState(sessionId: string): void {
  */
 export function onAssistantTextEvent(
   sessionId: string,
-  data: { text?: unknown; isFinal?: unknown },
+  data: { text?: unknown; isFinal?: unknown; isFullText?: unknown },
   agentMeta: AgentMeta | null,
 ): string | undefined {
   const text = typeof data.text === 'string' ? data.text : '';
   const isFinal = data.isFinal === true;
+  const isFullText = data.isFullText === true;
 
   if (isFinal) {
     const block = assistantBlocks.get(sessionId);
     if (block) {
-      // 流式确认:不落库,留给边界 flush。delta 已累积全文,isFinal.text 是冗余确认;
-      // 仅当 isFinal 带了更全的文本时兜底覆盖。meta 若带则更新。
-      if (text.length > block.text.length) block.text = text;
+      // 流式确认:不落库,留给边界 flush。仅显式 isFullText 表示 SDK 权威全文：
+      // Claude Code 的某些 isFinal 是局部 text block 或截断兜底尾段，不能覆盖整条消息。
+      if (text && isFullText) block.text = text;
       if (agentMeta) block.agentMeta = agentMeta;
       return block.persistId;
     }

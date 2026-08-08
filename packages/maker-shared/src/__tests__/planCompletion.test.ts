@@ -167,14 +167,29 @@ describe('applyCodexPlanSnapshotOnDone', () => {
     )).toEqual({ messages, changed: false, toolUseId: null });
   });
 
-  it('does not seal a failed or interrupted turn', () => {
+  it('does not seal a failed or interrupted turn, but stamps it as failed', () => {
+    // interrupted / failed 的 done 不盖章(任务还活着,计划必须留在屏幕上),
+    // 但要立即在内存补 turnCompleted:false——main 的落库印记在 done 广播之后
+    // 才异步到达,没有这枚即时印记,全勾完的中断计划会先被旧数据兜底隐藏、
+    // 再被落库行广播复活闪回。
     const message = planMessage('plan:stopped', [{ step: 'Inspect', status: 'in_progress' }]);
-    const messages = [message];
+    const result = applyCodexPlanSnapshotOnDone([message], null, 'stopped', 'interrupted');
 
-    expect(applyCodexPlanSnapshotOnDone(messages, null, 'stopped', 'interrupted')).toEqual({
-      messages,
+    expect(result.changed).toBe(true);
+    expect(result.toolUseId).toBe('plan:stopped');
+    expect(result.messages[0]).toMatchObject({
+      turnCompleted: false,
+      // 不盖章,步骤状态不动。
+      toolInput: { explanation: 'keep', plan: [{ step: 'Inspect', status: 'in_progress' }] },
+    });
+    expect(result.messages[0]).not.toHaveProperty('terminalPlanSnapshot');
+
+    // 已有印记时是纯 no-op,不重启胶囊计时。
+    const stamped = { ...message, turnCompleted: false };
+    expect(applyCodexPlanSnapshotOnDone([stamped], null, 'stopped', 'interrupted')).toEqual({
+      messages: [stamped],
       changed: false,
-      toolUseId: null,
+      toolUseId: 'plan:stopped',
     });
   });
 });

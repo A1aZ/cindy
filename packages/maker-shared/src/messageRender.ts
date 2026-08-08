@@ -597,7 +597,12 @@ export interface CodexPlanSnapshotApplyResult<
  *
  * Interrupted / failed turns, and any turn whose id does not match, seal
  * nothing: the task is still alive and the user is usually about to steer it,
- * so the plan must stay on screen.
+ * so the plan must stay on screen. A matching non-successful terminal `done`
+ * does stamp `turnCompleted:false` on its plan row, immediately in memory —
+ * main's durable stamp (`persistCodexPlanOnDone`) lands asynchronously after
+ * this event is broadcast, and without the in-memory twin an all-done
+ * interrupted plan would be retired by the legacy fallback the moment
+ * streaming ends, then flash back when the durable row arrives.
  */
 export function applyCodexPlanSnapshotOnDone<
   TMessage extends MessageRenderSourceMessageLike,
@@ -610,7 +615,10 @@ export function applyCodexPlanSnapshotOnDone<
 ): CodexPlanSnapshotApplyResult<TMessage> {
   const authoritativeSnapshot = Array.isArray(snapshot) ? snapshot : null;
   const sealsTurn = terminalStatus === 'completed' && Boolean(turnId);
-  if (!authoritativeSnapshot && !sealsTurn) {
+  // done 恒为终态:status 不是 completed(interrupted / failed)即失败终态。
+  const stampsFailed =
+    Boolean(turnId) && typeof terminalStatus === 'string' && terminalStatus !== 'completed';
+  if (!authoritativeSnapshot && !sealsTurn && !stampsFailed) {
     return { messages, changed: false, toolUseId: null };
   }
   const expectedToolUseId = turnId ? `plan:${turnId}` : null;
@@ -632,7 +640,9 @@ export function applyCodexPlanSnapshotOnDone<
     // Seal an already-sealed row again would be a no-op update that still
     // restarts the capsule's grace timer, so treat it as unchanged.
     const sealChanged = sealsTurn && message.terminalPlanSnapshot !== true;
-    if (!planChanged && !sealChanged) {
+    const failChanged =
+      stampsFailed && message.terminalPlanSnapshot !== true && message.turnCompleted !== false;
+    if (!planChanged && !sealChanged && !failChanged) {
       return { messages, changed: false, toolUseId };
     }
 
@@ -647,6 +657,7 @@ export function applyCodexPlanSnapshotOnDone<
               : {}),
           }
         : {}),
+      ...(failChanged ? { turnCompleted: false } : {}),
       ...(typeof planUpdatedAtMs === 'number' && Number.isFinite(planUpdatedAtMs)
         ? { planUpdatedAtMs }
         : {}),

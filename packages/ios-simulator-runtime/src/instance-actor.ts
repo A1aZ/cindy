@@ -746,7 +746,7 @@ export class IOSSimulatorInstanceActor {
       device: {
         ...input.templateDevice,
         udid: created.udid,
-        name: created.name,
+        name: input.name,
         state: "Shutdown",
         lastBootedAt: null,
       },
@@ -797,6 +797,17 @@ export class IOSSimulatorInstanceActor {
           ),
         );
         this.#throwCreateFailure(cleanupRequired, signal);
+        if (created.name !== input.name) {
+          if (!this.#lifecycle.renameExact) {
+            throw new IOSSimulatorInstanceError(
+              "SIMULATOR_CREATE_FAILED",
+              "The simulator lifecycle cannot finalize the created device name.",
+              true,
+            );
+          }
+          await this.#lifecycle.renameExact(created.udid, input.name, signal);
+          this.#throwCreateFailure(cleanupRequired, signal);
+        }
         return rollbackBinding;
       } catch (error) {
         const current = this.#bindingForUdid(created.udid);

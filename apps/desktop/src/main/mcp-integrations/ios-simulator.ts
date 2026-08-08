@@ -82,6 +82,7 @@ import type {
   GhostIOSSimulatorStatusSnapshot,
 } from '../../shared/ghost.js';
 import { createLogger } from '../logger.js';
+import { redact } from '../log-upload/redact.js';
 import { withSessionRouteLock } from '../localDb/sessionRouteLock.js';
 import { desktopSessionStorage } from '../maker-host/session-storage.js';
 import { isTrustedAppRendererWindow } from '../security/trustedAppRenderer.js';
@@ -180,6 +181,8 @@ export interface IOSSimulatorHostOptions {
   mediaCapture?: IOSSimulatorMediaCaptureAdapter;
   diagnosticsStore?: IOSSimulatorDiagnosticsStore;
   resourceScheduler?: IOSSimulatorResourceScheduler;
+  /** Fail-closed gate supplied by the persisted registry owner. */
+  canReconcilePendingCreates?: () => boolean;
   /** Recycle an idle WDA process while retaining the booted simulator binding. */
   idleRecycleMs?: number;
   /** Minimum interval between exact-UDID CoreSimulator liveness checks. */
@@ -299,6 +302,7 @@ export function createRegistryBackedIOSSimulatorActor(
   actor: IOSSimulatorInstanceActor;
   flush: () => Promise<void>;
   release: () => void;
+  canReconcilePendingCreates: () => boolean;
 } {
   let ownsWriterLease = false;
   let startupError: unknown = null;
@@ -357,6 +361,7 @@ export function createRegistryBackedIOSSimulatorActor(
         if (registry.isWriter && !startupError) registry.saveSync(store.listAll());
       },
       release: () => registry.releaseWriterSync(),
+      canReconcilePendingCreates: () => !startupError && registry.isWriter,
     };
   } catch (error) {
     registry.releaseWriterSync();
@@ -370,6 +375,16 @@ function createDefaultOwnershipRegistry(): IOSSimulatorOwnershipRegistryFile {
   );
 }
 
+function createProfileScopedIOSSimulatorLifecycle(
+  registry: IOSSimulatorOwnershipRegistryFile,
+): IOSSimulatorSimctlLifecycle {
+  const createMarkerNamespace = createHash('sha256')
+    .update(path.resolve(registry.filePath))
+    .digest('hex')
+    .slice(0, 16);
+  return createIOSSimulatorSimctlLifecycle({ createMarkerNamespace });
+}
+
 function createDefaultActor(
   lifecycle: IOSSimulatorSimctlLifecycle,
   registry = createDefaultOwnershipRegistry(),
@@ -377,6 +392,7 @@ function createDefaultActor(
   actor: IOSSimulatorInstanceActor;
   flush: () => Promise<void>;
   release: () => void;
+  canReconcilePendingCreates: () => boolean;
 } {
   const persisted = createRegistryBackedIOSSimulatorActor(lifecycle, registry);
   if (!registry.isWriter) {
@@ -703,7 +719,7 @@ function publicNativeSidecarDiagnostics(
 }
 
 function publicBuildText(value: string): string {
-  return value
+  return redact(value)
     .replace(/https?:\/\/[^\s)]+/gi, '<redacted-url>')
     .replace(/(?:\/Users\/|\/private\/var\/|\/tmp\/)[^\s"']+/g, '<redacted-path>')
     .slice(-2 * 1024 * 1024);
@@ -930,7 +946,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   >();
   let ownershipReconciled = false;
   let ownershipReconcilePromise: Promise<void> | null = null;
+  let pendingCreateReconcileController: AbortController | null = null;
+  let pendingCreateReconcilePromise: Promise<readonly string[]> | null = null;
   let disposePromise: Promise<void> | null = null;
+  const canReconcilePendingCreates = options.canReconcilePendingCreates ?? (() => true);
+
+  function abortPendingCreateReconciliation(): Promise<void> {
+    pendingCreateReconcileController?.abort();
+    return (
+      pendingCreateReconcilePromise?.then(
+        () => undefined,
+        () => undefined,
+      ) ?? Promise.resolve()
+    );
+  }
   const pushRouteStatus =
     options.pushRouteStatus ??
     ((status: IOSSimulatorPublicRouteStatus) => {
@@ -2271,6 +2300,40 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (ownershipReconciled) return;
     if (ownershipReconcilePromise) return ownershipReconcilePromise;
     ownershipReconcilePromise = (async () => {
+      let complete = true;
+      const persistedInstances = actor.listAll();
+      if (lifecycle.reconcilePendingCreates && persistedInstances.length > 0) {
+        if (!canReconcilePendingCreates()) {
+          complete = false;
+        } else {
+          const controller = new AbortController();
+          const reconciliation = lifecycle.reconcilePendingCreates(
+            persistedInstances.map((instance) => ({
+              udid: instance.simulatorUdid,
+              name: instance.simulatorName,
+            })),
+            controller.signal,
+          );
+          pendingCreateReconcileController = controller;
+          pendingCreateReconcilePromise = reconciliation;
+          try {
+            await reconciliation;
+          } catch (error) {
+            complete = false;
+            if (!disposePromise) {
+              logger.warn('Interrupted simulator create reconciliation will retry', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } finally {
+            if (pendingCreateReconcileController === controller) {
+              pendingCreateReconcileController = null;
+              pendingCreateReconcilePromise = null;
+            }
+          }
+        }
+      }
+      if (disposePromise) return;
       await reconcileOrphanedBuildResultBundles();
       if (disposePromise) return;
       const environment = await runtime.inspect();
@@ -2279,7 +2342,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       const devices = new Map(
         environment.devices.map((device) => [device.udid.toUpperCase(), device]),
       );
-      let complete = true;
       for (const snapshot of actor.listAll()) {
         const instanceComplete = await withSessionLock(snapshot.sessionId, () =>
           reconcilePersistedInstance(snapshot, devices),
@@ -5770,6 +5832,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return cleanupRemovedSessionRuntime(sessionId);
     },
     abortOperationsForExit() {
+      void abortPendingCreateReconciliation();
       try {
         actor.abortOperationsForExit();
       } catch (error) {
@@ -5804,6 +5867,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     dispose() {
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
+        const pendingCreateReconciliation = abortPendingCreateReconciliation();
         actor.abortOperationsForExit();
         const lifecycleStarts = actor.cancelAllLifecycleStarts();
         const mutations = actor.cancelAllMutations();
@@ -5816,7 +5880,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             error: error instanceof Error ? error.message : String(error),
           });
         });
-        await Promise.all([lifecycleStarts, mutations, ...builds.map((build) => build.settled)]);
+        await Promise.all([
+          pendingCreateReconciliation,
+          lifecycleStarts,
+          mutations,
+          ...builds.map((build) => build.settled),
+        ]);
         clearVisualBaselines();
         await Promise.all(
           [...buildDiagnostics.entries()].map(([diagnosticsId, diagnostic]) =>
@@ -5899,6 +5968,7 @@ function installDefaultIOSSimulatorHost(
     const host = createIOSSimulatorHost({
       lifecycle,
       actor: persistedActor.actor,
+      canReconcilePendingCreates: persistedActor.canReconcilePendingCreates,
       driverManager: createDefaultDriverManager(),
     });
     configureIOSSimulatorRendererAccessRevocationObserver((grants) => {
@@ -5936,8 +6006,9 @@ export function initializeIOSSimulatorHost(): IOSSimulatorHost {
     throw new Error('The iOS Simulator host is shutting down.');
   }
 
-  const lifecycle = createIOSSimulatorSimctlLifecycle();
-  const persistedActor = createDefaultActor(lifecycle);
+  const registry = createDefaultOwnershipRegistry();
+  const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
+  const persistedActor = createDefaultActor(lifecycle, registry);
   return installDefaultIOSSimulatorHost(lifecycle, persistedActor);
 }
 
@@ -6037,11 +6108,12 @@ export function reconcilePersistedIOSSimulatorOwnership(): Promise<void> {
         true,
       );
     }
-    if (registry.loadSync().length === 0) {
+    const persistedInstances = registry.loadSync();
+    if (persistedInstances.length === 0) {
       registry.releaseWriterSync();
       return Promise.resolve();
     }
-    const lifecycle = createIOSSimulatorSimctlLifecycle();
+    const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
     const persistedActor = createDefaultActor(lifecycle, registry);
     const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
     registryTransferred = true;
@@ -6105,7 +6177,7 @@ export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<vo
     // Keep the same writer lease from the authoritative read through Host
     // installation. Releasing and reacquiring here would reopen the race with
     // another Cindy process attaching this task while it is being removed.
-    const lifecycle = createIOSSimulatorSimctlLifecycle();
+    const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
     const persistedActor = createDefaultActor(lifecycle, registry);
     const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
     registryTransferred = true;

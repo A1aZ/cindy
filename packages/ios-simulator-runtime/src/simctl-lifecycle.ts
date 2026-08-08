@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,11 +7,28 @@ import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
 import { IOSSimulatorInstanceError } from "./instance-errors.js";
 import type { IOSSimulatorCreatedDevice } from "./instance-types.js";
 import { parseSimctlListJson } from "./simctl-parser.js";
-import type { IOSSimulatorCommandRunner, IOSSimulatorDevice } from "./types.js";
+import type {
+  IOSSimulatorCommandResult,
+  IOSSimulatorCommandRunner,
+  IOSSimulatorDevice,
+} from "./types.js";
 
 const XCRUN = "/usr/bin/xcrun";
 const UUID_PATTERN = /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/;
 const CREATE_ABORT_CLEANUP_TIMEOUT_MS = 4_000;
+const CREATE_ABORT_RECONCILE_TIMEOUT_MS = 3_000;
+const CREATE_MARKER_PREFIX = "__CindyPending__";
+const CREATE_MARKER_UUID_PATTERN =
+  /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const ANY_CREATE_MARKER_PATTERN = new RegExp(
+  `^${CREATE_MARKER_PREFIX}[A-Za-z0-9_-]{8,64}__${CREATE_MARKER_UUID_PATTERN.source.slice(1, -1)}$`,
+  "i",
+);
+
+/** Internal create markers are recovery evidence, never user-attachable devices. */
+export function isIOSSimulatorPendingCreateName(name: string): boolean {
+  return ANY_CREATE_MARKER_PATTERN.test(name);
+}
 
 export interface IOSSimulatorLifecycleClock {
   now(): number;
@@ -22,6 +40,8 @@ export interface IOSSimulatorSimctlLifecycleOptions {
   clock?: IOSSimulatorLifecycleClock;
   bootTimeoutMs?: number;
   pollIntervalMs?: number;
+  /** Stable, non-secret profile identity used to recover interrupted creates. */
+  createMarkerNamespace?: string;
 }
 
 /**
@@ -109,6 +129,13 @@ export interface IOSSimulatorSimctlLifecycle {
     },
     signal?: AbortSignal,
   ): Promise<IOSSimulatorCreatedDevice>;
+  /** Rename only an exact UUID after ownership has been persisted. */
+  renameExact?(udid: string, name: string, signal?: AbortSignal): Promise<void>;
+  /** Rename only exact markers already proven owned by this profile. */
+  reconcilePendingCreates?(
+    ownedDevices: readonly { udid: string; name: string }[],
+    signal?: AbortSignal,
+  ): Promise<readonly string[]>;
   deleteExact(udid: string, signal?: AbortSignal): Promise<void>;
   /** Set the simulated system appearance without bringing Simulator.app forward. */
   setAppearance?(
@@ -183,6 +210,17 @@ function requireIdentifier(value: string, label: string): string {
     throw new IOSSimulatorInstanceError(
       "INVALID_ARGUMENT",
       `${label} is invalid`,
+    );
+  }
+  return normalized;
+}
+
+function requireCreateMarkerNamespace(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9_-]{8,64}$/.test(normalized)) {
+    throw new IOSSimulatorInstanceError(
+      "INVALID_ARGUMENT",
+      "createMarkerNamespace is invalid",
     );
   }
   return normalized;
@@ -451,6 +489,10 @@ export function createIOSSimulatorSimctlLifecycle(
   const clock = options.clock ?? defaultClock();
   const bootTimeoutMs = options.bootTimeoutMs ?? 120_000;
   const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+  const createMarkerNamespace = requireCreateMarkerNamespace(
+    options.createMarkerNamespace ?? randomUUID().replaceAll("-", ""),
+  );
+  const createMarkerPrefix = `${CREATE_MARKER_PREFIX}${createMarkerNamespace}__`;
   if (bootTimeoutMs <= 0 || pollIntervalMs <= 0) {
     throw new IOSSimulatorInstanceError(
       "INVALID_ARGUMENT",
@@ -467,10 +509,25 @@ export function createIOSSimulatorSimctlLifecycle(
     return result;
   }
 
-  async function cleanupFailedCreate(udid: string): Promise<void> {
-    const result = await runner.run(XCRUN, ["simctl", "delete", udid], {
-      timeoutMs: CREATE_ABORT_CLEANUP_TIMEOUT_MS,
-    });
+  function isPendingCreateName(name: string): boolean {
+    return (
+      isIOSSimulatorPendingCreateName(name) &&
+      name.startsWith(createMarkerPrefix) &&
+      CREATE_MARKER_UUID_PATTERN.test(name.slice(createMarkerPrefix.length))
+    );
+  }
+
+  async function cleanupFailedCreate(
+    udid: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const result = await runner.run(
+      XCRUN,
+      ["simctl", "delete", udid],
+      signal
+        ? { timeoutMs: CREATE_ABORT_CLEANUP_TIMEOUT_MS, signal }
+        : { timeoutMs: CREATE_ABORT_CLEANUP_TIMEOUT_MS },
+    );
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "SIMULATOR_DELETE_FAILED",
@@ -478,6 +535,27 @@ export function createIOSSimulatorSimctlLifecycle(
         true,
       );
     }
+  }
+
+  async function recoverCreatedMarker(
+    markerName: string,
+    deviceTypeIdentifier: string,
+    runtimeIdentifier: string,
+    signal: AbortSignal,
+  ): Promise<IOSSimulatorDevice | null> {
+    const result = await runner.run(XCRUN, ["simctl", "list", "-j"], {
+      timeoutMs: CREATE_ABORT_CLEANUP_TIMEOUT_MS,
+      signal,
+    });
+    if (result.exitCode !== 0 || signal.aborted) return null;
+    const candidates = parseSimctlListJson(result.stdout).devices.filter(
+      (device) =>
+        device.name === markerName &&
+        device.runtimeIdentifier === runtimeIdentifier &&
+        device.deviceTypeIdentifier === deviceTypeIdentifier &&
+        UUID_PATTERN.test(device.udid.toUpperCase()),
+    );
+    return candidates.length === 1 ? candidates[0]! : null;
   }
 
   async function list(signal?: AbortSignal): Promise<IOSSimulatorDevice[]> {
@@ -506,6 +584,26 @@ export function createIOSSimulatorSimctlLifecycle(
         (device) => device.udid.toUpperCase() === normalized,
       ) ?? null
     );
+  }
+
+  async function renameExact(
+    udid: string,
+    name: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const normalized = requireUdid(udid);
+    const targetName = requireIdentifier(name, "name");
+    const result = await runSimctl(
+      ["simctl", "rename", normalized, targetName],
+      signal,
+    );
+    if (result.exitCode !== 0) {
+      throw new IOSSimulatorInstanceError(
+        "SIMULATOR_CREATE_FAILED",
+        "The newly created iOS Simulator could not be named.",
+        true,
+      );
+    }
   }
 
   return {
@@ -627,7 +725,7 @@ export function createIOSSimulatorSimctlLifecycle(
     },
 
     async createExact(input, signal): Promise<IOSSimulatorCreatedDevice> {
-      const name = requireIdentifier(input.name, "name");
+      requireIdentifier(input.name, "name");
       const deviceTypeIdentifier = requireIdentifier(
         input.deviceTypeIdentifier,
         "deviceTypeIdentifier",
@@ -636,46 +734,135 @@ export function createIOSSimulatorSimctlLifecycle(
         input.runtimeIdentifier,
         "runtimeIdentifier",
       );
+      const markerName = `${createMarkerPrefix}${randomUUID()}`;
       throwIfAborted(signal);
-      const result = await runner.run(
-        XCRUN,
-        ["simctl", "create", name, deviceTypeIdentifier, runtimeIdentifier],
-        signal ? { timeoutMs: 60_000, signal } : { timeoutMs: 60_000 },
-      );
-      const udid = result.stdout.trim().toUpperCase();
-      const hasExactCreatedDevice = UUID_PATTERN.test(udid);
+      let result: IOSSimulatorCommandResult | null = null;
+      let commandError: unknown = null;
+      try {
+        result = await runner.run(
+          XCRUN,
+          [
+            "simctl",
+            "create",
+            markerName,
+            deviceTypeIdentifier,
+            runtimeIdentifier,
+          ],
+          signal ? { timeoutMs: 60_000, signal } : { timeoutMs: 60_000 },
+        );
+      } catch (error) {
+        commandError = error;
+      }
+
+      const stdoutUdid = result?.stdout.trim().toUpperCase() ?? "";
+      let createdDevice: IOSSimulatorCreatedDevice | null = UUID_PATTERN.test(
+        stdoutUdid,
+      )
+        ? {
+            udid: stdoutUdid,
+            name: markerName,
+            runtimeIdentifier,
+            deviceTypeIdentifier,
+          }
+        : null;
       const createFailure =
-        result.exitCode !== 0 || !hasExactCreatedDevice
+        commandError ??
+        (result?.exitCode !== 0
           ? new IOSSimulatorInstanceError(
               "SIMULATOR_CREATE_FAILED",
               "The iOS Simulator device could not be created.",
             )
-          : null;
-      if (hasExactCreatedDevice && (signal?.aborted || createFailure)) {
-        const createdDevice = {
-          udid,
-          name,
-          runtimeIdentifier,
-          deviceTypeIdentifier,
-        };
+          : null);
+
+      // CoreSimulator may commit the device before a cancelled xcrun flushes
+      // its UUID. The random profile marker remains in CoreSimulator itself,
+      // so one bounded post-create list can recover only this operation.
+      let cleanupController: AbortController | null = null;
+      let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
+      if (!createdDevice) {
+        cleanupController = new AbortController();
+        cleanupTimer = setTimeout(
+          () => cleanupController?.abort(),
+          CREATE_ABORT_RECONCILE_TIMEOUT_MS,
+        );
+        cleanupTimer.unref?.();
+        try {
+          const recovered = await recoverCreatedMarker(
+            markerName,
+            deviceTypeIdentifier,
+            runtimeIdentifier,
+            cleanupController.signal,
+          );
+          if (recovered) {
+            createdDevice = {
+              udid: recovered.udid.toUpperCase(),
+              name: markerName,
+              runtimeIdentifier,
+              deviceTypeIdentifier,
+            };
+          }
+        } catch {
+          // The marker is profile-scoped and remains recoverable on startup.
+        }
+      }
+
+      if (createdDevice && (signal?.aborted || createFailure)) {
         const originalReason = signal?.aborted ? signal.reason : createFailure;
         try {
-          await cleanupFailedCreate(udid);
+          await cleanupFailedCreate(
+            createdDevice.udid,
+            cleanupController?.signal,
+          );
         } catch (error) {
           throw new IOSSimulatorCreateCleanupRequiredError(
             createdDevice,
             originalReason,
-            {
-              cause: error,
-            },
+            { cause: error },
           );
+        } finally {
+          if (cleanupTimer) clearTimeout(cleanupTimer);
         }
+      } else if (cleanupTimer) {
+        clearTimeout(cleanupTimer);
       }
       if (signal?.aborted) {
         throwIfAborted(signal);
       }
+      if (commandError) throw commandError;
       if (createFailure) throw createFailure;
-      return { udid, name, runtimeIdentifier, deviceTypeIdentifier };
+      if (!createdDevice) {
+        throw new IOSSimulatorInstanceError(
+          "SIMULATOR_CREATE_FAILED",
+          "The iOS Simulator device could not be created.",
+        );
+      }
+      return createdDevice;
+    },
+
+    renameExact,
+
+    async reconcilePendingCreates(
+      ownedDevices,
+      signal,
+    ): Promise<readonly string[]> {
+      const owned = new Map(
+        ownedDevices.map((device) => [
+          requireUdid(device.udid),
+          requireIdentifier(device.name, "name"),
+        ]),
+      );
+      const pending = (await list(signal)).filter(
+        (device) =>
+          isPendingCreateName(device.name) &&
+          owned.has(device.udid.toUpperCase()),
+      );
+      const reconciled: string[] = [];
+      for (const device of pending) {
+        const udid = device.udid.toUpperCase();
+        await renameExact(udid, owned.get(udid)!, signal);
+        reconciled.push(udid);
+      }
+      return reconciled;
     },
 
     async deleteExact(udid, signal): Promise<void> {

@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
 import { IOSSimulatorInstanceError } from "./instance-errors.js";
+import { createWdaChildEnvironment } from "./wda/build-plan.js";
 import type {
   IOSSimulatorCommandResult,
   IOSSimulatorCommandRunner,
@@ -45,6 +46,8 @@ export class IOSSimulatorProjectBuildError extends IOSSimulatorInstanceError {
 export interface IOSSimulatorProjectBuilderOptions {
   commandRunner?: IOSSimulatorCommandRunner;
   buildTimeoutMs?: number;
+  /** Test/integration seam; only the shared child-process allowlist is retained. */
+  environment?: NodeJS.ProcessEnv;
 }
 
 export interface IOSSimulatorMobileMetroStatus {
@@ -161,11 +164,15 @@ function throwIfLaunchValidationCancelled(signal?: AbortSignal): void {
 export class IOSSimulatorProjectBuilder {
   readonly #runner: IOSSimulatorCommandRunner;
   readonly #buildTimeoutMs: number;
+  readonly #childEnvironment: NodeJS.ProcessEnv;
 
   constructor(options: IOSSimulatorProjectBuilderOptions = {}) {
     this.#runner =
       options.commandRunner ?? createNodeIOSSimulatorCommandRunner();
     this.#buildTimeoutMs = options.buildTimeoutMs ?? 30 * 60_000;
+    this.#childEnvironment = createWdaChildEnvironment(
+      options.environment ?? process.env,
+    );
   }
 
   async inspect(
@@ -293,6 +300,7 @@ export class IOSSimulatorProjectBuilder {
           timeoutMs: this.#buildTimeoutMs,
           maxBufferBytes: 1024 * 1024,
           signal: input.signal,
+          env: this.#childEnvironment,
         },
       );
       await throwIfBuildCancelled(input.signal);
@@ -349,6 +357,7 @@ export class IOSSimulatorProjectBuilder {
         timeoutMs: 60_000,
         maxBufferBytes: 1024 * 1024,
         signal: input.signal,
+        env: this.#childEnvironment,
       },
     );
     await throwIfBuildCancelled(input.signal);
@@ -418,6 +427,7 @@ export class IOSSimulatorProjectBuilder {
         timeoutMs: this.#buildTimeoutMs,
         maxBufferBytes: 1024 * 1024,
         signal: input.signal,
+        env: this.#childEnvironment,
       },
     );
     await throwIfBuildCancelled(input.signal, resultBundlePath);
@@ -443,6 +453,7 @@ export class IOSSimulatorProjectBuilder {
         timeoutMs: 60_000,
         maxBufferBytes: 4 * 1024 * 1024,
         signal: input.signal,
+        env: this.#childEnvironment,
       },
     );
     await throwIfBuildCancelled(input.signal, resultBundlePath);
@@ -510,7 +521,9 @@ export class IOSSimulatorProjectBuilder {
     throwIfLaunchValidationCancelled(signal);
     if (project.kind !== "cindy-mobile") return null;
     const exactSimulatorUdid = simulatorUdid.trim().toUpperCase();
-    if (!/^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(exactSimulatorUdid)) {
+    if (
+      !/^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(exactSimulatorUdid)
+    ) {
       throw new IOSSimulatorInstanceError(
         "INVALID_ARGUMENT",
         "simulatorUdid must be an exact simulator UUID",
@@ -518,18 +531,13 @@ export class IOSSimulatorProjectBuilder {
     }
     const result = await this.#runner.run(
       "pnpm",
-      [
-        "mobile:sim:whoami",
-        "--",
-        "--json",
-        "--udid",
-        exactSimulatorUdid,
-      ],
+      ["mobile:sim:whoami", "--", "--json", "--udid", exactSimulatorUdid],
       {
         cwd: project.worktreeRoot,
         timeoutMs: 60_000,
         maxBufferBytes: 2 * 1024 * 1024,
         signal,
+        env: this.#childEnvironment,
       },
     );
     throwIfLaunchValidationCancelled(signal);
@@ -578,7 +586,11 @@ export class IOSSimulatorProjectBuilder {
     const result = await this.#runner.run(
       "xcrun",
       ["xcresulttool", "get", "--path", resultBundlePath, "--format", "json"],
-      { timeoutMs: 60_000, maxBufferBytes },
+      {
+        timeoutMs: 60_000,
+        maxBufferBytes,
+        env: this.#childEnvironment,
+      },
     );
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(

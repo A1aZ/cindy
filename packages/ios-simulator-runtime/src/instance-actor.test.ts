@@ -891,8 +891,52 @@ describe("IOSSimulatorInstanceActor", () => {
     );
     expect(created).toMatchObject({
       simulatorUdid: createdUdid,
+      simulatorName: "Cindy iPhone",
       creationProvenance: "cindy",
       lifecycleState: "stopped",
+    });
+  });
+
+  it("persists exact ownership before renaming an interrupted-create marker", async () => {
+    const harness = createHarness();
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const markerName =
+      "__CindyPending__testprofile__11111111-2222-4333-8444-555555555555";
+    vi.mocked(harness.lifecycle.createExact).mockResolvedValue({
+      udid: createdUdid,
+      name: markerName,
+      runtimeIdentifier: DEVICE.runtimeIdentifier,
+      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+    });
+    harness.lifecycle.renameExact = vi.fn(async (udid, name) => {
+      expect(harness.store.listAll()).toEqual([
+        expect.objectContaining({
+          simulatorUdid: createdUdid,
+          simulatorName: "Cindy iPhone",
+          sessionId: "session-a",
+        }),
+      ]);
+      expect(udid).toBe(createdUdid);
+      expect(name).toBe("Cindy iPhone");
+    });
+    await harness.actor.detach(harness.route());
+
+    const created = await harness.actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: "Cindy iPhone",
+      templateDevice: DEVICE,
+    });
+
+    expect(harness.lifecycle.renameExact).toHaveBeenCalledWith(
+      createdUdid,
+      "Cindy iPhone",
+      expect.any(AbortSignal),
+    );
+    expect(created).toMatchObject({
+      simulatorUdid: createdUdid,
+      simulatorName: "Cindy iPhone",
     });
   });
 

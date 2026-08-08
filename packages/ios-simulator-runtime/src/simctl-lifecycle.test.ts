@@ -8,8 +8,17 @@ import {
 import type { IOSSimulatorCommandRunner } from "./types.js";
 
 const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
+const DEVICE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro";
+const RUNTIME = "com.apple.CoreSimulator.SimRuntime.iOS-26-4";
 
-function listJson(state: string): string {
+function devicesJson(
+  devices: Array<{
+    udid: string;
+    name: string;
+    state?: string;
+    deviceTypeIdentifier?: string;
+  }>,
+): string {
   return JSON.stringify({
     runtimes: [
       {
@@ -20,18 +29,18 @@ function listJson(state: string): string {
       },
     ],
     devices: {
-      "com.apple.CoreSimulator.SimRuntime.iOS-26-4": [
-        {
-          udid: UDID,
-          name: "iPhone 17 Pro",
-          state,
-          isAvailable: true,
-          deviceTypeIdentifier:
-            "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
-        },
-      ],
+      [RUNTIME]: devices.map((device) => ({
+        ...device,
+        state: device.state ?? "Shutdown",
+        isAvailable: true,
+        deviceTypeIdentifier: device.deviceTypeIdentifier ?? DEVICE_TYPE,
+      })),
     },
   });
+}
+
+function listJson(state: string): string {
+  return devicesJson([{ udid: UDID, name: "iPhone 17 Pro", state }]);
 }
 
 describe("createIOSSimulatorSimctlLifecycle", () => {
@@ -245,6 +254,7 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     );
     const lifecycle = createIOSSimulatorSimctlLifecycle({
       commandRunner: { run },
+      createMarkerNamespace: "testprofile",
     });
 
     await lifecycle.createExact({
@@ -253,6 +263,7 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
         "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
       runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
     });
+    await lifecycle.renameExact?.(UDID, "Cindy iPhone");
     await lifecycle.shutdownExact(UDID);
     await lifecycle.deleteExact(UDID);
 
@@ -261,12 +272,18 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
       [
         "simctl",
         "create",
-        "Cindy iPhone",
+        expect.stringMatching(/^__CindyPending__testprofile__[0-9a-f-]{36}$/),
         "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
         "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
       ],
       { timeoutMs: 60_000 },
     );
+    expect(run).toHaveBeenCalledWith("/usr/bin/xcrun", [
+      "simctl",
+      "rename",
+      UDID,
+      "Cindy iPhone",
+    ]);
     expect(run).toHaveBeenCalledWith("/usr/bin/xcrun", [
       "simctl",
       "shutdown",
@@ -276,6 +293,124 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
       "simctl",
       "delete",
       UDID,
+    ]);
+  });
+
+  it("recovers and deletes a cancelled create whose UUID never reached stdout", async () => {
+    const controller = new AbortController();
+    const reason = new Error("create cancelled before stdout");
+    const preexistingUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    let markerName = "";
+    let createSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "create") {
+          markerName = args[2]!;
+          createSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return { stdout: "", stderr: "", exitCode: null };
+        }
+        if (args[1] === "list") {
+          return {
+            stdout: devicesJson([
+              {
+                udid: preexistingUdid,
+                name: "Cindy iPhone",
+              },
+              { udid: UDID, name: markerName },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "delete" || args[1] === "rename") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      createMarkerNamespace: "testprofile",
+    });
+
+    const creating = lifecycle.createExact(
+      {
+        name: "Cindy iPhone",
+        deviceTypeIdentifier: DEVICE_TYPE,
+        runtimeIdentifier: RUNTIME,
+      },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(createSignal).toBe(controller.signal));
+    controller.abort(reason);
+
+    await expect(creating).rejects.toBe(reason);
+    expect(markerName).toMatch(/^__CindyPending__testprofile__[0-9a-f-]{36}$/);
+    const deleteCalls = run.mock.calls.filter(
+      ([, args]) => args[1] === "delete",
+    );
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0]?.[1]).toEqual(["simctl", "delete", UDID]);
+    expect(JSON.stringify(deleteCalls)).not.toContain(preexistingUdid);
+  });
+
+  it("renames only this profile's markers with persisted exact ownership", async () => {
+    const ownedUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const otherProfileUdid = "3A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const ordinaryUdid = "4A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args) => {
+        if (args[1] === "list") {
+          return {
+            stdout: devicesJson([
+              {
+                udid: UDID,
+                name: "__CindyPending__profilealpha__11111111-2222-4333-8444-555555555555",
+              },
+              {
+                udid: ownedUdid,
+                name: "__CindyPending__profilealpha__22222222-3333-4444-8555-666666666666",
+              },
+              {
+                udid: otherProfileUdid,
+                name: "__CindyPending__profilebeta__33333333-4444-4555-8666-777777777777",
+              },
+              { udid: ordinaryUdid, name: "Cindy iPhone" },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "delete" || args[1] === "rename") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      createMarkerNamespace: "profilealpha",
+    });
+
+    await expect(
+      lifecycle.reconcilePendingCreates?.([
+        { udid: ownedUdid, name: "Cindy Restored iPhone" },
+      ]),
+    ).resolves.toEqual([ownedUdid]);
+    const deleteCalls = run.mock.calls.filter(
+      ([, args]) => args[1] === "delete",
+    );
+    expect(deleteCalls).toHaveLength(0);
+    expect(run).toHaveBeenCalledWith("/usr/bin/xcrun", [
+      "simctl",
+      "rename",
+      ownedUdid,
+      "Cindy Restored iPhone",
     ]);
   });
 
@@ -299,6 +434,7 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     );
     const lifecycle = createIOSSimulatorSimctlLifecycle({
       commandRunner: { run },
+      createMarkerNamespace: "testprofile",
     });
 
     const creating = lifecycle.createExact(
@@ -320,7 +456,7 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
       [
         "simctl",
         "create",
-        "Cindy iPhone",
+        expect.stringMatching(/^__CindyPending__testprofile__[0-9a-f-]{36}$/),
         "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
         "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
       ],
@@ -354,6 +490,7 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     );
     const lifecycle = createIOSSimulatorSimctlLifecycle({
       commandRunner: { run },
+      createMarkerNamespace: "testprofile",
     });
 
     const creating = lifecycle.createExact(
@@ -374,7 +511,9 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
       originalReason: reason,
       createdDevice: {
         udid: UDID,
-        name: "Cindy iPhone",
+        name: expect.stringMatching(
+          /^__CindyPending__testprofile__[0-9a-f-]{36}$/,
+        ),
         deviceTypeIdentifier:
           "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
         runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",

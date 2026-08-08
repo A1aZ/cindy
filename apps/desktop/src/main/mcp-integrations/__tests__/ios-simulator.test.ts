@@ -187,6 +187,7 @@ describe('iOS Simulator host', () => {
       bootExact: vi.fn(),
       shutdownExact: vi.fn(),
       createExact: vi.fn(),
+      reconcilePendingCreates: vi.fn(),
       deleteExact: vi.fn(),
     };
 
@@ -208,6 +209,7 @@ describe('iOS Simulator host', () => {
       const host = createIOSSimulatorHost({
         actor: persisted.actor,
         lifecycle,
+        canReconcilePendingCreates: persisted.canReconcilePendingCreates,
         runtime: { inspect: vi.fn(async () => READY_REPORT) },
         getSession: vi.fn(async (id) => localSession(id)),
         resolveWorktreeRoot: vi.fn(async () => '/tmp/session-a'),
@@ -224,6 +226,7 @@ describe('iOS Simulator host', () => {
         errorCode: 'DEVICE_BUSY',
         message: expect.stringContaining('ownership registry is invalid'),
       });
+      expect(lifecycle.reconcilePendingCreates).not.toHaveBeenCalled();
       expect(registry.isWriter).toBe(true);
       await persisted.flush();
       persisted.release();
@@ -1789,6 +1792,58 @@ describe('iOS Simulator host', () => {
     expect(resourceScheduler.runningCount()).toBe(1);
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
     expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it('aborts and drains pending-marker reconciliation before host disposal completes', async () => {
+    let reconcileSignal: AbortSignal | undefined;
+    let finishReconciliation: (value: readonly string[]) => void = () => undefined;
+    const reconcilePendingCreates = vi.fn(
+      (_owned: readonly { udid: string; name: string }[], signal?: AbortSignal) =>
+        new Promise<readonly string[]>((resolve) => {
+          reconcileSignal = signal;
+          finishReconciliation = resolve;
+        }),
+    );
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      reconcilePendingCreates,
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'abc',
+      device: READY_REPORT.devices[0]!,
+    });
+    const inspect = vi.fn(async () => READY_REPORT);
+    const host = createIOSSimulatorHost({ actor, lifecycle, runtime: { inspect } });
+
+    const reconciling = host.reconcileOwnership();
+    await vi.waitFor(() => expect(reconcileSignal).toBeDefined());
+    let disposed = false;
+    const disposing = host.dispose().then(() => {
+      disposed = true;
+    });
+
+    expect(reconcileSignal?.aborted).toBe(true);
+    await Promise.resolve();
+    expect(disposed).toBe(false);
+    expect(reconcilePendingCreates).toHaveBeenCalledWith(
+      [{ udid: instance.simulatorUdid, name: instance.simulatorName }],
+      reconcileSignal,
+    );
+
+    finishReconciliation([]);
+    await Promise.all([reconciling, disposing]);
+    expect(disposed).toBe(true);
+    expect(inspect).not.toHaveBeenCalled();
   });
 
   it('disposes WDA and recording resources on host shutdown without changing ownership', async () => {
@@ -6475,7 +6530,8 @@ describe('iOS Simulator host', () => {
         scheme: 'Demo',
         appPath: `${worktreeRoot}/build/Demo.app`,
         resultBundlePath: `${derivedDataPath}/CindyBuild.xcresult`,
-        buildLogTail: 'compile /tmp/session-a/secret.swift\\nwarning: keep this warning',
+        buildLogTail:
+          'compile /tmp/session-a/secret.swift\\nGH_TOKEN=ghp_1234567890abcdefghijkl\\nwarning: keep this warning',
       }),
     );
     const validateLaunch = vi.fn(async () => ({
@@ -6490,7 +6546,14 @@ describe('iOS Simulator host', () => {
     const projectBuilder: IOSSimulatorProjectBuilderAdapter = {
       build: buildProject,
       readXcresult: vi.fn(async () =>
-        JSON.stringify({ issues: [{ message: 'failed at /Users/secret/project.swift' }] }),
+        JSON.stringify({
+          issues: [
+            {
+              message:
+                'failed at /Users/secret/project.swift Authorization: Bearer simulator-diagnostic-secret-123456',
+            },
+          ],
+        }),
       ),
       validateLaunch,
     };
@@ -6557,6 +6620,7 @@ describe('iOS Simulator host', () => {
         },
       },
     });
+    expect(JSON.stringify(built)).not.toContain('ghp_1234567890abcdefghijkl');
     const diagnosticsId = (built as { ok: true; data: { diagnostics: { diagnosticsId: string } } })
       .data.diagnostics.diagnosticsId;
     await expect(
@@ -6585,6 +6649,7 @@ describe('iOS Simulator host', () => {
     );
     expect(xcresult).toMatchObject({ ok: true, data: { available: true, eof: true } });
     expect(JSON.stringify(xcresult)).not.toContain('/Users/secret');
+    expect(JSON.stringify(xcresult)).not.toContain('simulator-diagnostic-secret-123456');
     await expect(
       host.callTool(
         'read_build_diagnostics',

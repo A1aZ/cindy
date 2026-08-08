@@ -72,7 +72,15 @@ describe("IOSSimulatorProjectBuilder", () => {
       }
       return { stdout: "", stderr: "", exitCode: 0 };
     });
-    const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
+    const builder = new IOSSimulatorProjectBuilder({
+      commandRunner: { run },
+      environment: {
+        PATH: "/safe/bin",
+        DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
+        GH_TOKEN: "ghp_should_not_reach_builds",
+        XDT_CODEX_API_KEY: "should-not-reach-builds",
+      },
+    });
     const signal = new AbortController().signal;
     await expect(
       builder.validateLaunch(root, SIMULATOR_UDID.toLowerCase(), signal),
@@ -82,14 +90,15 @@ describe("IOSSimulatorProjectBuilder", () => {
     });
     expect(run).toHaveBeenCalledWith(
       "pnpm",
-      [
-        "mobile:sim:whoami",
-        "--",
-        "--json",
-        "--udid",
-        SIMULATOR_UDID,
-      ],
-      expect.objectContaining({ cwd: await realpath(root), signal }),
+      ["mobile:sim:whoami", "--", "--json", "--udid", SIMULATOR_UDID],
+      expect.objectContaining({
+        cwd: await realpath(root),
+        signal,
+        env: {
+          DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer",
+          PATH: "/safe/bin",
+        },
+      }),
     );
   });
 
@@ -309,32 +318,40 @@ describe("IOSSimulatorProjectBuilder", () => {
     const appPath = path.join(root, "derived", "Build", "Example.app");
     await mkdir(workspace);
     await mkdir(appPath, { recursive: true });
-    const run = vi.fn(async (_command: string, args: readonly string[]) => {
-      if (args.includes("-list")) {
-        return {
-          stdout: JSON.stringify({ workspace: { schemes: ["Example"] } }),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-      if (args.includes("-showBuildSettings")) {
-        return {
-          stdout: JSON.stringify([
-            {
-              buildSettings: {
-                TARGET_BUILD_DIR: path.dirname(appPath),
-                WRAPPER_NAME: "Example.app",
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args) => {
+        if (args.includes("-list")) {
+          return {
+            stdout: JSON.stringify({ workspace: { schemes: ["Example"] } }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args.includes("-showBuildSettings")) {
+          return {
+            stdout: JSON.stringify([
+              {
+                buildSettings: {
+                  TARGET_BUILD_DIR: path.dirname(appPath),
+                  WRAPPER_NAME: "Example.app",
+                },
               },
-            },
-          ]),
-          stderr: "",
-          exitCode: 0,
-        };
-      }
-      return { stdout: "", stderr: "", exitCode: 0 };
-    });
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    );
     const result = await new IOSSimulatorProjectBuilder({
       commandRunner: { run },
+      environment: {
+        PATH: "/safe/bin",
+        HOME: "/safe/home",
+        GH_TOKEN: "ghp_should_not_reach_xcode",
+        NODE_OPTIONS: "--require=/tmp/untrusted.js",
+      },
     }).build({
       worktreeRoot: root,
       derivedDataPath: path.join(root, "derived"),
@@ -357,6 +374,14 @@ describe("IOSSimulatorProjectBuilder", () => {
       args.includes("-showBuildSettings"),
     );
     expect(settingsCall?.[1]).not.toContain("-resultBundlePath");
+    for (const [, , options] of run.mock.calls) {
+      expect(options?.env).toEqual({
+        HOME: "/safe/home",
+        PATH: "/safe/bin",
+      });
+      expect(options?.env).not.toHaveProperty("GH_TOKEN");
+      expect(options?.env).not.toHaveProperty("NODE_OPTIONS");
+    }
   });
 
   it("uses a fresh xcresult bundle for each build", async () => {

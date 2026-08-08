@@ -1,5 +1,6 @@
 import { createNodeIOSSimulatorCommandRunner } from "./command-runner.js";
 import { IOSSimulatorRuntimeError } from "./errors.js";
+import { isIOSSimulatorPendingCreateName } from "./simctl-lifecycle.js";
 import { parseSimctlListJson } from "./simctl-parser.js";
 import path from "node:path";
 import type {
@@ -146,7 +147,10 @@ export function createIOSSimulatorRuntime(
         const availableRuntimes = parsed.runtimes.filter(
           (runtime) => runtime.isAvailable,
         );
-        const availableDevices = parsed.devices.filter(
+        const visibleDevices = parsed.devices.filter(
+          (device) => !isIOSSimulatorPendingCreateName(device.name),
+        );
+        const availableDevices = visibleDevices.filter(
           (device) => device.isAvailable,
         );
         if (availableRuntimes.length === 0) {
@@ -162,7 +166,7 @@ export function createIOSSimulatorRuntime(
               xcodeSelectPath,
               xcodeVersion,
               runtimes: parsed.runtimes,
-              devices: parsed.devices,
+              devices: visibleDevices,
             },
           );
         }
@@ -178,7 +182,7 @@ export function createIOSSimulatorRuntime(
               xcodeSelectPath,
               xcodeVersion,
               runtimes: parsed.runtimes,
-              devices: parsed.devices,
+              devices: visibleDevices,
             },
           );
         }
@@ -189,7 +193,7 @@ export function createIOSSimulatorRuntime(
           xcodeSelectPath,
           xcodeVersion,
           runtimes: parsed.runtimes,
-          devices: parsed.devices,
+          devices: visibleDevices,
           issue: null,
           error: null,
           setupSteps: [],

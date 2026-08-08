@@ -48,7 +48,7 @@ const SIMCTL_LIST = JSON.stringify({
   },
 });
 
-function runnerForSimctl(): IOSSimulatorCommandRunner {
+function runnerForSimctl(simctlList = SIMCTL_LIST): IOSSimulatorCommandRunner {
   return {
     run: vi.fn(async (command, args) => {
       const key = `${command} ${args.join(" ")}`;
@@ -67,7 +67,7 @@ function runnerForSimctl(): IOSSimulatorCommandRunner {
         };
       }
       if (key === "/usr/bin/xcrun simctl list -j") {
-        return { stdout: SIMCTL_LIST, stderr: "", exitCode: 0 };
+        return { stdout: simctlList, stderr: "", exitCode: 0 };
       }
       throw new Error(`unexpected command: ${key}`);
     }),
@@ -166,6 +166,29 @@ describe("createIOSSimulatorRuntime", () => {
       xcodeVersion: "Xcode 26.4\nBuild version 17E11",
     });
     expect(report.devices).toHaveLength(2);
+  });
+
+  it("never exposes interrupted-create markers as attachable devices", async () => {
+    const simctl = JSON.parse(SIMCTL_LIST) as {
+      devices: Record<string, Array<Record<string, unknown>>>;
+    };
+    simctl.devices["com.apple.CoreSimulator.SimRuntime.iOS-26-4"]!.push({
+      udid: "MARKER-UDID",
+      name: "__CindyPending__profilealpha__11111111-2222-4333-8444-555555555555",
+      state: "Booted",
+      isAvailable: true,
+      deviceTypeIdentifier: "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+    });
+
+    const report = await createIOSSimulatorRuntime({
+      platform: "darwin",
+      commandRunner: runnerForSimctl(JSON.stringify(simctl)),
+    }).inspect();
+
+    expect(report.ready).toBe(true);
+    expect(report.devices.map((device) => device.udid)).not.toContain(
+      "MARKER-UDID",
+    );
   });
 
   it("uses one exact DEVELOPER_DIR without mutating xcode-select", async () => {

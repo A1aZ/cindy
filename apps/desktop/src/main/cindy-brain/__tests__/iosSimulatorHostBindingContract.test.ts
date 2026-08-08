@@ -17,10 +17,7 @@ describe('iOS Simulator plugin Host binding', () => {
     const start = source.indexOf(
       'function focusedIOSSimulatorContext(): IOSSimulatorSlotFocusContext | null {',
     );
-    const end = source.indexOf(
-      '\n}\n\nfunction isIOSSimulatorContextCurrent',
-      start,
-    );
+    const end = source.indexOf('\n}\n\nfunction focusedIOSSimulatorAuthorizationCandidate', start);
     const body = source.slice(start, end);
 
     expect(start).toBeGreaterThan(-1);
@@ -29,5 +26,21 @@ describe('iOS Simulator plugin Host binding', () => {
     expect(body).toContain('sessionId: access.sessionId');
     expect(body).toContain('revision: access.generation');
     expect(body).not.toContain('ghostSessionFocusByWebContents');
+  });
+
+  it('uses renderer focus only as an explicitly confirmed cold-open hint', () => {
+    const start = source.indexOf(
+      'async function authorizeFocusedIOSSimulatorContext(): Promise<IOSSimulatorSlotFocusContext | null> {',
+    );
+    const end = source.indexOf('\n}\n\nfunction isIOSSimulatorContextCurrent', start);
+    const body = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(body).toContain('requestIOSSimulatorRendererSessionAccess(');
+    expect(body).toContain('getIOSSimulatorRendererSessionAccess(candidate.window.webContents)');
+    expect(body).toContain('sessionId: access.sessionId');
+    expect(body).toContain('revision: access.generation');
+    expect(body).not.toContain('sessionId: candidate.sessionHint');
   });
 });

@@ -79,6 +79,7 @@ function makeSlot(overrides: Partial<IOSSimulatorSlotDeps> = {}) {
   const deps: IOSSimulatorSlotDeps = {
     getGhost: () => simulatorGhost(),
     focusedContext: () => context,
+    authorizeFocusedContext: vi.fn(async () => context),
     isContextCurrent: (candidate) => sameContext(context, candidate),
     getStatus: vi.fn(async () => readyStatus()),
     focusViewer: vi.fn(() => true),
@@ -189,6 +190,56 @@ describe('GhostIOSSimulatorSlot', () => {
     await expect(
       test.slot.handleRequest('ios-simulator', { kind: 'open-panel', instanceId: 'foreign' }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'INSTANCE_NOT_OWNED' });
+  });
+
+  it('explicitly authorizes a cold open-panel request without prompting for status', async () => {
+    const grantedContext: IOSSimulatorSlotFocusContext = {
+      sessionId: 'session-a',
+      windowWebContentsId: 101,
+      revision: 2,
+    };
+    let context: IOSSimulatorSlotFocusContext | null = null;
+    const authorizeFocusedContext = vi.fn(async () => {
+      context = grantedContext;
+      return grantedContext;
+    });
+    const test = makeSlot({
+      focusedContext: () => context,
+      authorizeFocusedContext,
+      isContextCurrent: (candidate) => sameContext(context, candidate),
+    });
+
+    await expect(test.slot.handleRequest('ios-simulator', { kind: 'open-panel' })).resolves.toEqual(
+      { ok: true, apiVersion: 1, kind: 'open-panel' },
+    );
+    expect(authorizeFocusedContext).toHaveBeenCalledTimes(1);
+    expect(test.deps.getStatus).toHaveBeenCalledWith('session-a');
+    expect(test.deps.focusViewer).toHaveBeenCalledWith(grantedContext, undefined);
+
+    context = null;
+    await expect(
+      test.slot.handleRequest('ios-simulator', { kind: 'status' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'HOST_NOT_READY' });
+    expect(authorizeFocusedContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('rate-limits cold open attempts before requesting another authorization', async () => {
+    const authorizeFocusedContext = vi.fn(async () => null);
+    const test = makeSlot({
+      focusedContext: () => null,
+      authorizeFocusedContext,
+    });
+
+    await expect(
+      test.slot.handleRequest('ios-simulator', { kind: 'open-panel' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'HOST_NOT_READY' });
+    expect(authorizeFocusedContext).toHaveBeenCalledTimes(1);
+
+    test.advance(GHOST_IOS_SIMULATOR_OPEN_MIN_INTERVAL_MS - 1);
+    await expect(
+      test.slot.handleRequest('ios-simulator', { kind: 'open-panel' }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'RATE_LIMITED' });
+    expect(authorizeFocusedContext).toHaveBeenCalledTimes(1);
   });
 
   it('rate-limits opening before doing another Host status probe', async () => {

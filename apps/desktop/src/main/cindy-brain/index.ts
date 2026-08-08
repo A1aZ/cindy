@@ -199,6 +199,7 @@ import {
   clearIOSSimulatorRendererAccess,
   focusIOSSimulatorRendererSession,
   getIOSSimulatorRendererSessionAccess,
+  requestIOSSimulatorRendererSessionAccess,
   revokeIOSSimulatorRendererAccessForSessionChange,
 } from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { getIOSSimulatorPluginStatus } from '../mcp-integrations/ios-simulator.js';
@@ -1901,6 +1902,54 @@ function focusedIOSSimulatorContext(): IOSSimulatorSlotFocusContext | null {
   };
 }
 
+function focusedIOSSimulatorAuthorizationCandidate(): {
+  window: BrowserWindow;
+  sessionHint: string;
+} | null {
+  const candidates = mainShellWindows();
+  const focused = BrowserWindow.getFocusedWindow();
+  const focusedMainShell =
+    focused && !focused.isDestroyed() && candidates.includes(focused) ? focused : null;
+  // If a detached plugin/sidebar window has focus, only a single main shell is
+  // unambiguous. The renderer report below is an untrusted hint for the native
+  // confirmation flow, never the resulting authorization context.
+  const window = focusedMainShell ?? (candidates.length === 1 ? candidates[0]! : null);
+  if (!window || window.webContents.isDestroyed()) return null;
+  const sessionHint = ghostSessionFocusByWebContents.get(window.webContents.id)?.trim();
+  return sessionHint ? { window, sessionHint } : null;
+}
+
+async function authorizeFocusedIOSSimulatorContext(): Promise<IOSSimulatorSlotFocusContext | null> {
+  const existing = focusedIOSSimulatorContext();
+  if (existing) return existing;
+
+  const candidate = focusedIOSSimulatorAuthorizationCandidate();
+  if (!candidate) return null;
+  const granted = await requestIOSSimulatorRendererSessionAccess(
+    candidate.window.webContents,
+    candidate.sessionHint,
+  );
+  if (!granted) return null;
+
+  // Confirmation can outlive a focus/route transition. The registry invalidates
+  // those pending grants; this second identity check also keeps the candidate
+  // window and its route hint stable before reading the authoritative snapshot.
+  const currentCandidate = focusedIOSSimulatorAuthorizationCandidate();
+  if (
+    currentCandidate?.window !== candidate.window ||
+    currentCandidate.sessionHint !== candidate.sessionHint
+  ) {
+    return null;
+  }
+  const access = getIOSSimulatorRendererSessionAccess(candidate.window.webContents);
+  if (!access || access.sessionId !== candidate.sessionHint) return null;
+  return {
+    sessionId: access.sessionId,
+    windowWebContentsId: candidate.window.webContents.id,
+    revision: access.generation,
+  };
+}
+
 function isIOSSimulatorContextCurrent(context: IOSSimulatorSlotFocusContext): boolean {
   const current = focusedIOSSimulatorContext();
   return (
@@ -1921,6 +1970,7 @@ export function getGhostIOSSimulatorSlot(): GhostIOSSimulatorSlot {
     iosSimulatorSlotSingleton = new GhostIOSSimulatorSlot({
       getGhost: findAvailableGhost,
       focusedContext: focusedIOSSimulatorContext,
+      authorizeFocusedContext: authorizeFocusedIOSSimulatorContext,
       isContextCurrent: isIOSSimulatorContextCurrent,
       getStatus: getIOSSimulatorPluginStatus,
       focusViewer: (context, instanceId) => {

@@ -31,6 +31,11 @@ export interface IOSSimulatorSlotFocusContext {
 export interface IOSSimulatorSlotDeps {
   getGhost(id: string): InstalledGhost | null;
   focusedContext(): IOSSimulatorSlotFocusContext | null;
+  /**
+   * User-initiated cold-start path. The Host must explicitly authorize the
+   * exact foreground window/task and return a fresh Main-owned grant snapshot.
+   */
+  authorizeFocusedContext(): Promise<IOSSimulatorSlotFocusContext | null>;
   isContextCurrent(context: IOSSimulatorSlotFocusContext): boolean;
   /** Read-only, redacted snapshot; must not reconcile or renew ownership. */
   getStatus(sessionId: string): Promise<GhostIOSSimulatorStatusProbeResult>;
@@ -155,11 +160,6 @@ export class GhostIOSSimulatorSlot {
       instanceId = payload.instanceId.trim();
     }
 
-    const context = this.deps.focusedContext();
-    if (!context?.sessionId.trim()) {
-      return fail('HOST_NOT_READY', '当前没有打开的 Cindy 任务；先打开一个任务再使用内置模拟器');
-    }
-
     if (payload.kind === 'open-panel') {
       const now = this.now();
       const lastAttemptAt = this.lastOpenAttemptAt.get(ghostId);
@@ -170,6 +170,14 @@ export class GhostIOSSimulatorSlot {
       ) {
         return fail('RATE_LIMITED', '打开内置模拟器的请求太频繁；请稍后重试');
       }
+    }
+
+    let context = this.deps.focusedContext();
+    if (!context?.sessionId.trim() && payload.kind === 'open-panel') {
+      context = await this.deps.authorizeFocusedContext();
+    }
+    if (!context?.sessionId.trim()) {
+      return fail('HOST_NOT_READY', '当前没有打开的 Cindy 任务；先打开一个任务再使用内置模拟器');
     }
 
     let probe: GhostIOSSimulatorStatusProbeResult;

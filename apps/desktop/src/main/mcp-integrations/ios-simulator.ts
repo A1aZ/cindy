@@ -121,6 +121,19 @@ interface IOSSimulatorSessionSnapshot {
   status?: 'active' | 'archived' | 'deleted' | null;
 }
 
+interface IOSSimulatorPluginStatusReadOptions {
+  /** Test seam; production uses the active Main-owned task database. */
+  getSession?: (sessionId: string) => Promise<IOSSimulatorSessionSnapshot | null>;
+  /** Test seam; production uses the shared passive environment cache. */
+  inspectEnvironment?: () => Promise<IOSSimulatorEnvironmentReport>;
+  /** Test seam for account-generation fencing around passive async reads. */
+  getOwnerScopeKey?: () => string;
+  /** Test seam for the fail-closed account replacement boundary. */
+  isOwnerBoundaryPending?: () => boolean;
+  /** Test seam for Desktop shutdown racing a passive status read. */
+  isHostClosing?: () => boolean;
+}
+
 interface IOSSimulatorDriverManager {
   get(instanceId: string): WdaRunningInstance | null;
   probe?(instanceId: string): Promise<WdaRunningInstance | null>;
@@ -293,6 +306,18 @@ function sessionError(
   message: string,
 ): Extract<IOSSimulatorSessionStatus, { ok: false }> {
   return { ok: false, sessionId, errorCode, message };
+}
+
+function projectPluginEnvironment(
+  environment: IOSSimulatorEnvironmentReport,
+): GhostIOSSimulatorStatusSnapshot['environment'] {
+  return {
+    platform: environment.platform,
+    supported: environment.supported,
+    ready: environment.ready,
+    xcodeVersion: environment.xcodeVersion,
+    availableDeviceCount: environment.devices.filter((device) => device.isAvailable).length,
+  };
 }
 
 function reportDetachCleanupError(error: unknown, instance: IOSSimulatorInstance): void {
@@ -2151,18 +2176,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     );
   }
 
-  function projectPluginEnvironment(
-    environment: IOSSimulatorEnvironmentReport,
-  ): GhostIOSSimulatorStatusSnapshot['environment'] {
-    return {
-      platform: environment.platform,
-      supported: environment.supported,
-      ready: environment.ready,
-      xcodeVersion: environment.xcodeVersion,
-      availableDeviceCount: environment.devices.filter((device) => device.isAvailable).length,
-    };
-  }
-
   async function readPluginEnvironment(): Promise<GhostIOSSimulatorStatusSnapshot['environment']> {
     const now = Date.now();
     if (pluginEnvironmentCache && pluginEnvironmentCache.expiresAt > now) {
@@ -2191,7 +2204,22 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         message: 'The iOS Simulator host is shutting down.',
       };
     }
+    if (isOwnerBoundaryPending()) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
+    const ownerScopeKey = getOwnerScopeKey();
     const resolved = await resolveSession(sessionId);
+    if (isOwnerBoundaryPending() || getOwnerScopeKey() !== ownerScopeKey) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
     if (!resolved.ok)
       return { ok: false, errorCode: resolved.errorCode, message: resolved.message };
     try {
@@ -2201,6 +2229,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           ok: false,
           errorCode: 'IOS_SIMULATOR_HOST_ERROR',
           message: 'The iOS Simulator host is shutting down.',
+        };
+      }
+      if (isOwnerBoundaryPending() || getOwnerScopeKey() !== ownerScopeKey) {
+        return {
+          ok: false,
+          errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+          message: 'The iOS Simulator status is temporarily unavailable.',
         };
       }
       const instances = actor.list(resolved.sessionId);
@@ -6145,6 +6180,138 @@ interface DefaultIOSSimulatorRuntime {
 let defaultIOSSimulatorRuntime: DefaultIOSSimulatorRuntime | null = null;
 let defaultIOSSimulatorRuntimeClosing = false;
 let defaultIOSSimulatorRuntimeDisposePromise: Promise<void> | null = null;
+let passivePluginRuntime: IOSSimulatorRuntime | null = null;
+let passivePluginEnvironmentCache: {
+  expiresAt: number;
+  value: GhostIOSSimulatorStatusSnapshot['environment'];
+} | null = null;
+let passivePluginEnvironmentInFlight: Promise<
+  GhostIOSSimulatorStatusSnapshot['environment']
+> | null = null;
+
+async function readPassivePluginEnvironment(): Promise<
+  GhostIOSSimulatorStatusSnapshot['environment']
+> {
+  const now = Date.now();
+  if (passivePluginEnvironmentCache && passivePluginEnvironmentCache.expiresAt > now) {
+    return passivePluginEnvironmentCache.value;
+  }
+  if (passivePluginEnvironmentInFlight) return passivePluginEnvironmentInFlight;
+  passivePluginRuntime ??= createIOSSimulatorRuntime();
+  passivePluginEnvironmentInFlight = passivePluginRuntime.inspect().then((environment) => {
+    const value = projectPluginEnvironment(environment);
+    passivePluginEnvironmentCache = {
+      value,
+      expiresAt: Date.now() + PLUGIN_ENVIRONMENT_CACHE_MS,
+    };
+    return value;
+  });
+  try {
+    return await passivePluginEnvironmentInFlight;
+  } finally {
+    passivePluginEnvironmentInFlight = null;
+  }
+}
+
+async function readPassiveIOSSimulatorPluginStatus(
+  sessionId: string,
+  options: IOSSimulatorPluginStatusReadOptions,
+): Promise<GhostIOSSimulatorStatusProbeResult> {
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedSessionId) {
+    return {
+      ok: false,
+      errorCode: 'SESSION_CONTEXT_REQUIRED',
+      message: 'A Cindy session is required.',
+    };
+  }
+  try {
+    const getOwnerScopeKey = options.getOwnerScopeKey ?? activeOwnerScopeKey;
+    const isOwnerBoundaryPending =
+      options.isOwnerBoundaryPending ?? isAppSessionBoundaryPending;
+    const isHostClosing =
+      options.isHostClosing ?? (() => defaultIOSSimulatorRuntimeClosing);
+    if (isHostClosing() || isOwnerBoundaryPending()) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
+    const ownerScopeKey = getOwnerScopeKey();
+    const getSession =
+      options.getSession ??
+      (async (id: string) => {
+        const session = await desktopSessionStorage.get(id);
+        if (!session) return null;
+        return {
+          ...session,
+          status: await desktopSessionStorage.getStatus(id),
+        };
+      });
+    const session = await getSession(normalizedSessionId);
+    if (
+      isHostClosing() ||
+      isOwnerBoundaryPending() ||
+      getOwnerScopeKey() !== ownerScopeKey
+    ) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
+    if (!session || (session.status && session.status !== 'active')) {
+      return {
+        ok: false,
+        errorCode: 'SESSION_NOT_FOUND',
+        message: 'The Cindy session no longer exists.',
+      };
+    }
+    if (session.remoteHostId) {
+      return {
+        ok: false,
+        errorCode: 'UNSUPPORTED_SESSION_KIND',
+        message: 'SSH and remote sessions cannot access simulators on this Mac.',
+      };
+    }
+    const environment = options.inspectEnvironment
+      ? projectPluginEnvironment(await options.inspectEnvironment())
+      : await readPassivePluginEnvironment();
+    if (
+      isHostClosing() ||
+      isOwnerBoundaryPending() ||
+      getOwnerScopeKey() !== ownerScopeKey
+    ) {
+      return {
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      };
+    }
+    return {
+      ok: true,
+      status: {
+        environment,
+        // Without an in-process Host there is no controllable task ownership
+        // or live route state to project. Never claim another process's
+        // persisted instances merely to satisfy a passive plugin probe.
+        instances: [],
+        routeStatuses: [],
+      },
+    };
+  } catch (error) {
+    logger.warn('Passive iOS Simulator plugin status snapshot failed', {
+      sessionId: normalizedSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+      message: 'The iOS Simulator status is temporarily unavailable.',
+    };
+  }
+}
 
 function installDefaultIOSSimulatorHost(
   lifecycle: IOSSimulatorSimctlLifecycle,
@@ -6222,8 +6389,18 @@ export function getIOSSimulatorSessionStatus(
 
 export function getIOSSimulatorPluginStatus(
   sessionId: string,
+  options: IOSSimulatorPluginStatusReadOptions = {},
 ): Promise<GhostIOSSimulatorStatusProbeResult> {
-  return initializeIOSSimulatorHost().getPluginStatus(sessionId);
+  const host = currentIOSSimulatorHost();
+  if (host) return host.getPluginStatus(sessionId);
+  if (defaultIOSSimulatorRuntimeClosing) {
+    return Promise.resolve({
+      ok: false,
+      errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+      message: 'The iOS Simulator host is shutting down.',
+    });
+  }
+  return readPassiveIOSSimulatorPluginStatus(sessionId, options);
 }
 
 export function callIOSSimulatorHostTool(

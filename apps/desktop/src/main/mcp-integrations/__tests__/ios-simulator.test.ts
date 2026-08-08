@@ -36,6 +36,7 @@ import {
   createRegistryBackedIOSSimulatorActor,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
+  getIOSSimulatorPluginStatus,
   getIOSSimulatorMcpDeps,
   reconcilePersistedIOSSimulatorOwnership,
   type IOSSimulatorAppLifecycleAdapter,
@@ -106,6 +107,85 @@ describe('iOS Simulator host', () => {
     } finally {
       getPath.mockRestore();
     }
+  });
+
+  it('keeps a cold plugin status probe passive and leaves the ownership writer available', async () => {
+    const acquireWriter = vi.spyOn(
+      IOSSimulatorOwnershipRegistryFile.prototype,
+      'acquireWriterSync',
+    );
+    const inspectEnvironment = vi.fn(async () => READY_REPORT);
+    try {
+      await expect(
+        getIOSSimulatorPluginStatus('passive-session', {
+          getSession: vi.fn(async (id) => localSession(id)),
+          inspectEnvironment,
+        }),
+      ).resolves.toEqual({
+        ok: true,
+        status: {
+          environment: {
+            platform: 'darwin',
+            supported: true,
+            ready: true,
+            xcodeVersion: READY_REPORT.xcodeVersion,
+            availableDeviceCount: 1,
+          },
+          instances: [],
+          routeStatuses: [],
+        },
+      });
+      expect(inspectEnvironment).toHaveBeenCalledOnce();
+      expect(acquireWriter).not.toHaveBeenCalled();
+    } finally {
+      acquireWriter.mockRestore();
+    }
+  });
+
+  it.each([
+    ['missing', null, 'SESSION_NOT_FOUND'],
+    ['archived', { ...localSession('archived'), status: 'archived' as const }, 'SESSION_NOT_FOUND'],
+    [
+      'remote',
+      { ...localSession('remote'), remoteHostId: 'remote-host' },
+      'UNSUPPORTED_SESSION_KIND',
+    ],
+  ])(
+    'rejects a %s passive plugin task before inspecting the simulator environment',
+    async (_case, session, errorCode) => {
+      const inspectEnvironment = vi.fn(async () => READY_REPORT);
+
+      await expect(
+        getIOSSimulatorPluginStatus('passive-session', {
+          getSession: vi.fn(async () => session),
+          inspectEnvironment,
+        }),
+      ).resolves.toMatchObject({ ok: false, errorCode });
+      expect(inspectEnvironment).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails a cold plugin status read closed when the account changes during task lookup', async () => {
+    let ownerScopeKey = 'cloud:owner-a:1';
+    const inspectEnvironment = vi.fn(async () => READY_REPORT);
+
+    await expect(
+      getIOSSimulatorPluginStatus('passive-session', {
+        getSession: vi.fn(async (id) => {
+          ownerScopeKey = 'cloud:owner-b:2';
+          return localSession(id);
+        }),
+        inspectEnvironment,
+        getOwnerScopeKey: () => ownerScopeKey,
+        isOwnerBoundaryPending: () => false,
+        isHostClosing: () => false,
+      }),
+    ).resolves.toEqual({
+      ok: false,
+      errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+      message: 'The iOS Simulator status is temporarily unavailable.',
+    });
+    expect(inspectEnvironment).not.toHaveBeenCalled();
   });
 
   itMac('fences an ordinary removed task without retaining the default Host lease', async () => {
@@ -534,6 +614,89 @@ describe('iOS Simulator host', () => {
     expect(after.generation).toBe(before.generation);
     expect(after.lease).toEqual(before.lease);
     await host.dispose();
+  });
+
+  it('fails plugin status closed while the account boundary is pending', async () => {
+    const getSession = vi.fn(async (id: string) => localSession(id));
+    const inspect = vi.fn(async () => READY_REPORT);
+    const host = createIOSSimulatorHost({
+      runtime: { inspect },
+      getSession,
+      getOwnerScopeKey: () => 'cloud:owner-a:1',
+      isOwnerBoundaryPending: () => true,
+    });
+
+    try {
+      await expect(host.getPluginStatus('session-a')).resolves.toEqual({
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      });
+      expect(getSession).not.toHaveBeenCalled();
+      expect(inspect).not.toHaveBeenCalled();
+    } finally {
+      await host.dispose();
+    }
+  });
+
+  it('does not return an old-owner plugin snapshot when the account changes mid-inspection', async () => {
+    let ownerScopeKey = 'cloud:owner-a:1';
+    let markInspectionStarted: () => void = () => undefined;
+    let releaseInspection: () => void = () => undefined;
+    const inspectionStarted = new Promise<void>((resolve) => {
+      markInspectionStarted = resolve;
+    });
+    const inspectionGate = new Promise<void>((resolve) => {
+      releaseInspection = resolve;
+    });
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle: {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      },
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'private-fingerprint',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      runtime: {
+        inspect: vi.fn(async () => {
+          markInspectionStarted();
+          await inspectionGate;
+          return READY_REPORT;
+        }),
+      },
+      getSession: vi.fn(async (id) => localSession(id)),
+      getOwnerScopeKey: () => ownerScopeKey,
+      isOwnerBoundaryPending: () => false,
+    });
+
+    try {
+      const statusPromise = host.getPluginStatus('session-a');
+      await inspectionStarted;
+      ownerScopeKey = 'cloud:owner-b:2';
+      releaseInspection();
+
+      const status = await statusPromise;
+      expect(status).toEqual({
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+        message: 'The iOS Simulator status is temporarily unavailable.',
+      });
+      expect(JSON.stringify(status)).not.toContain(attached.instanceId);
+    } finally {
+      releaseInspection();
+      await host.dispose();
+    }
   });
 
   it('keeps build diagnostics host-available without a running simulator instance', async () => {

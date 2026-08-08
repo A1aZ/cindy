@@ -889,9 +889,15 @@ async function runPipeline(task: InternalTask): Promise<void> {
     }
     try {
       assertTaskOwnerCurrent(task);
+      const projectionEpochAtRequestStart =
+        remoteSessionStore.captureInputProjectionAuthorityEpoch(sessionId);
       const projection = await maker.input.enqueue(sessionId, queued, { sendAtMs: Date.now() });
       assertTaskOwnerCurrent(task);
-      remoteSessionStore.setInputProjection(sessionId, projection);
+      remoteSessionStore.setInputProjectionIfCurrent(
+        sessionId,
+        projection,
+        projectionEpochAtRequestStart,
+      );
     } catch (error) {
       if (isStaleNewSessionOwnerError(error)) throw error;
       // 有界轮询分辨(codex review P1):enqueue 超时时消息可能已被受理并瞬间

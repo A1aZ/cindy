@@ -2667,11 +2667,13 @@ describe('remoteSessionStore', () => {
   });
 
   it('clears a continuation owner at a terminal boundary without a projection clear push', () => {
-    remoteSessionStore.setInputProjection('s1', {
+    const ownerProjection = {
       ...projection('s1'),
       continuationTurnClientId: 'resume-1',
-    });
+    };
+    remoteSessionStore.setInputProjection('s1', ownerProjection);
     remoteSessionStore.setSessionRunning('s1', true);
+    const operationEpoch = remoteSessionStore.captureInputProjectionAuthorityEpoch('s1');
 
     remoteSessionStore.applyRemotePush('dev-1', 'maker:status-changed', {
       sessionId: 's1',
@@ -2680,6 +2682,7 @@ describe('remoteSessionStore', () => {
 
     expect(remoteSessionStore.getInputProjection('s1').continuationTurnClientId).toBeNull();
     expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+    expect(remoteSessionStore.setInputProjectionIfCurrent('s1', ownerProjection, operationEpoch)).toBe(false);
   });
 
   it('soft-invalidates an offline device without deleting sessions or messages', () => {

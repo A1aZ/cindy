@@ -227,6 +227,8 @@ function buildConversationShareCss({
     }
     #xdt-content.share-stage {
       box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
       width: ${width}px;
       min-width: ${width}px;
       padding: 28px;

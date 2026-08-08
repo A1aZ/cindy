@@ -120,6 +120,41 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('gap: 6px;');
   });
 
+  it('分享导出保持消息间距，并为隐藏 WebView 复用安全边界', () => {
+    const html = buildConversationShareHtml({
+      allShareableIds: ['first', 'middle', 'third'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [
+        { body: 'first', clientId: 'first', kind: 'user' },
+        { body: 'third', clientId: 'third', kind: 'assistant' },
+      ],
+    });
+    const webViewSource = readFileSync(
+      resolve(process.cwd(), 'src/session/ConversationShareWebView.tsx'),
+      'utf8',
+    );
+    const shareBarSource = readFileSync(
+      resolve(process.cwd(), 'src/session/ShareSelectionBar.tsx'),
+      'utf8',
+    );
+
+    expect(html).toContain('<div class="share-gap" aria-hidden="true">⋯</div>');
+    expect(html).toMatch(
+      /#xdt-content\.share-stage\s*\{[\s\S]*?display: flex;[\s\S]*?flex-direction: column;[\s\S]*?gap: 16px;/,
+    );
+    expect(shareBarSource).toContain('height: 44,');
+    expect(shareBarSource).toContain('minHeight: 44,');
+    expect(webViewSource).toContain(
+      'onShouldStartLoadWithRequest={interceptNavigation}',
+    );
+    expect(webViewSource).toContain(
+      'interceptHtmlNavigation(request, documentSettledRef.current)',
+    );
+    expect(webViewSource).toContain('allowFileAccess={false}');
+    expect(webViewSource).toContain('mediaCapturePermissionGrantType="deny"');
+  });
+
   it('导出结构化正文和附件时保留可见投影，不泄露隐藏引用或外链', () => {
     const html = buildConversationShareHtml({
       allShareableIds: ['message'],

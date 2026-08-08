@@ -9,6 +9,8 @@ import {
 import { Directory, File, Paths } from "expo-file-system";
 import { Image as NativeImage, StyleSheet, View } from "react-native";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
+import type { ShouldStartLoadRequest } from "react-native-webview/lib/WebViewTypes";
+import { interceptHtmlNavigation } from "@/session/htmlNavigationPolicy";
 
 const EXPORT_TIMEOUT_MS = 20_000;
 const EXPORT_SCALE = 2;
@@ -37,6 +39,13 @@ export const ConversationShareWebView = forwardRef<
   const sequenceRef = useRef(0);
   const readyRef = useRef(false);
   const readyWaitersRef = useRef<ReadyWaiter[]>([]);
+  const documentSettledRef = useRef(false);
+  const lastHtmlRef = useRef(html);
+
+  if (lastHtmlRef.current !== html) {
+    lastHtmlRef.current = html;
+    documentSettledRef.current = false;
+  }
 
   useEffect(() => {
     readyRef.current = false;
@@ -140,6 +149,12 @@ export const ConversationShareWebView = forwardRef<
     }
   }, []);
 
+  const interceptNavigation = useCallback(
+    (request: ShouldStartLoadRequest) =>
+      interceptHtmlNavigation(request, documentSettledRef.current),
+    [],
+  );
+
   useEffect(
     () => () => {
       const unmountedError = new Error("conversation share webview unmounted");
@@ -154,7 +169,7 @@ export const ConversationShareWebView = forwardRef<
   );
 
   const source = useMemo(
-    () => ({ html, baseUrl: "https://xdt-maker-mobile.local" }),
+    () => ({ html, baseUrl: "about:blank" }),
     [html],
   );
 
@@ -163,10 +178,16 @@ export const ConversationShareWebView = forwardRef<
       <WebView
         javaScriptEnabled
         onMessage={handleMessage}
+        onLoadEnd={() => {
+          documentSettledRef.current = true;
+        }}
+        onShouldStartLoadWithRequest={interceptNavigation}
         originWhitelist={["*"]}
         ref={webViewRef}
         scrollEnabled={false}
         setSupportMultipleWindows={false}
+        allowFileAccess={false}
+        mediaCapturePermissionGrantType="deny"
         source={source}
         style={styles.webView}
       />

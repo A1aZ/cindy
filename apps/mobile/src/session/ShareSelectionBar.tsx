@@ -195,7 +195,7 @@ const makeStyles = (colors: ThemeColors) =>
       borderWidth: StyleSheet.hairlineWidth,
       flexDirection: "row",
       gap: spacing.xs,
-      height: 36,
+      height: 44,
       paddingHorizontal: spacing.sm,
     },
     selectAllLabel: {
@@ -237,7 +237,7 @@ const makeStyles = (colors: ThemeColors) =>
       borderRadius: radius.pill,
       flexDirection: "row",
       gap: spacing.xs,
-      minHeight: 40,
+      minHeight: 44,
       paddingHorizontal: spacing.md,
     },
     shareLabel: {

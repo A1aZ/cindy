@@ -3,6 +3,8 @@ import path from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import type { IOSSimulatorCommandRunner } from '@cindy/ios-simulator-runtime';
+
 import { IOSSimulatorMediaCapture } from '../ios-simulator-media';
 
 afterEach(() => {
@@ -52,6 +54,82 @@ describe('IOSSimulatorMediaCapture', () => {
         ],
       }),
     );
+  });
+
+  it('forwards screenshot cancellation to xcrun and removes the temporary directory', async () => {
+    let screenshotPath = '';
+    let runnerSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner['run']>(async (_command, args, options) => {
+      screenshotPath = args.at(-1)!;
+      runnerSignal = options?.signal;
+      return new Promise((resolve) => {
+        options?.signal?.addEventListener(
+          'abort',
+          () => resolve({ stdout: '', stderr: '', exitCode: null }),
+          { once: true },
+        );
+      });
+    });
+    const capture = new IOSSimulatorMediaCapture({ commandRunner: { run } });
+    const controller = new AbortController();
+
+    const screenshot = capture.captureScreenshotBytes({
+      simulatorUdid: 'EXACT-UDID',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(runnerSignal).toBe(controller.signal));
+    const tempRoot = path.dirname(screenshotPath);
+    controller.abort(new Error('task closed'));
+
+    await expect(screenshot).rejects.toMatchObject({ code: 'SCREENSHOT_CAPTURE_FAILED' });
+    await expect(stat(tempRoot)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('invalidates screenshot ingest when its host mutation is cancelled after capture', async () => {
+    let markIngestStarted: () => void = () => undefined;
+    let releaseIngest: () => void = () => undefined;
+    const ingestStarted = new Promise<void>((resolve) => {
+      markIngestStarted = resolve;
+    });
+    const ingestGate = new Promise<void>((resolve) => {
+      releaseIngest = resolve;
+    });
+    const ingest = vi.fn(async (params) => {
+      markIngestStarted();
+      await ingestGate;
+      params.assertStillValid?.();
+      return {
+        hash: 'b'.repeat(64),
+        ext: '.png',
+        mimeType: 'image/png',
+        bytes: params.buffer.length,
+        url: `cindy-media://blobs/${'b'.repeat(64)}.png`,
+        deduplicated: false,
+        refIds: ['late-ref'],
+      };
+    });
+    const run = vi.fn(async (_command: string, args: readonly string[]) => {
+      const output = args.at(-1)!;
+      await mkdir(path.dirname(output), { recursive: true });
+      await writeFile(output, Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]));
+      return { stdout: '', stderr: '', exitCode: 0 };
+    });
+    const capture = new IOSSimulatorMediaCapture({ commandRunner: { run }, ingest });
+    const controller = new AbortController();
+
+    const screenshot = capture.takeScreenshot({
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      source: 'agent',
+      signal: controller.signal,
+    });
+    await ingestStarted;
+    controller.abort(new Error('task closed'));
+
+    await expect(screenshot).rejects.toMatchObject({ code: 'MUTATION_CANCELLED' });
+    releaseIngest();
+    await expect(capture.dispose()).resolves.toBeUndefined();
   });
 
   it('does not ingest a screenshot after its data owner changes during capture', async () => {

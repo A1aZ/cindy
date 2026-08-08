@@ -359,6 +359,69 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     expect(JSON.stringify(deleteCalls)).not.toContain(preexistingUdid);
   });
 
+  it("deletes a delayed unclaimed marker during the next profile startup recovery", async () => {
+    const controller = new AbortController();
+    const reason = new Error("create cancelled before delayed marker appeared");
+    let markerName = "";
+    let createSignal: AbortSignal | undefined;
+    let listCount = 0;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "create") {
+          markerName = args[2]!;
+          createSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return { stdout: "", stderr: "", exitCode: null };
+        }
+        if (args[1] === "list") {
+          listCount += 1;
+          return {
+            stdout:
+              listCount === 1
+                ? devicesJson([])
+                : devicesJson([{ udid: UDID, name: markerName }]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "delete") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      createMarkerNamespace: "testprofile",
+    });
+
+    const creating = lifecycle.createExact(
+      {
+        name: "Cindy iPhone",
+        deviceTypeIdentifier: DEVICE_TYPE,
+        runtimeIdentifier: RUNTIME,
+      },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(createSignal).toBe(controller.signal));
+    controller.abort(reason);
+    await expect(creating).rejects.toBe(reason);
+    expect(
+      run.mock.calls.filter(([, args]) => args[1] === "delete"),
+    ).toHaveLength(0);
+
+    await expect(
+      lifecycle.recoverPendingCreatesAtStartup?.([]),
+    ).resolves.toEqual([UDID]);
+    expect(run.mock.calls.filter(([, args]) => args[1] === "delete")).toEqual([
+      expect.arrayContaining(["/usr/bin/xcrun", ["simctl", "delete", UDID]]),
+    ]);
+  });
+
   it("renames only this profile's markers with persisted exact ownership", async () => {
     const ownedUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
     const otherProfileUdid = "3A9D41E0-E031-4AD0-A8B5-847480802E8E";
@@ -412,6 +475,107 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
       ownedUdid,
       "Cindy Restored iPhone",
     ]);
+  });
+
+  it("startup recovery deletes only unclaimed markers from this exact profile", async () => {
+    const ownedUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const otherProfileUdid = "3A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const ordinaryUdid = "4A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const unclaimedName =
+      "__CindyPending__profilealpha__11111111-2222-4333-8444-555555555555";
+    const ownedName =
+      "__CindyPending__profilealpha__22222222-3333-4444-8555-666666666666";
+    const devices = [
+      { udid: UDID, name: unclaimedName },
+      { udid: ownedUdid, name: ownedName },
+      {
+        udid: otherProfileUdid,
+        name: "__CindyPending__profilebeta__33333333-4444-4555-8666-777777777777",
+      },
+      { udid: ordinaryUdid, name: "Cindy iPhone" },
+    ];
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args) => {
+        if (args[1] === "list") {
+          return {
+            stdout: devicesJson(devices),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "delete" || args[1] === "rename") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      createMarkerNamespace: "profilealpha",
+    });
+
+    await expect(
+      lifecycle.recoverPendingCreatesAtStartup?.([
+        { udid: ownedUdid, name: "Cindy Restored iPhone" },
+      ]),
+    ).resolves.toEqual([UDID, ownedUdid]);
+    expect(run.mock.calls.filter(([, args]) => args[1] === "delete")).toEqual([
+      expect.arrayContaining(["/usr/bin/xcrun", ["simctl", "delete", UDID]]),
+    ]);
+    expect(run.mock.calls.filter(([, args]) => args[1] === "rename")).toEqual([
+      expect.arrayContaining([
+        "/usr/bin/xcrun",
+        ["simctl", "rename", ownedUdid, "Cindy Restored iPhone"],
+      ]),
+    ]);
+    expect(JSON.stringify(run.mock.calls)).not.toContain(
+      `["simctl","delete","${otherProfileUdid}"]`,
+    );
+    expect(JSON.stringify(run.mock.calls)).not.toContain(
+      `["simctl","delete","${ordinaryUdid}"]`,
+    );
+  });
+
+  it("does not delete a pending device that changes during startup revalidation", async () => {
+    const markerName =
+      "__CindyPending__profilealpha__11111111-2222-4333-8444-555555555555";
+    let listCount = 0;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args) => {
+        if (args[1] === "list") {
+          listCount += 1;
+          return {
+            stdout: devicesJson([
+              {
+                udid: UDID,
+                name:
+                  listCount === 1 ? markerName : "Externally Renamed iPhone",
+              },
+            ]),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "delete") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      createMarkerNamespace: "profilealpha",
+    });
+
+    await expect(
+      lifecycle.recoverPendingCreatesAtStartup?.([]),
+    ).resolves.toEqual([]);
+    expect(
+      run.mock.calls.filter(([, args]) => args[1] === "list"),
+    ).toHaveLength(2);
+    expect(run.mock.calls.filter(([, args]) => args[1] === "delete")).toEqual(
+      [],
+    );
   });
 
   it("cancels create and deletes only an exact late-created UDID", async () => {

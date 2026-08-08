@@ -385,6 +385,39 @@ function createProfileScopedIOSSimulatorLifecycle(
   return createIOSSimulatorSimctlLifecycle({ createMarkerNamespace });
 }
 
+const STARTUP_PENDING_CREATE_RECOVERY_TIMEOUT_MS = 6_000;
+
+async function recoverProfilePendingCreatesAtStartup(
+  lifecycle: IOSSimulatorSimctlLifecycle,
+  persistedInstances: readonly IOSSimulatorInstance[],
+): Promise<void> {
+  if (!lifecycle.recoverPendingCreatesAtStartup) return;
+  const controller = new AbortController();
+  const timer = setTimeout(
+    () => controller.abort(new Error('Simulator pending-create startup recovery timed out')),
+    STARTUP_PENDING_CREATE_RECOVERY_TIMEOUT_MS,
+  );
+  timer.unref?.();
+  try {
+    await lifecycle.recoverPendingCreatesAtStartup(
+      persistedInstances.map((instance) => ({
+        udid: instance.simulatorUdid,
+        name: instance.simulatorName,
+      })),
+      controller.signal,
+    );
+  } catch (error) {
+    // A marker remains hidden and profile-scoped, so an optional Simulator
+    // cleanup failure must not block Cindy startup. Keeping it intact lets the
+    // next startup retry under the same exclusive registry lease.
+    logger.warn('Interrupted simulator create startup recovery will retry', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createDefaultActor(
   lifecycle: IOSSimulatorSimctlLifecycle,
   registry = createDefaultOwnershipRegistry(),
@@ -5419,7 +5452,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             route.instanceId,
             'screenshot',
           );
-          const captured = await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             assertSessionOperationAdmission(
               instance.sessionId,
@@ -5436,6 +5469,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               sessionId: instance.sessionId,
               instanceId: instance.instanceId,
               source: context?.origin === 'user' ? 'user' : 'agent',
+              signal,
             });
           });
           return {
@@ -5451,7 +5485,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (name === 'capture_visual_baseline') {
           const route = readMutationRoute(sessionId, args);
-          const baseline = await runHostMutation(route, context, async (instance) => {
+          const baseline = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (typeof mediaCapture.captureScreenshotBytes !== 'function') {
               throw new IOSSimulatorInstanceError(
@@ -5461,6 +5495,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             }
             const bytes = await mediaCapture.captureScreenshotBytes({
               simulatorUdid: instance.simulatorUdid,
+              signal,
             });
             const baselineId = randomUUID();
             while (visualBaselines.size >= 4) {
@@ -5508,7 +5543,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'threshold must be between 0 and 255',
             );
           }
-          const diff = await runHostMutation(route, context, async (instance) => {
+          const diff = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (typeof mediaCapture.captureScreenshotBytes !== 'function') {
               throw new IOSSimulatorInstanceError(
@@ -5518,6 +5553,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             }
             const current = await mediaCapture.captureScreenshotBytes({
               simulatorUdid: instance.simulatorUdid,
+              signal,
             });
             return compareIOSSimulatorPngBuffers(baseline.bytes, current, threshold);
           });
@@ -6089,14 +6125,22 @@ export function reconcileIOSSimulatorOwnership(): Promise<void> {
 }
 
 /**
- * Startup recovery stays lazy when this profile has never owned a simulator,
- * but persisted bindings must be reconciled even if the feature is not opened
- * again after a crash.
+ * Startup recovery performs one bounded, profile-scoped pending-create sweep
+ * even when ownership is empty, then releases the writer lease without
+ * installing the Host. Persisted bindings still install the Host so they are
+ * reconciled even if the feature is not opened again after a crash.
  */
-export function reconcilePersistedIOSSimulatorOwnership(): Promise<void> {
+export interface IOSSimulatorPersistedOwnershipRecoveryOptions {
+  /** Test seam; production always derives a profile-scoped lifecycle. */
+  createLifecycle?: (registry: IOSSimulatorOwnershipRegistryFile) => IOSSimulatorSimctlLifecycle;
+}
+
+export async function reconcilePersistedIOSSimulatorOwnership(
+  options: IOSSimulatorPersistedOwnershipRecoveryOptions = {},
+): Promise<void> {
   const currentHost = currentIOSSimulatorHost();
   if (currentHost) return currentHost.reconcileOwnership();
-  if (process.platform !== 'darwin') return Promise.resolve();
+  if (process.platform !== 'darwin') return;
 
   const registry = createDefaultOwnershipRegistry();
   let registryTransferred = false;
@@ -6109,18 +6153,20 @@ export function reconcilePersistedIOSSimulatorOwnership(): Promise<void> {
       );
     }
     const persistedInstances = registry.loadSync();
+    const lifecycle =
+      options.createLifecycle?.(registry) ?? createProfileScopedIOSSimulatorLifecycle(registry);
+    await recoverProfilePendingCreatesAtStartup(lifecycle, persistedInstances);
     if (persistedInstances.length === 0) {
       registry.releaseWriterSync();
-      return Promise.resolve();
+      return;
     }
-    const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
     const persistedActor = createDefaultActor(lifecycle, registry);
     const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
     registryTransferred = true;
-    return host.reconcileOwnership();
+    await host.reconcileOwnership();
   } catch (error) {
     if (!registryTransferred) registry.releaseWriterSync();
-    return Promise.reject(error);
+    throw error;
   }
 }
 

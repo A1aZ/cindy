@@ -126,20 +126,70 @@ describe('iOS Simulator host', () => {
     }
   });
 
-  itMac('keeps startup ownership recovery lazy when the registry is empty', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-lazy-reconcile-'));
-    const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
-    const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
-    const competingRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath);
-    try {
-      await expect(reconcilePersistedIOSSimulatorOwnership()).resolves.toBeUndefined();
-      expect(competingRegistry.acquireWriterSync()).toBe(true);
-    } finally {
-      competingRegistry.releaseWriterSync();
-      getPath.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
+  itMac(
+    'recovers pending creates with an empty registry before releasing its writer lease',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-lazy-reconcile-'));
+      const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
+      const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
+      const competingRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath);
+      let finishRecovery: (value: readonly string[]) => void = () => undefined;
+      const recoverPendingCreatesAtStartup = vi.fn(
+        (_owned: readonly { udid: string; name: string }[], _signal?: AbortSignal) =>
+          new Promise<readonly string[]>((resolve) => {
+            finishRecovery = resolve;
+          }),
+      );
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        recoverPendingCreatesAtStartup,
+        deleteExact: vi.fn(),
+      };
+      try {
+        const recovering = reconcilePersistedIOSSimulatorOwnership({
+          createLifecycle: () => lifecycle,
+        });
+        await vi.waitFor(() => expect(recoverPendingCreatesAtStartup).toHaveBeenCalledOnce());
+        expect(recoverPendingCreatesAtStartup).toHaveBeenCalledWith([], expect.any(AbortSignal));
+        expect(competingRegistry.acquireWriterSync()).toBe(false);
+
+        finishRecovery([]);
+        await expect(recovering).resolves.toBeUndefined();
+        expect(competingRegistry.acquireWriterSync()).toBe(true);
+      } finally {
+        competingRegistry.releaseWriterSync();
+        getPath.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itMac(
+    'does not inspect or delete pending markers when the ownership registry is invalid',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-invalid-reconcile-'));
+      const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
+      const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
+      await mkdir(path.dirname(registryPath), { recursive: true });
+      await writeFile(registryPath, '{"version":1,"instances":[');
+      const createLifecycle = vi.fn();
+      const competingRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath);
+      try {
+        await expect(
+          reconcilePersistedIOSSimulatorOwnership({ createLifecycle }),
+        ).rejects.toMatchObject({ code: 'DEVICE_BUSY' });
+        expect(createLifecycle).not.toHaveBeenCalled();
+        expect(competingRegistry.acquireWriterSync()).toBe(true);
+      } finally {
+        competingRegistry.releaseWriterSync();
+        getPath.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not reconcile Simulator ownership during generic IPC bootstrap', () => {
     const source = readFileSync(new URL('../../maker-ipc/register.ts', import.meta.url), 'utf8');
@@ -5716,7 +5766,15 @@ describe('iOS Simulator host', () => {
           'base64',
         ),
       ),
-      takeScreenshot: vi.fn(),
+      takeScreenshot: vi.fn(async () => ({
+        hash: 'a'.repeat(64),
+        ext: '.png',
+        mimeType: 'image/png',
+        bytes: 8,
+        url: `cindy-media://blobs/${'a'.repeat(64)}.png`,
+        deduplicated: false,
+        refIds: ['ref-screenshot'],
+      })),
       startRecording: vi.fn(),
       stopRecording: vi.fn(),
     } as unknown as IOSSimulatorMediaCaptureAdapter;
@@ -5850,6 +5908,19 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { diff: { unchangedCount: 1, added: [], removed: [], changed: [] } },
     });
+    await expect(
+      host.callTool('take_screenshot', route, { sessionId: 'session-a', origin: 'agent' }),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: { mediaUrl: expect.stringMatching(/^cindy-media:\/\/blobs\//) },
+    });
+    expect(mediaCapture.takeScreenshot).toHaveBeenCalledWith({
+      simulatorUdid: instance.simulatorUdid,
+      sessionId: 'session-a',
+      instanceId: instance.instanceId,
+      source: 'agent',
+      signal: expect.any(AbortSignal),
+    });
     const visualBaseline = await host.callTool('capture_visual_baseline', route, {
       sessionId: 'session-a',
       origin: 'agent',
@@ -5869,6 +5940,14 @@ describe('iOS Simulator host', () => {
     ).resolves.toMatchObject({
       ok: true,
       data: { diff: { comparedPixels: 1, differentPixels: 0, differenceRatio: 0 } },
+    });
+    expect(mediaCapture.captureScreenshotBytes).toHaveBeenNthCalledWith(1, {
+      simulatorUdid: instance.simulatorUdid,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mediaCapture.captureScreenshotBytes).toHaveBeenNthCalledWith(2, {
+      simulatorUdid: instance.simulatorUdid,
+      signal: expect.any(AbortSignal),
     });
     await expect(
       host.callTool(

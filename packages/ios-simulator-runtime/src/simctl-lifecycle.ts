@@ -136,6 +136,15 @@ export interface IOSSimulatorSimctlLifecycle {
     ownedDevices: readonly { udid: string; name: string }[],
     signal?: AbortSignal,
   ): Promise<readonly string[]>;
+  /**
+   * Startup-only recovery while the caller holds this profile's exclusive
+   * ownership-registry lease. Unclaimed markers from this exact profile are
+   * deleted by exact UUID; other profiles and ordinary devices are untouched.
+   */
+  recoverPendingCreatesAtStartup?(
+    ownedDevices: readonly { udid: string; name: string }[],
+    signal?: AbortSignal,
+  ): Promise<readonly string[]>;
   deleteExact(udid: string, signal?: AbortSignal): Promise<void>;
   /** Set the simulated system appearance without bringing Simulator.app forward. */
   setAppearance?(
@@ -863,6 +872,55 @@ export function createIOSSimulatorSimctlLifecycle(
         reconciled.push(udid);
       }
       return reconciled;
+    },
+
+    async recoverPendingCreatesAtStartup(
+      ownedDevices,
+      signal,
+    ): Promise<readonly string[]> {
+      const owned = new Map(
+        ownedDevices.map((device) => [
+          requireUdid(device.udid),
+          requireIdentifier(device.name, "name"),
+        ]),
+      );
+      const pending = (await list(signal)).filter((device) =>
+        isPendingCreateName(device.name),
+      );
+      const recovered: string[] = [];
+      let firstFailure: unknown = null;
+      for (const device of pending) {
+        const udid = device.udid.toUpperCase();
+        try {
+          const ownedName = owned.get(udid);
+          if (ownedName) {
+            await renameExact(udid, ownedName, signal);
+            recovered.push(udid);
+            continue;
+          }
+
+          // CoreSimulator is global to the macOS user. Re-read the exact UUID
+          // before deleting so an external rename or replacement cannot turn
+          // a profile-scoped cleanup into deletion of an ordinary device.
+          const current = await findExact(udid, signal);
+          if (
+            !current ||
+            current.name !== device.name ||
+            !isPendingCreateName(current.name) ||
+            current.runtimeIdentifier !== device.runtimeIdentifier ||
+            current.deviceTypeIdentifier !== device.deviceTypeIdentifier
+          ) {
+            continue;
+          }
+          await cleanupFailedCreate(udid, signal);
+          recovered.push(udid);
+        } catch (error) {
+          if (signal?.aborted) throwIfAborted(signal);
+          firstFailure ??= error;
+        }
+      }
+      if (firstFailure !== null) throw firstFailure;
+      return recovered;
     },
 
     async deleteExact(udid, signal): Promise<void> {

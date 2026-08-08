@@ -62,6 +62,7 @@ export interface IOSSimulatorScreenshotInput {
   sessionId: string;
   instanceId: string;
   source: 'agent' | 'user';
+  signal?: AbortSignal;
 }
 
 interface ActiveRecording {
@@ -654,7 +655,7 @@ export class IOSSimulatorMediaCapture {
   }
 
   async captureScreenshotBytes(
-    input: Pick<IOSSimulatorScreenshotInput, 'simulatorUdid'>,
+    input: Pick<IOSSimulatorScreenshotInput, 'simulatorUdid' | 'signal'>,
   ): Promise<Buffer> {
     const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-screenshot-'));
     const screenshotPath = path.join(tempRoot, 'screenshot.png');
@@ -662,7 +663,7 @@ export class IOSSimulatorMediaCapture {
       const result = await this.#runner.run(
         'xcrun',
         ['simctl', 'io', input.simulatorUdid, 'screenshot', '--type=png', screenshotPath],
-        { timeoutMs: 30_000, maxBufferBytes: 256 * 1024 },
+        { timeoutMs: 30_000, maxBufferBytes: 256 * 1024, signal: input.signal },
       );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
@@ -708,6 +709,13 @@ export class IOSSimulatorMediaCapture {
     const requests = this.#screenshotRequestsBySession.get(input.sessionId) ?? new Set();
     requests.add(request);
     this.#screenshotRequestsBySession.set(input.sessionId, requests);
+    const cancelForAbortedMutation = (): void => {
+      if (request.cancelled) return;
+      request.cancelled = true;
+      request.resolveCancelled();
+    };
+    if (input.signal?.aborted) cancelForAbortedMutation();
+    else input.signal?.addEventListener('abort', cancelForAbortedMutation, { once: true });
     const operation = (async (): Promise<IngestedMedia> => {
       this.#assertScreenshotCurrent(request);
       const buffer = await this.captureScreenshotBytes(input);
@@ -741,6 +749,7 @@ export class IOSSimulatorMediaCapture {
     try {
       return await this.#awaitScreenshotRequest(request, operation);
     } finally {
+      input.signal?.removeEventListener('abort', cancelForAbortedMutation);
       requests.delete(request);
       if (requests.size === 0) this.#screenshotRequestsBySession.delete(input.sessionId);
     }

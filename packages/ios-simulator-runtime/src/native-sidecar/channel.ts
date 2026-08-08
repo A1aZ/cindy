@@ -177,6 +177,7 @@ export class IOSSimulatorNativeSidecarChannelError extends Error {
       | "ABORTED"
       | "PROTOCOL_ERROR"
       | "PARKED"
+      | "TERMINATION_FAILED"
       | "PROCESS_EXITED",
     message: string,
   ) {
@@ -368,8 +369,14 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     return this.#lastTermination ? { ...this.#lastTermination } : null;
   }
 
+  /** Resolves only after a quarantined process has actually closed. */
+  get retirement(): Promise<void> | null {
+    return this.#stoppingProcess?.exited ?? null;
+  }
+
   async start(): Promise<void> {
     if (this.#stopPromise) await this.#stopPromise;
+    if (this.#stoppingProcess) throw this.#terminationFailedError();
     if (this.#state === "running" && this.#process) return;
     if (this.#state === "parked") {
       throw new IOSSimulatorNativeSidecarChannelError(
@@ -499,7 +506,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
   }
 
   rearm(): void {
-    if (this.#process) return;
+    if (this.#process || this.#stoppingProcess) return;
     this.#crashCount = 0;
     this.#consecutiveTimeouts = 0;
     this.#state = "idle";
@@ -518,6 +525,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     );
     if (process) return this.#ensureProcessClosed(process, true);
     if (this.#stopPromise) return this.#stopPromise;
+    if (this.#stoppingProcess) throw this.#terminationFailedError();
   }
 
   /** Synchronously kill both active and already-stopping process groups. */
@@ -556,16 +564,22 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         this.#ensureProcessClosed(process, terminate),
       );
     }
+    this.#stoppingProcess = process;
+    void process.exited
+      .then(() => {
+        if (this.#stoppingProcess === process) {
+          this.#stoppingProcess = null;
+        }
+      })
+      .catch(() => undefined);
     const operation = terminate
       ? this.#terminateStoppedProcess(process)
       : process.exited;
     const stopPromise = operation.finally(() => {
       if (this.#stopPromise === stopPromise) {
         this.#stopPromise = null;
-        this.#stoppingProcess = null;
       }
     });
-    this.#stoppingProcess = process;
     this.#stopPromise = stopPromise;
     return stopPromise;
   }
@@ -584,7 +598,14 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
       this.#options.stopTimeoutMs,
     );
     process.kill("SIGKILL");
-    if (!(await killed)) await process.exited;
+    if (!(await killed)) throw this.#terminationFailedError();
+  }
+
+  #terminationFailedError(): IOSSimulatorNativeSidecarChannelError {
+    return new IOSSimulatorNativeSidecarChannelError(
+      "TERMINATION_FAILED",
+      "Native sidecar process did not terminate after SIGKILL.",
+    );
   }
 
   #waitForProcessExit(

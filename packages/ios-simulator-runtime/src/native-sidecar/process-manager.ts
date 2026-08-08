@@ -45,6 +45,8 @@ export interface IOSSimulatorNativeSidecarManagedChannel extends IOSSimulatorNat
   readonly crashCount: number;
   readonly stderrTail: string;
   readonly lastTermination: IOSSimulatorNativeSidecarTermination | null;
+  /** Present while an unsuccessfully terminated process still owns the slot. */
+  readonly retirement: Promise<void> | null;
   start(): Promise<void>;
   restart(): Promise<void>;
   rearm(): void;
@@ -145,6 +147,15 @@ interface PendingSidecarOperation {
   stopRequested: boolean;
 }
 
+interface RetiringSidecarOperation {
+  channel: IOSSimulatorNativeSidecarManagedChannel;
+  sandbox: IOSSimulatorNativeSidecarSandboxLaunchState;
+  policy?: IOSSimulatorNativeCapabilityAdmissionPolicy;
+  detectedCapabilities?: Readonly<IOSSimulatorDriverCapabilities>;
+  exited: boolean;
+  finalizing?: Promise<void>;
+}
+
 interface IOSSimulatorNativeSidecarSandboxLaunchState {
   diagnostics: IOSSimulatorNativeSidecarSandboxDiagnostics;
   temporaryDirectory: string | null;
@@ -198,6 +209,7 @@ export class IOSSimulatorNativeSidecarProcessManagerError extends Error {
       | "SANDBOX_UNAVAILABLE"
       | "SANDBOX_UNSUPPORTED_PLATFORM"
       | "SANDBOX_PROFILE_INVALID"
+      | "TERMINATION_FAILED"
       | "UNAVAILABLE",
     message: string,
   ) {
@@ -561,6 +573,7 @@ export class IOSSimulatorNativeSidecarProcessManager {
   readonly #running = new Map<string, InternalRunningInstance>();
   readonly #starting = new Map<string, PendingSidecarOperation>();
   readonly #stopping = new Map<string, Promise<void>>();
+  readonly #retiring = new Map<string, RetiringSidecarOperation>();
   readonly #liveChannels = new Set<IOSSimulatorNativeSidecarManagedChannel>();
   readonly #lastProbe = new Map<
     string,
@@ -672,6 +685,8 @@ export class IOSSimulatorNativeSidecarProcessManager {
     requireIdentity(input);
     const stopping = this.#stopping.get(input.instanceId);
     if (stopping) return stopping.then(() => this.start(input));
+    const retiring = this.#retiring.get(input.instanceId);
+    if (retiring) return this.#resumeAfterRetiring(input, retiring);
     const running = this.#running.get(input.instanceId);
     if (running) {
       if (!sameStartIdentity(running.startInput, input)) {
@@ -835,12 +850,24 @@ export class IOSSimulatorNativeSidecarProcessManager {
           this.#lastSandbox.set(input.instanceId, sandbox.diagnostics);
         }
       }
-      await channel.stop().catch(() => undefined);
+      let stopFailure: unknown;
+      try {
+        await this.#stopChannelOrRetire(
+          input.instanceId,
+          channel,
+          sandbox,
+          policy,
+        );
+      } catch (error) {
+        stopFailure = error;
+      }
+      if (this.#retiring.has(input.instanceId)) throw stopFailure;
       try {
         await this.#disposeSandbox(sandbox);
       } finally {
         this.#liveChannels.delete(channel);
       }
+      if (stopFailure) throw stopFailure;
       throw failure;
     }
   }
@@ -854,6 +881,8 @@ export class IOSSimulatorNativeSidecarProcessManager {
     if (stopping) {
       return stopping.then(() => this.recover(input, options));
     }
+    const retiring = this.#retiring.get(input.instanceId);
+    if (retiring) return this.#resumeAfterRetiring(input, retiring);
     const running = this.#running.get(input.instanceId);
     if (!running) return this.start(input);
     if (!sameStartIdentity(running.startInput, input)) {
@@ -996,12 +1025,25 @@ export class IOSSimulatorNativeSidecarProcessManager {
       }
       if (operation.stopRequested || running.channel.state !== "parked") {
         this.#running.delete(input.instanceId);
-        await running.channel.stop().catch(() => undefined);
+        let stopFailure: unknown;
+        try {
+          await this.#stopChannelOrRetire(
+            input.instanceId,
+            running.channel,
+            running.sandbox,
+            running.policy,
+            running.handshake.capabilities,
+          );
+        } catch (stopError) {
+          stopFailure = stopError;
+        }
+        if (this.#retiring.has(input.instanceId)) throw stopFailure;
         try {
           await this.#disposeSandbox(running.sandbox);
         } finally {
           this.#liveChannels.delete(running.channel);
         }
+        if (stopFailure) throw stopFailure;
       }
       throw failure;
     }
@@ -1077,6 +1119,127 @@ export class IOSSimulatorNativeSidecarProcessManager {
     );
   }
 
+  #terminationFailedError(): IOSSimulatorNativeSidecarProcessManagerError {
+    return new IOSSimulatorNativeSidecarProcessManagerError(
+      "TERMINATION_FAILED",
+      "Native sidecar process did not terminate after SIGKILL.",
+    );
+  }
+
+  #rememberRetiring(
+    instanceId: string,
+    channel: IOSSimulatorNativeSidecarManagedChannel,
+    sandbox: IOSSimulatorNativeSidecarSandboxLaunchState,
+    policy?: IOSSimulatorNativeCapabilityAdmissionPolicy,
+    detectedCapabilities?: Readonly<IOSSimulatorDriverCapabilities>,
+    force = false,
+  ): boolean {
+    const retirement = channel.retirement;
+    if (!retirement && !force) return false;
+    const existing = this.#retiring.get(instanceId);
+    if (existing) return existing.channel === channel;
+    const retiring: RetiringSidecarOperation = {
+      channel,
+      sandbox,
+      policy,
+      detectedCapabilities,
+      exited: false,
+    };
+    this.#retiring.set(instanceId, retiring);
+    this.#lastFailure.set(
+      instanceId,
+      "Native sidecar process did not terminate after SIGKILL.",
+    );
+    if (policy) {
+      this.#lastAdmission.set(
+        instanceId,
+        evaluateIOSSimulatorNativeCapabilityAdmission({
+          policy,
+          detectedCapabilities,
+          processState: "failed",
+          now: this.#options.now,
+        }),
+      );
+    }
+    if (retirement) {
+      void retirement
+        .then(async () => {
+          retiring.exited = true;
+          await this.#finalizeRetiring(instanceId, retiring);
+        })
+        .catch(() => undefined);
+    }
+    return true;
+  }
+
+  async #finalizeRetiring(
+    instanceId: string,
+    retiring: RetiringSidecarOperation,
+  ): Promise<void> {
+    if (this.#retiring.get(instanceId) !== retiring || !retiring.exited) return;
+    retiring.finalizing ??= (async () => {
+      this.#lastSandbox.set(instanceId, retiring.sandbox.diagnostics);
+      await this.#disposeSandbox(retiring.sandbox);
+      if (this.#retiring.get(instanceId) !== retiring) return;
+      this.#retiring.delete(instanceId);
+      this.#liveChannels.delete(retiring.channel);
+      this.#lastFailure.delete(instanceId);
+      if (retiring.policy) {
+        this.#lastAdmission.set(
+          instanceId,
+          evaluateIOSSimulatorNativeCapabilityAdmission({
+            policy: retiring.policy,
+            detectedCapabilities: retiring.detectedCapabilities,
+            processState: "stopped",
+            now: this.#options.now,
+          }),
+        );
+      }
+    })();
+    await retiring.finalizing;
+  }
+
+  async #resumeAfterRetiring(
+    input: IOSSimulatorNativeSidecarStartOptions,
+    retiring: RetiringSidecarOperation,
+  ): Promise<IOSSimulatorNativeSidecarRunningInstance> {
+    if (!retiring.exited) throw this.#terminationFailedError();
+    await this.#finalizeRetiring(input.instanceId, retiring);
+    if (this.#retiring.get(input.instanceId) === retiring) {
+      throw this.#terminationFailedError();
+    }
+    return this.start(input);
+  }
+
+  async #stopChannelOrRetire(
+    instanceId: string,
+    channel: IOSSimulatorNativeSidecarManagedChannel,
+    sandbox: IOSSimulatorNativeSidecarSandboxLaunchState,
+    policy?: IOSSimulatorNativeCapabilityAdmissionPolicy,
+    detectedCapabilities?: Readonly<IOSSimulatorDriverCapabilities>,
+  ): Promise<void> {
+    try {
+      await channel.stop();
+    } catch (error) {
+      const reportedTerminationFailure =
+        isRecord(error) && error.code === "TERMINATION_FAILED";
+      const terminationFailed =
+        this.#rememberRetiring(
+          instanceId,
+          channel,
+          sandbox,
+          policy,
+          detectedCapabilities,
+          reportedTerminationFailure,
+        ) || reportedTerminationFailure;
+      if (terminationFailed) throw this.#terminationFailedError();
+      throw safeProcessManagerFailure(
+        error,
+        "Native sidecar process failed to stop.",
+      );
+    }
+  }
+
   async #verifyBinaryIntegrity(instanceId: string): Promise<void> {
     if (!this.#options.verifyBinaryIntegrity) return;
     try {
@@ -1104,6 +1267,15 @@ export class IOSSimulatorNativeSidecarProcessManager {
   }
 
   async #stop(instanceId: string): Promise<void> {
+    const retiring = this.#retiring.get(instanceId);
+    if (retiring) {
+      if (!retiring.exited) throw this.#terminationFailedError();
+      await this.#finalizeRetiring(instanceId, retiring);
+      if (this.#retiring.get(instanceId) === retiring) {
+        throw this.#terminationFailedError();
+      }
+      return;
+    }
     const pending = this.#starting.get(instanceId);
     const pendingTermination = pending?.channel?.lastTermination;
     if (pendingTermination) {
@@ -1114,10 +1286,33 @@ export class IOSSimulatorNativeSidecarProcessManager {
     }
     if (pending) {
       pending.stopRequested = true;
-      await pending.channel?.stop().catch(() => undefined);
+      if (pending.channel && pending.sandbox) {
+        try {
+          await this.#stopChannelOrRetire(
+            instanceId,
+            pending.channel,
+            pending.sandbox,
+            pending.policy,
+          );
+        } catch (error) {
+          await pending.promise?.catch(() => undefined);
+          throw error;
+        }
+      } else {
+        await pending.channel?.stop();
+      }
     }
-    let running = this.#running.get(instanceId);
-    const stoppedRunning = running;
+    await pending?.promise?.catch(() => undefined);
+    const newlyRetiring = this.#retiring.get(instanceId);
+    if (newlyRetiring) {
+      if (!newlyRetiring.exited) throw this.#terminationFailedError();
+      await this.#finalizeRetiring(instanceId, newlyRetiring);
+      if (this.#retiring.get(instanceId) === newlyRetiring) {
+        throw this.#terminationFailedError();
+      }
+      return;
+    }
+    const running = this.#running.get(instanceId);
     const runningTermination = running?.channel.lastTermination;
     if (runningTermination) {
       this.#lastTermination.set(
@@ -1126,39 +1321,35 @@ export class IOSSimulatorNativeSidecarProcessManager {
       );
     }
     if (running) {
-      this.#running.delete(instanceId);
       await running.adapter.detach().catch(() => undefined);
-      await running.channel.stop().catch(() => undefined);
-      this.#liveChannels.delete(running.channel);
-    }
-    await pending?.promise?.catch(() => undefined);
-    running = this.#running.get(instanceId);
-    if (running) {
+      try {
+        await this.#stopChannelOrRetire(
+          instanceId,
+          running.channel,
+          running.sandbox,
+          running.policy,
+          running.handshake.capabilities,
+        );
+      } catch (error) {
+        if (this.#retiring.has(instanceId)) {
+          this.#running.delete(instanceId);
+        }
+        throw error;
+      }
       this.#running.delete(instanceId);
-      await running.adapter.detach().catch(() => undefined);
-      await running.channel.stop().catch(() => undefined);
       this.#liveChannels.delete(running.channel);
-    }
-    if (pending?.channel) this.#liveChannels.delete(pending.channel);
-    const policy = running?.policy ?? stoppedRunning?.policy ?? pending?.policy;
-    const sandbox =
-      running?.sandbox ?? stoppedRunning?.sandbox ?? pending?.sandbox;
-    if (sandbox) {
-      this.#lastSandbox.set(instanceId, sandbox.diagnostics);
-      await this.#disposeSandbox(sandbox);
-    }
-    if (policy) {
+      this.#lastSandbox.set(instanceId, running.sandbox.diagnostics);
+      await this.#disposeSandbox(running.sandbox);
       this.#lastAdmission.set(
         instanceId,
         evaluateIOSSimulatorNativeCapabilityAdmission({
-          policy,
-          detectedCapabilities:
-            running?.handshake.capabilities ??
-            stoppedRunning?.handshake.capabilities,
+          policy: running.policy,
+          detectedCapabilities: running.handshake.capabilities,
           processState: "stopped",
           now: this.#options.now,
         }),
       );
+      this.#lastFailure.delete(instanceId);
     }
   }
 

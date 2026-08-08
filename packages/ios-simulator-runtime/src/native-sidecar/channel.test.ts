@@ -216,6 +216,47 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     }
   });
 
+  it("quarantines a process that remains alive after the bounded SIGKILL wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const { channel, launcher, processes } = harness({ stopTimeoutMs: 5 });
+      await channel.start();
+      const process = processes[0]!;
+      process.emitExitOnKill = false;
+
+      const stop = channel.stop();
+      const stopped = expect(stop).rejects.toMatchObject({
+        code: "TERMINATION_FAILED",
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await stopped;
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      await expect(channel.start()).rejects.toMatchObject({
+        code: "TERMINATION_FAILED",
+      });
+      await expect(channel.restart()).rejects.toMatchObject({
+        code: "TERMINATION_FAILED",
+      });
+      expect(launcher.launch).toHaveBeenCalledTimes(1);
+
+      channel.abortOperationsForExit();
+      expect(process.killSignals).toEqual([
+        "SIGTERM",
+        "SIGKILL",
+        "SIGKILL",
+      ]);
+      process.exit(null, "SIGKILL");
+      await process.exited;
+      await Promise.resolve();
+
+      await channel.start();
+      expect(launcher.launch).toHaveBeenCalledTimes(2);
+      await channel.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("synchronously kills both active and already-stopping processes for Host exit", async () => {
     const activeHarness = harness();
     await activeHarness.channel.start();
@@ -359,6 +400,8 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     expect(launcher.launch).toHaveBeenCalledTimes(2);
     processes[1]!.exit(1, "SIGKILL");
     expect(channel.state).toBe("parked");
+    await processes[1]!.exited;
+    await Promise.resolve();
     expect(() => channel.rearm()).not.toThrow();
     await channel.start();
     expect(launcher.launch).toHaveBeenCalledTimes(3);

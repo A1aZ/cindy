@@ -42,6 +42,7 @@ class FakeChannel implements IOSSimulatorNativeSidecarManagedChannel {
   crashCount = 0;
   stderrTail = "";
   lastTermination: IOSSimulatorNativeSidecarTermination | null = null;
+  retirement: Promise<void> | null = null;
   readonly requests: IOSSimulatorNativeSidecarCommand[] = [];
   readonly stop = vi.fn(async () => {
     this.state = "stopped";
@@ -145,6 +146,101 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     manager.abortOperationsForExit();
 
     expect(channel.abortOperationsForExit).toHaveBeenCalledOnce();
+  });
+
+  it("retains a failed-termination slot until the exact channel exits", async () => {
+    const channels: FakeChannel[] = [];
+    const createChannel = vi.fn(() => {
+      const channel = new FakeChannel();
+      channels.push(channel);
+      return channel;
+    });
+    const manager = new IOSSimulatorNativeSidecarProcessManager({
+      binaryPath: "/private/fake/ios-simulator-sidecar",
+      createChannel,
+    });
+    await manager.start(input());
+    const retired = channels[0]!;
+    let resolveRetirement!: () => void;
+    retired.retirement = new Promise<void>((resolve) => {
+      resolveRetirement = resolve;
+    });
+    void retired.retirement.then(() => {
+      retired.retirement = null;
+    });
+    retired.stop.mockImplementation(async () => {
+      retired.state = "stopped";
+      throw Object.assign(new Error("still alive"), {
+        code: "TERMINATION_FAILED",
+      });
+    });
+
+    await expect(manager.stop(input().instanceId)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    await expect(manager.start(input())).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    expect(createChannel).toHaveBeenCalledTimes(1);
+    manager.abortOperationsForExit();
+    expect(retired.abortOperationsForExit).toHaveBeenCalledOnce();
+
+    resolveRetirement();
+    await retired.retirement;
+    await vi.waitFor(() =>
+      expect(manager.diagnostics(input().instanceId).state).toBe("stopped"),
+    );
+    await manager.start(input());
+    expect(createChannel).toHaveBeenCalledTimes(2);
+    await manager.stop(input().instanceId);
+  });
+
+  it("quarantines a failed startup channel before allowing another launch", async () => {
+    const retired = new FakeChannel(undefined, {
+      ready: false,
+      message: "probe failed",
+    });
+    let resolveRetirement!: () => void;
+    retired.stop.mockImplementation(async () => {
+      if (!retired.retirement) {
+        retired.retirement = new Promise<void>((resolve) => {
+          resolveRetirement = resolve;
+        });
+        void retired.retirement.then(() => {
+          retired.retirement = null;
+        });
+      }
+      retired.state = "stopped";
+      throw Object.assign(new Error("still alive"), {
+        code: "TERMINATION_FAILED",
+      });
+    });
+    const replacement = new FakeChannel();
+    const createChannel = vi
+      .fn<() => IOSSimulatorNativeSidecarManagedChannel>()
+      .mockReturnValueOnce(retired)
+      .mockReturnValue(replacement);
+    const manager = new IOSSimulatorNativeSidecarProcessManager({
+      binaryPath: "/private/fake/ios-simulator-sidecar",
+      createChannel,
+    });
+
+    await expect(manager.start(input())).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    await expect(manager.start(input())).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    expect(createChannel).toHaveBeenCalledTimes(1);
+
+    resolveRetirement();
+    await retired.retirement;
+    await vi.waitFor(() =>
+      expect(manager.diagnostics(input().instanceId).state).toBe("stopped"),
+    );
+    await manager.start(input());
+    expect(createChannel).toHaveBeenCalledTimes(2);
+    await manager.stop(input().instanceId);
   });
 
   it("adds native product flags only for explicitly enabled host capabilities", () => {

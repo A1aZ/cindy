@@ -105,6 +105,7 @@ export class IOSSimulatorCapabilityProviderError extends Error {
       | "ARTIFACT_CHANGED"
       | "ADMISSION_DENIED"
       | "START_STOPPED"
+      | "TERMINATION_FAILED"
       | "UNAVAILABLE",
     message: string,
   ) {
@@ -196,6 +197,15 @@ function stoppedError(): IOSSimulatorCapabilityProviderError {
   );
 }
 
+function isTerminationFailure(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "TERMINATION_FAILED"
+  );
+}
+
 /**
  * Host-owned supervisor that converts artifact candidates into process
  * managers. Plugin sandboxes cannot inject runtimes, policies, or process
@@ -220,6 +230,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     IOSSimulatorNativeCapabilityAdmissionDecision
   >();
   #enabled = true;
+  #disposing = false;
   #disposed = false;
 
   constructor(options: {
@@ -241,10 +252,10 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
   }
 
   enable(): void {
-    if (this.#disposed) {
+    if (this.#disposing || this.#disposed) {
       throw new IOSSimulatorCapabilityProviderError(
         "PROVIDER_DISABLED",
-        "Native capability provider is disposed.",
+        "Native capability provider is disposing or disposed.",
       );
     }
     this.#enabled = true;
@@ -257,10 +268,12 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
 
   async dispose(): Promise<void> {
     if (this.#disposed) return;
-    this.#disposed = true;
+    this.#disposing = true;
     await this.disable();
     this.#runtimes.clear();
     this.#runtimeArtifacts.clear();
+    this.#disposed = true;
+    this.#disposing = false;
   }
 
   abortOperationsForExit(): void {
@@ -387,7 +400,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
       this.#assertAdmitted(input.instanceId, policy);
     } catch (error) {
       if (existing) {
-        await existing.runtime.stop(input.instanceId).catch(() => undefined);
+        await this.#stopBindingForRelease(input.instanceId, existing);
         this.#rememberDiagnostics(input.instanceId, existing.runtime);
         this.#bindings.delete(input.instanceId);
       }
@@ -403,17 +416,30 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     try {
       const running = await runtime.start(input);
       if (operation.stopRequested) {
-        await runtime.stop(input.instanceId).catch(() => undefined);
+        await this.#stopBindingForRelease(input.instanceId, binding);
         throw stoppedError();
       }
       this.#rememberDiagnostics(input.instanceId, runtime);
       return running;
     } catch (error) {
       this.#rememberDiagnostics(input.instanceId, runtime);
-      if (!runtime.get(input.instanceId)) {
+      if (
+        !(
+          error instanceof IOSSimulatorCapabilityProviderError &&
+          error.code === "TERMINATION_FAILED"
+        ) &&
+        !isTerminationFailure(error) &&
+        !runtime.get(input.instanceId)
+      ) {
         this.#bindings.delete(input.instanceId);
       }
       if (error instanceof IOSSimulatorCapabilityProviderError) throw error;
+      if (isTerminationFailure(error)) {
+        throw new IOSSimulatorCapabilityProviderError(
+          "TERMINATION_FAILED",
+          "Native capability process did not terminate after SIGKILL.",
+        );
+      }
       throw new IOSSimulatorCapabilityProviderError(
         "UNAVAILABLE",
         "Native capability provider is unavailable.",
@@ -467,7 +493,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     operation.artifactId = artifact.artifactId;
     if (operation.stopRequested) throw stoppedError();
     if (artifactKey(artifact) !== binding.artifactKey) {
-      await binding.runtime.stop(input.instanceId).catch(() => undefined);
+      await this.#stopBindingForRelease(input.instanceId, binding);
       this.#rememberDiagnostics(input.instanceId, binding.runtime);
       this.#bindings.delete(input.instanceId);
       throw new IOSSimulatorCapabilityProviderError(
@@ -479,7 +505,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     try {
       this.#assertAdmitted(input.instanceId, policy);
     } catch (error) {
-      await binding.runtime.stop(input.instanceId).catch(() => undefined);
+      await this.#stopBindingForRelease(input.instanceId, binding);
       this.#rememberDiagnostics(input.instanceId, binding.runtime);
       this.#bindings.delete(input.instanceId);
       throw error;
@@ -488,15 +514,23 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     try {
       const running = await binding.runtime.recover(input, options);
       if (operation.stopRequested) {
-        await binding.runtime.stop(input.instanceId).catch(() => undefined);
+        await this.#stopBindingForRelease(input.instanceId, binding);
         throw stoppedError();
       }
       this.#rememberDiagnostics(input.instanceId, binding.runtime);
       return running;
     } catch (error) {
       this.#rememberDiagnostics(input.instanceId, binding.runtime);
-      if (operation.stopRequested) throw stoppedError();
+      if (operation.stopRequested && !isTerminationFailure(error)) {
+        throw stoppedError();
+      }
       if (error instanceof IOSSimulatorCapabilityProviderError) throw error;
+      if (isTerminationFailure(error)) {
+        throw new IOSSimulatorCapabilityProviderError(
+          "TERMINATION_FAILED",
+          "Native capability process did not terminate after SIGKILL.",
+        );
+      }
       throw new IOSSimulatorCapabilityProviderError(
         "UNAVAILABLE",
         "Native capability provider recovery failed.",
@@ -516,15 +550,33 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     return operation;
   }
 
+  async #stopBindingForRelease(
+    instanceId: string,
+    binding: ArtifactBinding,
+  ): Promise<void> {
+    try {
+      await binding.runtime.stop(instanceId);
+    } catch (error) {
+      this.#rememberDiagnostics(instanceId, binding.runtime);
+      if (isTerminationFailure(error)) {
+        throw new IOSSimulatorCapabilityProviderError(
+          "TERMINATION_FAILED",
+          "Native capability process did not terminate after SIGKILL.",
+        );
+      }
+      // Preserve the existing best-effort behavior for non-lifecycle failures.
+    }
+  }
+
   async #stop(instanceId: string): Promise<void> {
     const pending = this.#starting.get(instanceId);
     if (pending) pending.stopRequested = true;
     let binding = this.#bindings.get(instanceId);
-    await binding?.runtime.stop(instanceId).catch(() => undefined);
+    if (binding) await this.#stopBindingForRelease(instanceId, binding);
     await pending?.promise?.catch(() => undefined);
     binding = this.#bindings.get(instanceId) ?? binding;
     if (binding) {
-      await binding.runtime.stop(instanceId).catch(() => undefined);
+      await this.#stopBindingForRelease(instanceId, binding);
       this.#rememberDiagnostics(instanceId, binding.runtime);
     }
     this.#bindings.delete(instanceId);
@@ -624,7 +676,7 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
   }
 
   #assertEnabled(): void {
-    if (!this.#enabled || this.#disposed) {
+    if (!this.#enabled || this.#disposing || this.#disposed) {
       throw new IOSSimulatorCapabilityProviderError(
         "PROVIDER_DISABLED",
         "Native capability provider is disabled.",

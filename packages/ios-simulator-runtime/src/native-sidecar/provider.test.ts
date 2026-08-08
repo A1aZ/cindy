@@ -228,6 +228,104 @@ describe("HostIOSSimulatorSidecarSupervisor", () => {
     expect(supervisor.get(START.instanceId)).toBeNull();
   });
 
+  it("preserves the artifact binding while its runtime is still retiring", async () => {
+    let artifact = bundledArtifact();
+    const { supervisor, createRuntime, runtimes } = createSupervisor({
+      resolve: () => artifact,
+    });
+    await supervisor.start(START);
+    const runtime = runtimes[0]!;
+    const terminationFailure = Object.assign(new Error("still alive"), {
+      code: "TERMINATION_FAILED",
+    });
+    runtime.stop.mockRejectedValueOnce(terminationFailure);
+
+    await expect(supervisor.stop(START.instanceId)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    artifact = bundledArtifact({
+      artifactId: "replacement.ios-sidecar",
+      sha256: "b".repeat(64),
+    });
+    await expect(supervisor.start(START)).rejects.toMatchObject({
+      code: "ARTIFACT_CHANGED",
+    });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+
+    artifact = bundledArtifact();
+    runtime.start.mockRejectedValueOnce(terminationFailure);
+    await expect(supervisor.start(START)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+
+    await supervisor.stop(START.instanceId);
+    artifact = bundledArtifact({
+      artifactId: "replacement.ios-sidecar",
+      sha256: "b".repeat(64),
+    });
+    await supervisor.start(START);
+    expect(createRuntime).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries disposal after a bounded termination failure", async () => {
+    const { supervisor, runtimes } = createSupervisor({
+      resolve: () => bundledArtifact(),
+    });
+    await supervisor.start(START);
+    const runtime = runtimes[0]!;
+    runtime.stop.mockRejectedValueOnce(
+      Object.assign(new Error("still alive"), {
+        code: "TERMINATION_FAILED",
+      }),
+    );
+
+    await expect(supervisor.dispose()).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    expect(supervisor.get(START.instanceId)).not.toBeNull();
+    supervisor.abortOperationsForExit();
+    expect(runtime.abortOperationsForExit).toHaveBeenCalledTimes(1);
+
+    await supervisor.dispose();
+    expect(supervisor.get(START.instanceId)).toBeNull();
+    supervisor.abortOperationsForExit();
+    expect(runtime.abortOperationsForExit).toHaveBeenCalledTimes(1);
+    expect(() => supervisor.enable()).toThrowError(
+      IOSSimulatorCapabilityProviderError,
+    );
+  });
+
+  it("blocks enable and new starts throughout asynchronous disposal", async () => {
+    const { supervisor, createRuntime, runtimes } = createSupervisor({
+      resolve: () => bundledArtifact(),
+    });
+    await supervisor.start(START);
+    const runtime = runtimes[0]!;
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    runtime.stop.mockImplementationOnce(async (instanceId) => {
+      await stopGate;
+      runtime.running.delete(instanceId);
+    });
+
+    const disposal = supervisor.dispose();
+    await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledOnce());
+    expect(() => supervisor.enable()).toThrowError(
+      IOSSimulatorCapabilityProviderError,
+    );
+    await expect(
+      supervisor.start({ ...START, instanceId: "instance-b" }),
+    ).rejects.toMatchObject({ code: "PROVIDER_DISABLED" });
+    expect(createRuntime).toHaveBeenCalledTimes(1);
+
+    releaseStop();
+    await disposal;
+    expect(supervisor.get(START.instanceId)).toBeNull();
+  });
+
   it("derives artifact trust from the Host resolver and rejects an untrusted plugin before runtime creation", async () => {
     const pluginArtifact = bundledArtifact({
       artifactId: "example.ios-sidecar",

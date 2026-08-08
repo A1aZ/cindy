@@ -24,12 +24,28 @@ const BASE = path.join(path.sep, 'base');
 const USER_DATA = path.join(BASE, 'Cindy');
 const LEGACY = path.join(BASE, 'xdt-maker');
 const nodeRequire = createRequire(import.meta.url);
-const electronPath = nodeRequire('electron') as string;
-const electronResourcesDir = process.platform === 'darwin'
-  ? path.resolve(path.dirname(electronPath), '..', 'Resources')
-  : path.join(path.dirname(electronPath), 'resources');
-const electronAsarFixture = path.join(electronResourcesDir, 'default_app.asar');
-const hasElectronRuntime = existsSync(electronPath) && existsSync(electronAsarFixture);
+
+function resolveElectronRuntime(
+  resolveElectron: () => unknown = () => nodeRequire('electron'),
+  fileExists: (filePath: string) => boolean = existsSync,
+): { executable: string; asarFixture: string } | null {
+  try {
+    const executable = resolveElectron();
+    if (typeof executable !== 'string' || !fileExists(executable)) return null;
+    const resourcesDir = process.platform === 'darwin'
+      ? path.resolve(path.dirname(executable), '..', 'Resources')
+      : path.join(path.dirname(executable), 'resources');
+    const asarFixture = path.join(resourcesDir, 'default_app.asar');
+    return fileExists(asarFixture) ? { executable, asarFixture } : null;
+  } catch {
+    return null;
+  }
+}
+
+const electronRuntime = resolveElectronRuntime();
+const electronPath = electronRuntime?.executable ?? '';
+const electronAsarFixture = electronRuntime?.asarFixture ?? '';
+const hasElectronRuntime = electronRuntime !== null;
 const requireElectronRuntime = process.env.CINDY_REQUIRE_ELECTRON_RUNTIME_TEST === '1';
 
 if (requireElectronRuntime && !hasElectronRuntime) {
@@ -171,6 +187,16 @@ function readMarker(memfs: MemFs): Record<string, unknown> {
   expect(raw).toBeTruthy();
   return JSON.parse(raw as string) as Record<string, unknown>;
 }
+
+describe('Electron runtime detection', () => {
+  it('treats a missing Electron package as unavailable', () => {
+    expect(
+      resolveElectronRuntime(() => {
+        throw new Error('module not found');
+      }),
+    ).toBeNull();
+  });
+});
 
 describe('runLegacyUserDataMigration', () => {
   it('marker 已存在 → 直接返回,不弹窗不写盘', async () => {

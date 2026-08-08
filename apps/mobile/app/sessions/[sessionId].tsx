@@ -100,6 +100,7 @@ import {
 import {
   ConversationShareWebView,
   bundledAssetToDataUri,
+  deleteConversationSharePngTemp,
   writeConversationSharePngTemp,
   type ConversationShareWebViewHandle,
 } from '@/session/ConversationShareWebView';
@@ -113,6 +114,7 @@ import {
   shareSelectionStore,
   useShareSelectionActive,
   useShareSelectionCount,
+  useShareSelectionRevision,
 } from '@/session/shareSelectionStore';
 import { ComposerRichInput, type ComposerRichInputHandle } from '@/session/ComposerRichInput';
 import { InlineQueueSection } from '@/session/InlineQueueSection';
@@ -256,7 +258,8 @@ import {
   useSessionQuotes,
 } from '@/session/chatQuoteStore';
 import { QuoteCapsule } from '@/session/QuoteCapsule';
-import { formatQuotesForSend, stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
+import { formatQuotesForSend, parseChatQuoteSegments, stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
+import { buildVisibleSentInlineTokens, sentInlineTokensDisplayText } from '@/session/sentMessageAtoms';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { projectDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import { confirmFullAccessChange } from '@/session/fullAccessConfirmation';
@@ -665,9 +668,20 @@ function collectConversationShareMessages(
       if (!isShareableMessage(item.message)) return;
       if (item.message.kind !== 'user' && item.message.kind !== 'assistant') return;
       const clientId = item.message.source.clientId || item.message.source.id || item.message.key;
-      const body = item.message.quotesEncoded
-        ? stripChatQuoteMarkerLines(item.message.body)
-        : item.message.body;
+      const body = item.message.kind === 'user'
+        ? sentInlineTokensDisplayText(
+            buildVisibleSentInlineTokens(
+              item.message.body,
+              item.message.quotesEncoded
+                ? parseChatQuoteSegments(item.message.body)
+                : item.message.body ? [{ kind: 'text' as const, text: item.message.body }] : [],
+              item.message.pastedTextRanges,
+              item.message.slashCommandRanges,
+            ).filter((token) => token.kind !== 'quote'),
+          )
+        : item.message.quotesEncoded
+          ? stripChatQuoteMarkerLines(item.message.body)
+          : item.message.body;
       messages.push({
         body,
         clientId,
@@ -876,6 +890,7 @@ export default function SessionScreen() {
   const sessionId = readRouteParam(params.sessionId) ?? '';
   const shareSelectionActive = useShareSelectionActive(sessionId);
   const shareSelectionCount = useShareSelectionCount();
+  const shareSelectionRevision = useShareSelectionRevision();
   const deviceId = readRouteParam(params.deviceId) ?? remoteSessionStore.getSessionDeviceId(sessionId) ?? '';
   // 回撤 preview/commit 的「请求代际」。每次发起 +1、每次切 session 也 +1(见下方 reset effect),
   // 异步返回后代际已变则丢弃。比只比较 sessionId 更严谨:仅比 sessionId 无法失效「A 发起 → 切到 B →
@@ -5611,7 +5626,7 @@ export default function SessionScreen() {
       .getSelectedIdsInOrder(allShareableIds)
       .map((clientId) => shareMessageById.get(clientId))
       .filter((message): message is ConversationShareMessage => message !== undefined);
-  }, [allShareableIds, shareMessageById, shareSelectionActive, shareSelectionCount]);
+  }, [allShareableIds, shareMessageById, shareSelectionActive, shareSelectionRevision]);
   const conversationShareHtml = useMemo(() => {
     if (!shareSelectionActive || selectedShareMessages.length === 0) return '';
     return buildConversationShareHtml({
@@ -5683,12 +5698,13 @@ export default function SessionScreen() {
     shareOperationSeqRef.current = operationSeq;
     const isShareOperationActive = () =>
       shareOperationSeqRef.current === operationSeq && shareSelectionActiveRef.current;
+    let localUri: string | null = null;
     setConversationShareBusy(true);
     try {
       if (!isShareOperationActive()) return;
       const base64 = await exportConversationSharePng();
       if (!isShareOperationActive()) return;
-      const localUri = await writeConversationSharePngTemp(base64);
+      localUri = await writeConversationSharePngTemp(base64);
       if (!isShareOperationActive()) return;
       if (!localUri) throw new Error(t('session.screen.shareNoLocalImage'));
       const sharing = await import('expo-sharing');
@@ -5702,6 +5718,7 @@ export default function SessionScreen() {
       console.warn('[conversation-share] failed to generate or open share image', error);
       Alert.alert(t('session.screen.shareFailedTitle'), t('session.screen.shareImageFailed'));
     } finally {
+      if (localUri) await deleteConversationSharePngTemp(localUri);
       if (shareOperationSeqRef.current === operationSeq) setConversationShareBusy(false);
     }
   }, [conversationShareBusy, exportConversationSharePng, selectedShareMessages.length, shareSelectionActive, t]);

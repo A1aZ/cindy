@@ -19,8 +19,10 @@ export function isShareableMessage(message: ShareableMessageLike): boolean {
 let activeSessionId: string | null = null;
 const selectedIds = new Set<string>();
 const listeners = new Set<() => void>();
+let revision = 0;
 
 function notify(): void {
+  revision += 1;
   for (const listener of listeners) listener();
 }
 
@@ -104,6 +106,14 @@ export function useShareSelectionCount(): number {
   return useSyncExternalStore(
     subscribe,
     () => shareSelectionStore.count(),
+    () => 0,
+  );
+}
+
+export function useShareSelectionRevision(): number {
+  return useSyncExternalStore(
+    subscribe,
+    () => revision,
     () => 0,
   );
 }

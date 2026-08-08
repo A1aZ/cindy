@@ -5,6 +5,7 @@ import WebKit
 private let onScreenshot = "onScreenshot"
 private let conversationShareRenderTimeout: TimeInterval = 20
 private let conversationShareMaxOutputPixels: CGFloat = 12_000_000
+private let conversationShareMaxSourcePixels: CGFloat = 12_000_000
 
 public class XdtScreenshotMonitorModule: Module {
   private var screenshotObserver: NSObjectProtocol?
@@ -180,9 +181,10 @@ private final class ConversationShareHtmlRenderer: NSObject, WKNavigationDelegat
         let captureWidth = numericOption(dimensions["width"]),
         let captureHeight = numericOption(dimensions["height"]),
         captureWidth > 0,
-        captureHeight > 0
+        captureHeight > 0,
+        captureWidth * captureHeight <= conversationShareMaxSourcePixels
       else {
-        self.finish(.failure(ConversationShareRenderError("Conversation share dimensions are invalid.")))
+        self.finish(.failure(ConversationShareRenderError("Conversation share content is too large.")))
         return
       }
       webView.frame = CGRect(x: 0, y: 0, width: captureWidth, height: captureHeight)

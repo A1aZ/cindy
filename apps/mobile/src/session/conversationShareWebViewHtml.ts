@@ -1,6 +1,6 @@
 import { redactSensitiveText } from "@cindy/maker-shared/error-redaction";
 import { buildKatexLoaderJs } from "@/session/mathWebViewHtml";
-import { MOBILE_MERMAID_SCRIPT_URLS } from "@/session/mermaidWebViewHtml";
+import { buildMermaidLoaderJs } from "@/session/mermaidWebViewHtml";
 import {
   buildSelectableMarkdownCss,
   buildSelectableMarkdownFragmentHtml,
@@ -83,7 +83,7 @@ export function buildConversationShareHtml({
     "<head>",
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">',
-    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://registry.npmmirror.com; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://registry.npmmirror.com; font-src https://cdn.jsdelivr.net https://registry.npmmirror.com data:; object-src 'none'; base-uri 'none'; form-action 'none';\">",
+    "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; object-src 'none'; base-uri 'none'; form-action 'none';\">",
     `<style id="share-style">${markdownCss}${buildConversationShareCss({ background, surfaceElevated: colors.surfaceElevated, textPrimary: colors.textPrimary, textSecondary: colors.textSecondary, textTertiary: colors.textTertiary, width })}</style>`,
     "</head>",
     "<body>",
@@ -271,7 +271,6 @@ function buildConversationShareCss({
 }
 
 function buildConversationShareRichContentScript(dark: boolean): string {
-  const mermaidUrls = JSON.stringify(MOBILE_MERMAID_SCRIPT_URLS);
   const mermaidTheme = dark ? "dark" : "default";
   const renderKatexJs = [
     'document.querySelectorAll("[data-latex]").forEach(function (element) {',
@@ -287,7 +286,10 @@ function buildConversationShareRichContentScript(dark: boolean): string {
     "mathDone = true;",
     "maybeReady();",
   ].join("");
-  const katexLoader = buildKatexLoaderJs(renderKatexJs);
+  const katexLoader = buildKatexLoaderJs(
+    renderKatexJs,
+    'clearTimeout(mathFallback); mathDone = true; maybeReady();',
+  );
 
   return `<script>
 (function () {
@@ -362,33 +364,10 @@ function buildConversationShareRichContentScript(dark: boolean): string {
   }
 
   if (!mermaidDone) {
-    (function attemptMermaid(index) {
-      var urls = ${mermaidUrls};
-      if (index >= urls.length) {
-        mermaidDone = true;
-        maybeReady();
-        return;
-      }
-      var finished = false;
-      var timer = setTimeout(fail, 6000);
-      function fail() {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        attemptMermaid(index + 1);
-      }
-      var script = document.createElement('script');
-      script.src = urls[index];
-      script.onload = function () {
-        if (finished) return;
-        if (!window.mermaid) { fail(); return; }
-        finished = true;
-        clearTimeout(timer);
-        renderMermaidNodes();
-      };
-      script.onerror = fail;
-      document.head.appendChild(script);
-    })(0);
+    ${buildMermaidLoaderJs(
+      'renderMermaidNodes();',
+      'mermaidDone = true; maybeReady();',
+    )}
   }
 
   maybeReady();
@@ -400,6 +379,7 @@ function buildExportScript(): string {
   return `<script>
 (function () {
   var maxOutputPixels = 12000000;
+  var maxSourcePixels = 12000000;
   function post(payload) {
     if (window.ReactNativeWebView) window.ReactNativeWebView.postMessage(JSON.stringify(payload));
   }
@@ -451,6 +431,7 @@ function buildExportScript(): string {
       var rect = stage.getBoundingClientRect();
       var width = Math.max(stage.scrollWidth, Math.ceil(rect.width));
       var height = Math.max(stage.scrollHeight, Math.ceil(rect.height));
+      if (width * height > maxSourcePixels) throw new Error('conversation-share-content-too-large');
       var requestedScale = Math.max(Number(scale) || 1, 0.25);
       var maxScale = Math.sqrt(maxOutputPixels / Math.max(1, width * height));
       var effectiveScale = Math.min(requestedScale, maxScale);

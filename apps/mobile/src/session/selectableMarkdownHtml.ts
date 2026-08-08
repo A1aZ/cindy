@@ -70,7 +70,7 @@ export function buildSelectableMarkdownHtml(
   // KaTeX runtime 只在文档确实含公式时注入(绝大多数文档没有,不为它们付
   // CDN 请求;失败降级由占位内容天然承担——块级是源码 <pre>、行内是斜体源码)。
   // CSS/JS 一律由 loader 动态注入,不放静态 <link>/<script src>:阻塞式外链在
-  // CDN 挂起时会让 WebView 永久白屏(见 mathWebViewHtml.ts 的硬约束说明)。
+  // 资源请求挂起时会让 WebView 永久白屏(见 mathWebViewHtml.ts 的硬约束说明)。
   const hasMath = blocksContainMath(blocks);
   return [
     '<!doctype html>',
@@ -116,7 +116,7 @@ function blocksContainMath(blocks: readonly MobileMarkdownBlock[]): boolean {
 
 /**
  * KaTeX 原位渲染脚本:KaTeX 就绪后把所有 data-latex 元素替换成 KaTeX 输出。
- * CSS/JS 经 buildKatexLoaderJs 动态注入(双 CDN failover + 超时,不阻塞首屏),
+ * CSS/JS 经 buildKatexLoaderJs 动态注入(固定本地资源 + 超时,不阻塞首屏),
  * 全部失败时占位源码(块级 <pre> / 行内斜体)保持可读;渲染失败(非法 LaTeX)
  * 由 throwOnError:false 消化,不抛错不留半截 DOM。
  */

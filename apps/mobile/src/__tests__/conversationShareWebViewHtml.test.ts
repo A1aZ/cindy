@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -54,18 +56,66 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('window.katex.render');
     expect(html).toContain('window.mermaid.render');
     expect(html).toContain("theme: 'dark'");
-    expect(html).toContain('window.__cindyConversationShareRichContentReady = true');
+    expect(html).toContain(
+      'window.__cindyConversationShareRichContentReady = true',
+    );
   });
 
-  it('仅放行既有 CDN，并在导出前等待富内容和图片解码', () => {
+  it('只使用离线资源，并在导出前等待富内容和图片解码', () => {
     const html = buildRichConversationHtml();
 
-    expect(html).toContain("img-src data:;");
+    expect(html).toContain("default-src 'none';");
+    expect(html).toContain('img-src data:;');
     expect(html).not.toContain('img-src data: https:');
-    expect(html).toContain(
-      "script-src 'unsafe-inline' https://cdn.jsdelivr.net https://registry.npmmirror.com",
-    );
+    expect(html).toContain("script-src 'unsafe-inline';");
     expect(html).toContain('waitForRichContent().then(waitForImages)');
     expect(html).toContain('image.decode().catch(function () {})');
+    expect(html).toContain(
+      "throw new Error('conversation-share-content-too-large')",
+    );
+  });
+
+  it('限制原生与降级 renderer 的完整源尺寸，并清理一次性 PNG', () => {
+    const nativeSource = readFileSync(
+      resolve(
+        process.cwd(),
+        'modules/xdt-screenshot-monitor/ios/XdtScreenshotMonitorModule.swift',
+      ),
+      'utf8',
+    );
+    const webViewSource = readFileSync(
+      resolve(process.cwd(), 'src/session/ConversationShareWebView.tsx'),
+      'utf8',
+    );
+    const sessionSource = readFileSync(
+      resolve(process.cwd(), 'app/sessions/[sessionId].tsx'),
+      'utf8',
+    );
+
+    expect(nativeSource).toContain('conversationShareMaxSourcePixels');
+    expect(nativeSource).toContain(
+      'captureWidth * captureHeight <= conversationShareMaxSourcePixels',
+    );
+    expect(webViewSource).toContain(
+      'await deleteConversationSharePngTemp(file.uri);',
+    );
+    expect(sessionSource).toContain(
+      'if (localUri) await deleteConversationSharePngTemp(localUri);',
+    );
+  });
+
+  it('使用 Mobile 获批的克制页脚尺寸', () => {
+    const designSource = readFileSync(
+      resolve(process.cwd(), '../../docs/design-rules/DESIGN.md'),
+      'utf8',
+    );
+    const html = buildRichConversationHtml();
+
+    expect(designSource).toContain('Mobile approved 2026-08-08');
+    expect(designSource).toContain('22×22px (6px radius)');
+    expect(designSource).toContain('18px-high wordmark with a 6px gap');
+    expect(html).toContain('width: 22px;');
+    expect(html).toContain('height: 18px;');
+    expect(html).toContain('gap: 6px;');
   });
 });

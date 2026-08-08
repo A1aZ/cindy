@@ -216,18 +216,33 @@ function encodeBase64(bytes: Uint8Array): string {
 export async function writeConversationSharePngTemp(
   base64: string,
 ): Promise<string | null> {
+  let fileUri: string | null = null;
   try {
     const directory = new Directory(Paths.cache, EXPORT_DIR_NAME);
     directory.create({ intermediates: true, idempotent: true });
     const unique = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const file = new File(directory, `conversation-${unique}.png`);
+    fileUri = file.uri;
     const FileSystem = await import("expo-file-system/legacy");
     await FileSystem.writeAsStringAsync(file.uri, base64, {
       encoding: FileSystem.EncodingType.Base64,
     });
-    return (file.size ?? 0) > 0 ? file.uri : null;
-  } catch {
+    if ((file.size ?? 0) > 0) return file.uri;
+    await deleteConversationSharePngTemp(file.uri);
     return null;
+  } catch {
+    if (fileUri) await deleteConversationSharePngTemp(fileUri);
+    return null;
+  }
+}
+
+export async function deleteConversationSharePngTemp(uri: string): Promise<void> {
+  if (!uri) return;
+  try {
+    const FileSystem = await import("expo-file-system/legacy");
+    await FileSystem.deleteAsync(uri, { idempotent: true });
+  } catch {
+    // 一次性缓存清理是 best-effort，不覆盖原分享操作的结果。
   }
 }
 

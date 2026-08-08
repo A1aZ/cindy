@@ -191,6 +191,72 @@ describe('iOS Simulator host', () => {
     },
   );
 
+  it('gates an already-created Host on one startup pending-create recovery', async () => {
+    let finishRecovery: (value: readonly string[]) => void = () => undefined;
+    const recoverPendingCreatesAtStartup = vi.fn(
+      (_owned: readonly { udid: string; name: string }[], _signal?: AbortSignal) =>
+        new Promise<readonly string[]>((resolve) => {
+          finishRecovery = resolve;
+        }),
+    );
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      recoverPendingCreatesAtStartup,
+      deleteExact: vi.fn(),
+    };
+    const inspect = vi.fn(async () => READY_REPORT);
+    const host = createIOSSimulatorHost({
+      lifecycle,
+      runtime: { inspect },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    const firstCall = host.callTool('list_devices', {}, { sessionId: 'session-a' });
+    await vi.waitFor(() => expect(recoverPendingCreatesAtStartup).toHaveBeenCalledOnce());
+    expect(recoverPendingCreatesAtStartup).toHaveBeenCalledWith([], expect.any(AbortSignal));
+    expect(inspect).not.toHaveBeenCalled();
+
+    finishRecovery([]);
+    await expect(firstCall).resolves.toMatchObject({ ok: true });
+    await expect(
+      host.callTool('list_devices', {}, { sessionId: 'session-a' }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(recoverPendingCreatesAtStartup).toHaveBeenCalledOnce();
+  });
+
+  it('retries startup pending-create recovery after the ownership gate becomes available', async () => {
+    let recoveryAllowed = false;
+    const recoverPendingCreatesAtStartup = vi.fn(async () => [] as readonly string[]);
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      recoverPendingCreatesAtStartup,
+      deleteExact: vi.fn(),
+    };
+    const host = createIOSSimulatorHost({
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      canReconcilePendingCreates: () => recoveryAllowed,
+    });
+
+    await expect(
+      host.callTool('list_devices', {}, { sessionId: 'session-a' }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(recoverPendingCreatesAtStartup).not.toHaveBeenCalled();
+
+    recoveryAllowed = true;
+    await expect(
+      host.callTool('list_devices', {}, { sessionId: 'session-a' }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(recoverPendingCreatesAtStartup).toHaveBeenCalledOnce();
+  });
+
   it('does not reconcile Simulator ownership during generic IPC bootstrap', () => {
     const source = readFileSync(new URL('../../maker-ipc/register.ts', import.meta.url), 'utf8');
     expect(source).not.toContain('reconcileIOSSimulatorOwnership');

@@ -390,9 +390,13 @@ const STARTUP_PENDING_CREATE_RECOVERY_TIMEOUT_MS = 6_000;
 async function recoverProfilePendingCreatesAtStartup(
   lifecycle: IOSSimulatorSimctlLifecycle,
   persistedInstances: readonly IOSSimulatorInstance[],
+  signal?: AbortSignal,
 ): Promise<void> {
   if (!lifecycle.recoverPendingCreatesAtStartup) return;
   const controller = new AbortController();
+  const abortFromParent = (): void => controller.abort(signal?.reason);
+  if (signal?.aborted) abortFromParent();
+  else signal?.addEventListener('abort', abortFromParent, { once: true });
   const timer = setTimeout(
     () => controller.abort(new Error('Simulator pending-create startup recovery timed out')),
     STARTUP_PENDING_CREATE_RECOVERY_TIMEOUT_MS,
@@ -415,6 +419,7 @@ async function recoverProfilePendingCreatesAtStartup(
     });
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abortFromParent);
   }
 }
 
@@ -980,7 +985,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   let ownershipReconciled = false;
   let ownershipReconcilePromise: Promise<void> | null = null;
   let pendingCreateReconcileController: AbortController | null = null;
-  let pendingCreateReconcilePromise: Promise<readonly string[]> | null = null;
+  let pendingCreateReconcilePromise: Promise<unknown> | null = null;
+  let startupPendingCreateRecoveryAttempted = false;
   let disposePromise: Promise<void> | null = null;
   const canReconcilePendingCreates = options.canReconcilePendingCreates ?? (() => true);
 
@@ -2334,6 +2340,30 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (ownershipReconcilePromise) return ownershipReconcilePromise;
     ownershipReconcilePromise = (async () => {
       let complete = true;
+      if (!startupPendingCreateRecoveryAttempted && lifecycle.recoverPendingCreatesAtStartup) {
+        if (!canReconcilePendingCreates()) {
+          complete = false;
+        } else {
+          startupPendingCreateRecoveryAttempted = true;
+          const controller = new AbortController();
+          const recovery = recoverProfilePendingCreatesAtStartup(
+            lifecycle,
+            actor.listAll(),
+            controller.signal,
+          );
+          pendingCreateReconcileController = controller;
+          pendingCreateReconcilePromise = recovery;
+          try {
+            await recovery;
+          } finally {
+            if (pendingCreateReconcileController === controller) {
+              pendingCreateReconcileController = null;
+              pendingCreateReconcilePromise = null;
+            }
+          }
+        }
+      }
+      if (disposePromise) return;
       const persistedInstances = actor.listAll();
       if (lifecycle.reconcilePendingCreates && persistedInstances.length > 0) {
         if (!canReconcilePendingCreates()) {
@@ -6155,8 +6185,8 @@ export async function reconcilePersistedIOSSimulatorOwnership(
     const persistedInstances = registry.loadSync();
     const lifecycle =
       options.createLifecycle?.(registry) ?? createProfileScopedIOSSimulatorLifecycle(registry);
-    await recoverProfilePendingCreatesAtStartup(lifecycle, persistedInstances);
     if (persistedInstances.length === 0) {
+      await recoverProfilePendingCreatesAtStartup(lifecycle, persistedInstances);
       registry.releaseWriterSync();
       return;
     }

@@ -26,6 +26,8 @@ const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
 // an amount Electron Main can safely validate and ingest without multi-GiB
 // allocations; larger captures are rejected before readFile.
 const MAX_BUFFERED_RECORDING_BYTES = 128 * 1024 * 1024;
+const RECORDING_STARTED_MARKER = 'Recording started';
+const RECORDING_STARTUP_TIMEOUT_MS = 5_000;
 const RECORDING_STOP_TIMEOUT_MS = 5_000;
 const RECORDING_TERM_TIMEOUT_MS = 1_000;
 const RECORDING_KILL_TIMEOUT_MS = 500;
@@ -43,6 +45,8 @@ export interface IOSSimulatorMediaCaptureOptions {
 }
 
 export interface IOSSimulatorRecordingProcess {
+  /** Resolves only after simctl has processed the first frame. */
+  started: Promise<void>;
   exited: Promise<void>;
   /** True while the detached recorder process group still owns live members. */
   isAlive?(): boolean;
@@ -70,7 +74,7 @@ interface ActiveRecording {
   tempRoot: string;
   videoPath: string;
   process: IOSSimulatorRecordingProcess;
-  phase: 'active' | 'finalizing';
+  phase: 'starting' | 'active' | 'finalizing';
   discardRequested: boolean;
   discardSignalSent: boolean;
   discarded: Promise<void>;
@@ -113,7 +117,7 @@ function createRecordingLauncher(): IOSSimulatorRecordingLauncher {
         shell: false,
         detached: process.platform !== 'win32',
         windowsHide: true,
-        stdio: ['ignore', 'ignore', 'ignore'],
+        stdio: ['ignore', 'ignore', 'pipe'],
       });
       child.on('error', () => {
         // ChildProcess requires an error listener to avoid an uncaught Main
@@ -127,6 +131,24 @@ function createRecordingLauncher(): IOSSimulatorRecordingLauncher {
       }
       const pid = child.pid;
       let leaderClosed = false;
+      let resolveStarted: () => void = () => undefined;
+      let startedResolved = false;
+      let stderrTail = '';
+      const started = new Promise<void>((resolve) => {
+        resolveStarted = resolve;
+      });
+      child.stderr?.setEncoding('utf8');
+      child.stderr?.on('data', (chunk: string | Buffer) => {
+        if (startedResolved) return;
+        stderrTail = `${stderrTail}${chunk.toString()}`;
+        if (stderrTail.includes(RECORDING_STARTED_MARKER)) {
+          startedResolved = true;
+          stderrTail = '';
+          resolveStarted();
+          return;
+        }
+        stderrTail = stderrTail.slice(-(RECORDING_STARTED_MARKER.length - 1));
+      });
       const exited = new Promise<void>((resolve) => {
         child.once('close', () => {
           leaderClosed = true;
@@ -136,6 +158,7 @@ function createRecordingLauncher(): IOSSimulatorRecordingLauncher {
         // gone. `close` plus the group liveness probe remains authoritative.
       });
       return {
+        started,
         exited,
         isAlive: () => isProcessGroupAlive(pid, leaderClosed),
         kill(signal) {
@@ -152,6 +175,46 @@ function createRecordingLauncher(): IOSSimulatorRecordingLauncher {
       };
     },
   };
+}
+
+async function waitForRecordingStartup(
+  process: IOSSimulatorRecordingProcess,
+  timeoutMs: number,
+): Promise<'started' | 'exited' | 'timeout'> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let poll: ReturnType<typeof setInterval> | null = null;
+    const finish = (result: 'started' | 'exited' | 'timeout'): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (poll) clearInterval(poll);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish('timeout'), timeoutMs);
+    const confirmExit = (): void => {
+      try {
+        if (process.isAlive && !process.isAlive()) finish('exited');
+      } catch {
+        // A failed liveness probe cannot prove the process group is gone.
+      }
+    };
+    if (process.isAlive) {
+      poll = setInterval(confirmExit, 25);
+      confirmExit();
+    }
+    void process.started.then(
+      () => finish('started'),
+      () => undefined,
+    );
+    void process.exited.then(
+      () => {
+        if (!process.isAlive) finish('exited');
+        else confirmExit();
+      },
+      () => undefined,
+    );
+  });
 }
 
 async function waitForRecordingExit(
@@ -721,6 +784,14 @@ export class IOSSimulatorMediaCapture {
           true,
         );
       }
+      const abandonedStart = (recording: ActiveRecording): boolean =>
+        recording.instanceId === input.instanceId &&
+        recording.phase === 'starting' &&
+        recording.discardRequested;
+      if (Array.from(this.#recordings.values()).some(abandonedStart)) {
+        this.#requestDiscard(abandonedStart);
+        await this.#discardMatching(abandonedStart);
+      }
       if (
         Array.from(this.#recordings.values()).some((item) => item.instanceId === input.instanceId)
       ) {
@@ -732,6 +803,7 @@ export class IOSSimulatorMediaCapture {
       const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-recording-'));
       const videoPath = path.join(tempRoot, 'recording.mov');
       const recordingId = randomUUID();
+      let recording: ActiveRecording | null = null;
       try {
         if (
           this.#closed ||
@@ -758,13 +830,13 @@ export class IOSSimulatorMediaCapture {
           '--codec=h264',
           videoPath,
         ]);
-        this.#recordings.set(recordingId, {
+        recording = {
           ...input,
           recordingId,
           tempRoot,
           videoPath,
           process,
-          phase: 'active',
+          phase: 'starting',
           discardRequested: false,
           discardSignalSent: false,
           discarded,
@@ -773,10 +845,58 @@ export class IOSSimulatorMediaCapture {
           instanceEpoch,
           ownerScopeKey: ownerScope.ownerScopeKey,
           ingestDb: ownerScope.ingestDb,
-        });
+        };
+        this.#recordings.set(recordingId, recording);
+        const startup = await waitForRecordingStartup(process, RECORDING_STARTUP_TIMEOUT_MS);
+        let startupError: unknown = null;
+        try {
+          this.#assertRecordingCurrent(recording);
+        } catch (error) {
+          startupError = error;
+        }
+        if (!startupError && startup === 'exited') {
+          startupError = new IOSSimulatorInstanceError(
+            'RECORDING_FAILED',
+            'The recording process exited before capture became ready.',
+            true,
+          );
+        }
+        if (!startupError && startup === 'timeout') {
+          startupError = new IOSSimulatorInstanceError(
+            'RECORDING_FAILED',
+            'The recording process did not process its first frame before the startup timeout.',
+            true,
+          );
+        }
+        if (!startupError && process.isAlive) {
+          try {
+            if (!process.isAlive()) {
+              startupError = new IOSSimulatorInstanceError(
+                'RECORDING_FAILED',
+                'The recording process exited before capture became ready.',
+                true,
+              );
+            }
+          } catch {
+            startupError = new IOSSimulatorInstanceError(
+              'RECORDING_FAILED',
+              'The recording process could not be verified after startup.',
+              true,
+            );
+          }
+        }
+        if (startupError) {
+          const matches = (candidate: ActiveRecording): boolean => candidate === recording;
+          this.#requestDiscard(matches);
+          await this.#discardMatching(matches);
+          throw startupError;
+        }
+        recording.phase = 'active';
         return { recordingId, startedAt: new Date().toISOString() };
       } catch (error) {
-        await rm(tempRoot, { recursive: true, force: true });
+        if (!recording) {
+          await rm(tempRoot, { recursive: true, force: true });
+        }
         throw error;
       }
     });

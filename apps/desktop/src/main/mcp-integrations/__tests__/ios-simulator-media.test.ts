@@ -239,6 +239,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launchArgs = args;
         const videoPath = args.at(-1)!;
         return {
+          started: Promise.resolve(),
           exited: new Promise<void>((resolve) => {
             resolveExit = resolve;
           }),
@@ -288,6 +289,222 @@ describe('IOSSimulatorMediaCapture', () => {
     await expect(stat(path.dirname(launchArgs.at(-1)!))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('rejects an immediately exited recorder and clears its state and temp directory', async () => {
+    const videoPaths: string[] = [];
+    const launch = vi.fn((args: readonly string[]) => {
+      videoPaths.push(args.at(-1)!);
+      return {
+        started: new Promise<void>(() => undefined),
+        exited: Promise.resolve(),
+        isAlive: () => false,
+        kill: vi.fn(),
+      };
+    });
+    const capture = new IOSSimulatorMediaCapture({ recordingLauncher: { launch } });
+    const input = {
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 1,
+      source: 'agent' as const,
+    };
+
+    await expect(capture.startRecording(input)).rejects.toMatchObject({
+      code: 'RECORDING_FAILED',
+    });
+    await expect(capture.startRecording(input)).rejects.toMatchObject({
+      code: 'RECORDING_FAILED',
+    });
+
+    expect(launch).toHaveBeenCalledTimes(2);
+    await Promise.all(
+      videoPaths.map((videoPath) =>
+        expect(stat(path.dirname(videoPath))).rejects.toMatchObject({ code: 'ENOENT' }),
+      ),
+    );
+  });
+
+  it('does not report recording success before the first frame is processed', async () => {
+    let resolveStarted: () => void = () => undefined;
+    let resolveExit: () => void = () => undefined;
+    let processAlive = true;
+    const kill = vi.fn(() => {
+      processAlive = false;
+      resolveExit();
+    });
+    const launch = vi.fn(() => ({
+      started: new Promise<void>((resolve) => {
+        resolveStarted = resolve;
+      }),
+      exited: new Promise<void>((resolve) => {
+        resolveExit = resolve;
+      }),
+      isAlive: () => processAlive,
+      kill,
+    }));
+    const capture = new IOSSimulatorMediaCapture({ recordingLauncher: { launch } });
+    let settled = false;
+    const starting = capture.startRecording({
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 1,
+      source: 'agent',
+    });
+    void starting.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    resolveStarted();
+    await expect(starting).resolves.toEqual({
+      recordingId: expect.any(String),
+      startedAt: expect.any(String),
+    });
+    await expect(capture.discardInstance('instance-a')).resolves.toBeUndefined();
+    expect(kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('kills and clears a recorder that never processes its first frame', async () => {
+    let resolveExit: () => void = () => undefined;
+    let processAlive = true;
+    let videoPath = '';
+    const kill = vi.fn(() => {
+      processAlive = false;
+      resolveExit();
+    });
+    const launch = vi.fn((args: readonly string[]) => {
+      videoPath = args.at(-1)!;
+      return {
+        started: new Promise<void>(() => undefined),
+        exited: new Promise<void>((resolve) => {
+          resolveExit = resolve;
+        }),
+        isAlive: () => processAlive,
+        kill,
+      };
+    });
+    const capture = new IOSSimulatorMediaCapture({ recordingLauncher: { launch } });
+
+    vi.useFakeTimers();
+    const starting = capture.startRecording({
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 1,
+      source: 'agent',
+    });
+    const failure = expect(starting).rejects.toMatchObject({ code: 'RECORDING_FAILED' });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    await failure;
+    expect(kill).toHaveBeenCalledWith('SIGKILL');
+    await expect(stat(path.dirname(videoPath))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('retries a stuck startup cleanup before launching the next recorder', async () => {
+    let firstResolveExit: () => void = () => undefined;
+    let firstAlive = true;
+    let firstKillCount = 0;
+    let secondResolveExit: () => void = () => undefined;
+    let secondAlive = true;
+    const firstKill = vi.fn(() => {
+      firstKillCount += 1;
+      if (firstKillCount < 2) return;
+      firstAlive = false;
+      firstResolveExit();
+    });
+    const secondKill = vi.fn(() => {
+      secondAlive = false;
+      secondResolveExit();
+    });
+    const launch = vi.fn(() => {
+      if (launch.mock.calls.length === 1) {
+        return {
+          started: new Promise<void>(() => undefined),
+          exited: new Promise<void>((resolve) => {
+            firstResolveExit = resolve;
+          }),
+          isAlive: () => firstAlive,
+          kill: firstKill,
+        };
+      }
+      return {
+        started: Promise.resolve(),
+        exited: new Promise<void>((resolve) => {
+          secondResolveExit = resolve;
+        }),
+        isAlive: () => secondAlive,
+        kill: secondKill,
+      };
+    });
+    const capture = new IOSSimulatorMediaCapture({ recordingLauncher: { launch } });
+    const input = {
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 1,
+      source: 'agent' as const,
+    };
+
+    vi.useFakeTimers();
+    const firstStart = capture.startRecording(input);
+    const firstFailure = expect(firstStart).rejects.toMatchObject({ code: 'RECORDING_FAILED' });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+    await vi.advanceTimersByTimeAsync(5_500);
+    await firstFailure;
+    expect(firstKill).toHaveBeenCalledTimes(1);
+
+    const secondStart = await capture.startRecording(input);
+    expect(secondStart.recordingId).toEqual(expect.any(String));
+    expect(firstKill).toHaveBeenCalledTimes(2);
+    expect(launch).toHaveBeenCalledTimes(2);
+    await expect(capture.discardInstance('instance-a')).resolves.toBeUndefined();
+    expect(secondKill).toHaveBeenCalledWith('SIGKILL');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a starting recorder visible to Host disposal', async () => {
+    let resolveExit: () => void = () => undefined;
+    let videoPath = '';
+    const kill = vi.fn(() => resolveExit());
+    const launch = vi.fn((args: readonly string[]) => {
+      videoPath = args.at(-1)!;
+      return {
+        started: new Promise<void>(() => undefined),
+        exited: new Promise<void>((resolve) => {
+          resolveExit = resolve;
+        }),
+        kill,
+      };
+    });
+    const capture = new IOSSimulatorMediaCapture({ recordingLauncher: { launch } });
+    const starting = capture.startRecording({
+      simulatorUdid: 'EXACT-UDID',
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      generation: 1,
+      source: 'agent',
+    });
+    await vi.waitFor(() => expect(launch).toHaveBeenCalledOnce());
+
+    const disposing = capture.dispose();
+
+    await expect(starting).rejects.toMatchObject({ code: 'RECORDING_NOT_FOUND' });
+    await expect(disposing).resolves.toBeUndefined();
+    expect(kill).toHaveBeenCalledWith('SIGKILL');
+    await expect(stat(path.dirname(videoPath))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('does not ingest a recording after its data owner changes during finalization', async () => {
     let ownerScopeKey = 'owner-a';
     let videoPath = '';
@@ -301,6 +518,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -362,6 +580,7 @@ describe('IOSSimulatorMediaCapture', () => {
     const launch = vi.fn((args: readonly string[]) => {
       firstVideoPath ||= args.at(-1)!;
       return {
+        started: Promise.resolve(),
         exited: new Promise<void>((resolve) => {
           resolveFirstExit = resolve;
         }),
@@ -418,6 +637,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -461,6 +681,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -508,7 +729,7 @@ describe('IOSSimulatorMediaCapture', () => {
             if (signal === 'SIGKILL') resolveExit();
           });
           kills.push(kill);
-          return { exited, kill };
+          return { started: Promise.resolve(), exited, kill };
         }),
       },
     });
@@ -581,6 +802,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -645,6 +867,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -693,13 +916,21 @@ describe('IOSSimulatorMediaCapture', () => {
 
   it('bounds recording ingest even when storage never settles', async () => {
     let videoPath = '';
+    let resolveExit: () => void = () => undefined;
+    let processAlive = true;
     const ingest = vi.fn(() => new Promise<never>(() => undefined));
     const launch = vi.fn((args: readonly string[]) => {
       videoPath = args.at(-1)!;
       return {
-        exited: Promise.resolve(),
-        isAlive: () => false,
-        kill: vi.fn(),
+        started: Promise.resolve(),
+        exited: new Promise<void>((resolve) => {
+          resolveExit = resolve;
+        }),
+        isAlive: () => processAlive,
+        kill: vi.fn(() => {
+          processAlive = false;
+          resolveExit();
+        }),
       };
     });
     const capture = new IOSSimulatorMediaCapture({
@@ -751,7 +982,11 @@ describe('IOSSimulatorMediaCapture', () => {
       recordingLauncher: {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
-          return { exited: new Promise<void>(() => undefined), kill };
+          return {
+            started: Promise.resolve(),
+            exited: new Promise<void>(() => undefined),
+            kill,
+          };
         }),
       },
     });
@@ -791,6 +1026,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>(() => undefined),
             kill,
           };
@@ -855,6 +1091,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveLeaderExit = resolve;
             }),
@@ -937,6 +1174,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -980,6 +1218,7 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           videoPath = args.at(-1)!;
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => {
               resolveExit = resolve;
             }),
@@ -1024,11 +1263,19 @@ describe('IOSSimulatorMediaCapture', () => {
         launch: vi.fn((args: readonly string[]) => {
           const instanceId = args[2] === 'UDID-A' ? 'instance-a' : 'instance-b';
           paths.set(instanceId, args.at(-1)!);
-          const kill = vi.fn();
+          let resolveExit: () => void = () => undefined;
+          let processAlive = true;
+          const kill = vi.fn(() => {
+            processAlive = false;
+            resolveExit();
+          });
           kills.set(instanceId, kill);
           return {
-            exited: Promise.resolve(),
-            isAlive: () => false,
+            started: Promise.resolve(),
+            exited: new Promise<void>((resolve) => {
+              resolveExit = resolve;
+            }),
+            isAlive: () => processAlive,
             kill,
           };
         }),
@@ -1090,6 +1337,7 @@ describe('IOSSimulatorMediaCapture', () => {
           });
           kills.set(instanceId, kill);
           return {
+            started: Promise.resolve(),
             exited: new Promise<void>((resolve) => exits.set(instanceId, resolve)),
             kill,
           };

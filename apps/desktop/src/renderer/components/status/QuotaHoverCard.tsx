@@ -450,7 +450,7 @@ export function QuotaHoverCard({
   return (
     <div
       data-testid="quota-hover-card"
-      className="flex max-h-[calc(100vh-16px)] w-[340px] select-none flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] pb-2 text-[13px] leading-5 text-[var(--text-primary)]"
+      className="flex max-h-[calc(100vh-16px)] w-[340px] select-none flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] pb-2 text-13 leading-5 text-[var(--text-primary)]"
       style={{ boxShadow: 'var(--shadow-menu)' }}
     >
       <div
@@ -467,7 +467,7 @@ export function QuotaHoverCard({
               {planLabel ? (
                 <span
                   data-testid="quota-plan-badge"
-                  className="ml-auto rounded-full border border-[var(--border-default)] px-[7px] py-px text-[11px] font-medium"
+                  className="ml-auto rounded-full border border-[var(--border-default)] px-[7px] py-px text-11 font-medium"
                 >
                   {planLabel}
                 </span>

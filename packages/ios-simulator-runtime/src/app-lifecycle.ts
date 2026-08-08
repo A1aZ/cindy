@@ -33,6 +33,15 @@ function requireBundleId(value: string): string {
   return normalized;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new IOSSimulatorInstanceError(
+    "MUTATION_CANCELLED",
+    "The simulator app operation was cancelled because its lifecycle changed.",
+    true,
+  );
+}
+
 /** Exact-UDID simctl app lifecycle with worktree-contained build artifacts. */
 export class IOSSimulatorAppLifecycle {
   readonly #runner: IOSSimulatorCommandRunner;
@@ -46,7 +55,9 @@ export class IOSSimulatorAppLifecycle {
     worktreeRoot: string,
     appPath: string,
     trustedBuildRoot?: string,
+    signal?: AbortSignal,
   ): Promise<IOSSimulatorAppArtifact> {
+    throwIfAborted(signal);
     const root = await realpath(worktreeRoot);
     const resolvedApp = await realpath(appPath);
     const resolvedBuildRoot = trustedBuildRoot
@@ -73,8 +84,9 @@ export class IOSSimulatorAppLifecycle {
     const result = await this.#runner.run(
       "/usr/bin/plutil",
       ["-extract", "CFBundleIdentifier", "raw", "-o", "-", plist],
-      { timeoutMs: 15_000, maxBufferBytes: 64 * 1024 },
+      { timeoutMs: 15_000, maxBufferBytes: 64 * 1024, signal },
     );
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "APP_ARTIFACT_INVALID",
@@ -93,14 +105,18 @@ export class IOSSimulatorAppLifecycle {
   async installExact(
     simulatorUdid: string,
     artifact: IOSSimulatorAppArtifact,
+    signal?: AbortSignal,
   ): Promise<void> {
+    throwIfAborted(signal);
     const result = await this.#runner.run(
       "xcrun",
       ["simctl", "install", simulatorUdid, artifact.appPath],
       {
         timeoutMs: 120_000,
+        signal,
       },
     );
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "APP_INSTALL_FAILED",
@@ -114,7 +130,9 @@ export class IOSSimulatorAppLifecycle {
     simulatorUdid: string,
     artifact: Pick<IOSSimulatorAppArtifact, "bundleId">,
     args: string[] = [],
+    signal?: AbortSignal,
   ): Promise<void> {
+    throwIfAborted(signal);
     if (
       args.length > 64 ||
       args.some((arg) => typeof arg !== "string" || arg.length > 4_096)
@@ -133,8 +151,9 @@ export class IOSSimulatorAppLifecycle {
         requireBundleId(artifact.bundleId),
         ...args,
       ],
-      { timeoutMs: 30_000 },
+      { timeoutMs: 30_000, signal },
     );
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "APP_LAUNCH_FAILED",
@@ -144,12 +163,18 @@ export class IOSSimulatorAppLifecycle {
     }
   }
 
-  async terminateExact(simulatorUdid: string, bundleId: string): Promise<void> {
+  async terminateExact(
+    simulatorUdid: string,
+    bundleId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
     const result = await this.#runner.run(
       "xcrun",
       ["simctl", "terminate", simulatorUdid, requireBundleId(bundleId)],
-      { timeoutMs: 30_000 },
+      { timeoutMs: 30_000, signal },
     );
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "APP_TERMINATE_FAILED",
@@ -159,7 +184,12 @@ export class IOSSimulatorAppLifecycle {
     }
   }
 
-  async openUrlExact(simulatorUdid: string, rawUrl: string): Promise<void> {
+  async openUrlExact(
+    simulatorUdid: string,
+    rawUrl: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    throwIfAborted(signal);
     if (rawUrl.length > 8_192 || /[\r\n\0]/.test(rawUrl)) {
       throw new IOSSimulatorInstanceError(
         "INVALID_ARGUMENT",
@@ -188,8 +218,9 @@ export class IOSSimulatorAppLifecycle {
     const result = await this.#runner.run(
       "xcrun",
       ["simctl", "openurl", simulatorUdid, url.toString()],
-      { timeoutMs: 30_000 },
+      { timeoutMs: 30_000, signal },
     );
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "OPEN_URL_FAILED",

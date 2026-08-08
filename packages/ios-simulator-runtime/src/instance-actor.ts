@@ -85,7 +85,10 @@ export class IOSSimulatorInstanceActor {
   readonly #tails = new Map<string, Promise<void>>();
   readonly #cancelGrace = new Map<string, () => void>();
   readonly #mutationStates = new Map<string, MutableMutationState>();
-  readonly #activeAgentMutations = new Map<string, AbortController>();
+  readonly #activeMutations = new Map<
+    string,
+    { source: IOSSimulatorMutationSource; controller: AbortController }
+  >();
   readonly #activeLifecycleStarts = new Map<
     string,
     Set<ActiveLifecycleStart>
@@ -275,8 +278,8 @@ export class IOSSimulatorInstanceActor {
     }
 
     // Invalidate mutations that entered the queue before this transition and
-    // abort the currently active Agent operation. User operations remain
-    // serialized and will revalidate their now-stale route afterwards.
+    // abort the currently active Agent operation. An already-active user
+    // operation remains serialized; queued work is cancelled before it runs.
     this.#mutationState(input.instanceId).takeoverEpoch += 1;
     this.#cancelActiveAgentMutation(input.instanceId);
     this.#abortLifecycleStartsForInstance(input.instanceId);
@@ -382,6 +385,30 @@ export class IOSSimulatorInstanceActor {
     return this.mutationState(route.instanceId);
   }
 
+  /** Invalidate queued work and synchronously abort the active mutation. */
+  abortMutationsForInstance(instanceId: string): void {
+    this.#mutationState(instanceId).takeoverEpoch += 1;
+    this.#activeMutations.get(instanceId)?.controller.abort();
+  }
+
+  /** Abort and drain mutations owned by one Cindy task before its worktree is recycled. */
+  async cancelMutationsForSession(sessionId: string): Promise<void> {
+    await this.#abortAndDrainMutations(
+      this.#store.listForSession(sessionId).map((instance) => instance.instanceId),
+    );
+  }
+
+  /** Abort and drain every mutation before Host-owned runtime teardown. */
+  async cancelAllMutations(): Promise<void> {
+    await this.#abortAndDrainMutations([
+      ...new Set([
+        ...this.#mutationStates.keys(),
+        ...this.#activeMutations.keys(),
+        ...this.#tails.keys(),
+      ]),
+    ]);
+  }
+
   /** Serialize one bounded driver mutation behind lifecycle operations. */
   async runMutation<T>(
     route: IOSSimulatorMutationRoute,
@@ -415,16 +442,19 @@ export class IOSSimulatorInstanceActor {
           0,
           state.queuedAgentMutations - 1,
         );
-        if (
-          state.agentPaused ||
-          state.takeoverEpoch !== expectedTakeoverEpoch
-        ) {
+        if (state.agentPaused || state.takeoverEpoch !== expectedTakeoverEpoch) {
           throw new IOSSimulatorInstanceError(
             "MUTATION_CANCELLED",
             "The queued simulator action was cancelled because simulator control changed.",
             true,
           );
         }
+      } else if (state.takeoverEpoch !== expectedTakeoverEpoch) {
+        throw new IOSSimulatorInstanceError(
+          "MUTATION_CANCELLED",
+          "The queued simulator action was cancelled because its lifecycle changed.",
+          true,
+        );
       } else if (state.activeSource === "agent") {
         throw new IOSSimulatorInstanceError(
           "DEVICE_BUSY",
@@ -434,9 +464,8 @@ export class IOSSimulatorInstanceActor {
       }
       state.activeSource = source;
       const controller = new AbortController();
-      if (source === "agent") {
-        this.#activeAgentMutations.set(route.instanceId, controller);
-      }
+      const activeMutation = { source, controller };
+      this.#activeMutations.set(route.instanceId, activeMutation);
       try {
         this.#store.assertMutationRoute(route);
         const instance = this.#store.heartbeat(
@@ -451,7 +480,7 @@ export class IOSSimulatorInstanceActor {
           );
         }
         const result = await task(instance, controller.signal);
-        if (source === "agent" && controller.signal.aborted) {
+        if (controller.signal.aborted) {
           throw new IOSSimulatorInstanceError(
             "MUTATION_CANCELLED",
             "The active simulator action was cancelled because simulator control changed.",
@@ -460,8 +489,8 @@ export class IOSSimulatorInstanceActor {
         }
         return result;
       } finally {
-        if (this.#activeAgentMutations.get(route.instanceId) === controller) {
-          this.#activeAgentMutations.delete(route.instanceId);
+        if (this.#activeMutations.get(route.instanceId) === activeMutation) {
+          this.#activeMutations.delete(route.instanceId);
         }
         state.activeSource = null;
         state.lastSource = source;
@@ -484,9 +513,7 @@ export class IOSSimulatorInstanceActor {
     // serialized check below is still required because ownership can be
     // rebound while cleanup waits behind an existing instance operation.
     this.#store.requireOwned(instanceId, sessionId);
-    const state = this.#mutationState(instanceId);
-    state.takeoverEpoch += 1;
-    this.#cancelActiveAgentMutation(instanceId);
+    this.abortMutationsForInstance(instanceId);
     this.#abortLifecycleStartsForInstance(instanceId);
     this.#cancelGrace.get(instanceId)?.();
     this.#cancelGrace.delete(instanceId);
@@ -497,7 +524,19 @@ export class IOSSimulatorInstanceActor {
   }
 
   #cancelActiveAgentMutation(instanceId: string): void {
-    this.#activeAgentMutations.get(instanceId)?.abort();
+    const active = this.#activeMutations.get(instanceId);
+    if (active?.source === "agent") active.controller.abort();
+  }
+
+  async #abortAndDrainMutations(instanceIds: string[]): Promise<void> {
+    const uniqueInstanceIds = [...new Set(instanceIds)];
+    for (const instanceId of uniqueInstanceIds) {
+      this.abortMutationsForInstance(instanceId);
+    }
+    const tails = uniqueInstanceIds
+      .map((instanceId) => this.#tails.get(instanceId))
+      .filter((tail): tail is Promise<void> => Boolean(tail));
+    await Promise.all(tails);
   }
 
   #lifecycleStartCancelledError(): IOSSimulatorInstanceError {
@@ -607,6 +646,9 @@ export class IOSSimulatorInstanceActor {
 
   /** Synchronous force-quit seam; async disposal separately awaits settlement. */
   abortOperationsForExit(): void {
+    for (const instanceId of this.#mutationStates.keys()) {
+      this.abortMutationsForInstance(instanceId);
+    }
     this.#abortLifecycleStarts(
       [...this.#activeLifecycleStarts.values()].flatMap((entries) => [
         ...entries,
@@ -777,6 +819,7 @@ export class IOSSimulatorInstanceActor {
     } catch (error) {
       return Promise.reject(error);
     }
+    this.abortMutationsForInstance(admission.instanceId);
     this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
       const instance = this.#requireAdmittedLifecycleRoute(admission);
@@ -828,6 +871,7 @@ export class IOSSimulatorInstanceActor {
     } catch (error) {
       return Promise.reject(error);
     }
+    this.abortMutationsForInstance(admission.instanceId);
     this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
       const instance = this.#requireAdmittedLifecycleRoute(admission);

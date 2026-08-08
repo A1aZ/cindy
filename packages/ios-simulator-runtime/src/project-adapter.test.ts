@@ -73,8 +73,9 @@ describe("IOSSimulatorProjectBuilder", () => {
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
+    const signal = new AbortController().signal;
     await expect(
-      builder.validateLaunch(root, SIMULATOR_UDID.toLowerCase()),
+      builder.validateLaunch(root, SIMULATOR_UDID.toLowerCase(), signal),
     ).resolves.toMatchObject({
       healthy: true,
       expectedPort: 8081,
@@ -88,7 +89,7 @@ describe("IOSSimulatorProjectBuilder", () => {
         "--udid",
         SIMULATOR_UDID,
       ],
-      expect.objectContaining({ cwd: await realpath(root) }),
+      expect.objectContaining({ cwd: await realpath(root), signal }),
     );
   });
 

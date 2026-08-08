@@ -148,6 +148,15 @@ async function throwIfBuildCancelled(
   );
 }
 
+function throwIfLaunchValidationCancelled(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw new IOSSimulatorInstanceError(
+    "MUTATION_CANCELLED",
+    "App launch validation was cancelled because its simulator session ended.",
+    true,
+  );
+}
+
 /** Detects Cindy Mobile or one unambiguous generic Xcode container and builds without a shell. */
 export class IOSSimulatorProjectBuilder {
   readonly #runner: IOSSimulatorCommandRunner;
@@ -494,8 +503,11 @@ export class IOSSimulatorProjectBuilder {
   async validateLaunch(
     worktreeRoot: string,
     simulatorUdid: string,
+    signal?: AbortSignal,
   ): Promise<IOSSimulatorMobileMetroStatus | null> {
+    throwIfLaunchValidationCancelled(signal);
     const project = await this.inspect(worktreeRoot);
+    throwIfLaunchValidationCancelled(signal);
     if (project.kind !== "cindy-mobile") return null;
     const exactSimulatorUdid = simulatorUdid.trim().toUpperCase();
     if (!/^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(exactSimulatorUdid)) {
@@ -517,8 +529,10 @@ export class IOSSimulatorProjectBuilder {
         cwd: project.worktreeRoot,
         timeoutMs: 60_000,
         maxBufferBytes: 2 * 1024 * 1024,
+        signal,
       },
     );
+    throwIfLaunchValidationCancelled(signal);
     const lines = `${result.stdout}\n${result.stderr}`
       .split(/\r?\n/)
       .map((line) => line.trim())

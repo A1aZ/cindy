@@ -941,7 +941,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   function assertSessionOperationAdmission(
     sessionId: string,
     expectedEpoch: number,
-    operation: 'app build' | 'screenshot' | 'screen recording',
+    operation: 'app build' | 'screenshot' | 'screen recording' | 'simulator operation',
   ): void {
     if ((sessionOperationAdmissionEpochs.get(sessionId) ?? 0) === expectedEpoch) return;
     throw new IOSSimulatorInstanceError(
@@ -1075,7 +1075,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   }
   function beginInstanceTeardown(instanceId: string): void {
     // Abort CoreSimulator startup at teardown admission, before media or WDA
-    // cleanup can spend the remaining lifecycle budget.
+    // cleanup can spend the remaining lifecycle budget. App lifecycle calls
+    // use the same mutation signal, so a slow simctl install is terminated too.
+    actor.abortMutationsForInstance(instanceId);
     void actor.cancelLifecycleStartsForInstance(instanceId);
     const current = lifecycleBarrier(instanceId);
     instanceLifecycleBarriers.set(instanceId, {
@@ -1842,7 +1844,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     // them first so task archive/delete never waits out the 120-second boot
     // budget before ownership cleanup can begin.
     const lifecycleStarts = actor.cancelLifecycleStartsForSession(sessionId);
-    await Promise.all([lifecycleStarts, cancelSessionBuildsAndRecordings(sessionId)]);
+    await Promise.all([
+      lifecycleStarts,
+      actor.cancelMutationsForSession(sessionId),
+      cancelSessionBuildsAndRecordings(sessionId),
+    ]);
     await Promise.all(
       [...(activeSessionRemovalBarrierOperations.get(sessionId) ?? [])].map(
         (operation) => operation.settled,
@@ -2913,11 +2919,36 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     task: (instance: IOSSimulatorInstance, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     assertHostActive();
+    const sessionAdmissionEpoch = sessionOperationAdmissionEpochs.get(route.sessionId) ?? 0;
+    const instanceAdmissionEpoch = captureInstanceOperationAdmission(
+      route.instanceId,
+      'operation',
+    );
     return actor.runMutation(
       route,
       async (instance, signal) => {
         assertHostActive();
+        assertSessionOperationAdmission(
+          instance.sessionId,
+          sessionAdmissionEpoch,
+          'simulator operation',
+        );
+        assertInstanceOperationAdmission(
+          instance.instanceId,
+          instanceAdmissionEpoch,
+          'operation',
+        );
         const result = await task(instance, signal);
+        assertSessionOperationAdmission(
+          instance.sessionId,
+          sessionAdmissionEpoch,
+          'simulator operation',
+        );
+        assertInstanceOperationAdmission(
+          instance.instanceId,
+          instanceAdmissionEpoch,
+          'operation',
+        );
         assertHostActive();
         return result;
       },
@@ -5081,7 +5112,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             let artifact: IOSSimulatorAppArtifact;
             try {
               try {
-                artifact = await appLifecycle.inspectArtifact(instance.worktreeRoot, built.appPath);
+                artifact = await appLifecycle.inspectArtifact(
+                  instance.worktreeRoot,
+                  built.appPath,
+                  undefined,
+                  activeBuild.controller.signal,
+                );
               } catch (error) {
                 if (
                   !(error instanceof IOSSimulatorInstanceError) ||
@@ -5093,6 +5129,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                   instance.worktreeRoot,
                   built.appPath,
                   derivedDataPath,
+                  activeBuild.controller.signal,
                 );
               }
             } catch (error) {
@@ -5208,11 +5245,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (name === 'install_app') {
           const route = readMutationRoute(sessionId, args);
           const artifactId = readString(args, 'artifactId');
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             await appLifecycle.installExact(
               instance.simulatorUdid,
               requireArtifact(instance, artifactId),
+              signal,
             );
           });
           return { ok: true, data: { artifactId, installed: true } };
@@ -5224,19 +5262,21 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           if (!Array.isArray(launchArgs) || launchArgs.some((value) => typeof value !== 'string')) {
             throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'args must be a string array');
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const stored = appArtifacts.get(artifactId);
             if (stored?.projectKind === 'cindy-mobile' && projectBuilder.validateLaunch) {
               await projectBuilder.validateLaunch(
                 stored.artifact.worktreeRoot,
                 instance.simulatorUdid,
+                signal,
               );
             }
             await appLifecycle.launchExact(
               instance.simulatorUdid,
               requireArtifact(instance, artifactId),
               launchArgs,
+              signal,
             );
             screenMaps.invalidate(instance.instanceId);
           });
@@ -5246,19 +5286,23 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (name === 'terminate_app') {
           const route = readMutationRoute(sessionId, args);
           const artifactId = readString(args, 'artifactId');
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const artifact = requireArtifact(instance, artifactId);
-            await appLifecycle.terminateExact(instance.simulatorUdid, artifact.bundleId);
+            await appLifecycle.terminateExact(instance.simulatorUdid, artifact.bundleId, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { artifactId, terminated: true } };
         }
         if (name === 'open_url') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
-            await appLifecycle.openUrlExact(instance.simulatorUdid, readString(args, 'url'));
+            await appLifecycle.openUrlExact(
+              instance.simulatorUdid,
+              readString(args, 'url'),
+              signal,
+            );
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { opened: true } };
@@ -5675,7 +5719,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       }
     },
     cancelSessionOperations(sessionId) {
-      return cancelSessionBuildsAndRecordings(sessionId.trim());
+      const normalizedSessionId = sessionId.trim();
+      return Promise.all([
+        actor.cancelMutationsForSession(normalizedSessionId),
+        cancelSessionBuildsAndRecordings(normalizedSessionId),
+      ]).then(() => undefined);
     },
     cleanupRemovedSession(sessionId) {
       return cleanupRemovedSessionRuntime(sessionId);
@@ -5684,7 +5732,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       try {
         actor.abortOperationsForExit();
       } catch (error) {
-        logger.warn('iOS Simulator exit cleanup could not abort simulator startup', {
+        logger.warn('iOS Simulator exit cleanup could not abort simulator operations', {
           error: error instanceof Error ? error.message : String(error),
         });
       }
@@ -5716,6 +5764,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
         const lifecycleStarts = actor.cancelAllLifecycleStarts();
+        const mutations = actor.cancelAllMutations();
         const builds = [...activeBuilds.values()];
         for (const build of builds) build.controller.abort();
         // Close the recording start gate immediately, before waiting for a
@@ -5725,7 +5774,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             error: error instanceof Error ? error.message : String(error),
           });
         });
-        await Promise.all([lifecycleStarts, ...builds.map((build) => build.settled)]);
+        await Promise.all([lifecycleStarts, mutations, ...builds.map((build) => build.settled)]);
         clearVisualBaselines();
         await Promise.all(
           [...buildDiagnostics.entries()].map(([diagnosticsId, diagnostic]) =>

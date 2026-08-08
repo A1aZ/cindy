@@ -339,6 +339,73 @@ describe("IOSSimulatorInstanceActor", () => {
     });
   });
 
+  it("cancels an active Agent mutation as soon as stop is admitted", async () => {
+    const harness = createHarness({ booted: true });
+    let activeSignal: AbortSignal | undefined;
+    const active = harness.actor.runMutation(
+      harness.route(),
+      async (_instance, signal) => {
+        activeSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    );
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+
+    const stopping = harness.actor.stop(harness.route());
+    expect(activeSignal?.aborted).toBe(true);
+    await expect(active).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(stopping).resolves.toMatchObject({ lifecycleState: "stopped" });
+  });
+
+  it("cancels an active user mutation through the force-exit seam", async () => {
+    const harness = createHarness({ booted: true });
+    let activeSignal: AbortSignal | undefined;
+    const active = harness.actor.runMutation(
+      harness.route(),
+      async (_instance, signal) => {
+        activeSignal = signal;
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+      "user",
+    );
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+
+    expect(() => harness.actor.abortOperationsForExit()).not.toThrow();
+    expect(activeSignal?.aborted).toBe(true);
+    await expect(active).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
+  });
+
+  it("aborts and drains active and queued mutations for one session", async () => {
+    const harness = createHarness({ booted: true });
+    let activeSignal: AbortSignal | undefined;
+    const active = harness.actor
+      .runMutation(
+        harness.route(),
+        async (_instance, signal) => {
+          activeSignal = signal;
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+        "user",
+      )
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+    const queued = harness.actor
+      .runMutation(harness.route(), async () => "should-not-run", "user")
+      .catch((error: unknown) => error);
+
+    const cancelling = harness.actor.cancelMutationsForSession("session-a");
+    expect(activeSignal?.aborted).toBe(true);
+    await expect(cancelling).resolves.toBeUndefined();
+    await expect(active).resolves.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(queued).resolves.toMatchObject({ code: "MUTATION_CANCELLED" });
+  });
+
   it("ignores a stale liveness result without cancelling the new generation", async () => {
     const harness = createHarness({ booted: true });
     const recovered = await harness.actor.recover(harness.route());

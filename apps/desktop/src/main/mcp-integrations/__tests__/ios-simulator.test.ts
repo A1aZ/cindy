@@ -1653,9 +1653,31 @@ describe('iOS Simulator host', () => {
       getSession: vi.fn(async () => localSession('dispose-session')),
     });
 
+    let mutationSignal: AbortSignal | undefined;
+    const activeMutation = actor
+      .runMutation(
+        {
+          sessionId: instance.sessionId,
+          instanceId: instance.instanceId,
+          generation: instance.generation,
+          leaseId: instance.lease.id,
+        },
+        async (_current, signal) => {
+          mutationSignal = signal;
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+        'user',
+      )
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(mutationSignal).toBeDefined());
+
     await host.dispose();
     await host.dispose();
 
+    expect(mutationSignal?.aborted).toBe(true);
+    await expect(activeMutation).resolves.toMatchObject({ code: 'MUTATION_CANCELLED' });
     expect(discardInstance).toHaveBeenCalledTimes(1);
     expect(discardInstance).toHaveBeenCalledWith(instance.instanceId);
     expect(stopDriver).toHaveBeenCalledTimes(1);
@@ -1930,9 +1952,30 @@ describe('iOS Simulator host', () => {
     );
     await vi.waitFor(() => expect(build).toHaveBeenCalledOnce());
 
+    let mutationSignal: AbortSignal | undefined;
+    const activeMutation = actor
+      .runMutation(
+        {
+          sessionId: current.sessionId,
+          instanceId: current.instanceId,
+          generation: current.generation,
+          leaseId: current.lease.id,
+        },
+        async (_instance, signal) => {
+          mutationSignal = signal;
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+        'user',
+      )
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(mutationSignal).toBeDefined());
+
     expect(() => host.abortOperationsForExit()).not.toThrow();
 
     expect(buildSignal?.aborted).toBe(true);
+    expect(mutationSignal?.aborted).toBe(true);
     expect(abortLifecycleStarts).toHaveBeenCalledOnce();
     expect(abortRecording).toHaveBeenCalledOnce();
     expect(abortDriver).toHaveBeenCalledOnce();
@@ -1940,6 +1983,7 @@ describe('iOS Simulator host', () => {
       ok: false,
       errorCode: 'MUTATION_CANCELLED',
     });
+    await expect(activeMutation).resolves.toMatchObject({ code: 'MUTATION_CANCELLED' });
     await host.dispose();
   });
 
@@ -4865,6 +4909,61 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it('aborts and drains an active simulator mutation before task cancellation returns', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+    let mutationSignal: AbortSignal | undefined;
+    const active = actor
+      .runMutation(
+        {
+          sessionId: instance.sessionId,
+          instanceId: instance.instanceId,
+          generation: instance.generation,
+          leaseId: instance.lease.id,
+        },
+        async (_current, signal) => {
+          mutationSignal = signal;
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+        },
+        'user',
+      )
+      .catch((error: unknown) => error);
+    await vi.waitFor(() => expect(mutationSignal).toBeDefined());
+
+    await expect(host.cancelSessionOperations('session-a')).resolves.toBeUndefined();
+    expect(mutationSignal?.aborted).toBe(true);
+    await expect(active).resolves.toMatchObject({ code: 'MUTATION_CANCELLED' });
+    await host.dispose();
+  });
+
   it('does not block task removal when recording cleanup fails', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
@@ -4951,6 +5050,7 @@ describe('iOS Simulator host', () => {
       recordingId: 'late-recording',
       startedAt: new Date().toISOString(),
     }));
+    const openUrlExact = vi.fn(async () => undefined);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
@@ -4966,6 +5066,13 @@ describe('iOS Simulator host', () => {
         startRecording,
         discardInstance,
       } as unknown as IOSSimulatorMediaCaptureAdapter,
+      appLifecycle: {
+        inspectArtifact: vi.fn(),
+        installExact: vi.fn(),
+        launchExact: vi.fn(),
+        terminateExact: vi.fn(),
+        openUrlExact,
+      },
     });
 
     await host.reconcileOwnership();
@@ -5005,6 +5112,14 @@ describe('iOS Simulator host', () => {
       origin: 'user',
     });
     await discardStarted;
+    await expect(
+      host.callTool(
+        'open_url',
+        { ...route, url: 'demo://teardown-race' },
+        { sessionId: 'session-a', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'MUTATION_CANCELLED' });
+    expect(openUrlExact).not.toHaveBeenCalled();
     releaseActive();
 
     await expect(screenshot).resolves.toMatchObject({
@@ -5020,7 +5135,7 @@ describe('iOS Simulator host', () => {
 
     releaseDiscard();
     await expect(stopping).resolves.toMatchObject({ ok: true });
-    await expect(active).resolves.toBeUndefined();
+    await expect(active).rejects.toMatchObject({ code: 'MUTATION_CANCELLED' });
     await host.dispose();
   });
 
@@ -6045,9 +6160,12 @@ describe('iOS Simulator host', () => {
     const inspectArtifact = vi.fn<IOSSimulatorAppLifecycleAdapter['inspectArtifact']>(
       async () => artifact,
     );
+    const installExact = vi.fn<IOSSimulatorAppLifecycleAdapter['installExact']>(
+      async () => undefined,
+    );
     const appLifecycle: IOSSimulatorAppLifecycleAdapter = {
       inspectArtifact,
-      installExact: vi.fn(async () => undefined),
+      installExact,
       launchExact: vi.fn(async () => undefined),
       terminateExact: vi.fn(async () => undefined),
       openUrlExact: vi.fn(async () => undefined),
@@ -6175,6 +6293,7 @@ describe('iOS Simulator host', () => {
     expect(validateLaunch).toHaveBeenCalledWith(
       '/tmp/session-a',
       READY_REPORT.devices[0]!.udid,
+      expect.any(AbortSignal),
     );
     await host.callTool(
       'terminate_app',
@@ -6199,19 +6318,53 @@ describe('iOS Simulator host', () => {
         containerPath: 'ios/Demo.xcodeproj',
       }),
     );
-    expect(appLifecycle.installExact).toHaveBeenCalledWith(READY_REPORT.devices[0]!.udid, artifact);
-    expect(appLifecycle.launchExact).toHaveBeenCalledWith(READY_REPORT.devices[0]!.udid, artifact, [
-      '--uitesting',
-    ]);
+    expect(appLifecycle.installExact).toHaveBeenCalledWith(
+      READY_REPORT.devices[0]!.udid,
+      artifact,
+      expect.any(AbortSignal),
+    );
+    expect(appLifecycle.launchExact).toHaveBeenCalledWith(
+      READY_REPORT.devices[0]!.udid,
+      artifact,
+      ['--uitesting'],
+      expect.any(AbortSignal),
+    );
     expect(appLifecycle.terminateExact).toHaveBeenCalledWith(
       READY_REPORT.devices[0]!.udid,
       artifact.bundleId,
+      expect.any(AbortSignal),
     );
     expect(appLifecycle.openUrlExact).toHaveBeenCalledWith(
       READY_REPORT.devices[0]!.udid,
       'demo://home',
+      expect.any(AbortSignal),
     );
     expect(requestViewerFocus).toHaveBeenCalledWith('session-a', instance.instanceId);
+
+    let installSignal: AbortSignal | undefined;
+    installExact.mockImplementationOnce(
+      async (_simulatorUdid, _artifact, signal) =>
+        new Promise<void>((resolve) => {
+          installSignal = signal;
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        }),
+    );
+    const installing = host.callTool(
+      'install_app',
+      { ...route, artifactId: artifact.artifactId },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(installSignal).toBeDefined());
+    const stopping = host.callTool('stop_instance', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await vi.waitFor(() => expect(installSignal?.aborted).toBe(true));
+    await expect(installing).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(stopping).resolves.toMatchObject({ ok: true });
   });
 
   it('returns readable diagnostics when build_app fails', async () => {

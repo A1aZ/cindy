@@ -27,9 +27,12 @@ describe("IOSSimulatorAppLifecycle", () => {
       exitCode: 0,
     }));
     const lifecycle = new IOSSimulatorAppLifecycle({ commandRunner: { run } });
-    const artifact = await lifecycle.inspectArtifact(root, appPath);
-    await lifecycle.installExact("EXACT-UDID", artifact);
-    await lifecycle.launchExact("EXACT-UDID", artifact, ["--uitesting"]);
+    const signal = new AbortController().signal;
+    const artifact = await lifecycle.inspectArtifact(root, appPath, undefined, signal);
+    await lifecycle.installExact("EXACT-UDID", artifact, signal);
+    await lifecycle.launchExact("EXACT-UDID", artifact, ["--uitesting"], signal);
+    await lifecycle.terminateExact("EXACT-UDID", artifact.bundleId, signal);
+    await lifecycle.openUrlExact("EXACT-UDID", "demo://home", signal);
 
     const resolvedAppPath = await realpath(appPath);
     expect(artifact).toMatchObject({
@@ -39,12 +42,55 @@ describe("IOSSimulatorAppLifecycle", () => {
     expect(run).toHaveBeenCalledWith(
       "xcrun",
       ["simctl", "install", "EXACT-UDID", resolvedAppPath],
-      expect.any(Object),
+      expect.objectContaining({ signal }),
     );
     expect(run).toHaveBeenCalledWith(
       "xcrun",
       ["simctl", "launch", "EXACT-UDID", "com.example.app", "--uitesting"],
-      expect.any(Object),
+      expect.objectContaining({ signal }),
+    );
+    expect(run).toHaveBeenCalledWith(
+      "xcrun",
+      ["simctl", "terminate", "EXACT-UDID", "com.example.app"],
+      expect.objectContaining({ signal }),
+    );
+    expect(run).toHaveBeenCalledWith(
+      "xcrun",
+      ["simctl", "openurl", "EXACT-UDID", "demo://home"],
+      expect.objectContaining({ signal }),
+    );
+    expect(run).toHaveBeenCalledWith(
+      "/usr/bin/plutil",
+      expect.any(Array),
+      expect.objectContaining({ signal }),
+    );
+  });
+
+  it("reports cancellation when a simctl app operation is aborted", async () => {
+    const controller = new AbortController();
+    const run = vi.fn(async () => {
+      controller.abort();
+      return { stdout: "", stderr: "", exitCode: null };
+    });
+    const lifecycle = new IOSSimulatorAppLifecycle({ commandRunner: { run } });
+
+    await expect(
+      lifecycle.installExact(
+        "EXACT-UDID",
+        {
+          artifactId: "artifact-a",
+          worktreeRoot: "/tmp/worktree",
+          appPath: "/tmp/worktree/Demo.app",
+          bundleId: "com.example.demo",
+          createdAt: "2026-08-08T00:00:00.000Z",
+        },
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
+    expect(run).toHaveBeenCalledWith(
+      "xcrun",
+      expect.arrayContaining(["install", "EXACT-UDID"]),
+      expect.objectContaining({ signal: controller.signal }),
     );
   });
 

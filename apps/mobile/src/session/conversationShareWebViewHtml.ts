@@ -10,11 +10,23 @@ import { buildMessageContentLayout } from "@/session/messageContentLayout";
 import { lineHeight, typeScale } from "@/theme/tokens";
 
 export interface ConversationShareMessage {
+  attachments?: readonly ConversationShareAttachment[];
   clientId: string;
   kind: "user" | "assistant";
   body: string;
+  bodyParts?: readonly ConversationShareBodyPart[];
   secondaryBody?: string;
 }
+
+export interface ConversationShareAttachment {
+  kind: "image" | "file";
+  name: string;
+  dataUri?: string;
+}
+
+export type ConversationShareBodyPart =
+  | { kind: "text"; text: string }
+  | { kind: "quote" | "pasted" | "slash"; label: string };
 
 export interface ConversationShareWebViewColors {
   background: string;
@@ -22,6 +34,7 @@ export interface ConversationShareWebViewColors {
   border: string;
   codeSurface: string;
   inlineCode: string;
+  surfaceChip: string;
   textPrimary: string;
   textSecondary: string;
   textTertiary: string;
@@ -84,7 +97,7 @@ export function buildConversationShareHtml({
     '<meta charset="utf-8">',
     '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">',
     "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; font-src data:; object-src 'none'; base-uri 'none'; form-action 'none';\">",
-    `<style id="share-style">${markdownCss}${buildConversationShareCss({ background, surfaceElevated: colors.surfaceElevated, textPrimary: colors.textPrimary, textSecondary: colors.textSecondary, textTertiary: colors.textTertiary, width })}</style>`,
+    `<style id="share-style">${markdownCss}${buildConversationShareCss({ background, border: colors.border, surfaceChip: colors.surfaceChip, surfaceElevated: colors.surfaceElevated, textPrimary: colors.textPrimary, textSecondary: colors.textSecondary, textTertiary: colors.textTertiary, width })}</style>`,
     "</head>",
     "<body>",
     `<main id="xdt-content" class="share-stage" data-share-background="${escapeAttribute(background)}">`,
@@ -108,20 +121,62 @@ function buildMessageHtml(
   const secondaryBody = message.secondaryBody
     ? redactSensitiveText(message.secondaryBody).trim()
     : "";
-  const bodyHtml = body
-    ? buildSelectableMarkdownFragmentHtml(body, markdownOptions)
-    : "";
+  const bodyHtml = message.bodyParts
+    ? buildBodyPartsHtml(message.bodyParts, markdownOptions)
+    : body
+      ? buildSelectableMarkdownFragmentHtml(body, markdownOptions)
+      : "";
   const secondaryHtml = secondaryBody
     ? buildSelectableMarkdownFragmentHtml(secondaryBody, markdownOptions)
     : "";
+  const attachmentsHtml = buildAttachmentsHtml(message.attachments ?? []);
+  const bubbleHtml = bodyHtml || secondaryHtml
+    ? [
+        `<div class="share-bubble share-bubble-${message.kind}">`,
+        bodyHtml,
+        secondaryHtml ? `<div class="share-secondary">${secondaryHtml}</div>` : "",
+        "</div>",
+      ].join("")
+    : "";
   return [
     `<article class="share-message share-message-${message.kind}" data-share-message-id="${escapeAttribute(message.clientId)}">`,
-    `<div class="share-bubble share-bubble-${message.kind}">`,
-    bodyHtml,
-    secondaryHtml ? `<div class="share-secondary">${secondaryHtml}</div>` : "",
-    "</div>",
+    attachmentsHtml,
+    bubbleHtml,
     "</article>",
   ].join("");
+}
+
+function buildBodyPartsHtml(
+  parts: readonly ConversationShareBodyPart[],
+  markdownOptions: SelectableMarkdownHtmlOptions,
+): string {
+  const items = parts.flatMap((part) => {
+    if (part.kind === "text") {
+      const text = redactSensitiveText(part.text).trim();
+      return text
+        ? [`<div class="share-content-text">${buildSelectableMarkdownFragmentHtml(text, markdownOptions)}</div>`]
+        : [];
+    }
+    const label = redactSensitiveText(part.label).trim();
+    return label
+      ? [`<span class="share-inline-chip share-inline-chip-${part.kind}"><span class="share-inline-chip-icon" aria-hidden="true">${part.kind === "quote" ? "❝" : part.kind === "pasted" ? "▤" : "/"}</span><span class="share-inline-chip-label">${escapeHtml(label)}</span></span>`]
+      : [];
+  });
+  return items.length > 0 ? `<div class="share-inline-body">${items.join("")}</div>` : "";
+}
+
+function buildAttachmentsHtml(
+  attachments: readonly ConversationShareAttachment[],
+): string {
+  if (attachments.length === 0) return "";
+  const items = attachments.map((attachment) => {
+    const name = redactSensitiveText(attachment.name).trim();
+    if (attachment.kind === "image" && isInlineRasterDataUri(attachment.dataUri)) {
+      return `<img class="share-attachment-image" src="${escapeAttribute(attachment.dataUri)}" alt="${escapeAttribute(name)}">`;
+    }
+    return `<div class="share-attachment-chip share-attachment-chip-${attachment.kind}"><span class="share-attachment-icon" aria-hidden="true"></span><span class="share-attachment-label">${escapeHtml(name)}</span></div>`;
+  });
+  return `<div class="share-attachments">${items.join("")}</div>`;
 }
 
 function buildConversationShareMarkdownOptions(
@@ -145,6 +200,8 @@ function buildConversationShareMarkdownOptions(
 
 function buildConversationShareCss({
   background,
+  border,
+  surfaceChip,
   surfaceElevated,
   textPrimary,
   textSecondary,
@@ -152,6 +209,8 @@ function buildConversationShareCss({
   width,
 }: {
   background: string;
+  border: string;
+  surfaceChip: string;
   surfaceElevated: string;
   textPrimary: string;
   textSecondary: string;
@@ -178,11 +237,71 @@ function buildConversationShareCss({
     }
     .share-message {
       display: flex;
+      flex-direction: column;
       width: 100%;
       min-width: 0;
     }
-    .share-message-user { justify-content: flex-end; }
-    .share-message-assistant { justify-content: flex-start; }
+    .share-message-user { align-items: flex-end; }
+    .share-message-assistant { align-items: flex-start; }
+    .share-attachments {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-width: 86%;
+      margin-bottom: 4px;
+    }
+    .share-message-user .share-attachments { align-items: flex-end; }
+    .share-message-assistant .share-attachments { align-items: flex-start; }
+    .share-attachment-image {
+      display: block;
+      width: auto;
+      max-width: 280px;
+      height: auto;
+      max-height: 180px;
+      object-fit: contain;
+      border-radius: 12px;
+    }
+    .share-attachment-chip {
+      box-sizing: border-box;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      max-width: 228px;
+      padding: 5px 10px;
+      border: 1px solid ${cssValue(border)};
+      border-radius: 9999px;
+      background: ${cssValue(surfaceChip)};
+      color: ${cssValue(textPrimary)};
+      font-size: 12px;
+      line-height: 18px;
+    }
+    .share-attachment-icon {
+      position: relative;
+      box-sizing: border-box;
+      width: 15px;
+      height: 17px;
+      flex: 0 0 15px;
+      border: 1.5px solid ${cssValue(textSecondary)};
+      border-radius: 3px;
+    }
+    .share-attachment-chip-image .share-attachment-icon::before {
+      content: "";
+      position: absolute;
+      left: 3px;
+      right: 3px;
+      bottom: 3px;
+      height: 5px;
+      border-left: 1.5px solid ${cssValue(textSecondary)};
+      border-bottom: 1.5px solid ${cssValue(textSecondary)};
+      transform: skewY(-30deg);
+    }
+    .share-attachment-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .share-bubble {
       box-sizing: border-box;
       min-width: 0;
@@ -201,6 +320,44 @@ function buildConversationShareCss({
     .share-secondary {
       margin-top: 8px;
       color: ${cssValue(textSecondary)};
+    }
+    .share-inline-body {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px;
+      max-width: 100%;
+    }
+    .share-content-text {
+      flex-basis: 100%;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .share-inline-chip {
+      box-sizing: border-box;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      max-width: 240px;
+      padding: 2px 8px;
+      border: 1px solid ${cssValue(border)};
+      border-radius: 9999px;
+      background: ${cssValue(surfaceChip)};
+      color: ${cssValue(textPrimary)};
+      font-size: 12px;
+      line-height: 18px;
+    }
+    .share-inline-chip-icon {
+      flex: 0 0 auto;
+      color: ${cssValue(textSecondary)};
+      font-size: 13px;
+      line-height: 16px;
+    }
+    .share-inline-chip-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     #xdt-content table {
       display: table;
@@ -490,4 +647,10 @@ function escapeAttribute(value: string): string {
 
 function cssValue(value: string): string {
   return value.replace(/[;<>]/g, "");
+}
+
+function isInlineRasterDataUri(value: string | undefined): value is string {
+  return Boolean(
+    value && /^data:image\/(?:gif|jpe?g|png|webp);base64,[a-z0-9+/=\s]+$/i.test(value),
+  );
 }

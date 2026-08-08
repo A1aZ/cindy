@@ -13,6 +13,7 @@ const colors: ConversationShareWebViewColors = {
   codeSurface: '#f5f5f5',
   dark: true,
   inlineCode: '#333333',
+  surfaceChip: '#f2f2f2',
   surfaceElevated: '#fafafa',
   syntax: {
     comment: '#777777',
@@ -117,5 +118,63 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('width: 22px;');
     expect(html).toContain('height: 18px;');
     expect(html).toContain('gap: 6px;');
+  });
+
+  it('导出结构化正文和附件时保留可见投影，不泄露隐藏引用或外链', () => {
+    const html = buildConversationShareHtml({
+      allShareableIds: ['message'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [
+        {
+          attachments: [
+            {
+              dataUri: 'data:image/png;base64,AA==',
+              kind: 'image',
+              name: 'preview.png',
+            },
+            { kind: 'image', name: 'remote.png' },
+            { kind: 'file', name: 'notes.md' },
+          ],
+          body: 'visible fallback',
+          bodyParts: [
+            { kind: 'quote', label: 'quoted context' },
+            { kind: 'pasted', label: 'Pasted text · 120 chars' },
+            { kind: 'slash', label: '/review' },
+            { kind: 'text', text: 'reply' },
+          ],
+          clientId: 'message',
+          kind: 'user',
+        },
+      ],
+    });
+
+    expect(html).toContain('quoted context');
+    expect(html).toContain('Pasted text · 120 chars');
+    expect(html).toContain('/review');
+    expect(html).toContain('data:image/png;base64,AA==');
+    expect(html).toContain('remote.png');
+    expect(html).toContain('notes.md');
+    expect(html).not.toContain('visible fallback');
+    expect(html).not.toContain('https://example.com/private.png');
+  });
+
+  it('附件-only 消息不生成空白文字气泡', () => {
+    const html = buildConversationShareHtml({
+      allShareableIds: ['attachment'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [
+        {
+          attachments: [{ kind: 'file', name: 'report.pdf' }],
+          body: '',
+          clientId: 'attachment',
+          kind: 'user',
+        },
+      ],
+    });
+
+    expect(html).toContain('share-attachment-chip-file');
+    expect(html).not.toContain('share-bubble-user">');
   });
 });

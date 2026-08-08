@@ -24,6 +24,8 @@ interface PendingExport {
   timer: ReturnType<typeof setTimeout>;
 }
 
+type ReadyWaiter = (error: Error | null) => void;
+
 export const ConversationShareWebView = forwardRef<
   ConversationShareWebViewHandle,
   {
@@ -34,7 +36,7 @@ export const ConversationShareWebView = forwardRef<
   const pendingRef = useRef(new Map<string, PendingExport>());
   const sequenceRef = useRef(0);
   const readyRef = useRef(false);
-  const readyWaitersRef = useRef<Array<() => void>>([]);
+  const readyWaitersRef = useRef<ReadyWaiter[]>([]);
 
   useEffect(() => {
     readyRef.current = false;
@@ -46,16 +48,22 @@ export const ConversationShareWebView = forwardRef<
       async exportPng(options) {
         if (!readyRef.current) {
           await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(() => {
-              readyWaitersRef.current = readyWaitersRef.current.filter(
-                (waiter) => waiter !== resolve,
-              );
-              reject(new Error("conversation share webview not ready"));
-            }, EXPORT_TIMEOUT_MS);
-            readyWaitersRef.current.push(() => {
+            let settled = false;
+            const waiter: ReadyWaiter = (error) => {
+              if (settled) return;
+              settled = true;
               clearTimeout(timer);
-              resolve();
-            });
+              readyWaitersRef.current = readyWaitersRef.current.filter(
+                (candidate) => candidate !== waiter,
+              );
+              if (error) reject(error);
+              else resolve();
+            };
+            const timer = setTimeout(
+              () => waiter(new Error("conversation share webview not ready")),
+              EXPORT_TIMEOUT_MS,
+            );
+            readyWaitersRef.current.push(waiter);
           });
         }
         return new Promise<string>((resolve, reject) => {
@@ -103,7 +111,7 @@ export const ConversationShareWebView = forwardRef<
     if (record.type === "conversation-share-ready") {
       readyRef.current = true;
       const waiters = readyWaitersRef.current.splice(0);
-      waiters.forEach((waiter) => waiter());
+      waiters.forEach((waiter) => waiter(null));
       return;
     }
     if (
@@ -134,10 +142,11 @@ export const ConversationShareWebView = forwardRef<
 
   useEffect(
     () => () => {
-      readyWaitersRef.current.splice(0).forEach((waiter) => waiter());
+      const unmountedError = new Error("conversation share webview unmounted");
+      readyWaitersRef.current.splice(0).forEach((waiter) => waiter(unmountedError));
       for (const pending of pendingRef.current.values()) {
         clearTimeout(pending.timer);
-        pending.reject(new Error("conversation share webview unmounted"));
+        pending.reject(unmountedError);
       }
       pendingRef.current.clear();
     },

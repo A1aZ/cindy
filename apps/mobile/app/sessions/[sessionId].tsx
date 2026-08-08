@@ -108,6 +108,7 @@ import {
   buildConversationShareHtml,
   type ConversationShareMessage,
 } from '@/session/conversationShareWebViewHtml';
+import { projectConversationShareMessage } from '@/session/conversationShareProjection';
 import { ShareSelectionBar } from '@/session/ShareSelectionBar';
 import {
   isShareableMessage,
@@ -258,8 +259,7 @@ import {
   useSessionQuotes,
 } from '@/session/chatQuoteStore';
 import { QuoteCapsule } from '@/session/QuoteCapsule';
-import { formatQuotesForSend, parseChatQuoteSegments, stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
-import { buildVisibleSentInlineTokens, sentInlineTokensDisplayText } from '@/session/sentMessageAtoms';
+import { formatQuotesForSend, stripChatQuoteMarkerLines } from '@cindy/maker-shared/chat-quotes';
 import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { projectDraftSessionTitle } from '@cindy/maker-shared/session-title';
 import { confirmFullAccessChange } from '@/session/fullAccessConfirmation';
@@ -658,7 +658,7 @@ function measureViewInWindow(view: View | null): Promise<{
   });
 }
 
-/** 展平消息流中的工作组 / 子 Agent，只收集用户和 AI 的正文消息用于图片导出。 */
+/** 展平消息流中的工作组 / 子 Agent，投影用户实际可见的消息内容用于图片导出。 */
 function collectConversationShareMessages(
   items: readonly MobileMessageRenderItem[],
 ): ConversationShareMessage[] {
@@ -666,28 +666,9 @@ function collectConversationShareMessages(
   const visit = (item: MobileMessageRenderItem | MobileWorkChildItem): void => {
     if (item.type === 'message') {
       if (!isShareableMessage(item.message)) return;
-      if (item.message.kind !== 'user' && item.message.kind !== 'assistant') return;
       const clientId = item.message.source.clientId || item.message.source.id || item.message.key;
-      const body = item.message.kind === 'user'
-        ? sentInlineTokensDisplayText(
-            buildVisibleSentInlineTokens(
-              item.message.body,
-              item.message.quotesEncoded
-                ? parseChatQuoteSegments(item.message.body)
-                : item.message.body ? [{ kind: 'text' as const, text: item.message.body }] : [],
-              item.message.pastedTextRanges,
-              item.message.slashCommandRanges,
-            ).filter((token) => token.kind !== 'quote'),
-          )
-        : item.message.quotesEncoded
-          ? stripChatQuoteMarkerLines(item.message.body)
-          : item.message.body;
-      messages.push({
-        body,
-        clientId,
-        kind: item.message.kind,
-        ...(item.message.secondaryBody ? { secondaryBody: item.message.secondaryBody } : {}),
-      });
+      const projected = projectConversationShareMessage(clientId, item.message);
+      if (projected) messages.push(projected);
       return;
     }
     if (item.type === 'work_group') {
@@ -5637,6 +5618,7 @@ export default function SessionScreen() {
         border: colors.border,
         codeSurface: colors.chatCodeSurface,
         inlineCode: colors.chatInlineCodeText,
+        surfaceChip: colors.surfaceChip,
         surfaceElevated: colors.surfaceElevated,
         syntax: {
           comment: colors.syntaxComment,
@@ -9115,7 +9097,11 @@ export default function SessionScreen() {
         </View>
       </KeyboardAvoidingView>
       {shareSelectionActive && conversationShareHtml && !conversationShareNativeRendererAvailable ? (
-        <ConversationShareWebView html={conversationShareHtml} ref={conversationShareWebViewRef} />
+        <ConversationShareWebView
+          html={conversationShareHtml}
+          key={conversationShareHtml}
+          ref={conversationShareWebViewRef}
+        />
       ) : null}
       {wideSessionNav.enabled || sessionListDrawerOverlayMounted ? (
         // 树内 overlay(zIndex 40)盖住顶部 chrome 与底部 composer;树内层叠而非 Modal 的

@@ -203,4 +203,24 @@ describe('markCodexPlanTurnFailed', () => {
     const noPlan = { role: 'tool_use' as const, clientId: 'b1', toolName: 'Bash', content: '' };
     expect(markCodexPlanTurnFailed([noPlan])).toEqual({ messages: [noPlan], changed: false });
   });
+
+  it('never reaches past the latest user message into an older turn plan', () => {
+    // 所有权边界:本次失败的 turn 没发过 update_plan 时,不得把上一段历史里
+    // 未盖章的旧计划(如升级前已全勾完退场的行)标成失败复活——main 侧对应
+    // 落库也不会发生,内存里这枚错印记将没有任何广播能纠正。
+    const historicPlan = planMessage('plan:old', [{ step: 'Ship', status: 'completed' }]);
+    const newUserTurn = { role: 'user' as const, clientId: 'u2', content: 'next task' };
+    const failingTool = { role: 'tool_use' as const, clientId: 'b2', toolName: 'Bash', content: '' };
+
+    expect(markCodexPlanTurnFailed([historicPlan, newUserTurn, failingTool])).toEqual({
+      messages: [historicPlan, newUserTurn, failingTool],
+      changed: false,
+    });
+
+    // 计划在当前 user 段内(属于本次失败 turn)时照常落印。
+    const currentPlan = planMessage('plan:cur', [{ step: 'Ship', status: 'completed' }]);
+    const result = markCodexPlanTurnFailed([newUserTurn, currentPlan]);
+    expect(result.changed).toBe(true);
+    expect(result.messages[1]).toMatchObject({ turnCompleted: false });
+  });
 });

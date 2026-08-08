@@ -665,16 +665,26 @@ export function applyCodexPlanSnapshotOnDone<
 /**
  * Live-side twin of main's `persistCodexPlanOnTerminalError`: a Codex turn that
  * dies on a terminal `error` never gets a `done`, so nothing seals its plan row
- * and nothing stamps `turnCompleted:false` in memory. Stamp the latest unsealed
+ * and nothing stamps `turnCompleted:false` in memory. Stamp the current turn's
  * plan row here so the pinned capsule sees the task as alive immediately, in
  * the window before the durable stamp's row broadcast arrives. Step statuses
  * are untouched; already-sealed or already-stamped rows are left alone.
+ *
+ * Ownership boundary: only rows inside the failing turn's segment — after the
+ * latest user message — may be stamped. Codex plan rows are per-turn
+ * (`plan:<turnId>` is created within its own turn), so the scan stops cold at
+ * the first user row. A failed turn that never emitted `update_plan` stamps
+ * nothing; reaching past the boundary would resurrect an unrelated historical
+ * plan (pre-seal-era all-done rows retire via the legacy fallback, and a stray
+ * failure stamp would flip them back to "alive" with no durable write to
+ * correct it — main's stamper correctly no-ops in that case).
  */
 export function markCodexPlanTurnFailed<TMessage extends MessageRenderSourceMessageLike>(
   messages: readonly TMessage[],
 ): { messages: readonly TMessage[]; changed: boolean } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (message.role === 'user') break;
     if (message.role !== 'tool_use' || toolNameOf(message) !== 'update_plan') continue;
     if (message.terminalPlanSnapshot === true || message.turnCompleted === false) {
       return { messages, changed: false };

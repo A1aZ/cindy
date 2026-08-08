@@ -339,6 +339,78 @@ describe('update_plan tool_use persistence', () => {
     );
   });
 
+  it('carries repeated update_plan snapshots into the terminal write', async () => {
+    // 同一 turn 的第二次 update_plan 走 persistId 复用分支。按-turn 缓存若只在
+    // 首次记录,终态写入会拿首版快照整行覆盖,已勾完的进度在重载/远端同步后
+    // 倒退回第一版(review P1)。
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-multi',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Inspect', status: 'in_progress' }, { step: 'Patch', status: 'pending' }] },
+      },
+      null,
+    );
+    const secondPersistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-multi',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Inspect', status: 'completed' }, { step: 'Patch', status: 'in_progress' }] },
+      },
+      null,
+    );
+    expect(secondPersistId).toBe(persistId);
+
+    // done 不带 plan(常见):内容只能来自缓存,必须是最新那一版。
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-multi', status: 'completed' },
+    })).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenLastCalledWith(
+      SESSION,
+      persistId,
+      expect.objectContaining({
+        input: { plan: [{ step: 'Inspect', status: 'completed' }, { step: 'Patch', status: 'in_progress' }] },
+        terminalPlanSnapshot: true,
+      }),
+    );
+  });
+
+  it('stamps a terminal-error failure onto the latest repeated plan snapshot', async () => {
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-multi-err',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Inspect', status: 'in_progress' }] },
+      },
+      null,
+    );
+    onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-multi-err',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Inspect', status: 'completed' }] },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnTerminalError(SESSION, 'turn-multi-err')).toBe(true);
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenLastCalledWith(
+      SESSION,
+      persistId,
+      expect.objectContaining({
+        input: { plan: [{ step: 'Inspect', status: 'completed' }] },
+        turnCompleted: false,
+      }),
+    );
+  });
+
   it('stamps an already-completed plan as terminal at the successful done boundary', async () => {
     const persistId = onToolUseEvent(
       SESSION,

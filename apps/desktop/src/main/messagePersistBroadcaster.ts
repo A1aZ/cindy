@@ -541,6 +541,23 @@ function isUpdatableToolUse(toolName: string): boolean {
   return toolName === 'update_plan' || toolName === 'web_search';
 }
 
+/**
+ * 计划行进按 turnId 的表:它要活过 continuation boundary 的 map 清空,直到产品
+ * turn 真正结束才用得上(review P1-1)。**每次 update_plan 都要调**——同一 turn 的
+ * 重复更新走 onToolUseEvent 的复用分支,只在首次记录会让终态写入拿首版快照覆盖
+ * 已更新的计划(review P1)。
+ */
+function rememberCodexPlanRow(
+  sessionId: string,
+  toolName: string,
+  toolUseId: string,
+  persistId: string,
+  input: unknown,
+): void {
+  if (toolName !== 'update_plan' || !toolUseId) return;
+  getOrCreateSessionMap(codexPlanRowByTurnToolUseId, sessionId).set(toolUseId, { persistId, input });
+}
+
 function rememberUpdatableToolUsePersistId(sessionId: string, toolUseId: string, persistId: string): void {
   let idMap = updatableToolUsePersistIdBySession.get(sessionId);
   if (!idMap) {
@@ -579,6 +596,9 @@ export function onToolUseEvent(
     enqueueWrite(`tool_use_update:${sessionId}:${existingPersistId}`, () =>
       updateDbMessageContent(sessionId, existingPersistId, content),
     );
+    // 同一 turn 的第二次 update_plan 走这条复用分支,按-turn 缓存必须跟着刷新:
+    // 终态写入优先读它,停在首版快照会把已更新的计划整行盖回第一版(review P1)。
+    rememberCodexPlanRow(sessionId, toolName, toolUseId, existingPersistId, data.input);
     notePersistedMessage(sessionId, 'tool_use', existingPersistId);
     return existingPersistId;
   }
@@ -596,14 +616,7 @@ export function onToolUseEvent(
   if (isUpdatableToolUse(toolName) && toolUseId) {
     rememberUpdatableToolUsePersistId(sessionId, toolUseId, persistId);
   }
-  // 计划行额外记进按 turnId 的表:它要活过 continuation boundary 的 map 清空,
-  // 直到产品 turn 真正结束才用得上(review P1-1)。
-  if (toolName === 'update_plan' && toolUseId) {
-    getOrCreateSessionMap(codexPlanRowByTurnToolUseId, sessionId).set(toolUseId, {
-      persistId,
-      input: data.input,
-    });
-  }
+  rememberCodexPlanRow(sessionId, toolName, toolUseId, persistId, data.input);
   notePersistedMessage(sessionId, 'tool_use', persistId);
   return persistId;
 }

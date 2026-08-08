@@ -946,6 +946,52 @@ describe('remoteSessionStore', () => {
     });
   });
 
+  it('stamps the turn plan as failed on a codex terminal error, through live-plan overlays', () => {
+    // 没有 done 的 codex 终态 error:这一轮的计划行等不到章。手机端要自己补失败
+    // 印记,否则全勾完的失败计划按旧数据兜底退场;而印记只写内存行、不写 live
+    // 缓存时,overlay 会用旧缓存把 main 随后广播的落库印记盖回去(review P1)。
+    const planRow = {
+      ...message('plan-row-1', 's1'),
+      role: 'tool_use' as const,
+      toolUseId: 'plan:turn-err',
+      content: {
+        toolUseId: 'plan:turn-err',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      },
+    };
+    remoteSessionStore.setMessages('s1', [planRow]);
+    // 先按真实链路让 live 缓存记住这一行(update_plan 推送)。
+    remoteSessionStore.applyMakerEvent('s1', {
+      type: 'tool_use',
+      data: {
+        toolUseId: 'plan:turn-err',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      },
+    }, 'plan-row-1');
+
+    remoteSessionStore.applyMakerEvent('s1', {
+      type: 'error',
+      source: 'codex',
+      data: { message: 'stream disconnected' },
+    });
+
+    expect(remoteSessionStore.getMessages('s1')[0]).toMatchObject({
+      content: {
+        turnCompleted: false,
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      },
+    });
+
+    // main 落库前的行重新到达(无印记):overlay 用 live 缓存覆盖 content,
+    // 缓存已带印记 → 不回退成"已完成的旧计划"。
+    remoteSessionStore.mergeMessages('s1', [planRow]);
+    expect(remoteSessionStore.getMessages('s1')[0]).toMatchObject({
+      content: { turnCompleted: false },
+    });
+  });
+
   it('coalesces update_plan with streaming finalization into one notification', () => {
     vi.useFakeTimers();
     const notify = vi.fn();

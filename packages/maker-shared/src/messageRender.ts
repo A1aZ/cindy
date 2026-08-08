@@ -729,19 +729,28 @@ export function applyCodexPlanSnapshotOnDone<
  */
 export function markCodexPlanTurnFailed<TMessage extends MessageRenderSourceMessageLike>(
   messages: readonly TMessage[],
-): { messages: readonly TMessage[]; changed: boolean } {
+): { messages: readonly TMessage[]; changed: boolean; toolUseId: string | null } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (message.role === 'user' && message.delivery !== 'steer') break;
     if (message.role !== 'tool_use' || toolNameOf(message) !== 'update_plan') continue;
     if (planRowSealOf(message).sealed || planRowTurnFailed(message)) {
-      return { messages, changed: false };
+      return { messages, changed: false, toolUseId: null };
     }
     const next = [...messages];
-    next[index] = { ...message, turnCompleted: false };
-    return { messages: next, changed: true };
+    // 印记同时落 content(与 applyCodexPlanSnapshotOnDone 同口径):mobile 的
+    // live-plan 缓存只存 content 并整体覆盖 overlay 之后的行,只写顶层的话
+    // 缓存一盖就把 main 广播的落库印记抹掉。
+    const content = readRecord(message.content);
+    next[index] = {
+      ...message,
+      turnCompleted: false,
+      ...(content ? { content: { ...content, turnCompleted: false } } : {}),
+    };
+    // toolUseId 回给调用方:mobile 按它把同一份 content 写回 live-plan 缓存。
+    return { messages: next, changed: true, toolUseId: toolUseIdOf(message) ?? null };
   }
-  return { messages, changed: false };
+  return { messages, changed: false, toolUseId: null };
 }
 
 function samePlanSnapshot(left: unknown[], right: unknown[]): boolean {

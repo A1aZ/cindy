@@ -230,17 +230,21 @@ describe('markCodexPlanTurnFailed', () => {
       turnCompleted: false,
       toolInput: { plan: [{ step: 'Ship', status: 'completed' }] },
     });
+    // 印记同时落 content,并回传 toolUseId:mobile 靠这两样把同一份 content 写回
+    // live-plan 缓存,否则 overlay 会把落库印记盖回去(review P1)。
+    expect(result.toolUseId).toBe('plan:err');
+    expect(result.messages[0].content).toMatchObject({ turnCompleted: false });
   });
 
   it('leaves sealed or already-stamped rows and plan-less turns alone', () => {
     const sealed = { ...planMessage('plan:done', []), terminalPlanSnapshot: true };
-    expect(markCodexPlanTurnFailed([sealed])).toEqual({ messages: [sealed], changed: false });
+    expect(markCodexPlanTurnFailed([sealed])).toEqual({ messages: [sealed], changed: false, toolUseId: null });
 
     const stamped = { ...planMessage('plan:old-fail', []), turnCompleted: false };
-    expect(markCodexPlanTurnFailed([stamped])).toEqual({ messages: [stamped], changed: false });
+    expect(markCodexPlanTurnFailed([stamped])).toEqual({ messages: [stamped], changed: false, toolUseId: null });
 
     const noPlan = { role: 'tool_use' as const, clientId: 'b1', toolName: 'Bash', content: '' };
-    expect(markCodexPlanTurnFailed([noPlan])).toEqual({ messages: [noPlan], changed: false });
+    expect(markCodexPlanTurnFailed([noPlan])).toEqual({ messages: [noPlan], changed: false, toolUseId: null });
   });
 
   it('writes the lifecycle stamp into content as well for mobile live-plan overlays', () => {
@@ -285,6 +289,7 @@ describe('markCodexPlanTurnFailed', () => {
     expect(markCodexPlanTurnFailed([historicPlan, newUserTurn, failingTool])).toEqual({
       messages: [historicPlan, newUserTurn, failingTool],
       changed: false,
+      toolUseId: null,
     });
 
     // 计划在当前 user 段内(属于本次失败 turn)时照常落印。

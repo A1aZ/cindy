@@ -175,6 +175,10 @@ export class IOSSimulatorRendererAccessRegistry {
     }
     const existing = this.grants.get(target.id);
     if (existing?.target === target && existing.generation === source.generation) return true;
+    // Inheritance is an authoritative Host decision just like grantTargets.
+    // Invalidate a manual confirmation that started before this detached
+    // target was bound, including its first inherited grant.
+    this.bumpTargetEpoch(target.id);
     const revoked = existing ? this.removeGeneration(existing.generation) : [];
     this.grants.set(target.id, {
       sessionId: source.sessionId,

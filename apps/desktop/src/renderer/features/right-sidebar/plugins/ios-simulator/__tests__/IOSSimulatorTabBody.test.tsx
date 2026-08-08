@@ -329,6 +329,35 @@ describe('IOSSimulatorTabBody', () => {
     expect(screen.queryByText('rightSidebar.iosSimulator.accessRequiredTitle')).toBeNull();
   });
 
+  it('animates the access loader on an HTML wrapper instead of the SVG', async () => {
+    const api = installStatus(readyStatus());
+    api.status.mockRejectedValueOnce(
+      new Error(
+        'Error invoking remote method: Error: [PERMISSION_DENIED] iOS Simulator access is limited to the current task',
+      ),
+    );
+    api.requestAccess.mockImplementationOnce(
+      () => new Promise<IOSSimulatorAccessRequestResult>(() => undefined),
+    );
+
+    render(<IOSSimulatorTabBody state={{ instanceId: null }} ctx={ctx} />);
+    fireEvent.click(
+      await screen.findByRole('button', {
+        name: 'rightSidebar.iosSimulator.allowTaskAccess',
+      }),
+    );
+
+    const button = await screen.findByRole('button', {
+      name: 'rightSidebar.iosSimulator.requestingAccess',
+    });
+    const wrapper = button.querySelector('span.animate-spin');
+    const icon = wrapper?.querySelector('svg');
+    expect(wrapper).toBeTruthy();
+    expect(wrapper?.classList.contains('motion-reduce:animate-none')).toBe(true);
+    expect(icon).toBeTruthy();
+    expect(icon?.classList.contains('animate-spin')).toBe(false);
+  });
+
   it('keeps the access action visible when native confirmation is cancelled', async () => {
     const api = installStatus(readyStatus());
     api.status.mockRejectedValueOnce(

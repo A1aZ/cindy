@@ -13,6 +13,22 @@ async function makeWorkingDir(): Promise<string> {
   return fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'computer-wd-')));
 }
 
+async function writeTrajectory(
+  root: string,
+  actions: Array<{ tool: string; arguments?: Record<string, unknown> }>,
+  directoryName = 'rec',
+): Promise<string> {
+  const directory = path.join(root, directoryName);
+  await Promise.all(
+    actions.map(async (action, index) => {
+      const turn = path.join(directory, `turn-${String(index + 1).padStart(5, '0')}`);
+      await fs.mkdir(turn, { recursive: true });
+      await fs.writeFile(path.join(turn, 'action.json'), JSON.stringify(action), 'utf8');
+    }),
+  );
+  return directory;
+}
+
 function textPayload(result: unknown): unknown {
   const content = (result as { content: Array<{ type: string; text?: string }> }).content;
   const first = content[0];
@@ -1087,29 +1103,657 @@ describe('createComputerMcpServer', () => {
     await h.cleanup();
   });
 
-  it('dispatches replay trajectory tool (dir constrained to workingDir)', async () => {
+  it('replays a validated trajectory through Cindy action dispatch', async () => {
     const deps: ComputerMcpDeps = {
       getStatus: vi.fn(),
       callTool: vi.fn(async () => ({ ok: true })),
     };
     const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      {
+        tool: 'click',
+        arguments: { pid: 123, window_id: 7, x: 10, y: 20 },
+      },
+    ]);
     const h = await makeHarness(deps, {
       getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
     });
 
-    await h.client.callTool({
+    const payload = textPayload(
+      await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0, stop_on_error: false },
+        },
+      }),
+    ) as {
+      ok: boolean;
+      data: { attempted: number; succeeded: number; failed: number };
+    };
+
+    expect(payload).toMatchObject({
+      ok: true,
+      data: { attempted: 1, succeeded: 1, failed: 0 },
+    });
+    expect(deps.callTool).toHaveBeenCalledWith(
+      'click',
+      { pid: 123, window_id: 7, x: 10, y: 20 },
+      { agentKind: 'claude-code' },
+    );
+    expect(deps.callTool).not.toHaveBeenCalledWith(
+      'replay_trajectory',
+      expect.anything(),
+      expect.anything(),
+    );
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'replays inside a workingDir reached through a symbolic link',
+    async () => {
+      const deps: ComputerMcpDeps = {
+        getStatus: vi.fn(),
+        callTool: vi.fn(async () => ({ ok: true })),
+      };
+      const container = await makeWorkingDir();
+      const realWorkingDir = path.join(container, 'real-workspace');
+      const linkedWorkingDir = path.join(container, 'linked-workspace');
+      await fs.mkdir(realWorkingDir);
+      await fs.symlink(realWorkingDir, linkedWorkingDir, 'dir');
+      await writeTrajectory(realWorkingDir, [
+        {
+          tool: 'get_window_state',
+          arguments: {
+            pid: 121,
+            window_id: 1,
+            screenshot_out_file: 'screens/state.png',
+          },
+        },
+      ]);
+      const h = await makeHarness(deps, {
+        getSessionContext: () => ({
+          agentKind: 'claude-code',
+          workingDir: linkedWorkingDir,
+        }),
+      });
+
+      const payload = textPayload(await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0 },
+        },
+      })) as { ok: boolean; data: { succeeded: number } };
+
+      expect(payload).toMatchObject({ ok: true, data: { succeeded: 1 } });
+      expect(deps.callTool).toHaveBeenCalledWith(
+        'get_window_state',
+        {
+          pid: 121,
+          window_id: 1,
+          screenshot_out_file: path.join(realWorkingDir, 'screens', 'state.png'),
+        },
+        { agentKind: 'claude-code' },
+      );
+      await h.cleanup();
+      await fs.rm(container, { recursive: true, force: true });
+    },
+  );
+
+  it('preflights every turn before replay and blocks a later Simulator action', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) =>
+        pid === 202
+          ? {
+              pid,
+              command:
+                '/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator',
+            }
+          : { pid, name: 'Code' },
+      ),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'click', arguments: { pid: 101, window_id: 1, x: 10, y: 20 } },
+      { tool: 'click', arguments: { pid: 202, window_id: 2, x: 30, y: 40 } },
+    ]);
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const result = await h.client.callTool({
       name: 'call_tool',
       arguments: {
         name: 'replay_trajectory',
-        args: { dir: 'rec', delay_ms: 100, stop_on_error: false },
+        args: { dir: 'rec', delay_ms: 0, stop_on_error: false },
       },
     });
 
-    expect(deps.callTool).toHaveBeenCalledWith('replay_trajectory', {
-      dir: path.join(root, 'rec'),
-      delay_ms: 100,
-      stop_on_error: false,
-    }, { agentKind: 'claude-code' });
+    expect(textPayload(result)).toMatchObject({
+      ok: false,
+      errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+      data: { blocked_target: 'Simulator.app' },
+    });
+    expect(result.isError).toBe(true);
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it.each([
+    [
+      'Xcode hotkey',
+      { tool: 'hotkey', arguments: { pid: 303, keys: ['cmd', 'r'] } },
+      { pid: 303, name: 'Xcode' },
+      'Xcode',
+    ],
+    [
+      'Simulator launch',
+      { tool: 'launch_app', arguments: { name: 'Simulator' } },
+      { pid: 404, name: 'Code' },
+      'Simulator.app',
+    ],
+  ])(
+    'blocks %s embedded in a manually authored trajectory',
+    async (_label, action, identity, target) => {
+      const deps: ComputerMcpDeps = {
+        getStatus: vi.fn(),
+        resolveProcessIdentity: vi.fn(async () => identity),
+        callTool: vi.fn(),
+      };
+      const root = await makeWorkingDir();
+      await writeTrajectory(root, [action]);
+      const h = await makeHarness(deps, {
+        getSessionContext: () => ({
+          agentKind: 'claude-code',
+          workingDir: root,
+        }),
+      });
+
+      const result = await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0 },
+        },
+      });
+
+      expect(textPayload(result)).toMatchObject({
+        ok: false,
+        errorCode: 'EMBEDDED_IOS_SIMULATOR_PREFERRED',
+        data: { blocked_target: target },
+      });
+      expect(deps.callTool).not.toHaveBeenCalled();
+      await h.cleanup();
+      await fs.rm(root, { recursive: true, force: true });
+    },
+  );
+
+  it('does not classify trajectory paths or typed text as an external Simulator target', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({ pid, name: 'Code' })),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(
+      root,
+      [
+        {
+          tool: 'type_text',
+          arguments: { pid: 505, text: 'Simulator.app is text only' },
+        },
+      ],
+      'Simulator-recording',
+    );
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const payload = textPayload(
+      await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'Simulator-recording', delay_ms: 0 },
+        },
+      }),
+    ) as { ok: boolean; data: { succeeded: number } };
+
+    expect(payload).toMatchObject({ ok: true, data: { succeeded: 1 } });
+    expect(deps.callTool).toHaveBeenCalledWith(
+      'type_text',
+      {
+        pid: 505,
+        text: 'Simulator.app is text only',
+      },
+      { agentKind: 'claude-code' },
+    );
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('re-resolves process identity immediately before each recorded action', async () => {
+    const resolveProcessIdentity = vi
+      .fn()
+      .mockResolvedValueOnce({ pid: 606, name: 'Code' })
+      .mockResolvedValueOnce({
+        pid: 606,
+        bundleId: 'com.apple.iphonesimulator',
+      });
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity,
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'click', arguments: { pid: 606, window_id: 6, x: 10, y: 20 } },
+    ]);
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const payload = textPayload(
+      await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0 },
+        },
+      }),
+    ) as {
+      ok: boolean;
+      data: {
+        attempted: number;
+        failed: number;
+        first_failure?: { error?: string };
+      };
+    };
+
+    expect(payload).toMatchObject({
+      ok: true,
+      data: { attempted: 1, failed: 1 },
+    });
+    expect(payload.data.first_failure?.error).toContain('EMBEDDED_IOS_SIMULATOR_PREFERRED');
+    expect(resolveProcessIdentity).toHaveBeenCalledTimes(2);
+    expect(resolveProcessIdentity).toHaveBeenNthCalledWith(1, 606);
+    expect(resolveProcessIdentity).toHaveBeenNthCalledWith(2, 606, { forceFresh: true });
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('executes the immutable preflight snapshot when the action file changes later', async () => {
+    const root = await makeWorkingDir();
+    const trajectory = await writeTrajectory(root, [
+      { tool: 'type_text', arguments: { pid: 616, text: 'original text' } },
+    ]);
+    const actionPath = path.join(trajectory, 'turn-00001', 'action.json');
+    const resolveProcessIdentity = vi.fn(async (pid: number) => {
+      if (resolveProcessIdentity.mock.calls.length === 1) {
+        await fs.writeFile(
+          actionPath,
+          JSON.stringify({ tool: 'launch_app', arguments: { name: 'Simulator' } }),
+          'utf8',
+        );
+      }
+      return { pid, name: 'Code' };
+    });
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity,
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0 },
+      },
+    })) as { ok: boolean; data: { succeeded: number } };
+
+    expect(payload).toMatchObject({ ok: true, data: { succeeded: 1 } });
+    expect(deps.callTool).toHaveBeenCalledWith(
+      'type_text',
+      { pid: 616, text: 'original text' },
+      { agentKind: 'claude-code' },
+    );
+    expect(deps.callTool).not.toHaveBeenCalledWith('launch_app', expect.anything());
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('fails replay closed when host process provenance is unavailable', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'click', arguments: { pid: 707, window_id: 7, x: 10, y: 20 } },
+    ]);
+    const h = await makeHarness(
+      deps,
+      {
+        getSessionContext: () => ({
+          agentKind: 'claude-code',
+          workingDir: root,
+        }),
+      },
+      { injectDefaultProcessResolver: false },
+    );
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0, stop_on_error: false },
+      },
+    });
+
+    expect(textPayload(result)).toMatchObject({
+      ok: false,
+      errorCode: 'TARGET_PROVENANCE_UNAVAILABLE',
+    });
+    expect(result.isError).toBe(true);
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a recorded turn that escapes through a symlink',
+    async () => {
+      const deps: ComputerMcpDeps = {
+        getStatus: vi.fn(),
+        callTool: vi.fn(async () => ({ ok: true })),
+      };
+      const root = await makeWorkingDir();
+      const outside = await makeWorkingDir();
+      await fs.mkdir(path.join(root, 'rec'), { recursive: true });
+      await fs.writeFile(
+        path.join(outside, 'action.json'),
+        JSON.stringify({ tool: 'get_screen_size', arguments: {} }),
+        'utf8',
+      );
+      await fs.symlink(outside, path.join(root, 'rec', 'turn-00001'), 'dir');
+      const h = await makeHarness(deps, {
+        getSessionContext: () => ({
+          agentKind: 'claude-code',
+          workingDir: root,
+        }),
+      });
+
+      const result = await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0 },
+        },
+      });
+
+      expect(textPayload(result)).toMatchObject({
+        ok: false,
+        errorCode: 'TRAJECTORY_VALIDATION_FAILED',
+        data: { turn: 'turn-00001' },
+      });
+      expect(deps.callTool).not.toHaveBeenCalled();
+      await h.cleanup();
+      await fs.rm(root, { recursive: true, force: true });
+      await fs.rm(outside, { recursive: true, force: true });
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symbolic-link action file even when its target stays in the task',
+    async () => {
+      const deps: ComputerMcpDeps = {
+        getStatus: vi.fn(),
+        callTool: vi.fn(async () => ({ ok: true })),
+      };
+      const root = await makeWorkingDir();
+      const turn = path.join(root, 'rec', 'turn-00001');
+      await fs.mkdir(turn, { recursive: true });
+      await fs.writeFile(
+        path.join(root, 'safe-action.json'),
+        JSON.stringify({ tool: 'get_screen_size', arguments: {} }),
+        'utf8',
+      );
+      await fs.symlink(path.join(root, 'safe-action.json'), path.join(turn, 'action.json'));
+      const h = await makeHarness(deps, {
+        getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+      });
+
+      const result = await h.client.callTool({
+        name: 'call_tool',
+        arguments: {
+          name: 'replay_trajectory',
+          args: { dir: 'rec', delay_ms: 0 },
+        },
+      });
+
+      expect(textPayload(result)).toMatchObject({
+        ok: false,
+        errorCode: 'TRAJECTORY_VALIDATION_FAILED',
+        data: { turn: 'turn-00001' },
+      });
+      expect(deps.callTool).not.toHaveBeenCalled();
+      await h.cleanup();
+      await fs.rm(root, { recursive: true, force: true });
+    },
+  );
+
+  it('rejects trajectories whose aggregate action files exceed the memory budget', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      resolveProcessIdentity: vi.fn(async (pid) => ({ pid, name: 'Code' })),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(
+      root,
+      Array.from({ length: 9 }, (_, index) => ({
+        tool: 'type_text',
+        arguments: { pid: 800 + index, text: 'x'.repeat(240_000) },
+      })),
+    );
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0, stop_on_error: false },
+      },
+    });
+
+    expect(textPayload(result)).toMatchObject({
+      ok: false,
+      errorCode: 'TRAJECTORY_VALIDATION_FAILED',
+      data: { turn: 'turn-00009' },
+    });
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('bounds accumulated replay result summaries', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(async () => 'x'.repeat(10_000)),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(
+      root,
+      Array.from({ length: 40 }, () => ({ tool: 'get_screen_size', arguments: {} })),
+    );
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0 },
+      },
+    })) as { data: { turns: Array<{ result_summary: string }> } };
+
+    expect(payload.data.turns).toHaveLength(40);
+    expect(payload.data.turns.every((turn) => turn.result_summary.length <= 2_048)).toBe(true);
+    expect(
+      payload.data.turns.reduce((total, turn) => total + turn.result_summary.length, 0),
+    ).toBeLessThanOrEqual(64 * 1024);
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('preserves recorded tool summaries instead of exposing Cindy envelopes', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi
+        .fn()
+        .mockResolvedValueOnce('screen is 1440x900')
+        .mockRejectedValueOnce(new Error('driver capture failed')),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'get_screen_size', arguments: {} },
+      { tool: 'get_screen_size', arguments: {} },
+    ]);
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const payload = textPayload(await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0, stop_on_error: false },
+      },
+    })) as {
+      data: {
+        turns: Array<{ result_summary: string }>;
+        first_failure: { error: string };
+      };
+    };
+
+    expect(payload.data.turns.map((turn) => turn.result_summary)).toEqual([
+      'screen is 1440x900',
+      'driver capture failed',
+    ]);
+    expect(payload.data.first_failure.error).toBe('driver capture failed');
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('stops dispatching recorded actions after the MCP request is cancelled', async () => {
+    const controller = new AbortController();
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(async () => {
+        controller.abort();
+        return { ok: true };
+      }),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'get_screen_size', arguments: {} },
+      { tool: 'get_screen_size', arguments: {} },
+    ]);
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    await expect(
+      h.client.callTool(
+        {
+          name: 'call_tool',
+          arguments: {
+            name: 'replay_trajectory',
+            args: { dir: 'rec', delay_ms: 100, stop_on_error: false },
+          },
+        },
+        undefined,
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(deps.callTool).toHaveBeenCalledTimes(1);
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('rejects nested trajectory replay before any action is dispatched', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(async () => ({ ok: true })),
+    };
+    const root = await makeWorkingDir();
+    await writeTrajectory(root, [
+      { tool: 'replay_trajectory', arguments: { dir: 'another-recording' } },
+    ]);
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0 },
+      },
+    });
+
+    expect(textPayload(result)).toMatchObject({
+      ok: false,
+      errorCode: 'TRAJECTORY_VALIDATION_FAILED',
+      data: { turn: 'turn-00001' },
+    });
+    expect(deps.callTool).not.toHaveBeenCalled();
+    await h.cleanup();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('fails closed before replay when a recorded action is malformed', async () => {
+    const deps: ComputerMcpDeps = {
+      getStatus: vi.fn(),
+      callTool: vi.fn(),
+    };
+    const root = await makeWorkingDir();
+    const turn = path.join(root, 'rec', 'turn-00001');
+    await fs.mkdir(turn, { recursive: true });
+    await fs.writeFile(path.join(turn, 'action.json'), '{not-json', 'utf8');
+    const h = await makeHarness(deps, {
+      getSessionContext: () => ({ agentKind: 'claude-code', workingDir: root }),
+    });
+
+    const result = await h.client.callTool({
+      name: 'call_tool',
+      arguments: {
+        name: 'replay_trajectory',
+        args: { dir: 'rec', delay_ms: 0 },
+      },
+    });
+
+    expect(textPayload(result)).toMatchObject({
+      ok: false,
+      errorCode: 'TRAJECTORY_VALIDATION_FAILED',
+      data: { turn: 'turn-00001' },
+    });
+    expect(deps.callTool).not.toHaveBeenCalled();
     await h.cleanup();
     await fs.rm(root, { recursive: true, force: true });
   });

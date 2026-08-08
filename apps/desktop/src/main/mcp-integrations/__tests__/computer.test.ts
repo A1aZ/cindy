@@ -2464,6 +2464,36 @@ describe('computer mcp integration', () => {
     expect(spawnMock).toHaveBeenCalledTimes(1);
   });
 
+  it('bypasses the process snapshot cache when a routing guard requests fresh provenance', async () => {
+    const deps = getComputerMcpDeps();
+    mockProcessSnapshotSpawn([{
+      pid: 687,
+      parentPid: 1,
+      name: 'Code',
+      command: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+    }]);
+    mockProcessSnapshotSpawn([{
+      pid: 687,
+      parentPid: 1,
+      name: 'Simulator',
+      command:
+        '/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator',
+    }]);
+
+    await expect(deps.resolveProcessIdentity?.(687)).resolves.toMatchObject({
+      pid: 687,
+      command: '/Applications/Visual Studio Code.app/Contents/MacOS/Electron',
+    });
+    await expect(
+      deps.resolveProcessIdentity?.(687, { forceFresh: true }),
+    ).resolves.toMatchObject({
+      pid: 687,
+      command:
+        '/Applications/Xcode.app/Contents/Developer/Applications/Simulator.app/Contents/MacOS/Simulator',
+    });
+    expect(spawnMock).toHaveBeenCalledTimes(2);
+  });
+
   it('closes active MCP sessions and blocks tool dispatch while permission onboarding is paused', async () => {
     setPlatform('darwin');
     mcpCallToolMock

@@ -3462,10 +3462,11 @@ export function getComputerMcpDeps(options: ComputerMcpDepsOptions = {}): Comput
       await ensureRuntime();
       return getComputerDriverStatus();
     },
-    resolveProcessIdentity: async (pid) => {
-      let processSnapshot = await readProcessSnapshotResult();
+    resolveProcessIdentity: async (pid, resolveOptions) => {
+      const forceFresh = resolveOptions?.forceFresh === true;
+      let processSnapshot = await readProcessSnapshotResult({ forceFresh });
       let processInfo = processSnapshot.processes.get(pid);
-      if (!processInfo) {
+      if (!processInfo && !forceFresh) {
         processSnapshot = await readProcessSnapshotResult({ forceFresh: true });
         processInfo = processSnapshot.processes.get(pid);
       }

@@ -178,6 +178,35 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(sidebar.target, 'session-b')).toBe(false);
   });
 
+  it('does not let an older sidebar confirmation overwrite a newly inherited Host grant', async () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(53);
+    const sidebar = fakeWebContents(54);
+    const deferred: { resolve?: (confirmed: boolean) => void } = {};
+    registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
+    registry.grantAndFocus('session-b');
+    registry.configureResolver(() => ({
+      grantTargets: [main.target, sidebar.target],
+      focusTarget: sidebar.target,
+    }));
+    registry.configureConfirmation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+
+    const pending = registry.requestAccess('session-a', sidebar.target);
+    expect(registry.inheritAccess(main.target, sidebar.target)).toBe(true);
+    deferred.resolve?.(true);
+
+    await expect(pending).resolves.toBe(false);
+    expect(registry.hasAccess(main.target, 'session-a')).toBe(false);
+    expect(registry.hasAccess(sidebar.target, 'session-a')).toBe(false);
+    expect(registry.hasAccess(main.target, 'session-b')).toBe(true);
+    expect(registry.hasAccess(sidebar.target, 'session-b')).toBe(true);
+  });
+
   it('requires the exact WebContents object even when a numeric id is reused', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const original = fakeWebContents(61);

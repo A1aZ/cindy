@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import {
+  IOS_SIMULATOR_INSTANCE_ERROR_CODES,
+  IOSSimulatorInstanceError,
+} from '@cindy/ios-simulator-runtime';
+
+import { isIpcErrorCode } from '../../../shared/ipc-errors';
 import { MAKER_INVOKE } from '../channels';
 import {
   registerIOSSimulatorHandlers,
@@ -15,6 +21,10 @@ describe('iOS Simulator IPC handlers', () => {
       ...deps,
     });
   }
+
+  it('registers every stable Simulator business code in the IPC decoder allowlist', () => {
+    expect(IOS_SIMULATOR_INSTANCE_ERROR_CODES.every(isIpcErrorCode)).toBe(true);
+  });
 
   it.each([
     MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS,
@@ -88,6 +98,31 @@ describe('iOS Simulator IPC handlers', () => {
     ).resolves.toEqual({ granted: false });
   });
 
+  it('keeps access-request internals in Main logs and returns a fixed IPC error', async () => {
+    const harness = new IpcHarness();
+    const internalError = new Error(
+      'confirmation archive failed at /Users/alice/Library/Application Support/Cindy/private.json',
+    );
+    const reportError = vi.fn();
+    registerTrusted(harness, {
+      hasSessionAccess: () => false,
+      requestSessionAccess: vi.fn(async () => {
+        throw internalError;
+      }),
+      reportError,
+    });
+
+    const request = harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, {
+      sessionId: 'session-a',
+    });
+    await expect(request).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: '[INTERNAL] iOS Simulator access could not be requested.',
+    });
+    await expect(request).rejects.not.toThrow(/\/Users\/alice|private\.json/);
+    expect(reportError).toHaveBeenCalledWith('request-access', internalError);
+  });
+
   it('passes a validated session id to the host', async () => {
     const harness = new IpcHarness();
     const getStatus = vi.fn(async (sessionId: string) => ({
@@ -104,6 +139,32 @@ describe('iOS Simulator IPC handlers', () => {
       }),
     ).resolves.toMatchObject({ sessionId: 'session-a' });
     expect(getStatus).toHaveBeenCalledWith('session-a');
+  });
+
+  it('preserves safe Simulator business codes without exposing status internals', async () => {
+    const harness = new IpcHarness();
+    const internalError = new IOSSimulatorInstanceError(
+      'DEVICE_BUSY',
+      'registry locked at /Users/alice/Library/Application Support/Cindy/ownership.json',
+      true,
+    );
+    const reportError = vi.fn();
+    registerTrusted(harness, {
+      getStatus: vi.fn(async () => {
+        throw internalError;
+      }),
+      reportError,
+    });
+
+    const request = harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+      sessionId: 'session-a',
+    });
+    await expect(request).rejects.toMatchObject({
+      code: 'DEVICE_BUSY',
+      message: '[DEVICE_BUSY] iOS Simulator status is temporarily unavailable.',
+    });
+    await expect(request).rejects.not.toThrow(/\/Users\/alice|ownership\.json/);
+    expect(reportError).toHaveBeenCalledWith('status', internalError);
   });
 
   it('rejects missing session ids', async () => {
@@ -167,6 +228,32 @@ describe('iOS Simulator IPC handlers', () => {
     expect(callTool).toHaveBeenCalledTimes(1);
   });
 
+  it('folds tool-call internals behind the same safe Main-to-Renderer boundary', async () => {
+    const harness = new IpcHarness();
+    const internalError = new Error(
+      'WDA archive missing at /Users/alice/Library/Application Support/Cindy/wda/private.zip',
+    );
+    const reportError = vi.fn();
+    registerTrusted(harness, {
+      callTool: vi.fn(async () => {
+        throw internalError;
+      }),
+      reportError,
+    });
+
+    const request = harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_CALL, {
+      sessionId: 'session-a',
+      name: 'attach_device',
+      args: {},
+    });
+    await expect(request).rejects.toMatchObject({
+      code: 'INTERNAL',
+      message: '[INTERNAL] iOS Simulator operation failed.',
+    });
+    await expect(request).rejects.not.toThrow(/\/Users\/alice|private\.zip/);
+    expect(reportError).toHaveBeenCalledWith('call-tool', internalError);
+  });
+
   it('allows only explicit agent-control grant decisions', async () => {
     const harness = new IpcHarness();
     const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
@@ -213,6 +300,25 @@ describe('iOS Simulator IPC handlers', () => {
         paused: 'yes',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  });
+
+  it('keeps mutation route validation outside the Host error boundary', async () => {
+    const harness = new IpcHarness();
+    const reportError = vi.fn();
+    const setAgentMutationPaused = vi.fn();
+    registerTrusted(harness, { reportError, setAgentMutationPaused });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_MUTATION_CONTROL, {
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        generation: 0,
+        leaseId: 'lease-a',
+        paused: true,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    expect(setAgentMutationPaused).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
   });
 
   it('validates exact frame routes before forwarding visibility and frame reads', async () => {

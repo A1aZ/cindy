@@ -409,7 +409,10 @@ export function findCindyWdaDiagnosticCandidates(
     input.xcodebuildExecutablePaths ?? [],
   );
   return parseDarwinProcessSnapshot(snapshot)
-    .filter((row) => executablePaths.has(path.resolve(row.command.trim())))
+    // The snapshot always comes from Darwin. Keep its absolute executable path
+    // byte-for-byte stable instead of reinterpreting it with the test host's
+    // path flavor (for example, Windows would rewrite /usr/bin/xcrun).
+    .filter((row) => executablePaths.has(row.command.trim()))
     .map((row) => ({
       pid: row.pid,
       processGroupId: row.processGroupId,

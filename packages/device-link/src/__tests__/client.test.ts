@@ -3050,8 +3050,7 @@ describe('DeviceLinkClient', () => {
     // 断线 → 第一次退避 5ms
     h.current().emit('close', 1006);
     expect(h.client.getStatus()).toBe('connecting');
-    await tick(15);
-    expect(h.sockets.length).toBe(2);
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
 
     h.current().ack();
     expect(h.client.getStatus()).toBe('online');
@@ -3066,9 +3065,7 @@ describe('DeviceLinkClient', () => {
 
     h.current().emit('close', 1012, 'service restart');
     expect(h.client.getStatus()).toBe('connecting');
-    await tick(15);
-
-    expect(h.sockets).toHaveLength(2);
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
     h.current().ack();
     expect(h.client.getStatus()).toBe('online');
     h.client.stop();
@@ -3088,16 +3085,14 @@ describe('DeviceLinkClient', () => {
 
     // 第一次断线 → 20ms 后重连。
     h.current().emit('close', 4409, 'replaced by newer connection');
-    await tick(30);
-    expect(h.sockets.length).toBe(2);
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
     h.current().ack();
 
     // 第二条连接还没稳定到 reconnectStableResetMs 就又被顶掉,下一次应按 40ms 退避。
     h.current().emit('close', 4409, 'replaced by newer connection');
     await tick(25);
     expect(h.sockets.length).toBe(2);
-    await tick(30);
-    expect(h.sockets.length).toBe(3);
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(3));
     h.client.stop();
   });
 
@@ -3202,8 +3197,7 @@ describe('DeviceLinkClient', () => {
 
     // 断线 → 退避重连产生 socket2(epoch2)
     stale.emit('close', 1006);
-    await tick(15);
-    expect(h.sockets.length).toBe(2);
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
     const fresh = h.current();
 
     // 过期 socket1 的迟到 close + 垃圾 message:epoch 守卫应忽略(否则 handleDisconnect 会
@@ -3403,8 +3397,7 @@ describe('DeviceLinkClient', () => {
     h.current().emit('close', 1006);
     await tick(20);
     expect(h.sockets.length).toBe(1); // 退避 50ms 未到,不重连(默认曲线未被改快)
-    await tick(50);
-    expect(h.sockets.length).toBe(2); // 到点才重连
+    await vi.waitFor(() => expect(h.sockets).toHaveLength(2)); // 到点才重连
     h.current().ack();
     expect(h.client.getStatus()).toBe('online');
     h.client.stop();
@@ -3662,7 +3655,7 @@ describe('DeviceLinkClient', () => {
       expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'replaced', closeCode: 4409 });
       expect(issues).toHaveLength(1);
 
-      await tick(15);
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
       h.current().ack();
       expect(h.client.getConnectionIssue()).toBeNull();
       expect(issues).toHaveLength(2);
@@ -3689,7 +3682,7 @@ describe('DeviceLinkClient', () => {
       h.current().emit('close', 4429, 'too many connections');
       expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'too-many-connections' });
 
-      await tick(15);
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
       h.current().emit('close', 4400, 'protocol version mismatch');
       expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'version-mismatch' });
       h.client.stop();
@@ -3737,12 +3730,12 @@ describe('DeviceLinkClient', () => {
       expect(h.client.getConnectionIssue()).toBeNull();
 
       // 先制造 auth-failed,再来一次普通断线:原因不被网络抖动洗掉
-      await tick(15);
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
       const ws2 = h.current();
       ws2.emit('error', new Error("Expected HTTP 101 response but was '401 Unauthorized'"));
       ws2.emit('close', 1006);
       expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'auth-failed' });
-      await tick(15);
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(3));
       h.current().emit('close', 1006);
       expect(h.client.getConnectionIssue()).toMatchObject({ kind: 'auth-failed' });
       h.client.stop();
@@ -3757,7 +3750,7 @@ describe('DeviceLinkClient', () => {
       const ws = h.current();
       ws.emit('error', new Error('Unexpected server response: 401'));
       ws.emit('close', 1006);
-      await tick(15);
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(2));
       const ws2 = h.current();
       ws2.emit('error', new Error('Unexpected server response: 401'));
       ws2.emit('close', 1006);
@@ -3913,8 +3906,9 @@ describe('DeviceLinkClient', () => {
       h.current().ack();
       await tick();
       await establishInboundReliableLink(h, `stream-${src}`, 1, src);
+      const socketCount = h.sockets.length;
       h.current().emit('close', 1006);
-      await tick(20); // 退避后重连
+      await vi.waitFor(() => expect(h.sockets).toHaveLength(socketCount + 1));
       h.current().ack();
       await tick();
       expect(h.client.getStatus()).toBe('online');
@@ -4175,8 +4169,9 @@ describe('DeviceLinkClient', () => {
         // 恢复后仍在 30s 节流窗口内(时钟只走 1s)再次丢 link:新帧必须立刻再通知,
         // 否则 host 的唯一恢复出口最坏被推迟整个窗口。
         nowMs += 1_000;
+        const socketCount = h.sockets.length;
         h.current().emit('close', 1006);
-        await tick(20);
+        await vi.waitFor(() => expect(h.sockets).toHaveLength(socketCount + 1));
         h.current().ack();
         await tick();
         const staleFrame2 = encodeReliableFrames(

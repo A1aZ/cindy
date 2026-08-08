@@ -76,8 +76,15 @@ export function PinnedPlanPanel({
     Boolean(insertion) && (insertion?.sealed === true || (allDone && !codexPlanAlive));
   const completedAtMs =
     insertion?.sealedAtMs ?? insertion?.updatedAtMs ?? Date.parse(insertion?.createdAt ?? '');
+  // 章的时刻来自执行端时钟;device-link 被控场景下本机时钟可能与其偏差任意大。
+  // "未来"的时刻不可信(执行端偏快会让胶囊多挂整个偏差时长)——按缺失处理,
+  // 落进下方 fallback 通道:按身份一次性记"本地看到章的此刻 + 2 秒",不随渲染
+  // 滑动。过去的时刻照用(重载/新窗口不重数 2 秒;执行端偏慢最多提前收起,
+  // 无害)。
   const persistedCompletionDeadlineMs =
-    retired && Number.isFinite(completedAtMs) ? completedAtMs + COMPLETED_PLAN_VISIBLE_MS : null;
+    retired && Number.isFinite(completedAtMs) && completedAtMs <= Date.now()
+      ? completedAtMs + COMPLETED_PLAN_VISIBLE_MS
+      : null;
   const [fallbackCompletionVisibility, setFallbackCompletionVisibility] = useState<{
     identity: string;
     deadlineMs: number;

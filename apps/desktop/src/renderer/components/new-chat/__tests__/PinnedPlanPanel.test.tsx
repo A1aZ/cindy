@@ -314,6 +314,29 @@ describe('PinnedPlanPanel terminal seal', () => {
     };
   }
 
+  it('clamps a future terminal seal timestamp to the local clock (device-link skew)', () => {
+    // 章的时刻来自执行端时钟。被控场景下执行端偏快时,sealedAtMs 在本机看是
+    // "未来"——不钳制的话胶囊会多挂整个偏差时长;钳到本地此刻后仍是标准 2 秒。
+    const sealedInFuture: ChatMessage = {
+      ...planMessage('in_progress', T0),
+      terminalPlanSnapshot: true,
+      terminalPlanAtMs: T0 + 10 * 60_000, // 执行端快 10 分钟
+    };
+
+    render(
+      <PinnedPlanPanel
+        sessionId="skewed-seal"
+        messages={[sealedInFuture]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
   it('starts the grace period at the terminal seal, not when the plan was created', () => {
     // 真实复现:计划先展示了 4 秒,agent 才回答完成。若拿 createdAt 算 2 秒,
     // 章一到就已过期,用户会看到泡泡在收尾瞬间直接消失。

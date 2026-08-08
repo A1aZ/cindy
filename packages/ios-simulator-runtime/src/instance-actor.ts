@@ -57,6 +57,12 @@ interface MutableMutationState {
   takeoverEpoch: number;
 }
 
+interface ActiveLifecycleStart {
+  sessionId: string;
+  controller: AbortController;
+  settled: Promise<void>;
+}
+
 const DEFAULT_DETACH_GRACE_MS = 10 * 60_000;
 
 function defaultScheduler(): IOSSimulatorScheduler {
@@ -80,6 +86,10 @@ export class IOSSimulatorInstanceActor {
   readonly #cancelGrace = new Map<string, () => void>();
   readonly #mutationStates = new Map<string, MutableMutationState>();
   readonly #activeAgentMutations = new Map<string, AbortController>();
+  readonly #activeLifecycleStarts = new Map<
+    string,
+    Set<ActiveLifecycleStart>
+  >();
 
   constructor(options: IOSSimulatorInstanceActorOptions) {
     this.#store = options.store;
@@ -196,7 +206,9 @@ export class IOSSimulatorInstanceActor {
 
   /** Remove a persisted binding after orphan policy has decided its fate. */
   forget(instanceId: string, sessionId: string): IOSSimulatorInstance {
+    this.#store.requireOwned(instanceId, sessionId);
     this.#cancelActiveAgentMutation(instanceId);
+    this.#abortLifecycleStartsForInstance(instanceId);
     return this.#store.release(instanceId, sessionId);
   }
 
@@ -208,8 +220,9 @@ export class IOSSimulatorInstanceActor {
     healthState: IOSSimulatorInstance["healthState"],
     errorCode: string | null,
   ): IOSSimulatorInstance {
-    this.#cancelActiveAgentMutation(instanceId);
     const current = this.#store.requireOwned(instanceId, sessionId);
+    this.#cancelActiveAgentMutation(instanceId);
+    this.#abortLifecycleStartsForInstance(instanceId);
     const renewed = this.#store.renew(instanceId, sessionId);
     return this.#store.update(instanceId, sessionId, {
       generation: current.generation + 1,
@@ -266,6 +279,7 @@ export class IOSSimulatorInstanceActor {
     // serialized and will revalidate their now-stale route afterwards.
     this.#mutationState(input.instanceId).takeoverEpoch += 1;
     this.#cancelActiveAgentMutation(input.instanceId);
+    this.#abortLifecycleStartsForInstance(input.instanceId);
     this.#cancelGrace.get(input.instanceId)?.();
     this.#cancelGrace.delete(input.instanceId);
 
@@ -473,6 +487,7 @@ export class IOSSimulatorInstanceActor {
     const state = this.#mutationState(instanceId);
     state.takeoverEpoch += 1;
     this.#cancelActiveAgentMutation(instanceId);
+    this.#abortLifecycleStartsForInstance(instanceId);
     this.#cancelGrace.get(instanceId)?.();
     this.#cancelGrace.delete(instanceId);
     return this.#serialize(instanceId, async () => {
@@ -483,6 +498,120 @@ export class IOSSimulatorInstanceActor {
 
   #cancelActiveAgentMutation(instanceId: string): void {
     this.#activeAgentMutations.get(instanceId)?.abort();
+  }
+
+  #lifecycleStartCancelledError(): IOSSimulatorInstanceError {
+    return new IOSSimulatorInstanceError(
+      "MUTATION_CANCELLED",
+      "Simulator startup was cancelled because its lifecycle changed.",
+      true,
+    );
+  }
+
+  #throwIfLifecycleStartCancelled(signal: AbortSignal): void {
+    if (!signal.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : this.#lifecycleStartCancelledError();
+  }
+
+  #abortLifecycleStarts(records: readonly ActiveLifecycleStart[]): void {
+    for (const record of records) {
+      if (!record.controller.signal.aborted) {
+        record.controller.abort(this.#lifecycleStartCancelledError());
+      }
+    }
+  }
+
+  #activeLifecycleStartsForInstance(
+    instanceId: string,
+  ): ActiveLifecycleStart[] {
+    return [...(this.#activeLifecycleStarts.get(instanceId) ?? [])];
+  }
+
+  #abortLifecycleStartsForInstance(instanceId: string): void {
+    this.#abortLifecycleStarts(
+      this.#activeLifecycleStartsForInstance(instanceId),
+    );
+  }
+
+  #runLifecycleStart(
+    route: IOSSimulatorMutationRoute,
+    task: (signal: AbortSignal) => Promise<IOSSimulatorInstance>,
+  ): Promise<IOSSimulatorInstance> {
+    try {
+      // Register before the serializer yields so teardown admission can abort
+      // both an active boot and a boot queued behind another mutation.
+      this.#store.assertMutationRoute(route);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const record: ActiveLifecycleStart = {
+      sessionId: route.sessionId,
+      controller: new AbortController(),
+      settled: Promise.resolve(),
+    };
+    let records = this.#activeLifecycleStarts.get(route.instanceId);
+    if (!records) {
+      records = new Set();
+      this.#activeLifecycleStarts.set(route.instanceId, records);
+    }
+    records.add(record);
+    const operation = this.#serialize(route.instanceId, () =>
+      task(record.controller.signal),
+    );
+    record.settled = operation
+      .then(
+        () => undefined,
+        () => undefined,
+      )
+      .finally(() => {
+        records?.delete(record);
+        if (records?.size === 0) {
+          this.#activeLifecycleStarts.delete(route.instanceId);
+        }
+      });
+    return operation;
+  }
+
+  /** Abort one instance's queued/active CoreSimulator starts and await settlement. */
+  cancelLifecycleStartsForInstance(instanceId: string): Promise<void> {
+    const records = this.#activeLifecycleStartsForInstance(instanceId);
+    this.#abortLifecycleStarts(records);
+    return Promise.all(records.map((record) => record.settled)).then(
+      () => undefined,
+    );
+  }
+
+  /** Abort starts owned by a removed Cindy task before its Host barrier drains. */
+  cancelLifecycleStartsForSession(sessionId: string): Promise<void> {
+    const records = [...this.#activeLifecycleStarts.values()]
+      .flatMap((entries) => [...entries])
+      .filter((record) => record.sessionId === sessionId);
+    this.#abortLifecycleStarts(records);
+    return Promise.all(records.map((record) => record.settled)).then(
+      () => undefined,
+    );
+  }
+
+  /** Abort every CoreSimulator start while Desktop shutdown still has a budget. */
+  cancelAllLifecycleStarts(): Promise<void> {
+    const records = [...this.#activeLifecycleStarts.values()].flatMap(
+      (entries) => [...entries],
+    );
+    this.#abortLifecycleStarts(records);
+    return Promise.all(records.map((record) => record.settled)).then(
+      () => undefined,
+    );
+  }
+
+  /** Synchronous force-quit seam; async disposal separately awaits settlement. */
+  abortOperationsForExit(): void {
+    this.#abortLifecycleStarts(
+      [...this.#activeLifecycleStarts.values()].flatMap((entries) => [
+        ...entries,
+      ]),
+    );
   }
 
   #mutationState(instanceId: string): MutableMutationState {
@@ -518,11 +647,28 @@ export class IOSSimulatorInstanceActor {
   }
 
   start(route: IOSSimulatorMutationRoute): Promise<IOSSimulatorInstance> {
-    return this.#serialize(route.instanceId, async () => {
-      const instance = this.#store.assertMutationRoute(route);
-      if (instance.lifecycleState === "ready") {
-        return this.#store.renew(instance.instanceId, instance.sessionId);
+    try {
+      if (this.#store.assertMutationRoute(route).lifecycleState === "ready") {
+        // A ready start only renews its lease; it owns no CoreSimulator process
+        // and must not be cancelled by the startup teardown seam.
+        return this.#serialize(route.instanceId, async () => {
+          const instance = this.#store.assertMutationRoute(route);
+          if (instance.lifecycleState !== "ready") {
+            throw new IOSSimulatorInstanceError(
+              "INVALID_INSTANCE_STATE",
+              "The simulator can no longer renew from its current state.",
+              true,
+            );
+          }
+          return this.#store.renew(instance.instanceId, instance.sessionId);
+        });
       }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.#runLifecycleStart(route, async (signal) => {
+      const instance = this.#store.assertMutationRoute(route);
+      this.#throwIfLifecycleStartCancelled(signal);
       if (
         instance.lifecycleState !== "stopped" &&
         instance.lifecycleState !== "error"
@@ -537,9 +683,13 @@ export class IOSSimulatorInstanceActor {
         lifecycleState: "booting",
         healthState: "recovering",
         errorCode: null,
+        // The Host owns the boot as soon as it issues the CoreSimulator
+        // mutation, even if readiness is later cancelled during bootstatus.
+        bootProvenance: "agent-booted",
       });
       try {
-        await this.#lifecycle.bootExact(instance.simulatorUdid);
+        await this.#lifecycle.bootExact(instance.simulatorUdid, signal);
+        this.#throwIfLifecycleStartCancelled(signal);
         const now = new Date(this.#clock.now()).toISOString();
         return this.#store.update(instance.instanceId, instance.sessionId, {
           lifecycleState: "ready",
@@ -566,8 +716,9 @@ export class IOSSimulatorInstanceActor {
 
   /** Reboot a persisted ready binding after CoreSimulator was lost externally. */
   recover(route: IOSSimulatorMutationRoute): Promise<IOSSimulatorInstance> {
-    return this.#serialize(route.instanceId, async () => {
+    return this.#runLifecycleStart(route, async (signal) => {
       const instance = this.#store.assertMutationRoute(route);
+      this.#throwIfLifecycleStartCancelled(signal);
       if (
         instance.lifecycleState !== "ready" &&
         instance.lifecycleState !== "error" &&
@@ -583,9 +734,11 @@ export class IOSSimulatorInstanceActor {
         lifecycleState: "booting",
         healthState: "recovering",
         errorCode: null,
+        bootProvenance: "agent-booted",
       });
       try {
-        await this.#lifecycle.bootExact(instance.simulatorUdid);
+        await this.#lifecycle.bootExact(instance.simulatorUdid, signal);
+        this.#throwIfLifecycleStartCancelled(signal);
         const now = new Date(this.#clock.now()).toISOString();
         return this.#store.update(instance.instanceId, instance.sessionId, {
           lifecycleState: "ready",
@@ -624,6 +777,7 @@ export class IOSSimulatorInstanceActor {
     } catch (error) {
       return Promise.reject(error);
     }
+    this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
       const instance = this.#requireAdmittedLifecycleRoute(admission);
       if (instance.lifecycleState === "stopped") return instance;
@@ -674,6 +828,7 @@ export class IOSSimulatorInstanceActor {
     } catch (error) {
       return Promise.reject(error);
     }
+    this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
       const instance = this.#requireAdmittedLifecycleRoute(admission);
       this.#cancelGrace.get(instance.instanceId)?.();

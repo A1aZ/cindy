@@ -1074,6 +1074,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     return instanceLifecycleBarriers.get(instanceId) ?? { epoch: 0, pendingTeardowns: 0 };
   }
   function beginInstanceTeardown(instanceId: string): void {
+    // Abort CoreSimulator startup at teardown admission, before media or WDA
+    // cleanup can spend the remaining lifecycle budget.
+    void actor.cancelLifecycleStartsForInstance(instanceId);
     const current = lifecycleBarrier(instanceId);
     instanceLifecycleBarriers.set(instanceId, {
       epoch: current.epoch + 1,
@@ -1835,7 +1838,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   }
 
   async function performRemovedSessionCleanup(sessionId: string): Promise<void> {
-    await cancelSessionBuildsAndRecordings(sessionId);
+    // Startup calls hold the same session-removal barrier awaited below. Abort
+    // them first so task archive/delete never waits out the 120-second boot
+    // budget before ownership cleanup can begin.
+    const lifecycleStarts = actor.cancelLifecycleStartsForSession(sessionId);
+    await Promise.all([lifecycleStarts, cancelSessionBuildsAndRecordings(sessionId)]);
     await Promise.all(
       [...(activeSessionRemovalBarrierOperations.get(sessionId) ?? [])].map(
         (operation) => operation.settled,
@@ -4014,16 +4021,26 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 // readiness. Preserve the real resource occupancy even when
                 // actor.start() never returns its ready snapshot.
                 if (lifecycleStartAttempted && !runningCommitted) {
-                  try {
-                    const device = await lifecycle.findExact(starting.simulatorUdid);
-                    if (device && device.state.trim().toLowerCase() !== 'shutdown') {
+                  if (
+                    error instanceof IOSSimulatorInstanceError &&
+                    error.code === 'MUTATION_CANCELLED'
+                  ) {
+                    // Teardown must not start another uncancellable simctl
+                    // probe after it has already aborted bootstatus. Startup
+                    // may have crossed `simctl boot`, so preserve occupancy.
+                    commitRunning();
+                  } else {
+                    try {
+                      const device = await lifecycle.findExact(starting.simulatorUdid);
+                      if (device && device.state.trim().toLowerCase() !== 'shutdown') {
+                        commitRunning();
+                      }
+                    } catch {
+                      // An ambiguous probe cannot prove that CoreSimulator
+                      // released the resource. Fail closed while preserving the
+                      // original startup failure as the authoritative error.
                       commitRunning();
                     }
-                  } catch {
-                    // An ambiguous probe cannot prove that CoreSimulator
-                    // released the resource. Fail closed while preserving the
-                    // original startup failure as the authoritative error.
-                    commitRunning();
                   }
                 }
                 throw error;
@@ -5664,6 +5681,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return cleanupRemovedSessionRuntime(sessionId);
     },
     abortOperationsForExit() {
+      try {
+        actor.abortOperationsForExit();
+      } catch (error) {
+        logger.warn('iOS Simulator exit cleanup could not abort simulator startup', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       for (const build of activeBuilds.values()) {
         try {
           build.controller.abort();
@@ -5691,6 +5715,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     dispose() {
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
+        const lifecycleStarts = actor.cancelAllLifecycleStarts();
         const builds = [...activeBuilds.values()];
         for (const build of builds) build.controller.abort();
         // Close the recording start gate immediately, before waiting for a
@@ -5700,7 +5725,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             error: error instanceof Error ? error.message : String(error),
           });
         });
-        await Promise.all(builds.map((build) => build.settled));
+        await Promise.all([lifecycleStarts, ...builds.map((build) => build.settled)]);
         clearVisualBaselines();
         await Promise.all(
           [...buildDiagnostics.entries()].map(([diagnosticsId, diagnostic]) =>

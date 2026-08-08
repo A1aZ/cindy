@@ -197,7 +197,7 @@ function installStatus(statusValue: IOSSimulatorSessionStatus) {
       };
     },
   );
-  const latestFrame = vi.fn(async (): Promise<IOSSimulatorToolResponse> => ({
+  const latestFrame = vi.fn(async (_request?: unknown): Promise<IOSSimulatorToolResponse> => ({
     ok: true,
     data: { stream: null },
   }));
@@ -2307,5 +2307,153 @@ describe('IOSSimulatorTabBody', () => {
         },
       });
     });
+  });
+
+  it('drops a stale grid route and retries when its refresh is superseded', async () => {
+    const instanceA: IOSSimulatorPublicInstance = {
+      ...readyInstance(1),
+      simulatorName: 'iPhone A',
+      lease: { ...readyInstance(1).lease, id: 'lease-a' },
+    };
+    const instanceB: IOSSimulatorPublicInstance = {
+      ...readyInstance(2),
+      instanceId: 'instance-b',
+      simulatorUdid: 'DEVICE-B',
+      simulatorName: 'iPhone B',
+      lease: { ...readyInstance(2).lease, id: 'lease-b' },
+    };
+    const stoppedB: IOSSimulatorPublicInstance = {
+      ...instanceB,
+      generation: 3,
+      lifecycleState: 'stopped',
+      lease: { ...instanceB.lease, id: 'lease-b-renewed' },
+      stoppedAt: '2026-07-24T00:00:00.000Z',
+    };
+    const readyBaseStatus = readyStatus(instanceA);
+    if (!readyBaseStatus.ok) throw new Error('Expected a ready status fixture.');
+    const initialStatus: IOSSimulatorSessionStatus = {
+      ...readyBaseStatus,
+      instances: [instanceA, instanceB],
+    };
+    const reconciledStatus: IOSSimulatorSessionStatus = {
+      ...initialStatus,
+      instances: [instanceA, stoppedB],
+    };
+    const api = installStatus(initialStatus);
+    let resolveSupersededRefresh: (status: IOSSimulatorSessionStatus) => void = () => undefined;
+    const supersededRefresh = new Promise<IOSSimulatorSessionStatus>((resolve) => {
+      resolveSupersededRefresh = resolve;
+    });
+    api.status
+      .mockResolvedValueOnce(initialStatus)
+      .mockImplementationOnce(async () => supersededRefresh)
+      .mockRejectedValueOnce(new Error('newer status request failed'))
+      .mockResolvedValue(reconciledStatus);
+    let instanceBPolls = 0;
+    api.latestFrame.mockImplementation(async (request?: unknown) => {
+      const route = request as { instanceId?: string } | undefined;
+      if (route?.instanceId !== 'instance-b') {
+        return { ok: true, data: { stream: null } };
+      }
+      instanceBPolls += 1;
+      if (instanceBPolls === 1) {
+        return {
+          ok: true,
+          data: {
+            stream: {
+              instanceId: 'instance-b',
+              generation: 2,
+              state: 'streaming',
+              reconnectAttempt: 0,
+              latestFrame: {
+                instanceId: 'instance-b',
+                generation: 2,
+                sequence: 1,
+                encoding: 'jpeg',
+                receivedAt: '2026-07-24T00:00:00.000Z',
+                bytes: new Uint8Array([1, 2, 3]),
+              },
+            },
+          },
+        };
+      }
+      return {
+        ok: true,
+        data: { instance: stoppedB, stream: null, viewport: null },
+      };
+    });
+
+    render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    const staleImage = (await screen.findByAltText('iPhone B')) as HTMLImageElement;
+    Object.defineProperties(staleImage, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width: 200, height: 400 }),
+      },
+    });
+    fireEvent.pointerDown(staleImage, {
+      pointerId: 31,
+      button: 0,
+      clientX: 20,
+      clientY: 40,
+    });
+    await waitFor(() => expect(api.status).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    await waitFor(() => expect(screen.queryByAltText('iPhone B')).toBeNull());
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'iPhone B rightSidebar.iosSimulator.pressHome',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:ios-simulator-1');
+    fireEvent.pointerUp(staleImage, {
+      pointerId: 31,
+      clientX: 180,
+      clientY: 360,
+    });
+    expect(api.call).not.toHaveBeenCalled();
+
+    act(() => {
+      api.emitFocusRequest({
+        sessionId: 'session-a',
+        instanceId: 'instance-b',
+        userInitiated: false,
+      });
+    });
+    await waitFor(() => expect(api.status).toHaveBeenCalledTimes(3), { timeout: 2_000 });
+    await act(async () => {
+      resolveSupersededRefresh(reconciledStatus);
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(api.status).toHaveBeenCalledTimes(4), { timeout: 2_000 });
+    await waitFor(() => expect(screen.queryByAltText('iPhone B')).toBeNull());
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', {
+          name: 'iPhone B rightSidebar.iosSimulator.pressHome',
+        }),
+      ).toBeNull(),
+    );
+
+    const pollsAfterRefresh = api.latestFrame.mock.calls.filter(
+      ([request]) => (request as { instanceId?: string } | undefined)?.instanceId === 'instance-b',
+    ).length;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 650));
+    });
+    expect(
+      api.latestFrame.mock.calls.filter(
+        ([request]) =>
+          (request as { instanceId?: string } | undefined)?.instanceId === 'instance-b',
+      ),
+    ).toHaveLength(pollsAfterRefresh);
   });
 });

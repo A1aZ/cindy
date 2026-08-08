@@ -24,6 +24,7 @@ import type {
 } from '@cindy/ios-simulator-runtime';
 import type {
   IOSSimulatorPublicInstance,
+  IOSSimulatorSessionStatus,
   IOSSimulatorToolResponse,
 } from '../../../../../shared/iosSimulatorIpc';
 
@@ -37,6 +38,7 @@ interface IOSSimulatorInstanceGridProps {
   title: string;
   countLabel: string;
   onSelect: (instanceId: string) => void;
+  onRefresh: () => Promise<IOSSimulatorSessionStatus | null>;
 }
 
 const BACKGROUND_PROFILE: IOSSimulatorStreamProfile = {
@@ -67,10 +69,20 @@ function routeFor(instance: IOSSimulatorPublicInstance) {
   };
 }
 
+function routeKey(instance: IOSSimulatorPublicInstance): string {
+  return `${instance.generation}:${instance.lease.id}`;
+}
+
 function streamFrom(result: IOSSimulatorToolResponse): IOSSimulatorFramePumpSnapshot | null {
   if (!result.ok || !result.data || typeof result.data !== 'object') return null;
   const stream = (result.data as { stream?: unknown }).stream;
   return stream && typeof stream === 'object' ? (stream as IOSSimulatorFramePumpSnapshot) : null;
+}
+
+function instanceFrom(result: IOSSimulatorToolResponse): IOSSimulatorPublicInstance | null {
+  if (!result.ok || !result.data || typeof result.data !== 'object') return null;
+  const instance = (result.data as { instance?: unknown }).instance;
+  return instance && typeof instance === 'object' ? (instance as IOSSimulatorPublicInstance) : null;
 }
 
 /** Compact multi-instance view with per-tile basic input routed by exact instance. */
@@ -84,10 +96,12 @@ export function IOSSimulatorInstanceGrid({
   title,
   countLabel,
   onSelect,
+  onRefresh,
 }: IOSSimulatorInstanceGridProps) {
   const { t } = useTranslation();
   const [tiles, setTiles] = useState<Record<string, TileState>>({});
   const [tileBusy, setTileBusy] = useState<Record<string, boolean>>({});
+  const [invalidatedRouteKeys, setInvalidatedRouteKeys] = useState<Record<string, string>>({});
   const [tileErrors, setTileErrors] = useState<Record<string, string>>({});
   const [tileText, setTileText] = useState<Record<string, string>>({});
   const [tileOrientation, setTileOrientation] = useState<Record<string, 'PORTRAIT' | 'LANDSCAPE'>>(
@@ -95,11 +109,18 @@ export function IOSSimulatorInstanceGrid({
   );
   const urlsRef = useRef<Record<string, string>>({});
   const gesturesRef = useRef<Record<string, TileGesture | null>>({});
+  const invalidatedRouteKeysRef = useRef<Record<string, string>>({});
+  const routeRefreshStateRef = useRef({ pending: false, nextAttemptAt: 0 });
   const readyInstances = useMemo(
     () => instances.filter((instance) => instance.lifecycleState === 'ready'),
     [instances],
   );
   const viewerVisible = active && shellVisible;
+  const routeIsInvalidated = useCallback(
+    (instance: IOSSimulatorPublicInstance) =>
+      invalidatedRouteKeysRef.current[instance.instanceId] === routeKey(instance),
+    [],
+  );
 
   const callTile = useCallback(
     async (
@@ -114,7 +135,13 @@ export function IOSSimulatorInstanceGrid({
         | 'unlock_screen',
       args: Record<string, unknown>,
     ): Promise<boolean> => {
-      if (instance.lifecycleState !== 'ready' || tileBusy[instance.instanceId]) return false;
+      if (
+        instance.lifecycleState !== 'ready' ||
+        tileBusy[instance.instanceId] ||
+        routeIsInvalidated(instance)
+      ) {
+        return false;
+      }
       setTileBusy((previous) => ({ ...previous, [instance.instanceId]: true }));
       setTileErrors((previous) => {
         const next = { ...previous };
@@ -151,7 +178,7 @@ export function IOSSimulatorInstanceGrid({
         setTileBusy((previous) => ({ ...previous, [instance.instanceId]: false }));
       }
     },
-    [sessionId, t, tileBusy],
+    [routeIsInvalidated, sessionId, t, tileBusy],
   );
 
   const tilePoint = useCallback((event: ReactPointerEvent<HTMLImageElement>) => {
@@ -164,7 +191,13 @@ export function IOSSimulatorInstanceGrid({
 
   const onTilePointerDown = useCallback(
     (instance: IOSSimulatorPublicInstance, event: ReactPointerEvent<HTMLImageElement>) => {
-      if (event.button !== 0 || tileBusy[instance.instanceId]) return;
+      if (
+        event.button !== 0 ||
+        tileBusy[instance.instanceId] ||
+        routeIsInvalidated(instance)
+      ) {
+        return;
+      }
       const point = tilePoint(event);
       gesturesRef.current[instance.instanceId] = {
         pointerId: event.pointerId,
@@ -176,7 +209,7 @@ export function IOSSimulatorInstanceGrid({
       };
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [tileBusy, tilePoint],
+    [routeIsInvalidated, tileBusy, tilePoint],
   );
 
   const onTilePointerUp = useCallback(
@@ -187,6 +220,7 @@ export function IOSSimulatorInstanceGrid({
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
+      if (routeIsInvalidated(instance)) return;
       const end = tilePoint(event);
       const distance = Math.hypot(
         event.clientX - gesture.startClientX,
@@ -205,7 +239,7 @@ export function IOSSimulatorInstanceGrid({
         durationMs: Math.round(durationMs),
       });
     },
-    [callTile, tilePoint],
+    [callTile, routeIsInvalidated, tilePoint],
   );
 
   const sendTileText = useCallback(
@@ -221,6 +255,9 @@ export function IOSSimulatorInstanceGrid({
 
   useEffect(() => {
     const currentIds = new Set(readyInstances.map((instance) => instance.instanceId));
+    const currentRoutes = new Map(
+      readyInstances.map((instance) => [instance.instanceId, routeKey(instance)]),
+    );
     for (const [instanceId, url] of Object.entries(urlsRef.current)) {
       if (!currentIds.has(instanceId)) {
         URL.revokeObjectURL(url);
@@ -232,39 +269,91 @@ export function IOSSimulatorInstanceGrid({
         Object.entries(previous).filter(([instanceId]) => currentIds.has(instanceId)),
       ),
     );
+    const retainedInvalidatedRoutes = Object.fromEntries(
+      Object.entries(invalidatedRouteKeysRef.current).filter(
+        ([instanceId, invalidatedRoute]) => currentRoutes.get(instanceId) === invalidatedRoute,
+      ),
+    );
+    invalidatedRouteKeysRef.current = retainedInvalidatedRoutes;
+    setInvalidatedRouteKeys(retainedInvalidatedRoutes);
+    if (Object.keys(retainedInvalidatedRoutes).length === 0) {
+      routeRefreshStateRef.current.nextAttemptAt = 0;
+    }
   }, [readyInstances]);
 
   useEffect(() => {
     let cancelled = false;
     let polling = false;
-    const setVisibility = async (visible: boolean) => {
-      await Promise.all(
-        readyInstances.map(async (instance) => {
-          const route = {
-            sessionId,
-            ...routeFor(instance),
-            visible,
-            preferredEncoding: 'jpeg' as const,
-          };
-          await window.electronAPI.maker.iosSimulator
-            .setViewerVisibility(route)
-            .catch(() => undefined);
-          if (visible && instance.instanceId !== selectedInstanceId) {
-            await window.electronAPI.maker.iosSimulator
-              .setStreamProfile({ sessionId, ...routeFor(instance), profile: BACKGROUND_PROFILE })
-              .catch(() => undefined);
-          }
-        }),
-      );
+    const requestRouteRefresh = () => {
+      const refreshState = routeRefreshStateRef.current;
+      if (
+        cancelled ||
+        refreshState.pending ||
+        Object.keys(invalidatedRouteKeysRef.current).length === 0 ||
+        Date.now() < refreshState.nextAttemptAt
+      ) {
+        return;
+      }
+      refreshState.pending = true;
+      refreshState.nextAttemptAt = Number.POSITIVE_INFINITY;
+      void Promise.resolve()
+        .then(onRefresh)
+        .catch(() => undefined)
+        .finally(() => {
+          // A returned status may lose a concurrent request-version race in
+          // the parent. Only changed props clear invalidation; until then keep
+          // retrying at a bounded cadence.
+          refreshState.nextAttemptAt =
+            Object.keys(invalidatedRouteKeysRef.current).length > 0 ? Date.now() + 500 : 0;
+          refreshState.pending = false;
+        });
     };
-    const accept = (instanceId: string, result: IOSSimulatorToolResponse) => {
-      if (cancelled) return;
+    const invalidateRoute = (instance: IOSSimulatorPublicInstance) => {
+      const instanceId = instance.instanceId;
+      if (cancelled || routeIsInvalidated(instance)) return;
+      const hadInvalidatedRoute = Object.keys(invalidatedRouteKeysRef.current).length > 0;
+      invalidatedRouteKeysRef.current = {
+        ...invalidatedRouteKeysRef.current,
+        [instanceId]: routeKey(instance),
+      };
+      if (!hadInvalidatedRoute) routeRefreshStateRef.current.nextAttemptAt = 0;
+      gesturesRef.current[instanceId] = null;
+      setInvalidatedRouteKeys((previous) => ({
+        ...previous,
+        [instanceId]: routeKey(instance),
+      }));
+      const previousUrl = urlsRef.current[instanceId];
+      if (previousUrl) {
+        URL.revokeObjectURL(previousUrl);
+        delete urlsRef.current[instanceId];
+      }
+      setTiles((previous) => ({
+        ...previous,
+        [instanceId]: { stream: null, frameUrl: null },
+      }));
+      requestRouteRefresh();
+    };
+    const accept = (instance: IOSSimulatorPublicInstance, result: IOSSimulatorToolResponse) => {
+      if (cancelled || routeIsInvalidated(instance)) return;
+      if (!result.ok) {
+        if (result.errorCode === 'LEASE_EXPIRED' || result.errorCode === 'STALE_GENERATION') {
+          invalidateRoute(instance);
+        }
+        return;
+      }
+      // Host returns an instance only when reconcile or heartbeat advanced the
+      // authoritative route. Stop using the captured generation/lease before
+      // another poll or tile control can race the parent refresh.
+      if (instanceFrom(result)) {
+        invalidateRoute(instance);
+        return;
+      }
       const stream = streamFrom(result);
       const frame = stream?.latestFrame;
       if (!frame) {
         setTiles((previous) => ({
           ...previous,
-          [instanceId]: { ...previous[instanceId], stream },
+          [instance.instanceId]: { ...previous[instance.instanceId], stream },
         }));
         return;
       }
@@ -275,29 +364,59 @@ export function IOSSimulatorInstanceGrid({
       );
       const image = new Image();
       image.onload = () => {
-        if (cancelled) {
+        if (cancelled || routeIsInvalidated(instance)) {
           URL.revokeObjectURL(url);
           return;
         }
-        const previous = urlsRef.current[instanceId];
+        const previous = urlsRef.current[instance.instanceId];
         if (previous) URL.revokeObjectURL(previous);
-        urlsRef.current[instanceId] = url;
-        setTiles((current) => ({ ...current, [instanceId]: { stream, frameUrl: url } }));
+        urlsRef.current[instance.instanceId] = url;
+        setTiles((current) => ({
+          ...current,
+          [instance.instanceId]: { stream, frameUrl: url },
+        }));
       };
       image.onerror = () => URL.revokeObjectURL(url);
       image.src = url;
+    };
+    const setVisibility = async (visible: boolean) => {
+      await Promise.all(
+        readyInstances.map(async (instance) => {
+          const route = {
+            sessionId,
+            ...routeFor(instance),
+            visible,
+            preferredEncoding: 'jpeg' as const,
+          };
+          const result = await window.electronAPI.maker.iosSimulator
+            .setViewerVisibility(route)
+            .catch(() => null);
+          if (visible && result) accept(instance, result);
+          if (
+            visible &&
+            !routeIsInvalidated(instance) &&
+            instance.instanceId !== selectedInstanceId
+          ) {
+            await window.electronAPI.maker.iosSimulator
+              .setStreamProfile({ sessionId, ...routeFor(instance), profile: BACKGROUND_PROFILE })
+              .catch(() => undefined);
+          }
+        }),
+      );
     };
     const poll = async () => {
       if (!viewerVisible || polling || cancelled) return;
       polling = true;
       try {
+        requestRouteRefresh();
         await Promise.all(
           readyInstances.map(async (instance) => {
+            if (routeIsInvalidated(instance)) return;
             const result = await window.electronAPI.maker.iosSimulator.latestFrame({
               sessionId,
               ...routeFor(instance),
             });
-            accept(instance.instanceId, result);
+            accept(instance, result);
           }),
         );
       } finally {
@@ -314,7 +433,7 @@ export function IOSSimulatorInstanceGrid({
       for (const url of Object.values(urlsRef.current)) URL.revokeObjectURL(url);
       urlsRef.current = {};
     };
-  }, [readyInstances, selectedInstanceId, sessionId, viewerVisible]);
+  }, [onRefresh, readyInstances, routeIsInvalidated, selectedInstanceId, sessionId, viewerVisible]);
 
   if (readyInstances.length < 2) return null;
 
@@ -337,7 +456,8 @@ export function IOSSimulatorInstanceGrid({
           const agentBusy = Boolean(
             mutation?.activeSource === 'agent' || (mutation?.queuedAgentMutations ?? 0) > 0,
           );
-          const busy = tileBusy[instance.instanceId] === true || agentBusy;
+          const routeInvalidated = invalidatedRouteKeys[instance.instanceId] === routeKey(instance);
+          const busy = tileBusy[instance.instanceId] === true || agentBusy || routeInvalidated;
           const error = tileErrors[instance.instanceId];
           return (
             <article

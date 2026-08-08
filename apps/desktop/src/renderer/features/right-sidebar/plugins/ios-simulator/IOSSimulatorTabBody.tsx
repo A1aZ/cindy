@@ -1724,6 +1724,7 @@ export function IOSSimulatorTabBody({
                   count: instances.filter((instance) => instance.lifecycleState === 'ready').length,
                 })}
                 onSelect={(instanceId) => ctx.patchState({ instanceId })}
+                onRefresh={refresh}
               />
             )}
 

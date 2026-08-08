@@ -86,7 +86,10 @@ describe("IOSSimulatorInstanceActor", () => {
       bootProvenance: "agent-booted",
       generation: 2,
     });
-    expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
 
     const stopped = await harness.actor.stop(harness.route(started));
     expect(stopped).toMatchObject({ lifecycleState: "stopped", generation: 3 });
@@ -98,64 +101,117 @@ describe("IOSSimulatorInstanceActor", () => {
     });
   });
 
-  it("keeps admitted teardown authority across generation advance and lease expiry", async () => {
+  it("cancels an in-flight start before an admitted stop waits on the serializer", async () => {
     const harness = createHarness();
-    let finishBoot: () => void = () => undefined;
+    let bootSignal: AbortSignal | undefined;
     vi.mocked(harness.lifecycle.bootExact).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishBoot = () => resolve({ ...DEVICE, state: "Booted" });
+      (_udid, signal) =>
+        new Promise((_resolve, reject) => {
+          bootSignal = signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
         }),
     );
 
     const starting = harness.actor.start(harness.route());
     await vi.waitFor(() =>
-      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID),
+      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(
+        UDID,
+        expect.any(AbortSignal),
+      ),
     );
     const route = harness.route();
     const stopping = harness.actor.stop(route);
+    expect(bootSignal?.aborted).toBe(true);
     harness.setNow(2_000_000);
     route.sessionId = "forged-session";
     route.instanceId = "forged-instance";
     route.leaseId = "forged-lease";
-    finishBoot();
 
-    await expect(starting).resolves.toMatchObject({
-      lifecycleState: "ready",
-      generation: 2,
+    await expect(starting).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
     });
     await expect(stopping).resolves.toMatchObject({
       lifecycleState: "stopped",
-      generation: 3,
+      generation: 2,
     });
     expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
   });
 
-  it("preserves detach grace when it takes over an in-flight start", async () => {
+  it("cancels an in-flight start while preserving Host-owned detach grace", async () => {
     const harness = createHarness();
-    let finishBoot: () => void = () => undefined;
+    let bootSignal: AbortSignal | undefined;
     vi.mocked(harness.lifecycle.bootExact).mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finishBoot = () => resolve({ ...DEVICE, state: "Booted" });
+      (_udid, signal) =>
+        new Promise((_resolve, reject) => {
+          bootSignal = signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
         }),
     );
 
     const starting = harness.actor.start(harness.route());
     await vi.waitFor(() =>
-      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID),
+      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(
+        UDID,
+        expect.any(AbortSignal),
+      ),
     );
     const detaching = harness.actor.detach(harness.route());
-    finishBoot();
+    expect(bootSignal?.aborted).toBe(true);
 
-    await expect(starting).resolves.toMatchObject({ generation: 2 });
+    await expect(starting).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
     await expect(detaching).resolves.toMatchObject({
-      generation: 2,
+      generation: 1,
       viewerState: "detached",
       bootProvenance: "agent-booted",
     });
     expect(harness.scheduled).toHaveLength(1);
     expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+  });
+
+  it("cancels startup by owning session and through the force-exit seam", async () => {
+    const harness = createHarness();
+    let bootSignal: AbortSignal | undefined;
+    vi.mocked(harness.lifecycle.bootExact).mockImplementation(
+      (_udid, signal) =>
+        new Promise((_resolve, reject) => {
+          bootSignal = signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+
+    const starting = harness.actor.start(harness.route());
+    await vi.waitFor(() => expect(bootSignal).toBeDefined());
+    await harness.actor.cancelLifecycleStartsForSession("another-session");
+    expect(bootSignal?.aborted).toBe(false);
+
+    const sessionCancellation =
+      harness.actor.cancelLifecycleStartsForSession("session-a");
+    expect(bootSignal?.aborted).toBe(true);
+    await sessionCancellation;
+    await expect(starting).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+
+    bootSignal = undefined;
+    const recovering = harness.actor.recover(harness.route());
+    await vi.waitFor(() =>
+      expect(harness.lifecycle.bootExact).toHaveBeenCalledTimes(2),
+    );
+    const recoverySignal = vi.mocked(harness.lifecycle.bootExact).mock
+      .calls[1]?.[1];
+    expect(() => harness.actor.abortOperationsForExit()).not.toThrow();
+    expect(recoverySignal?.aborted).toBe(true);
+    await expect(recovering).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
   });
 
   it("does not let an admitted teardown cross a replacement lease", async () => {
@@ -181,7 +237,10 @@ describe("IOSSimulatorInstanceActor", () => {
       bootProvenance: "agent-booted",
       generation: harness.instance.generation + 1,
     });
-    expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     await expect(harness.actor.recover(harness.route())).rejects.toMatchObject({
       code: "STALE_GENERATION",
     });

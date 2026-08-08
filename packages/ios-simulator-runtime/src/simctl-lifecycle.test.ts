@@ -126,6 +126,54 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     ]);
   });
 
+  it("propagates startup cancellation into every simctl subprocess", async () => {
+    const controller = new AbortController();
+    let listCount = 0;
+    let bootStatusSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "list") {
+          listCount += 1;
+          return {
+            stdout: listJson(listCount === 1 ? "Shutdown" : "Booted"),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        if (args[1] === "boot") {
+          return { stdout: "", stderr: "", exitCode: 0 };
+        }
+        if (args[1] === "bootstatus") {
+          bootStatusSignal = options?.signal;
+          return await new Promise((resolve) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => resolve({ stdout: "", stderr: "", exitCode: null }),
+              { once: true },
+            );
+          });
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+      clock: {
+        now: () => 0,
+        sleep: async () => undefined,
+      },
+    });
+
+    const booting = lifecycle.bootExact(UDID, controller.signal);
+    await vi.waitFor(() => expect(bootStatusSignal).toBe(controller.signal));
+    controller.abort(new Error("cancelled for teardown"));
+
+    await expect(booting).rejects.toThrow("cancelled for teardown");
+    for (const [, , options] of run.mock.calls) {
+      expect(options?.signal).toBe(controller.signal);
+    }
+  });
+
   it("uses exact argv for create, shutdown, and delete", async () => {
     const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
       async (_command, args) => {

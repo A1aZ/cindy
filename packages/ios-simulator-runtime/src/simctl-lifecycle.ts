@@ -390,6 +390,17 @@ function defaultClock(): IOSSimulatorLifecycleClock {
   };
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new IOSSimulatorInstanceError(
+        "MUTATION_CANCELLED",
+        "Simulator startup was cancelled because its lifecycle changed.",
+        true,
+      );
+}
+
 /** Exact-UDID, argv-only CoreSimulator lifecycle adapter. */
 export function createIOSSimulatorSimctlLifecycle(
   options: IOSSimulatorSimctlLifecycleOptions = {},
@@ -405,8 +416,12 @@ export function createIOSSimulatorSimctlLifecycle(
     );
   }
 
-  async function list(): Promise<IOSSimulatorDevice[]> {
-    const result = await runner.run(XCRUN, ["simctl", "list", "-j"]);
+  async function list(signal?: AbortSignal): Promise<IOSSimulatorDevice[]> {
+    throwIfAborted(signal);
+    const result = signal
+      ? await runner.run(XCRUN, ["simctl", "list", "-j"], { signal })
+      : await runner.run(XCRUN, ["simctl", "list", "-j"]);
+    throwIfAborted(signal);
     if (result.exitCode !== 0) {
       throw new IOSSimulatorInstanceError(
         "SIMULATOR_NOT_FOUND",
@@ -417,10 +432,13 @@ export function createIOSSimulatorSimctlLifecycle(
     return parseSimctlListJson(result.stdout).devices;
   }
 
-  async function findExact(udid: string): Promise<IOSSimulatorDevice | null> {
+  async function findExact(
+    udid: string,
+    signal?: AbortSignal,
+  ): Promise<IOSSimulatorDevice | null> {
     const normalized = requireUdid(udid);
     return (
-      (await list()).find(
+      (await list(signal)).find(
         (device) => device.udid.toUpperCase() === normalized,
       ) ?? null
     );
@@ -431,7 +449,8 @@ export function createIOSSimulatorSimctlLifecycle(
 
     async bootExact(udid, signal): Promise<IOSSimulatorDevice> {
       const normalized = requireUdid(udid);
-      const before = await findExact(normalized);
+      throwIfAborted(signal);
+      const before = await findExact(normalized, signal);
       if (!before) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_NOT_FOUND",
@@ -441,7 +460,13 @@ export function createIOSSimulatorSimctlLifecycle(
       if (before.state.toLowerCase() !== "booted") {
         let bootedOrStarting = false;
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          const boot = await runner.run(XCRUN, ["simctl", "boot", normalized]);
+          throwIfAborted(signal);
+          const boot = signal
+            ? await runner.run(XCRUN, ["simctl", "boot", normalized], {
+                signal,
+              })
+            : await runner.run(XCRUN, ["simctl", "boot", normalized]);
+          throwIfAborted(signal);
           if (boot.exitCode === 0) {
             bootedOrStarting = true;
             break;
@@ -451,13 +476,16 @@ export function createIOSSimulatorSimctlLifecycle(
           // transition is already in flight. Confirm the state before treating
           // the failure as terminal, then allow one short retry for a genuine
           // transient service race.
-          const afterFailure = await findExact(normalized);
+          const afterFailure = await findExact(normalized, signal);
           const state = afterFailure?.state.toLowerCase();
           if (state === "booted" || state === "booting") {
             bootedOrStarting = true;
             break;
           }
-          if (attempt === 0) await clock.sleep(500, signal);
+          if (attempt === 0) {
+            await clock.sleep(500, signal);
+            throwIfAborted(signal);
+          }
         }
         if (!bootedOrStarting) {
           throw new IOSSimulatorInstanceError(
@@ -470,8 +498,8 @@ export function createIOSSimulatorSimctlLifecycle(
 
       const deadline = clock.now() + bootTimeoutMs;
       while (clock.now() < deadline) {
-        if (signal?.aborted) throw signal.reason;
-        const device = await findExact(normalized);
+        throwIfAborted(signal);
+        const device = await findExact(normalized, signal);
         if (!device) {
           throw new IOSSimulatorInstanceError(
             "SIMULATOR_NOT_FOUND",
@@ -487,14 +515,18 @@ export function createIOSSimulatorSimctlLifecycle(
           const ready = await runner.run(
             XCRUN,
             ["simctl", "bootstatus", normalized, "-b"],
-            { timeoutMs: remaining },
+            signal
+              ? { timeoutMs: remaining, signal }
+              : { timeoutMs: remaining },
           );
+          throwIfAborted(signal);
           if (ready.exitCode === 0) return device;
         }
         await clock.sleep(
           Math.min(pollIntervalMs, deadline - clock.now()),
           signal,
         );
+        throwIfAborted(signal);
       }
       throw new IOSSimulatorInstanceError(
         "SIMULATOR_BOOT_TIMEOUT",

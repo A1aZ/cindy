@@ -603,7 +603,7 @@ export function registerIOSSimulatorTools(
   registry.register({
     name: "build_app",
     description:
-      "Build one iOS app for the embedded simulator instance. For repositories with multiple or nested Xcode containers, pass containerPath as a worktree-relative path (or an absolute path that still resolves inside the worktree), then select a shared scheme when needed. Continue with install_app and launch_app on this same Cindy session. This may require command approval.",
+      "Build one iOS app for the embedded simulator instance. Xcode runs the project's build scripts as the current macOS user, so scripts may read or modify files outside the project and build output is returned to the Agent. Approve only for a trusted project. For repositories with multiple or nested Xcode containers, pass containerPath as a worktree-relative path (or an absolute path that still resolves inside the worktree), then select a shared scheme when needed. Continue with install_app and launch_app on this same Cindy session.",
     inputShape: {
       ...routeShape,
       containerPath: z.string().trim().min(1).max(4096).optional(),

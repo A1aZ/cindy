@@ -4458,6 +4458,10 @@
       "title": "iOS シミュレータ",
       "startPrompt": "iOS シミュレータを開いてください。",
       "description": "このローカルセッションで使用できる Xcode 環境とシミュレータを確認します。",
+      "buildApproval": {
+        "title": "Xcode にこのプロジェクトのビルドを許可しますか？",
+        "description": "Xcode は macOS ユーザーの権限でこのプロジェクトのビルドスクリプトを実行します。スクリプトはプロジェクト外のファイルを読み取りまたは変更でき、ビルド出力は Agent に返されます。信頼できるプロジェクトの場合のみ続行してください。"
+      },
       "refresh": "更新",
       "checking": "確認中",
       "accessRequiredTitle": "このセッションを承認",

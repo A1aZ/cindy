@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   getDesktopClaudeReadOnlyAllowedTools,
   getDesktopMcpToolApprovalPolicy,
+  getDesktopMcpToolApprovalPresentation,
 } from '../mcp-tool-approval-policy.js';
+import { setMainLocale } from '../../i18n.js';
 
 describe('desktop Claude read-only allowlist', () => {
   it('allows only explicitly reviewed read-only tools', () => {
@@ -148,10 +150,45 @@ describe('desktop MCP approval policy', () => {
     expect(
       getDesktopMcpToolApprovalPolicy({
         serverName: 'cindy_ios_simulator',
+        toolParams: { name: 'build_app', args: {} },
+      }),
+    ).toBe('prompt-each-time');
+    expect(
+      getDesktopMcpToolApprovalPolicy({
+        serverName: 'cindy_ios_simulator',
         toolName: 'call_tool',
         toolParams: { name: 'tap', args: {} },
       }),
     ).toBe('auto-approve');
+  });
+
+  it('discloses host file access before an agent starts an Xcode build', () => {
+    setMainLocale('en');
+    expect(
+      getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolName: 'call_tool',
+        toolParams: { name: 'build_app', args: {} },
+      }),
+    ).toEqual({
+      title: 'Allow Xcode to build this project?',
+      description: expect.stringMatching(
+        /macOS user.*outside the project.*returned to the Agent.*trust this project/i,
+      ),
+    });
+    expect(
+      getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolName: 'call_tool',
+        toolParams: { name: 'tap', args: {} },
+      }),
+    ).toBeUndefined();
+    expect(
+      getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolParams: { name: 'build_app', args: {} },
+      })?.description,
+    ).toContain('outside the project');
   });
 
   it('auto-approves read-only discovery entries even on untrusted servers', () => {

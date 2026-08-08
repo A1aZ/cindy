@@ -4458,6 +4458,10 @@
       "title": "iOS 模拟器",
       "startPrompt": "帮我打开 iOS 模拟器。",
       "description": "查看当前本地任务可用的 Xcode 环境和模拟器设备。",
+      "buildApproval": {
+        "title": "允许 Xcode 构建此项目？",
+        "description": "Xcode 会以你的 macOS 用户权限运行此项目的构建脚本。这些脚本可能读取或修改项目外的文件，构建输出也会返回给 Agent。请仅在信任此项目时继续。"
+      },
       "refresh": "刷新",
       "checking": "正在检查",
       "accessRequiredTitle": "授权当前任务",

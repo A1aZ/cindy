@@ -10895,6 +10895,60 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('uses the host security disclosure for progressive MCP approvals', async () => {
+    const disclosure = {
+      title: 'Allow Xcode to build this project?',
+      description:
+        'Build scripts may access files outside the project, and output is returned to the Agent.',
+    };
+    const presentation = vi.fn(() => disclosure);
+    const agent = new CodexAgent(createDeps({}, {
+      getMcpToolApprovalPolicy: () => 'prompt-each-time',
+      getMcpToolApprovalPresentation: presentation,
+    }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-ios-build-disclosure',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'ask',
+    });
+    const resolver = vi.fn(async () => ({
+      kind: 'permission' as const,
+      behavior: 'deny' as const,
+    }));
+    handle.setInteractionResolver(resolver);
+
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.mcpServerElicitation) throw new Error('expected mcpServerElicitation handler');
+    const result = await handlers.mcpServerElicitation({
+      threadId: 'start-thread-id',
+      turnId: 'turn-ios-build',
+      serverName: 'cindy_ios_simulator',
+      mode: 'form',
+      _meta: {
+        codex_approval_kind: 'mcp_tool_call',
+        persist: ['session'],
+        tool_params: { name: 'build_app', args: {} },
+      },
+      message: 'Generic MCP approval',
+      requestedSchema: {},
+    });
+
+    expect(result).toEqual({ action: 'decline', content: null, _meta: null });
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'permission',
+      title: disclosure.title,
+      description: disclosure.description,
+      suggestions: undefined,
+    }));
+    expect(presentation).toHaveBeenCalledWith({
+      serverName: 'cindy_ios_simulator',
+      toolParams: { name: 'build_app', args: {} },
+    });
+    await handle.close();
+  });
+
   it('still prompts for prompt-each-time inner MCP calls in Full access mode', async () => {
     // 回归:宽松档曾无条件 accept, 让高风险 inner tool(contacts_delete 等)
     // 绕过逐次确认；Full access 也必须保留 forcePrompt 护栏。
@@ -12395,6 +12449,11 @@ describe('CodexAgent MCP thread context hooks', () => {
   });
 
   it('keeps host dynamic tool calls behind the existing MCP approval policy', async () => {
+    const disclosure = {
+      title: 'Allow Xcode to build this project?',
+      description:
+        'Build scripts may access files outside the project, and output is returned to the Agent.',
+    };
     const callTool = vi.fn(async () => ({
       contentItems: [{ type: 'inputText' as const, text: '{"ok":true}' }],
       success: true,
@@ -12411,6 +12470,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         callTool,
       },
       getMcpToolApprovalPolicy: () => 'prompt-each-time',
+      getMcpToolApprovalPresentation: () => disclosure,
     }));
     const host = installFakeHost(agent);
     const handle = await agent.startSession({
@@ -12423,7 +12483,11 @@ describe('CodexAgent MCP thread context hooks', () => {
       expect(request).toMatchObject({
         kind: 'permission',
         toolName: 'dynamic:cindy_ios_simulator:call_tool',
+        title: disclosure.title,
+        description: disclosure.description,
       });
+      if (request.kind !== 'permission') throw new Error('expected permission request');
+      expect(request.suggestions).toBeUndefined();
       return { kind: 'permission', behavior: 'deny' };
     });
 

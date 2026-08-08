@@ -134,6 +134,12 @@ export type McpToolApprovalPolicy =
   | 'prompt'
   | 'prompt-each-time';
 
+/** Host-owned copy for an MCP permission request that needs a specific risk disclosure. */
+export interface McpToolApprovalPresentation {
+  title?: string;
+  description?: string;
+}
+
 /** Pi 内 MCP client 的 server 描述；remote 存在时直接访问外部 Streamable HTTP MCP。 */
 export interface PiMcpServerRef {
   name: string;
@@ -660,6 +666,17 @@ export interface AgentDeps {
    * 缺省 / undefined → 走原 dispatchInteraction (弹 UI), 行为与改动前一致。
    */
   getMcpToolApprovalPolicy?: (context: McpToolApprovalContext) => McpToolApprovalPolicy;
+
+  /**
+   * Optional host-owned title and description for an MCP approval card.
+   *
+   * This stays separate from the policy mode: a call can remain
+   * `prompt-each-time` while the Host explains a risk the generic MCP client
+   * cannot infer from the outer `call_tool` envelope.
+   */
+  getMcpToolApprovalPresentation?: (
+    context: McpToolApprovalContext,
+  ) => McpToolApprovalPresentation | undefined;
 
   /**
    * Codex-only deterministic tool activation for narrow host capabilities.

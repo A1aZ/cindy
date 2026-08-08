@@ -17,8 +17,14 @@
  *   4. 其余                —— 逐次弹窗（第三方 server、cindy_ssh、插件 ghost_call…）
  */
 
-import type { McpToolApprovalContext, McpToolApprovalPolicy } from '@cindy/maker-core';
+import type {
+  McpToolApprovalContext,
+  McpToolApprovalPolicy,
+  McpToolApprovalPresentation,
+} from '@cindy/maker-core';
 import { canAutoApproveContactsMcpTool } from '@cindy/mcps';
+
+import { t } from '../i18n.js';
 
 /**
  * 精确到工具的只读放行表，键为 `<server>::<tool>`。
@@ -113,7 +119,10 @@ export function getDesktopMcpToolApprovalPolicy(
       : 'prompt-each-time';
   }
   if (serverName === 'cindy_ios_simulator') {
-    if (toolName === 'call_tool') {
+    // Some Codex app-server versions omit the outer tool name but retain the
+    // validated progressive payload. Preserve the inner action's stricter
+    // policy instead of falling back to a persistable generic server prompt.
+    if (toolName === 'call_tool' || toolName === undefined) {
       const innerName =
         toolParams && typeof toolParams === 'object'
           ? (toolParams as { name?: unknown }).name
@@ -130,4 +139,25 @@ export function getDesktopMcpToolApprovalPolicy(
     return 'auto-approve';
   }
   return 'prompt';
+}
+
+/**
+ * Host-owned security copy for progressive MCP actions whose outer
+ * `call_tool` description cannot explain the inner action's real authority.
+ */
+export function getDesktopMcpToolApprovalPresentation(
+  context: McpToolApprovalContext,
+): McpToolApprovalPresentation | undefined {
+  const innerName =
+    context.serverName === 'cindy_ios_simulator' &&
+    (context.toolName === 'call_tool' || context.toolName === undefined) &&
+    context.toolParams &&
+    typeof context.toolParams === 'object'
+      ? (context.toolParams as { name?: unknown }).name
+      : undefined;
+  if (innerName !== 'build_app') return undefined;
+  return {
+    title: t('rightSidebar.iosSimulator.buildApproval.title'),
+    description: t('rightSidebar.iosSimulator.buildApproval.description'),
+  };
 }

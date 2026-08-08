@@ -480,6 +480,29 @@ describe('PinnedPlanPanel terminal seal', () => {
     expect(screen.queryByTestId('plan-pill')).toBeNull();
   });
 
+  it('keeps an all-done codex plan visible when its turn failed instead of sealing', () => {
+    // Codex 把步骤全勾完后 turn 以中断/失败终态收场:host 按设计不盖章,只给该行
+    // 盖 turnCompleted:false。此时流式已结束,但任务还活着——不得因为"非流式 +
+    // 全勾完"就当旧数据兜底退场,否则用户正要接着指挥的计划被摘牌。
+    const failedAllDone: ChatMessage = {
+      ...planMessage('completed', T0, T0),
+      turnCompleted: false,
+    };
+
+    render(
+      <PinnedPlanPanel
+        sessionId="failed-turn-all-done"
+        messages={[failedAllDone]}
+        animated={false}
+        streaming={false}
+        width={400}
+      />,
+    );
+
+    act(() => vi.advanceTimersByTime(30_000));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+  });
+
   it('still retires an all-done codex plan from old history data without a seal', () => {
     // 旧数据没有章(升级前落库),也永远不会再有:全勾完兜底照旧生效,
     // 否则旧会话的计划会永远挂在屏幕上。非流式 = 没有在等章的 turn。

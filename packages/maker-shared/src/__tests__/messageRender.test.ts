@@ -870,6 +870,28 @@ describe('message render todo grouping', () => {
     expect(findLatestMessageTodoInsertion([tool('t1', 'Bash', {})])).toBeNull();
   });
 
+  it('findLatestMessageTodoInsertion marks a plan whose turn failed as turnFailed', () => {
+    // persistCodexPlanOnDone 在中断/失败终态给计划行盖 turnCompleted:false。
+    // 面板据此不走"全勾完"兜底退场:任务还活着,计划必须留在屏幕上。
+    const failedPlan = {
+      ...tool('plan1', 'update_plan', {
+        plan: [{ step: 'Ship it', status: 'completed' }],
+      }),
+      turnCompleted: false,
+    };
+
+    expect(findLatestMessageTodoInsertion([failedPlan])).toMatchObject({
+      source: 'codex',
+      turnFailed: true,
+    });
+    // 正常行没有印记,不应引入该字段。
+    expect(
+      findLatestMessageTodoInsertion([
+        tool('plan2', 'update_plan', { plan: [{ step: 'Ship it', status: 'completed' }] }),
+      ]),
+    ).not.toHaveProperty('turnFailed');
+  });
+
   it('does not infer completion from an ambiguous legacy Codex turn seal', () => {
     const plan = {
       ...tool('plan1', 'update_plan', {

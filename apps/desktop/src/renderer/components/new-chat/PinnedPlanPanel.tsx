@@ -60,13 +60,20 @@ export function PinnedPlanPanel({
     insertion.todos.length > 0 &&
     insertion.todos.every((todo) => todo.status === 'completed'),
   );
-  // codex 计划在 turn 流式期间是"等章"状态:host 的终态章才是权威,agent 提前把
-  // 步骤全勾完不算数——按 allDone 抢跑会在章晚到时产生"消失再闪回"。TodoWrite /
-  // Task 永远不会有章,codex 旧历史数据也不会再有,它们照旧走全勾完兜底。
-  const awaitingSeal = insertion?.source === 'codex' && insertion.sealed !== true && streaming;
+  // codex 计划有两种"任务还活着"的状态,都不得走全勾完兜底:
+  // - turn 流式中且未盖章:正在等 host 的终态章,agent 提前勾完不算数——按
+  //   allDone 抢跑会在章晚到时产生"消失再闪回";
+  // - host 给该行盖了 turnCompleted:false(中断/失败终态,见 persistCodexPlanOnDone):
+  //   按设计不盖章,计划必须留在屏幕上供用户继续指挥,哪怕步骤恰好全勾完。
+  // TodoWrite / Task 永远不会有这两种印记,codex 旧历史数据也不会再有,它们照旧
+  // 走全勾完兜底——否则旧会话的计划会永远挂着。
+  const codexPlanAlive =
+    insertion?.source === 'codex' &&
+    insertion.sealed !== true &&
+    (streaming || insertion.turnFailed === true);
   // 退场 = host 盖了终态章(权威),或计划自己勾完了(没有章的旧数据兜底)。
   const retired =
-    Boolean(insertion) && (insertion?.sealed === true || (allDone && !awaitingSeal));
+    Boolean(insertion) && (insertion?.sealed === true || (allDone && !codexPlanAlive));
   const completedAtMs =
     insertion?.sealedAtMs ?? insertion?.updatedAtMs ?? Date.parse(insertion?.createdAt ?? '');
   const persistedCompletionDeadlineMs =

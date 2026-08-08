@@ -210,6 +210,11 @@ export interface MessageRenderTodoInsertion {
   sealed?: boolean;
   /** Persisted host time of the successful terminal seal. */
   sealedAtMs?: number;
+  /**
+   * host 在中断/失败 turn 给该计划行盖的 `turnCompleted: false`(见
+   * `persistCodexPlanOnDone`):任务还活着,常驻面板不得按"全勾完"兜底退场。
+   */
+  turnFailed?: boolean;
 }
 
 export interface MessageRenderLatestTodoState {
@@ -501,6 +506,7 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
               : {}),
           }
         : {}),
+      ...(messages[session.lastIndex]?.turnCompleted === false ? { turnFailed: true } : {}),
     });
   }
   return out;

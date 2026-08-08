@@ -2032,6 +2032,224 @@ describe('iOS Simulator host', () => {
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
   });
 
+  it('does not let a late viewer open resurrect a stream after the matching close', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const running = {
+      instanceId: instance.instanceId,
+      simulatorUdid: instance.simulatorUdid,
+      pid: 42,
+      driver: {
+        getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
+        getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+      },
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance;
+    let liveRunning: WdaRunningInstance | null = null;
+    const probe = vi.fn(async () => liveRunning);
+    let resolveMemoryProbe: (value: {
+      source: 'node-os';
+      freePercentage: null;
+      freeBytes: number;
+      totalBytes: number;
+    }) => void = () => undefined;
+    const memoryProbe = vi.fn(
+      () =>
+        new Promise<{
+          source: 'node-os';
+          freePercentage: null;
+          freeBytes: number;
+          totalBytes: number;
+        }>((resolve) => {
+          resolveMemoryProbe = resolve;
+        }),
+    );
+    const resourceScheduler = new IOSSimulatorResourceScheduler({ memoryProbe });
+    const driverManager = {
+      get: vi.fn(() => liveRunning),
+      probe,
+      start: vi.fn(async () => running),
+      stop: vi.fn(async () => undefined),
+    };
+    const framePump = {
+      setVisible: vi.fn(({ visible }: { visible: boolean }) => ({
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        state: visible ? ('connecting' as const) : ('idle' as const),
+        reconnectAttempt: 0,
+        latestFrame: null,
+      })),
+      snapshot: vi.fn(() => null),
+      clear: vi.fn(),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      driverManager,
+      framePump: framePump as never,
+      idleRecycleMs: 20,
+      resourceScheduler,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    const route = {
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    };
+
+    const lateOpen = host.setViewerVisibility(
+      'session-a',
+      route,
+      true,
+      'jpeg',
+      undefined,
+      17,
+      'viewer-a',
+    );
+    await vi.waitFor(() => expect(memoryProbe).toHaveBeenCalledOnce());
+    await expect(
+      host.setViewerVisibility('session-a', route, false, 'jpeg', undefined, 17, 'viewer-a'),
+    ).resolves.toMatchObject({ ok: true });
+    expect(actor.getOwned('session-a', instance.instanceId).healthState).toBe('healthy');
+    resolveMemoryProbe({
+      source: 'node-os',
+      freePercentage: null,
+      freeBytes: 100 * 1024 ** 3,
+      totalBytes: 128 * 1024 ** 3,
+    });
+
+    await expect(lateOpen).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+    expect(driverManager.start).not.toHaveBeenCalled();
+    expect(framePump.setVisible).not.toHaveBeenCalledWith(
+      expect.objectContaining({ visible: true }),
+    );
+
+    liveRunning = running;
+    let resolveStaleProbe: (value: WdaRunningInstance | null) => void = () => undefined;
+    probe.mockImplementationOnce(
+      () =>
+        new Promise<WdaRunningInstance | null>((resolve) => {
+          resolveStaleProbe = resolve;
+        }),
+    );
+    const staleOpen = host.setViewerVisibility(
+      'session-a',
+      route,
+      true,
+      'jpeg',
+      undefined,
+      17,
+      'viewer-stale',
+    );
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        true,
+        'jpeg',
+        undefined,
+        17,
+        'viewer-current',
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    const hiddenCallsBeforeStaleClose = framePump.setVisible.mock.calls.filter(
+      ([request]) => request.visible === false,
+    ).length;
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        false,
+        'jpeg',
+        undefined,
+        17,
+        'viewer-stale',
+      ),
+    ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+    expect(
+      framePump.setVisible.mock.calls.filter(([request]) => request.visible === false),
+    ).toHaveLength(hiddenCallsBeforeStaleClose);
+    resolveStaleProbe(running);
+    await expect(staleOpen).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        false,
+        'jpeg',
+        undefined,
+        17,
+        'viewer-current',
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    let resolveRevokedProbe: (value: WdaRunningInstance | null) => void = () => undefined;
+    probe.mockImplementationOnce(
+      () =>
+        new Promise<WdaRunningInstance | null>((resolve) => {
+          resolveRevokedProbe = resolve;
+        }),
+    );
+    const revokedOpen = host.setViewerVisibility(
+      'session-a',
+      route,
+      true,
+      'jpeg',
+      undefined,
+      17,
+      'viewer-revoked',
+    );
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(4));
+    // The pending open has already cancelled the timer from the explicit
+    // close, so only revocation cleanup can produce the next stop call.
+    driverManager.stop.mockClear();
+    expect(host.revokeRendererViewer('session-a', 17)).toBe(1);
+    resolveRevokedProbe(running);
+    await expect(revokedOpen).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+    await vi.waitFor(() => expect(driverManager.stop).toHaveBeenCalledWith(instance.instanceId));
+
+    const invalidOpen = host.setViewerVisibility(
+      'session-a',
+      { ...route, instanceId: 'renderer-supplied-unknown-instance' },
+      true,
+      'jpeg',
+      undefined,
+      18,
+      'viewer-invalid',
+    );
+    expect(host.revokeRendererViewer('session-a', 18)).toBe(0);
+    await expect(invalidOpen).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_FOUND',
+    });
+    await host.dispose();
+  });
+
   it('returns a fresh viewer route when driver recovery outlives the lease', async () => {
     let now = 1_000;
     const lifecycle: IOSSimulatorSimctlLifecycle = {

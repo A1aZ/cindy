@@ -771,6 +771,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     string,
     { sessionId: string; webContentsId: number | null; viewerToken: string | null }
   >();
+  type ViewerVisibilityIntent = {
+    sequence: number;
+    sessionId: string;
+    viewerToken: string | null;
+    visible: boolean;
+  };
+  const viewerVisibilityIntents = new Map<string, Map<number, ViewerVisibilityIntent>>();
+  let nextViewerVisibilityIntentSequence = 0;
   const activeViewerTouches = new Map<string, Map<string, IOSSimulatorLiveTouchPoint>>();
   const pushH264Frame =
     options.pushH264Frame ??
@@ -1670,6 +1678,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       viewerPreferredEncodings.delete(instance.instanceId);
       viewerFallbackReasons.delete(instance.instanceId);
       viewerSessions.delete(instance.instanceId);
+      viewerVisibilityIntents.delete(instance.instanceId);
       streamProfiles.delete(instance.instanceId);
       nativeStreamProfiles.delete(instance.instanceId);
       clearViewportState(instance.instanceId);
@@ -1705,6 +1714,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     viewerPreferredEncodings.delete(instanceId);
     viewerFallbackReasons.delete(instanceId);
     viewerSessions.delete(instanceId);
+    viewerVisibilityIntents.delete(instanceId);
     streamProfiles.delete(instanceId);
     nativeStreamProfiles.delete(instanceId);
     clearViewportState(instanceId);
@@ -3105,6 +3115,98 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     }
   }
 
+  function registerViewerVisibilityIntent(
+    sessionId: string,
+    instanceId: string,
+    visible: boolean,
+    viewerWebContentsId?: number,
+    viewerToken?: string,
+  ): { intent: ViewerVisibilityIntent | null; ignored: boolean } {
+    if (viewerWebContentsId === undefined || disposePromise) {
+      return { intent: null, ignored: false };
+    }
+    const normalizedSessionId = sessionId.trim();
+    // Register ordering before the first await, but never allocate state for a
+    // renderer-supplied instance id that is not owned by this exact task.
+    if (
+      !actor
+        .list(normalizedSessionId)
+        .some((instance) => instance.instanceId === instanceId)
+    ) {
+      return { intent: null, ignored: false };
+    }
+    const normalizedViewerToken = viewerToken ?? null;
+    const intents = viewerVisibilityIntents.get(instanceId) ?? new Map();
+    const previous = intents.get(viewerWebContentsId);
+    const activeViewer = viewerSessions.get(instanceId);
+    const latestViewer =
+      previous ??
+      (activeViewer?.webContentsId === viewerWebContentsId
+        ? {
+            sequence: 0,
+            sessionId: activeViewer.sessionId,
+            viewerToken: activeViewer.viewerToken,
+            visible: true,
+          }
+        : null);
+    if (
+      !visible &&
+      latestViewer &&
+      (latestViewer.sessionId !== normalizedSessionId ||
+        (latestViewer.viewerToken !== null && latestViewer.viewerToken !== normalizedViewerToken))
+    ) {
+      return { intent: null, ignored: true };
+    }
+    const intent: ViewerVisibilityIntent = {
+      sequence: ++nextViewerVisibilityIntentSequence,
+      sessionId: normalizedSessionId,
+      viewerToken: normalizedViewerToken,
+      visible,
+    };
+    intents.set(viewerWebContentsId, intent);
+    viewerVisibilityIntents.set(instanceId, intents);
+    return { intent, ignored: false };
+  }
+
+  function isCurrentViewerVisibilityIntent(
+    instanceId: string,
+    viewerWebContentsId: number | undefined,
+    intent: ViewerVisibilityIntent | null,
+  ): boolean {
+    if (viewerWebContentsId === undefined || !intent) return true;
+    return viewerVisibilityIntents.get(instanceId)?.get(viewerWebContentsId) === intent;
+  }
+
+  function assertCurrentViewerVisibilityIntent(
+    instanceId: string,
+    viewerWebContentsId: number | undefined,
+    intent: ViewerVisibilityIntent | null,
+  ): void {
+    if (isCurrentViewerVisibilityIntent(instanceId, viewerWebContentsId, intent)) return;
+    throw new IOSSimulatorInstanceError(
+      'INSTANCE_NOT_OWNED',
+      'This simulator viewer request was replaced by a newer visibility request.',
+      true,
+    );
+  }
+
+  function revokeRendererViewerIntents(
+    sessionId: string,
+    viewerWebContentsId: number,
+  ): Set<string> {
+    const revokedInstanceIds = new Set<string>();
+    for (const [instanceId, intents] of viewerVisibilityIntents) {
+      const current = intents.get(viewerWebContentsId);
+      if (!current || current.sessionId !== sessionId) continue;
+      // Removing the exact object invalidates every pending assertion while
+      // avoiding an unbounded tombstone per destroyed WebContents.
+      intents.delete(viewerWebContentsId);
+      if (intents.size === 0) viewerVisibilityIntents.delete(instanceId);
+      revokedInstanceIds.add(instanceId);
+    }
+    return revokedInstanceIds;
+  }
+
   function reserveViewerClaim(
     sessionId: string,
     instanceId: string,
@@ -3253,11 +3355,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     getStatus: inspectForSession,
     getPluginStatus: inspectForPlugin,
     revokeRendererViewer(sessionId, viewerWebContentsId) {
-      let revoked = 0;
+      const revokedInstanceIds = revokeRendererViewerIntents(sessionId, viewerWebContentsId);
       for (const [instanceId, viewer] of [...viewerSessions]) {
         if (viewer.sessionId !== sessionId || viewer.webContentsId !== viewerWebContentsId)
           continue;
-        revoked += 1;
+        revokedInstanceIds.add(instanceId);
         try {
           stopViewerMedia(actor.getOwned(sessionId, instanceId));
         } catch {
@@ -3274,7 +3376,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           clearViewportState(instanceId);
         }
       }
-      return revoked;
+      return revokedInstanceIds.size;
     },
     async setViewerVisibility(
       sessionId,
@@ -3285,14 +3387,26 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       viewerWebContentsId,
       viewerToken,
     ) {
+      const viewerIntentRegistration = registerViewerVisibilityIntent(
+        sessionId,
+        route.instanceId,
+        visible,
+        viewerWebContentsId,
+        viewerToken,
+      );
+      const viewerIntent = viewerIntentRegistration.intent;
       let viewerClaimReservation: ReturnType<typeof reserveViewerClaim> = null;
       let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
+      let viewerRuntimeInstance: IOSSimulatorInstance | null = null;
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId, {
           registerRemovalBarrier: visible,
         });
         if (!resolved.ok) return resolved;
+        if (visible) {
+          assertCurrentViewerVisibilityIntent(route.instanceId, viewerWebContentsId, viewerIntent);
+        }
         removalBarrierOperation = resolved.removalBarrierOperation ?? null;
         if (visible) assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
@@ -3304,6 +3418,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           ? actor.heartbeat(mutationRoute)
           : assertViewerDeactivationRoute(mutationRoute);
         if (!visible) {
+          if (
+            viewerIntentRegistration.ignored ||
+            !isCurrentViewerVisibilityIntent(instance.instanceId, viewerWebContentsId, viewerIntent)
+          ) {
+            return {
+              ok: true,
+              data: {
+                stream: null,
+                ignored: true,
+                mutation: actor.mutationState(instance.instanceId),
+              },
+            };
+          }
           const activeViewer = viewerSessions.get(instance.instanceId);
           if (
             activeViewer &&
@@ -3341,20 +3468,27 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // re-arm a parked Sidecar.
         const rearmNativeSidecar = !viewerSessions.has(instance.instanceId);
         instance = await reconcileLiveDevice(instance);
+        assertCurrentViewerVisibilityIntent(instance.instanceId, viewerWebContentsId, viewerIntent);
         if (visible) assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         if (instance.lifecycleState !== 'ready') {
           return viewerRouteRefreshResult(instance);
         }
         cancelIdleRecycle(instance.instanceId);
+        viewerRuntimeInstance = instance;
         const driverManager = getDriverManager();
         let running = await getHealthyDriver(instance.instanceId);
+        assertCurrentViewerVisibilityIntent(instance.instanceId, viewerWebContentsId, viewerIntent);
         let current = currentReadyGeneration(instance);
         if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
         instance = current;
         if (!running) {
-          actor.markHealth(resolved.sessionId, instance.instanceId, 'recovering', null);
           const environment = await runtime.inspect();
+          assertCurrentViewerVisibilityIntent(
+            instance.instanceId,
+            viewerWebContentsId,
+            viewerIntent,
+          );
           assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           assertHostActive();
           current = currentReadyGeneration(instance);
@@ -3388,11 +3522,24 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             running = await resourceScheduler.runStart(
               instance.instanceId,
               async (commitRunning) => {
+                assertCurrentViewerVisibilityIntent(
+                  instance.instanceId,
+                  viewerWebContentsId,
+                  viewerIntent,
+                );
+                assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+                assertHostActive();
                 commitRunning();
+                actor.markHealth(resolved.sessionId, instance.instanceId, 'recovering', null);
                 const started = await ensureDriver(instance, environment);
                 assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
                 return started;
               },
+            );
+            assertCurrentViewerVisibilityIntent(
+              instance.instanceId,
+              viewerWebContentsId,
+              viewerIntent,
             );
           } catch (error) {
             if (isInstanceError(error, 'STALE_GENERATION')) {
@@ -3411,12 +3558,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             (await driverManager.recoverNativeSidecar(instance.instanceId, {
               rearm: rearmNativeSidecar,
             })) ?? running;
+          assertCurrentViewerVisibilityIntent(
+            instance.instanceId,
+            viewerWebContentsId,
+            viewerIntent,
+          );
           assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           assertHostActive();
           current = currentReadyGeneration(instance);
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
           instance = current;
         }
+        assertCurrentViewerVisibilityIntent(instance.instanceId, viewerWebContentsId, viewerIntent);
         viewerClaimReservation = reserveViewerClaim(
           resolved.sessionId,
           instance.instanceId,
@@ -3426,6 +3579,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         let viewport: IOSSimulatorPublicViewport;
         try {
           viewport = await readViewport(running);
+          assertCurrentViewerVisibilityIntent(
+            instance.instanceId,
+            viewerWebContentsId,
+            viewerIntent,
+          );
           assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         } catch (error) {
           current = currentReadyGeneration(instance);
@@ -3440,6 +3598,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // more after all slow startup work so the successful response always
         // carries a live viewer route.
         instance = actor.heartbeatOwned(resolved.sessionId, instance.instanceId);
+        assertCurrentViewerVisibilityIntent(instance.instanceId, viewerWebContentsId, viewerIntent);
         viewerClaimReservation?.assertCurrent();
         if (viewerWebContentsId !== undefined) {
           assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
@@ -3473,6 +3632,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, 'set_viewer_visibility');
       } finally {
         viewerClaimReservation?.rollback();
+        if (
+          visible &&
+          viewerRuntimeInstance &&
+          !isCurrentViewerVisibilityIntent(
+            viewerRuntimeInstance.instanceId,
+            viewerWebContentsId,
+            viewerIntent,
+          ) &&
+          !viewerSessions.has(viewerRuntimeInstance.instanceId) &&
+          driverManager?.get(viewerRuntimeInstance.instanceId)
+        ) {
+          scheduleIdleRecycle(viewerRuntimeInstance);
+        }
         removalBarrierOperation?.finish();
       }
     },
@@ -3532,6 +3704,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           viewerPreferredEncodings.delete(instance.instanceId);
           viewerFallbackReasons.delete(instance.instanceId);
           viewerSessions.delete(instance.instanceId);
+          viewerVisibilityIntents.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
           publishRouteStatusForInstance(instance);
           return {
@@ -3867,6 +4040,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           viewerPreferredEncodings.delete(instance.instanceId);
           viewerFallbackReasons.delete(instance.instanceId);
           viewerSessions.delete(instance.instanceId);
+          viewerVisibilityIntents.delete(instance.instanceId);
           clearViewportState(instance.instanceId);
           requestViewerFocus(sessionId, instance.instanceId);
           publishRouteStatusForInstance(instance, getDriverManager().get(instance.instanceId));
@@ -3896,6 +4070,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             viewerPreferredEncodings.delete(route.instanceId);
             viewerFallbackReasons.delete(route.instanceId);
             viewerSessions.delete(route.instanceId);
+            viewerVisibilityIntents.delete(route.instanceId);
             clearViewportState(route.instanceId);
             const stopped = await actor.stop(route);
             resourceScheduler.markStopped(route.instanceId);
@@ -3932,6 +4107,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             viewerPreferredEncodings.delete(route.instanceId);
             viewerFallbackReasons.delete(route.instanceId);
             viewerSessions.delete(route.instanceId);
+            viewerVisibilityIntents.delete(route.instanceId);
             clearViewportState(route.instanceId);
             agentControlLeases.delete(route.instanceId);
             return {
@@ -5460,6 +5636,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             viewerPreferredEncodings.delete(instance.instanceId);
             viewerFallbackReasons.delete(instance.instanceId);
             viewerSessions.delete(instance.instanceId);
+            viewerVisibilityIntents.delete(instance.instanceId);
             clearViewportState(instance.instanceId);
             return {
               ok: true,
@@ -5568,6 +5745,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         );
         activeViewerTouches.clear();
         viewerSessions.clear();
+        viewerVisibilityIntents.clear();
         routeStatusCache.clear();
         pluginEnvironmentCache = null;
       })();

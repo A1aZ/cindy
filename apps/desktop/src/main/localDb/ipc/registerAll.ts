@@ -10,7 +10,7 @@
 import { ipcMain } from 'electron';
 
 import { closeDb, ensureReady, getCurrentUserId } from '../index';
-import { getCurrentDbClientUserId } from '../client/current';
+import { getCurrentDbClientUserId, tryGetDbClient } from '../client/current';
 import { registerSessionIpc, setSessionRemovalCancelOperations } from './sessions';
 import { registerMessageIpc } from './messages';
 import { registerOrcaWorkflowIpc } from './orcaTeams';
@@ -26,8 +26,43 @@ import { registerRemoteHistoryIpc } from './history';
 import { createLogger } from '../../logger';
 import { recordDesktopDevLocalDbStartupResult } from '../../devStartupStatus';
 import { createOwnerEnsureCoordinator } from './ownerEnsureCoordinator';
+import { reconcileSessionMediaRefsForDeletedSessions } from '../../cindy-media/sessionCleanup';
+import { reconcileMediaRefCompensationsForOwner } from '../../cindy-media/refCompensationJournal';
+import { setSessionRouteLockImplementation } from '../sessionRouteLock';
 
 const log = createLogger('registerAll');
+const MEDIA_REF_COMPENSATION_BUSY_RETRY_MS = 12_000;
+
+function startMediaRefCompensationReconcile(
+  userId: string,
+  client: NonNullable<ReturnType<typeof tryGetDbClient>>,
+  isOwnerCurrent: () => boolean,
+): void {
+  const run = async (allowBusyRetry: boolean): Promise<void> => {
+    if (!isOwnerCurrent()) return;
+    const result = await reconcileMediaRefCompensationsForOwner({
+      ownerId: userId,
+      db: client.drizzle,
+      isOwnerCurrent,
+    });
+    if (!allowBusyRetry || result.busy === 0 || !isOwnerCurrent()) return;
+    const retry = setTimeout(() => {
+      void run(false).catch((error) => {
+        log.warn('delayed media reference compensation reconcile failed', {
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, MEDIA_REF_COMPENSATION_BUSY_RETRY_MS);
+    retry.unref?.();
+  };
+  void run(true).catch((error) => {
+    log.warn('media reference compensation reconcile failed', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
 
 export interface RegisterLocalDbIpcOpts {
   /** Current stable app-session owner. False makes queued/in-flight work stale. */
@@ -38,6 +73,8 @@ export interface RegisterLocalDbIpcOpts {
   beforeEnsureReady?: (userId: string) => void | Promise<void>;
   /** Stop Host-owned session operations before an archived/deleted worktree is recycled. */
   cancelSessionOperations?: (sessionId: string) => Promise<void>;
+  /** Serialize startup tombstone cleanup with task restore/start/send operations. */
+  withSessionLock?: <T>(sessionId: string, task: () => Promise<T>) => Promise<T>;
   /**
    * 可选回调：localDb.ensureReady 成功（含已就绪复用路径）后触发。
    * 用途：启动依赖 localDb 的 host 单例（如 scheduler-host）。失败时协调器会
@@ -53,11 +90,43 @@ export interface RegisterLocalDbIpcOpts {
 
 export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
   setSessionRemovalCancelOperations(opts.cancelSessionOperations ?? null);
+  setSessionRouteLockImplementation(opts.withSessionLock ?? null);
   const runEnsureReady = createOwnerEnsureCoordinator({
     isOwnerCurrent: opts.isOwnerCurrent ?? (() => true),
     beforeEnsureReady: opts.beforeEnsureReady,
     ensureReady,
-    onReady: opts.onReady,
+    onReady: async (userId) => {
+      await opts.onReady?.(userId);
+      const client = tryGetDbClient();
+      if (
+        !client ||
+        getCurrentDbClientUserId() !== userId ||
+        !(opts.isOwnerCurrent?.(userId) ?? true)
+      ) {
+        return;
+      }
+      const isReadyOwnerCurrent = (): boolean =>
+        tryGetDbClient() === client &&
+        getCurrentDbClientUserId() === userId &&
+        (opts.isOwnerCurrent?.(userId) ?? true);
+      startMediaRefCompensationReconcile(userId, client, isReadyOwnerCurrent);
+
+      const cancelSessionOperations = opts.cancelSessionOperations;
+      const withSessionLock = opts.withSessionLock;
+      if (!cancelSessionOperations || !withSessionLock) return;
+      const db = client.drizzle;
+      void reconcileSessionMediaRefsForDeletedSessions({
+        db,
+        isOwnerCurrent: isReadyOwnerCurrent,
+        withSessionLock,
+        quiesceSession: cancelSessionOperations,
+      }).catch((error) => {
+        log.warn('deleted task media reconcile failed', {
+          userId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    },
     onReadyError: (userId, err) => {
       log.warn(
         JSON.stringify({
@@ -101,11 +170,13 @@ export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
       result = await runEnsureReady(userId);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      log.error(JSON.stringify({
-        event: 'localDb.ipc.ensure-ready.failed',
-        userId,
-        error: message,
-      }));
+      log.error(
+        JSON.stringify({
+          event: 'localDb.ipc.ensure-ready.failed',
+          userId,
+          error: message,
+        }),
+      );
       result = {
         ready: false,
         error: { code: 'DB_INIT_FAILED', message },

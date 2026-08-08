@@ -15,7 +15,11 @@ import {
   type IOSSimulatorCommandRunner,
 } from '@cindy/ios-simulator-runtime';
 
-import { ingestMedia, type IngestedMedia } from '../cindy-media/ingest.js';
+import { ingestMedia, type IngestedMedia, type IngestMediaParams } from '../cindy-media/ingest.js';
+import type { LedgerDb } from '../cindy-media/ledger.js';
+import { captureMediaRefCompensationScope } from '../cindy-media/refCompensationJournal.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
+import { tryGetDbClient } from '../localDb/client/current.js';
 
 const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
 // cindy-media currently ingests buffers. Keep the recording ceiling bounded to
@@ -26,11 +30,16 @@ const RECORDING_STOP_TIMEOUT_MS = 5_000;
 const RECORDING_TERM_TIMEOUT_MS = 1_000;
 const RECORDING_KILL_TIMEOUT_MS = 500;
 const RECORDING_DISCARD_KILL_TIMEOUT_MS = 500;
+const RECORDING_INGEST_TIMEOUT_MS = 30_000;
+
+type IOSSimulatorMediaIngest = (params: IngestMediaParams) => Promise<IngestedMedia>;
 
 export interface IOSSimulatorMediaCaptureOptions {
   commandRunner?: IOSSimulatorCommandRunner;
-  ingest?: typeof ingestMedia;
+  ingest?: IOSSimulatorMediaIngest;
   recordingLauncher?: IOSSimulatorRecordingLauncher;
+  getOwnerScopeKey?: () => string;
+  isOwnerScopeCurrent?: (ownerScopeKey: string) => boolean;
 }
 
 export interface IOSSimulatorRecordingProcess {
@@ -64,6 +73,27 @@ interface ActiveRecording {
   phase: 'active' | 'finalizing';
   discardRequested: boolean;
   discardSignalSent: boolean;
+  discarded: Promise<void>;
+  resolveDiscarded(): void;
+  sessionEpoch: number;
+  instanceEpoch: number;
+  ownerScopeKey: string;
+  ingestDb: LedgerDb | null;
+}
+
+interface IOSSimulatorMediaOwnerScope {
+  ownerScopeKey: string;
+  ingestDb: LedgerDb | null;
+}
+
+interface ActiveScreenshotRequest {
+  sessionId: string;
+  instanceId: string;
+  sessionEpoch: number;
+  ownerScope: IOSSimulatorMediaOwnerScope;
+  cancelled: boolean;
+  cancelledSignal: Promise<void>;
+  resolveCancelled(): void;
 }
 
 function isProcessGroupAlive(pid: number, leaderClosed: boolean): boolean {
@@ -193,31 +223,332 @@ async function terminateRecordingProcess(
 /** Explicit simulator media capture. Transient stream frames never enter this path. */
 export class IOSSimulatorMediaCapture {
   readonly #runner: IOSSimulatorCommandRunner;
-  readonly #ingest: typeof ingestMedia;
+  readonly #customIngest: IOSSimulatorMediaIngest | null;
+  readonly #getOwnerScopeKey: () => string;
+  readonly #isOwnerScopeCurrent: (ownerScopeKey: string) => boolean;
   readonly #recordingLauncher: IOSSimulatorRecordingLauncher;
   readonly #recordings = new Map<string, ActiveRecording>();
-  #recordingOperationTail: Promise<void> = Promise.resolve();
+  readonly #recordingOperationTails = new Map<string, Promise<void>>();
+  readonly #screenshotRequestsBySession = new Map<string, Set<ActiveScreenshotRequest>>();
+  readonly #rawIngestsBySession = new Map<string, Set<Promise<void>>>();
+  readonly #rawIngestsByInstance = new Map<string, Set<Promise<void>>>();
+  readonly #instanceSessions = new Map<string, string>();
+  readonly #sessionEpochs = new Map<string, number>();
+  readonly #instanceEpochs = new Map<string, number>();
+  #ingestPoisoned = false;
   #closed = false;
 
   constructor(options: IOSSimulatorMediaCaptureOptions = {}) {
     this.#runner = options.commandRunner ?? createNodeIOSSimulatorCommandRunner();
-    this.#ingest = options.ingest ?? ingestMedia;
+    this.#customIngest = options.ingest ?? null;
+    this.#getOwnerScopeKey = options.getOwnerScopeKey ?? activeOwnerScopeKey;
+    this.#isOwnerScopeCurrent =
+      options.isOwnerScopeCurrent ??
+      ((ownerScopeKey) =>
+        !isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScopeKey);
     this.#recordingLauncher = options.recordingLauncher ?? createRecordingLauncher();
   }
 
-  #serializeRecordingOperation<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.#recordingOperationTail.then(operation, operation);
-    this.#recordingOperationTail = result.then(
+  #captureOwnerScope(): IOSSimulatorMediaOwnerScope {
+    return {
+      ownerScopeKey: this.#getOwnerScopeKey(),
+      ingestDb: this.#customIngest ? null : (tryGetDbClient()?.drizzle ?? null),
+    };
+  }
+
+  #assertOwnerScopeCurrent(scope: IOSSimulatorMediaOwnerScope): void {
+    if (!this.#isOwnerScopeCurrent(scope.ownerScopeKey)) {
+      throw new IOSSimulatorInstanceError(
+        'RECORDING_NOT_FOUND',
+        'The simulator media request was cancelled because its data owner changed.',
+        true,
+      );
+    }
+  }
+
+  #assertScreenshotCurrent(request: ActiveScreenshotRequest): void {
+    if (
+      this.#closed ||
+      this.#ingestPoisoned ||
+      request.cancelled ||
+      this.#epoch(this.#sessionEpochs, request.sessionId) !== request.sessionEpoch
+    ) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The simulator screenshot was cancelled while its task was closing.',
+        true,
+      );
+    }
+    this.#assertOwnerScopeCurrent(request.ownerScope);
+  }
+
+  #ingestMedia(
+    params: IngestMediaParams,
+    scope: IOSSimulatorMediaOwnerScope,
+  ): Promise<IngestedMedia> {
+    const callerGuard = params.assertStillValid;
+    const guardedParams: IngestMediaParams = {
+      ...params,
+      assertStillValid: () => {
+        this.#assertOwnerScopeCurrent(scope);
+        callerGuard?.();
+      },
+    };
+    guardedParams.assertStillValid?.();
+    if (this.#customIngest) return this.#customIngest(guardedParams);
+    if (!scope.ingestDb) {
+      throw new IOSSimulatorInstanceError(
+        'RECORDING_FAILED',
+        'The simulator media database is not ready.',
+        true,
+      );
+    }
+    return ingestMedia(
+      {
+        ...guardedParams,
+        refCompensationScope: captureMediaRefCompensationScope(scope.ownerScopeKey),
+      },
+      scope.ingestDb,
+    );
+  }
+
+  #serializeRecordingOperation<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#recordingOperationTails.get(sessionId) ?? Promise.resolve();
+    const result = previous.then(operation, operation);
+    const tail = result.then(
       () => undefined,
       () => undefined,
     );
+    this.#recordingOperationTails.set(sessionId, tail);
+    void tail.then(() => {
+      if (this.#recordingOperationTails.get(sessionId) === tail) {
+        this.#recordingOperationTails.delete(sessionId);
+      }
+    });
     return result;
   }
 
-  #requestDiscard(instanceId?: string): void {
-    for (const recording of this.#recordings.values()) {
-      if (instanceId && recording.instanceId !== instanceId) continue;
+  #epoch(epochs: Map<string, number>, key: string): number {
+    return epochs.get(key) ?? 0;
+  }
+
+  #advanceEpoch(epochs: Map<string, number>, key: string): void {
+    epochs.set(key, this.#epoch(epochs, key) + 1);
+  }
+
+  #assertRecordingCurrent(recording: ActiveRecording): void {
+    if (
+      this.#closed ||
+      this.#ingestPoisoned ||
+      recording.discardRequested ||
+      this.#epoch(this.#sessionEpochs, recording.sessionId) !== recording.sessionEpoch ||
+      this.#epoch(this.#instanceEpochs, recording.instanceId) !== recording.instanceEpoch ||
+      !this.#isOwnerScopeCurrent(recording.ownerScopeKey)
+    ) {
+      throw new IOSSimulatorInstanceError(
+        'RECORDING_NOT_FOUND',
+        'The simulator recording was discarded while its task or instance was closing.',
+        true,
+      );
+    }
+  }
+
+  #markDiscardRequested(recording: ActiveRecording): void {
+    if (!recording.discardRequested) {
       recording.discardRequested = true;
+      recording.resolveDiscarded();
+    }
+  }
+
+  #awaitRecordingIngest(
+    recording: ActiveRecording,
+    operation: Promise<IngestedMedia>,
+  ): Promise<IngestedMedia> {
+    return new Promise<IngestedMedia>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      };
+      const timer = setTimeout(() => {
+        this.#ingestPoisoned = true;
+        this.#markDiscardRequested(recording);
+        finish(() =>
+          reject(
+            new IOSSimulatorInstanceError(
+              'RECORDING_FAILED',
+              'The simulator recording could not be saved before the bounded timeout.',
+              true,
+            ),
+          ),
+        );
+      }, RECORDING_INGEST_TIMEOUT_MS);
+      void recording.discarded.then(() => {
+        finish(() => {
+          try {
+            this.#assertRecordingCurrent(recording);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      void operation.then(
+        (result) => finish(() => resolve(result)),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  #trackRawIngest(
+    sessionId: string,
+    instanceId: string,
+    operation: Promise<IngestedMedia>,
+  ): Promise<IngestedMedia> {
+    const completion = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    const sessionSet = this.#rawIngestsBySession.get(sessionId) ?? new Set();
+    const instanceSet = this.#rawIngestsByInstance.get(instanceId) ?? new Set();
+    sessionSet.add(completion);
+    instanceSet.add(completion);
+    this.#rawIngestsBySession.set(sessionId, sessionSet);
+    this.#rawIngestsByInstance.set(instanceId, instanceSet);
+    void completion.then(() => {
+      sessionSet.delete(completion);
+      instanceSet.delete(completion);
+      if (sessionSet.size === 0) this.#rawIngestsBySession.delete(sessionId);
+      if (instanceSet.size === 0) this.#rawIngestsByInstance.delete(instanceId);
+    });
+    return operation;
+  }
+
+  #awaitScreenshotRequest(
+    request: ActiveScreenshotRequest,
+    operation: Promise<IngestedMedia>,
+  ): Promise<IngestedMedia> {
+    return new Promise<IngestedMedia>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        callback();
+      };
+      void request.cancelledSignal.then(() => {
+        finish(() => {
+          try {
+            this.#assertScreenshotCurrent(request);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      void operation.then(
+        (result) =>
+          finish(() => {
+            try {
+              this.#assertScreenshotCurrent(request);
+              resolve(result);
+            } catch (error) {
+              reject(error);
+            }
+          }),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  #awaitScreenshotIngest(
+    request: ActiveScreenshotRequest,
+    operation: Promise<IngestedMedia>,
+  ): Promise<IngestedMedia> {
+    return new Promise<IngestedMedia>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      };
+      const timer = setTimeout(() => {
+        this.#ingestPoisoned = true;
+        request.cancelled = true;
+        finish(() =>
+          reject(
+            new IOSSimulatorInstanceError(
+              'SCREENSHOT_CAPTURE_FAILED',
+              'The simulator screenshot could not be saved before the bounded timeout.',
+              true,
+            ),
+          ),
+        );
+      }, RECORDING_INGEST_TIMEOUT_MS);
+      void request.cancelledSignal.then(() => {
+        finish(() => {
+          try {
+            this.#assertScreenshotCurrent(request);
+          } catch (error) {
+            reject(error);
+          }
+        });
+      });
+      void operation.then(
+        (result) => finish(() => resolve(result)),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  #requestScreenshotDiscard(
+    matches: (request: ActiveScreenshotRequest) => boolean = () => true,
+  ): ActiveScreenshotRequest[] {
+    const requests = Array.from(this.#screenshotRequestsBySession.values())
+      .flatMap((items) => [...items])
+      .filter(matches);
+    for (const request of requests) {
+      if (request.cancelled) continue;
+      request.cancelled = true;
+      request.resolveCancelled();
+    }
+    return requests;
+  }
+
+  #awaitRawIngestQuiescence(operations: Iterable<Promise<void>>, scope: string): Promise<void> {
+    const pending = [...operations];
+    if (pending.length === 0) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      };
+      const timer = setTimeout(() => {
+        this.#ingestPoisoned = true;
+        finish(() =>
+          reject(
+            new IOSSimulatorInstanceError(
+              'RECORDING_FAILED',
+              `The simulator recording store did not become idle before ${scope} cleanup timed out.`,
+              true,
+            ),
+          ),
+        );
+      }, RECORDING_INGEST_TIMEOUT_MS);
+      void Promise.all(pending).then(
+        () => finish(resolve),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  #requestDiscard(matches: (recording: ActiveRecording) => boolean = () => true): void {
+    for (const recording of this.#recordings.values()) {
+      if (!matches(recording)) continue;
+      this.#markDiscardRequested(recording);
       if (!recording.discardSignalSent) {
         recording.discardSignalSent = true;
         // Discard never preserves the MOV. Kill immediately so one finalizing
@@ -227,24 +558,36 @@ export class IOSSimulatorMediaCapture {
     }
   }
 
-  async #discardMatching(instanceId?: string): Promise<void> {
-    const recordings = Array.from(this.#recordings.values()).filter(
-      (recording) => !instanceId || recording.instanceId === instanceId,
-    );
+  async #discardMatching(
+    matches: (recording: ActiveRecording) => boolean = () => true,
+  ): Promise<void> {
+    const recordings = Array.from(this.#recordings.values()).filter(matches);
+    const stuckRecordingIds: string[] = [];
     await Promise.all(
       recordings.map(async (recording) => {
-        try {
-          if (recording.discardSignalSent) {
-            await waitForRecordingExit(recording.process, RECORDING_KILL_TIMEOUT_MS);
-          } else {
-            await terminateRecordingProcess(recording.process, 'discard');
-          }
-        } finally {
-          this.#recordings.delete(recording.recordingId);
-          await rm(recording.tempRoot, { recursive: true, force: true });
+        const exited = recording.discardSignalSent
+          ? await waitForRecordingExit(recording.process, RECORDING_KILL_TIMEOUT_MS)
+          : (await terminateRecordingProcess(recording.process, 'discard')) !== 'stuck';
+        if (!exited) {
+          // Keep the process and temp path tracked so a later lifecycle pass can
+          // retry SIGKILL. Clearing the signal latch lets #requestDiscard send
+          // another kill instead of treating the first unconfirmed signal as
+          // completed cleanup.
+          recording.discardSignalSent = false;
+          stuckRecordingIds.push(recording.recordingId);
+          return;
         }
+        this.#recordings.delete(recording.recordingId);
+        await rm(recording.tempRoot, { recursive: true, force: true });
       }),
     );
+    if (stuckRecordingIds.length > 0) {
+      throw new IOSSimulatorInstanceError(
+        'RECORDING_FAILED',
+        'One or more simulator recording processes did not confirm exit after SIGKILL.',
+        true,
+      );
+    }
   }
 
   async captureScreenshotBytes(
@@ -286,21 +629,58 @@ export class IOSSimulatorMediaCapture {
   }
 
   async takeScreenshot(input: IOSSimulatorScreenshotInput): Promise<IngestedMedia> {
-    const buffer = await this.captureScreenshotBytes(input);
-    return this.#ingest({
-      buffer,
-      mimeType: 'image/png',
-      refs: [
-        {
-          refKind: 'session-attachment',
-          refId: `ios-simulator:${input.instanceId}:${randomUUID()}`,
-          originSessionId: input.sessionId,
-          originKind: input.source === 'agent' ? 'tool' : 'user',
-          originId: input.instanceId,
-          label: 'iOS Simulator screenshot',
-        },
-      ],
-    });
+    const ownerScope = this.#captureOwnerScope();
+    let resolveCancelled: () => void = () => undefined;
+    const request: ActiveScreenshotRequest = {
+      sessionId: input.sessionId,
+      instanceId: input.instanceId,
+      sessionEpoch: this.#epoch(this.#sessionEpochs, input.sessionId),
+      ownerScope,
+      cancelled: false,
+      cancelledSignal: new Promise<void>((resolve) => {
+        resolveCancelled = resolve;
+      }),
+      resolveCancelled: () => resolveCancelled(),
+    };
+    const requests = this.#screenshotRequestsBySession.get(input.sessionId) ?? new Set();
+    requests.add(request);
+    this.#screenshotRequestsBySession.set(input.sessionId, requests);
+    const operation = (async (): Promise<IngestedMedia> => {
+      this.#assertScreenshotCurrent(request);
+      const buffer = await this.captureScreenshotBytes(input);
+      this.#assertScreenshotCurrent(request);
+      const ingestOperation = this.#trackRawIngest(
+        input.sessionId,
+        input.instanceId,
+        this.#ingestMedia(
+          {
+            buffer,
+            mimeType: 'image/png',
+            refs: [
+              {
+                refKind: 'session-attachment',
+                refId: input.sessionId,
+                originSessionId: input.sessionId,
+                originKind: input.source === 'agent' ? 'tool' : 'user',
+                originId: input.instanceId,
+                label: 'iOS Simulator screenshot',
+              },
+            ],
+            assertStillValid: () => this.#assertScreenshotCurrent(request),
+          },
+          ownerScope,
+        ),
+      );
+      const ingested = await this.#awaitScreenshotIngest(request, ingestOperation);
+      this.#assertScreenshotCurrent(request);
+      return ingested;
+    })();
+    try {
+      return await this.#awaitScreenshotRequest(request, operation);
+    } finally {
+      requests.delete(request);
+      if (requests.size === 0) this.#screenshotRequestsBySession.delete(input.sessionId);
+    }
   }
 
   async startRecording(input: {
@@ -310,11 +690,34 @@ export class IOSSimulatorMediaCapture {
     generation: number;
     source: 'agent' | 'user';
   }): Promise<{ recordingId: string; startedAt: string }> {
-    return this.#serializeRecordingOperation(async () => {
-      if (this.#closed) {
+    if (this.#ingestPoisoned) {
+      throw new IOSSimulatorInstanceError(
+        'RECORDING_FAILED',
+        'The simulator media store is unavailable until Cindy restarts.',
+        true,
+      );
+    }
+    const ownerScope = this.#captureOwnerScope();
+    this.#assertOwnerScopeCurrent(ownerScope);
+    const sessionEpoch = this.#epoch(this.#sessionEpochs, input.sessionId);
+    const instanceEpoch = this.#epoch(this.#instanceEpochs, input.instanceId);
+    this.#instanceSessions.set(input.instanceId, input.sessionId);
+    return this.#serializeRecordingOperation(input.sessionId, async () => {
+      if (this.#closed || this.#ingestPoisoned) {
         throw new IOSSimulatorInstanceError(
           'RECORDING_FAILED',
           'The simulator media service is shutting down.',
+          true,
+        );
+      }
+      this.#assertOwnerScopeCurrent(ownerScope);
+      if (
+        this.#epoch(this.#sessionEpochs, input.sessionId) !== sessionEpoch ||
+        this.#epoch(this.#instanceEpochs, input.instanceId) !== instanceEpoch
+      ) {
+        throw new IOSSimulatorInstanceError(
+          'RECORDING_NOT_FOUND',
+          'The simulator recording request was cancelled while its task or instance was closing.',
           true,
         );
       }
@@ -330,13 +733,23 @@ export class IOSSimulatorMediaCapture {
       const videoPath = path.join(tempRoot, 'recording.mov');
       const recordingId = randomUUID();
       try {
-        if (this.#closed) {
+        if (
+          this.#closed ||
+          this.#ingestPoisoned ||
+          this.#epoch(this.#sessionEpochs, input.sessionId) !== sessionEpoch ||
+          this.#epoch(this.#instanceEpochs, input.instanceId) !== instanceEpoch
+        ) {
           throw new IOSSimulatorInstanceError(
-            'RECORDING_FAILED',
-            'The simulator media service is shutting down.',
+            'RECORDING_NOT_FOUND',
+            'The simulator recording request was cancelled while its task or instance was closing.',
             true,
           );
         }
+        this.#assertOwnerScopeCurrent(ownerScope);
+        let resolveDiscarded: () => void = () => undefined;
+        const discarded = new Promise<void>((resolve) => {
+          resolveDiscarded = resolve;
+        });
         const process = this.#recordingLauncher.launch([
           'simctl',
           'io',
@@ -354,6 +767,12 @@ export class IOSSimulatorMediaCapture {
           phase: 'active',
           discardRequested: false,
           discardSignalSent: false,
+          discarded,
+          resolveDiscarded,
+          sessionEpoch,
+          instanceEpoch,
+          ownerScopeKey: ownerScope.ownerScopeKey,
+          ingestDb: ownerScope.ingestDb,
         });
         return { recordingId, startedAt: new Date().toISOString() };
       } catch (error) {
@@ -369,7 +788,7 @@ export class IOSSimulatorMediaCapture {
     instanceId: string;
     generation: number;
   }): Promise<IngestedMedia> {
-    return this.#serializeRecordingOperation(async () => {
+    return this.#serializeRecordingOperation(input.sessionId, async () => {
       const recording = this.#recordings.get(input.recordingId);
       if (
         !recording ||
@@ -383,8 +802,10 @@ export class IOSSimulatorMediaCapture {
         );
       }
       recording.phase = 'finalizing';
+      let processExitConfirmed = false;
       try {
         const termination = await terminateRecordingProcess(recording.process, 'finalize');
+        processExitConfirmed = termination !== 'stuck';
         if (termination !== 'finalized') {
           throw new IOSSimulatorInstanceError(
             'RECORDING_FAILED',
@@ -394,13 +815,7 @@ export class IOSSimulatorMediaCapture {
             true,
           );
         }
-        if (recording.discardRequested || this.#closed) {
-          throw new IOSSimulatorInstanceError(
-            'RECORDING_NOT_FOUND',
-            'The simulator recording was discarded while its instance was closing.',
-            true,
-          );
-        }
+        this.#assertRecordingCurrent(recording);
         const info = await stat(recording.videoPath);
         if (!info.isFile() || info.size <= 0 || info.size > MAX_BUFFERED_RECORDING_BYTES) {
           throw new IOSSimulatorInstanceError(
@@ -409,44 +824,113 @@ export class IOSSimulatorMediaCapture {
           );
         }
         const buffer = await readFile(recording.videoPath);
-        return await this.#ingest({
-          buffer,
-          mimeType: 'video/quicktime',
-          refs: [
+        this.#assertRecordingCurrent(recording);
+        const ingestOperation = this.#trackRawIngest(
+          recording.sessionId,
+          recording.instanceId,
+          this.#ingestMedia(
             {
-              refKind: 'session-attachment',
-              refId: `ios-simulator:${recording.instanceId}:${recording.recordingId}`,
-              originSessionId: recording.sessionId,
-              originKind: recording.source === 'agent' ? 'tool' : 'user',
-              originId: recording.instanceId,
-              label: 'iOS Simulator recording',
+              buffer,
+              mimeType: 'video/quicktime',
+              refs: [
+                {
+                  refKind: 'session-attachment',
+                  refId: recording.sessionId,
+                  originSessionId: recording.sessionId,
+                  originKind: recording.source === 'agent' ? 'tool' : 'user',
+                  originId: recording.instanceId,
+                  label: 'iOS Simulator recording',
+                },
+              ],
+              assertStillValid: () => this.#assertRecordingCurrent(recording),
             },
-          ],
-        });
+            {
+              ownerScopeKey: recording.ownerScopeKey,
+              ingestDb: recording.ingestDb,
+            },
+          ),
+        );
+        return await this.#awaitRecordingIngest(recording, ingestOperation);
       } finally {
-        this.#recordings.delete(recording.recordingId);
-        await rm(recording.tempRoot, { recursive: true, force: true });
+        if (processExitConfirmed) {
+          this.#recordings.delete(recording.recordingId);
+          await rm(recording.tempRoot, { recursive: true, force: true });
+        }
       }
     });
   }
 
   async discardInstance(instanceId: string): Promise<void> {
-    this.#requestDiscard(instanceId);
-    return this.#serializeRecordingOperation(() => this.#discardMatching(instanceId));
+    const matches = (recording: ActiveRecording) => recording.instanceId === instanceId;
+    let sessionId = this.#instanceSessions.get(instanceId);
+    this.#advanceEpoch(this.#instanceEpochs, instanceId);
+    const screenshotRequests = this.#requestScreenshotDiscard(
+      (request) => request.instanceId === instanceId,
+    );
+    sessionId ??= screenshotRequests[0]?.sessionId;
+    this.#requestDiscard(matches);
+    if (!sessionId) {
+      await this.#discardMatching(matches);
+      await this.#awaitRawIngestQuiescence(
+        this.#rawIngestsByInstance.get(instanceId) ?? [],
+        'instance',
+      );
+      return;
+    }
+    return this.#serializeRecordingOperation(sessionId, async () => {
+      await this.#discardMatching(matches);
+      await this.#awaitRawIngestQuiescence(
+        this.#rawIngestsByInstance.get(instanceId) ?? [],
+        'instance',
+      );
+      this.#instanceSessions.delete(instanceId);
+    });
+  }
+
+  async discardSession(sessionId: string): Promise<void> {
+    const matches = (recording: ActiveRecording) => recording.sessionId === sessionId;
+    this.#advanceEpoch(this.#sessionEpochs, sessionId);
+    this.#requestScreenshotDiscard((request) => request.sessionId === sessionId);
+    this.#requestDiscard(matches);
+    return this.#serializeRecordingOperation(sessionId, async () => {
+      await this.#discardMatching(matches);
+      await this.#awaitRawIngestQuiescence(this.#rawIngestsBySession.get(sessionId) ?? [], 'task');
+      for (const [instanceId, boundSessionId] of this.#instanceSessions) {
+        if (boundSessionId === sessionId) this.#instanceSessions.delete(instanceId);
+      }
+    });
   }
 
   /** Graceful Host teardown closes the gate before waiting for in-flight starts. */
   async dispose(): Promise<void> {
     this.#closed = true;
+    this.#requestScreenshotDiscard();
     this.#requestDiscard();
-    return this.#serializeRecordingOperation(() => this.#discardMatching());
+    await Promise.all([...this.#recordingOperationTails.values()]);
+    const rawIngestQuiescence = this.#awaitRawIngestQuiescence(
+      Array.from(this.#rawIngestsBySession.values()).flatMap((operations) => [...operations]),
+      'host',
+    ).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    let firstError: unknown = null;
+    try {
+      await this.#discardMatching();
+    } catch (error) {
+      firstError = error;
+    }
+    firstError ??= await rawIngestQuiescence;
+    this.#instanceSessions.clear();
+    if (firstError) throw firstError;
   }
 
   /** Updater force-quit cannot await cleanup, so synchronously kill every group. */
   abortOperationsForExit(): void {
     this.#closed = true;
+    this.#requestScreenshotDiscard();
     for (const recording of this.#recordings.values()) {
-      recording.discardRequested = true;
+      this.#markDiscardRequested(recording);
       if (!recording.discardSignalSent) {
         recording.discardSignalSent = true;
         signalRecordingProcess(recording.process, 'SIGKILL');

@@ -19,6 +19,7 @@ import { permissionModeOrAsk } from '@cindy/maker-shared/permission-mode';
 import { getDbClient } from '../../localDb/client/current';
 import { normalizeDbAgentKind } from '../../../shared/agentKindConversion';
 import { sessions } from '../../localDb/schema';
+import { withSessionRouteLock } from '../../localDb/sessionRouteLock';
 import { createLogger, maskPath } from '../../logger';
 import { setSessionProvider } from '../../maker-host/session-provider-store';
 import {
@@ -118,10 +119,12 @@ export function createImSessionRepo(
     async findActiveSession(botContextId, userId, scopeKey) {
       const id = ns.sessionIdFor(botContextId, userId, scopeKey);
       const db = getDbClient().drizzle;
-      const rows = await db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
-      const row = rows[0];
-      if (!row) return null;
-      if (row.status !== 'active') {
+      const result = await withSessionRouteLock(id, async () => {
+        const rows = await db.select().from(sessions).where(eq(sessions.id, id)).limit(1);
+        const row = rows[0];
+        if (!row) return { row: null, revivedFrom: null };
+        if (row.status === 'active') return { row, revivedFrom: null };
+
         // 复活由用户 IM 消息触发,一并 bump userSendAt:广播 created 后 renderer
         // 立即重拉,而稍后 turnRunner 的 touchUserSent 不再广播 patched,不在这里
         // 写的话 sidebar 会按旧活跃时间排序/分组,直到下次整页刷新。
@@ -136,7 +139,14 @@ export function createImSessionRepo(
             ...(ns.workspaceKind ? { workspaceKind: ns.workspaceKind } : {}),
           })
           .where(eq(sessions.id, id));
-        log.info(`revived soft-deleted ${ns.source} session id=${row.id} (was ${row.status})`);
+        return { row, revivedFrom: row.status };
+      });
+      const row = result.row;
+      if (!row) return null;
+      if (result.revivedFrom) {
+        log.info(
+          `revived soft-deleted ${ns.source} session id=${row.id} (was ${result.revivedFrom})`,
+        );
         // 软删行已从 sidebar 消失,patched 增量对不存在的行无效;
         // created 触发 renderer 重拉列表,让会话重新出现。
         broadcastSessionCreated(row.id);
@@ -181,48 +191,50 @@ export function createImSessionRepo(
       const db = getDbClient().drizzle;
       const row = prepared ?? (await this.prepareNewSession(botContextId, userId, scopeKey));
       const now = Date.now();
-      await db
-        .insert(sessions)
-        .values({
-          id: row.id,
-          title: ns.defaultTitle(userId),
-          ...(ns.workspaceKind ? { workspaceKind: ns.workspaceKind } : {}),
-          workingDir: row.workingDir,
-          model: row.model,
-          effort: row.effort,
-          permissionMode: row.permissionMode,
-          fastMode: row.fastMode,
-          status: 'active',
-          agentKind: toDbAgentKind(row.agentKind),
-          providerId: row.providerId,
-          source: ns.source,
-          ...ns.extraInsertColumns(botContextId, userId),
-          createdAt: now,
-          updatedAt: now,
-          // IM 会话由用户消息触发创建,插入时即设 userSendAt,
-          // 避免广播后 renderer 重拉到 userSendAt=null 的行被误判为草稿。
-          userSendAt: now,
-        })
-        .onConflictDoUpdate({
-          target: sessions.id,
-          set: {
-            status: 'active',
-            source: ns.source,
+      const persisted = await withSessionRouteLock(row.id, async () => {
+        await db
+          .insert(sessions)
+          .values({
+            id: row.id,
+            title: ns.defaultTitle(userId),
             ...(ns.workspaceKind ? { workspaceKind: ns.workspaceKind } : {}),
+            workingDir: row.workingDir,
+            model: row.model,
+            effort: row.effort,
+            permissionMode: row.permissionMode,
+            fastMode: row.fastMode,
+            status: 'active',
+            agentKind: toDbAgentKind(row.agentKind),
+            providerId: row.providerId,
+            source: ns.source,
             ...ns.extraInsertColumns(botContextId, userId),
+            createdAt: now,
             updatedAt: now,
+            // IM 会话由用户消息触发创建,插入时即设 userSendAt,
+            // 避免广播后 renderer 重拉到 userSendAt=null 的行被误判为草稿。
             userSendAt: now,
-          },
-        });
-      // upsert 可能走冲突分支(残留行的 sdkSessionId / 模型 / 权限被刻意保留),
-      // 返回值必须以 DB 持久化结果为准——直接返回 prepared 默认值会让 turn 拿
-      // sdkSessionId=null 新开对话,而 DB 里旧上下文仍标记 active,两边失配。
-      const persistedRows = await db
-        .select()
-        .from(sessions)
-        .where(eq(sessions.id, row.id))
-        .limit(1);
-      const persisted = persistedRows[0];
+          })
+          .onConflictDoUpdate({
+            target: sessions.id,
+            set: {
+              status: 'active',
+              source: ns.source,
+              ...(ns.workspaceKind ? { workspaceKind: ns.workspaceKind } : {}),
+              ...ns.extraInsertColumns(botContextId, userId),
+              updatedAt: now,
+              userSendAt: now,
+            },
+          });
+        // upsert 可能走冲突分支(残留行的 sdkSessionId / 模型 / 权限被刻意保留),
+        // 返回值必须以 DB 持久化结果为准——直接返回 prepared 默认值会让 turn 拿
+        // sdkSessionId=null 新开对话,而 DB 里旧上下文仍标记 active,两边失配。
+        const persistedRows = await db
+          .select()
+          .from(sessions)
+          .where(eq(sessions.id, row.id))
+          .limit(1);
+        return persistedRows[0];
+      });
       const result: ImSessionRow = persisted
         ? {
             id: persisted.id,

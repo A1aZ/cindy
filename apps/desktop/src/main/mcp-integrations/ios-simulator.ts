@@ -150,6 +150,7 @@ export type IOSSimulatorMediaCaptureAdapter = Pick<
   | 'startRecording'
   | 'stopRecording'
   | 'discardInstance'
+  | 'discardSession'
 > &
   Partial<Pick<IOSSimulatorMediaCapture, 'dispose' | 'abortOperationsForExit'>>;
 
@@ -814,12 +815,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     resolveSettled: () => void;
   };
   const activeBuilds = new Map<string, ActiveBuild>();
-  const sessionBuildAdmissionEpochs = new Map<string, number>();
+  const sessionOperationAdmissionEpochs = new Map<string, number>();
   const blockedBuildInstances = new Set<string>();
-  const instanceLifecycleBarriers = new Map<
-    string,
-    { epoch: number; pendingTeardowns: number }
-  >();
+  const instanceLifecycleBarriers = new Map<string, { epoch: number; pendingTeardowns: number }>();
   const mediaCapture = options.mediaCapture ?? new IOSSimulatorMediaCapture();
   const visualBaselines = new Map<
     string,
@@ -890,15 +888,21 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     errorCode: 'IOS_SIMULATOR_HOST_ERROR',
     message: 'The iOS Simulator host is shutting down.',
   });
+  function assertSessionOperationAdmission(
+    sessionId: string,
+    expectedEpoch: number,
+    operation: 'app build' | 'screenshot' | 'screen recording',
+  ): void {
+    if ((sessionOperationAdmissionEpochs.get(sessionId) ?? 0) === expectedEpoch) return;
+    throw new IOSSimulatorInstanceError(
+      'MUTATION_CANCELLED',
+      `The ${operation} was cancelled because its Cindy task lifecycle changed.`,
+      true,
+    );
+  }
   function beginBuild(instance: IOSSimulatorInstance, expectedSessionEpoch: number): ActiveBuild {
     if (disposePromise) throw new IOSSimulatorHostDisposedError();
-    if ((sessionBuildAdmissionEpochs.get(instance.sessionId) ?? 0) !== expectedSessionEpoch) {
-      throw new IOSSimulatorInstanceError(
-        'MUTATION_CANCELLED',
-        'The app build was cancelled because its Cindy task lifecycle changed.',
-        true,
-      );
-    }
+    assertSessionOperationAdmission(instance.sessionId, expectedSessionEpoch, 'app build');
     if (blockedBuildInstances.has(instance.instanceId)) {
       throw new IOSSimulatorInstanceError(
         'MUTATION_CANCELLED',
@@ -936,14 +940,29 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     build.controller.abort();
     await build.settled;
   }
-  async function cancelSessionBuilds(sessionId: string): Promise<void> {
-    sessionBuildAdmissionEpochs.set(
+  async function cancelSessionBuildsAndRecordings(sessionId: string): Promise<void> {
+    sessionOperationAdmissionEpochs.set(
       sessionId,
-      (sessionBuildAdmissionEpochs.get(sessionId) ?? 0) + 1,
+      (sessionOperationAdmissionEpochs.get(sessionId) ?? 0) + 1,
     );
     const builds = [...activeBuilds.entries()].filter(([, build]) => build.sessionId === sessionId);
     for (const [, build] of builds) build.controller.abort();
-    await Promise.all(builds.map(([, build]) => build.settled));
+    const results = await Promise.allSettled([
+      ...builds.map(([, build]) => build.settled),
+      mediaCapture.discardSession(sessionId),
+    ]);
+    // Admission is already closed above, so a recorder cleanup failure must not
+    // strand the whole task archive/delete (or an Orca shutdown) halfway through.
+    // The media adapter keeps its own failed process state for later lifecycle
+    // reconciliation; here we only wait for every build/cleanup attempt to settle
+    // and surface diagnostics without reopening task-owned mutations.
+    for (const result of results) {
+      if (result.status !== 'rejected') continue;
+      logger.warn('iOS Simulator task-owned operation cleanup failed', {
+        sessionId,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    }
   }
   function lifecycleBarrier(instanceId: string): { epoch: number; pendingTeardowns: number } {
     return instanceLifecycleBarriers.get(instanceId) ?? { epoch: 0, pendingTeardowns: 0 };
@@ -974,6 +993,31 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       );
     }
     return current.epoch;
+  }
+  function captureInstanceOperationAdmission(instanceId: string, operation: string): number {
+    const current = lifecycleBarrier(instanceId);
+    if (current.pendingTeardowns > 0) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        `The simulator ${operation} was cancelled because its lifecycle is changing.`,
+        true,
+      );
+    }
+    return current.epoch;
+  }
+  function assertInstanceOperationAdmission(
+    instanceId: string,
+    expectedEpoch: number,
+    operation: string,
+  ): void {
+    const current = lifecycleBarrier(instanceId);
+    if (current.epoch !== expectedEpoch || current.pendingTeardowns > 0) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        `The simulator ${operation} was cancelled because its lifecycle changed.`,
+        true,
+      );
+    }
   }
   function completeInstanceActivation(instance: IOSSimulatorInstance, expectedEpoch: number): void {
     const current = lifecycleBarrier(instance.instanceId);
@@ -1921,10 +1965,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (session.remoteHostId || !device) {
           const runtimeReleased = await releaseInstanceRuntime(instance);
-          if (
-            runtimeReleased &&
-            (!device || device.state.trim().toLowerCase() === 'shutdown')
-          ) {
+          if (runtimeReleased && (!device || device.state.trim().toLowerCase() === 'shutdown')) {
             resourceScheduler.markStopped(instance.instanceId);
           }
           actor.reconcile(
@@ -2638,6 +2679,27 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     );
   }
 
+  async function discardInstanceMediaForLifecycle(
+    instanceId: string,
+    operation: 'stop' | 'detach',
+  ): Promise<{ code: 'MEDIA_CLEANUP_INCOMPLETE'; message: string } | null> {
+    try {
+      await mediaCapture.discardInstance(instanceId);
+      return null;
+    } catch (error) {
+      logger.warn('iOS Simulator media cleanup did not finish before lifecycle teardown', {
+        instanceId,
+        operation,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return {
+        code: 'MEDIA_CLEANUP_INCOMPLETE',
+        message:
+          'The simulator lifecycle completed, but pending media cleanup did not finish. Restart Cindy before capturing more simulator media.',
+      };
+    }
+  }
+
   function requireArtifact(
     instance: IOSSimulatorInstance,
     artifactId: string,
@@ -2964,7 +3026,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     revokeRendererViewer(sessionId, viewerWebContentsId) {
       let revoked = 0;
       for (const [instanceId, viewer] of [...viewerSessions]) {
-        if (viewer.sessionId !== sessionId || viewer.webContentsId !== viewerWebContentsId) continue;
+        if (viewer.sessionId !== sessionId || viewer.webContentsId !== viewerWebContentsId)
+          continue;
         revoked += 1;
         try {
           stopViewerMedia(actor.getOwned(sessionId, instanceId));
@@ -3546,7 +3609,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           try {
             await cancelBuild(route.instanceId);
             cancelIdleRecycle(route.instanceId);
-            await mediaCapture.discardInstance(route.instanceId);
+            const mediaCleanupWarning = await discardInstanceMediaForLifecycle(
+              route.instanceId,
+              'stop',
+            );
             clearVisualBaselines(route.instanceId);
             await getDriverManager().stop(route.instanceId);
             screenMaps.clear(route.instanceId);
@@ -3562,7 +3628,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             publishRouteStatusForInstance(stopped, null);
             return {
               ok: true,
-              data: instanceData(stopped),
+              data: {
+                ...instanceData(stopped),
+                ...(mediaCleanupWarning ? { mediaCleanupWarning } : {}),
+              },
             };
           } finally {
             finishInstanceTeardown(route.instanceId);
@@ -3576,7 +3645,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           try {
             await cancelBuild(route.instanceId);
             cancelIdleRecycle(route.instanceId);
-            await mediaCapture.discardInstance(route.instanceId);
+            const mediaCleanupWarning = await discardInstanceMediaForLifecycle(
+              route.instanceId,
+              'detach',
+            );
             clearVisualBaselines(route.instanceId);
             await getDriverManager().stop(route.instanceId);
             screenMaps.clear(route.instanceId);
@@ -3590,9 +3662,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             agentControlLeases.delete(route.instanceId);
             return {
               ok: true,
-              data: instanceData(
-                await actor.detach(route, () => resourceScheduler.markStopped(route.instanceId)),
-              ),
+              data: {
+                ...instanceData(
+                  await actor.detach(route, () => resourceScheduler.markStopped(route.instanceId)),
+                ),
+                ...(mediaCleanupWarning ? { mediaCleanupWarning } : {}),
+              },
             };
           } finally {
             finishInstanceTeardown(route.instanceId);
@@ -4468,7 +4543,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           // between this check and beginBuild: if archival wins first this
           // call fails closed; if beginBuild wins first archival observes and
           // cancels the registered operation.
-          const buildAdmissionEpoch = sessionBuildAdmissionEpochs.get(sessionId) ?? 0;
+          const buildAdmissionEpoch = sessionOperationAdmissionEpochs.get(sessionId) ?? 0;
           const buildSession = await resolveSession(sessionId);
           if (!buildSession.ok) return buildSession;
           assertHostActive();
@@ -4719,9 +4794,27 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           return { ok: true, data: { opened: true } };
         }
         if (name === 'take_screenshot') {
-          const route = readMutationRoute(sessionId, args);
+          const screenshotAdmissionEpoch = sessionOperationAdmissionEpochs.get(sessionId) ?? 0;
+          const screenshotSession = await resolveSession(sessionId);
+          if (!screenshotSession.ok) return screenshotSession;
+          assertHostActive();
+          const route = readMutationRoute(screenshotSession.sessionId, args);
+          const screenshotInstanceEpoch = captureInstanceOperationAdmission(
+            route.instanceId,
+            'screenshot',
+          );
           const captured = await runHostMutation(route, context, async (instance) => {
             requireControlGrant(instance, context);
+            assertSessionOperationAdmission(
+              instance.sessionId,
+              screenshotAdmissionEpoch,
+              'screenshot',
+            );
+            assertInstanceOperationAdmission(
+              instance.instanceId,
+              screenshotInstanceEpoch,
+              'screenshot',
+            );
             return mediaCapture.takeScreenshot({
               simulatorUdid: instance.simulatorUdid,
               sessionId: instance.sessionId,
@@ -4881,9 +4974,31 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           return { ok: true, data: { diagnostics: entry } };
         }
         if (name === 'start_recording') {
-          const route = readMutationRoute(sessionId, args);
+          // Revalidate immediately before the actor queue, then check the
+          // task lifecycle epoch again at the synchronous media-registration
+          // boundary. If cancellation wins first, registration is denied; if
+          // registration wins first, discardSession is queued behind it.
+          const recordingAdmissionEpoch = sessionOperationAdmissionEpochs.get(sessionId) ?? 0;
+          const recordingSession = await resolveSession(sessionId);
+          if (!recordingSession.ok) return recordingSession;
+          assertHostActive();
+          const route = readMutationRoute(recordingSession.sessionId, args);
+          const recordingInstanceEpoch = captureInstanceOperationAdmission(
+            route.instanceId,
+            'screen recording',
+          );
           const recording = await runHostMutation(route, context, async (instance) => {
             requireControlGrant(instance, context);
+            assertSessionOperationAdmission(
+              instance.sessionId,
+              recordingAdmissionEpoch,
+              'screen recording',
+            );
+            assertInstanceOperationAdmission(
+              instance.instanceId,
+              recordingInstanceEpoch,
+              'screen recording',
+            );
             return mediaCapture.startRecording({
               simulatorUdid: instance.simulatorUdid,
               sessionId: instance.sessionId,
@@ -5077,7 +5192,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       }
     },
     cancelSessionOperations(sessionId) {
-      return cancelSessionBuilds(sessionId.trim());
+      return cancelSessionBuildsAndRecordings(sessionId.trim());
     },
     abortOperationsForExit() {
       for (const build of activeBuilds.values()) build.controller.abort();

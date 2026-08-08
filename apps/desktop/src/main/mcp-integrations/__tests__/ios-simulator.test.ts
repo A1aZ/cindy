@@ -895,11 +895,7 @@ describe('iOS Simulator host', () => {
     const shutdownExact = vi
       .fn<() => Promise<void>>()
       .mockRejectedValueOnce(
-        new IOSSimulatorInstanceError(
-          'SIMULATOR_SHUTDOWN_FAILED',
-          'simctl shutdown failed',
-          true,
-        ),
+        new IOSSimulatorInstanceError('SIMULATOR_SHUTDOWN_FAILED', 'simctl shutdown failed', true),
       )
       .mockResolvedValue(undefined);
     const lifecycle: IOSSimulatorSimctlLifecycle = {
@@ -1870,15 +1866,7 @@ describe('iOS Simulator host', () => {
     );
     await vi.waitFor(() => expect(staleViewportDeferred.resolve).not.toBeNull());
     await expect(
-      host.setViewerVisibility(
-        'session-a',
-        route,
-        true,
-        'h264',
-        undefined,
-        88,
-        'viewer-e-current',
-      ),
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 88, 'viewer-e-current'),
     ).resolves.toMatchObject({ ok: true });
     staleViewportDeferred.resolve?.({ width: 393, height: 852 });
     await expect(staleRemount).resolves.toMatchObject({
@@ -1886,15 +1874,7 @@ describe('iOS Simulator host', () => {
       errorCode: 'INSTANCE_NOT_OWNED',
     });
     await expect(
-      host.setViewerVisibility(
-        'session-a',
-        route,
-        false,
-        'h264',
-        undefined,
-        88,
-        'viewer-d-stale',
-      ),
+      host.setViewerVisibility('session-a', route, false, 'h264', undefined, 88, 'viewer-d-stale'),
     ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
 
     await expect(
@@ -3381,12 +3361,17 @@ describe('iOS Simulator host', () => {
       return snapshot;
     });
     const build = vi.fn<IOSSimulatorProjectBuilderAdapter['build']>();
+    const discardSession = vi.fn(async () => undefined);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       getSession,
       projectBuilder: { build },
+      mediaCapture: {
+        discardSession,
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
     });
 
     await host.reconcileOwnership();
@@ -3404,6 +3389,8 @@ describe('iOS Simulator host', () => {
     );
     await finalReadStarted;
     await host.cancelSessionOperations('session-a');
+    expect(discardSession).toHaveBeenCalledOnce();
+    expect(discardSession).toHaveBeenCalledWith('session-a');
     resolveFinalRead();
 
     await expect(buildPromise).resolves.toMatchObject({
@@ -3413,6 +3400,395 @@ describe('iOS Simulator host', () => {
     expect(build).not.toHaveBeenCalled();
     await host.dispose();
   });
+
+  it('does not register a recording after its task cancellation has completed', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    let armed = false;
+    let armedReadCount = 0;
+    let signalFinalRead!: () => void;
+    const finalReadStarted = new Promise<void>((resolve) => {
+      signalFinalRead = resolve;
+    });
+    let resolveFinalRead!: () => void;
+    const getSession = vi.fn(async (id: string) => {
+      const snapshot = { ...localSession(id), status: 'active' as const };
+      if (armed && ++armedReadCount === 2) {
+        signalFinalRead();
+        await new Promise<void>((resolve) => {
+          resolveFinalRead = resolve;
+        });
+      }
+      return snapshot;
+    });
+    const startRecording = vi.fn(async () => ({
+      recordingId: 'late-recording',
+      startedAt: new Date().toISOString(),
+    }));
+    const discardSession = vi.fn(async () => undefined);
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession,
+      mediaCapture: {
+        startRecording,
+        discardSession,
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+
+    await host.reconcileOwnership();
+    const instance = actor.list('session-a')[0]!;
+    armed = true;
+    const recordingPromise = host.callTool(
+      'start_recording',
+      {
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+      },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await finalReadStarted;
+    await host.cancelSessionOperations('session-a');
+    resolveFinalRead();
+
+    await expect(recordingPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    expect(startRecording).not.toHaveBeenCalled();
+    expect(discardSession).toHaveBeenCalledOnce();
+    await host.dispose();
+  });
+
+  it('does not capture a screenshot after its task cancellation has completed', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    let armed = false;
+    let armedReadCount = 0;
+    let signalFinalRead!: () => void;
+    const finalReadStarted = new Promise<void>((resolve) => {
+      signalFinalRead = resolve;
+    });
+    let resolveFinalRead!: () => void;
+    const getSession = vi.fn(async (id: string) => {
+      const snapshot = { ...localSession(id), status: 'active' as const };
+      if (armed && ++armedReadCount === 2) {
+        signalFinalRead();
+        await new Promise<void>((resolve) => {
+          resolveFinalRead = resolve;
+        });
+      }
+      return snapshot;
+    });
+    const takeScreenshot = vi.fn(async () => ({
+      hash: 'a'.repeat(64),
+      ext: '.png',
+      mimeType: 'image/png',
+      bytes: 8,
+      url: `cindy-media://blobs/${'a'.repeat(64)}.png`,
+      deduplicated: false,
+      refIds: ['ref-a'],
+    }));
+    const discardSession = vi.fn(async () => undefined);
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession,
+      mediaCapture: {
+        takeScreenshot,
+        discardSession,
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+
+    await host.reconcileOwnership();
+    const instance = actor.list('session-a')[0]!;
+    armed = true;
+    const screenshotPromise = host.callTool(
+      'take_screenshot',
+      {
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+      },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await finalReadStarted;
+    await host.cancelSessionOperations('session-a');
+    resolveFinalRead();
+
+    await expect(screenshotPromise).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    expect(takeScreenshot).not.toHaveBeenCalled();
+    expect(discardSession).toHaveBeenCalledOnce();
+    await host.dispose();
+  });
+
+  it('does not block task removal when recording cleanup fails', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const discardSession = vi.fn(async () => {
+      throw new Error('recording process did not exit');
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      mediaCapture: {
+        discardSession,
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+
+    await expect(host.cancelSessionOperations('session-a')).resolves.toBeUndefined();
+    expect(discardSession).toHaveBeenCalledWith('session-a');
+    await host.dispose();
+  });
+
+  it('rejects queued screenshot and recording registration after instance teardown begins', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'preexisting',
+    });
+    let markActiveStarted: () => void = () => undefined;
+    let releaseActive: () => void = () => undefined;
+    const activeStarted = new Promise<void>((resolve) => {
+      markActiveStarted = resolve;
+    });
+    const activeGate = new Promise<void>((resolve) => {
+      releaseActive = resolve;
+    });
+    let markDiscardStarted: () => void = () => undefined;
+    let releaseDiscard: () => void = () => undefined;
+    const discardStarted = new Promise<void>((resolve) => {
+      markDiscardStarted = resolve;
+    });
+    const discardGate = new Promise<void>((resolve) => {
+      releaseDiscard = resolve;
+    });
+    let discardCalls = 0;
+    const discardInstance = vi.fn(async () => {
+      discardCalls += 1;
+      if (discardCalls !== 1) return;
+      markDiscardStarted();
+      await discardGate;
+    });
+    const takeScreenshot = vi.fn(async () => ({
+      hash: 'a'.repeat(64),
+      ext: '.png',
+      mimeType: 'image/png',
+      bytes: 8,
+      url: `cindy-media://blobs/${'a'.repeat(64)}.png`,
+      deduplicated: false,
+      refIds: ['ref-a'],
+    }));
+    const startRecording = vi.fn(async () => ({
+      recordingId: 'late-recording',
+      startedAt: new Date().toISOString(),
+    }));
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+      },
+      mediaCapture: {
+        takeScreenshot,
+        startRecording,
+        discardInstance,
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+    });
+
+    await host.reconcileOwnership();
+    const instance = actor.list('session-a')[0]!;
+    const route = {
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    };
+    await expect(
+      host.setAgentControlGrant('session-a', instance.instanceId, 'allowed'),
+    ).resolves.toMatchObject({ ok: true });
+    const active = actor.runMutation(
+      { sessionId: 'session-a', ...route },
+      async () => {
+        markActiveStarted();
+        await activeGate;
+      },
+      'agent',
+    );
+    await activeStarted;
+
+    const screenshot = host.callTool('take_screenshot', route, {
+      sessionId: 'session-a',
+      origin: 'agent',
+    });
+    const recording = host.callTool('start_recording', route, {
+      sessionId: 'session-a',
+      origin: 'agent',
+    });
+    await vi.waitFor(() =>
+      expect(actor.mutationState(instance.instanceId)).toMatchObject({ queuedAgentMutations: 2 }),
+    );
+
+    const stopping = host.callTool('stop_instance', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await discardStarted;
+    releaseActive();
+
+    await expect(screenshot).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(recording).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    expect(takeScreenshot).not.toHaveBeenCalled();
+    expect(startRecording).not.toHaveBeenCalled();
+
+    releaseDiscard();
+    await expect(stopping).resolves.toMatchObject({ ok: true });
+    await expect(active).resolves.toBeUndefined();
+    await host.dispose();
+  });
+
+  it.each(['stop_instance', 'detach_device'] as const)(
+    'completes %s even when pending media cleanup times out',
+    async (toolName) => {
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(async () => READY_REPORT.devices[0]!),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(async () => undefined),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      };
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore(),
+        lifecycle,
+      });
+      const instance = actor.attach({
+        sessionId: 'session-a',
+        worktreeRoot: '/tmp/session-a',
+        sourceFingerprint: 'fingerprint-a',
+        device: READY_REPORT.devices[0]!,
+        bootProvenance: 'preexisting',
+      });
+      const discardInstance = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('raw media ingest did not become idle'))
+        .mockResolvedValue(undefined);
+      const stopDriver = vi.fn(async () => undefined);
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        runtime: { inspect: vi.fn(async () => READY_REPORT) },
+        getSession: vi.fn(async (id) => localSession(id)),
+        driverManager: {
+          get: vi.fn(() => null),
+          start: vi.fn(),
+          stop: stopDriver,
+        },
+        mediaCapture: {
+          discardInstance,
+        } as unknown as IOSSimulatorMediaCaptureAdapter,
+      });
+      await host.reconcileOwnership();
+      const current = actor.getOwned('session-a', instance.instanceId);
+      const route = {
+        instanceId: current.instanceId,
+        generation: current.generation,
+        leaseId: current.lease.id,
+      };
+
+      await expect(
+        host.callTool(toolName, route, { sessionId: 'session-a', origin: 'user' }),
+      ).resolves.toMatchObject({
+        ok: true,
+        data: {
+          mediaCleanupWarning: { code: 'MEDIA_CLEANUP_INCOMPLETE' },
+        },
+      });
+      expect(discardInstance).toHaveBeenCalledWith(instance.instanceId);
+      expect(stopDriver).toHaveBeenCalledWith(instance.instanceId);
+      if (toolName === 'stop_instance') {
+        expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
+        expect(actor.list('session-a')[0]).toMatchObject({ lifecycleState: 'stopped' });
+      } else {
+        expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+        expect(actor.list('session-a')).toEqual([]);
+      }
+      await host.dispose();
+    },
+  );
 
   it('shares exact attachment and lifecycle state while rejecting another session', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {

@@ -73,15 +73,18 @@ export type IOSSimulatorContentSize =
   | "accessibility-extra-extra-extra-large";
 
 export interface IOSSimulatorSimctlLifecycle {
-  findExact(udid: string): Promise<IOSSimulatorDevice | null>;
+  findExact(
+    udid: string,
+    signal?: AbortSignal,
+  ): Promise<IOSSimulatorDevice | null>;
   bootExact(udid: string, signal?: AbortSignal): Promise<IOSSimulatorDevice>;
-  shutdownExact(udid: string): Promise<void>;
+  shutdownExact(udid: string, signal?: AbortSignal): Promise<void>;
   createExact(input: {
     name: string;
     deviceTypeIdentifier: string;
     runtimeIdentifier: string;
   }): Promise<IOSSimulatorCreatedDevice>;
-  deleteExact(udid: string): Promise<void>;
+  deleteExact(udid: string, signal?: AbortSignal): Promise<void>;
   /** Set the simulated system appearance without bringing Simulator.app forward. */
   setAppearance?(udid: string, appearance: "light" | "dark"): Promise<void>;
   /** Enable or disable the simulated Increase Contrast accessibility setting. */
@@ -535,9 +538,11 @@ export function createIOSSimulatorSimctlLifecycle(
       );
     },
 
-    async shutdownExact(udid): Promise<void> {
+    async shutdownExact(udid, signal): Promise<void> {
       const normalized = requireUdid(udid);
-      const device = await findExact(normalized);
+      throwIfAborted(signal);
+      const device = await findExact(normalized, signal);
+      throwIfAborted(signal);
       if (!device) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_NOT_FOUND",
@@ -545,11 +550,12 @@ export function createIOSSimulatorSimctlLifecycle(
         );
       }
       if (device.state.toLowerCase() === "shutdown") return;
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "shutdown",
-        normalized,
-      ]);
+      const result = signal
+        ? await runner.run(XCRUN, ["simctl", "shutdown", normalized], {
+            signal,
+          })
+        : await runner.run(XCRUN, ["simctl", "shutdown", normalized]);
+      throwIfAborted(signal);
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_SHUTDOWN_FAILED",
@@ -584,9 +590,15 @@ export function createIOSSimulatorSimctlLifecycle(
       return { udid, name, runtimeIdentifier, deviceTypeIdentifier };
     },
 
-    async deleteExact(udid): Promise<void> {
+    async deleteExact(udid, signal): Promise<void> {
       const normalized = requireUdid(udid);
-      const result = await runner.run(XCRUN, ["simctl", "delete", normalized]);
+      throwIfAborted(signal);
+      const result = signal
+        ? await runner.run(XCRUN, ["simctl", "delete", normalized], {
+            signal,
+          })
+        : await runner.run(XCRUN, ["simctl", "delete", normalized]);
+      throwIfAborted(signal);
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_DELETE_FAILED",

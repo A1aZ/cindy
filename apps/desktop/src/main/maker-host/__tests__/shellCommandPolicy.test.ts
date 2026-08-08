@@ -80,6 +80,12 @@ describeMac('embedded iOS Simulator shell policy', () => {
     'TOOL=$(printf simctl); xcrun "$TOOL" shutdown DEVICE',
     'launchctl submit -l cindy-test -- /usr/bin/xcrun simctl shutdown DEVICE',
     `sandbox-exec -p '(version 1) (allow default)' /usr/bin/xcrun simctl shutdown DEVICE`,
+    "shopt -s expand_aliases\nalias sim='xcrun simctl'\nsim shutdown DEVICE",
+    "alias sim=xcrun\\ simctl; eval 'sim erase DEVICE'",
+    "builtin alias sim='/usr/bin/xcrun simctl'; eval 'sim shutdown DEVICE'",
+    "command -- alias sim='open -a Simulator'; eval sim",
+    "alias safe='ls -la' sim='xcrun simctl'; eval 'sim boot DEVICE'",
+    "alias sc='simctl'; eval 'sc shutdown DEVICE'",
   ])('denies Simulator mutation hidden behind shell execution: %s', (command) => {
     expect(getDesktopShellCommandPolicy(command)).toMatchObject({ decision: 'deny' });
   });
@@ -148,6 +154,10 @@ PY`,
     `git grep simctl | awk '{print $1}'`,
     `python3 -c 'print("ordinary")'; git grep simctl`,
     'git grep simctl || python3',
+    'alias',
+    'alias sim',
+    "alias ll='ls -la'; ll",
+    'echo "alias sim=\'xcrun simctl\'"',
   ])('allows a non-bypass command: %s', (command) => {
     expect(getDesktopShellCommandPolicy(command)).toBeUndefined();
   });

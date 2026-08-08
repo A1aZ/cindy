@@ -578,7 +578,10 @@ describe('iOS Simulator host', () => {
       });
 
       await scheduled[0]!.task();
-      expect(lifecycle.shutdownExact).toHaveBeenCalledWith(detached.simulatorUdid);
+      expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+        detached.simulatorUdid,
+        expect.any(AbortSignal),
+      );
       expect(actor.listAll()).toEqual([]);
       expect(resourceScheduler.runningCount()).toBe(0);
     } finally {
@@ -759,8 +762,14 @@ describe('iOS Simulator host', () => {
 
     await host.reconcileOwnership();
 
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
-    expect(lifecycle.deleteExact).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(actor.listAll()).toEqual([]);
   });
 
@@ -791,8 +800,14 @@ describe('iOS Simulator host', () => {
 
     await host.reconcileOwnership();
 
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
-    expect(lifecycle.deleteExact).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(actor.listAll()).toEqual([]);
   });
 
@@ -969,8 +984,14 @@ describe('iOS Simulator host', () => {
 
     await host.reconcileOwnership();
 
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
-    expect(lifecycle.deleteExact).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(actor.listAll()).toEqual([]);
   });
 
@@ -1255,9 +1276,62 @@ describe('iOS Simulator host', () => {
 
     await host.reconcileOwnership();
 
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(lifecycle.deleteExact).not.toHaveBeenCalled();
     expect(actor.listAll()).toEqual([]);
+  });
+
+  it('aborts archived CoreSimulator cleanup before updater force-quit', async () => {
+    let shutdownSignal: AbortSignal | undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(
+        (_udid: string, signal?: AbortSignal) =>
+          new Promise<void>((_resolve, reject) => {
+            shutdownSignal = signal;
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'archived-force-quit',
+      worktreeRoot: '/tmp/archived-force-quit',
+      sourceFingerprint: 'fingerprint-a',
+      creationProvenance: 'external',
+      bootProvenance: 'agent-booted',
+      device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => ({
+        ...localSession(instance.sessionId),
+        status: 'archived' as const,
+      })),
+    });
+
+    const reconciling = host.reconcileOwnership();
+    await vi.waitFor(() => expect(shutdownSignal).toBeDefined());
+    host.abortOperationsForExit();
+
+    expect(shutdownSignal?.aborted).toBe(true);
+    await expect(reconciling).resolves.toBeUndefined();
+    expect(actor.getOwned(instance.sessionId, instance.instanceId)).toMatchObject({
+      healthState: 'degraded',
+      errorCode: 'ARCHIVED_CLEANUP_FAILED',
+    });
+    await host.dispose();
   });
 
   it.each(['Booted', 'Booting'] as const)(
@@ -4537,7 +4611,10 @@ describe('iOS Simulator host', () => {
     await expect(cleanup).resolves.toBeUndefined();
     expect(driverManager.start).not.toHaveBeenCalled();
     expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(attached.simulatorUdid);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      attached.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(actor.list('session-a')).toEqual([]);
     expect(resourceScheduler.runningCount()).toBe(0);
   });
@@ -4767,9 +4844,9 @@ describe('iOS Simulator host', () => {
     });
     await expect(cleanup).resolves.toBeUndefined();
     expect(actor.list('session-a')).toEqual([]);
-    expect(lifecycle.findExact).toHaveBeenCalledWith(createdDevice.udid);
+    expect(lifecycle.findExact).toHaveBeenCalledWith(createdDevice.udid, expect.any(AbortSignal));
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
-    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdDevice.udid);
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdDevice.udid, expect.any(AbortSignal));
   });
 
   it('does not register a build after its task is archived at the reconcile boundary', async () => {
@@ -5299,7 +5376,10 @@ describe('iOS Simulator host', () => {
       expect(discardInstance).toHaveBeenCalledWith(instance.instanceId);
       expect(stopDriver).toHaveBeenCalledWith(instance.instanceId);
       if (toolName === 'stop_instance') {
-        expect(lifecycle.shutdownExact).toHaveBeenCalledWith(instance.simulatorUdid);
+        expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+          instance.simulatorUdid,
+          expect.any(AbortSignal),
+        );
         expect(actor.list('session-a')[0]).toMatchObject({ lifecycleState: 'stopped' });
       } else {
         expect(lifecycle.shutdownExact).not.toHaveBeenCalled();

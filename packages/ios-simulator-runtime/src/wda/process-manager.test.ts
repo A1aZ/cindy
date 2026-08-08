@@ -364,7 +364,7 @@ describe("WDA orphan ownership matching", () => {
   });
 
   it("reads only exact simctl candidates and revalidates diagnostic ownership", () => {
-    const simctl = path.join(path.dirname(xcodebuild), "simctl");
+    const simctl = path.posix.join(path.posix.dirname(xcodebuild), "simctl");
     const diagnosticInput = {
       cacheRoot,
       simulatorUdid: UDID,

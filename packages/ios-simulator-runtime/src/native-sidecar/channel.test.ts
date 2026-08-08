@@ -181,13 +181,44 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
   });
 
   it("times out pending requests without leaving them in the multiplexer", async () => {
-    const { channel } = harness({ requestTimeoutMs: 5 });
+    const { channel, processes } = harness({ requestTimeoutMs: 5 });
     await channel.start();
     await expect(
       channel.request(command("availability")),
     ).rejects.toMatchObject({
       code: "TIMEOUT",
     });
+    processes[0]!.stdout.write(reply("sidecar-1", { ready: true }));
+    await Promise.resolve();
+    expect(channel.state).toBe("running");
+    const next = channel.request(command("availability"));
+    processes[0]!.stdout.write(reply("sidecar-2", { ready: true }));
+    await expect(next).resolves.toEqual({ ready: true });
+    await channel.stop();
+  });
+
+  it("ignores one late reply for an aborted request without terminating the sidecar", async () => {
+    const { channel, processes } = harness();
+    await channel.start();
+    const controller = new AbortController();
+    const aborted = channel.request(command("tap"), controller.signal);
+
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ code: "ABORTED" });
+    processes[0]!.stdout.write(reply("sidecar-1", {}));
+    await Promise.resolve();
+
+    expect(channel.state).toBe("running");
+    expect(channel.crashCount).toBe(0);
+    const next = channel.request(command("availability"));
+    processes[0]!.stdout.write(reply("sidecar-2", { ready: true }));
+    await expect(next).resolves.toEqual({ ready: true });
+
+    // A tombstone consumes exactly one expected late reply. A duplicate keeps
+    // the existing fail-closed behavior for unsolicited protocol traffic.
+    processes[0]!.stdout.write(reply("sidecar-1", {}));
+    await vi.waitFor(() => expect(channel.state).toBe("failed"));
+    expect(channel.crashCount).toBe(1);
     await channel.stop();
   });
 

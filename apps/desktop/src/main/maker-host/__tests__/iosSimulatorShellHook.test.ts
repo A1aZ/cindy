@@ -4,6 +4,8 @@ import type { Logger } from '@cindy/maker-core';
 
 import { createIOSSimulatorShellGuardHook } from '../claude-hooks/ios-simulator-shell-hook.js';
 
+const describeMac = process.platform === 'darwin' ? describe : describe.skip;
+
 function createLoggerSpy(): { logger: Logger; warn: ReturnType<typeof vi.fn> } {
   const warn = vi.fn();
   const logger = {
@@ -18,7 +20,7 @@ function createLoggerSpy(): { logger: Logger; warn: ReturnType<typeof vi.fn> } {
   return { logger, warn };
 }
 
-describe('iOS Simulator shell guard hook', () => {
+describeMac('iOS Simulator shell guard hook', () => {
   it('denies bypass commands without persisting command text in logs', async () => {
     const { logger, warn } = createLoggerSpy();
     const hook = createIOSSimulatorShellGuardHook(logger);

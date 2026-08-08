@@ -896,6 +896,23 @@ function containsSimulatorFunctionBody(command: string, depth: number): boolean 
   return false;
 }
 
+/** Alias bodies are executable later, so reject unsafe definitions up front. */
+function containsSimulatorAliasDefinition(tokens: string[], depth: number): boolean {
+  if (executableName(tokens[0]) !== 'alias') return false;
+  let index = tokens[1] === '--' ? 2 : 1;
+  for (; index < tokens.length; index += 1) {
+    const definition = tokens[index]!;
+    const separator = definition.indexOf('=');
+    // `alias` and `alias name` only inspect the current shell state.
+    if (separator <= 0) continue;
+    const body = definition.slice(separator + 1);
+    if (containsLiteralSimulatorExecutor(body) || containsSimulatorBypass(body, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function containsSimulatorBypass(command: string, depth = 0): boolean {
   if (depth > 8) return /\b(?:simctl|Simulator(?:\.app)?)\b/i.test(command);
   if (
@@ -918,6 +935,7 @@ function containsSimulatorBypass(command: string, depth = 0): boolean {
     if (hasUnresolvedExecutableExpansion(segment, tokens)) return true;
     const unwrapped = unwrapCommand(tokens);
     if (unwrapped.inspectionOnly) continue;
+    if (containsSimulatorAliasDefinition(unwrapped.tokens, depth)) return true;
     if (unwrapped.nestedShell !== null) {
       if (unwrapped.unresolvedWrapper)
         return containsSimulatorExecutor(tokenizeShellSegment(segment));

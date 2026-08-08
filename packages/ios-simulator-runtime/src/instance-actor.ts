@@ -119,6 +119,7 @@ export class IOSSimulatorInstanceActor {
     string,
     Set<ActiveLifecycleStart>
   >();
+  readonly #lifecycleExitController = new AbortController();
 
   constructor(options: IOSSimulatorInstanceActorOptions) {
     this.#store = options.store;
@@ -437,7 +438,9 @@ export class IOSSimulatorInstanceActor {
   /** Abort and drain mutations owned by one Cindy task before its worktree is recycled. */
   async cancelMutationsForSession(sessionId: string): Promise<void> {
     await this.#abortAndDrainMutations(
-      this.#store.listForSession(sessionId).map((instance) => instance.instanceId),
+      this.#store
+        .listForSession(sessionId)
+        .map((instance) => instance.instanceId),
     );
   }
 
@@ -485,7 +488,10 @@ export class IOSSimulatorInstanceActor {
           0,
           state.queuedAgentMutations - 1,
         );
-        if (state.agentPaused || state.takeoverEpoch !== expectedTakeoverEpoch) {
+        if (
+          state.agentPaused ||
+          state.takeoverEpoch !== expectedTakeoverEpoch
+        ) {
           throw new IOSSimulatorInstanceError(
             "MUTATION_CANCELLED",
             "The queued simulator action was cancelled because simulator control changed.",
@@ -550,7 +556,7 @@ export class IOSSimulatorInstanceActor {
   runOwnershipCleanup<T>(
     instanceId: string,
     sessionId: string,
-    task: (instance: IOSSimulatorInstance) => Promise<T>,
+    task: (instance: IOSSimulatorInstance, signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     // Validate the old owner before changing mutation/grace state. The
     // serialized check below is still required because ownership can be
@@ -560,8 +566,9 @@ export class IOSSimulatorInstanceActor {
     this.#abortLifecycleStartsForInstance(instanceId);
     this.#cancelDetachGrace(instanceId);
     return this.#serialize(instanceId, async () => {
+      this.#throwIfLifecycleExitCancelled();
       const instance = this.#store.requireOwned(instanceId, sessionId);
-      return task(instance);
+      return task(instance, this.#lifecycleExitController.signal);
     });
   }
 
@@ -587,6 +594,22 @@ export class IOSSimulatorInstanceActor {
       "Simulator startup was cancelled because its lifecycle changed.",
       true,
     );
+  }
+
+  #lifecycleExitCancelledError(): IOSSimulatorInstanceError {
+    return new IOSSimulatorInstanceError(
+      "MUTATION_CANCELLED",
+      "Simulator lifecycle cleanup was cancelled because Cindy is exiting.",
+      true,
+    );
+  }
+
+  #throwIfLifecycleExitCancelled(): void {
+    const signal = this.#lifecycleExitController.signal;
+    if (!signal.aborted) return;
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : this.#lifecycleExitCancelledError();
   }
 
   #throwIfLifecycleStartCancelled(signal: AbortSignal): void {
@@ -688,6 +711,12 @@ export class IOSSimulatorInstanceActor {
 
   /** Synchronous force-quit seam; async disposal separately awaits settlement. */
   abortOperationsForExit(): void {
+    for (const instanceId of [...this.#cancelGrace.keys()]) {
+      this.#cancelDetachGrace(instanceId);
+    }
+    if (!this.#lifecycleExitController.signal.aborted) {
+      this.#lifecycleExitController.abort(this.#lifecycleExitCancelledError());
+    }
     for (const instanceId of this.#mutationStates.keys()) {
       this.abortMutationsForInstance(instanceId);
     }
@@ -864,13 +893,18 @@ export class IOSSimulatorInstanceActor {
     this.abortMutationsForInstance(admission.instanceId);
     this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
+      this.#throwIfLifecycleExitCancelled();
       const instance = this.#requireAdmittedLifecycleRoute(admission);
       if (instance.lifecycleState === "stopped") return instance;
       this.#store.update(instance.instanceId, instance.sessionId, {
         lifecycleState: "stopping",
       });
       try {
-        await this.#lifecycle.shutdownExact(instance.simulatorUdid);
+        await this.#lifecycle.shutdownExact(
+          instance.simulatorUdid,
+          this.#lifecycleExitController.signal,
+        );
+        this.#throwIfLifecycleExitCancelled();
         const now = new Date(this.#clock.now()).toISOString();
         return this.#store.update(instance.instanceId, instance.sessionId, {
           lifecycleState: "stopped",
@@ -1028,6 +1062,7 @@ export class IOSSimulatorInstanceActor {
     delayMs: number,
   ): void {
     this.#cancelDetachGrace(context.instanceId);
+    if (this.#lifecycleExitController.signal.aborted) return;
     const token = Symbol("detach-grace-cleanup");
     const cancel = this.#scheduler.schedule(Math.max(0, delayMs), () =>
       this.#runDetachGraceCleanup(context).then(
@@ -1055,6 +1090,7 @@ export class IOSSimulatorInstanceActor {
     context: DetachGraceCleanupContext,
     error: unknown,
   ): void {
+    if (this.#lifecycleExitController.signal.aborted) return;
     const current = this.#matchingDetachGrace(context);
     if (!current) return;
     try {
@@ -1067,10 +1103,15 @@ export class IOSSimulatorInstanceActor {
 
   #runDetachGraceCleanup(context: DetachGraceCleanupContext): Promise<void> {
     return this.#serialize(context.instanceId, async () => {
+      this.#throwIfLifecycleExitCancelled();
       const current = this.#matchingDetachGrace(context);
       if (!current) return;
       this.#assertMutationAllowed?.();
-      await this.#lifecycle.shutdownExact(current.simulatorUdid);
+      await this.#lifecycle.shutdownExact(
+        current.simulatorUdid,
+        this.#lifecycleExitController.signal,
+      );
+      this.#throwIfLifecycleExitCancelled();
       const afterShutdown = this.#matchingDetachGrace(context);
       if (!afterShutdown) return;
       // Resource release is intentionally before ownership release. The Host
@@ -1109,6 +1150,7 @@ export class IOSSimulatorInstanceActor {
     route: IOSSimulatorMutationRoute,
   ): Promise<IOSSimulatorInstance> {
     return this.#serialize(route.instanceId, async () => {
+      this.#throwIfLifecycleExitCancelled();
       const instance = this.#store.assertMutationRoute(route);
       if (instance.creationProvenance !== "cindy") {
         throw new IOSSimulatorInstanceError(
@@ -1118,9 +1160,17 @@ export class IOSSimulatorInstanceActor {
       }
       this.#assertMutationAllowed?.();
       if (instance.lifecycleState === "ready") {
-        await this.#lifecycle.shutdownExact(instance.simulatorUdid);
+        await this.#lifecycle.shutdownExact(
+          instance.simulatorUdid,
+          this.#lifecycleExitController.signal,
+        );
+        this.#throwIfLifecycleExitCancelled();
       }
-      await this.#lifecycle.deleteExact(instance.simulatorUdid);
+      await this.#lifecycle.deleteExact(
+        instance.simulatorUdid,
+        this.#lifecycleExitController.signal,
+      );
+      this.#throwIfLifecycleExitCancelled();
       this.#cancelDetachGrace(instance.instanceId);
       return this.#store.release(instance.instanceId, instance.sessionId);
     });

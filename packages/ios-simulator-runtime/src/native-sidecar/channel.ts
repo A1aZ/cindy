@@ -31,6 +31,7 @@ const MAX_EARLY_STREAM_EVENTS_PER_STREAM = 4;
 const MAX_EARLY_STREAMS = 8;
 const MAX_EARLY_STREAM_BYTES = 32 * 1024 * 1024;
 const MAX_CLOSED_STREAMS = 64;
+const MAX_LOCALLY_SETTLED_REQUESTS = 256;
 
 export type IOSSimulatorNativeSidecarChannelState =
   "idle" | "running" | "failed" | "parked" | "stopped";
@@ -307,6 +308,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
   readonly #launcher: IOSSimulatorNativeSidecarProcessLauncher;
   #decoder = new IOSSimulatorNativeSidecarFrameDecoder();
   readonly #pending = new Map<string, PendingRequest>();
+  readonly #locallySettledRequestIds = new Set<string>();
   readonly #streams = new Map<string, StreamState>();
   readonly #earlyStreamEvents = new Map<string, EarlyStreamEvent[]>();
   readonly #closedStreams = new Map<
@@ -401,6 +403,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     }
     this.#process = process;
     this.#state = "running";
+    this.#locallySettledRequestIds.clear();
     this.#decoderReset();
     process.stdout.on("data", (chunk: Buffer | Uint8Array | string) => {
       try {
@@ -752,6 +755,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         if (!pending) return;
         this.#pending.delete(id);
         pending.removeAbortListener();
+        this.#rememberLocallySettledRequest(id);
         const error = new IOSSimulatorNativeSidecarChannelError(
           "TIMEOUT",
           `Native sidecar request ${command.op} timed out.`,
@@ -763,9 +767,13 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         }
       }, this.#options.requestTimeoutMs);
       const onAbort = () => {
+        const pending = this.#pending.get(id);
+        if (!pending) return;
         clearTimeout(timeout);
         this.#pending.delete(id);
-        reject(abortError());
+        pending.removeAbortListener();
+        this.#rememberLocallySettledRequest(id);
+        pending.reject(abortError());
       };
       signal?.addEventListener("abort", onAbort, { once: true });
       this.#pending.set(id, {
@@ -808,6 +816,7 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
       const reply = decodeIOSSimulatorNativeSidecarJson(frame);
       const id = readString(reply.id, "id");
       const pending = this.#pending.get(id);
+      if (!pending && this.#locallySettledRequestIds.delete(id)) return;
       if (!pending)
         throw new IOSSimulatorNativeSidecarProtocolError(
           `Unknown reply id ${id}`,
@@ -1203,6 +1212,20 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     this.#earlyStreamEvents.clear();
     this.#closedStreams.clear();
     this.#earlyStreamBytes = 0;
+  }
+
+  /**
+   * The Helper cannot cancel a command that already crossed stdio. Keep a
+   * bounded one-reply tombstone so an expected late reply cannot be mistaken
+   * for protocol desynchronization after local abort or timeout.
+   */
+  #rememberLocallySettledRequest(id: string): void {
+    this.#locallySettledRequestIds.add(id);
+    while (this.#locallySettledRequestIds.size > MAX_LOCALLY_SETTLED_REQUESTS) {
+      const oldest = this.#locallySettledRequestIds.values().next().value;
+      if (oldest === undefined) break;
+      this.#locallySettledRequestIds.delete(oldest);
+    }
   }
 
   #timestamp(): string {

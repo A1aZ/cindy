@@ -28,6 +28,8 @@ import {
   type WdaSourceManifest,
 } from "./source-provider.js";
 
+const darwinPath = path.posix;
+
 const MAX_LOG_BYTES = 256 * 1024;
 const WDA_INTERRUPT_GRACE_MS = 5_000;
 const WDA_TERMINATE_GRACE_MS = 1_000;
@@ -260,7 +262,7 @@ function classifyCindyWdaControllers(
   const executablePaths = [
     ...(input.xcodebuildExecutablePaths ?? ["/usr/bin/xcodebuild"]),
   ]
-    .map((value) => path.resolve(value))
+    .map((value) => darwinPath.resolve(value))
     .filter((value, index, values) => values.indexOf(value) === index);
   if (executablePaths.length === 0) {
     return { ownedGroups: [], conflictingGroups: [] };
@@ -268,14 +270,14 @@ function classifyCindyWdaControllers(
   const conflictExecutablePaths = [
     ...(input.inspectedXcodebuildExecutablePaths ?? executablePaths),
   ]
-    .map((value) => path.resolve(value))
+    .map((value) => darwinPath.resolve(value))
     .filter((value, index, values) => values.indexOf(value) === index);
-  const root = path.resolve(input.cacheRoot);
+  const root = darwinPath.resolve(input.cacheRoot);
   const executablePattern = executablePaths
     .map(escapeRegularExpression)
     .join("|");
-  const projectPattern = `${escapeRegularExpression(path.join(root, "source"))}\\/[0-9a-f]{40}\\/WebDriverAgent\\.xcodeproj`;
-  const derivedPattern = `${escapeRegularExpression(path.join(root, "derived"))}\\/[0-9a-f]{64}`;
+  const projectPattern = `${escapeRegularExpression(darwinPath.join(root, "source"))}\\/[0-9a-f]{40}\\/WebDriverAgent\\.xcodeproj`;
+  const derivedPattern = `${escapeRegularExpression(darwinPath.join(root, "derived"))}\\/[0-9a-f]{64}`;
   const basePattern =
     `(?:${executablePattern}) -quiet -project ${projectPattern}` +
     ` -scheme WebDriverAgentRunner` +
@@ -360,13 +362,13 @@ export function findCindyWdaRunnerCandidates(
 ): WdaRunnerProcessCandidate[] {
   const normalizedUdid = normalizeSimulatorUdid(input.simulatorUdid);
   if (!normalizedUdid) return [];
-  const coreSimulatorRoot = path.resolve(
+  const coreSimulatorRoot = darwinPath.resolve(
     input.coreSimulatorRoot ??
-      path.join(os.homedir(), "Library", "Developer", "CoreSimulator"),
+      darwinPath.join(os.homedir(), "Library", "Developer", "CoreSimulator"),
   );
   const runnerPattern = new RegExp(
     `^${escapeRegularExpression(
-      path.join(
+      darwinPath.join(
         coreSimulatorRoot,
         "Devices",
         normalizedUdid,
@@ -392,9 +394,9 @@ function diagnosticExecutablePaths(
 ): Set<string> {
   const paths = new Set<string>(["/usr/bin/xcrun"]);
   for (const executable of xcodebuildExecutablePaths) {
-    const resolved = path.resolve(executable);
-    if (path.basename(resolved) !== "xcodebuild") continue;
-    const simctl = path.join(path.dirname(resolved), "simctl");
+    const resolved = darwinPath.resolve(executable);
+    if (darwinPath.basename(resolved) !== "xcodebuild") continue;
+    const simctl = darwinPath.join(darwinPath.dirname(resolved), "simctl");
     if (simctl !== "/usr/bin/simctl") paths.add(simctl);
   }
   return paths;
@@ -456,7 +458,10 @@ export function matchesCindyWdaDiagnosticCommand(
   );
   if ([...argv.matchAll(udidPattern)].length !== 1) return false;
 
-  const derivedRoot = path.join(path.resolve(input.cacheRoot), "derived");
+  const derivedRoot = darwinPath.join(
+    darwinPath.resolve(input.cacheRoot),
+    "derived",
+  );
   const outputPattern = new RegExp(
     `(?:^|\\s)--output(?:=|\\s+)${escapeRegularExpression(derivedRoot)}` +
       `\\/[0-9a-f]{64}(?=\\/|\\s|$)`,
@@ -520,7 +525,7 @@ export function matchesLegacyCindyWdaRunnerEnvironment(
     return false;
   }
   const derivedRoot = escapeRegularExpression(
-    path.join(path.resolve(input.cacheRoot), "derived"),
+    darwinPath.join(darwinPath.resolve(input.cacheRoot), "derived"),
   );
   const legacyDerivedPath = new RegExp(
     `(?:^|\\s)DYLD_LIBRARY_PATH=${derivedRoot}\\/[0-9a-f]{64}` +
@@ -668,7 +673,7 @@ function isAllowlistedXcodebuildCandidate(
   executablePath: string,
   selectedPaths: ReadonlySet<string>,
 ): boolean {
-  const resolved = path.resolve(executablePath);
+  const resolved = darwinPath.resolve(executablePath);
   if (selectedPaths.has(resolved) || resolved === "/usr/bin/xcodebuild") {
     return true;
   }
@@ -687,7 +692,9 @@ async function readWdaProcessInventory(
   // unrelated process credentials never enter the Cindy process.
   const processSnapshot = await readDarwinProcessSnapshot(input.signal);
   const executablePaths = new Set(
-    (input.xcodebuildExecutablePaths ?? []).map((value) => path.resolve(value)),
+    (input.xcodebuildExecutablePaths ?? []).map((value) =>
+      darwinPath.resolve(value),
+    ),
   );
   const rows = parseDarwinProcessSnapshot(processSnapshot);
   const controllerRows: string[] = [];
@@ -718,7 +725,9 @@ async function readWdaProcessInventory(
     processSnapshot,
     controllerSnapshot: controllerRows.join("\n"),
     inspectedXcodebuildExecutablePaths: [
-      ...new Set(candidates.map((row) => path.resolve(row.command.trim()))),
+      ...new Set(
+        candidates.map((row) => darwinPath.resolve(row.command.trim())),
+      ),
     ],
   };
 }
@@ -727,10 +736,10 @@ async function readSelectedXcodebuildPaths(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const configured = process.env.DEVELOPER_DIR?.trim();
-  if (configured && path.isAbsolute(configured)) {
+  if (configured && darwinPath.isAbsolute(configured)) {
     return [
       "/usr/bin/xcodebuild",
-      path.join(configured, "usr", "bin", "xcodebuild"),
+      darwinPath.join(configured, "usr", "bin", "xcodebuild"),
     ];
   }
   const result = await new Promise<{ output: string; exitCode: number | null }>(
@@ -805,7 +814,7 @@ async function readSelectedXcodebuildPaths(
     },
   );
   const developerDirectory = result.output.trim();
-  if (result.exitCode !== 0 || !path.isAbsolute(developerDirectory)) {
+  if (result.exitCode !== 0 || !darwinPath.isAbsolute(developerDirectory)) {
     throw new WdaError(
       "TERMINATION_FAILED",
       "The selected Xcode path could not be verified during WDA recovery",
@@ -813,7 +822,7 @@ async function readSelectedXcodebuildPaths(
   }
   return [
     "/usr/bin/xcodebuild",
-    path.join(developerDirectory, "usr", "bin", "xcodebuild"),
+    darwinPath.join(developerDirectory, "usr", "bin", "xcodebuild"),
   ];
 }
 

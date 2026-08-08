@@ -106,7 +106,10 @@ describe("IOSSimulatorInstanceActor", () => {
 
     const stopped = await harness.actor.stop(harness.route(started));
     expect(stopped).toMatchObject({ lifecycleState: "stopped", generation: 3 });
-    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     await expect(
       harness.actor.stop(harness.route(started)),
     ).rejects.toMatchObject({
@@ -149,7 +152,34 @@ describe("IOSSimulatorInstanceActor", () => {
       lifecycleState: "stopped",
       generation: 2,
     });
-    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("aborts an in-flight stop through the force-exit seam", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    let shutdownSignal: AbortSignal | undefined;
+    vi.mocked(harness.lifecycle.shutdownExact).mockImplementationOnce(
+      (_udid, signal) =>
+        new Promise((_resolve, reject) => {
+          shutdownSignal = signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+
+    const stopping = harness.actor.stop(harness.route(started));
+    await vi.waitFor(() => expect(shutdownSignal).toBeDefined());
+    harness.actor.abortOperationsForExit();
+
+    expect(shutdownSignal?.aborted).toBe(true);
+    await expect(stopping).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
   });
 
   it("cancels an in-flight start while preserving Host-owned detach grace", async () => {
@@ -491,7 +521,10 @@ describe("IOSSimulatorInstanceActor", () => {
     expect(harness.scheduled).toHaveLength(1);
     expect(onResourceReleased).not.toHaveBeenCalled();
     await harness.scheduled[0]?.();
-    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     expect(harness.store.get(detached.instanceId)).toBeNull();
     expect(onResourceReleased).toHaveBeenCalledWith(
       expect.objectContaining({ instanceId: detached.instanceId }),
@@ -556,7 +589,10 @@ describe("IOSSimulatorInstanceActor", () => {
       Date.parse(detached.graceExpiresAt!) - now,
     );
     await scheduled[0]?.task();
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     expect(store.get(detached.instanceId)).toBeNull();
     expect(onResourceStopped).toHaveBeenCalledTimes(1);
   });
@@ -599,7 +635,10 @@ describe("IOSSimulatorInstanceActor", () => {
       ),
     ).resolves.toBe(true);
 
-    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     expect(store.get(detached.instanceId)).toBeNull();
     expect(onResourceStopped).toHaveBeenCalledTimes(1);
   });
@@ -710,6 +749,36 @@ describe("IOSSimulatorInstanceActor", () => {
     expect(onResourceReleased).not.toHaveBeenCalled();
   });
 
+  it("aborts in-flight detach cleanup on exit without scheduling a retry", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    const onResourceStopped = vi.fn();
+    let shutdownSignal: AbortSignal | undefined;
+    vi.mocked(harness.lifecycle.shutdownExact).mockImplementationOnce(
+      (_udid, signal) =>
+        new Promise((_resolve, reject) => {
+          shutdownSignal = signal;
+          signal?.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const detached = await harness.actor.detach(
+      harness.route(started),
+      onResourceStopped,
+    );
+
+    const cleanup = Promise.resolve(harness.scheduled[0]?.());
+    await vi.waitFor(() => expect(shutdownSignal).toBeDefined());
+    harness.actor.abortOperationsForExit();
+
+    expect(shutdownSignal?.aborted).toBe(true);
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(harness.store.get(detached.instanceId)).not.toBeNull();
+    expect(harness.scheduled).toHaveLength(0);
+    expect(onResourceStopped).not.toHaveBeenCalled();
+  });
+
   it("serializes reattachment behind an in-flight grace shutdown", async () => {
     const harness = createHarness();
     const started = await harness.actor.start(harness.route());
@@ -725,7 +794,10 @@ describe("IOSSimulatorInstanceActor", () => {
 
     const cleanup = Promise.resolve(harness.scheduled[0]?.());
     await vi.waitFor(() =>
-      expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID),
+      expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(
+        UDID,
+        expect.any(AbortSignal),
+      ),
     );
     let reattached = false;
     const reattach = harness.actor
@@ -765,15 +837,24 @@ describe("IOSSimulatorInstanceActor", () => {
   it("deletes only an exact Cindy-provenance simulator", async () => {
     const harness = createHarness({ cindy: true });
     await harness.actor.delete(harness.route());
-    expect(harness.lifecycle.deleteExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.deleteExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
     expect(harness.store.get(harness.instance.instanceId)).toBeNull();
   });
 
   it("shuts down a ready Cindy simulator before deleting it", async () => {
     const harness = createHarness({ booted: true, cindy: true });
     await harness.actor.delete(harness.route());
-    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
-    expect(harness.lifecycle.deleteExact).toHaveBeenCalledWith(UDID);
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
+    expect(harness.lifecycle.deleteExact).toHaveBeenCalledWith(
+      UDID,
+      expect.any(AbortSignal),
+    );
   });
 
   it("creates a Cindy-owned simulator from an exact installed template", async () => {

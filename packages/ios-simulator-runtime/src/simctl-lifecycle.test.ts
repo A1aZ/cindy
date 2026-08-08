@@ -174,6 +174,61 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     }
   });
 
+  it("propagates cleanup cancellation into shutdown and delete subprocesses", async () => {
+    const shutdownController = new AbortController();
+    const deleteController = new AbortController();
+    let shutdownSignal: AbortSignal | undefined;
+    let deleteSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "list") {
+          return { stdout: listJson("Booted"), stderr: "", exitCode: 0 };
+        }
+        if (args[1] === "shutdown") {
+          shutdownSignal = options?.signal;
+          return await new Promise((resolve) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => resolve({ stdout: "", stderr: "", exitCode: null }),
+              { once: true },
+            );
+          });
+        }
+        if (args[1] === "delete") {
+          deleteSignal = options?.signal;
+          return await new Promise((resolve) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => resolve({ stdout: "", stderr: "", exitCode: null }),
+              { once: true },
+            );
+          });
+        }
+        throw new Error(`unexpected ${args.join(" ")}`);
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+    });
+
+    const shuttingDown = lifecycle.shutdownExact(
+      UDID,
+      shutdownController.signal,
+    );
+    await vi.waitFor(() =>
+      expect(shutdownSignal).toBe(shutdownController.signal),
+    );
+    shutdownController.abort(new Error("shutdown cancelled for exit"));
+    await expect(shuttingDown).rejects.toThrow("shutdown cancelled for exit");
+
+    const deleting = lifecycle.deleteExact(UDID, deleteController.signal);
+    await vi.waitFor(() => expect(deleteSignal).toBe(deleteController.signal));
+    deleteController.abort(new Error("delete cancelled for exit"));
+    await expect(deleting).rejects.toThrow("delete cancelled for exit");
+
+    expect(run.mock.calls[0]?.[2]?.signal).toBe(shutdownController.signal);
+  });
+
   it("uses exact argv for create, shutdown, and delete", async () => {
     const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
       async (_command, args) => {

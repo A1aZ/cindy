@@ -1797,6 +1797,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     instance: IOSSimulatorInstance,
     device: IOSSimulatorEnvironmentReport['devices'][number] | null | undefined,
     deviceStateKnown = true,
+    signal?: AbortSignal,
   ): Promise<boolean> {
     const hostOwnsBoot =
       instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
@@ -1813,7 +1814,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         });
       } else {
         try {
-          await lifecycle.shutdownExact(instance.simulatorUdid);
+          await lifecycle.shutdownExact(instance.simulatorUdid, signal);
           deviceStopped = true;
           schedulerReleaseAllowed = true;
         } catch (error) {
@@ -1829,7 +1830,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     // `simctl delete` would turn successful external cleanup into a permanent
     // retry loop, so only delete when the exact device still exists.
     if (instance.creationProvenance === 'cindy' && cleanupSucceeded && device) {
-      await lifecycle.deleteExact(instance.simulatorUdid).catch((error) => {
+      await lifecycle.deleteExact(instance.simulatorUdid, signal).catch((error) => {
         cleanupSucceeded = false;
         logger.warn('iOS Simulator stale binding cleanup could not delete device', {
           instanceId: instance.instanceId,
@@ -1874,14 +1875,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         const released = await actor.runOwnershipCleanup(
           snapshot.instanceId,
           sessionId,
-          async (instance) => {
+          async (instance, signal) => {
             const hostOwnsBoot =
               instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
             let device: IOSSimulatorEnvironmentReport['devices'][number] | null | undefined;
             let deviceStateKnown = !hostOwnsBoot;
             if (hostOwnsBoot) {
               try {
-                device = await lifecycle.findExact(instance.simulatorUdid);
+                device = await lifecycle.findExact(instance.simulatorUdid, signal);
                 deviceStateKnown = device !== undefined;
               } catch (error) {
                 logger.warn('iOS Simulator removed task cleanup could not inspect exact device', {
@@ -1891,7 +1892,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 });
               }
             }
-            return releaseStaleBinding(instance, device, deviceStateKnown);
+            return releaseStaleBinding(instance, device, deviceStateKnown, signal);
           },
         );
         if (!released) failures.add(snapshot.instanceId);
@@ -2197,7 +2198,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return false;
     }
     if (!session || session.status === 'deleted' || session.status === 'archived') {
-      return (await releaseStaleBinding(instance, device)) && complete;
+      const released = await actor.runOwnershipCleanup(
+        instance.instanceId,
+        instance.sessionId,
+        (owned, signal) =>
+          releaseStaleBinding(owned, device, true, signal),
+      );
+      return released && complete;
     }
     if (session.remoteHostId || !device) {
       const runtimeReleased = await releaseInstanceRuntime(instance);
@@ -5787,6 +5794,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     dispose() {
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
+        actor.abortOperationsForExit();
         const lifecycleStarts = actor.cancelAllLifecycleStarts();
         const mutations = actor.cancelAllMutations();
         const builds = [...activeBuilds.values()];

@@ -10,9 +10,13 @@
  */
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 import { messages, sessions } from '../../schema';
+import type { SessionRouteLock } from '../../sessionRouteLock';
+
+type SessionRouteLockMock = SessionRouteLock &
+  MockInstance<(sessionId: string, task: () => Promise<unknown>) => Promise<unknown>>;
 
 const h = vi.hoisted(() => ({
   db: null as ReturnType<typeof drizzle> | null,
@@ -23,7 +27,9 @@ const h = vi.hoisted(() => ({
   })),
   tapWindowBroadcast: vi.fn(),
   summarizeSession: vi.fn(async () => undefined),
-  routeLock: vi.fn(async (_sessionId: string, task: () => Promise<unknown>) => task()),
+  routeLock: vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
+    task(),
+  ) as SessionRouteLockMock,
 }));
 
 vi.mock('electron', () => ({

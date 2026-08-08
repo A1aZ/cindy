@@ -12,6 +12,7 @@ describe('desktop Claude read-only allowlist', () => {
     expect(tools).toEqual(
       expect.arrayContaining([
         'mcp__cindy__ghost_list',
+        'mcp__cindy__ghost_info',
         'mcp__cindy__ghost_forge_guide',
         'mcp__cindy_ios_simulator__list_tools',
         'mcp__cindy_helper__list_tools',
@@ -44,6 +45,7 @@ describe('desktop Claude read-only allowlist', () => {
   it('keeps the exact tool list and order stable for prompt-cache prefix', () => {
     expect(getDesktopClaudeReadOnlyAllowedTools()).toEqual([
       'mcp__cindy__ghost_list',
+      'mcp__cindy__ghost_info',
       'mcp__cindy__ghost_forge_guide',
       'mcp__cindy_browser__list_tools',
       'mcp__cindy_android__list_tools',
@@ -157,17 +159,20 @@ describe('desktop MCP approval policy', () => {
     expect(
       getDesktopMcpToolApprovalPolicy({ serverName: 'cindy_ssh', toolName: 'list_tools' }),
     ).toBe('auto-approve');
-    expect(
-      getDesktopMcpToolApprovalPolicy({ serverName: 'cindy', toolName: 'ghost_list' }),
-    ).toBe('auto-approve');
+    expect(getDesktopMcpToolApprovalPolicy({ serverName: 'cindy', toolName: 'ghost_list' })).toBe(
+      'auto-approve',
+    );
+    expect(getDesktopMcpToolApprovalPolicy({ serverName: 'cindy', toolName: 'ghost_info' })).toBe(
+      'auto-approve',
+    );
 
     // 同一个 server 的执行入口不跟着沾光。
     expect(
       getDesktopMcpToolApprovalPolicy({ serverName: 'cindy_ssh', toolName: 'call_tool' }),
     ).toBe('prompt');
-    expect(
-      getDesktopMcpToolApprovalPolicy({ serverName: 'cindy', toolName: 'ghost_call' }),
-    ).toBe('prompt');
+    expect(getDesktopMcpToolApprovalPolicy({ serverName: 'cindy', toolName: 'ghost_call' })).toBe(
+      'prompt',
+    );
   });
 
   it('auto-approves the browser call_tool entry that Claude used to prompt for every time', () => {

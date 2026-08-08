@@ -1,4 +1,8 @@
-import { GHOST_OAUTH_SCOPES_MAX, isValidCindyVersion } from '@cindy/plugin-protocol';
+import {
+  GHOST_MANIFEST_SUMMARY_MAX_CHARS,
+  GHOST_OAUTH_SCOPES_MAX,
+  isValidCindyVersion,
+} from '@cindy/plugin-protocol';
 import type { IOSSimulatorMcpErrorCode } from '@cindy/mcps';
 import { findSplitChildByPanelKind, insertRootSplitPane, type Layout } from './layoutTree';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from './locale';
@@ -29,6 +33,9 @@ export const GHOST_MANIFEST_FILE = 'ghost.json';
  * 安全预算，但最终写进 .cindy 的清单必须落在这个上限内。
  */
 export const GHOST_INSTALL_MANIFEST_MAX_BYTES = 256 * 1024;
+
+/** ghost.json 的 description / whenToUse 字符上限，正本在 plugin-protocol。 */
+export { GHOST_MANIFEST_SUMMARY_MAX_CHARS };
 
 /** 意识文件扩展名。 */
 export const CINDY_FILE_EXT = '.cindy';
@@ -809,7 +816,13 @@ export const GHOST_OAUTH_BOUNCE_PATH_RE = /^\/[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_-]+)
  * 改走 source:'oauth' + tokenBroker:'feishu';存量已装清单由内置意识播种器
  * 按指纹覆盖自愈,未覆盖前该意识加载被拒属预期。)
  */
-export const GHOST_SECRET_SOURCES = ['user', 'login-email', 'oauth', 'gh-cli', 'oidc-token'] as const;
+export const GHOST_SECRET_SOURCES = [
+  'user',
+  'login-email',
+  'oauth',
+  'gh-cli',
+  'oidc-token',
+] as const;
 export type GhostSecretSource = (typeof GHOST_SECRET_SOURCES)[number];
 
 /**
@@ -1458,11 +1471,7 @@ export interface InstalledGhost {
  * 插件包的来源与审核等级；通常只决定 UI 徽标。保留的 gh-cli 凭证来源还会
  * 要求 cindy-github 具备 cindy-official Host receipt，防止第三方仅自报 id。
  */
-export type GhostTrustLevel =
-  | 'cindy-official'
-  | 'reviewed'
-  | 'verified-publisher'
-  | 'unverified';
+export type GhostTrustLevel = 'cindy-official' | 'reviewed' | 'verified-publisher' | 'unverified';
 
 export interface GhostTrustInfo {
   level: GhostTrustLevel;
@@ -1663,7 +1672,9 @@ export function ghostPermissionItems(manifest: GhostManifest): GhostPermissionIt
       // 快问快答声明了偏好模型:说明行换带模型的版本(装入即知情,成本透明)。
       const declaredOneshotModel =
         cap === 'text.oneshot' ? manifest.cindy?.oneshotModel : undefined;
-      const detailKey = declaredOneshotModel ? 'cindyTextOneshotModelDetail' : GHOST_CINDY_PERM_DETAIL[cap];
+      const detailKey = declaredOneshotModel
+        ? 'cindyTextOneshotModelDetail'
+        : GHOST_CINDY_PERM_DETAIL[cap];
       // 未登记的能力键不该出现(validateGhostManifest 已拦),防御性跳过。
       if (labelKey) {
         items.push({
@@ -2084,7 +2095,12 @@ function ghostPermissionItemFingerprint(item: GhostPermissionItem): string {
   const args = item.detailArgs
     ? Object.entries(item.detailArgs).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     : [];
-  return JSON.stringify([item.key, item.detail ?? '', permissionDetailKeyForFingerprint(item), args]);
+  return JSON.stringify([
+    item.key,
+    item.detail ?? '',
+    permissionDetailKeyForFingerprint(item),
+    args,
+  ]);
 }
 
 /**
@@ -2097,10 +2113,7 @@ function ghostPermissionItemFingerprint(item: GhostPermissionItem): string {
  * 每项 JSON 编码后排序拼接,全可打印、无拼接歧义。
  */
 export function ghostPermissionBaselineKey(manifest: GhostManifest): string {
-  return ghostPermissionItems(manifest)
-    .map(ghostPermissionItemFingerprint)
-    .sort()
-    .join('\n');
+  return ghostPermissionItems(manifest).map(ghostPermissionItemFingerprint).sort().join('\n');
 }
 
 export function diffGhostPermissionItems(
@@ -2145,7 +2158,9 @@ export function unreviewedGhostPermissionItems(
   for (const item of ghostPermissionItems(previouslyInstalled ?? reviewed)) {
     approved.add(ghostPermissionItemFingerprint(item));
   }
-  return ghostPermissionItems(actual).filter((item) => !approved.has(ghostPermissionItemFingerprint(item)));
+  return ghostPermissionItems(actual).filter(
+    (item) => !approved.has(ghostPermissionItemFingerprint(item)),
+  );
 }
 
 /**
@@ -2437,11 +2452,11 @@ export function validateGhostManifestLocaleResource(
     }
     return value;
   };
-  const description = optionalText('description', 300);
+  const description = optionalText('description', GHOST_MANIFEST_SUMMARY_MAX_CHARS);
   if (isPlainObject(description) && typeof description.error === 'string') {
     return { ok: false, reason: description.error };
   }
-  const whenToUse = optionalText('whenToUse', 300);
+  const whenToUse = optionalText('whenToUse', GHOST_MANIFEST_SUMMARY_MAX_CHARS);
   if (isPlainObject(whenToUse) && typeof whenToUse.error === 'string') {
     return { ok: false, reason: whenToUse.error };
   }
@@ -2948,17 +2963,23 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     raw.description !== undefined &&
     (typeof raw.description !== 'string' ||
       raw.description.trim().length === 0 ||
-      raw.description.length > 300)
+      raw.description.length > GHOST_MANIFEST_SUMMARY_MAX_CHARS)
   ) {
-    return { ok: false, reason: 'description 必须是 1–300 字符的非空字符串' };
+    return {
+      ok: false,
+      reason: `description 必须是 1–${GHOST_MANIFEST_SUMMARY_MAX_CHARS} 字符的非空字符串`,
+    };
   }
   if (
     raw.whenToUse !== undefined &&
     (typeof raw.whenToUse !== 'string' ||
       raw.whenToUse.trim().length === 0 ||
-      raw.whenToUse.length > 300)
+      raw.whenToUse.length > GHOST_MANIFEST_SUMMARY_MAX_CHARS)
   ) {
-    return { ok: false, reason: 'whenToUse 必须是 1–300 字符的非空字符串' };
+    return {
+      ok: false,
+      reason: `whenToUse 必须是 1–${GHOST_MANIFEST_SUMMARY_MAX_CHARS} 字符的非空字符串`,
+    };
   }
   if (raw.icon !== undefined) {
     if (!isSafeGhostRelativePath(raw.icon)) {
@@ -3262,12 +3283,15 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     // 只验形态不验存在——目录随主机演进,声明式字段永不构成硬依赖。
     const oneshotModelRaw = cindyRaw.oneshotModel;
     if (
-      oneshotModelRaw !== undefined
-      && (typeof oneshotModelRaw !== 'string'
-        || oneshotModelRaw.trim().length === 0
-        || oneshotModelRaw.length > 128)
+      oneshotModelRaw !== undefined &&
+      (typeof oneshotModelRaw !== 'string' ||
+        oneshotModelRaw.trim().length === 0 ||
+        oneshotModelRaw.length > 128)
     ) {
-      return { ok: false, reason: 'cindy.oneshotModel 必须是 1–128 字符的目录模型 id(如 "codex/gpt-5.5")' };
+      return {
+        ok: false,
+        reason: 'cindy.oneshotModel 必须是 1–128 字符的目录模型 id(如 "codex/gpt-5.5")',
+      };
     }
     // 类目 → 合法动作表(image / video / media;image 与 video 的动作集恰好
     // 同名,但按类目查表,未来某类目动作分叉时这里天然承接)。新增类目必须
@@ -3313,13 +3337,20 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       else if (category === 'text') cindy.text = actions as GhostCindyTextAction[];
       else if (category === 'embed') cindy.embed = actions as GhostCindyEmbedAction[];
       else if (category === 'search') cindy.search = actions as GhostCindySearchAction[];
-      else return { ok: false, reason: `cindy 能力类目 ${JSON.stringify(category)} 尚未接线(主机缺陷)` };
+      else
+        return {
+          ok: false,
+          reason: `cindy 能力类目 ${JSON.stringify(category)} 尚未接线(主机缺陷)`,
+        };
     }
     // 偏好模型只是快问快答的选型意图,必须挂在能力本体上(无能力单挂偏好 =
     // 清单自相矛盾,与"有详单必有槽"同一判据)。
     if (oneshotModelRaw !== undefined) {
       if (!cindy.text?.includes('oneshot')) {
-        return { ok: false, reason: 'cindy.oneshotModel 必须与 text 含 "oneshot" 成对声明(它是快问快答的偏好模型)' };
+        return {
+          ok: false,
+          reason: 'cindy.oneshotModel 必须与 text 含 "oneshot" 成对声明(它是快问快答的偏好模型)',
+        };
       }
       cindy.oneshotModel = (oneshotModelRaw as string).trim();
     }
@@ -3981,7 +4012,8 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         if (source === 'gh-cli' && s.exchange !== undefined) {
           return {
             ok: false,
-            reason: 'network.secrets[].source 为 gh-cli 时不允许声明 exchange(GitHub token 只能直接注入 GitHub API)',
+            reason:
+              'network.secrets[].source 为 gh-cli 时不允许声明 exchange(GitHub token 只能直接注入 GitHub API)',
           };
         }
         if (
@@ -4102,7 +4134,8 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           ) {
             return {
               ok: false,
-              reason: 'network.secrets[].source 为 gh-cli 时 inject 必须固定为 api.github.com 的 Authorization: Bearer {value}',
+              reason:
+                'network.secrets[].source 为 gh-cli 时 inject 必须固定为 api.github.com 的 Authorization: Bearer {value}',
             };
           }
         }
@@ -4772,19 +4805,18 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       { hostDerivedSource: 'login-email' | 'gh-cli' | 'oidc-token' | null }
     >([
       ...(network?.secrets ?? []).map(
-        (s) => [
-          s.key,
-          {
-            hostDerivedSource:
-              s.source === 'login-email' || s.source === 'gh-cli' || s.source === 'oidc-token'
-                ? s.source
-                : null,
-          },
-        ] as const,
+        (s) =>
+          [
+            s.key,
+            {
+              hostDerivedSource:
+                s.source === 'login-email' || s.source === 'gh-cli' || s.source === 'oidc-token'
+                  ? s.source
+                  : null,
+            },
+          ] as const,
       ),
-      ...(node?.secretBindings ?? []).map(
-        (s) => [s.key, { hostDerivedSource: null }] as const,
-      ),
+      ...(node?.secretBindings ?? []).map((s) => [s.key, { hostDerivedSource: null }] as const),
     ]);
     const connectionKeys = new Set((network?.connections ?? []).map((c) => c.key));
     const groups: GhostSetupGroup[] = [];

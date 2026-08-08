@@ -6,17 +6,23 @@
  * 不能广播任何部分成功的 patch。
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import type { SessionRouteLock } from '../localDb/sessionRouteLock.js';
+
+type SessionRouteLockMock = SessionRouteLock &
+  MockInstance<(sessionId: string, task: () => Promise<unknown>) => Promise<unknown>>;
 
 const h = vi.hoisted(() => ({
   tx: vi.fn(),
   tapWindowBroadcast: vi.fn(),
   webContentsSend: vi.fn(),
   closeSession: vi.fn(),
-  withSendToSessionLock: vi.fn(async (_sessionId: string, task: () => Promise<unknown>) => task()),
+  withSendToSessionLock: vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
+    task(),
+  ) as SessionRouteLockMock,
   isSessionStillRemovable: vi.fn(),
   cancelSessionOperations: vi.fn(),
   removeSessionRefs: vi.fn(),
@@ -353,7 +359,7 @@ describe('recycleSessionWorktreeForStatusChange', () => {
   it('keeps media and worktree deletion inside the task route lock', async () => {
     let lockHeld = false;
     h.withSendToSessionLock.mockImplementationOnce(
-      async (_sessionId: string, task: () => Promise<unknown>) => {
+      async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> => {
         lockHeld = true;
         try {
           return await task();

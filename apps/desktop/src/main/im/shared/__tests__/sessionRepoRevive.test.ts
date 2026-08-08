@@ -8,7 +8,11 @@
  *   - createSession 的 INSERT 带 onConflictDoUpdate 兜并发竞态,冲突时只翻
  *     status 不碰上下文列。
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import type { SessionRouteLock } from '../../../localDb/sessionRouteLock';
+
+type SessionRouteLockMock = SessionRouteLock &
+  MockInstance<(sessionId: string, task: () => Promise<unknown>) => Promise<unknown>>;
 
 const mocks = vi.hoisted(() => {
   const updateWhere = vi.fn(async (_where: unknown) => {});
@@ -78,7 +82,9 @@ import { createImSessionRepo, type ImSessionRow } from '../sessionRepo';
 import { setSessionRouteLockImplementation } from '../../../localDb/sessionRouteLock';
 import type { ImOrchestratorConfig, ImSessionNamespace } from '../types';
 
-const routeLock = vi.fn(async (_sessionId: string, task: () => Promise<unknown>) => task());
+const routeLock = vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
+  task(),
+) as SessionRouteLockMock;
 
 beforeEach(() => {
   routeLock.mockClear();

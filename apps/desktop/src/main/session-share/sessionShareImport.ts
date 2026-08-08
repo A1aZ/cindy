@@ -918,6 +918,11 @@ export async function commitShareImport(
           ...(orcaTxArgs ? { orca: orcaTxArgs } : {}),
         });
         finalTxState.outcome = 'committed';
+        // The transaction is now durable. Consume the in-memory draft before
+        // revalidating the owner so a stale completion cannot be retried into
+        // another profile and duplicate the already committed import.
+        drafts.delete(opts.draftId);
+        assertStillValid();
       },
     );
 
@@ -942,7 +947,6 @@ export async function commitShareImport(
       transcriptsWritten,
       notes,
     });
-    drafts.delete(opts.draftId);
     // 回传被原子替换的旧图，IPC 层在 commit 成功后执行可逆性不再需要的
     // 运行时/UI 收尾（closeSession + patched 广播）。资源字节不立即删除，避免
     // 与同 resume id 的新任务复用转录/媒体发生竞态，交既有对账/回收路径处理。

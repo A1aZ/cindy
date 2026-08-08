@@ -182,10 +182,10 @@ export function registerSessionShareIpc(): void {
           activeOwnerScopeKey() === ownerScopeKey &&
           tryGetDbClient() === importDbClient;
         const assertStillValid = (): void => {
-          refCompensationScope.assertStillValid();
           if (!isStillCurrent()) {
-            throw new Error('Session share import owner changed before commit');
+            throw new Error('Session share import owner changed during import');
           }
+          refCompensationScope.assertStillValid();
         };
         const result = await commitShareImport(
           { draftId, workingDir, draftPrefs, overwrite, useWorktree },
@@ -204,6 +204,10 @@ export function registerSessionShareIpc(): void {
         if (isStillCurrent()) {
           await cleanupReplacedSessionMediaRefs(result.replacedSessions, importDbClient.drizzle);
         }
+        // The cleanup awaits above may outlive the captured owner even though
+        // the DB transaction itself completed under the correct client. Never
+        // project that old-owner session id into the replacement Renderer.
+        assertStillValid();
         // replacedSessions 是 main 内部收尾信息，不暴露给 renderer/preload 契约。
         const publicResult: CommitShareImportResult = {
           sessionId: result.sessionId,

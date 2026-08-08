@@ -29,6 +29,7 @@ const dbMock = vi.hoisted(() => ({
   queryCalls: [] as Array<{ sql: string; params: unknown[] }>,
   txCalls: [] as Array<{ name: string; args: unknown }>,
   txError: null as Error | null,
+  afterTxResolve: null as (() => void) | null,
   drizzle: { scope: 'stable-import-db' },
 }));
 const codexMock = vi.hoisted(() => ({
@@ -85,6 +86,7 @@ vi.mock('../../localDb/client/current.js', () => ({
     tx: async (name: string, args: unknown) => {
       if (dbMock.txError) throw dbMock.txError;
       dbMock.txCalls.push({ name, args });
+      dbMock.afterTxResolve?.();
       return { messageCount: (args as { messages: unknown[] }).messages.length };
     },
   }),
@@ -434,6 +436,7 @@ describe('sessionShareImport', () => {
     dbMock.queryCalls = [];
     dbMock.txCalls = [];
     dbMock.txError = null;
+    dbMock.afterTxResolve = null;
     codexMock.importCalls = [];
     codexMock.removeCalls = [];
     codexMock.importResult = {
@@ -677,6 +680,64 @@ describe('sessionShareImport', () => {
     await expect(
       fsp.stat(path.join(sharedMediaRoot, importedRef as string, '2-doc.pdf')),
     ).resolves.toBeDefined();
+  });
+
+  it('does not project a committed import after its captured owner changes', async () => {
+    let ownerCurrent = true;
+    dbMock.afterTxResolve = () => {
+      ownerCurrent = false;
+    };
+    const filePath = await writeBundleFile(await buildBundle());
+    const inspect = await inspectShareFile(filePath);
+    if (inspect.encrypted) return;
+    const assertStillValid = () => {
+      if (!ownerCurrent) {
+        throw Object.assign(new Error('owner changed during import'), {
+          code: 'PRECONDITION_FAILED',
+        });
+      }
+    };
+
+    await expect(
+      rawCommitShareImport(
+        {
+          draftId: inspect.draftId,
+          workingDir: newWorkdir,
+          projectsRootOverride: projectsRoot,
+          sharedMediaRootOverride: sharedMediaRoot,
+        },
+        {
+          dbClient: mockedDbClientModule.getDbClient(),
+          assertStillValid,
+          refCompensationScope: {
+            journalDir: path.join(tmpRoot, 'ref-compensation'),
+            ownerStorageKey: 'a'.repeat(20),
+            assertStillValid,
+          },
+        },
+      ),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+
+    expect(dbMock.txCalls).toHaveLength(1);
+    expect(cindyMediaMock.removeSessionRefsCalls).toEqual([]);
+    expect(legacyImageMock.removeSessionCalls).toEqual([]);
+    expect(codexMock.removeCalls).toEqual([]);
+    expect(worktreeMock.removeCalls).toEqual([]);
+    const importedRef = cindyMediaMock.ingestCalls[0]?.refs[0]?.refId;
+    expect(importedRef).toEqual(expect.any(String));
+    const key = newWorkdir.replace(/[^a-zA-Z0-9]/g, '-');
+    await expect(fsp.stat(path.join(projectsRoot, key, `${SID}.jsonl`))).resolves.toBeDefined();
+    await expect(
+      fsp.stat(path.join(sharedMediaRoot, importedRef as string, '2-doc.pdf')),
+    ).resolves.toBeDefined();
+    await expect(
+      commitShareImport({
+        draftId: inspect.draftId,
+        workingDir: newWorkdir,
+        projectsRootOverride: projectsRoot,
+        sharedMediaRootOverride: sharedMediaRoot,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 
   it('encrypted flow: inspect → wrong password → unlock → commit', async () => {

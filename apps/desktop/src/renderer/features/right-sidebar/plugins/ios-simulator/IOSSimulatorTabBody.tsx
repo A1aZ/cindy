@@ -1641,7 +1641,10 @@ export function IOSSimulatorTabBody({
             aria-live="polite"
             className="flex items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-12 text-[var(--text-secondary)]"
           >
-            <span className="inline-flex animate-spin" aria-hidden="true">
+            <span
+              className="inline-flex animate-spin motion-reduce:animate-none"
+              aria-hidden="true"
+            >
               <Loader2 size={14} />
             </span>
             <span>{t(`rightSidebar.iosSimulator.operations.${operation}`)}</span>

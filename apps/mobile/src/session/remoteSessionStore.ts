@@ -639,6 +639,7 @@ function completeLivePlanSnapshotOnDone(
   snapshot: unknown,
   turnId: string | null,
   terminalStatus: string | null,
+  cancelled: boolean,
 ): boolean {
   if (!turnId) return false;
   const toolUseId = `plan:${turnId}`;
@@ -650,6 +651,8 @@ function completeLivePlanSnapshotOnDone(
     snapshot,
     turnId,
     terminalStatus,
+    undefined,
+    cancelled,
   );
   const content = completed.messages[0]?.content;
   if (!completed.changed || !isRecord(content)) return false;
@@ -2339,18 +2342,22 @@ export const remoteSessionStore = {
         const rawTurn = isRecord(data?.raw) ? data.raw : null;
         const turnId = readString(rawTurn, 'id');
         const turnStatus = readString(rawTurn, 'status');
+        const turnCancelled = data?.cancelled === true;
         const currentMessages = messages.get(sessionId) ?? [];
         const completed = applyCodexPlanSnapshotOnDone(
           currentMessages,
           data?.plan,
           turnId,
           turnStatus,
+          undefined,
+          turnCancelled,
         );
         completeLivePlanSnapshotOnDone(
           sessionId,
           data?.plan,
           turnId,
           turnStatus,
+          turnCancelled,
         );
         terminalPlanChanged = completed.changed;
         if (completed.changed) {

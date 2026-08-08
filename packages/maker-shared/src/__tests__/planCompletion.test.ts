@@ -167,6 +167,19 @@ describe('applyCodexPlanSnapshotOnDone', () => {
     )).toEqual({ messages, changed: false, toolUseId: null });
   });
 
+  it('lets the cancelled flag outrank raw.status completed', () => {
+    // done 可同时带 cancelled:true + raw.status 'completed'(用户 Stop 恰逢
+    // turn 自然收尾)。main 的 isSuccessfulCodexDoneEventData 让取消优先、按
+    // 非成功持久化;渲染端必须同序——只看 status 就会即时盖章退场,随后落库
+    // 行广播又把计划复活,即时 UI 与 DB 分叉。
+    const message = planMessage('plan:raced', [{ step: 'Inspect', status: 'in_progress' }]);
+    const messages = [message];
+
+    expect(
+      applyCodexPlanSnapshotOnDone(messages, null, 'raced', 'completed', undefined, true),
+    ).toEqual({ messages, changed: false, toolUseId: null });
+  });
+
   it('does not seal a failed or interrupted turn, but stamps it as failed', () => {
     // interrupted / failed 的 done 不盖章(任务还活着,计划必须留在屏幕上),
     // 但要立即在内存补 turnCompleted:false——main 的落库印记在 done 广播之后

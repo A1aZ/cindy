@@ -4839,7 +4839,9 @@ export function handleStreamEvent(
       });
 
       const terminalData = event.data as
-        { plan?: unknown; raw?: { id?: unknown; status?: unknown } } | null | undefined;
+        { cancelled?: unknown; plan?: unknown; raw?: { id?: unknown; status?: unknown } }
+        | null
+        | undefined;
       const terminalTurnId = typeof terminalData?.raw?.id === 'string' ? terminalData.raw.id : null;
       const terminalTurnStatus =
         typeof terminalData?.raw?.status === 'string' ? terminalData.raw.status : null;
@@ -4851,6 +4853,7 @@ export function handleStreamEvent(
               terminalTurnId,
               terminalTurnStatus,
               Date.now(),
+              terminalData?.cancelled === true,
             ).messages
           : cleanedMessages;
 

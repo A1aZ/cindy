@@ -626,9 +626,14 @@ export function applyCodexPlanSnapshotOnDone<
   turnId?: string | null,
   terminalStatus?: unknown,
   planUpdatedAtMs?: number,
+  cancelled?: boolean,
 ): CodexPlanSnapshotApplyResult<TMessage> {
   const authoritativeSnapshot = Array.isArray(snapshot) ? snapshot : null;
-  const sealsTurn = terminalStatus === 'completed' && Boolean(turnId);
+  // 取消标记优先于 completed:done 可同时带 cancelled:true + raw.status
+  // 'completed'(main 侧 isSuccessfulCodexDoneEventData 同序判定)。渲染端若
+  // 只看 status 会先盖章退场,随后 main 持久化 turnCompleted:false 的 DB 行
+  // 广播到达,计划复活——即时 UI 与落库分叉。
+  const sealsTurn = terminalStatus === 'completed' && cancelled !== true && Boolean(turnId);
   // done 恒为终态:status 不是 completed(interrupted / failed)即失败终态。
   const stampsFailed =
     Boolean(turnId) && typeof terminalStatus === 'string' && terminalStatus !== 'completed';

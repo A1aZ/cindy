@@ -52,6 +52,11 @@ interface TileState {
   frameUrl: string | null;
 }
 
+interface TileLiveMutation {
+  routeKey: string;
+  mutation: IOSSimulatorMutationState;
+}
+
 interface TileGesture {
   pointerId: number;
   startedAt: number;
@@ -85,6 +90,12 @@ function instanceFrom(result: IOSSimulatorToolResponse): IOSSimulatorPublicInsta
   return instance && typeof instance === 'object' ? (instance as IOSSimulatorPublicInstance) : null;
 }
 
+function mutationFrom(result: IOSSimulatorToolResponse): IOSSimulatorMutationState | null {
+  if (!result.ok || !result.data || typeof result.data !== 'object') return null;
+  const mutation = (result.data as { mutation?: unknown }).mutation;
+  return mutation && typeof mutation === 'object' ? (mutation as IOSSimulatorMutationState) : null;
+}
+
 /** Compact multi-instance view with per-tile basic input routed by exact instance. */
 export function IOSSimulatorInstanceGrid({
   sessionId,
@@ -101,6 +112,7 @@ export function IOSSimulatorInstanceGrid({
   const { t } = useTranslation();
   const [tiles, setTiles] = useState<Record<string, TileState>>({});
   const [tileBusy, setTileBusy] = useState<Record<string, boolean>>({});
+  const [liveMutations, setLiveMutations] = useState<Record<string, TileLiveMutation>>({});
   const [invalidatedRouteKeys, setInvalidatedRouteKeys] = useState<Record<string, string>>({});
   const [tileErrors, setTileErrors] = useState<Record<string, string>>({});
   const [tileText, setTileText] = useState<Record<string, string>>({});
@@ -121,6 +133,34 @@ export function IOSSimulatorInstanceGrid({
       invalidatedRouteKeysRef.current[instance.instanceId] === routeKey(instance),
     [],
   );
+  const agentBusyInstanceIds = useMemo(() => {
+    const busyInstanceIds = new Set(
+      mutationStates
+        .filter(
+          (mutation) =>
+            mutation.activeSource === 'agent' || (mutation.queuedAgentMutations ?? 0) > 0,
+        )
+        .map((mutation) => mutation.instanceId),
+    );
+    for (const instance of readyInstances) {
+      const live = liveMutations[instance.instanceId];
+      if (!live || live.routeKey !== routeKey(instance)) continue;
+      if (live.mutation.activeSource === 'agent' || (live.mutation.queuedAgentMutations ?? 0) > 0) {
+        busyInstanceIds.add(instance.instanceId);
+      } else {
+        busyInstanceIds.delete(instance.instanceId);
+      }
+    }
+    return busyInstanceIds;
+  }, [liveMutations, mutationStates, readyInstances]);
+  const isTileBusy = useCallback(
+    (instance: IOSSimulatorPublicInstance) =>
+      instance.lifecycleState !== 'ready' ||
+      tileBusy[instance.instanceId] === true ||
+      agentBusyInstanceIds.has(instance.instanceId) ||
+      routeIsInvalidated(instance),
+    [agentBusyInstanceIds, routeIsInvalidated, tileBusy],
+  );
 
   const callTile = useCallback(
     async (
@@ -135,13 +175,7 @@ export function IOSSimulatorInstanceGrid({
         | 'unlock_screen',
       args: Record<string, unknown>,
     ): Promise<boolean> => {
-      if (
-        instance.lifecycleState !== 'ready' ||
-        tileBusy[instance.instanceId] ||
-        routeIsInvalidated(instance)
-      ) {
-        return false;
-      }
+      if (isTileBusy(instance)) return false;
       setTileBusy((previous) => ({ ...previous, [instance.instanceId]: true }));
       setTileErrors((previous) => {
         const next = { ...previous };
@@ -178,7 +212,7 @@ export function IOSSimulatorInstanceGrid({
         setTileBusy((previous) => ({ ...previous, [instance.instanceId]: false }));
       }
     },
-    [routeIsInvalidated, sessionId, t, tileBusy],
+    [isTileBusy, sessionId, t],
   );
 
   const tilePoint = useCallback((event: ReactPointerEvent<HTMLImageElement>) => {
@@ -191,13 +225,7 @@ export function IOSSimulatorInstanceGrid({
 
   const onTilePointerDown = useCallback(
     (instance: IOSSimulatorPublicInstance, event: ReactPointerEvent<HTMLImageElement>) => {
-      if (
-        event.button !== 0 ||
-        tileBusy[instance.instanceId] ||
-        routeIsInvalidated(instance)
-      ) {
-        return;
-      }
+      if (event.button !== 0 || isTileBusy(instance)) return;
       const point = tilePoint(event);
       gesturesRef.current[instance.instanceId] = {
         pointerId: event.pointerId,
@@ -209,7 +237,7 @@ export function IOSSimulatorInstanceGrid({
       };
       event.currentTarget.setPointerCapture(event.pointerId);
     },
-    [routeIsInvalidated, tileBusy, tilePoint],
+    [isTileBusy, tilePoint],
   );
 
   const onTilePointerUp = useCallback(
@@ -220,7 +248,7 @@ export function IOSSimulatorInstanceGrid({
       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
-      if (routeIsInvalidated(instance)) return;
+      if (isTileBusy(instance)) return;
       const end = tilePoint(event);
       const distance = Math.hypot(
         event.clientX - gesture.startClientX,
@@ -239,7 +267,7 @@ export function IOSSimulatorInstanceGrid({
         durationMs: Math.round(durationMs),
       });
     },
-    [callTile, routeIsInvalidated, tilePoint],
+    [callTile, isTileBusy, tilePoint],
   );
 
   const sendTileText = useCallback(
@@ -267,6 +295,13 @@ export function IOSSimulatorInstanceGrid({
     setTiles((previous) =>
       Object.fromEntries(
         Object.entries(previous).filter(([instanceId]) => currentIds.has(instanceId)),
+      ),
+    );
+    setLiveMutations((previous) =>
+      Object.fromEntries(
+        Object.entries(previous).filter(
+          ([instanceId, live]) => currentRoutes.get(instanceId) === live.routeKey,
+        ),
       ),
     );
     const retainedInvalidatedRoutes = Object.fromEntries(
@@ -318,6 +353,12 @@ export function IOSSimulatorInstanceGrid({
       };
       if (!hadInvalidatedRoute) routeRefreshStateRef.current.nextAttemptAt = 0;
       gesturesRef.current[instanceId] = null;
+      setLiveMutations((previous) => {
+        if (!(instanceId in previous)) return previous;
+        const next = { ...previous };
+        delete next[instanceId];
+        return next;
+      });
       setInvalidatedRouteKeys((previous) => ({
         ...previous,
         [instanceId]: routeKey(instance),
@@ -340,6 +381,13 @@ export function IOSSimulatorInstanceGrid({
           invalidateRoute(instance);
         }
         return;
+      }
+      const mutation = mutationFrom(result);
+      if (mutation?.instanceId === instance.instanceId) {
+        setLiveMutations((previous) => ({
+          ...previous,
+          [instance.instanceId]: { routeKey: routeKey(instance), mutation },
+        }));
       }
       // Host returns an instance only when reconcile or heartbeat advanced the
       // authoritative route. Stop using the captured generation/lease before
@@ -450,14 +498,9 @@ export function IOSSimulatorInstanceGrid({
         {readyInstances.map((instance) => {
           const tile = tiles[instance.instanceId];
           const selected = instance.instanceId === selectedInstanceId;
-          const mutation = mutationStates.find(
-            (candidate) => candidate.instanceId === instance.instanceId,
-          );
-          const agentBusy = Boolean(
-            mutation?.activeSource === 'agent' || (mutation?.queuedAgentMutations ?? 0) > 0,
-          );
+          const agentBusy = agentBusyInstanceIds.has(instance.instanceId);
           const routeInvalidated = invalidatedRouteKeys[instance.instanceId] === routeKey(instance);
-          const busy = tileBusy[instance.instanceId] === true || agentBusy || routeInvalidated;
+          const busy = isTileBusy(instance);
           const error = tileErrors[instance.instanceId];
           return (
             <article

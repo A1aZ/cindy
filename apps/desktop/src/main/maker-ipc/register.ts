@@ -183,11 +183,13 @@ import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
   broadcastSessionPatched,
+  captureSessionRecycleScope,
   clearSessionContextInDb,
   createSessionRemoteHostIdReader,
   getSessionRowSnapshot,
   getSessionRowSnapshotStrict,
   persistSessionFields,
+  recycleSessionWorktreeForStatusChange,
 } from '../localDb/ipc/sessions.js';
 // sidebar-card-mode: turn-done 后触发任务现状摘要生成
 import { maybeGenerateSessionTaskSummary } from '../sessionTaskSummary.js';
@@ -7922,9 +7924,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         // 上一次关闭若在 archiveWorkersByTeam 之前被打断,team 已非 active 但 worker session 还停在
         // active + hidden + unreachable —— 一并补齐归档,否则它们会成为永远触达不到的孤儿 worker。
+        const workerRecycleScope = captureSessionRecycleScope();
         const orphanedWorkerSessionIds = await reconcileInactiveTeamWorkersForLead(leadSessionId);
         for (const sid of orphanedWorkerSessionIds) {
-          await cancelIOSSimulatorSessionOperations(sid);
+          await recycleSessionWorktreeForStatusChange(sid, 'archived', workerRecycleScope);
           cleanupPendingInteractionsForSession(sid, 'orca_disable');
           forgetKnownOrcaWorkerSession(sid);
         }
@@ -7973,10 +7976,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
 
     await markTeamEnded(team.id, 'completed');
     await markWorkersStatusByTeam(team.id, 'done');
+    const workerRecycleScope = captureSessionRecycleScope();
     const archivedWorkerSessionIds = await archiveWorkersByTeam(team.id);
     await Promise.all(
       archivedWorkerSessionIds.map((sessionId) =>
-        cancelIOSSimulatorSessionOperations(sessionId),
+        recycleSessionWorktreeForStatusChange(sessionId, 'archived', workerRecycleScope),
       ),
     );
 
@@ -8167,7 +8171,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     },
     hasSendToSessionLock: (sessionId) => sendToSessionLocks.has(sessionId),
-    archiveWorkerSession: archiveSingleWorkerSession,
+    archiveWorkerSession: async (sessionId) => {
+      const workerRecycleScope = captureSessionRecycleScope();
+      await archiveSingleWorkerSession(sessionId);
+      await recycleSessionWorktreeForStatusChange(sessionId, 'archived', workerRecycleScope);
+    },
     getManualInterrupt,
     clearManualInterrupt,
     forgetWorkerSession: forgetKnownOrcaWorkerSession,

@@ -333,6 +333,15 @@ describe('setSessionsStatusInDb', () => {
 });
 
 describe('recycleSessionWorktreeForStatusChange', () => {
+  it('runs the full runtime cleanup chain for archived sessions', async () => {
+    await recycleSessionWorktreeForStatusChange('s1', 'archived');
+
+    expect(h.withSendToSessionLock).toHaveBeenCalledWith('s1', expect.any(Function));
+    expect(h.cancelSessionOperations).toHaveBeenCalledWith('s1');
+    expect(h.cleanupRemovedSession).toHaveBeenCalledWith('s1');
+    expect(h.closeSession).toHaveBeenCalledWith('s1');
+  });
+
   it('awaits the shared close and worktree recycle chain for deleted sessions', async () => {
     const order: string[] = [];
     h.cancelSessionOperations.mockImplementationOnce(async () => {

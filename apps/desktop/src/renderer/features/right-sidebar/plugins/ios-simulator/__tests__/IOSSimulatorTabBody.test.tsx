@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { IOSSimulatorMutationState } from '@cindy/ios-simulator-runtime';
 import type {
   IOSSimulatorAccessRequest,
   IOSSimulatorAccessRequestResult,
@@ -104,6 +105,56 @@ function readyStatus(instance = readyInstance()): IOSSimulatorSessionStatus {
       setupSteps: [],
     },
   };
+}
+
+function multiReadyStatus(
+  mutationStates: IOSSimulatorMutationState[] = [],
+): IOSSimulatorSessionStatus {
+  const instanceA: IOSSimulatorPublicInstance = {
+    ...readyInstance(1),
+    simulatorName: 'iPhone A',
+    lease: { ...readyInstance(1).lease, id: 'lease-a' },
+  };
+  const instanceB: IOSSimulatorPublicInstance = {
+    ...readyInstance(2),
+    instanceId: 'instance-b',
+    simulatorUdid: 'DEVICE-B',
+    simulatorName: 'iPhone B',
+    lease: { ...readyInstance(2).lease, id: 'lease-b' },
+  };
+  const status = readyStatus(instanceA);
+  if (!status.ok) throw new Error('Expected a ready status fixture.');
+  return { ...status, mutationStates, instances: [instanceA, instanceB] };
+}
+
+function installGridFrames(
+  api: ReturnType<typeof installStatus>,
+  mutationForInstance: (instanceId: string) => IOSSimulatorMutationState | null = () => null,
+): void {
+  api.latestFrame.mockImplementation(async (request?: unknown) => {
+    const route = request as { instanceId: string; generation: number };
+    const mutation = mutationForInstance(route.instanceId);
+    return {
+      ok: true,
+      data: {
+        stream: {
+          instanceId: route.instanceId,
+          generation: route.generation,
+          state: 'streaming',
+          reconnectAttempt: 0,
+          latestFrame: {
+            instanceId: route.instanceId,
+            generation: route.generation,
+            sequence: 1,
+            encoding: 'jpeg',
+            receivedAt: '2026-07-24T00:00:00.000Z',
+            bytes: new Uint8Array([1, 2, 3]),
+          },
+        },
+        ...(mutation ? { mutation } : {}),
+      },
+    };
+  });
 }
 
 function preparePointerTarget(container: HTMLElement): HTMLImageElement {
@@ -2307,6 +2358,99 @@ describe('IOSSimulatorTabBody', () => {
         },
       });
     });
+  });
+
+  it('blocks grid gestures while an Agent owns or queues device input', async () => {
+    const status = multiReadyStatus([
+      {
+        instanceId: 'instance-b',
+        activeSource: 'agent',
+        lastSource: 'agent',
+        queuedAgentMutations: 0,
+        agentPaused: false,
+        takeoverPending: false,
+      },
+    ]);
+    const api = installStatus(status);
+    installGridFrames(api);
+
+    render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    const image = (await screen.findByAltText('iPhone B')) as HTMLImageElement;
+    Object.defineProperties(image, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width: 200, height: 400 }),
+      },
+    });
+    expect(
+      (
+        screen.getByRole('button', {
+          name: 'iPhone B rightSidebar.iosSimulator.pressHome',
+        }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(true);
+
+    fireEvent.pointerDown(image, { pointerId: 41, button: 0, clientX: 20, clientY: 40 });
+    fireEvent.pointerUp(image, { pointerId: 41, clientX: 180, clientY: 360 });
+
+    expect(image.setPointerCapture).not.toHaveBeenCalled();
+    expect(api.call).not.toHaveBeenCalled();
+  });
+
+  it('releases a grid gesture without dispatching it when Agent input becomes busy', async () => {
+    const initialStatus = multiReadyStatus();
+    const api = installStatus(initialStatus);
+    let liveMutation: IOSSimulatorMutationState | null = null;
+    installGridFrames(api, (instanceId) => (instanceId === 'instance-b' ? liveMutation : null));
+
+    render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    const image = (await screen.findByAltText('iPhone B')) as HTMLImageElement;
+    Object.defineProperties(image, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: { configurable: true, value: vi.fn(() => true) },
+      releasePointerCapture: { configurable: true, value: vi.fn() },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, width: 200, height: 400 }),
+      },
+    });
+    fireEvent.pointerDown(image, { pointerId: 42, button: 0, clientX: 20, clientY: 40 });
+    expect(image.setPointerCapture).toHaveBeenCalledWith(42);
+
+    liveMutation = {
+      instanceId: 'instance-b',
+      activeSource: null,
+      lastSource: 'agent',
+      queuedAgentMutations: 1,
+      agentPaused: false,
+      takeoverPending: false,
+    };
+    await waitFor(
+      () =>
+        expect(
+          (
+            screen.getByRole('button', {
+              name: 'iPhone B rightSidebar.iosSimulator.pressHome',
+            }) as HTMLButtonElement
+          ).disabled,
+        ).toBe(true),
+      { timeout: 2_000 },
+    );
+    expect(api.status).toHaveBeenCalledOnce();
+
+    fireEvent.pointerUp(image, { pointerId: 42, clientX: 180, clientY: 360 });
+
+    expect(image.releasePointerCapture).toHaveBeenCalledWith(42);
+    expect(api.call).not.toHaveBeenCalled();
   });
 
   it('drops a stale grid route and retries when its refresh is superseded', async () => {

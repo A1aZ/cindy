@@ -918,7 +918,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const buildDiagnosticExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const buildDiagnosticReaders = new Map<string, number>();
   const buildDiagnosticReadExitController = new AbortController();
-  const activeBuildDiagnosticReads = new Set<Promise<void>>();
+  const activeBuildDiagnosticReads = new Set<Promise<unknown>>();
   const pendingBuildDiagnosticRemoval = new Map<string, BuildDiagnosticRecord>();
   let buildResultBundlesReconciled = false;
   let buildResultBundlesReconcilePromise: Promise<void> | null = null;
@@ -5386,9 +5386,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 },
               };
             }
-            if (diagnostic.xcresultText === null) {
+            let xcresultText = diagnostic.xcresultText;
+            if (xcresultText === null) {
               const readXcresult = projectBuilder.readXcresult.bind(projectBuilder);
-              const readOperation = (async () => {
+              const readOperation = (async (): Promise<string> => {
                 buildDiagnosticReaders.set(
                   diagnosticsId,
                   (buildDiagnosticReaders.get(diagnosticsId) ?? 0) + 1,
@@ -5407,19 +5408,21 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                     );
                   }
                   assertHostActive();
-                  diagnostic.xcresultText = publicBuildText(rawXcresult);
+                  const publicXcresult = publicBuildText(rawXcresult);
+                  diagnostic.xcresultText = publicXcresult;
+                  return publicXcresult;
                 } finally {
                   await releaseBuildDiagnosticReader(diagnosticsId);
                 }
               })();
               activeBuildDiagnosticReads.add(readOperation);
               try {
-                await readOperation;
+                xcresultText = await readOperation;
               } finally {
                 activeBuildDiagnosticReads.delete(readOperation);
               }
             }
-            text = diagnostic.xcresultText;
+            text = xcresultText;
           } else if (source !== 'build-log') {
             throw new IOSSimulatorInstanceError(
               'INVALID_ARGUMENT',

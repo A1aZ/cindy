@@ -275,6 +275,12 @@ import type {
 } from '@/session/mediaPlayerWebViewHtml';
 import { formatMobileSystemCard } from '@/session/systemCard';
 import {
+  getMobileAutoResumePresentation,
+  isMobileAutoResumeRowInFlight,
+  toggleMobileAutoResumeExpanded,
+} from '@/session/autoResumePresentation';
+import type { ContinuationInFlightProjectionCapability } from '@/session/types';
+import {
   projectMobileWorkActivities,
   projectRecentMobileWorkActivities,
   type MobileProjectedThinkingActivity,
@@ -477,6 +483,14 @@ interface MessageActions {
   screenWidth?: number;
   /** 会话是否流式中:驱动工具行 running/done 状态(未 settled 且流式中才显示进行中)。 */
   isSessionStreaming?: boolean;
+  /** 当前 maker vendor turn 是否仍在运行；旧端续跑归属兜底只允许使用这条窄信号。 */
+  makerTurnRunning?: boolean;
+  /** 当前 vendor turn 的自动续跑 owner。 */
+  continuationTurnClientId?: string | null;
+  /** 只有明确识别为 legacy 的投影才允许使用最后一条输入的兼容判据。 */
+  continuationInFlightProjectionCapability?: ContinuationInFlightProjectionCapability;
+  /** 含自动续跑合成行、排除 steer 的最后一条用户输入。 */
+  lastUserInputClientId?: string | null;
 }
 
 export function MessageRenderer({
@@ -505,6 +519,9 @@ export function MessageRenderer({
   emptyTestID,
   bottomOverlayHeight,
   isSessionStreaming,
+  makerTurnRunning,
+  continuationTurnClientId,
+  continuationInFlightProjectionCapability,
   loadingEarlier,
   focusedRequestKey,
   queueFooter,
@@ -547,6 +564,7 @@ export function MessageRenderer({
   const { t } = useTranslation();
   const styles = useThemedStyles(makeStyles);
   const firstUserMessageClientId = findFirstUserMessageClientId(items);
+  const lastUserInputClientId = findLastUserInputClientId(items);
   const focusedItemKeyRef = useRef(focusedItemKey);
   focusedItemKeyRef.current = focusedItemKey;
   const listRef = useRef<LegendListRef>(null);
@@ -800,13 +818,21 @@ export function MessageRenderer({
     busyClientId,
     busyAction,
     firstUserMessageClientId,
+    lastUserInputClientId,
+    makerTurnRunning,
+    continuationTurnClientId,
+    continuationInFlightProjectionCapability,
     isSessionStreaming,
     screenWidth: viewportLayout.contentWidth,
   }), [
     busyClientId,
     busyAction,
+    continuationInFlightProjectionCapability,
+    continuationTurnClientId,
     firstUserMessageClientId,
     isSessionStreaming,
+    lastUserInputClientId,
+    makerTurnRunning,
     onCopyMessageLink,
     onAddMessageToComposer,
     onDeleteMessage,
@@ -1952,6 +1978,13 @@ function MessageBubble({
       ) : null}
       {item.message.systemCardType ? (
         <MobileSystemCard
+          autoResumeInFlight={isMobileAutoResumeRowInFlight({
+            isContinuationTurnOwner: clientId === actions.continuationTurnClientId,
+            makerTurnRunning: actions.makerTurnRunning === true,
+            isLastUserInput: clientId === actions.lastUserInputClientId,
+            projectionCapability:
+              actions.continuationInFlightProjectionCapability ?? 'unknown',
+          })}
           data={item.message.systemCardData}
           type={item.message.systemCardType}
         />
@@ -3229,9 +3262,11 @@ function MobileAgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
 }
 
 function MobileSystemCard({
+  autoResumeInFlight,
   data,
   type,
 }: {
+  autoResumeInFlight?: boolean;
   data?: Record<string, unknown>;
   type: NonNullable<NormalizedRemoteMessage['systemCardType']>;
 }) {
@@ -3240,7 +3275,9 @@ function MobileSystemCard({
   if (type === 'agent-switch') return <MobileAgentSwitchCard data={data} />;
   // auto-resume 复用桌面 AgentActionRow 的单行状态布局:默认只显示当前状态和压缩后的
   // 中断原因,完整诊断按需展开,避免底层错误全文把手机消息流撑成一张大卡片。
-  if (type === 'auto-resume') return <MobileAutoResumeActionRow data={data} />;
+  if (type === 'auto-resume') {
+    return <MobileAutoResumeActionRow data={data} inFlight={autoResumeInFlight === true} />;
+  }
   const card = formatMobileSystemCard(type, data);
   return (
     <View style={styles.systemCard} testID={`message.systemCard.${type}`}>
@@ -3261,61 +3298,21 @@ function MobileSystemCard({
   );
 }
 
-interface MobileAutoResumeInfo {
-  error?: string;
-  attempt?: number;
-  maxAttempts?: number;
-  sessionTotal?: number;
-  outcome?: 'succeeded' | 'failed';
-}
-
-function readMobileAutoResumeInfo(data?: Record<string, unknown>): MobileAutoResumeInfo {
-  const number = (value: unknown) =>
-    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
-  const attempt = number(data?.attempt);
-  const maxAttempts = number(data?.maxAttempts);
-  const sessionTotal = number(data?.sessionTotal);
-  return {
-    ...(typeof data?.error === 'string' && data.error.trim() ? { error: data.error } : {}),
-    ...(attempt !== undefined ? { attempt } : {}),
-    ...(maxAttempts !== undefined ? { maxAttempts } : {}),
-    ...(sessionTotal !== undefined ? { sessionTotal } : {}),
-    ...(data?.outcome === 'succeeded' || data?.outcome === 'failed'
-      ? { outcome: data.outcome }
-      : {}),
-  };
-}
-
-function summarizeMobileInterruption(detail?: string): string | undefined {
-  if (!detail) return undefined;
-  const compact = detail
-    .replace(/^\s*API Error:\s*/i, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!compact) return undefined;
-  const firstSentence = compact.split(/(?<=[.。!?！？])\s/)[0] ?? compact;
-  return firstSentence.length > 72 ? `${firstSentence.slice(0, 71)}…` : firstSentence;
-}
-
 function MobileAutoResumeActionRow({
   data,
+  inFlight,
 }: {
   data?: Record<string, unknown>;
+  inFlight: boolean;
 }) {
   const styles = useThemedStyles(makeStyles);
   const { colors } = useTheme();
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
-  const info = readMobileAutoResumeInfo(data);
-  const hasProgress = info.attempt !== undefined && info.maxAttempts !== undefined;
-  const hasInterruptionContext =
-    data?.live === true ||
-    info.error !== undefined ||
-    hasProgress ||
-    info.sessionTotal !== undefined ||
-    info.outcome !== undefined;
+  const presentation = getMobileAutoResumePresentation(data, inFlight);
+  const { canExpand, hasProgress, info, state, summary } = presentation;
 
-  if (!hasInterruptionContext) {
+  if (state === 'separator') {
     const label = t('message.systemCard.autoResume.separator');
     return (
       <View style={styles.autoResumeSeparator} testID="message.systemCard.auto-resume-separator">
@@ -3329,21 +3326,18 @@ function MobileAutoResumeActionRow({
     );
   }
 
-  const live = data?.live === true;
-  const label = live
+  const label = state === 'live'
     ? hasProgress
       ? t('message.systemCard.autoResume.pendingWithProgress', {
           attempt: info.attempt,
           total: info.maxAttempts,
         })
       : t('message.systemCard.autoResume.pending')
-    : info.outcome === 'succeeded'
+    : state === 'succeeded'
       ? t('message.systemCard.autoResume.succeeded')
-      : info.outcome === 'failed'
+      : state === 'failed'
         ? t('message.systemCard.autoResume.failed')
         : t('message.systemCard.autoResume.neutral');
-  const summary = summarizeMobileInterruption(info.error);
-  const canExpand = Boolean(info.error) || hasProgress || info.sessionTotal !== undefined;
   const accessibilityLabel = summary ? `${label}: ${summary}` : label;
 
   return (
@@ -3353,15 +3347,22 @@ function MobileAutoResumeActionRow({
         accessibilityRole={canExpand ? 'button' : undefined}
         accessibilityState={canExpand ? { expanded } : undefined}
         disabled={!canExpand}
-        onPress={canExpand ? () => setExpanded((value) => !value) : undefined}
+        onPress={canExpand
+          ? () => setExpanded((value) => toggleMobileAutoResumeExpanded(value, canExpand))
+          : undefined}
         style={({ pressed }) => [styles.autoResumeHeader, pressed && styles.pressed]}
       >
-        <View style={styles.autoResumeIconSlot} accessibilityElementsHidden>
-          {live ? (
+        <View
+          accessible={false}
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          style={styles.autoResumeIconSlot}
+        >
+          {state === 'live' ? (
             <CompactActivityIndicator color={colors.textTertiary} size={iconSize.sm} />
-          ) : info.outcome === 'succeeded' ? (
+          ) : state === 'succeeded' ? (
             <Check color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
-          ) : info.outcome === 'failed' ? (
+          ) : state === 'failed' ? (
             <X color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
           ) : (
             <RefreshCw color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
@@ -5955,6 +5956,30 @@ function findFirstUserMessageClientIdInItem(
   return undefined;
 }
 
+function findLastUserInputClientId(items: readonly MobileMessageRenderItem[]): string | null {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const found = findLastUserInputClientIdInItem(items[index]);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findLastUserInputClientIdInItem(
+  item: MobileMessageRenderItem | MobileWorkChildItem,
+): string | null {
+  if (item.type === 'message' && item.message.role === 'user') {
+    const delivery = item.message.source.agentMeta?.delivery;
+    return delivery === 'steer' ? null : messageClientId(item);
+  }
+  if (item.type === 'work_group') {
+    for (let index = item.children.length - 1; index >= 0; index--) {
+      const found = findLastUserInputClientIdInItem(item.children[index]);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function messageClientId(item: MobileMessageItem): string {
   return item.message.source.clientId || item.message.source.id || item.message.key;
 }
@@ -6263,7 +6288,7 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
     alignItems: 'center',
     flexDirection: 'row',
     gap: spacing.xs,
-    minHeight: 40,
+    minHeight: 44,
     paddingHorizontal: spacing.xs,
   },
   autoResumeIconSlot: {

@@ -8098,6 +8098,11 @@ export default function SessionScreen() {
                     focusedRequestKey={focusedMessageRequestKey}
                     followLatestRequestKey={messageListFollowLatestRequestKey}
                     isSessionStreaming={isSessionStreaming}
+                    makerTurnRunning={makerTurnRunning}
+                    continuationTurnClientId={inputProjection.continuationTurnClientId}
+                    continuationInFlightProjectionCapability={
+                      inputProjection.continuationInFlightProjectionCapability
+                    }
                     items={messageListItems}
                     pendingSend={pendingSendActions}
                     loadingEarlier={loadingEarlier}

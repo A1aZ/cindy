@@ -191,6 +191,40 @@ describe('desktop MCP approval policy', () => {
     ).toContain('outside the project');
   });
 
+  it('discloses the task-scoped control lease before an agent creates or attaches a simulator', () => {
+    setMainLocale('en');
+    for (const [name, title] of [
+      ['attach_device', /connect to and control this simulator/i],
+      ['create_instance', /create and control a simulator/i],
+    ] as const) {
+      const presentation = getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolName: 'call_tool',
+        toolParams: { name, args: {} },
+      });
+      expect(presentation?.title).toMatch(title);
+      expect(presentation?.description).toMatch(
+        /current Cindy task.*start or stop.*install or launch.*tap.*swipe.*type.*screenshots.*settings.*without another device-control prompt.*disconnect.*revoke Agent control.*sensitive actions.*separate approval/i,
+      );
+    }
+
+    // Codex app-server versions that omit the outer progressive tool name
+    // must receive the same Host-owned disclosure from the validated payload.
+    expect(
+      getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolParams: { name: 'attach_device', args: {} },
+      })?.description,
+    ).toContain('without another device-control prompt');
+    expect(
+      getDesktopMcpToolApprovalPresentation({
+        serverName: 'cindy_ios_simulator',
+        toolName: 'call_tool',
+        toolParams: { name: 'open_url', args: {} },
+      }),
+    ).toBeUndefined();
+  });
+
   it('auto-approves read-only discovery entries even on untrusted servers', () => {
     // server 整体不可信, 但列工具清单 / 查连接状态没有副作用。
     expect(

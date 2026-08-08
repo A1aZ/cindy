@@ -4462,6 +4462,11 @@
         "title": "允许 Xcode 构建此项目？",
         "description": "Xcode 会以你的 macOS 用户权限运行此项目的构建脚本。这些脚本可能读取或修改项目外的文件，构建输出也会返回给 Agent。请仅在信任此项目时继续。"
       },
+      "agentControlApproval": {
+        "attachTitle": "允许 Agent 连接并控制此模拟器？",
+        "createTitle": "允许 Agent 创建并控制模拟器？",
+        "description": "操作成功后，Agent 可在当前 Cindy 任务中使用此模拟器：启动或停止模拟器、安装或启动 App，以及执行点击、滑动、输入、截图和更改模拟器设置等操作，无需再次确认设备控制。断开设备、结束任务、重启 Cindy 或在模拟器面板中撤销 Agent 控制后，此访问权限即失效。其他敏感操作仍可能需要单独批准。"
+      },
       "refresh": "刷新",
       "checking": "正在检查",
       "accessRequiredTitle": "授权当前任务",

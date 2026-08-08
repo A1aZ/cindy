@@ -12450,10 +12450,11 @@ describe('CodexAgent MCP thread context hooks', () => {
 
   it('keeps host dynamic tool calls behind the existing MCP approval policy', async () => {
     const disclosure = {
-      title: 'Allow Xcode to build this project?',
+      title: 'Allow the Agent to connect to and control this simulator?',
       description:
-        'Build scripts may access files outside the project, and output is returned to the Agent.',
+        'The Agent may control the simulator for this task without another device-control prompt.',
     };
+    const presentation = vi.fn(() => disclosure);
     const callTool = vi.fn(async () => ({
       contentItems: [{ type: 'inputText' as const, text: '{"ok":true}' }],
       success: true,
@@ -12470,7 +12471,7 @@ describe('CodexAgent MCP thread context hooks', () => {
         callTool,
       },
       getMcpToolApprovalPolicy: () => 'prompt-each-time',
-      getMcpToolApprovalPresentation: () => disclosure,
+      getMcpToolApprovalPresentation: presentation,
     }));
     const host = installFakeHost(agent);
     const handle = await agent.startSession({
@@ -12500,13 +12501,18 @@ describe('CodexAgent MCP thread context hooks', () => {
         callId: 'call-ios',
         namespace: null,
         tool: 'cindy_ios_simulator__call_tool',
-        arguments: { name: 'build_app', args: {} },
+        arguments: { name: 'attach_device', args: { udid: 'SIM-1' } },
       },
       { requestId: 'request-ios' },
     );
     expect(result).toEqual({
       contentItems: [{ type: 'inputText', text: 'The user declined this tool call.' }],
       success: false,
+    });
+    expect(presentation).toHaveBeenCalledWith({
+      serverName: 'cindy_ios_simulator',
+      toolName: 'call_tool',
+      toolParams: { name: 'attach_device', args: { udid: 'SIM-1' } },
     });
     expect(callTool).not.toHaveBeenCalled();
     await handle.close();

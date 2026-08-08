@@ -155,9 +155,21 @@ export function getDesktopMcpToolApprovalPresentation(
     typeof context.toolParams === 'object'
       ? (context.toolParams as { name?: unknown }).name
       : undefined;
-  if (innerName !== 'build_app') return undefined;
-  return {
-    title: t('rightSidebar.iosSimulator.buildApproval.title'),
-    description: t('rightSidebar.iosSimulator.buildApproval.description'),
-  };
+  if (innerName === 'build_app') {
+    return {
+      title: t('rightSidebar.iosSimulator.buildApproval.title'),
+      description: t('rightSidebar.iosSimulator.buildApproval.description'),
+    };
+  }
+  if (innerName === 'attach_device' || innerName === 'create_instance') {
+    return {
+      title: t(
+        innerName === 'attach_device'
+          ? 'rightSidebar.iosSimulator.agentControlApproval.attachTitle'
+          : 'rightSidebar.iosSimulator.agentControlApproval.createTitle',
+      ),
+      description: t('rightSidebar.iosSimulator.agentControlApproval.description'),
+    };
+  }
+  return undefined;
 }

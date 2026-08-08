@@ -4464,6 +4464,11 @@
         "title": "Allow Xcode to build this project?",
         "description": "Xcode will run this project's build scripts as your macOS user. They may read or modify files outside the project, and build output is returned to the Agent. Continue only if you trust this project."
       },
+      "agentControlApproval": {
+        "attachTitle": "Allow the Agent to connect to and control this simulator?",
+        "createTitle": "Allow the Agent to create and control a simulator?",
+        "description": "After this succeeds, the Agent can use this simulator for the current Cindy task: start or stop it, install or launch apps, tap, swipe, type, take screenshots, and change simulator settings without another device-control prompt. This access ends when you disconnect the device, end the task, restart Cindy, or revoke Agent control in the simulator panel. Other sensitive actions may still require separate approval."
+      },
       "refresh": "Refresh",
       "checking": "Checking",
       "accessRequiredTitle": "Authorize This Session",

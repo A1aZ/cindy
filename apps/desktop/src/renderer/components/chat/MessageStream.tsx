@@ -2373,20 +2373,29 @@ export function MessageStream({
   // null = 默认窗口(取末尾 RENDER_WINDOW_INITIAL_ITEMS 个 item);非 null = 锚定到
   // 具体的 RenderItem.key,从那个 item 开始 slice 到末尾。expand 时把锚点往前挪
   // RENDER_WINDOW_GROWTH_ITEMS 个 item。
-  const [firstVisibleItemKey, setFirstVisibleItemKey] = useState<string | null>(() =>
-    restoringRef.current ? (restoreSnapshotRef.current?.windowAnchorKey ?? null) : null,
-  );
+  //
+  // 还原快照是"默认窗口 + 非贴底"(windowAnchorKey=null 且 isNearBottom=false)
+  // 时,直接把窗口锚定到 viewportTopKey(视口顶端那条 item):applyRestore 需要
+  // 的锚点必然在窗口内(就是第一条),位置恢复不漂;窗口 = 视口位置 → 末尾,
+  // 必然有界(该快照态意味着用户仍在末尾 INITIAL 窗口内,≤80 条、典型只有一半)。
+  // 此前(codex review P2)这种快照走"全量 INITIAL 默认窗口"保锚点命中,几万字
+  // 会话切回要全量渲染 73+ 条、首帧 ~400ms(2026-08-09 沙盒 perf 日志实测),
+  // 锚定后回落到与贴底切换同阶。viewportTopKey 缺失(老快照)才退回全量窗口。
+  const [firstVisibleItemKey, setFirstVisibleItemKey] = useState<string | null>(() => {
+    if (!restoringRef.current) return null;
+    const snap = restoreSnapshotRef.current;
+    if (!snap) return null;
+    if (snap.windowAnchorKey !== null) return snap.windowAnchorKey;
+    if (!snap.isNearBottom && snap.viewportTopKey) return snap.viewportTopKey;
+    return null;
+  });
   // 两段式默认窗口的当前尺寸(FIRST_PAINT → 空闲期扩到 INITIAL)。只影响
   // firstVisibleItemKey === null 的"默认窗口"分支;锚点窗口不看它。
-  //
-  // 还原例外(codex review P2):快照是"默认窗口 + 非贴底"(windowAnchorKey=null
-  // 且 isNearBottom=false)时,saved viewportTopKey 可能落在末尾第 31-80 条 —— 若首帧
-  // 只画 30 条,applyRestore 找不到锚点,会话回开位置漂移;且还原态 isNearBottomRef
-  // 为 false,空闲扩窗也不会补。这种快照首帧直接用全量 INITIAL 窗口(放弃两段式);
-  // 贴底快照 / 无快照 / 锚点快照(锚点分支不看本值)仍走 FIRST_PAINT 两段式。
+  // "默认窗口 + 非贴底"快照已在上面转为锚点窗口,不再进本分支;仅
+  // viewportTopKey 缺失的降级路径仍需全量 INITIAL 保命中率。
   const [defaultWindowItems, setDefaultWindowItems] = useState(() => {
     const snap = restoringRef.current ? restoreSnapshotRef.current : null;
-    if (snap && snap.windowAnchorKey === null && !snap.isNearBottom) {
+    if (snap && snap.windowAnchorKey === null && !snap.isNearBottom && !snap.viewportTopKey) {
       return RENDER_WINDOW_INITIAL_ITEMS;
     }
     return RENDER_WINDOW_FIRST_PAINT_ITEMS;

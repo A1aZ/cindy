@@ -614,14 +614,17 @@ const path = require('node:path');
     }
 
     await originalFs.copyFile(source, destination);
-    const [sourceStat, destinationStat] = await Promise.all([
+    const [sourceStat, destinationStat, sourceContents, destinationContents] = await Promise.all([
       originalFs.stat(source),
       originalFs.stat(destination),
+      originalFs.readFile(source),
+      originalFs.readFile(destination),
     ]);
     process.stdout.write(JSON.stringify({
       patchedCopyError,
       copiedBytes: destinationStat.size,
       sourceBytes: sourceStat.size,
+      contentsMatch: sourceContents.equals(destinationContents),
     }));
   } finally {
     await originalFs.rm(tempDir, { recursive: true, force: true });
@@ -645,8 +648,10 @@ const path = require('node:path');
       patchedCopyError: string | null;
       copiedBytes: number;
       sourceBytes: number;
+      contentsMatch: boolean;
     };
     expect([null, 'ENOENT']).toContain(output.patchedCopyError);
     expect(output.copiedBytes).toBe(output.sourceBytes);
+    expect(output.contentsMatch).toBe(true);
   });
 });

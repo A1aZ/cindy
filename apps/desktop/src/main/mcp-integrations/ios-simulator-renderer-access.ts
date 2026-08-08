@@ -35,6 +35,11 @@ export type IOSSimulatorRendererGrant = {
   target: IOSSimulatorRendererWebContents;
 };
 
+export type IOSSimulatorRendererAccessSnapshot = Pick<
+  IOSSimulatorRendererGrant,
+  'sessionId' | 'generation'
+>;
+
 export type IOSSimulatorRendererAccessRevocationObserver = (
   grants: readonly IOSSimulatorRendererGrant[],
 ) => void;
@@ -89,6 +94,18 @@ export class IOSSimulatorRendererAccessRegistry {
       return false;
     }
     return true;
+  }
+
+  /** Exact Main-owned binding for this live WebContents, never a route hint. */
+  accessSnapshot(
+    target: IOSSimulatorRendererWebContents,
+  ): IOSSimulatorRendererAccessSnapshot | null {
+    const grant = this.grants.get(target.id);
+    if (!grant || grant.target !== target || grant.target.isDestroyed()) {
+      if (grant?.target.isDestroyed()) this.revokeGrant(target.id, grant);
+      return null;
+    }
+    return { sessionId: grant.sessionId, generation: grant.generation };
   }
 
   grantAndFocus(
@@ -413,6 +430,12 @@ export function focusIOSSimulatorRendererSession(
   preferredTarget?: IOSSimulatorRendererWebContents,
 ): boolean {
   return rendererAccessRegistry.grantAndFocus(sessionId, instanceId, preferredTarget);
+}
+
+export function getIOSSimulatorRendererSessionAccess(
+  target: IOSSimulatorRendererWebContents,
+): IOSSimulatorRendererAccessSnapshot | null {
+  return rendererAccessRegistry.accessSnapshot(target);
 }
 
 export function hasIOSSimulatorRendererSessionAccess(

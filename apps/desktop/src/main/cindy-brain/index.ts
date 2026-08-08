@@ -198,6 +198,7 @@ import { GhostIOSSimulatorSlot, type IOSSimulatorSlotFocusContext } from './iosS
 import {
   clearIOSSimulatorRendererAccess,
   focusIOSSimulatorRendererSession,
+  getIOSSimulatorRendererSessionAccess,
   revokeIOSSimulatorRendererAccessForSessionChange,
 } from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { getIOSSimulatorPluginStatus } from '../mcp-integrations/ios-simulator.js';
@@ -1850,14 +1851,8 @@ export function noteGhostSessionFocused(sessionId: string | null): void {
   ghostSessionFocusTracker.note(sessionId);
 }
 
-type GhostWindowSessionFocus = {
-  sessionId: string | null;
-  revision: number;
-};
-
-const ghostSessionFocusByWebContents = new Map<number, GhostWindowSessionFocus>();
+const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
-let ghostSessionFocusRevision = 0;
 
 function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | null): void {
   // Renderer route reports are not an authority to grant Simulator access. They
@@ -1865,12 +1860,8 @@ function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | 
   // from the task for which it was explicitly authorized.
   revokeIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
   const previous = ghostSessionFocusByWebContents.get(sender.id);
-  if (previous?.sessionId === sessionId) return;
-  ghostSessionFocusRevision += 1;
-  ghostSessionFocusByWebContents.set(sender.id, {
-    sessionId,
-    revision: ghostSessionFocusRevision,
-  });
+  if (previous === sessionId) return;
+  ghostSessionFocusByWebContents.set(sender.id, sessionId);
   if (!ghostSessionFocusTrackedWebContents.has(sender.id)) {
     ghostSessionFocusTrackedWebContents.add(sender.id);
     sender.once('destroyed', () => {
@@ -1895,19 +1886,18 @@ function focusedIOSSimulatorContext(): IOSSimulatorSlotFocusContext | null {
   // 主壳窗在前台时只认它自己的任务；它在非任务页时不能借用另一窗口的任务。
   const eligible = focusedMainShell
     ? [focusedMainShell]
-    : candidates.filter((window) => {
-        const focus = ghostSessionFocusByWebContents.get(window.webContents.id);
-        return Boolean(focus?.sessionId);
-      });
+    : candidates.filter((window) =>
+        Boolean(getIOSSimulatorRendererSessionAccess(window.webContents)),
+      );
   // 独立插件窗没有可信 opener/task 绑定；只有唯一候选时才允许回落，多窗歧义 fail closed。
   if (eligible.length !== 1) return null;
   const window = eligible[0]!;
-  const focus = ghostSessionFocusByWebContents.get(window.webContents.id);
-  if (!focus?.sessionId) return null;
+  const access = getIOSSimulatorRendererSessionAccess(window.webContents);
+  if (!access) return null;
   return {
-    sessionId: focus.sessionId,
+    sessionId: access.sessionId,
     windowWebContentsId: window.webContents.id,
-    revision: focus.revision,
+    revision: access.generation,
   };
 }
 

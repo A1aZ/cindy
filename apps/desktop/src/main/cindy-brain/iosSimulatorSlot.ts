@@ -6,8 +6,8 @@
  * 2. 请求 Host 打开已有的内置模拟器面板。
  *
  * 不跨插件边界传输视频帧、viewer lease、触控、Sidecar 路径或进程句柄。
- * 插件也不能自报 sessionId；任务身份只取 Host 的台前任务快照。实际 WDA / Native
- * 路由、生命周期、恢复和 fallback 继续走既有 iOS Simulator Host。
+ * 插件也不能自报 sessionId；任务身份只取 Host 已签发的台前窗口 grant。实际
+ * WDA / Native 路由、生命周期、恢复和 fallback 继续走既有 iOS Simulator Host。
  */
 
 import {

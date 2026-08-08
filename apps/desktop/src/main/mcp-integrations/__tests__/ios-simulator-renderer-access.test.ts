@@ -69,6 +69,23 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     });
   });
 
+  it('returns only the exact live Main-owned task binding', () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(13);
+    const replacement = fakeWebContents(13);
+    registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
+
+    expect(registry.accessSnapshot(main.target)).toBeNull();
+    expect(registry.grantAndFocus('session-a')).toBe(true);
+    expect(registry.accessSnapshot(main.target)).toEqual({ sessionId: 'session-a', generation: 1 });
+    expect(registry.accessSnapshot(replacement.target)).toBeNull();
+    expect(registry.grantAndFocus('session-b')).toBe(true);
+    expect(registry.accessSnapshot(main.target)).toEqual({ sessionId: 'session-b', generation: 2 });
+
+    main.destroy();
+    expect(registry.accessSnapshot(main.target)).toBeNull();
+  });
+
   it('replaces the previous session grant instead of trusting a forged route', () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(21);

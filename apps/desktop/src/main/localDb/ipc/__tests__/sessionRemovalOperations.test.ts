@@ -12,6 +12,9 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
     const cancelSessionOperations = vi.fn(async () => {
       order.push('cancel');
     });
+    const cleanupRemovedSession = vi.fn(async () => {
+      order.push('cleanup');
+    });
     const closeSession = vi.fn(async () => {
       order.push('close');
     });
@@ -21,10 +24,11 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
         isOwnerCurrent: () => true,
         isSessionStillRemovable,
         cancelSessionOperations,
+        cleanupRemovedSession,
         closeSession,
       }),
     ).resolves.toBe(true);
-    expect(order).toEqual(['check', 'cancel', 'check', 'close', 'check']);
+    expect(order).toEqual(['check', 'cancel', 'check', 'cleanup', 'check', 'close', 'check']);
   });
 
   it('does not close or recycle a task restored while cancellation settles', async () => {
@@ -33,6 +37,7 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
     const cancelSessionOperations = vi.fn(async () => undefined);
+    const cleanupRemovedSession = vi.fn(async () => undefined);
     const closeSession = vi.fn(async () => undefined);
 
     await expect(
@@ -40,10 +45,12 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
         isOwnerCurrent: () => true,
         isSessionStillRemovable,
         cancelSessionOperations,
+        cleanupRemovedSession,
         closeSession,
       }),
     ).resolves.toBe(false);
     expect(cancelSessionOperations).toHaveBeenCalledWith('session-a');
+    expect(cleanupRemovedSession).not.toHaveBeenCalled();
     expect(closeSession).not.toHaveBeenCalled();
   });
 
@@ -52,8 +59,10 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
       .fn<() => Promise<boolean>>()
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
     const cancelSessionOperations = vi.fn(async () => undefined);
+    const cleanupRemovedSession = vi.fn(async () => undefined);
     const closeSession = vi.fn(async () => undefined);
 
     await expect(
@@ -61,10 +70,33 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
         isOwnerCurrent: () => true,
         isSessionStillRemovable,
         cancelSessionOperations,
+        cleanupRemovedSession,
         closeSession,
       }),
     ).resolves.toBe(false);
     expect(closeSession).toHaveBeenCalledWith('session-a');
+  });
+
+  it('does not close the Agent session when Host runtime cleanup fails', async () => {
+    const cancelSessionOperations = vi.fn(async () => undefined);
+    const cleanupError = new Error('simulator process group is still alive');
+    const cleanupRemovedSession = vi.fn(async () => {
+      throw cleanupError;
+    });
+    const closeSession = vi.fn(async () => undefined);
+
+    await expect(
+      quiesceSessionBeforeWorktreeRecycle('session-a', {
+        isOwnerCurrent: () => true,
+        isSessionStillRemovable: vi.fn(async () => true),
+        cancelSessionOperations,
+        cleanupRemovedSession,
+        closeSession,
+      }),
+    ).rejects.toBe(cleanupError);
+    expect(cancelSessionOperations).toHaveBeenCalledWith('session-a');
+    expect(cleanupRemovedSession).toHaveBeenCalledWith('session-a');
+    expect(closeSession).not.toHaveBeenCalled();
   });
 
   it('stops before each side effect when the captured owner changes', async () => {
@@ -74,6 +106,7 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
       return true;
     });
     const cancelSessionOperations = vi.fn(async () => undefined);
+    const cleanupRemovedSession = vi.fn(async () => undefined);
     const closeSession = vi.fn(async () => undefined);
 
     await expect(
@@ -81,10 +114,12 @@ describe('quiesceSessionBeforeWorktreeRecycle', () => {
         isOwnerCurrent: () => current,
         isSessionStillRemovable,
         cancelSessionOperations,
+        cleanupRemovedSession,
         closeSession,
       }),
     ).resolves.toBe(false);
     expect(cancelSessionOperations).not.toHaveBeenCalled();
+    expect(cleanupRemovedSession).not.toHaveBeenCalled();
     expect(closeSession).not.toHaveBeenCalled();
   });
 });

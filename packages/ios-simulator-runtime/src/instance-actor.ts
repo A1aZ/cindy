@@ -455,6 +455,32 @@ export class IOSSimulatorInstanceActor {
     });
   }
 
+  /**
+   * Serialize Host-owned cleanup behind any active instance mutation while
+   * invalidating queued Agent work. The callback receives ownership only after
+   * the exact session still owns the instance, so task removal cannot tear down
+   * a device that was concurrently rebound elsewhere.
+   */
+  runOwnershipCleanup<T>(
+    instanceId: string,
+    sessionId: string,
+    task: (instance: IOSSimulatorInstance) => Promise<T>,
+  ): Promise<T> {
+    // Validate the old owner before changing mutation/grace state. The
+    // serialized check below is still required because ownership can be
+    // rebound while cleanup waits behind an existing instance operation.
+    this.#store.requireOwned(instanceId, sessionId);
+    const state = this.#mutationState(instanceId);
+    state.takeoverEpoch += 1;
+    this.#cancelActiveAgentMutation(instanceId);
+    this.#cancelGrace.get(instanceId)?.();
+    this.#cancelGrace.delete(instanceId);
+    return this.#serialize(instanceId, async () => {
+      const instance = this.#store.requireOwned(instanceId, sessionId);
+      return task(instance);
+    });
+  }
+
   #cancelActiveAgentMutation(instanceId: string): void {
     this.#activeAgentMutations.get(instanceId)?.abort();
   }

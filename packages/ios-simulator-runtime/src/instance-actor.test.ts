@@ -555,4 +555,79 @@ describe("IOSSimulatorInstanceActor", () => {
       harness.actor.runMutation(harness.route(), async () => "agent-ok"),
     ).resolves.toBe("agent-ok");
   });
+
+  it("serializes ownership cleanup after cancelling active and queued Agent mutations", async () => {
+    const harness = createHarness({ booted: true });
+    let releaseActive: () => void = () => undefined;
+    let activeSignal: AbortSignal | undefined;
+    const order: string[] = [];
+    const active = harness.actor.runMutation(
+      harness.route(),
+      async (_instance, signal) => {
+        activeSignal = signal;
+        order.push("active");
+        await new Promise<void>((resolve) => {
+          releaseActive = resolve;
+        });
+      },
+    );
+    const queued = harness.actor
+      .runMutation(harness.route(), async () => order.push("queued"))
+      .catch((error: unknown) => error);
+
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+    const cleanup = harness.actor.runOwnershipCleanup(
+      harness.instance.instanceId,
+      harness.instance.sessionId,
+      async (instance) => {
+        order.push("cleanup");
+        return instance;
+      },
+    );
+
+    expect(activeSignal?.aborted).toBe(true);
+    releaseActive();
+    await expect(active).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(queued).resolves.toMatchObject({ code: "MUTATION_CANCELLED" });
+    await expect(cleanup).resolves.toMatchObject({
+      instanceId: harness.instance.instanceId,
+      sessionId: harness.instance.sessionId,
+    });
+    expect(order).toEqual(["active", "cleanup"]);
+  });
+
+  it("does not disturb the current owner when stale cleanup names another session", async () => {
+    const harness = createHarness({ booted: true });
+    let releaseActive: () => void = () => undefined;
+    let activeSignal: AbortSignal | undefined;
+    const active = harness.actor.runMutation(
+      harness.route(),
+      async (_instance, signal) => {
+        activeSignal = signal;
+        await new Promise<void>((resolve) => {
+          releaseActive = resolve;
+        });
+        return "completed";
+      },
+    );
+    await vi.waitFor(() => expect(activeSignal).toBeDefined());
+
+    expect(() =>
+      harness.actor.runOwnershipCleanup(
+        harness.instance.instanceId,
+        "stale-session",
+        async () => undefined,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "INSTANCE_NOT_OWNED" }));
+
+    expect(activeSignal?.aborted).toBe(false);
+    expect(
+      harness.actor.mutationState(harness.instance.instanceId),
+    ).toMatchObject({
+      activeSource: "agent",
+      queuedAgentMutations: 0,
+    });
+    releaseActive();
+    await expect(active).resolves.toBe("completed");
+  });
 });

@@ -198,6 +198,8 @@ export interface IOSSimulatorHost {
   abortOperationsForExit(): void;
   /** Cancel build processes before a task is archived, deleted, or its worktree is recycled. */
   cancelSessionOperations(sessionId: string): Promise<void>;
+  /** Tear down all simulator runtime and ownership after a task is durably removed. */
+  cleanupRemovedSession(sessionId: string): Promise<void>;
   reconcileOwnership(): Promise<void>;
   describeTools(sessionId: string): Promise<IOSSimulatorToolAvailabilityReport>;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
@@ -254,8 +256,19 @@ export interface IOSSimulatorHost {
 }
 
 type SessionResolution =
-  | { ok: true; sessionId: string; session: IOSSimulatorSessionSnapshot }
+  | {
+      ok: true;
+      sessionId: string;
+      session: IOSSimulatorSessionSnapshot;
+      removalBarrierOperation?: IOSSimulatorSessionRemovalBarrierOperation;
+    }
   | Extract<IOSSimulatorSessionStatus, { ok: false }>;
+
+interface IOSSimulatorSessionRemovalBarrierOperation {
+  admissionEpoch: number;
+  settled: Promise<void>;
+  finish(): void;
+}
 
 function sessionError(
   sessionId: string | null,
@@ -816,6 +829,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   };
   const activeBuilds = new Map<string, ActiveBuild>();
   const sessionOperationAdmissionEpochs = new Map<string, number>();
+  const sessionRemovalAdmissionEpochs = new Map<string, number>();
+  const activeSessionRemovalBarrierOperations = new Map<
+    string,
+    Set<IOSSimulatorSessionRemovalBarrierOperation>
+  >();
+  const sessionRemovalCleanupPromises = new Map<string, Promise<void>>();
   const blockedBuildInstances = new Set<string>();
   const instanceLifecycleBarriers = new Map<string, { epoch: number; pendingTeardowns: number }>();
   const mediaCapture = options.mediaCapture ?? new IOSSimulatorMediaCapture();
@@ -897,6 +916,62 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     throw new IOSSimulatorInstanceError(
       'MUTATION_CANCELLED',
       `The ${operation} was cancelled because its Cindy task lifecycle changed.`,
+      true,
+    );
+  }
+  function beginSessionRemovalBarrierOperation(
+    sessionId: string,
+    expectedRemovalEpoch: number,
+  ): IOSSimulatorSessionRemovalBarrierOperation {
+    if (
+      (sessionRemovalAdmissionEpochs.get(sessionId) ?? 0) !== expectedRemovalEpoch ||
+      sessionRemovalCleanupPromises.has(sessionId)
+    ) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The simulator binding was cancelled because its Cindy task lifecycle changed.',
+        true,
+      );
+    }
+    let resolveSettled: () => void = () => undefined;
+    const settled = new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    });
+    let finished = false;
+    const operation: IOSSimulatorSessionRemovalBarrierOperation = {
+      admissionEpoch: expectedRemovalEpoch,
+      settled,
+      finish() {
+        if (finished) return;
+        finished = true;
+        const operations = activeSessionRemovalBarrierOperations.get(sessionId);
+        operations?.delete(operation);
+        if (operations?.size === 0) activeSessionRemovalBarrierOperations.delete(sessionId);
+        resolveSettled();
+      },
+    };
+    let operations = activeSessionRemovalBarrierOperations.get(sessionId);
+    if (!operations) {
+      operations = new Set();
+      activeSessionRemovalBarrierOperations.set(sessionId, operations);
+    }
+    operations.add(operation);
+    return operation;
+  }
+  function assertSessionRemovalAdmission(
+    sessionId: string,
+    operation: IOSSimulatorSessionRemovalBarrierOperation | null,
+  ): void {
+    if (
+      operation &&
+      (sessionRemovalAdmissionEpochs.get(sessionId) ?? 0) === operation.admissionEpoch &&
+      !sessionRemovalCleanupPromises.has(sessionId)
+    ) {
+      return;
+    }
+    throw new IOSSimulatorInstanceError(
+      'MUTATION_CANCELLED',
+      'The simulator binding was cancelled because its Cindy task lifecycle changed.',
       true,
     );
   }
@@ -1485,11 +1560,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       }
     });
 
-  async function resolveSession(sessionId: string): Promise<SessionResolution> {
+  async function resolveSession(
+    sessionId: string,
+    options: { registerRemovalBarrier?: boolean } = {},
+  ): Promise<SessionResolution> {
     const normalizedSessionId = sessionId.trim();
     if (!normalizedSessionId) {
       return sessionError(null, 'SESSION_CONTEXT_REQUIRED', 'A Cindy session is required.');
     }
+    const removalAdmissionEpoch = sessionRemovalAdmissionEpochs.get(normalizedSessionId) ?? 0;
     const session = await getSession(normalizedSessionId);
     if (!session) {
       return sessionError(
@@ -1512,7 +1591,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         'SSH and remote sessions cannot access simulators on this Mac.',
       );
     }
-    return { ok: true, sessionId: normalizedSessionId, session };
+    const removalBarrierOperation = options.registerRemovalBarrier
+      ? beginSessionRemovalBarrierOperation(normalizedSessionId, removalAdmissionEpoch)
+      : undefined;
+    return { ok: true, sessionId: normalizedSessionId, session, removalBarrierOperation };
   }
 
   function currentOwnedInstance(instance: IOSSimulatorInstance): IOSSimulatorInstance {
@@ -1584,6 +1666,200 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     } finally {
       finishInstanceTeardown(instance.instanceId);
     }
+  }
+
+  function clearInstanceRuntimeProjection(instanceId: string): void {
+    cancelIdleRecycle(instanceId);
+    releaseViewerTouches(instanceId);
+    screenMaps.clear(instanceId);
+    framePump.clear(instanceId);
+    h264FramePump.clear(instanceId);
+    viewerEncodings.delete(instanceId);
+    viewerPreferredEncodings.delete(instanceId);
+    viewerFallbackReasons.delete(instanceId);
+    viewerSessions.delete(instanceId);
+    streamProfiles.delete(instanceId);
+    nativeStreamProfiles.delete(instanceId);
+    clearViewportState(instanceId);
+    clearVisualBaselines(instanceId);
+    deviceLivenessChecks.delete(instanceId);
+    routeStatusCache.delete(instanceId);
+  }
+
+  function clearRemovedInstanceProjection(instanceId: string): void {
+    agentControlLeases.delete(instanceId);
+    for (const [artifactId, stored] of appArtifacts) {
+      if (stored.instanceId === instanceId) appArtifacts.delete(artifactId);
+    }
+  }
+
+  async function releaseInstanceRuntime(instance: IOSSimulatorInstance): Promise<boolean> {
+    beginInstanceTeardown(instance.instanceId);
+    try {
+      await cancelBuild(instance.instanceId);
+      clearInstanceRuntimeProjection(instance.instanceId);
+      let cleanupSucceeded = true;
+      await mediaCapture.discardInstance(instance.instanceId).catch((error) => {
+        cleanupSucceeded = false;
+        logger.warn('iOS Simulator ownership cleanup could not discard recording', {
+          instanceId: instance.instanceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+      if (driverManager) {
+        await driverManager.stop(instance.instanceId).catch((error) => {
+          cleanupSucceeded = false;
+          logger.warn('iOS Simulator ownership cleanup could not stop driver runtime', {
+            instanceId: instance.instanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+      return cleanupSucceeded;
+    } finally {
+      finishInstanceTeardown(instance.instanceId);
+    }
+  }
+
+  async function releaseStaleBinding(
+    instance: IOSSimulatorInstance,
+    device: IOSSimulatorEnvironmentReport['devices'][number] | null | undefined,
+    deviceStateKnown = true,
+  ): Promise<boolean> {
+    const hostOwnsBoot =
+      instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
+    const deviceState = device?.state.trim().toLowerCase() ?? null;
+    let deviceStopped = deviceStateKnown && (!device || deviceState === 'shutdown');
+    let cleanupSucceeded = await releaseInstanceRuntime(instance);
+    clearRemovedInstanceProjection(instance.instanceId);
+    let schedulerReleaseAllowed = cleanupSucceeded && (!hostOwnsBoot || deviceStopped);
+    if (cleanupSucceeded && hostOwnsBoot && !deviceStopped) {
+      if (!deviceStateKnown) {
+        cleanupSucceeded = false;
+        logger.warn('iOS Simulator stale binding cleanup could not verify exact device state', {
+          instanceId: instance.instanceId,
+        });
+      } else {
+        try {
+          await lifecycle.shutdownExact(instance.simulatorUdid);
+          deviceStopped = true;
+          schedulerReleaseAllowed = true;
+        } catch (error) {
+          cleanupSucceeded = false;
+          logger.warn('iOS Simulator stale binding cleanup could not shut down device', {
+            instanceId: instance.instanceId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
+    // A known-missing Cindy-created device is already deleted. Reissuing
+    // `simctl delete` would turn successful external cleanup into a permanent
+    // retry loop, so only delete when the exact device still exists.
+    if (instance.creationProvenance === 'cindy' && cleanupSucceeded && device) {
+      await lifecycle.deleteExact(instance.simulatorUdid).catch((error) => {
+        cleanupSucceeded = false;
+        logger.warn('iOS Simulator stale binding cleanup could not delete device', {
+          instanceId: instance.instanceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+    if (schedulerReleaseAllowed) resourceScheduler.markStopped(instance.instanceId);
+    if (cleanupSucceeded) {
+      actor.forget(instance.instanceId, instance.sessionId);
+    } else {
+      ownershipReconciled = false;
+      actor.reconcile(
+        instance.instanceId,
+        instance.sessionId,
+        deviceStopped ? 'stopped' : 'error',
+        'degraded',
+        'ARCHIVED_CLEANUP_FAILED',
+      );
+    }
+    return cleanupSucceeded;
+  }
+
+  async function performRemovedSessionCleanup(sessionId: string): Promise<void> {
+    await cancelSessionBuildsAndRecordings(sessionId);
+    await Promise.all(
+      [...(activeSessionRemovalBarrierOperations.get(sessionId) ?? [])].map(
+        (operation) => operation.settled,
+      ),
+    );
+    const failures = new Set<string>();
+    for (const snapshot of actor.list(sessionId)) {
+      try {
+        const released = await actor.runOwnershipCleanup(
+          snapshot.instanceId,
+          sessionId,
+          async (instance) => {
+            const hostOwnsBoot =
+              instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
+            let device: IOSSimulatorEnvironmentReport['devices'][number] | null | undefined;
+            let deviceStateKnown = !hostOwnsBoot;
+            if (hostOwnsBoot) {
+              try {
+                device = await lifecycle.findExact(instance.simulatorUdid);
+                deviceStateKnown = device !== undefined;
+              } catch (error) {
+                logger.warn('iOS Simulator removed task cleanup could not inspect exact device', {
+                  sessionId,
+                  instanceId: instance.instanceId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+            return releaseStaleBinding(instance, device, deviceStateKnown);
+          },
+        );
+        if (!released) failures.add(snapshot.instanceId);
+        else {
+          blockedBuildInstances.delete(snapshot.instanceId);
+          instanceLifecycleBarriers.delete(snapshot.instanceId);
+        }
+      } catch (error) {
+        if (
+          isInstanceError(error, 'INSTANCE_NOT_OWNED') &&
+          !actor.list(sessionId).some((instance) => instance.instanceId === snapshot.instanceId)
+        ) {
+          continue;
+        }
+        failures.add(snapshot.instanceId);
+        logger.warn('iOS Simulator removed task cleanup failed', {
+          sessionId,
+          instanceId: snapshot.instanceId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    if (failures.size > 0) {
+      throw new IOSSimulatorInstanceError(
+        'DEVICE_BUSY',
+        `Simulator cleanup is still pending for ${failures.size} instance(s).`,
+        true,
+      );
+    }
+  }
+
+  function cleanupRemovedSessionRuntime(sessionId: string): Promise<void> {
+    const normalizedSessionId = sessionId.trim();
+    const existing = sessionRemovalCleanupPromises.get(normalizedSessionId);
+    if (existing) return existing;
+    sessionRemovalAdmissionEpochs.set(
+      normalizedSessionId,
+      (sessionRemovalAdmissionEpochs.get(normalizedSessionId) ?? 0) + 1,
+    );
+    let trackedCleanup: Promise<void>;
+    const cleanup = Promise.resolve().then(() => performRemovedSessionCleanup(normalizedSessionId));
+    trackedCleanup = cleanup.finally(() => {
+      if (sessionRemovalCleanupPromises.get(normalizedSessionId) === trackedCleanup) {
+        sessionRemovalCleanupPromises.delete(normalizedSessionId);
+      }
+    });
+    sessionRemovalCleanupPromises.set(normalizedSessionId, trackedCleanup);
+    return trackedCleanup;
   }
 
   async function reconcileLiveDevice(
@@ -1821,103 +2097,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         environment.devices.map((device) => [device.udid.toUpperCase(), device]),
       );
       let complete = true;
-      const discardInstanceMedia = async (instance: IOSSimulatorInstance): Promise<boolean> => {
-        try {
-          await mediaCapture.discardInstance(instance.instanceId);
-          clearVisualBaselines(instance.instanceId);
-          return true;
-        } catch (error) {
-          complete = false;
-          logger.warn('iOS Simulator ownership reconcile could not discard recording', {
-            instanceId: instance.instanceId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return false;
-        }
-      };
-      const releaseInstanceRuntime = async (instance: IOSSimulatorInstance): Promise<boolean> => {
-        beginInstanceTeardown(instance.instanceId);
-        try {
-          await cancelBuild(instance.instanceId);
-          cancelIdleRecycle(instance.instanceId);
-          framePump.clear(instance.instanceId);
-          h264FramePump.clear(instance.instanceId);
-          viewerEncodings.delete(instance.instanceId);
-          viewerPreferredEncodings.delete(instance.instanceId);
-          viewerFallbackReasons.delete(instance.instanceId);
-          viewerSessions.delete(instance.instanceId);
-          clearViewportState(instance.instanceId);
-          streamProfiles.delete(instance.instanceId);
-          nativeStreamProfiles.delete(instance.instanceId);
-          let cleanupSucceeded = await discardInstanceMedia(instance);
-          if (driverManager) {
-            await driverManager.stop(instance.instanceId).catch((error) => {
-              cleanupSucceeded = false;
-              complete = false;
-              logger.warn('iOS Simulator ownership reconcile could not stop driver runtime', {
-                instanceId: instance.instanceId,
-                error: error instanceof Error ? error.message : String(error),
-              });
-            });
-          }
-          return cleanupSucceeded;
-        } finally {
-          finishInstanceTeardown(instance.instanceId);
-        }
-      };
-      const releaseStaleBinding = async (
-        instance: IOSSimulatorInstance,
-        device: IOSSimulatorEnvironmentReport['devices'][number] | undefined,
-      ): Promise<void> => {
-        // Archived sessions cannot be routed by callers. Apply the same
-        // provenance rule as detach/quit: only shut down a device Cindy or an
-        // Agent booted; never mutate a user-owned external device. Cindy-created
-        // devices are safe to delete after they are stopped.
-        const deviceState = device?.state.trim().toLowerCase() ?? null;
-        let deviceStopped = !device || deviceState === 'shutdown';
-        let cleanupSucceeded = await releaseInstanceRuntime(instance);
-        const hostOwnsBoot =
-          instance.bootProvenance === 'agent-booted' || instance.creationProvenance === 'cindy';
-        let schedulerReleaseAllowed = cleanupSucceeded && (!hostOwnsBoot || deviceStopped);
-        if (cleanupSucceeded && hostOwnsBoot && !deviceStopped) {
-          try {
-            await lifecycle.shutdownExact(instance.simulatorUdid);
-            deviceStopped = true;
-            schedulerReleaseAllowed = true;
-          } catch (error) {
-            cleanupSucceeded = false;
-            complete = false;
-            logger.warn('iOS Simulator stale binding cleanup could not shut down device', {
-              instanceId: instance.instanceId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-        if (instance.creationProvenance === 'cindy' && cleanupSucceeded) {
-          await lifecycle.deleteExact(instance.simulatorUdid).catch((error) => {
-            cleanupSucceeded = false;
-            complete = false;
-            logger.warn('iOS Simulator stale binding cleanup could not delete device', {
-              instanceId: instance.instanceId,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          });
-        }
-        if (schedulerReleaseAllowed) resourceScheduler.markStopped(instance.instanceId);
-        if (cleanupSucceeded) {
-          actor.forget(instance.instanceId, instance.sessionId);
-        } else {
-          // Preserve the record when an external mutation failed so a future
-          // Cindy start can retry cleanup instead of losing ownership.
-          actor.reconcile(
-            instance.instanceId,
-            instance.sessionId,
-            deviceStopped ? 'stopped' : 'error',
-            'degraded',
-            'ARCHIVED_CLEANUP_FAILED',
-          );
-        }
-      };
       for (const instance of actor.listAll()) {
         let session: IOSSimulatorSessionSnapshot | null = null;
         try {
@@ -1932,39 +2111,20 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         const device = devices.get(instance.simulatorUdid.toUpperCase());
         if (!session) {
-          await releaseStaleBinding(instance, device);
+          if (!(await releaseStaleBinding(instance, device))) complete = false;
           continue;
         }
         if (session.status === 'deleted') {
-          await releaseStaleBinding(instance, device);
+          if (!(await releaseStaleBinding(instance, device))) complete = false;
           continue;
         }
         if (session.status === 'archived') {
-          if (
-            instance.creationProvenance === 'cindy' ||
-            instance.bootProvenance === 'agent-booted'
-          ) {
-            await releaseStaleBinding(instance, device);
-          } else {
-            // External/preexisting devices remain untouched, but the archived
-            // Session must no longer retain an unroutable ownership record.
-            if (await releaseInstanceRuntime(instance)) {
-              resourceScheduler.markStopped(instance.instanceId);
-              actor.forget(instance.instanceId, instance.sessionId);
-            } else {
-              actor.reconcile(
-                instance.instanceId,
-                instance.sessionId,
-                device?.state.toLowerCase() === 'booted' ? 'ready' : 'stopped',
-                'degraded',
-                'ARCHIVED_CLEANUP_FAILED',
-              );
-            }
-          }
+          if (!(await releaseStaleBinding(instance, device))) complete = false;
           continue;
         }
         if (session.remoteHostId || !device) {
           const runtimeReleased = await releaseInstanceRuntime(instance);
+          if (!runtimeReleased) complete = false;
           if (runtimeReleased && (!device || device.state.trim().toLowerCase() === 'shutdown')) {
             resourceScheduler.markStopped(instance.instanceId);
           }
@@ -1979,14 +2139,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         const deviceState = device.state.trim().toLowerCase();
         if (deviceState === 'shutdown') {
-          if (await releaseInstanceRuntime(instance)) {
+          const runtimeReleased = await releaseInstanceRuntime(instance);
+          if (runtimeReleased) {
             resourceScheduler.markStopped(instance.instanceId);
-          }
+          } else complete = false;
         } else if (deviceState !== 'booted') {
           // Booting / Shutting Down / unknown concrete states may still own a
           // CoreSimulator process. Tear down Cindy media but keep scheduler
           // occupancy until a later probe proves the device is Shutdown.
-          await releaseInstanceRuntime(instance);
+          if (!(await releaseInstanceRuntime(instance))) complete = false;
         }
         actor.reconcile(
           instance.instanceId,
@@ -3057,10 +3218,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       viewerToken,
     ) {
       let viewerClaimReservation: ReturnType<typeof reserveViewerClaim> = null;
+      let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
         assertHostActive();
-        const resolved = await resolveSession(sessionId);
+        const resolved = await resolveSession(sessionId, {
+          registerRemovalBarrier: visible,
+        });
         if (!resolved.ok) return resolved;
+        removalBarrierOperation = resolved.removalBarrierOperation ?? null;
+        if (visible) assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         const mutationRoute = { ...route, sessionId: resolved.sessionId };
         if (visible) {
@@ -3107,6 +3273,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         // re-arm a parked Sidecar.
         const rearmNativeSidecar = !viewerSessions.has(instance.instanceId);
         instance = await reconcileLiveDevice(instance);
+        if (visible) assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         if (instance.lifecycleState !== 'ready') {
           return viewerRouteRefreshResult(instance);
@@ -3120,6 +3287,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (!running) {
           actor.markHealth(resolved.sessionId, instance.instanceId, 'recovering', null);
           const environment = await runtime.inspect();
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           assertHostActive();
           current = currentReadyGeneration(instance);
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
@@ -3153,7 +3321,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               instance.instanceId,
               async (commitRunning) => {
                 commitRunning();
-                return ensureDriver(instance, environment);
+                const started = await ensureDriver(instance, environment);
+                assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+                return started;
               },
             );
           } catch (error) {
@@ -3173,6 +3343,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             (await driverManager.recoverNativeSidecar(instance.instanceId, {
               rearm: rearmNativeSidecar,
             })) ?? running;
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           assertHostActive();
           current = currentReadyGeneration(instance);
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
@@ -3187,6 +3358,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         let viewport: IOSSimulatorPublicViewport;
         try {
           viewport = await readViewport(running);
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         } catch (error) {
           current = currentReadyGeneration(instance);
           if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
@@ -3233,17 +3405,22 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, 'set_viewer_visibility');
       } finally {
         viewerClaimReservation?.rollback();
+        removalBarrierOperation?.finish();
       }
     },
     async getLatestFrame(sessionId, route, viewerWebContentsId) {
+      let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
         assertHostActive();
-        const resolved = await resolveSession(sessionId);
+        const resolved = await resolveSession(sessionId, { registerRemovalBarrier: true });
         if (!resolved.ok) return resolved;
+        removalBarrierOperation = resolved.removalBarrierOperation ?? null;
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         assertCurrentViewer(resolved.sessionId, route.instanceId, viewerWebContentsId);
         let instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
         instance = await reconcileLiveDevice(instance);
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         if (instance.lifecycleState !== 'ready') {
           return {
@@ -3263,6 +3440,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             : framePump.snapshot(instance.instanceId);
         if (selectedEncoding === 'h264' && snapshot?.state === 'disconnected') {
           const running = await getHealthyDriver(instance.instanceId);
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           h264FramePump.clear(instance.instanceId);
           if (running) {
             snapshot = startViewerStream(
@@ -3311,6 +3489,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         const expired = currentExpiredViewerRoute({ ...route, sessionId: sessionId.trim() }, error);
         if (expired) stopViewerMedia(expired);
         return safeHostError(error, sessionId, 'get_latest_frame');
+      } finally {
+        removalBarrierOperation?.finish();
       }
     },
     async setAgentControlGrant(sessionId, instanceId, decision) {
@@ -3425,10 +3605,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       }
     },
     async setViewerStreamProfile(sessionId, route, profile, nativeProfile) {
+      let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
         assertHostActive();
-        const resolved = await resolveSession(sessionId);
+        const resolved = await resolveSession(sessionId, { registerRemovalBarrier: true });
         if (!resolved.ok) return resolved;
+        removalBarrierOperation = resolved.removalBarrierOperation ?? null;
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         if (
           !Number.isSafeInteger(profile.framesPerSecond) ||
@@ -3473,11 +3656,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (!running) {
           // The viewer may request its fallback profile while WDA is being rebuilt.
           // Native-only intent is rejected above because no active route can prove it.
+          assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
           streamProfiles.set(instance.instanceId, profile);
           nativeStreamProfiles.delete(instance.instanceId);
           return { ok: true, data: { profile } };
         }
         const applied = await running.driver.configureStream(running.driverSessionId, profile);
+        assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
         streamProfiles.set(instance.instanceId, applied);
         if (nativeProfile) nativeStreamProfiles.set(instance.instanceId, nativeProfile);
@@ -3512,6 +3697,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         };
       } catch (error) {
         return safeHostError(error, sessionId, 'set_viewer_stream_profile');
+      } finally {
+        removalBarrierOperation?.finish();
       }
     },
     async callTool(name, args, context): Promise<IOSSimulatorHostResult> {
@@ -3524,9 +3711,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         };
       }
       if (disposePromise) return hostDisposedResult();
+      let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
-        const resolved = await resolveSession(sessionId);
+        const resolved = await resolveSession(sessionId, {
+          registerRemovalBarrier:
+            name === 'start_instance' || name === 'create_instance' || name === 'attach_device',
+        });
         if (!resolved.ok) return resolved;
+        removalBarrierOperation = resolved.removalBarrierOperation ?? null;
         assertHostActive();
         await reconcilePersistedOwnership();
         assertHostActive();
@@ -3543,10 +3735,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           };
         }
         if (name === 'start_instance') {
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           const route = readMutationRoute(sessionId, args);
           requireControlGrant(actor.getOwned(sessionId, route.instanceId), context);
           const activationEpoch = captureInstanceActivation(route.instanceId);
           const environment = await runtime.inspect();
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           if (!environment.ready) {
             const safeEnvironment = publicEnvironment(environment);
             return {
@@ -3559,11 +3753,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             route.instanceId,
             async (commitRunning) => {
               assertHostActive();
+              assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
               const starting = actor.getOwned(sessionId, route.instanceId);
               try {
                 const started = await actor.start(route);
+                assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 commitRunning();
                 await ensureDriver(started, environment);
+                assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 return actor.heartbeatOwned(sessionId, started.instanceId);
               } catch (error) {
                 // simctl can boot the device and then fail while waiting for
@@ -3584,6 +3781,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               }
             },
           );
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           completeInstanceActivation(instance, activationEpoch);
           releaseViewerTouches(instance.instanceId);
           screenMaps.clear(instance.instanceId);
@@ -5107,7 +5305,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'The selected template simulator does not exist or is unavailable.',
             );
           }
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           const instance = await actor.create({
             sessionId,
             worktreeRoot,
@@ -5115,6 +5315,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             name: readString(args, 'name'),
             templateDevice,
           });
+          assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           if (context?.origin === 'agent') {
             agentControlLeases.set(instance.instanceId, sessionId);
           }
@@ -5139,7 +5340,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             : null;
           const attach = async (): Promise<IOSSimulatorHostResult> => {
             assertHostActive();
+            assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
             const worktreeRoot = await resolveWorktreeRoot(resolved.session.workDir);
+            assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
             const instance = await actor.attachSerialized({
               sessionId,
               worktreeRoot,
@@ -5149,6 +5352,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               bootProvenance:
                 device.state.toLowerCase() === 'booted' ? 'preexisting' : 'user-booted',
             });
+            assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
             const activationEpoch =
               existingInstance?.instanceId === instance.instanceId &&
               existingActivationEpoch !== null
@@ -5156,10 +5360,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 : captureInstanceActivation(instance.instanceId);
             if (instance.lifecycleState === 'ready') {
               await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+                assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 commitRunning();
                 await ensureDriver(instance, environment);
+                assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
               });
             }
+            assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
             const current = actor.getOwned(sessionId, instance.instanceId);
             completeInstanceActivation(current, activationEpoch);
             if (context?.origin === 'agent') {
@@ -5189,10 +5396,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       } catch (error) {
         if (error instanceof IOSSimulatorHostDisposedError) return hostDisposedResult();
         return safeHostError(error, sessionId, name);
+      } finally {
+        removalBarrierOperation?.finish();
       }
     },
     cancelSessionOperations(sessionId) {
       return cancelSessionBuildsAndRecordings(sessionId.trim());
+    },
+    cleanupRemovedSession(sessionId) {
+      return cleanupRemovedSessionRuntime(sessionId);
     },
     abortOperationsForExit() {
       for (const build of activeBuilds.values()) build.controller.abort();
@@ -5364,6 +5576,11 @@ export async function disposeIOSSimulatorHost(): Promise<void> {
 export function cancelIOSSimulatorSessionOperations(sessionId: string): Promise<void> {
   revokeIOSSimulatorRendererSession(sessionId);
   return defaultIOSSimulatorHost.cancelSessionOperations(sessionId);
+}
+
+export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<void> {
+  revokeIOSSimulatorRendererSession(sessionId);
+  return defaultIOSSimulatorHost.cleanupRemovedSession(sessionId);
 }
 
 export function setIOSSimulatorViewerStreamProfile(

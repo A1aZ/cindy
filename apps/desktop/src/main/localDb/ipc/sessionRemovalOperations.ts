@@ -2,6 +2,7 @@ export interface SessionRemovalOperationDeps {
   isOwnerCurrent(): boolean;
   isSessionStillRemovable(sessionId: string): Promise<boolean>;
   cancelSessionOperations(sessionId: string): Promise<void>;
+  cleanupRemovedSession(sessionId: string): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
 }
 
@@ -18,6 +19,10 @@ export async function quiesceSessionBeforeWorktreeRecycle(
   if (!(await deps.isSessionStillRemovable(sessionId))) return false;
   if (!deps.isOwnerCurrent()) return false;
   await deps.cancelSessionOperations(sessionId);
+  if (!deps.isOwnerCurrent()) return false;
+  if (!(await deps.isSessionStillRemovable(sessionId))) return false;
+  if (!deps.isOwnerCurrent()) return false;
+  await deps.cleanupRemovedSession(sessionId);
   if (!deps.isOwnerCurrent()) return false;
   if (!(await deps.isSessionStillRemovable(sessionId))) return false;
   if (!deps.isOwnerCurrent()) return false;

@@ -960,6 +960,274 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it.each([
+    {
+      label: 'external preexisting',
+      creationProvenance: 'external' as const,
+      bootProvenance: 'preexisting' as const,
+      expectShutdown: false,
+      expectDelete: false,
+    },
+    {
+      label: 'external Agent-booted',
+      creationProvenance: 'external' as const,
+      bootProvenance: 'agent-booted' as const,
+      expectShutdown: true,
+      expectDelete: false,
+    },
+    {
+      label: 'Cindy-created',
+      creationProvenance: 'cindy' as const,
+      bootProvenance: 'user-booted' as const,
+      expectShutdown: true,
+      expectDelete: true,
+    },
+  ])(
+    'cleans a removed $label binding after startup ownership reconcile has latched',
+    async ({ creationProvenance, bootProvenance, expectShutdown, expectDelete }) => {
+      const device = { ...READY_REPORT.devices[0]!, state: 'Booted' as const };
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(async () => device),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(async () => undefined),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(async () => undefined),
+      };
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+        lifecycle,
+      });
+      const instance = actor.attach({
+        sessionId: 'removed-session',
+        worktreeRoot: '/tmp/removed-session',
+        sourceFingerprint: 'fingerprint-a',
+        creationProvenance,
+        bootProvenance,
+        device,
+      });
+      const resourceScheduler = testResourceScheduler();
+      await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+        commitRunning();
+      });
+      const stopDriver = vi.fn(async () => undefined);
+      const discardSession = vi.fn(async () => undefined);
+      const discardInstance = vi.fn(async () => undefined);
+      const framePump = { clear: vi.fn(), snapshot: vi.fn(() => null) };
+      const h264FramePump = { clear: vi.fn() };
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        resourceScheduler,
+        driverManager: {
+          get: vi.fn(() => null),
+          start: vi.fn(),
+          stop: stopDriver,
+        },
+        framePump: framePump as never,
+        h264FramePump: h264FramePump as never,
+        mediaCapture: {
+          discardSession,
+          discardInstance,
+        } as unknown as IOSSimulatorMediaCaptureAdapter,
+        runtime: { inspect: vi.fn(async () => READY_REPORT) },
+        getSession: vi.fn(async (id) => localSession(id)),
+      });
+
+      await host.reconcileOwnership();
+      await expect(host.cleanupRemovedSession('removed-session')).resolves.toBeUndefined();
+      await expect(host.cleanupRemovedSession('removed-session')).resolves.toBeUndefined();
+
+      expect(actor.list('removed-session')).toEqual([]);
+      expect(resourceScheduler.runningCount()).toBe(0);
+      expect(stopDriver).toHaveBeenCalledOnce();
+      expect(stopDriver).toHaveBeenCalledWith(instance.instanceId);
+      expect(discardInstance).toHaveBeenCalledOnce();
+      expect(framePump.clear).toHaveBeenCalledWith(instance.instanceId);
+      expect(h264FramePump.clear).toHaveBeenCalledWith(instance.instanceId);
+      expect(lifecycle.findExact).toHaveBeenCalledTimes(expectShutdown ? 1 : 0);
+      expect(lifecycle.shutdownExact).toHaveBeenCalledTimes(expectShutdown ? 1 : 0);
+      expect(lifecycle.deleteExact).toHaveBeenCalledTimes(expectDelete ? 1 : 0);
+    },
+  );
+
+  it('treats an already missing Cindy-created device as successfully removed', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => null),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'removed-session',
+      worktreeRoot: '/tmp/removed-session',
+      sourceFingerprint: 'fingerprint-a',
+      creationProvenance: 'cindy',
+      bootProvenance: 'agent-booted',
+      device: READY_REPORT.devices[0]!,
+    });
+    const resourceScheduler = testResourceScheduler();
+    await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+      commitRunning();
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+      },
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    await host.reconcileOwnership();
+    await expect(host.cleanupRemovedSession('removed-session')).resolves.toBeUndefined();
+    await expect(host.cleanupRemovedSession('removed-session')).resolves.toBeUndefined();
+
+    expect(actor.list('removed-session')).toEqual([]);
+    expect(resourceScheduler.runningCount()).toBe(0);
+    expect(lifecycle.findExact).toHaveBeenCalledOnce();
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it('cleans only the removed task ownership and scheduler capacity', async () => {
+    const otherDevice = {
+      ...READY_REPORT.devices[0]!,
+      udid: '2A9D41E0-E031-4AD0-A8B5-847480802E8E',
+      name: 'iPhone 17 Pro B',
+    };
+    const environment = { ...READY_REPORT, devices: [READY_REPORT.devices[0]!, otherDevice] };
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const removed = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      creationProvenance: 'external',
+      bootProvenance: 'preexisting',
+      device: READY_REPORT.devices[0]!,
+    });
+    const retained = actor.attach({
+      sessionId: 'session-b',
+      worktreeRoot: '/tmp/session-b',
+      sourceFingerprint: 'fingerprint-b',
+      creationProvenance: 'external',
+      bootProvenance: 'preexisting',
+      device: otherDevice,
+    });
+    const resourceScheduler = testResourceScheduler();
+    for (const instance of [removed, retained]) {
+      await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+        commitRunning();
+      });
+    }
+    const stopDriver = vi.fn(async () => undefined);
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: stopDriver,
+      },
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => environment) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    await host.reconcileOwnership();
+    await host.cleanupRemovedSession('session-a');
+
+    expect(actor.list('session-a')).toEqual([]);
+    expect(actor.list('session-b')).toHaveLength(1);
+    expect(actor.list('session-b')[0]?.instanceId).toBe(retained.instanceId);
+    expect(resourceScheduler.runningCount()).toBe(1);
+    expect(stopDriver).toHaveBeenCalledOnce();
+    expect(stopDriver).toHaveBeenCalledWith(removed.instanceId);
+  });
+
+  it('retains degraded ownership and scheduler capacity when removed-task cleanup fails', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => READY_REPORT.devices[0]!),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'removed-session',
+      worktreeRoot: '/tmp/removed-session',
+      sourceFingerprint: 'fingerprint-a',
+      creationProvenance: 'external',
+      bootProvenance: 'agent-booted',
+      device: READY_REPORT.devices[0]!,
+    });
+    const resourceScheduler = testResourceScheduler();
+    await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
+      commitRunning();
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => {
+          throw new Error('driver process group did not stop');
+        }),
+      },
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+
+    await host.reconcileOwnership();
+    await expect(host.cleanupRemovedSession('removed-session')).rejects.toMatchObject({
+      code: 'DEVICE_BUSY',
+    });
+
+    expect(actor.getOwned('removed-session', instance.instanceId)).toMatchObject({
+      healthState: 'degraded',
+      errorCode: 'ARCHIVED_CLEANUP_FAILED',
+    });
+    expect(resourceScheduler.runningCount()).toBe(1);
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
   it('disposes WDA and recording resources on host shutdown without changing ownership', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
@@ -3322,6 +3590,310 @@ describe('iOS Simulator host', () => {
     await expect(detachPromise).resolves.toMatchObject({ ok: true });
     expect(resourceScheduler.runningCount()).toBe(0);
     await host.dispose();
+  });
+
+  it('waits for a racing start and shuts down the device before cleanup returns', async () => {
+    const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
+    const bootedDevice = { ...READY_REPORT.devices[0]!, state: 'Booted' as const };
+    let resolveBoot: (device: typeof bootedDevice) => void = () => undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => bootedDevice),
+      bootExact: vi.fn(
+        () =>
+          new Promise<typeof bootedDevice>((resolve) => {
+            resolveBoot = resolve;
+          }),
+      ),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: shutdownDevice,
+    });
+    const driverManager = {
+      get: vi.fn(() => null),
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+    const resourceScheduler = testResourceScheduler();
+    const environment = { ...READY_REPORT, devices: [shutdownDevice] };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      resourceScheduler,
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => environment) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    await host.reconcileOwnership();
+    driverManager.stop.mockClear();
+    const current = actor.getOwned('session-a', attached.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
+
+    const start = host.callTool('start_instance', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await vi.waitFor(() => expect(lifecycle.bootExact).toHaveBeenCalledOnce());
+    const cleanup = host.cleanupRemovedSession('session-a');
+    resolveBoot(bootedDevice);
+
+    await expect(start).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(driverManager.start).not.toHaveBeenCalled();
+    expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(attached.simulatorUdid);
+    expect(actor.list('session-a')).toEqual([]);
+    expect(resourceScheduler.runningCount()).toBe(0);
+  });
+
+  it('waits for a racing viewer open before clearing its runtime projection', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    let resolveWindowSize: (size: { width: number; height: number }) => void = () => undefined;
+    const running = {
+      instanceId: attached.instanceId,
+      simulatorUdid: attached.simulatorUdid,
+      pid: 42,
+      driver: {
+        getWindowSize: vi.fn(
+          () =>
+            new Promise<{ width: number; height: number }>((resolve) => {
+              resolveWindowSize = resolve;
+            }),
+        ),
+        getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+      },
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance;
+    const driverManager = {
+      get: vi.fn(() => running),
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+    const framePump = {
+      setVisible: vi.fn(),
+      snapshot: vi.fn(() => null),
+      clear: vi.fn(),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      framePump: framePump as never,
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resourceScheduler: testResourceScheduler(),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('session-a', attached.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
+
+    const viewer = host.setViewerVisibility('session-a', route, true, 'jpeg');
+    await vi.waitFor(() => expect(running.driver.getWindowSize).toHaveBeenCalledOnce());
+    const cleanup = host.cleanupRemovedSession('session-a');
+    await Promise.resolve();
+    expect(driverManager.stop).not.toHaveBeenCalled();
+    resolveWindowSize({ width: 393, height: 852 });
+
+    await expect(viewer).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(framePump.setVisible).not.toHaveBeenCalled();
+    expect(framePump.clear).toHaveBeenCalledWith(attached.instanceId);
+    expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
+    expect(actor.list('session-a')).toEqual([]);
+  });
+
+  it('waits for a racing attach and removes its partially started runtime', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    let resolveDriverStart: (running: WdaRunningInstance) => void = () => undefined;
+    let liveRunning: WdaRunningInstance | null = null;
+    const driverManager = {
+      get: vi.fn(() => liveRunning),
+      start: vi.fn(
+        () =>
+          new Promise<WdaRunningInstance>((resolve) => {
+            resolveDriverStart = (running) => {
+              liveRunning = running;
+              resolve(running);
+            };
+          }),
+      ),
+      stop: vi.fn(async () => {
+        liveRunning = null;
+      }),
+    };
+    const resourceScheduler = testResourceScheduler();
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      resourceScheduler,
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+    });
+    await host.reconcileOwnership();
+
+    const attach = host.callTool(
+      'attach_device',
+      { udid: READY_REPORT.devices[0]!.udid },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(driverManager.start).toHaveBeenCalledOnce());
+    const attached = actor.list('session-a')[0]!;
+    const cleanup = host.cleanupRemovedSession('session-a');
+    resolveDriverStart({
+      instanceId: attached.instanceId,
+      simulatorUdid: attached.simulatorUdid,
+      pid: 42,
+      driver: {},
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance);
+
+    await expect(attach).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(actor.list('session-a')).toEqual([]);
+    expect(resourceScheduler.runningCount()).toBe(0);
+    expect(driverManager.stop).toHaveBeenCalledWith(attached.instanceId);
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it('waits for a racing create and deletes the late Cindy-owned device', async () => {
+    const template = {
+      ...READY_REPORT.devices[0]!,
+      deviceTypeIdentifier: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+    };
+    const createdDevice = {
+      ...template,
+      udid: '2A9D41E0-E031-4AD0-A8B5-847480802E8E',
+      name: 'Late Cindy iPhone',
+      state: 'Shutdown' as const,
+    };
+    let resolveCreate: (device: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => createdDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(
+        (_input: Parameters<IOSSimulatorSimctlLifecycle['createExact']>[0]) =>
+          new Promise<Awaited<ReturnType<IOSSimulatorSimctlLifecycle['createExact']>>>(
+            (resolve) => {
+              resolveCreate = resolve;
+            },
+          ),
+      ),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const environment = { ...READY_REPORT, devices: [template] };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      mediaCapture: {
+        discardSession: vi.fn(async () => undefined),
+        discardInstance: vi.fn(async () => undefined),
+      } as unknown as IOSSimulatorMediaCaptureAdapter,
+      runtime: { inspect: vi.fn(async () => environment) },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+    });
+    await host.reconcileOwnership();
+
+    const create = host.callTool(
+      'create_instance',
+      { templateUdid: template.udid, name: createdDevice.name },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(lifecycle.createExact).toHaveBeenCalledOnce());
+    const cleanup = host.cleanupRemovedSession('session-a');
+    resolveCreate({
+      udid: createdDevice.udid,
+      name: createdDevice.name,
+      runtimeIdentifier: createdDevice.runtimeIdentifier,
+      deviceTypeIdentifier: createdDevice.deviceTypeIdentifier!,
+    });
+
+    await expect(create).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(actor.list('session-a')).toEqual([]);
+    expect(lifecycle.findExact).toHaveBeenCalledWith(createdDevice.udid);
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdDevice.udid);
   });
 
   it('does not register a build after its task is archived at the reconcile boundary', async () => {

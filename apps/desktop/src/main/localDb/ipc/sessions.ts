@@ -62,18 +62,27 @@ const initialSessionListLogged = new Set<string>();
 const SLOW_SESSION_LIST_MS = 250;
 type OwnerScope = ReturnType<typeof broadcastTap.captureDataOwnerBroadcastScope> | null;
 type SessionRemovalCancelOperations = (sessionId: string) => Promise<void>;
+type SessionRemovalCleanup = (sessionId: string) => Promise<void>;
 export interface SessionRecycleScope {
   ownerScope: OwnerScope;
   mediaDb: DbClient['drizzle'];
 }
 
 let sessionRemovalCancelOperations: SessionRemovalCancelOperations | null = null;
+let sessionRemovalCleanup: SessionRemovalCleanup | null = null;
 
 /** Composition-root injection for Host-owned operations that must stop before worktree recycle. */
 export function setSessionRemovalCancelOperations(
   cancelOperations: SessionRemovalCancelOperations | null,
 ): void {
   sessionRemovalCancelOperations = cancelOperations;
+}
+
+/** Composition-root injection for destructive cleanup after removal is revalidated. */
+export function setSessionRemovalCleanup(
+  cleanupRemovedSession: SessionRemovalCleanup | null,
+): void {
+  sessionRemovalCleanup = cleanupRemovedSession;
 }
 
 function captureOwnerScope(): OwnerScope {
@@ -225,7 +234,8 @@ export async function recycleSessionWorktreeForStatusChange(
     const mediaDb = capturedScope?.mediaDb ?? getDbClient().drizzle;
     if (!isOwnerScopeCurrent(ownerScope)) return;
     const cancelOperations = sessionRemovalCancelOperations;
-    if (!cancelOperations) {
+    const cleanupRemovedSession = sessionRemovalCleanup;
+    if (!cancelOperations || !cleanupRemovedSession) {
       throw new Error('iOS Simulator session cleanup is not configured');
     }
     const [mh, recycle] = await Promise.all([
@@ -241,6 +251,7 @@ export async function recycleSessionWorktreeForStatusChange(
         isOwnerCurrent: ownerIsCurrent,
         isSessionStillRemovable: isStillRemovable,
         cancelSessionOperations: cancelOperations,
+        cleanupRemovedSession,
         closeSession: async (id) => {
           await mh
             .getMakerIfReady()

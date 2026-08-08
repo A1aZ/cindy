@@ -11,7 +11,11 @@ import { ipcMain } from 'electron';
 
 import { closeDb, ensureReady, getCurrentUserId } from '../index';
 import { getCurrentDbClientUserId, tryGetDbClient } from '../client/current';
-import { registerSessionIpc, setSessionRemovalCancelOperations } from './sessions';
+import {
+  registerSessionIpc,
+  setSessionRemovalCancelOperations,
+  setSessionRemovalCleanup,
+} from './sessions';
 import { registerMessageIpc } from './messages';
 import { registerOrcaWorkflowIpc } from './orcaTeams';
 import { registerSessionImportIpc } from './session-import';
@@ -73,6 +77,8 @@ export interface RegisterLocalDbIpcOpts {
   beforeEnsureReady?: (userId: string) => void | Promise<void>;
   /** Stop Host-owned session operations before an archived/deleted worktree is recycled. */
   cancelSessionOperations?: (sessionId: string) => Promise<void>;
+  /** Release Host-owned runtime and ownership after task removal is revalidated. */
+  cleanupRemovedSession?: (sessionId: string) => Promise<void>;
   /** Serialize startup tombstone cleanup with task restore/start/send operations. */
   withSessionLock?: <T>(sessionId: string, task: () => Promise<T>) => Promise<T>;
   /**
@@ -90,6 +96,7 @@ export interface RegisterLocalDbIpcOpts {
 
 export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
   setSessionRemovalCancelOperations(opts.cancelSessionOperations ?? null);
+  setSessionRemovalCleanup(opts.cleanupRemovedSession ?? null);
   setSessionRouteLockImplementation(opts.withSessionLock ?? null);
   const runEnsureReady = createOwnerEnsureCoordinator({
     isOwnerCurrent: opts.isOwnerCurrent ?? (() => true),
@@ -112,14 +119,18 @@ export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
       startMediaRefCompensationReconcile(userId, client, isReadyOwnerCurrent);
 
       const cancelSessionOperations = opts.cancelSessionOperations;
+      const cleanupRemovedSession = opts.cleanupRemovedSession;
       const withSessionLock = opts.withSessionLock;
-      if (!cancelSessionOperations || !withSessionLock) return;
+      if (!cancelSessionOperations || !cleanupRemovedSession || !withSessionLock) return;
       const db = client.drizzle;
       void reconcileSessionMediaRefsForDeletedSessions({
         db,
         isOwnerCurrent: isReadyOwnerCurrent,
         withSessionLock,
-        quiesceSession: cancelSessionOperations,
+        quiesceSession: async (sessionId) => {
+          await cancelSessionOperations(sessionId);
+          await cleanupRemovedSession(sessionId);
+        },
       }).catch((error) => {
         log.warn('deleted task media reconcile failed', {
           userId,

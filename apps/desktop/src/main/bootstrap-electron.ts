@@ -307,6 +307,7 @@ import { registerDevEmbeddingIpc } from './ipc/dev/embedding';
 import { onQuit, installQuitHandler } from './lifecycle';
 import {
   cancelIOSSimulatorSessionOperations,
+  cleanupIOSSimulatorRemovedSession,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
 } from './mcp-integrations/ios-simulator';
@@ -6375,6 +6376,7 @@ app.on('ready', async () => {
   registerLegacyMigrationIpc();
   registerLocalDbIpc({
     cancelSessionOperations: cancelIOSSimulatorSessionOperations,
+    cleanupRemovedSession: cleanupIOSSimulatorRemovedSession,
     withSessionLock: withSendToSessionLock,
     isOwnerCurrent: (userId) =>
       isLocalDbOwnerCurrent(authManager.getAuthState(), userId, isAppSessionBoundaryPending()),

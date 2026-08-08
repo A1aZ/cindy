@@ -5133,6 +5133,8 @@ export class ClaudeCodeAgent extends BaseAgent {
             recordCanceledQueryClose(cancelledQuery, 'user_stop cancellation');
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
+            // main 上 #2151 已给 interrupt 成功分支挂了同一守卫; 本 PR 的差异是
+            // close-query / 超时 / 抛错 / bridge 分支也一并纳入同一契约。
             if (!sendInAcceptPhase) turnInFlight = false;
           } else {
             // interrupt 成功且无后台任务需要清：被中断的 turn 会收到
@@ -5143,8 +5145,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             // accept 阶段除外——finishSendBeforeUserInput 的入口守卫是
             // `if (!turnInFlight) return`,abort 抢清会让它以为已被收口而直接
             // 返回,send_cancelled_before_acceptance 的终态 boundary 从此丢失,
-            // isTurnRunning 悬置(正是 5042 行注释声明、却只挡了 pendingToolIds
-            // 的那半个守卫;review 3541310178 的反馈原型用例钉的就是它)。
+            // isTurnRunning 悬置(review 3541310178 的反馈原型用例钉的就是它)。
             if (!sendInAcceptPhase) turnInFlight = false;
           }
         } catch (e) {

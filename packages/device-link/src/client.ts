@@ -2787,11 +2787,18 @@ export class DeviceLinkClient {
     // 前移之后,后面的消息自然轮到(有交错用例锚定这两段行为)。
     //
     // 预算按**帧**计而不是按逻辑消息计:压垮 relay 的是帧数,而一条 4MB 消息会被分成
-    // 32 片,按消息计数会让 8 条预算放出 ~256 帧,等于没限(greptile P1)。分片不能跨趟
-    // 拆开(接收端要整条重组),所以每趟**至少发一条**,发完再按帧数结算是否超预算。
-    let framesLeft = opts.unlimited
+    // 32 片,按消息计数会让 8 条预算放出 ~256 帧,等于没限(greptile P1)。
+    //
+    // 本趟实际上限是 **max(预算, 队头那一条消息的分片数)**,不是预算本身:
+    //  - 非队头的大消息**发送前**就按预估分片数拦下(不许挤爆本趟),留到下一趟;
+    //  - 队头那一条无法再压 —— 分片不能跨趟拆(接收端按 seq 整条重组),而它又必须先送
+    //    到(累计 ACK 不推进,后面的 seq 谁也消费不了)。要把它也压进预算就得引入
+    //    per-message 分片游标与跨趟续传进度,那是可靠层的新机制,不在本 PR 范围;
+    //    而且它是用「大消息交付延迟 ×N 趟」换「突发再小一点」,取舍并不明显更优。
+    const budget = opts.unlimited
       ? Number.POSITIVE_INFINITY
       : normalizeRetryPassBudget(this.timing.transportRetryPassBudget);
+    let framesSpent = 0;
     for (const pending of peer.pending.values()) {
       if (!opts.ignoreInterval && now - pending.lastSentAt < this.timing.transportRetryIntervalMs) {
         continue;
@@ -2800,6 +2807,10 @@ export class DeviceLinkClient {
         this.handleReliableRetryExhausted(dst, pending.seq);
         return;
       }
+      // 发送前先按预估分片数结算:已经发过东西、且这一条会超预算时,把它留到下一趟。
+      // 用预估而非真实编码结果是刻意的 —— 这是流控决策,不需要精确,重新编码一条 4MB
+      // 消息只为数分片数不划算;发送后再用真实帧数扣减。
+      if (framesSpent > 0 && framesSpent + this.estimateReliableFrameCount(pending) > budget) break;
       let sentFrames = 0;
       try {
         sentFrames = this.sendReliableFrames(peer, pending);
@@ -2807,9 +2818,17 @@ export class DeviceLinkClient {
         this.log.debug(`reliable transport retry failed for ${dst.slice(0, 8)}`, err);
         break;
       }
-      framesLeft -= Math.max(1, sentFrames);
-      if (framesLeft <= 0) break;
+      framesSpent += Math.max(1, sentFrames);
+      if (framesSpent >= budget) break;
     }
+  }
+
+  /**
+   * 预估一条 pending 消息会写出多少帧(流控用,不要求精确)。`pending.bytes` 是入队时
+   * 量好的保留字节数,按分片上限向上取整即可;真实帧数由 sendReliableFrames 返回。
+   */
+  private estimateReliableFrameCount(pending: PendingReliableMessage): number {
+    return Math.max(1, Math.ceil(pending.bytes / MAX_TRANSPORT_CHUNK_BYTES));
   }
 
   private replayPending(dst: string, resumedLink = false): void {

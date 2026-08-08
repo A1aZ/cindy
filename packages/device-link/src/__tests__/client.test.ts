@@ -4545,16 +4545,46 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
       expect(framesSent(ws)).toBeGreaterThan(8);
       expect([...sendsBySeq(ws).values()]).toEqual([1, 1, 1, 1]);
 
-      // 预算 4 帧:第一条消息(3 片)发完还剩 1 帧 → 再发第二条后超预算停手;
-      // 关键是**不会**把 4 条全部重发。
+      // 预算 4 帧、每条 3 片:队头那条发完(3 帧)后,第二条会超预算 → 发送前就被拦下,
+      // 留到下一趟。所以本趟只重发队头 1 条、只写出 3 帧。
+      const framesBefore = framesSent(ws);
       await advance(200);
       const retried = retriedSeqs(sendsBySeq(ws));
-      expect(retried.length).toBeLessThan(4);
-      expect(retried).toEqual(seqs.slice(0, retried.length));
+      expect(retried).toEqual([seqs[0]]);
+      // 本趟真实写出的帧数不超过 max(预算, 队头分片数) —— 这才是「上限」的准确表述
+      const passFrames = framesSent(ws) - framesBefore;
+      expect(passFrames).toBeLessThanOrEqual(4);
     }, {
       pingIntervalMs: 600_000,
       transportRetryIntervalMs: 200,
       transportRetryPassBudget: 4,
+      transportMaxRetryAttempts: 50,
+    });
+  }, 15_000);
+
+  it('队头单条就超预算时:本趟只发它一条,后面的一条都不带(上限 = max(预算, 队头分片数))', async () => {
+    // review 两位都指出「预算不是硬上限」。准确表述是 max(预算, 队头分片数):队头那条
+    // 压不下去(分片不能跨趟拆,而它又必须先送到),但它绝不能顺带把后面的也拖出去。
+    await withFakeTimers(async (h, advance) => {
+      const chunky = 'x'.repeat(3 * 128 * 1024 + 1_000); // ~4 片,单条即超预算(2)
+      h.client.sendInvokeResult('dev-b', 'big', { ok: true, result: chunky });
+      for (let i = 0; i < 5; i += 1) {
+        h.client.sendInvokeResult('dev-b', `small-${i}`, { ok: true, result: i });
+      }
+      const ws = h.current();
+      const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
+      const framesBefore = framesSent(ws);
+
+      await advance(200);
+      // 只有队头那条大消息被重发,5 条小消息一条都没被带出去
+      expect(retriedSeqs(sendsBySeq(ws))).toEqual([seqs[0]]);
+      // 溢出被限制在「队头这一条的分片数」内,而不是预算 + 队头
+      const passFrames = framesSent(ws) - framesBefore;
+      expect(passFrames).toBeLessThanOrEqual(6);
+    }, {
+      pingIntervalMs: 600_000,
+      transportRetryIntervalMs: 200,
+      transportRetryPassBudget: 2,
       transportMaxRetryAttempts: 50,
     });
   }, 15_000);

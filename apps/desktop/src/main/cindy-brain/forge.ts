@@ -3365,7 +3365,11 @@ Agent 通过 Skill 调 Host MCP。不要为了重复同一状态再声明 \`pane
 
 \`\`\`js
 const caps = await cindy.iosSimulator.request({ kind: 'capabilities' });
-// caps.apiVersion === 1;pluginVideo/pluginInput 都是 false
+if (caps.ok && caps.kind === 'capabilities') {
+  // caps.apiVersion === 1
+  // caps.capabilities.pluginVideo === false
+  // caps.capabilities.pluginInput === false
+}
 
 const current = await cindy.iosSimulator.request({ kind: 'status' });
 if (current.ok) {

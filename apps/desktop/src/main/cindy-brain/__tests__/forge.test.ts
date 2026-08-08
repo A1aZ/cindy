@@ -947,7 +947,8 @@ describe('FORGE_GUIDE', () => {
       // 2026-08-06 iOS Simulator 插件能力:只读脱敏状态与 Host 面板入口。
       '内置 iOS 模拟器(ios-simulator 槽)',
       'cindy.iosSimulator.request',
-      'pluginVideo/pluginInput 都是 false',
+      'caps.capabilities.pluginVideo === false',
+      'caps.capabilities.pluginInput === false',
       '声明 `ios-simulator` 时必须同时声明 `minCindyVersion`',
       // 2026-07-28 图标与官方仓门禁(#809):§1/§2 的 icon 字段说明、
       // §8.1 官方插件仓的四语言 locale 与 assets/icon.png 惯例。

@@ -899,12 +899,60 @@ function hasUnresolvedXcrunTool(tokens: string[]): boolean {
   return firstToolToken !== '' && !isLiteralXcrunBoundaryToken(firstToolToken);
 }
 
+const SHELL_FUNCTION_HEADER_SOURCE =
+  '(?:(?:function\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*\\(\\s*\\)|function\\s+[A-Za-z_][A-Za-z0-9_]*)';
+const SHELL_FUNCTION_DEFINITION_PREFIX = new RegExp(
+  `^${SHELL_FUNCTION_HEADER_SOURCE}\\s*[({]`,
+);
+
+function shellCompoundBodyEnd(command: string, openingIndex: number): number | null {
+  const opening = command[openingIndex];
+  if (opening !== '{' && opening !== '(') return null;
+  const closing = opening === '{' ? '}' : ')';
+  let nesting = 1;
+  let quote: "'" | '"' | '`' | null = null;
+  let escaped = false;
+  for (let index = openingIndex + 1; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote !== "'") {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char;
+      continue;
+    }
+    if (char === opening) nesting += 1;
+    else if (char === closing) {
+      nesting -= 1;
+      if (nesting === 0) return index;
+    }
+  }
+  return null;
+}
+
 /** Function bodies are executable later, so reject unsafe bodies at definition time. */
 function containsSimulatorFunctionBody(command: string, depth: number): boolean {
-  const functionPattern =
-    /(?:^|[;\n]\s*)(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?\s*\{([\s\S]*?)\}/g;
-  for (const match of command.matchAll(functionPattern)) {
-    if (containsSimulatorBypass(match[1] ?? '', depth + 1)) return true;
+  const functionPattern = new RegExp(
+    `(?:^|[;\\n]\\s*)${SHELL_FUNCTION_HEADER_SOURCE}\\s*([({])`,
+    'g',
+  );
+  while (functionPattern.exec(command) !== null) {
+    const openingIndex = functionPattern.lastIndex - 1;
+    const closingIndex = shellCompoundBodyEnd(command, openingIndex);
+    if (closingIndex === null) continue;
+    if (containsSimulatorBypass(command.slice(openingIndex + 1, closingIndex), depth + 1)) {
+      return true;
+    }
+    functionPattern.lastIndex = closingIndex + 1;
   }
   return false;
 }
@@ -941,7 +989,7 @@ function containsSimulatorBypass(command: string, depth = 0): boolean {
   for (const segment of shellSegments(command)) {
     // Function bodies were classified recursively above. The leading
     // `name(){` token is not an execution wrapper in its own right.
-    if (/^(?:function\s+)?[A-Za-z_][A-Za-z0-9_]*(?:\s*\(\s*\))?\s*\{/.test(segment)) {
+    if (SHELL_FUNCTION_DEFINITION_PREFIX.test(segment)) {
       continue;
     }
     const tokens = tokenizeShellSegment(segment);

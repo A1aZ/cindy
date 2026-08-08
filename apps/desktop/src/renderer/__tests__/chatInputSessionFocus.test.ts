@@ -64,7 +64,7 @@ describe('ChatInput session switch focus contract', () => {
 
   it('enables storageKey refocus for routed session and new-draft views', () => {
     expect(sessionViewSource).toContain(
-      'const ownsRoute = !sessionIdProp && !isCompactRail && !isOrcaMode;',
+      'const ownsRoute = routeOwner ?? (!sessionIdProp && !isCompactRail && !isOrcaMode);',
     );
     expect(sessionViewSource).toContain('focusOnStorageKeyChange={ownsRoute}');
     expect(newMakerDraftRouteSource).toContain('focusOnStorageKeyChange');
@@ -98,7 +98,12 @@ describe('ChatInput session switch focus contract', () => {
     expect(pluginPageSource.match(/focusAtEnd: true/g)).toHaveLength(1);
     expect(
       chatInputSource.match(/placeGhostAtComposerStart\(editor, ghost, installedGhosts\)/g),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      chatInputSource.match(
+        /placeGhostAtComposerStart\(editor, ghost, installedGhostsRef\.current\)/g,
+      ),
+    ).toHaveLength(1);
     expect(chatInputSource).toContain('pendingGhostId: undefined');
     expect(chatInputSource).toContain('focusComposerEndNextFrame(editor);');
   });
@@ -210,10 +215,12 @@ describe('ChatInput session switch focus contract', () => {
     expect(pluginPageSource).toContain(
       'window.electronAPI.ghosts.onRecentUsageChanged(({ ids }) => {',
     );
-    expect(pluginPageSource).toMatch(
-      /sortGhostPluginItemsByRecentUse\(installedItems, recentGhostIds\)/,
-    );
-    expect(pluginPageSource).not.toContain('sortGhostPluginItemsByRecentUse(\n        ghosts');
+    // Ranking runs over the (searched) installed set, not the raw ghost list, and feeds
+    // recent-use + unread signals into the shared pure sorter.
+    expect(pluginPageSource).toMatch(/sortInstalledForDisplay\(searchedInstalledItems, \{/);
+    expect(pluginPageSource).toContain('recentIds: recentGhostIds');
+    expect(pluginPageSource).not.toContain('sortInstalledForDisplay(ghosts');
+    expect(pluginPageSource).not.toContain('sortInstalledForDisplay(installedItems');
   });
 });
 

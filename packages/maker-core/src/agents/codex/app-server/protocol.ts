@@ -468,6 +468,12 @@ export interface ThreadForkParams {
   sandbox?: SandboxMode;
   /** Per-request config overrides, including named permission profile definitions. */
   config?: Record<string, unknown>;
+  /**
+   * 只返回 thread 元数据与 live fork state,不把完整历史塞进单条 NDJSON response。
+   * 与 thread/resume.excludeTurns 同族;超长历史 thread 的 fork 响应体与历史成
+   * 正比、无上界,曾实测单行 31MiB 超过 client maxLineBytes(16MiB)熔断整条连接。
+   */
+  excludeTurns?: boolean;
   [k: string]: unknown;
 }
 
@@ -800,6 +806,11 @@ export interface ThreadStartedNotification {
 export interface TurnStartedNotification {
   method: 'turn/started';
   params: { threadId: string; turn: { id: string; [k: string]: unknown }; [k: string]: unknown };
+}
+
+export interface TurnDiffUpdatedNotification {
+  method: 'turn/diff/updated';
+  params: { threadId: string; turnId: string; diff: string; [k: string]: unknown };
 }
 
 /**
@@ -1154,6 +1165,7 @@ export interface ItemEnvelope {
 export type ServerNotification =
   | ThreadStartedNotification
   | TurnStartedNotification
+  | TurnDiffUpdatedNotification
   | TurnCompletedNotification
   | ThreadTokenUsageUpdatedNotification
   | ItemStartedNotification

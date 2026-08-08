@@ -12,6 +12,7 @@ import {
   IOSSimulatorAppLifecycle,
   auditIOSSimulatorScreenMap,
   diffIOSSimulatorScreenMaps,
+  IOSSimulatorDeviceGrantRegistryFile,
   IOSSimulatorDeviceGrantStore,
   IOSSimulatorDiagnosticsStore,
   IOSSimulatorFramePump,
@@ -33,6 +34,7 @@ import {
   WdaProcessManager,
   type IOSSimulatorEnvironmentReport,
   type IOSSimulatorDriverCapabilityReport,
+  type IOSSimulatorDeviceGrant,
   type IOSSimulatorAdmissionPolicy,
   type IOSSimulatorNativeCapabilityAdmissionPolicy,
   type IOSSimulatorNativeSidecarDiagnostics,
@@ -373,6 +375,39 @@ function createDefaultOwnershipRegistry(): IOSSimulatorOwnershipRegistryFile {
   return new IOSSimulatorOwnershipRegistryFile(
     path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
   );
+}
+
+/**
+ * Device consent is profile-scoped but independent from task ownership. Reuse
+ * the ownership registry's process-wide writer lease while keeping a corrupt
+ * consent snapshot from blocking lifecycle recovery: invalid data restores as
+ * all-unknown, and the next explicit decision must persist before it succeeds.
+ */
+export function createRegistryBackedIOSSimulatorDeviceGrantStore(
+  ownershipRegistry: IOSSimulatorOwnershipRegistryFile,
+): IOSSimulatorDeviceGrantStore {
+  const grantRegistry = new IOSSimulatorDeviceGrantRegistryFile(
+    path.join(path.dirname(ownershipRegistry.filePath), 'device-grants.json'),
+    { assertMutationAllowed: () => ownershipRegistry.assertWriter() },
+  );
+  let initialGrants: IOSSimulatorDeviceGrant[];
+  try {
+    initialGrants = grantRegistry.loadSync();
+  } catch (error) {
+    if (error instanceof IOSSimulatorInstanceError && error.code === 'DEVICE_BUSY') {
+      throw error;
+    }
+    logger.warn('Ignoring invalid persisted iOS Simulator device grants', {
+      filePath: redact(grantRegistry.filePath),
+      error: error instanceof Error ? error.message : String(error),
+    });
+    initialGrants = [];
+  }
+  return new IOSSimulatorDeviceGrantStore({
+    initialGrants,
+    assertMutationAllowed: () => ownershipRegistry.assertWriter(),
+    onChange: (grants) => grantRegistry.saveSync(grants),
+  });
 }
 
 function createProfileScopedIOSSimulatorLifecycle(
@@ -6060,6 +6095,7 @@ let defaultIOSSimulatorRuntimeDisposePromise: Promise<void> | null = null;
 function installDefaultIOSSimulatorHost(
   lifecycle: IOSSimulatorSimctlLifecycle,
   persistedActor: ReturnType<typeof createDefaultActor>,
+  registry: IOSSimulatorOwnershipRegistryFile,
 ): IOSSimulatorHost {
   if (defaultIOSSimulatorRuntime) {
     persistedActor.release();
@@ -6075,6 +6111,7 @@ function installDefaultIOSSimulatorHost(
     const host = createIOSSimulatorHost({
       lifecycle,
       actor: persistedActor.actor,
+      grantStore: createRegistryBackedIOSSimulatorDeviceGrantStore(registry),
       canReconcilePendingCreates: persistedActor.canReconcilePendingCreates,
       driverManager: createDefaultDriverManager(),
     });
@@ -6116,7 +6153,7 @@ export function initializeIOSSimulatorHost(): IOSSimulatorHost {
   const registry = createDefaultOwnershipRegistry();
   const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
   const persistedActor = createDefaultActor(lifecycle, registry);
-  return installDefaultIOSSimulatorHost(lifecycle, persistedActor);
+  return installDefaultIOSSimulatorHost(lifecycle, persistedActor, registry);
 }
 
 function currentIOSSimulatorHost(): IOSSimulatorHost | null {
@@ -6232,7 +6269,7 @@ export async function reconcilePersistedIOSSimulatorOwnership(
       return;
     }
     const persistedActor = createDefaultActor(lifecycle, registry);
-    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
+    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor, registry);
     registryTransferred = true;
     await host.reconcileOwnership();
   } catch (error) {
@@ -6296,7 +6333,7 @@ export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<vo
     // another Cindy process attaching this task while it is being removed.
     const lifecycle = createProfileScopedIOSSimulatorLifecycle(registry);
     const persistedActor = createDefaultActor(lifecycle, registry);
-    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
+    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor, registry);
     registryTransferred = true;
     return host.cleanupRemovedSession(normalizedSessionId);
   } catch (error) {

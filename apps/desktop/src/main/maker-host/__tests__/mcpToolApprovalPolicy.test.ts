@@ -129,14 +129,14 @@ describe('desktop MCP approval policy', () => {
     expect(getDesktopMcpToolApprovalPolicy({ serverName: 'third_party' })).toBe('prompt');
   });
 
-  it('prompts for simulator build, URL, and device creation while device-gated actions stay trusted', () => {
+  it('prompts for simulator setup actions while device-gated actions stay trusted', () => {
     expect(
       getDesktopMcpToolApprovalPolicy({
         serverName: 'cindy_ios_simulator',
         toolName: 'list_tools',
       }),
     ).toBe('auto-approve');
-    for (const name of ['build_app', 'create_instance', 'open_url']) {
+    for (const name of ['attach_device', 'build_app', 'create_instance', 'open_url']) {
       expect(
         getDesktopMcpToolApprovalPolicy({
           serverName: 'cindy_ios_simulator',

@@ -116,9 +116,12 @@ export function getDesktopMcpToolApprovalPolicy(
     if (toolName === 'call_tool') {
       const innerName =
         toolParams && typeof toolParams === 'object'
-        ? (toolParams as { name?: unknown }).name
+          ? (toolParams as { name?: unknown }).name
           : undefined;
-      return innerName === 'build_app' || innerName === 'open_url' || innerName === 'create_instance'
+      return innerName === 'build_app' ||
+        innerName === 'open_url' ||
+        innerName === 'create_instance' ||
+        innerName === 'attach_device'
         ? 'prompt-each-time'
         : 'auto-approve';
     }

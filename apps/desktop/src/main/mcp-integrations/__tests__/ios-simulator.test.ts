@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createIOSSimulatorNativeDevelopmentAdmissionPolicy,
   evaluateIOSSimulatorNativeCapabilityAdmission,
+  IOSSimulatorDeviceGrantStore,
   IOSSimulatorInstanceActor,
   IOSSimulatorInstanceError,
   IOSSimulatorOwnershipStore,
@@ -31,6 +32,7 @@ import {
   cancelIOSSimulatorSessionOperations,
   cleanupIOSSimulatorRemovedSession,
   createIOSSimulatorHost,
+  createRegistryBackedIOSSimulatorDeviceGrantStore,
   createRegistryBackedIOSSimulatorActor,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
@@ -125,6 +127,49 @@ describe('iOS Simulator host', () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  itMac(
+    'persists device grants in the active Cindy profile and restores them after restart',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-grants-'));
+      const ownershipRegistry = new IOSSimulatorOwnershipRegistryFile(
+        path.join(root, 'ios-simulator', 'ownership-registry.json'),
+      );
+      try {
+        expect(ownershipRegistry.acquireWriterSync()).toBe(true);
+        const firstStore = createRegistryBackedIOSSimulatorDeviceGrantStore(ownershipRegistry);
+        firstStore.set(READY_REPORT.devices[0]!.udid, { agentControl: 'allowed' });
+
+        const restoredStore = createRegistryBackedIOSSimulatorDeviceGrantStore(ownershipRegistry);
+        expect(restoredStore.get(READY_REPORT.devices[0]!.udid)).toMatchObject({
+          agentControl: 'allowed',
+          policySource: 'user',
+        });
+        restoredStore.set(READY_REPORT.devices[0]!.udid, { agentControl: 'denied' });
+        const deniedAfterRestart =
+          createRegistryBackedIOSSimulatorDeviceGrantStore(ownershipRegistry);
+        expect(deniedAfterRestart.get(READY_REPORT.devices[0]!.udid).agentControl).toBe('denied');
+        expect(
+          JSON.parse(
+            await readFile(path.join(root, 'ios-simulator', 'device-grants.json'), 'utf8'),
+          ),
+        ).toMatchObject({
+          version: 1,
+          grants: [{ simulatorUdid: READY_REPORT.devices[0]!.udid }],
+        });
+
+        await writeFile(
+          path.join(root, 'ios-simulator', 'device-grants.json'),
+          '{"version":1,"grants":[',
+        );
+        const failClosedStore = createRegistryBackedIOSSimulatorDeviceGrantStore(ownershipRegistry);
+        expect(failClosedStore.get(READY_REPORT.devices[0]!.udid).agentControl).toBe('unknown');
+      } finally {
+        ownershipRegistry.releaseWriterSync();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   itMac(
     'recovers pending creates with an empty registry before releasing its writer lease',
@@ -4646,6 +4691,74 @@ describe('iOS Simulator host', () => {
       instance.simulatorUdid,
       expect.any(AbortSignal),
     );
+  });
+
+  it('revokes an attached agent lease even when persisting the denial fails', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const grantStore = new IOSSimulatorDeviceGrantStore({
+      initialGrants: [
+        {
+          simulatorUdid: READY_REPORT.devices[0]!.udid,
+          agentControl: 'allowed',
+          screenshotCapture: 'unknown',
+          policySource: 'user',
+          updatedAt: '2026-08-07T00:00:00.000Z',
+        },
+      ],
+      onChange: () => {
+        throw new Error('disk unavailable');
+      },
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      grantStore,
+      runtime: {
+        inspect: vi.fn(async () => ({
+          ...READY_REPORT,
+          devices: [{ ...READY_REPORT.devices[0]!, state: 'Shutdown' as const }],
+        })),
+      },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+      resourceScheduler: testResourceScheduler(),
+    });
+
+    await expect(
+      host.callTool(
+        'attach_device',
+        { udid: READY_REPORT.devices[0]!.udid },
+        { sessionId: 'session-agent', origin: 'agent' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    const instance = actor.list('session-agent')[0]!;
+    const route = {
+      instanceId: instance.instanceId,
+      generation: instance.generation,
+      leaseId: instance.lease.id,
+    };
+
+    await expect(
+      host.setAgentControlGrant('session-agent', instance.instanceId, 'denied'),
+    ).resolves.toMatchObject({ ok: false });
+    expect(grantStore.get(instance.simulatorUdid).agentControl).toBe('denied');
+    await expect(
+      host.callTool('stop_instance', route, {
+        sessionId: 'session-agent',
+        origin: 'agent',
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'DEVICE_CONTROL_NOT_GRANTED' });
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
   });
 
   it('renews the lease after a slow driver start and opens the embedded viewer', async () => {

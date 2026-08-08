@@ -4,6 +4,7 @@ export * from "./compatibility.js";
 export * from "./compatibility-matrix.js";
 export * from "./app-lifecycle.js";
 export * from "./device-grant-store.js";
+export * from "./device-grant-registry-file.js";
 export * from "./diagnostics-store.js";
 export * from "./driver.js";
 export * from "./driver-router.js";

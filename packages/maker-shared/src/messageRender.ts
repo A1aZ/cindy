@@ -465,7 +465,16 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
       source === 'task'
       && Boolean(previousAllDone)
       && taskToolTargetsExistingTask(message, resultText, taskState);
-    const startsNewSession = !previous || (Boolean(previousAllDone) && !continuesCompletedTaskSession);
+    // 终态章是计划 session 的硬边界:成功收尾的 turn 常留着未勾完的步骤,只看
+    // allDone 会让下一 turn 的计划把上一轮吞成"续写"——历史里上一轮的计划卡
+    // 消失、面板复用旧 key。同 toolUseId 的活跃行被新事件清章(terminalPlanSnapshot
+    // 置 false)后不算边界,sealed-then-updated 的复亮行为不变。
+    const previousSealed =
+      Boolean(previous) && planRowSealOf(messages[previous!.lastIndex]).sealed;
+    const startsNewSession =
+      !previous
+      || previousSealed
+      || (Boolean(previousAllDone) && !continuesCompletedTaskSession);
     if (source === 'task' && startsNewSession) {
       taskState.clear();
     }
@@ -492,21 +501,21 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
   const out = new Map<number, MessageRenderTodoInsertion>();
   for (const session of sessions) {
     const first = messages[session.firstIndex];
+    const lastRow = messages[session.lastIndex];
+    const seal = planRowSealOf(lastRow);
     out.set(session.lastIndex, {
       key: `${keyPrefix}-${sourceClientId(first)}`,
       todos: session.todos,
-      createdAt: messages[session.lastIndex]?.createdAt,
-      updatedAtMs: messages[session.lastIndex]?.planUpdatedAtMs,
+      createdAt: lastRow?.createdAt,
+      updatedAtMs: lastRow?.planUpdatedAtMs,
       source: session.source,
-      ...(messages[session.lastIndex]?.terminalPlanSnapshot === true
+      ...(seal.sealed
         ? {
             sealed: true,
-            ...(typeof messages[session.lastIndex]?.terminalPlanAtMs === 'number'
-              ? { sealedAtMs: messages[session.lastIndex].terminalPlanAtMs }
-              : {}),
+            ...(typeof seal.sealedAtMs === 'number' ? { sealedAtMs: seal.sealedAtMs } : {}),
           }
         : {}),
-      ...(messages[session.lastIndex]?.turnCompleted === false ? { turnFailed: true } : {}),
+      ...(planRowTurnFailed(lastRow) ? { turnFailed: true } : {}),
     });
   }
   return out;
@@ -1774,6 +1783,37 @@ function toolInputOf(message: MessageRenderSourceMessageLike): unknown {
   if (message.toolInput !== undefined) return message.toolInput;
   const content = readRecord(message.content);
   return content?.input;
+}
+
+/**
+ * host 的终态章可能在顶层字段(desktop live / hydrate 路径),也可能只在持久化
+ * content 里(mobile 直接渲染 main 广播的行,updateDbMessageContent 把章写进
+ * content)。session 边界与 insertion 的 sealed 判定都必须两处都认。
+ */
+function planRowSealOf(
+  message: MessageRenderSourceMessageLike | undefined,
+): { sealed: boolean; sealedAtMs?: number } {
+  if (!message) return { sealed: false };
+  const content = readRecord(message.content);
+  const sealed =
+    message.terminalPlanSnapshot === true ||
+    (message.terminalPlanSnapshot === undefined && content?.terminalPlanSnapshot === true);
+  if (!sealed) return { sealed: false };
+  const sealedAtMs =
+    typeof message.terminalPlanAtMs === 'number'
+      ? message.terminalPlanAtMs
+      : typeof content?.terminalPlanAtMs === 'number'
+        ? content.terminalPlanAtMs
+        : undefined;
+  return { sealed: true, ...(sealedAtMs !== undefined ? { sealedAtMs } : {}) };
+}
+
+/** 同 planRowSealOf:失败印记(turnCompleted:false)也认 content 里的持久化位置。 */
+function planRowTurnFailed(message: MessageRenderSourceMessageLike | undefined): boolean {
+  if (!message) return false;
+  if (message.turnCompleted === false) return true;
+  const content = readRecord(message.content);
+  return message.turnCompleted === undefined && content?.turnCompleted === false;
 }
 
 function toolUseIdOf(message: MessageRenderSourceMessageLike): string | undefined {

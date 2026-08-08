@@ -7,6 +7,7 @@ import type {
   IOSSimulatorToolResponse,
 } from '../../shared/iosSimulatorIpc.js';
 import { IOS_SIMULATOR_RENDERER_TOOL_NAMES } from '../../shared/iosSimulatorIpc.js';
+import { activeOwnerScopeKey, isAppSessionBoundaryPending } from '../appSessionState.js';
 import {
   callIOSSimulatorHostTool,
   getIOSSimulatorLatestFrame,
@@ -18,8 +19,10 @@ import {
   updateIOSSimulatorViewerTouch,
 } from '../mcp-integrations/ios-simulator.js';
 import {
+  getIOSSimulatorRendererSessionAccess,
   hasIOSSimulatorRendererSessionAccess,
   requestIOSSimulatorRendererSessionAccess,
+  type IOSSimulatorRendererAccessSnapshot,
   type IOSSimulatorRendererWebContents,
 } from '../mcp-integrations/ios-simulator-renderer-access.js';
 import { createLogger } from '../logger.js';
@@ -55,6 +58,11 @@ const IOS_SIMULATOR_SAFE_IPC_MESSAGES: Record<IOSSimulatorIpcOperation, string> 
 
 export interface IOSSimulatorHandlerDeps {
   assertTrustedSender(event: unknown): void;
+  getOwnerScopeKey(): string;
+  isOwnerBoundaryPending(): boolean;
+  getSessionAccess(
+    target: IOSSimulatorRendererWebContents,
+  ): IOSSimulatorRendererAccessSnapshot | null;
   hasSessionAccess(target: IOSSimulatorRendererWebContents, sessionId: string): boolean;
   requestSessionAccess(
     target: IOSSimulatorRendererWebContents,
@@ -113,6 +121,9 @@ export interface IOSSimulatorHandlerDeps {
 const defaultDeps: IOSSimulatorHandlerDeps = {
   assertTrustedSender: (event) =>
     assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+  getOwnerScopeKey: activeOwnerScopeKey,
+  isOwnerBoundaryPending: isAppSessionBoundaryPending,
+  getSessionAccess: getIOSSimulatorRendererSessionAccess,
   hasSessionAccess: hasIOSSimulatorRendererSessionAccess,
   requestSessionAccess: requestIOSSimulatorRendererSessionAccess,
   getStatus: getIOSSimulatorSessionStatus,
@@ -152,12 +163,30 @@ async function callIOSSimulatorHost<T>(
   deps: IOSSimulatorHandlerDeps,
   operation: IOSSimulatorIpcOperation,
   call: () => T | Promise<T>,
+  assertStillAuthorized?: () => void,
 ): Promise<T> {
+  const ownerScopeKey = deps.getOwnerScopeKey();
+  const assertOwnerScopeCurrent = (): void => {
+    if (deps.isOwnerBoundaryPending() || deps.getOwnerScopeKey() !== ownerScopeKey) {
+      throwIpcError(
+        'PRECONDITION_FAILED',
+        'iOS Simulator ownership changed while handling the request. Retry the operation.',
+      );
+    }
+  };
+  assertOwnerScopeCurrent();
+  let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    return await call();
+    outcome = { ok: true, value: await call() };
   } catch (error) {
-    throwIOSSimulatorIpcError(deps, operation, error);
+    outcome = { ok: false, error };
   }
+  assertOwnerScopeCurrent();
+  assertStillAuthorized?.();
+  if (!outcome.ok) {
+    throwIOSSimulatorIpcError(deps, operation, outcome.error);
+  }
+  return outcome.value;
 }
 
 function readSessionId(payload: unknown): string {
@@ -221,19 +250,47 @@ export function registerIOSSimulatorHandlers(
     }
     return sender.id;
   };
+  const callIOSSimulatorHostForSession = <T>(
+    event: unknown,
+    sessionId: string,
+    operation: IOSSimulatorIpcOperation,
+    call: () => T | Promise<T>,
+  ): Promise<T> => {
+    const sender = readSenderWebContents(event);
+    const expectedAccess = resolved.getSessionAccess(sender);
+    if (!expectedAccess || expectedAccess.sessionId !== sessionId) {
+      throwIpcError('PERMISSION_DENIED', 'iOS Simulator access is limited to the current task');
+    }
+    return callIOSSimulatorHost(resolved, operation, call, () => {
+      const currentAccess = resolved.getSessionAccess(sender);
+      if (
+        !currentAccess ||
+        currentAccess.sessionId !== expectedAccess.sessionId ||
+        currentAccess.generation !== expectedAccess.generation
+      ) {
+        throwIpcError('PERMISSION_DENIED', 'iOS Simulator access grant expired');
+      }
+    });
+  };
   handle(MAKER_INVOKE.IOS_SIMULATOR_REQUEST_ACCESS, async (event, payload) => {
     const sessionId = readSessionId(payload);
     const sender = readSenderWebContents(event);
-    if (resolved.hasSessionAccess(sender, sessionId)) return { granted: true };
     const granted = await callIOSSimulatorHost(resolved, 'request-access', () =>
-      resolved.requestSessionAccess(sender, sessionId),
+      resolved.hasSessionAccess(sender, sessionId)
+        ? true
+        : resolved.requestSessionAccess(sender, sessionId),
     );
+    if (granted && !resolved.hasSessionAccess(sender, sessionId)) {
+      throwIpcError('PERMISSION_DENIED', 'iOS Simulator access grant expired');
+    }
     return { granted };
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_STATUS, async (event, payload) => {
     const sessionId = readSessionId(payload);
     assertSenderSession(event, sessionId);
-    return callIOSSimulatorHost(resolved, 'status', () => resolved.getStatus(sessionId));
+    return callIOSSimulatorHostForSession(event, sessionId, 'status', () =>
+      resolved.getStatus(sessionId),
+    );
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_CALL, async (event, payload) => {
     const record = readRecord(payload);
@@ -250,7 +307,7 @@ export function registerIOSSimulatorHandlers(
     if (!args || typeof args !== 'object' || Array.isArray(args)) {
       throwIpcError('INVALID_PARAMS', 'args must be an object');
     }
-    return callIOSSimulatorHost(resolved, 'call-tool', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'call-tool', () =>
       resolved.callTool(
         name as IOSSimulatorRendererToolName,
         args as Record<string, unknown>,
@@ -270,7 +327,7 @@ export function registerIOSSimulatorHandlers(
     if (decision !== 'allowed' && decision !== 'denied') {
       throwIpcError('INVALID_PARAMS', 'decision must be allowed or denied');
     }
-    return callIOSSimulatorHost(resolved, 'set-agent-control', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'set-agent-control', () =>
       resolved.setAgentControlGrant(sessionId, instanceId.trim(), decision),
     );
   });
@@ -305,7 +362,7 @@ export function registerIOSSimulatorHandlers(
     }
     const route = readViewerRoute(record);
     if (preferredEncoding === undefined && fallbackReason === undefined) {
-      return callIOSSimulatorHost(resolved, 'set-viewer-visibility', () =>
+      return callIOSSimulatorHostForSession(event, sessionId, 'set-viewer-visibility', () =>
         resolved.setViewerVisibility(
           sessionId,
           route,
@@ -318,7 +375,7 @@ export function registerIOSSimulatorHandlers(
       );
     }
     if (fallbackReason === undefined) {
-      return callIOSSimulatorHost(resolved, 'set-viewer-visibility', () =>
+      return callIOSSimulatorHostForSession(event, sessionId, 'set-viewer-visibility', () =>
         resolved.setViewerVisibility(
           sessionId,
           route,
@@ -330,7 +387,7 @@ export function registerIOSSimulatorHandlers(
         ),
       );
     }
-    return callIOSSimulatorHost(resolved, 'set-viewer-visibility', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'set-viewer-visibility', () =>
       resolved.setViewerVisibility(
         sessionId,
         route,
@@ -350,7 +407,7 @@ export function registerIOSSimulatorHandlers(
       throwIpcError('INVALID_PARAMS', 'paused (boolean) required');
     }
     const route = readViewerRoute(record);
-    return callIOSSimulatorHost(resolved, 'set-mutation-control', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'set-mutation-control', () =>
       resolved.setAgentMutationPaused(sessionId, route, record.paused as boolean),
     );
   });
@@ -359,7 +416,7 @@ export function registerIOSSimulatorHandlers(
     const sessionId = readSessionId(record);
     const route = readViewerRoute(record);
     const viewerWebContentsId = assertSenderSession(event, sessionId);
-    return callIOSSimulatorHost(resolved, 'latest-frame', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'latest-frame', () =>
       resolved.getLatestFrame(sessionId, route, viewerWebContentsId),
     );
   });
@@ -407,7 +464,7 @@ export function registerIOSSimulatorHandlers(
       jpegQuality: Number(candidate.jpegQuality),
       scalingPercent: Number(candidate.scalingPercent),
     };
-    return callIOSSimulatorHost(resolved, 'set-stream-profile', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'set-stream-profile', () =>
       resolved.setViewerStreamProfile(sessionId, route, streamProfile, nativeProfile),
     );
   });
@@ -442,7 +499,7 @@ export function registerIOSSimulatorHandlers(
       xRatio: record.xRatio,
       yRatio: record.yRatio,
     };
-    return callIOSSimulatorHost(resolved, 'live-touch', () =>
+    return callIOSSimulatorHostForSession(event, sessionId, 'live-touch', () =>
       resolved.updateViewerTouch(sessionId, route, viewerWebContentsId, touch),
     );
   });

@@ -74,5 +74,5 @@ export interface IOSSimulatorCommandRunner {
 
 /** Public module interface. Tooling details remain hidden behind one inspection call. */
 export interface IOSSimulatorRuntime {
-  inspect(): Promise<IOSSimulatorEnvironmentReport>;
+  inspect(signal?: AbortSignal): Promise<IOSSimulatorEnvironmentReport>;
 }

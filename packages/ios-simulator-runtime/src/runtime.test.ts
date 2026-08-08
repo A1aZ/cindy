@@ -194,11 +194,12 @@ describe("createIOSSimulatorRuntime", () => {
   it("uses one exact DEVELOPER_DIR without mutating xcode-select", async () => {
     const commandRunner = runnerForSimctl();
     const developerDir = "/Applications/Xcode-26.4.app/Contents/Developer";
+    const controller = new AbortController();
     const report = await createIOSSimulatorRuntime({
       platform: "darwin",
       commandRunner,
       developerDir,
-    }).inspect();
+    }).inspect(controller.signal);
 
     expect(report).toMatchObject({
       ready: true,
@@ -213,6 +214,7 @@ describe("createIOSSimulatorRuntime", () => {
       ["-version"],
       expect.objectContaining({
         env: expect.objectContaining({ DEVELOPER_DIR: developerDir }),
+        signal: controller.signal,
       }),
     );
     expect(commandRunner.run).toHaveBeenCalledWith(
@@ -220,8 +222,31 @@ describe("createIOSSimulatorRuntime", () => {
       ["simctl", "list", "-j"],
       expect.objectContaining({
         env: expect.objectContaining({ DEVELOPER_DIR: developerDir }),
+        signal: controller.signal,
       }),
     );
+  });
+
+  it("passes one inspection abort signal to every Apple tooling command", async () => {
+    const commandRunner = runnerForSimctl();
+    const controller = new AbortController();
+
+    await createIOSSimulatorRuntime({
+      platform: "darwin",
+      commandRunner,
+    }).inspect(controller.signal);
+
+    for (const [command, args] of [
+      ["/usr/bin/xcode-select", ["-p"]],
+      ["/usr/bin/xcodebuild", ["-version"]],
+      ["/usr/bin/xcrun", ["simctl", "list", "-j"]],
+    ] as const) {
+      expect(commandRunner.run).toHaveBeenCalledWith(
+        command,
+        args,
+        expect.objectContaining({ signal: controller.signal }),
+      );
+    }
   });
 
   it("rejects a relative DEVELOPER_DIR before running Apple tools", async () => {

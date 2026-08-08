@@ -17,6 +17,9 @@ describe('iOS Simulator IPC handlers', () => {
   function registerTrusted(harness: IpcHarness, deps: Partial<IOSSimulatorHandlerDeps> = {}): void {
     registerIOSSimulatorHandlers(harness, {
       assertTrustedSender: () => undefined,
+      getOwnerScopeKey: () => 'local:owner-a:1',
+      isOwnerBoundaryPending: () => false,
+      getSessionAccess: () => ({ sessionId: 'session-a', generation: 1 }),
       hasSessionAccess: (_target, sessionId) => sessionId === 'session-a',
       ...deps,
     });
@@ -66,9 +69,13 @@ describe('iOS Simulator IPC handlers', () => {
 
   it('returns the explicit native confirmation result for a manual access request', async () => {
     const harness = new IpcHarness();
-    const requestSessionAccess = vi.fn(async () => true);
+    let granted = false;
+    const requestSessionAccess = vi.fn(async () => {
+      granted = true;
+      return true;
+    });
     registerTrusted(harness, {
-      hasSessionAccess: () => false,
+      hasSessionAccess: () => granted,
       requestSessionAccess,
     });
 
@@ -139,6 +146,154 @@ describe('iOS Simulator IPC handlers', () => {
       }),
     ).resolves.toMatchObject({ sessionId: 'session-a' });
     expect(getStatus).toHaveBeenCalledWith('session-a');
+  });
+
+  it('rejects a request before calling the host while the owner boundary is pending', async () => {
+    const harness = new IpcHarness();
+    const getStatus = vi.fn();
+    const reportError = vi.fn();
+    registerTrusted(harness, {
+      isOwnerBoundaryPending: () => true,
+      getStatus,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(getStatus).not.toHaveBeenCalled();
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('discards a host result when the owner scope changes while awaiting it', async () => {
+    const harness = new IpcHarness();
+    let ownerScopeKey = 'local:owner-a:1';
+    const reportError = vi.fn();
+    const getStatus = vi.fn(async () => {
+      ownerScopeKey = 'local:owner-b:2';
+      return {
+        ok: false as const,
+        sessionId: 'session-a',
+        errorCode: 'UNSUPPORTED_SESSION_KIND' as const,
+        message: 'stale owner result',
+      };
+    });
+    registerTrusted(harness, {
+      getOwnerScopeKey: () => ownerScopeKey,
+      getStatus,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('discards a frame when an owner boundary starts while awaiting it', async () => {
+    const harness = new IpcHarness();
+    let boundaryPending = false;
+    const reportError = vi.fn();
+    const getLatestFrame = vi.fn(async () => {
+      boundaryPending = true;
+      return { ok: true as const, data: { stream: null } };
+    });
+    registerTrusted(harness, {
+      isOwnerBoundaryPending: () => boundaryPending,
+      getLatestFrame,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_LATEST_FRAME, {
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        generation: 1,
+        leaseId: 'lease-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('does not project an old host error after the owner scope changes', async () => {
+    const harness = new IpcHarness();
+    let ownerScopeKey = 'local:owner-a:1';
+    const reportError = vi.fn();
+    const getStatus = vi.fn(async () => {
+      ownerScopeKey = 'local:owner-b:2';
+      throw new IOSSimulatorInstanceError('DEVICE_BUSY', 'old owner registry path', true);
+    });
+    registerTrusted(harness, {
+      getOwnerScopeKey: () => ownerScopeKey,
+      getStatus,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('discards a host result when the renderer session grant is revoked while awaiting it', async () => {
+    const harness = new IpcHarness();
+    let hasAccess = true;
+    const reportError = vi.fn();
+    const getStatus = vi.fn(async () => {
+      hasAccess = false;
+      return {
+        ok: false as const,
+        sessionId: 'session-a',
+        errorCode: 'UNSUPPORTED_SESSION_KIND' as const,
+        message: 'stale session result',
+      };
+    });
+    registerTrusted(harness, {
+      hasSessionAccess: () => hasAccess,
+      getSessionAccess: () => (hasAccess ? { sessionId: 'session-a', generation: 1 } : null),
+      getStatus,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(reportError).not.toHaveBeenCalled();
+  });
+
+  it('discards a host result after a same-session grant is revoked and reissued', async () => {
+    const harness = new IpcHarness();
+    let grantGeneration = 1;
+    const reportError = vi.fn();
+    const getStatus = vi.fn(async () => {
+      grantGeneration = 2;
+      return {
+        ok: false as const,
+        sessionId: 'session-a',
+        errorCode: 'UNSUPPORTED_SESSION_KIND' as const,
+        message: 'stale grant result',
+      };
+    });
+    registerTrusted(harness, {
+      getSessionAccess: () => ({ sessionId: 'session-a', generation: grantGeneration }),
+      getStatus,
+      reportError,
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_STATUS, {
+        sessionId: 'session-a',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(reportError).not.toHaveBeenCalled();
   });
 
   it('preserves safe Simulator business codes without exposing status internals', async () => {

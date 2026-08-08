@@ -1492,6 +1492,41 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it.each(['abortOperationsForExit', 'dispose'] as const)(
+    'aborts an active runtime inspection during %s',
+    async (shutdownMode) => {
+      let inspectSignal: AbortSignal | undefined;
+      const inspect = vi.fn(
+        (signal?: AbortSignal) =>
+          new Promise<IOSSimulatorEnvironmentReport>((_resolve, reject) => {
+            inspectSignal = signal;
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      );
+      const host = createIOSSimulatorHost({
+        runtime: { inspect },
+        getSession: vi.fn(async (id) => localSession(id)),
+      });
+
+      const inspection = host.getPluginStatus('runtime-inspection-exit');
+      await vi.waitFor(() => expect(inspectSignal).toBeDefined());
+      let disposePromise: Promise<void>;
+      if (shutdownMode === 'abortOperationsForExit') {
+        host.abortOperationsForExit();
+        expect(inspectSignal?.aborted).toBe(true);
+        disposePromise = host.dispose();
+      } else {
+        disposePromise = host.dispose();
+        expect(inspectSignal?.aborted).toBe(true);
+      }
+      await expect(inspection).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'IOS_SIMULATOR_HOST_ERROR',
+      });
+      await disposePromise;
+    },
+  );
+
   it.each(['Booted', 'Booting'] as const)(
     'keeps archived ownership and scheduler capacity when %s shutdown fails',
     async (deviceState) => {

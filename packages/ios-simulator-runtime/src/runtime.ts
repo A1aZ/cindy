@@ -62,7 +62,9 @@ export function createIOSSimulatorRuntime(
     options.developerDir ?? process.env.DEVELOPER_DIR?.trim() ?? null;
 
   return {
-    async inspect(): Promise<IOSSimulatorEnvironmentReport> {
+    async inspect(
+      signal?: AbortSignal,
+    ): Promise<IOSSimulatorEnvironmentReport> {
       if (platform !== "darwin") {
         return unavailableReport(
           platform,
@@ -83,9 +85,23 @@ export function createIOSSimulatorRuntime(
           ["Select an absolute Xcode.app/Contents/Developer directory."],
         );
       }
+      const commandOptions =
+        requestedDeveloperDir || signal
+          ? {
+              ...(requestedDeveloperDir
+                ? {
+                    env: {
+                      ...process.env,
+                      DEVELOPER_DIR: requestedDeveloperDir,
+                    },
+                  }
+                : {}),
+              ...(signal ? { signal } : {}),
+            }
+          : undefined;
       let xcodeSelectPath = requestedDeveloperDir;
       if (xcodeSelectPath === null) {
-        const selected = await runner.run(XCODE_SELECT, ["-p"]);
+        const selected = await runner.run(XCODE_SELECT, ["-p"], commandOptions);
         if (selected.exitCode !== 0 || !selected.stdout.trim()) {
           return unavailableReport(
             platform,
@@ -99,14 +115,6 @@ export function createIOSSimulatorRuntime(
         }
         xcodeSelectPath = selected.stdout.trim();
       }
-      const commandOptions = requestedDeveloperDir
-        ? {
-            env: {
-              ...process.env,
-              DEVELOPER_DIR: requestedDeveloperDir,
-            },
-          }
-        : undefined;
 
       const version = await runner.run(
         XCODEBUILD,

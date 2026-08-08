@@ -953,6 +953,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   const buildDiagnosticExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const buildDiagnosticReaders = new Map<string, number>();
   const buildDiagnosticReadExitController = new AbortController();
+  const runtimeInspectionExitController = new AbortController();
   const activeBuildDiagnosticReads = new Set<Promise<unknown>>();
   const pendingBuildDiagnosticRemoval = new Map<string, BuildDiagnosticRecord>();
   let buildResultBundlesReconciled = false;
@@ -1025,6 +1026,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   let pendingCreateReconcilePromise: Promise<unknown> | null = null;
   let startupPendingCreateRecoveryAttempted = false;
   let disposePromise: Promise<void> | null = null;
+  const inspectRuntime = (): Promise<IOSSimulatorEnvironmentReport> =>
+    runtime.inspect(runtimeInspectionExitController.signal);
   const canReconcilePendingCreates = options.canReconcilePendingCreates ?? (() => true);
 
   function abortPendingCreateReconciliation(): Promise<void> {
@@ -2157,7 +2160,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return pluginEnvironmentCache.value;
     }
     if (pluginEnvironmentInFlight) return pluginEnvironmentInFlight;
-    pluginEnvironmentInFlight = runtime.inspect().then((environment) => {
+    pluginEnvironmentInFlight = inspectRuntime().then((environment) => {
       const value = projectPluginEnvironment(environment);
       if (!disposePromise) {
         pluginEnvironmentCache = { value, expiresAt: Date.now() + PLUGIN_ENVIRONMENT_CACHE_MS };
@@ -2246,7 +2249,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (disposePromise) return hostDisposedStatus(resolved.sessionId);
     await reconcileLiveDevices(actor.list(resolved.sessionId));
     if (disposePromise) return hostDisposedStatus(resolved.sessionId);
-    const environment = await runtime.inspect();
+    const environment = await inspectRuntime();
     if (disposePromise) return hostDisposedStatus(resolved.sessionId);
     const instances = actor
       .list(resolved.sessionId)
@@ -2436,7 +2439,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       if (disposePromise) return;
       await reconcileOrphanedBuildResultBundles();
       if (disposePromise) return;
-      const environment = await runtime.inspect();
+      const environment = await inspectRuntime();
       if (disposePromise) return;
       if (!environment?.ready) return;
       const devices = new Map(
@@ -2621,7 +2624,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     sessionId: string,
     environment?: IOSSimulatorEnvironmentReport,
   ): Promise<IOSSimulatorToolAvailabilityReport> {
-    const inspected = environment ?? (await runtime.inspect());
+    const inspected = environment ?? (await inspectRuntime());
     const instances = actor.list(sessionId);
     const running = instances
       .map((instance) => ({ instance, driver: getDriverManager().get(instance.instanceId) }))
@@ -3722,7 +3725,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         if (!current) return viewerRouteRefreshResult(currentOwnedInstance(instance));
         instance = current;
         if (!running) {
-          const environment = await runtime.inspect();
+          const environment = await inspectRuntime();
           assertCurrentViewerVisibilityIntent(
             instance.instanceId,
             viewerWebContentsId,
@@ -4219,7 +4222,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const route = readMutationRoute(sessionId, args);
           requireControlGrant(actor.getOwned(sessionId, route.instanceId), context);
           const activationEpoch = captureInstanceActivation(route.instanceId);
-          const environment = await runtime.inspect();
+          const environment = await inspectRuntime();
           assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
           if (!environment.ready) {
             const safeEnvironment = publicEnvironment(environment);
@@ -5788,7 +5791,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           };
         }
 
-        const environment = await runtime.inspect();
+        const environment = await inspectRuntime();
         assertHostActive();
         if (name === 'check_environment') {
           return { ok: true, data: publicEnvironment(environment) };
@@ -5971,6 +5974,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     },
     abortOperationsForExit() {
       void abortPendingCreateReconciliation();
+      runtimeInspectionExitController.abort();
       buildDiagnosticReadExitController.abort();
       try {
         actor.abortOperationsForExit();
@@ -6007,6 +6011,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       if (disposePromise) return disposePromise;
       disposePromise = (async () => {
         const pendingCreateReconciliation = abortPendingCreateReconciliation();
+        runtimeInspectionExitController.abort();
         buildDiagnosticReadExitController.abort();
         const buildDiagnosticReads = [...activeBuildDiagnosticReads];
         actor.abortOperationsForExit();

@@ -2279,15 +2279,17 @@ describe('IOSSimulatorTabBody', () => {
       expect(screen.getAllByText('iPhone A').length).toBeGreaterThanOrEqual(2);
       expect(screen.getAllByText('iPhone B').length).toBeGreaterThanOrEqual(1);
     });
-    expect(api.setViewerVisibility).toHaveBeenCalledWith(
-      expect.objectContaining({ instanceId: 'instance-b', visible: true }),
-    );
-    expect(api.setStreamProfile).toHaveBeenCalledWith(
-      expect.objectContaining({
-        instanceId: 'instance-b',
-        profile: { framesPerSecond: 5, jpegQuality: 25, scalingPercent: 50 },
-      }),
-    );
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ instanceId: 'instance-b', visible: true }),
+      );
+      expect(api.setStreamProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceId: 'instance-b',
+          profile: { framesPerSecond: 5, jpegQuality: 25, scalingPercent: 50 },
+        }),
+      );
+    });
 
     fireEvent.click(
       screen.getByRole('button', {
@@ -2358,6 +2360,52 @@ describe('IOSSimulatorTabBody', () => {
         },
       });
     });
+  });
+
+  it('does not apply a background stream profile after the grid is hidden', async () => {
+    const api = installStatus(multiReadyStatus());
+    let resolvePendingVisibility!: (result: IOSSimulatorToolResponse) => void;
+    const pendingVisibility = new Promise<IOSSimulatorToolResponse>((resolve) => {
+      resolvePendingVisibility = resolve;
+    });
+    api.setViewerVisibility.mockImplementation(async (request) => {
+      if (request.instanceId === 'instance-b' && request.visible) return pendingVisibility;
+      return { ok: true, data: { stream: null } };
+    });
+
+    const { rerender } = render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ instanceId: 'instance-b', visible: true }),
+      );
+    });
+
+    rerender(
+      <IOSSimulatorTabBody
+        state={{ instanceId: 'instance-a' }}
+        ctx={ctx}
+        active
+        shellVisible={false}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(api.setViewerVisibility).toHaveBeenCalledWith(
+        expect.objectContaining({ instanceId: 'instance-b', visible: false }),
+      );
+    });
+
+    await act(async () => {
+      resolvePendingVisibility({ ok: true, data: { stream: null } });
+      await pendingVisibility;
+    });
+
+    expect(api.setStreamProfile).not.toHaveBeenCalledWith(
+      expect.objectContaining({ instanceId: 'instance-b' }),
+    );
   });
 
   it('blocks grid gestures while an Agent owns or queues device input', async () => {

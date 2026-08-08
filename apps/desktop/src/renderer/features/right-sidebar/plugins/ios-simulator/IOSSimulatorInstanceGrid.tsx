@@ -319,6 +319,10 @@ export function IOSSimulatorInstanceGrid({
   useEffect(() => {
     let cancelled = false;
     let polling = false;
+    // Keep the preload bridge used by this effect stable through cleanup. The
+    // global bridge can disappear while renderer teardown is still draining
+    // the asynchronous visibility update.
+    const simulatorApi = window.electronAPI.maker.iosSimulator;
     const requestRouteRefresh = () => {
       const refreshState = routeRefreshStateRef.current;
       if (
@@ -436,16 +440,15 @@ export function IOSSimulatorInstanceGrid({
             visible,
             preferredEncoding: 'jpeg' as const,
           };
-          const result = await window.electronAPI.maker.iosSimulator
-            .setViewerVisibility(route)
-            .catch(() => null);
+          const result = await simulatorApi.setViewerVisibility(route).catch(() => null);
+          if (cancelled) return;
           if (visible && result) accept(instance, result);
           if (
             visible &&
             !routeIsInvalidated(instance) &&
             instance.instanceId !== selectedInstanceId
           ) {
-            await window.electronAPI.maker.iosSimulator
+            await simulatorApi
               .setStreamProfile({ sessionId, ...routeFor(instance), profile: BACKGROUND_PROFILE })
               .catch(() => undefined);
           }
@@ -460,7 +463,7 @@ export function IOSSimulatorInstanceGrid({
         await Promise.all(
           readyInstances.map(async (instance) => {
             if (routeIsInvalidated(instance)) return;
-            const result = await window.electronAPI.maker.iosSimulator.latestFrame({
+            const result = await simulatorApi.latestFrame({
               sessionId,
               ...routeFor(instance),
             });

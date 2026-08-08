@@ -2666,6 +2666,22 @@ describe('remoteSessionStore', () => {
     expect(remoteSessionStore.getInputProjection('s1').pendingQueue[0]?.clientId).toBe('q-1');
   });
 
+  it('clears a continuation owner at a terminal boundary without a projection clear push', () => {
+    remoteSessionStore.setInputProjection('s1', {
+      ...projection('s1'),
+      continuationTurnClientId: 'resume-1',
+    });
+    remoteSessionStore.setSessionRunning('s1', true);
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:status-changed', {
+      sessionId: 's1',
+      status: 'closed',
+    });
+
+    expect(remoteSessionStore.getInputProjection('s1').continuationTurnClientId).toBeNull();
+    expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+  });
+
   it('soft-invalidates an offline device without deleting sessions or messages', () => {
     const meta = session('s1', {
       updatedAt: '2026-01-01T00:00:01.000Z',

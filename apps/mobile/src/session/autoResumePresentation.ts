@@ -42,7 +42,7 @@ export function summarizeMobileInterruption(detail?: string): string | undefined
     .replace(/\s+/g, ' ')
     .trim();
   if (!compact) return undefined;
-  const firstSentence = compact.split(/(?<=[.。!?！？])\s/)[0] ?? compact;
+  const firstSentence = compact.match(/^.*?[.。!?！？](?=\s|$)/)?.[0] ?? compact;
   return firstSentence.length > 72 ? `${firstSentence.slice(0, 71)}…` : firstSentence;
 }
 

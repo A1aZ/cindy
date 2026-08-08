@@ -491,8 +491,8 @@ export function IOSSimulatorInstanceGrid({
       className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3"
     >
       <div className="mb-2 flex items-center justify-between gap-2">
-        <h3 className="text-[12px] font-medium">{title}</h3>
-        <span className="text-[10px] text-[var(--text-secondary)]">{countLabel}</span>
+        <h3 className="text-12 font-medium">{title}</h3>
+        <span className="text-10 text-[var(--text-secondary)]">{countLabel}</span>
       </div>
       <div className="grid grid-cols-2 gap-2">
         {readyInstances.map((instance) => {
@@ -533,7 +533,7 @@ export function IOSSimulatorInstanceGrid({
                       aria-hidden="true"
                     />
                   )}
-                  <span className="absolute inset-x-1 bottom-1 truncate rounded-lg bg-[var(--surface-chip)] px-1.5 py-1 text-[10px] text-[var(--text-primary)]">
+                  <span className="absolute inset-x-1 bottom-1 truncate rounded-lg bg-[var(--surface-chip)] px-1.5 py-1 text-10 text-[var(--text-primary)]">
                     {instance.simulatorName}
                   </span>
                 </div>
@@ -566,7 +566,7 @@ export function IOSSimulatorInstanceGrid({
                     disabled={busy}
                     aria-label={`${instance.simulatorName} ${t('rightSidebar.iosSimulator.textInputLabel')}`}
                     placeholder={t('rightSidebar.iosSimulator.textInputPlaceholder')}
-                    className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface)] pl-7 pr-2 text-[10px] text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
+                    className="h-7 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface)] pl-7 pr-2 text-10 text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
                   />
                 </div>
                 <button
@@ -623,14 +623,14 @@ export function IOSSimulatorInstanceGrid({
                 </button>
               </div>
               {agentBusy && (
-                <div className="border-t border-[var(--border-default)] px-2 py-1 text-[10px] text-[var(--warning-accent)]">
+                <div className="border-t border-[var(--border-default)] px-2 py-1 text-10 text-[var(--warning-accent)]">
                   {t('rightSidebar.iosSimulator.agentBusyTitle')}
                 </div>
               )}
               {error && (
                 <div
                   role="alert"
-                  className="border-t border-[var(--border-default)] px-2 py-1 text-[10px] text-[var(--text-secondary)]"
+                  className="border-t border-[var(--border-default)] px-2 py-1 text-10 text-[var(--text-secondary)]"
                 >
                   {error}
                 </div>

@@ -1557,9 +1557,9 @@ export function IOSSimulatorTabBody({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <Smartphone size={16} className="shrink-0" aria-hidden="true" />
-              <h2 className="text-[14px] font-medium">{t('rightSidebar.iosSimulator.title')}</h2>
+              <h2 className="text-14 font-medium">{t('rightSidebar.iosSimulator.title')}</h2>
             </div>
-            <p className="mt-1 text-[12px] leading-relaxed text-[var(--text-secondary)]">
+            <p className="mt-1 text-12 leading-relaxed text-[var(--text-secondary)]">
               {t('rightSidebar.iosSimulator.description')}
             </p>
           </div>
@@ -1583,10 +1583,10 @@ export function IOSSimulatorTabBody({
               aria-hidden="true"
             />
             <div className="min-w-0">
-              <div className="text-[12px] font-medium">
+              <div className="text-12 font-medium">
                 {t('rightSidebar.iosSimulator.accessRequiredTitle')}
               </div>
-              <div className="mt-1 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+              <div className="mt-1 text-11 leading-relaxed text-[var(--text-secondary)]">
                 {t('rightSidebar.iosSimulator.accessRequiredDescription')}
               </div>
               <div className="mt-3">
@@ -1629,7 +1629,7 @@ export function IOSSimulatorTabBody({
         {actionError && (
           <div
             role="alert"
-            className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-[12px] text-[var(--text-primary)]"
+            className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-12 text-[var(--text-primary)]"
           >
             {actionError}
           </div>
@@ -1639,7 +1639,7 @@ export function IOSSimulatorTabBody({
           <div
             role="status"
             aria-live="polite"
-            className="flex items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-[12px] text-[var(--text-secondary)]"
+            className="flex items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3 text-12 text-[var(--text-secondary)]"
           >
             <span className="inline-flex animate-spin" aria-hidden="true">
               <Loader2 size={14} />
@@ -1662,16 +1662,14 @@ export function IOSSimulatorTabBody({
 
             {!environment.ready && setupKeys.length > 0 && (
               <section className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3">
-                <h3 className="text-[12px] font-medium">
-                  {t('rightSidebar.iosSimulator.setupTitle')}
-                </h3>
+                <h3 className="text-12 font-medium">{t('rightSidebar.iosSimulator.setupTitle')}</h3>
                 <ol className="mt-2 space-y-2">
                   {setupKeys.map((key, index) => (
                     <li
                       key={key}
-                      className="flex gap-2 text-[12px] leading-relaxed text-[var(--text-secondary)]"
+                      className="flex gap-2 text-12 leading-relaxed text-[var(--text-secondary)]"
                     >
-                      <span className="flex h-5 w-5 shrink-0 select-none items-center justify-center rounded-full bg-[var(--surface-hover)] text-[10px] text-[var(--text-primary)]">
+                      <span className="flex h-5 w-5 shrink-0 select-none items-center justify-center rounded-full bg-[var(--surface-hover)] text-10 text-[var(--text-primary)]">
                         {index + 1}
                       </span>
                       <span>{t(key)}</span>
@@ -1683,7 +1681,7 @@ export function IOSSimulatorTabBody({
 
             {instances.length > 1 && (
               <section>
-                <h3 className="mb-2 text-[12px] font-medium">
+                <h3 className="mb-2 text-12 font-medium">
                   {t('rightSidebar.iosSimulator.instancesTitle')}
                 </h3>
                 <div className="flex flex-wrap gap-2">
@@ -1696,7 +1694,7 @@ export function IOSSimulatorTabBody({
                         aria-pressed={selected}
                         onClick={() => ctx.patchState({ instanceId: instance.instanceId })}
                         className={cn(
-                          'inline-flex h-8 max-w-full select-none items-center gap-1.5 rounded-full border px-3 text-[11px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
+                          'inline-flex h-8 max-w-full select-none items-center gap-1.5 rounded-full border px-3 text-11 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]',
                           selected
                             ? 'border-transparent bg-[var(--text-primary)] text-[var(--surface)]'
                             : 'border-[var(--border-default)] bg-[var(--surface-elevated)] text-[var(--text-primary)] hover:bg-[var(--surface-hover)]',
@@ -1732,14 +1730,14 @@ export function IOSSimulatorTabBody({
               <section className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <h3 className="truncate text-[12px] font-medium">
+                    <h3 className="truncate text-12 font-medium">
                       {attachedInstance.simulatorName}
                     </h3>
-                    <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
+                    <p className="mt-1 text-11 text-[var(--text-secondary)]">
                       {t('rightSidebar.iosSimulator.attachedDescription')}
                     </p>
                   </div>
-                  <span className="shrink-0 select-none rounded-full bg-[var(--surface-chip)] px-2 py-1 text-[10px] text-[var(--text-secondary)]">
+                  <span className="shrink-0 select-none rounded-full bg-[var(--surface-chip)] px-2 py-1 text-10 text-[var(--text-secondary)]">
                     {t(`rightSidebar.iosSimulator.lifecycle.${attachedInstance.lifecycleState}`)}
                   </span>
                 </div>
@@ -1748,14 +1746,14 @@ export function IOSSimulatorTabBody({
                   (agentBusy || mutation?.agentPaused) && (
                     <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-[var(--border-default)] bg-[var(--surface)] p-3">
                       <div className="min-w-0">
-                        <div className="text-[11px] font-medium text-[var(--warning-accent)]">
+                        <div className="text-11 font-medium text-[var(--warning-accent)]">
                           {t(
                             agentBusy
                               ? 'rightSidebar.iosSimulator.agentBusyTitle'
                               : 'rightSidebar.iosSimulator.manualControlTitle',
                           )}
                         </div>
-                        <div className="mt-0.5 text-pretty text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                        <div className="mt-0.5 text-pretty text-10 leading-relaxed text-[var(--text-secondary)]">
                           {t(
                             mutation?.takeoverPending
                               ? 'rightSidebar.iosSimulator.takeoverPendingDescription'
@@ -1780,7 +1778,7 @@ export function IOSSimulatorTabBody({
 
                 {attachedInstance.lifecycleState === 'ready' && (
                   <>
-                    <div className="mt-3 flex items-center justify-between gap-2 text-[11px]">
+                    <div className="mt-3 flex items-center justify-between gap-2 text-11">
                       <span className="text-[var(--text-secondary)]">
                         {t('rightSidebar.iosSimulator.streamProfile')}
                       </span>
@@ -1791,7 +1789,7 @@ export function IOSSimulatorTabBody({
                           void applyStreamProfile(event.target.value as StreamProfileName)
                         }
                         aria-label={t('rightSidebar.iosSimulator.streamProfile')}
-                        className="h-8 rounded-full border border-[var(--border-default)] bg-[var(--surface)] px-3 text-[11px] text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                        className="h-8 rounded-full border border-[var(--border-default)] bg-[var(--surface)] px-3 text-11 text-[var(--text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                       >
                         <option value="low">
                           {t('rightSidebar.iosSimulator.streamProfiles.low')}
@@ -1820,7 +1818,7 @@ export function IOSSimulatorTabBody({
                     <div
                       role="status"
                       aria-live="polite"
-                      className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-[var(--text-secondary)] select-none"
+                      className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-10 text-[var(--text-secondary)] select-none"
                     >
                       <span>{streamRouteLabel}</span>
                       <span aria-hidden="true">·</span>
@@ -1891,14 +1889,14 @@ export function IOSSimulatorTabBody({
                           onLostPointerCapture={onViewerLostPointerCapture}
                         />
                         {!presentationMatchesRoute && (
-                          <div className="flex flex-col items-center gap-2 p-8 text-center text-[11px] text-[var(--text-secondary)]">
+                          <div className="flex flex-col items-center gap-2 p-8 text-center text-11 text-[var(--text-secondary)]">
                             <Smartphone size={22} aria-hidden="true" />
                             <span className="text-pretty">
                               {t('rightSidebar.iosSimulator.waitingForFrame')}
                             </span>
                           </div>
                         )}
-                        <span className="absolute right-2 top-2 rounded-full bg-[var(--surface-chip)] px-2 py-1 text-[10px] tabular-nums text-[var(--text-secondary)]">
+                        <span className="absolute right-2 top-2 rounded-full bg-[var(--surface-chip)] px-2 py-1 text-10 tabular-nums text-[var(--text-secondary)]">
                           {streamFps.toFixed(1)} FPS
                           {viewport ? ` · ${viewport.width}×${viewport.height}` : ''} ·{' '}
                           {t(`rightSidebar.iosSimulator.stream.${streamState}`)}
@@ -1929,7 +1927,7 @@ export function IOSSimulatorTabBody({
                           disabled={!viewerInteractive}
                           aria-label={t('rightSidebar.iosSimulator.textInputLabel')}
                           placeholder={t('rightSidebar.iosSimulator.textInputPlaceholder')}
-                          className="h-8 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface)] pl-8 pr-3 text-[11px] text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
+                          className="h-8 w-full rounded-full border border-[var(--border-default)] bg-[var(--surface)] pl-8 pr-3 text-11 text-[var(--text-primary)] placeholder:text-[var(--text-placeholder)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:opacity-50"
                         />
                       </div>
                       <ActionButton
@@ -1968,7 +1966,7 @@ export function IOSSimulatorTabBody({
                         onClick={() => void runInteraction('unlock_screen', {})}
                       />
                     </div>
-                    <p className="mt-2 text-pretty text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                    <p className="mt-2 text-pretty text-10 leading-relaxed text-[var(--text-secondary)]">
                       {t('rightSidebar.iosSimulator.gestureHint')}
                     </p>
                   </>
@@ -1986,10 +1984,10 @@ export function IOSSimulatorTabBody({
                       aria-hidden="true"
                     />
                     <div className="min-w-0">
-                      <div className="text-[12px] font-medium">
+                      <div className="text-12 font-medium">
                         {t('rightSidebar.iosSimulator.viewerStoppedTitle')}
                       </div>
-                      <div className="mt-1 text-pretty text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                      <div className="mt-1 text-pretty text-11 leading-relaxed text-[var(--text-secondary)]">
                         {t('rightSidebar.iosSimulator.viewerStoppedDescription')}
                       </div>
                     </div>
@@ -2025,10 +2023,10 @@ export function IOSSimulatorTabBody({
                 {attachedInstance.lifecycleState === 'ready' && (
                   <div className="mt-3 flex items-center justify-between gap-3 border-t border-[var(--border-default)] pt-3">
                     <div className="min-w-0">
-                      <div className="text-[11px] font-medium">
+                      <div className="text-11 font-medium">
                         {t('rightSidebar.iosSimulator.agentControlTitle')}
                       </div>
-                      <div className="mt-0.5 text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                      <div className="mt-0.5 text-10 leading-relaxed text-[var(--text-secondary)]">
                         {t('rightSidebar.iosSimulator.agentControlDescription')}
                       </div>
                     </div>
@@ -2058,7 +2056,7 @@ export function IOSSimulatorTabBody({
                   aria-hidden="true"
                 />
                 <div className="min-w-0">
-                  <div className="text-[12px] font-medium text-[var(--text-primary)]">
+                  <div className="text-12 font-medium text-[var(--text-primary)]">
                     {t(
                       globalHardLimitReached
                         ? 'rightSidebar.iosSimulator.resourceHardLimitTitle'
@@ -2069,7 +2067,7 @@ export function IOSSimulatorTabBody({
                       },
                     )}
                   </div>
-                  <div className="mt-1 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                  <div className="mt-1 text-11 leading-relaxed text-[var(--text-secondary)]">
                     {t(
                       globalHardLimitReached
                         ? 'rightSidebar.iosSimulator.resourceHardLimitDescription'
@@ -2081,15 +2079,15 @@ export function IOSSimulatorTabBody({
             )}
 
             <section>
-              <h3 className="mb-2 text-[12px] font-medium">
+              <h3 className="mb-2 text-12 font-medium">
                 {t('rightSidebar.iosSimulator.devicesTitle')}
               </h3>
               {environment.devices.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-[12px] text-[var(--text-secondary)]">
+                <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-12 text-[var(--text-secondary)]">
                   {t('rightSidebar.iosSimulator.noDevices')}
                 </div>
               ) : availableDevices.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-[12px] text-[var(--text-secondary)]">
+                <div className="rounded-xl border border-dashed border-[var(--border-default)] p-4 text-center text-12 text-[var(--text-secondary)]">
                   {t('rightSidebar.iosSimulator.noAvailableDevices')}
                 </div>
               ) : (
@@ -2126,16 +2124,16 @@ export function IOSSimulatorTabBody({
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
-                            <div className="truncate text-[12px] font-medium">{device.name}</div>
-                            <div className="mt-1 truncate text-[11px] text-[var(--text-secondary)]">
+                            <div className="truncate text-12 font-medium">{device.name}</div>
+                            <div className="mt-1 truncate text-11 text-[var(--text-secondary)]">
                               {device.runtimeName} · {device.state}
                             </div>
-                            <div className="mt-1 truncate font-mono text-[10px] text-[var(--text-tertiary)]">
+                            <div className="mt-1 truncate font-mono text-10 text-[var(--text-tertiary)]">
                               {device.udid}
                             </div>
                           </div>
                           {isAttached ? (
-                            <span className="inline-flex shrink-0 select-none items-center gap-1 rounded-full bg-[var(--surface-chip)] px-2 py-1 text-[10px] text-[var(--text-secondary)]">
+                            <span className="inline-flex shrink-0 select-none items-center gap-1 rounded-full bg-[var(--surface-chip)] px-2 py-1 text-10 text-[var(--text-secondary)]">
                               <Link2 size={11} aria-hidden="true" />
                               {t('rightSidebar.iosSimulator.attached')}
                             </span>
@@ -2163,7 +2161,7 @@ export function IOSSimulatorTabBody({
                         {connectionBlockReason && (
                           <div
                             id={connectionBlockDescriptionId}
-                            className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[var(--text-secondary)]"
+                            className="mt-2 flex items-start gap-1.5 text-11 leading-relaxed text-[var(--text-secondary)]"
                           >
                             <AlertTriangle
                               size={12}
@@ -2188,7 +2186,7 @@ export function IOSSimulatorTabBody({
                     aria-expanded={unavailableDevicesExpanded}
                     aria-controls={`${ctx.tabId}-ios-simulator-unavailable-devices`}
                     onClick={() => setUnavailableDevicesExpanded((expanded) => !expanded)}
-                    className="flex w-full select-none items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 py-2.5 text-left text-[12px] font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
+                    className="flex w-full select-none items-center gap-2 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 py-2.5 text-left text-12 font-medium text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)]"
                   >
                     <AlertTriangle
                       size={14}
@@ -2198,7 +2196,7 @@ export function IOSSimulatorTabBody({
                     <span className="min-w-0 flex-1">
                       {t('rightSidebar.iosSimulator.unavailableDevicesTitle')}
                     </span>
-                    <span className="rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-[10px] font-normal text-[var(--text-secondary)]">
+                    <span className="rounded-full bg-[var(--surface-chip)] px-2 py-0.5 text-10 font-normal text-[var(--text-secondary)]">
                       {t('rightSidebar.iosSimulator.unavailableDevicesCount', {
                         count: unavailableDevices.length,
                       })}
@@ -2215,7 +2213,7 @@ export function IOSSimulatorTabBody({
                 </h3>
                 {unavailableDevicesExpanded && (
                   <div id={`${ctx.tabId}-ios-simulator-unavailable-devices`} className="mt-2">
-                    <p className="mb-2 text-[11px] leading-relaxed text-[var(--text-secondary)]">
+                    <p className="mb-2 text-11 leading-relaxed text-[var(--text-secondary)]">
                       {t('rightSidebar.iosSimulator.unavailableDevicesDescription')}
                     </p>
                     <ul className="space-y-2">
@@ -2226,14 +2224,14 @@ export function IOSSimulatorTabBody({
                             key={device.udid}
                             className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3"
                           >
-                            <div className="truncate text-[12px] font-medium">{device.name}</div>
-                            <div className="mt-1 truncate text-[11px] text-[var(--text-secondary)]">
+                            <div className="truncate text-12 font-medium">{device.name}</div>
+                            <div className="mt-1 truncate text-11 text-[var(--text-secondary)]">
                               {device.runtimeName} · {device.state}
                             </div>
-                            <div className="mt-1 truncate font-mono text-[10px] text-[var(--text-tertiary)]">
+                            <div className="mt-1 truncate font-mono text-10 text-[var(--text-tertiary)]">
                               {device.udid}
                             </div>
-                            <div className="mt-2 flex items-start gap-1.5 text-[11px] leading-relaxed text-[var(--text-primary)]">
+                            <div className="mt-2 flex items-start gap-1.5 text-11 leading-relaxed text-[var(--text-primary)]">
                               <AlertTriangle
                                 size={12}
                                 className="mt-0.5 shrink-0 text-[var(--text-secondary)]"
@@ -2248,7 +2246,7 @@ export function IOSSimulatorTabBody({
                                 })}
                               </span>
                             </div>
-                            <p className="mt-1 pl-[18px] text-[10px] leading-relaxed text-[var(--text-secondary)]">
+                            <p className="mt-1 pl-[18px] text-10 leading-relaxed text-[var(--text-secondary)]">
                               {t(
                                 missingRuntime
                                   ? 'rightSidebar.iosSimulator.missingRuntimeHelp'
@@ -2291,7 +2289,7 @@ function ActionButton({
       onClick={onClick}
       disabled={disabled}
       aria-describedby={describedBy}
-      className="inline-flex h-8 shrink-0 select-none items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 text-[11px] text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:opacity-50"
+      className="inline-flex h-8 shrink-0 select-none items-center gap-1.5 rounded-full border border-[var(--border-default)] bg-[var(--surface-elevated)] px-3 text-11 text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:opacity-50"
     >
       {spinning ? (
         <span className="inline-flex animate-spin motion-reduce:animate-none" aria-hidden="true">
@@ -2318,9 +2316,9 @@ function StatusCard({
     <div className="flex gap-2.5 rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-3">
       <Icon size={15} className="mt-0.5 shrink-0 text-[var(--text-secondary)]" aria-hidden="true" />
       <div className="min-w-0">
-        <div className="text-[12px] font-medium">{title}</div>
+        <div className="text-12 font-medium">{title}</div>
         {description && (
-          <div className="mt-1 whitespace-pre-line text-[11px] leading-relaxed text-[var(--text-secondary)]">
+          <div className="mt-1 whitespace-pre-line text-11 leading-relaxed text-[var(--text-secondary)]">
             {description}
           </div>
         )}

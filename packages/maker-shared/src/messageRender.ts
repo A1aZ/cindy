@@ -28,6 +28,11 @@ export interface MessageRenderSourceMessageLike {
   terminalPlanSnapshot?: boolean;
   /** Host time when the successful turn seal was applied. */
   terminalPlanAtMs?: number;
+  /**
+   * user 消息投递方式:'steer' 是运行中插话,不开启新 turn——失败印记回扫的
+   * turn 所有权边界只认普通('turn')user 消息。
+   */
+  delivery?: string | null;
 }
 
 export type MessageRenderNormalizedMessageKind =
@@ -655,9 +660,11 @@ export function applyCodexPlanSnapshotOnDone<
       return { messages, changed: false, toolUseId };
     }
 
-    const next = [...messages];
-    next[index] = {
-      ...message,
+    // 生命周期印记(章 / 失败标记)同时写进顶层与 content:mobile 的 live-plan
+    // 缓存只保存 content(rememberLivePlanContent),overlay 会用这份缓存覆盖
+    // main 广播里已持久化的带章 content——章只在顶层的话,overlay 一盖计划就
+    // 永远"未盖章",下一 turn 的计划会把上一轮吞进同一 session。
+    const lifecycleStamp = {
       ...(sealsTurn
         ? {
             terminalPlanSnapshot: true,
@@ -667,6 +674,11 @@ export function applyCodexPlanSnapshotOnDone<
           }
         : {}),
       ...(failChanged ? { turnCompleted: false } : {}),
+    };
+    const next = [...messages];
+    next[index] = {
+      ...message,
+      ...lifecycleStamp,
       ...(typeof planUpdatedAtMs === 'number' && Number.isFinite(planUpdatedAtMs)
         ? { planUpdatedAtMs }
         : {}),
@@ -674,7 +686,7 @@ export function applyCodexPlanSnapshotOnDone<
         ? { toolInput: { ...input, plan: nextPlan } }
         : {}),
       ...(content
-        ? { content: { ...content, input: { ...input, plan: nextPlan } } }
+        ? { content: { ...content, input: { ...input, plan: nextPlan }, ...lifecycleStamp } }
         : {}),
     };
     return { messages: next, changed: true, toolUseId };
@@ -691,11 +703,14 @@ export function applyCodexPlanSnapshotOnDone<
  * are untouched; already-sealed or already-stamped rows are left alone.
  *
  * Ownership boundary: only rows inside the failing turn's segment — after the
- * latest user message — may be stamped. Codex plan rows are per-turn
- * (`plan:<turnId>` is created within its own turn), so the scan stops cold at
- * the first user row. A failed turn that never emitted `update_plan` stamps
- * nothing; reaching past the boundary would resurrect an unrelated historical
- * plan (pre-seal-era all-done rows retire via the legacy fallback, and a stray
+ * latest turn-starting user message — may be stamped. Codex plan rows are
+ * per-turn (`plan:<turnId>` is created within its own turn), so the scan stops
+ * cold at the first user row that started a turn. A mid-turn steer interjection
+ * (`delivery: 'steer'`) does NOT start a new turn — the vendor turn keeps
+ * running and its plan row stays owned by the same turn — so steer rows do not
+ * end the scan. A failed turn that never emitted `update_plan` stamps nothing;
+ * reaching past the boundary would resurrect an unrelated historical plan
+ * (pre-seal-era all-done rows retire via the legacy fallback, and a stray
  * failure stamp would flip them back to "alive" with no durable write to
  * correct it — main's stamper correctly no-ops in that case).
  */
@@ -704,9 +719,9 @@ export function markCodexPlanTurnFailed<TMessage extends MessageRenderSourceMess
 ): { messages: readonly TMessage[]; changed: boolean } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === 'user') break;
+    if (message.role === 'user' && message.delivery !== 'steer') break;
     if (message.role !== 'tool_use' || toolNameOf(message) !== 'update_plan') continue;
-    if (message.terminalPlanSnapshot === true || message.turnCompleted === false) {
+    if (planRowSealOf(message).sealed || planRowTurnFailed(message)) {
       return { messages, changed: false };
     }
     const next = [...messages];

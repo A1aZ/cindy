@@ -219,6 +219,37 @@ describe('markCodexPlanTurnFailed', () => {
     expect(markCodexPlanTurnFailed([noPlan])).toEqual({ messages: [noPlan], changed: false });
   });
 
+  it('writes the lifecycle stamp into content as well for mobile live-plan overlays', () => {
+    // mobile 的 live-plan 缓存只保存 content,overlay 会用缓存覆盖 main 广播的
+    // 持久化 content。章/失败印记必须同时落在 content 里,否则 overlay 一盖,
+    // 成功计划在手机端永远"未盖章",下一 turn 把上一轮吞进同一 session。
+    const message = planMessage('plan:done', [{ step: 'Ship', status: 'completed' }]);
+    const sealed = applyCodexPlanSnapshotOnDone([message], null, 'done', 'completed', 1_700);
+    expect(sealed.messages[0].content).toMatchObject({
+      terminalPlanSnapshot: true,
+      terminalPlanAtMs: 1_700,
+    });
+
+    const interrupted = applyCodexPlanSnapshotOnDone(
+      [planMessage('plan:stop', [{ step: 'Ship', status: 'completed' }])],
+      null,
+      'plan:stop'.replace('plan:', ''),
+      'interrupted',
+    );
+    expect(interrupted.messages[0].content).toMatchObject({ turnCompleted: false });
+  });
+
+  it('does not stop the failure scan at a mid-turn steer interjection', () => {
+    // steer 插话不开新 turn:同一 vendor turn 里 计划 → steer user 行 → 终态
+    // error 的序列,回扫必须穿过 steer 行命中所属计划;普通 user 行仍是硬边界。
+    const plan = planMessage('plan:cur', [{ step: 'Ship', status: 'completed' }]);
+    const steerRow = { role: 'user' as const, clientId: 'u-steer', content: 'wait', delivery: 'steer' };
+
+    const result = markCodexPlanTurnFailed([plan, steerRow]);
+    expect(result.changed).toBe(true);
+    expect(result.messages[0]).toMatchObject({ turnCompleted: false });
+  });
+
   it('never reaches past the latest user message into an older turn plan', () => {
     // 所有权边界:本次失败的 turn 没发过 update_plan 时,不得把上一段历史里
     // 未盖章的旧计划(如升级前已全勾完退场的行)标成失败复活——main 侧对应

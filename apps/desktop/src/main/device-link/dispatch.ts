@@ -391,6 +391,48 @@ function projectInvokeResultForTunnel(
 /** 持有 client 的引用(转发 push 用);wireInboundDispatch 接入时设置。 */
 let activeClient: DeviceLinkClient | null = null;
 
+/**
+ * presence「显式离线」判据(index.ts 接线,那里持有权威 presence 视图):返回 true
+ * 仅当**当代** presence 明确宣告该设备离线;未知一律返回 false —— fail-open,不把
+ * 恢复窗口的首发拦死(判据刻意不跨连接代记忆,理由见 index.ts 的同名函数注释)。
+ *
+ * outbox **全量** flush 据此跳过注定 DEVICE_OFFLINE 的盲发:relay 在线时全量轮每
+ * REMOTE_INVOKE_RESULT_OUTBOX_RETRY_MS(500ms)跑一次,对 presence 已明说离线的
+ * 控制端就是 2 帧/秒的稳定无效出站,一直持续到 TTL 出清——只喂 relay 聚合背压
+ * (2026-08-08 事故的第四层失效面,见 docs/dev-rules/remote-and-mobile-adaptation.md)。
+ * 条目保留不丢,恢复由该控制端 link-open 触发的定向 flush
+ * (flushRemoteInvokeResultOutbox(src),不受本门禁约束)与 presence 翻回 online 后的
+ * 全量轮接棒。
+ */
+let presenceOfflineCheck: ((deviceId: string) => boolean) | null = null;
+
+export function setDispatchPresenceOfflineCheck(
+  check: ((deviceId: string) => boolean) | null,
+): void {
+  presenceOfflineCheck = check;
+}
+
+/**
+ * 门禁的唯一不变量:**只在 relay 确定路由不到时抑制发送**;同代内任何比 presence
+ * 更新的可达证据都必须让位给发送(fail-open),且该证据不得跨连接代存活。
+ *
+ * 这里的「更新的证据」就是 `acceptedLinkControllers`——它记录「link-accept 已成功、
+ * 尚未显式 close」的控制端,而它的增删边正好覆盖两侧:link-accept 成功即加入
+ * (那一刻 relay 确实路由到了它),link-close / 撤权 / presence 宣告离线
+ * (handleControllerOffline)/ teardown 立刻移除。于是「有 accepted link」天然表示
+ * 「已建链,且 presence 此后没有再说它离线」——不需要任何新状态或时间戳,证据由
+ * 权威源自己回收。
+ *
+ * 它关掉的具体缺口(codex review,同族第 3 次):presence 在同一代内滞后停留在
+ * false、控制端已 link-open 回归时,定向 flush 的首发若被 BACKPRESSURE 打回,末尾
+ * 排的重试是**无参全量轮**、丢掉 onlySrc 证据,于是这个已建链的 peer 会被持续跳过
+ * 到 presence 更新或 TTL 丢结果。判据里带上 accepted link 后,那一轮直接 fail-open。
+ */
+function isKnownUnroutable(deviceId: string): boolean {
+  if (!presenceOfflineCheck?.(deviceId)) return false;
+  return !acceptedLinkControllers.has(deviceId);
+}
+
 /** 订阅集合变化时一次性通知 host UI 控制态与更新重启安全态。 */
 type ControllersChangedListener = (
   controllers: ActiveController[],
@@ -1681,6 +1723,15 @@ function flushRemoteInvokeResultOutbox(onlySrc?: string): void {
     // 离线轮只做上面的 TTL 出清:trySend 必然 NOT_CONNECTED,不空转、不刷日志。
     if (!relayOnline) continue;
     if (blockedPeers.has(queued.src)) continue;
+    // presence 已明确宣告该控制端离线、且它当下也没有 accepted link:全量轮跳过盲发
+    // (每 500ms 一帧必弹 DEVICE_OFFLINE,只喂 relay 聚合背压),条目保留、TTL 照常。
+    // 判据与 fail-open 边界见 isKnownUnroutable。门禁只作用于全量轮(onlySrc 为空):
+    // 定向轮由 link-open 触发,「对端刚主动建链」是比 presence 更强、更新的在线证据,
+    // presence 短暂滞后/误报不得把这条恢复事件一并拦死(review P2)。
+    if (!onlySrc && isKnownUnroutable(queued.src)) {
+      blockedPeers.add(queued.src);
+      continue;
+    }
     const attempt = trySendInvokeResult(
       client,
       queued.src,
@@ -2274,6 +2325,7 @@ export const __testing = {
     clearAllSessionActivityStages();
     cancelAllLinkAcceptRetries();
     setBroadcastTapListener(null);
+    presenceOfflineCheck = null;
   },
   getActiveControllers,
   getUpdateRelaunchControllers,

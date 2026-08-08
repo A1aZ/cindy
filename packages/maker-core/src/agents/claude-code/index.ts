@@ -5012,6 +5012,12 @@ export class ClaudeCodeAgent extends BaseAgent {
           runningBackgroundTasks.clear();
           terminalBackgroundTaskIds.clear();
           turnInFlight = false;
+          // 本分支自己发 bridge_aborted 终态, send 的收尾责任就此交接完毕 ——
+          // 一并清 sendInAcceptPhase。不清的话: send 醒来走进
+          // finishSendBeforeUserInput, 入口守卫见 turnInFlight=false 直接返回,
+          // sendInAcceptPhase 悬置 true, 后续每次 abort 都被 accept 让位守卫
+          // 错误短路。boundary 只从这里发一次, send 那侧早退不再补发。
+          sendInAcceptPhase = false;
           turnState.interruptRequested = false;
           preserveBridgeRetryTarget(abortedBridgeKind, abortedRewindResumeAt);
           emitTurnBoundary(

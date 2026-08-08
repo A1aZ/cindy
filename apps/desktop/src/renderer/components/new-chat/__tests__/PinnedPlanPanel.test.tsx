@@ -314,6 +314,45 @@ describe('PinnedPlanPanel terminal seal', () => {
     };
   }
 
+  it('does not cut short a running grace when a past-clock sealed row arrives', () => {
+    // 执行端偏慢:本地已按实时 done 起了 2 秒缓冲,随后到达的落库行带过去的
+    // 章时刻(算出的期限已过期)。取较晚者——缓冲不被远端时钟掐断。
+    const view = render(
+      <PinnedPlanPanel
+        sessionId="slow-clock"
+        messages={[{ ...planMessage('in_progress', T0), terminalPlanSnapshot: true }]}
+        animated={false}
+        width={400}
+      />,
+    );
+    // 无 sealedAtMs → fallback 通道在本地起 2 秒缓冲。
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(500));
+
+    // 持久化行到达:执行端时钟慢 10 分钟,章时刻在本地视角早已过期。
+    view.rerender(
+      <PinnedPlanPanel
+        sessionId="slow-clock"
+        messages={[
+          {
+            ...planMessage('in_progress', T0),
+            terminalPlanSnapshot: true,
+            terminalPlanAtMs: T0 - 10 * 60_000,
+          },
+        ]}
+        animated={false}
+        width={400}
+      />,
+    );
+
+    // 本地缓冲还剩 1.5 秒:不得瞬间消失。
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1_499));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
   it('clamps a future terminal seal timestamp to the local clock (device-link skew)', () => {
     // 章的时刻来自执行端时钟。被控场景下执行端偏快时,sealedAtMs 在本机看是
     // "未来"——不钳制的话胶囊会多挂整个偏差时长;钳到本地此刻后仍是标准 2 秒。

@@ -19,7 +19,7 @@
  * 这时候按"全勾完"抢跑退场,会在章晚到(>2s)时先消失再被章复活闪回 2 秒。
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { findLatestMessageTodoInsertion } from '@cindy/maker-shared/message-render';
 
 import { TodoListCard } from '@/components/chat/TodoListCard';
@@ -90,11 +90,28 @@ export function PinnedPlanPanel({
     deadlineMs: number;
   } | null>(null);
   const completionIdentity = insertion ? `${sessionId ?? 'unknown'}:${insertion.key}` : null;
-  const completionDeadlineMs =
-    persistedCompletionDeadlineMs ??
-    (retired && fallbackCompletionVisibility?.identity === completionIdentity
+  const fallbackDeadlineMs =
+    retired && fallbackCompletionVisibility?.identity === completionIdentity
       ? fallbackCompletionVisibility.deadlineMs
-      : null);
+      : null;
+  // 执行端偏慢的另一半:实时 done 先按本地时刻(updatedAtMs/createdAt)起了
+  // 2 秒缓冲,随后到达的落库行带"过去"的执行端 sealedAtMs,重算出的期限已
+  // 过期——直接替换会把进行中的缓冲瞬间掐断。规则:同一身份的期限单调不减
+  // (render 间用 ref 记地板),后算出的更早期限只能取 max,不能倒退。重载/
+  // 新窗口是全新组件,地板为空,过期的章照旧立即隐藏(不重数 2 秒)。
+  const rawDeadlineMs =
+    persistedCompletionDeadlineMs !== null && fallbackDeadlineMs !== null
+      ? Math.max(persistedCompletionDeadlineMs, fallbackDeadlineMs)
+      : (persistedCompletionDeadlineMs ?? fallbackDeadlineMs);
+  const deadlineFloorRef = useRef<{ identity: string; deadlineMs: number } | null>(null);
+  let completionDeadlineMs = rawDeadlineMs;
+  if (completionDeadlineMs !== null && completionIdentity) {
+    const floor = deadlineFloorRef.current;
+    if (floor && floor.identity === completionIdentity) {
+      completionDeadlineMs = Math.max(completionDeadlineMs, floor.deadlineMs);
+    }
+    deadlineFloorRef.current = { identity: completionIdentity, deadlineMs: completionDeadlineMs };
+  }
   const completedPlanExpired = Boolean(
     completionDeadlineMs !== null && completionDeadlineMs <= Date.now(),
   );

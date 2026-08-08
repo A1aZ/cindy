@@ -175,9 +175,20 @@ describe('applyCodexPlanSnapshotOnDone', () => {
     const message = planMessage('plan:raced', [{ step: 'Inspect', status: 'in_progress' }]);
     const messages = [message];
 
-    expect(
-      applyCodexPlanSnapshotOnDone(messages, null, 'raced', 'completed', undefined, true),
-    ).toEqual({ messages, changed: false, toolUseId: null });
+    const result = applyCodexPlanSnapshotOnDone(
+      messages,
+      null,
+      'raced',
+      'completed',
+      undefined,
+      true,
+    );
+    // 不盖成功章,但要立即落失败印记(turnCompleted:false)——只拦盖章的话,
+    // 全勾完的取消计划会被旧数据兜底即时隐藏,再被 main 落库行复活闪回。
+    expect(result.changed).toBe(true);
+    expect(result.toolUseId).toBe('plan:raced');
+    expect(result.messages[0]).toMatchObject({ turnCompleted: false });
+    expect(result.messages[0]).not.toMatchObject({ terminalPlanSnapshot: true });
   });
 
   it('does not seal a failed or interrupted turn, but stamps it as failed', () => {

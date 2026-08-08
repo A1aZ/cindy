@@ -634,9 +634,13 @@ export function applyCodexPlanSnapshotOnDone<
   // 只看 status 会先盖章退场,随后 main 持久化 turnCompleted:false 的 DB 行
   // 广播到达,计划复活——即时 UI 与落库分叉。
   const sealsTurn = terminalStatus === 'completed' && cancelled !== true && Boolean(turnId);
-  // done 恒为终态:status 不是 completed(interrupted / failed)即失败终态。
+  // done 恒为终态:status 非 completed(interrupted / failed),或 cancelled 覆盖
+  // 了 completed,均为失败终态——后者只拦盖章不落失败印记的话,全勾完的取消
+  // 计划会被旧数据兜底即时隐藏,再被 main 的 turnCompleted:false 落库行复活。
   const stampsFailed =
-    Boolean(turnId) && typeof terminalStatus === 'string' && terminalStatus !== 'completed';
+    Boolean(turnId) &&
+    ((typeof terminalStatus === 'string' && terminalStatus !== 'completed') ||
+      (cancelled === true && terminalStatus === 'completed'));
   if (!authoritativeSnapshot && !sealsTurn && !stampsFailed) {
     return { messages, changed: false, toolUseId: null };
   }

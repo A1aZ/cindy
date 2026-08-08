@@ -16,6 +16,7 @@ import {
   IOSSimulatorProjectBuildError,
   IOSSimulatorResourceScheduler,
   WdaError,
+  WdaProcessManager,
   type IOSSimulatorEnvironmentReport,
   type IOSSimulatorH264Frame,
   type IOSSimulatorNativeSidecarDriver,
@@ -34,6 +35,7 @@ import {
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
   getIOSSimulatorMcpDeps,
+  reconcilePersistedIOSSimulatorOwnership,
   type IOSSimulatorAppLifecycleAdapter,
   type IOSSimulatorMediaCaptureAdapter,
   type IOSSimulatorProjectBuilderAdapter,
@@ -116,6 +118,21 @@ describe('iOS Simulator host', () => {
       await expect(stat(registryPath)).rejects.toMatchObject({
         code: 'ENOENT',
       });
+      expect(competingRegistry.acquireWriterSync()).toBe(true);
+    } finally {
+      competingRegistry.releaseWriterSync();
+      getPath.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  itMac('keeps startup ownership recovery lazy when the registry is empty', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-lazy-reconcile-'));
+    const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
+    const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
+    const competingRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath);
+    try {
+      await expect(reconcilePersistedIOSSimulatorOwnership()).resolves.toBeUndefined();
       expect(competingRegistry.acquireWriterSync()).toBe(true);
     } finally {
       competingRegistry.releaseWriterSync();
@@ -468,6 +485,61 @@ describe('iOS Simulator host', () => {
     });
   });
 
+  it('recovers persisted WDA ownership before marking a booted binding healthy', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const attached = actor.attach({
+      sessionId: 'persisted-wda-session',
+      worktreeRoot: '/tmp/persisted-wda-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const cleanupOrphaned = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new WdaError('TERMINATION_FAILED', 'orphan still running'));
+    const driverManager = {
+      get: vi.fn(() => null),
+      cleanupOrphaned,
+      start: vi.fn(async () => {
+        throw new Error('not expected');
+      }),
+      stop: vi.fn(async () => undefined),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => localSession('persisted-wda-session')),
+    });
+
+    await host.reconcileOwnership();
+    expect(cleanupOrphaned).toHaveBeenCalledWith(attached.instanceId, attached.simulatorUdid);
+    expect(actor.getOwned('persisted-wda-session', attached.instanceId)).toMatchObject({
+      lifecycleState: 'ready',
+      healthState: 'degraded',
+      errorCode: 'WDA_UNAVAILABLE',
+    });
+
+    await host.reconcileOwnership();
+    expect(cleanupOrphaned).toHaveBeenCalledTimes(2);
+    expect(actor.getOwned('persisted-wda-session', attached.instanceId)).toMatchObject({
+      lifecycleState: 'ready',
+      healthState: 'healthy',
+      errorCode: null,
+    });
+    expect(driverManager.stop).not.toHaveBeenCalled();
+  });
+
   it.each(['Booted', 'Booting'] as const)(
     'restores scheduler occupancy for a persisted %s device',
     async (deviceState) => {
@@ -801,6 +873,63 @@ describe('iOS Simulator host', () => {
     expect(actor.listAll()).toEqual([]);
   });
 
+  it('rechecks archived status under the task route lock before destructive recovery', async () => {
+    let releaseLock!: () => void;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let status: 'active' | 'archived' = 'archived';
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'archived-then-restored',
+      worktreeRoot: '/tmp/archived-then-restored',
+      sourceFingerprint: 'fingerprint-a',
+      creationProvenance: 'cindy',
+      bootProvenance: 'agent-booted',
+      device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
+    });
+    const withSessionLock = vi.fn(
+      async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> => {
+        await lockGate;
+        return task();
+      },
+    );
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      withSessionLock,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => ({
+        ...localSession('archived-then-restored'),
+        status,
+      })),
+    });
+
+    const reconcile = host.reconcileOwnership();
+    await vi.waitFor(() => expect(withSessionLock).toHaveBeenCalledOnce());
+    status = 'active';
+    releaseLock();
+    await reconcile;
+
+    expect(withSessionLock).toHaveBeenCalledWith('archived-then-restored', expect.any(Function));
+    expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+    expect(actor.getOwned('archived-then-restored', instance.instanceId)).toMatchObject({
+      lifecycleState: 'ready',
+      healthState: 'healthy',
+    });
+  });
+
   it('stops the driver runtime before shutting down and deleting a stale device', async () => {
     const order: string[] = [];
     const lifecycle: IOSSimulatorSimctlLifecycle = {
@@ -896,6 +1025,50 @@ describe('iOS Simulator host', () => {
     });
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
     expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+  });
+
+  it('aborts driver work before orphan recovery and still scans after stop fails', async () => {
+    const order: string[] = [];
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => READY_REPORT.devices[0]),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'removed-during-driver-start',
+      worktreeRoot: '/tmp/removed-during-driver-start',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => {
+          order.push('stop');
+          throw new Error('pending start cancellation failed');
+        }),
+        cleanupOrphaned: vi.fn(async () => {
+          order.push('cleanup');
+        }),
+      },
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => null),
+    });
+
+    await expect(host.cleanupRemovedSession(instance.sessionId)).rejects.toMatchObject({
+      code: 'DEVICE_BUSY',
+    });
+    expect(order).toEqual(['stop', 'cleanup']);
+    expect(actor.listAll()).toHaveLength(1);
   });
 
   it('stops the driver runtime when ownership reconcile observes a shut down device', async () => {
@@ -5781,6 +5954,9 @@ describe('iOS Simulator host', () => {
         .mockImplementation(() => {
           writerLeaseHeld = false;
         });
+      const cleanupOrphaned = vi
+        .spyOn(WdaProcessManager.prototype, 'cleanupOrphaned')
+        .mockResolvedValue();
       try {
         await expect(
           cleanupIOSSimulatorRemovedSession('persisted-removed-session'),
@@ -5805,6 +5981,7 @@ describe('iOS Simulator host', () => {
         releaseWriter.mockRestore();
         isWriter.mockRestore();
         acquireWriter.mockRestore();
+        cleanupOrphaned.mockRestore();
         getPath.mockRestore();
         await rm(root, { recursive: true, force: true });
       }

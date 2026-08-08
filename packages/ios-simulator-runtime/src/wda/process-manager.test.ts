@@ -15,9 +15,19 @@ import type {
 } from "../driver.js";
 import type { IOSSimulatorNativeSidecarStartOptions } from "../native-sidecar/process-manager.js";
 import type { IOSSimulatorCommandRunner } from "../types.js";
+import { WdaError } from "./errors.js";
 import {
+  createWdaOwnerFingerprint,
+  findCindyWdaDiagnosticCandidates,
+  findCindyWdaOrphanProcessGroups,
+  findCindyWdaRunnerCandidates,
+  hasConflictingWdaController,
+  matchesCindyWdaDiagnosticCommand,
+  matchesCindyWdaRunnerEnvironment,
+  matchesLegacyCindyWdaRunnerEnvironment,
   WdaProcessManager,
   type WdaManagedProcess,
+  type WdaOrphanProcessCleaner,
   type WdaProcessManagerOptions,
 } from "./process-manager.js";
 
@@ -28,6 +38,7 @@ interface HarnessOptions {
   startTimeoutMs?: number;
   leaderExitsOn?: readonly NodeJS.Signals[];
   groupExitsOn?: readonly NodeJS.Signals[];
+  orphanProcessCleaner?: WdaOrphanProcessCleaner;
 }
 
 afterEach(async () => {
@@ -126,6 +137,9 @@ async function createHarness(
   let now = 1_000;
   const ports = [18_100, 19_100, 18_101, 19_101];
   const launch = vi.fn(() => process);
+  const orphanProcessCleaner = vi.fn<WdaOrphanProcessCleaner>(
+    harnessOptions.orphanProcessCleaner ?? (async () => undefined),
+  );
   const manager = new WdaProcessManager({
     archivePath,
     cacheRoot: path.join(root, "cache"),
@@ -143,6 +157,7 @@ async function createHarness(
       },
     },
     nativeCapabilityProvider,
+    orphanProcessCleaner,
     startTimeoutMs: harnessOptions.startTimeoutMs,
   });
   return {
@@ -153,12 +168,346 @@ async function createHarness(
     process,
     killed,
     launch,
+    orphanProcessCleaner,
     exitGroup,
     exitLeader: settleLeader,
   };
 }
 
+describe("WDA orphan ownership matching", () => {
+  const cacheRoot =
+    "/Users/test/Library/Application Support/Cindy Test/ios-simulator/wda";
+  const coreSimulatorRoot = "/Users/test/Library/Developer/CoreSimulator";
+  const xcodebuild =
+    "/Applications/Xcode Test.app/Contents/Developer/usr/bin/xcodebuild";
+  const ownerFingerprint = createWdaOwnerFingerprint(
+    cacheRoot,
+    "instance-a",
+    UDID,
+  );
+  const input = {
+    cacheRoot,
+    instanceId: "instance-a",
+    simulatorUdid: UDID,
+    ownerFingerprint,
+    coreSimulatorRoot,
+    xcodebuildExecutablePaths: [xcodebuild],
+  };
+  const project = `${cacheRoot}/source/${"a".repeat(40)}/WebDriverAgent.xcodeproj`;
+  const derived = `${cacheRoot}/derived/${"b".repeat(64)}`;
+  const command =
+    `${xcodebuild} -quiet -project ${project}` +
+    ` -scheme WebDriverAgentRunner` +
+    ` -destination platform=iOS Simulator,id=${UDID},arch=arm64` +
+    ` -derivedDataPath ${derived} test-without-building` +
+    ` CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO`;
+
+  it("binds the owner fingerprint to profile, instance, and exact simulator", () => {
+    expect(ownerFingerprint).toMatch(/^[0-9a-f]{64}$/);
+    expect(
+      createWdaOwnerFingerprint(cacheRoot, "instance-a", UDID.toLowerCase()),
+    ).toBe(ownerFingerprint);
+    expect(
+      createWdaOwnerFingerprint(`${cacheRoot}-other`, "instance-a", UDID),
+    ).not.toBe(ownerFingerprint);
+    expect(createWdaOwnerFingerprint(cacheRoot, "instance-b", UDID)).not.toBe(
+      ownerFingerprint,
+    );
+  });
+
+  it("matches only an exact controller argv and keeps legacy ownership narrow", () => {
+    const tagged =
+      `${command} CINDY_WDA_OWNER_FINGERPRINT=${ownerFingerprint}` +
+      ` UPGRADE_TIMESTAMP=${ownerFingerprint}`;
+    expect(findCindyWdaOrphanProcessGroups(`420 420 ${tagged}`, input)).toEqual(
+      [420],
+    );
+    expect(
+      findCindyWdaOrphanProcessGroups(`421 421 ${command}`, input),
+    ).toEqual([421]);
+
+    const wrong = "c".repeat(64);
+    const rejected = [
+      `${tagged} EXTRA=1`,
+      `${command} CINDY_WDA_OWNER_FINGERPRINT=${ownerFingerprint}suffix UPGRADE_TIMESTAMP=${ownerFingerprint}`,
+      `${command} CINDY_WDA_OWNER_FINGERPRINT=${wrong} UPGRADE_TIMESTAMP=${wrong}`,
+      command.replace("test-without-building", "not-test-without-building"),
+      command.replace(`/source/${"a".repeat(40)}/`, "/source/../source/"),
+      command.replace(xcodebuild, "/tmp/xcodebuild"),
+      command.replace(UDID, "2A9D41E0-E031-4AD0-A8B5-847480802E8E"),
+    ];
+    for (const [index, candidate] of rejected.entries()) {
+      expect(
+        findCindyWdaOrphanProcessGroups(
+          `${500 + index} ${500 + index} ${candidate}`,
+          input,
+        ),
+      ).toEqual([]);
+    }
+    expect(findCindyWdaOrphanProcessGroups(`600 601 ${tagged}`, input)).toEqual(
+      [],
+    );
+  });
+
+  it("blocks an unowned same-device WDA controller without granting kill authority", () => {
+    const external =
+      `${xcodebuild} -quiet -project /tmp/ExternalAgent/WebDriverAgent.xcodeproj` +
+      ` -destination platform=iOS Simulator,id=${UDID},arch=arm64` +
+      ` -scheme WebDriverAgentRunner test-without-building`;
+    expect(hasConflictingWdaController(`650 650 ${external}`, input)).toBe(
+      true,
+    );
+    expect(
+      findCindyWdaOrphanProcessGroups(`650 650 ${external}`, input),
+    ).toEqual([]);
+    expect(
+      hasConflictingWdaController(
+        `651 651 ${external.replace(UDID, "2A9D41E0-E031-4AD0-A8B5-847480802E8E")}`,
+        input,
+      ),
+    ).toBe(false);
+    expect(
+      hasConflictingWdaController(
+        `652 652 ${external.replace("WebDriverAgentRunner", "UserApp")}`,
+        input,
+      ),
+    ).toBe(false);
+
+    const otherXcode =
+      "/Applications/Xcode Beta.app/Contents/Developer/usr/bin/xcodebuild";
+    const otherXcodeCommand = external.replace(xcodebuild, otherXcode);
+    expect(
+      hasConflictingWdaController(`653 653 ${otherXcodeCommand}`, {
+        ...input,
+        inspectedXcodebuildExecutablePaths: [xcodebuild, otherXcode],
+      }),
+    ).toBe(true);
+    expect(
+      findCindyWdaOrphanProcessGroups(`653 653 ${otherXcodeCommand}`, {
+        ...input,
+        inspectedXcodebuildExecutablePaths: [xcodebuild, otherXcode],
+      }),
+    ).toEqual([]);
+  });
+
+  it("reads an owner marker only after selecting an exact same-device Runner", () => {
+    const executable =
+      `${coreSimulatorRoot}/Devices/${UDID}/data/Containers/Bundle/Application/` +
+      `F152910A-1B1D-4F11-A669-68C785E9F638/` +
+      `WebDriverAgentRunner-Runner.app/WebDriverAgentRunner-Runner`;
+    const candidates = findCindyWdaRunnerCandidates(
+      `700 700 ${executable}`,
+      input,
+    );
+    expect(candidates).toEqual([
+      { pid: 700, processGroupId: 700, executablePath: executable },
+    ]);
+    expect(
+      matchesCindyWdaRunnerEnvironment(
+        `700 700 ${executable} USE_PORT=18100 UPGRADE_TIMESTAMP=${ownerFingerprint}`,
+        candidates[0]!,
+        ownerFingerprint,
+      ),
+    ).toBe(true);
+    expect(
+      matchesCindyWdaRunnerEnvironment(
+        `700 700 ${executable} UPGRADE_TIMESTAMP=${ownerFingerprint} UPGRADE_TIMESTAMP=${ownerFingerprint}`,
+        candidates[0]!,
+        ownerFingerprint,
+      ),
+    ).toBe(false);
+    expect(
+      matchesCindyWdaRunnerEnvironment(
+        `700 700 ${executable} UPGRADE_TIMESTAMP=${"c".repeat(64)}`,
+        candidates[0]!,
+        ownerFingerprint,
+      ),
+    ).toBe(false);
+    expect(
+      findCindyWdaRunnerCandidates(
+        `701 701 ${executable.replace(UDID, "2A9D41E0-E031-4AD0-A8B5-847480802E8E")}`,
+        input,
+      ),
+    ).toEqual([]);
+
+    const legacyEnvironment =
+      `700 700 ${executable}` +
+      ` SIMULATOR_UDID=${UDID}` +
+      ` XCODE_SCHEME_NAME=WebDriverAgentRunner` +
+      ` UPGRADE_TIMESTAMP=` +
+      ` DYLD_LIBRARY_PATH=${cacheRoot}/derived/${"b".repeat(64)}` +
+      `/Build/Products/Debug-iphonesimulator`;
+    expect(
+      matchesLegacyCindyWdaRunnerEnvironment(
+        legacyEnvironment,
+        candidates[0]!,
+        input,
+      ),
+    ).toBe(true);
+    expect(
+      matchesLegacyCindyWdaRunnerEnvironment(
+        legacyEnvironment.replace(
+          "UPGRADE_TIMESTAMP= ",
+          `UPGRADE_TIMESTAMP=${"c".repeat(64)} `,
+        ),
+        candidates[0]!,
+        input,
+      ),
+    ).toBe(false);
+    expect(
+      matchesLegacyCindyWdaRunnerEnvironment(
+        legacyEnvironment.replace(cacheRoot, `${cacheRoot}-other`),
+        candidates[0]!,
+        input,
+      ),
+    ).toBe(false);
+  });
+
+  it("reads only exact simctl candidates and revalidates diagnostic ownership", () => {
+    const simctl = path.join(path.dirname(xcodebuild), "simctl");
+    const diagnosticInput = {
+      cacheRoot,
+      simulatorUdid: UDID,
+      xcodebuildExecutablePaths: [xcodebuild],
+    };
+    const candidates = findCindyWdaDiagnosticCandidates(
+      [
+        `810 810 ${simctl}`,
+        "811 811 /usr/bin/xcrun",
+        "812 812 /tmp/xcrun",
+      ].join("\n"),
+      diagnosticInput,
+    );
+    expect(candidates).toEqual([
+      { pid: 810, processGroupId: 810, executablePath: simctl },
+      { pid: 811, processGroupId: 811, executablePath: "/usr/bin/xcrun" },
+    ]);
+
+    const output = `${derived}/Logs/Test/Diagnostics`;
+    const direct =
+      `810 810 ${simctl} diagnose -b --timeout=60` +
+      ` --output=${output} --udid=${UDID}`;
+    expect(
+      matchesCindyWdaDiagnosticCommand(direct, candidates[0]!, diagnosticInput),
+    ).toBe(true);
+    expect(
+      matchesCindyWdaDiagnosticCommand(
+        `811 811 /usr/bin/xcrun simctl diagnose --udid=${UDID} --output ${output}`,
+        candidates[1]!,
+        diagnosticInput,
+      ),
+    ).toBe(true);
+
+    const rejected = [
+      direct.replace("810 810", "900 900"),
+      direct.replace(" diagnose ", " list "),
+      direct.replace(UDID, "2A9D41E0-E031-4AD0-A8B5-847480802E8E"),
+      direct.replace(output, `${cacheRoot}-other/derived/${"b".repeat(64)}`),
+      `${direct} --udid=${UDID}`,
+      direct.replace(output, `${derived}-reused`),
+    ];
+    for (const commandLine of rejected) {
+      expect(
+        matchesCindyWdaDiagnosticCommand(
+          commandLine,
+          candidates[0]!,
+          diagnosticInput,
+        ),
+      ).toBe(false);
+    }
+  });
+});
+
 describe("WdaProcessManager", () => {
+  it("runs orphan recovery before source preparation and launch", async () => {
+    const harness = await createHarness();
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+
+    expect(harness.orphanProcessCleaner).toHaveBeenCalledTimes(2);
+    expect(harness.orphanProcessCleaner).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cacheRoot: path.join(harness.root, "cache"),
+        instanceId: "instance-a",
+        simulatorUdid: UDID,
+        ownerFingerprint: createWdaOwnerFingerprint(
+          path.join(harness.root, "cache"),
+          "instance-a",
+          UDID,
+        ),
+        signal: expect.any(AbortSignal),
+        rejectForeign: true,
+      }),
+    );
+    expect(
+      harness.orphanProcessCleaner.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.run.mock.invocationCallOrder[0]!);
+    expect(harness.run.mock.invocationCallOrder[0]).toBeLessThan(
+      harness.orphanProcessCleaner.mock.invocationCallOrder[1]!,
+    );
+    expect(
+      harness.orphanProcessCleaner.mock.invocationCallOrder[1],
+    ).toBeLessThan(harness.launch.mock.invocationCallOrder[0]!);
+  });
+
+  it("fails closed before build when orphan recovery is unavailable", async () => {
+    const orphanProcessCleaner = vi.fn(async () => {
+      throw new WdaError("TERMINATION_FAILED", "inventory unavailable");
+    });
+    const harness = await createHarness(undefined, { orphanProcessCleaner });
+
+    await expect(
+      harness.manager.start({
+        instanceId: "instance-a",
+        simulatorUdid: UDID,
+        runtimeIdentifier: "runtime",
+        xcodeBuild: "build",
+        architecture: "arm64",
+      }),
+    ).rejects.toMatchObject({ code: "TERMINATION_FAILED" });
+    expect(harness.run).not.toHaveBeenCalled();
+    expect(harness.launch).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending orphan inventory without hanging stop", async () => {
+    let calls = 0;
+    const orphanProcessCleaner = vi.fn<WdaOrphanProcessCleaner>(
+      async (input) => {
+        calls += 1;
+        if (calls > 1) return;
+        await new Promise<void>((_resolve, reject) => {
+          const onAbort = () =>
+            reject(new WdaError("START_CANCELLED", "cancelled"));
+          input.signal?.addEventListener("abort", onAbort, { once: true });
+          if (input.signal?.aborted) onAbort();
+        });
+      },
+    );
+    const harness = await createHarness(undefined, { orphanProcessCleaner });
+    const start = harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+    await vi.waitFor(() =>
+      expect(orphanProcessCleaner).toHaveBeenCalledTimes(1),
+    );
+
+    const stop = harness.manager.stop("instance-a");
+    await expect(start).rejects.toMatchObject({ code: "START_CANCELLED" });
+    await expect(stop).resolves.toBeUndefined();
+    expect(orphanProcessCleaner).toHaveBeenCalledTimes(2);
+    expect(harness.run).not.toHaveBeenCalled();
+    expect(harness.launch).not.toHaveBeenCalled();
+  });
+
   it("builds once, starts on private ports, probes, and reuses a running instance", async () => {
     const harness = await createHarness();
     const input = {

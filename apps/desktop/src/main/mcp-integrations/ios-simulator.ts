@@ -82,6 +82,7 @@ import type {
   GhostIOSSimulatorStatusSnapshot,
 } from '../../shared/ghost.js';
 import { createLogger } from '../logger.js';
+import { withSessionRouteLock } from '../localDb/sessionRouteLock.js';
 import { desktopSessionStorage } from '../maker-host/session-storage.js';
 import { isTrustedAppRendererWindow } from '../security/trustedAppRenderer.js';
 import {
@@ -119,6 +120,7 @@ interface IOSSimulatorSessionSnapshot {
 interface IOSSimulatorDriverManager {
   get(instanceId: string): WdaRunningInstance | null;
   probe?(instanceId: string): Promise<WdaRunningInstance | null>;
+  cleanupOrphaned?(instanceId: string, simulatorUdid: string): Promise<void>;
   start(options: WdaStartOptions): Promise<WdaRunningInstance>;
   stop(instanceId: string): Promise<void>;
   recoverNativeSidecar?(
@@ -183,6 +185,8 @@ export interface IOSSimulatorHostOptions {
   /** Minimum interval between exact-UDID CoreSimulator liveness checks. */
   deviceLivenessIntervalMs?: number;
   getSession?: (sessionId: string) => Promise<IOSSimulatorSessionSnapshot | null>;
+  /** Serialize persisted recovery with task archive/restore/send mutations. */
+  withSessionLock?: <T>(sessionId: string, task: () => Promise<T>) => Promise<T>;
   resolveWorktreeRoot?: (workDir: string) => Promise<string>;
   requestViewerFocus?: (sessionId: string, instanceId: string) => void;
   /** Main → renderer route diagnostics seam; injected in tests, broadcast by default. */
@@ -1567,6 +1571,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         status: await desktopSessionStorage.getStatus(sessionId),
       };
     });
+  const withSessionLock = options.withSessionLock ?? withSessionRouteLock;
   const resolveWorktreeRoot = options.resolveWorktreeRoot ?? realpath;
   const requestViewerFocus =
     options.requestViewerFocus ??
@@ -1712,6 +1717,21 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     }
   }
 
+  async function cleanupOrphanedDriverRuntime(instance: IOSSimulatorInstance): Promise<boolean> {
+    if (!driverManager?.cleanupOrphaned) return true;
+    try {
+      await driverManager.cleanupOrphaned(instance.instanceId, instance.simulatorUdid);
+      return true;
+    } catch (error) {
+      logger.warn('iOS Simulator ownership cleanup could not recover orphaned driver runtime', {
+        instanceId: instance.instanceId,
+        simulatorUdid: instance.simulatorUdid,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+  }
+
   async function releaseInstanceRuntime(instance: IOSSimulatorInstance): Promise<boolean> {
     beginInstanceTeardown(instance.instanceId);
     try {
@@ -1733,6 +1753,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             error: error instanceof Error ? error.message : String(error),
           });
         });
+        if (!(await cleanupOrphanedDriverRuntime(instance))) cleanupSucceeded = false;
       }
       return cleanupSucceeded;
     } finally {
@@ -2102,6 +2123,93 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     };
   }
 
+  async function reconcilePersistedInstance(
+    snapshot: IOSSimulatorInstance,
+    devices: ReadonlyMap<string, IOSSimulatorEnvironmentReport['devices'][number]>,
+  ): Promise<boolean> {
+    const instance = actor
+      .list(snapshot.sessionId)
+      .find((candidate) => candidate.instanceId === snapshot.instanceId);
+    if (!instance) return true;
+
+    let complete = true;
+    let driverRuntimeRecovered = await cleanupOrphanedDriverRuntime(instance);
+    if (!driverRuntimeRecovered) complete = false;
+    const device = devices.get(instance.simulatorUdid.toUpperCase());
+    const deviceState = device?.state.trim().toLowerCase() ?? null;
+    if (device && deviceState !== 'shutdown') {
+      // This scheduler is process-local while ownership is persisted. Restore
+      // observed occupancy before any fallible lookup/cleanup.
+      resourceScheduler.restoreRunning(instance.instanceId);
+    }
+    let session: IOSSimulatorSessionSnapshot | null = null;
+    try {
+      session = await getSession(instance.sessionId);
+    } catch (error) {
+      logger.warn('iOS Simulator ownership reconcile could not read session', {
+        instanceId: instance.instanceId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+    if (!session || session.status === 'deleted' || session.status === 'archived') {
+      return (await releaseStaleBinding(instance, device)) && complete;
+    }
+    if (session.remoteHostId || !device) {
+      const runtimeReleased = await releaseInstanceRuntime(instance);
+      if (!runtimeReleased) complete = false;
+      if (runtimeReleased && (!device || device.state.trim().toLowerCase() === 'shutdown')) {
+        resourceScheduler.markStopped(instance.instanceId);
+      }
+      actor.reconcile(
+        instance.instanceId,
+        instance.sessionId,
+        device ? (deviceState === 'booted' ? 'ready' : 'stopped') : 'error',
+        'degraded',
+        session.remoteHostId ? 'UNSUPPORTED_SESSION_KIND' : 'ORPHANED_DEVICE',
+      );
+      return complete;
+    }
+    const reconciledDeviceState = deviceState ?? 'unknown';
+    if (reconciledDeviceState === 'shutdown') {
+      const runtimeReleased = await releaseInstanceRuntime(instance);
+      if (runtimeReleased) {
+        resourceScheduler.markStopped(instance.instanceId);
+      } else {
+        driverRuntimeRecovered = false;
+        complete = false;
+      }
+    } else if (reconciledDeviceState !== 'booted') {
+      // Booting / Shutting Down / unknown concrete states may still own a
+      // CoreSimulator process. Tear down Cindy media but keep scheduler
+      // occupancy until a later probe proves the device is Shutdown.
+      if (!(await releaseInstanceRuntime(instance))) {
+        driverRuntimeRecovered = false;
+        complete = false;
+      }
+    }
+    actor.reconcile(
+      instance.instanceId,
+      instance.sessionId,
+      reconciledDeviceState === 'booted'
+        ? 'ready'
+        : reconciledDeviceState === 'shutdown'
+          ? 'stopped'
+          : reconciledDeviceState.includes('boot')
+            ? 'booting'
+            : reconciledDeviceState.includes('shutting')
+              ? 'stopping'
+              : 'error',
+      !driverRuntimeRecovered
+        ? 'degraded'
+        : reconciledDeviceState === 'booted' || reconciledDeviceState === 'shutdown'
+          ? 'healthy'
+          : 'recovering',
+      driverRuntimeRecovered ? null : 'WDA_UNAVAILABLE',
+    );
+    return complete;
+  }
+
   async function reconcilePersistedOwnership(): Promise<void> {
     if (disposePromise) return;
     if (ownershipReconciled) return;
@@ -2116,82 +2224,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         environment.devices.map((device) => [device.udid.toUpperCase(), device]),
       );
       let complete = true;
-      for (const instance of actor.listAll()) {
-        const device = devices.get(instance.simulatorUdid.toUpperCase());
-        const deviceState = device?.state.trim().toLowerCase() ?? null;
-        if (device && deviceState !== 'shutdown') {
-          // This scheduler is process-local while ownership is persisted.
-          // Restore observed CoreSimulator occupancy before any fallible task
-          // lookup/cleanup so failed recovery remains capacity-safe.
-          resourceScheduler.restoreRunning(instance.instanceId);
-        }
-        let session: IOSSimulatorSessionSnapshot | null = null;
-        try {
-          session = await getSession(instance.sessionId);
-        } catch (error) {
-          complete = false;
-          logger.warn('iOS Simulator ownership reconcile could not read session', {
-            instanceId: instance.instanceId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          continue;
-        }
-        if (!session) {
-          if (!(await releaseStaleBinding(instance, device))) complete = false;
-          continue;
-        }
-        if (session.status === 'deleted') {
-          if (!(await releaseStaleBinding(instance, device))) complete = false;
-          continue;
-        }
-        if (session.status === 'archived') {
-          if (!(await releaseStaleBinding(instance, device))) complete = false;
-          continue;
-        }
-        if (session.remoteHostId || !device) {
-          const runtimeReleased = await releaseInstanceRuntime(instance);
-          if (!runtimeReleased) complete = false;
-          if (runtimeReleased && (!device || device.state.trim().toLowerCase() === 'shutdown')) {
-            resourceScheduler.markStopped(instance.instanceId);
-          }
-          actor.reconcile(
-            instance.instanceId,
-            instance.sessionId,
-            device ? (deviceState === 'booted' ? 'ready' : 'stopped') : 'error',
-            'degraded',
-            session.remoteHostId ? 'UNSUPPORTED_SESSION_KIND' : 'ORPHANED_DEVICE',
-          );
-          continue;
-        }
-        const reconciledDeviceState = deviceState ?? 'unknown';
-        if (reconciledDeviceState === 'shutdown') {
-          const runtimeReleased = await releaseInstanceRuntime(instance);
-          if (runtimeReleased) {
-            resourceScheduler.markStopped(instance.instanceId);
-          } else complete = false;
-        } else if (reconciledDeviceState !== 'booted') {
-          // Booting / Shutting Down / unknown concrete states may still own a
-          // CoreSimulator process. Tear down Cindy media but keep scheduler
-          // occupancy until a later probe proves the device is Shutdown.
-          if (!(await releaseInstanceRuntime(instance))) complete = false;
-        }
-        actor.reconcile(
-          instance.instanceId,
-          instance.sessionId,
-          reconciledDeviceState === 'booted'
-            ? 'ready'
-            : reconciledDeviceState === 'shutdown'
-              ? 'stopped'
-              : reconciledDeviceState.includes('boot')
-                ? 'booting'
-                : reconciledDeviceState.includes('shutting')
-                  ? 'stopping'
-                  : 'error',
-          reconciledDeviceState === 'booted' || reconciledDeviceState === 'shutdown'
-            ? 'healthy'
-            : 'recovering',
-          null,
+      for (const snapshot of actor.listAll()) {
+        const instanceComplete = await withSessionLock(snapshot.sessionId, () =>
+          reconcilePersistedInstance(snapshot, devices),
         );
+        if (!instanceComplete) complete = false;
       }
       ownershipReconciled = complete;
     })().finally(() => {
@@ -5553,6 +5590,7 @@ function installDefaultIOSSimulatorHost(
     const host = createIOSSimulatorHost({
       lifecycle,
       actor: persistedActor.actor,
+      driverManager: createDefaultDriverManager(),
     });
     configureIOSSimulatorRendererAccessRevocationObserver((grants) => {
       for (const grant of grants) {
@@ -5668,6 +5706,41 @@ export async function flushIOSSimulatorOwnershipRegistry(): Promise<void> {
 
 export function reconcileIOSSimulatorOwnership(): Promise<void> {
   return initializeIOSSimulatorHost().reconcileOwnership();
+}
+
+/**
+ * Startup recovery stays lazy when this profile has never owned a simulator,
+ * but persisted bindings must be reconciled even if the feature is not opened
+ * again after a crash.
+ */
+export function reconcilePersistedIOSSimulatorOwnership(): Promise<void> {
+  const currentHost = currentIOSSimulatorHost();
+  if (currentHost) return currentHost.reconcileOwnership();
+  if (process.platform !== 'darwin') return Promise.resolve();
+
+  const registry = createDefaultOwnershipRegistry();
+  let registryTransferred = false;
+  try {
+    if (!registry.acquireWriterSync()) {
+      throw new IOSSimulatorInstanceError(
+        'DEVICE_BUSY',
+        'Another Cindy process is managing iOS Simulator ownership for this profile.',
+        true,
+      );
+    }
+    if (registry.loadSync().length === 0) {
+      registry.releaseWriterSync();
+      return Promise.resolve();
+    }
+    const lifecycle = createIOSSimulatorSimctlLifecycle();
+    const persistedActor = createDefaultActor(lifecycle, registry);
+    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
+    registryTransferred = true;
+    return host.reconcileOwnership();
+  } catch (error) {
+    if (!registryTransferred) registry.releaseWriterSync();
+    return Promise.reject(error);
+  }
 }
 
 export async function disposeIOSSimulatorHost(): Promise<void> {

@@ -116,7 +116,7 @@ describe('createOwnerEnsureCoordinator', () => {
 });
 
 describe('registerLocalDbIpc ready-hook composition', () => {
-  it('lets the lifecycle hook install DbClient before scheduling media reconcile', () => {
+  it('installs DbClient before runtime recovery and deleted-media reconcile', () => {
     const source = fs.readFileSync(new URL('../registerAll.ts', import.meta.url), 'utf8');
     const start = source.indexOf('onReady: async (userId) => {');
     const end = source.indexOf('onReadyError:', start);
@@ -124,6 +124,10 @@ describe('registerLocalDbIpc ready-hook composition', () => {
 
     expect(hook.indexOf('await opts.onReady?.(userId)')).toBeLessThan(
       hook.indexOf('tryGetDbClient()'),
+    );
+    expect(hook).toContain('await opts.reconcilePersistedSessionRuntimes?.()');
+    expect(hook.indexOf('await opts.reconcilePersistedSessionRuntimes?.()')).toBeLessThan(
+      hook.indexOf('reconcileSessionMediaRefsForDeletedSessions({'),
     );
     expect(hook).toContain('if (');
     expect(hook).toContain('!client');

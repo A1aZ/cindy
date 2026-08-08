@@ -34,6 +34,7 @@ export interface CreateWdaBuildPlanOptions {
   checkoutPath: string;
   derivedDataPath: string;
   simulatorUdid: string;
+  ownerFingerprint: string;
   architecture?: "arm64" | "x86_64";
   controlPort?: number;
   mjpegPort?: number;
@@ -56,6 +57,14 @@ function requireUdid(value: string): string {
   const normalized = value.trim().toUpperCase();
   if (!/^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(normalized)) {
     throw new Error("simulatorUdid must be an exact simulator UUID");
+  }
+  return normalized;
+}
+
+function requireOwnerFingerprint(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(normalized)) {
+    throw new Error("ownerFingerprint must be an exact SHA-256 hex digest");
   }
   return normalized;
 }
@@ -86,6 +95,7 @@ export function createWdaBuildPlan(
     "derivedDataPath",
   );
   const simulatorUdid = requireUdid(options.simulatorUdid);
+  const ownerFingerprint = requireOwnerFingerprint(options.ownerFingerprint);
   const architecture =
     options.architecture ?? (process.arch === "x64" ? "x86_64" : "arm64");
   const controlPort = requirePort(options.controlPort ?? 8100, "controlPort");
@@ -108,6 +118,11 @@ export function createWdaBuildPlan(
   const buildSettings = [
     "CODE_SIGNING_ALLOWED=NO",
     "COMPILER_INDEX_STORE_ENABLE=NO",
+    `CINDY_WDA_OWNER_FINGERPRINT=${ownerFingerprint}`,
+    // The bundled WDA scheme forwards this existing build setting into the
+    // independent Simulator runner environment. It lets crash recovery prove
+    // ownership without persisting or trusting a PID.
+    `UPGRADE_TIMESTAMP=${ownerFingerprint}`,
   ];
 
   return {

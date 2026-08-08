@@ -79,6 +79,8 @@ export interface RegisterLocalDbIpcOpts {
   cancelSessionOperations?: (sessionId: string) => Promise<void>;
   /** Release Host-owned runtime and ownership after task removal is revalidated. */
   cleanupRemovedSession?: (sessionId: string) => Promise<void>;
+  /** Reconcile persisted Host-owned task runtimes once the owner DB is readable. */
+  reconcilePersistedSessionRuntimes?: () => Promise<void>;
   /** Serialize startup tombstone cleanup with task restore/start/send operations. */
   withSessionLock?: <T>(sessionId: string, task: () => Promise<T>) => Promise<T>;
   /**
@@ -121,17 +123,35 @@ export function registerLocalDbIpc(opts: RegisterLocalDbIpcOpts = {}): void {
       const cancelSessionOperations = opts.cancelSessionOperations;
       const cleanupRemovedSession = opts.cleanupRemovedSession;
       const withSessionLock = opts.withSessionLock;
-      if (!cancelSessionOperations || !cleanupRemovedSession || !withSessionLock) return;
       const db = client.drizzle;
-      void reconcileSessionMediaRefsForDeletedSessions({
-        db,
-        isOwnerCurrent: isReadyOwnerCurrent,
-        withSessionLock,
-        quiesceSession: async (sessionId) => {
-          await cancelSessionOperations(sessionId);
-          await cleanupRemovedSession(sessionId);
-        },
-      }).catch((error) => {
+      void (async () => {
+        if (!isReadyOwnerCurrent()) return;
+        try {
+          await opts.reconcilePersistedSessionRuntimes?.();
+        } catch (error) {
+          log.warn('persisted task runtime reconcile failed', {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        if (
+          !isReadyOwnerCurrent() ||
+          !cancelSessionOperations ||
+          !cleanupRemovedSession ||
+          !withSessionLock
+        ) {
+          return;
+        }
+        await reconcileSessionMediaRefsForDeletedSessions({
+          db,
+          isOwnerCurrent: isReadyOwnerCurrent,
+          withSessionLock,
+          quiesceSession: async (sessionId) => {
+            await cancelSessionOperations(sessionId);
+            await cleanupRemovedSession(sessionId);
+          },
+        });
+      })().catch((error) => {
         log.warn('deleted task media reconcile failed', {
           userId,
           error: error instanceof Error ? error.message : String(error),

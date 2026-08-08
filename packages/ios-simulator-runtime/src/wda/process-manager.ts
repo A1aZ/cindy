@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 
 import { createNodeIOSSimulatorCommandRunner } from "../command-runner.js";
@@ -31,6 +33,11 @@ const WDA_INTERRUPT_GRACE_MS = 5_000;
 const WDA_TERMINATE_GRACE_MS = 1_000;
 const WDA_KILL_GRACE_MS = 500;
 const WDA_EXIT_POLL_MS = 25;
+const MAX_HOST_PROCESS_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+const MAX_CANDIDATE_PROCESS_BYTES = 64 * 1024;
+const HOST_PROCESS_COMMAND_TIMEOUT_MS = 2_000;
+const MAX_WDA_PROCESS_CANDIDATES = 128;
+const WDA_DIAGNOSTIC_CLEANUP_BUDGET_MS = 1_000;
 
 export interface WdaManagedProcess {
   readonly pid: number;
@@ -65,9 +72,28 @@ export interface WdaProcessManagerOptions {
   clock?: WdaProcessManagerClock;
   sourceManifest?: WdaSourceManifest;
   startTimeoutMs?: number;
+  orphanProcessCleaner?: WdaOrphanProcessCleaner;
   /** Host-owned boundary; WDA never receives artifact paths or process launchers. */
   nativeCapabilityProvider?: IOSSimulatorCapabilityProvider;
 }
+
+export interface WdaOrphanProcessCleanupInput {
+  cacheRoot: string;
+  instanceId: string;
+  simulatorUdid: string;
+  ownerFingerprint: string;
+  signal?: AbortSignal;
+  coreSimulatorRoot?: string;
+  xcodebuildExecutablePaths?: readonly string[];
+  /** Candidate argv paths inspected for conflict only; never grants kill authority. */
+  inspectedXcodebuildExecutablePaths?: readonly string[];
+  /** Start/reconcile rejects foreign same-device WDA; normal stop only removes Cindy-owned work. */
+  rejectForeign?: boolean;
+}
+
+export type WdaOrphanProcessCleaner = (
+  input: WdaOrphanProcessCleanupInput,
+) => Promise<void>;
 
 export interface WdaStartOptions {
   instanceId: string;
@@ -143,52 +169,936 @@ function defaultClock(): WdaProcessManagerClock {
   };
 }
 
+interface DarwinProcessSnapshotRow {
+  pid: number;
+  processGroupId: number;
+  command: string;
+}
+
+export interface WdaRunnerProcessCandidate {
+  pid: number;
+  processGroupId: number;
+  executablePath: string;
+}
+
+export interface WdaDiagnosticProcessCandidate {
+  pid: number;
+  processGroupId: number;
+  executablePath: string;
+}
+
+export interface WdaDetachedDiagnosticCleanupInput {
+  cacheRoot: string;
+  simulatorUdid: string;
+  signal?: AbortSignal;
+  xcodebuildExecutablePaths?: readonly string[];
+}
+
+function normalizeSimulatorUdid(value: string): string | null {
+  const normalized = value.trim().toUpperCase();
+  return /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(normalized)
+    ? normalized
+    : null;
+}
+
+/** Stable, non-secret owner marker embedded in the exact xcodebuild argv. */
+export function createWdaOwnerFingerprint(
+  cacheRoot: string,
+  instanceId: string,
+  simulatorUdid: string,
+): string {
+  const normalizedUdid = normalizeSimulatorUdid(simulatorUdid);
+  const normalizedInstanceId = instanceId.trim();
+  if (!normalizedUdid || !normalizedInstanceId) {
+    throw new WdaError(
+      "INVALID_CONFIGURATION",
+      "WDA orphan ownership requires an exact instance id and simulator UUID",
+    );
+  }
+  return createHash("sha256")
+    .update(path.resolve(cacheRoot))
+    .update("\0")
+    .update(normalizedInstanceId)
+    .update("\0")
+    .update(normalizedUdid)
+    .digest("hex");
+}
+
+function parseDarwinProcessSnapshot(
+  snapshot: string,
+): DarwinProcessSnapshotRow[] {
+  const rows: DarwinProcessSnapshotRow[] = [];
+  for (const line of snapshot.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const processGroupId = Number(match[2]);
+    if (!Number.isInteger(pid) || !Number.isInteger(processGroupId)) continue;
+    rows.push({ pid, processGroupId, command: match[3] });
+  }
+  return rows;
+}
+
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function currentProcessGroup(
+  rows: readonly DarwinProcessSnapshotRow[],
+): number | null {
+  return rows.find((row) => row.pid === process.pid)?.processGroupId ?? null;
+}
+
+function classifyCindyWdaControllers(
+  snapshot: string,
+  input: WdaOrphanProcessCleanupInput,
+): { ownedGroups: number[]; conflictingGroups: number[] } {
+  const normalizedUdid = normalizeSimulatorUdid(input.simulatorUdid);
+  if (!normalizedUdid || !/^[0-9a-f]{64}$/.test(input.ownerFingerprint)) {
+    return { ownedGroups: [], conflictingGroups: [] };
+  }
+  const executablePaths = [
+    ...(input.xcodebuildExecutablePaths ?? ["/usr/bin/xcodebuild"]),
+  ]
+    .map((value) => path.resolve(value))
+    .filter((value, index, values) => values.indexOf(value) === index);
+  if (executablePaths.length === 0) {
+    return { ownedGroups: [], conflictingGroups: [] };
+  }
+  const conflictExecutablePaths = [
+    ...(input.inspectedXcodebuildExecutablePaths ?? executablePaths),
+  ]
+    .map((value) => path.resolve(value))
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const root = path.resolve(input.cacheRoot);
+  const executablePattern = executablePaths
+    .map(escapeRegularExpression)
+    .join("|");
+  const projectPattern = `${escapeRegularExpression(path.join(root, "source"))}\\/[0-9a-f]{40}\\/WebDriverAgent\\.xcodeproj`;
+  const derivedPattern = `${escapeRegularExpression(path.join(root, "derived"))}\\/[0-9a-f]{64}`;
+  const basePattern =
+    `(?:${executablePattern}) -quiet -project ${projectPattern}` +
+    ` -scheme WebDriverAgentRunner` +
+    ` -destination platform=iOS Simulator,id=${normalizedUdid},arch=(?:arm64|x86_64)` +
+    ` -derivedDataPath ${derivedPattern}` +
+    ` (?:build-for-testing|test-without-building)` +
+    ` CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO`;
+  const legacyPattern = new RegExp(`^${basePattern}$`);
+  const ownedPattern = new RegExp(
+    `^${basePattern}` +
+      ` CINDY_WDA_OWNER_FINGERPRINT=${input.ownerFingerprint}` +
+      ` UPGRADE_TIMESTAMP=${input.ownerFingerprint}$`,
+  );
+  const schemePattern = /(?:^|\s)-scheme WebDriverAgentRunner(?=\s|$)/;
+  const destinationPattern = new RegExp(
+    `(?:^|\\s)-destination (?:platform=iOS Simulator,)?` +
+      `[^\\s]*id=${normalizedUdid}(?=,|\\s|$)`,
+  );
+  const rows = parseDarwinProcessSnapshot(snapshot);
+  const ownProcessGroup = currentProcessGroup(rows);
+  const ownedGroups = new Set<number>();
+  const conflictingGroups = new Set<number>();
+  for (const row of rows) {
+    const command = row.command.trim();
+    const owned = ownedPattern.test(command) || legacyPattern.test(command);
+    // A different profile/tool may use another project and DerivedData root.
+    // It is never kill-authorized, but a same-device WDA controller must block
+    // replacement startup until its Runner can be observed or it exits.
+    const related =
+      owned ||
+      (conflictExecutablePaths.some((executable) =>
+        command.startsWith(`${executable} `),
+      ) &&
+        schemePattern.test(command) &&
+        destinationPattern.test(command));
+    if (!related) continue;
+    if (
+      row.pid !== row.processGroupId ||
+      row.processGroupId <= 1 ||
+      row.processGroupId === ownProcessGroup
+    ) {
+      conflictingGroups.add(row.processGroupId);
+      continue;
+    }
+    if (owned) {
+      ownedGroups.add(row.processGroupId);
+    } else {
+      conflictingGroups.add(row.processGroupId);
+    }
+  }
+  return {
+    ownedGroups: [...ownedGroups],
+    conflictingGroups: [...conflictingGroups],
+  };
+}
+
+/**
+ * Select only Cindy-owned WDA xcodebuild group leaders for one persisted
+ * instance. A fingerprint mismatch is never treated as a legacy process.
+ */
+export function findCindyWdaOrphanProcessGroups(
+  snapshot: string,
+  input: WdaOrphanProcessCleanupInput,
+): number[] {
+  return classifyCindyWdaControllers(snapshot, input).ownedGroups;
+}
+
+/** Same-device WDA controllers whose exact Cindy ownership is not proven. */
+export function hasConflictingWdaController(
+  snapshot: string,
+  input: WdaOrphanProcessCleanupInput,
+): boolean {
+  return (
+    classifyCindyWdaControllers(snapshot, input).conflictingGroups.length > 0
+  );
+}
+
+/** Select exact Simulator runner executables before reading candidate-only env. */
+export function findCindyWdaRunnerCandidates(
+  snapshot: string,
+  input: WdaOrphanProcessCleanupInput,
+): WdaRunnerProcessCandidate[] {
+  const normalizedUdid = normalizeSimulatorUdid(input.simulatorUdid);
+  if (!normalizedUdid) return [];
+  const coreSimulatorRoot = path.resolve(
+    input.coreSimulatorRoot ??
+      path.join(os.homedir(), "Library", "Developer", "CoreSimulator"),
+  );
+  const runnerPattern = new RegExp(
+    `^${escapeRegularExpression(
+      path.join(
+        coreSimulatorRoot,
+        "Devices",
+        normalizedUdid,
+        "data",
+        "Containers",
+        "Bundle",
+        "Application",
+      ),
+    )}\\/[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}` +
+      `\\/WebDriverAgentRunner-Runner\\.app\\/WebDriverAgentRunner-Runner$`,
+  );
+  return parseDarwinProcessSnapshot(snapshot)
+    .filter((row) => runnerPattern.test(row.command.trim()))
+    .map((row) => ({
+      pid: row.pid,
+      processGroupId: row.processGroupId,
+      executablePath: row.command.trim(),
+    }));
+}
+
+function diagnosticExecutablePaths(
+  xcodebuildExecutablePaths: readonly string[],
+): Set<string> {
+  const paths = new Set<string>(["/usr/bin/xcrun"]);
+  for (const executable of xcodebuildExecutablePaths) {
+    const resolved = path.resolve(executable);
+    if (path.basename(resolved) !== "xcodebuild") continue;
+    const simctl = path.join(path.dirname(resolved), "simctl");
+    if (simctl !== "/usr/bin/simctl") paths.add(simctl);
+  }
+  return paths;
+}
+
+/** Select only exact xcrun/simctl executables before reading candidate argv. */
+export function findCindyWdaDiagnosticCandidates(
+  snapshot: string,
+  input: WdaDetachedDiagnosticCleanupInput,
+): WdaDiagnosticProcessCandidate[] {
+  const executablePaths = diagnosticExecutablePaths(
+    input.xcodebuildExecutablePaths ?? [],
+  );
+  return parseDarwinProcessSnapshot(snapshot)
+    .filter((row) => executablePaths.has(path.resolve(row.command.trim())))
+    .map((row) => ({
+      pid: row.pid,
+      processGroupId: row.processGroupId,
+      executablePath: row.command.trim(),
+    }));
+}
+
+/**
+ * Prove that one exact candidate is a same-device diagnostic writing only
+ * beneath this profile's WDA DerivedData root.
+ */
+export function matchesCindyWdaDiagnosticCommand(
+  snapshot: string,
+  candidate: WdaDiagnosticProcessCandidate,
+  input: WdaDetachedDiagnosticCleanupInput,
+): boolean {
+  const normalizedUdid = normalizeSimulatorUdid(input.simulatorUdid);
+  if (!normalizedUdid) return false;
+  const rows = parseDarwinProcessSnapshot(snapshot);
+  if (rows.length !== 1) return false;
+  const row = rows[0];
+  const commandPrefix = `${candidate.executablePath} `;
+  if (
+    row.pid !== candidate.pid ||
+    row.processGroupId !== candidate.processGroupId ||
+    !row.command.startsWith(commandPrefix)
+  ) {
+    return false;
+  }
+
+  const argv = row.command.slice(commandPrefix.length);
+  const subcommand =
+    candidate.executablePath === "/usr/bin/xcrun"
+      ? "simctl diagnose"
+      : "diagnose";
+  if (argv !== subcommand && !argv.startsWith(`${subcommand} `)) return false;
+
+  const udidPattern = new RegExp(
+    `(?:^|\\s)--udid=${escapeRegularExpression(normalizedUdid)}(?=\\s|$)`,
+    "gi",
+  );
+  if ([...argv.matchAll(udidPattern)].length !== 1) return false;
+
+  const derivedRoot = path.join(path.resolve(input.cacheRoot), "derived");
+  const outputPattern = new RegExp(
+    `(?:^|\\s)--output(?:=|\\s+)${escapeRegularExpression(derivedRoot)}` +
+      `\\/[0-9a-f]{64}(?=\\/|\\s|$)`,
+    "g",
+  );
+  return [...argv.matchAll(outputPattern)].length === 1;
+}
+
+/** Verify the candidate PID still owns the exact Runner and owner env marker. */
+export function matchesCindyWdaRunnerEnvironment(
+  snapshot: string,
+  candidate: WdaRunnerProcessCandidate,
+  ownerFingerprint: string,
+): boolean {
+  const rows = parseDarwinProcessSnapshot(snapshot);
+  if (rows.length !== 1) return false;
+  const row = rows[0];
+  if (
+    row.pid !== candidate.pid ||
+    row.processGroupId !== candidate.processGroupId ||
+    !row.command.startsWith(`${candidate.executablePath} `)
+  ) {
+    return false;
+  }
+  const matches = environmentValues(row.command, "UPGRADE_TIMESTAMP");
+  return matches.length === 1 && matches[0] === ownerFingerprint;
+}
+
+function environmentValues(command: string, key: string): string[] {
+  const pattern = new RegExp(
+    `(?:^|\\s)${escapeRegularExpression(key)}=([^\\s]*)(?=\\s|$)`,
+    "g",
+  );
+  return [...command.matchAll(pattern)].map((match) => match[1] ?? "");
+}
+
+/** Narrow migration path for Cindy WDA runners launched before owner markers. */
+export function matchesLegacyCindyWdaRunnerEnvironment(
+  snapshot: string,
+  candidate: WdaRunnerProcessCandidate,
+  input: WdaOrphanProcessCleanupInput,
+): boolean {
+  const rows = parseDarwinProcessSnapshot(snapshot);
+  if (rows.length !== 1) return false;
+  const row = rows[0];
+  const ownerMarkers = environmentValues(row.command, "UPGRADE_TIMESTAMP");
+  const simulatorUdids = environmentValues(row.command, "SIMULATOR_UDID");
+  const schemeNames = environmentValues(row.command, "XCODE_SCHEME_NAME");
+  if (
+    row.pid !== candidate.pid ||
+    row.processGroupId !== candidate.processGroupId ||
+    !row.command.startsWith(`${candidate.executablePath} `) ||
+    ownerMarkers.length !== 1 ||
+    ownerMarkers[0] !== "" ||
+    simulatorUdids.length !== 1 ||
+    simulatorUdids[0]?.toUpperCase() !==
+      input.simulatorUdid.trim().toUpperCase() ||
+    schemeNames.length !== 1 ||
+    schemeNames[0] !== "WebDriverAgentRunner"
+  ) {
+    return false;
+  }
+  const derivedRoot = escapeRegularExpression(
+    path.join(path.resolve(input.cacheRoot), "derived"),
+  );
+  const legacyDerivedPath = new RegExp(
+    `(?:^|\\s)DYLD_LIBRARY_PATH=${derivedRoot}\\/[0-9a-f]{64}` +
+      `\\/Build\\/Products\\/Debug-iphonesimulator[^\\s]*(?=\\s|$)`,
+    "g",
+  );
+  return [...row.command.matchAll(legacyDerivedPath)].length === 1;
+}
+
+function startCancelledError(): WdaError {
+  return new WdaError(
+    "START_CANCELLED",
+    "WebDriverAgent startup was cancelled",
+  );
+}
+
+function throwIfCleanupAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw startCancelledError();
+}
+
+function readBoundedHostCommand(
+  args: readonly string[],
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<{ output: string; exitCode: number | null }> {
+  return new Promise((resolve, reject) => {
+    throwIfCleanupAborted(signal);
+    const child = spawn("/bin/ps", [...args], {
+      env: { LANG: "C", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+      shell: false,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      child.kill("SIGKILL");
+      finish(() => reject(startCancelledError()));
+    };
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() =>
+        reject(
+          new WdaError(
+            "TERMINATION_FAILED",
+            "The host process inventory timed out during WDA recovery",
+          ),
+        ),
+      );
+    }, HOST_PROCESS_COMMAND_TIMEOUT_MS);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      outputBytes += chunk.byteLength;
+      if (outputBytes > maxBytes) {
+        child.kill("SIGKILL");
+        finish(() =>
+          reject(
+            new WdaError(
+              "TERMINATION_FAILED",
+              "The host process inventory exceeded the WDA recovery limit",
+            ),
+          ),
+        );
+        return;
+      }
+      output += chunk.toString("utf8");
+    });
+    child.once("error", () =>
+      finish(() =>
+        reject(
+          new WdaError(
+            "TERMINATION_FAILED",
+            "The host process inventory for WDA recovery is unavailable",
+          ),
+        ),
+      ),
+    );
+    child.once("close", (code) =>
+      finish(() => resolve({ output, exitCode: code })),
+    );
+  });
+}
+
+async function readDarwinProcessSnapshot(
+  signal?: AbortSignal,
+): Promise<string> {
+  const result = await readBoundedHostCommand(
+    ["-axo", "pid=,pgid=,comm="],
+    MAX_HOST_PROCESS_SNAPSHOT_BYTES,
+    signal,
+  );
+  if (result.exitCode !== 0) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "The host process inventory for WDA recovery failed",
+    );
+  }
+  return result.output;
+}
+
+async function readDarwinCandidateCommand(
+  pid: number,
+  includeEnvironment: boolean,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const result = await readBoundedHostCommand(
+    [
+      ...(includeEnvironment ? ["eww"] : []),
+      "-ww",
+      "-p",
+      String(pid),
+      "-o",
+      "pid=,pgid=,command=",
+    ],
+    MAX_CANDIDATE_PROCESS_BYTES,
+    signal,
+  );
+  if (result.exitCode === 0) return result.output;
+  if (result.exitCode === 1) return null;
+  throw new WdaError(
+    "TERMINATION_FAILED",
+    "A candidate WebDriverAgent process could not be inspected",
+  );
+}
+
+interface WdaProcessInventorySnapshot {
+  processSnapshot: string;
+  controllerSnapshot: string;
+  inspectedXcodebuildExecutablePaths: string[];
+}
+
+function isAllowlistedXcodebuildCandidate(
+  executablePath: string,
+  selectedPaths: ReadonlySet<string>,
+): boolean {
+  const resolved = path.resolve(executablePath);
+  if (selectedPaths.has(resolved) || resolved === "/usr/bin/xcodebuild") {
+    return true;
+  }
+  return (
+    /^\/Applications\/[^/]+\.app\/Contents\/Developer\/usr\/bin\/xcodebuild$/.test(
+      resolved,
+    ) || resolved === "/Library/Developer/CommandLineTools/usr/bin/xcodebuild"
+  );
+}
+
+async function readWdaProcessInventory(
+  input: WdaOrphanProcessCleanupInput,
+): Promise<WdaProcessInventorySnapshot> {
+  // The global pass reads executable paths only. Full argv/environment is
+  // requested by PID only after an exact xcodebuild/Runner path match, so
+  // unrelated process credentials never enter the Cindy process.
+  const processSnapshot = await readDarwinProcessSnapshot(input.signal);
+  const executablePaths = new Set(
+    (input.xcodebuildExecutablePaths ?? []).map((value) => path.resolve(value)),
+  );
+  const rows = parseDarwinProcessSnapshot(processSnapshot);
+  const controllerRows: string[] = [];
+  const ownRow = rows.find((row) => row.pid === process.pid);
+  if (ownRow) {
+    controllerRows.push(
+      `${ownRow.pid} ${ownRow.processGroupId} ${ownRow.command}`,
+    );
+  }
+  const candidates = rows.filter((row) =>
+    isAllowlistedXcodebuildCandidate(row.command.trim(), executablePaths),
+  );
+  if (candidates.length > MAX_WDA_PROCESS_CANDIDATES) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "Too many xcodebuild processes were present for safe WDA recovery",
+    );
+  }
+  const commands = await Promise.all(
+    candidates.map((row) =>
+      readDarwinCandidateCommand(row.pid, false, input.signal),
+    ),
+  );
+  for (const command of commands) {
+    if (command !== null) controllerRows.push(command.trim());
+  }
+  return {
+    processSnapshot,
+    controllerSnapshot: controllerRows.join("\n"),
+    inspectedXcodebuildExecutablePaths: [
+      ...new Set(candidates.map((row) => path.resolve(row.command.trim()))),
+    ],
+  };
+}
+
+async function readSelectedXcodebuildPaths(
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const configured = process.env.DEVELOPER_DIR?.trim();
+  if (configured && path.isAbsolute(configured)) {
+    return [
+      "/usr/bin/xcodebuild",
+      path.join(configured, "usr", "bin", "xcodebuild"),
+    ];
+  }
+  const result = await new Promise<{ output: string; exitCode: number | null }>(
+    (resolve, reject) => {
+      throwIfCleanupAborted(signal);
+      const child = spawn("/usr/bin/xcode-select", ["--print-path"], {
+        env: { LANG: "C", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+        shell: false,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      let output = "";
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => {
+        child.kill("SIGKILL");
+        finish(() => reject(startCancelledError()));
+      };
+      const timeout = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(() =>
+          reject(
+            new WdaError(
+              "TERMINATION_FAILED",
+              "The selected Xcode path timed out during WDA recovery",
+            ),
+          ),
+        );
+      }, HOST_PROCESS_COMMAND_TIMEOUT_MS);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      child.stdout?.on("data", (chunk: Buffer) => {
+        if (settled) return;
+        if (
+          Buffer.byteLength(output) + chunk.byteLength >
+          MAX_CANDIDATE_PROCESS_BYTES
+        ) {
+          child.kill("SIGKILL");
+          finish(() =>
+            reject(
+              new WdaError(
+                "TERMINATION_FAILED",
+                "The selected Xcode path exceeded the WDA recovery limit",
+              ),
+            ),
+          );
+          return;
+        }
+        output += chunk.toString("utf8");
+      });
+      child.once("error", () =>
+        finish(() =>
+          reject(
+            new WdaError(
+              "TERMINATION_FAILED",
+              "The selected Xcode path is unavailable during WDA recovery",
+            ),
+          ),
+        ),
+      );
+      child.once("close", (exitCode) =>
+        finish(() => resolve({ output, exitCode })),
+      );
+    },
+  );
+  const developerDirectory = result.output.trim();
+  if (result.exitCode !== 0 || !path.isAbsolute(developerDirectory)) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "The selected Xcode path could not be verified during WDA recovery",
+    );
+  }
+  return [
+    "/usr/bin/xcodebuild",
+    path.join(developerDirectory, "usr", "bin", "xcodebuild"),
+  ];
+}
+
+function isDetachedProcessGroupAlive(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException | null)?.code === "EPERM";
+  }
+}
+
+async function waitForDetachedProcessGroupExit(
+  processGroupId: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const deadline = Date.now() + WDA_KILL_GRACE_MS;
+  while (isDetachedProcessGroupAlive(processGroupId)) {
+    throwIfCleanupAborted(signal);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(WDA_EXIT_POLL_MS, remaining)),
+    );
+  }
+  return true;
+}
+
+async function classifyRunnerCandidates(
+  snapshot: string,
+  input: WdaOrphanProcessCleanupInput,
+): Promise<{ ownedGroups: number[]; conflict: boolean }> {
+  const candidates = findCindyWdaRunnerCandidates(snapshot, input);
+  if (candidates.length > MAX_WDA_PROCESS_CANDIDATES) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "Too many WebDriverAgent runners were present for safe recovery",
+    );
+  }
+  const ownProcessGroup = currentProcessGroup(
+    parseDarwinProcessSnapshot(snapshot),
+  );
+  const ownedGroups = new Set<number>();
+  let conflict = false;
+  const environments = await Promise.all(
+    candidates.map((candidate) =>
+      readDarwinCandidateCommand(candidate.pid, true, input.signal),
+    ),
+  );
+  for (const [index, candidate] of candidates.entries()) {
+    const environment = environments[index];
+    if (environment == null) continue;
+    const owned =
+      matchesCindyWdaRunnerEnvironment(
+        environment,
+        candidate,
+        input.ownerFingerprint,
+      ) ||
+      matchesLegacyCindyWdaRunnerEnvironment(environment, candidate, input);
+    if (!owned) {
+      conflict = true;
+      continue;
+    }
+    if (
+      candidate.pid !== candidate.processGroupId ||
+      candidate.processGroupId <= 1 ||
+      candidate.processGroupId === ownProcessGroup
+    ) {
+      conflict = true;
+      continue;
+    }
+    ownedGroups.add(candidate.processGroupId);
+  }
+  return { ownedGroups: [...ownedGroups], conflict };
+}
+
+async function inspectWdaProcessOwnership(
+  input: WdaOrphanProcessCleanupInput,
+): Promise<{ ownedGroups: number[]; conflict: boolean }> {
+  const snapshot = await readWdaProcessInventory(input);
+  const controllers = classifyCindyWdaControllers(snapshot.controllerSnapshot, {
+    ...input,
+    inspectedXcodebuildExecutablePaths:
+      snapshot.inspectedXcodebuildExecutablePaths,
+  });
+  const runners = await classifyRunnerCandidates(
+    snapshot.processSnapshot,
+    input,
+  );
+  return {
+    ownedGroups: [
+      ...new Set([...controllers.ownedGroups, ...runners.ownedGroups]),
+    ],
+    conflict: controllers.conflictingGroups.length > 0 || runners.conflict,
+  };
+}
+
+async function revalidateWdaProcessGroupImmediately(
+  processGroupId: number,
+  input: WdaOrphanProcessCleanupInput,
+): Promise<boolean> {
+  const controller = await readDarwinCandidateCommand(
+    processGroupId,
+    false,
+    input.signal,
+  );
+  if (
+    controller !== null &&
+    findCindyWdaOrphanProcessGroups(controller, input).includes(processGroupId)
+  ) {
+    return true;
+  }
+
+  const snapshot = await readDarwinProcessSnapshot(input.signal);
+  const candidate = findCindyWdaRunnerCandidates(snapshot, input).find(
+    (value) =>
+      value.pid === processGroupId && value.processGroupId === processGroupId,
+  );
+  if (!candidate) return false;
+  const environment = await readDarwinCandidateCommand(
+    candidate.pid,
+    true,
+    input.signal,
+  );
+  return (
+    environment !== null &&
+    (matchesCindyWdaRunnerEnvironment(
+      environment,
+      candidate,
+      input.ownerFingerprint,
+    ) ||
+      matchesLegacyCindyWdaRunnerEnvironment(environment, candidate, input))
+  );
+}
+
+async function terminateRevalidatedWdaProcessGroups(
+  initiallyOwnedGroups: readonly number[],
+  input: WdaOrphanProcessCleanupInput,
+): Promise<void> {
+  if (initiallyOwnedGroups.length === 0) return;
+  // Re-read each exact leader immediately before its own signal. One slow
+  // unrelated candidate cannot create a PID/PGID reuse window for another.
+  const groups = (
+    await Promise.all(
+      [...new Set(initiallyOwnedGroups)].map(async (processGroupId) => {
+        if (
+          !(await revalidateWdaProcessGroupImmediately(processGroupId, input))
+        ) {
+          return null;
+        }
+        throwIfCleanupAborted(input.signal);
+        try {
+          process.kill(-processGroupId, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException | null)?.code !== "ESRCH") {
+            throw new WdaError(
+              "TERMINATION_FAILED",
+              "A recovered WebDriverAgent process group could not be terminated",
+            );
+          }
+        }
+        return processGroupId;
+      }),
+    )
+  ).filter((value): value is number => value !== null);
+  const exited = await Promise.all(
+    groups.map((processGroupId) =>
+      waitForDetachedProcessGroupExit(processGroupId, input.signal),
+    ),
+  );
+  if (exited.some((value) => !value)) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "A recovered WebDriverAgent process group is still running",
+    );
+  }
+}
+
+/** Recover detached WDA groups after an ungraceful Desktop termination. */
+export const cleanupOrphanedWdaProcessGroups: WdaOrphanProcessCleaner = async (
+  input,
+) => {
+  if (process.platform !== "darwin") return;
+  throwIfCleanupAborted(input.signal);
+  const xcodebuildExecutablePaths =
+    input.xcodebuildExecutablePaths ??
+    (await readSelectedXcodebuildPaths(input.signal));
+  const normalizedInput = { ...input, xcodebuildExecutablePaths };
+  const initial = await inspectWdaProcessOwnership(normalizedInput);
+  await terminateRevalidatedWdaProcessGroups(
+    initial.ownedGroups,
+    normalizedInput,
+  );
+
+  const final = await inspectWdaProcessOwnership(normalizedInput);
+  if (
+    final.ownedGroups.length > 0 ||
+    (input.rejectForeign !== false && final.conflict)
+  ) {
+    throw new WdaError(
+      "TERMINATION_FAILED",
+      "Another or unrecovered WebDriverAgent runtime still owns this simulator",
+    );
+  }
+  await cleanupDetachedDiagnostics({
+    cacheRoot: input.cacheRoot,
+    simulatorUdid: input.simulatorUdid,
+    signal: input.signal,
+    xcodebuildExecutablePaths,
+  });
+};
+
 /**
  * XCTest may detach its `simctl diagnose` helper when Simulator.app exits.
  * Limit cleanup to helpers carrying both this manager's cache root and UDID so
  * user-owned diagnostics for other simulators are never touched.
  */
 async function cleanupDetachedDiagnostics(
-  cacheRoot: string,
-  simulatorUdid: string,
+  input: WdaDetachedDiagnosticCleanupInput,
 ): Promise<void> {
   if (process.platform !== "darwin") return;
-  await new Promise<void>((resolve) => {
-    const child = spawn("/bin/ps", ["-axo", "pid=,command="], {
-      shell: false,
-      stdio: ["ignore", "pipe", "ignore"],
+  const budgetController = new AbortController();
+  const onParentAbort = () => budgetController.abort();
+  input.signal?.addEventListener("abort", onParentAbort, { once: true });
+  if (input.signal?.aborted) onParentAbort();
+  const budgetTimer = setTimeout(
+    () => budgetController.abort(),
+    WDA_DIAGNOSTIC_CLEANUP_BUDGET_MS,
+  );
+  budgetTimer.unref();
+  const signal = budgetController.signal;
+  try {
+    throwIfCleanupAborted(signal);
+    const xcodebuildExecutablePaths =
+      input.xcodebuildExecutablePaths ??
+      (await readSelectedXcodebuildPaths(signal));
+    const normalizedInput = { ...input, xcodebuildExecutablePaths };
+    const snapshot = await readDarwinProcessSnapshot(signal);
+    const candidates = findCindyWdaDiagnosticCandidates(
+      snapshot,
+      normalizedInput,
+    );
+    if (candidates.length > MAX_WDA_PROCESS_CANDIDATES) return;
+
+    const commands = await Promise.all(
+      candidates.map((candidate) =>
+        readDarwinCandidateCommand(candidate.pid, false, signal),
+      ),
+    );
+    const owned = candidates.filter((candidate, index) => {
+      const command = commands[index];
+      return (
+        command !== null &&
+        matchesCindyWdaDiagnosticCommand(command, candidate, normalizedInput)
+      );
     });
-    let output = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      output += chunk.toString("utf8");
-    });
-    const finish = () => {
-      const root = path.resolve(cacheRoot);
-      for (const line of output.split("\n")) {
-        const match = line.trim().match(/^(\d+)\s+(.*)$/);
-        if (!match) continue;
-        const pid = Number(match[1]);
-        const command = match[2];
+
+    await Promise.all(
+      owned.map(async (candidate) => {
+        throwIfCleanupAborted(signal);
+        // Re-read immediately before signalling. A vanished or PID-reused
+        // candidate receives no signal.
+        const current = await readDarwinCandidateCommand(
+          candidate.pid,
+          false,
+          signal,
+        );
         if (
-          !Number.isInteger(pid) ||
-          pid === process.pid ||
-          !command.includes("simctl diagnose") ||
-          !command.includes(`--udid=${simulatorUdid}`) ||
-          !command.includes(`${root}/derived/`)
+          current === null ||
+          !matchesCindyWdaDiagnosticCommand(current, candidate, normalizedInput)
         ) {
-          continue;
+          return;
         }
         try {
-          process.kill(pid, "SIGTERM");
+          process.kill(candidate.pid, "SIGTERM");
         } catch {
-          // It exited between ps and kill; cleanup is already complete.
+          // It exited between the exact revalidation and signal.
         }
-      }
-      resolve();
-    };
-    child.once("error", () => resolve());
-    child.once("close", finish);
-  });
+      }),
+    );
+  } catch {
+    // Diagnostics are best-effort after WDA ownership itself has converged,
+    // but an explicit startup cancellation must still unwind immediately.
+    if (input.signal?.aborted) throw startCancelledError();
+  } finally {
+    clearTimeout(budgetTimer);
+    input.signal?.removeEventListener("abort", onParentAbort);
+  }
 }
 
 /** Spawn long-running Xcode processes without a shell and with the plan's allowlisted env. */
@@ -377,6 +1287,53 @@ export class WdaProcessManager {
     this.#options.nativeCapabilityProvider?.abortOperationsForExit?.();
   }
 
+  async cleanupOrphaned(
+    instanceId: string,
+    simulatorUdid: string,
+  ): Promise<void> {
+    const stopping = this.#stopping.get(instanceId);
+    if (stopping) await stopping;
+    const starting = this.#starting.get(instanceId);
+    if (starting) await starting.promise?.catch(() => undefined);
+    const running = this.#running.get(instanceId);
+    if (running) {
+      if (
+        running.simulatorUdid.toUpperCase() !==
+        simulatorUdid.trim().toUpperCase()
+      ) {
+        throw new WdaError(
+          "INVALID_CONFIGURATION",
+          "The running WebDriverAgent instance is bound to another simulator",
+        );
+      }
+      return;
+    }
+    await this.#cleanupOrphaned(instanceId, simulatorUdid);
+  }
+
+  #cleanupOrphaned(
+    instanceId: string,
+    simulatorUdid: string,
+    signal?: AbortSignal,
+    rejectForeign = true,
+  ): Promise<void> {
+    const ownerFingerprint = createWdaOwnerFingerprint(
+      this.#options.cacheRoot,
+      instanceId,
+      simulatorUdid,
+    );
+    return (
+      this.#options.orphanProcessCleaner ?? cleanupOrphanedWdaProcessGroups
+    )({
+      cacheRoot: this.#options.cacheRoot,
+      instanceId,
+      simulatorUdid,
+      ownerFingerprint,
+      signal,
+      rejectForeign,
+    });
+  }
+
   start(options: WdaStartOptions): Promise<WdaRunningInstance> {
     const stopping = this.#stopping.get(options.instanceId);
     if (stopping) return stopping.then(() => this.start(options));
@@ -454,6 +1411,16 @@ export class WdaProcessManager {
     operation: PendingWdaOperation,
   ): Promise<WdaRunningInstance> {
     const signal = operation.controller.signal;
+    const ownerFingerprint = createWdaOwnerFingerprint(
+      this.#options.cacheRoot,
+      options.instanceId,
+      options.simulatorUdid,
+    );
+    await this.#awaitStartOperation(
+      this.#cleanupOrphaned(options.instanceId, options.simulatorUdid, signal),
+      signal,
+    );
+    this.#throwIfStartCancelled(signal);
     const prepared = await this.#awaitStartOperation(
       prepareWdaSource({
         archivePath: this.#options.archivePath,
@@ -490,6 +1457,7 @@ export class WdaProcessManager {
       checkoutPath: prepared.checkoutPath,
       derivedDataPath,
       simulatorUdid: options.simulatorUdid,
+      ownerFingerprint,
       architecture: options.architecture,
       controlPort,
       mjpegPort,
@@ -509,6 +1477,13 @@ export class WdaProcessManager {
       );
     }
 
+    // The build may run for minutes. Recheck immediately before launching the
+    // Runner so a foreign same-device WDA that appeared meanwhile blocks this
+    // replacement instead of creating two competing sessions.
+    await this.#awaitStartOperation(
+      this.#cleanupOrphaned(options.instanceId, options.simulatorUdid, signal),
+      signal,
+    );
     this.#throwIfStartCancelled(signal);
     const process = this.#launcher.launch(plan.launch);
     operation.process = process;
@@ -653,6 +1628,12 @@ export class WdaProcessManager {
         ?.stop(options.instanceId)
         .catch(() => undefined);
       await this.#terminatePendingProcess(options.instanceId, operation);
+      await this.#cleanupOrphaned(
+        options.instanceId,
+        options.simulatorUdid,
+        undefined,
+        false,
+      );
       if (error instanceof WdaError) throw error;
       throw new WdaError(
         "LAUNCH_FAILED",
@@ -785,10 +1766,10 @@ export class WdaProcessManager {
     ) {
       return;
     }
-    retiring.finalizing ??= cleanupDetachedDiagnostics(
-      this.#options.cacheRoot,
-      retiring.simulatorUdid,
-    );
+    retiring.finalizing ??= cleanupDetachedDiagnostics({
+      cacheRoot: this.#options.cacheRoot,
+      simulatorUdid: retiring.simulatorUdid,
+    });
     await retiring.finalizing;
     if (
       this.#retiring.get(instanceId) === retiring &&
@@ -832,7 +1813,10 @@ export class WdaProcessManager {
     if (retiring?.process === process) {
       await this.#finalizeRetiringProcess(instanceId, retiring);
     } else {
-      await cleanupDetachedDiagnostics(this.#options.cacheRoot, simulatorUdid);
+      await cleanupDetachedDiagnostics({
+        cacheRoot: this.#options.cacheRoot,
+        simulatorUdid,
+      });
     }
     this.#liveProcesses.delete(process);
   }
@@ -871,6 +1855,7 @@ export class WdaProcessManager {
 
   async #stop(instanceId: string): Promise<void> {
     const pending = this.#starting.get(instanceId);
+    let cleanupUdid = pending?.simulatorUdid;
     if (pending && !pending.committed) {
       pending.controller.abort();
       const nativeStop = this.#options.nativeCapabilityProvider
@@ -883,6 +1868,7 @@ export class WdaProcessManager {
     }
     const retiring = this.#retiring.get(instanceId);
     if (retiring) {
+      cleanupUdid = retiring.simulatorUdid;
       await this.#terminateProcessGroup(
         instanceId,
         retiring.simulatorUdid,
@@ -890,7 +1876,13 @@ export class WdaProcessManager {
       );
     }
     const running = this.#running.get(instanceId);
-    if (!running) return;
+    if (!running) {
+      if (cleanupUdid) {
+        await this.#cleanupOrphaned(instanceId, cleanupUdid, undefined, false);
+      }
+      return;
+    }
+    cleanupUdid = running.simulatorUdid;
     this.#running.delete(instanceId);
     running.unsubscribeOutput();
     await this.#options.nativeCapabilityProvider
@@ -906,5 +1898,6 @@ export class WdaProcessManager {
       running.simulatorUdid,
       running.process,
     );
+    await this.#cleanupOrphaned(instanceId, cleanupUdid, undefined, false);
   }
 }

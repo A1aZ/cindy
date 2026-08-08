@@ -22,9 +22,10 @@ export interface ReconcileDeletedSessionMediaResult {
 }
 
 /**
- * Retry session-ref cleanup from durable soft-delete tombstones. A process
- * restart guarantees old media producers are gone; the atomic ledger guard
- * still preserves refs if a task was restored before this pass reaches it.
+ * Retry runtime quiescence and session-ref cleanup from durable soft-delete
+ * tombstones. Archived Simulator ownership is reconciled in one bounded Host
+ * registry pass before this media cleanup runs. The atomic ledger guard still
+ * preserves refs unless the task remains deleted when the DELETE executes.
  */
 export async function reconcileSessionMediaRefsForDeletedSessions(
   options: ReconcileDeletedSessionMediaOptions,

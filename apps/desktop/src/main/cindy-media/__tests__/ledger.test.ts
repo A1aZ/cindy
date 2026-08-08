@@ -415,29 +415,33 @@ describe('removeSessionRefsIfDeleted(软删墓碑原子门禁)', () => {
 });
 
 describe('reconcileSessionMediaRefsForDeletedSessions(持久重试)', () => {
-  it('只重试 deleted 任务并且重复运行幂等', async () => {
+  it('only retries deleted tasks and remains idempotent', async () => {
     await seedSession('deleted-1', 'deleted');
     await seedSession('archived-1', 'archived');
     await seedBlob(HASH_A);
     await ledger.addRef({ hash: HASH_A, refKind: 'session-attachment', refId: 'deleted-1' }, db);
     await ledger.addRef({ hash: HASH_A, refKind: 'session-attachment', refId: 'archived-1' }, db);
+    const quiesceSession = vi.fn(async () => undefined);
 
     await expect(
       sessionCleanup.reconcileSessionMediaRefsForDeletedSessions({
         db,
         isOwnerCurrent: () => true,
         withSessionLock: async (_sessionId, task) => task(),
-        quiesceSession: async () => undefined,
+        quiesceSession,
       }),
     ).resolves.toMatchObject({ scanned: 1, removed: 1, failed: 0 });
+    expect(quiesceSession).toHaveBeenCalledWith('deleted-1');
+    quiesceSession.mockClear();
     await expect(
       sessionCleanup.reconcileSessionMediaRefsForDeletedSessions({
         db,
         isOwnerCurrent: () => true,
         withSessionLock: async (_sessionId, task) => task(),
-        quiesceSession: async () => undefined,
+        quiesceSession,
       }),
     ).resolves.toMatchObject({ scanned: 1, removed: 0, failed: 0 });
+    expect(quiesceSession).toHaveBeenCalledTimes(1);
     expect(db.select().from(schema.mediaRefs).all()).toMatchObject([{ refId: 'archived-1' }]);
   });
 

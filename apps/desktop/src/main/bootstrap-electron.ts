@@ -310,6 +310,7 @@ import {
   cleanupIOSSimulatorRemovedSession,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
+  reconcilePersistedIOSSimulatorOwnership,
 } from './mcp-integrations/ios-simulator';
 import { abortIOSSimulatorOperationsForExit } from './mcp-integrations/ios-simulator-exit';
 import {
@@ -6378,6 +6379,7 @@ app.on('ready', async () => {
   registerLocalDbIpc({
     cancelSessionOperations: cancelIOSSimulatorSessionOperations,
     cleanupRemovedSession: cleanupIOSSimulatorRemovedSession,
+    reconcilePersistedSessionRuntimes: reconcilePersistedIOSSimulatorOwnership,
     withSessionLock: withSendToSessionLock,
     isOwnerCurrent: (userId) =>
       isLocalDbOwnerCurrent(authManager.getAuthState(), userId, isAppSessionBoundaryPending()),

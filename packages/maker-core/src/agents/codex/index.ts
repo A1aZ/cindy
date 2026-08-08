@@ -5817,8 +5817,7 @@ export class CodexAgent extends BaseAgent {
       });
       if (hostPolicy?.decision === 'deny') {
         log.warn('command execution denied by host policy', {
-          command: params.command ?? '',
-          cwd: params.cwd ?? null,
+          requestId: params.approvalId ?? params.itemId,
           reason: hostPolicy.reason,
         });
         return { decision: 'decline' };
@@ -8451,7 +8450,6 @@ export class CodexAgent extends BaseAgent {
             discardPendingSpawnLineageIds(reservedChildThreadIds);
             log.warn('command execution interrupted by host policy', {
               turnId: params.turnId,
-              command: shellCommand.command,
               reason: hostPolicy.reason,
             });
             void host

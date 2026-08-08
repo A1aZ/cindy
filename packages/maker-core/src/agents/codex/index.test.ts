@@ -282,6 +282,18 @@ function createNoopLogger(): Logger {
   return logger;
 }
 
+function createLoggerSpy(): { logger: Logger; warn: ReturnType<typeof vi.fn> } {
+  const warn = vi.fn();
+  const logger: Logger = {
+    ...createNoopLogger(),
+    warn,
+    child() {
+      return logger;
+    },
+  };
+  return { logger, warn };
+}
+
 function createDeps(
   runtimeConfig: AgentDeps['runtimeConfig'] = {},
   overrides: Partial<AgentDeps> = {},
@@ -12640,11 +12652,12 @@ describe('CodexAgent MCP thread context hooks', () => {
   });
 
   it('applies a host shell-command denial before Full access auto-approval', async () => {
+    const { logger, warn } = createLoggerSpy();
     const policy = vi.fn(() => ({
       decision: 'deny' as const,
       reason: 'use the embedded iOS Simulator',
     }));
-    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
+    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy, logger }));
     const host = installFakeHost(agent);
     const handle = await agent.startSession({
       sessionId: 'session-command-host-policy',
@@ -12660,30 +12673,37 @@ describe('CodexAgent MCP thread context hooks', () => {
     }));
     handle.setInteractionResolver(resolver);
 
+    const command = 'API_TOKEN=super-secret open -a Simulator';
     const result = await handlers.commandExecutionApproval({
       threadId: 'start-thread-id',
       turnId: 'turn-1',
       itemId: 'cmd-1',
-      command: 'open -a Simulator',
+      command,
       cwd: '/repo',
     });
 
     expect(policy).toHaveBeenCalledWith({
       agentKind: 'codex',
-      command: 'open -a Simulator',
+      command,
       cwd: '/repo',
     });
     expect(resolver).not.toHaveBeenCalled();
     expect(result).toEqual({ decision: 'decline' });
+    expect(warn).toHaveBeenCalledWith('command execution denied by host policy', {
+      requestId: 'cmd-1',
+      reason: 'use the embedded iOS Simulator',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('super-secret');
     await handle.close();
   });
 
   it('interrupts an already-started absolute-path shell bypass as a fail-safe', async () => {
+    const { logger, warn } = createLoggerSpy();
     const policy = vi.fn(() => ({
       decision: 'deny' as const,
       reason: 'use the embedded iOS Simulator',
     }));
-    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
+    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy, logger }));
     const host = installFakeHost(agent, (method) =>
       method === Method.TurnInterrupt ? {} : undefined,
     );
@@ -12696,26 +12716,32 @@ describe('CodexAgent MCP thread context hooks', () => {
     const handlers = host.getThreadHandlers();
     if (!handlers?.itemStarted) throw new Error('expected itemStarted handler');
 
+    const command = 'API_TOKEN=super-secret /usr/bin/open -a Simulator';
     handlers.itemStarted({
       threadId: 'start-thread-id',
       turnId: 'turn-1',
       item: {
         id: 'cmd-absolute',
         type: 'commandExecution',
-        command: '/usr/bin/open -a Simulator',
+        command,
         cwd: '/repo',
       },
     });
 
     expect(policy).toHaveBeenCalledWith({
       agentKind: 'codex',
-      command: '/usr/bin/open -a Simulator',
+      command,
       cwd: undefined,
     });
     expect(host.request).toHaveBeenCalledWith(Method.TurnInterrupt, {
       threadId: 'start-thread-id',
       turnId: 'turn-1',
     });
+    expect(warn).toHaveBeenCalledWith('command execution interrupted by host policy', {
+      turnId: 'turn-1',
+      reason: 'use the embedded iOS Simulator',
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('super-secret');
     await handle.close();
   });
 

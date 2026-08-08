@@ -20,7 +20,7 @@ export function createIOSSimulatorShellGuardHook(logger: Logger): HookCallback {
     log.warn('shell command denied by embedded iOS Simulator policy', {
       toolUseId: toolUseId ?? null,
       toolName: pre.tool_name,
-      command,
+      reason: policy.reason,
     });
     return {
       hookSpecificOutput: {

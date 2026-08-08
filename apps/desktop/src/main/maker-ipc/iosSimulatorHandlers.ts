@@ -436,7 +436,7 @@ export function registerIOSSimulatorHandlers(
       throwIpcError('INVALID_PARAMS', 'touch coordinates must be normalized');
     }
     const route = readViewerRoute(record);
-    const touch = {
+    const touch: Parameters<IOSSimulatorHandlerDeps['updateViewerTouch']>[3] = {
       gestureId: gestureId.trim(),
       phase,
       xRatio: record.xRatio,

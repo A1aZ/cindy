@@ -612,8 +612,20 @@ export class IOSSimulatorInstanceActor {
   }
 
   stop(route: IOSSimulatorMutationRoute): Promise<IOSSimulatorInstance> {
-    return this.#serialize(route.instanceId, async () => {
+    let admission: IOSSimulatorMutationRoute;
+    try {
       const instance = this.#store.assertMutationRoute(route);
+      admission = {
+        sessionId: instance.sessionId,
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+      };
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.#serialize(admission.instanceId, async () => {
+      const instance = this.#requireAdmittedLifecycleRoute(admission);
       if (instance.lifecycleState === "stopped") return instance;
       this.#store.update(instance.instanceId, instance.sessionId, {
         lifecycleState: "stopping",
@@ -644,14 +656,26 @@ export class IOSSimulatorInstanceActor {
     });
   }
 
-  async detach(
+  detach(
     route: IOSSimulatorMutationRoute,
     onResourceReleased: (
       instance: IOSSimulatorInstance,
     ) => void | Promise<void> = () => undefined,
   ): Promise<IOSSimulatorInstance> {
-    return this.#serialize(route.instanceId, async () => {
+    let admission: IOSSimulatorMutationRoute;
+    try {
       const instance = this.#store.assertMutationRoute(route);
+      admission = {
+        sessionId: instance.sessionId,
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        leaseId: instance.lease.id,
+      };
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return this.#serialize(admission.instanceId, async () => {
+      const instance = this.#requireAdmittedLifecycleRoute(admission);
       this.#cancelGrace.get(instance.instanceId)?.();
       this.#cancelGrace.delete(instance.instanceId);
       if (instance.bootProvenance !== "agent-booted") {
@@ -711,6 +735,25 @@ export class IOSSimulatorInstanceActor {
       this.#cancelGrace.set(detached.instanceId, cancel);
       return detached;
     });
+  }
+
+  /**
+   * A teardown admitted before the actor queue may follow a start that advances
+   * generation. Keep the exact session/instance/lease authority captured at
+   * admission, while intentionally ignoring queue-time lease expiry.
+   */
+  #requireAdmittedLifecycleRoute(
+    route: IOSSimulatorMutationRoute,
+  ): IOSSimulatorInstance {
+    const current = this.#store.requireOwned(route.instanceId, route.sessionId);
+    if (current.lease.id !== route.leaseId) {
+      throw new IOSSimulatorInstanceError(
+        "LEASE_EXPIRED",
+        "The simulator control lease is no longer current.",
+        true,
+      );
+    }
+    return current;
   }
 
   async delete(

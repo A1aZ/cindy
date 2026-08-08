@@ -1118,14 +1118,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     }
   }
   function completeInstanceActivation(instance: IOSSimulatorInstance, expectedEpoch: number): void {
-    const current = lifecycleBarrier(instance.instanceId);
-    if (current.epoch !== expectedEpoch || current.pendingTeardowns > 0) {
-      throw new IOSSimulatorInstanceError(
-        'MUTATION_CANCELLED',
-        'The simulator activation was cancelled because its lifecycle changed.',
-        true,
-      );
-    }
+    assertInstanceActivation(instance.instanceId, expectedEpoch);
     actor.assertRoute({
       sessionId: instance.sessionId,
       instanceId: instance.instanceId,
@@ -1133,6 +1126,16 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       leaseId: instance.lease.id,
     });
     blockedBuildInstances.delete(instance.instanceId);
+  }
+  function assertInstanceActivation(instanceId: string, expectedEpoch: number): void {
+    const current = lifecycleBarrier(instanceId);
+    if (current.epoch !== expectedEpoch || current.pendingTeardowns > 0) {
+      throw new IOSSimulatorInstanceError(
+        'MUTATION_CANCELLED',
+        'The simulator activation was cancelled because its lifecycle changed.',
+        true,
+      );
+    }
   }
   function managedBuildResultsRoot(): string {
     return path.join(app.getPath('userData'), 'ios-simulator', 'projects');
@@ -3820,10 +3823,16 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               assertHostActive();
               assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
               const starting = actor.getOwned(sessionId, route.instanceId);
+              let lifecycleStartAttempted = false;
+              let runningCommitted = false;
               try {
+                assertInstanceActivation(route.instanceId, activationEpoch);
+                lifecycleStartAttempted = true;
                 const started = await actor.start(route);
                 assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 commitRunning();
+                runningCommitted = true;
+                assertInstanceActivation(route.instanceId, activationEpoch);
                 await ensureDriver(started, environment);
                 assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 return actor.heartbeatOwned(sessionId, started.instanceId);
@@ -3831,16 +3840,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 // simctl can boot the device and then fail while waiting for
                 // readiness. Preserve the real resource occupancy even when
                 // actor.start() never returns its ready snapshot.
-                try {
-                  const device = await lifecycle.findExact(starting.simulatorUdid);
-                  if (device && device.state.trim().toLowerCase() !== 'shutdown') {
+                if (lifecycleStartAttempted && !runningCommitted) {
+                  try {
+                    const device = await lifecycle.findExact(starting.simulatorUdid);
+                    if (device && device.state.trim().toLowerCase() !== 'shutdown') {
+                      commitRunning();
+                    }
+                  } catch {
+                    // An ambiguous probe cannot prove that CoreSimulator
+                    // released the resource. Fail closed while preserving the
+                    // original startup failure as the authoritative error.
                     commitRunning();
                   }
-                } catch {
-                  // An ambiguous probe cannot prove that CoreSimulator
-                  // released the resource. Fail closed while preserving the
-                  // original startup failure as the authoritative error.
-                  commitRunning();
                 }
                 throw error;
               }
@@ -5427,6 +5438,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               await resourceScheduler.runStart(instance.instanceId, async (commitRunning) => {
                 assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
                 commitRunning();
+                assertInstanceActivation(instance.instanceId, activationEpoch);
                 await ensureDriver(instance, environment);
                 assertSessionRemovalAdmission(sessionId, removalBarrierOperation);
               });

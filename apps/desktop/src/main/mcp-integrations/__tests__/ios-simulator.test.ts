@@ -3222,6 +3222,108 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it.each(['stop_instance', 'detach_device'] as const)(
+    'cancels driver startup when %s overlaps Simulator boot',
+    async (toolName) => {
+      const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
+      const bootedDevice = { ...READY_REPORT.devices[0]!, state: 'Booted' as const };
+      let resolveBoot: (device: typeof bootedDevice) => void = () => undefined;
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(async () => bootedDevice),
+        bootExact: vi.fn(
+          () =>
+            new Promise<typeof bootedDevice>((resolve) => {
+              resolveBoot = resolve;
+            }),
+        ),
+        shutdownExact: vi.fn(async () => undefined),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      };
+      const detachedCleanups: Array<() => void | Promise<void>> = [];
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+        lifecycle,
+        scheduler: {
+          schedule: (_delay, task) => {
+            detachedCleanups.push(task);
+            return () => {
+              const index = detachedCleanups.indexOf(task);
+              if (index >= 0) detachedCleanups.splice(index, 1);
+            };
+          },
+        },
+      });
+      const attached = actor.attach({
+        sessionId: 'session-a',
+        worktreeRoot: '/tmp/session-a',
+        sourceFingerprint: 'fingerprint-a',
+        device: shutdownDevice,
+      });
+      const startDriver = vi.fn();
+      const stopDriver = vi.fn(async () => undefined);
+      const resourceScheduler = testResourceScheduler();
+      const environment = { ...READY_REPORT, devices: [shutdownDevice] };
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        driverManager: {
+          get: vi.fn(() => null),
+          start: startDriver,
+          stop: stopDriver,
+        },
+        resourceScheduler,
+        runtime: { inspect: vi.fn(async () => environment) },
+        getSession: vi.fn(async (id) => localSession(id)),
+        deviceLivenessIntervalMs: 0,
+      });
+      await host.reconcileOwnership();
+      stopDriver.mockClear();
+      const current = actor.getOwned('session-a', attached.instanceId);
+      const route = {
+        instanceId: current.instanceId,
+        generation: current.generation,
+        leaseId: current.lease.id,
+      };
+
+      const start = host.callTool('start_instance', route, {
+        sessionId: 'session-a',
+        origin: 'user',
+      });
+      await vi.waitFor(() => expect(lifecycle.bootExact).toHaveBeenCalledOnce());
+      const teardown = host.callTool(toolName, route, {
+        sessionId: 'session-a',
+        origin: 'user',
+      });
+      await vi.waitFor(() => expect(stopDriver).toHaveBeenCalledWith(attached.instanceId));
+      resolveBoot(bootedDevice);
+
+      await expect(start).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'MUTATION_CANCELLED',
+      });
+      await expect(teardown).resolves.toMatchObject({ ok: true });
+      expect(startDriver).not.toHaveBeenCalled();
+
+      if (toolName === 'stop_instance') {
+        expect(actor.getOwned('session-a', attached.instanceId)).toMatchObject({
+          lifecycleState: 'stopped',
+        });
+        expect(resourceScheduler.runningCount()).toBe(0);
+      } else {
+        expect(actor.getOwned('session-a', attached.instanceId)).toMatchObject({
+          viewerState: 'detached',
+          bootProvenance: 'agent-booted',
+        });
+        expect(detachedCleanups).toHaveLength(1);
+        await detachedCleanups[0]?.();
+        expect(actor.list('session-a')).toEqual([]);
+        expect(resourceScheduler.runningCount()).toBe(0);
+      }
+      await host.dispose();
+    },
+  );
+
   it('ignores an exact-device probe that finishes after the binding is detached', async () => {
     let resolveProbe!: (device: (typeof READY_REPORT.devices)[number] | null) => void;
     const lifecycle: IOSSimulatorSimctlLifecycle = {

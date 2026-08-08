@@ -98,6 +98,79 @@ describe("IOSSimulatorInstanceActor", () => {
     });
   });
 
+  it("keeps admitted teardown authority across generation advance and lease expiry", async () => {
+    const harness = createHarness();
+    let finishBoot: () => void = () => undefined;
+    vi.mocked(harness.lifecycle.bootExact).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishBoot = () => resolve({ ...DEVICE, state: "Booted" });
+        }),
+    );
+
+    const starting = harness.actor.start(harness.route());
+    await vi.waitFor(() =>
+      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID),
+    );
+    const route = harness.route();
+    const stopping = harness.actor.stop(route);
+    harness.setNow(2_000_000);
+    route.sessionId = "forged-session";
+    route.instanceId = "forged-instance";
+    route.leaseId = "forged-lease";
+    finishBoot();
+
+    await expect(starting).resolves.toMatchObject({
+      lifecycleState: "ready",
+      generation: 2,
+    });
+    await expect(stopping).resolves.toMatchObject({
+      lifecycleState: "stopped",
+      generation: 3,
+    });
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+  });
+
+  it("preserves detach grace when it takes over an in-flight start", async () => {
+    const harness = createHarness();
+    let finishBoot: () => void = () => undefined;
+    vi.mocked(harness.lifecycle.bootExact).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishBoot = () => resolve({ ...DEVICE, state: "Booted" });
+        }),
+    );
+
+    const starting = harness.actor.start(harness.route());
+    await vi.waitFor(() =>
+      expect(harness.lifecycle.bootExact).toHaveBeenCalledWith(UDID),
+    );
+    const detaching = harness.actor.detach(harness.route());
+    finishBoot();
+
+    await expect(starting).resolves.toMatchObject({ generation: 2 });
+    await expect(detaching).resolves.toMatchObject({
+      generation: 2,
+      viewerState: "detached",
+      bootProvenance: "agent-booted",
+    });
+    expect(harness.scheduled).toHaveLength(1);
+    expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+  });
+
+  it("does not let an admitted teardown cross a replacement lease", async () => {
+    const harness = createHarness({ booted: true });
+    const route = harness.route();
+    const renewing = harness.actor.start(route);
+    const stopping = harness.actor.stop(route);
+
+    await expect(renewing).resolves.toMatchObject({
+      lease: { id: expect.not.stringMatching(route.leaseId) },
+    });
+    await expect(stopping).rejects.toMatchObject({ code: "LEASE_EXPIRED" });
+    expect(harness.lifecycle.shutdownExact).not.toHaveBeenCalled();
+  });
+
   it("reboots a persisted binding after CoreSimulator loss and invalidates its old route", async () => {
     const harness = createHarness({ booted: true });
     const recovered = await harness.actor.recover(harness.route());

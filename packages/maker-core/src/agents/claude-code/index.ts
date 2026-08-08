@@ -5111,7 +5111,12 @@ export class ClaudeCodeAgent extends BaseAgent {
               // foreground turn has not already produced a terminal, replace
               // it with one synthetic boundary; a raced natural result leaves
               // foregroundWasInFlight=false and therefore does not get a duplicate.
-              if (foregroundWasInFlight) emitTurnBoundary('user_stop_unconfirmed_wake_tasks');
+              // accept 阶段的 foreground 终态归 send 的 finishSendBeforeUserInput:
+              // 它醒来后按 signal.aborted / push 失败走到自己的 boundary。这里
+              // 抢发会重复——一次 Stop 冒出两个终态。
+              if (foregroundWasInFlight && !sendInAcceptPhase) {
+                emitTurnBoundary('user_stop_unconfirmed_wake_tasks');
+              }
             }
             inputQueue.clear();
             try {
@@ -5122,13 +5127,19 @@ export class ClaudeCodeAgent extends BaseAgent {
             recordCanceledQueryClose(cancelledQuery, 'user_stop cancellation');
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
-            turnInFlight = false;
+            if (!sendInAcceptPhase) turnInFlight = false;
           } else {
             // interrupt 成功且无后台任务需要清：被中断的 turn 会收到
             // error_during_execution result → translator 在 onTurnEnd 清
             // turnInFlight。这里显式补清以防 SDK 未 drain result 的极端
             // 情况(确保不会 SESSION_RUNNING 永拒)。
-            turnInFlight = false;
+            //
+            // accept 阶段除外——finishSendBeforeUserInput 的入口守卫是
+            // `if (!turnInFlight) return`,abort 抢清会让它以为已被收口而直接
+            // 返回,send_cancelled_before_acceptance 的终态 boundary 从此丢失,
+            // isTurnRunning 悬置(正是 5042 行注释声明、却只挡了 pendingToolIds
+            // 的那半个守卫;review 3541310178 的反馈原型用例钉的就是它)。
+            if (!sendInAcceptPhase) turnInFlight = false;
           }
         } catch (e) {
           const errMsg = e instanceof Error ? e.message : String(e);
@@ -5155,11 +5166,13 @@ export class ClaudeCodeAgent extends BaseAgent {
             recordCanceledQueryClose(q, 'user_stop interrupt timeout');
             runningBackgroundTasks.clear();
             terminalBackgroundTaskIds.clear();
-            turnInFlight = false;
+            // accept 阶段同上——终态与清理归 send 自己(query 已被关闭, send 的
+            // push 会失败并走 finishSendBeforeUserInput)。
+            if (!sendInAcceptPhase) turnInFlight = false;
           } else {
             // interrupt 真正抛错(非超时)，回收标记防误抑制(同 watchdog)。
             turnState.interruptRequested = false;
-            turnInFlight = false;
+            if (!sendInAcceptPhase) turnInFlight = false;
             log.warn('abort threw', { error: String(e) });
           }
         }

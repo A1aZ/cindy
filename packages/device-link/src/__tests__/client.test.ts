@@ -4609,31 +4609,44 @@ describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
     });
   }, 10_000);
 
-  it('超时生成的 skip 占位立刻发,但仍受单趟预算约束(不借道无限重放)', async () => {
-    // codex P2:生成 skip 不证明对端可达,不该顺带拿到 replay 的无限预算。
+  it('超时生成的 skip 占位一定被发出(哪怕队头压着超过预算的 pending),且不顺带重放全窗口', async () => {
+    // codex P2 两轮:① 不该借道无限重放(会同步重发整个窗口);② 但也不能借道「受预算的
+    // 一趟」—— 那会从队头开始消耗预算、在到达 skip 之前用完,接收端正等这个 seq,后面的
+    // 可靠消息会一直阻塞。所以改成定向发这一帧。
     await withFakeTimers(async (h, advance) => {
+      // 队头先压 12 条(远超预算 3)
       for (let i = 0; i < 12; i += 1) {
         h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
       }
       const ws = h.current();
       const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
 
-      // 一条短超时的可靠 invoke:超时后 dropReliablePendingForRequest 会把它换成 skip
-      // 并立刻触发一趟重发。
       // 先挂 catch 再推进时钟:fake timer 下 reject 发生在 advance 内部,
       // 事后才 await 会被算成 unhandled rejection。
       const invoke = h.client.invoke('dev-b', { channel: 'maker:slow', args: [] }, 50)
         .then(() => null, (err: unknown) => err);
+      const invokeFrame = ws.sent.filter((env) => (
+        env.kind === 'invoke' && parseTransportPayload(env.payload)
+      )).at(-1)!;
+      const invokeSeq = parseTransportPayload(invokeFrame.payload)!.meta.seq;
+      expect(invokeSeq).toBeGreaterThan(seqs.at(-1)!); // 它排在那 12 条之后
+
       await advance(60);
       expect(await invoke).toMatchObject({ code: 'INVOKE_TIMEOUT' });
 
-      // 那一趟受预算约束:被重发的仍是队头预算条数,而不是 12 条全部
-      const retried = retriedSeqs(sendsBySeq(ws));
-      expect(retried.length).toBeLessThanOrEqual(3);
-      expect(retried).toEqual(seqs.slice(0, retried.length));
+      // ① 该 seq 的 skip 占位确实发出去了(不是等后续趟次才触达)
+      const skipSent = ws.sent.some((env) => {
+        const parsed = parseTransportPayload(env.payload);
+        if (!parsed || parsed.meta.seq !== invokeSeq) return false;
+        return JSON.parse(parsed.data)?.__cindyDeviceLinkTransportSkip === true;
+      });
+      expect(skipSent).toBe(true);
+
+      // ② 没有顺带把前面 12 条全部重发(那正是本 PR 要消除的簇)
+      expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
     }, {
       pingIntervalMs: 600_000,
-      transportRetryIntervalMs: 10_000, // 定时器不参与,只看 skip 那一趟
+      transportRetryIntervalMs: 10_000, // 定时器不参与,只看 skip 这一步
       transportRetryPassBudget: 3,
       transportMaxRetryAttempts: 50,
     });

@@ -1180,9 +1180,30 @@ export class DeviceLinkClient {
       pending.attempts = 0;
       pending.lastSentAt = 0;
       pending.sent = false;
-      // 生成 skip 占位不证明对端可达:立刻发,但仍受单趟预算约束(codex P2)。
-      this.retryPending(dst, { ignoreInterval: true, unlimited: false });
+      // **定向**发这一帧,不借道 retryPending:后者从队头遍历,skip 前面若压着超过预算的
+      // pending,预算会在到达它之前用完 —— 注释说的「立刻发」就没发生,而接收端正等这个
+      // seq,后面的可靠消息会一直阻塞(codex P2 第二轮)。skip payload 是单帧,不涉及预算;
+      // 其余 pending 照旧由定时趟次按预算推进。生成 skip 不证明对端可达,所以这里也不顺带
+      // 触发无预算重放。
+      this.sendSkipPlaceholderNow(dst, peer, pending);
       return;
+    }
+  }
+
+  /**
+   * 立刻发出一个 skip 占位帧(超时 / 永久帧错误后替换原消息用)。前置条件与 retryPending
+   * 同源;失败只记 debug —— 它本就是 best-effort 的解堵动作,发不出去时由定时趟次接棒。
+   */
+  private sendSkipPlaceholderNow(
+    dst: string,
+    peer: PeerTransportState,
+    pending: PendingReliableMessage,
+  ): void {
+    if (!peer.reliable || !peer.linkReady || this.stopped || this.status !== 'online') return;
+    try {
+      this.sendReliableFrames(peer, pending);
+    } catch (err) {
+      this.log.debug(`reliable transport skip placeholder send failed for ${dst.slice(0, 8)}`, err);
     }
   }
 

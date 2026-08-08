@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const source = readFileSync(new URL('../updateService.ts', import.meta.url), 'utf8');
+const bootstrapSource = readFileSync(new URL('../bootstrap-electron.ts', import.meta.url), 'utf8');
 
 describe('update force-quit iOS Simulator cleanup', () => {
   it('aborts detached simulator operations before exiting the process', () => {
@@ -19,5 +20,22 @@ describe('update force-quit iOS Simulator cleanup', () => {
     expect(forceQuitEnd).toBeGreaterThan(forceQuitStart);
     expect(abortIndex).toBeGreaterThanOrEqual(0);
     expect(exitIndex).toBeGreaterThan(abortIndex);
+  });
+
+  it('aborts detached simulator operations before the bounded async quit phase', () => {
+    expect(bootstrapSource).toContain(
+      "import { abortIOSSimulatorOperationsForExit } from './mcp-integrations/ios-simulator-exit';",
+    );
+    const abortIndex = bootstrapSource.indexOf(
+      "onQuit('ios-simulator-exit-abort', abortIOSSimulatorOperationsForExit, 'sync');",
+    );
+    const hostDisposeIndex = bootstrapSource.indexOf(
+      "onQuit('ios-simulator-host', disposeIOSSimulatorHost, 'async');",
+    );
+    const quitHandlerIndex = bootstrapSource.indexOf('installQuitHandler(6000);');
+
+    expect(abortIndex).toBeGreaterThanOrEqual(0);
+    expect(hostDisposeIndex).toBeGreaterThan(abortIndex);
+    expect(quitHandlerIndex).toBeGreaterThan(hostDisposeIndex);
   });
 });

@@ -347,15 +347,30 @@ export function createRegistryBackedIOSSimulatorActor(
   }
 }
 
-function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): {
+function createDefaultOwnershipRegistry(): IOSSimulatorOwnershipRegistryFile {
+  return new IOSSimulatorOwnershipRegistryFile(
+    path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
+  );
+}
+
+function createDefaultActor(
+  lifecycle: IOSSimulatorSimctlLifecycle,
+  registry = createDefaultOwnershipRegistry(),
+): {
   actor: IOSSimulatorInstanceActor;
   flush: () => Promise<void>;
   release: () => void;
 } {
-  const registry = new IOSSimulatorOwnershipRegistryFile(
-    path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
-  );
-  return createRegistryBackedIOSSimulatorActor(lifecycle, registry);
+  const persisted = createRegistryBackedIOSSimulatorActor(lifecycle, registry);
+  if (!registry.isWriter) {
+    persisted.release();
+    throw new IOSSimulatorInstanceError(
+      'DEVICE_BUSY',
+      'Another Cindy process is managing iOS Simulator ownership for this profile.',
+      true,
+    );
+  }
+  return persisted;
 }
 
 function createInMemoryActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
@@ -5520,20 +5535,19 @@ let defaultIOSSimulatorRuntime: DefaultIOSSimulatorRuntime | null = null;
 let defaultIOSSimulatorRuntimeClosing = false;
 let defaultIOSSimulatorRuntimeDisposePromise: Promise<void> | null = null;
 
-/**
- * The ownership registry holds a process-wide writer lease, so the default
- * Simulator Host must stay lazy. Passive/dev Desktop instances that never use
- * Simulator must not prevent the instance that actually needs it from taking
- * ownership.
- */
-export function initializeIOSSimulatorHost(): IOSSimulatorHost {
-  if (defaultIOSSimulatorRuntime) return defaultIOSSimulatorRuntime.host;
+function installDefaultIOSSimulatorHost(
+  lifecycle: IOSSimulatorSimctlLifecycle,
+  persistedActor: ReturnType<typeof createDefaultActor>,
+): IOSSimulatorHost {
+  if (defaultIOSSimulatorRuntime) {
+    persistedActor.release();
+    return defaultIOSSimulatorRuntime.host;
+  }
   if (defaultIOSSimulatorRuntimeClosing) {
+    persistedActor.release();
     throw new Error('The iOS Simulator host is shutting down.');
   }
 
-  const lifecycle = createIOSSimulatorSimctlLifecycle();
-  const persistedActor = createDefaultActor(lifecycle);
   let releaseExitAbortHandler: (() => void) | null = null;
   try {
     const host = createIOSSimulatorHost({
@@ -5561,6 +5575,23 @@ export function initializeIOSSimulatorHost(): IOSSimulatorHost {
     persistedActor.release();
     throw error;
   }
+}
+
+/**
+ * The ownership registry holds a process-wide writer lease, so the default
+ * Simulator Host must stay lazy. Passive/dev Desktop instances that never use
+ * Simulator must not prevent the instance that actually needs it from taking
+ * ownership.
+ */
+export function initializeIOSSimulatorHost(): IOSSimulatorHost {
+  if (defaultIOSSimulatorRuntime) return defaultIOSSimulatorRuntime.host;
+  if (defaultIOSSimulatorRuntimeClosing) {
+    throw new Error('The iOS Simulator host is shutting down.');
+  }
+
+  const lifecycle = createIOSSimulatorSimctlLifecycle();
+  const persistedActor = createDefaultActor(lifecycle);
+  return installDefaultIOSSimulatorHost(lifecycle, persistedActor);
 }
 
 function currentIOSSimulatorHost(): IOSSimulatorHost | null {
@@ -5665,7 +5696,42 @@ export function cancelIOSSimulatorSessionOperations(sessionId: string): Promise<
 
 export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<void> {
   revokeIOSSimulatorRendererSession(sessionId);
-  return currentIOSSimulatorHost()?.cleanupRemovedSession(sessionId) ?? Promise.resolve();
+  const currentHost = currentIOSSimulatorHost();
+  if (currentHost) return currentHost.cleanupRemovedSession(sessionId);
+  const normalizedSessionId = sessionId.trim();
+  if (!normalizedSessionId) return Promise.resolve();
+  // iOS ownership can only exist on macOS. Other platforms must keep generic
+  // task removal independent from the Darwin-only registry lease.
+  if (process.platform !== 'darwin') return Promise.resolve();
+
+  const registry = createDefaultOwnershipRegistry();
+  let registryTransferred = false;
+  try {
+    if (!registry.acquireWriterSync()) {
+      throw new IOSSimulatorInstanceError(
+        'DEVICE_BUSY',
+        'Another Cindy process is managing iOS Simulator ownership for this profile.',
+        true,
+      );
+    }
+    const persistedInstances = registry.loadSync();
+    if (!persistedInstances.some((instance) => instance.sessionId === normalizedSessionId)) {
+      registry.releaseWriterSync();
+      return Promise.resolve();
+    }
+
+    // Keep the same writer lease from the authoritative read through Host
+    // installation. Releasing and reacquiring here would reopen the race with
+    // another Cindy process attaching this task while it is being removed.
+    const lifecycle = createIOSSimulatorSimctlLifecycle();
+    const persistedActor = createDefaultActor(lifecycle, registry);
+    const host = installDefaultIOSSimulatorHost(lifecycle, persistedActor);
+    registryTransferred = true;
+    return host.cleanupRemovedSession(normalizedSessionId);
+  } catch (error) {
+    if (!registryTransferred) registry.releaseWriterSync();
+    return Promise.reject(error);
+  }
 }
 
 export function setIOSSimulatorViewerStreamProfile(

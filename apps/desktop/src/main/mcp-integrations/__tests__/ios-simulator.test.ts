@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,6 +31,7 @@ import {
   cleanupIOSSimulatorRemovedSession,
   createIOSSimulatorHost,
   createRegistryBackedIOSSimulatorActor,
+  disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
   getIOSSimulatorMcpDeps,
   type IOSSimulatorAppLifecycleAdapter,
@@ -73,6 +74,8 @@ const READY_REPORT: IOSSimulatorEnvironmentReport = {
   setupSteps: [],
 };
 
+const itMac = process.platform === 'darwin' ? it : it.skip;
+
 describe('iOS Simulator host', () => {
   function testResourceScheduler() {
     return new IOSSimulatorResourceScheduler({ freeMemoryBytes: () => 100 * 1024 ** 3 });
@@ -82,7 +85,7 @@ describe('iOS Simulator host', () => {
     return { id, workDir: `/tmp/${id}`, remoteHostId: null };
   }
 
-  it('keeps the default ownership registry lazy for disabled MCP discovery', async () => {
+  it('keeps the default ownership registry lazy for disabled MCP discovery and teardown', async () => {
     const getPath = vi.spyOn(app, 'getPath');
     try {
       const deps = getIOSSimulatorMcpDeps({ isIOSSimulatorEnabled: () => false });
@@ -94,11 +97,30 @@ describe('iOS Simulator host', () => {
         deps.callTool('check_environment', {}, { sessionId: 'disabled-session' }),
       ).resolves.toMatchObject({ errorCode: 'IOS_SIMULATOR_DISABLED' });
       await cancelIOSSimulatorSessionOperations('ordinary-session');
-      await cleanupIOSSimulatorRemovedSession('ordinary-session');
       await flushIOSSimulatorOwnershipRegistry();
       expect(getPath).not.toHaveBeenCalled();
     } finally {
       getPath.mockRestore();
+    }
+  });
+
+  itMac('fences an ordinary removed task without retaining the default Host lease', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-lazy-cleanup-'));
+    const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
+    const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
+    const competingRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath);
+    try {
+      await expect(cleanupIOSSimulatorRemovedSession('ordinary-session')).resolves.toBeUndefined();
+
+      expect(getPath).toHaveBeenCalledWith('userData');
+      await expect(stat(registryPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+      expect(competingRegistry.acquireWriterSync()).toBe(true);
+    } finally {
+      competingRegistry.releaseWriterSync();
+      getPath.mockRestore();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -5710,4 +5732,82 @@ describe('iOS Simulator host', () => {
       ),
     ).resolves.toMatchObject({ ok: false, errorCode: 'INVALID_ARGUMENT' });
   });
+
+  itMac(
+    'retries persisted removed-task cleanup after another registry writer releases its lease',
+    async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'cindy-ios-host-persisted-cleanup-'));
+      const registryPath = path.join(root, 'ios-simulator', 'ownership-registry.json');
+      const setupRegistry = new IOSSimulatorOwnershipRegistryFile(registryPath, {
+        acquireWriterLease: () => {
+          let held = true;
+          return {
+            isHeld: () => held,
+            release: () => {
+              held = false;
+            },
+          };
+        },
+      });
+      expect(setupRegistry.acquireWriterSync()).toBe(true);
+      const persistedInstance = new IOSSimulatorOwnershipStore({
+        createId: () => 'persisted-removed-instance',
+      }).attach({
+        sessionId: 'persisted-removed-session',
+        worktreeRoot: '/tmp/persisted-removed-session',
+        sourceFingerprint: 'persisted-fingerprint',
+        device: READY_REPORT.devices[0]!,
+      });
+      setupRegistry.saveSync([persistedInstance]);
+      setupRegistry.releaseWriterSync();
+
+      const getPath = vi.spyOn(app, 'getPath').mockReturnValue(root);
+      let writerLeaseHeld = false;
+      let acquireAttempts = 0;
+      const acquireWriter = vi
+        .spyOn(IOSSimulatorOwnershipRegistryFile.prototype, 'acquireWriterSync')
+        .mockImplementation(() => {
+          if (writerLeaseHeld) return true;
+          acquireAttempts += 1;
+          if (acquireAttempts === 1) return false;
+          writerLeaseHeld = true;
+          return true;
+        });
+      const isWriter = vi
+        .spyOn(IOSSimulatorOwnershipRegistryFile.prototype, 'isWriter', 'get')
+        .mockImplementation(() => writerLeaseHeld);
+      const releaseWriter = vi
+        .spyOn(IOSSimulatorOwnershipRegistryFile.prototype, 'releaseWriterSync')
+        .mockImplementation(() => {
+          writerLeaseHeld = false;
+        });
+      try {
+        await expect(
+          cleanupIOSSimulatorRemovedSession('persisted-removed-session'),
+        ).rejects.toMatchObject({
+          code: 'DEVICE_BUSY',
+          retryable: true,
+        });
+        expect(acquireAttempts).toBe(1);
+
+        await expect(
+          cleanupIOSSimulatorRemovedSession('persisted-removed-session'),
+        ).resolves.toBeUndefined();
+
+        expect(acquireAttempts).toBe(2);
+        const persisted = JSON.parse(await readFile(registryPath, 'utf8')) as {
+          instances: unknown[];
+        };
+        expect(persisted.instances).toEqual([]);
+      } finally {
+        await disposeIOSSimulatorHost();
+        expect(writerLeaseHeld).toBe(false);
+        releaseWriter.mockRestore();
+        isWriter.mockRestore();
+        acquireWriter.mockRestore();
+        getPath.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

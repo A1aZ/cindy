@@ -11,11 +11,11 @@ export function registerIOSSimulatorExitAbortHandler(
   };
 }
 
-/** Lightweight updater seam: never imports the simulator or media runtime. */
+/** Lightweight bounded-exit seam: never imports the simulator or media runtime. */
 export function abortIOSSimulatorOperationsForExit(): void {
   try {
     exitAbortHandler?.();
   } catch {
-    // A forced updater exit must not be blocked by best-effort child cleanup.
+    // A bounded or forced exit must not be blocked by best-effort child cleanup.
   }
 }

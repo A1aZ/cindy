@@ -311,6 +311,7 @@ import {
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
 } from './mcp-integrations/ios-simulator';
+import { abortIOSSimulatorOperationsForExit } from './mcp-integrations/ios-simulator-exit';
 import {
   clearIOSSimulatorRendererAccess,
   configureIOSSimulatorRendererAccessConfirmation,
@@ -6900,6 +6901,10 @@ onQuit('codex-proxy', () => disposeCodexProxy(), 'async');
 onQuit('remote-file-browser', () => disposeRemoteFileBrowser(), 'async');
 // Remote SSH pool: 主动断开所有活动连接, 防止 ssh2 子句柄阻塞 Node 进程退出。
 onQuit('remote-ssh-pool', () => disposeRemoteSshPool(), 'async');
+// WDA deleteSession may consume longer than the shared async quit budget. Kill
+// detached WDA/Sidecar process groups synchronously before that budget starts;
+// the lightweight seam is a no-op when Simulator was never initialized.
+onQuit('ios-simulator-exit-abort', abortIOSSimulatorOperationsForExit, 'sync');
 // Hook 连接: 停掉全部 WS transport(含重连 timer), 防句柄阻塞退出。
 onQuit('hook-control', () => disposeHookControl(), 'sync');
 // session-git-pr-context: 取消 .git HEAD 的 parcel watcher 订阅, 防原生句柄阻塞退出。

@@ -1146,6 +1146,21 @@ body.resizing-pane [data-ghost-webview] {
   }
 }
 
+/* 消息流条目级渲染跳过(Codex Desktop 同款,2026-08-09):视口外的 render
+   item 跳过整棵子树的布局与绘制,只按 contain-intrinsic-size 估高占位
+   (auto 前缀:渲染过一次后记住真实高度,滚回时用真实值,锚点不漂)。
+   切入长 session 时首帧只需布局视口内的几条消息 —— 之前是渲染窗口全量
+   80 条同步布局,几万字的会话切换有数百毫秒长任务(2026-08-09 实测卡顿)。
+   仅作用于 .msg-stream-items 的直接子元素(每条 render item 的根节点):
+   滚动恢复(measureViewportTop/applyRestore)按 children 索引取
+   getBoundingClientRect —— 对 content-visibility 隐藏的条目返回估高盒,
+   量测仍然成立,进入视口后 ResizeObserver 纠偏收敛到真实高度。
+   打印/导出走独立渲染树,不经过本容器,不受影响。 */
+.msg-stream-items > * {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}
+
 /* 意识卡片 running 扫光(卡槽③):主机盖在意识画布上的斜向光带。
    transform-only(规则 7 compositor-only);仅 running 挂载,settle 即卸,
    历史卡永远静止(净化器已剥意识自带动画,动感统一由主机供给)。 */

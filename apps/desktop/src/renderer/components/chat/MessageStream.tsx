@@ -3790,7 +3790,12 @@ export function MessageStream({
                 <div
                   ref={itemsRef}
                   className={cn(
-                    'flex flex-col gap-3.5',
+                    // msg-stream-items:直接子元素(每条 render item 的根节点)带
+                    // content-visibility:auto(globals.css)—— 视口外条目跳过布局
+                    // 与绘制,切入长 session 的首帧成本从「整个窗口 80 条」降到
+                    // 「一屏」。滚动恢复按条目锚定 + ResizeObserver 纠偏,估高
+                    // (240px)与真实高度的偏差在条目进入视口后被自动纠正。
+                    'msg-stream-items flex flex-col gap-3.5',
                     // 分享选择模式:整列内容右移,左侧让出复选框那一列。缩进加在
                     // 容器上(不是逐条消息),工具卡等不可选的 item 也跟着移,
                     // 左边缘保持对齐。

@@ -196,6 +196,7 @@ async function markRollbackRequired(
   } finally {
     await handle.close();
   }
+  await syncDirectory(path.dirname(paths.committed));
 }
 
 async function removeOperationMarkers(paths: JournalPaths, journalDir: string): Promise<void> {
@@ -236,12 +237,6 @@ async function commitRecord(
       { code: 'REF_JOURNAL_COMMIT_UNCERTAIN', cause: error },
     );
   }
-  await removeMarker(paths.committed, scope.journalDir).catch((error) => {
-    log.warn('Failed to collect a committed media reference journal', {
-      operationId: paths.operationId,
-      error: String(error),
-    });
-  });
 }
 
 /**
@@ -278,13 +273,31 @@ export async function withMediaRefCompensation<T>(params: {
       }
 
       const record = await writePendingRecord(params.scope, paths, params.refIds);
+      let recordCommitted = false;
       try {
         params.scope.assertStillValid();
         const result = await params.perform();
         params.scope.assertStillValid();
         await commitRecord(params.scope, paths, record);
+        recordCommitted = true;
+        params.scope.assertStillValid();
+        await removeMarker(paths.committed, params.scope.journalDir).catch((error) => {
+          log.warn('Failed to collect a committed media reference journal', {
+            operationId: paths.operationId,
+            error: String(error),
+          });
+        });
+        params.scope.assertStillValid();
         return result;
       } catch (error) {
+        if (recordCommitted) {
+          await markRollbackRequired(paths, record).catch((markError) => {
+            log.warn('Failed to preserve an invalidated media reference commit for rollback', {
+              operationId: paths.operationId,
+              error: String(markError),
+            });
+          });
+        }
         const rollback = await Promise.allSettled(params.refIds.map(params.compensate));
         const rollbackFailed = rollback.some((result) => result.status === 'rejected');
         rollback.forEach((result, index) => {

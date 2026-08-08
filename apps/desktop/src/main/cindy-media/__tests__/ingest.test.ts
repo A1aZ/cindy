@@ -80,6 +80,32 @@ function compensationScope(): MediaRefCompensationScope {
   return refCompensation.captureMediaRefCompensationScope(OWNER_SCOPE_KEY);
 }
 
+function postCommitExpiringScope(
+  journalDir: string,
+  expiration: 'after-commit' | 'after-collection' = 'after-commit',
+): MediaRefCompensationScope {
+  let sawPendingMarker = false;
+  let sawCommittedMarker = false;
+  const scope: MediaRefCompensationScope = {
+    journalDir,
+    ownerStorageKey: OWNER_KEY,
+    assertStillValid: () => {
+      const markers = fs.existsSync(scope.journalDir)
+        ? fs.readdirSync(scope.journalDir).filter((name) => name.endsWith('.json'))
+        : [];
+      if (markers.some((name) => name.endsWith('.pending.json'))) sawPendingMarker = true;
+      if (sawPendingMarker && markers.some((name) => name.endsWith('.committed.json'))) {
+        sawCommittedMarker = true;
+        if (expiration === 'after-commit') throw new Error('owner changed after journal commit');
+      }
+      if (expiration === 'after-collection' && sawCommittedMarker && markers.length === 0) {
+        throw new Error('owner changed after journal commit');
+      }
+    },
+  };
+  return scope;
+}
+
 function blobPathOf(hash: string, ext: string): string {
   return path.join(tmpUserData, 'cindy-media', 'blobs', hash.slice(0, 2), `${hash}${ext}`);
 }
@@ -250,6 +276,72 @@ describe('ingestMedia(崩溃语义:先字节后记账)', () => {
 
     expect(db.select().from(schema.mediaBlobs).all()).toHaveLength(1);
     expect(db.select().from(schema.mediaRefs).all()).toHaveLength(0);
+  });
+
+  it('补偿日志提交后 owner 失效时仍精确回滚本次引用', async () => {
+    const scope = postCommitExpiringScope(
+      path.join(tmpUserData, 'post-commit-owner-change-journal'),
+    );
+
+    await expect(
+      ingest.ingestMedia(
+        {
+          buffer: PNG_BYTES,
+          mimeType: 'image/png',
+          refs: [{ refKind: 'ghost-gallery', refId: 'stale-owner-art' }],
+          assertStillValid: () => undefined,
+          refCompensationScope: scope,
+        },
+        db,
+      ),
+    ).rejects.toThrow('owner changed after journal commit');
+
+    expect(db.select().from(schema.mediaRefs).all()).toHaveLength(0);
+    expect(fs.readdirSync(scope.journalDir).filter((name) => name.endsWith('.json'))).toHaveLength(
+      0,
+    );
+  });
+
+  it('补偿日志提交后 owner 失效且即时回滚失败时保留可恢复标记', async () => {
+    const scope = postCommitExpiringScope(compensationScope().journalDir, 'after-collection');
+    const removeRefById = vi
+      .spyOn(ledger, 'removeRefById')
+      .mockRejectedValueOnce(new Error('worker disposed'));
+    try {
+      await expect(
+        ingest.ingestMedia(
+          {
+            buffer: PNG_BYTES,
+            mimeType: 'image/png',
+            refs: [{ refKind: 'ghost-gallery', refId: 'recover-stale-owner-art' }],
+            assertStillValid: () => undefined,
+            refCompensationScope: scope,
+          },
+          db,
+        ),
+      ).rejects.toThrow('owner changed after journal commit');
+
+      expect(db.select().from(schema.mediaRefs).all()).toHaveLength(1);
+      const markerNames = fs
+        .readdirSync(scope.journalDir)
+        .filter((name) => name.endsWith('.committed.json'));
+      expect(markerNames).toHaveLength(1);
+      expect(
+        JSON.parse(fs.readFileSync(path.join(scope.journalDir, markerNames[0]), 'utf8')),
+      ).toMatchObject({ rollbackRequired: true });
+
+      removeRefById.mockRestore();
+      await expect(
+        refCompensation.reconcileMediaRefCompensationsForOwner({
+          ownerId: OWNER_ID,
+          db,
+          isOwnerCurrent: () => true,
+        }),
+      ).resolves.toMatchObject({ recoveredPending: 1 });
+      expect(db.select().from(schema.mediaRefs).all()).toHaveLength(0);
+    } finally {
+      removeRefById.mockRestore();
+    }
   });
 
   it('addRef 已提交但回执丢失时仍用预留 id 精确回滚引用', async () => {

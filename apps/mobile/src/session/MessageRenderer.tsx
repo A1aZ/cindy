@@ -19,6 +19,7 @@ import {
   Layers,
   ListTodo,
   LoaderCircle,
+  RefreshCw,
   PencilLine,
   Share as ShareIcon,
   Send,
@@ -3237,6 +3238,9 @@ function MobileSystemCard({
   const styles = useThemedStyles(makeStyles);
   // agent-switch 走专用「分隔线 + 药丸」渲染(对齐桌面),不落通用盒子卡片。
   if (type === 'agent-switch') return <MobileAgentSwitchCard data={data} />;
+  // auto-resume 复用桌面 AgentActionRow 的单行状态布局:默认只显示当前状态和压缩后的
+  // 中断原因,完整诊断按需展开,避免底层错误全文把手机消息流撑成一张大卡片。
+  if (type === 'auto-resume') return <MobileAutoResumeActionRow data={data} />;
   const card = formatMobileSystemCard(type, data);
   return (
     <View style={styles.systemCard} testID={`message.systemCard.${type}`}>
@@ -3251,6 +3255,161 @@ function MobileSystemCard({
               <Text style={styles.systemCardValue}>{row.value}</Text>
             </View>
           ))}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+interface MobileAutoResumeInfo {
+  error?: string;
+  attempt?: number;
+  maxAttempts?: number;
+  sessionTotal?: number;
+  outcome?: 'succeeded' | 'failed';
+}
+
+function readMobileAutoResumeInfo(data?: Record<string, unknown>): MobileAutoResumeInfo {
+  const number = (value: unknown) =>
+    typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+  const attempt = number(data?.attempt);
+  const maxAttempts = number(data?.maxAttempts);
+  const sessionTotal = number(data?.sessionTotal);
+  return {
+    ...(typeof data?.error === 'string' && data.error.trim() ? { error: data.error } : {}),
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(maxAttempts !== undefined ? { maxAttempts } : {}),
+    ...(sessionTotal !== undefined ? { sessionTotal } : {}),
+    ...(data?.outcome === 'succeeded' || data?.outcome === 'failed'
+      ? { outcome: data.outcome }
+      : {}),
+  };
+}
+
+function summarizeMobileInterruption(detail?: string): string | undefined {
+  if (!detail) return undefined;
+  const compact = detail
+    .replace(/^\s*API Error:\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!compact) return undefined;
+  const firstSentence = compact.split(/(?<=[.。!?！？])\s/)[0] ?? compact;
+  return firstSentence.length > 72 ? `${firstSentence.slice(0, 71)}…` : firstSentence;
+}
+
+function MobileAutoResumeActionRow({
+  data,
+}: {
+  data?: Record<string, unknown>;
+}) {
+  const styles = useThemedStyles(makeStyles);
+  const { colors } = useTheme();
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const info = readMobileAutoResumeInfo(data);
+  const hasProgress = info.attempt !== undefined && info.maxAttempts !== undefined;
+  const hasInterruptionContext =
+    data?.live === true ||
+    info.error !== undefined ||
+    hasProgress ||
+    info.sessionTotal !== undefined ||
+    info.outcome !== undefined;
+
+  if (!hasInterruptionContext) {
+    const label = t('message.systemCard.autoResume.separator');
+    return (
+      <View style={styles.autoResumeSeparator} testID="message.systemCard.auto-resume-separator">
+        <View style={styles.autoResumeDivider} />
+        <View style={styles.autoResumeSeparatorPill}>
+          <RefreshCw color={colors.textTertiary} size={iconSize.xs} strokeWidth={iconStroke.regular} />
+          <Text style={styles.autoResumeSeparatorText}>{label}</Text>
+        </View>
+        <View style={styles.autoResumeDivider} />
+      </View>
+    );
+  }
+
+  const live = data?.live === true;
+  const label = live
+    ? hasProgress
+      ? t('message.systemCard.autoResume.pendingWithProgress', {
+          attempt: info.attempt,
+          total: info.maxAttempts,
+        })
+      : t('message.systemCard.autoResume.pending')
+    : info.outcome === 'succeeded'
+      ? t('message.systemCard.autoResume.succeeded')
+      : info.outcome === 'failed'
+        ? t('message.systemCard.autoResume.failed')
+        : t('message.systemCard.autoResume.neutral');
+  const summary = summarizeMobileInterruption(info.error);
+  const canExpand = Boolean(info.error) || hasProgress || info.sessionTotal !== undefined;
+  const accessibilityLabel = summary ? `${label}: ${summary}` : label;
+
+  return (
+    <View style={styles.autoResumeRow} testID="message.systemCard.auto-resume">
+      <Pressable
+        accessibilityLabel={accessibilityLabel}
+        accessibilityRole={canExpand ? 'button' : undefined}
+        accessibilityState={canExpand ? { expanded } : undefined}
+        disabled={!canExpand}
+        onPress={canExpand ? () => setExpanded((value) => !value) : undefined}
+        style={({ pressed }) => [styles.autoResumeHeader, pressed && styles.pressed]}
+      >
+        <View style={styles.autoResumeIconSlot} accessibilityElementsHidden>
+          {live ? (
+            <CompactActivityIndicator color={colors.textTertiary} size={iconSize.sm} />
+          ) : info.outcome === 'succeeded' ? (
+            <Check color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : info.outcome === 'failed' ? (
+            <X color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : (
+            <RefreshCw color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          )}
+        </View>
+        <Text style={styles.autoResumeTitle} numberOfLines={1}>{label}</Text>
+        {summary ? (
+          <Text style={styles.autoResumeSummary} numberOfLines={1}>{summary}</Text>
+        ) : (
+          <View style={styles.autoResumeHeaderSpacer} />
+        )}
+        {canExpand ? (
+          expanded ? (
+            <ChevronDown color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          ) : (
+            <ChevronRight color={colors.textTertiary} size={iconSize.sm} strokeWidth={iconStroke.regular} />
+          )
+        ) : null}
+      </Pressable>
+      {expanded && canExpand ? (
+        <View style={styles.autoResumeDetailPanel}>
+          {info.error ? (
+            <>
+              <Text style={styles.autoResumeDetailLabel}>
+                {t('message.systemCard.autoResume.detail.reason')}
+              </Text>
+              <Text selectable style={styles.autoResumeDetailText}>{info.error}</Text>
+            </>
+          ) : null}
+          {(hasProgress || info.sessionTotal !== undefined) ? (
+            <View style={[styles.autoResumeDetailMeta, info.error && styles.autoResumeDetailMetaWithReason]}>
+              {hasProgress ? (
+                <Text style={styles.autoResumeDetailMetaText}>
+                  {t('message.systemCard.autoResume.detail.attempt', {
+                    attempt: info.attempt,
+                    total: info.maxAttempts,
+                  })}
+                </Text>
+              ) : null}
+              {info.sessionTotal !== undefined ? (
+                <Text style={styles.autoResumeDetailMetaText}>
+                  {t('message.systemCard.autoResume.detail.sessionTotal', {
+                    count: info.sessionTotal,
+                  })}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
         </View>
       ) : null}
     </View>
@@ -6066,6 +6225,102 @@ const makeStyles = (colors: ThemeColors) => StyleSheet.create({
   },
   systemCardValue: {
     color: colors.textPrimary,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+  },
+  autoResumeSeparator: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    paddingVertical: spacing.sm,
+  },
+  autoResumeDivider: {
+    backgroundColor: colors.border,
+    flex: 1,
+    height: StyleSheet.hairlineWidth,
+  },
+  autoResumeSeparatorPill: {
+    alignItems: 'center',
+    borderColor: colors.border,
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    maxWidth: '78%',
+    minHeight: 28,
+    paddingHorizontal: spacing.sm,
+  },
+  autoResumeSeparatorText: {
+    color: colors.textTertiary,
+    flexShrink: 1,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeRow: {
+    alignSelf: 'stretch',
+  },
+  autoResumeHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.xs,
+    minHeight: 40,
+    paddingHorizontal: spacing.xs,
+  },
+  autoResumeIconSlot: {
+    alignItems: 'center',
+    height: 18,
+    justifyContent: 'center',
+    width: iconSize.md,
+  },
+  autoResumeTitle: {
+    color: colors.textSecondary,
+    flexShrink: 1,
+    flexGrow: 0,
+    fontSize: typeScale.footnote,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeSummary: {
+    color: colors.textSecondary,
+    flex: 1,
+    fontSize: typeScale.footnote,
+    minWidth: 0,
+  },
+  autoResumeHeaderSpacer: {
+    flex: 1,
+    minWidth: spacing.xs,
+  },
+  autoResumeDetailPanel: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderRadius: radius.control,
+    borderWidth: StyleSheet.hairlineWidth,
+    marginHorizontal: spacing.xs,
+    marginBottom: spacing.xs,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+  },
+  autoResumeDetailLabel: {
+    color: colors.textTertiary,
+    fontSize: typeScale.caption,
+    fontWeight: fontWeight.medium,
+  },
+  autoResumeDetailText: {
+    color: colors.textSecondary,
+    fontFamily: monoFont,
+    fontSize: typeScale.caption,
+    lineHeight: lineHeight.caption,
+    marginTop: 2,
+  },
+  autoResumeDetailMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+  },
+  autoResumeDetailMetaWithReason: {
+    marginTop: spacing.sm,
+  },
+  autoResumeDetailMetaText: {
+    color: colors.textTertiary,
     fontSize: typeScale.caption,
     lineHeight: lineHeight.caption,
   },

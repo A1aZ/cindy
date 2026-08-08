@@ -3134,19 +3134,27 @@ export default function SessionScreen() {
       const activeSessions = await maker.listActiveSessions().catch(() => []);
       return { activeSessions, activityEpochAtFetchStart };
     };
+    const fetchProjection = async () => {
+      // Capture immediately before every request. Because this helper is invoked inside
+      // withTransientRemoteRetry, each retry receives a fresh projection authority fence.
+      const authorityEpochAtStart =
+        remoteSessionStore.captureInputProjectionAuthorityEpoch(sessionId);
+      const projection = await maker.input.getProjection(sessionId);
+      return { projection, authorityEpochAtStart };
+    };
     if (syncRun.isStale()) return;
     setLoading(true);
     setError(null);
     try {
       if (!isReopen) {
         // 首开 / 强制替换:A1 全量并行(含整窗 listMessages),不回退。
-        const [sessionMeta, history, pendingInteractions, projection, activeSessionSnapshot] = await withTransientRemoteRetry(async () => {
+        const [sessionMeta, history, pendingInteractions, projectionResult, activeSessionSnapshot] = await withTransientRemoteRetry(async () => {
           await openAndSubscribe();
           return Promise.all([
             maker.getSession(sessionId),
             listMessagesWithPayloadRetry((limit) => maker.listMessages(sessionId, { limit })),
             maker.getPendingInteractions(sessionId),
-            maker.input.getProjection(sessionId),
+            fetchProjection(),
             fetchActiveSessionSnapshot(),
           ]);
         });
@@ -3172,15 +3180,19 @@ export default function SessionScreen() {
         remoteSessionStore.markSessionMessagesSynced(sessionId, sessionMeta);
         setHasOlderMessages(moreBeyondWindow);
         remoteSessionStore.setPendingInteractions(sessionId, Array.isArray(pendingInteractions) ? pendingInteractions : []);
-        remoteSessionStore.setInputProjection(sessionId, projection);
+        remoteSessionStore.setInputProjectionIfCurrent(
+          sessionId,
+          projectionResult.projection,
+          projectionResult.authorityEpochAtStart,
+        );
       } else {
         // 重开:便宜并行(不含整窗 listMessages)拿 meta + pending + projection + active。
-        const [sessionMeta, pendingInteractions, projection, activeSessionSnapshot] = await withTransientRemoteRetry(async () => {
+        const [sessionMeta, pendingInteractions, projectionResult, activeSessionSnapshot] = await withTransientRemoteRetry(async () => {
           await openAndSubscribe();
           return Promise.all([
             maker.getSession(sessionId),
             maker.getPendingInteractions(sessionId),
-            maker.input.getProjection(sessionId),
+            fetchProjection(),
             fetchActiveSessionSnapshot(),
           ]);
         });
@@ -3224,7 +3236,11 @@ export default function SessionScreen() {
         }
         remoteSessionStore.upsertDeviceSession(deviceId, deviceName, sessionMeta);
         remoteSessionStore.setPendingInteractions(sessionId, Array.isArray(pendingInteractions) ? pendingInteractions : []);
-        remoteSessionStore.setInputProjection(sessionId, projection);
+        remoteSessionStore.setInputProjectionIfCurrent(
+          sessionId,
+          projectionResult.projection,
+          projectionResult.authorityEpochAtStart,
+        );
       }
       // 不变量:上面 setHasOlderMessages 的校正(:806/:841/:846)与这里的 setLastSyncedAt 之间必须保持
       // 同步尾、无 await —— 否则乐观点亮 effect(依赖 lastSyncedAt===null)会在 await 间隙把刚校正成 false
@@ -5037,9 +5053,16 @@ export default function SessionScreen() {
       // 与原路径同口径:先对账分辨「确实没应用」vs「已应用但响应丢了」。
       const applied = await (async () => {
         try {
+          const projectionEpochAtRequestStart =
+            remoteSessionStore.captureInputProjectionAuthorityEpoch(item.sessionId);
           const fresh = await maker.input.getProjection(item.sessionId);
-          remoteSessionStore.setInputProjection(item.sessionId, fresh);
-          return fresh.pendingQueue.some((entry) => entry.clientId === queued.clientId);
+          const accepted = remoteSessionStore.setInputProjectionIfCurrent(
+            item.sessionId,
+            fresh,
+            projectionEpochAtRequestStart,
+          );
+          const current = accepted ? fresh : remoteSessionStore.getInputProjection(item.sessionId);
+          return current.pendingQueue.some((entry) => entry.clientId === queued.clientId);
         } catch {
           return remoteSessionStore.getInputProjection(item.sessionId).pendingQueue
             .some((entry) => entry.clientId === queued.clientId);
@@ -5777,9 +5800,18 @@ export default function SessionScreen() {
         // refetch 也失败再退回本地 store(订阅推送在此窗口内可能已带回该 clientId)。
         const applied = await (async () => {
           try {
+            const projectionEpochAtRequestStart =
+              remoteSessionStore.captureInputProjectionAuthorityEpoch(sessionId);
             const fresh = await maker.input.getProjection(sessionId);
-            remoteSessionStore.setInputProjection(sessionId, fresh);
-            return fresh.pendingQueue.some((item) => item.clientId === queued.clientId);
+            const accepted = remoteSessionStore.setInputProjectionIfCurrent(
+              sessionId,
+              fresh,
+              projectionEpochAtRequestStart,
+            );
+            // If a newer push/terminal boundary won the fence, the fetched value is
+            // stale for both the mirror and the applied decision; consult current state.
+            const current = accepted ? fresh : remoteSessionStore.getInputProjection(sessionId);
+            return current.pendingQueue.some((item) => item.clientId === queued.clientId);
           } catch {
             return remoteSessionStore.getInputProjection(sessionId).pendingQueue
               .some((item) => item.clientId === queued.clientId);
@@ -6067,8 +6099,14 @@ export default function SessionScreen() {
         deviceId,
       );
       const accepted = await maker.input.steer(sessionId, prepared, { removeFromQueue: true, touchUserSend: true });
+      const projectionEpochAtRequestStart =
+        remoteSessionStore.captureInputProjectionAuthorityEpoch(sessionId);
       const projection = await maker.input.getProjection(sessionId);
-      applyProjection(projection);
+      remoteSessionStore.setInputProjectionIfCurrent(
+        sessionId,
+        projection,
+        projectionEpochAtRequestStart,
+      );
       return accepted;
     });
   };

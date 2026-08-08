@@ -714,9 +714,17 @@ async function isFirstMessageApplied(task: InternalTask): Promise<boolean | null
   )) return true;
   try {
     assertTaskOwnerCurrent(task);
+    const projectionEpochAtRequestStart =
+      remoteSessionStore.captureInputProjectionAuthorityEpoch(task.sessionId);
     const projection = await maker.input.getProjection(task.sessionId);
     assertTaskOwnerCurrent(task);
-    if (projection?.pendingQueue?.some((item) => item.clientId === clientId)) return true;
+    const accepted = remoteSessionStore.setInputProjectionIfCurrent(
+      task.sessionId,
+      projection,
+      projectionEpochAtRequestStart,
+    );
+    const current = accepted ? projection : remoteSessionStore.getInputProjection(task.sessionId);
+    if (current.pendingQueue.some((item) => item.clientId === clientId)) return true;
   } catch (error) {
     if (isStaleNewSessionOwnerError(error)) throw error;
     return null;

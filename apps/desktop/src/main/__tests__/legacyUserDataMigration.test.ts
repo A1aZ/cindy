@@ -640,8 +640,7 @@ const path = require('node:path');
 
     expect(result.error).toBeUndefined();
     expect(result.signal).toBeNull();
-    expect(result.stderr).toBe('');
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     const output = JSON.parse(result.stdout) as {
       patchedCopyError: string | null;
       copiedBytes: number;

@@ -160,6 +160,8 @@ describe('packaged iOS Simulator sidecar artifact verification', () => {
     const source = await readFile(sourcePath, 'utf8');
     const resourcesStart = source.indexOf('function extraResourcesForTarget');
     const resourcesEnd = source.indexOf('function assertRealAndroidPlatformTool');
+    const ensureWdaStart = source.indexOf('function ensureMacIOSSimulatorWdaArchive');
+    const ensureWdaEnd = source.indexOf('const MACOS_VOICE_HELPER_DEPLOYMENT_TARGET');
     const buildStart = source.indexOf('function buildMacIOSSimulatorHelper');
     const buildEnd = source.indexOf('function runSwiftcForTarget');
     const stageStart = source.indexOf('function stageMacIOSSimulatorHelper');
@@ -171,6 +173,8 @@ describe('packaged iOS Simulator sidecar artifact verification', () => {
     for (const marker of [
       resourcesStart,
       resourcesEnd,
+      ensureWdaStart,
+      ensureWdaEnd,
       buildStart,
       buildEnd,
       stageStart,
@@ -183,6 +187,7 @@ describe('packaged iOS Simulator sidecar artifact verification', () => {
     }
 
     const resourcesBody = source.slice(resourcesStart, resourcesEnd);
+    const ensureWdaBody = source.slice(ensureWdaStart, ensureWdaEnd);
     const buildBody = source.slice(buildStart, buildEnd);
     const stageBody = source.slice(stageStart, stageEnd);
     const prePackageBody = source.slice(prePackageStart, postPackageStart);
@@ -190,6 +195,13 @@ describe('packaged iOS Simulator sidecar artifact verification', () => {
 
     expect(resourcesBody).toContain("base.push('resources/ios-simulator')");
     expect(resourcesBody).toContain("base.push('resources/cli')");
+    expect(ensureWdaBody).toContain("process.platform !== 'darwin'");
+    expect(ensureWdaBody).toContain('!isMacForgePlatform(platform)');
+    expect(ensureWdaBody).toContain("'ensure-wda-source-archive.mjs'");
+    expect(ensureWdaBody).toContain('spawnSync(process.execPath');
+    expect(ensureWdaBody).toContain('result.error');
+    expect(ensureWdaBody).toContain('result.signal');
+    expect(ensureWdaBody).toContain('result.status !== 0');
     expect(buildBody).toContain("CINDY_IOS_SIDECAR_OUTPUT_MODE: 'helper'");
     expect(buildBody).toContain('CINDY_IOS_SIDECAR_ARCH: helperArch');
     expect(buildBody).toContain('`${CINDY_APP_ID}.ios-simulator-helper`');
@@ -197,7 +209,10 @@ describe('packaged iOS Simulator sidecar artifact verification', () => {
     expect(stageBody).toContain("path.join(appContents, 'Helpers', IOS_SIMULATOR_HELPER_BUNDLE)");
     expect(stageBody).toContain("fs.rmSync(path.join(resourceRoot, 'helper')");
     expect(stageBody).toContain("fs.rmSync(path.join(resourceRoot, 'native')");
-    expect(prePackageBody).toContain('buildMacIOSSimulatorHelper(platform, arch);');
+    const ensureWdaIndex = prePackageBody.indexOf('ensureMacIOSSimulatorWdaArchive(platform);');
+    const buildHelperIndex = prePackageBody.indexOf('buildMacIOSSimulatorHelper(platform, arch);');
+    expect(ensureWdaIndex).toBeGreaterThan(-1);
+    expect(buildHelperIndex).toBeGreaterThan(ensureWdaIndex);
     expect(postPackageBody).toContain('stageMacIOSSimulatorHelper(buildPath, opts.platform);');
   });
 

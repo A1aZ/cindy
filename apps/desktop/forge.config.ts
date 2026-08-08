@@ -907,6 +907,31 @@ function isMacForgePlatform(platform: ForgePlatform): boolean {
   return platform === 'darwin' || platform === 'mas';
 }
 
+function ensureMacIOSSimulatorWdaArchive(platform: ForgePlatform): void {
+  if (process.platform !== 'darwin' || !isMacForgePlatform(platform)) return;
+  const script = path.join(__dirname, 'scripts', 'ensure-wda-source-archive.mjs');
+  console.log(`[forge:prePackage] preparing pinned iOS Simulator WDA archive via ${script}...`);
+  const result = spawnSync(process.execPath, [script], {
+    cwd: __dirname,
+    stdio: 'inherit',
+  });
+  if (result.error) {
+    throw new Error(
+      `[forge] iOS Simulator WDA archive preparation failed: ${result.error.message}`,
+    );
+  }
+  if (result.signal) {
+    throw new Error(
+      `[forge] iOS Simulator WDA archive preparation terminated by signal ${result.signal}`,
+    );
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `[forge] iOS Simulator WDA archive preparation failed with exit code ${result.status}`,
+    );
+  }
+}
+
 const MACOS_VOICE_HELPER_DEPLOYMENT_TARGET = 'macos10.15';
 const MACOS_AGENT_ISLAND_HELPER_DEPLOYMENT_TARGET = 'macos14.0';
 const MACOS_COMPUTER_PERMISSION_GUIDE_HELPER_DEPLOYMENT_TARGET = 'macos13.0';
@@ -1397,6 +1422,7 @@ const config: ForgeConfig = {
     prePackage: async (_forgeConfig, platform, arch) => {
       const targetPlatform = requestedTargetPlatform();
       const targetArch = requestedTargetArch();
+      ensureMacIOSSimulatorWdaArchive(platform);
       if (targetPlatform === 'win32') {
         buildCindyUpdater();
       }

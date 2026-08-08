@@ -53,6 +53,9 @@ class FakeChannel implements IOSSimulatorNativeSidecarManagedChannel {
     this.crashCount = 0;
     this.state = "idle";
   });
+  readonly abortOperationsForExit = vi.fn(() => {
+    this.state = "stopped";
+  });
 
   constructor(
     readonly handshake: Record<string, unknown> = {
@@ -131,6 +134,19 @@ function input() {
 }
 
 describe("IOSSimulatorNativeSidecarProcessManager", () => {
+  it("forwards updater force-exit aborts to every live channel", async () => {
+    const channel = new FakeChannel();
+    const manager = new IOSSimulatorNativeSidecarProcessManager({
+      binaryPath: "/private/fake/ios-simulator-sidecar",
+      createChannel: () => channel,
+    });
+    await manager.start(input());
+
+    manager.abortOperationsForExit();
+
+    expect(channel.abortOperationsForExit).toHaveBeenCalledOnce();
+  });
+
   it("adds native product flags only for explicitly enabled host capabilities", () => {
     const start = input();
     expect(createIOSSimulatorNativeSidecarArguments(start)).toEqual([
@@ -506,6 +522,24 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
       state: "stopped",
       lastFailure: null,
     });
+  });
+
+  it("removes a failed recovery channel from force-exit tracking", async () => {
+    const channel = new FakeChannel();
+    const manager = new IOSSimulatorNativeSidecarProcessManager({
+      binaryPath: "/private/fake/ios-simulator-sidecar",
+      createChannel: () => channel,
+    });
+    await manager.start(input());
+    channel.state = "failed";
+    channel.restart.mockRejectedValueOnce(new Error("restart failed"));
+
+    await expect(manager.recover(input())).rejects.toMatchObject({
+      code: "UNAVAILABLE",
+    });
+    manager.abortOperationsForExit();
+
+    expect(channel.abortOperationsForExit).not.toHaveBeenCalled();
   });
 
   it("only re-arms a parked binding for explicit recovery", async () => {

@@ -34,4 +34,12 @@ describe('iOS Simulator updater exit abort seam', () => {
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledOnce();
   });
+
+  it('does not let a cleanup failure block the updater exit seam', () => {
+    unregister = registerIOSSimulatorExitAbortHandler(() => {
+      throw new Error('already exited');
+    });
+
+    expect(() => abortIOSSimulatorOperationsForExit()).not.toThrow();
+  });
 });

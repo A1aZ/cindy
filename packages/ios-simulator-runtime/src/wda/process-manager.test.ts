@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -146,6 +146,7 @@ async function createHarness(
     startTimeoutMs: harnessOptions.startTimeoutMs,
   });
   return {
+    root,
     manager,
     run,
     driver,
@@ -237,15 +238,19 @@ describe("WdaProcessManager", () => {
     expect(harness.killed).toEqual(["SIGINT"]);
   });
 
-  it("waits for an in-flight start and deterministically stops the late process", async () => {
+  it("cancels an in-flight WDA build without launching a late process", async () => {
     const harness = await createHarness();
     const runBuild = harness.run.getMockImplementation()!;
-    let releaseBuild!: () => void;
-    const buildGate = new Promise<void>((resolve) => {
-      releaseBuild = resolve;
-    });
     harness.run.mockImplementation(async (...args) => {
-      if (args[1].includes("build-for-testing")) await buildGate;
+      if (args[1].includes("build-for-testing")) {
+        return new Promise((resolve) => {
+          const signal = args[2]?.signal;
+          const finish = () =>
+            resolve({ stdout: "", stderr: "", exitCode: null });
+          signal?.addEventListener("abort", finish, { once: true });
+          if (signal?.aborted) finish();
+        });
+      }
       return runBuild(...args);
     });
 
@@ -263,20 +268,127 @@ describe("WdaProcessManager", () => {
         ),
       ).toBe(true),
     );
-    let stopSettled = false;
-    const stop = harness.manager.stop("instance-a").then(() => {
-      stopSettled = true;
-    });
-    await Promise.resolve();
-    expect(stopSettled).toBe(false);
+    const stop = harness.manager.stop("instance-a");
 
-    releaseBuild();
-    await start;
-    await stop;
+    await expect(start).rejects.toMatchObject({ code: "START_CANCELLED" });
+    await expect(stop).resolves.toBeUndefined();
 
     expect(harness.manager.get("instance-a")).toBeNull();
-    expect(harness.driver.deleteSession).toHaveBeenCalledWith("wda-session");
+    expect(harness.launch).not.toHaveBeenCalled();
+    expect(harness.driver.createSession).not.toHaveBeenCalled();
+    const buildCall = harness.run.mock.calls.find(([, args]) =>
+      args.includes("build-for-testing"),
+    );
+    expect(buildCall?.[2]?.signal?.aborted).toBe(true);
+  });
+
+  it("stops promptly while shared WDA source extraction finishes independently", async () => {
+    const harness = await createHarness();
+    const runCommand = harness.run.getMockImplementation()!;
+    let releaseExtraction!: () => void;
+    const extractionGate = new Promise<void>((resolve) => {
+      releaseExtraction = resolve;
+    });
+    harness.run.mockImplementation(async (...args) => {
+      if (!args[1].includes("-xzf")) return runCommand(...args);
+      await extractionGate;
+      return runCommand(...args);
+    });
+
+    const start = harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+    await vi.waitFor(() =>
+      expect(
+        harness.run.mock.calls.some(([, args]) => args.includes("-xzf")),
+      ).toBe(true),
+    );
+
+    await expect(harness.manager.stop("instance-a")).resolves.toBeUndefined();
+    await expect(start).rejects.toMatchObject({ code: "START_CANCELLED" });
+    expect(harness.launch).not.toHaveBeenCalled();
+
+    releaseExtraction();
+    await vi.waitFor(async () => {
+      const marker = await readFile(
+        path.join(
+          harness.root,
+          "cache",
+          "source",
+          "a".repeat(40),
+          ".cindy-wda-source.json",
+        ),
+        "utf8",
+      );
+      expect(marker).toContain('"revision"');
+    });
+  });
+
+  it("cancels readiness probing and terminates the already-launched process", async () => {
+    const harness = await createHarness();
+    harness.driver.probe.mockImplementation(() => new Promise(() => undefined));
+    const start = harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+    await vi.waitFor(() => expect(harness.driver.probe).toHaveBeenCalled());
+
+    const stop = harness.manager.stop("instance-a");
+
+    await expect(start).rejects.toMatchObject({ code: "START_CANCELLED" });
+    await expect(stop).resolves.toBeUndefined();
     expect(harness.killed).toEqual(["SIGINT"]);
+    expect(harness.manager.get("instance-a")).toBeNull();
+  });
+
+  it("synchronously kills live WDA processes during updater force-exit", async () => {
+    const harness = await createHarness();
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+
+    harness.manager.abortOperationsForExit();
+
+    expect(harness.killed).toEqual(["SIGKILL"]);
+  });
+
+  it("keeps stop-gap WDA processes visible to force-exit cleanup", async () => {
+    const harness = await createHarness();
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+    let releaseDelete!: () => void;
+    harness.driver.deleteSession.mockImplementation(
+      () =>
+        new Promise<undefined>((resolve) => {
+          releaseDelete = () => resolve(undefined);
+        }),
+    );
+    const stop = harness.manager.stop("instance-a");
+    await vi.waitFor(() =>
+      expect(harness.driver.deleteSession).toHaveBeenCalledWith("wda-session"),
+    );
+
+    harness.manager.abortOperationsForExit();
+    expect(harness.killed).toEqual(["SIGKILL"]);
+
+    releaseDelete();
+    await stop;
   });
 
   it("awaits full process-group termination before returning a readiness timeout", async () => {
@@ -363,6 +475,31 @@ describe("WdaProcessManager", () => {
     expect(harness.process.isAlive()).toBe(false);
   });
 
+  it("uses normal running teardown when process exit races the start commit", async () => {
+    const harness = await createHarness(undefined, {
+      groupExitsOn: [],
+    });
+    harness.driver.configureStream.mockImplementation(
+      async (_sessionId, profile) => {
+        harness.exitLeader("SIGTERM");
+        return profile;
+      },
+    );
+
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+
+    await vi.waitFor(() =>
+      expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]),
+    );
+    expect(harness.manager.get("instance-a")).toBeNull();
+  });
+
   it("quarantines an unkillable process group and blocks replacement starts", async () => {
     const harness = await createHarness(undefined, {
       leaderExitsOn: ["SIGINT"],
@@ -447,6 +584,9 @@ describe("WdaProcessManager", () => {
 
     expect(running.pid).toBe(43);
     expect(harness.launch).toHaveBeenCalledTimes(2);
+    harness.manager.abortOperationsForExit();
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(replacement.kill).toHaveBeenCalledWith("SIGKILL");
   });
 
   it("attaches the optional native adapter by exact generation and stops it with WDA", async () => {

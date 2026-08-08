@@ -20,6 +20,7 @@ import { createWdaBuildPlan, type WdaCommandPlan } from "./build-plan.js";
 import { WdaClient } from "./client.js";
 import { WdaError } from "./errors.js";
 import {
+  abortWdaSourcePreparationForExit,
   createWdaBuildCacheKey,
   prepareWdaSource,
   type WdaSourceManifest,
@@ -106,6 +107,11 @@ interface InternalRunningInstance extends WdaRunningInstance {
 }
 
 interface PendingWdaOperation {
+  controller: AbortController;
+  simulatorUdid: string;
+  committed: boolean;
+  process?: WdaManagedProcess;
+  termination?: Promise<void>;
   promise?: Promise<WdaRunningInstance>;
 }
 
@@ -287,6 +293,7 @@ export class WdaProcessManager {
   readonly #starting = new Map<string, PendingWdaOperation>();
   readonly #stopping = new Map<string, Promise<void>>();
   readonly #retiring = new Map<string, RetiringWdaProcess>();
+  readonly #liveProcesses = new Set<WdaManagedProcess>();
 
   constructor(options: WdaProcessManagerOptions) {
     this.#options = options;
@@ -354,6 +361,22 @@ export class WdaProcessManager {
     };
   }
 
+  /** Best-effort synchronous child teardown for updater force-quit. */
+  abortOperationsForExit(): void {
+    abortWdaSourcePreparationForExit();
+    for (const pending of this.#starting.values()) {
+      pending.controller.abort();
+    }
+    for (const process of this.#liveProcesses) {
+      try {
+        process.kill("SIGKILL");
+      } catch {
+        // The process group may already have exited.
+      }
+    }
+    this.#options.nativeCapabilityProvider?.abortOperationsForExit?.();
+  }
+
   start(options: WdaStartOptions): Promise<WdaRunningInstance> {
     const stopping = this.#stopping.get(options.instanceId);
     if (stopping) return stopping.then(() => this.start(options));
@@ -363,8 +386,12 @@ export class WdaProcessManager {
     if (running) return Promise.resolve(running);
     const pending = this.#starting.get(options.instanceId);
     if (pending) return pending.promise!;
-    const starting: PendingWdaOperation = {};
-    const operation = this.#start(options).finally(() => {
+    const starting: PendingWdaOperation = {
+      controller: new AbortController(),
+      simulatorUdid: options.simulatorUdid,
+      committed: false,
+    };
+    const operation = this.#start(options, starting).finally(() => {
       if (this.#starting.get(options.instanceId) === starting) {
         this.#starting.delete(options.instanceId);
       }
@@ -422,13 +449,21 @@ export class WdaProcessManager {
     return this.get(instanceId);
   }
 
-  async #start(options: WdaStartOptions): Promise<WdaRunningInstance> {
-    const prepared = await prepareWdaSource({
-      archivePath: this.#options.archivePath,
-      cacheRoot: path.join(this.#options.cacheRoot, "source"),
-      manifest: this.#options.sourceManifest,
-      commandRunner: this.#runner,
-    });
+  async #start(
+    options: WdaStartOptions,
+    operation: PendingWdaOperation,
+  ): Promise<WdaRunningInstance> {
+    const signal = operation.controller.signal;
+    const prepared = await this.#awaitStartOperation(
+      prepareWdaSource({
+        archivePath: this.#options.archivePath,
+        cacheRoot: path.join(this.#options.cacheRoot, "source"),
+        manifest: this.#options.sourceManifest,
+        commandRunner: this.#runner,
+      }),
+      signal,
+    );
+    this.#throwIfStartCancelled(signal);
     const buildCacheKey = createWdaBuildCacheKey({
       sourceRevision: prepared.revision,
       xcodeBuild: options.xcodeBuild,
@@ -441,10 +476,16 @@ export class WdaProcessManager {
       buildCacheKey,
     );
     await mkdir(derivedDataPath, { recursive: true });
+    this.#throwIfStartCancelled(signal);
     const allocate = this.#options.allocatePort ?? allocateLoopbackPort;
     const controlPort = await allocate();
+    this.#throwIfStartCancelled(signal);
     let mjpegPort = await allocate();
-    while (mjpegPort === controlPort) mjpegPort = await allocate();
+    this.#throwIfStartCancelled(signal);
+    while (mjpegPort === controlPort) {
+      mjpegPort = await allocate();
+      this.#throwIfStartCancelled(signal);
+    }
     const plan = createWdaBuildPlan({
       checkoutPath: prepared.checkoutPath,
       derivedDataPath,
@@ -458,7 +499,9 @@ export class WdaProcessManager {
       env: plan.build.env,
       timeoutMs: 10 * 60_000,
       maxBufferBytes: MAX_LOG_BYTES,
+      signal,
     });
+    this.#throwIfStartCancelled(signal);
     if (build.exitCode !== 0) {
       throw new WdaError(
         "BUILD_FAILED",
@@ -466,7 +509,10 @@ export class WdaProcessManager {
       );
     }
 
+    this.#throwIfStartCancelled(signal);
     const process = this.#launcher.launch(plan.launch);
+    operation.process = process;
+    this.#liveProcesses.add(process);
     const log = new BoundedLog();
     log.append(build.stdout);
     log.append(build.stderr);
@@ -477,129 +523,146 @@ export class WdaProcessManager {
         controlUrl: `http://127.0.0.1:${controlPort}`,
         mjpegUrl: `http://127.0.0.1:${mjpegPort}`,
       });
-    const deadline =
-      this.#clock.now() + (this.#options.startTimeoutMs ?? 90_000);
-    let health: IOSSimulatorDriverHealth | null = null;
-    let processExited = false;
-    void process.exited.then(() => {
-      processExited = true;
-    });
-    while (this.#clock.now() < deadline) {
-      if (processExited) break;
-      try {
-        const probed = await driver.probe();
-        if (probed.ready) {
-          health = probed;
-          break;
-        }
-      } catch {
-        // WDA commonly refuses connections while XCTest is still launching.
-      }
-      await this.#clock.sleep(500);
-    }
-    if (!health) {
-      unsubscribeOutput();
-      const failure = new WdaError(
-        "START_TIMEOUT",
-        "WebDriverAgent did not become ready in time",
-      );
-      await this.#terminateProcessGroup(
-        options.instanceId,
-        options.simulatorUdid,
-        process,
-      );
-      throw failure;
-    }
-    let driverSessionId: string;
     try {
-      const session = await driver.createSession();
-      driverSessionId = session.id;
-      await driver.configureStream(driverSessionId, {
-        framesPerSecond: 5,
-        jpegQuality: 25,
-        scalingPercent: 50,
+      this.#throwIfStartCancelled(signal);
+      const deadline =
+        this.#clock.now() + (this.#options.startTimeoutMs ?? 90_000);
+      let health: IOSSimulatorDriverHealth | null = null;
+      let processExited = false;
+      void process.exited.then(() => {
+        processExited = true;
       });
+      while (this.#clock.now() < deadline) {
+        this.#throwIfStartCancelled(signal);
+        if (processExited) break;
+        try {
+          const probed = await this.#awaitStartOperation(
+            driver.probe(),
+            signal,
+          );
+          if (probed.ready) {
+            health = probed;
+            break;
+          }
+        } catch (error) {
+          this.#throwIfStartCancelled(signal);
+          // WDA commonly refuses connections while XCTest is still launching.
+        }
+        await this.#sleepWhileStarting(500, signal);
+      }
+      this.#throwIfStartCancelled(signal);
+      if (!health) {
+        throw new WdaError(
+          "START_TIMEOUT",
+          "WebDriverAgent did not become ready in time",
+        );
+      }
+
+      const session = await this.#awaitStartOperation(
+        driver.createSession(),
+        signal,
+      );
+      const driverSessionId = session.id;
+      await this.#awaitStartOperation(
+        driver.configureStream(driverSessionId, {
+          framesPerSecond: 5,
+          jpegQuality: 25,
+          scalingPercent: 50,
+        }),
+        signal,
+      );
+      this.#throwIfStartCancelled(signal);
+
+      let nativeSidecar: IOSSimulatorNativeSidecarDriver | undefined;
+      let nativeUnavailableReason: string | null = null;
+      const nativeManager = this.#options.nativeCapabilityProvider;
+      if (nativeManager) {
+        if (options.generation === undefined) {
+          nativeUnavailableReason =
+            "Native sidecar requires the simulator generation from the ownership actor.";
+        } else {
+          try {
+            nativeSidecar = (
+              await this.#awaitStartOperation(
+                nativeManager.start({
+                  instanceId: options.instanceId,
+                  simulatorUdid: options.simulatorUdid,
+                  generation: options.generation,
+                  runtime: {
+                    runtimeIdentifier: options.runtimeIdentifier,
+                    runtimeBuildVersion: options.runtimeBuildVersion ?? null,
+                    xcodeBuild: options.xcodeBuild,
+                    architecture: options.architecture,
+                  },
+                }),
+                signal,
+              )
+            ).adapter;
+          } catch (error) {
+            this.#throwIfStartCancelled(signal);
+            nativeUnavailableReason =
+              error instanceof Error
+                ? error.message
+                : "Native sidecar capability probe failed.";
+          }
+        }
+      }
+      this.#throwIfStartCancelled(signal);
+      const driverRouter = this.#createDriverRouter({
+        instanceId: options.instanceId,
+        driver,
+        nativeSidecar,
+        nativeUnavailableReason,
+      });
+      const running: InternalRunningInstance = {
+        instanceId: options.instanceId,
+        simulatorUdid: options.simulatorUdid,
+        pid: process.pid,
+        controlPort,
+        mjpegPort,
+        sourceRevision: prepared.revision,
+        buildCacheKey,
+        driver,
+        driverRouter,
+        driverSessionId,
+        health,
+        startedAt: new Date(this.#clock.now()).toISOString(),
+        process,
+        unsubscribeOutput,
+        log,
+        nativeSidecar,
+        nativeGeneration: options.generation,
+        nativeRuntime: {
+          runtimeIdentifier: options.runtimeIdentifier,
+          runtimeBuildVersion: options.runtimeBuildVersion ?? null,
+          xcodeBuild: options.xcodeBuild,
+          architecture: options.architecture,
+        },
+      };
+      operation.committed = true;
+      this.#running.set(options.instanceId, running);
+      void process.exited.then(() => {
+        if (this.#running.get(options.instanceId)?.pid === process.pid) {
+          void this.stop(options.instanceId).catch(() => undefined);
+        }
+      });
+      return this.get(options.instanceId)!;
     } catch (error) {
       unsubscribeOutput();
-      const failure = new WdaError(
+      await this.#options.nativeCapabilityProvider
+        ?.stop(options.instanceId)
+        .catch(() => undefined);
+      await this.#terminatePendingProcess(options.instanceId, operation);
+      if (error instanceof WdaError) throw error;
+      throw new WdaError(
         "LAUNCH_FAILED",
         `WebDriverAgent session setup failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      await this.#terminateProcessGroup(
-        options.instanceId,
-        options.simulatorUdid,
-        process,
-      );
-      throw failure;
-    }
-    let nativeSidecar: IOSSimulatorNativeSidecarDriver | undefined;
-    let nativeUnavailableReason: string | null = null;
-    const nativeManager = this.#options.nativeCapabilityProvider;
-    if (nativeManager) {
-      if (options.generation === undefined) {
-        nativeUnavailableReason =
-          "Native sidecar requires the simulator generation from the ownership actor.";
-      } else {
-        try {
-          nativeSidecar = (
-            await nativeManager.start({
-              instanceId: options.instanceId,
-              simulatorUdid: options.simulatorUdid,
-              generation: options.generation,
-              runtime: {
-                runtimeIdentifier: options.runtimeIdentifier,
-                runtimeBuildVersion: options.runtimeBuildVersion ?? null,
-                xcodeBuild: options.xcodeBuild,
-                architecture: options.architecture,
-              },
-            })
-          ).adapter;
-        } catch (error) {
-          nativeUnavailableReason =
-            error instanceof Error
-              ? error.message
-              : "Native sidecar capability probe failed.";
-        }
+    } finally {
+      if (!operation.committed && !this.#isProcessGroupAlive(process)) {
+        this.#liveProcesses.delete(process);
       }
     }
-    const driverRouter = this.#createDriverRouter({
-      instanceId: options.instanceId,
-      driver,
-      nativeSidecar,
-      nativeUnavailableReason,
-    });
-    const running: InternalRunningInstance = {
-      instanceId: options.instanceId,
-      simulatorUdid: options.simulatorUdid,
-      pid: process.pid,
-      controlPort,
-      mjpegPort,
-      sourceRevision: prepared.revision,
-      buildCacheKey,
-      driver,
-      driverRouter,
-      driverSessionId,
-      health,
-      startedAt: new Date(this.#clock.now()).toISOString(),
-      process,
-      unsubscribeOutput,
-      log,
-      nativeSidecar,
-      nativeGeneration: options.generation,
-      nativeRuntime: {
-        runtimeIdentifier: options.runtimeIdentifier,
-        runtimeBuildVersion: options.runtimeBuildVersion ?? null,
-        xcodeBuild: options.xcodeBuild,
-        architecture: options.architecture,
-      },
-    };
-    this.#running.set(options.instanceId, running);
-    void process.exited.then(() => {
-      if (this.#running.get(options.instanceId)?.pid === process.pid) {
-        void this.stop(options.instanceId).catch(() => undefined);
-      }
-    });
-    return this.get(options.instanceId)!;
   }
 
   #createDriverRouter(input: {
@@ -622,6 +685,60 @@ export class WdaProcessManager {
         this.#options.nativeCapabilityProvider?.admission(input.instanceId) ??
         null,
     });
+  }
+
+  #startCancelledError(): WdaError {
+    return new WdaError(
+      "START_CANCELLED",
+      "WebDriverAgent startup was cancelled",
+    );
+  }
+
+  #throwIfStartCancelled(signal: AbortSignal): void {
+    if (signal.aborted) throw this.#startCancelledError();
+  }
+
+  #awaitStartOperation<T>(
+    operation: Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    if (signal.aborted) return Promise.reject(this.#startCancelledError());
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => finish(() => reject(this.#startCancelledError()));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      operation.then(
+        (value) => finish(() => resolve(value)),
+        (error) => finish(() => reject(error)),
+      );
+    });
+  }
+
+  #sleepWhileStarting(ms: number, signal: AbortSignal): Promise<void> {
+    return this.#awaitStartOperation(this.#clock.sleep(ms), signal);
+  }
+
+  #terminatePendingProcess(
+    instanceId: string,
+    operation: PendingWdaOperation,
+  ): Promise<void> {
+    if (!operation.process) return Promise.resolve();
+    operation.termination ??= this.#terminateProcessGroup(
+      instanceId,
+      operation.simulatorUdid,
+      operation.process,
+    );
+    return operation.termination;
   }
 
   #isProcessGroupAlive(process: WdaManagedProcess): boolean {
@@ -678,6 +795,7 @@ export class WdaProcessManager {
       !this.#isProcessGroupAlive(retiring.process)
     ) {
       this.#retiring.delete(instanceId);
+      this.#liveProcesses.delete(retiring.process);
     }
   }
 
@@ -716,6 +834,7 @@ export class WdaProcessManager {
     } else {
       await cleanupDetachedDiagnostics(this.#options.cacheRoot, simulatorUdid);
     }
+    this.#liveProcesses.delete(process);
   }
 
   async #resumeAfterRetiringProcess(
@@ -752,11 +871,15 @@ export class WdaProcessManager {
 
   async #stop(instanceId: string): Promise<void> {
     const pending = this.#starting.get(instanceId);
-    if (pending) {
-      await this.#options.nativeCapabilityProvider
+    if (pending && !pending.committed) {
+      pending.controller.abort();
+      const nativeStop = this.#options.nativeCapabilityProvider
         ?.stop(instanceId)
         .catch(() => undefined);
+      const termination = this.#terminatePendingProcess(instanceId, pending);
       await pending.promise?.catch(() => undefined);
+      await nativeStop;
+      await termination;
     }
     const retiring = this.#retiring.get(instanceId);
     if (retiring) {

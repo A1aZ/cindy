@@ -46,7 +46,17 @@ export interface WdaBuildCacheIdentity {
   architecture: "arm64" | "x86_64";
 }
 
-const inFlight = new Map<string, Promise<PreparedWdaSource>>();
+interface InFlightWdaSourcePreparation {
+  promise: Promise<PreparedWdaSource>;
+  controller: AbortController;
+}
+
+const inFlight = new Map<string, InFlightWdaSourcePreparation>();
+
+/** Synchronously signal shared extraction subprocesses before updater force-exit. */
+export function abortWdaSourcePreparationForExit(): void {
+  for (const operation of inFlight.values()) operation.controller.abort();
+}
 
 function requireAbsolute(value: string, label: string): string {
   if (!path.isAbsolute(value)) {
@@ -144,7 +154,8 @@ export function prepareWdaSource(
   const manifest = requireManifest(options.manifest ?? WDA_SOURCE_PIN);
   const key = `${archivePath}\0${cacheRoot}\0${manifest.revision}`;
   const existing = inFlight.get(key);
-  if (existing) return existing;
+  if (existing) return existing.promise;
+  const controller = new AbortController();
 
   const operation = (async () => {
     const runner =
@@ -167,7 +178,11 @@ export function prepareWdaSource(
       const extracted = await runner.run(
         TAR,
         ["-xzf", archivePath, "-C", temporaryPath, "--strip-components=1"],
-        { timeoutMs: 60_000, maxBufferBytes: 2 * 1024 * 1024 },
+        {
+          timeoutMs: 60_000,
+          maxBufferBytes: 2 * 1024 * 1024,
+          signal: controller.signal,
+        },
       );
       if (extracted.exitCode !== 0) {
         throw new WdaError(
@@ -204,6 +219,6 @@ export function prepareWdaSource(
       fromCache: false,
     };
   })().finally(() => inFlight.delete(key));
-  inFlight.set(key, operation);
+  inFlight.set(key, { promise: operation, controller });
   return operation;
 }

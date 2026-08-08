@@ -520,6 +520,30 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
     if (this.#stopPromise) return this.#stopPromise;
   }
 
+  /** Synchronously kill both active and already-stopping process groups. */
+  abortOperationsForExit(): void {
+    this.#stopRequested = true;
+    this.#state = "stopped";
+    this.#rejectAll(
+      new IOSSimulatorNativeSidecarChannelError(
+        "ABORTED",
+        "Native sidecar channel aborted for Host exit.",
+      ),
+    );
+    const processes = new Set([
+      ...(this.#process ? [this.#process] : []),
+      ...(this.#stoppingProcess ? [this.#stoppingProcess] : []),
+    ]);
+    this.#process = null;
+    for (const process of processes) {
+      try {
+        process.kill("SIGKILL");
+      } catch {
+        // The process may have exited between collection and termination.
+      }
+    }
+  }
+
   #ensureProcessClosed(
     process: IOSSimulatorNativeSidecarManagedProcess,
     terminate: boolean,

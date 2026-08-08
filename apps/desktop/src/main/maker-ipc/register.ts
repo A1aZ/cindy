@@ -452,7 +452,6 @@ import { registerAndroidAutomationHandlers } from './androidHandlers.js';
 import { registerIOSSimulatorHandlers } from './iosSimulatorHandlers.js';
 import {
   cancelIOSSimulatorSessionOperations,
-  reconcileIOSSimulatorOwnership,
 } from '../mcp-integrations/ios-simulator.js';
 import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
@@ -12291,9 +12290,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerIOSSimulatorHandlers(
     createElectronIpcHandlerRegistry(),
   );
-  void reconcileIOSSimulatorOwnership().catch((error) => {
-    log.warn('iOS Simulator ownership reconcile failed during IPC bootstrap', error);
-  });
 
   // ── Browser automation (Settings →「电脑使用」) ───────────────────────────
   // Probe local browser detection. Drives the detection status + download

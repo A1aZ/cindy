@@ -138,6 +138,25 @@ describe("IOSSimulatorResourceScheduler", () => {
     expect(scheduler.runningCount()).toBe(1);
   });
 
+  it("restores persisted occupancy without bypassing limits for another instance", async () => {
+    const scheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 1,
+      hardLimit: 1,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+
+    scheduler.restoreRunning("persisted");
+    scheduler.restoreRunning("persisted");
+
+    expect(scheduler.runningCount()).toBe(1);
+    await expect(
+      scheduler.runStart("new", async () => undefined),
+    ).rejects.toMatchObject({ code: "RESOURCE_LIMIT_REACHED" });
+    await expect(
+      scheduler.runStart("persisted", async () => "recovered"),
+    ).resolves.toBe("recovered");
+  });
+
   it("uses a hard architectural cap of four", async () => {
     const scheduler = new IOSSimulatorResourceScheduler({
       softLimit: 4,

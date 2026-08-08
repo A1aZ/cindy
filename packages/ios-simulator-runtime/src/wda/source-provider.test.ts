@@ -6,7 +6,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { IOSSimulatorCommandRunner } from "../types.js";
-import { createWdaBuildCacheKey, prepareWdaSource } from "./source-provider.js";
+import {
+  abortWdaSourcePreparationForExit,
+  createWdaBuildCacheKey,
+  prepareWdaSource,
+} from "./source-provider.js";
 
 const roots: string[] = [];
 
@@ -73,7 +77,11 @@ describe("prepareWdaSource", () => {
         expect.stringContaining(".extract-"),
         "--strip-components=1",
       ],
-      { timeoutMs: 60_000, maxBufferBytes: 2 * 1024 * 1024 },
+      {
+        timeoutMs: 60_000,
+        maxBufferBytes: 2 * 1024 * 1024,
+        signal: expect.any(AbortSignal),
+      },
     );
     const marker = JSON.parse(
       await readFile(
@@ -91,6 +99,42 @@ describe("prepareWdaSource", () => {
     });
     expect(second.fromCache).toBe(true);
     expect(test.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares and synchronously aborts in-flight extraction for updater exit", async () => {
+    const test = await harness();
+    let extractionSignal: AbortSignal | undefined;
+    test.run.mockImplementation(async (_command, args, options) => {
+      extractionSignal = options?.signal;
+      return new Promise((resolve) => {
+        const finish = () =>
+          resolve({ stdout: "", stderr: "", exitCode: null });
+        extractionSignal?.addEventListener("abort", finish, { once: true });
+        if (extractionSignal?.aborted) finish();
+      });
+    });
+
+    const first = prepareWdaSource({
+      archivePath: test.archivePath,
+      cacheRoot: test.cacheRoot,
+      manifest: test.manifest,
+      commandRunner: test.runner,
+    });
+    const second = prepareWdaSource({
+      archivePath: test.archivePath,
+      cacheRoot: test.cacheRoot,
+      manifest: test.manifest,
+      commandRunner: test.runner,
+    });
+    expect(second).toBe(first);
+    await vi.waitFor(() => expect(test.run).toHaveBeenCalledTimes(1));
+
+    abortWdaSourcePreparationForExit();
+
+    expect(extractionSignal?.aborted).toBe(true);
+    await expect(first).rejects.toMatchObject({
+      code: "INVALID_CONFIGURATION",
+    });
   });
 
   it("rejects checksum drift before invoking tar", async () => {

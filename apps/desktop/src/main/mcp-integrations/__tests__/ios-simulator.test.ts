@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -26,8 +27,11 @@ import {
 } from '@cindy/ios-simulator-runtime';
 import type { IOSSimulatorPublicRouteStatus } from '../../../shared/iosSimulatorIpc';
 import {
+  cancelIOSSimulatorSessionOperations,
+  cleanupIOSSimulatorRemovedSession,
   createIOSSimulatorHost,
   createRegistryBackedIOSSimulatorActor,
+  flushIOSSimulatorOwnershipRegistry,
   getIOSSimulatorMcpDeps,
   type IOSSimulatorAppLifecycleAdapter,
   type IOSSimulatorMediaCaptureAdapter,
@@ -77,6 +81,31 @@ describe('iOS Simulator host', () => {
   function localSession(id: string) {
     return { id, workDir: `/tmp/${id}`, remoteHostId: null };
   }
+
+  it('keeps the default ownership registry lazy for disabled MCP discovery', async () => {
+    const getPath = vi.spyOn(app, 'getPath');
+    try {
+      const deps = getIOSSimulatorMcpDeps({ isIOSSimulatorEnabled: () => false });
+
+      await expect(deps.describeTools?.({ sessionId: 'disabled-session' })).resolves.toMatchObject({
+        ready: false,
+      });
+      await expect(
+        deps.callTool('check_environment', {}, { sessionId: 'disabled-session' }),
+      ).resolves.toMatchObject({ errorCode: 'IOS_SIMULATOR_DISABLED' });
+      await cancelIOSSimulatorSessionOperations('ordinary-session');
+      await cleanupIOSSimulatorRemovedSession('ordinary-session');
+      await flushIOSSimulatorOwnershipRegistry();
+      expect(getPath).not.toHaveBeenCalled();
+    } finally {
+      getPath.mockRestore();
+    }
+  });
+
+  it('does not reconcile Simulator ownership during generic IPC bootstrap', () => {
+    const source = readFileSync(new URL('../../maker-ipc/register.ts', import.meta.url), 'utf8');
+    expect(source).not.toContain('reconcileIOSSimulatorOwnership');
+  });
 
   it('returns device discovery for a local session', async () => {
     const host = createIOSSimulatorHost({
@@ -200,7 +229,6 @@ describe('iOS Simulator host', () => {
       bootProvenance: 'preexisting',
     });
     const resourceScheduler = testResourceScheduler();
-    await resourceScheduler.runStart('running-instance', async () => undefined);
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
@@ -416,6 +444,97 @@ describe('iOS Simulator host', () => {
       ok: false,
       errorCode: 'STALE_GENERATION',
     });
+  });
+
+  it.each(['Booted', 'Booting'] as const)(
+    'restores scheduler occupancy for a persisted %s device',
+    async (deviceState) => {
+      const lifecycle: IOSSimulatorSimctlLifecycle = {
+        findExact: vi.fn(),
+        bootExact: vi.fn(),
+        shutdownExact: vi.fn(),
+        createExact: vi.fn(),
+        deleteExact: vi.fn(),
+      };
+      const actor = new IOSSimulatorInstanceActor({
+        store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+        lifecycle,
+      });
+      const instance = actor.attach({
+        sessionId: 'persisted-capacity-session',
+        worktreeRoot: '/tmp/persisted-capacity-session',
+        sourceFingerprint: 'fingerprint-a',
+        device: { ...READY_REPORT.devices[0]!, state: deviceState },
+      });
+      const resourceScheduler = new IOSSimulatorResourceScheduler({
+        softLimit: 1,
+        hardLimit: 1,
+        freeMemoryBytes: () => 100 * 1024 ** 3,
+      });
+      const host = createIOSSimulatorHost({
+        actor,
+        lifecycle,
+        resourceScheduler,
+        runtime: {
+          inspect: vi.fn(async () => ({
+            ...READY_REPORT,
+            devices: [{ ...READY_REPORT.devices[0]!, state: deviceState }],
+          })),
+        },
+        getSession: vi.fn(async () => localSession('persisted-capacity-session')),
+      });
+
+      await host.reconcileOwnership();
+
+      expect(resourceScheduler.runningCount()).toBe(1);
+      await expect(
+        resourceScheduler.runStart('new-instance', async () => undefined),
+      ).rejects.toMatchObject({ code: 'RESOURCE_LIMIT_REACHED' });
+      expect(actor.getOwned('persisted-capacity-session', instance.instanceId)).toMatchObject({
+        lifecycleState: deviceState === 'Booted' ? 'ready' : 'booting',
+      });
+    },
+  );
+
+  it('keeps restored capacity reserved when persisted task lookup fails', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({ createId: () => crypto.randomUUID() }),
+      lifecycle,
+    });
+    actor.attach({
+      sessionId: 'unreadable-persisted-session',
+      worktreeRoot: '/tmp/unreadable-persisted-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+    });
+    const resourceScheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 1,
+      hardLimit: 1,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      resourceScheduler,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => {
+        throw new Error('database unavailable');
+      }),
+    });
+
+    await host.reconcileOwnership();
+
+    expect(resourceScheduler.runningCount()).toBe(1);
+    await expect(
+      resourceScheduler.runStart('new-instance', async () => undefined),
+    ).rejects.toMatchObject({ code: 'RESOURCE_LIMIT_REACHED' });
   });
 
   it('cleans up missing-session ownership using the injected lifecycle only', async () => {
@@ -863,7 +982,6 @@ describe('iOS Simulator host', () => {
         device: { ...READY_REPORT.devices[0]!, state: deviceState },
       });
       const resourceScheduler = testResourceScheduler();
-      await resourceScheduler.runStart(instance.instanceId, async () => undefined);
       const host = createIOSSimulatorHost({
         actor,
         lifecycle,
@@ -1499,10 +1617,19 @@ describe('iOS Simulator host', () => {
           },
         ),
     );
-    const abortRecording = vi.fn();
+    const abortRecording = vi.fn(() => {
+      throw new Error('recording already exited');
+    });
+    const abortDriver = vi.fn();
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
+      driverManager: {
+        get: vi.fn(() => null),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+        abortOperationsForExit: abortDriver,
+      },
       projectBuilder: { build },
       mediaCapture: {
         abortOperationsForExit: abortRecording,
@@ -1524,10 +1651,11 @@ describe('iOS Simulator host', () => {
     );
     await vi.waitFor(() => expect(build).toHaveBeenCalledOnce());
 
-    host.abortOperationsForExit();
+    expect(() => host.abortOperationsForExit()).not.toThrow();
 
     expect(buildSignal?.aborted).toBe(true);
     expect(abortRecording).toHaveBeenCalledOnce();
+    expect(abortDriver).toHaveBeenCalledOnce();
     await expect(callPromise).resolves.toMatchObject({
       ok: false,
       errorCode: 'MUTATION_CANCELLED',

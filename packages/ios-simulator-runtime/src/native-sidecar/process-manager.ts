@@ -49,6 +49,7 @@ export interface IOSSimulatorNativeSidecarManagedChannel extends IOSSimulatorNat
   restart(): Promise<void>;
   rearm(): void;
   stop(): Promise<void>;
+  abortOperationsForExit?(): void;
 }
 
 export interface IOSSimulatorNativeSidecarStartOptions {
@@ -560,6 +561,7 @@ export class IOSSimulatorNativeSidecarProcessManager {
   readonly #running = new Map<string, InternalRunningInstance>();
   readonly #starting = new Map<string, PendingSidecarOperation>();
   readonly #stopping = new Map<string, Promise<void>>();
+  readonly #liveChannels = new Set<IOSSimulatorNativeSidecarManagedChannel>();
   readonly #lastProbe = new Map<
     string,
     IOSSimulatorNativeSidecarProbe | null
@@ -650,6 +652,20 @@ export class IOSSimulatorNativeSidecarProcessManager {
     };
   }
 
+  /** Best-effort synchronous child teardown for updater force-quit. */
+  abortOperationsForExit(): void {
+    for (const pending of this.#starting.values()) {
+      pending.stopRequested = true;
+    }
+    for (const channel of this.#liveChannels) {
+      try {
+        channel.abortOperationsForExit?.();
+      } catch {
+        // Continue terminating the remaining exact channels.
+      }
+    }
+  }
+
   start(
     input: IOSSimulatorNativeSidecarStartOptions,
   ): Promise<IOSSimulatorNativeSidecarRunningInstance> {
@@ -735,6 +751,7 @@ export class IOSSimulatorNativeSidecarProcessManager {
         this.#createChannelOptions(input, preflight, sandbox),
       );
     operation.channel = channel;
+    this.#liveChannels.add(channel);
     try {
       await channel.start();
       if (operation.stopRequested) {
@@ -819,7 +836,11 @@ export class IOSSimulatorNativeSidecarProcessManager {
         }
       }
       await channel.stop().catch(() => undefined);
-      await this.#disposeSandbox(sandbox);
+      try {
+        await this.#disposeSandbox(sandbox);
+      } finally {
+        this.#liveChannels.delete(channel);
+      }
       throw failure;
     }
   }
@@ -976,7 +997,11 @@ export class IOSSimulatorNativeSidecarProcessManager {
       if (operation.stopRequested || running.channel.state !== "parked") {
         this.#running.delete(input.instanceId);
         await running.channel.stop().catch(() => undefined);
-        await this.#disposeSandbox(running.sandbox);
+        try {
+          await this.#disposeSandbox(running.sandbox);
+        } finally {
+          this.#liveChannels.delete(running.channel);
+        }
       }
       throw failure;
     }
@@ -1104,6 +1129,7 @@ export class IOSSimulatorNativeSidecarProcessManager {
       this.#running.delete(instanceId);
       await running.adapter.detach().catch(() => undefined);
       await running.channel.stop().catch(() => undefined);
+      this.#liveChannels.delete(running.channel);
     }
     await pending?.promise?.catch(() => undefined);
     running = this.#running.get(instanceId);
@@ -1111,7 +1137,9 @@ export class IOSSimulatorNativeSidecarProcessManager {
       this.#running.delete(instanceId);
       await running.adapter.detach().catch(() => undefined);
       await running.channel.stop().catch(() => undefined);
+      this.#liveChannels.delete(running.channel);
     }
+    if (pending?.channel) this.#liveChannels.delete(pending.channel);
     const policy = running?.policy ?? stoppedRunning?.policy ?? pending?.policy;
     const sandbox =
       running?.sandbox ?? stoppedRunning?.sandbox ?? pending?.sandbox;

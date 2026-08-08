@@ -12,6 +12,7 @@ export const WDA_ERROR_CODES = [
   "BUILD_FAILED",
   "LAUNCH_FAILED",
   "START_TIMEOUT",
+  "START_CANCELLED",
   "TERMINATION_FAILED",
 ] as const;
 

@@ -131,6 +131,8 @@ interface IOSSimulatorDriverManager {
     capabilityReport?: IOSSimulatorDriverCapabilityReport | null;
     nativeSidecar?: IOSSimulatorNativeSidecarDiagnostics | null;
   };
+  /** Synchronous child teardown used immediately before updater force-quit. */
+  abortOperationsForExit?(): void;
 }
 
 export type IOSSimulatorAppLifecycleAdapter = Pick<
@@ -278,9 +280,6 @@ function sessionError(
   return { ok: false, sessionId, errorCode, message };
 }
 
-let defaultRegistryFlush: (() => Promise<void>) | null = null;
-let defaultRegistryRelease: (() => void) | null = null;
-
 export function createRegistryBackedIOSSimulatorActor(
   lifecycle: IOSSimulatorSimctlLifecycle,
   registry: IOSSimulatorOwnershipRegistryFile,
@@ -348,14 +347,15 @@ export function createRegistryBackedIOSSimulatorActor(
   }
 }
 
-function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
+function createDefaultActor(lifecycle: IOSSimulatorSimctlLifecycle): {
+  actor: IOSSimulatorInstanceActor;
+  flush: () => Promise<void>;
+  release: () => void;
+} {
   const registry = new IOSSimulatorOwnershipRegistryFile(
     path.join(app.getPath('userData'), 'ios-simulator', 'ownership-registry.json'),
   );
-  const persisted = createRegistryBackedIOSSimulatorActor(lifecycle, registry);
-  defaultRegistryFlush = persisted.flush;
-  defaultRegistryRelease = persisted.release;
-  return persisted.actor;
+  return createRegistryBackedIOSSimulatorActor(lifecycle, registry);
 }
 
 function createInMemoryActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulatorInstanceActor {
@@ -692,13 +692,15 @@ function safeHostError(
     error instanceof IOSSimulatorInstanceError
       ? error.code
       : error instanceof WdaError
-        ? error.code === 'BUILD_FAILED'
-          ? 'XCODE_BUILD_FAILED'
-          : error.code === 'UNREACHABLE'
-            ? 'DRIVER_DISCONNECTED'
-            : error.code === 'ORIENTATION_UNSUPPORTED'
-              ? 'ORIENTATION_UNSUPPORTED'
-              : 'WDA_UNAVAILABLE'
+        ? error.code === 'START_CANCELLED'
+          ? 'MUTATION_CANCELLED'
+          : error.code === 'BUILD_FAILED'
+            ? 'XCODE_BUILD_FAILED'
+            : error.code === 'UNREACHABLE'
+              ? 'DRIVER_DISCONNECTED'
+              : error.code === 'ORIENTATION_UNSUPPORTED'
+                ? 'ORIENTATION_UNSUPPORTED'
+                : 'WDA_UNAVAILABLE'
         : 'IOS_SIMULATOR_HOST_ERROR';
   logger.warn('iOS Simulator host call failed', {
     sessionId,
@@ -710,13 +712,15 @@ function safeHostError(
     error instanceof IOSSimulatorHostDisposedError
       ? error.message
       : error instanceof WdaError
-        ? error.code === 'BUILD_FAILED'
-          ? 'WebDriverAgent could not be built for this simulator.'
-          : error.code === 'UNREACHABLE'
-            ? 'The simulator automation driver is disconnected.'
-            : error.code === 'ORIENTATION_UNSUPPORTED'
-              ? 'The foreground app does not support the requested orientation.'
-              : 'The simulator automation driver is unavailable.'
+        ? error.code === 'START_CANCELLED'
+          ? 'The simulator automation driver startup was cancelled.'
+          : error.code === 'BUILD_FAILED'
+            ? 'WebDriverAgent could not be built for this simulator.'
+            : error.code === 'UNREACHABLE'
+              ? 'The simulator automation driver is disconnected.'
+              : error.code === 'ORIENTATION_UNSUPPORTED'
+                ? 'The foreground app does not support the requested orientation.'
+                : 'The simulator automation driver is unavailable.'
         : error instanceof IOSSimulatorInstanceError
           ? error.message
           : 'The iOS Simulator operation failed.';
@@ -2098,6 +2102,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       );
       let complete = true;
       for (const instance of actor.listAll()) {
+        const device = devices.get(instance.simulatorUdid.toUpperCase());
+        const deviceState = device?.state.trim().toLowerCase() ?? null;
+        if (device && deviceState !== 'shutdown') {
+          // This scheduler is process-local while ownership is persisted.
+          // Restore observed CoreSimulator occupancy before any fallible task
+          // lookup/cleanup so failed recovery remains capacity-safe.
+          resourceScheduler.restoreRunning(instance.instanceId);
+        }
         let session: IOSSimulatorSessionSnapshot | null = null;
         try {
           session = await getSession(instance.sessionId);
@@ -2109,7 +2121,6 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           });
           continue;
         }
-        const device = devices.get(instance.simulatorUdid.toUpperCase());
         if (!session) {
           if (!(await releaseStaleBinding(instance, device))) complete = false;
           continue;
@@ -2131,19 +2142,19 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           actor.reconcile(
             instance.instanceId,
             instance.sessionId,
-            device ? (device.state.toLowerCase() === 'booted' ? 'ready' : 'stopped') : 'error',
+            device ? (deviceState === 'booted' ? 'ready' : 'stopped') : 'error',
             'degraded',
             session.remoteHostId ? 'UNSUPPORTED_SESSION_KIND' : 'ORPHANED_DEVICE',
           );
           continue;
         }
-        const deviceState = device.state.trim().toLowerCase();
-        if (deviceState === 'shutdown') {
+        const reconciledDeviceState = deviceState ?? 'unknown';
+        if (reconciledDeviceState === 'shutdown') {
           const runtimeReleased = await releaseInstanceRuntime(instance);
           if (runtimeReleased) {
             resourceScheduler.markStopped(instance.instanceId);
           } else complete = false;
-        } else if (deviceState !== 'booted') {
+        } else if (reconciledDeviceState !== 'booted') {
           // Booting / Shutting Down / unknown concrete states may still own a
           // CoreSimulator process. Tear down Cindy media but keep scheduler
           // occupancy until a later probe proves the device is Shutdown.
@@ -2152,16 +2163,18 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         actor.reconcile(
           instance.instanceId,
           instance.sessionId,
-          deviceState === 'booted'
+          reconciledDeviceState === 'booted'
             ? 'ready'
-            : deviceState === 'shutdown'
+            : reconciledDeviceState === 'shutdown'
               ? 'stopped'
-              : deviceState.includes('boot')
+              : reconciledDeviceState.includes('boot')
                 ? 'booting'
-                : deviceState.includes('shutting')
+                : reconciledDeviceState.includes('shutting')
                   ? 'stopping'
                   : 'error',
-          deviceState === 'booted' || deviceState === 'shutdown' ? 'healthy' : 'recovering',
+          reconciledDeviceState === 'booted' || reconciledDeviceState === 'shutdown'
+            ? 'healthy'
+            : 'recovering',
           null,
         );
       }
@@ -5407,8 +5420,29 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       return cleanupRemovedSessionRuntime(sessionId);
     },
     abortOperationsForExit() {
-      for (const build of activeBuilds.values()) build.controller.abort();
-      mediaCapture.abortOperationsForExit?.();
+      for (const build of activeBuilds.values()) {
+        try {
+          build.controller.abort();
+        } catch (error) {
+          logger.warn('iOS Simulator exit cleanup could not abort an app build', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      try {
+        mediaCapture.abortOperationsForExit?.();
+      } catch (error) {
+        logger.warn('iOS Simulator exit cleanup could not abort media capture', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      try {
+        driverManager?.abortOperationsForExit?.();
+      } catch (error) {
+        logger.warn('iOS Simulator exit cleanup could not abort driver processes', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     },
     dispose() {
       if (disposePromise) return disposePromise;
@@ -5475,30 +5509,74 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   };
 }
 
-const defaultIOSSimulatorLifecycle = createIOSSimulatorSimctlLifecycle();
-const defaultIOSSimulatorHost = createIOSSimulatorHost({
-  lifecycle: defaultIOSSimulatorLifecycle,
-  actor: createDefaultActor(defaultIOSSimulatorLifecycle),
-});
-configureIOSSimulatorRendererAccessRevocationObserver((grants) => {
-  for (const grant of grants) {
-    defaultIOSSimulatorHost.revokeRendererViewer(grant.sessionId, grant.target.id);
+interface DefaultIOSSimulatorRuntime {
+  host: IOSSimulatorHost;
+  flushRegistry(): Promise<void>;
+  releaseRegistry(): void;
+  releaseExitAbortHandler(): void;
+}
+
+let defaultIOSSimulatorRuntime: DefaultIOSSimulatorRuntime | null = null;
+let defaultIOSSimulatorRuntimeClosing = false;
+let defaultIOSSimulatorRuntimeDisposePromise: Promise<void> | null = null;
+
+/**
+ * The ownership registry holds a process-wide writer lease, so the default
+ * Simulator Host must stay lazy. Passive/dev Desktop instances that never use
+ * Simulator must not prevent the instance that actually needs it from taking
+ * ownership.
+ */
+export function initializeIOSSimulatorHost(): IOSSimulatorHost {
+  if (defaultIOSSimulatorRuntime) return defaultIOSSimulatorRuntime.host;
+  if (defaultIOSSimulatorRuntimeClosing) {
+    throw new Error('The iOS Simulator host is shutting down.');
   }
-});
-const releaseIOSSimulatorExitAbortHandler = registerIOSSimulatorExitAbortHandler(() => {
-  defaultIOSSimulatorHost.abortOperationsForExit();
-});
+
+  const lifecycle = createIOSSimulatorSimctlLifecycle();
+  const persistedActor = createDefaultActor(lifecycle);
+  let releaseExitAbortHandler: (() => void) | null = null;
+  try {
+    const host = createIOSSimulatorHost({
+      lifecycle,
+      actor: persistedActor.actor,
+    });
+    configureIOSSimulatorRendererAccessRevocationObserver((grants) => {
+      for (const grant of grants) {
+        host.revokeRendererViewer(grant.sessionId, grant.target.id);
+      }
+    });
+    releaseExitAbortHandler = registerIOSSimulatorExitAbortHandler(() => {
+      host.abortOperationsForExit();
+    });
+    defaultIOSSimulatorRuntime = {
+      host,
+      flushRegistry: persistedActor.flush,
+      releaseRegistry: persistedActor.release,
+      releaseExitAbortHandler,
+    };
+    return host;
+  } catch (error) {
+    configureIOSSimulatorRendererAccessRevocationObserver(null);
+    releaseExitAbortHandler?.();
+    persistedActor.release();
+    throw error;
+  }
+}
+
+function currentIOSSimulatorHost(): IOSSimulatorHost | null {
+  return defaultIOSSimulatorRuntime?.host ?? null;
+}
 
 export function getIOSSimulatorSessionStatus(
   sessionId: string,
 ): Promise<IOSSimulatorSessionStatus> {
-  return defaultIOSSimulatorHost.getStatus(sessionId);
+  return initializeIOSSimulatorHost().getStatus(sessionId);
 }
 
 export function getIOSSimulatorPluginStatus(
   sessionId: string,
 ): Promise<GhostIOSSimulatorStatusProbeResult> {
-  return defaultIOSSimulatorHost.getPluginStatus(sessionId);
+  return initializeIOSSimulatorHost().getPluginStatus(sessionId);
 }
 
 export function callIOSSimulatorHostTool(
@@ -5506,7 +5584,7 @@ export function callIOSSimulatorHostTool(
   args: Record<string, unknown>,
   sessionId: string,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.callTool(name, args, { sessionId, origin: 'user' });
+  return initializeIOSSimulatorHost().callTool(name, args, { sessionId, origin: 'user' });
 }
 
 export function setIOSSimulatorAgentControlGrant(
@@ -5514,7 +5592,7 @@ export function setIOSSimulatorAgentControlGrant(
   instanceId: string,
   decision: 'allowed' | 'denied',
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setAgentControlGrant(sessionId, instanceId, decision);
+  return initializeIOSSimulatorHost().setAgentControlGrant(sessionId, instanceId, decision);
 }
 
 export function setIOSSimulatorViewerVisibility(
@@ -5526,7 +5604,7 @@ export function setIOSSimulatorViewerVisibility(
   viewerWebContentsId?: number,
   viewerToken?: string,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setViewerVisibility(
+  return initializeIOSSimulatorHost().setViewerVisibility(
     sessionId,
     route,
     visible,
@@ -5542,7 +5620,7 @@ export function setIOSSimulatorAgentMutationPaused(
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
   paused: boolean,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setAgentMutationPaused(sessionId, route, paused);
+  return initializeIOSSimulatorHost().setAgentMutationPaused(sessionId, route, paused);
 }
 
 export function getIOSSimulatorLatestFrame(
@@ -5550,37 +5628,44 @@ export function getIOSSimulatorLatestFrame(
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
   viewerWebContentsId: number,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.getLatestFrame(sessionId, route, viewerWebContentsId);
+  return initializeIOSSimulatorHost().getLatestFrame(sessionId, route, viewerWebContentsId);
 }
 
 export async function flushIOSSimulatorOwnershipRegistry(): Promise<void> {
-  await defaultRegistryFlush?.();
+  await defaultIOSSimulatorRuntime?.flushRegistry();
 }
 
 export function reconcileIOSSimulatorOwnership(): Promise<void> {
-  return defaultIOSSimulatorHost.reconcileOwnership();
+  return initializeIOSSimulatorHost().reconcileOwnership();
 }
 
 export async function disposeIOSSimulatorHost(): Promise<void> {
-  try {
-    clearIOSSimulatorRendererAccess();
-    await defaultIOSSimulatorHost.dispose();
-    await defaultRegistryFlush?.();
-  } finally {
-    configureIOSSimulatorRendererAccessRevocationObserver(null);
-    releaseIOSSimulatorExitAbortHandler();
-    defaultRegistryRelease?.();
-  }
+  if (defaultIOSSimulatorRuntimeDisposePromise) return defaultIOSSimulatorRuntimeDisposePromise;
+  defaultIOSSimulatorRuntimeClosing = true;
+  const runtime = defaultIOSSimulatorRuntime;
+  defaultIOSSimulatorRuntimeDisposePromise = (async () => {
+    try {
+      clearIOSSimulatorRendererAccess();
+      if (!runtime) return;
+      await runtime.host.dispose();
+      await runtime.flushRegistry();
+    } finally {
+      configureIOSSimulatorRendererAccessRevocationObserver(null);
+      runtime?.releaseExitAbortHandler();
+      runtime?.releaseRegistry();
+    }
+  })();
+  return defaultIOSSimulatorRuntimeDisposePromise;
 }
 
 export function cancelIOSSimulatorSessionOperations(sessionId: string): Promise<void> {
   revokeIOSSimulatorRendererSession(sessionId);
-  return defaultIOSSimulatorHost.cancelSessionOperations(sessionId);
+  return currentIOSSimulatorHost()?.cancelSessionOperations(sessionId) ?? Promise.resolve();
 }
 
 export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<void> {
   revokeIOSSimulatorRendererSession(sessionId);
-  return defaultIOSSimulatorHost.cleanupRemovedSession(sessionId);
+  return currentIOSSimulatorHost()?.cleanupRemovedSession(sessionId) ?? Promise.resolve();
 }
 
 export function setIOSSimulatorViewerStreamProfile(
@@ -5589,7 +5674,12 @@ export function setIOSSimulatorViewerStreamProfile(
   profile: IOSSimulatorStreamProfile,
   nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.setViewerStreamProfile(sessionId, route, profile, nativeProfile);
+  return initializeIOSSimulatorHost().setViewerStreamProfile(
+    sessionId,
+    route,
+    profile,
+    nativeProfile,
+  );
 }
 
 export function updateIOSSimulatorViewerTouch(
@@ -5603,7 +5693,12 @@ export function updateIOSSimulatorViewerTouch(
     yRatio: number;
   },
 ): Promise<IOSSimulatorHostResult> {
-  return defaultIOSSimulatorHost.updateViewerTouch(sessionId, route, viewerWebContentsId, touch);
+  return initializeIOSSimulatorHost().updateViewerTouch(
+    sessionId,
+    route,
+    viewerWebContentsId,
+    touch,
+  );
 }
 
 export interface IOSSimulatorMcpDepsOptions {
@@ -5614,7 +5709,7 @@ export interface IOSSimulatorMcpDepsOptions {
 export function getIOSSimulatorMcpDeps(
   options: IOSSimulatorMcpDepsOptions = {},
 ): IOSSimulatorMcpDeps {
-  const host = options.host ?? defaultIOSSimulatorHost;
+  const getHost = (): IOSSimulatorHost => options.host ?? initializeIOSSimulatorHost();
   return {
     describeTools: async (context) => {
       const sessionId = context?.sessionId?.trim();
@@ -5640,7 +5735,7 @@ export function getIOSSimulatorMcpDeps(
           },
         };
       }
-      return host.describeTools(sessionId);
+      return getHost().describeTools(sessionId);
     },
     callTool: async (name, args, context) => {
       if (options.isIOSSimulatorEnabled && !options.isIOSSimulatorEnabled(context)) {
@@ -5650,7 +5745,7 @@ export function getIOSSimulatorMcpDeps(
           message: 'iOS Simulator tools are disabled for this project.',
         };
       }
-      return host.callTool(name, args, context);
+      return getHost().callTool(name, args, context);
     },
     logger,
   };

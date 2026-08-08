@@ -72,8 +72,19 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         const onAbort = () => {
           if (settled || aborted) return;
           aborted = true;
+          if (timer) {
+            clearTimeout(timer);
+            timer = null;
+          }
+          if (forceKillTimer) clearTimeout(forceKillTimer);
           killProcessTree(child, "SIGKILL");
-          finish(null);
+          forceKillTimer = setTimeout(() => {
+            if (settled) return;
+            killProcessTree(child, "SIGKILL");
+            // The updater may force-quit after this bounded grace period. Do
+            // not wait forever for hostile inherited stdio handles to close.
+            finish(null);
+          }, TERMINATION_GRACE_MS);
         };
         timer = setTimeout(() => {
           if (settled) return;
@@ -126,7 +137,7 @@ export function createNodeIOSSimulatorCommandRunner(): IOSSimulatorCommandRunner
         child.once("close", (code) => {
           // The leader may exit on SIGTERM while a same-group descendant stays
           // alive. Keep the escalation watchdog in that case.
-          if (timedOut && isProcessGroupAlive(child)) return;
+          if ((timedOut || aborted) && isProcessGroupAlive(child)) return;
           finish(timedOut || aborted ? null : code);
         });
       });

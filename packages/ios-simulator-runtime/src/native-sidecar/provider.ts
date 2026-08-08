@@ -65,6 +65,8 @@ export interface IOSSimulatorCapabilityProvider {
     options?: IOSSimulatorNativeSidecarRecoverOptions,
   ): Promise<IOSSimulatorNativeSidecarRunningInstance>;
   stop(instanceId: string): Promise<void>;
+  /** Best-effort synchronous child teardown before a forced Host exit. */
+  abortOperationsForExit?(): void;
 }
 
 /** Lifecycle owner used for provider disable, upgrade, uninstall, and Host quit. */
@@ -259,6 +261,22 @@ export class HostIOSSimulatorSidecarSupervisor implements IOSSimulatorSidecarSup
     await this.disable();
     this.#runtimes.clear();
     this.#runtimeArtifacts.clear();
+  }
+
+  abortOperationsForExit(): void {
+    for (const pending of this.#starting.values()) {
+      pending.stopRequested = true;
+    }
+    for (const runtime of new Set([
+      ...this.#runtimes.values(),
+      ...[...this.#bindings.values()].map((binding) => binding.runtime),
+    ])) {
+      try {
+        runtime.abortOperationsForExit?.();
+      } catch {
+        // The updater must still be able to exit if one runtime is already gone.
+      }
+    }
   }
 
   async invalidateArtifact(artifactId: string): Promise<void> {

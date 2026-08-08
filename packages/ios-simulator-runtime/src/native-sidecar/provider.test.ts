@@ -131,6 +131,7 @@ class FakeRuntime implements IOSSimulatorSidecarRuntime {
   readonly stop = vi.fn(async (instanceId: string) => {
     this.running.delete(instanceId);
   });
+  readonly abortOperationsForExit = vi.fn();
 
   constructor(
     readonly artifact: Readonly<IOSSimulatorSidecarArtifactDescriptor>,
@@ -198,6 +199,17 @@ function createSupervisor(input: {
 }
 
 describe("HostIOSSimulatorSidecarSupervisor", () => {
+  it("forwards updater force-exit aborts to the bound Host runtime", async () => {
+    const { supervisor, runtimes } = createSupervisor({
+      resolve: () => bundledArtifact(),
+    });
+    await supervisor.start(START);
+
+    supervisor.abortOperationsForExit();
+
+    expect(runtimes[0]!.abortOperationsForExit).toHaveBeenCalledOnce();
+  });
+
   it("keeps artifact resolution and process creation behind the Host provider", async () => {
     const artifact = bundledArtifact();
     const { supervisor, createRuntime, runtimes } = createSupervisor({

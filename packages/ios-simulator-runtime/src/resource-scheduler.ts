@@ -142,6 +142,11 @@ export class IOSSimulatorResourceScheduler {
     this.#running.delete(instanceId);
   }
 
+  /** Restore observed CoreSimulator occupancy without re-running start admission. */
+  restoreRunning(instanceId: string): void {
+    this.#running.add(instanceId);
+  }
+
   runStart<T>(
     instanceId: string,
     task: (commitRunning: () => void) => Promise<T>,

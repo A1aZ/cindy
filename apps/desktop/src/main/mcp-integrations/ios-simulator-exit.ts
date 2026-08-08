@@ -13,5 +13,9 @@ export function registerIOSSimulatorExitAbortHandler(
 
 /** Lightweight updater seam: never imports the simulator or media runtime. */
 export function abortIOSSimulatorOperationsForExit(): void {
-  exitAbortHandler?.();
+  try {
+    exitAbortHandler?.();
+  } catch {
+    // A forced updater exit must not be blocked by best-effort child cleanup.
+  }
 }

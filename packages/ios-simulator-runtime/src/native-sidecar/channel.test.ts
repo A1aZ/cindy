@@ -216,6 +216,31 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     }
   });
 
+  it("synchronously kills both active and already-stopping processes for Host exit", async () => {
+    const activeHarness = harness();
+    await activeHarness.channel.start();
+    activeHarness.channel.abortOperationsForExit();
+    expect(activeHarness.processes[0]!.killSignals).toEqual(["SIGKILL"]);
+    expect(activeHarness.channel.state).toBe("stopped");
+
+    vi.useFakeTimers();
+    try {
+      const stoppingHarness = harness({ stopTimeoutMs: 5 });
+      await stoppingHarness.channel.start();
+      const process = stoppingHarness.processes[0]!;
+      process.emitExitOnKill = false;
+      const stop = stoppingHarness.channel.stop();
+      expect(process.killSignals).toEqual(["SIGTERM"]);
+
+      stoppingHarness.channel.abortOperationsForExit();
+      expect(process.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+      process.exit(null, "SIGKILL");
+      await stop;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("terminates the process after consecutive request timeouts", async () => {
     const { channel } = harness({
       requestTimeoutMs: 5,

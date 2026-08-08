@@ -58,6 +58,7 @@ import {
 import {
   onToolUseEvent,
   persistCodexPlanOnDone,
+  persistCodexPlanOnTerminalError,
   onToolResultEvent,
   onToolResultFullEvent,
   prepareSyntheticToolEventForBroadcast,
@@ -337,6 +338,41 @@ describe('update_plan tool_use persistence', () => {
         turnCompleted: false,
       },
     );
+  });
+
+  it('stamps the current turn plan as failed at a terminal error without a done', async () => {
+    // Codex 在 terminal error 后显式压掉迟到的 turnCompleted,该 turn 永远等不到
+    // done → persistCodexPlanOnDone 不会跑。此时必须由 error 边界补 turnCompleted:false,
+    // 否则全勾完的失败计划没有任何存活印记,面板会当旧数据兜底退场。
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-err',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnTerminalError(SESSION)).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(SESSION, persistId, {
+      toolUseId: 'plan:turn-err',
+      toolName: 'update_plan',
+      // 只盖存活标记,步骤状态一个不动——失败不是把勾去掉的理由。
+      input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      turnCompleted: false,
+    });
+    expect(broadcastMessageRow).toHaveBeenCalledWith(
+      SESSION,
+      expect.any(Object),
+      ownerScopeState.scope,
+    );
+  });
+
+  it('terminal error stamping is a no-op when the turn has no plan row', () => {
+    expect(persistCodexPlanOnTerminalError(SESSION)).toBe(false);
   });
 
   it('does not dedupe ordinary repeated tool_use ids', async () => {

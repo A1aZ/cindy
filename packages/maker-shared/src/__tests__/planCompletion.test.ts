@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyCodexPlanSnapshotOnDone } from '../messageRender.js';
+import { applyCodexPlanSnapshotOnDone, markCodexPlanTurnFailed } from '../messageRender.js';
 
 function planMessage(id: string, plan: unknown) {
   return {
@@ -176,5 +176,31 @@ describe('applyCodexPlanSnapshotOnDone', () => {
       changed: false,
       toolUseId: null,
     });
+  });
+});
+
+describe('markCodexPlanTurnFailed', () => {
+  // 没有 done 的终态 error:该 turn 永远等不到章。renderer 在 error 边界给最近
+  // 一条未盖章的计划行补 turnCompleted:false,面板据此把它当存活任务。
+  it('stamps the latest unsealed plan row as failed without touching steps', () => {
+    const plan = planMessage('plan:err', [{ step: 'Ship', status: 'completed' }]);
+    const result = markCodexPlanTurnFailed([plan]);
+
+    expect(result.changed).toBe(true);
+    expect(result.messages[0]).toMatchObject({
+      turnCompleted: false,
+      toolInput: { plan: [{ step: 'Ship', status: 'completed' }] },
+    });
+  });
+
+  it('leaves sealed or already-stamped rows and plan-less turns alone', () => {
+    const sealed = { ...planMessage('plan:done', []), terminalPlanSnapshot: true };
+    expect(markCodexPlanTurnFailed([sealed])).toEqual({ messages: [sealed], changed: false });
+
+    const stamped = { ...planMessage('plan:old-fail', []), turnCompleted: false };
+    expect(markCodexPlanTurnFailed([stamped])).toEqual({ messages: [stamped], changed: false });
+
+    const noPlan = { role: 'tool_use' as const, clientId: 'b1', toolName: 'Bash', content: '' };
+    expect(markCodexPlanTurnFailed([noPlan])).toEqual({ messages: [noPlan], changed: false });
   });
 });

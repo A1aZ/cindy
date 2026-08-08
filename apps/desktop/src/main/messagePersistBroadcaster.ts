@@ -646,6 +646,43 @@ export function persistCodexPlanOnDone(
 }
 
 /**
+ * Codex can end a turn with a terminal `error` that never gets a `done` (the
+ * agent explicitly suppresses a late `turnCompleted` after a terminal error).
+ * That path used to leave the turn's plan row with neither a seal nor a
+ * `turnCompleted:false` stamp, so plan-liveness consumers (the pinned capsule)
+ * had no durable evidence the task is still alive and could retire an all-done
+ * plan as if it were legacy history. Stamp the failure marker here — the
+ * per-turn maps only ever hold rows belonging to the current turn, so the scope
+ * is exact. Never seals, never touches step statuses.
+ */
+export function persistCodexPlanOnTerminalError(sessionId: string): boolean {
+  const infoMap = toolUseInfoBySession.get(sessionId);
+  const idMap = updatableToolUsePersistIdBySession.get(sessionId);
+  if (!infoMap || !idMap) return false;
+  let stamped = false;
+  for (const [toolUseId, info] of infoMap) {
+    if (info.toolName !== 'update_plan') continue;
+    const persistId = idMap.get(toolUseId);
+    if (!persistId) continue;
+    const input = info.input && typeof info.input === 'object' && !Array.isArray(info.input)
+      ? info.input as Record<string, unknown>
+      : null;
+    if (!input || !Array.isArray(input.plan)) continue;
+    enqueueWrite(`codex_plan_terminal_error:${sessionId}:${persistId}`, async (ownerScope) => {
+      const updated = await updateDbMessageContent(sessionId, persistId, {
+        toolUseId,
+        toolName: 'update_plan',
+        input,
+        turnCompleted: false,
+      });
+      if (updated) broadcastMessageRow(sessionId, updated, ownerScope);
+    });
+    stamped = true;
+  }
+  return stamped;
+}
+
+/**
  * Main 侧合成 tool 事件也必须遵守 renderer 的展示契约:
  * tool_result / tool_result_full 只有带 persistId + resolvedContent 才会渲染。
  *

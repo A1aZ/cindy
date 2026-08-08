@@ -336,6 +336,7 @@ import {
   onInteractionMessage,
   onInteractionResolved,
   persistCodexPlanOnDone,
+  persistCodexPlanOnTerminalError,
   onThinkingEvent,
   onToolResultEvent,
   onToolResultFullEvent,
@@ -3835,6 +3836,18 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // A claim-bearing done seals this SDK segment, but the product turn is
         // still running and may emit another continuation segment. Reset the
         // per-SDK-turn persistence maps while deferring the logical turn marker.
+        // 没有 done 的终态 error(Codex 在 terminal error 后显式压掉迟到的
+        // turnCompleted,persistCodexPlanOnDone 永远不会跑到):本 turn 的计划行
+        // 既没有章也没有 turnCompleted:false,面板会把全勾完的失败计划当旧数据
+        // 兜底退场。在这里补失败印记——只盖 turn 存活标记,不动步骤状态。
+        if (
+          !isContinuationBoundary &&
+          event.source === 'codex' &&
+          event.type !== 'done' &&
+          isTerminalTurnErrorEvent(event)
+        ) {
+          persistCodexPlanOnTerminalError(session.id);
+        }
         if (!isContinuationBoundary && event.source === 'codex' && event.type === 'done') {
           // Renderer applies this terminal snapshot immediately. Persist the
           // same state before sealing the persist queue and clearing the

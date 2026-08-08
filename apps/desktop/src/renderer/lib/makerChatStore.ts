@@ -40,6 +40,7 @@ import {
   applyCodexPlanSnapshotOnDone,
   getLatestMessageTodoState,
   isAgentPlanToolName,
+  markCodexPlanTurnFailed,
 } from '@cindy/maker-shared/message-render';
 import {
   normalizeWorkflowProgressEntries,
@@ -5007,11 +5008,19 @@ export function handleStreamEvent(
       // failure. Daemon dying outside upgrade still surfaces a normal banner.
       const isPlannedUpgradeClose =
         reason === 'remote_daemon_closed' && isSessionUpgrading(event.sessionId);
+      // 没有 done 的 codex 终态 error:该 turn 的计划行等不到章,也等不到
+      // persistCodexPlanOnDone 的 turnCompleted:false。立即在内存里补失败印记
+      // (main 的 persistCodexPlanOnTerminalError 落库版本随行广播稍后到达),
+      // 否则钉住面板会把全勾完的失败计划当旧数据兜底退场。
+      const terminalErrorMessages =
+        event.source === 'codex'
+          ? markCodexPlanTurnFailed(finalized.messages).messages
+          : finalized.messages;
       return {
         ...finalized,
         messages: suppressAutoResumeBroadcastError
-          ? finalized.messages
-          : finalized.messages.filter(
+          ? [...terminalErrorMessages]
+          : terminalErrorMessages.filter(
               (message) => message.clientId !== AUTO_RESUME_PENDING_CLIENT_ID,
             ),
         // coordinator 已经先发 autoResumePending projection 时，终态 maker:event

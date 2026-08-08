@@ -4796,6 +4796,78 @@ describe('iOS Simulator host', () => {
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
   });
 
+  it('rechecks a Main-owned elevation after resolving the task and before persistence', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const grantStore = new IOSSimulatorDeviceGrantStore();
+    let pauseSessionResolution = false;
+    let notifyResolutionStarted: (() => void) | undefined;
+    let releaseSessionResolution: (() => void) | undefined;
+    const resolutionStarted = new Promise<void>((resolve) => {
+      notifyResolutionStarted = resolve;
+    });
+    const resolutionGate = new Promise<void>((resolve) => {
+      releaseSessionResolution = resolve;
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      grantStore,
+      runtime: {
+        inspect: vi.fn(async () => ({
+          ...READY_REPORT,
+          devices: [{ ...READY_REPORT.devices[0]!, state: 'Shutdown' as const }],
+        })),
+      },
+      getSession: vi.fn(async (id) => {
+        if (pauseSessionResolution) {
+          notifyResolutionStarted?.();
+          await resolutionGate;
+        }
+        return localSession(id);
+      }),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+      resourceScheduler: testResourceScheduler(),
+    });
+
+    await expect(
+      host.callTool(
+        'attach_device',
+        { udid: READY_REPORT.devices[0]!.udid },
+        { sessionId: 'session-agent', origin: 'user' },
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    const instance = actor.list('session-agent')[0]!;
+    let approvalCurrent = true;
+    const assertElevationCurrent = vi.fn(() => {
+      if (!approvalCurrent) throw new Error('Agent control approval expired');
+    });
+
+    pauseSessionResolution = true;
+    const elevation = host.setAgentControlGrant(
+      'session-agent',
+      instance.instanceId,
+      'allowed',
+      assertElevationCurrent,
+    );
+    await resolutionStarted;
+    approvalCurrent = false;
+    releaseSessionResolution?.();
+
+    await expect(elevation).resolves.toMatchObject({ ok: false });
+    expect(assertElevationCurrent).toHaveBeenCalledOnce();
+    expect(grantStore.get(instance.simulatorUdid).agentControl).toBe('unknown');
+  });
+
   it('renews the lease after a slow driver start and opens the embedded viewer', async () => {
     let now = 1_000;
     const lifecycle: IOSSimulatorSimctlLifecycle = {

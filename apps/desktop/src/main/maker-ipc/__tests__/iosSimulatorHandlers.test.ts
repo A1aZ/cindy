@@ -409,24 +409,120 @@ describe('iOS Simulator IPC handlers', () => {
     expect(reportError).toHaveBeenCalledWith('call-tool', internalError);
   });
 
-  it('allows only explicit agent-control grant decisions', async () => {
+  it('requires Main-owned confirmation for Agent-control elevation and allows direct revocation', async () => {
     const harness = new IpcHarness();
-    const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
-    registerTrusted(harness, { setAgentControlGrant });
+    const approval = {
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      grantGeneration: 1,
+      lifecycleEpoch: 0,
+      elevationEpoch: 0,
+    };
+    const setAgentControlGrant = vi.fn(
+      async (
+        _sessionId: string,
+        _instanceId: string,
+        _decision: 'allowed' | 'denied',
+        assertElevationCurrent?: () => void,
+      ) => {
+        assertElevationCurrent?.();
+        return { ok: true as const, data: {} };
+      },
+    );
+    const confirmAgentControlElevation = vi.fn(async () => approval);
+    const invalidateAgentControlElevation = vi.fn();
+    const isAgentControlApprovalCurrent = vi.fn(() => true);
+    registerTrusted(harness, {
+      setAgentControlGrant,
+      confirmAgentControlElevation,
+      invalidateAgentControlElevation,
+      isAgentControlApprovalCurrent,
+    });
 
     await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
       sessionId: 'session-a',
       instanceId: 'instance-a',
-      decision: 'allowed',
+      action: 'request-allow',
     });
-    expect(setAgentControlGrant).toHaveBeenCalledWith('session-a', 'instance-a', 'allowed');
+    expect(confirmAgentControlElevation).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 17 }),
+      'session-a',
+      'instance-a',
+    );
+    expect(setAgentControlGrant).toHaveBeenCalledWith(
+      'session-a',
+      'instance-a',
+      'allowed',
+      expect.any(Function),
+    );
+    expect(isAgentControlApprovalCurrent).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 17 }),
+      approval,
+    );
+
+    await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
+      sessionId: 'session-a',
+      instanceId: 'instance-a',
+      action: 'revoke',
+    });
+    expect(confirmAgentControlElevation).toHaveBeenCalledTimes(1);
+    expect(invalidateAgentControlElevation).toHaveBeenCalledWith('session-a', 'instance-a');
+    expect(setAgentControlGrant).toHaveBeenLastCalledWith('session-a', 'instance-a', 'denied');
     await expect(
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
         sessionId: 'session-a',
         instanceId: 'instance-a',
-        decision: 'unknown',
+        action: 'allow',
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+  });
+
+  it('does not persist Agent control when native confirmation is cancelled', async () => {
+    const harness = new IpcHarness();
+    const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
+    registerTrusted(harness, {
+      setAgentControlGrant,
+      confirmAgentControlElevation: vi.fn(async () => null),
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        action: 'request-allow',
+      }),
+    ).resolves.toEqual({ ok: true, data: { confirmed: false } });
+    expect(setAgentControlGrant).not.toHaveBeenCalled();
+  });
+
+  it('rechecks the exact Renderer grant after Agent-control confirmation', async () => {
+    const harness = new IpcHarness();
+    let generation = 1;
+    const setAgentControlGrant = vi.fn(async () => ({ ok: true as const, data: {} }));
+    registerTrusted(harness, {
+      getSessionAccess: () => ({ sessionId: 'session-a', generation }),
+      setAgentControlGrant,
+      isAgentControlApprovalCurrent: vi.fn(() => true),
+      confirmAgentControlElevation: vi.fn(async () => {
+        generation = 2;
+        return {
+          sessionId: 'session-a',
+          instanceId: 'instance-a',
+          grantGeneration: 1,
+          lifecycleEpoch: 0,
+          elevationEpoch: 0,
+        };
+      }),
+    });
+
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_AGENT_CONTROL, {
+        sessionId: 'session-a',
+        instanceId: 'instance-a',
+        action: 'request-allow',
+      }),
+    ).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    expect(setAgentControlGrant).not.toHaveBeenCalled();
   });
 
   it('validates and routes explicit Agent mutation pause state', async () => {

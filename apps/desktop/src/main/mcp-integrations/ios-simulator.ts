@@ -227,6 +227,7 @@ export interface IOSSimulatorHost {
     sessionId: string,
     instanceId: string,
     decision: Exclude<IOSSimulatorGrantDecision, 'unknown'>,
+    assertElevationCurrent?: () => void,
   ): Promise<IOSSimulatorHostResult>;
   setAgentMutationPaused(
     sessionId: string,
@@ -3976,13 +3977,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         removalBarrierOperation?.finish();
       }
     },
-    async setAgentControlGrant(sessionId, instanceId, decision) {
+    async setAgentControlGrant(sessionId, instanceId, decision, assertElevationCurrent) {
       try {
         assertHostActive();
         const resolved = await resolveSession(sessionId);
         if (!resolved.ok) return resolved;
         assertHostActive();
         const instance = actor.getOwned(resolved.sessionId, instanceId);
+        if (decision === 'allowed') assertElevationCurrent?.();
         if (decision === 'denied') {
           agentControlLeases.delete(instance.instanceId);
         }
@@ -6189,8 +6191,14 @@ export function setIOSSimulatorAgentControlGrant(
   sessionId: string,
   instanceId: string,
   decision: 'allowed' | 'denied',
+  assertElevationCurrent?: () => void,
 ): Promise<IOSSimulatorHostResult> {
-  return initializeIOSSimulatorHost().setAgentControlGrant(sessionId, instanceId, decision);
+  return initializeIOSSimulatorHost().setAgentControlGrant(
+    sessionId,
+    instanceId,
+    decision,
+    assertElevationCurrent,
+  );
 }
 
 export function setIOSSimulatorViewerVisibility(

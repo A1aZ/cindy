@@ -267,6 +267,80 @@ describe('IOSSimulatorRendererAccessRegistry', () => {
     expect(registry.hasAccess(main.target, 'session-a')).toBe(false);
   });
 
+  it('uses Main-owned confirmation for Agent-control elevation and coalesces exact requests', async () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(85);
+    const sidebar = fakeWebContents(87);
+    const deferred: { resolve?: (confirmed: boolean) => void } = {};
+    const confirm = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+    registry.configureResolver(() => ({
+      grantTargets: [main.target, sidebar.target],
+      focusTarget: sidebar.target,
+    }));
+    registry.grantAndFocus('session-a');
+    registry.configureAgentControlConfirmation(confirm);
+
+    const first = registry.requestAgentControlElevation('session-a', 'instance-a', main.target);
+    const second = registry.requestAgentControlElevation('session-a', 'instance-a', sidebar.target);
+    await expect(
+      registry.requestAgentControlElevation('session-a', 'instance-b', main.target),
+    ).resolves.toBeNull();
+    expect(confirm).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledWith(main.target, 'session-a', 'instance-a');
+
+    deferred.resolve?.(true);
+    const [mainApproval, sidebarApproval] = await Promise.all([first, second]);
+    expect(mainApproval).not.toBeNull();
+    expect(sidebarApproval).not.toBeNull();
+    expect(registry.isAgentControlApprovalCurrent(main.target, mainApproval!)).toBe(true);
+    expect(registry.isAgentControlApprovalCurrent(sidebar.target, sidebarApproval!)).toBe(true);
+  });
+
+  it('invalidates Agent-control confirmation when the exact task grant changes', async () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(86);
+    const deferred: { resolve?: (confirmed: boolean) => void } = {};
+    registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
+    registry.grantAndFocus('session-a');
+    registry.configureAgentControlConfirmation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+
+    const pending = registry.requestAgentControlElevation('session-a', 'instance-a', main.target);
+    registry.grantAndFocus('session-b');
+    deferred.resolve?.(true);
+
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it('lets a direct revocation invalidate an older pending elevation', async () => {
+    const registry = new IOSSimulatorRendererAccessRegistry();
+    const main = fakeWebContents(88);
+    const deferred: { resolve?: (confirmed: boolean) => void } = {};
+    registry.configureResolver(() => ({ grantTargets: [main.target], focusTarget: main.target }));
+    registry.grantAndFocus('session-a');
+    registry.configureAgentControlConfirmation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          deferred.resolve = resolve;
+        }),
+    );
+
+    const pending = registry.requestAgentControlElevation('session-a', 'instance-a', main.target);
+    registry.invalidateAgentControlElevation('session-a', 'instance-a');
+    deferred.resolve?.(true);
+
+    await expect(pending).resolves.toBeNull();
+  });
+
   it('invalidates a pending confirmation when the window family switches tasks', async () => {
     const registry = new IOSSimulatorRendererAccessRegistry();
     const main = fakeWebContents(91);

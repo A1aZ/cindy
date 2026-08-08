@@ -29,6 +29,20 @@ export type IOSSimulatorRendererAccessConfirmation = (
   sessionId: string,
 ) => Promise<boolean>;
 
+export type IOSSimulatorAgentControlConfirmation = (
+  target: IOSSimulatorRendererWebContents,
+  sessionId: string,
+  instanceId: string,
+) => Promise<boolean>;
+
+export interface IOSSimulatorAgentControlApproval {
+  readonly sessionId: string;
+  readonly instanceId: string;
+  readonly grantGeneration: number;
+  readonly lifecycleEpoch: number;
+  readonly elevationEpoch: number;
+}
+
 export type IOSSimulatorRendererGrant = {
   sessionId: string;
   generation: number;
@@ -61,9 +75,19 @@ export class IOSSimulatorRendererAccessRegistry {
     number,
     { sessionId: string; promise: Promise<boolean> }
   >();
+  private readonly pendingAgentControl = new Map<
+    string,
+    {
+      sessionId: string;
+      instanceId: string;
+      promise: Promise<IOSSimulatorAgentControlApproval | null>;
+    }
+  >();
+  private readonly agentControlEpochs = new Map<string, number>();
   private readonly accessCooldownUntil = new Map<number, number>();
   private resolver: IOSSimulatorRendererTargetResolver | null = null;
   private confirmation: IOSSimulatorRendererAccessConfirmation | null = null;
+  private agentControlConfirmation: IOSSimulatorAgentControlConfirmation | null = null;
   private revocationObserver: IOSSimulatorRendererAccessRevocationObserver | null = null;
   private nextGeneration = 0;
   private lifecycleEpoch = 0;
@@ -76,6 +100,12 @@ export class IOSSimulatorRendererAccessRegistry {
 
   configureConfirmation(confirmation: IOSSimulatorRendererAccessConfirmation | null): void {
     this.confirmation = confirmation;
+  }
+
+  configureAgentControlConfirmation(
+    confirmation: IOSSimulatorAgentControlConfirmation | null,
+  ): void {
+    this.agentControlConfirmation = confirmation;
   }
 
   configureRevocationObserver(observer: IOSSimulatorRendererAccessRevocationObserver | null): void {
@@ -154,6 +184,79 @@ export class IOSSimulatorRendererAccessRegistry {
     });
     this.pendingAccess.set(target.id, { sessionId: normalizedSessionId, promise });
     return promise;
+  }
+
+  /**
+   * Ask Main-owned native UI to approve a profile-wide Agent-control elevation.
+   * The Renderer can request this flow, but it never supplies the approval.
+   */
+  requestAgentControlElevation(
+    sessionId: string,
+    instanceId: string,
+    target: IOSSimulatorRendererWebContents,
+  ): Promise<IOSSimulatorAgentControlApproval | null> {
+    const normalizedSessionId = sessionId.trim();
+    const normalizedInstanceId = instanceId.trim();
+    const grant = this.grants.get(target.id);
+    if (
+      !normalizedSessionId ||
+      !normalizedInstanceId ||
+      !this.agentControlConfirmation ||
+      !grant ||
+      grant.target !== target ||
+      grant.sessionId !== normalizedSessionId ||
+      target.isDestroyed()
+    ) {
+      return Promise.resolve(null);
+    }
+    const key = this.agentControlKey(normalizedSessionId, normalizedInstanceId);
+    for (const [pendingKey, pending] of this.pendingAgentControl) {
+      if (pending.sessionId === normalizedSessionId && pendingKey !== key) {
+        return Promise.resolve(null);
+      }
+    }
+    let pending = this.pendingAgentControl.get(key);
+    if (!pending) {
+      const promise = this.performAgentControlElevation(
+        normalizedSessionId,
+        normalizedInstanceId,
+        target,
+        grant.generation,
+      ).finally(() => {
+        const current = this.pendingAgentControl.get(key);
+        if (current?.promise === promise) this.pendingAgentControl.delete(key);
+      });
+      pending = {
+        sessionId: normalizedSessionId,
+        instanceId: normalizedInstanceId,
+        promise,
+      };
+      this.pendingAgentControl.set(key, pending);
+    }
+    return pending.promise.then((approval) =>
+      approval && this.isAgentControlApprovalCurrent(target, approval) ? approval : null,
+    );
+  }
+
+  invalidateAgentControlElevation(sessionId: string, instanceId: string): void {
+    const key = this.agentControlKey(sessionId.trim(), instanceId.trim());
+    this.agentControlEpochs.set(key, (this.agentControlEpochs.get(key) ?? 0) + 1);
+  }
+
+  isAgentControlApprovalCurrent(
+    target: IOSSimulatorRendererWebContents,
+    approval: IOSSimulatorAgentControlApproval,
+  ): boolean {
+    const current = this.grants.get(target.id);
+    return Boolean(
+      !target.isDestroyed() &&
+      this.lifecycleEpoch === approval.lifecycleEpoch &&
+      (this.agentControlEpochs.get(this.agentControlKey(approval.sessionId, approval.instanceId)) ??
+        0) === approval.elevationEpoch &&
+      current?.target === target &&
+      current.sessionId === approval.sessionId &&
+      current.generation === approval.grantGeneration,
+    );
   }
 
   pushRouteStatus(status: IOSSimulatorPublicRouteStatus): number {
@@ -303,6 +406,49 @@ export class IOSSimulatorRendererAccessRegistry {
     return this.hasAccess(target, sessionId);
   }
 
+  private async performAgentControlElevation(
+    sessionId: string,
+    instanceId: string,
+    target: IOSSimulatorRendererWebContents,
+    grantGeneration: number,
+  ): Promise<IOSSimulatorAgentControlApproval | null> {
+    const lifecycleEpoch = this.lifecycleEpoch;
+    const targetEpoch = this.targetEpochs.get(target.id) ?? 0;
+    const sessionEpoch = this.sessionEpochs.get(sessionId) ?? 0;
+    const key = this.agentControlKey(sessionId, instanceId);
+    const elevationEpoch = this.agentControlEpochs.get(key) ?? 0;
+    let confirmed = false;
+    try {
+      confirmed = (await this.agentControlConfirmation?.(target, sessionId, instanceId)) === true;
+    } catch {
+      confirmed = false;
+    }
+    if (!confirmed || target.isDestroyed()) return null;
+    const current = this.grants.get(target.id);
+    if (
+      this.lifecycleEpoch === lifecycleEpoch &&
+      (this.targetEpochs.get(target.id) ?? 0) === targetEpoch &&
+      (this.sessionEpochs.get(sessionId) ?? 0) === sessionEpoch &&
+      (this.agentControlEpochs.get(key) ?? 0) === elevationEpoch &&
+      current?.target === target &&
+      current.sessionId === sessionId &&
+      current.generation === grantGeneration
+    ) {
+      return {
+        sessionId,
+        instanceId,
+        grantGeneration,
+        lifecycleEpoch,
+        elevationEpoch,
+      };
+    }
+    return null;
+  }
+
+  private agentControlKey(sessionId: string, instanceId: string): string {
+    return `${sessionId}\u0000${instanceId}`;
+  }
+
   private resolveTargets(preferredTarget?: IOSSimulatorRendererWebContents): {
     targets: Map<number, IOSSimulatorRendererWebContents>;
     focusTarget: IOSSimulatorRendererWebContents | null;
@@ -418,6 +564,12 @@ export function configureIOSSimulatorRendererAccessConfirmation(
   rendererAccessRegistry.configureConfirmation(confirmation);
 }
 
+export function configureIOSSimulatorAgentControlConfirmation(
+  confirmation: IOSSimulatorAgentControlConfirmation | null,
+): void {
+  rendererAccessRegistry.configureAgentControlConfirmation(confirmation);
+}
+
 export function configureIOSSimulatorRendererAccessRevocationObserver(
   observer: IOSSimulatorRendererAccessRevocationObserver | null,
 ): void {
@@ -450,6 +602,28 @@ export function requestIOSSimulatorRendererSessionAccess(
   sessionId: string,
 ): Promise<boolean> {
   return rendererAccessRegistry.requestAccess(sessionId, target);
+}
+
+export function requestIOSSimulatorAgentControlElevation(
+  target: IOSSimulatorRendererWebContents,
+  sessionId: string,
+  instanceId: string,
+): Promise<IOSSimulatorAgentControlApproval | null> {
+  return rendererAccessRegistry.requestAgentControlElevation(sessionId, instanceId, target);
+}
+
+export function invalidateIOSSimulatorAgentControlElevation(
+  sessionId: string,
+  instanceId: string,
+): void {
+  rendererAccessRegistry.invalidateAgentControlElevation(sessionId, instanceId);
+}
+
+export function isIOSSimulatorAgentControlApprovalCurrent(
+  target: IOSSimulatorRendererWebContents,
+  approval: IOSSimulatorAgentControlApproval,
+): boolean {
+  return rendererAccessRegistry.isAgentControlApprovalCurrent(target, approval);
 }
 
 export function pushIOSSimulatorRouteStatusToGrantedRenderers(

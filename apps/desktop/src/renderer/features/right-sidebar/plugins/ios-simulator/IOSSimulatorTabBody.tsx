@@ -990,7 +990,7 @@ export function IOSSimulatorTabBody({
       const result = await window.electronAPI.maker.iosSimulator.setAgentControl({
         sessionId: ctx.sessionId,
         instanceId: attachedInstance.instanceId,
-        decision: grant?.agentControl === 'allowed' ? 'denied' : 'allowed',
+        action: grant?.agentControl === 'allowed' ? 'revoke' : 'request-allow',
       });
       if (!result.ok) setActionError(formatActionError(result));
       else await refresh();

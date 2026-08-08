@@ -21,7 +21,11 @@ import {
 import {
   getIOSSimulatorRendererSessionAccess,
   hasIOSSimulatorRendererSessionAccess,
+  invalidateIOSSimulatorAgentControlElevation,
+  isIOSSimulatorAgentControlApprovalCurrent,
+  requestIOSSimulatorAgentControlElevation,
   requestIOSSimulatorRendererSessionAccess,
+  type IOSSimulatorAgentControlApproval,
   type IOSSimulatorRendererAccessSnapshot,
   type IOSSimulatorRendererWebContents,
 } from '../mcp-integrations/ios-simulator-renderer-access.js';
@@ -68,6 +72,16 @@ export interface IOSSimulatorHandlerDeps {
     target: IOSSimulatorRendererWebContents,
     sessionId: string,
   ): Promise<boolean>;
+  confirmAgentControlElevation(
+    target: IOSSimulatorRendererWebContents,
+    sessionId: string,
+    instanceId: string,
+  ): Promise<IOSSimulatorAgentControlApproval | null>;
+  invalidateAgentControlElevation(sessionId: string, instanceId: string): void;
+  isAgentControlApprovalCurrent(
+    target: IOSSimulatorRendererWebContents,
+    approval: IOSSimulatorAgentControlApproval,
+  ): boolean;
   getStatus(sessionId: string): Promise<IOSSimulatorSessionStatus>;
   callTool(
     name: IOSSimulatorRendererToolName,
@@ -78,6 +92,7 @@ export interface IOSSimulatorHandlerDeps {
     sessionId: string,
     instanceId: string,
     decision: 'allowed' | 'denied',
+    assertElevationCurrent?: () => void,
   ): Promise<IOSSimulatorToolResponse>;
   setAgentMutationPaused(
     sessionId: string,
@@ -126,6 +141,9 @@ const defaultDeps: IOSSimulatorHandlerDeps = {
   getSessionAccess: getIOSSimulatorRendererSessionAccess,
   hasSessionAccess: hasIOSSimulatorRendererSessionAccess,
   requestSessionAccess: requestIOSSimulatorRendererSessionAccess,
+  confirmAgentControlElevation: requestIOSSimulatorAgentControlElevation,
+  invalidateAgentControlElevation: invalidateIOSSimulatorAgentControlElevation,
+  isAgentControlApprovalCurrent: isIOSSimulatorAgentControlApprovalCurrent,
   getStatus: getIOSSimulatorSessionStatus,
   callTool: callIOSSimulatorHostTool,
   setAgentControlGrant: setIOSSimulatorAgentControlGrant,
@@ -162,7 +180,7 @@ function throwIOSSimulatorIpcError(
 async function callIOSSimulatorHost<T>(
   deps: IOSSimulatorHandlerDeps,
   operation: IOSSimulatorIpcOperation,
-  call: () => T | Promise<T>,
+  call: (assertCurrent: () => void) => T | Promise<T>,
   assertStillAuthorized?: () => void,
 ): Promise<T> {
   const ownerScopeKey = deps.getOwnerScopeKey();
@@ -174,15 +192,18 @@ async function callIOSSimulatorHost<T>(
       );
     }
   };
-  assertOwnerScopeCurrent();
+  const assertCurrent = (): void => {
+    assertOwnerScopeCurrent();
+    assertStillAuthorized?.();
+  };
+  assertCurrent();
   let outcome: { ok: true; value: T } | { ok: false; error: unknown };
   try {
-    outcome = { ok: true, value: await call() };
+    outcome = { ok: true, value: await call(assertCurrent) };
   } catch (error) {
     outcome = { ok: false, error };
   }
-  assertOwnerScopeCurrent();
-  assertStillAuthorized?.();
+  assertCurrent();
   if (!outcome.ok) {
     throwIOSSimulatorIpcError(deps, operation, outcome.error);
   }
@@ -254,7 +275,7 @@ export function registerIOSSimulatorHandlers(
     event: unknown,
     sessionId: string,
     operation: IOSSimulatorIpcOperation,
-    call: () => T | Promise<T>,
+    call: (assertCurrent: () => void) => T | Promise<T>,
   ): Promise<T> => {
     const sender = readSenderWebContents(event);
     const expectedAccess = resolved.getSessionAccess(sender);
@@ -319,16 +340,48 @@ export function registerIOSSimulatorHandlers(
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
     assertSenderSession(event, sessionId);
+    const sender = readSenderWebContents(event);
     const instanceId = record.instanceId;
-    const decision = record.decision;
+    const action = record.action;
     if (typeof instanceId !== 'string' || !instanceId.trim()) {
       throwIpcError('INVALID_PARAMS', 'instanceId (string) required');
     }
-    if (decision !== 'allowed' && decision !== 'denied') {
-      throwIpcError('INVALID_PARAMS', 'decision must be allowed or denied');
+    if (action !== 'request-allow' && action !== 'revoke') {
+      throwIpcError('INVALID_PARAMS', 'action must be request-allow or revoke');
     }
-    return callIOSSimulatorHostForSession(event, sessionId, 'set-agent-control', () =>
-      resolved.setAgentControlGrant(sessionId, instanceId.trim(), decision),
+    const normalizedInstanceId = instanceId.trim();
+    return callIOSSimulatorHostForSession(
+      event,
+      sessionId,
+      'set-agent-control',
+      async (assertCurrent) => {
+        if (action === 'revoke') {
+          resolved.invalidateAgentControlElevation(sessionId, normalizedInstanceId);
+          return resolved.setAgentControlGrant(sessionId, normalizedInstanceId, 'denied');
+        }
+        const approval = await resolved.confirmAgentControlElevation(
+          sender,
+          sessionId,
+          normalizedInstanceId,
+        );
+        if (!approval) return { ok: true, data: { confirmed: false } };
+        // A native dialog can outlive the exact Renderer/task grant that opened
+        // it. Revalidate immediately before the profile-wide elevation is sent
+        // to the Host and again inside the Host immediately before persistence.
+        const assertElevationCurrent = (): void => {
+          assertCurrent();
+          if (!resolved.isAgentControlApprovalCurrent(sender, approval)) {
+            throwIpcError('PERMISSION_DENIED', 'Agent control approval expired');
+          }
+        };
+        assertElevationCurrent();
+        return resolved.setAgentControlGrant(
+          sessionId,
+          normalizedInstanceId,
+          'allowed',
+          assertElevationCurrent,
+        );
+      },
     );
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_SET_VIEWER_VISIBILITY, async (event, payload) => {

@@ -310,11 +310,13 @@ import {
   cleanupIOSSimulatorRemovedSession,
   disposeIOSSimulatorHost,
   flushIOSSimulatorOwnershipRegistry,
+  getIOSSimulatorSessionStatus,
   reconcilePersistedIOSSimulatorOwnership,
 } from './mcp-integrations/ios-simulator';
 import { abortIOSSimulatorOperationsForExit } from './mcp-integrations/ios-simulator-exit';
 import {
   clearIOSSimulatorRendererAccess,
+  configureIOSSimulatorAgentControlConfirmation,
   configureIOSSimulatorRendererAccessConfirmation,
   configureIOSSimulatorRendererTargets,
   inheritIOSSimulatorRendererSessionAccess,
@@ -1365,6 +1367,52 @@ configureIOSSimulatorRendererAccessConfirmation(async (target, sessionId) => {
     buttons: [
       t('rightSidebar.iosSimulator.accessDialogAllow'),
       t('rightSidebar.iosSimulator.accessDialogCancel'),
+    ],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (result.response !== 0 || owner.isDestroyed() || target.isDestroyed()) return false;
+  const current = await getSessionRowSnapshot(sessionId);
+  return Boolean(
+    current && current.status === 'active' && !current.remoteHostId && isIOSSimulatorPluginActive(),
+  );
+});
+configureIOSSimulatorAgentControlConfirmation(async (target, sessionId, instanceId) => {
+  if (!isIOSSimulatorPluginActive()) return false;
+  const owner = resolveIOSSimulatorRendererWindow(target as WebContents);
+  if (!owner) return false;
+  const row = await getSessionRowSnapshot(sessionId);
+  if (!row || row.status !== 'active' || row.remoteHostId) return false;
+  const status = await getIOSSimulatorSessionStatus(sessionId);
+  const instance = status.ok
+    ? status.instances.find((candidate) => candidate.instanceId === instanceId)
+    : undefined;
+  if (!instance) return false;
+
+  const taskLabel =
+    sanitizeGhostNoticeText(row.title ?? '')
+      .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 120) || t('rightSidebar.iosSimulator.accessDialogUntitledTask');
+  const simulatorLabel = sanitizeGhostNoticeText(instance.simulatorName)
+    .replace(/[\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\s+/g, ' ')
+    .slice(0, 120);
+  const result = await dialog.showMessageBox(owner, {
+    type: 'warning',
+    title: t('rightSidebar.iosSimulator.agentControlDialogTitle'),
+    message: t('rightSidebar.iosSimulator.agentControlDialogMessage').replaceAll(
+      '{{simulator}}',
+      simulatorLabel,
+    ),
+    detail: t('rightSidebar.iosSimulator.agentControlDialogDetail').replaceAll(
+      '{{task}}',
+      taskLabel,
+    ),
+    buttons: [
+      t('rightSidebar.iosSimulator.agentControlDialogAllow'),
+      t('rightSidebar.iosSimulator.agentControlDialogCancel'),
     ],
     defaultId: 1,
     cancelId: 1,

@@ -163,7 +163,8 @@ export type IOSSimulatorToolResponse =
 export interface IOSSimulatorAgentControlRequest {
   sessionId: string;
   instanceId: string;
-  decision: 'allowed' | 'denied';
+  /** Elevation is only a request; Main owns confirmation and persistence. */
+  action: 'request-allow' | 'revoke';
 }
 
 export interface IOSSimulatorViewerRouteRequest {

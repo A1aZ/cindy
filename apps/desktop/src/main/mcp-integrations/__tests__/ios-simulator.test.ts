@@ -898,12 +898,15 @@ describe('iOS Simulator host', () => {
       bootProvenance: 'agent-booted',
       device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
     });
-    const withSessionLock = vi.fn(
-      async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> => {
-        await lockGate;
-        return task();
-      },
-    );
+    const observeSessionLock = vi.fn();
+    const withSessionLock = async <T>(
+      sessionId: string,
+      task: () => Promise<T>,
+    ): Promise<T> => {
+      observeSessionLock(sessionId, task);
+      await lockGate;
+      return task();
+    };
     const host = createIOSSimulatorHost({
       actor,
       lifecycle,
@@ -916,12 +919,15 @@ describe('iOS Simulator host', () => {
     });
 
     const reconcile = host.reconcileOwnership();
-    await vi.waitFor(() => expect(withSessionLock).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(observeSessionLock).toHaveBeenCalledOnce());
     status = 'active';
     releaseLock();
     await reconcile;
 
-    expect(withSessionLock).toHaveBeenCalledWith('archived-then-restored', expect.any(Function));
+    expect(observeSessionLock).toHaveBeenCalledWith(
+      'archived-then-restored',
+      expect.any(Function),
+    );
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
     expect(lifecycle.deleteExact).not.toHaveBeenCalled();
     expect(actor.getOwned('archived-then-restored', instance.instanceId)).toMatchObject({

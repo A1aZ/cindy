@@ -129,6 +129,28 @@ function sameArtifact(
   );
 }
 
+/** @internal Exported only so cleanup error precedence stays covered by unit tests. */
+export async function finalizeIOSSimulatorReleaseGateProbe(
+  probeSucceeded: boolean,
+  cleanupSteps: readonly (() => Promise<void>)[],
+): Promise<void> {
+  let firstCleanupError: unknown;
+  let cleanupFailed = false;
+  for (const cleanup of cleanupSteps) {
+    try {
+      await cleanup();
+    } catch (error) {
+      if (!cleanupFailed) firstCleanupError = error;
+      cleanupFailed = true;
+    }
+  }
+  if (probeSucceeded && cleanupFailed) {
+    throw new Error('IOS_SIMULATOR_RELEASE_CLEANUP_FAILED', {
+      cause: firstCleanupError,
+    });
+  }
+}
+
 async function runNativeProbe(
   input: IOSSimulatorReleaseGateNativeProbeInput,
 ): Promise<IOSSimulatorReleaseGateNativeResult> {
@@ -146,6 +168,7 @@ async function runNativeProbe(
 
   const lifecycle = createIOSSimulatorSimctlLifecycle();
   let simulatorUdid: string | null = null;
+  let probeSucceeded = false;
   const manager = new IOSSimulatorNativeSidecarProcessManager({
     binaryPath: input.artifact.executablePath,
     admissionPolicy: input.resolvePolicy,
@@ -241,6 +264,7 @@ async function runNativeProbe(
       throw new Error('IOS_SIMULATOR_RELEASE_RESTART_INCOMPLETE');
     }
 
+    probeSucceeded = true;
     return {
       h264Frames,
       keyFrames,
@@ -249,11 +273,15 @@ async function runNativeProbe(
       cleanRestartReady,
     };
   } finally {
-    await manager.stop(input.start.instanceId).catch(() => undefined);
-    if (simulatorUdid) {
-      await lifecycle.shutdownExact(simulatorUdid).catch(() => undefined);
-      await lifecycle.deleteExact(simulatorUdid).catch(() => undefined);
+    const cleanupSteps: Array<() => Promise<void>> = [() => manager.stop(input.start.instanceId)];
+    const cleanupUdid = simulatorUdid;
+    if (cleanupUdid) {
+      cleanupSteps.push(
+        () => lifecycle.shutdownExact(cleanupUdid),
+        () => lifecycle.deleteExact(cleanupUdid),
+      );
     }
+    await finalizeIOSSimulatorReleaseGateProbe(probeSucceeded, cleanupSteps);
   }
 }
 

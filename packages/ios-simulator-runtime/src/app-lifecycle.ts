@@ -9,6 +9,7 @@ import type { IOSSimulatorCommandRunner } from "./types.js";
 export interface IOSSimulatorAppArtifact {
   artifactId: string;
   worktreeRoot: string;
+  authorizedRoot: string;
   appPath: string;
   bundleId: string;
   createdAt: string;
@@ -51,30 +52,38 @@ export class IOSSimulatorAppLifecycle {
       options.commandRunner ?? createNodeIOSSimulatorCommandRunner();
   }
 
-  async inspectArtifact(
-    worktreeRoot: string,
+  async #inspectArtifactAtAuthorizedRoot(
+    authorizedRoot: string,
     appPath: string,
-    trustedBuildRoot?: string,
     signal?: AbortSignal,
-  ): Promise<IOSSimulatorAppArtifact> {
+  ): Promise<{ appPath: string; bundleId: string }> {
     throwIfAborted(signal);
-    const root = await realpath(worktreeRoot);
-    const resolvedApp = await realpath(appPath);
-    const resolvedBuildRoot = trustedBuildRoot
-      ? await realpath(trustedBuildRoot)
-      : null;
+    let resolvedApp: string;
+    try {
+      resolvedApp = await realpath(appPath);
+    } catch {
+      throw new IOSSimulatorInstanceError(
+        "APP_ARTIFACT_INVALID",
+        "The app artifact no longer exists.",
+      );
+    }
     if (
-      (!isInside(root, resolvedApp) &&
-        (!resolvedBuildRoot || !isInside(resolvedBuildRoot, resolvedApp))) ||
+      !path.isAbsolute(authorizedRoot) ||
+      !isInside(authorizedRoot, resolvedApp) ||
       path.extname(resolvedApp).toLowerCase() !== ".app"
     ) {
       throw new IOSSimulatorInstanceError(
         "APP_ARTIFACT_INVALID",
-        "The app artifact must be a .app directory inside the current worktree.",
+        "The app artifact must remain inside its authorized build root.",
       );
     }
-    const info = await stat(resolvedApp);
-    if (!info.isDirectory()) {
+    let isDirectory = false;
+    try {
+      isDirectory = (await stat(resolvedApp)).isDirectory();
+    } catch {
+      // Normalize file races into the same fail-closed artifact result.
+    }
+    if (!isDirectory) {
       throw new IOSSimulatorInstanceError(
         "APP_ARTIFACT_INVALID",
         "The app artifact is not a directory.",
@@ -94,10 +103,45 @@ export class IOSSimulatorAppLifecycle {
       );
     }
     return {
-      artifactId: randomUUID(),
-      worktreeRoot: root,
       appPath: resolvedApp,
       bundleId: requireBundleId(result.stdout),
+    };
+  }
+
+  async inspectArtifact(
+    worktreeRoot: string,
+    appPath: string,
+    trustedBuildRoot?: string,
+    signal?: AbortSignal,
+  ): Promise<IOSSimulatorAppArtifact> {
+    throwIfAborted(signal);
+    const root = await realpath(worktreeRoot);
+    const resolvedApp = await realpath(appPath);
+    const resolvedBuildRoot = trustedBuildRoot
+      ? await realpath(trustedBuildRoot)
+      : null;
+    const authorizedRoot = isInside(root, resolvedApp)
+      ? root
+      : resolvedBuildRoot && isInside(resolvedBuildRoot, resolvedApp)
+        ? resolvedBuildRoot
+        : null;
+    if (!authorizedRoot) {
+      throw new IOSSimulatorInstanceError(
+        "APP_ARTIFACT_INVALID",
+        "The app artifact must be a .app directory inside the current worktree.",
+      );
+    }
+    const identity = await this.#inspectArtifactAtAuthorizedRoot(
+      authorizedRoot,
+      resolvedApp,
+      signal,
+    );
+    return {
+      artifactId: randomUUID(),
+      worktreeRoot: root,
+      authorizedRoot,
+      appPath: identity.appPath,
+      bundleId: identity.bundleId,
       createdAt: new Date().toISOString(),
     };
   }
@@ -108,9 +152,24 @@ export class IOSSimulatorAppLifecycle {
     signal?: AbortSignal,
   ): Promise<void> {
     throwIfAborted(signal);
+    const revalidated = await this.#inspectArtifactAtAuthorizedRoot(
+      artifact.authorizedRoot,
+      artifact.appPath,
+      signal,
+    );
+    if (
+      revalidated.appPath !== artifact.appPath ||
+      revalidated.bundleId !== artifact.bundleId
+    ) {
+      throw new IOSSimulatorInstanceError(
+        "APP_ARTIFACT_INVALID",
+        "The app artifact changed after it was built.",
+      );
+    }
+    throwIfAborted(signal);
     const result = await this.#runner.run(
       "xcrun",
-      ["simctl", "install", simulatorUdid, artifact.appPath],
+      ["simctl", "install", simulatorUdid, revalidated.appPath],
       {
         timeoutMs: 120_000,
         signal,

@@ -2523,6 +2523,7 @@ describe('iOS Simulator host', () => {
         inspectArtifact: vi.fn(async () => ({
           artifactId: 'artifact-xcresult',
           worktreeRoot: '/tmp/force-quit-xcresult-session',
+          authorizedRoot: '/tmp/force-quit-xcresult-session',
           appPath: '/tmp/force-quit-xcresult-session/Demo.app',
           bundleId: 'com.example.demo',
           createdAt: '2026-08-08T00:00:00.000Z',
@@ -7303,6 +7304,7 @@ describe('iOS Simulator host', () => {
     const artifact = {
       artifactId: 'artifact-a',
       worktreeRoot: '/tmp/session-a',
+      authorizedRoot: '/tmp/session-a',
       appPath: '/tmp/session-a/build/Demo.app',
       bundleId: 'com.example.demo',
       createdAt: '2026-07-23T00:00:00.000Z',

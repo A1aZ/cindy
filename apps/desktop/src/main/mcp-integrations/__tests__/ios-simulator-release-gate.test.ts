@@ -5,6 +5,7 @@ import type {
   IOSSimulatorSidecarArtifactDescriptor,
 } from '@cindy/ios-simulator-runtime';
 import {
+  finalizeIOSSimulatorReleaseGateProbe,
   parseIOSSimulatorReleaseGateArgs,
   runIOSSimulatorReleaseGate,
   type IOSSimulatorReleaseGateDependencies,
@@ -76,6 +77,43 @@ function dependencies(
 }
 
 describe('packaged iOS Simulator release gate', () => {
+  it.each([0, 1, 2])(
+    'fails a successful native probe when cleanup step %i fails and still runs later cleanup',
+    async (failingStep) => {
+      const cleanup = [0, 1, 2].map((index) =>
+        vi.fn(async () => {
+          if (index === failingStep) throw new Error(`cleanup-${index}`);
+        }),
+      );
+
+      await expect(finalizeIOSSimulatorReleaseGateProbe(true, cleanup)).rejects.toMatchObject({
+        message: 'IOS_SIMULATOR_RELEASE_CLEANUP_FAILED',
+        cause: expect.objectContaining({ message: `cleanup-${failingStep}` }),
+      });
+      expect(cleanup.every((step) => step.mock.calls.length === 1)).toBe(true);
+    },
+  );
+
+  it('preserves the original probe failure while still attempting every cleanup step', async () => {
+    const probeError = new Error('IOS_SIMULATOR_RELEASE_H264_INVALID');
+    const cleanup = [0, 1, 2].map((index) =>
+      vi.fn(async () => {
+        throw new Error(`cleanup-${index}`);
+      }),
+    );
+    const probe = (async () => {
+      let probeSucceeded = false;
+      try {
+        throw probeError;
+      } finally {
+        await finalizeIOSSimulatorReleaseGateProbe(probeSucceeded, cleanup);
+      }
+    })();
+
+    await expect(probe).rejects.toBe(probeError);
+    expect(cleanup.every((step) => step.mock.calls.length === 1)).toBe(true);
+  });
+
   it('qualifies an exact verified combination without leaking Host paths', async () => {
     const deps = dependencies();
     const report = await runIOSSimulatorReleaseGate(OPTIONS, deps.value);

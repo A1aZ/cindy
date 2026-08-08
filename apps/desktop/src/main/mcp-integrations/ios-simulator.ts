@@ -284,6 +284,14 @@ function sessionError(
   return { ok: false, sessionId, errorCode, message };
 }
 
+function reportDetachCleanupError(error: unknown, instance: IOSSimulatorInstance): void {
+  logger.warn('iOS Simulator deferred detach cleanup failed and will retry', {
+    instanceId: instance.instanceId,
+    simulatorUdid: instance.simulatorUdid,
+    error: error instanceof Error ? error.message : String(error),
+  });
+}
+
 export function createRegistryBackedIOSSimulatorActor(
   lifecycle: IOSSimulatorSimctlLifecycle,
   registry: IOSSimulatorOwnershipRegistryFile,
@@ -339,7 +347,12 @@ export function createRegistryBackedIOSSimulatorActor(
       onChange: (instances) => registry.saveSync(instances),
     });
     return {
-      actor: new IOSSimulatorInstanceActor({ store, lifecycle, assertMutationAllowed }),
+      actor: new IOSSimulatorInstanceActor({
+        store,
+        lifecycle,
+        assertMutationAllowed,
+        onDetachCleanupError: reportDetachCleanupError,
+      }),
       flush: async () => {
         if (registry.isWriter && !startupError) registry.saveSync(store.listAll());
       },
@@ -383,6 +396,7 @@ function createInMemoryActor(lifecycle: IOSSimulatorSimctlLifecycle): IOSSimulat
       maxInstancesPerSession: MAX_INSTANCES_PER_SESSION,
     }),
     lifecycle,
+    onDetachCleanupError: reportDetachCleanupError,
   });
 }
 
@@ -2163,6 +2177,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (!driverRuntimeRecovered) complete = false;
     const device = devices.get(instance.simulatorUdid.toUpperCase());
     const deviceState = device?.state.trim().toLowerCase() ?? null;
+    const shouldResumeDetachGrace =
+      instance.bootProvenance === 'agent-booted' &&
+      instance.viewerState === 'detached' &&
+      instance.graceExpiresAt !== null;
     if (device && deviceState !== 'shutdown') {
       // This scheduler is process-local while ownership is persisted. Restore
       // observed occupancy before any fallible lookup/cleanup.
@@ -2214,7 +2232,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         complete = false;
       }
     }
-    actor.reconcile(
+    const reconciled = actor.reconcile(
       instance.instanceId,
       instance.sessionId,
       reconciledDeviceState === 'booted'
@@ -2232,7 +2250,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           ? 'healthy'
           : 'recovering',
       driverRuntimeRecovered ? null : 'WDA_UNAVAILABLE',
+      { preserveDetachGrace: shouldResumeDetachGrace },
     );
+    if (shouldResumeDetachGrace && driverRuntimeRecovered && complete) {
+      await actor.resumeDetachGrace(reconciled.instanceId, reconciled.sessionId, () =>
+        resourceScheduler.markStopped(reconciled.instanceId),
+      );
+    }
     return complete;
   }
 

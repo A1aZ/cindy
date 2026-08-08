@@ -19,7 +19,13 @@ const DEVICE: IOSSimulatorDevice = {
   lastBootedAt: null,
 };
 
-function createHarness(options: { booted?: boolean; cindy?: boolean } = {}) {
+function createHarness(
+  options: {
+    booted?: boolean;
+    cindy?: boolean;
+    onDetachCleanupError?: (error: unknown) => void;
+  } = {},
+) {
   let now = 1_000;
   let id = 0;
   const store = new IOSSimulatorOwnershipStore({
@@ -40,11 +46,18 @@ function createHarness(options: { booted?: boolean; cindy?: boolean } = {}) {
     lifecycle,
     clock: { now: () => now },
     detachGraceMs: 10 * 60_000,
+    detachCleanupRetryMs: 1_000,
+    onDetachCleanupError: options.onDetachCleanupError,
     scheduler: {
       schedule: (_delay, task) => {
-        scheduled.push(task);
+        const run = () => {
+          const index = scheduled.indexOf(run);
+          if (index >= 0) scheduled.splice(index, 1);
+          return task();
+        };
+        scheduled.push(run);
         return () => {
-          const index = scheduled.indexOf(task);
+          const index = scheduled.indexOf(run);
           if (index >= 0) scheduled.splice(index, 1);
         };
       },
@@ -485,6 +498,112 @@ describe("IOSSimulatorInstanceActor", () => {
     );
   });
 
+  it("restores the remaining persisted detach grace after reconciliation", async () => {
+    const original = createHarness();
+    const started = await original.actor.start(original.route());
+    const detached = await original.actor.detach(original.route(started));
+    const scheduled: Array<{
+      delayMs: number;
+      task: () => void | Promise<void>;
+    }> = [];
+    let now = 101_000;
+    const lifecycle = {
+      ...original.lifecycle,
+      shutdownExact: vi.fn(async () => undefined),
+    };
+    let restoredId = 0;
+    const store = new IOSSimulatorOwnershipStore({
+      clock: { now: () => now },
+      createId: () => `restored-${++restoredId}`,
+      initialInstances: [detached],
+    });
+    const actor = new IOSSimulatorInstanceActor({
+      store,
+      lifecycle,
+      clock: { now: () => now },
+      scheduler: {
+        schedule: (delayMs, task) => {
+          const entry = { delayMs, task };
+          scheduled.push(entry);
+          return () => {
+            const index = scheduled.indexOf(entry);
+            if (index >= 0) scheduled.splice(index, 1);
+          };
+        },
+      },
+    });
+    const reconciled = actor.reconcile(
+      detached.instanceId,
+      detached.sessionId,
+      "ready",
+      "healthy",
+      null,
+      { preserveDetachGrace: true },
+    );
+    const onResourceStopped = vi.fn();
+
+    await expect(
+      actor.resumeDetachGrace(
+        reconciled.instanceId,
+        reconciled.sessionId,
+        onResourceStopped,
+      ),
+    ).resolves.toBe(true);
+
+    expect(reconciled.graceExpiresAt).toBe(detached.graceExpiresAt);
+    expect(scheduled).toHaveLength(1);
+    expect(scheduled[0]?.delayMs).toBe(
+      Date.parse(detached.graceExpiresAt!) - now,
+    );
+    await scheduled[0]?.task();
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(store.get(detached.instanceId)).toBeNull();
+    expect(onResourceStopped).toHaveBeenCalledTimes(1);
+  });
+
+  it("immediately recovers an expired persisted detach grace", async () => {
+    const original = createHarness();
+    const started = await original.actor.start(original.route());
+    const detached = await original.actor.detach(original.route(started));
+    const now = Date.parse(detached.graceExpiresAt!) + 1;
+    const lifecycle = {
+      ...original.lifecycle,
+      shutdownExact: vi.fn(async () => undefined),
+    };
+    let restoredId = 0;
+    const store = new IOSSimulatorOwnershipStore({
+      clock: { now: () => now },
+      createId: () => `restored-${++restoredId}`,
+      initialInstances: [detached],
+    });
+    const actor = new IOSSimulatorInstanceActor({
+      store,
+      lifecycle,
+      clock: { now: () => now },
+    });
+    const reconciled = actor.reconcile(
+      detached.instanceId,
+      detached.sessionId,
+      "ready",
+      "healthy",
+      null,
+      { preserveDetachGrace: true },
+    );
+    const onResourceStopped = vi.fn();
+
+    await expect(
+      actor.resumeDetachGrace(
+        reconciled.instanceId,
+        reconciled.sessionId,
+        onResourceStopped,
+      ),
+    ).resolves.toBe(true);
+
+    expect(lifecycle.shutdownExact).toHaveBeenCalledWith(UDID);
+    expect(store.get(detached.instanceId)).toBeNull();
+    expect(onResourceStopped).toHaveBeenCalledTimes(1);
+  });
+
   it("releases preexisting devices immediately without shutdown", async () => {
     const harness = createHarness({ booted: true });
     const onResourceReleased = vi.fn();
@@ -499,8 +618,9 @@ describe("IOSSimulatorInstanceActor", () => {
     expect(onResourceReleased).toHaveBeenCalledWith(detached);
   });
 
-  it("keeps the resource counted when grace shutdown fails", async () => {
-    const harness = createHarness();
+  it("retries grace cleanup without rejecting when shutdown fails", async () => {
+    const onDetachCleanupError = vi.fn();
+    const harness = createHarness({ onDetachCleanupError });
     const started = await harness.actor.start(harness.route());
     const onResourceReleased = vi.fn();
     vi.mocked(harness.lifecycle.shutdownExact).mockRejectedValueOnce(
@@ -511,10 +631,63 @@ describe("IOSSimulatorInstanceActor", () => {
       harness.route(started),
       onResourceReleased,
     );
-    await expect(harness.scheduled[0]?.()).rejects.toThrow("shutdown failed");
+    await expect(harness.scheduled[0]?.()).resolves.toBeUndefined();
 
     expect(harness.store.get(detached.instanceId)).not.toBeNull();
     expect(onResourceReleased).not.toHaveBeenCalled();
+    expect(onDetachCleanupError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "shutdown failed" }),
+      expect.objectContaining({ instanceId: detached.instanceId }),
+    );
+    expect(harness.scheduled).toHaveLength(1);
+
+    await expect(harness.scheduled[0]?.()).resolves.toBeUndefined();
+    expect(harness.store.get(detached.instanceId)).toBeNull();
+    expect(onResourceReleased).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps ownership and retries when deferred resource release fails", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    const onResourceStopped = vi
+      .fn(async () => undefined)
+      .mockRejectedValueOnce(new Error("resource release failed"));
+    const detached = await harness.actor.detach(
+      harness.route(started),
+      onResourceStopped,
+    );
+
+    await expect(harness.scheduled[0]?.()).resolves.toBeUndefined();
+    expect(harness.store.get(detached.instanceId)).not.toBeNull();
+    expect(harness.scheduled).toHaveLength(1);
+
+    await expect(harness.scheduled[0]?.()).resolves.toBeUndefined();
+    expect(harness.store.get(detached.instanceId)).toBeNull();
+    expect(onResourceStopped).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels a retry when the detached simulator is reattached", async () => {
+    const harness = createHarness();
+    const started = await harness.actor.start(harness.route());
+    vi.mocked(harness.lifecycle.shutdownExact).mockRejectedValueOnce(
+      new Error("shutdown failed"),
+    );
+    await harness.actor.detach(harness.route(started));
+    await harness.scheduled[0]?.();
+    const retry = harness.scheduled[0]!;
+
+    harness.actor.attach({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      device: { ...DEVICE, state: "Booted" },
+      creationProvenance: "external",
+      bootProvenance: "agent-booted",
+    });
+
+    expect(harness.scheduled).toHaveLength(0);
+    await retry();
+    expect(harness.lifecycle.shutdownExact).toHaveBeenCalledTimes(1);
   });
 
   it("cancels deferred resource release when a detached device is reattached", async () => {

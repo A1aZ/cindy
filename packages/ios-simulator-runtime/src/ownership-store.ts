@@ -248,13 +248,17 @@ export class IOSSimulatorOwnershipStore {
     return instance;
   }
 
-  renew(instanceId: string, sessionId: string): IOSSimulatorInstance {
+  renew(
+    instanceId: string,
+    sessionId: string,
+    options: { preserveGrace?: boolean } = {},
+  ): IOSSimulatorInstance {
     const instance = this.requireOwned(instanceId, sessionId);
     const now = this.#clock.now();
     return this.update(instanceId, sessionId, {
       lease: this.#newLease(now),
       lastActiveAt: new Date(now).toISOString(),
-      graceExpiresAt: null,
+      ...(options.preserveGrace ? {} : { graceExpiresAt: null }),
     });
   }
 

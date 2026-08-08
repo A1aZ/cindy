@@ -485,6 +485,107 @@ describe('iOS Simulator host', () => {
     });
   });
 
+  it('restores persisted detach grace and releases scheduler capacity at its deadline', async () => {
+    let now = 1_000;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(async () => undefined),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const seedActor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({
+        clock: { now: () => now },
+        createId: () => crypto.randomUUID(),
+      }),
+      lifecycle,
+      clock: { now: () => now },
+      scheduler: { schedule: () => () => undefined },
+    });
+    const attached = seedActor.attach({
+      sessionId: 'persisted-grace-session',
+      worktreeRoot: '/tmp/persisted-grace-session',
+      sourceFingerprint: 'fingerprint-a',
+      device: READY_REPORT.devices[0]!,
+      bootProvenance: 'agent-booted',
+    });
+    const detached = await seedActor.detach({
+      sessionId: attached.sessionId,
+      instanceId: attached.instanceId,
+      generation: attached.generation,
+      leaseId: attached.lease.id,
+    });
+    now = 101_000;
+    const scheduled: Array<{
+      delayMs: number;
+      task: () => void | Promise<void>;
+      cancelled: boolean;
+    }> = [];
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore({
+        clock: { now: () => now },
+        createId: () => crypto.randomUUID(),
+        initialInstances: [detached],
+      }),
+      lifecycle,
+      clock: { now: () => now },
+      scheduler: {
+        schedule: (delayMs, task) => {
+          const entry = { delayMs, task, cancelled: false };
+          scheduled.push(entry);
+          return () => {
+            entry.cancelled = true;
+          };
+        },
+      },
+    });
+    const resourceScheduler = new IOSSimulatorResourceScheduler({
+      softLimit: 1,
+      hardLimit: 1,
+      freeMemoryBytes: () => 100 * 1024 ** 3,
+    });
+    const driverManager = {
+      get: vi.fn(() => null),
+      cleanupOrphaned: vi.fn(async () => undefined),
+      start: vi.fn(async () => {
+        throw new Error('not expected');
+      }),
+      stop: vi.fn(async () => undefined),
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager,
+      resourceScheduler,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => localSession('persisted-grace-session')),
+    });
+
+    try {
+      await host.reconcileOwnership();
+
+      const reconciled = actor.getOwned(detached.sessionId, detached.instanceId);
+      expect(reconciled).toMatchObject({
+        generation: detached.generation + 1,
+        graceExpiresAt: detached.graceExpiresAt,
+      });
+      expect(resourceScheduler.runningCount()).toBe(1);
+      expect(scheduled).toHaveLength(1);
+      expect(scheduled[0]).toMatchObject({
+        delayMs: Date.parse(detached.graceExpiresAt!) - now,
+        cancelled: false,
+      });
+
+      await scheduled[0]!.task();
+      expect(lifecycle.shutdownExact).toHaveBeenCalledWith(detached.simulatorUdid);
+      expect(actor.listAll()).toEqual([]);
+      expect(resourceScheduler.runningCount()).toBe(0);
+    } finally {
+      await host.dispose();
+    }
+  });
+
   it('recovers persisted WDA ownership before marking a booted binding healthy', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),

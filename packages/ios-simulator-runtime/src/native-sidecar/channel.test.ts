@@ -307,6 +307,32 @@ describe("IOSSimulatorNativeSidecarChannel", () => {
     expect(channel.state).toBe("failed");
   });
 
+  it.each([
+    ["missing", undefined],
+    ["non-boolean", "yes"],
+  ])(
+    "rejects a pending request when its reply has a %s ok field",
+    async (_label, ok) => {
+      const { channel, processes } = harness();
+      await channel.start();
+      const pending = channel.request(command("availability"));
+      processes[0]!.stdout.write(
+        encodeIOSSimulatorNativeSidecarJson({
+          id: "sidecar-1",
+          ...(ok === undefined ? {} : { ok }),
+          result: { ready: true },
+        }),
+      );
+
+      await expect(pending).rejects.toMatchObject({
+        code: "PROTOCOL_ERROR",
+        message: "Reply sidecar-1 has invalid ok field",
+      });
+      expect(channel.state).toBe("failed");
+      expect(channel.lastTermination?.reasonCode).toBe("protocol-error");
+    },
+  );
+
   it("waits for a faulted process to close before stop or restart completes", async () => {
     vi.useFakeTimers();
     try {

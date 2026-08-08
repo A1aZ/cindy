@@ -812,15 +812,18 @@ export class IOSSimulatorNativeSidecarChannel implements IOSSimulatorNativeSidec
         throw new IOSSimulatorNativeSidecarProtocolError(
           `Unknown reply id ${id}`,
         );
-      this.#pending.delete(id);
-      clearTimeout(pending.timeout);
-      pending.removeAbortListener();
-      this.#consecutiveTimeouts = 0;
+      // Validate while the request is still registered. A protocol fault
+      // terminates the sidecar and #rejectAll must still be able to settle this
+      // promise instead of leaving startup or an operation hung forever.
       if (reply.ok !== true && reply.ok !== false) {
         throw new IOSSimulatorNativeSidecarProtocolError(
           `Reply ${id} has invalid ok field`,
         );
       }
+      this.#pending.delete(id);
+      clearTimeout(pending.timeout);
+      pending.removeAbortListener();
+      this.#consecutiveTimeouts = 0;
       if (reply.ok) {
         pending.resolve(reply.result);
       } else {

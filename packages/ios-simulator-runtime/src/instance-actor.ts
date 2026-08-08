@@ -22,6 +22,15 @@ export interface IOSSimulatorInstanceActorOptions {
   clock?: IOSSimulatorClock;
   scheduler?: IOSSimulatorScheduler;
   detachGraceMs?: number;
+  detachCleanupRetryMs?: number;
+  onDetachCleanupError?: (
+    error: unknown,
+    instance: IOSSimulatorInstance,
+  ) => void;
+}
+
+export interface IOSSimulatorReconcileOptions {
+  preserveDetachGrace?: boolean;
 }
 
 export type IOSSimulatorMutationSource = "agent" | "user";
@@ -64,6 +73,20 @@ interface ActiveLifecycleStart {
 }
 
 const DEFAULT_DETACH_GRACE_MS = 10 * 60_000;
+const DEFAULT_DETACH_CLEANUP_RETRY_MS = 5_000;
+
+interface DetachGraceCleanupContext {
+  instanceId: string;
+  sessionId: string;
+  generation: number;
+  graceExpiresAt: string;
+  onResourceStopped: (instance: IOSSimulatorInstance) => void | Promise<void>;
+}
+
+interface ScheduledDetachGraceCleanup {
+  token: symbol;
+  cancel: () => void;
+}
 
 function defaultScheduler(): IOSSimulatorScheduler {
   return {
@@ -81,9 +104,12 @@ export class IOSSimulatorInstanceActor {
   readonly #clock: IOSSimulatorClock;
   readonly #scheduler: IOSSimulatorScheduler;
   readonly #detachGraceMs: number;
+  readonly #detachCleanupRetryMs: number;
+  readonly #onDetachCleanupError:
+    ((error: unknown, instance: IOSSimulatorInstance) => void) | null;
   readonly #assertMutationAllowed: (() => void) | null;
   readonly #tails = new Map<string, Promise<void>>();
-  readonly #cancelGrace = new Map<string, () => void>();
+  readonly #cancelGrace = new Map<string, ScheduledDetachGraceCleanup>();
   readonly #mutationStates = new Map<string, MutableMutationState>();
   readonly #activeMutations = new Map<
     string,
@@ -100,6 +126,9 @@ export class IOSSimulatorInstanceActor {
     this.#clock = options.clock ?? { now: () => Date.now() };
     this.#scheduler = options.scheduler ?? defaultScheduler();
     this.#detachGraceMs = options.detachGraceMs ?? DEFAULT_DETACH_GRACE_MS;
+    this.#detachCleanupRetryMs =
+      options.detachCleanupRetryMs ?? DEFAULT_DETACH_CLEANUP_RETRY_MS;
+    this.#onDetachCleanupError = options.onDetachCleanupError ?? null;
     this.#assertMutationAllowed = options.assertMutationAllowed ?? null;
     if (
       !Number.isSafeInteger(this.#detachGraceMs) ||
@@ -110,12 +139,20 @@ export class IOSSimulatorInstanceActor {
         "detachGraceMs must be a positive integer",
       );
     }
+    if (
+      !Number.isSafeInteger(this.#detachCleanupRetryMs) ||
+      this.#detachCleanupRetryMs <= 0
+    ) {
+      throw new IOSSimulatorInstanceError(
+        "INVALID_ARGUMENT",
+        "detachCleanupRetryMs must be a positive integer",
+      );
+    }
   }
 
   attach(input: IOSSimulatorAttachInput): IOSSimulatorInstance {
     const instance = this.#store.attach(input);
-    this.#cancelGrace.get(instance.instanceId)?.();
-    this.#cancelGrace.delete(instance.instanceId);
+    this.#cancelDetachGrace(instance.instanceId);
     return this.#store.update(instance.instanceId, instance.sessionId, {
       viewerState: "attached",
       graceExpiresAt: null,
@@ -212,6 +249,7 @@ export class IOSSimulatorInstanceActor {
     this.#store.requireOwned(instanceId, sessionId);
     this.#cancelActiveAgentMutation(instanceId);
     this.#abortLifecycleStartsForInstance(instanceId);
+    this.#cancelDetachGrace(instanceId);
     return this.#store.release(instanceId, sessionId);
   }
 
@@ -222,11 +260,14 @@ export class IOSSimulatorInstanceActor {
     lifecycleState: IOSSimulatorInstance["lifecycleState"],
     healthState: IOSSimulatorInstance["healthState"],
     errorCode: string | null,
+    options: IOSSimulatorReconcileOptions = {},
   ): IOSSimulatorInstance {
     const current = this.#store.requireOwned(instanceId, sessionId);
     this.#cancelActiveAgentMutation(instanceId);
     this.#abortLifecycleStartsForInstance(instanceId);
-    const renewed = this.#store.renew(instanceId, sessionId);
+    const renewed = this.#store.renew(instanceId, sessionId, {
+      preserveGrace: options.preserveDetachGrace,
+    });
     return this.#store.update(instanceId, sessionId, {
       generation: current.generation + 1,
       lifecycleState,
@@ -234,6 +275,9 @@ export class IOSSimulatorInstanceActor {
       errorCode,
       viewerState: "detached",
       lease: renewed.lease,
+      ...(options.preserveDetachGrace
+        ? { graceExpiresAt: current.graceExpiresAt }
+        : { graceExpiresAt: null }),
     });
   }
 
@@ -283,8 +327,7 @@ export class IOSSimulatorInstanceActor {
     this.#mutationState(input.instanceId).takeoverEpoch += 1;
     this.#cancelActiveAgentMutation(input.instanceId);
     this.#abortLifecycleStartsForInstance(input.instanceId);
-    this.#cancelGrace.get(input.instanceId)?.();
-    this.#cancelGrace.delete(input.instanceId);
+    this.#cancelDetachGrace(input.instanceId);
 
     return this.#serialize(input.instanceId, async () => {
       const current = this.#store.requireOwned(
@@ -515,8 +558,7 @@ export class IOSSimulatorInstanceActor {
     this.#store.requireOwned(instanceId, sessionId);
     this.abortMutationsForInstance(instanceId);
     this.#abortLifecycleStartsForInstance(instanceId);
-    this.#cancelGrace.get(instanceId)?.();
-    this.#cancelGrace.delete(instanceId);
+    this.#cancelDetachGrace(instanceId);
     return this.#serialize(instanceId, async () => {
       const instance = this.#store.requireOwned(instanceId, sessionId);
       return task(instance);
@@ -853,9 +895,39 @@ export class IOSSimulatorInstanceActor {
     });
   }
 
+  /** Restore a persisted detach deadline after Host startup reconciliation. */
+  async resumeDetachGrace(
+    instanceId: string,
+    sessionId: string,
+    onResourceStopped: (
+      instance: IOSSimulatorInstance,
+    ) => void | Promise<void> = () => undefined,
+  ): Promise<boolean> {
+    const instance = this.#store.requireOwned(instanceId, sessionId);
+    this.#cancelDetachGrace(instanceId);
+    if (
+      instance.bootProvenance !== "agent-booted" ||
+      instance.viewerState !== "detached" ||
+      instance.graceExpiresAt === null
+    ) {
+      return false;
+    }
+    const context = this.#detachGraceContext(instance, onResourceStopped);
+    const expiresAt = Date.parse(instance.graceExpiresAt);
+    const delayMs = Number.isFinite(expiresAt)
+      ? Math.max(0, expiresAt - this.#clock.now())
+      : 0;
+    if (delayMs > 0) {
+      this.#scheduleDetachGraceCleanup(context, delayMs);
+    } else {
+      await this.#attemptDetachGraceCleanup(context);
+    }
+    return true;
+  }
+
   detach(
     route: IOSSimulatorMutationRoute,
-    onResourceReleased: (
+    onResourceStopped: (
       instance: IOSSimulatorInstance,
     ) => void | Promise<void> = () => undefined,
   ): Promise<IOSSimulatorInstance> {
@@ -875,14 +947,13 @@ export class IOSSimulatorInstanceActor {
     this.#abortLifecycleStartsForInstance(admission.instanceId);
     return this.#serialize(admission.instanceId, async () => {
       const instance = this.#requireAdmittedLifecycleRoute(admission);
-      this.#cancelGrace.get(instance.instanceId)?.();
-      this.#cancelGrace.delete(instance.instanceId);
+      this.#cancelDetachGrace(instance.instanceId);
       if (instance.bootProvenance !== "agent-booted") {
         const released = this.#store.release(
           instance.instanceId,
           instance.sessionId,
         );
-        await onResourceReleased(released);
+        await onResourceStopped(released);
         return released;
       }
 
@@ -897,42 +968,121 @@ export class IOSSimulatorInstanceActor {
           graceExpiresAt,
         },
       );
-      const expectedGeneration = detached.generation;
-      const cancel = this.#scheduler.schedule(this.#detachGraceMs, async () => {
-        try {
-          await this.#serialize(detached.instanceId, async () => {
-            const current = this.#store.get(detached.instanceId);
-            if (
-              !current ||
-              current.viewerState !== "detached" ||
-              current.generation !== expectedGeneration ||
-              current.graceExpiresAt !== graceExpiresAt
-            ) {
-              return;
-            }
-            this.#assertMutationAllowed?.();
-            await this.#lifecycle.shutdownExact(current.simulatorUdid);
-            const afterShutdown = this.#store.get(detached.instanceId);
-            if (
-              !afterShutdown ||
-              afterShutdown.viewerState !== "detached" ||
-              afterShutdown.generation !== expectedGeneration ||
-              afterShutdown.graceExpiresAt !== graceExpiresAt
-            ) {
-              return;
-            }
-            const released = this.#store.release(
-              afterShutdown.instanceId,
-              afterShutdown.sessionId,
-            );
-            await onResourceReleased(released);
-          });
-        } finally {
-          this.#cancelGrace.delete(detached.instanceId);
-        }
-      });
-      this.#cancelGrace.set(detached.instanceId, cancel);
+      this.#scheduleDetachGraceCleanup(
+        this.#detachGraceContext(detached, onResourceStopped),
+        this.#detachGraceMs,
+      );
       return detached;
+    });
+  }
+
+  #detachGraceContext(
+    instance: IOSSimulatorInstance,
+    onResourceStopped: (instance: IOSSimulatorInstance) => void | Promise<void>,
+  ): DetachGraceCleanupContext {
+    if (instance.graceExpiresAt === null) {
+      throw new IOSSimulatorInstanceError(
+        "INVALID_ARGUMENT",
+        "Detached simulator cleanup requires a grace deadline.",
+      );
+    }
+    return {
+      instanceId: instance.instanceId,
+      sessionId: instance.sessionId,
+      generation: instance.generation,
+      graceExpiresAt: instance.graceExpiresAt,
+      onResourceStopped,
+    };
+  }
+
+  #matchingDetachGrace(
+    context: DetachGraceCleanupContext,
+  ): IOSSimulatorInstance | null {
+    const current = this.#store.get(context.instanceId);
+    if (
+      !current ||
+      current.sessionId !== context.sessionId ||
+      current.bootProvenance !== "agent-booted" ||
+      current.viewerState !== "detached" ||
+      current.generation !== context.generation ||
+      current.graceExpiresAt !== context.graceExpiresAt
+    ) {
+      return null;
+    }
+    return current;
+  }
+
+  #cancelDetachGrace(instanceId: string): void {
+    this.#cancelGrace.get(instanceId)?.cancel();
+    this.#cancelGrace.delete(instanceId);
+  }
+
+  #clearDetachGraceAttempt(instanceId: string, token: symbol): void {
+    if (this.#cancelGrace.get(instanceId)?.token === token) {
+      this.#cancelGrace.delete(instanceId);
+    }
+  }
+
+  #scheduleDetachGraceCleanup(
+    context: DetachGraceCleanupContext,
+    delayMs: number,
+  ): void {
+    this.#cancelDetachGrace(context.instanceId);
+    const token = Symbol("detach-grace-cleanup");
+    const cancel = this.#scheduler.schedule(Math.max(0, delayMs), () =>
+      this.#runDetachGraceCleanup(context).then(
+        () => this.#clearDetachGraceAttempt(context.instanceId, token),
+        (error: unknown) => {
+          this.#clearDetachGraceAttempt(context.instanceId, token);
+          this.#retryDetachGraceCleanup(context, error);
+        },
+      ),
+    );
+    this.#cancelGrace.set(context.instanceId, { token, cancel });
+  }
+
+  async #attemptDetachGraceCleanup(
+    context: DetachGraceCleanupContext,
+  ): Promise<void> {
+    try {
+      await this.#runDetachGraceCleanup(context);
+    } catch (error) {
+      this.#retryDetachGraceCleanup(context, error);
+    }
+  }
+
+  #retryDetachGraceCleanup(
+    context: DetachGraceCleanupContext,
+    error: unknown,
+  ): void {
+    const current = this.#matchingDetachGrace(context);
+    if (!current) return;
+    try {
+      this.#onDetachCleanupError?.(error, current);
+    } catch {
+      // Diagnostics must never prevent ownership recovery from retrying.
+    }
+    this.#scheduleDetachGraceCleanup(context, this.#detachCleanupRetryMs);
+  }
+
+  #runDetachGraceCleanup(context: DetachGraceCleanupContext): Promise<void> {
+    return this.#serialize(context.instanceId, async () => {
+      const current = this.#matchingDetachGrace(context);
+      if (!current) return;
+      this.#assertMutationAllowed?.();
+      await this.#lifecycle.shutdownExact(current.simulatorUdid);
+      const afterShutdown = this.#matchingDetachGrace(context);
+      if (!afterShutdown) return;
+      // Resource release is intentionally before ownership release. The Host
+      // callback is idempotent, so either failure leaves a persisted binding
+      // that startup reconciliation or this retry loop can safely recover.
+      await context.onResourceStopped(afterShutdown);
+      const afterResourceStop = this.#matchingDetachGrace(context);
+      if (!afterResourceStop) return;
+      this.#store.release(
+        afterResourceStop.instanceId,
+        afterResourceStop.sessionId,
+      );
     });
   }
 
@@ -971,8 +1121,7 @@ export class IOSSimulatorInstanceActor {
         await this.#lifecycle.shutdownExact(instance.simulatorUdid);
       }
       await this.#lifecycle.deleteExact(instance.simulatorUdid);
-      this.#cancelGrace.get(instance.instanceId)?.();
-      this.#cancelGrace.delete(instance.instanceId);
+      this.#cancelDetachGrace(instance.instanceId);
       return this.#store.release(instance.instanceId, instance.sessionId);
     });
   }

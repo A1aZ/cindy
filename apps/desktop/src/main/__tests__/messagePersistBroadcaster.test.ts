@@ -270,6 +270,75 @@ describe('update_plan tool_use persistence', () => {
     });
   });
 
+  it('still seals after a continuation boundary cleared the per-segment maps', async () => {
+    // 分段 turn:S1 产出计划 → continuation done(reset 清空 per-segment 映射)
+    // → S2 最终 done。计划行的引用按 turnId 存活,最终 done 仍找得到它并盖章;
+    // 否则重载后胶囊无章无失败印记 → 走旧版全勾完兜底 → 永久钉住(review P1-1)。
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-seg',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Segmented work', status: 'in_progress' }] },
+      },
+      null,
+    );
+
+    // continuation boundary 上 register 只跑 resetTurnPersistState(不 persist)。
+    resetTurnPersistState(SESSION);
+
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-seg', status: 'completed' },
+    })).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      persistId,
+      expect.objectContaining({
+        toolUseId: 'plan:turn-seg',
+        toolName: 'update_plan',
+        terminalPlanSnapshot: true,
+      }),
+    );
+  });
+
+  it('scopes a terminal-error failure stamp to the owning turn', async () => {
+    onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-old',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Old turn work', status: 'in_progress' }] },
+      },
+      null,
+    );
+    const currentPersistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-current',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Current work', status: 'in_progress' }] },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnTerminalError(SESSION, 'turn-current')).toBe(true);
+    await flushWrites();
+
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      currentPersistId,
+      expect.objectContaining({ toolUseId: 'plan:turn-current', turnCompleted: false }),
+    );
+    // 同会话里其它 turn 的计划行不得被顺手盖失败印记。
+    expect(updateMessageContent).not.toHaveBeenCalledWith(
+      SESSION,
+      expect.anything(),
+      expect.objectContaining({ toolUseId: 'plan:turn-old' }),
+    );
+  });
+
   it('stamps an already-completed plan as terminal at the successful done boundary', async () => {
     const persistId = onToolUseEvent(
       SESSION,

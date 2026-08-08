@@ -103,15 +103,20 @@ export function PinnedPlanPanel({
     persistedCompletionDeadlineMs !== null && fallbackDeadlineMs !== null
       ? Math.max(persistedCompletionDeadlineMs, fallbackDeadlineMs)
       : (persistedCompletionDeadlineMs ?? fallbackDeadlineMs);
+  // 地板只在 effect 里写(render 阶段写 ref 在 StrictMode 双渲染 / 并发渲染下
+  // 会读到被上一次渲染污染的值,review P2);render 阶段只读。
   const deadlineFloorRef = useRef<{ identity: string; deadlineMs: number } | null>(null);
-  let completionDeadlineMs = rawDeadlineMs;
-  if (completionDeadlineMs !== null && completionIdentity) {
-    const floor = deadlineFloorRef.current;
-    if (floor && floor.identity === completionIdentity) {
-      completionDeadlineMs = Math.max(completionDeadlineMs, floor.deadlineMs);
-    }
+  const floor = deadlineFloorRef.current;
+  const completionDeadlineMs =
+    rawDeadlineMs !== null && floor && completionIdentity && floor.identity === completionIdentity
+      ? Math.max(rawDeadlineMs, floor.deadlineMs)
+      : rawDeadlineMs;
+  useEffect(() => {
+    if (completionDeadlineMs === null || !completionIdentity) return;
+    const current = deadlineFloorRef.current;
+    if (current?.identity === completionIdentity && current.deadlineMs >= completionDeadlineMs) return;
     deadlineFloorRef.current = { identity: completionIdentity, deadlineMs: completionDeadlineMs };
-  }
+  }, [completionDeadlineMs, completionIdentity]);
   const completedPlanExpired = Boolean(
     completionDeadlineMs !== null && completionDeadlineMs <= Date.now(),
   );

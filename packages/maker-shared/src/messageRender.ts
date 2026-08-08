@@ -633,14 +633,18 @@ export function applyCodexPlanSnapshotOnDone<
   // 'completed'(main 侧 isSuccessfulCodexDoneEventData 同序判定)。渲染端若
   // 只看 status 会先盖章退场,随后 main 持久化 turnCompleted:false 的 DB 行
   // 广播到达,计划复活——即时 UI 与落库分叉。
-  const sealsTurn = terminalStatus === 'completed' && cancelled !== true && Boolean(turnId);
-  // done 恒为终态:status 非 completed(interrupted / failed),或 cancelled 覆盖
-  // 了 completed,均为失败终态——后者只拦盖章不落失败印记的话,全勾完的取消
-  // 计划会被旧数据兜底即时隐藏,再被 main 的 turnCompleted:false 落库行复活。
-  const stampsFailed =
-    Boolean(turnId) &&
-    ((typeof terminalStatus === 'string' && terminalStatus !== 'completed') ||
-      (cancelled === true && terminalStatus === 'completed'));
+  // 成功判据与 main 的 isSuccessfulCodexDoneEventData 逐字同序:未取消 +
+  // raw.status === 'completed'。其余一切(status 为别的值、缺失、被 cancelled
+  // 覆盖)在归属明确的 turn 上都是失败终态。
+  //
+  // "缺失也算失败"很关键:main 对缺 status 的 done 同样写 turnCompleted:false,
+  // 若这里不落印记,渲染端会按旧数据兜底先退场,随后落库行带失败印记到达又把
+  // 计划判活 → 消失再闪回(review P2)。
+  const isSuccessfulTerminal = terminalStatus === 'completed' && cancelled !== true;
+  const sealsTurn = isSuccessfulTerminal && Boolean(turnId);
+  // terminalStatus === undefined = 调用方没在描述终态(仅套用权威快照的调用),
+  // 不落任何印记;null / 其它值都来自真实 done,按失败终态处理。
+  const stampsFailed = Boolean(turnId) && terminalStatus !== undefined && !isSuccessfulTerminal;
   if (!authoritativeSnapshot && !sealsTurn && !stampsFailed) {
     return { messages, changed: false, toolUseId: null };
   }

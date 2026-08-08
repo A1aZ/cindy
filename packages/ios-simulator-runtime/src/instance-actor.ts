@@ -1,6 +1,7 @@
 import { IOSSimulatorInstanceError } from "./instance-errors.js";
 import type {
   IOSSimulatorAttachInput,
+  IOSSimulatorCreatedDevice,
   IOSSimulatorInstance,
   IOSSimulatorMutationRoute,
 } from "./instance-types.js";
@@ -8,7 +9,10 @@ import {
   IOSSimulatorOwnershipStore,
   type IOSSimulatorClock,
 } from "./ownership-store.js";
-import type { IOSSimulatorSimctlLifecycle } from "./simctl-lifecycle.js";
+import {
+  IOSSimulatorCreateCleanupRequiredError,
+  type IOSSimulatorSimctlLifecycle,
+} from "./simctl-lifecycle.js";
 
 export interface IOSSimulatorScheduler {
   schedule(delayMs: number, task: () => void | Promise<void>): () => void;
@@ -28,6 +32,11 @@ export interface IOSSimulatorInstanceActorOptions {
     instance: IOSSimulatorInstance,
   ) => void;
 }
+
+type IOSSimulatorCreateInput = Omit<IOSSimulatorAttachInput, "device"> & {
+  name: string;
+  templateDevice: IOSSimulatorAttachInput["device"];
+};
 
 export interface IOSSimulatorReconcileOptions {
   preserveDetachGrace?: boolean;
@@ -74,6 +83,7 @@ interface ActiveLifecycleStart {
 
 const DEFAULT_DETACH_GRACE_MS = 10 * 60_000;
 const DEFAULT_DETACH_CLEANUP_RETRY_MS = 5_000;
+const CREATE_ROLLBACK_TIMEOUT_MS = 4_000;
 
 interface DetachGraceCleanupContext {
   instanceId: string;
@@ -165,75 +175,92 @@ export class IOSSimulatorInstanceActor {
     input: IOSSimulatorAttachInput,
   ): Promise<IOSSimulatorInstance> {
     const normalizedUdid = input.device.udid.trim().toUpperCase();
-    const existing = this.#store
-      .listAll()
-      .find(
-        (instance) => instance.simulatorUdid.toUpperCase() === normalizedUdid,
-      );
     return this.#serialize(
-      existing?.instanceId ?? `attach:${normalizedUdid}`,
+      this.#deviceOperationKey(normalizedUdid),
       async () => {
+        const existing = this.#bindingForUdid(normalizedUdid);
         if (!existing) {
-          return this.attach(input);
-        }
-        const currentDevice = await this.#lifecycle.findExact(normalizedUdid);
-        if (currentDevice === null) {
-          throw new IOSSimulatorInstanceError(
-            "SIMULATOR_NOT_FOUND",
-            "The selected iOS Simulator device no longer exists.",
-            true,
+          const currentDevice = await this.#lifecycle.findExact(
+            normalizedUdid,
+            this.#lifecycleExitController.signal,
           );
+          if (currentDevice === null) {
+            throw new IOSSimulatorInstanceError(
+              "SIMULATOR_NOT_FOUND",
+              "The selected iOS Simulator device no longer exists.",
+              true,
+            );
+          }
+          return this.attach({
+            ...input,
+            device: currentDevice ?? input.device,
+          });
         }
-        return this.attach({
-          ...input,
-          // Some test adapters omit the optional lookup result. Production
-          // lifecycle adapters return either an exact device or null.
-          device: currentDevice ?? input.device,
+        return this.#serialize(existing.instanceId, async () => {
+          const currentDevice = await this.#lifecycle.findExact(
+            normalizedUdid,
+            this.#lifecycleExitController.signal,
+          );
+          if (currentDevice === null) {
+            throw new IOSSimulatorInstanceError(
+              "SIMULATOR_NOT_FOUND",
+              "The selected iOS Simulator device no longer exists.",
+              true,
+            );
+          }
+          return this.attach({
+            ...input,
+            // Some test adapters omit the optional lookup result. Production
+            // lifecycle adapters return either an exact device or null.
+            device: currentDevice ?? input.device,
+          });
         });
       },
     );
   }
 
-  create(
-    input: Omit<IOSSimulatorAttachInput, "device"> & {
-      name: string;
-      templateDevice: IOSSimulatorAttachInput["device"];
-    },
-  ): Promise<IOSSimulatorInstance> {
-    return this.#serialize(`create:${input.sessionId}`, async () => {
-      const deviceTypeIdentifier = input.templateDevice.deviceTypeIdentifier;
-      if (!deviceTypeIdentifier) {
-        throw new IOSSimulatorInstanceError(
-          "INVALID_ARGUMENT",
-          "The template simulator does not expose a device type identifier.",
+  create(input: IOSSimulatorCreateInput): Promise<IOSSimulatorInstance> {
+    return this.#runTrackedLifecycleStart(
+      `create:${input.sessionId}`,
+      input.sessionId,
+      async (signal) => {
+        this.#throwIfLifecycleStartCancelled(signal);
+        const deviceTypeIdentifier = input.templateDevice.deviceTypeIdentifier;
+        if (!deviceTypeIdentifier) {
+          throw new IOSSimulatorInstanceError(
+            "INVALID_ARGUMENT",
+            "The template simulator does not expose a device type identifier.",
+          );
+        }
+        this.#assertMutationAllowed?.();
+        let created: Awaited<
+          ReturnType<IOSSimulatorSimctlLifecycle["createExact"]>
+        >;
+        let cleanupRequired: IOSSimulatorCreateCleanupRequiredError | null =
+          null;
+        try {
+          created = await this.#lifecycle.createExact(
+            {
+              name: input.name,
+              deviceTypeIdentifier,
+              runtimeIdentifier: input.templateDevice.runtimeIdentifier,
+            },
+            signal,
+          );
+        } catch (error) {
+          if (!(error instanceof IOSSimulatorCreateCleanupRequiredError))
+            throw error;
+          created = error.createdDevice;
+          cleanupRequired = error;
+        }
+        return this.#finalizeCreatedDevice(
+          input,
+          created,
+          signal,
+          cleanupRequired,
         );
-      }
-      this.#assertMutationAllowed?.();
-      const created = await this.#lifecycle.createExact({
-        name: input.name,
-        deviceTypeIdentifier,
-        runtimeIdentifier: input.templateDevice.runtimeIdentifier,
-      });
-      try {
-        return this.attach({
-          sessionId: input.sessionId,
-          worktreeRoot: input.worktreeRoot,
-          sourceFingerprint: input.sourceFingerprint,
-          creationProvenance: "cindy",
-          bootProvenance: "user-booted",
-          device: {
-            ...input.templateDevice,
-            udid: created.udid,
-            name: created.name,
-            state: "Shutdown",
-            lastBootedAt: null,
-          },
-        });
-      } catch (error) {
-        await this.#lifecycle.deleteExact(created.udid).catch(() => undefined);
-        throw error;
-      }
-    });
+      },
+    );
   }
 
   list(sessionId: string): IOSSimulatorInstance[] {
@@ -650,18 +677,30 @@ export class IOSSimulatorInstanceActor {
     } catch (error) {
       return Promise.reject(error);
     }
+    return this.#runTrackedLifecycleStart(
+      route.instanceId,
+      route.sessionId,
+      task,
+    );
+  }
+
+  #runTrackedLifecycleStart(
+    operationKey: string,
+    sessionId: string,
+    task: (signal: AbortSignal) => Promise<IOSSimulatorInstance>,
+  ): Promise<IOSSimulatorInstance> {
     const record: ActiveLifecycleStart = {
-      sessionId: route.sessionId,
+      sessionId,
       controller: new AbortController(),
       settled: Promise.resolve(),
     };
-    let records = this.#activeLifecycleStarts.get(route.instanceId);
+    let records = this.#activeLifecycleStarts.get(operationKey);
     if (!records) {
       records = new Set();
-      this.#activeLifecycleStarts.set(route.instanceId, records);
+      this.#activeLifecycleStarts.set(operationKey, records);
     }
     records.add(record);
-    const operation = this.#serialize(route.instanceId, () =>
+    const operation = this.#serialize(operationKey, () =>
       task(record.controller.signal),
     );
     record.settled = operation
@@ -672,10 +711,174 @@ export class IOSSimulatorInstanceActor {
       .finally(() => {
         records?.delete(record);
         if (records?.size === 0) {
-          this.#activeLifecycleStarts.delete(route.instanceId);
+          this.#activeLifecycleStarts.delete(operationKey);
         }
       });
     return operation;
+  }
+
+  #deviceOperationKey(udid: string): string {
+    return `attach:${udid.trim().toUpperCase()}`;
+  }
+
+  #bindingForUdid(udid: string): IOSSimulatorInstance | null {
+    const normalized = udid.trim().toUpperCase();
+    return (
+      this.#store
+        .listAll()
+        .find(
+          (instance) => instance.simulatorUdid.toUpperCase() === normalized,
+        ) ?? null
+    );
+  }
+
+  #createdAttachInput(
+    input: IOSSimulatorCreateInput,
+    created: IOSSimulatorCreatedDevice,
+    sessionId: string,
+  ): IOSSimulatorAttachInput {
+    return {
+      sessionId,
+      worktreeRoot: input.worktreeRoot,
+      sourceFingerprint: input.sourceFingerprint,
+      creationProvenance: "cindy",
+      bootProvenance: "user-booted",
+      device: {
+        ...input.templateDevice,
+        udid: created.udid,
+        name: created.name,
+        state: "Shutdown",
+        lastBootedAt: null,
+      },
+    };
+  }
+
+  #createCleanupSessionId(udid: string): string {
+    return `__cindy_create_cleanup__:${udid.trim().toUpperCase()}`;
+  }
+
+  #throwCreateFailure(
+    cleanupRequired: IOSSimulatorCreateCleanupRequiredError | null,
+    signal: AbortSignal,
+  ): void {
+    this.#throwIfLifecycleStartCancelled(signal);
+    if (!cleanupRequired) return;
+    if (cleanupRequired.originalReason instanceof Error) {
+      throw cleanupRequired.originalReason;
+    }
+    throw cleanupRequired;
+  }
+
+  async #finalizeCreatedDevice(
+    input: IOSSimulatorCreateInput,
+    created: IOSSimulatorCreatedDevice,
+    signal: AbortSignal,
+    cleanupRequired: IOSSimulatorCreateCleanupRequiredError | null,
+  ): Promise<IOSSimulatorInstance> {
+    return this.#serialize(this.#deviceOperationKey(created.udid), async () => {
+      const existing = this.#bindingForUdid(created.udid);
+      if (existing) {
+        this.#throwCreateFailure(cleanupRequired, signal);
+        throw new IOSSimulatorInstanceError(
+          "SIMULATOR_ATTACHED_ELSEWHERE",
+          "The newly created simulator was attached to another Cindy session.",
+        );
+      }
+
+      let rollbackBinding: IOSSimulatorInstance | null = null;
+      try {
+        rollbackBinding = this.attach(
+          this.#createdAttachInput(
+            input,
+            created,
+            signal.aborted || cleanupRequired
+              ? this.#createCleanupSessionId(created.udid)
+              : input.sessionId,
+          ),
+        );
+        this.#throwCreateFailure(cleanupRequired, signal);
+        return rollbackBinding;
+      } catch (error) {
+        const current = this.#bindingForUdid(created.udid);
+        if (
+          current &&
+          (!rollbackBinding ||
+            current.instanceId !== rollbackBinding.instanceId)
+        ) {
+          this.#throwCreateFailure(cleanupRequired, signal);
+          throw error;
+        }
+        rollbackBinding = current;
+        if (!rollbackBinding) {
+          try {
+            rollbackBinding = this.attach(
+              this.#createdAttachInput(
+                input,
+                created,
+                this.#createCleanupSessionId(created.udid),
+              ),
+            );
+          } catch {
+            // A registry write failure must not prevent an exact best-effort
+            // rollback. If another binding raced this fallback, protect it.
+            if (this.#bindingForUdid(created.udid)) {
+              this.#throwCreateFailure(cleanupRequired, signal);
+              throw error;
+            }
+          }
+        }
+
+        // `createExact` already spent its bounded cleanup budget before
+        // raising CleanupRequired. Persist the exact binding instead of
+        // retrying here and extending Desktop shutdown past its deadline.
+        const deleted = cleanupRequired
+          ? false
+          : await this.#rollbackCreatedDevice(created.udid);
+        if (deleted && rollbackBinding) {
+          try {
+            this.#store.release(
+              rollbackBinding.instanceId,
+              rollbackBinding.sessionId,
+            );
+          } catch {
+            // The device is gone, but retaining the exact binding is safer
+            // than replacing the authoritative create/cancellation error.
+          }
+        } else if (rollbackBinding) {
+          try {
+            this.#store.update(
+              rollbackBinding.instanceId,
+              rollbackBinding.sessionId,
+              {
+                healthState: "degraded",
+                errorCode: "SIMULATOR_DELETE_FAILED",
+              },
+            );
+          } catch {
+            // The initial attach already persisted the exact identity. Keep it
+            // intact if the diagnostic update itself cannot be written.
+          }
+        }
+        this.#throwCreateFailure(cleanupRequired, signal);
+        throw error;
+      }
+    });
+  }
+
+  async #rollbackCreatedDevice(udid: string): Promise<boolean> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(this.#lifecycleStartCancelledError());
+    }, CREATE_ROLLBACK_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      await this.#lifecycle.deleteExact(udid, controller.signal);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** Abort one instance's queued/active CoreSimulator starts and await settlement. */

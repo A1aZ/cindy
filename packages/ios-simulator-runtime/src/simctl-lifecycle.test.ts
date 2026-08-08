@@ -1,7 +1,10 @@
 import { access } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
-import { createIOSSimulatorSimctlLifecycle } from "./simctl-lifecycle.js";
+import {
+  createIOSSimulatorSimctlLifecycle,
+  IOSSimulatorCreateCleanupRequiredError,
+} from "./simctl-lifecycle.js";
 import type { IOSSimulatorCommandRunner } from "./types.js";
 
 const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
@@ -276,6 +279,149 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     ]);
   });
 
+  it("cancels create and deletes only an exact late-created UDID", async () => {
+    const controller = new AbortController();
+    const reason = new Error("create cancelled for exit");
+    let createSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "create") {
+          createSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return { stdout: `${UDID}\n`, stderr: "", exitCode: null };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+    });
+
+    const creating = lifecycle.createExact(
+      {
+        name: "Cindy iPhone",
+        deviceTypeIdentifier:
+          "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+      },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(createSignal).toBe(controller.signal));
+    controller.abort(reason);
+
+    await expect(creating).rejects.toBe(reason);
+    expect(run).toHaveBeenNthCalledWith(
+      1,
+      "/usr/bin/xcrun",
+      [
+        "simctl",
+        "create",
+        "Cindy iPhone",
+        "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+      ],
+      { timeoutMs: 60_000, signal: controller.signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      2,
+      "/usr/bin/xcrun",
+      ["simctl", "delete", UDID],
+      { timeoutMs: 4_000 },
+    );
+  });
+
+  it("returns the exact created identity when cancellation cleanup fails", async () => {
+    const controller = new AbortController();
+    const reason = new Error("create cancelled for exit");
+    let createSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args, options) => {
+        if (args[1] === "create") {
+          createSignal = options?.signal;
+          await new Promise<void>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(), {
+              once: true,
+            });
+          });
+          return { stdout: `${UDID}\n`, stderr: "", exitCode: null };
+        }
+        return { stdout: "", stderr: "delete failed", exitCode: 1 };
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+    });
+
+    const creating = lifecycle.createExact(
+      {
+        name: "Cindy iPhone",
+        deviceTypeIdentifier:
+          "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+      },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(createSignal).toBe(controller.signal));
+    controller.abort(reason);
+
+    await expect(creating).rejects.toMatchObject({
+      name: "IOSSimulatorCreateCleanupRequiredError",
+      code: "SIMULATOR_DELETE_FAILED",
+      originalReason: reason,
+      createdDevice: {
+        udid: UDID,
+        name: "Cindy iPhone",
+        deviceTypeIdentifier:
+          "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+      },
+    } satisfies Partial<IOSSimulatorCreateCleanupRequiredError>);
+    expect(run).toHaveBeenNthCalledWith(
+      2,
+      "/usr/bin/xcrun",
+      ["simctl", "delete", UDID],
+      { timeoutMs: 4_000 },
+    );
+  });
+
+  it("preserves an exact UUID when create times out and cleanup fails", async () => {
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, args) =>
+        args[1] === "create"
+          ? { stdout: `${UDID}\n`, stderr: "", exitCode: null }
+          : { stdout: "", stderr: "delete failed", exitCode: 1 },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+    });
+
+    await expect(
+      lifecycle.createExact({
+        name: "Cindy iPhone",
+        deviceTypeIdentifier:
+          "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        runtimeIdentifier: "com.apple.CoreSimulator.SimRuntime.iOS-26-4",
+      }),
+    ).rejects.toMatchObject({
+      name: "IOSSimulatorCreateCleanupRequiredError",
+      code: "SIMULATOR_DELETE_FAILED",
+      originalReason: expect.objectContaining({
+        code: "SIMULATOR_CREATE_FAILED",
+      }),
+      createdDevice: expect.objectContaining({ udid: UDID }),
+    });
+    expect(run).toHaveBeenNthCalledWith(
+      2,
+      "/usr/bin/xcrun",
+      ["simctl", "delete", UDID],
+      { timeoutMs: 4_000 },
+    );
+  });
+
   it("rejects non-UUID mutation selectors before invoking simctl", async () => {
     const run = vi.fn();
     const lifecycle = createIOSSimulatorSimctlLifecycle({
@@ -297,101 +443,127 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     const lifecycle = createIOSSimulatorSimctlLifecycle({
       commandRunner: { run },
     });
+    const signal = new AbortController().signal;
 
-    await lifecycle.setAppearance?.(UDID, "dark");
-    await lifecycle.setLocation?.(UDID, 31.2304, 121.4737);
-    await lifecycle.startLocationRoute?.(UDID, {
-      waypoints: [
-        { latitude: 31.2304, longitude: 121.4737 },
-        { latitude: 31.233, longitude: 121.48 },
-      ],
-      speedMetersPerSecond: 12,
-      intervalSeconds: 2,
-    });
-    await lifecycle.clearLocation?.(UDID);
-    await lifecycle.setPrivacy?.(UDID, "grant", "photos", "com.example.app");
-    await lifecycle.setPrivacy?.(UDID, "reset", "all");
-    await lifecycle.pushNotification?.(UDID, "com.example.app", {
-      aps: { alert: "Hello" },
-    });
-    await lifecycle.setStatusBar?.(UDID, {
-      time: "9:41",
-      wifiBars: 3,
-      batteryLevel: 100,
-    });
-    await lifecycle.clearStatusBar?.(UDID);
-
-    expect(run).toHaveBeenNthCalledWith(1, "/usr/bin/xcrun", [
-      "simctl",
-      "ui",
+    await lifecycle.setAppearance?.(UDID, "dark", signal);
+    await lifecycle.setLocation?.(UDID, 31.2304, 121.4737, signal);
+    await lifecycle.startLocationRoute?.(
       UDID,
-      "appearance",
-      "dark",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(2, "/usr/bin/xcrun", [
-      "simctl",
-      "location",
-      UDID,
-      "set",
-      "31.2304,121.4737",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(3, "/usr/bin/xcrun", [
-      "simctl",
-      "location",
-      UDID,
-      "start",
-      "--speed=12",
-      "--interval=2",
-      "31.2304,121.4737",
-      "31.233,121.48",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(4, "/usr/bin/xcrun", [
-      "simctl",
-      "location",
-      UDID,
-      "clear",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(5, "/usr/bin/xcrun", [
-      "simctl",
-      "privacy",
+      {
+        waypoints: [
+          { latitude: 31.2304, longitude: 121.4737 },
+          { latitude: 31.233, longitude: 121.48 },
+        ],
+        speedMetersPerSecond: 12,
+        intervalSeconds: 2,
+      },
+      signal,
+    );
+    await lifecycle.clearLocation?.(UDID, signal);
+    await lifecycle.setPrivacy?.(
       UDID,
       "grant",
       "photos",
       "com.example.app",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(6, "/usr/bin/xcrun", [
-      "simctl",
-      "privacy",
+      signal,
+    );
+    await lifecycle.setPrivacy?.(UDID, "reset", "all", undefined, signal);
+    await lifecycle.pushNotification?.(
       UDID,
-      "reset",
-      "all",
-    ]);
+      "com.example.app",
+      {
+        aps: { alert: "Hello" },
+      },
+      signal,
+    );
+    await lifecycle.setStatusBar?.(
+      UDID,
+      {
+        time: "9:41",
+        wifiBars: 3,
+        batteryLevel: 100,
+      },
+      signal,
+    );
+    await lifecycle.clearStatusBar?.(UDID, signal);
+
+    expect(run).toHaveBeenNthCalledWith(
+      1,
+      "/usr/bin/xcrun",
+      ["simctl", "ui", UDID, "appearance", "dark"],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      2,
+      "/usr/bin/xcrun",
+      ["simctl", "location", UDID, "set", "31.2304,121.4737"],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      3,
+      "/usr/bin/xcrun",
+      [
+        "simctl",
+        "location",
+        UDID,
+        "start",
+        "--speed=12",
+        "--interval=2",
+        "31.2304,121.4737",
+        "31.233,121.48",
+      ],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      4,
+      "/usr/bin/xcrun",
+      ["simctl", "location", UDID, "clear"],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      5,
+      "/usr/bin/xcrun",
+      ["simctl", "privacy", UDID, "grant", "photos", "com.example.app"],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      6,
+      "/usr/bin/xcrun",
+      ["simctl", "privacy", UDID, "reset", "all"],
+      { signal },
+    );
     const pushCall = run.mock.calls[6];
     expect(pushCall?.[0]).toBe("/usr/bin/xcrun");
     expect(pushCall?.[1]).toEqual(
       expect.arrayContaining(["simctl", "push", UDID, "com.example.app"]),
     );
+    expect(pushCall?.[2]).toEqual({ signal });
     const payloadPath = pushCall?.[1]?.at(-1);
     expect(typeof payloadPath).toBe("string");
     await expect(access(String(payloadPath))).rejects.toThrow();
-    expect(run).toHaveBeenNthCalledWith(8, "/usr/bin/xcrun", [
-      "simctl",
-      "status_bar",
-      UDID,
-      "override",
-      "--time",
-      "9:41",
-      "--wifiBars",
-      "3",
-      "--batteryLevel",
-      "100",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(9, "/usr/bin/xcrun", [
-      "simctl",
-      "status_bar",
-      UDID,
-      "clear",
-    ]);
+    expect(run).toHaveBeenNthCalledWith(
+      8,
+      "/usr/bin/xcrun",
+      [
+        "simctl",
+        "status_bar",
+        UDID,
+        "override",
+        "--time",
+        "9:41",
+        "--wifiBars",
+        "3",
+        "--batteryLevel",
+        "100",
+      ],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      9,
+      "/usr/bin/xcrun",
+      ["simctl", "status_bar", UDID, "clear"],
+      { signal },
+    );
   });
 
   it("uses bounded argv for accessibility contrast and Dynamic Type controls", async () => {
@@ -403,24 +575,49 @@ describe("createIOSSimulatorSimctlLifecycle", () => {
     const lifecycle = createIOSSimulatorSimctlLifecycle({
       commandRunner: { run },
     });
+    const signal = new AbortController().signal;
 
-    await lifecycle.setIncreaseContrast?.(UDID, true);
-    await lifecycle.setContentSize?.(UDID, "accessibility-extra-large");
+    await lifecycle.setIncreaseContrast?.(UDID, true, signal);
+    await lifecycle.setContentSize?.(UDID, "accessibility-extra-large", signal);
 
-    expect(run).toHaveBeenNthCalledWith(1, "/usr/bin/xcrun", [
-      "simctl",
-      "ui",
-      UDID,
-      "increase_contrast",
-      "enabled",
-    ]);
-    expect(run).toHaveBeenNthCalledWith(2, "/usr/bin/xcrun", [
-      "simctl",
-      "ui",
-      UDID,
-      "content_size",
-      "accessibility-extra-large",
-    ]);
+    expect(run).toHaveBeenNthCalledWith(
+      1,
+      "/usr/bin/xcrun",
+      ["simctl", "ui", UDID, "increase_contrast", "enabled"],
+      { signal },
+    );
+    expect(run).toHaveBeenNthCalledWith(
+      2,
+      "/usr/bin/xcrun",
+      ["simctl", "ui", UDID, "content_size", "accessibility-extra-large"],
+      { signal },
+    );
+  });
+
+  it("preserves the abort reason for an active simulator control", async () => {
+    const controller = new AbortController();
+    const reason = new Error("control cancelled for exit");
+    let commandSignal: AbortSignal | undefined;
+    const run = vi.fn<IOSSimulatorCommandRunner["run"]>(
+      async (_command, _args, options) => {
+        commandSignal = options?.signal;
+        await new Promise<void>((resolve) => {
+          options?.signal?.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        return { stdout: "", stderr: "", exitCode: null };
+      },
+    );
+    const lifecycle = createIOSSimulatorSimctlLifecycle({
+      commandRunner: { run },
+    });
+
+    const changing = lifecycle.setAppearance?.(UDID, "dark", controller.signal);
+    await vi.waitFor(() => expect(commandSignal).toBe(controller.signal));
+    controller.abort(reason);
+
+    await expect(changing).rejects.toBe(reason);
   });
 
   it("rejects invalid location and privacy arguments before invoking simctl", async () => {

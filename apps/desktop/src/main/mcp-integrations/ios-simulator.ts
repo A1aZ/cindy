@@ -2201,8 +2201,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       const released = await actor.runOwnershipCleanup(
         instance.instanceId,
         instance.sessionId,
-        (owned, signal) =>
-          releaseStaleBinding(owned, device, true, signal),
+        (owned, signal) => releaseStaleBinding(owned, device, true, signal),
       );
       return released && complete;
     }
@@ -2388,18 +2387,22 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
 
   async function readDriverViewport(
     running: WdaRunningInstance,
+    signal?: AbortSignal,
   ): Promise<IOSSimulatorPublicViewport> {
     const [size, orientation] = await Promise.all([
-      running.driver.getWindowSize(running.driverSessionId),
-      running.driver.getOrientation(running.driverSessionId),
+      running.driver.getWindowSize(running.driverSessionId, signal),
+      running.driver.getOrientation(running.driverSessionId, signal),
     ]);
     const viewport = { ...size, orientation };
     driverViewports.set(running.instanceId, viewport);
     return viewport;
   }
 
-  async function readViewport(running: WdaRunningInstance): Promise<IOSSimulatorPublicViewport> {
-    const driverViewport = await readDriverViewport(running);
+  async function readViewport(
+    running: WdaRunningInstance,
+    signal?: AbortSignal,
+  ): Promise<IOSSimulatorPublicViewport> {
+    const driverViewport = await readDriverViewport(running, signal);
     const viewport = displayedViewport(
       driverViewport,
       viewerOrientationOverrides.get(running.instanceId) ?? driverViewport.orientation,
@@ -2408,7 +2411,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     return viewport;
   }
 
-  async function currentViewports(running: WdaRunningInstance): Promise<{
+  async function currentViewports(
+    running: WdaRunningInstance,
+    signal?: AbortSignal,
+  ): Promise<{
     viewer: IOSSimulatorPublicViewport;
     driver: IOSSimulatorPublicViewport;
   }> {
@@ -2417,7 +2423,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (cachedViewer && cachedDriver) {
       return { viewer: cachedViewer, driver: cachedDriver };
     }
-    const viewer = await readViewport(running);
+    const viewer = await readViewport(running, signal);
     return {
       viewer,
       driver: driverViewports.get(running.instanceId) ?? viewer,
@@ -2951,10 +2957,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   ): Promise<T> {
     assertHostActive();
     const sessionAdmissionEpoch = sessionOperationAdmissionEpochs.get(route.sessionId) ?? 0;
-    const instanceAdmissionEpoch = captureInstanceOperationAdmission(
-      route.instanceId,
-      'operation',
-    );
+    const instanceAdmissionEpoch = captureInstanceOperationAdmission(route.instanceId, 'operation');
     return actor.runMutation(
       route,
       async (instance, signal) => {
@@ -2964,22 +2967,26 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           sessionAdmissionEpoch,
           'simulator operation',
         );
-        assertInstanceOperationAdmission(
-          instance.instanceId,
-          instanceAdmissionEpoch,
-          'operation',
-        );
-        const result = await task(instance, signal);
+        assertInstanceOperationAdmission(instance.instanceId, instanceAdmissionEpoch, 'operation');
+        let result: T;
+        try {
+          result = await task(instance, signal);
+        } catch (error) {
+          if (signal.aborted) {
+            throw new IOSSimulatorInstanceError(
+              'MUTATION_CANCELLED',
+              'The simulator operation was cancelled because its lifecycle changed.',
+              true,
+            );
+          }
+          throw error;
+        }
         assertSessionOperationAdmission(
           instance.sessionId,
           sessionAdmissionEpoch,
           'simulator operation',
         );
-        assertInstanceOperationAdmission(
-          instance.instanceId,
-          instanceAdmissionEpoch,
-          'operation',
-        );
+        assertInstanceOperationAdmission(instance.instanceId, instanceAdmissionEpoch, 'operation');
         assertHostActive();
         return result;
       },
@@ -3197,11 +3204,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     const normalizedSessionId = sessionId.trim();
     // Register ordering before the first await, but never allocate state for a
     // renderer-supplied instance id that is not owned by this exact task.
-    if (
-      !actor
-        .list(normalizedSessionId)
-        .some((instance) => instance.instanceId === instanceId)
-    ) {
+    if (!actor.list(normalizedSessionId).some((instance) => instance.instanceId === instanceId)) {
       return { intent: null, ignored: false };
     }
     const normalizedViewerToken = viewerToken ?? null;
@@ -4698,7 +4701,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'orientation must be PORTRAIT or LANDSCAPE',
             );
           }
-          const rotation = await runHostMutation(route, context, async (instance) => {
+          const rotation = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
@@ -4707,9 +4710,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             let mode: 'device' | 'viewer' = 'device';
             let viewport: IOSSimulatorPublicViewport;
             try {
-              await running.driver.setOrientation(orientation, running.driverSessionId);
+              await running.driver.setOrientation(orientation, running.driverSessionId, signal);
               clearViewerOrientationOverride(instance.instanceId);
-              viewport = await readViewport(running);
+              viewport = await readViewport(running, signal);
             } catch (error) {
               const nativeDriver =
                 viewerEncodings.get(instance.instanceId) === 'h264'
@@ -4723,7 +4726,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 throw error;
               }
               const driverViewport =
-                driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+                driverViewports.get(instance.instanceId) ??
+                (await readDriverViewport(running, signal));
               const fallbackProfile = streamProfiles.get(instance.instanceId) ?? {
                 framesPerSecond: 5,
                 jpegQuality: 25,
@@ -4797,7 +4801,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'appearance must be light or dark',
             );
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setAppearance) {
               throw new IOSSimulatorInstanceError(
@@ -4805,7 +4809,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator appearance control is unavailable on this host.',
               );
             }
-            await lifecycle.setAppearance(instance.simulatorUdid, appearance);
+            await lifecycle.setAppearance(instance.simulatorUdid, appearance, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'set_appearance', appearance } };
@@ -4816,7 +4820,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           if (typeof enabled !== 'boolean') {
             throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'enabled must be a boolean');
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setIncreaseContrast) {
               throw new IOSSimulatorInstanceError(
@@ -4824,7 +4828,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator Increase Contrast control is unavailable on this host.',
               );
             }
-            await lifecycle.setIncreaseContrast(instance.simulatorUdid, enabled);
+            await lifecycle.setIncreaseContrast(instance.simulatorUdid, enabled, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'set_increase_contrast', enabled } };
@@ -4849,7 +4853,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           if (!validContentSizes.has(contentSize)) {
             throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'contentSize is invalid');
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setContentSize) {
               throw new IOSSimulatorInstanceError(
@@ -4857,7 +4861,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator Dynamic Type control is unavailable on this host.',
               );
             }
-            await lifecycle.setContentSize(instance.simulatorUdid, contentSize);
+            await lifecycle.setContentSize(instance.simulatorUdid, contentSize, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'set_content_size', contentSize } };
@@ -4866,7 +4870,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const route = readMutationRoute(sessionId, args);
           const latitude = readBoundedFinite(args, 'latitude', -90, 90);
           const longitude = readBoundedFinite(args, 'longitude', -180, 180);
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setLocation) {
               throw new IOSSimulatorInstanceError(
@@ -4874,7 +4878,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator location control is unavailable on this host.',
               );
             }
-            await lifecycle.setLocation(instance.simulatorUdid, latitude, longitude);
+            await lifecycle.setLocation(instance.simulatorUdid, latitude, longitude, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'set_location', latitude, longitude } };
@@ -4919,7 +4923,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               'intervalSeconds and distanceMeters cannot be used together',
             );
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.startLocationRoute) {
               throw new IOSSimulatorInstanceError(
@@ -4927,12 +4931,16 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator location route control is unavailable on this host.',
               );
             }
-            await lifecycle.startLocationRoute(instance.simulatorUdid, {
-              waypoints,
-              speedMetersPerSecond,
-              intervalSeconds,
-              distanceMeters,
-            } satisfies IOSSimulatorLocationRouteOptions);
+            await lifecycle.startLocationRoute(
+              instance.simulatorUdid,
+              {
+                waypoints,
+                speedMetersPerSecond,
+                intervalSeconds,
+                distanceMeters,
+              } satisfies IOSSimulatorLocationRouteOptions,
+              signal,
+            );
             screenMaps.invalidate(instance.instanceId);
           });
           return {
@@ -4942,7 +4950,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (name === 'clear_location') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.clearLocation) {
               throw new IOSSimulatorInstanceError(
@@ -4950,7 +4958,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator location control is unavailable on this host.',
               );
             }
-            await lifecycle.clearLocation(instance.simulatorUdid);
+            await lifecycle.clearLocation(instance.simulatorUdid, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'clear_location' } };
@@ -4966,7 +4974,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           if (!/^[a-z][a-z0-9-]{0,63}$/.test(service)) {
             throw new IOSSimulatorInstanceError('INVALID_ARGUMENT', 'privacy service is invalid');
           }
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setPrivacy) {
               throw new IOSSimulatorInstanceError(
@@ -4979,6 +4987,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               action as 'grant' | 'revoke' | 'reset',
               service,
               bundleId,
+              signal,
             );
             screenMaps.invalidate(instance.instanceId);
           });
@@ -4991,7 +5000,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const route = readMutationRoute(sessionId, args);
           const bundleId = readString(args, 'bundleId');
           const payload = readObject(args, 'payload');
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.pushNotification) {
               throw new IOSSimulatorInstanceError(
@@ -4999,7 +5008,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator push notification control is unavailable on this host.',
               );
             }
-            await lifecycle.pushNotification(instance.simulatorUdid, bundleId, payload);
+            await lifecycle.pushNotification(instance.simulatorUdid, bundleId, payload, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return {
@@ -5020,7 +5029,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             ...(typeof args.batteryState === 'string' ? { batteryState: args.batteryState } : {}),
             ...(typeof args.batteryLevel === 'number' ? { batteryLevel: args.batteryLevel } : {}),
           } as IOSSimulatorStatusBarOverrides;
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.setStatusBar) {
               throw new IOSSimulatorInstanceError(
@@ -5028,14 +5037,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator status-bar control is unavailable on this host.',
               );
             }
-            await lifecycle.setStatusBar(instance.simulatorUdid, overrides);
+            await lifecycle.setStatusBar(instance.simulatorUdid, overrides, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'set_status_bar', overrides } };
         }
         if (name === 'clear_status_bar') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             if (!lifecycle.clearStatusBar) {
               throw new IOSSimulatorInstanceError(
@@ -5043,23 +5052,23 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 'Simulator status-bar control is unavailable on this host.',
               );
             }
-            await lifecycle.clearStatusBar(instance.simulatorUdid);
+            await lifecycle.clearStatusBar(instance.simulatorUdid, signal);
             screenMaps.invalidate(instance.instanceId);
           });
           return { ok: true, data: { interaction: 'clear_status_bar' } };
         }
         if (name === 'lock_screen' || name === 'unlock_screen') {
           const route = readMutationRoute(sessionId, args);
-          await runHostMutation(route, context, async (instance) => {
+          await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             if (context?.origin !== 'user') {
               requireAgentInteractionSnapshot(instance, args);
             }
             if (name === 'lock_screen') {
-              await running.driver.lock(running.driverSessionId);
+              await running.driver.lock(running.driverSessionId, signal);
             } else {
-              await running.driver.unlock(running.driverSessionId);
+              await running.driver.unlock(running.driverSessionId, signal);
             }
             screenMaps.invalidate(instance.instanceId);
           });
@@ -5752,6 +5761,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     cancelSessionOperations(sessionId) {
       const normalizedSessionId = sessionId.trim();
       return Promise.all([
+        actor.cancelLifecycleStartsForSession(normalizedSessionId),
         actor.cancelMutationsForSession(normalizedSessionId),
         cancelSessionBuildsAndRecordings(normalizedSessionId),
       ]).then(() => undefined);

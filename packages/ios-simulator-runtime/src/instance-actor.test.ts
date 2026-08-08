@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { IOSSimulatorInstanceActor } from "./instance-actor.js";
 import { IOSSimulatorOwnershipStore } from "./ownership-store.js";
-import type { IOSSimulatorSimctlLifecycle } from "./simctl-lifecycle.js";
+import {
+  IOSSimulatorCreateCleanupRequiredError,
+  type IOSSimulatorSimctlLifecycle,
+} from "./simctl-lifecycle.js";
 import type { IOSSimulatorDevice } from "./types.js";
 
 const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
@@ -399,7 +402,9 @@ describe("IOSSimulatorInstanceActor", () => {
     const stopping = harness.actor.stop(harness.route());
     expect(activeSignal?.aborted).toBe(true);
     await expect(active).rejects.toMatchObject({ code: "MUTATION_CANCELLED" });
-    await expect(stopping).resolves.toMatchObject({ lifecycleState: "stopped" });
+    await expect(stopping).resolves.toMatchObject({
+      lifecycleState: "stopped",
+    });
   });
 
   it("cancels an active user mutation through the force-exit seam", async () => {
@@ -876,16 +881,395 @@ describe("IOSSimulatorInstanceActor", () => {
       templateDevice: DEVICE,
     });
 
-    expect(harness.lifecycle.createExact).toHaveBeenCalledWith({
-      name: "Cindy iPhone",
-      runtimeIdentifier: DEVICE.runtimeIdentifier,
-      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier,
-    });
+    expect(harness.lifecycle.createExact).toHaveBeenCalledWith(
+      {
+        name: "Cindy iPhone",
+        runtimeIdentifier: DEVICE.runtimeIdentifier,
+        deviceTypeIdentifier: DEVICE.deviceTypeIdentifier,
+      },
+      expect.any(AbortSignal),
+    );
     expect(created).toMatchObject({
       simulatorUdid: createdUdid,
       creationProvenance: "cindy",
       lifecycleState: "stopped",
     });
+  });
+
+  it("cancels and rolls back an in-flight create by owning session", async () => {
+    const harness = createHarness();
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    let createSignal: AbortSignal | undefined;
+    let resolveCreate: (created: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    vi.mocked(harness.lifecycle.createExact).mockImplementationOnce(
+      (_input, signal) =>
+        new Promise((resolve) => {
+          createSignal = signal;
+          resolveCreate = resolve;
+        }),
+    );
+
+    const creating = harness.actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: "Cindy iPhone",
+      templateDevice: DEVICE,
+    });
+    await vi.waitFor(() => expect(createSignal).toBeDefined());
+
+    await harness.actor.cancelLifecycleStartsForSession("another-session");
+    expect(createSignal?.aborted).toBe(false);
+    const cancelling =
+      harness.actor.cancelLifecycleStartsForSession("session-a");
+    expect(createSignal?.aborted).toBe(true);
+    let drained = false;
+    void cancelling.then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    resolveCreate({
+      udid: createdUdid,
+      name: "Cindy iPhone",
+      runtimeIdentifier: DEVICE.runtimeIdentifier,
+      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+    });
+
+    await expect(creating).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    await expect(cancelling).resolves.toBeUndefined();
+    expect(harness.lifecycle.deleteExact).toHaveBeenCalledWith(
+      createdUdid,
+      expect.any(AbortSignal),
+    );
+    expect(
+      harness.actor
+        .listAll()
+        .some((instance) => instance.simulatorUdid === createdUdid),
+    ).toBe(false);
+  });
+
+  it("does not delete a newly created device that another session attached first", async () => {
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const createdDevice = {
+      ...DEVICE,
+      udid: createdUdid,
+      name: "Cindy iPhone",
+    };
+    let resolveCreate: (created: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => createdDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(
+        () =>
+          new Promise<
+            Awaited<ReturnType<IOSSimulatorSimctlLifecycle["createExact"]>>
+          >((resolve) => {
+            resolveCreate = resolve;
+          }),
+      ),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      lifecycle,
+      store: new IOSSimulatorOwnershipStore({ maxInstancesPerSession: 2 }),
+    });
+
+    const creating = actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: createdDevice.name,
+      templateDevice: DEVICE,
+    });
+    await vi.waitFor(() =>
+      expect(lifecycle.createExact).toHaveBeenCalledOnce(),
+    );
+    const attachedElsewhere = await actor.attachSerialized({
+      sessionId: "session-b",
+      worktreeRoot: "/tmp/session-b",
+      sourceFingerprint: "def",
+      device: createdDevice,
+    });
+    resolveCreate({
+      udid: createdUdid,
+      name: createdDevice.name,
+      runtimeIdentifier: DEVICE.runtimeIdentifier,
+      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+    });
+
+    await expect(creating).rejects.toMatchObject({
+      code: "SIMULATOR_ATTACHED_ELSEWHERE",
+    });
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+    expect(
+      actor.getOwned("session-b", attachedElsewhere.instanceId),
+    ).toMatchObject({
+      simulatorUdid: createdUdid,
+    });
+  });
+
+  it("rejects a stale attach queued behind created-device rollback", async () => {
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const createdDevice = {
+      ...DEVICE,
+      udid: createdUdid,
+      name: "Cindy iPhone",
+    };
+    let createSignal: AbortSignal | undefined;
+    let resolveCreate: (created: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    let resolveDelete: () => void = () => undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => null),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(
+        (_input, signal) =>
+          new Promise<
+            Awaited<ReturnType<IOSSimulatorSimctlLifecycle["createExact"]>>
+          >((resolve) => {
+            createSignal = signal;
+            resolveCreate = resolve;
+          }),
+      ),
+      deleteExact: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDelete = resolve;
+          }),
+      ),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      lifecycle,
+      store: new IOSSimulatorOwnershipStore({ maxInstancesPerSession: 2 }),
+    });
+
+    const creating = actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: createdDevice.name,
+      templateDevice: DEVICE,
+    });
+    await vi.waitFor(() => expect(createSignal).toBeDefined());
+    const cancelling = actor.cancelLifecycleStartsForSession("session-a");
+    resolveCreate({
+      udid: createdUdid,
+      name: createdDevice.name,
+      runtimeIdentifier: DEVICE.runtimeIdentifier,
+      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+    });
+    await vi.waitFor(() =>
+      expect(lifecycle.deleteExact).toHaveBeenCalledOnce(),
+    );
+
+    const staleAttach = actor.attachSerialized({
+      sessionId: "session-b",
+      worktreeRoot: "/tmp/session-b",
+      sourceFingerprint: "def",
+      device: createdDevice,
+    });
+    resolveDelete();
+
+    await expect(creating).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    await expect(cancelling).resolves.toBeUndefined();
+    await expect(staleAttach).rejects.toMatchObject({
+      code: "SIMULATOR_NOT_FOUND",
+    });
+    expect(actor.listAll()).toEqual([]);
+  });
+
+  it("aborts an exact attach probe so exit can drain queued create rollback", async () => {
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const createdDevice = {
+      ...DEVICE,
+      udid: createdUdid,
+      name: "Cindy iPhone",
+    };
+    let findSignal: AbortSignal | undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(
+        (_udid, signal) =>
+          new Promise<
+            Awaited<ReturnType<IOSSimulatorSimctlLifecycle["findExact"]>>
+          >((_resolve, reject) => {
+            findSignal = signal;
+            signal?.addEventListener("abort", () => reject(signal.reason), {
+              once: true,
+            });
+          }),
+      ),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(async () => ({
+        udid: createdUdid,
+        name: createdDevice.name,
+        runtimeIdentifier: DEVICE.runtimeIdentifier,
+        deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+      })),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      lifecycle,
+      store: new IOSSimulatorOwnershipStore({ maxInstancesPerSession: 2 }),
+    });
+
+    const attaching = actor.attachSerialized({
+      sessionId: "session-b",
+      worktreeRoot: "/tmp/session-b",
+      sourceFingerprint: "def",
+      device: createdDevice,
+    });
+    await vi.waitFor(() => expect(findSignal).toBeDefined());
+    const creating = actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: createdDevice.name,
+      templateDevice: DEVICE,
+    });
+    await vi.waitFor(() =>
+      expect(lifecycle.createExact).toHaveBeenCalledOnce(),
+    );
+
+    actor.abortOperationsForExit();
+    const draining = actor.cancelAllLifecycleStarts();
+
+    expect(findSignal?.aborted).toBe(true);
+    await expect(attaching).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    await expect(creating).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    await expect(draining).resolves.toBeUndefined();
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(
+      createdUdid,
+      expect.any(AbortSignal),
+    );
+    expect(actor.listAll()).toEqual([]);
+  });
+
+  it("persists the exact created device when cancellation rollback fails", async () => {
+    const harness = createHarness();
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    let createSignal: AbortSignal | undefined;
+    let resolveCreate: (created: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    vi.mocked(harness.lifecycle.createExact).mockImplementationOnce(
+      (_input, signal) =>
+        new Promise((resolve) => {
+          createSignal = signal;
+          resolveCreate = resolve;
+        }),
+    );
+    vi.mocked(harness.lifecycle.deleteExact).mockRejectedValueOnce(
+      new Error("delete failed"),
+    );
+
+    const creating = harness.actor.create({
+      sessionId: "session-a",
+      worktreeRoot: "/tmp/session-a",
+      sourceFingerprint: "abc",
+      name: "Cindy iPhone",
+      templateDevice: DEVICE,
+    });
+    await vi.waitFor(() => expect(createSignal).toBeDefined());
+    const cancelling =
+      harness.actor.cancelLifecycleStartsForSession("session-a");
+    resolveCreate({
+      udid: createdUdid,
+      name: "Cindy iPhone",
+      runtimeIdentifier: DEVICE.runtimeIdentifier,
+      deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+    });
+
+    await expect(creating).rejects.toMatchObject({
+      code: "MUTATION_CANCELLED",
+    });
+    await expect(cancelling).resolves.toBeUndefined();
+    expect(
+      harness.actor
+        .listAll()
+        .find((instance) => instance.simulatorUdid === createdUdid),
+    ).toEqual(
+      expect.objectContaining({
+        sessionId: expect.stringMatching(/^__cindy_create_cleanup__:/),
+        creationProvenance: "cindy",
+        healthState: "degraded",
+        errorCode: "SIMULATOR_DELETE_FAILED",
+      }),
+    );
+  });
+
+  it("persists a timed-out created device without repeating spent cleanup", async () => {
+    const createdUdid = "2A9D41E0-E031-4AD0-A8B5-847480802E8E";
+    const createFailure = new Error("create timed out");
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(async () => {
+        throw new IOSSimulatorCreateCleanupRequiredError(
+          {
+            udid: createdUdid,
+            name: "Cindy iPhone",
+            runtimeIdentifier: DEVICE.runtimeIdentifier,
+            deviceTypeIdentifier: DEVICE.deviceTypeIdentifier!,
+          },
+          createFailure,
+        );
+      }),
+      deleteExact: vi.fn(async () => undefined),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      lifecycle,
+      store: new IOSSimulatorOwnershipStore(),
+    });
+
+    await expect(
+      actor.create({
+        sessionId: "session-a",
+        worktreeRoot: "/tmp/session-a",
+        sourceFingerprint: "abc",
+        name: "Cindy iPhone",
+        templateDevice: DEVICE,
+      }),
+    ).rejects.toBe(createFailure);
+    expect(lifecycle.deleteExact).not.toHaveBeenCalled();
+    expect(actor.listAll()).toEqual([
+      expect.objectContaining({
+        sessionId: expect.stringMatching(/^__cindy_create_cleanup__:/),
+        simulatorUdid: createdUdid,
+        healthState: "degraded",
+        errorCode: "SIMULATOR_DELETE_FAILED",
+      }),
+    ]);
   });
 
   it("deletes a newly created device when the ownership write fails after preflight", async () => {
@@ -923,7 +1307,10 @@ describe("IOSSimulatorInstanceActor", () => {
       }),
     ).rejects.toThrow("writer lease lost");
     expect(lifecycle.createExact).toHaveBeenCalledTimes(1);
-    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdUdid);
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(
+      createdUdid,
+      expect.any(AbortSignal),
+    );
     expect(actor.listAll()).toEqual([]);
   });
 

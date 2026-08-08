@@ -10,6 +10,7 @@ import type { IOSSimulatorCommandRunner, IOSSimulatorDevice } from "./types.js";
 
 const XCRUN = "/usr/bin/xcrun";
 const UUID_PATTERN = /^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/;
+const CREATE_ABORT_CLEANUP_TIMEOUT_MS = 4_000;
 
 export interface IOSSimulatorLifecycleClock {
   now(): number;
@@ -21,6 +22,27 @@ export interface IOSSimulatorSimctlLifecycleOptions {
   clock?: IOSSimulatorLifecycleClock;
   bootTimeoutMs?: number;
   pollIntervalMs?: number;
+}
+
+/**
+ * Carries the exact device identity when a failed or aborted `simctl create`
+ * produced a device but its immediate compensating delete also failed. The
+ * ownership actor can persist that identity for recovery instead of losing it.
+ */
+export class IOSSimulatorCreateCleanupRequiredError extends IOSSimulatorInstanceError {
+  constructor(
+    readonly createdDevice: IOSSimulatorCreatedDevice,
+    readonly originalReason: unknown,
+    options: { cause?: unknown } = {},
+  ) {
+    super(
+      "SIMULATOR_DELETE_FAILED",
+      "The simulator was created, but cancellation cleanup could not remove it.",
+      true,
+    );
+    this.name = "IOSSimulatorCreateCleanupRequiredError";
+    if (options.cause !== undefined) this.cause = options.cause;
+  }
 }
 
 export interface IOSSimulatorStatusBarOverrides {
@@ -79,52 +101,69 @@ export interface IOSSimulatorSimctlLifecycle {
   ): Promise<IOSSimulatorDevice | null>;
   bootExact(udid: string, signal?: AbortSignal): Promise<IOSSimulatorDevice>;
   shutdownExact(udid: string, signal?: AbortSignal): Promise<void>;
-  createExact(input: {
-    name: string;
-    deviceTypeIdentifier: string;
-    runtimeIdentifier: string;
-  }): Promise<IOSSimulatorCreatedDevice>;
+  createExact(
+    input: {
+      name: string;
+      deviceTypeIdentifier: string;
+      runtimeIdentifier: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<IOSSimulatorCreatedDevice>;
   deleteExact(udid: string, signal?: AbortSignal): Promise<void>;
   /** Set the simulated system appearance without bringing Simulator.app forward. */
-  setAppearance?(udid: string, appearance: "light" | "dark"): Promise<void>;
+  setAppearance?(
+    udid: string,
+    appearance: "light" | "dark",
+    signal?: AbortSignal,
+  ): Promise<void>;
   /** Enable or disable the simulated Increase Contrast accessibility setting. */
-  setIncreaseContrast?(udid: string, enabled: boolean): Promise<void>;
+  setIncreaseContrast?(
+    udid: string,
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<void>;
   /** Set the simulated Dynamic Type content-size category. */
   setContentSize?(
     udid: string,
     contentSize: IOSSimulatorContentSize,
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Set or clear the simulated device location. */
   setLocation?(
     udid: string,
     latitude: number,
     longitude: number,
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Start a bounded simulated route through explicit latitude/longitude waypoints. */
   startLocationRoute?(
     udid: string,
     options: IOSSimulatorLocationRouteOptions,
+    signal?: AbortSignal,
   ): Promise<void>;
-  clearLocation?(udid: string): Promise<void>;
+  clearLocation?(udid: string, signal?: AbortSignal): Promise<void>;
   /** Grant, revoke, or reset an app privacy permission. */
   setPrivacy?(
     udid: string,
     action: "grant" | "revoke" | "reset",
     service: string,
     bundleId?: string,
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Send one bounded APNs simulator payload through simctl. */
   pushNotification?(
     udid: string,
     bundleId: string,
     payload: Record<string, unknown>,
+    signal?: AbortSignal,
   ): Promise<void>;
   /** Set or clear deterministic status-bar overrides. */
   setStatusBar?(
     udid: string,
     overrides: IOSSimulatorStatusBarOverrides,
+    signal?: AbortSignal,
   ): Promise<void>;
-  clearStatusBar?(udid: string): Promise<void>;
+  clearStatusBar?(udid: string, signal?: AbortSignal): Promise<void>;
 }
 
 function requireUdid(value: string): string {
@@ -419,6 +458,28 @@ export function createIOSSimulatorSimctlLifecycle(
     );
   }
 
+  async function runSimctl(args: readonly string[], signal?: AbortSignal) {
+    throwIfAborted(signal);
+    const result = signal
+      ? await runner.run(XCRUN, args, { signal })
+      : await runner.run(XCRUN, args);
+    throwIfAborted(signal);
+    return result;
+  }
+
+  async function cleanupFailedCreate(udid: string): Promise<void> {
+    const result = await runner.run(XCRUN, ["simctl", "delete", udid], {
+      timeoutMs: CREATE_ABORT_CLEANUP_TIMEOUT_MS,
+    });
+    if (result.exitCode !== 0) {
+      throw new IOSSimulatorInstanceError(
+        "SIMULATOR_DELETE_FAILED",
+        "The simulator created during cancellation could not be removed.",
+        true,
+      );
+    }
+  }
+
   async function list(signal?: AbortSignal): Promise<IOSSimulatorDevice[]> {
     throwIfAborted(signal);
     const result = signal
@@ -565,7 +626,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async createExact(input): Promise<IOSSimulatorCreatedDevice> {
+    async createExact(input, signal): Promise<IOSSimulatorCreatedDevice> {
       const name = requireIdentifier(input.name, "name");
       const deviceTypeIdentifier = requireIdentifier(
         input.deviceTypeIdentifier,
@@ -575,18 +636,45 @@ export function createIOSSimulatorSimctlLifecycle(
         input.runtimeIdentifier,
         "runtimeIdentifier",
       );
+      throwIfAborted(signal);
       const result = await runner.run(
         XCRUN,
         ["simctl", "create", name, deviceTypeIdentifier, runtimeIdentifier],
-        { timeoutMs: 60_000 },
+        signal ? { timeoutMs: 60_000, signal } : { timeoutMs: 60_000 },
       );
       const udid = result.stdout.trim().toUpperCase();
-      if (result.exitCode !== 0 || !UUID_PATTERN.test(udid)) {
-        throw new IOSSimulatorInstanceError(
-          "SIMULATOR_CREATE_FAILED",
-          "The iOS Simulator device could not be created.",
-        );
+      const hasExactCreatedDevice = UUID_PATTERN.test(udid);
+      const createFailure =
+        result.exitCode !== 0 || !hasExactCreatedDevice
+          ? new IOSSimulatorInstanceError(
+              "SIMULATOR_CREATE_FAILED",
+              "The iOS Simulator device could not be created.",
+            )
+          : null;
+      if (hasExactCreatedDevice && (signal?.aborted || createFailure)) {
+        const createdDevice = {
+          udid,
+          name,
+          runtimeIdentifier,
+          deviceTypeIdentifier,
+        };
+        const originalReason = signal?.aborted ? signal.reason : createFailure;
+        try {
+          await cleanupFailedCreate(udid);
+        } catch (error) {
+          throw new IOSSimulatorCreateCleanupRequiredError(
+            createdDevice,
+            originalReason,
+            {
+              cause: error,
+            },
+          );
+        }
       }
+      if (signal?.aborted) {
+        throwIfAborted(signal);
+      }
+      if (createFailure) throw createFailure;
       return { udid, name, runtimeIdentifier, deviceTypeIdentifier };
     },
 
@@ -607,7 +695,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setAppearance(udid, appearance): Promise<void> {
+    async setAppearance(udid, appearance, signal): Promise<void> {
       const normalized = requireUdid(udid);
       if (appearance !== "light" && appearance !== "dark") {
         throw new IOSSimulatorInstanceError(
@@ -615,13 +703,10 @@ export function createIOSSimulatorSimctlLifecycle(
           "appearance must be light or dark",
         );
       }
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "ui",
-        normalized,
-        "appearance",
-        appearance,
-      ]);
+      const result = await runSimctl(
+        ["simctl", "ui", normalized, "appearance", appearance],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -631,7 +716,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setIncreaseContrast(udid, enabled): Promise<void> {
+    async setIncreaseContrast(udid, enabled, signal): Promise<void> {
       const normalized = requireUdid(udid);
       if (typeof enabled !== "boolean") {
         throw new IOSSimulatorInstanceError(
@@ -639,13 +724,16 @@ export function createIOSSimulatorSimctlLifecycle(
           "increase contrast enabled must be a boolean",
         );
       }
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "ui",
-        normalized,
-        "increase_contrast",
-        enabled ? "enabled" : "disabled",
-      ]);
+      const result = await runSimctl(
+        [
+          "simctl",
+          "ui",
+          normalized,
+          "increase_contrast",
+          enabled ? "enabled" : "disabled",
+        ],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -655,7 +743,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setContentSize(udid, contentSize): Promise<void> {
+    async setContentSize(udid, contentSize, signal): Promise<void> {
       const normalized = requireUdid(udid);
       if (!CONTENT_SIZES.has(contentSize)) {
         throw new IOSSimulatorInstanceError(
@@ -663,13 +751,10 @@ export function createIOSSimulatorSimctlLifecycle(
           "content size is invalid",
         );
       }
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "ui",
-        normalized,
-        "content_size",
-        contentSize,
-      ]);
+      const result = await runSimctl(
+        ["simctl", "ui", normalized, "content_size", contentSize],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -679,7 +764,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setLocation(udid, latitude, longitude): Promise<void> {
+    async setLocation(udid, latitude, longitude, signal): Promise<void> {
       const normalized = requireUdid(udid);
       if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90) {
         throw new IOSSimulatorInstanceError(
@@ -694,13 +779,10 @@ export function createIOSSimulatorSimctlLifecycle(
         );
       }
       const coordinate = `${latitude},${longitude}`;
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "location",
-        normalized,
-        "set",
-        coordinate,
-      ]);
+      const result = await runSimctl(
+        ["simctl", "location", normalized, "set", coordinate],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -710,7 +792,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async startLocationRoute(udid, options): Promise<void> {
+    async startLocationRoute(udid, options, signal): Promise<void> {
       const normalized = requireUdid(udid);
       const route = requireLocationRoute(options);
       const args = ["simctl", "location", normalized, "start"];
@@ -727,7 +809,7 @@ export function createIOSSimulatorSimctlLifecycle(
           (waypoint) => `${waypoint.latitude},${waypoint.longitude}`,
         ),
       );
-      const result = await runner.run(XCRUN, args);
+      const result = await runSimctl(args, signal);
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -737,14 +819,12 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async clearLocation(udid): Promise<void> {
+    async clearLocation(udid, signal): Promise<void> {
       const normalized = requireUdid(udid);
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "location",
-        normalized,
-        "clear",
-      ]);
+      const result = await runSimctl(
+        ["simctl", "location", normalized, "clear"],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -754,7 +834,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setPrivacy(udid, action, service, bundleId): Promise<void> {
+    async setPrivacy(udid, action, service, bundleId, signal): Promise<void> {
       const normalized = requireUdid(udid);
       if (!["grant", "revoke", "reset"].includes(action)) {
         throw new IOSSimulatorInstanceError(
@@ -782,7 +862,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
       const args = ["simctl", "privacy", normalized, action, service];
       if (bundleId) args.push(bundleId);
-      const result = await runner.run(XCRUN, args);
+      const result = await runSimctl(args, signal);
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -792,7 +872,7 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async pushNotification(udid, bundleId, payload): Promise<void> {
+    async pushNotification(udid, bundleId, payload, signal): Promise<void> {
       const normalized = requireUdid(udid);
       const normalizedBundleId = requireBundleId(bundleId);
       if (
@@ -821,20 +901,22 @@ export function createIOSSimulatorSimctlLifecycle(
           "push payload must be at most 4096 bytes",
         );
       }
+      throwIfAborted(signal);
       const tempRoot = await mkdtemp(path.join(os.tmpdir(), "cindy-ios-push-"));
       const payloadPath = path.join(tempRoot, "payload.json");
       try {
-        await writeFile(payloadPath, serialized, {
-          encoding: "utf8",
-          mode: 0o600,
-        });
-        const result = await runner.run(XCRUN, [
-          "simctl",
-          "push",
-          normalized,
-          normalizedBundleId,
+        await writeFile(
           payloadPath,
-        ]);
+          serialized,
+          signal
+            ? { encoding: "utf8", mode: 0o600, signal }
+            : { encoding: "utf8", mode: 0o600 },
+        );
+        throwIfAborted(signal);
+        const result = await runSimctl(
+          ["simctl", "push", normalized, normalizedBundleId, payloadPath],
+          signal,
+        );
         if (result.exitCode !== 0) {
           throw new IOSSimulatorInstanceError(
             "SIMULATOR_CONTROL_FAILED",
@@ -847,16 +929,13 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async setStatusBar(udid, overrides): Promise<void> {
+    async setStatusBar(udid, overrides, signal): Promise<void> {
       const normalized = requireUdid(udid);
       const entries = requireStatusBarOverrides(overrides);
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "status_bar",
-        normalized,
-        "override",
-        ...entries.flat(),
-      ]);
+      const result = await runSimctl(
+        ["simctl", "status_bar", normalized, "override", ...entries.flat()],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",
@@ -866,14 +945,12 @@ export function createIOSSimulatorSimctlLifecycle(
       }
     },
 
-    async clearStatusBar(udid): Promise<void> {
+    async clearStatusBar(udid, signal): Promise<void> {
       const normalized = requireUdid(udid);
-      const result = await runner.run(XCRUN, [
-        "simctl",
-        "status_bar",
-        normalized,
-        "clear",
-      ]);
+      const result = await runSimctl(
+        ["simctl", "status_bar", normalized, "clear"],
+        signal,
+      );
       if (result.exitCode !== 0) {
         throw new IOSSimulatorInstanceError(
           "SIMULATOR_CONTROL_FAILED",

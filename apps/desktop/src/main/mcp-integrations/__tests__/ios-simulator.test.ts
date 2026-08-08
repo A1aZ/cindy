@@ -1021,10 +1021,7 @@ describe('iOS Simulator host', () => {
       device: { ...READY_REPORT.devices[0]!, state: 'Booted' },
     });
     const observeSessionLock = vi.fn();
-    const withSessionLock = async <T>(
-      sessionId: string,
-      task: () => Promise<T>,
-    ): Promise<T> => {
+    const withSessionLock = async <T>(sessionId: string, task: () => Promise<T>): Promise<T> => {
       observeSessionLock(sessionId, task);
       await lockGate;
       return task();
@@ -1046,10 +1043,7 @@ describe('iOS Simulator host', () => {
     releaseLock();
     await reconcile;
 
-    expect(observeSessionLock).toHaveBeenCalledWith(
-      'archived-then-restored',
-      expect.any(Function),
-    );
+    expect(observeSessionLock).toHaveBeenCalledWith('archived-then-restored', expect.any(Function));
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
     expect(lifecycle.deleteExact).not.toHaveBeenCalled();
     expect(actor.getOwned('archived-then-restored', instance.instanceId)).toMatchObject({
@@ -2239,7 +2233,15 @@ describe('iOS Simulator host', () => {
   });
 
   it('does not expose WDA endpoints or raw driver errors to callers', async () => {
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => READY_REPORT.devices[0]!),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
     const host = createIOSSimulatorHost({
+      lifecycle,
       runtime: { inspect: vi.fn(async () => READY_REPORT) },
       driverManager: {
         get: vi.fn(() => null),
@@ -2459,29 +2461,13 @@ describe('iOS Simulator host', () => {
     );
     await vi.waitFor(() => expect(probe).toHaveBeenCalledTimes(2));
     await expect(
-      host.setViewerVisibility(
-        'session-a',
-        route,
-        true,
-        'jpeg',
-        undefined,
-        17,
-        'viewer-current',
-      ),
+      host.setViewerVisibility('session-a', route, true, 'jpeg', undefined, 17, 'viewer-current'),
     ).resolves.toMatchObject({ ok: true });
     const hiddenCallsBeforeStaleClose = framePump.setVisible.mock.calls.filter(
       ([request]) => request.visible === false,
     ).length;
     await expect(
-      host.setViewerVisibility(
-        'session-a',
-        route,
-        false,
-        'jpeg',
-        undefined,
-        17,
-        'viewer-stale',
-      ),
+      host.setViewerVisibility('session-a', route, false, 'jpeg', undefined, 17, 'viewer-stale'),
     ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
     expect(
       framePump.setVisible.mock.calls.filter(([request]) => request.visible === false),
@@ -2493,15 +2479,7 @@ describe('iOS Simulator host', () => {
     });
 
     await expect(
-      host.setViewerVisibility(
-        'session-a',
-        route,
-        false,
-        'jpeg',
-        undefined,
-        17,
-        'viewer-current',
-      ),
+      host.setViewerVisibility('session-a', route, false, 'jpeg', undefined, 17, 'viewer-current'),
     ).resolves.toMatchObject({ ok: true });
     let resolveRevokedProbe: (value: WdaRunningInstance | null) => void = () => undefined;
     probe.mockImplementationOnce(
@@ -4089,11 +4067,159 @@ describe('iOS Simulator host', () => {
         },
       },
     });
-    expect(lifecycle.createExact).toHaveBeenCalledWith({
+    expect(lifecycle.createExact).toHaveBeenCalledWith(
+      {
+        name: 'Cindy iPhone',
+        runtimeIdentifier: templateDevice.runtimeIdentifier,
+        deviceTypeIdentifier: templateDevice.deviceTypeIdentifier,
+      },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('aborts and drains create_instance before Host disposal completes', async () => {
+    const createdUdid = '2A9D41E0-E031-4AD0-A8B5-847480802E8E';
+    let createSignal: AbortSignal | undefined;
+    let resolveCreate: (created: {
+      udid: string;
+      name: string;
+      runtimeIdentifier: string;
+      deviceTypeIdentifier: string;
+    }) => void = () => undefined;
+    let resolveDelete: () => void = () => undefined;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(
+        (_input, signal) =>
+          new Promise<Awaited<ReturnType<IOSSimulatorSimctlLifecycle['createExact']>>>(
+            (resolve) => {
+              createSignal = signal;
+              resolveCreate = resolve;
+            },
+          ),
+      ),
+      deleteExact: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDelete = resolve;
+          }),
+      ),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const templateDevice = {
+      ...READY_REPORT.devices[0]!,
+      deviceTypeIdentifier: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+    };
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: {
+        inspect: vi.fn(async () => ({ ...READY_REPORT, devices: [templateDevice] })),
+      },
+      getSession: vi.fn(async (id) => localSession(id)),
+      resolveWorktreeRoot: vi.fn(async (workDir) => workDir),
+    });
+
+    const call = host.callTool(
+      'create_instance',
+      { templateUdid: templateDevice.udid, name: 'Cindy iPhone' },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(createSignal).toBeDefined());
+
+    const disposing = host.dispose();
+    expect(createSignal?.aborted).toBe(true);
+    resolveCreate({
+      udid: createdUdid,
       name: 'Cindy iPhone',
       runtimeIdentifier: templateDevice.runtimeIdentifier,
       deviceTypeIdentifier: templateDevice.deviceTypeIdentifier,
     });
+    await vi.waitFor(() => expect(lifecycle.deleteExact).toHaveBeenCalledOnce());
+    let disposed = false;
+    void disposing.then(() => {
+      disposed = true;
+    });
+    await Promise.resolve();
+    expect(disposed).toBe(false);
+    resolveDelete();
+
+    await expect(call).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(disposing).resolves.toBeUndefined();
+    expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdUdid, expect.any(AbortSignal));
+    expect(actor.listAll()).toEqual([]);
+  });
+
+  it('forwards task cancellation to an active simulator control command', async () => {
+    let controlSignal: AbortSignal | undefined;
+    const bootedDevice = READY_REPORT.devices[0]!;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => bootedDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+      setAppearance: vi.fn(
+        (_udid, _appearance, signal) =>
+          new Promise<void>((_resolve, reject) => {
+            controlSignal = signal;
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'abc',
+      device: bootedDevice,
+    });
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('session-a', instance.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
+
+    const changing = host.callTool(
+      'set_appearance',
+      { ...route, appearance: 'dark' },
+      { sessionId: 'session-a', origin: 'user' },
+    );
+    await vi.waitFor(() => expect(controlSignal).toBeDefined());
+
+    const cancelling = host.cancelSessionOperations('session-a');
+    expect(controlSignal?.aborted).toBe(true);
+
+    await expect(changing).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cancelling).resolves.toBeUndefined();
+    expect(lifecycle.setAppearance).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      'dark',
+      controlSignal,
+    );
+    await host.dispose();
   });
 
   it('automatically authorizes the same agent session after attach for start', async () => {
@@ -4350,8 +4476,11 @@ describe('iOS Simulator host', () => {
     async (probeMode) => {
       const shutdownDevice = { ...READY_REPORT.devices[0]!, state: 'Shutdown' as const };
       const bootingDevice = { ...READY_REPORT.devices[0]!, state: 'Booting' as const };
+      let findExactCalls = 0;
       const lifecycle: IOSSimulatorSimctlLifecycle = {
         findExact: vi.fn(async () => {
+          findExactCalls += 1;
+          if (findExactCalls === 1) return shutdownDevice;
           if (probeMode === 'probe-error') throw new Error('simctl probe failed');
           return bootingDevice;
         }),
@@ -4844,7 +4973,7 @@ describe('iOS Simulator host', () => {
     });
     await expect(cleanup).resolves.toBeUndefined();
     expect(actor.list('session-a')).toEqual([]);
-    expect(lifecycle.findExact).toHaveBeenCalledWith(createdDevice.udid, expect.any(AbortSignal));
+    expect(lifecycle.findExact).not.toHaveBeenCalled();
     expect(lifecycle.shutdownExact).not.toHaveBeenCalled();
     expect(lifecycle.deleteExact).toHaveBeenCalledWith(createdDevice.udid, expect.any(AbortSignal));
   });
@@ -5773,39 +5902,69 @@ describe('iOS Simulator host', () => {
     await expect(
       host.callTool('clear_status_bar', route, { sessionId: 'session-a', origin: 'agent' }),
     ).resolves.toMatchObject({ ok: true, data: { interaction: 'clear_status_bar' } });
-    expect(lifecycle.setAppearance).toHaveBeenCalledWith(instance.simulatorUdid, 'dark');
-    expect(lifecycle.setIncreaseContrast).toHaveBeenCalledWith(instance.simulatorUdid, true);
+    expect(lifecycle.setAppearance).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      'dark',
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.setIncreaseContrast).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      true,
+      expect.any(AbortSignal),
+    );
     expect(lifecycle.setContentSize).toHaveBeenCalledWith(
       instance.simulatorUdid,
       'accessibility-extra-large',
+      expect.any(AbortSignal),
     );
-    expect(lifecycle.setLocation).toHaveBeenCalledWith(instance.simulatorUdid, 31.23, 121.47);
-    expect(lifecycle.startLocationRoute).toHaveBeenCalledWith(instance.simulatorUdid, {
-      waypoints: [
-        { latitude: 31.23, longitude: 121.47 },
-        { latitude: 31.24, longitude: 121.48 },
-      ],
-      speedMetersPerSecond: 8,
-      intervalSeconds: 1,
-      distanceMeters: undefined,
-    });
-    expect(lifecycle.clearLocation).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.setLocation).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      31.23,
+      121.47,
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.startLocationRoute).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      {
+        waypoints: [
+          { latitude: 31.23, longitude: 121.47 },
+          { latitude: 31.24, longitude: 121.48 },
+        ],
+        speedMetersPerSecond: 8,
+        intervalSeconds: 1,
+        distanceMeters: undefined,
+      },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.clearLocation).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     expect(lifecycle.setPrivacy).toHaveBeenCalledWith(
       instance.simulatorUdid,
       'grant',
       'photos',
       'com.example.app',
+      expect.any(AbortSignal),
     );
     expect(lifecycle.pushNotification).toHaveBeenCalledWith(
       instance.simulatorUdid,
       'com.example.app',
       { aps: { alert: 'Hi' } },
+      expect.any(AbortSignal),
     );
-    expect(lifecycle.setStatusBar).toHaveBeenCalledWith(instance.simulatorUdid, {
-      time: '9:41',
-      wifiBars: 3,
-    });
-    expect(lifecycle.clearStatusBar).toHaveBeenCalledWith(instance.simulatorUdid);
+    expect(lifecycle.setStatusBar).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      {
+        time: '9:41',
+        wifiBars: 3,
+      },
+      expect.any(AbortSignal),
+    );
+    expect(lifecycle.clearStatusBar).toHaveBeenCalledWith(
+      instance.simulatorUdid,
+      expect.any(AbortSignal),
+    );
     const refreshedScreenResult = await host.callTool('get_screen_map', route, {
       sessionId: 'session-a',
       origin: 'agent',
@@ -6174,7 +6333,11 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true, data: { orientation: 'LANDSCAPE' } });
-    expect(driver.setOrientation).toHaveBeenCalledWith('LANDSCAPE', 'wda-session');
+    expect(driver.setOrientation).toHaveBeenCalledWith(
+      'LANDSCAPE',
+      'wda-session',
+      expect.any(AbortSignal),
+    );
     driver.setOrientation.mockRejectedValueOnce(
       new WdaError(
         'ORIENTATION_UNSUPPORTED',
@@ -6199,8 +6362,8 @@ describe('iOS Simulator host', () => {
     await expect(
       host.callTool('unlock_screen', route, { sessionId: 'session-a', origin: 'user' }),
     ).resolves.toMatchObject({ ok: true });
-    expect(driver.lock).toHaveBeenCalledWith('wda-session');
-    expect(driver.unlock).toHaveBeenCalledWith('wda-session');
+    expect(driver.lock).toHaveBeenCalledWith('wda-session', expect.any(AbortSignal));
+    expect(driver.unlock).toHaveBeenCalledWith('wda-session', expect.any(AbortSignal));
     expect(driver.getAccessibilityTree).toHaveBeenCalledTimes(
       accessibilityCallsAfterNativeInteractions,
     );

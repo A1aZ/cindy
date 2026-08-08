@@ -26,6 +26,10 @@ import {
 } from "./source-provider.js";
 
 const MAX_LOG_BYTES = 256 * 1024;
+const WDA_INTERRUPT_GRACE_MS = 5_000;
+const WDA_TERMINATE_GRACE_MS = 1_000;
+const WDA_KILL_GRACE_MS = 500;
+const WDA_EXIT_POLL_MS = 25;
 
 export interface WdaManagedProcess {
   readonly pid: number;
@@ -33,6 +37,7 @@ export interface WdaManagedProcess {
     code: number | null;
     signal: NodeJS.Signals | null;
   }>;
+  isAlive(): boolean;
   kill(signal: NodeJS.Signals): void;
   onOutput(listener: (chunk: string) => void): () => void;
 }
@@ -102,6 +107,12 @@ interface InternalRunningInstance extends WdaRunningInstance {
 
 interface PendingWdaOperation {
   promise?: Promise<WdaRunningInstance>;
+}
+
+interface RetiringWdaProcess {
+  process: WdaManagedProcess;
+  simulatorUdid: string;
+  finalizing?: Promise<void>;
 }
 
 class BoundedLog {
@@ -191,6 +202,7 @@ export function createNodeWdaProcessLauncher(): WdaProcessLauncher {
       });
       if (!child.pid)
         throw new WdaError("LAUNCH_FAILED", "WDA process did not start");
+      const pid = child.pid;
       const listeners = new Set<(chunk: string) => void>();
       const publish = (chunk: Buffer) => {
         const text = chunk.toString("utf8");
@@ -198,16 +210,36 @@ export function createNodeWdaProcessLauncher(): WdaProcessLauncher {
       };
       child.stdout?.on("data", publish);
       child.stderr?.on("data", publish);
+      let leaderExited = false;
+      const exited = new Promise<{
+        code: number | null;
+        signal: NodeJS.Signals | null;
+      }>((resolve) => {
+        child.once("exit", (code, signal) => {
+          leaderExited = true;
+          resolve({ code, signal });
+        });
+        child.once("error", () => {
+          leaderExited = true;
+          resolve({ code: null, signal: null });
+        });
+      });
       return {
-        pid: child.pid,
-        exited: new Promise((resolve) => {
-          child.once("exit", (code, signal) => resolve({ code, signal }));
-          child.once("error", () => resolve({ code: null, signal: null }));
-        }),
+        pid,
+        exited,
+        isAlive() {
+          if (process.platform === "win32") return !leaderExited;
+          try {
+            process.kill(-pid, 0);
+            return true;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException | null)?.code === "EPERM";
+          }
+        },
         kill(signal) {
-          if (process.platform !== "win32" && child.pid) {
+          if (process.platform !== "win32") {
             try {
-              process.kill(-child.pid, signal);
+              process.kill(-pid, signal);
               return;
             } catch {
               // The group may have already exited; fall back to the direct
@@ -254,6 +286,7 @@ export class WdaProcessManager {
   readonly #running = new Map<string, InternalRunningInstance>();
   readonly #starting = new Map<string, PendingWdaOperation>();
   readonly #stopping = new Map<string, Promise<void>>();
+  readonly #retiring = new Map<string, RetiringWdaProcess>();
 
   constructor(options: WdaProcessManagerOptions) {
     this.#options = options;
@@ -324,6 +357,8 @@ export class WdaProcessManager {
   start(options: WdaStartOptions): Promise<WdaRunningInstance> {
     const stopping = this.#stopping.get(options.instanceId);
     if (stopping) return stopping.then(() => this.start(options));
+    const retiring = this.#retiring.get(options.instanceId);
+    if (retiring) return this.#resumeAfterRetiringProcess(options, retiring);
     const running = this.get(options.instanceId);
     if (running) return Promise.resolve(running);
     const pending = this.#starting.get(options.instanceId);
@@ -464,11 +499,16 @@ export class WdaProcessManager {
     }
     if (!health) {
       unsubscribeOutput();
-      process.kill("SIGINT");
-      throw new WdaError(
+      const failure = new WdaError(
         "START_TIMEOUT",
         "WebDriverAgent did not become ready in time",
       );
+      await this.#terminateProcessGroup(
+        options.instanceId,
+        options.simulatorUdid,
+        process,
+      );
+      throw failure;
     }
     let driverSessionId: string;
     try {
@@ -481,11 +521,16 @@ export class WdaProcessManager {
       });
     } catch (error) {
       unsubscribeOutput();
-      process.kill("SIGINT");
-      throw new WdaError(
+      const failure = new WdaError(
         "LAUNCH_FAILED",
         `WebDriverAgent session setup failed: ${error instanceof Error ? error.message : String(error)}`,
       );
+      await this.#terminateProcessGroup(
+        options.instanceId,
+        options.simulatorUdid,
+        process,
+      );
+      throw failure;
     }
     let nativeSidecar: IOSSimulatorNativeSidecarDriver | undefined;
     let nativeUnavailableReason: string | null = null;
@@ -551,9 +596,7 @@ export class WdaProcessManager {
     this.#running.set(options.instanceId, running);
     void process.exited.then(() => {
       if (this.#running.get(options.instanceId)?.pid === process.pid) {
-        unsubscribeOutput();
-        void nativeManager?.stop(options.instanceId).catch(() => undefined);
-        this.#running.delete(options.instanceId);
+        void this.stop(options.instanceId).catch(() => undefined);
       }
     });
     return this.get(options.instanceId)!;
@@ -581,6 +624,120 @@ export class WdaProcessManager {
     });
   }
 
+  #isProcessGroupAlive(process: WdaManagedProcess): boolean {
+    try {
+      return process.isAlive();
+    } catch {
+      // A failed liveness probe cannot prove that the process group is gone.
+      return true;
+    }
+  }
+
+  async #waitForProcessGroupExit(
+    process: WdaManagedProcess,
+    timeoutMs: number,
+  ): Promise<boolean> {
+    const deadline = this.#clock.now() + timeoutMs;
+    while (this.#isProcessGroupAlive(process)) {
+      const remaining = deadline - this.#clock.now();
+      if (remaining <= 0) return false;
+      await this.#clock.sleep(Math.min(WDA_EXIT_POLL_MS, remaining));
+    }
+    return true;
+  }
+
+  #rememberRetiringProcess(
+    instanceId: string,
+    simulatorUdid: string,
+    process: WdaManagedProcess,
+  ): void {
+    const retiring = { process, simulatorUdid };
+    this.#retiring.set(instanceId, retiring);
+    void process.exited
+      .then(() => this.#finalizeRetiringProcess(instanceId, retiring))
+      .catch(() => undefined);
+  }
+
+  async #finalizeRetiringProcess(
+    instanceId: string,
+    retiring: RetiringWdaProcess,
+  ): Promise<void> {
+    if (
+      this.#retiring.get(instanceId) !== retiring ||
+      this.#isProcessGroupAlive(retiring.process)
+    ) {
+      return;
+    }
+    retiring.finalizing ??= cleanupDetachedDiagnostics(
+      this.#options.cacheRoot,
+      retiring.simulatorUdid,
+    );
+    await retiring.finalizing;
+    if (
+      this.#retiring.get(instanceId) === retiring &&
+      !this.#isProcessGroupAlive(retiring.process)
+    ) {
+      this.#retiring.delete(instanceId);
+    }
+  }
+
+  async #terminateProcessGroup(
+    instanceId: string,
+    simulatorUdid: string,
+    process: WdaManagedProcess,
+  ): Promise<void> {
+    const stages: ReadonlyArray<{
+      signal: NodeJS.Signals;
+      graceMs: number;
+    }> = [
+      { signal: "SIGINT", graceMs: WDA_INTERRUPT_GRACE_MS },
+      { signal: "SIGTERM", graceMs: WDA_TERMINATE_GRACE_MS },
+      { signal: "SIGKILL", graceMs: WDA_KILL_GRACE_MS },
+    ];
+    for (const stage of stages) {
+      if (!this.#isProcessGroupAlive(process)) break;
+      try {
+        process.kill(stage.signal);
+      } catch {
+        // Exit observation remains authoritative; continue the bounded wait.
+      }
+      if (await this.#waitForProcessGroupExit(process, stage.graceMs)) break;
+    }
+    if (this.#isProcessGroupAlive(process)) {
+      this.#rememberRetiringProcess(instanceId, simulatorUdid, process);
+      throw new WdaError(
+        "TERMINATION_FAILED",
+        "WebDriverAgent process group did not terminate after SIGKILL",
+      );
+    }
+    const retiring = this.#retiring.get(instanceId);
+    if (retiring?.process === process) {
+      await this.#finalizeRetiringProcess(instanceId, retiring);
+    } else {
+      await cleanupDetachedDiagnostics(this.#options.cacheRoot, simulatorUdid);
+    }
+  }
+
+  async #resumeAfterRetiringProcess(
+    options: WdaStartOptions,
+    retiring: RetiringWdaProcess,
+  ): Promise<WdaRunningInstance> {
+    if (this.#isProcessGroupAlive(retiring.process)) {
+      throw new WdaError(
+        "TERMINATION_FAILED",
+        "A previous WebDriverAgent process group is still terminating",
+      );
+    }
+    await this.#finalizeRetiringProcess(options.instanceId, retiring);
+    if (this.#retiring.get(options.instanceId) === retiring) {
+      throw new WdaError(
+        "TERMINATION_FAILED",
+        "A previous WebDriverAgent process group cleanup is still pending",
+      );
+    }
+    return this.start(options);
+  }
+
   async stop(instanceId: string): Promise<void> {
     const existing = this.#stopping.get(instanceId);
     if (existing) return existing;
@@ -601,6 +758,14 @@ export class WdaProcessManager {
         .catch(() => undefined);
       await pending.promise?.catch(() => undefined);
     }
+    const retiring = this.#retiring.get(instanceId);
+    if (retiring) {
+      await this.#terminateProcessGroup(
+        instanceId,
+        retiring.simulatorUdid,
+        retiring.process,
+      );
+    }
     const running = this.#running.get(instanceId);
     if (!running) return;
     this.#running.delete(instanceId);
@@ -613,15 +778,10 @@ export class WdaProcessManager {
     } catch {
       // The XCTest process may already be gone; process shutdown remains authoritative.
     }
-    running.process.kill("SIGINT");
-    const exited = await Promise.race([
-      running.process.exited.then(() => true),
-      this.#clock.sleep(5_000).then(() => false),
-    ]);
-    if (!exited) running.process.kill("SIGTERM");
-    await cleanupDetachedDiagnostics(
-      this.#options.cacheRoot,
+    await this.#terminateProcessGroup(
+      instanceId,
       running.simulatorUdid,
+      running.process,
     );
   }
 }

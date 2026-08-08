@@ -24,6 +24,12 @@ import {
 const UDID = "1A9D41E0-E031-4AD0-A8B5-847480802E8E";
 const roots: string[] = [];
 
+interface HarnessOptions {
+  startTimeoutMs?: number;
+  leaderExitsOn?: readonly NodeJS.Signals[];
+  groupExitsOn?: readonly NodeJS.Signals[];
+}
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -32,6 +38,7 @@ afterEach(async () => {
 
 async function createHarness(
   nativeCapabilityProvider?: WdaProcessManagerOptions["nativeCapabilityProvider"],
+  harnessOptions: HarnessOptions = {},
 ) {
   const root = await mkdtemp(path.join(os.tmpdir(), "cindy-wda-manager-test-"));
   roots.push(root);
@@ -61,15 +68,35 @@ async function createHarness(
   let exitProcess:
     | ((value: { code: number | null; signal: NodeJS.Signals | null }) => void)
     | null = null;
+  let leaderExited = false;
+  let groupAlive = true;
   const killed: NodeJS.Signals[] = [];
+  const settleLeader = (signal: NodeJS.Signals | null) => {
+    if (leaderExited) return;
+    leaderExited = true;
+    exitProcess?.({ code: signal ? null : 0, signal });
+  };
+  const exitGroup = (signal: NodeJS.Signals | null = null) => {
+    groupAlive = false;
+    settleLeader(signal);
+  };
   const process: WdaManagedProcess = {
     pid: 42,
     exited: new Promise((resolve) => {
       exitProcess = resolve;
     }),
+    isAlive: vi.fn(() => groupAlive),
     kill: vi.fn((signal) => {
       killed.push(signal);
-      exitProcess?.({ code: 0, signal });
+      if (harnessOptions.leaderExitsOn?.includes(signal)) {
+        settleLeader(signal);
+      }
+      if (
+        harnessOptions.groupExitsOn === undefined ||
+        harnessOptions.groupExitsOn.includes(signal)
+      ) {
+        exitGroup(signal);
+      }
     }),
     onOutput: vi.fn(() => () => undefined),
   };
@@ -97,13 +124,14 @@ async function createHarness(
     deleteSession: vi.fn(async () => undefined),
   };
   let now = 1_000;
-  const ports = [18_100, 19_100];
+  const ports = [18_100, 19_100, 18_101, 19_101];
+  const launch = vi.fn(() => process);
   const manager = new WdaProcessManager({
     archivePath,
     cacheRoot: path.join(root, "cache"),
     sourceManifest: manifest,
     commandRunner: { run },
-    processLauncher: { launch: vi.fn(() => process) },
+    processLauncher: { launch },
     allocatePort: vi.fn(async () => ports.shift()!),
     createDriver: vi.fn(
       () => driver as unknown as IOSSimulatorAutomationDriver,
@@ -115,8 +143,18 @@ async function createHarness(
       },
     },
     nativeCapabilityProvider,
+    startTimeoutMs: harnessOptions.startTimeoutMs,
   });
-  return { manager, run, driver, process, killed };
+  return {
+    manager,
+    run,
+    driver,
+    process,
+    killed,
+    launch,
+    exitGroup,
+    exitLeader: settleLeader,
+  };
 }
 
 describe("WdaProcessManager", () => {
@@ -239,6 +277,176 @@ describe("WdaProcessManager", () => {
     expect(harness.manager.get("instance-a")).toBeNull();
     expect(harness.driver.deleteSession).toHaveBeenCalledWith("wda-session");
     expect(harness.killed).toEqual(["SIGINT"]);
+  });
+
+  it("awaits full process-group termination before returning a readiness timeout", async () => {
+    const harness = await createHarness(undefined, {
+      startTimeoutMs: 500,
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: ["SIGKILL"],
+    });
+    harness.driver.probe.mockRejectedValue(new Error("connection refused"));
+
+    await expect(
+      harness.manager.start({
+        instanceId: "instance-a",
+        simulatorUdid: UDID,
+        runtimeIdentifier: "runtime",
+        xcodeBuild: "build",
+        architecture: "arm64",
+      }),
+    ).rejects.toMatchObject({ code: "START_TIMEOUT" });
+
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(harness.process.isAlive()).toBe(false);
+  });
+
+  it("terminates the whole process group when WDA session setup fails", async () => {
+    const harness = await createHarness(undefined, {
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: ["SIGKILL"],
+    });
+    harness.driver.createSession.mockRejectedValue(new Error("session failed"));
+
+    await expect(
+      harness.manager.start({
+        instanceId: "instance-a",
+        simulatorUdid: UDID,
+        runtimeIdentifier: "runtime",
+        xcodeBuild: "build",
+        architecture: "arm64",
+      }),
+    ).rejects.toMatchObject({ code: "LAUNCH_FAILED" });
+
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(harness.process.isAlive()).toBe(false);
+  });
+
+  it("waits through stop escalation when the leader exits before its process group", async () => {
+    const harness = await createHarness(undefined, {
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: ["SIGKILL"],
+    });
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+
+    await harness.manager.stop("instance-a");
+
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(harness.process.isAlive()).toBe(false);
+    expect(harness.manager.get("instance-a")).toBeNull();
+  });
+
+  it("routes an unexpected leader exit through the process-group termination barrier", async () => {
+    const harness = await createHarness(undefined, {
+      groupExitsOn: ["SIGKILL"],
+    });
+    await harness.manager.start({
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64",
+    });
+
+    harness.exitLeader("SIGTERM");
+
+    await vi.waitFor(() => {
+      expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+      expect(harness.manager.get("instance-a")).toBeNull();
+    });
+    expect(harness.process.isAlive()).toBe(false);
+  });
+
+  it("quarantines an unkillable process group and blocks replacement starts", async () => {
+    const harness = await createHarness(undefined, {
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: [],
+    });
+    const input = {
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64" as const,
+    };
+    await harness.manager.start(input);
+
+    await expect(harness.manager.stop("instance-a")).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    await expect(harness.manager.start(input)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(harness.process.isAlive()).toBe(true);
+    expect(harness.launch).toHaveBeenCalledTimes(1);
+  });
+
+  it("quarantines an unkillable readiness-timeout group before retrying start", async () => {
+    const harness = await createHarness(undefined, {
+      startTimeoutMs: 500,
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: [],
+    });
+    harness.driver.probe.mockRejectedValue(new Error("connection refused"));
+    const input = {
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64" as const,
+    };
+
+    await expect(harness.manager.start(input)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+    await expect(harness.manager.start(input)).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+
+    expect(harness.killed).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
+    expect(harness.process.isAlive()).toBe(true);
+    expect(harness.launch).toHaveBeenCalledTimes(1);
+  });
+
+  it("cleans a retired process group before allowing a replacement start", async () => {
+    const harness = await createHarness(undefined, {
+      leaderExitsOn: ["SIGINT"],
+      groupExitsOn: [],
+    });
+    const input = {
+      instanceId: "instance-a",
+      simulatorUdid: UDID,
+      runtimeIdentifier: "runtime",
+      xcodeBuild: "build",
+      architecture: "arm64" as const,
+    };
+    await harness.manager.start(input);
+    await expect(harness.manager.stop("instance-a")).rejects.toMatchObject({
+      code: "TERMINATION_FAILED",
+    });
+
+    const replacement: WdaManagedProcess = {
+      pid: 43,
+      exited: new Promise(() => undefined),
+      isAlive: vi.fn(() => true),
+      kill: vi.fn(),
+      onOutput: vi.fn(() => () => undefined),
+    };
+    harness.launch.mockReturnValue(replacement);
+    harness.exitGroup();
+
+    const running = await harness.manager.start(input);
+
+    expect(running.pid).toBe(43);
+    expect(harness.launch).toHaveBeenCalledTimes(2);
   });
 
   it("attaches the optional native adapter by exact generation and stops it with WDA", async () => {

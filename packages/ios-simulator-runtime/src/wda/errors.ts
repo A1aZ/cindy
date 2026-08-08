@@ -12,6 +12,7 @@ export const WDA_ERROR_CODES = [
   "BUILD_FAILED",
   "LAUNCH_FAILED",
   "START_TIMEOUT",
+  "TERMINATION_FAILED",
 ] as const;
 
 export type WdaErrorCode = (typeof WDA_ERROR_CODES)[number];

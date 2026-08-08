@@ -53,6 +53,8 @@ export interface IOSSimulatorMobileMetroStatus {
   expectedSource: string;
   currentSourceOnExpectedPort: boolean;
   anyMetro: boolean;
+  targetSimulatorUdid: string;
+  targetBooted: boolean;
 }
 
 async function exists(candidate: string): Promise<boolean> {
@@ -491,12 +493,26 @@ export class IOSSimulatorProjectBuilder {
    */
   async validateLaunch(
     worktreeRoot: string,
+    simulatorUdid: string,
   ): Promise<IOSSimulatorMobileMetroStatus | null> {
     const project = await this.inspect(worktreeRoot);
     if (project.kind !== "cindy-mobile") return null;
+    const exactSimulatorUdid = simulatorUdid.trim().toUpperCase();
+    if (!/^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$/.test(exactSimulatorUdid)) {
+      throw new IOSSimulatorInstanceError(
+        "INVALID_ARGUMENT",
+        "simulatorUdid must be an exact simulator UUID",
+      );
+    }
     const result = await this.#runner.run(
       "pnpm",
-      ["mobile:sim:whoami", "--", "--json"],
+      [
+        "mobile:sim:whoami",
+        "--",
+        "--json",
+        "--udid",
+        exactSimulatorUdid,
+      ],
       {
         cwd: project.worktreeRoot,
         timeoutMs: 60_000,
@@ -518,7 +534,10 @@ export class IOSSimulatorProjectBuilder {
           Number.isSafeInteger(parsed.expectedPort) &&
           typeof parsed.expectedSource === "string" &&
           typeof parsed.currentSourceOnExpectedPort === "boolean" &&
-          typeof parsed.anyMetro === "boolean"
+          typeof parsed.anyMetro === "boolean" &&
+          parsed.targetSimulatorUdid?.trim().toUpperCase() ===
+            exactSimulatorUdid &&
+          parsed.targetBooted === true
         ) {
           status = parsed as IOSSimulatorMobileMetroStatus;
           break;
@@ -530,7 +549,7 @@ export class IOSSimulatorProjectBuilder {
     if (result.exitCode !== 0 || !status?.healthy) {
       throw new IOSSimulatorInstanceError(
         "METRO_NOT_READY",
-        "Cindy Mobile Metro 8081 is not owned by this worktree or its source fingerprint is stale.",
+        "Cindy Mobile is not installed on the target simulator, or Metro 8081 is not owned by this worktree or its source fingerprint is stale.",
         true,
       );
     }

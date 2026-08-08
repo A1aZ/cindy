@@ -18,6 +18,7 @@ import {
 import type { IOSSimulatorCommandRunner } from "./types.js";
 
 const roots: string[] = [];
+const SIMULATOR_UDID = "A1B2C3D4-E5F6-47A8-9B0C-D1E2F3A4B5C6";
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -62,6 +63,8 @@ describe("IOSSimulatorProjectBuilder", () => {
             expectedSource: "branch@commit",
             currentSourceOnExpectedPort: true,
             anyMetro: true,
+            targetSimulatorUdid: SIMULATOR_UDID,
+            targetBooted: true,
           })}\n`,
           stderr: "",
           exitCode: 0,
@@ -70,15 +73,75 @@ describe("IOSSimulatorProjectBuilder", () => {
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
-    await expect(builder.validateLaunch(root)).resolves.toMatchObject({
+    await expect(
+      builder.validateLaunch(root, SIMULATOR_UDID.toLowerCase()),
+    ).resolves.toMatchObject({
       healthy: true,
       expectedPort: 8081,
     });
     expect(run).toHaveBeenCalledWith(
       "pnpm",
-      ["mobile:sim:whoami", "--", "--json"],
+      [
+        "mobile:sim:whoami",
+        "--",
+        "--json",
+        "--udid",
+        SIMULATOR_UDID,
+      ],
       expect.objectContaining({ cwd: await realpath(root) }),
     );
+  });
+
+  it("rejects a non-exact Simulator target before launch validation", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-project-"));
+    roots.push(root);
+    const mobile = path.join(root, "apps", "mobile");
+    await mkdir(mobile, { recursive: true });
+    await writeFile(path.join(mobile, "app.config.js"), "export default {};");
+    await writeFile(
+      path.join(mobile, "package.json"),
+      JSON.stringify({ name: "mobile" }),
+    );
+    const run = vi.fn();
+    const builder = new IOSSimulatorProjectBuilder({ commandRunner: { run } });
+
+    await expect(builder.validateLaunch(root, "booted")).rejects.toMatchObject({
+      code: "INVALID_ARGUMENT",
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when whoami reports a different booted Simulator", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "cindy-project-"));
+    roots.push(root);
+    const mobile = path.join(root, "apps", "mobile");
+    await mkdir(mobile, { recursive: true });
+    await writeFile(path.join(mobile, "app.config.js"), "export default {};");
+    await writeFile(
+      path.join(mobile, "package.json"),
+      JSON.stringify({ name: "mobile" }),
+    );
+    const builder = new IOSSimulatorProjectBuilder({
+      commandRunner: {
+        run: vi.fn(async () => ({
+          stdout: JSON.stringify({
+            healthy: true,
+            expectedPort: 8081,
+            expectedSource: "branch@commit",
+            currentSourceOnExpectedPort: true,
+            anyMetro: true,
+            targetSimulatorUdid: "11111111-2222-4333-8444-555555555555",
+            targetBooted: true,
+          }),
+          stderr: "",
+          exitCode: 0,
+        })),
+      },
+    });
+
+    await expect(
+      builder.validateLaunch(root, SIMULATOR_UDID),
+    ).rejects.toMatchObject({ code: "METRO_NOT_READY" });
   });
 
   it("fails closed when Cindy Mobile Metro is missing or stale", async () => {
@@ -100,13 +163,17 @@ describe("IOSSimulatorProjectBuilder", () => {
             expectedSource: "branch@commit",
             currentSourceOnExpectedPort: false,
             anyMetro: false,
+            targetSimulatorUdid: SIMULATOR_UDID,
+            targetBooted: true,
           }),
           stderr: "",
           exitCode: 1,
         })),
       },
     });
-    await expect(builder.validateLaunch(root)).rejects.toMatchObject({
+    await expect(
+      builder.validateLaunch(root, SIMULATOR_UDID),
+    ).rejects.toMatchObject({
       code: "METRO_NOT_READY",
     });
   });

@@ -5725,6 +5725,8 @@ describe('iOS Simulator host', () => {
       expectedSource: 'branch@commit',
       currentSourceOnExpectedPort: true,
       anyMetro: true,
+      targetSimulatorUdid: READY_REPORT.devices[0]!.udid,
+      targetBooted: true,
     }));
     const projectBuilder: IOSSimulatorProjectBuilderAdapter = {
       build: buildProject,
@@ -5870,7 +5872,10 @@ describe('iOS Simulator host', () => {
         { sessionId: 'session-a', origin: 'user' },
       ),
     ).resolves.toMatchObject({ ok: true });
-    expect(validateLaunch).toHaveBeenCalledWith('/tmp/session-a');
+    expect(validateLaunch).toHaveBeenCalledWith(
+      '/tmp/session-a',
+      READY_REPORT.devices[0]!.udid,
+    );
     await host.callTool(
       'terminate_app',
       { ...route, artifactId: artifact.artifactId },

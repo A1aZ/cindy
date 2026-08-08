@@ -23,7 +23,10 @@ import {
   formatMobileLocalConfigStatus,
 } from "./lib/mobile-local-config.mjs";
 import {
+  bootedSimulatorLinesForTarget,
   extractSimMetroPortArgs,
+  extractSimWhoamiUdidArgs,
+  getSimulatorAppContainer,
   resolveMobileSimulatorBundleId,
 } from "./lib/sim-whoami.mjs";
 import {
@@ -44,7 +47,8 @@ function resolveTarget() {
   const { region, passthrough } = extractMobileDevRegionArgs(
     process.argv.slice(2).filter((arg) => arg !== "--json"),
   );
-  const portArgs = extractSimMetroPortArgs(passthrough);
+  const udidArgs = extractSimWhoamiUdidArgs(passthrough);
+  const portArgs = extractSimMetroPortArgs(udidArgs.passthrough);
   if (portArgs.passthrough.length > 0) {
     throw new Error(
       `mobile:sim:whoami 不支持参数: ${portArgs.passthrough.join(" ")}`,
@@ -53,6 +57,7 @@ function resolveTarget() {
   return {
     region,
     port: portArgs.port,
+    simulatorUdid: udidArgs.simulatorUdid,
     bundleId: resolveMobileSimulatorBundleId(region),
   };
 }
@@ -70,7 +75,7 @@ try {
   console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
   process.exit(1);
 }
-const { region, port: expectedPort, bundleId } = target;
+const { region, port: expectedPort, simulatorUdid, bundleId } = target;
 const ports = [...new Set([...PORTS, expectedPort])].sort((a, b) => a - b);
 const expectedSource = gitSourceIdentity(worktreeRoot);
 let healthy = true;
@@ -99,24 +104,26 @@ function shFile(command, args) {
 
 console.log(`==> Mobile dev region: ${region}`);
 console.log("==== booted 模拟器 ====");
-const booted = sh("xcrun simctl list devices booted")
-  .split("\n")
-  .filter((l) => /\(Booted\)/.test(l));
+const allBooted = sh("xcrun simctl list devices booted").split("\n");
+const booted = bootedSimulatorLinesForTarget(allBooted, null);
+const targetBooted = bootedSimulatorLinesForTarget(allBooted, simulatorUdid);
 if (booted.length === 0) {
   console.log("  (没有 booted 模拟器)");
   healthy = false;
 } else booted.forEach((l) => console.log("  " + l.trim()));
+if (simulatorUdid && targetBooted.length === 0) {
+  console.log(`  (目标模拟器 ${simulatorUdid} 未启动)`);
+  healthy = false;
+}
 
 console.log(`\n==== 模拟器里装的 ${bundleId}(native 安装包版本)====`);
-const container = shFile("xcrun", [
-  "simctl",
-  "get_app_container",
-  "booted",
-  bundleId,
-  "app",
-]);
+const container = getSimulatorAppContainer(shFile, simulatorUdid, bundleId);
 if (!container) {
-  console.log("  (未安装 / 无 booted 设备)");
+  console.log(
+    simulatorUdid
+      ? `  (目标模拟器 ${simulatorUdid} 未安装 / 未启动)`
+      : "  (未安装 / 无 booted 设备)",
+  );
   healthy = false;
 } else {
   const plist = `${container}/Info.plist`;
@@ -185,6 +192,8 @@ if (jsonOutput) {
       currentSourceOnExpectedPort,
       anyMetro,
       bootedCount: booted.length,
+      targetSimulatorUdid: simulatorUdid,
+      targetBooted: targetBooted.length === 1,
       bundleId,
     }),
   );

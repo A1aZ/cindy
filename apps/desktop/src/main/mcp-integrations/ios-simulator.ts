@@ -5035,7 +5035,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             requireControlGrant(instance, context);
             const stored = appArtifacts.get(artifactId);
             if (stored?.projectKind === 'cindy-mobile' && projectBuilder.validateLaunch) {
-              await projectBuilder.validateLaunch(stored.artifact.worktreeRoot);
+              await projectBuilder.validateLaunch(
+                stored.artifact.worktreeRoot,
+                instance.simulatorUdid,
+              );
             }
             await appLifecycle.launchExact(
               instance.simulatorUdid,

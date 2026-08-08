@@ -867,23 +867,36 @@ function containsShellConsumedLiteralBypass(command: string): boolean {
   return false;
 }
 
+function isLiteralXcrunBoundaryToken(token: string): boolean {
+  return /^[A-Za-z0-9_./:+-]+$/.test(token);
+}
+
 function hasUnresolvedXcrunTool(tokens: string[]): boolean {
   if (executableName(tokens[0]) !== 'xcrun') return false;
   let index = 1;
   while (index < tokens.length && tokens[index]!.startsWith('-')) {
     const option = tokens[index]!;
-    index +=
-      option === '--sdk' || option === '-sdk' || option === '--toolchain' || option === '-toolchain'
-        ? 2
-        : 1;
+    if (/^(?:--sdk|-sdk|--toolchain|-toolchain)=/.test(option)) {
+      const value = option.slice(option.indexOf('=') + 1);
+      if (!isLiteralXcrunBoundaryToken(value)) return true;
+      index += 1;
+      continue;
+    }
+    if (
+      option === '--sdk' ||
+      option === '-sdk' ||
+      option === '--toolchain' ||
+      option === '-toolchain'
+    ) {
+      const value = tokens[index + 1];
+      if (!value || !isLiteralXcrunBoundaryToken(value)) return true;
+      index += 2;
+      continue;
+    }
+    index += 1;
   }
   const firstToolToken = tokens[index] ?? '';
-  if (!/[$`*?\[]/.test(firstToolToken)) return false;
-  let end = index + 1;
-  if (firstToolToken.includes('$(') && !firstToolToken.includes(')')) {
-    while (end < tokens.length && !tokens[end - 1]!.includes(')')) end += 1;
-  }
-  return containsLiteralSimulatorExecutor(tokens.slice(index, end).join(' '));
+  return firstToolToken !== '' && !isLiteralXcrunBoundaryToken(firstToolToken);
 }
 
 /** Function bodies are executable later, so reject unsafe bodies at definition time. */

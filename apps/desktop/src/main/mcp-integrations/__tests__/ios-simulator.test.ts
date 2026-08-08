@@ -4393,6 +4393,80 @@ describe('iOS Simulator host', () => {
     await host.dispose();
   });
 
+  it('cancels active WDA snapshot reads with the owning task', async () => {
+    let snapshotSignal: AbortSignal | undefined;
+    const bootedDevice = READY_REPORT.devices[0]!;
+    const lifecycle: IOSSimulatorSimctlLifecycle = {
+      findExact: vi.fn(async () => bootedDevice),
+      bootExact: vi.fn(),
+      shutdownExact: vi.fn(),
+      createExact: vi.fn(),
+      deleteExact: vi.fn(),
+    };
+    const actor = new IOSSimulatorInstanceActor({
+      store: new IOSSimulatorOwnershipStore(),
+      lifecycle,
+    });
+    const instance = actor.attach({
+      sessionId: 'session-a',
+      worktreeRoot: '/tmp/session-a',
+      sourceFingerprint: 'abc',
+      device: bootedDevice,
+    });
+    const driver = {
+      getAccessibilityTree: vi.fn(
+        (_sessionId: string | undefined, signal?: AbortSignal) =>
+          new Promise<never>((_resolve, reject) => {
+            snapshotSignal = signal;
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+      ),
+      getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
+      getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+    };
+    const running = {
+      instanceId: instance.instanceId,
+      simulatorUdid: instance.simulatorUdid,
+      pid: 42,
+      driver,
+      driverSessionId: 'wda-session',
+    } as unknown as WdaRunningInstance;
+    const host = createIOSSimulatorHost({
+      actor,
+      lifecycle,
+      driverManager: {
+        get: vi.fn(() => running),
+        start: vi.fn(),
+        stop: vi.fn(async () => undefined),
+      },
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    await host.reconcileOwnership();
+    const current = actor.getOwned('session-a', instance.instanceId);
+    const route = {
+      instanceId: current.instanceId,
+      generation: current.generation,
+      leaseId: current.lease.id,
+    };
+
+    const reading = host.callTool('get_screen_map', route, {
+      sessionId: 'session-a',
+      origin: 'user',
+    });
+    await vi.waitFor(() => expect(snapshotSignal).toBeDefined());
+
+    const cancelling = host.cancelSessionOperations('session-a');
+    expect(snapshotSignal?.aborted).toBe(true);
+    await expect(reading).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MUTATION_CANCELLED',
+    });
+    await expect(cancelling).resolves.toBeUndefined();
+    expect(driver.getAccessibilityTree).toHaveBeenCalledWith('wda-session', snapshotSignal);
+    await host.dispose();
+  });
+
   it('automatically authorizes the same agent session after attach for start', async () => {
     const lifecycle: IOSSimulatorSimctlLifecycle = {
       findExact: vi.fn(),
@@ -5713,19 +5787,31 @@ describe('iOS Simulator host', () => {
     });
     const driver = {
       kind: 'wda' as const,
-      probe: vi.fn(async () => ({ ready: true, message: null })),
-      getAccessibilityTree: vi.fn(async () => ({
-        capturedAt: '2026-07-22T12:00:00.000Z',
-        tree: {
-          type: 'XCUIElementTypeButton',
-          label: 'Continue',
-          enabled: true,
-          visible: true,
-          rect: { x: 20, y: 40, width: 100, height: 40 },
-        },
-      })),
-      getWindowSize: vi.fn(async () => ({ width: 393, height: 852 })),
-      getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+      probe: vi.fn(async (...args: [signal?: AbortSignal]) => {
+        void args;
+        return { ready: true, message: null };
+      }),
+      getAccessibilityTree: vi.fn(async (...args: [sessionId?: string, signal?: AbortSignal]) => {
+        void args;
+        return {
+          capturedAt: '2026-07-22T12:00:00.000Z',
+          tree: {
+            type: 'XCUIElementTypeButton',
+            label: 'Continue',
+            enabled: true,
+            visible: true,
+            rect: { x: 20, y: 40, width: 100, height: 40 },
+          },
+        };
+      }),
+      getWindowSize: vi.fn(async (...args: [sessionId?: string, signal?: AbortSignal]) => {
+        void args;
+        return { width: 393, height: 852 };
+      }),
+      getOrientation: vi.fn(async (...args: [sessionId?: string, signal?: AbortSignal]) => {
+        void args;
+        return 'PORTRAIT' as const;
+      }),
       configureStream: vi.fn(
         async (
           ...args: [
@@ -5911,6 +5997,12 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { screenMap: { generation: instance.generation, elements: [{ label: 'Continue' }] } },
     });
+    expect(driver.getAccessibilityTree).toHaveBeenLastCalledWith(
+      'wda-session',
+      expect.any(AbortSignal),
+    );
+    expect(driver.getWindowSize).toHaveBeenLastCalledWith('wda-session', expect.any(AbortSignal));
+    expect(driver.getOrientation).toHaveBeenLastCalledWith('wda-session', expect.any(AbortSignal));
     const doctor = await host.callTool('doctor', {}, { sessionId: 'session-a', origin: 'agent' });
     expect(doctor).toMatchObject({
       ok: true,
@@ -5959,6 +6051,12 @@ describe('iOS Simulator host', () => {
         },
       },
     });
+    expect(driver.probe).toHaveBeenLastCalledWith(expect.any(AbortSignal));
+    expect(driver.getOrientation).toHaveBeenLastCalledWith('wda-session', expect.any(AbortSignal));
+    expect(driver.getAccessibilityTree).toHaveBeenLastCalledWith(
+      'wda-session',
+      expect.any(AbortSignal),
+    );
     expect(JSON.stringify(capturedState)).not.toContain('/Users/example');
     expect(JSON.stringify(capturedState)).not.toContain('SimulatorKit.framework');
     expect(JSON.stringify(capturedState)).not.toContain('private-value');

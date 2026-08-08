@@ -2558,8 +2558,9 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
   async function refreshInteractionSnapshot(
     instance: IOSSimulatorInstance,
     running: WdaRunningInstance,
+    signal?: AbortSignal,
   ) {
-    const snapshot = await running.driver.getAccessibilityTree(running.driverSessionId);
+    const snapshot = await running.driver.getAccessibilityTree(running.driverSessionId, signal);
     return screenMaps.capture({
       instanceId: instance.instanceId,
       generation: instance.generation,
@@ -2787,7 +2788,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
       baselineFingerprint = screenMapFingerprint(baseline);
     }
     while (true) {
-      const screenMap = await refreshInteractionSnapshot(input.instance, input.running);
+      const screenMap = await refreshInteractionSnapshot(
+        input.instance,
+        input.running,
+        input.signal,
+      );
       lastScreenMap = screenMap;
       const fingerprint = screenMapFingerprint(screenMap);
       const now = Date.now();
@@ -2845,7 +2850,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     if (mode === 'immediate') {
       return {
         mode,
-        screenMap: await refreshInteractionSnapshot(instance, running),
+        screenMap: await refreshInteractionSnapshot(instance, running, signal),
         stable: false,
         timedOut: false,
         elapsedMs: 0,
@@ -2881,7 +2886,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     const nativeInput = running.driverRouter?.continuousInput();
     if (nativeInput && durationMs >= 8) {
       const viewport =
-        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running, signal));
       await nativeInput.touchPath(nativeSwipePath(start, end, durationMs, viewport), signal);
       return 'native-hid';
     }
@@ -2899,7 +2904,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     const nativeInput = running.driverRouter?.continuousInput();
     if (nativeInput) {
       const viewport =
-        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+        driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running, signal));
       const normalized = normalizedPointFromViewport(point, viewport);
       await nativeInput.touchPath(
         [
@@ -3997,7 +4002,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 true,
               );
             }
-            const { viewer, driver } = await currentViewports(running);
+            const { viewer, driver } = await currentViewports(running, signal);
             assertCurrentViewer(resolved.sessionId, instance.instanceId, viewerWebContentsId);
             const driverPoint = pointFromViewer(
               { xRatio: touch.xRatio, yRatio: touch.yRatio },
@@ -4332,12 +4337,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (name === 'get_screen_map') {
           const route = readMutationRoute(sessionId, args);
-          const captured = await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             const [screenMap, viewport] = await Promise.all([
-              refreshInteractionSnapshot(instance, running),
-              context?.origin === 'user' ? readViewport(running) : readDriverViewport(running),
+              refreshInteractionSnapshot(instance, running, signal),
+              context?.origin === 'user'
+                ? readViewport(running, signal)
+                : readDriverViewport(running, signal),
             ]);
             return { screenMap, viewport };
           });
@@ -4366,14 +4373,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const route = readMutationRoute(sessionId, args);
           const maxViolations =
             args.maxViolations === undefined ? 200 : readPositiveInteger(args, 'maxViolations');
-          const captured = await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             const current = screenMaps.current(instance.instanceId);
             const screenMap =
               current?.generation === instance.generation
                 ? current
-                : await refreshInteractionSnapshot(instance, running);
+                : await refreshInteractionSnapshot(instance, running, signal);
             return {
               audit: auditIOSSimulatorScreenMap(screenMap, maxViolations),
             };
@@ -4391,10 +4398,10 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           }
           const maxChanges =
             args.maxChanges === undefined ? 200 : readPositiveInteger(args, 'maxChanges');
-          const captured = await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
-            const current = await refreshInteractionSnapshot(instance, running);
+            const current = await refreshInteractionSnapshot(instance, running, signal);
             return {
               diff: diffIOSSimulatorScreenMaps(baseline, current, maxChanges),
             };
@@ -4411,11 +4418,11 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             if (elementId) {
               const screenMap =
                 context?.origin === 'user'
-                  ? await refreshInteractionSnapshot(instance, running)
+                  ? await refreshInteractionSnapshot(instance, running, signal)
                   : requireAgentInteractionSnapshot(instance, args);
               point = elementPoint(screenMap, elementId);
             } else if (context?.origin === 'user') {
-              const { viewer, driver } = await currentViewports(running);
+              const { viewer, driver } = await currentViewports(running, signal);
               point = pointFromViewer(args, viewer, driver, 'xRatio', 'yRatio');
             } else {
               requireAgentInteractionSnapshot(instance, args);
@@ -4427,7 +4434,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             const nativeInput = running.driverRouter?.continuousInput();
             if (nativeInput) {
               const nativeViewport =
-                driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+                driverViewports.get(instance.instanceId) ??
+                (await readDriverViewport(running, signal));
               const normalized = normalizedPointFromViewport(point, nativeViewport);
               await nativeInput.touchPath(
                 [
@@ -4459,7 +4467,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
-            const viewport = context?.origin === 'user' ? await currentViewports(running) : null;
+            const viewport =
+              context?.origin === 'user' ? await currentViewports(running, signal) : null;
             if (!viewport) {
               requireAgentInteractionSnapshot(instance, args);
             }
@@ -4505,7 +4514,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             const running = requireDriver(instance.instanceId);
             const screenMap =
               context?.origin === 'user'
-                ? await refreshInteractionSnapshot(instance, running)
+                ? await refreshInteractionSnapshot(instance, running, signal)
                 : requireAgentInteractionSnapshot(instance, args);
             const start = elementPoint(screenMap, readString(args, 'fromElementId'));
             const end = elementPoint(screenMap, readString(args, 'toElementId'));
@@ -4539,7 +4548,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             const running = requireDriver(instance.instanceId);
             const screenMap =
               context?.origin === 'user'
-                ? await refreshInteractionSnapshot(instance, running)
+                ? await refreshInteractionSnapshot(instance, running, signal)
                 : requireAgentInteractionSnapshot(instance, args);
             const point = elementPoint(screenMap, readString(args, 'elementId'));
             const backend = await performLongPress(
@@ -4600,7 +4609,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
             const running = requireDriver(instance.instanceId);
             let screenMap =
               context?.origin === 'user'
-                ? await refreshInteractionSnapshot(instance, running)
+                ? await refreshInteractionSnapshot(instance, running, signal)
                 : requireAgentInteractionSnapshot(instance, args);
             const completed: Array<{ index: number; type: string; backend: string }> = [];
             for (const [index, rawAction] of actions.entries()) {
@@ -4612,7 +4621,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 const nativeInput = running.driverRouter?.continuousInput();
                 if (nativeInput) {
                   const viewport =
-                    driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+                    driverViewports.get(instance.instanceId) ??
+                    (await readDriverViewport(running, signal));
                   const normalized = normalizedPointFromViewport(point, viewport);
                   await nativeInput.touchPath(
                     [
@@ -4672,7 +4682,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
                 );
               }
               screenMaps.invalidate(instance.instanceId);
-              screenMap = await refreshInteractionSnapshot(instance, running);
+              screenMap = await refreshInteractionSnapshot(instance, running, signal);
               completed.push({ index, type, backend });
             }
             const observation = await observeAfterInteraction(instance, running, args, signal);
@@ -4704,7 +4714,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               );
             }
             const viewport =
-              driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+              driverViewports.get(instance.instanceId) ??
+              (await readDriverViewport(running, signal));
             await nativeInput.touchPath(
               readTouchPath(args, 'points', viewport, readTouchEdge(args.edge)),
               signal,
@@ -4741,7 +4752,8 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               );
             }
             const viewport =
-              driverViewports.get(instance.instanceId) ?? (await readDriverViewport(running));
+              driverViewports.get(instance.instanceId) ??
+              (await readDriverViewport(running, signal));
             await nativeInput.touch2Path(
               readTouchPath(args, 'first', viewport),
               readTouchPath(args, 'second', viewport),
@@ -5591,13 +5603,13 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         }
         if (name === 'capture_state') {
           const route = readMutationRoute(sessionId, args);
-          const captured = await runHostMutation(route, context, async (instance) => {
+          const captured = await runHostMutation(route, context, async (instance, signal) => {
             requireControlGrant(instance, context);
             const running = requireDriver(instance.instanceId);
             const [health, orientation, accessibility] = await Promise.all([
-              running.driver.probe(),
-              running.driver.getOrientation(running.driverSessionId),
-              running.driver.getAccessibilityTree(running.driverSessionId),
+              running.driver.probe(signal),
+              running.driver.getOrientation(running.driverSessionId, signal),
+              running.driver.getAccessibilityTree(running.driverSessionId, signal),
             ]);
             const screenMap = screenMaps.capture({
               instanceId: instance.instanceId,

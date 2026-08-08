@@ -4405,3 +4405,185 @@ describe('DeviceLinkClient relay 拥塞断连(close 1013)', () => {
     h.client.stop();
   });
 });
+
+describe('定时重发的单趟预算(TRANSPORT_RETRY_PASS_BUDGET)', () => {
+  /** 统计每个 seq 被发出的次数(首发 1 次,之后每次重发 +1)。 */
+  function sendsBySeq(ws: FakeWs, kind: Envelope['kind'] = 'invoke-result'): Map<number, number> {
+    const counts = new Map<number, number>();
+    for (const env of ws.sent) {
+      if (env.kind !== kind) continue;
+      const parsed = parseTransportPayload(env.payload);
+      if (!parsed) continue;
+      counts.set(parsed.meta.seq, (counts.get(parsed.meta.seq) ?? 0) + 1);
+    }
+    return counts;
+  }
+  const retriedSeqs = (counts: Map<number, number>): number[] =>
+    [...counts.entries()].filter(([, n]) => n > 1).map(([seq]) => seq).sort((a, b) => a - b);
+
+  it('对端停止 ACK 时,一趟定时重发只发预算内的最旧几条(而不是整个窗口)', async () => {
+    // 2026-08-08 线上:一趟重发遍历整个 pending 窗口(上限 64 条)、同步全部写进 ws,
+    // 对端 relay 路由已失效时逐帧弹回 DEVICE_OFFLINE —— 单簇 213 条就是这个形状。
+    // 既有两道刹车都拦不住本趟:per-peer 制动要等 relay-error 回来(异步),ws 容量
+    // 中断的阈值是 8MB(小帧根本到不了)。所以「一趟发多少条」必须自己有上限。
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 200,
+        transportRetryPassBudget: 3,
+        transportMaxRetryAttempts: 50, // 不让耗尽路径提前介入
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    // 9 条 invoke-result(不可丢弃,不会被队头前缀丢弃逻辑吃掉)
+    for (let i = 0; i < 9; i += 1) {
+      h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+    }
+    const ws = h.current();
+    expect(sendsBySeq(ws).size).toBe(9);
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
+
+    // 第一趟定时重发落地后立即断言:只有预算内的条数被重发
+    await vi.waitFor(() => expect(retriedSeqs(sendsBySeq(ws)).length).toBeGreaterThan(0));
+    const firstPass = retriedSeqs(sendsBySeq(ws));
+    expect(firstPass.length).toBeLessThanOrEqual(3);
+    // 且是**最旧**的那几条 —— 累计 ACK 只能从队头推进,顺序不是可选项
+    expect(firstPass).toEqual(firstPass.slice().sort((a, b) => a - b));
+    expect(Math.min(...firstPass)).toBe(Math.min(...sendsBySeq(ws).keys()));
+
+    h.client.stop();
+  }, 10_000);
+
+  it('预算集中在队头,队头被 ACK 后窗口前移、后续消息才轮到重发', async () => {
+    // 这是累计 ACK 的正确形状,不是饥饿:对端在收到队头之前根本无法消费后面的 seq,
+    // 所以「一直重发最旧的几条」才是有效工作。窗口只在队头被确认后前移。
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 20,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 500,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    for (let i = 0; i < 6; i += 1) {
+      h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+    }
+    const ws = h.current();
+    const streamId = parseTransportPayload(
+      ws.sent.find((env) => env.kind === 'invoke-result' && parseTransportPayload(env.payload))!.payload,
+    )!.meta.streamId;
+    const seqs = [...sendsBySeq(ws).keys()].sort((a, b) => a - b);
+
+    // 无 ACK 时:重发始终压在队头的预算条数上,不铺满整个窗口
+    await vi.waitFor(() => expect(retriedSeqs(sendsBySeq(ws)).length).toBeGreaterThan(0));
+    await tick(120); // 跑过好几趟
+    const headOnly = retriedSeqs(sendsBySeq(ws));
+    expect(headOnly.length).toBeLessThanOrEqual(2);
+    expect(headOnly).toEqual(seqs.slice(0, headOnly.length));
+
+    // 队头被累计 ACK 掉 → 窗口前移 → 后面的消息才开始被重发
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-b',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId, ackSeq: seqs[2] },
+      },
+    });
+    await vi.waitFor(
+      () => expect(retriedSeqs(sendsBySeq(ws))).toContain(seqs[3]),
+      { timeout: 5_000 },
+    );
+    h.client.stop();
+  }, 10_000);
+
+  it('link 重建后的 replay 不受预算限制:可达性刚被对端 link-accept 证明过', async () => {
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 60_000, // 定时器不参与,只看 replay 那一趟
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'remote-stream');
+
+    for (let i = 0; i < 7; i += 1) {
+      h.client.sendInvokeResult('dev-b', `req-${i}`, { ok: true, result: i });
+    }
+    const ws = h.current();
+    expect(retriedSeqs(sendsBySeq(ws))).toEqual([]);
+
+    // 对端重新 link-open → 本端 link-accept → replay:一趟把 7 条全部重放
+    await establishInboundReliableLink(h, 'remote-stream-2');
+    await tick();
+    expect(retriedSeqs(sendsBySeq(ws)).length).toBe(7);
+
+    h.client.stop();
+  }, 10_000);
+
+  it('多 peer 拓扑:一个 peer 停止 ACK 被限流,另一个 peer 的投递零感知', async () => {
+    // 故障半径第 3 问(docs/dev-rules/remote-and-mobile-adaptation.md):预算是 per-peer 的,
+    // 一台休眠手机的积压不得拖慢另一台在线设备。
+    const h = makeHarness({
+      timing: {
+        pingIntervalMs: 60_000,
+        transportRetryIntervalMs: 200,
+        transportRetryPassBudget: 2,
+        transportMaxRetryAttempts: 50,
+      },
+    });
+    h.client.start();
+    await tick();
+    h.current().ack();
+    await establishInboundReliableLink(h, 'stream-b', 1, 'dev-b');
+    await establishInboundReliableLink(h, 'stream-c', 1, 'dev-c');
+
+    // dev-b 积压 8 条且从不 ACK;dev-c 只有 1 条并正常 ACK
+    for (let i = 0; i < 8; i += 1) {
+      h.client.sendInvokeResult('dev-b', `b-${i}`, { ok: true, result: i });
+    }
+    h.client.sendInvokeResult('dev-c', 'c-0', { ok: true, result: 'c' });
+
+    const ws = h.current();
+    const cFrames = () => ws.sent.filter((env) => {
+      if (env.kind !== 'invoke-result' || env.dst !== 'dev-c') return false;
+      return parseTransportPayload(env.payload) !== null;
+    });
+    expect(cFrames()).toHaveLength(1);
+    const cStreamId = parseTransportPayload(cFrames()[0]!.payload)!.meta.streamId;
+
+    // dev-c 累计 ACK:它的 pending 清空,此后不再重发
+    ws.push({
+      v: PROTOCOL_VERSION,
+      kind: 'push',
+      src: 'dev-c',
+      payload: {
+        channel: DEVICE_LINK_TRANSPORT_ACK_CHANNEL,
+        payload: { streamId: cStreamId, ackSeq: 1 },
+      },
+    });
+
+    // 等 dev-b 至少跑过一趟限流重发,确认 dev-c 完全没被牵连
+    await vi.waitFor(() => {
+      const bRetried = ws.sent.filter((env) => env.dst === 'dev-b' && env.kind === 'invoke-result');
+      expect(bRetried.length).toBeGreaterThan(8);
+    });
+    expect(cFrames()).toHaveLength(1);
+
+    h.client.stop();
+  }, 10_000);
+});

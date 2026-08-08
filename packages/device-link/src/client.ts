@@ -31,6 +31,7 @@ import {
   TRANSPORT_MAX_RETRY_ATTEMPTS,
   TRANSPORT_PENDING_PUSH_MAX_AGE_MS,
   TRANSPORT_RETRY_INTERVAL_MS,
+  TRANSPORT_RETRY_PASS_BUDGET,
   decodeTransportJson,
   encodeReliableFrames,
   isTransportSkipPayload,
@@ -215,6 +216,11 @@ export interface DeviceLinkTiming {
   transportRetryIntervalMs: number;
   /** 单个连接世代内的最大发送次数；耗尽后主动重连并在新世代继续。 */
   transportMaxRetryAttempts: number;
+  /**
+   * **定时器驱动**的单趟重发条数上限（理由与线上证据见
+   * TRANSPORT_RETRY_PASS_BUDGET）。link 重建后的 replay 不受此限。
+   */
+  transportRetryPassBudget: number;
   /** presence fire-and-forget 帧命中 WebSocket 背压后的合并重试间隔。 */
   presenceRetryIntervalMs: number;
   /**
@@ -251,6 +257,7 @@ const DEFAULT_TIMING: DeviceLinkTiming = {
   handshakeTimeoutMs: 15_000,
   transportRetryIntervalMs: TRANSPORT_RETRY_INTERVAL_MS,
   transportMaxRetryAttempts: TRANSPORT_MAX_RETRY_ATTEMPTS,
+  transportRetryPassBudget: TRANSPORT_RETRY_PASS_BUDGET,
   presenceRetryIntervalMs: 500,
   stalledLinkPendingMaxAgeMs: 60_000,
   congestionBackoffBaseMs: 5_000,
@@ -2737,6 +2744,11 @@ export class DeviceLinkClient {
     );
   }
 
+  /**
+   * @param force true = 由「可达性刚被证明」的事件驱动(收到对端 link-accept 后的
+   *   replayPending、skip 占位替换),整趟不限条数;false = 定时器驱动,按
+   *   transportRetryPassBudget 限流(理由与线上证据见 TRANSPORT_RETRY_PASS_BUDGET)。
+   */
   private retryPending(dst: string, force: boolean): void {
     const peer = this.peerTransport.get(dst);
     if (
@@ -2747,6 +2759,11 @@ export class DeviceLinkClient {
       || this.status !== 'online'
     ) return;
     const now = Date.now();
+    // pending 是按 seq 递增插入的 Map,迭代天然旧→新 —— 正是累计 ACK 需要推进的顺序。
+    // 对端长期不 ACK 时预算会一直压在队头那几条上,这**不是饥饿**而是正确形状:接收端
+    // 在拿到队头之前无法消费后面的 seq,重发队尾是无效工作。队头被累计 ACK 掉、窗口
+    // 前移之后,后面的消息自然轮到(有交错用例锚定这两段行为)。
+    let budget = force ? Number.POSITIVE_INFINITY : Math.max(1, this.timing.transportRetryPassBudget);
     for (const pending of peer.pending.values()) {
       if (!force && now - pending.lastSentAt < this.timing.transportRetryIntervalMs) continue;
       if (pending.attempts >= this.timing.transportMaxRetryAttempts) {
@@ -2759,6 +2776,8 @@ export class DeviceLinkClient {
         this.log.debug(`reliable transport retry failed for ${dst.slice(0, 8)}`, err);
         break;
       }
+      budget -= 1;
+      if (budget <= 0) break;
     }
   }
 

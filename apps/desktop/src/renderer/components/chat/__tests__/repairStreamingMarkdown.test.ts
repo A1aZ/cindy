@@ -22,6 +22,21 @@ describe('repairStreamingMarkdown', () => {
     expect(repairStreamingMarkdown('```\nline\n')).toBe('```\nline\n```');
   });
 
+  it('uses the opener character and length for synthetic closing fences', () => {
+    expect(repairStreamingMarkdown('~~~ts\nconst a = 1;')).toBe(
+      '~~~ts\nconst a = 1;\n~~~',
+    );
+    expect(repairStreamingMarkdown('````ts\nconst a = 1;')).toBe(
+      '````ts\nconst a = 1;\n````',
+    );
+  });
+
+  it('does not close a longer fence with a shorter same-character marker', () => {
+    expect(repairStreamingMarkdown('````ts\ncode\n```')).toBe(
+      '````ts\ncode\n```\n````',
+    );
+  });
+
   it('围栏内的星号/方括号不触发行内修复', () => {
     const src = '```\na ** b [x](y';
     expect(repairStreamingMarkdown(src)).toBe('```\na ** b [x](y\n```');

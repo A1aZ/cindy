@@ -26,9 +26,9 @@
 const FENCE_LINE = /^\s{0,3}(`{3,}|~{3,})/;
 
 /** 扫描围栏开合;返回 open 状态与"围栏外"文本(供行内反引号计数)。 */
-function scanFences(md: string): { open: boolean; outside: string } {
+function scanFences(md: string): { open: boolean; outside: string; fenceMarker: string } {
   let open = false;
-  let fenceChar = '';
+  let fenceMarker = '';
   const outside: string[] = [];
   for (const line of md.split('\n')) {
     const m = FENCE_LINE.exec(line);
@@ -36,19 +36,20 @@ function scanFences(md: string): { open: boolean; outside: string } {
       const marker = m[1][0];
       if (!open) {
         open = true;
-        fenceChar = marker;
+        fenceMarker = m[1];
         continue;
       }
       // 闭合围栏须与开围栏同字符。
-      if (marker === fenceChar) {
+      if (marker === fenceMarker[0] && m[1].length >= fenceMarker.length) {
         open = false;
+        fenceMarker = '';
         continue;
       }
       continue;
     }
     if (!open) outside.push(line);
   }
-  return { open, outside: outside.join('\n') };
+  return { open, outside: outside.join('\n'), fenceMarker };
 }
 
 function isEscaped(text: string, index: number): boolean {
@@ -129,10 +130,10 @@ function repairTrailingLink(md: string): string {
 
 export function repairStreamingMarkdown(md: string): string {
   if (md.length === 0) return md;
-  const { open, outside } = scanFences(md);
+  const { open, outside, fenceMarker } = scanFences(md);
   if (open) {
     // 围栏内是代码:补闭合即可,行内修复不适用。
-    return md.endsWith('\n') ? `${md}\`\`\`` : `${md}\n\`\`\``;
+    return md.endsWith('\n') ? `${md}${fenceMarker}` : `${md}\n${fenceMarker}`;
   }
   // inline code 半开(围栏外反引号计数为奇数):后续星号可能在代码里,不修。
   let backticks = 0;

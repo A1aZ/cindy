@@ -222,7 +222,7 @@ export function buildOneShotTarget(providerId: string): ProviderOneShotTarget | 
       if (!base) return null;
       const model = pickXdTitleModel(provider);
       if (!model) {
-        log.debug('title oneShot skipped: no usable chat model in xd gateway catalog', {
+        log.debug('oneShot skipped: no usable chat model in xd gateway catalog', {
           providerId,
         });
         return null;
@@ -436,7 +436,11 @@ export async function runProviderOneShot(
     sessionId: args.sessionId,
     agentKind: args.agentKind,
     promptLen: args.prompt.length,
-    opts,
+    maxTokens: opts?.maxTokens,
+    maxOutputChars: opts?.maxOutputChars,
+    maxVisualChars: opts?.maxVisualChars,
+    hasCodexInstructions: opts?.codexInstructions != null,
+    hasSystemPrompt: opts?.systemPrompt != null,
   });
 
   // 默认走吃系统代理的 undici fetch:上游可能是境外端点(catalog routing.upstream)。
@@ -467,13 +471,13 @@ export async function runProviderOneShot(
   }
 
   if (!providerId) {
-    log.debug('title oneShot skipped: no connected provider', { agentKind: args.agentKind });
+    log.debug('oneShot skipped: no connected provider', { agentKind: args.agentKind });
     return null;
   }
 
   const target = buildOneShotTarget(providerId);
   if (!target) {
-    log.debug('title oneShot skipped: no title target', { providerId, agentKind: args.agentKind });
+    log.debug('oneShot skipped: no one-shot target', { providerId, agentKind: args.agentKind });
     return null;
   }
   // 标题模型这份拷贝被用户停用 → 跳过(回落启发式起名)。rail 条目带 buildRegistry
@@ -487,7 +491,7 @@ export async function runProviderOneShot(
     ? titleRouteUnavailableReason(titleCatalogModel, railProvider?.source === 'user')
     : null;
   if (initialUnavailableReason) {
-    log.debug('title oneShot skipped: title model unavailable for new route', {
+    log.debug('oneShot skipped: title model unavailable for new route', {
       providerId,
       model: target.model,
       reason: initialUnavailableReason,
@@ -533,7 +537,7 @@ export async function runProviderOneShot(
   const canDispatchNow = (stage: string): boolean => {
     const reason = routeUnavailableNow();
     if (!reason) return true;
-    log.debug('title oneShot skipped: route unavailable before dispatch', {
+    log.debug('oneShot skipped: route unavailable before dispatch', {
       providerId,
       model: target.model,
       reason,
@@ -553,7 +557,7 @@ export async function runProviderOneShot(
       case 'anthropic-messages': {
         const oauth = await readAnthropicOAuth();
         if (!oauth?.accessToken) {
-          log.debug('title oneShot skipped: no anthropic OAuth', { providerId });
+          log.debug('oneShot skipped: no anthropic OAuth', { providerId });
           return null;
         }
         if (!canDispatchNow('after-credential-refresh')) return null;
@@ -577,14 +581,14 @@ export async function runProviderOneShot(
       case 'codex-responses': {
         const creds = readCodexCreds();
         if (!creds) {
-          log.debug('title oneShot skipped: no codex creds', { providerId });
+          log.debug('oneShot skipped: no codex creds', { providerId });
           return null;
         }
         if (!canDispatchNow('after-credential-read')) return null;
         log.debug('oneShot request body (codex)', {
           model: target.model,
           effort: target.effort,
-          instructions: codexInstructions,
+          instructionsLen: codexInstructions.length,
           promptLen: args.prompt.length,
         });
         text = await fetchCodexTitle(
@@ -603,7 +607,7 @@ export async function runProviderOneShot(
       case 'gateway-chat': {
         const key = readGatewayKey();
         if (!key) {
-          log.debug('title oneShot skipped: no gateway key', { providerId });
+          log.debug('oneShot skipped: no gateway key', { providerId });
           return null;
         }
         if (!canDispatchNow('after-credential-read')) return null;
@@ -641,7 +645,7 @@ export async function runProviderOneShot(
         ? Array.from(normalized).slice(0, maxVisualChars).join('')
         : normalized;
     if (!result) {
-      log.warn('title oneShot rejected invalid model output', {
+      log.warn('oneShot rejected invalid model output', {
         providerId,
         model: target.model,
         wire: target.wire,
@@ -649,7 +653,7 @@ export async function runProviderOneShot(
       });
       return null;
     }
-    log.info('title oneShot done', {
+    log.info('oneShot done', {
       providerId,
       model: target.model,
       wire: target.wire,
@@ -658,7 +662,7 @@ export async function runProviderOneShot(
     });
     return result;
   } catch (err) {
-    log.warn('title oneShot failed (swallowed)', {
+    log.warn('oneShot failed (swallowed)', {
       providerId,
       model: target.model,
       wire: target.wire,

@@ -60,7 +60,7 @@ export function TipsSection() {
           '[&>*+*]:border-t [&>*+*]:border-[var(--settings-theme-card-border)]',
         )}
       >
-        {/* 输入框推荐提示词:任务结束后自动预测用户下一步输入 */}
+        {/* 输入框推荐提示词:turn 结束后自动预测用户下一步输入 */}
         <div className="flex items-center justify-between gap-3 px-4 py-[14px]">
           <div className="flex items-center gap-3">
             <div

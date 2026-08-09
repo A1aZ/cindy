@@ -79,7 +79,7 @@ function buildPredictionPrompt(
     ja: "Match the user's language. The user types in Japanese.",
     ko: "Match the user's language. The user types in Korean.",
   };
-  const wdLine = workingDir ? `Current working directory: ${workingDir}` : null;
+  const wdLine = workingDir ? `Current working directory: ${escapeReferenceData(workingDir)}` : null;
 
   // 系统指令写入 Anthropic Messages API 顶层 system 字段（非 Anthropic wire 忽略），
   // 不混入 user message，避免被 Anthropic API 拒绝。
@@ -181,7 +181,7 @@ export async function generatePromptPrediction(
   //   - maxTokens=96: 标题仅需 32 token,预测 ≤140 chars 需要更多
   //   - codexInstructions: 告诉模型这是预测而非标题
   //   - systemPrompt: Anthropic Messages API 顶层 system 字段(非 Anthropic wire 忽略)
-  //   - maxOutputChars=0: 跳过 validateTitleOutput(该函数面向单行标题,拒绝多行/长文本)
+  //   - maxOutputChars=512: 恢复 validateTitleOutput 输出校验(拦截多行/Markdown/role label),再交给 maxVisualChars=140 做展示截断
   //   - maxVisualChars=140: 截断到推荐提示词上限
   return runProviderOneShot(
     {
@@ -198,7 +198,7 @@ export async function generatePromptPrediction(
       codexInstructions:
         'Output only the predicted next user message — no quotes, markdown, or commentary.',
       systemPrompt,
-      maxOutputChars: 0,
+      maxOutputChars: 512,
       maxVisualChars: 140,
     },
   );

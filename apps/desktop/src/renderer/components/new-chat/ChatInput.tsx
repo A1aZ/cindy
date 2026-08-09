@@ -6394,8 +6394,9 @@ export function ChatInput({
   const hasMessage = !isEditorEmpty(editor);
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
-  // 推荐 overlay 的唯一可见判据:有推荐词 + 输入框空 + 不在语音态。
-  const showRecommendationOverlay = !!recommendedPrompt && !hasMessage && !voiceInput.isBusy;
+  // 推荐 overlay 的唯一可见判据:开关开启 + 有推荐词 + 输入框空 + 不在语音态。
+  const showRecommendationOverlay =
+    recommendationEnabled && !!recommendedPrompt && !hasMessage && !voiceInput.isBusy;
   const hasVoiceDraftText = voiceInput.draftText.trim().length > 0;
   const [voiceReleaseToSendActive, setVoiceReleaseToSendActive] = useState(false);
   const sendButtonDisabled = Boolean(
@@ -7109,7 +7110,12 @@ export function ChatInput({
                   <span
                     ref={sendButtonRef}
                     className="inline-flex rounded-full"
-                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseDown={(event) => {
+                      // 只在编辑器已聚焦时压默认聚焦:点发送会先把焦点从
+                      // contenteditable 挪到 button 上,发完光标就没了;
+                      // 编辑器未聚焦时保留按钮正常聚焦行为(可访问性)。
+                      if (editor?.isFocused) event.preventDefault();
+                    }}
                   >
                     {mainSlotIsStop ? (
                       <SendButton

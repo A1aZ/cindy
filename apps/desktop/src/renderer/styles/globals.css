@@ -405,7 +405,8 @@ html:lang(ko) {
   content: none;
 }
 /* 输入框推荐提示词生效时,推荐词由 ChatInput 的 overlay 承载,关掉原生 placeholder。 */
-[data-recommendation-active='true'] .ProseMirror > p.is-editor-empty:first-child::before {
+[data-recommendation-active='true'] .ProseMirror > p.is-editor-empty:first-child::before,
+[data-recommendation-active='true'] .ProseMirror > p.is-empty:first-child:only-child::before {
   content: none;
 }
 .ProseMirror {

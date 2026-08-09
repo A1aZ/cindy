@@ -5,7 +5,8 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { reviewRows, utilityProcessFork } = vi.hoisted(() => ({
+const { readReviewDataMock, reviewRows, utilityProcessFork } = vi.hoisted(() => ({
+  readReviewDataMock: vi.fn(),
   reviewRows: [] as Array<Record<string, unknown>>,
   utilityProcessFork: vi.fn(),
 }));
@@ -24,7 +25,7 @@ vi.mock('../../localDb/client/current.js', () => ({
     },
   }),
 }));
-vi.mock('../../git-review/ipc.js', () => ({ readReviewData: async () => null }));
+vi.mock('../../git-review/ipc.js', () => ({ readReviewData: readReviewDataMock }));
 vi.mock('../../turn-change-set/store.js', () => ({
   listTurnChangeSets: async () => [],
   getTurnChangeSets: async () => [],
@@ -50,10 +51,16 @@ import {
 } from '../reviewArtifactAuthorization.js';
 import type { ReviewPdfUtilityChildLike } from '../reviewPdfProcess.js';
 import type { ReviewPdfUtilityRequest } from '../reviewPdfProcessProtocol.js';
+import type { ReviewData } from '../../../shared/gitReviewWire.js';
+import {
+  fingerprintReviewCappedWorkspaceFiles,
+  ReviewCappedWorkspaceChangedError,
+} from '../reviewCappedWorkspaceFingerprint.js';
 import {
   listReviewHistoricalAttachments,
   loadReviewEvidence,
   readReviewContextFingerprint,
+  readReviewWorkspaceSnapshot,
 } from '../reviewEvidence.js';
 
 const tempDirs: string[] = [];
@@ -83,13 +90,171 @@ async function tempDir(): Promise<string> {
 }
 
 beforeEach(() => {
+  readReviewDataMock.mockResolvedValue(null);
   utilityProcessFork.mockImplementation(() => new RejectingPdfUtility());
 });
 
 afterEach(async () => {
   reviewRows.splice(0);
+  readReviewDataMock.mockReset();
   utilityProcessFork.mockReset();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
+});
+
+function cappedReviewData(repoRoot: string, filePath: string): ReviewData {
+  const scope = {
+    sessionId: 'source',
+    workdir: repoRoot,
+    worktreePath: repoRoot,
+    workingDir: repoRoot,
+    repoRoot,
+    branch: 'feature',
+    headOid: 'a'.repeat(40),
+    isDetached: false,
+    isUnborn: false,
+    source: 'workingDir' as const,
+    aheadBehind: { ahead: 0, behind: 0, upstream: null, stale: false },
+    disabledReason: null,
+    disabledMessage: null,
+    resolutionChain: [],
+  };
+  const statusFile = {
+    path: filePath,
+    oldPath: null,
+    indexStatus: null,
+    worktreeStatus: 'modified' as const,
+    isUntracked: false,
+    isUnmerged: false,
+    isSubmodule: false,
+    sources: ['unstaged' as const],
+    rawXY: ' M',
+  };
+  const cappedFile = {
+    id: `unstaged:${filePath}`,
+    source: 'unstaged' as const,
+    path: filePath,
+    oldPath: null,
+    status: 'modified' as const,
+    additions: 1,
+    deletions: 1,
+    changedLines: 2,
+    changedBytes: 9,
+    isBinary: false,
+    isSubmodule: false,
+  };
+  return {
+    scope,
+    status: {
+      scope,
+      files: [statusFile],
+      stagedCount: 0,
+      unstagedCount: 1,
+      untrackedCount: 0,
+      unmergedCount: 0,
+      inProgress: [],
+      writeDisabledReasons: [],
+      dirty: true,
+    },
+    diffs: {
+      staged: [],
+      unstaged: [],
+      capped: {
+        staged: null,
+        unstaged: {
+          reason: 'changed-bytes',
+          stats: { fileCount: 1, totalChangedLines: 2, totalChangedBytes: 9 },
+          files: [cappedFile],
+        },
+      },
+    },
+    summary: {
+      sessionId: 'source',
+      disabledReason: null,
+      disabledMessage: null,
+      totalFiles: 1,
+      stagedFiles: 0,
+      unstagedFiles: 1,
+      untrackedFiles: 0,
+      unmergedFiles: 0,
+      dirty: true,
+    },
+  };
+}
+
+describe('readReviewWorkspaceSnapshot', () => {
+  it('changes the fingerprint for a same-size capped file replacement', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'large.ts';
+    const file = path.join(repoRoot, relativePath);
+    await fs.writeFile(file, 'aaa111zzz');
+    const reviewData = cappedReviewData(repoRoot, relativePath);
+    readReviewDataMock.mockResolvedValue(reviewData);
+
+    const before = await readReviewWorkspaceSnapshot('source');
+    await fs.writeFile(file, 'aaa222zzz');
+    const after = await readReviewWorkspaceSnapshot('source');
+
+    expect(after?.workspace).toEqual(before?.workspace);
+    expect(after?.fingerprint).not.toBe(before?.fingerprint);
+  });
+
+  it('retries until the capped Git summary and file content share one stable window', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'large.ts';
+    const file = path.join(repoRoot, relativePath);
+    await fs.writeFile(file, 'aaa111zzz');
+    const reviewData = cappedReviewData(repoRoot, relativePath);
+    let reads = 0;
+    readReviewDataMock.mockImplementation(async () => {
+      reads += 1;
+      if (reads === 2) await fs.writeFile(file, 'aaa222zzz');
+      return reviewData;
+    });
+
+    const recovered = await readReviewWorkspaceSnapshot('source');
+    readReviewDataMock.mockResolvedValue(reviewData);
+    const stable = await readReviewWorkspaceSnapshot('source');
+
+    expect(reads).toBe(4);
+    expect(recovered?.fingerprint).toBe(stable?.fingerprint);
+  });
+
+  it('restarts the whole snapshot after a transient during-hash change', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'large.ts';
+    await fs.writeFile(path.join(repoRoot, relativePath), 'aaa111zzz');
+    const reviewData = cappedReviewData(repoRoot, relativePath);
+    readReviewDataMock.mockResolvedValue(reviewData);
+    let fingerprintCalls = 0;
+
+    const snapshot = await readReviewWorkspaceSnapshot('source', {
+      fingerprintCappedWorkspaceFiles: async (...args) => {
+        fingerprintCalls += 1;
+        if (fingerprintCalls === 1) {
+          throw new ReviewCappedWorkspaceChangedError('transient write');
+        }
+        return fingerprintReviewCappedWorkspaceFiles(...args);
+      },
+    });
+
+    expect(snapshot?.fingerprint).toMatch(/^[a-f0-9]{64}$/);
+    expect(fingerprintCalls).toBe(3);
+  });
+
+  it('fails closed after repeated during-hash changes', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'large.ts';
+    await fs.writeFile(path.join(repoRoot, relativePath), 'aaa111zzz');
+    readReviewDataMock.mockResolvedValue(cappedReviewData(repoRoot, relativePath));
+    const fingerprintCappedWorkspaceFiles = vi.fn(async () => {
+      throw new ReviewCappedWorkspaceChangedError('continuous writes');
+    });
+
+    await expect(
+      readReviewWorkspaceSnapshot('source', { fingerprintCappedWorkspaceFiles }),
+    ).rejects.toBeInstanceOf(ReviewCappedWorkspaceChangedError);
+    expect(fingerprintCappedWorkspaceFiles).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('loadReviewEvidence attachment boundaries', () => {

@@ -37,6 +37,10 @@ import {
   type ResolvedReviewArtifactPath,
   type ReviewExplicitArtifactGrant,
 } from './reviewArtifactAuthorization.js';
+import {
+  fingerprintReviewCappedWorkspaceFiles,
+  ReviewCappedWorkspaceChangedError,
+} from './reviewCappedWorkspaceFingerprint.js';
 
 export interface ReviewAttachmentInput {
   name: string;
@@ -99,12 +103,43 @@ function mapReviewWorkspace(
   };
 }
 
-export async function readReviewWorkspaceSnapshot(
-  sourceSessionId: string,
-): Promise<{ workspace: ReviewWorkspaceEvidence; fingerprint: string | null } | null> {
-  const reviewData = await readReviewData(sourceSessionId).catch(() => null);
-  if (!reviewData) return null;
+interface ReviewWorkspaceSnapshot {
+  workspace: ReviewWorkspaceEvidence;
+  fingerprint: string | null;
+  hasCappedDiff: boolean;
+}
+
+interface ReviewWorkspaceSnapshotDeps {
+  readReviewData: typeof readReviewData;
+  fingerprintCappedWorkspaceFiles: typeof fingerprintReviewCappedWorkspaceFiles;
+}
+
+const defaultReviewWorkspaceSnapshotDeps: ReviewWorkspaceSnapshotDeps = {
+  readReviewData,
+  fingerprintCappedWorkspaceFiles: fingerprintReviewCappedWorkspaceFiles,
+};
+
+function cappedWorkspacePaths(workspace: ReviewWorkspaceEvidence): string[] {
+  return [workspace.diffs.capped?.staged, workspace.diffs.capped?.unstaged].flatMap((capped) =>
+    capped
+      ? capped.files.flatMap((file) => [file.path, file.oldPath].filter(Boolean) as string[])
+      : [],
+  );
+}
+
+async function buildReviewWorkspaceSnapshot(
+  reviewData: Awaited<ReturnType<typeof readReviewData>>,
+  fingerprintCappedWorkspaceFiles: typeof fingerprintReviewCappedWorkspaceFiles,
+): Promise<ReviewWorkspaceSnapshot> {
   const workspace = mapReviewWorkspace(reviewData);
+  const hasCappedDiff = Boolean(workspace.diffs.capped?.staged || workspace.diffs.capped?.unstaged);
+  const cappedContentFingerprint =
+    hasCappedDiff && reviewData.scope.repoRoot
+      ? await fingerprintCappedWorkspaceFiles(
+          reviewData.scope.repoRoot,
+          cappedWorkspacePaths(workspace),
+        )
+      : null;
   return {
     workspace,
     // A clean tree is not proof that the reviewer saw the same code: changing
@@ -127,11 +162,50 @@ export async function readReviewWorkspaceSnapshot(
               inProgress: reviewData.status?.inProgress ?? [],
               summary: reviewData.summary,
               workspace,
+              cappedContentFingerprint,
             }),
           )
           .digest('hex')
       : null,
+    hasCappedDiff,
   };
+}
+
+export async function readReviewWorkspaceSnapshot(
+  sourceSessionId: string,
+  depsInput: Partial<ReviewWorkspaceSnapshotDeps> = {},
+): Promise<{ workspace: ReviewWorkspaceEvidence; fingerprint: string | null } | null> {
+  const deps = { ...defaultReviewWorkspaceSnapshotDeps, ...depsInput };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const reviewData = await deps.readReviewData(sourceSessionId).catch((error) => {
+      if (attempt === 0) return null;
+      throw error;
+    });
+    if (!reviewData) return null;
+    try {
+      const current = await buildReviewWorkspaceSnapshot(
+        reviewData,
+        deps.fingerprintCappedWorkspaceFiles,
+      );
+      if (!current.hasCappedDiff) return current;
+
+      // A capped summary and its full-content digest must describe one stable
+      // workspace window. Require a second matching snapshot; a transient edit
+      // during either full-file hash restarts the whole Git + content read.
+      const confirmationData = await deps.readReviewData(sourceSessionId);
+      const confirmation = await buildReviewWorkspaceSnapshot(
+        confirmationData,
+        deps.fingerprintCappedWorkspaceFiles,
+      );
+      if (!confirmation.hasCappedDiff) return confirmation;
+      if (confirmation.fingerprint === current.fingerprint) return confirmation;
+    } catch (error) {
+      if (!(error instanceof ReviewCappedWorkspaceChangedError) || attempt === 2) throw error;
+    }
+  }
+  throw new ReviewCappedWorkspaceChangedError(
+    'The capped Review workspace kept changing while its content baseline was prepared',
+  );
 }
 
 function parseJsonRecord(value: unknown): Record<string, unknown> | null {

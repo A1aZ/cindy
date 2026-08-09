@@ -59,6 +59,7 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
     const canonicalWorkingDir = identity.canonicalWorkingDir;
     const canonicalRepoRoot = identity.canonicalRepoRoot;
     if (!canonicalWorkingDir || !canonicalRepoRoot) return 'unavailable';
+    const pathApi = identity.platform === 'win32' ? path.win32 : path.posix;
     const [resolvedWorkingDir, resolvedRepoRoot, entries] = await Promise.all([
       realpath(identity.workingDir),
       realpath(canonicalRepoRoot),
@@ -66,7 +67,7 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
         const stats = await stat(skillPath);
         const resolvedPath = await realpath(skillPath);
         if (!stats.isDirectory()) return { skillPath, stats, resolvedPath };
-        const skillFile = path.join(skillPath, 'SKILL.md');
+        const skillFile = pathApi.join(skillPath, 'SKILL.md');
         return {
           skillPath,
           stats,
@@ -81,7 +82,7 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
       || !piCanonicalPathsEqual(identity, canonicalRepoRoot, resolvedRepoRoot)
     ) return 'project-changed';
     if (entries.some(({ skillPath, stats, skillFileStats }) =>
-      (!stats.isDirectory() && (!stats.isFile() || path.extname(skillPath) !== '.md'))
+      (!stats.isDirectory() && (!stats.isFile() || pathApi.extname(skillPath) !== '.md'))
       || (stats.isDirectory() && !skillFileStats?.isFile()))) return 'unavailable';
     return entries.every(({ skillPath, resolvedPath, stats, resolvedSkillFile }) =>
       piCanonicalPathsEqual(identity, skillPath, resolvedPath)

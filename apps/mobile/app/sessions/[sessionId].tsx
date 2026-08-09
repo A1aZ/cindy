@@ -932,9 +932,11 @@ export default function SessionScreen() {
     (viewport: ShareableMessageViewport) => Promise<readonly string[]>
   ) | null>(null);
   const screenshotBlockedByOverlayRef = useRef(false);
-  const messageBlockingOverlayRef = useRef(false);
+  const [messageBlockingOverlay, setMessageBlockingOverlay] = useState(false);
   const shareSelectionActiveRef = useRef(shareSelectionActive);
   shareSelectionActiveRef.current = shareSelectionActive;
+  const shareSelectionRevisionRef = useRef(shareSelectionRevision);
+  shareSelectionRevisionRef.current = shareSelectionRevision;
   const lastScreenshotActivationAtRef = useRef(0);
   const shareOperationSeqRef = useRef(0);
   const [conversationShareBusy, setConversationShareBusy] = useState(false);
@@ -958,7 +960,7 @@ export default function SessionScreen() {
     visibleShareableMessageIdsReaderRef.current = reader;
   }, []);
   const handleMessageBlockingOverlayChange = useCallback((blocked: boolean) => {
-    messageBlockingOverlayRef.current = blocked;
+    setMessageBlockingOverlay(blocked);
   }, []);
   useEffect(() => {
     shareOperationSeqRef.current += 1;
@@ -5693,8 +5695,11 @@ export default function SessionScreen() {
     ) return;
     const operationSeq = shareOperationSeqRef.current + 1;
     shareOperationSeqRef.current = operationSeq;
+    const operationSelectionRevision = shareSelectionRevisionRef.current;
     const isShareOperationActive = () =>
-      shareOperationSeqRef.current === operationSeq && shareSelectionActiveRef.current;
+      shareOperationSeqRef.current === operationSeq
+      && shareSelectionActiveRef.current
+      && shareSelectionRevisionRef.current === operationSelectionRevision;
     let localUri: string | null = null;
     setConversationShareBusy(true);
     try {
@@ -5718,7 +5723,7 @@ export default function SessionScreen() {
       if (localUri) await deleteConversationSharePngTemp(localUri);
       if (shareOperationSeqRef.current === operationSeq) setConversationShareBusy(false);
     }
-  }, [conversationShareBusy, exportConversationSharePng, selectedShareMessages.length, shareSelectionActive, t]);
+  }, [conversationShareBusy, exportConversationSharePng, selectedShareMessages.length, shareSelectionActive, shareSelectionRevision, t]);
   // 解禁唤醒:会话参数就绪(fresh 元数据到达 / 新建管线收口)的那一帧重新 pump,把
   // 未就绪期间攒下的待发消息按 FIFO 发出去。渲染态判据与 outboxDispatchBlockedNow
   // 同构(那个读 store,供异步循环用;这个供 effect 依赖比较用)。
@@ -7699,7 +7704,7 @@ export default function SessionScreen() {
     || (permissionSheetOpen && canUseComposer)
     || composerPreviewAttachmentId !== null
     || sessionListDrawerOverlayMounted
-    || messageBlockingOverlayRef.current
+    || messageBlockingOverlay
   );
 
   // 聊天正文文件 chip 上下文(消息树内 inline chip 经 context 消费,不走多层 prop):

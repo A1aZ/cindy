@@ -110,6 +110,7 @@ describe('buildConversationShareHtml 富内容导出', () => {
     );
     expect(html).toContain('image.decode().catch(function () {})');
     expect(html).toContain('document.fonts.ready');
+    expect(html).toContain("document.querySelectorAll('style')");
     expect(html).toContain(
       "throw new Error('conversation-share-content-too-large')",
     );

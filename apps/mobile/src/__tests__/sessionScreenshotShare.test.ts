@@ -49,4 +49,38 @@ describe("mobile screenshot-triggered share guards", () => {
     );
     expect(source).toContain("onBlockingOverlayChange?.(payload !== null);");
   });
+
+  it("recomputes the screenshot guard from message overlay state", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "app/sessions/[sessionId].tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain(
+      "const [messageBlockingOverlay, setMessageBlockingOverlay] = useState(false);",
+    );
+    expect(source).toContain("setMessageBlockingOverlay(blocked);");
+    expect(source).toContain("|| messageBlockingOverlay");
+    expect(source).not.toContain("messageBlockingOverlayRef");
+  });
+
+  it("invalidates an export when the share selection revision changes", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "app/sessions/[sessionId].tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain(
+      "const shareSelectionRevisionRef = useRef(shareSelectionRevision);",
+    );
+    expect(source).toContain(
+      "shareSelectionRevisionRef.current = shareSelectionRevision;",
+    );
+    expect(source).toContain(
+      "const operationSelectionRevision = shareSelectionRevisionRef.current;",
+    );
+    expect(source).toContain(
+      "shareSelectionRevisionRef.current === operationSelectionRevision",
+    );
+  });
 });

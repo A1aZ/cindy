@@ -633,10 +633,13 @@ function buildExportScript(): string {
       var effectiveScale = Math.min(requestedScale, maxScale);
       var outputWidth = Math.max(1, Math.ceil(width * effectiveScale));
       var outputHeight = Math.max(1, Math.ceil(height * effectiveScale));
-      var style = document.getElementById('share-style');
+      var styles = Array.prototype.map.call(
+        document.querySelectorAll('style'),
+        function (style) { return style.textContent || ''; },
+      ).join('\\n');
       var markup = new XMLSerializer().serializeToString(stage);
       var svg = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="' + outputWidth + '" height="' + outputHeight + '" viewBox="0 0 ' + width + ' ' + height + '">' +
-        '<foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:' + width + 'px;background:' + stage.getAttribute('data-share-background') + '"><style>' + (style ? style.textContent : '') + '</style>' + markup + '</div></foreignObject></svg>';
+        '<foreignObject width="100%" height="100%"><div xmlns="http://www.w3.org/1999/xhtml" style="width:' + width + 'px;background:' + stage.getAttribute('data-share-background') + '"><style>' + styles + '</style>' + markup + '</div></foreignObject></svg>';
       var image = new Image();
       image.onload = function () {
         try {

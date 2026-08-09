@@ -46,4 +46,10 @@ describe('ChatInput Ghost snapshot contract', () => {
     );
     expect(source).toContain("toast.warning(t('newChat.pluginSetup.error.TARGET_UNAVAILABLE'));");
   });
+
+  it('does not consume Host capability text as a local plan-mode command', () => {
+    expect(source).toMatch(
+      /if \(\s*!serializedHostCapability &&\s*isPlanModeComposerCommandText\(/,
+    );
+  });
 });

@@ -300,21 +300,21 @@ function reviewFileSelectorIsAllowed(selector: unknown): selector is string {
   );
 }
 
-async function reviewReadToolIsInScope(params: {
+async function resolveReviewReadToolInput(params: {
   toolName: string;
   toolInput: Record<string, unknown> | undefined;
   workingDir: string;
   grants: readonly ReviewReadGrant[];
-}): Promise<boolean> {
+}): Promise<Record<string, unknown> | null> {
   if (params.toolName === 'Glob') {
-    if (!reviewFileSelectorIsAllowed(params.toolInput?.pattern)) return false;
+    if (!reviewFileSelectorIsAllowed(params.toolInput?.pattern)) return null;
   }
   if (
     params.toolName === 'Grep' &&
     params.toolInput?.glob !== undefined &&
     !reviewFileSelectorIsAllowed(params.toolInput.glob)
   ) {
-    return false;
+    return null;
   }
   const keyByTool: Partial<Record<string, string>> = {
     Read: 'file_path',
@@ -324,13 +324,18 @@ async function reviewReadToolIsInScope(params: {
     NotebookRead: 'notebook_path',
   };
   const key = keyByTool[params.toolName];
-  if (!key) return false;
+  if (!key) return null;
   const raw = params.toolInput?.[key];
   const candidate =
     typeof raw === 'string' && raw.trim()
       ? path.resolve(params.workingDir, raw)
       : params.workingDir;
-  return (await resolveReviewReadPath(candidate, params.workingDir, params.grants)) !== null;
+  const resolved = await resolveReviewReadPath(candidate, params.workingDir, params.grants);
+  if (!resolved) return null;
+  // The permission decision and the SDK tool execution must address the same
+  // filesystem object. In particular, never hand a validated symlink back to
+  // Read/Glob/Grep: it could be retargeted after this hook returns.
+  return { ...(params.toolInput ?? {}), [key]: resolved };
 }
 
 /**
@@ -1365,16 +1370,23 @@ export class ClaudeCodeAgent extends BaseAgent {
       if (input.hook_event_name !== 'PreToolUse') return { continue: true };
       const pre = input as PreToolUseHookInput;
       const toolName = pre.tool_name;
-      if (
-        isReadOnlyClaudeTool(toolName) &&
-        (await reviewReadToolIsInScope({
+      const updatedInput = isReadOnlyClaudeTool(toolName)
+        ? await resolveReviewReadToolInput({
           toolName,
           toolInput: pre.tool_input as Record<string, unknown> | undefined,
           workingDir: opts.workingDir,
           grants: reviewReadGrants,
-        }))
-      ) {
-        return { continue: true };
+        })
+        : null;
+      if (updatedInput) {
+        return {
+          continue: true,
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            updatedInput,
+          },
+        };
       }
       return {
         continue: true,

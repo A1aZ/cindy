@@ -91,7 +91,7 @@ async function tempDir(): Promise<string> {
 }
 
 beforeEach(() => {
-  readReviewDataMock.mockResolvedValue(null);
+  readReviewDataMock.mockResolvedValue(nonGitReviewData());
   utilityProcessFork.mockImplementation(() => new RejectingPdfUtility());
 });
 
@@ -182,7 +182,63 @@ function cappedReviewData(repoRoot: string, filePath: string): ReviewData {
   };
 }
 
+function nonGitReviewData(): ReviewData {
+  const scope = {
+    sessionId: 'source',
+    workdir: '/tmp/non-git-review',
+    worktreePath: null,
+    workingDir: '/tmp/non-git-review',
+    repoRoot: null,
+    branch: null,
+    headOid: null,
+    isDetached: false,
+    isUnborn: false,
+    source: 'workingDir' as const,
+    aheadBehind: { ahead: 0, behind: 0, upstream: null, stale: false },
+    disabledReason: 'non-git' as const,
+    disabledMessage: 'Not a Git repository',
+    resolutionChain: [],
+  };
+  return {
+    scope,
+    status: null,
+    diffs: { staged: [], unstaged: [], capped: { staged: null, unstaged: null } },
+    summary: {
+      sessionId: 'source',
+      disabledReason: 'non-git',
+      disabledMessage: 'Not a Git repository',
+      totalFiles: 0,
+      stagedFiles: 0,
+      unstagedFiles: 0,
+      untrackedFiles: 0,
+      unmergedFiles: 0,
+      dirty: false,
+    },
+  };
+}
+
 describe('readReviewWorkspaceSnapshot', () => {
+  it('fails closed when the Git evidence read throws instead of treating it as non-Git', async () => {
+    const failure = new Error('git index is locked');
+    readReviewDataMock.mockRejectedValue(failure);
+
+    await expect(readReviewWorkspaceSnapshot('source')).rejects.toBe(failure);
+    expect(readReviewDataMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed when the confirming Git evidence read throws', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'large.ts';
+    await fs.writeFile(path.join(repoRoot, relativePath), 'aaa111zzz');
+    const failure = new Error('git diff became unreadable');
+    readReviewDataMock
+      .mockResolvedValueOnce(cappedReviewData(repoRoot, relativePath))
+      .mockRejectedValueOnce(failure);
+
+    await expect(readReviewWorkspaceSnapshot('source')).rejects.toBe(failure);
+    expect(readReviewDataMock).toHaveBeenCalledTimes(2);
+  });
+
   it('changes the fingerprint for a same-size capped file replacement', async () => {
     const repoRoot = await tempDir();
     const relativePath = 'large.ts';

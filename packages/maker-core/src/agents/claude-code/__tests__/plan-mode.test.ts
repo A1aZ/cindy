@@ -307,7 +307,12 @@ describe('ClaudeCodeAgent plan mode', () => {
     })).rejects.toThrow(/refused/i);
     await expect(
       reviewHook({ hook_event_name: 'PreToolUse', tool_name: 'Read' }),
-    ).resolves.toEqual({ continue: true });
+    ).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: { file_path: await fs.realpath(workingDir) },
+      },
+    });
     await expect(reviewHook({
       hook_event_name: 'PreToolUse',
       tool_name: 'Read',
@@ -325,7 +330,12 @@ describe('ClaudeCodeAgent plan mode', () => {
       hook_event_name: 'PreToolUse',
       tool_name: 'Grep',
       tool_input: { path: workingDir, pattern: 'value' },
-    })).resolves.toEqual({ continue: true });
+    })).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: { path: await fs.realpath(workingDir), pattern: 'value' },
+      },
+    });
     await expect(reviewHook({
       hook_event_name: 'PreToolUse',
       tool_name: 'Grep',
@@ -335,12 +345,22 @@ describe('ClaudeCodeAgent plan mode', () => {
       hook_event_name: 'PreToolUse',
       tool_name: 'Grep',
       tool_input: { path: sourcePath, pattern: 'value' },
-    })).resolves.toEqual({ continue: true });
+    })).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: { path: await fs.realpath(sourcePath), pattern: 'value' },
+      },
+    });
     await expect(reviewHook({
       hook_event_name: 'PreToolUse',
       tool_name: 'Grep',
       tool_input: { path: workingDir, pattern: 'value', glob: '**/*.ts' },
-    })).resolves.toEqual({ continue: true });
+    })).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: { path: await fs.realpath(workingDir), pattern: 'value', glob: '**/*.ts' },
+      },
+    });
     for (const glob of ['**/*.pem', '**/.env*', '../../outside/**', '{src/**,/etc/**}']) {
       await expect(reviewHook({
         hook_event_name: 'PreToolUse',
@@ -352,12 +372,25 @@ describe('ClaudeCodeAgent plan mode', () => {
       hook_event_name: 'PreToolUse',
       tool_name: 'Glob',
       tool_input: { pattern: '**/*.ts' },
-    })).resolves.toEqual({ continue: true });
+    })).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: { path: await fs.realpath(workingDir), pattern: '**/*.ts' },
+      },
+    });
     await expect(reviewHook({
       hook_event_name: 'PreToolUse',
       tool_name: 'Glob',
       tool_input: { pattern: '{src,test}/**/*.{ts,tsx}' },
-    })).resolves.toEqual({ continue: true });
+    })).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: 'allow',
+        updatedInput: {
+          path: await fs.realpath(workingDir),
+          pattern: '{src,test}/**/*.{ts,tsx}',
+        },
+      },
+    });
     for (const pattern of [
       '../../.ssh/*',
       '{../../.ssh/*,**/*.ts}',
@@ -373,6 +406,52 @@ describe('ClaudeCodeAgent plan mode', () => {
         tool_name: 'Glob',
         tool_input: { pattern },
       })).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    }
+
+    for (const [toolName, key, rawPath] of [
+      ['Read', 'file_path', sourcePath],
+      ['NotebookRead', 'notebook_path', sourcePath],
+      ['LS', 'path', workingDir],
+    ] as const) {
+      const result = await reviewHook({
+        hook_event_name: 'PreToolUse',
+        tool_name: toolName,
+        tool_input: { [key]: rawPath },
+      });
+      expect(result).toMatchObject({
+        hookSpecificOutput: {
+          permissionDecision: 'allow',
+          updatedInput: { [key]: await fs.realpath(rawPath) },
+        },
+      });
+    }
+
+    if (process.platform !== 'win32') {
+      const approvedPath = path.join(workingDir, 'approved.ts');
+      const swappedLink = path.join(workingDir, 'swapped.ts');
+      const outsidePath = path.join(externalDir, 'private.txt');
+      await fs.writeFile(approvedPath, 'approved');
+      await fs.writeFile(outsidePath, 'private');
+      await fs.symlink(approvedPath, swappedLink);
+
+      const decision = await reviewHook({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: swappedLink },
+      });
+      await fs.unlink(swappedLink);
+      await fs.symlink(outsidePath, swappedLink);
+
+      expect(decision).toMatchObject({
+        hookSpecificOutput: {
+          permissionDecision: 'allow',
+          updatedInput: { file_path: await fs.realpath(approvedPath) },
+        },
+      });
+      expect(
+        (decision.hookSpecificOutput as { updatedInput: { file_path: string } }).updatedInput
+          .file_path,
+      ).not.toBe(swappedLink);
     }
     expect(downstreamHook).not.toHaveBeenCalled();
 

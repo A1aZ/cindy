@@ -177,11 +177,11 @@ export async function readReviewWorkspaceSnapshot(
 ): Promise<{ workspace: ReviewWorkspaceEvidence; fingerprint: string | null } | null> {
   const deps = { ...defaultReviewWorkspaceSnapshotDeps, ...depsInput };
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const reviewData = await deps.readReviewData(sourceSessionId).catch((error) => {
-      if (attempt === 0) return null;
-      throw error;
-    });
-    if (!reviewData) return null;
+    // A normal non-Git task is represented by ReviewData with a disabled scope.
+    // An exception means Git evidence could not be read and must abort Review;
+    // turning it into null would incorrectly publish a completed, evidence-free
+    // result for a task that may in fact be a Git workspace.
+    const reviewData = await deps.readReviewData(sourceSessionId);
     try {
       const current = await buildReviewWorkspaceSnapshot(
         reviewData,

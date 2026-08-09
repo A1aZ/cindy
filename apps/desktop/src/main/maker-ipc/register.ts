@@ -554,7 +554,9 @@ import {
 } from './interactionRouter.js';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import {
+  cleanupOrphanedTempAttachments,
   cleanupSessionTempAttachments,
+  configureTempAttachmentOwner,
   normalizeUserMessage,
   materializeDirectSendOssAttachments,
   materializeQueuedOssAttachmentsDeferred,
@@ -2439,6 +2441,7 @@ const reviewRunOwner: ReviewRunOwner = {
   instanceId: randomUUID(),
   processId: process.pid,
 };
+configureTempAttachmentOwner(reviewRunOwner);
 const ensureReviewOwnerLivenessReady = createRetryableReviewStartup(async () => {
   const handle = await startReviewOwnerLiveness();
   reviewRunOwner.liveness = handle.identity;
@@ -6809,6 +6812,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         reconcileInterruptedReviews(),
         sessionTurnLeaseTracker.reconcileStaleLeases(),
         cleanupOrphanedReviewArtifactSnapshots({ currentOwner: reviewRunOwner }),
+        cleanupOrphanedTempAttachments({ currentOwner: reviewRunOwner }),
       ]);
     } catch (error) {
       log.error('failed to prepare Review runtime state', {

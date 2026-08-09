@@ -12,7 +12,12 @@ const writeFile = vi.hoisted(() => vi.fn(async () => {}));
 const mkdir = vi.hoisted(() => vi.fn(async () => {}));
 const chmod = vi.hoisted(() => vi.fn(async () => {}));
 const lstat = vi.hoisted(() =>
-  vi.fn(async () => ({ isDirectory: () => true, isSymbolicLink: () => false })),
+  vi.fn(async (target: string) => {
+    if (target.endsWith('.cindy-owner.json')) {
+      throw Object.assign(new Error('not found'), { code: 'ENOENT' });
+    }
+    return { isDirectory: () => true, isSymbolicLink: () => false };
+  }),
 );
 const readFile = vi.hoisted(() => vi.fn(async () => Buffer.from('image-bytes')));
 vi.mock('node:fs/promises', () => ({
@@ -142,7 +147,7 @@ describe('normalizeUserMessage — device-link 出方向 OSS 引用物化', () =
     expect(downloadToFile).toHaveBeenCalledTimes(1);
     const [ossKeyArg, destArg] = downloadToFile.mock.calls[0] as unknown as [string, string];
     expect(ossKeyArg).toBe('cindy/device-link/u/x.png');
-    expect(destArg).toMatch(/cindy-attachments[\\/]sess-1[\\/].+\.png$/);
+    expect(destArg).toMatch(/cindy-attachments[\\/]v2-[^\\/]+[\\/]sess-1[\\/].+\.png$/);
     const block = (out as { content: Array<{ type: string; path?: string; mimeType?: string }> })
       .content[1];
     expect(block.path).toBe(destArg); // path 指向下载目标

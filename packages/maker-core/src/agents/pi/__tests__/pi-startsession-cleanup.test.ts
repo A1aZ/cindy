@@ -65,6 +65,7 @@ vi.mock('../rpc-client.js', () => ({
 }));
 
 import { PiAgent } from '../index.js';
+import { piProjectKey } from '../project-trust.js';
 import type { AgentDeps } from '../../base-agent.js';
 import type { Logger } from '../../../interfaces/logger.js';
 import type { PiProjectTrustInputSnapshot } from '../../../types/pi-project-trust.js';
@@ -151,19 +152,25 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     revision: string,
     skills: readonly string[],
   ): PiProjectTrustInputSnapshot {
+    const identity: PiProjectTrustInputSnapshot['identity'] = {
+      workingDir,
+      canonicalWorkingDir: workingDir,
+      canonicalRepoRoot: workingDir,
+      repoRootStatus: 'resolved',
+      platform: process.platform === 'win32' ? 'win32' : 'posix',
+      canonicalPathEncoding: process.platform === 'win32' ? 'utf16-lossless' : 'utf8-lossless',
+      ...(process.platform === 'win32'
+        ? { windowsCaseComparison: 'ordinal-insensitive' as const }
+        : {}),
+    };
+    const scopeKey = piProjectKey(identity);
+    if (!scopeKey) throw new Error('test project identity must be canonical');
     return {
-      identity: {
-        workingDir,
-        canonicalWorkingDir: workingDir,
-        canonicalRepoRoot: workingDir,
-        repoRootStatus: 'resolved',
-        platform: 'posix',
-        canonicalPathEncoding: 'utf8-lossless',
-      },
+      identity,
       approval: {
         status: 'approved',
         scope: 'working-dir',
-        scopeKey: `${workingDir}\0${workingDir}`,
+        scopeKey,
         revision,
       },
       discovered: {

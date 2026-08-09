@@ -1013,6 +1013,46 @@ describe('streamed assistant final calibration', () => {
       broadcastGuard(),
     );
   });
+
+  it('accepts a longer unmarked final prefix when Claude deltas missed the tail', async () => {
+    const persistId = onAssistantTextEvent(
+      SESSION,
+      { text: 'Hello ', isFinal: false },
+      null,
+    );
+    expect(onAssistantTextEvent(
+      SESSION,
+      { text: 'Hello world', isFinal: true },
+      null,
+    )).toBe(persistId);
+
+    flushAssistantBlock(SESSION, null);
+    await flushWrites();
+
+    expect(createMessage).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ clientId: persistId, content: 'Hello world' }),
+      broadcastGuard(),
+    );
+  });
+
+  it('does not replace a streamed block with a longer unrelated local text block', async () => {
+    const persistId = onAssistantTextEvent(
+      SESSION,
+      { text: 'first', isFinal: false },
+      null,
+    );
+    onAssistantTextEvent(SESSION, { text: 'second block', isFinal: true }, null);
+
+    flushAssistantBlock(SESSION, null);
+    await flushWrites();
+
+    expect(createMessage).toHaveBeenCalledWith(
+      SESSION,
+      expect.objectContaining({ clientId: persistId, content: 'first' }),
+      broadcastGuard(),
+    );
+  });
 });
 
 describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追踪)', () => {

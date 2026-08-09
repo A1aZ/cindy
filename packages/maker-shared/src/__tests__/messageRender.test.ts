@@ -8,6 +8,7 @@ import {
   findMessageTodoInsertions,
   formatDuration,
   getLatestMessageTodoState,
+  isSubagentParentToolUseId,
   type MessageRenderItem,
   type MessageRenderNormalizedMessage,
   type MessageRenderSourceMessageLike,
@@ -969,6 +970,17 @@ describe('message render todo grouping', () => {
         agentMeta: { parentUuid: 'toolu_01ABCDEF' },
       };
       expect(findLatestMessageTodoInsertion([realSubagentPlan])).toBeNull();
+    });
+
+    it('exports the same tool-parent shape check that projection sites must use', () => {
+      // desktop 渲染层的历史恢复会把裸 agentMeta.parentUuid 提升成显式
+      // parentToolUseId。提升前必须过这条判据,否则 legacy transcript 链边被当成
+      // 显式父归属,顶层计划在桌面端被过滤、在 mobile / main 端不被过滤,同一份
+      // 历史两端分组分叉(review P2)。判据与本文件内部的子代理归属同一份。
+      expect(isSubagentParentToolUseId('toolu_01ABCDEF')).toBe(true);
+      expect(isSubagentParentToolUseId('call_abc123')).toBe(true);
+      expect(isSubagentParentToolUseId('4f1c9a7e-3b2d-4c8a-9e5f-1a2b3c4d5e6f')).toBe(false);
+      expect(isSubagentParentToolUseId('preceding-user-uuid')).toBe(false);
     });
 
     it('starts a new session when an ordinary user turn intervenes', () => {

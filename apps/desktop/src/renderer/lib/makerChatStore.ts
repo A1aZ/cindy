@@ -40,6 +40,7 @@ import {
   applyCodexPlanSnapshotOnDone,
   getLatestMessageTodoState,
   isAgentPlanToolName,
+  isSubagentParentToolUseId,
   markCodexPlanTurnFailed,
 } from '@cindy/maker-shared/message-render';
 import {
@@ -14380,7 +14381,12 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         ...(typeof m.agentMeta?.model === 'string' && m.agentMeta.model
           ? { model: m.agentMeta.model }
           : {}),
-        ...(typeof m.agentMeta?.parentUuid === 'string' && m.agentMeta.parentUuid
+        // 只提升 SDK tool-parent 形态(toolu_ / call_):legacy Claude 导入把
+        // transcript 链边(preceding-user-uuid 这类非 RFC 串)也存在 parentUuid 上,
+        // 无条件提升会让顶层计划行被判成子代理、普通 user 行被当成合成边界,而
+        // 保留裸字段的 mobile / main 不会——同一份历史两端分组分叉(review P2)。
+        ...(typeof m.agentMeta?.parentUuid === 'string' &&
+        isSubagentParentToolUseId(m.agentMeta.parentUuid)
           ? { parentToolUseId: m.agentMeta.parentUuid }
           : {}),
       };

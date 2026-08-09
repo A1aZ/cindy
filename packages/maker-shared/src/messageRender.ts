@@ -522,6 +522,19 @@ function hasSubagentParent(message: MessageRenderSourceMessageLike): boolean {
 /** Live Claude/Codex SDK tool-use ids;裸 uuid 形态的 legacy transcript 链边不算。 */
 const SUBAGENT_PARENT_ID_RE = /^(?:toolu|call)[_-]/iu;
 
+/**
+ * 投影侧共用的同一条判据:这个字符串是不是 SDK 的 tool-parent id 形态。
+ *
+ * 把 DB 行的裸 `agentMeta.parentUuid` 提升成显式 `parentToolUseId` 的投影(desktop
+ * 渲染层的历史恢复)必须先过这一关 —— legacy Claude 导入把 transcript 链边
+ * (`preceding-user-uuid` 这类非 RFC 串)存在同一个键上,无条件提升会让顶层计划行
+ * 被判成子代理、普通 user 行被当成合成边界,而保留裸字段的 mobile / main 不会,
+ * 于是同一份历史在两端分组不同(review P2)。
+ */
+export function isSubagentParentToolUseId(value: string): boolean {
+  return isSubagentParentId(value);
+}
+
 function isSubagentParentId(value: string): boolean {
   return SUBAGENT_PARENT_ID_RE.test(value.trim());
 }

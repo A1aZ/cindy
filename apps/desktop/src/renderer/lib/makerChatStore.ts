@@ -14466,7 +14466,8 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         ...(typeof m.agentMeta?.model === 'string' && m.agentMeta.model
           ? { model: m.agentMeta.model }
           : {}),
-        ...(typeof m.agentMeta?.parentUuid === 'string' && m.agentMeta.parentUuid
+        ...(typeof m.agentMeta?.parentUuid === 'string' &&
+        isSubagentParentToolUseId(m.agentMeta.parentUuid)
           ? { parentToolUseId: m.agentMeta.parentUuid }
           : {}),
       };
@@ -14642,7 +14643,12 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
         ...(hookSource ? { hookSource } : {}),
         // 子代理内部的 user 行(SDK parent_tool_use_id):投影给计划归属判定,
         // 否则 maker-shared 会把它当成"用户开新话题"切断主线程计划 session。
-        ...(typeof m.agentMeta?.parentUuid === 'string' && m.agentMeta.parentUuid
+        // 只提升 SDK tool-parent 形态:legacy Claude 导入把 transcript 链边
+        // (preceding-user-uuid 这类非 RFC 串)也存在 parentUuid 上,无条件提升会
+        // 反过来把**普通 user 行**当成子代理内部消息,新计划继续复用旧 session/key、
+        // 跨话题合并计划卡(review P1)。
+        ...(typeof m.agentMeta?.parentUuid === 'string' &&
+        isSubagentParentToolUseId(m.agentMeta.parentUuid)
           ? { parentToolUseId: m.agentMeta.parentUuid }
           : {}),
       };
@@ -14780,7 +14786,8 @@ function mapServerMessages(serverMsgs: Message[]): ChatMessage[] {
       ...(typeof m.agentMeta?.model === 'string' && m.agentMeta.model
         ? { model: m.agentMeta.model }
         : {}),
-      ...(typeof m.agentMeta?.parentUuid === 'string' && m.agentMeta.parentUuid
+      ...(typeof m.agentMeta?.parentUuid === 'string' &&
+      isSubagentParentToolUseId(m.agentMeta.parentUuid)
         ? { parentToolUseId: m.agentMeta.parentUuid }
         : {}),
       isStreaming: false,

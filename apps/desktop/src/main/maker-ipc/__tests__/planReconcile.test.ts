@@ -177,6 +177,21 @@ describe('buildPlanReconcileNote', () => {
     expect(note).toContain('以下是用户的新消息');
   });
 
+  it('clamps长步骤与步骤内换行,注入段大小与计划无关', () => {
+    // 步骤内容由模型自由生成、无长度约束:原样注入会让一份异常(或被诱导生成的)
+    // 计划显著占用下一轮上下文,极端情况把用户的真正问题挤过输入上限(review P2)。
+    const note = buildPlanReconcileNote({
+      openSteps: [`${'很长的步骤'.repeat(200)}\n第二行\n\n第三行`],
+      totalSteps: 1,
+    });
+    const stepLine = note.split('\n').find((line) => line.startsWith('- '));
+    expect(stepLine).toBeDefined();
+    // 换行折成空格 → 清单结构不被撑散;整行长度有界。
+    expect(stepLine!.length).toBeLessThanOrEqual(2 + 160 + 1);
+    expect(stepLine!.endsWith('…')).toBe(true);
+    expect(note.split('\n').filter((line) => line.startsWith('- ')).length).toBe(1);
+  });
+
   it('caps the listed steps and notes the remainder', () => {
     const note = buildPlanReconcileNote({
       openSteps: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'],

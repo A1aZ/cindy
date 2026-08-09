@@ -94,10 +94,30 @@ export function summarizeOpenPlan(
   return { openSteps, totalSteps: insertion.todos.length };
 }
 
+/** 最多列出的未完成步骤数,其余折成计数。 */
+const MAX_LISTED_STEPS = 6;
+/**
+ * 单条步骤文本的上限。步骤内容由模型自由生成、没有任何长度约束,原样注入会让
+ * 一份异常(或被提示诱导生成)的计划显著占用下一轮上下文,极端情况把用户的真正
+ * 问题挤过输入上限(review P2)。同时把步骤内换行折成空格——注入段用换行分隔
+ * 条目,步骤自带换行会把清单结构撑散。
+ */
+const MAX_STEP_TEXT_CHARS = 160;
+
+function clampStepText(step: string): string {
+  const collapsed = step.replace(/\s+/gu, ' ').trim();
+  return collapsed.length > MAX_STEP_TEXT_CHARS
+    ? `${collapsed.slice(0, MAX_STEP_TEXT_CHARS)}…`
+    : collapsed;
+}
+
 /**
  * 对账指示文本。三个出口穷尽所有情况(继续 / 修订 / 清掉),且明确授权删除——
  * 不授权的话模型倾向于"计划不能丢",会把不相干的旧清单硬拖进新话题。
  * 结尾用与 agentHandoff 同款的"以下是用户的新消息"边界,让正文归位。
+ *
+ * 注入段整体有界:最多 MAX_LISTED_STEPS 条 × MAX_STEP_TEXT_CHARS 字符 + 固定文案,
+ * 与计划本身的大小无关。
  */
 export function buildPlanReconcileNote(summary: OpenPlanSummary): string {
   // 全勾完但 turn 失败收尾的清单:没有未完成步骤可列,让 agent 确认后收口
@@ -110,9 +130,14 @@ export function buildPlanReconcileNote(summary: OpenPlanSummary): string {
     '== 对账说明结束,以下是用户的新消息 ==',
     ].join('\n');
   }
-  const steps = summary.openSteps.slice(0, 6).map((step) => `- ${step}`).join('\n');
+  const steps = summary.openSteps
+    .slice(0, MAX_LISTED_STEPS)
+    .map((step) => `- ${clampStepText(step)}`)
+    .join('\n');
   const more =
-    summary.openSteps.length > 6 ? `\n(另有 ${summary.openSteps.length - 6} 项未列出)` : '';
+    summary.openSteps.length > MAX_LISTED_STEPS
+      ? `\n(另有 ${summary.openSteps.length - MAX_LISTED_STEPS} 项未列出)`
+      : '';
   return [
     '[计划对账]上一轮留有未完成的计划步骤:',
     `${steps}${more}`,

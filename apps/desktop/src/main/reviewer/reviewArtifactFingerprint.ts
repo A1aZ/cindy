@@ -110,6 +110,11 @@ async function addFile(
   stat: Stats,
   state: FingerprintState,
 ): Promise<void> {
+  if (stat.nlink > 1) {
+    throw new ReviewArtifactFingerprintChangedError(
+      'Review refused a multiply linked file in its artifact workspace',
+    );
+  }
   if (
     !Number.isSafeInteger(stat.size) ||
     stat.size < 0 ||
@@ -128,7 +133,11 @@ async function addFile(
   try {
     handle = await state.openFile(absolutePath, constants.O_RDONLY | NOFOLLOW_FLAG);
     const opened = await handle.stat();
-    if (!opened.isFile() || !reviewArtifactPathIdentityMatches(stat, opened)) {
+    if (
+      !opened.isFile() ||
+      opened.nlink > 1 ||
+      !reviewArtifactPathIdentityMatches(stat, opened)
+    ) {
       throw new ReviewArtifactFingerprintChangedError(
         'A review artifact changed while its content fingerprint was being prepared',
       );
@@ -140,8 +149,10 @@ async function addFile(
     if (
       bytesRead !== opened.size ||
       !reviewArtifactPathIdentityMatches(opened, afterHandle) ||
+      afterHandle.nlink > 1 ||
       !afterPath ||
       afterPath.isSymbolicLink() ||
+      afterPath.nlink > 1 ||
       !reviewArtifactPathIdentityMatches(opened, afterPath)
     ) {
       throw new ReviewArtifactFingerprintChangedError(

@@ -135,6 +135,11 @@ export async function authorizeReviewExplicitArtifacts(input: {
         'A review artifact changed while permission was being prepared',
       );
     }
+    if (stat.isFile() && stat.nlink > 1) {
+      throw new ReviewArtifactAuthorizationError(
+        'Review refused a multiply linked artifact file',
+      );
+    }
     const existingIdentity = pathIdentities.get(resolved.absPath);
     if (existingIdentity && !reviewArtifactPathIdentityMatches(existingIdentity, stat)) {
       throw new ReviewArtifactAuthorizationError(

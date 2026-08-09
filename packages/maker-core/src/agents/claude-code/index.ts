@@ -157,13 +157,12 @@ import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
 import { scanClaudeCustomizations } from './customization-scanner.js';
 import {
   REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
-  isReviewSensitiveCredentialPath,
   isReviewSensitiveCredentialSelector,
 } from '../shared/sensitive-credential-paths.js';
 import {
   assertReviewMessageContentPaths,
   buildReviewReadGrants,
-  pathIsWithinReviewGrant,
+  resolveReviewReadPath,
   type ReviewReadGrant,
 } from '../shared/review-read-scope.js';
 
@@ -331,15 +330,7 @@ async function reviewReadToolIsInScope(params: {
     typeof raw === 'string' && raw.trim()
       ? path.resolve(params.workingDir, raw)
       : params.workingDir;
-  if (isReviewSensitiveCredentialPath(candidate)) return false;
-  let realPath: string;
-  try {
-    realPath = await fs.realpath(candidate);
-  } catch {
-    return false;
-  }
-  if (isReviewSensitiveCredentialPath(realPath)) return false;
-  return params.grants.some((grant) => pathIsWithinReviewGrant(realPath, grant));
+  return (await resolveReviewReadPath(candidate, params.workingDir, params.grants)) !== null;
 }
 
 /**

@@ -286,6 +286,11 @@ async function copyOpenFile(
     if (!before.isFile()) {
       throw new ReviewArtifactAuthorizationError('Review only snapshots regular files');
     }
+    if (before.nlink > 1) {
+      throw new ReviewArtifactAuthorizationError(
+        'Review refused a multiply linked artifact file',
+      );
+    }
     if (before.size > MAX_SNAPSHOT_FILE_BYTES) {
       throw new ReviewArtifactAuthorizationError(
         'A review artifact is larger than the 64 MB local snapshot limit',
@@ -315,8 +320,10 @@ async function copyOpenFile(
     if (
       sourceOffset !== before.size ||
       !reviewArtifactSnapshotStatMatches(before, after) ||
+      after.nlink > 1 ||
       !afterPath ||
       afterPath.isSymbolicLink() ||
+      afterPath.nlink > 1 ||
       !reviewArtifactPathIdentityMatches(expectedIdentity, afterPath)
     ) {
       throw new ReviewArtifactAuthorizationError(
@@ -408,6 +415,11 @@ export async function materializeReviewArtifactSnapshots(input: {
       }
       if (!entry.isFile()) {
         throw new ReviewArtifactAuthorizationError('Review only snapshots regular files');
+      }
+      if (entry.nlink > 1) {
+        throw new ReviewArtifactAuthorizationError(
+          'Review refused a multiply linked artifact file',
+        );
       }
 
       if (!snapshotRoot) {

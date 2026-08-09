@@ -46,6 +46,27 @@ describe('authorizeReviewExplicitArtifacts', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
+  it('rejects a pre-existing hard-linked artifact before confirmation', async () => {
+    if (process.platform === 'win32') return;
+    const workingDir = await tempDir();
+    const externalDir = await tempDir();
+    const outside = path.join(externalDir, 'outside-secret.txt');
+    const linked = path.join(externalDir, 'linked.txt');
+    await fs.writeFile(outside, 'sensitive bytes');
+    await fs.link(outside, linked);
+    const confirm = vi.fn(async () => true);
+
+    await expect(
+      authorizeReviewExplicitArtifacts({
+        workingDir,
+        attachments: [{ name: 'linked.txt', path: linked }],
+        resolvePath: async () => ({ absPath: linked, managed: false }),
+        confirm,
+      }),
+    ).rejects.toThrow(/multiply linked/i);
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
   it('requires a one-run confirmation for external paths and rejects cancellation', async () => {
     const workingDir = await tempDir();
     const externalDir = await tempDir();

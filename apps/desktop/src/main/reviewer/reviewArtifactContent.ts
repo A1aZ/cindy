@@ -148,6 +148,7 @@ async function readPathBounded(
     // path between the size check and the unbounded read.
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error('not a regular file');
+    if (stat.nlink > 1) throw new Error('multiply linked artifact file');
     if (options.rejectOversize && stat.size > limit) {
       throw new ReviewArtifactTooLargeError(`artifact exceeds ${limit} bytes`);
     }
@@ -160,7 +161,11 @@ async function readPathBounded(
       bytesRead += chunk.bytesRead;
     }
     const finalStat = await handle.stat();
-    if (finalStat.size !== stat.size || finalStat.mtimeMs !== stat.mtimeMs) {
+    if (
+      finalStat.nlink > 1 ||
+      finalStat.size !== stat.size ||
+      finalStat.mtimeMs !== stat.mtimeMs
+    ) {
       throw new Error('file changed while it was being read');
     }
     return {

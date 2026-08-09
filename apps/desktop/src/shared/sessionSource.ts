@@ -17,6 +17,10 @@ export const SESSION_SOURCES = [
 
 export type SessionSource = (typeof SESSION_SOURCES)[number];
 
+export function isReviewSessionSource(source: unknown): source is 'review' {
+  return source === 'review';
+}
+
 // desktop sidebar 展示的会话 source 白名单。
 // slack: IM 渠道自动建的会话——用户在 Slack 发消息后 desktop 同步可见。
 // telegram: 共享 Cindy Telegram bot 派发并在本机执行的会话。

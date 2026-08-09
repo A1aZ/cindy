@@ -197,6 +197,21 @@ describe('review artifact fingerprint', () => {
     expect(openFile).not.toHaveBeenCalled();
   });
 
+  it('rejects a hard link that already exists inside the artifact workspace', async () => {
+    if (process.platform === 'win32') return;
+    const root = await makeTempDir();
+    const workspace = path.join(root, 'workspace');
+    const outside = path.join(root, 'outside-secret.txt');
+    const linked = path.join(workspace, 'linked.txt');
+    await fs.mkdir(workspace);
+    await fs.writeFile(outside, 'sensitive bytes');
+    await fs.link(outside, linked);
+
+    await expect(fingerprintReviewArtifacts([workspace])).rejects.toBeInstanceOf(
+      ReviewArtifactFingerprintChangedError,
+    );
+  });
+
   it('rejects a same-size replacement between extraction and the first baseline', async () => {
     const dir = await makeTempDir();
     const file = path.join(dir, 'draft.txt');

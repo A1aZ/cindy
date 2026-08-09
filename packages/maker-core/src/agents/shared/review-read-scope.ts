@@ -68,6 +68,9 @@ export async function buildReviewReadGrants(
     if (!stat.isDirectory() && !stat.isFile()) {
       throw new Error("Review paths must refer to files or directories");
     }
+    if (stat.isFile() && stat.nlink > 1) {
+      throw new Error("Review refused a multiply linked local file");
+    }
     if (!grants.some((grant) => grant.realPath === realPath)) {
       grants.push({ realPath, directory: stat.isDirectory() });
     }
@@ -95,6 +98,14 @@ export async function resolveReviewReadPath(
     return null;
   }
   if (isReviewSensitiveCredentialPath(realPath)) return null;
+  const stat = await fs.stat(realPath).catch(() => null);
+  if (
+    !stat ||
+    (!stat.isDirectory() && !stat.isFile()) ||
+    (stat.isFile() && stat.nlink > 1)
+  ) {
+    return null;
+  }
   return grants.some((grant) => pathIsWithinReviewGrant(realPath, grant))
     ? realPath
     : null;

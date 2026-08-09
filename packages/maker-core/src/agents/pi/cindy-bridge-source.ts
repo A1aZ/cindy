@@ -182,10 +182,13 @@ function reviewReadIsAllowed(candidate: string, allowedPaths: string[]): boolean
     if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(requested))) return false;
     const target = realpathSync(requested);
     if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(target))) return false;
+    const targetStat = statSync(target);
+    if (targetStat.isFile() && targetStat.nlink > 1) return false;
     return allowedPaths.some((allowedPath) => {
       try {
         const allowed = realpathSync(allowedPath);
         const stat = statSync(allowed);
+        if (stat.isFile() && stat.nlink > 1) return false;
         return stat.isDirectory() ? isInsideRoot(target, allowed) : target === allowed;
       } catch {
         return false;
@@ -322,6 +325,16 @@ function reviewSearchPathTouchesCredential(candidate: string, baseDir = process.
   }
 }
 
+function reviewSearchPathHasMultipleLinks(candidate: string, baseDir = process.cwd()): boolean {
+  try {
+    const target = realpathSync(path.resolve(baseDir, candidate));
+    const stat = statSync(target);
+    return stat.isFile() && stat.nlink > 1;
+  } catch {
+    return true;
+  }
+}
+
 function reviewGrepOutputPath(line: string): string | null {
   const match = /^(.*?)(?::\d+:|-\d+-)/.exec(line);
   return match?.[1] ?? null;
@@ -350,6 +363,7 @@ function filterReviewGrepResult(result: any, input: unknown): any {
       const candidate = reviewGrepOutputPath(line);
       if (!candidate) return true;
       if (reviewSearchPathTouchesCredential(candidate, resultBase)) return false;
+      if (reviewSearchPathHasMultipleLinks(candidate, resultBase)) return false;
       visibleMatch = true;
       return true;
     });
@@ -700,6 +714,7 @@ function rgGlob(
       if (!line || lines.length >= limit) return;
       const relative = line.replace(/\r$/, '');
       if (reviewOnly && reviewSearchPathTouchesCredential(relative, cwd)) return;
+      if (reviewOnly && reviewSearchPathHasMultipleLinks(relative, cwd)) return;
       // 完整镜像 Pi 上游 fd 规则：无 slash 时匹配 basename；有 slash 时启用
       // full-path，且相对 pattern 自动加 **/，让 src/** 同时命中 monorepo 子包。
       let candidate = path.basename(relative);

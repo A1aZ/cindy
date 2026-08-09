@@ -148,6 +148,24 @@ describe('materializeReviewArtifactSnapshots', () => {
     ).rejects.toBeInstanceOf(ReviewArtifactAuthorizationError);
   });
 
+  it('rejects a hard link that already exists when snapshotting starts', async () => {
+    if (process.platform === 'win32') return;
+    const workingDir = await tempDir();
+    const externalDir = await tempDir();
+    const outside = path.join(externalDir, 'outside-secret.txt');
+    const linked = path.join(externalDir, 'linked.txt');
+    await fs.writeFile(outside, 'sensitive bytes');
+    await fs.link(outside, linked);
+
+    await expect(
+      materializeReviewArtifactSnapshots({
+        workingDir,
+        grant: await grantFor([linked]),
+        owner: TEST_OWNER,
+      }),
+    ).rejects.toThrow(/multiply linked/i);
+  });
+
   it('rejects an atomic replacement after the original path was authorized', async () => {
     const workingDir = await tempDir();
     const externalDir = await tempDir();

@@ -76,6 +76,8 @@ describe('cindy-bridge extension source', () => {
     expect(source).toContain(
       'stat.isDirectory() ? isInsideRoot(target, allowed) : target === allowed',
     );
+    expect(source).toContain('targetStat.isFile() && targetStat.nlink > 1');
+    expect(source).toContain('reviewSearchPathHasMultipleLinks');
     expect(source).toContain('REVIEW_CREDENTIAL_PATH_PATTERNS.some');
     expect(source).toContain('REVIEW_CREDENTIAL_GLOB_PATTERNS.some');
   });

@@ -219,4 +219,25 @@ describe('extractReviewArtifactContent', () => {
     expect(result.warnings[0]?.message).toContain('大于 20 MB');
     await expect(fs.stat(renamed)).resolves.toBeDefined();
   });
+
+  it('does not extract content from a pre-existing hard-linked file', async () => {
+    if (process.platform === 'win32') return;
+    const dir = await tempDir();
+    const outside = path.join(dir, 'outside-secret.md');
+    const linked = path.join(dir, 'linked.md');
+    await fs.writeFile(outside, 'sensitive bytes');
+    await fs.link(outside, linked);
+
+    const result = await extractReviewArtifactContent({
+      label: 'linked.md',
+      category: 'text',
+      filePath: linked,
+      maxChars: 24_000,
+    });
+
+    expect(result.excerpt).toBeNull();
+    expect(result.warnings.map((item) => item.message).join('\n')).toContain(
+      'multiply linked artifact file',
+    );
+  });
 });

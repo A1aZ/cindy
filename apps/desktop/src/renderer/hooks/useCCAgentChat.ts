@@ -749,10 +749,10 @@ export function useCCAgentChat(
     lightState.isStreaming ||
     lightState.agentStatus.isRunning ||
     hasPendingSteer ||
-    // 远程会话豁免 pendingTaskWake:镜像事件有设计内的丢失窗口(断连/重连),
-    // taskUpdates 不在 reconcile 对账覆盖内,终态 drop 后无自愈路径。与
-    // makerChatStore.hasBackgroundAgentWork 的远程豁免同口径。
-    (lightState.pendingTaskWake && sessionId && !isRemoteSession(sessionId)) ||
+    // 远程会话豁免 pendingTaskWake:device-link 与 SSH 镜像事件有设计内的丢失
+    // 窗口(断连/重连),taskUpdates 不在 reconcile 对账覆盖内,终态 drop 后无自愈
+    // 路径。与 makerChatStore.hasBackgroundAgentWork 的远程豁免同口径。
+    (lightState.pendingTaskWake && sessionId && !isRemoteSession(sessionId) && !makerChatStore.getSnapshot(sessionId)?.remoteHostId) ||
     (pendingQueueLength > 0 && !lightState.queuePaused);
 
   const setQueueExpanded = useCallback(

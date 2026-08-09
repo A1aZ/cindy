@@ -1161,6 +1161,15 @@ body.resizing-pane [data-ghost-webview] {
   contain-intrinsic-size: auto 240px;
 }
 
+/* Fixed-position menu triggers must keep the viewport as their containing
+   block. Their menu content is portaled to body, but Radix still measures the
+   zero-size trigger inside the render item. Opt only those items out of the
+   containment boundary; plain text items keep the render-skip optimization. */
+.msg-stream-items > *:has([data-fixed-menu-anchor]) {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
+}
+
 /* 意识卡片 running 扫光(卡槽③):主机盖在意识画布上的斜向光带。
    transform-only(规则 7 compositor-only);仅 running 挂载,settle 即卸,
    历史卡永远静止(净化器已剥意识自带动画,动感统一由主机供给)。 */

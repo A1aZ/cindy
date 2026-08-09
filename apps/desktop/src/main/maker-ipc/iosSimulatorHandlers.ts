@@ -111,6 +111,8 @@ export interface IOSSimulatorHandlerDeps {
   setViewerStreamProfile(
     sessionId: string,
     route: { instanceId: string; generation: number; leaseId: string },
+    viewerWebContentsId: number,
+    viewerToken: string,
     profile: { framesPerSecond: number; jpegQuality: number; scalingPercent: number },
     nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
   ): Promise<IOSSimulatorToolResponse>;
@@ -476,7 +478,14 @@ export function registerIOSSimulatorHandlers(
   handle(MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, async (event, payload) => {
     const record = readRecord(payload);
     const sessionId = readSessionId(record);
-    assertSenderSession(event, sessionId);
+    const viewerWebContentsId = assertSenderSession(event, sessionId);
+    const viewerToken = record.viewerToken;
+    if (typeof viewerToken !== 'string' || !viewerToken.trim() || viewerToken.length > 128) {
+      throwIpcError(
+        'INVALID_PARAMS',
+        'viewerToken must be a non-empty string of at most 128 chars',
+      );
+    }
     const profile = record.profile;
     if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
       throwIpcError('INVALID_PARAMS', 'profile must be an object');
@@ -518,7 +527,14 @@ export function registerIOSSimulatorHandlers(
       scalingPercent: Number(candidate.scalingPercent),
     };
     return callIOSSimulatorHostForSession(event, sessionId, 'set-stream-profile', () =>
-      resolved.setViewerStreamProfile(sessionId, route, streamProfile, nativeProfile),
+      resolved.setViewerStreamProfile(
+        sessionId,
+        route,
+        viewerWebContentsId,
+        viewerToken.trim(),
+        streamProfile,
+        nativeProfile,
+      ),
     );
   });
   handle(MAKER_INVOKE.IOS_SIMULATOR_LIVE_TOUCH, async (event, payload) => {

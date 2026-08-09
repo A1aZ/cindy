@@ -301,6 +301,7 @@ export function IOSSimulatorTabBody({
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [textInput, setTextInput] = useState('');
   const [streamProfile, setStreamProfile] = useState<StreamProfileName>('balanced');
+  const [viewerReadyToken, setViewerReadyToken] = useState<string | null>(null);
   const requestVersionRef = useRef(0);
   const frameSequenceRef = useRef(0);
   const frameEncodingRef = useRef<'jpeg' | 'h264' | null>(null);
@@ -310,8 +311,14 @@ export function IOSSimulatorTabBody({
   const streamProfileRef = useRef<StreamProfileName>('balanced');
   const profileRouteRef = useRef<{
     routeKey: string | null;
+    viewerToken: string | null;
     nativeSelected: boolean;
     nativeActive: boolean;
+  } | null>(null);
+  const viewerIdentityRef = useRef<{
+    routeKey: string;
+    viewerToken: string;
+    ready: Promise<boolean>;
   } | null>(null);
   const nativeProfileAppliedRef = useRef<{
     routeKey: string;
@@ -584,7 +591,8 @@ export function IOSSimulatorTabBody({
   useEffect(() => {
     if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
     const route = { sessionId: ctx.sessionId, ...routeFor(attachedInstance) };
-    const viewerRoute = { ...route, viewerToken: window.crypto.randomUUID() };
+    const viewerToken = window.crypto.randomUUID();
+    const viewerRoute = { ...route, viewerToken };
     let cancelled = false;
     let polling = false;
     let nextRecoveryAt = 0;
@@ -596,6 +604,22 @@ export function IOSSimulatorTabBody({
     let routeInactive = false;
     let foregroundRecoveryArmed = document.visibilityState !== 'visible';
     const routeKey = `${route.instanceId}:${route.generation}`;
+    let viewerReadySettled = false;
+    let resolveViewerReady!: (ready: boolean) => void;
+    const viewerReady = new Promise<boolean>((resolve) => {
+      resolveViewerReady = resolve;
+    });
+    const settleViewerReady = (ready: boolean) => {
+      if (viewerReadySettled) return;
+      viewerReadySettled = true;
+      resolveViewerReady(ready);
+    };
+    const clearViewerReady = () => {
+      setViewerReadyToken((current) => (current === viewerToken ? null : current));
+    };
+    setViewerReadyToken(null);
+    nativeProfileAppliedRef.current = null;
+    viewerIdentityRef.current = { routeKey, viewerToken, ready: viewerReady };
     const decoderRuntime = createBrowserIOSSimulatorH264DecoderRuntime();
     let decoder: IOSSimulatorH264Decoder | null = null;
     frameSequenceRef.current = 0;
@@ -656,6 +680,10 @@ export function IOSSimulatorTabBody({
     };
     const acceptViewerResult = (result: IOSSimulatorToolResponse) => {
       if (!result.ok) {
+        if (result.errorCode !== 'LEASE_EXPIRED' && result.errorCode !== 'STALE_GENERATION') {
+          settleViewerReady(false);
+          clearViewerReady();
+        }
         disconnectViewer();
         if (
           viewerVisible &&
@@ -671,10 +699,16 @@ export function IOSSimulatorTabBody({
       }
       const nextInstance = resultInstance(result);
       if (nextInstance && nextInstance.lifecycleState !== 'ready') {
+        settleViewerReady(false);
+        clearViewerReady();
         routeInactive = true;
         disconnectViewer();
         void refresh();
         return;
+      }
+      if (viewerVisible) {
+        settleViewerReady(true);
+        setViewerReadyToken(viewerToken);
       }
       acceptStream(resultStream(result));
       if (nextInstance) void refresh();
@@ -920,6 +954,11 @@ export function IOSSimulatorTabBody({
     void startViewer();
     return () => {
       cancelled = true;
+      settleViewerReady(false);
+      clearViewerReady();
+      if (viewerIdentityRef.current?.viewerToken === viewerToken) {
+        viewerIdentityRef.current = null;
+      }
       decoder?.close();
       unsubscribeH264Frame();
       document.removeEventListener('visibilitychange', recoverNativeOnForeground);
@@ -1030,9 +1069,15 @@ export function IOSSimulatorTabBody({
     ): Promise<IOSSimulatorToolResponse | null> => {
       if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return null;
       const route = routeFor(attachedInstance);
+      const routeKey = `${route.instanceId}:${route.generation}`;
+      const viewerIdentity = viewerIdentityRef.current;
+      if (!viewerIdentity || viewerIdentity.routeKey !== routeKey) return null;
+      if (!(await viewerIdentity.ready)) return null;
+      if (viewerIdentityRef.current?.viewerToken !== viewerIdentity.viewerToken) return null;
       const result = await window.electronAPI.maker.iosSimulator.setStreamProfile({
         sessionId: ctx.sessionId,
         ...route,
+        viewerToken: viewerIdentity.viewerToken,
         ...viewerStreamProfile(profileName, useNativeProfile),
       });
       if (result.ok) {
@@ -1077,19 +1122,11 @@ export function IOSSimulatorTabBody({
     streamProfileRef.current = 'balanced';
     nativeProfileAppliedRef.current = null;
     if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
-    void window.electronAPI.maker.iosSimulator
-      .setStreamProfile({
-        sessionId: ctx.sessionId,
-        ...routeFor(attachedInstance),
-        ...viewerStreamProfile('balanced', false),
-      })
-      .catch(() => undefined);
   }, [
     attachedInstance?.generation,
     attachedInstance?.instanceId,
     attachedInstance?.lease.id,
     attachedInstance?.lifecycleState,
-    ctx.sessionId,
   ]);
 
   const applyTransientStreamProfile = useCallback(
@@ -1103,14 +1140,21 @@ export function IOSSimulatorTabBody({
     const previous = profileRouteRef.current;
     const nextRoute = {
       routeKey: viewerRouteKey,
+      viewerToken: viewerReadyToken,
       nativeSelected: nativeH264Selected,
       nativeActive: nativeH264Active,
     };
     profileRouteRef.current = nextRoute;
-    if (!attachedInstance || attachedInstance.lifecycleState !== 'ready') return;
+    if (!attachedInstance || attachedInstance.lifecycleState !== 'ready' || !viewerReadyToken)
+      return;
+    const viewerChanged = previous?.viewerToken !== viewerReadyToken;
 
     if (!nativeH264Selected) {
-      if (previous?.nativeSelected || streamProfileRef.current === 'experimental60') {
+      if (
+        viewerChanged ||
+        previous?.nativeSelected ||
+        streamProfileRef.current === 'experimental60'
+      ) {
         const nextProfile =
           streamProfileRef.current === 'experimental60' ? 'high' : streamProfileRef.current;
         setStreamProfile(nextProfile);
@@ -1119,7 +1163,12 @@ export function IOSSimulatorTabBody({
       }
       return;
     }
-    if (!nativeH264Active || !viewerRouteKey) return;
+    if (!nativeH264Active || !viewerRouteKey) {
+      if (viewerChanged) {
+        void sendStreamProfile(streamProfileRef.current, false).catch(() => undefined);
+      }
+      return;
+    }
     const applied = nativeProfileAppliedRef.current;
     if (applied?.routeKey === viewerRouteKey && applied.profile === streamProfileRef.current)
       return;
@@ -1134,6 +1183,7 @@ export function IOSSimulatorTabBody({
     nativeH264Active,
     nativeH264Selected,
     sendStreamProfile,
+    viewerReadyToken,
     viewerRouteKey,
   ]);
 

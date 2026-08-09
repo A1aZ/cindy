@@ -689,26 +689,37 @@ describe('iOS Simulator IPC handlers', () => {
     };
     await harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
       ...route,
+      viewerToken: 'viewer-token',
       profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
       nativeProfile: { framesPerSecond: 60, scalingPercent: 70 },
     });
     expect(setViewerStreamProfile).toHaveBeenCalledWith(
       'session-a',
       { instanceId: 'instance-a', generation: 3, leaseId: 'lease-a' },
+      17,
+      'viewer-token',
       { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
       { framesPerSecond: 60, scalingPercent: 70 },
     );
     await expect(
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
         ...route,
+        viewerToken: 'viewer-token',
         profile: { framesPerSecond: '10', jpegQuality: 45, scalingPercent: 70 },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
     await expect(
       harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
         ...route,
+        viewerToken: 'viewer-token',
         profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
         nativeProfile: { framesPerSecond: '60', scalingPercent: 70 },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+    await expect(
+      harness.invokeFrom(17, MAKER_INVOKE.IOS_SIMULATOR_SET_STREAM_PROFILE, {
+        ...route,
+        profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
       }),
     ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
   });

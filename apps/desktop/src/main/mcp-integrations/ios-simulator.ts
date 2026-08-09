@@ -269,6 +269,8 @@ export interface IOSSimulatorHost {
   setViewerStreamProfile(
     sessionId: string,
     route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+    viewerWebContentsId: number,
+    viewerToken: string,
     profile: IOSSimulatorStreamProfile,
     nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
   ): Promise<IOSSimulatorHostResult>;
@@ -3400,13 +3402,15 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
     sessionId: string,
     instanceId: string,
     viewerWebContentsId: number,
+    viewerToken?: string,
   ): void {
     const viewer = viewerSessions.get(instanceId);
     if (
       !viewer ||
       viewer.sessionId !== sessionId ||
       viewer.webContentsId === null ||
-      viewer.webContentsId !== viewerWebContentsId
+      viewer.webContentsId !== viewerWebContentsId ||
+      (viewerToken !== undefined && viewer.viewerToken !== viewerToken)
     ) {
       throw new IOSSimulatorInstanceError(
         'INSTANCE_NOT_OWNED',
@@ -4171,7 +4175,14 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         return safeHostError(error, sessionId, `viewer_touch_${touch.phase}`);
       }
     },
-    async setViewerStreamProfile(sessionId, route, profile, nativeProfile) {
+    async setViewerStreamProfile(
+      sessionId,
+      route,
+      viewerWebContentsId,
+      viewerToken,
+      profile,
+      nativeProfile,
+    ) {
       let removalBarrierOperation: IOSSimulatorSessionRemovalBarrierOperation | null = null;
       try {
         assertHostActive();
@@ -4180,6 +4191,7 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         removalBarrierOperation = resolved.removalBarrierOperation ?? null;
         assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
+        assertCurrentViewer(resolved.sessionId, route.instanceId, viewerWebContentsId, viewerToken);
         if (
           !Number.isSafeInteger(profile.framesPerSecond) ||
           profile.framesPerSecond < 1 ||
@@ -4211,6 +4223,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           );
         }
         const instance = actor.heartbeat({ ...route, sessionId: resolved.sessionId });
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
         const running = getDriverManager().get(instance.instanceId);
         const activeNativeDriver =
           nativeProfile && running ? activeNativeH264Driver(instance.instanceId, running) : null;
@@ -4224,6 +4242,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
           // The viewer may request its fallback profile while WDA is being rebuilt.
           // Native-only intent is rejected above because no active route can prove it.
           assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
+          assertCurrentViewer(
+            resolved.sessionId,
+            instance.instanceId,
+            viewerWebContentsId,
+            viewerToken,
+          );
           streamProfiles.set(instance.instanceId, profile);
           nativeStreamProfiles.delete(instance.instanceId);
           return { ok: true, data: { profile } };
@@ -4231,6 +4255,12 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
         const applied = await running.driver.configureStream(running.driverSessionId, profile);
         assertSessionRemovalAdmission(resolved.sessionId, removalBarrierOperation);
         assertHostActive();
+        assertCurrentViewer(
+          resolved.sessionId,
+          instance.instanceId,
+          viewerWebContentsId,
+          viewerToken,
+        );
         streamProfiles.set(instance.instanceId, applied);
         if (nativeProfile) nativeStreamProfiles.set(instance.instanceId, nativeProfile);
         else nativeStreamProfiles.delete(instance.instanceId);
@@ -6582,12 +6612,16 @@ export function cleanupIOSSimulatorRemovedSession(sessionId: string): Promise<vo
 export function setIOSSimulatorViewerStreamProfile(
   sessionId: string,
   route: Omit<IOSSimulatorMutationRoute, 'sessionId'>,
+  viewerWebContentsId: number,
+  viewerToken: string,
   profile: IOSSimulatorStreamProfile,
   nativeProfile?: IOSSimulatorNativeH264StreamProfileRequest,
 ): Promise<IOSSimulatorHostResult> {
   return initializeIOSSimulatorHost().setViewerStreamProfile(
     sessionId,
     route,
+    viewerWebContentsId,
+    viewerToken,
     profile,
     nativeProfile,
   );

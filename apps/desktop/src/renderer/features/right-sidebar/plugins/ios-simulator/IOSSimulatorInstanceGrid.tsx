@@ -431,6 +431,9 @@ export function IOSSimulatorInstanceGrid({
       image.onerror = () => URL.revokeObjectURL(url);
       image.src = url;
     };
+    const viewerTokens = new Map(
+      readyInstances.map((instance) => [instance.instanceId, window.crypto.randomUUID()]),
+    );
     const setVisibility = async (visible: boolean) => {
       await Promise.all(
         readyInstances.map(async (instance) => {
@@ -439,6 +442,7 @@ export function IOSSimulatorInstanceGrid({
             ...routeFor(instance),
             visible,
             preferredEncoding: 'jpeg' as const,
+            viewerToken: viewerTokens.get(instance.instanceId)!,
           };
           const result = await simulatorApi.setViewerVisibility(route).catch(() => null);
           if (cancelled) return;
@@ -449,7 +453,12 @@ export function IOSSimulatorInstanceGrid({
             instance.instanceId !== selectedInstanceId
           ) {
             await simulatorApi
-              .setStreamProfile({ sessionId, ...routeFor(instance), profile: BACKGROUND_PROFILE })
+              .setStreamProfile({
+                sessionId,
+                ...routeFor(instance),
+                viewerToken: viewerTokens.get(instance.instanceId)!,
+                profile: BACKGROUND_PROFILE,
+              })
               .catch(() => undefined);
           }
         }),

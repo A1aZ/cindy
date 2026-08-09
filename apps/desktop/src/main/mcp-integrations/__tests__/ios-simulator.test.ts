@@ -3515,9 +3515,13 @@ describe('iOS Simulator host', () => {
       endTouch,
     } as unknown as IOSSimulatorNativeSidecarDriver;
     const getWindowSize = vi.fn(async () => ({ width: 393, height: 852 }));
+    const configureStream = vi.fn(
+      async (_driverSessionId: string, profile: IOSSimulatorStreamProfile) => profile,
+    );
     const wdaDriver = {
       getWindowSize,
       getOrientation: vi.fn(async () => 'PORTRAIT' as const),
+      configureStream,
     };
     const capabilityReport = () => ({
       nativeSidecar: { available: true },
@@ -3662,6 +3666,67 @@ describe('iOS Simulator host', () => {
     await expect(
       host.setViewerVisibility('session-a', route, false, 'h264', undefined, 88, 'viewer-d-stale'),
     ).resolves.toMatchObject({ ok: true, data: { ignored: true } });
+
+    const profileCallsBeforeStaleRequest = configureStream.mock.calls.length;
+    await expect(
+      host.setViewerStreamProfile('session-a', route, 88, 'viewer-c', {
+        framesPerSecond: 10,
+        jpegQuality: 45,
+        scalingPercent: 70,
+      }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'INSTANCE_NOT_OWNED' });
+    expect(configureStream).toHaveBeenCalledTimes(profileCallsBeforeStaleRequest);
+
+    const staleProfileDeferred: {
+      resolve: ((profile: IOSSimulatorStreamProfile) => void) | null;
+    } = { resolve: null };
+    configureStream.mockImplementationOnce(
+      (_driverSessionId, profile) =>
+        new Promise((resolve) => {
+          staleProfileDeferred.resolve = resolve;
+          void profile;
+        }),
+    );
+    const staleProfileRequest = host.setViewerStreamProfile(
+      'session-a',
+      route,
+      88,
+      'viewer-e-current',
+      { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 },
+    );
+    await vi.waitFor(() => expect(staleProfileDeferred.resolve).not.toBeNull());
+    await expect(
+      host.setViewerVisibility(
+        'session-a',
+        route,
+        true,
+        'h264',
+        undefined,
+        88,
+        'viewer-profile-current',
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    staleProfileDeferred.resolve?.({
+      framesPerSecond: 10,
+      jpegQuality: 45,
+      scalingPercent: 70,
+    });
+    await expect(staleProfileRequest).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INSTANCE_NOT_OWNED',
+    });
+    await expect(
+      host.setViewerStreamProfile('session-a', route, 88, 'viewer-profile-current', {
+        framesPerSecond: 20,
+        jpegQuality: 70,
+        scalingPercent: 100,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      data: {
+        profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
+      },
+    });
 
     await expect(
       host.updateViewerTouch('session-a', route, 88, {
@@ -3900,7 +3965,7 @@ describe('iOS Simulator host', () => {
     };
 
     await expect(
-      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 77),
+      host.setViewerVisibility('session-a', route, true, 'h264', undefined, 77, 'viewer-token'),
     ).resolves.toMatchObject({
       ok: true,
       data: { stream: { state: 'connecting' } },
@@ -3953,6 +4018,8 @@ describe('iOS Simulator host', () => {
       host.setViewerStreamProfile(
         'session-a',
         route,
+        77,
+        'viewer-token',
         fallbackHighProfile,
         experimentalNativeProfile,
       ),
@@ -3964,6 +4031,8 @@ describe('iOS Simulator host', () => {
       host.setViewerStreamProfile(
         'session-a',
         route,
+        77,
+        'viewer-token',
         fallbackHighProfile,
         experimentalNativeProfile,
       ),
@@ -3985,7 +4054,7 @@ describe('iOS Simulator host', () => {
       }),
     );
     await expect(
-      host.setViewerStreamProfile('session-a', route, {
+      host.setViewerStreamProfile('session-a', route, 77, 'viewer-token', {
         framesPerSecond: 60,
         jpegQuality: 70,
         scalingPercent: 70,
@@ -4121,7 +4190,15 @@ describe('iOS Simulator host', () => {
 
     h264Snapshot = { ...h264Snapshot, state: 'connecting' };
     await expect(
-      host.setViewerVisibility('session-a', latestRoute, true, 'h264'),
+      host.setViewerVisibility(
+        'session-a',
+        latestRoute,
+        true,
+        'h264',
+        undefined,
+        77,
+        'viewer-token',
+      ),
     ).resolves.toMatchObject({
       ok: true,
       data: { stream: { state: 'connecting' } },
@@ -4137,11 +4214,27 @@ describe('iOS Simulator host', () => {
     );
 
     await expect(
-      host.setViewerVisibility('session-a', latestRoute, false, 'jpeg', undefined, 77),
+      host.setViewerVisibility(
+        'session-a',
+        latestRoute,
+        false,
+        'jpeg',
+        undefined,
+        77,
+        'viewer-token',
+      ),
     ).resolves.toMatchObject({ ok: true });
     nativeAvailable = false;
     await expect(
-      host.setViewerVisibility('session-a', latestRoute, true, 'h264', undefined, 77),
+      host.setViewerVisibility(
+        'session-a',
+        latestRoute,
+        true,
+        'h264',
+        undefined,
+        77,
+        'viewer-reopened',
+      ),
     ).resolves.toMatchObject({ ok: true });
     expect(driverManager.recoverNativeSidecar).toHaveBeenLastCalledWith(started.instanceId, {
       rearm: true,
@@ -6635,7 +6728,10 @@ describe('iOS Simulator host', () => {
       leaseId: instance.lease.id,
     };
     await expect(
-      host.setViewerStreamProfile('session-a', route, {
+      host.setViewerVisibility('session-a', route, true, 'jpeg', undefined, 17, 'viewer-token'),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      host.setViewerStreamProfile('session-a', route, 17, 'viewer-token', {
         framesPerSecond: 10,
         jpegQuality: 45,
         scalingPercent: 70,
@@ -6644,9 +6740,6 @@ describe('iOS Simulator host', () => {
       ok: true,
       data: { profile: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 } },
     });
-    await expect(
-      host.setViewerVisibility('session-a', route, true, 'jpeg', undefined, 17, 'viewer-token'),
-    ).resolves.toMatchObject({ ok: true });
     await expect(
       host.callTool('stop_instance', route, { sessionId: 'session-a', origin: 'agent' }),
     ).resolves.toMatchObject({ ok: false, errorCode: 'DEVICE_CONTROL_NOT_GRANTED' });
@@ -7360,7 +7453,7 @@ describe('iOS Simulator host', () => {
 
     running = null;
     await expect(
-      host.setViewerStreamProfile('session-a', route, {
+      host.setViewerStreamProfile('session-a', route, 17, 'viewer-token', {
         framesPerSecond: 20,
         jpegQuality: 70,
         scalingPercent: 100,

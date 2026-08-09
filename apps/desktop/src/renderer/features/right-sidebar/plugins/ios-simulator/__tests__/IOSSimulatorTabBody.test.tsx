@@ -794,6 +794,7 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         leaseId: instance.lease.id,
+        viewerToken: expect.any(String),
         profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
         nativeProfile: { framesPerSecond: 30, scalingPercent: 100 },
       });
@@ -806,6 +807,7 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         leaseId: instance.lease.id,
+        viewerToken: expect.any(String),
         profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
         nativeProfile: { framesPerSecond: 60, scalingPercent: 70 },
       });
@@ -857,8 +859,42 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         leaseId: instance.lease.id,
+        viewerToken: expect.any(String),
         profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
       });
+    });
+  });
+
+  it('waits for the exact viewer claim before applying its stream profile', async () => {
+    const api = installStatus(readyStatus());
+    let resolveViewerClaim!: (result: IOSSimulatorToolResponse) => void;
+    const viewerClaim = new Promise<IOSSimulatorToolResponse>((resolve) => {
+      resolveViewerClaim = resolve;
+    });
+    api.setViewerVisibility.mockImplementationOnce(async () => viewerClaim);
+
+    render(
+      <IOSSimulatorTabBody state={{ instanceId: 'instance-a' }} ctx={ctx} active shellVisible />,
+    );
+
+    await waitFor(() => expect(api.setViewerVisibility).toHaveBeenCalledTimes(1));
+    const viewerRequest = api.setViewerVisibility.mock.calls[0]![0];
+    expect(viewerRequest.viewerToken).toEqual(expect.any(String));
+    expect(api.setStreamProfile).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveViewerClaim(streamingJpegResult());
+      await viewerClaim;
+    });
+
+    await waitFor(() => {
+      expect(api.setStreamProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceId: 'instance-a',
+          viewerToken: viewerRequest.viewerToken,
+          profile: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 },
+        }),
+      );
     });
   });
 
@@ -929,23 +965,8 @@ describe('IOSSimulatorTabBody', () => {
           viewerToken: expect.any(String),
         }),
       );
-      expect(api.setStreamProfile).toHaveBeenCalledWith({
-        sessionId: 'session-a',
-        instanceId: 'instance-a',
-        generation: 2,
-        leaseId: 'lease-a',
-        profile: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 },
-      });
     });
-    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'high' } });
-    await waitFor(() => {
-      expect(api.setStreamProfile).toHaveBeenCalledWith(
-        expect.objectContaining({
-          instanceId: 'instance-a',
-          profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
-        }),
-      );
-    });
+    expect(api.setStreamProfile).not.toHaveBeenCalled();
     expect(api.latestFrame).not.toHaveBeenCalled();
 
     rendered.rerender(
@@ -955,7 +976,22 @@ describe('IOSSimulatorTabBody', () => {
       expect(api.setViewerVisibility).toHaveBeenCalledWith(
         expect.objectContaining({ instanceId: 'instance-a', visible: true }),
       );
+      expect(api.setStreamProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceId: 'instance-a',
+          profile: { framesPerSecond: 10, jpegQuality: 45, scalingPercent: 70 },
+        }),
+      );
       expect(api.latestFrame).toHaveBeenCalled();
+    });
+    fireEvent.change(screen.getByRole('combobox'), { target: { value: 'high' } });
+    await waitFor(() => {
+      expect(api.setStreamProfile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          instanceId: 'instance-a',
+          profile: { framesPerSecond: 20, jpegQuality: 70, scalingPercent: 100 },
+        }),
+      );
     });
 
     rendered.rerender(

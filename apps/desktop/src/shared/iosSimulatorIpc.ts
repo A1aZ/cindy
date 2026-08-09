@@ -189,6 +189,8 @@ export type IOSSimulatorNativeH264StreamProfileRequest = Pick<
 >;
 
 export interface IOSSimulatorStreamProfileRequest extends IOSSimulatorViewerRouteRequest {
+  /** Exact viewer effect lifetime that currently owns stream presentation. */
+  viewerToken: string;
   /** Exact compatibility profile kept ready for WDA/MJPEG fallback. */
   profile: IOSSimulatorStreamProfile;
   /** Optional product profile accepted only while Native H.264 is active. */

@@ -296,10 +296,14 @@ describe('readInstalledGhostManual', () => {
       await write('docs/physical-dir/MANUAL.md', '# 入口');
       await write('docs/physical-dir/references/flow.md', '# 流程');
       const originalLstat = fs.promises.lstat.bind(fs.promises);
-      vi.spyOn(fs.promises, 'lstat').mockImplementation(async (target) => {
-        if (String(target).endsWith(path.join('references', 'blocked.md'))) throw fsError(code);
-        return originalLstat(target);
-      });
+      vi.spyOn(fs.promises, 'lstat').mockImplementation(
+        ((target: fs.PathLike, options?: fs.StatOptions) => {
+          if (String(target).endsWith(path.join('references', 'blocked.md'))) {
+            return Promise.reject(fsError(code));
+          }
+          return originalLstat(target, options as never);
+        }) as typeof fs.promises.lstat,
+      );
       const result = await readInstalledGhostManual(ghost(), 'logical-name/references/blocked.md');
       expect(result).toMatchObject({
         ok: false,
@@ -316,12 +320,14 @@ describe('readInstalledGhostManual', () => {
     await write('docs/physical-dir/MANUAL.md', '# 入口');
     await write('docs/physical-dir/references/flow.md', '# 流程');
     const originalLstat = fs.promises.lstat.bind(fs.promises);
-    vi.spyOn(fs.promises, 'lstat').mockImplementation(async (target) => {
-      if (String(target).endsWith(path.join('references', 'missing.md'))) {
-        throw fsError('ENOTDIR');
-      }
-      return originalLstat(target);
-    });
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      ((target: fs.PathLike, options?: fs.StatOptions) => {
+        if (String(target).endsWith(path.join('references', 'missing.md'))) {
+          return Promise.reject(fsError('ENOTDIR'));
+        }
+        return originalLstat(target, options as never);
+      }) as typeof fs.promises.lstat,
+    );
     const requested = 'logical-name/references/missing.md';
     const result = await readInstalledGhostManual(ghost(), requested);
     expect(result).toMatchObject({
@@ -350,16 +356,18 @@ describe('readInstalledGhostManual', () => {
   it('请求的中间父段是特殊文件时仍归 MANUAL_UNAVAILABLE', async () => {
     await write('docs/physical-dir/MANUAL.md', '# 入口');
     const originalLstat = fs.promises.lstat.bind(fs.promises);
-    vi.spyOn(fs.promises, 'lstat').mockImplementation(async (target) => {
-      if (String(target).endsWith(path.join('physical-dir', 'special-parent'))) {
-        return {
-          isSymbolicLink: () => false,
-          isDirectory: () => false,
-          isFile: () => false,
-        } as fs.Stats;
-      }
-      return originalLstat(target);
-    });
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      ((target: fs.PathLike, options?: fs.StatOptions) => {
+        if (String(target).endsWith(path.join('physical-dir', 'special-parent'))) {
+          return Promise.resolve({
+            isSymbolicLink: () => false,
+            isDirectory: () => false,
+            isFile: () => false,
+          } as fs.Stats);
+        }
+        return originalLstat(target, options as never);
+      }) as typeof fs.promises.lstat,
+    );
     const result = await readInstalledGhostManual(ghost(), 'logical-name/special-parent/child.md');
     expect(result).toMatchObject({
       ok: false,
@@ -401,16 +409,18 @@ describe('readInstalledGhostManual', () => {
     }
 
     const originalLstat = fs.promises.lstat.bind(fs.promises);
-    vi.spyOn(fs.promises, 'lstat').mockImplementation(async (target) => {
-      if (String(target).endsWith(path.join('physical-dir', 'special.md'))) {
-        return {
-          isSymbolicLink: () => false,
-          isDirectory: () => false,
-          isFile: () => false,
-        } as fs.Stats;
-      }
-      return originalLstat(target);
-    });
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      ((target: fs.PathLike, options?: fs.StatOptions) => {
+        if (String(target).endsWith(path.join('physical-dir', 'special.md'))) {
+          return Promise.resolve({
+            isSymbolicLink: () => false,
+            isDirectory: () => false,
+            isFile: () => false,
+          } as fs.Stats);
+        }
+        return originalLstat(target, options as never);
+      }) as typeof fs.promises.lstat,
+    );
     const special = await readInstalledGhostManual(ghost(), 'logical-name/special.md');
     expect(special).toMatchObject({
       ok: false,

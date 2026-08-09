@@ -210,7 +210,26 @@ export class GhostManager {
         });
         continue;
       }
-      const v = validateGhostManifest(raw);
+      let v = validateGhostManifest(raw);
+      if (
+        !v.ok &&
+        typeof raw === 'object' &&
+        raw !== null &&
+        !Array.isArray(raw) &&
+        Object.prototype.hasOwnProperty.call(raw, 'manual')
+      ) {
+        const withoutLegacyManual = { ...(raw as Record<string, unknown>) };
+        delete withoutLegacyManual.manual;
+        const legacyCompatible = validateGhostManifest(withoutLegacyManual);
+        if (legacyCompatible.ok) {
+          this.options.log?.warn('ghost legacy manual metadata ignored', {
+            dir,
+            manifestId: legacyCompatible.manifest.id,
+            reason: v.reason,
+          });
+          v = legacyCompatible;
+        }
+      }
       if (!v.ok) {
         this.options.log?.warn('ghost dir skipped: invalid manifest', { dir, reason: v.reason });
         continue;

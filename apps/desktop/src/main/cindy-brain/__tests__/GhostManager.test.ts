@@ -353,6 +353,19 @@ describe('GhostManager · install', () => {
     await expectRejection(await manager.install(cindy), 'file-invalid');
   });
 
+  it.each([
+    ['string', 'notes'],
+    ['object', { note: 'legacy metadata', nested: { arbitrary: true } }],
+  ])('新包携带旧式 %s manual metadata 时 inspect/install 仍严格拒绝', async (label, manual) => {
+    const cindy = await makeCindy(`legacy-manual-${label}.cindy`, {
+      ...goodManifest(),
+      manual,
+    });
+    await expectRejection(await manager.inspect(cindy), 'file-invalid');
+    await expectRejection(await manager.install(cindy), 'file-invalid');
+    expect(fs.existsSync(path.join(rootDir, 'hello'))).toBe(false);
+  });
+
   it('Node 清单声明的 worker 不在包内 → inspect/install 都拒绝', async () => {
     const manifest = {
       ...goodManifest(),
@@ -512,6 +525,69 @@ describe('GhostManager · list', () => {
     await manager.install(await makeCindy('b.cindy', { ...goodManifest('zulu'), name: 'Z' }));
     await manager.install(await makeCindy('a.cindy', { ...goodManifest('alpha'), name: 'A' }));
     expect(manager.list().map((c) => c.manifest.id)).toEqual(['alpha', 'zulu']);
+  });
+
+  it('升级后忽略历史安装中的任意 manual metadata，保留启用状态且不放宽其它字段', async () => {
+    const warn = vi.fn();
+    manager = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+      log: { info: vi.fn(), warn },
+    });
+    const fixtures = [
+      { id: 'legacy-string', manual: 'notes', enabled: true },
+      {
+        id: 'legacy-object',
+        manual: { note: 'old metadata', nested: { arbitrary: true } },
+        enabled: false,
+      },
+    ];
+    for (const fixture of fixtures) {
+      const dir = path.join(rootDir, fixture.id);
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.writeFile(
+        path.join(dir, 'ghost.json'),
+        JSON.stringify({ ...goodManifest(fixture.id), manual: fixture.manual }),
+      );
+      await fs.promises.writeFile(path.join(dir, 'main.js'), '// legacy');
+      if (!fixture.enabled) await fs.promises.writeFile(path.join(dir, '.disabled'), '');
+    }
+    const invalidDir = path.join(rootDir, 'broken-other-field');
+    await fs.promises.mkdir(invalidDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(invalidDir, 'ghost.json'),
+      JSON.stringify({
+        ...goodManifest('broken-other-field'),
+        schemaVersion: 1,
+        manual: 'notes',
+      }),
+    );
+
+    const installed = manager.list();
+    expect(
+      installed.map(({ manifest, enabled }) => ({
+        id: manifest.id,
+        enabled,
+        manual: manifest.manual,
+      })),
+    ).toEqual([
+      { id: 'legacy-object', enabled: false, manual: undefined },
+      { id: 'legacy-string', enabled: true, manual: undefined },
+    ]);
+    expect(warn).toHaveBeenCalledTimes(3);
+    expect(warn).toHaveBeenCalledWith(
+      'ghost legacy manual metadata ignored',
+      expect.objectContaining({ manifestId: 'legacy-string' }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      'ghost legacy manual metadata ignored',
+      expect.objectContaining({ manifestId: 'legacy-object' }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      'ghost dir skipped: invalid manifest',
+      expect.objectContaining({ dir: invalidDir }),
+    );
   });
 });
 

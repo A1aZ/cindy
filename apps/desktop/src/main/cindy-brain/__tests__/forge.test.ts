@@ -1224,6 +1224,58 @@ describe('packGhostDir · manual 渐进披露手册', () => {
     }
   });
 
+  it('隐藏 Markdown 与隐藏目录沿用打包过滤规则，不入包也不触发变化误报', async () => {
+    const manifest = {
+      ...GOOD_MANIFEST,
+      manual: { items: [{ dir: 'manual', name: 'overview', description: '总览' }] },
+    };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// brain',
+      'manual/MANUAL.md': '# 总览',
+      'manual/visible.md': '# 可见正文',
+      'manual/.draft.md': '# 草稿',
+      'manual/.draft/hidden.md': '# 隐藏目录正文',
+    });
+    const packed = await packGhostDir(dir);
+    expect(packed.ok, JSON.stringify(packed)).toBe(true);
+    if (!packed.ok) return;
+    const zip = await JSZip.loadAsync(await fs.promises.readFile(packed.cindyPath));
+    expect(zip.file('manual/MANUAL.md')).not.toBeNull();
+    expect(zip.file('manual/visible.md')).not.toBeNull();
+    expect(zip.file('manual/.draft.md')).toBeNull();
+    expect(zip.file('manual/.draft/hidden.md')).toBeNull();
+  });
+
+  it('MANUAL.md 入口必须逐字匹配，大小写不敏感文件系统也不能用 manual.md 冒充', async () => {
+    const manifest = {
+      ...GOOD_MANIFEST,
+      manual: { items: [{ dir: 'manual', name: 'overview', description: '总览' }] },
+    };
+    const dir = await makeSrcDir({
+      'ghost.json': JSON.stringify(manifest),
+      'main.js': '// brain',
+      'manual/manual.md': '# 错误大小写入口',
+    });
+    const lowercaseEntry = path.join(dir, 'manual/manual.md');
+    const uppercaseEntry = path.join(dir, 'manual/MANUAL.md');
+    const originalLstat = fs.promises.lstat.bind(fs.promises);
+    const lstatSpy = vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      ((target: fs.PathLike, options?: fs.StatOptions) => {
+        if (String(target) === uppercaseEntry) {
+          return originalLstat(lowercaseEntry, options as never);
+        }
+        return originalLstat(target, options as never);
+      }) as typeof fs.promises.lstat,
+    );
+
+    expect(await packGhostDir(dir)).toMatchObject({
+      ok: false,
+      errorCode: 'ENTRY_MISSING',
+    });
+    expect(lstatSpy.mock.calls.some(([target]) => String(target) === uppercaseEntry)).toBe(false);
+  });
+
   it('制品中的 C0、DEL、反斜杠文件名和非法目录名在 Forge 侧直接拒绝', async () => {
     if (process.platform === 'win32') return;
     const manifest = {

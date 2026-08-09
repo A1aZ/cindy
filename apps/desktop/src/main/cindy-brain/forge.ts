@@ -689,9 +689,6 @@ async function buildGhostPackage(
     if (manifest.panel?.html) mustExist.push(manifest.panel.html);
     if (manifest.settingsHtml) mustExist.push(manifest.settingsHtml);
     for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
-    for (const item of manifest.manual?.items ?? []) {
-      mustExist.push(`${item.dir}/${GHOST_MANUAL_ENTRY_FILE}`);
-    }
     for (const rel of mustExist) {
       try {
         // lstat 与收集侧(walk 的 Dirent)同一语义:声明的入口若是符号链接,
@@ -748,18 +745,24 @@ async function buildGhostPackage(
       const validateManualDir = async (
         currentDir: string,
         relativeDir: string,
+        preloadedEntries?: fs.Dirent[],
       ): Promise<Exclude<ForgePackResult, { ok: true }> | null> => {
         let entries: fs.Dirent[];
-        try {
-          entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
-        } catch {
-          return {
-            ok: false,
-            errorCode: 'ENTRY_MISSING',
-            message: `读取手册目录失败:${item.dir}${relativeDir ? `/${relativeDir}` : ''}`,
-          };
+        if (preloadedEntries) {
+          entries = preloadedEntries;
+        } else {
+          try {
+            entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+          } catch {
+            return {
+              ok: false,
+              errorCode: 'ENTRY_MISSING',
+              message: `读取手册目录失败:${item.dir}${relativeDir ? `/${relativeDir}` : ''}`,
+            };
+          }
         }
         for (const entry of entries) {
+          if (shouldSkip(entry.name)) continue;
           const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
           const logicalPath = `${item.dir}/${relativePath}`;
           const absolutePath = path.join(currentDir, entry.name);
@@ -826,7 +829,25 @@ async function buildGhostPackage(
         }
         return null;
       };
-      const manualError = await validateManualDir(unitRoot, '');
+      let rootEntries: fs.Dirent[];
+      try {
+        rootEntries = await fs.promises.readdir(unitRoot, { withFileTypes: true });
+      } catch {
+        return {
+          ok: false,
+          errorCode: 'ENTRY_MISSING',
+          message: `读取手册目录失败:${item.dir}`,
+        };
+      }
+      const manualEntry = rootEntries.find((entry) => entry.name === GHOST_MANUAL_ENTRY_FILE);
+      if (!manualEntry?.isFile() || manualEntry.isSymbolicLink()) {
+        return {
+          ok: false,
+          errorCode: 'ENTRY_MISSING',
+          message: `清单声明的文件不存在:${item.dir}/${GHOST_MANUAL_ENTRY_FILE}`,
+        };
+      }
+      const manualError = await validateManualDir(unitRoot, '', rootEntries);
       if (manualError) return manualError;
     }
 

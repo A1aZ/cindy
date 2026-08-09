@@ -11,7 +11,8 @@ import {
   AUTOMATION_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
   LONG_USER_MESSAGE_COLLAPSED_LINES,
   LONG_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
-  shouldAutoCollapseUserMessageContent,
+  MIN_HALF_WIDTH_UNITS_PER_VISUAL_LINE,
+  mayExceedVisualLineThreshold,
 } from '@/session/userMessageCollapse';
 
 type ConversationShareRenderItem =
@@ -57,7 +58,7 @@ export function collectConversationShareMessages(
         ? AUTOMATION_USER_MESSAGE_VISUAL_LINE_THRESHOLD
         : LONG_USER_MESSAGE_VISUAL_LINE_THRESHOLD;
       const maxVisibleLines = item.message.kind === 'user'
-        && shouldAutoCollapseUserMessageContent(item.message.body, collapseThreshold)
+        && mayExceedVisualLineThreshold(item.message.body, collapseThreshold)
         ? item.message.automationOrigin
           ? AUTOMATION_USER_MESSAGE_COLLAPSED_LINES
           : LONG_USER_MESSAGE_COLLAPSED_LINES
@@ -67,6 +68,7 @@ export function collectConversationShareMessages(
           ? getAutomationOriginLabel(item.message.automationOrigin)
           : undefined,
         maxVisibleLines,
+        visualLineCapacity: maxVisibleLines ? MIN_HALF_WIDTH_UNITS_PER_VISUAL_LINE : undefined,
       });
       if (projected) messages.push(projected);
       return;

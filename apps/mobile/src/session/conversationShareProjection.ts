@@ -39,6 +39,7 @@ export function projectConversationShareMessage(
   options: {
     automationOriginLabel?: string;
     maxVisibleLines?: number;
+    visualLineCapacity?: number;
     visibleBody?: string;
   } = {},
 ): ConversationShareMessage | null {
@@ -74,7 +75,11 @@ export function projectConversationShareMessage(
     message.pastedTextRanges,
     message.slashCommandRanges,
   );
-  if (options.visibleBody !== undefined) {
+  const visibleTokens = options.maxVisibleLines
+    ? truncateSentInlineTokens(tokens, options.maxVisibleLines, options.visualLineCapacity)
+    : tokens;
+  const hasStructuredBody = visibleTokens.some((token) => token.kind !== 'text');
+  if (options.visibleBody !== undefined && !hasStructuredBody) {
     return {
       ...attachmentFields,
       ...automationOriginFields,
@@ -84,10 +89,6 @@ export function projectConversationShareMessage(
       ...(secondaryBody ? { secondaryBody } : {}),
     };
   }
-  const visibleTokens = options.maxVisibleLines
-    ? truncateSentInlineTokens(tokens, options.maxVisibleLines)
-    : tokens;
-  const hasStructuredBody = visibleTokens.some((token) => token.kind !== 'text');
   const bodyParts = hasStructuredBody ? projectBodyParts(visibleTokens) : undefined;
 
   return {
@@ -104,16 +105,17 @@ export function projectConversationShareMessage(
 function truncateSentInlineTokens(
   tokens: readonly SentInlineToken[],
   maxVisibleLines: number,
+  visualLineCapacity?: number,
 ): SentInlineToken[] {
   const visibleTokens: SentInlineToken[] = [];
   let remainingLines = maxVisibleLines;
   for (const token of tokens) {
     if (remainingLines <= 0) break;
     if (token.kind === 'text') {
-      const text = truncateTextToVisualLines(token.text, remainingLines);
+      const text = truncateTextToVisualLines(token.text, remainingLines, visualLineCapacity);
       if (!text) continue;
       visibleTokens.push({ ...token, text });
-      remainingLines -= estimateTextVisualLineCount(text);
+      remainingLines -= estimateTextVisualLineCount(text, visualLineCapacity);
       continue;
     }
     visibleTokens.push(token);

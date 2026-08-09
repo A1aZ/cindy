@@ -76,6 +76,15 @@ describe('collectConversationShareMessages', () => {
     expect(messages[2]?.body).toBe(longBody);
   });
 
+  it('窄屏下也按保守宽度截取未挂载的单行长消息', () => {
+    const narrowBody = 'a'.repeat(450);
+    const [message] = collectConversationShareMessages([
+      messageItem('narrow-user', 'user', { body: narrowBody }),
+    ], () => false);
+
+    expect(message?.body.length).toBeLessThan(narrowBody.length);
+  });
+
   it('只投影当前展开 work group 中的消息，并逐层尊重嵌套折叠态', () => {
     const nested = workGroup('work-nested', [
       messageItem('nested-assistant', 'assistant'),

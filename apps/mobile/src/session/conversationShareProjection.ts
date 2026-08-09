@@ -10,7 +10,6 @@ import {
 import { partitionMessageAttachments } from '@/session/messageAttachments';
 import type { NormalizedRemoteMessage } from '@/session/messageNormalize';
 import { compactQuoteLabel } from '@/session/quotePresentation';
-import { applySentAttachmentThumbOverlay } from '@/session/sentAttachmentThumbStore';
 import {
   buildVisibleSentInlineTokens,
   type SentInlineToken,
@@ -141,23 +140,8 @@ function projectAttachments(
 ): ConversationShareAttachment[] {
   const { imageAttachments, fileAttachments } =
     partitionMessageAttachments(attachments);
-  return [...imageAttachments, ...fileAttachments].map((attachment) => {
-    const visible = applySentAttachmentThumbOverlay(attachment);
-    const dataUri =
-      visible.kind === 'image' && isInlineRasterDataUri(visible.uri)
-        ? visible.uri
-        : undefined;
-    return {
-      kind: visible.kind,
-      name: visible.name,
-      ...(dataUri ? { dataUri } : {}),
-    };
-  });
-}
-
-function isInlineRasterDataUri(value: string | undefined): value is string {
-  return Boolean(
-    value &&
-    /^data:image\/(?:gif|jpe?g|png|webp);base64,[a-z0-9+/=\s]+$/i.test(value),
-  );
+  return [...imageAttachments, ...fileAttachments].map(({ kind, name }) => ({
+    kind,
+    name,
+  }));
 }

@@ -22,7 +22,6 @@ export interface ConversationShareMessage {
 export interface ConversationShareAttachment {
   kind: "image" | "file";
   name: string;
-  dataUri?: string;
 }
 
 export type ConversationShareBodyPart =
@@ -187,9 +186,6 @@ function buildAttachmentsHtml(
   if (attachments.length === 0) return "";
   const items = attachments.map((attachment) => {
     const name = redactSensitiveText(attachment.name).trim();
-    if (attachment.kind === "image" && isInlineRasterDataUri(attachment.dataUri)) {
-      return `<img class="share-attachment-image" src="${escapeAttribute(attachment.dataUri)}" alt="${escapeAttribute(name)}">`;
-    }
     return `<div class="share-attachment-chip share-attachment-chip-${attachment.kind}"><span class="share-attachment-icon" aria-hidden="true"></span><span class="share-attachment-label">${escapeHtml(name)}</span></div>`;
   });
   return `<div class="share-attachments">${items.join("")}</div>`;
@@ -279,15 +275,6 @@ function buildConversationShareCss({
     }
     .share-message-user .share-attachments { align-items: flex-end; }
     .share-message-assistant .share-attachments { align-items: flex-start; }
-    .share-attachment-image {
-      display: block;
-      width: auto;
-      max-width: 280px;
-      height: auto;
-      max-height: 180px;
-      object-fit: contain;
-      border-radius: 12px;
-    }
     .share-attachment-chip {
       box-sizing: border-box;
       display: flex;
@@ -707,10 +694,4 @@ function escapeAttribute(value: string): string {
 
 function cssValue(value: string): string {
   return value.replace(/[;<>]/g, "");
-}
-
-function isInlineRasterDataUri(value: string | undefined): value is string {
-  return Boolean(
-    value && /^data:image\/(?:gif|jpe?g|png|webp);base64,[a-z0-9+/=\s]+$/i.test(value),
-  );
 }

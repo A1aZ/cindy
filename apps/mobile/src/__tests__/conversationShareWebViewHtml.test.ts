@@ -244,11 +244,7 @@ describe('buildConversationShareHtml 富内容导出', () => {
       selectedMessages: [
         {
           attachments: [
-            {
-              dataUri: 'data:image/png;base64,AA==',
-              kind: 'image',
-              name: 'preview.png',
-            },
+            { kind: 'image', name: 'preview.png' },
             { kind: 'image', name: 'remote.png' },
             { kind: 'file', name: 'notes.md' },
           ],
@@ -269,7 +265,8 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('Pasted text · 120 chars');
     expect(html).toContain('/review');
     expect(html).not.toContain('share-inline-chip-icon" aria-hidden="true">/</span>');
-    expect(html).toContain('data:image/png;base64,AA==');
+    expect(html).toContain('preview.png');
+    expect(html).not.toContain('share-attachment-image');
     expect(html).toContain('remote.png');
     expect(html).toContain('notes.md');
     expect(html).not.toContain('visible fallback');

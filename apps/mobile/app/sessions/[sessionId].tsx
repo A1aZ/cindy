@@ -108,10 +108,16 @@ import {
   buildConversationShareHtml,
   type ConversationShareMessage,
 } from '@/session/conversationShareWebViewHtml';
-import { projectConversationShareMessage } from '@/session/conversationShareProjection';
+import {
+  collectConversationShareBlockIds,
+  collectConversationShareMessages,
+} from '@/session/conversationShareMessages';
+import {
+  isFoldableBlockExpanded,
+  useFoldableExpandedBlocksSnapshot,
+} from '@/session/expandedBlockMemory';
 import { ShareSelectionBar } from '@/session/ShareSelectionBar';
 import {
-  isShareableMessage,
   shareSelectionStore,
   useShareSelectionActive,
   useShareSelectionCount,
@@ -435,7 +441,6 @@ import {
   buildMobileMessageRenderItems,
   insertMobileForkOriginItem,
   type MobileMessageRenderItem,
-  type MobileWorkChildItem,
 } from '@/session/messageRenderModel';
 import { reconcileMobileMessageRenderItems } from '@/session/messageRenderReconcile';
 import { shouldSuppressEmptyMessageState } from '@/session/sessionEmptyState';
@@ -656,29 +661,6 @@ function measureViewInWindow(view: View | null): Promise<{
       resolve({ height, width, x, y });
     });
   });
-}
-
-/** 展平消息流中的工作组 / 子 Agent，投影用户实际可见的消息内容用于图片导出。 */
-function collectConversationShareMessages(
-  items: readonly MobileMessageRenderItem[],
-): ConversationShareMessage[] {
-  const messages: ConversationShareMessage[] = [];
-  const visit = (item: MobileMessageRenderItem | MobileWorkChildItem): void => {
-    if (item.type === 'message') {
-      if (!isShareableMessage(item.message)) return;
-      const clientId = item.message.source.clientId || item.message.source.id || item.message.key;
-      const projected = projectConversationShareMessage(clientId, item.message);
-      if (projected) messages.push(projected);
-      return;
-    }
-    if (item.type === 'work_group') {
-      item.children.forEach(visit);
-      return;
-    }
-    if (item.type === 'subagent_group') item.childItems.forEach(visit);
-  };
-  items.forEach(visit);
-  return messages;
 }
 
 /** 会话已读回执的驻留门槛:聚焦本会话且消息已渲染后停满这段时间才算「真实看到」。 */
@@ -5589,9 +5571,16 @@ export default function SessionScreen() {
     () => (pendingSendItems.length === 0 ? renderItems : [...renderItems, ...pendingSendItems]),
     [pendingSendItems, renderItems],
   );
+  const shareExpandableBlockIds = useMemo(
+    () => (shareSelectionActive ? collectConversationShareBlockIds(messageListItems) : []),
+    [messageListItems, shareSelectionActive],
+  );
+  const shareExpansionSnapshot = useFoldableExpandedBlocksSnapshot(shareExpandableBlockIds);
   const shareMessages = useMemo(
-    () => collectConversationShareMessages(messageListItems),
-    [messageListItems],
+    () => (shareSelectionActive
+      ? collectConversationShareMessages(messageListItems, isFoldableBlockExpanded)
+      : []),
+    [messageListItems, shareExpansionSnapshot, shareSelectionActive],
   );
   const shareMessageById = useMemo(
     () => new Map(shareMessages.map((message) => [message.clientId, message])),
@@ -5601,6 +5590,12 @@ export default function SessionScreen() {
     () => shareMessages.map((message) => message.clientId),
     [shareMessages],
   );
+  useEffect(() => {
+    if (!shareSelectionActive) return;
+    const exposedSelectedIds = shareSelectionStore.getSelectedIdsInOrder(allShareableIds);
+    if (exposedSelectedIds.length === shareSelectionStore.count()) return;
+    shareSelectionStore.setSelection(exposedSelectedIds);
+  }, [allShareableIds, shareSelectionActive]);
   const selectedShareMessages = useMemo(() => {
     if (!shareSelectionActive) return [];
     return shareSelectionStore

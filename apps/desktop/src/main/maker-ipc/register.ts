@@ -166,6 +166,7 @@ import {
 } from '../localDb/dialogueWorkdirSelfHeal.js';
 import {
   broadcastMessageRow,
+  broadcastMessageAgentMetaUpdate,
   broadcastMessageDeleted,
   commitMessageDeletion,
   createMessage as createDbMessage,
@@ -175,10 +176,33 @@ import {
   listMessagesForAgentHandoff,
   patchMessageAgentMeta,
   supersedeRetriedUserTurn,
+  updateMessageContent,
 } from '../localDb/ipc/messages.js';
 import { invalidateWorkersByLeadSingleFlight } from '../localDb/ipc/orcaWorkerListSingleFlight.js';
 import { messageToCamel } from '../localDb/mapper.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
+import { buildReviewPrompt } from '../reviewer/reviewPrompt.js';
+import {
+  listReviewHistoricalAttachments,
+  loadReviewEvidence,
+  readReviewWorkspaceSnapshot,
+  resolveReviewArtifactPath,
+  SensitiveReviewPathError,
+} from '../reviewer/reviewEvidence.js';
+import {
+  authorizeReviewExplicitArtifacts,
+  ReviewArtifactAuthorizationError,
+  type ReviewArtifactConfirmationItem,
+} from '../reviewer/reviewArtifactAuthorization.js';
+import { buildReviewArtifactConfirmationDialog } from '../reviewer/reviewArtifactDialog.js';
+import {
+  cleanupOrphanedReviewArtifactSnapshots,
+  prepareStableReviewArtifactSnapshots,
+} from '../reviewer/reviewArtifactSnapshot.js';
+import { fingerprintReviewArtifacts } from '../reviewer/reviewArtifactFingerprint.js';
+import { enforceReviewCreateOptions } from '../reviewer/reviewSessionPolicy.js';
+import { reviewSourceIdentityMatches } from '../reviewer/reviewSourceIdentity.js';
+import { readReviewRunFromAgentMeta, type ReviewRunMeta } from '../../shared/reviewRun.js';
 import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
@@ -510,6 +534,7 @@ import {
 } from './interactionRouter.js';
 import { registerMakerMessageDeleteHandler } from './messageDeleteHandler.js';
 import {
+  cleanupSessionTempAttachments,
   normalizeUserMessage,
   materializeDirectSendOssAttachments,
   materializeQueuedOssAttachmentsDeferred,
@@ -581,6 +606,7 @@ import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
+import { registerReviewStartHandler } from './reviewStartHandler.js';
 import { registerStopAgentTaskHandler } from './stopAgentTaskHandler.js';
 import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgroundTasksHandler.js';
 import { registerProviderHandlers } from './providerHandlers.js';
@@ -696,10 +722,7 @@ import {
   isTerminalTurnErrorEvent,
   SessionTurnActivityTracker,
 } from './sessionTurnActivityTracker.js';
-import {
-  ProductTurnUsageTargetTracker,
-  ProductTurnWallClockTracker,
-} from './turnWallClock.js';
+import { ProductTurnUsageTargetTracker, ProductTurnWallClockTracker } from './turnWallClock.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
 import {
   captureDataOwnerBroadcastScope,
@@ -1557,9 +1580,7 @@ interface OrcaCollabService {
   }) => Promise<
     { ok: true; workerId?: string } | { ok: false; errorCode: string; message: string }
   >;
-  listAvailableModels: (params: {
-    agent?: AgentKind;
-  }) => Promise<
+  listAvailableModels: (params: { agent?: AgentKind }) => Promise<
     | {
         ok: true;
         codex?: Array<{ id: string; label: string }>;
@@ -2140,9 +2161,7 @@ function cleanupPendingInteractionsForSession(sessionId: string, reason: string)
  * 给 feishu /ctr 接管 in-turn session 用 —— attached=true 路径里 setInteractionListener
  * 覆盖之前调一次, 把 desktop 卡片"原地搬到飞书"。
  */
-export function takePendingInteractionsForSession(
-  sessionId: string,
-): Array<{
+export function takePendingInteractionsForSession(sessionId: string): Array<{
   requestId: string;
   request: InteractionRequest;
   resolve: (decision: InteractionDecision) => void;
@@ -3532,11 +3551,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
         const isSilentStopDone =
           (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
-        if (
-          event.source === 'claude-code' &&
-          !isContinuationBoundary &&
-          !isSilentStopDone
-        ) {
+        if (event.source === 'claude-code' && !isContinuationBoundary && !isSilentStopDone) {
           completedTurnWallClockMs = productTurnWallClockTracker.finish(session.id);
         }
         if (!isContinuationBoundary && !isSilentStopDone) {
@@ -4852,6 +4867,19 @@ export async function beginTurnChangeSetAtDispatch(
   });
 }
 
+async function confirmReviewExternalArtifacts(
+  event: IpcMainInvokeEvent,
+  items: ReviewArtifactConfirmationItem[],
+): Promise<boolean> {
+  const options = buildReviewArtifactConfirmationDialog(items, t);
+  const owner = BrowserWindow.fromWebContents(event.sender);
+  const result =
+    owner && !owner.isDestroyed()
+      ? await dialog.showMessageBox(owner, options)
+      : await dialog.showMessageBox(options);
+  return result.response === 1;
+}
+
 export interface RegisterMakerIpcOptions {
   onAnySessionTurnKeepaliveChange?: (isRunning: boolean) => void;
   /** 由 bootstrap 注入，避免 maker-ipc → model-access → maker-host 的循环依赖。 */
@@ -4986,9 +5014,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INVALID_PARAMS', 'Invalid sessionId');
       }
       if (
-        !Array.isArray(ids)
-        || ids.length > TURN_CHANGE_SET_DETAIL_ID_LIMIT
-        || ids.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256)
+        !Array.isArray(ids) ||
+        ids.length > TURN_CHANGE_SET_DETAIL_ID_LIMIT ||
+        ids.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 256)
       ) {
         throwIpcError('INVALID_PARAMS', 'Invalid turn change-set ids');
       }
@@ -5016,12 +5044,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('UNSUPPORTED_CAPABILITY', 'Remote workspace restore is not available.');
       }
       const normalizedWorkDir = normalizeTurnChangeSetWorkspaceKey(meta.workDir);
-      const workspaceIsBusy = (): boolean => maker.listActiveSessions().some((session) => {
-        if (session.remoteHostId) return false;
-        const currentWorkDir = normalizeTurnChangeSetWorkspaceKey(session.workDir);
-        return currentWorkDir === normalizedWorkDir
-          && (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id));
-      });
+      const workspaceIsBusy = (): boolean =>
+        maker.listActiveSessions().some((session) => {
+          if (session.remoteHostId) return false;
+          const currentWorkDir = normalizeTurnChangeSetWorkspaceKey(session.workDir);
+          return (
+            currentWorkDir === normalizedWorkDir &&
+            (session.isTurnRunning() || getClaudeSessionBackgroundActivity(session.id))
+          );
+        });
       if (workspaceIsBusy() || isSessionTurnPendingCompletion(sessionId)) {
         throwIpcError('SESSION_RUNNING', 'Wait for the current response to finish.');
       }
@@ -5247,9 +5278,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerNewMakerWorktreeBranchPreferenceHandler(createElectronIpcHandlerRegistry(), {
     isDeviceLinkInvoke,
     assertTrustedCaller: (event) =>
-      assertTrustedAppRendererEvent(
-        event as Parameters<typeof assertTrustedAppRendererEvent>[0],
-      ),
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
     getPreference: getNewMakerWorktreeBranchPreference,
     applyPreference: applyNewMakerWorktreeBranchPreference,
     broadcast: broadcastToAllWindows,
@@ -5834,6 +5863,43 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return false;
   }
 
+  /**
+   * Review isolation is persisted by sessions.source, not trusted to whichever
+   * renderer happens to reconstruct CreateOpts after a restart. Every local
+   * create/resume funnel passes bootstrapSession, so this is the single place
+   * that restores the host-owned read-only purpose before any prompt injection.
+   */
+  async function applyPersistedReviewMode(o: CreateOpts): Promise<void> {
+    let isReview = o.reviewMode === true;
+    if (!isReview && typeof o.id === 'string' && o.id) {
+      const [row] = await getDbClient()
+        .drizzle.select({ source: sessions.source, remoteHostId: sessions.remoteHostId })
+        .from(sessions)
+        .where(eq(sessions.id, o.id))
+        .limit(1);
+      isReview = row?.source === 'review';
+      if (isReview && row?.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Review tasks are local-only in this version');
+      }
+    }
+    if (!isReview) return;
+    if (o.remoteHostId) {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'Review tasks are local-only in this version');
+    }
+    enforceReviewCreateOptions(o);
+  }
+
+  async function assertReviewSettingsUnlocked(sessionId: string): Promise<void> {
+    const [row] = await getDbClient()
+      .drizzle.select({ source: sessions.source })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .limit(1);
+    if (row?.source === 'review') {
+      throwIpcError('UNSUPPORTED_CAPABILITY', 'Review task settings are fixed to the source task');
+    }
+  }
+
   function orcaSessionStatus(sessionId: string): string {
     const session = maker.getSession(sessionId) as { getStatus?: () => string } | null;
     return session?.getStatus?.() ?? 'not_running';
@@ -5934,6 +6000,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     orcaRole: CreateOpts['orcaRole'],
   ): Promise<void> {
     if (orcaRole !== 'lead' && orcaRole !== 'worker') return;
+    await assertReviewSettingsUnlocked(sessionId);
     if (orcaRole === 'worker') {
       markKnownOrcaWorkerSession(sessionId);
       clearSuppressedOrcaWorkerAgentIslandSession(sessionId);
@@ -6011,8 +6078,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     didInjectProjectContext: boolean;
   }> {
     await options.waitForAccountProviderModelsReady();
-    const didInjectOrcaInstructions = applyOrcaInstructions(o);
-    const didInjectProjectContext = await applyProjectContextInjection(o);
+    await applyPersistedReviewMode(o);
+    const didInjectOrcaInstructions = o.reviewMode === true ? false : applyOrcaInstructions(o);
+    const didInjectProjectContext =
+      o.reviewMode === true ? false : await applyProjectContextInjection(o);
 
     if (o.extraDirs && o.extraDirs.length > 0) {
       const validation = await validateExtraDirs(o.extraDirs, o.workingDir);
@@ -6445,57 +6514,382 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   };
 
   const makerSessionRegistry = createElectronIpcHandlerRegistry();
-  registerMakerSessionCreateHandler(
-    makerSessionRegistry,
-    {
-      // CREATE_SESSION 同样先走 remote ensure:remote draft (尤其 collab
-      // lead) 的 SSH 重连 / agent 安装 / codex daemon MCP 注入必须先于
-      // bootstrap, 否则 lead 首个 turn 没有 cindy_orca, 与 orca 架构文档的
-      // "session start/resume 前置" 契约不符。本地会话 ensure 内部直接返回。
-      bootstrapSession: async (co) => {
-        await ensureRemoteReadyForSessionStart({ createOpts: co });
-        const result = await bootstrapSession(co);
-        // maker:create-session 是手机 / device-link 的创建入口，不经过
-        // local-db:sessions:create，因此后者维护 recent_workdirs 的逻辑不会运行。
-        // worktree 两步流此时 co.workingDir 已是隔离目录；picker 需要记住用户选的
-        // 项目根，而不是 auto-* 运行目录。worktreeStore 以同一预生成 sessionId
-        // 保存了权威 baseRepo。先完成 best-effort upsert 再让 handler 广播 created，
-        // 这样 renderer 收到广播重拉 recent 表时不会撞到写入竞态。
-        if (co.workspaceKind !== 'dialogue' && !co.remoteHostId) {
-          const recentProjectDir = worktreeStore.get(result.session.id)?.baseRepo
-            ?? getManagedWorktreeBasePath(co.workingDir)
-            ?? co.workingDir;
-          await upsertRecentWorkdir(recentProjectDir);
-        }
-        return result;
-      },
-      markOrcaRoleIfNeeded,
-      markKnownNonOrcaIfApplicable,
-      allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
-      createSessionId: createId,
-      now: Date.now,
-      withSessionLock: withSendToSessionLock,
-      sendWorkerReadyMessage: (session) => {
-        // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
-        // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
-        observeFireAndForgetSendOutcome(
-          session.send({ type: 'user', content: ORCA_WORKER_READY_MESSAGE }, { planMode: false }),
-          {
-            owner: 'orca-worker-ready',
-            entrypoint: 'CREATE_SESSION',
-            sessionId: session.id,
-            agentKind: session.agentKind,
-            action: 'worker-ready-placeholder',
-            context: `CREATE_SESSION/${session.id}/worker-ready-placeholder`,
-          },
-        );
-      },
-      broadcastSessionCreated,
-      logCreateSession: (fields) => log.info('create-session invoked', fields),
-      warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
+  registerMakerSessionCreateHandler(makerSessionRegistry, {
+    // CREATE_SESSION 同样先走 remote ensure:remote draft (尤其 collab
+    // lead) 的 SSH 重连 / agent 安装 / codex daemon MCP 注入必须先于
+    // bootstrap, 否则 lead 首个 turn 没有 cindy_orca, 与 orca 架构文档的
+    // "session start/resume 前置" 契约不符。本地会话 ensure 内部直接返回。
+    bootstrapSession: async (co) => {
+      await ensureRemoteReadyForSessionStart({ createOpts: co });
+      const result = await bootstrapSession(co);
+      // maker:create-session 是手机 / device-link 的创建入口，不经过
+      // local-db:sessions:create，因此后者维护 recent_workdirs 的逻辑不会运行。
+      // worktree 两步流此时 co.workingDir 已是隔离目录；picker 需要记住用户选的
+      // 项目根，而不是 auto-* 运行目录。worktreeStore 以同一预生成 sessionId
+      // 保存了权威 baseRepo。先完成 best-effort upsert 再让 handler 广播 created，
+      // 这样 renderer 收到广播重拉 recent 表时不会撞到写入竞态。
+      if (co.workspaceKind !== 'dialogue' && !co.remoteHostId) {
+        const recentProjectDir =
+          worktreeStore.get(result.session.id)?.baseRepo ??
+          getManagedWorktreeBasePath(co.workingDir) ??
+          co.workingDir;
+        await upsertRecentWorkdir(recentProjectDir);
+      }
+      return result;
     },
-  );
+    markOrcaRoleIfNeeded,
+    markKnownNonOrcaIfApplicable,
+    allocateDialogueWorkspace: ensureDialogueWorkspaceDir,
+    createSessionId: createId,
+    now: Date.now,
+    withSessionLock: withSendToSessionLock,
+    sendWorkerReadyMessage: (session) => {
+      // Orca worker 首次创建时发一条初始化消息，强制 codex 写 rollout 文件，
+      // 避免 app 重启后 thread/resume 因 rollout 缺失而失败。
+      observeFireAndForgetSendOutcome(
+        session.send({ type: 'user', content: ORCA_WORKER_READY_MESSAGE }, { planMode: false }),
+        {
+          owner: 'orca-worker-ready',
+          entrypoint: 'CREATE_SESSION',
+          sessionId: session.id,
+          agentKind: session.agentKind,
+          action: 'worker-ready-placeholder',
+          context: `CREATE_SESSION/${session.id}/worker-ready-placeholder`,
+        },
+      );
+    },
+    broadcastSessionCreated,
+    logCreateSession: (fields) => log.info('create-session invoked', fields),
+    warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
+  });
 
+  const reconcileInterruptedReviews = async (): Promise<void> => {
+    const db = getDbClient().drizzle;
+    const rows = await db
+      .select({
+        sessionId: messages.sessionId,
+        clientId: messages.clientId,
+        agentMeta: messages.agentMeta,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+          sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+        ),
+      );
+    const interruptedAt = Date.now();
+    for (const row of rows) {
+      const reviewRun = readReviewRunFromAgentMeta(row.agentMeta);
+      if (!reviewRun || reviewRun.status !== 'running') continue;
+      const failed: ReviewRunMeta = {
+        ...reviewRun,
+        status: 'failed',
+        completedAt: interruptedAt,
+        error: 'Review was interrupted when Cindy closed. Run /review again.',
+      };
+      await updateMessageContent(row.sessionId, row.clientId, '');
+      await patchMessageAgentMeta(row.sessionId, row.clientId, { reviewRun: failed });
+      await broadcastMessageAgentMetaUpdate(row.sessionId, row.clientId);
+    }
+  };
+  const reviewStartupReady = Promise.all([
+    reconcileInterruptedReviews(),
+    cleanupOrphanedReviewArtifactSnapshots(),
+  ])
+    .then(() => undefined)
+    .catch((error) => {
+      log.error('failed to prepare Review runtime state', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    });
+  // Registration happens before the renderer can invoke /review. Keep a
+  // rejection observer here so a startup database failure is logged without
+  // becoming an unhandled promise; START_REVIEW still awaits and fails closed.
+  void reviewStartupReady.catch(() => {});
+
+  const readLatestReviewerResult = async (reviewerSessionId: string): Promise<string> => {
+    const rows = await getDbClient()
+      .drizzle.select({ content: messages.content })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, reviewerSessionId),
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+        ),
+      )
+      .orderBy(desc(messages.createdAt), desc(messages.id))
+      .limit(8);
+    for (const row of rows) {
+      const text = visibleMessageTextForConversationSearch('assistant', row.content);
+      if (text) return text;
+    }
+    return '';
+  };
+
+  registerReviewStartHandler(makerSessionRegistry, {
+    assertCaller: (event) =>
+      assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
+    waitUntilReady: () => reviewStartupReady,
+    createRunId: randomUUID,
+    createReviewerSessionId: randomUUID,
+    now: Date.now,
+    prepareRun: async ({ event, request, reviewerSessionId }) => {
+      const db = getDbClient().drizzle;
+      const [source] = await db
+        .select({
+          id: sessions.id,
+          title: sessions.title,
+          workingDir: sessions.workingDir,
+          workspaceKind: sessions.workspaceKind,
+          model: sessions.model,
+          effort: sessions.effort,
+          fastMode: sessions.fastMode,
+          providerId: sessions.providerId,
+          agentKind: sessions.agentKind,
+          source: sessions.source,
+          remoteHostId: sessions.remoteHostId,
+          status: sessions.status,
+        })
+        .from(sessions)
+        .where(eq(sessions.id, request.sourceSessionId))
+        .limit(1);
+      if (!source || source.status !== 'active') {
+        throwIpcError('NOT_FOUND', 'Source task not found');
+      }
+      if (source.source === 'review') {
+        throwIpcError('INVALID_PARAMS', 'A review task cannot start another review');
+      }
+      if (source.remoteHostId) {
+        throwIpcError('UNSUPPORTED_CAPABILITY', 'Review is local-only in this version');
+      }
+      if (!source.workingDir) {
+        throwIpcError('INVALID_PARAMS', 'The source task has no working directory to review');
+      }
+      const sourceWorkingDir = source.workingDir;
+      if (maker.getSession(source.id)?.isTurnRunning()) {
+        throwIpcError(
+          'SESSION_RUNNING',
+          'Wait for the current task turn to finish before reviewing',
+        );
+      }
+
+      let evidence: Awaited<ReturnType<typeof loadReviewEvidence>>;
+      let sourceArtifactFingerprint = '';
+      let authorizedArtifactPaths: string[] = [];
+      let cleanupPreparedArtifacts: (() => Promise<void>) | null = null;
+      try {
+        const historicalAttachments = await listReviewHistoricalAttachments(source.id);
+        const explicitArtifactGrant = await authorizeReviewExplicitArtifacts({
+          workingDir: sourceWorkingDir,
+          focus: request.focus,
+          attachments: [...request.attachments, ...historicalAttachments],
+          resolvePath: resolveReviewArtifactPath,
+          confirm: (items) => confirmReviewExternalArtifacts(event as IpcMainInvokeEvent, items),
+        });
+        authorizedArtifactPaths = explicitArtifactGrant.paths;
+        const prepared = await prepareStableReviewArtifactSnapshots({
+          workingDir: sourceWorkingDir,
+          grant: explicitArtifactGrant,
+          prepare: (snapshotGrant) =>
+            loadReviewEvidence({
+              sourceSessionId: source.id,
+              workingDir: sourceWorkingDir,
+              focus: request.focus,
+              attachments: request.attachments,
+              explicitArtifactGrant: snapshotGrant,
+            }),
+        });
+        cleanupPreparedArtifacts = prepared.cleanup;
+        evidence = prepared.value;
+        sourceArtifactFingerprint = prepared.fingerprint;
+      } catch (error) {
+        await cleanupPreparedArtifacts?.();
+        if (
+          error instanceof ReviewArtifactAuthorizationError ||
+          error instanceof SensitiveReviewPathError
+        ) {
+          throwIpcError('PERMISSION_DENIED', error.message);
+        }
+        throw error;
+      }
+      if (
+        evidence.context.length === 0 &&
+        !evidence.workspace?.dirty &&
+        !evidence.changeSet &&
+        evidence.artifacts.length === 0 &&
+        !request.focus
+      ) {
+        await cleanupPreparedArtifacts?.();
+        throwIpcError('INVALID_PARAMS', 'The current task has no reviewable content yet');
+      }
+      let builtPrompt: ReturnType<typeof buildReviewPrompt>;
+      try {
+        builtPrompt = buildReviewPrompt({
+          focus: evidence.focusPath ? `审查路径：${evidence.focusPath}` : request.focus,
+          context: evidence.context,
+          workspace: evidence.workspace,
+          changeSet: evidence.changeSet,
+          artifacts: evidence.artifacts,
+          artifactsOmitted: evidence.artifactsOmitted,
+          artifactExcerpts: evidence.artifactExcerpts,
+          artifactWarnings: evidence.artifactWarnings,
+        });
+      } catch (error) {
+        await cleanupPreparedArtifacts?.();
+        throw error;
+      }
+
+      return {
+        sourceAgentKind: source.agentKind as 'cc' | 'codex' | 'pi',
+        prompt: builtPrompt.prompt,
+        targetKind: builtPrompt.targetKind,
+        cleanup: async () => {
+          await cleanupPreparedArtifacts?.();
+        },
+        prepareLaunch: async () => {
+          const rawReviewMessage: IpcUserMessage = {
+            type: 'user',
+            content: [{ type: 'text', text: builtPrompt.prompt }, ...evidence.attachmentBlocks],
+          };
+          const reviewMessage = await prepareUserMessageForAgent(
+            reviewerSessionId,
+            rawReviewMessage,
+            'send',
+          );
+          const readRoots = new Set(evidence.readRoots);
+          const reviewReadPaths = new Set(evidence.reviewReadPaths);
+          if (typeof reviewMessage !== 'string' && Array.isArray(reviewMessage.content)) {
+            for (const block of reviewMessage.content) {
+              if (
+                (block.type === 'image' || block.type === 'file') &&
+                typeof block.path === 'string' &&
+                path.isAbsolute(block.path)
+              ) {
+                readRoots.add(path.dirname(block.path));
+                reviewReadPaths.add(block.path);
+              }
+            }
+          }
+          const artifactPaths = [
+            ...reviewReadPaths,
+            ...(evidence.workspaceFingerprint ? [] : [sourceWorkingDir]),
+          ];
+          const artifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
+
+          return {
+            message: reviewMessage as UserMessage,
+            reviewerCreateOpts: buildCreateOptsWithStderr({
+              id: reviewerSessionId,
+              agentKind: dbToMakerAgentKind(source.agentKind),
+              workingDir: sourceWorkingDir,
+              workspaceKind: source.workspaceKind,
+              model: source.model,
+              effort: source.effort as CreateOpts['effort'],
+              fastMode: !!source.fastMode,
+              providerId: source.providerId,
+              title: `审查 · ${source.title}`.slice(0, 120),
+              permissionMode: 'ask',
+              planMode: false,
+              reviewMode: true,
+              reviewReadPaths: [...reviewReadPaths],
+              makerMemoryEnabled: false,
+              ...(readRoots.size > 0 ? { extraDirs: [...readRoots] } : {}),
+            }),
+            verifyBeforeStart: async () => {
+              if (
+                (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
+                sourceArtifactFingerprint
+              ) {
+                throw new Error(
+                  'A review artifact changed before Review started. Run /review again for the current result.',
+                );
+              }
+            },
+            verifyBeforePublish: async (): Promise<string | null> => {
+              const [currentSource] = await db
+                .select({
+                  workingDir: sessions.workingDir,
+                  workspaceKind: sessions.workspaceKind,
+                  status: sessions.status,
+                })
+                .from(sessions)
+                .where(eq(sessions.id, source.id))
+                .limit(1);
+              if (!reviewSourceIdentityMatches(source, currentSource ?? null)) {
+                return 'The source task workspace changed while Review was running. Run /review again in the current workspace.';
+              }
+              if (evidence.workspaceFingerprint) {
+                const currentWorkspace = await readReviewWorkspaceSnapshot(source.id);
+                if (currentWorkspace?.fingerprint !== evidence.workspaceFingerprint) {
+                  return 'The task files changed while Review was running. Run /review again for the current result.';
+                }
+              }
+              if (
+                (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
+                sourceArtifactFingerprint
+              ) {
+                return 'A review artifact changed while Review was running. Run /review again for the current result.';
+              }
+              const currentArtifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
+              if (currentArtifactFingerprint !== artifactFingerprint) {
+                return 'A review artifact changed while Review was running. Run /review again for the current result.';
+              }
+              return null;
+            },
+          };
+        },
+      };
+    },
+    createSourceCard: async ({ sourceSessionId, sourceCardClientId, sourceAgentKind, meta }) => {
+      await createDbMessage(sourceSessionId, {
+        clientId: sourceCardClientId,
+        role: 'assistant',
+        content: '',
+        agentMeta: { reviewRun: meta },
+        agentKind: sourceAgentKind,
+      });
+    },
+    updateSourceCard: async ({ sourceSessionId, sourceCardClientId, meta, result }) => {
+      await updateMessageContent(sourceSessionId, sourceCardClientId, result);
+      await patchMessageAgentMeta(sourceSessionId, sourceCardClientId, { reviewRun: meta });
+      await broadcastMessageAgentMetaUpdate(sourceSessionId, sourceCardClientId);
+    },
+    startReviewer: async (createOpts) => {
+      const { session } = await bootstrapSession(createOpts);
+      return session;
+    },
+    markReviewerStarted: async (reviewerSessionId, startedAt) => {
+      await getDbClient()
+        .drizzle.update(sessions)
+        .set({ userSendAt: startedAt, updatedAt: startedAt })
+        .where(eq(sessions.id, reviewerSessionId));
+    },
+    broadcastReviewerCreated: broadcastSessionCreated,
+    persistReviewerPrompt: async ({ reviewerSessionId, runId, prompt, sourceAgentKind }) => {
+      await createDbMessage(reviewerSessionId, {
+        clientId: `review-prompt:${runId}`,
+        role: 'user',
+        content: prompt,
+        agentKind: sourceAgentKind,
+      });
+    },
+    drainPersistQueue,
+    readReviewerResult: readLatestReviewerResult,
+    closeReviewer: async (reviewerSessionId) => {
+      try {
+        await maker.closeSession(reviewerSessionId);
+      } finally {
+        // startSession can fail after F6/base64 attachments were materialized
+        // but before Maker owns the session, so its onClose hook is not enough.
+        await cleanupSessionTempAttachments(reviewerSessionId);
+      }
+    },
+    warn: (message, fields) => log.warn(message, fields),
+  });
   registerPrecreatedWorktreeDiscardHandler(makerSessionRegistry, {
     assertCaller: (event) => {
       // device-link 的真实调用身份由 invoke async context + allowlist 证明；本机直调仍
@@ -6590,6 +6984,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           remoteHostId: sessions.remoteHostId,
           orcaRole: sessions.orcaRole,
           sdkSessionId: sessions.sdkSessionId,
+          source: sessions.source,
         })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
@@ -6787,6 +7182,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   }
 
   async function assertLeadCollabProjectEnabled(leadSessionId: string): Promise<void> {
+    await assertReviewSettingsUnlocked(leadSessionId);
     const lead = maker.getSession(leadSessionId);
     const leadRow = await getSessionRowSnapshot(leadSessionId);
     const rawWorkingDir =
@@ -6980,12 +7376,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 ? permissionModeOrAsk(row?.permissionMode)
                 : 'bypassPermissions',
           };
-          const hasExecutionOverrides = executionOverrides !== undefined && (
-            executionOverrides.agentKind !== undefined
-            || executionOverrides.model !== undefined
-            || executionOverrides.effort !== undefined
-            || executionOverrides.fastMode !== undefined
-          );
+          const hasExecutionOverrides =
+            executionOverrides !== undefined &&
+            (executionOverrides.agentKind !== undefined ||
+              executionOverrides.model !== undefined ||
+              executionOverrides.effort !== undefined ||
+              executionOverrides.fastMode !== undefined);
           if (hasExecutionOverrides) {
             const targetAgent = executionOverrides.agentKind ?? inheritedBase.agentKind;
             const resolvedExecution = resolveSendToSessionExecutionConfig({
@@ -7351,16 +7747,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
       if (live) {
         try {
-          const sendResult = await sendUserMessageWithAwaitedGitBaseline(
-            live,
-            message,
-            clientId,
-            {
-              planMode: false,
-              onAccepted: persistUserMessage,
-              onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-            },
-          );
+          const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, clientId, {
+            planMode: false,
+            onAccepted: persistUserMessage,
+            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          });
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
               commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7454,16 +7845,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         await ensureRemoteReadyForSessionStart({ createOpts });
         const { session } = await bootstrapSession(createOpts);
         await markOrcaRoleIfNeeded(session.id, createOpts.orcaRole);
-        const sendResult = await sendUserMessageWithAwaitedGitBaseline(
-          session,
-          message,
-          clientId,
-          {
-            planMode: false,
-            onAccepted: persistUserMessage,
-            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
-          },
-        );
+        const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
+          planMode: false,
+          onAccepted: persistUserMessage,
+          onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+        });
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -7935,13 +8321,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         body.workerAgent === 'codex' ? 'codex' : body.workerAgent === 'pi' ? 'pi' : 'claude-code';
       const delegateTask = typeof body.delegateTask === 'string' ? body.delegateTask : undefined;
       if (
-        body.workerPermissionMode !== undefined
-        && !isOrcaWorkerPermissionMode(body.workerPermissionMode)
+        body.workerPermissionMode !== undefined &&
+        !isOrcaWorkerPermissionMode(body.workerPermissionMode)
       ) {
-        throwIpcError(
-          'INVALID_PARAMS',
-          'workerPermissionMode must be auto or bypassPermissions',
-        );
+        throwIpcError('INVALID_PARAMS', 'workerPermissionMode must be auto or bypassPermissions');
       }
       return enableOrcaInternal(leadSessionId, {
         workerAgent,
@@ -8107,13 +8490,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           : ('claude-code' as const);
     const model = typeof b.model === 'string' && b.model.length > 0 ? b.model : undefined;
     if (
-      b.workerPermissionMode !== undefined
-      && !isOrcaWorkerPermissionMode(b.workerPermissionMode)
+      b.workerPermissionMode !== undefined &&
+      !isOrcaWorkerPermissionMode(b.workerPermissionMode)
     ) {
-      throwIpcError(
-        'INVALID_PARAMS',
-        'workerPermissionMode must be auto or bypassPermissions',
-      );
+      throwIpcError('INVALID_PARAMS', 'workerPermissionMode must be auto or bypassPermissions');
     }
     await assertLeadCollabProjectEnabled(b.leadSessionId);
     const result = await orcaLifecycleService.createWorker({
@@ -11030,11 +11410,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         if (isKnownSteerDuplicate()) {
           await materialized.cleanupBeforeAcceptance?.();
           if (attachmentOwnerId) {
-            await discardSpecificQueuedAttachmentOwnership(
-              sid,
-              parsed.clientId,
-              attachmentOwnerId,
-            );
+            await discardSpecificQueuedAttachmentOwnership(sid, parsed.clientId, attachmentOwnerId);
           }
           return true;
         }
@@ -11621,6 +11997,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 后到的 SET_MODEL 才能写 route。否则切换 DB await 恢复后会用旧 provider
       // 覆盖用户刚选的新 route，形成 DB 与进程内路由分叉。
       return withSendToSessionLock(sessionId, async () => {
+        await assertReviewSettingsUnlocked(sessionId);
         // 同引擎重选是 switch ack 后的第二段写入。另一控制端若在两段之间更新（含
         // set→clear ABA），修订号已变化：旧 SET_MODEL 必须在任何 route/DB 副作用前让位。
         if (
@@ -11743,6 +12120,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof sessionId !== 'string' || typeof effort !== 'string') {
       throwIpcError('INVALID_PARAMS', 'sessionId + effort required');
     }
+    await assertReviewSettingsUnlocked(sessionId);
     // 记下会话 effort:responses-bridge 模型(chatgpt/ / xai/)的 effort 无法经请求体流到 bridge,
     // 由 compat-proxy 路由决策从这里读出、闭包进订阅直连 handler 的 prefs(不影响 session 是否在跑)。
     setSessionEffort(sessionId, effort);
@@ -11788,6 +12166,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       if (typeof sessionId !== 'string' || typeof mode !== 'string') {
         throwIpcError('INVALID_PARAMS', 'sessionId + mode required');
       }
+      await assertReviewSettingsUnlocked(sessionId);
       const sess = maker.getSession(sessionId);
       if (!sess) {
         log.debug('set-permission-mode: session not found, no-op', { sessionId });
@@ -11803,6 +12182,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
     }
+    await assertReviewSettingsUnlocked(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) {
       log.debug('set-plan-mode: session not found, no-op', { sessionId });
@@ -12049,6 +12429,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     if (typeof sessionId !== 'string' || typeof enabled !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'sessionId + enabled required');
     }
+    await assertReviewSettingsUnlocked(sessionId);
     // 记下会话 Fast 态:responses-bridge 模型(chatgpt/ 前缀)的 fast 无法经请求体流到 bridge,
     // 由 compat-proxy 路由决策从这里读出、闭包进订阅直连 handler 的 prefs(与 SET_EFFORT 的 effort 同机制)。
     setSessionFastMode(sessionId, enabled);
@@ -12095,6 +12476,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   ipcMain.handle(MAKER_INVOKE.SET_EXTRA_DIRS, async (_e, sessionId: unknown, dirs: unknown) => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
     if (!Array.isArray(dirs)) throwIpcError('INVALID_PARAMS', 'dirs must be string[]');
+    await assertReviewSettingsUnlocked(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) {
       log.debug('set-extra-dirs: session not found, no-op', { sessionId });
@@ -12357,7 +12739,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
-      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
+      onDeferred: () =>
+        deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });
@@ -12376,7 +12759,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     return refreshCodexMcpEnvironment({
       restartCodex: restartCodexAfterAuthModeChange,
       shutdownCodexEnvironment,
-      onDeferred: () => deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
+      onDeferred: () =>
+        deferredCodexRestartHolder?.schedule('Codex Browser capability routing changed'),
       logger: log,
     });
   });
@@ -12928,9 +13312,6 @@ function broadcastNewMakerDraftChanged(): void {
   draftChangedScheduled = true;
   setTimeout(() => {
     draftChangedScheduled = false;
-    tapWindowBroadcast(
-      MAKER_PUSH.NEW_MAKER_DRAFT_CHANGED,
-      getRemoteNewMakerDefaultsByVendor(),
-    );
+    tapWindowBroadcast(MAKER_PUSH.NEW_MAKER_DRAFT_CHANGED, getRemoteNewMakerDefaultsByVendor());
   }, 0);
 }

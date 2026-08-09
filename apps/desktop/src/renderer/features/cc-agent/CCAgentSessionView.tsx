@@ -159,6 +159,7 @@ import {
 } from '@/lib/orcaSessionIdentity';
 import type { Effort, PermissionMode } from '@/lib/userPreferences.types';
 import type { AttachedFile, MentionedResource } from '@/lib/fileTypes';
+import { serializeAttachedFiles } from '@/lib/messageAttachmentPayload';
 import type { PastedTextRange, SlashCommandRange } from '@/lib/imageRef';
 import { createLogger } from '@/lib/logger';
 import { getModelById, getDefaultModelForVendor, getModelsForVendor } from '@/lib/modelDefinitions';
@@ -2396,8 +2397,7 @@ export function CCAgentSessionView({
 
   // /issue 命令的 composer 附件不随命令 payload 走 main IPC 往返 —— AttachedFile 是
   // renderer 层类型(与 render/main 解耦一致),且发送后 composer 会 clearFiles。故在
-  // dispatch 前于 renderer 侧快照,待 main 广播 DESKTOP_COMMAND_TRIGGERED 回流时由
-  // 下方 issue effect 取用(见 pendingIssueFilesRef 的消费点)。
+  // dispatch 前于 renderer 侧快照,待 main 广播 DESKTOP_COMMAND_TRIGGERED 回流时取用。
   const pendingIssueFilesRef = useRef<AttachedFile[] | undefined>(undefined);
 
   const maybeDispatchDesktopSlashCommand = useCallback(
@@ -2410,8 +2410,32 @@ export function CCAgentSessionView({
       const commands = cached.length > 0 ? cached : await getHelpCommandsSnapshot();
       const hit = commands.find((c) => c.name.toLowerCase() === cmdName);
       if (hit?.kind !== 'desktop') return false;
-      // 仅 /issue 需要携带附件:snapshot 到 ref,DESKTOP_COMMAND_TRIGGERED 回流时消费。
-      // 其它 desktop 命令(/help /clear /cmd ...)不涉及附件,不写 ref。
+      // Review is handed to Main immediately with this invocation's serialized
+      // attachments. It must not depend on this React view remaining mounted,
+      // nor share a mutable attachment ref with a later command.
+      if (hit.name === 'review') {
+        if (!sessionId) return true;
+        if (remoteDeviceId) {
+          toast.warning(t('review.toast.remoteUnsupported'));
+          return true;
+        }
+        const attachments = files?.length ? serializeAttachedFiles(files) : undefined;
+        void window.electronAPI.maker
+          .startReview({
+            sourceSessionId: sessionId,
+            ...(args.trim() ? { focus: args.trim() } : {}),
+            ...(attachments?.length ? { attachments } : {}),
+          })
+          .catch((err) => {
+            const ipcError = extractIpcError(err);
+            toast.error(
+              ipcError?.message || (err instanceof Error ? err.message : t('review.toast.failed')),
+            );
+          });
+        return true;
+      }
+      // /issue still uses the existing command event because its action runs
+      // inside this mounted composer. Other desktop commands have no files.
       if (hit.name === 'issue') {
         pendingIssueFilesRef.current = files && files.length > 0 ? files : undefined;
       }
@@ -2427,7 +2451,7 @@ export function CCAgentSessionView({
       });
       return true;
     },
-    [getHelpCommandsSnapshot, session?.workingDir, sessionId, remoteDeviceId],
+    [getHelpCommandsSnapshot, session?.workingDir, sessionId, remoteDeviceId, t],
   );
 
   const maybeShowContextUsage = useCallback(
@@ -3863,7 +3887,8 @@ export function CCAgentSessionView({
                   isAgentBusy={isAgentBusy}
                   onStop={handleStopSession}
                   pendingQueue={pendingQueue}
-                  disabled={remoteHandoffPreparing}
+                  disabled={remoteHandoffPreparing || session?.source === 'review'}
+                  settingsLocked={session?.source === 'review'}
                   queuePaused={queuePaused}
                   queueExpanded={queueExpanded}
                   onQueueExpandedChange={setQueueExpanded}

@@ -1,0 +1,285 @@
+import type { AgentEvent, SessionSendOptions, UserMessage } from '@cindy/maker-core';
+import { describe, expect, it, vi } from 'vitest';
+
+import { MAKER_INVOKE } from '../channels.js';
+import {
+  registerReviewStartHandler,
+  type PreparedReviewLaunch,
+  type PreparedReviewRun,
+  type ReviewRunnerHandle,
+  type ReviewStartHandlerDeps,
+} from '../reviewStartHandler.js';
+import { IpcHarness } from './helpers/ipcHarness.js';
+
+class FakeReviewer implements ReviewRunnerHandle {
+  private listener: ((event: AgentEvent) => void) | null = null;
+  accepted = true;
+  readonly send = vi.fn(async (_message: UserMessage, options: SessionSendOptions) => {
+    await options.onAccepted?.();
+    return this.accepted
+      ? ({ accepted: true } as const)
+      : ({ accepted: false, reason: 'cancelled-before-dispatch' } as const);
+  });
+
+  onEvent(listener: (event: AgentEvent) => void): () => void {
+    this.listener = listener;
+    return () => {
+      if (this.listener === listener) this.listener = null;
+    };
+  }
+
+  emit(event: AgentEvent): void {
+    this.listener?.(event);
+  }
+}
+
+function makeLaunch(overrides: Partial<PreparedReviewLaunch> = {}): PreparedReviewLaunch {
+  return {
+    message: { type: 'user', content: [{ type: 'text', text: 'review prompt' }] },
+    reviewerCreateOpts: {
+      id: 'reviewer-1',
+      agentKind: 'codex',
+      workingDir: '/repo',
+      model: 'gpt-test',
+      reviewMode: true,
+    },
+    verifyBeforeStart: vi.fn(async () => undefined),
+    verifyBeforePublish: vi.fn(async () => null),
+    ...overrides,
+  };
+}
+
+function makePreparedRun(
+  launch: PreparedReviewLaunch,
+  overrides: Partial<PreparedReviewRun> = {},
+): PreparedReviewRun {
+  return {
+    sourceAgentKind: 'codex',
+    prompt: 'review prompt',
+    targetKind: 'mixed',
+    prepareLaunch: vi.fn(async () => launch),
+    ...overrides,
+  };
+}
+
+function makeDeps(
+  reviewer: FakeReviewer,
+  overrides: Partial<ReviewStartHandlerDeps> = {},
+): ReviewStartHandlerDeps {
+  let id = 0;
+  const launch = makeLaunch();
+  return {
+    assertCaller: vi.fn(),
+    waitUntilReady: vi.fn(async () => undefined),
+    createRunId: vi.fn(() => `run-${++id}`),
+    createReviewerSessionId: vi.fn(() => `reviewer-${id}`),
+    now: vi.fn(() => 1_000 + id),
+    prepareRun: vi.fn(async () => makePreparedRun(launch)),
+    createSourceCard: vi.fn(async () => undefined),
+    updateSourceCard: vi.fn(async () => undefined),
+    startReviewer: vi.fn(async () => reviewer),
+    markReviewerStarted: vi.fn(async () => undefined),
+    broadcastReviewerCreated: vi.fn(),
+    persistReviewerPrompt: vi.fn(async () => undefined),
+    drainPersistQueue: vi.fn(async () => undefined),
+    readReviewerResult: vi.fn(async () => 'P1: real finding'),
+    closeReviewer: vi.fn(async () => undefined),
+    warn: vi.fn(),
+    ...overrides,
+  };
+}
+
+function reviewRequest(sourceSessionId = 'source-1') {
+  return { sourceSessionId, attachments: [] };
+}
+
+describe('maker:review:start IPC lifecycle', () => {
+  it('validates the caller and bounded request before preparing evidence', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, null)).rejects.toMatchObject({
+      code: 'INVALID_PARAMS',
+    });
+    await expect(
+      harness.invoke(MAKER_INVOKE.START_REVIEW, {
+        sourceSessionId: 'source-1',
+        attachments: Array.from({ length: 21 }, () => ({ name: 'x' })),
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PARAMS' });
+
+    expect(deps.assertCaller).toHaveBeenCalledTimes(2);
+    expect(deps.prepareRun).not.toHaveBeenCalled();
+  });
+
+  it('runs card, bootstrap, accepted send, and completed result through the real handler', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const cleanup = vi.fn(async () => undefined);
+    const deps = makeDeps(reviewer, {
+      prepareRun: vi.fn(async () => makePreparedRun(makeLaunch(), { cleanup })),
+    });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toEqual({
+      ok: true,
+      runId: 'run-1',
+      reviewerSessionId: 'reviewer-1',
+    });
+
+    expect(deps.createSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sourceSessionId: 'source-1',
+        sourceCardClientId: 'review:run-1',
+        meta: expect.objectContaining({ status: 'running', targetKind: 'mixed' }),
+      }),
+    );
+    expect(deps.startReviewer).toHaveBeenCalledWith(expect.objectContaining({ reviewMode: true }));
+    expect(deps.persistReviewerPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-1', prompt: 'review prompt' }),
+    );
+
+    reviewer.emit({ type: 'done', data: {} });
+    await vi.waitFor(() =>
+      expect(deps.updateSourceCard).toHaveBeenCalledWith(
+        expect.objectContaining({
+          result: 'P1: real finding',
+          meta: expect.objectContaining({ status: 'completed' }),
+        }),
+      ),
+    );
+    expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails a send rejected before provider dispatch, releases the source, and permits retry', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.accepted = false;
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'SESSION_RUNNING',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({ status: 'failed' }),
+      }),
+    );
+    expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+
+    reviewer.accepted = true;
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      { ok: true, runId: 'run-2' },
+    );
+  });
+
+  it('locks a source during evidence preparation and releases it when preparation fails', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    let rejectPreparation!: (error: Error) => void;
+    const preparation = new Promise<PreparedReviewRun>((_resolve, reject) => {
+      rejectPreparation = reject;
+    });
+    const deps = makeDeps(reviewer, {
+      prepareRun: vi.fn(() => preparation),
+    });
+    registerReviewStartHandler(harness, deps);
+
+    const first = harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+    await vi.waitFor(() => expect(deps.prepareRun).toHaveBeenCalledTimes(1));
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'SESSION_RUNNING',
+    });
+
+    rejectPreparation(new Error('evidence failed'));
+    await expect(first).rejects.toThrow('evidence failed');
+    expect(deps.startReviewer).not.toHaveBeenCalled();
+    expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores continuation boundaries and lets only the first terminal event finalize', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+    await harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+
+    reviewer.emit({ type: 'done', data: {}, turnContinuationId: 7 });
+    expect(deps.updateSourceCard).not.toHaveBeenCalled();
+    reviewer.emit({
+      type: 'error',
+      data: { message: 'model format rejected', isTerminal: true },
+    });
+    reviewer.emit({ type: 'done', data: {} });
+
+    await vi.waitFor(() => {
+      expect(deps.updateSourceCard).toHaveBeenCalledTimes(1);
+      expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: '',
+        meta: expect.objectContaining({
+          status: 'failed',
+          error: 'model format rejected',
+        }),
+      }),
+    );
+    expect(deps.readReviewerResult).not.toHaveBeenCalled();
+  });
+
+  it('publishes no stale result when final freshness verification fails', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const staleReason = 'A review artifact changed while Review was running.';
+    const launch = makeLaunch({
+      verifyBeforePublish: vi.fn(async () => staleReason),
+    });
+    const deps = makeDeps(reviewer, {
+      prepareRun: vi.fn(async () => makePreparedRun(launch)),
+    });
+    registerReviewStartHandler(harness, deps);
+    await harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+
+    reviewer.emit({ type: 'done', data: {} });
+    await vi.waitFor(() => expect(deps.updateSourceCard).toHaveBeenCalledTimes(1));
+
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: '',
+        meta: expect.objectContaining({ status: 'failed', error: staleReason }),
+      }),
+    );
+    expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails the visible card when evidence changes before reviewer bootstrap', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const cleanup = vi.fn(async () => undefined);
+    const launch = makeLaunch({
+      verifyBeforeStart: vi.fn(async () => {
+        throw new Error('artifact changed before start');
+      }),
+    });
+    const deps = makeDeps(reviewer, {
+      prepareRun: vi.fn(async () => makePreparedRun(launch, { cleanup })),
+    });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toThrow(
+      'artifact changed before start',
+    );
+    expect(deps.startReviewer).not.toHaveBeenCalled();
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({ status: 'failed' }),
+      }),
+    );
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+});

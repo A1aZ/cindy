@@ -37,4 +37,21 @@ describe('cindy-bridge extension source', () => {
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("event.toolName !== 'bash'");
     expect(CINDY_BRIDGE_EXTENSION_SOURCE).toContain("startsWith('mcp__')");
   });
+
+  it('checks the Review deny-by-default boundary before ordinary permission handling', () => {
+    const source = CINDY_BRIDGE_EXTENSION_SOURCE;
+    const reviewGate = source.indexOf('if (permission.reviewOnly)');
+    const ordinaryWriteHandling = source.indexOf('if (FILE_WRITE_BUILTINS.has(event.toolName))');
+
+    expect(reviewGate).toBeGreaterThan(-1);
+    expect(ordinaryWriteHandling).toBeGreaterThan(reviewGate);
+    expect(source).toContain(
+      "reason: 'Cindy Review only permits read-only access to this task and its explicit artifacts.'",
+    );
+    expect(source).toContain(
+      'reviewReadIsAllowed(event.toolName, rawPath, permission.reviewReadPaths)',
+    );
+    expect(source).toContain("toolName === 'grep' && statSync(target).isDirectory()");
+    expect(source).toContain('REVIEW_CREDENTIAL_PATH_PATTERNS.some');
+  });
 });

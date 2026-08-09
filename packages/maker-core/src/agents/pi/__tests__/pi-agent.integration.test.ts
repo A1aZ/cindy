@@ -31,13 +31,18 @@ import type { Logger } from '../../../interfaces/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '../../../../../..');
-const PI_BINARY = path.join(
-  REPO_ROOT,
-  'apps',
-  'pi-bin',
-  `${process.platform}-${process.arch}`,
-  process.platform === 'win32' ? 'pi.exe' : 'pi',
-);
+// Local installs keep the same versioned binary outside the worktree. The
+// override lets a lightweight harness smoke use that binary without copying it
+// into apps/pi-bin or starting Desktop; CI keeps the repository-managed path.
+const PI_BINARY =
+  process.env.CINDY_TEST_PI_BINARY ||
+  path.join(
+    REPO_ROOT,
+    'apps',
+    'pi-bin',
+    `${process.platform}-${process.arch}`,
+    process.platform === 'win32' ? 'pi.exe' : 'pi',
+  );
 const RIPGREP_DIR = path.join(
   REPO_ROOT,
   'apps',
@@ -720,6 +725,60 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         // pi 应把图片 base64 转发进网关请求(Anthropic image content block)。
         const sawImage = seenRequests.some((r) => r.body.includes(PNG_1x1_B64));
         expect(sawImage).toBe(true);
+      } finally {
+        await handle?.close();
+        rmSync(workingDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    'forwards one review turn with Markdown/PDF excerpts and image bytes',
+    { timeout: 60_000 },
+    async () => {
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+      const agent = new PiAgent(buildDeps());
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-review-formats-'));
+      const markdownPath = path.join(workingDir, 'launch.md');
+      const pdfPath = path.join(workingDir, 'contract.pdf');
+      const imagePath = path.join(workingDir, 'poster.png');
+      writeFileSync(markdownPath, '# Launch\nBudget: 100 vs 80 + 50');
+      writeFileSync(pdfPath, '%PDF-1.4\n% transport fixture');
+      writeFileSync(imagePath, Buffer.from(pngBase64, 'base64'));
+      let handle: AgentSessionHandle | null = null;
+      try {
+        handle = await agent.startSession({
+          sessionId: 'review-format-session',
+          workingDir,
+          model: 'pi-test-model',
+          reviewMode: true,
+          reviewReadPaths: [markdownPath, pdfPath, imagePath],
+        });
+        const before = seenRequests.length;
+        const done = (async () => {
+          for await (const event of handle!.events()) if (event.type === 'done') break;
+        })();
+        await handle.send({
+          type: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'Markdown budget: 100 vs 80 + 50. PDF payment: 30 days vs 60 days.',
+            },
+            { type: 'file', path: markdownPath, mimeType: 'text/markdown' },
+            { type: 'file', path: pdfPath, mimeType: 'application/pdf' },
+            { type: 'image', path: imagePath, mimeType: 'image/png' },
+          ],
+        });
+        await done;
+
+        const bodies = seenRequests.slice(before).map((request) => request.body).join('\n');
+        expect(bodies).toContain('Markdown budget: 100 vs 80 + 50');
+        expect(bodies).toContain('PDF payment: 30 days vs 60 days');
+        expect(bodies).toContain(jsonStringContent(markdownPath));
+        expect(bodies).toContain(jsonStringContent(pdfPath));
+        expect(bodies).toContain(pngBase64);
       } finally {
         await handle?.close();
         rmSync(workingDir, { recursive: true, force: true });

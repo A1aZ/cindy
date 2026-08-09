@@ -6160,6 +6160,14 @@
         "handoffTitle": "交接内容——切换时发送给新引擎的上下文摘要(不计入对话记录，仅在此展示)",
         "handoffTitleEnglishSource": "交接内容——切换时发送给新引擎的上下文摘要，原文为英文(不计入对话记录，仅在此展示)",
         "resumedBadge": "已续接原任务"
+      },
+      "review": {
+        "running": "正在审查当前成果",
+        "completed": "审查完成",
+        "failed": "审查未完成",
+        "openTask": "打开审查任务",
+        "readOnlyHint": "独立任务 · 无开发记忆 · 只读",
+        "noResult": "审查任务没有返回可见结论"
       }
     },
     "markdownRenderer": {
@@ -8754,6 +8762,20 @@
       "failed": "设置目标失败",
       "set": "目标已设置，开始自动推进",
       "cleared": "目标已清除"
+    }
+  },
+  "review": {
+    "toast": {
+      "failed": "无法开始审查",
+      "remoteUnsupported": "当前版本只支持审查本机任务"
+    },
+    "externalArtifactConfirm": {
+      "title": "允许审查工作区外的成果？",
+      "message": "本次审查会把 {{count}} 项工作区外或内存中的成果发送给你配置的模型。",
+      "detail": "本次只会授权下列成果。继续前请确认它们确实需要审查。",
+      "inline": "内存附件",
+      "allow": "仅本次允许",
+      "cancel": "取消"
     }
   },
   "learn": {

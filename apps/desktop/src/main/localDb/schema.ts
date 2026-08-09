@@ -32,6 +32,7 @@ const SESSION_SOURCES = [
   'wecom',
   'scheduler',
   'learn',
+  'review',
   'shared',
   'plugin',
 ] as const satisfies readonly SessionSource[];

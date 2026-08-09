@@ -53,7 +53,8 @@ function tempDirFor(sessionId: string): string {
 /** 在 session 临时目录下分配一个唯一文件路径(建目录,不写内容)。 */
 async function ensureTempPath(sessionId: string, mimeType: string | undefined): Promise<string> {
   const dir = tempDirFor(sessionId);
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700);
   TEMP_DIRS_BY_SESSION.set(sessionId, dir);
   const ext = (mimeType && EXT_BY_MIME[mimeType]) ?? '.bin';
   return path.join(dir, `${randomUUID()}${ext}`);
@@ -65,7 +66,8 @@ async function writeTempFile(
   mimeType: string | undefined,
 ): Promise<string> {
   const file = await ensureTempPath(sessionId, mimeType);
-  await fs.writeFile(file, bytes);
+  await fs.writeFile(file, bytes, { flag: 'wx', mode: 0o600 });
+  await fs.chmod(file, 0o600);
   return file;
 }
 

@@ -6160,6 +6160,14 @@
         "handoffTitle": "인계 내용——전환 시 새 엔진에 전송된 컨텍스트 요약(대화 기록에 포함되지 않으며 여기에서만 표시)",
         "handoffTitleEnglishSource": "인계 내용——전환 시 새 엔진에 전송된 컨텍스트 요약. 원문은 영어(대화 기록에 포함되지 않으며 여기에서만 표시)",
         "resumedBadge": "세션 재개됨"
+      },
+      "review": {
+        "running": "현재 결과물을 검토하는 중",
+        "completed": "검토 완료",
+        "failed": "검토를 완료하지 못했습니다",
+        "openTask": "검토 작업 열기",
+        "readOnlyHint": "독립 작업 · 개발 메모리 없음 · 읽기 전용",
+        "noResult": "검토 결과가 반환되지 않았습니다"
       }
     },
     "markdownRenderer": {
@@ -8754,6 +8762,20 @@
       "failed": "목표 설정에 실패했습니다",
       "set": "목표를 설정했습니다 — 자동으로 진행합니다",
       "cleared": "목표를 지웠습니다"
+    }
+  },
+  "review": {
+    "toast": {
+      "failed": "검토를 시작할 수 없습니다",
+      "remoteUnsupported": "이 버전에서는 로컬 작업만 검토할 수 있습니다"
+    },
+    "externalArtifactConfirm": {
+      "title": "작업 공간 밖의 결과물을 검토할까요?",
+      "message": "이 검토는 작업 공간 밖 또는 메모리에 있는 {{count}}개 항목을 설정된 모델로 보냅니다.",
+      "detail": "이번 검토에는 아래 항목만 허용됩니다. 계속하기 전에 확인하세요.",
+      "inline": "메모리 첨부 파일",
+      "allow": "이번만 허용",
+      "cancel": "취소"
     }
   },
   "learn": {

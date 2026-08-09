@@ -5014,6 +5014,24 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke('maker:execute-desktop-command', name, ctx),
 
+    startReview: (input: {
+      sourceSessionId: string;
+      focus?: string;
+      attachments?: Array<{
+        id: string;
+        name: string;
+        path: string;
+        ext: string;
+        size: number;
+        category: 'image' | 'pdf' | 'text' | 'office' | 'file';
+        mimeType: string;
+        url?: string;
+        originalName?: string;
+        base64?: string;
+      }>;
+    }): Promise<{ ok: true; runId: string; reviewerSessionId: string }> =>
+      ipcRenderer.invoke('maker:review:start', input),
+
     listAgentCommands: (
       agentKind: 'claude-code' | 'codex' | 'pi',
     ): Promise<{

@@ -10,11 +10,13 @@ vi.mock('electron', () => ({ app: { getPath: () => '/tmp/test-attach' } }));
 
 const writeFile = vi.hoisted(() => vi.fn(async () => {}));
 const mkdir = vi.hoisted(() => vi.fn(async () => {}));
+const chmod = vi.hoisted(() => vi.fn(async () => {}));
 const readFile = vi.hoisted(() => vi.fn(async () => Buffer.from('image-bytes')));
 vi.mock('node:fs/promises', () => ({
-  default: { writeFile, mkdir, readFile, rm: vi.fn(async () => {}) },
+  default: { writeFile, mkdir, chmod, readFile, rm: vi.fn(async () => {}) },
   writeFile,
   mkdir,
+  chmod,
   readFile,
   rm: vi.fn(async () => {}),
 }));

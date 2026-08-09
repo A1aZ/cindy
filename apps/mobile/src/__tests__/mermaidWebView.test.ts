@@ -59,6 +59,7 @@ describe('mermaidWebView', () => {
     expect(js).toContain(
       'try { renderMermaid(); } catch (error) { fail(); return; }',
     );
+    expect(js).not.toContain('</script>');
   });
 
   it('parse 失败兜底:注入 mermaidAutofix 修复版;合法源码注入空串跳过重试', () => {

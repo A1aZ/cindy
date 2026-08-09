@@ -5729,7 +5729,9 @@ export default function SessionScreen() {
       console.warn('[conversation-share] failed to generate or open share image', error);
       Alert.alert(t('session.screen.shareFailedTitle'), t('session.screen.shareImageFailed'));
     } finally {
-      if (localUri) await deleteConversationSharePngTemp(localUri);
+      if (localUri && Platform.OS !== 'android') {
+        await deleteConversationSharePngTemp(localUri);
+      }
       if (shareOperationSeqRef.current === operationSeq) setConversationShareBusy(false);
     }
   }, [conversationShareBusy, conversationShareHtml, exportConversationSharePng, selectedShareMessages.length, shareSelectionActive, shareSelectionRevision, t]);

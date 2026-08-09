@@ -39,10 +39,10 @@ export function buildKatexLoaderJs(onReadyJs: string, onErrorJs = ''): string {
       }
       try {
         var style = document.createElement('style');
-        style.textContent = ${JSON.stringify(MOBILE_KATEX_CSS)};
+        style.textContent = ${serializeForScript(MOBILE_KATEX_CSS)};
         document.head.appendChild(style);
         var script = document.createElement('script');
-        script.textContent = ${JSON.stringify(MOBILE_KATEX_JS)};
+        script.textContent = ${serializeForScript(MOBILE_KATEX_JS)};
         document.head.appendChild(script);
         if (!window.katex) { fail(); return; }
         try { ${onReadyJs} } catch (error) { fail(); return; }

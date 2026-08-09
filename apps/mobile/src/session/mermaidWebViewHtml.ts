@@ -32,7 +32,7 @@ export function buildMermaidLoaderJs(
       }
       try {
         var script = document.createElement('script');
-        script.textContent = ${JSON.stringify(MOBILE_MERMAID_JS)};
+        script.textContent = ${serializeForScript(MOBILE_MERMAID_JS)};
         document.head.appendChild(script);
         if (!window.mermaid) { fail(); return; }
         try { ${onReadyJs} } catch (error) { fail(); return; }

@@ -86,6 +86,7 @@ describe('buildKatexLoaderJs', () => {
     expect(js).toContain('setTimeout');
     expect(js).toContain('window.katex');
     expect(js).toContain('doRender();');
+    expect(js).not.toContain('</script>');
   });
 });
 

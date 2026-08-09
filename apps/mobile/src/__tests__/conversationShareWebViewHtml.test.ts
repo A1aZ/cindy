@@ -174,9 +174,7 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(webViewSource).toContain(
       'await deleteConversationSharePngTemp(file.uri);',
     );
-    expect(sessionSource).toContain(
-      'if (localUri) await deleteConversationSharePngTemp(localUri);',
-    );
+    expect(sessionSource).toContain("localUri && Platform.OS !== 'android'");
     expect(sessionSource).toContain('key={conversationShareHtml}');
   });
 

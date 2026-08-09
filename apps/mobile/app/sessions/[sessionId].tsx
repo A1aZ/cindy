@@ -5673,8 +5673,6 @@ export default function SessionScreen() {
     shareSelectionActive,
     windowDimensions.width,
   ]);
-  const conversationShareHtmlRef = useRef(conversationShareHtml);
-  conversationShareHtmlRef.current = conversationShareHtml;
   const enterShareSelection = useCallback((clientId: string) => {
     Keyboard.dismiss();
     setShareSelectionTriggeredByScreenshot(false);
@@ -5707,12 +5705,10 @@ export default function SessionScreen() {
     const operationSeq = shareOperationSeqRef.current + 1;
     shareOperationSeqRef.current = operationSeq;
     const operationSelectionRevision = shareSelectionRevisionRef.current;
-    const operationShareHtml = conversationShareHtml;
     const isShareOperationActive = () =>
       shareOperationSeqRef.current === operationSeq
       && shareSelectionActiveRef.current
-      && shareSelectionRevisionRef.current === operationSelectionRevision
-      && conversationShareHtmlRef.current === operationShareHtml;
+      && shareSelectionRevisionRef.current === operationSelectionRevision;
     let localUri: string | null = null;
     setConversationShareBusy(true);
     try {

@@ -88,6 +88,8 @@ describe("mobile screenshot-triggered share guards", () => {
     expect(source).toContain(
       "shareSelectionRevisionRef.current === operationSelectionRevision",
     );
+    expect(source).not.toContain("conversationShareHtmlRef");
+    expect(source).not.toContain("operationShareHtml");
   });
 
 });

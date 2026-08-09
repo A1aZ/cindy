@@ -210,6 +210,7 @@ import {
   type ReviewRunOwner,
 } from '../../shared/reviewRun.js';
 import {
+  createRetryableReviewStartup,
   hasReviewOwnerProcessEnded,
   shouldFailInterruptedReview,
 } from '../reviewer/reviewRunRecovery.js';
@@ -2438,16 +2439,10 @@ const reviewRunOwner: ReviewRunOwner = {
   instanceId: randomUUID(),
   processId: process.pid,
 };
-let reviewOwnerLivenessReady: Promise<void> | null = null;
-
-function ensureReviewOwnerLivenessReady(): Promise<void> {
-  if (!reviewOwnerLivenessReady) {
-    reviewOwnerLivenessReady = startReviewOwnerLiveness().then((handle) => {
-      reviewRunOwner.liveness = handle.identity;
-    });
-  }
-  return reviewOwnerLivenessReady;
-}
+const ensureReviewOwnerLivenessReady = createRetryableReviewStartup(async () => {
+  const handle = await startReviewOwnerLiveness();
+  reviewRunOwner.liveness = handle.identity;
+});
 const sessionTurnLeaseTracker = new SessionTurnLeaseTracker({
   getDbClient,
   owner: reviewRunOwner,
@@ -6807,25 +6802,26 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     return sessionTurnLeaseTracker.isTurnActive(sourceSessionId);
   };
-  const reviewStartupReady = ensureReviewOwnerLivenessReady()
-    .then(() =>
-      Promise.all([
+  const ensureReviewStartupReady = createRetryableReviewStartup(async () => {
+    try {
+      await ensureReviewOwnerLivenessReady();
+      await Promise.all([
         reconcileInterruptedReviews(),
         sessionTurnLeaseTracker.reconcileStaleLeases(),
         cleanupOrphanedReviewArtifactSnapshots({ currentOwner: reviewRunOwner }),
-      ]),
-    )
-    .then(() => undefined)
-    .catch((error) => {
+      ]);
+    } catch (error) {
       log.error('failed to prepare Review runtime state', {
         error: error instanceof Error ? error.message : String(error),
       });
       throw error;
-    });
+    }
+  });
   // Registration happens before the renderer can invoke /review. Keep a
   // rejection observer here so a startup database failure is logged without
-  // becoming an unhandled promise; START_REVIEW still awaits and fails closed.
-  void reviewStartupReady.catch(() => {});
+  // becoming an unhandled promise. A rejected attempt is forgotten so a later
+  // START_REVIEW can retry the full reconciliation and still fail closed.
+  void ensureReviewStartupReady().catch(() => {});
 
   const readLatestReviewerResult = async (reviewerSessionId: string): Promise<string> => {
     const rows = await getDbClient()
@@ -6851,7 +6847,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     assertCaller: (event) =>
       assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
     waitUntilReady: async () => {
-      await reviewStartupReady;
+      await ensureReviewStartupReady();
       // A supported shared-userData peer can exit after this instance starts.
       // Recheck ownership immediately before each run so its stale card can be
       // failed, while a still-live peer remains protected by the DB-backed gate.

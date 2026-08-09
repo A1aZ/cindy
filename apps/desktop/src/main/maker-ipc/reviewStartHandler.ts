@@ -27,45 +27,92 @@ export interface StartReviewRequest {
   attachments: ReviewAttachmentInput[];
 }
 
+export const REVIEW_START_REQUEST_LIMITS = {
+  sourceSessionIdChars: 512,
+  focusChars: 4_000,
+  attachmentCount: 20,
+  attachmentBase64Chars: 32 * 1024 * 1024,
+  totalBase64Chars: 64 * 1024 * 1024,
+  attachmentMetadataChars: {
+    name: 4_096,
+    path: 32 * 1024,
+    url: 64 * 1024,
+    category: 32,
+    mimeType: 1_024,
+    originalName: 4_096,
+  },
+  totalAttachmentMetadataChars: 256 * 1024,
+} as const;
+
 export function readStartReviewRequest(value: unknown): StartReviewRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throwIpcError('INVALID_PARAMS', 'review request must be an object');
   }
   const record = value as Record<string, unknown>;
-  if (typeof record.sourceSessionId !== 'string' || !record.sourceSessionId.trim()) {
+  if (
+    typeof record.sourceSessionId !== 'string' ||
+    record.sourceSessionId.length > REVIEW_START_REQUEST_LIMITS.sourceSessionIdChars ||
+    !record.sourceSessionId.trim()
+  ) {
     throwIpcError('INVALID_PARAMS', 'sourceSessionId required');
   }
-  const focus = typeof record.focus === 'string' ? record.focus.trim() : '';
-  if (focus.length > 4_000) {
-    throwIpcError('INVALID_PARAMS', 'review focus is too long');
+  let focus = '';
+  if (typeof record.focus === 'string') {
+    if (record.focus.length > REVIEW_START_REQUEST_LIMITS.focusChars) {
+      throwIpcError('INVALID_PARAMS', 'review focus is too long');
+    }
+    focus = record.focus.trim();
   }
   const rawAttachments = record.attachments ?? [];
-  if (!Array.isArray(rawAttachments) || rawAttachments.length > 20) {
+  if (
+    !Array.isArray(rawAttachments) ||
+    rawAttachments.length > REVIEW_START_REQUEST_LIMITS.attachmentCount
+  ) {
     throwIpcError('INVALID_PARAMS', 'review attachments must be an array of at most 20 files');
   }
   let totalBase64Chars = 0;
+  let totalMetadataChars = 0;
   const attachments: ReviewAttachmentInput[] = rawAttachments.map((item, index) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
       throwIpcError('INVALID_PARAMS', `review attachment ${index} must be an object`);
     }
     const attachment = item as Record<string, unknown>;
-    const name =
-      typeof attachment.name === 'string' && attachment.name.trim()
-        ? attachment.name.trim()
-        : `attachment-${index + 1}`;
+    const readMetadata = (
+      field: keyof typeof REVIEW_START_REQUEST_LIMITS.attachmentMetadataChars,
+    ): string | undefined => {
+      const raw = attachment[field];
+      if (typeof raw !== 'string' || !raw) return undefined;
+      if (raw.length > REVIEW_START_REQUEST_LIMITS.attachmentMetadataChars[field]) {
+        throwIpcError(
+          'INVALID_PARAMS',
+          `review attachment ${index} ${field} is too long`,
+        );
+      }
+      totalMetadataChars += raw.length;
+      if (totalMetadataChars > REVIEW_START_REQUEST_LIMITS.totalAttachmentMetadataChars) {
+        throwIpcError('INVALID_PARAMS', 'review attachment metadata is too large in total');
+      }
+      return raw;
+    };
+    const rawName = readMetadata('name');
+    const name = rawName?.trim() || `attachment-${index + 1}`;
+    const attachmentPath = readMetadata('path');
+    const url = readMetadata('url');
+    const category = readMetadata('category');
+    const mimeType = readMetadata('mimeType');
+    const originalName = readMetadata('originalName');
     const base64 = typeof attachment.base64 === 'string' ? attachment.base64 : undefined;
-    if (base64 && base64.length > 32 * 1024 * 1024) {
+    if (base64 && base64.length > REVIEW_START_REQUEST_LIMITS.attachmentBase64Chars) {
       throwIpcError('INVALID_PARAMS', `review attachment ${index} is too large`);
     }
     totalBase64Chars += base64?.length ?? 0;
-    if (totalBase64Chars > 64 * 1024 * 1024) {
+    if (totalBase64Chars > REVIEW_START_REQUEST_LIMITS.totalBase64Chars) {
       throwIpcError('INVALID_PARAMS', 'review attachments are too large in total');
     }
-    const category = attachment.category;
     return {
       name,
-      ...(typeof attachment.path === 'string' && attachment.path ? { path: attachment.path } : {}),
-      ...(typeof attachment.url === 'string' && attachment.url ? { url: attachment.url } : {}),
+      ...(attachmentPath ? { path: attachmentPath } : {}),
+      ...(url ? { url } : {}),
       ...(category === 'image' ||
       category === 'pdf' ||
       category === 'text' ||
@@ -73,12 +120,8 @@ export function readStartReviewRequest(value: unknown): StartReviewRequest {
       category === 'file'
         ? { category }
         : {}),
-      ...(typeof attachment.mimeType === 'string' && attachment.mimeType
-        ? { mimeType: attachment.mimeType }
-        : {}),
-      ...(typeof attachment.originalName === 'string' && attachment.originalName
-        ? { originalName: attachment.originalName }
-        : {}),
+      ...(mimeType ? { mimeType } : {}),
+      ...(originalName ? { originalName } : {}),
       ...(base64 ? { base64 } : {}),
     };
   });
@@ -187,6 +230,8 @@ class ReviewPreconditionError extends Error {
 
 const REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS = 100;
 const REVIEW_SOURCE_LEASE_RELEASE_RETRY_MAX_MS = 5_000;
+const REVIEW_TERMINAL_CARD_RETRY_MS = 100;
+const REVIEW_TERMINAL_CARD_RETRY_MAX_MS = 5_000;
 
 /**
  * Register the host-owned Review lifecycle behind the same small IPC registry used
@@ -227,6 +272,10 @@ export function registerReviewStartHandler(
     let releasePromise: Promise<void> | null = null;
     let releaseRetryTimer: NodeJS.Timeout | null = null;
     let releaseRetryDelayMs = REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS;
+    let terminalCardRetryTimer: NodeJS.Timeout | null = null;
+    let terminalCardRetryDelayMs = REVIEW_TERMINAL_CARD_RETRY_MS;
+    let pendingTerminalCard: ReviewCardWrite | null = null;
+    let terminalCardPersisted = false;
     let sourceCardWriteChain = Promise.resolve();
 
     const enqueueSourceCardWrite = (write: () => Promise<void>): Promise<void> => {
@@ -251,6 +300,9 @@ export function registerReviewStartHandler(
     }
 
     const release = (): Promise<void> => {
+      // A running card and its durable lease are one gate. Never expose the
+      // source for another /review until its terminal replacement is durable.
+      if (pendingTerminalCard) return Promise.resolve();
       if (releasePromise) return releasePromise;
       const pending = (async () => {
         if (sourceLeaseAcquired) {
@@ -287,6 +339,48 @@ export function registerReviewStartHandler(
       });
       return pending;
     };
+
+    function scheduleTerminalCardRetry(): void {
+      if (terminalCardRetryTimer || !pendingTerminalCard) return;
+      const delayMs = terminalCardRetryDelayMs;
+      terminalCardRetryDelayMs = Math.min(
+        terminalCardRetryDelayMs * 2,
+        REVIEW_TERMINAL_CARD_RETRY_MAX_MS,
+      );
+      const timer = setTimeout(() => {
+        if (terminalCardRetryTimer === timer) terminalCardRetryTimer = null;
+        const pendingCard = pendingTerminalCard;
+        if (pendingCard) void persistTerminalCard(pendingCard);
+      }, delayMs);
+      timer.unref?.();
+      terminalCardRetryTimer = timer;
+    }
+
+    async function persistTerminalCard(card: ReviewCardWrite): Promise<void> {
+      pendingTerminalCard = card;
+      try {
+        await enqueueSourceCardWrite(() => deps.updateSourceCard(card));
+      } catch (error) {
+        deps.warn('review terminal card persist failed; retry scheduled', {
+          sourceSessionId: request.sourceSessionId,
+          runId,
+          status: card.meta.status,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        scheduleTerminalCardRetry();
+        return;
+      }
+      if (pendingTerminalCard !== card) return;
+      terminalCardPersisted = true;
+      pendingTerminalCard = null;
+      if (terminalCardRetryTimer) {
+        clearTimeout(terminalCardRetryTimer);
+        terminalCardRetryTimer = null;
+      }
+      terminalCardRetryDelayMs = REVIEW_TERMINAL_CARD_RETRY_MS;
+      await release();
+    }
+
     const disposeReviewerListeners = (): void => {
       disposeReviewEvents?.();
       disposeReviewEvents = null;
@@ -333,19 +427,13 @@ export function registerReviewStartHandler(
             ? { error: redactSensitiveText(error).slice(0, 2_000) }
             : {}),
       };
-      try {
-        await enqueueSourceCardWrite(() =>
-          deps.updateSourceCard({
-            sourceSessionId: request.sourceSessionId,
-            sourceCardClientId,
-            sourceAgentKind: currentSourceAgentKind,
-            meta: nextMeta,
-            result,
-          }),
-        );
-      } finally {
-        await release();
-      }
+      await persistTerminalCard({
+        sourceSessionId: request.sourceSessionId,
+        sourceCardClientId,
+        sourceAgentKind: currentSourceAgentKind,
+        meta: nextMeta,
+        result,
+      });
     };
 
     try {
@@ -430,8 +518,12 @@ export function registerReviewStartHandler(
             'failed',
             '',
             error instanceof Error ? error.message : String(error),
-          ).catch(async () => {
-            await release();
+          ).catch((cardError) => {
+            deps.warn('review failure card retry setup failed', {
+              sourceSessionId: request.sourceSessionId,
+              reviewerSessionId,
+              error: cardError instanceof Error ? cardError.message : String(cardError),
+            });
           });
           await closeReviewer();
         });
@@ -451,7 +543,6 @@ export function registerReviewStartHandler(
             reviewerSessionId,
             error: error instanceof Error ? error.message : String(error),
           });
-          await release();
           await closeReviewer();
         });
         void terminalFinalization;
@@ -533,12 +624,18 @@ export function registerReviewStartHandler(
       const active = activeReviewsBySource.get(request.sourceSessionId);
       if (active?.runId === runId) {
         if (sourceCardCreated) {
-          const message = error instanceof Error ? error.message : String(error);
-          const failureCode =
-            error instanceof ReviewPreconditionError ? error.reason.code : undefined;
-          await updateSourceCard('failed', '', message, failureCode).catch(async () => {
-            await release();
-          });
+          if (!pendingTerminalCard && !terminalCardPersisted) {
+            const message = error instanceof Error ? error.message : String(error);
+            const failureCode =
+              error instanceof ReviewPreconditionError ? error.reason.code : undefined;
+            await updateSourceCard('failed', '', message, failureCode).catch((cardError) => {
+              deps.warn('review startup failure card retry setup failed', {
+                sourceSessionId: request.sourceSessionId,
+                reviewerSessionId,
+                error: cardError instanceof Error ? cardError.message : String(cardError),
+              });
+            });
+          }
         } else {
           await release();
         }

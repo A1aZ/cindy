@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { MAKER_INVOKE } from '../channels.js';
 import {
+  readStartReviewRequest,
+  REVIEW_START_REQUEST_LIMITS,
   registerReviewStartHandler,
   type PreparedReviewLaunch,
   type PreparedReviewRun,
@@ -113,6 +115,57 @@ function reviewRequest(sourceSessionId = 'source-1') {
 }
 
 describe('maker:review:start IPC lifecycle', () => {
+  it.each(
+    Object.entries(REVIEW_START_REQUEST_LIMITS.attachmentMetadataChars) as Array<
+      [keyof typeof REVIEW_START_REQUEST_LIMITS.attachmentMetadataChars, number]
+    >,
+  )('rejects oversized %s metadata before downstream normalization', (field, maxChars) => {
+    expect(() =>
+      readStartReviewRequest({
+        sourceSessionId: 'source-1',
+        attachments: [
+          {
+            name: 'artifact',
+            [field]: ' '.repeat(maxChars + 1),
+          },
+        ],
+      }),
+    ).toThrow(`review attachment 0 ${field} is too long`);
+  });
+
+  it('rejects aggregate attachment metadata before authorization or prompt assembly', () => {
+    const perAttachmentChars =
+      Math.floor(
+        REVIEW_START_REQUEST_LIMITS.totalAttachmentMetadataChars /
+          REVIEW_START_REQUEST_LIMITS.attachmentCount,
+      ) + 1;
+    expect(() =>
+      readStartReviewRequest({
+        sourceSessionId: 'source-1',
+        attachments: Array.from(
+          { length: REVIEW_START_REQUEST_LIMITS.attachmentCount },
+          (_, index) => ({ name: `artifact-${index}`, path: 'p'.repeat(perAttachmentChars) }),
+        ),
+      }),
+    ).toThrow('review attachment metadata is too large in total');
+  });
+
+  it('bounds raw trimmed request fields before trim can copy oversized input', () => {
+    expect(() =>
+      readStartReviewRequest({
+        sourceSessionId: ' '.repeat(REVIEW_START_REQUEST_LIMITS.sourceSessionIdChars + 1),
+        attachments: [],
+      }),
+    ).toThrow('sourceSessionId required');
+    expect(() =>
+      readStartReviewRequest({
+        sourceSessionId: 'source-1',
+        focus: ' '.repeat(REVIEW_START_REQUEST_LIMITS.focusChars + 1),
+        attachments: [],
+      }),
+    ).toThrow('review focus is too long');
+  });
+
   it('validates the caller and bounded request before preparing evidence', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();
@@ -582,6 +635,62 @@ describe('maker:review:start IPC lifecycle', () => {
       'review source lease release failed',
       expect.objectContaining({ sourceSessionId: 'source-1', runId: 'run-1' }),
     );
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-2',
+    });
+  });
+
+  it('keeps both source gates until a failed terminal card write eventually persists', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    let rejectFirstWrite!: (error: Error) => void;
+    let rejectSecondWrite!: (error: Error) => void;
+    const firstWrite = new Promise<void>((_resolve, reject) => {
+      rejectFirstWrite = reject;
+    });
+    const secondWrite = new Promise<void>((_resolve, reject) => {
+      rejectSecondWrite = reject;
+    });
+    const updateSourceCard = vi
+      .fn<ReviewStartHandlerDeps['updateSourceCard']>()
+      .mockImplementationOnce(() => firstWrite)
+      .mockImplementationOnce(() => secondWrite)
+      .mockResolvedValue(undefined);
+    const releaseSourceLease = vi.fn(async () => undefined);
+    const deps = makeDeps(reviewer, { updateSourceCard, releaseSourceLease });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-1',
+    });
+    reviewer.emitStatus('closed');
+    await vi.waitFor(() => expect(updateSourceCard).toHaveBeenCalledTimes(1));
+    expect(releaseSourceLease).not.toHaveBeenCalled();
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'SESSION_RUNNING',
+    });
+
+    rejectFirstWrite(new Error('database still locked'));
+    await vi.waitFor(() => expect(updateSourceCard).toHaveBeenCalledTimes(2));
+    expect(releaseSourceLease).not.toHaveBeenCalled();
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'SESSION_RUNNING',
+    });
+
+    rejectSecondWrite(new Error('database still locked'));
+    await vi.waitFor(() => {
+      expect(updateSourceCard).toHaveBeenCalledTimes(3);
+      expect(releaseSourceLease).toHaveBeenCalledTimes(1);
+    });
+    expect(updateSourceCard).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        meta: expect.objectContaining({ status: 'failed', failureCode: 'reviewer-closed' }),
+      }),
+    );
+    expect(deps.warn).toHaveBeenCalledTimes(2);
     await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
       ok: true,
       runId: 'run-2',

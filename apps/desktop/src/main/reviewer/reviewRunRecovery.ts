@@ -10,6 +10,30 @@ export type ReviewOwnerLivenessProbe = (
 ) => ReviewOwnerLivenessProbeResult | Promise<ReviewOwnerLivenessProbeResult>;
 export type ReviewRunOwnerStatus = 'alive' | 'ended' | 'unknown';
 
+/**
+ * Coalesce concurrent startup reconciliation, but forget a rejected attempt so
+ * the next /review can recover from a transient database failure without an app restart.
+ */
+export function createRetryableReviewStartup(
+  start: () => Promise<void>,
+): () => Promise<void> {
+  let attempt: Promise<void> | null = null;
+  return () => {
+    if (attempt) return attempt;
+    let current: Promise<void>;
+    try {
+      current = Promise.resolve(start());
+    } catch (error) {
+      current = Promise.reject(error);
+    }
+    attempt = current;
+    void current.catch(() => {
+      if (attempt === current) attempt = null;
+    });
+    return current;
+  };
+}
+
 export function isReviewProcessAlive(processId: number): boolean {
   try {
     process.kill(processId, 0);

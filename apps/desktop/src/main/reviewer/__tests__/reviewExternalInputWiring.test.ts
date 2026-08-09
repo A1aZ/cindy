@@ -62,4 +62,21 @@ describe('Review external input wiring', () => {
       '...(evidence.workspaceFingerprint ? [] : [sourceWorkingDir])',
     );
   });
+
+  it('retries failed startup reconciliation before admitting another Review', () => {
+    expect(registerSource.match(/createRetryableReviewStartup\(/g)).toHaveLength(2);
+    expect(registerSource).toContain('void ensureReviewStartupReady().catch(() => {});');
+    expect(registerSource).toMatch(
+      /waitUntilReady: async \(\) => \{\s+await ensureReviewStartupReady\(\);\s+[\s\S]*?await reconcileInterruptedReviews\(\);/,
+    );
+    const reconcileStart = registerSource.indexOf('const reconcileInterruptedReviews');
+    const reconcileEnd = registerSource.indexOf(
+      'const sourceHasPersistedRunningReview',
+      reconcileStart,
+    );
+    const reconcileSource = registerSource.slice(reconcileStart, reconcileEnd);
+    expect(reconcileSource.indexOf('patchMessageAgentMeta')).toBeLessThan(
+      reconcileSource.indexOf('releaseReviewSourceLease'),
+    );
+  });
 });

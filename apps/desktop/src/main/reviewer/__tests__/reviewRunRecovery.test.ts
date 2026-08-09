@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ReviewRunMeta, ReviewRunOwner } from '../../../shared/reviewRun.js';
-import { shouldFailInterruptedReview } from '../reviewRunRecovery.js';
+import {
+  createRetryableReviewStartup,
+  shouldFailInterruptedReview,
+} from '../reviewRunRecovery.js';
 
 const currentOwner: ReviewRunOwner = { instanceId: 'current', processId: 200 };
 
@@ -19,6 +22,30 @@ function running(owner?: ReviewRunOwner): ReviewRunMeta {
 }
 
 describe('Review run recovery ownership', () => {
+  it('coalesces startup reconciliation and retries after a transient failure', async () => {
+    let rejectFirst!: (error: Error) => void;
+    const firstAttempt = new Promise<void>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+    const start = vi
+      .fn<() => Promise<void>>()
+      .mockImplementationOnce(() => firstAttempt)
+      .mockResolvedValue(undefined);
+    const ensureReady = createRetryableReviewStartup(start);
+
+    const first = ensureReady();
+    const concurrent = ensureReady();
+    expect(concurrent).toBe(first);
+    expect(start).toHaveBeenCalledTimes(1);
+    rejectFirst(new Error('database is temporarily locked'));
+    await expect(first).rejects.toThrow('database is temporarily locked');
+
+    await expect(ensureReady()).resolves.toBeUndefined();
+    expect(start).toHaveBeenCalledTimes(2);
+    await expect(ensureReady()).resolves.toBeUndefined();
+    expect(start).toHaveBeenCalledTimes(2);
+  });
+
   it('does not fail a run owned by this process instance', async () => {
     const probe = vi.fn(() => false);
     await expect(

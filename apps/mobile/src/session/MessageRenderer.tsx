@@ -74,8 +74,6 @@ import { MessageActionSheet } from '@/session/MessageActionSheet';
 import { buildMobileMessageMenu, type MobileMessageMenuActionId } from '@/session/messageActionMenu';
 import { isShareableMessage } from '@/session/shareSelectionStore';
 import { ShareMessageCheckbox } from '@/session/ShareMessageCheckbox';
-import { projectConversationShareMessage } from '@/session/conversationShareProjection';
-import type { ConversationShareMessage } from '@/session/conversationShareWebViewHtml';
 import { SentInlineAtomBody } from '@/session/SentInlineAtomBody';
 import {
   composerDocumentFromSerializedMessage,
@@ -487,10 +485,6 @@ interface MessageActions {
   onPreviewRewind?: (clientId: string, draft: MobileMessageDraft) => void;
   onEnterShareSelection?: (clientId: string) => void;
   onShareableMessageViewChange?: (clientId: string, view: View | null) => void;
-  onShareableMessageProjectionChange?: (
-    clientId: string,
-    message: ConversationShareMessage,
-  ) => () => void;
   shareSelectionActive?: boolean;
   shareSelectionBusy?: boolean;
   /** 待发送气泡(pending_send 项)的展开态与队列操作回调。 */
@@ -530,7 +524,6 @@ export function MessageRenderer({
   onOpenSessionLink,
   onPreviewRewind,
   onEnterShareSelection,
-  onShareableMessageProjectionChange,
   onVisibleShareableMessageIdsReaderChange,
   shareSelectionActive,
   shareSelectionBusy,
@@ -869,7 +862,6 @@ export function MessageRenderer({
     onOpenSessionLink,
     onPreviewRewind,
     onEnterShareSelection,
-    onShareableMessageProjectionChange,
     onShareableMessageViewChange: handleShareableMessageViewChange,
     onOpenPayload: setPayload,
     onMessageActionSheetOpenChange: handleMessageActionSheetOpenChange,
@@ -905,7 +897,6 @@ export function MessageRenderer({
     onOpenSessionLink,
     onPreviewRewind,
     onEnterShareSelection,
-    onShareableMessageProjectionChange,
     handleShareableMessageViewChange,
     handleMessageActionSheetOpenChange,
     onResolveRemoteMedia,
@@ -1924,7 +1915,6 @@ function MessageBubble({
   // 前产生"过期行数"的错误收起判定;body 不匹配时视为未测量,回落估算兜底。
   const [measuredBody, setMeasuredBody] = useState<{
     body: string;
-    collapsedText: string;
     lines: number;
   } | null>(null);
   const measuredBodyLines =
@@ -1946,29 +1936,6 @@ function MessageBubble({
   }, [collapseResolved, collapseLatched, displayBubbleBody]);
   const shouldCollapseLongMessage = (collapseMeasureEnabled && collapseLatched) || collapseResolved;
   const longMessageCollapsed = shouldCollapseLongMessage && !longMessageExpanded;
-  const shareProjection = useMemo(
-    () => projectConversationShareMessage(clientId, item.message, {
-      automationOriginLabel: automationOrigin
-        ? automationOrigin.scheduleName
-          ? i18nInstance.t('message.renderer.automationOriginNamed', { name: automationOrigin.scheduleName })
-          : i18nInstance.t('message.renderer.automationOrigin')
-        : undefined,
-      maxVisibleLines: longMessageCollapsed ? collapsedLineCount : undefined,
-      visibleBody: longMessageCollapsed && measuredBody?.body === displayBubbleBody
-        ? measuredBody.collapsedText
-        : undefined,
-    }),
-    [automationOrigin, clientId, collapsedLineCount, displayBubbleBody, i18nInstance.language, item.message, longMessageCollapsed, measuredBody],
-  );
-  useEffect(() => {
-    if (!shareSelectionActive || !shareProjection) return;
-    return actions.onShareableMessageProjectionChange?.(clientId, shareProjection);
-  }, [
-    actions.onShareableMessageProjectionChange,
-    clientId,
-    shareProjection,
-    shareSelectionActive,
-  ]);
   // label 走 i18n.t,所以语言必须进依赖:否则用户在任务页挂载期间切语言,菜单会一直
   // 停在切换前的语言,直到 capability 变化或组件重挂。
   const messageMenu = useMemo(() => buildMobileMessageMenu({
@@ -2224,11 +2191,6 @@ function MessageBubble({
             numberOfLines={collapseThreshold + 1}
             onTextLayout={(e) => setMeasuredBody({
               body: displayBubbleBody,
-              collapsedText: e.nativeEvent.lines
-                .slice(0, collapsedLineCount)
-                .map((line) => line.text)
-                .join('\n')
-                .trimEnd(),
               lines: e.nativeEvent.lines.length,
             })}
             style={styles.messageText}

@@ -530,7 +530,8 @@ function renderInline(inline: MobileMarkdownInline, ctx: RenderContext = {}): st
       ].join('');
       // data-xdt-src 保留解析层原始 URL:target.src 会被 WebView percent-encode(中文文件名等),
       // 与图集里存的原始 URL 精确匹配不上会丢横滑翻页,点击上报以 data-xdt-src 为准。
-      return `<img src="${escapeAttribute(inline.url)}" data-xdt-src="${escapeAttribute(inline.url)}" alt="${escapeAttribute(inline.alt)}"${size}>`;
+      const alt = inline.alt || i18n.t('message.renderer.imageFallbackTitle');
+      return `<img src="${escapeAttribute(inline.url)}" data-xdt-src="${escapeAttribute(inline.url)}" alt="${escapeAttribute(alt)}"${size}>`;
     }
   }
 }

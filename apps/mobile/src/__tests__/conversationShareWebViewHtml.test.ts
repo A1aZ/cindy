@@ -6,6 +6,7 @@ import {
   buildConversationShareHtml,
   type ConversationShareWebViewColors,
 } from '@/session/conversationShareWebViewHtml';
+import { i18n } from '@/i18n';
 
 const colors: ConversationShareWebViewColors = {
   background: '#ffffff',
@@ -131,6 +132,21 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain(
       "throw new Error('conversation-share-content-too-large')",
     );
+  });
+
+  it('外链图片无法离线带入时保留可见占位', () => {
+    const html = buildConversationShareHtml({
+      allShareableIds: ['image'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [{
+        body: '![](https://example.com/image.png)',
+        clientId: 'image',
+        kind: 'assistant',
+      }],
+    });
+
+    expect(html).toContain(`alt="${i18n.t('message.renderer.imageFallbackTitle')}"`);
   });
 
   it('限制原生与降级 renderer 的完整源尺寸，并清理一次性 PNG', () => {

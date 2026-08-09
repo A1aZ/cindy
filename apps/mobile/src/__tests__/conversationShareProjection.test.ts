@@ -25,34 +25,6 @@ describe('projectConversationShareMessage', () => {
     expect(JSON.stringify(projected)).not.toContain('schedule-secret');
   });
 
-  it('优先使用原生排版实测的可见正文', () => {
-    const projected = projectConversationShareMessage('measured', {
-      body: '后面还有很多隐藏内容',
-      kind: 'user',
-    }, { maxVisibleLines: 10, visibleBody: '/review 后面可见' });
-
-    expect(projected?.body).toBe('/review 后面可见');
-    expect(projected?.bodyParts).toBeUndefined();
-  });
-
-  it('实测正文不可绕过结构化引用 chip 投影', () => {
-    const body = formatQuoteForSend({
-      sourcePath: '/private/project/secret.ts',
-      text: 'quoted context',
-    });
-
-    const projected = projectConversationShareMessage('measured-quote', {
-      body,
-      kind: 'user',
-      quotesEncoded: true,
-    }, { maxVisibleLines: 2, visibleBody: '被错误展开的完整引用' });
-
-    expect(projected?.bodyParts).toEqual([
-      { kind: 'quote', label: 'quoted context' },
-    ]);
-    expect(projected?.body).not.toBe('被错误展开的完整引用');
-  });
-
   it('把引用投影为紧凑可见 chip，并丢弃隐藏来源字段', () => {
     const body = formatQuoteForSend({
       sourcePath: '/private/project/secret.ts',

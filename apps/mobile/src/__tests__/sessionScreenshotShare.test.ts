@@ -90,24 +90,4 @@ describe("mobile screenshot-triggered share guards", () => {
     );
   });
 
-  it("clears only the projection instance that registered the cleanup", () => {
-    const sessionSource = readFileSync(
-      resolve(process.cwd(), "app/sessions/[sessionId].tsx"),
-      "utf8",
-    );
-    const rendererSource = readFileSync(
-      resolve(process.cwd(), "src/session/MessageRenderer.tsx"),
-      "utf8",
-    );
-
-    expect(sessionSource).toContain(
-      "if (shareMessageProjectionOverridesRef.current.get(clientId) !== message) return;",
-    );
-    expect(sessionSource).toContain(
-      "shareMessageProjectionOverridesRef.current.delete(clientId);",
-    );
-    expect(rendererSource).toContain(
-      "return actions.onShareableMessageProjectionChange?.(clientId, shareProjection);",
-    );
-  });
 });

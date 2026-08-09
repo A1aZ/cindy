@@ -598,12 +598,6 @@ const REOPEN_MESSAGE_WINDOW_LIMITS = [20, 10, 5, 1] as const;
 const TAIL_RETRY_HIDE_TIMEOUT_MS = 15_000;
 const SCREENSHOT_SHARE_ACTIVATION_DEBOUNCE_MS = 1_200;
 
-function conversationShareMessageFingerprint(
-  message: ConversationShareMessage,
-): string {
-  return JSON.stringify(message);
-}
-
 // 分享图页脚资源转成 data URI 后再交给 WebView，避免 foreignObject 导出空白。
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const shareCharacterAsset = require('../../assets/share/cindy-share-character.jpg');
@@ -950,8 +944,6 @@ export default function SessionScreen() {
   const [shareCharacterSrc, setShareCharacterSrc] = useState<string | null>(null);
   const [shareLogoSrc, setShareLogoSrc] = useState<string | null>(null);
   const shareLogoModeRef = useRef<string | null>(null);
-  const shareMessageProjectionOverridesRef = useRef(new Map<string, ConversationShareMessage>());
-  const [shareMessageProjectionRevision, setShareMessageProjectionRevision] = useState(0);
   // chat-text-quote:待随下一条消息发送的选中文字引用(全局 store,消息流选区
   // 按钮 / 文件预览页写入;发送时拼进正文,命中本地命令时保留)。
   const quotes = useSessionQuotes(sessionId);
@@ -967,21 +959,6 @@ export default function SessionScreen() {
   ) => {
     visibleShareableMessageIdsReaderRef.current = reader;
   }, []);
-  const handleShareableMessageProjectionChange = useCallback((
-    clientId: string,
-    message: ConversationShareMessage,
-  ): (() => void) => {
-    const previous = shareMessageProjectionOverridesRef.current.get(clientId);
-    shareMessageProjectionOverridesRef.current.set(clientId, message);
-    if (!previous || conversationShareMessageFingerprint(previous) !== conversationShareMessageFingerprint(message)) {
-      setShareMessageProjectionRevision((revision) => revision + 1);
-    }
-    return () => {
-      if (shareMessageProjectionOverridesRef.current.get(clientId) !== message) return;
-      shareMessageProjectionOverridesRef.current.delete(clientId);
-      setShareMessageProjectionRevision((revision) => revision + 1);
-    };
-  }, []);
   const handleMessageBlockingOverlayChange = useCallback((blocked: boolean) => {
     setMessageBlockingOverlay(blocked);
   }, []);
@@ -996,12 +973,6 @@ export default function SessionScreen() {
       if (shareSelectionStore.getActiveSessionId() === sessionId) shareSelectionStore.exit();
     };
   }, [sessionId]);
-  useEffect(() => {
-    if (shareSelectionActive) return;
-    if (shareMessageProjectionOverridesRef.current.size === 0) return;
-    shareMessageProjectionOverridesRef.current.clear();
-    setShareMessageProjectionRevision((revision) => revision + 1);
-  }, [shareSelectionActive]);
   useFocusEffect(
     useCallback(() => {
       if (Platform.OS !== 'ios' || !sessionId) return undefined;
@@ -5629,21 +5600,17 @@ export default function SessionScreen() {
   const shareExpansionSnapshot = useFoldableExpandedBlocksSnapshot(shareExpandableBlockIds);
   const shareMessages = useMemo(() => {
     if (!shareSelectionActive) return [];
-    const projectedMessages = collectConversationShareMessages(
+    return collectConversationShareMessages(
       messageListItems,
       isFoldableBlockExpanded,
       (origin) => origin.scheduleName
         ? t('message.renderer.automationOriginNamed', { name: origin.scheduleName })
         : t('message.renderer.automationOrigin'),
     );
-    return projectedMessages.map(
-      (message) => shareMessageProjectionOverridesRef.current.get(message.clientId) ?? message,
-    );
   }, [
     i18nInstance.language,
     messageListItems,
     shareExpansionSnapshot,
-    shareMessageProjectionRevision,
     shareSelectionActive,
   ]);
   const shareMessageById = useMemo(
@@ -8732,7 +8699,6 @@ export default function SessionScreen() {
                     onOpenSessionLink={openSessionLink}
                     onPreviewRewind={collaborationReadOnlyReason ? undefined : previewRewindAtMessage}
                     onEnterShareSelection={enterShareSelection}
-                    onShareableMessageProjectionChange={handleShareableMessageProjectionChange}
                     onVisibleShareableMessageIdsReaderChange={handleVisibleShareableMessageIdsReaderChange}
                     shareSelectionActive={shareSelectionActive}
                     shareSelectionBusy={conversationShareBusy}

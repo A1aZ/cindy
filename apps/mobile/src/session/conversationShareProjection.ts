@@ -40,7 +40,6 @@ export function projectConversationShareMessage(
     automationOriginLabel?: string;
     maxVisibleLines?: number;
     visualLineCapacity?: number;
-    visibleBody?: string;
   } = {},
 ): ConversationShareMessage | null {
   if (message.kind !== 'user' && message.kind !== 'assistant') return null;
@@ -79,16 +78,6 @@ export function projectConversationShareMessage(
     ? truncateSentInlineTokens(tokens, options.maxVisibleLines, options.visualLineCapacity)
     : tokens;
   const hasStructuredBody = visibleTokens.some((token) => token.kind !== 'text');
-  if (options.visibleBody !== undefined && !hasStructuredBody) {
-    return {
-      ...attachmentFields,
-      ...automationOriginFields,
-      body: options.visibleBody,
-      clientId,
-      kind: message.kind,
-      ...(secondaryBody ? { secondaryBody } : {}),
-    };
-  }
   const bodyParts = hasStructuredBody ? projectBodyParts(visibleTokens) : undefined;
 
   return {

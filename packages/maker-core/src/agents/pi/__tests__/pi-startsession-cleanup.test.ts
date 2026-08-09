@@ -293,6 +293,38 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await Promise.all([approvedHandle.close(), revokedHandle.close()]);
   });
 
+  it('fails closed when the resolver returns another workingDir approval snapshot', async () => {
+    const approvedDir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-approved-other-')));
+    try {
+      const skillPath = path.join(approvedDir, '.pi', 'skills', 'other-project-skill');
+      mkdirSync(skillPath, { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# other project\n');
+      const agent = new PiAgent(buildDeps({
+        resolvePiProjectTrustInput: async () => approvedInput(
+          approvedDir,
+          'rev-other-project',
+          [skillPath],
+        ),
+      }));
+      const handle = await agent.startSession({ sessionId: 'requested', workingDir: cwd, model: 'm' });
+      try {
+        expect(repeatedArgValues(knobs.spawnedArgs[0]!, '--skill')).toEqual([]);
+        await vi.waitFor(() => {
+          expect(handle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+            status: 'approved',
+            reason: 'approval-working-dir-mismatch',
+            approvalRevision: 'rev-other-project',
+            requestedSkillCount: 0,
+          });
+        });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      rmSync(approvedDir, { recursive: true, force: true });
+    }
+  });
+
   it('injects remote MCP secrets only through env and marks them for bash-child stripping', async () => {
     const agent = new PiAgent(buildDeps());
     const handle = await agent.startSession(opts());

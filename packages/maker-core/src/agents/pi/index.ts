@@ -1059,7 +1059,10 @@ export class PiAgent extends BaseAgent {
           workingDir: opts.workingDir,
           ...(opts.remoteHostId ? { remoteHostId: opts.remoteHostId } : {}),
         });
-        projectResourceAssembly = await assembleApprovedPiProjectResources(trustInput);
+        projectResourceAssembly = await assembleApprovedPiProjectResources(
+          trustInput,
+          opts.workingDir,
+        );
       } catch {
         projectResourceAssembly = unavailablePiProjectResourceAssembly(
           'approval-resolver-failed',

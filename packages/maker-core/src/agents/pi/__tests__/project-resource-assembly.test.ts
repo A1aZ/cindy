@@ -58,7 +58,7 @@ describe('Pi approved project resource assembly', () => {
   it('freezes only explicitly eligible project skill paths', async () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
-    const result = await assembleApprovedPiProjectResources(input, available);
+    const result = await assembleApprovedPiProjectResources(input, workingDir, available);
 
     expect(result.skillPaths).toEqual(input.discovered.skills);
     expect(result.diagnostic).toEqual({
@@ -91,6 +91,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app';
     const result = await assembleApprovedPiProjectResources(
       inputFor(workingDir, approval),
+      workingDir,
       available,
     );
 
@@ -122,6 +123,7 @@ describe('Pi approved project resource assembly', () => {
     });
     const result = await assembleApprovedPiProjectResources(
       inputFor(workingDir, approved(workingDir, 'rev-a'), [first, missing]),
+      workingDir,
       { stat, realpath: available.realpath },
     );
 
@@ -138,7 +140,7 @@ describe('Pi approved project resource assembly', () => {
       discoveredPath: input.discovered.skills[0]!,
       canonicalPath: '/outside/retargeted-skill',
     }];
-    const result = await assembleApprovedPiProjectResources(input, available);
+    const result = await assembleApprovedPiProjectResources(input, workingDir, available);
 
     expect(result.skillPaths).toEqual([]);
     expect(result.diagnostic.reason).toBe('approved-skills-ineligible');
@@ -151,10 +153,12 @@ describe('Pi approved project resource assembly', () => {
     const [first, second] = await Promise.all([
       assembleApprovedPiProjectResources(
         inputFor(firstDir, approved(firstDir, 'rev-a')),
+        firstDir,
         available,
       ),
       assembleApprovedPiProjectResources(
         inputFor(secondDir, { status: 'revoked', revision: 'rev-b', reason: 'user-revoked' }),
+        secondDir,
         available,
       ),
     ]);
@@ -172,7 +176,7 @@ describe('Pi approved project resource assembly', () => {
   it('invalidates the whole set when a canonical skill path is retargeted after approval', async () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
-    const result = await assembleApprovedPiProjectResources(input, {
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
       stat: available.stat,
       realpath: async (candidate) => candidate === input.discovered.skills[0]
         ? '/outside/retargeted-skill'
@@ -187,7 +191,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
-    const result = await assembleApprovedPiProjectResources(input, {
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
       stat: available.stat,
       realpath: async (candidate) => candidate === skillFile
         ? '/outside/retargeted-SKILL.md'
@@ -202,7 +206,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
-    const result = await assembleApprovedPiProjectResources(input, {
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
       stat: available.stat,
       realpath: async (candidate) => candidate === skillFile
         ? '/repo-a/packages/shared/demo.md'
@@ -218,6 +222,7 @@ describe('Pi approved project resource assembly', () => {
     const skillFile = `${workingDir}/.pi/skills/demo.md`;
     const result = await assembleApprovedPiProjectResources(
       inputFor(workingDir, approved(workingDir, 'rev-a'), [skillFile]),
+      workingDir,
       available,
     );
 
@@ -248,7 +253,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
-    const result = await assembleApprovedPiProjectResources(input, {
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
       stat: async (candidate) => {
         if (candidate === skillFile) throw new Error('ENOENT');
         return available.stat(candidate);
@@ -263,7 +268,7 @@ describe('Pi approved project resource assembly', () => {
   it('invalidates approved skills when the lexical workingDir is retargeted', async () => {
     const workingDir = '/repo-a/packages/app-link';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
-    const result = await assembleApprovedPiProjectResources(input, {
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
       stat: available.stat,
       realpath: async (candidate) => candidate === input.identity.workingDir
         ? '/outside/retargeted-working-dir'
@@ -274,10 +279,30 @@ describe('Pi approved project resource assembly', () => {
     expect(result.diagnostic.reason).toBe('approved-project-path-changed');
   });
 
+  it('rejects an internally valid approval snapshot for another requested workingDir', async () => {
+    const approvedDir = '/repo-a/packages/app';
+    const requestedDir = '/repo-b/packages/app';
+    const input = inputFor(approvedDir, approved(approvedDir, 'rev-a'));
+    const result = await assembleApprovedPiProjectResources(
+      input,
+      requestedDir,
+      available,
+    );
+
+    expect(result.skillPaths).toEqual([]);
+    expect(result.diagnostic).toMatchObject({
+      status: 'approved',
+      reason: 'approval-working-dir-mismatch',
+      approvalRevision: 'rev-a',
+      requestedSkillCount: 0,
+    });
+  });
+
   it('reports loaded only when this get_commands catalog confirms every explicit path', async () => {
     const workingDir = '/repo-a/packages/app';
     const assembly = await assembleApprovedPiProjectResources(
       inputFor(workingDir, approved(workingDir, 'rev-a')),
+      workingDir,
       available,
     );
     const skillPath = assembly.skillPaths[0]!;

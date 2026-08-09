@@ -54,33 +54,39 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
   stat: (path: string) => Promise<{ isDirectory(): boolean; isFile(): boolean }>,
   realpath: (path: string) => Promise<string>,
   identity: PiProjectTrustInputSnapshot['identity'],
-): Promise<'available' | 'unavailable' | 'project-changed' | 'skill-changed'> {
+  requestedWorkingDir: string,
+): Promise<'available' | 'unavailable' | 'request-mismatch' | 'project-changed' | 'skill-changed'> {
   try {
     const canonicalWorkingDir = identity.canonicalWorkingDir;
     const canonicalRepoRoot = identity.canonicalRepoRoot;
     if (!canonicalWorkingDir || !canonicalRepoRoot) return 'unavailable';
     const pathApi = identity.platform === 'win32' ? path.win32 : path.posix;
-    const [resolvedWorkingDir, resolvedRepoRoot, entries] = await Promise.all([
-      realpath(identity.workingDir),
-      realpath(canonicalRepoRoot),
-      Promise.all(skillPaths.map(async (skillPath) => {
-        const stats = await stat(skillPath);
-        const resolvedPath = await realpath(skillPath);
-        if (!stats.isDirectory()) return { skillPath, stats, resolvedPath };
-        const skillFile = pathApi.join(skillPath, 'SKILL.md');
-        return {
-          skillPath,
-          stats,
-          resolvedPath,
-          skillFileStats: await stat(skillFile),
-          resolvedSkillFile: await realpath(skillFile),
-        };
-      })),
-    ]);
+    const [resolvedWorkingDir, resolvedRequestedWorkingDir, resolvedRepoRoot, entries] =
+      await Promise.all([
+        realpath(identity.workingDir),
+        realpath(requestedWorkingDir),
+        realpath(canonicalRepoRoot),
+        Promise.all(skillPaths.map(async (skillPath) => {
+          const stats = await stat(skillPath);
+          const resolvedPath = await realpath(skillPath);
+          if (!stats.isDirectory()) return { skillPath, stats, resolvedPath };
+          const skillFile = pathApi.join(skillPath, 'SKILL.md');
+          return {
+            skillPath,
+            stats,
+            resolvedPath,
+            skillFileStats: await stat(skillFile),
+            resolvedSkillFile: await realpath(skillFile),
+          };
+        })),
+      ]);
     if (
       !piCanonicalPathsEqual(identity, canonicalWorkingDir, resolvedWorkingDir)
       || !piCanonicalPathsEqual(identity, canonicalRepoRoot, resolvedRepoRoot)
     ) return 'project-changed';
+    if (!piCanonicalPathsEqual(identity, canonicalWorkingDir, resolvedRequestedWorkingDir)) {
+      return 'request-mismatch';
+    }
     if (entries.some(({ skillPath, stats, skillFileStats }) =>
       (!stats.isDirectory() && (!stats.isFile() || pathApi.extname(skillPath) !== '.md'))
       || (stats.isDirectory() && !skillFileStats?.isFile()))) return 'unavailable';
@@ -100,11 +106,13 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
 
 /**
  * Convert one host-owned approval snapshot into a frozen, skills-only launch
- * snapshot. A missing/changed path invalidates the whole approved set so a
- * partial launch cannot silently diverge from the audited evidence.
+ * snapshot. The caller's actual workingDir is rebound to that snapshot here;
+ * a missing/changed path invalidates the whole approved set so a partial or
+ * cross-project launch cannot silently diverge from the audited evidence.
  */
 export async function assembleApprovedPiProjectResources(
   input: PiProjectTrustInputSnapshot | null,
+  requestedWorkingDir: string,
   options: {
     stat?: (path: string) => Promise<{ isDirectory(): boolean; isFile(): boolean }>;
     realpath?: (path: string) => Promise<string>;
@@ -134,13 +142,13 @@ export async function assembleApprovedPiProjectResources(
       options.stat ?? fs.stat,
       options.realpath ?? fs.realpath,
       input.identity,
+      requestedWorkingDir,
     );
     if (pathStatus !== 'available') {
-      reason = pathStatus === 'project-changed'
-        ? 'approved-project-path-changed'
-        : pathStatus === 'skill-changed'
-          ? 'approved-skill-path-changed'
-          : 'approved-skill-path-unavailable';
+      if (pathStatus === 'request-mismatch') reason = 'approval-working-dir-mismatch';
+      else if (pathStatus === 'project-changed') reason = 'approved-project-path-changed';
+      else if (pathStatus === 'skill-changed') reason = 'approved-skill-path-changed';
+      else reason = 'approved-skill-path-unavailable';
       skillPaths = [];
     }
   }

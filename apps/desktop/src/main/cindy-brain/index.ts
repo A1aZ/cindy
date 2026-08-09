@@ -74,7 +74,10 @@ import { serverApiFetch } from '../serverApiClient.js';
 import { getClientEndpoint } from '../clientEndpointsService.js';
 import { createGhostOauthBrokerClient } from './ghostOauthBroker.js';
 import { readRefImagesWithinBudget } from './refImageBudget.js';
-import { resolveGhostRepoRoot } from './repoRoot.js';
+import {
+  resolveCachedGhostRepoRoot,
+  type GhostRepoRootCacheEntry,
+} from './repoRoot.js';
 import { takePendingCindyInstall } from './openFileInstall.js';
 import { GhostRuntime } from './runtime/GhostRuntime.js';
 import {
@@ -751,17 +754,19 @@ export function suspendAllGhosts(): void {
 let ipcRegistered = false;
 
 /** 意识仓库根(userData/cindy-brain;旧 brain 目录首次解析时原地迁移)。 */
-let brainRootCache: string | null = null;
+let brainRootCache: GhostRepoRootCacheEntry | null = null;
 function brainRootDir(): string {
-  if (!brainRootCache) {
-    brainRootCache = resolveGhostRepoRoot({
+  brainRootCache = resolveCachedGhostRepoRoot(
+    brainRootCache,
+    activeOwnerScopeKey(),
+    {
       userDataDir: ownerScopedUserDataPath(),
       exists: (p) => fs.existsSync(p),
       rename: (from, to) => fs.renameSync(from, to),
       log,
-    });
-  }
-  return brainRootCache;
+    },
+  );
+  return brainRootCache.rootDir;
 }
 
 /**

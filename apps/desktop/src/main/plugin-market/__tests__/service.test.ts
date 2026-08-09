@@ -1649,9 +1649,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
   });
 
-  it('treats a missing previously-managed directory as an opt-out and does not reinstall', async () => {
+  it('does not turn a temporarily missing managed directory into an uninstall or opt-out', async () => {
     const item = summary({ defaultInstall: true });
-    const h = harness([item]);
+    const h = harness([]);
     h.ledger.upsertInstallation({
       pluginId: item.id,
       ghostId: item.ghostId,
@@ -1668,8 +1668,9 @@ describe('PluginMarketService migration and defaultInstall', () => {
     const snapshot = await h.service.snapshot();
 
     expect(runtime.install).not.toHaveBeenCalled();
-    expect(snapshot.items[0]?.installState).toBe('not-installed');
-    expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(true);
+    expect(snapshot.items).toEqual([]);
+    expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(true);
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(false);
   });
 
   it('records an opt-out only after a tracked local uninstall succeeds', async () => {
@@ -1682,6 +1683,25 @@ describe('PluginMarketService migration and defaultInstall', () => {
     expect(complete).not.toBeNull();
     expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(true);
     await complete?.();
+    expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(false);
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(true);
+  });
+
+  it('does not reinstall a default Plugin when a snapshot races its explicit uninstall', async () => {
+    const item = summary({ defaultInstall: true });
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item));
+    runtime.ghosts = [ghostEntry(item.ghostId)];
+    let racingSnapshot: ReturnType<typeof h.service.snapshot> | null = null;
+    runtime.uninstall.mockImplementationOnce(async () => {
+      runtime.ghosts = [];
+      racingSnapshot = h.service.snapshot();
+    });
+
+    await expect(h.service.uninstall(item.id)).resolves.toEqual({ ok: true });
+    await expect(racingSnapshot).resolves.toMatchObject({ unavailableReason: null });
+
+    expect(runtime.install).not.toHaveBeenCalled();
     expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(false);
     expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(true);
   });

@@ -441,8 +441,14 @@ export class PluginMarketService {
     const ledger = this.ledgerForOwner(owner);
     await this.adoptLegacyInstallations(plugins, ledger, owner);
     await this.backfillOfficialCindyGithubTrust(ledger, owner);
-    await this.reconcileRemovedInstallations(ledger, owner);
+    // A snapshot is passive discovery: an empty runtime list can be caused by
+    // startup, an owner transition, or a transient filesystem view. Only an
+    // explicit uninstall may turn that absence into installed=false/opt-out.
     await this.applyServerRemovals(removals, owner, ledger);
+    // Explicit uninstall completion is allowed to finish its physical removal
+    // before its ledger write. Wait for queued ledger mutations before deciding
+    // whether a default plugin should be installed again.
+    await this.ledgerMutation;
     // 自定义来源只影响自己的目录发现；暂时不可读的来源不能阻塞官方默认安装。
     // 已经落地的同 id 插件仍由 applyDefaultInstalls → installDetail 的本地事实检查保护。
     await this.applyDefaultInstalls(plugins, owner, ledger);
@@ -1461,26 +1467,6 @@ export class PluginMarketService {
     }
   }
 
-  private async reconcileRemovedInstallations(
-    ledger: PluginMarketLedger,
-    owner: ActiveAppSession,
-  ): Promise<void> {
-    const installSubject = defaultInstallSubject(owner);
-    for (const record of Object.values(ledger.read().installations)) {
-      if (!record.installed) continue;
-      await this.withLedgerMutation(owner, () => {
-        // 在场判定必须与写入同处一把锁内且即时重取:manager.update 的两次
-        // rename 之间 ghosts/<id> 短暂不存在,锁外的一次性快照会把这类瞬态
-        // 误判成"已卸载",把 pluginId 永久写进 defaultInstallOptOuts,该
-        // 默认安装插件从此不再自动装回。
-        const stillInstalled = getGhostManager()
-          .list()
-          .some((ghost) => ghost.manifest.id === record.ghostId);
-        if (!stillInstalled) ledger.markRemoved(record.ghostId, installSubject);
-      });
-    }
-  }
-
   private async applyServerRemovals(
     removals: readonly PluginRemovalNotice[],
     owner: ActiveAppSession,
@@ -1607,6 +1593,14 @@ export class PluginMarketService {
       try {
         await this.withMutation(summary.id, async () => {
           requireSameMarketOwner(owner);
+          const freshLedgerData = ledger.read();
+          if (freshLedgerData.defaultInstallOptOuts[installSubject]?.includes(summary.id)) {
+            return;
+          }
+          const freshLocal = this.localInstallSnapshot(ledger, freshLedgerData.installations);
+          if (this.toItem(summary, freshLocal).installState !== 'not-installed') {
+            return;
+          }
           const detail = await this.api.detail(summary.id);
           requireSameMarketOwner(owner);
           assertDetailMatchesSummary(summary, detail);

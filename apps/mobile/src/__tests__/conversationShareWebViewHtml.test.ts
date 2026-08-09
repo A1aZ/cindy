@@ -49,6 +49,42 @@ function buildRichConversationHtml(): string {
 }
 
 describe('buildConversationShareHtml 富内容导出', () => {
+  it('只按选中内容嵌入对应的富内容运行时', () => {
+    const plainHtml = buildConversationShareHtml({
+      allShareableIds: ['plain'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [{ body: 'plain text', clientId: 'plain', kind: 'assistant' }],
+    });
+    const mathHtml = buildConversationShareHtml({
+      allShareableIds: ['math'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [{
+        body: ['$$', 'x^2 + y^2', '$$'].join('\n'),
+        clientId: 'math',
+        kind: 'assistant',
+      }],
+    });
+    const mermaidHtml = buildConversationShareHtml({
+      allShareableIds: ['diagram'],
+      colors,
+      contentWidth: 390,
+      selectedMessages: [{
+        body: ['```mermaid', 'graph TD', 'A --> B', '```'].join('\n'),
+        clientId: 'diagram',
+        kind: 'assistant',
+      }],
+    });
+
+    expect(plainHtml).not.toContain('window.katex.render');
+    expect(plainHtml).not.toContain('window.mermaid.render');
+    expect(mathHtml).toContain('window.katex.render');
+    expect(mathHtml).not.toContain('window.mermaid.render');
+    expect(mermaidHtml).not.toContain('window.katex.render');
+    expect(mermaidHtml).toContain('window.mermaid.render');
+  });
+
   it('保留公式与 Mermaid 语义，并注入对应运行时升级脚本', () => {
     const html = buildRichConversationHtml();
 
@@ -103,6 +139,7 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(sessionSource).toContain(
       'if (localUri) await deleteConversationSharePngTemp(localUri);',
     );
+    expect(sessionSource).not.toContain('key={conversationShareHtml}');
   });
 
   it('使用 Mobile 获批的克制页脚尺寸', () => {

@@ -80,6 +80,9 @@ export function buildConversationShareHtml({
     previousIndex = currentIndex;
   }
 
+  const messagesMarkup = messagesHtml.join("");
+  const includeKatex = messagesMarkup.includes("data-latex=");
+  const includeMermaid = messagesMarkup.includes("data-mermaid-source=");
   const markdownCss = buildSelectableMarkdownCss(markdownOptions);
   const width = Math.max(280, Math.round(contentWidth));
   const background = cssValue(colors.background);
@@ -101,12 +104,16 @@ export function buildConversationShareHtml({
     "</head>",
     "<body>",
     `<main id="xdt-content" class="share-stage" data-share-background="${escapeAttribute(background)}">`,
-    messagesHtml.join(""),
+    messagesMarkup,
     '<footer class="share-footer">',
     `<div class="share-lockup">${character}${logo}</div>`,
     "</footer>",
     "</main>",
-    buildConversationShareRichContentScript(colors.dark === true),
+    buildConversationShareRichContentScript({
+      dark: colors.dark === true,
+      includeKatex,
+      includeMermaid,
+    }),
     buildExportScript(),
     "</body>",
     "</html>",
@@ -429,7 +436,18 @@ function buildConversationShareCss({
   `;
 }
 
-function buildConversationShareRichContentScript(dark: boolean): string {
+function buildConversationShareRichContentScript({
+  dark,
+  includeKatex,
+  includeMermaid,
+}: {
+  dark: boolean;
+  includeKatex: boolean;
+  includeMermaid: boolean;
+}): string {
+  if (!includeKatex && !includeMermaid) {
+    return "<script>window.__cindyConversationShareRichContentReady = true;</script>";
+  }
   const mermaidTheme = dark ? "dark" : "default";
   const renderKatexJs = [
     'document.querySelectorAll("[data-latex]").forEach(function (element) {',
@@ -445,27 +463,14 @@ function buildConversationShareRichContentScript(dark: boolean): string {
     "mathDone = true;",
     "maybeReady();",
   ].join("");
-  const katexLoader = buildKatexLoaderJs(
-    renderKatexJs,
-    'clearTimeout(mathFallback); mathDone = true; maybeReady();',
-  );
-
-  return `<script>
-(function () {
-  var mathNodes = document.querySelectorAll('[data-latex]');
-  var mermaidNodes = document.querySelectorAll('[data-mermaid-source]');
-  var mathDone = mathNodes.length === 0;
-  var mermaidDone = mermaidNodes.length === 0;
-  var ready = false;
-  window.__cindyConversationShareRichContentReady = false;
-
-  function maybeReady() {
-    if (!ready && mathDone && mermaidDone) {
-      ready = true;
-      window.__cindyConversationShareRichContentReady = true;
-    }
-  }
-
+  const katexLoader = includeKatex
+    ? buildKatexLoaderJs(
+        renderKatexJs,
+        'clearTimeout(mathFallback); mathDone = true; maybeReady();',
+      )
+    : "";
+  const mermaidRenderer = includeMermaid
+    ? `
   function renderMermaidNodes() {
     try {
       window.mermaid.initialize({
@@ -513,7 +518,10 @@ function buildConversationShareRichContentScript(dark: boolean): string {
       maybeReady();
     });
   }
-
+`
+    : "";
+  const katexSetup = includeKatex
+    ? `
   if (!mathDone) {
     var mathFallback = setTimeout(function () {
       mathDone = true;
@@ -521,13 +529,38 @@ function buildConversationShareRichContentScript(dark: boolean): string {
     }, 13000);
     ${katexLoader}
   }
-
+`
+    : "";
+  const mermaidSetup = includeMermaid
+    ? `
   if (!mermaidDone) {
     ${buildMermaidLoaderJs(
       'renderMermaidNodes();',
       'mermaidDone = true; maybeReady();',
     )}
   }
+`
+    : "";
+
+  return `<script>
+(function () {
+  var mathNodes = ${includeKatex ? "document.querySelectorAll('[data-latex]')" : "[]"};
+  var mermaidNodes = ${includeMermaid ? "document.querySelectorAll('[data-mermaid-source]')" : "[]"};
+  var mathDone = mathNodes.length === 0;
+  var mermaidDone = mermaidNodes.length === 0;
+  var ready = false;
+  window.__cindyConversationShareRichContentReady = false;
+
+  function maybeReady() {
+    if (!ready && mathDone && mermaidDone) {
+      ready = true;
+      window.__cindyConversationShareRichContentReady = true;
+    }
+  }
+
+  ${mermaidRenderer}
+  ${katexSetup}
+  ${mermaidSetup}
 
   maybeReady();
 })();

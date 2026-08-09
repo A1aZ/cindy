@@ -321,6 +321,7 @@ import { i18n } from '@/i18n';
 
 const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };
 const MESSAGE_CONTROL_TOUCH_SIZE = 32;
+const MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD = 5;
 const SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD = 10;
 // LegendList 变高 item 的初始估高(仅影响首帧布局定位,LegendList 挂载后按实测尺寸修正)。
 /**
@@ -481,6 +482,7 @@ interface MessageActions {
   onOpenSessionLink?: (url: string) => void;
   onPreviewRewind?: (clientId: string, draft: MobileMessageDraft) => void;
   onEnterShareSelection?: (clientId: string) => void;
+  onShareableMessageViewChange?: (clientId: string, view: View | null) => void;
   shareSelectionActive?: boolean;
   shareSelectionBusy?: boolean;
   /** 待发送气泡(pending_send 项)的展开态与队列操作回调。 */
@@ -590,6 +592,7 @@ export function MessageRenderer({
   const focusedItemKeyRef = useRef(focusedItemKey);
   focusedItemKeyRef.current = focusedItemKey;
   const listRef = useRef<LegendListRef>(null);
+  const shareableMessageViewsRef = useRef(new Map<string, View>());
   const windowDimensions = useWindowDimensions();
   const viewportLayout = useMemo(() => buildMobileReadableViewportLayout({
     screenHeight: windowDimensions.height,
@@ -824,6 +827,13 @@ export function MessageRenderer({
     loading: loadingEarlier === true,
     visibleMessageCount: listData.length,
   });
+  const handleShareableMessageViewChange = useCallback((clientId: string, view: View | null) => {
+    if (view) {
+      shareableMessageViewsRef.current.set(clientId, view);
+      return;
+    }
+    shareableMessageViewsRef.current.delete(clientId);
+  }, []);
   const actions: MessageActions & { firstUserMessageClientId?: string } = useMemo(() => ({
     onAddMessageToComposer,
     onCopyMessageLink,
@@ -833,6 +843,7 @@ export function MessageRenderer({
     onOpenSessionLink,
     onPreviewRewind,
     onEnterShareSelection,
+    onShareableMessageViewChange: handleShareableMessageViewChange,
     onOpenPayload: setPayload,
     onResolveRemoteMedia,
     // 待发送气泡(pending_send 项)的展开态与队列操作:漏了这一项 actions.pendingSend 就是
@@ -866,6 +877,7 @@ export function MessageRenderer({
     onOpenSessionLink,
     onPreviewRewind,
     onEnterShareSelection,
+    handleShareableMessageViewChange,
     onResolveRemoteMedia,
     pendingSend,
     shareSelectionActive,
@@ -896,9 +908,8 @@ export function MessageRenderer({
     ? `${focusedRequestKey ?? 'default'}:${focusedItemKey}`
     : null;
   const viewabilityConfigRef = useRef({
-    itemVisiblePercentThreshold: SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD,
+    itemVisiblePercentThreshold: MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD,
   });
-  const viewableShareableItemsRef = useRef<readonly ViewToken<MobileMessageRenderItem>[]>([]);
   const handleViewableItemsChangedRef = useRef((info: {
     viewableItems: ViewToken<MobileMessageRenderItem>[];
   }) => {
@@ -906,7 +917,6 @@ export function MessageRenderer({
     const orderedViewableItems = [...info.viewableItems].sort(
       (left, right) => (left.index ?? 0) - (right.index ?? 0),
     );
-    viewableShareableItemsRef.current = orderedViewableItems;
     for (const token of orderedViewableItems) {
       if (typeof token.index !== 'number') continue;
       nextIndex = nextIndex === null ? token.index : Math.min(nextIndex, token.index);
@@ -918,7 +928,6 @@ export function MessageRenderer({
   ): Promise<readonly string[]> => {
     const list = listRef.current;
     if (!list) return [];
-    const listState = list.getState();
     const listFrame = await measureInWindow(list.getNativeScrollRef());
     if (!listFrame || listFrame.height <= 0) return [];
     const visibleTop = Math.max(listFrame.y, viewport.visibleTop);
@@ -928,10 +937,8 @@ export function MessageRenderer({
     );
     if (visibleBottom <= visibleTop) return [];
     const measuredItems = await Promise.all(
-      viewableShareableItemsRef.current.map(async (token) => {
-        if (typeof token.index !== 'number' || token.item.type !== 'message') return null;
-        if (!isShareableMessage(token.item.message)) return null;
-        const frame = await measureInWindow(listState.elementAtIndex(token.index));
+      Array.from(shareableMessageViewsRef.current.entries()).map(async ([clientId, view]) => {
+        const frame = await measureInWindow(view);
         if (!frame || frame.height <= 0) return null;
         const visibleHeight = Math.max(
           0,
@@ -941,10 +948,13 @@ export function MessageRenderer({
           visibleHeight / frame.height
           < SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD / 100
         ) return null;
-        return messageClientId(token.item);
+        return { clientId, y: frame.y };
       }),
     );
-    return measuredItems.filter((clientId): clientId is string => clientId !== null);
+    return measuredItems
+      .filter((item): item is { clientId: string; y: number } => item !== null)
+      .sort((left, right) => left.y - right.y)
+      .map((item) => item.clientId);
   }, []);
   useEffect(() => {
     onVisibleShareableMessageIdsReaderChange?.(readActuallyVisibleShareableMessageIds);
@@ -1789,8 +1799,12 @@ function MessageBubble({
   const isUser = presentation.isUserAligned;
   const isStreamingAssistant = item.message.kind === 'assistant' && item.message.isStreaming === true;
   const clientId = messageClientId(item);
+  const shareableMessage = isShareableMessage(item.message);
+  const handleShareableMessageViewChange = useCallback((view: View | null) => {
+    actions.onShareableMessageViewChange?.(clientId, view);
+  }, [actions.onShareableMessageViewChange, clientId]);
   const shareSelectionActive = actions.shareSelectionActive === true
-    && isShareableMessage(item.message);
+    && shareableMessage;
   const isFirstUserMessage = item.message.kind === 'user' && clientId === actions.firstUserMessageClientId;
   const copyText = buildMobileMessageCopyText(item.message);
   const canUseCompletedActions = !isStreamingAssistant;
@@ -1841,9 +1855,10 @@ function MessageBubble({
   const canShare = !!(
     showCompletedActionBar
     && clientId
-    && isShareableMessage(item.message)
+    && shareableMessage
     && actions.onEnterShareSelection
     && !actions.shareSelectionActive
+    && !actions.busyClientId
   );
   const contentLayout = useMemo(() => buildMessageContentLayout({
     screenWidth: actions.screenWidth,
@@ -2183,6 +2198,7 @@ function MessageBubble({
 
   const messageNode = (
     <View
+      ref={shareableMessage ? handleShareableMessageViewChange : undefined}
       style={[
         styles.messageItem,
         isUser ? styles.userMessageItem : styles.agentMessageItem,

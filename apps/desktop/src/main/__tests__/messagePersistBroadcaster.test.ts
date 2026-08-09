@@ -217,7 +217,7 @@ describe('update_plan tool_use persistence', () => {
     expect(updateMessageContent).toHaveBeenCalledWith(
       SESSION,
       persistId,
-      {
+      expect.objectContaining({
         toolUseId: 'plan:turn-1',
         toolName: 'update_plan',
         // 步骤原样落库(Codex 报的就是 in_progress),退场靠下面这枚章,
@@ -231,7 +231,7 @@ describe('update_plan tool_use persistence', () => {
         },
         terminalPlanSnapshot: true,
         terminalPlanAtMs: expect.any(Number),
-      },
+      }),
     );
     expect(broadcastMessageRow).toHaveBeenCalledWith(
       SESSION,

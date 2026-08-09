@@ -583,6 +583,58 @@ describe('PinnedPlanPanel terminal seal', () => {
     expect(screen.queryByTestId('plan-pill')).toBeNull();
   });
 
+  it('does not revive an old unsealed all-done plan when a later turn starts streaming', () => {
+    const oldCompletedPlan = planMessage('completed', T0, T0);
+    vi.setSystemTime(T0 + 10_000);
+    const view = render(
+      <PinnedPlanPanel
+        sessionId="old-plan-new-turn"
+        messages={[oldCompletedPlan]}
+        animated={false}
+        streaming={false}
+        width={400}
+      />,
+    );
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+
+    view.rerender(
+      <PinnedPlanPanel
+        sessionId="old-plan-new-turn"
+        messages={[
+          oldCompletedPlan,
+          {
+            clientId: 'new-turn-user',
+            role: 'user',
+            content: 'Start the next turn',
+            createdAt: new Date(T0 + 10_000).toISOString(),
+            delivery: 'turn',
+          },
+        ]}
+        animated
+        streaming
+        width={400}
+      />,
+    );
+
+    expect(screen.queryByTestId('plan-pill')).toBeNull();
+  });
+
+  it('keeps a current-turn unsealed all-done codex plan visible while streaming', () => {
+    const currentPlan = planMessage('completed', T0, T0);
+    render(
+      <PinnedPlanPanel
+        sessionId="current-plan-streaming"
+        messages={[currentPlan]}
+        animated
+        streaming
+        width={400}
+      />,
+    );
+
+    act(() => vi.advanceTimersByTime(4_000));
+    expect(screen.queryByTestId('plan-pill')).not.toBeNull();
+  });
+
   it('keeps the all-done fallback for TodoWrite plans even while streaming', () => {
     // TodoWrite / Task 计划永远不会被盖章,全勾完兜底是它们唯一的退场路径,
     // 流式与否都不该被"等章"逻辑挡住。

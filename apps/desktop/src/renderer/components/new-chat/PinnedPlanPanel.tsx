@@ -20,7 +20,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { findLatestMessageTodoInsertion } from '@cindy/maker-shared/message-render';
+import { getLatestMessageTodoState } from '@cindy/maker-shared/message-render';
 
 import { TodoListCard } from '@/components/chat/TodoListCard';
 import type { ChatMessage } from '@/lib/makerChatStore';
@@ -51,10 +51,23 @@ export function PinnedPlanPanel({
   streaming?: boolean;
   className?: string;
 }): React.ReactElement | null {
-  const insertion = useMemo(
-    () => findLatestMessageTodoInsertion(messages, { taskHistoryMayBeIncomplete }),
+  const todoState = useMemo(
+    () => getLatestMessageTodoState(messages, { taskHistoryMayBeIncomplete }),
     [messages, taskHistoryMayBeIncomplete],
   );
+  const insertion = todoState.insertion;
+  // `streaming` is session-wide, but a legacy plan can outlive its turn. Only
+  // suppress the legacy all-done fallback while the latest normal user turn
+  // still owns this plan; steer rows do not start a new turn.
+  const latestNormalUserIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message.role === 'user' && message.delivery !== 'steer') return index;
+    }
+    return -1;
+  }, [messages]);
+  const planBelongsToLatestTurn =
+    todoState.latestInsertionIndex < 0 || latestNormalUserIndex <= todoState.latestInsertionIndex;
   const allDone = Boolean(
     insertion &&
     insertion.todos.length > 0 &&
@@ -70,7 +83,7 @@ export function PinnedPlanPanel({
   const codexPlanAlive =
     insertion?.source === 'codex' &&
     insertion.sealed !== true &&
-    (streaming || insertion.turnFailed === true);
+    ((streaming && planBelongsToLatestTurn) || insertion.turnFailed === true);
   // 退场 = host 盖了终态章(权威),或计划自己勾完了(没有章的旧数据兜底)。
   const retired =
     Boolean(insertion) && (insertion?.sealed === true || (allDone && !codexPlanAlive));

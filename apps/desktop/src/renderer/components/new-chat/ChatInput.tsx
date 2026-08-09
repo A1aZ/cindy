@@ -432,7 +432,7 @@ interface ChatInputProps {
    * 此时模型 / fast / effort / 权限档 等**能力全部从被控端读**(经隧道),控制端"忘掉"本地能力。
    * 由 CCAgentSessionView(reactive remoteDeviceId)/ NewMakerDraftRoute(目标设备)传入;本地会话 undefined。
    */
-  deviceLinkDeviceId?: string;
+  deviceLinkDeviceId?: string | null;
   /**
    * device-link「纯显示镜像」记忆 override:非空时优先于本机全局模型预设注入 ModelSelector,
    * 用于远程草稿 / 远程会话——非选中行读被控端镜像、改动经隧道写穿被控端,绝不碰控制端本地记忆
@@ -950,7 +950,7 @@ export function ChatInput({
   sessionOrcaRole,
   initialWorkingDir,
   remoteHostId,
-  deviceLinkDeviceId,
+  deviceLinkDeviceId: _deviceLinkDeviceId,
   modelMemoryOverride,
   initialModel,
   initialEffort,
@@ -1010,6 +1010,9 @@ export function ChatInput({
   topSlot,
   collaboration,
 }: ChatInputProps) {
+  // device-link 远程会话:null = 已确认本地会话(显式非远程),undefined = 尚未解析。
+  // 预测守卫用原始值区分 null vs undefined,其余下游通路归一化为 undefined。
+  const deviceLinkDeviceId = _deviceLinkDeviceId ?? undefined;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
@@ -1412,7 +1415,7 @@ export function ChatInput({
   workingDirRef.current = workingDir;
   const remoteHostIdRef = useRef<string | null | undefined>(remoteHostId);
   remoteHostIdRef.current = remoteHostId;
-  const deviceLinkDeviceIdRef = useRef<string | undefined>(deviceLinkDeviceId);
+  const deviceLinkDeviceIdRef = useRef<string | null | undefined>(deviceLinkDeviceId);
   deviceLinkDeviceIdRef.current = deviceLinkDeviceId;
   const tRef = useRef(t);
   tRef.current = t;

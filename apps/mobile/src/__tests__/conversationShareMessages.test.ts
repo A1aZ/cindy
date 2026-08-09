@@ -15,12 +15,14 @@ import type { NormalizedRemoteMessage } from '@/session/messageNormalize';
 function messageItem(
   clientId: string,
   kind: 'assistant' | 'user',
+  options: Partial<NormalizedRemoteMessage> = {},
 ): MobileMessageItem {
   const message = {
     body: clientId,
     key: clientId,
     kind,
     source: { clientId, id: clientId },
+    ...options,
   } as NormalizedRemoteMessage;
   return { key: `message-${clientId}`, message, type: 'message' };
 }
@@ -57,6 +59,23 @@ function projectedIds(
 }
 
 describe('collectConversationShareMessages', () => {
+  it('未挂载的长用户消息按桌面收起档位保守投影', () => {
+    const longBody = Array.from({ length: 15 }, (_, index) => `line ${index + 1}`).join('\n');
+    const automationBody = Array.from({ length: 6 }, (_, index) => `step ${index + 1}`).join('\n');
+    const messages = collectConversationShareMessages([
+      messageItem('long-user', 'user', { body: longBody }),
+      messageItem('automation-user', 'user', {
+        automationOrigin: { scheduleId: 'daily' },
+        body: automationBody,
+      }),
+      messageItem('assistant', 'assistant', { body: longBody }),
+    ], () => false);
+
+    expect(messages[0]?.body.split('\n')).toHaveLength(10);
+    expect(messages[1]?.body.split('\n')).toHaveLength(3);
+    expect(messages[2]?.body).toBe(longBody);
+  });
+
   it('只投影当前展开 work group 中的消息，并逐层尊重嵌套折叠态', () => {
     const nested = workGroup('work-nested', [
       messageItem('nested-assistant', 'assistant'),

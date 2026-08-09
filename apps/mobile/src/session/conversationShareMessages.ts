@@ -6,6 +6,13 @@ import type { NormalizedRemoteMessage } from '@/session/messageNormalize';
 import { projectConversationShareMessage } from '@/session/conversationShareProjection';
 import type { ConversationShareMessage } from '@/session/conversationShareWebViewHtml';
 import { isShareableMessage } from '@/session/shareSelectionStore';
+import {
+  AUTOMATION_USER_MESSAGE_COLLAPSED_LINES,
+  AUTOMATION_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
+  LONG_USER_MESSAGE_COLLAPSED_LINES,
+  LONG_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
+  shouldAutoCollapseUserMessageContent,
+} from '@/session/userMessageCollapse';
 
 type ConversationShareRenderItem =
   MobileMessageRenderItem | MobileWorkChildItem;
@@ -46,10 +53,20 @@ export function collectConversationShareMessages(
         item.message.source.clientId ||
         item.message.source.id ||
         item.message.key;
+      const collapseThreshold = item.message.automationOrigin
+        ? AUTOMATION_USER_MESSAGE_VISUAL_LINE_THRESHOLD
+        : LONG_USER_MESSAGE_VISUAL_LINE_THRESHOLD;
+      const maxVisibleLines = item.message.kind === 'user'
+        && shouldAutoCollapseUserMessageContent(item.message.body, collapseThreshold)
+        ? item.message.automationOrigin
+          ? AUTOMATION_USER_MESSAGE_COLLAPSED_LINES
+          : LONG_USER_MESSAGE_COLLAPSED_LINES
+        : undefined;
       const projected = projectConversationShareMessage(clientId, item.message, {
         automationOriginLabel: item.message.automationOrigin && getAutomationOriginLabel
           ? getAutomationOriginLabel(item.message.automationOrigin)
           : undefined,
+        maxVisibleLines,
       });
       if (projected) messages.push(projected);
       return;

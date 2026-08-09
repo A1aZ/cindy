@@ -365,6 +365,9 @@ const PREDICTION_MSG_SLICE = 600;
 /** 推荐提示词 workingDir 截断长度。 */
 const PREDICTION_WORKDIR_MAX = 512;
 
+/** 主进程级去重:同一 session 同时只能有一笔预测在途,避免多窗口重复付费调用。 */
+const _predictingPromptSessions = new Set<string>();
+
 function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throwIpcError('INVALID_PARAMS', 'predict-prompt request must be a non-null object');
@@ -422,7 +425,17 @@ function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
     ): Promise<{ prompt: string | null }> => {
       assertTrustedAppRendererEvent(event);
       const params = parsePredictPromptRequest(request);
-      return { prompt: await generatePromptPrediction(params) };
+      // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
+      // 等多窗口场景下重复触发付费 provider 调用。主进程级 Set 跨窗口可见。
+      if (_predictingPromptSessions.has(params.sessionId)) {
+        return { prompt: null };
+      }
+      _predictingPromptSessions.add(params.sessionId);
+      try {
+        return { prompt: await generatePromptPrediction(params) };
+      } finally {
+        _predictingPromptSessions.delete(params.sessionId);
+      }
     },
   );
 }

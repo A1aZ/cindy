@@ -68,4 +68,21 @@ describe('useStreamFadePreference', () => {
     act(() => pref.result.current.setPreference('off'));
     expect(enabled.result.current).toBe(false);
   });
+
+  it('useStreamFadeEnabled tracks storage changes without the settings hook mounted', () => {
+    const enabled = renderHook(() => useStreamFadeEnabled());
+    expect(enabled.result.current).toBe(false);
+
+    act(() => {
+      localStorage.setItem(KEY, 'on');
+      window.dispatchEvent(new StorageEvent('storage', { key: KEY, newValue: 'on' }));
+    });
+    expect(enabled.result.current).toBe(true);
+
+    act(() => {
+      localStorage.removeItem(KEY);
+      window.dispatchEvent(new StorageEvent('storage', { key: KEY, newValue: null }));
+    });
+    expect(enabled.result.current).toBe(false);
+  });
 });

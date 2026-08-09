@@ -45,16 +45,39 @@ export function getStreamFadePreference(): StreamFadePreference {
 }
 
 const listeners = new Set<() => void>();
+let storageSubscribed = false;
+
+function notifyListeners(): void {
+  listeners.forEach((fn) => fn());
+}
+
+function onStorage(e: StorageEvent): void {
+  if (e.key !== STORAGE_KEY) return;
+  memoryValue = parsePreference(e.newValue) ?? DEFAULT_PREFERENCE;
+  notifyListeners();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  if (!storageSubscribed) {
+    window.addEventListener('storage', onStorage);
+    storageSubscribed = true;
+  }
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && storageSubscribed) {
+      window.removeEventListener('storage', onStorage);
+      storageSubscribed = false;
+    }
+  };
+}
 
 /** 消息渲染侧的轻量订阅:只关心 boolean,设置页切换后即时重渲。 */
 export function useStreamFadeEnabled(): boolean {
   const [enabled, setEnabled] = useState(() => getStreamFadePreference() === 'on');
   useEffect(() => {
     const sync = () => setEnabled(getStreamFadePreference() === 'on');
-    listeners.add(sync);
-    return () => {
-      listeners.delete(sync);
-    };
+    return subscribe(sync);
   }, []);
   return enabled;
 }
@@ -80,22 +103,12 @@ export function useStreamFadePreference(): {
     } catch {
       // localStorage 不可用——内存 SoT 已生效;仅跨窗口同步缺失。
     }
-    listeners.forEach((fn) => fn());
+    notifyListeners();
   }, []);
 
   useEffect(() => {
     const sync = () => setState(getStreamFadePreference());
-    listeners.add(sync);
-    const onStorage = (e: StorageEvent) => {
-      if (e.key !== STORAGE_KEY) return;
-      memoryValue = parsePreference(e.newValue) ?? DEFAULT_PREFERENCE;
-      sync();
-    };
-    window.addEventListener('storage', onStorage);
-    return () => {
-      listeners.delete(sync);
-      window.removeEventListener('storage', onStorage);
-    };
+    return subscribe(sync);
   }, []);
 
   return { preference, isCustomized: preference !== DEFAULT_PREFERENCE, setPreference };
@@ -105,4 +118,8 @@ export function useStreamFadePreference(): {
 export function _resetStreamFadePreferenceForTests(): void {
   memoryValue = null;
   listeners.clear();
+  if (storageSubscribed) {
+    window.removeEventListener('storage', onStorage);
+    storageSubscribed = false;
+  }
 }

@@ -94,7 +94,10 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     proxyDisposed = 0;
     preparedMcpContext = undefined;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-home-'));
-    cwd = realpathSync(mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-')));
+    // Match fs.promises.realpath used by launch-time validation. On Windows the
+    // non-native sync implementation may preserve an 8.3 alias (RUNNER~1)
+    // while the async native implementation returns the final long path.
+    cwd = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-')));
   });
 
   afterEach(() => {

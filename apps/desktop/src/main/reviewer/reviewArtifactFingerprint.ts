@@ -157,7 +157,7 @@ async function walk(
     );
     return;
   }
-  entries.sort((a, b) => a.name.localeCompare(b.name));
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const entry of entries) {
     const childRelative = relativePath ? `${relativePath}/${entry.name}` : entry.name;
     if (isSensitive(entry.name, childRelative)) continue;

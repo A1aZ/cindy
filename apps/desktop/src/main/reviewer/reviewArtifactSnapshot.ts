@@ -32,13 +32,14 @@ export interface PreparedStableReviewArtifacts<T> {
   cleanup(): Promise<void>;
 }
 
-function stableStatMatches(before: Stats, after: Stats): boolean {
+export function reviewArtifactSnapshotStatMatches(before: Stats, after: Stats): boolean {
   return (
     before.dev === after.dev &&
     before.ino === after.ino &&
     before.size === after.size &&
     before.mtimeMs === after.mtimeMs &&
-    before.ctimeMs === after.ctimeMs
+    before.ctimeMs === after.ctimeMs &&
+    before.mode === after.mode
   );
 }
 
@@ -156,7 +157,7 @@ async function copyOpenFile(
       sourceOffset += bytesRead;
     }
     const after = await source.stat();
-    if (sourceOffset !== before.size || !stableStatMatches(before, after)) {
+    if (sourceOffset !== before.size || !reviewArtifactSnapshotStatMatches(before, after)) {
       throw new ReviewArtifactAuthorizationError(
         'A review artifact changed while its private snapshot was being prepared',
       );

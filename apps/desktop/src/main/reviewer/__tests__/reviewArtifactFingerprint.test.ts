@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   fingerprintReviewArtifacts,
@@ -36,6 +36,23 @@ describe('review artifact fingerprint', () => {
     const after = await fingerprintReviewArtifacts([dir]);
 
     expect(after).not.toBe(before);
+  });
+
+  it('uses locale-independent ordering for directory entries', async () => {
+    const dir = await makeTempDir();
+    await fs.writeFile(path.join(dir, 'z.txt'), 'z');
+    await fs.writeFile(path.join(dir, 'ä.txt'), 'a');
+    const localeCompare = vi
+      .spyOn(String.prototype, 'localeCompare')
+      .mockImplementation(() => {
+        throw new Error('locale-dependent ordering must not be used');
+      });
+
+    try {
+      await expect(fingerprintReviewArtifacts([dir])).resolves.toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      localeCompare.mockRestore();
+    }
   });
 
   it('does not read or fingerprint credential paths', async () => {

@@ -14,6 +14,7 @@ import {
   cleanupOrphanedReviewArtifactSnapshots,
   materializeReviewArtifactSnapshots,
   prepareStableReviewArtifactSnapshots,
+  reviewArtifactSnapshotStatMatches,
 } from '../reviewArtifactSnapshot.js';
 import { ReviewArtifactChangedDuringPreparationError } from '../reviewArtifactFingerprint.js';
 
@@ -45,6 +46,17 @@ afterEach(async () => {
 });
 
 describe('materializeReviewArtifactSnapshots', () => {
+  it('treats permission-mode drift as a snapshot stability failure', async () => {
+    const dir = await tempDir();
+    const file = path.join(dir, 'draft.md');
+    await fs.writeFile(file, 'draft');
+    const before = await fs.stat(file);
+    const after = { ...before, mode: before.mode ^ 0o100 } as typeof before;
+
+    expect(reviewArtifactSnapshotStatMatches(before, before)).toBe(true);
+    expect(reviewArtifactSnapshotStatMatches(before, after)).toBe(false);
+  });
+
   it('gives the reviewer a private immutable copy and removes it after the run', async () => {
     const workingDir = await tempDir();
     const externalDir = await tempDir();

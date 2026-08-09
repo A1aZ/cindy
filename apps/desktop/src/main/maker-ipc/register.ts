@@ -721,6 +721,7 @@ import {
 import {
   attachMainOwnedInputBoundary,
   buildMobileClientPromptNote,
+  shouldPrependMobileClientPromptNote,
   stripMainOnlySendOpts,
   stampMobileClientOrigin,
   type MainOwnedInputBoundaryStamp,
@@ -9156,7 +9157,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 手机说明同样只进 wire payload(steer 路径不落库用户消息,天然不污染原话)。
     // 两个来源都要认:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
     const steerNote =
-      isMobileControllerInvoke() || so.fromMobileClient === true
+      (isMobileControllerInvoke() || so.fromMobileClient === true)
+      && shouldPrependMobileClientPromptNote(normalized, sess.agentKind)
         ? buildMobileClientPromptNote()
         : null;
     const steerPayload = steerNote

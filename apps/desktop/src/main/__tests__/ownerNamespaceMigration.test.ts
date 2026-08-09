@@ -615,17 +615,22 @@ describe('legacy Ghost plugin recovery', () => {
     await writeGhostDirAtPath(source, 'legacy-plugin');
     let interrupted = false;
     let markerPendingAtRename: string[] | null = null;
+    let markerProjectionAtRename: string | null = null;
 
     const result = await recoverLegacyGhostPlugins(
       { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
       realFsDeps(root, {}, {
         rename: async (from: string, to: string) => {
           if (from === source && to === target) {
-            markerPendingAtRename = (
+            const marker = (
               JSON.parse(await fs.readFile(markerPath, 'utf-8')) as {
                 pendingIds: string[];
+                approvalProjectionSha256ById: Record<string, string>;
               }
-            ).pendingIds;
+            );
+            markerPendingAtRename = marker.pendingIds;
+            markerProjectionAtRename =
+              marker.approvalProjectionSha256ById['legacy-plugin'] ?? null;
           }
           await fs.rename(from, to);
           if (from === source && to === target && !interrupted) {
@@ -641,6 +646,7 @@ describe('legacy Ghost plugin recovery', () => {
       moved: 0,
     });
     expect(markerPendingAtRename).toEqual(['legacy-plugin']);
+    expect(markerProjectionAtRename).toMatch(/^[a-f0-9]{64}$/);
     await expect(fs.access(source)).rejects.toThrow();
     await expect(fs.readFile(path.join(target, 'ghost.json'), 'utf-8')).resolves.toContain(
       '"id":"legacy-plugin"',
@@ -650,12 +656,17 @@ describe('legacy Ghost plugin recovery', () => {
         markerPath,
         'utf-8',
       ),
-    ) as { ownerKey: string; pendingIds: string[] };
-    expect(marker).toEqual({
-      version: 1,
+    ) as {
+      ownerKey: string;
+      pendingIds: string[];
+      approvalProjectionSha256ById: Record<string, string>;
+    };
+    expect(marker).toMatchObject({
+      version: 2,
       ownerKey,
       pendingIds: ['legacy-plugin'],
     });
+    expect(marker.approvalProjectionSha256ById['legacy-plugin']).toMatch(/^[a-f0-9]{64}$/);
     expect(
       getLegacyGhostRecoveryStatus(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -676,8 +687,376 @@ describe('legacy Ghost plugin recovery', () => {
       status: 'partial',
       moved: 0,
       recoveredIds: ['legacy-plugin'],
+      recoveredApprovalProjectionSha256ById: {
+        'legacy-plugin': marker.approvalProjectionSha256ById['legacy-plugin'],
+      },
     });
   });
+
+  it('refreshes a stale frozen projection on a later retry while the source still exists', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const source = path.join(root, 'brain', 'legacy-plugin');
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await writeGhostDirAtPath(source, 'legacy-plugin');
+    let mutated = false;
+
+    const first = await recoverLegacyGhostPlugins(
+      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+      realFsDeps(root, {}, {
+        rename: async (from: string, to: string) => {
+          await fs.rename(from, to);
+          if (path.resolve(to) !== path.resolve(markerPath) || mutated) return;
+          mutated = true;
+          await fs.writeFile(
+            path.join(source, 'ghost.json'),
+            JSON.stringify({
+              schemaVersion: 2,
+              id: 'legacy-plugin',
+              name: 'Plugin legacy-plugin',
+              version: '1.0.1',
+              kind: 'chip',
+              entry: 'main.js',
+              slots: ['tool'],
+              tools: [
+                { name: 'do_thing', description: 'Do something' },
+                { name: 'new_thing', description: 'New thing' },
+              ],
+            }),
+          );
+        },
+      }),
+    );
+
+    expect(mutated).toBe(true);
+    expect(first).toMatchObject({ status: 'partial', moved: 0, conflicts: 1 });
+    await expect(fs.access(source)).resolves.toBeUndefined();
+    await expect(fs.access(target)).rejects.toThrow();
+    const firstMarker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      approvalProjectionSha256ById: Record<string, string>;
+    };
+    const staleDigest = firstMarker.approvalProjectionSha256ById['legacy-plugin'];
+    expect(staleDigest).toMatch(/^[a-f0-9]{64}$/);
+
+    __testing.resetLegacyGhostRecoveryState();
+    const second = await recoverLegacyGhostPlugins(
+      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+      realFsDeps(root),
+    );
+
+    const secondMarker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      approvalProjectionSha256ById: Record<string, string>;
+    };
+    const refreshedDigest = secondMarker.approvalProjectionSha256ById['legacy-plugin'];
+    expect(refreshedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(refreshedDigest).not.toBe(staleDigest);
+    expect(second).toMatchObject({
+      status: 'migrated',
+      moved: 1,
+      conflicts: 0,
+      recoveredIds: ['legacy-plugin'],
+      recoveredApprovalProjectionSha256ById: {
+        'legacy-plugin': refreshedDigest,
+      },
+    });
+    await expect(fs.access(source)).rejects.toThrow();
+    await expect(fs.access(target)).resolves.toBeUndefined();
+  });
+
+  it('re-freezes an empty digest map when the legacy source still exists', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const source = path.join(root, 'brain', 'legacy-plugin');
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await writeGhostDirAtPath(source, 'legacy-plugin');
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['legacy-plugin'],
+        approvalProjectionSha256ById: {},
+      }),
+    );
+
+    expect(
+      getLegacyGhostRecoveryStatus(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        root,
+      ),
+    ).toMatchObject({ state: 'partial', legacyPluginCount: 1, canRetry: true });
+
+    const result = await recoverLegacyGhostPlugins(
+      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+      realFsDeps(root),
+    );
+    const marker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      approvalProjectionSha256ById: Record<string, string>;
+    };
+    const refreshedDigest = marker.approvalProjectionSha256ById['legacy-plugin'];
+
+    expect(refreshedDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(result).toMatchObject({
+      status: 'migrated',
+      moved: 1,
+      conflicts: 0,
+      recoveredIds: ['legacy-plugin'],
+      recoveredApprovalProjectionSha256ById: {
+        'legacy-plugin': refreshedDigest,
+      },
+    });
+    await expect(fs.access(source)).rejects.toThrow();
+    await expect(fs.access(target)).resolves.toBeUndefined();
+  });
+
+  it('keeps a target-only recovery marker with an empty digest map fail closed', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await writeGhostDirAtPath(target, 'legacy-plugin');
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['legacy-plugin'],
+        approvalProjectionSha256ById: {},
+      }),
+    );
+
+    expect(
+      getLegacyGhostRecoveryStatus(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        root,
+      ),
+    ).toMatchObject({ state: 'partial', legacyPluginCount: 1, canRetry: false });
+
+    const result = await recoverLegacyGhostPlugins(
+      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+      realFsDeps(root),
+    );
+
+    expect(result).toEqual({ status: 'partial', moved: 0, conflicts: 1 });
+    await expect(fs.readFile(markerPath, 'utf8').then(JSON.parse)).resolves.toMatchObject({
+      version: 2,
+      ownerKey,
+      pendingIds: ['legacy-plugin'],
+    });
+    await expect(fs.readFile(path.join(target, 'ghost.json'), 'utf-8')).resolves.toContain(
+      '"id":"legacy-plugin"',
+    );
+  });
+
+  it('keeps a target-only legacy marker without frozen digests fail closed', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await writeGhostDirAtPath(target, 'legacy-plugin');
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['legacy-plugin'],
+      }),
+    );
+
+    const result = await recoverLegacyGhostPlugins(
+      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+      realFsDeps(root),
+    );
+
+    expect(result).toEqual({
+      status: 'partial',
+      moved: 0,
+      conflicts: 1,
+    });
+    await expect(fs.readFile(markerPath, 'utf8').then(JSON.parse)).resolves.toMatchObject({
+      version: 2,
+      ownerKey,
+      pendingIds: ['legacy-plugin'],
+    });
+    await expect(fs.readFile(path.join(target, 'ghost.json'), 'utf-8')).resolves.toContain(
+      '"id":"legacy-plugin"',
+    );
+  });
+
+  it('upgrades a target-only v1 marker before returning its frozen projection', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    const frozenDigest = 'a'.repeat(64);
+    await writeGhostDirAtPath(target, 'legacy-plugin');
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['legacy-plugin'],
+        approvalProjectionSha256ById: { 'legacy-plugin': frozenDigest },
+      }),
+    );
+
+    await expect(
+      recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+      ),
+    ).resolves.toMatchObject({
+      status: 'partial',
+      moved: 0,
+      recoveredIds: ['legacy-plugin'],
+      recoveredApprovalProjectionSha256ById: { 'legacy-plugin': frozenDigest },
+    });
+    await expect(fs.readFile(markerPath, 'utf8').then(JSON.parse)).resolves.toEqual({
+      version: 2,
+      ownerKey,
+      pendingIds: ['legacy-plugin'],
+      approvalProjectionSha256ById: { 'legacy-plugin': frozenDigest },
+    });
+  });
+
+  it.each(['manifest', 'disabled', 'trust', 'locale', 'icon', 'skill'] as const)(
+    'refuses an in-place %s approval projection change after the durable freeze',
+    async (kind) => {
+      const root = await tempRoot();
+      const ownerId = 'cloud-a';
+      const ownerKey = dataOwnerStorageKey(ownerId);
+      const source = path.join(root, 'brain', 'legacy-plugin');
+      const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+      const markerPath = path.join(
+        root,
+        'owners',
+        ownerKey,
+        __testing.LEGACY_GHOST_RECOVERY_MARKER,
+      );
+      await writeGhostDirAtPath(source, 'legacy-plugin');
+      const manifest = {
+        schemaVersion: 2,
+        id: 'legacy-plugin',
+        name: 'Legacy plugin',
+        version: '1.0.0',
+        kind: 'chip',
+        entry: 'main.js',
+        icon: 'assets/icon.png',
+        locales: { en: 'locales/en.json' },
+        slots: ['tool', 'skill'],
+        tools: [{ name: 'do_thing', description: 'Do something' }],
+        skill: {
+          items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }],
+        },
+      };
+      await fs.writeFile(path.join(source, 'ghost.json'), JSON.stringify(manifest));
+      await fs.mkdir(path.join(source, 'assets'), { recursive: true });
+      await fs.writeFile(path.join(source, 'assets', 'icon.png'), 'ORIGINAL ICON');
+      await fs.mkdir(path.join(source, 'locales'), { recursive: true });
+      await fs.writeFile(
+        path.join(source, 'locales', 'en.json'),
+        JSON.stringify({ name: 'Original name' }),
+      );
+      await fs.mkdir(path.join(source, 'skills', 'demo'), { recursive: true });
+      await fs.writeFile(
+        path.join(source, 'skills', 'demo', 'SKILL.md'),
+        '---\nname: demo\ndescription: Demo skill\n---\n\nOriginal instructions\n',
+      );
+      let mutated = false;
+
+      const result = await recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root, {}, {
+          rename: async (from: string, to: string) => {
+            await fs.rename(from, to);
+            if (path.resolve(to) !== path.resolve(markerPath) || mutated) return;
+            mutated = true;
+            if (kind === 'manifest') {
+              await fs.writeFile(
+                path.join(source, 'ghost.json'),
+                JSON.stringify({
+                  ...manifest,
+                  tools: [
+                    ...manifest.tools,
+                    { name: 'new_thing', description: 'New privileged tool' },
+                  ],
+                }),
+              );
+            } else if (kind === 'disabled') {
+              await fs.writeFile(path.join(source, '.disabled'), '');
+            } else if (kind === 'trust') {
+              await fs.writeFile(
+                path.join(source, '.cindy-trust.json'),
+                JSON.stringify({
+                  level: 'verified-publisher',
+                  publisherSigned: true,
+                  publisherVerified: true,
+                  reviewed: false,
+                }),
+              );
+            } else if (kind === 'locale') {
+              await fs.writeFile(
+                path.join(source, 'locales', 'en.json'),
+                JSON.stringify({ name: 'Replaced name' }),
+              );
+            } else if (kind === 'icon') {
+              await fs.writeFile(path.join(source, 'assets', 'icon.png'), 'REPLACED ICON');
+            } else {
+              await fs.writeFile(
+                path.join(source, 'skills', 'demo', 'SKILL.md'),
+                '---\nname: demo\ndescription: Demo skill\n---\n\nReplaced instructions\n',
+              );
+            }
+          },
+        }),
+      );
+
+      expect(mutated).toBe(true);
+      expect(result).toMatchObject({ status: 'partial', moved: 0, conflicts: 1 });
+      await expect(fs.access(source)).resolves.toBeUndefined();
+      await expect(fs.access(target)).rejects.toThrow();
+      const marker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+        approvalProjectionSha256ById: Record<string, string>;
+      };
+      expect(marker.approvalProjectionSha256ById['legacy-plugin']).toMatch(/^[a-f0-9]{64}$/);
+    },
+  );
 
   it('does not backfill a target that appeared while the legacy source still exists', async () => {
     const root = await tempRoot();
@@ -740,13 +1119,13 @@ describe('legacy Ghost plugin recovery', () => {
     await expect(
       fs.readFile(markerPath, 'utf8').then(JSON.parse),
     ).resolves.toEqual({
-      version: 1,
+      version: 2,
       ownerKey,
       pendingIds: ['stale-plugin'],
     });
   });
 
-  it('continues a mixed recovery marker when one id is already in the target', async () => {
+  it('continues only source-present ids in a mixed recovery marker', async () => {
     const root = await tempRoot();
     const ownerId = 'cloud-a';
     const ownerKey = dataOwnerStorageKey(ownerId);
@@ -773,12 +1152,21 @@ describe('legacy Ghost plugin recovery', () => {
         realFsDeps(root),
       ),
     ).resolves.toMatchObject({
-      status: 'migrated',
+      status: 'partial',
       moved: 1,
-      recoveredIds: ['already-moved', 'still-legacy'],
+      conflicts: 1,
+      recoveredIds: ['still-legacy'],
     });
+    const marker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      approvalProjectionSha256ById: Record<string, string>;
+    };
+    expect(marker.approvalProjectionSha256ById).not.toHaveProperty('already-moved');
+    expect(marker.approvalProjectionSha256ById['still-legacy']).toMatch(/^[a-f0-9]{64}$/);
     await expect(
       fs.access(path.join(root, 'owners', ownerKey, 'cindy-brain', 'still-legacy')),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(root, 'owners', ownerKey, 'cindy-brain', 'already-moved')),
     ).resolves.toBeUndefined();
   });
 
@@ -834,10 +1222,112 @@ describe('legacy Ghost plugin recovery', () => {
     );
 
     await expect(fs.readFile(markerPath, 'utf-8').then(JSON.parse)).resolves.toEqual({
-      version: 1,
+      version: 2,
       ownerKey,
       pendingIds: ['retry-plugin'],
     });
+  });
+
+  it('removes the recovery marker after the last pending id is acknowledged', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['completed-plugin'],
+        approvalProjectionSha256ById: {
+          'completed-plugin': 'a'.repeat(64),
+        },
+      }),
+    );
+
+    await acknowledgeRecoveredLegacyGhosts(
+      ownerId,
+      ['completed-plugin'],
+      realFsDeps(root),
+    );
+
+    await expect(fs.access(markerPath)).rejects.toThrow();
+  });
+
+  it('writes an empty recovery marker when final acknowledge cannot unlink', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['completed-plugin'],
+        approvalProjectionSha256ById: {
+          'completed-plugin': 'a'.repeat(64),
+        },
+      }),
+    );
+
+    await acknowledgeRecoveredLegacyGhosts(
+      ownerId,
+      ['completed-plugin'],
+      realFsDeps(root, {}, {
+        unlink: async () => {
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        },
+      }),
+    );
+
+    await expect(fs.readFile(markerPath, 'utf8').then(JSON.parse)).resolves.toEqual({
+      version: 2,
+      ownerKey,
+      pendingIds: [],
+    });
+  });
+
+  it('treats a legacy empty recovery marker as absent for fresh discovery', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(markerPath, JSON.stringify({ version: 1, ownerKey, pendingIds: [] }));
+    await writeGhostDirAtPath(path.join(root, 'brain', 'fresh-plugin'), 'fresh-plugin');
+
+    await expect(
+      recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+      ),
+    ).resolves.toMatchObject({
+      status: 'migrated',
+      moved: 1,
+      conflicts: 0,
+      recoveredIds: ['fresh-plugin'],
+    });
+    await expect(
+      fs.access(path.join(root, 'owners', ownerKey, 'cindy-brain', 'fresh-plugin')),
+    ).resolves.toBeUndefined();
   });
 
   it('does not follow a linked legacy repository root', async () => {
@@ -2042,6 +2532,7 @@ function realFsDeps(
     writeFileExclusive: (file: string, text: string) =>
       fs.writeFile(file, text, { encoding: 'utf-8', flag: 'wx' }),
     writeFile: (file: string, text: string) => fs.writeFile(file, text, 'utf-8'),
+    unlink: (file: string) => fs.unlink(file),
     lstat: (file: string) => fs.lstat(file),
     readdir: (dir: string) => fs.readdir(dir),
     mkdir: async (dir: string) => {

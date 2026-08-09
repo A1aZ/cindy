@@ -15,14 +15,14 @@ describe('Ghost account-boundary teardown ordering', () => {
 
   it('interrupts long setup, grant, and pipe waits before draining owner leases', () => {
     const start = bootstrap.indexOf(
-      'async function teardownAuthAccountBoundary(reason: string): Promise<void> {',
+      'async function teardownGhostProjectionBoundary(reason: string): Promise<void> {',
     );
     const end = bootstrap.indexOf('\n}\n', start);
     const body = bootstrap.slice(start, end);
 
-    const interrupt = body.indexOf('await interruptGhostCallsForAccountBoundary();');
-    const wait = body.indexOf('await waitForGhostMutations();');
-    const suspend = body.indexOf('suspendAllGhosts();');
+    const interrupt = body.indexOf('interruptGhostCallsForAccountBoundary));');
+    const wait = body.indexOf('waitForGhostMutations));');
+    const suspend = body.indexOf('suspendAllGhosts);');
 
     expect(interrupt).toBeGreaterThan(-1);
     expect(interrupt).toBeLessThan(wait);

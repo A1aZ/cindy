@@ -377,7 +377,10 @@ export async function hashGhostContentFiles(
       relativePath,
     );
     const noFollow = fs.constants.O_NOFOLLOW ?? null;
-    const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
+    const handle = await fs.promises.open(
+      filePath,
+      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (noFollow ?? 0),
+    );
     let handleStat: fs.BigIntStats;
     let initialRealFilePath: string | undefined;
     try {
@@ -423,7 +426,7 @@ export async function hashGhostContentFiles(
     // 重新打开同一路径，并再次流式摘要；新句柄的 stat 也可能陈旧，字节对账才是最终证据。
     const verificationHandle = await fs.promises.open(
       filePath,
-      fs.constants.O_RDONLY | (noFollow ?? 0),
+      fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (noFollow ?? 0),
     );
     try {
       const verificationStat = await verificationHandle.stat({ bigint: true });

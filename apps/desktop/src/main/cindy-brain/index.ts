@@ -40,6 +40,10 @@ import {
 import type { PluginMarketPackageReviewFacts } from '../../shared/pluginMarket.js';
 import { getAppCapabilities } from '../appCapabilities.js';
 import {
+  isGhostSkillProjectionBoundaryStableForOwner,
+  withGhostSkillProjectionReconcile,
+} from '../authBoundaryQuarantine.js';
+import {
   activeOwnerScopeKey,
   getActiveDataOwnerPushStamp,
   getActiveAppSession,
@@ -129,6 +133,8 @@ import { reclaimLoopbackPort } from './portReclaim.js';
 import { GhostConnectionManager } from './ghostConnections.js';
 import { getResolvedMainLocale, t } from '../i18n.js';
 import { reconcileGhostSkillLinks, removeGhostSkillLinksForRoots } from './skillSlot.js';
+import { assertGhostSkillProjectionStableOwner } from '../authBoundaryQuarantine.js';
+import { type GhostOwnerScope } from './ghostOwnerScope.js';
 import {
   assertTrustedAppRendererEvent,
   isTrustedAppRendererEvent,
@@ -490,6 +496,26 @@ function isSameAppSession(a: ActiveAppSession, b: ActiveAppSession): boolean {
   return a.mode === b.mode && a.dataOwnerId === b.dataOwnerId && a.generation === b.generation;
 }
 
+const ghostOwnerScope: GhostOwnerScope = {
+  capture: () => captureGhostMutationOwner(),
+  isCurrent: (scope) =>
+    !!scope && isSameAppSession(scope as ActiveAppSession, getActiveAppSession()),
+  isStable: (scope) =>
+    !!scope && isGhostSkillProjectionBoundaryStableForOwner(
+      (scope as ActiveAppSession).dataOwnerId,
+    ),
+  onInvalidated: (ghostId) => {
+    try {
+      getGhostRuntime().stop(ghostId);
+    } catch (error) {
+      log.warn('stale Ghost owner runtime stop failed', {
+        ghostId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  },
+};
+
 function currentLegacyGhostMigrationSession(): {
   mode: ActiveAppSession['mode'];
   dataOwnerId: string | null;
@@ -696,9 +722,14 @@ async function retryLegacyGhostRecoveryForActiveSession(): Promise<LegacyGhostRe
       const recoveredLegacyIds = [...(result.recoveredIds ?? [])];
       if (recoveredLegacyIds.length > 0) {
         try {
+          const expectedApprovalProjectionSha256ById =
+            result.recoveredApprovalProjectionSha256ById ?? {};
           const backfill = await getGhostManager().backfillRecoveredLegacyGhosts(
             recoveredLegacyIds,
-            { includePending: true },
+            {
+              includePending: true,
+              expectedApprovalProjectionSha256ById,
+            },
           );
           const pending = new Set(backfill.pending ?? []);
           const failed = new Set(backfill.failed);
@@ -746,6 +777,8 @@ export function waitForGhostMutations(): Promise<void> {
 
 /** Account-managed built-ins are unavailable outside a verified cloud session. */
 export function isGhostAvailableForActiveSession(id: string): boolean {
+  const activeOwner = getActiveAppSession().dataOwnerId;
+  if (!isGhostSkillProjectionBoundaryStableForOwner(activeOwner)) return false;
   return !isCindyAccountGhostId(id) || getAppCapabilities().canUseCindyAccountServices;
 }
 
@@ -795,6 +828,12 @@ export function listAvailableGhostsForAuthorization(): InstalledGhost[] {
 
 function requireGhostAvailableForActiveSession(id: string): void {
   if (!isGhostAvailableForActiveSession(id)) {
+    if (isAppSessionBoundaryPending()) {
+      throwIpcError(
+        'PRECONDITION_FAILED',
+        'Ghost projection is switching owners; retry after the boundary settles.',
+      );
+    }
     throwIpcError('PERMISSION_DENIED', 'This Plugin requires a Cindy account.');
   }
 }
@@ -1520,6 +1559,7 @@ export function getGhostCardActionDispatcher(): GhostCardActionDispatcher {
       onActivityStart: (key, sessionId) =>
         getGhostSessionActivityTracker().begin(key, sessionId),
       now: () => Date.now(),
+      ownerScope: ghostOwnerScope,
       log,
     });
   }
@@ -1569,6 +1609,7 @@ export function getGhostSubscriptionGateway(): GhostSubscriptionGateway {
           name: ghost.manifest.name,
         }, isDataOwnerPushStamp(ownerStamp) ? ownerStamp : undefined);
       },
+      ownerScope: ghostOwnerScope,
       log,
     });
   }
@@ -5519,10 +5560,19 @@ export function registerGhostIpc(): void {
     if (!listBuiltinSeedIds(builtinSeedRootDirs()).includes(id)) {
       throwIpcError('NOT_FOUND', `意识 ${id} 不是内置种子`);
     }
-    clearBuiltinTombstone(brainRootDir(), id, log);
-    void scheduleBuiltinReconcile('restore');
-    await builtinReconcileChain; // 等本轮装完再返回,renderer 拿到结果时列表已就位
-    return { ok: true };
+    const expectedOwner = captureGhostMutationOwner();
+    const releaseMutation = beginGhostMutation(expectedOwner);
+    try {
+      clearBuiltinTombstone(brainRootDir(), id, log);
+      void scheduleBuiltinReconcile('restore');
+      await builtinReconcileChain; // 等本轮装完再返回,renderer 拿到结果时列表已就位
+      if (!isSameAppSession(expectedOwner, getActiveAppSession())) {
+        throw new Error('账号已切换，已取消本次 Plugin 操作');
+      }
+      return { ok: true };
+    } finally {
+      releaseMutation();
+    }
   });
 
   // 启用 / 停用(停用 = 面板休眠,布局位置保留;详见 GhostManager.setEnabled)。
@@ -5832,6 +5882,19 @@ function broadcastGhostsChanged(
 //    永不并发两趟 fs 对账;失败仅 warn,幂等设计靠下一次广播/启动自愈。
 let skillReconcileInFlight = false;
 let skillReconcilePending = false;
+let skillReconcileRetryTimer: ReturnType<typeof setTimeout> | null = null;
+const SKILL_RECONCILE_RETRY_MS = 1_000;
+
+function scheduleGhostSkillReconcileRetry(): void {
+  skillReconcilePending = true;
+  if (skillReconcileRetryTimer) return;
+  skillReconcileRetryTimer = setTimeout(() => {
+    skillReconcileRetryTimer = null;
+    scheduleGhostSkillReconcile();
+  }, SKILL_RECONCILE_RETRY_MS);
+  skillReconcileRetryTimer.unref?.();
+}
+
 function scheduleGhostSkillReconcile(): void {
   skillReconcilePending = true;
   if (skillReconcileInFlight) return;
@@ -5847,14 +5910,21 @@ function scheduleGhostSkillReconcile(): void {
         // 边界期开轮直接抛,pending 保留,换号完成后的 ghosts:changed 广播重跑。
         let releaseLease: (() => void) | null = null;
         try {
-          releaseLease = beginGhostMutation(captureGhostMutationOwner());
-          const result = await reconcileGhostSkillLinks({
-            ghosts: getGhostManager().list(),
-            brainRoot: brainRootDir(),
-            approvalStateRoot: getGhostManager().approvalStateRoot(),
-            validateApprovedSkillSnapshot: (ghost) =>
-              getGhostManager().verifyApprovedSkillSnapshot(ghost),
-          });
+          const owner = captureGhostMutationOwner();
+          const result = await withGhostSkillProjectionReconcile(
+            owner.dataOwnerId ?? '',
+            async () => {
+              releaseLease = beginGhostMutation(owner);
+              return reconcileGhostSkillLinks({
+                ghosts: getGhostManager().list(),
+                brainRoot: brainRootDir(),
+                approvalStateRoot: getGhostManager().approvalStateRoot(),
+                assertOwnerStable: () => assertGhostSkillProjectionStableOwner(owner.dataOwnerId ?? ''),
+                validateApprovedSkillSnapshot: (ghost) =>
+                  getGhostManager().verifyApprovedSkillSnapshot(ghost),
+              });
+            },
+          );
           if (result.warnings.length > 0) {
             log.warn('ghost skill reconcile warnings', { warnings: result.warnings });
           }
@@ -5864,16 +5934,22 @@ function scheduleGhostSkillReconcile(): void {
             });
           }
         } catch (err) {
-          if (isAppSessionBoundaryPending()) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (
+            isAppSessionBoundaryPending()
+            || message.includes('projection is not stable')
+            || message.includes('boundary lock is busy or unavailable')
+          ) {
             // 账号边界期:本轮不动盘,保留 pending 等换号完成后的广播重跑。
-            skillReconcilePending = true;
+            scheduleGhostSkillReconcileRetry();
             break;
           }
           log.warn('ghost skill reconcile failed', {
-            error: err instanceof Error ? err.message : String(err),
+            error: message,
           });
         } finally {
-          releaseLease?.();
+          const release = releaseLease as (() => void) | null;
+          release?.();
         }
       }
     } finally {

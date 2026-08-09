@@ -12,14 +12,26 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 
 vi.mock('../../logger', () => ({
   createLogger: () => ({ warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() }),
 }));
 
-import { withCrossProcessLock } from '../crossProcessLock';
+import { __testing, withCrossProcessLock } from '../crossProcessLock';
 
 let dir: string;
+
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-process-lock-'));
@@ -36,6 +48,17 @@ async function writeStaleLock(lock: string): Promise<void> {
   await fsp.utimes(lock, old, old);
 }
 
+async function writeStaleReclaimGate(lock: string): Promise<void> {
+  const gate = `${lock}.reclaim`;
+  await fsp.writeFile(
+    gate,
+    JSON.stringify({ pid: 0x7ffffffe, startedAt: 1, nonce: 'stale-gate' }),
+    'utf8',
+  );
+  const old = new Date(Date.now() - 60_000);
+  await fsp.utimes(gate, old, old);
+}
+
 describe('接管陈旧锁', () => {
   it('删得掉 → 接管成功,task 拿到 held=true', async () => {
     const lock = path.join(dir, 'lock');
@@ -49,18 +72,18 @@ describe('接管陈旧锁', () => {
   it('锁文件删不掉 → 立刻降级返回,不空转到超时(更不无限循环)', async () => {
     const lock = path.join(dir, 'lock');
     await writeStaleLock(lock);
-    const originalRm = fsp.rm;
-    let rmAttempts = 0;
-    const spy = vi.spyOn(fsp, 'rm').mockImplementation((async (
-      target: unknown,
-      ...rest: unknown[]
+    const originalRename = fsp.rename;
+    let renameAttempts = 0;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
     ) => {
-      if (typeof target === 'string' && target === lock) {
-        rmAttempts += 1;
+      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
+        renameAttempts += 1;
         throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
       }
-      return (originalRm as (...args: unknown[]) => Promise<unknown>)(target, ...rest);
-    }) as unknown as typeof fsp.rm);
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
     try {
       const started = performance.now();
       const status = await withCrossProcessLock(
@@ -74,11 +97,539 @@ describe('接管陈旧锁', () => {
       expect(status).toEqual({ held: false, reason: 'busy' });
       // 不该把 waitMs 熬完,也不该反复重试删除。
       expect(elapsed).toBeLessThan(1_000);
-      expect(rmAttempts).toBe(1);
+      expect(renameAttempts).toBe(1);
       // 别人的锁没被动过。
       expect(fs.existsSync(lock)).toBe(true);
+      expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
     } finally {
       spy.mockRestore();
     }
+
+    await expect(
+      withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+    ).resolves.toEqual({ held: true });
+  });
+
+  it('reclaims a crashed reclaim gate before taking over the stale lock', async () => {
+    const lock = path.join(dir, 'lock');
+    await writeStaleLock(lock);
+    await writeStaleReclaimGate(lock);
+
+    const status = await withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s);
+
+    expect(status).toEqual({ held: true });
+    expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
+  });
+
+  it.each(['', '{not-json'])('keeps a stale legacy malformed lock fail-closed: %j', async (content) => {
+    const lock = path.join(dir, 'lock');
+    await fsp.writeFile(lock, content, 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withCrossProcessLock(
+        lock,
+        { label: 'test', waitMs: 100, allowMalformedStaleTakeover: false },
+        async (s) => s,
+      ),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+  });
+
+  it('keeps a stale legacy lock when its pid started before the lock file', async () => {
+    const lock = path.join(dir, 'lock');
+    await fsp.writeFile(lock, JSON.stringify({ pid: process.pid, startedAt: 1 }), 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withCrossProcessLock(lock, { label: 'test', waitMs: 100 }, async (s) => s),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+  });
+
+  it('reclaims a legacy lock when the recorded pid was reused after file creation', async () => {
+    const lock = path.join(dir, 'lock');
+    await fsp.writeFile(lock, '{}', 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+      windowsHide: true,
+      stdio: 'ignore',
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('spawn', resolve);
+        child.once('error', reject);
+      });
+      if (!child.pid) throw new Error('child pid missing');
+      await fsp.writeFile(lock, JSON.stringify({ pid: child.pid, startedAt: 1 }), 'utf8');
+      const old = new Date(Date.now() - 60_000);
+      await fsp.utimes(lock, old, old);
+
+      await expect(
+        withCrossProcessLock(lock, { label: 'test', waitMs: 1_000 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      child.kill();
+    }
+  }, 15_000);
+
+  it('retries a transient release deletion failure', async () => {
+    const lock = path.join(dir, 'lock');
+    const originalRm = fsp.rm;
+    let failed = false;
+    const spy = vi.spyOn(fsp, 'rm').mockImplementation((async (target: unknown, options?: unknown) => {
+      if (target === lock && !failed) {
+        failed = true;
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return (originalRm as (...args: unknown[]) => Promise<unknown>)(target, options);
+    }) as typeof fsp.rm);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it('recovers a released record after deletion stays unavailable', async () => {
+    const lock = path.join(dir, 'lock');
+    const originalRename = fsp.rename;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.release-`)) {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(lock)).toBe(true);
+
+    await expect(
+      withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+    ).resolves.toEqual({ held: true });
+  });
+
+  it('retries when a released lock disappears during stale takeover', async () => {
+    const lock = path.join(dir, 'lock');
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({
+        pid: 0x7ffffffe,
+        startedAt: 1,
+        nonce: '00000000-0000-4000-8000-000000000001',
+        state: 'released',
+      }),
+      'utf8',
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    const originalRename = fsp.rename;
+
+    let removedByRacingOwner = false;
+    const race = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (
+        !removedByRacingOwner
+        && from === lock
+        && typeof to === 'string'
+        && to.startsWith(`${lock}.reclaim-`)
+      ) {
+        removedByRacingOwner = true;
+        await fsp.rm(lock, { force: true });
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'waiter', waitMs: 1_000 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      race.mockRestore();
+    }
+    expect(removedByRacingOwner).toBe(true);
+  });
+
+  it('keeps a stale lock when process liveness cannot be proven', async () => {
+    const lock = path.join(dir, 'lock');
+    const identity = await __testing.getProcessIdentity(process.pid);
+    if (!identity) throw new Error('current process identity unavailable in test');
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: 1,
+        nonce: 'live-owner',
+        processStartIdentity: identity.key,
+        state: 'held',
+      }),
+      'utf8',
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+    const kill = vi.spyOn(process, 'kill').mockImplementation((() => {
+      throw Object.assign(new Error('liveness query unavailable'), { code: 'EACCES' });
+    }) as typeof process.kill);
+    try {
+      await expect(
+        withCrossProcessLock(
+          lock,
+          {
+            label: 'strict',
+            waitMs: 100,
+            requireProcessIdentity: true,
+            allowMalformedStaleTakeover: false,
+          },
+          async (s) => s,
+        ),
+      ).resolves.toEqual({ held: false, reason: 'busy' });
+    } finally {
+      kill.mockRestore();
+    }
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it.each(['unknown-format', 'bogus-state'])('keeps an unverifiable strict record fail-closed: %s', async (value) => {
+    const lock = path.join(dir, 'lock');
+    const identity = value === 'unknown-format' ? value : undefined;
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: 1,
+        nonce: '00000000-0000-4000-8000-000000000001',
+        ...(identity ? { processStartIdentity: identity } : { state: value }),
+      }),
+      'utf8',
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withCrossProcessLock(
+        lock,
+        { label: 'strict', waitMs: 100, requireProcessIdentity: true, allowMalformedStaleTakeover: false },
+        async (s) => s,
+      ),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it.each([
+    { label: 'missing nonce', omit: 'nonce' },
+    { label: 'null nonce', nonce: null },
+    { label: 'unknown nonce', nonce: 'unknown-format' },
+    { label: 'missing identity', omit: 'processStartIdentity' },
+    { label: 'zero identity', processStartIdentity: 'start-ms:0' },
+    { label: 'negative ticks identity', processStartIdentity: '-621355968000000001' },
+    { label: 'missing state', omit: 'state' },
+  ])('keeps a strict record with $label fail-closed', async (variant) => {
+    const lock = path.join(dir, 'lock');
+    const identity = await __testing.getProcessIdentity(process.pid);
+    if (!identity) throw new Error('current process identity unavailable in test');
+    const record: Record<string, unknown> = {
+      pid: process.pid,
+      startedAt: 1,
+      nonce: '00000000-0000-4000-8000-000000000001',
+      processStartIdentity: identity.key,
+      state: 'held',
+    };
+    if (variant.omit) delete record[variant.omit];
+    if (Object.prototype.hasOwnProperty.call(variant, 'nonce')) record.nonce = variant.nonce;
+    if (variant.processStartIdentity !== undefined) {
+      record.processStartIdentity = variant.processStartIdentity;
+    }
+    await fsp.writeFile(lock, JSON.stringify(record), 'utf8');
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withCrossProcessLock(
+        lock,
+        { label: 'strict', waitMs: 100, requireProcessIdentity: true, allowMalformedStaleTakeover: false },
+        async (s) => s,
+      ),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it('bounds repeated successful stale takeovers by time and count', async () => {
+    const lock = path.join(dir, 'lock');
+    await writeStaleLock(lock);
+    const originalRename = fsp.rename;
+    let takeovers = 0;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      const result = await (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
+        takeovers += 1;
+        await writeStaleLock(lock);
+      }
+      return result;
+    }) as typeof fsp.rename);
+    try {
+      const started = performance.now();
+      await expect(
+        withCrossProcessLock(lock, { label: 'churn', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: false, reason: 'busy' });
+      expect(performance.now() - started).toBeLessThan(1_000);
+      expect(takeovers).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('publishes after the final stale takeover when the path stays empty', async () => {
+    const lock = path.join(dir, 'lock');
+    await writeStaleLock(lock);
+    const originalRename = fsp.rename;
+    let takeovers = 0;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      const result = await (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
+        takeovers += 1;
+        if (takeovers < 3) await writeStaleLock(lock);
+      }
+      return result;
+    }) as typeof fsp.rename);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'final-takeover', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+      expect(takeovers).toBe(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('recovers an own reclaim gate after rename and fsync both fail', async () => {
+    const lock = path.join(dir, 'lock');
+    const originalOpen = fsp.open;
+    const originalRename = fsp.rename;
+    const openSpy = vi.spyOn(fsp, 'open').mockImplementation((async (...args: any[]) => {
+      const handle = await (originalOpen as (...inner: any[]) => Promise<any>)(...args);
+      const file = args[0];
+      if (typeof file === 'string' && file.startsWith(`${lock}.reclaim.candidate-`)) {
+        const originalSync = handle.sync.bind(handle);
+        let syncCount = 0;
+        handle.sync = async () => {
+          syncCount += 1;
+          if (syncCount >= 2) throw Object.assign(new Error('fsync unavailable'), { code: 'EIO' });
+          return originalSync();
+        };
+      }
+      return handle;
+    }) as typeof fsp.open);
+    const renameSpy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (from === `${lock}.reclaim` && typeof to === 'string' && to.startsWith(`${lock}.reclaim.release-`)) {
+        throw Object.assign(new Error('rename unavailable'), { code: 'EBUSY' });
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      renameSpy.mockRestore();
+      openSpy.mockRestore();
+    }
+
+    await expect(
+      withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+    ).resolves.toEqual({ held: true });
+    expect(fs.existsSync(`${lock}.reclaim`)).toBe(false);
+  });
+
+  it('keeps a successor protected while the previous owner is releasing', async () => {
+    const lock = path.join(dir, 'lock');
+    const releaseFirstTask = deferred();
+    const firstTaskStarted = deferred();
+    const releaseRenameStarted = deferred();
+    const allowReleaseRename = deferred();
+    const secondTaskStarted = deferred();
+    const releaseSecondTask = deferred();
+    const originalRename = fsp.rename;
+    let blockedRelease = false;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (
+        !blockedRelease
+        && from === lock
+        && typeof to === 'string'
+        && to.startsWith(`${lock}.release-`)
+      ) {
+        blockedRelease = true;
+        releaseRenameStarted.resolve();
+        await allowReleaseRename.promise;
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+
+    try {
+      const first = withCrossProcessLock(
+        lock,
+        { label: 'first', waitMs: 500 },
+        async (status) => {
+          expect(status).toEqual({ held: true });
+          firstTaskStarted.resolve();
+          await releaseFirstTask.promise;
+          return status;
+        },
+      );
+      await firstTaskStarted.promise;
+      releaseFirstTask.resolve();
+      await releaseRenameStarted.promise;
+
+      await expect(
+        withCrossProcessLock(lock, { label: 'second', waitMs: 100 }, async (s) => s),
+      ).resolves.toEqual({ held: false, reason: 'busy' });
+
+      allowReleaseRename.resolve();
+      await expect(first).resolves.toEqual({ held: true });
+
+      const second = withCrossProcessLock(
+        lock,
+        { label: 'second', waitMs: 500 },
+        async (status) => {
+          expect(status).toEqual({ held: true });
+          secondTaskStarted.resolve();
+          await releaseSecondTask.promise;
+          return status;
+        },
+      );
+      await secondTaskStarted.promise;
+
+      await expect(
+        withCrossProcessLock(lock, { label: 'third', waitMs: 100 }, async (s) => s),
+      ).resolves.toEqual({ held: false, reason: 'busy' });
+
+      releaseSecondTask.resolve();
+      await expect(second).resolves.toEqual({ held: true });
+    } finally {
+      allowReleaseRename.resolve();
+      releaseFirstTask.resolve();
+      releaseSecondTask.resolve();
+      spy.mockRestore();
+    }
+  });
+
+  it('does not remove a successor after the predecessor path disappeared', async () => {
+    const lock = path.join(dir, 'lock');
+    const firstTaskStarted = deferred();
+    const releaseFirstTask = deferred();
+    const secondTaskStarted = deferred();
+    const releaseSecondTask = deferred();
+
+    const first = withCrossProcessLock(
+      lock,
+      { label: 'first', waitMs: 500 },
+      async (status) => {
+        expect(status).toEqual({ held: true });
+        firstTaskStarted.resolve();
+        await releaseFirstTask.promise;
+        return status;
+      },
+    );
+    await firstTaskStarted.promise;
+    await fsp.rm(lock, { force: true });
+
+    const second = withCrossProcessLock(
+      lock,
+      { label: 'second', waitMs: 500 },
+      async (status) => {
+        expect(status).toEqual({ held: true });
+        secondTaskStarted.resolve();
+        await releaseSecondTask.promise;
+        return status;
+      },
+    );
+    await secondTaskStarted.promise;
+
+    releaseFirstTask.resolve();
+    await expect(first).resolves.toEqual({ held: true });
+    await expect(
+      withCrossProcessLock(lock, { label: 'third', waitMs: 100 }, async (s) => s),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+
+    releaseSecondTask.resolve();
+    await expect(second).resolves.toEqual({ held: true });
+  });
+
+  it('recovers a main lock left held when release marking and gate publication fail', async () => {
+    const lock = path.join(dir, 'lock');
+    const originalOpen = fsp.open;
+    const openSpy = vi.spyOn(fsp, 'open').mockImplementation((async (...args: any[]) => {
+      const file = args[0];
+      if (typeof file === 'string' && file.startsWith(`${lock}.reclaim.candidate-`)) {
+        throw Object.assign(new Error('gate unavailable'), { code: 'EIO' });
+      }
+      const handle = await (originalOpen as (...inner: any[]) => Promise<any>)(...args);
+      if (typeof file === 'string' && file.startsWith(`${lock}.candidate-`)) {
+        handle.write = async () => {
+          throw Object.assign(new Error('release write unavailable'), { code: 'EIO' });
+        };
+      }
+      return handle;
+    }) as typeof fsp.open);
+    try {
+      await expect(
+        withCrossProcessLock(lock, { label: 'first', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+      expect(JSON.parse(await fsp.readFile(lock, 'utf8')).state).toBe('held');
+
+      await expect(
+        withCrossProcessLock(lock, { label: 'second', waitMs: 500 }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it('keeps strict acquisition available when current-process identity commands fail', async () => {
+    const identity = await __testing.readProcessIdentity(
+      process.pid,
+      async () => {
+        throw new Error('identity command unavailable');
+      },
+    );
+
+    expect(identity?.startedAtMs).toEqual(expect.any(Number));
+    expect(identity?.key).toMatch(/^start-ms:\d+$/);
+  });
+
+  it('does not invent an identity for another process when OS queries fail', async () => {
+    await expect(
+      __testing.readProcessIdentity(
+        0x7ffffffe,
+        async () => {
+          throw new Error('identity command unavailable');
+        },
+      ),
+    ).resolves.toBeNull();
   });
 });

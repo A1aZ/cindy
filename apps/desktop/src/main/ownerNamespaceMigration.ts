@@ -16,6 +16,7 @@ import {
   NO_LEGACY_GHOST_RECOVERY,
   type LegacyGhostRecoveryStatus,
 } from '../shared/legacyGhostRecovery.js';
+import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
 const LEGACY_GHOST_RECOVERY_MARKER = '.legacy-ghost-recovery-v1.json';
@@ -58,11 +59,13 @@ interface ClaimMarker {
 }
 
 interface LegacyGhostRecoveryMarker {
-  version: 1;
+  version: 1 | 2;
   ownerKey: string;
   pendingIds: string[];
   /** Deterministic content failures remain inside the frozen id whitelist. */
   failedIds?: string[];
+  /** Complete approval-fact digest frozen before a source directory is moved. */
+  approvalProjectionSha256ById?: Record<string, string>;
 }
 
 type LegacyGhostRecoveryMarkerRead =
@@ -76,6 +79,7 @@ interface MigrationDeps {
   readFile(file: string): Promise<string>;
   writeFileExclusive(file: string, text: string): Promise<void>;
   writeFile(file: string, text: string): Promise<void>;
+  unlink(file: string): Promise<void>;
   lstat(file: string): Promise<{
     isDirectory(): boolean;
     isFile?: () => boolean;
@@ -106,6 +110,8 @@ export interface OwnerNamespaceMigrationResult {
   deferredReason?: OwnerNamespaceClaimDeferredReason;
   /** Ghost directories moved before approval backfill; durable across restart. */
   recoveredIds?: string[];
+  /** Expected full approval projection where the source was still available to freeze. */
+  recoveredApprovalProjectionSha256ById?: Record<string, string>;
 }
 
 const log = createLogger('ownerNamespaceMigration');
@@ -119,6 +125,7 @@ const productionDeps: MigrationDeps = {
   readFile: (file) => fs.readFile(file, 'utf-8'),
   writeFileExclusive: (file, text) => fs.writeFile(file, text, { encoding: 'utf-8', flag: 'wx' }),
   writeFile: (file, text) => fs.writeFile(file, text, 'utf-8'),
+  unlink: (file) => fs.unlink(file),
   lstat: (file) => fs.lstat(file),
   readdir: (dir) => fs.readdir(dir),
   mkdir: async (dir) => {
@@ -152,6 +159,33 @@ function isMissing(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
+const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
+
+function normalizeLegacyApprovalProjectionDigests(
+  value: unknown,
+  pendingIds: readonly string[],
+): { ok: true; digests?: Record<string, string> } | { ok: false } {
+  if (value === undefined) return { ok: true };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return { ok: false };
+  const pending = new Set(pendingIds);
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (
+    entries.some(
+      ([id, digest]) =>
+        !pending.has(id) || typeof digest !== 'string' || !SHA256_HEX_RE.test(digest),
+    )
+  ) {
+    return { ok: false };
+  }
+  return {
+    ok: true,
+    digests: Object.fromEntries(entries.sort(([left], [right]) => left.localeCompare(right))) as Record<
+      string,
+      string
+    >,
+  };
+}
+
 async function readMarker(deps: MigrationDeps, markerPath: string): Promise<ClaimMarker | null> {
   try {
     const parsed = JSON.parse(await deps.readFile(markerPath)) as Partial<ClaimMarker>;
@@ -182,20 +216,29 @@ async function readLegacyGhostRecoveryMarker(
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;
     const failedIds = parsed.failedIds ?? [];
+    const projections = normalizeLegacyApprovalProjectionDigests(
+      parsed.approvalProjectionSha256ById,
+      parsed.pendingIds ?? [],
+    );
     if (
-      parsed.version === 1 &&
+      (parsed.version === 1 || parsed.version === 2) &&
       typeof parsed.ownerKey === 'string' &&
       Array.isArray(parsed.pendingIds) &&
       parsed.pendingIds.every((id) => typeof id === 'string' && isValidGhostId(id)) &&
       Array.isArray(failedIds) &&
       failedIds.every((id) => typeof id === 'string' && isValidGhostId(id)) &&
-      failedIds.every((id) => parsed.pendingIds?.includes(id))
+      failedIds.every((id) => parsed.pendingIds?.includes(id)) &&
+      projections.ok
     ) {
+      if (parsed.pendingIds.length === 0) return { kind: 'missing' };
       const marker: LegacyGhostRecoveryMarker = {
-        version: 1,
+        version: parsed.version,
         ownerKey: parsed.ownerKey,
         pendingIds: [...new Set(parsed.pendingIds)],
         ...(failedIds.length > 0 ? { failedIds: [...new Set(failedIds)] } : {}),
+        ...(projections.digests
+          ? { approvalProjectionSha256ById: projections.digests }
+          : {}),
       };
       return { kind: 'ready', marker };
     }
@@ -814,8 +857,10 @@ export function getLegacyGhostRecoveryStatus(
       deferredReason: 'legacy-discovery-incomplete',
     };
   }
-  const recoveredIds = (recoveryMarker?.pendingIds ?? []).filter(
-    (id) => installedTargetIds.has(id) && !legacySourceIds.has(id),
+  const recoveredIds = (recoveryMarker?.pendingIds ?? []).filter((id) =>
+    installedTargetIds.has(id) &&
+    !legacySourceIds.has(id) &&
+    recoveryMarker?.approvalProjectionSha256ById?.[id] !== undefined,
   );
   const unexpectedFrozenIds = recoveryMarker
     ? legacyGhosts.map((ghost) => ghost.id).filter((id) => !recoveryMarker.pendingIds.includes(id))
@@ -1002,6 +1047,7 @@ export async function recoverLegacyGhostPlugins(
     ? recoveryMarkerRead.marker
     : null;
   let recoveryMarkerPersisted = recoveryMarker !== null;
+  const recoveryMarkerNeedsVersionUpgrade = recoveryMarker?.version === 1;
   if (recoveryMarker && recoveryMarker.ownerKey !== ownerKey) {
     log.warn('legacy ghost recovery blocked: durable recovery marker owner mismatch', {
       expectedOwnerKey: ownerKey,
@@ -1023,6 +1069,9 @@ export async function recoverLegacyGhostPlugins(
   ]);
   const targetDiscoveryIds = new Set(targetDiscovery.ghosts.map((ghost) => ghost.id));
   const pendingRecoveryIds = new Set(recoveryMarker?.pendingIds ?? sourceDiscoveryIds);
+  const approvalProjectionSha256ById = new Map<string, string>(
+    Object.entries(recoveryMarker?.approvalProjectionSha256ById ?? {}),
+  );
   const failedRecoveryIds = new Set(
     recoveryMarker?.failedIds ??
       [...sourceDiscoveryIds].filter((id) =>
@@ -1036,6 +1085,25 @@ export async function recoverLegacyGhostPlugins(
   const recoveredTargetIds = (): string[] => [...pendingRecoveryIds]
     .filter((id) => movedThisRun.has(id) || (targetDiscoveryIds.has(id) && !sourceDiscoveryIds.has(id)))
     .sort();
+  const targetOnlyPendingIdsWithoutFrozenDigest = (): string[] => [...pendingRecoveryIds]
+    .filter((id) =>
+      targetDiscoveryIds.has(id) &&
+      !sourceDiscoveryIds.has(id) &&
+      !approvalProjectionSha256ById.has(id)
+    )
+    .sort();
+  const recoveredApprovalProjectionDigests = (): Record<string, string> => {
+    const recovered: Record<string, string> = {};
+    for (const id of recoveredTargetIds()) {
+      const frozenDigest = approvalProjectionSha256ById.get(id);
+      if (frozenDigest !== undefined) {
+        recovered[id] = frozenDigest;
+      }
+    }
+    return Object.fromEntries(Object.entries(recovered).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ));
+  };
   if (
     sharedRecoveryBlocked &&
     scopedLegacyGhosts.length === 0 &&
@@ -1096,14 +1164,24 @@ export async function recoverLegacyGhostPlugins(
       activePendingIds.has(legacy.id),
     );
   }
-  if (movableLegacyGhosts.length === 0) {
-    const recoveredIds = recoveredTargetIds();
-    const result: OwnerNamespaceMigrationResult = {
-      status: conflicts > 0 || recoveredIds.length > 0 ? 'partial' : 'skipped',
+  const buildNoMoveResult = (): OwnerNamespaceMigrationResult => {
+    const recoveredApprovalProjectionSha256ById = recoveredApprovalProjectionDigests();
+    const recoveredIds = Object.keys(recoveredApprovalProjectionSha256ById);
+    const effectiveConflicts = conflicts + targetOnlyPendingIdsWithoutFrozenDigest().length;
+    return {
+      status: effectiveConflicts > 0 || recoveredIds.length > 0 ? 'partial' : 'skipped',
       moved: 0,
-      conflicts,
-      ...(recoveredIds.length > 0 ? { recoveredIds } : {}),
+      conflicts: effectiveConflicts,
+      ...(recoveredIds.length > 0
+        ? {
+            recoveredIds,
+            recoveredApprovalProjectionSha256ById,
+          }
+        : {}),
     };
+  };
+  if (movableLegacyGhosts.length === 0 && !recoveryMarkerNeedsVersionUpgrade) {
+    const result = buildNoMoveResult();
     recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
     return result;
   }
@@ -1144,17 +1222,63 @@ export async function recoverLegacyGhostPlugins(
     return result;
   }
 
-  // Freeze the recovery whitelist only after passive/concurrent ownership has
-  // been ruled out. A deferred instance must not write durable recovery state.
-  if (!recoveryMarkerPersisted && pendingRecoveryIds.size > 0 && !sharedRecoveryBlocked) {
+  // Freeze the complete approval projection only after passive/concurrent
+  // ownership has been ruled out. A source that is still in the legacy root
+  // can be re-frozen on every retry, but a target-only directory can never be
+  // inferred from its current mutable bytes.
+  let approvalProjectionDigestsChanged = false;
+  const projectionReadyLegacyGhosts: typeof movableLegacyGhosts = [];
+  for (const legacy of movableLegacyGhosts) {
+    try {
+      const frozen = await readLegacyGhostApprovalProjection(legacy.dir, legacy.id);
+      if (approvalProjectionSha256ById.get(legacy.id) !== frozen.sha256) {
+        approvalProjectionSha256ById.set(legacy.id, frozen.sha256);
+        approvalProjectionDigestsChanged = true;
+      }
+    } catch (error) {
+      conflicts += 1;
+      log.warn('legacy ghost recovery could not freeze approval projection', {
+        id: legacy.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    projectionReadyLegacyGhosts.push(legacy);
+  }
+  movableLegacyGhosts = projectionReadyLegacyGhosts;
+
+  // Freeze the recovery whitelist and its projections before any rename. A
+  // deferred instance must not write durable recovery state.
+  if (
+    (!recoveryMarkerPersisted ||
+      approvalProjectionDigestsChanged ||
+      recoveryMarkerNeedsVersionUpgrade) &&
+    pendingRecoveryIds.size > 0 &&
+    !sharedRecoveryBlocked
+  ) {
     await deps.mkdir(path.dirname(recoveryMarkerPath));
     await writeLegacyGhostRecoveryMarker(deps, recoveryMarkerPath, {
-      version: 1,
+      version: 2,
       ownerKey,
       pendingIds: [...pendingRecoveryIds].sort(),
       ...(failedRecoveryIds.size > 0 ? { failedIds: [...failedRecoveryIds].sort() } : {}),
+      ...(approvalProjectionSha256ById.size > 0
+        ? {
+            approvalProjectionSha256ById: Object.fromEntries(
+              [...approvalProjectionSha256ById.entries()].sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            ),
+          }
+        : {}),
     });
     recoveryMarkerPersisted = true;
+  }
+
+  if (movableLegacyGhosts.length === 0) {
+    const result = buildNoMoveResult();
+    recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
+    return result;
   }
 
   if (options.shouldAbort?.()) return { status: 'deferred', moved: 0, conflicts: 0 };
@@ -1190,13 +1314,7 @@ export async function recoverLegacyGhostPlugins(
     );
   }
   if (movableLegacyGhosts.length === 0) {
-    const recoveredIds = recoveredTargetIds();
-    const result: OwnerNamespaceMigrationResult = {
-      status: conflicts > 0 || recoveredIds.length > 0 ? 'partial' : 'skipped',
-      moved: 0,
-      conflicts,
-      ...(recoveredIds.length > 0 ? { recoveredIds } : {}),
-    };
+    const result = buildNoMoveResult();
     recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
     return result;
   }
@@ -1220,13 +1338,7 @@ export async function recoverLegacyGhostPlugins(
   }
   movableLegacyGhosts = commandSafeLegacyGhosts;
   if (movableLegacyGhosts.length === 0) {
-    const recoveredIds = recoveredTargetIds();
-    const result: OwnerNamespaceMigrationResult = {
-      status: conflicts > 0 || recoveredIds.length > 0 ? 'partial' : 'skipped',
-      moved: 0,
-      conflicts,
-      ...(recoveredIds.length > 0 ? { recoveredIds } : {}),
-    };
+    const result = buildNoMoveResult();
     recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
     return result;
   }
@@ -1270,10 +1382,19 @@ export async function recoverLegacyGhostPlugins(
     }
     await deps.mkdir(path.dirname(recoveryMarkerPath));
     const nextRecoveryMarker: LegacyGhostRecoveryMarker = {
-      version: 1,
+      version: 2,
       ownerKey,
       pendingIds: [...pendingRecoveryIds].sort(),
       ...(failedRecoveryIds.size > 0 ? { failedIds: [...failedRecoveryIds].sort() } : {}),
+      ...(approvalProjectionSha256ById.size > 0
+        ? {
+            approvalProjectionSha256ById: Object.fromEntries(
+              [...approvalProjectionSha256ById.entries()].sort(([left], [right]) =>
+                left.localeCompare(right),
+              ),
+            ),
+          }
+        : {}),
     };
     await writeLegacyGhostRecoveryMarker(deps, recoveryMarkerPath, nextRecoveryMarker);
     recoveryMarkerPersisted = true;
@@ -1436,6 +1557,34 @@ export async function recoverLegacyGhostPlugins(
       });
       continue;
     }
+    const expectedApprovalProjectionSha256 = approvalProjectionSha256ById.get(legacy.id);
+    if (!expectedApprovalProjectionSha256) {
+      failed = true;
+      conflicts += 1;
+      log.warn('legacy ghost recovery refused source without a frozen approval projection', {
+        id: legacy.id,
+      });
+      continue;
+    }
+    try {
+      const current = await readLegacyGhostApprovalProjection(legacy.dir, legacy.id);
+      if (current.sha256 !== expectedApprovalProjectionSha256) {
+        failed = true;
+        conflicts += 1;
+        log.warn('legacy ghost recovery refused source whose approval projection changed', {
+          id: legacy.id,
+        });
+        continue;
+      }
+    } catch (error) {
+      failed = true;
+      conflicts += 1;
+      log.warn('legacy ghost recovery could not re-read the frozen approval projection', {
+        id: legacy.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
     try {
       await deps.rename(legacy.dir, target);
       moved += 1;
@@ -1508,16 +1657,23 @@ export async function recoverLegacyGhostPlugins(
       }
     }
   }
-  const recoveredIds = recoveredTargetIds();
+  const recoveredApprovalProjectionSha256ById = recoveredApprovalProjectionDigests();
+  const recoveredIds = Object.keys(recoveredApprovalProjectionSha256ById);
+  const effectiveConflicts = conflicts + targetOnlyPendingIdsWithoutFrozenDigest().length;
   const result: OwnerNamespaceMigrationResult = {
-    status: failed || conflicts > 0 ? 'partial' : 'migrated',
+    status: failed || effectiveConflicts > 0 ? 'partial' : 'migrated',
     moved,
-    conflicts,
+    conflicts: effectiveConflicts,
     ...(provisioningStateMoved ? { provisioningStateMoved: true } : {}),
     ...(concurrentRecoveryInterrupted
       ? { deferredReason: 'concurrent-live-instances' as const }
       : {}),
-    ...(recoveredIds.length > 0 ? { recoveredIds } : {}),
+    ...(recoveredIds.length > 0
+      ? {
+          recoveredIds,
+          recoveredApprovalProjectionSha256ById,
+        }
+      : {}),
   };
   recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
   return result;
@@ -1544,20 +1700,29 @@ function readLegacyGhostRecoveryMarkerSync(
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;
     const failedIds = parsed.failedIds ?? [];
+    const projections = normalizeLegacyApprovalProjectionDigests(
+      parsed.approvalProjectionSha256ById,
+      parsed.pendingIds ?? [],
+    );
     if (
-      parsed.version === 1 &&
+      (parsed.version === 1 || parsed.version === 2) &&
       parsed.ownerKey === ownerKey &&
       Array.isArray(parsed.pendingIds) &&
       parsed.pendingIds.every((id) => typeof id === 'string' && isValidGhostId(id)) &&
       Array.isArray(failedIds) &&
       failedIds.every((id) => typeof id === 'string' && isValidGhostId(id)) &&
-      failedIds.every((id) => parsed.pendingIds?.includes(id))
+      failedIds.every((id) => parsed.pendingIds?.includes(id)) &&
+      projections.ok
     ) {
+      if (parsed.pendingIds.length === 0) return { kind: 'missing' };
       return { kind: 'ready', marker: {
-          version: 1,
+          version: parsed.version,
           ownerKey,
           pendingIds: [...new Set(parsed.pendingIds)],
           ...(failedIds.length > 0 ? { failedIds: [...new Set(failedIds)] } : {}),
+          ...(projections.digests
+            ? { approvalProjectionSha256ById: projections.digests }
+            : {}),
         } };
     }
     return { kind: 'invalid' };
@@ -1598,12 +1763,34 @@ export async function acknowledgeRecoveredLegacyGhosts(
   const acknowledged = new Set(ids);
   const pendingIds = marker.pendingIds.filter((id) => !acknowledged.has(id));
   if (pendingIds.length === marker.pendingIds.length) return;
+  if (pendingIds.length === 0) {
+    try {
+      await deps.unlink(markerPath);
+    } catch (error) {
+      if (isMissing(error)) return;
+      await writeLegacyGhostRecoveryMarker(deps, markerPath, {
+        version: 2,
+        ownerKey,
+        pendingIds: [],
+      });
+    }
+    return;
+  }
   await writeLegacyGhostRecoveryMarker(deps, markerPath, {
-    version: 1,
+    version: 2,
     ownerKey,
     pendingIds,
     ...(marker.failedIds?.length
       ? { failedIds: marker.failedIds.filter((id) => !acknowledged.has(id)) }
+      : {}),
+    ...(marker.approvalProjectionSha256ById
+      ? {
+          approvalProjectionSha256ById: Object.fromEntries(
+            Object.entries(marker.approvalProjectionSha256ById).filter(
+              ([id]) => !acknowledged.has(id),
+            ),
+          ),
+        }
       : {}),
   });
 }

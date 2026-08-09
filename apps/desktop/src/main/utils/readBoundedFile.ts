@@ -52,6 +52,24 @@ function sameInode(a: fs.BigIntStats, b: fs.BigIntStats): boolean {
   return a.dev === b.dev && a.ino === b.ino;
 }
 
+function sameStableFileState(before: fs.BigIntStats, after: fs.BigIntStats): boolean {
+  if (!after.isFile()) return false;
+  if (before.dev !== 0n && before.ino !== 0n && after.dev !== 0n && after.ino !== 0n) {
+    if (!sameInode(before, after)) return false;
+  }
+  return (
+    before.size === after.size &&
+    before.mtimeNs === after.mtimeNs &&
+    before.ctimeNs === after.ctimeNs
+  );
+}
+
+function changedWhileReadingError(): NodeJS.ErrnoException {
+  const error = new Error('source file changed while being read') as NodeJS.ErrnoException;
+  error.code = 'EIO';
+  return error;
+}
+
 /**
  * 在已打开句柄上循环读满已校验的长度。网络盘/FUSE 上单次 read() 不保证填满
  * 请求区间,单次读会把合法文件截断成解析失败。EOF 早于已校验长度(并发截断)
@@ -89,6 +107,23 @@ async function verifyStillWithinRoot(
   }
 }
 
+function verifyStillWithinRootSync(
+  handleStat: fs.BigIntStats,
+  filePath: string,
+  realRoot: string,
+): boolean {
+  try {
+    const [pathStat, realFilePath] = [
+      fs.statSync(filePath, { bigint: true }),
+      fs.realpathSync(filePath),
+    ];
+    if (!sameInode(pathStat, handleStat)) return false;
+    return isWithinRoot(realFilePath, realRoot);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 读取一个"必须是普通文件"的文件,拒绝符号链接,限量读取。
  *
@@ -112,7 +147,7 @@ export async function readBoundedFileNoFollow(
       : (fs.constants.O_NOFOLLOW ?? null);
   const handle = await fs.promises.open(
     filePath,
-    fs.constants.O_RDONLY | (noFollow ?? 0),
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (noFollow ?? 0),
   );
   try {
     const stat = await handle.stat({ bigint: true });
@@ -131,7 +166,17 @@ export async function readBoundedFileNoFollow(
     if (options?.containWithin !== undefined) {
       if (!(await verifyStillWithinRoot(stat, filePath, options.containWithin))) return null;
     }
-    return await readToLength(handle, Number(stat.size));
+    const bytes = await readToLength(handle, Number(stat.size));
+    const after = await handle.stat({ bigint: true });
+    if (bytes.byteLength !== Number(stat.size) || !sameStableFileState(stat, after)) {
+      throw changedWhileReadingError();
+    }
+    if (options?.containWithin !== undefined) {
+      if (!(await verifyStillWithinRoot(after, filePath, options.containWithin))) {
+        throw changedWhileReadingError();
+      }
+    }
+    return bytes;
   } finally {
     await handle.close();
   }
@@ -147,14 +192,27 @@ export async function readBoundedFileFollowLinks(
   maxBytes: number,
   options?: Pick<ReadBoundedFileOptions, 'containWithin'>,
 ): Promise<Buffer | null> {
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY);
+  const handle = await fs.promises.open(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+  );
   try {
     const stat = await handle.stat({ bigint: true });
     if (!stat.isFile() || Number(stat.size) > maxBytes) return null;
     if (options?.containWithin !== undefined) {
       if (!(await verifyStillWithinRoot(stat, filePath, options.containWithin))) return null;
     }
-    return await readToLength(handle, Number(stat.size));
+    const bytes = await readToLength(handle, Number(stat.size));
+    const after = await handle.stat({ bigint: true });
+    if (bytes.byteLength !== Number(stat.size) || !sameStableFileState(stat, after)) {
+      throw changedWhileReadingError();
+    }
+    if (options?.containWithin !== undefined) {
+      if (!(await verifyStillWithinRoot(after, filePath, options.containWithin))) {
+        throw changedWhileReadingError();
+      }
+    }
+    return bytes;
   } finally {
     await handle.close();
   }
@@ -173,7 +231,10 @@ export function readBoundedFileNoFollowSync(
     options?.noFollowFlag !== undefined
       ? options.noFollowFlag
       : (fs.constants.O_NOFOLLOW ?? null);
-  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
+  const fd = fs.openSync(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (noFollow ?? 0),
+  );
   try {
     const stat = fs.fstatSync(fd, { bigint: true });
     if (!stat.isFile() || Number(stat.size) > maxBytes) return null;
@@ -188,22 +249,24 @@ export function readBoundedFileNoFollowSync(
       if (!sameInode(linkStat, stat)) return null;
     }
     if (options?.containWithin !== undefined) {
-      try {
-        const pathStat = fs.statSync(filePath, { bigint: true });
-        const realFilePath = fs.realpathSync(filePath);
-        if (!sameInode(pathStat, stat)) return null;
-        if (!isWithinRoot(realFilePath, options.containWithin)) return null;
-      } catch {
-        return null;
-      }
+      if (!verifyStillWithinRootSync(stat, filePath, options.containWithin)) return null;
     }
     const size = Number(stat.size);
     const buffer = Buffer.alloc(size);
     let offset = 0;
     while (offset < size) {
       const bytesRead = fs.readSync(fd, buffer, offset, size - offset, offset);
-      if (bytesRead === 0) break;
+      if (bytesRead === 0) throw changedWhileReadingError();
       offset += bytesRead;
+    }
+    const after = fs.fstatSync(fd, { bigint: true });
+    if (offset !== size || !sameStableFileState(stat, after)) {
+      throw changedWhileReadingError();
+    }
+    if (options?.containWithin !== undefined) {
+      if (!verifyStillWithinRootSync(after, filePath, options.containWithin)) {
+        throw changedWhileReadingError();
+      }
     }
     return buffer.subarray(0, offset);
   } finally {

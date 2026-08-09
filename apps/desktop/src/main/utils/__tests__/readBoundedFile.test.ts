@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   GHOST_MANIFEST_MAX_BYTES,
+  readBoundedFileFollowLinks,
   readBoundedFileNoFollow,
   readBoundedFileNoFollowSync,
 } from '../readBoundedFile';
@@ -26,6 +27,31 @@ afterEach(async () => {
 });
 
 describe('readBoundedFileNoFollow', () => {
+  it('opens untrusted paths in non-blocking mode before checking the file type', async () => {
+    const file = path.join(workDir, 'plain.json');
+    await fs.promises.writeFile(file, '{"ok":1}');
+    const realOpen = fs.promises.open;
+    const flags: number[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.promises.open>
+    ) => {
+      flags.push(Number(args[1]));
+      return realOpen(...args);
+    }) as typeof fs.promises.open);
+
+    try {
+      await expect(readBoundedFileNoFollow(file, 1024)).resolves.not.toBeNull();
+      await expect(readBoundedFileFollowLinks(file, 1024)).resolves.not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(flags).toHaveLength(2);
+    const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
+    expect(flags.every((flag) => (flag & nonBlockingFlag) === nonBlockingFlag))
+      .toBe(true);
+  });
+
   it('普通文件按实际字节返回,超限返回 null', async () => {
     const small = path.join(workDir, 'small.json');
     await fs.promises.writeFile(small, '{"ok":true}');
@@ -201,6 +227,28 @@ describe('readBoundedFileNoFollow', () => {
 });
 
 describe('readBoundedFileNoFollowSync', () => {
+  it('opens untrusted paths in non-blocking mode before checking the file type', async () => {
+    const file = path.join(workDir, 'plain.json');
+    await fs.promises.writeFile(file, '{"ok":1}');
+    const realOpenSync = fs.openSync;
+    let flags = 0;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((
+      ...args: Parameters<typeof fs.openSync>
+    ) => {
+      flags = Number(args[1]);
+      return realOpenSync(...args);
+    }) as typeof fs.openSync);
+
+    try {
+      expect(readBoundedFileNoFollowSync(file, 1024)).not.toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
+    expect(flags & nonBlockingFlag).toBe(nonBlockingFlag);
+  });
+
   it('限量与回退闸语义和异步变体一致', async () => {
     const file = path.join(workDir, 'plain.json');
     await fs.promises.writeFile(file, '{"ok":1}');
@@ -219,5 +267,28 @@ describe('readBoundedFileNoFollowSync', () => {
     await fs.promises.symlink(target, link);
     expect(() => readBoundedFileNoFollowSync(link, 1024)).toThrow();
     expect(readBoundedFileNoFollowSync(link, 1024, { noFollowFlag: null })).toBeNull();
+  });
+});
+
+describe('readBoundedFileNoFollowSync mutation guard', () => {
+  it('rejects a file that changes while being read', async () => {
+    const file = path.join(workDir, 'mutating.json');
+    await fs.promises.writeFile(file, '{"ok":1}');
+    const realReadSync = fs.readSync;
+    let mutated = false;
+    const spy = vi.spyOn(fs, 'readSync').mockImplementation(((fd, buffer, offset, length, position) => {
+      const bytesRead = (realReadSync as typeof fs.readSync)(fd, buffer, offset, length, position);
+      if (!mutated && bytesRead > 0) {
+        mutated = true;
+        fs.writeFileSync(file, '{"ok":2,"mutated":true}');
+      }
+      return bytesRead;
+    }) as typeof fs.readSync);
+
+    try {
+      expect(() => readBoundedFileNoFollowSync(file, 1024)).toThrow(/changed while being read/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

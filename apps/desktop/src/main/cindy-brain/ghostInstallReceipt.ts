@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 
 import {
   GHOST_LOCALE_MAX_BYTES,
@@ -180,9 +181,11 @@ export class GhostInstallReceiptStore {
   /** Recovery must not confuse transient state-root IO with missing/corrupt approval state. */
   readForRecovery(id: string): GhostInstallReceiptRecoveryReadResult {
     const receiptPath = this.receiptPath(id);
-    let stat: fs.Stats;
+    let bytes: Buffer | null;
     try {
-      stat = fs.lstatSync(receiptPath);
+      bytes = readBoundedFileNoFollowSync(receiptPath, MAX_RECEIPT_BYTES, {
+        containWithin: this.rootDir(),
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return { state: 'missing' };
@@ -192,18 +195,10 @@ export class GhostInstallReceiptStore {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) {
+    if (!bytes) {
       return { state: 'invalid', reason: 'receipt 不是普通文件或超过大小上限' };
     }
-    let text: string;
-    try {
-      text = fs.readFileSync(receiptPath, 'utf8');
-    } catch (error) {
-      return {
-        state: 'unreadable',
-        reason: error instanceof Error ? error.message : String(error),
-      };
-    }
+    const text = bytes.toString('utf8');
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;
@@ -922,12 +917,18 @@ function classifyCleanupEntrySync(absPath: string): CleanupEntryKind {
 export function readLegacyInstallTrust(dir: string): GhostTrustInfo | null {
   const file = path.join(dir, '.cindy-trust.json');
   try {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.size > MAX_RECEIPT_BYTES) return null;
-    const trust = validateTrust(JSON.parse(fs.readFileSync(file, 'utf8')));
-    if (!trust || trust.level === 'cindy-official') return null;
-    return trust;
-  } catch {
+    const realDir = fs.realpathSync(dir);
+    const bytes = readBoundedFileNoFollowSync(file, MAX_RECEIPT_BYTES, { containWithin: realDir });
+    if (bytes === null) return null;
+    try {
+      const trust = validateTrust(JSON.parse(bytes.toString('utf8')));
+      if (!trust || trust.level === 'cindy-official') return null;
+      return trust;
+    } catch {
+      return null;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EIO') throw error;
     return null;
   }
 }

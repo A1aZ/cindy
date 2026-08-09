@@ -40,6 +40,7 @@ import {
   type GhostSubscribeTopic,
   type InstalledGhost,
 } from '../../shared/ghost.js';
+import { isGhostOwnerScopeUsable, type GhostOwnerScope } from './ghostOwnerScope.js';
 
 /** block 理由展示上限(超长截断,防意识用理由塞小作文)。 */
 const BLOCK_REASON_MAX_CHARS = 200;
@@ -88,6 +89,7 @@ export interface GhostSubscriptionGatewayDeps {
   now(): number;
   /** 钩子熔断回调(通知 renderer + 日志;每意识只触发一次)。 */
   onHookFused?(ghost: InstalledGhost, ownerStamp?: unknown): void;
+  ownerScope?: GhostOwnerScope;
   /** hookId 生成(测试注入固定序列;缺省 randomUUID)。 */
   newHookId?(): string;
   log?: {
@@ -110,6 +112,7 @@ interface SubEntry {
   /** 熔断:钩子降级为不再询问(旁听不受影响)。意识重启不自动复位,
    *  重新启停(disable/enable 清 entry)或重启应用后恢复。 */
   hookFused: boolean;
+  ownerScope: unknown;
 }
 
 /** 待决钩子(hookId → 归属意识与 resolver)。 */
@@ -143,7 +146,15 @@ export class GhostSubscriptionGateway {
   private entry(ghostId: string): SubEntry {
     let e = this.entries.get(ghostId);
     if (!e) {
-      e = { seq: 0, buffer: [], pendingDropped: 0, waking: false, hookFails: 0, hookFused: false };
+      e = {
+        seq: 0,
+        buffer: [],
+        pendingDropped: 0,
+        waking: false,
+        hookFails: 0,
+        hookFused: false,
+        ownerScope: undefined,
+      };
       this.entries.set(ghostId, e);
     }
     return e;
@@ -157,6 +168,15 @@ export class GhostSubscriptionGateway {
   ): void {
     const ghostId = ghost.manifest.id;
     const e = this.entry(ghostId);
+    const ownerScope = this.captureOwnerScope();
+    if (!this.ownerScopeUsable(ownerScope)) {
+      this.invalidateOwner(ghostId, e);
+      return;
+    }
+    if (e.ownerScope !== undefined && !this.ownerScopeUsable(e.ownerScope)) {
+      this.invalidateOwner(ghostId, e);
+    }
+    e.ownerScope = ownerScope;
     const evt: GhostPipeEventPush = {
       type: 'event',
       name,
@@ -169,14 +189,23 @@ export class GhostSubscriptionGateway {
     // 直投条件:在跑 + 缓冲已清 + 无唤醒在途——三者缺一都排队,否则新事件
     // 会插到缓冲里旧事件前面(seq 乱序)。投递失败(刚崩窗口期)同样回落缓冲。
     if (this.deps.isRunning(ghostId) && e.buffer.length === 0 && !e.waking) {
-      if (this.sendOne(ghostId, e, evt)) return;
+      if (this.sendOne(ghostId, e, evt, ownerScope)) return;
     }
-    this.buffer(ghost, e, evt);
+    this.buffer(ghost, e, evt, ownerScope);
   }
 
   /** 实际投递一条 did- 事件:溢出丢弃数在此刻附着(构造期附着会被后续
    *  同样溢出的事件把计数吞掉),投成才清零。返回是否投成。 */
-  private sendOne(ghostId: string, e: SubEntry, evt: GhostPipeEventPush): boolean {
+  private sendOne(
+    ghostId: string,
+    e: SubEntry,
+    evt: GhostPipeEventPush,
+    ownerScope = e.ownerScope,
+  ): boolean {
+    if (!this.ownerScopeUsable(ownerScope)) {
+      this.invalidateOwner(ghostId, e);
+      return false;
+    }
     const payload = e.pendingDropped > 0 ? { ...evt, dropped: e.pendingDropped } : evt;
     try {
       this.deps.sendToGhost(ghostId, payload);
@@ -187,22 +216,37 @@ export class GhostSubscriptionGateway {
     }
   }
 
-  private buffer(ghost: InstalledGhost, e: SubEntry, evt: GhostPipeEventPush): void {
+  private buffer(
+    ghost: InstalledGhost,
+    e: SubEntry,
+    evt: GhostPipeEventPush,
+    ownerScope: unknown,
+  ): void {
     if (e.buffer.length >= GHOST_SUB_QUEUE_MAX) {
       e.buffer.shift();
       e.pendingDropped += 1;
     }
     e.buffer.push(evt);
-    this.kickWake(ghost, e);
+    this.kickWake(ghost, e, ownerScope);
   }
 
   /** 事件到达即按需拉起(去重:唤醒在途不重复 spawn),醒后顺序补投。 */
-  private kickWake(ghost: InstalledGhost, e: SubEntry): void {
+  private kickWake(ghost: InstalledGhost, e: SubEntry, ownerScope: unknown): void {
     if (e.waking) return;
+    if (!this.ownerScopeUsable(ownerScope)) {
+      this.invalidateOwner(ghost.manifest.id, e);
+      return;
+    }
     e.waking = true;
     void this.deps
       .wake(ghost)
-      .then(() => this.flush(ghost.manifest.id, e))
+      .then(() => {
+        if (!this.ownerScopeUsable(ownerScope)) {
+          this.invalidateOwner(ghost.manifest.id, e);
+          return;
+        }
+        this.flush(ghost.manifest.id, e, ownerScope);
+      })
       .catch((err) => {
         // 唤醒失败缓冲保留(封顶丢最旧),下一条事件再试。
         this.deps.log?.warn('ghost subscribe wake failed', {
@@ -215,7 +259,37 @@ export class GhostSubscriptionGateway {
       });
   }
 
-  private flush(ghostId: string, e: SubEntry): void {
+  private captureOwnerScope(): unknown {
+    if (!this.deps.ownerScope) return undefined;
+    try {
+      return this.deps.ownerScope.capture();
+    } catch {
+      return Symbol('invalid-owner-scope');
+    }
+  }
+
+  private ownerScopeUsable(captured: unknown): boolean {
+    return isGhostOwnerScopeUsable(this.deps.ownerScope, captured);
+  }
+
+  private invalidateOwner(ghostId: string, e: SubEntry): void {
+    e.buffer.length = 0;
+    e.pendingDropped = 0;
+    e.ownerScope = undefined;
+    for (const [hookId, pending] of this.pendingHooks) {
+      if (pending.ghostId !== ghostId) continue;
+      this.pendingHooks.delete(hookId);
+      pending.resolve(null);
+    }
+    this.deps.ownerScope?.onInvalidated?.(ghostId);
+  }
+
+  private flush(ghostId: string, e: SubEntry, ownerScope: unknown): void {
+    if (!this.ownerScopeUsable(ownerScope)) {
+      this.invalidateOwner(ghostId, e);
+      return;
+    }
+    e.ownerScope = ownerScope;
     while (e.buffer.length > 0 && this.deps.isRunning(ghostId)) {
       if (!this.sendOne(ghostId, e, e.buffer[0])) break; // 又熄灯了:留在缓冲等下次
       e.buffer.shift();
@@ -234,6 +308,8 @@ export class GhostSubscriptionGateway {
     input: { sessionId: string; text: string },
     ownerStamp?: unknown,
   ): Promise<GhostScreenResult> {
+    const ownerScope = this.captureOwnerScope();
+    if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
     let currentText = input.text;
     let rewritten = false;
     let lastRewriteGhost: InstalledGhost | null = null;
@@ -247,7 +323,8 @@ export class GhostSubscriptionGateway {
       const verdict = await this.askOne(ghost, e, 'will-user-message', {
         sessionId: input.sessionId,
         text: currentText,
-      }, ownerStamp);
+      }, ownerStamp, ownerScope);
+      if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
       if (verdict?.action === 'block') {
         const reason = (verdict.reason ?? '').slice(0, BLOCK_REASON_MAX_CHARS);
         this.deps.log?.info('ghost hook blocked user message', { ghostId, sessionId: input.sessionId });
@@ -290,6 +367,8 @@ export class GhostSubscriptionGateway {
     input: { sessionId: string; text: string },
     ownerStamp?: unknown,
   ): Promise<GhostAssistantScreenResult> {
+    const ownerScope = this.captureOwnerScope();
+    if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
     let currentText = input.text;
     let lastRewriteGhost: InstalledGhost | null = null;
     let renderGhost: InstalledGhost | null = null;
@@ -305,7 +384,8 @@ export class GhostSubscriptionGateway {
       const verdict = await this.askOne(ghost, e, 'will-assistant-message', {
         sessionId: input.sessionId,
         text: currentText,
-      }, ownerStamp);
+      }, ownerStamp, ownerScope);
+      if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
       if (verdict?.action === 'rewrite' && typeof verdict.text === 'string') {
         const next = verdict.text.slice(0, GHOST_HOOK_REWRITE_MAX_CHARS).trim();
         // 空改写(意识把正文清空)视为无意义,忽略此次 rewrite 保原文。
@@ -357,6 +437,7 @@ export class GhostSubscriptionGateway {
     hookName: 'will-user-message' | 'will-assistant-message',
     input: { sessionId: string; text: string },
     ownerStamp?: unknown,
+    ownerScope?: unknown,
   ): Promise<HookVerdict | null> {
     const ghostId = ghost.manifest.id;
     const hookId = this.deps.newHookId?.() ?? randomUUID();
@@ -376,8 +457,23 @@ export class GhostSubscriptionGateway {
 
     let deliverFailure: string | null = null;
     void (async () => {
+      const capturedOwner = ownerScope ?? this.captureOwnerScope();
+      if (!this.ownerScopeUsable(capturedOwner)) {
+        this.invalidateOwner(ghostId, e);
+        return;
+      }
       // 常驻意识正常在跑;崩溃恢复窗口内兜底拉一次。
-      if (!this.deps.isRunning(ghostId)) await this.deps.wake(ghost);
+      if (!this.deps.isRunning(ghostId)) {
+        await this.deps.wake(ghost);
+        if (!this.ownerScopeUsable(capturedOwner)) {
+          this.invalidateOwner(ghostId, e);
+          return;
+        }
+      }
+      if (!this.ownerScopeUsable(capturedOwner)) {
+        this.invalidateOwner(ghostId, e);
+        return;
+      }
       this.deps.sendToGhost(ghostId, {
         type: 'event',
         name: hookName,
@@ -395,6 +491,7 @@ export class GhostSubscriptionGateway {
     const verdict = await verdictPromise;
     clearTimeout(timer);
     if (verdict === null) {
+      if (!this.ownerScopeUsable(ownerScope)) return null;
       this.noteHookFailure(ghost, e, deliverFailure ?? 'timeout', ownerStamp);
       return null;
     }

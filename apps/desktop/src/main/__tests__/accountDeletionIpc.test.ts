@@ -30,30 +30,21 @@ function createDeps(overrides: Partial<AccountDeletionIpcDeps> = {}): AccountDel
     clearReceipt: vi.fn(),
     consumeRestoredNotice: vi.fn().mockReturnValue(false),
     isConfirmedLocalSessionCurrent: vi.fn().mockReturnValue(true),
-    beginAccountBoundary: vi.fn().mockReturnValue(vi.fn()),
-    teardownAccountBoundary: vi.fn().mockResolvedValue(undefined),
-    clearLocalSession: vi.fn().mockReturnValue(true),
+    clearLocalSession: vi.fn().mockResolvedValue(true),
     logWarn: vi.fn(),
     ...overrides,
   };
 }
 
 describe('account deletion IPC handlers', () => {
-  it('tears down account services before clearing the initiating local session', async () => {
+  it('delegates the full account boundary transition to the local session clear', async () => {
     const order: string[] = [];
     const deps = createDeps({
       confirm: vi.fn().mockImplementation(async () => {
         order.push('confirm');
         return pendingStatus;
       }),
-      beginAccountBoundary: vi.fn().mockImplementation(() => {
-        order.push('begin-boundary');
-        return () => order.push('release-boundary');
-      }),
-      teardownAccountBoundary: vi.fn().mockImplementation(async () => {
-        order.push('teardown');
-      }),
-      clearLocalSession: vi.fn().mockImplementation(() => {
+      clearLocalSession: vi.fn().mockImplementation(async () => {
         order.push('clear-local');
         return true;
       }),
@@ -65,19 +56,13 @@ describe('account deletion IPC handlers', () => {
     });
 
     expect(result).toEqual({ success: true, value: pendingStatus });
-    expect(order).toEqual([
-      'confirm',
-      'begin-boundary',
-      'teardown',
-      'clear-local',
-      'release-boundary',
-    ]);
+    expect(order).toEqual(['confirm', 'clear-local']);
   });
 
-  it('still clears local auth when post-confirm teardown reports a non-fatal failure', async () => {
+  it('reports deletion accepted when post-confirm local cleanup remains quarantined', async () => {
     const error = new Error('db worker already stopped');
     const deps = createDeps({
-      teardownAccountBoundary: vi.fn().mockRejectedValue(error),
+      clearLocalSession: vi.fn().mockRejectedValue(error),
     });
     const handlers = createAccountDeletionIpcHandlers(deps);
 
@@ -86,19 +71,15 @@ describe('account deletion IPC handlers', () => {
     ).resolves.toEqual({ success: true, value: pendingStatus });
     expect(deps.clearLocalSession).toHaveBeenCalledOnce();
     expect(deps.logWarn).toHaveBeenCalledWith(
-      'account boundary teardown after deletion failed (non-fatal)',
+      'account boundary cleanup after deletion is incomplete; local auth remains fail closed',
       error,
     );
   });
 
-  it('always releases the account boundary when local session clearing throws', async () => {
-    const releaseBoundary = vi.fn();
+  it('does not expose local cleanup failures after irreversible server deletion', async () => {
     const error = new Error('local auth store unavailable');
     const deps = createDeps({
-      beginAccountBoundary: vi.fn().mockReturnValue(releaseBoundary),
-      clearLocalSession: vi.fn().mockImplementation(() => {
-        throw error;
-      }),
+      clearLocalSession: vi.fn().mockRejectedValue(error),
     });
 
     await expect(
@@ -106,8 +87,11 @@ describe('account deletion IPC handlers', () => {
         challengeId: 'challenge-id',
         code: '123456',
       }),
-    ).rejects.toThrow(error);
-    expect(releaseBoundary).toHaveBeenCalledOnce();
+    ).resolves.toEqual({ success: true, value: pendingStatus });
+    expect(deps.logWarn).toHaveBeenCalledWith(
+      'account boundary cleanup after deletion is incomplete; local auth remains fail closed',
+      error,
+    );
   });
 
   it('preserves auth-server failure codes and leaves the local session intact', async () => {
@@ -126,8 +110,6 @@ describe('account deletion IPC handlers', () => {
       success: false,
       code: 'ACCOUNT_DELETION_CHALLENGE_INVALID',
     });
-    expect(deps.teardownAccountBoundary).not.toHaveBeenCalled();
-    expect(deps.beginAccountBoundary).not.toHaveBeenCalled();
     expect(deps.clearLocalSession).not.toHaveBeenCalled();
   });
 
@@ -142,8 +124,6 @@ describe('account deletion IPC handlers', () => {
         code: '123456',
       }),
     ).resolves.toEqual({ success: true, value: pendingStatus });
-    expect(deps.teardownAccountBoundary).not.toHaveBeenCalled();
-    expect(deps.beginAccountBoundary).not.toHaveBeenCalled();
     expect(deps.clearLocalSession).not.toHaveBeenCalled();
     expect(deps.logWarn).toHaveBeenCalledWith(
       'account deletion confirmed after local auth identity changed; skip teardown',
@@ -206,7 +186,6 @@ describe('account deletion IPC handlers', () => {
       { success: true, value: pendingStatus },
     ]);
     expect(deps.confirm).toHaveBeenCalledOnce();
-    expect(deps.teardownAccountBoundary).toHaveBeenCalledOnce();
     expect(deps.clearLocalSession).toHaveBeenCalledOnce();
   });
 });

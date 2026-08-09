@@ -223,6 +223,8 @@ interface ReconcileOptions {
    * frontmatter 拦不住正文/辅助文件被改写,而已有链接目标不变时也不能直接 kept。
    */
   validateApprovedSkillSnapshot: (ghost: InstalledGhost) => Promise<boolean>;
+  /** Present only for the Ghost-managed global fanout path. */
+  assertOwnerStable?: () => void;
   /** 覆盖 home 目录(仅测试)。 */
   homeDir?: string;
 }
@@ -427,7 +429,7 @@ export async function reconcileGhostSkillLinks(
     try {
       const stat = await fsp.lstat(linkPath);
       if (!stat.isSymbolicLink()) continue; // TOCTOU 防御:再确认一次才动手
-      await fsp.rm(linkPath, { recursive: true, force: true });
+      await fsp.unlink(linkPath);
       actions.push({ linkName, op: 'removed' });
       changed = true;
     } catch (err) {
@@ -484,7 +486,10 @@ export async function reconcileGhostSkillLinks(
   //    缺失——canonical 正常但 .claude 侧被删或上次扇出失败);幂等、失败不阻断。
   try {
     const fanout = await prepareSharedGlobalSkillLinks(
-      opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {},
+      {
+        ...(opts.homeDir !== undefined ? { homeDir: opts.homeDir } : {}),
+        ...(opts.assertOwnerStable ? { assertOwnerStable: opts.assertOwnerStable } : {}),
+      },
     );
     warnings.push(...fanout.warnings);
   } catch (err) {

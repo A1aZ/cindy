@@ -37,8 +37,9 @@ export function deriveAppCapabilities(
 }
 
 export function getAppCapabilities(): AppCapabilities {
+  const session = getActiveAppSession();
   return deriveAppCapabilities(
-    getActiveAppSession().mode,
+    session.mode,
     isAppSessionBoundaryPending(),
   );
 }

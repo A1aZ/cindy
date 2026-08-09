@@ -13,6 +13,7 @@ import { createLogger } from './logger.js';
 import { createOverrideSettingsFile } from './maker-host/override-settings-file.js';
 import { LOCAL_PROFILE_DATA_OWNER_ID } from './profile/profileRegistryModel.js';
 import type { DataOwnerPushStamp } from '../shared/dataOwnerPush.js';
+import { isGhostSkillProjectionBoundaryStableForOwner } from './authBoundaryQuarantine.js';
 
 export type AppSessionMode = 'signed-out' | 'local' | 'cloud';
 
@@ -142,6 +143,13 @@ export function beginAppSessionBoundary(): () => void {
 }
 
 export function isAppSessionBoundaryPending(): boolean {
+  if (boundaryDepth > 0) return true;
+  const session = ensureLoaded();
+  return !isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId);
+}
+
+/** Process-local transition state, excluding a durable owner mismatch. */
+export function isAppSessionBoundaryLocallyPending(): boolean {
   return boundaryDepth > 0;
 }
 
@@ -174,6 +182,33 @@ export function commitActiveAppSession(
     generation: previous.generation + 1,
   };
   log.info('stable app session committed', {
+    mode,
+    dataOwnerId,
+    generation: active.generation,
+  });
+  return { ...active };
+}
+
+/** Update only this process after a passive instance signs out or is quarantined. */
+export function commitVolatileAppSession(
+  mode: AppSessionMode,
+  cloudOwnerId?: string | null,
+): ActiveAppSession {
+  const previous = ensureLoaded();
+  let dataOwnerId: string | null = null;
+  if (mode === 'local') {
+    dataOwnerId = LOCAL_DATA_OWNER_ID;
+  } else if (mode === 'cloud') {
+    const normalized = cloudOwnerId?.trim();
+    if (!normalized) throw new Error('cloud app session requires a verified data owner');
+    dataOwnerId = normalized;
+  }
+  active = {
+    mode,
+    dataOwnerId,
+    generation: previous.generation + 1,
+  };
+  log.info('volatile app session committed', {
     mode,
     dataOwnerId,
     generation: active.generation,

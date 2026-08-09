@@ -34,6 +34,8 @@ export interface SharedGlobalSkillLinksResult {
 
 interface PrepareOptions {
   homeDir?: string;
+  /** Optional owner-bound caller guard for Ghost-managed fanout. */
+  assertOwnerStable?: () => void;
 }
 
 export interface SharedProjectSkillLinksResult {
@@ -215,7 +217,7 @@ async function cleanupBrokenManagedLinks(
     if (!pointsIntoCurrentRoots && !matchesMovedProjectLink) continue;
 
     try {
-      await fsp.rm(linkPath, { recursive: true, force: true });
+      await fsp.unlink(linkPath);
       changed = true;
     } catch {
       // Broken symlink cleanup is best-effort; later link creation will report conflicts if needed.
@@ -316,6 +318,7 @@ async function linkEntriesIntoRoot(
 export async function prepareSharedGlobalSkillLinks(
   opts: PrepareOptions = {},
 ): Promise<SharedGlobalSkillLinksResult> {
+  opts.assertOwnerStable?.();
   const paths = sharedGlobalSkillsPaths(opts.homeDir);
   await fsp.mkdir(paths.sharedSkillsDir, { recursive: true });
   await fsp.mkdir(paths.claudeSkillsDir, { recursive: true });

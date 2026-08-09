@@ -11,7 +11,7 @@ import {
   validateGhostManifest,
   type InstalledGhost,
 } from '../../../shared/ghost';
-import { GhostManager } from '../GhostManager';
+import { GhostManager, readLegacyGhostApprovalProjection } from '../GhostManager';
 import { hashApprovedSkillContent } from '../ghostInstallReceipt';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -137,6 +137,18 @@ async function writeLegacyInstall(
   return dir;
 }
 
+async function recoveredProjectionOptions(...ids: string[]): Promise<{
+  expectedApprovalProjectionSha256ById: Record<string, string>;
+}> {
+  const expectedApprovalProjectionSha256ById: Record<string, string> = {};
+  for (const id of ids) {
+    expectedApprovalProjectionSha256ById[id] = (
+      await readLegacyGhostApprovalProjection(path.join(rootDir, id), id)
+    ).sha256;
+  }
+  return { expectedApprovalProjectionSha256ById };
+}
+
 /** 迁移台账路径(默认状态根 = <workDir>/ghosts-install-state)。 */
 function migrationLedgerPath(): string {
   return path.join(workDir, 'ghosts-install-state', '.legacy-migration.json');
@@ -237,6 +249,46 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
       approval: { state: 'approved' },
     });
     expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+  });
+
+  it('未批准或 receipt 损坏的插件不展示可变 trust 镜像', async () => {
+    const forgedTrust = {
+      level: 'cindy-official' as const,
+      publisherSigned: true,
+      publisherVerified: true,
+      reviewed: true,
+      publisherName: 'Forged publisher',
+      reviewerName: 'Forged reviewer',
+    };
+    await writeLegacyInstall('legacy', goodManifest('legacy'), { trust: forgedTrust });
+    await writeLegacyInstall('invalid', goodManifest('invalid'), { trust: forgedTrust });
+    await fs.promises.mkdir(path.join(workDir, 'ghosts-install-state'), { recursive: true });
+    await fs.promises.writeFile(
+      path.join(workDir, 'ghosts-install-state', 'invalid.json'),
+      JSON.stringify({ schemaVersion: 1, id: 'invalid' }),
+    );
+
+    const byId = Object.fromEntries(manager.list().map((ghost) => [ghost.manifest.id, ghost]));
+    expect(byId.legacy).toMatchObject({
+      approval: { state: 'legacy-unapproved' },
+      trust: {
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      },
+    });
+    expect(byId.invalid).toMatchObject({
+      approval: { state: 'invalid' },
+      trust: {
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      },
+    });
+    expect(byId.legacy.trust).not.toHaveProperty('publisherName');
+    expect(byId.invalid.trust).not.toHaveProperty('reviewerName');
   });
 
   it('旧安装的停用态被保留:.disabled 镜像 → receipt.enabled=false', async () => {
@@ -368,26 +420,27 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
 
   it('读 legacy ghost.json 的瞬时 IO(EACCES)判瞬时、不永久封门(P1 回归)', async () => {
     await writeLegacyInstall('hello', goodManifest());
-    const realReadFileSync = fs.readFileSync;
-    // 只让 <root>/hello/ghost.json 的读吃一次 EACCES(模拟杀软/句柄占用),其余照常。
+    const realOpenSync = fs.openSync;
+    // 只让 <root>/hello/ghost.json 的单句柄安全读取吃一次 EACCES(模拟杀软/句柄占用),
+    // 其余照常。
     const spy = vi
-      .spyOn(fs, 'readFileSync')
-      .mockImplementation(((p: fs.PathOrFileDescriptor, ...rest: unknown[]) => {
+      .spyOn(fs, 'openSync')
+      .mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
         if (typeof p === 'string' && p.endsWith(path.join('hello', 'ghost.json'))) {
           spy.mockRestore();
           const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
           err.code = 'EACCES';
           throw err;
         }
-        return (realReadFileSync as (...a: unknown[]) => unknown)(p, ...rest);
-      }) as typeof fs.readFileSync);
+        return (realOpenSync as (...a: unknown[]) => number)(p, ...rest);
+      }) as typeof fs.openSync);
 
     const first = await manager.migrateLegacyApprovalsOnce();
     // 修复前:readFileSync 的错被包成无 code 的 new Error → 误判确定性 failed →
     // 写进 completed 台账永久封门。修复后:保留 errno → 判瞬时 → retryPending + in-progress。
     expect(first.retryPending).toEqual(['hello']);
     expect(first.failed).toEqual([]);
-    const ledger = JSON.parse(realReadFileSync(migrationLedgerPath(), 'utf8')) as {
+    const ledger = JSON.parse(fs.readFileSync(migrationLedgerPath(), 'utf8')) as {
       state?: string;
     };
     expect(ledger.state).toBe('in-progress');
@@ -429,13 +482,14 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
     // 模拟 #1080 历史状态没有 ledger；receipt 本身只是在本轮被 AV/权限瞬时锁住。
     await fs.promises.rm(migrationLedgerPath());
-    const realLstatSync = fs.lstatSync;
-    const lstatSpy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+    const realOpenSync = fs.openSync;
+    const openSpy = vi.spyOn(fs, 'openSync');
+    openSpy.mockImplementation((target, ...args) => {
       if (path.resolve(String(target)) === path.resolve(receiptPath)) {
-        lstatSpy.mockRestore();
+        openSpy.mockRestore();
         throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
       }
-      return realLstatSync(target, options as never);
+      return (realOpenSync as (...openArgs: unknown[]) => number)(target, ...args);
     });
 
     const first = await manager.migrateLegacyApprovalsOnce();
@@ -1264,11 +1318,130 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     // 恢复流程搬入两个目录,但只把 recovered 声明为其中一个。
     await writeLegacyInstall('recovered', goodManifest('recovered'));
     await writeLegacyInstall('planted', goodManifest('planted'));
-    const out = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    const out = await manager.backfillRecoveredLegacyGhosts(
+      ['recovered'],
+      await recoveredProjectionOptions('recovered'),
+    );
     expect(out.migrated).toEqual(['recovered']);
     const byId = Object.fromEntries(manager.list().map((g) => [g.manifest.id, g.approval.state]));
     expect(byId.recovered).toBe('approved');
     expect(byId.planted).toBe('legacy-unapproved');
+  });
+
+  it.each(['manifest', 'disabled', 'trust', 'locale', 'icon', 'skill'] as const)(
+    '恢复 backfill 在 %s 批准投影漂移时保持 fail closed',
+    async (kind) => {
+      const manifest = {
+        ...goodManifest('recovered'),
+        icon: 'assets/icon.png',
+        locales: { en: 'locales/en.json' },
+        slots: ['tool', 'skill'],
+        skill: { items: [{ dir: 'skills/demo', name: 'demo', description: 'Demo skill' }] },
+      };
+      await writeLegacyInstall('recovered', manifest, {
+        files: {
+          'assets/icon.png': 'ORIGINAL ICON',
+          'locales/en.json': JSON.stringify({ name: 'Original name' }),
+          'skills/demo/SKILL.md':
+            '---\nname: demo\ndescription: Demo skill\n---\n\nOriginal instructions\n',
+        },
+      });
+      const expected = await recoveredProjectionOptions('recovered');
+      const dir = path.join(rootDir, 'recovered');
+      if (kind === 'manifest') {
+        await fs.promises.writeFile(
+          path.join(dir, 'ghost.json'),
+          JSON.stringify({
+            ...manifest,
+            tools: [
+              { name: 'do_thing', description: '做点事' },
+              { name: 'new_thing', description: 'New privileged tool' },
+            ],
+          }),
+        );
+      } else if (kind === 'disabled') {
+        await fs.promises.writeFile(path.join(dir, '.disabled'), '');
+      } else if (kind === 'trust') {
+        await fs.promises.writeFile(
+          path.join(dir, '.cindy-trust.json'),
+          JSON.stringify({
+            level: 'verified-publisher',
+            publisherSigned: true,
+            publisherVerified: true,
+            reviewed: false,
+          }),
+        );
+      } else if (kind === 'locale') {
+        await fs.promises.writeFile(
+          path.join(dir, 'locales', 'en.json'),
+          JSON.stringify({ name: 'Replaced name' }),
+        );
+      } else if (kind === 'icon') {
+        await fs.promises.writeFile(path.join(dir, 'assets', 'icon.png'), 'REPLACED ICON');
+      } else {
+        await fs.promises.writeFile(
+          path.join(dir, 'skills', 'demo', 'SKILL.md'),
+          '---\nname: demo\ndescription: Demo skill\n---\n\nReplaced instructions\n',
+        );
+      }
+
+      const outcome = await manager.backfillRecoveredLegacyGhosts(['recovered'], expected);
+      expect(outcome).toEqual({ migrated: [], failed: ['recovered'] });
+      expect(
+        fs.existsSync(path.join(workDir, 'ghosts-install-state', 'recovered.json')),
+      ).toBe(false);
+      expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+    },
+  );
+
+  it('fails closed when the legacy icon cannot be read during approval freezing', async () => {
+    await writeLegacyInstall(
+      'recovered',
+      {
+        ...goodManifest('recovered'),
+        icon: 'assets/icon.png',
+      },
+      {
+        files: {
+          'assets/icon.png': 'ORIGINAL ICON',
+        },
+      },
+    );
+    const realOpenSync = fs.openSync;
+    const spy = vi
+      .spyOn(fs, 'openSync')
+      .mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+        if (
+          typeof p === 'string' &&
+          p.endsWith(path.join('recovered', 'assets', 'icon.png'))
+        ) {
+          const err = new Error('EACCES: permission denied') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return (realOpenSync as (...a: unknown[]) => number)(p, ...rest);
+      }) as typeof fs.openSync);
+
+    try {
+      await expect(
+        readLegacyGhostApprovalProjection(path.join(rootDir, 'recovered'), 'recovered'),
+      ).rejects.toThrow(/EACCES: permission denied/i);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('恢复 backfill 不跟随被换成 junction 的插件根目录', async () => {
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+    const expected = await recoveredProjectionOptions('recovered');
+    const installedDir = path.join(rootDir, 'recovered');
+    const externalDir = path.join(workDir, 'external-recovered');
+    await fs.promises.rename(installedDir, externalDir);
+    await fs.promises.symlink(externalDir, installedDir, 'junction');
+
+    const outcome = await manager.backfillRecoveredLegacyGhosts(['recovered'], expected);
+    expect(outcome).toEqual({ migrated: [], failed: ['recovered'] });
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'recovered.json'))).toBe(false);
   });
 
   it('closes the recovery ledger when a queued id is already approved', async () => {
@@ -1284,7 +1457,12 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       }),
     );
 
-    await expect(manager.backfillRecoveredLegacyGhosts(['hello'])).resolves.toEqual({
+    await expect(
+      manager.backfillRecoveredLegacyGhosts(
+        ['hello'],
+        { expectedApprovalProjectionSha256ById: {} },
+      ),
+    ).resolves.toEqual({
       migrated: [],
       failed: [],
     });
@@ -1293,21 +1471,45 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     });
   });
 
+  it('keeps a target-only legacy recovery without a frozen projection fail closed', async () => {
+    await writeLegacyInstall('recovered', goodManifest('recovered'));
+
+    await expect(
+      manager.backfillRecoveredLegacyGhosts(
+        ['recovered'],
+        { expectedApprovalProjectionSha256ById: {} },
+      ),
+    ).resolves.toEqual({
+      migrated: [],
+      failed: ['recovered'],
+    });
+    expect(
+      fs.existsSync(path.join(workDir, 'ghosts-install-state', 'recovered.json')),
+    ).toBe(false);
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+  });
+
   it('恢复旁路遇到 unreadable receipt 同样只排队重试,不重铸批准', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
     const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
     await fs.promises.rm(migrationLedgerPath());
-    const realLstatSync = fs.lstatSync;
-    const lstatSpy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+    const realOpenSync = fs.openSync;
+    const openSpy = vi.spyOn(fs, 'openSync');
+    openSpy.mockImplementation((target, ...args) => {
       if (path.resolve(String(target)) === path.resolve(receiptPath)) {
-        lstatSpy.mockRestore();
+        openSpy.mockRestore();
         throw Object.assign(new Error('EIO: receipt temporarily unreadable'), { code: 'EIO' });
       }
-      return realLstatSync(target, options as never);
+      return (realOpenSync as (...openArgs: unknown[]) => number)(target, ...args);
     });
 
-    expect(await manager.backfillRecoveredLegacyGhosts(['hello'])).toEqual({
+    expect(
+      await manager.backfillRecoveredLegacyGhosts(
+        ['hello'],
+        await recoveredProjectionOptions('hello'),
+      ),
+    ).toEqual({
       migrated: [],
       failed: [],
     });
@@ -1330,7 +1532,8 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       return realRename(from, to);
     });
 
-    const first = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    const expected = await recoveredProjectionOptions('recovered');
+    const first = await manager.backfillRecoveredLegacyGhosts(['recovered'], expected);
     expect(first).toEqual({ migrated: [], failed: [] });
     const pendingLedger = JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as {
       state?: string;
@@ -1339,7 +1542,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(pendingLedger.state).toBe('in-progress');
     expect(pendingLedger.pendingIds).toEqual(['recovered']);
 
-    const second = await manager.backfillRecoveredLegacyGhosts(['recovered']);
+    const second = await manager.backfillRecoveredLegacyGhosts(['recovered'], expected);
     expect(second.migrated).toEqual(['recovered']);
     const completedLedger = JSON.parse(
       await fs.promises.readFile(migrationLedgerPath(), 'utf8'),
@@ -1367,7 +1570,10 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     });
 
     try {
-      await manager.backfillRecoveredLegacyGhosts(['recovered']);
+      await manager.backfillRecoveredLegacyGhosts(
+        ['recovered'],
+        await recoveredProjectionOptions('recovered'),
+      );
     } finally {
       renameSpy.mockRestore();
     }
@@ -1394,7 +1600,12 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     });
 
     try {
-      await expect(manager.backfillRecoveredLegacyGhosts(['recovered'])).rejects.toThrow(
+      await expect(
+        manager.backfillRecoveredLegacyGhosts(
+          ['recovered'],
+          await recoveredProjectionOptions('recovered'),
+        ),
+      ).rejects.toThrow(
         /ledger exists but is unreadable/,
       );
     } finally {
@@ -1749,13 +1960,13 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
       pendingMarkerPath(),
       JSON.stringify({ version: 1, id: 'hello', kind: 'install', packageSha256 }),
     );
-    const realReadFileSync = fs.readFileSync;
-    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+    const realOpenSync = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
       if (path.resolve(String(target)) === path.resolve(receiptPath())) {
         throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
       }
-      return (realReadFileSync as (...args: unknown[]) => unknown)(target, ...rest);
-    }) as typeof fs.readFileSync);
+      return (realOpenSync as (...args: unknown[]) => number)(target, ...rest);
+    }) as typeof fs.openSync);
     try {
       const recovered = freshManager();
       expect(recovered.list()[0]).toMatchObject({
@@ -1788,13 +1999,13 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
         backupDirName: path.basename(backupDir),
       }),
     );
-    const realLstatSync = fs.lstatSync;
-    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+    const realOpenSync = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
       if (path.resolve(String(target)) === path.resolve(receiptPath())) {
         throw Object.assign(new Error('EACCES: receipt locked'), { code: 'EACCES' });
       }
-      return (realLstatSync as (...args: unknown[]) => unknown)(target, ...rest);
-    }) as typeof fs.lstatSync);
+      return (realOpenSync as (...args: unknown[]) => number)(target, ...rest);
+    }) as typeof fs.openSync);
     try {
       const recovered = freshManager();
       expect(recovered.list()[0]).toMatchObject({
@@ -3805,6 +4016,62 @@ describe('GhostManager · setEnabled(启用/停用)', () => {
 });
 
 describe('GhostManager · inspect(只验不装)', () => {
+  it('opens a top-level .cindy source in non-blocking mode', async () => {
+    const cindy = await makeCindy('nonblocking.cindy', goodManifest());
+    const realOpen = fs.promises.open;
+    const flags: number[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.promises.open>
+    ) => {
+      if (path.resolve(String(args[0])) === path.resolve(cindy)) {
+        flags.push(Number(args[1]));
+      }
+      return realOpen(...args);
+    }) as typeof fs.promises.open);
+
+    try {
+      await manager.inspect(cindy);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(flags).toHaveLength(1);
+    const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
+    expect(flags[0] & nonBlockingFlag).toBe(nonBlockingFlag);
+  });
+
+  it('rejects a top-level .cindy source whose ctime changes during the read', async () => {
+    const cindy = await makeCindy('ctime-change.cindy', goodManifest());
+    const realOpen = fs.promises.open;
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation((async (
+      ...args: Parameters<typeof fs.promises.open>
+    ) => {
+      const handle = await realOpen(...args);
+      if (path.resolve(String(args[0])) !== path.resolve(cindy)) return handle;
+      const originalStat = handle.stat.bind(handle);
+      let statCalls = 0;
+      vi.spyOn(handle, 'stat').mockImplementation(async (...statArgs) => {
+        const stat = await originalStat(...statArgs);
+        statCalls += 1;
+        if (statCalls === 2) {
+      Object.defineProperty(stat, 'ctimeMs', {
+        value: Number(stat.ctimeMs) + 1,
+      });
+        }
+        return stat;
+      });
+      return handle;
+    }) as typeof fs.promises.open);
+
+    try {
+      await expect(manager.inspect(cindy)).resolves.toMatchObject({
+        rejection: { code: 'io' },
+      });
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('allows a top-level .cindy symlink and installs the inspected target bytes', async () => {
     const target = await makeCindy('symlink-target.cindy', goodManifest());
     const linked = path.join(workDir, 'symlink-source.cindy');
@@ -4100,5 +4367,42 @@ describe('GhostManager · skill 槽装入校验(确认框看到的 = Agent 读�
       'skills/foo/SKILL.md': skillMd('foo', '教 Agent 用 foo', 'x'.repeat(64 * 1024 + 1)),
     });
     await expectRejection(await manager.install(cindy), 'file-invalid');
+  });
+});
+describe('legacy trust mirror hardening', () => {
+  it('degrades an unreadable trust mirror to unverified instead of wedging recovery', async () => {
+    await writeLegacyInstall('linked-trust', goodManifest('linked-trust'), {
+      trust: {
+        level: 'verified-publisher',
+        publisherSigned: true,
+        publisherVerified: true,
+        reviewed: false,
+        publisherName: 'Acme',
+      },
+    });
+    const realOpenSync = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      if (typeof p === 'string' && p.endsWith(path.join('linked-trust', '.cindy-trust.json'))) {
+        const err = new Error('ELOOP: too many symbolic links encountered') as NodeJS.ErrnoException;
+        err.code = 'ELOOP';
+        throw err;
+      }
+      return (realOpenSync as (...a: unknown[]) => number)(p, ...rest);
+    }) as typeof fs.openSync);
+
+    try {
+      const frozen = await readLegacyGhostApprovalProjection(
+        path.join(rootDir, 'linked-trust'),
+        'linked-trust',
+      );
+      expect(frozen.projection.trust).toMatchObject({
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

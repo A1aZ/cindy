@@ -25,6 +25,7 @@ const MUTATING_GHOST_CHANNELS = [
   'ghosts:install',
   'ghosts:update',
   'ghosts:set-enabled',
+  'ghosts:restore-builtin',
 ] as const;
 
 function handlerBlock(source: string, channel: string): string {

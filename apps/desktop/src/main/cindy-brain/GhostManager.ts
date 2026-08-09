@@ -60,10 +60,13 @@ async function readRegularFileStableWithLimit(
 ): Promise<Buffer> {
   // 顶层 .cindy 路径允许是用户选择的 symlink；确认前后由整包 sha256 对账，
   // 单次读取则始终绑定同一个已打开句柄，避免 stat/read 的二次解析窗口。
-  const handle = await fs.promises.open(filePath, fs.constants.O_RDONLY);
+  const handle = await fs.promises.open(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+  );
   try {
     const opened = await handle.stat();
-    if (!opened.isFile() || opened.isSymbolicLink()) {
+    if (!opened.isFile()) {
       throw new Error('source is not a regular file');
     }
     if (opened.size > maxBytes) {
@@ -80,6 +83,7 @@ async function readRegularFileStableWithLimit(
     const sameIdentity = after.isFile() &&
       after.size === opened.size &&
       after.mtimeMs === opened.mtimeMs &&
+      after.ctimeMs === opened.ctimeMs &&
       ((opened.dev === 0 && opened.ino === 0) ||
         (after.dev === opened.dev && after.ino === opened.ino));
     if (!sameIdentity) throw new Error('source file changed while being read');
@@ -100,14 +104,8 @@ export const MAX_BASIC_ZIP_ENTRIES = 256;
 export const MAX_NODE_ZIP_ENTRIES = 2_048;
 /** 停用标记文件名(安装目录内;存在即停用)。 */
 const DISABLED_MARKER_FILE = '.disabled';
-/** 安装时由主机写入的信任快照与权限 receipt；作者包不能提供。 */
+/** 宿主保留的安装信任镜像文件名；插件包不得自行携带。 */
 const TRUST_METADATA_FILE = '.cindy-trust.json';
-
-interface GhostInstalledHostMetadata {
-  trust: GhostTrustInfo;
-  /** Legacy receipt retained only for backward-compatible metadata reads. */
-  approvedAtResourceProviderTool?: string;
-}
 
 /** 注入式日志接口 —— manager 不直接依赖 main/logger,单测零 electron。 */
 export interface GhostManagerLogger {
@@ -189,6 +187,182 @@ interface InstalledReapprovalProjection {
   localeResources: Record<string, GhostManifestLocaleResource>;
   iconDataUrl?: string;
   skillContentSha256: Record<string, string>;
+}
+
+export interface LegacyGhostApprovalProjection {
+  manifest: GhostManifest;
+  enabled: boolean;
+  trust: GhostTrustInfo;
+  localeResources: Record<string, GhostManifestLocaleResource>;
+  iconDataUrl?: string;
+  skillContentSha256: Record<string, string>;
+}
+
+export function hashLegacyGhostApprovalProjection(
+  projection: LegacyGhostApprovalProjection,
+): string {
+  return crypto
+    .createHash('sha256')
+    .update(
+      JSON.stringify({
+        version: 1,
+        manifest: projection.manifest,
+        enabled: projection.enabled,
+        trust: projection.trust,
+        localeResources: projection.localeResources,
+        iconDataUrl: projection.iconDataUrl ?? null,
+        skillContentSha256: projection.skillContentSha256,
+      }),
+    )
+    .digest('hex');
+}
+
+function sameLegacyApprovalDirectoryIdentity(expected: fs.Stats, current: fs.Stats): boolean {
+  if (!current.isDirectory() || current.isSymbolicLink()) return false;
+  if (expected.dev !== 0 || expected.ino !== 0 || current.dev !== 0 || current.ino !== 0) {
+    return expected.dev === current.dev && expected.ino === current.ino;
+  }
+  return expected.birthtimeMs === current.birthtimeMs && expected.ctimeMs === current.ctimeMs;
+}
+
+function sameLegacyApprovalCanonicalPath(left: string, right: string): boolean {
+  const fold = (value: string): string =>
+    process.platform === 'win32' ? value.toLowerCase() : value;
+  return fold(path.resolve(left)) === fold(path.resolve(right));
+}
+
+function assertStableLegacyApprovalDirectory(
+  dir: string,
+  expectedStats: fs.Stats,
+  expectedRealPath: string,
+): void {
+  const currentStats = fs.lstatSync(dir);
+  const currentRealPath = fs.realpathSync(dir);
+  if (
+    !sameLegacyApprovalDirectoryIdentity(expectedStats, currentStats) ||
+    !sameLegacyApprovalCanonicalPath(expectedRealPath, currentRealPath)
+  ) {
+    throw new Error('legacy approval directory changed while reading');
+  }
+}
+
+function readLegacyDisabledMarkerForApproval(dir: string): boolean {
+  const marker = path.join(dir, DISABLED_MARKER_FILE);
+  try {
+    const kind = classifyGhostDirEntrySync(marker);
+    if (kind === 'file') return true;
+    throw new Error('legacy disabled marker is not a regular file');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function readLegacyLocaleResourcesForApproval(
+  dir: string,
+  realDir: string,
+  manifest: GhostManifest,
+): Record<string, GhostManifestLocaleResource> {
+  const resources: Record<string, GhostManifestLocaleResource> = {};
+  for (const localePath of Object.values(manifest.locales ?? {})) {
+    if (!localePath) continue;
+    const absPath = resolveGhostContentPathSync(dir, localePath, {
+      expect: 'file',
+      label: 'legacy locale',
+    });
+    const bytes = readBoundedFileNoFollowSync(absPath, GHOST_LOCALE_MAX_BYTES, {
+      containWithin: realDir,
+    });
+    if (bytes === null) throw new Error(`legacy locale missing or oversized: ${localePath}`);
+    let raw: unknown;
+    try {
+      raw = JSON.parse(bytes.toString('utf8'));
+    } catch (error) {
+      throw new Error(
+        `legacy locale is not valid JSON: ${localePath}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    const validated = validateGhostManifestLocaleResource(raw, manifest);
+    if (!validated.ok) throw new Error(`legacy locale invalid: ${localePath}`);
+    resources[localePath] = validated.resource;
+  }
+  return resources;
+}
+
+function readLegacyIconDataUrlForApproval(
+  dir: string,
+  realDir: string,
+  manifest: GhostManifest,
+): string | undefined {
+  if (manifest.icon === undefined) return undefined;
+  const iconPath = resolveGhostContentPathSync(dir, manifest.icon, {
+    expect: 'file',
+    label: 'legacy icon',
+  });
+  const bytes = readBoundedFileNoFollowSync(iconPath, MAX_GHOST_ICON_BYTES, {
+    containWithin: realDir,
+  });
+  if (bytes === null) {
+    throw new Error(`legacy icon missing or oversized: ${manifest.icon}`);
+  }
+  const iconDataUrl = buildIconDataUrl(manifest.icon, bytes);
+  if (iconDataUrl === null) {
+    throw new Error(`legacy icon has unsupported mime type: ${manifest.icon}`);
+  }
+  return iconDataUrl;
+}
+
+/**
+ * Read the complete legacy approval fact once. Recovery freezes only its digest,
+ * then both the pre-rename gate and receipt backfill re-read this same projection.
+ */
+export async function readLegacyGhostApprovalProjection(
+  dir: string,
+  id: string,
+): Promise<{ projection: LegacyGhostApprovalProjection; sha256: string }> {
+  const dirStats = fs.lstatSync(dir);
+  if (!dirStats.isDirectory() || dirStats.isSymbolicLink()) {
+    throw new Error('legacy approval source is not a real directory');
+  }
+  const realDir = fs.realpathSync(dir);
+  assertStableLegacyApprovalDirectory(dir, dirStats, realDir);
+  const manifestPath = resolveGhostContentPathSync(dir, GHOST_MANIFEST_FILE, {
+    expect: 'file',
+    label: 'legacy manifest',
+  });
+  const rawBytes = readBoundedFileNoFollowSync(manifestPath, GHOST_MANIFEST_MAX_BYTES, {
+    containWithin: realDir,
+  });
+  if (rawBytes === null) throw new Error('legacy manifest is missing or oversized');
+  let raw: unknown;
+  try {
+    raw = JSON.parse(rawBytes.toString('utf8'));
+  } catch (error) {
+    throw new Error(`invalid manifest JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const validated = validateGhostManifest(raw);
+  if (!validated.ok) throw new Error(`invalid manifest: ${validated.reason}`);
+  if (validated.manifest.id !== id) throw new Error('manifest id != install dir name');
+
+  const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
+    level: 'unverified',
+    publisherSigned: false,
+    publisherVerified: false,
+    reviewed: false,
+  };
+  const projection: LegacyGhostApprovalProjection = {
+    manifest: validated.manifest,
+    enabled: !readLegacyDisabledMarkerForApproval(dir),
+    trust,
+    localeResources: readLegacyLocaleResourcesForApproval(dir, realDir, validated.manifest),
+    skillContentSha256: await hashApprovedSkillContent(validated.manifest, dir),
+  };
+  const iconDataUrl = readLegacyIconDataUrlForApproval(dir, realDir, validated.manifest);
+  if (iconDataUrl !== undefined) projection.iconDataUrl = iconDataUrl;
+  assertStableLegacyApprovalDirectory(dir, dirStats, realDir);
+  return { projection, sha256: hashLegacyGhostApprovalProjection(projection) };
 }
 
 function hashInstalledReapprovalProjection(
@@ -779,19 +953,6 @@ export class GhostManager {
     }
   }
 
-  /** Migration-only marker read: preserve transient fs errors for retry. */
-  private readLegacyDisabledMarkerForMigration(dir: string): boolean {
-    const marker = path.join(dir, DISABLED_MARKER_FILE);
-    try {
-      const kind = classifyGhostDirEntrySync(marker);
-      if (kind === 'file') return true;
-      throw new Error('legacy disabled marker is not a regular file');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw error;
-    }
-  }
-
   private writeDisabledMarkerSync(dir: string): void {
     if (classifyGhostDirEntrySync(dir) !== 'directory') {
       throw new Error('ghost disabled marker parent is not a real directory');
@@ -1191,7 +1352,10 @@ export class GhostManager {
 
   async backfillRecoveredLegacyGhosts(
     ids: readonly string[],
-    options: { includePending?: boolean } = {},
+    options: {
+      includePending?: boolean;
+      expectedApprovalProjectionSha256ById: Readonly<Record<string, string>>;
+    },
   ): Promise<{ migrated: string[]; failed: string[]; pending?: string[] }> {
     return this.runExclusiveMutation(async () => {
       const out = { migrated: [] as string[], failed: [] as string[] };
@@ -1249,7 +1413,20 @@ export class GhostManager {
           continue;
         }
         try {
-          if (await this.backfillLegacyApproval(path.join(root, id), id)) {
+          const targetDir = path.join(root, id);
+          const expectedApprovalProjectionSha256 =
+            options.expectedApprovalProjectionSha256ById[id];
+          if (expectedApprovalProjectionSha256 === undefined) {
+            throw new Error(`recovered legacy approval projection is missing or invalid: ${id}`);
+          }
+          if (!/^[a-f0-9]{64}$/.test(expectedApprovalProjectionSha256)) {
+            throw new Error(`recovered legacy approval projection is missing or invalid: ${id}`);
+          }
+          if (
+            await this.backfillLegacyApproval(targetDir, id, {
+              expectedApprovalProjectionSha256,
+            })
+          ) {
             out.migrated.push(id);
           }
           pendingForRetry.delete(id);
@@ -1315,62 +1492,34 @@ export class GhostManager {
    *   更不会因安装目录里的异常条目误伤——真正的运行期判据 `skillContentSha256` 仍逐字节算,
    *   技能目录含链接等异常会在那里如实 fail closed。
    */
-  private async backfillLegacyApproval(dir: string, id: string): Promise<boolean> {
-    // 读文件与解析分开抛,且**保留 fs 错误的 errno**:迁移循环按 `err.code` 把
-    // EACCES/EBUSY/EIO 判为瞬时(下次启动续跑),把无 errno 的错判为确定性内容无效
-    // (fail closed)。若把 readFileSync 的错也包成 new Error()(丢掉 code),一次
-    // 读 legacy ghost.json 的瞬时 IO 抖动就会被误判成确定性 failed、写进 completed
-    // 台账,永久要求重新确认 —— 违反 §5 瞬时故障自动重试。ENOENT(缺 ghost.json)与
-    // JSON 解析失败是真的内容无效,保持确定性:前者带 ENOENT(分类器显式归确定性),
-    // 后者无 errno。
-    let rawBytes: Buffer;
-    try {
-      rawBytes = fs.readFileSync(
-        resolveGhostContentPathSync(dir, GHOST_MANIFEST_FILE, {
-          expect: 'file',
-          label: 'legacy manifest',
-        }),
-      );
-    } catch (err) {
-      throw err; // 原样抛,保留 errno(EACCES/EBUSY/EIO → 瞬时;ENOENT → 确定性)
+  private async backfillLegacyApproval(
+    dir: string,
+    id: string,
+    options: { expectedApprovalProjectionSha256?: string } = {},
+  ): Promise<boolean> {
+    const { projection, sha256 } = await readLegacyGhostApprovalProjection(dir, id);
+    if (
+      options.expectedApprovalProjectionSha256 !== undefined &&
+      sha256 !== options.expectedApprovalProjectionSha256
+    ) {
+      throw new Error('legacy approval projection changed after recovery discovery');
     }
-    let raw: unknown;
-    try {
-      raw = JSON.parse(rawBytes.toString('utf-8'));
-    } catch (err) {
-      throw new Error(`invalid manifest JSON: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    const validated = validateGhostManifest(raw);
-    if (!validated.ok) throw new Error(`invalid manifest: ${validated.reason}`);
-    if (validated.manifest.id !== id) throw new Error('manifest id != install dir name');
-
-    const enabled = !this.readLegacyDisabledMarkerForMigration(dir);
-    const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
-      level: 'unverified',
-      publisherSigned: false,
-      publisherVerified: false,
-      reviewed: false,
-    };
-    const localeResources = this.readApprovedLocaleResources(dir, validated.manifest);
-    const iconDataUrl = this.readInstalledIconDataUrl(dir, validated.manifest) ?? undefined;
-    // skillContentSha256 是运行期判据,必须现算;技能目录异常(链接等)在此如实抛错。
-    const skillContentSha256 = await hashApprovedSkillContent(validated.manifest, dir);
 
     await this.receiptStore.write(
       createGhostInstallReceipt({
-        manifest: validated.manifest,
-        localeResources,
-        enabled,
-        trust,
-        skillContentSha256,
-        ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
+        manifest: projection.manifest,
+        localeResources: projection.localeResources,
+        enabled: projection.enabled,
+        trust: projection.trust,
+        skillContentSha256: projection.skillContentSha256,
+        ...(projection.iconDataUrl !== undefined ? { iconDataUrl: projection.iconDataUrl } : {}),
       }),
       { skillSourceDir: dir },
     );
     this.options.log?.info('legacy ghost approval migrated', {
       id,
-      enabled,
-      trustLevel: trust.level,
+      enabled: projection.enabled,
+      trustLevel: projection.trust.level,
       origin: 'legacy-migration',
     });
     return true;
@@ -1434,12 +1583,15 @@ export class GhostManager {
     }
     let rawBytes: Buffer;
     try {
-      rawBytes = fs.readFileSync(
-        resolveGhostContentPathSync(dir, GHOST_MANIFEST_FILE, {
-          expect: 'file',
-          label: 'installed manifest',
-        }),
-      );
+      const manifestPath = resolveGhostContentPathSync(dir, GHOST_MANIFEST_FILE, {
+        expect: 'file',
+        label: 'installed manifest',
+      });
+      const bytes = readBoundedFileNoFollowSync(manifestPath, GHOST_MANIFEST_MAX_BYTES, {
+        containWithin: fs.realpathSync(dir),
+      });
+      if (bytes === null) throw new Error('manifest is missing or oversized');
+      rawBytes = bytes;
     } catch (err) {
       return {
         rejection: {
@@ -1477,14 +1629,24 @@ export class GhostManager {
         },
       };
     }
-    const trust: GhostTrustInfo = readLegacyInstallTrust(dir) ?? {
-      level: 'unverified',
-      publisherSigned: false,
-      publisherVerified: false,
-      reviewed: false,
-    };
     let localeResources: Record<string, GhostManifestLocaleResource>;
     let skillContentSha256: Record<string, string>;
+    let trust: GhostTrustInfo;
+    try {
+      trust = readLegacyInstallTrust(dir) ?? {
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      };
+    } catch (err) {
+      return {
+        rejection: {
+          code: 'file-invalid',
+          reason: `安装目录信任数据不可读: ${err instanceof Error ? err.message : String(err)}`,
+        },
+      };
+    }
     try {
       localeResources = this.readApprovedLocaleResources(dir, validated.manifest);
       skillContentSha256 = await hashApprovedSkillContent(validated.manifest, dir);
@@ -1770,7 +1932,6 @@ export class GhostManager {
         });
         continue;
       }
-      const hostMetadata = this.readInstalledHostMetadata(dir);
       // 历史 manifest / receipt 中可能保留已移除的资源搜索元数据；它不参与当前
       // 运行时入口，插件本体与已批准的其它能力仍按现有授权照常可用。
       const manifest = v.manifest;
@@ -1785,8 +1946,13 @@ export class GhostManager {
         dir,
         enabled: false,
         approval: { state: approvalResult.state },
-        // trust 仅作展示徽标,不授予运行权(运行仍由 enabled:false + approval 门控)。
-        ...(hostMetadata ? { trust: hostMetadata.trust } : {}),
+        // 未批准安装目录里的 trust 镜像是可变字节，不能作为可信展示事实。
+        trust: {
+          level: 'unverified',
+          publisherSigned: false,
+          publisherVerified: false,
+          reviewed: false,
+        },
         ...(iconDataUrl !== null ? { iconDataUrl } : {}),
         ...(this.options.isTrustedBundledId?.(entry.name) ? { builtin: true } : {}),
       });
@@ -2041,49 +2207,6 @@ export class GhostManager {
       return buildIconDataUrl(manifest.icon, bytes);
     } catch {
       this.options.log?.warn('ghost icon skipped: unreadable', { dir, icon: manifest.icon });
-      return null;
-    }
-  }
-
-  /** 读取主机安装时写下的信任快照与权限 receipt；坏文件一律 fail closed。 */
-  private readInstalledHostMetadata(dir: string): GhostInstalledHostMetadata | null {
-    try {
-      const bytes = readBoundedFileNoFollowSync(path.join(dir, TRUST_METADATA_FILE), 64 * 1024);
-      if (bytes === null) return null;
-      const raw = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
-      if (
-        !raw ||
-        typeof raw !== 'object' ||
-        typeof raw.level !== 'string' ||
-        !['cindy-official', 'reviewed', 'verified-publisher', 'unverified'].includes(raw.level) ||
-        typeof raw.publisherSigned !== 'boolean' ||
-        typeof raw.publisherVerified !== 'boolean' ||
-        typeof raw.reviewed !== 'boolean'
-      ) return null;
-      const trust: GhostTrustInfo = {
-        level: raw.level as GhostTrustInfo['level'],
-        publisherSigned: raw.publisherSigned,
-        publisherVerified: raw.publisherVerified,
-        reviewed: raw.reviewed,
-        ...(typeof raw.publisherName === 'string' ? { publisherName: raw.publisherName } : {}),
-        ...(typeof raw.publisherKeyId === 'string' ? { publisherKeyId: raw.publisherKeyId } : {}),
-        ...(typeof raw.reviewerName === 'string' ? { reviewerName: raw.reviewerName } : {}),
-        ...(typeof raw.unknownReviewer === 'boolean' ? { unknownReviewer: raw.unknownReviewer } : {}),
-      };
-      const approval = raw.approvedAtResourceProvider;
-      const approvedAtResourceProviderTool =
-        approval
-        && typeof approval === 'object'
-        && !Array.isArray(approval)
-        && Object.keys(approval).length === 1
-        && typeof (approval as Record<string, unknown>).tool === 'string'
-          ? (approval as Record<string, string>).tool
-          : undefined;
-      return {
-        trust,
-        ...(approvedAtResourceProviderTool ? { approvedAtResourceProviderTool } : {}),
-      };
-    } catch {
       return null;
     }
   }
@@ -3216,6 +3339,7 @@ export class GhostManager {
     manifest: GhostManifest,
   ): Record<string, GhostManifestLocaleResource> {
     const resources: Record<string, GhostManifestLocaleResource> = {};
+    const realDir = fs.realpathSync(dir);
     for (const localePath of Object.values(manifest.locales ?? {})) {
       if (!localePath) continue;
       // 逐段解析:只 lstat 最终段挡不住"中间段被换成链接"——那会把插件目录之外的
@@ -3224,11 +3348,11 @@ export class GhostManager {
         expect: 'file',
         label: 'bundled locale',
       });
-      const stat = fs.lstatSync(absPath);
-      if (stat.size > GHOST_LOCALE_MAX_BYTES) {
-        throw new Error(`bundled locale missing or oversized: ${localePath}`);
-      }
-      const raw = JSON.parse(fs.readFileSync(absPath, 'utf8')) as unknown;
+      const bytes = readBoundedFileNoFollowSync(absPath, GHOST_LOCALE_MAX_BYTES, {
+        containWithin: realDir,
+      });
+      if (bytes === null) throw new Error(`bundled locale missing or oversized: ${localePath}`);
+      const raw = JSON.parse(bytes.toString('utf8')) as unknown;
       const validated = validateGhostManifestLocaleResource(raw, manifest);
       if (!validated.ok) throw new Error(`bundled locale invalid: ${localePath}`);
       resources[localePath] = validated.resource;

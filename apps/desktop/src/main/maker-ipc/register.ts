@@ -6783,7 +6783,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       Promise.all([
         reconcileInterruptedReviews(),
         sessionTurnLeaseTracker.reconcileStaleLeases(),
-        cleanupOrphanedReviewArtifactSnapshots(),
+        cleanupOrphanedReviewArtifactSnapshots({ currentOwner: reviewRunOwner }),
       ]),
     )
     .then(() => undefined)
@@ -6896,6 +6896,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const prepared = await prepareStableReviewArtifactSnapshots({
           workingDir: sourceWorkingDir,
           grant: explicitArtifactGrant,
+          owner: reviewRunOwner,
           prepare: (snapshotGrant) =>
             loadReviewEvidence({
               sourceSessionId: source.id,

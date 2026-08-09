@@ -1,28 +1,75 @@
 import { createHash } from 'node:crypto';
-import { promises as fs, type Stats } from 'node:fs';
+import { constants, promises as fs, type Stats } from 'node:fs';
 import path from 'node:path';
 
 import { isReviewSensitiveCredentialPath } from '@cindy/maker-core';
 
+import { reviewArtifactPathIdentityMatches } from './reviewArtifactAuthorization.js';
+
 const MAX_DIRECTORY_ENTRIES = 10_000;
-const MAX_FULL_FILE_BYTES = 8 * 1024 * 1024;
-const LARGE_FILE_SAMPLE_BYTES = 1024 * 1024;
 const READ_CHUNK_BYTES = 128 * 1024;
 const MAX_TOTAL_CONTENT_BYTES = 128 * 1024 * 1024;
+const NOFOLLOW_FLAG = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
+
+export type ReviewArtifactFileOpener = (
+  filePath: string,
+  flags: number,
+) => ReturnType<typeof fs.open>;
 
 interface FingerprintState {
   hash: ReturnType<typeof createHash>;
   entries: number;
   maxDirectoryEntries: number;
   contentBytesRemaining: number;
+  openFile: ReviewArtifactFileOpener;
 }
 
 export interface ReviewArtifactFingerprintOptions {
   /** Test seam; production uses the bounded fail-closed default. */
   maxDirectoryEntries?: number;
+  /** Test seam; production hashes at most the bounded total before failing closed. */
+  maxContentBytes?: number;
+  /** Test seam for deterministic lstat/open replacement coverage. */
+  openFile?: ReviewArtifactFileOpener;
 }
 
 export class ReviewArtifactFingerprintLimitError extends Error {}
+export class ReviewArtifactFingerprintChangedError extends Error {}
+
+async function assertCanonicalReviewArtifactPath(absolutePath: string): Promise<void> {
+  const canonicalPath = await fs.realpath(absolutePath).catch(() => null);
+  if (!canonicalPath || path.resolve(canonicalPath) !== path.resolve(absolutePath)) {
+    throw new ReviewArtifactFingerprintChangedError(
+      'A review artifact path changed while its content fingerprint was being prepared',
+    );
+  }
+}
+
+async function resolveFingerprintRoot(rawPath: string): Promise<string> {
+  const normalizedPath = path.normalize(rawPath);
+  const before = await fs.lstat(normalizedPath).catch(() => null);
+  if (!before || before.isSymbolicLink()) return normalizedPath;
+
+  const canonicalPath = await fs.realpath(normalizedPath).catch(() => null);
+  if (!canonicalPath) return normalizedPath;
+  const [afterRawPath, afterCanonicalPath] = await Promise.all([
+    fs.lstat(normalizedPath).catch(() => null),
+    fs.lstat(canonicalPath).catch(() => null),
+  ]);
+  if (
+    !afterRawPath ||
+    afterRawPath.isSymbolicLink() ||
+    !afterCanonicalPath ||
+    afterCanonicalPath.isSymbolicLink() ||
+    !reviewArtifactPathIdentityMatches(before, afterRawPath) ||
+    !reviewArtifactPathIdentityMatches(before, afterCanonicalPath)
+  ) {
+    throw new ReviewArtifactFingerprintChangedError(
+      'A review artifact root changed while its content fingerprint was being prepared',
+    );
+  }
+  return canonicalPath;
+}
 
 function addRecord(state: FingerprintState, ...parts: Array<string | number>): void {
   state.hash.update(parts.join('\0')).update('\n');
@@ -63,37 +110,52 @@ async function addFile(
   stat: Stats,
   state: FingerprintState,
 ): Promise<void> {
-  addRecord(state, 'file', relativePath, stat.size, stat.mtimeMs, stat.ctimeMs, stat.mode);
+  if (
+    !Number.isSafeInteger(stat.size) ||
+    stat.size < 0 ||
+    stat.size > state.contentBytesRemaining
+  ) {
+    throw new ReviewArtifactFingerprintLimitError(
+      'Review artifacts exceed the complete-content fingerprint byte limit',
+    );
+  }
+
+  // Content, path, size and mode define the reusable result. Mutable file
+  // timestamps are checked for TOCTOU below, but are intentionally omitted
+  // from the digest so the regression exercises the complete content hash.
+  addRecord(state, 'file', relativePath, stat.size, stat.mode);
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
-    handle = await fs.open(absolutePath, 'r');
-    if (state.contentBytesRemaining <= 0) {
-      addRecord(state, 'metadata-only', relativePath);
-    } else if (stat.size <= MAX_FULL_FILE_BYTES && stat.size <= state.contentBytesRemaining) {
-      const bytesRead = await hashRange(handle, state, 0, stat.size);
-      state.contentBytesRemaining -= bytesRead;
-    } else {
-      const totalSample = Math.min(
-        LARGE_FILE_SAMPLE_BYTES * 2,
-        stat.size,
-        state.contentBytesRemaining,
+    handle = await state.openFile(absolutePath, constants.O_RDONLY | NOFOLLOW_FLAG);
+    const opened = await handle.stat();
+    if (!opened.isFile() || !reviewArtifactPathIdentityMatches(stat, opened)) {
+      throw new ReviewArtifactFingerprintChangedError(
+        'A review artifact changed while its content fingerprint was being prepared',
       );
-      const firstSample = Math.ceil(totalSample / 2);
-      const lastSample = totalSample - firstSample;
-      let bytesRead = await hashRange(handle, state, 0, firstSample);
-      if (lastSample > 0) {
-        bytesRead += await hashRange(
-          handle,
-          state,
-          Math.max(firstSample, stat.size - lastSample),
-          lastSample,
-        );
-      }
-      state.contentBytesRemaining -= bytesRead;
-      addRecord(state, 'sampled', relativePath, bytesRead);
     }
+
+    const bytesRead = await hashRange(handle, state, 0, opened.size);
+    const afterHandle = await handle.stat();
+    const afterPath = await fs.lstat(absolutePath).catch(() => null);
+    if (
+      bytesRead !== opened.size ||
+      !reviewArtifactPathIdentityMatches(opened, afterHandle) ||
+      !afterPath ||
+      afterPath.isSymbolicLink() ||
+      !reviewArtifactPathIdentityMatches(opened, afterPath)
+    ) {
+      throw new ReviewArtifactFingerprintChangedError(
+        'A review artifact changed while its content fingerprint was being prepared',
+      );
+    }
+    state.contentBytesRemaining -= bytesRead;
+    addRecord(state, 'file-end', relativePath, bytesRead);
   } catch (error) {
-    addRecord(state, 'read-error', relativePath, error instanceof Error ? error.name : 'unknown');
+    if (error instanceof ReviewArtifactFingerprintChangedError) throw error;
+    throw new ReviewArtifactFingerprintChangedError(
+      'A review artifact could not be safely opened for content fingerprinting',
+      { cause: error },
+    );
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -135,6 +197,11 @@ async function walk(
     addRecord(state, 'symlink', relativePath, target, stat.mtimeMs, stat.ctimeMs);
     return;
   }
+  if (stat.isFile() || stat.isDirectory()) {
+    // Reject an intermediate directory that became a symlink after its parent
+    // was enumerated; O_NOFOLLOW only protects the final path component.
+    await assertCanonicalReviewArtifactPath(absolutePath);
+  }
   if (stat.isFile()) {
     await addFile(absolutePath, relativePath, stat, state);
     return;
@@ -167,8 +234,9 @@ async function walk(
 
 /**
  * Build a local-only identity for explicit review artifacts. The manifest is
- * deliberately bounded, ignores credential paths, and hashes file contents
- * (or both ends of very large files) so same-size edits are still detected.
+ * deliberately bounded, ignores credential paths, and hashes every readable
+ * file byte. Exceeding the byte budget fails closed instead of degrading to a
+ * sampled or metadata-only identity that could reuse a stale Review result.
  */
 export async function fingerprintReviewArtifacts(
   paths: readonly string[],
@@ -178,16 +246,21 @@ export async function fingerprintReviewArtifacts(
   if (!Number.isSafeInteger(maxDirectoryEntries) || maxDirectoryEntries <= 0) {
     throw new TypeError('maxDirectoryEntries must be a positive safe integer');
   }
+  const maxContentBytes = options.maxContentBytes ?? MAX_TOTAL_CONTENT_BYTES;
+  if (!Number.isSafeInteger(maxContentBytes) || maxContentBytes < 0) {
+    throw new TypeError('maxContentBytes must be a non-negative safe integer');
+  }
   const state: FingerprintState = {
     hash: createHash('sha256'),
     entries: 0,
     maxDirectoryEntries,
-    contentBytesRemaining: MAX_TOTAL_CONTENT_BYTES,
+    contentBytesRemaining: maxContentBytes,
+    openFile: options.openFile ?? ((filePath, flags) => fs.open(filePath, flags)),
   };
   const canonicalRoots = new Set<string>();
   for (const rawPath of paths) {
     if (!path.isAbsolute(rawPath) || isSensitive(rawPath)) continue;
-    const canonical = await fs.realpath(rawPath).catch(() => path.normalize(rawPath));
+    const canonical = await resolveFingerprintRoot(rawPath);
     if (!isSensitive(canonical)) canonicalRoots.add(canonical);
   }
   for (const root of [...canonicalRoots].sort()) {

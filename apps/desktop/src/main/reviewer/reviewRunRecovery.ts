@@ -8,6 +8,7 @@ export type ReviewProcessAliveProbe = (processId: number) => boolean;
 export type ReviewOwnerLivenessProbe = (
   owner: ReviewRunOwner,
 ) => ReviewOwnerLivenessProbeResult | Promise<ReviewOwnerLivenessProbeResult>;
+export type ReviewRunOwnerStatus = 'alive' | 'ended' | 'unknown';
 
 export function isReviewProcessAlive(processId: number): boolean {
   try {
@@ -18,6 +19,29 @@ export function isReviewProcessAlive(processId: number): boolean {
   }
 }
 
+/**
+ * Classify the exact Main-process incarnation behind a persisted Review owner.
+ * Legacy PID-only owners remain unknown while that PID exists because it may
+ * already belong to an unrelated process.
+ */
+export async function reviewRunOwnerStatus(
+  owner: ReviewRunOwner,
+  currentOwner: ReviewRunOwner,
+  processIsAlive: ReviewProcessAliveProbe = isReviewProcessAlive,
+  ownerLivenessProbe: ReviewOwnerLivenessProbe = (candidate) =>
+    candidate.liveness ? probeReviewOwnerLiveness(candidate.liveness) : 'unknown',
+): Promise<ReviewRunOwnerStatus> {
+  if (owner.instanceId === currentOwner.instanceId) return 'alive';
+  // This process now owns the same PID, so the differently identified previous
+  // owner has definitely terminated even if the OS immediately reused the PID.
+  if (owner.processId === currentOwner.processId) return 'ended';
+  if (owner.liveness) {
+    return ownerLivenessProbe(owner);
+  }
+  // Compatibility for leases/cards written before exact instance probes existed.
+  return processIsAlive(owner.processId) ? 'unknown' : 'ended';
+}
+
 export async function hasReviewOwnerProcessEnded(
   owner: ReviewRunOwner,
   currentOwner: ReviewRunOwner,
@@ -25,20 +49,10 @@ export async function hasReviewOwnerProcessEnded(
   ownerLivenessProbe: ReviewOwnerLivenessProbe = (candidate) =>
     candidate.liveness ? probeReviewOwnerLiveness(candidate.liveness) : 'unknown',
 ): Promise<boolean> {
-  if (owner.instanceId === currentOwner.instanceId) return false;
-  // This process now owns the same PID, so the differently identified previous
-  // owner has definitely terminated even if the OS immediately reused the PID.
-  if (owner.processId === currentOwner.processId) return true;
-  if (owner.liveness) {
-    const result = await ownerLivenessProbe(owner);
-    if (result === 'alive') return false;
-    if (result === 'ended') return true;
-    // A timeout or other ambiguous local transport failure must not let two
-    // Desktop instances own the same Review source concurrently.
-    return false;
-  }
-  // Compatibility for leases/cards written before exact instance probes existed.
-  return !processIsAlive(owner.processId);
+  return (
+    (await reviewRunOwnerStatus(owner, currentOwner, processIsAlive, ownerLivenessProbe)) ===
+    'ended'
+  );
 }
 
 /**

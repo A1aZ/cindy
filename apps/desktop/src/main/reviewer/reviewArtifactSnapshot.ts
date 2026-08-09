@@ -10,15 +10,27 @@ import {
   type ReviewArtifactPathIdentity,
   type ReviewExplicitArtifactGrant,
 } from './reviewArtifactAuthorization.js';
-import { prepareWithStableReviewArtifacts } from './reviewArtifactFingerprint.js';
+import {
+  prepareWithStableReviewArtifacts,
+  type ReviewArtifactFileOpener,
+} from './reviewArtifactFingerprint.js';
+import {
+  reviewRunOwnerStatus,
+  type ReviewOwnerLivenessProbe,
+  type ReviewProcessAliveProbe,
+} from './reviewRunRecovery.js';
+import { readReviewRunOwner, type ReviewRunOwner } from '../../shared/reviewRun.js';
 
 const MAX_SNAPSHOT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_SNAPSHOT_TOTAL_BYTES = 128 * 1024 * 1024;
 const COPY_BUFFER_BYTES = 1024 * 1024;
 const NOFOLLOW_FLAG = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
-const SNAPSHOT_ROOT_PREFIX = 'cindy-review-artifacts-v1-';
-const SNAPSHOT_ROOT_NAME = /^cindy-review-artifacts-v1-(\d+)-[A-Za-z0-9]{6}$/;
-const ACTIVE_SNAPSHOT_ROOTS = new Set<string>();
+const SNAPSHOT_ROOT_PREFIX = 'cindy-review-artifacts-v2-';
+const SNAPSHOT_ROOT_NAME = /^cindy-review-artifacts-v(1|2)-(\d+)-[A-Za-z0-9]{6}$/;
+const SNAPSHOT_OWNER_SUFFIX = '.owner.json';
+const SNAPSHOT_OWNER_MAX_BYTES = 4 * 1024;
+const DEFAULT_UNVERIFIABLE_SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+const ACTIVE_SNAPSHOT_ROOTS = new Map<string, string>();
 
 export interface MaterializedReviewArtifacts {
   grant: ReviewExplicitArtifactGrant;
@@ -52,48 +64,184 @@ function defaultProcessIsAlive(pid: number): boolean {
   }
 }
 
+interface ReviewArtifactSnapshotOwnerRecord {
+  version: 1;
+  createdAt: number;
+  owner: ReviewRunOwner;
+}
+
+function snapshotOwnerPath(snapshotRoot: string): string {
+  return `${snapshotRoot}${SNAPSHOT_OWNER_SUFFIX}`;
+}
+
+function readSnapshotOwnerRecord(value: unknown): ReviewArtifactSnapshotOwnerRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const owner = readReviewRunOwner(record.owner);
+  if (
+    record.version !== 1 ||
+    typeof record.createdAt !== 'number' ||
+    !Number.isFinite(record.createdAt) ||
+    record.createdAt <= 0 ||
+    !owner
+  ) {
+    return null;
+  }
+  return { version: 1, createdAt: record.createdAt, owner };
+}
+
+async function loadSnapshotOwnerRecord(
+  snapshotRoot: string,
+  expectedProcessId: number,
+  currentUid: number | null,
+): Promise<ReviewArtifactSnapshotOwnerRecord | null> {
+  const ownerPath = snapshotOwnerPath(snapshotRoot);
+  const before = await fs.lstat(ownerPath).catch(() => null);
+  if (
+    !before ||
+    before.isSymbolicLink() ||
+    !before.isFile() ||
+    before.size > SNAPSHOT_OWNER_MAX_BYTES ||
+    (currentUid !== null && before.uid !== currentUid)
+  ) {
+    return null;
+  }
+
+  let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
+  try {
+    handle = await fs.open(ownerPath, constants.O_RDONLY | NOFOLLOW_FLAG);
+    const opened = await handle.stat();
+    if (!reviewArtifactSnapshotStatMatches(before, opened)) return null;
+    const raw = await handle.readFile({ encoding: 'utf8' });
+    const afterHandle = await handle.stat();
+    const afterPath = await fs.lstat(ownerPath).catch(() => null);
+    if (
+      !reviewArtifactSnapshotStatMatches(opened, afterHandle) ||
+      !afterPath ||
+      afterPath.isSymbolicLink() ||
+      !reviewArtifactSnapshotStatMatches(opened, afterPath)
+    ) {
+      return null;
+    }
+    const record = readSnapshotOwnerRecord(JSON.parse(raw) as unknown);
+    return record?.owner.processId === expectedProcessId ? record : null;
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+function snapshotIsExpired(
+  stat: Stats,
+  createdAt: number | undefined,
+  now: number,
+  maxAgeMs: number,
+): boolean {
+  const lastKnownActiveAt = createdAt ?? Math.max(stat.birthtimeMs, stat.ctimeMs, stat.mtimeMs);
+  return now - lastKnownActiveAt >= maxAgeMs;
+}
+
 /**
  * Reclaims snapshot roots left by a terminated Cindy process. The versioned,
  * PID-scoped name and ownership checks deliberately avoid broad temp cleanup.
  */
-export async function cleanupOrphanedReviewArtifactSnapshots(
-  options: {
-    tempRoot?: string;
-    isProcessAlive?: (pid: number) => boolean;
-  } = {},
-): Promise<void> {
+export async function cleanupOrphanedReviewArtifactSnapshots(options: {
+  currentOwner: ReviewRunOwner;
+  tempRoot?: string;
+  processIsAlive?: ReviewProcessAliveProbe;
+  ownerLivenessProbe?: ReviewOwnerLivenessProbe;
+  now?: () => number;
+  maxUnverifiableAgeMs?: number;
+}): Promise<void> {
   const tempRoot = options.tempRoot ?? os.tmpdir();
   const entries = await fs.readdir(tempRoot, { withFileTypes: true }).catch((error) => {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
   });
   const currentUid = typeof process.getuid === 'function' ? process.getuid() : null;
-  const isProcessAlive = options.isProcessAlive ?? defaultProcessIsAlive;
+  const processIsAlive = options.processIsAlive ?? defaultProcessIsAlive;
+  const now = options.now?.() ?? Date.now();
+  const maxUnverifiableAgeMs =
+    options.maxUnverifiableAgeMs ?? DEFAULT_UNVERIFIABLE_SNAPSHOT_MAX_AGE_MS;
+  if (!Number.isFinite(maxUnverifiableAgeMs) || maxUnverifiableAgeMs < 0) {
+    throw new TypeError('maxUnverifiableAgeMs must be a non-negative finite number');
+  }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const match = SNAPSHOT_ROOT_NAME.exec(entry.name);
     if (!match) continue;
-    const ownerPid = Number(match[1]);
-    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0 || ownerPid === process.pid) continue;
-    if (isProcessAlive(ownerPid)) continue;
+    const snapshotVersion = Number(match[1]);
+    const ownerPid = Number(match[2]);
+    if (!Number.isSafeInteger(ownerPid) || ownerPid <= 0) continue;
 
     const candidate = path.join(tempRoot, entry.name);
     const stat = await fs.lstat(candidate).catch(() => null);
     if (!stat || stat.isSymbolicLink() || !stat.isDirectory()) continue;
     if (currentUid !== null && stat.uid !== currentUid) continue;
+
+    const ownerRecord =
+      snapshotVersion === 2 ? await loadSnapshotOwnerRecord(candidate, ownerPid, currentUid) : null;
+    const owner =
+      ownerRecord?.owner ??
+      ({
+        instanceId: `legacy-snapshot:${entry.name}`,
+        processId: ownerPid,
+      } satisfies ReviewRunOwner);
+    const status = await reviewRunOwnerStatus(
+      owner,
+      options.currentOwner,
+      processIsAlive,
+      options.ownerLivenessProbe,
+    );
+    if (status === 'alive') continue;
+    if (
+      status === 'unknown' &&
+      !snapshotIsExpired(stat, ownerRecord?.createdAt, now, maxUnverifiableAgeMs)
+    ) {
+      continue;
+    }
+
     await fs.rm(candidate, { recursive: true, force: true });
+    await fs.rm(snapshotOwnerPath(candidate), { force: true });
   }
+
+  // A crash between root removal and sidecar removal must not leave the exact
+  // liveness challenge behind indefinitely in the shared temp directory.
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(SNAPSHOT_OWNER_SUFFIX)) continue;
+    const rootName = entry.name.slice(0, -SNAPSHOT_OWNER_SUFFIX.length);
+    if (!SNAPSHOT_ROOT_NAME.test(rootName)) continue;
+    const ownerPath = path.join(tempRoot, entry.name);
+    const rootPath = path.join(tempRoot, rootName);
+    if (await fs.lstat(rootPath).catch(() => null)) continue;
+    const ownerStat = await fs.lstat(ownerPath).catch(() => null);
+    if (
+      !ownerStat ||
+      ownerStat.isSymbolicLink() ||
+      !ownerStat.isFile() ||
+      (currentUid !== null && ownerStat.uid !== currentUid)
+    ) {
+      continue;
+    }
+    await fs.rm(ownerPath, { force: true });
+  }
+}
+
+async function removeSnapshotRoot(snapshotRoot: string, ownerPath: string): Promise<void> {
+  await fs.rm(snapshotRoot, { recursive: true, force: true });
+  await fs.rm(ownerPath, { force: true });
+  ACTIVE_SNAPSHOT_ROOTS.delete(snapshotRoot);
 }
 
 /** Remove every private snapshot still owned by this Main process on clean exit. */
 export async function cleanupActiveReviewArtifactSnapshots(): Promise<void> {
   const failures: unknown[] = [];
   await Promise.all(
-    [...ACTIVE_SNAPSHOT_ROOTS].map(async (snapshotRoot) => {
+    [...ACTIVE_SNAPSHOT_ROOTS].map(async ([snapshotRoot, ownerPath]) => {
       try {
-        await fs.rm(snapshotRoot, { recursive: true, force: true });
-        ACTIVE_SNAPSHOT_ROOTS.delete(snapshotRoot);
+        await removeSnapshotRoot(snapshotRoot, ownerPath);
       } catch (error) {
         failures.push(error);
       }
@@ -113,8 +261,14 @@ async function copyOpenFile(
   sourcePath: string,
   destinationPath: string,
   expectedIdentity: ReviewArtifactPathIdentity,
+  openFile: ReviewArtifactFileOpener,
 ): Promise<number> {
-  const source = await fs.open(sourcePath, constants.O_RDONLY | NOFOLLOW_FLAG);
+  const source = await openFile(sourcePath, constants.O_RDONLY | NOFOLLOW_FLAG).catch((error) => {
+    throw new ReviewArtifactAuthorizationError(
+      'A review artifact changed after permission was granted',
+      { cause: error },
+    );
+  });
   let destination: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     const canonicalPath = await fs.realpath(sourcePath);
@@ -157,7 +311,14 @@ async function copyOpenFile(
       sourceOffset += bytesRead;
     }
     const after = await source.stat();
-    if (sourceOffset !== before.size || !reviewArtifactSnapshotStatMatches(before, after)) {
+    const afterPath = await fs.lstat(sourcePath).catch(() => null);
+    if (
+      sourceOffset !== before.size ||
+      !reviewArtifactSnapshotStatMatches(before, after) ||
+      !afterPath ||
+      afterPath.isSymbolicLink() ||
+      !reviewArtifactPathIdentityMatches(expectedIdentity, afterPath)
+    ) {
       throw new ReviewArtifactAuthorizationError(
         'A review artifact changed while its private snapshot was being prepared',
       );
@@ -179,11 +340,22 @@ async function copyOpenFile(
 export async function materializeReviewArtifactSnapshots(input: {
   workingDir: string;
   grant: ReviewExplicitArtifactGrant;
+  owner: ReviewRunOwner;
+  /** Test seam for deterministic lstat/open replacement coverage. */
+  openFile?: ReviewArtifactFileOpener;
 }): Promise<MaterializedReviewArtifacts> {
+  if (
+    !readReviewRunOwner(input.owner) ||
+    input.owner.processId !== process.pid ||
+    !input.owner.liveness
+  ) {
+    throw new Error('Review artifact snapshot owner is not ready');
+  }
   const canonicalWorkingDir = await fs.realpath(input.workingDir).catch(() => null);
   const snapshotPaths = new Map<string, string>();
   const liveDirectoryPaths: string[] = [];
   let snapshotRoot: string | null = null;
+  let ownerPath: string | null = null;
   let cleaned = false;
   let cleanupPromise: Promise<void> | null = null;
   let totalBytes = 0;
@@ -196,8 +368,7 @@ export async function materializeReviewArtifactSnapshots(input: {
     }
     if (!cleanupPromise) {
       cleanupPromise = (async () => {
-        await fs.rm(snapshotRoot!, { recursive: true, force: true });
-        ACTIVE_SNAPSHOT_ROOTS.delete(snapshotRoot!);
+        await removeSnapshotRoot(snapshotRoot!, ownerPath!);
         cleaned = true;
       })();
     }
@@ -241,17 +412,41 @@ export async function materializeReviewArtifactSnapshots(input: {
 
       if (!snapshotRoot) {
         snapshotRoot = await fs.mkdtemp(
-          path.join(os.tmpdir(), `${SNAPSHOT_ROOT_PREFIX}${process.pid}-`),
+          path.join(os.tmpdir(), `${SNAPSHOT_ROOT_PREFIX}${input.owner.processId}-`),
         );
-        ACTIVE_SNAPSHOT_ROOTS.add(snapshotRoot);
-        await fs.chmod(snapshotRoot, 0o700);
+        ownerPath = snapshotOwnerPath(snapshotRoot);
+        try {
+          await fs.chmod(snapshotRoot, 0o700);
+          const ownerRecord: ReviewArtifactSnapshotOwnerRecord = {
+            version: 1,
+            createdAt: Date.now(),
+            owner: input.owner,
+          };
+          await fs.writeFile(ownerPath, JSON.stringify(ownerRecord), {
+            encoding: 'utf8',
+            flag: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NOFOLLOW_FLAG,
+            mode: 0o600,
+          });
+          ACTIVE_SNAPSHOT_ROOTS.set(snapshotRoot, ownerPath);
+        } catch (error) {
+          await fs.rm(snapshotRoot, { recursive: true, force: true });
+          await fs.rm(ownerPath, { force: true });
+          snapshotRoot = null;
+          ownerPath = null;
+          throw error;
+        }
       }
       const key = createHash('sha256').update(sourcePath, 'utf8').digest('hex').slice(0, 16);
       const destinationPath = path.join(
         snapshotRoot,
         `${String(index + 1).padStart(2, '0')}-${key}${safeSnapshotExtension(sourcePath)}`,
       );
-      totalBytes += await copyOpenFile(sourcePath, destinationPath, expectedIdentity);
+      totalBytes += await copyOpenFile(
+        sourcePath,
+        destinationPath,
+        expectedIdentity,
+        input.openFile ?? ((filePath, flags) => fs.open(filePath, flags)),
+      );
       if (totalBytes > MAX_SNAPSHOT_TOTAL_BYTES) {
         throw new ReviewArtifactAuthorizationError(
           'Review artifacts exceed the 128 MB local snapshot limit',
@@ -282,6 +477,7 @@ export async function materializeReviewArtifactSnapshots(input: {
 export async function prepareStableReviewArtifactSnapshots<T>(input: {
   workingDir: string;
   grant: ReviewExplicitArtifactGrant;
+  owner: ReviewRunOwner;
   prepare: (snapshotGrant: ReviewExplicitArtifactGrant) => Promise<T>;
 }): Promise<PreparedStableReviewArtifacts<T>> {
   const holder: { materialized?: MaterializedReviewArtifacts } = {};
@@ -290,6 +486,7 @@ export async function prepareStableReviewArtifactSnapshots<T>(input: {
       holder.materialized = await materializeReviewArtifactSnapshots({
         workingDir: input.workingDir,
         grant: input.grant,
+        owner: input.owner,
       });
       return input.prepare(holder.materialized.grant);
     });

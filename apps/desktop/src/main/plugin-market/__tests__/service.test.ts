@@ -459,11 +459,12 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     expect(runtime.install).toHaveBeenCalledWith(
       expect.stringMatching(/\.cindy$/),
-      {
+      expect.objectContaining({
         ghostId: 'cindy-test',
         version: '1.0.0',
         reviewedManifest: manifest(),
-      },
+        beforeCommitInLock: expect.any(Function),
+      }),
     );
     expect(snapshot.items[0]).toMatchObject({
       installState: 'installed',
@@ -1035,11 +1036,12 @@ describe('PluginMarketService migration and defaultInstall', () => {
 
     expect(runtime.install).toHaveBeenCalledWith(
       expect.stringMatching(/\.cindy$/),
-      {
+      expect.objectContaining({
         ghostId: item.ghostId,
         version: item.currentRelease.version,
         reviewedManifest: manifest(),
-      },
+        beforeCommitInLock: expect.any(Function),
+      }),
     );
     expect(snapshot.items[0]).toMatchObject({
       installState: 'installed',
@@ -1702,6 +1704,41 @@ describe('PluginMarketService migration and defaultInstall', () => {
     await expect(racingSnapshot).resolves.toMatchObject({ unavailableReason: null });
 
     expect(runtime.install).not.toHaveBeenCalled();
+    expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(false);
+    expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(true);
+  });
+
+  it('cancels an in-flight default install when local uninstall records opt-out during download', async () => {
+    const item = summary({ defaultInstall: true });
+    const h = harness([item]);
+    h.ledger.upsertInstallation(recordForTest(item));
+    runtime.ghosts = [ghostEntry(item.ghostId)];
+    const completeLocalUninstall = h.service.prepareLocalUninstallTracking(item.ghostId);
+    expect(completeLocalUninstall).not.toBeNull();
+
+    const downloadMock = vi.mocked(
+      (await import('../download.js')).downloadVerifiedPlugin,
+    );
+    const downloadStarted = deferred();
+    const downloadGate = deferred();
+    downloadMock.mockImplementationOnce(async () => {
+      downloadStarted.resolve();
+      await downloadGate.promise;
+    });
+    runtime.install.mockImplementationOnce(async (_file, options) => {
+      options.beforeCommitInLock?.();
+      throw new Error('runtime install must be cancelled before package placement');
+    });
+
+    // 本地插件页已完成目录移除并广播空清单，账本 completion 紧随其后。
+    runtime.ghosts = [];
+    const snapshotPromise = h.service.snapshot();
+    await downloadStarted.promise;
+    await completeLocalUninstall?.();
+    downloadGate.resolve();
+
+    await expect(snapshotPromise).resolves.toMatchObject({ unavailableReason: null });
+    expect(runtime.install).toHaveBeenCalledOnce();
     expect(h.ledger.installationForGhost(item.ghostId)?.installed).toBe(false);
     expect(h.ledger.isDefaultInstallSuppressed('user-1', item.id)).toBe(true);
   });

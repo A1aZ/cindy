@@ -86,6 +86,7 @@ type PackagePermissionReviewer = (
 
 class SilentUpgradeBusyError extends Error {}
 class SilentUpgradeStaleBaselineError extends Error {}
+class SilentDefaultInstallCancelledError extends Error {}
 
 /**
  * 来源增删改的互斥键。自定义市场安装的提交段也要拿这把锁，保证所选来源从
@@ -1617,6 +1618,27 @@ export class PluginMarketService {
               // 上限；真实包若额外扩权，installDetail 会安全取消并等待用户之后
               // 从详情页手动安装、在原请求窗口完成确认。
               reviewedManifest: reviewedManifest.manifest,
+              // 下载期间用户可能从本地插件页完成显式卸载。最终落位前在
+              // ghostId 锁内重读卸载意图，不能让旧 snapshot 把插件装回来。
+              beforeCommitInLock: () => {
+                const commitLedgerData = ledger.read();
+                if (
+                  commitLedgerData.defaultInstallOptOuts[installSubject]?.includes(summary.id)
+                ) {
+                  throw new SilentDefaultInstallCancelledError(
+                    'Default Plugin was explicitly uninstalled',
+                  );
+                }
+                const commitLocal = this.localInstallSnapshot(
+                  ledger,
+                  commitLedgerData.installations,
+                );
+                if (this.toItem(summary, commitLocal).installState !== 'not-installed') {
+                  throw new SilentDefaultInstallCancelledError(
+                    'Default Plugin install state changed',
+                  );
+                }
+              },
             },
             owner,
             ledger,
@@ -1624,10 +1646,12 @@ export class PluginMarketService {
         });
       } catch (error) {
         // 单个默认插件失败不拖垮整个市场；下次同步可重试。
-        log.warn('default plugin install failed', {
-          pluginId: summary.id,
-          error: error instanceof Error ? error.message : String(error),
-        });
+        if (!(error instanceof SilentDefaultInstallCancelledError)) {
+          log.warn('default plugin install failed', {
+            pluginId: summary.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
       }
     }
   }

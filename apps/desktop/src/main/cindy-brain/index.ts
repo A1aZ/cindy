@@ -3729,6 +3729,7 @@ async function installOrUpdateMarketGhostPackageLocked(
       // inspect 与 install 各自重读磁盘,临时 .cindy 在两读之间被替换时,
       // 所有前置校验(保留前缀/审阅比对/签名/解压上限)都会作用在旧字节上。
       // 本地 .cindy 装入通道已强制此对账,市场通道同一口径。
+      expected.beforeCommitInLock?.();
       return installAndDock(manager, cindyFilePath, {
         ghostId: expected.ghostId,
         enable: true,

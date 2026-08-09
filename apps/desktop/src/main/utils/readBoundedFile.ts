@@ -49,6 +49,8 @@ export interface BoundedFileRead {
   bytes: Buffer;
   /** 与 bytes 来自同一已打开句柄，且读取前后版本字段保持不变。 */
   stat: fs.BigIntStats;
+  /** 同一文件句柄在读取前校验过的字节长度。 */
+  expectedSize: number;
 }
 
 export class BoundedFileReadUncertainError extends Error {
@@ -210,12 +212,23 @@ export async function readBoundedFileNoFollowWithStat(
       ) {
         throw new BoundedFileReadChangedError();
       }
-      return { bytes, stat: verificationStat };
+      return { bytes, stat: verificationStat, expectedSize: Number(stat.size) };
     }
-    return { bytes, stat: finalStat };
+    return { bytes, stat: finalStat, expectedSize: Number(stat.size) };
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Manual 校验使用的兼容入口：保留同句柄 stat/稳定性复核，同时暴露读取前长度。
+ */
+export async function readBoundedFileNoFollowWithSize(
+  filePath: string,
+  maxBytes: number,
+  options?: ReadBoundedFileOptions,
+): Promise<BoundedFileRead | null> {
+  return readBoundedFileNoFollowWithStat(filePath, maxBytes, options);
 }
 
 export async function readBoundedFileNoFollow(

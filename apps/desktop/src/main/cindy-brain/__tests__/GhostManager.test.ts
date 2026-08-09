@@ -71,7 +71,7 @@ function chipManifestWithCommand(id: string, command: string): Record<string, un
 async function makeCindy(
   fileName: string,
   manifest: Record<string, unknown> | null,
-  entries: Record<string, string> = {},
+  entries: Record<string, string | Buffer> = {},
 ): Promise<string> {
   const zip = new JSZip();
   if (manifest) zip.file('ghost.json', JSON.stringify(manifest));
@@ -749,6 +749,26 @@ describe('GhostManager · update(原位换版)', () => {
     expect(leftovers).toEqual([]);
   });
 
+  it('磁盘上的无 manual 旧布局可直接列出并原位升级，无需重装或重新确认', async () => {
+    const legacyDir = path.join(rootDir, 'hello');
+    await fs.promises.mkdir(legacyDir, { recursive: true });
+    await fs.promises.writeFile(path.join(legacyDir, 'ghost.json'), JSON.stringify(goodManifest()));
+    await fs.promises.writeFile(path.join(legacyDir, 'main.js'), '// legacy');
+    await fs.promises.writeFile(path.join(legacyDir, '.disabled'), '');
+    const legacy = manager.list();
+    expect(legacy).toMatchObject([{ manifest: { id: 'hello' }, enabled: false }]);
+    expect(legacy[0].manifest.manual).toBeUndefined();
+
+    const updated = await manager.update(
+      await makeCindy('legacy-v2.cindy', { ...goodManifest(), version: '2.0.0' }),
+    );
+    expect(updated).toMatchObject({
+      ghost: { manifest: { id: 'hello', version: '2.0.0' }, enabled: false },
+    });
+    expect((updated as { ghost: InstalledGhost }).ghost.manifest.manual).toBeUndefined();
+    expect(fs.existsSync(path.join(legacyDir, '.disabled'))).toBe(true);
+  });
+
   it('唤醒状态延续:沉睡中更新仍沉睡,唤醒中更新仍唤醒', async () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest()), { initiallyEnabled: false });
     const r1 = await manager.update(
@@ -888,5 +908,126 @@ describe('GhostManager · skill 槽装入校验(确认框看到的 = Agent 读�
       'skills/foo/SKILL.md': skillMd('foo', '教 Agent 用 foo', 'x'.repeat(64 * 1024 + 1)),
     });
     await expectRejection(await manager.install(cindy), 'file-invalid');
+  });
+});
+
+describe('GhostManager · manual 装入侧对等校验', () => {
+  const manifest = (): Record<string, unknown> => ({
+    ...goodManifest('manual-demo'),
+    manual: {
+      items: [
+        { dir: 'manual', name: 'overview', description: '总览' },
+        { dir: 'manual/advanced', name: 'advanced', description: '进阶' },
+      ],
+    },
+  });
+
+  it('嵌套单元、任意深度 Markdown 与 64KB 边界通过 inspect/install', async () => {
+    const cindy = await makeCindy('manual-good.cindy', manifest(), {
+      'manual/MANUAL.md': Buffer.alloc(64 * 1024, 0x61),
+      'manual/references/deep/flow.md': '# 深层',
+      'manual/advanced/MANUAL.md': '# 进阶',
+      'manual/advanced/reference.MD': '# 参考',
+    });
+    expect(await manager.inspect(cindy)).toMatchObject({
+      manifest: { manual: { items: [{ name: 'overview' }, { name: 'advanced' }] } },
+    });
+    expect(await manager.install(cindy)).toMatchObject({
+      ghost: { manifest: { id: 'manual-demo' } },
+    });
+  });
+
+  it.each([
+    ['缺 MANUAL.md', { 'manual/notes.md': '# notes' }],
+    [
+      '超过 64KB',
+      { 'manual/MANUAL.md': '# 入口', 'manual/huge.md': Buffer.alloc(64 * 1024 + 1, 0x61) },
+    ],
+    ['非法 UTF-8', { 'manual/MANUAL.md': '# 入口', 'manual/bad.md': Buffer.from([0xff, 0xfe]) }],
+    [
+      '二进制控制字节',
+      { 'manual/MANUAL.md': '# 入口', 'manual/binary.md': Buffer.from('ok\u0000bad') },
+    ],
+    ['非 Markdown', { 'manual/MANUAL.md': '# 入口', 'manual/data.json': '{}' }],
+  ] as Array<[string, Record<string, string | Buffer>]>)(
+    '%s 的恶意包绕过 Forge 仍拒绝',
+    async (_name, entries) => {
+      const single = {
+        ...goodManifest('manual-demo'),
+        manual: { items: [{ dir: 'manual', name: 'overview', description: '总览' }] },
+      };
+      await expectRejection(
+        await manager.install(await makeCindy('manual-bad.cindy', single, entries)),
+        'file-invalid',
+      );
+    },
+  );
+
+  it('ZIP 内符号链接条目不能作为 manual 文件', async () => {
+    const single = {
+      ...goodManifest('manual-demo'),
+      manual: { items: [{ dir: 'manual', name: 'overview', description: '总览' }] },
+    };
+    const zip = new JSZip();
+    zip.file('ghost.json', JSON.stringify(single));
+    zip.file('manual/MANUAL.md', '# 入口');
+    zip.file('manual/link.md', '../outside.md', { unixPermissions: 0o120777 });
+    const out = path.join(workDir, 'manual-link.cindy');
+    await fs.promises.writeFile(
+      out,
+      await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }),
+    );
+    await expectRejection(await manager.install(out), 'file-invalid');
+  });
+
+  it('ZIP manual 文件和显式目录条目含 C0、DEL 或反斜杠时拒绝', async () => {
+    const single = {
+      ...goodManifest('manual-demo'),
+      manual: { items: [{ dir: 'manual', name: 'guide', description: '总览' }] },
+    };
+    const cases = [
+      { name: `bad${String.fromCharCode(1)}name.md`, directory: false },
+      { name: `bad${String.fromCharCode(0x7f)}name.md`, directory: false },
+      { name: 'bad\\windows.md', directory: false },
+      { name: `bad${String.fromCharCode(1)}dir`, directory: true },
+    ];
+    for (const [index, testCase] of cases.entries()) {
+      const zip = new JSZip();
+      zip.file('ghost.json', JSON.stringify(single));
+      zip.file('manual/MANUAL.md', '# 入口');
+      if (testCase.directory) {
+        zip.file(`manual/${testCase.name}/`, null, { dir: true });
+        zip.file(`manual/${testCase.name}/nested.md`, '# invalid');
+      } else {
+        zip.file(`manual/${testCase.name}`, '# invalid');
+      }
+      const out = path.join(workDir, `manual-invalid-path-${index}.cindy`);
+      await fs.promises.writeFile(out, await zip.generateAsync({ type: 'nodebuffer' }));
+      await expectRejection(await manager.inspect(out), 'file-invalid');
+    }
+  });
+
+  it('ZIP manual 逻辑路径 1024 字符放行，超过 1024 字符拒绝', async () => {
+    const single = {
+      ...goodManifest('manual-demo'),
+      manual: { items: [{ dir: 'manual', name: 'guide', description: '总览' }] },
+    };
+    const inspectWithRelativePath = async (relativePath: string, fileName: string) => {
+      const zip = new JSZip();
+      zip.file('ghost.json', JSON.stringify(single));
+      zip.file('manual/MANUAL.md', '# 入口');
+      zip.file(`manual/${relativePath}`, '# deep', { createFolders: false });
+      const out = path.join(workDir, fileName);
+      await fs.promises.writeFile(out, await zip.generateAsync({ type: 'nodebuffer' }));
+      return manager.inspect(out);
+    };
+
+    expect(await inspectWithRelativePath(`${'a/'.repeat(507)}x.md`, 'manual-1024.cindy')).toMatchObject({
+      manifest: { id: 'manual-demo' },
+    });
+    await expectRejection(
+      await inspectWithRelativePath(`${'a/'.repeat(507)}xx.md`, 'manual-1025.cindy'),
+      'file-invalid',
+    );
   });
 });

@@ -23,6 +23,8 @@ L0  花名册（system 段常驻召回）
  ├─ 命中插件 ──────────→ L1.5  ghost_info(ghost_id) 精准详情
  └─ 未命中 / 怀疑过期 ──→ L1    ghost_list 全量实时清单（保底）
                                    │
+                 （长文手册）L1.75 ghost_manual(ghost_id, path?) 按需正文
+                                   │
               （二级分派插件）L2  插件内 list_tools(category)：类目工具明细 + RULES
                                    │
                               L3  ghost_call 执行 + 运行期可见性门禁
@@ -33,6 +35,9 @@ L0  花名册（system 段常驻召回）
   会话中途安装/卸载/启用/停用，`ghost_list` 是唯一能发现这类变动的现查入口。
 - 花名册与 `ghost_info` 的结果都**不是授权**：每次 `ghost_call` 仍按运行期实时
   校验放行（见 §4 第 6 条）。
+- `ghost_info` 的 `manual` 只给轻量索引；需要长文时再调 `ghost_manual`。手册正文只
+  作为 tool result 进入当前回合，不进入 system 段；正文是作者数据，不构成系统规则、
+  用户意图或权限授权。
 
 ## 3. 花名册（roster）
 
@@ -40,8 +45,8 @@ L0  花名册（system 段常驻召回）
 
 - 每条 = `{id, name, command, recall}`；`recall = whenToUse ?? description`。
 - 单条 recall 上限为协议常量 `GHOST_MANIFEST_SUMMARY_MAX_CHARS`（= 300，正本在
-  本仓 `packages/plugin-protocol/src/manifest.ts`，desktop 经
-  `apps/desktop/src/shared/ghost.ts` re-export）。
+  本仓 `packages/plugin-protocol/src/manifest.ts`；desktop 的
+  `apps/desktop/src/shared/ghost.ts` 是需要同步维护的完整协议镜像，不是 re-export）。
 - 序列化前逐字段折叠空白（`replace(/\s+/g, " ")` + trim）并防御截断
   （name ≤ 64、command ≤ 32、recall ≤ 300）；条目按 id 排序；最多 16 条、
   总预算 8000 字符。
@@ -143,11 +148,13 @@ L0  花名册（system 段常驻召回）
 - 二级分派插件：`list_tools(category)` 必须随工具明细下发该类目的 RULES；
   `call_tool` 参数错误时返回对应 schema 供自纠（FORGE_GUIDE §3.5）。
 - 打包期对疑似规则化的 `whenToUse` 只做 warning，不阻断安装（存量兼容）。
+- 长文手册使用顶层 `manual.items`；`MANUAL.md` 默认一层直达，只有大手册才拆深层，
+  并在入口给出可直接照抄的完整 `ghost_manual` 下一步调用，避免循环索引。
 
 ## 7. 明确不做的事
 
-- 不新增全局路由 Skill；不把工具使用手册铺成全局 Skill（Skill 槽只留给真正
-  跨会话的工作方法）。
+- 不新增全局路由 Skill；不把插件手册铺成全局 Skill。新插件使用按需读取的
+  `manual`；存量 Skill 槽处于停止新增、未来整体废弃的兼容期。
 - 不维护排他的 active plugin / active context；插件切换不做上下文替换，规则
   适用范围由 `ghost_id + category` 边界保证。
 - 不引入宿主级 rules_revision / receipt 回执协议。
@@ -161,8 +168,8 @@ L0  花名册（system 段常驻召回）
   `apps/desktop/src/main/mcp-integrations/ghost.ts`
 - 可见性唯一真源：`apps/desktop/src/main/cindy-brain/ghostVisibility.ts`
 - 作者契约（FORGE_GUIDE）：`apps/desktop/src/main/cindy-brain/forge.ts`
-- 摘要上限常量：本仓 `packages/plugin-protocol/src/manifest.ts`（desktop 经
-  `apps/desktop/src/shared/ghost.ts` re-export）
+- 摘要与 manual 契约：本仓 `packages/plugin-protocol/src/manifest.ts`，desktop
+  在 `apps/desktop/src/shared/ghost.ts` 维护完整镜像
 - 三 harness 注入落点：`packages/maker-core/src/agents/claude-code/index.ts`
   （buildQuery）、`packages/maker-core/src/agents/codex/index.ts`
   （startSession → developerInstructions）、

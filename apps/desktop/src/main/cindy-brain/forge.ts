@@ -21,13 +21,23 @@ import JSZip from 'jszip';
 import {
   GHOST_ICON_MAX_BYTES,
   GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  GHOST_MANUAL_ENTRY_FILE,
+  GHOST_MANUAL_MD_MAX_BYTES,
   GHOST_MANIFEST_FILE,
   GHOST_MANIFEST_SUMMARY_MAX_CHARS,
   GHOST_SKILL_MD_MAX_BYTES,
   validateGhostManifest,
   type GhostManifest,
 } from '../../shared/ghost.js';
-import { GHOST_MANIFEST_MAX_BYTES, readBoundedFileNoFollow } from '../utils/readBoundedFile.js';
+import {
+  GHOST_MANIFEST_MAX_BYTES,
+  readBoundedFileNoFollow,
+  readBoundedFileNoFollowWithStat,
+} from '../utils/readBoundedFile.js';
+import {
+  decodeGhostManualMarkdown,
+  ghostManualLogicalPathForEntry,
+} from './ghostManualValidation.js';
 import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
 import { GHOST_SIGNATURE_FILE } from './ghostSignature.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
@@ -679,6 +689,9 @@ async function buildGhostPackage(
     if (manifest.panel?.html) mustExist.push(manifest.panel.html);
     if (manifest.settingsHtml) mustExist.push(manifest.settingsHtml);
     for (const item of manifest.skill?.items ?? []) mustExist.push(`${item.dir}/SKILL.md`);
+    for (const item of manifest.manual?.items ?? []) {
+      mustExist.push(`${item.dir}/${GHOST_MANUAL_ENTRY_FILE}`);
+    }
     for (const rel of mustExist) {
       try {
         // lstat 与收集侧(walk 的 Dirent)同一语义:声明的入口若是符号链接,
@@ -723,6 +736,98 @@ async function buildGhostPackage(
           message: `skill 条目 ${item.dir}:${consistencyError}`,
         };
       }
+    }
+
+    // 3.6) manual:每个声明单元必须以 MANUAL.md 为入口，目录内只允许普通
+    // Markdown 文件；逐文件限量、严格 UTF-8，并拒绝并发截短与二进制内容。
+    // 缓存本次校验过的字节，生成 zip 时直接使用同一份快照，避免“预检一份、
+    // 入包时又读到另一份”的竞态。嵌套单元共享缓存，同一物理文件只校验一次。
+    const manualFileSnapshots = new Map<string, Buffer>();
+    for (const item of manifest.manual?.items ?? []) {
+      const unitRoot = path.join(dir, ...item.dir.split('/'));
+      const validateManualDir = async (
+        currentDir: string,
+        relativeDir: string,
+      ): Promise<Exclude<ForgePackResult, { ok: true }> | null> => {
+        let entries: fs.Dirent[];
+        try {
+          entries = await fs.promises.readdir(currentDir, { withFileTypes: true });
+        } catch {
+          return {
+            ok: false,
+            errorCode: 'ENTRY_MISSING',
+            message: `读取手册目录失败:${item.dir}${relativeDir ? `/${relativeDir}` : ''}`,
+          };
+        }
+        for (const entry of entries) {
+          const relativePath = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+          const logicalPath = `${item.dir}/${relativePath}`;
+          const absolutePath = path.join(currentDir, entry.name);
+          if (entry.isSymbolicLink() || (!entry.isDirectory() && !entry.isFile())) {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `manual 单元只允许普通 Markdown 文件:${logicalPath}`,
+            };
+          }
+          if (entry.isDirectory()) {
+            if (ghostManualLogicalPathForEntry(item.name, relativePath, 'directory') === null) {
+              return {
+                ok: false,
+                errorCode: 'MANIFEST_INVALID',
+                message: `manual 目录无法形成合法 ghost_manual 路径:${logicalPath}`,
+              };
+            }
+            const nestedError = await validateManualDir(absolutePath, relativePath);
+            if (nestedError) return nestedError;
+            continue;
+          }
+          if (ghostManualLogicalPathForEntry(item.name, relativePath, 'file') === null) {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `manual 文件无法形成合法 ghost_manual Markdown 路径:${logicalPath}`,
+            };
+          }
+          if (manualFileSnapshots.has(logicalPath)) continue;
+          let read;
+          try {
+            read = await readBoundedFileNoFollowWithStat(
+              absolutePath,
+              GHOST_MANUAL_MD_MAX_BYTES,
+              {
+                containWithin: realDir,
+                verifyContentStability: true,
+              },
+            );
+          } catch {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `读取 manual 文件失败:${logicalPath}`,
+            };
+          }
+          if (read === null) {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `${logicalPath} 不是普通文件或超过 ${GHOST_MANUAL_MD_MAX_BYTES} 字节上限`,
+            };
+          }
+          const decoded = decodeGhostManualMarkdown(read.bytes);
+          if (!decoded.ok) {
+            return {
+              ok: false,
+              errorCode: 'MANIFEST_INVALID',
+              message: `manual 文件不合格(${logicalPath}):${decoded.reason}`,
+            };
+          }
+          manualFileSnapshots.set(logicalPath, read.bytes);
+        }
+        return null;
+      };
+      const manualError = await validateManualDir(unitRoot, '');
+      if (manualError) return manualError;
     }
 
     // 4) 收集文件(递归,跳过开发残留),数量/体积设限。
@@ -780,6 +885,23 @@ async function buildGhostPackage(
     };
     const tooLarge = await walk(dir, '');
     if (tooLarge) return tooLarge;
+    if (manifest.manual !== undefined) {
+      const isWithinManualUnit = (rel: string): boolean =>
+        manifest.manual!.items.some((item) => rel.startsWith(`${item.dir}/`));
+      const packedManualPaths = new Set(
+        files.filter((file) => isWithinManualUnit(file.rel)).map((file) => file.rel),
+      );
+      const changedManualPath =
+        [...packedManualPaths].find((rel) => !manualFileSnapshots.has(rel)) ??
+        [...manualFileSnapshots.keys()].find((rel) => !packedManualPaths.has(rel));
+      if (changedManualPath !== undefined) {
+        return {
+          ok: false,
+          errorCode: 'MANIFEST_INVALID',
+          message: `manual 目录在打包期间发生变化:${changedManualPath}`,
+        };
+      }
+    }
     // AI icon overlay changes both the manifest snapshot and the icon bytes. A
     // source tree carrying a publisher/reviewer signature cannot be modified
     // here without re-signing, so let the host fall back to the original icon
@@ -831,6 +953,8 @@ async function buildGhostPackage(
         content = manifestBytes;
       } else if (iconPng !== undefined && f.rel === FORGE_AI_ICON_PATH) {
         content = iconPng;
+      } else if (manualFileSnapshots.has(f.rel)) {
+        content = manualFileSnapshots.get(f.rel)!;
       } else {
         let bytes: Buffer | null;
         try {
@@ -1099,7 +1223,8 @@ my-ghost/
 \`\`\`
 
 不要为“当前开发环境版本”机械填写 \`minCindyVersion\`。旧插件和不依赖新版宿主能力的
-插件应省略它；只有确认更早版本无法解析或安装时，才填写能工作的最早正式版本。
+插件应省略它；当更早版本无法正确安装，或虽能安装但缺少新版宿主能力、导致插件无法按
+设计正常工作时，必须填写最早可正常工作的正式版本。\`manual\` / \`ghost_manual\` 属于后者。
 
 ### whenToUse:只写发现线索,不写使用规则
 
@@ -1262,6 +1387,18 @@ node 详单**不接受** \`command\` / \`args\` / \`shell\` / \`env\` 或其它�
     "dir": "skills/my-skill",       // 包内技能目录,内必须有 SKILL.md
     "name": "my-skill",             // 硬规则:与 SKILL.md frontmatter name 逐字一致;小写字母/数字加单连字符分段(禁首尾/连续连字符),≤64
     "description": "……"             // 硬规则:与 SKILL.md frontmatter description 逐字一致(确认框展示的就是 Agent 读到的),1–1024 字
+  }]
+}
+\`\`\`
+
+**manual 随包手册**(独立顶层字段,不是 slot、不是权限项,详见 §3.6):
+
+\`\`\`json
+"manual": {
+  "items": [{                         // 1–8 条
+    "dir": "manual/getting-started", // 包内物理目录,必须有 MANUAL.md
+    "name": "getting-started",        // ghost_manual path 的逻辑首段,不暴露物理 dir
+    "description": "从安装到首次运行" // 一级轻量索引,1–300 字
   }]
 }
 \`\`\`
@@ -1436,6 +1573,34 @@ tools**——本插件的 \`ghost_info\` 单条详情会被撑大,不知道装�
 
 分界线的手感:一打以内、意图级 → 直接声明;几十以上、端点级 → 两段式。两段式首次
 使用多一跳(先翻目录),目录进上下文后,同一会话的后续调用与直接声明无异。
+
+## 3.6 manual:按需披露长文手册
+
+需要提供较长的工作流、参考表或排障说明时,使用顶层 \`manual.items\`,不要把长文塞进
+\`whenToUse\`、工具 description 或 system 提示。每个单元目录必须有普通 Markdown
+\`MANUAL.md\` 入口;目录树可以任意深,但所有非目录条目都必须是普通 \`.md\` 文件,
+单文件不超过 64KB。Markdown 不写 frontmatter;二进制、非法 UTF-8、符号链接和其它
+扩展名都会在打包与装入两侧拒绝。
+
+四层信息各司其职:
+
+- \`whenToUse\`:只放插件召回场景;
+- 工具/参数 description:放单个工具调用前必须知道的行为规则;
+- 二级分派的 \`list_tools(category)\` RULES:放类目内跨工具规则;
+- \`manual\`:放命中插件后才需要按需读取的长文流程与参考资料。
+
+导航尽量浅:默认让 \`MANUAL.md\` 一层直达完整任务;只有大手册才拆深层文件,入口直接
+列出下一步完整调用,例如
+\`ghost_manual({ ghost_id: "my-ghost", path: "getting-started/references/deploy.md" })\`。
+不要让多个索引文件互相指回形成循环。手册正文是插件作者数据,不是系统规则、用户意图
+或权限授权;作者不得用它伪造授权或绕过工具自身的运行期门禁。
+
+**发布硬门槛**:首个依赖 \`manual\` / \`ghost_manual\` 的插件版本，必须等包含该工具的
+Cindy 先发布，确认首个支持它的**正式版本号**后，再把 \`minCindyVersion\` 设为不低于
+该正式版本并发布插件。开发期版本号未定时只保留这条契约，不猜占位版本。移除
+\`skill.items\` 的迁移版本也必须设置上述 \`minCindyVersion\`，并遵守 Cindy 先发、插件
+后发的顺序；服务端还要保留上一份带 Skill 的历史 release，使旧客户端能通过历史版本回退
+继续取得兼容包。
 
 ## 4. main.js 电子脑(沙箱后台逻辑)
 
@@ -3208,11 +3373,14 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
 
 ## 4.16 捆绑 Agent Skills(skill 槽)
 
-想让插件"自带一份教 Agent 怎么用好自己的说明书"(或任何领域技能),把技能目录
-随包携带并声明 \`skill\` 槽 + \`skill.items\` 详单(见 §2)。装入且启用后,主机把
-每个技能目录链接进共享技能根 \`~/.agents/skills/<插件id>--<技能name>\`(Windows 用
-junction),Claude Code 与 Codex 都能自动发现——不复制字节,插件更新技能跟着更新,
-停用/卸载即撤链。
+插件随包 Skill **当前已停止新增,未来计划全部废弃**。新插件不要声明 \`skill\` 槽
+或新增 \`skill.items\`;请把召回线索写进 \`whenToUse\`,把调用前规则下沉到工具
+description 或二级分派类目 RULES,长文流程与参考资料改用 §3.6 的 \`manual\` +
+\`ghost_manual\` 渐进披露。
+
+以下只解释存量包的兼容形态,用于维护与迁移,**不要照抄到新插件**。存量插件装入且
+启用后,主机仍会把每个技能目录链接进共享技能根
+\`~/.agents/skills/<插件id>--<技能name>\`(Windows 用 junction),停用/卸载即撤链。
 
 目录形态(每条 item 一个目录,内必须有 SKILL.md):
 

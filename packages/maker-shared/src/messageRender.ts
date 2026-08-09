@@ -535,8 +535,7 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
         // 同轮 steer 插话:turn 还在跑,用户在指挥进行中的活,不是开新话题
         // (MessageStream 的 turn 分组同样把 steer 排除在新 turn 边界外)。当
         // 边界会让插话后的 TaskCreate 清掉本轮 taskState、TodoWrite 换 key。
-        message.delivery === 'steer' ||
-        meta?.delivery === 'steer' ||
+        isSteerUserRow(message) ||
         // 子代理内部的 user 行(带 parentUuid/parentToolUseId)是子任务的输入,
         // 不是用户开新话题——当边界会把主线程进行中的计划切成新 session、换 key
         // 重挂载 TodoListCard。
@@ -820,12 +819,11 @@ export function applyCodexPlanSnapshotOnDone<
  * (mobile 与 main 侧的原始行保持这个形状),desktop 渲染层把它投影成顶层
  * `delivery` 后丢弃原 meta。只看顶层会让 mobile / main 的所有权回扫在插话行上
  * 提前收手,全勾完的失败计划先按旧数据退场、等 main 的异步印记广播才复活
- * (断连时要等到重新加载,review P2)。
+ * (断连时要等到重新加载,review P2)。计划分组边界与失败回扫共用这一个谓词,
+ * 两处不再各自推导"什么算插话"。
  */
 function isSteerUserRow(message: MessageRenderSourceMessageLike): boolean {
-  if (message.delivery === 'steer') return true;
-  const meta = (message as { agentMeta?: { delivery?: unknown } | null }).agentMeta;
-  return meta?.delivery === 'steer';
+  return message.delivery === 'steer' || message.agentMeta?.delivery === 'steer';
 }
 
 /**

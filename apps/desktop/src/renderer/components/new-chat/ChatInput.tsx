@@ -47,6 +47,10 @@ import {
 import { WindowsSelectionReplacement } from './WindowsSelectionReplacement';
 import { EmptyDocSelectionGuard } from './EmptyDocSelectionGuard';
 import {
+  hasFocusMovedToInteractiveElement,
+  useComposerSendFocusRestore,
+} from './useComposerSendFocusRestore';
+import {
   setVoiceInputDraftDecoration,
   VoiceInputDraftDecoration,
   type VoiceInputCaretState,
@@ -1147,6 +1151,10 @@ export function ChatInput({
     // device-link 远程会话 & SSH 远程会话:maker:predict-prompt 不在 allowlist,且远程对话内容
     // 不应送到控制端本地 provider/凭证 —— 跳过预测。
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
+      // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
+      // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
+      // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
+      if (makerChatStore.hasRunningWakeTask(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;
@@ -2736,28 +2744,11 @@ export function ChatInput({
   useEffect(() => {
     editor?.setEditable(!composerMutationLocked);
   }, [composerMutationLocked, editor]);
-  /**
-   * 发送后把光标还回输入框。
-   *
-   * 派发期间 `composerEditorLocked` 会走上面的 `setEditable(false)`,contenteditable
-   * 一关浏览器就把焦点丢给 `<body>`;派发结束只恢复可编辑、不恢复焦点 —— 于是回车
-   * 发送完光标就没了,要接着打字得先点回输入框(推荐提示词的 Tab 也会因此失效)。
-   *
-   * 只在「派发前确实聚焦过」时补(标记在 dispatchSend 里同步记下),所以不抢焦点:
-   * 未聚焦就发送、或 disabled / 语音占用导致的上锁都不会触发。
-   *
-   * 必须排在上面那个 setEditable effect 之后:同一次 commit 里 effect 按声明序跑,
-   * 解锁时要等 setEditable(true) 先把 contenteditable 装回去,focus() 才落得进去。
-   */
-  const restoreFocusAfterDispatchRef = useRef(false);
-  useEffect(() => {
-    if (sendDispatchInFlight) return;
-    if (!restoreFocusAfterDispatchRef.current) return;
-    restoreFocusAfterDispatchRef.current = false;
-    const ed = editorRef.current;
-    if (!ed || ed.isDestroyed || !ed.isEditable) return;
-    ed.commands.focus();
-  }, [sendDispatchInFlight]);
+  const captureSendFocusForRestore = useComposerSendFocusRestore(
+    editor,
+    composerMutationLocked,
+    sendDispatchInFlight,
+  );
   const { settings: voiceInputSettings } = useVoiceInputSettings();
   const voiceInputShortcutLabel = useMemo(
     () => formatVoiceInputShortcut(voiceInputSettings.shortcut),
@@ -4417,10 +4408,7 @@ export function ChatInput({
       // settings settle; remote sends must stay editable after their
       // click-time snapshot is cleared.
       if (!optimisticallyClearRemoteComposer) {
-        // 上锁会 setEditable(false) 把焦点打飞。这里同步(state 更新前)记下派发瞬间
-        // 是否聚焦,解锁后由 restoreFocusAfterDispatch effect 还原。只在真会上锁的
-        // 分支记,否则标记会滞留到下一次派发的解锁时机上误触发。
-        restoreFocusAfterDispatchRef.current = editor?.isFocused ?? false;
+        captureSendFocusForRestore();
         setSendDispatchInFlight(true);
       }
       try {
@@ -4898,12 +4886,7 @@ export function ChatInput({
             const coordinator = effortChangeCoordinatorRef.current;
             let runtimeSettled = false;
             let timeoutId: ReturnType<typeof setTimeout> | undefined;
-            // 同一次派发里的第二段上锁。用 `||` 而不是直接赋值:本地路径此时已被上面
-            // 那次上锁 setEditable(false) 打掉焦点,重新读 isFocused 会是 false、把先前
-            // 记住的 true 覆盖掉;`||` 既保住它,又能为 remote optimistic 那条没走上面
-            // 分支的路径补上标记。
-            restoreFocusAfterDispatchRef.current =
-              restoreFocusAfterDispatchRef.current || (editor?.isFocused ?? false);
+            captureSendFocusForRestore();
             setSendDispatchInFlight(true);
             try {
               await Promise.race([
@@ -5003,6 +4986,7 @@ export function ChatInput({
       confirmDialog,
       navigate,
       planModeEntry,
+      captureSendFocusForRestore,
     ],
   );
   useEffect(() => {

@@ -13679,6 +13679,12 @@ export const makerChatStore = {
   getLightSnapshot,
   /** Non-creating read: session has a paused, non-empty pending queue (sidebar indicator). */
   hasPausedQueue,
+  /** 查询会话是否有正在运行的 wake 型后台任务 (local_agent / local_workflow)。 */
+  hasRunningWakeTask: (sessionId: string): boolean => {
+    const state = sessions.get(sessionId);
+    if (!state) return false;
+    return hasRunningWakeTask(state);
+  },
   mirrorSessionFields,
   /** F-SB-7: Subscribe to all session changes (for Sidebar running indicators). */
   subscribeAll,

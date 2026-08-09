@@ -478,6 +478,7 @@ interface MessageActions {
   onLoadEarlier?: () => void | Promise<void>;
   onOpenForkOrigin?: () => void;
   onOpenPayload?: (payload: MessagePayload) => void;
+  onBlockingOverlayChange?: (blocked: boolean) => void;
   /** 正文里会话深链 chip(xdt-maker://session/…)点击回调,app 内跳转。 */
   onOpenSessionLink?: (url: string) => void;
   onPreviewRewind?: (clientId: string, draft: MobileMessageDraft) => void;
@@ -518,6 +519,7 @@ export function MessageRenderer({
   onDeleteMessage,
   onLoadEarlier,
   onOpenForkOrigin,
+  onBlockingOverlayChange,
   onOpenSessionLink,
   onPreviewRewind,
   onEnterShareSelection,
@@ -692,6 +694,10 @@ export function MessageRenderer({
   const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
   const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
   const [payload, setPayload] = useState<MessagePayload | null>(null);
+  useEffect(() => {
+    onBlockingOverlayChange?.(payload !== null);
+    return () => onBlockingOverlayChange?.(false);
+  }, [onBlockingOverlayChange, payload]);
   // 关闭回调必须引用稳定:内联闭包每次渲染换新,会经 ImageLightbox 透传成
   // LightboxPage 手势 useMemo 的依赖,流式回复期间每 token 重建手势图,
   // 可能打断进行中的捏合/拖动手势(rule 7)。

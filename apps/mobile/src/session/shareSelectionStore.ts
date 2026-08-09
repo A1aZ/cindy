@@ -4,6 +4,7 @@ interface ShareableMessageLike {
   kind: string;
   systemCardType?: unknown;
   orcaCard?: unknown;
+  hookSource?: unknown;
   isSyntheticTrigger?: boolean;
 }
 
@@ -12,6 +13,7 @@ export function isShareableMessage(message: ShareableMessageLike): boolean {
     (message.kind === "user" || message.kind === "assistant") &&
     !message.systemCardType &&
     !message.orcaCard &&
+    !message.hookSource &&
     message.isSyntheticTrigger !== true
   );
 }

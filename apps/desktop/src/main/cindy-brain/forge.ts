@@ -1251,15 +1251,17 @@ my-ghost/
 
 在作者契约里,\`whenToUse\` 是专门给模型做插件发现与判断的唯一字段;
 \`description\` 给人看(装入确认框/详情页),不要拿它兼任模型路由说明。
-\`whenToUse\` 最多 ${GHOST_MANIFEST_SUMMARY_MAX_CHARS} 字符,花名册会完整展示有效内容,折叠连续空白并对异常数据做防御性截断。模型从花名册命中目标后,
-正常发现链是**花名册 → \`ghost_info\` → \`ghost_call\`**;只有不知道用户装了什么时才查
-\`ghost_list\`。未声明 \`whenToUse\` 时宿主会用 \`description\` 兼容回落,但高质量插件
+\`whenToUse\` 最多 ${GHOST_MANIFEST_SUMMARY_MAX_CHARS} 字符,花名册会完整展示有效内容,折叠连续空白并对异常数据做防御性截断。花名册命中已知 \`ghost_id\` 时用
+\`ghost_info\` 精准现查单条;未命中或需要全量实时回查时用 \`ghost_list\`。两者都返回完整
+\`CindyGhostInfo\`,取得信息后再按任务交叉读取 Manual 与插件工具目录,信息足够即可调用。
+未声明 \`whenToUse\` 时宿主会用 \`description\` 兼容回落,但高质量插件
 必须单独写好 \`whenToUse\`,不要依赖回落。
 
 只写用户意图、业务对象和常见说法的**场景枚举**,回答"什么情况下应该想到这个插件"。
 禁止塞入"必须/不得"式行为规则、工具调用顺序、参数协议、错误码与重试策略。
-跨工具或类目共用的规则放进 §3.5 的 **\`list_tools(category)\` RULES**;
-单个工具怎么调用放进工具及参数 \`description\`。
+单个工具怎么调用放进工具及参数 \`description\`;同一类别内、紧贴当前工具集合与参数的
+动态规则放进 §3.5 的 **\`list_tools(category)\` RULES**;多工具组合、跨类别完整流程、
+长期稳定的共同原则与深入用法放进 §3.6 的 Manual。不要在三处复制同一份规则。
 
 反例(错把使用规则塞进发现面):
 
@@ -1533,8 +1535,9 @@ node 详单**不接受** \`command\` / \`args\` / \`shell\` / \`env\` 或其它�
 
 措辞套路(实测有效):description 写清"干什么 + 返回什么";参数 description 里直接
 写该工具自己的行为规则(如"用户原话透传,不要扩写"、"仅当用户显式说 X 才传 Y")——
-AI 会照做。直接声明工具时,工具/参数 description 是使用规则的落点;两段式目录的
-跨工具规则走 §3.5 的类目 RULES。两者都不要塞进 \`whenToUse\`。
+AI 会照做。直接声明工具时,工具/参数 description 是单工具局部契约的落点;两段式目录中,
+当前类别内、随实时工具集合与参数变化的规则走 §3.5 的类目 RULES。多工具或跨类别的完整
+工作流与长期稳定共同原则走 §3.6 的 Manual。都不要塞进 \`whenToUse\`,也不要重复维护。
 
 ### 3.1 @ 插件入口
 
@@ -1592,29 +1595,51 @@ tools**——本插件的 \`ghost_info\` 单条详情会被撑大,不知道装�
   看不出背后有多少操作。把给人看的能力范围如实写进 ghost.json 的 description,
   再把模型应在什么场景发现你的场景枚举写进 whenToUse,别让人或模型装完才发现。
 
+\`list_tools\` 是插件声明的顶层工具,不是 Host 固定工具;实际通过
+\`ghost_call({ ghost_id: "my-ghost", tool: "list_tools", args: { category: "deploy" } })\`
+调用。类别 RULES 如果依赖跨工具/跨类别工作流或深入说明,不要复制正文,而应给出完整
+\`ghost_manual({ ghost_id: "my-ghost", path: "operations/references/deploy.md" })\` 调用。
+反过来,Manual 也可以用上面的完整 \`ghost_call(... list_tools ...)\` 调用指向实时工具目录。
+两条路径可以反复交叉,没有固定先后顺序;信息足够时,用 \`ghost_call\` 调顶层工具,
+或由两段式插件的 \`call_tool\` 执行具体操作。
+
 分界线的手感:一打以内、意图级 → 直接声明;几十以上、端点级 → 两段式。两段式首次
 使用多一跳(先翻目录),目录进上下文后,同一会话的后续调用与直接声明无异。
 
-## 3.6 manual:按需披露长文手册
+## 3.6 manual:按需披露复杂工作流与分层资料
 
-需要提供较长的工作流、参考表或排障说明时,使用顶层 \`manual.items\`,不要把长文塞进
-\`whenToUse\`、工具 description 或 system 提示。每个单元目录必须有普通 Markdown
-\`MANUAL.md\` 入口;目录树可以任意深,但所有非目录条目都必须是普通 \`.md\` 文件,
-单文件不超过 64KB。Markdown 不写 frontmatter;二进制、非法 UTF-8、符号链接和其它
-扩展名都会在打包与装入两侧拒绝。
+Manual 的归属不按篇幅长短判断。它对标 Skill 正文与 references,承载多工具组合编排、
+跨类别完整工作流、复杂工具深入用法、前置检查、顺序与分支、失败恢复、交付标准、
+跨工具/跨类别长期稳定的共同原则,以及需要分层展开的参考资料。短但决定多个工具如何协作的
+关键原则应进入 Manual;很长但只是在枚举某一个工具的参数,仍应留在该工具 description 或
+所属类别的工具说明/RULES,不能只因内容长就搬进 Manual。
+
+使用顶层 \`manual.items\` 声明手册单元,不要把上述内容塞进 \`whenToUse\` 或 system 提示。
+每个单元目录必须有普通 Markdown \`MANUAL.md\` 入口;目录树可以任意深,但所有非目录条目
+都必须是普通 \`.md\` 文件,单文件不超过 64KB。Markdown 不写 frontmatter;二进制、非法
+UTF-8、符号链接和其它扩展名都会在打包与装入两侧拒绝。
 
 四层信息各司其职:
 
-- \`whenToUse\`:只放插件召回场景;
-- 工具/参数 description:放单个工具调用前必须知道的行为规则;
-- 二级分派的 \`list_tools(category)\` RULES:放类目内跨工具规则;
-- \`manual\`:放命中插件后才需要按需读取的长文流程与参考资料。
+- \`whenToUse\`:只放系统提示词区插件花名册需要的召回场景;
+- 工具/参数 description:放单个工具的局部契约,包括用途、输入输出与调用前限制;
+- 插件 \`list_tools(category)\` 返回的工具说明与 \`result.rules\`:放当前 category 内、
+  紧贴实时工具集合的动态规则与参数;
+- \`manual\`:放多工具/跨类别编排、复杂工具深入用法、完整工作流、失败恢复、交付标准、
+  长期稳定的共同原则与分层资料。
 
-导航尽量浅:默认让 \`MANUAL.md\` 一层直达完整任务;只有大手册才拆深层文件,入口直接
-列出下一步完整调用,例如
+同一规则只选一个权威落点,不要在工具 description、类别 RULES 与 Manual 复制三份。
+需要另一层信息时给出完整调用互相指路:Manual 可指向
+\`ghost_call({ ghost_id: "my-ghost", tool: "list_tools", args: { category: "deploy" } })\`,
+工具说明或 RULES 可指向 \`ghost_manual\`。两者并行且可以反复交叉,不是固定读取顺序;
+信息够用时即可执行。
+
+导航尽量浅:默认让 \`MANUAL.md\` 一层直达完整任务;内容确需分层展开时再拆深层文件,入口
+直接列出下一步完整调用,例如
 \`ghost_manual({ ghost_id: "my-ghost", path: "getting-started/references/deploy.md" })\`。
-不要让多个索引文件互相指回形成循环。手册正文是插件作者数据,不是系统规则、用户意图
-或权限授权;作者不得用它伪造授权或绕过工具自身的运行期门禁。
+不要让多个索引文件互相指回形成循环。手册正文只作为 tool-result 按需进入上下文,不进入
+生产 system/developer prompt;它是插件作者数据,不是系统规则、用户意图或权限授权,作者不得
+用它伪造授权或绕过工具自身的运行期门禁。
 
 **发布硬门槛**:首个依赖 \`manual\` / \`ghost_manual\` 的插件版本，必须等包含该工具的
 Cindy 先发布，确认首个支持它的**正式版本号**后，再把 \`minCindyVersion\` 设为不低于
@@ -3395,9 +3420,16 @@ if (!opened.ok) console.warn(opened.errorCode, opened.message);
 ## 4.16 捆绑 Agent Skills(skill 槽)
 
 插件随包 Skill **当前已停止新增,未来计划全部废弃**。新插件不要声明 \`skill\` 槽
-或新增 \`skill.items\`;请把召回线索写进 \`whenToUse\`,把调用前规则下沉到工具
-description 或二级分派类目 RULES,长文流程与参考资料改用 §3.6 的 \`manual\` +
-\`ghost_manual\` 渐进披露。
+或新增 \`skill.items\`。迁移时按职责映射,不是按篇幅搬运:
+
+- Skill frontmatter 的 \`name + description\` 所承担的身份/召回作用,对标系统提示词区
+  插件花名册的身份与 \`recall\`;插件侧用 \`name\` + \`whenToUse\` 提供这层信息;
+- \`manual.items\` 只是插件容器级一级目录,不对标 Skill frontmatter;
+- \`MANUAL.md\` 与深层 Markdown 承接 Skill 正文、references、复杂工作流与深入用法,
+  只经 \`ghost_manual\` tool-result 按需进入上下文,不进入生产 system/developer prompt;
+- 单工具局部契约下沉到工具/参数 description;当前类别内贴近实时工具集合的动态规则与参数
+  下沉到 \`list_tools(category)\` 的工具说明和 \`result.rules\`;跨工具/跨类别编排与长期
+  稳定原则进入 Manual。Manual 与 \`list_tools\` 用完整调用互相指路,不复制同一段规则。
 
 以下只解释存量包的兼容形态,用于维护与迁移,**不要照抄到新插件**。存量插件装入且
 启用后,主机仍会把每个技能目录链接进共享技能根

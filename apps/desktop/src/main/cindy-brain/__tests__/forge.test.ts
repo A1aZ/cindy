@@ -717,20 +717,50 @@ describe('scaffoldGhostDir', () => {
 });
 
 describe('FORGE_GUIDE', () => {
-  it('manual 作者契约覆盖四层分工、完整调用、浅导航与 skill 废弃口径', () => {
+  it('manual 作者契约按职责分流并支持与工具目录交叉导航', () => {
     for (const marker of [
-      '## 3.6 manual:按需披露长文手册',
+      '## 3.6 manual:按需披露复杂工作流与分层资料',
       '"manual": {',
       'MANUAL.md',
       '目录树可以任意深',
       'Markdown 不写 frontmatter',
-      'list_tools(category)',
+      'Manual 的归属不按篇幅长短判断',
+      '多工具组合编排',
+      '复杂工具深入用法',
+      '前置检查、顺序与分支、失败恢复、交付标准',
+      '短但决定多个工具如何协作的',
+      '很长但只是在枚举某一个工具的参数',
+      '用途、输入输出与调用前限制',
+      '紧贴实时工具集合的动态规则与参数',
+      '同一规则只选一个权威落点',
+      '两者并行且可以反复交叉,不是固定读取顺序',
+      'ghost_call({ ghost_id: "my-ghost", tool: "list_tools", args: { category: "deploy" } })',
       'ghost_manual({ ghost_id: "my-ghost", path: "getting-started/references/deploy.md" })',
       '不要让多个索引文件互相指回形成循环',
-      '不是系统规则、用户意图',
-      '当前已停止新增,未来计划全部废弃',
+      '只作为 tool-result 按需进入上下文',
+      '不进入\n生产 system/developer prompt',
     ]) {
       expect(FORGE_GUIDE).toContain(marker);
+    }
+    expect(FORGE_GUIDE).not.toContain('需要提供较长的工作流、参考表或排障说明时');
+    expect(FORGE_GUIDE).not.toContain('只有大手册才拆深层文件');
+  });
+
+  it('skill 迁移精确映射召回元数据、正文与容器目录', () => {
+    const skillSection = FORGE_GUIDE.slice(
+      FORGE_GUIDE.indexOf('## 4.16 捆绑 Agent Skills(skill 槽)'),
+      FORGE_GUIDE.indexOf('## 4.17'),
+    );
+    for (const marker of [
+      '迁移时按职责映射,不是按篇幅搬运',
+      'Skill frontmatter 的 `name + description` 所承担的身份/召回作用',
+      '对标系统提示词区\n  插件花名册的身份与 `recall`',
+      '`manual.items` 只是插件容器级一级目录,不对标 Skill frontmatter',
+      '`MANUAL.md` 与深层 Markdown 承接 Skill 正文、references',
+      '只经 `ghost_manual` tool-result 按需进入上下文',
+      '当前已停止新增,未来计划全部废弃',
+    ]) {
+      expect(skillSection).toContain(marker);
     }
   });
 
@@ -741,7 +771,7 @@ describe('FORGE_GUIDE', () => {
     expect(FORGE_GUIDE).toContain('`manual` / `ghost_manual` 属于后者');
 
     const manualSection = FORGE_GUIDE.slice(
-      FORGE_GUIDE.indexOf('## 3.6 manual:按需披露长文手册'),
+      FORGE_GUIDE.indexOf('## 3.6 manual:按需披露复杂工作流与分层资料'),
       FORGE_GUIDE.indexOf('## 4. main.js 电子脑'),
     );
     const orderedRequirements = [
@@ -763,7 +793,9 @@ describe('FORGE_GUIDE', () => {
   it('写死 whenToUse 发现面与二级分派 RULES 契约', () => {
     expect(FORGE_GUIDE).toContain('给模型做插件发现与判断的唯一字段');
     expect(FORGE_GUIDE).toContain(`最多 ${GHOST_MANIFEST_SUMMARY_MAX_CHARS} 字符`);
-    expect(FORGE_GUIDE).toContain('花名册 → `ghost_info` → `ghost_call`');
+    expect(FORGE_GUIDE).toContain('花名册命中已知 `ghost_id` 时用');
+    expect(FORGE_GUIDE).toContain('未命中或需要全量实时回查时用 `ghost_list`');
+    expect(FORGE_GUIDE).toContain('两者都返回完整\n`CindyGhostInfo`');
     expect(FORGE_GUIDE).toContain(
       '禁止塞入"必须/不得"式行为规则、工具调用顺序、参数协议、错误码与重试策略',
     );
@@ -781,6 +813,8 @@ describe('FORGE_GUIDE', () => {
     );
     expect(FORGE_GUIDE).toContain('`rules: [规则键]`');
     expect(FORGE_GUIDE).toContain('参数 schema **和本次自纠必需的规则**');
+    expect(FORGE_GUIDE).toContain('`list_tools` 是插件声明的顶层工具,不是 Host 固定工具');
+    expect(FORGE_GUIDE).toContain('两条路径可以反复交叉,没有固定先后顺序');
     expect(FORGE_GUIDE).not.toContain('这是你影响 AI 行为的**唯一合法通道**');
     expect(FORGE_GUIDE).not.toContain('description(花名册自述)');
     expect(FORGE_GUIDE).not.toContain('选错会拖累所有会话');

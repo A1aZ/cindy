@@ -194,6 +194,7 @@ export function registerReviewStartHandler(
     let runningMeta: ReviewRunMeta | null = null;
     let sourceAgentKind: PreparedReviewRun['sourceAgentKind'] | null = null;
     let settled = false;
+    let settlementCause: 'provider-terminal' | 'reviewer-closed' | null = null;
     let reviewerClosed = false;
     let preparedRunCleaned = false;
     let preparedRunCleanup: (() => Promise<void>) | null = null;
@@ -366,6 +367,7 @@ export function registerReviewStartHandler(
         const terminalError = reviewEvent.type === 'error' && isTerminalTurnErrorEvent(reviewEvent);
         if (reviewEvent.type !== 'done' && !terminalError) return;
         settled = true;
+        settlementCause = 'provider-terminal';
         disposeReviewerListeners();
         terminalFinalization = (async () => {
           if (terminalError) {
@@ -408,6 +410,7 @@ export function registerReviewStartHandler(
       disposeReviewStatus = reviewer.onStatusChange((status) => {
         if (status !== 'closed' || settled || reviewerClosed) return;
         settled = true;
+        settlementCause = 'reviewer-closed';
         disposeReviewerListeners();
         terminalFinalization = (async () => {
           await updateSourceCard('failed', '', 'Reviewer task was closed before it finished');
@@ -478,6 +481,14 @@ export function registerReviewStartHandler(
       }
       if (settled) {
         await terminalFinalization;
+        // A provider terminal event proves the turn crossed its dispatch boundary even
+        // when Session.send has not returned yet. The source card already owns that
+        // completed/failed outcome, so report the command as accepted instead of making
+        // Renderer restore `/review` and offer an accidental duplicate run. A bare close
+        // remains a startup rejection because it does not prove provider dispatch.
+        if (settlementCause === 'provider-terminal') {
+          return { ok: true as const, runId, reviewerSessionId };
+        }
         throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before its start was accepted');
       }
       return { ok: true as const, runId, reviewerSessionId };

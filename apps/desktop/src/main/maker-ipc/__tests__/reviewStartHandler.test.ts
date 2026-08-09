@@ -187,6 +187,114 @@ describe('maker:review:start IPC lifecycle', () => {
     expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts a provider done emitted synchronously before send returns', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.send.mockImplementationOnce(async (_message, options) => {
+      await options.onAccepted?.();
+      reviewer.emit({ type: 'done', data: {} });
+      return { accepted: true } as const;
+    });
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toEqual({
+      ok: true,
+      runId: 'run-1',
+      reviewerSessionId: 'reviewer-1',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledTimes(1);
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: 'P1: real finding',
+        meta: expect.objectContaining({ status: 'completed' }),
+      }),
+    );
+    expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('accepts a synchronously dispatched terminal failure after failing the card once', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.send.mockImplementationOnce(async (_message, options) => {
+      await options.onAccepted?.();
+      reviewer.emit({
+        type: 'error',
+        data: { message: 'provider failed after dispatch', isTerminal: true },
+      });
+      return { accepted: true } as const;
+    });
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toEqual({
+      ok: true,
+      runId: 'run-1',
+      reviewerSessionId: 'reviewer-1',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledTimes(1);
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: '',
+        meta: expect.objectContaining({
+          status: 'failed',
+          error: 'provider failed after dispatch',
+        }),
+      }),
+    );
+  });
+
+  it('rejects a duplicate source submission while provider send is still pending', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    let releaseSend!: () => void;
+    const sendPending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    reviewer.send.mockImplementationOnce(async (_message, options) => {
+      await options.onAccepted?.();
+      await sendPending;
+      return { accepted: true } as const;
+    });
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    const first = harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+    await vi.waitFor(() => expect(reviewer.send).toHaveBeenCalledTimes(1));
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'SESSION_RUNNING',
+    });
+
+    releaseSend();
+    await expect(first).resolves.toMatchObject({ ok: true, runId: 'run-1' });
+    expect(deps.startReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a provider send failure before dispatch and permits retry', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.send.mockRejectedValueOnce(new Error('provider dispatch failed'));
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toThrow(
+      'provider dispatch failed',
+    );
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        result: '',
+        meta: expect.objectContaining({ status: 'failed' }),
+      }),
+    );
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      {
+        ok: true,
+        runId: 'run-2',
+      },
+    );
+  });
+
   it('fails a send rejected before provider dispatch, releases the source, and permits retry', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();

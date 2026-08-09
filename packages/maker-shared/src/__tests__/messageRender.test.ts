@@ -970,6 +970,18 @@ describe('message render todo grouping', () => {
         agentMeta: { parentUuid: 'toolu_01ABCDEF' },
       };
       expect(findLatestMessageTodoInsertion([realSubagentPlan])).toBeNull();
+
+      // 兼容模型归一化后的父调用 id(Task_x1)同样是真实 tool parent。
+      const compatSubagentPlan: MessageRenderSourceMessageLike = {
+        ...tool('todo-sub3', 'TodoWrite', {
+          todos: [
+            { content: 'Compat subagent step', status: 'in_progress' },
+            { content: 'Compat subagent follow-up', status: 'pending' },
+          ],
+        }),
+        agentMeta: { parentUuid: 'Task_x1' },
+      };
+      expect(findLatestMessageTodoInsertion([compatSubagentPlan])).toBeNull();
     });
 
     it('exports the same tool-parent shape check that projection sites must use', () => {
@@ -981,6 +993,13 @@ describe('message render todo grouping', () => {
       expect(isSubagentParentToolUseId('call_abc123')).toBe(true);
       expect(isSubagentParentToolUseId('4f1c9a7e-3b2d-4c8a-9e5f-1a2b3c4d5e6f')).toBe(false);
       expect(isSubagentParentToolUseId('preceding-user-uuid')).toBe(false);
+      // 兼容模型(kimi 系)的真实 tool-use id:`名字_序号`,以及 resume 前转录
+      // 归一化的产物 `_x` 顺延 / `_dupN` 去重。只认 toolu_/call_ 会把这类子代理
+      // 的计划当成顶层计划(review P2)。
+      expect(isSubagentParentToolUseId('Task_1')).toBe(true);
+      expect(isSubagentParentToolUseId('Task_x1')).toBe(true);
+      expect(isSubagentParentToolUseId('Bash_xx210')).toBe(true);
+      expect(isSubagentParentToolUseId('Bash_5_dup2')).toBe(true);
     });
 
     it('starts a new session when an ordinary user turn intervenes', () => {

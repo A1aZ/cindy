@@ -521,6 +521,23 @@ function hasSubagentParent(message: MessageRenderSourceMessageLike): boolean {
 
 /** Live Claude/Codex SDK tool-use ids;裸 uuid 形态的 legacy transcript 链边不算。 */
 const SUBAGENT_PARENT_ID_RE = /^(?:toolu|call)[_-]/iu;
+/**
+ * 兼容模型(kimi 系等)的 tool-use id 形态:`${ToolName}_${序号}`。resume 前的
+ * 转录归一化(maker-core 的 jsonl-tool-id-normalize)还会把它改写成 `Task_x1`
+ * (移出铸造空间,x 可顺延)与 `Bash_5_dup2`(去重),这些都是**真实 tool-use id**
+ * 并被同步写进子代理行的 parent_tool_use_id。只认 toolu_/call_ 前缀会把这类
+ * 子代理的 TodoWrite 当成顶层计划,而 desktop 实时流因显式投影不受影响 →
+ * 又一次多端分叉(review P2)。
+ *
+ * 与 legacy transcript 链边不会误撞:这条形态要求"下划线 + 可选 x + 末段数字",
+ * RFC uuid 与 `preceding-user-uuid` 都不含下划线数字结尾。
+ *
+ * 残留边界(如实记录):**任意**自定义形态的 tool id(既非 toolu_/call_,也非
+ * `名字_序号`)仍会被判成非 tool parent。彻底的解法是持久化时就记下"这是显式
+ * tool parent"这一位,而不是让每个消费方按字符串形态猜——同 canonical 计划模型
+ * 那笔欠账,留待正式建模时一并收口。
+ */
+const COMPAT_TOOL_USE_ID_RE = /^[A-Za-z][A-Za-z0-9_-]*_x*\d+(?:_dup\d+)?$/u;
 
 /**
  * 投影侧共用的同一条判据:这个字符串是不是 SDK 的 tool-parent id 形态。
@@ -536,7 +553,8 @@ export function isSubagentParentToolUseId(value: string): boolean {
 }
 
 function isSubagentParentId(value: string): boolean {
-  return SUBAGENT_PARENT_ID_RE.test(value.trim());
+  const trimmed = value.trim();
+  return SUBAGENT_PARENT_ID_RE.test(trimmed) || COMPAT_TOOL_USE_ID_RE.test(trimmed);
 }
 
 function looksLikeLegacyTranscriptUuid(value: string): boolean {

@@ -348,6 +348,11 @@ const ComposerHardBreak = HardBreak.extend({
 const TOOLBAR_DENSE_MAX_WIDTH = 520;
 const TOOLBAR_COMPACT_MAX_WIDTH = 448;
 
+// 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
+// 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
+// 模块级 Set 跟踪正在进行的预测,确保同一 session 同时只有一次预测调用。
+const _predictingSessions = new Set<string>();
+
 function isVoiceInputIdleLike(state: VoiceInputState): boolean {
   return state === 'idle' || state === 'done' || state === 'error';
 }
@@ -1173,6 +1178,11 @@ export function ChatInput({
         // 捕获请求时刻的 sessionId 与 turnGen 快照,落地前校验是否仍匹配。
         const requestSessionId = sessionId;
         const requestTurnGen = turnGenRef.current;
+        // 去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个
+        // ChatInput 实例都会独立检测到 turn 结束并触发预测。模块级 Set 确保
+        // 同一 session 同时只有一次预测调用,避免重复 provider 调用与费用。
+        if (_predictingSessions.has(requestSessionId)) return;
+        _predictingSessions.add(requestSessionId);
         window.electronAPI.maker
           .predictNextPrompt({
             sessionId,
@@ -1181,6 +1191,7 @@ export function ChatInput({
             workingDir: workingDir ?? undefined,
           })
           .then((result) => {
+            _predictingSessions.delete(requestSessionId);
             // 请求往返期间用户可能已经切换会话、发起新 turn 或开始打字 —— 落地前
             // 重新确认 sessionId、turnGen、编辑器状态,否则旧上下文的推荐会覆盖当前轮。
             const cur = editorRef.current;
@@ -1198,6 +1209,7 @@ export function ChatInput({
             }
           })
           .catch(() => {
+            _predictingSessions.delete(requestSessionId);
             // 预测失败静默处理:不显示推荐,也不回落任何默认文案。
           });
       }

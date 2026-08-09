@@ -1119,8 +1119,8 @@ export function onAssistantTextEvent(
       // 已完整的、更长前缀文本。只接受以当前增量为前缀的更长文本，避免同一 assistant
       // 消息中相邻 text block 互相覆盖。
       if (
-        text &&
-        (isFullText || (text.length > block.text.length && text.startsWith(block.text)))
+        isFullText ||
+        (text.length > block.text.length && text.startsWith(block.text))
       ) {
         block.text = text;
       }

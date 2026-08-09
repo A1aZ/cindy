@@ -992,6 +992,24 @@ describe('streamed assistant final calibration', () => {
     );
   });
 
+  it('drops stale streamed deltas when the authoritative final text is empty', async () => {
+    const persistId = onAssistantTextEvent(
+      SESSION,
+      { text: '撤回前的流式内容', isFinal: false },
+      null,
+    );
+    expect(onAssistantTextEvent(
+      SESSION,
+      { text: '', isFinal: true, isFullText: true },
+      null,
+    )).toBe(persistId);
+
+    flushAssistantBlock(SESSION, null);
+    await flushWrites();
+
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
   it('does not treat a shorter unmarked isFinal tail as a complete replacement', async () => {
     const persistId = onAssistantTextEvent(
       SESSION,

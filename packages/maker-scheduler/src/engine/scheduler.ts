@@ -362,6 +362,11 @@ export class Scheduler extends EventEmitter {
    * 只存内存：真到了重启，start() 的归一本来就会补上。
    */
   private readonly pendingReplans = new Map<string, StalledClaimPlan>();
+  /**
+   * 严格 cron 解析上线前可能落库的畸形 active 任务。清空 nextFireAt 若遇到存储故障，
+   * 周期 DB 同步仍会读回旧的到期时间；在用户修正表达式前必须持续把它们隔离在内存里。
+   */
+  private readonly invalidScheduleIds = new Set<string>();
 
   constructor(opts: SchedulerOptions) {
     super();
@@ -403,6 +408,9 @@ export class Scheduler extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.started) return;
+    // 隔离名单只描述本次运行周期里看到的存量坏记录。stop() 后再 start()
+    // 必须从持久化事实重新判定，不能把已删除或已修正任务的 id 带进新周期。
+    this.invalidScheduleIds.clear();
     // 被动模式:不装 tick 时钟、不做僵尸清理(可能误伤另一个活跃实例正在跑的
     // run)、不预载 activeSchedules(反正不 tick)。CRUD / runNow 照常可用。
     if (this.passive) {
@@ -443,7 +451,32 @@ export class Scheduler extends EventEmitter {
       // 节奏（cron 后续怎么改都不生效）。迁移已于 2026-05 上线并跑了一个月，存量
       // 老任务均已转换完，该逻辑只剩误伤，故移除。
       let current = sch;
-      const next = computeNextFireAt(current, now);
+      let next: number | undefined;
+      try {
+        next = computeNextFireAt(current, now);
+        this.invalidScheduleIds.delete(current.id);
+      } catch (err) {
+        // 旧版本曾接受 parseInt 可部分解析的畸形 cron（例如 `5abc * * * *`）。
+        // 升级后严格解析会拒绝它们，但一条存量坏记录不能让整个 scheduler 启动失败。
+        // 清空旧的 nextFireAt，保留记录供用户修正；内存副本同样禁用，避免陈旧时间误触发。
+        this.logger?.warn?.('scheduler: skipped invalid active schedule during startup', {
+          scheduleId: current.id,
+          error: String(err),
+        });
+        this.invalidScheduleIds.add(current.id);
+        try {
+          const updated = await this.storage.update(current.id, { nextFireAt: undefined });
+          current = updated ?? { ...current, nextFireAt: undefined };
+        } catch (clearErr) {
+          current = { ...current, nextFireAt: undefined };
+          this.logger?.warn?.('scheduler: failed to clear invalid schedule nextFireAt', {
+            scheduleId: current.id,
+            error: String(clearErr),
+          });
+        }
+        this.activeSchedules.set(current.id, current);
+        continue;
+      }
       if (next !== current.nextFireAt) {
         const updated = await this.storage.update(current.id, { nextFireAt: next });
         if (updated) current = updated;
@@ -523,8 +556,23 @@ export class Scheduler extends EventEmitter {
       this.lastDbSyncAt = now;
       try {
         const actives = await this.storage.listActive();
+        const previousSchedules = new Map(this.activeSchedules);
         this.activeSchedules.clear();
-        for (const sch of actives) this.activeSchedules.set(sch.id, sch);
+        const activeIds = new Set(actives.map((sch) => sch.id));
+        for (const scheduleId of this.invalidScheduleIds) {
+          if (!activeIds.has(scheduleId)) this.invalidScheduleIds.delete(scheduleId);
+        }
+        for (const sch of actives) {
+          const previous = previousSchedules.get(sch.id);
+          const cadenceChanged =
+            !previous ||
+            previous.cronExpr !== sch.cronExpr ||
+            previous.timezone !== sch.timezone ||
+            previous.intervalMs !== sch.intervalMs ||
+            previous.manual !== sch.manual;
+          const current = this.keepInvalidScheduleQuarantined(sch, now, cadenceChanged);
+          this.activeSchedules.set(current.id, current);
+        }
       } catch (err) {
         this.logger?.warn?.('scheduler: active-schedule DB sync failed', err);
       }
@@ -640,6 +688,22 @@ export class Scheduler extends EventEmitter {
         return;
       }
       schedule = claimed;
+      // The CAS protects the fire time, not the rest of the row. Another
+      // instance can therefore change cron metadata while retaining the same
+      // nextFireAt and still return its new row here. Validate the claimed
+      // source of truth before creating a run so that 30-second cache windows
+      // cannot execute a newly malformed schedule once.
+      try {
+        computeNextFireAt(schedule, this.clock.now());
+        this.invalidScheduleIds.delete(schedule.id);
+      } catch (err) {
+        this.invalidScheduleIds.add(schedule.id);
+        this.logger?.warn?.('scheduler: quarantined invalid schedule after due-fire claim', {
+          scheduleId: schedule.id,
+          error: String(err),
+        });
+        return;
+      }
     }
     this.updateInflightAttempt(runId, 'persisting');
     const firedAt = this.clock.now();
@@ -1171,6 +1235,10 @@ export class Scheduler extends EventEmitter {
     const now = this.clock.now();
     const id = this.generateId();
     const manual = input.manual ?? false;
+    // intervalMs 只决定下一次何时触发，不会让 cronExpr / timezone 变成可跳过的
+    // 元数据。否则用户能先持久化一个坏表达式，等未来清掉 intervalMs 时才在调度
+    // 路径报错。此处纯校验，不影响 interval 的 now + N 首次触发语义。
+    nextCronOrMonthlyFire(input.cronExpr, now, input.timezone);
     // 首次 nextFireAt：
     //   - manual → undefined（永不自动 fire）
     //   - intervalMs 设了 → createdAt + intervalMs（让"每 N 分钟"有 N 分钟暖场期）
@@ -1276,28 +1344,48 @@ export class Scheduler extends EventEmitter {
     if (shouldReactivateExpired) {
       updates.status = 'active';
     }
+    // cronExpr 即使暂时被 intervalMs 覆盖，也会在调用方显式清除 interval 后重新
+    // 成为调度依据。不能让一次 interval 模式更新把畸形 cron 持久化，留到以后才
+    // 在重排或启动时爆炸；timezone 变更同样需要验证现有表达式在新时区可解析。
+    const intervalKeyPresent = Object.prototype.hasOwnProperty.call(patch, 'intervalMs');
+    if (
+      patch.cronExpr !== undefined ||
+      patch.timezone !== undefined ||
+      patch.manual === false ||
+      intervalKeyPresent ||
+      shouldReactivateExpired
+    ) {
+      nextCronOrMonthlyFire(candidate.cronExpr, now, candidate.timezone);
+    }
     // manual / intervalMs / cronExpr / timezone 任一变化，或 expired 恢复 active 时，
     // 都要重算 nextFireAt：
     //   - manual:true  → 强制清空 nextFireAt（不再自动 fire）
     //   - manual:false 且 触发字段变 → 按新表达式重算（intervalMs 优先于 cron）
     //   - manual:false 且 触发字段没动 → nextFireAt 保留（避免 update 副作用）
+    // intervalMs 按「key 是否在场」判定而不是「值是否 undefined」：显式清空
+    // （key 在、值 undefined）同样是触发字段变化，必须重算回 cron 槽位。
     const needsRecompute =
       patch.cronExpr !== undefined ||
       patch.timezone !== undefined ||
       patch.manual !== undefined ||
-      patch.intervalMs !== undefined ||
+      intervalKeyPresent ||
       shouldReactivateExpired;
     let recomputeFromTo: { from: number | undefined; to: number | undefined } | null = null;
     if (needsRecompute) {
-      // cron 变更但 patch 未显式带 intervalMs（典型：MCP 工具只 patch cronExpr，
-      // 其 schema 不暴露 intervalMs）→ 一律清空 intervalMs（undefined，storage 落
-      // NULL），按字面壁钟语义执行。不清的话旧 intervalMs 永远获胜，改 cron 形同
-      // 虚设。也刻意**不做**"按形态推导 interval"：cron 就是 cron，interval 语义
-      // 只属于显式传 intervalMs 的调用方（GUI 表单）——推导会让 `0 */12 * * *`
-      // 这类壁钟意图被静默转成 interval，且与 create()（不推导）不对称。
-      if (patch.cronExpr !== undefined && !('intervalMs' in patch)) {
-        updates.intervalMs = undefined;
-      }
+      // intervalMs 遵循真 partial 契约：**patch 没带 key 就不动**。
+      //
+      // 历史上这里曾在「patch 带 cronExpr 但没带 intervalMs」时隐式清空 intervalMs——
+      // 那是 MCP 工具 schema 还不暴露 intervalMs 时代的权宜（不清的话旧 intervalMs
+      // 永远获胜，改 cron 形同虚设）。intervalMs 对所有调用方开放后，这个隐式清空
+      // 反过来成了静默事故源：调用方只更新 prompt + cronExpr（cadence 展示对齐的
+      // 常见形态）就把 interval 任务打回 cron 槽位语义（2026-07-29 #211 心跳实测
+      // 中招），所有调用方被迫记住「改 prompt 必须把 intervalMs 一起带上」。
+      //
+      // 现在清空只有一种表达：**显式带 key 且值为 undefined**（JSON 边界写 null，
+      // 由 MCP 工具层翻译成带 key 的 undefined），与 GUI 表单「恒带 key」的既有
+      // 行为一致。interval 任务只改 cronExpr 时，interval 语义保持权威（cron 仅作
+      // 展示），nextFireAt 按 now + intervalMs 重新起算。仍然刻意**不做**「按形态
+      // 推导 interval」：cron 就是 cron，与 create()（不推导）对称。
       const merged: Schedule = { ...existing, ...updates };
       if (merged.manual) {
         updates.nextFireAt = undefined;
@@ -1305,7 +1393,7 @@ export class Scheduler extends EventEmitter {
         patch.cronExpr !== undefined ||
         patch.timezone !== undefined ||
         patch.manual === false ||
-        patch.intervalMs !== undefined ||
+        intervalKeyPresent ||
         shouldReactivateExpired
       ) {
         // intervalMs 模式：把"修改"视作冷启动，从 now 起新一轮 N 倒计时。
@@ -1320,8 +1408,9 @@ export class Scheduler extends EventEmitter {
     const updated = await this.storage.update(id, updates);
     if (!updated) throw new Error(`Schedule not found: ${id}`);
     if (updated.status === 'active') {
-      this.activeSchedules.set(id, updated);
+      this.activeSchedules.set(id, this.keepInvalidScheduleQuarantined(updated, now));
     } else {
+      this.invalidScheduleIds.delete(id);
       this.activeSchedules.delete(id);
     }
     // DEBUG: 帮排查"编辑后 pending fire 没刷新"问题；只在触发字段变更时打。
@@ -1355,6 +1444,7 @@ export class Scheduler extends EventEmitter {
     await this.abortInflightAndWait(id, opts?.exemptRunId);
     const updated = await this.storage.update(id, { status: 'paused', updatedAt: this.clock.now() });
     if (!updated) throw new Error(`Schedule not found: ${id}`);
+    this.invalidScheduleIds.delete(id);
     this.activeSchedules.delete(id);
     this.emitEvent({ type: 'changed', scheduleId: id });
     return updated;
@@ -1368,6 +1458,9 @@ export class Scheduler extends EventEmitter {
     const existing = await this.storage.get(id);
     if (!existing) throw new Error(`Schedule not found: ${id}`);
     const now = this.clock.now();
+    // 与 create/update 对齐：恢复 interval 任务前也验证它保留的 cron 元数据，不能
+    // 重新激活一条未来清 interval 后必坏的记录。
+    nextCronOrMonthlyFire(existing.cronExpr, now, existing.timezone);
     // resume 视作冷启动：interval 模式起新一轮 N 倒计时（从 now 起算，与 update() 一致）；
     // cron 模式找下一个壁钟槽位。不要复用 nextIntervalFire —— 它按 lastFinishedAt+N 尊重原
     // 节奏（restart 语义），会让「上次完成不到一个 N 就 resume」比冷启动更早触发。
@@ -1381,6 +1474,7 @@ export class Scheduler extends EventEmitter {
       nextFireAt: next,
     });
     if (!updated) throw new Error(`Schedule not found: ${id}`);
+    this.invalidScheduleIds.delete(id);
     this.activeSchedules.set(id, updated);
     this.emitEvent({ type: 'changed', scheduleId: id });
     return updated;
@@ -1388,6 +1482,29 @@ export class Scheduler extends EventEmitter {
 
   async delete(id: string, opts?: { exemptRunId?: string }): Promise<void> {
     return this.serializeScheduleMutation(id, () => this.deleteUnlocked(id, opts));
+  }
+
+  private keepInvalidScheduleQuarantined(
+    schedule: Schedule,
+    now: number,
+    validate = false,
+  ): Schedule {
+    const wasKnownInvalid = this.invalidScheduleIds.has(schedule.id);
+    if (!validate && !wasKnownInvalid) return schedule;
+    try {
+      computeNextFireAt(schedule, now);
+      this.invalidScheduleIds.delete(schedule.id);
+      return schedule;
+    } catch (err) {
+      this.invalidScheduleIds.add(schedule.id);
+      if (!wasKnownInvalid) {
+        this.logger?.warn?.('scheduler: quarantined invalid active schedule during DB sync', {
+          scheduleId: schedule.id,
+          error: String(err),
+        });
+      }
+      return { ...schedule, nextFireAt: undefined };
+    }
   }
 
   private async deleteUnlocked(id: string, opts?: { exemptRunId?: string }): Promise<void> {
@@ -1404,6 +1521,7 @@ export class Scheduler extends EventEmitter {
     // fireOne 尾部对 schedule 行的重排 update 同样 no-op —— 均无副作用。
     await this.abortInflightAndWait(id, opts?.exemptRunId);
     await this.storage.delete(id);
+    this.invalidScheduleIds.delete(id);
     this.activeSchedules.delete(id);
     this.emitEvent({ type: 'changed', scheduleId: id });
   }
@@ -2692,6 +2810,10 @@ function computeNextFireAt(schedule: Schedule, fromMs: number): number | undefin
   // manual schedule 永远不参与自动触发，跳过 cron 计算（runNow 是单独路径）
   if (schedule.manual) return undefined;
   if (!schedule.recurring && schedule.lastFiredAt !== undefined) return undefined;
+  // interval schedules still persist cron metadata. Validate it before taking
+  // the interval fast path so legacy rows accepted by older parsers cannot
+  // evade startup/DB-sync quarantine and fire from a stale nextFireAt.
+  nextCronOrMonthlyFire(schedule.cronExpr, fromMs, schedule.timezone);
   if (schedule.intervalMs !== undefined) {
     // 冷启动：基线取 lastFinishedAt（跑过）或 createdAt（没跑过），再 max(base+N, now+N)
     // —— 漏掉的不补发，重新起 N 倒计时。

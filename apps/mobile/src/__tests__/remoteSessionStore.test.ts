@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { MAKER_EVENT_BATCH_CHANNEL } from '@cindy/device-link';
 import { remoteSessionStore, sessionPendingWrites } from '@/session/remoteSessionStore';
 import type { InputProjection, PendingInteraction, RemoteMessage, RemoteSession } from '@/session/types';
 
@@ -235,6 +236,105 @@ describe('remoteSessionStore', () => {
     expect(remoteSessionStore.getNewMakerWorktreePreference('dev-2')).toEqual({
       enabled: false,
       revision: 0,
+    });
+  });
+
+  it('mirrors host-revisioned worktree branches without coupling them to the checkbox', () => {
+    remoteSessionStore.setNewMakerWorktreePreference('dev-1', true);
+
+    remoteSessionStore.applyRemotePush(
+      'dev-1',
+      'maker:new-maker-worktree-branch:changed',
+      { baseRepo: '/repo/a', sourceBranch: 'feature/mobile', revision: 1 },
+    );
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')).toEqual({
+      baseRepo: '/repo/a',
+      sourceBranch: 'feature/mobile',
+      revision: 1,
+    });
+    expect(remoteSessionStore.getNewMakerWorktreePreference('dev-1')).toEqual({
+      enabled: true,
+      revision: 1,
+    });
+
+    // 同一分支的较新 host snapshot 仍要推进 revision，给在途 pull / apply 回包做 fence。
+    remoteSessionStore.applyRemotePush(
+      'dev-1',
+      'maker:new-maker-worktree-branch:changed',
+      { baseRepo: '/repo/a', sourceBranch: 'feature/mobile', revision: 2 },
+    );
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')?.revision)
+      .toBe(2);
+
+    // 更旧 revision 以及同 revision 的冲突值都无权覆盖已接受的宿主快照。
+    remoteSessionStore.applyRemotePush(
+      'dev-1',
+      'maker:new-maker-worktree-branch:changed',
+      { baseRepo: '/repo/a', sourceBranch: 'stale', revision: 1 },
+    );
+    remoteSessionStore.applyRemotePush(
+      'dev-1',
+      'maker:new-maker-worktree-branch:changed',
+      { baseRepo: '/repo/a', sourceBranch: 'conflict', revision: 2 },
+    );
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')).toEqual({
+      baseRepo: '/repo/a',
+      sourceBranch: 'feature/mobile',
+      revision: 2,
+    });
+  });
+
+  it('isolates worktree branch snapshots by device and canonical repo, then clears their shards', () => {
+    remoteSessionStore.setNewMakerWorktreeBranchPreference('dev-1', {
+      baseRepo: '/repo/a', sourceBranch: 'main', revision: 1,
+    });
+    remoteSessionStore.setNewMakerWorktreeBranchPreference('dev-1', {
+      baseRepo: '/repo/b', sourceBranch: 'release', revision: 4,
+    });
+    remoteSessionStore.setNewMakerWorktreeBranchPreference('dev-2', {
+      baseRepo: '/repo/a', sourceBranch: 'develop', revision: 2,
+    });
+
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')?.sourceBranch)
+      .toBe('main');
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/b')?.sourceBranch)
+      .toBe('release');
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-2', '/repo/a')?.sourceBranch)
+      .toBe('develop');
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-2', '/repo/b')).toBeNull();
+
+    remoteSessionStore.removeDevice('dev-1');
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')).toBeNull();
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/b')).toBeNull();
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-2', '/repo/a')?.sourceBranch)
+      .toBe('develop');
+
+    remoteSessionStore.clear();
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-2', '/repo/a')).toBeNull();
+  });
+
+  it('ignores malformed worktree branch pushes without disturbing an accepted snapshot', () => {
+    remoteSessionStore.setNewMakerWorktreeBranchPreference('dev-1', {
+      baseRepo: '/repo/a', sourceBranch: 'main', revision: 3,
+    });
+    for (const payload of [
+      null,
+      { baseRepo: '', sourceBranch: 'release', revision: 4 },
+      { baseRepo: '/repo/a', sourceBranch: '', revision: 4 },
+      { baseRepo: '/repo/a', sourceBranch: 'release', revision: -1 },
+      { baseRepo: '/repo/a', sourceBranch: 'release', revision: 3.5 },
+      { baseRepo: '/repo/a', sourceBranch: 'release', revision: '4' },
+    ]) {
+      remoteSessionStore.applyRemotePush(
+        'dev-1',
+        'maker:new-maker-worktree-branch:changed',
+        payload,
+      );
+    }
+    expect(remoteSessionStore.getNewMakerWorktreeBranchPreference('dev-1', '/repo/a')).toEqual({
+      baseRepo: '/repo/a',
+      sourceBranch: 'main',
+      revision: 3,
     });
   });
 
@@ -1816,6 +1916,51 @@ describe('remoteSessionStore', () => {
     });
   });
 
+  it('projects terminal 429 retries as rate-limit attempts only with their reason', () => {
+    const message =
+      'exceeded retry limit, last status: 429 Too Many Requests (rate-limit-retry 1/2)';
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: {
+          message,
+          reason: 'terminal-rate-limit-retry',
+          isTerminal: false,
+          willRetry: true,
+        },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toEqual({
+      attempt: 1,
+      maxAttempts: 2,
+      kind: 'rate-limit',
+    });
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: { message, isTerminal: false, willRetry: true },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+
+    remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+      sessionId: 's1',
+      event: {
+        type: 'error',
+        data: {
+          message: 'provider failed (auto-retry 1/2)',
+          reason: 'terminal-rate-limit-retry',
+          isTerminal: false,
+          willRetry: true,
+        },
+      },
+    });
+    expect(remoteSessionStore.getSessionRunStatus('s1').reconnectAttempt).toBeNull();
+  });
+
   it('tracks session running state from maker event push boundaries', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:10.000Z'));
@@ -2092,6 +2237,44 @@ describe('remoteSessionStore', () => {
       event: { type: 'done', data: {} },
     });
     expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+  });
+
+  it('keeps the product turn running across claimed mobile continuation boundaries', () => {
+    vi.useFakeTimers();
+    try {
+      pushMakerStatus('s1', { isRunning: true });
+      pushMakerText('s1', 'persist-1', 'first segment', false);
+      vi.runOnlyPendingTimers();
+
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: {
+          type: 'status',
+          turnContinuationId: 7,
+          data: { isRunning: false, status: 'Done' },
+        },
+      });
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'done', turnContinuationId: 7, data: {} },
+      });
+
+      expect(remoteSessionStore.isSessionRunning('s1')).toBe(true);
+      expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(true);
+      expect(remoteSessionStore.getSessionRunStatus('s1').startedAt).not.toBeNull();
+      expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).toBe(true);
+
+      remoteSessionStore.applyRemotePush('dev-1', 'maker:event', {
+        sessionId: 's1',
+        event: { type: 'done', data: {} },
+      });
+
+      expect(remoteSessionStore.isSessionRunning('s1')).toBe(false);
+      expect(remoteSessionStore.isSessionMakerTurnRunning('s1')).toBe(false);
+      expect(remoteSessionStore.getMessages('s1')[0]?.agentMeta?.isStreaming).not.toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('preserves boundary agent metadata when finalizing a streaming row', () => {
@@ -2784,5 +2967,91 @@ describe('引用调和(2026-07-18 首页重渲染风暴修复)', () => {
       ]);
     }
     expect(remoteSessionStore.getSessions()).toBe(snapshot);
+  });
+});
+
+describe('maker:event 微批拆包(CONTROLLER_CAPABILITY_MAKER_EVENT_BATCH_V1)', () => {
+  it('批内事件按序走与逐帧完全相同的路径:流式增量拼接结果一致', () => {
+    vi.useFakeTimers();
+    try {
+      // 逐帧基线
+      pushMakerText('s-single', 'p-1', 'hello', false);
+      pushMakerText('s-single', 'p-1', ' world', false);
+      vi.runOnlyPendingTimers();
+      const single = remoteSessionStore.getMessages('s-single');
+
+      // 同样两条事件,这次由被控端合并成一帧微批下发
+      remoteSessionStore.applyRemotePush('dev-1', MAKER_EVENT_BATCH_CHANNEL, {
+        sessionId: 's-batch',
+        events: [
+          { sessionId: 's-batch', persistId: 'p-1', event: { type: 'text', data: { text: 'hello', isFinal: false } } },
+          { sessionId: 's-batch', persistId: 'p-1', event: { type: 'text', data: { text: ' world', isFinal: false } } },
+        ],
+      });
+      vi.runOnlyPendingTimers();
+      const batched = remoteSessionStore.getMessages('s-batch');
+
+      expect(batched).toHaveLength(1);
+      expect(batched[0]).toMatchObject({ id: 'p-1', role: 'assistant', content: 'hello world' });
+      // 与逐帧结果逐字段一致(仅 sessionId 不同)
+      expect(batched[0]!.content).toBe(single[0]!.content);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('形状不符的批帧整体忽略;批内单条坏事件只跳过该条', () => {
+    vi.useFakeTimers();
+    try {
+      // 缺 events / events 为空 / 非数组:整帧忽略,不抛
+      for (const bad of [
+        { sessionId: 's-bad' },
+        { sessionId: 's-bad', events: [] },
+        { sessionId: 's-bad', events: 'nope' },
+        { events: [{}] },
+        null,
+      ]) {
+        expect(() =>
+          remoteSessionStore.applyRemotePush('dev-1', MAKER_EVENT_BATCH_CHANNEL, bad),
+        ).not.toThrow();
+      }
+      vi.runOnlyPendingTimers();
+      expect(remoteSessionStore.getMessages('s-bad')).toHaveLength(0);
+
+      // 批内混入坏条目:好的照常生效
+      remoteSessionStore.applyRemotePush('dev-1', MAKER_EVENT_BATCH_CHANNEL, {
+        sessionId: 's-mixed',
+        events: [
+          'not-an-object',
+          { sessionId: 's-mixed', persistId: 'p-9', event: { type: 'text', data: { text: 'ok', isFinal: true } } },
+        ],
+      });
+      vi.runOnlyPendingTimers();
+      expect(remoteSessionStore.getMessages('s-mixed')).toHaveLength(1);
+      expect(remoteSessionStore.getMessages('s-mixed')[0]).toMatchObject({ content: 'ok' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('批内 sessionId 与顶层不一致的条目被丢弃:不绕过 topic 隔离', () => {
+    // topic 路由只按**顶层** sessionId,批内混入其它会话的事件会把本端未订阅的
+    // 会话数据投进来(坏帧/恶意帧场景)。fail-closed 跳过该条,不整批丢。
+    vi.useFakeTimers();
+    try {
+      remoteSessionStore.applyRemotePush('dev-1', MAKER_EVENT_BATCH_CHANNEL, {
+        sessionId: 's-own',
+        events: [
+          { sessionId: 's-other', persistId: 'p-x', event: { type: 'text', data: { text: 'leak', isFinal: true } } },
+          { sessionId: 's-own', persistId: 'p-y', event: { type: 'text', data: { text: 'mine', isFinal: true } } },
+        ],
+      });
+      vi.runOnlyPendingTimers();
+      expect(remoteSessionStore.getMessages('s-other')).toHaveLength(0);
+      expect(remoteSessionStore.getMessages('s-own')).toHaveLength(1);
+      expect(remoteSessionStore.getMessages('s-own')[0]).toMatchObject({ content: 'mine' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

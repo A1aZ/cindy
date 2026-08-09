@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../localDb/ipc/messages.js', () => ({
   broadcastMessageAgentMetaUpdate: vi.fn(async () => true),
+  broadcastMessageRow: vi.fn(),
   createMessage: vi.fn(async () => ({}) as unknown),
   patchMessageAgentMetaWithResult: vi.fn(async (_sessionId, _clientId, patch) => ({
     previous: {},
@@ -29,12 +30,23 @@ vi.mock('../logger.js', () => ({
 }));
 
 const { mockSend } = vi.hoisted(() => ({ mockSend: vi.fn() }));
+const ownerScopeState = vi.hoisted(() => ({
+  current: true,
+  scope: { ownerScopeKey: 'owner-a', ownerStamp: undefined },
+}));
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { send: mockSend } }] },
+}));
+vi.mock('../device-link/broadcast-tap.js', () => ({
+  captureDataOwnerBroadcastScope: vi.fn(() => ownerScopeState.scope),
+  isDataOwnerBroadcastScopeCurrent: vi.fn(() => ownerScopeState.current),
+  getSafeDataOwnerPushStamp: vi.fn(() => undefined),
+  tapWindowBroadcast: vi.fn(),
 }));
 
 import {
   broadcastMessageAgentMetaUpdate,
+  broadcastMessageRow,
   createMessage,
   patchMessageAgentMetaWithResult,
   updateMessageContent,
@@ -45,6 +57,7 @@ import {
 } from '../mcp-integrations/mediaToolResultFallback.js';
 import {
   onToolUseEvent,
+  persistCodexPlanOnDone,
   onToolResultEvent,
   onToolResultFullEvent,
   prepareSyntheticToolEventForBroadcast,
@@ -53,11 +66,14 @@ import {
   onThinkingEvent,
   flushAssistantBlock,
   flushOrphanToolResults,
+  isSuccessfulCodexDoneEventData,
   onTurnErrorEvent,
   resetTurnPersistState,
   clearSessionPersistState,
   consumeLastAssistantPersistId,
+  consumeLastTopLevelAssistantPersistId,
   markAssistantTurnCompleted,
+  markAssistantTurnFailed,
   noteSessionClearBoundary,
   noteSessionAgentKind,
   enqueueDurableWrite,
@@ -74,8 +90,19 @@ const SUMMARY = 'tool finished';
 const flushWrites = () => new Promise((resolve) => setTimeout(resolve, 0));
 const broadcastGuard = () => expect.objectContaining({ shouldBroadcast: expect.any(Function) });
 
+describe('Codex done completion boundary', () => {
+  it('only treats successful terminal data as a completed turn', () => {
+    expect(isSuccessfulCodexDoneEventData({ raw: { status: 'completed' } })).toBe(true);
+    expect(isSuccessfulCodexDoneEventData({ raw: { status: 'interrupted' } })).toBe(false);
+    expect(isSuccessfulCodexDoneEventData({ raw: { status: 'failed' } })).toBe(false);
+    expect(isSuccessfulCodexDoneEventData({ cancelled: true })).toBe(false);
+    expect(isSuccessfulCodexDoneEventData({ raw: { id: 'legacy-turn' } })).toBe(false);
+  });
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
+  ownerScopeState.current = true;
   noteSessionClearBoundary(SESSION, null);
   clearSessionPersistState(SESSION);
 });
@@ -159,6 +186,124 @@ describe('update_plan tool_use persistence', () => {
     );
   });
 
+  it('persists a successful turn plan as completed so reload cannot resurrect progress', async () => {
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-1',
+        toolName: 'update_plan',
+        input: {
+          explanation: 'keep this field',
+          plan: [
+            { step: 'Inspect', status: 'completed' },
+            { step: 'Start dev', status: 'in_progress' },
+          ],
+        },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-1', status: 'completed' },
+      plan: [
+        { step: 'Inspect', status: 'completed' },
+        { step: 'Start dev', status: 'in_progress' },
+      ],
+    })).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      persistId,
+      {
+        toolUseId: 'plan:turn-1',
+        toolName: 'update_plan',
+        input: {
+          explanation: 'keep this field',
+          plan: [
+            { step: 'Inspect', status: 'completed' },
+            { step: 'Start dev', status: 'completed' },
+          ],
+        },
+        terminalPlanSnapshot: true,
+      },
+    );
+    expect(broadcastMessageRow).toHaveBeenCalledWith(
+      SESSION,
+      expect.any(Object),
+      ownerScopeState.scope,
+    );
+  });
+
+  it('stamps an already-completed plan as terminal at the successful done boundary', async () => {
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-complete',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-complete', status: 'completed' },
+      plan: [{ step: 'Ship', status: 'completed' }],
+    })).toBe(true);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      persistId,
+      {
+        toolUseId: 'plan:turn-complete',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Ship', status: 'completed' }] },
+        terminalPlanSnapshot: true,
+      },
+    );
+    expect(broadcastMessageRow).toHaveBeenCalledWith(
+      SESSION,
+      expect.any(Object),
+      ownerScopeState.scope,
+    );
+  });
+
+  it('persists non-success boundaries without inferring completion or touching unrelated turns', async () => {
+    const persistId = onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-1',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Wait for user', status: 'in_progress' }] },
+      },
+      null,
+    );
+
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-1', status: 'interrupted' },
+    })).toBe(true);
+    expect(persistCodexPlanOnDone(SESSION, {
+      cancelled: true,
+      raw: { id: 'turn-1', status: 'completed' },
+    })).toBe(true);
+    expect(persistCodexPlanOnDone(SESSION, {
+      raw: { id: 'turn-2', status: 'completed' },
+    })).toBe(false);
+
+    await flushWrites();
+    expect(updateMessageContent).toHaveBeenCalledWith(
+      SESSION,
+      persistId,
+      {
+        toolUseId: 'plan:turn-1',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Wait for user', status: 'in_progress' }] },
+        turnCompleted: false,
+      },
+    );
+  });
+
   it('does not dedupe ordinary repeated tool_use ids', async () => {
     const firstPersistId = onToolUseEvent(
       SESSION,
@@ -180,6 +325,15 @@ describe('update_plan tool_use persistence', () => {
 });
 
 describe('agent_kind enqueue snapshot', () => {
+  it('owner boundary after commit keeps the durable result instead of triggering retry', async () => {
+    const result = await enqueueDurableWrite('post-commit-owner-switch', () => {
+      ownerScopeState.current = false;
+      return { committed: true };
+    });
+
+    expect(result).toEqual({ committed: true });
+  });
+
   it('writeChain 延迟期间切换引擎,消息仍使用事件入队时的 agent_kind', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -832,6 +986,28 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     expect(consumeLastAssistantPersistId(SESSION)).toBe(last);
   });
 
+  it('Subagent 文本最后落库时，usage 仍取最后一条但 title seal 锁定最后一条顶层 Assistant', () => {
+    const topLevel = onAssistantTextEvent(
+      SESSION,
+      { text: '顶层正式答复', isFinal: true },
+      { uuid: 'top-level' },
+    );
+    onToolUseEvent(
+      SESSION,
+      { toolUseId: 'toolu_subagent', toolName: 'Agent', input: {} },
+      null,
+    );
+    const subagent = onAssistantTextEvent(
+      SESSION,
+      { text: 'Subagent 内部文本', isFinal: true },
+      { uuid: 'subagent', parentUuid: 'toolu_subagent' },
+    );
+
+    expect(consumeLastAssistantPersistId(SESSION)).toBe(subagent);
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBe(topLevel);
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBeUndefined();
+  });
+
   it('无 assistant 文本(纯 tool 轮)→ undefined', () => {
     onToolUseEvent(SESSION, { toolUseId: 'tu_only', toolName: 'Bash', input: {} }, null);
     expect(consumeLastAssistantPersistId(SESSION)).toBeUndefined();
@@ -841,6 +1017,7 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
     onAssistantTextEvent(SESSION, { text: 'gone', isFinal: true }, null);
     clearSessionPersistState(SESSION);
     expect(consumeLastAssistantPersistId(SESSION)).toBeUndefined();
+    expect(consumeLastTopLevelAssistantPersistId(SESSION)).toBeUndefined();
   });
 
   it('done seal 以 durable patch 落库', async () => {
@@ -850,11 +1027,30 @@ describe('consumeLastAssistantPersistId(per-turn 费用挂载的目标消息追�
       'assistant-final',
       { turnCompleted: true },
     );
-    expect(broadcastMessageAgentMetaUpdate).toHaveBeenCalledWith(SESSION, 'assistant-final');
+    expect(broadcastMessageAgentMetaUpdate).toHaveBeenCalledWith(
+      SESSION,
+      'assistant-final',
+      expect.objectContaining({ ownerStamp: undefined }),
+    );
+  });
+
+  it('terminal error seal 以 durable patch 写 false', async () => {
+    await expect(markAssistantTurnFailed(SESSION, 'assistant-failed')).resolves.toBe(true);
+    expect(patchMessageAgentMetaWithResult).toHaveBeenCalledWith(
+      SESSION,
+      'assistant-failed',
+      { turnCompleted: false },
+    );
+    expect(broadcastMessageAgentMetaUpdate).toHaveBeenCalledWith(
+      SESSION,
+      'assistant-failed',
+      expect.objectContaining({ ownerStamp: undefined }),
+    );
   });
 
   it('纯 tool turn 没有 assistant 时不写 seal', async () => {
     await expect(markAssistantTurnCompleted(SESSION, undefined)).resolves.toBe(false);
+    await expect(markAssistantTurnFailed(SESSION, undefined)).resolves.toBe(false);
     expect(patchMessageAgentMetaWithResult).not.toHaveBeenCalled();
   });
 });
@@ -885,7 +1081,11 @@ describe('onTurnErrorEvent — terminal error 持久化', () => {
     // live 消息流与 banner 双显示(设计取舍见 onTurnErrorEvent 头注释)。
     expect((optsArg as { shouldBroadcast?: () => boolean })?.shouldBroadcast?.()).toBe(false);
     // 脏信号必须发:让已加载历史的后台会话下次打开时从 DB 重拉,error 卡正常浮现。
-    expect(mockSend).toHaveBeenCalledWith('local-db:session:error-persisted', { sessionId: SESSION });
+    expect(mockSend).toHaveBeenCalledWith(
+      'local-db:session:error-persisted',
+      { sessionId: SESSION },
+      undefined,
+    );
   });
 
   it('message 为空 → 不落库也不发脏信号', async () => {
@@ -914,6 +1114,32 @@ describe('onTurnErrorEvent — terminal error 持久化', () => {
     const content = (bodyArg as { content: { message: string; sdkError: string } }).content;
     expect(content.message).toBe('Authorization: [REDACTED]; key=[REDACTED_KEY]');
     expect(content.sdkError).toBe('access_token=[REDACTED]');
+  });
+
+  it('content 携带错误发生时的 provider 快照(session-provider-store 同步取值)', async () => {
+    const { setSessionProvider } = await import('../maker-host/session-provider-store.js');
+    const sid = 'session-provider-snapshot';
+    setSessionProvider(sid, 'xd');
+    try {
+      onTurnErrorEvent(sid, { message: '网关余额不足(provider 快照用例)' });
+      await flushWrites();
+      const body = vi.mocked(createMessage).mock.calls.at(-1)?.[1] as {
+        content: Record<string, unknown>;
+      };
+      expect(body.content.providerId).toBe('xd');
+    } finally {
+      setSessionProvider(sid, null);
+    }
+  });
+
+  it('未显式选择 provider(默认路由)时不写 providerId —— 来源不明的行读侧 fail-closed', async () => {
+    const sid = 'session-provider-unset';
+    onTurnErrorEvent(sid, { message: '无显式 provider 的失败(快照用例)' });
+    await flushWrites();
+    const body = vi.mocked(createMessage).mock.calls.at(-1)?.[1] as {
+      content: Record<string, unknown>;
+    };
+    expect('providerId' in body.content).toBe(false);
   });
 
   it('error 前的在飞 assistant 文本先 flush 落库,error 行排在其后', async () => {

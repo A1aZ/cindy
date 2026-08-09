@@ -31,10 +31,10 @@ import { createPortal } from 'react-dom';
 import { GitFork } from 'lucide-react';
 import { SelectionQuoteButton } from './SelectionQuoteButton';
 import { useTranslation } from 'react-i18next';
-import {
-  isAgentPlanToolName,
-  isDeliveryProseText,
-} from '@cindy/maker-shared/message-render';
+import { isAgentPlanToolName, isDeliveryProseText } from '@cindy/maker-shared/message-render';
+// 子代理卡判据只能有一份:此前桌面自带一份只认 Agent/Task/collab:* 的副本,新增 harness
+// (PI 的 subagent)加进共享判据也到不了 AgentTaskCard,会静默落进普通工具组(codex review)。
+import { isAgentTaskToolName } from '@cindy/maker-shared/agent-task';
 
 import type {
   AgentTaskUpdate,
@@ -42,15 +42,26 @@ import type {
   ContinuationInFlightProjectionCapability,
 } from '@/hooks/useCCAgentChat';
 import { Spinner } from '@/components/ui/spinner';
+import { useMessageNavRailPreference } from '@/hooks/useMessageNavRailPreference';
 import { HISTORY_GAP_SPLIT_MS } from '@/lib/historyGap';
-import type { KnownLocalFileRef } from '@/lib/localPathResolver';
+import { resolveToolFilePath, type KnownLocalFileRef } from '@/lib/localPathResolver';
+import { collectGeneratedFiles, type GeneratedFileRef } from '@/lib/generatedFiles';
+import {
+  isRemoteSessionSticky,
+  subscribeTurnChangeSetUpdated,
+} from '@/lib/makerTransport';
+import { isEditableKeyboardTarget } from '@/lib/editableKeyboardTarget';
 import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
+import { cn } from '@/lib/utils';
 import {
   readSessionScroll,
   saveSessionScroll,
   type SessionScrollSnapshot,
 } from '@/lib/sessionScrollStore';
+import { SHARE_MESSAGE_ATTR, SHARE_SESSION_ATTR } from '@/lib/shareConversationImage';
+import { ShareMessageCheckbox } from './ShareMessageCheckbox';
+import { isShareableMessage, useShareSelectionActive } from './shareSelectionStore';
 
 // perf-baseline: 大 session 切换 first-paint 性能基线,保留用于回归监测。
 // 历史:commit ffff3603 (render-window 首引入) 因 687 条 session first-paint
@@ -103,17 +114,6 @@ export const RENDER_WINDOW_FIRST_PAINT_ITEMS = 30;
 const RENDER_WINDOW_GROWTH_ITEMS = 80;
 const RENDER_WINDOW_BOUNDARY_LOOKBACK_ITEMS = 24;
 
-function isEditableKeyboardTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) return false;
-  const tagName = target.tagName;
-  return (
-    tagName === 'INPUT' ||
-    tagName === 'TEXTAREA' ||
-    tagName === 'SELECT' ||
-    target.isContentEditable
-  );
-}
-
 function eventTargetElement(target: EventTarget | null): HTMLElement | null {
   if (target instanceof HTMLElement) return target;
   if (target instanceof Node) return target.parentElement;
@@ -150,6 +150,8 @@ import { NewMessageIndicator } from './NewMessageIndicator';
 import { ThinkingCard } from './ThinkingCard';
 import { AgentActionsBlock } from './AgentActionsBlock';
 import { AgentTaskCard } from './AgentTaskCard';
+import { TurnChangesCard } from './TurnChangesCard';
+import { GeneratedFilesCard } from './GeneratedFilesCard';
 import { WorkGroupBlock, type WorkGroupChild } from './WorkGroupBlock';
 import {
   extractAnchorCardId,
@@ -205,6 +207,9 @@ import {
 } from './autoFollowIntent';
 import { useNavigationKeyListener } from './useNavigationKeyListener';
 import { suppressScrollbarActivation } from '@/lib/scrollbarAutoHide';
+import { collectAssistantTurnUsageDetails } from '@/lib/userTurnUsage';
+import type { TurnUsageDetails } from '../../../shared/turnUsageDetails';
+import { hasReviewableTurnChanges, type TurnChangeSetSummary } from '../../../shared/turnChangeSet';
 
 interface MessageStreamProps {
   /** Active session id — used to reset scroll state on session switch. */
@@ -310,6 +315,19 @@ type ForkOriginRenderItem = {
   parentSessionId: string;
   forkedAtMessageId: string;
 };
+type TurnChangesRenderItem = {
+  /** Exact provider patches attached to one visible user turn. */
+  type: 'turn_changes';
+  key: string;
+  changeSet: TurnChangeSetSummary;
+};
+type GeneratedFilesRenderItem = {
+  type: 'generated_files';
+  key: string;
+  files: GeneratedFileRef[];
+  turnStartMs: number | null;
+  turnEndMs: number | null;
+};
 
 /** 原子工作子项:tool / agent task / thinking / assistant 工作文字。 */
 export type WorkChildItem = ToolSegmentRenderItem | AgentTaskRenderItem | MessageRenderItem;
@@ -339,6 +357,8 @@ export type RenderItem =
   | ToolSegmentRenderItem
   | AgentTaskRenderItem
   | ForkOriginRenderItem
+  | TurnChangesRenderItem
+  | GeneratedFilesRenderItem
   | {
       /** tool-result-media: 把 tool_result 里的 xdt_image_url(s) / xdt_video_urls
        *  提取出来作为独立视觉消息渲染,跳出 tool_segment 折叠卡片。统一容器,
@@ -414,7 +434,7 @@ function ForkOriginMarker({ onClick }: { onClick?: () => void }) {
         type="button"
         onClick={onClick}
         disabled={!onClick}
-        className="group inline-flex shrink-0 items-center gap-2 bg-transparent p-0 text-[13px] font-medium leading-5 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] hover:underline hover:underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:text-[var(--text-tertiary)] disabled:hover:no-underline"
+        className="group inline-flex shrink-0 items-center gap-2 bg-transparent p-0 text-13 font-medium leading-5 text-[var(--text-secondary)] transition-colors hover:text-[var(--text-primary)] hover:underline hover:underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring)] disabled:cursor-default disabled:text-[var(--text-tertiary)] disabled:hover:no-underline"
       >
         <GitFork size={15} strokeWidth={2} className="shrink-0" aria-hidden="true" />
         <span>{t('chat.forkOrigin.label')}</span>
@@ -828,11 +848,6 @@ export function collectSessionImageSrcs(
   return out;
 }
 
-// export 仅供单测(`buildRenderItemsKeyStability.test.ts`)使用,运行时无外部消费者。
-function isAgentTaskToolName(toolName: string): boolean {
-  return toolName === 'Agent' || toolName === 'Task' || toolName.startsWith('collab:');
-}
-
 // Workflow 工具(Claude Code SDK 多 agent 编排)在父会话事件流里 = 单个 local_workflow
 // 任务(内部子 agent 不发独立 task 事件,只有 workflow 级聚合进度)。与 Agent/Task 一样
 // 走 agent_task 渲染项;AgentTaskCard 内部按 taskType/toolName 识别为 workflow,展示
@@ -890,6 +905,10 @@ export function buildRenderItems(
      * 「父调用在不在 messages 里」做的归属判定都不可信,必须放宽而不是丢弃。
      */
     historyWindowIncomplete?: boolean;
+    /** Main-persisted exact patches, anchored to their visible user message. */
+    turnChangeSets?: readonly TurnChangeSetSummary[];
+    /** Session working directory for opaque generated-file fallback chips. */
+    workingDir?: string;
   },
 ): {
   items: RenderItem[];
@@ -1034,9 +1053,70 @@ export function buildRenderItems(
     pendingSegmentGhostCards = [];
   };
 
+  let turnStartIdx = 0;
+  const flushTurnChanges = (lo: number, hi: number): void => {
+    if (hi <= lo) return;
+    const anchorClientId = messages[lo]?.clientId;
+    if (!anchorClientId) return;
+    const changeSets = (opts?.turnChangeSets ?? []).filter(
+      (changeSet) => changeSet.anchorClientId === anchorClientId,
+    );
+    const exactPaths = new Set<string>();
+    const pathKey = (value: string): string => {
+      const normalized = value.replace(/\\/g, '/');
+      const windowsShape = /^[a-zA-Z]:[\\/]/.test(value) || value.includes('\\');
+      return windowsShape ? normalized.toLowerCase() : normalized;
+    };
+    for (const changeSet of changeSets) {
+      for (const file of changeSet.files) {
+        exactPaths.add(pathKey(resolveToolFilePath(file.path, changeSet.cwd)));
+        if (file.oldPath) exactPaths.add(pathKey(resolveToolFilePath(file.oldPath, changeSet.cwd)));
+      }
+    }
+    for (const changeSet of changeSets) {
+      // Zero-file entries without change evidence (e.g. only opaque tools ran)
+      // would render a card whose review pane is empty — skip the dead end.
+      if (!hasReviewableTurnChanges(changeSet)) continue;
+      items.push({
+        type: 'turn_changes',
+        key: `turnchanges-${changeSet.id}`,
+        changeSet,
+      });
+    }
+    const workingDir = opts?.workingDir ?? '';
+    if (!workingDir || hi <= lo) return;
+    const slice = messages.slice(lo, hi);
+    const generatedFiles = collectGeneratedFiles(slice, workingDir).filter((file) => {
+      const normalized = pathKey(file.path);
+      return !exactPaths.has(normalized) || changeSets.length === 0;
+    });
+    if (generatedFiles.length === 0) return;
+    let turnStartMs: number | null = null;
+    for (const message of slice) {
+      const timestamp = Date.parse(message.createdAt ?? '');
+      if (Number.isFinite(timestamp) && (turnStartMs === null || timestamp < turnStartMs)) {
+        turnStartMs = timestamp;
+      }
+    }
+    const boundaryTimestamp = Date.parse(messages[hi]?.createdAt ?? '');
+    items.push({
+      type: 'generated_files',
+      key: `genfiles-${messages[lo].clientId}`,
+      files: generatedFiles,
+      turnStartMs,
+      turnEndMs: Number.isFinite(boundaryTimestamp) ? boundaryTimestamp : null,
+    });
+  };
   let i = 0;
   while (i < messages.length) {
     const msg = messages[i];
+
+    // User turn boundary: attach the sealed patch after the turn it belongs to.
+    if (msg.role === 'user' && msg.delivery !== 'steer' && !msg.isSyntheticTrigger) {
+      flushSegment();
+      flushTurnChanges(turnStartIdx, i);
+      turnStartIdx = i;
+    }
 
     // ask_user: pending lives in the bottom input overlay; expired/unanswered
     // questions have no user selection to show. Only the answered state surfaces
@@ -1332,6 +1412,8 @@ export function buildRenderItems(
   // Flush trailing segment — important for streaming, where the turn often
   // ends mid-segment (no closing text yet).
   flushSegment();
+  // 末尾 turn 的产出文件卡(没有后续 user 边界触发)。
+  flushTurnChanges(turnStartIdx, messages.length);
 
   if (taskUpdates) {
     // 父会话自己的 Bash 调用集合:local_bash 任务卡(#247 的「后台命令」卡,含
@@ -2074,6 +2156,7 @@ function renderWorkGroupChild(
     assistantsWithFollowingUserBoundary: ReadonlySet<string>;
     turnFinalAssistantClientIds: ReadonlySet<string>;
     subagentModelByToolUseId: ReadonlyMap<string, string>;
+    userTurnUsageDetailsByAssistantId: ReadonlyMap<string, TurnUsageDetails>;
   },
 ): ReactNode {
   if (item.type === 'agent_task') {
@@ -2108,6 +2191,7 @@ function renderWorkGroupChild(
         props.assistantsWithFollowingUserBoundary,
       )}
       assistantIsTurnFinal={props.turnFinalAssistantClientIds.has(item.message.clientId)}
+      userTurnUsageDetails={props.userTurnUsageDetailsByAssistantId.get(item.message.clientId)}
       isFirstUserMessage={item.message.clientId === props.firstUserMessageClientId}
       isLastUserMessage={item.message.clientId === props.lastUserMessageClientId}
       isLastUserInput={item.message.clientId === props.lastUserInputClientId}
@@ -2238,6 +2322,9 @@ export function MessageStream({
   // (见 sessionImageSrcs 处注释)。
   const sessionFileValue = useChatSessionFileValue(sessionId, workingDir, remoteHostId);
 
+  /** 分享选择模式:只驱动整列缩进(低频)。逐条的选中态由每个复选框自己订阅。 */
+  const shareSelectionActive = useShareSelectionActive(sessionId);
+
   // 滚动容器:原生 div + overflow-y-auto,样式由全局 .is-scrolling 体系接管
   // (lib/scrollbarAutoHide.ts 自动加/撤 .is-scrolling 类,globals.css 控制
   // thumb 显隐)。data-scroll-container 给 ImageLightbox 等四个 lightbox
@@ -2345,6 +2432,41 @@ export function MessageStream({
     }
   }, [messages]);
 
+  const [turnChangeSets, setTurnChangeSets] = useState<TurnChangeSetSummary[]>([]);
+  useEffect(() => {
+    if (!sessionId || remoteHostId !== null || isRemoteSessionSticky(sessionId)) {
+      setTurnChangeSets([]);
+      return;
+    }
+    let cancelled = false;
+    setTurnChangeSets([]);
+    const off = subscribeTurnChangeSetUpdated(sessionId, ({ summary }) => {
+      if (cancelled) return;
+      setTurnChangeSets((current) => {
+        const next = current.filter((item) => item.id !== summary.id);
+        next.push(summary);
+        next.sort((a, b) => a.createdAt - b.createdAt);
+        return next;
+      });
+    });
+    void window.electronAPI.maker.listTurnChangeSets(sessionId)
+      .then((next) => {
+        if (cancelled) return;
+        setTurnChangeSets((current) => {
+          const merged = new Map(next.map((item) => [item.id, item]));
+          for (const item of current) merged.set(item.id, item);
+          return Array.from(merged.values()).sort((a, b) => a.createdAt - b.createdAt);
+        });
+      })
+      .catch(() => {
+        // A live push may already have arrived; keep it instead of clearing the card.
+      });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [remoteHostId, sessionId]);
+
   // 全量 build:折叠 / 丢弃 / 反向膨胀的所有规则一次性吸收 — 窗口看到的就是
   // 用户看到的。流式中每 token messages 引用变 → 这里跑一次 O(n) 单线性扫描,
   // 实测 N=1000 < 2ms (Windows),如果未来发现瓶颈再走增量化(out of scope)。
@@ -2352,8 +2474,10 @@ export function MessageStream({
     () =>
       buildRenderItems(messages, taskUpdates, ghostCardSnapshot, {
         historyWindowIncomplete: Boolean(hasMoreMessages),
+        turnChangeSets,
+        workingDir,
       }),
-    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages],
+    [messages, taskUpdates, ghostCardSnapshot, hasMoreMessages, turnChangeSets, workingDir],
   );
   const assistantsWithFollowingUserBoundary = useMemo(
     () => collectAssistantsWithFollowingUserBoundary(messages),
@@ -3440,6 +3564,10 @@ export function MessageStream({
   // 派生 —— 导航条要给整段历史画刻度)。目标可能在渲染窗口外,跳转走下面的
   // layout effect:复用 focus-jump 的"先扩窗到目标、下一轮再滚动"两段式,
   // 以及 chip-jump 的 expandWindow/onLoadMore 抑制协议。
+  // 导航条是个性化可选功能(Settings → 个性化 → 小技巧),默认关闭;关闭时
+  // 不挂载组件(卸载时组件自会把 navRailCoversNav 报回 false,chip 兜底回归),
+  // 也不做下面的空闲补页。
+  const { enabled: navRailEnabled } = useMessageNavRailPreference();
   const navRailEntries = useMemo(() => deriveNavRailEntries(messages), [messages]);
 
   // 入口去重:导航条**完整覆盖导航**(出场且刻度未截断)时抑制"跳到上一条
@@ -3454,7 +3582,9 @@ export function MessageStream({
   // shouldBackfillForNavRail 一族常量注释)。与"跳转补齐"同属程序化翻页,
   // prepend 的滚动补偿照走 F-SYNC-2 协议:调用前快照 scrollHeight/scrollTop。
   // 即使当下窗口太窄导航条没出场,补到的历史对搜索/上滚阅读同样有用,
-  // 且有轮数预算封顶,不做 eligible 门控。
+  // 且有轮数预算封顶,不做 eligible 门控。但**用户显式关闭导航条**(个性化
+  // 开关,默认关)时跳过:为一个不存在的 UI 自动翻页不符合默认克制,开关
+  // 打开后本 effect 依赖变化会重新评估补页。
   // 调度 effect 的依赖含 sessionId(与 MessageNavRail 的 resetKey 同款惯例):
   // 两个会话的条目数 / hasMore 恰好相同且 onLoadMore 身份未变时,切会话也要
   // 取消旧会话待发的空闲回调、并按归零后的轮数预算为新会话重新评估
@@ -3464,6 +3594,7 @@ export function MessageStream({
     navRailBackfillRoundsRef.current = 0;
   }, [sessionId]);
   useEffect(() => {
+    if (!navRailEnabled) return;
     if (!onLoadMore) return;
     if (
       !shouldBackfillForNavRail({
@@ -3490,7 +3621,14 @@ export function MessageStream({
     }
     const id = window.setTimeout(run, 300);
     return () => window.clearTimeout(id);
-  }, [sessionId, navRailEntries.length, hasMoreMessages, isLoadingMore, onLoadMore]);
+  }, [
+    sessionId,
+    navRailEnabled,
+    navRailEntries.length,
+    hasMoreMessages,
+    isLoadingMore,
+    onLoadMore,
+  ]);
 
   const railJumpSeqRef = useRef(0);
   const [railJumpRequest, setRailJumpRequest] = useState<{ id: string; seq: number } | null>(null);
@@ -3565,6 +3703,10 @@ export function MessageStream({
   const lastUserMessageClientId = useMemo(() => findLastUserMessageClientId(messages), [messages]);
   // 含合成行的"最后一条用户侧输入":自愈重连行据此判断自己是不是仍在飞(见 helper 注释)。
   const lastUserInputClientId = useMemo(() => findLastUserInputClientId(messages), [messages]);
+
+  const userTurnUsageDetailsByAssistantId = useMemo(() => {
+    return collectAssistantTurnUsageDetails(messages, turnFinalAssistantClientIds);
+  }, [messages, turnFinalAssistantClientIds]);
 
   // error-tail-banner:尾部未忽略的 error 行由输入框上方红条独家承载,流内需要
   // 知道"是不是最后一条"来跳过重复渲染。
@@ -3645,10 +3787,42 @@ export function MessageStream({
               React `key` 一律取 item.key — stable across builds(派生约定见
               RenderItem 类型注释 / buildRenderItems),复用 DOM 节点避免折叠
               态丢失 / 滚动锚点漂走。 */}
-                <div ref={itemsRef} className="flex flex-col gap-3.5">
+                <div
+                  ref={itemsRef}
+                  className={cn(
+                    'flex flex-col gap-3.5',
+                    // 分享选择模式:整列内容右移,左侧让出复选框那一列。缩进加在
+                    // 容器上(不是逐条消息),工具卡等不可选的 item 也跟着移,
+                    // 左边缘保持对齐。
+                    shareSelectionActive && 'pl-10',
+                    'transition-[padding] duration-[var(--motion-base)] ease-[var(--motion-ease-move)] motion-reduce:transition-none',
+                  )}
+                >
                   {visibleRenderItems.map((item) => {
                     if (item.type === 'fork_origin') {
                       return <ForkOriginMarker key={item.key} onClick={onOpenForkOrigin} />;
+                    }
+
+                    if (item.type === 'turn_changes') {
+                      if (!sessionId) return null;
+                      return (
+                        <TurnChangesCard
+                          key={item.key}
+                          sessionId={sessionId}
+                          changeSet={item.changeSet}
+                        />
+                      );
+                    }
+
+                    if (item.type === 'generated_files') {
+                      return (
+                        <GeneratedFilesCard
+                          key={item.key}
+                          files={item.files}
+                          turnStartMs={item.turnStartMs}
+                          turnEndMs={item.turnEndMs}
+                        />
+                      );
                     }
 
                     if (item.type === 'tool_segment') {
@@ -3728,6 +3902,7 @@ export function MessageStream({
                               assistantsWithFollowingUserBoundary,
                               turnFinalAssistantClientIds,
                               subagentModelByToolUseId,
+                              userTurnUsageDetailsByAssistantId,
                             }),
                         };
                       };
@@ -3815,16 +3990,32 @@ export function MessageStream({
                       );
                     }
 
+                    // 分享选择:复选框与光栅化定位属性都挂在这个**既有** wrapper 上,
+                    // 不新增 DOM 层级 —— 多包一层会让 AssistantMessage 子树在进出
+                    // 选择模式时 remount(mermaid 重渲、GhostToolCard iframe 重载)。
+                    const shareable =
+                      Boolean(sessionId) && Boolean(msg.clientId) && isShareableMessage(msg);
+
                     return (
                       <div
                         key={item.key}
                         data-message-client-id={msg.clientId}
-                        className={
-                          highlightMessageClientId === msg.clientId
-                            ? 'scroll-mt-20 rounded-xl bg-[hsl(var(--search-match-bg))] ring-1 ring-[var(--border-default)] transition-colors'
-                            : 'scroll-mt-20 transition-colors'
-                        }
+                        {...(shareable
+                          ? {
+                              [SHARE_SESSION_ATTR]: sessionId,
+                              [SHARE_MESSAGE_ATTR]: msg.clientId,
+                            }
+                          : {})}
+                        className={cn(
+                          'scroll-mt-20 transition-colors',
+                          shareable && 'relative',
+                          highlightMessageClientId === msg.clientId &&
+                            'rounded-xl bg-[hsl(var(--search-match-bg))] ring-1 ring-[var(--border-default)]',
+                        )}
                       >
+                        {shareable && shareSelectionActive ? (
+                          <ShareMessageCheckbox clientId={msg.clientId} />
+                        ) : null}
                         <MessageItem
                           message={msg}
                           toolResult={singleResultMap.get(msg.clientId)}
@@ -3840,6 +4031,7 @@ export function MessageStream({
                             assistantsWithFollowingUserBoundary,
                           )}
                           assistantIsTurnFinal={turnFinalAssistantClientIds.has(msg.clientId)}
+                          userTurnUsageDetails={userTurnUsageDetailsByAssistantId.get(msg.clientId)}
                           isFirstUserMessage={msg.clientId === firstUserMessageClientId}
                           isLastUserMessage={msg.clientId === lastUserMessageClientId}
                           isLastUserInput={msg.clientId === lastUserInputClientId}
@@ -3878,17 +4070,20 @@ export function MessageStream({
             />
 
             {/* message-nav-rail: 左缘提问导航条(每条提问一根刻度,当前项加深,
-          hover 预览,点击跳转)。显隐由组件自判:提问数 ≥4 且内容列左侧留白
-          足够;窄窗口 / 嵌入面板自然隐藏,绝不压在气泡上。 */}
-            <MessageNavRail
-              entries={navRailEntries}
-              scrollRef={scrollRef}
-              contentMaxWidth={contentWidth ?? 880}
-              bottomOffset={resolvedBottomPadding}
-              onJump={handleNavRailJump}
-              onNavCoverageChange={setNavRailCoversNav}
-              resetKey={sessionId}
-            />
+          hover 预览,点击跳转)。个性化开关(默认关)决定挂不挂载;挂载后的
+          显隐仍由组件自判:提问数 ≥4 且内容列左侧留白足够;窄窗口 / 嵌入面板
+          自然隐藏,绝不压在气泡上。 */}
+            {navRailEnabled && (
+              <MessageNavRail
+                entries={navRailEntries}
+                scrollRef={scrollRef}
+                contentMaxWidth={contentWidth ?? 880}
+                bottomOffset={resolvedBottomPadding}
+                onJump={handleNavRailJump}
+                onNavCoverageChange={setNavRailCoversNav}
+                resetKey={sessionId}
+              />
+            )}
 
             {/* prev-user-msg-jump: 右上角"跳到上一条提问"icon 按钮。
           通过 createPortal 挂到祖先的 TopRightChipStack 容器里,与 DiffPanelToggle
@@ -3931,6 +4126,7 @@ const MessageItem = memo(function MessageItem({
   sessionRunning,
   assistantForkBlocked,
   assistantIsTurnFinal,
+  userTurnUsageDetails,
   isFirstUserMessage,
   isLastUserMessage,
   isLastUserInput,
@@ -3961,6 +4157,8 @@ const MessageItem = memo(function MessageItem({
    *  (collectTurnFinalAssistantClientIds). Gates the hover action bar —
    *  mid-turn texts don't mount it, keeping the stream compact. */
   assistantIsTurnFinal?: boolean;
+  /** Aggregated token/cache/model details for this assistant's visible user turn. */
+  userTurnUsageDetails?: TurnUsageDetails;
   /** True iff this message is the first user message in the visible list.
    *  UserMessage hides the Rewind button for it (no prior assistant to
    *  resumeSessionAt anchor on — backend would throw NO_PRIOR_ASSISTANT). */
@@ -4068,6 +4266,7 @@ const MessageItem = memo(function MessageItem({
           userTurnCostUsd={message.userTurnCostUsd}
           userTurnCostIsEstimate={message.userTurnCostIsEstimate}
           turnUsageDetails={message.turnUsageDetails}
+          userTurnUsageDetails={userTurnUsageDetails}
           modelMismatch={message.modelMismatch}
           ghostReplyPending={message.ghostReplyPending}
         />

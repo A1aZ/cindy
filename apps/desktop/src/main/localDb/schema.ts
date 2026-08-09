@@ -1411,8 +1411,8 @@ export const mediaBlobs = sqliteTable('media_blobs', {
  * refKind/refId 是多态引用(消息 id / 会话 id / 意识 id),不设 FK——
  * 删除会话/卸载意识时由对应业务代码删自己名下的 ref(回收器对账兜底)。
  * origin* 记出生:意识面板供图的归属校验即查「该指纹是否有 origin 为本意识
- * 的行,或 ghost-gallery / ghost-grant / ghost-deposit ref」(ghostCanRead,
- * 见 main/cindy-media/ledger.ts)。
+ * 的行,或 ghost-gallery / ghost-grant / ghost-tool-grant / ghost-deposit ref」
+ * (ghostCanRead,见 main/cindy-media/ledger.ts)。
  *
  * refKind 是无约束的 text 列:新增引用类型只改 ledger.ts 的联合类型,
  * 不需要 migration。
@@ -1424,7 +1424,7 @@ export const mediaRefs = sqliteTable(
     hash: text('hash')
       .notNull()
       .references((): AnySQLiteColumn => mediaBlobs.hash, { onDelete: 'cascade' }),
-    /** 'message' | 'session-attachment' | 'ghost-gallery' | 'ghost-deposit' | 'import'…(联合类型见 ledger.ts)。 */
+    /** 'message' | 'session-attachment' | 'ghost-gallery' | 'ghost-tool-grant' | 'ghost-deposit' | 'import'…(联合类型见 ledger.ts)。 */
     refKind: text('ref_kind').notNull(),
     /** 引用方 id:消息 clientId / 会话 id / 意识 id。 */
     refId: text('ref_id').notNull(),
@@ -1518,5 +1518,31 @@ export const hookGroupMessages = sqliteTable(
     ),
     /** 窗口查询与 GC 的扫描路径。 */
     byWindow: index('hook_group_messages_window_idx').on(t.provider, t.chatId, t.threadId, t.id),
+  }),
+);
+
+/** hook_group_messages 的派生容量计数；由本地 SQLite 触发器增量维护。 */
+export const hookGroupMessageStats = sqliteTable('hook_group_message_stats', {
+  provider: text('provider').primaryKey(),
+  rowCount: integer('row_count').notNull(),
+  textBytes: integer('text_bytes').notNull(),
+});
+
+/**
+ * 群消息窗口的已提交游标。游标与消息池同属本地 DB，但按 provider 命名空间
+ * 隔离，登出/换绑时只清理对应 bot 的行。
+ */
+export const hookGroupContextCursors = sqliteTable(
+  'hook_group_context_cursors',
+  {
+    provider: text('provider').notNull(),
+    cursorKey: text('cursor_key').notNull(),
+    cursorId: integer('cursor_id').notNull(),
+    updatedAt: integer('updated_at').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.provider, t.cursorKey] }),
+    /** 消息命名空间已清空后，惰性 sweep 按最后活跃时间回收孤儿游标。 */
+    byUpdatedAt: index('hook_group_context_cursors_updated_at_idx').on(t.updatedAt),
   }),
 );

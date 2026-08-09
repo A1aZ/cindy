@@ -2,6 +2,7 @@ import { join as pathJoin } from 'node:path';
 
 import {
   createLiziMcpProviders,
+  resolveLiziMcpSessionContext,
   type LiziMcpProvider,
   type LiziMcpSessionContext,
   type LspServerPool,
@@ -9,7 +10,8 @@ import {
 import type { OrcaMcpDeps } from '@cindy/mcps';
 import { createCindyGhostsMcpServer } from 'cindy-tools';
 import type { MakerMemoryManager } from '@cindy/maker-core';
-import { getCindyGhostsMcpDeps } from './ghost.js';
+import { getCindyGhostsMcpDeps, type GhostGrantLiveSessionState } from './ghost.js';
+import { createGroupHistoryMcpServer } from './groupHistoryMcpServer.js';
 import { getAndroidMcpDeps } from './android.js';
 import { getBrowserMcpDeps } from './browser.js';
 import { getComputerMcpDeps } from './computer.js';
@@ -54,6 +56,11 @@ export interface DesktopMcpProvidersDeps {
   pluginRegistry: PluginRegistry;
   /** Device-link transport stays host-injected so provider tests do not load Electron runtime services. */
   invokeRemote: ChatHistoryReaderDeps['invokeRemote'];
+  /** 插件文件交接只认活跃 Session 的实时权限；缺失时由 ghost.ts fail closed。 */
+  getLiveSessionGrantState?: (
+    sessionId: string,
+    sessionInstanceId: string,
+  ) => GhostGrantLiveSessionState | null;
 }
 
 export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMcpProvider[] {
@@ -320,13 +327,46 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           return { ok: false, errorCode: 'INTERNAL', message };
         }
       },
-      sendToSession: async ({ targetSessionId, message, dispatcherSessionId, title, useWorktree, workingDir }) => {
+      sendToSession: async ({
+        targetSessionId,
+        message,
+        dispatcherSessionId,
+        title,
+        useWorktree,
+        workingDir,
+        agentKind,
+        model,
+        effort,
+        fast,
+      }) => {
         const svc = tryGetOrcaCollabService();
         if (!svc) {
           return { ok: false, errorCode: 'HOST_NOT_READY', message: 'orca collab service not initialized' };
         }
         try {
-          return await svc.sendToSession({ targetSessionId, message, dispatcherSessionId, title, useWorktree, workingDir });
+          const hasExecutionOverrides =
+            agentKind !== undefined
+            || model !== undefined
+            || effort !== undefined
+            || fast !== undefined;
+          return await svc.sendToSession({
+            targetSessionId,
+            message,
+            dispatcherSessionId,
+            title,
+            useWorktree,
+            workingDir,
+            ...(hasExecutionOverrides
+              ? {
+                  execution: {
+                    agentKind,
+                    model,
+                    effort,
+                    fastMode: fast,
+                  },
+                }
+              : {}),
+          });
         } catch (err) {
           return { ok: false, errorCode: 'INTERNAL', message: err instanceof Error ? err.message : String(err) };
         }
@@ -419,6 +459,18 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
   // plugin gate——工具面恒定是缓存前缀稳定的前提,"没装任何意识"表现为
   // ghost_list 返回空清单而非 server 消失,LLM 不困惑、老会话即时生效。
   gated.push({
+    name: 'cindy_group_history',
+    isEnabled: () => true,
+    toClaudeSdkConfig: (ctx) => ({
+      type: 'sdk',
+      name: 'cindy_group_history',
+      instance: createGroupHistoryMcpServer({
+        getSessionContext: () => resolveLiziMcpSessionContext(ctx),
+      }),
+    }),
+  });
+
+  gated.push({
     name: 'cindy',
     isEnabled: () => true,
     // ctx 闭包进 deps:claude in-process 路径的 tool-call 没有 ALS 语境,
@@ -427,7 +479,11 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
     toClaudeSdkConfig: (ctx) => ({
       type: 'sdk',
       name: 'cindy',
-      instance: createCindyGhostsMcpServer(getCindyGhostsMcpDeps(ctx)),
+      instance: createCindyGhostsMcpServer(
+        getCindyGhostsMcpDeps(ctx, {
+          getLiveSessionGrantState: deps.getLiveSessionGrantState,
+        }),
+      ),
     }),
   });
 

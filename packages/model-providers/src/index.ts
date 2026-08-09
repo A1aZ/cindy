@@ -24,12 +24,15 @@ export type {
   CustomProviderConfig,
   CustomProviderRuntimeConfig,
   ProviderRuntimeModelConfig,
+  PiReasoningEffort,
   ProviderPreset,
   ProviderPresetRuntime,
   OAuthAuthorizationCodeDescriptor,
   OAuthDeviceCodeDescriptor,
   OAuthProviderDescriptor,
 } from './types.js';
+
+export { PI_REASONING_EFFORTS } from './types.js';
 
 export { resolveCodexCompatibilityWireProtocol } from './codexCompatibility.js';
 
@@ -55,12 +58,17 @@ export {
 } from './source.js';
 
 export {
+  compareModelRegistryRevisions,
+  decideModelRegistrySnapshot,
   findModelRegistryRoute,
   resolveModelReferencePrice,
 } from './modelRegistry.js';
+export { modelRegistryCanonicalJson } from '@cindy/model-access-protocol';
 export type {
   ResolvedModelReferencePrice,
   ResolveModelReferencePriceOptions,
+  ModelRegistryRevisionRelation,
+  ModelRegistrySnapshotDecision,
 } from './modelRegistry.js';
 export type {
   ModelReferencePrice,
@@ -145,6 +153,7 @@ export {
   isChatEligible,
   groupOf,
   isAgentSelectableModel,
+  isModelSelectableForNewRoute,
   groupModelsForDisplay,
   isBudgetModel,
   modelBadges,

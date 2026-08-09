@@ -20,6 +20,11 @@ export interface OverrideSettingsFile<T> {
   writePatch(patch: Partial<T>, options?: { preserveDefaults?: boolean }): void;
   /** 跨进程锁内强制现读盘上 overrides，再合并 patch 并原子替换文件。 */
   writePatchAtomic(patch: Partial<T>, options?: { preserveDefaults?: boolean }): Promise<void>;
+  /** 在同一把跨进程锁内基于最新磁盘快照计算并写入 patch。 */
+  updateAtomic(
+    updater: (current: OverrideSettingsState<T>) => Partial<T>,
+    options?: { preserveDefaults?: boolean },
+  ): Promise<T>;
   reset(): T;
   /** 跨进程锁内删除 override 文件。 */
   resetAtomic(): Promise<T>;
@@ -49,6 +54,10 @@ export function createOverrideSettingsFile<T>(options: {
   label: string;
   /** owner/session 跨 await 切换时让原子写 fail closed。 */
   scopeKey?: () => string;
+  /** 同步读取前的文件大小硬上限；超限按读取失败处理，避免主进程无界分配。 */
+  maxBytes?: number;
+  /** 读取/解析失败时保留原文件，供用户修复；缺省维持旧 store 的删除坏文件行为。 */
+  preserveUnreadableFile?: boolean;
 }): OverrideSettingsFile<T> {
   let cached: CachedState<T> | null = null;
   let cachedResolvedPath: string | null = null;
@@ -73,10 +82,14 @@ export function createOverrideSettingsFile<T>(options: {
     cachedResolvedPath = file;
     try {
       if (fs.existsSync(file)) {
+        const stat = fs.statSync(file);
+        if (options.maxBytes !== undefined && stat.size > options.maxBytes) {
+          throw new Error(`file exceeds ${options.maxBytes} byte limit`);
+        }
         const text = fs.readFileSync(file, 'utf-8');
         const parsed = JSON.parse(text);
         const overrides = isLoggableObject(parsed) ? parsed : {};
-        cachedFileMtimeMs = statFileMtimeMs();
+        cachedFileMtimeMs = stat.mtimeMs;
         cached = {
           value: options.normalize({ ...defaults(), ...overrides }),
           isCustomized: Object.keys(overrides).length > 0,
@@ -96,14 +109,18 @@ export function createOverrideSettingsFile<T>(options: {
         error: err instanceof Error ? err.message : String(err),
         path: file,
       });
-      try {
-        fs.unlinkSync(file);
-      } catch {
-        // no-op
+      if (!options.preserveUnreadableFile) {
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          // no-op
+        }
       }
     }
 
-    cachedFileMtimeMs = null;
+    // 保留坏文件时记住它的 mtime，避免每次读取重复解析/刷日志；用户修复后
+    // invalidateIfChanged 会看到 mtime 变化并自动重试。
+    cachedFileMtimeMs = options.preserveUnreadableFile ? statFileMtimeMs() : null;
     cached = {
       value: defaults(),
       isCustomized: false,
@@ -171,6 +188,33 @@ export function createOverrideSettingsFile<T>(options: {
         }
         invalidate();
         writePatch(patch, writeOptions);
+      },
+    );
+  }
+
+  async function updateAtomic(
+    updater: (current: OverrideSettingsState<T>) => Partial<T>,
+    writeOptions?: { preserveDefaults?: boolean },
+  ): Promise<T> {
+    const file = options.filePath();
+    const scopeKey = options.scopeKey?.();
+    fs.mkdirSync(pathDirname(file), { recursive: true });
+    return withCrossProcessLock(
+      `${file}.lock`,
+      { label: `${options.label}-settings`, waitMs: 12_000 },
+      async (status) => {
+        if (!status.held) {
+          throw new Error(`${options.label} settings are busy in another process`);
+        }
+        if (options.filePath() !== file || options.scopeKey?.() !== scopeKey) {
+          throw new Error(
+            `${options.label} settings scope changed while waiting for the write lock`,
+          );
+        }
+        invalidate();
+        const current = readState();
+        writePatch(updater(current), writeOptions);
+        return readState().value;
       },
     );
   }
@@ -249,6 +293,7 @@ export function createOverrideSettingsFile<T>(options: {
     readState,
     writePatch,
     writePatchAtomic,
+    updateAtomic,
     reset,
     resetAtomic,
     invalidateIfChanged,
@@ -303,10 +348,12 @@ function sortObjectKeys(value: unknown): unknown {
     return value.map(sortObjectKeys);
   }
   if (isLoggableObject(value)) {
-    return Object.keys(value).sort().reduce<Record<string, unknown>>((acc, key) => {
-      acc[key] = sortObjectKeys(value[key]);
-      return acc;
-    }, {});
+    return Object.keys(value)
+      .sort()
+      .reduce<Record<string, unknown>>((acc, key) => {
+        acc[key] = sortObjectKeys(value[key]);
+        return acc;
+      }, {});
   }
   return value;
 }

@@ -5,7 +5,7 @@
  * `RolePillDropdown.tsx` 的 WorkerLayoutMenu):
  * - 容器 12px 圆角 + 1px border-default + surface-elevated + shadow-menu, padding 4
  * - 分组头 10px / weight 500 / text-tertiary / px-2.5 pt-2 pb-1
- * - menu item 28px / rounded-lg(8px) / px-2.5 py-1.5 / text-[12px] / text-primary,
+ * - menu item 28px / rounded-lg(8px) / px-2.5 py-1.5 / text-12 / text-primary,
  *   hover bg-surface-hover, disabled opacity-50
  * - 分隔线 mx-1 my-1 h-px bg-border-default
  *
@@ -15,10 +15,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { FileDiff, FolderTree, Globe, ListTodo, Terminal } from 'lucide-react';
+import { Activity, FileDiff, FolderTree, Globe, ListTodo, Terminal } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { listGhostTabMenuMetas, useTabKindRegistryVersion } from './registry';
 import type { TabKindId, TabKindMenuMeta } from './types';
 
 const DROPDOWN_WIDTH = 220;
@@ -64,6 +63,14 @@ const MENU_ITEMS: TabKindMenuMeta[] = [
     labelKey: 'rightSidebar.tabs.kinds.backgroundTasks',
     icon: ListTodo,
     order: 17,
+    enabled: true,
+    singleton: true,
+  },
+  {
+    kind: 'resource-usage',
+    labelKey: 'rightSidebar.tabs.kinds.resourceUsage',
+    icon: Activity,
+    order: 18,
     enabled: true,
     singleton: true,
   },
@@ -182,9 +189,6 @@ export function AddTabDropdown({ anchorRef, onClose, onSelect, existingKinds }: 
 
   const enabled = MENU_ITEMS.filter((m) => m.enabled).sort((a, b) => a.order - b.order);
   const coming = MENU_ITEMS.filter((m) => !m.enabled).sort((a, b) => a.order - b.order);
-  // 插件页签(panel.position:'tab')动态分组:随装/卸/停用增减,版本号驱动重渲。
-  useTabKindRegistryVersion();
-  const ghostItems = listGhostTabMenuMetas();
 
   return createPortal(
     <div
@@ -224,7 +228,7 @@ export function AddTabDropdown({ anchorRef, onClose, onSelect, existingKinds }: 
             label={t(m.labelKey)}
             trailing={
               alreadyOpen ? (
-                <span className="text-[10px] text-[var(--text-tertiary)]">
+                <span className="text-10 text-[var(--text-tertiary)]">
                   {t('rightSidebar.tabs.menu.alreadyOpen')}
                 </span>
               ) : undefined
@@ -233,31 +237,6 @@ export function AddTabDropdown({ anchorRef, onClose, onSelect, existingKinds }: 
           />
         );
       })}
-      {ghostItems.length > 0 && (
-        <>
-          <div className="mx-1 my-1 h-px bg-[var(--border-default)]" />
-          <GroupHeader label={t('rightSidebar.tabs.menu.pluginGroup')} />
-          {ghostItems.map((m) => {
-            const alreadyOpen = m.singleton && existingKinds?.has(m.kind);
-            return (
-              <DropdownItem
-                key={m.kind}
-                icon={m.icon}
-                // 插件名是用户内容原文(labelText),labelKey 只作兜底。
-                label={m.labelText ?? t(m.labelKey)}
-                trailing={
-                  alreadyOpen ? (
-                    <span className="text-[10px] text-[var(--text-tertiary)]">
-                      {t('rightSidebar.tabs.menu.alreadyOpen')}
-                    </span>
-                  ) : undefined
-                }
-                onClick={() => onSelect(m.kind)}
-              />
-            );
-          })}
-        </>
-      )}
       {coming.length > 0 && (
         <>
           <div className="mx-1 my-1 h-px bg-[var(--border-default)]" />
@@ -274,7 +253,7 @@ export function AddTabDropdown({ anchorRef, onClose, onSelect, existingKinds }: 
 
 function GroupHeader({ label }: { label: string }) {
   return (
-    <div className="px-2.5 pt-2 pb-1 text-[10px] font-medium text-[var(--text-tertiary)]">
+    <div className="px-2.5 pt-2 pb-1 text-10 font-medium text-[var(--text-tertiary)]">
       {label}
     </div>
   );
@@ -302,7 +281,7 @@ function DropdownItem({
       className={cn(
         // focus-visible 与 hover 同款背景:键盘打开时首项自动聚焦要有可见落点,
         // 鼠标交互不触发 focus-visible,无视觉噪音。
-        'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] leading-snug text-[var(--text-primary)] transition-colors focus:outline-none focus-visible:bg-[var(--surface-hover)]',
+        'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-13 leading-snug text-[var(--text-primary)] transition-colors focus:outline-none focus-visible:bg-[var(--surface-hover)]',
         disabled ? 'cursor-not-allowed opacity-50' : 'hover:bg-[var(--surface-hover)]',
       )}
     >

@@ -139,6 +139,18 @@ export interface CodexModelListParams {
   includeHidden?: boolean | null;
 }
 
+/** Minimal subset of `mcpServerStatus/list` used for post-start capability gates. */
+export interface CodexMcpServerStatus {
+  name: string;
+  tools: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+export interface CodexMcpServerStatusListResponse {
+  data: CodexMcpServerStatus[];
+  nextCursor: string | null;
+}
+
 export interface CodexModelListResponse {
   data: CodexModelListItem[];
   nextCursor: string | null;
@@ -456,6 +468,12 @@ export interface ThreadForkParams {
   sandbox?: SandboxMode;
   /** Per-request config overrides, including named permission profile definitions. */
   config?: Record<string, unknown>;
+  /**
+   * 只返回 thread 元数据与 live fork state,不把完整历史塞进单条 NDJSON response。
+   * 与 thread/resume.excludeTurns 同族;超长历史 thread 的 fork 响应体与历史成
+   * 正比、无上界,曾实测单行 31MiB 超过 client maxLineBytes(16MiB)熔断整条连接。
+   */
+  excludeTurns?: boolean;
   [k: string]: unknown;
 }
 
@@ -788,6 +806,11 @@ export interface ThreadStartedNotification {
 export interface TurnStartedNotification {
   method: 'turn/started';
   params: { threadId: string; turn: { id: string; [k: string]: unknown }; [k: string]: unknown };
+}
+
+export interface TurnDiffUpdatedNotification {
+  method: 'turn/diff/updated';
+  params: { threadId: string; turnId: string; diff: string; [k: string]: unknown };
 }
 
 /**
@@ -1142,6 +1165,7 @@ export interface ItemEnvelope {
 export type ServerNotification =
   | ThreadStartedNotification
   | TurnStartedNotification
+  | TurnDiffUpdatedNotification
   | TurnCompletedNotification
   | ThreadTokenUsageUpdatedNotification
   | ItemStartedNotification
@@ -1164,6 +1188,7 @@ export type ServerNotification =
 export const Method = {
   Initialize: 'initialize',
   ModelList: 'model/list',
+  McpServerStatusList: 'mcpServerStatus/list',
   SkillsList: 'skills/list',
   ThreadStart: 'thread/start',
   ThreadResume: 'thread/resume',

@@ -69,6 +69,7 @@ import type {
   ListCustomizationsOptions,
   ListCustomizationsResult,
 } from '../types/customizations.js';
+import type { PiRuntimeCapabilityManifest } from '../types/pi-runtime-capabilities.js';
 import { scanWorkspaceFileResources } from './shared/palette-scanner.js';
 import type { AutoReviewDelegate } from './shared/auto-review-decision.js';
 
@@ -82,6 +83,11 @@ export interface AgentCapabilityAdditions {
 export interface CodexMcpThreadContextArgs {
   threadId: string;
   sessionId: string;
+  /** Host-owned app-server thread lineage. */
+  mcpCallerKind: 'root' | 'descendant' | 'unknown';
+  mcpCallerAttested: boolean;
+  /** 当前 Maker Session 实例代号；同 business session 重建后必须变化。 */
+  sessionInstanceId?: string;
   workingDir: string;
   /**
    * SSH remote 会话的 host id。cindy_memory 的 store 定位键要靠它区分
@@ -111,12 +117,28 @@ export type McpToolApprovalPolicy =
   | 'prompt'
   | 'prompt-each-time';
 
-/** pi spawn 附加配置:host 的 MCP HTTP bridge 出口(见 AgentDeps.preparePiExtraSpawnConfig)。 */
+/** Pi 内 MCP client 的 server 描述；remote 存在时直接访问外部 Streamable HTTP MCP。 */
+export interface PiMcpServerRef {
+  name: string;
+  url: string;
+  remote?: {
+    /** HTTP header 名 → Pi 父进程 env var 名；描述符里绝不放 header 真值。 */
+    headerEnvVars: Record<string, string>;
+    /** extension 启动时 initialize + tools/list 的总预算；必须短于 Pi RPC ready 超时。 */
+    startupTimeoutMs: number;
+    /** 完成启动探测后的单次工具调用预算。 */
+    requestTimeoutMs: number;
+  };
+}
+
+/** pi spawn 附加配置:host 的 MCP HTTP bridge / 外部 HTTP MCP 出口。 */
 export interface PiExtraSpawnConfig {
   mcpBridge?: {
     token: string;
-    servers: Array<{ name: string; url: string }>;
+    servers: PiMcpServerRef[];
   } | null;
+  /** 外部 MCP header 真值；只进 Pi 父进程 env，并在 bash spawn 边界剥离。 */
+  mcpEnv?: Record<string, string>;
   /**
    * 释放本 session 的 bridge lease；带 sessionId 时同时注销身份 ctx。PiAgent 在
    * close() 时调用且要求幂等。只要拿到 bridge（包括匿名会话）就应提供。
@@ -131,11 +153,15 @@ export type PiNativeApi =
   | 'openai-completions'
   | 'google-generative-ai';
 
+export type PiNativeThinkingLevel = Exclude<Effort, 'ultra'>;
+
 /** BYOM:写进 pi models.json 的一个模型(原生 provider 块内)。 */
 export interface PiNativeModelSpec {
   id: string;
   name?: string;
   reasoning?: boolean;
+  /** Pi models.json 的 provider-specific thinking level 映射；null 明确禁用该档。 */
+  thinkingLevelMap?: Partial<Record<PiNativeThinkingLevel, string | null>>;
   contextWindow?: number;
   maxTokens?: number;
   input?: Array<'text' | 'image'>;
@@ -182,13 +208,32 @@ export interface PiNativeProvidersResult {
  */
 export interface PiExtraSpawnConfigContext {
   sessionId?: string;
+  /** 当前 Maker Session 实例代号；用于阻断旧 bridge 请求借用新实例权限。 */
+  sessionInstanceId?: string;
   workingDir: string;
   vendorOptions?: Record<string, unknown>;
+  mcpCallerKind?: 'root' | 'descendant' | 'unknown';
+  mcpCallerAttested?: boolean;
 }
 
 export interface CodexExtraSpawnConfig {
   extraArgs: string[];
   extraEnv: Record<string, string>;
+  /** Cindy-side display fallback for Codex subagent cards. */
+  subagentModelFallback?: string;
+  /** Whether this exact app-server spawn was provisioned with Codex Chrome. */
+  codexBrowserUseAvailable?: boolean;
+  /** Exact verified Chrome plugin version provisioned into this app-server. */
+  codexBrowserUseVersion?: string;
+  /** Maximum startup wait copied from the verified companion descriptor. */
+  codexBrowserUseStartupTimeoutMs?: number;
+  /**
+   * Build per-thread config overrides that bind host-owned HTTP MCP URLs to one
+   * in-memory Session instance. The app-server process is shared, so the spawn
+   * config only supplies the unbound base URL; thread/start|resume must add the
+   * opaque route identity for the concrete Session using this callback.
+   */
+  buildSessionMcpConfig?: (sessionInstanceId: string) => Record<string, unknown>;
   codexProxyActive?: boolean;
   /**
    * spawn args 中定义的「OpenAI 身份」provider id(name 逐字为 "OpenAI",
@@ -198,6 +243,19 @@ export interface CodexExtraSpawnConfig {
    * (本地压缩)—— 网关 / xAI / 自定义供应商上游不实现远端压缩,错配是硬失败。
    */
   codexRemoteCompactionProviderId?: string;
+}
+
+export type CodexAppServerProcessRole = 'task-host' | 'control-plane-service';
+
+export interface CodexAppServerProcessRegistration {
+  pid: number;
+  role: CodexAppServerProcessRole;
+}
+
+export interface LocalAgentProcessRegistration {
+  pid: number;
+  kind: 'claude' | 'pi';
+  role: 'task-host' | 'control-plane-service';
 }
 
 export interface CodexLocalCredentialModeSwitchContext {
@@ -232,7 +290,40 @@ export interface ClaudeSubagentTaskUsage {
   totalTokens: number;
 }
 
+/**
+ * The host has positively identified a resume state that must not be handed to
+ * Codex yet (for example, a rollout file that may still have a live writer).
+ * Unlike an incidental preparation failure, this error deliberately blocks
+ * thread/resume so Codex cannot append to an unsafe path.
+ */
+export class CodexResumePreparationBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CodexResumePreparationBlockedError';
+  }
+}
+
+export interface TurnChangeCaptureHooks {
+  /** Capture one known target before the provider is allowed to mutate it. */
+  beforeKnownFileWrite(input: {
+    sessionId: string;
+    provider: 'claude-code' | 'pi';
+    cwd: string;
+    targetPath: string;
+    remote?: boolean;
+  }): Promise<void>;
+  /** Record a tool whose filesystem effects cannot be known before execution. */
+  noteOpaqueWrite(input: {
+    sessionId: string;
+    provider: 'claude-code' | 'pi';
+    cwd: string;
+    remote?: boolean;
+  }): void;
+}
+
 export interface AgentDeps {
+  /** Optional low-I/O, provider-neutral turn change recorder supplied by the host. */
+  turnChangeCapture?: TurnChangeCaptureHooks;
   auth: AuthAdapter;
   runtimeConfig: AgentRuntimeConfig;
   /**
@@ -304,6 +395,23 @@ export interface AgentDeps {
   ) => Promise<PiNativeProvidersResult | null>;
 
   /**
+   * Pi-only:按实际 provider/model 路由解析运行时描述符。用于启动前校验已持久化 effort，
+   * 以及恢复已 retired 模型时补齐当前 session 的私有 models.json；结果不得进入公开
+   * availableModels 或授予新选择准入。
+   */
+  resolvePiRuntimeModelDescriptor?: (
+    providerId: string | null | undefined,
+    modelId: string,
+  ) => ModelDescriptor | null;
+
+  /**
+   * Pi-only:为 `cindy` gateway 的 models.json 块解析内置 provider-aware 描述符。
+   * 与上面的续跑私有解析器分开，避免生成 gateway 配置放宽 retired/disabled
+   * 准入或改变新会话的私有解析时机。缺省时 Pi 保留 flat descriptor fallback。
+   */
+  resolvePiGatewayModelDescriptor?: (modelId: string) => ModelDescriptor | null;
+
+  /**
    * Host-provided capability descriptor additions.
    *
    * This is append-only: additions with ids already present in the agent's built-in
@@ -322,6 +430,23 @@ export interface AgentDeps {
    * product policy.
    */
   capabilityRouting?: CapabilityRoutingPolicy;
+
+  /**
+   * Resolve capability arbitration once for a new session. Use this for
+   * workspace-scoped sources whose effective state is already frozen into
+   * vendorOptions by the host. Static capabilityRouting remains the fallback.
+   */
+  resolveCapabilityRouting?: (ctx: {
+    workingDir: string;
+    remoteHostId?: string | null;
+    vendorOptions: Readonly<Record<string, unknown>>;
+    /** Frozen fact: the concrete app-server was provisioned with the companion. */
+    codexBrowserUseProvisioned: boolean;
+    /** Exact Chrome plugin version bound to that host, when provisioned. */
+    codexBrowserUseVersion: string | null;
+    /** Post-start readiness check, invoked only when this session needs the fallback. */
+    ensureCodexBrowserUseReady: () => Promise<boolean>;
+  }) => CapabilityRoutingPolicy | undefined | Promise<CapabilityRoutingPolicy | undefined>;
 
   /**
    * 解析某条**具体路由**上该模型已核实的上下文窗口上限（host 注入）；没有则返回 null。
@@ -375,6 +500,22 @@ export interface AgentDeps {
   ) => Promise<CodexExtraSpawnConfig>;
 
   /**
+   * Codex 专用：登记本机 stdio app-server 的 PID 与职责。
+   * 返回 disposer 时会跟随 transport close 调用；远端 SSH transport 不触发。
+   */
+  registerLocalCodexAppServerProcess?: (
+    info: CodexAppServerProcessRegistration,
+  ) => void | (() => void);
+
+  /**
+   * Register a locally spawned Claude/Pi root process with the host. The returned
+   * disposer follows that exact process generation; remote transports never call it.
+   */
+  registerLocalAgentProcess?: (
+    info: LocalAgentProcessRegistration,
+  ) => void | (() => void);
+
+  /**
    * Codex 本地 shared app-server 凭证形态要切换前的宿主协调点。
    *
    * maker-core 不知道 desktop 的 active session / worktree / attachment 生命周期；
@@ -407,7 +548,10 @@ export interface AgentDeps {
    * behavior; implementations should be in-memory and best-effort.
    */
   registerCodexMcpThreadContext?: (args: CodexMcpThreadContextArgs) => void;
-  unregisterCodexMcpThreadContext?: (threadId: string) => void;
+  unregisterCodexMcpThreadContext?: (
+    threadId: string,
+    expectedSessionInstanceId?: string,
+  ) => void;
 
   /**
    * Codex 专用:为远端机器构造一个 codex app-server transport。
@@ -472,6 +616,9 @@ export interface AgentDeps {
    * 缺省 / undefined → 两段都不注入 (host 未接线, 与改造前行为一致)。
    */
   getContactsPromptState?: (ctx: { workingDir?: string }) => ContactsPromptState;
+
+  /** Session 装配时求值一次的插件花名册 system/developer 段；空清单返回空串。 */
+  getGhostRosterPrompt?: (ctx: { workingDir?: string }) => string;
 
   /**
    * Host-side MCP approval policy, shared by **both** agents. `auto-approve`
@@ -618,6 +765,8 @@ export interface AgentDeps {
   remoteCcQueryFactory?: (opts: {
     remoteHostId: string;
     sessionId: string;
+    /** 当前 Maker Session 实例代号；只在宿主 MCP 身份上下文中流转。 */
+    sessionInstanceId?: string;
     /**
      * 给 cc-mgr daemon 起 SDK Query 时用的全部 options
      * (cwd / model / env / mcpServers / systemPrompt / additionalDirectories /
@@ -782,6 +931,13 @@ export interface StartSessionOptions {
    * (如 LEAD_NOT_SUPPORTED) 让 LLM 知道当前调用无法绑定到具体 session。
    */
   sessionId?: string;
+  /**
+   * Maker 为本次内存 Session 实例铸造的唯一代号。业务 sessionId 可在重建后
+   * 复用；MCP 权限读取必须同时匹配本代号。Maker 会覆盖外部同名输入。宿主可
+   * 将它作为 opaque route identity 放进 harness 的本地 MCP URL，但不得把它
+   * 暴露成模型或插件可控的工具参数。
+   */
+  sessionInstanceId?: string;
   workingDir: string;
   /**
    * Product workspace classification. `dialogue` sessions may still receive an
@@ -935,6 +1091,8 @@ export interface SendOptions {
    * 共享 session 下区分自动任务 turn 与用户 turn。agent 子类不消费,透传无害。
    */
   origin?: SendOrigin;
+  /** Host-owned per-turn correlation copied onto every AgentEvent for lifecycle settlement. */
+  turnAttemptToken?: number;
   /**
    * Host-owned, per-turn permission policy. This is deliberately a callback
    * rather than prompt text: providers must enforce it at their pre-execution
@@ -991,6 +1149,18 @@ export interface BackgroundTaskSnapshot {
 }
 
 /**
+ * Provider-owned lifecycle of the turn boundary after a foreground `done`.
+ *
+ * `awaiting` means the provider has an automatic continuation queued or still
+ * expected. `active` means that continuation has started. `cancelled` means
+ * the continuation was explicitly stopped; observers may settle immediately,
+ * while the provider appends an ordered terminal boundary for Session state.
+ * Provider/session failure settles via the normal terminal error and
+ * session-status paths instead.
+ */
+export type TurnContinuationState = 'awaiting' | 'active' | 'cancelled';
+
+/**
  * 一个已启动的 agent 会话句柄。
  * 上层 Session 类持有此句柄并对外暴露 UI 友好的 API。
  */
@@ -999,6 +1169,12 @@ export interface AgentSessionHandle {
   readonly id: string;
   readonly agentKind: AgentKind;
   readonly model: string;
+  /** Pi-only, per-session runtime command catalog. Undefined for other agents. */
+  getRuntimeCapabilities?(): PiRuntimeCapabilityManifest | undefined;
+  /** Subscribe to Pi runtime catalog replacement; returns an idempotent disposer. */
+  onRuntimeCapabilitiesChange?(
+    listener: (manifest: PiRuntimeCapabilityManifest | undefined) => void,
+  ): () => void;
   /** Codex-only: 当前会话绑定的 app-server host 是否经 loopback proxy 出口。 */
   readonly codexProxyActive?: boolean;
   /**
@@ -1055,6 +1231,21 @@ export interface AgentSessionHandle {
    */
   listBackgroundTasks?(): BackgroundTaskSnapshot[];
 
+  /**
+   * Resolve the provider claim attached atomically to a specific `done` event.
+   * Returns null when that event has no matching continuation boundary.
+   */
+  beginTurnContinuationWait?(continuationId?: number): TurnContinuationState | null;
+
+  /**
+   * Observe provider-owned continuation cancellation/start transitions. The
+   * subscription is intentionally separate from task-card events: a stopped
+   * wake task does not necessarily produce another provider `done`.
+   */
+  onTurnContinuationChange?(
+    listener: (continuationId: number, state: TurnContinuationState) => void,
+  ): () => void;
+
   /** 关闭会话，清理子进程 */
   close(): Promise<void>;
 
@@ -1080,7 +1271,7 @@ export interface AgentSessionHandle {
   setInteractionResolver(resolver: InteractionResolver): void;
 
   /** 运行时切换模型 —— 不支持时抛 NotSupportedError */
-  setModel?(model: string, opts?: { providerId?: string | null }): Promise<void>;
+  setModel?(model: string, opts?: { providerId?: string | null; effort?: Effort }): Promise<void>;
 
   /** 运行时切换 effort */
   setEffort?(effort: Effort): Promise<void>;

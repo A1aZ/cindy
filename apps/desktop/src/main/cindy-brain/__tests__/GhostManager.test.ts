@@ -5,7 +5,7 @@ import path from 'node:path';
 import JSZip from 'jszip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { InstalledGhost } from '../../../shared/ghost';
+import { validateGhostManifest, type InstalledGhost } from '../../../shared/ghost';
 import { CINDY_OFFICIAL_GHOST_TRUST, GhostManager } from '../GhostManager';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -535,11 +535,38 @@ describe('GhostManager · list', () => {
       onChanged,
       log: { info: vi.fn(), warn },
     });
+    const sensitiveMarkers = [
+      'SECRET_STRING_METADATA',
+      '../SECRET_MANUAL_DIR',
+      'SECRET_MANUAL_NAME',
+      'SECRET_MANUAL_DESCRIPTION',
+    ];
+    const sensitiveManifest = {
+      ...goodManifest('legacy-object'),
+      manual: {
+        items: [
+          {
+            dir: sensitiveMarkers[1],
+            name: sensitiveMarkers[2],
+            description: sensitiveMarkers[3],
+          },
+        ],
+      },
+    };
+    const strictValidation = validateGhostManifest(sensitiveManifest);
+    expect(strictValidation.ok).toBe(false);
+    if (strictValidation.ok) throw new Error('sensitive legacy manual fixture must be invalid');
+    expect(strictValidation.reason).toContain(sensitiveMarkers[1]);
+
     const fixtures = [
-      { id: 'legacy-string', manual: 'notes', enabled: true },
+      {
+        id: 'legacy-string',
+        manifest: { ...goodManifest('legacy-string'), manual: sensitiveMarkers[0] },
+        enabled: true,
+      },
       {
         id: 'legacy-object',
-        manual: { note: 'old metadata', nested: { arbitrary: true } },
+        manifest: sensitiveManifest,
         enabled: false,
       },
     ];
@@ -548,7 +575,7 @@ describe('GhostManager · list', () => {
       await fs.promises.mkdir(dir, { recursive: true });
       await fs.promises.writeFile(
         path.join(dir, 'ghost.json'),
-        JSON.stringify({ ...goodManifest(fixture.id), manual: fixture.manual }),
+        JSON.stringify(fixture.manifest),
       );
       await fs.promises.writeFile(path.join(dir, 'main.js'), '// legacy');
       if (!fixture.enabled) await fs.promises.writeFile(path.join(dir, '.disabled'), '');
@@ -576,18 +603,30 @@ describe('GhostManager · list', () => {
       { id: 'legacy-string', enabled: true, manual: undefined },
     ]);
     expect(warn).toHaveBeenCalledTimes(3);
-    expect(warn).toHaveBeenCalledWith(
-      'ghost legacy manual metadata ignored',
-      expect.objectContaining({ manifestId: 'legacy-string' }),
+    const legacyWarnings = warn.mock.calls.filter(
+      ([message]) => message === 'ghost legacy manual metadata ignored',
     );
-    expect(warn).toHaveBeenCalledWith(
-      'ghost legacy manual metadata ignored',
-      expect.objectContaining({ manifestId: 'legacy-object' }),
+    expect(legacyWarnings).toHaveLength(2);
+    expect(legacyWarnings).toEqual(
+      expect.arrayContaining([
+        [
+          'ghost legacy manual metadata ignored',
+          { code: 'LEGACY_MANUAL_METADATA_IGNORED', manifestId: 'legacy-object' },
+        ],
+        [
+          'ghost legacy manual metadata ignored',
+          { code: 'LEGACY_MANUAL_METADATA_IGNORED', manifestId: 'legacy-string' },
+        ],
+      ]),
     );
     expect(warn).toHaveBeenCalledWith(
       'ghost dir skipped: invalid manifest',
       expect.objectContaining({ dir: invalidDir }),
     );
+    const serializedWarnings = JSON.stringify(warn.mock.calls);
+    for (const marker of sensitiveMarkers) expect(serializedWarnings).not.toContain(marker);
+    expect(serializedWarnings).not.toContain(strictValidation.reason);
+    expect(serializedWarnings).not.toContain('../');
   });
 });
 

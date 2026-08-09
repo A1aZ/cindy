@@ -223,9 +223,8 @@ export class GhostManager {
         const legacyCompatible = validateGhostManifest(withoutLegacyManual);
         if (legacyCompatible.ok) {
           this.options.log?.warn('ghost legacy manual metadata ignored', {
-            dir,
+            code: 'LEGACY_MANUAL_METADATA_IGNORED',
             manifestId: legacyCompatible.manifest.id,
-            reason: v.reason,
           });
           v = legacyCompatible;
         }

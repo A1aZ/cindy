@@ -9,7 +9,11 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
 
 import type { ReviewAttachmentInput } from '../reviewer/reviewEvidence.js';
-import type { ReviewRunMeta, ReviewTargetKind } from '../../shared/reviewRun.js';
+import type {
+  ReviewRunMeta,
+  ReviewRunOwner,
+  ReviewTargetKind,
+} from '../../shared/reviewRun.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
@@ -120,6 +124,7 @@ export interface ReviewStartHandlerDeps {
   waitUntilReady(): Promise<void>;
   createRunId(): string;
   createReviewerSessionId(): string;
+  owner: ReviewRunOwner;
   now(): number;
   prepareRun(input: {
     event: unknown;
@@ -254,6 +259,7 @@ export function registerReviewStartHandler(
         status: 'running',
         targetKind: prepared.targetKind,
         startedAt,
+        owner: deps.owner,
       };
       await deps.createSourceCard({
         sourceSessionId: request.sourceSessionId,

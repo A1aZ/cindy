@@ -8,6 +8,7 @@ import {
   fingerprintReviewArtifacts,
   prepareWithStableReviewArtifacts,
   ReviewArtifactChangedDuringPreparationError,
+  ReviewArtifactFingerprintLimitError,
 } from '../reviewArtifactFingerprint.js';
 
 const tempDirs: string[] = [];
@@ -59,6 +60,16 @@ describe('review artifact fingerprint', () => {
     const after = await fingerprintReviewArtifacts([file]);
 
     expect(after).not.toBe(before);
+  });
+
+  it('fails closed instead of returning a truncated directory fingerprint', async () => {
+    const dir = await makeTempDir();
+    await fs.writeFile(path.join(dir, 'a.txt'), 'a');
+    await fs.writeFile(path.join(dir, 'b.txt'), 'b');
+
+    await expect(
+      fingerprintReviewArtifacts([dir], { maxDirectoryEntries: 2 }),
+    ).rejects.toBeInstanceOf(ReviewArtifactFingerprintLimitError);
   });
 
   it('rejects a same-size replacement between extraction and the first baseline', async () => {

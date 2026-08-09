@@ -13,8 +13,16 @@ const MAX_TOTAL_CONTENT_BYTES = 128 * 1024 * 1024;
 interface FingerprintState {
   hash: ReturnType<typeof createHash>;
   entries: number;
+  maxDirectoryEntries: number;
   contentBytesRemaining: number;
 }
+
+export interface ReviewArtifactFingerprintOptions {
+  /** Test seam; production uses the bounded fail-closed default. */
+  maxDirectoryEntries?: number;
+}
+
+export class ReviewArtifactFingerprintLimitError extends Error {}
 
 function addRecord(state: FingerprintState, ...parts: Array<string | number>): void {
   state.hash.update(parts.join('\0')).update('\n');
@@ -97,9 +105,10 @@ async function walk(
   state: FingerprintState,
 ): Promise<void> {
   if (isSensitive(absolutePath, relativePath)) return;
-  if (state.entries >= MAX_DIRECTORY_ENTRIES) {
-    addRecord(state, 'directory-entry-limit', relativePath);
-    return;
+  if (state.entries >= state.maxDirectoryEntries) {
+    throw new ReviewArtifactFingerprintLimitError(
+      `Review artifact directory exceeds the ${state.maxDirectoryEntries.toLocaleString('en-US')}-entry fingerprint limit`,
+    );
   }
   state.entries += 1;
 
@@ -152,10 +161,6 @@ async function walk(
   for (const entry of entries) {
     const childRelative = relativePath ? `${relativePath}/${entry.name}` : entry.name;
     if (isSensitive(entry.name, childRelative)) continue;
-    if (state.entries >= MAX_DIRECTORY_ENTRIES) {
-      addRecord(state, 'directory-entry-limit', relativePath, entries.length);
-      break;
-    }
     await walk(path.join(absolutePath, entry.name), childRelative, state);
   }
 }
@@ -165,10 +170,18 @@ async function walk(
  * deliberately bounded, ignores credential paths, and hashes file contents
  * (or both ends of very large files) so same-size edits are still detected.
  */
-export async function fingerprintReviewArtifacts(paths: readonly string[]): Promise<string> {
+export async function fingerprintReviewArtifacts(
+  paths: readonly string[],
+  options: ReviewArtifactFingerprintOptions = {},
+): Promise<string> {
+  const maxDirectoryEntries = options.maxDirectoryEntries ?? MAX_DIRECTORY_ENTRIES;
+  if (!Number.isSafeInteger(maxDirectoryEntries) || maxDirectoryEntries <= 0) {
+    throw new TypeError('maxDirectoryEntries must be a positive safe integer');
+  }
   const state: FingerprintState = {
     hash: createHash('sha256'),
     entries: 0,
+    maxDirectoryEntries,
     contentBytesRemaining: MAX_TOTAL_CONTENT_BYTES,
   };
   const canonicalRoots = new Set<string>();

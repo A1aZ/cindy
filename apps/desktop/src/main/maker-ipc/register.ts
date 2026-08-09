@@ -204,7 +204,12 @@ import { fingerprintReviewArtifacts } from '../reviewer/reviewArtifactFingerprin
 import { enforceReviewCreateOptions } from '../reviewer/reviewSessionPolicy.js';
 import { reviewSourceIdentityMatches } from '../reviewer/reviewSourceIdentity.js';
 import { buildReviewSessionTitle } from '../reviewer/reviewSessionTitle.js';
-import { readReviewRunFromAgentMeta, type ReviewRunMeta } from '../../shared/reviewRun.js';
+import {
+  readReviewRunFromAgentMeta,
+  type ReviewRunMeta,
+  type ReviewRunOwner,
+} from '../../shared/reviewRun.js';
+import { shouldFailInterruptedReview } from '../reviewer/reviewRunRecovery.js';
 import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
@@ -6565,6 +6570,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
   });
 
+  const reviewRunOwner: ReviewRunOwner = {
+    instanceId: randomUUID(),
+    processId: process.pid,
+  };
   const reconcileInterruptedReviews = async (): Promise<void> => {
     const db = getDbClient().drizzle;
     const rows = await db
@@ -6584,7 +6593,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const interruptedAt = Date.now();
     for (const row of rows) {
       const reviewRun = readReviewRunFromAgentMeta(row.agentMeta);
-      if (!reviewRun || reviewRun.status !== 'running') continue;
+      if (!reviewRun || !shouldFailInterruptedReview(reviewRun, reviewRunOwner)) continue;
       const failed: ReviewRunMeta = {
         ...reviewRun,
         status: 'failed',
@@ -6595,6 +6604,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await patchMessageAgentMeta(row.sessionId, row.clientId, { reviewRun: failed });
       await broadcastMessageAgentMetaUpdate(row.sessionId, row.clientId);
     }
+  };
+  const sourceHasPersistedRunningReview = async (sourceSessionId: string): Promise<boolean> => {
+    const rows = await getDbClient()
+      .drizzle.select({ agentMeta: messages.agentMeta })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, sourceSessionId),
+          eq(messages.role, 'assistant'),
+          isNull(messages.rewindAt),
+          sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+        ),
+      );
+    return rows.some((row) => readReviewRunFromAgentMeta(row.agentMeta)?.status === 'running');
   };
   const reviewStartupReady = Promise.all([
     reconcileInterruptedReviews(),
@@ -6635,9 +6658,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerReviewStartHandler(makerSessionRegistry, {
     assertCaller: (event) =>
       assertTrustedAppRendererEvent(event as Parameters<typeof assertTrustedAppRendererEvent>[0]),
-    waitUntilReady: () => reviewStartupReady,
+    waitUntilReady: async () => {
+      await reviewStartupReady;
+      // A supported shared-userData peer can exit after this instance starts.
+      // Recheck ownership immediately before each run so its stale card can be
+      // failed, while a still-live peer remains protected by the DB-backed gate.
+      await reconcileInterruptedReviews();
+    },
     createRunId: randomUUID,
     createReviewerSessionId: randomUUID,
+    owner: reviewRunOwner,
     now: Date.now,
     prepareRun: async ({ event, request, reviewerSessionId }) => {
       const db = getDbClient().drizzle;
@@ -6661,6 +6691,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         .limit(1);
       if (!source || source.status !== 'active') {
         throwIpcError('NOT_FOUND', 'Source task not found');
+      }
+      if (await sourceHasPersistedRunningReview(source.id)) {
+        throwIpcError('SESSION_RUNNING', 'This task already has a review in progress');
       }
       if (source.source === 'review') {
         throwIpcError('INVALID_PARAMS', 'A review task cannot start another review');

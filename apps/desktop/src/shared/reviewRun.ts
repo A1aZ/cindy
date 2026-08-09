@@ -2,6 +2,12 @@ export type ReviewRunStatus = 'running' | 'completed' | 'failed';
 
 export type ReviewTargetKind = 'changes' | 'artifacts' | 'task' | 'mixed';
 
+export interface ReviewRunOwner {
+  /** Random per-Main-process identity; distinguishes PID reuse from the original owner. */
+  instanceId: string;
+  processId: number;
+}
+
 /**
  * Host-owned link between a source task and its isolated reviewer task.
  *
@@ -17,6 +23,11 @@ export interface ReviewRunMeta {
   status: ReviewRunStatus;
   targetKind: ReviewTargetKind;
   startedAt: number;
+  /**
+   * Present on runs created by owner-aware clients. Optional only so cards
+   * written by an older client remain readable after an upgrade.
+   */
+  owner?: ReviewRunOwner;
   completedAt?: number;
   error?: string;
 }
@@ -37,6 +48,20 @@ export function readReviewRunMeta(value: unknown): ReviewRunMeta | null {
     typeof record.startedAt !== 'number'
   ) {
     return null;
+  }
+  if (record.owner !== undefined) {
+    if (!record.owner || typeof record.owner !== 'object' || Array.isArray(record.owner)) {
+      return null;
+    }
+    const owner = record.owner as Record<string, unknown>;
+    if (
+      typeof owner.instanceId !== 'string' ||
+      !owner.instanceId ||
+      !Number.isSafeInteger(owner.processId) ||
+      (owner.processId as number) <= 0
+    ) {
+      return null;
+    }
   }
   return record as unknown as ReviewRunMeta;
 }

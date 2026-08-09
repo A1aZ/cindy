@@ -88,6 +88,7 @@ function makeDeps(
     waitUntilReady: vi.fn(async () => undefined),
     createRunId: vi.fn(() => `run-${++id}`),
     createReviewerSessionId: vi.fn(() => `reviewer-${id}`),
+    owner: { instanceId: 'main-instance-1', processId: 123 },
     now: vi.fn(() => 1_000 + id),
     prepareRun: vi.fn(async () => makePreparedRun(launch)),
     createSourceCard: vi.fn(async () => undefined),
@@ -148,7 +149,11 @@ describe('maker:review:start IPC lifecycle', () => {
       expect.objectContaining({
         sourceSessionId: 'source-1',
         sourceCardClientId: 'review:run-1',
-        meta: expect.objectContaining({ status: 'running', targetKind: 'mixed' }),
+        meta: expect.objectContaining({
+          status: 'running',
+          targetKind: 'mixed',
+          owner: { instanceId: 'main-instance-1', processId: 123 },
+        }),
       }),
     );
     expect(deps.startReviewer).toHaveBeenCalledWith(expect.objectContaining({ reviewMode: true }));

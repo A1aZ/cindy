@@ -738,6 +738,7 @@ import {
   isTerminalTurnErrorEvent,
   SessionTurnActivityTracker,
 } from './sessionTurnActivityTracker.js';
+import { SilentStopTurnLeaseGate, SessionTurnLeaseTracker } from './sessionTurnLease.js';
 import { ProductTurnUsageTargetTracker, ProductTurnWallClockTracker } from './turnWallClock.js';
 import { resolveClearSessionBoundary } from './clearSessionBoundary.js';
 import {
@@ -2427,6 +2428,21 @@ let pendingAgentSwitchApplyHolder:
 let cancelPendingAgentSwitchHolder: ((sessionId: string) => void) | null = null;
 let gitSnapshotCoordinator: GitSnapshotCoordinator | null = null;
 const sessionTurnActivityTracker = new SessionTurnActivityTracker();
+const reviewRunOwner: ReviewRunOwner = {
+  instanceId: randomUUID(),
+  processId: process.pid,
+};
+const sessionTurnLeaseTracker = new SessionTurnLeaseTracker({
+  getDbClient,
+  owner: reviewRunOwner,
+  createTurnId: randomUUID,
+  now: Date.now,
+  warn: (message, fields) => log.warn(message, fields),
+});
+const silentStopTurnLeaseGate = new SilentStopTurnLeaseGate();
+function providerTurnLeaseId(sessionInstanceId: string, turnGeneration: number): string {
+  return `${sessionInstanceId}:${turnGeneration}`;
+}
 const productTurnWallClockTracker = new ProductTurnWallClockTracker();
 const productTurnUsageTargetTracker = new ProductTurnUsageTargetTracker();
 const claudeOutputLagTimingGuard = new ClaudeOutputLagTimingGuard();
@@ -3206,10 +3222,28 @@ export function installDesktopInteractionListener(session: {
  * (skip / exhausted / send 失败)补发被推迟的 idle + coordinator done 信号,
  * 让 renderer 正确显示 stopped、scheduler/hook runner 收到 done 并 finish。
  */
-function settleSilentStopDone(
+async function settleSilentStopDone(
   sessionId: string,
   reason: 'exhausted' | 'skip' | 'send-failed',
-): void {
+  turnLeaseId: string,
+): Promise<void> {
+  silentStopTurnLeaseGate.settle(sessionId, turnLeaseId);
+  try {
+    if (!(await sessionTurnLeaseTracker.markTurnEndedAndCheckIdle(sessionId, turnLeaseId))) {
+      log.debug('ignored stale silent-stop settle after a newer turn started', {
+        sessionId,
+        turnLeaseId,
+      });
+      return;
+    }
+  } catch (error) {
+    log.warn('silent-stop turn lease settle failed closed', {
+      sessionId,
+      turnLeaseId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
   void finalizeTurnChangeSet(sessionId, null, 'complete');
   productTurnWallClockTracker.clear(sessionId);
   productTurnUsageTargetTracker.clear(sessionId);
@@ -3260,13 +3294,21 @@ async function surfaceSilentStopExhaustedBanner(sessionId: string): Promise<void
 async function handleSilentStopTurnEnd(
   session: NonNullable<ReturnType<Maker['getSession']>>,
   doneAt: number,
+  turnLeaseId: string,
   turnOrigin?: SendOrigin,
 ): Promise<void> {
+  if (!silentStopTurnLeaseGate.claim(session.id, turnLeaseId)) {
+    log.debug('ignored superseded silent-stop decision timer', {
+      sessionId: session.id,
+      turnLeaseId,
+    });
+    return;
+  }
   if (agentInputCoordinatorHolder?.hasPendingQueuedWork(session.id)) {
     log.debug('silent-stop auto-resume skipped — coordinator has queued work', {
       sessionId: session.id,
     });
-    settleSilentStopDone(session.id, 'skip');
+    await settleSilentStopDone(session.id, 'skip', turnLeaseId);
     return;
   }
   const decision = silentStopAutoResumeGuard.onSilentStop(session.id, doneAt);
@@ -3320,7 +3362,7 @@ async function handleSilentStopTurnEnd(
           reason: outcome.reason,
         });
         await surfaceSilentStopExhaustedBanner(session.id);
-        settleSilentStopDone(session.id, 'exhausted');
+        await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
       } else {
         log.info('silent-stop auto-resume dispatched', { sessionId: session.id });
       }
@@ -3331,16 +3373,16 @@ async function handleSilentStopTurnEnd(
         error: err instanceof Error ? err.message : String(err),
       });
       await surfaceSilentStopExhaustedBanner(session.id);
-      settleSilentStopDone(session.id, 'exhausted');
+      await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
     }
     return;
   }
   if (decision.action === 'exhausted') {
     await surfaceSilentStopExhaustedBanner(session.id);
-    settleSilentStopDone(session.id, 'exhausted');
+    await settleSilentStopDone(session.id, 'exhausted', turnLeaseId);
   }
   if (decision.action === 'skip') {
-    settleSilentStopDone(session.id, 'skip');
+    await settleSilentStopDone(session.id, 'skip', turnLeaseId);
   }
 }
 
@@ -3362,6 +3404,51 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
   advanceSessionTurnBoundaryGeneration(session.id);
   const registration: WiredSessionRegistration = { session, disposers: [] };
   wiredSessionsById.set(session.id, registration);
+
+  session.setTurnLifecycleObserver({
+    beforeProviderStart: async (turnGeneration) => {
+      if (session.remoteHostId) return;
+      silentStopTurnLeaseGate.supersede(session.id);
+      await sessionTurnLeaseTracker.markTurnStarted(
+        session.id,
+        providerTurnLeaseId(session.instanceId, turnGeneration),
+      );
+    },
+    onUndispatched: async (turnGeneration) => {
+      if (session.remoteHostId) return;
+      await sessionTurnLeaseTracker.markTurnEnded(
+        session.id,
+        providerTurnLeaseId(session.instanceId, turnGeneration),
+      );
+    },
+    onTerminal: ({ turnGeneration, event, isCurrentGeneration }) => {
+      if (session.remoteHostId) return;
+      const turnLeaseId = providerTurnLeaseId(session.instanceId, turnGeneration);
+      const isSilentStop =
+        event.type === 'done' &&
+        (event.data as { silentStop?: unknown } | null | undefined)?.silentStop === true;
+      if (isSilentStop && isCurrentGeneration) {
+        // The provider turn ended, but the product turn remains occupied while
+        // the bounded auto-resume decision runs. Its exact lease is either
+        // replaced by the next provider generation or released by settle.
+        const scheduled = silentStopTurnLeaseGate.schedule(session.id, event, turnLeaseId);
+        if (!scheduled) {
+          log.debug('ignored duplicate silent-stop terminal for the current turn', {
+            sessionId: session.id,
+            turnLeaseId,
+          });
+        }
+        return;
+      }
+      if (isCurrentGeneration) silentStopTurnLeaseGate.supersede(session.id);
+      void sessionTurnLeaseTracker.markTurnEnded(session.id, turnLeaseId);
+    },
+  });
+  registration.disposers.push(() => {
+    session.setTurnLifecycleObserver(null);
+    silentStopTurnLeaseGate.supersedeOwnedBy(session.id, `${session.instanceId}:`);
+    void sessionTurnLeaseTracker.markTurnEnded(session.id);
+  });
 
   // session-agent-switch:登记本会话当前引擎,broadcaster / user 行落库据此逐行
   // stamp messages.agent_kind(切换后历史行的 agent_meta 必须按写入时引擎解析)。
@@ -3565,8 +3652,18 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           interruptedTurnAutoResumeGuard.noteAttemptSettled(session.id, doneAttemptToken);
         }
         const rawTurn = (event.data as { raw?: { id?: unknown; status?: unknown } } | null)?.raw;
-        const isSilentStopDone =
+        const carriesSilentStop =
           (event.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+        const silentStopTurnLeaseId = carriesSilentStop
+          ? silentStopTurnLeaseGate.turnLeaseIdForEvent(event)
+          : undefined;
+        if (carriesSilentStop && !silentStopTurnLeaseId) {
+          log.debug('ignored stale silent-stop terminal from an older turn', {
+            sessionId: session.id,
+          });
+          return;
+        }
+        const isSilentStopDone = carriesSilentStop;
         if (event.source === 'claude-code' && !isContinuationBoundary && !isSilentStopDone) {
           completedTurnWallClockMs = productTurnWallClockTracker.finish(session.id);
         }
@@ -3609,7 +3706,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           const silentStopDoneAt = Date.now();
           const silentStopTurnOrigin = event.turnOrigin;
           setTimeout(() => {
-            void handleSilentStopTurnEnd(session, silentStopDoneAt, silentStopTurnOrigin);
+            void handleSilentStopTurnEnd(
+              session,
+              silentStopDoneAt,
+              silentStopTurnLeaseId!,
+              silentStopTurnOrigin,
+            );
           }, 1_500);
         }
       }
@@ -6579,10 +6681,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     warnStderr: (agentKind, line) => log.warn(`[${agentKind}/stderr] ${line}`),
   });
 
-  const reviewRunOwner: ReviewRunOwner = {
-    instanceId: randomUUID(),
-    processId: process.pid,
-  };
   const reconcileInterruptedReviews = async (): Promise<void> => {
     const dbClient = getDbClient();
     const db = dbClient.drizzle;
@@ -6648,8 +6746,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       );
     return rows.some((row) => readReviewRunFromAgentMeta(row.agentMeta)?.status === 'running');
   };
+  const sourceHasActiveTurn = async (sourceSessionId: string): Promise<boolean> => {
+    if (
+      maker.getSession(sourceSessionId)?.isTurnRunning() ||
+      sessionTurnActivityTracker.isSessionInTurn(sourceSessionId)
+    ) {
+      return true;
+    }
+    return sessionTurnLeaseTracker.isTurnActive(sourceSessionId);
+  };
   const reviewStartupReady = Promise.all([
     reconcileInterruptedReviews(),
+    sessionTurnLeaseTracker.reconcileStaleLeases(),
     cleanupOrphanedReviewArtifactSnapshots(),
   ])
     .then(() => undefined)
@@ -6738,7 +6846,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INVALID_PARAMS', 'The source task has no working directory to review');
       }
       const sourceWorkingDir = source.workingDir;
-      if (maker.getSession(source.id)?.isTurnRunning()) {
+      if (await sourceHasActiveTurn(source.id)) {
         throwIpcError(
           'SESSION_RUNNING',
           'Wait for the current task turn to finish before reviewing',
@@ -6869,7 +6977,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             }),
             verifyBeforeStart: async () => {
               if (
-                maker.getSession(source.id)?.isTurnRunning() ||
+                (await sourceHasActiveTurn(source.id)) ||
                 (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
               ) {
                 throw new Error(
@@ -6899,7 +7007,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 return 'The source task workspace changed while Review was running. Run /review again in the current workspace.';
               }
               if (
-                maker.getSession(source.id)?.isTurnRunning() ||
+                (await sourceHasActiveTurn(source.id)) ||
                 (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
               ) {
                 return 'The task conversation changed while Review was running. Run /review again for the current context.';
@@ -6937,6 +7045,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     },
     updateSourceCard: async ({ sourceSessionId, sourceCardClientId, meta, result }) => {
       await updateMessageContent(sourceSessionId, sourceCardClientId, result);
+      await patchMessageAgentMeta(sourceSessionId, sourceCardClientId, { reviewRun: meta });
+      await broadcastMessageAgentMetaUpdate(sourceSessionId, sourceCardClientId);
+    },
+    publishReviewerLink: async ({ sourceSessionId, sourceCardClientId, meta }) => {
       await patchMessageAgentMeta(sourceSessionId, sourceCardClientId, { reviewRun: meta });
       await broadcastMessageAgentMetaUpdate(sourceSessionId, sourceCardClientId);
     },
@@ -9849,6 +9961,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       });
     }
     sessionTurnActivityTracker.setSessionInTurn(sessionId, false);
+    void sessionTurnLeaseTracker.markTurnEnded(sessionId);
     // 与正常 product-terminal 事件共享同一条 Goal idle 唤醒语义。direct abort
     // 与 coordinator 的 authoritative-idle 都从本 reconciliation 成功出口经过；
     // 迟到终态或重复尾巴由 Goal controller 的 deferred intent 防抖幂等收敛。

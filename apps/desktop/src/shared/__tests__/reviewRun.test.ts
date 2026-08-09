@@ -29,4 +29,11 @@ describe('ReviewRunMeta', () => {
       readReviewRunMeta({ ...base, owner: { instanceId: 'instance-1', processId: 0 } }),
     ).toBeNull();
   });
+
+  it('keeps pre-bootstrap cards readable without publishing a dead reviewer link', () => {
+    const pending = { ...base, reviewerSessionId: undefined };
+    expect(readReviewRunMeta(pending)).toMatchObject({ runId: 'run-1', status: 'running' });
+    expect(readReviewRunMeta({ ...pending, reviewerSessionId: '' })).toBeNull();
+    expect(readReviewRunMeta({ ...pending, reviewerSessionId: 123 })).toBeNull();
+  });
 });

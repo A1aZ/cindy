@@ -19,7 +19,8 @@ export interface ReviewRunMeta {
   version: 1;
   runId: string;
   sourceSessionId: string;
-  reviewerSessionId: string;
+  /** Published only after the isolated reviewer task has actually been created. */
+  reviewerSessionId?: string;
   status: ReviewRunStatus;
   targetKind: ReviewTargetKind;
   startedAt: number;
@@ -39,13 +40,18 @@ export function readReviewRunMeta(value: unknown): ReviewRunMeta | null {
     record.version !== 1 ||
     typeof record.runId !== 'string' ||
     typeof record.sourceSessionId !== 'string' ||
-    typeof record.reviewerSessionId !== 'string' ||
     (record.status !== 'running' && record.status !== 'completed' && record.status !== 'failed') ||
     (record.targetKind !== 'changes' &&
       record.targetKind !== 'artifacts' &&
       record.targetKind !== 'task' &&
       record.targetKind !== 'mixed') ||
     typeof record.startedAt !== 'number'
+  ) {
+    return null;
+  }
+  if (
+    record.reviewerSessionId !== undefined &&
+    (typeof record.reviewerSessionId !== 'string' || !record.reviewerSessionId)
   ) {
     return null;
   }

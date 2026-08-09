@@ -70,5 +70,6 @@ describe('SystemCard Review', () => {
     expect(screen.getByText('chat.systemCard.review.failed')).toBeTruthy();
     expect(screen.getByText('Reviewer returned no visible conclusion')).toBeTruthy();
     expect(screen.queryByTestId('review-markdown')).toBeNull();
+    expect(screen.queryByText('chat.systemCard.review.openTask')).toBeNull();
   });
 });

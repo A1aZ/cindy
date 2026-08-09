@@ -9,11 +9,7 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
 
 import type { ReviewAttachmentInput } from '../reviewer/reviewEvidence.js';
-import type {
-  ReviewRunMeta,
-  ReviewRunOwner,
-  ReviewTargetKind,
-} from '../../shared/reviewRun.js';
+import type { ReviewRunMeta, ReviewRunOwner, ReviewTargetKind } from '../../shared/reviewRun.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
@@ -145,6 +141,7 @@ export interface ReviewStartHandlerDeps {
   }): Promise<void>;
   createSourceCard(input: ReviewCardWrite): Promise<void>;
   updateSourceCard(input: ReviewCardWrite): Promise<void>;
+  publishReviewerLink(input: ReviewCardWrite): Promise<void>;
   startReviewer(createOpts: MakerSessionCreateOpts): Promise<ReviewRunnerHandle>;
   markReviewerStarted(reviewerSessionId: string, startedAt: number): Promise<void>;
   broadcastReviewerCreated(reviewerSessionId: string): void;
@@ -201,6 +198,13 @@ export function registerReviewStartHandler(
     let sourceLeaseAcquired = false;
     let sourceCardCreated = false;
     let releasePromise: Promise<void> | null = null;
+    let sourceCardWriteChain = Promise.resolve();
+
+    const enqueueSourceCardWrite = (write: () => Promise<void>): Promise<void> => {
+      const next = sourceCardWriteChain.then(write, write);
+      sourceCardWriteChain = next.catch(() => undefined);
+      return next;
+    };
 
     const release = (): Promise<void> => {
       if (releasePromise) return releasePromise;
@@ -259,7 +263,8 @@ export function registerReviewStartHandler(
       result: string,
       error?: string,
     ): Promise<void> => {
-      if (!runningMeta || !sourceAgentKind) {
+      const currentSourceAgentKind = sourceAgentKind;
+      if (!runningMeta || !currentSourceAgentKind) {
         await release();
         return;
       }
@@ -270,13 +275,15 @@ export function registerReviewStartHandler(
         ...(error ? { error: redactSensitiveText(error).slice(0, 2_000) } : {}),
       };
       try {
-        await deps.updateSourceCard({
-          sourceSessionId: request.sourceSessionId,
-          sourceCardClientId,
-          sourceAgentKind,
-          meta: nextMeta,
-          result,
-        });
+        await enqueueSourceCardWrite(() =>
+          deps.updateSourceCard({
+            sourceSessionId: request.sourceSessionId,
+            sourceCardClientId,
+            sourceAgentKind: currentSourceAgentKind,
+            meta: nextMeta,
+            result,
+          }),
+        );
       } finally {
         await release();
       }
@@ -303,7 +310,6 @@ export function registerReviewStartHandler(
         version: 1,
         runId,
         sourceSessionId: request.sourceSessionId,
-        reviewerSessionId,
         status: 'running',
         targetKind: prepared.targetKind,
         startedAt,
@@ -312,7 +318,7 @@ export function registerReviewStartHandler(
       await deps.createSourceCard({
         sourceSessionId: request.sourceSessionId,
         sourceCardClientId,
-        sourceAgentKind,
+        sourceAgentKind: preparedSourceAgentKind,
         meta: runningMeta,
         result: '',
       });
@@ -321,6 +327,8 @@ export function registerReviewStartHandler(
       const launch = await prepared.prepareLaunch();
       await launch.verifyBeforeStart();
       const reviewer = await deps.startReviewer(launch.reviewerCreateOpts);
+      const linkedRunningMeta: ReviewRunMeta = { ...runningMeta, reviewerSessionId };
+      runningMeta = linkedRunningMeta;
 
       disposeReviewEvents = reviewer.onEvent((reviewEvent) => {
         if (settled) return;
@@ -396,6 +404,19 @@ export function registerReviewStartHandler(
         throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');
       }
       deps.broadcastReviewerCreated(reviewerSessionId);
+      if (settled) {
+        await terminalFinalization;
+        throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');
+      }
+      await enqueueSourceCardWrite(() =>
+        deps.publishReviewerLink({
+          sourceSessionId: request.sourceSessionId,
+          sourceCardClientId,
+          sourceAgentKind: preparedSourceAgentKind,
+          meta: linkedRunningMeta,
+          result: '',
+        }),
+      );
       if (settled) {
         await terminalFinalization;
         throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');

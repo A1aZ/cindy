@@ -95,6 +95,7 @@ function makeDeps(
     releaseSourceLease: vi.fn(async () => undefined),
     createSourceCard: vi.fn(async () => undefined),
     updateSourceCard: vi.fn(async () => undefined),
+    publishReviewerLink: vi.fn(async () => undefined),
     startReviewer: vi.fn(async () => reviewer),
     markReviewerStarted: vi.fn(async () => undefined),
     broadcastReviewerCreated: vi.fn(),
@@ -158,6 +159,16 @@ describe('maker:review:start IPC lifecycle', () => {
         }),
       }),
     );
+    const createdCard = vi.mocked(deps.createSourceCard).mock.calls[0]?.[0];
+    expect(createdCard?.meta).not.toHaveProperty('reviewerSessionId');
+    expect(deps.publishReviewerLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          status: 'running',
+          reviewerSessionId: 'reviewer-1',
+        }),
+      }),
+    );
     expect(deps.startReviewer).toHaveBeenCalledWith(expect.objectContaining({ reviewMode: true }));
     expect(deps.persistReviewerPrompt).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'run-1', prompt: 'review prompt' }),
@@ -191,6 +202,9 @@ describe('maker:review:start IPC lifecycle', () => {
         meta: expect.objectContaining({ status: 'failed' }),
       }),
     );
+    expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta.reviewerSessionId).toBe(
+      'reviewer-1',
+    );
     expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
 
     reviewer.accepted = true;
@@ -205,10 +219,12 @@ describe('maker:review:start IPC lifecycle', () => {
     const deps = makeDeps(reviewer);
     registerReviewStartHandler(harness, deps);
 
-    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
-      ok: true,
-      runId: 'run-1',
-    });
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      {
+        ok: true,
+        runId: 'run-1',
+      },
+    );
 
     reviewer.emitStatus('closed');
     await vi.waitFor(() =>
@@ -223,10 +239,12 @@ describe('maker:review:start IPC lifecycle', () => {
       ),
     );
 
-    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
-      ok: true,
-      runId: 'run-2',
-    });
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      {
+        ok: true,
+        runId: 'run-2',
+      },
+    );
   });
 
   it('rejects startup when the reviewer closes before send acceptance returns', async () => {
@@ -249,10 +267,12 @@ describe('maker:review:start IPC lifecycle', () => {
       }),
     );
 
-    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
-      ok: true,
-      runId: 'run-2',
-    });
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      {
+        ok: true,
+        runId: 'run-2',
+      },
+    );
   });
 
   it('lets close finalization own a simultaneous rejected send', async () => {
@@ -294,10 +314,35 @@ describe('maker:review:start IPC lifecycle', () => {
     });
     expect(reviewer.send).not.toHaveBeenCalled();
 
-    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
-      ok: true,
-      runId: 'run-2',
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
+      {
+        ok: true,
+        runId: 'run-2',
+      },
+    );
+  });
+
+  it('serializes a close that lands while the real reviewer link is being published', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    vi.mocked(deps.publishReviewerLink).mockImplementationOnce(async () => {
+      reviewer.emitStatus('closed');
     });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledTimes(1);
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          reviewerSessionId: 'reviewer-1',
+          status: 'failed',
+        }),
+      }),
+    );
   });
 
   it('locks a source during evidence preparation and releases it when preparation fails', async () => {
@@ -452,6 +497,35 @@ describe('maker:review:start IPC lifecycle', () => {
         meta: expect.objectContaining({ status: 'failed' }),
       }),
     );
+    expect(vi.mocked(deps.createSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty(
+      'reviewerSessionId',
+    );
+    expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty(
+      'reviewerSessionId',
+    );
+    expect(deps.publishReviewerLink).not.toHaveBeenCalled();
     expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not publish a generated reviewer id when reviewer bootstrap itself fails', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer, {
+      startReviewer: vi.fn(async () => {
+        throw new Error('reviewer bootstrap failed');
+      }),
+    });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toThrow(
+      'reviewer bootstrap failed',
+    );
+    expect(deps.publishReviewerLink).not.toHaveBeenCalled();
+    expect(vi.mocked(deps.createSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty(
+      'reviewerSessionId',
+    );
+    expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty(
+      'reviewerSessionId',
+    );
   });
 });

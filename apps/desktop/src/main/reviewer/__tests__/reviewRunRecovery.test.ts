@@ -19,49 +19,83 @@ function running(owner?: ReviewRunOwner): ReviewRunMeta {
 }
 
 describe('Review run recovery ownership', () => {
-  it('does not fail a run owned by this process instance', () => {
+  it('does not fail a run owned by this process instance', async () => {
     const probe = vi.fn(() => false);
-    expect(shouldFailInterruptedReview(running(currentOwner), currentOwner, probe)).toBe(false);
+    await expect(
+      shouldFailInterruptedReview(running(currentOwner), currentOwner, probe),
+    ).resolves.toBe(false);
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it('preserves a run while its foreign owner process is alive', () => {
+  it('preserves a legacy run while its foreign owner process is alive', async () => {
     const probe = vi.fn(() => true);
-    expect(
+    await expect(
       shouldFailInterruptedReview(
         running({ instanceId: 'other', processId: 300 }),
         currentOwner,
         probe,
       ),
-    ).toBe(false);
+    ).resolves.toBe(false);
     expect(probe).toHaveBeenCalledWith(300);
   });
 
-  it('fails only after the foreign owner is confirmed dead', () => {
-    expect(
+  it('fails a legacy run only after the foreign owner is confirmed dead', async () => {
+    await expect(
       shouldFailInterruptedReview(
         running({ instanceId: 'other', processId: 300 }),
         currentOwner,
         () => false,
       ),
-    ).toBe(true);
+    ).resolves.toBe(true);
   });
 
-  it('recognizes PID reuse by the current differently identified instance', () => {
+  it('recognizes PID reuse by the current differently identified instance', async () => {
     const probe = vi.fn(() => true);
-    expect(
+    await expect(
       shouldFailInterruptedReview(
         running({ instanceId: 'previous', processId: currentOwner.processId }),
         currentOwner,
         probe,
       ),
-    ).toBe(true);
+    ).resolves.toBe(true);
     expect(probe).not.toHaveBeenCalled();
   });
 
-  it('leaves owner-less cards from older clients untouched', () => {
+  it('uses the exact instance probe instead of a reused PID', async () => {
+    const processProbe = vi.fn(() => true);
+    const owner = {
+      instanceId: 'previous',
+      processId: 300,
+      liveness: { version: 1 as const, port: 1234, token: '1234567890abcdef' },
+    };
+    const livenessProbe = vi.fn(() => 'ended' as const);
+
+    await expect(
+      shouldFailInterruptedReview(running(owner), currentOwner, processProbe, livenessProbe),
+    ).resolves.toBe(true);
+    expect(livenessProbe).toHaveBeenCalledWith(owner);
+    expect(processProbe).not.toHaveBeenCalled();
+  });
+
+  it('preserves the lease when an exact instance probe is temporarily ambiguous', async () => {
+    const owner = {
+      instanceId: 'other',
+      processId: 300,
+      liveness: { version: 1 as const, port: 1234, token: '1234567890abcdef' },
+    };
+    await expect(
+      shouldFailInterruptedReview(
+        running(owner),
+        currentOwner,
+        () => false,
+        () => 'unknown',
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it('leaves owner-less cards from older clients untouched', async () => {
     const probe = vi.fn(() => false);
-    expect(shouldFailInterruptedReview(running(), currentOwner, probe)).toBe(false);
+    await expect(shouldFailInterruptedReview(running(), currentOwner, probe)).resolves.toBe(false);
     expect(probe).not.toHaveBeenCalled();
   });
 });

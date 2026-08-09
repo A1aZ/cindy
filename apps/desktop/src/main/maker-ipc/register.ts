@@ -213,6 +213,7 @@ import {
   hasReviewOwnerProcessEnded,
   shouldFailInterruptedReview,
 } from '../reviewer/reviewRunRecovery.js';
+import { startReviewOwnerLiveness } from '../reviewer/reviewOwnerLiveness.js';
 import {
   discardInvalidReviewSourceLease,
   listPersistedReviewSourceLeases,
@@ -748,6 +749,7 @@ import {
 import { setBusyProbe as setDeviceLinkBusyProbe } from '../device-link/index.js';
 import {
   markRemoteSettingPersistedInsideHandler,
+  setRemoteReviewInputGuard as setDeviceLinkRemoteReviewInputGuard,
   setRemoteWorkingDirGuard as setDeviceLinkRemoteWorkingDirGuard,
   setRemoteSettingsPersist as setDeviceLinkRemoteSettingsPersist,
 } from '../device-link/dispatch.js';
@@ -768,6 +770,7 @@ import {
   isPluginSetupInteractionDecision,
 } from './interactionResolveOrigin.js';
 import { checkRemoteWorkingDir } from '../device-link/remote-workdir-guard.js';
+import { assertReviewSessionExternalInputAllowed } from '../reviewer/reviewSessionInputPolicy.js';
 import { createWorkerTurnStartSequencer } from './workerTurnStartSequencer.js';
 import { createBusinessSessionId } from '../sessionIds.js';
 import { forkSessionAtMessage } from '../maker-orchestration/fork.js';
@@ -1382,6 +1385,7 @@ type SendToSessionInternalResult =
         | 'DELETED'
         | 'BUSY'
         | 'AGENT_NOT_READY'
+        | 'UNSUPPORTED_CAPABILITY'
         | 'BUDGET_MODEL_REQUIRES_API_MODE'
         | 'PROVIDER_ROUTE_UNAVAILABLE'
         // create 分支专用:dispatcher 无 session 上下文时无法继承配置新建。
@@ -2432,6 +2436,16 @@ const reviewRunOwner: ReviewRunOwner = {
   instanceId: randomUUID(),
   processId: process.pid,
 };
+let reviewOwnerLivenessReady: Promise<void> | null = null;
+
+function ensureReviewOwnerLivenessReady(): Promise<void> {
+  if (!reviewOwnerLivenessReady) {
+    reviewOwnerLivenessReady = startReviewOwnerLiveness().then((handle) => {
+      reviewRunOwner.liveness = handle.identity;
+    });
+  }
+  return reviewOwnerLivenessReady;
+}
 const sessionTurnLeaseTracker = new SessionTurnLeaseTracker({
   getDbClient,
   owner: reviewRunOwner,
@@ -5028,6 +5042,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // device-link 参数级收敛:远程 create-session 的 workingDir / worktree:create 的 baseRepo
   // 必须是本机当前可访问的目录,挡掉控制端用任意路径越权起进程或执行 git。
   setDeviceLinkRemoteWorkingDirGuard(checkRemoteWorkingDir);
+  setDeviceLinkRemoteReviewInputGuard(assertReviewExternalInputAllowed);
 
   // device-link 远程 set-* 持久化回流:effort/permission/fastMode/extraDirs 等
   // runtime-only handler 经这个注入写被控端 DB + 广播 patched。SET_MODEL 是例外:
@@ -6007,13 +6022,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     enforceReviewCreateOptions(o);
   }
 
-  async function assertReviewSettingsUnlocked(sessionId: string): Promise<void> {
+  async function readSessionSource(sessionId: string): Promise<string | null> {
     const [row] = await getDbClient()
       .drizzle.select({ source: sessions.source })
       .from(sessions)
       .where(eq(sessions.id, sessionId))
       .limit(1);
-    if (row?.source === 'review') {
+    return row?.source ?? null;
+  }
+
+  async function assertReviewExternalInputAllowed(sessionId: string): Promise<void> {
+    await assertReviewSessionExternalInputAllowed(sessionId, readSessionSource);
+  }
+
+  async function assertReviewSettingsUnlocked(sessionId: string): Promise<void> {
+    if ((await readSessionSource(sessionId)) === 'review') {
       throwIpcError('UNSUPPORTED_CAPABILITY', 'Review task settings are fixed to the source task');
     }
   }
@@ -6704,7 +6727,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const interruptedAt = Date.now();
     for (const row of rows) {
       const reviewRun = readReviewRunFromAgentMeta(row.agentMeta);
-      if (!reviewRun || !shouldFailInterruptedReview(reviewRun, reviewRunOwner)) continue;
+      if (!reviewRun || !(await shouldFailInterruptedReview(reviewRun, reviewRunOwner))) continue;
       const failed: ReviewRunMeta = {
         ...reviewRun,
         status: 'failed',
@@ -6724,7 +6747,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         });
         continue;
       }
-      if (!hasReviewOwnerProcessEnded(row.lease.owner, reviewRunOwner)) continue;
+      if (!(await hasReviewOwnerProcessEnded(row.lease.owner, reviewRunOwner))) continue;
       await releaseReviewSourceLease(dbClient, {
         sourceSessionId: row.sourceSessionId,
         runId: row.lease.runId,
@@ -6755,11 +6778,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     return sessionTurnLeaseTracker.isTurnActive(sourceSessionId);
   };
-  const reviewStartupReady = Promise.all([
-    reconcileInterruptedReviews(),
-    sessionTurnLeaseTracker.reconcileStaleLeases(),
-    cleanupOrphanedReviewArtifactSnapshots(),
-  ])
+  const reviewStartupReady = ensureReviewOwnerLivenessReady()
+    .then(() =>
+      Promise.all([
+        reconcileInterruptedReviews(),
+        sessionTurnLeaseTracker.reconcileStaleLeases(),
+        cleanupOrphanedReviewArtifactSnapshots(),
+      ]),
+    )
     .then(() => undefined)
     .catch((error) => {
       log.error('failed to prepare Review runtime state', {
@@ -7504,6 +7530,19 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         errorCode: 'INVALID_ARGS',
         message: 'message required',
       };
+    }
+
+    if (targetSessionId) {
+      try {
+        await assertReviewExternalInputAllowed(targetSessionId);
+      } catch (error) {
+        if ((error as { code?: unknown }).code !== 'UNSUPPORTED_CAPABILITY') throw error;
+        return {
+          ok: false,
+          errorCode: 'UNSUPPORTED_CAPABILITY',
+          message: error instanceof Error ? error.message : String(error),
+        };
+      }
     }
 
     // ── create 分支 ──────────────────────────────────────────────────────────
@@ -8503,8 +8542,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     isSessionRunningError,
     log,
   });
-  const dispatchOrEnqueueOrcaInterAgentMessage =
-    orcaInterAgentDispatcher.dispatchOrEnqueueOrcaInterAgentMessage;
+  const dispatchOrEnqueueOrcaInterAgentMessage: OrcaInterAgentDispatcher['dispatchOrEnqueueOrcaInterAgentMessage'] =
+    async (params) => {
+      try {
+        await assertReviewExternalInputAllowed(params.targetSessionId);
+      } catch (error) {
+        return {
+          ok: false,
+          dispatchOutcome: {
+            ...createHostSendFailure(
+              'SEND_FAILED',
+              error instanceof Error ? error.message : String(error),
+            ),
+            source: params.meta.source,
+            context: params.meta.context,
+          },
+        };
+      }
+      return orcaInterAgentDispatcher.dispatchOrEnqueueOrcaInterAgentMessage(params);
+    };
   dispatchInterAgentMessageHolder = dispatchOrEnqueueOrcaInterAgentMessage;
 
   ipcMain.handle(
@@ -9642,6 +9698,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   const sendToAgentAccepted: typeof sendToAgentAcceptedUnlocked = async (...args) => {
     const [sessionId] = args;
     if (typeof sessionId !== 'string') return await sendToAgentAcceptedUnlocked(...args);
+    await assertReviewExternalInputAllowed(sessionId);
     return await withSendToSessionLock(sessionId, () => sendToAgentAcceptedUnlocked(...args));
   };
   /**
@@ -9659,6 +9716,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     sendOpts?: unknown,
   ): Promise<void> => {
     if (typeof sessionId !== 'string') throwIpcError('INVALID_PARAMS', 'sessionId required');
+    await assertReviewExternalInputAllowed(sessionId);
     const sess = maker.getSession(sessionId);
     if (!sess) {
       log.warn('steer: session not running', { sessionId });
@@ -11268,6 +11326,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     remote: boolean,
     opts: unknown,
   ): Promise<MainOwnedInputBoundaryStamp> => {
+    await assertReviewExternalInputAllowed(sid);
     // Capture the coordinator generation before the first database await.  A
     // concurrent /clear replaces the in-memory state; after that await we must
     // reject the old request rather than treating the new generation as its
@@ -11324,6 +11383,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     MAKER_INVOKE.INPUT_ENQUEUE,
     async (_e, sessionId: unknown, item: unknown, opts?: unknown) => {
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       const deviceLinkInvoke = isDeviceLinkInvoke();
       const parsed = requireQueuedMessage(item);
       assertRemoteInputClearNotInFlight(sid, deviceLinkInvoke);
@@ -11473,6 +11533,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     MAKER_INVOKE.INPUT_STEER,
     async (_e, sessionId: unknown, item: unknown, opts?: unknown) => {
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       const deviceLinkInvoke = isDeviceLinkInvoke();
       const steerOpts =
         opts && typeof opts === 'object'
@@ -11940,6 +12001,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         throwIpcError('INVALID_PARAMS', 'clearedAt must be an ISO timestamp');
       }
       const sid = requireSessionId(sessionId);
+      await assertReviewExternalInputAllowed(sid);
       // Fence remote content-bearing controls for the whole clear lifecycle,
       // including the DB await below.  Local clear is gated too so a remote
       // controller cannot enter the same sealing window through another peer.

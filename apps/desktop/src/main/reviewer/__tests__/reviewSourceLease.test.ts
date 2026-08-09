@@ -61,7 +61,11 @@ describe('Review source lease', () => {
 
   it('admits exactly one shared-database owner and allows a successor after CAS release', async () => {
     const { first, second, raw } = setup();
-    const firstOwner = { instanceId: 'first', processId: 101 };
+    const firstOwner = {
+      instanceId: 'first',
+      processId: 101,
+      liveness: { version: 1 as const, port: 43101, token: 'first-owner-token' },
+    };
     const secondOwner = { instanceId: 'second', processId: 202 };
 
     const acquired = await Promise.all([

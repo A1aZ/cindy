@@ -1,6 +1,6 @@
 import { createId } from '@paralleldrive/cuid2';
 
-import type { ReviewRunOwner } from '../../shared/reviewRun.js';
+import { readReviewRunOwner, type ReviewRunOwner } from '../../shared/reviewRun.js';
 import type { DbClient } from '../localDb/client/DbClient.js';
 import { hasReviewOwnerProcessEnded } from '../reviewer/reviewRunRecovery.js';
 
@@ -113,15 +113,7 @@ export function readSessionTurnLeaseFromAgentMeta(value: unknown): SessionTurnLe
   ) {
     return null;
   }
-  const ownerRecord = owner as Record<string, unknown>;
-  if (
-    typeof ownerRecord.instanceId !== 'string' ||
-    !ownerRecord.instanceId ||
-    !Number.isSafeInteger(ownerRecord.processId) ||
-    (ownerRecord.processId as number) <= 0
-  ) {
-    return null;
-  }
+  if (!readReviewRunOwner(owner)) return null;
   return valueRecord as unknown as SessionTurnLease;
 }
 
@@ -256,7 +248,10 @@ export interface SessionTurnLeaseTrackerDeps {
   owner: ReviewRunOwner;
   createTurnId(): string;
   now(): number;
-  ownerProcessEnded?(owner: ReviewRunOwner, currentOwner: ReviewRunOwner): boolean;
+  ownerProcessEnded?(
+    owner: ReviewRunOwner,
+    currentOwner: ReviewRunOwner,
+  ): boolean | Promise<boolean>;
   warn?(message: string, fields: Record<string, unknown>): void;
 }
 
@@ -289,7 +284,7 @@ export class SessionTurnLeaseTracker {
     return next;
   }
 
-  private ownerProcessEnded(owner: ReviewRunOwner): boolean {
+  private ownerProcessEnded(owner: ReviewRunOwner): boolean | Promise<boolean> {
     return (this.deps.ownerProcessEnded ?? hasReviewOwnerProcessEnded)(owner, this.deps.owner);
   }
 
@@ -306,7 +301,7 @@ export class SessionTurnLeaseTracker {
         owner: row.lease.owner,
       });
     }
-    if (!this.ownerProcessEnded(row.lease.owner)) return false;
+    if (!(await this.ownerProcessEnded(row.lease.owner))) return false;
     return releaseSessionTurnLease(dbClient, {
       sessionId: row.sessionId,
       turnId: row.lease.turnId,

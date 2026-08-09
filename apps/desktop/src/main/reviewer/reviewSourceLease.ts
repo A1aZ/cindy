@@ -1,6 +1,6 @@
 import { createId } from '@paralleldrive/cuid2';
 
-import type { ReviewRunOwner } from '../../shared/reviewRun.js';
+import { readReviewRunOwner, type ReviewRunOwner } from '../../shared/reviewRun.js';
 import type { DbClient } from '../localDb/client/DbClient.js';
 
 /** One hidden row per source task makes the cross-process Review gate atomic. */
@@ -54,15 +54,7 @@ export function readReviewSourceLeaseFromAgentMeta(value: unknown): ReviewSource
   ) {
     return null;
   }
-  const ownerRecord = owner as Record<string, unknown>;
-  if (
-    typeof ownerRecord.instanceId !== 'string' ||
-    !ownerRecord.instanceId ||
-    !Number.isSafeInteger(ownerRecord.processId) ||
-    (ownerRecord.processId as number) <= 0
-  ) {
-    return null;
-  }
+  if (!readReviewRunOwner(owner)) return null;
   return valueRecord as unknown as ReviewSourceLease;
 }
 

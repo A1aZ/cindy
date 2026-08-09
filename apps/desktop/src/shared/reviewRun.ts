@@ -2,10 +2,54 @@ export type ReviewRunStatus = 'running' | 'completed' | 'failed';
 
 export type ReviewTargetKind = 'changes' | 'artifacts' | 'task' | 'mixed';
 
+export interface ReviewRunOwnerLiveness {
+  version: 1;
+  /** Loopback-only port owned by this exact Desktop Main instance. */
+  port: number;
+  /** Random challenge returned by the owner; prevents an unrelated port reuse from matching. */
+  token: string;
+}
+
 export interface ReviewRunOwner {
   /** Random per-Main-process identity; distinguishes PID reuse from the original owner. */
   instanceId: string;
   processId: number;
+  /**
+   * Exact cross-process liveness proof for owners created by current builds.
+   * Optional only for leases/cards written by older clients.
+   */
+  liveness?: ReviewRunOwnerLiveness;
+}
+
+export function readReviewRunOwner(value: unknown): ReviewRunOwner | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const owner = value as Record<string, unknown>;
+  if (
+    typeof owner.instanceId !== 'string' ||
+    !owner.instanceId ||
+    !Number.isSafeInteger(owner.processId) ||
+    (owner.processId as number) <= 0
+  ) {
+    return null;
+  }
+  if (owner.liveness !== undefined) {
+    if (!owner.liveness || typeof owner.liveness !== 'object' || Array.isArray(owner.liveness)) {
+      return null;
+    }
+    const liveness = owner.liveness as Record<string, unknown>;
+    if (
+      liveness.version !== 1 ||
+      !Number.isSafeInteger(liveness.port) ||
+      (liveness.port as number) <= 0 ||
+      (liveness.port as number) > 65_535 ||
+      typeof liveness.token !== 'string' ||
+      liveness.token.length < 16 ||
+      liveness.token.length > 256
+    ) {
+      return null;
+    }
+  }
+  return value as ReviewRunOwner;
 }
 
 /**
@@ -56,18 +100,7 @@ export function readReviewRunMeta(value: unknown): ReviewRunMeta | null {
     return null;
   }
   if (record.owner !== undefined) {
-    if (!record.owner || typeof record.owner !== 'object' || Array.isArray(record.owner)) {
-      return null;
-    }
-    const owner = record.owner as Record<string, unknown>;
-    if (
-      typeof owner.instanceId !== 'string' ||
-      !owner.instanceId ||
-      !Number.isSafeInteger(owner.processId) ||
-      (owner.processId as number) <= 0
-    ) {
-      return null;
-    }
+    if (!readReviewRunOwner(record.owner)) return null;
   }
   return record as unknown as ReviewRunMeta;
 }

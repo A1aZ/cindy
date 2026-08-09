@@ -1,0 +1,49 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+import { describe, expect, it } from 'vitest';
+
+const registerSource = readFileSync(
+  resolve(import.meta.dirname, '../../maker-ipc/register.ts'),
+  'utf8',
+);
+const reviewStartSource = readFileSync(
+  resolve(import.meta.dirname, '../../maker-ipc/reviewStartHandler.ts'),
+  'utf8',
+);
+
+describe('Review external input wiring', () => {
+  it('guards direct send/steer and every input-queue mutation at Main', () => {
+    expect(registerSource).toMatch(
+      /const assertRemoteInputControlBoundary[\s\S]*?await assertReviewExternalInputAllowed\(sid\);/,
+    );
+    for (const channel of ['INPUT_ENQUEUE', 'INPUT_STEER', 'INPUT_CLEAR_SESSION']) {
+      expect(registerSource).toMatch(
+        new RegExp(
+          `MAKER_INVOKE\\.${channel}[\\s\\S]{0,700}await assertReviewExternalInputAllowed\\(sid\\);`,
+        ),
+      );
+    }
+  });
+
+  it('also rejects local cross-task and Orca delivery into Review tasks', () => {
+    expect(registerSource).toMatch(
+      /async function sendToSessionInternal[\s\S]*?await assertReviewExternalInputAllowed\(targetSessionId\);/,
+    );
+    expect(registerSource).toMatch(
+      /const dispatchOrEnqueueOrcaInterAgentMessage[\s\S]*?await assertReviewExternalInputAllowed\(params\.targetSessionId\);/,
+    );
+    expect(registerSource).toMatch(
+      /const sendToAgentAccepted[\s\S]*?await assertReviewExternalInputAllowed\(sessionId\);/,
+    );
+    expect(registerSource).toMatch(
+      /const steerToAgentAccepted[\s\S]*?await assertReviewExternalInputAllowed\(sessionId\);/,
+    );
+  });
+
+  it('keeps the one allowed initial prompt on the host-only direct Session handle', () => {
+    expect(reviewStartSource).toContain('const sendResult = await reviewer.send(launch.message');
+    expect(reviewStartSource).not.toContain('MAKER_INVOKE.SEND');
+    expect(reviewStartSource).not.toContain('MAKER_INVOKE.INPUT_ENQUEUE');
+  });
+});

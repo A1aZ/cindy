@@ -52,6 +52,51 @@ function estimateVisualLineCount(line: string): number {
   return Math.max(1, Math.ceil(units / HALF_WIDTH_UNITS_PER_VISUAL_LINE));
 }
 
+export function estimateTextVisualLineCount(content: string): number {
+  if (!content) return 0;
+  return content
+    .split(LINE_BREAK_RE)
+    .reduce((total, line) => total + estimateVisualLineCount(line), 0);
+}
+
+/** 截取与消息收起态同量级的纯文本前缀，避免分享图带出未显示正文。 */
+export function truncateTextToVisualLines(
+  content: string,
+  maxLines: number,
+): string {
+  if (maxLines <= 0 || !content) return '';
+  let visualLine = 1;
+  let lineUnits = 0;
+  let truncated = false;
+  let result = '';
+  for (const character of content) {
+    if (character === '\n') {
+      if (visualLine >= maxLines) {
+        truncated = true;
+        break;
+      }
+      result += character;
+      visualLine += 1;
+      lineUnits = 0;
+      continue;
+    }
+    WIDE_CHAR_RE.lastIndex = 0;
+    const units = WIDE_CHAR_RE.test(character) ? 2 : 1;
+    WIDE_CHAR_RE.lastIndex = 0;
+    if (lineUnits > 0 && lineUnits + units > HALF_WIDTH_UNITS_PER_VISUAL_LINE) {
+      if (visualLine >= maxLines) {
+        truncated = true;
+        break;
+      }
+      visualLine += 1;
+      lineUnits = 0;
+    }
+    result += character;
+    lineUnits += units;
+  }
+  return truncated ? result.trimEnd() : result;
+}
+
 /** 纯文本估算版收起判定:仅作为测量回调到达前的首帧猜测。 */
 export function shouldAutoCollapseUserMessageContent(
   content: string,

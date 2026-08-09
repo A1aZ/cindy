@@ -165,8 +165,12 @@ function buildBodyPartsHtml(
         : [];
     }
     const label = redactSensitiveText(part.label).trim();
+    const icon = part.kind === "quote" ? "❝" : part.kind === "pasted" ? "▤" : "";
+    const iconHtml = icon
+      ? `<span class="share-inline-chip-icon" aria-hidden="true">${icon}</span>`
+      : "";
     return label
-      ? [`<span class="share-inline-chip share-inline-chip-${part.kind}"><span class="share-inline-chip-icon" aria-hidden="true">${part.kind === "quote" ? "❝" : part.kind === "pasted" ? "▤" : "/"}</span><span class="share-inline-chip-label">${escapeHtml(label)}</span></span>`]
+      ? [`<span class="share-inline-chip share-inline-chip-${part.kind}">${iconHtml}<span class="share-inline-chip-label">${escapeHtml(label)}</span></span>`]
       : [];
   });
   return items.length > 0 ? `<div class="share-inline-body">${items.join("")}</div>` : "";

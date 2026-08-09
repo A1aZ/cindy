@@ -229,6 +229,7 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('quoted context');
     expect(html).toContain('Pasted text · 120 chars');
     expect(html).toContain('/review');
+    expect(html).not.toContain('share-inline-chip-icon" aria-hidden="true">/</span>');
     expect(html).toContain('data:image/png;base64,AA==');
     expect(html).toContain('remote.png');
     expect(html).toContain('notes.md');

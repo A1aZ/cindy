@@ -13,8 +13,13 @@ import { compactQuoteLabel } from '@/session/quotePresentation';
 import { applySentAttachmentThumbOverlay } from '@/session/sentAttachmentThumbStore';
 import {
   buildVisibleSentInlineTokens,
+  type SentInlineToken,
   sentInlineTokensDisplayText,
 } from '@/session/sentMessageAtoms';
+import {
+  estimateTextVisualLineCount,
+  truncateTextToVisualLines,
+} from '@/session/userMessageCollapse';
 
 type ConversationShareSourceMessage = Pick<
   NormalizedRemoteMessage,
@@ -30,6 +35,7 @@ type ConversationShareSourceMessage = Pick<
 export function projectConversationShareMessage(
   clientId: string,
   message: ConversationShareSourceMessage,
+  options: { maxVisibleLines?: number; visibleBody?: string } = {},
 ): ConversationShareMessage | null {
   if (message.kind !== 'user' && message.kind !== 'assistant') return null;
 
@@ -59,17 +65,50 @@ export function projectConversationShareMessage(
     message.pastedTextRanges,
     message.slashCommandRanges,
   );
-  const hasStructuredBody = tokens.some((token) => token.kind !== 'text');
-  const bodyParts = hasStructuredBody ? projectBodyParts(tokens) : undefined;
+  if (options.visibleBody !== undefined) {
+    return {
+      ...attachmentFields,
+      body: options.visibleBody,
+      clientId,
+      kind: message.kind,
+      ...(secondaryBody ? { secondaryBody } : {}),
+    };
+  }
+  const visibleTokens = options.maxVisibleLines
+    ? truncateSentInlineTokens(tokens, options.maxVisibleLines)
+    : tokens;
+  const hasStructuredBody = visibleTokens.some((token) => token.kind !== 'text');
+  const bodyParts = hasStructuredBody ? projectBodyParts(visibleTokens) : undefined;
 
   return {
     ...attachmentFields,
-    body: sentInlineTokensDisplayText(tokens),
+    body: sentInlineTokensDisplayText(visibleTokens),
     ...(bodyParts ? { bodyParts } : {}),
     clientId,
     kind: message.kind,
     ...(secondaryBody ? { secondaryBody } : {}),
   };
+}
+
+function truncateSentInlineTokens(
+  tokens: readonly SentInlineToken[],
+  maxVisibleLines: number,
+): SentInlineToken[] {
+  const visibleTokens: SentInlineToken[] = [];
+  let remainingLines = maxVisibleLines;
+  for (const token of tokens) {
+    if (remainingLines <= 0) break;
+    if (token.kind === 'text') {
+      const text = truncateTextToVisualLines(token.text, remainingLines);
+      if (!text) continue;
+      visibleTokens.push({ ...token, text });
+      remainingLines -= estimateTextVisualLineCount(text);
+      continue;
+    }
+    visibleTokens.push(token);
+    remainingLines -= 1;
+  }
+  return visibleTokens;
 }
 
 function projectBodyParts(

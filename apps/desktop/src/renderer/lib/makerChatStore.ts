@@ -13685,6 +13685,16 @@ export const makerChatStore = {
     if (!state) return false;
     return hasRunningWakeTask(state);
   },
+  /**
+   * 查询会话是否有本地后台 agent 工作（wake 任务在跑 / 唤醒桥接 pending）。
+   * 远程会话豁免（镜像事件有丢失窗口，终态 drop 后无自愈路径）。
+   * 与 hasBackgroundAgentWork 内部函数同口径，但暴露为公共 API。
+   */
+  hasBackgroundAgentWork: (sessionId: string): boolean => {
+    const state = sessions.get(sessionId);
+    if (!state) return false;
+    return hasBackgroundAgentWork(sessionId, state);
+  },
   mirrorSessionFields,
   /** F-SB-7: Subscribe to all session changes (for Sidebar running indicators). */
   subscribeAll,

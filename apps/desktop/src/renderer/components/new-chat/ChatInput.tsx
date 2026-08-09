@@ -1154,7 +1154,7 @@ export function ChatInput({
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
-      if (makerChatStore.hasRunningWakeTask(sessionId)) return;
+      if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;

@@ -132,6 +132,41 @@ function stripShellControlTokens(tokens: string[]): string[] {
   return out;
 }
 
+function shellRedirectionSuffix(token: string): string | null {
+  const match = /^(?:\d+)?(?:<<<|<<-?|<>|<|>>?|>&|<&|>\|)(.*)$/s.exec(token);
+  return match ? (match[1] ?? '') : null;
+}
+
+function stripShellRedirections(input: string[]): string[] {
+  const tokens: string[] = [];
+  for (let index = 0; index < input.length; index += 1) {
+    const suffix = shellRedirectionSuffix(input[index]!);
+    if (suffix === null) {
+      tokens.push(input[index]!);
+      continue;
+    }
+    if (suffix === '' && index + 1 < input.length) index += 1;
+  }
+  return tokens;
+}
+
+/** Remove leading assignments/redirections so the next token is the command word. */
+function stripLeadingShellPreamble(input: string[]): string[] {
+  const tokens = [...input];
+  while (tokens.length > 0) {
+    const token = tokens[0]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
+      tokens.shift();
+      continue;
+    }
+    const redirectionSuffix = shellRedirectionSuffix(token);
+    if (redirectionSuffix === null) break;
+    tokens.shift();
+    if (redirectionSuffix === '' && tokens.length > 0) tokens.shift();
+  }
+  return tokens;
+}
+
 interface UnwrappedCommand {
   tokens: string[];
   nestedShell: string | null;
@@ -159,10 +194,12 @@ const NON_EXECUTING_REFERENCE_COMMANDS = new Set([
   'wc',
 ]);
 const OPAQUE_EXECUTION_WRAPPERS = new Set([
+  'coproc',
   'doas',
   'gtimeout',
   'launchctl',
   'parallel',
+  'repeat',
   'sandbox-exec',
   'script',
   'sudo',
@@ -176,9 +213,9 @@ const PROGRAMMABLE_INTERPRETER =
 
 /** Peel only wrappers whose argv shape is fully understood; unknown options fail closed. */
 function unwrapCommand(input: string[]): UnwrappedCommand {
-  let tokens = stripShellControlTokens(input);
+  let tokens = stripLeadingShellPreamble(stripShellControlTokens(input));
   for (let depth = 0; depth < MAX_WRAPPER_UNWRAP_DEPTH; depth += 1) {
-    while (tokens[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0])) tokens.shift();
+    tokens = stripLeadingShellPreamble(tokens);
     if (tokens.length === 0) {
       return { tokens, nestedShell: null, inspectionOnly: false, unresolvedWrapper: false };
     }
@@ -291,10 +328,50 @@ function unwrapCommand(input: string[]): UnwrappedCommand {
       tokens = tokens.slice(index);
       continue;
     }
-    if (head === 'builtin' || head === 'nohup' || head === 'time') {
+    if (head === 'time') {
+      let index = 1;
+      while (index < tokens.length) {
+        const token = tokens[index]!;
+        if (token === '--') {
+          index += 1;
+          break;
+        }
+        if (/^-[alhp]+$/.test(token)) {
+          index += 1;
+          continue;
+        }
+        if (token === '-o') {
+          if (index + 1 >= tokens.length) {
+            return {
+              tokens: [],
+              nestedShell: null,
+              inspectionOnly: false,
+              unresolvedWrapper: true,
+            };
+          }
+          index += 2;
+          continue;
+        }
+        if (/^-o.+/.test(token)) {
+          index += 1;
+          continue;
+        }
+        if (token.startsWith('-')) {
+          return {
+            tokens: tokens.slice(index),
+            nestedShell: null,
+            inspectionOnly: false,
+            unresolvedWrapper: true,
+          };
+        }
+        break;
+      }
+      tokens = tokens.slice(index);
+      continue;
+    }
+    if (head === 'builtin' || head === 'nocorrect' || head === 'noglob' || head === 'nohup') {
       let index = 1;
       if (tokens[index] === '--') index += 1;
-      else if (head === 'time' && tokens[index] === '-p') index += 1;
       else if (tokens[index]?.startsWith('-')) {
         return {
           tokens: tokens.slice(index),
@@ -697,19 +774,230 @@ function isSimulatorExecutorValue(value: string): boolean {
   return /(?:^|\/)(?:xcrun|simctl)$/i.test(normalized) || /Simulator(?:\.app)?/i.test(normalized);
 }
 
-function hasUnresolvedExecutableExpansion(segment: string, tokens: string[]): boolean {
+/** Dynamic command names can resolve to a Simulator bypass, so execution must fail closed. */
+function hasDynamicShellExpansion(token: string): boolean {
+  return /[$`*?[\]{}()^~]/.test(token) || token.indexOf('#') > 0;
+}
+
+function hasUnresolvedExecutableExpansion(tokens: string[]): boolean {
   const executableTokens = stripShellControlTokens(tokens);
   while (executableTokens[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(executableTokens[0])) {
     executableTokens.shift();
   }
   const executable = executableTokens[0] ?? '';
-  if (!/[$`*?\[]/.test(executable)) return false;
-  return /\b(?:xcrun|simctl|Simulator(?:\.app)?)\b/i.test(segment);
+  // `[` and `[[` are literal shell condition builtins, not glob-expanded
+  // executable names. Other expansion syntax in command position is unsafe.
+  if (executable === '[' || executable === '[[') return false;
+  return hasDynamicShellExpansion(executable);
+}
+
+/** Arithmetic compound commands contain expressions, not an executable argv. */
+function isArithmeticCompoundCommand(tokens: string[]): boolean {
+  let index = 0;
+  while (tokens[index] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index]!)) index += 1;
+  while (tokens[index] && /^(?:\{|\(|!|then|do|else|elif|if|while|until)$/.test(tokens[index]!)) {
+    index += 1;
+  }
+  return tokens[index] === '((' || tokens[index]?.startsWith('((') === true;
+}
+
+/**
+ * Shell arithmetic recursively resolves bare variables and array subscripts,
+ * which can execute command substitutions stored in their values. Only
+ * expressions made entirely from decimal literals and operators are safe to
+ * classify without evaluating the shell environment.
+ */
+function hasDynamicArithmeticEvaluation(segment: string): boolean {
+  const start = segment.indexOf('((');
+  const end = segment.lastIndexOf('))');
+  if (start < 0 || end < start + 2) return true;
+  const expression = segment.slice(start + 2, end);
+  return !/^[\s0-9()+\-*/%<>=!&|^~?:,]*$/.test(expression);
+}
+
+/** Unknown wrapper option shapes cannot prove which expanded token becomes the command. */
+function hasUnresolvedWrapperExpansion(unwrapped: UnwrappedCommand): boolean {
+  return (
+    unwrapped.unresolvedWrapper && unwrapped.tokens.some((token) => hasDynamicShellExpansion(token))
+  );
+}
+
+type OpaqueOptionShape = 'flag' | 'value' | 'command' | 'unknown';
+
+function opaqueOptionShape(head: string, token: string): OpaqueOptionShape {
+  const option = token.replace(/=.*/s, '=');
+  if (head === 'sudo') {
+    if (
+      /^(?:-[CDghpRrTtUu]|--(?:chdir|close-from|group|host|prompt|role|command-timeout|type|other-user|user))$/.test(
+        token,
+      )
+    )
+      return 'value';
+    if (
+      /^(?:-[ABbEeHhKklnPSsVv]|--(?:askpass|bell|background|edit|preserve-env|set-home|help|remove-timestamp|reset-timestamp|list|non-interactive|stdin|shell|validate|version))$/.test(
+        token,
+      )
+    )
+      return 'flag';
+    if (/^(?:-[CDghpRrTtUu].+|--[^=]+=)/.test(token)) return 'flag';
+  }
+  if (head === 'doas') {
+    if (/^-(?:a|C|u)$/.test(token)) return 'value';
+    if (/^-(?:L|n|s)$/.test(token) || /^-(?:a|C|u).+/.test(token)) return 'flag';
+  }
+  if (head === 'xargs') {
+    if (
+      /^(?:-[EILnPRSs]|--(?:eof|replace|max-lines|max-args|max-procs|right|max-chars))$/.test(token)
+    )
+      return 'value';
+    if (/^(?:-[0oprtx]|--(?:null|open-tty|interactive|no-run-if-empty|verbose|exit))$/.test(token))
+      return 'flag';
+    if (/^(?:-[EILnPRSs].+|--[^=]+=)/.test(token)) return 'flag';
+  }
+  if (head === 'sandbox-exec') {
+    if (/^-(?:D|f|n|p)$/.test(token)) return 'value';
+    if (/^-(?:D|f|n|p).+/.test(token)) return 'flag';
+  }
+  if (head === 'launchctl') {
+    if (token === '-p') return 'command';
+    if (/^-(?:l|o|e)$/.test(token)) return 'value';
+    if (/^-(?:l|o|e).+/.test(token)) return 'flag';
+  }
+  if (head === 'timeout' || head === 'gtimeout') {
+    if (/^(?:-k|-s|--kill-after|--signal)$/.test(token)) return 'value';
+    if (/^(?:-v|--foreground|--preserve-status|--verbose)$/.test(token)) return 'flag';
+    if (/^(?:-[ks].+|--[^=]+=)/.test(token)) return 'flag';
+  }
+  if (head === 'watch') {
+    if (/^(?:-n|--interval)$/.test(token)) return 'value';
+    if (
+      /^(?:-[bcegpqrtwx]+|-d(?:=permanent)?|--(?:beep|color|differences(?:=permanent)?|chgexit|errexit|equexit|no-rerun|no-title|no-wrap|precise|exec))$/.test(
+        token,
+      )
+    )
+      return 'flag';
+    if (/^(?:-n.+|--interval=)/.test(option)) return 'flag';
+  }
+  if (head === 'script') {
+    if (/^(?:-c|--command)$/.test(token)) return 'command';
+    if (/^(?:-t|-T|--timing)$/.test(token)) return 'value';
+    if (/^-[adeFkpqr]+$/.test(token)) return 'flag';
+  }
+  return 'unknown';
+}
+
+function hasDynamicWrappedCommand(tokens: string[], depth: number): boolean {
+  if (tokens.length === 0) return false;
+  if (depth > MAX_WRAPPER_UNWRAP_DEPTH) {
+    return tokens.some((token) => hasDynamicShellExpansion(token));
+  }
+  const unwrapped = unwrapCommand(tokens);
+  if (unwrapped.inspectionOnly) return false;
+  if (hasUnresolvedWrapperExpansion(unwrapped)) return true;
+  if (unwrapped.nestedShell !== null) {
+    if (containsSimulatorBypass(unwrapped.nestedShell, depth + 1)) return true;
+    return unwrapped.tokens.some((token) => hasDynamicShellExpansion(token));
+  }
+  if (hasUnresolvedExecutableExpansion(unwrapped.tokens)) return true;
+  return hasOpaqueWrapperExpansion(tokens, depth + 1);
+}
+
+/** Locate the command operand conservatively without mistaking later data argv for executables. */
+function hasOpaqueWrapperExpansion(tokens: string[], depth = 0): boolean {
+  tokens = stripShellRedirections(tokens);
+  const head = executableName(tokens[0]);
+  if (head === 'find') {
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (!/^-(?:exec|execdir|ok|okdir)$/.test(tokens[index]!)) continue;
+      const terminator = tokens.findIndex(
+        (token, candidateIndex) =>
+          candidateIndex > index && (token === ';' || token === '+' || token === '\\;'),
+      );
+      const commandEnd = terminator < 0 ? tokens.length : terminator;
+      return hasDynamicWrappedCommand(tokens.slice(index + 1, commandEnd), depth + 1);
+    }
+    return false;
+  }
+  if (!OPAQUE_EXECUTION_WRAPPERS.has(head)) return false;
+  if (head === 'coproc') {
+    // Bash/zsh allow an optional coprocess name, so command position is
+    // ambiguous. Any expansion in this execution form must fail closed.
+    return tokens.slice(1).some((token) => hasDynamicShellExpansion(token));
+  }
+  if (head === 'repeat') {
+    // zsh evaluates the count arithmetically before executing argv.
+    if (!/^\d+$/.test(tokens[1] ?? '')) return true;
+    return hasDynamicWrappedCommand(tokens.slice(2), depth + 1);
+  }
+
+  let index = 1;
+  if (head === 'launchctl') {
+    if (tokens[1] === 'submit') index = 2;
+    else if (tokens[1] === 'asuser' || tokens[1] === 'bsexec') index = 3;
+  }
+  while (index < tokens.length) {
+    const token = tokens[index]!;
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (!token.startsWith('-')) break;
+    const shape = opaqueOptionShape(head, token);
+    const possibleValue = tokens[index + 1];
+    if (shape === 'command') {
+      const commandValue = token.includes('=')
+        ? token.slice(token.indexOf('=') + 1)
+        : possibleValue;
+      if (hasDynamicShellExpansion(commandValue ?? '')) return true;
+      index += token.includes('=') ? 1 : 2;
+      continue;
+    }
+    if (shape === 'value') {
+      index += 2;
+      continue;
+    }
+    if (shape === 'flag') {
+      index += 1;
+      continue;
+    }
+    // Unknown option arity makes every later dynamic token ambiguous: it may
+    // be either an option value or the actual command. Fail closed instead of
+    // guessing and accidentally stepping past the executable.
+    return tokens.slice(index).some((value) => hasDynamicShellExpansion(value));
+  }
+  if (head === 'sudo') {
+    while (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[index] ?? '')) index += 1;
+  }
+  // timeout consumes a duration before its command; macOS script consumes an
+  // output file before an optional command.
+  if (head === 'timeout' || head === 'gtimeout' || head === 'script') index += 1;
+  return hasDynamicWrappedCommand(tokens.slice(index), depth + 1);
 }
 
 function referencesVariable(command: string, variable: string): boolean {
   const escaped = variable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`\\$(?:${escaped}\\b|\\{${escaped}\\})`).test(command);
+}
+
+const SHELL_ASSIGNMENT_BUILTINS = new Set(['declare', 'export', 'local', 'readonly', 'typeset']);
+
+function collectShellAssignments(tokens: string[]): Array<{ name: string; value: string }> {
+  const assignments: Array<{ name: string; value: string }> = [];
+  let index = 0;
+  const head = executableName(tokens[0]);
+  if (SHELL_ASSIGNMENT_BUILTINS.has(head)) {
+    index = 1;
+    while (tokens[index]?.startsWith('-')) index += 1;
+  }
+  for (; index < tokens.length; index += 1) {
+    const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(tokens[index]!);
+    if (!assignment) {
+      if (!SHELL_ASSIGNMENT_BUILTINS.has(head)) break;
+      continue;
+    }
+    assignments.push({ name: assignment[1]!, value: assignment[2] ?? '' });
+  }
+  return assignments;
 }
 
 /** Track simple shell assignments so a later eval/sh -c/$VAR cannot hide a bypass. */
@@ -719,19 +1007,15 @@ function containsTaintedVariableExecution(command: string): boolean {
     segment,
     tokens: tokenizeShellSegment(segment),
   }));
+  const assignments = tokenizedSegments.flatMap(({ tokens }) => collectShellAssignments(tokens));
   for (const { segment } of tokenizedSegments) {
     for (const match of segment.matchAll(/\b([A-Za-z_][A-Za-z0-9_]*)=\$\(([^)]*)\)/g)) {
       if (containsLiteralSimulatorExecutor(match[2] ?? '')) tainted.add(match[1]!);
     }
   }
-  for (const { tokens } of tokenizedSegments) {
-    for (const token of tokens) {
-      const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s.exec(token);
-      if (!assignment) break;
-      const value = assignment[2] ?? '';
-      if (isLiteralSimulatorBypass(value) || isSimulatorExecutorValue(value)) {
-        tainted.add(assignment[1]!);
-      }
+  for (const assignment of assignments) {
+    if (isLiteralSimulatorBypass(assignment.value) || isSimulatorExecutorValue(assignment.value)) {
+      tainted.add(assignment.name);
     }
   }
   if (tainted.size === 0) return false;
@@ -901,9 +1185,7 @@ function hasUnresolvedXcrunTool(tokens: string[]): boolean {
 
 const SHELL_FUNCTION_HEADER_SOURCE =
   '(?:(?:function\\s+)?[A-Za-z_][A-Za-z0-9_]*\\s*\\(\\s*\\)|function\\s+[A-Za-z_][A-Za-z0-9_]*)';
-const SHELL_FUNCTION_DEFINITION_PREFIX = new RegExp(
-  `^${SHELL_FUNCTION_HEADER_SOURCE}\\s*[({]`,
-);
+const SHELL_FUNCTION_DEFINITION_PREFIX = new RegExp(`^${SHELL_FUNCTION_HEADER_SOURCE}\\s*[({]`);
 
 function shellCompoundBodyEnd(command: string, openingIndex: number): number | null {
   const opening = command[openingIndex];
@@ -993,9 +1275,24 @@ function containsSimulatorBypass(command: string, depth = 0): boolean {
       continue;
     }
     const tokens = tokenizeShellSegment(segment);
-    if (hasUnresolvedExecutableExpansion(segment, tokens)) return true;
+    const arithmeticCompound = isArithmeticCompoundCommand(tokens);
+    if (arithmeticCompound && hasDynamicArithmeticEvaluation(segment)) return true;
     const unwrapped = unwrapCommand(tokens);
     if (unwrapped.inspectionOnly) continue;
+    // Known wrappers are peeled first so `env "$TOOL"` and `exec "$TOOL"`
+    // cannot hide a dynamically constructed executable. Shell `-c`
+    // positional arguments are not executables by themselves; its nested
+    // program is classified recursively below instead.
+    if (
+      !arithmeticCompound &&
+      unwrapped.nestedShell === null &&
+      hasUnresolvedExecutableExpansion(unwrapped.tokens)
+    ) {
+      return true;
+    }
+    if (hasUnresolvedWrapperExpansion(unwrapped) || hasOpaqueWrapperExpansion(tokens)) {
+      return true;
+    }
     if (containsSimulatorAliasDefinition(unwrapped.tokens, depth)) return true;
     if (unwrapped.nestedShell !== null) {
       if (unwrapped.unresolvedWrapper)

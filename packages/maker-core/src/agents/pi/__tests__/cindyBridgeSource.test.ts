@@ -1,8 +1,23 @@
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 import { CINDY_BRIDGE_EXTENSION_SOURCE } from '../cindy-bridge-source.js';
 
 describe('cindy-bridge extension source', () => {
+  it('is valid standalone TypeScript for the Pi runtime to load', () => {
+    const result = ts.transpileModule(CINDY_BRIDGE_EXTENSION_SOURCE, {
+      compilerOptions: {
+        module: ts.ModuleKind.ESNext,
+        target: ts.ScriptTarget.ES2022,
+      },
+      reportDiagnostics: true,
+    });
+    const errors = (result.diagnostics ?? [])
+      .filter((diagnostic) => diagnostic.category === ts.DiagnosticCategory.Error)
+      .map((diagnostic) => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'));
+    expect(errors).toEqual([]);
+  });
+
   it('overrides find with the managed ripgrep backend instead of runtime fd download', () => {
     const source = CINDY_BRIDGE_EXTENSION_SOURCE;
 
@@ -48,8 +63,12 @@ describe('cindy-bridge extension source', () => {
     expect(source).toContain(
       "reason: 'Cindy Review only permits read-only access to this task and its explicit artifacts.'",
     );
+    expect(source).toContain('reviewReadInputIsAllowed(');
+    expect(source).toContain('collectReviewPathCandidates(input)');
+    expect(source).toContain("new Set(['glob', 'globs', 'pattern', 'patterns'])");
+    expect(source).toContain('reviewSelectorTouchesCredential(selector)');
     expect(source).toContain(
-      'reviewReadIsAllowed(rawPath, permission.reviewReadPaths)',
+      'requestedPaths.every((candidate) => reviewReadIsAllowed(candidate, allowedPaths))',
     );
     expect(source).not.toContain("toolName === 'grep' && statSync(target).isDirectory()");
     expect(source).toContain(

@@ -49,3 +49,18 @@ export function isReviewSensitiveCredentialPath(target: string): boolean {
   return typeof target === 'string'
     && REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERNS.some((pattern) => pattern.test(target));
 }
+
+/**
+ * File selectors are not concrete paths: glob metacharacters can hide a
+ * sensitive basename from an otherwise path-shaped check. Inspect each
+ * alternative and a metacharacter-free form before a Review search runs.
+ */
+export function isReviewSensitiveCredentialSelector(selector: string): boolean {
+  if (typeof selector !== 'string') return false;
+  const candidates = [selector, ...selector.split(/[{},|]/)];
+  return candidates.some((candidate) => {
+    if (isReviewSensitiveCredentialPath(candidate)) return true;
+    const literalized = candidate.replace(/[*?[\]{}()!+@]/g, '');
+    return literalized !== candidate && isReviewSensitiveCredentialPath(literalized);
+  });
+}

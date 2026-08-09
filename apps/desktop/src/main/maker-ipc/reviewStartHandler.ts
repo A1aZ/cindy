@@ -132,6 +132,17 @@ export interface ReviewStartHandlerDeps {
     runId: string;
     reviewerSessionId: string;
   }): Promise<PreparedReviewRun>;
+  acquireSourceLease(input: {
+    sourceSessionId: string;
+    runId: string;
+    owner: ReviewRunOwner;
+    createdAt: number;
+  }): Promise<boolean>;
+  releaseSourceLease(input: {
+    sourceSessionId: string;
+    runId: string;
+    owner: ReviewRunOwner;
+  }): Promise<void>;
   createSourceCard(input: ReviewCardWrite): Promise<void>;
   updateSourceCard(input: ReviewCardWrite): Promise<void>;
   startReviewer(createOpts: MakerSessionCreateOpts): Promise<ReviewRunnerHandle>;
@@ -187,10 +198,36 @@ export function registerReviewStartHandler(
     let preparedRunCleaned = false;
     let preparedRunCleanup: (() => Promise<void>) | null = null;
     let terminalFinalization: Promise<void> | null = null;
+    let sourceLeaseAcquired = false;
+    let sourceCardCreated = false;
+    let releasePromise: Promise<void> | null = null;
 
-    const release = (): void => {
-      const active = activeReviewsBySource.get(request.sourceSessionId);
-      if (active?.runId === runId) activeReviewsBySource.delete(request.sourceSessionId);
+    const release = (): Promise<void> => {
+      if (releasePromise) return releasePromise;
+      releasePromise = (async () => {
+        if (sourceLeaseAcquired) {
+          try {
+            await deps.releaseSourceLease({
+              sourceSessionId: request.sourceSessionId,
+              runId,
+              owner: deps.owner,
+            });
+            sourceLeaseAcquired = false;
+          } catch (error) {
+            // Keep the in-process gate occupied if the durable gate could not
+            // be released. A later process can reclaim it after owner death.
+            deps.warn('review source lease release failed', {
+              sourceSessionId: request.sourceSessionId,
+              runId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return;
+          }
+        }
+        const active = activeReviewsBySource.get(request.sourceSessionId);
+        if (active?.runId === runId) activeReviewsBySource.delete(request.sourceSessionId);
+      })();
+      return releasePromise;
     };
     const disposeReviewerListeners = (): void => {
       disposeReviewEvents?.();
@@ -223,7 +260,7 @@ export function registerReviewStartHandler(
       error?: string,
     ): Promise<void> => {
       if (!runningMeta || !sourceAgentKind) {
-        release();
+        await release();
         return;
       }
       const nextMeta: ReviewRunMeta = {
@@ -241,7 +278,7 @@ export function registerReviewStartHandler(
           result,
         });
       } finally {
-        release();
+        await release();
       }
     };
 
@@ -251,6 +288,17 @@ export function registerReviewStartHandler(
       const preparedSourceAgentKind = prepared.sourceAgentKind;
       sourceAgentKind = preparedSourceAgentKind;
       const startedAt = deps.now();
+      if (
+        !(await deps.acquireSourceLease({
+          sourceSessionId: request.sourceSessionId,
+          runId,
+          owner: deps.owner,
+          createdAt: startedAt,
+        }))
+      ) {
+        throwIpcError('SESSION_RUNNING', 'This task already has a review in progress');
+      }
+      sourceLeaseAcquired = true;
       runningMeta = {
         version: 1,
         runId,
@@ -268,6 +316,7 @@ export function registerReviewStartHandler(
         meta: runningMeta,
         result: '',
       });
+      sourceCardCreated = true;
 
       const launch = await prepared.prepareLaunch();
       await launch.verifyBeforeStart();
@@ -311,7 +360,9 @@ export function registerReviewStartHandler(
             'failed',
             '',
             error instanceof Error ? error.message : String(error),
-          ).catch(release);
+          ).catch(async () => {
+            await release();
+          });
           await closeReviewer();
         });
         void terminalFinalization;
@@ -329,7 +380,7 @@ export function registerReviewStartHandler(
             reviewerSessionId,
             error: error instanceof Error ? error.message : String(error),
           });
-          release();
+          await release();
           await closeReviewer();
         });
         void terminalFinalization;
@@ -389,8 +440,14 @@ export function registerReviewStartHandler(
       await closeReviewer();
       const active = activeReviewsBySource.get(request.sourceSessionId);
       if (active?.runId === runId) {
-        const message = error instanceof Error ? error.message : String(error);
-        await updateSourceCard('failed', '', message).catch(release);
+        if (sourceCardCreated) {
+          const message = error instanceof Error ? error.message : String(error);
+          await updateSourceCard('failed', '', message).catch(async () => {
+            await release();
+          });
+        } else {
+          await release();
+        }
       }
       throw error;
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isReviewSensitiveCredentialPath,
+  isReviewSensitiveCredentialSelector,
   isSensitiveCredentialPath,
 } from "./sensitive-credential-paths.js";
 
@@ -21,5 +22,17 @@ describe("Review credential path policy", () => {
     expect(isReviewSensitiveCredentialPath("/repo/src/environment.ts")).toBe(
       false,
     );
+  });
+
+  it("recognizes credentials hidden behind file selector syntax", () => {
+    for (const selector of [
+      "**/*.pem",
+      "**/.env*",
+      "{src/**,**/.ssh/**}",
+      "**/{safe.ts,.env.local}",
+    ]) {
+      expect(isReviewSensitiveCredentialSelector(selector)).toBe(true);
+    }
+    expect(isReviewSensitiveCredentialSelector("{src,test}/**/*.{ts,tsx}")).toBe(false);
   });
 });

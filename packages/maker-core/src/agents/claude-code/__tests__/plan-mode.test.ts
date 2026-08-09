@@ -328,6 +328,18 @@ describe('ClaudeCodeAgent plan mode', () => {
     })).resolves.toEqual({ continue: true });
     await expect(reviewHook({
       hook_event_name: 'PreToolUse',
+      tool_name: 'Grep',
+      tool_input: { path: workingDir, pattern: 'value', glob: '**/*.ts' },
+    })).resolves.toEqual({ continue: true });
+    for (const glob of ['**/*.pem', '**/.env*', '../../outside/**', '{src/**,/etc/**}']) {
+      await expect(reviewHook({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Grep',
+        tool_input: { path: workingDir, pattern: 'value', glob },
+      })).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    }
+    await expect(reviewHook({
+      hook_event_name: 'PreToolUse',
       tool_name: 'Glob',
       tool_input: { pattern: '**/*.ts' },
     })).resolves.toEqual({ continue: true });
@@ -343,6 +355,8 @@ describe('ClaudeCodeAgent plan mode', () => {
       '[.][.]/.ssh/*',
       path.join(os.homedir(), '**', '*'),
       String.raw`C:\\Users\\outside\\*`,
+      '**/*.pem',
+      '**/.env*',
     ]) {
       await expect(reviewHook({
         hook_event_name: 'PreToolUse',

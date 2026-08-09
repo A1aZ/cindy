@@ -155,7 +155,10 @@ import type {
 } from '../../types/memory.js';
 import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
 import { scanClaudeCustomizations } from './customization-scanner.js';
-import { isReviewSensitiveCredentialPath } from '../shared/sensitive-credential-paths.js';
+import {
+  isReviewSensitiveCredentialPath,
+  isReviewSensitiveCredentialSelector,
+} from '../shared/sensitive-credential-paths.js';
 import {
   assertReviewMessageContentPaths,
   buildReviewReadGrants,
@@ -285,6 +288,14 @@ function reviewGlobPatternEscapesScope(pattern: string): boolean {
   return /(^|[{(,|])(?:\/|[a-zA-Z]:\/)/.test(value);
 }
 
+function reviewFileSelectorIsAllowed(selector: unknown): selector is string {
+  return (
+    typeof selector === 'string' &&
+    !reviewGlobPatternEscapesScope(selector) &&
+    !isReviewSensitiveCredentialSelector(selector)
+  );
+}
+
 async function reviewReadToolIsInScope(params: {
   toolName: string;
   toolInput: Record<string, unknown> | undefined;
@@ -292,8 +303,14 @@ async function reviewReadToolIsInScope(params: {
   grants: readonly ReviewReadGrant[];
 }): Promise<boolean> {
   if (params.toolName === 'Glob') {
-    const pattern = params.toolInput?.pattern;
-    if (typeof pattern !== 'string' || reviewGlobPatternEscapesScope(pattern)) return false;
+    if (!reviewFileSelectorIsAllowed(params.toolInput?.pattern)) return false;
+  }
+  if (
+    params.toolName === 'Grep' &&
+    params.toolInput?.glob !== undefined &&
+    !reviewFileSelectorIsAllowed(params.toolInput.glob)
+  ) {
+    return false;
   }
   const keyByTool: Partial<Record<string, string>> = {
     Read: 'file_path',

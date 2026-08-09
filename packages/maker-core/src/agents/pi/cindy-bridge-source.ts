@@ -194,6 +194,120 @@ function reviewReadIsAllowed(candidate: string, allowedPaths: string[]): boolean
   }
 }
 
+const REVIEW_PATH_FIELD_KEYS = new Set([
+  'path',
+  'paths',
+  'file_path',
+  'filepath',
+  'notebook_path',
+  'notebookpath',
+]);
+
+// Read tools have changed their input nesting across Pi versions. Walk every
+// object branch and validate every path-bearing field instead of trusting only
+// the top-level path value. Invalid or over-deep path shapes fail closed.
+function collectReviewPathCandidates(input: unknown): string[] | null {
+  if (
+    input != null
+    && (typeof input !== 'object' || Array.isArray(input))
+  ) return null;
+  const candidates: string[] = [];
+  const visit = (value: unknown, field: string | null, depth: number): boolean => {
+    if (depth > 6) return false;
+    const normalizedField = field?.toLowerCase() ?? null;
+    if (normalizedField && REVIEW_PATH_FIELD_KEYS.has(normalizedField)) {
+      const plural = normalizedField === 'paths';
+      if (plural) {
+        if (!Array.isArray(value)) return false;
+        for (const item of value) {
+          if (typeof item !== 'string') return false;
+          candidates.push(item || process.cwd());
+        }
+        return true;
+      }
+      if (typeof value !== 'string') return false;
+      candidates.push(value || process.cwd());
+      return true;
+    }
+    if (value == null) return true;
+    if (Array.isArray(value)) {
+      return value.every((item) => visit(item, null, depth + 1));
+    }
+    if (typeof value === 'object') {
+      return Object.entries(value as Record<string, unknown>)
+        .every(([key, child]) => visit(child, key, depth + 1));
+    }
+    return true;
+  };
+  return visit(input, null, 0) ? candidates : null;
+}
+
+function reviewSelectorEscapesScope(selector: string): boolean {
+  const value = selector.trim();
+  if (!value) return false;
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) return true;
+  if (/[\\[\]]/.test(value) || value.includes('..')) return true;
+  return /(^|[{(,|])(?:\/|[a-zA-Z]:\/)/.test(value);
+}
+
+function reviewSelectorTouchesCredential(selector: string): boolean {
+  const candidates = [selector, ...selector.split(/[{},|]/)];
+  return candidates.some((candidate) => {
+    if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(candidate))) return true;
+    const literalized = candidate.replace(/[*?[\]{}()!+@]/g, '');
+    return literalized !== candidate
+      && REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(literalized));
+  });
+}
+
+function collectReviewFileSelectors(toolName: string, input: unknown): string[] | null {
+  if (toolName !== 'grep' && toolName !== 'find') return [];
+  const selectorFields = toolName === 'grep'
+    ? new Set(['glob', 'globs'])
+    : new Set(['glob', 'globs', 'pattern', 'patterns']);
+  const selectors: string[] = [];
+  const visit = (value: unknown, field: string | null, depth: number): boolean => {
+    if (depth > 6) return false;
+    const normalizedField = field?.toLowerCase() ?? null;
+    if (normalizedField && selectorFields.has(normalizedField)) {
+      if (Array.isArray(value)) {
+        for (const item of value) {
+          if (typeof item !== 'string') return false;
+          selectors.push(item);
+        }
+        return true;
+      }
+      if (typeof value !== 'string') return false;
+      selectors.push(value);
+      return true;
+    }
+    if (value == null) return true;
+    if (Array.isArray(value)) {
+      return value.every((item) => visit(item, null, depth + 1));
+    }
+    if (typeof value === 'object') {
+      return Object.entries(value as Record<string, unknown>)
+        .every(([key, child]) => visit(child, key, depth + 1));
+    }
+    return true;
+  };
+  return visit(input, null, 0) ? selectors : null;
+}
+
+function reviewReadInputIsAllowed(
+  toolName: string,
+  input: unknown,
+  allowedPaths: string[],
+): boolean {
+  const paths = collectReviewPathCandidates(input);
+  const selectors = collectReviewFileSelectors(toolName, input);
+  if (!paths || !selectors) return false;
+  const requestedPaths = paths.length > 0 ? paths : [process.cwd()];
+  return requestedPaths.every((candidate) => reviewReadIsAllowed(candidate, allowedPaths))
+    && selectors.every((selector) =>
+      !reviewSelectorEscapesScope(selector) && !reviewSelectorTouchesCredential(selector));
+}
+
 // ── MCP streamable-HTTP 极简 client ─────────────────────────────────────────
 
 interface McpServerRef {
@@ -667,12 +781,13 @@ export default async function cindyBridge(pi: any) {
   pi.on('tool_call', async (event: any, ctx: any) => {
     const permission = currentPermissionState();
     if (permission.reviewOnly) {
-      const rawPath = typeof event.input?.path === 'string' && event.input.path
-        ? event.input.path
-        : process.cwd();
       if (
         READONLY_BUILTINS.has(event.toolName)
-        && reviewReadIsAllowed(rawPath, permission.reviewReadPaths)
+        && reviewReadInputIsAllowed(
+          event.toolName,
+          event.input,
+          permission.reviewReadPaths,
+        )
       ) return;
       return {
         block: true,

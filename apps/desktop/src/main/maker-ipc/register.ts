@@ -209,7 +209,16 @@ import {
   type ReviewRunMeta,
   type ReviewRunOwner,
 } from '../../shared/reviewRun.js';
-import { shouldFailInterruptedReview } from '../reviewer/reviewRunRecovery.js';
+import {
+  hasReviewOwnerProcessEnded,
+  shouldFailInterruptedReview,
+} from '../reviewer/reviewRunRecovery.js';
+import {
+  discardInvalidReviewSourceLease,
+  listPersistedReviewSourceLeases,
+  releaseReviewSourceLease,
+  tryAcquireReviewSourceLease,
+} from '../reviewer/reviewSourceLease.js';
 import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
@@ -6575,21 +6584,25 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     processId: process.pid,
   };
   const reconcileInterruptedReviews = async (): Promise<void> => {
-    const db = getDbClient().drizzle;
-    const rows = await db
-      .select({
-        sessionId: messages.sessionId,
-        clientId: messages.clientId,
-        agentMeta: messages.agentMeta,
-      })
-      .from(messages)
-      .where(
-        and(
-          eq(messages.role, 'assistant'),
-          isNull(messages.rewindAt),
-          sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+    const dbClient = getDbClient();
+    const db = dbClient.drizzle;
+    const [rows, sourceLeases] = await Promise.all([
+      db
+        .select({
+          sessionId: messages.sessionId,
+          clientId: messages.clientId,
+          agentMeta: messages.agentMeta,
+        })
+        .from(messages)
+        .where(
+          and(
+            eq(messages.role, 'assistant'),
+            isNull(messages.rewindAt),
+            sql`${messages.agentMeta} LIKE '%"reviewRun"%'`,
+          ),
         ),
-      );
+      listPersistedReviewSourceLeases(dbClient),
+    ]);
     const interruptedAt = Date.now();
     for (const row of rows) {
       const reviewRun = readReviewRunFromAgentMeta(row.agentMeta);
@@ -6603,6 +6616,22 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       await updateMessageContent(row.sessionId, row.clientId, '');
       await patchMessageAgentMeta(row.sessionId, row.clientId, { reviewRun: failed });
       await broadcastMessageAgentMetaUpdate(row.sessionId, row.clientId);
+    }
+    for (const row of sourceLeases) {
+      if (!row.lease) {
+        await discardInvalidReviewSourceLease(dbClient, row);
+        log.warn('discarded malformed Review source lease', {
+          sourceSessionId: row.sourceSessionId,
+          leaseRowId: row.id,
+        });
+        continue;
+      }
+      if (!hasReviewOwnerProcessEnded(row.lease.owner, reviewRunOwner)) continue;
+      await releaseReviewSourceLease(dbClient, {
+        sourceSessionId: row.sourceSessionId,
+        runId: row.lease.runId,
+        owner: row.lease.owner,
+      });
     }
   };
   const sourceHasPersistedRunningReview = async (sourceSessionId: string): Promise<boolean> => {
@@ -6669,6 +6698,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     createReviewerSessionId: randomUUID,
     owner: reviewRunOwner,
     now: Date.now,
+    acquireSourceLease: (input) => tryAcquireReviewSourceLease(getDbClient(), input),
+    releaseSourceLease: async (input) => {
+      await releaseReviewSourceLease(getDbClient(), input);
+    },
     prepareRun: async ({ event, request, reviewerSessionId }) => {
       const db = getDbClient().drizzle;
       const [source] = await db

@@ -11,6 +11,18 @@ export function isReviewProcessAlive(processId: number): boolean {
   }
 }
 
+export function hasReviewOwnerProcessEnded(
+  owner: ReviewRunOwner,
+  currentOwner: ReviewRunOwner,
+  processIsAlive: ReviewProcessAliveProbe = isReviewProcessAlive,
+): boolean {
+  if (owner.instanceId === currentOwner.instanceId) return false;
+  // This process now owns the same PID, so the differently identified previous
+  // owner has definitely terminated even if the OS immediately reused the PID.
+  if (owner.processId === currentOwner.processId) return true;
+  return !processIsAlive(owner.processId);
+}
+
 /**
  * A shared-userData instance may only fail a running card after proving that
  * the Main process which owns it has ended. Owner-less cards from older builds
@@ -22,9 +34,5 @@ export function shouldFailInterruptedReview(
   processIsAlive: ReviewProcessAliveProbe = isReviewProcessAlive,
 ): boolean {
   if (reviewRun.status !== 'running' || !reviewRun.owner) return false;
-  if (reviewRun.owner.instanceId === currentOwner.instanceId) return false;
-  // This process now owns the same PID, so the differently identified previous
-  // owner has definitely terminated even if the OS immediately reused the PID.
-  if (reviewRun.owner.processId === currentOwner.processId) return true;
-  return !processIsAlive(reviewRun.owner.processId);
+  return hasReviewOwnerProcessEnded(reviewRun.owner, currentOwner, processIsAlive);
 }

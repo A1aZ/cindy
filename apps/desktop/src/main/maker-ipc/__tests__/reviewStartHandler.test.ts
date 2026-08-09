@@ -91,6 +91,8 @@ function makeDeps(
     owner: { instanceId: 'main-instance-1', processId: 123 },
     now: vi.fn(() => 1_000 + id),
     prepareRun: vi.fn(async () => makePreparedRun(launch)),
+    acquireSourceLease: vi.fn(async () => true),
+    releaseSourceLease: vi.fn(async () => undefined),
     createSourceCard: vi.fn(async () => undefined),
     updateSourceCard: vi.fn(async () => undefined),
     startReviewer: vi.fn(async () => reviewer),
@@ -320,6 +322,55 @@ describe('maker:review:start IPC lifecycle', () => {
     await expect(first).rejects.toThrow('evidence failed');
     expect(deps.startReviewer).not.toHaveBeenCalled();
     expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses the durable lease to admit only one shared-database handler', async () => {
+    const firstHarness = new IpcHarness();
+    const secondHarness = new IpcHarness();
+    const firstReviewer = new FakeReviewer();
+    const secondReviewer = new FakeReviewer();
+    let lease: { runId: string; instanceId: string } | null = null;
+    const acquireSourceLease = vi.fn(
+      async (input: { runId: string; owner: { instanceId: string } }) => {
+        if (lease) return false;
+        lease = { runId: input.runId, instanceId: input.owner.instanceId };
+        return true;
+      },
+    );
+    const releaseSourceLease = vi.fn(
+      async (input: { runId: string; owner: { instanceId: string } }) => {
+        if (lease?.runId === input.runId && lease.instanceId === input.owner.instanceId) {
+          lease = null;
+        }
+      },
+    );
+    const firstDeps = makeDeps(firstReviewer, {
+      owner: { instanceId: 'first-main', processId: 101 },
+      acquireSourceLease,
+      releaseSourceLease,
+    });
+    const secondDeps = makeDeps(secondReviewer, {
+      owner: { instanceId: 'second-main', processId: 202 },
+      acquireSourceLease,
+      releaseSourceLease,
+    });
+    registerReviewStartHandler(firstHarness, firstDeps);
+    registerReviewStartHandler(secondHarness, secondDeps);
+
+    await expect(
+      firstHarness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest()),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      secondHarness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest()),
+    ).rejects.toMatchObject({ code: 'SESSION_RUNNING' });
+    expect(secondDeps.createSourceCard).not.toHaveBeenCalled();
+    expect(secondDeps.startReviewer).not.toHaveBeenCalled();
+
+    firstReviewer.emitStatus('closed');
+    await vi.waitFor(() => expect(lease).toBeNull());
+    await expect(
+      secondHarness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest()),
+    ).resolves.toMatchObject({ ok: true });
   });
 
   it('ignores continuation boundaries and lets only the first terminal event finalize', async () => {

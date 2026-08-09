@@ -783,12 +783,34 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
           return false;
         }
       })();
+      // 斜杠开头不等于控制指令:`/tmp/build.log 为什么失败` 是普通提问,按首字符
+      // 排除会让它绕过对账、遗留计划失去这一轮的收口机会(review P2)。信封里的
+      // slashCommandRanges 是权威判据 —— Composer 对新消息总会写这个键(空数组
+      // 表示"确认没有指令",见 stringifyUserContent 的注释),所以键在时只认
+      // 起点为 0 的真实指令范围;键不在(旧数据 / 非 Composer 生产者)才退回
+      // 首字符启发式。
+      const reconcileSlashRanges = (() => {
+        if (typeof reconcilePersistContent !== 'string') return undefined;
+        if (!reconcilePersistContent.startsWith('{')) return undefined;
+        try {
+          const parsed = JSON.parse(reconcilePersistContent) as { slashCommandRanges?: unknown };
+          return Array.isArray(parsed.slashCommandRanges) ? parsed.slashCommandRanges : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+      const startsWithSlashCommand =
+        reconcileSlashRanges !== undefined
+          ? reconcileSlashRanges.some(
+              (range) => (range as { start?: unknown } | null)?.start === 0,
+            )
+          : reconcilePersistText.startsWith('/');
       const isOrdinaryUserTurn =
         soForReconcile.origin === undefined &&
         soForReconcile.persistUserMessage?.autoResume !== true &&
         soForReconcile.persistUserMessage?.origin === undefined &&
         (reconcilePersistText.length > 0 || reconcileHasAttachments) &&
-        !reconcilePersistText.startsWith('/') &&
+        !startsWithSlashCommand &&
         !reconcilePersistText.startsWith('[UI_ACTION_TRIGGER]');
       const planReconcileNote = isOrdinaryUserTurn
         ? ((await deps.peekPlanReconcileNote?.(sessionId).catch(() => null)) ?? null)

@@ -467,6 +467,36 @@ export function dedupeToolMediaByUrl<TMedia extends MessageRenderToolMediaLike>(
 }
 
 /**
+ * 计划所有权的**唯一** user 边界判据:这个 user 行是不是"用户真的开口"的反面。
+ *
+ * 落在 user 行上但不构成边界的四类:
+ *  - 自动续跑 / scheduler 定时消息(agentMeta.autoResume / origin;desktop 渲染层
+ *    投影成 isSyntheticTrigger / automationOrigin 后丢弃原 meta,两套字段都认):
+ *    同一件事的延续,当边界会把进行中的计划切成新 session、历史里出现重复计划卡;
+ *  - 同轮 steer 插话:turn 还在跑,用户在指挥进行中的活,不是开新话题
+ *    (MessageStream 的 turn 分组同样把 steer 排除在新 turn 边界外);
+ *  - 子代理内部的 user 行(带 parentUuid / parentToolUseId):子任务的输入,当边界
+ *    会顶掉主线程计划、换 key 重挂载 TodoListCard。
+ *
+ * **计划分组(findMessageTodoInsertions)与失败回扫(markCodexPlanTurnFailed)共用
+ * 这一份判据**。两边各自推导过一次,结果是回扫只豁免了 steer:计划之后经过一次
+ * 自动续跑再以 terminal error 收尾时,回扫在合成 user 行上提前 break、够不到本轮
+ * 计划,全勾完的失败计划先按旧数据退场,等 main 的异步印记广播才复活(手机端断连
+ * 则要到重新加载,review P2)。
+ */
+function isSyntheticUserRow(message: MessageRenderSourceMessageLike): boolean {
+  const meta = message.agentMeta;
+  return (
+    message.isSyntheticTrigger === true ||
+    (message.automationOrigin !== undefined && message.automationOrigin !== null) ||
+    meta?.autoResume === true ||
+    (meta?.origin !== undefined && meta?.origin !== null) ||
+    isSteerUserRow(message) ||
+    hasSubagentParent(message)
+  );
+}
+
+/**
  * 子代理归属判定:desktop 投影出顶层 parentToolUseId;mobile / main 原始行只有
  * agentMeta.parentUuid。二者任一存在即视为子代理内部消息。
  */
@@ -521,26 +551,7 @@ export function findMessageTodoInsertions<TMessage extends MessageRenderSourceMe
   for (let index = 0; index < messages.length; index++) {
     const message = messages[index];
     if (message.role === 'user') {
-      // 只有"用户真的开口"才是所有权边界。自动续跑与 scheduler 定时消息落的
-      // 也是 user 行,但那是同一件事的延续,不能把进行中的计划切成新 session
-      // (否则历史里出现重复计划卡)。两套字段都认:main/mobile 路径消息带
-      // agentMeta(autoResume/origin);desktop 渲染层把 agentMeta 投影成
-      // isSyntheticTrigger / automationOrigin 后丢弃原 meta。
-      const meta = message.agentMeta;
-      const syntheticUserRow =
-        message.isSyntheticTrigger === true ||
-        (message.automationOrigin !== undefined && message.automationOrigin !== null) ||
-        meta?.autoResume === true ||
-        (meta?.origin !== undefined && meta?.origin !== null) ||
-        // 同轮 steer 插话:turn 还在跑,用户在指挥进行中的活,不是开新话题
-        // (MessageStream 的 turn 分组同样把 steer 排除在新 turn 边界外)。当
-        // 边界会让插话后的 TaskCreate 清掉本轮 taskState、TodoWrite 换 key。
-        isSteerUserRow(message) ||
-        // 子代理内部的 user 行(带 parentUuid/parentToolUseId)是子任务的输入,
-        // 不是用户开新话题——当边界会把主线程进行中的计划切成新 session、换 key
-        // 重挂载 TodoListCard。
-        hasSubagentParent(message);
-      if (!syntheticUserRow) lastUserIndex = index;
+      if (!isSyntheticUserRow(message)) lastUserIndex = index;
       continue;
     }
     const source = agentPlanSource(toolNameOf(message));
@@ -837,10 +848,12 @@ function isSteerUserRow(message: MessageRenderSourceMessageLike): boolean {
  * Ownership boundary: only rows inside the failing turn's segment — after the
  * latest turn-starting user message — may be stamped. Codex plan rows are
  * per-turn (`plan:<turnId>` is created within its own turn), so the scan stops
- * cold at the first user row that started a turn. A mid-turn steer interjection
- * (`delivery: 'steer'`) does NOT start a new turn — the vendor turn keeps
- * running and its plan row stays owned by the same turn — so steer rows do not
- * end the scan. A failed turn that never emitted `update_plan` stamps nothing;
+ * cold at the first user row that started a turn. What counts as "started a
+ * turn" is `isSyntheticUserRow`'s negation — the same predicate the plan
+ * grouping boundary uses, so steer interjections, auto-resume / scheduler
+ * dispatches, and subagent-internal user rows all keep the scan going instead of
+ * each surface re-deriving its own list. A failed turn that never emitted
+ * `update_plan` stamps nothing;
  * reaching past the boundary would resurrect an unrelated historical plan
  * (pre-seal-era all-done rows retire via the legacy fallback, and a stray
  * failure stamp would flip them back to "alive" with no durable write to
@@ -851,7 +864,7 @@ export function markCodexPlanTurnFailed<TMessage extends MessageRenderSourceMess
 ): { messages: readonly TMessage[]; changed: boolean; toolUseId: string | null } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === 'user' && !isSteerUserRow(message)) break;
+    if (message.role === 'user' && !isSyntheticUserRow(message)) break;
     if (message.role !== 'tool_use' || toolNameOf(message) !== 'update_plan') continue;
     if (planRowSealOf(message).sealed || planRowTurnFailed(message)) {
       return { messages, changed: false, toolUseId: null };

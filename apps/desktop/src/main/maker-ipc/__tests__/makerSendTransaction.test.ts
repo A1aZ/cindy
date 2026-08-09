@@ -1506,6 +1506,64 @@ describe('session-agent-switch handoff injection', () => {
     expect(peekPlanReconcileNote).not.toHaveBeenCalled();
   });
 
+  it('按信封里的 slash 范围区分控制指令与绝对路径开头的真实提问', async () => {
+    const peekPlanReconcileNote = vi.fn(async () => 'RECONCILE-NOTE');
+    const { deps, session } = createDeps({ peekPlanReconcileNote });
+    const transaction = createMakerSendTransaction(deps);
+
+    // `/tmp/build.log 为什么失败` 是普通提问:Composer 写了空的 slashCommandRanges
+    // (= 确认没有指令),不能因首字符 '/' 就绕过对账(review P2)。
+    await transaction.sendToAgentAccepted(
+      'session-1',
+      { type: 'user', content: '/tmp/build.log 为什么失败' },
+      undefined,
+      {
+        persistUserMessage: {
+          clientId: 'c-path',
+          content: '{"text":"/tmp/build.log 为什么失败","images":[],"files":[],"slashCommandRanges":[]}',
+        },
+      },
+    );
+    expect(session.send).toHaveBeenLastCalledWith(
+      { type: 'user', content: 'RECONCILE-NOTE\n\n/tmp/build.log 为什么失败' },
+      expect.anything(),
+    );
+
+    // 真正的控制指令带起点为 0 的范围:照旧排除。
+    await transaction.sendToAgentAccepted(
+      'session-1',
+      { type: 'user', content: '/compact' },
+      undefined,
+      {
+        persistUserMessage: {
+          clientId: 'c-cmd',
+          content: '{"text":"/compact","images":[],"files":[],"slashCommandRanges":[{"start":0,"end":8}]}',
+        },
+      },
+    );
+    expect(session.send).toHaveBeenLastCalledWith(
+      { type: 'user', content: '/compact' },
+      expect.anything(),
+    );
+
+    // 正文中段出现的指令形态(范围起点非 0)仍是真实提问。
+    await transaction.sendToAgentAccepted(
+      'session-1',
+      { type: 'user', content: '解释一下 /compact 做了什么' },
+      undefined,
+      {
+        persistUserMessage: {
+          clientId: 'c-mid',
+          content: '{"text":"解释一下 /compact 做了什么","images":[],"files":[],"slashCommandRanges":[{"start":5,"end":13}]}',
+        },
+      },
+    );
+    expect(session.send).toHaveBeenLastCalledWith(
+      { type: 'user', content: 'RECONCILE-NOTE\n\n解释一下 /compact 做了什么' },
+      expect.anything(),
+    );
+  });
+
   it('计划对账覆盖仅附件轮次(正文空,带图片/文件)', async () => {
     const peekPlanReconcileNote = vi.fn(async () => 'RECONCILE-NOTE');
     const { deps, session } = createDeps({ peekPlanReconcileNote });

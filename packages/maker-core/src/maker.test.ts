@@ -932,6 +932,16 @@ describe('Maker Pi runtime skill status', () => {
             },
           },
           {
+            name: 'skill:single-file-frontmatter-name',
+            source: 'skill',
+            sourceInfo: {
+              source: 'local',
+              scope: 'temporary',
+              baseDir: '/repo/.pi/skills',
+              path: '/repo/.pi/skills/single-file.md',
+            },
+          },
+          {
             name: 'skill:user-collision',
             source: 'skill',
             sourceInfo: { source: 'auto', scope: 'user', baseDir: '/home/.agents/skills' },
@@ -963,6 +973,7 @@ describe('Maker Pi runtime skill status', () => {
         projectSkill('one-skill', '/repo/.pi/skills/one-skill'),
         projectSkill('one-skill', '/repo/.agents/skills/one-skill'),
         projectSkill('two-skill', '/repo/.pi/skills/two-skill'),
+        projectSkill('single-file', '/repo/.pi/skills/single-file.md'),
         projectSkill('user-collision', '/repo/.pi/skills/user-collision'),
         projectSkill('malformed-collision', '/repo/.pi/skills/malformed-collision'),
       ],
@@ -997,6 +1008,7 @@ describe('Maker Pi runtime skill status', () => {
       ['one-skill', 'loaded'],
       ['one-skill', 'discovered'],
       ['two-skill', 'discovered'],
+      ['single-file', 'loaded'],
       ['user-collision', 'discovered'],
       ['malformed-collision', 'discovered'],
     ]);
@@ -1005,10 +1017,16 @@ describe('Maker Pi runtime skill status', () => {
       runtimeStatus: 'loaded',
       runtimeCommandName: 'skill:one-frontmatter-name',
     });
+    expect(one.skills[3]).toMatchObject({
+      name: 'single-file',
+      runtimeStatus: 'loaded',
+      runtimeCommandName: 'skill:single-file-frontmatter-name',
+    });
     expect(two.skills.map((skill) => [skill.name, skill.runtimeStatus])).toEqual([
       ['one-skill', 'discovered'],
       ['one-skill', 'discovered'],
       ['two-skill', 'loaded'],
+      ['single-file', 'loaded'],
       ['user-collision', 'discovered'],
       ['malformed-collision', 'discovered'],
     ]);

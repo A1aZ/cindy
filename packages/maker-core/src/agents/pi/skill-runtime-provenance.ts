@@ -16,8 +16,10 @@ export function piExplicitSkillRuntimePath(command: PiRuntimeCommand): string | 
     || command.sourceInfo.source !== 'local'
     || typeof baseDir !== 'string'
     || typeof skillFile !== 'string'
-    || path.basename(skillFile) !== 'SKILL.md'
+    || baseDir.includes('\0')
+    || skillFile.includes('\0')
     || path.resolve(path.dirname(skillFile)) !== path.resolve(baseDir)
   ) return null;
-  return baseDir;
+  if (path.basename(skillFile) === 'SKILL.md') return baseDir;
+  return path.extname(skillFile) === '.md' ? skillFile : null;
 }

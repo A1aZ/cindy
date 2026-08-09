@@ -6,7 +6,11 @@ import type {
   PiProjectTrustInputSnapshot,
   PiProjectTrustStatus,
 } from '../../types/pi-project-trust.js';
-import { evaluatePiProjectTrust, piCanonicalPathsEqual } from './project-trust.js';
+import {
+  evaluatePiProjectTrust,
+  piCanonicalPathIsWithin,
+  piCanonicalPathsEqual,
+} from './project-trust.js';
 import type {
   PiProjectResourceRuntimeDiagnostic,
   PiRuntimeCapabilityManifest,
@@ -58,19 +62,34 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
     const [resolvedWorkingDir, resolvedRepoRoot, entries] = await Promise.all([
       realpath(identity.workingDir),
       realpath(canonicalRepoRoot),
-      Promise.all(skillPaths.map(async (skillPath) => ({
-        skillPath,
-        stats: await stat(skillPath),
-        resolvedPath: await realpath(skillPath),
-      }))),
+      Promise.all(skillPaths.map(async (skillPath) => {
+        const stats = await stat(skillPath);
+        const resolvedPath = await realpath(skillPath);
+        if (!stats.isDirectory()) return { skillPath, stats, resolvedPath };
+        const skillFile = path.join(skillPath, 'SKILL.md');
+        return {
+          skillPath,
+          stats,
+          resolvedPath,
+          skillFileStats: await stat(skillFile),
+          resolvedSkillFile: await realpath(skillFile),
+        };
+      })),
     ]);
     if (
       !piCanonicalPathsEqual(identity, canonicalWorkingDir, resolvedWorkingDir)
       || !piCanonicalPathsEqual(identity, canonicalRepoRoot, resolvedRepoRoot)
     ) return 'project-changed';
-    if (entries.some(({ stats }) => !stats.isDirectory() && !stats.isFile())) return 'unavailable';
-    return entries.every(({ skillPath, resolvedPath }) =>
-      piCanonicalPathsEqual(identity, skillPath, resolvedPath))
+    if (entries.some(({ skillPath, stats, skillFileStats }) =>
+      (!stats.isDirectory() && (!stats.isFile() || path.extname(skillPath) !== '.md'))
+      || (stats.isDirectory() && !skillFileStats?.isFile()))) return 'unavailable';
+    return entries.every(({ skillPath, resolvedPath, stats, resolvedSkillFile }) =>
+      piCanonicalPathsEqual(identity, skillPath, resolvedPath)
+      && piCanonicalPathIsWithin(identity, canonicalRepoRoot, resolvedPath)
+      && (!stats.isDirectory() || (
+        typeof resolvedSkillFile === 'string'
+        && piCanonicalPathIsWithin(identity, canonicalRepoRoot, resolvedSkillFile)
+      )))
       ? 'available'
       : 'skill-changed';
   } catch {

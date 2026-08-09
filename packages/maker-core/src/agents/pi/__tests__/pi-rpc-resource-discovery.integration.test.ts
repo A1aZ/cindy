@@ -874,6 +874,36 @@ describe.skipIf(!existsSync(PI_BINARY))('Pi v0.83.0 RPC resource discovery facts
     ]));
   });
 
+  it('reports the exact file provenance for an explicit single-file skill', async () => {
+    const fixture = await createFixture('pi-rpc-explicit-file-skill-');
+    const explicitSkill = path.join(fixture.workingDir, '.pi', 'skills', 'single-file.md');
+    writeFileSync(
+      explicitSkill,
+      '---\nname: single-file\ndescription: fixture single file\n---\nfixture single file\n',
+    );
+    const result = await runGetCommands({
+      binaryPath: PI_BINARY,
+      cwd: fixture.workingDir,
+      configHome: fixture.configHome,
+      sessionDir: fixture.sessionDir,
+      approve: false,
+      extraArgs: ['--no-extensions', '--skill', explicitSkill],
+    });
+
+    expect(result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'skill:single-file',
+        source: 'skill',
+        sourceInfo: expect.objectContaining({
+          baseDir: path.dirname(explicitSkill),
+          path: explicitSkill,
+          source: 'local',
+          scope: 'temporary',
+        }),
+      }),
+    ]));
+  });
+
   it('reports one deterministic runtime command when explicit approved paths share a skill name', async () => {
     const fixture = await createFixture('pi-rpc-explicit-duplicate-name-');
     const first = path.join(fixture.workingDir, '.pi', 'skills', 'duplicate-first');

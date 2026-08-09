@@ -47,7 +47,10 @@ const approved = (workingDir: string, revision: string): PiProjectApprovalSnapsh
 });
 
 const available = {
-  stat: async () => ({ isDirectory: () => true, isFile: () => false }),
+  stat: async (candidate: string) => ({
+    isDirectory: () => !candidate.toLowerCase().endsWith('.md'),
+    isFile: () => candidate.toLowerCase().endsWith('.md'),
+  }),
   realpath: async (skillPath: string) => skillPath,
 };
 
@@ -122,7 +125,7 @@ describe('Pi approved project resource assembly', () => {
       { stat, realpath: available.realpath },
     );
 
-    expect(stat).toHaveBeenCalledTimes(2);
+    expect(stat).toHaveBeenCalled();
     expect(result.skillPaths).toEqual([]);
     expect(result.diagnostic.reason).toBe('approved-skill-path-unavailable');
     expect(result.decision?.resources.skills).toBe('eligible');
@@ -178,6 +181,83 @@ describe('Pi approved project resource assembly', () => {
 
     expect(result.skillPaths).toEqual([]);
     expect(result.diagnostic.reason).toBe('approved-skill-path-changed');
+  });
+
+  it('invalidates a skill whose SKILL.md entrypoint is retargeted after discovery', async () => {
+    const workingDir = '/repo-a/packages/app';
+    const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
+    const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
+    const result = await assembleApprovedPiProjectResources(input, {
+      stat: available.stat,
+      realpath: async (candidate) => candidate === skillFile
+        ? '/outside/retargeted-SKILL.md'
+        : candidate,
+    });
+
+    expect(result.skillPaths).toEqual([]);
+    expect(result.diagnostic.reason).toBe('approved-skill-path-changed');
+  });
+
+  it('allows a directory SKILL.md symlink that still resolves inside the approved repo', async () => {
+    const workingDir = '/repo-a/packages/app';
+    const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
+    const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
+    const result = await assembleApprovedPiProjectResources(input, {
+      stat: available.stat,
+      realpath: async (candidate) => candidate === skillFile
+        ? '/repo-a/packages/shared/demo.md'
+        : candidate,
+    });
+
+    expect(result.skillPaths).toEqual(input.discovered.skills);
+    expect(result.diagnostic.reason).toBe('approval-matched');
+  });
+
+  it('allows an approved single-file markdown skill', async () => {
+    const workingDir = '/repo-a/packages/app';
+    const skillFile = `${workingDir}/.pi/skills/demo.md`;
+    const result = await assembleApprovedPiProjectResources(
+      inputFor(workingDir, approved(workingDir, 'rev-a'), [skillFile]),
+      available,
+    );
+
+    expect(result.skillPaths).toEqual([skillFile]);
+    expect(result.diagnostic.reason).toBe('approval-matched');
+    expect(reconcilePiProjectResourceRuntime(result, {
+      capturedAt: '2026-08-10T00:00:00.000Z',
+      generation: 1,
+      status: 'loaded',
+      source: 'pi:get_commands',
+      commands: [{
+        name: 'skill:demo-file',
+        source: 'skill',
+        sourceInfo: {
+          scope: 'temporary',
+          source: 'local',
+          baseDir: `${workingDir}/.pi/skills`,
+          path: skillFile,
+        },
+      }],
+    })).toMatchObject({
+      reason: 'runtime-skills-confirmed',
+      loadedSkillCount: 1,
+    });
+  });
+
+  it('invalidates a skill whose SKILL.md entrypoint disappeared before launch', async () => {
+    const workingDir = '/repo-a/packages/app';
+    const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
+    const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
+    const result = await assembleApprovedPiProjectResources(input, {
+      stat: async (candidate) => {
+        if (candidate === skillFile) throw new Error('ENOENT');
+        return available.stat(candidate);
+      },
+      realpath: available.realpath,
+    });
+
+    expect(result.skillPaths).toEqual([]);
+    expect(result.diagnostic.reason).toBe('approved-skill-path-unavailable');
   });
 
   it('invalidates approved skills when the lexical workingDir is retargeted', async () => {
@@ -266,6 +346,23 @@ describe('Pi approved project resource assembly', () => {
           source: 'local',
           baseDir: skillPath,
           path: `${skillPath}/skill.md`,
+        },
+      }],
+    })).toMatchObject({
+      reason: 'runtime-skills-missing',
+      loadedSkillCount: 0,
+    });
+
+    expect(reconcilePiProjectResourceRuntime(assembly, {
+      ...baseManifest,
+      commands: [{
+        name: 'skill:demo',
+        source: 'skill',
+        sourceInfo: {
+          scope: 'temporary',
+          source: 'local',
+          baseDir: `${skillPath}\0outside`,
+          path: `${skillPath}\0outside/SKILL.md`,
         },
       }],
     })).toMatchObject({

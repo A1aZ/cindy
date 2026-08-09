@@ -33,6 +33,8 @@ describe('cindy-bridge extension source', () => {
     expect(source).not.toContain("'--glob', pattern");
     expect(source).toContain('glob: rgGlob');
     expect(source).toContain('const grepTool = createGrepTool(process.cwd())');
+    expect(source).toContain('filterReviewGrepResult(result, params)');
+    expect(source).toContain('reviewSearchPathTouchesCredential(relative, cwd)');
     expect(source).toContain('spawn(managedRipgrepPath(), args, {');
     expect(source).not.toContain("spawn('rg'");
     expect(source).toContain("const MANAGED_RG_PATH_ENV = 'CINDY_PI_MANAGED_RG_PATH'");
@@ -75,5 +77,6 @@ describe('cindy-bridge extension source', () => {
       'stat.isDirectory() ? isInsideRoot(target, allowed) : target === allowed',
     );
     expect(source).toContain('REVIEW_CREDENTIAL_PATH_PATTERNS.some');
+    expect(source).toContain('REVIEW_CREDENTIAL_GLOB_PATTERNS.some');
   });
 });

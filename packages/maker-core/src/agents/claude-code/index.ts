@@ -156,6 +156,7 @@ import type {
 import type { McpProviderContext } from '../../interfaces/mcp-provider.js';
 import { scanClaudeCustomizations } from './customization-scanner.js';
 import {
+  REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   isReviewSensitiveCredentialPath,
   isReviewSensitiveCredentialSelector,
 } from '../shared/sensitive-credential-paths.js';
@@ -1867,8 +1868,8 @@ export class ClaudeCodeAgent extends BaseAgent {
     // (eg. summarized reasoning UI 本地有 remote 没)。getter 让 memOverride /
     // mutableFastMode 读最新值 (setMemory / setFastMode 运行时改) 而不是 buildQuery
     // 时快照。装配逻辑(含 apiKeyHelper 恒置空的鉴权防线)在 flag-settings.ts。
-    const buildSettings = (): Settings =>
-      buildClaudeFlagSettings({
+    const buildSettings = (): Settings => {
+      const settings = buildClaudeFlagSettings({
         showThinkingSummaries,
         // Do not carry the local manager's native-memory suppression across the
         // SSH boundary: the remote host retains its own Claude memory
@@ -1882,6 +1883,21 @@ export class ClaudeCodeAgent extends BaseAgent {
         fastMode: mutableFastMode,
         capabilityRouting: reviewMode ? undefined : this.deps.capabilityRouting,
       });
+      if (!reviewMode) return settings;
+      return {
+        ...settings,
+        permissions: {
+          ...(settings.permissions ?? {}),
+          // Claude's built-in Grep/Glob implementation translates Read deny
+          // rules into trailing negative rg globs. Keep this execution-layer
+          // filter in addition to the PreToolUse path/scope gate: a granted
+          // directory with no explicit glob must not expose credential files.
+          deny: REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS.map(
+            (pattern) => `Read(${pattern})`,
+          ),
+        },
+      };
+    };
 
     // file checkpointing 与 capability 强绑定 —— 声明 rewind 能力时必须开此开关,
     // 否则 SDK rewindFiles() 报 "no checkpoint"。

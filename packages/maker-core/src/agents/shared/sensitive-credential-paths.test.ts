@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   isReviewSensitiveCredentialPath,
   isReviewSensitiveCredentialSelector,
   isSensitiveCredentialPath,
@@ -34,5 +35,18 @@ describe("Review credential path policy", () => {
       expect(isReviewSensitiveCredentialSelector(selector)).toBe(true);
     }
     expect(isReviewSensitiveCredentialSelector("{src,test}/**/*.{ts,tsx}")).toBe(false);
+  });
+
+  it("keeps directory search denies aligned for common credential files", () => {
+    expect(REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS).toEqual(
+      expect.arrayContaining([
+        "**/.env.*",
+        "**/.git/**",
+        "**/credentials.json",
+        "**/auth.json",
+        "**/*.pem",
+        "**/id_ed25519",
+      ]),
+    );
   });
 });

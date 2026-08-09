@@ -162,6 +162,9 @@ function terminalErrorMessage(event: AgentEvent): string {
   return typeof data?.message === 'string' && data.message ? data.message : 'Reviewer task failed';
 }
 
+const REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS = 100;
+const REVIEW_SOURCE_LEASE_RELEASE_RETRY_MAX_MS = 5_000;
+
 /**
  * Register the host-owned Review lifecycle behind the same small IPC registry used
  * by production Electron and in-memory tests. Evidence collection stays in the
@@ -198,6 +201,8 @@ export function registerReviewStartHandler(
     let sourceLeaseAcquired = false;
     let sourceCardCreated = false;
     let releasePromise: Promise<void> | null = null;
+    let releaseRetryTimer: NodeJS.Timeout | null = null;
+    let releaseRetryDelayMs = REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS;
     let sourceCardWriteChain = Promise.resolve();
 
     const enqueueSourceCardWrite = (write: () => Promise<void>): Promise<void> => {
@@ -206,9 +211,24 @@ export function registerReviewStartHandler(
       return next;
     };
 
+    function scheduleReleaseRetry(): void {
+      if (releaseRetryTimer) return;
+      const delayMs = releaseRetryDelayMs;
+      releaseRetryDelayMs = Math.min(
+        releaseRetryDelayMs * 2,
+        REVIEW_SOURCE_LEASE_RELEASE_RETRY_MAX_MS,
+      );
+      const timer = setTimeout(() => {
+        if (releaseRetryTimer === timer) releaseRetryTimer = null;
+        void release();
+      }, delayMs);
+      timer.unref?.();
+      releaseRetryTimer = timer;
+    }
+
     const release = (): Promise<void> => {
       if (releasePromise) return releasePromise;
-      releasePromise = (async () => {
+      const pending = (async () => {
         if (sourceLeaseAcquired) {
           try {
             await deps.releaseSourceLease({
@@ -225,13 +245,23 @@ export function registerReviewStartHandler(
               runId,
               error: error instanceof Error ? error.message : String(error),
             });
+            scheduleReleaseRetry();
             return;
           }
         }
+        if (releaseRetryTimer) {
+          clearTimeout(releaseRetryTimer);
+          releaseRetryTimer = null;
+        }
+        releaseRetryDelayMs = REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS;
         const active = activeReviewsBySource.get(request.sourceSessionId);
         if (active?.runId === runId) activeReviewsBySource.delete(request.sourceSessionId);
       })();
-      return releasePromise;
+      releasePromise = pending;
+      void pending.finally(() => {
+        if (releasePromise === pending) releasePromise = null;
+      });
+      return pending;
     };
     const disposeReviewerListeners = (): void => {
       disposeReviewEvents?.();

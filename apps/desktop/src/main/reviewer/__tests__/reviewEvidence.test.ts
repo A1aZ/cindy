@@ -61,6 +61,7 @@ import {
   loadReviewEvidence,
   readReviewContextFingerprint,
   readReviewWorkspaceSnapshot,
+  reviewWorkspaceFingerprintIsCurrent,
 } from '../reviewEvidence.js';
 
 const tempDirs: string[] = [];
@@ -196,6 +197,25 @@ describe('readReviewWorkspaceSnapshot', () => {
 
     expect(after?.workspace).toEqual(before?.workspace);
     expect(after?.fingerprint).not.toBe(before?.fingerprint);
+  });
+
+  it('marks prepared Git evidence stale when the workspace changes before launch', async () => {
+    const repoRoot = await tempDir();
+    const relativePath = 'tracked.ts';
+    const file = path.join(repoRoot, relativePath);
+    await fs.writeFile(file, 'before-value');
+    readReviewDataMock.mockResolvedValue(cappedReviewData(repoRoot, relativePath));
+
+    const prepared = await readReviewWorkspaceSnapshot('source');
+    expect(prepared?.fingerprint).toBeTruthy();
+    await expect(
+      reviewWorkspaceFingerprintIsCurrent('source', prepared!.fingerprint),
+    ).resolves.toBe(true);
+
+    await fs.writeFile(file, 'after--value');
+    await expect(
+      reviewWorkspaceFingerprintIsCurrent('source', prepared!.fingerprint),
+    ).resolves.toBe(false);
   });
 
   it('retries until the capped Git summary and file content share one stable window', async () => {

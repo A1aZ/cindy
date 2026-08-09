@@ -24,6 +24,7 @@
  */
 
 import {
+  REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS,
   REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
   SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS,
 } from '../shared/sensitive-credential-paths.js';
@@ -92,6 +93,7 @@ const CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(SENSITIVE_CREDENTIAL_PATH_PATT
   .map(({ source, flags }) => new RegExp(source, flags));
 const REVIEW_CREDENTIAL_PATH_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS)}
   .map(({ source, flags }) => new RegExp(source, flags));
+const REVIEW_CREDENTIAL_GLOB_PATTERNS = ${JSON.stringify(REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS)};
 
 // 递归扫全部字符串叶子(含数组 / 嵌套对象),深度上限防环/超大入参。工具入参把路径
 // 放进 { paths: [...] } 或 { opts: { path } } 时也能命中,不止顶层 string 字段。
@@ -306,6 +308,56 @@ function reviewReadInputIsAllowed(
   return requestedPaths.every((candidate) => reviewReadIsAllowed(candidate, allowedPaths))
     && selectors.every((selector) =>
       !reviewSelectorEscapesScope(selector) && !reviewSelectorTouchesCredential(selector));
+}
+
+function reviewSearchPathTouchesCredential(candidate: string, baseDir = process.cwd()): boolean {
+  const requested = path.resolve(baseDir, candidate);
+  const normalized = requested.split(path.sep).join('/');
+  if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(requested))) return true;
+  try {
+    return REVIEW_CREDENTIAL_GLOB_PATTERNS.some((pattern) =>
+      path.matchesGlob(normalized, pattern));
+  } catch {
+    return true;
+  }
+}
+
+function reviewGrepOutputPath(line: string): string | null {
+  const match = /^(.*?)(?::\d+:|-\d+-)/.exec(line);
+  return match?.[1] ?? null;
+}
+
+function filterReviewGrepResult(result: any, input: unknown): any {
+  if (!result || typeof result !== 'object' || !Array.isArray(result.content)) {
+    return { content: [{ type: 'text', text: 'No matches found' }], details: undefined };
+  }
+  const record = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : {};
+  const requestedPath = typeof record.path === 'string' && record.path ? record.path : '.';
+  const searchTarget = path.resolve(process.cwd(), requestedPath);
+  let resultBase = process.cwd();
+  try {
+    resultBase = statSync(searchTarget).isDirectory() ? searchTarget : path.dirname(searchTarget);
+  } catch {
+    return { content: [{ type: 'text', text: 'No matches found' }], details: undefined };
+  }
+
+  let visibleMatch = false;
+  const content = result.content.map((item: any) => {
+    if (!item || typeof item !== 'object' || typeof item.text !== 'string') return item;
+    const lines = item.text.split('\n').filter((line: string) => {
+      const candidate = reviewGrepOutputPath(line);
+      if (!candidate) return true;
+      if (reviewSearchPathTouchesCredential(candidate, resultBase)) return false;
+      visibleMatch = true;
+      return true;
+    });
+    return { ...item, text: lines.join('\n') };
+  });
+  return visibleMatch
+    ? { ...result, content }
+    : { content: [{ type: 'text', text: 'No matches found' }], details: undefined };
 }
 
 // ── MCP streamable-HTTP 极简 client ─────────────────────────────────────────
@@ -625,6 +677,7 @@ function rgGlob(
   options: { ignore: string[]; limit: number },
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
+    const reviewOnly = currentPermissionState().reviewOnly;
     const limit = Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : 1000;
     const args = ['--files', '--hidden', '--no-require-git'];
     for (const ignored of options.ignore) args.push('--glob', '!' + ignored);
@@ -646,6 +699,7 @@ function rgGlob(
     reader.on('line', (line) => {
       if (!line || lines.length >= limit) return;
       const relative = line.replace(/\r$/, '');
+      if (reviewOnly && reviewSearchPathTouchesCredential(relative, cwd)) return;
       // 完整镜像 Pi 上游 fd 规则：无 slash 时匹配 basename；有 slash 时启用
       // full-path，且相对 pattern 自动加 **/，让 src/** 同时命中 monorepo 子包。
       let candidate = path.basename(relative);
@@ -693,7 +747,9 @@ export default async function cindyBridge(pi: any) {
     execute: async (id: string, params: unknown, signal: AbortSignal, onUpdate: unknown) => {
       // Fail closed before Pi upstream ensureTool can fall back to cwd/PATH lookup.
       managedRipgrepPath();
-      return grepTool.execute(id, params as any, signal, onUpdate as any);
+      const reviewOnly = currentPermissionState().reviewOnly;
+      const result = await grepTool.execute(id, params as any, signal, onUpdate as any);
+      return reviewOnly ? filterReviewGrepResult(result, params) : result;
     },
   });
 

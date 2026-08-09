@@ -278,7 +278,17 @@ describe('ClaudeCodeAgent plan mode', () => {
     expect(queryOptions.allowedTools).toEqual(['Read', 'Glob', 'Grep', 'LS', 'NotebookRead']);
     expect(queryOptions.settingSources).toEqual([]);
     expect(queryOptions.allowDangerouslySkipPermissions).toBe(false);
-    expect(queryOptions.settings).toMatchObject({ autoMemoryEnabled: false });
+    expect(queryOptions.settings).toMatchObject({
+      autoMemoryEnabled: false,
+      permissions: {
+        deny: expect.arrayContaining([
+          'Read(**/.env.*)',
+          'Read(**/credentials.json)',
+          'Read(**/auth.json)',
+          'Read(**/*.pem)',
+        ]),
+      },
+    });
     expect(getGhostRosterPrompt).not.toHaveBeenCalled();
     expect(handle.getPlanMode?.()).toBe(false);
 

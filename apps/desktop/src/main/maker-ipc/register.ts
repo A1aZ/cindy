@@ -186,7 +186,7 @@ import {
   listReviewHistoricalAttachments,
   loadReviewEvidence,
   readReviewContextFingerprint,
-  readReviewWorkspaceSnapshot,
+  reviewWorkspaceFingerprintIsCurrent,
   resolveReviewArtifactPath,
   SensitiveReviewPathError,
 } from '../reviewer/reviewEvidence.js';
@@ -6985,6 +6985,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 );
               }
               if (
+                !(await reviewWorkspaceFingerprintIsCurrent(
+                  source.id,
+                  evidence.workspaceFingerprint,
+                ))
+              ) {
+                throw new Error(
+                  'The task files changed before Review started. Run /review again for the current result.',
+                );
+              }
+              if (
                 (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
                 sourceArtifactFingerprint
               ) {
@@ -7012,11 +7022,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               ) {
                 return 'The task conversation changed while Review was running. Run /review again for the current context.';
               }
-              if (evidence.workspaceFingerprint) {
-                const currentWorkspace = await readReviewWorkspaceSnapshot(source.id);
-                if (currentWorkspace?.fingerprint !== evidence.workspaceFingerprint) {
-                  return 'The task files changed while Review was running. Run /review again for the current result.';
-                }
+              if (
+                !(await reviewWorkspaceFingerprintIsCurrent(
+                  source.id,
+                  evidence.workspaceFingerprint,
+                ))
+              ) {
+                return 'The task files changed while Review was running. Run /review again for the current result.';
               }
               if (
                 (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==

@@ -97,6 +97,7 @@ import {
 import { reviewAction, type ReviewableAction } from '../shared/auto-review.js';
 import { UsageTracker } from '../shared/usage-tracker.js';
 import { getDefaultImageResizer } from '../shared/image-resizer.js';
+import { REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS } from '../shared/sensitive-credential-paths.js';
 import { pickTurnStartStatus, type OneShotState } from '../shared/turn-start-phrases.js';
 import {
   OVERLOAD_RETRY_MAX_ATTEMPTS,
@@ -520,44 +521,9 @@ function supportsCodexForkExcludeTurns(userAgent: string | undefined): boolean {
 
 const READONLY_REFERENCES_PERMISSION_PROFILE = 'cindy-readonly-references';
 const REVIEW_PERMISSION_PROFILE = 'cindy-review-readonly';
-const REVIEW_CREDENTIAL_GLOB_DENIES: Record<string, 'deny'> = {
-  '**/.env': 'deny',
-  '**/.env.*': 'deny',
-  '**/.git': 'deny',
-  '**/.git/**': 'deny',
-  '**/.ssh/**': 'deny',
-  '**/.aws/**': 'deny',
-  '**/.gnupg/**': 'deny',
-  '**/.kube/**': 'deny',
-  '**/.docker/**': 'deny',
-  '**/.azure/**': 'deny',
-  '**/.claude/**': 'deny',
-  '**/.codex/**': 'deny',
-  '**/.netrc': 'deny',
-  '**/.npmrc': 'deny',
-  '**/.pgpass': 'deny',
-  '**/.pypirc': 'deny',
-  '**/.git-credentials': 'deny',
-  '**/.cargo/credentials': 'deny',
-  '**/.cargo/credentials.toml': 'deny',
-  '**/.m2/settings.xml': 'deny',
-  '**/.m2/settings-security.xml': 'deny',
-  '**/application_default_credentials*': 'deny',
-  '**/credentials.json': 'deny',
-  '**/auth.json': 'deny',
-  '**/.config/gh/**': 'deny',
-  '**/.config/hub/**': 'deny',
-  '**/.config/glab/**': 'deny',
-  '**/.config/op/**': 'deny',
-  '**/.config/gcloud/**': 'deny',
-  '**/environ': 'deny',
-  '**/*.pem': 'deny',
-  '**/*.p12': 'deny',
-  '**/id_rsa': 'deny',
-  '**/id_ed25519': 'deny',
-  '**/id_ecdsa': 'deny',
-  '**/id_dsa': 'deny',
-};
+const REVIEW_CREDENTIAL_GLOB_DENIES: Record<string, 'deny'> = Object.fromEntries(
+  REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS.map((pattern) => [pattern, 'deny'] as const),
+);
 
 function quoteReviewConfigSegment(value: string): string {
   return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;

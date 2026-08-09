@@ -32,6 +32,52 @@ export const REVIEW_SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS = [
   { source: String.raw`(?:^|[\\/])\.git(?:[\\/]|$)`, flags: 'i' },
 ] as const;
 
+/**
+ * File-search deny globs shared by Review harnesses.
+ *
+ * Path regexes protect explicit reads and symlink targets. Directory-wide
+ * Grep/Glob/Find tools need a second, execution/result-level boundary because
+ * their input can be only a granted directory with no concrete file selector.
+ */
+export const REVIEW_SENSITIVE_CREDENTIAL_GLOB_PATTERNS = [
+  '**/.env',
+  '**/.env.*',
+  '**/.git',
+  '**/.git/**',
+  '**/.ssh/**',
+  '**/.aws/**',
+  '**/.gnupg/**',
+  '**/.kube/**',
+  '**/.docker/**',
+  '**/.azure/**',
+  '**/.claude/**',
+  '**/.codex/**',
+  '**/.netrc',
+  '**/.npmrc',
+  '**/.pgpass',
+  '**/.pypirc',
+  '**/.git-credentials',
+  '**/.cargo/credentials',
+  '**/.cargo/credentials.toml',
+  '**/.m2/settings.xml',
+  '**/.m2/settings-security.xml',
+  '**/application_default_credentials*',
+  '**/credentials.json',
+  '**/auth.json',
+  '**/.config/gh/**',
+  '**/.config/hub/**',
+  '**/.config/glab/**',
+  '**/.config/op/**',
+  '**/.config/gcloud/**',
+  '**/environ',
+  '**/*.pem',
+  '**/*.p12',
+  '**/id_rsa',
+  '**/id_ed25519',
+  '**/id_ecdsa',
+  '**/id_dsa',
+] as const;
+
 export const SENSITIVE_CREDENTIAL_PATH_PATTERNS: readonly RegExp[] =
   SENSITIVE_CREDENTIAL_PATH_PATTERN_SPECS.map(({ source, flags }) => new RegExp(source, flags));
 

@@ -1189,6 +1189,8 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
     permissionMode: 'ask' | 'auto' | 'bypassPermissions';
     resolverBehavior: 'allow' | 'deny';
     deps?: AgentDeps;
+    reviewMode?: boolean;
+    reviewReadPaths?: string[];
   }): Promise<{ resolverTools: string[]; finalText: string }> {
     const agent = new PiAgent(opts.deps ?? buildDeps());
     const resolverTools: string[] = [];
@@ -1199,6 +1201,8 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         workingDir: opts.workingDir,
         model: 'pi-test-model',
         permissionMode: opts.permissionMode,
+        ...(opts.reviewMode ? { reviewMode: true } : {}),
+        ...(opts.reviewReadPaths ? { reviewReadPaths: opts.reviewReadPaths } : {}),
       });
       handle.setInteractionResolver?.(async (req) => {
         resolverTools.push((req as { toolName?: string }).toolName ?? '?');
@@ -1249,6 +1253,41 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
         });
         const followUp = seenRequests.slice(reqBefore).map((request) => request.body);
         expect(followUp.some((body) => body.includes('tool-target.ts:1: needle-line'))).toBe(true);
+      } finally {
+        rmSync(workingDir, { recursive: true, force: true });
+        scriptedResponses.length = 0;
+      }
+    },
+  );
+
+  it(
+    'Review directory grep returns safe matches without credential-file contents',
+    { timeout: 60_000 },
+    async () => {
+      const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-review-safe-grep-'));
+      writeFileSync(path.join(workingDir, 'source.ts'), 'needle-safe\n');
+      writeFileSync(path.join(workingDir, 'credentials.json'), 'needle-credentials-secret\n');
+      writeFileSync(path.join(workingDir, 'cert.pem'), 'needle-private-key-secret\n');
+      try {
+        scriptedResponses.length = 0;
+        scriptedResponses.push(
+          anthropicToolUseBody('grep', { pattern: 'needle', path: '.', literal: true }),
+          anthropicStreamBody('review grep finished'),
+        );
+        const reqBefore = seenRequests.length;
+        await runPermissionTurn({
+          sessionId: 'pi-review-safe-grep',
+          workingDir,
+          permissionMode: 'ask',
+          resolverBehavior: 'deny',
+          reviewMode: true,
+        });
+        const followUp = seenRequests.slice(reqBefore).map((request) => request.body).join('\n');
+        expect(followUp).toContain('source.ts:1: needle-safe');
+        expect(followUp).not.toContain('credentials.json');
+        expect(followUp).not.toContain('needle-credentials-secret');
+        expect(followUp).not.toContain('cert.pem');
+        expect(followUp).not.toContain('needle-private-key-secret');
       } finally {
         rmSync(workingDir, { recursive: true, force: true });
         scriptedResponses.length = 0;

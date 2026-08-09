@@ -418,6 +418,33 @@ describe('maker:review:start IPC lifecycle', () => {
     ).resolves.toMatchObject({ ok: true });
   });
 
+  it('retries a transient durable lease release and eventually frees the source gate', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const releaseSourceLease = vi
+      .fn<ReviewStartHandlerDeps['releaseSourceLease']>()
+      .mockRejectedValueOnce(new Error('database is temporarily locked'))
+      .mockResolvedValue(undefined);
+    const deps = makeDeps(reviewer, { releaseSourceLease });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-1',
+    });
+    reviewer.emitStatus('closed');
+
+    await vi.waitFor(() => expect(releaseSourceLease).toHaveBeenCalledTimes(2));
+    expect(deps.warn).toHaveBeenCalledWith(
+      'review source lease release failed',
+      expect.objectContaining({ sourceSessionId: 'source-1', runId: 'run-1' }),
+    );
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-2',
+    });
+  });
+
   it('ignores continuation boundaries and lets only the first terminal event finalize', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();

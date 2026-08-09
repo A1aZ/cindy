@@ -208,6 +208,17 @@ export async function readReviewWorkspaceSnapshot(
   );
 }
 
+/** Re-read the Git evidence and compare it with the snapshot used to build the prompt. */
+export async function reviewWorkspaceFingerprintIsCurrent(
+  sourceSessionId: string,
+  expectedFingerprint: string | null,
+  depsInput: Partial<ReviewWorkspaceSnapshotDeps> = {},
+): Promise<boolean> {
+  if (!expectedFingerprint) return true;
+  const current = await readReviewWorkspaceSnapshot(sourceSessionId, depsInput);
+  return current?.fingerprint === expectedFingerprint;
+}
+
 function parseJsonRecord(value: unknown): Record<string, unknown> | null {
   let parsed = value;
   if (typeof parsed === 'string') {

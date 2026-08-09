@@ -3283,12 +3283,16 @@ describe('CodexAgent.startSession developerInstructions', () => {
       sessionId: 'session-child-route',
       workingDir: '/repo',
       vendorOptions: {},
+      mcpCallerKind: 'descendant',
+      mcpCallerAttested: true,
     });
     expect(registerCodexMcpThreadContext).toHaveBeenNthCalledWith(3, {
       threadId: 'grandchild-thread-id',
       sessionId: 'session-child-route',
       workingDir: '/repo',
       vendorOptions: {},
+      mcpCallerKind: 'descendant',
+      mcpCallerAttested: true,
     });
 
     await handle.close();
@@ -6064,6 +6068,8 @@ describe('CodexAgent MCP thread context hooks', () => {
       sessionInstanceId: 'instance-codex-mcp-context',
       workingDir: '/repo',
       vendorOptions: { orcaRole: 'lead' },
+      mcpCallerKind: 'root',
+      mcpCallerAttested: true,
     });
 
     await handle.close();
@@ -10727,6 +10733,8 @@ describe('CodexAgent MCP thread context hooks', () => {
       // ssh:<hostId>:<path> 的独立 store。
       remoteHostId: 'remote-host-1',
       vendorOptions: {},
+      mcpCallerKind: 'root',
+      mcpCallerAttested: true,
     });
     await handle.close();
     expect(unregisterCodexMcpThreadContext).toHaveBeenCalledWith('start-thread-id');

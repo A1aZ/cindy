@@ -1317,6 +1317,8 @@ export function getMaker(): Maker {
         threadId,
         sessionId,
         sessionInstanceId,
+        mcpCallerKind,
+        mcpCallerAttested,
         workingDir,
         remoteHostId,
         vendorOptions,
@@ -1330,6 +1332,8 @@ export function getMaker(): Maker {
         registerCodexMcpThreadContext(threadId, {
           agentKind: 'codex',
           sessionId,
+          mcpCallerKind,
+          mcpCallerAttested,
           ...(sessionInstanceId ? { sessionInstanceId } : {}),
           workingDir,
           // remote thread ctx: scope key 语义见 buildMemoryScopeKey。

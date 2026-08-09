@@ -105,8 +105,11 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(html).toContain('img-src data:;');
     expect(html).not.toContain('img-src data: https:');
     expect(html).toContain("script-src 'unsafe-inline';");
-    expect(html).toContain('waitForRichContent().then(waitForImages)');
+    expect(html).toContain(
+      'waitForRichContent().then(waitForImages).then(waitForFonts)',
+    );
     expect(html).toContain('image.decode().catch(function () {})');
+    expect(html).toContain('document.fonts.ready');
     expect(html).toContain(
       "throw new Error('conversation-share-content-too-large')",
     );
@@ -133,13 +136,14 @@ describe('buildConversationShareHtml 富内容导出', () => {
     expect(nativeSource).toContain(
       'captureWidth * captureHeight <= conversationShareMaxSourcePixels',
     );
+    expect(nativeSource).toContain('return numericValue.isFinite ? numericValue : nil');
     expect(webViewSource).toContain(
       'await deleteConversationSharePngTemp(file.uri);',
     );
     expect(sessionSource).toContain(
       'if (localUri) await deleteConversationSharePngTemp(localUri);',
     );
-    expect(sessionSource).not.toContain('key={conversationShareHtml}');
+    expect(sessionSource).toContain('key={conversationShareHtml}');
   });
 
   it('使用 Mobile 获批的克制页脚尺寸', () => {

@@ -254,14 +254,15 @@ private struct ConversationShareRenderError: LocalizedError {
 }
 
 private func numericOption(_ value: Any?) -> CGFloat? {
+  let numericValue: CGFloat
   if let number = value as? NSNumber {
-    return CGFloat(number.doubleValue)
+    numericValue = CGFloat(number.doubleValue)
+  } else if let value = value as? Double {
+    numericValue = CGFloat(value)
+  } else if let value = value as? Int {
+    numericValue = CGFloat(value)
+  } else {
+    return nil
   }
-  if let value = value as? Double {
-    return CGFloat(value)
-  }
-  if let value = value as? Int {
-    return CGFloat(value)
-  }
-  return nil
+  return numericValue.isFinite ? numericValue : nil
 }

@@ -603,6 +603,10 @@ function buildExportScript(): string {
       });
     }));
   }
+  function waitForFonts() {
+    if (!document.fonts || !document.fonts.ready) return Promise.resolve();
+    return Promise.resolve(document.fonts.ready).catch(function () {});
+  }
   function removeExternalImages(stage) {
     Array.prototype.slice.call(stage.querySelectorAll('img')).forEach(function (image) {
       var src = image.getAttribute('src') || '';
@@ -619,7 +623,7 @@ function buildExportScript(): string {
       return;
     }
     removeExternalImages(stage);
-    waitForRichContent().then(waitForImages).then(function () {
+    waitForRichContent().then(waitForImages).then(waitForFonts).then(function () {
       var rect = stage.getBoundingClientRect();
       var width = Math.max(stage.scrollWidth, Math.ceil(rect.width));
       var height = Math.max(stage.scrollHeight, Math.ceil(rect.height));

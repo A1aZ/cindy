@@ -708,6 +708,19 @@ export function applyCodexPlanSnapshotOnDone<
 }
 
 /**
+ * 同轮 steer 插话判定。**两套字段都认**:落库位置是 `agentMeta.delivery`
+ * (mobile 与 main 侧的原始行保持这个形状),desktop 渲染层把它投影成顶层
+ * `delivery` 后丢弃原 meta。只看顶层会让 mobile / main 的所有权回扫在插话行上
+ * 提前收手,全勾完的失败计划先按旧数据退场、等 main 的异步印记广播才复活
+ * (断连时要等到重新加载,review P2)。
+ */
+function isSteerUserRow(message: MessageRenderSourceMessageLike): boolean {
+  if (message.delivery === 'steer') return true;
+  const meta = (message as { agentMeta?: { delivery?: unknown } | null }).agentMeta;
+  return meta?.delivery === 'steer';
+}
+
+/**
  * Live-side twin of main's `persistCodexPlanOnTerminalError`: a Codex turn that
  * dies on a terminal `error` never gets a `done`, so nothing seals its plan row
  * and nothing stamps `turnCompleted:false` in memory. Stamp the current turn's
@@ -732,7 +745,7 @@ export function markCodexPlanTurnFailed<TMessage extends MessageRenderSourceMess
 ): { messages: readonly TMessage[]; changed: boolean; toolUseId: string | null } {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === 'user' && message.delivery !== 'steer') break;
+    if (message.role === 'user' && !isSteerUserRow(message)) break;
     if (message.role !== 'tool_use' || toolNameOf(message) !== 'update_plan') continue;
     if (planRowSealOf(message).sealed || planRowTurnFailed(message)) {
       return { messages, changed: false, toolUseId: null };

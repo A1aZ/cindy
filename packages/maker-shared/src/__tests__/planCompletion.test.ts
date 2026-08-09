@@ -276,6 +276,22 @@ describe('markCodexPlanTurnFailed', () => {
     const result = markCodexPlanTurnFailed([plan, steerRow]);
     expect(result.changed).toBe(true);
     expect(result.messages[0]).toMatchObject({ turnCompleted: false });
+
+    // steer 的落库位置是 agentMeta.delivery(mobile / main 侧原始行就是这个形状,
+    // 只有 desktop 渲染层把它投影成顶层字段)。只认顶层会让回扫在插话行上提前
+    // 收手,手机端全勾完的失败计划先按旧数据退场再被广播复活(review P2)。
+    const metaSteerRow = {
+      role: 'user' as const,
+      clientId: 'u-steer-meta',
+      content: 'wait',
+      agentMeta: { delivery: 'steer' },
+    };
+    const metaResult = markCodexPlanTurnFailed([
+      planMessage('plan:meta-steer', [{ step: 'Ship', status: 'completed' }]),
+      metaSteerRow,
+    ]);
+    expect(metaResult.changed).toBe(true);
+    expect(metaResult.messages[0]).toMatchObject({ turnCompleted: false });
   });
 
   it('never reaches past the latest user message into an older turn plan', () => {

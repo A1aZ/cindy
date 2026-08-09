@@ -58,7 +58,7 @@ function makeLaunch(overrides: Partial<PreparedReviewLaunch> = {}): PreparedRevi
       model: 'gpt-test',
       reviewMode: true,
     },
-    verifyBeforeStart: vi.fn(async () => undefined),
+    verifyBeforeStart: vi.fn(async () => null),
     verifyBeforePublish: vi.fn(async () => null),
     ...overrides,
   };
@@ -213,6 +213,38 @@ describe('maker:review:start IPC lifecycle', () => {
     expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
   });
 
+  it('persists a stable failure code when the reviewer returns no visible conclusion', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer, {
+      readReviewerResult: vi.fn(async () => ''),
+    });
+    registerReviewStartHandler(harness, deps);
+    await harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+
+    reviewer.emit({ type: 'done', data: {} });
+    await vi.waitFor(() => expect(deps.updateSourceCard).toHaveBeenCalledTimes(1));
+
+    const meta = vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta;
+    expect(meta).toMatchObject({ status: 'failed', failureCode: 'no-visible-result' });
+    expect(meta).not.toHaveProperty('error');
+  });
+
+  it('uses a stable provider failure code only when no diagnostic detail exists', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+    await harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest());
+
+    reviewer.emit({ type: 'error', data: { isTerminal: true } });
+    await vi.waitFor(() => expect(deps.updateSourceCard).toHaveBeenCalledTimes(1));
+
+    const meta = vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta;
+    expect(meta).toMatchObject({ status: 'failed', failureCode: 'provider-failed' });
+    expect(meta).not.toHaveProperty('error');
+  });
+
   it('accepts a synchronously dispatched terminal failure after failing the card once', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();
@@ -307,7 +339,10 @@ describe('maker:review:start IPC lifecycle', () => {
     });
     expect(deps.updateSourceCard).toHaveBeenCalledWith(
       expect.objectContaining({
-        meta: expect.objectContaining({ status: 'failed' }),
+        meta: expect.objectContaining({
+          status: 'failed',
+          failureCode: 'cancelled-before-start',
+        }),
       }),
     );
     expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta.reviewerSessionId).toBe(
@@ -341,7 +376,7 @@ describe('maker:review:start IPC lifecycle', () => {
           result: '',
           meta: expect.objectContaining({
             status: 'failed',
-            error: 'Reviewer task was closed before it finished',
+            failureCode: 'reviewer-closed',
           }),
         }),
       ),
@@ -371,7 +406,7 @@ describe('maker:review:start IPC lifecycle', () => {
     });
     expect(deps.updateSourceCard).toHaveBeenCalledWith(
       expect.objectContaining({
-        meta: expect.objectContaining({ status: 'failed' }),
+        meta: expect.objectContaining({ status: 'failed', failureCode: 'reviewer-closed' }),
       }),
     );
 
@@ -402,7 +437,7 @@ describe('maker:review:start IPC lifecycle', () => {
       expect.objectContaining({
         meta: expect.objectContaining({
           status: 'failed',
-          error: 'Reviewer task was closed before it finished',
+          failureCode: 'reviewer-closed',
         }),
       }),
     );
@@ -587,7 +622,10 @@ describe('maker:review:start IPC lifecycle', () => {
   it('publishes no stale result when final freshness verification fails', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();
-    const staleReason = 'A review artifact changed while Review was running.';
+    const staleReason = {
+      code: 'artifact-changed' as const,
+      message: 'A review artifact changed while Review was running.',
+    };
     const launch = makeLaunch({
       verifyBeforePublish: vi.fn(async () => staleReason),
     });
@@ -603,9 +641,10 @@ describe('maker:review:start IPC lifecycle', () => {
     expect(deps.updateSourceCard).toHaveBeenCalledWith(
       expect.objectContaining({
         result: '',
-        meta: expect.objectContaining({ status: 'failed', error: staleReason }),
+        meta: expect.objectContaining({ status: 'failed', failureCode: staleReason.code }),
       }),
     );
+    expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty('error');
     expect(deps.closeReviewer).toHaveBeenCalledTimes(1);
   });
 
@@ -614,24 +653,26 @@ describe('maker:review:start IPC lifecycle', () => {
     const reviewer = new FakeReviewer();
     const cleanup = vi.fn(async () => undefined);
     const launch = makeLaunch({
-      verifyBeforeStart: vi.fn(async () => {
-        throw new Error('artifact changed before start');
-      }),
+      verifyBeforeStart: vi.fn(async () => ({
+        code: 'artifact-changed' as const,
+        message: 'artifact changed before start',
+      })),
     });
     const deps = makeDeps(reviewer, {
       prepareRun: vi.fn(async () => makePreparedRun(launch, { cleanup })),
     });
     registerReviewStartHandler(harness, deps);
 
-    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toThrow(
-      'artifact changed before start',
-    );
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
     expect(deps.startReviewer).not.toHaveBeenCalled();
     expect(deps.updateSourceCard).toHaveBeenCalledWith(
       expect.objectContaining({
-        meta: expect.objectContaining({ status: 'failed' }),
+        meta: expect.objectContaining({ status: 'failed', failureCode: 'artifact-changed' }),
       }),
     );
+    expect(vi.mocked(deps.updateSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty('error');
     expect(vi.mocked(deps.createSourceCard).mock.calls[0]?.[0].meta).not.toHaveProperty(
       'reviewerSessionId',
     );

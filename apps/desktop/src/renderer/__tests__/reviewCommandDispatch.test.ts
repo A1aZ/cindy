@@ -30,6 +30,11 @@ describe('/review command dispatch', () => {
     expect(sessionViewSource).not.toContain("payload.command !== 'review'");
   });
 
+  it('does not surface coded Main Review failures as untranslated internal messages', () => {
+    expect(dispatchSource).toMatch(/ipcError\s+\? t\('review\.toast\.failed'\)/);
+    expect(dispatchSource).not.toContain('ipcError?.message ||');
+  });
+
   it('restores a rejected pending first Review with both text and attachments', () => {
     expect(sessionViewSource).toContain('if (!slashDispatch.accepted)');
     expect(sessionViewSource).toContain('restoreRemoteOptimisticDraft(sessionId, {');

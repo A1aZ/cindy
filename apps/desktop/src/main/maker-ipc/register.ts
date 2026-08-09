@@ -625,7 +625,7 @@ import { agentHandoffPending } from './agentHandoffPendingSingleton.js';
 import { type MakerSessionCreateOpts, withCreateSessionStderr } from './sessionRequest.js';
 import { persistAndHydrateSessionProvider } from './sessionProviderBootstrap.js';
 import { registerMakerSessionSendHandler } from './sessionSendHandler.js';
-import { registerReviewStartHandler } from './reviewStartHandler.js';
+import { registerReviewStartHandler, type ReviewFailureReason } from './reviewStartHandler.js';
 import { registerStopAgentTaskHandler } from './stopAgentTaskHandler.js';
 import { registerStopSessionBackgroundTasksHandler } from './stopSessionBackgroundTasksHandler.js';
 import { registerProviderHandlers } from './providerHandlers.js';
@@ -6761,7 +6761,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         ...reviewRun,
         status: 'failed',
         completedAt: interruptedAt,
-        error: 'Review was interrupted when Cindy closed. Run /review again.',
+        failureCode: 'interrupted',
       };
       await updateMessageContent(row.sessionId, row.clientId, '');
       await patchMessageAgentMeta(row.sessionId, row.clientId, { reviewRun: failed });
@@ -7012,6 +7012,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           // also bind the complete non-sensitive readable workspace content.
           const artifactPaths = [...reviewReadPaths, sourceWorkingDir];
           const artifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
+          const completeArtifactFingerprintIsCurrent = async (): Promise<boolean> =>
+            (await fingerprintReviewArtifacts(artifactPaths)) === artifactFingerprint;
 
           return {
             message: reviewMessage as UserMessage,
@@ -7032,14 +7034,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               makerMemoryEnabled: false,
               ...(readRoots.size > 0 ? { extraDirs: [...readRoots] } : {}),
             }),
-            verifyBeforeStart: async () => {
+            verifyBeforeStart: async (): Promise<ReviewFailureReason | null> => {
               if (
                 (await sourceHasActiveTurn(source.id)) ||
                 (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
               ) {
-                throw new Error(
-                  'The task conversation changed before Review started. Run /review again for the current context.',
-                );
+                return {
+                  code: 'source-conversation-changed',
+                  message:
+                    'The task conversation changed before Review started. Run /review again for the current context.',
+                };
               }
               if (
                 !(await reviewWorkspaceFingerprintIsCurrent(
@@ -7047,20 +7051,32 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                   evidence.workspaceFingerprint,
                 ))
               ) {
-                throw new Error(
-                  'The task files changed before Review started. Run /review again for the current result.',
-                );
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The task files changed before Review started. Run /review again for the current result.',
+                };
               }
               if (
                 (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
                 sourceArtifactFingerprint
               ) {
-                throw new Error(
-                  'A review artifact changed before Review started. Run /review again for the current result.',
-                );
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed before Review started. Run /review again for the current result.',
+                };
               }
+              if (!(await completeArtifactFingerprintIsCurrent())) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed before Review started. Run /review again for the current result.',
+                };
+              }
+              return null;
             },
-            verifyBeforePublish: async (): Promise<string | null> => {
+            verifyBeforePublish: async (): Promise<ReviewFailureReason | null> => {
               const [currentSource] = await db
                 .select({
                   workingDir: sessions.workingDir,
@@ -7071,13 +7087,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 .where(eq(sessions.id, source.id))
                 .limit(1);
               if (!reviewSourceIdentityMatches(source, currentSource ?? null)) {
-                return 'The source task workspace changed while Review was running. Run /review again in the current workspace.';
+                return {
+                  code: 'source-workspace-changed',
+                  message:
+                    'The source task workspace changed while Review was running. Run /review again in the current workspace.',
+                };
               }
               if (
                 (await sourceHasActiveTurn(source.id)) ||
                 (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
               ) {
-                return 'The task conversation changed while Review was running. Run /review again for the current context.';
+                return {
+                  code: 'source-conversation-changed',
+                  message:
+                    'The task conversation changed while Review was running. Run /review again for the current context.',
+                };
               }
               if (
                 !(await reviewWorkspaceFingerprintIsCurrent(
@@ -7085,17 +7109,28 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                   evidence.workspaceFingerprint,
                 ))
               ) {
-                return 'The task files changed while Review was running. Run /review again for the current result.';
+                return {
+                  code: 'source-files-changed',
+                  message:
+                    'The task files changed while Review was running. Run /review again for the current result.',
+                };
               }
               if (
                 (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
                 sourceArtifactFingerprint
               ) {
-                return 'A review artifact changed while Review was running. Run /review again for the current result.';
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed while Review was running. Run /review again for the current result.',
+                };
               }
-              const currentArtifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
-              if (currentArtifactFingerprint !== artifactFingerprint) {
-                return 'A review artifact changed while Review was running. Run /review again for the current result.';
+              if (!(await completeArtifactFingerprintIsCurrent())) {
+                return {
+                  code: 'artifact-changed',
+                  message:
+                    'A review artifact changed while Review was running. Run /review again for the current result.',
+                };
               }
               return null;
             },

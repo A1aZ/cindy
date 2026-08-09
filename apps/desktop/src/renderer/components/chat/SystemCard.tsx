@@ -24,6 +24,11 @@ import { cn } from '@/lib/utils';
 import { Collapse } from '@/components/ui/collapse';
 import { Spinner } from '@/components/ui/spinner';
 import { LearnStatusCard } from '@/features/learn/LearnStatusCard';
+import {
+  readReviewFailureCode,
+  reviewFailureCodeFromLegacyError,
+  type ReviewFailureCode,
+} from '../../../shared/reviewRun';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface SystemCardProps {
@@ -1126,6 +1131,18 @@ function AgentSwitchCard({ data }: { data?: Record<string, unknown> }) {
   );
 }
 
+const REVIEW_FAILURE_I18N_KEY: Record<ReviewFailureCode, string> = {
+  'no-visible-result': 'chat.systemCard.review.noResult',
+  'reviewer-closed': 'chat.systemCard.review.failure.reviewerClosed',
+  'cancelled-before-start': 'chat.systemCard.review.failure.cancelledBeforeStart',
+  interrupted: 'chat.systemCard.review.failure.interrupted',
+  'source-workspace-changed': 'chat.systemCard.review.failure.sourceWorkspaceChanged',
+  'source-conversation-changed': 'chat.systemCard.review.failure.sourceConversationChanged',
+  'source-files-changed': 'chat.systemCard.review.failure.sourceFilesChanged',
+  'artifact-changed': 'chat.systemCard.review.failure.artifactChanged',
+  'provider-failed': 'chat.systemCard.review.failure.providerFailed',
+};
+
 function ReviewCard({ data, workingDir }: { data?: Record<string, unknown>; workingDir?: string }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -1135,6 +1152,11 @@ function ReviewCard({ data, workingDir }: { data?: Record<string, unknown>; work
     typeof data?.reviewerSessionId === 'string' ? data.reviewerSessionId : '';
   const result = typeof data?.result === 'string' ? data.result : '';
   const error = typeof data?.error === 'string' ? data.error : '';
+  const failureCode =
+    readReviewFailureCode(data?.failureCode) ?? reviewFailureCodeFromLegacyError(error);
+  const failureMessage = failureCode
+    ? t(REVIEW_FAILURE_I18N_KEY[failureCode])
+    : error || t('chat.systemCard.review.noResult');
 
   return (
     <div className="my-2 rounded-lg border border-border bg-[var(--surface-chip)] px-3.5 py-3 text-sm">
@@ -1164,9 +1186,7 @@ function ReviewCard({ data, workingDir }: { data?: Record<string, unknown>; work
         </p>
       )}
       {status === 'failed' && (
-        <p className="mt-1.5 pl-[23px] text-xs text-[var(--error-fg)]">
-          {error || t('chat.systemCard.review.noResult')}
-        </p>
+        <p className="mt-1.5 pl-[23px] text-xs text-[var(--error-fg)]">{failureMessage}</p>
       )}
       {status === 'completed' && result && (
         <div className="mt-3 border-t border-border pt-3">

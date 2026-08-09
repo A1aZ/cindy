@@ -9,7 +9,12 @@ import { redactSensitiveText } from '@cindy/maker-shared/error-redaction';
 import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
 
 import type { ReviewAttachmentInput } from '../reviewer/reviewEvidence.js';
-import type { ReviewRunMeta, ReviewRunOwner, ReviewTargetKind } from '../../shared/reviewRun.js';
+import type {
+  ReviewFailureCode,
+  ReviewRunMeta,
+  ReviewRunOwner,
+  ReviewTargetKind,
+} from '../../shared/reviewRun.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
 import { MAKER_INVOKE } from './channels.js';
 import type { IpcHandlerRegistry } from './ipcHandlerRegistry.js';
@@ -88,9 +93,15 @@ export interface PreparedReviewLaunch {
   message: UserMessage;
   reviewerCreateOpts: MakerSessionCreateOpts;
   /** Fail closed if evidence changed after extraction but before provider start. */
-  verifyBeforeStart(): Promise<void>;
+  verifyBeforeStart(): Promise<ReviewFailureReason | null>;
   /** Return a user-facing failure reason instead of publishing a stale result. */
-  verifyBeforePublish(): Promise<string | null>;
+  verifyBeforePublish(): Promise<ReviewFailureReason | null>;
+}
+
+export interface ReviewFailureReason {
+  code: ReviewFailureCode;
+  /** Internal diagnostic/IPC detail. Stable cards persist code instead of this English text. */
+  message: string;
 }
 
 export interface PreparedReviewRun {
@@ -157,9 +168,21 @@ export interface ReviewStartHandlerDeps {
   warn(message: string, fields: Record<string, unknown>): void;
 }
 
-function terminalErrorMessage(event: AgentEvent): string {
+function terminalErrorDetails(event: AgentEvent): {
+  error?: string;
+  failureCode?: ReviewFailureCode;
+} {
   const data = event.data as { message?: unknown } | null;
-  return typeof data?.message === 'string' && data.message ? data.message : 'Reviewer task failed';
+  return typeof data?.message === 'string' && data.message
+    ? { error: data.message }
+    : { failureCode: 'provider-failed' };
+}
+
+class ReviewPreconditionError extends Error {
+  constructor(readonly reason: ReviewFailureReason) {
+    super(reason.message);
+    this.name = 'ReviewPreconditionError';
+  }
 }
 
 const REVIEW_SOURCE_LEASE_RELEASE_RETRY_MS = 100;
@@ -293,6 +316,7 @@ export function registerReviewStartHandler(
       status: 'completed' | 'failed',
       result: string,
       error?: string,
+      failureCode?: ReviewFailureCode,
     ): Promise<void> => {
       const currentSourceAgentKind = sourceAgentKind;
       if (!runningMeta || !currentSourceAgentKind) {
@@ -303,7 +327,11 @@ export function registerReviewStartHandler(
         ...runningMeta,
         status,
         completedAt: deps.now(),
-        ...(error ? { error: redactSensitiveText(error).slice(0, 2_000) } : {}),
+        ...(failureCode
+          ? { failureCode }
+          : error
+            ? { error: redactSensitiveText(error).slice(0, 2_000) }
+            : {}),
       };
       try {
         await enqueueSourceCardWrite(() =>
@@ -356,7 +384,8 @@ export function registerReviewStartHandler(
       sourceCardCreated = true;
 
       const launch = await prepared.prepareLaunch();
-      await launch.verifyBeforeStart();
+      const startFailure = await launch.verifyBeforeStart();
+      if (startFailure) throw new ReviewPreconditionError(startFailure);
       const reviewer = await deps.startReviewer(launch.reviewerCreateOpts);
       const linkedRunningMeta: ReviewRunMeta = { ...runningMeta, reviewerSessionId };
       runningMeta = linkedRunningMeta;
@@ -371,20 +400,21 @@ export function registerReviewStartHandler(
         disposeReviewerListeners();
         terminalFinalization = (async () => {
           if (terminalError) {
-            await updateSourceCard('failed', '', terminalErrorMessage(reviewEvent));
+            const details = terminalErrorDetails(reviewEvent);
+            await updateSourceCard('failed', '', details.error, details.failureCode);
             await closeReviewer();
             return;
           }
           await deps.drainPersistQueue();
           const result = await deps.readReviewerResult(reviewerSessionId);
           if (!result) {
-            await updateSourceCard('failed', '', 'Reviewer returned no visible conclusion');
+            await updateSourceCard('failed', '', undefined, 'no-visible-result');
             await closeReviewer();
             return;
           }
           const staleReason = await launch.verifyBeforePublish();
           if (staleReason) {
-            await updateSourceCard('failed', '', staleReason);
+            await updateSourceCard('failed', '', staleReason.message, staleReason.code);
             await closeReviewer();
             return;
           }
@@ -413,7 +443,7 @@ export function registerReviewStartHandler(
         settlementCause = 'reviewer-closed';
         disposeReviewerListeners();
         terminalFinalization = (async () => {
-          await updateSourceCard('failed', '', 'Reviewer task was closed before it finished');
+          await updateSourceCard('failed', '', undefined, 'reviewer-closed');
           await closeReviewer();
         })().catch(async (error) => {
           deps.warn('reviewer close finalization failed', {
@@ -476,7 +506,7 @@ export function registerReviewStartHandler(
         }
         disposeReviewerListeners();
         settled = true;
-        await updateSourceCard('failed', '', 'Reviewer was cancelled before it started');
+        await updateSourceCard('failed', '', undefined, 'cancelled-before-start');
         throwIpcError('SESSION_RUNNING', 'Reviewer was cancelled before it started');
       }
       if (settled) {
@@ -504,12 +534,17 @@ export function registerReviewStartHandler(
       if (active?.runId === runId) {
         if (sourceCardCreated) {
           const message = error instanceof Error ? error.message : String(error);
-          await updateSourceCard('failed', '', message).catch(async () => {
+          const failureCode =
+            error instanceof ReviewPreconditionError ? error.reason.code : undefined;
+          await updateSourceCard('failed', '', message, failureCode).catch(async () => {
             await release();
           });
         } else {
           await release();
         }
+      }
+      if (error instanceof ReviewPreconditionError) {
+        throwIpcError('PRECONDITION_FAILED', error.message);
       }
       throw error;
     }

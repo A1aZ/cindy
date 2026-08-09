@@ -6176,7 +6176,17 @@
         "failed": "审查未完成",
         "openTask": "打开审查任务",
         "readOnlyHint": "独立任务 · 无开发记忆 · 只读",
-        "noResult": "审查任务没有返回可见结论"
+        "noResult": "审查任务没有返回可见结论",
+        "failure": {
+          "reviewerClosed": "审查任务在完成前已关闭",
+          "cancelledBeforeStart": "审查在开始前已取消",
+          "interrupted": "Cindy 关闭时审查被中断，请重新运行 /review。",
+          "sourceWorkspaceChanged": "来源任务的工作区已变化，请在当前工作区重新运行 /review。",
+          "sourceConversationChanged": "来源任务已变化，请针对当前任务重新运行 /review。",
+          "sourceFilesChanged": "来源任务的文件已变化，请针对当前成果重新运行 /review。",
+          "artifactChanged": "审查成果已变化，请针对当前成果重新运行 /review。",
+          "providerFailed": "审查任务执行失败"
+        }
       }
     },
     "markdownRenderer": {

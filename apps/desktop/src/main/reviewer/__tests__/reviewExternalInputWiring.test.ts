@@ -51,6 +51,13 @@ describe('Review external input wiring', () => {
     expect(registerSource).toContain(
       'const artifactPaths = [...reviewReadPaths, sourceWorkingDir];',
     );
+    expect(registerSource).toContain('const completeArtifactFingerprintIsCurrent = async');
+    expect(
+      registerSource.match(/if \(!\(await completeArtifactFingerprintIsCurrent\(\)\)\)/g),
+    ).toHaveLength(2);
+    expect(
+      registerSource.indexOf('if (!(await completeArtifactFingerprintIsCurrent()))'),
+    ).toBeLessThan(registerSource.indexOf('verifyBeforePublish: async'));
     expect(registerSource).not.toContain(
       '...(evidence.workspaceFingerprint ? [] : [sourceWorkingDir])',
     );

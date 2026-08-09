@@ -64,12 +64,36 @@ describe('SystemCard Review', () => {
     expect(screen.getByTestId('location').textContent).toBe('/cc-agent/review-task');
   });
 
-  it('shows a persisted failure without inventing findings', () => {
-    renderCard({ status: 'failed', error: 'Reviewer returned no visible conclusion' });
+  it('translates a stable persisted failure code ahead of internal diagnostic text', () => {
+    renderCard({
+      status: 'failed',
+      failureCode: 'reviewer-closed',
+      error: 'Reviewer task was closed before it finished',
+    });
 
     expect(screen.getByText('chat.systemCard.review.failed')).toBeTruthy();
-    expect(screen.getByText('Reviewer returned no visible conclusion')).toBeTruthy();
+    expect(screen.getByText('chat.systemCard.review.failure.reviewerClosed')).toBeTruthy();
+    expect(screen.queryByText('Reviewer task was closed before it finished')).toBeNull();
     expect(screen.queryByTestId('review-markdown')).toBeNull();
     expect(screen.queryByText('chat.systemCard.review.openTask')).toBeNull();
+  });
+
+  it('localizes legacy built-in errors while preserving unknown provider detail', () => {
+    const { rerender } = renderCard({
+      status: 'failed',
+      error: 'Reviewer returned no visible conclusion',
+    });
+    expect(screen.getByText('chat.systemCard.review.noResult')).toBeTruthy();
+
+    rerender(
+      <MemoryRouter initialEntries={['/cc-agent/source-task']}>
+        <SystemCard
+          cardType="review"
+          data={{ status: 'failed', error: 'provider-specific failure' }}
+        />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('provider-specific failure')).toBeTruthy();
   });
 });

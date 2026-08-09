@@ -2,6 +2,71 @@ export type ReviewRunStatus = 'running' | 'completed' | 'failed';
 
 export type ReviewTargetKind = 'changes' | 'artifacts' | 'task' | 'mixed';
 
+export const REVIEW_FAILURE_CODES = [
+  'no-visible-result',
+  'reviewer-closed',
+  'cancelled-before-start',
+  'interrupted',
+  'source-workspace-changed',
+  'source-conversation-changed',
+  'source-files-changed',
+  'artifact-changed',
+  'provider-failed',
+] as const;
+
+export type ReviewFailureCode = (typeof REVIEW_FAILURE_CODES)[number];
+
+const REVIEW_FAILURE_CODE_SET = new Set<string>(REVIEW_FAILURE_CODES);
+
+export function readReviewFailureCode(value: unknown): ReviewFailureCode | null {
+  return typeof value === 'string' && REVIEW_FAILURE_CODE_SET.has(value)
+    ? (value as ReviewFailureCode)
+    : null;
+}
+
+const LEGACY_REVIEW_FAILURE_CODE_BY_ERROR = new Map<string, ReviewFailureCode>([
+  ['Reviewer returned no visible conclusion', 'no-visible-result'],
+  ['Reviewer task was closed before it finished', 'reviewer-closed'],
+  ['Reviewer was cancelled before it started', 'cancelled-before-start'],
+  ['Review was interrupted when Cindy closed. Run /review again.', 'interrupted'],
+  [
+    'The source task workspace changed while Review was running. Run /review again in the current workspace.',
+    'source-workspace-changed',
+  ],
+  [
+    'The task conversation changed before Review started. Run /review again for the current context.',
+    'source-conversation-changed',
+  ],
+  [
+    'The task conversation changed while Review was running. Run /review again for the current context.',
+    'source-conversation-changed',
+  ],
+  [
+    'The task files changed before Review started. Run /review again for the current result.',
+    'source-files-changed',
+  ],
+  [
+    'The task files changed while Review was running. Run /review again for the current result.',
+    'source-files-changed',
+  ],
+  [
+    'A review artifact changed before Review started. Run /review again for the current result.',
+    'artifact-changed',
+  ],
+  [
+    'A review artifact changed while Review was running. Run /review again for the current result.',
+    'artifact-changed',
+  ],
+  ['Reviewer task failed', 'provider-failed'],
+]);
+
+/** Keep cards persisted by pre-code clients localized without rewriting history. */
+export function reviewFailureCodeFromLegacyError(value: unknown): ReviewFailureCode | null {
+  return typeof value === 'string'
+    ? (LEGACY_REVIEW_FAILURE_CODE_BY_ERROR.get(value) ?? null)
+    : null;
+}
+
 export interface ReviewRunOwnerLiveness {
   version: 1;
   /** Loopback-only port owned by this exact Desktop Main instance. */
@@ -74,6 +139,8 @@ export interface ReviewRunMeta {
    */
   owner?: ReviewRunOwner;
   completedAt?: number;
+  /** Stable product reason translated by Renderer. Unknown provider details stay in error. */
+  failureCode?: ReviewFailureCode;
   error?: string;
 }
 
@@ -102,6 +169,7 @@ export function readReviewRunMeta(value: unknown): ReviewRunMeta | null {
   if (record.owner !== undefined) {
     if (!readReviewRunOwner(record.owner)) return null;
   }
+  if (record.failureCode !== undefined && !readReviewFailureCode(record.failureCode)) return null;
   return record as unknown as ReviewRunMeta;
 }
 

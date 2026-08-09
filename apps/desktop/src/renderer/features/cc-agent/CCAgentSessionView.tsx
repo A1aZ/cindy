@@ -2434,7 +2434,11 @@ export function CCAgentSessionView({
         } catch (err) {
           const ipcError = extractIpcError(err);
           toast.error(
-            ipcError?.message || (err instanceof Error ? err.message : t('review.toast.failed')),
+            ipcError
+              ? t('review.toast.failed')
+              : err instanceof Error
+                ? err.message
+                : t('review.toast.failed'),
           );
           return { handled: true, accepted: false, message };
         }

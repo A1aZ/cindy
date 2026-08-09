@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { readReviewRunMeta } from '../reviewRun.js';
+import {
+  readReviewFailureCode,
+  readReviewRunMeta,
+  reviewFailureCodeFromLegacyError,
+} from '../reviewRun.js';
 
 const base = {
   version: 1,
@@ -35,5 +39,26 @@ describe('ReviewRunMeta', () => {
     expect(readReviewRunMeta(pending)).toMatchObject({ runId: 'run-1', status: 'running' });
     expect(readReviewRunMeta({ ...pending, reviewerSessionId: '' })).toBeNull();
     expect(readReviewRunMeta({ ...pending, reviewerSessionId: 123 })).toBeNull();
+  });
+
+  it('accepts stable failure codes and rejects malformed ones', () => {
+    expect(
+      readReviewRunMeta({ ...base, status: 'failed', failureCode: 'reviewer-closed' }),
+    ).toMatchObject({ failureCode: 'reviewer-closed' });
+    expect(readReviewRunMeta({ ...base, status: 'failed', failureCode: 'made-up' })).toBeNull();
+    expect(readReviewFailureCode('artifact-changed')).toBe('artifact-changed');
+    expect(readReviewFailureCode(123)).toBeNull();
+  });
+
+  it('maps only known legacy internal messages to stable failure codes', () => {
+    expect(reviewFailureCodeFromLegacyError('Reviewer returned no visible conclusion')).toBe(
+      'no-visible-result',
+    );
+    expect(
+      reviewFailureCodeFromLegacyError(
+        'The task files changed while Review was running. Run /review again for the current result.',
+      ),
+    ).toBe('source-files-changed');
+    expect(reviewFailureCodeFromLegacyError('provider-specific failure')).toBeNull();
   });
 });

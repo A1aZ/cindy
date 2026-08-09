@@ -24,6 +24,7 @@ import {
 type ConversationShareSourceMessage = Pick<
   NormalizedRemoteMessage,
   | 'attachments'
+  | 'automationOrigin'
   | 'body'
   | 'kind'
   | 'pastedTextRanges'
@@ -35,16 +36,24 @@ type ConversationShareSourceMessage = Pick<
 export function projectConversationShareMessage(
   clientId: string,
   message: ConversationShareSourceMessage,
-  options: { maxVisibleLines?: number; visibleBody?: string } = {},
+  options: {
+    automationOriginLabel?: string;
+    maxVisibleLines?: number;
+    visibleBody?: string;
+  } = {},
 ): ConversationShareMessage | null {
   if (message.kind !== 'user' && message.kind !== 'assistant') return null;
 
   const attachments = projectAttachments(message.attachments ?? []);
   const attachmentFields = attachments.length > 0 ? { attachments } : {};
+  const automationOriginFields = options.automationOriginLabel
+    ? { automationOriginLabel: options.automationOriginLabel }
+    : {};
   const secondaryBody = message.secondaryBody || undefined;
   if (message.kind === 'assistant') {
     return {
       ...attachmentFields,
+      ...automationOriginFields,
       body: message.quotesEncoded
         ? stripChatQuoteMarkerLines(message.body)
         : message.body,
@@ -68,6 +77,7 @@ export function projectConversationShareMessage(
   if (options.visibleBody !== undefined) {
     return {
       ...attachmentFields,
+      ...automationOriginFields,
       body: options.visibleBody,
       clientId,
       kind: message.kind,
@@ -82,6 +92,7 @@ export function projectConversationShareMessage(
 
   return {
     ...attachmentFields,
+    ...automationOriginFields,
     body: sentInlineTokensDisplayText(visibleTokens),
     ...(bodyParts ? { bodyParts } : {}),
     clientId,

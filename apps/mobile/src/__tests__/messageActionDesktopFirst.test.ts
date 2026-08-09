@@ -8,6 +8,7 @@ describe('mobile message actions desktop-first surface', () => {
     const sharedSource = readFileSync(resolve(process.cwd(), '../../packages/maker-shared/src/messagePresentation.ts'), 'utf8');
 
     expect(source).toContain('const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };');
+    expect(source).toContain('const MESSAGE_CONTROL_TOUCH_SIZE = 44;');
     expect(source).toContain('buildMessageActionBarPresentation');
     expect(sharedSource).toContain("input.canCopy ? 'copy' : null");
     expect(sharedSource).toContain("input.canFork ? 'fork' : null");
@@ -28,6 +29,8 @@ describe('mobile message actions desktop-first surface', () => {
     expect(source).toContain("disabledActions={actionBusy ? ['rewind', 'delete'] : undefined}");
     expect(source).toContain('testID="message.moreButton"');
     expect(source).toContain('{ height: buttonSize, width: buttonSize }');
+    expect(source).toContain('minHeight: MESSAGE_CONTROL_TOUCH_SIZE');
+    expect(source).toContain('minWidth: MESSAGE_CONTROL_TOUCH_SIZE');
     expect(source).toContain('height: 24');
     expect(source).toContain('width: 24');
     expect(source).toContain('borderRadius: radius.pill');

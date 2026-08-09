@@ -2,6 +2,7 @@ import type {
   MobileMessageRenderItem,
   MobileWorkChildItem,
 } from '@/session/messageRenderModel';
+import type { NormalizedRemoteMessage } from '@/session/messageNormalize';
 import { projectConversationShareMessage } from '@/session/conversationShareProjection';
 import type { ConversationShareMessage } from '@/session/conversationShareWebViewHtml';
 import { isShareableMessage } from '@/session/shareSelectionStore';
@@ -33,6 +34,9 @@ export function collectConversationShareBlockIds(
 export function collectConversationShareMessages(
   items: readonly MobileMessageRenderItem[],
   isBlockExpanded: (blockId: string) => boolean,
+  getAutomationOriginLabel?: (
+    origin: NonNullable<NormalizedRemoteMessage['automationOrigin']>,
+  ) => string,
 ): ConversationShareMessage[] {
   const messages: ConversationShareMessage[] = [];
   const visit = (item: ConversationShareRenderItem): void => {
@@ -42,7 +46,11 @@ export function collectConversationShareMessages(
         item.message.source.clientId ||
         item.message.source.id ||
         item.message.key;
-      const projected = projectConversationShareMessage(clientId, item.message);
+      const projected = projectConversationShareMessage(clientId, item.message, {
+        automationOriginLabel: item.message.automationOrigin && getAutomationOriginLabel
+          ? getAutomationOriginLabel(item.message.automationOrigin)
+          : undefined,
+      });
       if (projected) messages.push(projected);
       return;
     }

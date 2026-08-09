@@ -840,7 +840,7 @@ function composerDraftScopeKey(sessionId: string, routeDraft: string | null): st
 export default function SessionScreen() {
   const styles = useThemedStyles(makeStyles);
   const { colors, mode } = useTheme();
-  const { t } = useTranslation();
+  const { t, i18n: i18nInstance } = useTranslation();
   const params = useLocalSearchParams<{
     sessionId: string;
     deviceId?: string;
@@ -5626,11 +5626,15 @@ export default function SessionScreen() {
     const projectedMessages = collectConversationShareMessages(
       messageListItems,
       isFoldableBlockExpanded,
+      (origin) => origin.scheduleName
+        ? t('message.renderer.automationOriginNamed', { name: origin.scheduleName })
+        : t('message.renderer.automationOrigin'),
     );
     return projectedMessages.map(
       (message) => shareMessageProjectionOverridesRef.current.get(message.clientId) ?? message,
     );
   }, [
+    i18nInstance.language,
     messageListItems,
     shareExpansionSnapshot,
     shareMessageProjectionRevision,

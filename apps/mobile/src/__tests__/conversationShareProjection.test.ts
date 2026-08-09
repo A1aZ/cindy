@@ -14,6 +14,17 @@ describe('projectConversationShareMessage', () => {
     expect(JSON.stringify(projected)).not.toContain('隐藏的第三行');
   });
 
+  it('保留自动化来源文案，但不暴露内部调度 ID', () => {
+    const projected = projectConversationShareMessage('automation', {
+      automationOrigin: { scheduleId: 'schedule-secret', scheduleName: '每日摘要' },
+      body: '自动化消息',
+      kind: 'user',
+    }, { automationOriginLabel: '由自动化「每日摘要」发送' });
+
+    expect(projected?.automationOriginLabel).toBe('由自动化「每日摘要」发送');
+    expect(JSON.stringify(projected)).not.toContain('schedule-secret');
+  });
+
   it('优先使用原生排版实测的可见正文', () => {
     const projected = projectConversationShareMessage('measured', {
       body: '/review 后面还有很多隐藏内容',

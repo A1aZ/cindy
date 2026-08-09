@@ -38,7 +38,7 @@ describe("mobile screenshot-triggered share guards", () => {
     ).toBeGreaterThanOrEqual(3);
   });
 
-  it("reports message payload viewers as blocking overlays", () => {
+  it("reports message payload viewers and action sheets as blocking overlays", () => {
     const source = readFileSync(
       resolve(process.cwd(), "src/session/MessageRenderer.tsx"),
       "utf8",
@@ -47,7 +47,13 @@ describe("mobile screenshot-triggered share guards", () => {
     expect(source).toContain(
       "onBlockingOverlayChange?: (blocked: boolean) => void;",
     );
-    expect(source).toContain("onBlockingOverlayChange?.(payload !== null);");
+    expect(source).toContain("const openMessageActionSheetsRef = useRef(new Set<string>());");
+    expect(source).toContain("onMessageActionSheetOpenChange: handleMessageActionSheetOpenChange,");
+    expect(source).toContain("actions.onMessageActionSheetOpenChange?.(clientId, true);");
+    expect(source).toContain("actions.onMessageActionSheetOpenChange?.(clientId, false);");
+    expect(source).toContain(
+      "payload !== null || openMessageActionSheetsRef.current.size > 0",
+    );
   });
 
   it("recomputes the screenshot guard from message overlay state", () => {

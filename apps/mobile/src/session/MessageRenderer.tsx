@@ -322,7 +322,7 @@ import { iconSize, iconStroke, monoFont, useTheme, useThemedStyles, type ThemeCo
 import { i18n } from '@/i18n';
 
 const MESSAGE_CONTROL_HIT_SLOP = { bottom: 10, left: 10, right: 10, top: 10 };
-const MESSAGE_CONTROL_TOUCH_SIZE = 32;
+const MESSAGE_CONTROL_TOUCH_SIZE = 44;
 const MESSAGE_LIST_VISIBLE_PERCENT_THRESHOLD = 5;
 const SCREENSHOT_SHARE_VISIBLE_PERCENT_THRESHOLD = 10;
 // LegendList 变高 item 的初始估高(仅影响首帧布局定位,LegendList 挂载后按实测尺寸修正)。
@@ -481,6 +481,7 @@ interface MessageActions {
   onOpenForkOrigin?: () => void;
   onOpenPayload?: (payload: MessagePayload) => void;
   onBlockingOverlayChange?: (blocked: boolean) => void;
+  onMessageActionSheetOpenChange?: (clientId: string, open: boolean) => void;
   /** 正文里会话深链 chip(xdt-maker://session/…)点击回调,app 内跳转。 */
   onOpenSessionLink?: (url: string) => void;
   onPreviewRewind?: (clientId: string, draft: MobileMessageDraft) => void;
@@ -701,8 +702,20 @@ export function MessageRenderer({
   const [isAwayFromBottom, setIsAwayFromBottom] = useState(false);
   const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
   const [payload, setPayload] = useState<MessagePayload | null>(null);
+  const payloadRef = useRef(payload);
+  payloadRef.current = payload;
+  const openMessageActionSheetsRef = useRef(new Set<string>());
+  const handleMessageActionSheetOpenChange = useCallback((clientId: string, open: boolean) => {
+    if (open) openMessageActionSheetsRef.current.add(clientId);
+    else openMessageActionSheetsRef.current.delete(clientId);
+    onBlockingOverlayChange?.(
+      payloadRef.current !== null || openMessageActionSheetsRef.current.size > 0,
+    );
+  }, [onBlockingOverlayChange]);
   useEffect(() => {
-    onBlockingOverlayChange?.(payload !== null);
+    onBlockingOverlayChange?.(
+      payload !== null || openMessageActionSheetsRef.current.size > 0,
+    );
     return () => onBlockingOverlayChange?.(false);
   }, [onBlockingOverlayChange, payload]);
   // 关闭回调必须引用稳定:内联闭包每次渲染换新,会经 ImageLightbox 透传成
@@ -859,6 +872,7 @@ export function MessageRenderer({
     onShareableMessageProjectionChange,
     onShareableMessageViewChange: handleShareableMessageViewChange,
     onOpenPayload: setPayload,
+    onMessageActionSheetOpenChange: handleMessageActionSheetOpenChange,
     onResolveRemoteMedia,
     // 待发送气泡(pending_send 项)的展开态与队列操作:漏了这一项 actions.pendingSend 就是
     // undefined,渲染分支直接 null —— 气泡整个不画,乐观显示消失。
@@ -893,6 +907,7 @@ export function MessageRenderer({
     onEnterShareSelection,
     onShareableMessageProjectionChange,
     handleShareableMessageViewChange,
+    handleMessageActionSheetOpenChange,
     onResolveRemoteMedia,
     pendingSend,
     shareSelectionActive,
@@ -1811,6 +1826,11 @@ function MessageBubble({
   const isUser = presentation.isUserAligned;
   const isStreamingAssistant = item.message.kind === 'assistant' && item.message.isStreaming === true;
   const clientId = messageClientId(item);
+  useEffect(() => {
+    if (!actionSheetOpen) return undefined;
+    actions.onMessageActionSheetOpenChange?.(clientId, true);
+    return () => actions.onMessageActionSheetOpenChange?.(clientId, false);
+  }, [actionSheetOpen, actions.onMessageActionSheetOpenChange, clientId]);
   const shareableMessage = isShareableMessage(item.message);
   const handleShareableMessageViewChange = useCallback((view: View | null) => {
     actions.onShareableMessageViewChange?.(clientId, view);
@@ -1928,12 +1948,17 @@ function MessageBubble({
   const longMessageCollapsed = shouldCollapseLongMessage && !longMessageExpanded;
   const shareProjection = useMemo(
     () => projectConversationShareMessage(clientId, item.message, {
+      automationOriginLabel: automationOrigin
+        ? automationOrigin.scheduleName
+          ? i18nInstance.t('message.renderer.automationOriginNamed', { name: automationOrigin.scheduleName })
+          : i18nInstance.t('message.renderer.automationOrigin')
+        : undefined,
       maxVisibleLines: longMessageCollapsed ? collapsedLineCount : undefined,
       visibleBody: longMessageCollapsed && measuredBody?.body === displayBubbleBody
         ? measuredBody.collapsedText
         : undefined,
     }),
-    [clientId, collapsedLineCount, displayBubbleBody, item.message, longMessageCollapsed, measuredBody],
+    [automationOrigin, clientId, collapsedLineCount, displayBubbleBody, i18nInstance.language, item.message, longMessageCollapsed, measuredBody],
   );
   useEffect(() => {
     if (!shareSelectionActive || !shareProjection) return;

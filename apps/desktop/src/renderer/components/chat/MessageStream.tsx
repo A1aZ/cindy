@@ -767,6 +767,20 @@ export function findRestorableViewportItemIdx(items: RenderItem[], viewportTopKe
 }
 
 /**
+ * Whether a restored viewport anchor still belongs to the bounded default tail.
+ * This is intentionally limited to the restore path; user-created anchored
+ * windows remain unbounded until the separate bidirectional-window change.
+ */
+export function isViewportAnchorWithinDefaultTail(
+  items: RenderItem[],
+  viewportTopKey: string,
+  windowSize = RENDER_WINDOW_INITIAL_ITEMS,
+): boolean {
+  const idx = findRestorableViewportItemIdx(items, viewportTopKey);
+  return idx >= Math.max(0, items.length - windowSize);
+}
+
+/**
  * 从全量 render items 里按渲染顺序抽出会话内所有图片的 src,作为 lightbox 翻图
  * 的数据源(全量,不受渲染窗口裁剪影响)。只收**结构化、确定会渲染成图**的三类:
  *   - tool-output 图(art 出图 / 飞书拉图等)→ tool_media item 的 image 项
@@ -2389,6 +2403,14 @@ export function MessageStream({
     if (!snap.isNearBottom && snap.viewportTopKey) return snap.viewportTopKey;
     return null;
   });
+  const restoreDefaultViewportRef = useRef(
+    Boolean(
+      restoringRef.current &&
+        restoreSnapshotRef.current?.windowAnchorKey === null &&
+        restoreSnapshotRef.current?.isNearBottom === false &&
+        restoreSnapshotRef.current?.viewportTopKey,
+    ),
+  );
   // 两段式默认窗口的当前尺寸(FIRST_PAINT → 空闲期扩到 INITIAL)。只影响
   // firstVisibleItemKey === null 的"默认窗口"分支;锚点窗口不看它。
   // "默认窗口 + 非贴底"快照已在上面转为锚点窗口,不再进本分支;仅
@@ -2562,8 +2584,48 @@ export function MessageStream({
         return allRenderItems.slice(defaultStartIdx);
       }
     }
+
+    // A default-tail snapshot can become stale while the session is in the
+    // background. If enough messages arrive, the saved viewport anchor is no
+    // longer in the bounded tail; prefer a bounded tail first paint over
+    // mounting the entire anchor-to-end range. The layout effect below clears
+    // the stale anchor state before the next paint.
+    if (
+      restoreDefaultViewportRef.current &&
+      restoringRef.current &&
+      idx < Math.max(0, allRenderItems.length - RENDER_WINDOW_INITIAL_ITEMS)
+    ) {
+      const defaultStartIdx = snapRenderWindowStartIdx(
+        allRenderItems,
+        Math.max(0, allRenderItems.length - RENDER_WINDOW_INITIAL_ITEMS),
+      );
+      return allRenderItems.slice(defaultStartIdx);
+    }
+
     return allRenderItems.slice(snapRenderWindowStartIdx(allRenderItems, idx));
   }, [allRenderItems, firstVisibleItemKey, defaultWindowItems]);
+
+  // If a restored default-tail anchor fell out of the tail while this session
+  // was backgrounded, permanently fall back to the bounded default window for
+  // this mount. This also prevents expandWindow from treating the stale key as
+  // a user-created anchored window.
+  useLayoutEffect(() => {
+    if (!restoreDefaultViewportRef.current || !restoringRef.current || firstVisibleItemKey === null) return;
+    const snap = restoreSnapshotRef.current;
+    if (!snap?.viewportTopKey) return;
+    if (allRenderItems.length === 0) return;
+    const anchorIdx = findRestorableViewportItemIdx(allRenderItems, snap.viewportTopKey);
+    // History hydration can temporarily omit the anchor; retain restore mode
+    // until a later render can locate it instead of treating it as deleted.
+    if (anchorIdx < 0) return;
+    if (isViewportAnchorWithinDefaultTail(allRenderItems, snap.viewportTopKey)) return;
+    restoreDefaultViewportRef.current = false;
+    restoringRef.current = false;
+    isNearBottomRef.current = false;
+    setIsNearBottom(false);
+    setFirstVisibleItemKey(null);
+    setDefaultWindowItems(RENDER_WINDOW_INITIAL_ITEMS);
+  }, [allRenderItems, firstVisibleItemKey]);
 
   // 两段式默认窗口第二段:首帧(非空)提交后,空闲期把默认窗口扩回 INITIAL。
   // 只在仍钉底时扩(prepend 在视口上方,pin-to-bottom layout effect 同帧重钉,

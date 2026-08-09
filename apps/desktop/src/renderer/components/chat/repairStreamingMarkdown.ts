@@ -23,14 +23,14 @@
  */
 
 /** 行首(允许前导空白)的 ``` 围栏行。 */
-const FENCE_LINE = /^\s{0,3}(`{3,}|~{3,})/;
+const FENCE_LINE = /^\s{0,3}(`{3,}|~{3,})(.*)$/;
 
 /** 扫描围栏开合;返回 open 状态与"围栏外"文本(供行内反引号计数)。 */
 function scanFences(md: string): { open: boolean; outside: string; fenceMarker: string } {
   let open = false;
   let fenceMarker = '';
   const outside: string[] = [];
-  for (const line of md.split('\n')) {
+  for (const line of md.split(/\r?\n/)) {
     const m = FENCE_LINE.exec(line);
     if (m) {
       const marker = m[1][0];
@@ -40,7 +40,11 @@ function scanFences(md: string): { open: boolean; outside: string; fenceMarker: 
         continue;
       }
       // 闭合围栏须与开围栏同字符。
-      if (marker === fenceMarker[0] && m[1].length >= fenceMarker.length) {
+      if (
+        marker === fenceMarker[0] &&
+        m[1].length >= fenceMarker.length &&
+        /^[ \t]*$/.test(m[2])
+      ) {
         open = false;
         fenceMarker = '';
         continue;

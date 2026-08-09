@@ -17,11 +17,11 @@
  *     没有才发新 key。markdown 结构变化(列表标记吃掉 "2. "、加粗闭合劈开文本
  *     节点、Segmenter 对 chunk 尾部的切分变化)只会让**词序号**漂移,key 不漂 ——
  *     漂移序号曾让已稳定的整片前文被当新词重淡(2026-08-08 实测)。
- *   - **settled 落袋 + 全 settled 槽位还原纯文本**:span 带 data-wf-key,
+ *   - **settled 落袋 + settled 前缀还原纯文本**:span 带 data-wf-key,
  *     MarkdownRenderer 根节点监听冒泡的 animationend(markSettledFromAnimationEnd),
- *     播完的 key 进 state.settled;槽位内词全部 settled 后,该文本节点**完全
- *     不再改树**(原生文本,零 span)—— 流式长文档的元素数因此回落到与无动效
- *     渲染同阶,react-markdown 每 tick 的重建 + diff 不随已播完的前文线性涨
+ *     播完的 key 进 state.settled;settled 词从槽位中还原为合并后的原生文本,
+ *     只保留仍在播放的尾部 span——流式长文档的元素数因此回落到与无动效渲染
+ *     同阶,react-markdown 每 tick 的重建 + diff 不随已播完的前文线性涨
  *     (曾因全文逐词包 span,几千元素把主线程打满,流式中点击切换 session
  *     无响应,2026-08-09 实测)。部分 settled 的槽位仍整槽包 span(settled 词
  *     的负 delay 已超动画时长,both 填充直接呈现终态,不重播)。抽掉 span 引
@@ -64,7 +64,7 @@
  */
 
 import type { Plugin } from 'unified';
-import type { Element, ElementContent, Root, Text } from 'hast';
+import type { Element, ElementContent, Root } from 'hast';
 
 /** 逐词 stagger 步长上限(Codex Desktop 同款 24ms;慢速输出时的标准节奏)。 */
 const STEP_MS = 24;
@@ -369,6 +369,33 @@ function isSlotFullySettled(
   return true;
 }
 
+function appendPlainText(nodes: ElementContent[], value: string): void {
+  if (!value) return;
+  const last = nodes[nodes.length - 1];
+  if (last?.type === 'text') last.value += value;
+  else nodes.push({ type: 'text', value });
+}
+
+function makeSlotNodes(
+  slot: TextSlot,
+  keys: string[],
+  state: WordFadeState,
+  nowMs: number,
+): ElementContent[] {
+  const nodes: ElementContent[] = [];
+  let wordIndex = slot.wordStart;
+  for (const word of slot.words) {
+    if (!word.trim()) {
+      appendPlainText(nodes, word);
+      continue;
+    }
+    const key = keys[wordIndex++];
+    if (state.settled.has(key)) appendPlainText(nodes, word);
+    else nodes.push(makeWordNode(word, key, state, nowMs));
+  }
+  return nodes;
+}
+
 /**
  * 给 li 挂圆点淡入(Codex Desktop fadeListDecoration 同构)。动画打在
  * `::marker` 上(CSS 见 globals.css),delay/key 借用 li 内第一个词 ——
@@ -413,11 +440,7 @@ export const rehypeStreamWordFade: Plugin<[WordFadeState], Root> = (state) => {
     const nodesBySlot = slots.map((slot) => {
       // 全 settled 槽位不改树(性能核心,见 isSlotFullySettled 注释)。
       if (isSlotFullySettled(slot, keys, state)) return null;
-      let wordIndex = slot.wordStart;
-      return slot.words.map((w) => {
-        if (!w.trim()) return { type: 'text', value: w } satisfies Text;
-        return makeWordNode(w, keys[wordIndex++], state, nowMs);
-      });
+      return makeSlotNodes(slot, keys, state, nowMs);
     });
     for (let s = slots.length - 1; s >= 0; s--) {
       const nodes = nodesBySlot[s];

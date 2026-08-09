@@ -339,24 +339,40 @@ describe('rehypeStreamWordFade', () => {
     expect(words2[0].key).toBe(words1[3].key);
   });
 
-  it('部分 settled 的槽位整槽仍包 span,settled 词靠负 delay 呈现终态不重播', () => {
+  it('部分 settled 的槽位把 settled 前缀还原为纯文本,仅活动尾部保留 span', () => {
     const state = createWordFadeState();
     const tree1 = root(el('p', [textNode('one two three')]));
     run(tree1, state);
     const words1 = collectWords(tree1);
-    // 只有 0 号播完:槽位未全 settled,整槽包 span。
+    // 只有 0 号播完:槽位未全 settled,但 settled 前缀不再保留 span。
     state.settled.add(words1[0].key);
 
     const tree2 = root(el('p', [textNode('one two three four')]));
     run(tree2, state, 500);
     const words2 = collectWords(tree2);
-    expect(words2.map((w) => w.text)).toEqual(['one ', 'two ', 'three ', 'four']);
-    // settled 词保住原 key,负 delay 已超动画时长(both 填充呈现终态)。
-    expect(words2[0].key).toBe(words1[0].key);
-    expect(words2[0].delay).toBe(-500);
+    expect(words2.map((w) => w.text)).toEqual(['two ', 'three ', 'four']);
+    const p = tree2.children[0] as Element;
+    expect(p.children[0]).toEqual(textNode('one '));
+    // 活动词仍保住原 key,负 delay 继续提供 remount 免疫。
     // 在播词续播,新词接排。
-    expect(words2[2].key).toBe(words1[2].key);
-    expect(words2[2].delay).toBe(-452);
+    expect(words2[0].key).toBe(words1[1].key);
+    expect(words2[1].key).toBe(words1[2].key);
+    expect(words2[1].delay).toBe(-452);
+  });
+
+  it('长 settled 前缀只保留一个原生文本节点', () => {
+    const state = createWordFadeState();
+    const prefix = Array.from({ length: 200 }, (_, i) => `w${i}`).join(' ');
+    const tree1 = root(el('p', [textNode(`${prefix} tail`)]));
+    run(tree1, state);
+    const words1 = collectWords(tree1);
+    for (const word of words1.slice(0, 200)) state.settled.add(word.key);
+
+    const tree2 = root(el('p', [textNode(`${prefix} tail next`)]));
+    run(tree2, state, 500);
+    const p = tree2.children[0] as Element;
+    expect(p.children[0]).toEqual(textNode(`${prefix} `));
+    expect(collectWords(tree2).map((w) => w.text)).toEqual(['tail ', 'next']);
   });
 });
 

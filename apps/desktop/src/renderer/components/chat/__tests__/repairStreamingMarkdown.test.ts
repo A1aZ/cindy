@@ -37,6 +37,16 @@ describe('repairStreamingMarkdown', () => {
     );
   });
 
+  it('does not treat a literal fence opener with info text as a closing line', () => {
+    const src = '```\n```ts\nconst value = 1;';
+    expect(repairStreamingMarkdown(src)).toBe(`${src}\n\`\`\``);
+  });
+
+  it('accepts a real closing fence with trailing whitespace', () => {
+    const src = '```\ncode\n```  ';
+    expect(repairStreamingMarkdown(src)).toBe(src);
+  });
+
   it('围栏内的星号/方括号不触发行内修复', () => {
     const src = '```\na ** b [x](y';
     expect(repairStreamingMarkdown(src)).toBe('```\na ** b [x](y\n```');

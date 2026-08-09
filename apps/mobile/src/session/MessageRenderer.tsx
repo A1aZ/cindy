@@ -490,7 +490,7 @@ interface MessageActions {
   onShareableMessageProjectionChange?: (
     clientId: string,
     message: ConversationShareMessage,
-  ) => void;
+  ) => () => void;
   shareSelectionActive?: boolean;
   shareSelectionBusy?: boolean;
   /** 待发送气泡(pending_send 项)的展开态与队列操作回调。 */
@@ -1962,7 +1962,7 @@ function MessageBubble({
   );
   useEffect(() => {
     if (!shareSelectionActive || !shareProjection) return;
-    actions.onShareableMessageProjectionChange?.(clientId, shareProjection);
+    return actions.onShareableMessageProjectionChange?.(clientId, shareProjection);
   }, [
     actions.onShareableMessageProjectionChange,
     clientId,

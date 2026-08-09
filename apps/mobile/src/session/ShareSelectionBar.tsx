@@ -50,7 +50,9 @@ export function ShareSelectionBar({
       selectedCount === shareSelectionStore.count();
     if (currentlyAllSelected) {
       shareSelectionStore.setSelection(
-        selectionBeforeSelectAllRef.current ?? [],
+        shareableIds.filter((clientId) =>
+          selectionBeforeSelectAllRef.current?.includes(clientId),
+        ),
       );
       selectionBeforeSelectAllRef.current = null;
       return;

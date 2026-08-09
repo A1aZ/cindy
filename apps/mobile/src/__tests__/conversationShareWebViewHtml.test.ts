@@ -204,6 +204,12 @@ describe('buildConversationShareHtml 富内容导出', () => {
     );
     expect(shareBarSource).toContain('height: 44,');
     expect(shareBarSource).toContain('minHeight: 44,');
+    expect(shareBarSource).toContain(
+      'shareableIds.filter((clientId) =>',
+    );
+    expect(shareBarSource).toContain(
+      'selectionBeforeSelectAllRef.current?.includes(clientId)',
+    );
     expect(webViewSource).toContain(
       'onShouldStartLoadWithRequest={interceptNavigation}',
     );

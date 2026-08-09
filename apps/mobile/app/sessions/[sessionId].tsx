@@ -970,11 +970,17 @@ export default function SessionScreen() {
   const handleShareableMessageProjectionChange = useCallback((
     clientId: string,
     message: ConversationShareMessage,
-  ) => {
+  ): (() => void) => {
     const previous = shareMessageProjectionOverridesRef.current.get(clientId);
-    if (previous && conversationShareMessageFingerprint(previous) === conversationShareMessageFingerprint(message)) return;
     shareMessageProjectionOverridesRef.current.set(clientId, message);
-    setShareMessageProjectionRevision((revision) => revision + 1);
+    if (!previous || conversationShareMessageFingerprint(previous) !== conversationShareMessageFingerprint(message)) {
+      setShareMessageProjectionRevision((revision) => revision + 1);
+    }
+    return () => {
+      if (shareMessageProjectionOverridesRef.current.get(clientId) !== message) return;
+      shareMessageProjectionOverridesRef.current.delete(clientId);
+      setShareMessageProjectionRevision((revision) => revision + 1);
+    };
   }, []);
   const handleMessageBlockingOverlayChange = useCallback((blocked: boolean) => {
     setMessageBlockingOverlay(blocked);

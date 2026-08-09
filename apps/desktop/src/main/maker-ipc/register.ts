@@ -185,6 +185,7 @@ import { buildReviewPrompt } from '../reviewer/reviewPrompt.js';
 import {
   listReviewHistoricalAttachments,
   loadReviewEvidence,
+  readReviewContextFingerprint,
   readReviewWorkspaceSnapshot,
   resolveReviewArtifactPath,
   SensitiveReviewPathError,
@@ -202,6 +203,7 @@ import {
 import { fingerprintReviewArtifacts } from '../reviewer/reviewArtifactFingerprint.js';
 import { enforceReviewCreateOptions } from '../reviewer/reviewSessionPolicy.js';
 import { reviewSourceIdentityMatches } from '../reviewer/reviewSourceIdentity.js';
+import { buildReviewSessionTitle } from '../reviewer/reviewSessionTitle.js';
 import { readReviewRunFromAgentMeta, type ReviewRunMeta } from '../../shared/reviewRun.js';
 import {
   applyAgentSwitchToSessionRow,
@@ -6791,7 +6793,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               effort: source.effort as CreateOpts['effort'],
               fastMode: !!source.fastMode,
               providerId: source.providerId,
-              title: `审查 · ${source.title}`.slice(0, 120),
+              title: buildReviewSessionTitle(source.title),
               permissionMode: 'ask',
               planMode: false,
               reviewMode: true,
@@ -6800,6 +6802,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               ...(readRoots.size > 0 ? { extraDirs: [...readRoots] } : {}),
             }),
             verifyBeforeStart: async () => {
+              if (
+                maker.getSession(source.id)?.isTurnRunning() ||
+                (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
+              ) {
+                throw new Error(
+                  'The task conversation changed before Review started. Run /review again for the current context.',
+                );
+              }
               if (
                 (await fingerprintReviewArtifacts(authorizedArtifactPaths)) !==
                 sourceArtifactFingerprint
@@ -6821,6 +6831,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
                 .limit(1);
               if (!reviewSourceIdentityMatches(source, currentSource ?? null)) {
                 return 'The source task workspace changed while Review was running. Run /review again in the current workspace.';
+              }
+              if (
+                maker.getSession(source.id)?.isTurnRunning() ||
+                (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
+              ) {
+                return 'The task conversation changed while Review was running. Run /review again for the current context.';
               }
               if (evidence.workspaceFingerprint) {
                 const currentWorkspace = await readReviewWorkspaceSnapshot(source.id);

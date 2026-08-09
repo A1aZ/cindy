@@ -8779,6 +8779,7 @@
     }
   },
   "review": {
+    "sessionTitle": "Review · {{title}}",
     "toast": {
       "failed": "Couldn't start review",
       "remoteUnsupported": "This version can only review local tasks"

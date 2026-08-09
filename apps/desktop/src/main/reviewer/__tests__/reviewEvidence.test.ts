@@ -17,7 +17,7 @@ vi.mock('../../localDb/client/current.js', () => ({
       select: () => ({
         from: () => ({
           where: () => ({
-            orderBy: () => ({ limit: async () => reviewRows }),
+            orderBy: () => ({ limit: async (limit: number) => reviewRows.slice(0, limit) }),
           }),
         }),
       }),
@@ -50,7 +50,11 @@ import {
 } from '../reviewArtifactAuthorization.js';
 import type { ReviewPdfUtilityChildLike } from '../reviewPdfProcess.js';
 import type { ReviewPdfUtilityRequest } from '../reviewPdfProcessProtocol.js';
-import { listReviewHistoricalAttachments, loadReviewEvidence } from '../reviewEvidence.js';
+import {
+  listReviewHistoricalAttachments,
+  loadReviewEvidence,
+  readReviewContextFingerprint,
+} from '../reviewEvidence.js';
 
 const tempDirs: string[] = [];
 
@@ -89,6 +93,90 @@ afterEach(async () => {
 });
 
 describe('loadReviewEvidence attachment boundaries', () => {
+  it('fingerprints source-task activity while ignoring Review lifecycle cards', async () => {
+    const workingDir = await tempDir();
+    reviewRows.push({
+      role: 'user',
+      content: JSON.stringify({ text: 'original request' }),
+      agentMeta: null,
+      createdAt: 1,
+      id: 'message-1',
+    });
+
+    const evidence = await loadReviewEvidence({
+      sourceSessionId: 'source',
+      workingDir,
+      attachments: [],
+      explicitArtifactGrant: {
+        paths: [],
+        pathIdentities: new Map(),
+        inlineAttachmentKeys: [],
+      },
+    });
+    expect(await readReviewContextFingerprint('source')).toBe(evidence.contextFingerprint);
+
+    reviewRows.push({
+      role: 'assistant',
+      content: JSON.stringify({ text: 'new result without file changes' }),
+      agentMeta: null,
+      createdAt: 2,
+      id: 'message-2',
+    });
+    const changedFingerprint = await readReviewContextFingerprint('source');
+    expect(changedFingerprint).not.toBe(evidence.contextFingerprint);
+
+    reviewRows.push({
+      role: 'assistant',
+      content: '',
+      agentMeta: JSON.stringify({ internalOnly: true }),
+      createdAt: 3,
+      id: 'hidden-card',
+    });
+    expect(await readReviewContextFingerprint('source')).toBe(changedFingerprint);
+
+    reviewRows.push({
+      role: 'assistant',
+      content: '',
+      agentMeta: JSON.stringify({
+        reviewRun: {
+          version: 1,
+          runId: 'review-run',
+          sourceSessionId: 'source',
+          reviewerSessionId: 'reviewer',
+          status: 'running',
+          targetKind: 'mixed',
+          startedAt: 3,
+        },
+      }),
+      createdAt: 4,
+      id: 'review-card',
+    });
+    expect(await readReviewContextFingerprint('source')).toBe(changedFingerprint);
+  });
+
+  it('does not let a hidden lifecycle row evict the twentieth visible context message', async () => {
+    reviewRows.push(
+      ...Array.from({ length: 20 }, (_, index) => ({
+        role: index % 2 === 0 ? 'user' : 'assistant',
+        content: JSON.stringify({ text: `visible-${20 - index}` }),
+        agentMeta: null,
+        createdAt: 20 - index,
+        id: `message-${String(20 - index).padStart(2, '0')}`,
+      })),
+    );
+    const initialFingerprint = await readReviewContextFingerprint('source');
+
+    reviewRows.unshift({
+      role: 'assistant',
+      content: '',
+      agentMeta: JSON.stringify({ goalCompletion: { status: 'completed' } }),
+      createdAt: 21,
+      id: 'hidden-goal-card',
+    });
+
+    expect(await readReviewContextFingerprint('source')).toBe(initialFingerprint);
+  });
+
   it('uses MIME-only image classification for the harness block', async () => {
     const workingDir = await tempDir();
     const requestedPath = path.join(workingDir, 'poster');

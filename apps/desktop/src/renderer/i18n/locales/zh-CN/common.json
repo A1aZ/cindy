@@ -8765,6 +8765,7 @@
     }
   },
   "review": {
+    "sessionTitle": "审查 · {{title}}",
     "toast": {
       "failed": "无法开始审查",
       "remoteUnsupported": "当前版本只支持审查本机任务"

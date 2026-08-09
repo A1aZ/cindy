@@ -3,7 +3,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { isReviewSensitiveCredentialPath } from '@cindy/maker-core';
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lt, ne, notLike, or } from 'drizzle-orm';
 
 import { getDbClient } from '../localDb/client/current.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
@@ -59,6 +59,7 @@ export interface ReviewAttachmentBlock {
 
 export interface LoadedReviewEvidence {
   context: ReviewContextMessage[];
+  contextFingerprint: string;
   workspace: ReviewWorkspaceEvidence | null;
   workspaceFingerprint: string | null;
   changeSet: TurnChangeSetDetail | null;
@@ -73,6 +74,7 @@ export interface LoadedReviewEvidence {
 }
 
 const MAX_CONTEXT_ROWS = 20;
+const CONTEXT_QUERY_PAGE_SIZE = 64;
 // A single invocation accepts at most 20 explicit attachments plus one focus
 // path. Keep a small margin for task-history artifacts before declaring the
 // evidence list partial.
@@ -152,27 +154,103 @@ function hasReviewRunMeta(raw: unknown): boolean {
   return readReviewRunFromAgentMeta(raw) !== null;
 }
 
-async function readReviewVisibleRows(sourceSessionId: string) {
+type ReviewVisibleRow = {
+  role: 'user' | 'assistant';
+  content: string;
+  agentMeta: string | null;
+  createdAt: number;
+  id: string;
+};
+
+async function readReviewVisibleRows(sourceSessionId: string): Promise<ReviewVisibleRow[]> {
   const db = getDbClient().drizzle;
-  const rows = await db
-    .select({
-      role: messages.role,
-      content: messages.content,
-      agentMeta: messages.agentMeta,
-      createdAt: messages.createdAt,
-      id: messages.id,
-    })
-    .from(messages)
-    .where(
-      and(
-        eq(messages.sessionId, sourceSessionId),
-        inArray(messages.role, ['user', 'assistant']),
-        isNull(messages.rewindAt),
-      ),
-    )
-    .orderBy(desc(messages.createdAt), desc(messages.id))
-    .limit(MAX_CONTEXT_ROWS);
-  return rows.filter((row) => !hasReviewRunMeta(row.agentMeta)).reverse();
+  const rows: ReviewVisibleRow[] = [];
+  let cursor: { createdAt: number; id: string } | null = null;
+
+  while (rows.length < MAX_CONTEXT_ROWS) {
+    const page = (await db
+      .select({
+        role: messages.role,
+        content: messages.content,
+        agentMeta: messages.agentMeta,
+        createdAt: messages.createdAt,
+        id: messages.id,
+      })
+      .from(messages)
+      .where(
+        and(
+          eq(messages.sessionId, sourceSessionId),
+          inArray(messages.role, ['user', 'assistant']),
+          isNull(messages.rewindAt),
+          ne(messages.content, ''),
+          // Exclude Review status cards in SQL so they cannot consume query
+          // pages. The JS parser below remains the fail-closed authority.
+          or(isNull(messages.agentMeta), notLike(messages.agentMeta, '%"reviewRun"%')),
+          cursor
+            ? or(
+                lt(messages.createdAt, cursor.createdAt),
+                and(eq(messages.createdAt, cursor.createdAt), lt(messages.id, cursor.id)),
+              )
+            : undefined,
+        ),
+      )
+      .orderBy(desc(messages.createdAt), desc(messages.id))
+      .limit(CONTEXT_QUERY_PAGE_SIZE)) as ReviewVisibleRow[];
+    if (page.length === 0) break;
+
+    const last: ReviewVisibleRow = page[page.length - 1]!;
+    cursor = { createdAt: last.createdAt, id: last.id };
+    for (const row of page) {
+      const visibleRow = row;
+      if (hasReviewRunMeta(visibleRow.agentMeta)) continue;
+      const hasVisibleText =
+        visibleMessageTextForConversationSearch(visibleRow.role, visibleRow.content).length > 0;
+      const hasHistoricalArtifact = historicalAttachmentsFromRows([visibleRow]).length > 0;
+      if (!hasVisibleText && !hasHistoricalArtifact) continue;
+      rows.push(visibleRow);
+      if (rows.length === MAX_CONTEXT_ROWS) break;
+    }
+    if (page.length < CONTEXT_QUERY_PAGE_SIZE) break;
+  }
+
+  return rows.reverse();
+}
+
+function fingerprintReviewContextRows(rows: readonly ReviewVisibleRow[]): string {
+  const visibleMessages = rows.flatMap((row) => {
+    const text = visibleMessageTextForConversationSearch(row.role, row.content);
+    return text
+      ? [
+          {
+            id: row.id,
+            createdAt: row.createdAt,
+            role: row.role,
+            text,
+          },
+        ]
+      : [];
+  });
+  const historicalArtifacts = historicalAttachmentsFromRows(rows).map((attachment) => ({
+    name: attachment.name,
+    path: attachment.path,
+    url: attachment.url,
+    category: attachment.category,
+    mimeType: attachment.mimeType,
+    originalName: attachment.originalName,
+  }));
+  return createHash('sha256')
+    .update(JSON.stringify({ visibleMessages, historicalArtifacts }))
+    .digest('hex');
+}
+
+/**
+ * Fingerprint the bounded visible text and historical artifact references
+ * supplied to a reviewer. Hidden row fields and Review status cards are
+ * deliberately absent, so lifecycle updates cannot invalidate their own run
+ * while genuine task activity does.
+ */
+export async function readReviewContextFingerprint(sourceSessionId: string): Promise<string> {
+  return fingerprintReviewContextRows(await readReviewVisibleRows(sourceSessionId));
 }
 
 function persistedFileRefs(content: unknown): Array<{ path: string; name?: string }> {
@@ -191,9 +269,7 @@ function persistedFileRefs(content: unknown): Array<{ path: string; name?: strin
   return refs;
 }
 
-function historicalAttachmentsFromRows(
-  rows: Awaited<ReturnType<typeof readReviewVisibleRows>>,
-): ReviewAttachmentInput[] {
+function historicalAttachmentsFromRows(rows: readonly ReviewVisibleRow[]): ReviewAttachmentInput[] {
   const attachments: ReviewAttachmentInput[] = [];
   for (const row of rows) {
     for (const url of imageCacheStore.collectSessionImageUrls(row.content)) {
@@ -488,6 +564,7 @@ export async function loadReviewEvidence(input: {
 
   return {
     context,
+    contextFingerprint: fingerprintReviewContextRows(visibleRows),
     workspace,
     workspaceFingerprint: workspaceSnapshot?.fingerprint ?? null,
     changeSet,

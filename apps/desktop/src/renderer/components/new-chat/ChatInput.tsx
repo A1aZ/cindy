@@ -2372,7 +2372,7 @@ export function ChatInput({
       },
     },
     // Tick state on every update so triggerState below recomputes.
-onUpdate: ({ editor: ed, transaction }) => {
+    onUpdate: ({ editor: ed, transaction }) => {
       const syntheticRangeEnd = syntheticAtRangeEndRef.current;
       if (syntheticRangeEnd !== null && transaction.docChanged) {
         syntheticAtRangeEndRef.current = transaction.mapping.map(syntheticRangeEnd, 1);
@@ -2382,7 +2382,6 @@ onUpdate: ({ editor: ed, transaction }) => {
       if (!composerDocIsEmpty(ed.state.doc) && recommendedPromptRef.current) {
         showRecommendationRef.current = false;
         setRecommendedPrompt(null);
-      }
       }
       if (
         !suppressListNormalizationRef.current &&
@@ -4409,6 +4408,10 @@ onUpdate: ({ editor: ed, transaction }) => {
       if (!finishAgentSendDispatch) return;
       draftSaveSchedulerRef.current?.flush();
       dispatchSendInFlightRef.current = true;
+      // 发送新消息时立即递增 turnGen，让任何还未落地的旧 turn 预测结果失效。
+      // 必须在所有异步操作（resolveSessionMessageReferencesForSend / effort settle）
+      // 之前递增，防止旧预测在 reference 解析等异步等待期间落地到输入框。
+      turnGenRef.current += 1;
       // Local/SSH sends keep the live composer while references and runtime
       // settings settle; remote sends must stay editable after their
       // click-time snapshot is cleared.
@@ -4887,11 +4890,6 @@ onUpdate: ({ editor: ed, transaction }) => {
             return;
           }
         }
-        // 发送新消息时立即递增 turnGen，让任何还未落地的旧 turn 预测结果失效。
-        // 必须在所有异步操作（effort settle / reference 解析）之前递增，防止
-        // device-link 乐观发送清空编辑器后、异步准备完成前旧预测写回输入框。
-        turnGenRef.current += 1;
-
         let result: boolean | void;
         let effortForSend = activeEffort;
         try {

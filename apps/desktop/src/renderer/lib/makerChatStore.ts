@@ -2547,6 +2547,7 @@ export type SessionChatLightState = Pick<
   | 'fastMode'
   | 'planModeEnabled'
   | 'agentSwitchIntent'
+  | 'pendingTaskWake'
 >;
 
 function createInitialState(): SessionChatState {
@@ -7652,6 +7653,7 @@ function selectLightState(state: SessionChatState): SessionChatLightState {
     queueExpanded: state.queueExpanded,
     fastMode: state.fastMode,
     planModeEnabled: state.planModeEnabled,
+    pendingTaskWake: state.pendingTaskWake,
   };
 }
 
@@ -7692,7 +7694,8 @@ function lightStateEquals(a: SessionChatLightState, b: SessionChatLightState): b
     a.queuePaused === b.queuePaused &&
     a.queueExpanded === b.queueExpanded &&
     a.fastMode === b.fastMode &&
-    a.planModeEnabled === b.planModeEnabled
+    a.planModeEnabled === b.planModeEnabled &&
+    a.pendingTaskWake === b.pendingTaskWake
   );
 }
 

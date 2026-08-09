@@ -748,6 +748,7 @@ export function useCCAgentChat(
     lightState.isStreaming ||
     lightState.agentStatus.isRunning ||
     hasPendingSteer ||
+    lightState.pendingTaskWake ||
     (pendingQueueLength > 0 && !lightState.queuePaused);
 
   const setQueueExpanded = useCallback(

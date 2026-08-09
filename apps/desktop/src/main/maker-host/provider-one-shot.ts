@@ -435,7 +435,7 @@ export async function runProviderOneShot(
   log.debug('oneShot args', {
     sessionId: args.sessionId,
     agentKind: args.agentKind,
-    prompt: args.prompt,
+    promptLen: args.prompt.length,
     opts,
   });
 
@@ -560,7 +560,7 @@ export async function runProviderOneShot(
         log.debug('oneShot request body (anthropic)', {
           model: toSdkModelString(target.model),
           maxTokens,
-          prompt: args.prompt,
+          promptLen: args.prompt.length,
         });
         text = await fetchAnthropicTitle(
           target.upstream,
@@ -585,7 +585,7 @@ export async function runProviderOneShot(
           model: target.model,
           effort: target.effort,
           instructions: codexInstructions,
-          prompt: args.prompt,
+          promptLen: args.prompt.length,
         });
         text = await fetchCodexTitle(
           target.upstream,

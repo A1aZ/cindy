@@ -70,6 +70,7 @@ import {
   isSuccessfulCodexDoneEventData,
   onTurnErrorEvent,
   resetTurnPersistState,
+  clearCodexPlanRowsForSession,
   clearSessionPersistState,
   consumeLastAssistantPersistId,
   consumeLastTopLevelAssistantPersistId,
@@ -513,6 +514,25 @@ describe('update_plan tool_use persistence', () => {
   });
 
   it('terminal error stamping is a no-op when the turn has no plan row', () => {
+    expect(persistCodexPlanOnTerminalError(SESSION)).toBe(false);
+  });
+
+  it('does not carry a reconciled turn plan into a later id-less terminal error', () => {
+    onToolUseEvent(
+      SESSION,
+      {
+        toolUseId: 'plan:turn-reconciled',
+        toolName: 'update_plan',
+        input: { plan: [{ step: 'Old turn work', status: 'completed' }] },
+      },
+      null,
+    );
+
+    // reconcileSessionTurnIdle treats the lost-terminal path as a logical turn
+    // boundary and clears this cross-segment ownership before the next turn.
+    clearCodexPlanRowsForSession(SESSION);
+    resetTurnPersistState(SESSION);
+
     expect(persistCodexPlanOnTerminalError(SESSION)).toBe(false);
   });
 

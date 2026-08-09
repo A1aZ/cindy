@@ -9314,6 +9314,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // The marker write is best-effort and ordered behind pending message
       // persistence. It may retry/settle after an owner boundary is available.
       markTurnEndedAfterPersistDrain(sessionId);
+      // This is a logical turn boundary even though the vendor terminal event
+      // was lost. Drop the cross-segment plan ownership here so a later turn's
+      // id-less terminal error cannot fail-stamp an older plan.
+      clearCodexPlanRowsForSession(sessionId);
       resetTurnPersistState(sessionId);
       noteClaudeSessionTurnState(sessionId, false);
       settlePendingCredentialSwitch(sessionId, `reconcile:${source}`);

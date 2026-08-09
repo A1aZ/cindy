@@ -610,7 +610,7 @@ export async function runProviderOneShot(
         log.debug('oneShot request body (gateway-chat)', {
           model: target.model,
           maxTokens,
-          prompt: args.prompt,
+          promptLen: args.prompt.length,
         });
         text = await fetchGatewayTitle(
           target.upstream,
@@ -628,7 +628,7 @@ export async function runProviderOneShot(
     log.debug('oneShot raw response', {
       wire: target.wire,
       model: target.model,
-      response: text,
+      responseLen: text?.length ?? 0,
     });
     // The prompt is advisory; never persist a transcript continuation, role-labelled
     // response, Markdown wrapper, or multiline answer. Validate the complete response

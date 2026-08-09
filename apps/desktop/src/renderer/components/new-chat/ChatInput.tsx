@@ -246,6 +246,7 @@ import {
   resolveComposerEnterIntent,
   useComposerSendShortcutPreference,
 } from '@/hooks/useComposerSendShortcutPreference';
+import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
 import { createLogger } from '@/lib/logger';
 import { createComposerDraftSaveScheduler } from '@/lib/composerDraftSaveScheduler';
 import {
@@ -1004,14 +1005,8 @@ export function ChatInput({
   const navigate = useNavigate();
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
   // ── 推荐提示词 ────────────────────────────────────────────────────
-  // 设置开关:从 localStorage 读,默认开启
-  const [recommendationEnabled] = useState(() => {
-    try {
-      return localStorage.getItem('prompt-recommendation-enabled') !== 'false';
-    } catch {
-      return true;
-    }
-  });
+  // 设置开关:通过 shared hook 订阅,与 TipsSection 同源,切换后立即生效。
+  const { enabled: recommendationEnabled } = usePromptRecommendationPreference();
   // 推荐词渲染成一层 overlay 盖在编辑器上(原生 placeholder 由 CSS 隐藏)——
   // Tiptap Placeholder 的文本在 extension 创建时定型,运行期改不动,所以不走它。
   const [recommendedPrompt, setRecommendedPrompt] = useState<string | null>(null);
@@ -1132,6 +1127,12 @@ export function ChatInput({
     // sessionId 变化时清除推荐 UI（ref 已在 render 阶段同步更新）
     setRecommendedPrompt(null);
   }, [sessionId]);
+  useEffect(() => {
+    // 用户在 Settings 里关闭推荐提示词后,立即清除当前可见的推荐 UI。
+    if (!recommendationEnabled) {
+      setRecommendedPrompt(null);
+    }
+  }, [recommendationEnabled]);
   // messages 是可选 prop,缺省按空历史处理(空历史不发预测请求)。
   const messagesRef = useRef(messages ?? []);
   messagesRef.current = messages ?? [];
@@ -6859,7 +6860,7 @@ export function ChatInput({
                   <div
                     className={cn(
                       'pointer-events-none absolute left-0 top-0 w-full truncate py-[3px]',
-                      'text-[15px] leading-[22px] font-normal',
+                      'text-15 leading-[1.467] font-normal',
                       'text-[var(--chat-input-placeholder-subtle)]',
                     )}
                     aria-hidden="true"

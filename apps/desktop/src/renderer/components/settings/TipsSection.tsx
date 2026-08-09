@@ -13,39 +13,31 @@
  * 应用, 不需要修改任何 cell 组件。
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Sparkles } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
 import { useAuth } from '@/contexts/AuthContext';
 import { Switch } from '@/components/ui/switch';
+import { usePromptRecommendationPreference } from '@/hooks/usePromptRecommendationPreference';
 
 import { ChatEmbeddingCell } from './ChatEmbeddingCell';
 import { MessageNavRailCell } from './MessageNavRailCell';
 import { SilentEncryptedRetryCell } from './SilentEncryptedRetryCell';
 
-const RECOMMENDATION_KEY = 'prompt-recommendation-enabled';
-
 export function TipsSection() {
   const { t } = useTranslation();
   const { mode } = useAuth();
-  const [recommendationEnabled, setRecommendationEnabled] = useState(() => {
-    try {
-      return localStorage.getItem(RECOMMENDATION_KEY) !== 'false';
-    } catch {
-      return true;
-    }
-  });
+  const { enabled: recommendationEnabled, setEnabled: setRecommendationEnabled } =
+    usePromptRecommendationPreference();
 
-  const handleRecommendationToggle = useCallback((next: boolean) => {
-    setRecommendationEnabled(next);
-    try {
-      localStorage.setItem(RECOMMENDATION_KEY, String(next));
-    } catch {
-      // localStorage 不可用 → 静默
-    }
-  }, []);
+  const handleRecommendationToggle = useCallback(
+    (next: boolean) => {
+      setRecommendationEnabled(next);
+    },
+    [setRecommendationEnabled],
+  );
 
   return (
     <div className="flex flex-col gap-[14px]">

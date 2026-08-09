@@ -326,6 +326,30 @@ describe('ClaudeCodeAgent plan mode', () => {
       tool_name: 'Grep',
       tool_input: { path: sourcePath, pattern: 'value' },
     })).resolves.toEqual({ continue: true });
+    await expect(reviewHook({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Glob',
+      tool_input: { pattern: '**/*.ts' },
+    })).resolves.toEqual({ continue: true });
+    await expect(reviewHook({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Glob',
+      tool_input: { pattern: '{src,test}/**/*.{ts,tsx}' },
+    })).resolves.toEqual({ continue: true });
+    for (const pattern of [
+      '../../.ssh/*',
+      '{../../.ssh/*,**/*.ts}',
+      '{/etc/*,**/*.ts}',
+      '[.][.]/.ssh/*',
+      path.join(os.homedir(), '**', '*'),
+      String.raw`C:\\Users\\outside\\*`,
+    ]) {
+      await expect(reviewHook({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Glob',
+        tool_input: { pattern },
+      })).resolves.toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } });
+    }
     expect(downstreamHook).not.toHaveBeenCalled();
 
     if (!handle.setPermissionMode) throw new Error('expected permission control');

@@ -13,6 +13,8 @@ import { IpcHarness } from './helpers/ipcHarness.js';
 
 class FakeReviewer implements ReviewRunnerHandle {
   private listener: ((event: AgentEvent) => void) | null = null;
+  private statusListener: ((status: 'active' | 'aborting' | 'closed' | 'error') => void) | null =
+    null;
   accepted = true;
   readonly send = vi.fn(async (_message: UserMessage, options: SessionSendOptions) => {
     await options.onAccepted?.();
@@ -28,8 +30,21 @@ class FakeReviewer implements ReviewRunnerHandle {
     };
   }
 
+  onStatusChange(
+    listener: (status: 'active' | 'aborting' | 'closed' | 'error') => void,
+  ): () => void {
+    this.statusListener = listener;
+    return () => {
+      if (this.statusListener === listener) this.statusListener = null;
+    };
+  }
+
   emit(event: AgentEvent): void {
     this.listener?.(event);
+  }
+
+  emitStatus(status: 'active' | 'aborting' | 'closed' | 'error'): void {
+    this.statusListener?.(status);
   }
 }
 
@@ -175,6 +190,107 @@ describe('maker:review:start IPC lifecycle', () => {
     await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
       { ok: true, runId: 'run-2' },
     );
+  });
+
+  it('fails and releases an active Review when its reviewer task is closed', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-1',
+    });
+
+    reviewer.emitStatus('closed');
+    await vi.waitFor(() =>
+      expect(deps.updateSourceCard).toHaveBeenCalledWith(
+        expect.objectContaining({
+          result: '',
+          meta: expect.objectContaining({
+            status: 'failed',
+            error: 'Reviewer task was closed before it finished',
+          }),
+        }),
+      ),
+    );
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-2',
+    });
+  });
+
+  it('rejects startup when the reviewer closes before send acceptance returns', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.send.mockImplementationOnce(async (_message, options) => {
+      await options.onAccepted?.();
+      reviewer.emitStatus('closed');
+      return { accepted: true } as const;
+    });
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({ status: 'failed' }),
+      }),
+    );
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-2',
+    });
+  });
+
+  it('lets close finalization own a simultaneous rejected send', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    reviewer.send.mockImplementationOnce(async (_message, options) => {
+      await options.onAccepted?.();
+      reviewer.emitStatus('closed');
+      return { accepted: false, reason: 'cancelled-before-dispatch' } as const;
+    });
+    const deps = makeDeps(reviewer);
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
+    expect(deps.updateSourceCard).toHaveBeenCalledTimes(1);
+    expect(deps.updateSourceCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        meta: expect.objectContaining({
+          status: 'failed',
+          error: 'Reviewer task was closed before it finished',
+        }),
+      }),
+    );
+  });
+
+  it('installs the close listener before publishing the reviewer task', async () => {
+    const harness = new IpcHarness();
+    const reviewer = new FakeReviewer();
+    const deps = makeDeps(reviewer);
+    vi.mocked(deps.broadcastReviewerCreated).mockImplementationOnce(() => {
+      reviewer.emitStatus('closed');
+    });
+    registerReviewStartHandler(harness, deps);
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).rejects.toMatchObject({
+      code: 'PRECONDITION_FAILED',
+    });
+    expect(reviewer.send).not.toHaveBeenCalled();
+
+    await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject({
+      ok: true,
+      runId: 'run-2',
+    });
   });
 
   it('locks a source during evidence preparation and releases it when preparation fails', async () => {

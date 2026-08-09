@@ -180,6 +180,7 @@ import {
   saveDraft as saveComposerDraft,
   getDraftPresence as getComposerDraftPresence,
   plainTextToTiptapDoc,
+  restoreRemoteOptimisticDraft,
 } from '@/lib/composerDraftStore';
 import { setLastWorkingDir } from '@/state/lastWorkingDir';
 import { consumeComposerMentionDrop } from '@/lib/composerDrop';
@@ -2401,38 +2402,42 @@ export function CCAgentSessionView({
   const pendingIssueFilesRef = useRef<AttachedFile[] | undefined>(undefined);
 
   const maybeDispatchDesktopSlashCommand = useCallback(
-    async (message: string, files?: AttachedFile[]): Promise<boolean> => {
+    async (
+      message: string,
+      files?: AttachedFile[],
+    ): Promise<'not-handled' | 'accepted' | 'rejected'> => {
       const slashMatch = message.match(/^\/(\S+)(?:\s+(.*))?$/s);
-      if (!slashMatch) return false;
+      if (!slashMatch) return 'not-handled';
       const cmdName = slashMatch[1].toLowerCase();
       const args = slashMatch[2] ?? '';
       const cached = allCommandsRef.current;
       const commands = cached.length > 0 ? cached : await getHelpCommandsSnapshot();
       const hit = commands.find((c) => c.name.toLowerCase() === cmdName);
-      if (hit?.kind !== 'desktop') return false;
+      if (hit?.kind !== 'desktop') return 'not-handled';
       // Review is handed to Main immediately with this invocation's serialized
       // attachments. It must not depend on this React view remaining mounted,
       // nor share a mutable attachment ref with a later command.
       if (hit.name === 'review') {
-        if (!sessionId) return true;
+        if (!sessionId) return 'rejected';
         if (remoteDeviceId) {
           toast.warning(t('review.toast.remoteUnsupported'));
-          return true;
+          return 'rejected';
         }
         const attachments = files?.length ? serializeAttachedFiles(files) : undefined;
-        void window.electronAPI.maker
-          .startReview({
+        try {
+          await window.electronAPI.maker.startReview({
             sourceSessionId: sessionId,
             ...(args.trim() ? { focus: args.trim() } : {}),
             ...(attachments?.length ? { attachments } : {}),
-          })
-          .catch((err) => {
-            const ipcError = extractIpcError(err);
-            toast.error(
-              ipcError?.message || (err instanceof Error ? err.message : t('review.toast.failed')),
-            );
           });
-        return true;
+          return 'accepted';
+        } catch (err) {
+          const ipcError = extractIpcError(err);
+          toast.error(
+            ipcError?.message || (err instanceof Error ? err.message : t('review.toast.failed')),
+          );
+          return 'rejected';
+        }
       }
       // /issue still uses the existing command event because its action runs
       // inside this mounted composer. Other desktop commands have no files.
@@ -2449,7 +2454,7 @@ export function CCAgentSessionView({
         ...(args ? { args } : {}),
         ...(remoteDeviceId ? { deviceId: remoteDeviceId } : {}),
       });
-      return true;
+      return 'accepted';
     },
     [getHelpCommandsSnapshot, session?.workingDir, sessionId, remoteDeviceId, t],
   );
@@ -2558,8 +2563,9 @@ export function CCAgentSessionView({
       //     广播回 renderer (上面 useEffect 订阅), 不发给 agent。
       //   - agent-builtin / agent-skill / 没命中任何已知命令 → 走默认 send,
       //     原文(含前导 `/`)直接送 agent, 由 SDK 自己识别 (/compact 等)。
-      if (deliveryMode !== 'steer' && (await maybeDispatchDesktopSlashCommand(message, files))) {
-        return;
+      if (deliveryMode !== 'steer') {
+        const desktopCommand = await maybeDispatchDesktopSlashCommand(message, files);
+        if (desktopCommand !== 'not-handled') return desktopCommand === 'accepted';
       }
 
       // ① 本机会话维持既有 readiness gate。device-link 已建任务不把视图生命周期内
@@ -3021,10 +3027,22 @@ export function CCAgentSessionView({
         }
         // 三处交接统一走 deliverRecoverableHandoff:交付成功才丢副本,
         // resolve false / 抛错都保留(见该函数注释)。
-        const dispatched = await deliverRecoverableHandoff(sessionId, () =>
-          maybeDispatchDesktopSlashCommand(pending.text, pending.files),
-        );
-        if (dispatched) return;
+        const desktopCommand = await maybeDispatchDesktopSlashCommand(pending.text, pending.files);
+        if (desktopCommand !== 'not-handled') {
+          if (desktopCommand === 'rejected') {
+            // NewMaker 已把源草稿移交并清空；Main 没受理 `/review` 时，把正文和附件
+            // 一起放回新会话输入框。复用失败发送的 FIFO 恢复器，避免覆盖用户在
+            // IPC 等待期间已经输入的新内容。
+            restoreRemoteOptimisticDraft(sessionId, {
+              clientId: `pending-review:${pending.createdAt}`,
+              text: plainTextToTiptapDoc(pending.text),
+              attachments: pending.files ?? [],
+              browserComments: [],
+            });
+          }
+          await deliverRecoverableHandoff(sessionId, () => desktopCommand === 'accepted');
+          return;
+        }
         // 必须 await:sendMessage 在设备离线 / 访问被撤销 / 远端 enqueue 拒绝时不抛错,
         // 而是 resolve false —— 不等它就丢副本,正文会从界面和磁盘上一起消失(codex P1)。
         await deliverRecoverableHandoff(sessionId, () =>

@@ -1,11 +1,16 @@
 import { promises as fs } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { reviewRows } = vi.hoisted(() => ({ reviewRows: [] as Array<Record<string, unknown>> }));
+const { reviewRows, utilityProcessFork } = vi.hoisted(() => ({
+  reviewRows: [] as Array<Record<string, unknown>>,
+  utilityProcessFork: vi.fn(),
+}));
 
+vi.mock('electron', () => ({ utilityProcess: { fork: utilityProcessFork } }));
 vi.mock('../../localDb/client/current.js', () => ({
   getDbClient: () => ({
     drizzle: {
@@ -43,9 +48,29 @@ import {
   authorizeReviewExplicitArtifacts,
   ReviewArtifactAuthorizationError,
 } from '../reviewArtifactAuthorization.js';
+import type { ReviewPdfUtilityChildLike } from '../reviewPdfProcess.js';
+import type { ReviewPdfUtilityRequest } from '../reviewPdfProcessProtocol.js';
 import { listReviewHistoricalAttachments, loadReviewEvidence } from '../reviewEvidence.js';
 
 const tempDirs: string[] = [];
+
+class RejectingPdfUtility extends EventEmitter implements ReviewPdfUtilityChildLike {
+  postMessage(message: unknown): void {
+    const request = message as ReviewPdfUtilityRequest;
+    queueMicrotask(() => {
+      this.emit('message', {
+        kind: 'result',
+        id: request.id,
+        ok: false,
+        error: 'invalid PDF fixture',
+      });
+    });
+  }
+
+  kill(): boolean {
+    return true;
+  }
+}
 
 async function tempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-review-evidence-'));
@@ -53,8 +78,13 @@ async function tempDir(): Promise<string> {
   return dir;
 }
 
+beforeEach(() => {
+  utilityProcessFork.mockImplementation(() => new RejectingPdfUtility());
+});
+
 afterEach(async () => {
   reviewRows.splice(0);
+  utilityProcessFork.mockReset();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 

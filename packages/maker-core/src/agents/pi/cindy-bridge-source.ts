@@ -174,13 +174,12 @@ function isInsideRoot(candidate: string, root: string): boolean {
   return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
 }
 
-function reviewReadIsAllowed(toolName: string, candidate: string, allowedPaths: string[]): boolean {
+function reviewReadIsAllowed(candidate: string, allowedPaths: string[]): boolean {
   try {
     const requested = path.resolve(process.cwd(), candidate);
     if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(requested))) return false;
     const target = realpathSync(requested);
     if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(target))) return false;
-    if (toolName === 'grep' && statSync(target).isDirectory()) return false;
     return allowedPaths.some((allowedPath) => {
       try {
         const allowed = realpathSync(allowedPath);
@@ -673,7 +672,7 @@ export default async function cindyBridge(pi: any) {
         : process.cwd();
       if (
         READONLY_BUILTINS.has(event.toolName)
-        && reviewReadIsAllowed(event.toolName, rawPath, permission.reviewReadPaths)
+        && reviewReadIsAllowed(rawPath, permission.reviewReadPaths)
       ) return;
       return {
         block: true,

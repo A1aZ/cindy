@@ -49,9 +49,12 @@ describe('cindy-bridge extension source', () => {
       "reason: 'Cindy Review only permits read-only access to this task and its explicit artifacts.'",
     );
     expect(source).toContain(
-      'reviewReadIsAllowed(event.toolName, rawPath, permission.reviewReadPaths)',
+      'reviewReadIsAllowed(rawPath, permission.reviewReadPaths)',
     );
-    expect(source).toContain("toolName === 'grep' && statSync(target).isDirectory()");
+    expect(source).not.toContain("toolName === 'grep' && statSync(target).isDirectory()");
+    expect(source).toContain(
+      'stat.isDirectory() ? isInsideRoot(target, allowed) : target === allowed',
+    );
     expect(source).toContain('REVIEW_CREDENTIAL_PATH_PATTERNS.some');
   });
 });

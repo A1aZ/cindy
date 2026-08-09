@@ -1,40 +1,21 @@
-import { promises as fs } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
+import { EventEmitter } from 'node:events';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
-import { extractReviewPdfTextInChild } from '../reviewPdfProcess.js';
+import {
+  extractReviewPdfTextInChild,
+  type ReviewPdfUtilityChildLike,
+} from '../reviewPdfProcess.js';
+import type { ReviewPdfUtilityRequest } from '../reviewPdfProcessProtocol.js';
 
-const tempDirs: string[] = [];
-
-async function tempDir(): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-review-pdf-process-'));
-  tempDirs.push(dir);
-  return dir;
+class FakePdfUtility extends EventEmitter implements ReviewPdfUtilityChildLike {
+  readonly postMessage = vi.fn((message: unknown) => void message);
+  readonly kill = vi.fn(() => true);
 }
 
-afterEach(async () => {
-  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
-});
-
 describe('isolated Review PDF extraction', () => {
-  it('kills a parser that blocks synchronously instead of blocking Electron Main', async () => {
-    const dir = await tempDir();
-    const fakePdfjs = path.join(dir, 'blocking-pdfjs.mjs');
-    await fs.writeFile(
-      fakePdfjs,
-      `export function getDocument() {
-        const document = {
-          numPages: 1,
-          async getPage() {
-            return { async getTextContent() { for (;;) {} } };
-          },
-          async destroy() {},
-        };
-        return { promise: Promise.resolve(document), async destroy() {} };
-      }`,
-    );
+  it('kills a non-responsive utility process instead of blocking Electron Main', async () => {
+    const child = new FakePdfUtility();
     const startedAt = Date.now();
 
     await expect(
@@ -42,9 +23,40 @@ describe('isolated Review PDF extraction', () => {
         timeoutMs: 150,
         maxPages: 2,
         maxInputBytes: 1_024,
-        pdfjsModulePath: fakePdfjs,
+        fork: () => child,
       }),
     ).rejects.toThrow('timed out');
+    expect(child.kill).toHaveBeenCalledTimes(1);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it('accepts only the matching bounded response and terminates the one-shot child', async () => {
+    const child = new FakePdfUtility();
+    child.postMessage.mockImplementationOnce((message) => {
+      const request = message as ReviewPdfUtilityRequest;
+      queueMicrotask(() => {
+        child.emit('message', {
+          kind: 'result',
+          id: request.id,
+          ok: true,
+          result: {
+            sections: ['--- 第 1 页 ---\nTerms'],
+            pagesInspected: 1,
+            numPages: 1,
+            clipped: false,
+          },
+        });
+      });
+    });
+
+    await expect(
+      extractReviewPdfTextInChild(Buffer.from('%PDF-1.4'), 1_000, {
+        timeoutMs: 1_000,
+        maxPages: 2,
+        maxInputBytes: 1_024,
+        fork: () => child,
+      }),
+    ).resolves.toMatchObject({ sections: ['--- 第 1 页 ---\nTerms'], pagesInspected: 1 });
+    expect(child.kill).toHaveBeenCalledTimes(1);
   });
 });

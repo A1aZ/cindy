@@ -274,12 +274,27 @@ function isReadOnlyClaudeTool(toolName: string): boolean {
   return READ_ONLY_CLAUDE_TOOLS.has(toolName);
 }
 
+function reviewGlobPatternEscapesScope(pattern: string): boolean {
+  const value = pattern.trim();
+  if (!value) return false;
+  if (path.isAbsolute(value) || path.win32.isAbsolute(value)) return true;
+  // Backslash escapes and character classes can spell a parent segment without
+  // a literal "..". Reject those ambiguous forms, then inspect brace/extglob
+  // branches for rooted paths while keeping common {ts,tsx} patterns usable.
+  if (/[\\[\]]/.test(value) || value.includes('..')) return true;
+  return /(^|[{(,|])(?:\/|[a-zA-Z]:\/)/.test(value);
+}
+
 async function reviewReadToolIsInScope(params: {
   toolName: string;
   toolInput: Record<string, unknown> | undefined;
   workingDir: string;
   grants: readonly ReviewReadGrant[];
 }): Promise<boolean> {
+  if (params.toolName === 'Glob') {
+    const pattern = params.toolInput?.pattern;
+    if (typeof pattern !== 'string' || reviewGlobPatternEscapesScope(pattern)) return false;
+  }
   const keyByTool: Partial<Record<string, string>> = {
     Read: 'file_path',
     Glob: 'path',

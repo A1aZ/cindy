@@ -645,8 +645,11 @@ describe('CodexAgent permissions', () => {
       approvalPolicy: 'never',
     });
     expect(turnStart).not.toHaveProperty('sandboxPolicy');
-    expect(JSON.stringify(turnStart.input)).toContain(realMarkdownPath);
-    expect(JSON.stringify(turnStart.input)).toContain(realPdfPath);
+    const reviewText = (turnStart.input as Array<{ type?: string; text?: string }>).find(
+      (item) => item.type === 'text',
+    )?.text;
+    expect(reviewText).toContain(realMarkdownPath);
+    expect(reviewText).toContain(realPdfPath);
     expect(turnStart.input).toEqual(
       expect.arrayContaining([{ type: 'localImage', path: realImagePath }]),
     );

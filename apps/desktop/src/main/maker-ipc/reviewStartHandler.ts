@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  SessionStatus,
   SessionSendOptions,
   SessionSendResult,
   UserMessage,
@@ -102,6 +103,7 @@ export interface PreparedReviewRun {
 
 export interface ReviewRunnerHandle {
   onEvent(listener: (event: AgentEvent) => void): () => void;
+  onStatusChange(listener: (status: SessionStatus) => void): () => void;
   send(message: UserMessage, options: SessionSendOptions): Promise<SessionSendResult>;
 }
 
@@ -172,6 +174,7 @@ export function registerReviewStartHandler(
     activeReviewsBySource.set(request.sourceSessionId, { runId, reviewerSessionId });
 
     let disposeReviewEvents: (() => void) | null = null;
+    let disposeReviewStatus: (() => void) | null = null;
     let runningMeta: ReviewRunMeta | null = null;
     let sourceAgentKind: PreparedReviewRun['sourceAgentKind'] | null = null;
     let settled = false;
@@ -183,6 +186,12 @@ export function registerReviewStartHandler(
     const release = (): void => {
       const active = activeReviewsBySource.get(request.sourceSessionId);
       if (active?.runId === runId) activeReviewsBySource.delete(request.sourceSessionId);
+    };
+    const disposeReviewerListeners = (): void => {
+      disposeReviewEvents?.();
+      disposeReviewEvents = null;
+      disposeReviewStatus?.();
+      disposeReviewStatus = null;
     };
     const closeReviewer = async (): Promise<void> => {
       if (reviewerClosed) return;
@@ -257,8 +266,6 @@ export function registerReviewStartHandler(
       const launch = await prepared.prepareLaunch();
       await launch.verifyBeforeStart();
       const reviewer = await deps.startReviewer(launch.reviewerCreateOpts);
-      await deps.markReviewerStarted(reviewerSessionId, startedAt);
-      deps.broadcastReviewerCreated(reviewerSessionId);
 
       disposeReviewEvents = reviewer.onEvent((reviewEvent) => {
         if (settled) return;
@@ -266,7 +273,7 @@ export function registerReviewStartHandler(
         const terminalError = reviewEvent.type === 'error' && isTerminalTurnErrorEvent(reviewEvent);
         if (reviewEvent.type !== 'done' && !terminalError) return;
         settled = true;
-        disposeReviewEvents?.();
+        disposeReviewerListeners();
         terminalFinalization = (async () => {
           if (terminalError) {
             await updateSourceCard('failed', '', terminalErrorMessage(reviewEvent));
@@ -303,6 +310,39 @@ export function registerReviewStartHandler(
         });
         void terminalFinalization;
       });
+      disposeReviewStatus = reviewer.onStatusChange((status) => {
+        if (status !== 'closed' || settled || reviewerClosed) return;
+        settled = true;
+        disposeReviewerListeners();
+        terminalFinalization = (async () => {
+          await updateSourceCard('failed', '', 'Reviewer task was closed before it finished');
+          await closeReviewer();
+        })().catch(async (error) => {
+          deps.warn('reviewer close finalization failed', {
+            sourceSessionId: request.sourceSessionId,
+            reviewerSessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          release();
+          await closeReviewer();
+        });
+        void terminalFinalization;
+      });
+
+      // Install both terminal listeners before the reviewer becomes visible to
+      // the renderer. Otherwise an immediate user close can land between the
+      // created broadcast and listener registration, leaving the source gate
+      // permanently occupied.
+      await deps.markReviewerStarted(reviewerSessionId, startedAt);
+      if (settled) {
+        await terminalFinalization;
+        throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');
+      }
+      deps.broadcastReviewerCreated(reviewerSessionId);
+      if (settled) {
+        await terminalFinalization;
+        throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');
+      }
 
       const sendResult = await reviewer.send(launch.message, {
         planMode: false,
@@ -316,10 +356,21 @@ export function registerReviewStartHandler(
         },
       });
       if (!sendResult.accepted) {
-        disposeReviewEvents?.();
+        if (settled && terminalFinalization) {
+          await terminalFinalization;
+          throwIpcError(
+            'PRECONDITION_FAILED',
+            'Reviewer task closed before its start was accepted',
+          );
+        }
+        disposeReviewerListeners();
         settled = true;
         await updateSourceCard('failed', '', 'Reviewer was cancelled before it started');
         throwIpcError('SESSION_RUNNING', 'Reviewer was cancelled before it started');
+      }
+      if (settled) {
+        await terminalFinalization;
+        throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before its start was accepted');
       }
       return { ok: true as const, runId, reviewerSessionId };
     } catch (error) {
@@ -327,7 +378,7 @@ export function registerReviewStartHandler(
         await terminalFinalization;
         throw error;
       }
-      disposeReviewEvents?.();
+      disposeReviewerListeners();
       settled = true;
       await closeReviewer();
       const active = activeReviewsBySource.get(request.sourceSessionId);

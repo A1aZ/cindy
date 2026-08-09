@@ -333,11 +333,19 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
 
       const permissionFile = captured.env.CINDY_PI_PERMISSION_FILE;
       expect(permissionFile).toBeTruthy();
-      expect(JSON.parse(readFileSync(permissionFile!, 'utf8'))).toMatchObject({
+      const reviewPermission = JSON.parse(readFileSync(permissionFile!, 'utf8')) as {
+        mode: string;
+        reviewOnly: boolean;
+        reviewReadPaths: string[];
+      };
+      expect(reviewPermission).toMatchObject({
         mode: 'ask',
         reviewOnly: true,
-        reviewReadPaths: [realpathSync(cwd), realpathSync(explicitArtifact)],
       });
+      expect(reviewPermission.reviewReadPaths.map((item) => realpathSync.native(item))).toEqual([
+        realpathSync.native(cwd),
+        realpathSync.native(explicitArtifact),
+      ]);
 
       await expect(
         handle.send({

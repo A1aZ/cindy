@@ -1,12 +1,44 @@
 import { promises as fs } from 'node:fs';
+import { EventEmitter } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { classifyReviewArtifact, extractReviewArtifactContent } from '../reviewArtifactContent.js';
+import type { ReviewPdfUtilityChildLike } from '../reviewPdfProcess.js';
+import type {
+  ReviewPdfUtilityRequest,
+  ReviewPdfUtilityResponse,
+} from '../reviewPdfProcessProtocol.js';
+import { extractReviewPdfText } from '../reviewPdfUtilityProcess.js';
+
+const utilityProcessFork = vi.hoisted(() => vi.fn());
+vi.mock('electron', () => ({ utilityProcess: { fork: utilityProcessFork } }));
 
 const tempDirs: string[] = [];
+
+class InProcessPdfUtility extends EventEmitter implements ReviewPdfUtilityChildLike {
+  postMessage(message: unknown): void {
+    const request = message as ReviewPdfUtilityRequest;
+    void extractReviewPdfText(request.data, request.maxChars, request.maxPages)
+      .then<ReviewPdfUtilityResponse, ReviewPdfUtilityResponse>(
+        (result) => ({ kind: 'result', id: request.id, ok: true, result }),
+        (error) => ({
+          kind: 'result',
+          id: request.id,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+      .then((response) => this.emit('message', response));
+  }
+
+  kill(): boolean {
+    this.emit('exit', 0);
+    return true;
+  }
+}
 
 async function tempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-review-artifact-'));
@@ -53,7 +85,12 @@ function simplePdf(lines: string[]): Uint8Array {
   return Buffer.from(body, 'binary');
 }
 
+beforeEach(() => {
+  utilityProcessFork.mockImplementation(() => new InProcessPdfUtility());
+});
+
 afterEach(async () => {
+  utilityProcessFork.mockReset();
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 

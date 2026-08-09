@@ -90,6 +90,20 @@ describe('review artifact fingerprint', () => {
     expect(after).toBe(before);
   });
 
+  it('does not read or fingerprint denied dependency trees', async () => {
+    const dir = await makeTempDir();
+    const dependencyDir = path.join(dir, 'node_modules', 'dependency');
+    await fs.mkdir(dependencyDir, { recursive: true });
+    await fs.writeFile(path.join(dir, 'draft.txt'), 'public');
+    await fs.writeFile(path.join(dependencyDir, 'index.js'), 'first');
+    const before = await fingerprintReviewArtifacts([dir]);
+
+    await fs.writeFile(path.join(dependencyDir, 'index.js'), 'other');
+    const after = await fingerprintReviewArtifacts([dir]);
+
+    expect(after).toBe(before);
+  });
+
   it('changes when an explicit artifact disappears', async () => {
     const dir = await makeTempDir();
     const file = path.join(dir, 'draft.txt');

@@ -25,6 +25,18 @@ describe("Review credential path policy", () => {
     );
   });
 
+  it("keeps generated dependency trees outside the Review read scope", () => {
+    expect(
+      isReviewSensitiveCredentialPath("/repo/node_modules/pkg/index.js"),
+    ).toBe(true);
+    expect(
+      isReviewSensitiveCredentialPath("/repo/packages/app/node_modules"),
+    ).toBe(true);
+    expect(
+      isReviewSensitiveCredentialPath("/repo/src/node_modules-helper.ts"),
+    ).toBe(false);
+  });
+
   it("recognizes credentials hidden behind file selector syntax", () => {
     for (const selector of [
       "**/*.pem",
@@ -34,7 +46,9 @@ describe("Review credential path policy", () => {
     ]) {
       expect(isReviewSensitiveCredentialSelector(selector)).toBe(true);
     }
-    expect(isReviewSensitiveCredentialSelector("{src,test}/**/*.{ts,tsx}")).toBe(false);
+    expect(
+      isReviewSensitiveCredentialSelector("{src,test}/**/*.{ts,tsx}"),
+    ).toBe(false);
   });
 
   it("keeps directory search denies aligned for common credential files", () => {
@@ -42,6 +56,7 @@ describe("Review credential path policy", () => {
       expect.arrayContaining([
         "**/.env.*",
         "**/.git/**",
+        "**/node_modules/**",
         "**/credentials.json",
         "**/auth.json",
         "**/*.pem",

@@ -6,9 +6,9 @@ import { isReviewSensitiveCredentialPath } from '@cindy/maker-core';
 
 import { reviewArtifactPathIdentityMatches } from './reviewArtifactAuthorization.js';
 
-const MAX_DIRECTORY_ENTRIES = 10_000;
+const MAX_DIRECTORY_ENTRIES = 50_000;
 const READ_CHUNK_BYTES = 128 * 1024;
-const MAX_TOTAL_CONTENT_BYTES = 128 * 1024 * 1024;
+const MAX_TOTAL_CONTENT_BYTES = 512 * 1024 * 1024;
 const NOFOLLOW_FLAG = typeof constants.O_NOFOLLOW === 'number' ? constants.O_NOFOLLOW : 0;
 
 export type ReviewArtifactFileOpener = (

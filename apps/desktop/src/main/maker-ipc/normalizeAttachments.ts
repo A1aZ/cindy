@@ -46,14 +46,37 @@ const EXT_BY_MIME: Record<string, string> = {
   'text/plain': '.txt',
 };
 
+function assertSafeTempSessionId(sessionId: string): void {
+  if (!sessionId || sessionId === '.' || sessionId === '..' || /[\\/\0]/.test(sessionId)) {
+    throw new Error('Unsafe session id for temporary attachments');
+  }
+}
+
+function tempRoot(): string {
+  return path.join(app.getPath('temp'), 'cindy-attachments');
+}
+
 function tempDirFor(sessionId: string): string {
-  return path.join(app.getPath('temp'), 'cindy-attachments', sessionId);
+  assertSafeTempSessionId(sessionId);
+  return path.join(tempRoot(), sessionId);
+}
+
+async function assertRealTempDirectory(dir: string): Promise<void> {
+  const entry = await fs.lstat(dir);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error('Temporary attachment directory must be a real directory');
+  }
 }
 
 /** 在 session 临时目录下分配一个唯一文件路径(建目录,不写内容)。 */
 async function ensureTempPath(sessionId: string, mimeType: string | undefined): Promise<string> {
+  const root = tempRoot();
   const dir = tempDirFor(sessionId);
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  await assertRealTempDirectory(root);
+  await fs.chmod(root, 0o700);
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await assertRealTempDirectory(dir);
   await fs.chmod(dir, 0o700);
   TEMP_DIRS_BY_SESSION.set(sessionId, dir);
   const ext = (mimeType && EXT_BY_MIME[mimeType]) ?? '.bin';

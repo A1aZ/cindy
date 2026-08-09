@@ -46,4 +46,13 @@ describe('Review external input wiring', () => {
     expect(reviewStartSource).not.toContain('MAKER_INVOKE.SEND');
     expect(reviewStartSource).not.toContain('MAKER_INVOKE.INPUT_ENQUEUE');
   });
+
+  it('binds Git reviews to readable workspace content outside the Git snapshot', () => {
+    expect(registerSource).toContain(
+      'const artifactPaths = [...reviewReadPaths, sourceWorkingDir];',
+    );
+    expect(registerSource).not.toContain(
+      '...(evidence.workspaceFingerprint ? [] : [sourceWorkingDir])',
+    );
+  });
 });

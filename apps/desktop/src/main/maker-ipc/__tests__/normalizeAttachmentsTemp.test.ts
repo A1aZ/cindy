@@ -71,4 +71,38 @@ describe('inline attachment temporary files', () => {
     await expect(fs.lstat(sessionTempDir)).rejects.toMatchObject({ code: 'ENOENT' });
     await cleanupSessionTempAttachments(sessionId);
   });
+
+  it.each(['shared root', 'session directory'] as const)(
+    'refuses a symlinked temporary attachment %s',
+    async (target) => {
+      if (process.platform === 'win32') return;
+      const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-review-inline-outside-'));
+      tempDirs.push(outside);
+      const sharedRoot = path.join(tempRoot.value, 'cindy-attachments');
+      if (target === 'shared root') {
+        await fs.symlink(outside, sharedRoot);
+      } else {
+        await fs.mkdir(sharedRoot);
+        await fs.symlink(outside, path.join(sharedRoot, 'reviewer-session'));
+      }
+
+      const normalized = await normalizeUserMessage('reviewer-session', {
+        type: 'user',
+        content: [
+          { type: 'text', text: 'Review this image' },
+          {
+            type: 'image',
+            base64: Buffer.from('private image bytes').toString('base64'),
+            mimeType: 'image/png',
+          },
+        ],
+      });
+
+      if (typeof normalized === 'string' || typeof normalized.content === 'string') {
+        throw new Error('expected block message');
+      }
+      expect(normalized.content).toEqual([{ type: 'text', text: 'Review this image' }]);
+      await expect(fs.readdir(outside)).resolves.toEqual([]);
+    },
+  );
 });

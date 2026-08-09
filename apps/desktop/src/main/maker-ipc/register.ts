@@ -378,7 +378,9 @@ import {
   onAssistantTextEvent,
   onInteractionMessage,
   onInteractionResolved,
+  clearCodexPlanRowsForSession,
   persistCodexPlanOnDone,
+  persistCodexPlanOnTerminalError,
   onThinkingEvent,
   onToolResultEvent,
   onToolResultFullEvent,
@@ -3497,9 +3499,9 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       // potentially multi-megabyte payload to every renderer and device-link controller.
       if (event.type === 'turn_diff') return;
       if (
-        event.turnScope === 'background'
-        && Object.prototype.hasOwnProperty.call(event, 'backgroundTurnStartedAt')
-        && backgroundTurnPredatesSessionClear(session.id, event.backgroundTurnStartedAt)
+        event.turnScope === 'background' &&
+        Object.prototype.hasOwnProperty.call(event, 'backgroundTurnStartedAt') &&
+        backgroundTurnPredatesSessionClear(session.id, event.backgroundTurnStartedAt)
       ) {
         return;
       }
@@ -3798,7 +3800,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
       const eventAgentMeta = (event as { agentMeta?: AgentMeta | null }).agentMeta ?? null;
       // 跟踪会话最近一次非空 agentMeta(镜像 renderer state.lastAgentMeta),给 interaction
       // 边界 flush 当兜底锚点,保 agent_meta 不丢(rewind/fork)。
-      if (eventAgentMeta && event.turnScope !== 'background') noteAgentMeta(session.id, eventAgentMeta);
+      if (eventAgentMeta && event.turnScope !== 'background')
+        noteAgentMeta(session.id, eventAgentMeta);
       let persistId: string | undefined;
       // tool_result 家族:main 解析出的权威内容,盖进 payload 让 renderer 即时显示
       // (Option C:内容重排状态机只在 main 一份,与落库同源同值)。
@@ -4036,6 +4039,23 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         // A claim-bearing done seals this SDK segment, but the product turn is
         // still running and may emit another continuation segment. Reset the
         // per-SDK-turn persistence maps while deferring the logical turn marker.
+        // 没有 done 的终态 error(Codex 在 terminal error 后显式压掉迟到的
+        // turnCompleted,persistCodexPlanOnDone 永远不会跑到):本 turn 的计划行
+        // 既没有章也没有 turnCompleted:false,面板会把全勾完的失败计划当旧数据
+        // 兜底退场。在这里补失败印记——只盖 turn 存活标记,不动步骤状态。
+        if (
+          !isContinuationBoundary &&
+          event.source === 'codex' &&
+          event.type !== 'done' &&
+          isTerminalTurnErrorEvent(event)
+        ) {
+          const errorTurnId =
+            typeof (event.data as { raw?: { id?: unknown } } | null | undefined)?.raw?.id ===
+            'string'
+              ? ((event.data as { raw?: { id?: unknown } }).raw!.id as string)
+              : null;
+          persistCodexPlanOnTerminalError(session.id, errorTurnId);
+        }
         if (!isContinuationBoundary && event.source === 'codex' && event.type === 'done') {
           // Renderer applies this terminal snapshot immediately. Persist the
           // same state before sealing the persist queue and clearing the
@@ -4054,6 +4074,10 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
         }
         if (!isContinuationBoundary) {
           markTurnEndedAfterPersistDrain(session.id);
+          // 逻辑 turn 结束:跨段存活的计划行引用到此回收(continuation boundary
+          // 上必须保留,否则最终 done 找不到计划行 → 无章无失败印记 → 胶囊永久
+          // 钉住,review P1-1)。
+          clearCodexPlanRowsForSession(session.id);
         }
         preserveTurnPersistStateForBackground(session.id);
         resetTurnPersistState(session.id);
@@ -4081,7 +4105,8 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           const replyText = typeof doneResult === 'string' ? doneResult : '';
           if (replyText.length > 0 && hasEnabledGhostAssistantHook()) {
             const turnModel =
-              turnModelPromiseBySession.get(session.id) ?? Promise.resolve(session.model || 'unknown');
+              turnModelPromiseBySession.get(session.id) ??
+              Promise.resolve(session.model || 'unknown');
             const assistantPersistId = turnAssistantPersistId;
             withGhostAssistantHookModel(turnModel, () => {
               runGhostAssistantReplyHook(session.id, assistantPersistId, replyText);
@@ -5787,7 +5812,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     async (_e, agentKind: unknown, params: unknown) => {
       try {
         const kind = requireAgentKind(agentKind);
-        const skillParams = (params ?? {}) as { workingDir?: string; forceReload?: boolean };
+        const skillParams = (params ?? {}) as {
+          workingDir?: string;
+          forceReload?: boolean;
+          sessionId?: string;
+        };
         const linksChanged = await prepareProjectSkillLinksFailSoft(skillParams?.workingDir);
         if (kind === 'codex' && linksChanged) {
           skillParams.forceReload = true;
@@ -6977,10 +7006,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               }
             }
           }
-          const artifactPaths = [
-            ...reviewReadPaths,
-            ...(evidence.workspaceFingerprint ? [] : [sourceWorkingDir]),
-          ];
+          // Every harness grants read access to the source working directory.
+          // Git identity/diff fingerprints do not cover ignored build output,
+          // caches or nested-submodule contents, so the reusable result must
+          // also bind the complete non-sensitive readable workspace content.
+          const artifactPaths = [...reviewReadPaths, sourceWorkingDir];
           const artifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
 
           return {
@@ -10041,6 +10071,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // The marker write is best-effort and ordered behind pending message
       // persistence. It may retry/settle after an owner boundary is available.
       markTurnEndedAfterPersistDrain(sessionId);
+      // This is a logical turn boundary even though the vendor terminal event
+      // was lost. Drop the cross-segment plan ownership here so a later turn's
+      // id-less terminal error cannot fail-stamp an older plan.
+      clearCodexPlanRowsForSession(sessionId);
       resetTurnPersistState(sessionId);
       noteClaudeSessionTurnState(sessionId, false);
       settlePendingCredentialSwitch(sessionId, `reconcile:${source}`);

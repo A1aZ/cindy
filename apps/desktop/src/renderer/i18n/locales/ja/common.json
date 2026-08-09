@@ -1738,6 +1738,12 @@
         "cellLabel": "メッセージ通知",
         "hint": "接続・切断時に Bot へ通知メッセージを送信"
       },
+      "sessionNotification": {
+        "label": "セッション完了通知",
+        "cellLabel": "セッション完了または応答が必要なときに Feishu / Lark メッセージを送信",
+        "hint": "連携済みの Feishu または Lark ボットを通じて DM を送信します。ウィンドウが非アクティブなときのみ送信されます。",
+        "disabledHint": "先に Bot を設定し、バインドを完了するために DM を送信してください。"
+      },
       "bind": "連携"
     },
     "wechatBot": {
@@ -3306,6 +3312,9 @@
           "empty": "このマーケットにはプラグイン項目がありません",
           "skippedEntries": "無効なプラグイン項目 {{count}} 件をスキップしました",
           "unreadableEntries": "プラグイン項目 {{count}} 件を一時的に読み込めません。更新して再試行してください",
+          "addedReceipt": "「{{name}}」を追加し、プラグイン {{count}} 件を検出しました",
+          "refreshedReceipt": "「{{name}}」を更新し、プラグイン {{count}} 件を検出しました",
+          "emptyWithSkippedEntries": "利用可能なプラグインが見つかりませんでした。マニフェストの項目はすべてスキップされました。ソースの種類、プラグインのディレクトリ、マニフェストを確認してください。",
           "localBadge": "ローカル",
           "defaultRef": "デフォルトブランチ",
           "neverSynced": "未同期",
@@ -7919,6 +7928,9 @@
       "deny": "拒否"
     }
   },
+  "commandPalette": {
+    "projectTrustRequired": "このプロジェクトを信頼すると使用できます"
+  },
   "skillhub": {
     "home": {
       "title": "スキル",
@@ -7946,7 +7958,12 @@
     },
     "common": {
       "openFolderFailed": "フォルダを開けませんでした",
-      "close": "閉じる"
+      "close": "閉じる",
+      "statusDiscovered": "検出済み",
+      "statusApproved": "承認済み",
+      "statusLoaded": "読み込み済み",
+      "statusFailed": "読み込み失敗",
+      "statusUnknown": "不明"
     },
     "welcome": {
       "scanning": "ローカルの skill をスキャン中…",

@@ -17,11 +17,9 @@ describe('/review command dispatch', () => {
     expect(dispatchSource).toContain('serializeAttachedFiles(files)');
     expect(dispatchSource).toContain('.startReview({');
     expect(dispatchSource).toContain('await window.electronAPI.maker.startReview({');
-    expect(dispatchSource).toContain("return 'accepted'");
-    expect(dispatchSource).toContain("return 'rejected'");
-    expect(sessionViewSource).toContain(
-      "if (desktopCommand !== 'not-handled') return desktopCommand === 'accepted'",
-    );
+    expect(dispatchSource).toContain('return { handled: true, accepted: true, message }');
+    expect(dispatchSource).toContain('return { handled: true, accepted: false, message }');
+    expect(sessionViewSource).toContain('if (slashDispatch.handled) return slashDispatch.accepted');
     expect(dispatchSource.indexOf('.startReview({')).toBeLessThan(
       dispatchSource.indexOf('void dispatchCommand(hit'),
     );
@@ -33,9 +31,32 @@ describe('/review command dispatch', () => {
   });
 
   it('restores a rejected pending first Review with both text and attachments', () => {
-    expect(sessionViewSource).toContain("if (desktopCommand === 'rejected')");
+    expect(sessionViewSource).toContain('if (!slashDispatch.accepted)');
     expect(sessionViewSource).toContain('restoreRemoteOptimisticDraft(sessionId, {');
     expect(sessionViewSource).toContain('text: plainTextToTiptapDoc(pending.text)');
     expect(sessionViewSource).toContain('attachments: pending.files ?? []');
+  });
+
+  it('consumes the handoff copy after a rejected Review is restored to the composer', () => {
+    const pendingReviewBranch = sessionViewSource.slice(
+      sessionViewSource.indexOf(
+        'if (slashDispatch.handled) {',
+        sessionViewSource.indexOf('const pending = consumePending(sessionId);'),
+      ),
+      sessionViewSource.indexOf(
+        'const pendingAgentReferences',
+        sessionViewSource.indexOf('const pending = consumePending(sessionId);'),
+      ),
+    );
+
+    expect(pendingReviewBranch).toContain('restoreRemoteOptimisticDraft(sessionId, {');
+    expect(pendingReviewBranch).toContain(
+      'await deliverRecoverableHandoff(sessionId, () => true);',
+    );
+    expect(pendingReviewBranch).not.toContain('() => slashDispatch.accepted');
+  });
+
+  it('only clears a deferred composer after Main accepts the Review', () => {
+    expect(dispatchSource).toContain('if (slashDispatch.accepted) pending.onDeferredAccepted?.();');
   });
 });

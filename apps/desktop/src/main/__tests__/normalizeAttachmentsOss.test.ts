@@ -11,12 +11,16 @@ vi.mock('electron', () => ({ app: { getPath: () => '/tmp/test-attach' } }));
 const writeFile = vi.hoisted(() => vi.fn(async () => {}));
 const mkdir = vi.hoisted(() => vi.fn(async () => {}));
 const chmod = vi.hoisted(() => vi.fn(async () => {}));
+const lstat = vi.hoisted(() =>
+  vi.fn(async () => ({ isDirectory: () => true, isSymbolicLink: () => false })),
+);
 const readFile = vi.hoisted(() => vi.fn(async () => Buffer.from('image-bytes')));
 vi.mock('node:fs/promises', () => ({
-  default: { writeFile, mkdir, chmod, readFile, rm: vi.fn(async () => {}) },
+  default: { writeFile, mkdir, chmod, lstat, readFile, rm: vi.fn(async () => {}) },
   writeFile,
   mkdir,
   chmod,
+  lstat,
   readFile,
   rm: vi.fn(async () => {}),
 }));
@@ -408,12 +412,14 @@ describe('materializeDirectSendOssAttachments â€” message + persistUserMessage ä
     const persistedContent = JSON.stringify({
       text: 'run check',
       images: [],
-      files: [{
-        name: 'setup.exe',
-        path: ref,
-        size: 15,
-        sha256: ATTACHMENT_SHA256,
-      }],
+      files: [
+        {
+          name: 'setup.exe',
+          path: ref,
+          size: 15,
+          sha256: ATTACHMENT_SHA256,
+        },
+      ],
     });
 
     const out = await materializeDirectSendOssAttachments(
@@ -525,19 +531,15 @@ describe('materializeDirectSendOssAttachments â€” message + persistUserMessage ä
         { type: 'file', path: fileRef, mimeType: 'application/pdf' },
       ],
     };
-    const out = await materializeDirectSendOssAttachments(
-      'sess-1',
-      message,
-      {
-        persistUserMessage: {
-          content: JSON.stringify({
-            text: '',
-            images: [],
-            files: [{ name: 'doc.pdf', path: fileRef }],
-          }),
-        },
+    const out = await materializeDirectSendOssAttachments('sess-1', message, {
+      persistUserMessage: {
+        content: JSON.stringify({
+          text: '',
+          images: [],
+          files: [{ name: 'doc.pdf', path: fileRef }],
+        }),
       },
-    );
+    });
     assert.deepEqual((out.message as typeof message).content[0], {
       type: 'image',
       base64: 'inline-image',

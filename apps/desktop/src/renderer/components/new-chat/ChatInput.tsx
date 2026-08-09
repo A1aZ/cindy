@@ -1095,7 +1095,12 @@ export function ChatInput({
   // ── ESC / history ref bridges for Tiptap handleKeyDown ────────────
   // Tiptap editorProps can't read React state, so we use refs.
   const onStopRef = useRef(onStop);
+  // 用户点击 Stop 时标记 wasTurnStoppedByUserRef,阻止该轮次触发预测。
   onStopRef.current = onStop;
+  const handleStop = useCallback(() => {
+    wasTurnStoppedByUserRef.current = true;
+    onStop?.();
+  }, [onStop]);
   const showStopButtonRef = useRef(showStopButton);
   showStopButtonRef.current = showStopButton;
 
@@ -1103,6 +1108,9 @@ export function ChatInput({
   // messages 在流式期间每个 delta 都变,放进 deps 会让本 effect 反复重跑并把
   // prevShowStopRef 冲掉,从而永远检测不到那次跳变 —— 所以走 ref 读最新值。
   const prevShowStopRef = useRef(false);
+  // 用户点击 Stop 或 turn 以错误结束时，不应触发预测。
+  // 该 ref 在 Stop 按钮/快捷键触发时置 true，新 turn 开始时重置。
+  const wasTurnStoppedByUserRef = useRef(false);
   // turnGen: 每次新 turn 开始递增,预测请求携带代次;落地时检查代次与 sessionId
   // 是否仍匹配,避免旧请求覆盖新轮推荐或跨 session 残留。
   // 递增分两层:render 阶段同步检测 showStopButton false→true 跳变,关闭「用户操作
@@ -1155,11 +1163,14 @@ export function ChatInput({
     if (showStopButton) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
+      wasTurnStoppedByUserRef.current = false;
     }
     // device-link 远程会话 & SSH 远程会话:maker:predict-prompt 不在 allowlist,且远程对话内容
     // 不应送到控制端本地 provider/凭证 —— 跳过预测。
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
+      // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
+      if (wasTurnStoppedByUserRef.current) return;
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
       if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
@@ -2235,6 +2246,7 @@ export function ChatInput({
           // instead of sending the next one immediately.
           if (showStopButtonRef.current && onStopRef.current) {
             event.preventDefault();
+            wasTurnStoppedByUserRef.current = true;
             onStopRef.current();
             return true;
           }
@@ -7082,7 +7094,7 @@ export function ChatInput({
                   {showSecondaryStop && (
                     <SendButton
                       disabled={false}
-                      onClick={onStop ?? (() => {})}
+                      onClick={handleStop}
                       isStreaming
                       visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                     />
@@ -7120,7 +7132,7 @@ export function ChatInput({
                     {mainSlotIsStop ? (
                       <SendButton
                         disabled={false}
-                        onClick={onStop ?? (() => {})}
+                        onClick={handleStop}
                         isStreaming
                         visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                       />

@@ -922,14 +922,29 @@ describe('Maker Pi runtime skill status', () => {
         source: 'pi:get_commands',
         commands: [
           {
-            name: `skill:${opts.sessionId}-skill`,
+            name: `skill:${opts.sessionId}-frontmatter-name`,
             source: 'skill',
-            sourceInfo: { source: 'auto', scope: 'project', baseDir: '/repo/.pi' },
+            sourceInfo: {
+              source: 'local',
+              scope: 'temporary',
+              baseDir: `/repo/.pi/skills/${opts.sessionId}-skill`,
+              path: `/repo/.pi/skills/${opts.sessionId}-skill/SKILL.md`,
+            },
           },
           {
             name: 'skill:user-collision',
             source: 'skill',
             sourceInfo: { source: 'auto', scope: 'user', baseDir: '/home/.agents/skills' },
+          },
+          {
+            name: 'skill:malformed-collision',
+            source: 'skill',
+            sourceInfo: {
+              source: 'local',
+              scope: 'temporary',
+              baseDir: '/repo/.pi/skills/malformed-collision',
+              path: '/other/SKILL.md',
+            },
           },
         ],
       });
@@ -949,6 +964,7 @@ describe('Maker Pi runtime skill status', () => {
         projectSkill('one-skill', '/repo/.agents/skills/one-skill'),
         projectSkill('two-skill', '/repo/.pi/skills/two-skill'),
         projectSkill('user-collision', '/repo/.pi/skills/user-collision'),
+        projectSkill('malformed-collision', '/repo/.pi/skills/malformed-collision'),
       ],
     }));
     const maker = new Maker({
@@ -982,17 +998,19 @@ describe('Maker Pi runtime skill status', () => {
       ['one-skill', 'discovered'],
       ['two-skill', 'discovered'],
       ['user-collision', 'discovered'],
+      ['malformed-collision', 'discovered'],
     ]);
     expect(one.skills[0]).toMatchObject({
       name: 'one-skill',
       runtimeStatus: 'loaded',
-      runtimeCommandName: 'skill:one-skill',
+      runtimeCommandName: 'skill:one-frontmatter-name',
     });
     expect(two.skills.map((skill) => [skill.name, skill.runtimeStatus])).toEqual([
       ['one-skill', 'discovered'],
       ['one-skill', 'discovered'],
       ['two-skill', 'loaded'],
       ['user-collision', 'discovered'],
+      ['malformed-collision', 'discovered'],
     ]);
     expect(preview.skills.every((skill) => skill.runtimeStatus === 'discovered')).toBe(true);
     expect(wrongProject.skills.every((skill) => skill.runtimeStatus === 'discovered')).toBe(true);

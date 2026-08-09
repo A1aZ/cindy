@@ -12,7 +12,7 @@
  * resume 路径、启动 RPC 也不会即时拒),控制流本身才是被测对象。
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -67,6 +67,7 @@ vi.mock('../rpc-client.js', () => ({
 import { PiAgent } from '../index.js';
 import type { AgentDeps } from '../../base-agent.js';
 import type { Logger } from '../../../interfaces/logger.js';
+import type { PiProjectTrustInputSnapshot } from '../../../types/pi-project-trust.js';
 
 const noopLogger: Logger = {
   trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, fatal: () => {},
@@ -92,7 +93,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     proxyDisposed = 0;
     preparedMcpContext = undefined;
     agentHome = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-home-'));
-    cwd = mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-'));
+    cwd = realpathSync(mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-')));
   });
 
   afterEach(() => {
@@ -101,7 +102,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  function buildDeps(): AgentDeps {
+  function buildDeps(overrides: Partial<AgentDeps> = {}): AgentDeps {
     return {
       auth: {
         getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
@@ -141,7 +142,47 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
           disposeSessionCtx: () => { disposed++; },
         };
       },
+      ...overrides,
     };
+  }
+
+  function approvedInput(
+    workingDir: string,
+    revision: string,
+    skills: readonly string[],
+  ): PiProjectTrustInputSnapshot {
+    return {
+      identity: {
+        workingDir,
+        canonicalWorkingDir: workingDir,
+        canonicalRepoRoot: workingDir,
+        repoRootStatus: 'resolved',
+        platform: 'posix',
+        canonicalPathEncoding: 'utf8-lossless',
+      },
+      approval: {
+        status: 'approved',
+        scope: 'working-dir',
+        scopeKey: `${workingDir}\0${workingDir}`,
+        revision,
+      },
+      discovered: {
+        skills,
+        canonicalSkillEvidence: skills.map((skillPath) => ({
+          discoveredPath: skillPath,
+          canonicalPath: skillPath,
+        })),
+        settings: [],
+        packages: [],
+        extensions: [],
+      },
+    };
+  }
+
+  function repeatedArgValues(args: readonly string[], flag: string): string[] {
+    return args.flatMap((value, index) => value === flag && args[index + 1]
+      ? [args[index + 1]!]
+      : []);
   }
 
   const opts = () => ({
@@ -187,6 +228,59 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(clearIntervalSpy).toHaveBeenCalledOnce();
     expect(disposed).toBe(1); // close() 才注销
     expect(proxyDisposed).toBe(1);
+  });
+
+  it('always disables project trust and implicit extensions while explicitly restoring only Cindy extensions', async () => {
+    const handle = await new PiAgent(buildDeps()).startSession(opts());
+    const args = knobs.spawnedArgs[0]!;
+    const configHome = knobs.spawnedEnvs[0]!.PI_CODING_AGENT_DIR!;
+
+    expect(args).toEqual(expect.arrayContaining(['--no-approve', '--no-extensions']));
+    expect(args).not.toContain('--approve');
+    expect(args).not.toContain('--no-skills');
+    expect(args).not.toContain('--skill');
+    expect(repeatedArgValues(args, '--extension')).toEqual([
+      path.join(configHome, 'extensions', 'cindy-bridge.ts'),
+      path.join(configHome, 'extensions', 'cindy-subagent.ts'),
+    ]);
+    await vi.waitFor(() => {
+      expect(handle.getRuntimeCapabilities?.()?.projectResources).toEqual({
+        status: 'unavailable',
+        reason: 'approval-resolver-unavailable',
+        approvalRevision: null,
+        requestedSkillCount: 0,
+      });
+    });
+    await handle.close();
+  });
+
+  it('freezes approval per new session and fails closed after revocation', async () => {
+    const skillPath = path.join(cwd, '.pi', 'skills', 'approved-skill');
+    mkdirSync(skillPath, { recursive: true });
+    writeFileSync(path.join(skillPath, 'SKILL.md'), '# approved\n');
+    const deps = buildDeps({
+      resolvePiProjectTrustInput: async ({ sessionId, workingDir }) => sessionId === 'approved'
+        ? approvedInput(workingDir, 'rev-approved', [skillPath])
+        : {
+            ...approvedInput(workingDir, 'rev-unused', [skillPath]),
+            approval: { status: 'revoked', revision: 'rev-revoked', reason: 'user-revoked' },
+          },
+    });
+    const agent = new PiAgent(deps);
+    const approvedHandle = await agent.startSession({ sessionId: 'approved', workingDir: cwd, model: 'm' });
+    const revokedHandle = await agent.startSession({ sessionId: 'revoked', workingDir: cwd, model: 'm' });
+
+    expect(repeatedArgValues(knobs.spawnedArgs[0]!, '--skill')).toEqual([skillPath]);
+    expect(repeatedArgValues(knobs.spawnedArgs[1]!, '--skill')).toEqual([]);
+    await vi.waitFor(() => {
+      expect(approvedHandle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+        status: 'approved', approvalRevision: 'rev-approved', requestedSkillCount: 1,
+      });
+      expect(revokedHandle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+        status: 'revoked', reason: 'user-revoked', approvalRevision: 'rev-revoked', requestedSkillCount: 0,
+      });
+    });
+    await Promise.all([approvedHandle.close(), revokedHandle.close()]);
   });
 
   it('injects remote MCP secrets only through env and marks them for bash-child stripping', async () => {
@@ -250,12 +344,31 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   // (PI_CODING_AGENT_DIR = agentHome/run-tmp/<hex>)承载 models.json,close/退出时清理。
   it('isolates each session config home under run-tmp and keeps concurrent sessions independent', async () => {
     const { existsSync } = await import('node:fs');
-    const agent = new PiAgent(buildDeps());
-    const h1 = await agent.startSession({ sessionId: 's1', workingDir: cwd, model: 'm' });
-    const h2 = await agent.startSession({ sessionId: 's2', workingDir: cwd, model: 'm' });
+    const skillOne = path.join(cwd, '.pi', 'skills', 'one');
+    const skillTwo = path.join(cwd, '.agents', 'skills', 'two');
+    for (const skillPath of [skillOne, skillTwo]) {
+      mkdirSync(skillPath, { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# isolated\n');
+    }
+    const agent = new PiAgent(buildDeps({
+      resolvePiProjectTrustInput: async ({ sessionId, workingDir }) => approvedInput(
+        workingDir,
+        `rev-${sessionId}`,
+        [sessionId === 's1' ? skillOne : skillTwo],
+      ),
+    }));
+    const [h1, h2] = await Promise.all([
+      agent.startSession({ sessionId: 's1', workingDir: cwd, model: 'm' }),
+      agent.startSession({ sessionId: 's2', workingDir: cwd, model: 'm' }),
+    ]);
 
-    const home1 = knobs.spawnedEnvs[0].PI_CODING_AGENT_DIR as string;
-    const home2 = knobs.spawnedEnvs[1].PI_CODING_AGENT_DIR as string;
+    const indexForSession = (sessionId: string) => knobs.spawnedEnvs.findIndex(
+      (env) => env.CINDY_PI_SESSION_ID === sessionId,
+    );
+    const s1Index = indexForSession('s1');
+    const s2Index = indexForSession('s2');
+    const home1 = knobs.spawnedEnvs[s1Index].PI_CODING_AGENT_DIR as string;
+    const home2 = knobs.spawnedEnvs[s2Index].PI_CODING_AGENT_DIR as string;
     const runTmp = path.join(agentHome, 'run-tmp');
     // 两个会话各自独立的 configHome(都在 run-tmp 下,hex 不同),各有自己的 models.json。
     expect(home1).not.toBe(home2);
@@ -263,6 +376,16 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(home2.startsWith(runTmp)).toBe(true);
     expect(existsSync(path.join(home1, 'models.json'))).toBe(true);
     expect(existsSync(path.join(home2, 'models.json'))).toBe(true);
+    expect(repeatedArgValues(knobs.spawnedArgs[s1Index]!, '--skill')).toEqual([skillOne]);
+    expect(repeatedArgValues(knobs.spawnedArgs[s2Index]!, '--skill')).toEqual([skillTwo]);
+    await vi.waitFor(() => {
+      expect(h1.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+        approvalRevision: 'rev-s1', requestedSkillCount: 1,
+      });
+      expect(h2.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+        approvalRevision: 'rev-s2', requestedSkillCount: 1,
+      });
+    });
 
     // close 一个会话清理它的 configHome,另一个不受影响(cleanup 是 fire-and-forget,轮询等)。
     await h1.close();

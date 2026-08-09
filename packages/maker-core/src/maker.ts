@@ -34,6 +34,7 @@ import type {
   ListCustomizationsResult,
 } from './types/customizations.js';
 import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilities.js';
+import { piExplicitSkillRuntimePath } from './agents/pi/skill-runtime-provenance.js';
 import { Session, generateSessionId } from './session.js';
 import type {
   AgentSessionHandle,
@@ -164,30 +165,39 @@ function mergePiRuntimeSkillStatuses(
   manifest: PiRuntimeCapabilityManifest | undefined,
 ): ListAgentSkillsResult {
   if (manifest?.status !== 'loaded') return result;
-  const loadedProjectSkills = new Map(
-    manifest.commands.flatMap((command) => {
-      const baseDir = command.sourceInfo.baseDir;
-      if (
-        command.source !== 'skill'
-        || command.sourceInfo.scope !== 'project'
-        || typeof baseDir !== 'string'
-        || !command.name.startsWith('skill:')
-      ) return [];
-      return [[[
-        command.name.slice('skill:'.length),
-        canonicalPiRuntimePath(baseDir),
-      ].join('\0'), command.name] as const];
-    }),
-  );
-  if (loadedProjectSkills.size === 0) return result;
+  const loadedExplicitSkills = new Map<string, string>();
+  const loadedLegacyProjectSkills = new Map<string, string>();
+  for (const command of manifest.commands) {
+    const baseDir = command.sourceInfo.baseDir;
+    if (command.source !== 'skill' || !command.name.startsWith('skill:')) continue;
+    const skillName = command.name.slice('skill:'.length);
+    if (command.sourceInfo.scope === 'project' && typeof baseDir === 'string') {
+      loadedLegacyProjectSkills.set(
+        [skillName, canonicalPiRuntimePath(baseDir)].join('\0'),
+        command.name,
+      );
+      continue;
+    }
+    // Pinned Pi reports explicit --skill with a paired baseDir + SKILL.md path.
+    // The shared helper rejects partial/mismatched provenance before a
+    // user/global collision can mark a project scanner result loaded. Match
+    // explicit resources by path because frontmatter names need not equal
+    // their containing folder names.
+    const explicitPath = piExplicitSkillRuntimePath(command);
+    if (explicitPath) {
+      loadedExplicitSkills.set(canonicalPiRuntimePath(explicitPath), command.name);
+    }
+  }
+  if (loadedExplicitSkills.size === 0 && loadedLegacyProjectSkills.size === 0) return result;
   return {
     ...result,
     skills: result.skills.map((skill) => {
       const runtimeCommandName = skill.scope === 'repo' && skill.path
-        ? loadedProjectSkills.get([
-          skill.name,
-          canonicalPiRuntimePath(path.dirname(path.dirname(skill.path))),
-        ].join('\0'))
+        ? loadedExplicitSkills.get(canonicalPiRuntimePath(skill.path))
+          ?? [skill.path, path.dirname(path.dirname(skill.path))]
+            .map(canonicalPiRuntimePath)
+            .map((skillPath) => loadedLegacyProjectSkills.get([skill.name, skillPath].join('\0')))
+            .find((commandName) => commandName !== undefined)
         : undefined;
       return runtimeCommandName
         ? { ...skill, runtimeStatus: 'loaded' as const, runtimeCommandName }

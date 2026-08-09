@@ -59,6 +59,17 @@ function normalizePath(
   return null;
 }
 
+/** Compare two host canonical paths with the exact platform identity used by approval keys. */
+export function piCanonicalPathsEqual(
+  identity: Pick<PiProjectIdentityResolution, 'platform' | 'windowsCaseComparison'>,
+  first: string,
+  second: string,
+): boolean {
+  const left = normalizePath(first, identity.platform, identity.windowsCaseComparison);
+  const right = normalizePath(second, identity.platform, identity.windowsCaseComparison);
+  return left !== null && right !== null && left === right;
+}
+
 function hasLosslessCanonicalEncoding(
   identity: Pick<PiProjectIdentityResolution, 'platform' | 'canonicalPathEncoding' | 'windowsCaseComparison'>,
 ): boolean {

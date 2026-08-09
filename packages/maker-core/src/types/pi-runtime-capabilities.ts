@@ -45,6 +45,16 @@ export interface PiRuntimeCommand {
   sourceInfo: PiRuntimeCommandSourceInfo;
 }
 
+/** Startup-only Cindy approval/assembly fact for this isolated Pi runtime. */
+export interface PiProjectResourceRuntimeDiagnostic {
+  status: import('./pi-project-trust.js').PiProjectTrustStatus;
+  reason: string;
+  approvalRevision: string | null;
+  requestedSkillCount: number;
+  /** Present only when this session's get_commands returned a valid catalog. */
+  loadedSkillCount?: number;
+}
+
 /**
  * Per-session runtime catalog snapshot. All fields are optional at call sites
  * through the AgentSessionHandle contract, so old consumers remain compatible.
@@ -60,4 +70,6 @@ export interface PiRuntimeCapabilityManifest {
   source: PiRuntimeCapabilitySource;
   commands: readonly PiRuntimeCommand[];
   error?: PiRuntimeCapabilityError;
+  /** Does not imply loaded; only `commands` from this session's get_commands can do that. */
+  projectResources?: PiProjectResourceRuntimeDiagnostic;
 }

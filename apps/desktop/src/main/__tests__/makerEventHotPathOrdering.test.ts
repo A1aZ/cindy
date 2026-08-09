@@ -132,6 +132,10 @@ describe('maker:event hot path ordering', () => {
       reconcileSource,
       'markTurnEndedAfterPersistDrain(sessionId);',
       'clearCodexPlanRowsForSession(sessionId);',
+    );
+    expectOrder(
+      reconcileSource,
+      'clearCodexPlanRowsForSession(sessionId);',
       'resetTurnPersistState(sessionId);',
     );
 

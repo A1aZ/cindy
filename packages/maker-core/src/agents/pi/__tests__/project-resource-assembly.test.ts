@@ -52,6 +52,7 @@ const available = {
     isFile: () => candidate.toLowerCase().endsWith('.md'),
   }),
   realpath: async (skillPath: string) => skillPath,
+  findNearestGitRoot: async (workingDir: string) => workingDir.split('/').slice(0, 3).join('/'),
 };
 
 describe('Pi approved project resource assembly', () => {
@@ -124,7 +125,7 @@ describe('Pi approved project resource assembly', () => {
     const result = await assembleApprovedPiProjectResources(
       inputFor(workingDir, approved(workingDir, 'rev-a'), [first, missing]),
       workingDir,
-      { stat, realpath: available.realpath },
+      { ...available, stat },
     );
 
     expect(stat).toHaveBeenCalled();
@@ -177,7 +178,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const result = await assembleApprovedPiProjectResources(input, workingDir, {
-      stat: available.stat,
+      ...available,
       realpath: async (candidate) => candidate === input.discovered.skills[0]
         ? '/outside/retargeted-skill'
         : candidate,
@@ -192,7 +193,7 @@ describe('Pi approved project resource assembly', () => {
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
     const result = await assembleApprovedPiProjectResources(input, workingDir, {
-      stat: available.stat,
+      ...available,
       realpath: async (candidate) => candidate === skillFile
         ? '/outside/retargeted-SKILL.md'
         : candidate,
@@ -207,7 +208,7 @@ describe('Pi approved project resource assembly', () => {
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
     const result = await assembleApprovedPiProjectResources(input, workingDir, {
-      stat: available.stat,
+      ...available,
       realpath: async (candidate) => candidate === skillFile
         ? '/repo-a/packages/shared/demo.md'
         : candidate,
@@ -254,11 +255,11 @@ describe('Pi approved project resource assembly', () => {
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const skillFile = `${input.discovered.skills[0]}/SKILL.md`;
     const result = await assembleApprovedPiProjectResources(input, workingDir, {
+      ...available,
       stat: async (candidate) => {
         if (candidate === skillFile) throw new Error('ENOENT');
         return available.stat(candidate);
       },
-      realpath: available.realpath,
     });
 
     expect(result.skillPaths).toEqual([]);
@@ -269,7 +270,7 @@ describe('Pi approved project resource assembly', () => {
     const workingDir = '/repo-a/packages/app-link';
     const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
     const result = await assembleApprovedPiProjectResources(input, workingDir, {
-      stat: available.stat,
+      ...available,
       realpath: async (candidate) => candidate === input.identity.workingDir
         ? '/outside/retargeted-working-dir'
         : candidate,
@@ -293,6 +294,23 @@ describe('Pi approved project resource assembly', () => {
     expect(result.diagnostic).toMatchObject({
       status: 'approved',
       reason: 'approval-working-dir-mismatch',
+      approvalRevision: 'rev-a',
+      requestedSkillCount: 0,
+    });
+  });
+
+  it('rejects an approval snapshot when a nearer Git root appears before launch', async () => {
+    const workingDir = '/repo-a/packages/app';
+    const input = inputFor(workingDir, approved(workingDir, 'rev-a'));
+    const result = await assembleApprovedPiProjectResources(input, workingDir, {
+      ...available,
+      findNearestGitRoot: async () => workingDir,
+    });
+
+    expect(result.skillPaths).toEqual([]);
+    expect(result.diagnostic).toMatchObject({
+      status: 'approved',
+      reason: 'approved-repo-root-changed',
       approvalRevision: 'rev-a',
       requestedSkillCount: 0,
     });

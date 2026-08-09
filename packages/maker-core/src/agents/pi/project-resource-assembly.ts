@@ -30,6 +30,8 @@ export interface PiProjectResourceAssemblySnapshot {
   readonly diagnostic: PiProjectResourceAssemblyDiagnostic;
 }
 
+type PiPathStat = { isDirectory(): boolean; isFile(): boolean };
+
 const unavailableDiagnostic = (
   reason: string,
 ): PiProjectResourceAssemblyDiagnostic => Object.freeze({
@@ -49,23 +51,53 @@ export function unavailablePiProjectResourceAssembly(
   });
 }
 
+async function findNearestGitRoot(
+  start: string,
+  stat: (path: string) => Promise<PiPathStat>,
+  pathApi: typeof path.posix | typeof path.win32,
+): Promise<string | null> {
+  let current = start;
+  while (true) {
+    try {
+      const marker = await stat(pathApi.join(current, '.git'));
+      if (marker.isDirectory() || marker.isFile()) return current;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Match project discovery: an unreadable marker is a conservative
+      // boundary, while a genuinely absent marker permits walking upward.
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') return current;
+    }
+    const parent = pathApi.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
 async function validateSkillPathsImmediatelyBeforeLaunch(
   skillPaths: readonly string[],
-  stat: (path: string) => Promise<{ isDirectory(): boolean; isFile(): boolean }>,
+  stat: (path: string) => Promise<PiPathStat>,
   realpath: (path: string) => Promise<string>,
   identity: PiProjectTrustInputSnapshot['identity'],
   requestedWorkingDir: string,
-): Promise<'available' | 'unavailable' | 'request-mismatch' | 'project-changed' | 'skill-changed'> {
+  resolveNearestGitRoot: (
+    workingDir: string,
+    stat: (path: string) => Promise<PiPathStat>,
+    pathApi: typeof path.posix | typeof path.win32,
+  ) => Promise<string | null>,
+): Promise<
+  'available' | 'unavailable' | 'request-mismatch' | 'repo-mismatch' | 'project-changed' | 'skill-changed'
+> {
   try {
     const canonicalWorkingDir = identity.canonicalWorkingDir;
     const canonicalRepoRoot = identity.canonicalRepoRoot;
     if (!canonicalWorkingDir || !canonicalRepoRoot) return 'unavailable';
     const pathApi = identity.platform === 'win32' ? path.win32 : path.posix;
-    const [resolvedWorkingDir, resolvedRequestedWorkingDir, resolvedRepoRoot, entries] =
+    const resolvedRequestedWorkingDir = await realpath(requestedWorkingDir);
+    const [resolvedWorkingDir, resolvedRepoRoot, currentRepoRoot, entries] =
       await Promise.all([
         realpath(identity.workingDir),
-        realpath(requestedWorkingDir),
         realpath(canonicalRepoRoot),
+        resolveNearestGitRoot(resolvedRequestedWorkingDir, stat, pathApi),
         Promise.all(skillPaths.map(async (skillPath) => {
           const stats = await stat(skillPath);
           const resolvedPath = await realpath(skillPath);
@@ -87,6 +119,10 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
     if (!piCanonicalPathsEqual(identity, canonicalWorkingDir, resolvedRequestedWorkingDir)) {
       return 'request-mismatch';
     }
+    if (
+      !currentRepoRoot
+      || !piCanonicalPathsEqual(identity, canonicalRepoRoot, currentRepoRoot)
+    ) return 'repo-mismatch';
     if (entries.some(({ skillPath, stats, skillFileStats }) =>
       (!stats.isDirectory() && (!stats.isFile() || pathApi.extname(skillPath) !== '.md'))
       || (stats.isDirectory() && !skillFileStats?.isFile()))) return 'unavailable';
@@ -114,8 +150,13 @@ export async function assembleApprovedPiProjectResources(
   input: PiProjectTrustInputSnapshot | null,
   requestedWorkingDir: string,
   options: {
-    stat?: (path: string) => Promise<{ isDirectory(): boolean; isFile(): boolean }>;
+    stat?: (path: string) => Promise<PiPathStat>;
     realpath?: (path: string) => Promise<string>;
+    findNearestGitRoot?: (
+      workingDir: string,
+      stat: (path: string) => Promise<PiPathStat>,
+      pathApi: typeof path.posix | typeof path.win32,
+    ) => Promise<string | null>;
   } = {},
 ): Promise<PiProjectResourceAssemblySnapshot> {
   if (!input) return unavailablePiProjectResourceAssembly('approval-snapshot-unavailable');
@@ -143,9 +184,11 @@ export async function assembleApprovedPiProjectResources(
       options.realpath ?? fs.realpath,
       input.identity,
       requestedWorkingDir,
+      options.findNearestGitRoot ?? findNearestGitRoot,
     );
     if (pathStatus !== 'available') {
       if (pathStatus === 'request-mismatch') reason = 'approval-working-dir-mismatch';
+      else if (pathStatus === 'repo-mismatch') reason = 'approved-repo-root-changed';
       else if (pathStatus === 'project-changed') reason = 'approved-project-path-changed';
       else if (pathStatus === 'skill-changed') reason = 'approved-skill-path-changed';
       else reason = 'approved-skill-path-unavailable';

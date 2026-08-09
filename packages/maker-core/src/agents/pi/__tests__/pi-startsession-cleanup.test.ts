@@ -98,6 +98,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     // non-native sync implementation may preserve an 8.3 alias (RUNNER~1)
     // while the async native implementation returns the final long path.
     cwd = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-cleanup-cwd-')));
+    mkdirSync(path.join(cwd, '.git'));
   });
 
   afterEach(() => {
@@ -154,11 +155,12 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     workingDir: string,
     revision: string,
     skills: readonly string[],
+    repoRoot = workingDir,
   ): PiProjectTrustInputSnapshot {
     const identity: PiProjectTrustInputSnapshot['identity'] = {
       workingDir,
       canonicalWorkingDir: workingDir,
-      canonicalRepoRoot: workingDir,
+      canonicalRepoRoot: repoRoot,
       repoRootStatus: 'resolved',
       platform: process.platform === 'win32' ? 'win32' : 'posix',
       canonicalPathEncoding: process.platform === 'win32' ? 'utf16-lossless' : 'utf8-lossless',
@@ -296,6 +298,7 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
   it('fails closed when the resolver returns another workingDir approval snapshot', async () => {
     const approvedDir = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-approved-other-')));
     try {
+      mkdirSync(path.join(approvedDir, '.git'));
       const skillPath = path.join(approvedDir, '.pi', 'skills', 'other-project-skill');
       mkdirSync(skillPath, { recursive: true });
       writeFileSync(path.join(skillPath, 'SKILL.md'), '# other project\n');
@@ -322,6 +325,49 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       }
     } finally {
       rmSync(approvedDir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a nearer Git root appears after the approval snapshot', async () => {
+    const outerRepo = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-approved-outer-')));
+    try {
+      const requestedDir = path.join(outerRepo, 'packages', 'nested');
+      const skillPath = path.join(outerRepo, '.agents', 'skills', 'outer-skill');
+      mkdirSync(path.join(outerRepo, '.git'));
+      mkdirSync(requestedDir, { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# outer project\n');
+      const snapshot = approvedInput(
+        requestedDir,
+        'rev-before-nested-repo',
+        [skillPath],
+        outerRepo,
+      );
+      mkdirSync(path.join(requestedDir, '.git'));
+
+      const agent = new PiAgent(buildDeps({
+        resolvePiProjectTrustInput: async () => snapshot,
+      }));
+      const handle = await agent.startSession({
+        sessionId: 'nested-repo',
+        workingDir: requestedDir,
+        model: 'm',
+      });
+      try {
+        expect(repeatedArgValues(knobs.spawnedArgs[0]!, '--skill')).toEqual([]);
+        await vi.waitFor(() => {
+          expect(handle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+            status: 'approved',
+            reason: 'approved-repo-root-changed',
+            approvalRevision: 'rev-before-nested-repo',
+            requestedSkillCount: 0,
+          });
+        });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      rmSync(outerRepo, { recursive: true, force: true });
     }
   });
 

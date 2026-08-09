@@ -416,7 +416,7 @@ function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
   );
   // 输入框推荐提示词:turn 结束后预测用户下一步输入,复用 title one-shot 基础设施。
   // 本 handler 会触发一次付费模型调用,按 electron-security-and-process-boundaries §5
-  // 做 sender 断言 + 运行期 payload 校验。
+  // 做 sender 断言 + 运行期 payload 校验 + DB 防御纵深(远程会话拒绝)。
   ipcMain.handle(
     MAKER_INVOKE.PREDICT_PROMPT,
     async (
@@ -425,6 +425,15 @@ function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
     ): Promise<{ prompt: string | null }> => {
       assertTrustedAppRendererEvent(event);
       const params = parsePredictPromptRequest(request);
+      // 防御纵深:即使 renderer 有 UI 守卫,main 侧也需从 DB 确认 session 真实存在且非远程
+      // (SSH / device-link),避免受信 renderer 绕过 UI 守卫携带远程会话内容触发付费调用。
+      const [sessionRow] = await getDbClient()
+        .drizzle.select({ remoteHostId: sessions.remoteHostId })
+        .from(sessions)
+        .where(eq(sessions.id, params.sessionId));
+      if (!sessionRow || sessionRow.remoteHostId) {
+        return { prompt: null };
+      }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
       // 等多窗口场景下重复触发付费 provider 调用。主进程级 Set 跨窗口可见。
       if (_predictingPromptSessions.has(params.sessionId)) {

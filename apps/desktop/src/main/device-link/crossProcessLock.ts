@@ -991,10 +991,26 @@ async function publishGateReleaseMarker(gate: ReclaimGate): Promise<void> {
 }
 
 async function hasValidGateReleaseMarker(gatePath: string): Promise<boolean> {
+  const markerPath = gateReleaseMarkerPath(gatePath);
+  const gateDir = path.dirname(gatePath);
+  let gateRealDir: string;
   try {
-    const value = JSON.parse(
-      await fsp.readFile(gateReleaseMarkerPath(gatePath), 'utf8'),
-    ) as unknown;
+    gateRealDir = fsSync.realpathSync(gateDir);
+  } catch {
+    return false;
+  }
+  let bytes: Buffer | null;
+  try {
+    bytes = await readBoundedFileNoFollow(markerPath, 4 * 1024, {
+      containWithin: gateRealDir,
+      nonBlocking: true,
+    });
+  } catch {
+    return false;
+  }
+  if (bytes === null) return false;
+  try {
+    const value = JSON.parse(bytes.toString('utf8')) as unknown;
     return Boolean(
       value
       && typeof value === 'object'

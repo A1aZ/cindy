@@ -623,6 +623,33 @@ describe('GhostManager · owner 受管根路径', () => {
     expect(fresh.list()).toEqual([]);
   });
 
+  it('symlinked state root 下已批准插件不被判 invalid(P1 回归)', async () => {
+    const physicalUserData = path.join(workDir, 'physical-user-data');
+    const linkedUserData = path.join(workDir, 'linked-user-data');
+    await fs.promises.mkdir(path.join(physicalUserData, 'owners', 'owner-a'), { recursive: true });
+    try {
+      await fs.promises.symlink(
+        physicalUserData,
+        linkedUserData,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      return;
+    }
+
+    const relocated = new GhostManager({
+      getRootDir: () => path.join(linkedUserData, 'owners', 'owner-a', 'cindy-brain'),
+      getStateDir: () => path.join(linkedUserData, 'owners', 'owner-a', 'ghost-install-state'),
+    });
+    await relocated.install(await makeCindy('approved.cindy', goodManifest('approved')));
+
+    // receipt 落在 realpath 状态根内;containWithin 必须用 realpath 根,
+    // 否则合法 receipt 会被判在根外 → list() 降级成 invalid。
+    const listed = relocated.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].approval.state).toBe('approved');
+  });
+
   it('仍拒绝受管根本身是 symlink/junction', async () => {
     const outside = path.join(workDir, 'outside-root');
     const linkedRoot = path.join(workDir, 'linked-root');
@@ -1605,30 +1632,28 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       state: 'in-progress',
       pendingIds: ['existing'],
     };
-    await fs.promises.writeFile(migrationLedgerPath(), JSON.stringify(originalLedger));
+    // 台账经 bounded no-follow 读取,超上限即视为不可读(不再用 unbounded
+    // readFileSync)。构造一个超限 ledger,验证门保守关死且 recovery queue 不被覆盖。
+    const oversizedLedger = {
+      ...originalLedger,
+      migratedIds: Array.from({ length: 900 }, (_, i) => `pad-${'x'.repeat(120)}-${i}`),
+    };
+    await fs.promises.writeFile(
+      migrationLedgerPath(),
+      JSON.stringify(oversizedLedger),
+    );
     await writeLegacyInstall('recovered', goodManifest('recovered'));
-    const realReadFileSync = fs.readFileSync;
-    const readSpy = vi.spyOn(fs, 'readFileSync').mockImplementation((target, options) => {
-      if (path.resolve(String(target)) === path.resolve(migrationLedgerPath())) {
-        throw Object.assign(new Error('EIO: ledger temporarily unreadable'), { code: 'EIO' });
-      }
-      return realReadFileSync(target, options as never);
-    });
 
-    try {
-      await expect(
-        manager.backfillRecoveredLegacyGhosts(
-          ['recovered'],
-          await recoveredProjectionOptions('recovered'),
-        ),
-      ).rejects.toThrow(
-        /ledger exists but is unreadable/,
-      );
-    } finally {
-      readSpy.mockRestore();
-    }
+    await expect(
+      manager.backfillRecoveredLegacyGhosts(
+        ['recovered'],
+        await recoveredProjectionOptions('recovered'),
+      ),
+    ).rejects.toThrow(
+      /ledger exists but is unreadable/,
+    );
     expect(JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8'))).toEqual(
-      originalLedger,
+      oversizedLedger,
     );
   });
 

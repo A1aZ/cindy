@@ -527,13 +527,27 @@ export class GhostManager {
   }
 
   private resolveContentRoot(): string {
-    return path.resolve(this.options.getRootDir());
+    // 返回 realpath:state/content root 可以位于 symlinked 祖先之下(重定位的
+    // Home/AppData),而 bounded 读取的 containWithin 必须是 realpath 产物,
+    // 否则合法文件会被判在根外而把已批准插件当成 invalid。
+    return this.assertManagedRootPath(
+      path.resolve(this.options.getRootDir()),
+      'ghost content root',
+    );
   }
 
   private resolveStateRoot(): string {
-    if (this.options.getStateDir) return path.resolve(this.options.getStateDir());
+    if (this.options.getStateDir) {
+      return this.assertManagedRootPath(
+        path.resolve(this.options.getStateDir()),
+        'ghost approval state root',
+      );
+    }
     const root = this.resolveContentRoot();
-    return path.join(path.dirname(root), `${path.basename(root)}-install-state`);
+    return this.assertManagedRootPath(
+      path.join(path.dirname(root), `${path.basename(root)}-install-state`),
+      'ghost approval state root',
+    );
   }
 
   private contentRootDir(): string {

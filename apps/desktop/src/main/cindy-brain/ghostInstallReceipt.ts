@@ -32,6 +32,7 @@ const RECEIPT_SCHEMA_VERSION = 2;
 const MAX_RECEIPT_BYTES = 2 * 1024 * 1024;
 const MAX_PENDING_MUTATION_BYTES = 64 * 1024;
 const MAX_ICON_DATA_URL_BYTES = 768 * 1024;
+const MAX_MIGRATION_LEDGER_BYTES = 64 * 1024;
 /**
  * 受管 icon 快照的完整形态:声明的图片 mime + 严格 base64 载荷。载荷字符集也要
  * 校验 —— 只认前缀会让被改写的 receipt 把任意字符串塞进 renderer 的 img src。
@@ -404,8 +405,17 @@ export class GhostInstallReceiptStore {
   /** 读迁移台账(缺失/损坏返回 null;追加 id 时用,判定门只看 hasMigrationLedger)。 */
   readMigrationLedger(): GhostLegacyMigrationLedger | null {
     try {
+      // 与 receipt 同源:no-follow + 限量 + realpath 根内复核。FIFO / symlink 到
+      // 无界大文件必须在 parse 前就被拒绝,否则启动路径(migrationDoorClosed)
+      // 会阻塞或分配无界内存,而不是把台账按不可读关门。
+      const bytes = readBoundedFileNoFollowSync(
+        this.migrationLedgerPath(),
+        MAX_MIGRATION_LEDGER_BYTES,
+        { containWithin: this.rootDir() },
+      );
+      if (bytes === null) return null;
       const raw = JSON.parse(
-        fs.readFileSync(this.migrationLedgerPath(), 'utf8'),
+        bytes.toString('utf8'),
       ) as GhostLegacyMigrationLedger;
       if (
         !raw ||

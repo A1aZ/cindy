@@ -1331,7 +1331,10 @@ export default function NewRemoteSessionScreen() {
       .getNewMakerWorktreePreference(intent.target.deviceId).enabled;
     if (currentEnabled !== intent.enabled) return false;
     if (!intent.enabled) return true;
-    if (intent.eligibility.status !== 'eligible') return false;
+    if (
+      intent.eligibility.status !== 'eligible'
+      && intent.eligibility.status !== 'ineligible'
+    ) return false;
     const currentEligibility = worktreeEligibilityRef.current;
     if (
       currentEligibility.status !== 'eligible'

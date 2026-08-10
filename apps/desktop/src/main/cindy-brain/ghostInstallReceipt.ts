@@ -447,10 +447,13 @@ export class GhostInstallReceiptStore {
     return ledger === null || ledger.state !== 'in-progress';
   }
 
-  /** 是否已跑过一轮 legacy 迁移(全局一次性门;读不动按"存在"处理,宁可不再迁)。 */
+  /** 是否已跑过一轮 legacy 迁移(全局一次性门;存在即按"已跑"处理,宁可不再迁)。 */
   hasMigrationLedger(): boolean {
     try {
-      return fs.lstatSync(this.migrationLedgerPath()).isFile();
+      // 只要路径存在就视为已迁,不论它是普通文件还是 symlink / FIFO / 设备节点:
+      // 把非普通 ledger 判成"不存在"会让迁移门重开,允许从当前可变安装目录重铸授权。
+      fs.lstatSync(this.migrationLedgerPath());
+      return true;
     } catch (error) {
       // ENOENT = 从未迁过,可以迁;其它错误(权限等)= 状态未知,保守当作"已迁",
       // 绝不因为读不动 ledger 就把迁移(=从可变安装目录重建授权)再放开一次。

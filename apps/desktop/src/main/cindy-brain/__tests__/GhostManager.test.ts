@@ -734,6 +734,25 @@ describe('GhostManager · 迁移崩溃安全(in-progress 状态机)与隔离命�
     expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe('{ not valid json');
   });
 
+  it.skipIf(process.platform === 'win32')(
+    '台账是非普通文件(symlink)→ 门保守关死,不迁也不重写',
+    async () => {
+      await writeLegacyInstall('aaa', goodManifest('aaa'));
+      await fs.promises.mkdir(path.join(workDir, 'ghosts-install-state'), { recursive: true });
+      const outside = path.join(workDir, 'ledger-outside.json');
+      await fs.promises.writeFile(outside, '{}', 'utf8');
+      await fs.promises.symlink(outside, migrationLedgerPath());
+
+      const outcome = await manager.migrateLegacyApprovalsOnce();
+      expect(outcome).toEqual({ migrated: [], skipped: [], failed: [], retryPending: [] });
+      expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+      // 门关死:ledger 未被重写(仍是 symlink 指向外部文件)。
+      const st = await fs.promises.lstat(migrationLedgerPath());
+      expect(st.isSymbolicLink()).toBe(true);
+      expect(await fs.promises.readFile(migrationLedgerPath(), 'utf8')).toBe('{}');
+    },
+  );
+
   it.each([
     ['empty pendingIds', []],
     ['non-string pending id', [null]],

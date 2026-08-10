@@ -938,14 +938,10 @@ export default function HomeScreen() {
     ? 'off'
     : connectionError ? 'muted' : status === 'online' ? 'ready' : status === 'connecting' ? 'busy' : 'off';
   const connectionTitle = activeConnectionIssue
-    ? activeConnectionIssue.kind === 'unstable'
-      ? t('deviceLink.unstableTitle')
-      : connectionIssueTitle(activeConnectionIssue.kind)
+    ? connectionIssueTitle(activeConnectionIssue.kind)
     : connectionError ? t('devices.list.syncFailed') : homeConnectionTitle(status, t);
   const connectionCopy = activeConnectionIssue
-    ? activeConnectionIssue.kind === 'unstable'
-      ? t('deviceLink.unstableHint')
-      : connectionIssueHint(activeConnectionIssue.kind)
+    ? connectionIssueHint(activeConnectionIssue.kind)
     : connectionError;
   const emptyStateTitle = initialHomeError ? t('devices.list.syncFailed') : home.emptyTitle;
   const emptyStateCopy = initialHomeError ? (connectionError ?? t('devices.list.requestFailed')) : home.emptyCopy;

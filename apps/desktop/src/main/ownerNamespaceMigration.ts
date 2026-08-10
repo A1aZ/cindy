@@ -896,8 +896,11 @@ export function getLegacyGhostRecoveryStatus(
     scopedDiscovery.deferredIds.length > 0 ||
     targetDiscovery.deferredRoots.length > 0 ||
     targetDiscovery.deferredIds.length > 0;
+  // 一个与待恢复 id 无关的 target 目录损坏（比如安装了别的插件但 ghost.json
+  // 偶然坏了）不应永久卡死本 owner 的整批 legacy 恢复。用已按 pendingIds
+  // 过滤的 targetInvalidIds 判定，而不是原始的 targetDiscovery.invalidIds。
   const discoveryHasInvalid =
-    sourceDiscoveryProblemIds.size > 0 || targetDiscovery.invalidIds.length > 0;
+    sourceDiscoveryProblemIds.size > 0 || targetInvalidIds.size > 0;
   const installedTargetIds = new Set(targetDiscovery.ghosts.map((ghost) => ghost.id));
   const legacySourceIds = new Set(legacyGhosts.map((ghost) => ghost.id));
   const knownDiscoveryIds = new Set([
@@ -941,7 +944,7 @@ export function getLegacyGhostRecoveryStatus(
     ...recoveredIds,
     ...(recoveryMarker?.pendingIds ?? []),
   ]).size;
-  if (discoveryHasInvalid && targetDiscovery.invalidIds.length > 0) {
+  if (discoveryHasInvalid && targetInvalidIds.size > 0) {
     return { state: 'partial', legacyPluginCount: Math.max(1, legacyPluginCount), canRetry: false };
   }
   if (legacyPluginCount === 0) return NO_LEGACY_GHOST_RECOVERY;

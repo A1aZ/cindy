@@ -1658,7 +1658,7 @@ export class PluginMarketService {
     if (
       silentBaselineMismatch &&
       reviewedBaseline !== undefined &&
-      ghostPermissionBaselineKey(installed) !== reviewedBaseline
+      ghostPermissionBaselineKey(installed.manifest) !== reviewedBaseline
     ) {
       throw new SilentUpgradeStaleBaselineError('Installed Plugin permissions changed');
     }
@@ -2028,9 +2028,13 @@ export class PluginMarketService {
             return;
           }
           const freshInstalled = freshLocal.ghostsById.get(summary.ghostId);
-          const reviewedBaseline = freshInstalled
-            ? ghostPermissionBaselineKey(freshInstalled.manifest)
-            : undefined;
+          if (!freshInstalled) {
+            log.warn('default plugin upgrade skipped because the installed record disappeared', {
+              pluginId: summary.id,
+            });
+            return;
+          }
+          const reviewedBaseline = ghostPermissionBaselineKey(freshInstalled.manifest);
           const detail = await this.api.detail(summary.id);
           requireSameMarketOwner(owner);
           assertDetailMatchesSummary(summary, detail);
@@ -2048,6 +2052,7 @@ export class PluginMarketService {
             reviewedManifest: reviewedManifest.manifest,
             allowPermissionExpansion: true,
             reviewedBaseline,
+            expectedInstalledApproval: ghostInstallApprovalToken(freshInstalled.approval),
             silentBaselineMismatch: true,
             beforeCommitInLock: () => {
               if (

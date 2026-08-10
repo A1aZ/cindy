@@ -2618,7 +2618,7 @@ describe('GhostManager · install', () => {
     expect(manager.list()[0].trust).toEqual(CINDY_OFFICIAL_GHOST_TRUST);
   });
 
-  it('残缺的官方 receipt 不会被投影为可用的官方 trust', async () => {
+  it('可变 trust 镜像损坏不会覆盖有效的官方 Host receipt', async () => {
     const local = await makeCindy('github-incomplete-receipt.cindy', goodManifest('cindy-github'));
     await manager.install(local, { trustOverride: 'cindy-official' });
     const metadataPath = path.join(rootDir, 'cindy-github', '.cindy-trust.json');
@@ -2626,7 +2626,7 @@ describe('GhostManager · install', () => {
     delete metadata.publisherName;
     await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
 
-    expect(manager.list()[0]?.trust).toBeUndefined();
+    expect(manager.list()[0]?.trust).toEqual(CINDY_OFFICIAL_GHOST_TRUST);
   });
 
   it('@ 资源入口必须命中主机安装 receipt，旧安装元数据不会在升级后自动扩权', async () => {

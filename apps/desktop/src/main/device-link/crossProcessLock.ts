@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import type { Stats } from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -82,6 +83,10 @@ let currentProcessIdentityPromise: Promise<ProcessIdentity | null> | null = null
 // nonce so the same process can recover it before treating the gate as busy.
 const pendingOwnRecordRecovery = new Map<string, string>();
 const pendingOwnGateCleanup = new Set<string>();
+
+function gateReleaseMarkerPath(gatePath: string): string {
+  return `${gatePath}.released`;
+}
 
 export async function withCrossProcessLock<T>(
   lockPath: string,
@@ -446,7 +451,10 @@ function reclaimGateDirPath(lockPath: string): string {
 async function cleanupPendingOwnGates(): Promise<void> {
   for (const file of [...pendingOwnGateCleanup]) {
     await removePathWithRetry(file);
-    if (!(await pathExists(file))) pendingOwnGateCleanup.delete(file);
+    if (!(await pathExists(file))) {
+      await removePathWithRetry(gateReleaseMarkerPath(file));
+      pendingOwnGateCleanup.delete(file);
+    }
   }
 }
 
@@ -463,7 +471,7 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
   for (const entry of entries) {
     if (!entry.startsWith('gate-') || !entry.endsWith('.json')) continue;
     const filePath = path.join(dirPath, entry);
-    let stat: Awaited<ReturnType<typeof fsp.stat>>;
+    let stat: Stats;
     try {
       stat = await fsp.stat(filePath);
     } catch {
@@ -471,7 +479,18 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     }
     const record = await readLockRecord(filePath, true);
     if (record === 'missing') continue;
-    if (typeof record === 'string') return filePath;
+    if (await hasValidGateReleaseMarker(filePath)) {
+      await removePathWithRetry(filePath);
+      await removePathWithRetry(gateReleaseMarkerPath(filePath));
+      continue;
+    }
+    if (typeof record === 'string') {
+      const fresh = Date.now() - stat.mtimeMs <= LOCK_STALE_MS;
+      if (fresh || await isMalformedGateOwnerActive(filePath, stat)) return filePath;
+      await removePathWithRetry(filePath);
+      if (await pathExists(filePath)) return filePath;
+      continue;
+    }
     if (record.state === 'released') {
       await removePathWithRetry(filePath);
       continue;
@@ -493,6 +512,29 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     || (left.record.nonce ?? '').localeCompare(right.record.nonce ?? '')
     || left.filePath.localeCompare(right.filePath));
   return active[0]?.filePath ?? null;
+}
+
+async function isMalformedGateOwnerActive(
+  filePath: string,
+  stat: Stats,
+): Promise<boolean> {
+  const match = /^gate-(\d+)-[0-9a-f-]+\.json$/i.exec(path.basename(filePath));
+  if (!match) return true;
+  const pid = Number(match[1]);
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  const createdAtMs = Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
+    ? stat.birthtimeMs
+    : stat.mtimeMs;
+  return isRecordOwnerActive(
+    {
+      pid,
+      startedAt: stat.mtimeMs,
+      nonce: null,
+      processStartIdentity: null,
+      state: 'held',
+    },
+    createdAtMs,
+  );
 }
 
 async function acquireReclaimGate(
@@ -864,20 +906,63 @@ async function cleanupPublishedLock(
 
 async function releaseReclaimGate(gate: ReclaimGate): Promise<void> {
   clearInterval(gate.heartbeat);
+  let releasedRecordDurable = false;
   try {
     await markReleased(gate.lock);
+    releasedRecordDurable = true;
   } catch (error) {
     log.warn('lock reclaim gate could not be flushed before release', error);
+    await publishGateReleaseMarker(gate).catch((markerError) => {
+      log.warn('lock reclaim gate release marker could not be published', markerError);
+    });
   }
   await gate.lock.handle.close().catch(() => undefined);
   await removePathWithRetry(gate.filePath);
   if (await pathExists(gate.filePath)) {
     pendingOwnGateCleanup.add(gate.filePath);
+  } else if (!releasedRecordDurable) {
+    await removePathWithRetry(gateReleaseMarkerPath(gate.filePath));
   }
   try {
     await fsp.rmdir(gate.dirPath);
   } catch {
     // Another contender may already be publishing in the directory.
+  }
+}
+
+async function publishGateReleaseMarker(gate: ReclaimGate): Promise<void> {
+  const markerPath = gateReleaseMarkerPath(gate.filePath);
+  let handle: Awaited<ReturnType<typeof fsp.open>> | null = null;
+  try {
+    handle = await fsp.open(markerPath, 'wx');
+    await writeAllAt(handle, JSON.stringify({
+      gateFile: path.basename(gate.filePath),
+      nonce: gate.lock.nonce,
+    }));
+    await handle.sync();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    if (!(await hasValidGateReleaseMarker(gate.filePath))) throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function hasValidGateReleaseMarker(gatePath: string): Promise<boolean> {
+  try {
+    const value = JSON.parse(
+      await fsp.readFile(gateReleaseMarkerPath(gatePath), 'utf8'),
+    ) as unknown;
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && (value as Record<string, unknown>).gateFile === path.basename(gatePath)
+      && typeof (value as Record<string, unknown>).nonce === 'string'
+      && isValidNonce((value as Record<string, unknown>).nonce as string),
+    );
+  } catch {
+    return false;
   }
 }
 

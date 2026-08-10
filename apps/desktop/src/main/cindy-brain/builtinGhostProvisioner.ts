@@ -116,7 +116,10 @@ export interface ProvisionDeps {
   publishSeed?: (
     id: string,
     seedDir: string,
-    options: { disabled: boolean },
+    options: {
+      disabled: boolean;
+      trust?: typeof CINDY_OFFICIAL_GHOST_TRUST;
+    },
   ) => void | Promise<void>;
   /**
    * 首次真实变更(装/覆盖/回收)动手前回调,整轮至多一次 —— index.ts 用它
@@ -619,117 +622,79 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           }
 
           // 4) 指纹比对(忽略点开头文件:`.disabled` 是用户状态不是内容)。
+          // 种子是随应用发布的第一方输入,出现链接/FIFO/设备节点属于打包事故:
+          // 必须整颗 fail closed,不能在复制时静默丢掉条目后批准一个残缺安装。
           const seedFingerprint = await fingerprintDirContent(seedDir);
           if (seedFingerprint.hasNonRegularEntry) {
             throw new Error('builtin seed contains a link or non-regular entry');
           }
+
+          const trust = id === 'cindy-github' ? CINDY_OFFICIAL_GHOST_TRUST : undefined;
           if (installedExists) {
             const installedFingerprint = await fingerprintDirContent(installedDir);
-            if (
+            const contentMatches =
               !installedFingerprint.hasNonRegularEntry &&
-              seedFingerprint.hash === installedFingerprint.hash
-            ) {
+              seedFingerprint.hash === installedFingerprint.hash;
+            const trustNeedsRepair = trust !== undefined && !hasCindyOfficialTrustMetadata(installedDir);
+            if (contentMatches && !trustNeedsRepair) {
               outcome.approved.push(manifest);
               outcome.approvedSourceDirs[id] = seedDir;
-              if (id === 'cindy-github' && !hasCindyOfficialTrustMetadata(installedDir)) {
-                // receipt 与官方字节必须在同一把安装锁内、经同一次 staging swap
-                // 原子落位；不能在 hash 后单独给可能已被替换的目录补 trust。
-                const wasDisabled = classifyGhostDirEntrySync(path.join(installedDir, '.disabled')) === 'file';
-                markApplyStart();
-                await swapInSeed(seedDir, installedDir, repoRootDir, id, {
-                  disabled: wasDisabled,
-                  trust: CINDY_OFFICIAL_GHOST_TRUST,
-                });
-              }
               outcome.skipped.push(id);
               return;
             }
-            const wasDisabled = classifyGhostDirEntrySync(path.join(installedDir, '.disabled')) === 'file';
+
+            const wasDisabled = (() => {
+              try {
+                return classifyGhostDirEntrySync(path.join(installedDir, '.disabled')) === 'file';
+              } catch {
+                return false;
+              }
+            })();
             markApplyStart();
+            // Claim seeded ownership durably before exchanging bytes. If the process
+            // dies after the swap but before the end-of-pass ledger write, the next
+            // reconciliation still knows this id is eligible for audience cleanup.
             seeded.add(id);
             if (!writeState(repoRootDir, { removed: [...tombstones], seeded: [...seeded].sort() }, log)) {
               seeded.delete(id);
               throw new Error('builtin seeded ledger could not be persisted before replacement');
             }
             ownershipClaimPersisted = true;
-            await deps.beforeReplace?.(id);
-            await swapInSeed(seedDir, installedDir, repoRootDir, id, {
+            if (!contentMatches) await deps.beforeReplace?.(id);
+            const options = {
               disabled: wasDisabled,
-              ...(id === 'cindy-github' ? { trust: CINDY_OFFICIAL_GHOST_TRUST } : {}),
-            });
+              ...(trust ? { trust } : {}),
+            };
+            if (deps.publishSeed) await deps.publishSeed(id, seedDir, options);
+            else await swapInSeed(seedDir, installedDir, repoRootDir, id, options);
             outcome.approved.push(manifest);
             outcome.approvedSourceDirs[id] = seedDir;
-            outcome.updated.push(manifest);
-            log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
+            if (contentMatches) {
+              outcome.skipped.push(id);
+            } else {
+              outcome.updated.push(manifest);
+              log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
+            }
             return;
           }
 
-        {
-        // 4) 指纹比对(忽略点开头文件:`.disabled` 是用户状态不是内容)。
-        // 种子是随应用发布的第一方输入,出现链接/FIFO/设备节点属于打包事故:
-        // 必须整颗 fail closed,不能在复制时静默丢掉条目后批准一个残缺安装。
-        const seedFingerprint = await fingerprintDirContent(seedDir);
-        if (seedFingerprint.hasNonRegularEntry) {
-          throw new Error('builtin seed contains a link or non-regular entry');
-        }
-        if (installedExists) {
-          const installedFingerprint = await fingerprintDirContent(installedDir);
-          // 安装侧含非普通条目 = 一律判不一致,走重新播种把目录换回随包字节。
-          // 否则它既修不回来(判成相同就跳过播种),随后 hashApprovedDirectory 又会因
-          // 非普通条目抛错、批准被撤销,插件每次启动都卡在不可用。
-          if (
-            !installedFingerprint.hasNonRegularEntry &&
-            seedFingerprint.hash === installedFingerprint.hash
-          ) {
-            outcome.approved.push(manifest);
-            outcome.approvedSourceDirs[id] = seedDir;
-            outcome.skipped.push(id);
-            return;
-          }
-          const wasDisabled = (() => {
-            try {
-              classifyGhostDirEntrySync(path.join(installedDir, '.disabled'));
-              return true;
-            } catch {
-              return false;
-            }
-          })();
           markApplyStart();
-          // Claim seeded ownership durably before exchanging bytes. If the process
-          // dies after the swap but before the end-of-pass ledger write, the next
-          // reconciliation still knows this id is eligible for audience cleanup.
-          seeded.add(id);
-          if (!writeState(repoRootDir, { removed: [...tombstones], seeded: [...seeded].sort() }, log)) {
-            seeded.delete(id);
-            throw new Error('builtin seeded ledger could not be persisted before replacement');
-          }
-          ownershipClaimPersisted = true;
-          await deps.beforeReplace?.(id);
-          if (deps.publishSeed) await deps.publishSeed(id, seedDir, { disabled: wasDisabled });
-          else await swapInSeed(seedDir, installedDir, repoRootDir, id, { disabled: wasDisabled });
-          outcome.approved.push(manifest);
-          outcome.approvedSourceDirs[id] = seedDir;
-          outcome.updated.push(manifest);
-          log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
-        } else {
-          markApplyStart();
-          await swapInSeed(seedDir, installedDir, repoRootDir, id, {
-            disabled: false,
-            ...(id === 'cindy-github' ? { trust: CINDY_OFFICIAL_GHOST_TRUST } : {}),
-          });
           seeded.add(id);
           if (!writeState(repoRootDir, { removed: [...tombstones], seeded: [...seeded].sort() }, log)) {
             seeded.delete(id);
             throw new Error('builtin seeded ledger could not be persisted before install');
           }
           ownershipClaimPersisted = true;
-          if (deps.publishSeed) await deps.publishSeed(id, seedDir, { disabled: false });
-          else await swapInSeed(seedDir, installedDir, repoRootDir, id, { disabled: false });
+          const options = {
+            disabled: false,
+            ...(trust ? { trust } : {}),
+          };
+          if (deps.publishSeed) await deps.publishSeed(id, seedDir, options);
+          else await swapInSeed(seedDir, installedDir, repoRootDir, id, options);
           outcome.approved.push(manifest);
           outcome.approvedSourceDirs[id] = seedDir;
           outcome.installed.push(manifest);
           log?.info('builtin ghost installed', { id, version: manifest.version });
-        }
         });
       } catch (err) {
         // Existing ownership must survive a failed audience/orphan cleanup so the

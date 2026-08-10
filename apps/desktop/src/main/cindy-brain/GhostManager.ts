@@ -434,7 +434,10 @@ export interface GhostExclusiveMutation {
   publishTrustedBundledSeed(
     id: string,
     sourceDir: string,
-    options: { disabled: boolean },
+    options: {
+      disabled: boolean;
+      trust?: typeof CINDY_OFFICIAL_GHOST_TRUST;
+    },
   ): Promise<void>;
   approveTrustedBundledInstall(
     manifest: GhostManifest,
@@ -2253,53 +2256,6 @@ export class GhostManager {
     }
   }
 
-  /** 读取主机安装时写下的信任快照与权限 receipt；坏文件一律 fail closed。 */
-  private readInstalledHostMetadata(dir: string): GhostInstalledHostMetadata | null {
-    try {
-      const bytes = readBoundedFileNoFollowSync(path.join(dir, TRUST_METADATA_FILE), 64 * 1024);
-      if (bytes === null) return null;
-      const raw = JSON.parse(bytes.toString('utf8')) as Record<string, unknown>;
-      if (
-        !raw ||
-        typeof raw !== 'object' ||
-        typeof raw.level !== 'string' ||
-        !['cindy-official', 'reviewed', 'verified-publisher', 'unverified'].includes(raw.level) ||
-        typeof raw.publisherSigned !== 'boolean' ||
-        typeof raw.publisherVerified !== 'boolean' ||
-        typeof raw.reviewed !== 'boolean'
-      ) return null;
-      const trust: GhostTrustInfo = {
-        level: raw.level as GhostTrustInfo['level'],
-        publisherSigned: raw.publisherSigned,
-        publisherVerified: raw.publisherVerified,
-        reviewed: raw.reviewed,
-        ...(typeof raw.publisherName === 'string' ? { publisherName: raw.publisherName } : {}),
-        ...(typeof raw.publisherKeyId === 'string' ? { publisherKeyId: raw.publisherKeyId } : {}),
-        ...(typeof raw.reviewerName === 'string' ? { reviewerName: raw.reviewerName } : {}),
-        ...(typeof raw.unknownReviewer === 'boolean' ? { unknownReviewer: raw.unknownReviewer } : {}),
-      };
-      // Official trust is a capability-bearing identity. A malformed receipt is
-      // not downgraded into a partially trusted official object; it disappears
-      // from the projection so every consumer fails closed.
-      if (trust.level === 'cindy-official' && !isCindyOfficialTrustInfo(trust)) return null;
-      const approval = raw.approvedAtResourceProvider;
-      const approvedAtResourceProviderTool =
-        approval
-        && typeof approval === 'object'
-        && !Array.isArray(approval)
-        && Object.keys(approval).length === 1
-        && typeof (approval as Record<string, unknown>).tool === 'string'
-          ? (approval as Record<string, string>).tool
-          : undefined;
-      return {
-        trust,
-        ...(approvedAtResourceProviderTool ? { approvedAtResourceProviderTool } : {}),
-      };
-    } catch {
-      return null;
-    }
-  }
-
   /**
    * 只验不装:读 .cindy → 解包 → 校验清单,返回清单(含 icon data URL),
    * 零副作用。「装意识前弹确认」(README 安全原则)的数据来源 —— 三个装入
@@ -2685,7 +2641,6 @@ export class GhostManager {
       manifest,
       approvedManifest,
       localeResources,
-      trust,
       packageSha256,
       iconDataUrl,
       allEntries,
@@ -2897,7 +2852,6 @@ export class GhostManager {
       manifest,
       approvedManifest,
       localeResources,
-      trust,
       packageSha256,
       iconDataUrl,
       allEntries,
@@ -3159,7 +3113,10 @@ export class GhostManager {
   private async publishTrustedBundledSeedUnlocked(
     id: string,
     sourceDirInput: string,
-    options: { disabled: boolean },
+    options: {
+      disabled: boolean;
+      trust?: typeof CINDY_OFFICIAL_GHOST_TRUST;
+    },
   ): Promise<void> {
     if (
       !isValidGhostId(id) ||
@@ -3193,6 +3150,12 @@ export class GhostManager {
       await copyBundledSeedDirectory(sourceDir, stagingDir);
       if (options.disabled) {
         await fs.promises.writeFile(path.join(stagingDir, DISABLED_MARKER_FILE), '');
+      }
+      if (options.trust) {
+        await fs.promises.writeFile(
+          path.join(stagingDir, TRUST_METADATA_FILE),
+          `${JSON.stringify(options.trust, null, 2)}\n`,
+        );
       }
       if (finalKind === 'missing') {
         await this.receiptStore.writePendingMutation(id, { kind: 'install', packageSha256 });
@@ -3318,12 +3281,7 @@ export class GhostManager {
     ) {
       throw new Error('builtin seed publish journal does not match immutable source');
     }
-    const trust: GhostTrustInfo = {
-      level: 'cindy-official',
-      publisherSigned: false,
-      publisherVerified: false,
-      reviewed: true,
-    };
+    const trust = CINDY_OFFICIAL_GHOST_TRUST;
     const current = this.readApproval(manifest.id);
     // priorEnabled 直接读盘上的 receipt 而不是 readApproval 的投影:进程内隔离态的
     // receipt 不可作授权事实,但"曾经停用"这个位只用于往下拉,是 fail closed 方向,

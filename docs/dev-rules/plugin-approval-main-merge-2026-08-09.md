@@ -12,6 +12,12 @@ security rules.
   malformed, pending, mismatched, or durability-uncertain state fails closed.
 - Every owner-bound Ghost, Agent, broker, slot, skill-link, and IPC consumer must
   use the same durable owner and in-process owner generation.
+- General Cindy account capabilities are also fail-closed unless the durable
+  projection marker is `stable` for the active data owner; releasing an in-memory
+  session boundary alone must not reopen cloud services after an uncertain commit.
+- Ghost mutation owner capture and lease acquisition re-check durable owner
+  stability at the mutation boundary, so a pending or mismatched marker cannot be
+  bypassed by a previously captured in-memory session.
 - Passive shared-userData instances are read-only for the global projection. They
   must not sweep links, publish a different owner, or turn a primary owner's
   projection into another account's projection.

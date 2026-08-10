@@ -221,6 +221,12 @@ describe('extractCommandOutputPathCandidates', () => {
       extractCommandOutputPathCandidates("df.to_csv(index=False, path_or_buf='out/report.csv')"),
     ).toEqual(['out/report.csv']);
     expect(
+      extractCommandOutputPathCandidates("torch.save(model.state_dict(), 'out/model.pt')"),
+    ).toEqual(['out/model.pt']);
+    expect(extractCommandOutputPathCandidates("joblib.dump(model, 'out/model.pkl')")).toEqual([
+      'out/model.pkl',
+    ]);
+    expect(
       extractCommandOutputPathCandidates('workbook.to_excel(excel_writer="out/report.xlsx")'),
     ).toEqual(['out/report.xlsx']);
     expect(extractCommandOutputPathCandidates("plt.savefig('out/chart.png')")).toEqual([
@@ -235,6 +241,11 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates('tee /work/out/report.txt')).toEqual([
       '/work/out/report.txt',
     ]);
+    expect(
+      extractCommandOutputPathCandidates(
+        "wget --output-document='out/report.pdf' https://example.com/report.pdf",
+      ),
+    ).toEqual(['out/report.pdf']);
     expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual([
       'output/source.txt',
     ]);
@@ -244,6 +255,15 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates('cp inputs/a.txt inputs/b.txt output/')).toEqual([
       'output/a.txt',
       'output/b.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('cp -t output source.txt')).toEqual([
+      'output/source.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('mv --target-directory output source.txt')).toEqual([
+      'output/source.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates("cp 'source file.txt' output/")).toEqual([
+      'output/source file.txt',
     ]);
     expect(
       extractCommandOutputPathCandidates(

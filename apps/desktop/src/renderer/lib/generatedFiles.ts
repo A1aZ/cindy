@@ -112,6 +112,21 @@ interface CommandPathToken {
   end: number;
 }
 
+interface CommandArgument {
+  value: string;
+  start: number;
+  end: number;
+}
+
+function extractCommandArguments(text: string, offset = 0): CommandArgument[] {
+  return [...text.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
+    const value = match[1] ?? match[2] ?? match[3] ?? '';
+    const quoteOffset = match[1] !== undefined || match[2] !== undefined ? 1 : 0;
+    const start = offset + (match.index ?? 0) + quoteOffset;
+    return { value, start, end: start + value.length };
+  });
+}
+
 const RELATIVE_PATH_TOKEN_RE = /(?:^|[\s=(,>])([^\s'"<>|?*]+[\\/])(?=$|[\s'"<>|])/g;
 
 /** 提取路径 token 及其在命令中的位置;写出语义需要靠相邻文本判断。 */
@@ -165,6 +180,8 @@ const WRITE_CALL_PREFIX_RE =
   /(?:\.|\b)(?:save|savefig|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*)?(?:[rubf]{0,2})?['"]$/i;
 const WRITE_CALL_LATER_KEYWORD_PREFIX_RE =
   /(?:\.|\b)(?:save|savefig|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*[^();\r\n]+,\s*(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*(?:[rubf]{0,2})?['"]$/i;
+const OBJECT_FIRST_WRITE_CALL_PREFIX_RE =
+  /\b(?:torch\.save|joblib\.dump)\s*\(\s*(?:[^();\r\n]|\([^()]*\))+,\s*(?:[rubf]{0,2})?['"]$/i;
 const POWERSHELL_CMDLET_RE = /\b[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9-]*\b/g;
 const POWERSHELL_WRITE_COMMANDS = new Set([
   'out-file',
@@ -174,7 +191,8 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
   'export-clixml',
   'new-item',
 ]);
-const OUTPUT_OPTION_PREFIX_RE = /(?:^|\s)(?:-o|--output(?:-file)?|--outfile)(?:\s+|=)['"]?$/i;
+const OUTPUT_OPTION_PREFIX_RE =
+  /(?:^|\s)(?:-o|--output(?:-file|-document)?|--outfile)(?:\s+|=)['"]?$/i;
 const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
 const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
 const TEE_COMMAND_PREFIX_RE = /(?:^|[|;&]\s*)tee(?:\.exe)?\b[^|;&\r\n]*['"]?$/i;
@@ -187,16 +205,34 @@ function extractTransferPlainFilenameDestinations(command: string): CommandPathT
     const commandName = (commandMatch[1] ?? '').toLowerCase();
     const argsText = commandMatch[2] ?? '';
     const argsStart = (commandMatch.index ?? 0) + commandMatch[0].length - argsText.length;
-    const args = [...argsText.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
-      const value = match[1] ?? match[2] ?? match[3] ?? '';
-      const offset = match[1] !== undefined || match[2] !== undefined ? 1 : 0;
-      const start = argsStart + (match.index ?? 0) + offset;
-      return { value, start, end: start + value.length };
-    });
+    const args = extractCommandArguments(argsText, argsStart);
     const isPlainFilename = (value: string): boolean =>
       EXT_RE.test(value) && !/[\\/<>|?*]/.test(value);
     if (commandName !== 'copy-item' && commandName !== 'move-item') {
-      if (args.some((arg) => /^(?:-t|--target-directory(?:=|$))/i.test(arg.value))) continue;
+      const supportsTargetDirectoryOption = commandName === 'cp' || commandName === 'mv';
+      const targetDirectoryOptionIndex = supportsTargetDirectoryOption
+        ? args.findIndex((arg) => /^(?:-t|--target-directory(?:=|$))/i.test(arg.value))
+        : -1;
+      if (targetDirectoryOptionIndex >= 0) {
+        const option = args[targetDirectoryOptionIndex];
+        const equalsIndex = option.value.indexOf('=');
+        const separateDestination = args[targetDirectoryOptionIndex + 1];
+        const rawDestination =
+          equalsIndex >= 0 ? option.value.slice(equalsIndex + 1) : separateDestination?.value;
+        const destinationStart =
+          equalsIndex >= 0
+            ? option.start + equalsIndex + 1
+            : (separateDestination?.start ?? option.end);
+        const destination = rawDestination?.replace(/^(['"])(.*)\1$/, '$2');
+        if (destination && !TEMP_DIR_RE.test(destination) && !/[<>|?*]/.test(destination)) {
+          out.push({
+            path: /[\\/]$/.test(destination) ? destination : `${destination}/`,
+            start: destinationStart,
+            end: destinationStart + destination.length,
+          });
+        }
+        continue;
+      }
       const positional = args.filter(
         (arg) =>
           !arg.value.startsWith('-') &&
@@ -304,6 +340,7 @@ function isExplicitOutputPath(
   if (
     WRITE_CALL_PREFIX_RE.test(before) ||
     WRITE_CALL_LATER_KEYWORD_PREFIX_RE.test(before) ||
+    OBJECT_FIRST_WRITE_CALL_PREFIX_RE.test(before) ||
     /^\s*['"]?\s*\)\s*\.\s*write_(?:text|bytes)\s*\(/i.test(after) ||
     isPowerShellOutputPosition(before) ||
     OUTPUT_OPTION_PREFIX_RE.test(before) ||
@@ -353,6 +390,14 @@ function isExplicitOutputPath(
     }
     return lastPath?.start === token.start && lastPath.end === token.end;
   }
+  if (
+    /(?:^|\|\s*)(?:cp|mv)\s+/i.test(segment.trim()) &&
+    /(?:^|\s)(?:-t|--target-directory)(?:\s+|=)['"]?$/i.test(
+      command.slice(segmentStart, token.start),
+    )
+  ) {
+    return true;
+  }
   return (
     lastPath?.start === token.start &&
     lastPath.end === token.end &&
@@ -388,17 +433,14 @@ function transferDirectoryOutputs(
     .filter((token) => token.start !== destination.start)
     .filter((token) => !/[\\/]$/.test(token.path))
     .map((token) => token.path);
-  const beforeDestination = command.slice(segmentStart, destination.start);
-  const afterDestination = command.slice(destination.end, segmentEnd);
-  for (const match of beforeDestination.matchAll(
-    /(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g,
-  )) {
-    if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
-  }
-  for (const match of afterDestination.matchAll(
-    /(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g,
-  )) {
-    if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
+  const segmentArguments = extractCommandArguments(
+    command.slice(segmentStart, segmentEnd),
+    segmentStart,
+  );
+  for (const argument of segmentArguments) {
+    if (argument.start === destination.start) continue;
+    if (!EXT_RE.test(argument.value) || /[<>|?*]/.test(argument.value)) continue;
+    if (!sourcePaths.includes(argument.value)) sourcePaths.push(argument.value);
   }
   const outputs = sourcePaths
     .map((source) => {
@@ -417,7 +459,7 @@ function transferDirectoryOutputs(
  *
  * mtime 只能证明文件最近变过,不能证明是当前命令创建的(新 worktree 中所有文件尤其容易
  * 同时命中时间窗)。因此普通参数、变量赋值、Get-Content / ReadAllLines 等读取位置一律不收;
- * 只认重定向、常见 save/write API、输出参数及复制目标。后续仍由渲染方做时间窗复核。
+ * 只认重定向、常见 save/write API、输出参数及复制/移动目标。后续仍由渲染方做时间窗复核。
  */
 export function extractCommandOutputPathCandidates(command: string): string[] {
   const tokens = extractCommandPathTokens(command);

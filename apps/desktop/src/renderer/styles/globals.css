@@ -1043,6 +1043,7 @@ body.resizing-pane [data-ghost-webview] {
 [data-app-hidden='true'] .session-running-dot,
 [data-app-hidden='true'] .thinking-dot,
 [data-app-hidden='true'] .ghost-card-sweep,
+[data-app-hidden='true'] .brand-loading-mark-sheen::before,
 [data-app-hidden='true'] .ghost-bubble-face,
 [data-app-hidden='true'] .agent-island-mascot-character,
 [data-app-hidden='true'] .agent-island-mascot-keyboard,

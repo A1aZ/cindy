@@ -119,12 +119,30 @@ interface CommandArgument {
 }
 
 function extractCommandArguments(text: string, offset = 0): CommandArgument[] {
-  return [...text.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
+  const parsed = [...text.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
     const value = match[1] ?? match[2] ?? match[3] ?? '';
-    const quoteOffset = match[1] !== undefined || match[2] !== undefined ? 1 : 0;
+    const quoted = match[1] !== undefined || match[2] !== undefined;
+    const quoteOffset = quoted ? 1 : 0;
     const start = offset + (match.index ?? 0) + quoteOffset;
-    return { value, start, end: start + value.length };
+    return { value, start, end: start + value.length, quoted };
   });
+  const merged: typeof parsed = [];
+  // POSIX shell 的奇数个尾随反斜杠会转义紧随其后的空白;只消费最后一个反斜杠,
+  // 避免把 Windows 路径里的普通反斜杠做全局反转义。
+  for (const argument of parsed) {
+    const previous = merged.at(-1);
+    const trailingBackslashes = previous?.value.match(/\\+$/)?.[0].length ?? 0;
+    if (previous && !previous.quoted && !argument.quoted && trailingBackslashes % 2 === 1) {
+      const gap = text.slice(previous.end - offset, argument.start - offset);
+      if (/^[ \t]+$/.test(gap)) {
+        previous.value = `${previous.value.slice(0, -1)}${gap[0]}${argument.value}`;
+        previous.end = argument.end;
+        continue;
+      }
+    }
+    merged.push(argument);
+  }
+  return merged.map(({ value, start, end }) => ({ value, start, end }));
 }
 
 const RELATIVE_PATH_TOKEN_RE = /(?:^|[\s=(,>])([^\s'"<>|?*]+[\\/])(?=$|[\s'"<>|])/g;
@@ -336,13 +354,14 @@ function isExplicitOutputPath(
   tokens: readonly CommandPathToken[],
 ): boolean {
   const before = command.slice(Math.max(0, token.start - 240), token.start);
+  const powerShellBefore = command.slice(0, token.start);
   const after = command.slice(token.end, token.end + 80);
   if (
     WRITE_CALL_PREFIX_RE.test(before) ||
     WRITE_CALL_LATER_KEYWORD_PREFIX_RE.test(before) ||
     OBJECT_FIRST_WRITE_CALL_PREFIX_RE.test(before) ||
     /^\s*['"]?\s*\)\s*\.\s*write_(?:text|bytes)\s*\(/i.test(after) ||
-    isPowerShellOutputPosition(before) ||
+    isPowerShellOutputPosition(powerShellBefore) ||
     OUTPUT_OPTION_PREFIX_RE.test(before) ||
     REDIRECT_PREFIX_RE.test(before) ||
     SAVE_COMMAND_PREFIX_RE.test(before) ||
@@ -382,21 +401,19 @@ function isExplicitOutputPath(
     .filter((candidate) => candidate.start >= segmentStart && candidate.end <= segmentEnd)
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .at(-1);
+  const beforeInSegment = command.slice(segmentStart, token.start);
   if (/(?:^|\|\s*)(?:Copy-Item|Move-Item)\b/i.test(segment.trim())) {
-    const beforeInSegment = command.slice(segmentStart, token.start);
     const hasExplicitDestination = /-(?:Destination|LiteralDestination|Target)\s+/i.test(segment);
     if (hasExplicitDestination) {
       return /-(?:Destination|LiteralDestination|Target)\s+['"]?$/i.test(beforeInSegment);
     }
     return lastPath?.start === token.start && lastPath.end === token.end;
   }
-  if (
+  const isTargetDirectoryTransfer =
     /(?:^|\|\s*)(?:cp|mv)\s+/i.test(segment.trim()) &&
-    /(?:^|\s)(?:-t|--target-directory)(?:\s+|=)['"]?$/i.test(
-      command.slice(segmentStart, token.start),
-    )
-  ) {
-    return true;
+    /(?:^|\s)(?:-t(?:\s+|$)|--target-directory(?:\s+|=))/i.test(segment);
+  if (isTargetDirectoryTransfer) {
+    return /(?:^|\s)(?:-t|--target-directory)(?:\s+|=)['"]?$/i.test(beforeInSegment);
   }
   return (
     lastPath?.start === token.start &&

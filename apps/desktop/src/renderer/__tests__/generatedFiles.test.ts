@@ -265,6 +265,13 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates("cp 'source file.txt' output/")).toEqual([
       'output/source file.txt',
     ]);
+    expect(extractCommandOutputPathCandidates('cp source\\ file.txt output/')).toEqual([
+      'output/source file.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('cp -t /dest /src/a.txt')).toEqual(['/dest/a.txt']);
+    expect(extractCommandOutputPathCandidates('cp --target-directory=/dest /src/a.txt')).toEqual([
+      '/dest/a.txt',
+    ]);
     expect(
       extractCommandOutputPathCandidates(
         'Get-ChildItem inputs/source.txt | Copy-Item -Destination output/',
@@ -370,6 +377,11 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates(
         "Set-Content -Value (Get-Content -Path 'inputs/source.txt') -Path 'artifacts/result.txt'",
+      ),
+    ).toEqual(['artifacts/result.txt']);
+    expect(
+      extractCommandOutputPathCandidates(
+        `Set-Content -Value '${'x'.repeat(300)}' -Path 'artifacts/result.txt'`,
       ),
     ).toEqual(['artifacts/result.txt']);
     expect(

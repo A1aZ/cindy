@@ -152,4 +152,50 @@ describe('SessionDragPreviewController', () => {
     expect(controller.isActive()).toBe(true);
     controller.end(owner);
   });
+
+  it('ignores a native release from an older drag token', () => {
+    const owner = {};
+    const firstPreview = createPreviewWindow();
+    const secondPreview = createPreviewWindow();
+    const controller = new SessionDragPreviewController({
+      screen: {
+        getCursorScreenPoint: () => ({ x: 900, y: 700 }),
+        getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 800 } }),
+      },
+      getAppWindowBounds: () => [],
+      createPreviewWindow: vi.fn().mockReturnValueOnce(firstPreview).mockReturnValue(secondPreview),
+    });
+
+    const firstToken = controller.begin(owner, '任务 A');
+    const secondToken = controller.begin(owner, '任务 B');
+    expect(firstToken).not.toBe(secondToken);
+
+    expect(controller.endByToken(firstToken!)).toBe(false);
+    expect(controller.isActive()).toBe(true);
+    expect(secondPreview.hide).not.toHaveBeenCalled();
+
+    expect(controller.endByToken(secondToken!)).toBe(true);
+    expect(controller.isActive()).toBe(false);
+    expect(secondPreview.hide).toHaveBeenCalledOnce();
+  });
+
+  it('notifies native cleanup when the safety timeout ends a drag', () => {
+    const onStopped = vi.fn();
+    const controller = new SessionDragPreviewController({
+      screen: {
+        getCursorScreenPoint: () => ({ x: 900, y: 700 }),
+        getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1200, height: 800 } }),
+      },
+      getAppWindowBounds: () => [],
+      createPreviewWindow,
+      maxDurationMs: 32,
+      onStopped,
+    });
+
+    const token = controller.begin({}, '任务 A');
+    vi.advanceTimersByTime(48);
+
+    expect(controller.isActive()).toBe(false);
+    expect(onStopped).toHaveBeenCalledWith(token);
+  });
 });

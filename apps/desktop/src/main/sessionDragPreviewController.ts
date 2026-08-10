@@ -24,12 +24,14 @@ export interface SessionDragPreviewControllerDeps {
   screen: SessionDragPreviewScreenLike;
   getAppWindowBounds: () => readonly WindowBounds[];
   createPreviewWindow: (label: string) => SessionDragPreviewWindowLike;
+  onStopped?: (token: number) => void;
   intervalMs?: number;
   maxDurationMs?: number;
 }
 
 interface ActiveSessionDrag {
   owner: object;
+  token: number;
   label: string;
   startedAt: number;
   preview: SessionDragPreviewWindowLike | null;
@@ -52,15 +54,17 @@ const DEFAULT_MAX_DURATION_MS = 30_000;
  */
 export class SessionDragPreviewController {
   private active: ActiveSessionDrag | null = null;
+  private nextToken = 1;
 
   constructor(private readonly deps: SessionDragPreviewControllerDeps) {}
 
-  begin(owner: object, labelInput: string): void {
-    if (this.active?.owner && this.active.owner !== owner) return;
+  begin(owner: object, labelInput: string): number | null {
+    if (this.active?.owner && this.active.owner !== owner) return null;
     this.stop();
 
     const active: ActiveSessionDrag = {
       owner,
+      token: this.nextToken++,
       label: labelInput,
       startedAt: Date.now(),
       preview: null,
@@ -73,15 +77,21 @@ export class SessionDragPreviewController {
     this.preparePreview(active);
     this.tick(active);
     active.timer = setInterval(() => this.tick(active), this.deps.intervalMs ?? DEFAULT_INTERVAL_MS);
+    return active.token;
   }
 
-  end(owner?: object): void {
-    if (owner !== undefined && this.active?.owner !== owner) return;
-    this.stop();
+  end(owner?: object): boolean {
+    if (owner !== undefined && this.active?.owner !== owner) return false;
+    return this.stop();
   }
 
   isActive(): boolean {
     return this.active !== null;
+  }
+
+  endByToken(token: number): boolean {
+    if (this.active?.token !== token) return false;
+    return this.stop(this.active.owner);
   }
 
   private preparePreview(active: ActiveSessionDrag): void {
@@ -130,11 +140,12 @@ export class SessionDragPreviewController {
     }
   }
 
-  private stop(owner?: object): void {
-    if (owner !== undefined && this.active?.owner !== owner) return;
+  private stop(owner?: object): boolean {
+    if (owner !== undefined && this.active?.owner !== owner) return false;
     const active = this.active;
     this.active = null;
-    if (!active) return;
+    if (!active) return false;
+    this.deps.onStopped?.(active.token);
     if (active.timer) clearInterval(active.timer);
     const preview = active.preview;
     if (preview && !preview.isDestroyed()) {
@@ -152,5 +163,6 @@ export class SessionDragPreviewController {
         preview.close();
       }, 0);
     }
+    return true;
   }
 }

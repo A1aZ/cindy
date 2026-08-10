@@ -4724,7 +4724,11 @@ interface ElectronAPI {
       sessionId: string,
       deviceId?: string | null,
     ) => Promise<boolean>;
-    beginSessionDragPreview: (label: string) => Promise<void>;
+    beginSessionDragPreview: (
+      label: string,
+      sessionId: string,
+      deviceId?: string | null,
+    ) => Promise<void>;
     endSessionDragPreview: (dragEndAtMs?: number) => void;
 
     // ── Palette `/` 命令三源 (palette refactor) ───────────────────────

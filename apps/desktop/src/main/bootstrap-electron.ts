@@ -618,7 +618,10 @@ import {
 } from './secondary-windows.js';
 import {
   beginSessionDragPreview,
+  consumeNativeSessionDragOpenResult,
+  disposeSessionDragPreview,
   endSessionDragPreview,
+  prewarmSessionDragReleaseHelper,
 } from './session-drag-preview.js';
 import {
   isGlobalVoiceInputOverlayVisible,
@@ -3048,6 +3051,10 @@ const registerIpcHandlers = () => {
       // Keep the owner check so a delayed IPC from one window cannot stop a
       // newer drag that already started in another window.
       if (sourceWindow) endSessionDragPreview(sourceWindow);
+      const nativeResult = sourceWindow
+        ? consumeNativeSessionDragOpenResult(sourceWindow, sessionId, deviceId)
+        : null;
+      if (nativeResult !== null) return nativeResult;
       return openSessionInNewWindowIfDroppedOutside(
         sessionId,
         mainWindowRef,
@@ -3059,12 +3066,24 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle(
     MAKER_IPC_INVOKE.SESSION_DRAG_PREVIEW_START,
-    (event, labelRaw: unknown) => {
+    (event, labelRaw: unknown, sessionId: unknown, deviceIdRaw: unknown) => {
       assertTrustedAppRendererEvent(event);
-      if (typeof labelRaw !== 'string') return;
+      if (
+        typeof labelRaw !== 'string' ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0
+      ) {
+        throwIpcError('INVALID_PARAMS', 'label and sessionId required');
+      }
+      const deviceId = parseOptionalDeviceLinkDeviceId(deviceIdRaw);
       const sourceWindow = BrowserWindow.fromWebContents(event.sender);
       if (!sourceWindow || sourceWindow.isDestroyed()) return;
-      beginSessionDragPreview(sourceWindow, labelRaw.slice(0, 160));
+      beginSessionDragPreview(
+        sourceWindow,
+        labelRaw.slice(0, 160),
+        sessionId,
+        deviceId,
+      );
     },
   );
 
@@ -6936,6 +6955,10 @@ app.on('ready', async () => {
   initLogUploadService();
   startupWindowCreationAllowed = true;
   createWindow();
+  // The macOS release watcher stays disarmed until a task drag begins. Start
+  // its tiny helper after the first window exists so drag latency never pays
+  // a dev swiftc compile or process-spawn cost.
+  prewarmSessionDragReleaseHelper();
   // 预热仅服务 dev macOS，延迟执行避免和启动关键路径争用 CPU；失败由入口内部吞掉。
   setTimeout(() => {
     prewarmMacComputerPermissionGuideHelper();
@@ -7055,6 +7078,7 @@ onQuit(
 );
 onQuit('auth-manager', () => authManager.dispose(), 'sync');
 onQuit('app-badge-clear', () => clearAllSessionAttention(), 'sync');
+onQuit('session-drag-preview', () => disposeSessionDragPreview(), 'sync');
 // 自带 adb 的常驻 server 守护进程随退出收掉(fire-and-forget detached spawn,
 // 不阻塞)。不收会一直锁安装目录里的 adb.exe,弄挂增量更新(os error 32)。
 onQuit('android-adb-kill-server', () => disposeAndroidAdb(), 'sync');

@@ -1,6 +1,9 @@
 import { BrowserWindow, nativeTheme, screen } from 'electron';
 
 import { isAppContentWindow } from './windowFocusClassifier.js';
+import { openSessionInNewWindowIfDroppedOutside } from './secondary-windows.js';
+import { SessionDragNativeOpenCoordinator } from './sessionDragNativeOpenCoordinator.js';
+import { SessionDragReleaseNativeHost } from './sessionDragReleaseNativeHost.js';
 import { SessionDragPreviewController } from './sessionDragPreviewController.js';
 
 const PREVIEW_WIDTH = 320;
@@ -85,6 +88,8 @@ function createSessionDragPreviewWindow(label: string) {
   };
 }
 
+let nativeReleaseHost: SessionDragReleaseNativeHost | null = null;
+const nativeOpenCoordinator = new SessionDragNativeOpenCoordinator<BrowserWindow>();
 const controller = new SessionDragPreviewController({
   screen,
   getAppWindowBounds: () =>
@@ -92,10 +97,33 @@ const controller = new SessionDragPreviewController({
       .filter((win) => isAppContentWindow(win) && win.isVisible() && !win.isMinimized())
       .map((win) => win.getBounds()),
   createPreviewWindow: createSessionDragPreviewWindow,
+  onStopped: (token) => {
+    nativeOpenCoordinator.stop(token);
+    nativeReleaseHost?.disarm();
+  },
+});
+nativeReleaseHost = new SessionDragReleaseNativeHost({
+  onMouseUp: (token) => {
+    nativeOpenCoordinator.handleNativeRelease(
+      token,
+      () => controller.endByToken(token),
+      ({ owner, sessionId, deviceId }) =>
+        openSessionInNewWindowIfDroppedOutside(sessionId, owner, owner, deviceId),
+    );
+  },
 });
 
-export function beginSessionDragPreview(sourceWindow: BrowserWindow, label: string): void {
-  controller.begin(sourceWindow, label);
+export function beginSessionDragPreview(
+  sourceWindow: BrowserWindow,
+  label: string,
+  sessionId: string,
+  deviceId?: string | null,
+): void {
+  const token = controller.begin(sourceWindow, label);
+  if (token !== null) {
+    nativeOpenCoordinator.begin(token, sourceWindow, sessionId, deviceId);
+    void nativeReleaseHost?.arm(token);
+  }
 }
 
 export function endSessionDragPreview(sourceWindow: BrowserWindow): void {
@@ -104,4 +132,21 @@ export function endSessionDragPreview(sourceWindow: BrowserWindow): void {
 
 export function stopSessionDragPreview(): void {
   controller.end();
+}
+
+export function consumeNativeSessionDragOpenResult(
+  sourceWindow: BrowserWindow,
+  sessionId: string,
+  deviceId?: string | null,
+): boolean | null {
+  return nativeOpenCoordinator.consumeNativeResult(sourceWindow, sessionId, deviceId);
+}
+
+export function prewarmSessionDragReleaseHelper(): void {
+  void nativeReleaseHost?.prewarm();
+}
+
+export function disposeSessionDragPreview(): void {
+  controller.end();
+  nativeReleaseHost?.dispose();
 }

@@ -53,6 +53,8 @@ function stopTrackingSessionDrag(): boolean {
 
 function startTrackingSessionDrag(
   label: string,
+  sessionId: string,
+  deviceId: string | null | undefined,
   dragImageCleanup: () => void,
   onNativeDragEnd: () => void,
 ): void {
@@ -62,17 +64,11 @@ function startTrackingSessionDrag(
     return;
   }
   const beginPreview = window.electronAPI?.maker?.beginSessionDragPreview;
-  if (beginPreview) void beginPreview(label).catch(() => undefined);
-  const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === 'Escape') activeSessionDragCancelled = true;
-  };
-  const onDragEnd = () => onNativeDragEnd();
-  const onPointerUp = () => onNativeDragEnd();
-  window.addEventListener('keydown', onKeyDown, true);
-  window.addEventListener('dragend', onDragEnd, true);
-  window.addEventListener('pointerup', onPointerUp, true);
-  window.addEventListener('mouseup', onPointerUp, true);
-  activeSessionDragCleanup = () => {
+  if (beginPreview) void beginPreview(label, sessionId, deviceId).catch(() => undefined);
+  let previewEndSent = false;
+  const signalPreviewEnd = () => {
+    if (previewEndSent) return;
+    previewEndSent = true;
     const endPreview = window.electronAPI?.maker?.endSessionDragPreview;
     try {
       endPreview?.(Date.now());
@@ -80,10 +76,35 @@ function startTrackingSessionDrag(
       // Renderer teardown can make preload unavailable mid-drag. Local drag
       // cleanup must still complete; main has its own duration safety cap.
     }
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    activeSessionDragCancelled = true;
+    // Escape may cancel Chromium's drag without immediately producing
+    // dragend. Disarm the macOS mouse-up fast path now so releasing the button
+    // after cancellation cannot open a window.
+    signalPreviewEnd();
+  };
+  const onDragEnd = () => onNativeDragEnd();
+  const onPointerUp = () => onNativeDragEnd();
+  window.addEventListener('keydown', onKeyDown, true);
+  window.addEventListener('dragend', onDragEnd, true);
+  // macOS has a main-process AppKit mouse-up fast path. Renderer pointer/mouse
+  // events can arrive first and disarm that listener before it sees the drop;
+  // leave them as the fallback only on platforms without the native path.
+  const hasNativeMouseUpPath = window.electronAPI?.platform === 'darwin';
+  if (!hasNativeMouseUpPath) {
+    window.addEventListener('pointerup', onPointerUp, true);
+    window.addEventListener('mouseup', onPointerUp, true);
+  }
+  activeSessionDragCleanup = () => {
+    signalPreviewEnd();
     window.removeEventListener('keydown', onKeyDown, true);
     window.removeEventListener('dragend', onDragEnd, true);
-    window.removeEventListener('pointerup', onPointerUp, true);
-    window.removeEventListener('mouseup', onPointerUp, true);
+    if (!hasNativeMouseUpPath) {
+      window.removeEventListener('pointerup', onPointerUp, true);
+      window.removeEventListener('mouseup', onPointerUp, true);
+    }
     dragImageCleanup();
   };
 }
@@ -184,9 +205,15 @@ export function startSessionDrag(
 
   currentTarget?.setAttribute('data-session-dragging', 'true');
   const dragImageCleanup = installSessionDragPreview(event.dataTransfer);
-  startTrackingSessionDrag(options.label || options.sessionId, dragImageCleanup, () => {
-    finishSessionDrag({ currentTarget }, options.sessionId, options.deviceId);
-  });
+  startTrackingSessionDrag(
+    options.label || options.sessionId,
+    options.sessionId,
+    options.deviceId,
+    dragImageCleanup,
+    () => {
+      finishSessionDrag({ currentTarget }, options.sessionId, options.deviceId);
+    },
+  );
   return true;
 }
 

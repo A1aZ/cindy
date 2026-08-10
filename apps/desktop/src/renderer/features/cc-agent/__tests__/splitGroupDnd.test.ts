@@ -111,7 +111,7 @@ describe('splitGroupDnd', () => {
     expect((preview as HTMLCanvasElement).height).toBe(1);
     expect((preview as HTMLCanvasElement).dataset.sessionDragPreviewTransparent).toBe('true');
     expect(document.querySelector('[data-session-drag-preview-transparent]')).toBe(preview);
-    expect(beginPreview).toHaveBeenCalledWith('任务 A');
+    expect(beginPreview).toHaveBeenCalledWith('任务 A', 'session-a', 'device-b');
 
     window.dispatchEvent(new Event('pointerup'));
     window.dispatchEvent(new Event('dragend'));
@@ -120,6 +120,56 @@ describe('splitGroupDnd', () => {
     expect(endPreview).toHaveBeenCalledWith(expect.any(Number));
     expect(openOutside).toHaveBeenCalledWith('session-a', 'device-b');
     expect(document.querySelector('[data-session-drag-preview-transparent]')).toBeNull();
+    if (electronApiDescriptor) {
+      Object.defineProperty(window, 'electronAPI', electronApiDescriptor);
+    } else {
+      Reflect.deleteProperty(window, 'electronAPI');
+    }
+  });
+
+  it('macOS waits for the native mouse-up path before ending the drag', () => {
+    const row = document.createElement('div');
+    const dataTransfer = {
+      effectAllowed: 'none',
+      setData: vi.fn(),
+      setDragImage: vi.fn(),
+    };
+    const beginPreview = vi.fn().mockResolvedValue(undefined);
+    const endPreview = vi.fn();
+    const openOutside = vi.fn().mockResolvedValue(false);
+    const electronApiDescriptor = Object.getOwnPropertyDescriptor(window, 'electronAPI');
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: {
+        platform: 'darwin',
+        maker: {
+          beginSessionDragPreview: beginPreview,
+          endSessionDragPreview: endPreview,
+          openSessionInNewWindowIfDroppedOutside: openOutside,
+        },
+      },
+    });
+
+    startSessionDrag(
+      {
+        target: row,
+        currentTarget: row,
+        dataTransfer,
+        preventDefault: vi.fn(),
+      },
+      {
+        sessionId: 'session-a',
+        enabled: true,
+        needsDedicatedHandle: false,
+      },
+    );
+    window.dispatchEvent(new Event('pointerup'));
+    expect(endPreview).not.toHaveBeenCalled();
+    expect(openOutside).not.toHaveBeenCalled();
+
+    window.dispatchEvent(new Event('dragend'));
+    expect(endPreview).toHaveBeenCalledOnce();
+    expect(openOutside).toHaveBeenCalledWith('session-a', undefined);
     if (electronApiDescriptor) {
       Object.defineProperty(window, 'electronAPI', electronApiDescriptor);
     } else {
@@ -164,7 +214,7 @@ describe('splitGroupDnd', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     finishSessionDrag({ currentTarget: row }, 'session-a');
 
-    expect(beginPreview).toHaveBeenCalledWith('session-a');
+    expect(beginPreview).toHaveBeenCalledWith('session-a', 'session-a', undefined);
     expect(endPreview).toHaveBeenCalledOnce();
     expect(endPreview).toHaveBeenCalledWith(expect.any(Number));
     expect(openOutside).not.toHaveBeenCalled();

@@ -5107,8 +5107,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
         sessionId,
         deviceId,
       ),
-    beginSessionDragPreview: (label: string): Promise<void> =>
-      ipcRenderer.invoke('maker:session-drag-preview:start', label),
+    beginSessionDragPreview: (
+      label: string,
+      sessionId: string,
+      deviceId?: string | null,
+    ): Promise<void> =>
+      ipcRenderer.invoke('maker:session-drag-preview:start', label, sessionId, deviceId),
     endSessionDragPreview: (dragEndAtMs?: number): void =>
       ipcRenderer.send('maker:session-drag-preview:end', dragEndAtMs),
 

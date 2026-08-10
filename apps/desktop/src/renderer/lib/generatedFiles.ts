@@ -6,15 +6,15 @@
  * `describeToolUse` 归一化,不自己维护工具名表:
  *   - kind==='file' 且 action==='create'  → Write / write(claude / pi 新建文件)
  *   - kind==='fileChange' 的 changes 里 action==='add' → codex file_change 新增文件
- *   - kind==='command' → 从命令文本启发式提取产物路径候选(source:'command')。
+ *   - kind==='command' → 从命令文本里带明确写出语义的位置提取产物路径候选(source:'command')。
  *     Excel / Word / PDF 等二进制产物只能靠脚本(Bash/exec 跑 python、node)生成,
  *     没有文件工具记录;不补这个盲区,卡在「帮我生成个表格」主场景直接失灵。
  * 「修改已有文件」(edit / update)与读取不算产出(产品口径:只收新建,见
  * AskUserQuestion 决策)。move / delete 同样排除。
  *
  * 误报防线(source:'command' 特有,由渲染方 GeneratedFilesCard 执行):
- *   命令文本里出现路径 ≠ 命令创建了它(可能只是读输入)。所以 command 候选除
- *   存在性外,还必须满足「文件 mtime 落在本轮时间窗内」才出 chip;窗口不可得
+ *   命令文本里出现路径 ≠ 命令创建了它(可能只是读输入)。所以只认重定向、save / write
+ *   API、输出参数等明确写出位置;候选除存在性外,还必须满足「文件 mtime 落在本轮时间窗内」才出 chip;窗口不可得
  *   (消息无 createdAt / 远程会话无法 stat)时宁可不出。tool 来源保持原判定。
  */
 
@@ -72,9 +72,7 @@ function dedupeKeyForPath(abs: string): string {
 function canonicalizeWindowsShape(abs: string): string {
   // 连续分隔符折叠进画布路径本身(不只 dedupe key):stat 虽能容忍 `C:\\x`,但
   // Explorer `/select` 与 chip 展示不该带转义残留。盘符形态不存在 UNC 头,可整段折叠。
-  return /^[a-zA-Z]:[\\/]/.test(abs)
-    ? abs.replace(/\//g, '\\').replace(/\\{2,}/g, '\\')
-    : abs;
+  return /^[a-zA-Z]:[\\/]/.test(abs) ? abs.replace(/\//g, '\\').replace(/\\{2,}/g, '\\') : abs;
 }
 
 /** 单条 tool_use 消息 → 它新建的文件原始路径列表(可能为空)。 */
@@ -84,9 +82,7 @@ function createdPathsFromToolUse(toolName: string, input: unknown): string[] {
     return descriptor.action === 'create' && descriptor.filePath ? [descriptor.filePath] : [];
   }
   if (descriptor.kind === 'fileChange') {
-    return descriptor.changes
-      .filter((c) => c.action === 'add' && c.path)
-      .map((c) => c.path);
+    return descriptor.changes.filter((c) => c.action === 'add' && c.path).map((c) => c.path);
   }
   return [];
 }
@@ -109,31 +105,139 @@ function isPathCandidate(raw: string): boolean {
   return isAbs || hasSep;
 }
 
-/**
- * 命令文本 → 产物路径候选。两个来源:
- *   1. 引号字符串(`'...'` / `"..."`):脚本内路径的主形态,可含空格与 CJK,
- *      如 python 的 `wb.save(r'C:\Users\x\表格.xlsx')`;
- *   2. 裸 token:重定向 / CLI 参数里的无引号绝对路径(不含空格)。
- * 只做形态过滤,不判断读写意图——读写区分交给渲染方的 mtime 时间窗。
- */
-export function extractCommandPathCandidates(command: string): string[] {
+interface CommandPathToken {
+  path: string;
+  start: number;
+  end: number;
+}
+
+/** 提取路径 token 及其在命令中的位置;写出语义需要靠相邻文本判断。 */
+function extractCommandPathTokens(command: string): CommandPathToken[] {
   if (!command) return [];
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const push = (raw: string): void => {
+  const out: CommandPathToken[] = [];
+  const quotedRanges: Array<{ start: number; end: number }> = [];
+  const push = (raw: string, start: number, end: number): void => {
     const s = raw.trim();
     if (!isPathCandidate(s)) return;
-    if (seen.has(s)) return;
-    seen.add(s);
-    out.push(s);
+    out.push({ path: s, start, end });
   };
-  for (const m of command.matchAll(/'([^'\r\n]+)'|"([^"\r\n]+)"/g)) {
-    push(m[1] ?? m[2] ?? '');
-  }
+  // 单、双引号分开扫描,才能识别 `node -e "save('C:\\out\\a.xlsx')"` 这类
+  // 外层 shell 引号包内层语言字符串的常见形态。合并成一个 alternation 会被外层先吞掉。
+  const scanQuoted = (re: RegExp): void => {
+    for (const m of command.matchAll(re)) {
+      const raw = m[1] ?? '';
+      const matchStart = m.index ?? 0;
+      quotedRanges.push({ start: matchStart, end: matchStart + m[0].length });
+      push(raw, matchStart + 1, matchStart + 1 + raw.length);
+    }
+  };
+  scanQuoted(/'([^'\r\n]+)'/g);
+  scanQuoted(/"([^"\r\n]+)"/g);
   // 裸 Windows 盘符路径与裸 POSIX 绝对路径(前面是行首/空白/常见分隔)。
   // 盘符前不允许字母数字:排除 URL scheme 尾字母被当盘符(https://…)。
-  for (const m of command.matchAll(/(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'"<>|?*]+/g)) push(m[0]);
-  for (const m of command.matchAll(/(?:^|[\s=(,>])(\/[^\s'"<>|?*:]+)/g)) push(m[1]);
+  const insideQuotedRange = (index: number): boolean =>
+    quotedRanges.some((range) => index >= range.start && index < range.end);
+  for (const m of command.matchAll(/(?<![A-Za-z0-9])[A-Za-z]:[\\/][^\s'"<>|?*]+/g)) {
+    const start = m.index ?? 0;
+    if (!insideQuotedRange(start)) push(m[0], start, start + m[0].length);
+  }
+  for (const m of command.matchAll(/(?:^|[\s=(,>])(\/[^\s'"<>|?*:]+)/g)) {
+    const start = (m.index ?? 0) + m[0].length - m[1].length;
+    if (!insideQuotedRange(start)) push(m[1], start, start + m[1].length);
+  }
+  return out.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+const WRITE_CALL_PREFIX_RE =
+  /(?:\.|\b)(?:save|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:[rubf]{0,2})?['"]$/i;
+const POWERSHELL_CMDLET_RE = /\b[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9-]*\b/g;
+const POWERSHELL_WRITE_COMMANDS = new Set([
+  'out-file',
+  'set-content',
+  'add-content',
+  'export-csv',
+  'export-clixml',
+  'new-item',
+]);
+const OUTPUT_OPTION_PREFIX_RE = /(?:^|\s)(?:-o|--output(?:-file)?|--outfile)(?:\s+|=)['"]?$/i;
+const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
+const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
+
+function isPowerShellOutputPosition(before: string): boolean {
+  let lastCmdlet: RegExpMatchArray | null = null;
+  for (const match of before.matchAll(POWERSHELL_CMDLET_RE)) lastCmdlet = match;
+  if (!lastCmdlet || !POWERSHELL_WRITE_COMMANDS.has(lastCmdlet[0].toLowerCase())) return false;
+  const trailing = before.slice((lastCmdlet.index ?? 0) + lastCmdlet[0].length);
+  // Support the first positional path and the cmdlets' explicit path switches.
+  // Any nested/read cmdlet becomes the last cmdlet and therefore cannot leak its input path.
+  return /^\s*['"]?$/.test(trailing) || /-(?:FilePath|LiteralPath|Path)\s+['"]?$/i.test(trailing);
+}
+
+function isExplicitOutputPath(
+  command: string,
+  token: CommandPathToken,
+  tokens: readonly CommandPathToken[],
+): boolean {
+  const before = command.slice(Math.max(0, token.start - 240), token.start);
+  const after = command.slice(token.end, token.end + 80);
+  if (
+    WRITE_CALL_PREFIX_RE.test(before) ||
+    isPowerShellOutputPosition(before) ||
+    OUTPUT_OPTION_PREFIX_RE.test(before) ||
+    REDIRECT_PREFIX_RE.test(before) ||
+    SAVE_COMMAND_PREFIX_RE.test(before)
+  ) {
+    return true;
+  }
+  // Python / Ruby 等的 open(path, 'w'|'a'|'x'|'wb'...)。
+  if (
+    /\bopen\s*\(\s*(?:[rubf]{0,2})?['"]$/i.test(before) &&
+    /^['"]\s*,\s*['"][wax][bt+]*['"]/i.test(after)
+  ) {
+    return true;
+  }
+
+  // cp/copy 的最后一个路径参数是目标。只看当前命令段,避免把前一条读取命令的路径带进来。
+  const previousSeparators = [
+    { index: command.lastIndexOf(';', token.start - 1), length: 1 },
+    { index: command.lastIndexOf('\n', token.start - 1), length: 1 },
+    { index: command.lastIndexOf('&&', token.start - 1), length: 2 },
+    { index: command.lastIndexOf('||', token.start - 1), length: 2 },
+  ];
+  const previousSeparator = previousSeparators.reduce((latest, candidate) =>
+    candidate.index > latest.index ? candidate : latest,
+  );
+  const segmentStart = previousSeparator.index + previousSeparator.length;
+  const nextSeparators = [
+    command.indexOf(';', token.end),
+    command.indexOf('\n', token.end),
+    command.indexOf('&&', token.end),
+    command.indexOf('||', token.end),
+  ].filter((index) => index >= 0);
+  const segmentEnd = nextSeparators.length > 0 ? Math.min(...nextSeparators) : command.length;
+  const segment = command.slice(segmentStart, segmentEnd);
+  const lastPath = tokens
+    .filter((candidate) => candidate.start >= segmentStart && candidate.end <= segmentEnd)
+    .at(-1);
+  return lastPath === token && /(?:^|[|]\s*)\s*(?:cp|copy|Copy-Item)\b/i.test(segment);
+}
+
+/**
+ * 命令文本 → 明确写出位置里的产物路径候选。
+ *
+ * mtime 只能证明文件最近变过,不能证明是当前命令创建的(新 worktree 中所有文件尤其容易
+ * 同时命中时间窗)。因此普通参数、变量赋值、Get-Content / ReadAllLines 等读取位置一律不收;
+ * 只认重定向、常见 save/write API、输出参数及复制目标。后续仍由渲染方做时间窗复核。
+ */
+export function extractCommandOutputPathCandidates(command: string): string[] {
+  const tokens = extractCommandPathTokens(command);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const token of tokens) {
+    if (!isExplicitOutputPath(command, token, tokens) || seen.has(token.path)) continue;
+    seen.add(token.path);
+    out.push(token.path);
+  }
   return out;
 }
 
@@ -190,7 +294,7 @@ export function collectGeneratedFiles(
     }
     const descriptor = describeToolUse(toolName, msg.toolInput);
     if (descriptor.kind === 'command' && descriptor.command) {
-      for (const rawPath of extractCommandPathCandidates(descriptor.command)) {
+      for (const rawPath of extractCommandOutputPathCandidates(descriptor.command)) {
         addPath(rawPath, 'command');
       }
     }

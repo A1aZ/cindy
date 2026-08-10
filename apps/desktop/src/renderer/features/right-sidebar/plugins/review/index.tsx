@@ -59,7 +59,7 @@ const DEFAULT_STATE: ReviewState = {
   diffViewMode: 'unified',
   fileTreeVisible: false,
   wordWrap: false,
-  wordDiff: true,
+  wordDiff: false,
   hideWhitespace: false,
   richMarkdownPreview: true,
   branchBaseRef: null,

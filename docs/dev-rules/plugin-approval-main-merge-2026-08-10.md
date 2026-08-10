@@ -1,9 +1,9 @@
 # Plugin Approval PR Main Merge Strategy (2026-08-10)
 
-Second main merge for PR #1916 after merging `origin/main` at `9bcf7bd1a`.
-The first merge (2026-08-09, `e78f44ae5`) is recorded in
-`plugin-approval-main-merge-2026-08-09.md`. This note records the decisions for
-this round only; it does not replace the authoritative security rules.
+Third merge of `origin/main` for PR #1916. The first (2026-08-09, `e78f44ae5`)
+and second (2026-08-10, `9bcf7bd1a`) merges are recorded in
+`plugin-approval-main-merge-2026-08-09.md` and the earlier sections of this
+file. This section records the third round only.
 
 ## Invariants (unchanged, carry forward)
 
@@ -139,6 +139,19 @@ This round fixed two Linux CI failures plus one Codex review P1:
   Fixed the assertions to match the implementation: no-follow defaults to
   blocking, `{ nonBlocking: true }` opts in, follow-links always non-blocking.
   No production code changed.
+
+## Third main merge (2026-08-10, `cd60883fd`)
+
+`origin/main` advanced 3 commits past the second merge base
+(`9bcf7bd1a..cd60883fd`):
+
+- `fix(i18n): 補齊 zh-TW Subagent 護欄策略 key` — added the same three
+  `cindyPolicy*` keys this branch had already added. The merge took
+  origin/main's official wording (`自定義` over `自訂`). i18n gate passes.
+- `fix(scheduler): preserve Claude subscription route (#2230)` — scheduler /
+  provider / maker-host changes; no overlap with this PR's plugin-approval
+  surface. The affected suites (runnerModelSelection, model-route-guard-live,
+  orcaProviderRoutingSnapshotWiring) pass.
 
 ## Post-merge gate
 

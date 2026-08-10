@@ -537,11 +537,7 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -575,11 +571,7 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -630,11 +622,7 @@ describe('legacy Ghost plugin recovery', () => {
         false,
         { reservedCommands: new Set(['draw']) },
       ),
-    ).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
   });
 
   it('ignores tombstones from a foreign shared root during recovery planning', async () => {
@@ -667,10 +655,19 @@ describe('legacy Ghost plugin recovery', () => {
         realFsDeps(root),
         { rejectReservedIds: true },
       ),
-    ).resolves.toMatchObject({ status: 'partial', moved: 0, conflicts: 1 });
+    ).resolves.toEqual({ status: 'skipped', moved: 0, conflicts: 0 });
+    expect(
+      getLegacyGhostRecoveryStatus(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        root,
+        false,
+        { rejectReservedIds: true },
+      ),
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(
       fs.readFile(path.join(root, 'brain', 'cindy-untrusted', 'ghost.json'), 'utf-8'),
     ).resolves.toContain('"id":"cindy-untrusted"');
+    await expect(fs.access(path.join(root, __testing.CLAIM_MARKER))).rejects.toThrow();
   });
 
   it('moves builtin provisioning state with plugins before reconciliation', async () => {
@@ -736,11 +733,7 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -1033,11 +1026,7 @@ describe('legacy Ghost plugin recovery', () => {
     );
 
     expect(result).toMatchObject({ status: 'partial', moved: 0, conflicts: 1 });
-    expect(status).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    expect(status).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(fs.readFile(path.join(target, 'ghost.json'), 'utf-8')).resolves.toBe('scoped');
     await expect(
       fs.readFile(path.join(root, 'cindy-brain', 'valid-plugin', 'ghost.json'), 'utf-8'),
@@ -1162,11 +1151,7 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({
-      state: 'partial',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
 
     await expect(
       recoverLegacyGhostPlugins(
@@ -1222,11 +1207,7 @@ describe('legacy Ghost plugin recovery', () => {
         {},
         (pid) => pid === 4242,
       ),
-    ).toEqual({
-      state: 'deferred',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
 
     const result = await recoverLegacyGhostPlugins(
       { mode: 'cloud', dataOwnerId: 'cloud-a', user: { id: 'cloud-a' } },
@@ -1290,7 +1271,7 @@ describe('legacy Ghost plugin recovery', () => {
     expect(hasLegacyOwnerNamespaceClaim('cloud-a', root)).toBe(false);
   });
 
-  it('reports claimed-by-other-owner and never moves plugins across accounts', async () => {
+  it('ignores foreign-owned shared plugins and never moves them across accounts', async () => {
     const root = await tempRoot();
     await writeGhostDir(root, 'cindy-brain', 'valid-plugin');
     await fs.writeFile(
@@ -1308,14 +1289,13 @@ describe('legacy Ghost plugin recovery', () => {
     );
 
     expect(result).toEqual({ status: 'claimed-by-other-owner', moved: 0, conflicts: 0 });
-    expect(status).toEqual({
-      state: 'claimed-by-other-owner',
-      legacyPluginCount: 1,
-      canRetry: false,
-    });
+    expect(status).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     await expect(
       fs.access(path.join(root, 'owners', dataOwnerStorageKey('cloud-b'), 'cindy-brain')),
     ).rejects.toThrow();
+    await expect(
+      fs.readFile(path.join(root, 'cindy-brain', 'valid-plugin', 'ghost.json'), 'utf-8'),
+    ).resolves.toContain('"id":"valid-plugin"');
   });
 
   it('reports retryable partial status when legacy plugins appear after a completed owner claim', async () => {
@@ -1348,11 +1328,7 @@ describe('legacy Ghost plugin recovery', () => {
           { mode: 'cloud', dataOwnerId: 'cloud-a', user: { id: 'cloud-a' } },
           root,
         ),
-      ).toEqual({
-        state: 'deferred',
-        legacyPluginCount: 1,
-        canRetry: false,
-      });
+      ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
     } finally {
       delete process.env.XDT_PASSIVE_SHARED_USER_DATA;
     }

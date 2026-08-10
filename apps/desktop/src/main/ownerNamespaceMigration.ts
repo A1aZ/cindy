@@ -286,6 +286,13 @@ interface LegacyGhostDir {
   command: string | null;
 }
 
+function filterLegacyGhostsByIdPolicy(
+  ghosts: LegacyGhostDir[],
+  rejectReservedIds: boolean,
+): LegacyGhostDir[] {
+  return rejectReservedIds ? ghosts.filter((ghost) => !isOfficialGhostId(ghost.id)) : ghosts;
+}
+
 function readValidLegacyGhostDir(
   dir: string,
   expectedId: string,
@@ -483,7 +490,10 @@ export function getLegacyGhostRecoveryStatus(
   session: MigrationSessionState,
   userDataDir?: string,
   boundaryPending = false,
-  options: { reservedCommands?: ReadonlySet<string> } = {},
+  options: {
+    reservedCommands?: ReadonlySet<string>;
+    rejectReservedIds?: boolean;
+  } = {},
   isPidAlive: (pid: number) => boolean = isPidAliveDefault,
 ): LegacyGhostRecoveryStatus {
   if (boundaryPending || session.mode !== 'cloud' || !session.dataOwnerId || !session.user) {
@@ -493,14 +503,15 @@ export function getLegacyGhostRecoveryStatus(
 
   const root = userDataDir ?? app.getPath('userData');
   const ownerKey = dataOwnerStorageKey(session.dataOwnerId);
-  const sharedLegacyGhosts = listSharedLegacyGhostDirs(root);
-  const scopedLegacyGhosts = listOwnerScopedLegacyGhostDirs(root, ownerKey);
-  const legacyGhosts = [...sharedLegacyGhosts, ...scopedLegacyGhosts];
-  const legacyPluginCount = legacyGhosts.length;
-  if (legacyPluginCount === 0) return NO_LEGACY_GHOST_RECOVERY;
-  if (process.env.XDT_PASSIVE_SHARED_USER_DATA === '1') {
-    return { state: 'deferred', legacyPluginCount, canRetry: false };
-  }
+  const rejectReservedIds = options.rejectReservedIds === true;
+  const sharedLegacyGhosts = filterLegacyGhostsByIdPolicy(
+    listSharedLegacyGhostDirs(root),
+    rejectReservedIds,
+  );
+  const scopedLegacyGhosts = filterLegacyGhostsByIdPolicy(
+    listOwnerScopedLegacyGhostDirs(root, ownerKey),
+    rejectReservedIds,
+  );
 
   const markerRead = readMarkerSync(root);
   const sharedRecoveryBlocked =
@@ -508,19 +519,25 @@ export function getLegacyGhostRecoveryStatus(
     (markerRead.invalid ||
       (markerRead.marker !== null && markerRead.marker.ownerKey !== ownerKey));
   if (sharedRecoveryBlocked && scopedLegacyGhosts.length === 0) {
-    if (markerRead.marker && markerRead.marker.ownerKey !== ownerKey) {
-      return { state: 'claimed-by-other-owner', legacyPluginCount, canRetry: false };
-    }
-    return { state: 'partial', legacyPluginCount, canRetry: false };
+    // 无法证明属于当前账号的共享目录不是当前账号的恢复任务：保留原文件，
+    // 但不向 Renderer 暴露数量，也不展示一个用户无法处理的永久状态。
+    return NO_LEGACY_GHOST_RECOVERY;
+  }
+  const eligibleLegacyGhosts = sharedRecoveryBlocked
+    ? scopedLegacyGhosts
+    : [...sharedLegacyGhosts, ...scopedLegacyGhosts];
+  const legacyPluginCount = eligibleLegacyGhosts.length;
+  if (legacyPluginCount === 0) return NO_LEGACY_GHOST_RECOVERY;
+  if (process.env.XDT_PASSIVE_SHARED_USER_DATA === '1') {
+    return NO_LEGACY_GHOST_RECOVERY;
   }
   if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
-    return { state: 'deferred', legacyPluginCount, canRetry: false };
+    return NO_LEGACY_GHOST_RECOVERY;
   }
 
-  const eligibleLegacyGhosts = sharedRecoveryBlocked ? scopedLegacyGhosts : legacyGhosts;
   const targetRoot = path.join(root, 'owners', ownerKey, 'cindy-brain');
   if (!hasSafeRecoveryTargetChainSync(root, targetRoot)) {
-    return { state: 'partial', legacyPluginCount, canRetry: false };
+    return NO_LEGACY_GHOST_RECOVERY;
   }
   const occupiedCommands = new Set(
     listLegacyGhostDirsInRoots([targetRoot])
@@ -542,15 +559,7 @@ export function getLegacyGhostRecoveryStatus(
     return command === null || !occupiedCommands.has(command);
   });
   if (!canRetry) {
-    if (
-      sharedRecoveryBlocked &&
-      markerRead.marker &&
-      markerRead.marker.ownerKey !== ownerKey &&
-      scopedLegacyGhosts.length === 0
-    ) {
-      return { state: 'claimed-by-other-owner', legacyPluginCount, canRetry: false };
-    }
-    return { state: 'partial', legacyPluginCount, canRetry: false };
+    return NO_LEGACY_GHOST_RECOVERY;
   }
 
   const marker = markerRead.marker;
@@ -577,8 +586,15 @@ export async function recoverLegacyGhostPlugins(
   const userDataDir = deps.userDataDir();
   const ownerKey = dataOwnerStorageKey(ownerId);
   const markerPath = path.join(userDataDir, CLAIM_MARKER);
-  const sharedLegacyGhosts = listSharedLegacyGhostDirs(userDataDir);
-  const scopedLegacyGhosts = listOwnerScopedLegacyGhostDirs(userDataDir, ownerKey);
+  const rejectReservedIds = options.rejectReservedIds === true;
+  const sharedLegacyGhosts = filterLegacyGhostsByIdPolicy(
+    listSharedLegacyGhostDirs(userDataDir),
+    rejectReservedIds,
+  );
+  const scopedLegacyGhosts = filterLegacyGhostsByIdPolicy(
+    listOwnerScopedLegacyGhostDirs(userDataDir, ownerKey),
+    rejectReservedIds,
+  );
   let marker: ClaimMarker | null = null;
   let eligibleSharedGhosts = sharedLegacyGhosts;
   let sharedRecoveryBlocked = false;
@@ -616,10 +632,6 @@ export async function recoverLegacyGhostPlugins(
   let movableLegacyGhosts: ReturnType<typeof listLegacyGhostDirs> = [];
   let conflicts = sharedRecoveryBlocked ? sharedLegacyGhosts.length : 0;
   for (const legacy of [...eligibleSharedGhosts, ...scopedLegacyGhosts]) {
-    if (options.rejectReservedIds && isOfficialGhostId(legacy.id)) {
-      conflicts += 1;
-      continue;
-    }
     if ((await pathType(deps, path.join(targetRoot, legacy.id))) === 'missing') {
       movableLegacyGhosts.push(legacy);
     } else {

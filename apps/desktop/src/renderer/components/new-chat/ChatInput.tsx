@@ -1186,7 +1186,9 @@ export function ChatInput({
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
       // 当 composer 被禁用时（如 reviewer 任务完成后 read-only），不应触发
       // 预测：用户无法 Tab 填入或发送，发起 provider 调用是浪费。
-      if (disabledRef.current) return;
+      // 读取 disabled prop 而非 disabledRef：disabledRef 由后续 effect 刷新，
+      // reviewer 任务变为 read-only 的同一次 render 中 ref 可能仍是旧值。
+      if (disabled) return;
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
       // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
       // turnStoppedByUser 是 session 级 store 字段(stopSession 置位、新 turn 复位),

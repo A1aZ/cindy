@@ -60,7 +60,7 @@ arm64 和 x64 产物。
 
 ## 发布检查
 
-打包脚本成功退出即表示 Helper 签名、公证和静态 release gate 已通过。发布前可额外抽查：
+打包脚本成功退出即表示 Helper 签名、公证和静态 release gate 已通过（命中上文 cross-architecture 例外的跨 arch 那趟例外:该趟为 Mach-O 架构门禁,launch-based static gate 跳过)。发布前可额外抽查：
 
 ```bash
 codesign --verify --deep --strict --verbose=2 /path/to/Cindy.app

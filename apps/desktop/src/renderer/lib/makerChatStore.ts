@@ -5603,11 +5603,15 @@ function handleStatusUpdate(
     ...state,
     // 真实 turn 的起/止都把 side-task 标记复位(它只描述「最近一次 stop」)。
     lastStopWasSideTask: false,
-    // 唤醒桥接:turn 启动(isRunning:true)时清除,或 turn 完成(Done + !isRunning)
-    // 时清除。后者处理 wake 任务在发出 isRunning:true 之前就失败(直接 error+Done)
-    // 的场景——此时 isTurnStart 永远不会变 true,若不清除 pendingTaskWake 会永久
-    // 撑住 running 快照,导致会话无限期处于 running/Stop 状态。
-    pendingTaskWake: (isTurnStart || isTurnComplete) ? false : state.pendingTaskWake,
+    // 唤醒桥接:仅在 wake turn 真正启动(isRunning:true)时清除,或 wake turn
+    // 失败时清除——后者表现为 Done + !isRunning 且主 turn 已经结束
+    // (state.agentStatus.isRunning 已为 false),此时 isTurnStart 永远不会
+    // 变 true,若不清除 pendingTaskWake 会永久撑住 running 快照。
+    // 主 turn Done(isTurnComplete 且 state.agentStatus.isRunning 为 true)时
+    // 不清除桥接:桥接必须在主 turn 结束后继续存活,直到 wake turn 启动或失败。
+    pendingTaskWake: isTurnStart ? false :
+      (isTurnComplete && state.pendingTaskWake && !state.agentStatus.isRunning) ? false :
+      state.pendingTaskWake,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {
       status: update.status,

@@ -817,6 +817,12 @@ async function withCloudOwnerCommit<T>(opts: {
     return withGhostSkillProjectionReadOnlyOwner(opts.nextOwnerId, opts.commit);
   }
   let releaseBoundary: (() => void) | null = null;
+  // A same-owner projection repair tears down the owner-bound Ghost runtime but
+  // keeps the same mode/owner, so commitActiveAppSession's same-owner early
+  // return would NOT advance the owner generation — stale async work that
+  // captured the pre-repair scope key would then pass the post-release guard.
+  // Force a generation bump so the scope key changes across the teardown.
+  let forceBumpGeneration = false;
   try {
     return await withGhostSkillProjectionOwnerCommit({
       previousOwnerId: opts.previousOwnerId,
@@ -830,11 +836,21 @@ async function withCloudOwnerCommit<T>(opts: {
           if (!projectionRepairTeardown) {
             throw new Error('Ghost projection repair requires a teardown hook');
           }
+          forceBumpGeneration = true;
           await projectionRepairTeardown('same-owner-projection-recovery');
         }
       },
       prepareCommit: opts.prepareCommit,
-      commit: opts.commit,
+      commit: async () => {
+        const result = await opts.commit();
+        // Same-owner repair: advance the owner generation after the real commit
+        // so activeOwnerScopeKey() changes and stale captured scopes are rejected.
+        if (forceBumpGeneration) {
+          const session = getActiveAppSession();
+          commitActiveAppSession(session.mode, session.dataOwnerId ?? undefined, true);
+        }
+        return result;
+      },
     });
   } finally {
     const release = releaseBoundary as (() => void) | null;

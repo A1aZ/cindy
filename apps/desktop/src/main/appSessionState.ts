@@ -160,6 +160,7 @@ export function isAppSessionBoundaryLocallyPending(): boolean {
 export function commitActiveAppSession(
   mode: AppSessionMode,
   cloudOwnerId?: string | null,
+  forceBumpGeneration = false,
 ): ActiveAppSession {
   const previous = ensureLoaded();
   let dataOwnerId: string | null = null;
@@ -171,7 +172,11 @@ export function commitActiveAppSession(
     dataOwnerId = normalized;
   }
 
-  if (previous.mode === mode && previous.dataOwnerId === dataOwnerId) {
+  if (
+    previous.mode === mode
+    && previous.dataOwnerId === dataOwnerId
+    && !forceBumpGeneration
+  ) {
     return { ...previous };
   }
 

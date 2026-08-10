@@ -153,6 +153,21 @@ This round fixed two Linux CI failures plus one Codex review P1:
   surface. The affected suites (runnerModelSelection, model-route-guard-live,
   orcaProviderRoutingSnapshotWiring) pass.
 
+## Codex P1: same-owner projection repair must bump the owner generation
+
+`withCloudOwnerCommit`'s same-owner repair branch (durable Ghost projection
+missing/quarantined while the app session is already committed to the same
+owner) tears down the owner-bound Ghost runtime but keeps the same mode/owner,
+so `commitActiveAppSession` early-returned without advancing the owner
+generation. Async work that captured the pre-repair `activeOwnerScopeKey()`
+would then pass the stale-scope guard after the boundary was released.
+
+Fix: `commitActiveAppSession` gains an optional `forceBumpGeneration` flag that
+also advances generation on the same-owner early-return path; `withCloudOwnerCommit`
+sets it when it runs a same-owner projection repair and re-commits with the flag
+after the real commit. This makes `activeOwnerScopeKey()` change across the
+teardown so stale captured scopes are rejected.
+
 ## Post-merge gate
 
 After all conflicts are resolved: inspect the complete diff, verify no unmerged

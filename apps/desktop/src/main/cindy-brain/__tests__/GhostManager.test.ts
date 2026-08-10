@@ -1970,13 +1970,16 @@ describe('GhostManager · 装入/更新崩溃窗口恢复(事务标记)', () => 
         backupDirName: path.basename(backupDir),
       }),
     );
-    const realReadFileSync = fs.readFileSync;
-    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
+    // readPendingMutationSync now uses readBoundedFileNoFollowSync (single-handle
+    // open+stat+read) instead of lstat+readFileSync.  Inject EACCES at openSync
+    // so the bounded reader surfaces the unreadable state through its normal path.
+    const realOpenSync = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation(((target: fs.PathLike, ...rest: unknown[]) => {
       if (path.resolve(String(target)) === path.resolve(pendingMarkerPath())) {
         throw Object.assign(new Error('EACCES: marker locked'), { code: 'EACCES' });
       }
-      return (realReadFileSync as (...args: unknown[]) => unknown)(target, ...rest);
-    }) as typeof fs.readFileSync);
+      return (realOpenSync as (...args: unknown[]) => unknown)(target, ...rest);
+    }) as typeof fs.openSync);
     try {
       const recovered = freshManager();
       expect(recovered.list()[0]).toMatchObject({
@@ -4349,14 +4352,27 @@ describe('GhostManager · update(原位换版)', () => {
     await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
     onChanged.mockClear();
 
-    const v2 = await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }, { 'new.txt': 'v2' });
-    const result = await updateGhost(v2);
+    const v2 = await makeCindy(
+      'v2.cindy',
+      { ...goodManifest(), version: '2.0.0' },
+      { 'new.txt': 'v2' },
+    );
+    const onPackagePlaced = vi.fn();
+    const installed = manager.list().find((g) => g.manifest.id === 'hello');
+    const result = await manager.update(v2, {
+      expectedInstalledApproval: ghostInstallApprovalToken(installed?.approval),
+      onPackagePlaced,
+    });
     expect('ghost' in result, JSON.stringify(result)).toBe(true);
     const { ghost } = result as { ghost: InstalledGhost };
     expect(ghost.manifest.version).toBe('2.0.0');
     expect(ghost.dir).toBe(path.join(rootDir, 'hello'));
     expect(fs.existsSync(path.join(rootDir, 'hello', 'new.txt'))).toBe(true);
     expect(fs.existsSync(path.join(rootDir, 'hello', 'old.txt'))).toBe(false); // 换版不留旧文件
+    expect(onPackagePlaced).toHaveBeenCalledTimes(1);
+    expect(onPackagePlaced.mock.invocationCallOrder[0]).toBeLessThan(
+      onChanged.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
     expect(onChanged).toHaveBeenCalledTimes(1);
     // 备份/staging 临时目录不残留。
     const leftovers = fs.readdirSync(rootDir).filter((n) => n.startsWith('.cindy-'));

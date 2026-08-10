@@ -95,6 +95,19 @@ async function run(request: Request): Promise<void> {
     if (!stagingStat.isDirectory() || stagingStat.isSymbolicLink()) {
       throw new Error('Forge scaffold staging directory changed');
     }
+    // Re-check target existence immediately before rename.  On POSIX,
+    // rename(staging, target) atomically replaces an existing directory, so
+    // a concurrent process that creates the target between the initial ENOENT
+    // check and the rename call would have its just-created directory silently
+    // replaced.  This second lstat shrinks the window to the sub-call gap
+    // between lstat and rename.
+    try {
+      await fs.promises.lstat(request.targetName);
+      send({ ok: false, errorCode: 'TARGET_EXISTS', message: '目标已经存在，不会覆盖' });
+      return;
+    } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error;
+    }
     try {
       await fs.promises.rename(staging, request.targetName);
     } catch (error) {

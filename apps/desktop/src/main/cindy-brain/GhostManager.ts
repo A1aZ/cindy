@@ -2865,6 +2865,8 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
+      /** 目录换位完成后、任何通知或运行时收尾前触发。 */
+      onPackagePlaced?: () => void;
     },
   ) {
     return this.runExclusiveMutation(() => this.updateUnlocked(lizFilePath, opts));
@@ -2876,6 +2878,8 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
+      /** 目录换位完成后、任何通知或运行时收尾前触发。 */
+      onPackagePlaced?: () => void;
     },
   ): Promise<{ ghost: InstalledGhost } | { rejection: InstallRejection }> {
     const parsed = await this.parse(lizFilePath);
@@ -3135,6 +3139,7 @@ export class GhostManager {
       trust,
       ...(iconDataUrl !== undefined ? { iconDataUrl } : {}),
     };
+    opts?.onPackagePlaced?.();
     this.options.log?.info('ghost updated', { id: manifest.id, version: manifest.version });
     const projected = this.projectCommittedMutationResult(ghost);
     this.options.onChanged?.(projected.list);

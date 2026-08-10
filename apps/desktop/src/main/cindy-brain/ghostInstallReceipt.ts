@@ -531,11 +531,16 @@ export class GhostInstallReceiptStore {
   readPendingMutationSync(id: string): GhostPendingMutationReadResult {
     let raw: Record<string, unknown>;
     const markerPath = this.pendingMutationPath(id);
+    let bytes: Buffer | null;
     try {
-      const stat = fs.lstatSync(markerPath);
-      if (!stat.isFile() || stat.size > MAX_PENDING_MUTATION_BYTES) {
-        return { state: 'invalid', reason: 'journal is not a regular file or exceeds size limit' };
-      }
+      // Single-handle bounded read: the earlier lstat+readFileSync pair had a
+      // TOCTOU window where a FIFO/symlink/huge file could replace the journal
+      // between the two calls.  readBoundedFileNoFollowSync opens, stats, and
+      // reads from the same handle with O_NONBLOCK so a FIFO/device blocks
+      // neither the open nor the subsequent read.
+      bytes = readBoundedFileNoFollowSync(markerPath, MAX_PENDING_MUTATION_BYTES, {
+        containWithin: this.rootDir(),
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { state: 'missing' };
       return {
@@ -543,15 +548,10 @@ export class GhostInstallReceiptStore {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
-    let text: string;
-    try {
-      text = fs.readFileSync(markerPath, 'utf8');
-    } catch (error) {
-      return {
-        state: 'unreadable',
-        reason: error instanceof Error ? error.message : String(error),
-      };
+    if (!bytes) {
+      return { state: 'invalid', reason: 'journal is not a regular file or exceeds size limit' };
     }
+    const text = bytes.toString('utf8');
     let parsed: unknown;
     try {
       parsed = JSON.parse(text) as unknown;

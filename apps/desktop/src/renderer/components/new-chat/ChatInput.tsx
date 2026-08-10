@@ -1127,6 +1127,22 @@ export function ChatInput({
   const turnGenRef = useRef(0);
   const prevShowStopRender = useRef(false);
   const prevSessionIdRef = useRef(sessionId);
+  // sessionId 切换时在 render 阶段同步更新预测相关 ref，消除 session 切换与
+  // layout effect 之间的时序窗口。旧代码将 ref 更新放在 useLayoutEffect 中，
+  // 当会话 A 的预测仍在途且切换到会话 B 时，sessionId 已变但 ref 未更新，
+  // 旧 Promise 返回时仍通过 prevSessionIdRef.current === requestSessionId 校验，
+  // 导致会话 A 的推荐词写入会话 B 的输入框。
+  // 修复：在 render 阶段同步更新 ref，旧 session 的预测请求落回时
+  // prevSessionIdRef 已更新为新 sessionId，校验失败后静默丢弃。
+  // React concurrent rendering 下若某次 render 被丢弃，ref 会在实际 commit 的
+  // render 中再次正确更新，不影响最终正确性。
+  if (prevSessionIdRef.current !== sessionId) {
+    prevSessionIdRef.current = sessionId;
+    prevShowStopRef.current = false;
+    turnGenRef.current = 0;
+    prevShowStopRender.current = false;
+    showRecommendationRef.current = false;
+  }
   // useLayoutEffect 在 React commit 后、浏览器绘制前同步执行，比 useEffect 更接近
   // render 阶段的时序，同时避免 React concurrent rendering 下 render 被丢弃但 ref
   // 已被错误修改的风险。防御纵深：发送时已通过 turnGenRef.current += 1 立即失效
@@ -1138,20 +1154,6 @@ export function ChatInput({
       turnGenRef.current += 1;
     }
   });
-  // sessionId 切换时同步更新预测相关 ref。使用 useLayoutEffect 而非 render 阶段直接
-  // 修改 ref，避免 concurrent rendering 的潜在风险。sessionId 在 commit 后立即更新
-  // ref，旧 session 预测请求若在 commit→layout effect 之间返回，仍会因 sessionId
-  // 不匹配被落地校验拒绝（defense-in-depth）。
-  useLayoutEffect(() => {
-    if (prevSessionIdRef.current !== sessionId) {
-      prevSessionIdRef.current = sessionId;
-      prevShowStopRef.current = false;
-      turnGenRef.current = 0;
-      prevShowStopRender.current = false;
-      showRecommendationRef.current = false;
-      setRecommendedPrompt(null);
-    }
-  }, [sessionId]);
   useEffect(() => {
     // sessionId 变化时清除推荐 UI（ref 已在 render 阶段同步更新）
     setRecommendedPrompt(null);

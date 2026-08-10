@@ -209,6 +209,7 @@ import {
   decideAutoFillAction,
   decideUserIntentFillAction,
   TOP_HISTORY_TRIGGER_PX,
+  NO_SCROLL_TOLERANCE_PX,
 } from './viewportFillDetect';
 import {
   resolveNearBottomOnScroll,
@@ -3110,6 +3111,17 @@ export function MessageStream({
         return;
       }
       case 'none':
+        // render-window-bidirectional: 锚定窗口未覆盖末尾且内容不溢出时，
+        // expandWindow 只向前扩（向最早方向）、保持窗口尾边不变；对向后
+        // 方向（锚点后的内容）没有帮助。这里从尾部扩 anchoredForwardItems
+        // 把锚点后内容逐步纳入 DOM，直到视口撑出滚动条或窗口触及全量末尾。
+        if (
+          firstVisibleItemKey !== null &&
+          !windowCoversEnd &&
+          Math.abs(el.scrollHeight - el.clientHeight) <= NO_SCROLL_TOLERANCE_PX
+        ) {
+          setAnchoredForwardItems((prev) => prev + RENDER_WINDOW_GROWTH_ITEMS);
+        }
         return;
     }
   }, [
@@ -3120,6 +3132,8 @@ export function MessageStream({
     onLoadMore,
     windowAtTop,
     expandWindow,
+    windowCoversEnd,
+    firstVisibleItemKey,
   ]);
 
   // ── F2 / new-message-indicator ──
@@ -3397,8 +3411,19 @@ export function MessageStream({
     // 用户消息总是产出独立的 message item(不进 segment / 不被丢弃),所以这里
     // 只需要解开 type==='message' && role==='user' 这一支。
     const lastItem = visibleRenderItems[visibleRenderItems.length - 1];
-    const lastUserMsg =
+    let lastUserMsg =
       lastItem?.type === 'message' && lastItem.message.role === 'user' ? lastItem.message : null;
+    // render-window-bidirectional: 当锚定窗口未覆盖末尾时，新的用户发送可能
+    // 落在 bounded window 外面、visibleRenderItems 尾感知不到。此时查
+    // allRenderItems 尾兜底：检测到新发送后清除锚点，下一次 render 切回默认
+    // 尾窗，pin-to-bottom 自然把视口钉到底部。
+    if (!lastUserMsg && firstVisibleItemKey !== null && !windowCoversEnd) {
+      const realLast = allRenderItems[allRenderItems.length - 1];
+      if (realLast?.type === 'message' && realLast.message.role === 'user') {
+        lastUserMsg = realLast.message;
+        setFirstVisibleItemKey(null);
+      }
+    }
     const userMessageObservation = resolveLastUserMessageObservation({
       restoring: restoringRef.current,
       tailUserMessageId: lastUserMsg?.clientId ?? null,
@@ -3422,7 +3447,7 @@ export function MessageStream({
 
     const el = scrollRef.current;
     if (el) prevScrollTopRef.current = el.scrollTop;
-  }, [visibleRenderItems, bottomPadding, pinToBottom]);
+  }, [visibleRenderItems, bottomPadding, pinToBottom, firstVisibleItemKey, windowCoversEnd, allRenderItems]);
 
   // ── 还原浏览位置(layout effect,在上面的 pin-to-bottom effect 之后跑) ──
   // mount 首帧 + 还原期间窗口变化时把视口摆回锚点。settle(图片/markdown 异步加载

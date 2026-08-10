@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import type { Stats } from 'node:fs';
 import fsp from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { createLogger } from '../logger';
+import { readBoundedFileNoFollow } from '../utils/readBoundedFile.js';
 
 const log = createLogger('device-link:cross-process-lock');
 
@@ -261,14 +263,28 @@ async function readLockRecord(
   lockPath: string,
   requireCompleteRecord = false,
 ): Promise<ReadLockRecord> {
-  let raw: string;
+  const lockDir = path.dirname(lockPath);
+  let lockRealDir: string;
   try {
-    raw = await fsp.readFile(lockPath, 'utf8');
+    lockRealDir = fsSync.realpathSync(lockDir);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
     return 'unreadable';
   }
+  let bytes: Buffer | null;
+  try {
+    bytes = await readBoundedFileNoFollow(lockPath, 4 * 1024, {
+      containWithin: lockRealDir,
+      nonBlocking: true,
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
+    return 'unreadable';
+  }
+  if (bytes === null) return 'unreadable';
+  const raw = bytes.toString('utf8');
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return 'malformed';

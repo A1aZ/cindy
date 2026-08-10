@@ -32,6 +32,7 @@ import {
   groupWorkRuns,
   snapRenderWindowStartIdx,
   isViewportAnchorWithinDefaultTail,
+  resolveAnchoredWindowItemCount,
   clampTailWindowStartByBudget,
   estimateRenderItemMountCost,
   RENDER_WINDOW_INITIAL_ITEMS,
@@ -475,6 +476,22 @@ describe('two-phase first-paint window', () => {
     expect(firstPaint[firstPaint.length - 1]?.key).toBe(
       allRenderItems[allRenderItems.length - 1]?.key,
     );
+  });
+});
+
+describe('anchored bounded window includes its target', () => {
+  it('adds boundary lookback distance to the desired forward count', () => {
+    // target 位于 turn 起点后第 24 个 item；15-item 窗口若不补 lookback 会漏掉 target。
+    const startIdx = 10;
+    const anchorIdx = startIdx + 24;
+    expect(resolveAnchoredWindowItemCount(startIdx, anchorIdx, 15)).toBe(39);
+    expect(startIdx + resolveAnchoredWindowItemCount(startIdx, anchorIdx, 15)).toBeGreaterThan(
+      anchorIdx,
+    );
+  });
+
+  it('does not inflate a window when snapping keeps the anchor as start', () => {
+    expect(resolveAnchoredWindowItemCount(20, 20, 15)).toBe(15);
   });
 });
 

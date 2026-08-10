@@ -460,6 +460,14 @@ export function clampTailWindowStartByBudget(
   return countStartIdx;
 }
 
+export function resolveAnchoredWindowItemCount(
+  startIdx: number,
+  anchorIdx: number,
+  desiredForwardItems: number,
+): number {
+  return desiredForwardItems + Math.max(0, anchorIdx - startIdx);
+}
+
 // export 仅供 render-window 集成单测使用。窗口默认/扩窗时如果刚好切在
 // agent_task / work_group / assistant 中间,顶部会出现无上下文的卡片。
 // 向前吸收同一 user turn 的开头,但限制 lookback 防止单个超长 turn 破坏首屏预算。
@@ -2686,8 +2694,13 @@ export function MessageStream({
     }
 
     const startIdx = snapRenderWindowStartIdx(allRenderItems, idx);
+    const windowItemCount = resolveAnchoredWindowItemCount(
+      startIdx,
+      idx,
+      anchoredForwardItems,
+    );
     return {
-      items: allRenderItems.slice(startIdx, startIdx + anchoredForwardItems),
+      items: allRenderItems.slice(startIdx, startIdx + windowItemCount),
       startIdx,
     };
   }, [allRenderItems, firstVisibleItemKey, defaultWindowItems, anchoredForwardItems, firstMountDeferred]);
@@ -2894,7 +2907,7 @@ export function MessageStream({
   const windowCoversEnd =
     firstVisibleItemKey === null ||
     allRenderItems.length === 0 ||
-    visibleStartIdx + anchoredForwardItems >= allRenderItems.length;
+    visibleStartIdx + visibleRenderItems.length >= allRenderItems.length;
 
   // ── 滚动位置 保存 / 还原 的辅助 ──
   // unmount cleanup 与 ResizeObserver 回调里读不到最新的 visibleRenderItems /

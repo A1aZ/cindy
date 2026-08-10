@@ -881,6 +881,11 @@ async function withAccountFreeOwnerCommit(opts: {
 }): Promise<void> {
   let authCleared = opts.authAlreadyCleared ?? false;
   let releaseBoundary: (() => void) | null = null;
+  // Same-owner account-free repair tears down the owner-bound Ghost runtime but
+  // keeps the same mode/owner, so commitActiveAppSession's same-owner early
+  // return would NOT advance the owner generation — stale async work that
+  // captured the pre-repair scope key would then pass the post-release guard.
+  let forceBumpGeneration = false;
   const notify = opts.notify ?? true;
   const previousOwnerId = getActiveAppSession().dataOwnerId;
   if (isPassiveSharedUserDataInstance()) {
@@ -923,6 +928,7 @@ async function withAccountFreeOwnerCommit(opts: {
           if (!projectionRepairTeardown) {
             throw new Error('account-free projection repair requires a teardown hook');
           }
+          forceBumpGeneration = true;
           await projectionRepairTeardown(opts.reason);
         }
       },
@@ -946,6 +952,12 @@ async function withAccountFreeOwnerCommit(opts: {
           authCleared = true;
         }
         commitActiveAppSession(opts.nextMode);
+        // Same-owner account-free repair: advance the owner generation after the
+        // real commit so activeOwnerScopeKey() changes and stale captured scopes
+        // are rejected across the teardown.
+        if (forceBumpGeneration) {
+          commitActiveAppSession(opts.nextMode, undefined, true);
+        }
       },
     });
   } catch (error) {

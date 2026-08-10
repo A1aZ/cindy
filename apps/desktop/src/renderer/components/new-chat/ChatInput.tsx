@@ -301,6 +301,7 @@ import {
   isRemoteOptimisticDataOwnerBoundaryError,
   isRemoteOptimisticSessionPurgedError,
   makerChatStore,
+	wasLastStopSideTask,
 } from '@/lib/makerChatStore';
 // 切模型前的上下文容量预检(大窗口 → 小窗口护栏), 纯函数与 main 共用。
 import { assessModelSwitchContext } from '../../../shared/modelSwitchAssessment';
@@ -1203,6 +1204,9 @@ export function ChatInput({
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
       if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
+	      // side-task（skipTurnReset 如 Mivo 侧通道）结束时，store 将 running 翻为
+	      // false 但未产生新的 assistant 回复，不应在对话内容未变时发起付费预测。
+	      if (wasLastStopSideTask(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;

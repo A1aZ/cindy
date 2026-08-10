@@ -195,7 +195,6 @@ import { composerDocIsEmpty } from './composerDocState';
 import { canUseLocalAttachmentPicker } from './localAttachmentPicker';
 import {
   isComposerBlankPointerTarget,
-  isInteractiveFocusedElement,
   resolveComposerBlankFocusIntent,
 } from './composerBlankPointerFocus';
 import {
@@ -347,11 +346,6 @@ const ComposerHardBreak = HardBreak.extend({
 // 自然宽度（permission + model + voice + send 等）估，实测可微调。
 const TOOLBAR_DENSE_MAX_WIDTH = 520;
 const TOOLBAR_COMPACT_MAX_WIDTH = 448;
-
-// 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
-// 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
-// 模块级 Set 跟踪正在进行的预测,确保同一 session 同时只有一次预测调用。
-const _predictingSessions = new Set<string>();
 
 function isVoiceInputIdleLike(state: VoiceInputState): boolean {
   return state === 'idle' || state === 'done' || state === 'error';
@@ -754,20 +748,6 @@ function scrollVoiceInputDraftEndIntoView(editor: Editor): void {
   }
 }
 
-function hasFocusMovedToInteractiveElement(focusAnchor: Element | null, editor: Editor): boolean {
-  const activeElement = document.activeElement;
-  if (
-    !activeElement ||
-    activeElement === document.body ||
-    activeElement === document.documentElement
-  ) {
-    return false;
-  }
-  if (activeElement === focusAnchor) return false;
-  if (editor.view.dom.contains(activeElement)) return false;
-  return isInteractiveFocusedElement(activeElement);
-}
-
 /**
  * Is the editor document "empty" (no text and no chips)? Used to mimic the
  * textarea's `message.trim().length > 0` gate for the Send button.
@@ -950,7 +930,7 @@ export function ChatInput({
   sessionOrcaRole,
   initialWorkingDir,
   remoteHostId,
-  deviceLinkDeviceId: _deviceLinkDeviceId,
+  deviceLinkDeviceId,
   modelMemoryOverride,
   initialModel,
   initialEffort,
@@ -1010,9 +990,6 @@ export function ChatInput({
   topSlot,
   collaboration,
 }: ChatInputProps) {
-  // device-link 远程会话:null = 已确认本地会话(显式非远程),undefined = 尚未解析。
-  // 预测守卫用原始值区分 null vs undefined,其余下游通路归一化为 undefined。
-  const deviceLinkDeviceId = _deviceLinkDeviceId ?? undefined;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
@@ -1095,12 +1072,7 @@ export function ChatInput({
   // ── ESC / history ref bridges for Tiptap handleKeyDown ────────────
   // Tiptap editorProps can't read React state, so we use refs.
   const onStopRef = useRef(onStop);
-  // 用户点击 Stop 时标记 wasTurnStoppedByUserRef,阻止该轮次触发预测。
   onStopRef.current = onStop;
-  const handleStop = useCallback(() => {
-    wasTurnStoppedByUserRef.current = true;
-    onStop?.();
-  }, [onStop]);
   const showStopButtonRef = useRef(showStopButton);
   showStopButtonRef.current = showStopButton;
 
@@ -1108,9 +1080,6 @@ export function ChatInput({
   // messages 在流式期间每个 delta 都变,放进 deps 会让本 effect 反复重跑并把
   // prevShowStopRef 冲掉,从而永远检测不到那次跳变 —— 所以走 ref 读最新值。
   const prevShowStopRef = useRef(false);
-  // 用户点击 Stop 或 turn 以错误结束时，不应触发预测。
-  // 该 ref 在 Stop 按钮/快捷键触发时置 true，新 turn 开始时重置。
-  const wasTurnStoppedByUserRef = useRef(false);
   // turnGen: 每次新 turn 开始递增,预测请求携带代次;落地时检查代次与 sessionId
   // 是否仍匹配,避免旧请求覆盖新轮推荐或跨 session 残留。
   // 递增分两层:render 阶段同步检测 showStopButton false→true 跳变,关闭「用户操作
@@ -1163,20 +1132,14 @@ export function ChatInput({
     if (showStopButton) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
-      wasTurnStoppedByUserRef.current = false;
     }
     // device-link 远程会话 & SSH 远程会话:maker:predict-prompt 不在 allowlist,且远程对话内容
     // 不应送到控制端本地 provider/凭证 —— 跳过预测。
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
-      // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
-      if (wasTurnStoppedByUserRef.current) return;
-	      // turn 以终端错误结束时，不应触发预测：错误上下文可能包含不完整/损坏的对话，
-	      // 避免在错误状态下发起付费 provider 调用。
-	      if (makerChatStore.getSnapshot(sessionId)?.error) return;
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
-      if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
+      if (makerChatStore.hasRunningWakeTask(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;
@@ -1195,11 +1158,6 @@ export function ChatInput({
         // 捕获请求时刻的 sessionId 与 turnGen 快照,落地前校验是否仍匹配。
         const requestSessionId = sessionId;
         const requestTurnGen = turnGenRef.current;
-        // 去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个
-        // ChatInput 实例都会独立检测到 turn 结束并触发预测。模块级 Set 确保
-        // 同一 session 同时只有一次预测调用,避免重复 provider 调用与费用。
-        if (_predictingSessions.has(requestSessionId)) return;
-        _predictingSessions.add(requestSessionId);
         window.electronAPI.maker
           .predictNextPrompt({
             sessionId,
@@ -1208,7 +1166,6 @@ export function ChatInput({
             workingDir: workingDir ?? undefined,
           })
           .then((result) => {
-            _predictingSessions.delete(requestSessionId);
             // 请求往返期间用户可能已经切换会话、发起新 turn 或开始打字 —— 落地前
             // 重新确认 sessionId、turnGen、编辑器状态,否则旧上下文的推荐会覆盖当前轮。
             const cur = editorRef.current;
@@ -1226,7 +1183,6 @@ export function ChatInput({
             }
           })
           .catch(() => {
-            _predictingSessions.delete(requestSessionId);
             // 预测失败静默处理:不显示推荐,也不回落任何默认文案。
           });
       }
@@ -2249,7 +2205,6 @@ export function ChatInput({
           // instead of sending the next one immediately.
           if (showStopButtonRef.current && onStopRef.current) {
             event.preventDefault();
-            wasTurnStoppedByUserRef.current = true;
             onStopRef.current();
             return true;
           }
@@ -3294,7 +3249,7 @@ export function ChatInput({
         window.requestAnimationFrame(() => {
           if (editor.isDestroyed || !editor.isEditable) return;
           if (latestStorageKeyRef.current !== storageKey) return;
-          if (hasFocusMovedToInteractiveElement(storageKeyFocusAnchor, editor)) return;
+          if (hasFocusMovedToInteractiveElement(storageKeyFocusAnchor, editor.view.dom)) return;
           editor.commands.focus('end');
         });
       }
@@ -3361,7 +3316,7 @@ export function ChatInput({
         if (!focusOnStorageKeyChangeRef.current) return;
         if (disableAutofocusRef.current || disabledRef.current) return;
         if (editor.isDestroyed || !editor.isEditable) return;
-        if (hasFocusMovedToInteractiveElement(storageKeyFocusAnchor, editor)) return;
+        if (hasFocusMovedToInteractiveElement(storageKeyFocusAnchor, editor.view.dom)) return;
         editor.commands.focus('end');
       });
     };
@@ -6409,10 +6364,15 @@ export function ChatInput({
   const hasMessage = !isEditorEmpty(editor);
   renderSnapshotRef.current = composerRenderSnapshot(trigger, hasMessage);
   const canSend = hasMessage || hasAttachments || browserComments.length > 0;
-  // 推荐 overlay 的唯一可见判据:开关开启 + 有推荐词 + 输入框空 + 不在语音态。
-  const showRecommendationOverlay =
-    recommendationEnabled && !!recommendedPrompt && !hasMessage && !voiceInput.isBusy;
   const hasVoiceDraftText = voiceInput.draftText.trim().length > 0;
+  // 推荐 overlay 的唯一可见判据:有推荐词 + 输入框空 + 无附件/浏览器评论/语音草稿 + 不在语音态。
+  const showRecommendationOverlay =
+    !!recommendedPrompt &&
+    !hasMessage &&
+    !hasAttachments &&
+    browserComments.length === 0 &&
+    !hasVoiceDraftText &&
+    !voiceInput.isBusy;
   const [voiceReleaseToSendActive, setVoiceReleaseToSendActive] = useState(false);
   const sendButtonDisabled = Boolean(
     disabled ||
@@ -7097,7 +7057,7 @@ export function ChatInput({
                   {showSecondaryStop && (
                     <SendButton
                       disabled={false}
-                      onClick={handleStop}
+                      onClick={onStop ?? (() => {})}
                       isStreaming
                       visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                     />
@@ -7125,17 +7085,12 @@ export function ChatInput({
                   <span
                     ref={sendButtonRef}
                     className="inline-flex rounded-full"
-                    onMouseDown={(event) => {
-                      // 只在编辑器已聚焦时压默认聚焦:点发送会先把焦点从
-                      // contenteditable 挪到 button 上,发完光标就没了;
-                      // 编辑器未聚焦时保留按钮正常聚焦行为(可访问性)。
-                      if (editor?.isFocused) event.preventDefault();
-                    }}
+                    onMouseDown={(event) => event.preventDefault()}
                   >
                     {mainSlotIsStop ? (
                       <SendButton
                         disabled={false}
-                        onClick={handleStop}
+                        onClick={onStop ?? (() => {})}
                         isStreaming
                         visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                       />

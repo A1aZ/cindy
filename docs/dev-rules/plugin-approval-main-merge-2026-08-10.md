@@ -102,6 +102,44 @@ main's changes without weakening fail-closed behavior.
   --config.engine-strict=false` links the workspace without touching the
   lockfile. The lockfile in the merge matches `origin/main` byte-for-byte.
 
+## Post-merge fixes (2026-08-10 round 2)
+
+This round fixed two Linux CI failures plus one Codex review P1:
+
+- **crossProcessLock legacy PID-reuse takeover was platform-dependent and
+  unsound.** `isRecordOwnerActive` decided a legacy record's liveness from the
+  lock file's `birthtimeMs`; on filesystems where birthtime is unavailable or 0
+  the same legacy takeover decided differently from platforms with a real
+  birthtime, so `reclaims a legacy lock when the recorded pid was reused`
+  failed on Linux, and a mtime-based fallback made the "live owner must not be
+  taken over" guard timing-dependent on the parent's age. A PID-reuse takeover
+  cannot be proven soundly from a legacy record (a live pid could be the
+  original still-running holder mid-drain with a stale mtime). Fix:
+  `isRecordOwnerActive` now treats a live non-self pid (kill(pid,0) succeeds)
+  as the active holder unconditionally (fail closed, timing-independent); a
+  PID-reuse takeover is only accepted when the lock's recorded
+  `processStartIdentity` demonstrably does not match the current process. The
+  PID-reuse test was updated to record a mismatching identity (`start-ms:0`)
+  instead of relying on a sentinel startedAt + stale mtime. This is
+  cross-platform stable and never squeezes out a live drain/cleanup owner.
+- **Silent default upgrade minted a fresh receipt for non-approved installs.**
+  `applyDefaultUpgrades` passed `expectedInstalledApproval` +
+  `allowPermissionExpansion` for `legacy-unapproved`/`invalid` org defaults,
+  letting `installDetail` mint a new approved receipt without user reapproval
+  (Codex P1). Fix: skip the silent upgrade when `approval.state !== 'approved'`
+  and leave the plugin in `update-available` so it goes through the
+  reapproval/recovery flow. Added a regression test covering both
+  `legacy-unapproved` and `invalid`.
+- **`readBoundedFile.test.ts` carried two merge-introduced assertions that
+  contradicted the implementation.** Two tests asserted every `readBoundedFile*`
+  open passes `O_NONBLOCK`, but the no-follow variants only enable it via the
+  `nonBlocking` option (and the synchronous variant has no such option); only
+  `readBoundedFileFollowLinks` always opens non-blocking. These assertions do
+  not exist in `origin/main`'s test file and were introduced by the merge.
+  Fixed the assertions to match the implementation: no-follow defaults to
+  blocking, `{ nonBlocking: true }` opts in, follow-links always non-blocking.
+  No production code changed.
+
 ## Post-merge gate
 
 After all conflicts are resolved: inspect the complete diff, verify no unmerged

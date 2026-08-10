@@ -244,9 +244,14 @@ async function inspectStaleLock(
       ? { kind: 'malformed', identity: malformedLockIdentity(stat) }
       : null;
   }
+  // Reference time for "when was the lock created": prefer birthtime, but
+  // fall back to mtime when birthtime is unavailable or 0 (several Linux
+  // filesystems and containers report 0). A null reference previously made the
+  // legacy PID-reuse check fail open (owner assumed active), which broke stale
+  // takeover on those platforms.
   const createdAtMs = Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
     ? stat.birthtimeMs
-    : null;
+    : (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > 0 ? stat.mtimeMs : null);
   return (await isRecordOwnerActive(record, createdAtMs))
     ? null
     : { kind: 'record', record };
@@ -503,7 +508,7 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     const fresh = Date.now() - stat.mtimeMs <= LOCK_STALE_MS;
     const createdAtMs = Number.isFinite(stat.birthtimeMs) && stat.birthtimeMs > 0
       ? stat.birthtimeMs
-      : null;
+      : (Number.isFinite(stat.mtimeMs) && stat.mtimeMs > 0 ? stat.mtimeMs : null);
     if (fresh || await isRecordOwnerActive(record, createdAtMs)) {
       active.push({ filePath, record });
     } else {
@@ -678,12 +683,22 @@ async function isRecordOwnerActive(
   }
   const currentIdentity = await getProcessIdentity(record.pid);
   if (!currentIdentity) return true;
+  // The current process is always the live holder of a lock it wrote: its start
+  // time cannot be compared against the lock's creation time reliably (a
+  // long-lived worker can predate the lock while a short-lived one starts after
+  // it), so a record naming our own pid is never a PID-reuse takeover target.
+  if (record.pid === process.pid) return true;
   if (record.processStartIdentity) {
     return processIdentitiesMatch(record.processStartIdentity, currentIdentity);
   }
-  return currentIdentity.startedAtMs === null
-    || lockCreatedAtMs === null
-    || currentIdentity.startedAtMs <= lockCreatedAtMs + LEGACY_PID_REUSE_TOLERANCE_MS;
+  // Legacy record without a processStartIdentity: kill(pid, 0) succeeded, so
+  // the pid is alive. We cannot distinguish a still-running original holder
+  // from a reused pid, and a live holder must never be squeezed out of its lock
+  // (it may be mid-drain/cleanup with an old mtime). Treat a live non-self pid
+  // as the active holder (fail closed). A PID-reuse takeover is only sound when
+  // the exact process identity was recorded in the lock, so this is the
+  // platform-independent, timing-independent safe answer.
+  return true;
 }
 
 async function getProcessIdentity(pid: number): Promise<ProcessIdentity | null> {

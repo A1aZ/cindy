@@ -147,7 +147,7 @@ describe('接管陈旧锁', () => {
     ).resolves.toEqual({ held: false, reason: 'busy' });
   });
 
-  it('reclaims a legacy lock when the recorded pid was reused after file creation', async () => {
+  it('reclaims a lock when the recorded process identity no longer matches the live pid', async () => {
     const lock = path.join(dir, 'lock');
     await fsp.writeFile(lock, '{}', 'utf8');
     await new Promise((resolve) => setTimeout(resolve, 2_100));
@@ -161,7 +161,22 @@ describe('接管陈旧锁', () => {
         child.once('error', reject);
       });
       if (!child.pid) throw new Error('child pid missing');
-      await fsp.writeFile(lock, JSON.stringify({ pid: child.pid, startedAt: 1 }), 'utf8');
+      // The lock records a process identity that cannot match the live pid's
+      // current identity ('start-ms:0' parses to null → never equal). This is
+      // the only sound signal for a PID-reuse takeover: a live pid alone is
+      // treated as the active holder (fail closed), because a still-running
+      // drain/cleanup owner must not be squeezed out.
+      await fsp.writeFile(
+        lock,
+        JSON.stringify({
+          pid: child.pid,
+          startedAt: 1,
+          processStartIdentity: 'start-ms:0',
+          nonce: '00000000-0000-4000-8000-000000000001',
+          state: 'held',
+        }),
+        'utf8',
+      );
       const old = new Date(Date.now() - 60_000);
       await fsp.utimes(lock, old, old);
 

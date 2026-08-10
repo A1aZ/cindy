@@ -441,6 +441,41 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
     }
   });
 
+  it('wake 任务在发出 isRunning:true 前就失败 → pendingTaskWake 清除,会话不永久转圈', async () => {
+    // P1: wake 任务 failure 路径(直接 error+Done,从未 isRunning:true)时,
+    // isTurnStart 永远不会变 true,若不清除 pendingTaskWake 会永久撑住 running
+    // 快照,导致会话无限期处于 running/Stop 状态。
+    const sid = `wake-fail-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // turn start + subagent 启动
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+      expect(makerChatStore.getRunningSnapshot().get(sid)?.isRunning).toBe(true);
+
+      // 主 turn 结束——subagent 仍在跑,快照保持 running
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false));
+      expect(makerChatStore.getRunningSnapshot().get(sid)?.isRunning).toBe(true);
+
+      // subagent 完成——唤醒桥接撑住空窗
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      const stateAfterWake = makerChatStore.getSnapshot(sid);
+      expect(stateAfterWake.pendingTaskWake).toBe(true);
+
+      // wake turn 失败:SDK 直接推 Done(isRunning:false)但从未推 isRunning:true
+      // 修复点:isTurnComplete 也应清除 pendingTaskWake,防止永久转圈
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const stateAfterFailure = makerChatStore.getSnapshot(sid);
+      expect(stateAfterFailure.pendingTaskWake).toBe(false);
+
+      const transition = makerChatStore.getRunningSnapshot().get(sid);
+      expect(transition?.isRunning).toBe(false);
+      await flushStopTransition();
+      expect(makerChatStore.getRunningSnapshot().has(sid)).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
   it('local_bash 后台任务不折算:主 turn 结束即 stopped(dev server 不永转)', async () => {
     const sid = `bash-${Math.random().toString(36).slice(2, 8)}`;
     try {

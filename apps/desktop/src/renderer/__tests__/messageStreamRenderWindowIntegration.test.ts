@@ -33,6 +33,7 @@ import {
   snapRenderWindowStartIdx,
   isViewportAnchorWithinDefaultTail,
   resolveAnchoredWindowItemCount,
+  shouldBoostDefaultWindow,
   clampTailWindowStartByBudget,
   estimateRenderItemMountCost,
   RENDER_WINDOW_INITIAL_ITEMS,
@@ -492,6 +493,38 @@ describe('anchored bounded window includes its target', () => {
 
   it('does not inflate a window when snapping keeps the anchor as start', () => {
     expect(resolveAnchoredWindowItemCount(20, 20, 15)).toBe(15);
+  });
+});
+
+describe('budget-clamped default window boost', () => {
+  it('boosts a short session when the byte budget hid some items', () => {
+    expect(
+      shouldBoostDefaultWindow({
+        allItemCount: 10,
+        visibleItemCount: 5,
+        defaultWindowItems: 15,
+      }),
+    ).toBe(true);
+  });
+
+  it('does not boost a genuinely complete short session', () => {
+    expect(
+      shouldBoostDefaultWindow({
+        allItemCount: 10,
+        visibleItemCount: 10,
+        defaultWindowItems: 15,
+      }),
+    ).toBe(false);
+  });
+
+  it('does not boost after the default window already reached INITIAL', () => {
+    expect(
+      shouldBoostDefaultWindow({
+        allItemCount: RENDER_WINDOW_INITIAL_ITEMS + 20,
+        visibleItemCount: RENDER_WINDOW_INITIAL_ITEMS,
+        defaultWindowItems: RENDER_WINDOW_INITIAL_ITEMS,
+      }),
+    ).toBe(false);
   });
 });
 

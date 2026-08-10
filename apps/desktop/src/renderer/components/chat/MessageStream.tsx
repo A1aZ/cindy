@@ -469,6 +469,19 @@ export function resolveAnchoredWindowItemCount(
   return desiredForwardItems + Math.max(0, anchorIdx - startIdx);
 }
 
+export function shouldBoostDefaultWindow({
+  allItemCount,
+  visibleItemCount,
+  defaultWindowItems,
+}: {
+  allItemCount: number;
+  visibleItemCount: number;
+  defaultWindowItems: number;
+}): boolean {
+  if (defaultWindowItems >= RENDER_WINDOW_INITIAL_ITEMS) return false;
+  return visibleItemCount < allItemCount;
+}
+
 // export 仅供 render-window 集成单测使用。窗口默认/扩窗时如果刚好切在
 // agent_task / work_group / assistant 中间,顶部会出现无上下文的卡片。
 // 向前吸收同一 user turn 的开头,但限制 lookback 防止单个超长 turn 破坏首屏预算。
@@ -2733,10 +2746,21 @@ export function MessageStream({
   // 无跳动);已向上滚离底部 / 已切到锚点窗口的,交给既有 expandWindow 路径。
   // requestIdleCallback 带 1s timeout 兜底;测试等无 ric 环境退化为 setTimeout。
   useEffect(() => {
-    if (defaultWindowItems >= RENDER_WINDOW_INITIAL_ITEMS) return;
     if (firstVisibleItemKey !== null) return;
     if (visibleRenderItems.length === 0) return;
-    if (allRenderItems.length <= defaultWindowItems) return; // 短会话无需扩
+    // 不能只比较 allItems <= defaultWindowItems。短会话的声明窗口容量可能已
+    // 覆盖全量，但首帧字节预算仍会把实际 DOM 起点向后裁；此时 visible.length
+    // 才是窗口是否完整的事实源。只要实际可见数 < 全量，就要在空闲期 boost，
+    // 将 defaultWindowItems 升到 INITIAL（预算仅在 <INITIAL 阶段生效），恢复全部 item。
+    if (
+      !shouldBoostDefaultWindow({
+        allItemCount: allRenderItems.length,
+        visibleItemCount: visibleRenderItems.length,
+        defaultWindowItems,
+      })
+    ) {
+      return;
+    }
     const boost = () => {
       if (isNearBottomRef.current) {
         setDefaultWindowItems(RENDER_WINDOW_INITIAL_ITEMS);

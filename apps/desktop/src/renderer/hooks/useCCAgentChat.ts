@@ -753,6 +753,7 @@ export function useCCAgentChat(
     // 窗口(断连/重连),taskUpdates 不在 reconcile 对账覆盖内,终态 drop 后无自愈
     // 路径。与 makerChatStore.hasBackgroundAgentWork 的远程豁免同口径。
     (lightState.pendingTaskWake && sessionId && !isRemoteSessionSticky(sessionId) && !makerChatStore.getSnapshot(sessionId)?.remoteHostId) ||
+    (sessionId != null && makerChatStore.hasBackgroundAgentWork(sessionId)) ||
     (pendingQueueLength > 0 && !lightState.queuePaused);
 
   const setQueueExpanded = useCallback(

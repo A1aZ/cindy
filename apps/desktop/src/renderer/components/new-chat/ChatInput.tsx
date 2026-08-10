@@ -1184,6 +1184,9 @@ export function ChatInput({
     //   undefined = 所有权尚未解析 → 允许预测（remoteHostId 门禁会拦截 SSH 远程）
     //   string = 远程会话 → 被下面 !deviceLinkDeviceId 拦截
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
+      // 当 composer 被禁用时（如 reviewer 任务完成后 read-only），不应触发
+      // 预测：用户无法 Tab 填入或发送，发起 provider 调用是浪费。
+      if (disabledRef.current) return;
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
       // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
       // turnStoppedByUser 是 session 级 store 字段(stopSession 置位、新 turn 复位),

@@ -32,8 +32,11 @@ import {
   groupWorkRuns,
   snapRenderWindowStartIdx,
   isViewportAnchorWithinDefaultTail,
+  clampTailWindowStartByBudget,
+  estimateRenderItemMountCost,
   RENDER_WINDOW_INITIAL_ITEMS,
   RENDER_WINDOW_FIRST_PAINT_ITEMS,
+  RENDER_WINDOW_FIRST_PAINT_BUDGET,
 } from '../components/chat/MessageStream';
 import {
   decideAutoFillAction,
@@ -472,6 +475,55 @@ describe('two-phase first-paint window', () => {
     expect(firstPaint[firstPaint.length - 1]?.key).toBe(
       allRenderItems[allRenderItems.length - 1]?.key,
     );
+  });
+});
+
+describe('first-paint content budget (clampTailWindowStartByBudget)', () => {
+  const mkItem = (id: string, contentSize: number) => ({
+    key: `message-${id}`,
+    type: 'message' as const,
+    message: mkAssistant(id, 'x'.repeat(contentSize)),
+  });
+
+  it('small messages never hit the budget — start index unchanged', () => {
+    const items = Array.from({ length: 15 }, (_, i) => mkItem(`s-${i}`, 500));
+    expect(clampTailWindowStartByBudget(items, 0)).toBe(0);
+  });
+
+  it('large messages shrink the window from the front', () => {
+    // 每条 12KB:64k 预算 ≈ 5 条(200 固定开销 + 12000)。15 条起点应收窄到只渲染约 5 条。
+    const items = Array.from({ length: 15 }, (_, i) => mkItem(`l-${i}`, 12_000));
+    const clamped = clampTailWindowStartByBudget(items, 0);
+    expect(clamped).toBeGreaterThan(0);
+    const rendered = items.length - clamped;
+    const cost = items.slice(clamped).reduce((acc, it) => acc + estimateRenderItemMountCost(it), 0);
+    expect(cost).toBeLessThanOrEqual(RENDER_WINDOW_FIRST_PAINT_BUDGET + 12_200);
+    expect(rendered).toBeGreaterThanOrEqual(5);
+    expect(rendered).toBeLessThan(8);
+  });
+
+  it('always keeps at least the last item even when a single item busts the budget', () => {
+    const items = [mkItem('huge', RENDER_WINDOW_FIRST_PAINT_BUDGET * 2)];
+    expect(clampTailWindowStartByBudget(items, 0)).toBe(0);
+  });
+
+  it('window tail is always the latest item', () => {
+    const items = Array.from({ length: 10 }, (_, i) => mkItem(`t-${i}`, 20_000));
+    const clamped = clampTailWindowStartByBudget(items, 0);
+    const rendered = items.slice(clamped);
+    expect(rendered[rendered.length - 1]?.key).toBe(items[items.length - 1]?.key);
+  });
+
+  it('non-message items use flat estimates and stay cheap', () => {
+    const seg = {
+      key: 'seg-a',
+      type: 'tool_segment' as const,
+      toolCalls: [mkTool('a')],
+      resultMap: new Map<string, string>(),
+      settledIds: new Set<string>(),
+      resultTsMap: new Map<string, number>(),
+    };
+    expect(estimateRenderItemMountCost(seg)).toBeLessThan(1000);
   });
 });
 

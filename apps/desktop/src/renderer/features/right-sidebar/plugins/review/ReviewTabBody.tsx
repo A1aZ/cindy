@@ -750,8 +750,11 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
       diff: deviceLinkDeviceId ? trimPreviewDiff(diff) : diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
-    } as Parameters<typeof window.electronAPI.gitReview.imagePreview>[0]);
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, trimPreviewDiff]);
+    } as Parameters<typeof window.electronAPI.gitReview.imagePreview>[0]).catch((err) => {
+      if (isReviewRemoteOversizeError(err)) throw new Error(t('rightSidebar.review.remote.oversizeDesc'));
+      throw err;
+    });
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, t, trimPreviewDiff]);
   const loadMarkdownPreview = useCallback<LoadMarkdownPreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));
     return gitReviewApiFor(deviceLinkDeviceId).markdownPreview({
@@ -759,8 +762,11 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
       diff: deviceLinkDeviceId ? trimPreviewDiff(diff) : diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
-    } as Parameters<typeof window.electronAPI.gitReview.markdownPreview>[0]);
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, trimPreviewDiff]);
+    } as Parameters<typeof window.electronAPI.gitReview.markdownPreview>[0]).catch((err) => {
+      if (isReviewRemoteOversizeError(err)) throw new Error(t('rightSidebar.review.remote.oversizeDesc'));
+      throw err;
+    });
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, t, trimPreviewDiff]);
   const openReviewFile = useCallback((diff: FileDiff) => {
     if (!sessionId) return;
     void window.electronAPI.gitReview.openFile({ sessionId, path: diff.path })

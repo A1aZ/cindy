@@ -209,8 +209,8 @@ type WatchdogSpawn = (
  *   - 纯 ASCII: WSH 按系统 ANSI 代码页读文件, 非 ASCII 注释会乱码;
  *   - ES3 语法: JScript 没有 const/let/箭头函数, 函数调用**不允许尾逗号**
  *     (尾逗号是语法错, //B 模式下静默失败, watchdog 形同虚设);
- *   - pid / 宽限期 / execPath 全部走命令行参数, 内容与具体一次运行无关 ——
- *     因此可以固定文件名、启动期预生成、双实例覆盖写也无冲突。
+ *   - pid / 宽限期 / execPath 全部走命令行参数, 内容与具体一次运行无关; 脚本
+ *     文件在启动期预生成到 mkdtemp 唯一目录。
  */
 const WATCHDOG_SCRIPT_CONTENT = [
   '// Cindy shutdown hard-kill watchdog (win32).',
@@ -488,7 +488,8 @@ function beginShutdown(timeoutMs: number, reason: string): Promise<void> {
   // 都是同步盘 IO (日志文件 / run-marker 的 mkdirSync+writeFileSync), 落在坏盘
   // 或网络盘上可能无限阻塞 —— 那正是 watchdog 要兜的挂死形态, 不能让布防
   // 排在它们后面。spawn 本身不做盘写 (win32 的 watchdog 脚本已在启动期由
-  // installQuitHandler 预生成; 仅当启动期预生成失败时布防才会内联补写一次)。
+  // installQuitHandler 预生成; 布防期只做存在性校验——脚本被外部删除时
+  // prepareShutdownWatchdogScript 会清缓存并重建, 启动期写盘失败则直接走缺席标记)。
   armShutdownHardKillWatchdog();
   log.info(`beginShutdown timeoutMs=${timeoutMs} reason=${reason}`);
   noteShutdownBegin(reason);
@@ -512,13 +513,13 @@ export function installQuitHandler(timeoutMs = 2000): void {
   _installed = true;
 
   // win32 watchdog 脚本在启动期预生成 —— 布防发生在 shutdown 热路径, 必须保持
-  // 零盘 IO (见 beginShutdown 注释)。这里失败只 warn: 布防时还有一次内联重试,
-  // 两次都失败才会打"缺席标记"。
+  // 零盘 IO (见 beginShutdown 注释)。这里失败只 warn 并设 prepare-failed 标记:
+  // 后续布防直接走缺席路径, 不会在退出热路径再碰盘。
   if (process.platform === 'win32') {
     try {
       prepareShutdownWatchdogScript();
     } catch (err) {
-      log.warn('failed to pre-generate shutdown watchdog script (will retry at arm time)', err);
+      log.warn('failed to pre-generate shutdown watchdog script (absent for this session)', err);
     }
   }
 

@@ -60,8 +60,8 @@ vi.mock('../logger', async () => {
 });
 
 // 每个用例独立的 watchdog 脚本落盘目录 (mkdtemp 唯一路径, 用完即删)。既满足
-// 测试资源规则, 也让 win32 宿主上 installQuitHandler 的启动期预生成不触碰真实
-// os.tmpdir 下的固定共享路径 (freshLifecycle 里预 seed 缓存)。
+// 测试资源规则, 也让 win32 宿主上 installQuitHandler 的启动期预生成不会写入
+// 真实 os.tmpdir (freshLifecycle 里用本目录预 seed 缓存)。
 let watchdogTmpDir: string;
 beforeEach(() => {
   watchdogTmpDir = mkdtempSync(join(tmpdir(), 'lifecycle-wd-'));

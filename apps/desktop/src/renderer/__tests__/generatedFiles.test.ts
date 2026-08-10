@@ -212,6 +212,12 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates("Path('out/data.bin').write_bytes(payload)"),
     ).toEqual(['out/data.bin']);
+    expect(
+      extractCommandOutputPathCandidates("df.to_csv(path_or_buf='out/report.csv', index=False)"),
+    ).toEqual(['out/report.csv']);
+    expect(
+      extractCommandOutputPathCandidates("workbook.to_excel(excel_writer=\"out/report.xlsx\")"),
+    ).toEqual(['out/report.xlsx']);
     expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/source.txt']);
     expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\source.txt']);
     expect(

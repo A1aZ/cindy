@@ -159,7 +159,7 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
 }
 
 const WRITE_CALL_PREFIX_RE =
-  /(?:\.|\b)(?:save|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:[rubf]{0,2})?['"]$/i;
+  /(?:\.|\b)(?:save|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*)?(?:[rubf]{0,2})?['"]$/i;
 const POWERSHELL_CMDLET_RE = /\b[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9-]*\b/g;
 const POWERSHELL_WRITE_COMMANDS = new Set([
   'out-file',

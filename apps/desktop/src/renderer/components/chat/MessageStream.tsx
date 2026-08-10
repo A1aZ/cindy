@@ -215,6 +215,7 @@ import {
   resolveNearBottomOnScroll,
   resolveLastUserMessageObservation,
   resolveRenderPinDecision,
+  selectTailUserMessageId,
   shouldUnpinOnUpIntent,
   shouldUnpinOnWheel,
 } from './autoFollowIntent';
@@ -3419,27 +3420,44 @@ export function MessageStream({
   // result land.
   // biome-ignore lint/correctness/useExhaustiveDependencies: bottomPadding 是触发型依赖；overlay 高度变化时即使 effect 内不读取它，也必须重新 pin 到底。
   useLayoutEffect(() => {
-    const lastItem = visibleRenderItems[visibleRenderItems.length - 1];
-    let lastUserMsg =
-      lastItem?.type === 'message' && lastItem.message.role === 'user' ? lastItem.message : null;
+    const visibleLastItem = visibleRenderItems[visibleRenderItems.length - 1];
+    const realLastItem = allRenderItems[allRenderItems.length - 1];
+    const tailUserMessageId = selectTailUserMessageId({
+      windowCoversEnd,
+      visibleLastItem,
+      realLastItem,
+      userMessageId: (item) =>
+        item?.type === 'message' && item.message.role === 'user'
+          ? item.message.clientId
+          : null,
+    });
+    const lastUserMsg =
+      tailUserMessageId === null
+        ? null
+        : realLastItem?.type === 'message' && realLastItem.message.clientId === tailUserMessageId
+          ? realLastItem.message
+          : visibleLastItem?.type === 'message' &&
+              visibleLastItem.message.clientId === tailUserMessageId
+            ? visibleLastItem.message
+            : null;
 
-    // render-window-bidirectional: 锚定窗口未覆盖末尾时新发送落在 bounded
-    // window 外面，visibleRenderItems 尾感知不到。查 allRenderItems 尾兜底。
-    // 关键：不能在同一次 effect 里 pinToBottom —— visibleRenderItems 仍是旧的
-    // 有界窗口切片，pinToBottom 会滚到切片的底部而非真正的末尾。
-    // 清除锚点 + 设置 isNearBottom → 下一次 render 切回默认尾窗后，
-    // nearBottom=true 分支自然触发 pinToBottom。
+    // 锚定窗口外检测到真实的新发送：当前 effect 的 visibleRenderItems 仍是旧切片，
+    // 不能同帧 pinToBottom。先清锚并恢复 near-bottom，下一次 render 切回默认尾窗
+    // 后再自然 pin；提前同步 lastUserMsgIdRef，防下一帧重复判成新发送。
     let windowAnchorClearedOnSend = false;
-    if (!lastUserMsg && firstVisibleItemKey !== null && !windowCoversEnd) {
-      const realLast = allRenderItems[allRenderItems.length - 1];
-      if (realLast?.type === 'message' && realLast.message.role === 'user') {
-        setFirstVisibleItemKey(null);
-        isNearBottomRef.current = true;
-        setIsNearBottom(true);
-        setUnreadCount(0);
-        lastUserMsgIdRef.current = realLast.message.clientId;
-        windowAnchorClearedOnSend = true;
-      }
+    const realTailUserSendOutsideWindow =
+      !restoringRef.current &&
+      firstVisibleItemKey !== null &&
+      !windowCoversEnd &&
+      lastUserMsg !== null &&
+      lastUserMsg.clientId !== lastUserMsgIdRef.current;
+    if (realTailUserSendOutsideWindow) {
+      setFirstVisibleItemKey(null);
+      isNearBottomRef.current = true;
+      setIsNearBottom(true);
+      setUnreadCount(0);
+      lastUserMsgIdRef.current = lastUserMsg.clientId;
+      windowAnchorClearedOnSend = true;
     }
     const userMessageObservation = resolveLastUserMessageObservation({
       restoring: restoringRef.current,

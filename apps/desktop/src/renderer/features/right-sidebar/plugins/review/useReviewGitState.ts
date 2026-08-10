@@ -72,10 +72,13 @@ function useGitReviewLoad<T>(
   sessionId: string | null,
   fetch: (sessionId: string) => Promise<T>,
   logLabel: string,
-  options: { cacheKey?: string | null; preserveWhenDisabled?: boolean } = {},
+  options: { cacheKey?: string | null; preserveWhenDisabled?: boolean; scopeKey?: string | null } = {},
 ): LoadState<T> {
   const cacheKey = options.cacheKey ?? null;
   const preserveWhenDisabled = options.preserveWhenDisabled ?? false;
+  // scope = 数据归属的会话/设备身份(`<deviceId|local>:<sessionId>`)。cacheKey 还编码
+  // oid / baseRef / whitespace 等查询参数,粒度比 scope 细。
+  const scopeKey = options.scopeKey ?? cacheKey;
   const [data, setDataState] = useState<T | null>(() => {
     const cached = cacheKey ? reviewLoadCache.get(cacheKey) as T | undefined : undefined;
     return cached ?? null;
@@ -83,6 +86,30 @@ function useGitReviewLoad<T>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  // 渲染期 keyed reset(React "derived state during render"),不等 useEffect——effect
+  // 跑在 paint 之后,切换的第一帧会把上一个 key 的旧审查结果画给新会话(review P1):
+  //  - 新 key 有缓存 → 当帧采纳缓存;
+  //  - scope(会话/设备)变了且无缓存 → 当帧清空 fail closed,绝不把 A 会话的 diff
+  //    画给 B 会话;
+  //  - 同 scope 内换 key(切 commit / baseRef / whitespace)且无缓存 → 保留旧数据,
+  //    由 loading 态覆盖(既有 cache continuity 契约,见 useReviewGitState.test)。
+  // preserveWhenDisabled 仅保护「scope 变 null 的禁用窗口」(commit/branch diff 视图
+  // 暂时失焦),非空 scope 之间的切换一律重置。
+  const [paintedScopeKey, setPaintedScopeKey] = useState(scopeKey);
+  const [paintedCacheKey, setPaintedCacheKey] = useState(cacheKey);
+  if (paintedScopeKey !== scopeKey || paintedCacheKey !== cacheKey) {
+    const scopeChanged = paintedScopeKey !== scopeKey;
+    setPaintedScopeKey(scopeKey);
+    setPaintedCacheKey(cacheKey);
+    const cached = cacheKey ? reviewLoadCache.get(cacheKey) as T | undefined : undefined;
+    if (cached !== undefined) {
+      setDataState(cached);
+    } else if (scopeChanged && (scopeKey !== null || !preserveWhenDisabled)) {
+      setDataState(null);
+      setError(null);
+      setErrorCode(null);
+    }
+  }
   const requestRef = useRef(0);
   const setData = useCallback((next: T) => {
     setDataState(next);
@@ -122,18 +149,6 @@ function useGitReviewLoad<T>(
   const debouncedLoad = useDebouncedCallback(load, REFRESH_DEBOUNCE_MS);
 
   useEffect(() => {
-    const cached = cacheKey ? reviewLoadCache.get(cacheKey) as T | undefined : undefined;
-    if (cached !== undefined) {
-      setDataState(cached);
-    } else if (!sessionId && !preserveWhenDisabled) {
-      setDataState(null);
-    } else if (sessionId) {
-      // cacheKey 变化且新 key 无缓存（切换设备/session）时，先清旧数据避免闪现旧审查结果
-      setDataState(null);
-    }
-  }, [cacheKey, preserveWhenDisabled, sessionId]);
-
-  useEffect(() => {
     load();
   }, [load]);
 
@@ -160,6 +175,7 @@ export function useReviewGitState(
     gitReviewApiFor(deviceId).get({ sessionId: currentSessionId, ignoreWhitespace }), [deviceId, ignoreWhitespace]);
   return useGitReviewLoad(sessionId, fetchReviewData, 'git review load failed', {
     cacheKey: sessionId ? `${deviceId ?? 'local'}:worktree:${sessionId}:${ignoreWhitespace ? 'w' : 'plain'}` : null,
+    scopeKey: sessionId ? `${deviceId ?? 'local'}:${sessionId}` : null,
   });
 }
 
@@ -191,6 +207,7 @@ export function useReviewCommitDiff(
   }, [deviceId, ignoreWhitespace, oid]);
   return useGitReviewLoad(sessionId && oid ? sessionId : null, fetchCommitDiff, 'git review commit diff failed', {
     cacheKey: sessionId && oid ? `${deviceId ?? 'local'}:commit:${sessionId}:${oid}:${ignoreWhitespace ? 'w' : 'plain'}` : null,
+    scopeKey: sessionId && oid ? `${deviceId ?? 'local'}:${sessionId}` : null,
     preserveWhenDisabled: true,
   });
 }
@@ -210,6 +227,7 @@ export function useReviewBranchDiff(
     }), [baseRef, deviceId, ignoreWhitespace]);
   return useGitReviewLoad(sessionId && enabled ? sessionId : null, fetchBranchDiff, 'git review branch diff failed', {
     cacheKey: sessionId ? `${deviceId ?? 'local'}:branch:${sessionId}:${baseRef ?? 'default'}:${ignoreWhitespace ? 'w' : 'plain'}` : null,
+    scopeKey: sessionId ? `${deviceId ?? 'local'}:${sessionId}` : null,
     preserveWhenDisabled: true,
   });
 }
@@ -243,6 +261,7 @@ export function useReviewFileDiff(
     : null;
   return useGitReviewLoad(sessionId && source && path ? sessionId : null, fetchFileDiff, 'git review file diff failed', {
     cacheKey,
+    scopeKey: sessionId && source && path ? `${deviceId ?? 'local'}:${sessionId}` : null,
     preserveWhenDisabled: true,
   });
 }
@@ -280,6 +299,7 @@ export function useReviewFileDiffs(
     'git review file diff batch failed',
     {
       cacheKey: sessionId && requestKey ? `${deviceId ?? 'local'}:files:${sessionId}:${requestKey}` : null,
+      scopeKey: sessionId && requestKey ? `${deviceId ?? 'local'}:${sessionId}` : null,
       preserveWhenDisabled: false,
     },
   );

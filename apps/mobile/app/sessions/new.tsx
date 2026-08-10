@@ -3821,6 +3821,7 @@ export default function NewRemoteSessionScreen() {
     }
     if (
       worktreeApplicable
+      && worktreeEligibility.status !== 'ineligible'
       && (
         worktreePreferenceWriteTargetRef.current === selectedDeviceId
         || worktreePreferenceAuthorityUnknownByDeviceRef.current.has(selectedDeviceId)
@@ -4387,6 +4388,7 @@ export default function NewRemoteSessionScreen() {
     }
     if (
       worktreeApplicable
+      && worktreeEligibility.status !== 'ineligible'
       && (
         worktreePreferenceWriteTargetRef.current === selectedDeviceId
         || worktreePreferenceAuthorityUnknownByDeviceRef.current.has(selectedDeviceId)

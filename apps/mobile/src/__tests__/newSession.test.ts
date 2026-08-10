@@ -1827,7 +1827,8 @@ describe('new session worktree wiring (source locks)', () => {
       'applicable: worktreeApplicable,',
     );
     const createEntry = newSource.indexOf('const create = useCallback(async () => {');
-    const createBody = newSource.slice(createEntry, createEntry + 1_800);
+    // ineligible 豁免守卫使 create 函数体略长,窗口扩至 1600 确保覆盖 worktreeCreateBlocked。
+    const createBody = newSource.slice(createEntry, createEntry + 1_600);
     expect(createBody).not.toContain('|| worktreePreferenceSaving');
     expect(createBody).toContain('if (worktreeCreateBlocked) {');
     expect(newSource).toContain('worktreeBranchPreferenceSaving');

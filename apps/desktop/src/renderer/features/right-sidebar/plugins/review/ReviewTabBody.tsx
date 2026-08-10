@@ -726,24 +726,36 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
     () => getGitApplyCopyAvailability(visibleDiffs, hideWhitespace, platform),
     [hideWhitespace, platform, visibleDiffs],
   );
+  /**
+   * device-link 预览请求只需 parsePreviewDiffPayload 读取的字段(source/id/path/oldPath/index);
+   * 全量 FileDiff(hunks/hunksPlain 等)经隧道传输浪费帧预算且从不被被控端读取。
+   * 本地调用仍传完整 diff 保持兼容。
+   */
+  const trimPreviewDiff = useCallback((diff: FileDiff): FileDiff => ({
+    source: diff.source,
+    id: diff.id,
+    path: diff.path,
+    oldPath: diff.oldPath,
+    index: diff.index,
+  } as FileDiff), []);
   const loadImagePreview = useCallback<LoadImagePreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));
     return gitReviewApiFor(deviceLinkDeviceId).imagePreview({
       sessionId,
-      diff,
+      diff: deviceLinkDeviceId ? trimPreviewDiff(diff) : diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
-    });
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId]);
+    } as Parameters<typeof window.electronAPI.gitReview.imagePreview>[0]);
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, trimPreviewDiff]);
   const loadMarkdownPreview = useCallback<LoadMarkdownPreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));
     return gitReviewApiFor(deviceLinkDeviceId).markdownPreview({
       sessionId,
-      diff,
+      diff: deviceLinkDeviceId ? trimPreviewDiff(diff) : diff,
       commitOid: diff.source === 'commit' ? effectiveCommitOid : null,
       branchBaseRef: diff.source === 'branch' ? currentBranchDiffData?.baseRef ?? branchBaseRef : null,
-    });
-  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId]);
+    } as Parameters<typeof window.electronAPI.gitReview.markdownPreview>[0]);
+  }, [branchBaseRef, currentBranchDiffData?.baseRef, deviceLinkDeviceId, effectiveCommitOid, sessionId, trimPreviewDiff]);
   const openReviewFile = useCallback((diff: FileDiff) => {
     if (!sessionId) return;
     void window.electronAPI.gitReview.openFile({ sessionId, path: diff.path })

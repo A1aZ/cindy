@@ -17,7 +17,7 @@ import {
   type LegacyGhostRecoveryStatus,
 } from '../shared/legacyGhostRecovery.js';
 import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
-import { readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
+import { readBoundedFileNoFollow, readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
 const LEGACY_GHOST_RECOVERY_MARKER = '.legacy-ghost-recovery-v1.json';
@@ -208,12 +208,23 @@ async function readLegacyGhostRecoveryMarker(
   deps: MigrationDeps,
   markerPath: string,
 ): Promise<LegacyGhostRecoveryMarkerRead> {
-  let text: string;
+  const ownerRoot = path.dirname(markerPath);
+  let ownerRealPath: string;
   try {
-    text = await deps.readFile(markerPath);
+    ownerRealPath = await fs.realpath(ownerRoot);
   } catch (error) {
     return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
   }
+  let bytes: Buffer | null;
+  try {
+    bytes = await readBoundedFileNoFollow(markerPath, 64 * 1024, {
+      containWithin: ownerRealPath,
+    });
+  } catch (error) {
+    return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
+  }
+  if (bytes === null) return { kind: 'deferred' };
+  const text = bytes.toString('utf8');
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;
     const failedIds = parsed.failedIds ?? [];

@@ -2055,21 +2055,28 @@ describe('legacy Ghost plugin recovery', () => {
       JSON.stringify({ version: 1, ownerKey, pendingIds: ['queued-plugin'] }),
     );
     await writeGhostDir(root, 'brain', 'queued-plugin');
-    const result = await recoverLegacyGhostPlugins(
-      { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
-      realFsDeps(root, {}, {
-        readFile: (file: string) =>
-          path.resolve(file) === path.resolve(markerPath)
-            ? Promise.reject(Object.assign(new Error('marker locked'), { code: 'EACCES' }))
-            : fs.readFile(file, 'utf8'),
-      }),
-    );
-    expect(result).toEqual({
-      status: 'deferred',
-      moved: 0,
-      conflicts: 0,
-      deferredReason: 'legacy-discovery-incomplete',
-    });
+    // readLegacyGhostRecoveryMarker now uses readBoundedFileNoFollow;
+    // inject EACCES at the bounded reader so the marker stays unreadable.
+    const boundedModule = await import('../utils/readBoundedFile.js');
+    const readerSpy = vi
+      .spyOn(boundedModule, 'readBoundedFileNoFollow')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('marker locked'), { code: 'EACCES' }),
+      );
+    try {
+      const result = await recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+      );
+      expect(result).toEqual({
+        status: 'deferred',
+        moved: 0,
+        conflicts: 0,
+        deferredReason: 'legacy-discovery-incomplete',
+      });
+    } finally {
+      readerSpy.mockRestore();
+    }
     await expect(fs.access(path.join(root, 'brain', 'queued-plugin'))).resolves.toBeUndefined();
   });
 

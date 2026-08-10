@@ -1558,9 +1558,9 @@ export function ChatInput({
 
   const agentKind = vendorKeyToAgentKind(vendorKey);
   // device-link 远程会话:能力(模型 / fast / effort)从被控端读;本地会话 deviceLinkDeviceId undefined → 本地。
-  const ccCaps = useAgentCapabilities('claude-code', deviceLinkDeviceId);
-  const codexCaps = useAgentCapabilities('codex', deviceLinkDeviceId);
-  const piCaps = useAgentCapabilities('pi', deviceLinkDeviceId);
+  const ccCaps = useAgentCapabilities('claude-code', deviceLinkDeviceId ?? undefined);
+  const codexCaps = useAgentCapabilities('codex', deviceLinkDeviceId ?? undefined);
+  const piCaps = useAgentCapabilities('pi', deviceLinkDeviceId ?? undefined);
   const activeAgentCapabilities =
     agentKind === 'codex'
       ? codexCaps.capabilities
@@ -1599,7 +1599,7 @@ export function ChatInput({
   // 断链期间发出的读回会失败(catch 吞掉),断链期间被控端 / 另一控制端改的意图其
   // sessions:patched 推送也收不到 —— 恢复连接后必须重读一次,否则 composer 会一直
   // 停在过期引擎上。非 connected → connected 的每次跃迁 +1,驱动下方 effect 重跑。
-  const remoteConnStatus = useRemoteSessionConnection(deviceLinkDeviceId);
+  const remoteConnStatus = useRemoteSessionConnection(deviceLinkDeviceId ?? undefined);
   const [remoteReconnectEpoch, setRemoteReconnectEpoch] = useState(0);
   const remoteWasConnectedRef = useRef(false);
   useEffect(() => {
@@ -1685,7 +1685,7 @@ export function ChatInput({
   // 供应商连接态。effectiveSourceId / sendProviderId / dispatchSend 预检用它。device-link 远程会话 /
   // 草稿用**被控端**供应商目录(隧道),否则用本机(两 hook 都无条件调用,按 deviceLinkDeviceId 取)。
   const localProviders = useProviders();
-  const remoteProviders = useDeviceProviders(deviceLinkDeviceId);
+  const remoteProviders = useDeviceProviders(deviceLinkDeviceId ?? undefined);
   const providers = deviceLinkDeviceId ? remoteProviders.providers : localProviders.providers;
   const sendProviders = filterChatBridgedCodexProviders(
     providers,
@@ -1701,7 +1701,7 @@ export function ChatInput({
   // provider 目录，且真实读取失败时 fail closed。只有结构化 unsupported 才允许旧端回退。
   const { loading: localProvidersLoading } = useConnectedSource(currentModelAgentKind, activeModel);
   const remoteModelListStatus = resolveRemoteModelListStatus({
-    deviceId: deviceLinkDeviceId,
+    deviceId: deviceLinkDeviceId ?? undefined,
     agentKind: currentModelAgentKind,
     cc: ccCaps,
     codex: codexCaps,
@@ -3689,7 +3689,7 @@ export function ChatInput({
         paletteAgentKind,
         workingDir,
         { ...opts, skipAgentSkills: isRemoteSession, sessionId },
-        deviceLinkDeviceId,
+        deviceLinkDeviceId ?? undefined,
       )
         .then((cmds) => {
           if (slashCommandLoadSeqRef.current === seq) {
@@ -5242,7 +5242,7 @@ export function ChatInput({
   const modelFastSupported = useCallback(
     (targetModelId: string, providerId: string | null): boolean =>
       resolveFastSupported({
-        deviceId: deviceLinkDeviceId,
+        deviceId: deviceLinkDeviceId ?? undefined,
         deviceProviders: remoteProviders.providers,
         localProviders: localProviders.providers,
         capabilities:
@@ -5378,9 +5378,9 @@ export function ChatInput({
         });
         return;
       }
-      const sourceRemoteDeviceId = sessionId
+      const sourceRemoteDeviceId = (sessionId
         ? (deviceLinkDeviceId ?? getSessionDeviceId(sessionId))
-        : deviceLinkDeviceId;
+        : deviceLinkDeviceId) ?? undefined;
       const persisted = await persistFastModeChange(enabled, {
         remoteDeviceId: sourceRemoteDeviceId,
       });
@@ -5554,7 +5554,7 @@ export function ChatInput({
             : !!providerId &&
               !!modelMemory &&
               resolveFastSupported({
-                deviceId: deviceLinkDeviceId,
+                deviceId: deviceLinkDeviceId ?? undefined,
                 deviceProviders: remoteProviders.providers,
                 localProviders: localProviders.providers,
                 capabilities:
@@ -7079,7 +7079,7 @@ export function ChatInput({
                   permissionMode={activePermissionMode}
                   onPermissionModeChange={handlePermissionModeChange}
                   vendorKey={vendorKey}
-                  deviceId={deviceLinkDeviceId}
+                  deviceId={deviceLinkDeviceId ?? undefined}
                   disabled={composerEditorLocked || settingsLocked}
                   dense={effectiveDenseToolbar}
                   iconOnly={useUltraCompactToolbar}
@@ -7141,7 +7141,7 @@ export function ChatInput({
                           }
                         : undefined
                     }
-                    deviceId={deviceLinkDeviceId}
+                    deviceId={deviceLinkDeviceId ?? undefined}
                     // SSH 远程会话隐藏订阅直连模型(chatgpt/ / xai/):bridge 只挂在本地 compat-proxy,
                     // 远程模式走 remoteEndpoint 不经翻译,选了必失败。
                     excludeSubscriptionDirect={!!remoteHostId}

@@ -1154,8 +1154,8 @@ export function ChatInput({
       turnGenRef.current += 1;
     }
   });
-  useEffect(() => {
-    // sessionId 变化时清除推荐 UI（ref 已在 render 阶段同步更新）
+  useLayoutEffect(() => {
+    // sessionId 变化时同步清除推荐 UI（用 useLayoutEffect 避免旧推荐跨会话闪现）
     setRecommendedPrompt(null);
   }, [sessionId]);
   useEffect(() => {

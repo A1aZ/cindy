@@ -5608,7 +5608,7 @@ function handleStatusUpdate(
     // isRunning:true)是正常路径;wake turn 秒挂(只来 error + Done)也在这里
     // 收口,防止桥接标记漏网永久撑住 running 快照。skipTurnReset 已提前 return。
     pendingTaskWake: false,
-    turnStoppedByUser: false,
+    turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {
       status: update.status,
       tokenUsage: tu,
@@ -7666,6 +7666,7 @@ function selectLightState(state: SessionChatState): SessionChatLightState {
     fastMode: state.fastMode,
     planModeEnabled: state.planModeEnabled,
     pendingTaskWake: state.pendingTaskWake,
+    turnStoppedByUser: state.turnStoppedByUser,
   };
 }
 

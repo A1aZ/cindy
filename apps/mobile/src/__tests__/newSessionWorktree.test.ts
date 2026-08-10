@@ -94,7 +94,7 @@ describe('resolveWorktreeEligibility', () => {
 
 describe('worktreeEligibilityForTarget', () => {
   const snapshot = {
-    target: { deviceId: 'dev-a', workingDir: '/repo/a' },
+    target: { deviceId: 'dev-a', workingDir: '/repo/a', probeGeneration: '1\u00002' },
     eligibility: {
       status: 'eligible' as const,
       baseRepo: '/repo/a',
@@ -102,10 +102,11 @@ describe('worktreeEligibilityForTarget', () => {
     },
   };
 
-  it('只向同设备 + 同 cwd 暴露探测结果', () => {
+  it('只向同设备 + 同 cwd + 同探测代次暴露探测结果', () => {
     expect(worktreeEligibilityForTarget(snapshot, {
       deviceId: 'dev-a',
       workingDir: ' /repo/a ',
+      probeGeneration: '1\u00002',
     })).toEqual(snapshot.eligibility);
   });
 
@@ -113,10 +114,25 @@ describe('worktreeEligibilityForTarget', () => {
     expect(worktreeEligibilityForTarget(snapshot, {
       deviceId: 'dev-a',
       workingDir: '/repo/b',
+      probeGeneration: '1\u00002',
     })).toEqual({ status: 'probing' });
     expect(worktreeEligibilityForTarget(snapshot, {
       deviceId: 'dev-b',
       workingDir: '/repo/a',
+      probeGeneration: '1\u00002',
+    })).toEqual({ status: 'probing' });
+  });
+
+  it('同设备和目录重连重探时首帧同步回落 probing', () => {
+    expect(worktreeEligibilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: '/repo/a',
+      probeGeneration: '2\u00002',
+    })).toEqual({ status: 'probing' });
+    expect(worktreeEligibilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: '/repo/a',
+      probeGeneration: '1\u00003',
     })).toEqual({ status: 'probing' });
   });
 });

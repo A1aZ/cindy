@@ -1077,11 +1077,12 @@ export default function NewRemoteSessionScreen() {
   );
   const WorkspaceIcon = draft.workspaceKind === 'dialogue' ? MessageCircle : Folder;
   const agentLabel = mobileAgentLabel(draft.agentKind);
-  // effect 在 commit 后才会把旧探测结果重置为 probing；render 期先按设备 + cwd 同步
-  // 对齐 target，切项目/设备后立即创建也拿不到上一仓库的 baseRepo/sourceBranch。
+  // effect 在 commit 后才会把旧探测结果重置为 probing；render 期先按设备 + cwd +
+  // 连接代次同步对齐 target，切项目/设备或同目标重连后立即创建也拿不到旧结果。
   const worktreeTarget = {
     deviceId: selectedDeviceId ?? '',
     workingDir: draft.workspaceKind === 'project' ? draft.workingDir.trim() : '',
+    probeGeneration: `${connectionEpoch}\u0000${presenceVersion}`,
   };
   worktreeBranchTargetRef.current = worktreeTarget;
   const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, worktreeTarget);
@@ -2175,7 +2176,11 @@ export default function NewRemoteSessionScreen() {
   useEffect(() => {
     const cwd = draft.workspaceKind === 'project' ? draft.workingDir.trim() : '';
     const seq = ++worktreeDetectSeqRef.current;
-    const target = { deviceId: selectedDeviceId ?? '', workingDir: cwd };
+    const target = {
+      deviceId: selectedDeviceId ?? '',
+      workingDir: cwd,
+      probeGeneration: `${connectionEpoch}\u0000${presenceVersion}`,
+    };
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const probingEligibility: NewSessionWorktreeEligibility = { status: 'probing' };

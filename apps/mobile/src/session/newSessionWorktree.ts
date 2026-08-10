@@ -40,9 +40,14 @@ export type NewSessionWorktreeEligibility =
   | { status: 'unsupported' }
   | { status: 'detect-failed' };
 
-export interface NewSessionWorktreeProbeTarget {
+export interface NewSessionWorktreeBranchTarget {
   deviceId: string;
   workingDir: string;
+}
+
+export interface NewSessionWorktreeProbeTarget extends NewSessionWorktreeBranchTarget {
+  /** 设备连接/在线存在变化时递增；同目录旧探测结果不能跨 generation 复用。 */
+  probeGeneration: string;
 }
 
 /** 探测结果与发起时的设备/目录绑定，防切换目标后的首帧误用上一仓库结果。 */
@@ -55,7 +60,7 @@ export interface NewSessionWorktreeProbeSnapshot {
 
 /** 用户显式选择的源分支只属于发起选择时的设备 + 工作目录，不得跨目标复用。 */
 export interface NewSessionWorktreeBranchSelectionSnapshot {
-  target: NewSessionWorktreeProbeTarget;
+  target: NewSessionWorktreeBranchTarget;
   sourceBranch: string;
 }
 
@@ -63,8 +68,8 @@ export interface NewSessionWorktreeBranchSelectionSnapshot {
 export function shouldAcceptWorktreeBranchListResult(input: {
   requestSeq: number;
   latestSeq: number;
-  requestTarget: NewSessionWorktreeProbeTarget;
-  latestTarget: NewSessionWorktreeProbeTarget;
+  requestTarget: NewSessionWorktreeBranchTarget;
+  latestTarget: NewSessionWorktreeBranchTarget;
 }): boolean {
   return input.requestSeq === input.latestSeq
     && input.requestTarget.deviceId === input.latestTarget.deviceId
@@ -72,8 +77,9 @@ export function shouldAcceptWorktreeBranchListResult(input: {
 }
 
 /**
- * 只向当前选择暴露同 target 的结果。React effect 要到 commit 后才会把 state 重置为
- * probing；render 阶段先做这道同步 fence，用户切项目/设备后立即创建也不会拿旧 baseRepo。
+ * 只向当前选择与连接代次暴露同 target 的结果。React effect 要到 commit 后才会把 state
+ * 重置为 probing；render 阶段先做这道同步 fence，用户切项目/设备或同目标重连后立即创建
+ * 也不会拿旧资格。
  */
 export function worktreeEligibilityForTarget(
   snapshot: NewSessionWorktreeProbeSnapshot | null,
@@ -83,6 +89,7 @@ export function worktreeEligibilityForTarget(
     !snapshot
     || snapshot.target.deviceId !== target.deviceId
     || snapshot.target.workingDir.trim() !== target.workingDir.trim()
+    || snapshot.target.probeGeneration !== target.probeGeneration
   ) {
     return { status: 'probing' };
   }
@@ -96,7 +103,7 @@ export function worktreeEligibilityForTarget(
  */
 export function worktreeSourceBranchForTarget(
   snapshot: NewSessionWorktreeBranchSelectionSnapshot | null,
-  target: NewSessionWorktreeProbeTarget,
+  target: NewSessionWorktreeBranchTarget,
   eligibility: NewSessionWorktreeEligibility,
 ): string {
   if (

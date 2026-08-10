@@ -1942,6 +1942,7 @@ describe('new session worktree wiring (source locks)', () => {
     expect(newSource).toContain('const worktreeTarget = {');
     expect(newSource).toContain('deviceId: selectedDeviceId ??');
     expect(newSource).toContain('worktreeEligibilityForTarget(worktreeProbe, worktreeTarget)');
+    expect(newSource).toContain('probeGeneration: `${connectionEpoch}\\u0000${presenceVersion}`');
     expect(newSource).toContain('worktreeSourceBranchFromPreference(');
     expect(newSource).toContain('shouldAcceptWorktreeBranchListResult({');
     expect(newSource).toContain('sourceBranch: worktreeIntent.sourceBranch,');

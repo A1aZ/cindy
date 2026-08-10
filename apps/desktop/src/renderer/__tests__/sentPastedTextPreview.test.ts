@@ -34,9 +34,12 @@ import {
 import type { PastedTextRange } from '@/lib/imageRef';
 
 const sourcePath = resolve(__dirname, '..', 'components', 'chat', 'UserMessage.tsx');
-const source = readFileSync(sourcePath, 'utf8');
+// Windows 检出会把 .tsx 变成 CRLF(.gitattributes 只对 .sh/.mjs 等固定 LF),下面的
+// 源码断言里有匹配裸 \n 的地方,不归一化就只在 Windows 上红。与本目录其它源码扫描
+// 用例(collabEntryPolicy / controlledBannerPlacement 等)同一约定。
+const source = readFileSync(sourcePath, 'utf8').replace(/\r\n/g, '\n');
 
-const LOCALES = ['zh-CN', 'en', 'ja', 'ko'] as const;
+const LOCALES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko'] as const;
 
 /** 440 行日志的最小可测替身:行数足够撞穿收起阈值。 */
 function makeLog(lines: number): string {
@@ -173,16 +176,16 @@ describe('UserMessage pasted-text chip wiring', () => {
   });
 
   it('S3 测量镜像与收起态渲染共用同一份投影正文', () => {
-    expect(source).toContain('mayExceedVisualLineThreshold(collapseMeasureBody, collapseThreshold)');
+    expect(source).toContain(
+      'mayExceedVisualLineThreshold(collapseMeasureBody, collapseThreshold)',
+    );
     expect(source).toContain(
       'useUserMessageAutoCollapse(collapseMeasureBody, collapseMeasureEnabled, collapseThreshold)',
     );
     // 测量镜像(独立 JSX 表达式)。
     expect(source.match(/\{collapseMeasureBody\}/g)?.length).toBe(1);
     // 收起态正文使用同一套静态 chip renderer,不再把投影纯文本直接塞进正文。
-    expect(source).toMatch(
-      /longMessageCollapsed\s*\n\s*\? renderContent\(\n\s*displayBubbleBody,/,
-    );
+    expect(source).toMatch(/longMessageCollapsed\s*\n\s*\? renderContent\(\n\s*displayBubbleBody,/);
     expect(source).toContain('bubbleAgentReferences,\n                              false,');
     // 偏移只在 bubbleBody 与 ghostBody 同源时才折叠(引用交错的消息保持原文测量)。
     expect(source).toContain('bubbleBody === ghostBody');

@@ -39,6 +39,7 @@ import type {
   Effort,
   PermissionMode,
   Session,
+  TurnContinuationState,
 } from '@cindy/maker-core';
 import { clampEffortToSupported } from '@cindy/model-providers';
 import type {
@@ -152,7 +153,6 @@ export const QUEUED_DISPATCH_SUSPEND_GAP_MS = 30_000;
  * 收尾 —— 宁可发一条中间态通知,不让 run 永久挂起。正常等待不会误触发:subagent
  * 运行中会周期性上报 task_progress,每个事件都刷新计时。
  */
-export const BG_TASK_IDLE_FALLBACK_MS = 10 * 60_000;
 /** terminal error 后紧随的同轮 done 配对窗口；自动续跑的最短退避远大于它。 */
 const INTERRUPTED_ERROR_DONE_FALLBACK_MS = 250;
 
@@ -266,11 +266,15 @@ export interface MakerScheduleRunnerDeps {
     defaultEffort: string | null;
     supportsFastMode: boolean;
   } | null>;
-  /** Pi 空模型的实时默认路由；model/providerId 必须来自同一连接来源快照。 */
+  /**
+   * Headless 默认路由的实时快照。Pi 空模型用它成对解析 model/providerId；
+   * Claude fresh session 传 modelId，把隐式来源物化为真实 provider，避免凭证 fallback。
+   */
   resolveDefaultModelRoute?: (
     agent: AgentKind,
     preferredProviderId?: string | null,
-  ) => Promise<{ model: string; providerId: string } | null>;
+    modelId?: string,
+  ) => Promise<{ model: string; providerId: string | null; catalogKnown?: boolean } | null>;
 }
 
 /**
@@ -700,19 +704,50 @@ export class MakerScheduleRunner implements ScheduleRunner {
         : undefined;
     const explicitProviderId = schedule.providerId?.trim() ? schedule.providerId.trim() : null;
     const defaultRouteProviderId = explicitProviderId ?? (isHeartbeat ? heartbeatProviderId : null);
-    const dynamicDefaultRoute =
-      !rawModel?.trim() && effectiveAgentKind === 'pi'
-        ? ((await this.deps.resolveDefaultModelRoute?.(
-            effectiveAgentKind,
-            defaultRouteProviderId,
-          )) ?? null)
-        : null;
+    const modelHint = rawModel?.trim() ? rawModel : defaultModelFor(effectiveAgentKind);
+    // Fresh Claude schedules must freeze the same provider rail the UI would use for this model.
+    // Leaving providerId null delegates credential selection to the legacy auth fallback, which can
+    // silently choose the Cindy gateway even when the only usable source is an Anthropic subscription.
+    const shouldMaterializeFreshClaudeProvider =
+      !isHeartbeat && effectiveAgentKind === 'claude-code' && !explicitProviderId;
+    let dynamicDefaultRoute: {
+      model: string;
+      providerId: string | null;
+      catalogKnown?: boolean;
+    } | null = null;
+    if (!modelHint && effectiveAgentKind === 'pi') {
+      dynamicDefaultRoute =
+        (await this.deps.resolveDefaultModelRoute?.(
+          effectiveAgentKind,
+          defaultRouteProviderId,
+        )) ?? null;
+    } else if (shouldMaterializeFreshClaudeProvider) {
+      dynamicDefaultRoute =
+        (await this.deps.resolveDefaultModelRoute?.(
+          effectiveAgentKind,
+          defaultRouteProviderId,
+          modelHint,
+        )) ?? null;
+    }
     const model = rawModel?.trim()
       ? rawModel
       : (dynamicDefaultRoute?.model ?? defaultModelFor(effectiveAgentKind));
     if (!model) {
       throw new Error('schedule route unavailable: Pi has no connected model source');
     }
+    if (
+      shouldMaterializeFreshClaudeProvider &&
+      this.deps.resolveDefaultModelRoute &&
+      (!dynamicDefaultRoute ||
+        (dynamicDefaultRoute.providerId === null && dynamicDefaultRoute.catalogKnown !== false))
+    ) {
+      throw new Error(
+        `schedule route unavailable: Claude Code has no connected source for model "${model}"`,
+      );
+    }
+    const materializedDefaultProviderId = shouldMaterializeFreshClaudeProvider
+      ? (dynamicDefaultRoute?.providerId ?? null)
+      : null;
     const permissionMode = defaultPermissionModeForSchedule();
     // fastMode 对 Codex / Pi 生效（claude-code agent 忽略此字段）；Claude 恒不传，
     // 确保「不影响 Claude」。heartbeat 沿用 session meta 里的 fast 态，非 heartbeat 取 schedule。
@@ -794,7 +829,11 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 隐式改道(reroutedProviderId)也是本次 fire 的落地来源:跨凭证家族的改道
       // (如停用 XD 默认 → 改道 Anthropic)若不进本判定,会复用旧凭证 spawn 的
       // live session,请求仍走旧轨道或直接鉴权失败(PR #744 review 第二十三轮)。
-      const nextProviderId = explicitProviderId ?? reroutedProviderId ?? currentProviderId;
+      const nextProviderId =
+        explicitProviderId ??
+        reroutedProviderId ??
+        materializedDefaultProviderId ??
+        currentProviderId;
       if (
         liveSession &&
         shouldCloseSessionForCredentialSwitch({
@@ -977,8 +1016,9 @@ export class MakerScheduleRunner implements ScheduleRunner {
     //   - heartbeat 且留空 → 沿用绑定会话的来源:hydrate 只在内存无条目时写,**不覆盖**
     //     用户在聊天里刚切的更新值(runner 绕过了 register 的 hydrate funnel,冷 resume
     //     时内存为空,这一步把 DB 里的 provider_id 补回来 → honor 聊天所选来源)。
-    //   - 非 heartbeat 且留空 → fresh session 保持默认(null)→ 原生默认路由,不动它。
-    // null 的字节级不变性见 session-provider-store 契约;空值全程不进新分支(no-break)。
+    //   - 非 heartbeat Claude 且留空 → 把实时解析出的默认来源显式写入，确保 spawn
+    //     credential mode、proxy 路由、coordinator baseline 与落库使用同一个 provider。
+    //   - 其它非 heartbeat 且留空 → 保持既有默认路由语义。
     if (explicitProviderId) {
       setSessionProvider(session.id, explicitProviderId);
     } else if (reroutedProviderId) {
@@ -987,6 +1027,8 @@ export class MakerScheduleRunner implements ScheduleRunner {
       // 心跳生效,否则照旧经停用的隐式默认派发(PR #744 review 第十四轮)。fresh
       // spawn 时与 opts.providerId 幂等。
       setSessionProvider(session.id, reroutedProviderId);
+    } else if (materializedDefaultProviderId) {
+      setSessionProvider(session.id, materializedDefaultProviderId);
     } else if (isHeartbeat) {
       hydrateSessionProvider(session.id, heartbeatProviderId);
     }
@@ -1029,10 +1071,10 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // 下次 fire 读到的 meta.model 必须跟实际运行一致（4.4.1 已 setModel）。
         // 同 effort: 复用路径 setModel 失败时跳过, 留给下次 fire 重试。
         model: heartbeatModelChanged && modelSwitchApplied ? model : undefined,
-        // 任务级显式选了来源时落 sessions.provider_id —— 让聊天里打开这个会话时
-        // 来源 picker 与下次 fire / 冷 resume 的路由一致(register hydrate funnel 读它)。
-        // 留空(沿用默认 / 沿用会话)时不写,保留会话自己的 provider_id 不动(no-break)。
-        providerId: explicitProviderId ?? undefined,
+        // 显式来源或 fresh Claude 物化出的默认来源都要落 sessions.provider_id ——
+        // 聊天 picker、下次 heartbeat / 冷 resume 与本轮真实凭证/endpoint 才不会漂移。
+        // heartbeat 留空时仍不写,保留绑定会话自己的 provider_id。
+        providerId: explicitProviderId ?? materializedDefaultProviderId ?? undefined,
         // 回退分配了对话工作区的会话按 'dialogue' 落库 —— 侧边栏才会归入
         // "对话"分组(覆盖存量 workspaceKind='project' 但无目录的旧任务)。
         workspaceKind: !isHeartbeat
@@ -2178,37 +2220,37 @@ export class MakerScheduleRunner implements ScheduleRunner {
    * done 时 buffer 即这一轮的最终输出(与飞书正常对话气泡显示同源),
    * 用于 schedule 完成通知 / 历史回顾。
    *
-   * 后台 subagent 感知:agent 派了后台任务(agent_task_update status=running)时,
-   * 主 turn 的 done 只是"等待中"的中间态 —— subagent 完成后 SDK 会自动续 turn 产出
-   * 真正的最终 summary。因此 done 时若仍有在途任务,不定格、继续听,直到某个 done
-   * 到来时在途任务集合为空才收尾(text 的 isFinal 替换语义保证 buffer 最终是最后
-   * 一个 turn 的 canonical 文本)。异常保护见 BG_TASK_IDLE_FALLBACK_MS。
+   * 自动续 turn 感知:done 到达时由 provider 权威回答后面是否还会自动续开下一
+   * turn。只有 Claude 的 wake 型后台任务具备这种语义；agent_task_update 是 UI
+   * 任务卡事件，Codex / Pi 子代理、local_bash 等不能阻塞 run 收口。若 provider
+   * 明确仍有 continuation,继续听到下一次 done(text 的 isFinal 替换语义保证
+   * buffer 最终是最后一个 turn 的 canonical 文本)。会话彻底死亡时按失败收口；
+   * 不再按静默时长猜完成。
    */
   private createTurnCompletionWaiter(
-    session: Pick<Awaited<ReturnType<Maker['createSession']>>, 'id' | 'onEvent'>,
+    session: Pick<Awaited<ReturnType<Maker['createSession']>>, 'id' | 'onEvent'> & {
+      beginTurnContinuationWait?: (continuationId?: number) => TurnContinuationState | null;
+      onTurnContinuationChange?: (
+        listener: (continuationId: number, state: TurnContinuationState) => void,
+      ) => () => void;
+      onStatusChange?: (
+        listener: (status: 'active' | 'aborting' | 'closed' | 'error') => void,
+      ) => () => void;
+    },
     options: TurnCompletionWaiterOptions,
   ): TurnCompletionWaiter {
     let assistantText = '';
     let stopped = false;
     let stopListeningTurn: (() => void) | undefined;
     const turnFinished = new Promise<void>((resolve, reject) => {
-      /** 在途后台任务 id 集合(running 加入,completed/failed/stopped 移除)。 */
-      const runningBgTasks = new Set<string>();
-      /** 已收到过 done 但因在途任务未收尾 —— 此状态下任何事件都会刷新兜底计时。 */
-      let waitingForBgTasks = false;
-      let bgFallbackTimer: NodeJS.Timeout | undefined;
       let interruptedDoneTimer: NodeJS.Timeout | undefined;
       let ignorePairedInterruptedDone = false;
       let pendingSettleUnsub: (() => void) | undefined;
+      let pendingContinuationUnsub: (() => void) | undefined;
       let autoResumeFailureUnsub: (() => void) | undefined;
       let off: () => void = () => undefined;
+      let offStatus: () => void = () => undefined;
       let settled = false;
-      const clearBgFallbackTimer = (): void => {
-        if (bgFallbackTimer) {
-          clearTimeout(bgFallbackTimer);
-          bgFallbackTimer = undefined;
-        }
-      };
       const clearInterruptedDoneTimer = (): void => {
         if (interruptedDoneTimer) {
           clearTimeout(interruptedDoneTimer);
@@ -2221,13 +2263,15 @@ export class MakerScheduleRunner implements ScheduleRunner {
           options.origin.runId,
         ) === true;
       const cleanup = (): void => {
-        clearBgFallbackTimer();
         clearInterruptedDoneTimer();
         pendingSettleUnsub?.();
         pendingSettleUnsub = undefined;
+        pendingContinuationUnsub?.();
+        pendingContinuationUnsub = undefined;
         autoResumeFailureUnsub?.();
         autoResumeFailureUnsub = undefined;
         off();
+        offStatus();
         stopListeningTurn = undefined;
       };
       const finish = (): void => {
@@ -2242,28 +2286,19 @@ export class MakerScheduleRunner implements ScheduleRunner {
         cleanup();
         reject(err);
       };
-      const armBgFallbackTimer = (): void => {
-        clearBgFallbackTimer();
-        bgFallbackTimer = setTimeout(() => {
-          this.deps.logger.warn?.(
-            '[runner] background task events went silent; finalizing run with current buffer',
-            { sessionId: session.id, pendingTasks: [...runningBgTasks] },
-          );
-          finish();
-        }, BG_TASK_IDLE_FALLBACK_MS);
-        bgFallbackTimer.unref?.();
-      };
+      offStatus = session.onStatusChange?.((status) => {
+        if (status !== 'closed' && status !== 'error') return;
+        fail(new Error(`scheduler session ended without a terminal event (${status})`));
+      }) ?? (() => undefined);
       off = session.onEvent((ev: AgentEvent) => {
         // 一个绑定会话可能在自动续跑退避期间被用户接管。waiter 只消费本 run
         // 的 scheduler turn（初始派发与 autoResume 都保留同一 origin）；其它 run、
         // 手动消息与 /compact 的事件既不能刷新本 run 的存活时间，也不能改写结果。
-        // 生产 Session 会给本 turn 的事件补全 origin，并在终态后清空。终态之后只有
-        // 已明确进入 background-task 等待态的 standalone 事件仍属于本 run；其它
-        // 无 origin 事件可能是旧 turn 的迟到 done、用户 turn 或 auto-compact，不能
-        // 刷新存活时间、写入结果或提前收口。
+        // 生产 Session 会给本 turn 的事件补全 origin。无 origin 事件可能是旧 turn
+        // 的迟到 done、用户 turn 或 auto-compact，不能刷新存活时间、写入结果或提前收口。
         const eventOrigin = ev.turnOrigin;
         if (!eventOrigin) {
-          if (options.requireTurnOrigin && !waitingForBgTasks) return;
+          if (options.requireTurnOrigin) return;
         } else if (
           eventOrigin.kind !== 'scheduler' ||
           eventOrigin.scheduleId !== options.origin.scheduleId ||
@@ -2275,14 +2310,7 @@ export class MakerScheduleRunner implements ScheduleRunner {
         // "多久没有新反馈",不是"总共跑了多久")。放在最前面:后面每个分支都可能
         // return,漏掉任一路径都会让守卫少收到进展信号。
         options.onProgress?.();
-        // 等待后台任务期间,任何事件都说明会话还活着 → 刷新兜底计时
-        if (waitingForBgTasks) armBgFallbackTimer();
         if (ev.type === 'agent_task_update') {
-          const data = ev.data as { taskId?: string; status?: string } | null;
-          if (data && typeof data.taskId === 'string') {
-            if (data.status === 'running') runningBgTasks.add(data.taskId);
-            else runningBgTasks.delete(data.taskId);
-          }
           return;
         }
         if (ev.type === 'text') {
@@ -2307,7 +2335,42 @@ export class MakerScheduleRunner implements ScheduleRunner {
           // (或弹耗尽横幅)。不 finish——等续跑 turn 的 done 或守卫 settle 通知。
           // settle 通知覆盖守卫决策为非续跑的所有路径(skip/exhausted/send 失败),
           // 否则 turnFinished 永不 resolve,run 永久挂起。
-          if ((ev.data as { silentStop?: boolean } | null | undefined)?.silentStop === true) {
+          const isSilentStopDone =
+            (ev.data as { silentStop?: boolean } | null | undefined)?.silentStop === true;
+          const continuationId = ev.turnContinuationId;
+          const continuationState = continuationId === undefined
+            ? null
+            : session.beginTurnContinuationWait?.(continuationId) ?? null;
+          if (continuationState === 'cancelled') {
+            // Provider already observed an explicit stop/teardown. Session
+            // gets a separate ordered boundary; this run can settle now.
+            finish();
+            return;
+          }
+          if (continuationState === 'awaiting' || continuationState === 'active') {
+            // 当前 SDK turn 已结束，但 provider 确认 wake 任务会自动续开下一
+            // turn —— 不定格，等待续 turn 自己的 done。
+            pendingContinuationUnsub?.();
+            pendingContinuationUnsub = session.onTurnContinuationChange?.(
+              (changedContinuationId, state) => {
+                if (
+                  state !== 'cancelled' ||
+                  (continuationId !== undefined && changedContinuationId !== continuationId)
+                ) {
+                  return;
+                }
+                pendingContinuationUnsub?.();
+                pendingContinuationUnsub = undefined;
+                finish();
+              },
+            );
+            this.deps.logger.info?.(
+              '[runner] turn done with pending provider continuation; deferring run finalization',
+              { sessionId: session.id },
+            );
+            return;
+          }
+          if (isSilentStopDone) {
             this.deps.logger.info?.(
               '[runner] silent-stop done deferred; waiting for auto-resume or settled',
               { sessionId: session.id },
@@ -2322,16 +2385,6 @@ export class MakerScheduleRunner implements ScheduleRunner {
                 finish();
               }
             });
-            return;
-          }
-          if (runningBgTasks.size > 0) {
-            // 主 turn 结束但后台 subagent 还在跑 —— 不定格,等续 turn 的 done
-            waitingForBgTasks = true;
-            armBgFallbackTimer();
-            this.deps.logger.info?.(
-              '[runner] turn done with background tasks in flight; deferring run finalization',
-              { sessionId: session.id, pendingTasks: [...runningBgTasks] },
-            );
             return;
           }
           finish();

@@ -49,6 +49,7 @@ import { throwIpcError } from './utils/ipcValidate';
 import { noteExpectedExit } from './startup-diagnostics';
 import { buildMacOSUpdateScript } from './updateScriptMacOS';
 import { disposeAndroidAdb } from './mcp-integrations/android';
+import { abortIOSSimulatorOperationsForExit } from './mcp-integrations/ios-simulator-exit';
 import { getGhostNodeRuntimeBroker } from './cindy-brain/index';
 import { cleanOldUpdateFiles } from './updateArtifacts';
 
@@ -243,7 +244,6 @@ async function getAutoRelaunchBlockReasonForCurrentState(): Promise<AutoRelaunch
  * launched, so there is no in-flight agent turn / schedule / active session to
  * interrupt. We therefore relaunch into the updater as soon as a patch is ready,
  * gating only on the essentials:
- *   - `disabled`     — user turned the auto-update relaunch switch off; respect it.
  *   - `dev`          — the native updater replaces the *installed* app; it can't
  *                      sanely update a dev / electron-forge instance, so never
  *                      auto-launch it there.
@@ -255,7 +255,6 @@ async function getAutoRelaunchBlockReasonForCurrentState(): Promise<AutoRelaunch
  * full policy via getAutoRelaunchBlockReasonForCurrentState.)
  */
 async function getStartupRelaunchBlockReason(): Promise<AutoRelaunchBlockReason | null> {
-  if (!readAutoUpdateSettings().autoRelaunchOnIdle) return 'disabled';
   if (isDev()) return 'dev';
   if (currentStatus !== 'ready') return 'not-ready';
   if (isRelaunching || autoRelaunchInProgress) return 'relaunching';
@@ -265,7 +264,7 @@ async function getStartupRelaunchBlockReason(): Promise<AutoRelaunchBlockReason 
 /**
  * Startup update checks apply a staged patch as soon as it is ready (the historic
  * behavior), gated only by the lightweight startup policy above. Whenever that
- * policy blocks (auto-update off / dev / not ready / already relaunching) the
+ * policy blocks (dev / not ready / relaunching) the
  * patch stays staged and the app enters normally, surfacing the UpdateBanner.
  */
 async function buildStartupReadyReply(version: string | undefined): Promise<{
@@ -1017,6 +1016,9 @@ function forceQuit(): void {
   // 绕过 onQuit 链意味着 disposeAndroidAdb 不会被自动调用——显式 fire-and-forget
   // 收掉自带 adb server,避免它锁住安装目录阻碍 updater 替换文件。
   disposeAndroidAdb();
+  // build_app uses detached process groups, so parent exit does not reliably
+  // reap xcodebuild. Abort synchronously before process.exit bypasses Host dispose.
+  abortIOSSimulatorOperationsForExit();
   // Node 子进程同理——before-quit 的 destroyAll 不会触发,这里同步 kill。
   try { getGhostNodeRuntimeBroker().destroyAll(); } catch { /* best-effort */ }
   for (const win of BrowserWindow.getAllWindows()) {

@@ -70,14 +70,24 @@ import { ChatImageView } from './ChatImageView';
 import { TextLightbox } from './TextLightbox';
 import { ToolPayloadLightbox } from './ToolPayloadLightbox';
 import { MessageActionBar } from './MessageActionBar';
+import { shareSelectionStore } from './shareSelectionStore';
 import { ErrorMessageCard } from './ErrorMessageCard';
 import { useForkAtMessage, textToTiptapDoc } from './useForkAtMessage';
 import { useDeleteMessage } from './useDeleteMessage';
-import { useSessionNavigationMode } from '@/features/cc-agent/embeddedSessionNavigation';
+import {
+  isInteractiveSessionNavigationMode,
+  useSessionNavigationMode,
+} from '@/features/cc-agent/embeddedSessionNavigation';
 import { RewindPreviewDialog } from './RewindPreviewDialog';
 import { UserMessageEditBox } from './UserMessageEditBox';
 import HookTaskCard from './HookTaskCard';
 import { useFileChipContextMenu } from './useFileChipContextMenu';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   AUTOMATION_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
   LONG_USER_MESSAGE_VISUAL_LINE_THRESHOLD,
@@ -92,6 +102,7 @@ import { getStickySessionDeviceId } from '@/features/device-link/stickySessionOr
 import { insertSessionLinkIntoComposer } from '@/lib/composerActionsBus';
 import { MENTION_TOKEN_SPLIT, parseMentionToken } from '@/lib/mentionRefFormat';
 import { parseGhostCommandWord, splitGhostDirective } from '@/cindy-brain/ghostCommand';
+import { splitHostCapabilityDirective } from '@/cindy-brain/hostCapabilityInvocation';
 import {
   GhostFulfillmentContext,
   GhostSummonCard,
@@ -101,10 +112,7 @@ import { AutomationOriginBadge } from './AutomationOriginBadge';
 import { UserMessageUrlLink } from './UserMessageUrlLink';
 import { InlineReferenceChip } from './InlineReferenceChip';
 import { QuoteChip } from './QuoteChip';
-import {
-  SentAgentReferenceChip,
-  sentAgentReferenceDisplayLabel,
-} from './SentAgentReferenceChip';
+import { SentAgentReferenceChip, sentAgentReferenceDisplayLabel } from './SentAgentReferenceChip';
 import { parseOrcaCommunicationContent, resolveUserDisplayText } from './userMessageDisplayText';
 
 /**
@@ -236,6 +244,118 @@ function UserFileChip({
         className="relative top-[-1px] -my-[1px] max-w-[min(240px,55vw)] align-middle"
       />
       {ctxMenu.menu}
+    </>
+  );
+}
+
+/**
+ * UserAttachmentChip — 用户消息下方的文件附件 chip(与正文里的 `@file` 引用
+ * chip 是两种呈现;此前只有 onClick,右键无反应,与 UserFileChip 交互不一致,
+ * Issue #1811 讨论中实捉)。左键保持既有行为:安全降级附件走另存流程,其余
+ * 文本预览 / 交系统默认应用。右键:
+ *   - 普通附件 → 共享文件 chip 菜单(复制 / 路径 / 定位等,与 UserFileChip 同款);
+ *   - 安全降级附件 → 仅「另存为…」单项。受控 `.bin` 副本的路径不该经「复制
+ *     文件路径 / 打开所在目录」外泄,打开类动作更会绕过降级本身。
+ */
+function UserAttachmentChip({
+  file,
+  onOpenTextPreview,
+}: {
+  file: { name: string; path: string };
+  /** 文本预览分支的回调:父组件记录 chip 元素(关闭预览后焦点复位)并开 lightbox。 */
+  onOpenTextPreview: (chip: HTMLElement) => void;
+}) {
+  const { t } = useTranslation();
+  const sessionFileCtx = useChatSessionFile();
+  const downloadOnly = isSafetyDowngradedAttachment(file);
+  // Rules-of-hooks:两个菜单 hook/状态都无条件建,按 downloadOnly 选用其一。
+  const ctxMenu = useFileChipContextMenu({
+    getAbsPath: () => file.path,
+    canOpenInBrowser: isBrowserOpenablePath(file.path),
+  });
+  const [saveMenuPos, setSaveMenuPos] = useState<{ x: number; y: number } | null>(null);
+
+  const saveOnlyMenu = (
+    <DropdownMenu
+      open={saveMenuPos !== null}
+      onOpenChange={(open) => {
+        if (!open) setSaveMenuPos(null);
+      }}
+    >
+      <DropdownMenuTrigger asChild>
+        <span
+          aria-hidden
+          data-fixed-menu-anchor
+          style={{
+            position: 'fixed',
+            left: saveMenuPos?.x ?? 0,
+            top: saveMenuPos?.y ?? 0,
+            width: 0,
+            height: 0,
+            pointerEvents: 'none',
+          }}
+        />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" sideOffset={2} onClick={(e) => e.stopPropagation()}>
+        <DropdownMenuItem
+          onClick={() => {
+            setSaveMenuPos(null);
+            void saveChatAttachmentWithToasts(sessionFileCtx, file);
+          }}
+        >
+          <Download className="mr-2 h-4 w-4" />
+          {t('chat.media.saveAs')}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={
+          downloadOnly ? t('chat.userMessage.saveAttachmentAs', { name: file.name }) : undefined
+        }
+        onClick={async (e) => {
+          if (downloadOnly) {
+            await saveChatAttachmentWithToasts(sessionFileCtx, file);
+            return;
+          }
+          const chip = e.currentTarget;
+          if (!(await shouldOpenTextLightboxForOrigin(sessionFileCtx, file.path))) return;
+          onOpenTextPreview(chip);
+        }}
+        onContextMenu={(e) => {
+          if (downloadOnly) {
+            e.preventDefault();
+            e.stopPropagation();
+            setSaveMenuPos({ x: e.clientX, y: e.clientY });
+            return;
+          }
+          ctxMenu.onContextMenu(e);
+        }}
+        className={cn(
+          'inline-flex items-center gap-1.5',
+          'h-7 px-2.5 py-1.5',
+          'rounded-[9999px]',
+          'bg-[var(--msg-user-bg)]',
+          'border border-[var(--msg-user-border)]',
+          'text-13 font-medium',
+          'text-[var(--msg-user-text)]',
+          'hover:bg-[var(--cmd-palette-item-hover)]',
+          'transition-colors cursor-pointer',
+          'max-w-[280px]',
+        )}
+      >
+        {downloadOnly ? (
+          <Download size={14} className="shrink-0 text-[var(--msg-user-text)]" />
+        ) : (
+          <FileText size={14} className="shrink-0 text-[var(--msg-user-text)]" />
+        )}
+        <span className="truncate">{file.name}</span>
+      </button>
+      {downloadOnly ? saveOnlyMenu : ctxMenu.menu}
     </>
   );
 }
@@ -431,14 +551,32 @@ function renderContentWithoutPastedText(
         // A real mention is always preceded by whitespace or sits at line start.
         const prev = parts[pi - 1];
         if (prev && prev.length > 0 && !/\s$/.test(prev)) {
-          nodes.push(...renderTextWithLinks(part, `${li}-${pi}`, onImageClick, sessionId, sessionReferences, interactive));
+          nodes.push(
+            ...renderTextWithLinks(
+              part,
+              `${li}-${pi}`,
+              onImageClick,
+              sessionId,
+              sessionReferences,
+              interactive,
+            ),
+          );
           continue;
         }
 
         // Only render as chip if it looks like a real path
         if (!looksLikePath(ref)) {
           // Not a path — render as plain text
-          nodes.push(...renderTextWithLinks(part, `${li}-${pi}`, onImageClick, sessionId, sessionReferences, interactive));
+          nodes.push(
+            ...renderTextWithLinks(
+              part,
+              `${li}-${pi}`,
+              onImageClick,
+              sessionId,
+              sessionReferences,
+              interactive,
+            ),
+          );
           continue;
         }
 
@@ -499,7 +637,9 @@ function renderContentWithoutPastedText(
                   const result = await resolveLocalPathSmart(ref, workingDir);
                   if (result.status === 'multiple') {
                     toast.error(
-                      t('chat.markdownRenderer.duplicateFiles', { count: result.candidates.length }),
+                      t('chat.markdownRenderer.duplicateFiles', {
+                        count: result.candidates.length,
+                      }),
                     );
                     return;
                   }
@@ -521,7 +661,16 @@ function renderContentWithoutPastedText(
           );
         }
       } else {
-        nodes.push(...renderTextWithLinks(part, `${li}-${pi}`, onImageClick, sessionId, sessionReferences, interactive));
+        nodes.push(
+          ...renderTextWithLinks(
+            part,
+            `${li}-${pi}`,
+            onImageClick,
+            sessionId,
+            sessionReferences,
+            interactive,
+          ),
+        );
       }
     }
   }
@@ -733,8 +882,7 @@ export function renderContent(
           // 也无法选中复制,不能当作查看全文的唯一出口(issue #946)。
           {...(interactive && onPastedTextChipClick
             ? {
-                onClick: (event) =>
-                  onPastedTextChipClick(token.text, event.currentTarget),
+                onClick: (event) => onPastedTextChipClick(token.text, event.currentTarget),
               }
             : {})}
         />
@@ -800,7 +948,8 @@ export function UserMessage({
   // Capability gate: 没传 agentKind (调用方未升级) → 默认两者都允许 (兼容旧路径)
   // 传了 agentKind → 按 capabilities.fork/rewind.supported 决定 icon 显示
   // renderer 'cc' ↔ maker 'claude-code' 别名映射 (DB / Session 用 'cc', maker IPC 用 'claude-code')
-  const makerKind: MakerAgentKind = agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
+  const makerKind: MakerAgentKind =
+    agentKind === 'codex' || agentKind === 'pi' ? agentKind : 'claude-code';
   // device-link 远程会话:fork/rewind 能力按被控端读(本机会话 deviceId undefined,行为不变)。
   // 媒体来源(device/ssh)用于把附件/文件预览 URL 改写到 cindy-remote-media://(入方向媒体)。
   // 取自 ChatSessionFileContext(MessageStream 顶层订阅式构造,deviceId 迟到注册时
@@ -864,7 +1013,10 @@ export function UserMessage({
   // 对不上模板按普通文本原样显示)。copy / fork / rewind / 编辑预填全部用
   // 剥离后的正文——这些路径重发都走发送期再展开,带着旧指令会叠加双份。
   // orca / hook 消息不经意识展开,跳过解析。
-  const ghostSplit = orcaCommunication || hookSource ? null : splitGhostDirective(displayContent);
+  const ghostSplit =
+    orcaCommunication || hookSource
+      ? null
+      : (splitGhostDirective(displayContent) ?? splitHostCapabilityDirective(displayContent));
   const ghostDirective = ghostSplit?.directive ?? null;
   const ghostBody = ghostSplit?.body ?? displayContent;
   // quotesEncoded 消息按正文顺序解析全部引用块,支持引用与回复交错。
@@ -967,11 +1119,7 @@ export function UserMessage({
   const collapseMeasureBody = useMemo(
     () =>
       bubbleBody === ghostBody
-        ? projectSentInlinePlainText(
-            displayBubbleBody,
-            bubblePastedRanges,
-            bubbleAgentReferences,
-          )
+        ? projectSentInlinePlainText(displayBubbleBody, bubblePastedRanges, bubbleAgentReferences)
         : displayBubbleBody,
     [bubbleAgentReferences, bubbleBody, bubblePastedRanges, displayBubbleBody, ghostBody],
   );
@@ -1008,6 +1156,15 @@ export function UserMessage({
     insertSessionLinkIntoComposer({ targetSessionId: sessionId, href: messageDeepLink });
   }, [messageDeepLink, sessionId]);
 
+  // 分享为图片:进入选择模式并预选本条(入口那条天然该已勾选,省一次点击)。
+  const handleShareAsImage = useMemo(
+    () =>
+      sessionId && messageClientId
+        ? () => shareSelectionStore.enter(sessionId, messageClientId)
+        : undefined,
+    [messageClientId, sessionId],
+  );
+
   // fork-from-here: only wire when both sessionId + messageClientId are
   // present (older code paths that render UserMessage without these props
   // simply won't show the Fork button). 流程收敛在 useForkAtMessage —
@@ -1030,7 +1187,7 @@ export function UserMessage({
   // 同时按 capabilities.fork.supported gate (Codex 现支持; 未来若 agent 不支持自动隐藏)。
   const navigationMode = useSessionNavigationMode();
   const canFork =
-    navigationMode === 'route-owner' &&
+    isInteractiveSessionNavigationMode(navigationMode) &&
     Boolean(sessionId && messageClientId) &&
     !isFirstUserMessage &&
     forkSupported &&
@@ -1139,6 +1296,17 @@ export function UserMessage({
   // 重渲都重建,连带"等待停止接力" effect 无谓重跑(bot review 指出)。
   const exitEditing = useCallback(() => setEditing(false), []);
 
+  // 分享选择模式只克隆已发送消息的只读 DOM。仅在本条实际处于编辑态时订阅
+  // share store,避免让所有 user 消息都因选择模式切换而重渲染。
+  useEffect(() => {
+    if (!editing || !sessionId) return;
+    const exitWhenSharing = () => {
+      if (shareSelectionStore.isActive(sessionId)) exitEditing();
+    };
+    exitWhenSharing();
+    return shareSelectionStore.subscribe(exitWhenSharing);
+  }, [editing, exitEditing, sessionId]);
+
   // 编辑期间会话来了新消息(自动化任务注入等) → 本条不再是最后一条,继续
   // 发送会把那条新消息一起回退掉。直接退出编辑态(文本是从原消息预填的,
   // 退出无内容损失风险 —— 用户改到一半的文本被放弃,但这是极罕见路径,
@@ -1183,47 +1351,16 @@ export function UserMessage({
           hookSource ? 'justify-start' : 'justify-end',
         )}
       >
-        {files.map((f, idx) => {
-          const downloadOnly = isSafetyDowngradedAttachment(f);
-          return (
-            <button
-              key={`file-${idx}-${f.path}`}
-              type="button"
-              aria-label={
-                downloadOnly ? t('chat.userMessage.saveAttachmentAs', { name: f.name }) : undefined
-              }
-              onClick={async (e) => {
-                if (downloadOnly) {
-                  await saveChatAttachmentWithToasts(sessionFileCtx, f);
-                  return;
-                }
-                const chip = e.currentTarget;
-                if (!(await shouldOpenTextLightboxForOrigin(sessionFileCtx, f.path))) return;
-                activeFileChipRef.current = chip;
-                setTextLightboxFile({ path: f.path, name: f.name });
-              }}
-              className={cn(
-                'inline-flex items-center gap-1.5',
-                'h-7 px-2.5 py-1.5',
-                'rounded-[9999px]',
-                'bg-[var(--msg-user-bg)]',
-                'border border-[var(--msg-user-border)]',
-                'text-[13px] font-medium',
-                'text-[var(--msg-user-text)]',
-                'hover:bg-[var(--cmd-palette-item-hover)]',
-                'transition-colors cursor-pointer',
-                'max-w-[280px]',
-              )}
-            >
-              {downloadOnly ? (
-                <Download size={14} className="shrink-0 text-[var(--msg-user-text)]" />
-              ) : (
-                <FileText size={14} className="shrink-0 text-[var(--msg-user-text)]" />
-              )}
-              <span className="truncate">{f.name}</span>
-            </button>
-          );
-        })}
+        {files.map((f, idx) => (
+          <UserAttachmentChip
+            key={`file-${idx}-${f.path}`}
+            file={f}
+            onOpenTextPreview={(chip) => {
+              activeFileChipRef.current = chip;
+              setTextLightboxFile({ path: f.path, name: f.name });
+            }}
+          />
+        ))}
       </div>
     ) : null;
 
@@ -1269,7 +1406,7 @@ export function UserMessage({
               type="button"
               className={cn(
                 'flex w-full items-center gap-2 px-3 py-2 text-left',
-                'text-[13px] font-medium leading-none',
+                'text-13 font-medium leading-none',
                 'hover:bg-[var(--cmd-palette-item-hover)] transition-colors',
               )}
               aria-expanded={orcaExpanded}
@@ -1312,7 +1449,7 @@ export function UserMessage({
             {/* /goal 目标设定/更新:气泡上方右对齐渲一个徽标(不进气泡、不入 copyText)。 */}
             {goalBadge && (
               <span
-                className="inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium"
+                className="inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-11 font-medium"
                 style={{ backgroundColor: 'var(--surface-chip)', color: 'var(--text-secondary)' }}
               >
                 <Target size={11} strokeWidth={2} aria-hidden className="shrink-0" />
@@ -1421,7 +1558,8 @@ export function UserMessage({
                       <div
                         className={cn(
                           'min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]',
-                          longMessageCollapsed && (automationOrigin ? 'line-clamp-3' : 'line-clamp-10'),
+                          longMessageCollapsed &&
+                            (automationOrigin ? 'line-clamp-3' : 'line-clamp-10'),
                         )}
                       >
                         {quoteSegments.map((segment, index) =>
@@ -1498,7 +1636,8 @@ export function UserMessage({
                       <div
                         className={cn(
                           'whitespace-pre-wrap [overflow-wrap:anywhere]',
-                          longMessageCollapsed && (automationOrigin ? 'line-clamp-3' : 'line-clamp-10'),
+                          longMessageCollapsed &&
+                            (automationOrigin ? 'line-clamp-3' : 'line-clamp-10'),
                         )}
                       >
                         {longMessageCollapsed
@@ -1560,7 +1699,7 @@ export function UserMessage({
                         onClick={() => setLongMessageExpanded((expanded) => !expanded)}
                         className={cn(
                           'mt-2 inline-flex items-center gap-1 rounded-full px-1 py-0.5',
-                          'text-[12px] font-medium leading-5',
+                          'text-12 font-medium leading-5',
                           'text-[var(--msg-user-text)] opacity-65 transition-opacity',
                           'hover:opacity-100',
                           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--focus-ring-soft)]',
@@ -1607,6 +1746,7 @@ export function UserMessage({
                   hovered={hovered}
                   onFork={!isBlocked && canFork ? handleFork : undefined}
                   onAddToChat={!isBlocked && messageDeepLink ? handleAddToChat : undefined}
+                  onShareAsImage={handleShareAsImage}
                   onDelete={!isBlocked && sessionId && messageClientId ? handleDelete : undefined}
                   onEdit={canEdit ? handleEdit : undefined}
                   onRewind={!isBlocked && canRewind ? handleRewind : undefined}

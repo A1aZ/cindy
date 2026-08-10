@@ -1,6 +1,6 @@
 /**
  * Settings -> Personalization 的 Subagent 设置:默认模型(Claude Code / Codex)+
- * Codex 子代理护栏(总开关 / 并发上限 / 嵌套开关)。
+ * Codex 子代理护栏(总开关 / Cindy 策略 / 并发上限 / 嵌套开关)。
  *
  * main 进程 JSON store 是事实源;renderer 只展示并通过 IPC 提交覆盖值。
  * codex spawn 注入键的变更可能延迟生效(返回体 codexRestartDeferred=true 时
@@ -213,7 +213,7 @@ export function SubagentModelSection() {
   // Codex 三元组 (model, providerId, effort) 原子落库;「不指定」三键同清,
   // 不给 effort 留孤儿(IPC 层有意不强清 effort,见 shared 契约注释)。
   const setCodexModel = useCallback(
-    async (model: string | null, providerId: string | null) => {
+    async (model: string | null, providerId: string | null, reconciledEffort?: string) => {
       const current = settingsRef.current;
       if (!current) return;
       if (model === null) {
@@ -229,10 +229,16 @@ export function SubagentModelSection() {
       const rememberedEffort = nextProviderId
         ? getProviderModelEffort('codex', nextProviderId, model)
         : undefined;
-      const nextEffort = resolveCodexEffort(
-        model,
-        isCodexSubagentEffort(rememberedEffort) ? rememberedEffort : current.codexEffort,
-      );
+      // ModelSelector 已按目标来源行的 catalog/记忆解析出统一选择结果；优先消费它，
+      // 只有旧调用方未提供第三参时才回落本地记忆/当前值。
+      const preferredEffort = reconciledEffort ?? rememberedEffort;
+      // 空串是共享选择器对“目标来源不支持 effort”的明确回传，不能被旧 effort 复活。
+      const nextEffort = reconciledEffort === ''
+        ? null
+        : resolveCodexEffort(
+          model,
+          isCodexSubagentEffort(preferredEffort) ? preferredEffort : current.codexEffort,
+        );
       if (
         model === current.codex &&
         nextProviderId === current.codexProviderId &&
@@ -536,10 +542,14 @@ export function SubagentModelSection() {
                   : () => navigate('/settings?tab=providers')
               }
               reselectEmitsChange
-              onProviderChange={(providerId, modelId) => {
+              onProviderChange={(providerId, modelId, reconciledEffort) => {
                 const nextModel = modelId ?? settings.codex;
                 if (!nextModel) return;
-                void setCodexModel(nextModel, resolveProviderId('codex', nextModel, providerId));
+                void setCodexModel(
+                  nextModel,
+                  resolveProviderId('codex', nextModel, providerId),
+                  reconciledEffort,
+                );
               }}
               switching={pending}
               disabled={providersLoading}
@@ -596,6 +606,32 @@ export function SubagentModelSection() {
         <p className="-mt-3 px-4 pb-3 text-12 leading-[1.4] text-[var(--settings-section-sublabel)] opacity-70">
           {t('settings.subagentModels.guardrails.enableHint')}
         </p>
+
+        <div className="mx-4 h-px bg-[var(--settings-theme-card-border)]" />
+
+        <div
+          className={`flex items-center justify-between gap-3 px-4 py-4 ${subagentsEnabled ? '' : 'pointer-events-none opacity-50'}`}
+        >
+          <div className="flex min-w-0 flex-col gap-1">
+            <p
+              className="text-13 font-medium text-[var(--settings-section-sublabel)]"
+              style={{ letterSpacing: '0.12px' }}
+            >
+              {t('settings.subagentModels.guardrails.cindyPolicyLabel')}
+            </p>
+            <p className="text-12 leading-[1.4] text-[var(--settings-section-sublabel)] opacity-70">
+              {t('settings.subagentModels.guardrails.cindyPolicyHint')}
+            </p>
+          </div>
+          <Switch
+            checked={settings.codexUseCindySubagentPolicy}
+            disabled={pending || !subagentsEnabled}
+            onCheckedChange={(next) => {
+              void persistPatch({ codexUseCindySubagentPolicy: next });
+            }}
+            aria-label={t('settings.subagentModels.guardrails.cindyPolicyAria')}
+          />
+        </div>
 
         <div className="mx-4 h-px bg-[var(--settings-theme-card-border)]" />
 

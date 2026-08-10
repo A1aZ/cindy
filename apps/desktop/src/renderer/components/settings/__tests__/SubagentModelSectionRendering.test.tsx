@@ -154,7 +154,7 @@ vi.mock('@/components/new-chat/ModelSelector', () => ({
     sourceDisconnected?: boolean;
     reselectEmitsChange?: boolean;
     onNavigateToProviders?: () => void;
-    onProviderChange?: (providerId: string | null, modelId?: string) => void;
+    onProviderChange?: (providerId: string | null, modelId?: string, effort?: string) => void;
     onModelChange: (modelId: string) => void;
     onEffortChange?: (effort: string) => void;
     modelMemory?: {
@@ -193,6 +193,16 @@ vi.mock('@/components/new-chat/ModelSelector', () => ({
           type="button"
           data-testid={`${vendor}:pick-provider-row`}
           onClick={() => props.onProviderChange?.(providerId, modelId)}
+        />
+        <button
+          type="button"
+          data-testid={`${vendor}:pick-provider-row-low`}
+          onClick={() => props.onProviderChange?.(providerId, modelId, 'low')}
+        />
+        <button
+          type="button"
+          data-testid={`${vendor}:pick-provider-row-empty`}
+          onClick={() => props.onProviderChange?.(providerId, modelId, '')}
         />
         <button
           type="button"
@@ -244,6 +254,7 @@ const DEFAULTS = {
   codexProviderId: null,
   codexEffort: null,
   codexSubagentsEnabled: true,
+  codexUseCindySubagentPolicy: true,
   codexMaxConcurrentSubagents: null,
   codexAllowNestedSubagents: false,
 } as const;
@@ -509,6 +520,31 @@ describe('SubagentModelSection Codex row', () => {
     });
   });
 
+  it('uses the shared provider-row effort when switching sources', async () => {
+    render(<SubagentModelSection />);
+    fireEvent.click(await screen.findByTestId('codex:pick-provider-row-low'));
+    await waitFor(() => expect(settingsSet).toHaveBeenCalledTimes(1));
+    expect(settingsSet).toHaveBeenCalledWith({
+      codex: 'gpt-5.6-terra',
+      codexProviderId: 'openai',
+      codexEffort: 'low',
+    });
+  });
+
+  it('clears a provider row effort when the shared selector returns an explicit empty value', async () => {
+    settingsGet.mockResolvedValue(
+      makeState({ codex: 'gpt-5.6-terra', codexProviderId: 'openai', codexEffort: 'high' }),
+    );
+    render(<SubagentModelSection />);
+    fireEvent.click(await screen.findByTestId('codex:pick-provider-row-empty'));
+    await waitFor(() => expect(settingsSet).toHaveBeenCalledTimes(1));
+    expect(settingsSet).toHaveBeenCalledWith({
+      codex: 'gpt-5.6-terra',
+      codexProviderId: 'openai',
+      codexEffort: null,
+    });
+  });
+
   it('configures and selects an unselected model effort through the shared panel', async () => {
     // ModelSelector #1280 后,未选中行只在注入 modelMemory 时打开配置列;
     // 点 effort 会先写预设、再选中该行。Subagent 必须把这两步收敛成
@@ -637,6 +673,16 @@ describe('SubagentModelSection guardrails card', () => {
     expect(settingsSet).toHaveBeenCalledWith({ codexSubagentsEnabled: false });
   });
 
+  it('toggles the Cindy custom policy with a single-key patch', async () => {
+    render(<SubagentModelSection />);
+    const policy = await screen.findByRole('switch', {
+      name: 'settings.subagentModels.guardrails.cindyPolicyAria',
+    });
+    fireEvent.click(policy);
+    await waitFor(() => expect(settingsSet).toHaveBeenCalledTimes(1));
+    expect(settingsSet).toHaveBeenCalledWith({ codexUseCindySubagentPolicy: false });
+  });
+
   it('toggles nested subagents with a single-key patch', async () => {
     render(<SubagentModelSection />);
     const nested = await screen.findByRole('switch', {
@@ -740,6 +786,7 @@ describe('SubagentModelSection guardrails card', () => {
     settingsGet.mockResolvedValue(
       makeState({
         codexSubagentsEnabled: false,
+        codexUseCindySubagentPolicy: true,
         codexMaxConcurrentSubagents: 4,
         codexAllowNestedSubagents: true,
       }),
@@ -751,9 +798,14 @@ describe('SubagentModelSection guardrails card', () => {
     const custom = (await screen.findByRole('switch', {
       name: 'settings.subagentModels.guardrails.concurrencyCustomAria',
     })) as HTMLButtonElement;
+    const policy = (await screen.findByRole('switch', {
+      name: 'settings.subagentModels.guardrails.cindyPolicyAria',
+    })) as HTMLButtonElement;
     expect(nested.disabled).toBe(true);
     expect(custom.disabled).toBe(true);
-    // 值保留:嵌套开关仍显示 on(重开总开关即恢复,不清值)。
+    expect(policy.disabled).toBe(true);
+    // 值保留:Cindy 策略与嵌套开关仍显示 on(重开总开关即恢复,不清值)。
+    expect(policy.getAttribute('aria-checked')).toBe('true');
     expect(nested.getAttribute('aria-checked')).toBe('true');
   });
 
@@ -818,8 +870,13 @@ describe('SubagentModelSection per-card override controls', () => {
     settingsGet.mockResolvedValue(
       makeState({
         codexSubagentsEnabled: false,
+        codexUseCindySubagentPolicy: false,
         codexMaxConcurrentSubagents: 4,
-        customizedKeys: ['codexSubagentsEnabled', 'codexMaxConcurrentSubagents'],
+        customizedKeys: [
+          'codexSubagentsEnabled',
+          'codexUseCindySubagentPolicy',
+          'codexMaxConcurrentSubagents',
+        ],
         isCustomized: true,
       }),
     );
@@ -829,6 +886,7 @@ describe('SubagentModelSection per-card override controls', () => {
     await waitFor(() => expect(settingsSet).toHaveBeenCalledTimes(1));
     expect(settingsSet).toHaveBeenCalledWith({
       codexSubagentsEnabled: true,
+      codexUseCindySubagentPolicy: true,
       codexMaxConcurrentSubagents: null,
       codexAllowNestedSubagents: false,
     });

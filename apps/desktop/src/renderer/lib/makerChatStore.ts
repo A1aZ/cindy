@@ -4228,7 +4228,7 @@ function hasRunningWakeTask(state: SessionChatState): boolean {
  */
 function hasBackgroundAgentWork(sessionId: string, state: SessionChatState): boolean {
   if (!state.pendingTaskWake && !hasRunningWakeTask(state)) return false;
-  return !isRemoteSession(sessionId) && !state.remoteHostId;
+  return !isRemoteSessionSticky(sessionId) && !state.remoteHostId;
 }
 
 /**

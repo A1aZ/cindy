@@ -73,6 +73,7 @@ vi.mock('@/lib/makerTransport', () => ({
   aroundMessagesFor: vi.fn(async () => []),
   aroundMessagesByClientIdFor: vi.fn(async () => []),
   isRemoteSession: (sessionId: string) => sessionId.startsWith('remote-'),
+  isRemoteSessionSticky: (sessionId: string) => sessionId.startsWith('remote-'),
 }));
 
 import { EMPTY_SESSION_STATE, handleStreamEvent, makerChatStore } from '@/lib/makerChatStore';

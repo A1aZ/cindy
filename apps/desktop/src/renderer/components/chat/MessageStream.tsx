@@ -482,6 +482,23 @@ export function shouldBoostDefaultWindow({
   return visibleItemCount < allItemCount;
 }
 
+export function resolveDefaultWindowStartIdx({
+  allItemCount,
+  defaultWindowItems,
+  visibleStartIdx,
+  visibleItemCount,
+}: {
+  allItemCount: number;
+  defaultWindowItems: number;
+  visibleStartIdx: number;
+  visibleItemCount: number;
+}): number {
+  // 首帧字节预算可能让实际 DOM 窗口比声明容量小。用户在 idle boost 前主动
+  // 向上滚动时，必须从真实 visibleStartIdx 扩，而不是用声明容量反算出 0。
+  if (visibleItemCount < allItemCount) return visibleStartIdx;
+  return Math.max(0, allItemCount - defaultWindowItems);
+}
+
 // export 仅供 render-window 集成单测使用。窗口默认/扩窗时如果刚好切在
 // agent_task / work_group / assistant 中间,顶部会出现无上下文的卡片。
 // 向前吸收同一 user turn 的开头,但限制 lookback 防止单个超长 turn 破坏首屏预算。
@@ -2892,7 +2909,12 @@ export function MessageStream({
     let currentStartIdx: number;
     const wasDefaultWindow = firstVisibleItemKey === null;
     if (wasDefaultWindow) {
-      currentStartIdx = Math.max(0, allRenderItems.length - defaultWindowItems);
+      currentStartIdx = resolveDefaultWindowStartIdx({
+        allItemCount: allRenderItems.length,
+        defaultWindowItems,
+        visibleStartIdx,
+        visibleItemCount: visibleRenderItems.length,
+      });
     } else {
       currentStartIdx = allRenderItems.findIndex((it) => it.key === firstVisibleItemKey);
       if (currentStartIdx < 0) {
@@ -2921,7 +2943,13 @@ export function MessageStream({
         setAnchoredForwardItems((prev) => prev + (currentStartIdx - newAnchorIdx));
       }
     }
-  }, [allRenderItems, firstVisibleItemKey, defaultWindowItems]);
+  }, [
+    allRenderItems,
+    firstVisibleItemKey,
+    defaultWindowItems,
+    visibleStartIdx,
+    visibleRenderItems.length,
+  ]);
 
   // render-window-bidirectional 要点 2: windowAtTop 改基于 visibleStartIdx === 0。
   // 原定义 visible.length === all.length 在双向窗口下即使 start 已到 0 也恒为 false。

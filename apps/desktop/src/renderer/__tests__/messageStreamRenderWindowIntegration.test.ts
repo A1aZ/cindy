@@ -33,6 +33,7 @@ import {
   snapRenderWindowStartIdx,
   isViewportAnchorWithinDefaultTail,
   resolveAnchoredWindowItemCount,
+  resolveDefaultWindowStartIdx,
   shouldBoostDefaultWindow,
   clampTailWindowStartByBudget,
   estimateRenderItemMountCost,
@@ -525,6 +526,30 @@ describe('budget-clamped default window boost', () => {
         defaultWindowItems: RENDER_WINDOW_INITIAL_ITEMS,
       }),
     ).toBe(false);
+  });
+});
+
+describe('budget-clamped default window user expansion', () => {
+  it('uses the actual visible start when byte budget hid early items', () => {
+    expect(
+      resolveDefaultWindowStartIdx({
+        allItemCount: 10,
+        defaultWindowItems: 15,
+        visibleStartIdx: 5,
+        visibleItemCount: 5,
+      }),
+    ).toBe(5);
+  });
+
+  it('uses the declared tail capacity when the visible window is complete', () => {
+    expect(
+      resolveDefaultWindowStartIdx({
+        allItemCount: 100,
+        defaultWindowItems: 15,
+        visibleStartIdx: 85,
+        visibleItemCount: 15,
+      }),
+    ).toBe(85);
   });
 });
 

@@ -315,7 +315,13 @@ export function readBoundedFileNoFollowSync(
 ): Buffer | null {
   const noFollow =
     options?.noFollowFlag !== undefined ? options.noFollowFlag : (fs.constants.O_NOFOLLOW ?? null);
-  const fd = fs.openSync(filePath, fs.constants.O_RDONLY | (noFollow ?? 0));
+  // O_NONBLOCK:对普通文件是 no-op,但对 FIFO/设备在 open 时立即返回 EAGAIN 而不是
+  // 把 Main 永久阻塞 —— 同步读取路径(receipt / ledger / locale)只接受普通文件,
+  // 特殊文件必须 fail-closed 而不是挂起。
+  const fd = fs.openSync(
+    filePath,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0) | (noFollow ?? 0),
+  );
   try {
     const stat = fs.fstatSync(fd, { bigint: true });
     if (!stat.isFile() || Number(stat.size) > maxBytes) return null;

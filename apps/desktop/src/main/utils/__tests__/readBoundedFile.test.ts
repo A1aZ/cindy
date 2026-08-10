@@ -401,7 +401,7 @@ describe('readBoundedFileNoFollow', () => {
 });
 
 describe('readBoundedFileNoFollowSync', () => {
-  it('opens untrusted no-follow paths in blocking mode by default (sync variant)', async () => {
+  it('opens untrusted no-follow paths in non-blocking mode (sync variant)', async () => {
     const file = path.join(workDir, 'plain.json');
     await fs.promises.writeFile(file, '{"ok":1}');
     const realOpenSync = fs.openSync;
@@ -419,10 +419,10 @@ describe('readBoundedFileNoFollowSync', () => {
       spy.mockRestore();
     }
 
-    // The synchronous variant has no nonBlocking option; the default no-follow
-    // open stays blocking (regular files only, so this cannot block on a FIFO).
+    // The sync variant opens non-blocking so a FIFO/device entry cannot block
+    // Main forever; O_NONBLOCK is a no-op for regular files.
     const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
-    expect(flags & nonBlockingFlag).toBe(0);
+    expect(flags & nonBlockingFlag).toBe(nonBlockingFlag);
   });
 
   it('限量与回退闸语义和异步变体一致', async () => {

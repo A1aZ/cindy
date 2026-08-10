@@ -1143,12 +1143,16 @@ export default function NewRemoteSessionScreen() {
     && worktreePreferenceAuthorityUnknownByDeviceRef.current.has(selectedDeviceId);
   const worktreeApplicable = draft.workspaceKind === 'project'
     && draft.workingDir.trim().length > 0;
+  // ineligible(2026-08-07 裁决):确认目录不合格时无需等偏好就绪——反正不会
+  // 创建 worktree,GET 在途不应卡住普通会话创建。
   const worktreePreferenceCreateBlocked = worktreeApplicable
-    && selectedDeviceId != null && (
-    worktreePreferenceSaving
-    || worktreePreferenceAuthorityUnknown
-    || !worktreePreferenceReady
-  );
+    && selectedDeviceId != null
+    && worktreeEligibility.status !== 'ineligible'
+    && (
+      worktreePreferenceSaving
+      || worktreePreferenceAuthorityUnknown
+      || !worktreePreferenceReady
+    );
   // host preference 虽然持久化，连接代次仍属于权威读取 identity：桌面重启/重连后
   // 即使 deviceId/repo 没变，也重新 GET，不能只相信手机内存里的旧快照。
   const worktreeBranchPreferenceSyncKey = worktreeBranchPreferenceKey

@@ -4699,14 +4699,13 @@ export function handleStreamEvent(
       // 空窗里到达 completed / failed 终态 → SDK 马上会自动开 wake turn,置位
       // 桥接标记撑住 running 快照,防止空窗里闪出假的 running→stopped 转换。
       // stopped(interrupt 杀掉)不置位——不会有 wake turn 跟进,置了就永久转圈。
-      // 已知竞态(有意接受):任务终态若恰在主 turn Done 前一瞬到达(isRunning
-      // 仍 true),不置桥接 → 紧跟的 Done 会提前发一次 done 通知,wake turn 结束
-      // 再发一次(即退化为修复前行为,不劣于现状;反向置位会被紧跟的 Done 清掉,
-      // renderer 侧无法彻底关死)。
+      // 任务终态若在主 turn 仍 running 时到达,仍置桥接标记,让 Done 后的
+      // hasBackgroundAgentWork 返回 true,阻止 ChatInput 用不完整上下文发起预测。
+      // 后续 wake turn 启动时 handleStatusUpdate 会清除 pendingTaskWake(见该
+      // 函数中 pendingTaskWake: false),桥接不会永久撑住 running 快照。
       const wakesAfterTerminal =
         (merged.status === 'completed' || merged.status === 'failed') &&
-        isWakeAgentTask(merged) &&
-        !state.agentStatus.isRunning;
+        isWakeAgentTask(merged);
       return {
         ...state,
         lastAgentMeta: incomingMeta ?? state.lastAgentMeta,

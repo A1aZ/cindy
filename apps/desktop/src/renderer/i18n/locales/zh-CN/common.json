@@ -3779,7 +3779,10 @@
         "statusFailed": "更新失败",
         "background": "后台继续",
         "doneAction": "完成",
-        "doneToast": "批量更新完成：{{done}} 个已更新，{{rest}} 个未完成"
+        "doneToast": "批量更新完成：{{done}} 个已更新，{{rest}} 个未完成",
+        "rereview": "重新审阅",
+        "approve": "同意",
+        "skip": "跳过"
       }
     },
     "mcp": {

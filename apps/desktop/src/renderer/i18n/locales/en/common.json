@@ -3784,7 +3784,10 @@
         "statusFailed": "Update failed",
         "background": "Continue in background",
         "doneAction": "Done",
-        "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed"
+        "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed",
+        "rereview": "Re-review",
+        "approve": "Approve",
+        "skip": "Skip"
       }
     },
     "mcp": {

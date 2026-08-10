@@ -3783,7 +3783,10 @@
         "statusFailed": "업데이트 실패",
         "background": "백그라운드에서 계속",
         "doneAction": "완료",
-        "doneToast": "일괄 업데이트 완료: {{done}}개 업데이트, {{rest}}개 미완료"
+        "doneToast": "일괄 업데이트 완료: {{done}}개 업데이트, {{rest}}개 미완료",
+        "rereview": "다시 검토",
+        "approve": "승인",
+        "skip": "건너뛰기"
       }
     },
     "mcp": {

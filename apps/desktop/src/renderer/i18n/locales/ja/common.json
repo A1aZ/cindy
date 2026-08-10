@@ -3783,7 +3783,10 @@
         "statusFailed": "更新に失敗",
         "background": "バックグラウンドで続行",
         "doneAction": "完了",
-        "doneToast": "一括更新が完了:{{done}} 件更新、{{rest}} 件未完了"
+        "doneToast": "一括更新が完了:{{done}} 件更新、{{rest}} 件未完了",
+        "rereview": "再確認",
+        "approve": "承認",
+        "skip": "スキップ"
       }
     },
     "mcp": {

@@ -3782,7 +3782,10 @@
         "statusFailed": "更新失敗",
         "background": "後臺繼續",
         "doneAction": "完成",
-        "doneToast": "批次更新完成：{{done}} 個已更新，{{rest}} 個未完成"
+        "doneToast": "批次更新完成：{{done}} 個已更新，{{rest}} 個未完成",
+        "rereview": "重新審閱",
+        "approve": "同意",
+        "skip": "跳過"
       }
     },
     "mcp": {

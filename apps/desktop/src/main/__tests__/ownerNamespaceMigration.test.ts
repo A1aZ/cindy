@@ -1552,6 +1552,7 @@ describe('legacy Ghost plugin recovery', () => {
     await expect(
       fs.readFile(path.join(root, 'brain', 'cindy-untrusted', 'ghost.json'), 'utf-8'),
     ).resolves.toContain('"id":"cindy-untrusted"');
+    await expect(fs.access(path.join(root, __testing.CLAIM_MARKER))).rejects.toThrow();
   });
 
   it('moves builtin provisioning state with plugins before reconciliation', async () => {
@@ -2341,7 +2342,7 @@ describe('legacy Ghost plugin recovery', () => {
     ).toEqual({ state: 'partial', legacyPluginCount: 1, canRetry: false });
   });
 
-  it('reports claimed-by-other-owner and never moves plugins across accounts', async () => {
+  it('ignores foreign-owned shared plugins and never moves them across accounts', async () => {
     const root = await tempRoot();
     await writeGhostDir(root, 'cindy-brain', 'valid-plugin');
     await fs.writeFile(
@@ -2367,6 +2368,9 @@ describe('legacy Ghost plugin recovery', () => {
     await expect(
       fs.access(path.join(root, 'owners', dataOwnerStorageKey('cloud-b'), 'cindy-brain')),
     ).rejects.toThrow();
+    await expect(
+      fs.readFile(path.join(root, 'cindy-brain', 'valid-plugin', 'ghost.json'), 'utf-8'),
+    ).resolves.toContain('"id":"valid-plugin"');
   });
 
   it('reports retryable partial status when legacy plugins appear after a completed owner claim', async () => {

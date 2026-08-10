@@ -788,7 +788,10 @@ export function getLegacyGhostRecoveryStatus(
   session: MigrationSessionState,
   userDataDir?: string,
   boundaryPending = false,
-  options: { reservedCommands?: ReadonlySet<string> } = {},
+  options: {
+    reservedCommands?: ReadonlySet<string>;
+    rejectReservedIds?: boolean;
+  } = {},
   isPidAlive: (pid: number) => boolean = isPidAliveDefault,
 ): LegacyGhostRecoveryStatus {
   if (boundaryPending || session.mode !== 'cloud' || !session.dataOwnerId || !session.user) {
@@ -879,7 +882,9 @@ export function getLegacyGhostRecoveryStatus(
   if (process.env.XDT_PASSIVE_SHARED_USER_DATA === '1') {
     return { state: 'deferred', legacyPluginCount, canRetry: false };
   }
-
+  if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
+    return { state: 'deferred', legacyPluginCount, canRetry: false };
+  }
   if (recoveredIds.length > 0) {
     if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
       return { state: 'deferred', legacyPluginCount, canRetry: false };
@@ -903,9 +908,6 @@ export function getLegacyGhostRecoveryStatus(
       return { state: 'claimed-by-other-owner', legacyPluginCount, canRetry: false };
     }
     return { state: 'partial', legacyPluginCount, canRetry: false };
-  }
-  if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
-    return { state: 'deferred', legacyPluginCount, canRetry: false };
   }
 
   const eligibleLegacyGhosts = (sharedRecoveryBlocked ? scopedLegacyGhosts : legacyGhosts)
@@ -933,14 +935,6 @@ export function getLegacyGhostRecoveryStatus(
     return command === null || !occupiedCommands.has(command);
   });
   if (!canRetry) {
-    if (
-      sharedRecoveryBlocked &&
-      markerRead.marker &&
-      markerRead.marker.ownerKey !== ownerKey &&
-      scopedLegacyGhosts.length === 0
-    ) {
-      return { state: 'claimed-by-other-owner', legacyPluginCount, canRetry: false };
-    }
     return { state: 'partial', legacyPluginCount, canRetry: false };
   }
 

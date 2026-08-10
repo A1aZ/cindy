@@ -5096,8 +5096,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('maker:model-price-override:reset', target),
 
     // 「在新窗口打开」会话多开 —— 新建一个完整窗口定位到该 session。
-    openSessionInNewWindow: (sessionId: string): Promise<void> =>
-      ipcRenderer.invoke('maker:open-session-in-new-window', sessionId),
+    openSessionInNewWindow: (sessionId: string, deviceId?: string | null): Promise<void> =>
+      ipcRenderer.invoke('maker:open-session-in-new-window', sessionId, deviceId),
+    openSessionInNewWindowIfDroppedOutside: (
+      sessionId: string,
+      deviceId?: string | null,
+    ): Promise<boolean> =>
+      ipcRenderer.invoke(
+        'maker:open-session-in-new-window-if-dropped-outside',
+        sessionId,
+        deviceId,
+      ),
+    beginSessionDragPreview: (label: string): Promise<void> =>
+      ipcRenderer.invoke('maker:session-drag-preview:start', label),
+    endSessionDragPreview: (dragEndAtMs?: number): void =>
+      ipcRenderer.send('maker:session-drag-preview:end', dragEndAtMs),
 
     // ── Palette `/` 命令三源 (palette refactor) ─────────────────────────
     // Renderer 通过这四个调用合并三路数据 + 触发 desktop 命令 execute。

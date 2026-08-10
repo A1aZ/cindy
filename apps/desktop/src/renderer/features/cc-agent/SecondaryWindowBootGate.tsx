@@ -22,8 +22,9 @@
 import { useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { getBootSessionId } from '@/lib/secondaryWindow';
+import { getBootDeviceId, getBootSessionId } from '@/lib/secondaryWindow';
 import { resolveSessionRoute } from '@/lib/orcaSessionIdentity';
+import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('SecondaryWindowBootGate');
@@ -42,6 +43,13 @@ export function SecondaryWindowBootGate() {
       // 异常进入(直接打开 /cc-agent/boot 而无 bootSession)→ 回落默认入口。
       navigate('/cc-agent', { replace: true });
       return;
+    }
+
+    const bootDeviceId = getBootDeviceId();
+    if (bootDeviceId) {
+      // The remote session is not in the local DB. Pin its origin before route
+      // resolution so the secondary renderer never probes the local maker.
+      remoteProjectsStore.pinSessionOrigin(bootDeviceId, bootSessionId);
     }
 
     let cancelled = false;

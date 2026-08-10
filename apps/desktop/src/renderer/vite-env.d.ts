@@ -4719,7 +4719,13 @@ interface ElectronAPI {
     ) => Promise<import('../shared/modelPriceOverride').ModelPriceOverrideView>;
 
     // 「在新窗口打开」会话多开
-    openSessionInNewWindow: (sessionId: string) => Promise<void>;
+    openSessionInNewWindow: (sessionId: string, deviceId?: string | null) => Promise<void>;
+    openSessionInNewWindowIfDroppedOutside: (
+      sessionId: string,
+      deviceId?: string | null,
+    ) => Promise<boolean>;
+    beginSessionDragPreview: (label: string) => Promise<void>;
+    endSessionDragPreview: (dragEndAtMs?: number) => void;
 
     // ── Palette `/` 命令三源 (palette refactor) ───────────────────────
     listDesktopCommands: () => Promise<{

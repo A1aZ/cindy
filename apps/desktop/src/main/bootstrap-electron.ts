@@ -349,6 +349,7 @@ import {
 } from './windowFocusClassifier.js';
 import {
   assertTrustedAppRendererEvent,
+  isTrustedAppRendererEvent,
   isTrustedAppRendererWindow,
 } from './security/trustedAppRenderer.js';
 import { isMainShellWindowUrl } from './cindy-brain/scheduleSlot.js';
@@ -499,7 +500,11 @@ import {
   withSendToSessionLock,
 } from './maker-ipc/register.js';
 import { cleanupActiveReviewArtifactSnapshots } from './reviewer/reviewArtifactSnapshot.js';
-import { MAKER_INVOKE as MAKER_IPC_INVOKE, MAKER_PUSH } from './maker-ipc/channels.js';
+import {
+  MAKER_INVOKE as MAKER_IPC_INVOKE,
+  MAKER_PUSH,
+  MAKER_SEND,
+} from './maker-ipc/channels.js';
 import {
   preserveLegacyMakerMemoryDisabled,
   readMemorySettings,
@@ -606,7 +611,15 @@ import { registerFileBrowserDeviceOp } from './file-browser/device-op.js';
 import { registerSearchIpc } from './file-browser/search/index.js';
 import { registerVoiceInputIpc } from './voice-input/index.js';
 import { installWindowHiddenBroadcast } from './windowHiddenBroadcast.js';
-import { isSecondaryAppWindow, openSessionInNewWindow } from './secondary-windows.js';
+import {
+  isSecondaryAppWindow,
+  openSessionInNewWindow,
+  openSessionInNewWindowIfDroppedOutside,
+} from './secondary-windows.js';
+import {
+  beginSessionDragPreview,
+  endSessionDragPreview,
+} from './session-drag-preview.js';
 import {
   isGlobalVoiceInputOverlayVisible,
   registerGlobalVoiceInputIpc,
@@ -1031,6 +1044,7 @@ const safeStorageReadLog = createLogger('safe-storage:read');
 const rendererConsoleLog = createLogger('renderer-console');
 const updatePresentationLog = createLogger('update-presentation');
 const voicePowerBroadcastLog = createLogger('voice-input-power');
+const sessionDragPreviewLog = createLogger('session-drag-preview');
 let rendererBootGuard: RendererBootGuard | null = null;
 
 const lifecycleDbClientManager = createLifecycleDbClientManager({
@@ -2933,6 +2947,19 @@ function syncDefaultPluginsForActiveOwner(): void {
   });
 }
 
+function parseOptionalDeviceLinkDeviceId(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (trimmed.length === 0 || trimmed.length > 256 || value !== trimmed) {
+    throwIpcError(
+      'INVALID_PARAMS',
+      'deviceLinkDeviceId must be a non-empty, trimmed string of at most 256 characters or null',
+    );
+  }
+  return trimmed;
+}
+
 const registerIpcHandlers = () => {
   // Find the primary app window, skipping transient utility BrowserWindows like
   // the voice-input overlay (minimizable:false, maximizable:false). Electron's
@@ -2993,11 +3020,78 @@ const registerIpcHandlers = () => {
   });
 
   // 「在新窗口打开」会话多开 —— 新建一个完整窗口定位到该 session, 初始 bounds 取主窗。
-  ipcMain.handle(MAKER_IPC_INVOKE.OPEN_SESSION_IN_NEW_WINDOW, (_e, sessionId: unknown) => {
-    if (typeof sessionId !== 'string' || sessionId.length === 0) {
-      throwIpcError('INVALID_PARAMS', 'sessionId required');
+  ipcMain.handle(
+    MAKER_IPC_INVOKE.OPEN_SESSION_IN_NEW_WINDOW,
+    (event, sessionId: unknown, deviceIdRaw: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        throwIpcError('INVALID_PARAMS', 'sessionId required');
+      }
+      const deviceId = parseOptionalDeviceLinkDeviceId(deviceIdRaw);
+      const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+      openSessionInNewWindow(sessionId, sourceWindow ?? mainWindowRef, deviceId);
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_IPC_INVOKE.OPEN_SESSION_IN_NEW_WINDOW_IF_DROPPED_OUTSIDE,
+    (event, sessionId: unknown, deviceIdRaw: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof sessionId !== 'string' || sessionId.length === 0) {
+        throwIpcError('INVALID_PARAMS', 'sessionId required');
+      }
+      const deviceId = parseOptionalDeviceLinkDeviceId(deviceIdRaw);
+      const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+      // The renderer normally ends the preview immediately before invoking
+      // this check. Stop again here so a delayed dragend/IPC cannot leave the
+      // transient card visible after the drop has already been classified.
+      // Keep the owner check so a delayed IPC from one window cannot stop a
+      // newer drag that already started in another window.
+      if (sourceWindow) endSessionDragPreview(sourceWindow);
+      return openSessionInNewWindowIfDroppedOutside(
+        sessionId,
+        mainWindowRef,
+        sourceWindow,
+        deviceId,
+      );
+    },
+  );
+
+  ipcMain.handle(
+    MAKER_IPC_INVOKE.SESSION_DRAG_PREVIEW_START,
+    (event, labelRaw: unknown) => {
+      assertTrustedAppRendererEvent(event);
+      if (typeof labelRaw !== 'string') return;
+      const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+      if (!sourceWindow || sourceWindow.isDestroyed()) return;
+      beginSessionDragPreview(sourceWindow, labelRaw.slice(0, 160));
+    },
+  );
+
+  ipcMain.on(MAKER_SEND.SESSION_DRAG_PREVIEW_END, (event, dragEndAtMsRaw: unknown) => {
+    // Fire-and-forget callers cannot receive an IPC error. Drop stale or
+    // untrusted senders instead of throwing through Electron's EventEmitter.
+    if (!isTrustedAppRendererEvent(event)) return;
+    const sourceWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!sourceWindow || sourceWindow.isDestroyed()) return;
+    const receivedAtMs = Date.now();
+    endSessionDragPreview(sourceWindow);
+    if (!app.isPackaged) {
+      const dragEndAtMs =
+        typeof dragEndAtMsRaw === 'number' &&
+        Number.isFinite(dragEndAtMsRaw) &&
+        Math.abs(receivedAtMs - dragEndAtMsRaw) <= 60_000
+          ? dragEndAtMsRaw
+          : null;
+      sessionDragPreviewLog.info(
+        JSON.stringify({
+          event: 'sessionDragPreview.end.dispatched',
+          rendererToMainMs:
+            dragEndAtMs === null ? null : Math.max(0, receivedAtMs - dragEndAtMs),
+          hideApiDispatchMs: Date.now() - receivedAtMs,
+        }),
+      );
     }
-    openSessionInNewWindow(sessionId, mainWindowRef);
   });
 
   // E4D 毛玻璃(R1 audit,用户裁决透壁纸 2026-07-17):仅 CINDY family 启用毛玻璃透壁纸;
@@ -6518,6 +6612,36 @@ app.on('ready', async () => {
           userId,
           mode: dbClientTakeover.mode,
         });
+        return;
+      }
+      if (dbClientTakeover.mode === 'unchanged') {
+        // 副窗口会再次走 localDb.ensureReady；同 owner 的 lifecycle client 已由首个
+        // onReady 完整启动，因此这里只保留 DB 连接交接，不重复执行账号级启动维护。
+        // worker takeover 会让 ensureReady 为本次副窗口重新打开 main DB，交接完成后立即
+        // 释放该短暂连接，避免它长期占用文件句柄和 optimize 定时器。
+        if (dbClientTakeover.shouldReleaseMainDb && process.env.XDT_DB_INPROC !== 'true') {
+          localDbCloseDb({ preserveSchemaMigrationLease: true });
+          dbClientLog.info('[DbClient] duplicate owner ensure released reopened main db', {
+            userId,
+          });
+        }
+        return;
+      }
+      // A secondary window can arrive while the lifecycle client is being
+      // re-established. Its renderer only needs a readable DB and the route;
+      // repeating the account-wide attachment sweep here can scan every
+      // persisted message and staged file for several seconds. The primary
+      // window remains responsible for that maintenance pass.
+      if (BrowserWindow.getAllWindows().some(isSecondaryAppWindow)) {
+        dbClientLog.info('[DbClient] secondary window skips account startup maintenance', {
+          userId,
+        });
+        if (dbClientTakeover.shouldReleaseMainDb && process.env.XDT_DB_INPROC !== 'true') {
+          localDbCloseDb({ preserveSchemaMigrationLease: true });
+          dbClientLog.info('[DbClient] main-side _db released after secondary takeover', {
+            userId,
+          });
+        }
         return;
       }
       // Phase 1.1: file worker 接管 DB 连接后,释放 main 端的 _db + optimize 定时器。

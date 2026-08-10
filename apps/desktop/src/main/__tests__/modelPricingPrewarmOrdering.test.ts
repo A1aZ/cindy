@@ -21,12 +21,16 @@ describe('model pricing prewarm ordering', () => {
   it('prewarms after localDb user takeover succeeds', () => {
     const localDbReady = source.indexOf('const dbClientTakeover = await ensureLifecycleDbClient(userId);');
     const failedGuard = source.indexOf("dbClientTakeover.mode === 'failed'");
+    const unchangedGuard = source.indexOf("dbClientTakeover.mode === 'unchanged'");
+    const attachmentSweep = source.indexOf('sweepStagedChatAttachmentsOnStartup({');
     const earlyUsageIpc = source.indexOf('registerMakerUsageIpc(ipcMaker);');
     const prewarm = source.indexOf('void prewarmModelPricing();');
     const refreshCatalog = source.indexOf('await refreshCustomProvidersIntoCatalog(');
 
     expect(localDbReady).toBeGreaterThanOrEqual(0);
     expect(failedGuard).toBeGreaterThan(localDbReady);
+    expect(unchangedGuard).toBeGreaterThan(failedGuard);
+    expect(attachmentSweep).toBeGreaterThan(unchangedGuard);
     expect(earlyUsageIpc).toBeGreaterThanOrEqual(0);
     expect(prewarm).toBeGreaterThan(failedGuard);
     expect(prewarm).toBeGreaterThan(earlyUsageIpc);

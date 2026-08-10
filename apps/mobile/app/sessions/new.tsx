@@ -1325,6 +1325,9 @@ export default function NewRemoteSessionScreen() {
       || currentTarget.deviceId !== intent.target.deviceId
       || currentTarget.workingDir.trim() !== intent.target.workingDir.trim()
     ) return false;
+    // ineligible 目标不创建 worktree,无需等偏好同步/就绪——提前返回,
+    // 避免偏好 GET 在途时被下方偏好守卫拦截(2026-08-07 裁决)。
+    if (intent.enabled && intent.eligibility.status === 'ineligible') return true;
     if (
       worktreePreferenceSyncKeyRef.current !== intent.preferenceSyncKey
       || worktreePreferenceReadyKeyRef.current !== intent.preferenceSyncKey
@@ -1335,23 +1338,9 @@ export default function NewRemoteSessionScreen() {
       .getNewMakerWorktreePreference(intent.target.deviceId).enabled;
     if (currentEnabled !== intent.enabled) return false;
     if (!intent.enabled) return true;
-    if (
-      intent.eligibility.status !== 'eligible'
-      && intent.eligibility.status !== 'ineligible'
-    ) return false;
+    // ineligible 已在前面提前返回,此处只可能是 eligible(2026-08-07 裁决)。
+    if (intent.eligibility.status !== 'eligible') return false;
     const currentEligibility = worktreeEligibilityRef.current;
-    // eligible 与 ineligible 对 current 的要求不同:eligible 需要 repo
-    // 与 baseRepo 完全匹配;ineligible 只需状态仍为 ineligible(无需
-    // baseRepo,也不可能走到下方的分支/偏好校验)。
-    if (intent.eligibility.status === 'eligible') {
-      if (
-        currentEligibility.status !== 'eligible'
-        || currentEligibility.baseRepo !== intent.eligibility.baseRepo
-      ) return false;
-    } else if (intent.eligibility.status === 'ineligible') {
-      if (currentEligibility.status !== 'ineligible') return false;
-    }
-    if (intent.eligibility.status !== 'eligible') return true;
     const currentStoredBranch = remoteSessionStore.getNewMakerWorktreeBranchPreference(
       intent.target.deviceId,
       currentEligibility.baseRepo,

@@ -310,6 +310,15 @@ export interface SessionAgentSwitchFallbackArgs {
 export interface MessageDeleteArgs {
   sessionId: string;
   clientIds: string[];
+  /**
+   * Parentless Claude observations cannot be joined to a tool message. For an
+   * assistant-round deletion, the caller supplies the surrounding real-user
+   * time boundaries so the same transaction can retire those durable copies.
+   */
+  subagentTurnWindow?: {
+    startedAtInclusive: number;
+    startedAtExclusive?: number;
+  };
   contextMarker: {
     id: string;
     clientId: string;
@@ -324,6 +333,7 @@ export interface MessageDeleteResult {
     messageId: string;
     clientId: string;
   }>;
+  subagentRunIds: string[];
 }
 
 export interface SessionsSetStatusResultItem {

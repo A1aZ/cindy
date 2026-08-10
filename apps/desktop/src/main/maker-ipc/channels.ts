@@ -9,6 +9,7 @@ import { IOS_SIMULATOR_ROUTE_STATUS_CHANNEL } from '../../shared/iosSimulatorIpc
 
 export const MAKER_INVOKE = {
   CREATE_SESSION: 'maker:create-session',
+  START_REVIEW: 'maker:review:start',
   TURN_CHANGE_SETS_LIST: 'maker:turn-change-sets:list',
   TURN_CHANGE_SETS_GET: 'maker:turn-change-sets:get',
   TURN_CHANGE_SET_APPLY: 'maker:turn-change-set:apply',

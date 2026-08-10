@@ -212,10 +212,16 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates("Path('out/data.bin').write_bytes(payload)"),
     ).toEqual(['out/data.bin']);
-    expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/']);
-    expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\']);
+    expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/source.txt']);
+    expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\source.txt']);
     expect(
       extractCommandOutputPathCandidates('cp inputs/a.txt inputs/b.txt output/'),
+    ).toEqual(['output/a.txt', 'output/b.txt']);
+    expect(
+      extractCommandOutputPathCandidates('Get-ChildItem inputs/source.txt | Copy-Item -Destination output/'),
+    ).toEqual(['output/source.txt']);
+    expect(
+      extractCommandOutputPathCandidates('Get-ChildItem inputs/ | Copy-Item -Destination output/'),
     ).toEqual(['output/']);
   });
 

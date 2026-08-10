@@ -234,8 +234,46 @@ function isExplicitOutputPath(
   return (
     lastPath?.start === token.start &&
     lastPath.end === token.end &&
-    /^(?:cp|copy|Copy-Item)\s+/i.test(segment.trim())
+    /(?:^|\|\s*)(?:cp|copy|Copy-Item)\s+/i.test(segment.trim())
   );
+}
+
+function copyDirectoryOutputs(
+  command: string,
+  destination: CommandPathToken,
+  tokens: readonly CommandPathToken[],
+): string[] {
+  if (!/[\\/]$/.test(destination.path)) return [destination.path];
+  const previousSeparators = [
+    { index: command.lastIndexOf(';', destination.start - 1), length: 1 },
+    { index: command.lastIndexOf('\n', destination.start - 1), length: 1 },
+    { index: command.lastIndexOf('&&', destination.start - 1), length: 2 },
+    { index: command.lastIndexOf('||', destination.start - 1), length: 2 },
+  ];
+  const previousSeparator = previousSeparators.reduce((latest, candidate) =>
+    candidate.index > latest.index ? candidate : latest,
+  );
+  const segmentStart = previousSeparator.index + previousSeparator.length;
+  const nextSeparators = [
+    command.indexOf(';', destination.end),
+    command.indexOf('\n', destination.end),
+    command.indexOf('&&', destination.end),
+    command.indexOf('||', destination.end),
+  ].filter((index) => index >= 0);
+  const segmentEnd = nextSeparators.length > 0 ? Math.min(...nextSeparators) : command.length;
+  const sourcePaths = tokens
+    .filter((token) => token.start >= segmentStart && token.end <= destination.start)
+    .filter((token) => token.start !== destination.start && !/[\\/]$/.test(token.path))
+    .map((token) => token.path);
+  const beforeDestination = command.slice(segmentStart, destination.start);
+  for (const match of beforeDestination.matchAll(/(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g)) {
+    if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
+  }
+  const outputs = sourcePaths.map((source) => {
+    const sourceName = source.replace(/[\\/]$/, '').split(/[\\/]/).at(-1);
+    return sourceName ? `${destination.path}${sourceName}` : null;
+  }).filter((path): path is string => Boolean(path));
+  return outputs.length > 0 ? outputs : [destination.path];
 }
 
 /**
@@ -250,9 +288,12 @@ export function extractCommandOutputPathCandidates(command: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const token of tokens) {
-    if (!isExplicitOutputPath(command, token, tokens) || seen.has(token.path)) continue;
-    seen.add(token.path);
-    out.push(token.path);
+    if (!isExplicitOutputPath(command, token, tokens)) continue;
+    for (const output of copyDirectoryOutputs(command, token, tokens)) {
+      if (seen.has(output)) continue;
+      seen.add(output);
+      out.push(output);
+    }
   }
   return out;
 }

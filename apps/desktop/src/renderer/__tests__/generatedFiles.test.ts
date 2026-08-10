@@ -265,6 +265,10 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates('Copy-Item inputs/source.txt report.txt')).toEqual([
       'report.txt',
     ]);
+    expect(extractCommandOutputPathCandidates('cp source.txt report.txt')).toEqual(['report.txt']);
+    expect(extractCommandOutputPathCandidates('copy source.txt report.txt')).toEqual([
+      'report.txt',
+    ]);
   });
 
   it('skips temp dirs, extension-less tokens, plain filenames and URLs', () => {
@@ -325,6 +329,21 @@ describe('extractCommandOutputPathCandidates', () => {
         "Set-Content -Path 'artifacts/result.txt' -Value (Get-Content 'inputs/source.txt')",
       ),
     ).toEqual(['artifacts/result.txt']);
+    expect(
+      extractCommandOutputPathCandidates(
+        "Set-Content -Value (Get-Content 'inputs/source.txt') -Path 'artifacts/result.txt'",
+      ),
+    ).toEqual(['artifacts/result.txt']);
+    expect(
+      extractCommandOutputPathCandidates(
+        "Set-Content -Value (Get-Content -Path 'inputs/source.txt') -Path 'artifacts/result.txt'",
+      ),
+    ).toEqual(['artifacts/result.txt']);
+    expect(
+      extractCommandOutputPathCandidates(
+        "Set-Content -Value (Get-Content -Path 'inputs/source.txt')",
+      ),
+    ).toEqual([]);
     expect(
       extractCommandOutputPathCandidates(
         "Set-Content $output ([System.IO.File]::ReadAllText('inputs/source.txt'))",

@@ -154,7 +154,7 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
       push(raw, start, start + raw.length);
     }
   }
-  for (const token of extractCopyItemPlainFilenameDestinations(command)) {
+  for (const token of extractCopyPlainFilenameDestinations(command)) {
     out.push(token);
   }
   return out.sort((a, b) => a.start - b.start || a.end - b.end);
@@ -178,12 +178,13 @@ const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
 const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
 const TEE_COMMAND_PREFIX_RE = /(?:^|[|;&]\s*)tee(?:\.exe)?\b[^|;&\r\n]*['"]?$/i;
 
-function extractCopyItemPlainFilenameDestinations(command: string): CommandPathToken[] {
+function extractCopyPlainFilenameDestinations(command: string): CommandPathToken[] {
   const out: CommandPathToken[] = [];
-  const commandRe = /\bCopy-Item\b([^|;\r\n]*?)(?=\|{1,2}|;|\r?$|\n)/gim;
+  const commandRe = /\b(Copy-Item|copy|cp)\b([^|;\r\n]*?)(?=\|{1,2}|;|\r?$|\n)/gim;
   for (const commandMatch of command.matchAll(commandRe)) {
-    const argsText = commandMatch[1] ?? '';
-    const argsStart = (commandMatch.index ?? 0) + commandMatch[0].indexOf(argsText);
+    const commandName = (commandMatch[1] ?? '').toLowerCase();
+    const argsText = commandMatch[2] ?? '';
+    const argsStart = (commandMatch.index ?? 0) + commandMatch[0].length - argsText.length;
     const args = [...argsText.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
       const value = match[1] ?? match[2] ?? match[3] ?? '';
       const offset = match[1] !== undefined || match[2] !== undefined ? 1 : 0;
@@ -192,6 +193,19 @@ function extractCopyItemPlainFilenameDestinations(command: string): CommandPathT
     });
     const isPlainFilename = (value: string): boolean =>
       EXT_RE.test(value) && !/[\\/<>|?*]/.test(value);
+    if (commandName !== 'copy-item') {
+      if (args.some((arg) => /^(?:-t|--target-directory(?:=|$))/i.test(arg.value))) continue;
+      const positional = args.filter(
+        (arg) =>
+          !arg.value.startsWith('-') &&
+          !(commandName === 'copy' && /^\/[A-Za-z]+$/.test(arg.value)),
+      );
+      const destination = positional.length >= 2 ? positional.at(-1) : undefined;
+      if (destination && isPlainFilename(destination.value)) {
+        out.push({ path: destination.value, start: destination.start, end: destination.end });
+      }
+      continue;
+    }
     const explicitDestinationIndex = args.findIndex((arg) =>
       /^-(?:Destination|LiteralDestination|Target)$/i.test(arg.value),
     );
@@ -224,14 +238,58 @@ function extractCopyItemPlainFilenameDestinations(command: string): CommandPathT
   return out;
 }
 
+function isTopLevelPowerShellTail(value: string): boolean {
+  let depth = 0;
+  let quote: "'" | '"' | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === '`') {
+      index += 1;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    if (char === '(' || char === '[' || char === '{') {
+      depth += 1;
+      continue;
+    }
+    if (char === ')' || char === ']' || char === '}') {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (depth === 0 && (char === ';' || char === '|' || char === '\r' || char === '\n')) {
+      return false;
+    }
+  }
+  return depth === 0;
+}
+
 function isPowerShellOutputPosition(before: string): boolean {
-  let lastCmdlet: RegExpMatchArray | null = null;
-  for (const match of before.matchAll(POWERSHELL_CMDLET_RE)) lastCmdlet = match;
-  if (!lastCmdlet || !POWERSHELL_WRITE_COMMANDS.has(lastCmdlet[0].toLowerCase())) return false;
-  const trailing = before.slice((lastCmdlet.index ?? 0) + lastCmdlet[0].length);
+  const cmdlets = [...before.matchAll(POWERSHELL_CMDLET_RE)];
+  const lastCmdlet = cmdlets.at(-1);
+  const lastWriteCmdlet = cmdlets
+    .filter((match) => POWERSHELL_WRITE_COMMANDS.has(match[0].toLowerCase()))
+    .at(-1);
+  if (!lastCmdlet || !lastWriteCmdlet) return false;
+  const writeTail = before.slice((lastWriteCmdlet.index ?? 0) + lastWriteCmdlet[0].length);
   // Support the first positional path and the cmdlets' explicit path switches.
-  // Any nested/read cmdlet becomes the last cmdlet and therefore cannot leak its input path.
-  return /^\s*['"]?$/.test(trailing) || /-(?:FilePath|LiteralPath|Path)\s+['"]?$/i.test(trailing);
+  // An explicit switch may follow a nested read expression, but it must remain at the writer's
+  // top level so a nested `Get-Content -Path` cannot leak its input path.
+  if (
+    /-(?:FilePath|LiteralPath|Path)\s+['"]?$/i.test(writeTail) &&
+    isTopLevelPowerShellTail(writeTail)
+  ) {
+    return true;
+  }
+  if (lastCmdlet.index !== lastWriteCmdlet.index) return false;
+  const trailing = before.slice((lastCmdlet.index ?? 0) + lastCmdlet[0].length);
+  return /^\s*['"]?$/.test(trailing);
 }
 
 function isExplicitOutputPath(

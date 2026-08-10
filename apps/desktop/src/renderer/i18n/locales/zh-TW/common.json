@@ -3546,6 +3546,8 @@
         "sessionContextDetail": "只在它為當前任務幹活時告知位置資訊(任務編號與專案資料夾路徑)，不包含檔案內容，也不因此獲得檔案訪問權。",
         "preview": "可在右側欄瀏覽器中開啟以下網站的預覽頁面",
         "previewDetail": "只能開啟下方列出的網站；每次開啟都會提示是哪個插件開啟的。",
+        "iosSimulator": "可查看當前任務的內建 iOS 模擬器狀態並開啟控制面板",
+        "iosSimulatorDetail": "模擬器生命週期、WDA、Native Sidecar、畫面與輸入仍由 Cindy 主機管理；插件無法取得畫面位元組、輸入權限、原生 Helper 或其他任務的 ID。",
         "nodeChildSpawn": "Node 程式可請宿主再啟動包內申報過的子處理程序",
         "nodeChildSpawnDetail": "只能啟動它自己包裡申報過的 JS 檔案(與主程式同樣的本機權限)，不能執行任意命令；插件停用或退出時子處理程序一併關閉。",
         "skill": "為 AI 助手新增技能「{{name}}」",
@@ -3560,6 +3562,7 @@
       },
       "errors": {
         "fileInvalid": "不是合法的 .cindy 插件檔案",
+        "hostUnsupported": "這個插件需要目前版本尚未提供的 Cindy 能力。請先更新 Cindy，再重新安裝。",
         "alreadyInstalled": "這個插件已經安裝",
         "commandConflict": "它的指令和已裝插件撞名了，先解除安裝佔用方或讓作者改名",
         "idReserved": "該 id 使用了官方保留字首 cindy-，僅隨應用內建的插件可用",
@@ -3664,7 +3667,8 @@
         "slotBadge": "未讀角標",
         "slotFs": "寫檔案",
         "slotSkill": "Agent 技能",
-        "slotWorkspace": "工作區任務"
+        "slotWorkspace": "工作區任務",
+        "slotIOSSimulator": "內建 iOS 模擬器"
       },
       "commandPaletteTag": "插件指令",
       "updateConfirm": {
@@ -6382,6 +6386,9 @@
       "mention": "提及插件 · {{names}}",
       "mentionExpandAria": "檢視追加給模型的提示原文",
       "mentionDirectiveLabel": "追加給模型的提示",
+      "hostCapabilityExpandAria": "檢視所選 Cindy 能力的路由說明",
+      "hostCapabilityDirectiveLabel": "傳送給 Agent 的 Cindy 能力路由",
+      "hostCapabilityLegend": "高亮 = 目前選擇 · 其餘為 Cindy 固定路由說明",
       "semanticExpandAria": "檢視本次呼叫說明",
       "semanticNote": "AI 根據訊息語義自主呼叫了這個插件；本條訊息未追加任何機器指令。",
       "listSeparator": "、",
@@ -8865,6 +8872,7 @@
     "addFiles": "新增檔案、圖片或影片…",
     "pluginsTitle": "已安裝的插件",
     "pluginDisabled": "未生效",
+    "pluginAgentInvoked": "Agent 自動呼叫",
     "pluginNoCommand": "不可直接使用",
     "sectionTitle": "引用目錄(只讀)",
     "empty": "還沒有引用目錄",

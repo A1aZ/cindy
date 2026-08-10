@@ -920,6 +920,18 @@ describe('Maker Pi runtime skill status', () => {
         generation: 1,
         status: 'loaded',
         source: 'pi:get_commands',
+        projectResources: {
+          status: 'approved',
+          reason: 'runtime-skills-confirmed',
+          approvalRevision: `rev-${opts.sessionId}`,
+          requestedSkillCount: 1,
+          loadedSkillCount: 1,
+          loadedSkills: [{
+            sourcePath: `/repo/.pi/skills/${opts.sessionId}-skill`,
+            runtimePath: `/isolated/${opts.sessionId}/project-resources/skills/0/${opts.sessionId}-skill`,
+            commandName: `skill:${opts.sessionId}-frontmatter-name`,
+          }],
+        },
         commands: [
           {
             name: `skill:${opts.sessionId}-frontmatter-name`,
@@ -927,8 +939,8 @@ describe('Maker Pi runtime skill status', () => {
             sourceInfo: {
               source: 'local',
               scope: 'temporary',
-              baseDir: `/repo/.pi/skills/${opts.sessionId}-skill`,
-              path: `/repo/.pi/skills/${opts.sessionId}-skill/SKILL.md`,
+              baseDir: `/isolated/${opts.sessionId}/project-resources/skills/0/${opts.sessionId}-skill`,
+              path: `/isolated/${opts.sessionId}/project-resources/skills/0/${opts.sessionId}-skill/SKILL.md`,
             },
           },
           {

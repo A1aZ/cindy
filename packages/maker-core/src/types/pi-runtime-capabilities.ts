@@ -53,6 +53,12 @@ export interface PiProjectResourceRuntimeDiagnostic {
   requestedSkillCount: number;
   /** Present only when this session's get_commands returned a valid catalog. */
   loadedSkillCount?: number;
+  /** Exact source↔snapshot mappings confirmed by this session's get_commands. */
+  loadedSkills?: readonly {
+    sourcePath: string;
+    runtimePath: string;
+    commandName: string;
+  }[];
 }
 
 /**

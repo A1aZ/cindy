@@ -1,10 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
+import {
+  constants,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
   assembleApprovedPiProjectResources,
   reconcilePiProjectResourceRuntime,
+  stageApprovedPiProjectResources,
   unavailablePiProjectResourceAssembly,
 } from '../project-resource-assembly.js';
+import { piProjectKey } from '../project-trust.js';
 import type {
   PiProjectApprovalSnapshot,
   PiProjectTrustInputSnapshot,
@@ -45,6 +61,45 @@ const approved = (workingDir: string, revision: string): PiProjectApprovalSnapsh
   scopeKey: `${workingDir.split('/').slice(0, 3).join('/')}\0${workingDir}`,
   revision,
 });
+
+function inputForRepoRoot(
+  workingDir: string,
+  revision: string,
+  skills: readonly string[],
+): PiProjectTrustInputSnapshot {
+  const identity: PiProjectTrustInputSnapshot['identity'] = {
+    workingDir,
+    canonicalWorkingDir: workingDir,
+    canonicalRepoRoot: workingDir,
+    repoRootStatus: 'resolved',
+    platform: process.platform === 'win32' ? 'win32' : 'posix',
+    canonicalPathEncoding: process.platform === 'win32' ? 'utf16-lossless' : 'utf8-lossless',
+    ...(process.platform === 'win32'
+      ? { windowsCaseComparison: 'ordinal-insensitive' as const }
+      : {}),
+  };
+  const scopeKey = piProjectKey(identity);
+  if (!scopeKey) throw new Error('test project identity must be canonical');
+  return {
+    identity,
+    approval: {
+      status: 'approved',
+      scope: 'working-dir',
+      scopeKey,
+      revision,
+    },
+    discovered: {
+      skills,
+      canonicalSkillEvidence: skills.map((skillPath) => ({
+        discoveredPath: skillPath,
+        canonicalPath: skillPath,
+      })),
+      settings: [],
+      packages: [],
+      extensions: [],
+    },
+  };
+}
 
 const available = {
   stat: async (candidate: string) => ({
@@ -105,6 +160,7 @@ describe('Pi approved project resource assembly', () => {
     expect(unavailablePiProjectResourceAssembly('approval-resolver-unavailable')).toEqual({
       decision: null,
       skillPaths: [],
+      launchSkillPaths: [],
       diagnostic: {
         status: 'unavailable',
         reason: 'approval-resolver-unavailable',
@@ -218,7 +274,7 @@ describe('Pi approved project resource assembly', () => {
     expect(result.diagnostic.reason).toBe('approval-matched');
   });
 
-  it('allows an approved single-file markdown skill', async () => {
+  it('keeps a single-file markdown skill discovered because Cindy project scanning only approves directories', async () => {
     const workingDir = '/repo-a/packages/app';
     const skillFile = `${workingDir}/.pi/skills/demo.md`;
     const result = await assembleApprovedPiProjectResources(
@@ -227,27 +283,111 @@ describe('Pi approved project resource assembly', () => {
       available,
     );
 
-    expect(result.skillPaths).toEqual([skillFile]);
-    expect(result.diagnostic.reason).toBe('approval-matched');
-    expect(reconcilePiProjectResourceRuntime(result, {
-      capturedAt: '2026-08-10T00:00:00.000Z',
-      generation: 1,
-      status: 'loaded',
-      source: 'pi:get_commands',
-      commands: [{
-        name: 'skill:demo-file',
-        source: 'skill',
-        sourceInfo: {
-          scope: 'temporary',
-          source: 'local',
-          baseDir: `${workingDir}/.pi/skills`,
-          path: skillFile,
-        },
-      }],
-    })).toMatchObject({
-      reason: 'runtime-skills-confirmed',
-      loadedSkillCount: 1,
-    });
+    expect(result.skillPaths).toEqual([]);
+    expect(result.launchSkillPaths).toEqual([]);
+    expect(result.diagnostic.reason).toBe('approved-skill-path-unavailable');
+  });
+
+  it('pins a complete directory skill inside configHome before Pi receives it', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-stage-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo', 'packages', 'app');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(path.join(skillPath, 'assets'), { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# approved snapshot\n');
+      writeFileSync(path.join(skillPath, 'assets', 'fixture.txt'), 'snapshot asset\n');
+      const input = inputForRepoRoot(workingDir, 'rev-stage', [skillPath]);
+      const assembled = await assembleApprovedPiProjectResources(input, workingDir);
+      const openSpy = vi.spyOn(fsPromises, 'open');
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      expect(staged.skillPaths).toEqual([skillPath]);
+      expect(staged.launchSkillPaths).toHaveLength(1);
+      expect(staged.launchSkillPaths[0]).toBe(
+        path.join(configHome, 'project-resources', 'skills', '0', 'demo'),
+      );
+      expect(readFileSync(path.join(staged.launchSkillPaths[0]!, 'SKILL.md'), 'utf8'))
+        .toBe('# approved snapshot\n');
+      expect(readFileSync(path.join(staged.launchSkillPaths[0]!, 'assets', 'fixture.txt'), 'utf8'))
+        .toBe('snapshot asset\n');
+      const nonBlockingFlag = constants.O_NONBLOCK ?? 0;
+      expect((openSpy.mock.calls[0]?.[1] as number) & nonBlockingFlag)
+        .toBe(nonBlockingFlag);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the launch snapshot immutable when the project skill is retargeted before spawn', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-retarget-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const outsideSkill = path.join(root, 'outside-skill');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      mkdirSync(outsideSkill, { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# approved\n');
+      writeFileSync(path.join(outsideSkill, 'SKILL.md'), '# outside\n');
+      const assembled = await assembleApprovedPiProjectResources(
+        inputForRepoRoot(workingDir, 'rev-retarget', [skillPath]),
+        workingDir,
+      );
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      renameSync(skillPath, `${skillPath}-approved-old`);
+      symlinkSync(outsideSkill, skillPath, process.platform === 'win32' ? 'junction' : 'dir');
+
+      expect(readFileSync(path.join(staged.launchSkillPaths[0]!, 'SKILL.md'), 'utf8'))
+        .toBe('# approved\n');
+      expect(staged.launchSkillPaths[0]).not.toBe(skillPath);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the entire snapshot closed when a nested symlink escapes the approved repo', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-escape-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo');
+    const first = path.join(workingDir, '.pi', 'skills', 'first');
+    const second = path.join(workingDir, '.pi', 'skills', 'second');
+    const outsideDir = path.join(root, 'outside-dir');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(first, { recursive: true });
+      mkdirSync(second, { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(path.join(first, 'SKILL.md'), '# first\n');
+      writeFileSync(path.join(second, 'SKILL.md'), '# second\n');
+      mkdirSync(outsideDir, { recursive: true });
+      writeFileSync(path.join(outsideDir, 'outside.txt'), 'outside\n');
+      symlinkSync(
+        outsideDir,
+        path.join(second, 'outside-dir'),
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+      const assembled = await assembleApprovedPiProjectResources(
+        inputForRepoRoot(workingDir, 'rev-escape', [first, second]),
+        workingDir,
+      );
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      expect(staged.skillPaths).toEqual([]);
+      expect(staged.launchSkillPaths).toEqual([]);
+      expect(staged.diagnostic).toMatchObject({
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('invalidates a skill whose SKILL.md entrypoint disappeared before launch', async () => {
@@ -324,6 +464,10 @@ describe('Pi approved project resource assembly', () => {
       available,
     );
     const skillPath = assembly.skillPaths[0]!;
+    const runtimeAssembly = {
+      ...assembly,
+      launchSkillPaths: [skillPath],
+    };
     const baseManifest = {
       capturedAt: '2026-08-10T00:00:00.000Z',
       generation: 1,
@@ -331,7 +475,7 @@ describe('Pi approved project resource assembly', () => {
       source: 'pi:get_commands' as const,
     };
 
-    expect(reconcilePiProjectResourceRuntime(assembly, {
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
       ...baseManifest,
       commands: [{
         name: 'skill:demo',
@@ -347,9 +491,14 @@ describe('Pi approved project resource assembly', () => {
       reason: 'runtime-skills-confirmed',
       requestedSkillCount: 1,
       loadedSkillCount: 1,
+      loadedSkills: [{
+        sourcePath: skillPath,
+        runtimePath: skillPath,
+        commandName: 'skill:demo',
+      }],
     });
 
-    expect(reconcilePiProjectResourceRuntime(assembly, {
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
       ...baseManifest,
       commands: [{
         name: 'skill:demo',
@@ -362,7 +511,25 @@ describe('Pi approved project resource assembly', () => {
       loadedSkillCount: 0,
     });
 
-    expect(reconcilePiProjectResourceRuntime(assembly, {
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
+      ...baseManifest,
+      commands: [{
+        name: 'not-a-skill-command',
+        source: 'skill',
+        sourceInfo: {
+          scope: 'temporary',
+          source: 'local',
+          baseDir: skillPath,
+          path: `${skillPath}/SKILL.md`,
+        },
+      }],
+    })).toMatchObject({
+      reason: 'runtime-skills-missing',
+      loadedSkillCount: 0,
+      loadedSkills: [],
+    });
+
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
       ...baseManifest,
       commands: [{
         name: 'skill:demo',
@@ -379,7 +546,7 @@ describe('Pi approved project resource assembly', () => {
       loadedSkillCount: 0,
     });
 
-    expect(reconcilePiProjectResourceRuntime(assembly, {
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
       ...baseManifest,
       commands: [{
         name: 'skill:demo',
@@ -396,7 +563,7 @@ describe('Pi approved project resource assembly', () => {
       loadedSkillCount: 0,
     });
 
-    expect(reconcilePiProjectResourceRuntime(assembly, {
+    expect(reconcilePiProjectResourceRuntime(runtimeAssembly, {
       ...baseManifest,
       commands: [{
         name: 'skill:demo',

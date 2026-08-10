@@ -874,6 +874,40 @@ describe.skipIf(!existsSync(PI_BINARY))('Pi v0.83.0 RPC resource discovery facts
     ]));
   });
 
+  it('loads an explicit immutable skill snapshot from a non-auto-scanned configHome directory', async () => {
+    const fixture = await createFixture('pi-rpc-config-home-snapshot-');
+    const snapshotSkill = path.join(
+      fixture.configHome,
+      'project-resources',
+      'skills',
+      '0',
+      'snapshot-skill',
+    );
+    writeSkill(snapshotSkill, 'snapshot-skill');
+    const result = await runGetCommands({
+      binaryPath: PI_BINARY,
+      cwd: fixture.workingDir,
+      configHome: fixture.configHome,
+      sessionDir: fixture.sessionDir,
+      approve: false,
+      extraArgs: ['--no-extensions', '--skill', snapshotSkill],
+    });
+
+    expect(result.commands).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        name: 'skill:snapshot-skill',
+        source: 'skill',
+        sourceInfo: expect.objectContaining({
+          baseDir: snapshotSkill,
+          path: path.join(snapshotSkill, 'SKILL.md'),
+          source: 'local',
+          scope: 'temporary',
+        }),
+      }),
+    ]));
+    expect(result.commands.some((command) => command.name === 'skill:project-pi-skill')).toBe(false);
+  });
+
   it('reports the exact file provenance for an explicit single-file skill', async () => {
     const fixture = await createFixture('pi-rpc-explicit-file-skill-');
     const explicitSkill = path.join(fixture.workingDir, '.pi', 'skills', 'single-file.md');

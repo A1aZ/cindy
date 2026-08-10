@@ -197,6 +197,10 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
       : []);
   }
 
+  function stagedSkillPath(configHome: string, index: number, sourcePath: string): string {
+    return path.join(configHome, 'project-resources', 'skills', String(index), path.basename(sourcePath));
+  }
+
   const opts = () => ({
     sessionId: 's1',
     sessionInstanceId: 'pi-instance-1',
@@ -282,7 +286,9 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     const approvedHandle = await agent.startSession({ sessionId: 'approved', workingDir: cwd, model: 'm' });
     const revokedHandle = await agent.startSession({ sessionId: 'revoked', workingDir: cwd, model: 'm' });
 
-    expect(repeatedArgValues(knobs.spawnedArgs[0]!, '--skill')).toEqual([skillPath]);
+    expect(repeatedArgValues(knobs.spawnedArgs[0]!, '--skill')).toEqual([
+      stagedSkillPath(knobs.spawnedEnvs[0]!.PI_CODING_AGENT_DIR!, 0, skillPath),
+    ]);
     expect(repeatedArgValues(knobs.spawnedArgs[1]!, '--skill')).toEqual([]);
     await vi.waitFor(() => {
       expect(approvedHandle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
@@ -464,8 +470,12 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(home2.startsWith(runTmp)).toBe(true);
     expect(existsSync(path.join(home1, 'models.json'))).toBe(true);
     expect(existsSync(path.join(home2, 'models.json'))).toBe(true);
-    expect(repeatedArgValues(knobs.spawnedArgs[s1Index]!, '--skill')).toEqual([skillOne]);
-    expect(repeatedArgValues(knobs.spawnedArgs[s2Index]!, '--skill')).toEqual([skillTwo]);
+    expect(repeatedArgValues(knobs.spawnedArgs[s1Index]!, '--skill')).toEqual([
+      stagedSkillPath(home1, 0, skillOne),
+    ]);
+    expect(repeatedArgValues(knobs.spawnedArgs[s2Index]!, '--skill')).toEqual([
+      stagedSkillPath(home2, 0, skillTwo),
+    ]);
     await vi.waitFor(() => {
       expect(h1.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
         approvalRevision: 'rev-s1', requestedSkillCount: 1,
@@ -515,7 +525,9 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     expect(knobs.spawnedEnvs[approvedIndex]!.CINDY_PI_PERMISSION_FILE).not.toBe(
       knobs.spawnedEnvs[reviewIndex]!.CINDY_PI_PERMISSION_FILE,
     );
-    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--skill')).toEqual([skillPath]);
+    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--skill')).toEqual([
+      stagedSkillPath(approvedHome, 0, skillPath),
+    ]);
     expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--skill')).toEqual([]);
     expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--extension')).toEqual([
       path.join(approvedHome, 'extensions', 'cindy-bridge.ts'),

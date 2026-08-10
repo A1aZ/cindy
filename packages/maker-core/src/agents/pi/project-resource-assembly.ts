@@ -1,5 +1,7 @@
 import fs from 'node:fs/promises';
+import { constants, createWriteStream } from 'node:fs';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 
 import type {
   PiProjectTrustDecision,
@@ -26,7 +28,10 @@ export interface PiProjectResourceAssemblyDiagnostic {
 
 export interface PiProjectResourceAssemblySnapshot {
   readonly decision: PiProjectTrustDecision | null;
+  /** Canonical project paths represented by the host approval snapshot. */
   readonly skillPaths: readonly string[];
+  /** Per-session immutable copies that are safe to pass to Pi. */
+  readonly launchSkillPaths: readonly string[];
   readonly diagnostic: PiProjectResourceAssemblyDiagnostic;
 }
 
@@ -47,6 +52,7 @@ export function unavailablePiProjectResourceAssembly(
   return Object.freeze({
     decision: null,
     skillPaths: Object.freeze([]),
+    launchSkillPaths: Object.freeze([]),
     diagnostic: unavailableDiagnostic(reason),
   });
 }
@@ -123,13 +129,12 @@ async function validateSkillPathsImmediatelyBeforeLaunch(
       !currentRepoRoot
       || !piCanonicalPathsEqual(identity, canonicalRepoRoot, currentRepoRoot)
     ) return 'repo-mismatch';
-    if (entries.some(({ skillPath, stats, skillFileStats }) =>
-      (!stats.isDirectory() && (!stats.isFile() || pathApi.extname(skillPath) !== '.md'))
-      || (stats.isDirectory() && !skillFileStats?.isFile()))) return 'unavailable';
+    if (entries.some(({ stats, skillFileStats }) =>
+      !stats.isDirectory() || !skillFileStats?.isFile())) return 'unavailable';
     return entries.every(({ skillPath, resolvedPath, stats, resolvedSkillFile }) =>
       piCanonicalPathsEqual(identity, skillPath, resolvedPath)
       && piCanonicalPathIsWithin(identity, canonicalRepoRoot, resolvedPath)
-      && (!stats.isDirectory() || (
+      && (stats.isDirectory() && (
         typeof resolvedSkillFile === 'string'
         && piCanonicalPathIsWithin(identity, canonicalRepoRoot, resolvedSkillFile)
       )))
@@ -200,6 +205,7 @@ export async function assembleApprovedPiProjectResources(
   return Object.freeze({
     decision,
     skillPaths: frozenSkillPaths,
+    launchSkillPaths: Object.freeze([]),
     diagnostic: Object.freeze({
       status: decision.status,
       reason,
@@ -207,6 +213,200 @@ export async function assembleApprovedPiProjectResources(
       requestedSkillCount: frozenSkillPaths.length,
     }),
   });
+}
+
+function localPathIsWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function sameFileIdentity(
+  first: Pick<Awaited<ReturnType<typeof fs.lstat>>, 'dev' | 'ino'>,
+  second: Pick<Awaited<ReturnType<typeof fs.lstat>>, 'dev' | 'ino'>,
+): boolean {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+async function materializeSkillEntry(
+  sourcePath: string,
+  targetPath: string,
+  canonicalRepoRoot: string,
+  activeDirectories: Set<string>,
+): Promise<void> {
+  const [entry, canonicalSource] = await Promise.all([
+    fs.lstat(sourcePath),
+    fs.realpath(sourcePath),
+  ]);
+  if (!localPathIsWithin(canonicalRepoRoot, canonicalSource)) {
+    throw new Error('approved skill entry escaped its repository');
+  }
+
+  if (entry.isSymbolicLink()) {
+    await materializeSkillEntry(canonicalSource, targetPath, canonicalRepoRoot, activeDirectories);
+    return;
+  }
+  if (entry.isDirectory()) {
+    if (activeDirectories.has(canonicalSource)) {
+      throw new Error('approved skill contains a directory cycle');
+    }
+    activeDirectories.add(canonicalSource);
+    try {
+      await fs.mkdir(targetPath, { recursive: false });
+      const children = await fs.readdir(sourcePath, { withFileTypes: true });
+      for (const child of children) {
+        await materializeSkillEntry(
+          path.join(sourcePath, child.name),
+          path.join(targetPath, child.name),
+          canonicalRepoRoot,
+          activeDirectories,
+        );
+      }
+      const [canonicalAfterCopy, entryAfterCopy] = await Promise.all([
+        fs.realpath(sourcePath),
+        fs.lstat(sourcePath),
+      ]);
+      if (
+        path.relative(canonicalAfterCopy, canonicalSource) !== ''
+        || !entryAfterCopy.isDirectory()
+        || !sameFileIdentity(entry, entryAfterCopy)
+      ) {
+        throw new Error('approved skill directory changed while snapshotting');
+      }
+    } finally {
+      activeDirectories.delete(canonicalSource);
+    }
+    return;
+  }
+  if (!entry.isFile()) throw new Error('approved skill contains a special file');
+
+  const sourceHandle = await fs.open(
+    sourcePath,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const openedEntry = await sourceHandle.stat();
+    if (!openedEntry.isFile() || !sameFileIdentity(entry, openedEntry)) {
+      throw new Error('approved skill file changed before snapshot read');
+    }
+    await pipeline(
+      sourceHandle.createReadStream({ autoClose: false }),
+      createWriteStream(targetPath, { flags: 'wx', mode: openedEntry.mode }),
+    );
+    const [openedAfterCopy, sourcePathAfterCopy, sourceAfterCopy, targetAfterCopy] =
+      await Promise.all([
+        sourceHandle.stat(),
+        fs.lstat(sourcePath),
+        fs.realpath(sourcePath),
+        fs.lstat(targetPath),
+      ]);
+    if (
+      !sameFileIdentity(openedEntry, openedAfterCopy)
+      || !sameFileIdentity(openedEntry, sourcePathAfterCopy)
+      || path.relative(sourceAfterCopy, canonicalSource) !== ''
+      || !targetAfterCopy.isFile()
+    ) {
+      throw new Error('approved skill file changed while snapshotting');
+    }
+    await fs.chmod(targetPath, openedEntry.mode & 0o777);
+  } finally {
+    await sourceHandle.close();
+  }
+}
+
+async function assertMaterializedTreeContainsNoLinksOrSpecialFiles(root: string): Promise<void> {
+  const entries = await fs.readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    const entryPath = path.join(root, entry.name);
+    const stats = await fs.lstat(entryPath);
+    if (stats.isSymbolicLink()) throw new Error('skill snapshot contains a symbolic link');
+    if (stats.isDirectory()) {
+      await assertMaterializedTreeContainsNoLinksOrSpecialFiles(entryPath);
+    } else if (!stats.isFile()) {
+      throw new Error('skill snapshot contains a special file');
+    }
+  }
+}
+
+/**
+ * Materialize every approved directory into this session's isolated configHome.
+ * Pi never receives a mutable project path: the whole set is staged off-path,
+ * audited, and atomically published only after every skill succeeds.
+ */
+export async function stageApprovedPiProjectResources(
+  assembly: PiProjectResourceAssemblySnapshot,
+  configHome: string,
+): Promise<PiProjectResourceAssemblySnapshot> {
+  if (assembly.skillPaths.length === 0) return assembly;
+  const canonicalRepoRoot = assembly.decision?.canonicalRepoRoot;
+  if (!canonicalRepoRoot) {
+    return Object.freeze({
+      ...assembly,
+      skillPaths: Object.freeze([]),
+      launchSkillPaths: Object.freeze([]),
+      diagnostic: Object.freeze({
+        ...assembly.diagnostic,
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      }),
+    });
+  }
+
+  let temporaryRoot: string | null = null;
+  try {
+    temporaryRoot = await fs.mkdtemp(path.join(configHome, '.project-resources-'));
+    const temporarySkillsRoot = path.join(temporaryRoot, 'skills');
+    await fs.mkdir(temporarySkillsRoot);
+    const relativeLaunchPaths: string[] = [];
+    for (const [index, sourcePath] of assembly.skillPaths.entries()) {
+      const skillName = path.basename(sourcePath);
+      const relativePath = path.join('skills', String(index), skillName);
+      const targetPath = path.join(temporaryRoot, relativePath);
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await materializeSkillEntry(
+        sourcePath,
+        targetPath,
+        canonicalRepoRoot,
+        new Set<string>(),
+      );
+      const [canonicalSourceAfterCopy, skillEntrypoint] = await Promise.all([
+        fs.realpath(sourcePath),
+        fs.lstat(path.join(targetPath, 'SKILL.md')),
+      ]);
+      if (path.resolve(canonicalSourceAfterCopy) !== path.resolve(sourcePath) || !skillEntrypoint.isFile()) {
+        throw new Error('approved skill changed before snapshot publication');
+      }
+      relativeLaunchPaths.push(relativePath);
+    }
+    await assertMaterializedTreeContainsNoLinksOrSpecialFiles(temporarySkillsRoot);
+
+    const publishedRoot = path.join(configHome, 'project-resources');
+    await fs.rename(temporaryRoot, publishedRoot);
+    temporaryRoot = null;
+    const launchSkillPaths = Object.freeze(relativeLaunchPaths.map((relativePath) =>
+      path.join(publishedRoot, relativePath)));
+    return Object.freeze({
+      ...assembly,
+      launchSkillPaths,
+      diagnostic: Object.freeze({
+        ...assembly.diagnostic,
+        requestedSkillCount: launchSkillPaths.length,
+      }),
+    });
+  } catch {
+    if (temporaryRoot) {
+      await fs.rm(temporaryRoot, { recursive: true, force: true }).catch(() => undefined);
+    }
+    return Object.freeze({
+      ...assembly,
+      skillPaths: Object.freeze([]),
+      launchSkillPaths: Object.freeze([]),
+      diagnostic: Object.freeze({
+        ...assembly.diagnostic,
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      }),
+    });
+  }
 }
 
 function comparableRuntimePath(value: string): string {
@@ -225,15 +425,22 @@ export function reconcilePiProjectResourceRuntime(
   assembly: PiProjectResourceAssemblySnapshot,
   manifest: PiRuntimeCapabilityManifest,
 ): PiProjectResourceRuntimeDiagnostic {
-  if (manifest.status !== 'loaded' || assembly.skillPaths.length === 0) {
+  if (manifest.status !== 'loaded' || assembly.launchSkillPaths.length === 0) {
     return assembly.diagnostic;
   }
 
-  const expectedPaths = new Set(assembly.skillPaths.map(comparableRuntimePath));
-  const loadedPaths = new Set(manifest.commands.flatMap((command) => {
+  const expectedPaths = new Set(assembly.launchSkillPaths.map(comparableRuntimePath));
+  const loadedPaths = new Map(manifest.commands.flatMap((command) => {
     const skillPath = piExplicitSkillRuntimePath(command);
-    return skillPath ? [comparableRuntimePath(skillPath)] : [];
+    return skillPath && command.name.startsWith('skill:')
+      ? [[comparableRuntimePath(skillPath), command.name] as const]
+      : [];
   }));
+  const loadedSkills = assembly.launchSkillPaths.flatMap((runtimePath, index) => {
+    const commandName = loadedPaths.get(comparableRuntimePath(runtimePath));
+    const sourcePath = assembly.skillPaths[index];
+    return commandName && sourcePath ? [{ sourcePath, runtimePath, commandName }] : [];
+  });
   const loadedSkillCount = [...expectedPaths].filter((skillPath) => loadedPaths.has(skillPath)).length;
   return Object.freeze({
     ...assembly.diagnostic,
@@ -241,5 +448,6 @@ export function reconcilePiProjectResourceRuntime(
       ? 'runtime-skills-confirmed'
       : 'runtime-skills-missing',
     loadedSkillCount,
+    loadedSkills: Object.freeze(loadedSkills.map((skill) => Object.freeze(skill))),
   });
 }

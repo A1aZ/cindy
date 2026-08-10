@@ -93,10 +93,14 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
 8. **项目资源显式装配**:root、只读 subagent 与离线 fork 启动 Pi 时都必须显式传
    `--no-approve --no-extensions`;root 仅用重复 `--extension` 回装 Cindy 自有 bridge/subagent
    与 pinned plan-mode，并仅用重复 `--skill` 装配 host 从 PR3 approval snapshot 判定 eligible
-   的 canonical 项目 skill 路径。不得读取/复制项目 `.pi/settings.json`，不得传 `--approve`，
+   的项目 skill 目录。eligible canonical 目录必须先完整物化到当前会话 `configHome` 的非自动
+   扫描目录，再把隔离快照路径交给 Pi；不得把仍可变化的项目原路径直接放进 argv。复制期间
+   任一越界 symlink、特殊文件或路径替换会使整组 skills fail closed。不得读取/复制项目
+   `.pi/settings.json`，不得传 `--approve`，
    不得依赖 `PI_OFFLINE=1` 代替 packages/extensions 硬门。root 不传 `--no-skills`，以保留现有
-   user/global skill 行为；项目 skill 的 `loaded` 只能由当前会话 `get_commands` 的 exact
-   temporary/local provenance 证明。approval 真源缺失、异常、撤销、失效或路径消失时，新会话
+   user/global skill 行为；项目 skill 的 `loaded` 只能由当前会话 `get_commands` 对隔离快照路径
+   的 exact temporary/local provenance 证明。approval 真源缺失、异常、撤销、失效、路径消失
+   或快照失败时，新会话
    一律不带项目 `--skill`，并在 per-session runtime manifest 记录诊断原因。
 
 ## 5. 已交付(2026-07 里程碑)

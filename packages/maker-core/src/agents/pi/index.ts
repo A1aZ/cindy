@@ -89,6 +89,7 @@ import { capturePiRuntimeCapabilityManifest } from './runtime-capabilities.js';
 import {
   assembleApprovedPiProjectResources,
   reconcilePiProjectResourceRuntime,
+  stageApprovedPiProjectResources,
   unavailablePiProjectResourceAssembly,
 } from './project-resource-assembly.js';
 import {
@@ -1093,6 +1094,10 @@ export class PiAgent extends BaseAgent {
           trustInput,
           opts.workingDir,
         );
+        projectResourceAssembly = await stageApprovedPiProjectResources(
+          projectResourceAssembly,
+          configHome,
+        );
       } catch {
         projectResourceAssembly = unavailablePiProjectResourceAssembly(
           'approval-resolver-failed',
@@ -1125,7 +1130,7 @@ export class PiAgent extends BaseAgent {
       '--extension', bridgeExtensionPath,
       ...(!reviewMode ? ['--extension', subagentExtensionPath] : []),
       ...(!reviewMode && planModeExtAvailable ? ['--extension', planModeExtPath] : []),
-      ...projectResourceAssembly.skillPaths.flatMap((skillPath) => ['--skill', skillPath]),
+      ...projectResourceAssembly.launchSkillPaths.flatMap((skillPath) => ['--skill', skillPath]),
     ];
 
     const queue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();

@@ -167,6 +167,9 @@ function mergePiRuntimeSkillStatuses(
   if (manifest?.status !== 'loaded') return result;
   const loadedExplicitSkills = new Map<string, string>();
   const loadedLegacyProjectSkills = new Map<string, string>();
+  for (const skill of manifest.projectResources?.loadedSkills ?? []) {
+    loadedExplicitSkills.set(canonicalPiRuntimePath(skill.sourcePath), skill.commandName);
+  }
   for (const command of manifest.commands) {
     const baseDir = command.sourceInfo.baseDir;
     if (command.source !== 'skill' || !command.name.startsWith('skill:')) continue;

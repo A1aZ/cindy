@@ -1175,8 +1175,13 @@ export function ChatInput({
       wasTurnStoppedByUserRef.current = false;
     }
     // device-link 远程会话 & SSH 远程会话:maker:predict-prompt 不在 allowlist,且远程对话内容
-    // 不应送到控制端本地 provider/凭证 —— 跳过预测。
-    if (wasRunning && !showStopButton && recommendationEnabled && sessionId && deviceLinkDeviceId === undefined && !remoteHostId) {
+    // 不应送到控制端本地 provider/凭证 —— 跳过预测。deviceLinkDeviceId 为 null（已确认
+    // 本地会话）或 undefined（所有权未解析）时允许预测，非空字符串（远程会话）时拦截。
+    // deviceLinkDeviceId 语义（来自 CCAgentSessionView）：
+    //   null = 已确认本地会话 → 允许预测
+    //   undefined = 所有权尚未解析 → 允许预测（remoteHostId 门禁会拦截 SSH 远程）
+    //   string = 远程会话 → 被下面 !deviceLinkDeviceId 拦截
+    if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
       // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
       if (wasTurnStoppedByUserRef.current) return;

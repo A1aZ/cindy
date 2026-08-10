@@ -1336,10 +1336,18 @@ export default function NewRemoteSessionScreen() {
       && intent.eligibility.status !== 'ineligible'
     ) return false;
     const currentEligibility = worktreeEligibilityRef.current;
-    if (
-      currentEligibility.status !== 'eligible'
-      || currentEligibility.baseRepo !== intent.eligibility.baseRepo
-    ) return false;
+    // eligible 与 ineligible 对 current 的要求不同:eligible 需要 repo
+    // 与 baseRepo 完全匹配;ineligible 只需状态仍为 ineligible(无需
+    // baseRepo,也不可能走到下方的分支/偏好校验)。
+    if (intent.eligibility.status === 'eligible') {
+      if (
+        currentEligibility.status !== 'eligible'
+        || currentEligibility.baseRepo !== intent.eligibility.baseRepo
+      ) return false;
+    } else if (intent.eligibility.status === 'ineligible') {
+      if (currentEligibility.status !== 'ineligible') return false;
+    }
+    if (intent.eligibility.status !== 'eligible') return true;
     const currentStoredBranch = remoteSessionStore.getNewMakerWorktreeBranchPreference(
       intent.target.deviceId,
       currentEligibility.baseRepo,

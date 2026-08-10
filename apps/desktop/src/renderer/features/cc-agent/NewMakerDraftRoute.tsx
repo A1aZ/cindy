@@ -2977,10 +2977,15 @@ export function NewMakerDraftRoute() {
       // Checkbox APPLY 是双向门：无论 ON→OFF 还是 OFF→ON，创建都必须等
       // 工作端确认，否则会把旧状态误当成这次用户意图。分支 APPLY 则只在
       // Worktree ON 时阻塞；OFF 仍可直接创建普通 session，保持两条轴独立。
+      // 确认不合格(2026-08-07 裁决)时控件隐藏、勾选不生效，偏好写入在途不应
+      // 卡住普通会话创建——确认不合格目录永远不会创建 worktree。
       if (
-        wtPreferenceSavingRef.current
-        || wtPreferenceAuthorityUnknownRef.current
-        || (selectedWorktree.enabled && wtBranchPreferenceSavingRef.current)
+        selectedWorktree.confirmedIneligible !== true
+        && (
+          wtPreferenceSavingRef.current
+          || wtPreferenceAuthorityUnknownRef.current
+          || (selectedWorktree.enabled && wtBranchPreferenceSavingRef.current)
+        )
       ) {
         toast.warning(t('ccAgent.draft.deviceStillLoading'));
         return false;
@@ -3760,10 +3765,14 @@ export function NewMakerDraftRoute() {
         // while an in-flight branch write only blocks a Worktree-enabled
         // project.  OFF remains an ordinary base-repo create even if the
         // independent branch preference transaction is still settling.
+        // 确认不合格(2026-08-07 裁决)时跳过偏好写入守卫,与 Send 同口径。
         if (
-          wtPreferenceSavingRef.current
-          || wtPreferenceAuthorityUnknownRef.current
-          || (selectedWorktree.enabled && wtBranchPreferenceSavingRef.current)
+          selectedWorktree.confirmedIneligible !== true
+          && (
+            wtPreferenceSavingRef.current
+            || wtPreferenceAuthorityUnknownRef.current
+            || (selectedWorktree.enabled && wtBranchPreferenceSavingRef.current)
+          )
         ) {
           throw new Error(t('ccAgent.draft.deviceStillLoading'));
         }

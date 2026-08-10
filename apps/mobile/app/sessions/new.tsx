@@ -1326,8 +1326,8 @@ export default function NewRemoteSessionScreen() {
       || currentTarget.workingDir.trim() !== intent.target.workingDir.trim()
     ) return false;
     // ineligible 目标不创建 worktree,无需等偏好同步/就绪——提前返回,
-    // 避免偏好 GET 在途时被下方偏好守卫拦截(2026-08-07 裁决)。
-    if (intent.enabled && intent.eligibility.status === 'ineligible') return true;
+    // 避免偏好 GET 在途时被下方偏好守卫拦截;与 enabled 无关(2026-08-07 裁决)。
+    if (intent.eligibility.status === 'ineligible') return true;
     if (
       worktreePreferenceSyncKeyRef.current !== intent.preferenceSyncKey
       || worktreePreferenceReadyKeyRef.current !== intent.preferenceSyncKey

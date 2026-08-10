@@ -12,7 +12,7 @@ const h = vi.hoisted(() => ({
   trusted: true,
   predict: vi.fn(async (_params: unknown) => '下一步做什么'),
   /** 模拟 DB 返回的 session row */
-  sessionRow: { remoteHostId: null } as { remoteHostId: string | null } | undefined,
+  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null } | undefined,
 }));
 
 function nativeImageEmpty() {
@@ -193,7 +193,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   h.handlers.clear();
   h.trusted = true;
-  h.sessionRow = { remoteHostId: null };
+  h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
   h.predict.mockResolvedValue('下一步做什么');
   registerMakerTitleIpc();
 });
@@ -270,17 +270,25 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
   });
 
   it('session 为远程会话(remoteHostId 非空)时静默返回 null', async () => {
-    h.sessionRow = { remoteHostId: 'ssh-host-1' };
+    h.sessionRow = { remoteHostId: 'ssh-host-1', agentKind: 'cc' };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
   });
 
-  it('本地 session(remoteHostId=null)正常执行预测', async () => {
-    h.sessionRow = { remoteHostId: null };
+  it('本地 session(remoteHostId=null, agentKind 匹配)正常执行预测', async () => {
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: '下一步做什么' });
     expect(h.predict).toHaveBeenCalledTimes(1);
+  });
+
+  it('agentKind 不匹配时静默返回 null,不触发付费调用', async () => {
+    // renderer 上报 claude-code,DB 存的是 codex
+    h.sessionRow = { remoteHostId: null, agentKind: 'codex' };
+
+    await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
+    expect(h.predict).not.toHaveBeenCalled();
   });
 });
 

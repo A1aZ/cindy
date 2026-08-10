@@ -4,6 +4,7 @@ import { ipcMain, type WebContents } from 'electron';
 
 import { isIpcError } from '../../shared/ipc-errors.js';
 import { isGhostInstallApprovalToken, type GhostManifest } from '../../shared/ghost.js';
+import { isPluginMarketCustomIconKey } from '../../shared/pluginMarket.js';
 import {
   sendToTrustedAppWindows,
   setGhostUninstallLedgerPreparer,
@@ -12,6 +13,7 @@ import { createLogger } from '../logger.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { requireObject, requireString, throwIpcError } from '../utils/ipcValidate.js';
 import { parseMarketSource } from './sources/parse.js';
+import { LocalIconRequestGate } from './localIconRequestGate.js';
 import { PluginMarketPackagePermissionReviewBridge } from './packagePermissionReviewBridge.js';
 import { PluginMarketService } from './service.js';
 
@@ -19,9 +21,11 @@ const log = createLogger('plugin-market-ipc');
 let registered = false;
 let serviceSingleton: PluginMarketService | null = null;
 const REMOVAL_NOTICE_AVAILABLE_CHANNEL = 'plugin-market:removal-notice-available';
+const UPGRADE_NOTICE_AVAILABLE_CHANNEL = 'plugin-market:upgrade-notice-available';
 const PACKAGE_PERMISSION_REVIEW_CHANNEL = 'plugin-market:package-permission-review';
 const trackedReviewRequesters = new WeakSet<WebContents>();
 const packagePermissionReviewBridge = new PluginMarketPackagePermissionReviewBridge();
+const localIconRequestGate = new LocalIconRequestGate();
 
 function service(): PluginMarketService {
   serviceSingleton ??= new PluginMarketService();
@@ -33,6 +37,11 @@ function signalRemovalNoticeAvailable(): void {
   sendToTrustedAppWindows(REMOVAL_NOTICE_AVAILABLE_CHANNEL, undefined);
 }
 
+function signalUpgradeNoticeAvailable(): void {
+  if (!service().hasPendingUpgradeNotice()) return;
+  sendToTrustedAppWindows(UPGRADE_NOTICE_AVAILABLE_CHANNEL, undefined);
+}
+
 async function snapshotAndSignalRemovalNotice() {
   try {
     return await service().snapshot();
@@ -40,6 +49,7 @@ async function snapshotAndSignalRemovalNotice() {
     // 清理已成功但后续默认安装等步骤失败时，pending 仍必须通知 Renderer；
     // snapshot 的原始异常继续向上抛，不把通知信号伪装成整轮成功。
     signalRemovalNoticeAvailable();
+    signalUpgradeNoticeAvailable();
   }
 }
 
@@ -105,11 +115,37 @@ export function registerPluginMarketIpc(): void {
     assertTrustedAppRendererEvent(event);
     return invokePluginMarket(async () => service().consumeRemovalNotice());
   });
+  ipcMain.handle('plugin-market:consume-upgrade-notice', (event) => {
+    assertTrustedAppRendererEvent(event);
+    return invokePluginMarket(async () => service().consumeUpgradeNotice());
+  });
   ipcMain.handle('plugin-market:detail', (event, pluginId: unknown) => {
     assertTrustedAppRendererEvent(event);
     return invokePluginMarket(() =>
       service().detail(requireString(pluginId, 'pluginId')),
     );
+  });
+  ipcMain.handle('plugin-market:local-icons', (event, raw: unknown) => {
+    assertTrustedAppRendererEvent(event);
+    if (!Array.isArray(raw) || raw.length > 8) {
+      throwIpcError('INVALID_PARAMS', 'local icon requests must contain at most 8 entries');
+    }
+    const requests = raw.map((entry) => {
+      const payload = requireObject(entry);
+      const pluginId = requireString(payload.pluginId, 'pluginId');
+      const expectedIconKey = requireString(payload.expectedIconKey, 'expectedIconKey');
+      if (pluginId.length > 1024 || !isPluginMarketCustomIconKey(expectedIconKey)) {
+        throwIpcError('INVALID_PARAMS', 'Invalid local Plugin icon request');
+      }
+      return { pluginId, expectedIconKey };
+    });
+    return invokePluginMarket(() => {
+      const request = localIconRequestGate.tryRun(() => service().localIcons(requests));
+      if (!request) {
+        throwIpcError('PRECONDITION_FAILED', 'Too many local Plugin icon requests');
+      }
+      return request;
+    });
   });
   ipcMain.handle(
     'plugin-market:install',

@@ -24,7 +24,9 @@ import type { GroupMessagePayload, TaskDispatchPayload } from '@cindy/slack-hook
 import {
   assembleGroupWindowContext,
   createFenceNeutralizer,
+  DEFAULT_GROUP_WINDOW_RETENTION,
   recordGroupWindowEntry,
+  resetGroupWindowCursors,
   type GroupContextAssembly,
 } from '../im/shared/groupWindowCore.js';
 import { getDbClient } from '../localDb/client/current.js';
@@ -35,10 +37,17 @@ export type { GroupContextAssembly };
 
 const log = createLogger('hook-group-window');
 
-/** 每个 principal + 群/topic 窗口永久保留的最近行数。 */
-const WINDOW_KEEP_PER_KEY = 500;
-/** 每个 principal 跨全部群/topic 永久保留的最近行数。 */
-export const WINDOW_KEEP_PER_PRINCIPAL = 10_000;
+/**
+ * 官方 bot 这一侧生效的保留上限 —— 数值取共享默认值, 但**这份对象是官方独有的**。
+ *
+ * 额度本来就按 provider 命名空间(`telegram:<principalId>`)各算各的: 统计表以
+ * provider 为主键、回收也按 provider 过滤。两个账号同时在用就是两份独立额度,
+ * 个人 bot 的 `telegram-personal:<botId>` 更是另一块 —— 谁也吃不掉谁的份。
+ *
+ * 做成可变对象只为让测试用小阈值把回收逼出来; 拿 1 GiB 默认值写回归等于在测试
+ * 里灌一 GB 数据。
+ */
+export const GROUP_WINDOW_RETENTION = { ...DEFAULT_GROUP_WINDOW_RETENTION };
 
 /**
  * 从 externalKey 解析 Telegram 群/topic lane。
@@ -89,8 +98,13 @@ function providerOf(principalId: string): string {
  * group.message 帧入窗。返回 true 表示本次确实插入，供调用方在幂等入窗后
  * 执行一次自动通讯录登记；重放/重连的同一条消息返回 false。
  *
- * 消息先落当前主账号的本地数据库，不做 TTL；每个群/topic 只保留最近 500
- * 条，避免未受信任群成员无限占用磁盘。引用与 prompt 仍只从本机窗口读取。
+ * 消息先落当前主账号的本地数据库，不做 TTL。**保留按容量不按条数**：每个
+ * provider 命名空间 1 GiB 正文 + 500 万行安全阀（`GROUP_WINDOW_RETENTION`，
+ * 数值来自共享核心的 `DEFAULT_GROUP_WINDOW_RETENTION`），碰不到才是常态。
+ * 旧注释写的「每个群/topic 只保留最近 500 条」已不是现行策略——按条数在活跃群
+ * 里几天就把去年的内容挤没了（理由见 `groupWindowCore.ts`）。那个 500 是
+ * `CONTEXT_READ_LIMIT`，拼上下文时的**读取**窗口，不是存储上限。
+ * 引用与 prompt 仍只从本机窗口读取。
  */
 export async function recordGroupMessage(
   payload: GroupMessagePayload,
@@ -108,7 +122,7 @@ export async function recordGroupMessage(
       fileNames: payload.fileNames,
       sentAt: payload.sentAt,
     },
-    { keepPerKey: WINDOW_KEEP_PER_KEY, keepPerNamespace: WINDOW_KEEP_PER_PRINCIPAL },
+    GROUP_WINDOW_RETENTION,
   );
 }
 
@@ -124,8 +138,8 @@ export async function sweepGroupWindowExpired(): Promise<void> {
 }
 
 /**
- * 每 lane 的增量游标(上次拼装到的窗口行 id)。内存态: 重启后首次派发会
- * 重新包含整个窗口(一次性冗余, 可接受), 之后恢复增量语义。
+ * 每 lane 的增量游标(上次拼装到的窗口行 id)。内存态只作热缓存, 持久事实在
+ * hook_group_context_cursors; 重启后首次派发从本地 DB 恢复增量语义。
  */
 const contextCursors = new Map<string, number>();
 
@@ -141,7 +155,7 @@ const NO_CONTEXT: GroupContextAssembly = { prefix: '', commit: () => undefined }
 
 /**
  * 为一次 hook 派发组装本地群上下文前缀。非群 lane / 窗口为空返回空装配。
- * 只读窗口; 游标推进延迟到 commit(由 dispatcher 在任务受理后调用)。
+ * 只读窗口; 游标推进延迟到 commit(由 dispatcher 在 provider 实际受理后调用)。
  */
 export async function buildGroupContextPrefix(
   payload: TaskDispatchPayload,
@@ -172,9 +186,25 @@ export async function buildGroupContextPrefix(
   });
 }
 
-/** 测试与登出清理: 重置内存游标(窗口行随 DB 生命周期)。 */
-export function resetGroupContextCursors(): void {
-  contextCursors.clear();
+/** 测试与登出清理: 只清理官方群 provider 的内存态与持久游标。 */
+export function resetGroupContextCursors(options?: {
+  clearPersisted?: boolean;
+}): Promise<void> {
+  return resetGroupWindowCursors({
+    cursors: contextCursors,
+    providerPrefixes: ['telegram:'],
+    providerNames: ['telegram'],
+    ...(options?.clearPersisted === false ? { clearPersisted: false } : {}),
+  });
+}
+
+/** 同步生命周期入口使用的安全收口: 异步清理失败只记日志, 不产生 unhandled rejection。 */
+export function resetGroupContextCursorsSafely(options?: {
+  clearPersisted?: boolean;
+}): void {
+  void resetGroupContextCursors(options).catch((error: unknown) => {
+    log.warn(`group context cursor reset failed: ${String(error)}`);
+  });
 }
 
 /** 设置卡数据源：官方群窗口里出现过的群，按最近活跃排序。 */

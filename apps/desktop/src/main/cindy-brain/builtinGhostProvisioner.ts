@@ -17,6 +17,11 @@ import {
   resolveGhostContentPathSync,
 } from './ghostContentTree.js';
 import { validateGhostLocaleResourcesInDirectory } from './ghostLocaleFiles.js';
+import {
+  CINDY_OFFICIAL_GHOST_TRUST,
+  hasCindyOfficialTrustMetadata,
+} from './GhostManager.js';
+import { withGhostInstallLock } from './ghostInstallLock.js';
 
 /**
  * builtinGhostProvisioner — 内置意识的启动播种(第一方可信通道)。
@@ -586,32 +591,80 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           continue;
         }
 
-        const installedDir = path.join(repoRootDir, id);
-        const installedExists =
-          isRealDirectoryPath(installedDir) &&
-          (() => {
-            try {
-              return classifyGhostDirEntrySync(path.join(installedDir, GHOST_MANIFEST_FILE)) === 'file';
-            } catch {
-              return false;
+        await withGhostInstallLock(id, async () => {
+          const installedDir = path.join(repoRootDir, id);
+          const installedExists =
+            isRealDirectoryPath(installedDir) &&
+            (() => {
+              try {
+                return classifyGhostDirEntrySync(path.join(installedDir, GHOST_MANIFEST_FILE)) === 'file';
+              } catch {
+                return false;
+              }
+            })();
+
+          // 3) 受众:不命中 → 回收"播种装的"(seeded 台账内),手动装的不动。
+          if (!matchesAudience(config.get(id)?.audience, identity)) {
+            if (seeded.has(id) && installedExists) {
+              markApplyStart();
+              await deps.beforeRemove?.(id);
+              await fs.promises.rm(installedDir, { recursive: true, force: true });
+              seeded.delete(id);
+              outcome.removed.push(id);
+              log?.info('builtin ghost removed: audience no longer matches', { id });
+            } else {
+              outcome.skipped.push(id);
             }
-          })();
-
-        // 3) 受众:不命中 → 回收"播种装的"(seeded 台账内),手动装的不动。
-        if (!matchesAudience(config.get(id)?.audience, identity)) {
-          if (seeded.has(id) && installedExists) {
-            markApplyStart();
-            await deps.beforeRemove?.(id);
-            await fs.promises.rm(installedDir, { recursive: true, force: true });
-            seeded.delete(id);
-            outcome.removed.push(id);
-            log?.info('builtin ghost removed: audience no longer matches', { id });
-          } else {
-            outcome.skipped.push(id);
+            return;
           }
-          continue;
-        }
 
+          // 4) 指纹比对(忽略点开头文件:`.disabled` 是用户状态不是内容)。
+          const seedFingerprint = await fingerprintDirContent(seedDir);
+          if (seedFingerprint.hasNonRegularEntry) {
+            throw new Error('builtin seed contains a link or non-regular entry');
+          }
+          if (installedExists) {
+            const installedFingerprint = await fingerprintDirContent(installedDir);
+            if (
+              !installedFingerprint.hasNonRegularEntry &&
+              seedFingerprint.hash === installedFingerprint.hash
+            ) {
+              outcome.approved.push(manifest);
+              outcome.approvedSourceDirs[id] = seedDir;
+              if (id === 'cindy-github' && !hasCindyOfficialTrustMetadata(installedDir)) {
+                // receipt 与官方字节必须在同一把安装锁内、经同一次 staging swap
+                // 原子落位；不能在 hash 后单独给可能已被替换的目录补 trust。
+                const wasDisabled = classifyGhostDirEntrySync(path.join(installedDir, '.disabled')) === 'file';
+                markApplyStart();
+                await swapInSeed(seedDir, installedDir, repoRootDir, id, {
+                  disabled: wasDisabled,
+                  trust: CINDY_OFFICIAL_GHOST_TRUST,
+                });
+              }
+              outcome.skipped.push(id);
+              return;
+            }
+            const wasDisabled = classifyGhostDirEntrySync(path.join(installedDir, '.disabled')) === 'file';
+            markApplyStart();
+            seeded.add(id);
+            if (!writeState(repoRootDir, { removed: [...tombstones], seeded: [...seeded].sort() }, log)) {
+              seeded.delete(id);
+              throw new Error('builtin seeded ledger could not be persisted before replacement');
+            }
+            ownershipClaimPersisted = true;
+            await deps.beforeReplace?.(id);
+            await swapInSeed(seedDir, installedDir, repoRootDir, id, {
+              disabled: wasDisabled,
+              ...(id === 'cindy-github' ? { trust: CINDY_OFFICIAL_GHOST_TRUST } : {}),
+            });
+            outcome.approved.push(manifest);
+            outcome.approvedSourceDirs[id] = seedDir;
+            outcome.updated.push(manifest);
+            log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
+            return;
+          }
+
+        {
         // 4) 指纹比对(忽略点开头文件:`.disabled` 是用户状态不是内容)。
         // 种子是随应用发布的第一方输入,出现链接/FIFO/设备节点属于打包事故:
         // 必须整颗 fail closed,不能在复制时静默丢掉条目后批准一个残缺安装。
@@ -631,7 +684,7 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
             outcome.approved.push(manifest);
             outcome.approvedSourceDirs[id] = seedDir;
             outcome.skipped.push(id);
-            continue;
+            return;
           }
           const wasDisabled = (() => {
             try {
@@ -660,6 +713,10 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           log?.info('builtin ghost updated to bundled content', { id, version: manifest.version });
         } else {
           markApplyStart();
+          await swapInSeed(seedDir, installedDir, repoRootDir, id, {
+            disabled: false,
+            ...(id === 'cindy-github' ? { trust: CINDY_OFFICIAL_GHOST_TRUST } : {}),
+          });
           seeded.add(id);
           if (!writeState(repoRootDir, { removed: [...tombstones], seeded: [...seeded].sort() }, log)) {
             seeded.delete(id);
@@ -673,6 +730,7 @@ export async function provisionBuiltinGhosts(deps: ProvisionDeps): Promise<Provi
           outcome.installed.push(manifest);
           log?.info('builtin ghost installed', { id, version: manifest.version });
         }
+        });
       } catch (err) {
         // Existing ownership must survive a failed audience/orphan cleanup so the
         // next reconciliation retries instead of permanently forgetting an
@@ -939,7 +997,7 @@ async function swapInSeed(
   finalDir: string,
   repoRootDir: string,
   id: string,
-  opts: { disabled: boolean },
+  opts: { disabled: boolean; trust?: typeof CINDY_OFFICIAL_GHOST_TRUST },
 ): Promise<void> {
   const rand = crypto.randomBytes(4).toString('hex');
   const stagingDir = path.join(repoRootDir, `.cindy-provisioning-${id}-${rand}`);
@@ -949,6 +1007,12 @@ async function swapInSeed(
     await copyDirSkippingDotEntries(seedDir, stagingDir);
     if (opts.disabled) {
       await fs.promises.writeFile(path.join(stagingDir, '.disabled'), '');
+    }
+    if (opts.trust) {
+      await fs.promises.writeFile(
+        path.join(stagingDir, '.cindy-trust.json'),
+        `${JSON.stringify(opts.trust, null, 2)}\n`,
+      );
     }
   } catch (err) {
     await fs.promises.rm(stagingDir, { recursive: true, force: true }).catch(() => {});

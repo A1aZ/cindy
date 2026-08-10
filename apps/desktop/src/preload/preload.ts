@@ -64,6 +64,7 @@ import type {
 } from '../shared/local-themes';
 import type { LocalThemeImportResult } from '../shared/theme-import/types';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from '../shared/locale';
+import type { RawReleaseNotes } from '../shared/releaseNotesContent';
 import {
   MODEL_ACCESS_STATUS_CHANNEL,
   type ModelAccessStatus as ModelAccessStatusPayload,
@@ -384,6 +385,9 @@ const fanOutLegacyMigrationState = createIpcFanOut('legacy-migration:state');
 const fanOutCorruptionRestored = createIpcFanOut('local-db:corruption-restored');
 const fanOutPluginRemovalNoticeAvailable = createIpcFanOut(
   'plugin-market:removal-notice-available',
+);
+const fanOutPluginUpgradeNoticeAvailable = createIpcFanOut(
+  'plugin-market:upgrade-notice-available',
 );
 const fanOutPluginMarketPackagePermissionReview = createIpcFanOut(
   'plugin-market:package-permission-review',
@@ -933,9 +937,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 同步读不卡启动,与 app-shortcuts:get 同模式。
   layout: {
     getStateSync: (): { layout: unknown } => ipcRenderer.sendSync('layout:get'),
-    set: (layout: unknown): Promise<{ layout: unknown }> =>
+    set: (layout: unknown): Promise<{ layout: unknown; persisted: boolean }> =>
       ipcRenderer.invoke('layout:set', layout),
-    reset: (): Promise<{ layout: unknown }> => ipcRenderer.invoke('layout:reset'),
+    reset: (): Promise<{ layout: unknown; persisted: boolean }> =>
+      ipcRenderer.invoke('layout:reset'),
     onChanged: fanOutLayoutChanged,
   },
 
@@ -1017,10 +1022,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
         options: Array<{ id: string; label: string }>;
         defaultModel: { id: string; label: string } | null;
       };
-      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      /** 文本类(快问快答):选项是当前供应商目录的全部文本模型(cat: 编码钉值,
+       *  带供应商/模型/徽标等结构化字段供富列表渲染);declaredModel = 身份卡声明
+       *  的偏好模型;utilityProfiles = 存量轻量档位钉的展示名表(老钉值回显用)。 */
       text: {
-        options: Array<{ id: string; label: string }>;
+        options: Array<{
+          id: string;
+          label: string;
+          group: string;
+          providerId: string;
+          agentKind: string;
+          modelId: string;
+          modelName: string;
+          icon?: string;
+          budget: boolean;
+          subscription: boolean;
+          routing?: import('@cindy/model-providers').Provider['routing'];
+          agentSuffix?: string;
+        }>;
         defaultModel: { id: string; label: string } | null;
+        declaredModel?: { id: string; label: string } | null;
+        utilityProfiles?: Array<{ id: string; label: string }>;
       };
       /** 向量类(文本转向量):同 image/video 走目录派生。 */
       embed: {
@@ -1202,6 +1224,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('plugin-market:snapshot'),
     detail: (pluginId: string): Promise<import('../shared/pluginMarket').PluginMarketDetail> =>
       ipcRenderer.invoke('plugin-market:detail', pluginId),
+    localIcons: (
+      requests: import('../shared/pluginMarket').PluginMarketLocalIconRequest[],
+    ): Promise<import('../shared/pluginMarket').PluginMarketLocalIconResult[]> =>
+      ipcRenderer.invoke('plugin-market:local-icons', requests),
     install: (
       pluginId: string,
       options: import('../shared/pluginMarket').PluginMarketInstallOptions,
@@ -1222,6 +1248,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
       import('../shared/pluginMarket').PluginRemovalUserNotice | null
     > => ipcRenderer.invoke('plugin-market:consume-removal-notice'),
     onRemovalNoticeAvailable: fanOutPluginRemovalNoticeAvailable,
+    consumeUpgradeNotice: (): Promise<
+      import('../shared/pluginMarket').PluginUpgradeUserNotice | null
+    > => ipcRenderer.invoke('plugin-market:consume-upgrade-notice'),
+    onUpgradeNoticeAvailable: fanOutPluginUpgradeNoticeAvailable,
     listSources: (): Promise<import('../shared/pluginMarket').MarketSourceSummary[]> =>
       ipcRenderer.invoke('plugin-market:list-sources'),
     pickLocalSource: (
@@ -3668,7 +3698,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Platform is resolved in main via getPlatformKey() to keep the CDN path
   // axis identical to the hot-update manifest.
   // Returns null on 404 / network / parse error — caller decides UX.
-  fetchReleaseNotes: (version: string): Promise<RawReleaseNotesPayload | null> =>
+  fetchReleaseNotes: (version: string): Promise<RawReleaseNotes | null> =>
     ipcRenderer.invoke('release-notes:fetch', version),
 
   // Sorted ascending list of every version with a notice on the CDN. Renderer
@@ -5023,7 +5053,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
     listAgentSkills: (
       agentKind: 'claude-code' | 'codex' | 'pi',
-      params: { workingDir?: string; forceReload?: boolean },
+      params: { workingDir?: string; forceReload?: boolean; sessionId?: string },
     ): Promise<{
       success: boolean;
       error?: string;
@@ -5035,6 +5065,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         path?: string;
         scope?: string;
         enabled?: boolean;
+        runtimeStatus?: 'discovered' | 'approved' | 'loaded' | 'failed' | 'unknown';
+        runtimeCommandName?: string;
       }>;
     }> => ipcRenderer.invoke('maker:list-agent-skills', agentKind, params),
 

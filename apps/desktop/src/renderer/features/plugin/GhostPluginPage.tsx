@@ -134,6 +134,7 @@ import {
 import { AddMarketplaceDialog } from './AddMarketplaceDialog';
 import { pluginMarketErrorKey } from './lib/pluginMarketErrorKey';
 import { usePluginIconRefresh } from './lib/usePluginIconRefresh';
+import { usePluginMarketIcon } from './lib/usePluginMarketIcon';
 import { usePluginMarketForegroundRefresh } from './lib/usePluginMarketForegroundRefresh';
 import { usePluginMarketLocaleRefresh } from './lib/usePluginMarketLocaleRefresh';
 import './plugin-motion.css';
@@ -1776,6 +1777,7 @@ export function MarketPluginCard({
   onIconLoadError: () => void;
 }) {
   const { t } = useTranslation();
+  const marketIcon = usePluginMarketIcon(item, { deferUntilVisible: true });
   const unavailable = busy || item.installState === 'conflict';
   const conflictDescriptionId = useId();
   const conflictDescription =
@@ -1806,10 +1808,12 @@ export function MarketPluginCard({
         )}
       >
         <GhostPluginIcon
-          iconDataUrl={item.icon?.url}
+          iconContainerRef={marketIcon.containerRef}
+          iconDataUrl={marketIcon.iconDataUrl}
           iconId={item.ghostId}
           iconName={item.name}
-          onIconLoadError={onIconLoadError}
+          onIconLoad={marketIcon.onIconLoad}
+          onIconLoadError={() => marketIcon.onIconLoadError(onIconLoadError)}
         />
         <span className="flex min-w-0 flex-1 flex-col self-stretch pt-0.5">
           <span className="truncate text-15 font-medium text-[var(--text-primary)]">

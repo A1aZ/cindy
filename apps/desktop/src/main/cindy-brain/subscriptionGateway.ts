@@ -18,9 +18,11 @@
  * 依赖注入(规则 14):意识清单/运行态/唤醒/投递全经 deps,单测直喂。
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { isTurnContinuationBoundaryEvent } from '@cindy/maker-shared/turn-continuation';
+import { eq } from 'drizzle-orm';
 
 import {
   GHOST_ASSISTANT_HOOK_TIMEOUT_MS,
@@ -36,11 +38,14 @@ import {
   type GhostEventThinkingData,
   type GhostEventTurnEndData,
   type GhostEventTurnStartData,
+  type GhostMessageHookData,
   type GhostPipeEventPush,
   type GhostSubscribeTopic,
   type InstalledGhost,
 } from '../../shared/ghost.js';
 import { isGhostOwnerScopeUsable, type GhostOwnerScope } from './ghostOwnerScope.js';
+import { getDbClient } from '../localDb/client/current.js';
+import * as localDbSchema from '../localDb/schema.js';
 
 /** block 理由展示上限(超长截断,防意识用理由塞小作文)。 */
 const BLOCK_REASON_MAX_CHARS = 200;
@@ -53,6 +58,46 @@ type HookVerdict = {
   html?: string;
   height?: number;
 };
+
+type MessageHookContext = Pick<GhostMessageHookData, 'model'>;
+const userHookContext = new AsyncLocalStorage<MessageHookContext>();
+const assistantHookContext = new AsyncLocalStorage<Promise<MessageHookContext>>();
+
+function boundMessageHookContext(
+  context: Promise<MessageHookContext>,
+  timeoutMs: number,
+): Promise<MessageHookContext> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const fallback = new Promise<MessageHookContext>((resolve) => {
+    timer = setTimeout(() => resolve({}), timeoutMs);
+    timer.unref?.();
+  });
+  return Promise.race([context.catch(() => ({})), fallback]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** Carry the turn-start model through the asynchronous assistant-hook continuation. */
+export function withGhostAssistantHookModel<T>(model: Promise<string>, task: () => T): T {
+  const context = boundMessageHookContext(
+    model.then((value) => (value && value !== 'unknown' ? { model: value } : {})),
+    GHOST_ASSISTANT_HOOK_TIMEOUT_MS / 2,
+  );
+  return assistantHookContext.run(context, task);
+}
+
+export function resolveGhostUserHookModel(
+  turnRunning: boolean,
+  liveModel: string | undefined,
+  queuedModel: string | undefined,
+): string | undefined {
+  return turnRunning ? liveModel : queuedModel;
+}
+
+/** Carry the dispatch model through the user-hook screening continuation. */
+export function withGhostUserHookModel<T>(model: string | undefined, task: () => T): T {
+  return model && model !== 'unknown' ? userHookContext.run({ model }, task) : task();
+}
 
 /**
  * 用户消息拦截结果(will-user-message,宿主消费):
@@ -92,10 +137,24 @@ export interface GhostSubscriptionGatewayDeps {
   ownerScope?: GhostOwnerScope;
   /** hookId 生成(测试注入固定序列;缺省 randomUUID)。 */
   newHookId?(): string;
+  resolveMessageHookContext?(sessionId: string): MessageHookContext | Promise<MessageHookContext>;
   log?: {
     info(msg: string, meta?: Record<string, unknown>): void;
     warn(msg: string, meta?: Record<string, unknown>): void;
   };
+}
+
+async function readMessageHookContext(sessionId: string): Promise<MessageHookContext> {
+  const rows = await getDbClient()
+    .drizzle.select({
+      model: localDbSchema.sessions.model,
+    })
+    .from(localDbSchema.sessions)
+    .where(eq(localDbSchema.sessions.id, sessionId))
+    .limit(1);
+  const row = rows[0];
+  if (!row) return {};
+  return { model: row.model ?? undefined };
 }
 
 /** 每意识的订阅运行态。 */
@@ -310,6 +369,8 @@ export class GhostSubscriptionGateway {
   ): Promise<GhostScreenResult> {
     const ownerScope = this.captureOwnerScope();
     if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
+    let context: MessageHookContext | Promise<MessageHookContext> | undefined =
+      userHookContext.getStore();
     let currentText = input.text;
     let rewritten = false;
     let lastRewriteGhost: InstalledGhost | null = null;
@@ -319,11 +380,12 @@ export class GhostSubscriptionGateway {
       const ghostId = ghost.manifest.id;
       const e = this.entry(ghostId);
       if (e.hookFused) continue;
+      context ??= this.resolveMessageHookContext(input.sessionId, GHOST_HOOK_TIMEOUT_MS / 2);
 
       const verdict = await this.askOne(ghost, e, 'will-user-message', {
         sessionId: input.sessionId,
         text: currentText,
-      }, ownerStamp, ownerScope);
+      }, context, ownerStamp, ownerScope);
       if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
       if (verdict?.action === 'block') {
         const reason = (verdict.reason ?? '').slice(0, BLOCK_REASON_MAX_CHARS);
@@ -369,6 +431,8 @@ export class GhostSubscriptionGateway {
   ): Promise<GhostAssistantScreenResult> {
     const ownerScope = this.captureOwnerScope();
     if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
+    let context: MessageHookContext | Promise<MessageHookContext> | undefined =
+      assistantHookContext.getStore();
     let currentText = input.text;
     let lastRewriteGhost: InstalledGhost | null = null;
     let renderGhost: InstalledGhost | null = null;
@@ -380,11 +444,15 @@ export class GhostSubscriptionGateway {
       const ghostId = ghost.manifest.id;
       const e = this.entry(ghostId);
       if (e.hookFused) continue;
+      context ??= this.resolveMessageHookContext(
+        input.sessionId,
+        GHOST_ASSISTANT_HOOK_TIMEOUT_MS / 2,
+      );
 
       const verdict = await this.askOne(ghost, e, 'will-assistant-message', {
         sessionId: input.sessionId,
         text: currentText,
-      }, ownerStamp, ownerScope);
+      }, context, ownerStamp, ownerScope);
       if (!this.ownerScopeUsable(ownerScope)) return { action: 'allow' };
       if (verdict?.action === 'rewrite' && typeof verdict.text === 'string') {
         const next = verdict.text.slice(0, GHOST_HOOK_REWRITE_MAX_CHARS).trim();
@@ -427,15 +495,13 @@ export class GhostSubscriptionGateway {
   }
 
   /** 问一个意识:唤醒(如需)+ 投递 + 等裁决,整体套一只超时闸。
-   *  投递(含 wake)**不在超时闸前阻塞**——fire 后立刻进入等待,wake 挂死
-   *  (恶意/损坏意识 load 永不完成)照样 3s 放行,这才是真正的整体上界;
-   *  迟到的 wake 完成后即便把事件送出去,hookId 已过期,裁决被静默丢。
    *  返回 null = 本轮失败(已计入熔断),外层按放行继续。 */
   private async askOne(
     ghost: InstalledGhost,
     e: SubEntry,
     hookName: 'will-user-message' | 'will-assistant-message',
-    input: { sessionId: string; text: string },
+    input: GhostMessageHookData,
+    context: MessageHookContext | Promise<MessageHookContext>,
     ownerStamp?: unknown,
     ownerScope?: unknown,
   ): Promise<HookVerdict | null> {
@@ -451,9 +517,14 @@ export class GhostSubscriptionGateway {
       resolveVerdict = resolve;
     });
     this.pendingHooks.set(hookId, { ghostId, resolve: resolveVerdict });
-    const timer = setTimeout(() => {
-      if (this.pendingHooks.delete(hookId)) resolveVerdict(null); // 超时 = fail-open
-    }, timeoutMs);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const armTimeout = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (this.pendingHooks.delete(hookId)) resolveVerdict(null); // 超时 = fail-open
+      }, timeoutMs);
+    };
+    armTimeout();
 
     let deliverFailure: string | null = null;
     void (async () => {
@@ -464,7 +535,11 @@ export class GhostSubscriptionGateway {
       }
       // 常驻意识正常在跑;崩溃恢复窗口内兜底拉一次。
       if (!this.deps.isRunning(ghostId)) {
-        await this.deps.wake(ghost);
+        const wokeBeforeDeadline = await Promise.race([
+          this.deps.wake(ghost).then(() => true),
+          verdictPromise.then(() => false),
+        ]);
+        if (!wokeBeforeDeadline) return;
         if (!this.ownerScopeUsable(capturedOwner)) {
           this.invalidateOwner(ghostId, e);
           return;
@@ -474,13 +549,22 @@ export class GhostSubscriptionGateway {
         this.invalidateOwner(ghostId, e);
         return;
       }
+      const resolvedContext = context instanceof Promise ? await context : context;
+      if (!this.pendingHooks.has(hookId)) return;
+      const data: GhostMessageHookData = {
+        ...input,
+        ...(resolvedContext.model ? { model: resolvedContext.model } : {}),
+      };
       this.deps.sendToGhost(ghostId, {
         type: 'event',
         name: hookName,
         hookId,
         ts: this.deps.now(),
-        data: { sessionId: input.sessionId, text: input.text },
+        data,
       });
+      // Assistant hooks run after the turn and may grant a fresh decision
+      // window. User hooks stay inside the original end-to-end send deadline.
+      if (hookName === 'will-assistant-message' && this.pendingHooks.has(hookId)) armTimeout();
     })().catch((err) => {
       if (this.pendingHooks.delete(hookId)) {
         deliverFailure = `deliver: ${err instanceof Error ? err.message : String(err)}`;
@@ -497,6 +581,18 @@ export class GhostSubscriptionGateway {
     }
     e.hookFails = 0;
     return verdict;
+  }
+
+  private resolveMessageHookContext(
+    sessionId: string,
+    timeoutMs: number,
+  ): MessageHookContext | Promise<MessageHookContext> {
+    try {
+      const context = (this.deps.resolveMessageHookContext ?? readMessageHookContext)(sessionId);
+      return context instanceof Promise ? boundMessageHookContext(context, timeoutMs) : context;
+    } catch {
+      return {};
+    }
   }
 
   private noteHookFailure(

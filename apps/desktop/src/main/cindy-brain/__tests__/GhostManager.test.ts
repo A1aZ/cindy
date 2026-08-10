@@ -11,7 +11,7 @@ import {
   validateGhostManifest,
   type InstalledGhost,
 } from '../../../shared/ghost';
-import { GhostManager, readLegacyGhostApprovalProjection } from '../GhostManager';
+import { CINDY_OFFICIAL_GHOST_TRUST, GhostManager, readLegacyGhostApprovalProjection } from '../GhostManager';
 import { hashApprovedSkillContent } from '../ghostInstallReceipt';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
@@ -1328,7 +1328,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(byId.planted).toBe('legacy-unapproved');
   });
 
-  it.each(['manifest', 'disabled', 'trust', 'locale', 'icon', 'skill'] as const)(
+  it.each(['manifest', 'disabled', 'trust', 'locale', 'skill'] as const)(
     '恢复 backfill 在 %s 批准投影漂移时保持 fail closed',
     async (kind) => {
       const manifest = {
@@ -1376,8 +1376,6 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
           path.join(dir, 'locales', 'en.json'),
           JSON.stringify({ name: 'Replaced name' }),
         );
-      } else if (kind === 'icon') {
-        await fs.promises.writeFile(path.join(dir, 'assets', 'icon.png'), 'REPLACED ICON');
       } else {
         await fs.promises.writeFile(
           path.join(dir, 'skills', 'demo', 'SKILL.md'),
@@ -1394,7 +1392,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     },
   );
 
-  it('fails closed when the legacy icon cannot be read during approval freezing', async () => {
+  it('keeps legacy approval backfill eligible when the optional icon cannot be read', async () => {
     await writeLegacyInstall(
       'recovered',
       {
@@ -1423,9 +1421,8 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       }) as typeof fs.openSync);
 
     try {
-      await expect(
-        readLegacyGhostApprovalProjection(path.join(rootDir, 'recovered'), 'recovered'),
-      ).rejects.toThrow(/EACCES: permission denied/i);
+      const result = await readLegacyGhostApprovalProjection(path.join(rootDir, 'recovered'), 'recovered');
+      expect(result.projection.iconDataUrl).toBeUndefined();
     } finally {
       spy.mockRestore();
     }
@@ -2603,6 +2600,33 @@ describe('GhostManager · install', () => {
       onChanged,
     });
     expect(recovered.list()[0]).toMatchObject({ approval: { state: 'approved' } });
+  });
+
+  it('本地包仅自报 cindy-github 不会获得官方 trust；Host override 才能写官方 receipt', async () => {
+    const local = await makeCindy('github-local.cindy', goodManifest('cindy-github'));
+    const localResult = await manager.install(local);
+    expect(localResult).toMatchObject({ ghost: { trust: { level: 'unverified' } } });
+    await fs.promises.rm(path.join(rootDir, 'cindy-github'), { recursive: true, force: true });
+
+    const officialResult = await manager.install(local, { trustOverride: 'cindy-official' });
+    expect(officialResult).toMatchObject({ ghost: { trust: { level: 'cindy-official' } } });
+    const receipt = JSON.parse(
+      await fs.promises.readFile(path.join(rootDir, 'cindy-github', '.cindy-trust.json'), 'utf8'),
+    ) as { level?: unknown };
+    expect(receipt.level).toBe('cindy-official');
+    expect(receipt).toMatchObject(CINDY_OFFICIAL_GHOST_TRUST);
+    expect(manager.list()[0].trust).toEqual(CINDY_OFFICIAL_GHOST_TRUST);
+  });
+
+  it('残缺的官方 receipt 不会被投影为可用的官方 trust', async () => {
+    const local = await makeCindy('github-incomplete-receipt.cindy', goodManifest('cindy-github'));
+    await manager.install(local, { trustOverride: 'cindy-official' });
+    const metadataPath = path.join(rootDir, 'cindy-github', '.cindy-trust.json');
+    const metadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8')) as Record<string, unknown>;
+    delete metadata.publisherName;
+    await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
+
+    expect(manager.list()[0]?.trust).toBeUndefined();
   });
 
   it('@ 资源入口必须命中主机安装 receipt，旧安装元数据不会在升级后自动扩权', async () => {

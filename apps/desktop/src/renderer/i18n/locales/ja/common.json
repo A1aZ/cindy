@@ -131,6 +131,7 @@
       "terminalShell": "デフォルトターミナルシェル",
       "composer": "メッセージ入力",
       "linkOpen": "リンクの開き方",
+      "streamFade": "ストリーミング表示エフェクト",
       "compatMode": "ヒント",
       "voiceInput": "音声入力",
       "import": "セッションインポート",
@@ -252,7 +253,8 @@
             "listAgent": "agent に現在登録されている鍵を一覧表示:",
             "linuxStart": "ユーザーローカルの ssh-agent を起動(永続化したい場合は ~/.bashrc / ~/.zshrc に追記):",
             "win32Enable": "ssh-agent サービスを有効化(管理者 PowerShell で実行):"
-          }
+          },
+          "noSuchFileFix": "このパスはディスク上に存在しません。ホスト設定に戻って正しい秘密鍵を選び直すか、「Identity file パス」の入力を確認してください（~/.ssh/… 形式に対応し、ホームディレクトリに展開されます）。"
         }
       },
       "add": {
@@ -370,7 +372,8 @@
         "codexSyncDone": "Codex 認証情報をリモートに送りました",
         "codexSyncDoneDaemonRestartFailed": "Codex 認証情報はリモートに送信されましたが、古い daemon が再起動されませんでした — リモートに再接続してから再試行してください",
         "codexSyncFailed": "Codex 認証情報の同期に失敗",
-        "codexSyncNoLocal": "ローカルに Codex 認証情報が見つかりません — まず {{appName}} で Codex にログインしてください"
+        "codexSyncNoLocal": "ローカルに Codex 認証情報が見つかりません — まず {{appName}} で Codex にログインしてください",
+        "connectKeyFileMissing": "秘密鍵ファイルが見つからないか読み込めません: {{detail}}。パスを確認するか、ホスト設定で鍵を選び直してください。"
       },
       "silentInstall": {
         "starting": "リモート {{hostId}} に {{agent}} をインストール中…",
@@ -462,6 +465,15 @@
         "label": "サイドバーカードモード",
         "hint": "ピン留めセッションをタスク状況の要約付きカードで表示します。カードの高さは要約の長さで変わり、サイドバーを広げると 2〜3 列に自動配置されます。",
         "aria": "サイドバーカードモードを切り替える"
+      },
+      "layout": {
+        "label": "パネルレイアウト",
+        "hint": "パネルの位置と幅は次回起動時も保持されます。使いにくい配置になった場合は、初期レイアウトに戻せます。",
+        "reset": "初期レイアウトに戻す",
+        "resetSuccess": "パネルレイアウトを初期状態に戻しました",
+        "resetFailed": "パネルレイアウトを初期状態に戻せませんでした",
+        "saved": "パネル位置を保存しました。設定 → 外観から初期レイアウトに戻せます。",
+        "saveFailed": "パネル位置を保存できませんでした"
       }
     },
     "notifications": {
@@ -473,6 +485,15 @@
       "feishuHint": "連携済みの Feishu または Lark ボットからプライベートメッセージを送信します。ウィンドウが非アクティブの場合のみ送信。",
       "feishuDisabledHint": "先に「Feishu / Lark ボット」で設定し、ボットに 1 度メッセージを送ってバインドを完了してください。",
       "feishuAria": "セッション完了時の Feishu 通知を切り替え",
+      "sessionEvent": {
+        "untitled": "無題のセッション",
+        "done": "完了しました ✓",
+        "error": "実行に失敗しました",
+        "needsReply": "返信が必要です",
+        "externalDone": "Cindy · セッション「{{title}}」が完了しました ✓",
+        "externalError": "Cindy · セッション「{{title}}」の実行に失敗しました",
+        "externalNeedsReply": "Cindy · セッション「{{title}}」への返信が必要です"
+      },
       "wecomGroupLabel": "WeCom グループ通知",
       "wecomGroupHint": "自動操作の完了通知に使用します。WeCom グループボットの Webhook URL を貼り付けると、このデバイスに暗号化保存されます。",
       "wecomGroupConfiguredHint": "設定済み（キー {{maskedKey}}）。全体スイッチをオンにした後、自動操作ごとに必要に応じて送信できます。",
@@ -611,6 +632,7 @@
       "options": {
         "system": "自動 (システムに従う)",
         "zh-CN": "简体中文",
+        "zh-TW": "繁體中文",
         "en": "English",
         "ja": "日本語",
         "ko": "한국어"
@@ -922,6 +944,7 @@
         "optionDescriptions": {
           "auto": "認識サービスが自動判定",
           "zh-CN": "簡体字中国語（中国本土）",
+          "zh-TW": "繁体字中国語（台湾）",
           "en": "英語",
           "ja": "日本語",
           "ko": "韓国語"
@@ -1726,6 +1749,12 @@
         "cellLabel": "メッセージ通知",
         "hint": "接続・切断時に Bot へ通知メッセージを送信"
       },
+      "sessionNotification": {
+        "label": "セッション完了通知",
+        "cellLabel": "セッション完了または応答が必要なときに Feishu / Lark メッセージを送信",
+        "hint": "連携済みの Feishu または Lark ボットを通じて DM を送信します。ウィンドウが非アクティブなときのみ送信されます。",
+        "disabledHint": "先に Bot を設定し、バインドを完了するために DM を送信してください。"
+      },
       "bind": "連携"
     },
     "wechatBot": {
@@ -2038,6 +2067,7 @@
         "project": "プロジェクトワークスペースを切り替え",
         "model": "モデルを表示・切り替え",
         "permission": "権限モードを表示・切り替え",
+        "settings": "プロジェクトと Agent 設定を表示",
         "ctr": "デスクトップセッションをリモート操作",
         "exctr": "リモート操作を終了"
       },
@@ -2318,6 +2348,12 @@
         "sidebar": "サイドバーブラウザ",
         "external": "システムブラウザ"
       }
+    },
+    "streamFade": {
+      "title": "ストリーミング表示エフェクト",
+      "label": "出力テキストのフェードイン",
+      "hint": "返信のストリーミング中、新しいテキストが語単位で順にフェードインします。オンにするとエフェクトが有効になり、オフでは即時表示されます。システムの「視差効果を減らす」が有効な場合、このエフェクトは常にオフです。",
+      "toggleAria": "ストリーミングのフェードインを切り替え"
     },
     "chatEmbedding": {
       "cell": {
@@ -3033,6 +3069,9 @@
           "wecom": "WeCom の新規会話では、この Agent・モデル・権限モードを使用します。既存のチャットには /new で適用します。"
         },
         "agentLabel": "Agent",
+        "agentUnsupportedOnChannelHint": "{{agent}} Agent はこのチャンネルでメッセージごとの権限確認に対応していないため、メッセージを処理できません。Claude Code または Codex に切り替えてください。",
+        "agentUnsupportedOnChannelModeHint": "Agent を切り替えて /new を送信した後、新しい Agent でも権限モードの問題が表示される場合は、/permission を送信して権限モードを調整してください。",
+        "permissionModeUnsupportedOnChannelHint": "現在の Agent はこの権限モードではこのチャンネルを利用できないため、メッセージを処理できません。/permission を送信して対応する権限モードに変更してください。",
         "modelLabel": "モデル設定",
         "loading": "新規会話設定を読み込み中…",
         "loadFailed": "新規会話設定を読み込めませんでした",
@@ -3235,6 +3274,14 @@
         "unavailable": "プラグインマーケットを一時的に利用できません。インストール済みプラグインは引き続き利用できます。",
         "authenticationRequired": "プラグインマーケットを表示するには Cindy にログインしてください。",
         "notConfigured": "この環境ではプラグインマーケットが設定されていません。インストール済みプラグインは引き続き利用できます。",
+        "upgradeNotice": {
+          "single": "組織のプラグイン「{{name}}」を自動更新しました。",
+          "multiple_one": "組織の {{count}} 個のプラグインを自動更新しました。",
+          "multiple_other": "組織の {{count}} 個のプラグインを自動更新しました。",
+          "singleWithPermissions": "組織のプラグイン「{{name}}」を自動更新しました。新しい権限：{{permissions}}",
+          "multipleWithPermissions_one": "組織の {{count}} 個のプラグインを自動更新しました。新しい権限が追加されました。",
+          "multipleWithPermissions_other": "組織の {{count}} 個のプラグインを自動更新しました。新しい権限が追加されたプラグインがあります。"
+        },
         "removalNotice": {
           "single": "プラグイン「{{name}}」は組織によって削除され、このデバイス上のローカルコピーとデータはクリーンアップされました。",
           "multiple_one": "{{count}} 件のプラグインが組織によって削除され、このデバイス上のローカルコピーとデータはクリーンアップされました。",
@@ -3276,6 +3323,9 @@
           "empty": "このマーケットにはプラグイン項目がありません",
           "skippedEntries": "無効なプラグイン項目 {{count}} 件をスキップしました",
           "unreadableEntries": "プラグイン項目 {{count}} 件を一時的に読み込めません。更新して再試行してください",
+          "addedReceipt": "「{{name}}」を追加し、プラグイン {{count}} 件を検出しました",
+          "refreshedReceipt": "「{{name}}」を更新し、プラグイン {{count}} 件を検出しました",
+          "emptyWithSkippedEntries": "利用可能なプラグインが見つかりませんでした。マニフェストの項目はすべてスキップされました。ソースの種類、プラグインのディレクトリ、マニフェストを確認してください。",
           "localBadge": "ローカル",
           "defaultRef": "デフォルトブランチ",
           "neverSynced": "未同期",
@@ -3436,6 +3486,7 @@
         "cindyEmbedTextDetail": "テキストはシステムのベクトルモデルに送られて数値列に変換されます。1 回あたり最大 {{max}} 件で、モデル料金が発生する場合があります。生成されたベクトルはプラグインだけが保持し、あなたのライブラリには書き込まれません。",
         "cindySearchWeb": "Cindy AI で公開ウェブを検索できます",
         "cindySearchWebDetail": "検索では公開ウェブにアクセスし、Cindy AI の利用枠を消費する場合があります。",
+        "cindyTextOneshotModelDetail": "システムの軽量タスクモデルチェーン(自動タイトルと同じ経路)を使用します。Agent は使わず、ファイルにもアクセスしません。モデル料金が発生する場合があります。プラグインが希望モデルを宣言しています: {{model}}(現在のカタログで利用可能な場合に有効。ピン留めが優先されます)。",
         "agentUserAction": "プラグインカードをクリックした後、Agent の新しいターンを開始できます",
         "agentUserActionDetail": "1 回のクリックにつき 1 回だけ開始でき、そのカードが属するセッションでのみ使用できます。",
         "agentBackground": "バックグラウンドで Agent の新しいターンを自動的に開始できます",
@@ -3482,6 +3533,8 @@
         "networkSecretGhostInputDetail": "この資格情報はプラグイン自身の設定画面で入力を受け付けるため、入力時にはプラグインのページを経由します。その後ホストへ一度だけ渡されて暗号化保存され、保存後はプラグインから読み出せません。注入は宣言されたドメインへのリクエスト時のみホストが行います。",
         "networkSecretIdentity": "ログインメールアドレスを認証情報「{{name}}」として使用します",
         "networkSecretIdentityDetail": "値はログイン中のアカウントのメールアドレスから取得され、リクエスト時にホストが自動的に導出・注入します。入力は不要です。プラグインは設定画面に現在の身元を表示する目的で、このメールアドレスを読み取れます。",
+        "networkSecretGhCli": "認証情報「{{name}}」にはローカルの GitHub CLI ログインを優先して使用します",
+        "networkSecretGhCliDetail": "ホストは必要なときだけローカルの gh ログイントークンを読み取り、GitHub API リクエストにだけ注入します。プラグインのコードはトークンを読み取ったり保存したりできません。gh を利用できない場合は、プラグイン設定で予備の Personal Access Token を設定できます。",
         "networkSecretOrganizationIdentity": "Cindy の組織ユーザー ID を認証情報「{{name}}」として使用します",
         "networkSecretOrganizationIdentityDetail": "Cindy は必要なときに短時間有効な ID アサーションを発行し、ホストだけが明示されたサービスホストへ送信します。プラグインのコードはトークンを読み取ったり保存したりできません。",
         "networkSecretOauth": "{{host}} で OAuth 認可を行うよう案内します({{name}})",
@@ -3492,6 +3545,7 @@
         "codeDetailWithNode": "パネル UI は独立したサンドボックスで実行されます。ローカル処理は上記で宣言された Node ランタイムが提供します。",
         "added": "追加",
         "removed": "削除",
+        "updated": "更新",
         "unchanged": "他 {{count}} 件の権限は変更なし",
         "noChange": "権限に変更はありません。",
         "pick": "フォルダの選択をあなたに依頼できます",
@@ -3562,6 +3616,9 @@
             "embed.text": "テキストのベクトル化"
           },
           "defaultOption": "{{model}}(既定)",
+          "defaultOptionDeclared": "{{model}}(プラグイン宣言)",
+          "searchPlaceholder": "モデルやプロバイダを検索",
+          "budgetBadge": "割引",
           "noModels": "利用可能なモデルなし"
         },
         "errandPrefs": {
@@ -4256,11 +4313,21 @@
     "tokenLabel": "Token",
     "tokenBreakdown": "（入力 {{input}} · 出力 {{output}}）",
     "cacheLabel": "キャッシュ",
+    "timeLabel": "時間",
+    "timeAndRateValue": "{{duration}} 速度:{{rate}} トークン/秒",
     "modelLabel": "モデル",
     "staleData": "データは {{minutes}} 分前に更新されました",
+    "paceTrendFast": "現在の平均使用ペースは速めです（おおよその傾向）",
+    "paceTrendNormal": "現在の平均使用ペースは通常です（おおよその傾向）",
+    "paceTrendSlow": "現在の平均使用ペースは遅めです（おおよその傾向）",
     "waiting": "Claude サブスクリプションの使用量は次のリクエスト完了後に更新されます。"
   },
   "usageDetails": {
+    "durationSeconds": "{{value}}秒",
+    "durationMinutesSeconds": "{{minutes}}分 {{seconds}}秒",
+    "performanceLine": "速度 {{rate}} トークン/秒 · 時間 {{duration}}",
+    "performanceRateLine": "速度 {{rate}} トークン/秒",
+    "timeLine": "時間 {{duration}}",
     "costLine": "このターンの消費: {{cost}}",
     "valueLine": "このターンの token 価値: {{cost}}",
     "tokenLine": "Token: 合計 {{total}} · 入力 {{input}} · 出力 {{output}}",
@@ -4488,7 +4555,6 @@
     "review": {
       "turn": {
         "title": "このメッセージの変更",
-        "currentWorkspace": "現在のワークスペース",
         "localOnly": "メッセージ単位の正確な変更は、リモートタスクではまだ利用できません。",
         "partialNotice": "このメッセージには正確に追跡できないコマンドまたはツールの書き込みが含まれます。以下は取得できた一部のみで、完全なパッチではありません。",
         "emptyTitle": "記録された変更はありません",
@@ -5620,7 +5686,7 @@
   },
   "chatgptAuthRecovery": {
     "title": "ChatGPT のログインが無効になりました",
-    "systemSharedInvalidated": "Cindy は現在、このコンピューターの ChatGPT ログインを使用しています。このログインは無効になりました。ChatGPT App を開いて再度ログインしてから、再試行してください。",
+    "systemSharedInvalidated": "Cindy は現在、このコンピューターの ChatGPT ログインを使用しています。このログインは無効になりました。Cindy で再度ログインしてから、再試行してください。",
     "instanceIsolatedInvalidated": "Cindy は現在、個別にログインした ChatGPT アカウントを使用しています。このログインは無効になりました。Cindy で再度ログインしてから、再試行してください。",
     "unknownInvalidated": "Cindy の現在の ChatGPT ログインは無効になりました。再度ログインしてから、再試行してください。",
     "recovered": "ChatGPT ログインが復旧しました。再試行してください。",
@@ -6301,6 +6367,7 @@
       "actionUnavailable": "このメッセージには安全に元に戻せないファイル変更が含まれています",
       "actionFailed": "変更を適用できませんでした。もう一度お試しください",
       "partial": "正確に取得できた変更のみ表示しています",
+      "partialNone": "ファイルは変更されましたが、内容を記録できなかったため、ここではレビューや元に戻す操作ができません",
       "partialReversible": "元に戻す操作と再適用の対象は正確に取得された変更のみです。取得されていない変更は処理されません",
       "partialActionHint": "正確に取得されたファイル変更のみを元に戻すか再適用します",
       "showMore": "さらに {{count}} ファイルを表示",
@@ -7819,7 +7886,7 @@
   },
   "issueAgent": {
     "command": {
-      "instruction": "{{appName}} にフィードバックを送りたいです。質の高い GitHub issue にまとめるのを手伝ってください:まずフィードバックの種類(バグか機能要望か)を確認し、必要な詳細(現象、再現手順または利用シーン、期待する動作)を質問してください。情報が揃ったら cindy_helper の call_tool で submit_github_issue ツールを呼び出して提出してください(category=feedback。先に list_tools でパラメータを確認できます。提出前に確認カードが表示されます)。提出に失敗した場合は、理由をそのまま教えてください。{{details}}",
+      "instruction": "{{appName}} にフィードバックを送りたいです。情報が揃った明確な GitHub issue にまとめるのを手伝ってください:バグか機能要望かを確認し、不足または曖昧な点だけを質問してください。バグでは現象、再現手順、期待する動作と実際の動作、再現頻度、試した対処をできるだけ確認し、ユーザーの同意がある場合だけ個人情報を除いた診断の要約を含めてください。パスワード、トークン、メールアドレス、個人パス、無関係なファイル内容は含めないでください。機能要望では利用シーン、現在の困りごと、期待する結果を確認してください。情報が揃ったら cindy_helper の call_tool で submit_github_issue ツールを呼び出して提出してください(category=feedback。先に list_tools でパラメータを確認できます。提出前に確認カードが表示されます)。GitHub プラグインやアカウントの設定は不要です。既定では Cindy 公式 Bot が送信し、利用可能な GitHub アカウントがある場合のみ確認カードに追加の送信元として表示されます。作成後は issue 番号とリンクを伝え、Cindy がオープンソースであること、ソースから再現・修正・テスト・機能開発を一緒に進められることを案内してください。提出に失敗した場合は、理由をそのまま教えてください。{{details}}",
       "detailsPrefix": "\n最初の説明:{{details}}"
     },
     "confirm": {
@@ -7828,11 +7895,12 @@
       "typeFeature": "機能要望",
       "titleLabel": "タイトル",
       "bodyLabel": "本文(Markdown)",
-      "submissionMethodLabel": "公開方法",
-      "identityGithubUser": "GitHub アカウント @{{login}} から直接公開",
+      "privacyHint": "検出された一般的な秘密情報、個人パス、メールアドレスはできるだけ自動で隠します。送信前に公開内容を確認してください。",
+      "submissionMethodLabel": "送信元",
+      "identityGithubUser": "自分の GitHub アカウント @{{login}}",
       "identityGithubUserHint": "GitHub 上の Issue 作成者となり、自分で編集またはクローズできます",
-      "identityPlatform": "Cindy が代理で公開(GitHub App {{login}})",
-      "identityPlatformHint": "GitHub 上の Issue 作成者にはならず、自分で編集またはクローズできません",
+      "identityPlatform": "Cindy 公式 Bot @{{login}}（既定）",
+      "identityPlatformHint": "GitHub アカウントの設定は不要です。Issue は公式 Bot が作成し、本文に公開署名を付けられます",
       "publicNameLabel": "公開署名",
       "publicNameHint": "この署名は Issue 本文に公開表示されます",
       "anonymous": "匿名",
@@ -7879,6 +7947,9 @@
       "deny": "拒否"
     }
   },
+  "commandPalette": {
+    "projectTrustRequired": "このプロジェクトを信頼すると使用できます"
+  },
   "skillhub": {
     "home": {
       "title": "スキル",
@@ -7906,7 +7977,12 @@
     },
     "common": {
       "openFolderFailed": "フォルダを開けませんでした",
-      "close": "閉じる"
+      "close": "閉じる",
+      "statusDiscovered": "検出済み",
+      "statusApproved": "承認済み",
+      "statusLoaded": "読み込み済み",
+      "statusFailed": "読み込み失敗",
+      "statusUnknown": "不明"
     },
     "welcome": {
       "scanning": "ローカルの skill をスキャン中…",
@@ -8618,6 +8694,25 @@
       "waitingForWorker": "Worker を待機中",
       "closeAria": "閉じる"
     }
+  },
+  "splitGroup": {
+    "closeAria": "「{{title}}」のペインを閉じる",
+    "closeAll": "分割を閉じる",
+    "toggleDirection": "上下 / 左右の分割を切り替え",
+    "dropHint": "ここにセッションをドロップして開く",
+    "loadingTask": "セッションを読み込み中…",
+    "resizeAria": "セッションペインのサイズを変更",
+    "openInSplit": "分割で開く",
+    "openSide": {
+      "left": "セッションを左側で開く",
+      "right": "セッションを右側で開く",
+      "top": "セッションを上側で開く",
+      "bottom": "セッションを下側で開く"
+    },
+    "alreadyOpen": "このセッションはすでに分割内で開いています。別のセッションを選択してください。",
+    "limitReached": "1 つの分割で開けるセッションは最大 {{count}} 件です。ペインを 1 つ閉じてから、もう一度お試しください。",
+    "addUnavailable": "このセッションは現在の分割で開けません。メイン領域でセッションを開いてから、もう一度お試しください。",
+    "workerUnavailable": "Worker は個別のペインで開けません。所属する Lead セッションを開いてください。"
   },
   "extraDirs": {
     "menuAria": "操作メニュー",

@@ -26,6 +26,7 @@ type VoiceInputConnectionTestResult =
 type DesktopLoginAction = import('../shared/authIpc').DesktopLoginAction;
 type DesktopLoginActionResult = import('../shared/authIpc').DesktopLoginActionResult;
 type UtilityTextFailure = import('../shared/utilityTextResult').UtilityTextFailure;
+type ProviderRoutingPayload = import('@cindy/model-providers').Provider['routing'];
 type MakerSessionTreeSnapshot = import('@cindy/maker-core').SessionTreeSnapshot;
 type BrowserBackendHealth = import('../shared/browserBackend').BrowserBackendHealth;
 type BrowserBackendRecoveryResult = import('../shared/browserBackend').BrowserBackendRecoveryResult;
@@ -45,6 +46,7 @@ type PendingRemotePrecreatedWorktreeTarget =
   import('../shared/remotePrecreatedWorktreeLedger').PendingRemotePrecreatedWorktreeTarget;
 type RemotePrecreatedWorktreeLedgerSnapshot =
   import('../shared/remotePrecreatedWorktreeLedger').RemotePrecreatedWorktreeLedgerSnapshot;
+type RawReleaseNotesPayload = import('../shared/releaseNotesContent').RawReleaseNotes;
 
 interface NewMakerWorktreeBranchPreferenceSnapshot {
   baseRepo: string;
@@ -1144,8 +1146,11 @@ interface ElectronAPI {
     getStateSync: () => { layout: import('../shared/layoutTree').Layout };
     set: (
       layout: import('../shared/layoutTree').Layout,
-    ) => Promise<{ layout: import('../shared/layoutTree').Layout }>;
-    reset: () => Promise<{ layout: import('../shared/layoutTree').Layout }>;
+    ) => Promise<{ layout: import('../shared/layoutTree').Layout; persisted: boolean }>;
+    reset: () => Promise<{
+      layout: import('../shared/layoutTree').Layout;
+      persisted: boolean;
+    }>;
     onChanged: (
       callback: (payload: { layout: import('../shared/layoutTree').Layout }) => void,
     ) => () => void;
@@ -1199,10 +1204,28 @@ interface ElectronAPI {
         options: Array<{ id: string; label: string }>;
         defaultModel: { id: string; label: string } | null;
       };
-      /** 文本类(快问快答):选项是轻量任务模型链的档位(供应商×模型),不是媒体目录模型。 */
+      /** 文本类(快问快答):选项是当前供应商目录的全部文本模型(cat: 编码钉值,
+       *  带供应商/模型/徽标等结构化字段供富列表渲染);declaredModel = 身份卡声明
+       *  的偏好模型(目录里解析得到才给,"跟随默认"行据此如实展示实际路由)。 */
       text: {
-        options: Array<{ id: string; label: string }>;
+        options: Array<{
+          id: string;
+          label: string;
+          group: string;
+          providerId: string;
+          agentKind: string;
+          modelId: string;
+          modelName: string;
+          icon?: string;
+          budget: boolean;
+          subscription: boolean;
+          routing?: ProviderRoutingPayload;
+          agentSuffix?: string;
+        }>;
         defaultModel: { id: string; label: string } | null;
+        declaredModel?: { id: string; label: string } | null;
+        /** 存量轻量档位钉(目录扩展前的合法钉值)的展示名表,老钉值回显友好名用。 */
+        utilityProfiles?: Array<{ id: string; label: string }>;
       };
       /** 向量类(文本转向量):同 image/video 走目录派生。 */
       embed: {
@@ -1509,6 +1532,9 @@ interface ElectronAPI {
   pluginMarket: {
     snapshot: () => Promise<import('../shared/pluginMarket').PluginMarketSnapshot>;
     detail: (pluginId: string) => Promise<import('../shared/pluginMarket').PluginMarketDetail>;
+    localIcons: (
+      requests: import('../shared/pluginMarket').PluginMarketLocalIconRequest[],
+    ) => Promise<import('../shared/pluginMarket').PluginMarketLocalIconResult[]>;
     install: (
       pluginId: string,
       options: import('../shared/pluginMarket').PluginMarketInstallOptions,
@@ -1527,6 +1553,10 @@ interface ElectronAPI {
       import('../shared/pluginMarket').PluginRemovalUserNotice | null
     >;
     onRemovalNoticeAvailable: (callback: () => void) => () => void;
+    consumeUpgradeNotice: () => Promise<
+      import('../shared/pluginMarket').PluginUpgradeUserNotice | null
+    >;
+    onUpgradeNoticeAvailable: (callback: () => void) => () => void;
     listSources: () => Promise<import('../shared/pluginMarket').MarketSourceSummary[]>;
     pickLocalSource: (
       defaultPath?: string,
@@ -4676,7 +4706,7 @@ interface ElectronAPI {
 
     listAgentSkills: (
       agentKind: 'claude-code' | 'codex' | 'pi',
-      params: { workingDir?: string; forceReload?: boolean },
+      params: { workingDir?: string; forceReload?: boolean; sessionId?: string },
     ) => Promise<{
       success: boolean;
       error?: string;
@@ -4688,6 +4718,8 @@ interface ElectronAPI {
         path?: string;
         scope?: string;
         enabled?: boolean;
+        runtimeStatus?: 'discovered' | 'approved' | 'loaded' | 'failed' | 'unknown';
+        runtimeCommandName?: string;
       }>;
     }>;
 
@@ -5790,43 +5822,6 @@ interface ElectronAPI {
   };
 }
 
-/* ── Release notes raw payload shape from CDN ── */
-
-/** Author-grouped item: one block per contributor, with their bullets. */
-interface RawReleaseNotesItem {
-  name: string;
-  list: string[];
-}
-
-interface RawReleaseNotesSection {
-  title: string;
-  items: RawReleaseNotesItem[];
-}
-
-/** Topic-format (v2) block: one user-facing theme with a short narrative. */
-interface RawReleaseNotesTopic {
-  emoji?: string;
-  title: string;
-  text: string;
-  contributors?: string[];
-}
-
-interface RawReleaseNotesPayload {
-  version: string;
-  date: string;
-  /**
-   * Flat contributor list — collective hall-of-fame on top of per-item `by`.
-   * Optional: older notice files predate the field (renderer defaults to []).
-   */
-  contributors?: string[];
-  /** Legacy author-grouped sections. Absent on topic-format payloads. */
-  sections?: RawReleaseNotesSection[];
-  /** Topic-format blocks. Non-empty ⇒ renderer uses the topic layout. */
-  topics?: RawReleaseNotesTopic[];
-  /** Optional one-line lead above the topics (e.g. PR/commit counts). */
-  intro?: string;
-}
-
 /* ── SkillHub Registry types (v0.6) ──
  * Mirror of `src/main/skillhub/registry/types.ts`. Renderer uses these
  * for reading registryEntry on SkillhubSkill; no runtime import needed. */
@@ -5876,15 +5871,25 @@ interface SkillhubSkill {
   id: string;
   /** URL 匹配键 — 不含 engine，和路由格式一致，用于侧栏选中高亮。 */
   urlKey: string;
+  /** Pi customization 的 canonical physical source hash；Pi 条目始终提供。 */
+  sourceKey?: string;
+  /** 同一 URL 基键存在多个来源时，详情路由必须携带 sourceKey。 */
+  requiresSourceKey?: boolean;
   /** 来自哪个 agent 引擎。 */
   engine: 'claude-code' | 'codex' | 'pi';
   /** 发现该 skill 的所有引擎专属路径（去重后）。 */
-  linkedEngines: Array<{ engine: 'claude-code' | 'codex' | 'pi'; label: string }>;
+  linkedEngines: Array<{
+    engine: 'claude-code' | 'codex' | 'pi';
+    label: string;
+    runtimeStatus?: 'discovered' | 'approved' | 'loaded' | 'failed' | 'unknown';
+  }>;
   kind: SkillhubKind;
   scope: SkillhubScope;
   name: string;
   description?: string;
   absolutePath: string;
+  /** Lexical path reported by discovery before canonical realpath deduplication. */
+  discoveredPath?: string;
   mdPath: string;
   files: SkillhubFileEntry[];
   frontmatter?: Record<string, unknown>;

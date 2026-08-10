@@ -14,6 +14,7 @@ import {
   Maker,
   ClaudeCodeAgent,
   CodexAgent,
+  DEFAULT_AUTO_REVIEW_TIMEOUT_POLICY,
   configureDefaultImageResizer,
   type McpProvider,
 } from '@cindy/maker-core';
@@ -72,6 +73,7 @@ import {
   reconcileCodexAgentProxyEnv,
 } from '../remote-ssh/agent-proxy.js';
 import { openCcManagerSession } from './cc-manager-client.js';
+import { routeInjectedRemoteMcpApprovalsThroughCindy } from './remote-claude-permission-mode.js';
 import { getRemoteClaudeBinaryPath } from '../remote-ssh/cc-manager-install.js';
 import {
   createBashConcurrencyHooks,
@@ -128,6 +130,7 @@ import {
   unregister as unregisterCodexProxyPrompt,
 } from './codex-proxy-host.js';
 import { createDesktopMcpProviders } from '../mcp-integrations/mcp-providers.js';
+import { getGhostRosterPrompt } from '../mcp-integrations/ghost.js';
 import { readContactsSettings } from './contacts-settings-store.js';
 import {
   captureKnownFileBefore,
@@ -228,7 +231,7 @@ const reviewAutoPermissionAction = createAutoPermissionReviewer({
       agentKind: request.agentKind,
       model: request.model,
       maxTokens: 384,
-      timeoutMs: 8_000,
+      timeoutMs: DEFAULT_AUTO_REVIEW_TIMEOUT_POLICY.requestTimeoutMs,
       reasoningEffort: 'low',
     });
     return result.ok ? result.text : null;
@@ -778,6 +781,7 @@ export function getMaker(): Maker {
         if (!getPluginRegistry().isEnabled('contacts', workingDir)) return 'unavailable';
         return readContactsSettings().enabled ? 'enabled' : 'disabled';
       },
+      getGhostRosterPrompt,
       // 第一方只读工具走 SDK allowedTools, 避免 auto 模式为 discovery/read-only
       // 操作额外调用远程安全分类器; 列表按精确工具名维护, 不放行动态 call_tool。
       claudeAllowedTools: getDesktopClaudeReadOnlyAllowedTools(),
@@ -889,6 +893,12 @@ export function getMaker(): Maker {
             message: err instanceof Error ? err.message : String(err),
           });
         }
+
+        // maker-core computes the initial permission mode before this factory
+        // injects collaboration MCP servers. Native OAuth Auto bypasses the
+        // approval RPC entirely, so finalize the mode after injection but
+        // before openCcManagerSession consumes startParams.
+        routeInjectedRemoteMcpApprovalsThroughCindy(startParams, injectedServerCount);
 
         // app 重启后首轮 bridge MCP 注入:daemon 侧旧 query 若还 alive, 其
         // SDK 持有的 mcp-session-id 在新 bridge 已不存在, attach 会让协同
@@ -1063,6 +1073,7 @@ export function getMaker(): Maker {
         const applied = codexAppliedContactsEnabled ?? live;
         return applied ? 'enabled' : 'unavailable';
       },
+      getGhostRosterPrompt,
       // 模型清单 SSoT = 目录（providers.json，OSS 运行时真源 / bundled 兜底）。maker-core 的
       // CODEX_MODELS 已删、availableModels 起始为空；host 从账号可选目录派生 codex 列表注入
       // （gpt 原生 + codex/ 折扣网关路由）。「折扣GPT」codex/ 仍是「XD 网关来源」,渲染层按
@@ -1243,7 +1254,7 @@ export function getMaker(): Maker {
             : {}),
         };
       },
-      registerCodexMcpThreadContext: ({ threadId, sessionId, sessionInstanceId, workingDir, remoteHostId, vendorOptions }) => {
+      registerCodexMcpThreadContext: ({ threadId, sessionId, sessionInstanceId, mcpCallerKind, mcpCallerAttested, workingDir, remoteHostId, vendorOptions }) => {
         // Codex shares one app-server across sessions. Freeze the effective
         // ordinary-tool policy at thread creation so later Settings changes do
         // not mutate a runtime that is already running.
@@ -1253,6 +1264,8 @@ export function getMaker(): Maker {
         registerCodexMcpThreadContext(threadId, {
           agentKind: 'codex',
           sessionId,
+          mcpCallerKind,
+          mcpCallerAttested,
           ...(sessionInstanceId ? { sessionInstanceId } : {}),
           workingDir,
           // remote thread ctx: scope key 语义见 buildMemoryScopeKey。
@@ -1464,6 +1477,7 @@ export function getMaker(): Maker {
         resolvePiRuntimeModelDescriptor(getDesktopSelectableCatalog(), 'cindy', modelId),
       mcpProviders: piMcpProviders,
       makerMemory: makerMemoryManager,
+      getGhostRosterPrompt,
     });
 
     _maker = new Maker({

@@ -70,4 +70,25 @@ describe('market Ghost session boundary', () => {
     expect(source.match(/getGhost: findAvailableGhost/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
     expect(source).toContain('return findAvailableGhost(id)?.manifest.name ?? null;');
   });
+
+  it('runs the final market callback before both initial install and update placement', () => {
+    const installStart = source.indexOf(
+      'async function installOrUpdateMarketGhostPackageLocked(',
+    );
+    const installEnd = source.indexOf(
+      '\n}\n\ntype GhostUninstallLedgerCompletion',
+      installStart,
+    );
+    const body = source.slice(installStart, installEnd);
+    const initialBranch = body.slice(
+      body.indexOf('if (!installed) {'),
+      body.indexOf('const runtime = getGhostRuntime();'),
+    );
+
+    expect(initialBranch.indexOf('expected.beforeCommitInLock?.();')).toBeGreaterThan(-1);
+    expect(initialBranch.indexOf('expected.beforeCommitInLock?.();')).toBeLessThan(
+      initialBranch.indexOf('return installAndDock('),
+    );
+    expect(body.match(/expected\.beforeCommitInLock\?\.\(\);/g)).toHaveLength(2);
+  });
 });

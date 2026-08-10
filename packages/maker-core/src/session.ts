@@ -42,6 +42,7 @@ import type {
 } from './types/events.js';
 import { isTerminalAgentErrorEvent } from './types/events.js';
 import type { ContextUsageData } from './types/context-usage.js';
+import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilities.js';
 import type {
   AgentSessionHandle,
   BackgroundTaskSnapshot,
@@ -99,12 +100,12 @@ export const STALL_ABORT_RECOVERY_GRACE_MS = 10_000;
 /**
  * 手动 abort(用户按 Stop)之后的复核宽限。
  *
- * 比看门狗那条(10s)长得多是刻意的:看门狗开火前已经确诊"整条链路零事件"，可以果断;
- * 手动 Stop 只说明用户想停，transport 很可能完全健康，只是这一次 interrupt 往返慢
- * (远端 daemon / SSH 隧道)。用 10s 判它"没生效"会把正常会话误关。60s 远超任何健康
- * 往返，又给"按了 Stop 却永远停不下来"留了有界出路(review #944 第十一轮 P1)。
+ * agent 层的 abort() 已自带 interrupt 超时(10s) + turnInFlight 即刻清除;
+ * 超时后走 q.close() → U2 兜底收口。本宽限是最后的保险:只保 agent 层 timeout
+ * 和 q.close() 都失败(极度罕见)的极端情况。从 60s 缩到 15s, 与 agent 层互不叠加,
+ * 端到端最长不超过 15s(review #944 第十一轮末尾调优)。
  */
-export const MANUAL_ABORT_RECOVERY_GRACE_MS = 60_000;
+export const MANUAL_ABORT_RECOVERY_GRACE_MS = 15_000;
 
 /**
  * turn 零事件看门狗的计时分片长度。额度按片累加,片尾核对真实经过时间,
@@ -719,6 +720,18 @@ export class Session {
     return this.handle.getUsageSnapshot();
   }
 
+  /** Return the current per-session Pi runtime capability snapshot, if exposed. */
+  getRuntimeCapabilities(): PiRuntimeCapabilityManifest | undefined {
+    return this.handle.getRuntimeCapabilities?.();
+  }
+
+  /** Subscribe to replacement of the current per-session Pi runtime catalog. */
+  onRuntimeCapabilitiesChange(
+    listener: (manifest: PiRuntimeCapabilityManifest | undefined) => void,
+  ): () => void {
+    return this.handle.onRuntimeCapabilitiesChange?.(listener) ?? (() => undefined);
+  }
+
   async getContextUsage(): Promise<ContextUsageData> {
     this.ensureActive();
     if (!this.handle.getContextUsage) {
@@ -852,6 +865,9 @@ export class Session {
     this.assertPermissionModeSupported(mode);
     this.permissionModeChangesInFlight += 1;
     const operation = this.permissionModeChangeChain.catch(() => undefined).then(async () => {
+      // The request may have queued before close() but reached the transport only after
+      // shutdown started. Re-check at the serialized side-effect boundary.
+      this.ensureActive();
       await this.handle.setPermissionMode!(mode);
       this.permissionModeStateValue = {
         mode,
@@ -880,6 +896,9 @@ export class Session {
     if (this.externalPermissionModeChangesInFlight > 0) return false;
     this.permissionModeChangesInFlight += 1;
     const operation = this.permissionModeChangeChain.catch(() => undefined).then(async () => {
+      // A matching restore can wait behind another mode change. Never apply it after
+      // close() has reserved transport shutdown.
+      this.ensureActive();
       const current = this.permissionModeStateValue;
       if (current.mode !== expected.mode || current.generation !== expected.generation) {
         return false;
@@ -899,6 +918,7 @@ export class Session {
   }
 
   private assertPermissionModeSupported(mode: PermissionMode): void {
+    this.ensureActive();
     if (!this.capabilities.permissionModes.some((m) => m.id === mode)) {
       throw new NotSupportedError(
         `permissionMode='${mode}'`,
@@ -1162,15 +1182,17 @@ export class Session {
    * (review #944 第二轮)。
    */
   private fanOutEvent(event: AgentEvent, observedGeneration = this.turnGeneration): void {
-    this.lastEventAt = Date.now();
+    const isBackgroundEvent = event.turnScope === 'background';
+    if (!isBackgroundEvent) this.lastEventAt = Date.now();
     this.lastEventType = event.type;
     const isCurrentGeneration = observedGeneration === this.turnGeneration;
     // fan-out 前打 turn origin(所有 listener 拿到同一份);事件对象由 translator
     // 每次新建、看门狗每次合成,不会串台。=== undefined 守卫:不覆盖 agent 自带的。
-    if (isCurrentGeneration && this.currentTurnOrigin && event.turnOrigin === undefined) {
+    if (!isBackgroundEvent && isCurrentGeneration && this.currentTurnOrigin && event.turnOrigin === undefined) {
       event.turnOrigin = this.currentTurnOrigin;
     }
     if (
+      !isBackgroundEvent &&
       isCurrentGeneration &&
       this.currentTurnAttemptToken !== null &&
       event.turnAttemptToken === undefined
@@ -1220,6 +1242,10 @@ export class Session {
     for (const listener of this.eventListeners) {
       try { listener(listenerEvent); } catch (e) { this.logger.error('event listener threw', { error: String(e) }); }
     }
+    // A late child update belongs to the completed parent turn. It remains
+    // visible to listeners, but must not clear/adopt the current turn or keep
+    // its zero-event watchdog alive.
+    if (isBackgroundEvent) return;
     // turn 真正结束后清 origin,下一轮无 origin 的 turn 不被污染。
     // 关键:**只**在 done / 终止型 error 上清,**不要**在 status(isRunning=false)
     // 上清 —— translator 收尾是先 push end-status(isRunning=false)、紧接着 push

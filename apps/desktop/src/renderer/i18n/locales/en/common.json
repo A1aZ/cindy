@@ -131,6 +131,7 @@
       "terminalShell": "Default terminal shell",
       "composer": "Message input",
       "linkOpen": "Link open behavior",
+      "streamFade": "Streaming motion",
       "compatMode": "Tips",
       "voiceInput": "Voice input",
       "import": "Session Import",
@@ -252,7 +253,8 @@
             "listAgent": "List currently loaded keys:",
             "linuxStart": "Start a user-local ssh-agent (add this line to ~/.bashrc / ~/.zshrc to persist):",
             "win32Enable": "Enable the ssh-agent service (run as Administrator in PowerShell):"
-          }
+          },
+          "noSuchFileFix": "This path does not exist on disk. Go back to the host settings and re-select the correct private key, or double-check the Identity file path (the ~/.ssh/… form is supported and expands to your home directory)."
         }
       },
       "add": {
@@ -370,7 +372,8 @@
         "codexSyncDone": "Codex credentials pushed to remote",
         "codexSyncDoneDaemonRestartFailed": "Codex credentials pushed, but the old daemon did not restart — reconnect to the remote / restart the daemon before retrying",
         "codexSyncFailed": "Codex credentials sync failed",
-        "codexSyncNoLocal": "No local Codex credentials found — log in to Codex in {{appName}} first"
+        "codexSyncNoLocal": "No local Codex credentials found — log in to Codex in {{appName}} first",
+        "connectKeyFileMissing": "Private key file not found or unreadable: {{detail}}. Check the path, or re-select the key in the host settings."
       },
       "silentInstall": {
         "starting": "Installing {{agent}} on remote {{hostId}}…",
@@ -462,6 +465,15 @@
         "label": "Sidebar card mode",
         "hint": "Pinned sessions are shown as cards with task-status summaries; card heights vary with summary length, and the cards flow into 2–3 columns when the sidebar is widened.",
         "aria": "Toggle sidebar card mode"
+      },
+      "layout": {
+        "label": "Panel layout",
+        "hint": "Panel positions and widths persist across restarts. Restore the default arrangement if the layout becomes difficult to use.",
+        "reset": "Restore default layout",
+        "resetSuccess": "Default panel layout restored",
+        "resetFailed": "Could not restore the default panel layout",
+        "saved": "Panel position saved. Restore the default layout in Settings → Appearance.",
+        "saveFailed": "Could not save the panel position"
       }
     },
     "notifications": {
@@ -473,6 +485,15 @@
       "feishuHint": "Sends a private message via the linked Feishu or Lark bot; only when the window is unfocused.",
       "feishuDisabledHint": "First set up the bot in \"Feishu / Lark Bot\" and DM it once to complete binding.",
       "feishuAria": "Toggle session-done FeiShu notifications",
+      "sessionEvent": {
+        "untitled": "Untitled session",
+        "done": "Completed ✓",
+        "error": "Failed",
+        "needsReply": "Reply needed",
+        "externalDone": "Cindy · Session “{{title}}” completed ✓",
+        "externalError": "Cindy · Session “{{title}}” failed",
+        "externalNeedsReply": "Cindy · Session “{{title}}” needs your reply"
+      },
       "wecomGroupLabel": "WeCom group notifications",
       "wecomGroupHint": "Used for automation completion notifications. Paste a WeCom group bot Webhook URL; it is encrypted on this device.",
       "wecomGroupConfiguredHint": "Configured (key {{maskedKey}}). Turn on the master switch, then enable it for each automation as needed.",
@@ -611,6 +632,7 @@
       "options": {
         "system": "Auto (follow system)",
         "zh-CN": "简体中文",
+        "zh-TW": "Traditional Chinese",
         "en": "English",
         "ja": "日本語",
         "ko": "한국어"
@@ -922,6 +944,7 @@
         "optionDescriptions": {
           "auto": "Let the recognition service detect it",
           "zh-CN": "Simplified Chinese (Mainland China)",
+          "zh-TW": "Traditional Chinese (Taiwan)",
           "en": "English",
           "ja": "Japanese",
           "ko": "Korean"
@@ -1727,6 +1750,12 @@
         "cellLabel": "Message notification",
         "hint": "Send a notification message to the Bot on connect/disconnect"
       },
+      "sessionNotification": {
+        "label": "Session notifications",
+        "cellLabel": "Send a Feishu / Lark DM when a session finishes or needs a reply",
+        "hint": "Sends a private message via the linked Feishu or Lark bot; only when the window is unfocused.",
+        "disabledHint": "First set up the bot and DM it once to complete binding."
+      },
       "bind": "Bind"
     },
     "wechatBot": {
@@ -2039,6 +2068,7 @@
         "project": "Switch project workspace",
         "model": "Show or switch the model",
         "permission": "Show or switch the permission mode",
+        "settings": "Show project and agent settings",
         "ctr": "Remotely control a desktop session",
         "exctr": "Exit remote control"
       },
@@ -2319,6 +2349,12 @@
         "sidebar": "Sidebar browser",
         "external": "System browser"
       }
+    },
+    "streamFade": {
+      "title": "Streaming motion",
+      "label": "Fade in streamed text",
+      "hint": "While a reply streams, new words fade in one after another. Turn on to enable the effect; content shows instantly when off. Always off when the system reduce-motion setting is on.",
+      "toggleAria": "Toggle streaming fade-in motion"
     },
     "chatEmbedding": {
       "cell": {
@@ -3034,6 +3070,9 @@
           "wecom": "New WeCom conversations use this Agent, model, and permission mode. Send /new in an existing chat to apply them."
         },
         "agentLabel": "Agent",
+        "agentUnsupportedOnChannelHint": "{{agent}} Agent does not support per-message permission confirmations on this channel; messages cannot be processed. Switch to Claude Code or Codex.",
+        "agentUnsupportedOnChannelModeHint": "After switching the Agent and sending /new, if the new Agent still reports a permission-mode issue, send /permission to adjust the permission mode.",
+        "permissionModeUnsupportedOnChannelHint": "The current Agent cannot run on this channel in this permission mode, so messages cannot be processed. Send /permission to choose a supported mode.",
         "modelLabel": "Model Configuration",
         "loading": "Loading new conversation configuration…",
         "loadFailed": "Failed to load new conversation configuration",
@@ -3236,6 +3275,14 @@
         "unavailable": "The plugin market is temporarily unavailable. Installed plugins remain available.",
         "authenticationRequired": "Sign in to Cindy to view the plugin market.",
         "notConfigured": "The plugin market is not configured for this environment. Installed plugins remain available.",
+        "upgradeNotice": {
+          "single": "Automatically updated organization plugin “{{name}}”.",
+          "multiple_one": "Automatically updated {{count}} organization plugin.",
+          "multiple_other": "Automatically updated {{count}} organization plugins.",
+          "singleWithPermissions": "Automatically updated organization plugin “{{name}}”; new permissions: {{permissions}}.",
+          "multipleWithPermissions_one": "Automatically updated {{count}} organization plugin; it includes new permissions.",
+          "multipleWithPermissions_other": "Automatically updated {{count}} organization plugins; some plugins include new permissions."
+        },
         "removalNotice": {
           "single": "The organization removed the plugin “{{name}}”. Its local copy and data on this device have been cleaned up.",
           "multiple_one": "The organization removed {{count}} plugin. Its local copy and data on this device have been cleaned up.",
@@ -3277,6 +3324,9 @@
           "empty": "No plugin entries in this marketplace",
           "skippedEntries": "Skipped {{count}} invalid plugin entries",
           "unreadableEntries": "{{count}} plugin entries are temporarily unreadable; refresh to retry",
+          "addedReceipt": "Added \"{{name}}\" with {{count}} plugins discovered",
+          "refreshedReceipt": "Refreshed \"{{name}}\" with {{count}} plugins discovered",
+          "emptyWithSkippedEntries": "No usable plugins were discovered because all listed entries were skipped. Check the source types, plugin directories, and manifest entries.",
           "localBadge": "Local",
           "defaultRef": "Default branch",
           "neverSynced": "Never synced",
@@ -3437,6 +3487,7 @@
         "cindyEmbedTextDetail": "Text is sent to the system embedding model and turned into numbers, up to {{max}} items per call. Model charges may apply. The vectors go only to the plugin — nothing is written to your own library.",
         "cindySearchWeb": "Can search the public web with Cindy AI",
         "cindySearchWebDetail": "Search requests access the public web and may consume Cindy AI quota.",
+        "cindyTextOneshotModelDetail": "Uses the system's lightweight utility model chain (the same lane as auto titles). No Agent involved and no file access. Model charges may apply. The plugin declares a preferred model: {{model}} (effective when available in the current catalog; your pin takes precedence).",
         "agentUserAction": "Can start a new Agent turn after you click a plugin card",
         "agentUserActionDetail": "Each click permits one turn only, and only in the session that owns the card.",
         "agentBackground": "Can automatically start new Agent turns in the background",
@@ -3483,6 +3534,8 @@
         "networkSecretGhostInputDetail": "Collected by this plugin's own settings UI — the plugin page sees the value at entry time. It is then handed to the host in one step for encrypted storage; once stored, the plugin can never read it back, and the host injects it only for the domains it declares.",
         "networkSecretIdentity": "Will use your login email as the credential \"{{name}}\"",
         "networkSecretIdentityDetail": "The value comes from your signed-in account's email, derived and injected by the host at request time; nothing to fill in. The plugin can read this email to show the current identity in its settings UI.",
+        "networkSecretGhCli": "Will prefer your local GitHub CLI login for the credential \"{{name}}\"",
+        "networkSecretGhCliDetail": "The host reads the local gh login token only when needed and injects it only into GitHub API requests; plugin code cannot read or store the token. If gh is unavailable, you can configure a fallback Personal Access Token in the plugin settings.",
         "networkSecretOrganizationIdentity": "Will use your Cindy organization identity as the credential \"{{name}}\"",
         "networkSecretOrganizationIdentityDetail": "Cindy issues a short-lived identity assertion when needed, and the host sends it only to the explicitly listed service hosts. The plugin code cannot read or store the token.",
         "networkSecretOauth": "Will guide you through OAuth authorization at {{host}} ({{name}})",
@@ -3493,6 +3546,7 @@
         "codeDetailWithNode": "The panel UI runs in an isolated sandbox; local processing is provided by the Node runtime declared above.",
         "added": "New",
         "removed": "Removed",
+        "updated": "Updated",
         "unchanged": "{{count}} other permissions unchanged",
         "noChange": "No permission changes.",
         "pick": "Can ask you to pick a folder for it",
@@ -3563,6 +3617,9 @@
             "embed.text": "Text to vector"
           },
           "defaultOption": "{{model}} (default)",
+          "defaultOptionDeclared": "{{model}} (plugin declared)",
+          "searchPlaceholder": "Search models or providers",
+          "budgetBadge": "Discount",
           "noModels": "No models available"
         },
         "errandPrefs": {
@@ -4258,11 +4315,21 @@
     "tokenLabel": "Tokens",
     "tokenBreakdown": "(input {{input}} · output {{output}})",
     "cacheLabel": "Cache",
+    "timeLabel": "Time",
+    "timeAndRateValue": "{{duration}} TPS:{{rate}}",
     "modelLabel": "Model",
     "staleData": "Data updated {{minutes}} minutes ago",
+    "paceTrendFast": "Trending fast at the current average pace (rough estimate)",
+    "paceTrendNormal": "Trending normally at the current average pace (rough estimate)",
+    "paceTrendSlow": "Trending slowly at the current average pace (rough estimate)",
     "waiting": "Claude subscription usage will update after the next request completes."
   },
   "usageDetails": {
+    "durationSeconds": "{{value}}s",
+    "durationMinutesSeconds": "{{minutes}}m {{seconds}}s",
+    "performanceLine": "TPS {{rate}} · Time {{duration}}",
+    "performanceRateLine": "TPS {{rate}}",
+    "timeLine": "Time {{duration}}",
     "costLine": "Cost this turn: {{cost}}",
     "valueLine": "Token value this turn: {{cost}}",
     "tokenLine": "Tokens: {{total}} total · input {{input}} · output {{output}}",
@@ -4490,7 +4557,6 @@
     "review": {
       "turn": {
         "title": "Changes from this message",
-        "currentWorkspace": "Current workspace",
         "localOnly": "Exact message changes are not available for remote sessions yet.",
         "partialNotice": "This message includes command or tool writes that could not be tracked exactly. Only the captured subset is shown; it is not a complete patch.",
         "emptyTitle": "No recorded changes",
@@ -5622,7 +5688,7 @@
   },
   "chatgptAuthRecovery": {
     "title": "ChatGPT Sign-In Is No Longer Valid",
-    "systemSharedInvalidated": "Cindy is currently using this computer’s ChatGPT sign-in. That sign-in is no longer valid. Open the ChatGPT App, sign in again, then retry.",
+    "systemSharedInvalidated": "Cindy is currently using this computer’s ChatGPT sign-in. That sign-in is no longer valid. Sign in again in Cindy, then retry.",
     "instanceIsolatedInvalidated": "Cindy is currently using a separately signed-in ChatGPT account. That sign-in is no longer valid. Sign in again in Cindy, then retry.",
     "unknownInvalidated": "Cindy’s current ChatGPT sign-in is no longer valid. Sign in again, then retry.",
     "recovered": "ChatGPT sign-in has been restored. Please retry.",
@@ -6304,6 +6370,7 @@
       "actionUnavailable": "This message includes file changes that cannot be safely undone",
       "actionFailed": "The changes could not be applied. Try again",
       "partial": "Only the changes captured exactly are shown",
+      "partialNone": "Files were changed, but their contents could not be recorded, so they cannot be reviewed or undone here",
       "partialReversible": "Only exactly captured changes can be undone or reapplied; uncaptured changes are not handled",
       "partialActionHint": "Only undo or reapply exactly captured file changes",
       "showMore": "Show {{count}} more files",
@@ -7832,7 +7899,7 @@
   },
   "issueAgent": {
     "command": {
-      "instruction": "I'd like to file feedback for {{appName}}. Please help me turn it into a high-quality GitHub issue: first confirm the feedback type (bug or feature request) and ask follow-up questions for the necessary details (symptoms, reproduction steps or use case, expected behavior). Once there is enough information, submit it with the submit_github_issue tool via cindy_helper call_tool (category=feedback; you can run list_tools first to check the parameters; a confirmation card will be shown to me before submitting). If the submission fails, tell me the reason honestly.{{details}}",
+      "instruction": "I'd like to file feedback for {{appName}}. Help me turn it into a complete, clear GitHub issue: confirm whether it is a bug or feature request, and ask only for missing or ambiguous details. For bugs, collect the symptoms, reproduction steps, expected and actual behavior, frequency, attempted fixes, and—only with my consent—redacted diagnostic summaries; never include passwords, tokens, email addresses, personal paths, or unrelated files. For feature requests, clarify the use case, current pain point, and desired outcome. Once the information is sufficient, submit it with the submit_github_issue tool via cindy_helper call_tool (category=feedback; you can run list_tools first to check the parameters; a confirmation card will be shown to me before submitting). No GitHub plugin or account setup is required: Cindy's official bot is the default, and a working GitHub account appears only as an optional identity in the confirmation card. After creation, tell me the issue number and link, explain that Cindy is open source, and offer to help me reproduce, fix, test, or extend it from source. If the submission fails, tell me the reason honestly.{{details}}",
       "detailsPrefix": "\nMy initial description: {{details}}"
     },
     "confirm": {
@@ -7841,11 +7908,12 @@
       "typeFeature": "Feature",
       "titleLabel": "Title",
       "bodyLabel": "Body (Markdown)",
-      "submissionMethodLabel": "Publishing Method",
-      "identityGithubUser": "Publish directly through GitHub account @{{login}}",
+      "privacyHint": "Common secrets, personal paths, and email addresses are redacted when detected. Review the public content before submitting.",
+      "submissionMethodLabel": "Submission Identity",
+      "identityGithubUser": "My GitHub account @{{login}}",
       "identityGithubUserHint": "You will be the GitHub author and can edit or close this Issue on GitHub",
-      "identityPlatform": "Publish through Cindy (GitHub App {{login}})",
-      "identityPlatformHint": "You will not be the GitHub author and cannot edit or close this Issue yourself",
+      "identityPlatform": "Cindy official bot @{{login}} (default)",
+      "identityPlatformHint": "No GitHub account setup is required. The official bot creates the Issue, and you can add a public attribution in the body",
       "publicNameLabel": "Public Attribution",
       "publicNameHint": "This attribution will appear publicly in the Issue body",
       "anonymous": "Anonymous",
@@ -7892,6 +7960,9 @@
       "deny": "Deny"
     }
   },
+  "commandPalette": {
+    "projectTrustRequired": "Available after you trust this project"
+  },
   "skillhub": {
     "home": {
       "title": "Skills",
@@ -7919,7 +7990,12 @@
     },
     "common": {
       "openFolderFailed": "Failed to open folder",
-      "close": "Close"
+      "close": "Close",
+      "statusDiscovered": "Discovered",
+      "statusApproved": "Approved",
+      "statusLoaded": "Loaded",
+      "statusFailed": "Load failed",
+      "statusUnknown": "Unknown"
     },
     "welcome": {
       "scanning": "Scanning local skills…",
@@ -8632,6 +8708,25 @@
       "waitingForWorker": "Waiting for worker",
       "closeAria": "Close"
     }
+  },
+  "splitGroup": {
+    "closeAria": "Close Pane for “{{title}}”",
+    "closeAll": "Close Split",
+    "toggleDirection": "Toggle Horizontal / Vertical Split",
+    "dropHint": "Drop to Open the Session Here",
+    "loadingTask": "Loading Session…",
+    "resizeAria": "Resize Session Panes",
+    "openInSplit": "Open in Split",
+    "openSide": {
+      "left": "Open Session on Left",
+      "right": "Open Session on Right",
+      "top": "Open Session Above",
+      "bottom": "Open Session Below"
+    },
+    "alreadyOpen": "This session is already open in the split. Choose another session.",
+    "limitReached": "A split can contain up to {{count}} sessions. Close one pane and try again.",
+    "addUnavailable": "This session can’t be opened in the current split. Open a session in the main area and try again.",
+    "workerUnavailable": "A Worker can’t open in a separate pane. Open its Lead session instead."
   },
   "extraDirs": {
     "menuAria": "Composer actions",

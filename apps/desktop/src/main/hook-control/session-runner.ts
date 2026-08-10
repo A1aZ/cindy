@@ -90,6 +90,7 @@ import { getWorkspaceProviderSource } from './workspaceProviderSourceStore.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 import { observeHookTurn, type HookTurnObserver } from './turnObserver.js';
+import { beginGroupHistoryAccess } from '../im/shared/groupHistoryAccess.js';
 
 import type {
   HookContinuationWatchRequest,
@@ -527,6 +528,12 @@ export function createMakerHookSessionRunner(deps: {
        */
       const isTelegramGroupTurn = req.source?.im === 'telegram' && req.laneKind === 'group';
       let releaseTelegramGroupTurnLease: (() => void) | null = null;
+      let releaseGroupHistoryAccess: (() => void) | null = null;
+      const releaseGroupHistory = (): void => {
+        const release = releaseGroupHistoryAccess;
+        releaseGroupHistoryAccess = null;
+        release?.();
+      };
       const releaseTelegramGroupTurn = (): void => {
         releaseTelegramGroupTurnLease?.();
         releaseTelegramGroupTurnLease = null;
@@ -974,6 +981,13 @@ export function createMakerHookSessionRunner(deps: {
             }
           },
           beforeProviderStart: () => {
+            if (req.groupHistoryAccess) {
+              releaseGroupHistoryAccess = beginGroupHistoryAccess({
+                sessionId: session.id,
+                sessionInstanceId: session.instanceId,
+                scope: req.groupHistoryAccess,
+              });
+            }
             const routeOrigin: RoutedTurnOrigin =
               req.source?.im === 'slack'
                 ? { kind: 'im', channel: 'slack' }
@@ -1032,13 +1046,27 @@ export function createMakerHookSessionRunner(deps: {
           observer.stop();
           finalizeInteractions();
           releaseTelegramGroupTurn();
+          releaseGroupHistory();
           return fail(`send not dispatched: ${outcome.reason}`);
+        }
+        // 与个人 IM turnRunner 的 route-resolved 时机一致：只有 provider 已
+        // 实际接受本次 send 后才执行 durable 群游标提交。回调失败不能反转
+        // 已受理 turn；旧游标会让下次最多重复携带，而不会永久跳过消息。
+        try {
+          await req.onProviderAccepted?.();
+        } catch (err) {
+          log.warn(
+            `provider-accepted callback failed for session=${session.id.slice(-8)}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
         }
       } catch (err) {
         if (turnChangeSetStarted) clearPendingTurnChangeSets(session.id);
         observer.stop();
         finalizeInteractions();
         releaseTelegramGroupTurn();
+        releaseGroupHistory();
         return fail(err instanceof Error ? err.message : String(err));
       }
 
@@ -1055,6 +1083,7 @@ export function createMakerHookSessionRunner(deps: {
         // lease 在这里才能放: observer.finished 已把后台任务一并定格
         // (早放 = 后台续跑期间又回到共享 session 的旧行为)。幂等。
         releaseTelegramGroupTurn();
+        releaseGroupHistory();
       }
 
       // 已知 v1 取舍: 不做 scheduler 4.5.1 的完整 backfillSessionMeta。

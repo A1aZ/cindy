@@ -436,13 +436,16 @@ async function finishDarwin({
         `CINDY_IOS_SIMULATOR_RELEASE_NATIVE_SMOKE=1 requires a host that can natively run the ${arch} package`,
       );
     } else {
-      // 跨 arch 连打:该产物在本机跑不起来(如 arm64 机上的 x64 app),门禁无法
-      // exec 它。x64 从不含 native helper、运行期必然回退 WDA/MJPEG,跳过验证不
-      // 降低真实安全。此处跳过的只会是跨 arch 的 static gate。
+      // 跨 arch 连打:该产物在本机跑不起来(如 arm64 机上的 x64 app),launch-based
+      // gate 无法 exec 它。沿用 ios-simulator-integration-plan.md 的 cross-architecture
+      // 例外(原仅覆盖 Intel 机 + arm64 ad-hoc,现扩至 arm64 机 + x64 Developer-ID 的
+      // static gate):x64 从不含 native helper、运行期必然回退 WDA/MJPEG,static gate
+      // 验的是构造上已保证的行为。跳过 launch,但仍用 lipo 证明公证后的包确是目标 arch。
+      verifyMacBinaryArch(appName, arch);
       console.log(
         `==> Skipping iOS Simulator release gate: ${arch} app is not runnable on this ${
           isPhysicalArm64Mac() ? 'arm64' : 'Intel'
-        } host`,
+        } host (Mach-O arch verified)`,
       );
     }
 
@@ -472,10 +475,12 @@ async function finishDarwin({
     if (hostCanExecArch(arch)) {
       runIOSSimulatorReleaseGate(appPath, arch, 'untrusted');
     } else {
+      // cross-architecture 例外:跳过 launch-based gate,仍做 Mach-O arch 门禁。
+      verifyMacBinaryArch(appName, arch);
       console.log(
         `==> Skipping iOS Simulator release gate: ${arch} app is not runnable on this ${
           isPhysicalArm64Mac() ? 'arm64' : 'Intel'
-        } host`,
+        } host (Mach-O arch verified)`,
       );
     }
     const appZipPath = path.join(artifactDir, `${baseName}-${arch}.zip`);

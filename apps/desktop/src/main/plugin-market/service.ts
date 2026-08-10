@@ -902,6 +902,26 @@ export class PluginMarketService {
       if (!manifestSupportsCurrentCindy(compatible.manifest)) {
         throwIpcError('NOT_FOUND', 'This Plugin is unavailable for this Cindy version');
       }
+      // 用户审阅过的清单必须与市场当前返回的清单有相同的权限面：
+      // 同 releaseId 下市场在审阅→安装之间换 manifest 时，新增的权限
+      // 用户从没见过，不能当作"已审阅"递进安装。与自定义来源路径
+      // install.ts:184-191 的打包前比对同向（但此处比对的是预览清单而非
+      // 实际打包字节，名字/版本/作者差异不在此处检测）。
+      if (options.expectedManifest !== undefined) {
+        const reviewed = validateGhostManifest(options.expectedManifest);
+        // 畸形 payload 会造成 ghostPermissionBaselineKey crash（slots.includes
+        // 等字段解引用），先验证再比对。验证失败时直接拒——审阅过的清单连基本
+        // 结构都不对，不能信任。
+        if (!reviewed.ok) {
+          throwIpcError('PRECONDITION_FAILED', reviewed.reason);
+        }
+        if (
+          ghostPermissionBaselineKey(compatible.manifest) !==
+          ghostPermissionBaselineKey(reviewed.manifest)
+        ) {
+          throwIpcError('PRECONDITION_FAILED', 'Plugin manifest changed after permission review');
+        }
+      }
       const existing = getGhostManager()
         .list()
         .find((ghost) => ghost.manifest.id === plugin.ghostId);

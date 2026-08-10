@@ -127,6 +127,9 @@ function useGitReviewLoad<T>(
       setDataState(cached);
     } else if (!sessionId && !preserveWhenDisabled) {
       setDataState(null);
+    } else if (sessionId) {
+      // cacheKey 变化且新 key 无缓存（切换设备/session）时，先清旧数据避免闪现旧审查结果
+      setDataState(null);
     }
   }, [cacheKey, preserveWhenDisabled, sessionId]);
 

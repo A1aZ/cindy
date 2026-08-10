@@ -111,8 +111,7 @@ interface CommandPathToken {
   end: number;
 }
 
-const RELATIVE_PATH_TOKEN_RE =
-  /(?:^|[\s=(,>])([^\s'"<>|?*]+[\\/])(?=$|[\s'"<>|])/g;
+const RELATIVE_PATH_TOKEN_RE = /(?:^|[\s=(,>])([^\s'"<>|?*]+[\\/])(?=$|[\s'"<>|])/g;
 
 /** 提取路径 token 及其在命令中的位置;写出语义需要靠相邻文本判断。 */
 function extractCommandPathTokens(command: string): CommandPathToken[] {
@@ -155,11 +154,16 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
       push(raw, start, start + raw.length);
     }
   }
+  for (const token of extractCopyItemPlainFilenameDestinations(command)) {
+    out.push(token);
+  }
   return out.sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 const WRITE_CALL_PREFIX_RE =
   /(?:\.|\b)(?:save|savefig|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*)?(?:[rubf]{0,2})?['"]$/i;
+const WRITE_CALL_LATER_KEYWORD_PREFIX_RE =
+  /(?:\.|\b)(?:save|savefig|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*[^();\r\n]+,\s*(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*(?:[rubf]{0,2})?['"]$/i;
 const POWERSHELL_CMDLET_RE = /\b[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9-]*\b/g;
 const POWERSHELL_WRITE_COMMANDS = new Set([
   'out-file',
@@ -173,6 +177,52 @@ const OUTPUT_OPTION_PREFIX_RE = /(?:^|\s)(?:-o|--output(?:-file)?|--outfile)(?:\
 const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
 const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
 const TEE_COMMAND_PREFIX_RE = /(?:^|[|;&]\s*)tee(?:\.exe)?\b[^|;&\r\n]*['"]?$/i;
+
+function extractCopyItemPlainFilenameDestinations(command: string): CommandPathToken[] {
+  const out: CommandPathToken[] = [];
+  const commandRe = /\bCopy-Item\b([^|;\r\n]*?)(?=\|{1,2}|;|\r?$|\n)/gim;
+  for (const commandMatch of command.matchAll(commandRe)) {
+    const argsText = commandMatch[1] ?? '';
+    const argsStart = (commandMatch.index ?? 0) + commandMatch[0].indexOf(argsText);
+    const args = [...argsText.matchAll(/'([^'\r\n]*)'|"([^"\r\n]*)"|([^\s]+)/g)].map((match) => {
+      const value = match[1] ?? match[2] ?? match[3] ?? '';
+      const offset = match[1] !== undefined || match[2] !== undefined ? 1 : 0;
+      const start = argsStart + (match.index ?? 0) + offset;
+      return { value, start, end: start + value.length };
+    });
+    const isPlainFilename = (value: string): boolean =>
+      EXT_RE.test(value) && !/[\\/<>|?*]/.test(value);
+    const explicitDestinationIndex = args.findIndex((arg) =>
+      /^-(?:Destination|LiteralDestination|Target)$/i.test(arg.value),
+    );
+    if (explicitDestinationIndex >= 0) {
+      const destination = args[explicitDestinationIndex + 1];
+      if (destination && isPlainFilename(destination.value)) {
+        out.push({ path: destination.value, start: destination.start, end: destination.end });
+      }
+      continue;
+    }
+
+    const positional: typeof args = [];
+    let namedSource = false;
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (!arg.value.startsWith('-')) {
+        positional.push(arg);
+        continue;
+      }
+      if (/^-(?:Path|LiteralPath)$/i.test(arg.value)) namedSource = true;
+      if (!/^-(?:Force|Recurse|PassThru|Container|Confirm|WhatIf)$/i.test(arg.value)) {
+        index += 1;
+      }
+    }
+    const destination = namedSource ? positional[0] : positional[1];
+    if (destination && isPlainFilename(destination.value)) {
+      out.push({ path: destination.value, start: destination.start, end: destination.end });
+    }
+  }
+  return out;
+}
 
 function isPowerShellOutputPosition(before: string): boolean {
   let lastCmdlet: RegExpMatchArray | null = null;
@@ -193,6 +243,7 @@ function isExplicitOutputPath(
   const after = command.slice(token.end, token.end + 80);
   if (
     WRITE_CALL_PREFIX_RE.test(before) ||
+    WRITE_CALL_LATER_KEYWORD_PREFIX_RE.test(before) ||
     /^\s*['"]?\s*\)\s*\.\s*write_(?:text|bytes)\s*\(/i.test(after) ||
     isPowerShellOutputPosition(before) ||
     OUTPUT_OPTION_PREFIX_RE.test(before) ||
@@ -205,7 +256,8 @@ function isExplicitOutputPath(
   // Python / Ruby 等的 open(path, 'w'|'a'|'x'|'wb'...)。
   if (
     /\bopen\s*\(\s*(?:[rubf]{0,2})?['"]$/i.test(before) &&
-    /^['"]\s*,\s*['"][wax][bt+]*['"]/i.test(after)
+    (/^['"]\s*,\s*['"][wax][bt+]*['"]/i.test(after) ||
+      /^['"]\s*,\s*[^();\r\n]*\bmode\s*=\s*['"][wax][bt+]*['"]/i.test(after))
   ) {
     return true;
   }
@@ -278,16 +330,25 @@ function copyDirectoryOutputs(
     .map((token) => token.path);
   const beforeDestination = command.slice(segmentStart, destination.start);
   const afterDestination = command.slice(destination.end, segmentEnd);
-  for (const match of beforeDestination.matchAll(/(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g)) {
+  for (const match of beforeDestination.matchAll(
+    /(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g,
+  )) {
     if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
   }
-  for (const match of afterDestination.matchAll(/(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g)) {
+  for (const match of afterDestination.matchAll(
+    /(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g,
+  )) {
     if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
   }
-  const outputs = sourcePaths.map((source) => {
-    const sourceName = source.replace(/[\\/]$/, '').split(/[\\/]/).at(-1);
-    return sourceName ? `${destination.path}${sourceName}` : null;
-  }).filter((path): path is string => Boolean(path));
+  const outputs = sourcePaths
+    .map((source) => {
+      const sourceName = source
+        .replace(/[\\/]$/, '')
+        .split(/[\\/]/)
+        .at(-1);
+      return sourceName ? `${destination.path}${sourceName}` : null;
+    })
+    .filter((path): path is string => Boolean(path));
   return outputs.length > 0 ? outputs : [destination.path];
 }
 

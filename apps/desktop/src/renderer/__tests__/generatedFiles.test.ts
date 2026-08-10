@@ -207,34 +207,48 @@ describe('extractCommandOutputPathCandidates', () => {
       ),
     ).toEqual(['artifacts/report.md']);
     expect(
-      extractCommandOutputPathCandidates("python -c \"from pathlib import Path; Path('out/report.md').write_text('ok')\""),
+      extractCommandOutputPathCandidates(
+        "python -c \"from pathlib import Path; Path('out/report.md').write_text('ok')\"",
+      ),
     ).toEqual(['out/report.md']);
-    expect(
-      extractCommandOutputPathCandidates("Path('out/data.bin').write_bytes(payload)"),
-    ).toEqual(['out/data.bin']);
+    expect(extractCommandOutputPathCandidates("Path('out/data.bin').write_bytes(payload)")).toEqual(
+      ['out/data.bin'],
+    );
     expect(
       extractCommandOutputPathCandidates("df.to_csv(path_or_buf='out/report.csv', index=False)"),
     ).toEqual(['out/report.csv']);
     expect(
-      extractCommandOutputPathCandidates("workbook.to_excel(excel_writer=\"out/report.xlsx\")"),
+      extractCommandOutputPathCandidates("df.to_csv(index=False, path_or_buf='out/report.csv')"),
+    ).toEqual(['out/report.csv']);
+    expect(
+      extractCommandOutputPathCandidates('workbook.to_excel(excel_writer="out/report.xlsx")'),
     ).toEqual(['out/report.xlsx']);
-    expect(extractCommandOutputPathCandidates("plt.savefig('out/chart.png')")).toEqual(['out/chart.png']);
-    expect(extractCommandOutputPathCandidates("plt.savefig(fname='out/chart.pdf', bbox_inches='tight')")).toEqual([
-      'out/chart.pdf',
+    expect(extractCommandOutputPathCandidates("plt.savefig('out/chart.png')")).toEqual([
+      'out/chart.png',
     ]);
     expect(
-      extractCommandOutputPathCandidates("printf 'report' | tee 'out/report.md'"),
-    ).toEqual(['out/report.md']);
+      extractCommandOutputPathCandidates("plt.savefig(fname='out/chart.pdf', bbox_inches='tight')"),
+    ).toEqual(['out/chart.pdf']);
+    expect(extractCommandOutputPathCandidates("printf 'report' | tee 'out/report.md'")).toEqual([
+      'out/report.md',
+    ]);
     expect(extractCommandOutputPathCandidates('tee /work/out/report.txt')).toEqual([
       '/work/out/report.txt',
     ]);
-    expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/source.txt']);
-    expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\source.txt']);
+    expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual([
+      'output/source.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual([
+      'output\\source.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('cp inputs/a.txt inputs/b.txt output/')).toEqual([
+      'output/a.txt',
+      'output/b.txt',
+    ]);
     expect(
-      extractCommandOutputPathCandidates('cp inputs/a.txt inputs/b.txt output/'),
-    ).toEqual(['output/a.txt', 'output/b.txt']);
-    expect(
-      extractCommandOutputPathCandidates('Get-ChildItem inputs/source.txt | Copy-Item -Destination output/'),
+      extractCommandOutputPathCandidates(
+        'Get-ChildItem inputs/source.txt | Copy-Item -Destination output/',
+      ),
     ).toEqual(['output/source.txt']);
     expect(
       extractCommandOutputPathCandidates('Get-ChildItem inputs/ | Copy-Item -Destination output/'),
@@ -247,6 +261,9 @@ describe('extractCommandOutputPathCandidates', () => {
     ).toEqual(['artifacts/report.txt']);
     expect(extractCommandOutputPathCandidates('Copy-Item inputs/source.txt output/')).toEqual([
       'output/source.txt',
+    ]);
+    expect(extractCommandOutputPathCandidates('Copy-Item inputs/source.txt report.txt')).toEqual([
+      'report.txt',
     ]);
   });
 
@@ -294,6 +311,15 @@ describe('extractCommandOutputPathCandidates', () => {
         "open('inputs/source.txt', 'r'); open('artifacts/result.txt', 'wb')",
       ),
     ).toEqual(['artifacts/result.txt']);
+    expect(extractCommandOutputPathCandidates("open('artifacts/result.txt', mode='w')")).toEqual([
+      'artifacts/result.txt',
+    ]);
+    expect(
+      extractCommandOutputPathCandidates(
+        "open('artifacts/result.bin', encoding='utf8', mode='wb')",
+      ),
+    ).toEqual(['artifacts/result.bin']);
+    expect(extractCommandOutputPathCandidates("open('inputs/source.txt', mode='r')")).toEqual([]);
     expect(
       extractCommandOutputPathCandidates(
         "Set-Content -Path 'artifacts/result.txt' -Value (Get-Content 'inputs/source.txt')",

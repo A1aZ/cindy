@@ -5967,6 +5967,7 @@
     "verificationFailed": "暫時無法確認 ChatGPT 登入是否已恢復，請重新檢測。"
   },
   "chat": {
+    "sessionLoading": "正在載入任務",
     "askUserQuestion": {
       "skippedAnswer": "已跳過"
     },

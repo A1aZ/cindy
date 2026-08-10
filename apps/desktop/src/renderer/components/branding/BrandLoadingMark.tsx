@@ -14,6 +14,7 @@
  * reduced-motion:扫光停(sheen 隐藏),wordmark 静态显示,延迟淡入退化为
  * 直接显示(见 globals.css 的 reduce 块)。
  */
+import { useTranslation } from 'react-i18next';
 import { useBrandLogo } from '@/hooks/useBrandLogo';
 
 interface BrandLoadingMarkProps {
@@ -22,7 +23,9 @@ interface BrandLoadingMarkProps {
 }
 
 export function BrandLoadingMark({ width = 120 }: BrandLoadingMarkProps) {
+  const { t } = useTranslation();
   const logo = useBrandLogo();
+  const loadingLabel = t('chat.sessionLoading', '正在加载任务');
   const maskStyle = {
     maskImage: `url("${logo}")`,
     maskRepeat: 'no-repeat',
@@ -39,6 +42,7 @@ export function BrandLoadingMark({ width = 120 }: BrandLoadingMarkProps) {
       style={{ width, aspectRatio: '2048 / 699' }}
       role="status"
       aria-live="polite"
+      aria-label={loadingLabel}
     >
       <img
         src={logo}

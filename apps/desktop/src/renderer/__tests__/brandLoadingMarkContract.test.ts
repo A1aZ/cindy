@@ -10,6 +10,18 @@ const css = readFileSync(
   fileURLToPath(new URL('../styles/globals.css', import.meta.url)),
   'utf8',
 );
+const component = readFileSync(
+  fileURLToPath(new URL('../components/branding/BrandLoadingMark.tsx', import.meta.url)),
+  'utf8',
+);
+const locales = ['en', 'zh-CN', 'zh-TW', 'ja', 'ko'].map((locale) =>
+  JSON.parse(
+    readFileSync(
+      fileURLToPath(new URL(`../i18n/locales/${locale}/common.json`, import.meta.url)),
+      'utf8',
+    ),
+  ),
+);
 
 describe('BrandLoadingMark design exception contract', () => {
   it('registers the session loader in motion, brand, and gradient rules', () => {
@@ -31,5 +43,13 @@ describe('BrandLoadingMark design exception contract', () => {
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.brand-loading-mark-sheen::before[\s\S]*?animation:\s*none/,
     );
     expect(css).toMatch(/@keyframes brand-loading-sheen[\s\S]*?transform:\s*translateX\(350%\)/);
+  });
+
+  it('exposes a localized accessible status name', () => {
+    expect(component).toContain("t('chat.sessionLoading', '正在加载任务')");
+    expect(component).toContain('aria-label={loadingLabel}');
+    expect(component).toContain('role="status"');
+    expect(locales.every((locale) => typeof locale.chat.sessionLoading === 'string')).toBe(true);
+    expect(locales.every((locale) => locale.chat.sessionLoading.length > 0)).toBe(true);
   });
 });

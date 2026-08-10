@@ -5968,6 +5968,7 @@
     "verificationFailed": "ChatGPT ログインが復旧したか確認できませんでした。再確認してください。"
   },
   "chat": {
+    "sessionLoading": "タスクを読み込み中",
     "askUserQuestion": {
       "skippedAnswer": "スキップ済み"
     },

@@ -5554,6 +5554,7 @@
     },
     "worktree": {
       "detecting": "檢測環境中…",
+      "detectFailed": "環境檢測失敗，worktree 暫不可用",
       "gitMissing": "未檢測到 git，請先安裝",
       "notGitRepo": "當前目錄不是 git 倉庫",
       "alreadyInWorktree": "已在 worktree 中，禁止巢狀",

@@ -3567,6 +3567,14 @@ export class GhostManager {
         }
         this.options.recordBuiltinTombstone(id);
       } catch (err) {
+        // Tombstone persistence is part of the uninstall transaction.  If it
+        // fails, roll back the pending journal and in-process quarantine so a
+        // reported failure cannot be completed by startup recovery later.
+        const journalCleared = await this.receiptStore
+          .clearPendingMutation(id)
+          .then(() => true)
+          .catch(() => false);
+        if (journalCleared) this.untrustedApprovals.delete(this.isolationKey(id));
         return {
           rejection: { code: 'io', reason: err instanceof Error ? err.message : String(err) },
         };

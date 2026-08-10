@@ -2910,7 +2910,7 @@ describe('GhostManager · uninstall', () => {
     expect(manager.list()).toEqual([]);
   });
 
-  it('keeps builtin uninstall journal and bytes quarantined when tombstone persistence fails', async () => {
+  it('rolls back builtin uninstall journal and quarantine when tombstone persistence fails', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     trustedBundledIds.add('hello');
     recordBuiltinTombstone.mockImplementationOnce(() => {
@@ -2927,17 +2927,12 @@ describe('GhostManager · uninstall', () => {
     expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', 'hello.json'))).toBe(true);
     expect(manager.list()[0]).toMatchObject({
       manifest: { id: 'hello' },
-      enabled: false,
-      approval: { state: 'invalid' },
+      enabled: true,
+      approval: { state: 'approved' },
     });
-    expect(
-      JSON.parse(
-        await fs.promises.readFile(
-          path.join(workDir, 'ghosts-install-state', '.pending-hello.json'),
-          'utf8',
-        ),
-      ),
-    ).toMatchObject({ kind: 'uninstall', builtinTombstone: true });
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json'))).toBe(
+      false,
+    );
   });
 
   it('recovers a crashed builtin uninstall by persisting its tombstone before deletion', async () => {

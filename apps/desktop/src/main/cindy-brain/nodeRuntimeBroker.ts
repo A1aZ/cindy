@@ -1408,8 +1408,19 @@ export class GhostNodeRuntimeBroker {
 
   private ownerScopeUsable(ghostId: string, captured: unknown): boolean {
     if (isGhostOwnerScopeUsable(this.deps.ownerScope, captured)) return true;
-    this.deps.ownerScope?.onInvalidated?.(ghostId);
-    this.stop(ghostId);
+    let hasCurrentWorker = false;
+    // Tear down every stale worker for this ghost, but preserve a worker that
+    // already belongs to the new owner. The runtime-level invalidation callback
+    // is only safe when no fresh generation exists for the same ghost.
+    for (const [key, entry] of [...this.workers]) {
+      if (entry.ghost.manifest.id !== ghostId) continue;
+      if (isGhostOwnerScopeUsable(this.deps.ownerScope, entry.ownerScopeSnapshot)) {
+        hasCurrentWorker = true;
+        continue;
+      }
+      this.stopWorker(key, entry);
+    }
+    if (!hasCurrentWorker) this.deps.ownerScope?.onInvalidated?.(ghostId);
     return false;
   }
 

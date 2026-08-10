@@ -142,6 +142,45 @@ describe('nodeRuntimeBroker owner boundary races', () => {
     expect(child.killed).toBe(true);
     expect(invalidated).toHaveBeenCalledWith('node-ghost');
   });
+
+  it('a stale owner callback does not stop a fresh worker for the same ghost', async () => {
+    let generation = 1;
+    const ghost = fakeGhost({ lifecycle: 'resident' });
+    const staleChild = new FakeNodeProcess(undefined, false);
+    const freshChild = new FakeNodeProcess(undefined, false);
+    const invalidated = vi.fn();
+    const spawnProcess = vi.fn(
+      () => (spawnProcess.mock.calls.length === 1 ? staleChild : freshChild) as unknown as NodeWorkerProcess,
+    );
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess,
+      ownerScope: {
+        capture: () => generation,
+        isCurrent: (scope) => scope === generation,
+        isStable: (scope) => scope === generation,
+        onInvalidated: invalidated,
+      },
+    });
+
+    const firstStart = broker.startResident(ghost);
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledTimes(1));
+    staleChild.emit('spawn');
+    await firstStart;
+    generation = 2;
+    broker.stop('node-ghost');
+    const secondStart = broker.startResident(ghost);
+    await vi.waitFor(() => expect(spawnProcess.mock.calls.length).toBeGreaterThanOrEqual(2));
+    freshChild.emit('spawn');
+    await secondStart;
+
+    staleChild.stderr.write('stale owner callback\n');
+    await vi.waitFor(() => expect(staleChild.killed).toBe(true));
+
+    expect(freshChild.killed).toBe(false);
+    expect(broker.stateOf('node-ghost')).toBe('running');
+    expect(invalidated).not.toHaveBeenCalled();
+  });
 });
 
 function makeAutoReplyProcess(methods?: string[]) {

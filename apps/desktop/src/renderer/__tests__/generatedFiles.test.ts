@@ -218,6 +218,10 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates("workbook.to_excel(excel_writer=\"out/report.xlsx\")"),
     ).toEqual(['out/report.xlsx']);
+    expect(extractCommandOutputPathCandidates("plt.savefig('out/chart.png')")).toEqual(['out/chart.png']);
+    expect(extractCommandOutputPathCandidates("plt.savefig(fname='out/chart.pdf', bbox_inches='tight')")).toEqual([
+      'out/chart.pdf',
+    ]);
     expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/source.txt']);
     expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\source.txt']);
     expect(
@@ -229,6 +233,9 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates('Get-ChildItem inputs/ | Copy-Item -Destination output/'),
     ).toEqual(['output/']);
+    expect(
+      extractCommandOutputPathCandidates('Copy-Item -Destination output/ -Path inputs/source.txt'),
+    ).toEqual(['output/source.txt']);
   });
 
   it('skips temp dirs, extension-less tokens, plain filenames and URLs', () => {

@@ -159,7 +159,7 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
 }
 
 const WRITE_CALL_PREFIX_RE =
-  /(?:\.|\b)(?:save|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*)?(?:[rubf]{0,2})?['"]$/i;
+  /(?:\.|\b)(?:save|savefig|writeFileSync|writeFile|writeAllText|writeAllBytes|createWriteStream|write_text|write_bytes|to_csv|to_excel|to_json|to_parquet|imwrite|imsave|dump)\s*\(\s*(?:(?:path_or_buf|excel_writer|path|filename|fname|fp|file)\s*=\s*)?(?:[rubf]{0,2})?['"]$/i;
 const POWERSHELL_CMDLET_RE = /\b[A-Za-z][A-Za-z0-9]*-[A-Za-z][A-Za-z0-9-]*\b/g;
 const POWERSHELL_WRITE_COMMANDS = new Set([
   'out-file',
@@ -231,6 +231,9 @@ function isExplicitOutputPath(
     .filter((candidate) => candidate.start >= segmentStart && candidate.end <= segmentEnd)
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .at(-1);
+  if (/(?:^|\|\s*)Copy-Item\b/i.test(segment.trim())) {
+    return /-(?:Destination|LiteralDestination|Target)\s+['"]?$/i.test(before);
+  }
   return (
     lastPath?.start === token.start &&
     lastPath.end === token.end &&
@@ -262,11 +265,16 @@ function copyDirectoryOutputs(
   ].filter((index) => index >= 0);
   const segmentEnd = nextSeparators.length > 0 ? Math.min(...nextSeparators) : command.length;
   const sourcePaths = tokens
-    .filter((token) => token.start >= segmentStart && token.end <= destination.start)
-    .filter((token) => token.start !== destination.start && !/[\\/]$/.test(token.path))
+    .filter((token) => token.start >= segmentStart && token.end <= segmentEnd)
+    .filter((token) => token.start !== destination.start)
+    .filter((token) => !/[\\/]$/.test(token.path))
     .map((token) => token.path);
   const beforeDestination = command.slice(segmentStart, destination.start);
+  const afterDestination = command.slice(destination.end, segmentEnd);
   for (const match of beforeDestination.matchAll(/(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g)) {
+    if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
+  }
+  for (const match of afterDestination.matchAll(/(?:^|[\s'"])([^\s'"]+\.[A-Za-z][A-Za-z0-9]{0,7})(?=$|[\s'"])/g)) {
     if (!sourcePaths.includes(match[1])) sourcePaths.push(match[1]);
   }
   const outputs = sourcePaths.map((source) => {

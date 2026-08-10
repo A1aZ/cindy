@@ -5403,6 +5403,7 @@
     "modelSelector": {
       "budgetNeedsApiKey": "此模型需先在設定裡配置 API key 才能使用",
       "hidden": "已隱藏",
+      "modelListAria": "模型列表",
       "subscriptionDirectDisabled": {
         "chatgpt": "訂閱直連的 GPT 模型協議暫不支援 SSH 遠端會話",
         "xai": "訂閱直連的 Grok 模型協議暫不支援 SSH 遠端會話",

@@ -809,6 +809,7 @@ export function createMakerSendTransaction(deps: MakerSendTransactionDeps): Make
         soForReconcile.origin === undefined &&
         soForReconcile.persistUserMessage?.autoResume !== true &&
         soForReconcile.persistUserMessage?.origin === undefined &&
+        soForReconcile.persistUserMessage?.delivery !== 'steer' &&
         (reconcilePersistText.length > 0 || reconcileHasAttachments) &&
         !startsWithSlashCommand &&
         !reconcilePersistText.startsWith('[UI_ACTION_TRIGGER]');

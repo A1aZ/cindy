@@ -61,6 +61,7 @@ function toRenderSourceMessage(row: PlanReconcileCandidateRow): MessageRenderSou
     ...(toolUseId ? { toolUseId } : {}),
     ...(parentToolUseId ? { parentToolUseId } : {}),
     ...(content?.terminalPlanSnapshot === true ? { terminalPlanSnapshot: true } : {}),
+    ...(content?.turnCompleted === false ? { turnCompleted: false as const } : {}),
   };
 }
 

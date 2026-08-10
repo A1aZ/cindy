@@ -52,4 +52,11 @@ describe('BrandLoadingMark design exception contract', () => {
     expect(locales.every((locale) => typeof locale.chat.sessionLoading === 'string')).toBe(true);
     expect(locales.every((locale) => locale.chat.sessionLoading.length > 0)).toBe(true);
   });
+
+  it('uses the session term in Japanese and Korean', () => {
+    expect(locales[3].chat.sessionLoading).toContain('セッション');
+    expect(locales[3].chat.sessionLoading).not.toContain('タスク');
+    expect(locales[4].chat.sessionLoading).toContain('세션');
+    expect(locales[4].chat.sessionLoading).not.toContain('작업');
+  });
 });

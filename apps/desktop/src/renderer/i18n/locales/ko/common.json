@@ -5968,7 +5968,7 @@
     "verificationFailed": "ChatGPT 로그인이 복구되었는지 확인할 수 없습니다. 다시 확인해 주세요."
   },
   "chat": {
-    "sessionLoading": "작업 불러오는 중",
+    "sessionLoading": "세션 불러오는 중",
     "askUserQuestion": {
       "skippedAnswer": "건너뜀"
     },

@@ -1345,7 +1345,13 @@ export default function NewRemoteSessionScreen() {
     if (!intent.enabled) return true;
     // ineligible 已在前面提前返回,此处只可能是 eligible(2026-08-07 裁决)。
     if (intent.eligibility.status !== 'eligible') return false;
+    // 与 ineligible 快照同理:eligible 快照也必须复核 live 资格仍是同一 repo 的
+    // eligible,await 期间被重探成别的状态或换了 repo 都不能继续建 worktree。
     const currentEligibility = worktreeEligibilityRef.current;
+    if (
+      currentEligibility.status !== 'eligible'
+      || currentEligibility.baseRepo !== intent.eligibility.baseRepo
+    ) return false;
     const currentStoredBranch = remoteSessionStore.getNewMakerWorktreeBranchPreference(
       intent.target.deviceId,
       currentEligibility.baseRepo,

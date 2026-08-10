@@ -46,6 +46,13 @@ export function usePromptRecommendationPreference(): {
 
   useEffect(() => {
     const sync = () => setState(getPromptRecommendationPreference());
+    // 当所有 hook 实例都卸载后再次挂载时，跨窗口的 storage 事件可能已被错失，
+    // 此时 memoryValue 仍是旧值。在添加第一个 listener 前从 storage 刷新缓存，
+    // 确保多窗口切换场景下不会读到过期的偏好状态。
+    if (listeners.size === 0) {
+      memoryValue = readFromStorage();
+      setState(memoryValue);
+    }
     listeners.add(sync);
     const onStorage = (event: StorageEvent) => {
       if (event.key !== PROMPT_RECOMMENDATION_KEY) return;

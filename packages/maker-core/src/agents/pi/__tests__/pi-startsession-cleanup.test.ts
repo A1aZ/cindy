@@ -483,6 +483,66 @@ describe('PiAgent.startSession failure cleanup (mocked pi process)', () => {
     await waitFor(() => !existsSync(home2));
   });
 
+  it('keeps an approved session isolated from a concurrent Review session', async () => {
+    const skillPath = path.join(cwd, '.pi', 'skills', 'approved-only');
+    mkdirSync(skillPath, { recursive: true });
+    writeFileSync(path.join(skillPath, 'SKILL.md'), '# approved only\n');
+    const resolvePiProjectTrustInput = vi.fn(async ({ workingDir }:
+      Parameters<NonNullable<AgentDeps['resolvePiProjectTrustInput']>>[0]) => approvedInput(
+      workingDir,
+      'rev-approved-only',
+      [skillPath],
+    ));
+    const agent = new PiAgent(buildDeps({ resolvePiProjectTrustInput }));
+    const [approvedHandle, reviewHandle] = await Promise.all([
+      agent.startSession({ sessionId: 'approved', workingDir: cwd, model: 'm' }),
+      agent.startSession({
+        sessionId: 'review',
+        workingDir: cwd,
+        model: 'm',
+        reviewMode: true,
+      }),
+    ]);
+
+    const indexForSession = (sessionId: string) => knobs.spawnedEnvs.findIndex(
+      (env) => env.CINDY_PI_SESSION_ID === sessionId,
+    );
+    const approvedIndex = indexForSession('approved');
+    const reviewIndex = indexForSession('review');
+    const approvedHome = knobs.spawnedEnvs[approvedIndex]!.PI_CODING_AGENT_DIR!;
+    const reviewHome = knobs.spawnedEnvs[reviewIndex]!.PI_CODING_AGENT_DIR!;
+    expect(approvedHome).not.toBe(reviewHome);
+    expect(knobs.spawnedEnvs[approvedIndex]!.CINDY_PI_PERMISSION_FILE).not.toBe(
+      knobs.spawnedEnvs[reviewIndex]!.CINDY_PI_PERMISSION_FILE,
+    );
+    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--skill')).toEqual([skillPath]);
+    expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--skill')).toEqual([]);
+    expect(repeatedArgValues(knobs.spawnedArgs[approvedIndex]!, '--extension')).toEqual([
+      path.join(approvedHome, 'extensions', 'cindy-bridge.ts'),
+      path.join(approvedHome, 'extensions', 'cindy-subagent.ts'),
+    ]);
+    expect(repeatedArgValues(knobs.spawnedArgs[reviewIndex]!, '--extension')).toEqual([
+      path.join(reviewHome, 'extensions', 'cindy-bridge.ts'),
+    ]);
+    expect(resolvePiProjectTrustInput).toHaveBeenCalledOnce();
+    expect(resolvePiProjectTrustInput).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'approved',
+    }));
+    await vi.waitFor(() => {
+      expect(approvedHandle.getRuntimeCapabilities?.()?.projectResources).toMatchObject({
+        status: 'approved', approvalRevision: 'rev-approved-only', requestedSkillCount: 1,
+      });
+      expect(reviewHandle.getRuntimeCapabilities?.()?.projectResources).toEqual({
+        status: 'unavailable',
+        reason: 'review-mode-project-resources-disabled',
+        approvalRevision: null,
+        requestedSkillCount: 0,
+      });
+    });
+
+    await Promise.all([approvedHandle.close(), reviewHandle.close()]);
+  });
+
   it('cleans up the session config home when the pi process exits unexpectedly (crash)', async () => {
     const { existsSync } = await import('node:fs');
     const agent = new PiAgent(buildDeps());

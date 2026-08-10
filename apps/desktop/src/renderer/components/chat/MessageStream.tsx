@@ -3406,22 +3406,26 @@ export function MessageStream({
   // result land.
   // biome-ignore lint/correctness/useExhaustiveDependencies: bottomPadding 是触发型依赖；overlay 高度变化时即使 effect 内不读取它，也必须重新 pin 到底。
   useLayoutEffect(() => {
-    // tail item 在 visibleRenderItems 与 allRenderItems 末尾完全一致(window 始终
-    // 包含最新的一段),用 visibleRenderItems 避免扩窗时多触发一次。
-    // 用户消息总是产出独立的 message item(不进 segment / 不被丢弃),所以这里
-    // 只需要解开 type==='message' && role==='user' 这一支。
     const lastItem = visibleRenderItems[visibleRenderItems.length - 1];
     let lastUserMsg =
       lastItem?.type === 'message' && lastItem.message.role === 'user' ? lastItem.message : null;
-    // render-window-bidirectional: 当锚定窗口未覆盖末尾时，新的用户发送可能
-    // 落在 bounded window 外面、visibleRenderItems 尾感知不到。此时查
-    // allRenderItems 尾兜底：检测到新发送后清除锚点，下一次 render 切回默认
-    // 尾窗，pin-to-bottom 自然把视口钉到底部。
+
+    // render-window-bidirectional: 锚定窗口未覆盖末尾时新发送落在 bounded
+    // window 外面，visibleRenderItems 尾感知不到。查 allRenderItems 尾兜底。
+    // 关键：不能在同一次 effect 里 pinToBottom —— visibleRenderItems 仍是旧的
+    // 有界窗口切片，pinToBottom 会滚到切片的底部而非真正的末尾。
+    // 清除锚点 + 设置 isNearBottom → 下一次 render 切回默认尾窗后，
+    // nearBottom=true 分支自然触发 pinToBottom。
+    let windowAnchorClearedOnSend = false;
     if (!lastUserMsg && firstVisibleItemKey !== null && !windowCoversEnd) {
       const realLast = allRenderItems[allRenderItems.length - 1];
       if (realLast?.type === 'message' && realLast.message.role === 'user') {
-        lastUserMsg = realLast.message;
         setFirstVisibleItemKey(null);
+        isNearBottomRef.current = true;
+        setIsNearBottom(true);
+        setUnreadCount(0);
+        lastUserMsgIdRef.current = realLast.message.clientId;
+        windowAnchorClearedOnSend = true;
       }
     }
     const userMessageObservation = resolveLastUserMessageObservation({
@@ -3429,7 +3433,9 @@ export function MessageStream({
       tailUserMessageId: lastUserMsg?.clientId ?? null,
       previousTailUserMessageId: lastUserMsgIdRef.current,
     });
-    lastUserMsgIdRef.current = userMessageObservation.baselineUserMessageId;
+    if (!windowAnchorClearedOnSend) {
+      lastUserMsgIdRef.current = userMessageObservation.baselineUserMessageId;
+    }
     const decision = resolveRenderPinDecision({
       restoring: restoringRef.current,
       newUserSend: userMessageObservation.isNewUserSend,
@@ -3443,7 +3449,7 @@ export function MessageStream({
       restoringRef.current = false;
       isNearBottomRef.current = true;
     }
-    if (decision.pinToBottom) pinToBottom();
+    if (decision.pinToBottom && !windowAnchorClearedOnSend) pinToBottom();
 
     const el = scrollRef.current;
     if (el) prevScrollTopRef.current = el.scrollTop;

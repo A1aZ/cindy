@@ -1113,6 +1113,9 @@ export function ChatInput({
   const showStopButtonRef = useRef(showStopButton);
   showStopButtonRef.current = showStopButton;
 
+  const recommendationEnabledRef = useRef(recommendationEnabled);
+  recommendationEnabledRef.current = recommendationEnabled;
+
   // ── 推荐提示词:turn 结束(showStopButton true→false)→ 调 IPC 预测 ────
   // messages 在流式期间每个 delta 都变,放进 deps 会让本 effect 反复重跑并把
   // prevShowStopRef 冲掉,从而永远检测不到那次跳变 —— 所以走 ref 读最新值。
@@ -1237,6 +1240,7 @@ export function ChatInput({
             const cur = editorRef.current;
             if (
               result?.prompt &&
+              recommendationEnabledRef.current &&
               cur &&
               !cur.isDestroyed &&
               composerFullyEmptyRef.current() &&

@@ -6410,15 +6410,23 @@ function scheduleGhostSkillReconcile(): void {
         let releaseLease: (() => void) | null = null;
         try {
           const owner = captureGhostMutationOwner();
+          // 已登出/无 owner 时不建全局技能投影：全局 ~/.agents/skills 中的旧链接
+          // 在账号 teardown 时已由 removeGhostSkillLinksForRoots 撤销，这里空跑只会
+          // 因为 ownerId 为空被 withGhostSkillProjectionReconcile 拒绝，且错误消息
+          // 不命中任何重试条件导致 pending 被清掉（永久不复跑），不如直接跳过。
+          if (!owner.dataOwnerId) {
+            skillReconcileInFlight = false;
+            return;
+          }
           const result = await withGhostSkillProjectionReconcile(
-            owner.dataOwnerId ?? '',
+            owner.dataOwnerId,
             async () => {
               releaseLease = beginGhostMutation(owner);
               return reconcileGhostSkillLinks({
                 ghosts: getGhostManager().list(),
                 brainRoot: brainRootDir(),
                 approvalStateRoot: getGhostManager().approvalStateRoot(),
-                assertOwnerStable: () => assertGhostSkillProjectionStableOwner(owner.dataOwnerId ?? ''),
+                assertOwnerStable: () => assertGhostSkillProjectionStableOwner(owner.dataOwnerId!),
                 validateApprovedSkillSnapshot: (ghost) =>
                   getGhostManager().verifyApprovedSkillSnapshot(ghost),
               });

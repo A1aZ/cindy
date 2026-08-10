@@ -7014,6 +7014,18 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           const artifactFingerprint = await fingerprintReviewArtifacts(artifactPaths);
           const completeArtifactFingerprintIsCurrent = async (): Promise<boolean> =>
             (await fingerprintReviewArtifacts(artifactPaths)) === artifactFingerprint;
+          const readCurrentSourceIdentity = async () => {
+            const [currentSource] = await db
+              .select({
+                workingDir: sessions.workingDir,
+                workspaceKind: sessions.workspaceKind,
+                status: sessions.status,
+              })
+              .from(sessions)
+              .where(eq(sessions.id, source.id))
+              .limit(1);
+            return currentSource ?? null;
+          };
 
           return {
             message: reviewMessage as UserMessage,
@@ -7035,6 +7047,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               ...(readRoots.size > 0 ? { extraDirs: [...readRoots] } : {}),
             }),
             verifyBeforeStart: async (): Promise<ReviewFailureReason | null> => {
+              if (!reviewSourceIdentityMatches(source, await readCurrentSourceIdentity())) {
+                return {
+                  code: 'source-workspace-changed',
+                  message:
+                    'The source task workspace changed before Review started. Run /review again in the current workspace.',
+                };
+              }
               if (
                 (await sourceHasActiveTurn(source.id)) ||
                 (await readReviewContextFingerprint(source.id)) !== evidence.contextFingerprint
@@ -7077,16 +7096,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               return null;
             },
             verifyBeforePublish: async (): Promise<ReviewFailureReason | null> => {
-              const [currentSource] = await db
-                .select({
-                  workingDir: sessions.workingDir,
-                  workspaceKind: sessions.workspaceKind,
-                  status: sessions.status,
-                })
-                .from(sessions)
-                .where(eq(sessions.id, source.id))
-                .limit(1);
-              if (!reviewSourceIdentityMatches(source, currentSource ?? null)) {
+              if (!reviewSourceIdentityMatches(source, await readCurrentSourceIdentity())) {
                 return {
                   code: 'source-workspace-changed',
                   message:

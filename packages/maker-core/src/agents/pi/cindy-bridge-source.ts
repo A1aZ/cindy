@@ -176,15 +176,15 @@ function isInsideRoot(candidate: string, root: string): boolean {
   return rel === '' || (!rel.startsWith('..' + path.sep) && rel !== '..' && !path.isAbsolute(rel));
 }
 
-function reviewReadIsAllowed(candidate: string, allowedPaths: string[]): boolean {
+function resolveReviewReadPath(candidate: string, allowedPaths: string[]): string | null {
   try {
     const requested = path.resolve(process.cwd(), candidate);
-    if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(requested))) return false;
+    if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(requested))) return null;
     const target = realpathSync(requested);
-    if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(target))) return false;
+    if (REVIEW_CREDENTIAL_PATH_PATTERNS.some((re) => re.test(target))) return null;
     const targetStat = statSync(target);
-    if (targetStat.isFile() && targetStat.nlink > 1) return false;
-    return allowedPaths.some((allowedPath) => {
+    if (targetStat.isFile() && targetStat.nlink > 1) return null;
+    const allowed = allowedPaths.some((allowedPath) => {
       try {
         const allowed = realpathSync(allowedPath);
         const stat = statSync(allowed);
@@ -194,8 +194,9 @@ function reviewReadIsAllowed(candidate: string, allowedPaths: string[]): boolean
         return false;
       }
     });
+    return allowed ? target : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -208,43 +209,62 @@ const REVIEW_PATH_FIELD_KEYS = new Set([
   'notebookpath',
 ]);
 
+type ReviewPathField = {
+  candidate: string;
+  write: (resolved: string) => void;
+};
+
 // Read tools have changed their input nesting across Pi versions. Walk every
-// object branch and validate every path-bearing field instead of trusting only
-// the top-level path value. Invalid or over-deep path shapes fail closed.
-function collectReviewPathCandidates(input: unknown): string[] | null {
+// object branch, retain a writer for every path-bearing field, then replace all
+// fields with the exact real paths that passed validation. Invalid or over-deep
+// path shapes fail closed without reaching the built-in tool.
+function collectReviewPathFields(input: unknown): ReviewPathField[] | null {
   if (
-    input != null
-    && (typeof input !== 'object' || Array.isArray(input))
+    input == null
+    || typeof input !== 'object'
+    || Array.isArray(input)
   ) return null;
-  const candidates: string[] = [];
-  const visit = (value: unknown, field: string | null, depth: number): boolean => {
+  const fields: ReviewPathField[] = [];
+  const visit = (
+    value: unknown,
+    field: string | null,
+    depth: number,
+    write: (resolved: string) => void,
+  ): boolean => {
     if (depth > 6) return false;
     const normalizedField = field?.toLowerCase() ?? null;
     if (normalizedField && REVIEW_PATH_FIELD_KEYS.has(normalizedField)) {
       const plural = normalizedField === 'paths';
       if (plural) {
         if (!Array.isArray(value)) return false;
-        for (const item of value) {
+        for (let index = 0; index < value.length; index += 1) {
+          const item = value[index];
           if (typeof item !== 'string') return false;
-          candidates.push(item || process.cwd());
+          fields.push({
+            candidate: item || process.cwd(),
+            write: (resolved) => { value[index] = resolved; },
+          });
         }
         return true;
       }
       if (typeof value !== 'string') return false;
-      candidates.push(value || process.cwd());
+      fields.push({ candidate: value || process.cwd(), write });
       return true;
     }
     if (value == null) return true;
     if (Array.isArray(value)) {
-      return value.every((item) => visit(item, null, depth + 1));
+      return value.every((item, index) =>
+        visit(item, null, depth + 1, (resolved) => { value[index] = resolved; }));
     }
     if (typeof value === 'object') {
-      return Object.entries(value as Record<string, unknown>)
-        .every(([key, child]) => visit(child, key, depth + 1));
+      const record = value as Record<string, unknown>;
+      return Object.entries(record)
+        .every(([key, child]) =>
+          visit(child, key, depth + 1, (resolved) => { record[key] = resolved; }));
     }
     return true;
   };
-  return visit(input, null, 0) ? candidates : null;
+  return visit(input, null, 0, () => {}) ? fields : null;
 }
 
 function reviewSelectorEscapesScope(selector: string): boolean {
@@ -299,18 +319,32 @@ function collectReviewFileSelectors(toolName: string, input: unknown): string[] 
   return visit(input, null, 0) ? selectors : null;
 }
 
-function reviewReadInputIsAllowed(
+function normalizeReviewReadInput(
   toolName: string,
   input: unknown,
   allowedPaths: string[],
 ): boolean {
-  const paths = collectReviewPathCandidates(input);
+  const pathFields = collectReviewPathFields(input);
   const selectors = collectReviewFileSelectors(toolName, input);
-  if (!paths || !selectors) return false;
-  const requestedPaths = paths.length > 0 ? paths : [process.cwd()];
-  return requestedPaths.every((candidate) => reviewReadIsAllowed(candidate, allowedPaths))
-    && selectors.every((selector) =>
-      !reviewSelectorEscapesScope(selector) && !reviewSelectorTouchesCredential(selector));
+  if (!pathFields || !selectors) return false;
+  if (selectors.some((selector) =>
+    reviewSelectorEscapesScope(selector) || reviewSelectorTouchesCredential(selector))) {
+    return false;
+  }
+  const requestedPaths = pathFields.length > 0
+    ? pathFields.map((field) => field.candidate)
+    : [process.cwd()];
+  const resolvedPaths = requestedPaths.map((candidate) =>
+    resolveReviewReadPath(candidate, allowedPaths));
+  if (resolvedPaths.some((resolved) => resolved === null)) return false;
+  if (pathFields.length === 0) {
+    (input as Record<string, unknown>).path = resolvedPaths[0]!;
+  } else {
+    for (let index = 0; index < pathFields.length; index += 1) {
+      pathFields[index].write(resolvedPaths[index]!);
+    }
+  }
+  return true;
 }
 
 function reviewSearchPathTouchesCredential(candidate: string, baseDir = process.cwd()): boolean {
@@ -854,7 +888,7 @@ export default async function cindyBridge(pi: any) {
     if (permission.reviewOnly) {
       if (
         READONLY_BUILTINS.has(event.toolName)
-        && reviewReadInputIsAllowed(
+        && normalizeReviewReadInput(
           event.toolName,
           event.input,
           permission.reviewReadPaths,

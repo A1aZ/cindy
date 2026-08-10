@@ -63,6 +63,27 @@ describe('Review external input wiring', () => {
     );
   });
 
+  it('rechecks the exact active source identity before both launch and publish', () => {
+    expect(registerSource).toContain('const readCurrentSourceIdentity = async () => {');
+    expect(
+      registerSource.match(
+        /reviewSourceIdentityMatches\(source, await readCurrentSourceIdentity\(\)\)/g,
+      ),
+    ).toHaveLength(2);
+
+    const verifyBeforeStart = registerSource.indexOf('verifyBeforeStart: async');
+    const firstIdentityCheck = registerSource.indexOf(
+      'reviewSourceIdentityMatches(source, await readCurrentSourceIdentity())',
+      verifyBeforeStart,
+    );
+    const verifyBeforePublish = registerSource.indexOf('verifyBeforePublish: async');
+    expect(firstIdentityCheck).toBeGreaterThan(verifyBeforeStart);
+    expect(firstIdentityCheck).toBeLessThan(verifyBeforePublish);
+    expect(registerSource.slice(verifyBeforeStart, verifyBeforePublish)).toContain(
+      "code: 'source-workspace-changed'",
+    );
+  });
+
   it('retries failed startup reconciliation before admitting another Review', () => {
     expect(registerSource.match(/createRetryableReviewStartup\(/g)).toHaveLength(2);
     expect(registerSource).toContain('void ensureReviewStartupReady().catch(() => {});');

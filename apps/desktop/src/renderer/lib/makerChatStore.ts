@@ -5603,10 +5603,11 @@ function handleStatusUpdate(
     ...state,
     // 真实 turn 的起/止都把 side-task 标记复位(它只描述「最近一次 stop」)。
     lastStopWasSideTask: false,
-    // 真实 turn 的任意 status 都终结唤醒桥接:wake turn 启动(message_start 发
-    // isRunning:true)是正常路径;wake turn 秒挂(只来 error + Done)也在这里
-    // 收口,防止桥接标记漏网永久撑住 running 快照。skipTurnReset 已提前 return。
-    pendingTaskWake: false,
+    // 唤醒桥接:只在 turn 启动(isRunning:true)时清除,不在 turn 完成
+    // (isRunning:false/Done)时清除。主 turn Done 后 wake turn 启动前必须
+    // 保留 pendingTaskWake,让 hasBackgroundAgentWork 阻止 ChatInput 用
+    // 不完整上下文发起预测。wake turn 启动(isRunning:true)时正常清除。
+    pendingTaskWake: isTurnStart ? false : state.pendingTaskWake,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {
       status: update.status,

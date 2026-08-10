@@ -302,7 +302,7 @@ describe('pendingTaskWake (唤醒桥接标记)', () => {
     expect(completed.pendingTaskWake).toBe(false);
   });
 
-  it('turn 还在跑时任务 completed 不置位(无空窗可桥)', () => {
+  it('turn 还在跑时任务 completed 也置位——唤醒桥接不受主 turn 状态影响', () => {
     const running = baseState({
       agentStatus: { ...EMPTY_SESSION_STATE.agentStatus, isRunning: true },
     });
@@ -311,7 +311,7 @@ describe('pendingTaskWake (唤醒桥接标记)', () => {
       taskEvent({ taskId: 'task-1', status: 'running', taskType: 'local_agent' }),
     );
     const completed = handleStreamEvent(started, taskEvent({ taskId: 'task-1', status: 'completed' }));
-    expect(completed.pendingTaskWake).toBe(false);
+    expect(completed.pendingTaskWake).toBe(true);
   });
 
   it('缺失 taskType(白名单外)不置位——宁可少转不可多转', () => {

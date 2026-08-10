@@ -43,7 +43,10 @@ import piSystemPrompt from './pi-system-prompt.md?raw';
 import { createLogger } from '../logger.js';
 import { readMemorySettings } from './memory-settings-store.js';
 import { registerPiProxySession } from './pi-proxy-session-auth.js';
-import { getDesktopMcpToolApprovalPolicy } from './mcp-tool-approval-policy.js';
+import {
+  getDesktopMcpToolApprovalPolicy,
+  getDesktopMcpToolApprovalPresentation,
+} from './mcp-tool-approval-policy.js';
 import { getRipgrepBinaryPath } from './runtime-configs.js';
 
 const log = createLogger('pi-host');
@@ -186,6 +189,8 @@ function buildDesktopPiRuntimeConfig(): AgentRuntimeConfig {
 
 export interface BuildPiAgentOpts {
   logger: AgentDeps['logger'];
+  turnChangeCapture?: AgentDeps['turnChangeCapture'];
+  registerLocalAgentProcess?: AgentDeps['registerLocalAgentProcess'];
   capabilityAdditions?: AgentDeps['capabilityAdditions'];
   reviewAutoPermissionAction?: AgentDeps['reviewAutoPermissionAction'];
   /** Cindy MCP providers(与 claude/codex 同源工厂产物);经 HTTP bridge 暴露给 pi。 */
@@ -193,6 +198,7 @@ export interface BuildPiAgentOpts {
   makerMemory?: AgentDeps['makerMemory'];
   resolvePiRuntimeModelDescriptor?: AgentDeps['resolvePiRuntimeModelDescriptor'];
   resolvePiGatewayModelDescriptor?: AgentDeps['resolvePiGatewayModelDescriptor'];
+  getGhostRosterPrompt?: AgentDeps['getGhostRosterPrompt'];
 }
 
 /** Cindy wire protocol → pi models.json api 形态。 */
@@ -361,6 +367,8 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     runtimeConfig: buildDesktopPiRuntimeConfig(),
     binaryPath,
     logger: opts.logger,
+    turnChangeCapture: opts.turnChangeCapture,
+    registerLocalAgentProcess: opts.registerLocalAgentProcess,
     capabilityAdditions: opts.capabilityAdditions,
     reviewAutoPermissionAction: opts.reviewAutoPermissionAction,
     mcpProviders: opts.mcpProviders,
@@ -368,11 +376,13 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     // 与 Claude Code / Codex 同一份第一方 MCP 审批真源。Pi 之前没接,导致 orca 这类
     // 可信 server 的工具落进 Auto-review 灰区被模型静默 block(详见 pi/index.ts 权限门)。
     getMcpToolApprovalPolicy: getDesktopMcpToolApprovalPolicy,
+    getMcpToolApprovalPresentation: getDesktopMcpToolApprovalPresentation,
     resolvePiAgentHome: () => path.join(app.getPath('userData'), 'pi-agent-home'),
     preparePiExtraSpawnConfig: (providers, ctx) => getPiExtraSpawnConfig(providers, opts.logger, ctx),
     registerPiProxySession,
     resolvePiNativeProviders: () => resolvePiNativeProviders(),
     resolvePiRuntimeModelDescriptor: opts.resolvePiRuntimeModelDescriptor,
     resolvePiGatewayModelDescriptor: opts.resolvePiGatewayModelDescriptor,
+    getGhostRosterPrompt: opts.getGhostRosterPrompt,
   });
 }

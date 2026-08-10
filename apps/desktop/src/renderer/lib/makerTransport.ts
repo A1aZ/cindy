@@ -18,6 +18,7 @@ import {
   getSessionDeviceId,
   remoteProjectsStore,
 } from '@/features/device-link/remoteProjectsStore';
+import { isDataOwnerPushCurrent } from '@/contexts/dataOwnerGeneration';
 import { isDeviceLinkRemotePushCurrent } from '@/lib/remoteDataOwnerPushFence';
 import {
   accountCounterAtRequestStart,
@@ -31,6 +32,7 @@ import type { Message, Session } from '@/lib/ccAgent.types';
 import * as messageService from '@/lib/messageService';
 import * as sessionService from '@/lib/sessionService';
 import { extractIpcError } from '@/utils/ipcError';
+import type { TurnChangeSetUpdatedPayload } from '../../shared/turnChangeSet';
 
 type FullMaker = typeof window.electronAPI.maker;
 
@@ -65,6 +67,10 @@ export interface RoutableMaker {
   getContextUsage: FullMaker['getContextUsage'];
   setExtraDirs: FullMaker['setExtraDirs'];
   closeSession: FullMaker['closeSession'];
+  // 手动压缩(pi 原生 compact,capability-aware 的 maker:compact-session):
+  // 上下文环 / 会话菜单对 device-link 远程 pi 会话也要隧道到被控端执行
+  // (压缩的是被控端的会话上下文,控制端本机无该 live 会话,固定调本机必 null 静默失败)。
+  compactSession: FullMaker['compactSession'];
   enableOrca: FullMaker['enableOrca'];
   disableOrca: FullMaker['disableOrca'];
   input: Pick<
@@ -161,6 +167,12 @@ function remoteMakerApi(deviceId: string): RoutableMaker {
     getContextUsage: t('maker:get-context-usage') as FullMaker['getContextUsage'],
     setExtraDirs: t('maker:set-extra-dirs') as FullMaker['setExtraDirs'],
     closeSession: t('maker:close-session') as FullMaker['closeSession'],
+    compactSession: ((sessionId, instructions) =>
+      invokeRemote(
+        deviceId,
+        'maker:compact-session',
+        instructions === undefined ? [sessionId] : [sessionId, instructions],
+      )) as FullMaker['compactSession'],
     enableOrca: t('maker:session:enable-orca') as FullMaker['enableOrca'],
     disableOrca: t('maker:session:disable-orca') as FullMaker['disableOrca'],
     input: {
@@ -194,6 +206,16 @@ export function makerApiForDevice(deviceId: string): RoutableMaker {
   return remoteMakerApi(deviceId);
 }
 
+/** Mutation 前按明确 deviceId 重新读取被控端能力，避免复用可能过期的 renderer cache。 */
+export function agentCapabilitiesForDevice(
+  deviceId: string,
+  agentKind: 'claude-code' | 'codex' | 'pi',
+): Promise<{ supportsOrcaWorkerPermissionMode?: boolean }> {
+  return invokeRemote(deviceId, 'maker:get-capabilities', [agentKind]) as Promise<{
+    supportsOrcaWorkerPermissionMode?: boolean;
+  }>;
+}
+
 /**
  * 按 sessionId 来源返回 maker 操作入口:
  *   - 本地 → 真 window.electronAPI.maker(零开销,行为不变)
@@ -219,6 +241,40 @@ export function makerApiFor(sessionId: string): RoutableMaker {
 export function makerApiForSticky(sessionId: string): RoutableMaker {
   const deviceId = getStickySessionDeviceId(sessionId);
   return deviceId ? makerApiForDevice(deviceId) : window.electronAPI.maker;
+}
+
+/** Subscribe to local exact-turn updates; remote sessions deliberately fail closed in this phase. */
+export function subscribeTurnChangeSetUpdated(
+  sessionId: string,
+  cb: (payload: TurnChangeSetUpdatedPayload) => void,
+): () => void {
+  const bind = (deviceId: string | undefined): (() => void) => {
+    if (!deviceId) {
+      return window.electronAPI.maker.onTurnChangeSetUpdated((raw, ownerStamp) => {
+        if (!isDataOwnerPushCurrent(ownerStamp)) return;
+        const payload = raw as Partial<TurnChangeSetUpdatedPayload> | null;
+        if (payload?.sessionId !== sessionId || !payload.summary) return;
+        cb(payload as TurnChangeSetUpdatedPayload);
+      });
+    }
+    // Exact patches can exceed the 2 MiB device-link frame. This phase fails closed for
+    // controlled sessions instead of truncating a patch and presenting it as exact.
+    return () => {};
+  };
+
+  let currentDeviceId = getStickySessionDeviceId(sessionId);
+  let offInner = bind(currentDeviceId);
+  const offStore = remoteProjectsStore.subscribe(() => {
+    const nextDeviceId = getStickySessionDeviceId(sessionId);
+    if (nextDeviceId === currentDeviceId) return;
+    currentDeviceId = nextDeviceId;
+    offInner();
+    offInner = bind(nextDeviceId);
+  });
+  return () => {
+    offStore();
+    offInner();
+  };
 }
 
 /** 是否远程(device-link)会话。 */

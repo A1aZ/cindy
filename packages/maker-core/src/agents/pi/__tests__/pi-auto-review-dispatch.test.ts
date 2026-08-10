@@ -11,7 +11,15 @@
  *      `set_model` id(都是用户选中的目录 id)。
  */
 
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +34,7 @@ const captured = vi.hoisted(() => ({
   mcpVendorOptions: undefined as Record<string, unknown> | undefined,
   failSetModel: false,
   rejectSetModel: false,
+  failPrompt: false,
   onAfterSetModel: null as null | (() => void),
   // 卡住 set_model 的回包,让测试能在"RPC 在飞"的那一刻观察盘上的路由快照。
   holdSetModel: null as null | Promise<void>,
@@ -56,6 +65,9 @@ vi.mock('../rpc-client.js', () => ({
       }
       if (cmd.type === 'set_model' && captured.failSetModel) {
         captured.onAfterSetModel?.();
+        return { success: false };
+      }
+      if (cmd.type === 'prompt' && captured.failPrompt) {
         return { success: false };
       }
       if (cmd.type === 'get_state') {
@@ -101,6 +113,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     captured.mcpVendorOptions = undefined;
     captured.failSetModel = false;
     captured.rejectSetModel = false;
+    captured.failPrompt = false;
     captured.onAfterSetModel = null;
     captured.holdSetModel = null;
     captured.closed = false;
@@ -128,6 +141,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     /** 本会话「已注册」的桥接 MCP server 名(经 preparePiExtraSpawnConfig 下发)。 */
     serverNames?: string[];
     policy?: AgentDeps['getMcpToolApprovalPolicy'];
+    presentation?: AgentDeps['getMcpToolApprovalPresentation'];
   }
 
   function buildDeps(
@@ -137,6 +151,9 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
   ): AgentDeps {
     return {
       ...(mcp?.policy ? { getMcpToolApprovalPolicy: mcp.policy } : {}),
+      ...(mcp?.presentation
+        ? { getMcpToolApprovalPresentation: mcp.presentation }
+        : {}),
       ...(mcp?.serverNames
         ? {
           preparePiExtraSpawnConfig: async (_providers, context) => {
@@ -282,6 +299,90 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
       expect(noProxy).toContain(entry);
     }
     expect(captured.env.no_proxy).toBeUndefined();
+  });
+
+  it('locks Review sessions to the local read-only tool surface without memory, MCP, or subagents', async () => {
+    const deps = buildDeps(undefined, false, { serverNames: ['cindy_memory', 'cindy_helper'] });
+    deps.getGhostRosterPrompt = vi.fn(() => 'PRIVATE ROSTER');
+    const explicitArtifact = path.join(agentHome, 'explicit-artifact.txt');
+    const dotenvPath = path.join(cwd, '.env.local');
+    writeFileSync(explicitArtifact, 'review me');
+    writeFileSync(dotenvPath, 'TOKEN=secret');
+    const handle = await new PiAgent(deps).startSession({
+      sessionId: 'review-session',
+      workingDir: cwd,
+      model: 'm',
+      permissionMode: 'bypassPermissions',
+      planMode: true,
+      makerMemoryEnabled: true,
+      userPrompt: 'PRIVATE USER PROMPT',
+      reviewMode: true,
+      reviewReadPaths: [explicitArtifact],
+    });
+    try {
+      const toolsIndex = captured.args.indexOf('--tools');
+      expect(toolsIndex).toBeGreaterThan(-1);
+      expect(captured.args[toolsIndex + 1]).toBe('read,grep,find,ls');
+      expect(captured.mcpVendorOptions).toBeUndefined();
+      expect(deps.getGhostRosterPrompt).not.toHaveBeenCalled();
+
+      const promptIndex = captured.args.indexOf('--append-system-prompt');
+      const appendedPrompt = promptIndex >= 0 ? captured.args[promptIndex + 1] : '';
+      expect(appendedPrompt).not.toContain('PRIVATE ROSTER');
+      expect(appendedPrompt).not.toContain('PRIVATE USER PROMPT');
+
+      const configHome = captured.env.PI_CODING_AGENT_DIR;
+      expect(configHome).toBeTruthy();
+      expect(readdirSync(path.join(configHome!, 'extensions')).sort()).toEqual(['cindy-bridge.ts']);
+
+      const permissionFile = captured.env.CINDY_PI_PERMISSION_FILE;
+      expect(permissionFile).toBeTruthy();
+      const reviewPermission = JSON.parse(readFileSync(permissionFile!, 'utf8')) as {
+        mode: string;
+        reviewOnly: boolean;
+        reviewReadPaths: string[];
+      };
+      expect(reviewPermission).toMatchObject({
+        mode: 'ask',
+        reviewOnly: true,
+      });
+      expect(reviewPermission.reviewReadPaths.map((item) => realpathSync.native(item))).toEqual([
+        realpathSync.native(cwd),
+        realpathSync.native(explicitArtifact),
+      ]);
+
+      await expect(
+        handle.send({
+          type: 'user',
+          content: [{ type: 'image', path: dotenvPath, mimeType: 'image/png' }],
+        }),
+      ).rejects.toThrow(/refused/i);
+      expect(captured.requests.some((request) => request.type === 'prompt')).toBe(false);
+
+      await handle.setPermissionMode?.('bypassPermissions');
+      expect(JSON.parse(readFileSync(permissionFile!, 'utf8'))).toMatchObject({
+        mode: 'ask',
+        reviewOnly: true,
+      });
+      expect(handle.getPlanMode?.()).toBe(false);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('把 session 花名册快照追加到 Pi system prompt', async () => {
+    const deps = buildDeps();
+    deps.getGhostRosterPrompt = vi.fn(() => 'GHOST ROSTER PROMPT');
+    const agent = new PiAgent(deps);
+    const handle = await agent.startSession({
+      sessionId: 'roster-session',
+      workingDir: cwd,
+      model: 'm',
+    });
+    const idx = captured.args.indexOf('--append-system-prompt');
+    expect(captured.args[idx + 1]).toContain('GHOST ROSTER PROMPT');
+    expect(deps.getGhostRosterPrompt).toHaveBeenCalledWith({ workingDir: cwd });
+    await handle.close();
   });
 
   it('does not inherit an unmanaged ripgrep path from the host process env', async () => {
@@ -658,6 +759,156 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r2', confirmed: true });
   });
 
+  it('lets a turn policy override Auto-Review allow and passes exact tool evidence', async () => {
+    const review = vi.fn(async () => ({ verdict: 'allow' as const }));
+    const handle = await start('auto', review);
+    const forceConfirmToolCall = vi.fn(() => true);
+    await handle.send(
+      { type: 'user', content: 'Update the shared scratch file.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-policy' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall,
+        },
+      },
+    );
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'allow' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+
+    const input = { path: '/tmp/policy.txt' };
+    firePermissionRequest('policy-allow', 'write', input);
+    expect(await waitForResponse('policy-allow')).toEqual({
+      type: 'extension_ui_response', id: 'policy-allow', confirmed: true,
+    });
+    expect(forceConfirmToolCall).toHaveBeenCalledWith('write', input);
+    expect(resolver).toHaveBeenCalledOnce();
+    expect(review).toHaveBeenCalledOnce();
+  });
+
+  it('lets a turn policy override MCP auto-approve and fail-closes policy exceptions', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'allow' as const }), false, {
+      serverNames: ['cindy_contacts'],
+      policy: () => 'auto-approve',
+    });
+    await handle.send(
+      { type: 'user', content: 'Update a contact.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-mcp' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall: () => {
+            throw new Error('policy unavailable');
+          },
+        },
+      },
+    );
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+
+    firePermissionRequest('policy-mcp', 'mcp__cindy_contacts__call_tool', {
+      name: 'contacts_merge',
+      args: { sourceId: 'a', targetId: 'b' },
+    });
+    expect(await waitForResponse('policy-mcp')).toEqual({
+      type: 'extension_ui_response', id: 'policy-mcp', confirmed: false,
+    });
+    expect(resolver).toHaveBeenCalledOnce();
+  });
+
+  it('denies Auto-Review ask without an extra channel prompt on policy turns', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'ask' as const }));
+    await handle.send(
+      { type: 'user', content: 'Touch an outside file.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-gray' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall: () => false,
+        },
+      },
+    );
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'allow' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+
+    firePermissionRequest('policy-gray', 'write', { path: '/tmp/outside-gray.txt' });
+    expect(await waitForResponse('policy-gray')).toEqual({
+      type: 'extension_ui_response', id: 'policy-gray', confirmed: false,
+    });
+    expect(resolver).not.toHaveBeenCalled();
+  });
+
+  it('keeps a policy across internal continuation tools and clears it at agent_settled', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'allow' as const }));
+    const forceConfirmToolCall = vi.fn(() => true);
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'allow' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+    await handle.send(
+      { type: 'user', content: 'Run a plan and continue.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-continuation' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall,
+        },
+      },
+    );
+
+    firePermissionRequest('policy-first', 'write', { path: '/tmp/first.txt' });
+    firePermissionRequest('policy-continuation', 'bash', { command: 'pnpm test' });
+    expect((await waitForResponse('policy-first')).confirmed).toBe(true);
+    expect((await waitForResponse('policy-continuation')).confirmed).toBe(true);
+    expect(forceConfirmToolCall).toHaveBeenCalledTimes(2);
+
+    captured.onEvent?.({ type: 'agent_settled' });
+    await handle.send({ type: 'user', content: 'Desktop follow-up without channel policy.' });
+    firePermissionRequest('desktop-after-policy', 'write', { path: '/tmp/desktop.txt' });
+    expect((await waitForResponse('desktop-after-policy')).confirmed).toBe(true);
+    expect(forceConfirmToolCall).toHaveBeenCalledTimes(2);
+    expect(resolver).toHaveBeenCalledTimes(2);
+  });
+
+  it('rolls back a policy when Pi rejects the prompt before provider acceptance', async () => {
+    const handle = await start('auto', async () => ({ verdict: 'allow' as const }));
+    const forceConfirmToolCall = vi.fn(() => true);
+    captured.failPrompt = true;
+    await expect(handle.send(
+      { type: 'user', content: 'Rejected policy turn.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-rejected' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall,
+        },
+      },
+    )).rejects.toThrow('pi prompt rejected');
+
+    captured.failPrompt = false;
+    await handle.send({ type: 'user', content: 'Normal Desktop turn.' });
+    firePermissionRequest('desktop-after-reject', 'write', { path: '/tmp/desktop-after-reject.txt' });
+    expect((await waitForResponse('desktop-after-reject')).confirmed).toBe(true);
+    expect(forceConfirmToolCall).not.toHaveBeenCalled();
+  });
+
+  it('rejects a policy in Full Access before sending the prompt RPC', async () => {
+    const handle = await start('bypassPermissions');
+    const promptsBefore = captured.requests.filter((request) => request.type === 'prompt').length;
+    await expect(handle.send(
+      { type: 'user', content: 'Unsafe remote turn.' },
+      {
+        turnPermissionPolicy: {
+          origin: { kind: 'im', channel: 'wechat', taskId: 'task-full-access' },
+          confirmationSurface: 'channel',
+          forceConfirmToolCall: () => true,
+        },
+      },
+    )).rejects.toMatchObject({
+      name: 'TurnPermissionPolicyUnsupportedError',
+      permissionMode: 'bypassPermissions',
+    });
+    expect(captured.requests.filter((request) => request.type === 'prompt')).toHaveLength(promptsBefore);
+  });
+
   /**
    * 桥接 MCP 工具走 host 审批策略,不进 Auto-review 灰区(与 Claude Code / Codex 同一份
    * 真源)。回归的真实缺陷:Pi 没接这条策略时,`start_team` 落进灰区交模型判,模型按
@@ -717,6 +968,37 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     expect(review).not.toHaveBeenCalled();
     expect(resolverCalls).toBe(1);
     expect(captured.sent).toContainEqual({ type: 'extension_ui_response', id: 'r21', confirmed: true });
+  });
+
+  it('uses the host security disclosure for progressive MCP approvals', async () => {
+    const disclosure = {
+      title: 'Allow Xcode to build this project?',
+      description:
+        'Build scripts may access files outside the project, and output is returned to the Agent.',
+    };
+    const handle = await start('auto', undefined, false, {
+      serverNames: ['cindy_ios_simulator'],
+      policy: () => 'prompt-each-time',
+      presentation: () => disclosure,
+    });
+    const resolver = vi.fn(async () => ({ kind: 'permission', behavior: 'deny' } as const));
+    handle.setInteractionResolver?.(resolver as never);
+
+    firePermissionRequest('r-build', 'mcp__cindy_ios_simulator__call_tool', {
+      name: 'build_app',
+      args: {},
+    });
+
+    expect(await waitForResponse('r-build')).toEqual({
+      type: 'extension_ui_response',
+      id: 'r-build',
+      confirmed: false,
+    });
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'permission',
+      title: disclosure.title,
+      description: disclosure.description,
+    }));
   });
 
   /**

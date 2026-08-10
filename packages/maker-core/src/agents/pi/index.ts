@@ -35,6 +35,7 @@ import {
   type PiNativeProviderSpec,
   type SendOptions,
   type StartSessionOptions,
+  type TurnPermissionPolicy,
 } from '../base-agent.js';
 import {
   CINDY_BRIDGE_EXTENSION_FILENAME,
@@ -74,13 +75,20 @@ import type {
 import type { MemoryResetResult, MemorySetResult, MemoryStatus } from '../../types/memory.js';
 import type { AgentKind, Effort, UserMessage, UserContentBlock } from '../../types/common.js';
 import type { ListAgentSkillsOptions, ListAgentSkillsResult } from '../../types/palette.js';
+import type { ListCustomizationsOptions, ListCustomizationsResult } from '../../types/customizations.js';
 import { scanPiCustomizations } from './customization-scanner.js';
 import { createAsyncQueue, type AsyncQueue } from '../shared/async-queue.js';
 import { resolveMcpToolTarget } from '../shared/mcp-tool-target.js';
+import {
+  assertReviewMessageContentPaths,
+  buildReviewReadGrants,
+} from '../shared/review-read-scope.js';
 import { resolveAgentCredentialMode } from '../credential-mode.js';
 import { PiRpcProcess, type PiRpcEvent } from './rpc-client.js';
+import { capturePiRuntimeCapabilityManifest } from './runtime-capabilities.js';
 import {
   createPiTranslateContext,
+  disposePiTranslateContext,
   translatePiEvent,
   usageSnapshotOf,
   type PiTranslateContext,
@@ -92,6 +100,7 @@ import {
   piContextTokensFromTree,
   userDraftTextFromPiEntry,
 } from './session-tree.js';
+import type { PiRuntimeCapabilityManifest } from '../../types/pi-runtime-capabilities.js';
 
 const PI_PROVIDER_ID = 'cindy';
 // 既非 Cindy 网关(cindy/xd)也非订阅直连(openai/anthropic/xai)的 providerId = 显式 BYOM
@@ -376,6 +385,15 @@ export class PiAgent extends BaseAgent {
         { id: 'bypassPermissions', displayName: 'Full access', description: 'Every tool runs without asking. Highest risk; use only for trusted tasks.' },
       ],
       setPermissionModeMidSession: { supported: true },
+      // Host 每轮权限策略(个人微信 / Telegram 群等远程渠道):在 handleExtensionUiRequest
+      // 的工具审批边界上,先于 MCP auto-approve 与 auto 档 Auto-Review 强制确认命中的调用。
+      // bypassPermissions 下 cindy-bridge 直接放行、tool_call 不冒泡,host 无从执行策略 ——
+      // 因此把 Full Access 列为不支持,由 host 在 provider 启动前 fail-closed 拒绝该组合,
+      // 而不是给出无法兑现的"强制确认"承诺(与 CC/Codex 同口径)。
+      turnPermissionPolicy: {
+        supported: { supported: true },
+        unsupportedPermissionModes: ['bypassPermissions'],
+      },
       // plan 模式经 pi 自带 plan-mode 扩展(--extension 加载):开启后禁用 edit/write、
       // bash 仅允许只读白名单;plan 提示词仅在激活时注入(不增基线上下文)。
       // Cindy 用 setPlanMode 经 /plan 命令 toggle 驱动 enter/exit。
@@ -414,6 +432,9 @@ export class PiAgent extends BaseAgent {
       // pi 原生 compact RPC:手动压缩(可带聚焦指令,调 LLM 生成摘要)。
       // 斜杠转义后用户无法手输 /compact,此能力是 pi 会话手动压缩的唯一入口。
       manualCompact: { supported: true },
+      // Pi 的 get_commands runtime catalog 通过 per-session handle 查询；
+      // manifest 本身在 ready/fork 后异步采集，暂不可用不代表能力不支持。
+      runtimeCapabilities: { supported: true },
     };
   }
 
@@ -518,6 +539,7 @@ export class PiAgent extends BaseAgent {
         message: 'pi sessions are local-only for now',
       });
     }
+    const reviewMode = opts.reviewMode === true;
 
     // BYOM:host 解析当前会话可用的原生 provider(用户自定义/本地模型)+ 需注入的 env(keys)。
     // 缺省 → 空,只有网关 provider `cindy`(现状不变)。失败不致命,降级为无原生 provider。
@@ -739,10 +761,12 @@ export class PiAgent extends BaseAgent {
     // cindy-subagent extension:与 bridge 并列的独立扩展(职责分离 —— bridge 管权限门与
     // MCP 桥,这个只管子代理)。子进程继承 PI_CODING_AGENT_DIR,因此同样加载 bridge,
     // 权限门对子代理照样生效;递归由扩展内的 depth env 自己截断。
-    await fs.writeFile(
-      path.join(extensionsDir, CINDY_SUBAGENT_EXTENSION_FILENAME),
-      CINDY_SUBAGENT_EXTENSION_SOURCE,
-    );
+    if (!reviewMode) {
+      await fs.writeFile(
+        path.join(extensionsDir, CINDY_SUBAGENT_EXTENSION_FILENAME),
+        CINDY_SUBAGENT_EXTENSION_SOURCE,
+      );
+    }
 
     // 权限档文件:extension 每次 tool_call 现读(热切换);读不到按 ask fail-closed。
     const runtimeDir = path.join(agentHome, 'runtime');
@@ -793,8 +817,16 @@ export class PiAgent extends BaseAgent {
     // 桥内行为同 ask(非只读全部冒泡)。其余档(default/acceptEdits/plan)归 ask 最严。
     const normalizePermissionMode = (mode: string | undefined): 'ask' | 'auto' | 'bypassPermissions' =>
       mode === 'bypassPermissions' ? 'bypassPermissions' : mode === 'auto' ? 'auto' : 'ask';
-    let permissionMode = normalizePermissionMode(opts.permissionMode);
+    let permissionMode = reviewMode ? 'ask' : normalizePermissionMode(opts.permissionMode);
     let mutableExtraDirs = [...(opts.extraDirs ?? [])];
+    const reviewReadGrants = reviewMode
+      ? await buildReviewReadGrants(opts.workingDir, opts.reviewReadPaths ?? [])
+      : [];
+    const reviewReadPaths = reviewReadGrants.map((grant) => grant.realPath);
+    // Keep ordinary permission files shape-compatible with older Cindy/Pi
+    // sessions. The Review-only marker is capability-like: absence means the
+    // normal bridge, while `true` selects the restricted Review bridge.
+    const reviewPathSnapshot = reviewMode ? { reviewReadPaths, reviewOnly: true as const } : {};
     // 与 Claude / Codex 一致，运行期 Orca 身份更新必须原地落在同一个对象上。
     // Desktop Pi MCP bridge 在 startSession 时持有这个引用；start_team 成功后 host
     // 调 setVendorOptions，后续 create_worker 等工具才能立即读到最新 Lead 身份。
@@ -802,16 +834,20 @@ export class PiAgent extends BaseAgent {
     type PermissionSnapshot = {
       mode: 'ask' | 'auto' | 'bypassPermissions';
       readOnlyRoots: string[];
+      reviewReadPaths?: string[];
+      reviewOnly?: true;
     };
     const permissionPrivilege = (mode: PermissionSnapshot['mode']): number =>
       mode === 'bypassPermissions' ? 2 : mode === 'auto' ? 1 : 0;
     let requestedPermissionSnapshot: PermissionSnapshot = {
       mode: permissionMode,
       readOnlyRoots: [...mutableExtraDirs],
+      ...reviewPathSnapshot,
     };
     let persistedPermissionSnapshot: PermissionSnapshot = {
       mode: permissionMode,
       readOnlyRoots: [...mutableExtraDirs],
+      ...reviewPathSnapshot,
     };
     // 权限档写入串行化 + 代际跳过。并发/连续切档(本地与远程控制端同时切,或用户快速连点)时,
     // 无串行的 fs.writeFile 可能让较早的 Full-access 写在较新的 Ask 写之后落盘 —— bridge 每次
@@ -824,6 +860,7 @@ export class PiAgent extends BaseAgent {
       requestedPermissionSnapshot = {
         mode: next.mode,
         readOnlyRoots: [...next.readOnlyRoots],
+        ...reviewPathSnapshot,
       };
       // 收紧必须立刻约束 host 侧审批门；等待磁盘 I/O 才改闭包会留下一个 Full access
       // 的窗口。放宽反过来只能等对应快照成功落盘，避免 host 已放行而 bridge 仍是旧档。
@@ -832,7 +869,11 @@ export class PiAgent extends BaseAgent {
       }
       const gen = ++permissionWriteGen;
       // 排队时刻捕获意图快照;运行时若已被更晚的写取代则跳过(旧内容不得在新内容之后落盘)。
-      const snapshot = { ...requestedPermissionSnapshot, readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots] };
+      const snapshot = {
+        ...requestedPermissionSnapshot,
+        readOnlyRoots: [...requestedPermissionSnapshot.readOnlyRoots],
+        ...reviewPathSnapshot,
+      };
       const run = permissionWriteChain.then(async () => {
         if (gen !== permissionWriteGen) return;
         try {
@@ -847,6 +888,7 @@ export class PiAgent extends BaseAgent {
               // 放宽失败时 permissionMode 仍是旧的已提交 mode，同样达到回滚效果。
               mode: permissionMode,
               readOnlyRoots: [...persistedPermissionSnapshot.readOnlyRoots],
+              ...reviewPathSnapshot,
             };
           }
           throw error;
@@ -859,6 +901,7 @@ export class PiAgent extends BaseAgent {
           persistedPermissionSnapshot = {
             mode: snapshot.mode,
             readOnlyRoots: [...snapshot.readOnlyRoots],
+            ...reviewPathSnapshot,
           };
         }
       });
@@ -894,7 +937,7 @@ export class PiAgent extends BaseAgent {
      * 用它当"撤销开关"(上一版就是这么用的,那是个空操作,review 连点两轮)。运行期要收回子代理
      * 能力只有一条可证明有效的路:终止会话。
      */
-    let subagentRoutingEnabled = true;
+    let subagentRoutingEnabled = !reviewMode;
     const writeSubagentRuntimeFile = async (
       next: { model?: string; provider?: string; pending?: boolean },
     ): Promise<boolean> => {
@@ -926,7 +969,7 @@ export class PiAgent extends BaseAgent {
       }
     };
     // 会话暴露前先落初始快照(await:模型第一次调 subagent 时文件必须已经在)。
-    if (!(await writeSubagentRuntimeFile({ model: opts.model, provider: initialProvider }))) {
+    if (subagentRoutingEnabled && !(await writeSubagentRuntimeFile({ model: opts.model, provider: initialProvider }))) {
       subagentRoutingEnabled = false;
     }
 
@@ -939,13 +982,15 @@ export class PiAgent extends BaseAgent {
     let mcpEnv: PiExtraSpawnConfig['mcpEnv'] = {};
     let disposeSessionCtx: (() => void) | undefined;
     const registeredMcpServerNames = new Set<string>();
-    if (this.deps.preparePiExtraSpawnConfig) {
+    if (!reviewMode && this.deps.preparePiExtraSpawnConfig) {
       try {
         const extra = await this.deps.preparePiExtraSpawnConfig(this.deps.mcpProviders ?? [], {
           sessionId: opts.sessionId,
           ...(opts.sessionInstanceId ? { sessionInstanceId: opts.sessionInstanceId } : {}),
           workingDir: opts.workingDir,
           vendorOptions: mutableVendorOptions,
+          mcpCallerKind: 'root',
+          mcpCallerAttested: true,
         });
         mcpBridge = extra?.mcpBridge ?? null;
         mcpEnv = extra?.mcpEnv ?? {};
@@ -968,6 +1013,7 @@ export class PiAgent extends BaseAgent {
     // 记忆(进 FTS 可 memory_search 检索,但排除出 MEMORY.md / system prompt,不污染
     // curated 记忆)。gate 与 CC 同口径;best-effort,失败只 warn,绝不阻断会话。
     const compactionMemoryEnabled =
+      !reviewMode &&
       (opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false) === true &&
       (this.memoryOverride ?? true) === true &&
       !!this.deps.makerMemory;
@@ -1001,9 +1047,13 @@ export class PiAgent extends BaseAgent {
 
     // 追加而非替换:pi 默认 prompt(工具用法/工程约定)原样保留,只追加 host 产品段
     // 与用户段。前缀稳定(默认 prompt 静态),易变内容禁止进入(缓存规则 3.1)。
+    const ghostRosterPrompt = reviewMode
+      ? ''
+      : this.deps.getGhostRosterPrompt?.({ workingDir: opts.workingDir }) ?? '';
     const appendSections = [
       this.deps.runtimeConfig.systemPrompt?.trim(),
-      opts.userPrompt?.trim(),
+      ghostRosterPrompt.trim(),
+      reviewMode ? undefined : opts.userPrompt?.trim(),
       piExtraDirsPrompt(mutableExtraDirs),
     ].filter((s): s is string => !!s && s.length > 0);
     const appendSystemPrompt = appendSections.join('\n\n');
@@ -1027,13 +1077,19 @@ export class PiAgent extends BaseAgent {
       '--session-dir', sessionDir,
       '--provider', initialProvider,
       '--model', opts.model,
+      ...(reviewMode ? ['--tools', 'read,grep,find,ls'] : []),
       ...(appendSystemPrompt.length > 0 ? ['--append-system-prompt', appendSystemPrompt] : []),
-      ...(planModeExtAvailable ? ['--extension', planModeExtPath] : []),
+      ...(!reviewMode && planModeExtAvailable ? ['--extension', planModeExtPath] : []),
     ];
 
     const queue: AsyncQueue<AgentEvent> = createAsyncQueue<AgentEvent>();
     const ctx: PiTranslateContext = createPiTranslateContext(this.deps.logger);
     let interactionResolver: InteractionResolver | null = null;
+    // Host 每轮权限策略(个人微信 / Telegram 群)。刻意保留在 send 之外的闭包里:
+    // pi 的内部续跑(plan 审批后的实施轮、自动继续)不再经 handle.send,却必须继续
+    // 强制确认策略命中的工具 —— 与 Claude(task_notification 续跑)/ Codex(plan
+    // follow-up send)同口径。清空只认 turn 终态,由 send 预检覆盖为最新值。
+    let activeTurnPermissionPolicy: TurnPermissionPolicy | null = null;
     let mutableModel = opts.model;
     // Pi RPC 实际选中的 provider。与用于宿主鉴权/审阅元数据的 mutableProviderId 分开：
     // null/订阅来源会归一到 cindy，setModel 未显式传来源时也必须跟随本次解析结果。
@@ -1085,6 +1141,13 @@ export class PiAgent extends BaseAgent {
         });
       }
     };
+    const clearActiveTurnPermissionPolicy = (
+      reason: string,
+      opts?: { dismissPending?: boolean },
+    ): void => {
+      activeTurnPermissionPolicy = null;
+      if (opts?.dismissPending) dismissAllPendingPrompts(reason, 'deny');
+    };
     // 「自动审核不可用」的会话级一次性提示(issue #1574);与 Claude / Codex 同口径,走既有的
     // 非终止 error 事件 + `[CODE]` 约定,不新增事件类型。
     const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice((message) => {
@@ -1124,6 +1187,29 @@ export class PiAgent extends BaseAgent {
     // preparePiExtraSpawnConfig 注册、但 handle 尚未交出,close() 不会跑 → 单独
     // 兜底注销 ctx 再抛(构造失败没有 proc 可关)。catch 必抛,故其后 proc 恒已赋值。
     let proc: PiRpcProcess;
+    let runtimeCapabilityManifest: PiRuntimeCapabilityManifest | undefined;
+    let runtimeCapabilityGeneration = 0;
+    const runtimeCapabilityListeners = new Set<(
+      manifest: PiRuntimeCapabilityManifest | undefined,
+    ) => void>();
+    const notifyRuntimeCapabilityListener = (
+      listener: (manifest: PiRuntimeCapabilityManifest | undefined) => void,
+      manifest: PiRuntimeCapabilityManifest | undefined,
+    ): void => {
+      try {
+        listener(manifest);
+      } catch (error) {
+        this.deps.logger.warn('pi runtime capability listener failed (non-fatal)', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+    const publishRuntimeCapabilities = (manifest: PiRuntimeCapabilityManifest | undefined): void => {
+      runtimeCapabilityManifest = manifest;
+      for (const listener of runtimeCapabilityListeners) {
+        notifyRuntimeCapabilityListener(listener, manifest);
+      }
+    };
     const proxySessionToken = randomBytes(32).toString('base64url');
     let disposeProxySession: (() => void) | undefined;
     // 幂等:onExit(进程异常退出)与 close()(用户结束)可能都调用它;首次注销后置位,
@@ -1214,6 +1300,12 @@ export class PiAgent extends BaseAgent {
         cwd: opts.workingDir,
         env: spawnEnv,
         logger: this.deps.logger,
+        onProcessSpawned: (pid) =>
+          this.deps.registerLocalAgentProcess?.({
+            pid,
+            kind: 'pi',
+            role: 'task-host',
+          }),
         onEvent: (event: PiRpcEvent) => {
           if (event.type === 'extension_ui_request') {
             this.handleExtensionUiRequest(event, proc, () => ({
@@ -1225,6 +1317,10 @@ export class PiAgent extends BaseAgent {
               notifyAutoReviewUnavailable: () => autoReviewUnavailableNotice.notify(),
               registeredMcpServerNames,
               registerPendingPrompt,
+              turnPermissionPolicy: activeTurnPermissionPolicy,
+              sessionId: opts.sessionId ?? '',
+              workingDir: opts.workingDir ?? '',
+              remote: Boolean(opts.remoteHostId),
             }));
             return;
           }
@@ -1237,9 +1333,22 @@ export class PiAgent extends BaseAgent {
               void writeCompactionDigest(summary.trim(), reason);
             }
           }
+          // Pi 的真实 turn 终态是 agent_settled；auto-retry 耗尽则先发 terminal error。
+          // 两条路径都必须立即清本轮 host policy，避免它泄漏到后续 Desktop turn。
+          if (
+            event.type === 'agent_settled'
+            || (event.type === 'auto_retry_end' && event.success !== true)
+          ) {
+            clearActiveTurnPermissionPolicy('turn_terminal', { dismissPending: true });
+          }
           translatePiEvent(event, queue, ctx);
         },
         onExit: ({ code, signal }) => {
+          disposePiTranslateContext(ctx);
+          clearActiveTurnPermissionPolicy('process_exit', { dismissPending: true });
+          runtimeCapabilityGeneration++;
+          publishRuntimeCapabilities(undefined);
+          runtimeCapabilityListeners.clear();
           if (!closed) {
             // 非用户 close 的进程死亡:terminal error + 收尾,避免 UI 永久 running。
             queue.push({
@@ -1265,6 +1374,7 @@ export class PiAgent extends BaseAgent {
         },
       });
     } catch (err) {
+      disposePiTranslateContext(ctx);
       try {
         disposeSessionRegistrations();
       } catch {
@@ -1370,6 +1480,22 @@ export class PiAgent extends BaseAgent {
     // 身份注册(否则 ?session= ctx 泄漏)+ 关掉可能已 spawn 的子进程(否则僵尸 pi
     // 仍持有本会话的 MCP 路由),再把原始错误抛给调用方。
     let sdkSessionId = '';
+    const refreshRuntimeCapabilities = async (
+      stage: 'ready' | 'switch_session' | 'fork',
+    ): Promise<void> => {
+      const generation = ++runtimeCapabilityGeneration;
+      const manifest = await capturePiRuntimeCapabilityManifest(
+        proc,
+        {
+          ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
+          ...(sdkSessionId ? { sdkSessionId } : {}),
+        },
+        generation,
+        stage,
+      );
+      if (!closed && generation === runtimeCapabilityGeneration) publishRuntimeCapabilities(manifest);
+    };
+    let runtimeCaptureStage: 'ready' | 'switch_session' = 'ready';
     try {
       // Resume:pi 的会话钥匙是 session JSONL 绝对路径(get_state.sessionFile),
       // 落库 sdk_session_id 存的就是它;切换失败走 invalid-resume CAS 协定。
@@ -1402,6 +1528,8 @@ export class PiAgent extends BaseAgent {
               resumeSessionId: opts.resumeSessionId,
               error: switched.error,
             });
+          } else {
+            runtimeCaptureStage = 'switch_session';
           }
         }
       }
@@ -1437,6 +1565,14 @@ export class PiAgent extends BaseAgent {
       sdkSessionId = stateData.sessionFile || stateData.sessionId || `pi-${Date.now()}`;
       queue.push({ type: 'session_id', data: sdkSessionId, source: 'pi' });
 
+      // get_state is the ready boundary. Capture exactly once after the final
+      // fresh/resumed runtime has been selected; list/customization calls never
+      // trigger this RPC.
+      // Capability discovery is optional and must not delay session creation.
+      // The ready boundary has selected the final Pi session identity; publish
+      // the result later through the per-session query/listener contract.
+      void refreshRuntimeCapabilities(runtimeCaptureStage);
+
       // plan 镜像与 pi 持久态对齐(resume 关键):pi 的 plan-mode 扩展在 session_start 会从
       // session entry 自恢复 planModeEnabled,但不发 notify。若镜像固定为 false 而 pi 实为 true,
       // 由于 /plan 是 toggle + setPlanMode 幂等短路,会导致方向反转或关不掉。故从 get_entries
@@ -1455,6 +1591,7 @@ export class PiAgent extends BaseAgent {
         }
       }
     } catch (err) {
+      disposePiTranslateContext(ctx);
       try {
         disposeSessionRegistrations();
       } catch {
@@ -1648,14 +1785,27 @@ export class PiAgent extends BaseAgent {
       get id() { return sdkSessionId; },
       agentKind,
       get model() { return mutableModel; },
+      getRuntimeCapabilities() { return runtimeCapabilityManifest; },
+      onRuntimeCapabilitiesChange(listener) {
+        if (closed) {
+          notifyRuntimeCapabilityListener(listener, undefined);
+          return () => undefined;
+        }
+        runtimeCapabilityListeners.add(listener);
+        // Replay the current snapshot synchronously so late subscribers cannot
+        // miss an async ready/rewind capture that completed before registration.
+        notifyRuntimeCapabilityListener(listener, runtimeCapabilityManifest);
+        return () => runtimeCapabilityListeners.delete(listener);
+      },
 
-      // 每轮权限策略(IM 群等)是 host 侧的 forceConfirmToolCall 回调,必须在工具执行前的
-      // 审批边界强制执行。Pi 的工具审批在独立进程的 cindy-bridge extension(按 perm 文件
-      // 现读 ask/auto/bypass 档),没有逐 tool_call 回调进 host 的通道,任何档位都无法执行
-      // 该 host 回调;故一旦带策略就 fail-closed 拒绝,避免成员可控的群上下文在 auto/bypass
-      // 下不经 owner 确认执行破坏性工具(codex review P1)。
+      // 每轮权限策略(IM 群 / 个人微信等)是 host 侧的 forceConfirmToolCall 回调,必须在
+      // 工具执行前的审批边界强制执行。ask/auto 下 cindy-bridge 会把非只读内置工具与桥接
+      // MCP 工具冒泡进 host 审批,故 host 每轮策略可被执行;唯 bypassPermissions 下 bridge
+      // 按 perm 文件现读直接放行、tool_call 根本不冒泡,host 无从执行该回调 —— 故只在
+      // Full Access 下 fail-closed 拒绝带策略的 send(与 capability
+      // turnPermissionPolicy.unsupportedPermissionModes 一致,也与 CC/Codex 同口径)。
       validateSendOptions(sendOpts: SendOptions) {
-        if (sendOpts.turnPermissionPolicy) {
+        if (sendOpts.turnPermissionPolicy && permissionMode === 'bypassPermissions') {
           throw new TurnPermissionPolicyUnsupportedError('pi', permissionMode);
         }
       },
@@ -1663,31 +1813,59 @@ export class PiAgent extends BaseAgent {
       async send(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
         rejectIfCancelled(sendOpts, 'send');
         if (sendOpts) handle.validateSendOptions?.(sendOpts);
-        const { text, images } = await buildPiPrompt(message);
-        rejectIfCancelled(sendOpts, 'send');
-        assertImageInputSupported(images);
-        setAutoReviewIntent(message.content);
-        // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
-        // 后续 user turn 前附上短引用目录段(但 /skill: 起始时不前置,见 composePiPromptText)。
-        const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs));
-        const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(promptText) };
-        if (images.length > 0) command.images = images;
-        // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
-        if (ctx.isStreaming) command.streamingBehavior = 'followUp';
-        const userEntriesBefore = sendOpts?.onTranscriptUserEntry
-          ? await readPiUserEntryIds()
-          : null;
-        rejectIfCancelled(sendOpts, 'send');
-        const resp = await proc.request(command);
-        if (!resp.success) {
-          throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
+        // 本轮策略覆盖:无策略显式清 null,不继承上一轮渠道策略(§7.2.5);内部续跑
+        // (plan 审批实施轮 / 自动继续)不经 send,仍读这份闭包值继承(§7.10)。
+        // provider 接受前任何失败都必须撤销,避免"任务显示已开始、实际未启动"却残留策略。
+        const previousTurnPermissionPolicy = activeTurnPermissionPolicy;
+        activeTurnPermissionPolicy = sendOpts?.turnPermissionPolicy ?? null;
+        let providerAccepted = false;
+        try {
+          if (reviewMode) {
+            await assertReviewMessageContentPaths(
+              message.content,
+              opts.workingDir,
+              reviewReadGrants,
+            );
+          }
+          const { text, images } = await buildPiPrompt(message);
+          rejectIfCancelled(sendOpts, 'send');
+          assertImageInputSupported(images);
+          setAutoReviewIntent(message.content);
+          // setExtraDirs 是热更新；Pi 没有独立的 mid-session system-prompt RPC，所以在
+          // 后续 user turn 前附上短引用目录段(但 /skill: 起始时不前置,见 composePiPromptText)。
+          const promptText = composePiPromptText(text, piExtraDirsPrompt(mutableExtraDirs));
+          const command: Record<string, unknown> = { type: 'prompt', message: escapeLeadingSlashCommand(promptText) };
+          if (images.length > 0) command.images = images;
+          // send 语义 = 排队开新 turn;pi streaming 中裸 prompt 会被拒,补 followUp。
+          if (ctx.isStreaming) command.streamingBehavior = 'followUp';
+          const userEntriesBefore = sendOpts?.onTranscriptUserEntry
+            ? await readPiUserEntryIds()
+            : null;
+          rejectIfCancelled(sendOpts, 'send');
+          const resp = await proc.request(command);
+          if (!resp.success) {
+            throw new Error(`pi prompt rejected: ${resp.error ?? 'unknown'}`);
+          }
+          providerAccepted = true;
+          await reportAcceptedPiUserEntry(userEntriesBefore, sendOpts?.onTranscriptUserEntry);
+        } catch (err) {
+          // 只在 Provider 尚未接受本轮时回滚。接受后的 transcript 回调失败不代表
+          // turn 没启动；此时恢复旧 policy 会让正在运行的新 turn 用错安全边界。
+          if (!providerAccepted) activeTurnPermissionPolicy = previousTurnPermissionPolicy;
+          throw err;
         }
-        await reportAcceptedPiUserEntry(userEntriesBefore, sendOpts?.onTranscriptUserEntry);
       },
 
       async steer(message: UserMessage, sendOpts?: SendOptions): Promise<void> {
         rejectIfCancelled(sendOpts, 'steer');
         if (sendOpts) handle.validateSendOptions?.(sendOpts);
+        if (reviewMode) {
+          await assertReviewMessageContentPaths(
+            message.content,
+            opts.workingDir,
+            reviewReadGrants,
+          );
+        }
         const { text, images } = await buildPiPrompt(message);
         rejectIfCancelled(sendOpts, 'steer');
         assertImageInputSupported(images);
@@ -1704,15 +1882,33 @@ export class PiAgent extends BaseAgent {
 
       async abort(): Promise<void> {
         if (proc.isClosed) return;
-        await proc.request({ type: 'abort' }).catch((err: unknown) => {
-          deps.logger.warn('pi abort request failed', { message: (err as Error).message });
-        });
+        // 先把等待中的调用 fail-closed 唤醒；即使 abort RPC 失败，也不能让用户刚拒绝/
+        // 停止的那次工具继续等一张已失效的卡。policy 仅在 Pi 确认接受 abort 后清空，
+        // RPC 失败时继续保留，防止仍在运行的 turn 失去渠道安全边界。
+        dismissAllPendingPrompts('turn_aborted', 'deny');
+        try {
+          const resp = await proc.request({ type: 'abort' });
+          if (resp.success) {
+            clearActiveTurnPermissionPolicy('turn_aborted');
+          } else {
+            deps.logger.warn('pi abort request rejected', { message: resp.error ?? 'unknown' });
+          }
+        } catch (err) {
+          deps.logger.warn('pi abort request failed', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
       },
 
       async close(): Promise<void> {
         closed = true;
-        // 会话结束时挂起的卡已经不可能有人回答:强制 deny,别让等它的调用悬着(同 CC / Codex)。
-        dismissAllPendingPrompts('session_closed', 'deny');
+        disposePiTranslateContext(ctx);
+        runtimeCapabilityGeneration++;
+        publishRuntimeCapabilities(undefined);
+        runtimeCapabilityListeners.clear();
+        // 会话结束时挂起的卡已经不可能有人回答:清 policy 并强制 deny,别让等它的调用
+        // 悬着(同 CC / Codex)。
+        clearActiveTurnPermissionPolicy('session_closed', { dismissPending: true });
         // 先注销 bridge 身份注册(幂等),再关子进程。放前面:即便 proc.close 抛错
         // 也不泄漏 ctx —— 该 sessionId 的 `?session=` 路由必须随会话结束失效。
         try {
@@ -1741,6 +1937,7 @@ export class PiAgent extends BaseAgent {
       },
 
       async setModel(model: string, setOpts?: { providerId?: string | null; effort?: Effort }): Promise<void> {
+        if (reviewMode) return;
         // 会话级串行闸:整段"写待切换快照 → set_model RPC → 落定/回滚"必须是一个临界区。
         // 并发或连点切换(本地 + 远程控制端同时切)若交错,A 写 pending、B 写 pending、A 落定 B 的
         // 内容,盘上就会出现没人确认过的组合。串行化之后每次切换都看到确定的前一状态,
@@ -1752,6 +1949,7 @@ export class PiAgent extends BaseAgent {
       },
 
       async setEffort(effort: Effort): Promise<void> {
+        if (reviewMode) return;
         assertStartupEffortAllowed(activeEffortSnapshot, effort);
         if (activeEffortSnapshot?.length === 0) return;
         const resp = await proc.request({
@@ -1762,6 +1960,12 @@ export class PiAgent extends BaseAgent {
       },
 
       async setPermissionMode(mode): Promise<void> {
+        if (reviewMode) {
+          deps.logger.debug('pi setPermissionMode ignored for hard read-only Review session', {
+            requested: mode,
+          });
+          return;
+        }
         // ask/auto/bypass 三档;extension 每次 tool_call 现读,写完即生效。
         // auto 的差异在 Cindy 侧 dispatcher(handleExtensionUiRequest),bridge 无感知。
         const nextMode = normalizePermissionMode(mode);
@@ -1801,6 +2005,7 @@ export class PiAgent extends BaseAgent {
       },
 
       async setExtraDirs(dirs: string[]): Promise<void> {
+        if (reviewMode) return;
         await writePermissionSnapshotOrFailClosed({
           ...requestedPermissionSnapshot,
           readOnlyRoots: [...dirs],
@@ -1818,6 +2023,7 @@ export class PiAgent extends BaseAgent {
       },
 
       async setPlanMode(enabled: boolean): Promise<void> {
+        if (reviewMode) return;
         if (!planModeExtAvailable) {
           deps.logger.warn('pi setPlanMode ignored: plan-mode extension not available');
           return;
@@ -1919,12 +2125,20 @@ export class PiAgent extends BaseAgent {
         }
         const forked = await proc.request({ type: 'fork', entryId });
         if (!forked.success) throw new Error(`pi rewind fork failed: ${forked.error ?? 'unknown'}`);
+        // Pi has switched runtime identity at the successful fork response. Clear
+        // the old catalog before any follow-up get_state can fail or time out.
+        runtimeCapabilityGeneration++;
+        publishRuntimeCapabilities(undefined);
         const state = await proc.request({ type: 'get_state' });
         if (!state.success) throw new Error(`pi rewind get_state failed: ${state.error ?? 'unknown'}`);
         const replacement = (state.data as { sessionFile?: string } | undefined)?.sessionFile;
         if (!replacement) throw new Error('pi rewind replacement session path unavailable');
         sdkSessionId = replacement;
         queue.push({ type: 'session_id', data: replacement, source: 'pi' });
+        // The Pi session has already switched to the replacement file. Do not
+        // make rewind wait for optional discovery; the generation fence keeps
+        // this asynchronous refresh from publishing stale data.
+        void refreshRuntimeCapabilities('fork');
         return { sdkSessionId: replacement };
       },
 
@@ -2116,6 +2330,12 @@ export class PiAgent extends BaseAgent {
         PI_CODING_AGENT_DIR: forkHome,
       },
       logger: log,
+      onProcessSpawned: (pid) =>
+        this.deps.registerLocalAgentProcess?.({
+          pid,
+          kind: 'pi',
+          role: 'control-plane-service',
+        }),
       onEvent: () => {},
       onExit: () => {},
     });
@@ -2178,6 +2398,9 @@ export class PiAgent extends BaseAgent {
         tailTurnsToDrop: tailDrop,
       });
       // uuidMap 空:与 Codex 一致,pi agentMeta 不存 SDK message uuid。
+      // This short-lived control-plane process is closed immediately. The
+      // newly created live session will capture its own authoritative catalog
+      // at ready; do not hold this fork path for an optional 5s RPC timeout.
       return { newSdkSessionId: newPath, uuidMap: new Map() };
     } finally {
       await proc.close();
@@ -2186,12 +2409,18 @@ export class PiAgent extends BaseAgent {
     }
   }
 
+  /** SkillHub raw view; project items remain discovered until runtime truth says otherwise. */
+  override async listCustomizations(
+    opts: ListCustomizationsOptions,
+  ): Promise<ListCustomizationsResult> {
+    return scanPiCustomizations(opts);
+  }
+
   /**
    * ChatInput `/` palette 的 agent-skill 类目 —— 纯文件系统发现,与 CC/Codex 对齐。
    *
-   * 扫共享根 ~/.agents/skills(cc/codex 同源,pi 因此看到一致的技能包)+ pi 原生
-   * ~/.pi/agent/skills + 项目目录。只暴露技能"存在"(name/description),技能正文仅
-   * 在 /skill:name 被调用时进上下文 —— 故此发现层零基线上下文增长(契合精简 pi)。
+   * 扫共享根 ~/.agents/skills + 项目 .pi/skills 和从 cwd 到 Git 根的
+   * .agents/skills。项目条目仅表示已发现；只有 get_commands 能确认 loaded。
    */
   override async listAgentSkills(opts: ListAgentSkillsOptions): Promise<ListAgentSkillsResult> {
     const { items, errors } = await scanPiCustomizations({
@@ -2208,6 +2437,8 @@ export class PiAgent extends BaseAgent {
           path: it.absolutePath,
           scope: (it.scope === 'repo' ? 'repo' : 'user') as 'user' | 'repo',
           enabled: it.enabled ?? true,
+          runtimeStatus: it.runtimeStatus,
+          runtimeCommandName: `skill:${it.name}`,
         }))
         .sort((a, b) => a.name.localeCompare(b.name)),
     };
@@ -2241,6 +2472,9 @@ export class PiAgent extends BaseAgent {
       notifyAutoReviewUnavailable: () => void;
       /** 本会话实际注册过的桥接 MCP server 名;MCP 归属判定只认这批(防冒名顶替)。 */
       registeredMcpServerNames: ReadonlySet<string>;
+      sessionId: string;
+      workingDir: string;
+      remote: boolean;
       /**
        * 把一张挂起的权限卡登记进会话级表,返回注销函数。档位切换 / 关闭会话时由
        * `dismissAllPendingPrompts` 强制 settle,避免放宽档位后调用仍卡在失效的卡上。
@@ -2249,11 +2483,61 @@ export class PiAgent extends BaseAgent {
         requestId: string,
         entry: { settle: (resolveAs: 'allow' | 'deny') => void; forcePrompt: boolean },
       ) => () => void;
+      /**
+       * 本轮 host 权限策略(个人微信 / Telegram 群等);无策略为 null。命中
+       * forceConfirmToolCall 的调用必须走用户确认,压过 MCP auto-approve 与 auto
+       * 档 Auto-Review 的 allow(§7.4 优先级)。策略抛异常按"必须询问"收口。
+       */
+      turnPermissionPolicy: TurnPermissionPolicy | null;
     },
   ): void {
     const method = typeof event.method === 'string' ? event.method : '';
     const id = typeof event.id === 'string' ? event.id : undefined;
     if (!id) return;
+
+    if (method === 'confirm' && event.title === 'cindy:turn-change-capture') {
+      let toolName = '';
+      let input: Record<string, unknown> = {};
+      try {
+        const payload = JSON.parse(typeof event.message === 'string' ? event.message : '{}') as {
+          toolName?: unknown;
+          input?: unknown;
+        };
+        if (typeof payload.toolName === 'string') toolName = payload.toolName;
+        if (payload.input && typeof payload.input === 'object') input = payload.input as Record<string, unknown>;
+      } catch {
+        // Malformed capture payload is non-fatal; let the tool proceed and mark it opaque.
+      }
+      const context = getPermissionCtx();
+      void (async () => {
+        if (!context.sessionId || !context.workingDir) return;
+        const targetPath = typeof input.path === 'string' ? input.path : null;
+        if (targetPath && (toolName === 'edit' || toolName === 'write')) {
+          await this.deps.turnChangeCapture?.beforeKnownFileWrite({
+            sessionId: context.sessionId,
+            provider: 'pi',
+            cwd: context.workingDir,
+            targetPath,
+            ...(context.remote ? { remote: true } : {}),
+          });
+        } else {
+          this.deps.turnChangeCapture?.noteOpaqueWrite({
+            sessionId: context.sessionId,
+            provider: 'pi',
+            cwd: context.workingDir,
+            ...(context.remote ? { remote: true } : {}),
+          });
+        }
+      })().catch((error) => {
+        this.deps.logger.warn('pi turn change capture failed', {
+          toolName,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }).finally(() => {
+        proc.send({ type: 'extension_ui_response', id, confirmed: true });
+      });
+      return;
+    }
 
     if (method === 'confirm' && event.title === 'cindy:permission') {
       let toolName = 'tool';
@@ -2277,7 +2561,44 @@ export class PiAgent extends BaseAgent {
         notifyAutoReviewUnavailable,
         registeredMcpServerNames,
         registerPendingPrompt,
+        turnPermissionPolicy,
       } = getPermissionCtx();
+      /**
+       * 本轮策略是否强制确认此工具调用。命中 → 必须走用户确认(forcePrompt),
+       * 不被 MCP auto-approve 或 Auto-Review allow 覆盖。策略回调是 host 注入的外部
+       * 代码:同步抛错不能变成放行,按"必须询问" fail-closed(与 CC/Codex 同口径)。
+       */
+      const turnPolicyForcePrompt = ((): boolean => {
+        if (!turnPermissionPolicy) return false;
+        try {
+          return turnPermissionPolicy.forceConfirmToolCall(toolName, input) === true;
+        } catch (err) {
+          this.deps.logger.error('pi turn permission policy threw -> force confirmation', {
+            toolName,
+            origin: turnPermissionPolicy.origin,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          return true;
+        }
+      })();
+      const mcpTarget = resolveMcpToolTarget(toolName, registeredMcpServerNames);
+      const hostApprovalPresentation = (() => {
+        const presenter = this.deps.getMcpToolApprovalPresentation;
+        if (!presenter || !mcpTarget) return undefined;
+        try {
+          return presenter({
+            serverName: mcpTarget.serverName,
+            toolName: mcpTarget.toolName,
+            toolParams: input,
+          });
+        } catch (err) {
+          this.deps.logger.error('MCP approval presentation threw -> generic copy', {
+            serverName: mcpTarget.serverName,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          return undefined;
+        }
+      })();
       /**
        * 向用户要一次表态。`decided` 区分「用户明确表态」与「压根拿不到决策」(无 resolver /
        * resolver 抛错 / kind 不匹配) —— 调用方对后者才允许按 Full access 语义放行,
@@ -2314,6 +2635,12 @@ export class PiAgent extends BaseAgent {
             requestId: id,
             toolName,
             input,
+            ...(hostApprovalPresentation?.title
+              ? { title: hostApprovalPresentation.title }
+              : {}),
+            ...(hostApprovalPresentation?.description
+              ? { description: hostApprovalPresentation.description }
+              : {}),
           })).then((decision) => {
             if (decision.kind !== 'permission') {
               this.deps.logger.warn('pi permission got mismatched decision kind', {
@@ -2348,19 +2675,24 @@ export class PiAgent extends BaseAgent {
         opts?: { forcePrompt?: boolean },
       ): Promise<boolean> => {
         // 发起确认前:已切到 Full access 就不该再弹卡。
-        if (isFullAccessNow()) return true;
+        // 但 forcePrompt 代表不能被权限放宽追认的安全边界；若 host lease / 预检失效
+        // 真的让 policy turn 落进 Full access，宁可拒绝也不能静默放行。
+        if (isFullAccessNow()) return opts?.forcePrompt === true ? false : true;
         const outcome = await requestUserDecision({ forcePrompt: opts?.forcePrompt === true });
         // 已有决策(用户明确表态,或切档时代为 settle)→ 以它为准,不再被档位二次翻转。
         if (outcome.decided) return outcome.approved;
         // 拿不到决策:Full access 下按 bypass 语义放行,其余一律 fail-closed。
-        return isFullAccessNow();
+        return opts?.forcePrompt === true ? false : isFullAccessNow();
       };
       void (async () => {
         // Full access 优先收口,压在所有后续判定之前。bridge 侧按 perm 文件现读已把 bypass
         // 拦在冒泡之前,但档位是热切换的:confirm 冒泡之后用户仍可能切到 Full access。此时
         // MCP 策略 / 灰区审阅 / 弹窗都不该再改变「全放行」语义,也不该因为没有 resolver 就
         // 拒掉工具调用(与 auto 分支既有的 modeAfterReview bypass 收口同口径)。
-        if (isFullAccessNow()) {
+        // 本轮策略命中时不吃 Full Access 短路:policy + bypassPermissions 已在 send 预检
+        // 拒绝、且 policy turn 持 host lease 堵死热切到 bypass,故此处 turnPolicyForcePrompt
+        // 为真本不可达;仍显式 fail-closed,避免任一上游闸门被绕过就静默放行破坏性调用。
+        if (isFullAccessNow() && !turnPolicyForcePrompt) {
           proc.send({ type: 'extension_ui_response', id, confirmed: true });
           return;
         }
@@ -2385,24 +2717,23 @@ export class PiAgent extends BaseAgent {
         const mcpPolicy = ((): 'auto-approve' | 'prompt' | 'prompt-each-time' | null => {
           const classifier = this.deps.getMcpToolApprovalPolicy;
           if (!classifier) return null;
-          const target = resolveMcpToolTarget(toolName, registeredMcpServerNames);
-          if (!target) return null;
+          if (!mcpTarget) return null;
           try {
             const policy = classifier({
-              serverName: target.serverName,
-              toolName: target.toolName,
+              serverName: mcpTarget.serverName,
+              toolName: mcpTarget.toolName,
               toolParams: input,
             });
             if (policy === 'auto-approve' || policy === 'prompt' || policy === 'prompt-each-time') {
               return policy;
             }
             this.deps.logger.error('invalid MCP approval policy -> user confirmation', {
-              serverName: target.serverName,
+              serverName: mcpTarget.serverName,
               policy,
             });
           } catch (err) {
             this.deps.logger.error('MCP approval policy threw -> user confirmation', {
-              serverName: target.serverName,
+              serverName: mcpTarget.serverName,
               message: err instanceof Error ? err.message : String(err),
             });
           }
@@ -2410,13 +2741,16 @@ export class PiAgent extends BaseAgent {
         })();
         if (mcpPolicy !== null) {
           // Pi 的权限门只有放行/拒绝两态,没有会话级持久化规则,因此 prompt 与
-          // prompt-each-time 在这里收敛成同一个动作:每次都问用户。
+          // prompt-each-time 在这里收敛成同一个动作:每次都问用户。本轮策略命中时
+          // auto-approve 也不放行 —— 渠道安全契约压过第一方 MCP 自动批准(§7.4)。
           proc.send({
             type: 'extension_ui_response',
             id,
-            confirmed: mcpPolicy === 'auto-approve'
+            confirmed: mcpPolicy === 'auto-approve' && !turnPolicyForcePrompt
               ? true
-              : await requestUserConfirmation({ forcePrompt: mcpPolicy === 'prompt-each-time' }),
+              : await requestUserConfirmation({
+                  forcePrompt: turnPolicyForcePrompt || mcpPolicy === 'prompt-each-time',
+                }),
           });
           return;
         }
@@ -2424,7 +2758,7 @@ export class PiAgent extends BaseAgent {
           proc.send({
             type: 'extension_ui_response',
             id,
-            confirmed: await requestUserConfirmation(),
+            confirmed: await requestUserConfirmation({ forcePrompt: turnPolicyForcePrompt }),
           });
           return;
         }
@@ -2444,7 +2778,11 @@ export class PiAgent extends BaseAgent {
           //   - 仍是 auto → 按本次审查 verdict 收口(下方原逻辑)。
           const modeAfterReview = getPermissionCtx().permissionMode;
           if (modeAfterReview === 'bypassPermissions') {
-            proc.send({ type: 'extension_ui_response', id, confirmed: true });
+            proc.send({
+              type: 'extension_ui_response',
+              id,
+              confirmed: !turnPolicyForcePrompt,
+            });
             return;
           }
           if (modeAfterReview !== 'auto') {
@@ -2457,11 +2795,25 @@ export class PiAgent extends BaseAgent {
             });
             return;
           }
-          if (decision.verdict === 'ask') {
+          // 本轮策略命中:压过 Auto-Review 的 allow / block,一律走渠道确认(forcePrompt)。
+          if (turnPolicyForcePrompt) {
             proc.send({
               type: 'extension_ui_response',
               id,
               confirmed: await requestUserConfirmation({ forcePrompt: true }),
+            });
+            return;
+          }
+          if (decision.verdict === 'ask') {
+            // policy turn + auto 的灰区语义对齐 Codex:只有渠道 policy 明确命中的调用
+            // 才打扰 owner；普通 Auto-Review ask 直接 fail-closed，不再额外弹微信确认。
+            // 无 policy 的 Desktop auto 会话维持既有逐次确认行为。
+            proc.send({
+              type: 'extension_ui_response',
+              id,
+              confirmed: turnPermissionPolicy
+                ? false
+                : await requestUserConfirmation({ forcePrompt: true }),
             });
             return;
           }

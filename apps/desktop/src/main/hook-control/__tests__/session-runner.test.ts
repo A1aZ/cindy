@@ -38,6 +38,10 @@ const h = vi.hoisted(() => {
     createMessage: vi.fn(async () => {
       calls.push('createMessage');
     }),
+    beginTurnChangeSetAtDispatch: vi.fn(async (session: { id: string }, anchorClientId: string) => {
+      calls.push(`beginChangeSet:${session.id}:${anchorClientId}`);
+    }),
+    clearPendingTurnChangeSets: vi.fn(),
     setSessionProviderIdInDb: vi.fn(async (id: string, providerId: string) => {
       calls.push(`providerDb:${id}:${providerId}`);
     }),
@@ -96,11 +100,15 @@ vi.mock('../../device-link/broadcast-tap.js', () => ({
   tapWindowBroadcast: h.tapWindowBroadcast,
 }));
 vi.mock('../../maker-ipc/register.js', () => ({
+  beginTurnChangeSetAtDispatch: h.beginTurnChangeSetAtDispatch,
   wireSessionToIpc: vi.fn(),
   isSessionInTurn: () => false,
   installDesktopInteractionListener: h.installDesktopInteractionListener,
   noteSilentStopUserSend: vi.fn(),
   onSilentStopSettled: vi.fn(() => () => {}),
+}));
+vi.mock('../../turn-change-set/store.js', () => ({
+  clearPendingTurnChangeSets: h.clearPendingTurnChangeSets,
 }));
 vi.mock('../../maker-host/send-outcome.js', () => ({
   toDesktopSessionDispatchOutcome: () => ({ dispatched: true as const }),
@@ -494,6 +502,23 @@ describe('hook session-runner 的 userSendAt 时序(未分类误判回归)', () 
     expect(h.calls).not.toContain('created:sess-old');
     expect(h.touchUserSendInDb).toHaveBeenCalledTimes(1);
     expect(h.touchUserSendInDb).toHaveBeenCalledWith('sess-old');
+  });
+
+  it('provider 接受后才执行回调，回调失败不反转已受理 turn', async () => {
+    const onProviderAccepted = vi.fn(async () => {
+      h.calls.push('providerAccepted');
+      throw new Error('cursor db unavailable');
+    });
+    const runner = createMakerHookSessionRunner({ log });
+
+    const outcome = await runner.run(baseReq({ onProviderAccepted }));
+
+    expect(outcome.status).toBe('ok');
+    expect(onProviderAccepted).toHaveBeenCalledTimes(1);
+    expect(h.calls.indexOf('createMessage')).toBeLessThan(h.calls.indexOf('providerAccepted'));
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.stringContaining('provider-accepted callback failed for session=sess-new'),
+    );
   });
 
   it('入站图片附件:ingest 进媒体总仓挂 session-attachment 引用,喂 agent 用 blob 绝对路径,落库用 cindy-media url', async () => {
@@ -1671,6 +1696,64 @@ describe('进度快照(turn.progress 链路)', () => {
       // 答复；运行中只显示后一条，完成态则一次性替换为完整正式答复。
       expect(outcome.finalText).toBe('结论是……\n\n最终结果。');
       expect(emitted).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('官方 Telegram 运行中累计多段正文，done 立即冲刷节流窗里的最后答案', async () => {
+    vi.useFakeTimers();
+    try {
+      fakeMaker.createSession.mockImplementationOnce(async (opts: { id?: string }) =>
+        makeManualSession(opts.id ?? 'sess-x'),
+      );
+      const emitted: string[] = [];
+      const runner = createMakerHookSessionRunner({ log });
+      const p = runner.run(
+        baseReq({
+          source: { im: 'telegram', userText: 'hi' },
+          onProgress: (text: string) => emitted.push(text),
+        }),
+      );
+      await flush();
+
+      const cb = h.eventCbs.get('sess-new')!;
+      cb({ type: 'text', data: { text: '先说第一段。', isFinal: true }, source: 'codex' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(emitted.at(-1)).toContain('先说第一段。');
+
+      // 对齐 Hermes 的事件流思路：thinking / tool 先作为结构化事件
+      // 进入共享 presenter，Telegram whole 模式再投影过程区与累计正文。
+      cb({
+        type: 'thinking',
+        data: { stage: 'final', blockId: 'check-final', text: '核对收口链路' },
+      });
+      cb({
+        type: 'tool_use',
+        data: {
+          toolUseId: 'read-final',
+          toolName: 'Read',
+          input: { file_path: '/repo/final.ts' },
+        },
+      });
+
+      // 第二段还在 1.5s trailing 窗口内就结束。旧逻辑 teardown 会清 timer，
+      // 导致这段正文从未进入 turn.progress；Telegram 路径必须立刻发累计快照。
+      cb({ type: 'text', data: { text: '最后答案。', isFinal: true }, source: 'codex' });
+      cb({ type: 'done', data: null });
+      const outcome = await p;
+
+      expect(outcome.status).toBe('ok');
+      // 工具前的短旁白只属于运行过程：进度快照要保留，正式终稿
+      // 仍按桌面消息流规则折叠它，不把过程旁白混进答案。
+      expect(outcome.finalText).toBe('最后答案。');
+      expect(emitted.at(-1)).toContain('先说第一段。\n\n最后答案。');
+      expect(emitted.at(-1)).toContain('工作中 · 2 项');
+      expect(emitted.at(-1)).toContain('核对收口链路');
+      expect(emitted.at(-1)).toContain('读取 final.ts');
+      const countAfterDone = emitted.length;
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(emitted).toHaveLength(countAfterDone);
     } finally {
       vi.useRealTimers();
     }
@@ -2969,5 +3052,25 @@ describe('watchContinuation: 观察桌面端续跑并回流', () => {
     expect(events.at(-1)).toBe('end:error');
     expect(ends[0]?.errorMessage).toContain('no activity');
     expect(h.eventCbs.has('sess-live')).toBe(false);
+  });
+});
+
+describe('hook turn change-set anchor', () => {
+  it('uses the durable accepted user message client id', async () => {
+    const runner = createMakerHookSessionRunner({ log });
+    const outcome = await runner.run(baseReq({}));
+
+    expect(outcome.status).toBe('ok');
+    const [, message] = h.createMessage.mock.calls[0] as unknown as [
+      string,
+      { clientId: string },
+    ];
+    expect(h.beginTurnChangeSetAtDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'sess-new' }),
+      message.clientId,
+    );
+    expect(h.calls.indexOf('createMessage')).toBeLessThan(
+      h.calls.indexOf(`beginChangeSet:sess-new:${message.clientId}`),
+    );
   });
 });

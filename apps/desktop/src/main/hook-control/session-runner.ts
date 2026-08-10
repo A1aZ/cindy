@@ -51,11 +51,13 @@ import { getMaker } from '../maker-host/index.js';
 import { resolveLenientRoute } from '../maker-host/model-route-guard.js';
 import { resolveLenientSessionRoute } from '../maker-host/model-route-guard-live.js';
 import {
+  beginTurnChangeSetAtDispatch,
   wireSessionToIpc,
   isSessionInTurn,
   noteSilentStopUserSend,
   onSilentStopSettled,
 } from '../maker-ipc/register.js';
+import { clearPendingTurnChangeSets } from '../turn-change-set/store.js';
 import {
   beginInteractionRoute,
   type InteractionHandler,
@@ -88,6 +90,7 @@ import { getWorkspaceProviderSource } from './workspaceProviderSourceStore.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
 import { beginHeadlessGhostSetupTurn } from '../mcp-integrations/ghostSetupInteractionSurface.js';
 import { observeHookTurn, type HookTurnObserver } from './turnObserver.js';
+import { beginGroupHistoryAccess } from '../im/shared/groupHistoryAccess.js';
 
 import type {
   HookContinuationWatchRequest,
@@ -525,6 +528,12 @@ export function createMakerHookSessionRunner(deps: {
        */
       const isTelegramGroupTurn = req.source?.im === 'telegram' && req.laneKind === 'group';
       let releaseTelegramGroupTurnLease: (() => void) | null = null;
+      let releaseGroupHistoryAccess: (() => void) | null = null;
+      const releaseGroupHistory = (): void => {
+        const release = releaseGroupHistoryAccess;
+        releaseGroupHistoryAccess = null;
+        release?.();
+      };
       const releaseTelegramGroupTurn = (): void => {
         releaseTelegramGroupTurnLease?.();
         releaseTelegramGroupTurnLease = null;
@@ -794,10 +803,14 @@ export function createMakerHookSessionRunner(deps: {
       // 就会让"续跑接回渠道"那条路径静默落后于本路径。
       // tool_result 旁路收集的出站图片 absPath(收口时随 turn.end 附件外发)
       const extraImageAbsPaths: string[] = [];
+      const useTelegramProgressParity = req.source?.im === 'telegram';
       const observer = observeHookTurn(session, {
-        // 进度快照不按渠道/聊天类型分叉: 过程区时间线在上正文在下,
-        // Telegram DM / 群 / topic 与 Slack 一致。
+        // Telegram 对齐个人 bot：过程消息累积展示整轮正文，done 先冲刷最后一帧。
+        // Slack / X 保留只展示当前消息的旧行为，避免顺带改变其它车道。
         ...(req.onProgress ? { onProgress: req.onProgress } : {}),
+        ...(useTelegramProgressParity
+          ? { progressBodyMode: 'whole' as const, flushProgressOnDone: true }
+          : {}),
         onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
         onSilentStopSettled,
         log,
@@ -951,6 +964,8 @@ export function createMakerHookSessionRunner(deps: {
           ? { text: req.prompt, images: imageRefs, files: fileRefs }
           : req.prompt;
 
+      const turnChangeAnchorClientId = randomUUID();
+      let turnChangeSetStarted = false;
       try {
         const pendingHandoff = await agentHandoffPending.peek(session.id);
         const outgoingMessage: UserMessage = pendingHandoff
@@ -970,6 +985,13 @@ export function createMakerHookSessionRunner(deps: {
             }
           },
           beforeProviderStart: () => {
+            if (req.groupHistoryAccess) {
+              releaseGroupHistoryAccess = beginGroupHistoryAccess({
+                sessionId: session.id,
+                sessionInstanceId: session.instanceId,
+                scope: req.groupHistoryAccess,
+              });
+            }
             const routeOrigin: RoutedTurnOrigin =
               req.source?.im === 'slack'
                 ? { kind: 'im', channel: 'slack' }
@@ -1002,11 +1024,13 @@ export function createMakerHookSessionRunner(deps: {
             // 裸 path 的 image block 会被忽略), 无图为纯文本 string。
             noteSilentStopUserSend(session.id);
             await createMessage(session.id, {
-              clientId: randomUUID(),
+              clientId: turnChangeAnchorClientId,
               role: 'user',
               content: userMessageContent,
               agentMeta: { origin, ...(req.source ? { hookSource: req.source } : {}) },
             });
+            await beginTurnChangeSetAtDispatch(session, turnChangeAnchorClientId);
+            turnChangeSetStarted = true;
             // 每次被接受的 IM 消息都是一次用户发送: bump userSendAt 让排序
             // 时间轴与桌面端 sendMessage 口径一致, sessions:patched 广播顺带把
             // 复用/接管会话即时重排序(新建路径已在广播前落过, 这里更新为实际
@@ -1022,15 +1046,31 @@ export function createMakerHookSessionRunner(deps: {
           context: `hook:${req.origin.connectionId}`,
         });
         if (!outcome.dispatched) {
+          if (turnChangeSetStarted) clearPendingTurnChangeSets(session.id);
           observer.stop();
           finalizeInteractions();
           releaseTelegramGroupTurn();
+          releaseGroupHistory();
           return fail(`send not dispatched: ${outcome.reason}`);
         }
+        // 与个人 IM turnRunner 的 route-resolved 时机一致：只有 provider 已
+        // 实际接受本次 send 后才执行 durable 群游标提交。回调失败不能反转
+        // 已受理 turn；旧游标会让下次最多重复携带，而不会永久跳过消息。
+        try {
+          await req.onProviderAccepted?.();
+        } catch (err) {
+          log.warn(
+            `provider-accepted callback failed for session=${session.id.slice(-8)}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
       } catch (err) {
+        if (turnChangeSetStarted) clearPendingTurnChangeSets(session.id);
         observer.stop();
         finalizeInteractions();
         releaseTelegramGroupTurn();
+        releaseGroupHistory();
         return fail(err instanceof Error ? err.message : String(err));
       }
 
@@ -1047,6 +1087,7 @@ export function createMakerHookSessionRunner(deps: {
         // lease 在这里才能放: observer.finished 已把后台任务一并定格
         // (早放 = 后台续跑期间又回到共享 session 的旧行为)。幂等。
         releaseTelegramGroupTurn();
+        releaseGroupHistory();
       }
 
       // 已知 v1 取舍: 不做 scheduler 4.5.1 的完整 backfillSessionMeta。
@@ -1120,12 +1161,16 @@ function beginContinuationWatch(
   const extraImageAbsPaths: string[] = [];
   let claimed = false;
   let settled = false;
+  const useTelegramProgressParity = req.source?.im === 'telegram';
   const observer = observeHookTurn(session, {
-    // 与 run() 同一呈现: 过程区时间线在上正文在下, 不按聊天类型分叉。
+    // 与 run() 同一呈现；Telegram 续跑同样累计正文并在 done 冲刷最后一帧。
     onProgress: (text) => {
       // 认领之前不发进度: 那时 server 还没把这条消息挂到新 requestId 上。
       if (claimed) req.onProgress(text);
     },
+    ...(useTelegramProgressParity
+      ? { progressBodyMode: 'whole' as const, flushProgressOnDone: true }
+      : {}),
     onToolResult: (fullText) => collectOutboundImages(fullText, extraImageAbsPaths, log),
     onSilentStopSettled,
     log,

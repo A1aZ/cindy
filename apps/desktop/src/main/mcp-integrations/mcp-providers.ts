@@ -2,6 +2,7 @@ import { join as pathJoin } from 'node:path';
 
 import {
   createLiziMcpProviders,
+  resolveLiziMcpSessionContext,
   type LiziMcpProvider,
   type LiziMcpSessionContext,
   type LspServerPool,
@@ -10,7 +11,9 @@ import type { OrcaMcpDeps } from '@cindy/mcps';
 import { createCindyGhostsMcpServer } from 'cindy-tools';
 import type { MakerMemoryManager } from '@cindy/maker-core';
 import { getCindyGhostsMcpDeps, type GhostGrantLiveSessionState } from './ghost.js';
+import { createGroupHistoryMcpServer } from './groupHistoryMcpServer.js';
 import { getAndroidMcpDeps } from './android.js';
+import { getIOSSimulatorMcpDeps } from './ios-simulator.js';
 import { getBrowserMcpDeps } from './browser.js';
 import { getComputerMcpDeps } from './computer.js';
 import { feishuIm, wechatIm } from '../im';
@@ -84,6 +87,13 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         // Keep that snapshot for a busy turn when a disable refresh is deferred;
         // a successfully rebuilt bridge omits this provider via the outer gate.
         context?.agentKind === 'codex' || pluginRegistry.isEnabled('android'),
+    }),
+    iosSimulator: getIOSSimulatorMcpDeps({
+      // Project-scoped gating is applied by the provider wrapper below using
+      // the live MCP session context. This host-level check preserves the
+      // existing global fallback for non-session callers.
+      isIOSSimulatorEnabled: (context) =>
+        pluginRegistry.isEnabled('ios-simulator', context?.workingDir),
     }),
     browser: getBrowserMcpDeps(),
     computer: getComputerMcpDeps({
@@ -285,7 +295,7 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           if (isIpcError(err) && err.code === 'NOT_FOUND') {
-            return { ok: false, errorCode: 'NOT_FOUND', message };
+            return { ok: false, errorCode: err.code, message };
           }
           return { ok: false, errorCode: 'INTERNAL', message };
         }
@@ -319,19 +329,54 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
           return { ok: true, changed };
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          if (isIpcError(err) && err.code === 'NOT_FOUND') {
-            return { ok: false, errorCode: 'NOT_FOUND', message };
+          if (isIpcError(err)) {
+            if (err.code === 'NOT_FOUND' || err.code === 'PRECONDITION_FAILED') {
+              return { ok: false, errorCode: err.code, message };
+            }
           }
           return { ok: false, errorCode: 'INTERNAL', message };
         }
       },
-      sendToSession: async ({ targetSessionId, message, dispatcherSessionId, title, useWorktree, workingDir }) => {
+      sendToSession: async ({
+        targetSessionId,
+        message,
+        dispatcherSessionId,
+        title,
+        useWorktree,
+        workingDir,
+        agentKind,
+        model,
+        effort,
+        fast,
+      }) => {
         const svc = tryGetOrcaCollabService();
         if (!svc) {
           return { ok: false, errorCode: 'HOST_NOT_READY', message: 'orca collab service not initialized' };
         }
         try {
-          return await svc.sendToSession({ targetSessionId, message, dispatcherSessionId, title, useWorktree, workingDir });
+          const hasExecutionOverrides =
+            agentKind !== undefined
+            || model !== undefined
+            || effort !== undefined
+            || fast !== undefined;
+          return await svc.sendToSession({
+            targetSessionId,
+            message,
+            dispatcherSessionId,
+            title,
+            useWorktree,
+            workingDir,
+            ...(hasExecutionOverrides
+              ? {
+                  execution: {
+                    agentKind,
+                    model,
+                    effort,
+                    fastMode: fast,
+                  },
+                }
+              : {}),
+          });
         } catch (err) {
           return { ok: false, errorCode: 'INTERNAL', message: err instanceof Error ? err.message : String(err) };
         }
@@ -423,6 +468,18 @@ export function createDesktopMcpProviders(deps: DesktopMcpProvidersDeps): LiziMc
   // 全名由 shared/ghost.ts isGhostCallToolName 兼容匹配)。常注册不设
   // plugin gate——工具面恒定是缓存前缀稳定的前提,"没装任何意识"表现为
   // ghost_list 返回空清单而非 server 消失,LLM 不困惑、老会话即时生效。
+  gated.push({
+    name: 'cindy_group_history',
+    isEnabled: () => true,
+    toClaudeSdkConfig: (ctx) => ({
+      type: 'sdk',
+      name: 'cindy_group_history',
+      instance: createGroupHistoryMcpServer({
+        getSessionContext: () => resolveLiziMcpSessionContext(ctx),
+      }),
+    }),
+  });
+
   gated.push({
     name: 'cindy',
     isEnabled: () => true,

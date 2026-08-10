@@ -116,6 +116,41 @@ class NotificationTransport implements Transport {
   }
 }
 
+describe('AppServerHost assistant text delta routing', () => {
+  it('subscribes to dedicated agentMessage deltas and routes them to the owning thread', async () => {
+    const transport = new NotificationTransport();
+    const host = new AppServerHost({
+      createTransport: () => transport,
+      logger,
+      clientInfo: { name: 'cindy-test', version: '0.0.0' },
+    });
+    await host.ensureStarted();
+
+    const initialize = transport.lines
+      .map((line) => JSON.parse(line) as { method?: string; params?: { capabilities?: { optOutNotificationMethods?: string[] } } })
+      .find((message) => message.method === 'initialize');
+    expect(initialize?.params?.capabilities?.optOutNotificationMethods).not.toContain(
+      'item/agentMessage/delta',
+    );
+
+    const agentMessageDelta = vi.fn();
+    const subscription = host.subscribeThread('thread-1', { agentMessageDelta });
+    const params = {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'msg-1',
+      delta: 'Hello',
+    };
+    transport.emit({ method: 'item/agentMessage/delta', params });
+
+    expect(agentMessageDelta).toHaveBeenCalledOnce();
+    expect(agentMessageDelta).toHaveBeenCalledWith(params);
+
+    await subscription.release();
+    await host.shutdown();
+  });
+});
+
 describe('AppServerHost MCP readiness', () => {
   it('retries a negative tool probe instead of permanently caching it', async () => {
     let available = false;
@@ -1038,11 +1073,13 @@ describe('AppServerHost descendant notification routing', () => {
     const itemStarted = vi.fn();
     const tokenUsageUpdated = vi.fn();
     const turnCompleted = vi.fn();
+    const turnDiffUpdated = vi.fn();
     const subscription = host.subscribeThread('root-thread', {
       descendantNotification,
       itemStarted,
       tokenUsageUpdated,
       turnCompleted,
+      turnDiffUpdated,
     });
 
     transport.emit({
@@ -1066,32 +1103,45 @@ describe('AppServerHost descendant notification routing', () => {
       method: 'turn/completed',
       params: { threadId: 'grandchild-thread', turn: { id: 'turn-g1', status: 'completed' } },
     };
+    const childDiff = {
+      method: 'turn/diff/updated',
+      params: { threadId: 'child-thread', turnId: 'turn-c1', diff: 'diff --git a/a b/a' },
+    };
     transport.emit(childItem);
     transport.emit(childUsage);
     transport.emit(grandchildTurn);
+    transport.emit(childDiff);
 
     expect(descendantNotification.mock.calls).toEqual([
       ['child-thread', 'item/started', childItem.params],
       ['child-thread', 'thread/tokenUsage/updated', childUsage.params],
       ['grandchild-thread', 'turn/completed', grandchildTurn.params],
+      ['child-thread', 'turn/diff/updated', childDiff.params],
     ]);
     // 关键隔离:子线程事件绝不能进主线程 handler —— 否则子代理的 exec 会被渲染成
     // 主会话自己的工具调用,并污染主 turn 的 usage 与状态机。
     expect(itemStarted).not.toHaveBeenCalled();
     expect(tokenUsageUpdated).not.toHaveBeenCalled();
     expect(turnCompleted).not.toHaveBeenCalled();
+    expect(turnDiffUpdated).not.toHaveBeenCalled();
 
     // 主线程自己的同名事件照旧走主通道。
     transport.emit({
       method: 'item/started',
       params: { threadId: 'root-thread', turnId: 'turn-r1', item: { id: 'i-2', type: 'commandExecution' } },
     });
+    const rootDiff = {
+      method: 'turn/diff/updated',
+      params: { threadId: 'root-thread', turnId: 'turn-r1', diff: 'diff --git a/b b/b' },
+    };
+    transport.emit(rootDiff);
     expect(itemStarted).toHaveBeenCalledTimes(1);
-    expect(descendantNotification).toHaveBeenCalledTimes(3);
+    expect(turnDiffUpdated).toHaveBeenCalledWith(rootDiff.params);
+    expect(descendantNotification).toHaveBeenCalledTimes(4);
 
     await subscription.release();
     transport.emit(childItem);
-    expect(descendantNotification).toHaveBeenCalledTimes(3);
+    expect(descendantNotification).toHaveBeenCalledTimes(4);
     // thread/started 只走专用的 descendantThreadStarted,不重复出现在本通道。
     expect(descendantNotification.mock.calls.some(([, method]) => method === 'thread/started')).toBe(false);
 

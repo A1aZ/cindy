@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -7,6 +7,23 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { stageMacIOSSimulatorHelper } from '../../../forge-ios-simulator-helper';
 
 const roots: string[] = [];
+
+async function supportsPosixExecutableMode(filePath: string): Promise<boolean> {
+  const originalMode = (await stat(filePath)).mode & 0o777;
+  try {
+    await chmod(filePath, 0o755);
+    const executableMode = (await stat(filePath)).mode & 0o777;
+    return executableMode === 0o755;
+  } catch {
+    return false;
+  } finally {
+    try {
+      await chmod(filePath, originalMode);
+    } catch {
+      // The fixture is temporary and will be removed by afterEach.
+    }
+  }
+}
 
 async function createFixture(result: Record<string, unknown>, includeExecutable: boolean) {
   const buildPath = await mkdtemp(path.join(os.tmpdir(), 'cindy-forge-ios-helper-'));
@@ -30,7 +47,10 @@ async function createFixture(result: Record<string, unknown>, includeExecutable:
     await mkdir(path.dirname(executablePath), { recursive: true });
     await writeFile(executablePath, 'sidecar', { mode: 0o644 });
   }
-  return { buildPath, appContents, resourceRoot };
+  const posixExecutableModeSupported = includeExecutable
+    ? await supportsPosixExecutableMode(executablePath)
+    : false;
+  return { buildPath, appContents, resourceRoot, posixExecutableModeSupported };
 }
 
 afterEach(async () => {
@@ -60,8 +80,11 @@ describe('stageMacIOSSimulatorHelper', () => {
       'MacOS',
       'ios-simulator-sidecar',
     );
-    await expect(stat(executable)).resolves.toMatchObject({ mode: expect.any(Number) });
-    expect((await stat(executable)).mode & 0o777).toBe(0o755);
+    const executableStat = await stat(executable);
+    expect(executableStat.mode).toEqual(expect.any(Number));
+    if (fixture.posixExecutableModeSupported) {
+      expect(executableStat.mode & 0o777).toBe(0o755);
+    }
     await expect(stat(path.join(fixture.resourceRoot, 'helper'))).rejects.toThrow();
     await expect(stat(path.join(fixture.resourceRoot, 'native'))).rejects.toThrow();
     await expect(

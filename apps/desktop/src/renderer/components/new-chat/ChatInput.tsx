@@ -214,8 +214,15 @@ import {
   EMPTY_SLASH_COMMANDS,
   failSlashCommandRosterLoad,
   filterSlashCommands,
+  firstAvailableSlashCommandIndex,
+  hasAvailableSlashCommand,
+  hasUnavailableProjectSkillPreview,
+  isSlashCommandUnavailable,
   isSlashCommandRosterReady,
   loadAllCommands,
+  nextAvailableSlashCommandIndex,
+  PI_RUNTIME_SKILL_RETRY_DELAYS_MS,
+  slashCommandInvocationName,
   type SlashCommandRosterState,
   type UnifiedCommand,
 } from '@/lib/slashCommands';
@@ -347,6 +354,11 @@ const ComposerHardBreak = HardBreak.extend({
 const TOOLBAR_DENSE_MAX_WIDTH = 520;
 const TOOLBAR_COMPACT_MAX_WIDTH = 448;
 
+// 预测去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个 ChatInput
+// 实例都会独立检测到 turn 结束并触发 predictNextPrompt,导致重复的 provider 调用。
+// 模块级 Set 跟踪正在进行的预测,确保同一 session 同时只有一次预测调用。
+const _predictingSessions = new Set<string>();
+
 function isVoiceInputIdleLike(state: VoiceInputState): boolean {
   return state === 'idle' || state === 'done' || state === 'error';
 }
@@ -463,6 +475,8 @@ interface ChatInputProps {
   onWorkingDirChange?: (dir: string | null) => void;
   /** When true, the input is disabled (e.g. during streaming). */
   disabled?: boolean;
+  /** Freeze model/provider/effort/permission controls for audit-only tasks. */
+  settingsLocked?: boolean;
   /** When true, shows Stop button instead of Send button. */
   isStreaming?: boolean;
   /**
@@ -930,7 +944,7 @@ export function ChatInput({
   sessionOrcaRole,
   initialWorkingDir,
   remoteHostId,
-  deviceLinkDeviceId,
+  deviceLinkDeviceId: _deviceLinkDeviceId,
   modelMemoryOverride,
   initialModel,
   initialEffort,
@@ -942,6 +956,7 @@ export function ChatInput({
   onFastModeChange,
   onWorkingDirChange,
   disabled,
+  settingsLocked = false,
   isStreaming = false,
   isAgentBusy,
   onStop,
@@ -990,6 +1005,9 @@ export function ChatInput({
   topSlot,
   collaboration,
 }: ChatInputProps) {
+  // device-link 远程会话:null = 所有权尚未解析,undefined = 已确认本地会话,string = 远程会话。
+  // 预测守卫用原始值区分 null vs undefined,下游通路继续用 ?? undefined 归一化。
+  const deviceLinkDeviceId = _deviceLinkDeviceId;
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { preference: composerSendShortcutPreference } = useComposerSendShortcutPreference();
@@ -1086,7 +1104,12 @@ export function ChatInput({
   // ── ESC / history ref bridges for Tiptap handleKeyDown ────────────
   // Tiptap editorProps can't read React state, so we use refs.
   const onStopRef = useRef(onStop);
+  // 用户点击 Stop 时标记 wasTurnStoppedByUserRef,阻止该轮次触发预测。
   onStopRef.current = onStop;
+  const handleStop = useCallback(() => {
+    wasTurnStoppedByUserRef.current = true;
+    onStop?.();
+  }, [onStop]);
   const showStopButtonRef = useRef(showStopButton);
   showStopButtonRef.current = showStopButton;
 
@@ -1094,6 +1117,9 @@ export function ChatInput({
   // messages 在流式期间每个 delta 都变,放进 deps 会让本 effect 反复重跑并把
   // prevShowStopRef 冲掉,从而永远检测不到那次跳变 —— 所以走 ref 读最新值。
   const prevShowStopRef = useRef(false);
+  // 用户点击 Stop 或 turn 以错误结束时，不应触发预测。
+  // 该 ref 在 Stop 按钮/快捷键触发时置 true，新 turn 开始时重置。
+  const wasTurnStoppedByUserRef = useRef(false);
   // turnGen: 每次新 turn 开始递增,预测请求携带代次;落地时检查代次与 sessionId
   // 是否仍匹配,避免旧请求覆盖新轮推荐或跨 session 残留。
   // 递增分两层:render 阶段同步检测 showStopButton false→true 跳变,关闭「用户操作
@@ -1146,14 +1172,20 @@ export function ChatInput({
     if (showStopButton) {
       showRecommendationRef.current = false;
       setRecommendedPrompt(null);
+      wasTurnStoppedByUserRef.current = false;
     }
     // device-link 远程会话 & SSH 远程会话:maker:predict-prompt 不在 allowlist,且远程对话内容
     // 不应送到控制端本地 provider/凭证 —— 跳过预测。
-    if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
+    if (wasRunning && !showStopButton && recommendationEnabled && sessionId && deviceLinkDeviceId === undefined && !remoteHostId) {
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
+      // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
+      if (wasTurnStoppedByUserRef.current) return;
+	      // turn 以终端错误结束时，不应触发预测：错误上下文可能包含不完整/损坏的对话，
+	      // 避免在错误状态下发起付费 provider 调用。
+	      if (makerChatStore.getSnapshot(sessionId)?.error) return;
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
-      if (makerChatStore.hasRunningWakeTask(sessionId)) return;
+      if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;
       // 冷加载帧:runtimeAgentKind 尚未确认时就默认 claude-code,会将其他引擎的会话内容
       // 发给 Claude Code provider —— 跳过预测,等 agent 身份确认后再恢复。
       if (runtimeAgentKind == null) return;
@@ -1172,6 +1204,11 @@ export function ChatInput({
         // 捕获请求时刻的 sessionId 与 turnGen 快照,落地前校验是否仍匹配。
         const requestSessionId = sessionId;
         const requestTurnGen = turnGenRef.current;
+        // 去重:同一 session 在多个窗口(openSessionInNewWindow)打开时,每个
+        // ChatInput 实例都会独立检测到 turn 结束并触发预测。模块级 Set 确保
+        // 同一 session 同时只有一次预测调用,避免重复 provider 调用与费用。
+        if (_predictingSessions.has(requestSessionId)) return;
+        _predictingSessions.add(requestSessionId);
         window.electronAPI.maker
           .predictNextPrompt({
             sessionId,
@@ -1180,6 +1217,7 @@ export function ChatInput({
             workingDir: workingDir ?? undefined,
           })
           .then((result) => {
+            _predictingSessions.delete(requestSessionId);
             // 请求往返期间用户可能已经切换会话、发起新 turn 或开始打字 —— 落地前
             // 重新确认 sessionId、turnGen、编辑器状态,否则旧上下文的推荐会覆盖当前轮。
             const cur = editorRef.current;
@@ -1197,6 +1235,7 @@ export function ChatInput({
             }
           })
           .catch(() => {
+            _predictingSessions.delete(requestSessionId);
             // 预测失败静默处理:不显示推荐,也不回落任何默认文案。
           });
       }
@@ -1609,8 +1648,8 @@ export function ChatInput({
   // 与下拉菜单看到的顺序一致。vendorKey 未锁定时按 PermissionSelector 的
   // 默认取 cc。editorProps.handleKeyDown 是稳定闭包, 走 ref 取值。
   const permissionCycleOptions = useMemo(
-    () => activeAgentCapabilities?.permissionModes ?? [],
-    [activeAgentCapabilities],
+    () => (settingsLocked ? [] : (activeAgentCapabilities?.permissionModes ?? [])),
+    [activeAgentCapabilities, settingsLocked],
   );
   const permissionCycleOptionsRef = useRef(permissionCycleOptions);
   permissionCycleOptionsRef.current = permissionCycleOptions;
@@ -1624,7 +1663,7 @@ export function ChatInput({
   // 计划模式入口门控:agent capability(device-link 老被控端无此字段 → 隐藏)+ 父组件接线。
   const planModeSupported = activeAgentCapabilities?.planMode?.supported === true;
   const planModeEntry =
-    planModeSupported && onPlanModeChange
+    !settingsLocked && planModeSupported && onPlanModeChange
       ? { enabled: planModeEnabled, onToggle: (next: boolean) => void onPlanModeChange(next) }
       : undefined;
   // 当前 activeModel 归属的 agent runtime —— 用于 send 预检里按 (model, agent) 查
@@ -2219,6 +2258,7 @@ export function ChatInput({
           // instead of sending the next one immediately.
           if (showStopButtonRef.current && onStopRef.current) {
             event.preventDefault();
+            wasTurnStoppedByUserRef.current = true;
             onStopRef.current();
             return true;
           }
@@ -2915,9 +2955,25 @@ export function ChatInput({
       ) {
         event.preventDefault();
         event.stopPropagation();
+        if (panelBridgeRef.current?.captureKey(event)) return;
         clearPressTimer();
         voiceShortcutPressRef.current = null;
         void dispatchSendRef.current(enterIntent);
+        return;
+      }
+
+      // This window capture listener runs before Tiptap's palette bridge. While
+      // listening, preserve the editor's normal priority: Enter first selects
+      // or dismisses the open palette instead of stopping voice and sending the
+      // unresolved slash query.
+      if (
+        currentState === 'listening' &&
+        isComposerEnterTarget(event.target) &&
+        (enterIntent === 'queue' || enterIntent === 'steer') &&
+        panelBridgeRef.current?.captureKey(event)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
         return;
       }
 
@@ -3588,6 +3644,7 @@ export function ChatInput({
     workingDir ?? null,
     paletteAgentKind,
     isRemoteSession,
+    sessionId ?? null,
     deviceLinkDeviceId ?? null,
   ]);
   const [slashCommandLoadState, setSlashCommandLoadState] = useState<SlashCommandRosterState>({
@@ -3613,6 +3670,7 @@ export function ChatInput({
     [mergedCommands, planModeCommandAvailable, slashCommandsReady, t],
   );
   const slashCommandLoadSeqRef = useRef(0);
+  const piRuntimeRetryRef = useRef(0);
   useEffect(
     () => () => {
       slashCommandLoadSeqRef.current += 1;
@@ -3630,7 +3688,7 @@ export function ChatInput({
       loadAllCommands(
         paletteAgentKind,
         workingDir,
-        { ...opts, skipAgentSkills: isRemoteSession },
+        { ...opts, skipAgentSkills: isRemoteSession, sessionId },
         deviceLinkDeviceId,
       )
         .then((cmds) => {
@@ -3654,10 +3712,14 @@ export function ChatInput({
       workingDir,
       paletteAgentKind,
       isRemoteSession,
+      sessionId,
       deviceLinkDeviceId,
       slashCommandContextKey,
     ],
   );
+  useEffect(() => {
+    piRuntimeRetryRef.current = 0;
+  }, [slashCommandContextKey]);
   useEffect(() => {
     reloadSlashCommands();
   }, [reloadSlashCommands]);
@@ -3947,10 +4009,15 @@ export function ChatInput({
   const [slashFocus, setSlashFocus] = useState(0);
   const [atFocus, setAtFocus] = useState(0);
 
-  // Reset focus when the list shrinks below current index
+  // Keep keyboard focus on an executable row when filtering or runtime status changes.
   useEffect(() => {
-    if (slashFocus >= filteredCommands.length) setSlashFocus(0);
-  }, [filteredCommands.length, slashFocus]);
+    setSlashFocus((current) => (
+      current >= filteredCommands.length
+      || (filteredCommands[current] && isSlashCommandUnavailable(filteredCommands[current]))
+        ? firstAvailableSlashCommandIndex(filteredCommands)
+        : current
+    ));
+  }, [filteredCommands]);
   useEffect(() => {
     if (
       atFocus >= filteredAt.length ||
@@ -4027,6 +4094,21 @@ export function ChatInput({
     if (!slashOpen) return;
     reloadSlashCommands({ forceReload: true });
   }, [slashOpen, reloadSlashCommands]);
+  useEffect(() => {
+    if (!slashOpen) {
+      piRuntimeRetryRef.current = 0;
+      return;
+    }
+    if (paletteAgentKind !== 'pi' || !sessionId) return;
+    if (!hasUnavailableProjectSkillPreview(mergedCommands)) return;
+    const attempt = piRuntimeRetryRef.current;
+    if (attempt >= PI_RUNTIME_SKILL_RETRY_DELAYS_MS.length) return;
+    piRuntimeRetryRef.current = attempt + 1;
+    const timer = window.setTimeout(() => {
+      reloadSlashCommands({ forceReload: true });
+    }, PI_RUNTIME_SKILL_RETRY_DELAYS_MS[attempt]);
+    return () => window.clearTimeout(timer);
+  }, [mergedCommands, paletteAgentKind, reloadSlashCommands, sessionId, slashOpen]);
 
   // ── Panel → editor bridge for keyboard nav ─────────────────────────
   // The editor's `handleKeyDown` fires before React re-renders, so we need
@@ -4043,7 +4125,7 @@ export function ChatInput({
         switch (e.key) {
           case 'ArrowDown':
             if (slashOpen && filteredCommands.length > 0) {
-              setSlashFocus((i) => (i + 1) % filteredCommands.length);
+              setSlashFocus((i) => nextAvailableSlashCommandIndex(filteredCommands, i, 1));
               return true;
             }
             if (atOpen && filteredAt.length > 0) {
@@ -4053,7 +4135,7 @@ export function ChatInput({
             return false;
           case 'ArrowUp':
             if (slashOpen && filteredCommands.length > 0) {
-              setSlashFocus((i) => (i - 1 + filteredCommands.length) % filteredCommands.length);
+              setSlashFocus((i) => nextAvailableSlashCommandIndex(filteredCommands, i, -1));
               return true;
             }
             if (atOpen && filteredAt.length > 0) {
@@ -4063,8 +4145,20 @@ export function ChatInput({
             return false;
           case 'Enter':
           case 'Tab':
-            if (slashOpen && filteredCommands[slashFocus]) {
-              insertSlashCommand(filteredCommands[slashFocus]);
+            if (slashOpen) {
+              const focusedCommand = filteredCommands[slashFocus];
+              if (!focusedCommand) {
+                if (trigger.kind === 'slash') setSuppressedSlashAt(trigger.from);
+                return true;
+              }
+              if (isSlashCommandUnavailable(focusedCommand)) {
+                setSlashFocus(firstAvailableSlashCommandIndex(filteredCommands));
+                if (!hasAvailableSlashCommand(filteredCommands) && trigger.kind === 'slash') {
+                  setSuppressedSlashAt(trigger.from);
+                }
+                return true;
+              }
+              insertSlashCommand(focusedCommand);
               return true;
             }
             if (
@@ -4108,7 +4202,8 @@ export function ChatInput({
         !editor ||
         editor.isDestroyed ||
         trigger.kind !== 'slash' || composerMutationLockedRef.current ||
-        editor.view.composing
+        editor.view.composing ||
+        isSlashCommandUnavailable(cmd)
       ) {
         return;
       }
@@ -4158,7 +4253,13 @@ export function ChatInput({
           } else {
             // Slash 也保持纯文本;SlashCommandDecoration 只负责视觉确认,
             // Backspace / 光标移动因此与普通文字完全一致。
-            replaceSlashCommandRunWithText(tr, editor.schema, from, runEnd, cmd.name);
+            replaceSlashCommandRunWithText(
+              tr,
+              editor.schema,
+              from,
+              runEnd,
+              slashCommandInvocationName(cmd),
+            );
           }
           return true;
         })
@@ -5265,6 +5366,7 @@ export function ChatInput({
       syncDraft = true,
       memoryProviderId = effectiveSourceId,
     ) => {
+      if (settingsLocked) return;
       // 切换意图期:Fast 改动是"更新意图"而不是改当前会话实时状态(否则普通
       // SET_FAST 链路会让 main 清意图、renderer 乐观态失配)。经 ref 调用——
       // performAgentSwitch 声明在本回调之后(TDZ)。
@@ -5304,6 +5406,7 @@ export function ChatInput({
       modelMemory,
       persistFastModeChange,
       syncSessionDraftModelPrefs,
+      settingsLocked,
     ],
   );
 
@@ -5589,6 +5692,7 @@ export function ChatInput({
 
   const performModelChange = useCallback(
     async (newModelId: string, expectedAgentSwitchRevision?: number) => {
+      if (settingsLocked) return false;
       const sourceSessionId = sessionId;
       const sourceRemoteDeviceId = sourceSessionId
         ? (deviceLinkDeviceId ?? getSessionDeviceId(sourceSessionId))
@@ -5819,6 +5923,7 @@ export function ChatInput({
       confirmModelSwitchContextGuard,
       performAgentSwitch,
       remoteAtomicModelSelectionSupported,
+      settingsLocked,
     ],
   );
 
@@ -5839,6 +5944,7 @@ export function ChatInput({
 
   const handleEffortChange = useCallback(
     async (newEffort: Effort) => {
+      if (settingsLocked) return;
       // 切换意图期:effort 改动 = 更新意图(重登记),不走普通 setEffort 链路。
       if (sessionId && makerChatStore.getAgentSwitchIntent(sessionId)) {
         const intent = makerChatStore.getAgentSwitchIntent(sessionId)!;
@@ -5936,6 +6042,7 @@ export function ChatInput({
       syncSessionDraftModelPrefs,
       fastMode,
       performAgentSwitch,
+      settingsLocked,
     ],
   );
 
@@ -5987,6 +6094,7 @@ export function ChatInput({
       reconciledEffort?: Effort,
       expectedAgentSwitchRevision?: number,
     ) => {
+      if (settingsLocked) return false;
       const sourceSessionId = sessionId;
       const sourceRemoteDeviceId = sourceSessionId
         ? (deviceLinkDeviceId ?? getSessionDeviceId(sourceSessionId))
@@ -6261,6 +6369,7 @@ export function ChatInput({
       confirmModelSwitchContextGuard,
       performAgentSwitch,
       remoteAtomicModelSelectionSupported,
+      settingsLocked,
     ],
   );
 
@@ -6307,6 +6416,7 @@ export function ChatInput({
 
   const handlePermissionModeChange = useCallback(
     async (newMode: PermissionMode) => {
+      if (settingsLocked) return;
       const previousMode = activePermissionModeRef.current;
       if (requiresFullAccessConfirmation(previousMode, newMode)) {
         const confirmed = await confirmDialog({
@@ -6353,7 +6463,7 @@ export function ChatInput({
         toast.error(t('newChat.chatInput.permissionSwitchFailed'));
       }
     },
-    [sessionId, onPermissionModeDidChange, t, confirmDialog],
+    [sessionId, onPermissionModeDidChange, t, confirmDialog, settingsLocked],
   );
   useEffect(() => {
     handlePermissionModeChangeRef.current = handlePermissionModeChange;
@@ -6931,7 +7041,7 @@ export function ChatInput({
                 {/* 「+」只负责合成打开统一建议面板；内容与输入 @ 完全共用。 */}
                 <ExtraDirsButton
                   extraDirsCount={(extraDirs ?? []).length}
-                  hasReferenceDirs={onExtraDirsChange !== undefined}
+                  hasReferenceDirs={!settingsLocked && onExtraDirsChange !== undefined}
                   open={syntheticAtOpen}
                   onOpenChange={handleComposerSuggestionOpenChange}
                   autoFocusTarget={composerSuggestionFocusTarget}
@@ -6947,7 +7057,7 @@ export function ChatInput({
                       onClose={closeAtPanel}
                       onRetry={() => runAtScan(atQuery)}
                       referenceDirs={
-                        onExtraDirsChange
+                        !settingsLocked && onExtraDirsChange
                           ? {
                               dirs: extraDirs ?? [],
                               onRemove: (path) => {
@@ -6970,7 +7080,7 @@ export function ChatInput({
                   onPermissionModeChange={handlePermissionModeChange}
                   vendorKey={vendorKey}
                   deviceId={deviceLinkDeviceId}
-                  disabled={composerEditorLocked}
+                  disabled={composerEditorLocked || settingsLocked}
                   dense={effectiveDenseToolbar}
                   iconOnly={useUltraCompactToolbar}
                   visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
@@ -7051,7 +7161,9 @@ export function ChatInput({
                     onProviderChange={handleProviderChange}
                     onNavigateToProviders={handleNavigateToProviders}
                     switching={remoteSwitchInFlight}
-                    disabled={disabled || agentSendDispatchInFlight || agentSwitchInFlight}
+                    disabled={
+                      disabled || settingsLocked || agentSendDispatchInFlight || agentSwitchInFlight
+                    }
                     visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                     compactToolbar={useNarrowToolbar}
                     ultraCompactToolbar={useUltraCompactToolbar}
@@ -7072,7 +7184,7 @@ export function ChatInput({
                   {showSecondaryStop && (
                     <SendButton
                       disabled={false}
-                      onClick={onStop ?? (() => {})}
+                      onClick={handleStop}
                       isStreaming
                       visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                     />
@@ -7100,12 +7212,17 @@ export function ChatInput({
                   <span
                     ref={sendButtonRef}
                     className="inline-flex rounded-full"
-                    onMouseDown={(event) => event.preventDefault()}
+                    onMouseDown={(event) => {
+                      // 只在编辑器已聚焦时压默认聚焦:点发送会先把焦点从
+                      // contenteditable 挪到 button 上,发完光标就没了;
+                      // 编辑器未聚焦时保留按钮正常聚焦行为(可访问性)。
+                      if (editor?.isFocused) event.preventDefault();
+                    }}
                   >
                     {mainSlotIsStop ? (
                       <SendButton
                         disabled={false}
-                        onClick={onStop ?? (() => {})}
+                        onClick={handleStop}
                         isStreaming
                         visualVariant={isCreateAgentVariant ? 'create-agent' : 'default'}
                       />

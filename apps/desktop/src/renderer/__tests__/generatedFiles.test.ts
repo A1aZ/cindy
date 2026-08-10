@@ -269,6 +269,19 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates('copy source.txt report.txt')).toEqual([
       'report.txt',
     ]);
+    expect(
+      extractCommandOutputPathCandidates("mv 'tmp/report.pdf' 'artifacts/report.pdf'"),
+    ).toEqual(['artifacts/report.pdf']);
+    expect(extractCommandOutputPathCandidates("mv 'tmp/report.pdf' 'artifacts/'")).toEqual([
+      'artifacts/report.pdf',
+    ]);
+    expect(extractCommandOutputPathCandidates('mv source.txt report.txt')).toEqual(['report.txt']);
+    expect(extractCommandOutputPathCandidates('move source.txt report.txt')).toEqual([
+      'report.txt',
+    ]);
+    expect(
+      extractCommandOutputPathCandidates('Move-Item -Destination output/ -Path inputs/source.txt'),
+    ).toEqual(['output/source.txt']);
   });
 
   it('skips temp dirs, extension-less tokens, plain filenames and URLs', () => {

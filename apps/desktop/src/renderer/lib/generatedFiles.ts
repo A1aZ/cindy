@@ -10,7 +10,8 @@
  *     Excel / Word / PDF 等二进制产物只能靠脚本(Bash/exec 跑 python、node)生成,
  *     没有文件工具记录;不补这个盲区,卡在「帮我生成个表格」主场景直接失灵。
  * 「修改已有文件」(edit / update)与读取不算产出(产品口径:只收新建,见
- * AskUserQuestion 决策)。move / delete 同样排除。
+ * AskUserQuestion 决策)。结构化文件工具的 move / delete 同样排除;命令层把明确的
+ * copy / move 目标作为候选,用于临时文件落到最终产物路径的场景。
  *
  * 误报防线(source:'command' 特有,由渲染方 GeneratedFilesCard 执行):
  *   命令文本里出现路径 ≠ 命令创建了它(可能只是读输入)。所以只认重定向、save / write
@@ -87,7 +88,7 @@ function createdPathsFromToolUse(toolName: string, input: unknown): string[] {
   return [];
 }
 
-/** 文件候选需带扩展名;复制命令的目录目标可用末尾分隔符明确表达。 */
+/** 文件候选需带扩展名;复制/移动命令的目录目标可用末尾分隔符明确表达。 */
 const EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,7}$/;
 
 /** 临时目录里的产物是脚本自身/中间文件的高发区,一律不算「本轮产出」。 */
@@ -154,7 +155,7 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
       push(raw, start, start + raw.length);
     }
   }
-  for (const token of extractCopyPlainFilenameDestinations(command)) {
+  for (const token of extractTransferPlainFilenameDestinations(command)) {
     out.push(token);
   }
   return out.sort((a, b) => a.start - b.start || a.end - b.end);
@@ -178,9 +179,10 @@ const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
 const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
 const TEE_COMMAND_PREFIX_RE = /(?:^|[|;&]\s*)tee(?:\.exe)?\b[^|;&\r\n]*['"]?$/i;
 
-function extractCopyPlainFilenameDestinations(command: string): CommandPathToken[] {
+function extractTransferPlainFilenameDestinations(command: string): CommandPathToken[] {
   const out: CommandPathToken[] = [];
-  const commandRe = /\b(Copy-Item|copy|cp)\b([^|;\r\n]*?)(?=\|{1,2}|;|\r?$|\n)/gim;
+  const commandRe =
+    /\b(Copy-Item|Move-Item|copy|move|cp|mv)\b([^|;\r\n]*?)(?=\|{1,2}|;|\r?$|\n)/gim;
   for (const commandMatch of command.matchAll(commandRe)) {
     const commandName = (commandMatch[1] ?? '').toLowerCase();
     const argsText = commandMatch[2] ?? '';
@@ -193,12 +195,12 @@ function extractCopyPlainFilenameDestinations(command: string): CommandPathToken
     });
     const isPlainFilename = (value: string): boolean =>
       EXT_RE.test(value) && !/[\\/<>|?*]/.test(value);
-    if (commandName !== 'copy-item') {
+    if (commandName !== 'copy-item' && commandName !== 'move-item') {
       if (args.some((arg) => /^(?:-t|--target-directory(?:=|$))/i.test(arg.value))) continue;
       const positional = args.filter(
         (arg) =>
           !arg.value.startsWith('-') &&
-          !(commandName === 'copy' && /^\/[A-Za-z]+$/.test(arg.value)),
+          !((commandName === 'copy' || commandName === 'move') && /^\/[A-Za-z]+$/.test(arg.value)),
       );
       const destination = positional.length >= 2 ? positional.at(-1) : undefined;
       if (destination && isPlainFilename(destination.value)) {
@@ -320,7 +322,7 @@ function isExplicitOutputPath(
     return true;
   }
 
-  // cp/copy 的最后一个路径参数是目标。只看当前命令段,避免把前一条读取命令的路径带进来。
+  // copy/move 的最后一个路径参数是目标。只看当前命令段,避免把前一条命令的路径带进来。
   const previousSeparators = [
     { index: command.lastIndexOf(';', token.start - 1), length: 1 },
     { index: command.lastIndexOf('\n', token.start - 1), length: 1 },
@@ -343,7 +345,7 @@ function isExplicitOutputPath(
     .filter((candidate) => candidate.start >= segmentStart && candidate.end <= segmentEnd)
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .at(-1);
-  if (/(?:^|\|\s*)Copy-Item\b/i.test(segment.trim())) {
+  if (/(?:^|\|\s*)(?:Copy-Item|Move-Item)\b/i.test(segment.trim())) {
     const beforeInSegment = command.slice(segmentStart, token.start);
     const hasExplicitDestination = /-(?:Destination|LiteralDestination|Target)\s+/i.test(segment);
     if (hasExplicitDestination) {
@@ -354,11 +356,11 @@ function isExplicitOutputPath(
   return (
     lastPath?.start === token.start &&
     lastPath.end === token.end &&
-    /(?:^|\|\s*)(?:cp|copy|Copy-Item)\s+/i.test(segment.trim())
+    /(?:^|\|\s*)(?:cp|copy|mv|move|Copy-Item|Move-Item)\s+/i.test(segment.trim())
   );
 }
 
-function copyDirectoryOutputs(
+function transferDirectoryOutputs(
   command: string,
   destination: CommandPathToken,
   tokens: readonly CommandPathToken[],
@@ -423,7 +425,7 @@ export function extractCommandOutputPathCandidates(command: string): string[] {
   const out: string[] = [];
   for (const token of tokens) {
     if (!isExplicitOutputPath(command, token, tokens)) continue;
-    for (const output of copyDirectoryOutputs(command, token, tokens)) {
+    for (const output of transferDirectoryOutputs(command, token, tokens)) {
       if (seen.has(output)) continue;
       seen.add(output);
       out.push(output);

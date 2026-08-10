@@ -537,7 +537,11 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -571,7 +575,11 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -622,7 +630,11 @@ describe('legacy Ghost plugin recovery', () => {
         false,
         { reservedCommands: new Set(['draw']) },
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
   });
 
   it('ignores tombstones from a foreign shared root during recovery planning', async () => {
@@ -733,7 +745,11 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
     await expect(
       recoverLegacyGhostPlugins(
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
@@ -1026,7 +1042,11 @@ describe('legacy Ghost plugin recovery', () => {
     );
 
     expect(result).toMatchObject({ status: 'partial', moved: 0, conflicts: 1 });
-    expect(status).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    expect(status).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
     await expect(fs.readFile(path.join(target, 'ghost.json'), 'utf-8')).resolves.toBe('scoped');
     await expect(
       fs.readFile(path.join(root, 'cindy-brain', 'valid-plugin', 'ghost.json'), 'utf-8'),
@@ -1151,7 +1171,11 @@ describe('legacy Ghost plugin recovery', () => {
         { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
         root,
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
 
     await expect(
       recoverLegacyGhostPlugins(
@@ -1207,7 +1231,11 @@ describe('legacy Ghost plugin recovery', () => {
         {},
         (pid) => pid === 4242,
       ),
-    ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+    ).toEqual({
+      state: 'deferred',
+      legacyPluginCount: 1,
+      canRetry: false,
+    });
 
     const result = await recoverLegacyGhostPlugins(
       { mode: 'cloud', dataOwnerId: 'cloud-a', user: { id: 'cloud-a' } },
@@ -1328,7 +1356,11 @@ describe('legacy Ghost plugin recovery', () => {
           { mode: 'cloud', dataOwnerId: 'cloud-a', user: { id: 'cloud-a' } },
           root,
         ),
-      ).toEqual({ state: 'none', legacyPluginCount: 0, canRetry: false });
+      ).toEqual({
+        state: 'deferred',
+        legacyPluginCount: 1,
+        canRetry: false,
+      });
     } finally {
       delete process.env.XDT_PASSIVE_SHARED_USER_DATA;
     }

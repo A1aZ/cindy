@@ -519,9 +519,15 @@ export function getLegacyGhostRecoveryStatus(
     (markerRead.invalid ||
       (markerRead.marker !== null && markerRead.marker.ownerKey !== ownerKey));
   if (sharedRecoveryBlocked && scopedLegacyGhosts.length === 0) {
-    // 无法证明属于当前账号的共享目录不是当前账号的恢复任务：保留原文件，
-    // 但不向 Renderer 暴露数量，也不展示一个用户无法处理的永久状态。
-    return NO_LEGACY_GHOST_RECOVERY;
+    if (markerRead.marker && markerRead.marker.ownerKey !== ownerKey) {
+      // 已明确属于其他账号的共享目录不是当前账号的恢复任务。
+      return NO_LEGACY_GHOST_RECOVERY;
+    }
+    return {
+      state: 'partial',
+      legacyPluginCount: sharedLegacyGhosts.length,
+      canRetry: false,
+    };
   }
   const eligibleLegacyGhosts = sharedRecoveryBlocked
     ? scopedLegacyGhosts
@@ -529,15 +535,15 @@ export function getLegacyGhostRecoveryStatus(
   const legacyPluginCount = eligibleLegacyGhosts.length;
   if (legacyPluginCount === 0) return NO_LEGACY_GHOST_RECOVERY;
   if (process.env.XDT_PASSIVE_SHARED_USER_DATA === '1') {
-    return NO_LEGACY_GHOST_RECOVERY;
+    return { state: 'deferred', legacyPluginCount, canRetry: false };
   }
   if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
-    return NO_LEGACY_GHOST_RECOVERY;
+    return { state: 'deferred', legacyPluginCount, canRetry: false };
   }
 
   const targetRoot = path.join(root, 'owners', ownerKey, 'cindy-brain');
   if (!hasSafeRecoveryTargetChainSync(root, targetRoot)) {
-    return NO_LEGACY_GHOST_RECOVERY;
+    return { state: 'partial', legacyPluginCount, canRetry: false };
   }
   const occupiedCommands = new Set(
     listLegacyGhostDirsInRoots([targetRoot])
@@ -559,7 +565,7 @@ export function getLegacyGhostRecoveryStatus(
     return command === null || !occupiedCommands.has(command);
   });
   if (!canRetry) {
-    return NO_LEGACY_GHOST_RECOVERY;
+    return { state: 'partial', legacyPluginCount, canRetry: false };
   }
 
   const marker = markerRead.marker;

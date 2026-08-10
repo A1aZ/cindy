@@ -37,6 +37,7 @@ import {
   isGhostNodeMcpReservedMethod,
   parseGhostNodeChildToHostMessage,
 } from '../../shared/ghost.js';
+import { isGhostOwnerScopeUsable, type GhostOwnerScope } from './ghostOwnerScope.js';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -100,6 +101,7 @@ export interface NodeWorkerProcess {
 
 export interface GhostNodeRuntimeBrokerDeps {
   getGhost(id: string): InstalledGhost | null;
+  ownerScope?: GhostOwnerScope;
   /**
    * 读取当前插件自己声明的 Node 凭证。生产接 safeStorage；返回 null =
    * 未保存或保险库不可用。调用方不得记录返回值。
@@ -133,6 +135,7 @@ interface PendingRpc {
   deadlineAt: number | null;
   /** 超时收尾(初臂/续命共用同一段收尾逻辑)。 */
   expire(): void;
+  ownerScopeSnapshot: unknown;
 }
 
 /** 宿主代启的原样 stdio 子进程(childSpawn;挂在某个 worker 名下)。 */
@@ -146,6 +149,7 @@ interface ChildProcEntry {
 
 interface WorkerEntry {
   ghost: InstalledGhost;
+  ownerScopeSnapshot: unknown;
   /** 本进程对应的入口(相对路径;主入口 = manifest.node.entry)。 */
   entryRel: string;
   child: NodeWorkerProcess;
@@ -195,6 +199,7 @@ class WorkerStartError extends Error {
     message: string,
     readonly retryable: boolean,
     readonly silent = false,
+    readonly ownerBoundary = false,
   ) {
     super(message);
   }
@@ -449,7 +454,9 @@ export class GhostNodeRuntimeBroker {
   async startResident(ghost: InstalledGhost): Promise<void> {
     this.stoppedGhosts.delete(ghost.manifest.id);
     if (!ghost.enabled || ghost.manifest.node?.lifecycle !== 'resident') return;
-    const entry = await this.ensureWorker(ghost, ghost.manifest.node.entry);
+    const ownerScopeSnapshot = this.captureOwnerScope();
+    const entry = await this.ensureWorker(ghost, ghost.manifest.node.entry, ownerScopeSnapshot);
+    this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
     if (ghost.manifest.node.protocol === 'mcp-stdio') await this.ensureMcpInitialized(entry);
   }
 
@@ -457,7 +464,9 @@ export class GhostNodeRuntimeBroker {
   async startForRecovery(ghost: InstalledGhost): Promise<void> {
     this.stoppedGhosts.delete(ghost.manifest.id);
     if (!ghost.enabled || !ghost.manifest.node) return;
-    const entry = await this.ensureWorker(ghost, ghost.manifest.node.entry);
+    const ownerScopeSnapshot = this.captureOwnerScope();
+    const entry = await this.ensureWorker(ghost, ghost.manifest.node.entry, ownerScopeSnapshot);
+    this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
     if (ghost.manifest.node.protocol === 'mcp-stdio') await this.ensureMcpInitialized(entry);
   }
 
@@ -544,11 +553,22 @@ export class GhostNodeRuntimeBroker {
       return errorResult('INVALID_REQUEST', 'MCP 初始化由 Cindy 主机统一管理');
     }
 
+    let ownerScopeSnapshot: unknown;
+    try {
+      ownerScopeSnapshot = this.captureOwnerScope();
+    } catch {
+      return errorResult('PERMISSION_DENIED', 'Plugin owner boundary is not stable');
+    }
+
     let hostSecrets: Record<string, string> | undefined;
     if (secretBindings.length > 0) {
       hostSecrets = Object.create(null) as Record<string, string>;
       try {
         for (const binding of secretBindings) {
+          if (!this.ownerScopeUsable(ghostId, ownerScopeSnapshot)) {
+            clearHostSecrets(hostSecrets);
+            return errorResult('PERMISSION_DENIED', 'Plugin owner boundary is not stable');
+          }
           const value = this.deps.readSecret?.(ghostId, binding.key) ?? null;
           if (value === null) {
             clearHostSecrets(hostSecrets);
@@ -559,6 +579,10 @@ export class GhostNodeRuntimeBroker {
           }
           hostSecrets[binding.key] = value;
         }
+        if (!this.ownerScopeUsable(ghostId, ownerScopeSnapshot)) {
+          clearHostSecrets(hostSecrets);
+          return errorResult('PERMISSION_DENIED', 'Plugin owner boundary is not stable');
+        }
       } catch {
         clearHostSecrets(hostSecrets);
         return errorResult('INTERNAL', '读取 Node 请求所需凭证失败');
@@ -567,9 +591,13 @@ export class GhostNodeRuntimeBroker {
 
     let entry: WorkerEntry;
     try {
-      entry = await this.ensureWorker(ghost, entryRel);
+      entry = await this.ensureWorker(ghost, entryRel, ownerScopeSnapshot);
+      this.assertOwnerScopeUsable(ghostId, ownerScopeSnapshot);
     } catch (error) {
       clearHostSecrets(hostSecrets);
+      if (error instanceof WorkerStartError && error.ownerBoundary) {
+        return errorResult('PERMISSION_DENIED', error.message);
+      }
       return errorResult(
         'PROCESS_START_FAILED',
         error instanceof Error ? error.message : 'Node 工作进程启动失败',
@@ -583,6 +611,7 @@ export class GhostNodeRuntimeBroker {
     try {
       if (ghost.manifest.node.protocol === 'mcp-stdio') {
         await this.ensureMcpInitialized(entry);
+        this.assertOwnerScopeUsable(ghostId, ownerScopeSnapshot);
         if (entry.pending.size >= MAX_PENDING_REQUESTS) {
           return errorResult('RATE_LIMITED', '这个插件同时等待的 Node 请求太多');
         }
@@ -599,6 +628,7 @@ export class GhostNodeRuntimeBroker {
         effectiveTimeoutMs,
         request.maxTotalMs as number | undefined,
         hostSecrets,
+        ownerScopeSnapshot,
       );
       // writeLine/JSON.stringify 在 sendRpc 内同步完成；随即抹掉本次临时对象，
       // 不让凭证明文跟随 Promise 生命周期常驻在 broker 闭包里。
@@ -625,6 +655,7 @@ export class GhostNodeRuntimeBroker {
 
   /** worker 引导层上行控制帧的总入口:形状不合静默丢,资格逐项查。 */
   private handleWorkerControl(entry: WorkerEntry, raw: unknown): void {
+    if (!this.ownerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot)) return;
     const message = parseGhostNodeChildToHostMessage(raw);
     if (!message) return;
     if (message.type === 'spawn-child') {
@@ -658,6 +689,7 @@ export class GhostNodeRuntimeBroker {
   private readonly childReservations = new Map<string, number>();
 
   private replyToWorker(entry: WorkerEntry, message: GhostNodeChildToWorkerMessage): void {
+    if (!this.ownerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot)) return;
     entry.child.sendControl?.(message);
   }
 
@@ -681,6 +713,10 @@ export class GhostNodeRuntimeBroker {
         message: reason,
       });
     };
+    if (!this.ownerScopeUsable(ghostId, entry.ownerScopeSnapshot)) {
+      fail('Plugin owner boundary changed before child process dispatch');
+      return;
+    }
     const ghost = this.deps.getGhost(ghostId);
     const node = ghost?.enabled ? ghost.manifest.node : undefined;
     if (!node || node.childSpawn !== true) {
@@ -771,7 +807,10 @@ export class GhostNodeRuntimeBroker {
     }
 
     // worker 在等待答复期间死了/被停:孩子不能变孤儿,就地收掉。
-    if (this.workers.get(GhostNodeRuntimeBroker.keyOf(ghostId, entry.entryRel)) !== entry) {
+    if (
+      this.workers.get(GhostNodeRuntimeBroker.keyOf(ghostId, entry.entryRel)) !== entry
+      || !this.ownerScopeUsable(ghostId, entry.ownerScopeSnapshot)
+    ) {
       try {
         proc.kill('SIGKILL');
       } catch {
@@ -913,13 +952,26 @@ export class GhostNodeRuntimeBroker {
   /** destroyAll(主机退出)后置真:退避中的重试不得再拉新进程。 */
   private destroyed = false;
 
-  private async ensureWorker(ghost: InstalledGhost, entryRel: string): Promise<WorkerEntry> {
+  private async ensureWorker(
+    ghost: InstalledGhost,
+    entryRel: string,
+    ownerScopeSnapshot: unknown,
+  ): Promise<WorkerEntry> {
     const key = GhostNodeRuntimeBroker.keyOf(ghost.manifest.id, entryRel);
     const inflight = this.startingWorkers.get(key);
-    if (inflight) return inflight;
+    if (inflight) {
+      const entry = await inflight;
+      this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
+      this.assertOwnerScopeUsable(ghost.manifest.id, entry.ownerScopeSnapshot);
+      return entry;
+    }
     const existing = this.workers.get(key);
-    if (existing) return existing;
-    const starting = this.startWorkerWithRetry(ghost, entryRel, key);
+    if (existing) {
+      this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
+      this.assertOwnerScopeUsable(ghost.manifest.id, existing.ownerScopeSnapshot);
+      return existing;
+    }
+    const starting = this.startWorkerWithRetry(ghost, entryRel, key, ownerScopeSnapshot);
     this.startingWorkers.set(key, starting);
     try {
       return await starting;
@@ -932,7 +984,9 @@ export class GhostNodeRuntimeBroker {
     ghost: InstalledGhost,
     entryRel: string,
     key: string,
+    ownerScopeSnapshot: unknown,
   ): Promise<WorkerEntry> {
+    this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
     if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) {
       throw new WorkerStartError('Node 工作进程启动已取消', false, true);
     }
@@ -942,6 +996,7 @@ export class GhostNodeRuntimeBroker {
     for (let attempt = 1; attempt <= WORKER_START_ATTEMPTS; attempt++) {
       if (attempt > 1) {
         await this.delay(WORKER_START_RETRY_DELAYS_MS[attempt - 2] ?? 750);
+        this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
         // 退避期间插件可能被停用/卸载/更新/停止,主机也可能正在退出:
         // 现查现用;已停用/已收摊/已停止就不再拉进程,也不补发状态事件。
         if (this.destroyed || this.stoppedGhosts.has(ghost.manifest.id)) throw lastError;
@@ -954,7 +1009,7 @@ export class GhostNodeRuntimeBroker {
         current = fresh;
       }
       try {
-        return await this.startWorkerOnce(current, entryRel, key);
+        return await this.startWorkerOnce(current, entryRel, key, ownerScopeSnapshot);
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
         const retryable = error instanceof WorkerStartError ? error.retryable : true;
@@ -977,7 +1032,9 @@ export class GhostNodeRuntimeBroker {
     ghost: InstalledGhost,
     entryRel: string,
     key: string,
+    ownerScopeSnapshot: unknown,
   ): Promise<WorkerEntry> {
+    this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
     const node = ghost.manifest.node;
     if (!node) throw new WorkerStartError('ghost.json 缺少 node 工作进程详单', false);
     const entryPath = path.resolve(ghost.dir, ...entryRel.split('/'));
@@ -993,6 +1050,7 @@ export class GhostNodeRuntimeBroker {
     }
     const entry: WorkerEntry = {
       ghost,
+      ownerScopeSnapshot,
       entryRel,
       child,
       startupPhase: true,
@@ -1047,7 +1105,10 @@ export class GhostNodeRuntimeBroker {
       const text = decoded.trim().slice(0, 4_096);
       if (text) this.deps.log?.warn('ghost node stderr', { ghostId: ghost.manifest.id, text });
       // 进程已退出后不再续命——定时器已冻结,由 settleExit 统一结算。
-      if (!entry.exitDrain) {
+      if (
+        !entry.exitDrain
+        && this.ownerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot)
+      ) {
         // stderr 是手册钦定的日志口——构建刷日志就是活着的证据,给续命请求重置沉默窗口。
         this.renewPendingOnActivity(entry);
       }
@@ -1106,6 +1167,7 @@ export class GhostNodeRuntimeBroker {
       throw error;
     }
     entry.startupPhase = false;
+    this.assertOwnerScopeUsable(ghost.manifest.id, ownerScopeSnapshot);
     this.deps.log?.info('ghost node process started', {
       ghostId: ghost.manifest.id,
       entry: entryRel,
@@ -1136,6 +1198,7 @@ export class GhostNodeRuntimeBroker {
         },
         10_000,
       ).then(() => {
+        this.assertOwnerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot);
         this.writeLine(entry, {
           jsonrpc: '2.0',
           method: 'notifications/initialized',
@@ -1156,7 +1219,9 @@ export class GhostNodeRuntimeBroker {
     timeoutMs: number,
     maxTotalMs?: number,
     hostSecrets?: Readonly<Record<string, string>>,
+    ownerScopeSnapshot: unknown = entry.ownerScopeSnapshot,
   ): Promise<unknown> {
+    this.assertOwnerScopeUsable(entry.ghost.manifest.id, ownerScopeSnapshot);
     this.clearIdleTimer(entry);
     const id = String(entry.nextId++);
     return new Promise((resolve, reject) => {
@@ -1172,6 +1237,7 @@ export class GhostNodeRuntimeBroker {
           reject(new NodeRpcError('timeout', `Node 请求 ${method} 等待超时`));
           this.scheduleIdleStop(entry);
         },
+        ownerScopeSnapshot,
       };
       entry.pending.set(id, pending);
       this.armPendingTimer(pending);
@@ -1231,6 +1297,7 @@ export class GhostNodeRuntimeBroker {
   private handleStdout(entry: WorkerEntry, chunk: Buffer | string): void {
     const key = GhostNodeRuntimeBroker.keyOf(entry.ghost.manifest.id, entry.entryRel);
     if (this.workers.get(key) !== entry) return;
+    if (!this.ownerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot)) return;
     entry.stdoutBuffer += entry.stdoutDecoder.write(
       Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, 'utf8'),
     );
@@ -1259,6 +1326,7 @@ export class GhostNodeRuntimeBroker {
   }
 
   private handleRpcMessage(entry: WorkerEntry, message: unknown): void {
+    if (!this.ownerScopeUsable(entry.ghost.manifest.id, entry.ownerScopeSnapshot)) return;
     if (!message || typeof message !== 'object' || Array.isArray(message)) {
       this.failProtocol(entry, 'Node 返回的 JSON-RPC 消息必须是对象');
       return;
@@ -1273,6 +1341,10 @@ export class GhostNodeRuntimeBroker {
       if (!pending) return; // 迟到或未知 response，静默丢弃。
       entry.pending.delete(String(msg.id));
       this.clearTimer(pending.timer);
+      if (!this.ownerScopeUsable(entry.ghost.manifest.id, pending.ownerScopeSnapshot)) {
+        pending.reject(new NodeRpcError('exit', 'Plugin owner boundary changed before response'));
+        return;
+      }
       if (msg.error && typeof msg.error === 'object') {
         const rpcError = msg.error as Record<string, unknown>;
         pending.reject(
@@ -1328,6 +1400,27 @@ export class GhostNodeRuntimeBroker {
     } catch {
       // exit handler still converges state when available
     }
+  }
+
+  private captureOwnerScope(): unknown {
+    return this.deps.ownerScope?.capture();
+  }
+
+  private ownerScopeUsable(ghostId: string, captured: unknown): boolean {
+    if (isGhostOwnerScopeUsable(this.deps.ownerScope, captured)) return true;
+    this.deps.ownerScope?.onInvalidated?.(ghostId);
+    this.stop(ghostId);
+    return false;
+  }
+
+  private assertOwnerScopeUsable(ghostId: string, captured: unknown): void {
+    if (this.ownerScopeUsable(ghostId, captured)) return;
+    throw new WorkerStartError(
+      'Plugin owner boundary changed before Node dispatch',
+      false,
+      true,
+      true,
+    );
   }
 
   private handleExit(

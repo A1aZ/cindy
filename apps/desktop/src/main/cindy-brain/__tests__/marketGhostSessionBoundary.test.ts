@@ -22,7 +22,8 @@ describe('market Ghost session boundary', () => {
     const captureEnd = source.indexOf('\n}\n', captureStart);
     const captureBody = source.slice(captureStart, captureEnd);
     expect(captureBody).toContain('isAppSessionBoundaryPending()');
-    expect(captureBody).toContain('return getActiveAppSession();');
+    expect(captureBody).toContain('const owner = getActiveAppSession();');
+    expect(captureBody).toContain('isGhostSkillProjectionBoundaryStableForOwner(owner.dataOwnerId)');
 
     const leaseStart = source.indexOf(
       'function beginGhostMutation(expectedOwner?: ActiveAppSession): () => void {',

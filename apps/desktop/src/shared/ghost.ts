@@ -1685,7 +1685,7 @@ function ghostPermissionProjectionTuple(item: GhostPermissionItem): unknown[] {
   return [
     item.key,
     item.kind,
-    item.labelKey,
+    permissionLabelKeyForFingerprint(item),
     sortRecord(item.labelArgs),
     item.detail ?? null,
     permissionDetailKeyForFingerprint(item) || null,
@@ -2104,6 +2104,24 @@ export interface GhostPermissionDiff {
  * 形态),只看 key+detail 会把"说明/成本面变了"漏判成"权限面没变",更新时
  * 用户看不到重新确认。
  */
+function isGithubCredentialCompatibilityItem(item: GhostPermissionItem): boolean {
+  return (
+    item.key === 'network:secret:github_pat' &&
+    (item.detailKey === 'networkSecretGhostInputDetail' ||
+      item.detailKey === 'networkSecretGhCliDetail')
+  );
+}
+
+function permissionLabelKeyForFingerprint(item: GhostPermissionItem): string {
+  if (
+    isGithubCredentialCompatibilityItem(item) &&
+    (item.labelKey === 'networkSecret' || item.labelKey === 'networkSecretGhCli')
+  ) {
+    return 'networkSecretGithubCredential';
+  }
+  return item.labelKey;
+}
+
 function permissionDetailKeyForFingerprint(item: GhostPermissionItem): string {
   // cindy-github 从存量 PAT(source:user)升级为 Host 优先 gh-cli 时，凭证仍由
   // Main 只注入同一个 network secret key 与同一组目标；变化的是设置页/权限
@@ -2111,10 +2129,7 @@ function permissionDetailKeyForFingerprint(item: GhostPermissionItem): string {
   // 同时也必须共用审阅指纹，否则升级会被误判成扩权并要求存量用户重新确认。
   // gh-cli 的 manifest 校验只允许官方 cindy-github，因此这个兼容等价不会
   // 放宽其它插件；其它 detailKey/detailArgs 变化仍按新说明完整性规则复核。
-  if (
-    item.detailKey === 'networkSecretGhostInputDetail' ||
-    item.detailKey === 'networkSecretGhCliDetail'
-  ) {
+  if (isGithubCredentialCompatibilityItem(item)) {
     return 'networkSecretGithubCredentialDetail';
   }
   return item.detailKey ?? '';

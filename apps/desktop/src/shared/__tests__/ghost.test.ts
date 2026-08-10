@@ -27,7 +27,6 @@ import {
   isOfficialGhostId,
   isValidGhostNetworkHostPattern,
   layoutWithGhostPanel,
-  unreviewedGhostPermissionItems,
   parseGhostPartition,
   resolveGhostManifestLocale,
   validateGhostManifest,

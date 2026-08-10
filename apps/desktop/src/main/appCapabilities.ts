@@ -10,6 +10,7 @@ import {
   isAppSessionBoundaryPending,
   type AppSessionMode,
 } from './appSessionState.js';
+import { isGhostSkillProjectionBoundaryStableForOwner } from './authBoundaryQuarantine.js';
 import { throwIpcError } from './utils/ipcValidate.js';
 
 export interface AppCapabilities {
@@ -24,8 +25,9 @@ export interface AppCapabilities {
 export function deriveAppCapabilities(
   mode: AppSessionMode,
   boundaryPending = false,
+  ownerStable = true,
 ): AppCapabilities {
-  const cloud = mode === 'cloud' && !boundaryPending;
+  const cloud = mode === 'cloud' && !boundaryPending && ownerStable;
   return {
     canUseCindyAccountServices: cloud,
     canUseCindyGateway: cloud,
@@ -41,6 +43,7 @@ export function getAppCapabilities(): AppCapabilities {
   return deriveAppCapabilities(
     session.mode,
     isAppSessionBoundaryPending(),
+    isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId),
   );
 }
 
@@ -48,8 +51,11 @@ export function requireAppCapability(
   capability: keyof AppCapabilities,
   message = 'This feature requires a Cindy account.',
 ): void {
-  if (getAppCapabilities()[capability]) return;
-  if (isAppSessionBoundaryPending()) {
+  const session = getActiveAppSession();
+  const boundaryPending = isAppSessionBoundaryPending();
+  const ownerStable = isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId);
+  if (deriveAppCapabilities(session.mode, boundaryPending, ownerStable)[capability]) return;
+  if (boundaryPending || (session.mode === 'cloud' && !ownerStable)) {
     throwIpcError(
       'PRECONDITION_FAILED',
       'App session is switching; retry after the owner boundary settles.',

@@ -202,7 +202,7 @@ describe('GhostPermissionDiffView(更新权限 diff)', () => {
     render(<GhostPermissionDiffView diff={diffGhostPermissionItems(prev, next)} />);
     // 真正的权限变化(新增网络域名)仍在折叠区之外,第一屏就能看到。
     expect(screen.getByText(/perm\.networkHost:.*api\.example\.com/)).toBeTruthy();
-    expect(screen.getAllByText('settings.ghosts.perm.added')).toHaveLength(2);
+    expect(screen.getByText('settings.ghosts.perm.added')).toBeTruthy();
     // 新增 network 槽后 code 项的主机固定说明换版本(codeDetail → codeDetailNetwork):
     // 指纹含 detailKey 后这算权限面变化,但同 key 配对成一条「更新」行,
     // 不渲染成「移除+新增」两条误导用户。

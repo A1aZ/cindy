@@ -89,6 +89,61 @@ function rpcRequest(method = 'echo', params: unknown = { value: 1 }) {
   return { type: 'node-request', method, params };
 }
 
+describe('nodeRuntimeBroker owner boundary races', () => {
+  it('owner boundary change during startup kills the worker and fails closed', async () => {
+    let generation = 1;
+    const invalidated = vi.fn();
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess(undefined, false);
+    const spawnProcess = vi.fn(() => child as unknown as NodeWorkerProcess);
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess,
+      ownerScope: {
+        capture: () => generation,
+        isCurrent: (scope) => scope === generation,
+        isStable: (scope) => scope === generation,
+        onInvalidated: invalidated,
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('startup'));
+    await vi.waitFor(() => expect(spawnProcess).toHaveBeenCalledTimes(1));
+    generation = 2;
+    child.emit('spawn');
+
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'PERMISSION_DENIED' });
+    expect(child.killed).toBe(true);
+    expect(invalidated).toHaveBeenCalledWith('node-ghost');
+  });
+
+  it('owner boundary change before a response discards the response and stops the worker', async () => {
+    let generation = 1;
+    const invalidated = vi.fn();
+    const ghost = fakeGhost();
+    const child = new FakeNodeProcess();
+    const broker = new GhostNodeRuntimeBroker({
+      getGhost: () => ghost,
+      spawnProcess: () => child as unknown as NodeWorkerProcess,
+      ownerScope: {
+        capture: () => generation,
+        isCurrent: (scope) => scope === generation,
+        isStable: (scope) => scope === generation,
+        onInvalidated: invalidated,
+      },
+    });
+
+    const pending = broker.handleRequest('node-ghost', rpcRequest('response'));
+    await vi.waitFor(() => expect(child.received).toHaveLength(1));
+    generation = 2;
+    child.send({ jsonrpc: '2.0', id: child.received[0].id, result: { stale: true } });
+
+    await expect(pending).resolves.toMatchObject({ ok: false, errorCode: 'PROCESS_EXITED' });
+    expect(child.killed).toBe(true);
+    expect(invalidated).toHaveBeenCalledWith('node-ghost');
+  });
+});
+
 function makeAutoReplyProcess(methods?: string[]) {
   const process = new FakeNodeProcess((message) => {
     if (typeof message.method === 'string') methods?.push(message.method);

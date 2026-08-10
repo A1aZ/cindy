@@ -424,11 +424,20 @@ export async function withGhostSkillProjectionReconcile<T>(
   ownerId: string,
   reconcile: () => Promise<T>,
 ): Promise<T> {
-  if (isPassiveSharedUserDataInstance()) {
-    throw new Error('Passive shared-userData instances cannot mutate the Ghost skill projection');
-  }
   const normalizedOwnerId = ownerId.trim();
   if (!normalizedOwnerId) throw new Error('Ghost skill reconcile requires a committed owner');
+  return withSharedGlobalSkillProjectionMutation(normalizedOwnerId, reconcile);
+}
+
+/** Serialize every mutation of the shared home-level skill discovery roots. */
+export async function withSharedGlobalSkillProjectionMutation<T>(
+  ownerId: string | null,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  if (isPassiveSharedUserDataInstance()) {
+    throw new Error('Passive shared-userData instances cannot mutate global skill projections');
+  }
+  const normalizedOwnerId = normalizeOwnerArgument(ownerId);
   return withStrictBoundaryLock(async () => {
     if (processProjectionQuarantined || isDurablyQuarantined()) {
       throw new Error(
@@ -443,7 +452,7 @@ export async function withGhostSkillProjectionReconcile<T>(
     ) {
       throw new Error('Ghost skill projection is not stable for the active owner');
     }
-    return reconcile();
+    return mutation();
   });
 }
 
@@ -481,7 +490,13 @@ export function isGhostSkillProjectionBoundaryStableForOwner(ownerId: string | n
 export function assertGhostSkillProjectionStableOwner(ownerId: string): void {
   const normalizedOwnerId = ownerId.trim();
   if (!normalizedOwnerId) throw new Error('Ghost skill projection requires a committed owner');
-  if (!isGhostSkillProjectionBoundaryStableForOwner(normalizedOwnerId)) {
+  assertGhostSkillProjectionBoundaryStableForOwner(normalizedOwnerId);
+}
+
+export function assertGhostSkillProjectionBoundaryStableForOwner(
+  ownerId: string | null,
+): void {
+  if (!isGhostSkillProjectionBoundaryStableForOwner(ownerId)) {
     throw new Error('Ghost skill projection is not stable for the active owner');
   }
 }

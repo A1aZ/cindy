@@ -473,7 +473,11 @@ function captureGhostMutationOwner(): ActiveAppSession {
   if (isAppSessionBoundaryPending()) {
     throw new Error('账号切换中，已取消本次 Plugin 操作');
   }
-  return getActiveAppSession();
+  const owner = getActiveAppSession();
+  if (!isGhostSkillProjectionBoundaryStableForOwner(owner.dataOwnerId)) {
+    throw new Error('Plugin owner boundary is not durably stable');
+  }
+  return owner;
 }
 
 /**
@@ -486,8 +490,11 @@ function beginGhostMutation(expectedOwner?: ActiveAppSession): () => void {
   if (isAppSessionBoundaryPending()) {
     throw new Error('账号切换中，已取消本次 Plugin 操作');
   }
+  const currentOwner = getActiveAppSession();
+  if (!isGhostSkillProjectionBoundaryStableForOwner(currentOwner.dataOwnerId)) {
+    throw new Error('Plugin owner boundary is not durably stable');
+  }
   if (expectedOwner) {
-    const currentOwner = getActiveAppSession();
     if (
       currentOwner.mode !== expectedOwner.mode ||
       currentOwner.dataOwnerId !== expectedOwner.dataOwnerId ||
@@ -1406,6 +1413,7 @@ export function getGhostPipeDispatcher(): GhostPipeDispatcher {
   if (!dispatcherSingleton) {
     dispatcherSingleton = new GhostPipeDispatcher({
       getGhost: findAvailableGhost,
+      ownerScope: ghostOwnerScope,
       runtimeStateOf: (id) => getGhostRuntime().stateOf(id),
       spawn: async (ghost) => {
         const r = await getGhostRuntime().spawn(ghost);
@@ -1495,6 +1503,7 @@ export function getGhostNodeRuntimeBroker(): GhostNodeRuntimeBroker {
   if (!nodeRuntimeBrokerSingleton) {
     nodeRuntimeBrokerSingleton = new GhostNodeRuntimeBroker({
       getGhost: findAvailableGhost,
+      ownerScope: ghostOwnerScope,
       readSecret: (ghostId, secretKey) => readGhostSecret(ghostId, secretKey),
       sendToGhost: (ghostId, payload) => {
         sendToGhostLogic(ghostId, payload);

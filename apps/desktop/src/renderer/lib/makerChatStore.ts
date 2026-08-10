@@ -4701,8 +4701,8 @@ export function handleStreamEvent(
       // stopped(interrupt 杀掉)不置位——不会有 wake turn 跟进,置了就永久转圈。
       // 任务终态若在主 turn 仍 running 时到达,仍置桥接标记,让 Done 后的
       // hasBackgroundAgentWork 返回 true,阻止 ChatInput 用不完整上下文发起预测。
-      // 后续 wake turn 启动时 handleStatusUpdate 会清除 pendingTaskWake(见该
-      // 函数中 pendingTaskWake: false),桥接不会永久撑住 running 快照。
+      // 后续 wake turn 启动(isRunning:true)时 handleStatusUpdate 通过
+      // isTurnStart 分支清除 pendingTaskWake,桥接不会永久撑住 running 快照。
       const wakesAfterTerminal =
         (merged.status === 'completed' || merged.status === 'failed') &&
         isWakeAgentTask(merged);

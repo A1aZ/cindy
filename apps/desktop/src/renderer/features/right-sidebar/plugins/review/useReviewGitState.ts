@@ -31,12 +31,10 @@ interface LoadState<T> {
   data: T | null;
   loading: boolean;
   error: string | null;
+  /** IPC error code (e.g. 'DEVICE_LINK_CHANNEL_NOT_ALLOWED'); null when error is absent or not an IPC error. */
+  errorCode: string | null;
   refresh: () => void;
   setData: (data: T) => void;
-}
-
-function messageFromError(err: unknown): string {
-  return extractIpcError(err)?.message ?? (err instanceof Error ? err.message : String(err));
 }
 
 function useDebouncedCallback(cb: () => void, delayMs: number): () => void {
@@ -84,6 +82,7 @@ function useGitReviewLoad<T>(
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const requestRef = useRef(0);
   const setData = useCallback((next: T) => {
     setDataState(next);
@@ -95,6 +94,7 @@ function useGitReviewLoad<T>(
       requestRef.current += 1;
       if (!preserveWhenDisabled) setDataState(null);
       setError(null);
+      setErrorCode(null);
       setLoading(false);
       return;
     }
@@ -106,12 +106,14 @@ function useGitReviewLoad<T>(
         if (requestRef.current !== requestId) return;
         setData(next);
         setError(null);
+        setErrorCode(null);
       })
       .catch((err) => {
         if (requestRef.current !== requestId) return;
-        const message = messageFromError(err);
-        setError(message);
-        log.warn(logLabel, { sessionId, message });
+        const ipcErr = extractIpcError(err);
+        setError(ipcErr?.message ?? (err instanceof Error ? err.message : String(err)));
+        setErrorCode(ipcErr?.code ?? null);
+        log.warn(logLabel, { sessionId, message: ipcErr?.message ?? String(err) });
       })
       .finally(() => {
         if (requestRef.current === requestId) setLoading(false);
@@ -143,7 +145,7 @@ function useGitReviewLoad<T>(
     };
   }, [sessionId, debouncedLoad]);
 
-  return { data, loading, error, refresh: load, setData };
+  return { data, loading, error, errorCode, refresh: load, setData };
 }
 
 export function useReviewGitState(

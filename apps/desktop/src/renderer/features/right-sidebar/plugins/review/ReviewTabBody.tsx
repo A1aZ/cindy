@@ -57,7 +57,7 @@ import type {
   ReviewStageOperationSummary,
 } from '@/lib/gitReview.types';
 import { formatSidebarTime } from '@/features/cc-agent/lib/formatSidebarTime';
-import { isDeviceTooOldError } from '@/lib/fileBrowserTransport';
+
 import { gitReviewApiFor, isReviewRemoteOversizeError } from '@/lib/gitReviewTransport';
 import { makerChatStore } from '@/lib/makerChatStore';
 import type { TurnChangeSetDetail } from '../../../../../shared/turnChangeSet';
@@ -583,7 +583,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
   const sessionId = ctx.sessionId || null;
   const hideWhitespace = state.hideWhitespace ?? false;
   const branchBaseRef = state.branchBaseRef ?? null;
-  const { data, loading, error, refresh, setData: setReviewData } = useReviewGitState(sessionId, hideWhitespace, deviceLinkDeviceId);
+  const { data, loading, error, errorCode, refresh, setData: setReviewData } = useReviewGitState(sessionId, hideWhitespace, deviceLinkDeviceId);
   const commitsState = useReviewCommits(sessionId, branchBaseRef, deviceLinkDeviceId);
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
@@ -1112,7 +1112,7 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
   if (error && !data) {
     // device-link 远程会话的两类确定性失败给专属占位:老被控端无 remote-op
     // channel(升级即解决,刷新无用),以及响应超设备互联帧预算。
-    if (deviceLinkDeviceId && isDeviceTooOldError(error)) {
+    if (deviceLinkDeviceId && errorCode === 'DEVICE_LINK_CHANNEL_NOT_ALLOWED') {
       return (
         <CenteredState
           icon={<AlertTriangle size={24} />}

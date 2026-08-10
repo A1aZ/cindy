@@ -745,6 +745,7 @@ describe('PluginMarketService migration and defaultInstall', () => {
       {
         ghostId: 'cindy-github',
         version: item.currentRelease.version,
+        expectedInstalledApproval: APPROVED_INSTALL_TOKEN,
         officialCindyGithub: true,
       },
     );

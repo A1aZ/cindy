@@ -97,4 +97,36 @@ describe('GhostInstallReceiptStore cleanup', () => {
     );
     expect(await fs.promises.readFile(externalReceipt, 'utf8')).toBe('{}');
   });
+
+  it('retains stale snapshots instead of using unsafe pathname-based recursive cleanup', async () => {
+    const parent = path.join(stateRoot, 'skill-snapshots', 'hello');
+    const movedParent = path.join(stateRoot, 'skill-snapshots', 'hello-moved');
+    const external = path.join(workDir, 'external-prune-target');
+    await fs.promises.mkdir(path.join(parent, 'stale'), { recursive: true });
+    await fs.promises.mkdir(path.join(external, 'stale'), { recursive: true });
+    await fs.promises.writeFile(path.join(external, 'stale', 'sentinel.txt'), 'keep');
+    const verifiedParent = await fs.promises.realpath(parent);
+
+    const realReaddir = fs.promises.readdir;
+    let swapped = false;
+    vi.spyOn(fs.promises, 'readdir').mockImplementation(async (target, options) => {
+      const entries = await realReaddir(target, options as never);
+      if (!swapped && path.resolve(String(target)) === path.resolve(verifiedParent)) {
+        swapped = true;
+        await fs.promises.rename(parent, movedParent);
+        await fs.promises.symlink(external, parent, process.platform === 'win32' ? 'junction' : 'dir');
+      }
+      return entries as never;
+    });
+
+    await (store as unknown as {
+      pruneStaleSkillSnapshots(receipt: { id: string; revision: string }): Promise<void>;
+    }).pruneStaleSkillSnapshots({ id: 'hello', revision: 'current' });
+
+    expect(swapped).toBe(false);
+    expect(await fs.promises.readFile(path.join(external, 'stale', 'sentinel.txt'), 'utf8')).toBe(
+      'keep',
+    );
+    expect(fs.existsSync(path.join(parent, 'stale'))).toBe(true);
+  });
 });

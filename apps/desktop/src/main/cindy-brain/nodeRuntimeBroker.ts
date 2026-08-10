@@ -942,6 +942,7 @@ export class GhostNodeRuntimeBroker {
 
   /** 同 key 在途启动去重:重试退避窗口内的并发请求共享同一次启动,不双开进程。 */
   private readonly startingWorkers = new Map<string, Promise<WorkerEntry>>();
+  private readonly startingWorkerScopes = new Map<string, unknown>();
 
   /** stop(ghostId) 置入:在途重试检测到后立即中止,不继续拉新进程。 */
   private readonly stoppedGhosts = new Set<string>();
@@ -971,12 +972,14 @@ export class GhostNodeRuntimeBroker {
       this.assertOwnerScopeUsable(ghost.manifest.id, existing.ownerScopeSnapshot);
       return existing;
     }
+    this.startingWorkerScopes.set(key, ownerScopeSnapshot);
     const starting = this.startWorkerWithRetry(ghost, entryRel, key, ownerScopeSnapshot);
     this.startingWorkers.set(key, starting);
     try {
       return await starting;
     } finally {
       this.startingWorkers.delete(key);
+      this.startingWorkerScopes.delete(key);
     }
   }
 
@@ -1419,6 +1422,14 @@ export class GhostNodeRuntimeBroker {
         continue;
       }
       this.stopWorker(key, entry);
+    }
+    if (!hasCurrentWorker) {
+      for (const [key, scope] of this.startingWorkerScopes) {
+        if (key.startsWith(`${ghostId}::`) && isGhostOwnerScopeUsable(this.deps.ownerScope, scope)) {
+          hasCurrentWorker = true;
+          break;
+        }
+      }
     }
     if (!hasCurrentWorker) this.deps.ownerScope?.onInvalidated?.(ghostId);
     return false;

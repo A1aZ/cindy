@@ -457,6 +457,7 @@ function canBackfillOfficialCindyGithubTrust(
     record.installed &&
     record.source === 'market' &&
     record.manifestDigest !== undefined &&
+    installed.approval.state === 'approved' &&
     !hasCindyOfficialTrustMetadata(installed.dir) &&
     serverRecordMatchesInstalledGhost(record.pluginId, installed, record)
   );
@@ -2040,6 +2041,7 @@ export class PluginMarketService {
         await installOrUpdateMarketGhostPackage(tempPath, {
           ghostId: 'cindy-github',
           version: currentRecord.version,
+          expectedInstalledApproval: ghostInstallApprovalToken(currentInstalled.approval),
           officialCindyGithub: true,
         });
       });

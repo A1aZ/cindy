@@ -3326,7 +3326,7 @@ describe('GhostManager · Host approval receipt', () => {
     expect(fs.existsSync(snapshotRoot)).toBe(false);
   });
 
-  it('prunes skill snapshots left behind by superseded approval revisions', async () => {
+  it('retains skill snapshots left behind by superseded approval revisions', async () => {
     await manager.install(await makeCindy('skill-v1.cindy', skillManifest(), skillFiles()));
     const firstSnapshot = manager.list()[0].approvedSkillRoot!;
     const snapshotParent = path.dirname(firstSnapshot);
@@ -3342,9 +3342,9 @@ describe('GhostManager · Host approval receipt', () => {
     const secondSnapshot = manager.list()[0].approvedSkillRoot!;
 
     expect(secondSnapshot).not.toBe(firstSnapshot);
-    expect(await fs.promises.readdir(snapshotParent)).toEqual([
-      path.basename(secondSnapshot),
-    ]);
+    expect(new Set(await fs.promises.readdir(snapshotParent))).toEqual(
+      new Set([path.basename(firstSnapshot), path.basename(secondSnapshot)]),
+    );
   });
 
   it('快照回收/重建绝不穿透被换成 junction 的父段删外部目录内容', async () => {

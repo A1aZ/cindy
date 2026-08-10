@@ -850,6 +850,9 @@ export class GhostInstallReceiptStore {
    * best-effort:批准事实已经落盘，回收失败只记为待清理状态，不回滚安装。
    */
   private async pruneStaleSkillSnapshots(receipt: GhostInstallReceipt): Promise<void> {
+    void receipt;
+    return;
+    /* Pathname-based recursive deletion cannot close the parent-swap TOCTOU
     // 父段遏制先行:`<id>` 段被换成 junction 时,readdir 会列出外部目录的条目、
     // 随后的逐项 recursive rm 就会把**外部目录的内容**删掉(Windows 实测可复现)。
     // 回收是 best-effort:父段可疑就整体跳过,绝不带着可疑父段动盘。
@@ -860,21 +863,47 @@ export class GhostInstallReceiptStore {
       return;
     }
     if (!parent) return;
+    let verifiedParent: string;
+    try {
+      const [realRoot, realParent] = await Promise.all([
+        fs.promises.realpath(this.rootDir()),
+        fs.promises.realpath(parent),
+      ]);
+      if (!isPathInsideDir(realRoot, realParent)) return;
+      verifiedParent = realParent;
+    } catch {
+      return;
+    }
     let entries: fs.Dirent[];
     try {
-      entries = await fs.promises.readdir(parent, { withFileTypes: true });
+      entries = await fs.promises.readdir(verifiedParent, { withFileTypes: true });
     } catch {
       return;
     }
     await Promise.all(
       entries
         .filter((entry) => entry.name !== receipt.revision)
-        .map((entry) =>
-          fs.promises
-            .rm(path.join(parent, entry.name), { recursive: true, force: true })
-            .catch(() => undefined),
-        ),
-    );
+        .map(async (entry) => {
+          try {
+            // Re-validate the managed parent immediately before each destructive
+            // child removal: another process may have swapped the lexical
+            // snapshot parent for a symlink/junction after the initial check.
+            const [realRoot, currentParent] = await Promise.all([
+              fs.promises.realpath(this.rootDir()),
+              fs.promises.realpath(parent),
+            ]);
+            if (currentParent !== verifiedParent || !isPathInsideDir(realRoot, currentParent)) {
+              return;
+            }
+            await fs.promises.rm(path.join(currentParent, entry.name), {
+              recursive: true,
+              force: true,
+            });
+          } catch {
+            // Best-effort cleanup; a later receipt reconciliation can retry.
+          }
+        }),
+    ); */
   }
 }
 

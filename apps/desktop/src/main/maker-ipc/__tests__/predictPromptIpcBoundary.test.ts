@@ -245,6 +245,7 @@ describe('maker:predict-prompt — payload 运行期校验', () => {
   });
 
   it('有效 payload 截断后传递', async () => {
+    h.sessionRow = { remoteHostId: null, agentKind: 'pi' };
     await invokePredict({
       sessionId: 'session-1',
       agentKind: 'pi',

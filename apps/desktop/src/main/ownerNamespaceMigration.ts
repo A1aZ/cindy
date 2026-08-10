@@ -219,11 +219,18 @@ async function readLegacyGhostRecoveryMarker(
   try {
     bytes = await readBoundedFileNoFollow(markerPath, 64 * 1024, {
       containWithin: ownerRealPath,
+      nonBlocking: true,
     });
   } catch (error) {
-    return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return { kind: 'missing' };
+    // ELOOP: O_NOFOLLOW on a symlink — deterministic, never self-healing.
+    if (code === 'ELOOP') return { kind: 'invalid' };
+    return { kind: 'deferred' };
   }
-  if (bytes === null) return { kind: 'deferred' };
+  // 非普通文件 / 超过 64 KiB / containment 失败都是确定性缺陷,不会自行恢复;
+  // 按 invalid 而非 deferred 处理,避免"永久重试但不收敛"的活跃性死锁。
+  if (bytes === null) return { kind: 'invalid' };
   const text = bytes.toString('utf8');
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;
@@ -1707,13 +1714,14 @@ function readLegacyGhostRecoveryMarkerSync(
       containWithin: ownerRoot,
     });
   } catch (error) {
-    return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
-  }
-  if (bytes === null) {
-    // 标记存在但不是普通文件或超过大小上限:按无法判读的标记处理,
-    // 恢复路径保持 fail-closed。
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return { kind: 'missing' };
+    // same as sync: ELOOP = symlink → deterministic, never self-healing.
+    if (code === 'ELOOP') return { kind: 'invalid' };
     return { kind: 'deferred' };
   }
+  // 非普通文件 / 超过 64 KiB / containment 失败:确定性缺陷,invalid 而非 deferred。
+  if (bytes === null) return { kind: 'invalid' };
   const text = bytes.toString('utf8');
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;

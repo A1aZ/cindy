@@ -205,6 +205,16 @@ function isPhysicalArm64Mac() {
   }
 }
 
+/**
+ * 宿主能否原生执行该 arch 的 packaged app。双架构连打时其中一趟必是跨 arch:
+ * arm64 机打 x64(Rosetta 起 x64 Electron 会挂/超时,x64 agent 二进制甚至因缺
+ * AVX 死循环),Intel 机打 arm64(根本起不来)。这类 app 不能拿来跑需要"启动
+ * 打包产物"的检查(smoke / iOS Simulator release gate)。
+ */
+function hostCanExecArch(arch) {
+  return arch === 'arm64' ? isPhysicalArm64Mac() : !isPhysicalArm64Mac();
+}
+
 /** 跳过 smoke 启动前,用 lipo 确认 packaged 主二进制确实是目标架构。 */
 function verifyMacBinaryArch(appName, arch) {
   const exePath = path.join(
@@ -410,12 +420,24 @@ async function finishDarwin({
     console.log('==> Notarizing...');
     notarizeMacApp(appPath, identity);
     signingMode = 'developer-id+notarized';
-    runIOSSimulatorReleaseGate(
-      appPath,
-      arch,
-      iosSimulatorHelperSigned ? 'verified' : 'untrusted',
-      requireNativeReleaseGate,
-    );
+    if (hostCanExecArch(arch)) {
+      runIOSSimulatorReleaseGate(
+        appPath,
+        arch,
+        iosSimulatorHelperSigned ? 'verified' : 'untrusted',
+        requireNativeReleaseGate,
+      );
+    } else {
+      // 跨 arch 连打:该产物在本机跑不起来(如 arm64 机上的 x64 app),门禁无法
+      // exec 它。x64 从不含 native helper、运行期必然回退 WDA/MJPEG,跳过验证不
+      // 降低真实安全。requireNativeReleaseGate 已在上方要求 helper 已签(x64 到不了
+      // 这里),故此处跳过的只会是跨 arch 的 static gate。
+      console.log(
+        `==> Skipping iOS Simulator release gate: ${arch} app is not runnable on this ${
+          isPhysicalArm64Mac() ? 'arm64' : 'Intel'
+        } host`,
+      );
+    }
 
     const dmgPath = path.join(artifactDir, `${baseName}-${arch}.dmg`);
     console.log('==> Creating DMG...');
@@ -440,12 +462,14 @@ async function finishDarwin({
         'CINDY_IOS_SIMULATOR_RELEASE_NATIVE_SMOKE=1 requires a Developer ID signed and notarized package',
       );
     }
-    if (arch === 'arm64' && !isPhysicalArm64Mac()) {
-      console.log(
-        '==> Skipping iOS Simulator release gate: arm64 app is not runnable on this Intel host',
-      );
-    } else {
+    if (hostCanExecArch(arch)) {
       runIOSSimulatorReleaseGate(appPath, arch, 'untrusted');
+    } else {
+      console.log(
+        `==> Skipping iOS Simulator release gate: ${arch} app is not runnable on this ${
+          isPhysicalArm64Mac() ? 'arm64' : 'Intel'
+        } host`,
+      );
     }
     const appZipPath = path.join(artifactDir, `${baseName}-${arch}.zip`);
     console.log('==> Creating app ZIP (ad-hoc signed)...');

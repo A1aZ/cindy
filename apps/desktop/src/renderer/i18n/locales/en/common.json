@@ -5970,6 +5970,7 @@
     "verificationFailed": "Cindy couldn’t confirm whether the ChatGPT sign-in has recovered. Check again."
   },
   "chat": {
+    "sessionLoading": "Loading task",
     "askUserQuestion": {
       "skippedAnswer": "Skipped"
     },

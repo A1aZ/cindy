@@ -86,6 +86,7 @@ function useGitReviewLoad<T>(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
+  const requestRef = useRef(0);
   // 渲染期 keyed reset(React "derived state during render"),不等 useEffect——effect
   // 跑在 paint 之后,切换的第一帧会把上一个 key 的旧审查结果画给新会话(review P1):
   //  - 新 key 有缓存 → 当帧采纳缓存;
@@ -102,6 +103,12 @@ function useGitReviewLoad<T>(
     setPaintedScopeKey(scopeKey);
     setPaintedCacheKey(cacheKey);
     const cached = cacheKey ? reviewLoadCache.get(cacheKey) as T | undefined : undefined;
+    if (scopeChanged) {
+      // 立即让旧 scope 的在途请求失效；不能等新 scope 的 load effect，旧请求可能
+      // 在 render 与 effect 之间完成并把 A 会话数据写回 B 会话。
+      requestRef.current += 1;
+      setLoading(false);
+    }
     if (cached !== undefined) {
       setDataState(cached);
     } else if (scopeChanged && (scopeKey !== null || !preserveWhenDisabled)) {
@@ -110,7 +117,6 @@ function useGitReviewLoad<T>(
       setErrorCode(null);
     }
   }
-  const requestRef = useRef(0);
   const setData = useCallback((next: T) => {
     setDataState(next);
     if (cacheKey) reviewLoadCache.set(cacheKey, next);
@@ -182,7 +188,9 @@ export function useReviewGitState(
 export function useReviewDirtySummary(sessionId: string | null, deviceId: string | null = null): LoadState<ReviewDirtySummary> {
   const fetchReviewSummary = useCallback((currentSessionId: string) =>
     gitReviewApiFor(deviceId).summary({ sessionId: currentSessionId }), [deviceId]);
-  return useGitReviewLoad(sessionId, fetchReviewSummary, 'git review summary failed');
+  return useGitReviewLoad(sessionId, fetchReviewSummary, 'git review summary failed', {
+    scopeKey: sessionId ? `${deviceId ?? 'local'}:${sessionId}` : null,
+  });
 }
 
 export function useReviewCommits(
@@ -192,7 +200,9 @@ export function useReviewCommits(
 ): LoadState<ReviewCommitListData> {
   const fetchReviewCommits = useCallback((currentSessionId: string) =>
     gitReviewApiFor(deviceId).commits({ sessionId: currentSessionId, baseRef }), [baseRef, deviceId]);
-  return useGitReviewLoad(sessionId, fetchReviewCommits, 'git review commits failed');
+  return useGitReviewLoad(sessionId, fetchReviewCommits, 'git review commits failed', {
+    scopeKey: sessionId ? `${deviceId ?? 'local'}:${sessionId}` : null,
+  });
 }
 
 export function useReviewCommitDiff(

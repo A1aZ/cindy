@@ -1327,7 +1327,12 @@ export default function NewRemoteSessionScreen() {
     ) return false;
     // ineligible 目标不创建 worktree,无需等偏好同步/就绪——提前返回,
     // 避免偏好 GET 在途时被下方偏好守卫拦截;与 enabled 无关(2026-08-07 裁决)。
-    if (intent.eligibility.status === 'ineligible') return true;
+    // 但快照不能替代实时状态:await 期间同目标可能被重探回 probing/eligible/
+    // detect-failed,旧 ineligible 快照必须复核 live ref 仍为 ineligible 才放行,
+    // 否则回到 fail closed(探测未定不等于确认不合格)。
+    if (intent.eligibility.status === 'ineligible') {
+      return worktreeEligibilityRef.current.status === 'ineligible';
+    }
     if (
       worktreePreferenceSyncKeyRef.current !== intent.preferenceSyncKey
       || worktreePreferenceReadyKeyRef.current !== intent.preferenceSyncKey

@@ -172,6 +172,7 @@ const POWERSHELL_WRITE_COMMANDS = new Set([
 const OUTPUT_OPTION_PREFIX_RE = /(?:^|\s)(?:-o|--output(?:-file)?|--outfile)(?:\s+|=)['"]?$/i;
 const REDIRECT_PREFIX_RE = /(?:^|[^>])>{1,2}\s*['"]?$/;
 const SAVE_COMMAND_PREFIX_RE = /(?:^|[;&|]\s*|\s)save\s+['"]?$/i;
+const TEE_COMMAND_PREFIX_RE = /(?:^|[|;&]\s*)tee(?:\.exe)?\b[^|;&\r\n]*['"]?$/i;
 
 function isPowerShellOutputPosition(before: string): boolean {
   let lastCmdlet: RegExpMatchArray | null = null;
@@ -196,7 +197,8 @@ function isExplicitOutputPath(
     isPowerShellOutputPosition(before) ||
     OUTPUT_OPTION_PREFIX_RE.test(before) ||
     REDIRECT_PREFIX_RE.test(before) ||
-    SAVE_COMMAND_PREFIX_RE.test(before)
+    SAVE_COMMAND_PREFIX_RE.test(before) ||
+    TEE_COMMAND_PREFIX_RE.test(before)
   ) {
     return true;
   }
@@ -232,7 +234,12 @@ function isExplicitOutputPath(
     .sort((a, b) => a.start - b.start || a.end - b.end)
     .at(-1);
   if (/(?:^|\|\s*)Copy-Item\b/i.test(segment.trim())) {
-    return /-(?:Destination|LiteralDestination|Target)\s+['"]?$/i.test(before);
+    const beforeInSegment = command.slice(segmentStart, token.start);
+    const hasExplicitDestination = /-(?:Destination|LiteralDestination|Target)\s+/i.test(segment);
+    if (hasExplicitDestination) {
+      return /-(?:Destination|LiteralDestination|Target)\s+['"]?$/i.test(beforeInSegment);
+    }
+    return lastPath?.start === token.start && lastPath.end === token.end;
   }
   return (
     lastPath?.start === token.start &&

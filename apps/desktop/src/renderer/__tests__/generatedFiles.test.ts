@@ -222,6 +222,12 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(extractCommandOutputPathCandidates("plt.savefig(fname='out/chart.pdf', bbox_inches='tight')")).toEqual([
       'out/chart.pdf',
     ]);
+    expect(
+      extractCommandOutputPathCandidates("printf 'report' | tee 'out/report.md'"),
+    ).toEqual(['out/report.md']);
+    expect(extractCommandOutputPathCandidates('tee /work/out/report.txt')).toEqual([
+      '/work/out/report.txt',
+    ]);
     expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/source.txt']);
     expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\source.txt']);
     expect(
@@ -236,6 +242,12 @@ describe('extractCommandOutputPathCandidates', () => {
     expect(
       extractCommandOutputPathCandidates('Copy-Item -Destination output/ -Path inputs/source.txt'),
     ).toEqual(['output/source.txt']);
+    expect(
+      extractCommandOutputPathCandidates("Copy-Item 'inputs/source.txt' 'artifacts/report.txt'"),
+    ).toEqual(['artifacts/report.txt']);
+    expect(extractCommandOutputPathCandidates('Copy-Item inputs/source.txt output/')).toEqual([
+      'output/source.txt',
+    ]);
   });
 
   it('skips temp dirs, extension-less tokens, plain filenames and URLs', () => {

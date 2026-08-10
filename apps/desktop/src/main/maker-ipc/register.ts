@@ -179,6 +179,14 @@ import {
 import { invalidateWorkersByLeadSingleFlight } from '../localDb/ipc/orcaWorkerListSingleFlight.js';
 import { messageToCamel } from '../localDb/mapper.js';
 import { visibleMessageTextForConversationSearch } from '../localDb/conversationSearch.pure.js';
+import { persistSubagentTaskUpdate } from '../localDb/subagentRuns.js';
+import { broadcastSubagentRunsChanged } from '../localDb/ipc/subagentRuns.js';
+import {
+  captureSubagentObservationGeneration,
+  clearSubagentObservationRewindState,
+  enqueueSubagentObservationWrite,
+  noteSubagentObservationTurnStarted,
+} from '../subagentObservationRewindFence.js';
 import {
   applyAgentSwitchToSessionRow,
   applyAgentSwitchResumeFallbackAtomically,
@@ -3477,6 +3485,7 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           pendingFailedTurnAssistantPersistId.delete(session.id);
           // 记录 turn 开始时刻，供 onTurnErrorEvent 判断 error 是否属于 /clear 之前的旧 turn。
           noteTurnStarted(session.id);
+          noteSubagentObservationTurnStarted(session.id);
           // silent-stop 守卫:新 turn 开始 → 清 pendingResume + 记录时刻(陈旧判定)。
           silentStopAutoResumeGuard.noteTurnStarted(session.id);
           interruptedTurnAutoResumeGuard.noteTurnStarted(session.id, {
@@ -3730,6 +3739,43 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           },
           eventAgentMeta,
         );
+      }
+      if (event.type === 'agent_task_update') {
+        // Subagent workspace is an observer only: normalize the existing
+        // harness event into Cindy's durable record on the same FIFO as chat
+        // messages. No launch/control path or provider payload is modified.
+        const source =
+          event.source === 'claude-code' || event.source === 'codex' || event.source === 'pi'
+            ? event.source
+            : undefined;
+        const observedAt = Date.now();
+        const generationStamp = captureSubagentObservationGeneration({
+          sessionId: session.id,
+          data: event.data,
+          source,
+        });
+        if (generationStamp) void enqueueSubagentObservationWrite({
+          sessionId: session.id,
+          stamp: generationStamp,
+          enqueue: () =>
+            enqueueDurableWrite(`subagent_update:${session.id}`, async (ownerScope) => {
+              const persisted = await persistSubagentTaskUpdate(
+                session.id,
+                event.data,
+                source,
+                observedAt,
+              );
+              if (persisted) {
+                broadcastSubagentRunsChanged({ sessionId: session.id, ...persisted }, ownerScope);
+              }
+              return persisted;
+            }),
+        }).catch((error) => {
+          log.warn('Subagent workspace persistence failed', {
+            sessionId: session.id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
       // 先 broadcast 保 UI 实时性,再 flush(flush 只入队、不阻塞)。
       // Keep the raw event for main-side coordination/persistence, but only
@@ -4782,6 +4828,12 @@ export function wireSessionToIpc(session: ReturnType<Maker['getSession']>): void
           // 后台活动检测:会话进程已关闭(closeSession / 删除),清账并广播横幅熄灭。
           clearClaudeSessionBackgroundActivity(session.id);
           clearSessionPersistState(session.id);
+          const subagentRewindStateCleared = clearSubagentObservationRewindState(session.id);
+          if (!subagentRewindStateCleared) {
+            log.warn('session close deferred active Subagent Rewind cleanup', {
+              sessionId: session.id,
+            });
+          }
           // 进程关闭 ≠ 通知作废:临时会话调度(非 heartbeat / 非 persistentSession)在 run
           // 终态后立刻 closeSession,此刻完成卡片刚在灵动岛上弹出来。硬删条目会让它当场
           // 消失,所以这条路径保留仍在展示的卡片,由 dwell 到期或用户 ack 收掉。
@@ -6712,16 +6764,28 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     getLiveSession: (sessionId) => maker.getSession(sessionId),
     hasBackgroundActivity: getClaudeSessionBackgroundActivity,
     closeSession: (sessionId) => maker.closeSession(sessionId),
+    drainPersistQueue,
     commitDeletion: commitMessageDeletion,
     setPendingHandoff: (sessionId, handoff, expectedGeneration) =>
       agentHandoffPending.set(sessionId, handoff, expectedGeneration),
     readPendingHandoffGeneration: (sessionId) => agentHandoffPending.readGeneration(sessionId),
-    onCommitted: ({ sessionId, deletedClientIds, updatedAt, preview }, requestedClientId) => {
+    onCommitted: (
+      { sessionId, deletedClientIds, subagentRunIds, updatedAt, preview },
+      requestedClientId,
+    ) => {
       broadcastMessageDeleted({
         sessionId,
         clientId: requestedClientId,
         clientIds: deletedClientIds,
       });
+      for (const runId of subagentRunIds) {
+        broadcastSubagentRunsChanged({
+          sessionId,
+          runId,
+          created: false,
+          firstForSession: false,
+        });
+      }
       // 不带 _count:可见消息数不是列表的权威口径,拿它 patch 的错值会被 shallow merge 一直
       // 留住;权威口径受删除影响只有 0 或 +1,交给 sessions:list / reseed 收敛就够。
       // 见 commitMessageDeletion 的注释与 issue #1282。
@@ -12878,6 +12942,13 @@ function redactEventForRenderer(event: AgentEvent): AgentEvent {
   const data = event.data as Record<string, unknown>;
   const safeData = { ...data };
   let changed = false;
+  // Main consumes this Cindy-owned durable projection marker before the event
+  // crosses renderer/device-link boundaries. Live task-card payloads therefore
+  // keep their existing wire shape and older mobile clients need no upgrade.
+  if (event.type === 'agent_task_update' && 'subagentObservation' in safeData) {
+    delete safeData.subagentObservation;
+    changed = true;
+  }
   for (const key of ['message', 'sdkError'] as const) {
     if (typeof safeData[key] === 'string') {
       const redacted = redactSensitiveText(safeData[key]);

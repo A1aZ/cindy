@@ -17,6 +17,7 @@ import {
   type LegacyGhostRecoveryStatus,
 } from '../shared/legacyGhostRecovery.js';
 import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
+import { readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
 const LEGACY_GHOST_RECOVERY_MARKER = '.legacy-ghost-recovery-v1.json';
@@ -1677,20 +1678,32 @@ function readLegacyGhostRecoveryMarkerSync(
   userDataDir: string,
   ownerKey: string,
 ): LegacyGhostRecoveryMarkerRead {
-  let text: string;
+  const markerPath = path.join(
+    userDataDir,
+    'owners',
+    ownerKey,
+    LEGACY_GHOST_RECOVERY_MARKER,
+  );
+  let ownerRoot: string;
   try {
-    text = fsSync.readFileSync(
-      path.join(
-        userDataDir,
-        'owners',
-        ownerKey,
-        LEGACY_GHOST_RECOVERY_MARKER,
-      ),
-      'utf-8',
-    );
+    ownerRoot = fsSync.realpathSync(path.join(userDataDir, 'owners', ownerKey));
   } catch (error) {
     return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
   }
+  let bytes: Buffer | null;
+  try {
+    bytes = readBoundedFileNoFollowSync(markerPath, 64 * 1024, {
+      containWithin: ownerRoot,
+    });
+  } catch (error) {
+    return isMissing(error) ? { kind: 'missing' } : { kind: 'deferred' };
+  }
+  if (bytes === null) {
+    // 标记存在但不是普通文件或超过大小上限:按无法判读的标记处理,
+    // 恢复路径保持 fail-closed。
+    return { kind: 'deferred' };
+  }
+  const text = bytes.toString('utf8');
   try {
     const parsed = JSON.parse(text) as Partial<LegacyGhostRecoveryMarker>;
     const failedIds = parsed.failedIds ?? [];

@@ -24,7 +24,14 @@ let trustedBundledIds: Set<string>;
 let recordBuiltinTombstone: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
-  workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-ghost-test-'));
+  // GH Windows runners expose os.tmpdir() as an 8.3 short path while
+  // GhostManager.assertManagedRootPath resolves roots via realpathSync.native
+  // (long-name canonical).  Canonicalize here so test-built paths match what
+  // production passes to fs; otherwise every path-keyed spy predicate silently
+  // mismatches and error injections never fire.
+  workDir = fs.realpathSync.native(
+    await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-ghost-test-')),
+  );
   rootDir = path.join(workDir, 'ghosts');
   onChanged = vi.fn();
   hostLocale = 'zh-CN';
@@ -970,7 +977,9 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     const inspected = await manager.inspectInstalledReapproval('hello');
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     const dir = path.join(rootDir, 'hello');
-    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-outside-'));
+    const outside = fs.realpathSync.native(
+      await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-outside-')),
+    );
     const outsideMarker = path.join(outside, '.disabled');
     await fs.promises.writeFile(outsideMarker, 'sentinel');
     const probe = path.join(workDir, 'reapprove-junction-probe');
@@ -1010,7 +1019,9 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
     const dir = path.join(rootDir, 'hello');
     const displaced = path.join(rootDir, 'hello-displaced');
-    const outside = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-rollback-'));
+    const outside = fs.realpathSync.native(
+      await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-reapprove-rollback-')),
+    );
     let linkCreated = false;
     const realRename = fs.promises.rename;
     const renameSpy = vi.spyOn(fs.promises, 'rename').mockImplementation(async (from, to) => {

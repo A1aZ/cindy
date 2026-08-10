@@ -727,9 +727,9 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
     [hideWhitespace, platform, visibleDiffs],
   );
   /**
-   * device-link 预览请求只需 parsePreviewDiffPayload 读取的字段(source/id/path/oldPath/index);
-   * 全量 FileDiff(hunks/hunksPlain 等)经隧道传输浪费帧预算且从不被被控端读取。
-   * 本地调用仍传完整 diff 保持兼容。
+   * device-link 预览请求只发送被控端实际读取的轻量 diff 字段，裁剪 hunks / hunksPlain
+   * 等大字段以节省帧预算。markdownReader 额外读取 kind/size/status/isTooLarge/isBinary,
+   * imageReader 读取 kind。本地调用仍传完整 diff 保持兼容。
    */
   const trimPreviewDiff = useCallback((diff: FileDiff): FileDiff => ({
     source: diff.source,
@@ -737,6 +737,11 @@ function GitReviewTabBody({ state, ctx, source, setSource, selectedCommitOid, se
     path: diff.path,
     oldPath: diff.oldPath,
     index: diff.index,
+    kind: diff.kind,
+    size: diff.size,
+    status: diff.status,
+    isTooLarge: diff.isTooLarge,
+    isBinary: diff.isBinary,
   } as FileDiff), []);
   const loadImagePreview = useCallback<LoadImagePreview>((diff) => {
     if (!sessionId) return Promise.reject(new Error('sessionId is required'));

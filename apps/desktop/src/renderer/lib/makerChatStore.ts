@@ -7960,7 +7960,7 @@ function getRunningSnapshot(): ReadonlyMap<string, SessionStatusInfo> {
 /** 最近一次 running→stopped 是否来自 side-task(见 lastStopWasSideTask)。
  * useSessionRunningStatus 在 transition entry 已被调度清除后以此兜底,
  * 使 side-task 结束不触发 done/error 终态通知。 */
-function wasLastStopSideTask(sessionId: string): boolean {
+export function wasLastStopSideTask(sessionId: string): boolean {
   return !!sessions.get(sessionId)?.lastStopWasSideTask;
 }
 

@@ -430,10 +430,21 @@ function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
       // 同时拒绝 review session:reviewer 会话的 composer 被禁用(disabled),不可编辑也不可发送,
       // 对其做预测是浪费付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind })
         .from(sessions)
         .where(eq(sessions.id, params.sessionId));
       if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review') {
+        return { prompt: null };
+      }
+      // 防御纵深:校验 renderer 上报的 agentKind 与 DB 记录一致,避免受信 renderer 绕过
+      // UI 守卫或 stale UI 状态将 Claude session 的对话内容发送给 Codex provider(反之亦然)。
+      const dbAgentKind = dbToMakerAgentKind(sessionRow.agentKind);
+      if (dbAgentKind !== params.agentKind) {
+        log.warn('predict-prompt agentKind mismatch — rejecting', {
+          sessionId: params.sessionId,
+          rendererAgentKind: params.agentKind,
+          dbAgentKind,
+        });
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow

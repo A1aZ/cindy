@@ -93,6 +93,7 @@ const commandPlugin: GhostPluginListItem = {
   approvalState: 'approved',
   builtin: false,
   tabPanel: false,
+  hostCapability: null,
 };
 
 const panelPlugin: GhostPluginListItem = {
@@ -107,6 +108,13 @@ const toolPlugin: GhostPluginListItem = {
   id: 'pure-tool',
   name: 'Pure Tool',
   canUse: false,
+};
+
+const simulatorPlugin: GhostPluginListItem = {
+  ...toolPlugin,
+  id: 'ios-simulator',
+  name: 'iOS Simulator',
+  hostCapability: 'ios-simulator',
 };
 
 const marketPlugin: PluginMarketItem = {
@@ -150,6 +158,15 @@ describe('GhostPluginCard', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'settings.ghosts.page.useAria' }));
     expect(onPrimary).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers a conversation entry for a Host capability plugin', () => {
+    const onPrimary = vi.fn();
+    render(<GhostPluginCard item={simulatorPlugin} onPrimary={onPrimary} onManage={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'settings.ghosts.page.chatAria' }));
+    expect(onPrimary).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText('settings.ghosts.page.agentInvoked')).toBeNull();
   });
 
   it('routes the manage icon to detail without firing the primary action', () => {

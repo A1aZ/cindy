@@ -2438,11 +2438,12 @@ describe('GhostManager · install', () => {
         'zh-CN': 'locales/zh-CN.json',
       },
     };
-    const locale = (name: string, description: string, toolDescription: string) => JSON.stringify({
-      name,
-      description,
-      tools: { do_thing: { description: toolDescription } },
-    });
+    const locale = (name: string, description: string, toolDescription: string) =>
+      JSON.stringify({
+        name,
+        description,
+        tools: { do_thing: { description: toolDescription } },
+      });
     const cindy = await makeCindy('localized.cindy', manifest, {
       'locales/en.json': locale('English name', 'English description', 'English tool'),
       'locales/zh-CN.json': locale('中文名称', '中文说明', '中文工具'),
@@ -2480,10 +2481,11 @@ describe('GhostManager · install', () => {
       name: 'Base name',
       locales: { en: 'locales/en.json' },
     };
-    const locale = (name: string) => JSON.stringify({
-      name,
-      tools: { do_thing: { description: 'Localized tool' } },
-    });
+    const locale = (name: string) =>
+      JSON.stringify({
+        name,
+        tools: { do_thing: { description: 'Localized tool' } },
+      });
     const cindy = await makeCindy('localized-symlink.cindy', manifest, {
       'locales/en.json': locale('Packaged name'),
     });
@@ -2508,7 +2510,10 @@ describe('GhostManager · install', () => {
     const outsideLocalesDir = path.join(workDir, 'outside-locales');
     await fs.promises.rm(localesDir, { recursive: true, force: true });
     await fs.promises.mkdir(outsideLocalesDir);
-    await fs.promises.writeFile(path.join(outsideLocalesDir, 'en.json'), locale('Outside parent name'));
+    await fs.promises.writeFile(
+      path.join(outsideLocalesDir, 'en.json'),
+      locale('Outside parent name'),
+    );
     await fs.promises.symlink(
       outsideLocalesDir,
       localesDir,
@@ -2634,13 +2639,14 @@ describe('GhostManager · install', () => {
     const installed = await manager.install(cindy);
 
     const metadataPath = path.join(rootDir, 'hello', '.cindy-trust.json');
-    const metadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8')) as Record<string, unknown>;
+    const metadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
 
     delete metadata.approvedAtResourceProvider;
     await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
-    expect(manager.list()[0].manifest.tools).toEqual([
-      { name: 'do_thing', description: '做点事' },
-    ]);
+    expect(manager.list()[0].manifest.tools).toEqual([{ name: 'do_thing', description: '做点事' }]);
 
     metadata.approvedAtResourceProvider = { tool: 'other_tool' };
     await fs.promises.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
@@ -2675,7 +2681,10 @@ describe('GhostManager · install', () => {
   });
 
   it('源文件不存在 → source-not-found', async () => {
-    await expectRejection(await manager.install(path.join(workDir, 'nope.cindy')), 'source-not-found');
+    await expectRejection(
+      await manager.install(path.join(workDir, 'nope.cindy')),
+      'source-not-found',
+    );
   });
 
   it('不是 zip 的文件 → file-invalid', async () => {
@@ -2769,7 +2778,10 @@ describe('GhostManager · install', () => {
   it('重复装入同 id → already-installed,原安装不受影响', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     onChanged.mockClear();
-    await expectRejection(await manager.install(await makeCindy('b.cindy', goodManifest())), 'already-installed');
+    await expectRejection(
+      await manager.install(await makeCindy('b.cindy', goodManifest())),
+      'already-installed',
+    );
     expect(fs.existsSync(path.join(rootDir, 'hello', 'ghost.json'))).toBe(true);
     expect(onChanged).not.toHaveBeenCalled();
   });
@@ -2781,7 +2793,9 @@ describe('GhostManager · install', () => {
       'command-conflict',
     );
     expect(fs.existsSync(path.join(rootDir, 'beta'))).toBe(false); // 半点不落盘
-    const ok = await manager.install(await makeCindy('c.cindy', chipManifestWithCommand('gamma', '画图')));
+    const ok = await manager.install(
+      await makeCindy('c.cindy', chipManifestWithCommand('gamma', '画图')),
+    );
     expect('ghost' in ok).toBe(true);
     expect(manager.list().map((g) => g.manifest.id)).toEqual(['alpha', 'gamma']);
   });
@@ -4162,10 +4176,7 @@ describe('GhostManager · inspect(只验不装)', () => {
     const expectedPackageSha256 = (inspected as { packageSha256: string }).packageSha256;
 
     await makeCindy('swap.cindy', goodManifest(), { 'payload.txt': 'after' });
-    await expectRejection(
-      await manager.install(cindy, { expectedPackageSha256 }),
-      'file-invalid',
-    );
+    await expectRejection(await manager.install(cindy, { expectedPackageSha256 }), 'file-invalid');
     expect(fs.existsSync(rootDir)).toBe(false);
   });
 
@@ -4174,6 +4185,28 @@ describe('GhostManager · inspect(只验不装)', () => {
     await fs.promises.writeFile(bad, 'nope');
     const result = await manager.inspect(bad);
     expect((result as { rejection: { code: string } }).rejection.code).toBe('file-invalid');
+  });
+
+  it('未来 schema 或未知字符串 capability → 插件合法但当前 Host 不支持', async () => {
+    const futureSchema = await makeCindy('future-schema.cindy', {
+      ...goodManifest(),
+      schemaVersion: 3,
+    });
+    await expectRejection(await manager.inspect(futureSchema), 'host-unsupported');
+
+    const futureCapability = await makeCindy('future-capability.cindy', {
+      ...goodManifest(),
+      slots: ['tool', 'future-host-capability'],
+    });
+    await expectRejection(await manager.inspect(futureCapability), 'host-unsupported');
+  });
+
+  it('slot 形状畸形仍按非法文件拒绝，友好提示不放松安全校验', async () => {
+    const malformed = await makeCindy('malformed-slot.cindy', {
+      ...goodManifest(),
+      slots: ['tool', { name: 'future-host-capability' }],
+    });
+    await expectRejection(await manager.inspect(malformed), 'file-invalid');
   });
 });
 
@@ -4191,7 +4224,9 @@ describe('GhostManager · author / icon(身份卡展示字段)', () => {
     expect('manifest' in inspected).toBe(true);
     const ok = inspected as { manifest: { author?: string }; iconDataUrl?: string };
     expect(ok.manifest.author).toBe('Lizi');
-    expect(ok.iconDataUrl).toBe(`data:image/png;base64,${Buffer.from('PNGDATA').toString('base64')}`);
+    expect(ok.iconDataUrl).toBe(
+      `data:image/png;base64,${Buffer.from('PNGDATA').toString('base64')}`,
+    );
 
     const result = await manager.install(cindy);
     expect('ghost' in result).toBe(true);

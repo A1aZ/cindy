@@ -11,6 +11,7 @@ import {
   GHOST_LOCALE_MAX_BYTES,
   GHOST_ICON_MAX_BYTES,
   GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  GHOST_SLOTS,
   GHOST_SKILL_MD_MAX_BYTES,
   ghostLocalePathFor,
   ghostInstallApprovalToken,
@@ -92,11 +93,6 @@ async function readRegularFileStableWithLimit(
     await handle.close().catch(() => undefined);
   }
 }
-/**
- * icon 文件大小上限。icon 以 data URL 形态随 ghosts:list(sendSync)下发,
- * 上限同时保护装载与首帧同步 IPC 的载荷体积。
- */
-const MAX_GHOST_ICON_BYTES = 512 * 1024; // 512 KB
 /** 解压后总大小/条目数上限；Node 包允许携带已打包 CLI，但仍有硬闸。 */
 export const MAX_BASIC_UNCOMPRESSED_BYTES = 32 * 1024 * 1024;
 export const MAX_NODE_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
@@ -191,6 +187,7 @@ export interface GhostManagerOptions {
 export type InstallRejection =
   | { code: 'source-not-found'; reason: string }
   | { code: 'file-invalid'; reason: string }
+  | { code: 'host-unsupported'; reason: string }
   | { code: 'already-installed'; reason: string }
   | { code: 'not-installed'; reason: string }
   | { code: 'command-conflict'; reason: string }
@@ -344,7 +341,7 @@ function readLegacyIconDataUrlForApproval(
       expect: 'file',
       label: 'legacy icon',
     });
-    const bytes = readBoundedFileNoFollowSync(iconPath, MAX_GHOST_ICON_BYTES, {
+    const bytes = readBoundedFileNoFollowSync(iconPath, GHOST_ICON_MAX_BYTES, {
       containWithin: realDir,
     });
     if (bytes === null) return undefined;
@@ -446,6 +443,31 @@ export interface GhostExclusiveMutation {
   ): Promise<boolean>;
   removeInstallApproval(id: string): Promise<boolean>;
   uninstall(id: string, options?: GhostUninstallOptions): Promise<UninstallResult>;
+}
+
+/**
+ * 区分“包本身坏了”和“包使用了更新版 Cindy 才认识的契约”。
+ *
+ * 这里只收窄识别两个可证明是 Host 版本差异的形状：未来 schemaVersion，或
+ * 字符串形态的未知 capability slot。其它畸形输入仍交给完整 manifest 校验，
+ * 不能借友好提示放松安装安全边界。
+ */
+export function ghostManifestHostUnsupportedReason(raw: unknown): string | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  if (
+    typeof record.schemaVersion === 'number' &&
+    Number.isInteger(record.schemaVersion) &&
+    record.schemaVersion > 2
+  ) {
+    return `插件使用了更新的清单格式(schemaVersion ${record.schemaVersion})`;
+  }
+  if (!Array.isArray(record.slots)) return null;
+  const supported = new Set<string>([...GHOST_SLOTS, 'model']);
+  const unknown = [
+    ...new Set(record.slots.filter((slot): slot is string => typeof slot === 'string')),
+  ].filter((slot) => !supported.has(slot));
+  return unknown.length > 0 ? `插件需要当前 Cindy 尚不支持的能力:${unknown.join(' / ')}` : null;
 }
 
 /**
@@ -2242,11 +2264,14 @@ export class GhostManager {
         expect: 'file',
         label: 'ghost icon',
       });
-      const bytes = readBoundedFileNoFollowSync(iconPath, MAX_GHOST_ICON_BYTES, {
+      const bytes = readBoundedFileNoFollowSync(iconPath, GHOST_ICON_MAX_BYTES, {
         containWithin: fs.realpathSync(dir),
       });
       if (bytes === null) {
-        this.options.log?.warn('ghost icon skipped: missing or oversize', { dir, icon: manifest.icon });
+        this.options.log?.warn('ghost icon skipped: missing or oversize', {
+          dir,
+          icon: manifest.icon,
+        });
         return null;
       }
       return buildIconDataUrl(manifest.icon, bytes);
@@ -2413,6 +2438,10 @@ export class GhostManager {
         rejection: { code: 'file-invalid', reason: `${GHOST_MANIFEST_FILE} 不是合法 JSON` },
       };
     }
+    const hostUnsupportedReason = ghostManifestHostUnsupportedReason(manifestRaw);
+    if (hostUnsupportedReason) {
+      return { rejection: { code: 'host-unsupported', reason: hostUnsupportedReason } };
+    }
     const v = validateGhostManifest(manifestRaw);
     if (!v.ok) {
       return { rejection: { code: 'file-invalid', reason: `清单不合格:${v.reason}` } };
@@ -2535,7 +2564,7 @@ export class GhostManager {
       }
       let iconData: Buffer;
       try {
-        iconData = await readZipEntryBufferWithLimit(iconEntry, MAX_GHOST_ICON_BYTES, 'icon');
+        iconData = await readZipEntryBufferWithLimit(iconEntry, GHOST_ICON_MAX_BYTES, 'icon');
       } catch {
         return {
           rejection: {
@@ -3464,9 +3493,13 @@ export class GhostManager {
     }
     await fs.promises.writeFile(
       path.join(stagingDir, TRUST_METADATA_FILE),
-      `${JSON.stringify({
-        ...opts.trust,
-      }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          ...opts.trust,
+        },
+        null,
+        2,
+      )}\n`,
     );
   }
 

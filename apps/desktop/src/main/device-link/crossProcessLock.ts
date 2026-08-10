@@ -132,8 +132,13 @@ export async function withCrossProcessLock<T>(
       ownLock = publishedLock;
       held = true;
       break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') {
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      // EEXIST = 锁被别人持着(正常竞争)。
+      // EBUSY / EPERM / EACCES 在 Windows 上可能是文件刚被删除但 FS 还没完全释放,
+      // 和 EEXIST 一样走重试而不是立刻判 unavailable;有 deadline 兜底不会无限等。
+      if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES') {
+        // 锁**建不出来**(EMFILE / 目录不存在…):无从判断有没有别人在临界区。
         reason = 'unavailable';
         break;
       }

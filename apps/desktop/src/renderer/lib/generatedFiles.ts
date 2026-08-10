@@ -87,7 +87,7 @@ function createdPathsFromToolUse(toolName: string, input: unknown): string[] {
   return [];
 }
 
-/** 带扩展名(1–8 位字母数字,不含纯数字)的路径才算候选;`a.b.c` 取末段。 */
+/** 文件候选需带扩展名;复制命令的目录目标可用末尾分隔符明确表达。 */
 const EXT_RE = /\.[A-Za-z][A-Za-z0-9]{0,7}$/;
 
 /** 临时目录里的产物是脚本自身/中间文件的高发区,一律不算「本轮产出」。 */
@@ -96,7 +96,7 @@ const TEMP_DIR_RE = /(^|[\\/])(tmp|temp)([\\/])|[\\/]AppData[\\/]Local[\\/]Temp[
 function isPathCandidate(raw: string): boolean {
   const s = raw.trim();
   if (s.length < 3 || s.length > 512) return false;
-  if (!EXT_RE.test(s)) return false;
+  if (!EXT_RE.test(s) && !/[\\/]$/.test(s)) return false;
   if (TEMP_DIR_RE.test(s)) return false;
   // 绝对路径,或含分隔符的相对路径(交给 resolveToolFilePath 按 workingDir 解析)。
   // 纯文件名(`输出.xlsx`)不收:随机带点 token 误报率太高。
@@ -110,6 +110,9 @@ interface CommandPathToken {
   start: number;
   end: number;
 }
+
+const RELATIVE_PATH_TOKEN_RE =
+  /(?:^|[\s=(,>])([^\s'"<>|?*]+[\\/])(?=$|[\s'"<>|])/g;
 
 /** 提取路径 token 及其在命令中的位置;写出语义需要靠相邻文本判断。 */
 function extractCommandPathTokens(command: string): CommandPathToken[] {
@@ -144,6 +147,13 @@ function extractCommandPathTokens(command: string): CommandPathToken[] {
   for (const m of command.matchAll(/(?:^|[\s=(,>])(\/[^\s'"<>|?*:]+)/g)) {
     const start = (m.index ?? 0) + m[0].length - m[1].length;
     if (!insideQuotedRange(start)) push(m[1], start, start + m[1].length);
+  }
+  for (const m of command.matchAll(RELATIVE_PATH_TOKEN_RE)) {
+    const raw = m[1];
+    const start = (m.index ?? 0) + m[0].length - raw.length;
+    if (!insideQuotedRange(start) && !/^https?:\/\//i.test(raw)) {
+      push(raw, start, start + raw.length);
+    }
   }
   return out.sort((a, b) => a.start - b.start || a.end - b.end);
 }
@@ -182,6 +192,7 @@ function isExplicitOutputPath(
   const after = command.slice(token.end, token.end + 80);
   if (
     WRITE_CALL_PREFIX_RE.test(before) ||
+    /^\s*['"]?\s*\)\s*\.\s*write_(?:text|bytes)\s*\(/i.test(after) ||
     isPowerShellOutputPosition(before) ||
     OUTPUT_OPTION_PREFIX_RE.test(before) ||
     REDIRECT_PREFIX_RE.test(before) ||
@@ -218,8 +229,13 @@ function isExplicitOutputPath(
   const segment = command.slice(segmentStart, segmentEnd);
   const lastPath = tokens
     .filter((candidate) => candidate.start >= segmentStart && candidate.end <= segmentEnd)
+    .sort((a, b) => a.start - b.start || a.end - b.end)
     .at(-1);
-  return lastPath === token && /(?:^|[|]\s*)\s*(?:cp|copy|Copy-Item)\b/i.test(segment);
+  return (
+    lastPath?.start === token.start &&
+    lastPath.end === token.end &&
+    /^(?:cp|copy|Copy-Item)\s+/i.test(segment.trim())
+  );
 }
 
 /**

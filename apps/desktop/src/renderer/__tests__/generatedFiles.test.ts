@@ -206,6 +206,17 @@ describe('extractCommandOutputPathCandidates', () => {
         'Get-Content "inputs/source.md" && copy "inputs/source.md" \'artifacts/report.md\'',
       ),
     ).toEqual(['artifacts/report.md']);
+    expect(
+      extractCommandOutputPathCandidates("python -c \"from pathlib import Path; Path('out/report.md').write_text('ok')\""),
+    ).toEqual(['out/report.md']);
+    expect(
+      extractCommandOutputPathCandidates("Path('out/data.bin').write_bytes(payload)"),
+    ).toEqual(['out/data.bin']);
+    expect(extractCommandOutputPathCandidates('cp source.txt output/')).toEqual(['output/']);
+    expect(extractCommandOutputPathCandidates('copy source.txt output\\')).toEqual(['output\\']);
+    expect(
+      extractCommandOutputPathCandidates('cp inputs/a.txt inputs/b.txt output/'),
+    ).toEqual(['output/']);
   });
 
   it('skips temp dirs, extension-less tokens, plain filenames and URLs', () => {

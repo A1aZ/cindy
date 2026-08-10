@@ -427,11 +427,13 @@ function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
       const params = parsePredictPromptRequest(request);
       // 防御纵深:即使 renderer 有 UI 守卫,main 侧也需从 DB 确认 session 真实存在且非远程
       // (SSH / device-link),避免受信 renderer 绕过 UI 守卫携带远程会话内容触发付费调用。
+      // 同时拒绝 review session:reviewer 会话的 composer 被禁用(disabled),不可编辑也不可发送,
+      // 对其做预测是浪费付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source })
         .from(sessions)
         .where(eq(sessions.id, params.sessionId));
-      if (!sessionRow || sessionRow.remoteHostId) {
+      if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review') {
         return { prompt: null };
       }
       // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow

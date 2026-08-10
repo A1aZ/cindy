@@ -4394,7 +4394,8 @@ export function ChatInput({
         const ghost = installedGhostsRef.current.find(
           (candidate) => candidate.manifest.id === selectedItem.pluginId,
         );
-        if (!ghost?.enabled || !ghost.manifest.command) return;
+        if (!ghost?.enabled) return;
+
         editor
           .chain()
           .focus()
@@ -4403,7 +4404,16 @@ export function ChatInput({
             return true;
           })
           .run();
-        placeGhostAtComposerStart(editor, ghost, installedGhostsRef.current);
+
+        if (ghost.manifest.command) {
+          placeGhostAtComposerStart(editor, ghost, installedGhostsRef.current);
+        } else {
+          const hostCap = hostCapabilityForGhost(ghost);
+          if (hostCap) {
+            placeHostCapabilityAtComposerStart(editor, ghost, installedGhostsRef.current);
+          }
+        }
+
         closeAtPanel();
         return;
       }

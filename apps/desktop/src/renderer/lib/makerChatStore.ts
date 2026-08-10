@@ -2501,6 +2501,13 @@ export interface SessionChatState {
    */
   pendingTaskWake: boolean;
   /**
+   * 用户主动 Stop 标记:会话级(非组件级),确保同一 session 在多窗口打开时
+   * 任一窗口的 Stop 都能阻止其他窗口触发预测等后续行为。
+   * 置位:stopSession(用户主动 Stop 时)。
+   * 清除:新 turn 启动(isRunning false→true)时复位。
+   */
+  turnStoppedByUser: boolean;
+  /**
    * agent-meta: 上一条 SDK assistant message 的 cc 元信息——mid-turn 抢救
    * assistant 累积流（tool_use / ask_user / plan_review 切流时把累积文本落
    * assistant）能拿到对应的 SDK 元信息。
@@ -2548,6 +2555,7 @@ export type SessionChatLightState = Pick<
   | 'planModeEnabled'
   | 'agentSwitchIntent'
   | 'pendingTaskWake'
+  | 'turnStoppedByUser'
 >;
 
 function createInitialState(): SessionChatState {
@@ -2613,6 +2621,7 @@ function createInitialState(): SessionChatState {
     planModeRev: 0,
     lastStopWasSideTask: false,
     pendingTaskWake: false,
+    turnStoppedByUser: false,
     lastAgentMeta: null,
   };
 }
@@ -2680,6 +2689,7 @@ export const EMPTY_SESSION_STATE: SessionChatState = Object.freeze({
   planModeRev: 0,
   lastStopWasSideTask: false,
   pendingTaskWake: false,
+  turnStoppedByUser: false,
   lastAgentMeta: null,
 }) as SessionChatState;
 
@@ -5509,6 +5519,7 @@ function forceFinalizeOnSessionClosed(state: SessionChatState): SessionChatState
     // 清零,否则 running 快照(折算了后台任务)会让 spinner 永久转下去。
     taskUpdates: stoppedTasks,
     pendingTaskWake: false,
+    turnStoppedByUser: false,
     agentStatus: {
       ...finalized.agentStatus,
       isRunning: false,
@@ -5597,6 +5608,7 @@ function handleStatusUpdate(
     // isRunning:true)是正常路径;wake turn 秒挂(只来 error + Done)也在这里
     // 收口,防止桥接标记漏网永久撑住 running 快照。skipTurnReset 已提前 return。
     pendingTaskWake: false,
+    turnStoppedByUser: false,
     agentStatus: {
       status: update.status,
       tokenUsage: tu,
@@ -7695,7 +7707,8 @@ function lightStateEquals(a: SessionChatLightState, b: SessionChatLightState): b
     a.queueExpanded === b.queueExpanded &&
     a.fastMode === b.fastMode &&
     a.planModeEnabled === b.planModeEnabled &&
-    a.pendingTaskWake === b.pendingTaskWake
+    a.pendingTaskWake === b.pendingTaskWake &&
+    a.turnStoppedByUser === b.turnStoppedByUser
   );
 }
 
@@ -9523,6 +9536,7 @@ function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean 
       messages: optimisticMessages,
       taskUpdates: new Map(),
       pendingTaskWake: false,
+      turnStoppedByUser: false,
       historyLoaded: false,
       hasMoreMessages: false,
       oldestMessageId: null,
@@ -12084,6 +12098,7 @@ function stopSession(
       // 后续 task_progress 会把条目翻回 running,状态自愈。
       taskUpdates: stopRunningAgentTasks(s.taskUpdates, 'wake'),
       pendingTaskWake: false,
+      turnStoppedByUser: true,
       agentStatus: {
         status: 'Idle',
         // Preserve all token/cost values — ring keeps showing last known context capacity
@@ -12390,6 +12405,7 @@ async function clearSessionAfterGuardImpl(sessionId: string, clearedAt: string):
       ),
       taskUpdates: new Map(),
       pendingTaskWake: false,
+      turnStoppedByUser: false,
       streamingClientId: null,
       streamingText: '',
       isStreaming: false,

@@ -1184,10 +1184,12 @@ export function ChatInput({
     if (wasRunning && !showStopButton && recommendationEnabled && sessionId && !deviceLinkDeviceId && !remoteHostId) {
       // 后台 wake 型任务(local_agent / local_workflow)仍在运行时,主 turn 报告
       // 用户点击 Stop 或 turn 以错误/中止结束时,不应触发预测。
-      if (wasTurnStoppedByUserRef.current) return;
-	      // turn 以终端错误结束时，不应触发预测：错误上下文可能包含不完整/损坏的对话，
-	      // 避免在错误状态下发起付费 provider 调用。
-	      if (makerChatStore.getSnapshot(sessionId)?.error) return;
+      // turnStoppedByUser 是 session 级 store 字段(stopSession 置位、新 turn 复位),
+      // 确保同一 session 在多窗口打开时,任一窗口的 Stop 都能阻止其他窗口触发预测。
+      if (makerChatStore.getSnapshot(sessionId)?.turnStoppedByUser) return;
+      // turn 以终端错误结束时，不应触发预测：错误上下文可能包含不完整/损坏的对话，
+      // 避免在错误状态下发起付费 provider 调用。
+      if (makerChatStore.getSnapshot(sessionId)?.error) return;
       // stopped 但会话仍在工作 —— 跳过预测,避免用不完整上下文发起付费调用。
       // hasBackgroundAgentWork 已在 _isSessionBusy 里统一折算,这里单独补门禁。
       if (makerChatStore.hasBackgroundAgentWork(sessionId)) return;

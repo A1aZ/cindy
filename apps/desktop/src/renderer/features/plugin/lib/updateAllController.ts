@@ -539,6 +539,7 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
         expectedInstalledApproval: reviewedApproval,
         expectedManifest: row.expectedManifest,
         allowPermissionExpansion: true,
+        allowSourceReplacement: false,
         // 审阅基线随批准回传:Main 在安装锁内用当时的已装 manifest 复核,
         // renderer 这边的检查挡不住 IPC 往返窗口内的替换。
         ...(row.reviewedBaseline !== undefined
@@ -563,6 +564,7 @@ async function runApprovalBody(pluginId: string, generation: number): Promise<vo
         expectedReleaseId: detail.releaseId,
         expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval),
         expectedManifest: detail.manifest,
+        allowSourceReplacement: false,
       });
       if (!ok) return;
       patchRow(generation, pluginId, { status: 'done', fromVersion: installed.version });

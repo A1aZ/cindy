@@ -260,6 +260,7 @@ describe('updateAllController', () => {
         expectedInstalledApproval: approvalState,
         expectedManifest: targetManifest,
         allowPermissionExpansion: true,
+        allowSourceReplacement: false,
         reviewedBaseline: expect.any(String),
       });
     },
@@ -327,6 +328,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: 'invalid',
       expectedManifest: targetManifest,
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
   });
@@ -406,6 +408,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: nextManifest,
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
@@ -434,6 +437,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: `approved:${revision}`,
       expectedManifest: targetManifest,
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
   });
@@ -485,6 +489,7 @@ describe('updateAllController', () => {
       expectedReleaseId: 'release-2',
       expectedInstalledApproval: 'approved:33333333-3333-4333-8333-333333333333',
       expectedManifest: expect.any(Object),
+      allowSourceReplacement: false,
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
@@ -529,6 +534,7 @@ describe('updateAllController', () => {
       expectedReleaseId: 'release-2',
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: expect.any(Object),
+      allowSourceReplacement: false,
     });
   });
 
@@ -580,6 +586,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: expect.any(Object),
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
   });
@@ -769,6 +776,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: expect.any(Object),
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
@@ -990,6 +998,7 @@ describe('updateAllController', () => {
       expectedReleaseId: 'release-2',
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: expect.anything(),
+      allowSourceReplacement: false,
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');
   });
@@ -1121,6 +1130,7 @@ describe('updateAllController', () => {
       expectedInstalledApproval: DEFAULT_APPROVAL_TOKEN,
       expectedManifest: swappedManifest,
       allowPermissionExpansion: true,
+      allowSourceReplacement: false,
       reviewedBaseline: expect.any(String),
     });
     expect(getUpdateAllBatchState().rows?.[0]?.status).toBe('done');

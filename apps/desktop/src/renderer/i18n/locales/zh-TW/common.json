@@ -634,8 +634,8 @@
         "zh-CN": "簡體中文",
         "en": "English",
         "ja": "日本語",
-    "ko": "한국어",
-    "zh-TW": "繁體中文"
+        "ko": "한국어",
+        "zh-TW": "繁體中文"
       }
     },
     "userProfile": {
@@ -1476,7 +1476,11 @@
           "confirmTitle": "確認覆蓋",
           "confirmSubtitle": "選擇要從 {{source}} 複製的欄位。",
           "source": "來源",
-          "columns": { "field": "欄位", "source": "來源值", "target": "目前值" },
+          "columns": {
+            "field": "欄位",
+            "source": "來源值",
+            "target": "目前值"
+          },
           "fields": {
             "endpointBundle": "端點與 API 協議",
             "baseUrl": "基礎 URL",
@@ -1503,7 +1507,11 @@
           "targetReady_other": "可填入 {{count}} 個欄位",
           "targetIncompatible_one": "{{count}} 個欄位不相容",
           "targetIncompatible_other": "{{count}} 個欄位不相容",
-          "status": { "needsConfirm": "需要確認", "ready": "可以填入", "incompatible": "不相容" },
+          "status": {
+            "needsConfirm": "需要確認",
+            "ready": "可以填入",
+            "incompatible": "不相容"
+          },
           "secretIndependent": "複製到 {{target}} 的獨立本機金鑰",
           "overwriteCurrent": "取代目前值",
           "fillEmpty": "填入目前空白欄位",
@@ -2533,7 +2541,7 @@
       },
       "android": {
         "title": "Android 自動化",
-          "description": "讓 Agent 透過 ADB 檢查並操作已連線的 Android 裝置",
+        "description": "讓 Agent 透過 ADB 檢查並操作已連線的 Android 裝置",
         "toggleAria": "切換 Android 自動化",
         "refresh": "重新檢查",
         "toggleHint": "這個全域性開關只對之後新建的 Agent 會話生效；已在執行的 Agent 會話不受影響。",
@@ -3432,7 +3440,11 @@
             "copied": "指南已複製到剪貼簿。",
             "copyFailed": "複製失敗，請重試。"
           }
-        }
+        },
+        "customSourcesUnavailable": "以下自訂市場暫時無法存取：{{names}}，其他市場不受影響。",
+        "replace": "取代",
+        "replaceAria": "以此市場版本取代 {{name}}",
+        "replaceDescription": "已安裝相同 ID 的插件，繼續將以市場版本取代，原有資料會保留。"
       },
       "install": "安裝插件…",
       "empty": "還沒有安裝任何插件",
@@ -4830,7 +4842,15 @@
         "unmerged": "存在未合併檔案",
         "in-progress": "git 操作進行中",
         "agent-running": "Agent 正在執行",
-        "disabled": "審查不可用"
+        "disabled": "審查不可用",
+        "remote-device": "遠端設備任務僅支援檢視",
+        "remote-ssh": "SSH 工作區審查僅支援檢視"
+      },
+      "remote": {
+        "deviceTooOldTitle": "對方設備版本過舊",
+        "deviceTooOldDesc": "對方設備的 {{appName}} 版本過舊，暫不支援遠端審查，請升級被控設備後重試。",
+        "oversizeTitle": "改動資料過大",
+        "oversizeDesc": "該視圖的改動超過裝置互聯單次傳輸上限，請在被控設備上檢視。"
       },
       "unmodifiedLines_one": "{{count}} 行未改動",
       "unmodifiedLines_other": "{{count}} 行未改動",
@@ -5546,7 +5566,8 @@
       },
       "agentSwitch": {
         "hint": "選擇切換到 {{agent}} 後使用的模型"
-      }
+      },
+      "modelListAria": "模型清單"
     },
     "permissionSelector": {
       "triggerAria": "選擇權限模式：{{label}}",
@@ -5622,7 +5643,8 @@
       "notGitRepo": "當前目錄不是 git 倉庫",
       "alreadyInWorktree": "已在 worktree 中，禁止巢狀",
       "toggleAria": "啟用 worktree 隔離",
-      "chipTooltip": "在獨立 worktree 中開始這次對話，不影響當前分支"
+      "chipTooltip": "在獨立 worktree 中開始這次對話，不影響當前分支",
+      "detectFailed": "環境偵測失敗，暫時無法使用 Worktree"
     },
     "branchChip": {
       "label": "分支",
@@ -6479,7 +6501,8 @@
           "sourceConversationChanged": "來源任務已變更，請針對當前任務重新執行 /review。",
           "sourceFilesChanged": "來源任務的檔案已變更，請針對當前成果重新執行 /review。",
           "artifactChanged": "審查成果已變更，請針對當前成果重新執行 /review。",
-          "providerFailed": "審查任務執行失敗"
+          "providerFailed": "審查任務執行失敗",
+          "artifactUnavailable": "Cindy 無法安全讀取審查成品，請檢查工作區或附件後重新執行 /review"
         }
       }
     },
@@ -6732,7 +6755,8 @@
     },
     "ghostPreview": {
       "opened": "打開了一個預覽頁面"
-    }
+    },
+    "sessionLoading": "載入任務中"
   },
   "ccAgent": {
     "agentStatus": {

@@ -1476,7 +1476,11 @@
           "confirmTitle": "Confirm overwrites",
           "confirmSubtitle": "Choose the fields to copy from {{source}}.",
           "source": "Source",
-          "columns": { "field": "Field", "source": "Source value", "target": "Current value" },
+          "columns": {
+            "field": "Field",
+            "source": "Source value",
+            "target": "Current value"
+          },
           "fields": {
             "endpointBundle": "Endpoint and API protocol",
             "baseUrl": "Base URL",
@@ -3438,7 +3442,10 @@
             "copied": "Guide copied to clipboard.",
             "copyFailed": "Copy failed. Please try again."
           }
-        }
+        },
+        "conflict": "Unavailable",
+        "conflictAria": "{{name}} has a plugin identifier conflict",
+        "conflictDescription": "This plugin identifier is already in use and cannot be installed right now"
       },
       "install": "Install Plugin…",
       "empty": "No plugins installed yet",
@@ -3773,7 +3780,14 @@
         "statusFailed": "Update failed",
         "background": "Continue in background",
         "doneAction": "Done",
-        "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed"
+        "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed",
+        "approve": "Approve and update",
+        "collapseDiff": "Collapse",
+        "permissionChanged": "Permissions changed",
+        "rereview": "Re-review",
+        "reviewDiff": "Review and confirm",
+        "reviewOutdated": "Permission diff is outdated",
+        "skip": "Skip this item"
       }
     },
     "mcp": {
@@ -4831,7 +4845,8 @@
         "in-progress": "git operation in progress",
         "agent-running": "agent is running",
         "disabled": "review unavailable",
-        "remote-device": "remote device sessions are view-only"
+        "remote-device": "remote device sessions are view-only",
+        "remote-ssh": "SSH workspace review is view-only"
       },
       "remote": {
         "deviceTooOldTitle": "Device version too old",

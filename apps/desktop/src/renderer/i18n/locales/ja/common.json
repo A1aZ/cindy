@@ -1476,7 +1476,11 @@
           "confirmTitle": "上書きを確認",
           "confirmSubtitle": "{{source}} からコピーする項目を選択してください。",
           "source": "コピー元",
-          "columns": { "field": "項目", "source": "コピー元", "target": "現在値" },
+          "columns": {
+            "field": "項目",
+            "source": "コピー元",
+            "target": "現在値"
+          },
           "fields": {
             "endpointBundle": "エンドポイントと API プロトコル",
             "baseUrl": "ベース URL",
@@ -3437,7 +3441,10 @@
             "copied": "ガイドをクリップボードにコピーしました。",
             "copyFailed": "コピーに失敗しました。もう一度お試しください。"
           }
-        }
+        },
+        "conflict": "利用不可",
+        "conflictAria": "{{name}} にプラグイン識別子の競合があります",
+        "conflictDescription": "このプラグイン識別子は既に使用されており、現在インストールできません"
       },
       "install": "プラグインをインストール…",
       "empty": "まだプラグインがインストールされていません",
@@ -3772,7 +3779,14 @@
         "statusFailed": "更新に失敗",
         "background": "バックグラウンドで続行",
         "doneAction": "完了",
-        "doneToast": "一括更新が完了:{{done}} 件更新、{{rest}} 件未完了"
+        "doneToast": "一括更新が完了:{{done}} 件更新、{{rest}} 件未完了",
+        "approve": "承認して更新",
+        "collapseDiff": "折りたたむ",
+        "permissionChanged": "権限が変更されました",
+        "rereview": "再レビュー",
+        "reviewDiff": "確認して承認",
+        "reviewOutdated": "権限の差分が期限切れです",
+        "skip": "この項目をスキップ"
       }
     },
     "mcp": {
@@ -4829,7 +4843,8 @@
         "in-progress": "git 操作が進行中です",
         "agent-running": "エージェントが実行中です",
         "disabled": "レビューを利用できません",
-        "remote-device": "リモートデバイスのセッションは閲覧のみです"
+        "remote-device": "リモートデバイスのセッションは閲覧のみです",
+        "remote-ssh": "SSH ワークスペースのレビューは表示専用です"
       },
       "remote": {
         "deviceTooOldTitle": "相手デバイスのバージョンが古すぎます",

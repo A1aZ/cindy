@@ -1476,7 +1476,11 @@
           "confirmTitle": "덮어쓰기 확인",
           "confirmSubtitle": "{{source}}에서 복사할 필드를 선택하세요.",
           "source": "원본",
-          "columns": { "field": "필드", "source": "원본 값", "target": "현재 값" },
+          "columns": {
+            "field": "필드",
+            "source": "원본 값",
+            "target": "현재 값"
+          },
           "fields": {
             "endpointBundle": "엔드포인트 및 API 프로토콜",
             "baseUrl": "기본 URL",
@@ -3437,7 +3441,10 @@
             "copied": "가이드를 클립보드에 복사했습니다.",
             "copyFailed": "복사에 실패했습니다. 다시 시도하세요."
           }
-        }
+        },
+        "conflict": "사용 불가",
+        "conflictAria": "{{name}}에 플러그인 식별자 충돌이 있습니다",
+        "conflictDescription": "이 플러그인 식별자는 이미 사용 중이므로 현재 설치할 수 없습니다"
       },
       "install": "플러그인 설치…",
       "empty": "아직 설치된 플러그인이 없습니다",
@@ -3772,7 +3779,14 @@
         "statusFailed": "업데이트 실패",
         "background": "백그라운드에서 계속",
         "doneAction": "완료",
-        "doneToast": "일괄 업데이트 완료: {{done}}개 업데이트, {{rest}}개 미완료"
+        "doneToast": "일괄 업데이트 완료: {{done}}개 업데이트, {{rest}}개 미완료",
+        "approve": "승인 및 업데이트",
+        "collapseDiff": "접기",
+        "permissionChanged": "권한이 변경됨",
+        "rereview": "재검토",
+        "reviewDiff": "검토 및 확인",
+        "reviewOutdated": "권한 차이가 만료됨",
+        "skip": "이 항목 건너뛰기"
       }
     },
     "mcp": {
@@ -4829,7 +4843,8 @@
         "in-progress": "git 작업 진행 중",
         "agent-running": "에이전트 실행 중",
         "disabled": "리뷰를 사용할 수 없음",
-        "remote-device": "원격 기기 세션은 보기 전용입니다"
+        "remote-device": "원격 기기 세션은 보기 전용입니다",
+        "remote-ssh": "SSH 워크스페이스 검토는 보기 전용입니다"
       },
       "remote": {
         "deviceTooOldTitle": "상대 기기 버전이 너무 오래되었습니다",

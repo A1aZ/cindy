@@ -427,11 +427,18 @@ async function finishDarwin({
         iosSimulatorHelperSigned ? 'verified' : 'untrusted',
         requireNativeReleaseGate,
       );
+    } else if (requireNativeReleaseGate) {
+      // 显式要求的 native smoke 必须在能原生运行目标 arch 的受控发布机上跑
+      // (要 boot 模拟器 + 起 native sidecar)。此处跳过会把它悄悄降级成"无门禁",
+      // 违背 docs/ios-simulator-integration-plan.md 的发布约束——宁可失败,逼操作者
+      // 换到匹配的宿主机。
+      throw new Error(
+        `CINDY_IOS_SIMULATOR_RELEASE_NATIVE_SMOKE=1 requires a host that can natively run the ${arch} package`,
+      );
     } else {
       // 跨 arch 连打:该产物在本机跑不起来(如 arm64 机上的 x64 app),门禁无法
       // exec 它。x64 从不含 native helper、运行期必然回退 WDA/MJPEG,跳过验证不
-      // 降低真实安全。requireNativeReleaseGate 已在上方要求 helper 已签(x64 到不了
-      // 这里),故此处跳过的只会是跨 arch 的 static gate。
+      // 降低真实安全。此处跳过的只会是跨 arch 的 static gate。
       console.log(
         `==> Skipping iOS Simulator release gate: ${arch} app is not runnable on this ${
           isPhysicalArm64Mac() ? 'arm64' : 'Intel'

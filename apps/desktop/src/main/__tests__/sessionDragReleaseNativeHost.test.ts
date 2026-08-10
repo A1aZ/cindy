@@ -108,13 +108,15 @@ describe('SessionDragReleaseNativeHost', () => {
   });
 
   it('uses a listen-only, one-shot AppKit event monitor without reading cursor data', () => {
-    const source = fs.readFileSync(
-      new URL(
-        '../../../native/session-drag-release/macos-session-drag-release-helper.swift',
-        import.meta.url,
-      ),
-      'utf8',
-    );
+    const source = fs
+      .readFileSync(
+        new URL(
+          '../../../native/session-drag-release/macos-session-drag-release-helper.swift',
+          import.meta.url,
+        ),
+        'utf8',
+      )
+      .replace(/\r\n?/g, '\n');
 
     expect(source).toContain('NSEvent.addGlobalMonitorForEvents(matching: mask)');
     expect(source).toContain('NSEvent.addLocalMonitorForEvents(matching: mask)');

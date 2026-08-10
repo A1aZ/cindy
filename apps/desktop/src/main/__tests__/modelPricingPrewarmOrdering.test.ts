@@ -23,6 +23,7 @@ describe('model pricing prewarm ordering', () => {
     const failedGuard = source.indexOf("dbClientTakeover.mode === 'failed'");
     const unchangedGuard = source.indexOf("dbClientTakeover.mode === 'unchanged'");
     const attachmentSweep = source.indexOf('sweepStagedChatAttachmentsOnStartup({');
+    const lifecycleStartupBlock = source.slice(localDbReady, attachmentSweep);
     const earlyUsageIpc = source.indexOf('registerMakerUsageIpc(ipcMaker);');
     const prewarm = source.indexOf('void prewarmModelPricing();');
     const refreshCatalog = source.indexOf('await refreshCustomProvidersIntoCatalog(');
@@ -31,6 +32,9 @@ describe('model pricing prewarm ordering', () => {
     expect(failedGuard).toBeGreaterThan(localDbReady);
     expect(unchangedGuard).toBeGreaterThan(failedGuard);
     expect(attachmentSweep).toBeGreaterThan(unchangedGuard);
+    expect(lifecycleStartupBlock).not.toContain(
+      'BrowserWindow.getAllWindows().some(isSecondaryAppWindow)',
+    );
     expect(earlyUsageIpc).toBeGreaterThanOrEqual(0);
     expect(prewarm).toBeGreaterThan(failedGuard);
     expect(prewarm).toBeGreaterThan(earlyUsageIpc);

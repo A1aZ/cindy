@@ -6646,23 +6646,6 @@ app.on('ready', async () => {
         }
         return;
       }
-      // A secondary window can arrive while the lifecycle client is being
-      // re-established. Its renderer only needs a readable DB and the route;
-      // repeating the account-wide attachment sweep here can scan every
-      // persisted message and staged file for several seconds. The primary
-      // window remains responsible for that maintenance pass.
-      if (BrowserWindow.getAllWindows().some(isSecondaryAppWindow)) {
-        dbClientLog.info('[DbClient] secondary window skips account startup maintenance', {
-          userId,
-        });
-        if (dbClientTakeover.shouldReleaseMainDb && process.env.XDT_DB_INPROC !== 'true') {
-          localDbCloseDb({ preserveSchemaMigrationLease: true });
-          dbClientLog.info('[DbClient] main-side _db released after secondary takeover', {
-            userId,
-          });
-        }
-        return;
-      }
       // Phase 1.1: file worker 接管 DB 连接后,释放 main 端的 _db + optimize 定时器。
       // 如果 worker takeover 失败并进入 inproc fallback,main _db 必须继续保留,
       // 否则 fallback 会拿到已关闭的连接。

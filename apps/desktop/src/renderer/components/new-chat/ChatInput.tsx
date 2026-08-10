@@ -141,7 +141,7 @@ import {
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { PermissionSelector } from './PermissionSelector';
 import { ExtraDirsButton, type CollaborationMenuConfig } from './ExtraDirsButton';
-import { focusComposerEndNextFrame, placeGhostAtComposerStart } from './ghostComposerPlacement';
+import { focusComposerEndNextFrame, hostCapabilityForGhost, placeGhostAtComposerStart, placeHostCapabilityAtComposerStart } from './ghostComposerPlacement';
 import { NewGoalDialog } from './NewGoalDialog';
 import { PlanModeIndicator } from './PlanModeIndicator';
 import {
@@ -2520,6 +2520,11 @@ export function ChatInput({
             attachments: existing?.attachments ?? [],
             quotes: existing?.quotes ?? [],
             browserComments: existing?.browserComments ?? [],
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
           },
           { silent: true },
         );
@@ -2725,16 +2730,11 @@ export function ChatInput({
     [installedGhosts, workingDir],
   );
   const pluginAvailableIds = useMemo(
-    () =>
-      new Set(
-        ghostsForCommand
-          .filter((ghost) => ghost.enabled && ghost.manifest.command)
-          .map((ghost) => ghost.manifest.id),
-      ),
+    () => new Set(ghostsForCommand.filter((ghost) => ghost.enabled).map((ghost) => ghost.manifest.id)),
     [ghostsForCommand],
   );
   // 统一建议面板的插件条目(旧 `+` 菜单口径的并集):可用项可选,无指令或
-  // 未生效项保留展示但置灰(entry 级 disabled + 原因)。
+  // Host 入口或未生效项保留展示但置灰(entry 级 disabled + 原因)。
   const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(
     () => {
       // device-link 远程会话的插件运行在被控端；控制端清单既不代表远端
@@ -2742,30 +2742,41 @@ export function ChatInput({
       if (deviceLinkDeviceId) return [];
       return pluginsForMenu.map((ghost) => {
         const hasCommand = !!ghost.manifest.command;
-        const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasCommand;
+        const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
+        const hasComposerEntry = hasCommand || hostCapability !== null;
+        const selectable = pluginAvailableIds.has(ghost.manifest.id) && hasComposerEntry;
+        const entryKey = ghost.manifest.command ?? hostCapability ?? '';
         return {
           item: {
             type: 'plugin-command' as const,
             name: ghost.manifest.name,
-            relPath: ghost.manifest.command ?? `cindy://plugin/${ghost.manifest.id}`,
+            relPath:
+              ghost.manifest.command ??
+              (hostCapability
+                ? `cindy://host-capability/${hostCapability}`
+                : `cindy://plugin/${ghost.manifest.id}`),
             pluginId: ghost.manifest.id,
             ...(ghost.iconDataUrl ? { iconDataUrl: ghost.iconDataUrl } : {}),
-            sourceLabel: ghost.manifest.command ?? '',
-            _nameLower: `${ghost.manifest.name} ${ghost.manifest.command ?? ''}`.toLowerCase(),
-            _relPathLower: `${ghost.manifest.command ?? ''} ${ghost.manifest.id}`.toLowerCase(),
+            sourceLabel: entryKey,
+            _nameLower: `${ghost.manifest.name} ${entryKey}`.toLowerCase(),
+            _relPathLower: `${entryKey} ${ghost.manifest.id}`.toLowerCase(),
           },
           ...(selectable
             ? {}
             : {
                 disabled: true,
                 disabledReason: t(
-                  hasCommand ? 'extraDirs.pluginDisabled' : 'extraDirs.pluginNoCommand',
+                  !pluginAvailableIds.has(ghost.manifest.id)
+                    ? 'extraDirs.pluginDisabled'
+                    : ghost.manifest.slots.includes('skill')
+                      ? 'extraDirs.pluginAgentInvoked'
+                      : 'extraDirs.pluginNoCommand',
                 ),
               }),
         };
       });
     },
-    [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, t],
+    [deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t],
   );
   useEffect(() => {
     setGhostCommandRoster(editor, ghostsForCommand);
@@ -3273,6 +3284,11 @@ export function ChatInput({
           attachments: existing?.attachments ?? [],
           quotes: existing?.quotes ?? [],
           browserComments: existing?.browserComments ?? [],
+          ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+          ...(existing?.pendingHostCapabilityGhostId
+            ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+            : {}),
+          ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
         },
         { silent: true },
       );
@@ -3510,6 +3526,23 @@ export function ChatInput({
       return;
     }
 
+    if (draft.pendingHostCapabilityGhostId) {
+      const ghost = ghostsForCommand.find(
+        (candidate) => candidate.manifest.id === draft.pendingHostCapabilityGhostId,
+      );
+      saveComposerDraft(
+        storageKey,
+        {
+          ...draft,
+          pendingHostCapabilityGhostId: undefined,
+          focusAtEnd: false,
+        },
+        { silent: true },
+      );
+      if (ghost) placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
+      return;
+    }
+
     if (!draft.focusAtEnd) return;
     saveComposerDraft(
       storageKey,
@@ -3555,6 +3588,11 @@ export function ChatInput({
             attachments: existing?.attachments ?? [],
             quotes: existing?.quotes ?? [],
             browserComments: next,
+            ...(existing?.pendingGhostId ? { pendingGhostId: existing.pendingGhostId } : {}),
+            ...(existing?.pendingHostCapabilityGhostId
+              ? { pendingHostCapabilityGhostId: existing.pendingHostCapabilityGhostId }
+              : {}),
+            ...(existing?.focusAtEnd ? { focusAtEnd: true } : {}),
           },
           { silent: true },
         );

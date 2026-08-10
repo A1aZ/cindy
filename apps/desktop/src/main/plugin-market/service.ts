@@ -2034,6 +2034,19 @@ export class PluginMarketService {
             });
             return;
           }
+          // A legacy-unapproved or invalid install has no approved baseline: a
+          // silent default upgrade would let Main mint a fresh approved receipt
+          // without the full permission review the user must confirm. Skip the
+          // silent upgrade and leave the plugin in its current state so it goes
+          // through the reapproval/recovery flow instead.
+          if (freshInstalled.approval.state !== 'approved') {
+            log.warn('default plugin upgrade skipped for unapproved install', {
+              pluginId: summary.id,
+              ghostId: summary.ghostId,
+              approvalState: freshInstalled.approval.state,
+            });
+            return;
+          }
           const reviewedBaseline = ghostPermissionBaselineKey(freshInstalled.manifest);
           const detail = await this.api.detail(summary.id);
           requireSameMarketOwner(owner);

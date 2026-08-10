@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 describe('readBoundedFileNoFollow', () => {
-  it('opens untrusted paths in non-blocking mode before checking the file type', async () => {
+  it('opens follow-links untrusted paths in non-blocking mode; no-follow defaults to blocking', async () => {
     const file = path.join(workDir, 'plain.json');
     await fs.promises.writeFile(file, '{"ok":1}');
     const realOpen = fs.promises.open;
@@ -43,16 +43,25 @@ describe('readBoundedFileNoFollow', () => {
     }) as typeof fs.promises.open);
 
     try {
+      // readBoundedFileNoFollow opts into O_NONBLOCK only when the caller asks
+      // for it (special-file reads); the default no-follow open stays blocking.
       await expect(readBoundedFileNoFollow(file, 1024)).resolves.not.toBeNull();
+      await expect(readBoundedFileNoFollow(file, 1024, { nonBlocking: true })).resolves.not.toBeNull();
+      // readBoundedFileFollowLinks always opens non-blocking so a FIFO/device
+      // entry cannot block Main forever.
       await expect(readBoundedFileFollowLinks(file, 1024)).resolves.not.toBeNull();
     } finally {
       spy.mockRestore();
     }
 
-    expect(flags).toHaveLength(2);
+    expect(flags).toHaveLength(3);
     const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
-    expect(flags.every((flag) => (flag & nonBlockingFlag) === nonBlockingFlag))
-      .toBe(true);
+    // flags[0]: readBoundedFileNoFollow default (blocking)
+    expect(flags[0] & nonBlockingFlag).toBe(0);
+    // flags[1]: readBoundedFileNoFollow with nonBlocking: true
+    expect(flags[1] & nonBlockingFlag).toBe(nonBlockingFlag);
+    // flags[2]: readBoundedFileFollowLinks (always non-blocking)
+    expect(flags[2] & nonBlockingFlag).toBe(nonBlockingFlag);
   });
 
   it('普通文件按实际字节返回,超限返回 null', async () => {
@@ -392,7 +401,7 @@ describe('readBoundedFileNoFollow', () => {
 });
 
 describe('readBoundedFileNoFollowSync', () => {
-  it('opens untrusted paths in non-blocking mode before checking the file type', async () => {
+  it('opens untrusted no-follow paths in blocking mode by default (sync variant)', async () => {
     const file = path.join(workDir, 'plain.json');
     await fs.promises.writeFile(file, '{"ok":1}');
     const realOpenSync = fs.openSync;
@@ -410,8 +419,10 @@ describe('readBoundedFileNoFollowSync', () => {
       spy.mockRestore();
     }
 
+    // The synchronous variant has no nonBlocking option; the default no-follow
+    // open stays blocking (regular files only, so this cannot block on a FIFO).
     const nonBlockingFlag = fs.constants.O_NONBLOCK ?? 0;
-    expect(flags & nonBlockingFlag).toBe(nonBlockingFlag);
+    expect(flags & nonBlockingFlag).toBe(0);
   });
 
   it('限量与回退闸语义和异步变体一致', async () => {

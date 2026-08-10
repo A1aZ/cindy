@@ -1078,6 +1078,44 @@ describe('PluginMarketService migration and defaultInstall', () => {
     });
   });
 
+  it.each(['legacy-unapproved', 'invalid'] as const)(
+    'skips the silent default upgrade for a %s install instead of minting a fresh receipt',
+    async (approvalState) => {
+      const item = summary({
+        scope: 'organization',
+        organizationId: 'org-1',
+        defaultInstall: true,
+        currentRelease: {
+          ...summary().currentRelease,
+          id: 'release-2',
+          version: '2.0.0',
+        },
+      });
+      const oldManifest = manifest(item.ghostId, '1.0.0');
+      const installDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-market-upgrade-'));
+      roots.push(installDir);
+      fs.writeFileSync(path.join(installDir, 'ghost.json'), JSON.stringify(oldManifest));
+      runtime.ghosts = [
+        { manifest: oldManifest, dir: installDir, enabled: false, approval: { state: approvalState } },
+      ];
+      const h = harness([item]);
+      h.ledger.upsertInstallation({
+        ...recordForTest(item),
+        releaseId: 'release-1',
+        version: '1.0.0',
+        manifestDigest: ghostManifestDigest(oldManifest),
+      });
+
+      const snapshot = await h.service.snapshot();
+
+      // 非 approved 安装没有已批准基线：静默默认升级会无用户确认签发新 receipt，
+      // 必须跳过，交给重新确认/恢复流程。runtime.install 不应被调用。
+      expect(runtime.install).not.toHaveBeenCalled();
+      expect(snapshot.items[0]).toMatchObject({ installState: 'update-available' });
+      expect(h.service.consumeUpgradeNotice()).toBeNull();
+    },
+  );
+
   it('silently updates an organization defaultInstall package and preserves disabled state', async () => {
     const item = summary({
       scope: 'organization',

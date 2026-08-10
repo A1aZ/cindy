@@ -532,13 +532,14 @@ describe('shouldBlockNewSessionCreateForWorktree', () => {
         preferenceSaving: false,
       })).toBe(false);
     }
-    // 偏好写入在途仍拦截,与资格无关。
+    // 偏好写入在途也不应拦截 ineligible——确认不合格目录不创建 worktree,
+    // preference 写入在途不该卡住普通会话创建。
     expect(shouldBlockNewSessionCreateForWorktree({
       applicable: true,
       enabled: true,
       eligibility: { status: 'ineligible', reason: 'notGitRepo' },
       preferenceSaving: true,
-    })).toBe(true);
+    })).toBe(false);
   });
 });
 

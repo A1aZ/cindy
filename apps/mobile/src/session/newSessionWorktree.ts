@@ -361,10 +361,12 @@ export function shouldBlockNewSessionCreateForWorktree(input: {
   // 对话工作区 / 尚未选目录时 worktree 控件本就隐藏，工作端记忆不能反向卡住
   // 普通会话创建；切回具体项目后再按该项目资格决定是否阻止。
   if (!input.applicable) return false;
+  // ineligible 目标不创建 worktree,preference 写入在途也不该卡住普通会话
+  // 创建(2026-08-07 裁决);仅 eligible/probing/detect-failed/unsupported 需要等。
+  if (input.eligibility.status === 'ineligible') return false;
   if (input.preferenceSaving) return true;
   return input.enabled
-    && input.eligibility.status !== 'eligible'
-    && input.eligibility.status !== 'ineligible';
+    && input.eligibility.status !== 'eligible';
 }
 
 /** 资格未通过时的 caption 文案 key(session.json);eligible 无 caption。 */

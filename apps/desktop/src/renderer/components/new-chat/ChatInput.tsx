@@ -1003,6 +1003,20 @@ export function ChatInput({
   const recommendedPromptRef = useRef<string | null>(null);
   recommendedPromptRef.current = recommendedPrompt;
   const showRecommendationRef = useRef(false);
+  // 完整输入框空判断:不仅检查 ProseMirror 文档是否为空,还检查附件、浏览器评论和语音稿。
+  // 避免在用户放好了附件/评论/语音稿但正文为空时,仍发起付费的 predictNextPrompt 调用。
+  const voiceDraftTextRef = useRef('');
+  const composerFullyEmptyRef = useRef<() => boolean>(() => true);
+  composerFullyEmptyRef.current = () => {
+    const ed = editorRef.current;
+    if (!ed || ed.isDestroyed) return false;
+    return (
+      composerDocIsEmpty(ed.state.doc) &&
+      latestAttachmentsRef.current.length === 0 &&
+      browserCommentsRef.current.length === 0 &&
+      voiceDraftTextRef.current.length === 0
+    );
+  };
   const resolvedPlaceholder = placeholder ?? t('newChat.chatInput.defaultPlaceholder');
   const composerSendShortcutLabel = getComposerSendShortcutLabel(
     composerSendShortcutPreference,
@@ -1149,7 +1163,7 @@ export function ChatInput({
         latestMessages.length > 0 &&
         ed &&
         !ed.isDestroyed &&
-        composerDocIsEmpty(ed.state.doc)
+        composerFullyEmptyRef.current()
       ) {
         const contextMsgs = latestMessages.slice(-20).map((m) => ({
           role: m.role,
@@ -1173,7 +1187,7 @@ export function ChatInput({
               result?.prompt &&
               cur &&
               !cur.isDestroyed &&
-              composerDocIsEmpty(cur.state.doc) &&
+              composerFullyEmptyRef.current() &&
               !showStopButtonRef.current &&
               prevSessionIdRef.current === requestSessionId &&
               turnGenRef.current === requestTurnGen
@@ -2161,7 +2175,7 @@ export function ChatInput({
           showRecommendationRef.current &&
           recommendedPromptRef.current
         ) {
-          if (composerDocIsEmpty(view.state.doc)) {
+          if (composerFullyEmptyRef.current()) {
             event.preventDefault();
             // 先撤推荐(overlay 与正文同位置,不先撤会有一帧重叠),再插入文本。
             showRecommendationRef.current = false;
@@ -2724,6 +2738,7 @@ export function ChatInput({
   );
 
   const voiceInput = useVoiceInput(editor, disabled, messages, voiceInputOptions);
+  voiceDraftTextRef.current = voiceInput.draftText;
   const composerMutationLocked = composerEditorLocked || voiceInput.isBusy;
   composerMutationLockedRef.current = composerMutationLocked;
   useEffect(() => {

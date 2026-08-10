@@ -113,6 +113,7 @@ const state = (overrides: Partial<SessionChatState> = {}): SessionChatState => (
   planModeRev: 0,
   lastStopWasSideTask: false,
   pendingTaskWake: false,
+  turnStoppedByUser: false,
   lastAgentMeta: null,
   ...overrides,
 });

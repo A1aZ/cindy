@@ -1804,6 +1804,7 @@ describe('new session worktree wiring (source locks)', () => {
       'useRemoteNewMakerWorktreePreference(selectedDeviceId)',
     );
     expect(newSource).toContain("classification.status === 'missing'");
+    expect(newSource).toContain('worktreeProbeCapabilityForTarget(');
     expect(newSource).toContain('worktreeHostSupportsRecoveryKeyDiscard === false');
     expect(newSource).not.toContain(
       'remoteSessionStore.setNewMakerWorktreePreference(selectedDeviceId, false);',

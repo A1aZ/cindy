@@ -76,6 +76,21 @@ export function shouldAcceptWorktreeBranchListResult(input: {
     && input.requestTarget.workingDir.trim() === input.latestTarget.workingDir.trim();
 }
 
+export function worktreeProbeCapabilityForTarget(
+  snapshot: NewSessionWorktreeProbeSnapshot | null,
+  target: NewSessionWorktreeProbeTarget,
+): boolean | undefined {
+  if (
+    !snapshot
+    || snapshot.target.deviceId !== target.deviceId
+    || snapshot.target.workingDir.trim() !== target.workingDir.trim()
+    || snapshot.target.probeGeneration !== target.probeGeneration
+  ) {
+    return undefined;
+  }
+  return snapshot.supportsRecoveryKeyDiscard;
+}
+
 /**
  * 只向当前选择与连接代次暴露同 target 的结果。React effect 要到 commit 后才会把 state
  * 重置为 probing；render 阶段先做这道同步 fence，用户切项目/设备或同目标重连后立即创建

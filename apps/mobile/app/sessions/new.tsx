@@ -309,6 +309,7 @@ import {
   shouldBlockNewSessionCreateForWorktree,
   shouldShowWorktreeToggle,
   worktreeEligibilityForTarget,
+  worktreeProbeCapabilityForTarget,
   worktreeEligibilityCaptionKey,
   worktreeEligibilityFromError,
   worktreeSourceBranchFromPreference,
@@ -1087,11 +1088,10 @@ export default function NewRemoteSessionScreen() {
   worktreeBranchTargetRef.current = worktreeTarget;
   const worktreeEligibility = worktreeEligibilityForTarget(worktreeProbe, worktreeTarget);
   worktreeEligibilityRef.current = worktreeEligibility;
-  const worktreeHostSupportsRecoveryKeyDiscard = worktreeProbe
-    && worktreeProbe.target.deviceId === worktreeTarget.deviceId
-    && worktreeProbe.target.workingDir.trim() === worktreeTarget.workingDir.trim()
-    ? worktreeProbe.supportsRecoveryKeyDiscard
-    : undefined;
+  const worktreeHostSupportsRecoveryKeyDiscard = worktreeProbeCapabilityForTarget(
+    worktreeProbe,
+    worktreeTarget,
+  );
   const worktreeBranchBaseRepo = worktreeEligibility.status === 'eligible'
     ? worktreeEligibility.baseRepo
     : '';

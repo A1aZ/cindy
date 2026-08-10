@@ -27,6 +27,7 @@ import {
   shouldAcceptWorktreeBranchListResult,
   shouldShowWorktreeToggle,
   worktreeEligibilityForTarget,
+  worktreeProbeCapabilityForTarget,
   worktreeEligibilityCaptionKey,
   worktreeEligibilityFromError,
   worktreeSourceBranchFromPreference,
@@ -89,6 +90,30 @@ describe('resolveWorktreeEligibility', () => {
     expect(resolveWorktreeEligibility(legacyResult, '/repo/app')).toEqual({
       status: 'unsupported',
     });
+  });
+});
+
+describe('worktreeProbeCapabilityForTarget', () => {
+  const snapshot = {
+    target: { deviceId: 'dev-a', workingDir: '/repo/a', probeGeneration: '1\u00002' },
+    eligibility: { status: 'unsupported' as const },
+    supportsRecoveryKeyDiscard: false,
+  };
+
+  it('只向同设备 + 同 cwd + 同探测代次暴露 recovery capability', () => {
+    expect(worktreeProbeCapabilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: ' /repo/a ',
+      probeGeneration: '1\u00002',
+    })).toBe(false);
+  });
+
+  it('同目标重连重探时不暴露上一代 capability', () => {
+    expect(worktreeProbeCapabilityForTarget(snapshot, {
+      deviceId: 'dev-a',
+      workingDir: '/repo/a',
+      probeGeneration: '2\u00002',
+    })).toBeUndefined();
   });
 });
 

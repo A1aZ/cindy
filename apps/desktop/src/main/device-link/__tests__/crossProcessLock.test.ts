@@ -188,6 +188,31 @@ describe('接管陈旧锁', () => {
     }
   }, 15_000);
 
+  it('reclaims a self-pid lock whose recorded identity was from a reused pid', async () => {
+    // A crashed instance left a lock naming our pid, but with the dead
+    // instance's process identity. After the OS reuses the pid for us, the
+    // identity no longer matches: the exact-identity comparison must win over
+    // the self-pid shortcut, or strict callers stay permanently busy.
+    const lock = path.join(dir, 'lock');
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: 1,
+        processStartIdentity: 'start-ms:0',
+        nonce: '00000000-0000-4000-8000-000000000001',
+        state: 'held',
+      }),
+      'utf8',
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withCrossProcessLock(lock, { label: 'test', waitMs: 1_000 }, async (s) => s),
+    ).resolves.toEqual({ held: true });
+  }, 15_000);
+
   it('retries a transient release deletion failure', async () => {
     const lock = path.join(dir, 'lock');
     const originalRm = fsp.rm;

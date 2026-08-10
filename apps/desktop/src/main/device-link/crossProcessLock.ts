@@ -683,14 +683,20 @@ async function isRecordOwnerActive(
   }
   const currentIdentity = await getProcessIdentity(record.pid);
   if (!currentIdentity) return true;
-  // The current process is always the live holder of a lock it wrote: its start
-  // time cannot be compared against the lock's creation time reliably (a
-  // long-lived worker can predate the lock while a short-lived one starts after
-  // it), so a record naming our own pid is never a PID-reuse takeover target.
-  if (record.pid === process.pid) return true;
+  // Exact process identity is the strongest signal and must be checked before
+  // the self-pid shortcut: after a crash + PID reuse the OS may hand our pid to
+  // this process while the lock still records the dead instance's identity, so
+  // a mismatching identity on our own pid is a reused-pid takeover target (and
+  // skipping the comparison would leave strict callers permanently busy).
   if (record.processStartIdentity) {
     return processIdentitiesMatch(record.processStartIdentity, currentIdentity);
   }
+  // No recorded identity: the current process is always the live holder of a
+  // lock it wrote — its start time cannot be compared against the lock's
+  // creation time reliably (a long-lived worker can predate the lock while a
+  // short-lived one starts after it), so a record naming our own pid is never
+  // a PID-reuse takeover target without an identity to disprove it.
+  if (record.pid === process.pid) return true;
   // Legacy record without a processStartIdentity: kill(pid, 0) succeeded, so
   // the pid is alive. We cannot distinguish a still-running original holder
   // from a reused pid, and a live holder must never be squeezed out of its lock

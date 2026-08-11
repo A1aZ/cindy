@@ -545,7 +545,7 @@ export class GhostInstallReceiptStore {
     // caller knows whether to roll it back on receipt write failure.
     // EXISTENT: the marker is already in place (concurrent writer or
     //   surviving marker from a failed rollback) — safe to proceed.
-    // ERROR: temp write or rename failed for a reason other than
+    // ERROR: temp write or link/rename failed for a reason other than
     //   EEXIST — fail the receipt write, do not publish the receipt
     //   without the per-id migration guard.
     if (this.hasMigrationMarker(id)) return false;
@@ -555,7 +555,26 @@ export class GhostInstallReceiptStore {
     const temp = path.join(root, `.migrated-${id}-${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`);
     try {
       await fs.promises.writeFile(temp, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-      await fs.promises.rename(temp, target);
+      // Publish via hard-link first so the operation is no-clobber:
+      // link fails with EEXIST if a concurrent writer already created
+      // the marker, while rename would silently replace it and claim
+      // ownership.  If link is not available (EXDEV, cross-device),
+      // fall back to a pre-rename existence check + rename.
+      try {
+        await fs.promises.link(temp, target);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          // Concurrent writer already published the marker — safe.
+          return false;
+        }
+        if ((error as NodeJS.ErrnoException).code === 'EXDEV') {
+          // Cross-device: re-check before rename so we don't clobber.
+          if (this.hasMigrationMarker(id)) return false;
+          await fs.promises.rename(temp, target);
+        } else {
+          throw error;
+        }
+      }
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {

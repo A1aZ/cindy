@@ -459,6 +459,8 @@ export interface GhostSecretExchangeDecl {
 
 /** OAuth 凭证:scopes 条数上限(超出拒装;确认框逐条展示要可读)。 */
 export const GHOST_OAUTH_SCOPES_MAX = 256;
+/** OAuth broker 模式允许声明的备用 client ID 数量上限。 */
+export const GHOST_OAUTH_CLIENT_ID_ALTERNATIVES_MAX = 8;
 /** OAuth 凭证:extraAuthorizeParams 条数上限。 */
 export const GHOST_OAUTH_EXTRA_PARAMS_MAX = 8;
 /**
@@ -496,8 +498,10 @@ export interface GhostSecretOauthDecl {
    * client 凭证**覆盖**内置值(清除自填 = 回落内置)。桌面应用的 client
    * 凭证按 Google 官方口径本非机密(installed-app),写进包里不引入新泄露面;
    * 授权仍需用户在浏览器里亲自同意,凭证本身访问不了任何数据。
-   */
+  */
   clientId?: string;
+  /** 可选:broker 模式下允许意识在单次连接时选择的备用客户端 ID。 */
+  clientIdAlternatives?: string[];
   /** 可选:内置 client 的 secret(与 clientId 成对;纯 PKCE 服务商可省略)。 */
   clientSecret?: string;
   /** 申请的 scope 列表(0–256 条,确认框逐条展示;缺省 = 不带 scope 参数)。 */
@@ -528,7 +532,7 @@ export interface GhostSecretOauthDecl {
    * 为空(回落显示 labelPath 标签)。不声明 = 展示名就用 labelPath 的值
    * (邮箱这类本身可读的服务商不需要它)。
    */
-  identity?: { url: string; labelPath: string; displayTemplate?: string };
+  identity?: { url: string; labelPath: string; displayTemplate?: string; avatarPath?: string };
   /**
    * 可选:loopback 回调固定端口(1024–65535)。Atlassian 这类服务商要求回调
    * URI 与应用注册值精确匹配(含端口),声明后主机授权引擎钉死
@@ -1951,6 +1955,47 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
               };
             }
           }
+          let oaClientIdAlternatives: string[] | undefined;
+          if (oa.clientIdAlternatives !== undefined) {
+            if (oa.clientId === undefined) {
+              return {
+                ok: false,
+                reason: 'network.secrets[].oauth.clientIdAlternatives 必须与默认 clientId 一起声明',
+              };
+            }
+            if (
+              !Array.isArray(oa.clientIdAlternatives) ||
+              oa.clientIdAlternatives.length === 0 ||
+              oa.clientIdAlternatives.length > GHOST_OAUTH_CLIENT_ID_ALTERNATIVES_MAX
+            ) {
+              return {
+                ok: false,
+                reason: `network.secrets[].oauth.clientIdAlternatives 必须是 1–${GHOST_OAUTH_CLIENT_ID_ALTERNATIVES_MAX} 条的数组`,
+              };
+            }
+            oaClientIdAlternatives = [];
+            for (const clientId of oa.clientIdAlternatives) {
+              if (
+                typeof clientId !== 'string' ||
+                clientId.trim().length === 0 ||
+                clientId.length > 200 ||
+                /\s/.test(clientId)
+              ) {
+                return {
+                  ok: false,
+                  reason:
+                    'network.secrets[].oauth.clientIdAlternatives 含非法条目(须为 1–200 字符、不含空白的字符串)',
+                };
+              }
+              if (clientId === oa.clientId || oaClientIdAlternatives.includes(clientId)) {
+                return {
+                  ok: false,
+                  reason: `network.secrets[].oauth.clientIdAlternatives 含重复条目 ${JSON.stringify(clientId)}`,
+                };
+              }
+              oaClientIdAlternatives.push(clientId);
+            }
+          }
           if (oa.clientSecret !== undefined) {
             if (oa.clientId === undefined) {
               return {
@@ -2082,6 +2127,12 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
               };
             }
           }
+          if (oaClientIdAlternatives !== undefined && oa.tokenBroker === undefined) {
+            return {
+              ok: false,
+              reason: 'network.secrets[].oauth.clientIdAlternatives 仅允许与 tokenBroker 一起声明',
+            };
+          }
           // brokerBounce(可选):双地址弹跳回调,必须与 tokenBroker + redirectPort
           // 成套声明(302 目标端口/路径在 broker 服务端写死,三者是一套约定)。
           let oaBounce: { path: string; callbackPath: string } | undefined;
@@ -2108,7 +2159,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
             }
             oaBounce = { path: bb.path as string, callbackPath: bb.callbackPath as string };
           }
-          let oaIdentity: { url: string; labelPath: string; displayTemplate?: string } | undefined;
+          let oaIdentity:
+            | { url: string; labelPath: string; displayTemplate?: string; avatarPath?: string }
+            | undefined;
           if (oa.identity !== undefined) {
             if (!isPlainObject(oa.identity)) {
               return { ok: false, reason: 'network.secrets[].oauth.identity 必须是对象' };
@@ -2163,16 +2216,35 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
               }
               idnTemplate = idn.displayTemplate;
             }
+            let idnAvatarPath: string | undefined;
+            if (idn.avatarPath !== undefined) {
+              if (
+                typeof idn.avatarPath !== 'string' ||
+                idn.avatarPath.length > 128 ||
+                !GHOST_SECRET_EXCHANGE_TOKEN_PATH_RE.test(idn.avatarPath)
+              ) {
+                return {
+                  ok: false,
+                  reason:
+                    'network.secrets[].oauth.identity.avatarPath 必须是 ≤128 字符的点分路径(段名限字母/数字/_/-,如 "data.avatar_thumb")',
+                };
+              }
+              idnAvatarPath = idn.avatarPath;
+            }
             oaIdentity = {
               url: idnUrl.url,
               labelPath: idn.labelPath,
               ...(idnTemplate !== undefined ? { displayTemplate: idnTemplate } : {}),
+              ...(idnAvatarPath !== undefined ? { avatarPath: idnAvatarPath } : {}),
             };
           }
           oauth = {
             authorizeUrl: authorizeParsed.url,
             tokenUrl: tokenParsed.url,
             ...(oa.clientId !== undefined ? { clientId: oa.clientId as string } : {}),
+            ...(oaClientIdAlternatives !== undefined
+              ? { clientIdAlternatives: oaClientIdAlternatives }
+              : {}),
             ...(oa.clientSecret !== undefined ? { clientSecret: oa.clientSecret as string } : {}),
             ...(oaScopes !== undefined ? { scopes: oaScopes } : {}),
             ...(oa.scopeDelimiter !== undefined

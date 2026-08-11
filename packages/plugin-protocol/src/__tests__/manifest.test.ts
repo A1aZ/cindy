@@ -389,6 +389,44 @@ describe('Ghost manifest contract', () => {
     });
   });
 
+  it('preserves Desktop-supported OAuth client alternatives and identity avatar path', () => {
+    const result = validateGhostManifest({
+      ...validManifest,
+      tools: undefined,
+      slots: ['network'],
+      settingsHtml: 'settings.html',
+      network: {
+        hosts: ['accounts.example.com', 'api.example.com'],
+        secrets: [
+          {
+            key: 'account',
+            label: 'Example account',
+            source: 'oauth',
+            inject: { header: 'Authorization', format: 'Bearer {value}' },
+            oauth: {
+              authorizeUrl: 'https://accounts.example.com/authorize',
+              tokenUrl: 'https://accounts.example.com/token',
+              clientId: 'cn-client',
+              clientIdAlternatives: ['global-client'],
+              tokenBroker: 'example',
+              identity: {
+                url: 'https://api.example.com/me',
+                labelPath: 'data.user_id',
+                avatarPath: 'data.avatar_thumb',
+              },
+            },
+          },
+        ],
+      },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.manifest.network?.secrets?.[0]?.oauth).toMatchObject({
+      clientIdAlternatives: ['global-client'],
+      identity: { avatarPath: 'data.avatar_thumb' },
+    });
+  });
+
   it('accepts and normalizes Plugin locale resource declarations', () => {
     const locales = {
       en: 'locales/en.json',

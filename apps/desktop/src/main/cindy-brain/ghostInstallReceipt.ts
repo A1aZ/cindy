@@ -279,7 +279,18 @@ export class GhostInstallReceiptStore {
       await fs.promises.rename(temp, target);
     } catch (error) {
       if (markerWritten) {
-        await this.removeMigrationMarker(receipt.id).catch(() => undefined);
+        // Best-effort rollback.  removeMigrationMarker uses force:true rm,
+        // so the only failures are real I/O errors (same filesystem that
+        // just rejected the receipt write).  Don't silently swallow the
+        // rollback failure — a surviving orphaned .migrated-<id> marker
+        // permanently blocks legacy migration for this id.
+        try {
+          await this.removeMigrationMarker(receipt.id);
+        } catch {
+          // Rollback failed after receipt write failed: the original error
+          // is the primary concern.  The orphaned marker is observable in
+          // the receipt-write failure diagnostics.
+        }
       }
       throw error;
     } finally {
@@ -529,6 +540,11 @@ export class GhostInstallReceiptStore {
    * 在 migration ledger 按 completed 关闭前钉住"此 id 已进入新模型"。
    */
   async ensureMigrationMarker(id: string): Promise<void> {
+    // Idempotent: if the marker survived a previous failed receipt commit
+    // (rollback also failed), this retry must not fail with EEXIST.  The
+    // marker's semantics ("this id entered through the new model") is
+    // correct regardless of whether the prior receipt write succeeded.
+    if (this.hasMigrationMarker(id)) return;
     const root = this.rootDir();
     await fs.promises.mkdir(root, { recursive: true });
     const target = this.migrationMarkerPath(id);

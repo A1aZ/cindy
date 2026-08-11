@@ -120,7 +120,19 @@ async function run(request: Request): Promise<void> {
       if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
         throw new Error('Forge scaffold target replaced after mkdir');
       }
+      const targetRealPath = await fs.promises.realpath(request.targetName);
       for (const entry of await fs.promises.readdir(staging, { withFileTypes: true })) {
+        // Per-entry revalidation: a concurrent swap between the single-shot
+        // lstat check above and each rename would let path.join follow the
+        // swapped link. Re-check the target identity before every file move.
+        const currentStat = await fs.promises.lstat(request.targetName);
+        if (!currentStat.isDirectory() || currentStat.isSymbolicLink()) {
+          throw new Error('Forge scaffold target identity changed during publish');
+        }
+        const currentReal = await fs.promises.realpath(request.targetName);
+        if (!samePath(currentReal, targetRealPath)) {
+          throw new Error('Forge scaffold target path changed during publish');
+        }
         await fs.promises.rename(
           path.join(staging, entry.name),
           path.join(request.targetName, entry.name),

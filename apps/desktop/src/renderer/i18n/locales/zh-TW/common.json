@@ -3773,6 +3773,7 @@
       },
       "updateAll": {
         "title": "全部更新 · {{count}} 個插件",
+        "collapseDiff": "收起",
         "description": "權限無變化的更新會自動完成；涉及權限變更的需要你逐項確認。",
         "versionRange": "v{{from}} → v{{to}}",
         "statusPending": "排隊中",
@@ -3783,7 +3784,10 @@
         "background": "後臺繼續",
         "doneAction": "完成",
         "doneToast": "批次更新完成：{{done}} 個已更新，{{rest}} 個未完成",
+        "permissionChanged": "權限變更",
         "rereview": "重新審閱",
+        "reviewDiff": "查看",
+        "reviewOutdated": "審查過期",
         "approve": "同意",
         "skip": "跳過"
       }

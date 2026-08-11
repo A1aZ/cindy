@@ -3774,6 +3774,7 @@
       },
       "updateAll": {
         "title": "모두 업데이트 · {{count}}개",
+        "collapseDiff": "접기",
         "description": "일반 업데이트는 자동으로 완료되며, 검증된 실제 패키지가 새 권한을 요청할 때만 개별 확인합니다.",
         "versionRange": "v{{from}} → v{{to}}",
         "statusPending": "대기 중",
@@ -3784,7 +3785,10 @@
         "background": "백그라운드에서 계속",
         "doneAction": "완료",
         "doneToast": "일괄 업데이트 완료: {{done}}개 업데이트, {{rest}}개 미완료",
+        "permissionChanged": "권한 변경됨",
         "rereview": "다시 검토",
+        "reviewDiff": "검토",
+        "reviewOutdated": "검토 기간 만료",
         "approve": "승인",
         "skip": "건너뛰기"
       }

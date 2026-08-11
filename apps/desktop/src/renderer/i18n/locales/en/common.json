@@ -3775,6 +3775,7 @@
       },
       "updateAll": {
         "title": "Update all · {{count}} plugins",
+        "collapseDiff": "Collapse",
         "description": "Regular updates finish automatically; verified packages that request new permissions need per-item approval.",
         "versionRange": "v{{from}} → v{{to}}",
         "statusPending": "Queued",
@@ -3785,7 +3786,10 @@
         "background": "Continue in background",
         "doneAction": "Done",
         "doneToast": "Batch update finished: {{done}} updated, {{rest}} not completed",
+        "permissionChanged": "Permission changed",
         "rereview": "Re-review",
+        "reviewDiff": "Review",
+        "reviewOutdated": "Review outdated",
         "approve": "Approve",
         "skip": "Skip"
       }

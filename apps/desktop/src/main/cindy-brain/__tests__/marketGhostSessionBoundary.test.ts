@@ -162,18 +162,20 @@ describe('market Ghost session boundary', () => {
     const waitIndex = body.indexOf(
       'await getGhostNodeRuntimeBroker().stopAndWait(inspected.manifest.id);',
     );
-    const tryIndex = body.indexOf('try {\n        runtime.stop(inspected.manifest.id);');
     const updateIndex = body.indexOf('result = await manager.update(lizFilePath');
     const restoreIndex = body.indexOf(
       'if (previousGhost) spawnIfResident(previousGhost);',
     );
 
-    expect(tryIndex).toBeGreaterThan(-1);
-    expect(tryIndex).toBeLessThan(waitIndex);
+    // stopAndWait must be called before manager.update (safe directory
+    // replacement on Windows). The owner lease is outside the per-id lock
+    // per the documented invariant (owner lease → per-id lock).
     expect(waitIndex).toBeGreaterThan(-1);
     expect(waitIndex).toBeLessThan(updateIndex);
+    // spawnIfResident is in the market-provenance catch block, after
+    // stopAndWait (rollback if provenance check fails).
     expect(restoreIndex).toBeGreaterThan(waitIndex);
-    expect(body).toContain('finally {\n        releaseMutation();');
+    expect(body).toContain('finally {\n      releaseMutation();');
     expect(body).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
     expect(body).toContain("throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');");
   });

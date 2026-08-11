@@ -541,13 +541,13 @@ export class GhostInstallReceiptStore {
    * 在 migration ledger 按 completed 关闭前钉住"此 id 已进入新模型"。
    */
   async ensureMigrationMarker(id: string): Promise<boolean> {
-    // Idempotent: if the marker survived a previous failed receipt commit
-    // (rollback also failed), this retry must not fail with EEXIST.  The
-    // marker's semantics ("this id entered through the new model") is
-    // correct regardless of whether the prior receipt write succeeded.
-    //
-    // Returns true only when this call actually created the marker, so
-    // the caller knows whether to roll it back on receipt write failure.
+    // Returns true only when this call published the marker, so the
+    // caller knows whether to roll it back on receipt write failure.
+    // EXISTENT: the marker is already in place (concurrent writer or
+    //   surviving marker from a failed rollback) — safe to proceed.
+    // ERROR: temp write or rename failed for a reason other than
+    //   EEXIST — fail the receipt write, do not publish the receipt
+    //   without the per-id migration guard.
     if (this.hasMigrationMarker(id)) return false;
     const root = this.rootDir();
     await fs.promises.mkdir(root, { recursive: true });
@@ -557,10 +557,15 @@ export class GhostInstallReceiptStore {
       await fs.promises.writeFile(temp, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       await fs.promises.rename(temp, target);
       return true;
-    } catch {
-      // rename failed (e.g. target already exists from a concurrent
-      // writer) — the marker exists, but we didn't create it.
-      return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        // Concurrent writer already published the marker — safe.
+        return false;
+      }
+      // EACCES, EPERM, EBUSY, EIO, etc.: the state root is not writable,
+      // so the receipt write will also likely fail.  Throw now rather than
+      // proceeding with a receipt that lacks the migration guard.
+      throw error;
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }

@@ -508,7 +508,7 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     // A leftover .released sidecar from a previous gate instance shares the
     // same locked file name — its nonce must match the current gate record's
     // nonce, else it belongs to a different instance and must be ignored.
-    const expectedNonce = typeof record !== 'string' ? record.nonce : undefined;
+    const expectedNonce = typeof record !== 'string' ? (record.nonce ?? undefined) : undefined;
     if (await hasValidGateReleaseMarker(filePath, expectedNonce)) {
       await removePathWithRetry(filePath);
       await removePathWithRetry(gateReleaseMarkerPath(filePath));

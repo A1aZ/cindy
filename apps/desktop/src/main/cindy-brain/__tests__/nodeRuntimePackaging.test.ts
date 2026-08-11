@@ -29,7 +29,7 @@ describe('Node runtime packaging contract', () => {
     expect(worker).toContain('parentPort');
     expect(worker).toContain('verifyParent');
     expect(worker).toContain('sameForgeScaffoldParentIdentity');
-    expect(worker).toContain('fs.promises.rename(staging, request.targetName)');
+    expect(worker).toContain('fs.promises.mkdir(request.targetName)');
     expect(worker).not.toContain('ELECTRON_RUN_AS_NODE');
     const capability = fs.readFileSync(
       path.join(desktopRoot, 'src/main/cindy-brain/forgeScaffoldCapability.ts'),

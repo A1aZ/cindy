@@ -169,11 +169,11 @@ type WorkerListLayout = 'tabs' | 'dropdown';
 type DropdownOpenMode = 'transient' | 'pinned' | null;
 
 function readStoredWorkerListLayout(): WorkerListLayout {
-  if (typeof window === 'undefined') return 'dropdown';
+  if (typeof window === 'undefined') return 'tabs';
   try {
-    return window.localStorage.getItem(WORKER_LIST_LAYOUT_KEY) === 'tabs' ? 'tabs' : 'dropdown';
+    return window.localStorage.getItem(WORKER_LIST_LAYOUT_KEY) === 'dropdown' ? 'dropdown' : 'tabs';
   } catch {
-    return 'dropdown';
+    return 'tabs';
   }
 }
 

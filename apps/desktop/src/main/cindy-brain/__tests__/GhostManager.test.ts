@@ -1270,13 +1270,13 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     // 攻击:删掉 receipt,指望整个插件消失变成 legacy-unapproved。
     // 不加 slot 修改(避免 backfillLegacyApproval 校验失败进入 failed 分支)。
     await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
-    // 无 ledger → 迁移门仍开着。Coordinator 扫描到 hello 目录无 receipt,
-    // 按 legacy candidate backfill。这是已知权衡:关闭 auto-close 门防止的是
-    // "迁移扫描瞬时故障 + builtin reconcile 写 receipt 后其余插件全部
-    // legacy-unapproved"(P0 红线),代价是删 receipt 攻击面略宽(仍需写状态根)。
+    // Per-id migration marker prevents backfill. Without the marker, the
+    // coordinator would re-approve from the current mutable directory. With
+    // the marker, the system knows this was a new-model install whose receipt
+    // was deleted — not a legacy install. It stays fail-closed.
     const outcome = await manager.migrateLegacyApprovalsOnce();
-    expect(outcome.migrated).toEqual(['hello']);
-    expect(manager.list()[0].approval.state).toBe('approved');
+    expect(outcome).toEqual({ migrated: [], skipped: ['hello'], failed: [], retryPending: [] });
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
 
   it('P0-2:安装不自动落 migration ledger —— 落账失败也不影响安装', async () => {

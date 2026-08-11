@@ -254,9 +254,12 @@ export class GhostInstallReceiptStore {
     // 扫描因瞬时故障失败、且 builtin/市场写入首份 receipt 后永久关闭迁移门，使所有
     // 存量插件变成 legacy-unapproved（P0 红线）。
     //
-    // “有效 receipt + 无 ledger”的 mixed 状态由 migrateLegacyApprovalsOnce 的扫描-跳过
-    // 逻辑安全处理:已有 receipt 的 id 会被跳过，其余 legacy 目录照常迁移；全数落定后
-    // 才由 coordinator 统一写 completed。任何先于迁移的 receipt 写入都不能抢断迁移门。
+    // 代之以 per-id 迁移标记:receipt 初次落账时同步写 `.migrated-<id>` 哨兵文件。
+    // coordinator 扫描时见到”无 receipt + 有哨兵”就跳过 —— 这是新模型装的插件、
+    // 不是 legacy，删掉 receipt 不能骗到一次从可变目录重铸批准。
+    if (!this.hasMigrationLedger()) {
+      await this.ensureMigrationMarker(receipt.id);
+    }
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
       root,
@@ -499,6 +502,42 @@ export class GhostInstallReceiptStore {
       // ENOENT = 从未迁过,可以迁;其它错误(权限等)= 状态未知,保守当作"已迁",
       // 绝不因为读不动 ledger 就把迁移(=从可变安装目录重建授权)再放开一次。
       return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+    }
+  }
+
+  /**
+   * Per-id migration marker path. 与 receipt 同位（状态根内）,coordinator 扫描
+   * 时用它区分"安装了 receipt 之前就是 legacy"与"新模型安装后 receipt 被删"。
+   */
+  private migrationMarkerPath(id: string): string {
+    if (!isValidGhostId(id)) throw new Error('invalid ghost id for migration marker path');
+    return path.join(this.rootDir(), `.migrated-${id}`);
+  }
+
+  /**
+   * 确保 per-id 迁移标记存在。receipt 初次落账时调用；标记是零字节普通文件,
+   * 在 migration ledger 按 completed 关闭前钉住"此 id 已进入新模型"。
+   */
+  async ensureMigrationMarker(id: string): Promise<void> {
+    const root = this.rootDir();
+    await fs.promises.mkdir(root, { recursive: true });
+    const target = this.migrationMarkerPath(id);
+    const temp = path.join(root, `.migrated-${id}-${process.pid}-${crypto.randomBytes(4).toString('hex')}.tmp`);
+    try {
+      await fs.promises.writeFile(temp, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await fs.promises.rename(temp, target);
+    } finally {
+      await fs.promises.rm(temp, { force: true }).catch(() => undefined);
+    }
+  }
+
+  /** 是否存在 per-id 迁移标记(表明此 id 是通过新模型安装,而非 legacy)。 */
+  hasMigrationMarker(id: string): boolean {
+    try {
+      fs.lstatSync(this.migrationMarkerPath(id));
+      return true;
+    } catch {
+      return false;
     }
   }
 

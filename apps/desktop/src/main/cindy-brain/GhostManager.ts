@@ -1319,6 +1319,12 @@ export class GhostManager {
         blockedByPendingJournal.push(id);
         continue;
       }
+      // Per-id 迁移标记:新模型 receipt 落账时同步写入。无 receipt 但有标记 = 新模型
+      // 安装后 receipt 被删,不是 legacy —— 绝不从可变安装目录重铸批准。
+      if (this.receiptStore.hasMigrationMarker(id)) {
+        result.skipped.push(id);
+        continue;
+      }
       candidates.push(id);
     }
 

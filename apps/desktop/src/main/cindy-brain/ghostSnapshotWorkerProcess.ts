@@ -130,6 +130,8 @@ export async function runGhostSnapshotWorkerRequest(
     await verifyDirectory(workingDir, parts[0]);
     const tempPath = workPath(temp);
     await fs.promises.mkdir(tempPath);
+    const tempKind = await classifyGhostDirEntry(tempPath);
+    if (tempKind !== 'directory') throw new Error('snapshot temp directory was replaced before copy');
     const copiedRoots: string[] = [];
     for (const item of [...(request.receipt.manifest.skill?.items ?? [])].sort(
       (left, right) => left.dir.split('/').length - right.dir.split('/').length,
@@ -151,6 +153,8 @@ export async function runGhostSnapshotWorkerRequest(
       if (error) throw new Error(`approved skill ${item.dir} is inconsistent: ${error}`);
     }
     if (!await matches(request.receipt, tempPath)) throw new Error('approved skill content no longer matches receipt');
+    const tempBeforePublish = await classifyGhostDirEntry(tempPath);
+    if (tempBeforePublish !== 'directory') throw new Error('snapshot temp directory was replaced before publish');
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);
     if (exists) await fs.promises.rm(targetPath, { recursive: true, force: true });
@@ -162,6 +166,8 @@ export async function runGhostSnapshotWorkerRequest(
     } catch (error) {
       if (!hasCode(error, 'ENOENT')) throw error;
     }
+    const tempBeforeRename = await classifyGhostDirEntry(tempPath);
+    if (tempBeforeRename !== 'directory') throw new Error('snapshot temp directory was replaced before rename');
     await fs.promises.rename(tempPath, targetPath);
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);

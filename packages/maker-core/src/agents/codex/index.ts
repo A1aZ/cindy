@@ -7707,6 +7707,14 @@ export class CodexAgent extends BaseAgent {
         // actually finished. Close the turn with the policy error and Codex's
         // required idle tail; the tombstone keeps interrupted from becoming a
         // user-Stop done(cancelled:true).
+        // This path deliberately tombstones the provider completion, so the
+        // normal interrupted-turn branch below cannot end a plan cycle for us.
+        // Clear it here before the next send inherits stale Plan Mode state.
+        if (currentTurnPlanModeActive) {
+          proposedPlanText = null;
+          planCycleActive = false;
+          currentTurnPlanModeActive = false;
+        }
         terminalErroredTurnIds.add(turn.id);
         eventQueue.push({
           type: 'error',

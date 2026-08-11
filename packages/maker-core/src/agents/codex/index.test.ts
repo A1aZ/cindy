@@ -13132,6 +13132,57 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('ends an active plan cycle after a host-policy interruption', async () => {
+    const policy = vi.fn(() => ({
+      decision: 'deny' as const,
+      reason: 'use the embedded iOS Simulator',
+    }));
+    let turnSeq = 0;
+    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: `turn-${++turnSeq}` } };
+      if (method === Method.TurnInterrupt) return {};
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-command-item-host-policy-plan-cycle',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'bypassPermissions',
+      planMode: true,
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemStarted || !handlers.turnCompleted) {
+      throw new Error('expected itemStarted and turnCompleted handlers');
+    }
+
+    await handle.send({ type: 'user', content: 'make a plan' });
+    const turnStartRequests = () =>
+      host.request.mock.calls.filter(([method]) => method === Method.TurnStart);
+    const [, planParams] = turnStartRequests()[0] as [string, Record<string, unknown>];
+    expect(planParams.collaborationMode).toMatchObject({ mode: 'plan' });
+
+    handlers.itemStarted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'cmd-plan-bypass',
+        type: 'commandExecution',
+        command: '/usr/bin/open -a Simulator',
+        cwd: '/repo',
+      },
+    });
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'interrupted' },
+    });
+
+    await handle.send({ type: 'user', content: 'continue normally' });
+    const [, normalParams] = turnStartRequests()[1] as [string, Record<string, unknown>];
+    expect(normalParams.collaborationMode).toMatchObject({ mode: 'default' });
+    await handle.close();
+  });
+
   it.each(['interrupted', 'completed', 'failed'] as const)(
     'preserves an early %s turn completion while interrupt ACK is pending',
     async (turnStatus) => {

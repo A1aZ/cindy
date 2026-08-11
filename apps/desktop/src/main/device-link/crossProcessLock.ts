@@ -505,7 +505,11 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     }
     const record = await readLockRecord(filePath, true);
     if (record === 'missing') continue;
-    if (await hasValidGateReleaseMarker(filePath)) {
+    // A leftover .released sidecar from a previous gate instance shares the
+    // same locked file name — its nonce must match the current gate record's
+    // nonce, else it belongs to a different instance and must be ignored.
+    const expectedNonce = typeof record !== 'string' ? record.nonce : undefined;
+    if (await hasValidGateReleaseMarker(filePath, expectedNonce)) {
       await removePathWithRetry(filePath);
       await removePathWithRetry(gateReleaseMarkerPath(filePath));
       continue;
@@ -984,13 +988,13 @@ async function publishGateReleaseMarker(gate: ReclaimGate): Promise<void> {
     await handle.sync();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (!(await hasValidGateReleaseMarker(gate.filePath))) throw error;
+    if (!(await hasValidGateReleaseMarker(gate.filePath, gate.lock.nonce))) throw error;
   } finally {
     await handle?.close().catch(() => undefined);
   }
 }
 
-async function hasValidGateReleaseMarker(gatePath: string): Promise<boolean> {
+async function hasValidGateReleaseMarker(gatePath: string, expectedNonce?: string): Promise<boolean> {
   const markerPath = gateReleaseMarkerPath(gatePath);
   const gateDir = path.dirname(gatePath);
   let gateRealDir: string;
@@ -1011,14 +1015,16 @@ async function hasValidGateReleaseMarker(gatePath: string): Promise<boolean> {
   if (bytes === null) return false;
   try {
     const value = JSON.parse(bytes.toString('utf8')) as unknown;
-    return Boolean(
-      value
-      && typeof value === 'object'
-      && !Array.isArray(value)
-      && (value as Record<string, unknown>).gateFile === path.basename(gatePath)
-      && typeof (value as Record<string, unknown>).nonce === 'string'
-      && isValidNonce((value as Record<string, unknown>).nonce as string),
-    );
+    if (
+      !value
+      || typeof value !== 'object'
+      || Array.isArray(value)
+    ) return false;
+    const obj = value as Record<string, unknown>;
+    if (obj.gateFile !== path.basename(gatePath)) return false;
+    if (typeof obj.nonce !== 'string' || !isValidNonce(obj.nonce)) return false;
+    if (expectedNonce !== undefined && obj.nonce !== expectedNonce) return false;
+    return true;
   } catch {
     return false;
   }

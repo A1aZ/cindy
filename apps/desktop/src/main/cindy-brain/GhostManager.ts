@@ -181,6 +181,8 @@ export interface GhostManagerOptions {
   /** Cindy 维护的发布者/审核公钥表；缺省为空，签名仍验完整性但不抬身份等级。 */
   trustRegistry?: GhostTrustRegistry;
   log?: GhostManagerLogger;
+  /** Test-only stable snapshot mutation seam; production defaults to the worker. */
+  mutateSnapshot?: ConstructorParameters<typeof GhostInstallReceiptStore>[1];
 }
 
 /** install / update 的失败分类 —— IPC 层据此映射错误码。 */
@@ -518,7 +520,10 @@ export class GhostManager {
   }
 
   constructor(private readonly options: GhostManagerOptions) {
-    this.receiptStore = new GhostInstallReceiptStore(() => this.stateRootDir());
+    this.receiptStore = new GhostInstallReceiptStore(
+      () => this.stateRootDir(),
+      this.options.mutateSnapshot,
+    );
     const contentRoot = this.resolveContentRoot();
     const stateRoot = this.resolveStateRoot();
     this.assertDisjointRoots(contentRoot, stateRoot);

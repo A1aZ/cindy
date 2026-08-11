@@ -12,6 +12,7 @@ describe('Node runtime packaging contract', () => {
     const forge = fs.readFileSync(path.join(desktopRoot, 'forge.config.ts'), 'utf8');
     expect(forge).toContain("entry: 'src/main/cindy-brain/nodeRuntimeWorkerProcess.ts'");
     expect(forge).toContain("entry: 'src/main/cindy-brain/forgeScaffoldWorkerProcess.ts'");
+    expect(forge).toContain("entry: 'src/main/cindy-brain/ghostSnapshotWorkerProcess.ts'");
     expect(forge).toContain("target: 'preload'");
     expect(forge).toContain('[FuseV1Options.RunAsNode]: false');
     expect(forge).toContain('[FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false');

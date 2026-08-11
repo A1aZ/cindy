@@ -23,6 +23,10 @@ import {
 } from './ghostContentTree.js';
 import { isPathInsideDir } from './dirDeposit.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
+import {
+  mutateGhostSnapshotWithStableParent,
+  type GhostSnapshotMutationRequest,
+} from './ghostSnapshotCapability.js';
 
 // v2 pairs receipts with the unambiguous ghostContentTree framing. Keeping v1
 // readable would let an old ambiguous digest authorize a snapshot under the
@@ -166,7 +170,12 @@ export type GhostPendingMutationListResult =
 
 /** Host-owned receipt store：严格读取、同目录临时文件 + rename 原子提交。 */
 export class GhostInstallReceiptStore {
-  constructor(private readonly getRootDir: () => string) {}
+  constructor(
+    private readonly getRootDir: () => string,
+    private readonly mutateSnapshot: (
+      request: GhostSnapshotMutationRequest,
+    ) => Promise<void> = mutateGhostSnapshotWithStableParent,
+  ) {}
 
   rootDir(): string {
     return path.resolve(this.getRootDir());
@@ -281,9 +290,17 @@ export class GhostInstallReceiptStore {
     // and transient IO failures remain observable so the caller keeps its journal.
     const snapshotPath = await this.assertManagedSnapshotParent(id, { createMissing: false });
     if (!snapshotPath) return;
-    await fs.promises.rm(snapshotPath, {
-      recursive: true,
-      force: true,
+    const parentDir = path.join(this.rootDir(), 'skill-snapshots');
+    const parentStats = await fs.promises.lstat(parentDir, { bigint: true });
+    await this.mutateSnapshot({
+      parentDir,
+      expectedParent: {
+        realPath: await fs.promises.realpath(parentDir),
+        dev: parentStats.dev,
+        ino: parentStats.ino,
+      },
+      operation: 'remove',
+      targetName: id,
     });
   }
 
@@ -300,7 +317,10 @@ export class GhostInstallReceiptStore {
     }
     const snapshotPath = this.assertManagedSnapshotParentSync(id, { createMissing: false });
     if (!snapshotPath) return;
-    fs.rmSync(snapshotPath, { recursive: true, force: true });
+    // Startup recovery is synchronous, while the only safe recursive cleanup
+    // capability is the cwd-bound utility worker. Removing the receipt is the
+    // authorization boundary; retain the now-unreferenced snapshot for later
+    // asynchronous cleanup rather than performing a pathname-based rmSync.
   }
 
   skillSnapshotRoot(id: string, revision: string): string {
@@ -684,141 +704,24 @@ export class GhostInstallReceiptStore {
   ): Promise<void> {
     const items = receipt.manifest.skill?.items ?? [];
     if (items.length === 0) return;
-    const target = this.skillSnapshotRoot(receipt.id, receipt.revision);
-    // 父段遏制必须先于**任何**对 target 的操作:lstat/rm/rename 都会穿透被换成
-    // junction 的父段,读写到状态根之外(见 assertManagedSnapshotParent 头注释)。
-    const parent = await this.assertManagedSnapshotParent(receipt.id, { createMissing: true });
-    if (!parent) throw new Error('skill snapshot parent unavailable');
-    let existing: fs.Stats | null;
-    try {
-      existing = await fs.promises.lstat(target);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      existing = null;
+    const snapshotsRoot = path.join(this.rootDir(), 'skill-snapshots');
+    try { await fs.promises.mkdir(snapshotsRoot, { recursive: false }); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-    if (existing) {
-      if (!existing.isDirectory()) {
-        throw new Error('approved skill snapshot target is not a directory');
-      }
-      // 快照已存在**不等于**它还是被批准的那份字节:状态根里的目录同样可被同权限
-      // 进程改写,而主 Agent 是顺着共享技能链接持续读它的。所以这里必须重算,
-      // 不能像上一版那样直接早退信任它。
-      if (await this.skillSnapshotMatchesReceipt(receipt, target)) return;
-      // 对不上的快照一律不可信:删掉,退回下面的重建路径 —— 重建本身仍要过安装
-      // 目录的字节校验,所以"损坏快照"能自愈,"安装字节已漂移"仍然拒。
-      await fs.promises.rm(target, { recursive: true, force: true });
-    }
-    if (!skillSourceDir) {
-      throw new Error('approved skill snapshot is missing');
-    }
-    const temp = path.join(
-      parent,
-      `.${receipt.revision}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
-    );
-    try {
-      await fs.promises.mkdir(temp, { recursive: false });
-
-      // 顺序是安全要点,不要改回"先校验源目录、再复制":源目录随时可被同权限进程
-      // 改写,校验和复制各读一次就有一个可换字节的窗口,复制出来的快照可能不是被
-      // 校验过的那一份。因此**先复制到 temp,再对 temp 里(即将成为快照的)那份字节
-      // 做全部权威校验**,校验通过才 rename 就位。
-      // 清单允许嵌套的 skill dir(如 skills/foo 与 skills/foo/bar —— 校验只拒重复,
-      // 不拒前缀嵌套)。祖先目录的整树复制已经带上了嵌套项的字节,再按嵌套项复制一次
-      // 会撞上 COPYFILE_EXCL 直接失败 —— 那会让一份合法清单在装入/更新/迁移/重新确认
-      // 四条路上全军覆没(§5 红线)。按深度排序、祖先先复制,已覆盖的嵌套项跳过复制;
-      // 指纹校验仍逐 item 进行(嵌套项的根就在祖先拷出的树里)。大小写折叠比较,
-      // 与清单查重同口径。
-      const copiedRoots: string[] = [];
-      const itemsByDepth = [...items].sort(
-        (a, b) => a.dir.split('/').length - b.dir.split('/').length,
-      );
-      for (const item of itemsByDepth) {
-        const dirFold = item.dir.toLowerCase();
-        if (copiedRoots.some((root) => dirFold === root || dirFold.startsWith(`${root}/`))) {
-          continue;
-        }
-        // 与算指纹同一个解析入口:逐段确认真目录,挡住"中间段被换成链接"这条从技能
-        // 目录之外取字节的路子。两侧必须共用,否则一侧穿透、一侧不穿透,复制的和
-        // 算指纹的就不是同一组字节。
-        const source = await resolveGhostContentPath(skillSourceDir, item.dir, {
-          expect: 'directory',
-          label: 'approved skill',
-        });
-        // 复制前的便宜预检:只为早失败、少做无用功(避免整份拷一个超大 SKILL.md)。
-        // **这不是安全边界** —— 它读的是可变源目录,结论随时可能过期,真正说话的是
-        // 下面对 temp 的校验。
-        const sourceSkillMdStat = await fs.promises
-          .lstat(path.join(source, 'SKILL.md'))
-          .catch(() => null);
-        if (
-          sourceSkillMdStat &&
-          (!sourceSkillMdStat.isFile() || sourceSkillMdStat.size > GHOST_SKILL_MD_MAX_BYTES)
-        ) {
-          throw new Error(
-            `approved skill ${item.dir}/SKILL.md is not a regular file or exceeds ${GHOST_SKILL_MD_MAX_BYTES} bytes`,
-          );
-        }
-        await copyRegularDirectory(source, path.join(temp, ...item.dir.split('/')));
-        copiedRoots.push(dirFold);
-      }
-
-      // 权威校验一律针对 temp:此刻这些字节已经脱离可变安装目录,复制期间被换过也
-      // 会在这里暴露。**尺寸上限必须排在算指纹之前** —— 源目录那道预检不是安全边界
-      // (预检后可被换成超大文件),若先算指纹就等于上限在权威路径上一次都没生效。
-      for (const item of items) {
-        const copiedSkillMdPath = path.join(temp, ...item.dir.split('/'), 'SKILL.md');
-        // 包一层领域错误:这一段现在排在算指纹之前,SKILL.md 缺失时若直接抛裸 ENOENT,
-        // 日志里就看不出是"技能内容被动过"这件事(只有被篡改时才可达,两种写法都
-        // fail closed,纯粹为可读性)。
-        const copiedSkillMdStat = await fs.promises.lstat(copiedSkillMdPath).catch((error) => {
-          throw new Error(
-            `approved skill ${item.dir}/SKILL.md is unreadable in the snapshot: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          );
-        });
-        if (!copiedSkillMdStat.isFile() || copiedSkillMdStat.size > GHOST_SKILL_MD_MAX_BYTES) {
-          throw new Error(
-            `approved skill ${item.dir}/SKILL.md is not a regular file or exceeds ${GHOST_SKILL_MD_MAX_BYTES} bytes`,
-          );
-        }
-      }
-      // 指纹判定走与"接受既有快照""发布后复核"同一个 helper:同一判据只有一份实现,
-      // 否则三处各写一遍、日后只改其中一处,就是这条链路前几轮反复出问题的形态。
-      if (!(await this.skillSnapshotMatchesReceipt(receipt, temp))) {
-        throw new Error(
-          `approved skill content for ${receipt.id} no longer matches the bytes approved at install time`,
-        );
-      }
-      for (const item of items) {
-        // 指纹相符已经蕴含 frontmatter 一致(批准时点那份过过这道校验),这里重跑一遍
-        // 是防止钉指纹那条路径本身有 bug,并给出更具体的错误。
-        const consistencyError = checkSkillMdConsistency(
-          await fs.promises.readFile(path.join(temp, ...item.dir.split('/'), 'SKILL.md'), 'utf8'),
-          item,
-        );
-        if (consistencyError) {
-          throw new Error(`approved skill ${item.dir} is inconsistent: ${consistencyError}`);
-        }
-      }
-
-      await fs.promises.rename(temp, target);
-
-      // rename 之前 temp 位于状态根内、同权限进程仍可改写它,所以就位之后再核一遍:
-      // 这一步把"校验通过 → rename"之间那段窗口收掉 —— 在那段里被换过的字节到这里
-      // 会暴露,并且不会留在盘上。
-      //
-      // 残留窗口(已知、未关):这次核对之后、主 Agent 顺着共享技能链接读取之前,快照
-      // 仍可被改写。要真正关掉需要给状态根写保护或在消费侧校验,都不在本函数范围内;
-      // 该缺口已正式登记在 docs/dev-rules/plugin-security-and-authoring.md 第 6 节
-      // (与"内容根字节可变"是两条并列的不同缺口)。
-      if (!(await this.skillSnapshotMatchesReceipt(receipt, target))) {
-        await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
-        throw new Error('approved skill snapshot changed while being published');
-      }
-    } finally {
-      await fs.promises.rm(temp, { recursive: true, force: true }).catch(() => undefined);
-    }
+    const rootStats = await fs.promises.lstat(snapshotsRoot, { bigint: true });
+    if (!rootStats.isDirectory() || rootStats.isSymbolicLink()) throw new Error('skill snapshot root unavailable');
+    await this.mutateSnapshot({
+      parentDir: snapshotsRoot,
+      expectedParent: {
+        realPath: await fs.promises.realpath(snapshotsRoot),
+        dev: rootStats.dev,
+        ino: rootStats.ino,
+      },
+      operation: 'ensure',
+      targetName: `${receipt.id}/${receipt.revision}`,
+      receipt,
+      ...(skillSourceDir ? { sourceDir: skillSourceDir } : {}),
+    });
   }
 
   /**

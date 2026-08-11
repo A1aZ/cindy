@@ -15,7 +15,9 @@ describe('GhostInstallReceiptStore cleanup', () => {
     workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'cindy-receipt-cleanup-'));
     stateRoot = path.join(workDir, 'state');
     await fs.promises.mkdir(stateRoot);
-    store = new GhostInstallReceiptStore(() => stateRoot);
+    store = new GhostInstallReceiptStore(() => stateRoot, async ({ parentDir, targetName, operation }) => {
+      if (operation === 'remove') await fs.promises.rm(path.join(parentDir, targetName), { recursive: true, force: true });
+    });
   });
 
   afterEach(async () => {

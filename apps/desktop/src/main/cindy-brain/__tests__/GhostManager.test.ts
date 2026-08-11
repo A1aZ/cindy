@@ -13,6 +13,7 @@ import {
 } from '../../../shared/ghost';
 import { CINDY_OFFICIAL_GHOST_TRUST, GhostManager, readLegacyGhostApprovalProjection } from '../GhostManager';
 import { hashApprovedSkillContent } from '../ghostInstallReceipt';
+import { runGhostSnapshotWorkerRequest } from '../ghostSnapshotWorkerProcess';
 
 /** 每个用例独立的临时仓库根 + 源文件目录(规则 23:测试路径一律 os.tmpdir)。 */
 let workDir: string;
@@ -46,6 +47,10 @@ beforeEach(async () => {
       trustedBundledIds.has(id) &&
       path.resolve(sourceDir) === path.resolve(workDir, 'bundled-seeds', id),
     recordBuiltinTombstone,
+    mutateSnapshot: async (request) => {
+      const { parentDir, ...workerRequest } = request;
+      await runGhostSnapshotWorkerRequest(workerRequest, parentDir);
+    },
   });
 });
 

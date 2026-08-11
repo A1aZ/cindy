@@ -40,6 +40,14 @@ describe('useStreamFadePreference', () => {
     expect(result.current.isCustomized).toBe(true);
   });
 
+  it('clears a legacy on override after the default changes to on', () => {
+    localStorage.setItem(KEY, 'on');
+    expect(getStreamFadePreference()).toBe('on');
+    expect(localStorage.getItem(KEY)).toBeNull();
+    const { result } = renderHook(() => useStreamFadePreference());
+    expect(result.current.isCustomized).toBe(false);
+  });
+
   it('falls back to default on garbage stored value', () => {
     localStorage.setItem(KEY, 'whatever');
     expect(getStreamFadePreference()).toBe('on');

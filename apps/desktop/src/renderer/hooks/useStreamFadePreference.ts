@@ -29,6 +29,14 @@ function parsePreference(raw: string | null): StreamFadePreference | null {
   return raw === 'on' || raw === 'off' ? raw : null;
 }
 
+function clearDefaultOverride(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // localStorage 不可用——保留内存中的默认值即可。
+  }
+}
+
 /** 模块级内存 SoT;null = 尚未被本窗口读定/写定。 */
 let memoryValue: StreamFadePreference | null = null;
 
@@ -37,6 +45,11 @@ export function getStreamFadePreference(): StreamFadePreference {
   if (memoryValue !== null) return memoryValue;
   try {
     const parsed = parsePreference(localStorage.getItem(STORAGE_KEY));
+    if (parsed === DEFAULT_PREFERENCE) {
+      // 清理旧版本留下的默认值 override，避免它阻断未来默认值迁移。
+      clearDefaultOverride();
+      return (memoryValue = DEFAULT_PREFERENCE);
+    }
     if (parsed) return (memoryValue = parsed);
   } catch {
     // localStorage 不可用——退回默认(不落定内存,留待后续写入)。
@@ -53,7 +66,9 @@ function notifyListeners(): void {
 
 function onStorage(e: StorageEvent): void {
   if (e.key !== STORAGE_KEY) return;
-  memoryValue = parsePreference(e.newValue) ?? DEFAULT_PREFERENCE;
+  const parsed = parsePreference(e.newValue);
+  if (parsed === DEFAULT_PREFERENCE) clearDefaultOverride();
+  memoryValue = parsed ?? DEFAULT_PREFERENCE;
   notifyListeners();
 }
 

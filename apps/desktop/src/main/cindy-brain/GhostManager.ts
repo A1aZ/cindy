@@ -1500,11 +1500,20 @@ export class GhostManager {
           ...(prev?.failedIds?.length ? { failedIds: prev.failedIds } : {}),
           state: 'in-progress',
           pendingIds: queuedIds,
-          recoveryApprovalProjectionSha256ById: Object.fromEntries(
-            queuedIds
-              .filter((id) => options.expectedApprovalProjectionSha256ById[id] !== undefined)
-              .map((id) => [id, options.expectedApprovalProjectionSha256ById[id]]),
-          ),
+          recoveryApprovalProjectionSha256ById: (() => {
+            // Merge carried-over digests from the previous ledger with the current
+            // call's frozen digests. A later recovery pass for a different id must
+            // not drop older digests, or the generic retry path will backfill without
+            // the pre-rename baseline.
+            const merged: Record<string, string> = {
+              ...prev?.recoveryApprovalProjectionSha256ById,
+            };
+            for (const id of queuedIds) {
+              const current = options.expectedApprovalProjectionSha256ById[id];
+              if (current !== undefined) merged[id] = current;
+            }
+            return merged;
+          })(),
         });
         for (const id of queuedIds) pendingForRetry.add(id);
       }
@@ -1592,11 +1601,24 @@ export class GhostManager {
           ...(pendingForRetry.size > 0
             ? {
                 pendingIds: [...pendingForRetry].sort(),
-                recoveryApprovalProjectionSha256ById: Object.fromEntries(
-                  [...pendingForRetry]
-                    .filter((id) => options.expectedApprovalProjectionSha256ById[id] !== undefined)
-                    .map((id) => [id, options.expectedApprovalProjectionSha256ById[id]]),
-                ),
+                recoveryApprovalProjectionSha256ById: (() => {
+                  // Merge carried-over digests from the previous ledger with the
+                  // current call's frozen digests. An id pending from a prior
+                  // recovery pass won't appear in options but must retain its
+                  // pre-rename baseline for the generic retry path.
+                  const merged: Record<string, string> = {
+                    ...prev?.recoveryApprovalProjectionSha256ById,
+                  };
+                  for (const id of pendingForRetry) {
+                    const current = options.expectedApprovalProjectionSha256ById[id];
+                    if (current !== undefined) merged[id] = current;
+                  }
+                  return Object.fromEntries(
+                    [...pendingForRetry]
+                      .filter((id) => merged[id] !== undefined)
+                      .map((id) => [id, merged[id]]),
+                  );
+                })(),
               }
             : {}),
         });

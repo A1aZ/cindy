@@ -167,12 +167,18 @@ export interface ModelModalities {
   output: string[];
 }
 
+interface ModelCatalogAgentOverride extends Omit<ModelAgentOverride, 'defaultEffort'> {
+  /** Older Model Access responses use null to mean that no effort is preferred. */
+  defaultEffort?: ModelEffort | null;
+}
+
 interface ModelCatalogEntryBase extends ModelPricing {
   id: string;
   mode?: string;
   /** Optional for compatibility with older Model Access responses. */
   currency?: ModelCurrency;
-  agents: ModelAgent[];
+  /** Missing or empty legacy values default to claude-code in the Desktop catalog. */
+  agents?: ModelAgent[];
   name?: string;
   group?: string;
   description?: string;
@@ -181,11 +187,11 @@ interface ModelCatalogEntryBase extends ModelPricing {
   maxOutputTokens?: number;
   modalities?: ModelModalities;
   efforts?: ModelEffort[];
-  defaultEffort?: ModelEffort;
+  defaultEffort?: ModelEffort | null;
   sortOrder?: number;
   supportsFastMode?: boolean;
   defaultEnabled?: boolean;
-  perAgent?: Partial<Record<ModelAgent, ModelAgentOverride>>;
+  perAgent?: Partial<Record<ModelAgent, ModelCatalogAgentOverride>>;
 }
 
 export interface ModelCatalogEntryV1 extends ModelCatalogEntryBase {

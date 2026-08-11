@@ -149,8 +149,9 @@ describe('plugin delivery contract', () => {
   it('parses a visible Plugin detail and validates its manifest', () => {
     const detailManifest = {
       ...validManifest,
-      slots: ['tool', 'panel', 'badge', 'confirm'],
+      slots: ['tool', 'panel', 'badge', 'confirm', 'agent'],
       panel: { html: 'panel.html' },
+      agent: { errand: true, schedule: true },
     } as const;
     const response = parseGetPluginResponse({
       schemaVersion: PLUGIN_API_SCHEMA_VERSION,
@@ -179,7 +180,12 @@ describe('plugin delivery contract', () => {
       'panel',
       'badge',
       'confirm',
+      'agent',
     ]);
+    expect(response.plugin.currentRelease.manifest.agent).toEqual({
+      errand: true,
+      schedule: true,
+    });
   });
 
   it('preserves the version-gated ios-simulator slot in Plugin details', () => {

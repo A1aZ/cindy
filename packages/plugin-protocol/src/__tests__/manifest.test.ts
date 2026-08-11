@@ -1338,6 +1338,19 @@ describe('Ghost manifest contract', () => {
     });
     expect(backgroundAgent.ok).toBe(true);
     if (backgroundAgent.ok) expect(backgroundAgent.manifest.agent).toEqual({ background: true });
+
+    for (const [capability, expected] of [
+      ['errand', { errand: true }],
+      ['schedule', { schedule: true }],
+    ] as const) {
+      const result = validateGhostManifest({
+        ...validManifest,
+        slots: ['tool', 'agent'],
+        agent: { [capability]: true },
+      });
+      expect(result.ok, capability).toBe(true);
+      if (result.ok) expect(result.manifest.agent).toEqual(expected);
+    }
   });
 
   it("panel.position 'tab' 合法;tab 时停靠专属字段(minWidth/defaultFraction)明确拒绝", () => {

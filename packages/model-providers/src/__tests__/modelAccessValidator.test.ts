@@ -240,6 +240,41 @@ describe('model access catalog contract', () => {
     );
   });
 
+  it('accepts missing or empty legacy agents while rejecting unsupported explicit values', () => {
+    const {
+      agents: _agents,
+      newSessionDefault: _newSessionDefault,
+      perAgent: _perAgent,
+      ...withoutAgents
+    } = VALID_RESPONSE.models[0]!;
+
+    for (const model of [withoutAgents, { ...withoutAgents, agents: [] }]) {
+      expect(parseListModelsResponse({ ...VALID_RESPONSE, models: [model] }).ok).toBe(true);
+    }
+    expectReject(
+      {
+        ...VALID_RESPONSE,
+        models: [{ ...VALID_RESPONSE.models[0], agents: ['pi'] }],
+      },
+      'response.models[0].agents',
+    );
+  });
+
+  it('accepts null defaults from Model Access at the model and agent-override levels', () => {
+    expect(
+      parseListModelsResponse({
+        ...VALID_RESPONSE,
+        models: [
+          {
+            ...VALID_RESPONSE.models[0],
+            defaultEffort: null,
+            perAgent: { codex: { defaultEffort: null } },
+          },
+        ],
+      }).ok,
+    ).toBe(true);
+  });
+
   it('rejects unsupported schema versions and malformed nested pricing', () => {
     expectReject({ ...VALID_RESPONSE, schemaVersion: 3 }, 'response.schemaVersion');
     expectReject(

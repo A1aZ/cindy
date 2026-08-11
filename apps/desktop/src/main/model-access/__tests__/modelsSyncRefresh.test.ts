@@ -47,6 +47,25 @@ describe('parseModelsSyncPayload', () => {
     });
   });
 
+  it('preserves missing agents and null effort defaults for existing catalog fallbacks', () => {
+    const { agents: _agents, ...modelWithoutAgents } = baseModel;
+    const legacyModel = { ...modelWithoutAgents, defaultEffort: null } as const;
+    const modelWithOverride = {
+      ...baseModel,
+      defaultEffort: null,
+      perAgent: { codex: { defaultEffort: null } },
+    } as const;
+
+    expect(parseModelsSyncPayload({ schemaVersion: 2, models: [legacyModel] })).toEqual({
+      ok: true,
+      models: [legacyModel],
+    });
+    expect(parseModelsSyncPayload({ schemaVersion: 2, models: [modelWithOverride] })).toEqual({
+      ok: true,
+      models: [modelWithOverride],
+    });
+  });
+
   it.each([
     {
       label: 'unknown schema version',

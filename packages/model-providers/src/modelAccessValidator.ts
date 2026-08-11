@@ -289,6 +289,7 @@ function overrideError(
   path: string,
   baseEfforts: readonly ModelEffort[] | undefined,
   allowedFields?: readonly string[],
+  allowNullDefaultEffort = false,
 ): string | null {
   if (!isPlainObject(value)) return `${path} must be an object`;
   let error = allowedFields ? unknownFieldError(value, allowedFields, path) : null;
@@ -297,7 +298,14 @@ function overrideError(
   if (error) return error;
   error = effortListError(value.efforts, `${path}.efforts`);
   if (error) return error;
-  if (value.defaultEffort !== undefined && !isModelEffort(value.defaultEffort)) {
+  if (
+    value.defaultEffort !== undefined &&
+    value.defaultEffort !== null &&
+    !isModelEffort(value.defaultEffort)
+  ) {
+    return `${path}.defaultEffort must be a supported effort value when present`;
+  }
+  if (value.defaultEffort === null && !allowNullDefaultEffort) {
     return `${path}.defaultEffort must be a supported effort value when present`;
   }
   const effectiveEfforts =
@@ -305,9 +313,9 @@ function overrideError(
       ? (value.efforts as ModelEffort[])
       : baseEfforts;
   if (
-    value.defaultEffort !== undefined &&
+    isModelEffort(value.defaultEffort) &&
     effectiveEfforts !== undefined &&
-    !effectiveEfforts.includes(value.defaultEffort as ModelEffort)
+    !effectiveEfforts.includes(value.defaultEffort)
   ) {
     return `${path}.defaultEffort must be included in ${path}.efforts or the base efforts`;
   }
@@ -396,13 +404,12 @@ function modelEntryError(
     return `${path}.currency must be CNY or USD when present`;
   }
   if (
-    !Array.isArray(value.agents) ||
-    value.agents.length === 0 ||
-    value.agents.some((agent) => !isModelAgent(agent))
+    value.agents !== undefined &&
+    (!Array.isArray(value.agents) || value.agents.some((agent) => !isModelAgent(agent)))
   ) {
-    return `${path}.agents must be a non-empty array of supported agents`;
+    return `${path}.agents must be an array of supported agents when present`;
   }
-  const supportedAgents = value.agents as ModelAgent[];
+  const supportedAgents = Array.isArray(value.agents) ? (value.agents as ModelAgent[]) : [];
   if (schemaVersion === MODEL_ACCESS_CATALOG_SCHEMA_VERSION) {
     const defaultError = newSessionDefaultError(
       value.newSessionDefault,
@@ -434,7 +441,11 @@ function modelEntryError(
   if (error) return error;
   error = effortListError(value.efforts, `${path}.efforts`);
   if (error) return error;
-  if (value.defaultEffort !== undefined && !isModelEffort(value.defaultEffort)) {
+  if (
+    value.defaultEffort !== undefined &&
+    value.defaultEffort !== null &&
+    !isModelEffort(value.defaultEffort)
+  ) {
     return `${path}.defaultEffort must be a supported effort value when present`;
   }
   const efforts =
@@ -442,9 +453,9 @@ function modelEntryError(
       ? (value.efforts as ModelEffort[])
       : undefined;
   if (
-    value.defaultEffort !== undefined &&
+    isModelEffort(value.defaultEffort) &&
     efforts !== undefined &&
-    !efforts.includes(value.defaultEffort as ModelEffort)
+    !efforts.includes(value.defaultEffort)
   ) {
     return `${path}.defaultEffort must be included in ${path}.efforts`;
   }
@@ -477,6 +488,7 @@ function modelEntryError(
         `${path}.perAgent.${agent}`,
         efforts,
         MODEL_AGENT_OVERRIDE_FIELDS,
+        true,
       );
       if (error) return error;
     }

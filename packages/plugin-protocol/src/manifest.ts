@@ -162,11 +162,12 @@ export interface GhostCardNeeds {
  * Agent 新回合能力详单。
  *
  * 申请 `agent` 槽默认只允许消费宿主在真实用户点击插件卡片时签发的
- * 一次性通行票。`background: true` 额外允许插件在没有当次点击票据时,
- * 对已经由用户建立过关联的会话发起回合;这是更高一档权限,安装时单列。
+ * 一次性通行票。三个可选加档均由 Desktop 独立展示并授权。
  */
 export interface GhostAgentNeeds {
   background?: boolean;
+  errand?: boolean;
+  schedule?: boolean;
 }
 
 /** 插件随包本地 Node 工作进程使用的 stdio 协议。 */
@@ -2424,7 +2425,7 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     };
   }
 
-  // agent 槽能力详单:缺省 = 仅点击票据;background: true 是更高一档权限。
+  // agent 槽能力详单:缺省 = 仅点击票据;三个加档由 Desktop 独立展示并授权。
   let agent: GhostAgentNeeds | undefined;
   if (raw.agent !== undefined) {
     if (!isPlainObject(raw.agent)) {
@@ -2434,7 +2435,9 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
       return { ok: false, reason: '声明了 agent 能力详单但 slots 未包含 "agent"' };
     }
     const agentRaw = raw.agent as Record<string, unknown>;
-    const unknownAgentField = Object.keys(agentRaw).find((key) => key !== 'background');
+    const unknownAgentField = Object.keys(agentRaw).find(
+      (key) => key !== 'background' && key !== 'errand' && key !== 'schedule',
+    );
     if (unknownAgentField) {
       return {
         ok: false,
@@ -2444,14 +2447,24 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
     if (agentRaw.background !== undefined && typeof agentRaw.background !== 'boolean') {
       return { ok: false, reason: 'agent.background 必须是布尔值' };
     }
-    if (agentRaw.background !== true) {
+    if (agentRaw.errand !== undefined && typeof agentRaw.errand !== 'boolean') {
+      return { ok: false, reason: 'agent.errand 必须是布尔值' };
+    }
+    if (agentRaw.schedule !== undefined && typeof agentRaw.schedule !== 'boolean') {
+      return { ok: false, reason: 'agent.schedule 必须是布尔值' };
+    }
+    if (agentRaw.background !== true && agentRaw.errand !== true && agentRaw.schedule !== true) {
       return {
         ok: false,
         reason:
-          'agent 能力详单目前只有 background: true 这一项;仅需用户点击触发时请省略 agent 字段',
+          'agent 能力详单只有 background: true / errand: true / schedule: true 三项加档;仅需用户点击触发时请省略 agent 字段',
       };
     }
-    agent = { background: true };
+    agent = {
+      ...(agentRaw.background === true ? { background: true } : {}),
+      ...(agentRaw.errand === true ? { errand: true } : {}),
+      ...(agentRaw.schedule === true ? { schedule: true } : {}),
+    };
   }
 
   // node 槽详单:只收包内入口 + 固定 stdio 协议 + 生命周期。这里刻意采用

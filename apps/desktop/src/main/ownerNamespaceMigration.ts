@@ -1051,10 +1051,26 @@ export async function recoverLegacyGhostPlugins(
   const scopedDiscovery = scanLegacyGhostDirsInRoots([
     ownerScopedLegacyGhostRootDir(userDataDir, ownerKey),
   ]);
-  const targetRoot = path.join(userDataDir, 'owners', ownerKey, 'cindy-brain');
-  const targetDiscovery = scanLegacyGhostDirsInRoots([targetRoot]);
   const sharedLegacyGhosts = sharedDiscovery.ghosts;
   const scopedLegacyGhosts = scopedDiscovery.ghosts;
+  // Defer the target-root scan until we know there are legacy sources or
+  // pending recovery ids.  Scanning beforehand can block the synchronous
+  // owner claim when an unrelated installed plugin has a corrupt ghost.json
+  // (e.g. leftover FIFO after a sync conflict).  Pattern from
+  // getLegacyGhostRecoveryStatusForActiveSession (checklist item 6.5a).
+  const targetRoot = path.join(userDataDir, 'owners', ownerKey, 'cindy-brain');
+  const earlyRecoveryMarkerRead = readLegacyGhostRecoveryMarkerSync(
+    userDataDir,
+    ownerKey,
+  );
+  const hasRecoveryCandidates =
+    sharedLegacyGhosts.length > 0 ||
+    scopedLegacyGhosts.length > 0 ||
+    (earlyRecoveryMarkerRead.kind === 'ready' &&
+      (earlyRecoveryMarkerRead.marker?.pendingIds?.length ?? 0) > 0);
+  const targetDiscovery = hasRecoveryCandidates
+    ? scanLegacyGhostDirsInRoots([targetRoot])
+    : { ghosts: [], deferredIds: [], invalidIds: [], deferredRoots: [] };
   const discoveryDeferred =
     sharedDiscovery.deferredRoots.length > 0 ||
     sharedDiscovery.deferredIds.length > 0 ||

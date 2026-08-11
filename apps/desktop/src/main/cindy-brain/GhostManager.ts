@@ -3451,7 +3451,7 @@ export class GhostManager {
         await this.receiptStore.write({
           ...current.receipt,
           enabled,
-        });
+        }, { skillSourceDir: sourceDir });
         await this.finishTrustedBundledPublish(manifest.id, pendingPublish);
         this.untrustedApprovals.delete(this.isolationKey(manifest.id));
         return true;

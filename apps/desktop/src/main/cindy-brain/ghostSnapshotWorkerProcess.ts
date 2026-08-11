@@ -1,3 +1,20 @@
+/**
+ * Skill snapshot 的 cwd-bound utility worker。
+ *
+ * 防御策略（见 plugin-security-and-authoring.md §Review 清单 6.5a）：
+ *   verifyParent → mkdir temp → classifyGhostDirEntry(temp) →
+ *   从 sourceDir 复制内容到 temp → matches(temp) 内容哈希 → 多层 pre-rename 复验
+ *   (verifyParent + verifyDirectory + classifyGhostDirEntry + lstat absence) →
+ *   原子 rename → post-rename classifyGhostDirEntry → matches(target) → cleanup。
+ *
+ * pre-check（classifyGhostDirEntry / verifyParent / matches）只缩窄 TOCTOU
+ * 窗口；post-rename classifyGhostDirEntry + matches() 才是真正的安全判定
+ * （matches() 自身不校验 baseDir，见 ghostContentTree.ts:68）。
+ * pre-rename classifyGhostDirEntry 与 rename 之间的单 await 间隙是 Node.js
+ * 未暴露 renameat 的硬边界，不可消除——安全判定必须在操作之后做，不能靠
+ * 叠加更多 pre-check。
+ * cleanup 按 verifyParent + verifyDirectory 做身份守卫，不按 pathname 删。
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 

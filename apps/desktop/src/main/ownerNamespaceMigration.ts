@@ -873,7 +873,6 @@ export function getLegacyGhostRecoveryStatus(
     ownerScopedLegacyGhostRootDir(root, ownerKey),
   ]);
   const targetRoot = path.join(root, 'owners', ownerKey, 'cindy-brain');
-  const targetDiscovery = scanLegacyGhostDirsInRoots([targetRoot]);
   const sharedLegacyGhosts = sharedDiscovery.ghosts;
   const scopedLegacyGhosts = scopedDiscovery.ghosts;
   const legacyGhosts = [...sharedLegacyGhosts, ...scopedLegacyGhosts];
@@ -881,6 +880,16 @@ export function getLegacyGhostRecoveryStatus(
   const recoveryMarker = recoveryMarkerRead.kind === 'ready'
     ? recoveryMarkerRead.marker
     : null;
+  // Defer the target-root scan until we know there are legacy sources or
+  // pending recovery ids.  Scanning beforehand wastes work in a healthy
+  // profile and, worse, can block the recovery-status IPC or report a
+  // spurious deferred status when an unrelated installed plugin has a
+  // corrupt ghost.json (e.g. leftover FIFO after a sync conflict).
+  const hasRecoveryCandidates =
+    legacyGhosts.length > 0 || (recoveryMarker?.pendingIds?.length ?? 0) > 0;
+  const targetDiscovery = hasRecoveryCandidates
+    ? scanLegacyGhostDirsInRoots([targetRoot])
+    : { ghosts: [], deferredIds: [], invalidIds: [], deferredRoots: [] };
   const sourceDiscoveryProblemIds = new Set([
     ...sharedDiscovery.deferredIds,
     ...sharedDiscovery.invalidIds,

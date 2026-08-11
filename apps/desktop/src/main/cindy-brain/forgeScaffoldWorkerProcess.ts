@@ -1,3 +1,17 @@
+/**
+ * Forge scaffold 的 cwd-bound utility worker。
+ *
+ * 防御策略（见 plugin-security-and-authoring.md §Review 清单 6.5a）：
+ *   mkdir(atomic no-clobber gate) → pre-check（fast fail）→ per-entry 操作 →
+ *   post-loop verifyParent → dev/ino-guarded cleanup（仅 catch 失败时触发）→
+ *   finally 清理 staging。
+ * per-entry 复验（lstat + isDir + isSymlink + dev/ino + realpath in bigint）
+ * 在每次 rename 前执行，缩窄 TOCTOU 窗口到单 await 边界。
+ * 最后一个 per-entry 检查与最后一个 rename 之间的间隙是 Node.js 未暴露
+ * renameat 的硬边界，不可消除——dev/ino-guarded cleanup 提供补偿控制。
+ * 再增加 pre-check 不能关闭此间隙；安全方向是保持当前的 post-loop
+ * verifyParent + identity-guarded cleanup，而不是叠加更多路径检查。
+ */
 import fs from 'node:fs';
 import path from 'node:path';
 

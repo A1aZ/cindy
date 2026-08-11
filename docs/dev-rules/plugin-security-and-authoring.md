@@ -435,6 +435,13 @@ topic 路由；产品层多端语义见
    相对路径逐段解析 + 统一指纹格式），而不是就地 `readdir` + `isDirectory()` 或 `stat`
    直读？策略差异（点开头条目算不算内容、非普通条目 throw 还是 flag）是否以显式参数
    表达而不是复制一份实现？
+6.5a. **新增的路径式 worker（skill snapshot、Forge scaffold 等）是否采用
+   「操作前检查（fast fail）→ 原子操作 → 操作后复验 → identity-guarded cleanup」
+   模式，而不是仅靠操作前检查判定安全？** 操作后复验是否落在原子操作**之后**、
+   无 TOCTOU 间隙的位置（如 `rename` 之后立刻 `lstat` + identity compare，而不是
+   在 `rename` 之前加更多 `lstat`）？pre-check 与 rename 之间的间隙是 Node.js 未暴露
+   `renameat` 等 fd-relative 原语的硬边界，不可消除——因此安全判定必须在操作之后做。
+   cleanup 时是否按 `dev`/`ino` identity 守卫而非仅按 pathname 删除？
 6.6. **存量插件升级后还能不能用（第 5 节红线）**：本次是否改了 receipt schema／必填
    字段／落盘位置、指纹或摘要编码、manifest 校验、slot 形态、快照与链接命名、安装根或
    状态根路径、`.cindy` 包格式、管子协议、内置 id？命中就逐条问：用户升级后**什么都不做**

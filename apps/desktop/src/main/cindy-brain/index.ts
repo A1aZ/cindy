@@ -5780,7 +5780,12 @@ export function registerGhostIpc(): void {
         }
         if ('rejection' in result) {
           restoreMarketRecord();
-          if (previousGhost) spawnIfResident(previousGhost);
+          // 回滚失败 = 安装目录可能已是新字节或缺失，"旧版本还在"不成立，
+          // 不得按旧 InstalledGhost 重启运行时（P1：那会拿旧批准跑未知字节）。
+          if (previousGhost &&
+            !(result.rejection.code === 'io' && result.rejection.rollbackFailed)) {
+            spawnIfResident(previousGhost);
+          }
           throwInstallError(result.rejection);
         }
         runtime.resetFuse(inspected.manifest.id); // 换了代码,给新版本干净的熔断记账

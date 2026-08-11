@@ -13132,72 +13132,95 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
-  it('uses an early turn completion as the terminal proof while interrupt ACK is pending', async () => {
-    const policy = vi.fn(() => ({
-      decision: 'deny' as const,
-      reason: 'use the embedded iOS Simulator',
-    }));
-    let acknowledgeInterrupt!: () => void;
-    const interruptAck = new Promise<unknown>((resolve) => {
-      acknowledgeInterrupt = () => resolve({});
-    });
-    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
-    const host = installFakeHost(agent, (method) => {
-      if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
-      if (method === Method.TurnInterrupt) return interruptAck;
-      return undefined;
-    });
-    const handle = await agent.startSession({
-      sessionId: 'session-command-item-host-policy-completes-before-ack',
-      model: 'gpt-5.4',
-      workingDir: '/repo',
-      permissionMode: 'bypassPermissions',
-    });
-    const handlers = host.getThreadHandlers();
-    if (!handlers?.itemStarted || !handlers.turnCompleted) {
-      throw new Error('expected itemStarted and turnCompleted handlers');
-    }
-    const iterator = handle.events()[Symbol.asyncIterator]();
-    await handle.send({ type: 'user', content: 'test early completion' });
-    expect(await nextEvent(iterator)).toMatchObject({
-      type: 'status',
-      data: { isRunning: true },
-    });
+  it.each(['interrupted', 'completed', 'failed'] as const)(
+    'preserves an early %s turn completion while interrupt ACK is pending',
+    async (turnStatus) => {
+      const policy = vi.fn(() => ({
+        decision: 'deny' as const,
+        reason: 'use the embedded iOS Simulator',
+      }));
+      let acknowledgeInterrupt!: () => void;
+      const interruptAck = new Promise<unknown>((resolve) => {
+        acknowledgeInterrupt = () => resolve({});
+      });
+      const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
+      const host = installFakeHost(agent, (method) => {
+        if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
+        if (method === Method.TurnInterrupt) return interruptAck;
+        return undefined;
+      });
+      const handle = await agent.startSession({
+        sessionId: 'session-command-item-host-policy-completes-before-ack',
+        model: 'gpt-5.4',
+        workingDir: '/repo',
+        permissionMode: 'bypassPermissions',
+      });
+      const handlers = host.getThreadHandlers();
+      if (!handlers?.itemStarted || !handlers.turnCompleted) {
+        throw new Error('expected itemStarted and turnCompleted handlers');
+      }
+      const iterator = handle.events()[Symbol.asyncIterator]();
+      await handle.send({ type: 'user', content: 'test early completion' });
+      expect(await nextEvent(iterator)).toMatchObject({
+        type: 'status',
+        data: { isRunning: true },
+      });
 
-    handlers.itemStarted({
-      threadId: 'start-thread-id',
-      turnId: 'turn-1',
-      item: {
-        id: 'cmd-absolute',
-        type: 'commandExecution',
-        command: '/usr/bin/open -a Simulator',
-        cwd: '/repo',
-      },
-    });
-    expect(await nextEvent(iterator)).toMatchObject({
-      type: 'error',
-      data: { isTerminal: false, reason: 'host-shell-command-blocked' },
-    });
+      handlers.itemStarted({
+        threadId: 'start-thread-id',
+        turnId: 'turn-1',
+        item: {
+          id: 'cmd-absolute',
+          type: 'commandExecution',
+          command: '/usr/bin/open -a Simulator',
+          cwd: '/repo',
+        },
+      });
+      expect(await nextEvent(iterator)).toMatchObject({
+        type: 'error',
+        data: { isTerminal: false, reason: 'host-shell-command-blocked' },
+      });
 
-    handlers.turnCompleted({
-      threadId: 'start-thread-id',
-      turn: { id: 'turn-1', status: 'interrupted' },
-    });
-    expect(await nextEvent(iterator)).toMatchObject({
-      type: 'error',
-      data: { isTerminal: true, reason: 'host-shell-command-blocked' },
-    });
-    expect(await nextEvent(iterator)).toMatchObject({
-      type: 'status',
-      data: { status: 'Done', isRunning: false },
-    });
-    expect(handle.isTurnRunning?.()).toBe(false);
+      handlers.turnCompleted({
+        threadId: 'start-thread-id',
+        turn: { id: 'turn-1', status: turnStatus },
+      });
+      if (turnStatus === 'interrupted') {
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'error',
+          data: { isTerminal: true, reason: 'host-shell-command-blocked' },
+        });
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'status',
+          data: { status: 'Done', isRunning: false },
+        });
+      } else if (turnStatus === 'failed') {
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'error',
+          data: { isTerminal: true, reason: 'turn-failed' },
+        });
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'done',
+          data: { cancelled: false, raw: { status: 'failed' } },
+        });
+      } else {
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'status',
+          data: { status: 'Done', isRunning: false },
+        });
+        expect(await nextEvent(iterator)).toMatchObject({
+          type: 'done',
+          data: { raw: { status: 'completed' } },
+        });
+      }
+      expect(handle.isTurnRunning?.()).toBe(false);
 
-    acknowledgeInterrupt();
-    await Promise.resolve();
-    await expect(nextEvent(iterator)).rejects.toThrow('timed out waiting for event');
-    await handle.close();
-  });
+      acknowledgeInterrupt();
+      await Promise.resolve();
+      await expect(nextEvent(iterator)).rejects.toThrow('timed out waiting for event');
+      await handle.close();
+    },
+  );
 
   it('keeps the turn visible when a host-policy interrupt cannot be acknowledged', async () => {
     const { logger, error } = createLoggerSpy();

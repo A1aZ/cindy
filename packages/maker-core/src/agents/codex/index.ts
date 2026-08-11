@@ -7696,12 +7696,10 @@ export class CodexAgent extends BaseAgent {
           handleTurnCompleted(params);
           return;
         }
-        if (
-          pendingHostPolicyInterrupt.acknowledgement === 'failed'
-          && turn.status !== 'interrupted'
-        ) {
-          // The interrupt could not be confirmed and the provider says the turn
-          // ended normally/failed, so preserve that authoritative outcome.
+        if (turn.status !== 'interrupted') {
+          // ACK state only controls whether another policy hit may retry the
+          // interrupt. The provider's completed/failed status is authoritative
+          // even when it arrives before that ACK settles.
           handleTurnCompleted(params);
           return;
         }

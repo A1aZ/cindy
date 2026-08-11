@@ -169,6 +169,14 @@ export async function runGhostSnapshotWorkerRequest(
     const tempBeforeRename = await classifyGhostDirEntry(tempPath);
     if (tempBeforeRename !== 'directory') throw new Error('snapshot temp directory was replaced before rename');
     await fs.promises.rename(tempPath, targetPath);
+    const targetEntryKind = await classifyGhostDirEntry(targetPath);
+    if (targetEntryKind !== 'directory') {
+      if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false) &&
+        await verifyDirectory(workingDir, parts[0]).then(() => true, () => false)) {
+        await fs.promises.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+      }
+      throw new Error('snapshot target is not a real directory after publish');
+    }
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);
     if (!await matches(request.receipt, targetPath)) {

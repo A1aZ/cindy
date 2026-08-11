@@ -485,21 +485,23 @@ export function dedupeToolMediaByUrl<TMedia extends MessageRenderToolMediaLike>(
  * 则要到重新加载,review P2)。
  */
 function isSyntheticUserRow(message: MessageRenderSourceMessageLike): boolean {
+  if (isHookUserRow(message)) return false;
   const meta = message.agentMeta;
   return (
     message.isSyntheticTrigger === true ||
-    (message.automationOrigin !== undefined && message.automationOrigin !== null && !isHookOrigin(message.automationOrigin)) ||
+    (message.automationOrigin !== undefined && message.automationOrigin !== null) ||
     meta?.autoResume === true ||
-    (meta?.origin !== undefined && meta?.origin !== null && !isHookOrigin(meta.origin)) ||
+    (meta?.origin !== undefined && meta?.origin !== null) ||
     isSteerUserRow(message) ||
     hasSubagentParent(message)
   );
 }
 
-function isHookOrigin(origin: unknown): boolean {
-  if (!origin || typeof origin !== 'object') return false;
-  const scheduleId = (origin as Record<string, unknown>).scheduleId;
-  return typeof scheduleId === 'string' && scheduleId.startsWith('hook:');
+function isHookUserRow(message: MessageRenderSourceMessageLike): boolean {
+  const hookSource =
+    (message as Record<string, unknown>).hookSource ??
+    message.agentMeta?.hookSource;
+  return hookSource !== undefined && hookSource !== null;
 }
 
 /**

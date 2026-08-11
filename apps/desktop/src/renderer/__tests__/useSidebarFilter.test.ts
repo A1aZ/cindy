@@ -20,18 +20,22 @@ import {
   GROUP_BY_KEY,
   LAST_ACTIVITY_KEY,
   SORT_BY_KEY,
+  TASK_INFO_KEY,
   MANUAL_PROJECT_ORDER_KEY,
   loadStatus,
   loadProjects,
   loadGroupBy,
   loadLastActivity,
   loadSortBy,
+  loadTaskInfoFields,
   loadManualProjectOrder,
   persistStatus,
   persistProjects,
   persistGroupBy,
   persistLastActivity,
   persistSortBy,
+  persistTaskInfoFields,
+  nextTaskInfoAfterToggle,
   persistManualProjectOrder,
   nextProjectsAfterToggle,
   includeProjectInFilter,
@@ -169,9 +173,9 @@ describe('loadGroupBy', () => {
     expect(loadGroupBy()).toBe('project');
   });
 
-  it("returns 'date' / 'project' when persisted", () => {
-    localStorage.setItem(GROUP_BY_KEY, 'date');
-    expect(loadGroupBy()).toBe('date');
+  it("returns 'flat' / 'project' when persisted", () => {
+    localStorage.setItem(GROUP_BY_KEY, 'flat');
+    expect(loadGroupBy()).toBe('flat');
     localStorage.setItem(GROUP_BY_KEY, 'project');
     expect(loadGroupBy()).toBe('project');
   });
@@ -186,10 +190,10 @@ describe('loadGroupBy', () => {
     expect(loadGroupBy()).toBe('project');
   });
 
-  // 用户显式选过 'date' → 持久化生效,下次启动仍是 'date'(不被默认值覆盖)。
-  it("respects an explicit persisted 'date' across reloads", () => {
+  // 侧边栏重设计 D 期:按日期分组已删除;老用户存量 'date' 静默回退默认。
+  it("falls back to 'project' on the removed 'date' legacy value", () => {
     localStorage.setItem(GROUP_BY_KEY, 'date');
-    expect(loadGroupBy()).toBe('date');
+    expect(loadGroupBy()).toBe('project');
   });
 });
 
@@ -232,8 +236,6 @@ describe('loadSortBy', () => {
     expect(loadSortBy()).toBe('time');
     localStorage.setItem(SORT_BY_KEY, 'manual');
     expect(loadSortBy()).toBe('manual');
-    localStorage.setItem(SORT_BY_KEY, 'alphabetic');
-    expect(loadSortBy()).toBe('alphabetic');
     localStorage.setItem(SORT_BY_KEY, 'recency');
     expect(loadSortBy()).toBe('recency');
   });
@@ -243,9 +245,50 @@ describe('loadSortBy', () => {
     expect(loadSortBy()).toBe('recency');
   });
 
+  it("falls back to 'recency' on the removed 'alphabetic' legacy value", () => {
+    // 侧边栏重设计裁决:按名称排序已删除;老用户存量值静默回退默认。
+    localStorage.setItem(SORT_BY_KEY, 'alphabetic');
+    expect(loadSortBy()).toBe('recency');
+  });
+
   it("returns 'recency' when localStorage is unavailable", () => {
     uninstallLocalStorage();
     expect(loadSortBy()).toBe('recency');
+  });
+});
+
+describe('taskInfoFields（任务行右侧信息复选）', () => {
+  beforeEach(() => installMemoryLocalStorage());
+  afterEach(() => uninstallLocalStorage());
+
+  it("defaults to ['time'] when storage is empty", () => {
+    expect(loadTaskInfoFields()).toEqual(['time']);
+  });
+
+  it('空数组是合法状态（用户显式全不选），不回落默认', () => {
+    persistTaskInfoFields([]);
+    expect(loadTaskInfoFields()).toEqual([]);
+  });
+
+  it('persist → load round-trips and drops illegal / duplicate entries', () => {
+    persistTaskInfoFields(['pr', 'tokens', 'cost', 'time']);
+    expect(loadTaskInfoFields()).toEqual(['pr', 'tokens', 'cost', 'time']);
+    localStorage.setItem(TASK_INFO_KEY, JSON.stringify(['time', 'bogus', 'time', 42, 'cost']));
+    expect(loadTaskInfoFields()).toEqual(['time', 'cost']);
+  });
+
+  it('falls back to default on broken JSON or shape mismatch', () => {
+    localStorage.setItem(TASK_INFO_KEY, '{not-json');
+    expect(loadTaskInfoFields()).toEqual(['time']);
+    localStorage.setItem(TASK_INFO_KEY, JSON.stringify({ fields: ['time'] }));
+    expect(loadTaskInfoFields()).toEqual(['time']);
+  });
+
+  it('nextTaskInfoAfterToggle toggles membership and allows empty', () => {
+    expect(nextTaskInfoAfterToggle(['time'], 'cost')).toEqual(['time', 'cost']);
+    expect(nextTaskInfoAfterToggle(['time', 'cost'], 'time')).toEqual(['cost']);
+    expect(nextTaskInfoAfterToggle(['cost'], 'cost')).toEqual([]);
+    expect(nextTaskInfoAfterToggle([], 'pr')).toEqual(['pr']);
   });
 });
 
@@ -303,8 +346,8 @@ describe('persist round-trip', () => {
   });
 
   it('persistGroupBy → loadGroupBy returns the same value', () => {
-    persistGroupBy('date');
-    expect(loadGroupBy()).toBe('date');
+    persistGroupBy('flat');
+    expect(loadGroupBy()).toBe('flat');
     persistGroupBy('project');
     expect(loadGroupBy()).toBe('project');
   });
@@ -321,8 +364,6 @@ describe('persist round-trip', () => {
     expect(loadSortBy()).toBe('time');
     persistSortBy('manual');
     expect(loadSortBy()).toBe('manual');
-    persistSortBy('alphabetic');
-    expect(loadSortBy()).toBe('alphabetic');
     persistSortBy('recency');
     expect(loadSortBy()).toBe('recency');
   });

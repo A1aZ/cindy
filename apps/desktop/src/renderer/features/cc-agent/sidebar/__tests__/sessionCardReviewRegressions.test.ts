@@ -142,11 +142,12 @@ describe('SessionCard review regressions', () => {
     expect(sessionCardSource).not.toContain('session-card-progress');
   });
 
-  it('keeps card time anchored to the bottom meta row instead of the overlay layout', () => {
-    // 时间固定在底部 meta 行右端(ml-auto),不再依赖 overlay/block 双态测量。
+  it('keeps card info anchored to the bottom meta row instead of the overlay layout', () => {
+    // 时间/信息槽固定在底部 meta 行右端(ml-auto),不再依赖 overlay/block 双态测量。
+    // C 期起时间渲染并入 SessionInfoMeta(任务信息复选),锚点与让位语义不变。
     expect(sessionCardSource).not.toContain('cardTimeLayout');
-    expect(sessionCardSource).toContain('{cardTimeText}');
-    expect(sessionCardSource).toContain('ml-auto shrink-0'); // E1D 侧栏层级:time 色 conditional via cn,ml-auto shrink-0 保留
+    expect(sessionCardSource).toContain('pieces={cardInfoPieces}');
+    expect(sessionCardSource).toContain('ml-auto shrink-0'); // E1D 侧栏层级:info 槽 ml-auto shrink-0 保留
   });
 
   it('keeps archive confirmation pills clear of time and ordinal overlays', () => {
@@ -178,10 +179,14 @@ describe('SessionCard review regressions', () => {
   it('E1D 任务C: SessionCard active 反白链完整且运行态不降级文字颜色', () => {
     const re = /isActive \? 'text-sidebar-item-active-foreground'/g;
     const count = (sessionCardSource.match(re) || []).length;
+    // C 期起两个时间槽的 isActive 分支并入 SessionInfoMeta(经 isActive prop 传递,
+    // 组件内应用 active-foreground),SessionCard 本体剩 title×2 + RemoteProjectIcon 等。
     expect(
       count,
-      'isActive conditional active-foreground ≥7(title×2+time+RemoteProjectIcon×4)',
-    ).toBeGreaterThanOrEqual(7);
+      'isActive conditional active-foreground ≥5(title×2+RemoteProjectIcon 等;时间槽已并入 SessionInfoMeta)',
+    ).toBeGreaterThanOrEqual(5);
+    // 信息槽的反白链由 SessionInfoMeta 承担:isActive 必须透传。
+    expect(sessionCardSource).toMatch(/<SessionInfoMeta[\s\S]{0,200}isActive=\{isActive\}/);
 
     // Running is already expressed by the status indicator, so its text keeps
     // the same semantic colors as other non-active tasks.

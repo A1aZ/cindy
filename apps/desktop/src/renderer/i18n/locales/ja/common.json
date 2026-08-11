@@ -466,6 +466,11 @@
         "hint": "ピン留めセッションをタスク状況の要約付きカードで表示します。カードの高さは要約の長さで変わり、サイドバーを広げると 2〜3 列に自動配置されます。",
         "aria": "サイドバーカードモードを切り替える"
       },
+      "sidebarMainListMode": {
+        "label": "セッションリストの表示",
+        "hint": "サイドバーのメインリスト（ピン留め以外）の表示形式。テキストはコンパクトな 1 行、リストはプレビュー付きの 2 行です。",
+        "aria": "セッションリストの表示を切り替える"
+      },
       "layout": {
         "label": "パネルレイアウト",
         "hint": "パネルの位置と幅は次回起動時も保持されます。使いにくい配置になった場合は、初期レイアウトに戻せます。",
@@ -6936,6 +6941,7 @@
         "awaitingPluginSetup": "プラグイン設定待ち"
       },
       "showAllSessions": "すべて表示 {{count}} 件",
+      "allSessions": "すべてのセッション",
       "dialogues": "会話",
       "newDialogue": "新規セッション",
       "dialoguesToggleExpand": "会話を展開",
@@ -6972,8 +6978,22 @@
         "codex": "Codex"
       },
       "filterGroupBy": {
-        "project": "プロジェクト",
-        "date": "日付"
+        "project": "プロジェクトでグループ化",
+        "flat": "フラット表示",
+        "device": "デバイスでグループ化",
+        "dialogue": "チャットをまとめる"
+      },
+      "deviceGroup": {
+        "local": "このデバイス",
+        "offline": "オフライン",
+        "collapse": "このデバイスを折りたたむ",
+        "expand": "このデバイスを展開"
+      },
+      "foldAll": {
+        "collapseGroups": "すべてのグループを折りたたむ",
+        "collapseProjects": "プロジェクトグループを折りたたむ",
+        "collapseDevices": "デバイスグループを折りたたむ",
+        "expandAll": "すべてのグループを展開"
       },
       "filterLastActivity": {
         "1d": "1日",
@@ -6986,7 +7006,7 @@
         "recency": "最近順",
         "time": "時系列",
         "manual": "手動",
-        "alphabetic": "アルファベット順"
+        "priority": "優先度"
       },
       "filterStatusHeading": "ステータス",
       "filterAgentHeading": "エージェント",
@@ -6995,6 +7015,24 @@
       "filterSortByHeading": "並び替え",
       "filterProjectsHeading": "プロジェクト",
       "filterAllProjects": "すべてのプロジェクト",
+      "filterHeading": "フィルター",
+      "filterSummaryNone": "なし",
+      "filterSummaryActive": "{{count}} 件適用中",
+      "filterReset": "フィルターをリセット",
+      "displayHeading": "表示",
+      "taskInfoHeading": "セッション情報",
+      "taskInfoSummaryNone": "なし",
+      "taskInfoSummarySeparator": "、",
+      "taskInfo": {
+        "time": "時間",
+        "pr": "PR ステータス",
+        "tokens": "トークン",
+        "cost": "コスト"
+      },
+      "taskInfoTip": {
+        "tokens": "累計トークン",
+        "cost": "累計コスト"
+      },
       "dateGroup": {
         "today": "今日",
         "yesterday": "昨日",

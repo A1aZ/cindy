@@ -466,6 +466,11 @@
         "hint": "Pinned sessions are shown as cards with task-status summaries; card heights vary with summary length, and the cards flow into 2–3 columns when the sidebar is widened.",
         "aria": "Toggle sidebar card mode"
       },
+      "sidebarMainListMode": {
+        "label": "Session list style",
+        "hint": "Display style for the main sidebar list (below Pinned): Text is a compact single row; List is a two-line row with a preview.",
+        "aria": "Switch session list style"
+      },
       "layout": {
         "label": "Panel layout",
         "hint": "Panel positions and widths persist across restarts. Restore the default arrangement if the layout becomes difficult to use.",
@@ -6948,6 +6953,7 @@
         "awaitingPluginSetup": "Awaiting plugin setup"
       },
       "showAllSessions": "Show all {{count}}",
+      "allSessions": "All sessions",
       "dialogues": "Chat",
       "newDialogue": "New session",
       "dialoguesToggleExpand": "Expand Chat",
@@ -6984,8 +6990,22 @@
         "codex": "Codex"
       },
       "filterGroupBy": {
-        "project": "Project",
-        "date": "Date"
+        "project": "Group by project",
+        "flat": "Flat list",
+        "device": "Group by device",
+        "dialogue": "Group chats together"
+      },
+      "deviceGroup": {
+        "local": "This device",
+        "offline": "Offline",
+        "collapse": "Collapse this device",
+        "expand": "Expand this device"
+      },
+      "foldAll": {
+        "collapseGroups": "Collapse all groups",
+        "collapseProjects": "Collapse project groups",
+        "collapseDevices": "Collapse device groups",
+        "expandAll": "Expand all groups"
       },
       "filterLastActivity": {
         "1d": "1d",
@@ -6998,7 +7018,7 @@
         "recency": "Recent first",
         "time": "Oldest first",
         "manual": "Manual",
-        "alphabetic": "Alphabetical"
+        "priority": "Priority"
       },
       "filterStatusHeading": "Status",
       "filterAgentHeading": "Agent",
@@ -7007,6 +7027,24 @@
       "filterSortByHeading": "Sort by",
       "filterProjectsHeading": "Projects",
       "filterAllProjects": "All projects",
+      "filterHeading": "Filters",
+      "filterSummaryNone": "None",
+      "filterSummaryActive": "{{count}} active",
+      "filterReset": "Reset filters",
+      "displayHeading": "Display",
+      "taskInfoHeading": "Session info",
+      "taskInfoSummaryNone": "None",
+      "taskInfoSummarySeparator": ", ",
+      "taskInfo": {
+        "time": "Time",
+        "pr": "PR status",
+        "tokens": "Tokens",
+        "cost": "Cost"
+      },
+      "taskInfoTip": {
+        "tokens": "Total tokens",
+        "cost": "Total cost"
+      },
       "dateGroup": {
         "today": "Today",
         "yesterday": "Yesterday",

@@ -466,6 +466,11 @@
         "hint": "置頂任務以卡片形式展示，含執行狀態摘要，卡片高度隨摘要長短錯落；側欄拉寬時自動分 2~3 列。",
         "aria": "切換側邊欄卡片模式"
       },
+      "sidebarMainListMode": {
+        "label": "任務列表顯示方式",
+        "hint": "側邊欄主列表（置頂以外）的顯示形態：文字為緊湊單行，列表為帶預覽的兩行。",
+        "aria": "切換任務列表顯示方式"
+      },
       "layout": {
         "label": "面板佈局",
         "hint": "面板位置和寬度會保留到下次啟動。如果佈局變得難以使用，可以恢復預設排列。",
@@ -6935,6 +6940,7 @@
         "awaitingPluginSetup": "等待插件設定"
       },
       "showAllSessions": "顯示全部 {{count}} 項",
+      "allSessions": "全部任務",
       "dialogues": "對話",
       "newDialogue": "新任務",
       "dialoguesToggleExpand": "展開對話",
@@ -6971,8 +6977,22 @@
         "codex": "Codex"
       },
       "filterGroupBy": {
-        "project": "專案",
-        "date": "日期"
+        "project": "按專案分組",
+        "flat": "平鋪",
+        "device": "按裝置分組",
+        "dialogue": "對話歸為一組"
+      },
+      "deviceGroup": {
+        "local": "本機",
+        "offline": "離線",
+        "collapse": "收起該裝置",
+        "expand": "展開該裝置"
+      },
+      "foldAll": {
+        "collapseGroups": "收起所有分組",
+        "collapseProjects": "收起專案分組",
+        "collapseDevices": "收起裝置分組",
+        "expandAll": "展開所有分組"
       },
       "filterLastActivity": {
         "1d": "1 天",
@@ -6985,7 +7005,7 @@
         "recency": "最近優先",
         "time": "最早優先",
         "manual": "手動排序",
-        "alphabetic": "字母排序"
+        "priority": "優先級"
       },
       "filterStatusHeading": "狀態",
       "filterAgentHeading": "Agent",
@@ -6994,6 +7014,24 @@
       "filterSortByHeading": "排序",
       "filterProjectsHeading": "專案",
       "filterAllProjects": "所有專案",
+      "filterHeading": "篩選",
+      "filterSummaryNone": "無",
+      "filterSummaryActive": "{{count}} 項生效",
+      "filterReset": "重設篩選",
+      "displayHeading": "顯示",
+      "taskInfoHeading": "任務資訊",
+      "taskInfoSummaryNone": "無",
+      "taskInfoSummarySeparator": "、",
+      "taskInfo": {
+        "time": "時間",
+        "pr": "PR 狀態",
+        "tokens": "Token",
+        "cost": "費用"
+      },
+      "taskInfoTip": {
+        "tokens": "累計 Token",
+        "cost": "累計費用"
+      },
       "dateGroup": {
         "today": "今天",
         "yesterday": "昨天",

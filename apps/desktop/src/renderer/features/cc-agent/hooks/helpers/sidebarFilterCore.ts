@@ -31,8 +31,11 @@ export const STATUS_KEY = 'cc-agent.sidebar.filter.status';
 export const PROJECTS_KEY = 'cc-agent.sidebar.filter.projects';
 export const VENDOR_KEY = 'cc-agent.sidebar.filter.vendor';
 export const GROUP_BY_KEY = 'cc-agent.sidebar.filter.groupBy';
+export const GROUP_DIALOGUE_KEY = 'cc-agent.sidebar.filter.groupDialogue';
+export const GROUP_DEVICE_KEY = 'cc-agent.sidebar.filter.groupDevice';
 export const LAST_ACTIVITY_KEY = 'cc-agent.sidebar.filter.lastActivity';
 export const SORT_BY_KEY = 'cc-agent.sidebar.filter.sortBy';
+export const TASK_INFO_KEY = 'cc-agent.sidebar.filter.taskInfo';
 export const MANUAL_PROJECT_ORDER_KEY = 'cc-agent.sidebar.filter.manualProjectOrder';
 export const MANUAL_PINNED_ORDER_KEY = 'cc-agent.sidebar.pinnedSessionOrder';
 
@@ -41,12 +44,21 @@ export type FilterStatus = 'active' | 'archived' | 'all';
 export type FilterProjects = 'all' | string[];
 /** M41: vendor filter — 'all' = 全部；'cc' = 仅 Claude；'codex' = 仅 Codex。 */
 export type FilterVendor = 'all' | 'cc' | 'codex';
-/** Sidebar 主列表分组方式。默认 project，date 用于按最近活跃日期分组。 */
-export type FilterGroupBy = 'project' | 'date';
+/**
+ * Sidebar 主列表分组方式(侧边栏重设计 D 期)。
+ *   - project: 「按项目分组」开——有项目的任务收进项目行(默认)。
+ *   - flat:   「按项目分组」关——全部平铺,行尾带项目来源标签。
+ * 旧值 'date'(按日期分组)已删除,存量值回退 'project'。
+ */
+export type FilterGroupBy = 'project' | 'flat';
 /** 最近活跃范围筛选。默认 all。 */
 export type FilterLastActivity = 'all' | '1d' | '3d' | '7d' | '30d';
-/** Sidebar 主列表排序方式。默认 recency。manual/alphabetic 只用于 Project 分组。 */
-export type FilterSortBy = 'recency' | 'time' | 'manual' | 'alphabetic';
+/** Sidebar 主列表排序方式。默认 recency。manual 只用于 Project 分组;
+ *  priority = 等待处理 > 运行中 > 其余按最近活动(D 期新增)。
+ *  （侧边栏重设计裁决：alphabetic 已删除，存量值回退到 recency。） */
+export type FilterSortBy = 'recency' | 'time' | 'manual' | 'priority';
+/** 任务行右侧信息项（复选）。顺序固定 pr → tokens → cost → time 渲染。 */
+export type TaskInfoField = 'time' | 'pr' | 'tokens' | 'cost';
 export type ManualProjectDropPosition = 'before' | 'after';
 
 const STATUS_VALUES: ReadonlySet<string> = new Set<FilterStatus>(['active', 'archived', 'all']);
@@ -239,12 +251,12 @@ export function persistVendor(v: FilterVendor): void {
 
 /* ============================== groupBy load/persist ============================== */
 
-const GROUP_BY_VALUES: ReadonlySet<string> = new Set<FilterGroupBy>(['project', 'date']);
+const GROUP_BY_VALUES: ReadonlySet<string> = new Set<FilterGroupBy>(['project', 'flat']);
 
 /**
  * 读 localStorage 中的 groupBy;任何异常 / 非法值 / 未设置 → 'project'。
- * 「按工作目录分组」是 Cindy 作为工作台的设计基线默认值;用户显式切到
- * 'date' 时由 persistGroupBy 写入 storage,下次启动读回,保留其选择。
+ * 「按工作目录分组」是 Cindy 作为工作台的设计基线默认值。
+ * 旧值 'date'(按日期分组,D 期删除)不在合法集合内,自动回退 'project'。
  */
 export function loadGroupBy(): FilterGroupBy {
   const storage = safeStorage();
@@ -267,6 +279,60 @@ export function persistGroupBy(groupBy: FilterGroupBy): void {
     storage.setItem(GROUP_BY_KEY, groupBy);
   } catch (err) {
     log.warn('[useSidebarFilter] failed to persist groupBy:', err);
+  }
+}
+
+/* ============================== groupDialogue load/persist ============================== */
+
+/**
+ * 「对话归为一组」开关(D 期):true = 无项目任务收进「对话」组;
+ * false(默认,定稿)= 散排在主列表里与项目行混排。
+ */
+export function loadGroupDialogue(): boolean {
+  const storage = safeStorage();
+  if (!storage) return false;
+  try {
+    return storage.getItem(GROUP_DIALOGUE_KEY) === 'true';
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to read groupDialogue:', err);
+    return false;
+  }
+}
+
+export function persistGroupDialogue(groupDialogue: boolean): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(GROUP_DIALOGUE_KEY, String(groupDialogue));
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to persist groupDialogue:', err);
+  }
+}
+
+/* ============================== groupDevice load/persist ============================== */
+
+/**
+ * 「按设备分组」开关(E 期):默认开(定稿)。仅在有远程设备连接时可见/生效
+ * (与顶部设备切换栏同一出现条件);仅本机时选项隐藏、效果自然为单段。
+ */
+export function loadGroupDevice(): boolean {
+  const storage = safeStorage();
+  if (!storage) return true;
+  try {
+    return storage.getItem(GROUP_DEVICE_KEY) !== 'false';
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to read groupDevice:', err);
+    return true;
+  }
+}
+
+export function persistGroupDevice(groupDevice: boolean): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(GROUP_DEVICE_KEY, String(groupDevice));
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to persist groupDevice:', err);
   }
 }
 
@@ -310,9 +376,10 @@ const SORT_BY_VALUES: ReadonlySet<string> = new Set<FilterSortBy>([
   'recency',
   'time',
   'manual',
-  'alphabetic',
+  'priority',
 ]);
 
+/** 读 sortBy。已删除的 'alphabetic' 存量值不在合法集合内，自动回退 'recency'。 */
 export function loadSortBy(): FilterSortBy {
   const storage = safeStorage();
   if (!storage) return 'recency';
@@ -335,6 +402,70 @@ export function persistSortBy(sortBy: FilterSortBy): void {
   } catch (err) {
     log.warn('[useSidebarFilter] failed to persist sortBy:', err);
   }
+}
+
+/* ============================== taskInfo load/persist ============================== */
+
+const TASK_INFO_VALUES: ReadonlySet<string> = new Set<TaskInfoField>([
+  'time',
+  'pr',
+  'tokens',
+  'cost',
+]);
+/** 默认只显示最近活动时间（现状行为）。 */
+export const DEFAULT_TASK_INFO_FIELDS: readonly TaskInfoField[] = ['time'];
+
+/**
+ * 读任务行右侧信息复选。存储为 JSON string[]；非法值逐项剔除。
+ * 与其它维度不同：空数组是合法状态（用户显式全不选 = 行右侧留空），
+ * 只有解析失败 / 未设置才回落默认。
+ */
+export function loadTaskInfoFields(): TaskInfoField[] {
+  const storage = safeStorage();
+  if (!storage) return [...DEFAULT_TASK_INFO_FIELDS];
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(TASK_INFO_KEY);
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to read taskInfo:', err);
+    return [...DEFAULT_TASK_INFO_FIELDS];
+  }
+  if (raw == null) return [...DEFAULT_TASK_INFO_FIELDS];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...DEFAULT_TASK_INFO_FIELDS];
+    const seen = new Set<string>();
+    const cleaned: TaskInfoField[] = [];
+    for (const value of parsed) {
+      if (typeof value !== 'string' || !TASK_INFO_VALUES.has(value) || seen.has(value)) continue;
+      seen.add(value);
+      cleaned.push(value as TaskInfoField);
+    }
+    return cleaned;
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to parse taskInfo JSON:', err);
+    return [...DEFAULT_TASK_INFO_FIELDS];
+  }
+}
+
+export function persistTaskInfoFields(fields: readonly TaskInfoField[]): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(TASK_INFO_KEY, JSON.stringify(fields));
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to persist taskInfo:', err);
+  }
+}
+
+/** 切换某个信息项的勾选状态。空数组合法（全不选）。语义无变化时返回 prev。 */
+export function nextTaskInfoAfterToggle(
+  prev: readonly TaskInfoField[],
+  field: TaskInfoField,
+): TaskInfoField[] {
+  const idx = prev.indexOf(field);
+  if (idx >= 0) return prev.slice(0, idx).concat(prev.slice(idx + 1));
+  return prev.concat(field);
 }
 
 /* ============================== manual project order load/persist ============================== */

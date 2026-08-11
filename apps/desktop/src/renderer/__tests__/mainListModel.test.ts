@@ -1,0 +1,197 @@
+/**
+ * mainListModel — 主列表混排模型单测(sidebar-redesign D 期)。
+ * 覆盖:混排口径(项目行与散排对话平级竞争位置)、四种排序、对话组开关、
+ * flat 平铺、手动排序只管项目行的收窄语义。
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import type { Session } from '@/lib/ccAgent.types';
+import type { ProjectNode } from '../features/cc-agent/lib/projectGrouping';
+import {
+  buildMainListEntries,
+  sessionPriorityRank,
+  type MainListEntry,
+} from '../features/cc-agent/lib/mainListModel';
+
+let seq = 0;
+function session(overrides: Partial<Session> & { updatedAt: string }): Session {
+  seq += 1;
+  return {
+    id: `s${seq}`,
+    userId: 'u',
+    title: `session ${seq}`,
+    workingDir: null,
+    workspaceKind: 'dialogue',
+    model: 'm',
+    effort: 'high',
+    permissionMode: 'ask',
+    providerId: null,
+    sdkSessionId: null,
+    totalTokenUsage: 0,
+    totalCostUsd: 0,
+    contextTokens: 0,
+    contextWindow: 0,
+    fastMode: false,
+    clearedAt: null,
+    pinnedAt: null,
+    userSendAt: null,
+    status: 'active',
+    agentKind: 'cc',
+    createdAt: overrides.updatedAt,
+    ...overrides,
+  } as Session;
+}
+
+function project(key: string, sessions: Session[]): ProjectNode {
+  return {
+    projectKey: `local:${key}`,
+    workingDir: key,
+    displayName: key,
+    scope: 'local',
+    sessions,
+    latestActivityAt: sessions[0]?.updatedAt ?? null,
+  } as unknown as ProjectNode;
+}
+
+function labels(entries: MainListEntry[]): string[] {
+  return entries.map((entry) =>
+    entry.kind === 'project'
+      ? `p:${entry.project.displayName}`
+      : entry.kind === 'dialogue-group'
+        ? 'dlg-group'
+        : `s:${entry.session.title}`,
+  );
+}
+
+const NO_PRIORITY = {
+  runningSessionIds: new Set<string>(),
+  attentionSessionIds: new Set<string>(),
+};
+
+describe('buildMainListEntries — 混排(recency)', () => {
+  it('interleaves project rows and stray dialogues by latest activity', () => {
+    const projNew = project('alpha', [session({ updatedAt: '2026-08-12T10:00:00Z' })]);
+    const projOld = project('beta', [session({ updatedAt: '2026-08-10T10:00:00Z' })]);
+    const dlgMid = session({ updatedAt: '2026-08-11T10:00:00Z', title: 'mid-dlg' });
+    const entries = buildMainListEntries({
+      projects: [projOld, projNew],
+      dialogues: [dlgMid],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    // 两分钟前活跃的对话排在昨天的项目上面——项目不是特权层级。
+    expect(labels(entries)).toEqual(['p:alpha', 's:mid-dlg', 'p:beta']);
+  });
+
+  it('collects dialogues into one group entry when groupDialogue is on', () => {
+    const proj = project('alpha', [session({ updatedAt: '2026-08-12T10:00:00Z' })]);
+    const dlgA = session({ updatedAt: '2026-08-12T12:00:00Z', title: 'a' });
+    const dlgB = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'b' });
+    const entries = buildMainListEntries({
+      projects: [proj],
+      dialogues: [dlgA, dlgB],
+      groupBy: 'project',
+      groupDialogue: true,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    // 对话组按组内最新活动(dlgA)参与排序 → 排在项目前。
+    expect(labels(entries)).toEqual(['dlg-group', 'p:alpha']);
+    const group = entries[0];
+    expect(group.kind === 'dialogue-group' && group.sessions).toHaveLength(2);
+  });
+
+  it('flattens project sessions to top level when groupBy is flat', () => {
+    const proj = project('alpha', [
+      session({ updatedAt: '2026-08-12T10:00:00Z', title: 'in-proj' }),
+    ]);
+    const dlg = session({ updatedAt: '2026-08-12T11:00:00Z', title: 'dlg' });
+    const entries = buildMainListEntries({
+      projects: [proj],
+      dialogues: [dlg],
+      groupBy: 'flat',
+      groupDialogue: false,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    expect(labels(entries)).toEqual(['s:dlg', 's:in-proj']);
+  });
+});
+
+describe('buildMainListEntries — 排序口径', () => {
+  it("sorts oldest-first under 'time'", () => {
+    const projNew = project('alpha', [session({ updatedAt: '2026-08-12T10:00:00Z' })]);
+    const dlgOld = session({ updatedAt: '2026-08-01T10:00:00Z', title: 'old' });
+    const entries = buildMainListEntries({
+      projects: [projNew],
+      dialogues: [dlgOld],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'time',
+      manualProjectOrder: [],
+    });
+    expect(labels(entries)).toEqual(['s:old', 'p:alpha']);
+  });
+
+  it("floats attention > running > rest under 'priority', recency within tiers", () => {
+    const attention = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'needs-input' });
+    const running = session({ updatedAt: '2026-08-05T00:00:00Z', title: 'running' });
+    const idleNewest = session({ updatedAt: '2026-08-12T00:00:00Z', title: 'idle' });
+    const ctx = {
+      runningSessionIds: new Set([running.id]),
+      attentionSessionIds: new Set([attention.id]),
+    };
+    expect(sessionPriorityRank(attention, ctx)).toBe(0);
+    expect(sessionPriorityRank(running, ctx)).toBe(1);
+    expect(sessionPriorityRank(idleNewest, ctx)).toBe(2);
+    const entries = buildMainListEntries({
+      projects: [],
+      dialogues: [idleNewest, running, attention],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'priority',
+      manualProjectOrder: [],
+      priorityContext: ctx,
+    });
+    expect(labels(entries)).toEqual(['s:needs-input', 's:running', 's:idle']);
+  });
+
+  it('a project inherits its best session priority (group floats with its members)', () => {
+    const attention = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'attn-in-proj' });
+    const proj = project('alpha', [attention]);
+    const idleDlg = session({ updatedAt: '2026-08-12T00:00:00Z', title: 'idle-dlg' });
+    const entries = buildMainListEntries({
+      projects: [proj],
+      dialogues: [idleDlg],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'priority',
+      manualProjectOrder: [],
+      priorityContext: {
+        runningSessionIds: new Set<string>(),
+        attentionSessionIds: new Set([attention.id]),
+      },
+    });
+    expect(labels(entries)).toEqual(['p:alpha', 's:idle-dlg']);
+  });
+
+  it('keeps manual sort scoped to project rows; dialogues follow by recency (§9.3)', () => {
+    const projA = project('alpha', [session({ updatedAt: '2026-08-01T00:00:00Z' })]);
+    const projB = project('beta', [session({ updatedAt: '2026-08-12T00:00:00Z' })]);
+    const dlg = session({ updatedAt: '2026-08-13T00:00:00Z', title: 'newest-dlg' });
+    const entries = buildMainListEntries({
+      projects: [projA, projB],
+      dialogues: [dlg],
+      groupBy: 'project',
+      groupDialogue: false,
+      sortBy: 'manual',
+      manualProjectOrder: ['local:beta', 'local:alpha'],
+      priorityContext: NO_PRIORITY,
+    });
+    // 项目按手动顺序;最新的散排对话也排在项目之后(手动排序只管项目行)。
+    expect(labels(entries)).toEqual(['p:beta', 'p:alpha', 's:newest-dlg']);
+  });
+});

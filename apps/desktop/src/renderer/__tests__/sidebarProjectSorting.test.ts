@@ -68,21 +68,6 @@ describe('sidebar project sorting', () => {
     expect(sorted.map((p) => p.workingDir)).toEqual(['/p/gamma', '/p/alpha', '/p/beta']);
   });
 
-  it('sorts projects alphabetically by display name', () => {
-    const sorted = sortProjectsForSidebar(
-      [
-        project({ workingDir: '/p/zeta', displayName: 'zeta' }),
-        project({ workingDir: '/p/alpha', displayName: 'alpha' }),
-        project({ workingDir: '/p/Project 2', displayName: 'Project 2' }),
-        project({ workingDir: '/p/Project 10', displayName: 'Project 10' }),
-      ],
-      'alphabetic',
-      [],
-    );
-
-    expect(sorted.map((p) => p.displayName)).toEqual(['alpha', 'Project 2', 'Project 10', 'zeta']);
-  });
-
   it('sorts sessions by userSendAt, ignoring later updatedAt bumps', () => {
     // 排序时钟 = userSendAt ?? updatedAt（以用户最近一次按下发送为主键）。
     // laterSend.updatedAt 有意设得比 earlierSend 更新（模拟 agent 回复 / scheduler

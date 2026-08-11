@@ -150,13 +150,8 @@ import {
 } from './lib/sidebarProjectRestore';
 import { PinnedSection, type PinnedSidebarEntry } from './sidebar/sections/PinnedSection';
 import { ProjectNode as ProjectNodeView } from './sidebar/sections/ProjectNode';
-import {
-  DialogueSection,
-  compareDialogueSessions,
-  type DialogueSortBy,
-} from './sidebar/sections/DialogueSection';
+import { compareDialogueSessions, type DialogueSortBy } from './sidebar/sections/DialogueSection';
 import { ProjectsSection } from './sidebar/sections/ProjectsSection';
-import { DateGroupedSessionsSection } from './sidebar/sections/DateGroupedSessionsSection';
 import { isAutomationGeneratedSession } from './lib/scheduledSessionGrouping';
 import { toStoredSessionTitle } from './lib/sessionDisplayTitle';
 import {
@@ -1126,6 +1121,18 @@ function ExpandedView({
   // 过滤在源头做,下游 grouping / pinned / projects / dialogues / date-grouped / search 自动继承。
   const selectedMachineId = useEffectiveSelectedMachineId();
   const switcherDevices = useSwitcherDevices();
+  // E 期「按设备分组」:远程设备顺序 + 名称/在线状态(设备切换栏同序同源)。
+  // 空 map = 没有远程设备 → ProjectsSection 隐藏该分组选项、不切段。
+  const remoteDeviceIndex = useMemo(() => {
+    const index = new Map<string, { name: string; online: boolean }>();
+    for (const device of switcherDevices) {
+      index.set(device.deviceId, {
+        name: device.name,
+        online: device.status === 'connected',
+      });
+    }
+    return index;
+  }, [switcherDevices]);
   const deviceListSettled = useDeviceLinkDeviceListSettled();
   const selectedDialogueDeviceResolution = useMemo(
     () => resolveDialogueDeviceTarget(selectedMachineId, switcherDevices, deviceListSettled),
@@ -1636,31 +1643,12 @@ function ExpandedView({
     [sessions, remoteProjectSessions, filter, t],
   );
 
-  const visibleDateSessions = useMemo(() => {
-    const allowedProjects = filter.projectsAsSet;
-    return activityFilteredSessions.filter((s) => {
-      if (s.pinnedAt != null) return false;
-      if (vendorPredicate && !vendorPredicate(s)) return false;
-      if (s.workspaceKind !== 'dialogue') {
-        const pinnedProjectKey = projectIdentityKeyForSession(s);
-        if (pinnedProjectKey != null && pinnedProjectKeys.has(pinnedProjectKey)) return false;
-      }
-      if (allowedProjects === null) return true;
-      if (s.workspaceKind === 'dialogue') return false;
-      const wd = normalizeWorkingDir(s.workingDir);
-      if (wd == null) return false;
-      const key = projectIdentityKeyForSession(s);
-      return key != null && allowedProjects.has(key);
-    });
-  }, [activityFilteredSessions, vendorPredicate, filter.projectsAsSet, pinnedProjectKeys]);
-
+  // D 期:按日期分组已删除(visibleDateSessions 随 DateGroupedSessionsSection 一并下线)。
   const hasVisibleSidebarContent =
     visiblePinnedEntries.length > 0 ||
-    (filter.groupBy === 'date'
-      ? visibleDateSessions.length > 0
-      : visibleUnclassified.length > 0 ||
-        visibleProjectsWithVendor.length > 0 ||
-        visibleDialogues.length > 0);
+    visibleUnclassified.length > 0 ||
+    visibleProjectsWithVendor.length > 0 ||
+    visibleDialogues.length > 0;
 
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [selectionAnchorSessionId, setSelectionAnchorSessionId] = useState<string | null>(null);
@@ -3135,87 +3123,46 @@ function ExpandedView({
                 projectOptions={projectPickerOptions}
                 onReorder={handlePinnedReorder}
               />
-              {filter.groupBy === 'date' ? (
-                <DateGroupedSessionsSection
-                  sessions={visibleDateSessions}
-                  isLoading={isLoadingSidebarSessions}
-                  allKnownProjects={visibleProjectUniverse}
-                  filter={filter}
-                  activeSessionId={activeSessionId}
-                  runningSessionIds={displayRunningSessionIds}
-                  attachedSessionIds={attachedSessionIds}
-                  notifications={sidebarNotifications}
-                  scheduleSessionIndex={scheduleSessionIndex}
-                  selectedSessionIds={selectedSessionIds}
-                  onSessionClick={handleSessionClick}
-                  onAction={handleActionClick}
-                  onRename={handleRename}
-                  onTogglePin={handleTogglePin}
-                  onMoveSession={handleMoveSession}
-                  projectOptions={projectPickerOptions}
-                  onScheduleAction={handleScheduleAction}
-                />
-              ) : (
-                <>
-                  <ProjectsSection
-                    unclassified={visibleUnclassified}
-                    projects={visibleProjectsWithVendor}
-                    allKnownProjects={visibleProjectUniverse}
-                    allProjectKeysForOrder={gcProjectKeys}
-                    filter={filter}
-                    collapsed={collapse.collapsed}
-                    isAllCollapsed={collapse.isAllCollapsed}
-                    activeSessionId={activeSessionId}
-                    runningSessionIds={displayRunningSessionIds}
-                    attachedSessionIds={attachedSessionIds}
-                    notifications={sidebarNotifications}
-                    scheduleSessionIndex={scheduleSessionIndex}
-                    selectedSessionIds={selectedSessionIds}
-                    onSessionClick={handleSessionClick}
-                    onAction={handleActionClick}
-                    onRename={handleRename}
-                    onTogglePin={handleTogglePin}
-                    onMoveSession={handleMoveSession}
-                    projectOptions={projectPickerOptions}
-                    onScheduleAction={handleScheduleAction}
-                    onToggleProject={collapse.toggle}
-                    onToggleProjectPin={handleToggleProjectPin}
-                    onRenameProject={handleProjectAliasChange}
-                    onRemoveFromSidebar={handleRemoveProjectFromSidebar}
-                    onCollapseAll={collapse.collapseAll}
-                    onExpandAll={collapse.expandAll}
-                    onCreateProject={handleCreateProject}
-                    onCreateInProject={handleCreateInProject}
-                    onOpenConversationSearch={handleOpenConversationSearch}
-                    onOpenInExplorer={handleOpenInExplorer}
-                    onLinkCodexProject={handleLinkCodexProject}
-                    linkingCodexProject={linkingCodexProject}
-                    onBrowseFiles={handleBrowseFiles}
-                    onArchiveAll={handleArchiveAllInProject}
-                  />
-                  <DialogueSection
-                    sessions={visibleDialogues}
-                    isLoading={isLoadingSidebarSessions}
-                    activeSessionId={activeSessionId}
-                    runningSessionIds={displayRunningSessionIds}
-                    attachedSessionIds={attachedSessionIds}
-                    notifications={sidebarNotifications}
-                    scheduleSessionIndex={scheduleSessionIndex}
-                    selectedSessionIds={selectedSessionIds}
-                    onSessionClick={handleSessionClick}
-                    onAction={handleActionClick}
-                    onRename={handleRename}
-                    onTogglePin={handleTogglePin}
-                    onMoveSession={handleMoveSession}
-                    projectOptions={projectPickerOptions}
-                    onScheduleAction={handleScheduleAction}
-                    onCreateDialogue={handleCreateDialogue}
-                    createDisabled={dialogueCreatePending}
-                    sortBy={dialogueSortBy}
-                    onSortByChange={setDialogueSortBy}
-                  />
-                </>
-              )}
+              {/* D 期:主列表 = 混排模型(项目行 + 散排对话 / 对话组,ProjectsSection
+                  内部按 mainListModel 统一排序)。按日期分组与固定 Dialogue 段已删除。 */}
+              <ProjectsSection
+                unclassified={visibleUnclassified}
+                projects={visibleProjectsWithVendor}
+                dialogues={visibleDialogues}
+                allKnownProjects={visibleProjectUniverse}
+                allProjectKeysForOrder={gcProjectKeys}
+                filter={filter}
+                collapsed={collapse.collapsed}
+                isAllCollapsed={collapse.isAllCollapsed}
+                activeSessionId={activeSessionId}
+                runningSessionIds={displayRunningSessionIds}
+                attachedSessionIds={attachedSessionIds}
+                notifications={sidebarNotifications}
+                scheduleSessionIndex={scheduleSessionIndex}
+                selectedSessionIds={selectedSessionIds}
+                onSessionClick={handleSessionClick}
+                onAction={handleActionClick}
+                onRename={handleRename}
+                onTogglePin={handleTogglePin}
+                onMoveSession={handleMoveSession}
+                projectOptions={projectPickerOptions}
+                onScheduleAction={handleScheduleAction}
+                onToggleProject={collapse.toggle}
+                onToggleProjectPin={handleToggleProjectPin}
+                onRenameProject={handleProjectAliasChange}
+                onRemoveFromSidebar={handleRemoveProjectFromSidebar}
+                onCollapseAll={collapse.collapseAll}
+                onExpandAll={collapse.expandAll}
+                onCreateProject={handleCreateProject}
+                onCreateInProject={handleCreateInProject}
+                onOpenConversationSearch={handleOpenConversationSearch}
+                onOpenInExplorer={handleOpenInExplorer}
+                onLinkCodexProject={handleLinkCodexProject}
+                linkingCodexProject={linkingCodexProject}
+                onBrowseFiles={handleBrowseFiles}
+                onArchiveAll={handleArchiveAllInProject}
+                remoteDeviceIndex={remoteDeviceIndex}
+              />
             </>
           )}
         </div>

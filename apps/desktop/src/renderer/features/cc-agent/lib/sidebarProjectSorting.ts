@@ -34,14 +34,6 @@ export function sortProjectsForSidebar(
   if (sortBy === 'time') {
     return withSortedSessions.sort((a, b) => toMs(a.latestActivityAt) - toMs(b.latestActivityAt));
   }
-  if (sortBy === 'alphabetic') {
-    return withSortedSessions.sort((a, b) =>
-      a.displayName.localeCompare(b.displayName, undefined, {
-        numeric: true,
-        sensitivity: 'base',
-      }),
-    );
-  }
   if (sortBy === 'manual') {
     const normalizedOrder = normalizeManualProjectOrder(
       manualProjectOrder,

@@ -29,8 +29,8 @@ describe('sidebar remote project icon', () => {
     expect(sessionItemSource).toMatch(
       /const remoteIconKind = session\.deviceLinkDeviceId\s+\?\s+'device-link'\s+:\s+session\.remoteHostId\s+\?\s+'ssh'\s+:\s+null/,
     );
-    expect(sessionCardSource).toContain(
-      "const remoteIconKind = session.deviceLinkDeviceId ? 'device-link' : session.remoteHostId ? 'ssh' : null",
+    expect(sessionCardSource).toMatch(
+      /const remoteIconKind = session\.deviceLinkDeviceId\s+\?\s+'device-link'\s+:\s+session\.remoteHostId\s+\?\s+'ssh'\s+:\s+null/,
     );
     expect(sessionHeaderSource).toContain(
       "const remoteIconKind = session.deviceLinkDeviceId ? 'device-link' : session.remoteHostId ? 'ssh' : null",
@@ -55,8 +55,9 @@ describe('sidebar remote project icon', () => {
     expect(sessionItemSource).toMatch(
       /<span[\s\S]*?className=\{cn\(\s*'min-w-0 flex flex-1 items-center gap-1\.5'[\s\S]*?<SidebarTitleMarquee[\s\S]*?\{remoteIconKind && \([\s\S]*?<RemoteProjectIcon/,
     );
+    // C 期起右侧时间槽由 SessionInfoMeta 承担(任务信息复选),仍在同一让位容器内。
     expect(sessionItemSource).toMatch(
-      /<div className="group\/slot relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14">[\s\S]*?<WorktreeBadge[\s\S]*?<time/,
+      /<div className="group\/slot relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14">[\s\S]*?<WorktreeBadge[\s\S]*?<SessionInfoMeta/,
     );
     expect(sessionCardSource).toContain('function TimeActionsSlot');
     expect(sessionCardSource).not.toMatch(/function TimeActionsSlot[\s\S]*?remoteIconKind/);

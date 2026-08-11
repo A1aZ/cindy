@@ -603,7 +603,8 @@ describe('SessionCard visual cases', () => {
       expect(action.className).not.toContain('border-sidebar-border');
       expect(action.querySelector('svg')?.getAttribute('width')).toBe('14');
     }
-    const listTimeFade = listContainer.querySelector('time')?.parentElement;
+    // C 期起 time 包在 SessionInfoMeta 的 span 里;最近的 div 祖先才是让位容器。
+    const listTimeFade = listContainer.querySelector('time')?.closest('div');
     expect(listTimeFade?.className).toContain('group-focus-within/slot:opacity-0');
     expect(listTimeFade?.parentElement?.className).toContain('group/slot');
     cleanup();
@@ -660,7 +661,8 @@ describe('SessionCard visual cases', () => {
     expect(confirmPill.className).toContain('var(--surface-elevated)');
     expect(confirmPill.className).not.toContain('transparent');
     if (variant === 'list') {
-      expect(container.querySelector('time')?.parentElement?.className).toContain('invisible');
+      // 让位容器是 time 最近的 div 祖先(time 嵌在 SessionInfoMeta span 内)。
+      expect(container.querySelector('time')?.closest('div')?.className).toContain('invisible');
     }
   });
 

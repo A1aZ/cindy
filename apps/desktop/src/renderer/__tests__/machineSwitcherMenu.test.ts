@@ -30,13 +30,6 @@ const projectsSectionSource = read(
   'sections',
   'ProjectsSection.tsx',
 );
-const dateSectionSource = read(
-  'features',
-  'cc-agent',
-  'sidebar',
-  'sections',
-  'DateGroupedSessionsSection.tsx',
-);
 const menuSource = read('features', 'cc-agent', 'sidebar', 'MachineSwitcherMenu.tsx');
 
 describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不滚动)', () => {
@@ -74,40 +67,19 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(projectsSectionSource).not.toContain('MachineSwitcherMenu');
   });
 
-  it('项目视图:早退条件不再依赖 hasRemote 保留空段头(入口不在本段头)', () => {
+  it('项目视图:早退条件不再依赖机器切换 hook 保留空段头(入口不在本段头)', () => {
+    // E 期的 hasRemoteDevices 是 prop 注入的设备分组开关可见性,与当年段头里
+    // 直接消费 useMachineSwitcher 的旧结构无关——断言收窄到 hook 本身。
     expect(projectsSectionSource).not.toContain('useMachineSwitcher');
-    expect(projectsSectionSource).not.toContain('hasRemote');
+    expect(projectsSectionSource).not.toContain('hasRemoteMachines');
   });
 
-  it('日期分组头不再渲染 MachineSwitcherMenu(已移到顶部固定行)', () => {
-    expect(dateSectionSource).not.toContain('MachineSwitcherMenu');
-  });
-
-  it('日期分组视图:选中 0 会话的远程机器时仍渲染空态段头(空列表可感知)', () => {
-    // groups 为空且 filter 未激活、初始加载已结束时,若还选中了非「所有」的远程机器,
-    // machineFilterActive 让组件继续渲染空态段头(「空」标签),让用户看得出是机器
-    // 过滤导致的空列表而非白屏。
-    expect(dateSectionSource).toContain('machineFilterActive');
-    expect(dateSectionSource).toMatch(/selectedDeviceId\s*!==\s*MACHINE_ALL/);
-    expect(dateSectionSource).toContain(
-      'if (groups.length === 0 && !isLoading && !filter.isFilterActive && !machineFilterActive) return null;',
-    );
-  });
-
-  it('按时间分组视图:整理侧边栏(filter)按钮默认隐藏、hover 段头才浮现', () => {
-    // 段头挂 group/sidebar-header,SidebarFilterPopover 包在 hover-reveal 容器里。
-    expect(dateSectionSource).toContain('group/sidebar-header');
-    expect(dateSectionSource).toContain('HEADER_HOVER_ACTION_CLASS');
-    // filter popover 包在 hover-reveal 容器里(默认隐藏,hover 段头才浮现)。
-    expect(dateSectionSource).toMatch(
-      /<div className=\{HEADER_HOVER_ACTION_CLASS\}>\s*<SidebarFilterPopover/,
-    );
-  });
+  // (侧边栏重设计 D 期:按日期分组段已删除,其 MachineSwitcherMenu / 空态 /
+  //  hover-reveal 断言随 DateGroupedSessionsSection.tsx 一并下线。)
 
   it('机器过滤激活时其它 action 仍按默认 hover 收起(不随选中设备常驻)', () => {
     // 选中设备只体现在 MachineSwitcherMenu 自身(active 指示),其它 action 不因此常驻。
     expect(projectsSectionSource).not.toContain('useMachineFilterActive');
-    expect(dateSectionSource).not.toContain('useMachineFilterActive');
   });
 
   it('MachineSwitcherMenu 常驻显示,不再有 hoverGroup 浮现模式', () => {

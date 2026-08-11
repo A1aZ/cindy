@@ -111,6 +111,15 @@ async function run(request: Request): Promise<void> {
       throw error;
     }
     try {
+      await verifyParent(request.expectedParent);
+      // Validate that the just-created target is still a real directory
+      // owned by this worker before moving entries into it.  A concurrent
+      // process could delete the empty directory and replace it with a
+      // symlink/junction between mkdir and the rename loop.
+      const targetStat = await fs.promises.lstat(request.targetName);
+      if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+        throw new Error('Forge scaffold target replaced after mkdir');
+      }
       for (const entry of await fs.promises.readdir(staging, { withFileTypes: true })) {
         await fs.promises.rename(
           path.join(staging, entry.name),
@@ -122,7 +131,17 @@ async function run(request: Request): Promise<void> {
     } catch (error) {
       // Publish failed after mkdir: the partially-populated target must be
       // cleaned up so it doesn't block the next scaffold attempt.
-      await fs.promises.rm(request.targetName, { recursive: true, force: true }).catch(() => undefined);
+      // Only remove a real directory — if the target was swapped for a
+      // symlink/junction, rm with recursive would follow it.
+      try {
+        const cleanupStat = await fs.promises.lstat(request.targetName);
+        if (cleanupStat.isDirectory() && !cleanupStat.isSymbolicLink()) {
+          await fs.promises.rm(request.targetName, { recursive: true, force: true });
+        }
+      } catch {
+        // Cleanup is best-effort; the next scaffold attempt will also
+        // reject the TARGET_EXISTS state.
+      }
       throw error;
     }
     await verifyParent(request.expectedParent);

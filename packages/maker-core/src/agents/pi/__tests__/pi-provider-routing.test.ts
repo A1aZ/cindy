@@ -265,6 +265,103 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('keeps BYOM startup when the model is outside the XD v3 Pi catalog', async () => {
+    const deps: AgentDeps = {
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({}),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [
+          {
+            id: 'byom-only-model',
+            displayName: 'BYOM Only Model',
+            contextWindow: 128_000,
+            efforts: [],
+            defaultEffort: null,
+          },
+        ],
+      },
+      resolvePiAgentHome: () => agentHome,
+      // undefined = 该模型不受 XD v3 管理；不是 XD 协议缺失。
+      resolvePiGatewayModelApi: () => undefined,
+      resolvePiNativeProviders: async () => ({
+        providers: [
+          {
+            id: 'my-local',
+            name: 'My Local',
+            baseUrl: 'http://127.0.0.1:11434/v1',
+            api: 'openai-completions',
+            models: [{ id: 'byom-only-model' }],
+          },
+        ],
+        env: {},
+      }),
+    };
+
+    const handle = await new PiAgent(deps).startSession({
+      sessionId: 'byom-outside-xd-v3',
+      workingDir: cwd,
+      model: 'byom-only-model',
+      providerId: 'my-local',
+    });
+
+    expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 2))
+      .toEqual(['--provider', 'my-local']);
+    const models = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
+    ) as {
+      providers: Record<string, {
+        models: Array<{ id: string; api?: string }>;
+      }>;
+    };
+    expect(models.providers.cindy?.models.find((model) => model.id === 'byom-only-model'))
+      .toMatchObject({ api: 'anthropic-messages' });
+    expect(models.providers['my-local']?.models.find((model) => model.id === 'byom-only-model'))
+      .toMatchObject({ id: 'byom-only-model' });
+    await handle.close();
+  });
+
+  it('still fails closed when an XD Pi model has no valid v3 wire protocol', async () => {
+    const deps: AgentDeps = {
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({}),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [
+          {
+            id: 'invalid-xd-model',
+            displayName: 'Invalid XD Model',
+            contextWindow: 200_000,
+            efforts: [],
+            defaultEffort: null,
+          },
+        ],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => null,
+    };
+
+    await expect(new PiAgent(deps).startSession({
+      sessionId: 'invalid-xd-v3-wire',
+      workingDir: cwd,
+      model: 'invalid-xd-model',
+      providerId: 'xd',
+    })).rejects.toThrow(/Model Access v3 did not provide a Pi wire protocol/);
+    expect(captured.args).toEqual([]);
+  });
+
   it('reconciles a stale persisted effort to the selected BYOM model default before startup', async () => {
     const resolver = vi.fn((providerId: string | null | undefined, modelId: string) => {
       if (providerId !== 'native-a' || modelId !== 'shared-model') return null;

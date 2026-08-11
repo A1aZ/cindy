@@ -164,15 +164,18 @@ function xdGatewayTargetAgents(model: XdGatewayModelInfo): AgentKind[] {
  * XD 下发模型给 Pi 时的真实 wire protocol。
  *
  * Pi provider 始终叫 `cindy`；这里只读取 v3 服务端给该模型的 transport，供
- * models.json 写入模型级 `api`。缺失返回 null，由 maker-core fail closed。
+ * models.json 写入模型级 `api`。三态语义：非 XD Pi 模型返回 undefined；XD Pi 模型
+ * 缺失或协议非法返回 null，由 maker-core fail closed；有效配置返回 Responses。
  */
 export function resolveXdPiGatewayWireProtocol(
   modelId: string,
-): Extract<ProviderWireProtocol, 'openai-responses'> | null {
+): Extract<ProviderWireProtocol, 'openai-responses'> | null | undefined {
   const normalized = modelId.replace(/\[1m\]$/, '');
-  const wireProtocol = xdGatewayModels.find(
+  const gatewayModel = xdGatewayModels.find(
     (model) => model.id === normalized,
-  )?.perAgent?.pi?.wireProtocol;
+  );
+  if (!gatewayModel?.agents?.includes('pi')) return undefined;
+  const wireProtocol = gatewayModel.perAgent?.pi?.wireProtocol;
   return wireProtocol === 'openai-responses' ? wireProtocol : null;
 }
 

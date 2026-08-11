@@ -478,10 +478,19 @@ export class PiAgent extends BaseAgent {
       // provider-aware 描述符，不能被同名 non-reasoning BYOM 清空 reasoning。
       // host 未注入 resolver 或只有 BYOM 条目时保留旧 flat fallback。
       const m = this.deps.resolvePiGatewayModelDescriptor?.(publicModel.id) ?? publicModel;
-      const api = this.deps.resolvePiGatewayModelApi?.(m.id);
-      if (api !== 'anthropic-messages' && api !== 'openai-responses') {
+      const resolvedApi = this.deps.resolvePiGatewayModelApi?.(m.id);
+      if (
+        resolvedApi === null ||
+        (resolvedApi !== undefined &&
+          resolvedApi !== 'anthropic-messages' &&
+          resolvedApi !== 'openai-responses')
+      ) {
         throw new Error(`Model Access v3 did not provide a Pi wire protocol for model: ${m.id}`);
       }
+      // undefined 明确表示该模型不属于 XD Pi 目录。订阅直连及 BYOM-only 模型仍需出现在
+      // cindy compat provider 的模型表中，沿用它们既有的 Messages 前门；只有 null 才是
+      // “属于 XD 但 v3 配置不完整”，上面已 fail closed。
+      const api = resolvedApi ?? 'anthropic-messages';
       const supportsImageInput = m.supportsImageInput === true;
       gatewayImageInputByModel.set(m.id, supportsImageInput);
       return {

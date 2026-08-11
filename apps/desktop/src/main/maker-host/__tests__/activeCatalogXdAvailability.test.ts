@@ -107,12 +107,18 @@ describe('XD 网关权威模型清单重建', () => {
         agents: ['claude-code', 'codex', 'pi'],
         perAgent: { pi: { wireProtocol: 'openai-responses' } },
       },
+      {
+        id: 'claude-only-model',
+        agents: ['claude-code'],
+        perAgent: { 'claude-code': { wireProtocol: 'anthropic-messages' } },
+      },
     ]);
 
     expect(resolveXdPiGatewayWireProtocol('invalid-messages-wire')).toBeNull();
     expect(resolveXdPiGatewayWireProtocol('responses-model')).toBe('openai-responses');
     expect(resolveXdPiGatewayWireProtocol('responses-model[1m]')).toBe('openai-responses');
-    expect(resolveXdPiGatewayWireProtocol('unknown-model')).toBeNull();
+    expect(resolveXdPiGatewayWireProtocol('claude-only-model')).toBeUndefined();
+    expect(resolveXdPiGatewayWireProtocol('unknown-model')).toBeUndefined();
   });
 
   it('显式登记 efforts=[] 表示不可调,不合成 3 档;fast 显式 false 尊重', () => {

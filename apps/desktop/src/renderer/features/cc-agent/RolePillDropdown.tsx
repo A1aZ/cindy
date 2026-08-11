@@ -318,13 +318,50 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
 function WorkerLayoutMenu({
   layout,
   onLayoutChange,
+  workers,
+  selectedWorkerId,
+  activeWorkerCount,
+  softLimit,
+  hardLimit,
+  onSwitchFocus,
+  onOpenCreate,
+  onOpenSettings,
+  settingsEnabled = true,
+  onArchiveWorker,
+  clearAttentionWhenVisible = true,
 }: {
   layout: WorkerListLayout;
   onLayoutChange: (layout: WorkerListLayout) => void;
+  workers: WorkerInfo[];
+  selectedWorkerId: string | null;
+  activeWorkerCount: number;
+  softLimit: number;
+  hardLimit: number;
+  onSwitchFocus: (workerId: string) => void;
+  onOpenCreate: () => void;
+  onOpenSettings: () => void;
+  settingsEnabled?: boolean;
+  onArchiveWorker: (workerId: string) => void;
+  clearAttentionWhenVisible?: boolean;
 }) {
   const { t } = useTranslation();
+  const shortcutKey = useAppShortcutDisplay('new-maker');
   const [open, setOpen] = useState(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const attention = useWorkerAttentionSnapshot();
+  const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
+  const totalWorkerCount = workers.length;
+  const activeCount = activeWorkerCount;
+
+  useLayoutEffect(() => {
+    if (!open || !clearAttentionWhenVisible) return;
+    if (
+      selectedWorkerId &&
+      workers.find((item) => item.workerId === selectedWorkerId)?.status !== 'done'
+    ) {
+      clearWorkerAttention(selectedWorkerId);
+    }
+  }, [attention, clearAttentionWhenVisible, selectedWorkerId, workers, open]);
 
   useEffect(() => {
     if (!open) return;
@@ -344,7 +381,7 @@ function WorkerLayoutMenu({
     };
   }, [open]);
 
-  const rows: Array<{ value: WorkerListLayout; label: string }> = [
+  const layoutRows: Array<{ value: WorkerListLayout; label: string }> = [
     { value: 'tabs', label: t('orca.rolePill.layoutTabs') },
     { value: 'dropdown', label: t('orca.rolePill.layoutDropdown') },
   ];
@@ -367,31 +404,202 @@ function WorkerLayoutMenu({
       </Tip>
       {open && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 w-[190px] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)] p-1"
+          className="absolute right-0 top-full z-50 mt-1 w-[320px] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
           style={{ boxShadow: 'var(--shadow-menu)' }}
         >
-          <div className="select-none px-2.5 py-1.5 text-10 font-medium leading-snug text-[var(--text-tertiary)]">
-            {t('orca.rolePill.layoutMenuLabel')}
+          {/* Header: WORKERS + count */}
+          <div className="flex select-none items-center justify-between px-4 pt-3 pb-2">
+            <span className="text-10 font-medium uppercase tracking-[0.5px] text-[var(--text-tertiary)]">
+              {t('orca.rolePill.workersHeader')}
+            </span>
+            <span className="text-10 font-medium text-[var(--text-tertiary)]">
+              {t('orca.rolePill.workerCountSummary', {
+                count: totalWorkerCount,
+                totalCount: totalWorkerCount,
+                activeCount,
+              })}
+            </span>
           </div>
-          {rows.map((row) => {
-            const selected = row.value === layout;
-            return (
+
+          {/* Worker rows */}
+          <div className="flex flex-col">
+            {workers.map((w) => {
+              const isFocused = w.workerId === selectedWorkerId || w.focused;
+              const isError = w.status === 'error';
+              return (
+                <div key={w.workerId} className="group relative">
+                  <button
+                    type="button"
+                    className={cn(
+                      'flex w-full flex-col px-4 py-2 text-left transition-colors',
+                      isError
+                        ? 'bg-[var(--error-bg)] border-l-2 border-[var(--error-fg)] pl-[14px]'
+                        : isFocused
+                          ? 'bg-[var(--surface-chip)] border-l-2 border-[var(--status-bar-accent)] pl-[14px]'
+                          : 'pl-4',
+                    )}
+                    onClick={() => {
+                      onSwitchFocus(w.workerId);
+                      setOpen(false);
+                    }}
+                  >
+                    <div className="flex items-center gap-2 text-13 leading-snug">
+                      <WorkerAvatar
+                        agent={w.agent}
+                        status={w.status}
+                        showAttentionDot={!isFocused && attention.has(w.workerId)}
+                      />
+                      <span className="font-medium text-[var(--text-primary)]">{w.role}</span>
+                      {shouldShowWorkerLabel(w.role, w.label) && (
+                        <>
+                          <span className="text-[var(--text-tertiary)]">#</span>
+                          <span className="text-[var(--text-secondary)]">{w.label}</span>
+                        </>
+                      )}
+                    </div>
+                    <div className="mt-0.5 ml-[26px] flex items-center gap-1.5 text-11 leading-snug text-[var(--text-tertiary)]">
+                      <span>{simplifyModelName(w.model)}</span>
+                      <EffortBars effort={w.effort} />
+                    </div>
+                  </button>
+                  {/* hover archive ✕ */}
+                  <button
+                    type="button"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-[22px] w-[22px] items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpen(false);
+                      void requestArchiveWorker(w);
+                    }}
+                    aria-label={t('orca.rolePill.archiveWorkerAria', {
+                      name: getWorkerArchiveDisplayName(w),
+                    })}
+                  >
+                    <X size={13} />
+                  </button>
+                  {isError && (
+                    <WorkerErrorBadge className="absolute right-2 top-1.5 z-10 shadow-[0_0_0_1.5px_var(--surface-elevated)]" />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Separator */}
+          <div className="mx-4 h-px bg-[var(--border-default)]" />
+
+          {/* Create new worker row */}
+          {activeCount >= hardLimit ? (
+            <div className="px-4 py-2.5">
+              <div className="flex items-center gap-2 opacity-40">
+                <span className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--surface-elevated)]">
+                  <Plus size={13} />
+                </span>
+                <span className="text-13 leading-snug text-[var(--text-primary)]">
+                  {t('orca.rolePill.createWorker')}
+                </span>
+              </div>
+              <div className="mt-1 text-11 leading-snug text-[var(--text-tertiary)]">
+                {t('orca.rolePill.hardLimitHint', { count: hardLimit })}
+              </div>
+              {settingsEnabled && (
+                <button
+                  type="button"
+                  className="mt-1.5 inline-flex items-center gap-1 text-11 leading-snug text-[var(--text-primary)] underline hover:opacity-80"
+                  onClick={() => onOpenSettings()}
+                >
+                  {t('orca.rolePill.settingsCollaboration')}
+                  <ChevronRight size={10} />
+                </button>
+              )}
+            </div>
+          ) : activeCount >= softLimit ? (
+            <div className="px-4 py-2.5">
               <button
-                key={row.value}
                 type="button"
-                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-12 leading-snug text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+                className="flex w-full items-center gap-2 text-left"
                 onClick={() => {
-                  onLayoutChange(row.value);
+                  onOpenCreate();
                   setOpen(false);
                 }}
               >
-                <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--text-primary)]">
-                  {selected && <Check size={12} strokeWidth={2.4} />}
+                <span className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--surface-chip)]">
+                  <Plus size={13} className="text-[var(--status-bar-accent)]" />
                 </span>
-                <span>{row.label}</span>
+                <span className="text-13 leading-snug text-[var(--status-bar-accent)]">
+                  {t('orca.rolePill.createWorker')}
+                </span>
+                {shortcutKey && (
+                  <kbd className="ml-auto text-10 text-[var(--status-bar-accent)]">
+                    {shortcutKey}
+                  </kbd>
+                )}
               </button>
-            );
-          })}
+              <div className="mt-1 px-[30px] text-11 leading-snug text-[var(--text-tertiary)]">
+                {t('orca.rolePill.softLimitHint', { count: softLimit })}
+              </div>
+              {settingsEnabled && (
+                <div className="px-[30px]">
+                  <button
+                    type="button"
+                    className="mt-1 inline-flex items-center gap-1 text-11 leading-snug text-[var(--status-bar-accent)] underline hover:opacity-80"
+                    onClick={() => onOpenSettings()}
+                  >
+                    {t('orca.rolePill.settingsCollaboration')}
+                    <ChevronRight size={10} />
+                  </button>
+                </div>
+              )}
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-13 leading-snug text-[var(--text-secondary)] hover:bg-[var(--surface-chip)] transition-colors"
+              onClick={() => {
+                onOpenCreate();
+                setOpen(false);
+              }}
+            >
+              <span className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md bg-[var(--surface-chip)]">
+                <Plus size={13} className="text-[var(--text-secondary)]" />
+              </span>
+              {t('orca.rolePill.createWorker')}
+              {shortcutKey && (
+                <kbd className="ml-auto text-10 text-[var(--text-tertiary)]">
+                  {shortcutKey}
+                </kbd>
+              )}
+            </button>
+          )}
+
+          {/* Separator */}
+          <div className="mx-4 h-px bg-[var(--border-default)]" />
+
+          {/* Layout options */}
+          <div className="p-1">
+            <div className="select-none px-2.5 py-1.5 text-10 font-medium leading-snug text-[var(--text-tertiary)]">
+              {t('orca.rolePill.layoutMenuLabel')}
+            </div>
+            {layoutRows.map((row) => {
+              const selected = row.value === layout;
+              return (
+                <button
+                  key={row.value}
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-12 leading-snug text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
+                  onClick={() => {
+                    onLayoutChange(row.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--text-primary)]">
+                    {selected && <Check size={12} strokeWidth={2.4} />}
+                  </span>
+                  <span>{row.label}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
@@ -643,7 +851,21 @@ export function WorkerListToolbar({
           hardLimit={hardLimit}
           onOpenCreate={onOpenCreate}
         />
-        <WorkerLayoutMenu layout={layout} onLayoutChange={handleLayoutChange} />
+        <WorkerLayoutMenu
+          layout={layout}
+          onLayoutChange={handleLayoutChange}
+          workers={workers}
+          selectedWorkerId={selectedWorkerId}
+          activeWorkerCount={activeWorkerCount}
+          softLimit={softLimit}
+          hardLimit={hardLimit}
+          onSwitchFocus={onSwitchFocus}
+          onOpenCreate={onOpenCreate}
+          onOpenSettings={onOpenSettings}
+          settingsEnabled={settingsEnabled}
+          onArchiveWorker={onArchiveWorker}
+          clearAttentionWhenVisible={clearAttentionWhenVisible}
+        />
         {trailingActions}
       </div>
     );
@@ -685,7 +907,21 @@ export function WorkerListToolbar({
           />
         </div>
       )}
-      <WorkerLayoutMenu layout={layout} onLayoutChange={handleLayoutChange} />
+      <WorkerLayoutMenu
+        layout={layout}
+        onLayoutChange={handleLayoutChange}
+        workers={workers}
+        selectedWorkerId={selectedWorkerId}
+        activeWorkerCount={activeWorkerCount}
+        softLimit={softLimit}
+        hardLimit={hardLimit}
+        onSwitchFocus={onSwitchFocus}
+        onOpenCreate={onOpenCreate}
+        onOpenSettings={onOpenSettings}
+        settingsEnabled={settingsEnabled}
+        onArchiveWorker={onArchiveWorker}
+        clearAttentionWhenVisible={clearAttentionWhenVisible}
+      />
       {trailingActions}
     </div>
   );

@@ -2,6 +2,24 @@
 export const DESKTOP_DEV_REGIONS = Object.freeze(["cn", "global", "dev"]);
 
 /**
+ * 与 packages/maker-shared/src/brandIdentity.ts 的 userDataDirNameByRegion 镜像。
+ * .mjs 启动器不能直接 import TS；同步关系由 brand-identity-sync.test.mjs 锁住。
+ */
+export const DESKTOP_USER_DATA_DIR_NAME_BY_REGION = Object.freeze({
+  cn: "Cindy",
+  global: "CindyGlobal",
+  dev: "CindyDev",
+});
+
+/** 共享 Desktop profile 的区域目录名；省略区域时遵循产品规则默认 Global。 */
+export function desktopUserDataDirNameForRegion(region = "global") {
+  if (!DESKTOP_DEV_REGIONS.includes(region)) {
+    throw new Error(`invalid desktop dev region: ${region}; expected cn, global or dev`);
+  }
+  return DESKTOP_USER_DATA_DIR_NAME_BY_REGION[region];
+}
+
+/**
  * 解析 desktop dev 区域。命令行显式值优先，保留 CINDY_AUTH_REGION 作为
  * CI / 老脚本兼容入口；无配置时默认 Global。
  */

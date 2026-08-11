@@ -3,10 +3,19 @@ import test from "node:test";
 
 import {
   applyDesktopDevStartupConfig,
+  desktopUserDataDirNameForRegion,
   resolveDesktopDevRegion,
   resolveDesktopDevStartupConfig,
   stripDesktopDevRegionArgs,
 } from "../shared/desktop-dev-region.mjs";
+
+test("desktop shared userData follows the region identity", () => {
+  assert.equal(desktopUserDataDirNameForRegion(), "CindyGlobal");
+  assert.equal(desktopUserDataDirNameForRegion("global"), "CindyGlobal");
+  assert.equal(desktopUserDataDirNameForRegion("cn"), "Cindy");
+  assert.equal(desktopUserDataDirNameForRegion("dev"), "CindyDev");
+  assert.throws(() => desktopUserDataDirNameForRegion("us"), /expected cn, global or dev/);
+});
 
 test("desktop dev region defaults to global and keeps the legacy env fallback", () => {
   assert.equal(resolveDesktopDevRegion([], {}), "global");

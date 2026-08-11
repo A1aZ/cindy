@@ -8,6 +8,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
@@ -389,6 +390,48 @@ describe('Pi approved project resource assembly', () => {
       const staged = await stageApprovedPiProjectResources(assembled, configHome);
 
       expect(overwritten).toBe(true);
+      expect(staged.skillPaths).toEqual([]);
+      expect(staged.launchSkillPaths).toEqual([]);
+      expect(staged.diagnostic).toMatchObject({
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when an approved directory changes after its children are enumerated', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-dir-churn-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const skillFile = path.join(skillPath, 'SKILL.md');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(skillFile, '# approved content\n');
+      const assembled = await assembleApprovedPiProjectResources(
+        inputForRepoRoot(workingDir, 'rev-dir-churn', [skillPath]),
+        workingDir,
+      );
+      const realLstat = fsPromises.lstat.bind(fsPromises);
+      let mutated = false;
+      vi.spyOn(fsPromises, 'lstat').mockImplementation(async (candidate, options) => {
+        if (String(candidate) === skillFile && !mutated) {
+          mutated = true;
+          writeFileSync(path.join(skillPath, 'late-asset.txt'), 'added after readdir\n');
+          const stableChangedTime = new Date('2000-01-01T00:00:00.000Z');
+          utimesSync(skillPath, stableChangedTime, stableChangedTime);
+        }
+        return realLstat(candidate, options);
+      });
+
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      expect(mutated).toBe(true);
       expect(staged.skillPaths).toEqual([]);
       expect(staged.launchSkillPaths).toEqual([]);
       expect(staged.diagnostic).toMatchObject({

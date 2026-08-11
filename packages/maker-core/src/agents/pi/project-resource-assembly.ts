@@ -229,7 +229,7 @@ function sameFileIdentity(
   return first.dev === second.dev && first.ino === second.ino;
 }
 
-function sameFileSnapshot(
+function sameEntrySnapshot(
   first: Awaited<ReturnType<FileHandle['stat']>>,
   second: Awaited<ReturnType<FileHandle['stat']>>,
 ): boolean {
@@ -288,7 +288,7 @@ async function materializeSkillEntry(
       if (
         path.relative(canonicalAfterCopy, canonicalSource) !== ''
         || !entryAfterCopy.isDirectory()
-        || !sameFileIdentity(entry, entryAfterCopy)
+        || !sameEntrySnapshot(entry, entryAfterCopy)
       ) {
         throw new Error('approved skill directory changed while snapshotting');
       }
@@ -320,7 +320,7 @@ async function materializeSkillEntry(
         fs.lstat(targetPath),
       ]);
     if (
-      !sameFileSnapshot(openedEntry, openedAfterCopy)
+      !sameEntrySnapshot(openedEntry, openedAfterCopy)
       || !sameFileIdentity(openedEntry, sourcePathAfterCopy)
       || path.relative(sourceAfterCopy, canonicalSource) !== ''
       || !targetAfterCopy.isFile()
@@ -342,7 +342,7 @@ async function materializeSkillEntry(
       ]);
       if (
         sourceDigest !== targetDigest
-        || !sameFileSnapshot(openedAfterCopy, sourceAfterStableRead)
+        || !sameEntrySnapshot(openedAfterCopy, sourceAfterStableRead)
         || !targetAfterStableRead.isFile()
         || targetAfterStableRead.size !== sourceAfterStableRead.size
       ) {

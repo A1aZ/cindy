@@ -1,12 +1,12 @@
 /**
  * useStreamFadePreference — 流式输出淡入动效的开关偏好(Settings → 个性化)。
  * ---------------------------------------------------------------------------
- * 两态,默认关闭(2026-08-09 裁决:动效仍在打磨,先以 opt-in 提供):
+ * 两态,默认开启(2026-08-11 裁决):
  *   - 'on'   流式输出时新内容淡入浮现(逐词 + 列表圆点,rehypeStreamWordFade)。
  *   - 'off'  关闭动效,文字直接显示。
  *
  * 规则 20(配置默认值 vs override)落法:localStorage 只存 override——
- * 用户切回 'off'(= 当前系统默认)时**删除** key 而不是写入,未自定义的用户
+ * 用户切回 'on'(= 当前系统默认)时**删除** key 而不是写入,未自定义的用户
  * 未来自动跟随新版本默认值;isCustomized 即 "存在 override"。
  *
  * 模块级内存值做跨实例 SoT + `storage` 事件跨窗口同步,模式与
@@ -23,7 +23,7 @@ import { useCallback, useEffect, useState } from 'react';
 export type StreamFadePreference = 'on' | 'off';
 
 const STORAGE_KEY = 'chat.streamFadePreference';
-const DEFAULT_PREFERENCE: StreamFadePreference = 'off';
+const DEFAULT_PREFERENCE: StreamFadePreference = 'on';
 
 function parsePreference(raw: string | null): StreamFadePreference | null {
   return raw === 'on' || raw === 'off' ? raw : null;

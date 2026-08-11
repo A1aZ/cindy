@@ -227,6 +227,7 @@ import { GhostPreviewSlot } from './previewSlot.js';
 import { GhostScheduleSlot, isMainShellWindowUrl } from './scheduleSlot.js';
 import { GhostWorkspaceSlot, type WorkspaceSessionService } from './workspaceSlot.js';
 import { GhostIOSSimulatorSlot, type IOSSimulatorSlotFocusContext } from './iosSimulatorSlot.js';
+import { resolveIOSSimulatorPluginAccess } from './iosSimulatorPluginGate.js';
 import {
   clearIOSSimulatorRendererAccess,
   focusIOSSimulatorRendererSession,
@@ -816,6 +817,16 @@ export function isGhostAvailableForActiveSession(id: string): boolean {
   const activeOwner = getActiveAppSession().dataOwnerId;
   if (!isGhostSkillProjectionBoundaryStableForOwner(activeOwner)) return false;
   return !isCindyAccountGhostId(id) || getAppCapabilities().canUseCindyAccountServices;
+}
+
+/** Live Host capability gate shared by Agent transports and Renderer IPC. */
+export function getIOSSimulatorPluginAccessDecision(
+  workingDir: string | null = null,
+) {
+  return resolveIOSSimulatorPluginAccess(getGhostManager().list(), workingDir, {
+    isAvailableForActiveSession: isGhostAvailableForActiveSession,
+    isDisabledForWorkdir: isGhostDisabledForWorkdir,
+  });
 }
 
 function availableGhosts(): InstalledGhost[] {
@@ -4341,14 +4352,18 @@ async function installOrUpdateMarketGhostPackageLocked(
     expected.beforeCommitInLock?.();
     const runtime = getGhostRuntime();
     runtime.stop(expected.ghostId);
-    getGhostNodeRuntimeBroker().stop(expected.ghostId);
-    getGhostAgentSlot().clearGhost(expected.ghostId);
-    getGhostErrandSlot().clearGhost(expected.ghostId);
+    // 无法确认旧进程已退出时保持停止态，不能启动第二份 resident。只有旧进程
+    // 已确认退出、后续目录更新失败时，才恢复原版本。
+    await getGhostNodeRuntimeBroker().stopAndWait(expected.ghostId);
     let result: Awaited<ReturnType<typeof manager.update>>;
     let packagePlaced = false;
     try {
-      // 与首装分支同一口径:钉住 inspect 时校验过的包字节。receipt 模型下更新必须
-      // 绑定 receipt token(决策 A:与 main 的 sha 钉扎叠加),否则并发批准变更绕不过去。
+      // 市场更新同样会原位 rename 插件目录。Windows 上不能只发停止信号，
+      // 必须确认旧 utilityProcess 已离开，否则入口文件仍可能被占用而报 EPERM。
+      getGhostAgentSlot().clearGhost(expected.ghostId);
+      getGhostErrandSlot().clearGhost(expected.ghostId);
+      // receipt 模型下更新必须绑定 receipt token(决策 A:与 main 的 sha 钉扎叠加),
+      // 否则并发批准变更绕不过去。
       if (!expected.expectedInstalledApproval) {
         throwIpcError(
           'PRECONDITION_FAILED',
@@ -5662,10 +5677,15 @@ export function registerGhostIpc(): void {
     // 从熄灯到换版收尾整段持 owner 租约:熄灯之后每一步都在改"当前 owner"的插件世界,
     // 中途 owner 切换落定会把后半段(update 落盘/停靠/点火)写进新 owner。租约在锁外,
     // 与市场/本地装入/卸载共用的按 ghostId 互斥叠加(二者语义不同,决策 A 都保留)。
+    // 锁序不变量(违反即死锁):owner lease → per-id lock。
     const releaseMutation = beginGhostMutation(mutationOwner);
     try {
       return await withGhostInstallLock(inspected.manifest.id, async () => {
         const previousGhost = manager.list().find((g) => g.manifest.id === inspected.manifest.id);
+        runtime.stop(inspected.manifest.id);
+        // 等待失败表示旧进程仍可能存活；此时不能恢复 resident，否则会产生
+        // 两份后台进程。仅在确认退出后的更新阶段失败时恢复旧版本。
+        await getGhostNodeRuntimeBroker().stopAndWait(inspected.manifest.id);
         let marketRecord: PluginMarketInstallationRecord | null;
         let marketInstallSubject: string | null = null;
         let marketRecordWasSuppressed = false;
@@ -5684,6 +5704,7 @@ export function registerGhostIpc(): void {
               : false;
           }
         } catch (error) {
+          if (previousGhost) spawnIfResident(previousGhost);
           log.warn('failed to verify Plugin provenance before local update', {
             ghostId: inspected.manifest.id,
             error: error instanceof Error ? error.message : String(error),
@@ -5722,6 +5743,7 @@ export function registerGhostIpc(): void {
             marketLedger.markRemoved(inspected.manifest.id, marketInstallSubject);
           } catch (error) {
             restoreMarketRecord();
+            if (previousGhost) spawnIfResident(previousGhost);
             log.warn('failed to detach Plugin market provenance before local update', {
               ghostId: inspected.manifest.id,
               error: error instanceof Error ? error.message : String(error),
@@ -5729,8 +5751,6 @@ export function registerGhostIpc(): void {
             throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');
           }
         }
-        runtime.stop(inspected.manifest.id);
-        getGhostNodeRuntimeBroker().stop(inspected.manifest.id);
         getGhostAgentSlot().clearGhost(inspected.manifest.id);
         getGhostErrandSlot().clearGhost(inspected.manifest.id);
         let result: Awaited<ReturnType<typeof manager.update>>;

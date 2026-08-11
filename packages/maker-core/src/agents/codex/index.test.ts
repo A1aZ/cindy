@@ -13037,9 +13037,11 @@ describe('CodexAgent MCP thread context hooks', () => {
       reason: 'use the embedded iOS Simulator',
     }));
     const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy, logger }));
-    const host = installFakeHost(agent, (method) =>
-      method === Method.TurnInterrupt ? {} : undefined,
-    );
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
+      if (method === Method.TurnInterrupt) return {};
+      return undefined;
+    });
     const handle = await agent.startSession({
       sessionId: 'session-command-item-host-policy',
       model: 'gpt-5.4',
@@ -13047,7 +13049,15 @@ describe('CodexAgent MCP thread context hooks', () => {
       permissionMode: 'bypassPermissions',
     });
     const handlers = host.getThreadHandlers();
-    if (!handlers?.itemStarted) throw new Error('expected itemStarted handler');
+    if (!handlers?.itemStarted || !handlers.turnCompleted) {
+      throw new Error('expected itemStarted and turnCompleted handlers');
+    }
+    const iterator = handle.events()[Symbol.asyncIterator]();
+    await handle.send({ type: 'user', content: 'test host policy' });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'status',
+      data: { isRunning: true },
+    });
 
     const command = 'API_TOKEN=super-secret /usr/bin/open -a Simulator';
     handlers.itemStarted({
@@ -13075,6 +13085,22 @@ describe('CodexAgent MCP thread context hooks', () => {
       reason: 'use the embedded iOS Simulator',
     });
     expect(JSON.stringify(warn.mock.calls)).not.toContain('super-secret');
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'error',
+      data: {
+        message: 'use the embedded iOS Simulator',
+        isTerminal: true,
+        reason: 'host-shell-command-blocked',
+      },
+    });
+
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'interrupted' },
+    });
+
+    expect(handle.isTurnRunning?.()).toBe(false);
+    await expect(nextEvent(iterator)).rejects.toThrow('timed out waiting for event');
     await handle.close();
   });
 

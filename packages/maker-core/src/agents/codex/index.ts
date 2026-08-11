@@ -8971,14 +8971,23 @@ export class CodexAgent extends BaseAgent {
               turnId: params.turnId,
               reason: hostPolicy.reason,
             });
+            // Host policy is an internal terminal failure, not a user Stop. Publish the
+            // durable error before interrupting and tombstone the turn so the later
+            // turn/completed(interrupted) only performs bookkeeping instead of emitting
+            // done(cancelled:true), which would clear the policy error in Desktop.
+            terminalErroredTurnIds.add(params.turnId);
+            eventQueue.push({
+              type: 'error',
+              data: {
+                message: hostPolicy.reason,
+                isTerminal: true,
+                reason: 'host-shell-command-blocked',
+              },
+              source: 'codex',
+            });
             void host
               .request(Method.TurnInterrupt, { threadId, turnId: params.turnId })
               .catch(() => undefined);
-            eventQueue.push({
-              type: 'error',
-              data: { message: hostPolicy.reason, isTerminal: false },
-              source: 'codex',
-            });
             return;
           }
         }

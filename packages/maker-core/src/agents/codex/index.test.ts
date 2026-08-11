@@ -13166,6 +13166,87 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
+  it('keeps explicit user Stop attribution after a policy hit and late blocked item', async () => {
+    const policy = vi.fn(() => ({
+      decision: 'deny' as const,
+      reason: 'use the embedded iOS Simulator',
+    }));
+    let resolvePolicyInterrupt!: () => void;
+    const policyInterruptAck = new Promise<unknown>((resolve) => {
+      resolvePolicyInterrupt = () => resolve({});
+    });
+    let interruptCount = 0;
+    const agent = new CodexAgent(createDeps({}, { getShellCommandPolicy: policy }));
+    const host = installFakeHost(agent, (method) => {
+      if (method === Method.TurnStart) return { turn: { id: 'turn-1' } };
+      if (method === Method.TurnInterrupt) {
+        interruptCount += 1;
+        return interruptCount === 1 ? policyInterruptAck : {};
+      }
+      return undefined;
+    });
+    const handle = await agent.startSession({
+      sessionId: 'session-command-item-host-policy-user-stop',
+      model: 'gpt-5.4',
+      workingDir: '/repo',
+      permissionMode: 'bypassPermissions',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.itemStarted || !handlers.turnCompleted) {
+      throw new Error('expected itemStarted and turnCompleted handlers');
+    }
+    const iterator = handle.events()[Symbol.asyncIterator]();
+    await handle.send({ type: 'user', content: 'test user Stop after host policy' });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'status',
+      data: { isRunning: true },
+    });
+
+    handlers.itemStarted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'cmd-before-stop',
+        type: 'commandExecution',
+        command: '/usr/bin/open -a Simulator',
+        cwd: '/repo',
+      },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'error',
+      data: { isTerminal: false, reason: 'host-shell-command-blocked' },
+    });
+
+    await handle.abort();
+    handlers.itemStarted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'cmd-after-stop',
+        type: 'commandExecution',
+        command: '/usr/bin/open -a Simulator',
+        cwd: '/repo',
+      },
+    });
+    expect(
+      host.request.mock.calls.filter(([method]) => method === Method.TurnInterrupt),
+    ).toHaveLength(2);
+
+    handlers.turnCompleted({
+      threadId: 'start-thread-id',
+      turn: { id: 'turn-1', status: 'interrupted' },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'done',
+      data: { cancelled: true },
+    });
+
+    resolvePolicyInterrupt();
+    await Promise.resolve();
+    await expect(nextEvent(iterator)).rejects.toThrow('timed out waiting for event');
+    await handle.close();
+  });
+
   it('ends an active plan cycle after a host-policy interruption', async () => {
     const policy = vi.fn(() => ({
       decision: 'deny' as const,

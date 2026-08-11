@@ -825,10 +825,19 @@ function readLegacyGhostManifest(
   expectedId: string,
 ): LegacyGhostManifestRead {
   const manifestPath = path.join(dir, GHOST_MANIFEST_FILE);
+  // containWithin needs the real path so that symlinked/relocated userData
+  // doesn't reject the manifest as outside the root.  If realpathSync itself
+  // fails the directory is inaccessible and the scan treats it as invalid.
+  let containWithin: string;
+  try {
+    containWithin = fsSync.realpathSync(dir);
+  } catch {
+    return { kind: 'invalid' };
+  }
   let bytes: Buffer | null;
   try {
     bytes = readBoundedFileNoFollowSync(manifestPath, GHOST_MANIFEST_MAX_BYTES, {
-      containWithin: dir,
+      containWithin,
     });
   } catch (error) {
     return isMissing(error) ? { kind: 'invalid' } : { kind: 'deferred' };

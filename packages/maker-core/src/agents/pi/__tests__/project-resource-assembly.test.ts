@@ -352,6 +352,55 @@ describe('Pi approved project resource assembly', () => {
     }
   });
 
+  it('fails closed when an approved file is overwritten through the same inode while copying', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-rewrite-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const skillFile = path.join(skillPath, 'SKILL.md');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(skillFile, '# approved content\n');
+      const assembled = await assembleApprovedPiProjectResources(
+        inputForRepoRoot(workingDir, 'rev-rewrite', [skillPath]),
+        workingDir,
+      );
+      const realOpen = fsPromises.open.bind(fsPromises);
+      let overwritten = false;
+      vi.spyOn(fsPromises, 'open').mockImplementation(async (candidate, flags, mode) => {
+        const handle = await realOpen(candidate, flags, mode);
+        if (String(candidate) !== skillFile) return handle;
+        const createReadStream = handle.createReadStream.bind(handle);
+        handle.createReadStream = ((options) => {
+          const stream = createReadStream(options);
+          if (!overwritten) {
+            stream.once('end', () => {
+              overwritten = true;
+              writeFileSync(skillFile, '# replacement content written in place\n');
+            });
+          }
+          return stream;
+        }) as typeof handle.createReadStream;
+        return handle;
+      });
+
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      expect(overwritten).toBe(true);
+      expect(staged.skillPaths).toEqual([]);
+      expect(staged.launchSkillPaths).toEqual([]);
+      expect(staged.diagnostic).toMatchObject({
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('fails the entire snapshot closed when a nested symlink escapes the approved repo', async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-escape-')));
     const configHome = path.join(root, 'config-home');

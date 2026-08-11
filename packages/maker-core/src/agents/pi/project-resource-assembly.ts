@@ -2,6 +2,8 @@ import fs from 'node:fs/promises';
 import { constants, createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
+import { createHash } from 'node:crypto';
+import type { FileHandle } from 'node:fs/promises';
 
 import type {
   PiProjectTrustDecision,
@@ -227,6 +229,24 @@ function sameFileIdentity(
   return first.dev === second.dev && first.ino === second.ino;
 }
 
+function sameFileSnapshot(
+  first: Awaited<ReturnType<FileHandle['stat']>>,
+  second: Awaited<ReturnType<FileHandle['stat']>>,
+): boolean {
+  return sameFileIdentity(first, second)
+    && first.size === second.size
+    && first.mtimeMs === second.mtimeMs
+    && first.ctimeMs === second.ctimeMs;
+}
+
+async function hashOpenFile(handle: FileHandle): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) {
+    hash.update(chunk);
+  }
+  return hash.digest('hex');
+}
+
 async function materializeSkillEntry(
   sourcePath: string,
   targetPath: string,
@@ -300,12 +320,36 @@ async function materializeSkillEntry(
         fs.lstat(targetPath),
       ]);
     if (
-      !sameFileIdentity(openedEntry, openedAfterCopy)
+      !sameFileSnapshot(openedEntry, openedAfterCopy)
       || !sameFileIdentity(openedEntry, sourcePathAfterCopy)
       || path.relative(sourceAfterCopy, canonicalSource) !== ''
       || !targetAfterCopy.isFile()
     ) {
       throw new Error('approved skill file changed while snapshotting');
+    }
+    const targetHandle = await fs.open(
+      targetPath,
+      constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+    );
+    try {
+      const [sourceDigest, targetDigest] = await Promise.all([
+        hashOpenFile(sourceHandle),
+        hashOpenFile(targetHandle),
+      ]);
+      const [sourceAfterStableRead, targetAfterStableRead] = await Promise.all([
+        sourceHandle.stat(),
+        targetHandle.stat(),
+      ]);
+      if (
+        sourceDigest !== targetDigest
+        || !sameFileSnapshot(openedAfterCopy, sourceAfterStableRead)
+        || !targetAfterStableRead.isFile()
+        || targetAfterStableRead.size !== sourceAfterStableRead.size
+      ) {
+        throw new Error('approved skill file content changed while snapshotting');
+      }
+    } finally {
+      await targetHandle.close();
     }
     await fs.chmod(targetPath, openedEntry.mode & 0o777);
   } finally {

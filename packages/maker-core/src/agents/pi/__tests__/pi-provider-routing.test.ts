@@ -72,6 +72,9 @@ describe('Pi provider-aware model routing', () => {
 
   it('uses providerId as the primary key when duplicate model ids exist', async () => {
     const authProviderIds: Array<string | null | undefined> = [];
+    const apiResolver = vi.fn((providerId: string | null | undefined) =>
+      providerId === 'openai' ? 'anthropic-messages' as const : 'openai-responses' as const,
+    );
     const deps: AgentDeps = {
       auth: {
         getState: async (options) => {
@@ -91,7 +94,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
-      resolvePiGatewayModelApi: () => 'anthropic-messages',
+      resolvePiGatewayModelApi: apiResolver,
       resolvePiNativeProviders: async () => ({
         providers: [
           { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'shared-model' }] },
@@ -117,11 +120,23 @@ describe('Pi provider-aware model routing', () => {
     const models = JSON.parse(
       readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
     ) as {
-      providers: Record<string, { models: Array<{ id: string }> }>;
+      providers: Record<string, { models: Array<{ id: string; api?: string }> }>;
     };
-    expect(models.providers.cindy?.models.some((model) => model.id === 'shared-model')).toBe(true);
+    expect(apiResolver).toHaveBeenCalledWith('openai', 'shared-model');
+    expect(models.providers.cindy?.models.find((model) => model.id === 'shared-model')).toMatchObject({
+      api: 'anthropic-messages',
+    });
     expect(models.providers['native-a']?.models.some((model) => model.id === 'shared-model')).toBe(true);
     expect(models.providers['native-b']?.models.some((model) => model.id === 'shared-model')).toBe(true);
+
+    await expect(handle.setModel!('shared-model', { providerId: 'xd' })).rejects.toThrow(
+      /restart the Pi session to change provider wire protocol/,
+    );
+    expect(captured.requests).not.toContainEqual({
+      type: 'set_model',
+      provider: 'cindy',
+      modelId: 'shared-model',
+    });
 
     await handle.setModel!('shared-model', { providerId: 'native-b' });
     expect(captured.requests).toContainEqual({
@@ -235,7 +250,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
-      resolvePiGatewayModelApi: (modelId) =>
+      resolvePiGatewayModelApi: (_providerId, modelId) =>
         modelId === 'responses-model' ? 'openai-responses' : 'anthropic-messages',
     };
 

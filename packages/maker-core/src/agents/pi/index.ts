@@ -462,7 +462,11 @@ export class PiAgent extends BaseAgent {
     agentHome: string,
     nativeProviders: PiNativeProviderSpec[] = [],
     retainedRuntimeModel?: ModelDescriptor,
-  ): Promise<Map<string, boolean>> {
+    gatewayProviderId?: string | null,
+  ): Promise<{
+    gatewayImageInputByModel: Map<string, boolean>;
+    gatewayApiByModel: Map<string, 'anthropic-messages' | 'openai-responses'>;
+  }> {
     const endpoint = this.deps.runtimeConfig.endpoint;
     if (!endpoint) {
       this.deps.logger.warn('pi: runtimeConfig.endpoint missing — models.json will have no usable provider');
@@ -472,13 +476,14 @@ export class PiAgent extends BaseAgent {
       ? [...publicModels, retainedRuntimeModel]
       : publicModels;
     const gatewayImageInputByModel = new Map<string, boolean>();
+    const gatewayApiByModel = new Map<string, 'anthropic-messages' | 'openai-responses'>();
     const models = runtimeModels.map((publicModel: ModelDescriptor) => {
       // availableModels 为跨 provider 拍平的公开能力；BYOM 同 id 冲突时 effort
       // 会按设计收敛成交集。cindy gateway 块则代表内置路由，必须回查其
       // provider-aware 描述符，不能被同名 non-reasoning BYOM 清空 reasoning。
       // host 未注入 resolver 或只有 BYOM 条目时保留旧 flat fallback。
       const m = this.deps.resolvePiGatewayModelDescriptor?.(publicModel.id) ?? publicModel;
-      const resolvedApi = this.deps.resolvePiGatewayModelApi?.(m.id);
+      const resolvedApi = this.deps.resolvePiGatewayModelApi?.(gatewayProviderId, m.id);
       if (
         resolvedApi === null ||
         (resolvedApi !== undefined &&
@@ -491,6 +496,7 @@ export class PiAgent extends BaseAgent {
       // cindy compat provider 的模型表中，沿用它们既有的 Messages 前门；只有 null 才是
       // “属于 XD 但 v3 配置不完整”，上面已 fail closed。
       const api = resolvedApi ?? 'anthropic-messages';
+      gatewayApiByModel.set(m.id, api);
       const supportsImageInput = m.supportsImageInput === true;
       gatewayImageInputByModel.set(m.id, supportsImageInput);
       return {
@@ -555,7 +561,7 @@ export class PiAgent extends BaseAgent {
     }
     await fs.mkdir(agentHome, { recursive: true });
     await fs.writeFile(path.join(agentHome, 'models.json'), JSON.stringify({ providers }, null, 2) + '\n');
-    return gatewayImageInputByModel;
+    return { gatewayImageInputByModel, gatewayApiByModel };
   }
 
   async startSession(opts: StartSessionOptions): Promise<AgentSessionHandle> {
@@ -769,10 +775,11 @@ export class PiAgent extends BaseAgent {
       configHomeCleaned = true;
       void fs.rm(configHome, { recursive: true, force: true }).catch(() => {});
     };
-    const gatewayImageInputByModel = await this.writeModelsJson(
+    const { gatewayImageInputByModel, gatewayApiByModel } = await this.writeModelsJson(
       configHome,
       nativeProviders,
       retainedRuntimeModel,
+      authProviderId,
     );
     const sessionDir = path.join(agentHome, 'sessions');
     await fs.mkdir(sessionDir, { recursive: true });
@@ -1681,6 +1688,30 @@ export class PiAgent extends BaseAgent {
         );
       }
       const provider = resolveProviderForModel(model, requestedProviderId);
+      if (provider === PI_PROVIDER_ID) {
+        const routeProviderId = requestedProviderId !== undefined
+          ? requestedProviderId
+          : mutableProviderId;
+        const resolvedApi = this.deps.resolvePiGatewayModelApi?.(routeProviderId, model);
+        if (
+          resolvedApi === null ||
+          (resolvedApi !== undefined &&
+            resolvedApi !== 'anthropic-messages' &&
+            resolvedApi !== 'openai-responses')
+        ) {
+          throw new Error(
+            `Model Access v3 did not provide a Pi wire protocol for model: ${model}`,
+          );
+        }
+        const desiredApi = resolvedApi ?? 'anthropic-messages';
+        const configuredApi = gatewayApiByModel.get(model);
+        if (configuredApi && configuredApi !== desiredApi) {
+          throw new Error(
+            `pi: provider switch for model '${model}' requires API '${desiredApi}', but this session ` +
+              `started with '${configuredApi}'; restart the Pi session to change provider wire protocol.`,
+          );
+        }
+      }
       // effort 能力校验必须排在写路由快照**之前**:它会抛错中止本次切换,而快照一旦落盘就
       // 指向了新 provider —— 那正是父子路由分叉的形状(upstream #1451 与本 PR 的合并点)。
       const nextEffortSnapshot = resolveStartupEffortSnapshot(provider, model);

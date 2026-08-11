@@ -446,7 +446,7 @@ describe.skipIf(!piAvailable)('PiAgent integration (real pi binary + fake gatewa
           },
         ],
       };
-      deps.resolvePiGatewayModelApi = (modelId) =>
+      deps.resolvePiGatewayModelApi = (_providerId, modelId) =>
         modelId === 'pi-responses-model' ? 'openai-responses' : 'anthropic-messages';
       const agent = new PiAgent(deps);
       const workingDir = mkdtempSync(path.join(tmpdir(), 'pi-agent-responses-cwd-'));

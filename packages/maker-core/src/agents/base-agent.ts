@@ -439,13 +439,17 @@ export interface AgentDeps {
 
   /**
    * Pi-only:解析 `cindy` gateway 内某模型应使用的 PI API。provider 仍保持 `cindy`，
-   * 只在模型级落实 wire protocol。三态语义：
+   * 但同一 model id 可能同时存在于 XD 与订阅来源，必须同时按当前会话来源落实 wire
+   * protocol，不能只按 model id 猜。三态语义：
    * - `openai-responses`：Model Access v3 明确指定的 Cindy AI Pi 路由；
+   * - `anthropic-messages`：非 XD compat proxy 路由；
    * - `null`：模型属于 Cindy AI Pi 目录，但协议缺失或不匹配，Pi fail closed；
-   * - `undefined`：模型不属于 Cindy AI Pi 目录，保留非 XD compat proxy 的既有
-   *   Anthropic Messages 协议（不是 Model Access fallback）。
+   * - `undefined`：模型不属于当前来源的 XD Pi 目录，保留既有 Messages 协议。
    */
-  resolvePiGatewayModelApi?: (modelId: string) => PiNativeApi | null | undefined;
+  resolvePiGatewayModelApi?: (
+    providerId: string | null | undefined,
+    modelId: string,
+  ) => PiNativeApi | null | undefined;
 
   /**
    * Host-provided capability descriptor additions.

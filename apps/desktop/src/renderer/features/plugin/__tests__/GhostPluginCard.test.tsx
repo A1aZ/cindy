@@ -31,6 +31,7 @@ import {
   diffMarketUpdatePermissionItems,
   GhostPluginCard,
   LegacyGhostRecoveryNotice,
+  marketUpdateAllowsPermissionExpansion,
   MarketPluginCard,
 } from '../GhostPluginPage';
 import {
@@ -38,6 +39,7 @@ import {
   __resetGhostUnreadForTest,
 } from '@/cindy-brain/ghostUnreadStore';
 import type { GhostPluginListItem } from '../lib/ghostPluginViewModel';
+import type { InstalledGhost } from '../../../../shared/ghost';
 import type { PluginMarketItem } from '../../../../shared/pluginMarket';
 
 const {
@@ -81,6 +83,23 @@ describe('diffMarketUpdatePermissionItems', () => {
       expect(diff.unchanged).toEqual([]);
     },
   );
+});
+
+describe('marketUpdateAllowsPermissionExpansion', () => {
+  const installed = (approvalState: 'approved' | 'legacy-unapproved' | 'invalid') =>
+    ({ approval: { state: approvalState } }) as InstalledGhost;
+
+  it.each(['legacy-unapproved', 'invalid'] as const)(
+    'allows the full reapproval of a no-permission %s install',
+    (approvalState) => {
+      expect(marketUpdateAllowsPermissionExpansion(installed(approvalState), 0)).toBe(true);
+    },
+  );
+
+  it('only allows approved installs when the reviewed diff adds permissions', () => {
+    expect(marketUpdateAllowsPermissionExpansion(installed('approved'), 0)).toBe(false);
+    expect(marketUpdateAllowsPermissionExpansion(installed('approved'), 1)).toBe(true);
+  });
 });
 
 const commandPlugin: GhostPluginListItem = {

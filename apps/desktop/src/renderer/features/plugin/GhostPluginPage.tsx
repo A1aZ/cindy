@@ -275,6 +275,13 @@ export function diffMarketUpdatePermissionItems(
   return diffInstalledGhostPermissionItems(installed, next);
 }
 
+export function marketUpdateAllowsPermissionExpansion(
+  installed: InstalledGhost,
+  addedPermissionCount: number,
+): boolean {
+  return installed.approval.state !== 'approved' || addedPermissionCount > 0;
+}
+
 /** 读「忽略本轮更新」的持久值(键按数据归属分桶,见 ignoredRoundStorageKey)。 */
 function readIgnoredRound(storageKey: string): string {
   try {
@@ -868,7 +875,10 @@ export function GhostPluginPage() {
           expectedReleaseId: next.releaseId,
           expectedManifest: next.manifest,
           expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval),
-          allowPermissionExpansion: diff.added.length > 0,
+          allowPermissionExpansion: marketUpdateAllowsPermissionExpansion(
+            installedGhost,
+            diff.added.length,
+          ),
           ...(installedGhost
             ? { reviewedBaseline: ghostPermissionBaselineKey(installedGhost.manifest) }
             : {}),

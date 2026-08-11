@@ -95,29 +95,36 @@ async function run(request: Request): Promise<void> {
     if (!stagingStat.isDirectory() || stagingStat.isSymbolicLink()) {
       throw new Error('Forge scaffold staging directory changed');
     }
-    // Re-check target existence immediately before rename.  On POSIX,
-    // rename(staging, target) atomically replaces an existing directory, so
-    // a concurrent process that creates the target between the initial ENOENT
-    // check and the rename call would have its just-created directory silently
-    // replaced.  This second lstat shrinks the window to the sub-call gap
-    // between lstat and rename.
+    // Use mkdir as an atomic no-clobber gate: mkdir on the target name
+    // succeeds iff the target does not exist, and fails with EEXIST if it
+    // does (cross-platform, including POSIX where rename would silently
+    // replace an existing directory).  Once mkdir succeeds, the target is
+    // exclusively owned by this worker; rename each entry from staging
+    // into it, then rmdir the now-empty staging.
     try {
-      await fs.promises.lstat(request.targetName);
-      send({ ok: false, errorCode: 'TARGET_EXISTS', message: '目标已经存在，不会覆盖' });
-      return;
+      await fs.promises.mkdir(request.targetName);
     } catch (error) {
-      if (!hasCode(error, 'ENOENT')) throw error;
-    }
-    try {
-      await fs.promises.rename(staging, request.targetName);
-    } catch (error) {
-      if (hasCode(error, 'EEXIST') || hasCode(error, 'ENOTEMPTY')) {
+      if (hasCode(error, 'EEXIST')) {
         send({ ok: false, errorCode: 'TARGET_EXISTS', message: '目标已经存在，不会覆盖' });
         return;
       }
       throw error;
     }
-    staging = null;
+    try {
+      for (const entry of await fs.promises.readdir(staging, { withFileTypes: true })) {
+        await fs.promises.rename(
+          path.join(staging, entry.name),
+          path.join(request.targetName, entry.name),
+        );
+      }
+      await fs.promises.rmdir(staging);
+      staging = null;
+    } catch (error) {
+      // Publish failed after mkdir: the partially-populated target must be
+      // cleaned up so it doesn't block the next scaffold attempt.
+      await fs.promises.rm(request.targetName, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
     await verifyParent(request.expectedParent);
     send({ ok: true });
   } finally {

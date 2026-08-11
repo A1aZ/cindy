@@ -72,6 +72,7 @@ const MODEL_CATALOG_ENTRY_V1_FIELDS = [
   'name',
   'group',
   'description',
+  'icon',
   'contextWindow',
   'maxOutputTokens',
   'modalities',
@@ -418,6 +419,12 @@ function modelEntryError(
   ] as const) {
     const error = optionalStringError(value[key], `${path}.${key}`, max);
     if (error) return error;
+  }
+  if (
+    value.icon !== undefined &&
+    (typeof value.icon !== 'string' || value.icon.trim().length === 0)
+  ) {
+    return `${path}.icon must be a non-empty string when present`;
   }
   for (const key of ['contextWindow', 'maxOutputTokens'] as const) {
     const error = optionalPositiveIntegerError(value[key], `${path}.${key}`);

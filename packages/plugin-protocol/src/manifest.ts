@@ -89,6 +89,8 @@ export const GHOST_SLOTS = [
   'node',
   'network',
   'notify',
+  'badge',
+  'confirm',
   'fs',
   'session-context',
   'pick',
@@ -1349,6 +1351,12 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
   }
   if (slots.includes('panel') && panel === undefined) {
     return { ok: false, reason: 'slots 声明了 "panel" 但缺少 panel(面板由意识自绘,html 必填)' };
+  }
+  if (slots.includes('badge') && panel === undefined) {
+    return {
+      ok: false,
+      reason: 'slots 声明了 "badge" 但缺少 panel——未读点必须有可打开的面板内容',
+    };
   }
 
   // card 槽能力详单:缺省 = 仅渲染;externalLinks: true 是独立加档权限。

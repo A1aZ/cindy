@@ -147,12 +147,17 @@ describe('plugin delivery contract', () => {
   });
 
   it('parses a visible Plugin detail and validates its manifest', () => {
+    const detailManifest = {
+      ...validManifest,
+      slots: ['tool', 'panel', 'badge', 'confirm'],
+      panel: { html: 'panel.html' },
+    } as const;
     const response = parseGetPluginResponse({
       schemaVersion: PLUGIN_API_SCHEMA_VERSION,
       plugin: {
         id: pluginId,
-        ghostId: validManifest.id,
-        name: validManifest.name,
+        ghostId: detailManifest.id,
+        name: detailManifest.name,
         description: null,
         author: null,
         scope: 'public',
@@ -160,15 +165,21 @@ describe('plugin delivery contract', () => {
         defaultInstall: true,
         currentRelease: {
           id: 'release-1',
-          version: validManifest.version,
+          version: detailManifest.version,
           sha256: 'a'.repeat(64),
           sizeBytes: 1024,
           publishedAt: '2026-07-19T00:00:00.000Z',
-          manifest: validManifest,
+          manifest: detailManifest,
         },
       },
     });
-    expect(response.plugin.currentRelease.manifest.id).toBe(validManifest.id);
+    expect(response.plugin.currentRelease.manifest.id).toBe(detailManifest.id);
+    expect(response.plugin.currentRelease.manifest.slots).toEqual([
+      'tool',
+      'panel',
+      'badge',
+      'confirm',
+    ]);
   });
 
   it('preserves the version-gated ios-simulator slot in Plugin details', () => {

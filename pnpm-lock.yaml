@@ -1226,6 +1226,9 @@ importers:
 
   packages/plugin-protocol:
     devDependencies:
+      '@types/node':
+        specifier: '*'
+        version: 25.9.5
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

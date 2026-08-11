@@ -16,6 +16,7 @@ describe('parseModelsSyncPayload', () => {
     currency: 'CNY' as const,
     agents: ['claude-code', 'codex'] as const,
     mode: 'chat',
+    icon: 'deepseek',
     modalities: { input: ['text'], output: ['text'] },
   };
 

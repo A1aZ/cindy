@@ -664,6 +664,25 @@ describe('Ghost manifest contract', () => {
     expect(result.manifest).not.toHaveProperty('unknownField');
   });
 
+  it('accepts Desktop-supported badge and confirm slots while requiring a badge panel', () => {
+    const manifest = {
+      ...validManifest,
+      slots: ['tool', 'panel', 'badge', 'confirm'],
+      panel: { html: 'panel.html' },
+    } as const;
+
+    expect(validateGhostManifest(manifest)).toEqual({ ok: true, manifest });
+    expect(
+      validateGhostManifest({
+        ...validManifest,
+        slots: ['tool', 'badge'],
+      }),
+    ).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('panel'),
+    });
+  });
+
   it('accepts the taptap-maker style manifest with node/session-context/pick/preview slots', () => {
     const result = validateGhostManifest({
       schemaVersion: GHOST_MANIFEST_SCHEMA_VERSION,

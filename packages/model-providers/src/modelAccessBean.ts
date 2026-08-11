@@ -175,6 +175,7 @@ interface ModelCatalogEntryBase extends ModelPricing {
   name?: string;
   group?: string;
   description?: string;
+  icon?: string;
   contextWindow?: number;
   maxOutputTokens?: number;
   modalities?: ModelModalities;

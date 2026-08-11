@@ -24,6 +24,7 @@ const VALID_RESPONSE: ListModelsResponse = {
       agents: ['claude-code', 'codex'],
       newSessionDefault: ['claude-code', 'codex'],
       name: 'Example Chat Model',
+      icon: 'example',
       contextWindow: 200_000,
       modalities: { input: ['text', 'image'], output: ['text'] },
       inputCostPerToken: 0.000_001,
@@ -202,6 +203,8 @@ describe('model access catalog contract', () => {
     ] as const) {
       expect(parseListModelsResponse({ schemaVersion, models: [model] }).ok).toBe(true);
       expectReject({ schemaVersion, models: [{ ...model, mode: 42 }] }, 'response.models[0].mode');
+      expectReject({ schemaVersion, models: [{ ...model, icon: '   ' }] }, 'response.models[0].icon');
+      expectReject({ schemaVersion, models: [{ ...model, icon: 42 }] }, 'response.models[0].icon');
       expectReject(
         {
           schemaVersion,

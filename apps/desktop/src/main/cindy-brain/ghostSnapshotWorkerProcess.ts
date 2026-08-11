@@ -55,6 +55,11 @@ async function verifyParent(expected: GhostSnapshotParentIdentity, workingDir: s
   if (!sameGhostSnapshotParentIdentity(stats, expected)) throw new Error('snapshot parent identity changed');
   if (!samePath(await fs.promises.realpath(workingDir), expected.realPath)) throw new Error('snapshot parent path changed');
 }
+async function verifyDirectory(workingDir: string, name: string): Promise<void> {
+  const target = path.join(workingDir, name);
+  const kind = await classifyGhostDirEntry(target);
+  if (kind !== 'directory') throw new Error('snapshot id parent changed');
+}
 async function copyDirectory(source: string, target: string): Promise<void> {
   if ((await classifyGhostDirEntry(source)) !== 'directory') throw new Error(`skill source is not a directory: ${source}`);
   await fs.promises.mkdir(target, { recursive: true });
@@ -97,6 +102,7 @@ export async function runGhostSnapshotWorkerRequest(
   await verifyParent(request.expectedParent, workingDir);
   if (request.operation === 'remove') {
     await verifyParent(request.expectedParent, workingDir);
+    if (parts.length === 1) await verifyDirectory(workingDir, parts[0]);
     await fs.promises.rm(targetPath, { recursive: true, force: true });
     send({ ok: true }); return;
   }
@@ -117,6 +123,8 @@ export async function runGhostSnapshotWorkerRequest(
   }
   const temp = `.${parts[1]}-${process.pid}-${Date.now()}.tmp`;
   try {
+    await verifyParent(request.expectedParent, workingDir);
+    await verifyDirectory(workingDir, parts[0]);
     const tempPath = workPath(temp);
     await fs.promises.mkdir(tempPath);
     const copiedRoots: string[] = [];
@@ -141,19 +149,24 @@ export async function runGhostSnapshotWorkerRequest(
     }
     if (!await matches(request.receipt, tempPath)) throw new Error('approved skill content no longer matches receipt');
     await verifyParent(request.expectedParent, workingDir);
+    await verifyDirectory(workingDir, parts[0]);
     if (exists) await fs.promises.rm(targetPath, { recursive: true, force: true });
     await verifyParent(request.expectedParent, workingDir);
+    await verifyDirectory(workingDir, parts[0]);
     await fs.promises.rename(tempPath, targetPath);
     await verifyParent(request.expectedParent, workingDir);
+    await verifyDirectory(workingDir, parts[0]);
     if (!await matches(request.receipt, targetPath)) {
-      if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false)) {
+      if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false) &&
+        await verifyDirectory(workingDir, parts[0]).then(() => true, () => false)) {
         await fs.promises.rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
       }
       throw new Error('approved skill snapshot changed while being published');
     }
     send({ ok: true });
   } finally {
-    if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false)) {
+    if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false) &&
+      await verifyDirectory(workingDir, parts[0]).then(() => true, () => false)) {
       await fs.promises.rm(workPath(temp), { recursive: true, force: true }).catch(() => undefined);
     }
   }

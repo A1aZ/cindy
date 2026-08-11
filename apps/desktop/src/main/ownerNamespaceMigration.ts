@@ -1191,7 +1191,9 @@ export function getLegacyGhostRecoveryStatus(
   const targetRoot = path.join(root, 'owners', ownerKey, 'cindy-brain');
   const sharedLegacyGhosts = sharedDiscovery.ghosts;
   const scopedLegacyGhosts = scopedDiscovery.ghosts;
-  const legacyGhosts = [...sharedLegacyGhosts, ...scopedLegacyGhosts];
+  const legacyGhosts = options.rejectReservedIds
+    ? [...sharedLegacyGhosts, ...scopedLegacyGhosts].filter((ghost) => !isOfficialGhostId(ghost.id))
+    : [...sharedLegacyGhosts, ...scopedLegacyGhosts];
   const recoveryMarkerRead = readLegacyGhostRecoveryMarkerSync(root, ownerKey);
   const recoveryMarker = recoveryMarkerRead.kind === 'ready'
     ? recoveryMarkerRead.marker

@@ -260,10 +260,11 @@ export class GhostInstallReceiptStore {
     //
     // 标记写入在 receipt 之前，receipt 写失败必须回滚标记，避免留一个
     // 无 receipt 的哨兵把合法 legacy 插件永久挡在迁移之外。
+    // ensureMigrationMarker 返回 true 仅当本次调用实际创建了 marker，
+    // 因此不存在 TOCTOU：检查和创建在同一个调用内完成。
     let markerWritten = false;
     if (!this.hasMigrationLedger()) {
-      await this.ensureMigrationMarker(receipt.id);
-      markerWritten = true;
+      markerWritten = await this.ensureMigrationMarker(receipt.id);
     }
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
@@ -539,12 +540,15 @@ export class GhostInstallReceiptStore {
    * 确保 per-id 迁移标记存在。receipt 初次落账时调用；标记是零字节普通文件,
    * 在 migration ledger 按 completed 关闭前钉住"此 id 已进入新模型"。
    */
-  async ensureMigrationMarker(id: string): Promise<void> {
+  async ensureMigrationMarker(id: string): Promise<boolean> {
     // Idempotent: if the marker survived a previous failed receipt commit
     // (rollback also failed), this retry must not fail with EEXIST.  The
     // marker's semantics ("this id entered through the new model") is
     // correct regardless of whether the prior receipt write succeeded.
-    if (this.hasMigrationMarker(id)) return;
+    //
+    // Returns true only when this call actually created the marker, so
+    // the caller knows whether to roll it back on receipt write failure.
+    if (this.hasMigrationMarker(id)) return false;
     const root = this.rootDir();
     await fs.promises.mkdir(root, { recursive: true });
     const target = this.migrationMarkerPath(id);
@@ -552,6 +556,11 @@ export class GhostInstallReceiptStore {
     try {
       await fs.promises.writeFile(temp, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
       await fs.promises.rename(temp, target);
+      return true;
+    } catch {
+      // rename failed (e.g. target already exists from a concurrent
+      // writer) — the marker exists, but we didn't create it.
+      return false;
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }

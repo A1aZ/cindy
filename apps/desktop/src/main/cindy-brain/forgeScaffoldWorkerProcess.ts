@@ -110,24 +110,32 @@ async function run(request: Request): Promise<void> {
       }
       throw error;
     }
+    let targetDev: bigint = 0n;
+    let targetIno: bigint = 0n;
     try {
       await verifyParent(request.expectedParent);
       // Validate that the just-created target is still a real directory
       // owned by this worker before moving entries into it.  A concurrent
       // process could delete the empty directory and replace it with a
       // symlink/junction between mkdir and the rename loop.
-      const targetStat = await fs.promises.lstat(request.targetName);
+      const targetStat = await fs.promises.lstat(request.targetName, { bigint: true });
       if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
         throw new Error('Forge scaffold target replaced after mkdir');
       }
       const targetRealPath = await fs.promises.realpath(request.targetName);
+      targetDev = targetStat.dev;
+      targetIno = targetStat.ino;
       for (const entry of await fs.promises.readdir(staging, { withFileTypes: true })) {
         // Per-entry revalidation: a concurrent swap between the single-shot
         // lstat check above and each rename would let path.join follow the
-        // swapped link. Re-check the target identity before every file move.
-        const currentStat = await fs.promises.lstat(request.targetName);
+        // swapped link. Re-check the target identity (dev/ino + realpath)
+        // before every file move.
+        const currentStat = await fs.promises.lstat(request.targetName, { bigint: true });
         if (!currentStat.isDirectory() || currentStat.isSymbolicLink()) {
           throw new Error('Forge scaffold target identity changed during publish');
+        }
+        if (currentStat.dev !== targetDev || currentStat.ino !== targetIno) {
+          throw new Error('Forge scaffold target replaced by a different directory during publish');
         }
         const currentReal = await fs.promises.realpath(request.targetName);
         if (!samePath(currentReal, targetRealPath)) {
@@ -143,11 +151,17 @@ async function run(request: Request): Promise<void> {
     } catch (error) {
       // Publish failed after mkdir: the partially-populated target must be
       // cleaned up so it doesn't block the next scaffold attempt.
-      // Only remove a real directory — if the target was swapped for a
-      // symlink/junction, rm with recursive would follow it.
+      // Only remove the directory that we created — if the target was
+      // replaced by a concurrent process (different dev/ino), leave it
+      // alone rather than destroying another process's directory.
       try {
-        const cleanupStat = await fs.promises.lstat(request.targetName);
-        if (cleanupStat.isDirectory() && !cleanupStat.isSymbolicLink()) {
+        const cleanupStat = await fs.promises.lstat(request.targetName, { bigint: true });
+        if (
+          cleanupStat.isDirectory() &&
+          !cleanupStat.isSymbolicLink() &&
+          cleanupStat.dev === targetDev &&
+          cleanupStat.ino === targetIno
+        ) {
           await fs.promises.rm(request.targetName, { recursive: true, force: true });
         }
       } catch {

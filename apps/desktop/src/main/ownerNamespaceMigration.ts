@@ -17,6 +17,7 @@ import {
   type LegacyGhostRecoveryStatus,
 } from '../shared/legacyGhostRecovery.js';
 import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
+import { withGhostInstallLock } from './cindy-brain/ghostInstallLock.js';
 import { readBoundedFileNoFollow, readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
@@ -1649,7 +1650,13 @@ export async function recoverLegacyGhostPlugins(
       continue;
     }
     try {
-      await deps.rename(legacy.dir, target);
+      // Hold the per-id install lock during rename so a concurrent
+      // install/update on the same id cannot write a pending journal
+      // that recovery on next launch would misidentify as an uncommitted
+      // install and delete.
+      await withGhostInstallLock(legacy.id, async () => {
+        await deps.rename(legacy.dir, target);
+      });
       moved += 1;
       movedThisRun.add(legacy.id);
     } catch (error) {

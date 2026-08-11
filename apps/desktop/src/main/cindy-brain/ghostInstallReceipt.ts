@@ -250,19 +250,13 @@ export class GhostInstallReceiptStore {
     } catch (error) {
       if (options.requireSkillSnapshot !== false) throw error;
     }
-    // Migration ledger 是 receipt 对外生效的前置提交记录。正常装入/更新若先写
-    // receipt、后 best-effort 落 ledger，会自然制造“有效 receipt + 无 ledger”的
-    // mixed 状态；下一版既不能安全判断其它无 receipt 目录是 legacy 还是被删批准。
-    // legacy migration/recovery 已在首个 backfill 前写好 in-progress，因此这里仅在
-    // **完全没有** ledger 时先写 completed，且失败必须阻断 receipt 提交。
-    if (!this.hasMigrationLedger()) {
-      await this.writeMigrationLedger({
-        version: 1,
-        migratedAt: new Date().toISOString(),
-        migratedIds: [],
-        state: 'completed',
-      });
-    }
+    // 此处**绝不**自动写 migration ledger —— 自动写 completed 的旧逻辑会在迁移
+    // 扫描因瞬时故障失败、且 builtin/市场写入首份 receipt 后永久关闭迁移门，使所有
+    // 存量插件变成 legacy-unapproved（P0 红线）。
+    //
+    // “有效 receipt + 无 ledger”的 mixed 状态由 migrateLegacyApprovalsOnce 的扫描-跳过
+    // 逻辑安全处理:已有 receipt 的 id 会被跳过，其余 legacy 目录照常迁移；全数落定后
+    // 才由 coordinator 统一写 completed。任何先于迁移的 receipt 写入都不能抢断迁移门。
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
       root,

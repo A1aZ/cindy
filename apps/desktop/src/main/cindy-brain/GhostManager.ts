@@ -1407,12 +1407,29 @@ export class GhostManager {
     const failedIds = [...new Set([...result.failed, ...(resumeLedger?.failedIds ?? [])])].sort();
     for (const id of blockedByPendingJournal) pendingForRetry.add(id);
     const retryIds = [...pendingForRetry].sort();
+    // Preserve frozen recovery digests for pending ids that still need retry.
+    // The generic retry path (migrateLegacyApprovalsOnce) reads these back
+    // and passes expectedApprovalProjectionSha256 to backfillLegacyApproval.
+    const nextRecoveryDigests =
+      retryIds.length > 0 && resumeLedger?.recoveryApprovalProjectionSha256ById
+        ? Object.fromEntries(
+            Object.entries(resumeLedger.recoveryApprovalProjectionSha256ById).filter(
+              ([id]) => pendingForRetry.has(id),
+            ),
+          )
+        : undefined;
     await this.receiptStore.writeMigrationLedger({
       version: 1,
       migratedAt: new Date().toISOString(),
       migratedIds,
       ...(retryIds.length > 0
-        ? { state: 'in-progress' as const, pendingIds: retryIds }
+        ? {
+            state: 'in-progress' as const,
+            pendingIds: retryIds,
+            ...(nextRecoveryDigests && Object.keys(nextRecoveryDigests).length > 0
+              ? { recoveryApprovalProjectionSha256ById: nextRecoveryDigests }
+              : {}),
+          }
         : { state: 'completed' as const }),
       ...(failedIds.length > 0 ? { failedIds } : {}),
     });

@@ -91,6 +91,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => 'anthropic-messages',
       resolvePiNativeProviders: async () => ({
         providers: [
           { id: 'native-a', name: 'Native A', baseUrl: 'http://a.test', api: 'openai-completions', models: [{ id: 'shared-model' }] },
@@ -170,6 +171,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => 'anthropic-messages',
       resolvePiNativeProviders: async () => ({
         providers: [
           {
@@ -210,6 +212,59 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('keeps provider cindy while applying a model-level Responses API and /v1 base URL', async () => {
+    const deps: AgentDeps = {
+      auth: {
+        getState: async () => ({ authenticated: true, identity: 'test', authSource: 'api-key' as const }),
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({ CINDY_PI_API_KEY: 'gateway-key' }),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9988/' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [
+          {
+            id: 'responses-model',
+            displayName: 'Responses Model',
+            contextWindow: 200_000,
+            efforts: [],
+            defaultEffort: null,
+          },
+        ],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: (modelId) =>
+        modelId === 'responses-model' ? 'openai-responses' : 'anthropic-messages',
+    };
+
+    const handle = await new PiAgent(deps).startSession({
+      sessionId: 'gateway-responses-model',
+      workingDir: cwd,
+      model: 'responses-model',
+      providerId: 'xd',
+    });
+
+    expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 2))
+      .toEqual(['--provider', 'cindy']);
+    const models = JSON.parse(
+      readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
+    ) as {
+      providers: Record<string, {
+        api: string;
+        models: Array<{ id: string; api?: string; baseUrl?: string }>;
+      }>;
+    };
+    expect(models.providers.cindy?.api).toBe('anthropic-messages');
+    expect(models.providers.cindy?.models.find((model) => model.id === 'responses-model'))
+      .toMatchObject({
+        api: 'openai-responses',
+        baseUrl: 'http://127.0.0.1:9988/v1',
+      });
+    await handle.close();
+  });
+
   it('reconciles a stale persisted effort to the selected BYOM model default before startup', async () => {
     const resolver = vi.fn((providerId: string | null | undefined, modelId: string) => {
       if (providerId !== 'native-a' || modelId !== 'shared-model') return null;
@@ -243,6 +298,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelApi: () => 'anthropic-messages',
       resolvePiNativeProviders: async () => ({
         providers: [
           {
@@ -470,6 +526,7 @@ describe('Pi provider-aware model routing', () => {
       availableModels,
     },
     resolvePiAgentHome: () => agentHome,
+    resolvePiGatewayModelApi: () => 'anthropic-messages',
     resolvePiNativeProviders,
   });
 

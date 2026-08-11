@@ -206,6 +206,7 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
           }] : []),
         ],
       },
+      resolvePiGatewayModelApi: () => 'openai-responses',
       resolvePiAgentHome: () => agentHome,
       registerPiProxySession: (sessionId, token) => {
         captured.proxyRegistration = { sessionId, token };

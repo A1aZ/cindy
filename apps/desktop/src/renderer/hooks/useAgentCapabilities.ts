@@ -53,9 +53,9 @@ export interface ModelDescriptor {
   /**
    * 该模型是哪些 wire agent 的**新对话默认种子**(源自目录 newSessionDefault,与 sortOrder
    * 解耦;生产环境 XD 网关由服务端按区域下发)。消费点见 modelDefinitions.newSessionDefaultModelId
-   * 与 draftModelCalibration:被标记且可用的模型优先作新对话默认。pi 按 'claude-code' 口径判定。
+   * 与 draftModelCalibration:被标记且可用的模型优先作新对话默认。
    */
-  newSessionDefault?: ('claude-code' | 'codex')[];
+  newSessionDefault?: ('claude-code' | 'codex' | 'pi')[];
 }
 
 export interface EffortDescriptor {

@@ -23,8 +23,8 @@ interface StubModel {
   defaultEffort: string;
   sortOrder?: number;
   defaultEnabled?: boolean;
-  /** 新对话默认种子标记(与 sortOrder 解耦);pi 按 'claude-code' 口径判定。 */
-  newSessionDefault?: ('claude-code' | 'codex')[];
+  /** 新对话默认种子标记(与 sortOrder 解耦)。 */
+  newSessionDefault?: ('claude-code' | 'codex' | 'pi')[];
 }
 
 /** pi 也是一个 vendor;缺省的 agent 一律回落空清单。 */

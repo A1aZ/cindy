@@ -438,6 +438,13 @@ export interface AgentDeps {
   resolvePiGatewayModelDescriptor?: (modelId: string) => ModelDescriptor | null;
 
   /**
+   * Pi-only:解析 `cindy` gateway 内某模型应使用的 PI API。provider 仍保持 `cindy`，
+   * 只在模型级落实 wire protocol。Cindy AI 模型必须由 Model Access v3 明确指定
+   * OpenAI Responses；缺失或不匹配时 Pi fail closed，不猜测或切换协议。
+   */
+  resolvePiGatewayModelApi?: (modelId: string) => PiNativeApi | null | undefined;
+
+  /**
    * Host-provided capability descriptor additions.
    *
    * This is append-only: additions with ids already present in the agent's built-in

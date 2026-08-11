@@ -119,6 +119,12 @@ const PI_COMPACT_TIMEOUT_MS = 600_000;
 /** 分支摘要同样可能触发一次完整 LLM 调用。 */
 const PI_BRANCH_NAVIGATION_TIMEOUT_MS = 600_000;
 
+/** PI 的 OpenAI Responses client 以 baseUrl 为 `/v1` 根；Anthropic client 则自行追加 `/v1/messages`。 */
+function piResponsesBaseUrl(endpoint: string): string {
+  const trimmed = endpoint.replace(/\/+$/, '');
+  return trimmed.endsWith('/v1') ? trimmed : `${trimmed}/v1`;
+}
+
 class PiImageInputUnsupportedError extends Error {
   readonly code = PI_IMAGE_INPUT_UNSUPPORTED_CODE;
 
@@ -472,14 +478,26 @@ export class PiAgent extends BaseAgent {
       // provider-aware 描述符，不能被同名 non-reasoning BYOM 清空 reasoning。
       // host 未注入 resolver 或只有 BYOM 条目时保留旧 flat fallback。
       const m = this.deps.resolvePiGatewayModelDescriptor?.(publicModel.id) ?? publicModel;
+      const api = this.deps.resolvePiGatewayModelApi?.(m.id);
+      if (api !== 'anthropic-messages' && api !== 'openai-responses') {
+        throw new Error(`Model Access v3 did not provide a Pi wire protocol for model: ${m.id}`);
+      }
       const supportsImageInput = m.supportsImageInput === true;
       gatewayImageInputByModel.set(m.id, supportsImageInput);
       return {
         id: m.id,
         name: m.displayName,
+        // Pi 0.83 支持同一 provider 下逐模型覆盖 API/baseUrl。provider 身份仍是
+        // `cindy`；Model Access v3 让 PI 固定命中 Gateway 的 `/v1/responses` 前门。
+        // 该前门可由 Gateway 翻译到不同上游，不代表底层模型原生实现 Responses。
+        api,
+        ...(api === 'openai-responses' && endpoint
+          ? { baseUrl: piResponsesBaseUrl(endpoint) }
+          : {}),
         reasoning: m.efforts.length > 0,
         input: supportsImageInput ? ['text', 'image'] : ['text'],
-        contextWindow: m.contextWindow > 0 ? m.contextWindow : 200_000,
+        // Model Access v3 requires this value; never replace the server limit with a client guess.
+        contextWindow: m.contextWindow,
         maxTokens: m.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : 32_000,
         // 计费单位与目录一致($/1M tokens);pi 按此自行计价,usage 事件的 cost 才有真值。
         cost: {

@@ -48,6 +48,7 @@ import {
   getDesktopMcpToolApprovalPresentation,
 } from './mcp-tool-approval-policy.js';
 import { getRipgrepBinaryPath } from './runtime-configs.js';
+import { resolveXdPiGatewayWireProtocol } from './active-catalog.js';
 
 const log = createLogger('pi-host');
 
@@ -383,6 +384,7 @@ export function buildPiAgent(opts: BuildPiAgentOpts): PiAgent | null {
     resolvePiNativeProviders: () => resolvePiNativeProviders(),
     resolvePiRuntimeModelDescriptor: opts.resolvePiRuntimeModelDescriptor,
     resolvePiGatewayModelDescriptor: opts.resolvePiGatewayModelDescriptor,
+    resolvePiGatewayModelApi: resolveXdPiGatewayWireProtocol,
     getGhostRosterPrompt: opts.getGhostRosterPrompt,
   });
 }

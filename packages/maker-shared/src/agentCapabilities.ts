@@ -6,8 +6,8 @@ export interface MobileModelOption {
   effortDisplayNames: Record<string, string>;
   defaultEffort: string | null;
   supportsFastMode: boolean;
-  /** 区域门控后的新任务默认标记；Pi 复用 claude-code 标记。 */
-  newSessionDefault?: ('claude-code' | 'codex')[];
+  /** 区域门控后的新任务默认标记。 */
+  newSessionDefault?: ('claude-code' | 'codex' | 'pi')[];
 }
 
 export interface MobileChoiceOption {

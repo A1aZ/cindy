@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type { MobileCodexRateLimitsResult } from '@cindy/maker-shared/device-link-contract';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
+import type { SessionDragPreviewPalette } from '../shared/sessionDragPreview';
 import {
   AGENT_ISLAND_GET_DISPLAY_OPTIONS_CHANNEL,
   AGENT_ISLAND_PREVIEW_SOUND_CHANNEL,
@@ -5110,9 +5111,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     beginSessionDragPreview: (
       label: string,
       sessionId: string,
-      deviceId?: string | null,
+      deviceId: string | null | undefined,
+      palette: SessionDragPreviewPalette,
     ): Promise<void> =>
-      ipcRenderer.invoke('maker:session-drag-preview:start', label, sessionId, deviceId),
+      ipcRenderer.invoke('maker:session-drag-preview:start', label, sessionId, deviceId, palette),
     endSessionDragPreview: (dragEndAtMs?: number): void =>
       ipcRenderer.send('maker:session-drag-preview:end', dragEndAtMs),
 
@@ -6410,7 +6412,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       onH264Frame: (callback: (payload: IOSSimulatorH264FramePush) => void) =>
         fanOutIOSSimulatorH264Frame((payload) => callback(payload as IOSSimulatorH264FramePush)),
       onRouteStatus: (callback: (payload: IOSSimulatorRouteStatusPush) => void) =>
-        fanOutIOSSimulatorRouteStatus((payload) => callback(payload as IOSSimulatorRouteStatusPush)),
+        fanOutIOSSimulatorRouteStatus((payload) =>
+          callback(payload as IOSSimulatorRouteStatusPush),
+        ),
       onFocusRequest: (callback: (request: IOSSimulatorFocusRequest) => void) =>
         fanOutIOSSimulatorFocusRequest((request) => callback(request as IOSSimulatorFocusRequest)),
     },

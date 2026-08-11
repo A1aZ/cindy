@@ -1,4 +1,5 @@
 import type { DropSide } from './splitGroupStore';
+import type { SessionDragPreviewPalette } from '../../../shared/sessionDragPreview';
 import { buildSessionDeepLink } from '@/lib/deepLink';
 import {
   isSessionLinkDropTarget,
@@ -43,6 +44,31 @@ interface SessionDragEndEventLike {
 let activeSessionDragCancelled = false;
 let activeSessionDragCleanup: (() => void) | null = null;
 
+function resolveSessionDragPreviewPalette(): SessionDragPreviewPalette | undefined {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return undefined;
+  const parent = document.body ?? document.documentElement;
+  if (!parent) return undefined;
+
+  const probe = document.createElement('div');
+  probe.dataset.sessionDragPreviewPaletteProbe = 'true';
+  probe.style.cssText =
+    'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;';
+  probe.style.backgroundColor = 'var(--surface-elevated)';
+  probe.style.borderTop = '1px solid var(--border-default)';
+  probe.style.color = 'var(--text-primary)';
+  parent.appendChild(probe);
+  try {
+    const style = window.getComputedStyle(probe);
+    return {
+      surface: style.backgroundColor,
+      border: style.borderTopColor,
+      text: style.color,
+    };
+  } finally {
+    probe.remove();
+  }
+}
+
 function stopTrackingSessionDrag(): boolean {
   const cancelled = activeSessionDragCancelled;
   activeSessionDragCancelled = false;
@@ -64,7 +90,12 @@ function startTrackingSessionDrag(
     return;
   }
   const beginPreview = window.electronAPI?.maker?.beginSessionDragPreview;
-  if (beginPreview) void beginPreview(label, sessionId, deviceId).catch(() => undefined);
+  if (beginPreview) {
+    const palette = resolveSessionDragPreviewPalette();
+    if (palette) {
+      void beginPreview(label, sessionId, deviceId, palette).catch(() => undefined);
+    }
+  }
   let previewEndSent = false;
   const signalPreviewEnd = () => {
     if (previewEndSent) return;

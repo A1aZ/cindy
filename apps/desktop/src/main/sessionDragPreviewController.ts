@@ -4,6 +4,7 @@ import {
   type ScreenPoint,
   type WindowBounds,
 } from './windowBounds.js';
+import type { SessionDragPreviewPalette } from '../shared/sessionDragPreview.js';
 
 export interface SessionDragPreviewScreenLike {
   getCursorScreenPoint(): ScreenPoint;
@@ -23,7 +24,10 @@ export interface SessionDragPreviewWindowLike {
 export interface SessionDragPreviewControllerDeps {
   screen: SessionDragPreviewScreenLike;
   getAppWindowBounds: () => readonly WindowBounds[];
-  createPreviewWindow: (label: string) => SessionDragPreviewWindowLike;
+  createPreviewWindow: (
+    label: string,
+    palette: SessionDragPreviewPalette,
+  ) => SessionDragPreviewWindowLike;
   onStopped?: (token: number) => void;
   intervalMs?: number;
   maxDurationMs?: number;
@@ -58,7 +62,7 @@ export class SessionDragPreviewController {
 
   constructor(private readonly deps: SessionDragPreviewControllerDeps) {}
 
-  begin(owner: object, labelInput: string): number | null {
+  begin(owner: object, labelInput: string, palette: SessionDragPreviewPalette): number | null {
     if (this.active?.owner && this.active.owner !== owner) return null;
     this.stop();
 
@@ -74,9 +78,12 @@ export class SessionDragPreviewController {
       timer: null,
     };
     this.active = active;
-    this.preparePreview(active);
+    this.preparePreview(active, palette);
     this.tick(active);
-    active.timer = setInterval(() => this.tick(active), this.deps.intervalMs ?? DEFAULT_INTERVAL_MS);
+    active.timer = setInterval(
+      () => this.tick(active),
+      this.deps.intervalMs ?? DEFAULT_INTERVAL_MS,
+    );
     return active.token;
   }
 
@@ -94,8 +101,8 @@ export class SessionDragPreviewController {
     return this.stop(this.active.owner);
   }
 
-  private preparePreview(active: ActiveSessionDrag): void {
-    const preview = this.deps.createPreviewWindow(active.label);
+  private preparePreview(active: ActiveSessionDrag, palette: SessionDragPreviewPalette): void {
+    const preview = this.deps.createPreviewWindow(active.label, palette);
     active.preview = preview;
     void preview.ready.then(() => {
       if (this.active !== active || preview.isDestroyed()) return;

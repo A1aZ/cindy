@@ -500,11 +500,7 @@ import {
   withSendToSessionLock,
 } from './maker-ipc/register.js';
 import { cleanupActiveReviewArtifactSnapshots } from './reviewer/reviewArtifactSnapshot.js';
-import {
-  MAKER_INVOKE as MAKER_IPC_INVOKE,
-  MAKER_PUSH,
-  MAKER_SEND,
-} from './maker-ipc/channels.js';
+import { MAKER_INVOKE as MAKER_IPC_INVOKE, MAKER_PUSH, MAKER_SEND } from './maker-ipc/channels.js';
 import {
   preserveLegacyMakerMemoryDisabled,
   readMemorySettings,
@@ -623,6 +619,10 @@ import {
   endSessionDragPreview,
   prewarmSessionDragReleaseHelper,
 } from './session-drag-preview.js';
+import {
+  parseSessionDragPreviewPalette,
+  truncateSessionDragPreviewLabel,
+} from './sessionDragPreviewHtml.js';
 import {
   isGlobalVoiceInputOverlayVisible,
   registerGlobalVoiceInputIpc,
@@ -3066,23 +3066,24 @@ const registerIpcHandlers = () => {
 
   ipcMain.handle(
     MAKER_IPC_INVOKE.SESSION_DRAG_PREVIEW_START,
-    (event, labelRaw: unknown, sessionId: unknown, deviceIdRaw: unknown) => {
+    (event, labelRaw: unknown, sessionId: unknown, deviceIdRaw: unknown, paletteRaw: unknown) => {
       assertTrustedAppRendererEvent(event);
-      if (
-        typeof labelRaw !== 'string' ||
-        typeof sessionId !== 'string' ||
-        sessionId.length === 0
-      ) {
+      if (typeof labelRaw !== 'string' || typeof sessionId !== 'string' || sessionId.length === 0) {
         throwIpcError('INVALID_PARAMS', 'label and sessionId required');
       }
       const deviceId = parseOptionalDeviceLinkDeviceId(deviceIdRaw);
+      const palette = parseSessionDragPreviewPalette(paletteRaw);
+      if (!palette) {
+        throwIpcError('INVALID_PARAMS', 'invalid session drag preview palette');
+      }
       const sourceWindow = BrowserWindow.fromWebContents(event.sender);
       if (!sourceWindow || sourceWindow.isDestroyed()) return;
       beginSessionDragPreview(
         sourceWindow,
-        labelRaw.slice(0, 160),
+        truncateSessionDragPreviewLabel(labelRaw),
         sessionId,
         deviceId,
+        palette,
       );
     },
   );
@@ -3105,8 +3106,7 @@ const registerIpcHandlers = () => {
       sessionDragPreviewLog.info(
         JSON.stringify({
           event: 'sessionDragPreview.end.dispatched',
-          rendererToMainMs:
-            dragEndAtMs === null ? null : Math.max(0, receivedAtMs - dragEndAtMs),
+          rendererToMainMs: dragEndAtMs === null ? null : Math.max(0, receivedAtMs - dragEndAtMs),
           hideApiDispatchMs: Date.now() - receivedAtMs,
         }),
       );
@@ -6279,19 +6279,17 @@ async function runSmokeTest(
     const metaCount = (
       db.prepare('SELECT COUNT(*) AS c FROM migration_meta').get() as { c: number }
     ).c;
-    const pluginStorageResult = pluginStorage
-      ? await runPluginStorageSmoke(userId)
-      : undefined;
+    const pluginStorageResult = pluginStorage ? await runPluginStorageSmoke(userId) : undefined;
     const payload = {
-        ok: true,
-        schema_version: schemaVersion,
-        tables: {
-          sessions: sessionsCount,
-          messages: messagesCount,
-          migration_meta: metaCount,
-        },
-        ...(pluginStorageResult ? { plugin_storage: pluginStorageResult } : {}),
-      };
+      ok: true,
+      schema_version: schemaVersion,
+      tables: {
+        sessions: sessionsCount,
+        messages: messagesCount,
+        migration_meta: metaCount,
+      },
+      ...(pluginStorageResult ? { plugin_storage: pluginStorageResult } : {}),
+    };
     const serialized = `${JSON.stringify(payload)}\n`;
     if (resultFile) fs.writeFileSync(resultFile, serialized, { mode: 0o600 });
     process.stdout.write(serialized);

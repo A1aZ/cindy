@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   SPLIT_GROUP_SESSION_MIME,
@@ -17,8 +17,25 @@ import {
 } from '../splitGroupDnd';
 
 const RECT = { left: 100, top: 50, width: 400, height: 300 };
+const PREVIEW_PALETTE = {
+  surface: 'rgb(248, 248, 248)',
+  border: 'rgb(220, 223, 227)',
+  text: 'rgb(60, 63, 67)',
+};
+
+function mockPreviewPalette(): void {
+  vi.spyOn(window, 'getComputedStyle').mockReturnValue({
+    backgroundColor: PREVIEW_PALETTE.surface,
+    borderTopColor: PREVIEW_PALETTE.border,
+    color: PREVIEW_PALETTE.text,
+  } as unknown as CSSStyleDeclaration);
+}
 
 describe('splitGroupDnd', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('输入框内的任务拖放由 composer 消费，不属于分屏落点', () => {
     const composer = document.createElement('div');
     composer.setAttribute('data-split-group-composer-drop-target', '');
@@ -64,6 +81,7 @@ describe('splitGroupDnd', () => {
   });
 
   it('共享原生拖拽 helper 保留任务 payload 并在结束时请求窗口外判定', () => {
+    mockPreviewPalette();
     const row = document.createElement('div');
     const title = document.createElement('span');
     row.append(title);
@@ -111,7 +129,8 @@ describe('splitGroupDnd', () => {
     expect((preview as HTMLCanvasElement).height).toBe(1);
     expect((preview as HTMLCanvasElement).dataset.sessionDragPreviewTransparent).toBe('true');
     expect(document.querySelector('[data-session-drag-preview-transparent]')).toBe(preview);
-    expect(beginPreview).toHaveBeenCalledWith('任务 A', 'session-a', 'device-b');
+    expect(beginPreview).toHaveBeenCalledWith('任务 A', 'session-a', 'device-b', PREVIEW_PALETTE);
+    expect(document.querySelector('[data-session-drag-preview-palette-probe]')).toBeNull();
 
     window.dispatchEvent(new Event('pointerup'));
     window.dispatchEvent(new Event('dragend'));
@@ -178,6 +197,7 @@ describe('splitGroupDnd', () => {
   });
 
   it('按 Escape 取消原生拖拽时不会请求窗口外开窗', () => {
+    mockPreviewPalette();
     const row = document.createElement('div');
     const dataTransfer = {
       effectAllowed: 'none',
@@ -214,7 +234,7 @@ describe('splitGroupDnd', () => {
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     finishSessionDrag({ currentTarget: row }, 'session-a');
 
-    expect(beginPreview).toHaveBeenCalledWith('session-a', 'session-a', undefined);
+    expect(beginPreview).toHaveBeenCalledWith('session-a', 'session-a', undefined, PREVIEW_PALETTE);
     expect(endPreview).toHaveBeenCalledOnce();
     expect(endPreview).toHaveBeenCalledWith(expect.any(Number));
     expect(openOutside).not.toHaveBeenCalled();

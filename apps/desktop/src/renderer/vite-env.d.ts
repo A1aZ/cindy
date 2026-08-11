@@ -4727,7 +4727,8 @@ interface ElectronAPI {
     beginSessionDragPreview: (
       label: string,
       sessionId: string,
-      deviceId?: string | null,
+      deviceId: string | null | undefined,
+      palette: import('../shared/sessionDragPreview').SessionDragPreviewPalette,
     ) => Promise<void>;
     endSessionDragPreview: (dragEndAtMs?: number) => void;
 

@@ -4,6 +4,13 @@ import {
   SessionDragPreviewController,
   type SessionDragPreviewWindowLike,
 } from '../sessionDragPreviewController';
+import type { SessionDragPreviewPalette } from '../../shared/sessionDragPreview';
+
+const PALETTE: SessionDragPreviewPalette = {
+  surface: 'rgb(31, 32, 34)',
+  border: 'rgb(64, 66, 70)',
+  text: 'rgb(244, 244, 242)',
+};
 
 function createPreviewWindow(): SessionDragPreviewWindowLike & {
   setPosition: ReturnType<typeof vi.fn>;
@@ -45,10 +52,10 @@ describe('SessionDragPreviewController', () => {
       createPreviewWindow: create,
     });
 
-    controller.begin(owner, '任务 A');
+    controller.begin(owner, '任务 A', PALETTE);
     vi.advanceTimersByTime(48);
 
-    expect(create).toHaveBeenCalledWith('任务 A');
+    expect(create).toHaveBeenCalledWith('任务 A', PALETTE);
     expect(preview.showInactive).not.toHaveBeenCalled();
     expect(controller.isActive()).toBe(true);
     controller.end(owner);
@@ -68,12 +75,12 @@ describe('SessionDragPreviewController', () => {
       createPreviewWindow: create,
     });
 
-    controller.begin(owner, '任务 A');
+    controller.begin(owner, '任务 A', PALETTE);
     point = { x: 900, y: 700 };
     vi.advanceTimersByTime(16);
     await Promise.resolve();
 
-    expect(create).toHaveBeenCalledWith('任务 A');
+    expect(create).toHaveBeenCalledWith('任务 A', PALETTE);
     expect(preview.setPosition).toHaveBeenCalledWith(880, 708, false);
     expect(preview.showInactive).toHaveBeenCalled();
 
@@ -116,7 +123,7 @@ describe('SessionDragPreviewController', () => {
       createPreviewWindow: create,
     });
 
-    controller.begin(owner, '任务 A');
+    controller.begin(owner, '任务 A', PALETTE);
     point = { x: 900, y: 700 };
     vi.advanceTimersByTime(16);
     point = { x: 300, y: 300 };
@@ -146,7 +153,7 @@ describe('SessionDragPreviewController', () => {
       createPreviewWindow: () => preview,
     });
 
-    controller.begin(owner, '任务 A');
+    controller.begin(owner, '任务 A', PALETTE);
     controller.end(other);
 
     expect(controller.isActive()).toBe(true);
@@ -166,8 +173,8 @@ describe('SessionDragPreviewController', () => {
       createPreviewWindow: vi.fn().mockReturnValueOnce(firstPreview).mockReturnValue(secondPreview),
     });
 
-    const firstToken = controller.begin(owner, '任务 A');
-    const secondToken = controller.begin(owner, '任务 B');
+    const firstToken = controller.begin(owner, '任务 A', PALETTE);
+    const secondToken = controller.begin(owner, '任务 B', PALETTE);
     expect(firstToken).not.toBe(secondToken);
 
     expect(controller.endByToken(firstToken!)).toBe(false);
@@ -192,7 +199,7 @@ describe('SessionDragPreviewController', () => {
       onStopped,
     });
 
-    const token = controller.begin({}, '任务 A');
+    const token = controller.begin({}, '任务 A', PALETTE);
     vi.advanceTimersByTime(48);
 
     expect(controller.isActive()).toBe(false);

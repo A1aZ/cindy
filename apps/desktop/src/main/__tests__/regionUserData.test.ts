@@ -33,7 +33,7 @@ describe('resolveRegionUserDataDirName', () => {
     ).toBe('CindyDev');
   });
 
-  it('显式 --user-data-dir 或 XDT_USER_DATA_DIR 时不覆写,尊重调用方', () => {
+  it('显式 Chromium --user-data-dir 时不覆写,尊重调用方', () => {
     expect(
       resolveRegionUserDataDirName({
         isPackaged: true,
@@ -48,20 +48,15 @@ describe('resolveRegionUserDataDirName', () => {
         argv: ['Cindy.exe', '--user-data-dir', 'C:\\tmp\\xdt-smoke-x'],
       }),
     ).toBeNull();
+  });
+
+  it('XDT_USER_DATA_DIR 仍保留区域默认 profile 作为隔离 epoch 基线', () => {
     expect(
       resolveRegionUserDataDirName({
         isPackaged: false,
         region: 'global',
         argv: ARGV,
         envUserDataDir: '/tmp/custom-profile',
-      }),
-    ).toBeNull();
-    expect(
-      resolveRegionUserDataDirName({
-        isPackaged: true,
-        region: 'global',
-        argv: ARGV,
-        envUserDataDir: '/tmp/ambient-dev-only-profile',
       }),
     ).toBe('CindyGlobal');
   });

@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+
 /** Desktop dev 支持的区域身份。 */
 export const DESKTOP_DEV_REGIONS = Object.freeze(["cn", "global", "dev"]);
 
@@ -17,6 +20,33 @@ export function desktopUserDataDirNameForRegion(region = "global") {
     throw new Error(`invalid desktop dev region: ${region}; expected cn, global or dev`);
   }
   return DESKTOP_USER_DATA_DIR_NAME_BY_REGION[region];
+}
+
+/** 计算与 Electron app.getPath('userData') 对齐的区域 profile 路径。 */
+export function desktopUserDataDirForRegion(
+  region = "global",
+  platform = process.platform,
+  env = process.env,
+  homeDir = os.homedir(),
+) {
+  const dirName = desktopUserDataDirNameForRegion(region);
+  const pathImpl = platform === "win32" ? path.win32 : path.posix;
+  switch (platform) {
+    case "darwin":
+      return pathImpl.join(homeDir, "Library", "Application Support", dirName);
+    case "win32":
+      return pathImpl.join(
+        env.APPDATA || pathImpl.join(homeDir, "AppData", "Roaming"),
+        dirName,
+      );
+    case "linux":
+      return pathImpl.join(
+        env.XDG_CONFIG_HOME || pathImpl.join(homeDir, ".config"),
+        dirName,
+      );
+    default:
+      throw new Error(`unsupported platform: ${platform}`);
+  }
 }
 
 /**

@@ -13,10 +13,9 @@
  *    保持 Electron 原生行为(线上 cn 包与历史行为完全一致)。
  *  - 非 packaged 启动同样按区域选正式 profile；`--isolated` 再由 devCliFlags
  *    基于这个区域目录派生 `<区域目录>-dev2[-<名字>]`。
- *  - 命令行显式传了 Chromium 原生 `--user-data-dir`，或环境已显式设置
- *    `XDT_USER_DATA_DIR` 时返回 null，尊重调用方
- *    (smoke-packaged.mjs 用它把假库指到 os.tmpdir 临时目录;覆写会让 global
- *    包的 smoke 数据写进真实 CindyGlobal 目录、临时目录清了个空)。
+ *  - 命令行显式传了 Chromium 原生 `--user-data-dir` 时返回 null，尊重调用方。
+ *    `XDT_USER_DATA_DIR` 是 devCliFlags 的最终覆写；这里仍先建立区域默认
+ *    profile，确保隔离 epoch comparison 以 CindyGlobal / Cindy / CindyDev 为基线。
  *  - 只决定**目录名**,拼绝对路径(appData 基址)留给调用方——本模块保持
  *    零 Electron 依赖,可直接单测。
  */
@@ -43,9 +42,6 @@ export function resolveRegionUserDataDirName(input: {
   envUserDataDir?: string;
 }): string | null {
   if (hasExplicitUserDataDir(input.argv)) return null;
-  // XDT_USER_DATA_DIR is a dev-only override. Packaged builds must keep their
-  // published region mapping even if an ambient shell variable leaks in.
-  if (!input.isPackaged && input.envUserDataDir?.trim()) return null;
   const dirName = brandUserDataDirName(input.region);
   // 与 productName 默认派生目录同名(cn)→ 不覆写,走 Electron 原生路径。
   if (dirName === BRAND_IDENTITY.userDataDirName) return null;

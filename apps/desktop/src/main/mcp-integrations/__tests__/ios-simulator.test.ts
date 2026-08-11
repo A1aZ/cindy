@@ -27,6 +27,7 @@ import {
   type IOSSimulatorTouchPoint,
   type WdaRunningInstance,
 } from '@cindy/ios-simulator-runtime';
+import { IOSSimulatorToolRegistry, registerIOSSimulatorTools } from '@cindy/mcps';
 import type { IOSSimulatorPublicRouteStatus } from '../../../shared/iosSimulatorIpc';
 import {
   cancelIOSSimulatorSessionOperations,
@@ -756,6 +757,51 @@ describe('iOS Simulator host', () => {
         read_build_diagnostics: { state: 'available', backend: 'host' },
       },
     });
+  });
+
+  it('reports availability under exactly the advertised simulator tool names', async () => {
+    const host = createIOSSimulatorHost({
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async (id) => localSession(id)),
+    });
+    const registry = new IOSSimulatorToolRegistry();
+    registerIOSSimulatorTools(registry, { callTool: vi.fn() });
+    const advertised = new Set(registry.list().map((tool) => tool.name));
+
+    // The registry merges this map by advertised name, so a renamed tool that
+    // kept its old availability key would silently report TOOL_NOT_REPORTED.
+    const reported = Object.keys((await host.describeTools('session-a')).tools).sort();
+    expect(reported).toEqual([...advertised].sort());
+
+    // The rejected-session branch reports its own reduced map and must use the
+    // same names, or the real rejection reason never reaches discovery.
+    const rejectedHost = createIOSSimulatorHost({
+      runtime: { inspect: vi.fn(async () => READY_REPORT) },
+      getSession: vi.fn(async () => null),
+    });
+    const rejected = await rejectedHost.describeTools('missing-session');
+    expect(rejected.ready).toBe(false);
+    expect(Object.keys(rejected.tools).length).toBeGreaterThan(0);
+    for (const [name, availability] of Object.entries(rejected.tools)) {
+      expect(advertised.has(name)).toBe(true);
+      expect(availability).toBeDefined();
+    }
+    expect(rejected.tools.list_simulator_devices).toMatchObject({
+      state: 'unavailable',
+      reasonCode: 'SESSION_NOT_FOUND',
+    });
+
+    // Recommendations are model guidance too: naming a superseded tool sends the
+    // model back to the ambiguous name this rename hides.
+    const doctor = await host.callTool('doctor', {}, { sessionId: 'session-a' });
+    const recommended = (doctor as { data: { recommendedActions: string[] } }).data
+      .recommendedActions;
+    expect(recommended).toContain('list_simulator_devices');
+    for (const action of recommended) {
+      expect(advertised.has(action) || action === 'create_instance_or_attach_device').toBe(
+        true,
+      );
+    }
   });
 
   it('removes stale orphaned xcresult bundles during ownership reconciliation', async () => {
@@ -6803,7 +6849,7 @@ describe('iOS Simulator host', () => {
           instanceCount: 1,
           runningInstanceCount: 1,
           tools: {
-            drag: { state: 'available', backend: 'wda' },
+            drag_on_simulator: { state: 'available', backend: 'wda' },
             touch_path: { state: 'unavailable', reasonCode: 'NATIVE_HID_NOT_ADMITTED' },
           },
         },

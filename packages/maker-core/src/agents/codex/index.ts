@@ -3021,13 +3021,13 @@ export class CodexAgent extends BaseAgent {
     const completedTurnIds = new Set<string>();
     const terminalErroredTurnIds = new Set<string>();
     // A host policy can catch a shell command only after app-server has already
-    // started it. Keep turn/completed pending until the bounded interrupt RPC
-    // settles: success may close the turn with the policy error, while failure
-    // must leave the turn visible and running instead of hiding its later events
-    // behind a terminal tombstone.
+    // started it. An interrupt ACK proves only request acceptance, not that the
+    // command stopped, so retain this marker until authoritative turn/completed.
+    // A failed ACK remains provenance-only: output stays visible, while a later
+    // interrupted completion can still be attributed to the policy request.
     const pendingHostPolicyInterrupts = new Map<
       string,
-      { reason: string; completion: TurnCompletedParams | null }
+      { reason: string; acknowledgement: 'pending' | 'failed' }
     >();
     // daemon 后端 retry-loop 的终局升级 (issue #677): 远端摸不到 Codex 后端时
     // daemon 无限 willRetry, turn 永不收口。同 turn 重试超阈值 → 合成终态错误,
@@ -7691,7 +7691,40 @@ export class CodexAgent extends BaseAgent {
       const turn = params.turn;
       const pendingHostPolicyInterrupt = pendingHostPolicyInterrupts.get(turn.id);
       if (pendingHostPolicyInterrupt) {
-        pendingHostPolicyInterrupt.completion = params;
+        pendingHostPolicyInterrupts.delete(turn.id);
+        if (terminalErroredTurnIds.has(turn.id) || completedTurnIds.has(turn.id)) {
+          handleTurnCompleted(params);
+          return;
+        }
+        if (
+          pendingHostPolicyInterrupt.acknowledgement === 'failed'
+          && turn.status !== 'interrupted'
+        ) {
+          // The interrupt could not be confirmed and the provider says the turn
+          // ended normally/failed, so preserve that authoritative outcome.
+          handleTurnCompleted(params);
+          return;
+        }
+        // The provider completion is the first proof that the denied command is
+        // actually finished. Close the turn with the policy error and Codex's
+        // required idle tail; the tombstone keeps interrupted from becoming a
+        // user-Stop done(cancelled:true).
+        terminalErroredTurnIds.add(turn.id);
+        eventQueue.push({
+          type: 'error',
+          data: {
+            message: pendingHostPolicyInterrupt.reason,
+            isTerminal: true,
+            reason: 'host-shell-command-blocked',
+          },
+          source: 'codex',
+        });
+        handleTurnCompleted(params);
+        eventQueue.push({
+          type: 'status',
+          data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
+          source: 'codex',
+        });
         return;
       }
       if (reconnectStallCleanupTurnId === turn.id) {
@@ -8981,68 +9014,45 @@ export class CodexAgent extends BaseAgent {
           });
           if (hostPolicy?.decision === 'deny') {
             discardPendingSpawnLineageIds(reservedChildThreadIds);
-            if (pendingHostPolicyInterrupts.has(params.turnId)) return;
+            const existingPolicyInterrupt = pendingHostPolicyInterrupts.get(params.turnId);
+            if (existingPolicyInterrupt?.acknowledgement === 'pending') return;
             log.warn('command execution interrupted by host policy', {
               turnId: params.turnId,
               reason: hostPolicy.reason,
             });
-            const pendingInterrupt = {
+            const pendingInterrupt: {
+              reason: string;
+              acknowledgement: 'pending' | 'failed';
+            } = {
               reason: hostPolicy.reason,
-              completion: null as TurnCompletedParams | null,
+              acknowledgement: 'pending',
             };
             pendingHostPolicyInterrupts.set(params.turnId, pendingInterrupt);
+            // Keep the task visibly running until provider completion proves the
+            // command stopped. This non-terminal warning survives the ACK window
+            // without arming Session's terminal-error drain.
+            eventQueue.push({
+              type: 'error',
+              data: {
+                message: pendingInterrupt.reason,
+                isTerminal: false,
+                reason: 'host-shell-command-blocked',
+              },
+              source: 'codex',
+            });
             void (async () => {
               const interrupted = await interruptTurnForPermissionTighten(params.turnId, {
                 suppressFailureEvent: true,
               });
               if (pendingHostPolicyInterrupts.get(params.turnId) !== pendingInterrupt) return;
-              pendingHostPolicyInterrupts.delete(params.turnId);
+              if (interrupted) return;
+              pendingInterrupt.acknowledgement = 'failed';
               if (closed) return;
-
-              const completedWhileInterrupting = pendingInterrupt.completion;
-              if (!interrupted && !completedWhileInterrupting) {
-                // The command may still be running. Keep this error non-terminal so the
-                // Session remains attached to the turn and its later output/completion is
-                // visible instead of being swallowed by a terminal tombstone.
-                log.error('host policy could not interrupt running command', {
-                  turnId: params.turnId,
-                });
-                eventQueue.push({
-                  type: 'error',
-                  data: {
-                    message: pendingInterrupt.reason,
-                    isTerminal: false,
-                    reason: 'host-shell-command-blocked',
-                  },
-                  source: 'codex',
-                });
-                return;
-              }
-
-              // Host policy is an internal terminal failure, not a user Stop. An ACK (or
-              // an already-observed completion) proves the old turn can be closed locally.
-              // Publish the durable error with Codex's required idle tail, then tombstone
-              // the provider completion so done(cancelled:true) cannot clear the error.
-              terminalErroredTurnIds.add(params.turnId);
-              eventQueue.push({
-                type: 'error',
-                data: {
-                  message: pendingInterrupt.reason,
-                  isTerminal: true,
-                  reason: 'host-shell-command-blocked',
-                },
-                source: 'codex',
-              });
-              handleTurnCompleted(
-                completedWhileInterrupting ?? ({
-                  threadId,
-                  turn: { id: params.turnId, status: 'interrupted' },
-                } as TurnCompletedParams),
-              );
-              eventQueue.push({
-                type: 'status',
-                data: { status: 'Done', ...usageTracker.snapshot(), isRunning: false },
-                source: 'codex',
+              // The command may still be running. This provenance marker is not
+              // a tombstone, so later output remains visible; completion status
+              // decides whether the interrupt actually took effect.
+              log.error('host policy could not interrupt running command', {
+                turnId: params.turnId,
               });
             })();
             return;

@@ -13105,9 +13105,43 @@ describe('CodexAgent MCP thread context hooks', () => {
     });
     expect(handle.isTurnRunning?.()).toBe(true);
 
+    handlers.itemStarted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'cmd-absolute',
+        type: 'commandExecution',
+        command,
+        cwd: '/repo',
+      },
+    });
+    expect(
+      host.request.mock.calls.filter(([method]) => method === Method.TurnInterrupt),
+    ).toHaveLength(1);
+
     acknowledgeInterrupt();
     await Promise.resolve();
     expect(handle.isTurnRunning?.()).toBe(true);
+
+    handlers.itemStarted({
+      threadId: 'start-thread-id',
+      turnId: 'turn-1',
+      item: {
+        id: 'cmd-absolute-after-ack',
+        type: 'commandExecution',
+        command: '/usr/bin/open -a Simulator',
+        cwd: '/repo',
+      },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: 'error',
+      data: { isTerminal: false, reason: 'host-shell-command-blocked' },
+    });
+    await vi.waitFor(() => {
+      expect(
+        host.request.mock.calls.filter(([method]) => method === Method.TurnInterrupt),
+      ).toHaveLength(2);
+    });
 
     handlers.turnCompleted({
       threadId: 'start-thread-id',

@@ -3027,7 +3027,11 @@ export class CodexAgent extends BaseAgent {
     // interrupted completion can still be attributed to the policy request.
     const pendingHostPolicyInterrupts = new Map<
       string,
-      { reason: string; acknowledgement: 'pending' | 'failed' }
+      {
+        reason: string;
+        itemId: string;
+        acknowledgement: 'pending' | 'acknowledged' | 'failed';
+      }
     >();
     // daemon 后端 retry-loop 的终局升级 (issue #677): 远端摸不到 Codex 后端时
     // daemon 无限 willRetry, turn 永不收口。同 turn 重试超阈值 → 合成终态错误,
@@ -9021,16 +9025,27 @@ export class CodexAgent extends BaseAgent {
           if (hostPolicy?.decision === 'deny') {
             discardPendingSpawnLineageIds(reservedChildThreadIds);
             const existingPolicyInterrupt = pendingHostPolicyInterrupts.get(params.turnId);
-            if (existingPolicyInterrupt?.acknowledgement === 'pending') return;
+            // Deduplicate only the same blocked item while its interrupt RPC is
+            // still in flight. A different blocked item is fresh proof that the
+            // turn is still executing and must issue another bounded interrupt,
+            // even if the previous request has not acknowledged yet.
+            if (
+              existingPolicyInterrupt?.acknowledgement === 'pending' &&
+              existingPolicyInterrupt.itemId === params.item.id
+            ) {
+              return;
+            }
             log.warn('command execution interrupted by host policy', {
               turnId: params.turnId,
               reason: hostPolicy.reason,
             });
             const pendingInterrupt: {
               reason: string;
-              acknowledgement: 'pending' | 'failed';
+              itemId: string;
+              acknowledgement: 'pending' | 'acknowledged' | 'failed';
             } = {
               reason: hostPolicy.reason,
+              itemId: params.item.id,
               acknowledgement: 'pending',
             };
             pendingHostPolicyInterrupts.set(params.turnId, pendingInterrupt);
@@ -9051,7 +9066,10 @@ export class CodexAgent extends BaseAgent {
                 suppressFailureEvent: true,
               });
               if (pendingHostPolicyInterrupts.get(params.turnId) !== pendingInterrupt) return;
-              if (interrupted) return;
+              if (interrupted) {
+                pendingInterrupt.acknowledgement = 'acknowledged';
+                return;
+              }
               pendingInterrupt.acknowledgement = 'failed';
               if (closed) return;
               // The command may still be running. This provenance marker is not

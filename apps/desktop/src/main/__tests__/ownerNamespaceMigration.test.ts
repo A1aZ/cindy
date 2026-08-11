@@ -2209,13 +2209,18 @@ describe('legacy Ghost plugin recovery', () => {
     const ownerId = 'cloud-a';
     await writeGhostDir(root, 'cindy-brain', 'unreadable-manifest');
     const manifestPath = path.join(root, 'cindy-brain', 'unreadable-manifest', 'ghost.json');
-    const originalReadFile = fsSync.readFileSync.bind(fsSync);
-    const readFileSpy = vi.spyOn(fsSync, 'readFileSync').mockImplementation((file, options) => {
-      if (path.resolve(String(file)) === path.resolve(manifestPath)) {
-        throw Object.assign(new Error('manifest locked'), { code: 'EACCES' });
-      }
-      return originalReadFile(file as never, options as never) as never;
-    });
+    const boundedModule = await import('../utils/readBoundedFile.js');
+    const originalNoFollowSync = boundedModule.readBoundedFileNoFollowSync;
+    const noFollowSpy = vi
+      .spyOn(boundedModule, 'readBoundedFileNoFollowSync')
+      .mockImplementation(
+        (file: string, maxBytes?: number, options?: { containWithin?: string; nonBlocking?: boolean }) => {
+          if (path.resolve(String(file)) === path.resolve(manifestPath)) {
+            throw Object.assign(new Error('manifest locked'), { code: 'EACCES' });
+          }
+          return originalNoFollowSync(file, maxBytes!, options!);
+        },
+      );
     try {
       expect(
         getLegacyGhostRecoveryStatus(
@@ -2239,7 +2244,7 @@ describe('legacy Ghost plugin recovery', () => {
         deferredReason: 'legacy-discovery-incomplete',
       });
     } finally {
-      readFileSpy.mockRestore();
+      noFollowSpy.mockRestore();
     }
     await expect(fs.access(manifestPath)).resolves.toBeUndefined();
     await expect(

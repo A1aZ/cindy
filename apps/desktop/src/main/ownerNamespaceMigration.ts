@@ -19,7 +19,7 @@ import {
 } from '../shared/legacyGhostRecovery.js';
 import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
 import { withGhostInstallLock } from './cindy-brain/ghostInstallLock.js';
-import { readBoundedFileNoFollow, readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
+import { readBoundedFileNoFollow, readBoundedFileNoFollowSync, GHOST_MANIFEST_MAX_BYTES } from './utils/readBoundedFile.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
 const LEGACY_GHOST_RECOVERY_MARKER = '.legacy-ghost-recovery-v1.json';
@@ -824,15 +824,19 @@ function readLegacyGhostManifest(
   dir: string,
   expectedId: string,
 ): LegacyGhostManifestRead {
-  let text: string;
+  const manifestPath = path.join(dir, GHOST_MANIFEST_FILE);
+  let bytes: Buffer | null;
   try {
-    text = fsSync.readFileSync(path.join(dir, GHOST_MANIFEST_FILE), 'utf-8');
+    bytes = readBoundedFileNoFollowSync(manifestPath, GHOST_MANIFEST_MAX_BYTES, {
+      containWithin: dir,
+    });
   } catch (error) {
     return isMissing(error) ? { kind: 'invalid' } : { kind: 'deferred' };
   }
+  if (!bytes) return { kind: 'invalid' };
   let raw: unknown;
   try {
-    raw = JSON.parse(text);
+    raw = JSON.parse(bytes.toString('utf-8'));
   } catch {
     return { kind: 'invalid' };
   }

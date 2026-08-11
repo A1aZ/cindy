@@ -276,7 +276,8 @@ function normalizeModelOption(value: unknown): MobileModelOption | null {
     : {};
   const newSessionDefault = Array.isArray(value.newSessionDefault)
     ? [...new Set(value.newSessionDefault.filter(
-      (item): item is 'claude-code' | 'codex' => item === 'claude-code' || item === 'codex',
+      (item): item is 'claude-code' | 'codex' | 'pi' =>
+        item === 'claude-code' || item === 'codex' || item === 'pi',
     ))]
     : [];
   return {

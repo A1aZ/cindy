@@ -104,15 +104,18 @@ export function resolveDeviceLinkDraftDefaults(
 
   // 要解析哪个模型:控制端本次显式 targetModel(切模型)永远优先。初始 seed 只有在**新端明确
   // 回传未选过模型**时才采用区域目录默认；旧端缺字段时保守保留 remoteDraft.model，避免
-  // 把无法识别的历史显式选择覆盖掉。pi 与本地默认口径一致，映射到 claude-code wire 标记。
-  const wireAgent = agentKind === 'codex' ? 'codex' : 'claude-code';
+  // 把无法识别的历史显式选择覆盖掉。Pi 接受 v3 自己的标记，同时保留既有非 XD 目录的
+  // claude-code 投影标记。
+  const defaultMarkers: readonly AgentKind[] = agentKind === 'pi'
+    ? ['pi', 'claude-code']
+    : agentKind ? [agentKind] : [];
   const markedDefault = agentKind
     ? models
         .map((model, index) => ({ model, index }))
         .filter(
           ({ model }) =>
             model.defaultEnabled !== false &&
-            (model.newSessionDefault?.includes(wireAgent) ?? false),
+            (model.newSessionDefault?.some((marker) => defaultMarkers.includes(marker)) ?? false),
         )
         .sort(
           (a, b) =>

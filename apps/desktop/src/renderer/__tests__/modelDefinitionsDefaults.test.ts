@@ -286,16 +286,28 @@ describe('newSessionDefault（专用默认种子标记）', () => {
     expect(md.getDefaultModelForVendor('cc').id).toBe('flag-first');
   });
 
-  it('pi 按 claude-code 口径判定：标了 claude-code 的模型成为 pi 的默认', async () => {
+  it('pi 接受 v3 自己的默认标记', async () => {
     const md = await loadWith({
       pi: [
         model('sonnet', { sortOrder: 0 }),
-        model('deepseek', { sortOrder: 44, newSessionDefault: ['claude-code'] }),
+        model('deepseek', { sortOrder: 44, newSessionDefault: ['pi'] }),
       ],
     });
 
     expect(md.getDefaultModelForVendor('pi').id).toBe('deepseek');
     expect(md.newSessionDefaultModelId('pi')).toBe('deepseek');
+  });
+
+  it('pi 保留非 XD 目录既有的 claude-code 投影标记', async () => {
+    const md = await loadWith({
+      pi: [
+        model('sonnet', { sortOrder: 0 }),
+        model('opus', { sortOrder: 44, newSessionDefault: ['claude-code'] }),
+      ],
+    });
+
+    expect(md.getDefaultModelForVendor('pi').id).toBe('opus');
+    expect(md.newSessionDefaultModelId('pi')).toBe('opus');
   });
 
   it('pi 未标记时冷启动占位是 claude-sonnet-5（不再错落到 cc 的 opus-5）', async () => {

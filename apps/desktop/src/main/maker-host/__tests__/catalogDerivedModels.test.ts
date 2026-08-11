@@ -275,7 +275,7 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
     );
     anthropic.models.pi = [model('shared-default')];
     xd.models.pi = [
-      model('shared-default', { newSessionDefault: ['claude-code', 'codex'] }),
+      model('shared-default', { newSessionDefault: ['pi'] }),
     ];
 
     expect(
@@ -288,7 +288,7 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
     ).toMatchObject({ contextWindow: 272_000, newSessionDefault: ['codex'] });
     expect(
       deriveAvailableModels(catalog, 'pi').find((entry) => entry.id === 'shared-default'),
-    ).toMatchObject({ newSessionDefault: ['claude-code'] });
+    ).toMatchObject({ newSessionDefault: ['pi'] });
   });
 
   it('per-agent 分叉透传:gpt-5.5 cc=1M / codex=272k', () => {

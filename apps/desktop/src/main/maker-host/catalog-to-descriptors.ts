@@ -114,23 +114,24 @@ function intersectPiEffortCapabilities(
 
 /**
  * availableModels 按 id 拍平后仍要保留 XD 区域策略。展示/能力字段继续首见胜出；这里只把
- * 当前 agent 对应的默认标记并到首见 descriptor。Pi 按既有协议复用 claude-code 标记。
+ * 当前 agent 对应的默认标记并到首见 descriptor。Pi 接受 v3 自己的标记，同时保留既有
+ * 非 XD 目录的 claude-code 投影标记。
  */
 function mergeNewSessionDefaultMarker(
   first: ModelDescriptor,
   next: ModelDescriptor,
   agent: AgentKind,
 ): ModelDescriptor {
-  const marker = agent === 'pi' ? 'claude-code' : agent;
-  if (
-    next.newSessionDefault?.includes(marker) !== true ||
-    first.newSessionDefault?.includes(marker) === true
-  ) {
-    return first;
-  }
+  const markers: readonly AgentKind[] = agent === 'pi' ? ['pi', 'claude-code'] : [agent];
+  const missingMarkers = markers.filter(
+    (marker) =>
+      next.newSessionDefault?.includes(marker) === true &&
+      first.newSessionDefault?.includes(marker) !== true,
+  );
+  if (missingMarkers.length === 0) return first;
   return {
     ...first,
-    newSessionDefault: [...(first.newSessionDefault ?? []), marker],
+    newSessionDefault: [...(first.newSessionDefault ?? []), ...missingMarkers],
   };
 }
 

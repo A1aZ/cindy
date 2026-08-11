@@ -135,7 +135,19 @@ describe('resolveDeviceLinkDraftDefaults', () => {
     expect(sel.model).toBe('claude-opus-4-8');
   });
 
-  it('Pi 的远程新任务默认沿用 claude-code wire 标记', () => {
+  it('Pi 的远程新任务默认接受 v3 的 pi 标记', () => {
+    const capabilities = caps();
+    capabilities.availableModels[1]!.newSessionDefault = ['pi'];
+    const sel = resolveDeviceLinkDraftDefaults(
+      capabilities,
+      { model: 'claude-opus-4-8', modelChosenByUser: false },
+      undefined,
+      'pi',
+    );
+    expect(sel.model).toBe('claude-haiku-4-5');
+  });
+
+  it('Pi 的远程新任务保留非 XD claude-code 投影标记兼容', () => {
     const sel = resolveDeviceLinkDraftDefaults(
       caps(),
       { model: 'claude-opus-4-8', modelChosenByUser: false },

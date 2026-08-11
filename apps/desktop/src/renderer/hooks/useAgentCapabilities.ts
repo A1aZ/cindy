@@ -195,13 +195,13 @@ function isOptionalStringRecord(value: unknown): boolean {
   );
 }
 
-/** 与 protocol newSessionDefault 约束一致:可选;存在时非空、wire agent、无重复。 */
+/** 与 protocol newSessionDefault 约束一致:可选;存在时非空、已知 agent、无重复。 */
 function isOptionalNewSessionDefault(value: unknown): boolean {
   if (value === undefined) return true;
   if (!Array.isArray(value) || value.length === 0) return false;
   if (
     value.some(
-      (agent) => agent !== 'claude-code' && agent !== 'codex',
+      (agent) => agent !== 'claude-code' && agent !== 'codex' && agent !== 'pi',
     )
   ) {
     return false;

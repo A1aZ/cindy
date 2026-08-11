@@ -1244,6 +1244,8 @@ export class GhostManager {
     const resumeLedger = this.receiptStore.readMigrationLedger();
     const resumePending =
       resumeLedger?.state === 'in-progress' ? new Set(resumeLedger.pendingIds ?? []) : null;
+    const resumeApprovalProjectionDigest =
+      resumeLedger?.recoveryApprovalProjectionSha256ById ?? undefined;
 
     const root = this.contentRootDir();
     let entries: fs.Dirent[] = [];
@@ -1357,7 +1359,10 @@ export class GhostManager {
 
     for (const id of candidates) {
       try {
-        const migrated = await this.backfillLegacyApproval(path.join(root, id), id);
+        const migrated = await this.backfillLegacyApproval(path.join(root, id), id, {
+          expectedApprovalProjectionSha256:
+            resumeApprovalProjectionDigest?.[id],
+        });
         (migrated ? result.migrated : result.skipped).push(id);
         pendingForRetry.delete(id);
       } catch (err) {
@@ -1460,6 +1465,8 @@ export class GhostManager {
       // Persist the complete recovery work queue before the first backfill. If the
       // first receipt write or subsequent processing crashes, receiptStore.write()
       // cannot auto-close the migration door and the remaining ids are still durable.
+      // Frozen digests are persisted alongside pending ids so that the generic
+      // retry path in migrateLegacyApprovalsOnce can verify content hasn't changed.
       const queuedIds = [...new Set([...pendingForRetry, ...workIds])].sort();
       const hadQueuedWork = queuedIds.length > 0;
       if (queuedIds.length > 0) {
@@ -1470,6 +1477,11 @@ export class GhostManager {
           ...(prev?.failedIds?.length ? { failedIds: prev.failedIds } : {}),
           state: 'in-progress',
           pendingIds: queuedIds,
+          recoveryApprovalProjectionSha256ById: Object.fromEntries(
+            queuedIds
+              .filter((id) => options.expectedApprovalProjectionSha256ById[id] !== undefined)
+              .map((id) => [id, options.expectedApprovalProjectionSha256ById[id]]),
+          ),
         });
         for (const id of queuedIds) pendingForRetry.add(id);
       }
@@ -1551,9 +1563,19 @@ export class GhostManager {
           migratedIds: [...new Set([...(prev?.migratedIds ?? []), ...out.migrated])].sort(),
           ...(failedIds.length > 0 ? { failedIds } : {}),
           // 旁路 backfill 的瞬时失败也必须进入持久化 work queue；目录已经搬入安装根，
-          // 下一轮不会再次出现在“刚恢复”清单里，不能只靠内存日志重试。
+          // 下一轮不会再次出现在”刚恢复”清单里，不能只靠内存日志重试。
+          // 同时钉死恢复冻结的批准投影摘要，确保重试时内容未变。
           state: pendingForRetry.size > 0 ? 'in-progress' : 'completed',
-          ...(pendingForRetry.size > 0 ? { pendingIds: [...pendingForRetry].sort() } : {}),
+          ...(pendingForRetry.size > 0
+            ? {
+                pendingIds: [...pendingForRetry].sort(),
+                recoveryApprovalProjectionSha256ById: Object.fromEntries(
+                  [...pendingForRetry]
+                    .filter((id) => options.expectedApprovalProjectionSha256ById[id] !== undefined)
+                    .map((id) => [id, options.expectedApprovalProjectionSha256ById[id]]),
+                ),
+              }
+            : {}),
         });
       }
       if (out.migrated.length > 0) this.options.onChanged?.(this.list());

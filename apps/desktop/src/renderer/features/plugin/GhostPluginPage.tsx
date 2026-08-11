@@ -1277,7 +1277,9 @@ export function GhostPluginPage() {
           ...(isUpdate && installedGhost
             ? { expectedInstalledApproval: ghostInstallApprovalToken(installedGhost.approval) }
             : {}),
-          ...(isUpdate && diff!.added.length > 0
+          ...(isUpdate &&
+            (diff!.added.length > 0 ||
+              installedGhost?.approval.state !== 'approved')
             ? {
                 allowPermissionExpansion: true,
                 ...(installedGhost

@@ -120,6 +120,12 @@ export interface GhostLegacyMigrationLedger {
   state?: 'in-progress' | 'completed';
   /** 仅 `in-progress`:本轮待迁 id 全集(动笔前钉死)。 */
   pendingIds?: string[];
+  /**
+   * Owner recovery 在搬目录前冻结的批准投影摘要，按 id 索引。
+   * 仅对恢复路径进入 pending 的 id 有效；主迁移候选不含此字段。
+   * retry 路径用它在重试前验证内容未被篡改。
+   */
+  recoveryApprovalProjectionSha256ById?: Record<string, string>;
 }
 
 /**
@@ -456,6 +462,17 @@ export class GhostInstallReceiptStore {
         return null;
       }
       if (raw.state !== 'in-progress' && raw.pendingIds !== undefined) return null;
+      if (
+        raw.recoveryApprovalProjectionSha256ById !== undefined &&
+        (typeof raw.recoveryApprovalProjectionSha256ById !== 'object' ||
+          raw.recoveryApprovalProjectionSha256ById === null ||
+          Array.isArray(raw.recoveryApprovalProjectionSha256ById) ||
+          Object.keys(raw.recoveryApprovalProjectionSha256ById).some(
+            (k) => !isValidGhostId(k) || !/^[a-f0-9]{64}$/.test(raw.recoveryApprovalProjectionSha256ById![k]),
+          ))
+      ) {
+        return null;
+      }
       return raw;
     } catch {
       return null;

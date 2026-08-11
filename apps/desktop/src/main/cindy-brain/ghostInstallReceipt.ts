@@ -257,8 +257,13 @@ export class GhostInstallReceiptStore {
     // 代之以 per-id 迁移标记:receipt 初次落账时同步写 `.migrated-<id>` 哨兵文件。
     // coordinator 扫描时见到”无 receipt + 有哨兵”就跳过 —— 这是新模型装的插件、
     // 不是 legacy，删掉 receipt 不能骗到一次从可变目录重铸批准。
+    //
+    // 标记写入在 receipt 之前，receipt 写失败必须回滚标记，避免留一个
+    // 无 receipt 的哨兵把合法 legacy 插件永久挡在迁移之外。
+    let markerWritten = false;
     if (!this.hasMigrationLedger()) {
       await this.ensureMigrationMarker(receipt.id);
+      markerWritten = true;
     }
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
@@ -272,6 +277,11 @@ export class GhostInstallReceiptStore {
         mode: 0o600,
       });
       await fs.promises.rename(temp, target);
+    } catch (error) {
+      if (markerWritten) {
+        await this.removeMigrationMarker(receipt.id).catch(() => undefined);
+      }
+      throw error;
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);
     }
@@ -539,6 +549,11 @@ export class GhostInstallReceiptStore {
     } catch {
       return false;
     }
+  }
+
+  /** 回滚 per-id 迁移标记(receipt 写入失败时调用)。 */
+  async removeMigrationMarker(id: string): Promise<void> {
+    await fs.promises.rm(this.migrationMarkerPath(id), { force: true });
   }
 
   async writeMigrationLedger(ledger: GhostLegacyMigrationLedger): Promise<void> {

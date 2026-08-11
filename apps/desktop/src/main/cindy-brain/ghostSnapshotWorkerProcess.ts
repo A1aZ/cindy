@@ -113,7 +113,10 @@ export async function runGhostSnapshotWorkerRequest(
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('snapshot target is not a real directory');
     exists = true;
   } catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
-  if (exists && await matches(request.receipt, targetPath)) { send({ ok: true }); return; }
+  if (exists) {
+    await verifyDirectory(workingDir, parts[0]);
+    if (await matches(request.receipt, targetPath)) { send({ ok: true }); return; }
+  }
   try {
     const parentKind = await classifyGhostDirEntry(workPath(parts[0]));
     if (parentKind !== 'directory') throw new Error('snapshot parent identity changed');
@@ -153,6 +156,12 @@ export async function runGhostSnapshotWorkerRequest(
     if (exists) await fs.promises.rm(targetPath, { recursive: true, force: true });
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);
+    try {
+      const recheck = await fs.promises.lstat(targetPath);
+      throw new Error('snapshot target recreated before publish');
+    } catch (error) {
+      if (!hasCode(error, 'ENOENT')) throw error;
+    }
     await fs.promises.rename(tempPath, targetPath);
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);

@@ -977,7 +977,7 @@ export function createMakerHookSessionRunner(deps: {
               pendingHandoff,
             ) as UserMessage)
           : { type: 'user', content: sendContent };
-        const planReconcileNote = await (async () => {
+        const planReconcileNote = req.source?.im ? await (async () => {
           try {
             const rows = await enqueueDurableWrite(`plan-reconcile-read:${session.id}`, () =>
               listMessagesForAgentHandoff(session.id, 1000),
@@ -987,7 +987,7 @@ export function createMakerHookSessionRunner(deps: {
           } catch {
             return null;
           }
-        })();
+        })() : null;
         const outgoingMessage: UserMessage = planReconcileNote
           ? (prependNoteToWireUserMessage(withHandoff, planReconcileNote) as UserMessage)
           : withHandoff;

@@ -1171,8 +1171,17 @@ export async function recoverLegacyGhostPlugins(
     if (isValidGhostId(id) && pendingRecoveryIds.has(id)) failedRecoveryIds.add(id);
   }
   const movedThisRun = new Set<string>();
+  // Pending ids that are only in the target root (already moved by a prior
+  // run) and not in any legacy source.  These bypass the per-plugin
+  // rejectReservedIds guard that only runs over source legacy entries
+  // (line 1252), so reserved/official ids must be filtered here as well.
+  // Match the same conditional gating as the source-side guard: only
+  // reject when options.rejectReservedIds is true (packaged builds).
   const recoveredTargetIds = (): string[] => [...pendingRecoveryIds]
-    .filter((id) => movedThisRun.has(id) || (targetDiscoveryIds.has(id) && !sourceDiscoveryIds.has(id)))
+    .filter((id) =>
+      (!options.rejectReservedIds || !isOfficialGhostId(id)) &&
+      (movedThisRun.has(id) || (targetDiscoveryIds.has(id) && !sourceDiscoveryIds.has(id)))
+    )
     .sort();
   const targetOnlyPendingIdsWithoutFrozenDigest = (): string[] => [...pendingRecoveryIds]
     .filter((id) =>

@@ -5927,29 +5927,29 @@ export function registerGhostIpc(): void {
     // 开 receipt 是 owner 绑定的状态根写路径:租约以**票据里 inspect 时点的 owner**
     // 为期望值 —— 确认卡停留期间切了号,generation 不等直接拒,A 的确认给不了 B。
     const releaseMutation = beginGhostMutation(ticket.owner);
-    let result: Awaited<ReturnType<typeof manager.reapproveInstalled>>;
     try {
-      result = await manager.reapproveInstalled(id, {
+      const result = await manager.reapproveInstalled(id, {
           enable: options.enable,
           expectedManifestSha256: options.expectedManifestSha256,
           expectedApprovalProjectionSha256: options.expectedApprovalProjectionSha256,
           expectedInstalledApproval: options.expectedInstalledApproval,
       });
+      if ('rejection' in result) throwInstallError(result.rejection);
+      // 与装入/更新同款收尾:面板停靠(已有位置则 no-op)+ 常驻点火。
+      // 必须在 owner 租约内执行 —— 否则账号切换后 dock/spawn 会写到新 owner。
+      const store = getLayoutStore();
+      const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
+      if (docked) {
+        const applied = store.setLayout(docked);
+        if ('rejection' in applied) {
+          log.warn('ghost panel dock rejected', { id: result.ghost.manifest.id, reason: applied.rejection });
+        }
+      }
+      spawnIfResident(result.ghost);
+      return { ghost: result.ghost };
     } finally {
       releaseMutation();
     }
-    if ('rejection' in result) throwInstallError(result.rejection);
-    // 与装入/更新同款收尾:面板停靠(已有位置则 no-op)+ 常驻点火。
-    const store = getLayoutStore();
-    const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
-    if (docked) {
-      const applied = store.setLayout(docked);
-      if ('rejection' in applied) {
-        log.warn('ghost panel dock rejected', { id: result.ghost.manifest.id, reason: applied.rejection });
-      }
-    }
-    spawnIfResident(result.ghost);
-    return { ghost: result.ghost };
   });
 
   // 只验不装:读出 .cindy 的清单给确认弹窗展示,零副作用。

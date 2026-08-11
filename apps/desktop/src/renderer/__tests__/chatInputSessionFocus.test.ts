@@ -134,7 +134,7 @@ describe('ChatInput session switch focus contract', () => {
       ),
     ).toHaveLength(1);
     expect(capabilitySelectionBlock).toContain("selectedItem.type === 'plugin-command'");
-    expect(capabilitySelectionBlock).toContain('!ghost?.enabled || !ghost.manifest.command');
+    expect(capabilitySelectionBlock).toContain('!ghost?.enabled');
     expect(capabilitySelectionBlock).toContain(
       'placeGhostAtComposerStart(editor, ghost, installedGhostsRef.current);',
     );

@@ -141,6 +141,7 @@ import {
 import { useConfirmDialog } from '@/components/ui/confirm-dialog-provider';
 import { PermissionSelector } from './PermissionSelector';
 import { ExtraDirsButton, type CollaborationMenuConfig } from './ExtraDirsButton';
+import { expandHostCapabilityInvocation } from '../../cindy-brain/hostCapabilityInvocation';
 import { focusComposerEndNextFrame, hostCapabilityForGhost, placeGhostAtComposerStart, placeHostCapabilityAtComposerStart } from './ghostComposerPlacement';
 import { NewGoalDialog } from './NewGoalDialog';
 import { PlanModeIndicator } from './PlanModeIndicator';
@@ -4606,6 +4607,7 @@ export function ChatInput({
           agentReferences: serializedAgentReferences,
           pastedTextRanges,
           slashCommandRanges,
+          hostCapability,
         } = serializedContent;
         let agentReferences = serializedAgentReferences;
         const attachmentsForSend = optimisticallyClearRemoteComposer
@@ -4660,8 +4662,9 @@ export function ChatInput({
         // (截图在下方并入 filesToSend,与文本块里的 "attached as a labeled image"
         // caption 对应)。
         const text = formatBrowserCommentsForSend(commentsForSend, editorText);
-        // Allow send if there is text OR attachments(纯引用 / 纯评论无输入也可发送)
-        if (!text && attachmentsForSend.length === 0) return;
+        // Allow send if there is text, attachments, or a host-capability chip
+        // (host-capability chips carry routing metadata but no visible text).
+        if (!text && attachmentsForSend.length === 0 && !hostCapability) return;
 
         // device-link 模型清单未结算或真实读取失败时禁止发送。模型选择器会同步显示
         // loading / error；这里兜住快捷键、语音等间接派发入口，避免旧快照继续路由。
@@ -4752,6 +4755,9 @@ export function ChatInput({
           ? findGhostByCommand(eligibleGhosts, ghostCommandWord)
           : null;
         const textToSend = expandGhostCommand(text, eligibleGhosts);
+        const routedText = hostCapability
+          ? expandHostCapabilityInvocation(textToSend, hostCapability, hostCapability.name)
+          : textToSend;
         const sendSnapshot = captureComposerSendSnapshot(
           editor.getJSON(),
           latestAttachmentsRef.current,
@@ -5095,7 +5101,7 @@ export function ChatInput({
             effortForSend = coordinator.getCommittedEffort(sessionId) ?? activeEffort;
           }
           result = await onSend(
-            textToSend,
+            routedText,
             activeModel,
             effortForSend,
             activePermissionMode,

@@ -5540,7 +5540,7 @@
         "budget": "GPT 割引",
         "grok": "xAI",
         "google": "Google",
-        "china": "国内",
+        "china": "中国",
         "image": "画像",
         "video": "動画",
         "tts": "音声合成",
@@ -5548,6 +5548,7 @@
         "realtime": "リアルタイム音声",
         "embedding": "埋め込み",
         "compression": "圧縮",
+        "ungrouped": "未分類",
         "other": "その他"
       },
       "search": {

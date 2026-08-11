@@ -18,6 +18,7 @@
 import { DEFAULT_DRAFT_SESSION_TITLE } from '@cindy/maker-shared/session-title';
 import fs from 'node:fs';
 import path from 'node:path';
+import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from 'node:timers';
 
 import type { AgentKind } from './types/common.js';
 import type { Capabilities } from './types/capabilities.js';
@@ -161,6 +162,29 @@ function canonicalPiRuntimePath(value: string): string {
   }
 }
 
+const PI_PROJECT_SKILL_PALETTE_FINGERPRINT_TIMEOUT_MS = 250;
+const PI_PROJECT_SKILL_PALETTE_FINGERPRINT_ENTRY_BUDGET = 2_048;
+
+async function fingerprintPiProjectSkillForPalette(
+  sourcePath: string,
+  canonicalRepoRoot: string,
+  budget: { remainingEntries: number; deadlineAtMs: number },
+): ReturnType<typeof fingerprintPiProjectSkillEntrypoint> {
+  const remainingMs = budget.deadlineAtMs - Date.now();
+  if (remainingMs <= 0) return null;
+  let timeout: number | NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      fingerprintPiProjectSkillEntrypoint(sourcePath, canonicalRepoRoot, { budget }),
+      new Promise<null>((resolve) => {
+        timeout = setNodeTimeout(() => resolve(null), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearNodeTimeout(timeout);
+  }
+}
+
 async function mergePiRuntimeSkillStatuses(
   result: ListAgentSkillsResult,
   manifest: PiRuntimeCapabilityManifest | undefined,
@@ -169,15 +193,20 @@ async function mergePiRuntimeSkillStatuses(
   const loadedExplicitSkills = new Map<string, string>();
   const loadedLegacyProjectSkills = new Map<string, string>();
   const changedProjectSkills = new Map<string, string>();
+  const fingerprintBudget = {
+    remainingEntries: PI_PROJECT_SKILL_PALETTE_FINGERPRINT_ENTRY_BUDGET,
+    deadlineAtMs: Date.now() + PI_PROJECT_SKILL_PALETTE_FINGERPRINT_TIMEOUT_MS,
+  };
   for (const skill of manifest.projectResources?.loadedSkills ?? []) {
     const canonicalSourcePath = canonicalPiRuntimePath(skill.sourcePath);
     if (!skill.snapshotDigest || !skill.sourceFingerprint || !skill.canonicalRepoRoot) {
       changedProjectSkills.set(canonicalSourcePath, skill.sourcePath);
       continue;
     }
-    const currentFingerprint = await fingerprintPiProjectSkillEntrypoint(
+    const currentFingerprint = await fingerprintPiProjectSkillForPalette(
       skill.sourcePath,
       skill.canonicalRepoRoot,
+      fingerprintBudget,
     );
     if (
       currentFingerprint?.contentDigest !== skill.snapshotDigest

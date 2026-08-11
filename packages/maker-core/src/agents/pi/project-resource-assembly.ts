@@ -3,6 +3,7 @@ import { constants, createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createHash } from 'node:crypto';
+import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from 'node:timers';
 import type { FileHandle } from 'node:fs/promises';
 
 import type {
@@ -36,7 +37,7 @@ export interface PiProjectResourceAssemblySnapshot {
   readonly launchSkillPaths: readonly string[];
   /** Content fingerprints for the immutable launch copies, index-aligned with skillPaths. */
   readonly launchSkillDigests: readonly string[];
-  /** Launch-time source identities used to detect stale palette entries without hashing assets. */
+  /** Launch-time source-tree identities used to detect stale palette entries without hashing assets. */
   readonly launchSkillSourceFingerprints: readonly string[];
   readonly diagnostic: PiProjectResourceAssemblyDiagnostic;
 }
@@ -247,10 +248,31 @@ function sameEntrySnapshot(
     && first.ctimeMs === second.ctimeMs;
 }
 
-async function hashOpenFile(handle: FileHandle): Promise<string> {
+async function hashOpenFile(handle: FileHandle, deadlineAtMs = Number.POSITIVE_INFINITY): Promise<string> {
+  if (Date.now() >= deadlineAtMs) throw new Error('approved skill fingerprint deadline expired');
   const hash = createHash('sha256');
-  for await (const chunk of handle.createReadStream({ start: 0, autoClose: false })) {
-    hash.update(chunk);
+  const controller = new AbortController();
+  let timeout: number | NodeJS.Timeout | undefined;
+  if (Number.isFinite(deadlineAtMs)) {
+    timeout = setNodeTimeout(
+      () => controller.abort(),
+      Math.max(0, deadlineAtMs - Date.now()),
+    );
+  }
+  try {
+    for await (const chunk of handle.createReadStream({
+      start: 0,
+      autoClose: false,
+      signal: controller.signal,
+    })) {
+      if (Date.now() >= deadlineAtMs) {
+        controller.abort();
+        throw new Error('approved skill fingerprint deadline expired');
+      }
+      hash.update(chunk);
+    }
+  } finally {
+    if (timeout) clearNodeTimeout(timeout);
   }
   return hash.digest('hex');
 }
@@ -260,10 +282,16 @@ export interface PiProjectSkillEntrypointFingerprint {
   readonly sourceStateDigest: string;
 }
 
+export interface PiProjectSkillFingerprintBudget {
+  remainingEntries: number;
+  readonly deadlineAtMs: number;
+}
+
 async function fingerprintSkillEntrypointOnce(
   rootPath: string,
   canonicalRepoRoot: string,
-): Promise<PiProjectSkillEntrypointFingerprint> {
+  sharedBudget?: PiProjectSkillFingerprintBudget,
+): Promise<string> {
   const skillPath = path.join(rootPath, 'SKILL.md');
   const [rootEntry, canonicalRoot, skillLinkEntry, canonicalSkill, skillTargetEntry] =
     await Promise.all([
@@ -287,11 +315,14 @@ async function fingerprintSkillEntrypointOnce(
     constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
   );
   try {
+    if (sharedBudget && Date.now() >= sharedBudget.deadlineAtMs) {
+      throw new Error('approved skill fingerprint deadline expired');
+    }
     const openedEntry = await handle.stat();
     if (!openedEntry.isFile() || !sameFileIdentity(skillTargetEntry, openedEntry)) {
       throw new Error('approved skill entrypoint changed before fingerprinting');
     }
-    const contentDigest = await hashOpenFile(handle);
+    const contentDigest = await hashOpenFile(handle, sharedBudget?.deadlineAtMs);
     const [
       rootEntryAfterRead,
       canonicalRootAfterRead,
@@ -318,55 +349,168 @@ async function fingerprintSkillEntrypointOnce(
     ) {
       throw new Error('approved skill entrypoint changed while fingerprinting');
     }
-    const sourceState = createHash('sha256');
-    for (const value of [
-      canonicalRoot,
-      rootEntry.dev,
-      rootEntry.ino,
-      rootEntry.size,
-      rootEntry.mtimeMs,
-      rootEntry.ctimeMs,
-      canonicalSkill,
-      skillLinkEntry.dev,
-      skillLinkEntry.ino,
-      skillLinkEntry.size,
-      skillLinkEntry.mtimeMs,
-      skillLinkEntry.ctimeMs,
-      openedEntry.dev,
-      openedEntry.ino,
-      openedEntry.size,
-      openedEntry.mtimeMs,
-      openedEntry.ctimeMs,
-      contentDigest,
-    ]) {
-      sourceState.update(String(value));
-      sourceState.update('\0');
-    }
-    return Object.freeze({
-      contentDigest,
-      sourceStateDigest: sourceState.digest('hex'),
-    });
+    return contentDigest;
   } finally {
     await handle.close();
   }
+}
+
+const MAX_PI_PROJECT_SKILL_FINGERPRINT_ENTRIES = 10_000;
+
+function updateFingerprintValue(hash: ReturnType<typeof createHash>, value: unknown): void {
+  hash.update(String(value));
+  hash.update('\0');
+}
+
+async function fingerprintSkillTreeStateOnce(
+  rootPath: string,
+  canonicalRepoRoot: string,
+  sharedBudget?: PiProjectSkillFingerprintBudget,
+): Promise<string> {
+  const hash = createHash('sha256');
+  const activeDirectories = new Set<string>();
+  let entryCount = 0;
+
+  const visit = async (entryPath: string, relativePath: string): Promise<void> => {
+    if (sharedBudget) {
+      if (Date.now() >= sharedBudget.deadlineAtMs || sharedBudget.remainingEntries <= 0) {
+        throw new Error('approved skill tree exceeded the shared fingerprint budget');
+      }
+      sharedBudget.remainingEntries -= 1;
+    }
+    entryCount += 1;
+    if (entryCount > MAX_PI_PROJECT_SKILL_FINGERPRINT_ENTRIES) {
+      throw new Error('approved skill tree exceeds the fingerprint entry budget');
+    }
+    const [linkEntry, canonicalEntry, targetEntry] = await Promise.all([
+      fs.lstat(entryPath),
+      fs.realpath(entryPath),
+      fs.stat(entryPath),
+    ]);
+    if (
+      !localPathIsWithin(canonicalRepoRoot, canonicalEntry)
+      || (!targetEntry.isDirectory() && !targetEntry.isFile())
+    ) {
+      throw new Error('approved skill tree contains an escaped or special entry');
+    }
+    const kind = targetEntry.isDirectory() ? 'directory' : 'file';
+    for (const value of [
+      relativePath,
+      linkEntry.isSymbolicLink() ? `symlink-${kind}` : kind,
+      canonicalEntry,
+      linkEntry.dev,
+      linkEntry.ino,
+      linkEntry.mode,
+      linkEntry.size,
+      linkEntry.mtimeMs,
+      linkEntry.ctimeMs,
+      targetEntry.dev,
+      targetEntry.ino,
+      targetEntry.mode,
+      targetEntry.size,
+      targetEntry.mtimeMs,
+      targetEntry.ctimeMs,
+    ]) updateFingerprintValue(hash, value);
+
+    if (targetEntry.isDirectory()) {
+      if (activeDirectories.has(canonicalEntry)) {
+        throw new Error('approved skill tree contains a directory cycle');
+      }
+      activeDirectories.add(canonicalEntry);
+      try {
+        const remainingEntryBudget = Math.min(
+          MAX_PI_PROJECT_SKILL_FINGERPRINT_ENTRIES - entryCount,
+          sharedBudget?.remainingEntries ?? Number.POSITIVE_INFINITY,
+        );
+        const childNames: string[] = [];
+        const directory = await fs.opendir(entryPath);
+        try {
+          while (true) {
+            if (sharedBudget && Date.now() >= sharedBudget.deadlineAtMs) {
+              throw new Error('approved skill tree exceeded the shared fingerprint deadline');
+            }
+            const child = await directory.read();
+            if (!child) break;
+            if (childNames.length >= remainingEntryBudget) {
+              throw new Error('approved skill tree exceeds the fingerprint entry budget');
+            }
+            childNames.push(child.name);
+          }
+        } finally {
+          await directory.close().catch(() => undefined);
+        }
+        if (sharedBudget && Date.now() >= sharedBudget.deadlineAtMs) {
+          throw new Error('approved skill tree exceeded the shared fingerprint deadline');
+        }
+        childNames.sort((left, right) => Buffer.from(left).compare(Buffer.from(right)));
+        for (const childName of childNames) {
+          await visit(
+            path.join(entryPath, childName),
+            relativePath === '.' ? childName : path.join(relativePath, childName),
+          );
+        }
+      } finally {
+        activeDirectories.delete(canonicalEntry);
+      }
+    }
+
+    const [linkEntryAfter, canonicalEntryAfter, targetEntryAfter] = await Promise.all([
+      fs.lstat(entryPath),
+      fs.realpath(entryPath),
+      fs.stat(entryPath),
+    ]);
+    if (
+      !sameEntrySnapshot(linkEntry, linkEntryAfter)
+      || !sameEntrySnapshot(targetEntry, targetEntryAfter)
+      || path.resolve(canonicalEntryAfter) !== path.resolve(canonicalEntry)
+    ) {
+      throw new Error('approved skill tree changed while fingerprinting');
+    }
+  };
+
+  await visit(rootPath, '.');
+  return hash.digest('hex');
 }
 
 /** Fail-closed SKILL.md identity used when projecting a live session into the palette. */
 export async function fingerprintPiProjectSkillEntrypoint(
   rootPath: string,
   canonicalRepoRoot: string,
+  options: { budget?: PiProjectSkillFingerprintBudget } = {},
 ): Promise<PiProjectSkillEntrypointFingerprint | null> {
   try {
+    if (options.budget && Date.now() >= options.budget.deadlineAtMs) return null;
     const [canonicalRoot, canonicalBoundary] = await Promise.all([
       fs.realpath(rootPath),
       fs.realpath(canonicalRepoRoot),
     ]);
     if (!localPathIsWithin(canonicalBoundary, canonicalRoot)) return null;
-    const first = await fingerprintSkillEntrypointOnce(rootPath, canonicalBoundary);
-    const second = await fingerprintSkillEntrypointOnce(rootPath, canonicalBoundary);
-    return first.contentDigest === second.contentDigest
-      && first.sourceStateDigest === second.sourceStateDigest
-      ? first
+    const firstContentDigest = await fingerprintSkillEntrypointOnce(
+      rootPath,
+      canonicalBoundary,
+      options.budget,
+    );
+    const firstSourceStateDigest = await fingerprintSkillTreeStateOnce(
+      rootPath,
+      canonicalBoundary,
+      options.budget,
+    );
+    const secondContentDigest = await fingerprintSkillEntrypointOnce(
+      rootPath,
+      canonicalBoundary,
+      options.budget,
+    );
+    const secondSourceStateDigest = await fingerprintSkillTreeStateOnce(
+      rootPath,
+      canonicalBoundary,
+      options.budget,
+    );
+    return firstContentDigest === secondContentDigest
+      && firstSourceStateDigest === secondSourceStateDigest
+      ? Object.freeze({
+          contentDigest: firstContentDigest,
+          sourceStateDigest: firstSourceStateDigest,
+        })
       : null;
   } catch {
     return null;
@@ -547,6 +691,13 @@ export async function stageApprovedPiProjectResources(
       ) {
         throw new Error('approved skill root changed before snapshotting');
       }
+      const sourceFingerprintBeforeCopy = await fingerprintPiProjectSkillEntrypoint(
+        sourcePath,
+        canonicalRepoRoot,
+      );
+      if (!sourceFingerprintBeforeCopy) {
+        throw new Error('approved skill source fingerprint failed before snapshotting');
+      }
       await materializeSkillEntry(
         sourcePath,
         targetPath,
@@ -572,6 +723,8 @@ export async function stageApprovedPiProjectResources(
         !launchFingerprint
         || !sourceFingerprint
         || launchFingerprint.contentDigest !== sourceFingerprint.contentDigest
+        || sourceFingerprintBeforeCopy.contentDigest !== sourceFingerprint.contentDigest
+        || sourceFingerprintBeforeCopy.sourceStateDigest !== sourceFingerprint.sourceStateDigest
         || !sameEntrySnapshot(sourceRootBeforeCopy, sourceRootAfterFingerprint)
         || path.resolve(canonicalSourceAfterFingerprint) !== path.resolve(canonicalSourceBeforeCopy)
       ) {

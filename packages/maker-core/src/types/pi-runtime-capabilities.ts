@@ -60,7 +60,7 @@ export interface PiProjectResourceRuntimeDiagnostic {
     commandName: string;
     /** Present for PR4 immutable project snapshots; absent only on older manifests. */
     snapshotDigest?: string;
-    /** Launch-time source identity; current sessions require it before reporting loaded. */
+    /** Launch-time source-tree identity; current sessions require it before reporting loaded. */
     sourceFingerprint?: string;
     /** Approval-time boundary used to fingerprint the current source fail closed. */
     canonicalRepoRoot?: string;

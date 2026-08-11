@@ -1144,6 +1144,14 @@ describe('Maker Pi runtime skill status', () => {
       });
       expect(initial.skills[0]).toMatchObject({ runtimeStatus: 'loaded' });
 
+      writeFileSync(path.join(sourcePath, 'assets', 'fixture.txt'), 'changed! asset\n');
+      const changedAsset = await maker.listAgentSkills('pi', {
+        workingDir: repoRoot,
+        sessionId: 'source-snapshot',
+      });
+      expect(changedAsset.skills[0]).toMatchObject({ runtimeStatus: 'discovered' });
+      expect(changedAsset.errors).toContainEqual(expect.objectContaining({ path: sourcePath }));
+
       writeFileSync(path.join(sourcePath, 'SKILL.md'), '# changed in place\n');
       const changedFile = await maker.listAgentSkills('pi', {
         workingDir: repoRoot,

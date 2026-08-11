@@ -476,7 +476,9 @@ describe('Pi approved project resource assembly', () => {
       vi.spyOn(fsPromises, 'open').mockImplementation(async (candidate, flags, mode) => {
         if (String(candidate) === skillFile) {
           sourceSkillOpenCount += 1;
-          if (sourceSkillOpenCount === 2) {
+          // Two opens establish the pre-copy fingerprint; the copy itself is
+          // the third. Swap on the first post-copy source fingerprint open.
+          if (sourceSkillOpenCount === 4) {
             renameSync(skillPath, oldSkillPath);
             mkdirSync(skillPath);
             writeFileSync(skillFile, '# unchanged entrypoint\n');
@@ -524,6 +526,49 @@ describe('Pi approved project resource assembly', () => {
       expect(skillOpenCount).toBe(2);
     } finally {
       vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('changes the source-state fingerprint when only a nested asset is rewritten in place', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-asset-')));
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const assetPath = path.join(skillPath, 'assets', 'fixture.txt');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(path.dirname(assetPath), { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# unchanged entrypoint\n');
+      writeFileSync(assetPath, 'asset-one\n');
+      const before = await fingerprintPiProjectSkillEntrypoint(skillPath, workingDir);
+
+      writeFileSync(assetPath, 'asset-two\n');
+      const after = await fingerprintPiProjectSkillEntrypoint(skillPath, workingDir);
+
+      expect(before?.contentDigest).toBe(after?.contentDigest);
+      expect(before?.sourceStateDigest).not.toBe(after?.sourceStateDigest);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when a palette fingerprint exhausts its shared entry budget', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-budget-')));
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(path.join(skillPath, 'assets'), { recursive: true });
+      writeFileSync(path.join(skillPath, 'SKILL.md'), '# approved\n');
+      writeFileSync(path.join(skillPath, 'assets', 'fixture.txt'), 'asset\n');
+
+      await expect(fingerprintPiProjectSkillEntrypoint(skillPath, workingDir, {
+        budget: { remainingEntries: 1, deadlineAtMs: Number.POSITIVE_INFINITY },
+      })).resolves.toBeNull();
+      await expect(fingerprintPiProjectSkillEntrypoint(skillPath, workingDir, {
+        budget: { remainingEntries: 10, deadlineAtMs: Date.now() - 1 },
+      })).resolves.toBeNull();
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

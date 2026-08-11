@@ -41,10 +41,15 @@ import { useSidebarMainViewMode } from '@/hooks/useSidebarCardMode';
 import { ProjectNode } from './ProjectNode';
 import { UnclassifiedSection } from './UnclassifiedSection';
 import { getSessionListCollapseView } from '../../lib/sessionListCollapse';
-import { getDialogueCollapseLimit, getProjectCollapseLimit } from '../../lib/sidebarCollapseConfig';
+import {
+  getProjectCollapseLimit,
+  getProjectSessionCollapseLimit,
+} from '../../lib/sidebarCollapseConfig';
 import {
   normalizeManualProjectOrder,
   mergeVisibleReorder,
+  loadDialogueGroupCollapsed,
+  persistDialogueGroupCollapsed,
 } from '../../hooks/helpers/sidebarFilterCore';
 import {
   buildMainListEntries,
@@ -307,6 +312,15 @@ export function ProjectsSection({
   }, [deviceGroupingActive, visibleMixedEntries, remoteDeviceIndex]);
   // 设备段折叠(E 期):本机段 key 'local'。
   const [collapsedDevices, setCollapsedDevices] = useState<ReadonlySet<string>>(new Set());
+  // 「对话」组折叠:与项目行折叠同级的分组状态(用户裁决:对话组的折叠交互与
+  // 项目分组一致,含「收起所有分组」批量操作)。持久化为显示类本地偏好。
+  const [dialogueGroupCollapsed, setDialogueGroupCollapsed] = useState<boolean>(() =>
+    loadDialogueGroupCollapsed(),
+  );
+  const setDialogueCollapsed = useCallback((next: boolean) => {
+    setDialogueGroupCollapsed(next);
+    persistDialogueGroupCollapsed(next);
+  }, []);
   const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
   const toggleDeviceSection = useCallback((key: string) => {
     setCollapsedDevices((prev) => {
@@ -318,23 +332,27 @@ export function ProjectsSection({
   }, []);
 
   // 「展开/收起所有分组」按钮(E 期):
-  //   单层(仅项目组层或仅设备层)→ 收起所有 ↔ 展开所有;
-  //   双层(设备 + 项目组同时存在)→ 循环:收项目层 → 收设备层 → 全部展开。
-  // 组层折叠复用现有 ProjectNode 折叠状态(collapsed / onCollapseAll / onExpandAll)。
+  //   单层(仅组层或仅设备层)→ 收起所有 ↔ 展开所有;
+  //   双层(设备 + 组层同时存在)→ 循环:收组层 → 收设备层 → 全部展开。
+  // 组层 = 项目行 + 「对话」组行(用户裁决:对话组与项目分组同一套批量折叠),
+  // 项目侧复用 ProjectNode 折叠状态(collapsed / onCollapseAll / onExpandAll)。
   const hasGroupLayer = visibleMixedEntries.some((entry) => entry.kind !== 'session');
+  const hasDialogueGroup = visibleMixedEntries.some((entry) => entry.kind === 'dialogue-group');
+  const allGroupsCollapsed = isAllCollapsed && (!hasDialogueGroup || dialogueGroupCollapsed);
   const hasDeviceLayer = deviceGroupingActive && deviceSections.length > 0;
   const allDevicesCollapsed =
     hasDeviceLayer &&
     deviceSections.every((section) => collapsedDevices.has(deviceSectionKey(section.deviceId)));
   const foldState: 'collapse-groups' | 'collapse-devices' | 'expand-all' | null = (() => {
     if (!hasGroupLayer && !hasDeviceLayer) return null;
-    if (hasGroupLayer && !isAllCollapsed) return 'collapse-groups';
+    if (hasGroupLayer && !allGroupsCollapsed) return 'collapse-groups';
     if (hasDeviceLayer && !allDevicesCollapsed) return 'collapse-devices';
     return 'expand-all';
   })();
   const handleFoldAll = useCallback(() => {
     if (foldState === 'collapse-groups') {
       onCollapseAll();
+      setDialogueCollapsed(true);
       return;
     }
     if (foldState === 'collapse-devices') {
@@ -343,10 +361,11 @@ export function ProjectsSection({
       );
       return;
     }
-    // expand-all:两层全展开。
+    // expand-all:全部层级展开(设备段 + 项目行 + 对话组)。
     setCollapsedDevices(new Set());
     onExpandAll();
-  }, [foldState, deviceSections, onCollapseAll, onExpandAll]);
+    setDialogueCollapsed(false);
+  }, [foldState, deviceSections, onCollapseAll, onExpandAll, setDialogueCollapsed]);
   const foldLabel =
     foldState === 'collapse-groups'
       ? hasDeviceLayer
@@ -446,7 +465,10 @@ export function ProjectsSection({
         <DialogueGroupNode
           key="dialogue-group"
           sessions={entry.sessions}
+          collapsed={dialogueGroupCollapsed}
+          onToggle={() => setDialogueCollapsed(!dialogueGroupCollapsed)}
           parentSectionCollapsed={isSectionCollapsed}
+          disableSessionCollapse={disableSessionCollapse}
           activeSessionId={activeSessionId}
           runningSessionIds={runningSessionIds}
           attachedSessionIds={attachedSessionIds}
@@ -698,13 +720,19 @@ export function ProjectsSection({
 
 /**
  * DialogueGroupNode — 「对话」组行(D 期,「对话归为一组」开启时)。
- * 视觉与 ProjectNode 表头同族:可折叠分组头(图标 + 「对话」+ 计数)+ 组内会话。
- * 组内折叠上限沿用旧对话段口径(getDialogueCollapseLimit)。
+ * 视觉与交互与 ProjectNode 表头**同款**(2026-08-12 用户裁决:对话组的分组 UI、
+ * 交互与自动收起逻辑都与项目分组一致):h-8 药丸 hover 行、15px 图标、meta 灰文字、
+ * 标题右侧 hover 渐显展开箭头;组内会话折叠上限同项目内会话
+ * (getProjectSessionCollapseLimit)。折叠状态受控(父层持久化),并纳入
+ * 「收起所有分组」的批量收起/展开。
  * 标题「对话」是归属分类名(task-and-conversation-naming §2.3)。
  */
 function DialogueGroupNode({
   sessions,
+  collapsed,
+  onToggle,
   parentSectionCollapsed,
+  disableSessionCollapse,
   activeSessionId,
   runningSessionIds,
   attachedSessionIds,
@@ -721,7 +749,10 @@ function DialogueGroupNode({
   sessionVariant,
 }: {
   sessions: Session[];
+  collapsed: boolean;
+  onToggle: () => void;
   parentSectionCollapsed: boolean;
+  disableSessionCollapse: boolean;
   activeSessionId?: string;
   runningSessionIds: ReadonlySet<string>;
   attachedSessionIds: ReadonlySet<string>;
@@ -738,30 +769,54 @@ function DialogueGroupNode({
   sessionVariant: 'text' | 'list';
 }) {
   const { t } = useTranslation();
-  const [collapsed, setCollapsed] = useState(false);
-  const ToggleIcon = collapsed ? ChevronRight : ChevronDown;
+  // 与 ProjectNode 同款:标题右侧 hover 渐显的展开/收起指示箭头。
+  const Chevron = collapsed ? ChevronRight : ChevronDown;
   return (
-    <div className="flex w-full flex-col gap-0.5" data-no-drag>
-      <button
-        type="button"
-        onClick={() => setCollapsed((value) => !value)}
+    <div className="relative flex w-full select-none flex-col" data-no-drag>
+      {/* 段头:与 ProjectNode Header 同款规格(h-8 药丸 hover / pl-3 pr-1 /
+          gap-2.5 / 15px 图标 / meta 灰 font-normal),仅图标换 MessagesSquare、
+          无重命名与右键菜单(「对话」是固定分类名,没有项目那套操作)。 */}
+      <div
+        role="button"
+        tabIndex={0}
         aria-expanded={!collapsed}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
         className={cn(
-          'group/dialogue-header flex h-7 w-full items-center gap-1.5 rounded-md px-1.5',
-          'text-[var(--sidebar-list-muted)] transition-colors hover:bg-sidebar-item-hover hover:text-[var(--sidebar-nav-text)]',
+          'group flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-full pl-3 pr-1',
+          'text-sm font-normal text-[var(--sidebar-list-muted)]',
+          'transition-colors hover:bg-sidebar-item-hover',
         )}
       >
-        <ToggleIcon size={13} strokeWidth={2} className="shrink-0" />
-        <MessagesSquare size={14} strokeWidth={2} className="shrink-0" />
-        <span className="min-w-0 truncate text-sm font-medium">
-          {t('ccAgent.sidebar.dialogues')}
-        </span>
-        <span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
-          {sessions.length}
-        </span>
-      </button>
-      <SectionCollapse collapsed={collapsed}>
-        <div className={cn('flex flex-col gap-0.5', sessionVariant === 'list' ? 'pl-3' : 'pl-0')}>
+        <MessagesSquare
+          size={15}
+          strokeWidth={1.8}
+          className="shrink-0 text-[var(--sidebar-list-muted)]"
+        />
+        <div className="flex min-w-0 flex-1 items-center gap-1.5">
+          <span className="min-w-0 flex-1 truncate">{t('ccAgent.sidebar.dialogues')}</span>
+          <Chevron
+            size={13}
+            strokeWidth={2}
+            aria-hidden
+            className="shrink-0 text-[var(--cmd-palette-item-meta)] opacity-0 transition-opacity duration-[120ms] group-hover:opacity-100"
+          />
+        </div>
+      </div>
+      {/* 组内会话:与 ProjectNode 的会话区同款容器(gap / pt / pb 呼吸、list 缩进)
+          与同一份折叠上限(getProjectSessionCollapseLimit)。 */}
+      <SectionCollapse collapsed={collapsed} data-no-drag>
+        <div
+          className={cn(
+            'flex flex-col gap-0.5 pt-0.5 pb-1.5 pr-0',
+            sessionVariant === 'list' ? 'pl-3' : 'pl-0',
+          )}
+        >
           <SessionEntryList
             sessions={sessions}
             activeSessionId={activeSessionId}
@@ -779,7 +834,8 @@ function DialogueGroupNode({
             onScheduleAction={onScheduleAction}
             indented
             collapsible
-            collapseLimit={getDialogueCollapseLimit()}
+            collapseLimit={getProjectSessionCollapseLimit()}
+            disableCollapse={disableSessionCollapse}
             sectionCollapsed={parentSectionCollapsed || collapsed}
             sessionVariant={sessionVariant}
           />

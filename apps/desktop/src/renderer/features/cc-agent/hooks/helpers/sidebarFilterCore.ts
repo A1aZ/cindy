@@ -33,6 +33,7 @@ export const VENDOR_KEY = 'cc-agent.sidebar.filter.vendor';
 export const GROUP_BY_KEY = 'cc-agent.sidebar.filter.groupBy';
 export const GROUP_DIALOGUE_KEY = 'cc-agent.sidebar.filter.groupDialogue';
 export const GROUP_DEVICE_KEY = 'cc-agent.sidebar.filter.groupDevice';
+export const DIALOGUE_GROUP_COLLAPSED_KEY = 'cc-agent.sidebar.dialogueGroupCollapsed';
 export const LAST_ACTIVITY_KEY = 'cc-agent.sidebar.filter.lastActivity';
 export const SORT_BY_KEY = 'cc-agent.sidebar.filter.sortBy';
 export const TASK_INFO_KEY = 'cc-agent.sidebar.filter.taskInfo';
@@ -333,6 +334,34 @@ export function persistGroupDevice(groupDevice: boolean): void {
     storage.setItem(GROUP_DEVICE_KEY, String(groupDevice));
   } catch (err) {
     log.warn('[useSidebarFilter] failed to persist groupDevice:', err);
+  }
+}
+
+/* ==================== dialogue group collapsed load/persist ==================== */
+
+/**
+ * 「对话」组行的折叠状态(与项目行折叠同级的分组折叠,默认展开)。
+ * 项目折叠是 owner-scoped(useCollapsedProjects);对话组只有一个、无 GC 需求,
+ * 按显示类偏好走本地 localStorage 即可。
+ */
+export function loadDialogueGroupCollapsed(): boolean {
+  const storage = safeStorage();
+  if (!storage) return false;
+  try {
+    return storage.getItem(DIALOGUE_GROUP_COLLAPSED_KEY) === 'true';
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to read dialogueGroupCollapsed:', err);
+    return false;
+  }
+}
+
+export function persistDialogueGroupCollapsed(collapsed: boolean): void {
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, String(collapsed));
+  } catch (err) {
+    log.warn('[useSidebarFilter] failed to persist dialogueGroupCollapsed:', err);
   }
 }
 

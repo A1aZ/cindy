@@ -289,7 +289,10 @@ import {
   resolveBetterSqliteModuleEntry,
   resolveBetterSqliteNativeBinding,
 } from './localDb/betterSqliteFactory';
-import { freezeSessionActiveTurnMarkers } from './localDb/sessionActiveTurn';
+import {
+  beginSessionTurnEndedSuppression,
+  freezeSessionActiveTurnMarkers,
+} from './localDb/sessionActiveTurn';
 import { getDrizzleDir } from './localDb/migrate';
 import { resolveSqliteVecExtPath } from './localDb/sqliteVecLoader';
 import {
@@ -1196,26 +1199,38 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // 的 Maker 上兑现旧 owner 的记忆设置重启(shutdown 触发的会话关闭事件也会
   // 撞上它,先清再关)。
   clearDeferredCodexRestartForOwnerBoundary();
+  // interrupted-turn-resume:shutdown 批量 close 会话会触发 close teardown 的
+  // markSessionTurnEnded,把"边界时还在飞的 turn"伪装成正常收尾 —— 被切换打断的
+  // 任务从此既无中断横幅也无红点,呈现为"卡住且无报错"(与 ⌘Q 的 quit freeze 同款
+  // 问题,quit freeze 只保护退出编排,不覆盖这里)。shutdown 到 DB dispose 期间抑制
+  // ended 写,保住 startedAt > endedAt 的中断痕迹;不覆盖 teardown 前段,边界早段
+  // 自然完成的 turn 照常收尾。释放放 finally:抑制器是进程级计数,泄漏一次就把
+  // 后续 owner 的正常收尾写全部吞掉,中断横幅会在每个正常完成的任务上误弹。
+  const releaseEndedSuppression = beginSessionTurnEndedSuppression();
   try {
-    const maker = getMakerIfReady();
-    if (maker) await maker.shutdown();
-    resetMaker();
-  } catch (err) {
-    authBoundaryLog.error(`maker shutdown on ${reason} failed (non-fatal):`, err);
-    resetMaker();
+    try {
+      const maker = getMakerIfReady();
+      if (maker) await maker.shutdown();
+      resetMaker();
+    } catch (err) {
+      authBoundaryLog.error(`maker shutdown on ${reason} failed (non-fatal):`, err);
+      resetMaker();
+    }
+    // device-link 单持有者仲裁:必须在 dispose DbClient **之前**释放持有权行
+    // (dispose 同步 clearCurrentDbClient,之后 store 不可用,只能等 15s+ 心跳
+    // 过期,同机幸存实例接管变慢)。内部带 1.5s 超时,不会卡住登出。
+    try {
+      await releaseDeviceLinkOwnershipBeforeLogout();
+    } catch (err) {
+      authBoundaryLog.error(
+        `[bootstrap-electron] release device-link ownership on ${reason} failed (non-fatal):`,
+        err,
+      );
+    }
+    await lifecycleDbClientManager.dispose(reason);
+  } finally {
+    releaseEndedSuppression();
   }
-  // device-link 单持有者仲裁:必须在 dispose DbClient **之前**释放持有权行
-  // (dispose 同步 clearCurrentDbClient,之后 store 不可用,只能等 15s+ 心跳
-  // 过期,同机幸存实例接管变慢)。内部带 1.5s 超时,不会卡住登出。
-  try {
-    await releaseDeviceLinkOwnershipBeforeLogout();
-  } catch (err) {
-    authBoundaryLog.error(
-      `[bootstrap-electron] release device-link ownership on ${reason} failed (non-fatal):`,
-      err,
-    );
-  }
-  await lifecycleDbClientManager.dispose(reason);
   agentIslandService?.resetRuntimeState();
 }
 

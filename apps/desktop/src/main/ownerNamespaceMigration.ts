@@ -1208,21 +1208,30 @@ export function getLegacyGhostRecoveryStatus(
   const targetDiscovery = hasRecoveryCandidates
     ? scanLegacyGhostDirsInRoots([targetRoot])
     : { ghosts: [], deferredIds: [], invalidIds: [], deferredRoots: [] };
-  const sourceDiscoveryProblemIds = new Set([
-    ...sharedDiscovery.deferredIds,
-    ...sharedDiscovery.invalidIds,
-    ...scopedDiscovery.deferredIds,
-    ...scopedDiscovery.invalidIds,
-  ]);
+  const sourceDiscoveryProblemIds = new Set(
+    [
+      ...sharedDiscovery.deferredIds,
+      ...sharedDiscovery.invalidIds,
+      ...scopedDiscovery.deferredIds,
+      ...scopedDiscovery.invalidIds,
+    ].filter((id) => !options.rejectReservedIds || !isOfficialGhostId(id)),
+  );
   const targetInvalidIds = new Set(
     targetDiscovery.invalidIds.filter((id) => recoveryMarker?.pendingIds.includes(id)),
   );
+  // Filter reserved IDs from per-id counts so they don't report spurious
+  // deferred/invalid problems for ids that can never be recovered (P2,
+  // PRRT_kwDOTgdRUs6YRp62).  deferredRoots are root-level (not per-id)
+  // and can't be id-filtered.
+  const sourceDeferredIds = options.rejectReservedIds
+    ? [...sharedDiscovery.deferredIds, ...scopedDiscovery.deferredIds]
+      .filter((id) => !isOfficialGhostId(id))
+    : [...sharedDiscovery.deferredIds, ...scopedDiscovery.deferredIds];
   const discoveryDeferred =
     sharedDiscovery.deferredRoots.length > 0 ||
-    sharedDiscovery.deferredIds.length > 0 ||
     scopedDiscovery.deferredRoots.length > 0 ||
-    scopedDiscovery.deferredIds.length > 0 ||
     targetDiscovery.deferredRoots.length > 0 ||
+    sourceDeferredIds.length > 0 ||
     targetDiscovery.deferredIds.length > 0;
   // 一个与待恢复 id 无关的 target 目录损坏（比如安装了别的插件但 ghost.json
   // 偶然坏了）不应永久卡死本 owner 的整批 legacy 恢复。用已按 pendingIds

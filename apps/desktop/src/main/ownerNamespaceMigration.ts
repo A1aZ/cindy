@@ -1278,7 +1278,8 @@ export function getLegacyGhostRecoveryStatus(
   const recoveredIds = (recoveryMarker?.pendingIds ?? []).filter((id) =>
     installedTargetIds.has(id) &&
     !legacySourceIds.has(id) &&
-    recoveryMarker?.approvalProjectionSha256ById?.[id] !== undefined,
+    recoveryMarker?.approvalProjectionSha256ById?.[id] !== undefined &&
+    (!options.rejectReservedIds || !isOfficialGhostId(id)),
   );
   const unexpectedFrozenIds = recoveryMarker
     ? legacyGhosts.map((ghost) => ghost.id).filter((id) => !recoveryMarker.pendingIds.includes(id))
@@ -1407,13 +1408,16 @@ export async function recoverLegacyGhostPlugins(
   const targetDiscovery = hasRecoveryCandidates
     ? scanLegacyGhostDirsInRoots([targetRoot])
     : { ghosts: [], deferredIds: [], invalidIds: [], deferredRoots: [] };
+  // Filter reserved IDs from per-id counts so they don't force a spurious
+  // deferred that blocks valid legacy plugins from being moved (P1,
+  // PRRT_kwDOTgdRUs6YSU-u).  Match the filter already applied in
+  // getLegacyGhostRecoveryStatus.
   const discoveryDeferred =
     sharedDiscovery.deferredRoots.length > 0 ||
-    sharedDiscovery.deferredIds.length > 0 ||
     scopedDiscovery.deferredRoots.length > 0 ||
-    scopedDiscovery.deferredIds.length > 0 ||
     targetDiscovery.deferredRoots.length > 0 ||
-    targetDiscovery.deferredIds.length > 0;
+    [...sharedDiscovery.deferredIds, ...scopedDiscovery.deferredIds, ...targetDiscovery.deferredIds]
+      .some((id) => !options.rejectReservedIds || !isOfficialGhostId(id));
   const discoveryInvalidCount = new Set([
     ...sharedDiscovery.invalidIds,
     ...scopedDiscovery.invalidIds,

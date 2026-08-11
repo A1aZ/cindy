@@ -170,7 +170,8 @@ export interface ModelModalities {
 interface ModelCatalogEntryBase extends ModelPricing {
   id: string;
   mode?: string;
-  currency: ModelCurrency;
+  /** Optional for compatibility with older Model Access responses. */
+  currency?: ModelCurrency;
   agents: ModelAgent[];
   name?: string;
   group?: string;

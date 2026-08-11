@@ -392,8 +392,8 @@ function modelEntryError(
   }
   error = optionalStringError(value.mode, `${path}.mode`, 128);
   if (error) return error;
-  if (!isModelCurrency(value.currency)) {
-    return `${path}.currency must be CNY or USD`;
+  if (value.currency !== undefined && !isModelCurrency(value.currency)) {
+    return `${path}.currency must be CNY or USD when present`;
   }
   if (
     !Array.isArray(value.agents) ||

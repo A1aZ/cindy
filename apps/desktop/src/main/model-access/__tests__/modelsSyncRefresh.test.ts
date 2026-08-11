@@ -38,6 +38,15 @@ describe('parseModelsSyncPayload', () => {
     });
   });
 
+  it('preserves a missing legacy currency for the pricing fallback path', () => {
+    const { currency: _currency, ...modelWithoutCurrency } = baseModel;
+
+    expect(parseModelsSyncPayload({ schemaVersion: 2, models: [modelWithoutCurrency] })).toEqual({
+      ok: true,
+      models: [modelWithoutCurrency],
+    });
+  });
+
   it.each([
     {
       label: 'unknown schema version',

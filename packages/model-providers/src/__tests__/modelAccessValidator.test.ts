@@ -223,9 +223,14 @@ describe('model access catalog contract', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('rejects missing or unsupported currency with the exact field path', () => {
+  it('accepts missing currency for legacy fallback and rejects unsupported explicit values', () => {
     const { currency: _currency, ...withoutCurrency } = VALID_RESPONSE.models[0]!;
-    expectReject({ ...VALID_RESPONSE, models: [withoutCurrency] }, 'response.models[0].currency');
+    expect(
+      parseListModelsResponse({ ...VALID_RESPONSE, models: [withoutCurrency] }),
+    ).toEqual({
+      ok: true,
+      value: { ...VALID_RESPONSE, models: [withoutCurrency] },
+    });
     expectReject(
       {
         ...VALID_RESPONSE,

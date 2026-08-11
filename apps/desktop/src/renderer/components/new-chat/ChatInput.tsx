@@ -4755,9 +4755,18 @@ export function ChatInput({
           ? findGhostByCommand(eligibleGhosts, ghostCommandWord)
           : null;
         const textToSend = expandGhostCommand(text, eligibleGhosts);
-        const routedText = hostCapability
-          ? expandHostCapabilityInvocation(textToSend, hostCapability, hostCapability.name)
-          : textToSend;
+        // 发送前校验 host-capability 插件仍处于启用且 workdir 可用的状态。
+        // 若用户在插入芯片后停用/卸载了该插件，芯片内序列化的 ghostId/capability
+        // 已失时效，不应再展开 Host 路由指令（fail-closed）。
+        const isHostCapabilityValid =
+          hostCapability !== undefined &&
+          eligibleGhosts.some(
+            (g) => g.manifest.id === hostCapability.ghostId && g.enabled,
+          );
+        const routedText =
+          hostCapability && isHostCapabilityValid
+            ? expandHostCapabilityInvocation(textToSend, hostCapability, hostCapability.name)
+            : textToSend;
         const sendSnapshot = captureComposerSendSnapshot(
           editor.getJSON(),
           latestAttachmentsRef.current,

@@ -35,6 +35,7 @@ import type {
 } from './types/customizations.js';
 import type { PiRuntimeCapabilityManifest } from './types/pi-runtime-capabilities.js';
 import { piExplicitSkillRuntimePath } from './agents/pi/skill-runtime-provenance.js';
+import { fingerprintPiProjectSkillEntrypoint } from './agents/pi/project-resource-assembly.js';
 import { Session, generateSessionId } from './session.js';
 import type {
   AgentSessionHandle,
@@ -160,15 +161,32 @@ function canonicalPiRuntimePath(value: string): string {
   }
 }
 
-function mergePiRuntimeSkillStatuses(
+async function mergePiRuntimeSkillStatuses(
   result: ListAgentSkillsResult,
   manifest: PiRuntimeCapabilityManifest | undefined,
-): ListAgentSkillsResult {
+): Promise<ListAgentSkillsResult> {
   if (manifest?.status !== 'loaded') return result;
   const loadedExplicitSkills = new Map<string, string>();
   const loadedLegacyProjectSkills = new Map<string, string>();
+  const changedProjectSkills = new Map<string, string>();
   for (const skill of manifest.projectResources?.loadedSkills ?? []) {
-    loadedExplicitSkills.set(canonicalPiRuntimePath(skill.sourcePath), skill.commandName);
+    const canonicalSourcePath = canonicalPiRuntimePath(skill.sourcePath);
+    if (!skill.snapshotDigest || !skill.sourceFingerprint || !skill.canonicalRepoRoot) {
+      changedProjectSkills.set(canonicalSourcePath, skill.sourcePath);
+      continue;
+    }
+    const currentFingerprint = await fingerprintPiProjectSkillEntrypoint(
+      skill.sourcePath,
+      skill.canonicalRepoRoot,
+    );
+    if (
+      currentFingerprint?.contentDigest !== skill.snapshotDigest
+      || currentFingerprint.sourceStateDigest !== skill.sourceFingerprint
+    ) {
+      changedProjectSkills.set(canonicalSourcePath, skill.sourcePath);
+      continue;
+    }
+    loadedExplicitSkills.set(canonicalSourcePath, skill.commandName);
   }
   for (const command of manifest.commands) {
     const baseDir = command.sourceInfo.baseDir;
@@ -191,21 +209,36 @@ function mergePiRuntimeSkillStatuses(
       loadedExplicitSkills.set(canonicalPiRuntimePath(explicitPath), command.name);
     }
   }
-  if (loadedExplicitSkills.size === 0 && loadedLegacyProjectSkills.size === 0) return result;
+  if (
+    loadedExplicitSkills.size === 0
+    && loadedLegacyProjectSkills.size === 0
+    && changedProjectSkills.size === 0
+  ) return result;
+  const changedSkillErrors = [...changedProjectSkills.values()].map((skillPath) => ({
+    path: skillPath,
+    message: 'Project skill changed after this Pi session started; restart the session to load the current version.',
+  }));
   return {
     ...result,
     skills: result.skills.map((skill) => {
-      const runtimeCommandName = skill.scope === 'repo' && skill.path
-        ? loadedExplicitSkills.get(canonicalPiRuntimePath(skill.path))
-          ?? [skill.path, path.dirname(path.dirname(skill.path))]
-            .map(canonicalPiRuntimePath)
-            .map((skillPath) => loadedLegacyProjectSkills.get([skill.name, skillPath].join('\0')))
-            .find((commandName) => commandName !== undefined)
-        : undefined;
+      let runtimeCommandName: string | undefined;
+      if (skill.scope === 'repo' && skill.path) {
+        const canonicalSkillPath = canonicalPiRuntimePath(skill.path);
+        if (!changedProjectSkills.has(canonicalSkillPath)) {
+          runtimeCommandName = loadedExplicitSkills.get(canonicalSkillPath)
+            ?? [skill.path, path.dirname(path.dirname(skill.path))]
+              .map(canonicalPiRuntimePath)
+              .map((skillPath) => loadedLegacyProjectSkills.get([skill.name, skillPath].join('\0')))
+              .find((commandName) => commandName !== undefined);
+        }
+      }
       return runtimeCommandName
         ? { ...skill, runtimeStatus: 'loaded' as const, runtimeCommandName }
         : skill;
     }),
+    ...(changedSkillErrors.length > 0
+      ? { errors: [...(result.errors ?? []), ...changedSkillErrors] }
+      : {}),
   };
 }
 

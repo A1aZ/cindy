@@ -34,6 +34,10 @@ export interface PiProjectResourceAssemblySnapshot {
   readonly skillPaths: readonly string[];
   /** Per-session immutable copies that are safe to pass to Pi. */
   readonly launchSkillPaths: readonly string[];
+  /** Content fingerprints for the immutable launch copies, index-aligned with skillPaths. */
+  readonly launchSkillDigests: readonly string[];
+  /** Launch-time source identities used to detect stale palette entries without hashing assets. */
+  readonly launchSkillSourceFingerprints: readonly string[];
   readonly diagnostic: PiProjectResourceAssemblyDiagnostic;
 }
 
@@ -55,6 +59,8 @@ export function unavailablePiProjectResourceAssembly(
     decision: null,
     skillPaths: Object.freeze([]),
     launchSkillPaths: Object.freeze([]),
+    launchSkillDigests: Object.freeze([]),
+    launchSkillSourceFingerprints: Object.freeze([]),
     diagnostic: unavailableDiagnostic(reason),
   });
 }
@@ -208,6 +214,8 @@ export async function assembleApprovedPiProjectResources(
     decision,
     skillPaths: frozenSkillPaths,
     launchSkillPaths: Object.freeze([]),
+    launchSkillDigests: Object.freeze([]),
+    launchSkillSourceFingerprints: Object.freeze([]),
     diagnostic: Object.freeze({
       status: decision.status,
       reason,
@@ -245,6 +253,124 @@ async function hashOpenFile(handle: FileHandle): Promise<string> {
     hash.update(chunk);
   }
   return hash.digest('hex');
+}
+
+export interface PiProjectSkillEntrypointFingerprint {
+  readonly contentDigest: string;
+  readonly sourceStateDigest: string;
+}
+
+async function fingerprintSkillEntrypointOnce(
+  rootPath: string,
+  canonicalRepoRoot: string,
+): Promise<PiProjectSkillEntrypointFingerprint> {
+  const skillPath = path.join(rootPath, 'SKILL.md');
+  const [rootEntry, canonicalRoot, skillLinkEntry, canonicalSkill, skillTargetEntry] =
+    await Promise.all([
+      fs.lstat(rootPath),
+      fs.realpath(rootPath),
+      fs.lstat(skillPath),
+      fs.realpath(skillPath),
+      fs.stat(skillPath),
+    ]);
+  if (
+    !rootEntry.isDirectory()
+    || !skillTargetEntry.isFile()
+    || !localPathIsWithin(canonicalRepoRoot, canonicalRoot)
+    || !localPathIsWithin(canonicalRepoRoot, canonicalSkill)
+  ) {
+    throw new Error('approved skill entrypoint escaped its repository');
+  }
+
+  const handle = await fs.open(
+    canonicalSkill,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const openedEntry = await handle.stat();
+    if (!openedEntry.isFile() || !sameFileIdentity(skillTargetEntry, openedEntry)) {
+      throw new Error('approved skill entrypoint changed before fingerprinting');
+    }
+    const contentDigest = await hashOpenFile(handle);
+    const [
+      rootEntryAfterRead,
+      canonicalRootAfterRead,
+      skillLinkEntryAfterRead,
+      canonicalSkillAfterRead,
+      skillTargetEntryAfterRead,
+      openedAfterRead,
+    ] = await Promise.all([
+      fs.lstat(rootPath),
+      fs.realpath(rootPath),
+      fs.lstat(skillPath),
+      fs.realpath(skillPath),
+      fs.stat(skillPath),
+      handle.stat(),
+    ]);
+    if (
+      !sameEntrySnapshot(rootEntry, rootEntryAfterRead)
+      || !sameEntrySnapshot(skillLinkEntry, skillLinkEntryAfterRead)
+      || !sameEntrySnapshot(skillTargetEntry, skillTargetEntryAfterRead)
+      || !sameEntrySnapshot(openedEntry, openedAfterRead)
+      || !sameFileIdentity(openedEntry, skillTargetEntryAfterRead)
+      || path.relative(canonicalRootAfterRead, canonicalRoot) !== ''
+      || path.relative(canonicalSkillAfterRead, canonicalSkill) !== ''
+    ) {
+      throw new Error('approved skill entrypoint changed while fingerprinting');
+    }
+    const sourceState = createHash('sha256');
+    for (const value of [
+      canonicalRoot,
+      rootEntry.dev,
+      rootEntry.ino,
+      rootEntry.size,
+      rootEntry.mtimeMs,
+      rootEntry.ctimeMs,
+      canonicalSkill,
+      skillLinkEntry.dev,
+      skillLinkEntry.ino,
+      skillLinkEntry.size,
+      skillLinkEntry.mtimeMs,
+      skillLinkEntry.ctimeMs,
+      openedEntry.dev,
+      openedEntry.ino,
+      openedEntry.size,
+      openedEntry.mtimeMs,
+      openedEntry.ctimeMs,
+      contentDigest,
+    ]) {
+      sourceState.update(String(value));
+      sourceState.update('\0');
+    }
+    return Object.freeze({
+      contentDigest,
+      sourceStateDigest: sourceState.digest('hex'),
+    });
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Fail-closed SKILL.md identity used when projecting a live session into the palette. */
+export async function fingerprintPiProjectSkillEntrypoint(
+  rootPath: string,
+  canonicalRepoRoot: string,
+): Promise<PiProjectSkillEntrypointFingerprint | null> {
+  try {
+    const [canonicalRoot, canonicalBoundary] = await Promise.all([
+      fs.realpath(rootPath),
+      fs.realpath(canonicalRepoRoot),
+    ]);
+    if (!localPathIsWithin(canonicalBoundary, canonicalRoot)) return null;
+    const first = await fingerprintSkillEntrypointOnce(rootPath, canonicalBoundary);
+    const second = await fingerprintSkillEntrypointOnce(rootPath, canonicalBoundary);
+    return first.contentDigest === second.contentDigest
+      && first.sourceStateDigest === second.sourceStateDigest
+      ? first
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function materializeSkillEntry(
@@ -387,6 +513,8 @@ export async function stageApprovedPiProjectResources(
       ...assembly,
       skillPaths: Object.freeze([]),
       launchSkillPaths: Object.freeze([]),
+      launchSkillDigests: Object.freeze([]),
+      launchSkillSourceFingerprints: Object.freeze([]),
       diagnostic: Object.freeze({
         ...assembly.diagnostic,
         reason: 'approved-skill-snapshot-failed',
@@ -401,11 +529,24 @@ export async function stageApprovedPiProjectResources(
     const temporarySkillsRoot = path.join(temporaryRoot, 'skills');
     await fs.mkdir(temporarySkillsRoot);
     const relativeLaunchPaths: string[] = [];
+    const launchSkillDigests: string[] = [];
+    const launchSkillSourceFingerprints: string[] = [];
     for (const [index, sourcePath] of assembly.skillPaths.entries()) {
       const skillName = path.basename(sourcePath);
       const relativePath = path.join('skills', String(index), skillName);
       const targetPath = path.join(temporaryRoot, relativePath);
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      const [sourceRootBeforeCopy, canonicalSourceBeforeCopy] = await Promise.all([
+        fs.lstat(sourcePath),
+        fs.realpath(sourcePath),
+      ]);
+      if (
+        !sourceRootBeforeCopy.isDirectory()
+        || path.resolve(canonicalSourceBeforeCopy) !== path.resolve(sourcePath)
+        || !localPathIsWithin(canonicalRepoRoot, canonicalSourceBeforeCopy)
+      ) {
+        throw new Error('approved skill root changed before snapshotting');
+      }
       await materializeSkillEntry(
         sourcePath,
         targetPath,
@@ -419,7 +560,26 @@ export async function stageApprovedPiProjectResources(
       if (path.resolve(canonicalSourceAfterCopy) !== path.resolve(sourcePath) || !skillEntrypoint.isFile()) {
         throw new Error('approved skill changed before snapshot publication');
       }
+      const [launchFingerprint, sourceFingerprint] = await Promise.all([
+        fingerprintPiProjectSkillEntrypoint(targetPath, targetPath),
+        fingerprintPiProjectSkillEntrypoint(sourcePath, canonicalRepoRoot),
+      ]);
+      const [sourceRootAfterFingerprint, canonicalSourceAfterFingerprint] = await Promise.all([
+        fs.lstat(sourcePath),
+        fs.realpath(sourcePath),
+      ]);
+      if (
+        !launchFingerprint
+        || !sourceFingerprint
+        || launchFingerprint.contentDigest !== sourceFingerprint.contentDigest
+        || !sameEntrySnapshot(sourceRootBeforeCopy, sourceRootAfterFingerprint)
+        || path.resolve(canonicalSourceAfterFingerprint) !== path.resolve(canonicalSourceBeforeCopy)
+      ) {
+        throw new Error('approved skill snapshot fingerprint failed');
+      }
       relativeLaunchPaths.push(relativePath);
+      launchSkillDigests.push(launchFingerprint.contentDigest);
+      launchSkillSourceFingerprints.push(sourceFingerprint.sourceStateDigest);
     }
     await assertMaterializedTreeContainsNoLinksOrSpecialFiles(temporarySkillsRoot);
 
@@ -431,6 +591,8 @@ export async function stageApprovedPiProjectResources(
     return Object.freeze({
       ...assembly,
       launchSkillPaths,
+      launchSkillDigests: Object.freeze(launchSkillDigests),
+      launchSkillSourceFingerprints: Object.freeze(launchSkillSourceFingerprints),
       diagnostic: Object.freeze({
         ...assembly.diagnostic,
         requestedSkillCount: launchSkillPaths.length,
@@ -444,6 +606,8 @@ export async function stageApprovedPiProjectResources(
       ...assembly,
       skillPaths: Object.freeze([]),
       launchSkillPaths: Object.freeze([]),
+      launchSkillDigests: Object.freeze([]),
+      launchSkillSourceFingerprints: Object.freeze([]),
       diagnostic: Object.freeze({
         ...assembly.diagnostic,
         reason: 'approved-skill-snapshot-failed',
@@ -483,7 +647,19 @@ export function reconcilePiProjectResourceRuntime(
   const loadedSkills = assembly.launchSkillPaths.flatMap((runtimePath, index) => {
     const commandName = loadedPaths.get(comparableRuntimePath(runtimePath));
     const sourcePath = assembly.skillPaths[index];
-    return commandName && sourcePath ? [{ sourcePath, runtimePath, commandName }] : [];
+    const snapshotDigest = assembly.launchSkillDigests[index];
+    const sourceFingerprint = assembly.launchSkillSourceFingerprints[index];
+    const canonicalRepoRoot = assembly.decision?.canonicalRepoRoot;
+    return commandName && sourcePath && snapshotDigest && sourceFingerprint && canonicalRepoRoot
+      ? [{
+          sourcePath,
+          runtimePath,
+          commandName,
+          snapshotDigest,
+          sourceFingerprint,
+          canonicalRepoRoot,
+        }]
+      : [];
   });
   const loadedSkillCount = [...expectedPaths].filter((skillPath) => loadedPaths.has(skillPath)).length;
   return Object.freeze({

@@ -17,6 +17,7 @@ import path from 'node:path';
 
 import {
   assembleApprovedPiProjectResources,
+  fingerprintPiProjectSkillEntrypoint,
   reconcilePiProjectResourceRuntime,
   stageApprovedPiProjectResources,
   unavailablePiProjectResourceAssembly,
@@ -162,6 +163,8 @@ describe('Pi approved project resource assembly', () => {
       decision: null,
       skillPaths: [],
       launchSkillPaths: [],
+      launchSkillDigests: [],
+      launchSkillSourceFingerprints: [],
       diagnostic: {
         status: 'unavailable',
         reason: 'approval-resolver-unavailable',
@@ -307,6 +310,8 @@ describe('Pi approved project resource assembly', () => {
 
       expect(staged.skillPaths).toEqual([skillPath]);
       expect(staged.launchSkillPaths).toHaveLength(1);
+      expect(staged.launchSkillDigests).toHaveLength(1);
+      expect(staged.launchSkillSourceFingerprints).toHaveLength(1);
       expect(staged.launchSkillPaths[0]).toBe(
         path.join(configHome, 'project-resources', 'skills', '0', 'demo'),
       );
@@ -314,6 +319,11 @@ describe('Pi approved project resource assembly', () => {
         .toBe('# approved snapshot\n');
       expect(readFileSync(path.join(staged.launchSkillPaths[0]!, 'assets', 'fixture.txt'), 'utf8'))
         .toBe('snapshot asset\n');
+      await expect(fingerprintPiProjectSkillEntrypoint(skillPath, workingDir))
+        .resolves.toMatchObject({
+          contentDigest: staged.launchSkillDigests[0],
+          sourceStateDigest: staged.launchSkillSourceFingerprints[0],
+        });
       const nonBlockingFlag = constants.O_NONBLOCK ?? 0;
       expect((openSpy.mock.calls[0]?.[1] as number) & nonBlockingFlag)
         .toBe(nonBlockingFlag);
@@ -444,6 +454,80 @@ describe('Pi approved project resource assembly', () => {
     }
   });
 
+  it('binds the launch fingerprint to the exact source root that was copied', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-root-swap-')));
+    const configHome = path.join(root, 'config-home');
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const skillFile = path.join(skillPath, 'SKILL.md');
+    const oldSkillPath = `${skillPath}-old`;
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      mkdirSync(configHome, { recursive: true });
+      writeFileSync(skillFile, '# unchanged entrypoint\n');
+      writeFileSync(path.join(skillPath, 'asset.txt'), 'copied asset\n');
+      const assembled = await assembleApprovedPiProjectResources(
+        inputForRepoRoot(workingDir, 'rev-root-swap', [skillPath]),
+        workingDir,
+      );
+      const realOpen = fsPromises.open.bind(fsPromises);
+      let sourceSkillOpenCount = 0;
+      vi.spyOn(fsPromises, 'open').mockImplementation(async (candidate, flags, mode) => {
+        if (String(candidate) === skillFile) {
+          sourceSkillOpenCount += 1;
+          if (sourceSkillOpenCount === 2) {
+            renameSync(skillPath, oldSkillPath);
+            mkdirSync(skillPath);
+            writeFileSync(skillFile, '# unchanged entrypoint\n');
+            writeFileSync(path.join(skillPath, 'asset.txt'), 'replacement asset\n');
+          }
+        }
+        return realOpen(candidate, flags, mode);
+      });
+
+      const staged = await stageApprovedPiProjectResources(assembled, configHome);
+
+      expect(sourceSkillOpenCount).toBeGreaterThanOrEqual(2);
+      expect(staged.skillPaths).toEqual([]);
+      expect(staged.launchSkillPaths).toEqual([]);
+      expect(staged.diagnostic).toMatchObject({
+        reason: 'approved-skill-snapshot-failed',
+        requestedSkillCount: 0,
+      });
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a skill tree that changes between complete fingerprint passes', async () => {
+    const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-fingerprint-')));
+    const workingDir = path.join(root, 'repo');
+    const skillPath = path.join(workingDir, '.pi', 'skills', 'demo');
+    const skillFile = path.join(skillPath, 'SKILL.md');
+    try {
+      mkdirSync(path.join(workingDir, '.git'), { recursive: true });
+      mkdirSync(skillPath, { recursive: true });
+      writeFileSync(skillFile, '# first pass\n');
+      const realOpen = fsPromises.open.bind(fsPromises);
+      let skillOpenCount = 0;
+      vi.spyOn(fsPromises, 'open').mockImplementation(async (candidate, flags, mode) => {
+        if (String(candidate) === skillFile) {
+          skillOpenCount += 1;
+          if (skillOpenCount === 2) writeFileSync(skillFile, '# second pass\n');
+        }
+        return realOpen(candidate, flags, mode);
+      });
+
+      await expect(fingerprintPiProjectSkillEntrypoint(skillPath, workingDir)).resolves.toBeNull();
+      expect(skillOpenCount).toBe(2);
+    } finally {
+      vi.restoreAllMocks();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('fails the entire snapshot closed when a nested symlink escapes the approved repo', async () => {
     const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), 'pi-project-resource-escape-')));
     const configHome = path.join(root, 'config-home');
@@ -559,6 +643,8 @@ describe('Pi approved project resource assembly', () => {
     const runtimeAssembly = {
       ...assembly,
       launchSkillPaths: [skillPath],
+      launchSkillDigests: ['snapshot-digest'],
+      launchSkillSourceFingerprints: ['source-fingerprint'],
     };
     const baseManifest = {
       capturedAt: '2026-08-10T00:00:00.000Z',
@@ -587,6 +673,9 @@ describe('Pi approved project resource assembly', () => {
         sourcePath: skillPath,
         runtimePath: skillPath,
         commandName: 'skill:demo',
+        snapshotDigest: 'snapshot-digest',
+        sourceFingerprint: 'source-fingerprint',
+        canonicalRepoRoot: assembly.decision?.canonicalRepoRoot,
       }],
     });
 

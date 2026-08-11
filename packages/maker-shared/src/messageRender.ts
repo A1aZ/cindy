@@ -488,12 +488,18 @@ function isSyntheticUserRow(message: MessageRenderSourceMessageLike): boolean {
   const meta = message.agentMeta;
   return (
     message.isSyntheticTrigger === true ||
-    (message.automationOrigin !== undefined && message.automationOrigin !== null) ||
+    (message.automationOrigin !== undefined && message.automationOrigin !== null && !isHookOrigin(message.automationOrigin)) ||
     meta?.autoResume === true ||
-    (meta?.origin !== undefined && meta?.origin !== null) ||
+    (meta?.origin !== undefined && meta?.origin !== null && !isHookOrigin(meta.origin)) ||
     isSteerUserRow(message) ||
     hasSubagentParent(message)
   );
+}
+
+function isHookOrigin(origin: unknown): boolean {
+  if (!origin || typeof origin !== 'object') return false;
+  const scheduleId = (origin as Record<string, unknown>).scheduleId;
+  return typeof scheduleId === 'string' && scheduleId.startsWith('hook:');
 }
 
 /**

@@ -246,6 +246,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFileInBrowser: (pathOrUrl: string): Promise<unknown> => ipcRenderer.invoke('shell:open-file-in-browser', pathOrUrl),
   openPath: (pathOrUrl: string): Promise<unknown> => ipcRenderer.invoke('shell:open-path', pathOrUrl),
   showItemInFolder: (params: unknown): Promise<unknown> => ipcRenderer.invoke('shell:show-item-in-folder', params),
+  copyMediaToClipboard: (params: unknown): Promise<unknown> =>
+    ipcRenderer.invoke('media:copy-to-clipboard', params),
+  openMediaWithDefaultApp: (params: unknown): Promise<void> =>
+    ipcRenderer.invoke('media:open-with-default-app', params),
+  saveMediaAs: (params: unknown): Promise<unknown> => ipcRenderer.invoke('media:save-as', params),
   getFilePath: (file: File): string => {
     try {
       return webUtils.getPathForFile(file);
@@ -255,6 +260,39 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   cacheImageFromBuffer: (params: unknown): Promise<unknown> => ipcRenderer.invoke('image-cache:from-buffer', params),
   onRsbBrowserFocusUrlBar: (cb: () => void): (() => void) => onPayload('rsb:browser-focus-url-bar', cb),
+
+  // 意识面板注册与运行所需的最小 bridge。右侧栏独立窗口会复用
+  // ghostPanels/GhostChipPanelBody，但不暴露安装、卸载、开发运行时或权限管理能力。
+  ghosts: {
+    listSync: (): { ghosts: unknown[] } => ipcRenderer.sendSync('ghosts:list'),
+    reload: (id: string): Promise<{ state: string }> => ipcRenderer.invoke('ghosts:reload', id),
+    setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> =>
+      ipcRenderer.invoke('ghosts:set-enabled', id, enabled),
+    resolvePanelMedia: (
+      uri: string,
+      purpose?: 'attach' | 'menu',
+    ): Promise<unknown> => ipcRenderer.invoke('ghosts:resolve-panel-media', uri, purpose),
+    runtimeStates: (): Promise<{ states: Record<string, string> }> =>
+      ipcRenderer.invoke('ghosts:runtime-states'),
+    onChanged: (cb: (payload: unknown) => void): (() => void) => onPayload('ghosts:changed', cb),
+    onRuntimeChanged: (cb: (payload: unknown) => void): (() => void) =>
+      onPayload('ghosts:runtime-changed', cb),
+    onPreviewMedia: (cb: (payload: unknown) => void): (() => void) =>
+      onPayload('ghosts:preview-media', cb),
+    unreadSync: (): { entries: unknown[] } => {
+      try {
+        const result = ipcRenderer.sendSync('ghosts:unread') as { entries?: unknown } | null;
+        return { entries: Array.isArray(result?.entries) ? result.entries : [] };
+      } catch {
+        return { entries: [] };
+      }
+    },
+    clearUnread: (id: string, seenAt?: number): Promise<{ ok: boolean }> =>
+      ipcRenderer.invoke('ghosts:clear-unread', id, seenAt),
+    onBadge: (cb: (payload: unknown) => void): (() => void) => onPayload('ghosts:badge', cb),
+    onUnreadSnapshot: (cb: (payload: unknown) => void): (() => void) =>
+      onPayload('ghosts:unread-snapshot', cb),
+  },
 
   rightSidebarWindow: {
     getState: (): Promise<{ detached: boolean; lastOpen: boolean; open: boolean }> =>

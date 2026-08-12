@@ -119,6 +119,7 @@ const fileBrowserKeys = exposedNestedKeys(source, 'fileBrowser');
 const terminalKeys = exposedNestedKeys(source, 'terminal');
 const processMonitorKeys = exposedNestedKeys(source, 'processMonitor');
 const nativePopupKeys = exposedNestedKeys(source, 'rsbNativePopup');
+const ghostKeys = exposedNestedKeys(source, 'ghosts');
 
 describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
   it('鏆撮湶 chrome 鑳藉姏', () => {
@@ -175,7 +176,8 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
     expect(topLevel).toEqual(expect.arrayContaining([
       'fileBrowser', 'terminal', 'gitReview', 'processMonitor', 'rsbNativePopup',
       'openExternal', 'openFileInBrowser', 'openPath', 'showItemInFolder',
-      'getFilePath', 'cacheImageFromBuffer', 'maker', 'localDb',
+      'copyMediaToClipboard', 'openMediaWithDefaultApp', 'saveMediaAs',
+      'getFilePath', 'cacheImageFromBuffer', 'maker', 'localDb', 'ghosts',
     ]));
     expect(fileBrowserKeys).toEqual(expect.arrayContaining([
       'listDir', 'listAllFiles', 'readFile', 'writeFile', 'createFile', 'createFolder',
@@ -196,18 +198,29 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
     expect(nativePopupKeys).toEqual(expect.arrayContaining([
       'claim', 'setBounds', 'command', 'close', 'onEvent',
     ]));
+    expect(ghostKeys).toEqual(expect.arrayContaining([
+      'listSync', 'reload', 'setEnabled', 'resolvePanelMedia', 'runtimeStates',
+      'onChanged', 'onRuntimeChanged', 'onPreviewMedia',
+      'unreadSync', 'clearUnread', 'onBadge', 'onUnreadSnapshot',
+    ]));
   });
 
   it('涓嶆毚闇?maker / agent / voice / login 鑷不鑳藉姏', () => {
     const forbidden = [
       'agent', 'voiceInput', 'login', 'settings',
       'updater', 'chat', 'session',
-      'resourceUsageWindow', 'ghostPanelWindow', 'ghosts',
+      'resourceUsageWindow', 'ghostPanelWindow',
       'pluginMarket', 'deepLink', 'gitContext',
-      'copyMediaToClipboard', 'cacheMediaForSession',
+      'cacheMediaForSession',
     ];
     for (const key of forbidden) {
       expect(topLevel).not.toEqual(expect.arrayContaining([key]));
+    }
+    for (const key of [
+      'install', 'uninstall', 'inspect', 'devRuntime', 'devCall',
+      'approve', 'revokeApproval', 'setCindyPref', 'listCardsBySession',
+    ]) {
+      expect(ghostKeys).not.toEqual(expect.arrayContaining([key]));
     }
   });
 

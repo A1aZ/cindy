@@ -43,6 +43,7 @@ import { useCloseShortcutShellOwner } from '@/hooks/useCloseWindowShortcut';
 import { useLocale } from '@/hooks/useLocale';
 import { createLogger } from '@/lib/logger';
 import { makerChatStore } from '@/lib/makerChatStore';
+import { GhostMediaLightboxHost } from '@/cindy-brain/GhostMediaLightboxHost';
 import {
   ensureGhostPanelsRegistered,
   useGhostPanelsSync,
@@ -252,6 +253,7 @@ export function SidebarWindowLayout() {
           </div>
         )}
       </div>
+      <GhostMediaLightboxHost />
     </div>
   );
 }

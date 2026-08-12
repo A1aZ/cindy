@@ -18,6 +18,7 @@ interface FakeWindow {
   destroy: ReturnType<typeof vi.fn>;
   hide: ReturnType<typeof vi.fn>;
   show: ReturnType<typeof vi.fn>;
+  showInactive: ReturnType<typeof vi.fn>;
   focus: ReturnType<typeof vi.fn>;
   restore: ReturnType<typeof vi.fn>;
   isMinimized: () => boolean;
@@ -64,6 +65,7 @@ function fakeWindow(id = 1): FakeWindow {
     }),
     hide: vi.fn(() => { visible = false; }),
     show: vi.fn(() => { visible = true; }),
+    showInactive: vi.fn(() => { visible = true; }),
     focus: vi.fn(),
     restore: vi.fn(() => {
       minimized = false;
@@ -490,17 +492,65 @@ describe('userInitiated:false', () => {
     h.controller.open({ userInitiated: true });
 
     win.show.mockClear();
+    win.showInactive.mockClear();
     win.focus.mockClear();
     h.controller.open({ userInitiated: false });
     expect(win.show).not.toHaveBeenCalled();
+    expect(win.showInactive).not.toHaveBeenCalled();
     expect(win.focus).not.toHaveBeenCalled();
   });
 
-  it('window not yet built: creates window without showing', () => {
+  it('prewarmed ready window: automated open shows without focusing', () => {
+    const h = makeHarness();
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+
+    h.controller.open({ userInitiated: false });
+
+    expect(win.showInactive).toHaveBeenCalledTimes(1);
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.focus).not.toHaveBeenCalled();
+    expect(h.controller.getState().open).toBe(true);
+  });
+
+  it('window not yet built: shows without focusing after presentation-ready', () => {
     const h = makeHarness();
     h.controller.open({ userInitiated: false });
     expect(h.windows).toHaveLength(1);
     expect(h.createWindowCalls).toHaveLength(1);
+    const win = h.windows[0];
+
+    markReady(h.controller, win);
+
+    expect(win.showInactive).toHaveBeenCalledTimes(1);
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.focus).not.toHaveBeenCalled();
+  });
+
+  it('not-ready window: automated open fallback shows without focusing', () => {
+    const h = makeHarness();
+    h.controller.open({ userInitiated: false });
+    const win = h.windows[0];
+
+    vi.advanceTimersByTime(5000);
+
+    expect(win.showInactive).toHaveBeenCalledTimes(1);
+    expect(win.show).not.toHaveBeenCalled();
+    expect(win.focus).not.toHaveBeenCalled();
+  });
+
+  it('not-ready window: later user open upgrades pending show to focused', () => {
+    const h = makeHarness();
+    h.controller.open({ userInitiated: false });
+    const win = h.windows[0];
+
+    h.controller.open({ userInitiated: true });
+    markReady(h.controller, win);
+
+    expect(win.show).toHaveBeenCalledTimes(1);
+    expect(win.showInactive).not.toHaveBeenCalled();
+    expect(win.focus).toHaveBeenCalledTimes(1);
   });
 
   it('setDetached(true) opens window', () => {
@@ -527,6 +577,8 @@ describe('ensureOpenForAutomation', () => {
     const win = h.windows[0];
     markReady(h.controller, win);
     await expect(h.controller.ensureOpenForAutomation()).resolves.toBeUndefined();
+    expect(win.showInactive).toHaveBeenCalledTimes(1);
+    expect(win.focus).not.toHaveBeenCalled();
   });
 
   it('detached + no window: opens and waits for presentation-ready', async () => {
@@ -547,7 +599,7 @@ describe('ensureOpenForAutomation', () => {
     const h = makeHarness({ detached: true });
     const pending = h.controller.ensureOpenForAutomation();
     // ensureOpenForAutomation 内部 readyWaiter 超时为 READY_TIMEOUT_MS(8s)。
-    // 5s openFallback 会 showAndFocus 但不影响 readyWaiter。
+    // 5s openFallback 会 showInactive 但不影响 readyWaiter。
     const assertion = expect(pending).rejects.toThrow(/ready timeout/);
     vi.advanceTimersByTime(8000);
     await assertion;

@@ -108,6 +108,7 @@ export class RsbWindowController {
   private presentationReady = false;
   private visible = false;
   private pendingOpen = false;
+  private pendingOpenShouldFocus = true;
   private disposed = false;
   private readyWaiters: Array<{
     resolve: () => void;
@@ -173,17 +174,22 @@ export class RsbWindowController {
     this.deps.settings.writePatch({ lastOpen: true });
 
     if (this.winRef && !this.winRef.isDestroyed()) {
-      if (!userInitiated) return;
       if (this.visible && this.winRef.isVisible()) {
-        this.winRef.focus();
+        if (userInitiated) {
+          this.pendingOpenShouldFocus = true;
+          this.winRef.focus();
+        }
         return;
       }
       if (this.presentationReady) {
-        this.showAndFocus(this.winRef);
+        this.showWindow(this.winRef, userInitiated);
         return;
       }
       // 窗口存在但渲染尚未完成，等待 presentation-ready 或超时
       this.winRef.webContents.setBackgroundThrottling(false);
+      this.pendingOpenShouldFocus = this.pendingOpen
+        ? this.pendingOpenShouldFocus || userInitiated
+        : userInitiated;
       this.pendingOpen = true;
       this.scheduleOpenFallback(this.winRef);
       this.broadcast();
@@ -191,13 +197,15 @@ export class RsbWindowController {
     }
 
     this.pendingOpen = true;
+    this.pendingOpenShouldFocus = userInitiated;
     const win = this.ensureWindow();
     if (!win) {
       this.pendingOpen = false;
+      this.pendingOpenShouldFocus = true;
       return;
     }
     if (this.presentationReady) {
-      this.showAndFocus(win);
+      this.showWindow(win, userInitiated);
       return;
     }
     this.scheduleOpenFallback(win);
@@ -211,6 +219,7 @@ export class RsbWindowController {
     } else {
       this.deps.settings.writePatch({ lastOpen: false });
       this.pendingOpen = false;
+      this.pendingOpenShouldFocus = true;
       this.broadcast();
     }
   }
@@ -260,10 +269,10 @@ export class RsbWindowController {
       w.resolve();
     }
     if (this.pendingOpen) {
-      this.showAndFocus(win);
+      this.showWindow(win, this.pendingOpenShouldFocus);
     }
     // 无论是纯预热还是用户点击打开，presentation-ready 都是 deferred
-    // command 可以安全交付的统一边界。不能在 showAndFocus 后提前返回，否则
+    // command 可以安全交付的统一边界。不能在 showWindow 后提前返回，否则
     // 点击路径会永久留下此前排队的 passive intent。
     this.flushDeferredCommandsToDetachedHost();
     return true;
@@ -305,8 +314,6 @@ export class RsbWindowController {
    */
   ensureOpenForAutomation(opts: { userInitiated?: boolean } = {}): Promise<void> {
     if (!this.deps.settings.read().detached) return Promise.resolve();
-    if (this.presentationReady && this.winRef && !this.winRef.isDestroyed())
-      return Promise.resolve();
     this.open({ userInitiated: opts.userInitiated === true });
     if (this.presentationReady) return Promise.resolve();
     return new Promise<void>((resolve, reject) => {
@@ -475,14 +482,19 @@ export class RsbWindowController {
     return win;
   }
 
-  private showAndFocus(win: BrowserWindow): void {
+  private showWindow(win: BrowserWindow, shouldFocus: boolean): void {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
     this.pendingOpen = false;
+    this.pendingOpenShouldFocus = shouldFocus;
     if (win.isMinimized()) win.restore();
     win.webContents.setBackgroundThrottling(true);
-    win.show();
-    win.focus();
+    if (shouldFocus) {
+      win.show();
+      win.focus();
+    } else {
+      win.showInactive();
+    }
     this.visible = true;
     // lastOpen 由 open() 在外层写，这里只负责展示
     this.deps.sendToWindow(win, RSB_WINDOW_VISIBILITY_CHANGED_CHANNEL, { visible: true });
@@ -493,6 +505,7 @@ export class RsbWindowController {
     this.clearOpenTimeout();
     this.clearPrewarmTimeout();
     this.pendingOpen = false;
+    this.pendingOpenShouldFocus = true;
     if (win.isVisible()) win.hide();
     this.visible = false;
     try {
@@ -533,6 +546,7 @@ export class RsbWindowController {
     this.presentationReady = false;
     this.visible = false;
     this.pendingOpen = false;
+    this.pendingOpenShouldFocus = true;
     this.destroyingWindow = false;
 
     const waiters = this.readyWaiters.splice(0);
@@ -560,7 +574,7 @@ export class RsbWindowController {
       if (!this.rendererReady && !this.visible) {
         this.deps.log.warn('right-sidebar open timed out before renderer-ready');
       }
-      if (!this.visible) this.showAndFocus(win);
+      if (!this.visible) this.showWindow(win, this.pendingOpenShouldFocus);
     }, DEFAULT_OPEN_TIMEOUT_MS);
     this.openTimeout.unref?.();
   }
@@ -610,7 +624,9 @@ export class RsbWindowController {
   private onRendererReloadStarted(win: BrowserWindow): void {
     if (win !== this.winRef || win.isDestroyed()) return;
     const shouldRestore = this.visible || this.pendingOpen;
-    if (shouldRestore) this.pendingOpen = true;
+    if (shouldRestore) {
+      this.pendingOpen = true;
+    }
     if (this.visible) win.hide();
     win.webContents.setBackgroundThrottling(false);
     this.rendererReady = false;
@@ -625,6 +641,7 @@ export class RsbWindowController {
   private invalidateWindow(win: BrowserWindow, reason: string): void {
     if (win !== this.winRef || win.isDestroyed()) return;
     const reopen = this.pendingOpen || this.visible;
+    const reopenShouldFocus = this.pendingOpenShouldFocus;
     this.deps.log.warn('right-sidebar cached window invalidated', { reason, reopen });
     this.destroyCachedWindow();
     if (!reopen || this.disposed) return;
@@ -634,9 +651,11 @@ export class RsbWindowController {
     }
     this.automaticRecoveryAttempts += 1;
     this.pendingOpen = true;
+    this.pendingOpenShouldFocus = reopenShouldFocus;
     const replacement = this.ensureWindow();
     if (!replacement) {
       this.pendingOpen = false;
+      this.pendingOpenShouldFocus = true;
       return;
     }
     this.scheduleOpenFallback(replacement);

@@ -109,10 +109,16 @@ function normalizeNestedPowerShellInvocation(command: string): string | null {
   const withoutOperator = command.replace(/^[&.]\s+/, '');
   const target = leadingShellToken(withoutOperator);
   if (!target) return null;
-  const bin = powerShellExecutableName(target.value);
-  if (!bin) return null;
+  if (!isPowerShellExecutable(target.value)) return null;
+  // **解释器 token 原样保留,不改写成短名**。core 自己就能从完整路径求出解释器身份
+  // (`executableName` 去目录去 `.exe`,实测 Bash 入口对 `'C:\…\pwsh.exe' -enc X` 判红),
+  // 所以改写既无必要,又会抹掉路径 —— 而归一结果就是 reviewAutoAction 的缓存身份:
+  // `& 'C:\Program Files\PowerShell\7\pwsh.exe' -File a.ps1` 与
+  // `& 'C:\tmp\pwsh.exe' -File a.ps1` 会变成同一条 key,可信路径拿到的 allow 会被任意
+  // 一个叫 pwsh.exe 的二进制复用(codex 报,已实测复现)。只剥调用运算符。
+  const executable = withoutOperator.slice(0, target.length);
   const rest = withoutOperator.slice(target.length).trim();
-  return rest ? `${bin} ${normalizeInterpreterArgs(rest)}` : bin;
+  return rest ? `${executable} ${normalizeInterpreterArgs(rest)}` : executable;
 }
 
 /**
@@ -169,13 +175,13 @@ function leadingShellToken(text: string): { value: string; length: number } | nu
 }
 
 /**
- * token 是否为 PowerShell 解释器;是则返回**规范短名**。与 core 的 `executableName` 同口径
- * (去目录、去 `.exe`、大小写无关)。保留 pwsh / powershell 的区分,不把 5.1 与 7 混为一谈。
+ * token 是否为 PowerShell 解释器。与 core 的 `executableName` 同口径:去目录、去 `.exe`、
+ * 大小写无关。只做判断,**不用于改写** —— 改写会抹掉路径,而路径是缓存身份的一部分。
  */
-function powerShellExecutableName(token: string): 'pwsh' | 'powershell' | null {
+function isPowerShellExecutable(token: string): boolean {
   const base = token.split(/[\\/]/).pop() ?? '';
   const stem = base.replace(/\.exe$/i, '').toLowerCase();
-  return stem === 'pwsh' ? 'pwsh' : stem === 'powershell' ? 'powershell' : null;
+  return stem === 'pwsh' || stem === 'powershell';
 }
 
 function extractFilePath(toolName: string, input: unknown): string | undefined {

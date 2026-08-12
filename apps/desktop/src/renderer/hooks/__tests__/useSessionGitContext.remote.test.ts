@@ -19,6 +19,7 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 import { useSessionGitContext } from '../useSessionGitContext';
 import { PrRefsProvider } from '@/contexts/PrRefsContext';
+import { remoteProjectsStore } from '@/features/device-link/remoteProjectsStore';
 
 /** 统一管线经 PrRefsProvider 拉取 PR;hook 测试统一套一层 provider。 */
 const wrapper = ({ children }: { children: ReactNode }) =>
@@ -235,5 +236,51 @@ describe('useSessionGitContext remote routing', () => {
       expect(result.current.prStatuses.size).toBe(0);
     });
     unmount();
+  });
+
+  // 2026-08-13 用户裁决:设备明确断线时不发注定失败的 PR 隧道查询(fail-open:
+  // shard 缺失照常尝试,见 prRefsRefreshGating.test.ts 的判定语义)。
+  it('被控端标记断线时跳过 PR 引用的隧道查询,重连后恢复', async () => {
+    const gitContext = makeGitContext();
+    const invoke = vi.fn(async (_deviceId: string, channel: string) => {
+      if (channel === 'git-context:get-for-session') {
+        return {
+          workdir: '/controlled/repo',
+          head: { kind: 'branch', branch: 'feature/offline', shortSha: null },
+          source: 'remote',
+        };
+      }
+      return [];
+    });
+    window.electronAPI = {
+      gitContext,
+      deviceLink: { invoke },
+    } as never;
+
+    const session = { ...sessionBase, deviceLinkDeviceId: 'device-1' };
+    try {
+      // 断线快照:shard 仍在(会话行留在侧栏),连接标记为 disconnected。
+      remoteProjectsStore.setDeviceSessions('device-1', 'Test Device', [session]);
+      remoteProjectsStore.markDeviceDisconnected('device-1');
+
+      const first = renderHook(() => useSessionGitContext(session), { wrapper });
+      await waitFor(() => expect(first.result.current.head?.branch).toBe('feature/offline'));
+      // HEAD 走独立通道不受门控;PR 引用的隧道查询被跳过。
+      expect(invoke).not.toHaveBeenCalledWith('device-1', 'git-context:pr-refs:list', [
+        'session-1',
+      ]);
+      first.unmount();
+
+      // 重连(权威列表再次到达)→ 下一个触发点(这里用重挂载等价周期/聚焦刷新)恢复查询。
+      remoteProjectsStore.setDeviceSessions('device-1', 'Test Device', [session]);
+      const second = renderHook(() => useSessionGitContext(session), { wrapper });
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith('device-1', 'git-context:pr-refs:list', ['session-1']);
+      });
+      second.unmount();
+    } finally {
+      // 清掉 shard,别让断线标记漂进同文件其它用例。
+      remoteProjectsStore.removeDevice('device-1');
+    }
   });
 });

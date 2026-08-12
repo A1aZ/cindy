@@ -28,6 +28,7 @@ import {
 import type { PrStatusResult, SessionPrRef } from '@/lib/gitContext.types';
 import { prStatusKey, MAX_STATUS_QUERIES, PR_STATUS_REFRESH_INTERVAL_MS } from '@/lib/prStatus';
 import { useAuth } from '@/contexts/AuthContext';
+import { isRemoteDeviceMarkedDisconnected } from '@/features/device-link/remoteProjectsStore';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PrRefsContext');
@@ -214,6 +215,9 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         const deviceId =
           remoteDeviceBySession.current.get(sessionId) ??
           prConsumers.current.get(sessionId)?.deviceId;
+        // 设备明确断线时不发注定失败的隧道调用(fail-open:shard 缺失照常尝试)。
+        // 不写任何状态,重连后的下一个触发点(周期 / 聚焦 / 引用到位)自然恢复。
+        if (deviceId && isRemoteDeviceMarkedDisconnected(deviceId)) return;
         const results = deviceId
           ? ((await window.electronAPI.deviceLink.invoke(deviceId, 'git-context:pr-status', [
               { sessionId, queries },
@@ -242,6 +246,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   // 但**不是终态**:下个周期重查(远端新增 PR / 短暂竞态都靠这条自愈)。
   const fetchRefsForRemoteSession = useRef((sessionId: string, deviceId: string) => {
     remoteDeviceBySession.current.set(sessionId, deviceId);
+    // 设备明确断线 → 跳过(簿记保留,供状态查询路由)。此前失败路径刻意不写时间戳
+    // 以便瞬断立即重试,但长离线下就成了每个周期一轮注定失败的隧道调用 + 告警日志;
+    // 断线判定本地同步可得,先看一眼再发(2026-08-13 用户裁决)。fail-open:
+    // shard 缺失(尚未建立 / 设备已移除)照常尝试,语义见 isRemoteDeviceMarkedDisconnected。
+    if (isRemoteDeviceMarkedDisconnected(deviceId)) return;
     if (remoteRefsInFlight.current.has(sessionId)) return;
     // TTL 门:距上次成功不足一个刷新周期就跳过(interval / 聚焦 / 行重挂载都会
     // 频繁触发,靠它避免风暴);失败路径不写时间戳,天然立即可重试。
@@ -307,6 +316,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   // 等远端状态变化也随节拍收敛(main / 被控端各有 60s TTL,重复查询便宜)。
   useEffect(() => {
     const refreshAll = () => {
+      // 失焦/隐藏时跳过周期刷新:没人在看,后台空转的查询(GitHub 配额 +
+      // device-link 隧道)纯属浪费;下面的 focus 监听会在回到前台的瞬间全量补一次,
+      // 数据不会停留在过期态(2026-08-13 用户裁决)。focus 事件触发的调用天然
+      // 通过本判断(事件发生时已聚焦)。
+      if (typeof document !== 'undefined' && (document.hidden || !document.hasFocus())) return;
       for (const [sessionId, entry] of prConsumers.current) {
         refreshConsumer(sessionId, entry.deviceId);
       }

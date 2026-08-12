@@ -147,14 +147,14 @@ describe('resolveDeviceLinkDraftDefaults', () => {
     expect(sel.model).toBe('claude-haiku-4-5');
   });
 
-  it('Pi 的远程新任务保留非 XD claude-code 投影标记兼容', () => {
+  it('Pi 的远程新任务不借用 claude-code 默认标记', () => {
     const sel = resolveDeviceLinkDraftDefaults(
       caps(),
       { model: 'claude-opus-4-8', modelChosenByUser: false },
       undefined,
       'pi',
     );
-    expect(sel.model).toBe('claude-haiku-4-5');
+    expect(sel.model).toBe('claude-opus-4-8');
   });
 
   it('effort 不被目标模型支持 → 落该模型 defaultEffort', () => {

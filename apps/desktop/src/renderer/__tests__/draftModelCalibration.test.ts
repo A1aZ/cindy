@@ -296,7 +296,7 @@ describe('pickConnectedModelForAgent — newSessionDefault 标记优先（步骤
     expect(pickId(providers, 'pi', 'claude-sonnet-5')).toBe('deepseek');
   });
 
-  it('pi keeps accepting the legacy non-XD claude-code projection marker', () => {
+  it('pi does not borrow a claude-code default marker', () => {
     const providers = [
       provider('anthropic', true, {
         pi: [
@@ -305,7 +305,7 @@ describe('pickConnectedModelForAgent — newSessionDefault 标记优先（步骤
         ],
       }),
     ];
-    expect(pickId(providers, 'pi', 'claude-sonnet-5')).toBe('claude-opus-5');
+    expect(pickId(providers, 'pi', 'claude-sonnet-5')).toBe('claude-sonnet-5');
   });
 
   it('被标记但默认收起(defaultEnabled:false)时不选', () => {

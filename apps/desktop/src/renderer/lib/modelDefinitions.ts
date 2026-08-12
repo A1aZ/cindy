@@ -27,7 +27,7 @@ export interface ModelDefinition {
   /**
    * 该模型是哪些 wire agent 的**新对话默认种子**(源自目录 newSessionDefault,与 sortOrder
    * 解耦)。缺省 = 不作为默认。getDefaultModelForVendor / newSessionDefaultModelId 据它选默认;
-   * Pi 支持自己的 v3 标记，同时保留非 XD 目录既有的 Claude Code 投影标记。
+   * Pi 只接受自己的 v3 标记，不借用其它 Agent 的默认策略。
    */
   newSessionDefault?: ('claude-code' | 'codex' | 'pi')[];
 }
@@ -136,20 +136,19 @@ function firstByCatalogOrder(models: readonly ModelDefinition[]): ModelDefinitio
   return pool.slice().sort(byOrder)[0];
 }
 
-/** vendor → 新对话默认所依据的目录 Agent 标记；Pi 的 CC 标记仅用于既有非 XD 投影。 */
-function defaultMarkerAgentsForVendor(
+/** vendor → 新对话默认所依据的目录 Agent 标记。 */
+function defaultMarkerAgentForVendor(
   vendorKey: 'cc' | 'codex' | 'pi',
-): readonly ('claude-code' | 'codex' | 'pi')[] {
-  if (vendorKey === 'cc') return ['claude-code'];
-  if (vendorKey === 'codex') return ['codex'];
-  return ['pi', 'claude-code'];
+): 'claude-code' | 'codex' | 'pi' {
+  if (vendorKey === 'cc') return 'claude-code';
+  return vendorKey;
 }
 
 /**
  * 该 vendor 被目录**显式标记**为新对话默认种子(newSessionDefault)、且当前可用且默认可见的
  * 模型 id;没有标记则返回 null。多个被标记时按 sortOrder 决胜。与 sortOrder / defaultEnabled
- * 解耦 —— 标记本身表达「这是默认」,sortOrder 只管选择器陈列顺序。Pi 优先接受 v3 的 pi
- * 标记，同时保留既有非 XD 目录的 claude-code 投影标记。
+ * 解耦 —— 标记本身表达「这是默认」,sortOrder 只管选择器陈列顺序。每个 vendor 只接受
+ * 自己的 Agent 标记，避免把其它 Agent 的服务端默认策略当作自己的隐式 fallback。
  *
  * 生产环境该标记对 XD 网关模型由服务端 GET /models 按区域下发(见 shared/modelAccess
  * ModelAccessGatewayModel.newSessionDefault);bundled 目录默认不标记,故服务端未下发时
@@ -159,11 +158,9 @@ export function newSessionDefaultModelId(
   vendorKey: 'cc' | 'codex' | 'pi',
   deviceId?: string,
 ): string | null {
-  const agents = defaultMarkerAgentsForVendor(vendorKey);
+  const agent = defaultMarkerAgentForVendor(vendorKey);
   const flagged = getModelsForVendor(vendorKey, deviceId).filter(
-    (m) =>
-      m.defaultEnabled !== false &&
-      (m.newSessionDefault?.some((agent) => agents.includes(agent)) ?? false),
+    (m) => m.defaultEnabled !== false && (m.newSessionDefault?.includes(agent) ?? false),
   );
   return firstByCatalogOrder(flagged)?.id ?? null;
 }

@@ -82,6 +82,12 @@ type Option<T extends string> = {
    * 这类图标能真正帮上忙的段——分组与排序是抽象策略,硬配图标反而增噪,留空。
    */
   Icon?: LucideIcon;
+  /**
+   * hover 说明(2026-08-13 用户裁决)。只给「光看标签猜不出排序依据」的选项——
+   * 「优先级」不说清按什么排,用户无从判断它和「按时间排序」的差别;
+   * 「按时间排序」「手动排序」名字自解释,不加提示避免菜单变成说明书。
+   */
+  tipKey?: string;
 };
 
 const STATUS_OPTIONS: ReadonlyArray<Option<FilterStatus>> = [
@@ -107,7 +113,11 @@ const LAST_ACTIVITY_OPTIONS: ReadonlyArray<Option<FilterLastActivity>> = [
 /** 「最早优先」(旧 time)2026-08-12 用户裁决删除;时间排序只保留最近活动在前一档。 */
 const FLAT_SORT_BY_OPTIONS: ReadonlyArray<Option<FilterSortBy>> = [
   { value: 'recency', labelKey: 'ccAgent.sidebar.filterSortBy.recency' },
-  { value: 'priority', labelKey: 'ccAgent.sidebar.filterSortBy.priority' },
+  {
+    value: 'priority',
+    labelKey: 'ccAgent.sidebar.filterSortBy.priority',
+    tipKey: 'ccAgent.sidebar.filterSortByTip.priority',
+  },
 ];
 
 /** manual(手动排序)只管项目行(设计文档 §9.3 收窄),平铺模式下无意义不展示。 */
@@ -228,12 +238,15 @@ function SelectMenuItem({
   selected,
   onSelect,
   Icon,
+  tip,
   keepOpen = false,
 }: {
   label: string;
   selected: boolean;
   onSelect: () => void;
   Icon?: LucideIcon;
+  /** 可选 hover 说明(见 Option.tipKey);为空时 Tip 透明透传,不挂 tooltip。 */
+  tip?: string;
   /**
    * 选中后保持菜单打开(2026-08-12 用户裁决)。给筛选的各维度用:筛选常要连着
    * 调好几项(状态 + Agent + 最近活跃),每选一次就整棵菜单收掉、得从段头重新点开
@@ -243,19 +256,24 @@ function SelectMenuItem({
   keepOpen?: boolean;
 }) {
   return (
-    <DropdownMenuItem
-      onSelect={(event) => {
-        if (keepOpen) event.preventDefault();
-        onSelect();
-      }}
-      className={MENU_ITEM_CLASS}
-    >
-      <MenuItemIcon Icon={Icon} />
-      <span className="truncate">{label}</span>
-      {selected && (
-        <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
-      )}
-    </DropdownMenuItem>
+    // side="right":菜单本身贴着侧栏右缘,提示往上/下会压住相邻选项,往右才有空间
+    // (与项目多选行的远程 Tip 同侧)。Tip 在 text 为空时直接透传 children,
+    // 无提示的选项零额外开销、也不会多包一层影响 Radix 的键盘导航。
+    <Tip text={tip} side="right">
+      <DropdownMenuItem
+        onSelect={(event) => {
+          if (keepOpen) event.preventDefault();
+          onSelect();
+        }}
+        className={MENU_ITEM_CLASS}
+      >
+        <MenuItemIcon Icon={Icon} />
+        <span className="truncate">{label}</span>
+        {selected && (
+          <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
+        )}
+      </DropdownMenuItem>
+    </Tip>
   );
 }
 
@@ -476,6 +494,7 @@ export function SidebarFilterPopover({
               label={t(option.labelKey)}
               selected={effectiveSortBy === option.value}
               onSelect={() => setSortBy(option.value)}
+              tip={option.tipKey ? t(option.tipKey) : undefined}
             />
           ))}
 

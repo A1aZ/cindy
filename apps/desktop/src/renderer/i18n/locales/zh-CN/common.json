@@ -7003,6 +7003,9 @@
         "manual": "手动排序",
         "priority": "优先级"
       },
+      "filterSortByTip": {
+        "priority": "有未读或等你处理的排在最前，然后是运行中的，其余按时间"
+      },
       "filterStatusHeading": "状态",
       "filterAgentHeading": "Agent",
       "filterLastActivityHeading": "最近活跃",

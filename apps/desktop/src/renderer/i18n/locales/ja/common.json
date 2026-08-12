@@ -7007,6 +7007,9 @@
         "manual": "手動",
         "priority": "優先度"
       },
+      "filterSortByTip": {
+        "priority": "未読・要対応を最上位に、次に実行中、残りは時間順"
+      },
       "filterStatusHeading": "ステータス",
       "filterAgentHeading": "エージェント",
       "filterLastActivityHeading": "最終アクティビティ",

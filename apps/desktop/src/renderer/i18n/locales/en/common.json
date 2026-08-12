@@ -7019,6 +7019,9 @@
         "manual": "Manual",
         "priority": "Priority"
       },
+      "filterSortByTip": {
+        "priority": "Unread or waiting on you first, then running, then by time"
+      },
       "filterStatusHeading": "Status",
       "filterAgentHeading": "Agent",
       "filterLastActivityHeading": "Last activity",

@@ -203,6 +203,22 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     );
   });
 
+  // 2026-08-13 用户裁决:「优先级」光看标签猜不出排序依据,需要 hover 说明。
+  it('排序的「优先级」有 hover 说明,自解释的档位不加', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    // 说明挂在选项表上(与 labelKey / Icon 同源),不在渲染处硬编码文案。
+    expect(filterSource).toMatch(
+      /value: 'priority',\s*\n\s*labelKey: 'ccAgent\.sidebar\.filterSortBy\.priority',\s*\n\s*tipKey: 'ccAgent\.sidebar\.filterSortByTip\.priority',/,
+    );
+    // recency / manual 名字自解释,不配说明——菜单不该变成说明书。
+    expect(filterSource).not.toMatch(/filterSortBy\.recency',\s*\n?\s*tipKey/);
+    expect(filterSource).not.toMatch(/filterSortBy\.manual',\s*\n?\s*tipKey/);
+    // side="right":菜单贴侧栏右缘,提示往上下会压住相邻选项。
+    expect(filterSource).toContain('<Tip text={tip} side="right">');
+    // 渲染处从选项表取,tipKey 缺省时传 undefined(Tip 据此透明透传、不挂 tooltip)。
+    expect(filterSource).toContain('tip={option.tipKey ? t(option.tipKey) : undefined}');
+  });
+
   // 设计文档 §3.3 定稿 + 2026-08-12 用户重申:筛选不作用于置顶区。
   it('置顶区不受项目 / Agent / 最近活跃筛选影响(归档仍按状态隐藏)', () => {
     // 置顶会话:直接用 allGroups.pinned,不再套 vendor / project 过滤。

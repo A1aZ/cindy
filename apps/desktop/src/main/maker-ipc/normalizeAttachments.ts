@@ -863,9 +863,11 @@ export async function materializeDirectSendOssAttachments(
       typeof pathValue === 'string' &&
       pathValue !== originalPath
     ) {
+      const isImage = (original as { type?: unknown }).type === 'image';
       nextContent[attachmentIndexes[index]] = {
         ...(original as object),
         path: pathValue,
+        ...(isImage ? { pathOrigin: 'desktop-host' as const } : {}),
         base64: undefined,
       };
     }

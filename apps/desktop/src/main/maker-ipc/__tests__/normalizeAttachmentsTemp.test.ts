@@ -14,8 +14,13 @@ vi.mock('../../imageCacheStore.js', () => ({
 }));
 vi.mock('../../cindy-media/blobStore.js', () => ({
   resolveSafe: vi.fn(),
+  supportedMime: vi.fn(),
+  mimeForExt: vi.fn(),
 }));
-vi.mock('../../cindy-media/ledger.js', () => ({}));
+vi.mock('../../cindy-media/ledger.js', () => ({
+  removeRefById: vi.fn(),
+  deleteZeroRefBlobRecord: vi.fn(),
+}));
 vi.mock('../../cindy-media/ingest.js', () => ({ ingestMedia: vi.fn() }));
 vi.mock('../../device-link/mediaTransfer.js', () => ({
   downloadToFile: vi.fn(),
@@ -29,12 +34,18 @@ import {
   cleanupOrphanedTempAttachments,
   cleanupSessionTempAttachments,
   configureTempAttachmentOwner,
+  materializeDirectSendOssAttachments,
   normalizeUserMessage,
 } from '../normalizeAttachments.js';
+import * as cindyMediaBlobStore from '../../cindy-media/blobStore.js';
+import { ingestMedia } from '../../cindy-media/ingest.js';
+import { downloadToFile, removeRemote } from '../../device-link/mediaTransfer.js';
+import { buildAttachmentOssRef } from '../../../shared/attachmentOssRef.js';
 
 const tempDirs: string[] = [];
 
 beforeEach(async () => {
+  vi.clearAllMocks();
   tempRoot.value = await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-review-inline-test-'));
   tempDirs.push(tempRoot.value);
   configureTempAttachmentOwner({
@@ -48,6 +59,57 @@ afterEach(async () => {
 });
 
 describe('inline attachment temporary files', () => {
+  it('marks directly materialized OSS images as desktop-host attachments', async () => {
+    const hash = 'a'.repeat(64);
+    const mediaUrl = `cindy-media://blobs/${hash}.png`;
+    const absPath = path.join(tempRoot.value, 'materialized.png');
+    vi.mocked(downloadToFile).mockImplementationOnce(async (_ossKey, destination) => {
+      await fs.writeFile(destination, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    });
+    vi.mocked(cindyMediaBlobStore.supportedMime).mockReturnValue(true);
+    vi.mocked(cindyMediaBlobStore.resolveSafe).mockReturnValue({
+      absPath,
+      mimeType: 'image/png',
+      hash,
+    });
+    vi.mocked(ingestMedia).mockResolvedValueOnce({
+      hash,
+      ext: '.png',
+      mimeType: 'image/png',
+      bytes: 4,
+      url: mediaUrl,
+      deduplicated: false,
+      refIds: ['ref-1'],
+    });
+    const ossRef = buildAttachmentOssRef({
+      ossKey: 'cindy/device-link/user/image.png',
+      mimeType: 'image/png',
+      originalName: 'image.png',
+    });
+
+    const materialized = await materializeDirectSendOssAttachments(
+      'direct-oss-image',
+      {
+        type: 'user',
+        content: [{ type: 'image', path: ossRef, mimeType: 'image/png' }],
+      },
+      undefined,
+    );
+
+    expect(materialized.message).toEqual({
+      type: 'user',
+      content: [{
+        type: 'image',
+        path: absPath,
+        mimeType: 'image/png',
+        pathOrigin: 'desktop-host',
+        base64: undefined,
+      }],
+    });
+    materialized.cleanupAfterAcceptance?.();
+    expect(removeRemote).toHaveBeenCalledWith('cindy/device-link/user/image.png');
+  });
+
   it('writes private bytes and removes them even before Maker owns the session', async () => {
     const sessionId = 'reviewer-session';
     const normalized = await normalizeUserMessage(sessionId, {

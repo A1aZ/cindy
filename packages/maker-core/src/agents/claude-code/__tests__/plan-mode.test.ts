@@ -625,6 +625,61 @@ describe('ClaudeCodeAgent plan mode', () => {
     await handle.close();
   });
 
+  it('warns when an active SSH session is steered with a desktop-local image', async () => {
+    const configDir = await makeTempDir();
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const workingDir = await makeTempDir();
+    const imagePath = path.join(workingDir, 'desktop-steer.png');
+    const remoteSend = vi.fn(async () => {});
+    const fakeQuery = { ...createFakeQuery(), send: remoteSend };
+    const remoteCcQueryFactory: NonNullable<AgentDeps['remoteCcQueryFactory']> = async () =>
+      fakeQuery as never;
+    const logger = createNoopLogger();
+    const warn = vi.spyOn(logger, 'warn');
+    const agent = new ClaudeCodeAgent(createDeps({ logger, remoteCcQueryFactory }));
+    const handle = await agent.startSession({
+      sessionId: 'session-remote-desktop-steer-image',
+      model: 'claude-opus-4-6',
+      workingDir,
+      remoteHostId: 'remote-1',
+      permissionMode: 'auto',
+    });
+    const iterator = handle.events()[Symbol.asyncIterator]();
+
+    await handle.send({ type: 'user', content: 'Start the remote turn' });
+    await vi.waitFor(() => expect(remoteSend).toHaveBeenCalledTimes(1));
+    await handle.steer({
+      type: 'user',
+      content: [
+        {
+          type: 'image',
+          path: imagePath,
+          mimeType: 'image/png',
+          pathOrigin: 'desktop-host',
+        },
+        { type: 'text', text: 'Inspect this too' },
+      ],
+    });
+    await vi.waitFor(() => expect(remoteSend).toHaveBeenCalledTimes(2));
+
+    expect(warn).toHaveBeenCalledWith(
+      'cc remote: local attachment not accessible on remote session',
+      expect.objectContaining({
+        sessionId: 'session-remote-desktop-steer-image',
+        hostId: 'remote-1',
+      }),
+    );
+    const events = [await nextEvent(iterator), await nextEvent(iterator)];
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      data: expect.objectContaining({
+        message: expect.stringContaining('[REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED]'),
+        isTerminal: false,
+      }),
+    }));
+    await handle.close();
+  });
+
   it('overrides remote cc-manager env with a host-materialized Claude route', async () => {
     const configDir = await makeTempDir();
     process.env.CLAUDE_CONFIG_DIR = configDir;

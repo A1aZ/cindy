@@ -4842,6 +4842,27 @@ export class ClaudeCodeAgent extends BaseAgent {
         releaseCancellationRebuildGate?.();
       }
     }
+    const warnIfRemoteDesktopAttachment = (content: UserMessage['content']): void => {
+      if (!opts.remoteHostId || !Array.isArray(content)) return;
+      const hasDesktopLocalAttachment = content.some(
+        (block) => block.type === 'file'
+          || block.type === 'mention'
+          || (block.type === 'image' && block.pathOrigin === 'desktop-host'),
+      );
+      if (!hasDesktopLocalAttachment) return;
+      log.warn('cc remote: local attachment not accessible on remote session', {
+        sessionId: opts.sessionId,
+        hostId: opts.remoteHostId,
+      });
+      eventQueue.push({
+        type: 'error',
+        data: {
+          message: '[REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED] Local file attachments are not accessible on remote sessions. Paste content directly instead.',
+          isTerminal: false,
+        },
+        source: 'claude-code',
+      });
+    };
     const handle: AgentSessionHandle = {
       get id() { return sdkSessionId ?? '<pending>'; },
       agentKind: 'claude-code',
@@ -5163,27 +5184,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // 模型看不见 → silent context loss。完整修法是 upload 文件到远端 (follow-up),
           // 这里 MVP 检测到附件就 emit warn event 让用户知道,实际请求里把附件 ref 留着
           // (daemon 端 SDK 读不到就跳过, 不会 crash)。
-          if (opts.remoteHostId && Array.isArray(message.content)) {
-            const hasDesktopLocalAttachment = message.content.some(
-              (b) => b.type === 'file'
-                || b.type === 'mention'
-                || (b.type === 'image' && b.pathOrigin === 'desktop-host'),
-            );
-            if (hasDesktopLocalAttachment) {
-              log.warn('cc remote: local attachment not accessible on remote session', {
-                sessionId: opts.sessionId,
-                hostId: opts.remoteHostId,
-              });
-              eventQueue.push({
-                type: 'error',
-                data: {
-                  message: '[REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED] Local file attachments are not accessible on remote sessions. Paste content directly instead.',
-                  isTerminal: false,
-                },
-                source: 'claude-code',
-              });
-            }
-          }
+          warnIfRemoteDesktopAttachment(message.content);
           // Claude Code streaming-input 协议要求 message 包装层,漏掉会 exit code 1。
           // sendOpts.messageUuid 注入到 SDK input.uuid — SDK 透传当作 file checkpoint
           // snapshot 的 messageId, rewind preview 拿同款 uuid 调 rewindFiles dryRun。
@@ -5268,6 +5269,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           // keeps the original queue/composer content and lets the user retry.
           throw new Error('No active Claude turn to steer');
         }
+        warnIfRemoteDesktopAttachment(message.content);
         // Same-turn steering deliberately does NOT call beginTurn(), reset the
         // tool-loop guard, or emit a new running status. Those are turn-start
         // side effects; doing them here would corrupt usage attribution and make

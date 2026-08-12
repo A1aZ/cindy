@@ -208,6 +208,9 @@ function createHarness(opts?: {
   const onAcceptedQueuedMessage = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['onAcceptedQueuedMessage']>
   >(() => {});
+  const rewindCancelledPersistedUserMessage = vi.fn<
+    NonNullable<AgentInputCoordinatorDeps['rewindCancelledPersistedUserMessage']>
+  >(async () => {});
   const onDispatchedUserTurn = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['onDispatchedUserTurn']>
   >(() => {});
@@ -299,6 +302,7 @@ function createHarness(opts?: {
     onUserMessagePersisted,
     onUserMessagePersistenceFailed,
     onAcceptedQueuedMessage,
+    rewindCancelledPersistedUserMessage,
     onDispatchedUserTurn,
     onResumableTurnError,
     isResumableTurnErrorCandidate,
@@ -335,6 +339,7 @@ function createHarness(opts?: {
     onUserMessagePersisted,
     onUserMessagePersistenceFailed,
     onAcceptedQueuedMessage,
+    rewindCancelledPersistedUserMessage,
     onDispatchedUserTurn,
     onResumableTurnError,
     isResumableTurnErrorCandidate,
@@ -6148,6 +6153,45 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
       sid,
       expect.objectContaining({ clientId: 'q-focus' }),
     );
+    expect(h.rewindCancelledPersistedUserMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-focus' }),
+    );
+  });
+
+  it('rechecks focused-plugin messages at the final vendor dispatch boundary', async () => {
+    const h = createHarness();
+    const sid = 'plugin-final-focus-guard-cancelled';
+    let focused = true;
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => () => {
+      if (!focused) throw new AcceptedCallbackDispatchCancelled('plugin target changed');
+    });
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      focused = false;
+      sendOpts.assertBeforeVendorDispatch?.();
+      return sendSuccess();
+    });
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-final-focus', 'plugin message', {
+        bypassGhostHooks: true,
+        requireCurrentSessionFocus: true,
+      }),
+    );
+    await flush();
+
+    expect(h.rewindCancelledPersistedUserMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-final-focus' }),
+    );
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-final-focus' }),
+      'cancelled',
+    );
+    expect(latestProjection(h.projections).recovery).toBeNull();
   });
 
   it('releases a crash-restored paused queue on explicit user input (resumeRestorePausedQueue)', async () => {

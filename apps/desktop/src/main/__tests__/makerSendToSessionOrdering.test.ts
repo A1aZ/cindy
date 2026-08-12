@@ -302,13 +302,23 @@ describe('sendToSession ordering', () => {
     expect(liveBranch).toContain('live,');
     expectOrder(liveBranch, 'message,', 'clientId,');
     expect(liveBranch).toContain('onAccepted: persistUserMessage,');
-    expect(liveBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
+    expect(liveBranch).toContain('onDispatching: () => {');
+    expectOrder(
+      liveBranch,
+      'assertBeforeVendorDispatch?.();',
+      'dispatchAgentIslandUserPrompt(targetSessionId);',
+    );
     expect(liveBranch).toContain("assertDesktopSendDispatched(sendResult, 'send_to_session live');");
     expect(resumedBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(');
     expect(resumedBranch).toContain('session,');
     expectOrder(resumedBranch, 'message,', 'clientId,');
     expect(resumedBranch).toContain('onAccepted: persistUserMessage,');
-    expect(resumedBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
+    expect(resumedBranch).toContain('onDispatching: () => {');
+    expectOrder(
+      resumedBranch,
+      'assertBeforeVendorDispatch?.();',
+      'dispatchAgentIslandUserPrompt(targetSessionId);',
+    );
     expect(resumedBranch).toContain("assertDesktopSendDispatched(sendResult, 'send_to_session resumed');");
   });
 
@@ -580,7 +590,12 @@ describe('sendToSession ordering', () => {
     expect(liveBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(');
     expect(liveBranch).toContain('live,');
     expect(liveBranch).toContain('onAccepted: persistUserMessage,');
-    expect(liveBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
+    expect(liveBranch).toContain('onDispatching: () => {');
+    expectOrder(
+      liveBranch,
+      'assertBeforeVendorDispatch?.();',
+      'dispatchAgentIslandUserPrompt(targetSessionId);',
+    );
     expect(liveBranch).not.toContain('await persistUserMessage();');
     expect(liveBranch).toContain('if (isSessionRunningError(err))');
     expect(liveBranch).toContain('await enqueueSendToSessionMessage({');
@@ -598,7 +613,12 @@ describe('sendToSession ordering', () => {
     expect(resumedBranch).toContain('const sendResult = await sendUserMessageWithAwaitedGitBaseline(');
     expect(resumedBranch).toContain('session,');
     expect(resumedBranch).toContain('onAccepted: persistUserMessage,');
-    expect(resumedBranch).toContain('onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),');
+    expect(resumedBranch).toContain('onDispatching: () => {');
+    expectOrder(
+      resumedBranch,
+      'assertBeforeVendorDispatch?.();',
+      'dispatchAgentIslandUserPrompt(targetSessionId);',
+    );
     expect(resumedBranch).not.toContain('await persistUserMessage();');
     expect(resumedBranch).toContain('if (isSessionRunningError(err))');
     expect(resumedBranch).toContain('await enqueueSendToSessionMessage({');
@@ -633,11 +653,10 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('clientId,');
     expect(runnerBlock).toContain('rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)');
     expect(runnerBlock).not.toContain('if (!rewound) return;');
-    expectOrder(
-      runnerBlock,
-      'rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)',
-      'throw new AcceptedCallbackDispatchCancelled(',
-    );
+    expect(runnerBlock).toContain('finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);');
+    expect(runnerBlock).toContain('assertBeforeVendorDispatch: () => {');
+    expect(runnerBlock).toContain("'plugin target changed at final vendor dispatch boundary'");
+    expect(runnerBlock).toContain('onDispatchCancelled: rewindCancelledMessage,');
   });
 
   it('screens plugin session messages once before direct or queued dispatch', () => {
@@ -676,6 +695,10 @@ describe('sendToSession ordering', () => {
     expect(coordinatorBlock).toContain('isGhostSessionCurrent(sessionId)');
     expect(coordinatorBlock).toContain(
       'rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId)',
+    );
+    expect(coordinatorBlock).toContain('captureGhostSessionFocusGuard(sessionId)');
+    expect(coordinatorBlock).toContain(
+      "'plugin target changed at queued final vendor dispatch boundary'",
     );
     expect(coordinatorBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
   });

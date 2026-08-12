@@ -1944,37 +1944,35 @@ const ghostSessionFocusTracker = createGhostPrimarySessionFocusTracker(
   resolveGhostPrimarySession,
   (sessionId) => notifyGhostSessionEvent('switched', { sessionId }),
 );
+let ghostSessionFocusRevision = 0;
 export function noteGhostSessionFocused(sessionId: string | null): void {
+  ghostSessionFocusRevision += 1;
   rawGhostSessionFocusTracker.note(sessionId);
   ghostSessionFocusTracker.note(sessionId);
 }
 
-async function currentGhostSessionId(): Promise<string | null> {
-  const candidates = mainShellWindows();
+type GhostSessionFocusGuard = {
+  revision: number;
+  webContentsId: number;
+  rawSessionId: string;
+};
+
+function readGhostSessionFocusCandidate(): { webContentsId: number; sessionId: string } | null {
   const focused = BrowserWindow.getFocusedWindow();
-  const readCandidate = () =>
-    selectGhostFocusedSessionCandidate(
-      mainShellWindows().map((window) => ({
-        webContentsId: window.webContents.id,
-        sessionId: ghostSessionFocusByWebContents.get(window.webContents.id) ?? null,
-      })),
-      (() => {
-        const currentFocused = BrowserWindow.getFocusedWindow();
-        return currentFocused && !currentFocused.isDestroyed()
-          ? currentFocused.webContents.id
-          : null;
-      })(),
-    );
-  const candidate = selectGhostFocusedSessionCandidate(
-    candidates.map((window) => ({
+  return selectGhostFocusedSessionCandidate(
+    mainShellWindows().map((window) => ({
       webContentsId: window.webContents.id,
       sessionId: ghostSessionFocusByWebContents.get(window.webContents.id) ?? null,
     })),
     focused && !focused.isDestroyed() ? focused.webContents.id : null,
   );
+}
+
+async function currentGhostSessionId(): Promise<string | null> {
+  const candidate = readGhostSessionFocusCandidate();
   if (!candidate) return null;
   const primarySessionId = await resolveGhostPrimarySession(candidate.sessionId);
-  const current = readCandidate();
+  const current = readGhostSessionFocusCandidate();
   return current?.webContentsId === candidate.webContentsId &&
     current.sessionId === candidate.sessionId
     ? primarySessionId
@@ -1983,6 +1981,41 @@ async function currentGhostSessionId(): Promise<string | null> {
 
 export async function isGhostSessionCurrent(sessionId: string): Promise<boolean> {
   return (await currentGhostSessionId()) === sessionId;
+}
+
+/**
+ * 异步确认目标仍是当前主任务，并返回可在 vendor 前同步复核的焦点守卫。
+ * 同步复核同时约束窗口、原始路由与路由版本，避免异步主任务归一化后又切换焦点。
+ */
+export async function captureGhostSessionFocusGuard(
+  sessionId: string,
+): Promise<(() => boolean) | null> {
+  const revision = ghostSessionFocusRevision;
+  const candidate = readGhostSessionFocusCandidate();
+  if (!candidate) return null;
+  const primarySessionId = await resolveGhostPrimarySession(candidate.sessionId);
+  const current = readGhostSessionFocusCandidate();
+  if (
+    primarySessionId !== sessionId ||
+    revision !== ghostSessionFocusRevision ||
+    current?.webContentsId !== candidate.webContentsId ||
+    current.sessionId !== candidate.sessionId
+  ) {
+    return null;
+  }
+  const guard: GhostSessionFocusGuard = {
+    revision,
+    webContentsId: candidate.webContentsId,
+    rawSessionId: candidate.sessionId,
+  };
+  return () => {
+    const latest = readGhostSessionFocusCandidate();
+    return (
+      guard.revision === ghostSessionFocusRevision &&
+      latest?.webContentsId === guard.webContentsId &&
+      latest.sessionId === guard.rawSessionId
+    );
+  };
 }
 
 const ghostSessionFocusByWebContents = new Map<number, string | null>();

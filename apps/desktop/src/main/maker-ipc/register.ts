@@ -86,6 +86,7 @@ import { isGhostDisabledForWorkdir } from '../cindy-brain/ghostWorkdirPrefs.js';
 import {
   executeGhostSetupAction,
   executeGhostSetupInlineAction,
+  captureGhostSessionFocusGuard,
   getGhostManager,
   getGhostSetupAssessment,
   getIOSSimulatorPluginAccessDecision,
@@ -7822,6 +7823,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     bypassGhostHooks?: boolean;
     /** 插件当前任务消息在最终派发前仍须命中当前焦点主任务。 */
     requireCurrentSessionFocus?: boolean;
+    /** Host-only synchronous fence for the last boundary before vendor dispatch. */
+    assertBeforeVendorDispatch?: () => void;
+    /** Cleanup for a durable row cancelled by an accepted/final-dispatch guard. */
+    onDispatchCancelled?: () => void | Promise<void>;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -7841,6 +7846,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       origin,
       bypassGhostHooks,
       requireCurrentSessionFocus,
+      assertBeforeVendorDispatch,
+      onDispatchCancelled,
       createDefaults,
       inheritSourcePermissionMode,
     } = params;
@@ -8319,7 +8326,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           const sendResult = await sendUserMessageWithAwaitedGitBaseline(live, message, clientId, {
             planMode: false,
             onAccepted: persistUserMessage,
-            onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+            onDispatching: () => {
+              assertBeforeVendorDispatch?.();
+              dispatchAgentIslandUserPrompt(targetSessionId);
+            },
           });
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
@@ -8343,6 +8353,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
           };
         } catch (err) {
+          if (err instanceof AcceptedCallbackDispatchCancelled) {
+            await onDispatchCancelled?.();
+            if (userPromptPreviewStarted) {
+              rollbackAgentIslandUserPrompt(
+                targetSessionId,
+                clientId,
+                'send_to_session:live:cancelled-before-dispatch',
+              );
+            }
+            return {
+              ok: false as const,
+              errorCode: 'INTERNAL' as const,
+              message: '当前焦点任务已变化，请重试',
+            };
+          }
           if (isSessionRunningError(err)) {
             if (userPromptPreviewStarted) {
               rollbackAgentIslandUserPrompt(
@@ -8419,7 +8444,10 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         const sendResult = await sendUserMessageWithAwaitedGitBaseline(session, message, clientId, {
           planMode: false,
           onAccepted: persistUserMessage,
-          onDispatching: () => dispatchAgentIslandUserPrompt(targetSessionId),
+          onDispatching: () => {
+            assertBeforeVendorDispatch?.();
+            dispatchAgentIslandUserPrompt(targetSessionId);
+          },
         });
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
@@ -8443,6 +8471,21 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             dbRow.userSendAt !== null ? new Date(dbRow.userSendAt).toISOString() : null,
         };
       } catch (err) {
+        if (err instanceof AcceptedCallbackDispatchCancelled) {
+          await onDispatchCancelled?.();
+          if (userPromptPreviewStarted) {
+            rollbackAgentIslandUserPrompt(
+              targetSessionId,
+              clientId,
+              'send_to_session:resumed:cancelled-before-dispatch',
+            );
+          }
+          return {
+            ok: false as const,
+            errorCode: 'INTERNAL' as const,
+            message: '当前焦点任务已变化，请重试',
+          };
+        }
         if (isSessionRunningError(err)) {
           if (userPromptPreviewStarted) {
             rollbackAgentIslandUserPrompt(
@@ -8636,6 +8679,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     }
     const screenedMessage = verdict.action === 'rewrite' ? verdict.text : message;
     const clientId = createId();
+    let finalDispatchGuard: (() => boolean) | null = null;
+    let dispatchCancelledForFocus = false;
+    const rewindCancelledMessage = async (): Promise<void> => {
+      dispatchCancelledForFocus = true;
+      let rewound = false;
+      try {
+        rewound = await enqueueDurableWrite(
+          `plugin-message-rewind:${sessionId}:${clientId}`,
+          () => rewindPersistedUserMessageBeforeDispatch(sessionId, clientId),
+        );
+      } catch (err) {
+        log.warn('plugin message rewind before cancelled dispatch failed', {
+          sessionId,
+          clientId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (!rewound) {
+        log.warn('plugin message rewind was not confirmed before cancelled dispatch', {
+          sessionId,
+          clientId,
+        });
+      }
+    };
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
       message: screenedMessage,
@@ -8645,34 +8712,36 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       requireCurrentSessionFocus: true,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
-          let rewound = false;
-          try {
-            rewound = await enqueueDurableWrite(
-              `plugin-message-rewind:${sessionId}:${clientId}`,
-              () => rewindPersistedUserMessageBeforeDispatch(sessionId, clientId),
-            );
-          } catch (err) {
-            log.warn('plugin message rewind before cancelled dispatch failed', {
-              sessionId,
-              clientId,
-              err: err instanceof Error ? err.message : String(err),
-            });
-          }
-          if (!rewound) {
-            log.warn('plugin message rewind was not confirmed before cancelled dispatch', {
-              sessionId,
-              clientId,
-            });
-          }
-          // 焦点权限边界优先于清理结果：回退失败可能留下待后续修复的孤立行，
-          // 但绝不能因此把插件消息派发到已经失焦的任务。
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target session is no longer focused',
           );
         }
+        finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);
+        if (!finalDispatchGuard) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin target changed while preparing final dispatch guard',
+          );
+        }
       },
+      assertBeforeVendorDispatch: () => {
+        if (!finalDispatchGuard?.()) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin target changed at final vendor dispatch boundary',
+          );
+        }
+      },
+      onDispatchCancelled: rewindCancelledMessage,
     });
-    if (!sent.ok) return sent;
+    if (!sent.ok) {
+      if (dispatchCancelledForFocus) {
+        return {
+          ok: false,
+          errorCode: 'SESSION_UNAVAILABLE',
+          message: '当前焦点任务已变化，请重试',
+        };
+      }
+      return sent;
+    }
     return {
       ok: true,
       sessionId: sent.targetSessionId,
@@ -10012,6 +10081,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         assertCurrentInputClearBoundary(sessionId, precondition.expected);
       }
       assertCurrentInputGeneration(sessionId, readExpectedInputGeneration(sendOpts));
+      const hostFence = (sendOpts as { assertBeforeVendorDispatch?: unknown } | null)
+        ?.assertBeforeVendorDispatch;
+      if (typeof hostFence === 'function') hostFence();
     },
     onUndispatchedDirectUserTurn: (sessionId) => gitSnapshotCoordinator?.onTurnAbort(sessionId),
     ackInterruptedTurnDispatched: async (sessionId, endedAt) => {
@@ -10914,7 +10986,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 可见行),理由与踩过的坑记在 helper 的注释里。
     supersedeRetriedUserTurn,
     getLastAssistantTranscriptUuid,
-    onAcceptedQueuedMessage: async (sessionId, item): Promise<void> => {
+    onAcceptedQueuedMessage: async (sessionId, item): Promise<void | (() => void)> => {
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。
       schedulerQueuedPromptDiscardWatchers.delete(item.clientId);
       if (item.requireCurrentSessionFocus === true) {
@@ -10929,26 +11001,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           });
         }
         if (!isCurrent) {
-          orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
-          let rewound = false;
-          try {
-            rewound = await enqueueDurableWrite(
-              `plugin-message-rewind:${sessionId}:${item.clientId}`,
-              () => rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId),
-            );
-          } catch (err) {
-            log.warn('restored plugin message rewind before cancelled dispatch failed', {
-              sessionId,
-              clientId: item.clientId,
-              err: err instanceof Error ? err.message : String(err),
-            });
-          }
-          if (!rewound) {
-            log.warn('restored plugin message rewind was not confirmed before cancelled dispatch', {
-              sessionId,
-              clientId: item.clientId,
-            });
-          }
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target changed before queued vendor dispatch',
           );
@@ -10957,6 +11009,26 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 返回 promise 让 coordinator 在 onPersisted 链路里 await —— worker 运行态与
       // pending auto-bridge 副作用必须先于 turn 启动完成；失败仍吞错落日志，不拦派发。
       await orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
+      if (item.requireCurrentSessionFocus === true) {
+        const guard = await captureGhostSessionFocusGuard(sessionId);
+        if (!guard) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin target changed while preparing queued final dispatch guard',
+          );
+        }
+        return () => {
+          if (!guard()) {
+            throw new AcceptedCallbackDispatchCancelled(
+              'plugin target changed at queued final vendor dispatch boundary',
+            );
+          }
+        };
+      }
+    },
+    rewindCancelledPersistedUserMessage: async (sessionId, item) => {
+      await enqueueDurableWrite(`plugin-message-rewind:${sessionId}:${item.clientId}`, () =>
+        rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId),
+      );
     },
     onUserMessagePersisting: (sessionId, item) => {
       markQueuedAttachmentPersistenceStarted(sessionId, item.clientId);

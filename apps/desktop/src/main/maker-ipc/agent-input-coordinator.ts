@@ -195,6 +195,8 @@ export interface AgentInputSendOpts {
   expectedClearBoundaryMs?: number | null;
   /** Main-owned input generation captured before async preparation. */
   expectedInputGeneration?: number;
+  /** Host-only synchronous fence checked immediately before vendor dispatch. */
+  assertBeforeVendorDispatch?: () => void;
   persistUserMessage?: {
     clientId: string;
     content: string;
@@ -410,6 +412,11 @@ export interface AgentInputCoordinatorDeps {
   /** Technical or policy rejection before vendor dispatch. */
   onRejectedUserTurn?: (sessionId: string, item: AgentInputQueuedMessage) => void;
   onAcceptedQueuedMessage?: (
+    sessionId: string,
+    item: AgentInputQueuedMessage,
+  ) => void | (() => void) | Promise<void | (() => void)>;
+  /** Rewind a durable user row when a host final-dispatch fence cancels the turn. */
+  rewindCancelledPersistedUserMessage?: (
     sessionId: string,
     item: AgentInputQueuedMessage,
   ) => void | Promise<void>;
@@ -3217,6 +3224,7 @@ export class AgentInputCoordinator {
         head.persistedContent,
         referenceContexts,
       );
+      let finalDispatchGuard: (() => void) | undefined;
       const result = await this.deps.sendToAgent(
         sessionId,
         buildMakerUserMessage(head, referenceContexts),
@@ -3234,6 +3242,9 @@ export class AgentInputCoordinator {
           ...(head.origin?.kind === 'scheduler' ? { origin: head.origin } : {}),
           // 手机来源透传到 send 事务:drain 已脱离入队时的 async context。
           ...(head.fromMobileClient ? { fromMobileClient: true } : {}),
+          ...(head.requireCurrentSessionFocus
+            ? { assertBeforeVendorDispatch: () => finalDispatchGuard?.() }
+            : {}),
           persistUserMessage: {
             clientId: head.clientId,
             content: head.persistedContent,
@@ -3278,7 +3289,8 @@ export class AgentInputCoordinator {
               // host 把排队 orca 消息的 accepted 副作用挂在这个 hook 上(置 running /
               // autoBridgePending), 必须 await 完才能放行 vendor turn —— fire-and-forget
               // 会让快 worker 在状态可见前结束 turn, 桥接被 turn-end handler 误跳过。
-              await this.deps.onAcceptedQueuedMessage?.(sessionId, head);
+              const acceptedResult = await this.deps.onAcceptedQueuedMessage?.(sessionId, head);
+              finalDispatchGuard = typeof acceptedResult === 'function' ? acceptedResult : undefined;
               if (!this.isActiveTurnCurrent(sessionId, active)) {
                 throw new Error(
                   '[SEND_CANCELLED_BEFORE_DISPATCH] User turn was cancelled before vendor dispatch',
@@ -3357,6 +3369,15 @@ export class AgentInputCoordinator {
         head.requireCurrentSessionFocus === true &&
         err instanceof AcceptedCallbackDispatchCancelled
       ) {
+        try {
+          await this.deps.rewindCancelledPersistedUserMessage?.(sessionId, head);
+        } catch (rewindError) {
+          log.warn('focused plugin message rewind after final dispatch cancellation failed', {
+            sessionId,
+            clientId: head.clientId,
+            error: errorMessage(rewindError),
+          });
+        }
         latest.activeTurn = null;
         latest.error = null;
         latest.stickyError = null;

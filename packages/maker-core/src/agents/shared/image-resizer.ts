@@ -3,8 +3,8 @@
  * ---------------------------------------------------------------------------
  * Last-mile shrink for images that go INTO the LLM context. UI / IM 仍然显示
  * 原图,只在 toClaudeSdkContent / toAppServerInput 这一步把 image-block 的
- * absPath 透明替换为缩好的副本路径,Claude SDK / codex app-server 读到的就是
- * resized 文件,显著节省 vision token。
+ * absPath 透明替换为缩好的副本路径,再由下游转换为模型原生图片输入,
+ * 显著节省 vision token。
  *
  * 设计要点:
  *  - 用 sharp (libvips Node binding)。所有 decode/resize/encode 都在 libuv

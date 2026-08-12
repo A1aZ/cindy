@@ -187,7 +187,7 @@ afterEach(async () => {
 });
 
 describe('ClaudeCodeAgent plan mode', () => {
-  it('keeps review text, Markdown, PDF, and image references in one real SDK turn', async () => {
+  it('keeps review text, file references, and a native image in one real SDK turn', async () => {
     const { handle, queryPrompt, workingDir } = await startPlanSession(
       false,
       {},
@@ -199,16 +199,14 @@ describe('ClaudeCodeAgent plan mode', () => {
     const imagePath = path.join(workingDir, 'poster.png');
     await fs.writeFile(markdownPath, '# Launch\nBudget: 100 vs 80 + 50');
     await fs.writeFile(pdfPath, '%PDF-1.4\n% review transport fixture');
+    const imageBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
     await fs.writeFile(
       imagePath,
-      Buffer.from(
-        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC',
-        'base64',
-      ),
+      Buffer.from(imageBase64, 'base64'),
     );
     const realMarkdownPath = await fs.realpath(markdownPath);
     const realPdfPath = await fs.realpath(pdfPath);
-    const realImagePath = await fs.realpath(imagePath);
     const nextInput = queryPrompt[Symbol.asyncIterator]().next();
 
     await handle.send({
@@ -222,9 +220,20 @@ describe('ClaudeCodeAgent plan mode', () => {
     });
 
     const sdkInput = (await nextInput).value;
-    expect(sdkInput?.message?.content).toBe(
-      `@"${realMarkdownPath}" @"${realPdfPath}" @"${realImagePath}" Review the Markdown, PDF, and image evidence.`,
-    );
+    expect(sdkInput?.message?.content).toEqual([
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/png',
+          data: imageBase64,
+        },
+      },
+      {
+        type: 'text',
+        text: `@"${realMarkdownPath}" @"${realPdfPath}" Review the Markdown, PDF, and image evidence.`,
+      },
+    ]);
     await handle.close();
   });
 

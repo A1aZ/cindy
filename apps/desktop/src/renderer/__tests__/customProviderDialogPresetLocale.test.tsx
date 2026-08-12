@@ -207,6 +207,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     });
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
+    await screen.findByDisplayValue('http://127.0.0.1:4000/v1');
 
     fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
@@ -247,6 +248,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     });
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
+    await screen.findByDisplayValue('http://127.0.0.1:4000/v1');
     fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
 

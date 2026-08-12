@@ -35,7 +35,8 @@ const INSTALL_VINTAGE_KEY = 'cc-agent.sidebar.installVintage.v1';
  *     项目筛选与手动排序(owner-scoped 前的历史裸 key,老安装才会有)。
  *   - sidebar.cardMode:显式改过显示模式(这类用户本就能被 cardMode 自身识别,
  *     列在这里是为了让判定对「只改过显示模式」的人同样成立)。
- * 注:owner-scoped 之后这些 key 会带 owner 后缀,故用前缀匹配而非全等。
+ * 注:owner-scoped 之后这些 key 会带 owner 后缀(sidebarOwnerStorage 的格式是
+ * `<base>.owner.<ownerId>`),故除全等外再做该前缀匹配。
  */
 const LEGACY_USAGE_KEYS = [
   'cc-agent.lastChatView.v1',
@@ -63,11 +64,14 @@ function safeStorage(): Storage | null {
 }
 
 function hasLegacyUsageTrace(storage: Storage): boolean {
-  // owner-scoped key 形如 `<base>::<ownerId>`,故按前缀匹配整张表。
+  // owner-scoped key 形如 `<base>.owner.<ownerId>`(sidebarOwnerStorageKey),
+  // 按该前缀匹配整张表。(2026-08-13 复查修正:此前误写成 `<base>:` 前缀,
+  // 与真实键格式不符,scoped 痕迹永远匹配不上——靠裸根键与 claim key 兜着
+  // 没出实际误判,但按错误格式匹配的分支等于死码。)
   for (let i = 0; i < storage.length; i += 1) {
     const key = storage.key(i);
     if (key == null) continue;
-    if (LEGACY_USAGE_KEYS.some((base) => key === base || key.startsWith(`${base}:`))) {
+    if (LEGACY_USAGE_KEYS.some((base) => key === base || key.startsWith(`${base}.owner.`))) {
       return true;
     }
   }

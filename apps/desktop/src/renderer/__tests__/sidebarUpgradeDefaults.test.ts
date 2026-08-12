@@ -126,9 +126,16 @@ describe('sidebarInstallVintage:老安装识别', () => {
     expect(getSidebarInstallVintage()).toBe('legacy');
   });
 
-  it('owner-scoped 后缀的痕迹同样命中(前缀匹配)', () => {
-    localStorage.setItem('cc-agent.sidebar.collapsedProjects:owner-1', '[]');
+  it('owner-scoped 后缀的痕迹同样命中(前缀匹配,格式对齐 sidebarOwnerStorageKey)', () => {
+    // 真实格式是 `<base>.owner.<encodeURIComponent(ownerId)>`(2026-08-13 修正:
+    // 此前实现与本测试都误用 `<base>:` 前缀,互相印证成"绿的死码")。
+    localStorage.setItem('cc-agent.sidebar.collapsedProjects.owner.owner-1', '[]');
     expect(getSidebarInstallVintage()).toBe('legacy');
+  });
+
+  it('其它以痕迹键为前缀但非 owner-scoped 的键不误判', () => {
+    localStorage.setItem('cc-agent.sidebar.collapsedProjectsSomethingElse', 'x');
+    expect(getSidebarInstallVintage()).toBe('fresh');
   });
 
   it('判定固化后不再随新出现的痕迹翻转(避免默认值中途漂移)', () => {

@@ -3157,7 +3157,9 @@ cindy.onHostMessage(async (msg) => {
 
 ### 4.13.1 当前任务消息 API
 
-声明 \`session-context\` 与 \`agent.sessionMessage\` 后,面板可以把按钮动作交给当前任务继续处理:
+声明 \`session-context\` 与 \`agent.sessionMessage\` 后,电子脑可以把普通用户消息交给当前任务继续处理。
+面板仍然保持零桥,不能直接调用 \`cindy.session\`;面板按钮必须按 §5 先唤醒电子脑,再通过
+同源 \`BroadcastChannel\` 把请求交给 \`main.js\`:
 
 使用该能力的 manifest 必须同时声明 \`minCindyVersion\`,避免旧 Cindy 因不认识新增字段而
 拒绝整份插件身份卡;版本值填写首次提供该 Host API 的 Cindy 正式发布版本。
@@ -3170,16 +3172,59 @@ cindy.onHostMessage(async (msg) => {
 主机会重新核对插件身份、能力声明、焦点任务 ID、消息长度和插件启用状态;任务忙时会排队,
 返回 \`created\`、\`resumed\`、\`active\` 或 \`queued\` disposition。
 
-\`sessionId\` 必须来自刚刚读取的当前任务,不能写死或替换成其它任务 ID:
+\`sessionId\` 必须来自刚刚读取的当前任务,不能写死或替换成其它任务 ID。以下示例省略了
+超时展示等界面细节;面板按 \`reqId\` 重试、电子脑按 \`reqId\` 去重,避免电子脑刚唤醒时丢消息:
 
 \`\`\`js
-const current = await cindy.session.getCurrentSessionId();
-if (current.ok && current.sessionId) {
-  await cindy.session.sendMessage({
-    sessionId: current.sessionId,
-    message: '/your-skill run'
+// main.js（电子脑）
+const sessionChannel = new BroadcastChannel('my-ghost-session');
+const sessionRequests = new Map();
+sessionChannel.onmessage = async ({ data }) => {
+  if (data?.type !== 'send-current-session-message' || !data.reqId) return;
+  let pending = sessionRequests.get(data.reqId);
+  if (!pending) {
+    pending = (async () => {
+      const current = await cindy.session.getCurrentSessionId();
+      if (!current.ok || !current.sessionId) return current;
+      return cindy.session.sendMessage({
+        sessionId: current.sessionId,
+        message: data.message
+      });
+    })();
+    sessionRequests.set(data.reqId, pending);
+    setTimeout(() => sessionRequests.delete(data.reqId), 60_000);
+  }
+  sessionChannel.postMessage({
+    type: 'session-message-result',
+    reqId: data.reqId,
+    result: await pending
   });
-}
+};
+
+// panel.js（零桥面板；放进按钮的 async 事件处理函数）
+const panelChannel = new BroadcastChannel('my-ghost-session');
+const wake = await fetch('cindy-ghost://<id>/wake');
+if (!wake.ok) throw new Error('插件后台未能唤醒');
+const reqId = crypto.randomUUID();
+const request = {
+  type: 'send-current-session-message',
+  reqId,
+  message: '/your-skill run'
+};
+panelChannel.postMessage(request);
+const retry = setInterval(() => panelChannel.postMessage(request), 300);
+const timeout = setTimeout(() => {
+  clearInterval(retry);
+  panelChannel.close();
+  // 在按钮旁展示超时,允许用户决定是否重试。
+}, 10_000);
+panelChannel.onmessage = ({ data }) => {
+  if (data?.type !== 'session-message-result' || data.reqId !== reqId) return;
+  clearInterval(retry);
+  clearTimeout(timeout);
+  panelChannel.close();
+  // 根据 data.result 更新按钮状态或展示错误。
+};
 \`\`\`
 
 该 API 只是发送一条普通用户消息,不是直接执行 Skill 的特权入口;需要执行 Skill 时,消息内容

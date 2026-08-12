@@ -958,7 +958,11 @@ describe('FORGE_GUIDE', () => {
       'caps.capabilities.pluginInput === false',
       '声明 `ios-simulator` 时必须同时声明 `minCindyVersion`',
       '必须同时声明 `minCindyVersion`,取首次提供当前任务消息能力的 Cindy 正式发布版本',
-      'if (current.ok && current.sessionId)',
+      'if (!current.ok || !current.sessionId) return current',
+      "fetch('cindy-ghost://<id>/wake')",
+      "new BroadcastChannel('my-ghost-session')",
+      '// main.js（电子脑）',
+      '// panel.js（零桥面板；放进按钮的 async 事件处理函数）',
       // 2026-07-28 图标与官方仓门禁(#809):§1/§2 的 icon 字段说明、
       // §8.1 官方插件仓的四语言 locale 与 assets/icon.png 惯例。
       '"icon": "assets/icon.png"',

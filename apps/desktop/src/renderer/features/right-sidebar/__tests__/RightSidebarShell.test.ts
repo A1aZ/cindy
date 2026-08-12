@@ -266,6 +266,34 @@ describe('RightSidebarShell empty state', () => {
     delete (window as unknown as { electronAPI?: unknown }).electronAPI;
   });
 
+  it('does not replace the active browser session while the detached shell is hidden', async () => {
+    const setActiveSession = window.electronAPI.rsbBrowserBridge.setActiveSession;
+    const view = render(
+      createElement(RightSidebarShell, {
+        sessionId: 's1',
+        workdir: '/tmp/repo',
+        remoteHostId: null,
+        shellVisible: false,
+        isMac: true,
+      }),
+    );
+
+    await waitFor(() => expect(tabsIpc.list).toHaveBeenCalledWith({ sessionId: 's1' }));
+    expect(setActiveSession).not.toHaveBeenCalled();
+
+    view.rerender(
+      createElement(RightSidebarShell, {
+        sessionId: 's1',
+        workdir: '/tmp/repo',
+        remoteHostId: null,
+        shellVisible: true,
+        isMac: true,
+      }),
+    );
+
+    await waitFor(() => expect(setActiveSession).toHaveBeenCalledWith({ sessionId: 's1' }));
+  });
+
   it('mounts only the active body first, then idle-mounts and keeps the rest alive', async () => {
     const idleCallbacks: IdleRequestCallback[] = [];
     Object.defineProperty(window, 'requestIdleCallback', {

@@ -213,17 +213,20 @@ export function RightSidebarShell({
   useEffect(() => {
     // Phase 5: 推送当前焦点 RSB sessionId 给 main,让 RsbWebviewBackend 拿到。
     // null 也推(切到非 RSB 路由时),让 main 端清掉 active session — 否则
-    // 之前的 sessionId 会成 stale 引用。setActiveSession 失败容错(preload 未就绪)。
-    void window.electronAPI?.rsbBrowserBridge
-      ?.setActiveSession({ sessionId })
-      .catch(() => undefined);
+    // 之前的 sessionId 会成 stale 引用。隐藏的分离窗口只是预热/待命实例，不能
+    // 覆盖主窗口当前的浏览器 session。setActiveSession 失败容错(preload 未就绪)。
+    if (shellVisible) {
+      void window.electronAPI?.rsbBrowserBridge
+        ?.setActiveSession({ sessionId })
+        .catch(() => undefined);
+    }
     if (!sessionId) return;
     // 首次访问该 sessionId 时触发 IPC list 拉取;命中 cache 直接 noop。
     // 完成后 setBucket → notify → subscribeBucket 唤醒 useSyncExternalStore 重渲染。
     void ensureHydrated(sessionId).catch((err) => {
       log.error('ensureHydrated failed', { sessionId, err });
     });
-  }, [sessionId]);
+  }, [sessionId, shellVisible]);
 
   const projectedTabs = useMemo(
     () => projectIOSSimulatorTabs(bucket.tabs, bucket.activeTabId, iosSimulatorPluginAvailable),

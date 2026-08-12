@@ -7,11 +7,9 @@
  */
 
 import { useCallback, useEffect, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
 import { isAgentIslandSupported } from '@/hooks/useAgentIslandSettings';
-import { isSidebarWindow } from '@/lib/sidebarWindow';
 import { toast } from '@/lib/toast';
 import { CCAgentSessionView } from './CCAgentSessionView';
 import { CreateWorkerPopover } from './CreateWorkerPopover';
@@ -62,7 +60,6 @@ export function OrcaWorkerPanel({
   onSearchJumpConsumed,
 }: OrcaWorkerPanelProps) {
   const { t } = useTranslation();
-  const navigate = useNavigate();
   const {
     workers,
     focusedWorker,
@@ -165,8 +162,6 @@ export function OrcaWorkerPanel({
           hardLimit={hardLimit}
           onSwitchFocus={handleSwitchFocus}
           onOpenCreate={() => void handleOpenCreate()}
-          onOpenSettings={() => navigate('/settings?section=collaboration')}
-          settingsEnabled={!isSidebarWindow()}
           onArchiveWorker={handleArchiveWorker}
           clearAttentionWhenVisible={viewVisible}
         />

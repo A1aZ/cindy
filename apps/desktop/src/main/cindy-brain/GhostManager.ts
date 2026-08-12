@@ -204,6 +204,16 @@ export type InstallRejection =
       rollbackFailed?: boolean;
     };
 
+/**
+ * Reversible side effect prepared after the new package directory is in place.
+ * Durable writes happen before this object is returned; `commit` only publishes
+ * best-effort notifications after the receipt has committed.
+ */
+export interface GhostPackageCommitPreparation {
+  commit(): void;
+  rollback(): void;
+}
+
 export type UninstallRejection =
   | { code: 'invalid-id'; reason: string }
   | { code: 'not-installed'; reason: string }
@@ -2937,6 +2947,7 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
+      beforePackageCommit?: () => GhostPackageCommitPreparation | void;
       /** 目录换位完成后、任何通知或运行时收尾前触发。 */
       onPackagePlaced?: () => void;
     },
@@ -2950,6 +2961,8 @@ export class GhostManager {
       expectedInstalledApproval: string;
       expectedPackageSha256?: string;
       trustOverride?: GhostHostTrustOverride;
+      /** 新目录已换位、旧目录仍可回滚时执行；抛错会恢复旧版本。 */
+      beforePackageCommit?: () => GhostPackageCommitPreparation | void;
       /** 目录换位完成后、任何通知或运行时收尾前触发。 */
       onPackagePlaced?: () => void;
     },
@@ -3149,9 +3162,14 @@ export class GhostManager {
         },
       };
     }
-    // 与 install 同理:技能字节指纹从这次换入的内容目录现算。
+    // Durable side effects (currently OAuth client migration) join the package
+    // transaction after the new manifest is in place but before its receipt is
+    // committed. Later failures compensate both this side effect and the
+    // directory swap; either rollback failure keeps journal + quarantine.
+    let packageCommitPreparation: GhostPackageCommitPreparation | undefined;
     let receipt: GhostInstallReceipt;
     try {
+      packageCommitPreparation = opts.beforePackageCommit?.() ?? undefined;
       receipt = createGhostInstallReceipt({
         manifest: approvedManifest,
         localeResources,
@@ -3169,20 +3187,54 @@ export class GhostManager {
       });
       await this.receiptStore.write(receipt, { skillSourceDir: finalDir });
     } catch (err) {
-      let rolledBack = true;
-      await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
-      await fs.promises.rename(backupDir, finalDir).catch((rollbackErr) => {
-        rolledBack = false;
+      let sideEffectRolledBack = !(
+        err instanceof Error &&
+        'rollbackFailed' in err &&
+        err.rollbackFailed === true
+      );
+      if (packageCommitPreparation) {
+        try {
+          packageCommitPreparation.rollback();
+        } catch (rollbackErr) {
+          sideEffectRolledBack = false;
+          (this.options.log?.error ?? this.options.log?.warn)?.call(
+            this.options.log,
+            'ghost update side-effect rollback failed',
+            {
+              id: manifest.id,
+              error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            },
+          );
+        }
+      }
+      let directoryRolledBack = false;
+      if (sideEffectRolledBack) {
+        directoryRolledBack = true;
+        await fs.promises.rm(finalDir, { recursive: true, force: true }).catch(() => undefined);
+        await fs.promises.rename(backupDir, finalDir).catch((rollbackErr) => {
+          directoryRolledBack = false;
+          (this.options.log?.error ?? this.options.log?.warn)?.call(
+            this.options.log,
+            'ghost update rollback failed after receipt write failure',
+            {
+              id: manifest.id,
+              backupDir,
+              error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
+            },
+          );
+        });
+      } else {
+        // Preserve the normal interrupted-update shape (new final + old backup)
+        // when the side effect cannot be compensated. Startup first restores the
+        // old package from this journal, then OAuth reconciliation can safely
+        // restore only accounts tagged for that rolled-back client transition.
         (this.options.log?.error ?? this.options.log?.warn)?.call(
           this.options.log,
-          'ghost update rollback failed after receipt write failure',
-          {
-            id: manifest.id,
-            backupDir,
-            error: rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr),
-          },
+          'ghost update left package swap for startup recovery after side-effect rollback failure',
+          { id: manifest.id, backupDir },
         );
-      });
+      }
+      const rolledBack = sideEffectRolledBack && directoryRolledBack;
       if (rolledBack) {
         await clearUpdateQuarantineAfterRollback();
       }
@@ -3200,6 +3252,16 @@ export class GhostManager {
       this.untrustedApprovals.delete(this.isolationKey(manifest.id));
     } catch {
       // Keep quarantine while the durable journal remains; recovery retries it.
+    }
+    try {
+      packageCommitPreparation?.commit();
+    } catch (err) {
+      // Receipt and package bytes are already committed. Notification failure
+      // must not report a false update rollback to the caller.
+      this.options.log?.warn('ghost update side-effect commit notification failed', {
+        id: manifest.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     await fs.promises.rm(backupDir, { recursive: true, force: true }).catch(() => {});
 

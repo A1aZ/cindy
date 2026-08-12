@@ -46,6 +46,7 @@ export interface GhostPluginListItem {
   tabPanel: boolean;
   /** 声明了由 Host 承载、但可从插件 UI 主动进入的能力。 */
   hostCapability: 'ios-simulator' | null;
+  oauthAuthorizationExpired?: boolean;
   trust?: GhostTrustInfo;
   iconDataUrl?: string;
 }
@@ -275,6 +276,7 @@ export function toGhostPluginListItem(
     builtin: ghost.builtin === true,
     tabPanel: manifest.panel?.position === 'tab',
     hostCapability: manifest.slots.includes('ios-simulator') ? 'ios-simulator' : null,
+    oauthAuthorizationExpired: ghost.oauthAuthorizationExpired !== undefined,
     trust: ghost.trust ?? {
       level: 'unverified',
       publisherSigned: false,

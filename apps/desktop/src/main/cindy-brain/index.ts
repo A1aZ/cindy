@@ -143,6 +143,7 @@ import { handleGhostSecretsRequest } from './runtime/ghostSecretsEndpoint.js';
 import { handleGhostOauthRequest } from './runtime/ghostOauthEndpoint.js';
 import { handleGhostConnectionsRequest } from './runtime/ghostConnectionsEndpoint.js';
 import { GhostOauthAccountManager, type GhostOauthDecl } from './ghostOauthAccounts.js';
+import { withGhostOauthMutationLock } from './ghostOauthMutationLock.js';
 import { cancelActiveGhostOauthFlow } from './ghostOauthFlow.js';
 import {
   appendReadyGhostOauthReauthSuggest,
@@ -838,9 +839,22 @@ function availableGhosts(): InstalledGhost[] {
 
 function projectGhostForRenderer(ghost: InstalledGhost): InstalledGhost {
   try {
-    const suggest = getGhostOauthReauthSuggest(withRuntimeFiloGoogleClient(ghost.manifest));
+    const runtimeManifest = withRuntimeFiloGoogleClient(ghost.manifest);
+    const oauthManager = getGhostOauthAccountManager();
+    const expiredAccountCount = (runtimeManifest.network?.secrets ?? []).reduce(
+      (count, secret) =>
+        secret.source === 'oauth' && secret.oauth
+          ? count +
+            oauthManager.clientMigrationExpiredAccountCount(runtimeManifest.id, secret.key)
+          : count,
+      0,
+    );
+    const suggest = getGhostOauthReauthSuggest(runtimeManifest);
     return {
       ...ghost,
+      ...(expiredAccountCount > 0
+        ? { oauthAuthorizationExpired: { expiredAccountCount } }
+        : {}),
       ...(suggest
         ? {
             oauthScopeStale: {
@@ -851,8 +865,8 @@ function projectGhostForRenderer(ghost: InstalledGhost): InstalledGhost {
         : {}),
     };
   } catch (error) {
-    // 详情页角标是提示面，保险库异常不能让插件清单整体消失。
-    log.warn('ghost oauth scope stale projection omitted', {
+    // OAuth 展示投影是提示面，保险库异常不能让插件清单整体消失。
+    log.warn('ghost oauth renderer projection omitted', {
       ghostId: ghost.manifest.id,
       errorType: error instanceof Error ? error.name : typeof error,
     });
@@ -3596,6 +3610,62 @@ export function getGhostCindySlot(): GhostCindySlot {
  * removeGhostSecrets 的前缀清扫天然连带)。
  */
 let ghostOauthManagerSingleton: GhostOauthAccountManager | null = null;
+let ghostOauthReconciledOwnerScope: string | null = null;
+let ghostOauthReconcileInFlight: Promise<void> | null = null;
+
+function ghostOauthMutationLockPath(ghostId: string): string {
+  return ownerScopedUserDataPath('ghost-install-state', '.oauth-locks', `${ghostId}.lock`);
+}
+
+function withActiveOwnerGhostOauthMutationLock<T>(
+  ghostId: string,
+  task: () => Promise<T> | T,
+): Promise<T> {
+  const ownerScope = activeOwnerScopeKey();
+  return withGhostOauthMutationLock(
+    ownerScope,
+    ghostId,
+    ghostOauthMutationLockPath(ghostId),
+    async () => {
+      if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) {
+        throw new Error('Plugin OAuth owner boundary changed before mutation');
+      }
+      return task();
+    },
+  );
+}
+
+/** Reconcile migration markers once for every committed owner scope. */
+export async function reconcileGhostOauthAccountsForActiveOwner(): Promise<void> {
+  const ownerScope = activeOwnerScopeKey();
+  if (ghostOauthReconciledOwnerScope === ownerScope) return;
+  if (ghostOauthReconcileInFlight) await ghostOauthReconcileInFlight;
+  if (ghostOauthReconciledOwnerScope === ownerScope) return;
+  const reconcileTask = (async () => {
+    if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) return;
+    const oauthManager = getGhostOauthAccountManager();
+    for (const ghost of getGhostManager().list()) {
+      await withActiveOwnerGhostOauthMutationLock(ghost.manifest.id, () => {
+        if (activeOwnerScopeKey() !== ownerScope) {
+          throw new Error('Plugin OAuth owner changed during reconciliation');
+        }
+        oauthManager.reconcileAccountsForInstalledManifest(
+          withRuntimeFiloGoogleClient(ghost.manifest),
+        );
+      });
+    }
+    if (!isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScope) {
+      ghostOauthReconciledOwnerScope = ownerScope;
+    }
+  })();
+  ghostOauthReconcileInFlight = reconcileTask;
+  try {
+    await reconcileTask;
+  } finally {
+    if (ghostOauthReconcileInFlight === reconcileTask) ghostOauthReconcileInFlight = null;
+  }
+}
+
 function getGhostOauthAccountManager(): GhostOauthAccountManager {
   if (!ghostOauthManagerSingleton) {
     ghostOauthManagerSingleton = new GhostOauthAccountManager({
@@ -3670,6 +3740,14 @@ function getGhostOauthAccountManager(): GhostOauthAccountManager {
           : undefined;
         return currentDecl !== undefined && isDeepStrictEqual(currentDecl, decl);
       },
+      withMutationLock: withActiveOwnerGhostOauthMutationLock,
+    });
+    queueMicrotask(() => {
+      void reconcileGhostOauthAccountsForActiveOwner().catch((error) => {
+        log.warn('ghost oauth startup reconciliation failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
     });
   }
   return ghostOauthManagerSingleton;
@@ -3703,9 +3781,13 @@ function getGhostOauthReauthSuggest(
   runtimeManifest: GhostManifest,
 ): GhostSetupReauthSuggest | undefined {
   const oauthManager = getGhostOauthAccountManager();
-  return findGhostOauthReauthSuggest(runtimeManifest, (secretKey, decl) =>
-    oauthManager.defaultMissingScopes(runtimeManifest.id, secretKey, decl),
-  );
+  return findGhostOauthReauthSuggest(runtimeManifest, (secretKey, decl) => {
+    const defaultAccount = oauthManager
+      .listAccounts(runtimeManifest.id, secretKey)
+      .find((account) => account.isDefault);
+    if (defaultAccount?.status === 'expired') return [];
+    return oauthManager.defaultMissingScopes(runtimeManifest.id, secretKey, decl);
+  });
 }
 
 /**
@@ -4298,9 +4380,10 @@ async function installOrUpdateMarketGhostPackageLocked(
             )
           : [];
       const needsReview =
-        expected.permissionPolicy.mode === 'manual'
+        permissionDiff?.builtinOauthClientChanged === true ||
+        (expected.permissionPolicy.mode === 'manual'
           ? permissionDiff === null || permissionDiff.added.length > 0
-          : unreviewed.length > 0;
+          : unreviewed.length > 0);
       if (needsReview && expected.approvedPackageSha256 === undefined) {
         const reviewKeys =
           expected.permissionPolicy.mode === 'manual'
@@ -4318,6 +4401,7 @@ async function installOrUpdateMarketGhostPackageLocked(
           ghostId: expected.ghostId,
           mode: expected.permissionPolicy.mode,
           keys: reviewKeys,
+          builtinOauthClientChanged: permissionDiff?.builtinOauthClientChanged === true,
         });
         throw new GhostPackagePermissionReviewRequiredError(review);
       }
@@ -4370,15 +4454,24 @@ async function installOrUpdateMarketGhostPackageLocked(
           'Plugin approval state was not bound to the market update',
         );
       }
-      result = await manager.update(cindyFilePath, {
-        expectedPackageSha256: inspected.packageSha256,
-        expectedInstalledApproval: expected.expectedInstalledApproval,
-        ...(trustOverride ? { trustOverride } : {}),
-        onPackagePlaced: () => {
-          packagePlaced = true;
-          expected.onPackagePlacedInLock?.();
-        },
-      });
+      // Lock order: owner lease -> install lock -> OAuth security lock. Keep
+      // the strict lock through package swap, receipt commit, and compensation.
+      result = await withActiveOwnerGhostOauthMutationLock(expected.ghostId, () =>
+        manager.update(cindyFilePath, {
+          expectedPackageSha256: inspected.packageSha256,
+          expectedInstalledApproval: expected.expectedInstalledApproval!,
+          ...(trustOverride ? { trustOverride } : {}),
+          beforePackageCommit: () =>
+            getGhostOauthAccountManager().prepareAccountsForChangedClients(
+              withRuntimeFiloGoogleClient(installed.manifest),
+              withRuntimeFiloGoogleClient(inspected.canonicalManifest),
+            ),
+          onPackagePlaced: () => {
+            packagePlaced = true;
+            expected.onPackagePlacedInLock?.();
+          },
+        }),
+      );
     } catch (error) {
       if (!packagePlaced) {
         spawnIfResident(installed);
@@ -4442,7 +4535,9 @@ export async function uninstallGhostAndCleanup(
 ): Promise<void> {
   // 按 ghostId 与装入/更新互斥:卸载与同 id 的市场/本地装入不得交错,否则
   // 市场装入的"目标是否已装"判定会被本卸载在其落位前抽走(反之亦然)。
-  return withGhostInstallLock(id, () => uninstallGhostAndCleanupLocked(id, options));
+  return withGhostInstallLock(id, () =>
+    withActiveOwnerGhostOauthMutationLock(id, () => uninstallGhostAndCleanupLocked(id, options)),
+  );
 }
 
 async function uninstallGhostAndCleanupLocked(
@@ -4730,6 +4825,7 @@ export function registerGhostIpc(): void {
       networkHosts: runtimeManifest.network?.hosts,
       manager: getGhostOauthAccountManager(),
       ghostId,
+      withMutationLock: withActiveOwnerGhostOauthMutationLock,
       onChanged: (secretKey) => {
         getGhostSetupChangeBus().emit(ghostId, { source: 'oauth', ref: secretKey });
         broadcastGhostsChanged(getGhostManager().list(), false, { projectionOnly: true });
@@ -5756,13 +5852,24 @@ export function registerGhostIpc(): void {
         let result: Awaited<ReturnType<typeof manager.update>>;
         let packagePlaced = false;
         try {
-          result = await manager.update(lizFilePath, {
-            expectedPackageSha256,
-            expectedInstalledApproval,
-            onPackagePlaced: () => {
-              packagePlaced = true;
-            },
-          });
+          result = await withActiveOwnerGhostOauthMutationLock(inspected.manifest.id, () =>
+            manager.update(lizFilePath, {
+              expectedPackageSha256,
+              expectedInstalledApproval,
+              ...(previousGhost
+                ? {
+                    beforePackageCommit: () =>
+                      getGhostOauthAccountManager().prepareAccountsForChangedClients(
+                        withRuntimeFiloGoogleClient(previousGhost.manifest),
+                        withRuntimeFiloGoogleClient(inspected.canonicalManifest),
+                      ),
+                  }
+                : {}),
+              onPackagePlaced: () => {
+                packagePlaced = true;
+              },
+            }),
+          );
         } catch (err) {
           if (!packagePlaced) {
             restoreMarketRecord();

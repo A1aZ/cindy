@@ -748,6 +748,7 @@ import {
   getGhostSessionActivityTracker,
   interruptGhostCallsForAccountBoundary,
   isGhostAvailableForActiveSession,
+  reconcileGhostOauthAccountsForActiveOwner,
   refreshGhostLocalization,
   registerGhostIpc,
   setGhostsChangedObserver,
@@ -3081,6 +3082,15 @@ function syncDefaultPluginsForActiveOwner(): void {
   });
 }
 
+function reconcileGhostOauthForActiveOwner(): void {
+  void reconcileGhostOauthAccountsForActiveOwner().catch((error) => {
+    createLogger('ghost-oauth-owner-reconcile').warn(
+      'OAuth account reconciliation for active owner failed',
+      { error: error instanceof Error ? error.message : String(error) },
+    );
+  });
+}
+
 function parseOptionalDeviceLinkDeviceId(value: unknown): string | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
@@ -5203,9 +5213,13 @@ const registerIpcHandlers = () => {
   // 复用市场快照；云端登录/切号的通知可能早于 owner boundary 释放，因此
   // 延迟到当前调用栈结束后再按已提交的新 owner 补跑一次。
   disposePluginMarketAuthListener = authManager.onAuthStateChange(() => {
-    queueMicrotask(syncDefaultPluginsForActiveOwner);
+    queueMicrotask(() => {
+      syncDefaultPluginsForActiveOwner();
+      reconcileGhostOauthForActiveOwner();
+    });
   });
   syncDefaultPluginsForActiveOwner();
+  reconcileGhostOauthForActiveOwner();
 
   // ── Dialog: 目录选择器（v0.6 新增，与旧 show-open-directory-dialog 并存） ──
   ipcMain.handle(

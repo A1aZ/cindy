@@ -4408,6 +4408,114 @@ describe('GhostManager · update(原位换版)', () => {
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
   });
 
+  it('提交前回调失败时恢复旧版本', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
+    const result = await manager.update(
+      await makeCindy(
+        'v2.cindy',
+        { ...goodManifest(), version: '2.0.0' },
+        { 'new.txt': 'v2' },
+      ),
+      {
+        expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+        beforePackageCommit: () => {
+          throw new Error('migration write failed');
+        },
+      },
+    );
+
+    await expectRejection(result, 'io');
+    expect(manager.list()[0]?.manifest.version).toBe('1.0.0');
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'old.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'new.txt'))).toBe(false);
+  });
+
+  it('receipt 提交失败时补偿副作用并恢复旧版本', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
+    const rollback = vi.fn();
+    const commit = vi.fn();
+    const store = (
+      manager as unknown as {
+        receiptStore: { write(...args: unknown[]): Promise<void> };
+      }
+    ).receiptStore;
+    const writeSpy = vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('receipt blocked'));
+    try {
+      const result = await manager.update(
+        await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }, { 'new.txt': 'v2' }),
+        {
+          expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+          beforePackageCommit: () => ({ commit, rollback }),
+        },
+      );
+      await expectRejection(result, 'io');
+    } finally {
+      writeSpy.mockRestore();
+    }
+    expect(rollback).toHaveBeenCalledTimes(1);
+    expect(commit).not.toHaveBeenCalled();
+    expect(manager.list()[0]?.manifest.version).toBe('1.0.0');
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'old.txt'))).toBe(true);
+  });
+
+  it('副作用补偿失败时保留 journal、隔离和可恢复的目录交换现场', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest(), { 'old.txt': 'v1' }));
+    const store = (
+      manager as unknown as {
+        receiptStore: { write(...args: unknown[]): Promise<void> };
+      }
+    ).receiptStore;
+    const writeSpy = vi.spyOn(store, 'write').mockRejectedValueOnce(new Error('receipt blocked'));
+    try {
+      const result = await manager.update(
+        await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }, { 'new.txt': 'v2' }),
+        {
+          expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+          beforePackageCommit: () => ({
+            commit: vi.fn(),
+            rollback: () => {
+              throw new Error('vault blocked');
+            },
+          }),
+        },
+      );
+      expect(result).toMatchObject({ rejection: { code: 'io', rollbackFailed: true } });
+    } finally {
+      writeSpy.mockRestore();
+    }
+    expect(manager.list()[0]).toMatchObject({ approval: { state: 'invalid' }, enabled: false });
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'new.txt'))).toBe(true);
+    expect(fs.readdirSync(rootDir).some((name) => name.startsWith('.cindy-updating-hello-'))).toBe(true);
+    expect(fs.existsSync(path.join(workDir, 'ghosts-install-state', '.pending-hello.json'))).toBe(true);
+
+    const recovered = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      onChanged,
+    });
+    expect(recovered.list()[0]?.manifest.version).toBe('1.0.0');
+    expect(fs.existsSync(path.join(rootDir, 'hello', 'old.txt'))).toBe(true);
+  });
+
+  it('副作用只在 receipt 提交后 commit', async () => {
+    await manager.install(await makeCindy('v1.cindy', goodManifest()));
+    const events: string[] = [];
+    const result = await manager.update(
+      await makeCindy('v2.cindy', { ...goodManifest(), version: '2.0.0' }),
+      {
+        expectedInstalledApproval: ghostInstallApprovalToken(manager.list()[0]?.approval),
+        beforePackageCommit: () => ({
+          rollback: vi.fn(),
+          commit: () => {
+            events.push(manager.list()[0]?.manifest.version ?? 'missing');
+          },
+        }),
+      },
+    );
+    expect('ghost' in result).toBe(true);
+    expect(events).toEqual(['2.0.0']);
+  });
+
   it('未装入 → not-installed 拒绝', async () => {
     await expectRejection(await updateGhost(await makeCindy('a.cindy', goodManifest())), 'not-installed');
   });

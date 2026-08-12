@@ -640,6 +640,31 @@ describe('sendToSession ordering', () => {
     );
   });
 
+  it('screens plugin session messages once before direct or queued dispatch', () => {
+    const runnerBlock = extractBetween(
+      source,
+      'setGhostSessionMessageRunner(async',
+      '  setGhostErrandRunner(',
+    );
+    expect(runnerBlock).toContain('screenGhostUserMessage(sessionId, message)');
+    expect(runnerBlock).toContain("if (verdict.action === 'block') {");
+    expect(runnerBlock).toContain("errorCode: 'PERMISSION_DENIED'");
+    expect(runnerBlock).toContain(
+      "const screenedMessage = verdict.action === 'rewrite' ? verdict.text : message;",
+    );
+    expect(runnerBlock).toContain('message: screenedMessage,');
+    expect(runnerBlock).toContain('bypassGhostHooks: true,');
+
+    const enqueueBlock = extractBetween(
+      source,
+      'async function enqueueSendToSessionMessage',
+      'const orcaInterAgentDispatcher:',
+    );
+    expect(enqueueBlock).toContain(
+      '...(params.bypassGhostHooks ? { bypassGhostHooks: true } : {}),',
+    );
+  });
+
   it('preserves stored permission and extraDirs when sendToWorker resumes a worker', () => {
     const resumeBranch = extractBetween(
       source,

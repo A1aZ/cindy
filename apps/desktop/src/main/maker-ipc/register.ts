@@ -7817,6 +7817,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAccepted?: () => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    /** 调用方已执行 will-user-message 筛查；繁忙入队后不得重复询问钩子。 */
+    bypassGhostHooks?: boolean;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -7834,6 +7836,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAccepted,
       onAcceptedRollback,
       origin,
+      bypassGhostHooks,
       createDefaults,
       inheritSourcePermissionMode,
     } = params;
@@ -8177,6 +8180,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           onAccepted,
           onAcceptedRollback,
           origin,
+          bypassGhostHooks,
         });
         return {
           ok: true as const,
@@ -8226,6 +8230,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAccepted,
             onAcceptedRollback,
             origin,
+            bypassGhostHooks,
           });
           return {
             ok: true as const,
@@ -8350,6 +8355,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               onAccepted,
               onAcceptedRollback,
               origin,
+              bypassGhostHooks,
             });
             return {
               ok: true as const,
@@ -8448,6 +8454,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAccepted,
             onAcceptedRollback,
             origin,
+            bypassGhostHooks,
           });
           return {
             ok: true as const,
@@ -8602,11 +8609,31 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         message: '当前焦点任务已变化，请重试',
       };
     }
+    const liveSession = maker.getSession(sessionId);
+    const meta = await maker.getSessionMeta(sessionId).catch(() => null);
+    const hookModel = resolveGhostUserHookModel(
+      liveSession?.isTurnRunning() === true,
+      liveSession?.model,
+      meta?.model,
+    );
+    const verdict = await withGhostUserHookModel(hookModel, () =>
+      screenGhostUserMessage(sessionId, message),
+    );
+    if (verdict.action === 'block') {
+      return {
+        ok: false,
+        errorCode: 'PERMISSION_DENIED',
+        message: verdict.reason || '插件消息已被用户消息钩子拦截',
+      };
+    }
+    const screenedMessage = verdict.action === 'rewrite' ? verdict.text : message;
     const clientId = createId();
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
-      message,
+      message: screenedMessage,
       clientId,
+      // 直发已在上方筛查；繁忙转队列时沿用结果，避免同一消息重复触发钩子。
+      bypassGhostHooks: true,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
           let rewound = false;
@@ -8838,6 +8865,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAccepted?: () => void | Promise<void>;
     onAcceptedRollback?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
+    bypassGhostHooks?: boolean;
   }): Promise<void> {
     const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
     const queued: AgentInputQueuedMessage = {
@@ -8856,6 +8884,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         createdAt: new Date().toISOString(),
       },
       createOpts,
+      ...(params.bypassGhostHooks ? { bypassGhostHooks: true } : {}),
       ...(params.origin ? { origin: params.origin } : {}),
     };
     if (params.onAccepted) {

@@ -109,6 +109,42 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).toContain("typeof ResizeObserver !== 'undefined'");
   });
 
+  // 2026-08-12 用户裁决:整理菜单里「显示 / 任务信息」加行首图标,让选项一眼可辨。
+  it('显示与任务信息选项带图标,显示模式与置顶段菜单同字形', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    const pinnedSectionSource = read(
+      'features',
+      'cc-agent',
+      'sidebar',
+      'sections',
+      'PinnedSection.tsx',
+    );
+
+    // 显示模式:同一概念在两处菜单必须用同一个 lucide 字形(不各造一套)。
+    expect(filterSource).toContain("labelKey: 'ccAgent.sidebar.viewStyleList', Icon: AlignJustify");
+    expect(filterSource).toContain(
+      "labelKey: 'ccAgent.sidebar.viewStyleListWide', Icon: LayoutList",
+    );
+    expect(pinnedSectionSource).toContain(
+      "labelKey: 'ccAgent.sidebar.viewStyleList', Icon: AlignJustify",
+    );
+    expect(pinnedSectionSource).toContain(
+      "labelKey: 'ccAgent.sidebar.viewStyleListWide', Icon: LayoutList",
+    );
+
+    // 任务信息四项各配数据类型图标;时间用 Clock 而非 Timer(后者是自动任务专用字形)。
+    expect(filterSource).toContain("labelKey: 'ccAgent.sidebar.taskInfo.time', Icon: Clock");
+    expect(filterSource).toContain("labelKey: 'ccAgent.sidebar.taskInfo.pr', Icon: GitPullRequest");
+    expect(filterSource).toContain("labelKey: 'ccAgent.sidebar.taskInfo.tokens', Icon: Coins");
+    expect(filterSource).toContain("labelKey: 'ccAgent.sidebar.taskInfo.cost', Icon: Wallet");
+    expect(filterSource).not.toMatch(/taskInfo\.time', Icon: Timer/);
+
+    // 抽象策略段(分组 / 排序 / 筛选维度)刻意不配图标,避免为凑图标而增噪。
+    expect(filterSource).not.toMatch(/filterSortBy\.\w+', Icon:/);
+    expect(filterSource).not.toMatch(/filterGroupBy\.\w+', Icon:/);
+    expect(filterSource).not.toMatch(/filterStatus\.\w+', Icon:/);
+  });
+
   it('连接中占位页不再自带 MachineSwitcherMenu(固定行已常驻,不会被困住)', () => {
     const idx = sidebarUpperSource.indexOf('selectedMachineConnecting ?');
     expect(idx).toBeGreaterThanOrEqual(0);

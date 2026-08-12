@@ -21,7 +21,19 @@
  */
 
 import type { ReactNode } from 'react';
-import { Check, ChevronRight, Globe, SlidersHorizontal } from 'lucide-react';
+import {
+  AlignJustify,
+  Check,
+  ChevronRight,
+  Clock,
+  Coins,
+  GitPullRequest,
+  Globe,
+  LayoutList,
+  SlidersHorizontal,
+  Wallet,
+  type LucideIcon,
+} from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
@@ -59,6 +71,11 @@ import {
 type Option<T extends string> = {
   value: T;
   labelKey: string;
+  /**
+   * 行首小图标(2026-08-12 用户裁决:让选项一眼可辨)。只给「形态 / 数据类型」
+   * 这类图标能真正帮上忙的段——分组与排序是抽象策略,硬配图标反而增噪,留空。
+   */
+  Icon?: LucideIcon;
 };
 
 const STATUS_OPTIONS: ReadonlyArray<Option<FilterStatus>> = [
@@ -93,18 +110,26 @@ const PROJECT_SORT_BY_OPTIONS: ReadonlyArray<Option<FilterSortBy>> = [
   { value: 'manual', labelKey: 'ccAgent.sidebar.filterSortBy.manual' },
 ];
 
-/** 复选顺序即菜单显示顺序;渲染顺序固定 pr → tokens → cost → time。 */
+/**
+ * 复选顺序即菜单显示顺序;渲染顺序固定 pr → tokens → cost → time。
+ * 图标对应各自的数据类型:时间=Clock(Timer 已被自动任务独占,不复用避免撞义)、
+ * PR=GitPullRequest(与顶栏 / 侧栏徽标未知态同一个字形)、token=Coins、费用=Wallet。
+ */
 const TASK_INFO_OPTIONS: ReadonlyArray<Option<TaskInfoField>> = [
-  { value: 'time', labelKey: 'ccAgent.sidebar.taskInfo.time' },
-  { value: 'pr', labelKey: 'ccAgent.sidebar.taskInfo.pr' },
-  { value: 'tokens', labelKey: 'ccAgent.sidebar.taskInfo.tokens' },
-  { value: 'cost', labelKey: 'ccAgent.sidebar.taskInfo.cost' },
+  { value: 'time', labelKey: 'ccAgent.sidebar.taskInfo.time', Icon: Clock },
+  { value: 'pr', labelKey: 'ccAgent.sidebar.taskInfo.pr', Icon: GitPullRequest },
+  { value: 'tokens', labelKey: 'ccAgent.sidebar.taskInfo.tokens', Icon: Coins },
+  { value: 'cost', labelKey: 'ccAgent.sidebar.taskInfo.cost', Icon: Wallet },
 ];
 
-/** 主列表显示形态(B 期):文字版 / 列表版。卡片版仅置顶段支持(入口在置顶段头)。 */
+/**
+ * 主列表显示形态(B 期):文字版 / 列表版。卡片版仅置顶段支持(入口在置顶段头)。
+ * 图标沿用置顶段显示模式菜单的既有定案(PinnedSection):文字=密排文本行,
+ * 列表=带内容块的行 —— 同一概念在两处菜单里字形一致。
+ */
 const MAIN_VIEW_OPTIONS: ReadonlyArray<Option<SidebarMainViewMode>> = [
-  { value: 'text', labelKey: 'ccAgent.sidebar.viewStyleList' },
-  { value: 'list', labelKey: 'ccAgent.sidebar.viewStyleListWide' },
+  { value: 'text', labelKey: 'ccAgent.sidebar.viewStyleList', Icon: AlignJustify },
+  { value: 'list', labelKey: 'ccAgent.sidebar.viewStyleListWide', Icon: LayoutList },
 ];
 
 export interface SidebarFilterPopoverProps {
@@ -159,17 +184,31 @@ function MenuSubRow({
   );
 }
 
+/**
+ * 行首图标(可选):meta 灰、14px/1.8 —— 与菜单文字同一层级,不与右侧的 ✓ 抢注意力。
+ * 同段内要么都给要么都不给,避免半数有图标造成文字起点参差。
+ */
+function MenuItemIcon({ Icon }: { Icon?: LucideIcon }) {
+  if (!Icon) return null;
+  return (
+    <Icon size={14} strokeWidth={1.8} className="shrink-0 text-[var(--cmd-palette-item-meta)]" />
+  );
+}
+
 function SelectMenuItem({
   label,
   selected,
   onSelect,
+  Icon,
 }: {
   label: string;
   selected: boolean;
   onSelect: () => void;
+  Icon?: LucideIcon;
 }) {
   return (
     <DropdownMenuItem onSelect={onSelect} className={MENU_ITEM_CLASS}>
+      <MenuItemIcon Icon={Icon} />
       <span className="truncate">{label}</span>
       {selected && (
         <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
@@ -183,10 +222,12 @@ function CheckMenuItem({
   label,
   checked,
   onToggle,
+  Icon,
 }: {
   label: string;
   checked: boolean;
   onToggle: () => void;
+  Icon?: LucideIcon;
 }) {
   return (
     <DropdownMenuItem
@@ -196,6 +237,7 @@ function CheckMenuItem({
       }}
       className={MENU_ITEM_CLASS}
     >
+      <MenuItemIcon Icon={Icon} />
       <span className="truncate">{label}</span>
       {checked && <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />}
     </DropdownMenuItem>
@@ -497,6 +539,7 @@ export function SidebarFilterPopover({
               label={t(option.labelKey)}
               selected={mainViewMode === option.value}
               onSelect={() => setMainViewMode(option.value)}
+              Icon={option.Icon}
             />
           ))}
           <MenuSubRow
@@ -510,6 +553,7 @@ export function SidebarFilterPopover({
                 label={t(option.labelKey)}
                 checked={taskInfoFields.includes(option.value)}
                 onToggle={() => toggleTaskInfoField(option.value)}
+                Icon={option.Icon}
               />
             ))}
           </MenuSubRow>

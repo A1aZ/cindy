@@ -30,6 +30,7 @@ import {
   MessagesSquare,
   MonitorSmartphone,
   Plus,
+  SquarePen,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -151,6 +152,10 @@ export interface ProjectsSectionProps {
    * null / 空数组 = 没有远程设备连接 → 设备分组选项隐藏、不切段。
    */
   remoteDeviceIndex?: ReadonlyMap<string, { name: string; online: boolean }> | null;
+  /** 「对话」组行右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。 */
+  onCreateDialogue: () => void;
+  /** 对话设备解析在途时禁用新建(与旧对话段 createDisabled 同语义)。 */
+  isCreateDialogueDisabled?: boolean;
 }
 
 export function ProjectsSection({
@@ -190,6 +195,8 @@ export function ProjectsSection({
   onBrowseFiles,
   onArchiveAll,
   remoteDeviceIndex = null,
+  onCreateDialogue,
+  isCreateDialogueDisabled = false,
 }: ProjectsSectionProps) {
   const { t } = useTranslation();
   const reducedMotion = useReducedMotion();
@@ -467,6 +474,8 @@ export function ProjectsSection({
           sessions={entry.sessions}
           collapsed={dialogueGroupCollapsed}
           onToggle={() => setDialogueCollapsed(!dialogueGroupCollapsed)}
+          onCreateDialogue={onCreateDialogue}
+          isCreateDisabled={isCreateDialogueDisabled}
           parentSectionCollapsed={isSectionCollapsed}
           disableSessionCollapse={disableSessionCollapse}
           activeSessionId={activeSessionId}
@@ -731,6 +740,8 @@ function DialogueGroupNode({
   sessions,
   collapsed,
   onToggle,
+  onCreateDialogue,
+  isCreateDisabled,
   parentSectionCollapsed,
   disableSessionCollapse,
   activeSessionId,
@@ -751,6 +762,9 @@ function DialogueGroupNode({
   sessions: Session[];
   collapsed: boolean;
   onToggle: () => void;
+  /** 组头右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。 */
+  onCreateDialogue: () => void;
+  isCreateDisabled: boolean;
   parentSectionCollapsed: boolean;
   disableSessionCollapse: boolean;
   activeSessionId?: string;
@@ -806,6 +820,36 @@ function DialogueGroupNode({
             aria-hidden
             className="shrink-0 text-[var(--cmd-palette-item-meta)] opacity-0 transition-opacity duration-[120ms] group-hover:opacity-100"
           />
+        </div>
+        {/* 悬浮工具组:与 ProjectNode Header 同款——常态隐藏,hover 整行淡入。
+            对话组没有项目那套 More 菜单,只保留新建(SquarePen,与项目行等位)。 */}
+        <div
+          className={cn(
+            'flex shrink-0 items-center gap-0.5',
+            'opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
+          )}
+        >
+          <Tip text={t('ccAgent.sidebar.newDialogue')}>
+            <button
+              type="button"
+              aria-label={t('ccAgent.sidebar.newDialogue')}
+              disabled={isCreateDisabled}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!isCreateDisabled) onCreateDialogue();
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onKeyDown={(e) => e.stopPropagation()}
+              className={cn(
+                'flex size-5 shrink-0 items-center justify-center rounded-md',
+                'text-sidebar-action-icon hover:text-foreground',
+                'hover:bg-sidebar-item-hover focus:outline-none',
+                'disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent',
+              )}
+            >
+              <SquarePen size={14} strokeWidth={2} />
+            </button>
+          </Tip>
         </div>
       </div>
       {/* 组内会话:与 ProjectNode 的会话区同款容器(gap / pt / pb 呼吸、list 缩进)

@@ -3162,6 +3162,8 @@ function ExpandedView({
                 onBrowseFiles={handleBrowseFiles}
                 onArchiveAll={handleArchiveAllInProject}
                 remoteDeviceIndex={remoteDeviceIndex}
+                onCreateDialogue={handleCreateDialogue}
+                isCreateDialogueDisabled={dialogueCreatePending}
               />
             </>
           )}

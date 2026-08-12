@@ -982,6 +982,13 @@ describe('ghost · 芯片型清单(schemaVersion 2)', () => {
         agent: { sessionMessage: true },
       }).ok,
     ).toBe(false);
+    expect(
+      validateGhostManifest({
+        ...goodChipManifest(),
+        slots: ['agent', 'session-context'],
+        agent: { sessionMessage: true },
+      }).ok,
+    ).toBe(false);
   });
 
   it('存量兼容红线:不声明 agent.schedule 的清单,权限项与内容键逐字不变', () => {

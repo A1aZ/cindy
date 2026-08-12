@@ -1393,13 +1393,22 @@ describe('Ghost manifest contract', () => {
     const sessionMessage = validateGhostManifest({
       ...validManifest,
       minCindyVersion: '1.2.3',
-      slots: ['tool', 'agent', 'session-context'],
+      slots: ['tool', 'agent', 'panel', 'session-context'],
+      panel: { html: 'panel.html' },
       agent: { sessionMessage: true },
     });
     expect(sessionMessage.ok).toBe(true);
     if (sessionMessage.ok) {
       expect(sessionMessage.manifest.agent).toEqual({ sessionMessage: true });
     }
+    expect(
+      validateGhostManifest({
+        ...validManifest,
+        minCindyVersion: '1.2.3',
+        slots: ['tool', 'agent', 'session-context'],
+        agent: { sessionMessage: true },
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('panel') });
     expect(
       validateGhostManifest({
         ...validManifest,
@@ -1410,7 +1419,8 @@ describe('Ghost manifest contract', () => {
     expect(
       validateGhostManifest({
         ...validManifest,
-        slots: ['tool', 'agent', 'session-context'],
+        slots: ['tool', 'agent', 'panel', 'session-context'],
+        panel: { html: 'panel.html' },
         agent: { sessionMessage: true },
       }),
     ).toMatchObject({ ok: false, reason: expect.stringContaining('minCindyVersion') });

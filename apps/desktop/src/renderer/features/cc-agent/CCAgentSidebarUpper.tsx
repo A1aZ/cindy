@@ -247,7 +247,7 @@ import {
   useDeleteScheduleWithSessions,
   type DeletedScheduleGeneratedSessionResult,
 } from '@/features/scheduler/hooks/useDeleteScheduleWithSessions';
-import { resolveDialogueDeviceTarget } from './lib/dialogueCreateTarget';
+import { resolveDialogueDeviceTarget, type DialogueDeviceTarget } from './lib/dialogueCreateTarget';
 import { makeDialogueNewMakerRouteState } from './lib/newMakerRouteState';
 
 const log = createLogger('CCAgentSidebarUpper');
@@ -2057,16 +2057,32 @@ function ExpandedView({
     t,
   ]);
 
-  const handleCreateDialogue = useCallback(() => {
-    // 冷启动时 effective selection 会刻意保留持久化的唯一远端选择，但设备目录可能尚未
-    // settle、switcherDevices 仍为空。此时不能把“尚未解析”当成“确认缺失”并回落本机；
-    // 展开态段头与折叠 rail 面板共用这个 handler，因此在目标可判定前统一不创建。
-    if (selectedDialogueDeviceResolution.status === 'pending') return;
-    handleClearSelection();
-    navigate('/cc-agent/new', {
-      state: makeDialogueNewMakerRouteState(selectedDialogueDeviceResolution.target),
-    });
-  }, [handleClearSelection, navigate, selectedDialogueDeviceResolution]);
+  /**
+   * 新建对话。目标设备两种来源:
+   *   - 调用方给出显式目标(`deviceTarget` 传了值):按设备分组时对话组隶属于某个
+   *     设备段,组头的新建就该落在该设备上(null = 本机段),不再看当前机器作用域
+   *     (2026-08-12 用户裁决)。目标已确定,也就不受作用域解析的 pending 影响。
+   *   - 未给(undefined):沿用作用域推断——仅当作用域唯一指向一台远程机器时继承它。
+   */
+  const handleCreateDialogue = useCallback(
+    (deviceTarget?: DialogueDeviceTarget | null) => {
+      let target: DialogueDeviceTarget | null;
+      if (deviceTarget === undefined) {
+        // 冷启动时 effective selection 会刻意保留持久化的唯一远端选择，但设备目录可能尚未
+        // settle、switcherDevices 仍为空。此时不能把“尚未解析”当成“确认缺失”并回落本机；
+        // 展开态段头与折叠 rail 面板共用这个 handler，因此在目标可判定前统一不创建。
+        if (selectedDialogueDeviceResolution.status === 'pending') return;
+        target = selectedDialogueDeviceResolution.target;
+      } else {
+        target = deviceTarget;
+      }
+      handleClearSelection();
+      navigate('/cc-agent/new', {
+        state: makeDialogueNewMakerRouteState(target),
+      });
+    },
+    [handleClearSelection, navigate, selectedDialogueDeviceResolution],
+  );
 
   const handleLinkCodexProject = useCallback(
     async (project: ProjectNode) => {

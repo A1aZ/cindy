@@ -137,9 +137,10 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
       'resolveDialogueDeviceTarget(selectedMachineId, switcherDevices, deviceListSettled)',
     );
     expect(handler).toContain("selectedDialogueDeviceResolution.status === 'pending'");
-    expect(handler).toContain(
-      'state: makeDialogueNewMakerRouteState(selectedDialogueDeviceResolution.target)',
-    );
+    // 无显式目标时仍走作用域推断(pending 守卫 + resolution.target);显式目标见下一条。
+    expect(handler).toContain('if (deviceTarget === undefined)');
+    expect(handler).toContain('target = selectedDialogueDeviceResolution.target;');
+    expect(handler).toContain('state: makeDialogueNewMakerRouteState(target)');
     expect(handler).not.toContain('resetDraftWorkspaceTargets');
     expect(handler).not.toContain('patchNewMakerDraft');
     expect(newMakerDraftRouteSource).toContain('readNewMakerDialogueTargetRequest(location.state)');
@@ -158,6 +159,27 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     // 混排后展开态的「新建对话」入口并入统一新建;rail 对话面板仍保留独立入口。
     expect(sidebarSource).toContain('onCreateDialogue={handleCreateDialogue}');
     expect(sidebarSource).toContain('isCreateDialogueDisabled={dialogueCreatePending}');
+  });
+
+  // 2026-08-12 用户裁决:按设备分组时,某个设备段下「对话」组的新建必须落在该设备上,
+  // 不再按当前机器作用域猜(作用域可能是「所有」或另一台设备)。
+  it('creates the dialogue on the device that owns the group when grouping by device', () => {
+    // 设备段把自己的设备作为创建目标传下去:本机段 null,远程段 {deviceId, deviceName}。
+    expect(projectsSectionSource).toMatch(
+      /renderNonProjectEntry\(\s*entry,\s*key,\s*section\.deviceId\s*\?\s*\{ deviceId: section\.deviceId, deviceName: name \}\s*:\s*null,\s*\)/,
+    );
+    // 不按设备分组的两条渲染路径不传目标 → 上层沿用作用域推断。
+    expect(projectsSectionSource).toContain('renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY)');
+    expect(projectsSectionSource).toContain(
+      'onCreateDialogue={() => onCreateDialogue(dialogueDeviceTarget)}',
+    );
+    // 目标设备离线 → 禁用新建并复用远程写保护文案(被控端才是真正的创建方)。
+    expect(projectsSectionSource).toContain("t('ccAgent.remoteSession.actionsUnavailable')");
+    expect(projectsSectionSource).toMatch(/const targetDeviceOffline = Boolean\(/);
+    // 显式目标不受作用域解析 pending 影响(目标已定,无需等设备目录 settle)。
+    expect(projectsSectionSource).toContain(
+      'dialogueDeviceTarget === undefined ? isCreateDialogueDisabled : false',
+    );
   });
 
   it('allows the shared create route to send a standalone dialogue without picking a project', () => {

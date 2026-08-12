@@ -59,6 +59,7 @@ import {
   type MainListEntry,
 } from '../../lib/mainListModel';
 import { buildSessionSourceLabelMap } from '../../lib/sessionSourceLabel';
+import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
 import { SidebarFilterPopover } from '../SidebarFilterPopover';
 import { SectionCollapse } from '../SectionCollapse';
 import { SessionEntryList } from '../SessionEntryList';
@@ -158,8 +159,13 @@ export interface ProjectsSectionProps {
    * null / 空数组 = 没有远程设备连接 → 设备分组选项隐藏、不切段。
    */
   remoteDeviceIndex?: ReadonlyMap<string, { name: string; online: boolean }> | null;
-  /** 「对话」组行右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。 */
-  onCreateDialogue: () => void;
+  /**
+   * 「对话」组行右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。
+   * 按设备分组时对话组隶属于某个设备段,这里显式给出该段的设备作为创建目标
+   * (null = 本机段),不再让上层按当前机器作用域猜(2026-08-12 用户裁决);
+   * 不分组时不传,沿用上层的作用域推断。
+   */
+  onCreateDialogue: (deviceTarget?: DialogueDeviceTarget | null) => void;
   /** 对话设备解析在途时禁用新建(与旧对话段 createDisabled 同语义)。 */
   isCreateDialogueDisabled?: boolean;
 }
@@ -481,7 +487,13 @@ export function ProjectsSection({
   // 散排对话行 / 「对话」组行。散排行带来源标签(hover);对话组行 = 可折叠的
   // 分组头 + 组内会话(折叠上限与对话段旧口径一致)。dialogueGroupKey 标识
   // 该组属于哪个段(设备段 key / 单一列表 DIALOGUE_GROUP_ALL_KEY),折叠独立。
-  const renderNonProjectEntry = (entry: MainListEntry, dialogueGroupKey: string): ReactNode => {
+  // dialogueDeviceTarget:按设备分组时该段的设备(null = 本机段),组头新建即落在
+  // 这台设备上;不分组时传 undefined,由上层按当前机器作用域推断。
+  const renderNonProjectEntry = (
+    entry: MainListEntry,
+    dialogueGroupKey: string,
+    dialogueDeviceTarget?: DialogueDeviceTarget | null,
+  ): ReactNode => {
     if (entry.kind === 'session') {
       return (
         <SessionEntryList
@@ -507,14 +519,26 @@ export function ProjectsSection({
     }
     if (entry.kind === 'dialogue-group') {
       const isCollapsed = collapsedDialogueGroups.has(dialogueGroupKey);
+      // 目标设备离线时不能在它上面新建(被控端才是真正的创建方)——与远程项目行的
+      // 新建同款保护(isDeviceLinkWriteBlocked / actionsUnavailable 文案)。
+      const targetDeviceOffline = Boolean(
+        dialogueDeviceTarget && !remoteDeviceIndex?.get(dialogueDeviceTarget.deviceId)?.online,
+      );
+      // 显式目标下不看作用域解析的 pending:目标已定,无需等设备目录 settle。
+      const createDisabled =
+        (dialogueDeviceTarget === undefined ? isCreateDialogueDisabled : false) ||
+        targetDeviceOffline;
       return (
         <DialogueGroupNode
           key={`dialogue-group:${dialogueGroupKey}`}
           sessions={entry.sessions}
           collapsed={isCollapsed}
           onToggle={() => setDialogueCollapsed([dialogueGroupKey], !isCollapsed)}
-          onCreateDialogue={onCreateDialogue}
-          isCreateDisabled={isCreateDialogueDisabled}
+          onCreateDialogue={() => onCreateDialogue(dialogueDeviceTarget)}
+          isCreateDisabled={createDisabled}
+          createDisabledReason={
+            targetDeviceOffline ? t('ccAgent.remoteSession.actionsUnavailable') : undefined
+          }
           parentSectionCollapsed={isSectionCollapsed}
           disableSessionCollapse={disableSessionCollapse}
           activeSessionId={activeSessionId}
@@ -719,7 +743,14 @@ export function ProjectsSection({
                         {section.entries.map((entry) =>
                           entry.kind === 'project'
                             ? renderProjectNode(entry.project)
-                            : renderNonProjectEntry(entry, key),
+                            : // 本机段 → null(强制本机);远程段 → 该设备。
+                              renderNonProjectEntry(
+                                entry,
+                                key,
+                                section.deviceId
+                                  ? { deviceId: section.deviceId, deviceName: name }
+                                  : null,
+                              ),
                         )}
                       </div>
                     </SectionCollapse>
@@ -770,6 +801,7 @@ function DialogueGroupNode({
   onToggle,
   onCreateDialogue,
   isCreateDisabled,
+  createDisabledReason,
   parentSectionCollapsed,
   disableSessionCollapse,
   activeSessionId,
@@ -790,9 +822,14 @@ function DialogueGroupNode({
   sessions: Session[];
   collapsed: boolean;
   onToggle: () => void;
-  /** 组头右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。 */
+  /**
+   * 组头右侧的新建入口(与项目行 SquarePen 等位):新建不绑项目的对话任务。
+   * 目标设备由父层按所在设备段决定(闭包传入),本组件不关心。
+   */
   onCreateDialogue: () => void;
   isCreateDisabled: boolean;
+  /** 禁用原因(目标设备离线),有值时替换按钮 tooltip / aria——与远程项目行同款。 */
+  createDisabledReason?: string;
   parentSectionCollapsed: boolean;
   disableSessionCollapse: boolean;
   activeSessionId?: string;
@@ -857,10 +894,10 @@ function DialogueGroupNode({
             'opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
           )}
         >
-          <Tip text={t('ccAgent.sidebar.newDialogue')}>
+          <Tip text={createDisabledReason ?? t('ccAgent.sidebar.newDialogue')}>
             <button
               type="button"
-              aria-label={t('ccAgent.sidebar.newDialogue')}
+              aria-label={createDisabledReason ?? t('ccAgent.sidebar.newDialogue')}
               disabled={isCreateDisabled}
               onClick={(e) => {
                 e.stopPropagation();

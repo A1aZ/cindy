@@ -262,6 +262,7 @@ import {
   createGhostWindowFocusRevisionTracker,
   createGhostPrimarySessionFocusTracker,
   isGhostEligibleSessionRow,
+  isGhostCurrentSessionSourceEligible,
   isGhostSessionSwitchEligibleRow,
   readStableGhostCurrentSessionSnapshot,
   resolveGhostPrimarySessionId,
@@ -1934,7 +1935,13 @@ const rawGhostSessionFocusTracker = createGhostSessionFocusTracker(() => undefin
 async function resolveGhostPrimarySession(sessionId: string): Promise<string | null> {
   return resolveGhostPrimarySessionId(
     sessionId,
-    async (candidateSessionId) => (await getSessionRowSnapshot(candidateSessionId))?.orcaRole,
+    async (candidateSessionId) => {
+      const row = await getSessionRowSnapshot(candidateSessionId);
+      // Focus can point at any visible session source. Only user tasks and an
+      // Orca Lead may be exposed through the plugin current-session API.
+      if (!row || !isGhostCurrentSessionSourceEligible(row.source)) return 'unknown';
+      return row.orcaRole;
+    },
     async (workerSessionId) => {
       const team = await getTeamByWorkerSession(workerSessionId);
       return team?.leadSessionId ?? null;

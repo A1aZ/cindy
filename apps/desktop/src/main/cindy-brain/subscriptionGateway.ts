@@ -564,6 +564,11 @@ export function isGhostEligibleSessionRow(row: {
   return (row.source === 'desktop' || row.source === 'shared' || row.source === 'plugin') && row.orcaRole == null;
 }
 
+/** Current-task reads may inspect Orca workers before normalizing them to Lead. */
+export function isGhostCurrentSessionSourceEligible(source: string | null | undefined): boolean {
+  return source === 'desktop' || source === 'shared' || source === 'plugin';
+}
+
 /**
  * did-session-switched 单独使用的资格判定：协同 Lead 是用户正在看的主任务，
  * 应参与前台任务切换；Worker 仍是内部协同任务，不直接暴露给插件。

@@ -19,6 +19,7 @@ import {
   createGhostWindowFocusRevisionTracker,
   ghostActivityId,
   isGhostEligibleSessionRow,
+  isGhostCurrentSessionSourceEligible,
   isGhostSessionSwitchEligibleRow,
   readStableGhostCurrentSessionSnapshot,
   resolveGhostPrimarySessionId,
@@ -731,6 +732,13 @@ describe('isGhostSessionSwitchEligibleRow(did-session-switched 专用资格)', (
     expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: 'worker' })).toBe(false);
     expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: 'unknown' })).toBe(false);
     expect(isGhostSessionSwitchEligibleRow({ source: 'scheduler', orcaRole: null })).toBe(false);
+    expect(isGhostCurrentSessionSourceEligible('desktop')).toBe(true);
+    expect(isGhostCurrentSessionSourceEligible('shared')).toBe(true);
+    expect(isGhostCurrentSessionSourceEligible('plugin')).toBe(true);
+    expect(isGhostCurrentSessionSourceEligible('scheduler')).toBe(false);
+    expect(isGhostCurrentSessionSourceEligible('learn')).toBe(false);
+    expect(isGhostCurrentSessionSourceEligible('feishu')).toBe(false);
+    expect(isGhostCurrentSessionSourceEligible(null)).toBe(false);
   });
 });
 

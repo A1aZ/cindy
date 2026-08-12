@@ -597,6 +597,8 @@ export function createSessionRemoteHostIdReader(): (sessionId: string) => Promis
 }
 
 export interface SessionRowSnapshot {
+  /** Source gate used by plugin current-task/session-switch projection. */
+  source?: string | null;
   status: string;
   title: string | null;
   userSendAt: number | null;
@@ -618,6 +620,7 @@ async function selectSessionRowSnapshot(id: string): Promise<SessionRowSnapshot 
   const db = getDbClient().drizzle;
   const [row] = await db
     .select({
+      source: sessions.source,
       status: sessions.status,
       title: sessions.title,
       userSendAt: sessions.userSendAt,

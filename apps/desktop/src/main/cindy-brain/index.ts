@@ -262,6 +262,7 @@ import {
   createGhostPrimarySessionFocusTracker,
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
+  readStableGhostCurrentSessionSnapshot,
   resolveGhostPrimarySessionId,
   selectGhostFocusedSessionCandidate,
   type GhostInteractionActivityKind,
@@ -4849,18 +4850,19 @@ export function registerGhostIpc(): void {
         if (!ghost.manifest.slots.includes('session-context')) {
           throwIpcError('PERMISSION_DENIED', '插件未声明 session-context 能力');
         }
-        const sessionId = await currentGhostSessionId();
-        if (!sessionId) {
+        const current = await readStableGhostCurrentSessionSnapshot(
+          currentGhostSessionId,
+          (sessionId) =>
+            Promise.all([getSessionRowSnapshot(sessionId), getSessionFsSnapshot(sessionId)]),
+        );
+        if (!current) {
           return {
             ok: true,
             kind: 'current-session' as const,
             sessionId: null,
           };
         }
-        const [row, fsSnapshot] = await Promise.all([
-          getSessionRowSnapshot(sessionId),
-          getSessionFsSnapshot(sessionId),
-        ]);
+        const { sessionId, snapshot: [row, fsSnapshot] } = current;
         return {
           ok: true,
           kind: 'current-session' as const,

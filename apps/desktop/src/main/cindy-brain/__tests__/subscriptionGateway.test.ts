@@ -19,6 +19,7 @@ import {
   ghostActivityId,
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
+  readStableGhostCurrentSessionSnapshot,
   resolveGhostPrimarySessionId,
   selectGhostFocusedSessionCandidate,
   normalizeTurnUsage,
@@ -792,6 +793,33 @@ describe('selectGhostFocusedSessionCandidate', () => {
         1,
       ),
     ).toBeNull();
+  });
+});
+
+describe('readStableGhostCurrentSessionSnapshot', () => {
+  it('快照读取期间焦点变化时丢弃旧任务数据', async () => {
+    const resolveCurrentSessionId = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce('session-old')
+      .mockResolvedValueOnce('session-new');
+    const readSnapshot = vi.fn(async () => ({ title: '旧任务' }));
+
+    await expect(
+      readStableGhostCurrentSessionSnapshot(resolveCurrentSessionId, readSnapshot),
+    ).resolves.toBeNull();
+    expect(readSnapshot).toHaveBeenCalledWith('session-old');
+  });
+
+  it('焦点保持不变时返回对应任务快照', async () => {
+    const resolveCurrentSessionId = vi.fn(async () => 'session-1');
+    const readSnapshot = vi.fn(async () => ({ title: '当前任务' }));
+
+    await expect(
+      readStableGhostCurrentSessionSnapshot(resolveCurrentSessionId, readSnapshot),
+    ).resolves.toEqual({
+      sessionId: 'session-1',
+      snapshot: { title: '当前任务' },
+    });
   });
 });
 

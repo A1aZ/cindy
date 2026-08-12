@@ -613,6 +613,18 @@ export function selectGhostFocusedSessionCandidate(
   return { webContentsId: selected.webContentsId, sessionId: selected.sessionId };
 }
 
+/** 异步读取当前任务快照，并在读取完成后复核焦点，避免返回已失焦任务的数据。 */
+export async function readStableGhostCurrentSessionSnapshot<T>(
+  resolveCurrentSessionId: () => Promise<string | null>,
+  readSnapshot: (sessionId: string) => Promise<T>,
+): Promise<{ sessionId: string; snapshot: T } | null> {
+  const sessionId = await resolveCurrentSessionId();
+  if (!sessionId) return null;
+  const snapshot = await readSnapshot(sessionId);
+  if ((await resolveCurrentSessionId()) !== sessionId) return null;
+  return { sessionId, snapshot };
+}
+
 /** 插件面板只面向用户主任务；特殊焦点若落到 Orca Worker，统一折回所属 Lead。 */
 export async function resolveGhostPrimarySessionId(
   sessionId: string | null,

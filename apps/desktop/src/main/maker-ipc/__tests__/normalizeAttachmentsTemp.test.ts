@@ -66,7 +66,10 @@ describe('inline attachment temporary files', () => {
     }
     const imageBlock = normalized.content.find((block) => block.type === 'image');
     const imagePath = imageBlock?.path;
-    if (typeof imagePath !== 'string') throw new Error('expected materialized image path');
+    if (!imageBlock || typeof imagePath !== 'string') {
+      throw new Error('expected materialized image path');
+    }
+    expect(imageBlock.pathOrigin).toBe('desktop-host');
     const sessionTempDir = path.dirname(imagePath);
     const ownerRoot = path.dirname(sessionTempDir);
     const ownerRecord = JSON.parse(

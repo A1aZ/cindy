@@ -272,6 +272,7 @@ type AttachmentBlock = {
   path?: string;
   base64?: string;
   mimeType?: string;
+  pathOrigin?: 'desktop-host';
 };
 type UserMessageShape = string | { type: 'user'; content: string | RawBlock[] };
 
@@ -299,6 +300,16 @@ export async function normalizeUserMessage(
     }
 
     const block = { ...raw } as AttachmentBlock & { type: 'image' | 'file' };
+    const isDesktopHostImage = block.type === 'image' && (
+      block.pathOrigin === 'desktop-host'
+      || Boolean(block.base64)
+      || (typeof block.path === 'string' && (
+        block.path.startsWith('xdt-image://')
+        || block.path.startsWith('cindy-media://')
+        || isAttachmentOssRef(block.path)
+      ))
+    );
+    if (isDesktopHostImage) block.pathOrigin = 'desktop-host';
 
     // 0) device-link 出方向 OSS 引用(控制端发来的附件)→ presign-get 下载物化到临时文件,
     //    用后删 OSS。新引用下载/校验失败 → 整条不发；旧引用保留历史的单附件降级语义。

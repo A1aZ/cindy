@@ -5160,10 +5160,12 @@ export class ClaudeCodeAgent extends BaseAgent {
           // 这里 MVP 检测到附件就 emit warn event 让用户知道,实际请求里把附件 ref 留着
           // (daemon 端 SDK 读不到就跳过, 不会 crash)。
           if (opts.remoteHostId && Array.isArray(message.content)) {
-            const hasFileAttachment = message.content.some(
-              (b) => b.type === 'file' || b.type === 'mention',
+            const hasDesktopLocalAttachment = message.content.some(
+              (b) => b.type === 'file'
+                || b.type === 'mention'
+                || (b.type === 'image' && b.pathOrigin === 'desktop-host'),
             );
-            if (hasFileAttachment) {
+            if (hasDesktopLocalAttachment) {
               log.warn('cc remote: local attachment not accessible on remote session', {
                 sessionId: opts.sessionId,
                 hostId: opts.remoteHostId,

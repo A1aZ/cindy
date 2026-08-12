@@ -131,12 +131,10 @@ export function SidebarWindowLayout() {
       const revision = ++visibilityRevisionRef.current;
       if (!payload.visible) {
         setWindowVisible(false);
-        setCtx(null);
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         setWindowChromeRevision((revision) => revision + 1);
       } else {
         setWindowVisible(false);
-        setCtx(null);
         const contextRevision = contextRevisionRef.current;
         // controller 在发送 visible:true 前已经切换为可见态，getContext 此时返回
         // main 缓存的最新快照；与单向 refresh push 相比，可明确等待本轮刷新完成。
@@ -161,23 +159,26 @@ export function SidebarWindowLayout() {
     });
   }, []);
 
-  const activeCtx = windowVisible ? ctx : null;
-  const sessionId = activeCtx?.available ? activeCtx.sessionId : null;
+  // ctx 同时是 keep-alive 宿主：隐藏期间保留旧 session，让 webview / terminal / review
+  // 等标签主体继续挂载，只通过 shellVisible 暂停其工作。涉及用户操作的宿主能力
+  // 必须另行受 windowVisible 门控，不能把挂载上下文当成交互授权。
+  const sessionId = ctx?.available ? ctx.sessionId : null;
+  const interactiveSessionId = windowVisible ? sessionId : null;
 
   // agent tab-op 触发的可见性请求(本窗口内 rsbBrowserBridge 派发):
   //  - 'close'(最后一个 tab 被关)且目标是当前会话 → 收起 = 关本窗口
   //  - 'open' → no-op(窗口已开);异会话请求忽略(tab 已入库,切过去自然可见)
   useEffect(() => {
     return onRequestRightSidebarVisibility((visibility, opts) => {
-      const target = opts.sessionId ?? sessionId;
-      if (!target || target !== sessionId) return;
+      const target = opts.sessionId ?? interactiveSessionId;
+      if (!target || target !== interactiveSessionId) return;
       if (visibility === 'close') {
         void window.electronAPI.rightSidebarWindow.close().catch((err) => {
           log.warn('close via visibility request failed', err);
         });
       }
     });
-  }, [sessionId]);
+  }, [interactiveSessionId]);
 
   // 主窗命令转发:
   // - open-terminal 快捷键:必须先 hydrate 再 add/focus,语义对齐 MainLayout。
@@ -199,10 +200,10 @@ export function SidebarWindowLayout() {
   // 声明壳层所有权 —— App 根的 useCloseWindowFallbackShortcut 让路给本消费点。
   useCloseShortcutShellOwner();
   useAppShortcut('close-tab-or-window', () => {
-    if (sessionId) {
-      const bucket = getBucket(sessionId);
+    if (interactiveSessionId) {
+      const bucket = getBucket(interactiveSessionId);
       if (bucket.activeTabId) {
-        void closeTab(sessionId, bucket.activeTabId).catch((err) => {
+        void closeTab(interactiveSessionId, bucket.activeTabId).catch((err) => {
           log.warn('close tab via shortcut failed', err);
         });
         return true;
@@ -271,21 +272,21 @@ export function SidebarWindowLayout() {
       <div className="relative flex flex-1 flex-col overflow-hidden">
         <RightSidebarShell
           sessionId={sessionId}
-          workdir={activeCtx?.workdir ?? ''}
-          remoteHostId={activeCtx?.remoteHostId ?? null}
-          deviceLinkDeviceId={activeCtx?.deviceLinkDeviceId}
+          workdir={ctx?.workdir ?? ''}
+          remoteHostId={ctx?.remoteHostId ?? null}
+          deviceLinkDeviceId={ctx?.deviceLinkDeviceId}
           shellVisible={windowVisible}
           isMac={isMac}
         />
-        {!sessionId && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        {(!windowVisible || !sessionId) && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--panel-bg)]">
             <span className="text-13 text-[var(--text-tertiary)]">
               {t('rightSidebar.window.followPlaceholder')}
             </span>
           </div>
         )}
       </div>
-      <GhostMediaLightboxHost sessionId={sessionId ?? undefined} />
+      <GhostMediaLightboxHost sessionId={interactiveSessionId ?? undefined} />
     </div>
   );
 }

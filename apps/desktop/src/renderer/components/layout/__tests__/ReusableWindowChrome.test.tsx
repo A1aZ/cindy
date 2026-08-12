@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   ghostMinimizeListener: null as (() => void) | null,
   ghostMinimizeEnabled: true,
   sidebarShellVisible: undefined as boolean | undefined,
+  sidebarShellSessionId: undefined as string | null | undefined,
   sidebarLightboxSessionId: undefined as string | undefined,
   minimizeGhostPanel: vi.fn(),
   restoreGhostPanel: vi.fn(),
@@ -39,7 +40,14 @@ vi.mock('@/components/title-bar/WindowControls', () => ({
   },
 }));
 vi.mock('@/features/right-sidebar/RightSidebarShell', () => ({
-  RightSidebarShell: ({ shellVisible }: { shellVisible?: boolean }) => {
+  RightSidebarShell: ({
+    sessionId,
+    shellVisible,
+  }: {
+    sessionId?: string | null;
+    shellVisible?: boolean;
+  }) => {
+    mocks.sidebarShellSessionId = sessionId;
     mocks.sidebarShellVisible = shellVisible;
     return null;
   },
@@ -134,6 +142,7 @@ describe('reusable auxiliary window chrome', () => {
     mocks.ghostMinimizeListener = null;
     mocks.ghostMinimizeEnabled = true;
     mocks.sidebarShellVisible = undefined;
+    mocks.sidebarShellSessionId = undefined;
     mocks.sidebarLightboxSessionId = undefined;
     Object.defineProperty(window, 'electronAPI', {
       configurable: true,
@@ -328,11 +337,15 @@ describe('reusable auxiliary window chrome', () => {
     );
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));
     await waitFor(() => expect(mocks.sidebarLightboxSessionId).toBe('session-a'));
+    expect(mocks.sidebarShellSessionId).toBe('session-a');
 
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
+    expect(mocks.sidebarShellSessionId).toBe('session-a');
+    expect(mocks.sidebarShellVisible).toBe(false);
     expect(mocks.sidebarLightboxSessionId).toBeUndefined();
 
     act(() => mocks.sidebarVisibilityListener?.({ visible: true }));
+    expect(mocks.sidebarShellSessionId).toBe('session-a');
     expect(mocks.sidebarShellVisible).toBe(false);
     expect(mocks.sidebarLightboxSessionId).toBeUndefined();
 
@@ -346,6 +359,7 @@ describe('reusable auxiliary window chrome', () => {
     });
 
     expect(mocks.sidebarShellVisible).toBe(true);
+    expect(mocks.sidebarShellSessionId).toBe('session-b');
     expect(mocks.sidebarLightboxSessionId).toBe('session-b');
   });
 

@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   sidebarShellVisible: undefined as boolean | undefined,
   sidebarShellSessionId: undefined as string | null | undefined,
   sidebarLightboxSessionId: undefined as string | undefined,
+  initGlobalListeners: vi.fn(),
   minimizeGhostPanel: vi.fn(),
   restoreGhostPanel: vi.fn(),
 }));
@@ -112,7 +113,7 @@ vi.mock('@/lib/ghostPanelBubbleState', () => ({
   restoreGhostPanel: mocks.restoreGhostPanel,
 }));
 vi.mock('@/lib/makerChatStore', () => ({
-  makerChatStore: { initGlobalListeners: vi.fn() },
+  makerChatStore: { initGlobalListeners: mocks.initGlobalListeners },
 }));
 vi.mock('@/lib/logger', () => ({
   createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
@@ -283,6 +284,7 @@ describe('reusable auxiliary window chrome', () => {
 
   it('restores right-sidebar tab bodies only after the visible window has fresh context', async () => {
     render(<SidebarWindowLayout />);
+    expect(mocks.initGlobalListeners).toHaveBeenCalledWith({ ownsRemoteAuthRetry: false });
     expect(mocks.sidebarShellVisible).toBe(false);
 
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));

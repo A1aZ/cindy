@@ -68,7 +68,9 @@ export function SidebarWindowLayout() {
   ensureGhostPanelsRegistered();
   useGhostPanelsSync();
   useEffect(() => {
-    makerChatStore.initGlobalListeners();
+    // 子窗口需要实时事件来维护面板内容，但认证失败后的凭证读取、会话重启与消息重发
+    // 必须只由主 renderer 执行，避免多个 renderer 对同一远程任务并发重试。
+    makerChatStore.initGlobalListeners({ ownsRemoteAuthRetry: false });
   }, []);
   const isMac = window.electronAPI?.platform === 'darwin';
   const [ctx, setCtx] = useState<SidebarWindowContext | null>(null);

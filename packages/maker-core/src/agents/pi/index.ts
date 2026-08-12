@@ -658,6 +658,18 @@ export class PiAgent extends BaseAgent {
       );
     }
     const initialProvider = resolveProviderForModel(opts.model, opts.providerId);
+    // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，
+    // 仍必须能从 model→provider 映射识别纯 BYOM，不能误落 Cindy gateway 登录门。
+    // startup effort 快照也使用同一来源，因此必须在快照 resolver 之前完成初始化。
+    const authProviderId =
+      opts.providerId ??
+      (initialProvider !== PI_PROVIDER_ID
+        ? initialProvider
+        : opts.model.startsWith('chatgpt/')
+          ? 'openai'
+          : opts.model.startsWith('xai/')
+            ? 'xai'
+            : null);
 
     // availableModels 是跨 provider 拍平的公开选择面；启动旧任务时必须按实际来源重查
     // provider-aware 描述符，不能拿同 id 的内置/BYOM 首见条目校验持久化 effort。
@@ -737,17 +749,6 @@ export class PiAgent extends BaseAgent {
       );
     };
 
-    // 先解析 native provider 再做 auth：老会话/远端控制端可能没有持久化 providerId，
-    // 仍必须能从 model→provider 映射识别纯 BYOM，不能误落 Cindy gateway 登录门。
-    const authProviderId =
-      opts.providerId ??
-      (initialProvider !== PI_PROVIDER_ID
-        ? initialProvider
-        : opts.model.startsWith('chatgpt/')
-          ? 'openai'
-          : opts.model.startsWith('xai/')
-            ? 'xai'
-            : null);
     const credentialMode =
       resolveAgentCredentialMode({ agentKind: 'pi', providerId: authProviderId, model: opts.model }) ??
       'gateway-key';

@@ -396,6 +396,20 @@ describe('model access catalog contract', () => {
       },
       'response.models[0].perAgent.codex.defaultEffort',
     );
+    expectReject(
+      {
+        ...VALID_RESPONSE,
+        models: [
+          {
+            ...VALID_RESPONSE.models[0],
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+            perAgent: { codex: { efforts: ['low'] } },
+          },
+        ],
+      },
+      'response.models[0].perAgent.codex.efforts',
+    );
   });
 
   it('rejects duplicate ids and overrides for unsupported agents', () => {

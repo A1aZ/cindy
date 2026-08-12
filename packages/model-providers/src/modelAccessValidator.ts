@@ -308,6 +308,7 @@ function overrideError(
   baseEfforts: readonly ModelEffort[] | undefined,
   allowedFields?: readonly string[],
   allowNullDefaultEffort = false,
+  baseDefaultEffort?: ModelEffort | null,
 ): string | null {
   if (!isPlainObject(value)) return `${path} must be an object`;
   let error = allowedFields ? unknownFieldError(value, allowedFields, path) : null;
@@ -336,6 +337,14 @@ function overrideError(
     !effectiveEfforts.includes(value.defaultEffort)
   ) {
     return `${path}.defaultEffort must be included in ${path}.efforts or the base efforts`;
+  }
+  if (
+    value.defaultEffort === undefined &&
+    isModelEffort(baseDefaultEffort) &&
+    effectiveEfforts !== undefined &&
+    !effectiveEfforts.includes(baseDefaultEffort)
+  ) {
+    return `${path}.efforts must include the inherited base defaultEffort`;
   }
   for (const key of ['supportsFastMode', 'defaultEnabled'] as const) {
     if (value[key] !== undefined && typeof value[key] !== 'boolean') {
@@ -540,6 +549,7 @@ function modelEntryError(
           ? MODEL_AGENT_OVERRIDE_V3_FIELDS
           : MODEL_AGENT_OVERRIDE_FIELDS,
         true,
+        isModelEffort(value.defaultEffort) ? value.defaultEffort : null,
       );
       if (error) return error;
       if (isPlainObject(override) && override.wireProtocol !== undefined) {
@@ -845,6 +855,8 @@ function registryEntryError(
         `${path}.perAgent.${agent}`,
         efforts,
         MODEL_AGENT_OVERRIDE_FIELDS,
+        false,
+        isModelEffort(value.defaultEffort) ? value.defaultEffort : null,
       );
       if (error) return error;
     }

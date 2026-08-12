@@ -700,6 +700,29 @@ describe('pi auto-review dispatch & spawn config (mocked pi process)', () => {
     await handle.close();
   });
 
+  it('resume 模型同时缺少公开与 retained 描述符时不会在来源初始化前访问 resolver', async () => {
+    const deps = buildDeps();
+    deps.resolvePiRuntimeModelDescriptor = vi.fn(() => null);
+    deps.resolvePiGatewayModelDescriptor = vi.fn(() => null);
+    const agent = new PiAgent(deps);
+    const resumeFile = path.join(agentHome, 'missing-retained-session.jsonl');
+    writeFileSync(resumeFile, '{}\n');
+
+    const handle = await agent.startSession({
+      sessionId: 'missing-retained-resume',
+      workingDir: cwd,
+      model: 'chatgpt/gpt-missing',
+      providerId: 'openai',
+      resumeSessionId: resumeFile,
+    });
+
+    expect(deps.resolvePiGatewayModelDescriptor).toHaveBeenCalledWith(
+      'openai',
+      'chatgpt/gpt-missing',
+    );
+    await handle.close();
+  });
+
   it('新会话缺少公开模型时不调用私有续跑解析器', async () => {
     const resolver = vi.fn(() => ({
       id: 'chatgpt/gpt-retired',

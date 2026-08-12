@@ -5,10 +5,12 @@
  * time。以「·」分隔;全不选渲染 null(行右侧留空)。
  *
  * 数据口径:
- *   - pr:session_pr_refs 的最新一条(lastSeenAt 降序首位),只显示等宽 `#号`,
- *     状态**全靠颜色**(设计定稿):色表复用 gitContextPrVisuals.PR_STATUS_COLOR
- *     (与会话顶栏 GitContextBadge / hover tooltip 同一张表);状态未加载 /
- *     no-token / 查询失败时降级为 tertiary 灰(号码本地就有)。文字状态放 hover。
+ *   - pr:session_pr_refs 的最新一条(lastSeenAt 降序首位),显示「状态 icon +
+ *     等宽 `#号`」,与会话顶栏 GitContextBadge 的 PrChip 同款(2026-08-12 用户
+ *     裁决:仿顶栏,状态颜色只上在 icon 上,`#号` 文字用信息槽常规灰):形状表
+ *     PR_STATUS_ICON + 色表 PR_STATUS_COLOR(色弱友好,四态形状不同);状态
+ *     未加载 / no-token / 查询失败时 icon 降级 GitPullRequest + tertiary 灰
+ *     (号码本地就有)。文字状态放 hover。
  *   - tokens:session.totalTokenUsage,formatCompactTokens 缩写(1.4M / 320k),
  *     无单位后缀(与费用的货币前缀天然区分);0 视为无数据不显示。
  *   - cost:优先 totalMoney(区域币种 $/¥),回退 legacy totalCostUsd;
@@ -27,6 +29,7 @@
  */
 
 import { useEffect } from 'react';
+import { GitPullRequest } from 'lucide-react';
 import { formatCompactTokens } from '@cindy/maker-shared/usage-format';
 import { useTranslation } from 'react-i18next';
 
@@ -36,7 +39,7 @@ import type { SessionPrRef } from '@/lib/gitContext.types';
 import { formatMoney, formatUsd } from '@/lib/usageFormat';
 import { prStatusKey } from '@/lib/prStatus';
 import { usePrStatuses } from '@/contexts/PrRefsContext';
-import { PR_STATUS_COLOR } from '../gitContextPrVisuals';
+import { PR_STATUS_COLOR, PR_STATUS_ICON } from '../gitContextPrVisuals';
 import { formatSidebarTime, formatSidebarTimeAbsolute } from '../lib/formatSidebarTime';
 import type { TaskInfoField } from '../hooks/useTaskInfoFields';
 
@@ -94,11 +97,13 @@ export function buildSessionInfoPieces(
 }
 
 /**
- * PR `#号` 徽标(C' 期)——单独组件以隔离 statuses 订阅(文件头性能边界)。
- * 挂载即请求状态(fetchStatusesForSession 有去重 + main 60s TTL);拿到前
- * 灰色渲染号码。等宽字体,状态全靠颜色;文字状态进 title。
+ * PR 徽标(C' 期)——单独组件以隔离 statuses 订阅(文件头性能边界)。
+ * 挂载即请求状态(fetchStatusesForSession 有去重 + main 60s TTL)。
+ * 视觉与顶栏 PrChip 同款:状态 icon(形状 + 颜色双编码)+ 等宽 `#号`;
+ * `#号` 文字继承信息槽前景色(active 让位由父级统一处理),状态颜色只上
+ * 在 icon 上。状态未加载时 icon 灰色 GitPullRequest 占位;文字状态进 title。
  */
-function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: boolean }) {
+function PrNumberPiece({ prRef }: { prRef: SessionPrRef }) {
   const { t } = useTranslation();
   const { statuses, fetchStatusesForSession } = usePrStatuses();
   useEffect(() => {
@@ -106,18 +111,18 @@ function PrNumberPiece({ prRef, isActive }: { prRef: SessionPrRef; isActive?: bo
   }, [fetchStatusesForSession, prRef.sessionId]);
   const status = statuses.get(prStatusKey(prRef));
   const kind = status?.ok ? status.status : null;
+  const Icon = kind ? PR_STATUS_ICON[kind] : GitPullRequest;
   const title = kind
     ? `${prRef.owner}/${prRef.repo}#${prRef.prNumber} · ${t(`ccAgent.gitContext.pr.status.${kind}`)}`
     : `${prRef.owner}/${prRef.repo}#${prRef.prNumber}`;
   return (
-    <span
-      className="shrink-0 font-mono"
-      title={title}
-      style={
-        // active 行让位给统一前景色;其余按状态着色,未知状态 tertiary 灰降级。
-        isActive ? undefined : { color: kind ? PR_STATUS_COLOR[kind] : 'var(--text-tertiary)' }
-      }
-    >
+    <span className="flex shrink-0 items-center gap-0.5 font-mono" title={title}>
+      <Icon
+        size={11}
+        strokeWidth={1.75}
+        className="shrink-0"
+        style={{ color: kind ? PR_STATUS_COLOR[kind] : 'var(--text-tertiary)' }}
+      />
       #{prRef.prNumber}
     </span>
   );
@@ -149,7 +154,7 @@ export function SessionInfoMeta({
         className,
       )}
     >
-      {prRef && <PrNumberPiece prRef={prRef} isActive={isActive} />}
+      {prRef && <PrNumberPiece prRef={prRef} />}
       {pieces.map((piece, index) => (
         <span key={piece.key} className="flex shrink-0 items-center gap-1" title={piece.title}>
           {(index > 0 || prRef) && (

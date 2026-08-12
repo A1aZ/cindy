@@ -729,11 +729,11 @@ export function ProjectsSection({
                           online ? 'bg-[var(--card-status-done)]' : 'bg-[var(--text-tertiary)]',
                         )}
                       />
-                      <span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
-                        {section.entries.length}
-                      </span>
+                      {/* 条数已去掉(2026-08-12 用户裁决):它数的是顶层条目
+                          (项目行 + 散排对话 + 对话组),不是任务数,读起来只会误导;
+                          段展开后内容本身就是答案。「离线」接手 ml-auto 保持靠右。 */}
                       {!online && (
-                        <span className="shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
+                        <span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
                           {t('ccAgent.sidebar.deviceGroup.offline')}
                         </span>
                       )}

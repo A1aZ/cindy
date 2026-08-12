@@ -72,6 +72,23 @@ describe('sidebar remote project icon', () => {
     );
     expect(sessionItemSource).not.toContain('<span className="min-w-0 flex-1 truncate">');
     expect(sessionCardSource).not.toContain("'min-w-0 flex-1 truncate'");
+    // 项目行同规(2026-08-12 用户裁决):项目名 shrink 而非 flex-1,远程图标紧跟
+    // 名字而不是被推到行尾。
+    expect(projectNodeSource).toContain(
+      '<span className="min-w-0 max-w-full shrink truncate">{project.displayName}</span>',
+    );
+    expect(projectNodeSource).not.toContain(
+      '<span className="min-w-0 flex-1 truncate">{project.displayName}</span>',
+    );
+  });
+
+  // 2026-08-12 用户裁决:设备段头的条数去掉——它数的是顶层条目(项目行 + 散排对话
+  // + 对话组)而非任务数,读起来只会误导;「离线」标签接手 ml-auto 保持靠右。
+  it('drops the entry count from the device group header', () => {
+    expect(projectsSectionSource).not.toContain('{section.entries.length}');
+    expect(projectsSectionSource).toContain(
+      '<span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">',
+    );
   });
 
   // 2026-08-12 用户裁决:按设备分组时列表已按设备切段、段头写着设备名,项目行不再

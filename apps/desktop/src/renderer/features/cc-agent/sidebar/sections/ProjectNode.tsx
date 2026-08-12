@@ -333,7 +333,9 @@ export function ProjectNode({
               )}
             />
           ) : (
-            <span className="min-w-0 flex-1 truncate">{project.displayName}</span>
+            // shrink 而非 flex-1:让远程图标紧跟项目名,不被推到行尾
+            // (2026-08-12 用户裁决,与会话行的标题 + 远程图标同款)。
+            <span className="min-w-0 max-w-full shrink truncate">{project.displayName}</span>
           )}
           {!isEditingName && isDeviceLink ? (
             <Tip text={remoteIdentity?.displayLabel ?? project.deviceLinkDeviceId ?? ''}>

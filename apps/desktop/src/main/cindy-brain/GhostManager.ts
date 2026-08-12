@@ -31,6 +31,7 @@ import {
   readBoundedFileNoFollowSync,
 } from '../utils/readBoundedFile.js';
 import { checkSkillMdConsistency } from './skillSlot.js';
+import { parseInstalledGhostManifest } from '../installedGhostManifest.js';
 import {
   decodeGhostManualMarkdown,
   ghostManualLogicalPathForEntry,
@@ -210,24 +211,13 @@ export class GhostManager {
         });
         continue;
       }
-      let v = validateGhostManifest(raw);
-      if (
-        !v.ok &&
-        typeof raw === 'object' &&
-        raw !== null &&
-        !Array.isArray(raw) &&
-        Object.prototype.hasOwnProperty.call(raw, 'manual')
-      ) {
-        const withoutLegacyManual = { ...(raw as Record<string, unknown>) };
-        delete withoutLegacyManual.manual;
-        const legacyCompatible = validateGhostManifest(withoutLegacyManual);
-        if (legacyCompatible.ok) {
-          this.options.log?.warn('ghost legacy manual metadata ignored', {
-            code: 'LEGACY_MANUAL_METADATA_IGNORED',
-            manifestId: legacyCompatible.manifest.id,
-          });
-          v = legacyCompatible;
-        }
+      const parsedInstalled = parseInstalledGhostManifest(raw);
+      const v = parsedInstalled;
+      if (parsedInstalled.ok && parsedInstalled.legacyManualIgnored) {
+        this.options.log?.warn('ghost legacy manual metadata ignored', {
+          code: 'LEGACY_MANUAL_METADATA_IGNORED',
+          manifestId: parsedInstalled.manifest.id,
+        });
       }
       if (!v.ok) {
         this.options.log?.warn('ghost dir skipped: invalid manifest', { dir, reason: v.reason });

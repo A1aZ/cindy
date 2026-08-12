@@ -398,8 +398,9 @@ describe('OrcaWorkflowRoute source invariants', () => {
   });
 
   it('does not navigate the detached sidebar window to settings from the worker toolbar', () => {
-    expect(workerPanelSource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
-    expect(workerPanelSource).toContain('settingsEnabled={!isSidebarWindow()}');
+    // 设置链接已从 WorkerListToolbar 中移除，OrcaWorkerPanel 不再需要 isSidebarWindow 来限制设置入口
+    expect(workerPanelSource).not.toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
+    expect(workerPanelSource).not.toContain('settingsEnabled');
   });
 
   it('marks the collaboration worker chat as sidebar-embedded so it cannot replace the host route', () => {

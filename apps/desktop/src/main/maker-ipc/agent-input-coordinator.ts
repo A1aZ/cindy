@@ -3143,9 +3143,15 @@ export class AgentInputCoordinator {
       // #2506 结果级诊断:排队输入被 gate 挡住时留痕(此前零日志,gate-clear
       // 到成功 drain 之间的静默滞留无从定位)。只记 id / 布尔 / 枚举,不记正文;
       // 空队列的例行 drain 不记,避免每次 turn-done 都产生噪音。
+      // 级别按 gate 分层(Codex review):turn 运行中排队、恢复暂停、交互锁等
+      // 都是**正常态**,每次 drain 尝试都会进这里 —— packaged 默认 info,记
+      // info 会让普通排队持续刷日志、淹没真正的异常断点,复现期排障走 DEBUG
+      // (工程规范)。只有 queue-restore-failed(快照恢复确已失败,队列滞留到
+      // 人工介入,非瞬态)保留 info 常驻观测。
       const gate = this.explainDrainBlockGate(sessionId, state);
       if (gate !== null && gate !== 'queue-empty') {
-        log.info('drain blocked', {
+        const logAt = gate === 'queue-restore-failed' ? log.info : log.debug;
+        logAt('drain blocked', {
           sessionId,
           reason,
           gate,

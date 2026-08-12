@@ -16,7 +16,8 @@
  *  3. 竞态排列 b:close cleanup 吞掉已排程的 wake-drain(register 接线的
  *     「先关后唤」顺序是正确性前提,本用例锁住反例的行为);
  *  4. 竞态排列 c:迟到/重复 wake 的恰好一次语义;
- *  5. drain blocked 结果级诊断落日志(gate 枚举 + 脱敏字段)。
+ *  5. drain blocked 结果级诊断落日志(gate 枚举 + 脱敏字段;常规 gate 走
+ *     debug,仅 queue-restore-failed 保留 info)。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentInputCoordinator } from '../agent-input-coordinator.js';
@@ -238,7 +239,9 @@ function latestSnapshotClientIds(
 }
 
 function drainBlockedLogs(): Array<Record<string, unknown>> {
-  return mocks.logger.info.mock.calls
+  // 常规 gate 的阻塞诊断走 debug(正常排队每次 drain 都进这里,info 会刷爆
+  // packaged 日志);只有 queue-restore-failed 保留 info 常驻观测。
+  return mocks.logger.debug.mock.calls
     .filter(([message]) => message === 'drain blocked')
     .map(([, meta]) => meta as Record<string, unknown>);
 }
@@ -251,7 +254,7 @@ describe('deferred Codex restart × input queue drain (#2506)', () => {
   it('端到端:pending 门挡住的后续消息在重启兑现后恰好派发一次并落库', async () => {
     const h = createRestartHarness();
     await h.coordinator.ensureQueueRestored(h.SID);
-    mocks.logger.info.mockClear();
+    mocks.logger.debug.mockClear();
 
     // 另一会话忙 → 重启延期挂起;本会话上一轮已完成(running=false)。
     h.setBusyOtherSession(true);
@@ -308,7 +311,7 @@ describe('deferred Codex restart × input queue drain (#2506)', () => {
     expect(h.sendToAgent).not.toHaveBeenCalled();
 
     // 迟到的二次 wake 不越过暂停态,且必须留下 gate 诊断而不是静默无痕。
-    mocks.logger.info.mockClear();
+    mocks.logger.debug.mockClear();
     h.coordinator.wakeSession(h.SID, 'deferred-codex-restart-applied');
     await flush();
     expect(h.sendToAgent).not.toHaveBeenCalled();

@@ -709,6 +709,26 @@ describe('setContext / routeCommand', () => {
     expect(h.sends.at(-1)).toEqual({ channel: 'cmd-channel', payload: cmd });
   });
 
+  it('queues passive commands while a cached detached window is hidden and flushes on reopen', async () => {
+    const h = makeHarness({ detached: true });
+    h.controller.setContext(ctx);
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+    h.controller.open();
+    h.controller.close();
+    h.sends.length = 0;
+
+    const cmd = { type: 'close-orca-workers-tab' as const, sessionId: 's1' };
+    await expect(
+      h.controller.routeCommand({ command: cmd, allowOpen: false }),
+    ).resolves.toBe('queued');
+    expect(h.sends).toEqual([]);
+
+    h.controller.open();
+    expect(h.sends).toContainEqual({ channel: 'cmd-channel', payload: cmd });
+  });
+
   it('detach preference change mid-wait: returns attached, no send to destroyed host', async () => {
     const h = makeHarness({ detached: true });
     h.controller.setContext(ctx);

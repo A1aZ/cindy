@@ -72,6 +72,8 @@ export function SidebarWindowLayout() {
   }, []);
   const isMac = window.electronAPI?.platform === 'darwin';
   const [ctx, setCtx] = useState<SidebarWindowContext | null>(null);
+  // 预热窗口初始隐藏；由 main 的 visibility push 驱动 Shell 内各子面板暂停/恢复。
+  const [windowVisible, setWindowVisible] = useState(false);
   const presentationReadySentRef = useRef(false);
   // 复用隐藏窗口时，Chromium 可能保留上一次关闭按钮的 focus / :hover 状态。
   // 与资源用量窗口一致，隐藏时重挂载 chrome，确保再次显示从干净状态开始。
@@ -120,6 +122,7 @@ export function SidebarWindowLayout() {
   // 隐藏/显示时刷新 context(主窗 session 可能已切换)并重置瞬时交互态。
   useEffect(() => {
     return window.electronAPI.rightSidebarWindow.onVisibilityChanged((payload) => {
+      setWindowVisible(payload.visible);
       if (!payload.visible) {
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         setWindowChromeRevision((revision) => revision + 1);
@@ -243,6 +246,7 @@ export function SidebarWindowLayout() {
           workdir={ctx?.workdir ?? ''}
           remoteHostId={ctx?.remoteHostId ?? null}
           deviceLinkDeviceId={ctx?.deviceLinkDeviceId}
+          shellVisible={windowVisible}
           isMac={isMac}
         />
         {!sessionId && (

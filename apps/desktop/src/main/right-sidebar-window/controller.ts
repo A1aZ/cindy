@@ -357,7 +357,7 @@ export class RsbWindowController {
     if (!this.canDispatchCommand(command)) return 'stale-context';
 
     const windowAlive = this.winRef && !this.winRef.isDestroyed();
-    if (!allowOpen && (!windowAlive || !this.presentationReady)) {
+    if (!allowOpen && (!windowAlive || !this.presentationReady || !this.visible)) {
       this.enqueueDeferredCommand(command);
       return 'queued';
     }
@@ -498,6 +498,9 @@ export class RsbWindowController {
     this.visible = true;
     // lastOpen 由 open() 在外层写，这里只负责展示
     this.deps.sendToWindow(win, RSB_WINDOW_VISIBILITY_CHANGED_CHANNEL, { visible: true });
+    // 隐藏复用期间的 passive 命令不能在用户看不见时改动子窗口 store；
+    // 窗口重新显示后按原顺序统一交付。
+    this.flushDeferredCommandsToDetachedHost();
     this.broadcast();
   }
 

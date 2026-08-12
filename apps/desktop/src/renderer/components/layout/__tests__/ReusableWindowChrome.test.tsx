@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   ghostVisibilityListener: null as ((payload: { visible: boolean }) => void) | null,
   ghostMinimizeListener: null as (() => void) | null,
   ghostMinimizeEnabled: true,
+  sidebarShellVisible: undefined as boolean | undefined,
   minimizeGhostPanel: vi.fn(),
   restoreGhostPanel: vi.fn(),
 }));
@@ -36,7 +37,12 @@ vi.mock('@/components/title-bar/WindowControls', () => ({
     );
   },
 }));
-vi.mock('@/features/right-sidebar/RightSidebarShell', () => ({ RightSidebarShell: () => null }));
+vi.mock('@/features/right-sidebar/RightSidebarShell', () => ({
+  RightSidebarShell: ({ shellVisible }: { shellVisible?: boolean }) => {
+    mocks.sidebarShellVisible = shellVisible;
+    return null;
+  },
+}));
 vi.mock('@/features/device-link/useDeviceLinkRemoteProjects', () => ({
   useDeviceLinkRemoteProjects: vi.fn(),
 }));
@@ -121,6 +127,7 @@ describe('reusable auxiliary window chrome', () => {
     mocks.ghostVisibilityListener = null;
     mocks.ghostMinimizeListener = null;
     mocks.ghostMinimizeEnabled = true;
+    mocks.sidebarShellVisible = undefined;
     Object.defineProperty(window, 'electronAPI', {
       configurable: true,
       value: {
@@ -256,6 +263,17 @@ describe('reusable auxiliary window chrome', () => {
       'test-ghost',
       false,
     );
+  });
+
+  it('passes cached-window visibility through to right-sidebar tab bodies', async () => {
+    render(<SidebarWindowLayout />);
+    expect(mocks.sidebarShellVisible).toBe(false);
+
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));
+    expect(mocks.sidebarShellVisible).toBe(true);
+
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
+    expect(mocks.sidebarShellVisible).toBe(false);
   });
 
   it('respects a plugin manifest that disables minimize in the detached window', async () => {

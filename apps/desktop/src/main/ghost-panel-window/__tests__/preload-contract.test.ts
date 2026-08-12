@@ -84,6 +84,13 @@ describe('ghost panel preload contract', () => {
     ]));
   });
 
+  it('guards plugin mutations to the current detached panel id', () => {
+    expect(source).toContain("new URLSearchParams(window.location.search).get('ghostPanelWindow')");
+    expect(source).toContain('mutationErrorForGhostPanel(id)');
+    expect(source).toContain("ipcRenderer.invoke('ghosts:reload', id)");
+    expect(source).toContain("ipcRenderer.invoke('ghosts:set-enabled', id, enabled)");
+  });
+
   it('uses shared lifecycle channel constants', () => {
     expect(source).toContain('GHOST_PANEL_WINDOW_RENDERER_READY_CHANNEL');
     expect(source).toContain('GHOST_PANEL_WINDOW_PRESENTATION_READY_CHANNEL');

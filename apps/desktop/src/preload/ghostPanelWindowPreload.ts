@@ -20,6 +20,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type { AppearanceSettings } from '../shared/appearanceSettings';
 import type { LocalThemesResult } from '../shared/local-themes';
 import type { GhostPanelWindowsState } from '../shared/ghostPanelWindow';
+import { isValidGhostId } from '../shared/ghost';
 import { DEFAULT_LOCALE, SUPPORTED_LOCALES, type SupportedLocale } from '../shared/locale';
 import {
   GHOST_PANEL_WINDOW_CLOSE_REQUESTED_CHANNEL,
@@ -49,6 +50,18 @@ function onPayload<T>(channel: string, cb: (payload: T) => void): Unsub {
   const listener = (_event: Electron.IpcRendererEvent, payload: T): void => cb(payload);
   ipcRenderer.on(channel, listener);
   return () => ipcRenderer.removeListener(channel, listener);
+}
+
+const currentGhostPanelId = (() => {
+  const raw = new URLSearchParams(window.location.search).get('ghostPanelWindow');
+  return isValidGhostId(raw) ? raw : null;
+})();
+
+function mutationErrorForGhostPanel(id: string): Error | null {
+  if (currentGhostPanelId === null || id !== currentGhostPanelId) {
+    return new Error('ghost panel mutation must target the current panel');
+  }
+  return null;
 }
 
 // 事件扇出型通道（main 广播 → 所有 renderer），按名注册 listener，fan-out 在 preload 层。
@@ -179,10 +192,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     /** 已装清单（同步：与面板体同帧渲染，不闪占位）。 */
     listSync: (): { ghosts: unknown[] } => ipcRenderer.sendSync('ghosts:list'),
     /** 重载插件（面板崩溃后恢复）。 */
-    reload: (id: string): Promise<{ state: string }> => ipcRenderer.invoke('ghosts:reload', id),
+    reload: (id: string): Promise<{ state: string }> => {
+      const error = mutationErrorForGhostPanel(id);
+      if (error) return Promise.reject(error);
+      return ipcRenderer.invoke('ghosts:reload', id);
+    },
     /** 启用/停用（面板错误态「关闭」按钮）。 */
-    setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> =>
-      ipcRenderer.invoke('ghosts:set-enabled', id, enabled),
+    setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> => {
+      const error = mutationErrorForGhostPanel(id);
+      if (error) return Promise.reject(error);
+      return ipcRenderer.invoke('ghosts:set-enabled', id, enabled);
+    },
     /** 解析面板媒体 URI → cindy-media:// 地址（右键菜单 / 拖拽引渡）。 */
     resolvePanelMedia: (
       uri: string,

@@ -4771,10 +4771,16 @@ export function ChatInput({
               g.enabled &&
               hostCapabilityForGhost(g) === hostCapability.capability,
           );
-        const routedText =
-          hostCapability && isHostCapabilityValid
-            ? expandHostCapabilityInvocation(textToSend, hostCapability, hostCapability.name)
-            : textToSend;
+        // 校验失败(插件停用/卸载/超 workdir/远程会话)时不静默退化为普通文本发送:
+        // 芯片承载的是用户选择的能力路由意图,退化发送会丢失 Host 路由,仅芯片消息还会
+        // 以空文本派发,静默丢弃用户意图。直接提示并拦截,让用户修复插件状态后重发。
+        if (hostCapability && !isHostCapabilityValid) {
+          toast.warning(t('newChat.pluginSetup.error.TARGET_UNAVAILABLE'));
+          return;
+        }
+        const routedText = hostCapability
+          ? expandHostCapabilityInvocation(textToSend, hostCapability, hostCapability.name)
+          : textToSend;
         const sendSnapshot = captureComposerSendSnapshot(
           editor.getJSON(),
           latestAttachmentsRef.current,

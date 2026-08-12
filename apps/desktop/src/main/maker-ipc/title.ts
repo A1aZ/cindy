@@ -49,6 +49,10 @@ import {
   type SessionAutoTitleRequest,
   type SessionAutoTitleResult,
 } from './sessionAutoTitle.js';
+import {
+  generatePromptPrediction,
+  type PromptPredictionParams,
+} from './promptPrediction.js';
 
 const log = createLogger('maker-ipc/title');
 
@@ -340,6 +344,50 @@ function parseAutoTitleRequest(raw: unknown): SessionAutoTitleRequest {
   };
 }
 
+/** 推荐提示词素材上限(消息条数)。 */
+const PREDICTION_MESSAGES_MAX = 40;
+/** 推荐提示词单条消息截断长度(UTF-16 code unit)。 */
+const PREDICTION_MSG_SLICE = 600;
+/** 推荐提示词 workingDir 截断长度。 */
+const PREDICTION_WORKDIR_MAX = 512;
+
+/** 主进程级去重:同一 session 同时只能有一笔预测在途,避免多窗口重复付费调用。 */
+const _predictingPromptSessions = new Set<string>();
+
+function parsePredictPromptRequest(raw: unknown): PromptPredictionParams {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throwIpcError('INVALID_PARAMS', 'predict-prompt request must be a non-null object');
+  }
+  const { sessionId, agentKind, messages, workingDir } = raw as Record<string, unknown>;
+  if (typeof sessionId !== 'string' || !sessionId || sessionId.length > SESSION_ID_MAX) {
+    throwIpcError('INVALID_PARAMS', 'invalid or missing sessionId for predict-prompt');
+  }
+  if (!TITLE_AGENT_KINDS.includes(agentKind as AgentKind)) {
+    throwIpcError('INVALID_PARAMS', `invalid agentKind for predict-prompt: ${String(agentKind)}`);
+  }
+  if (!Array.isArray(messages)) {
+    throwIpcError('INVALID_PARAMS', 'messages must be an array for predict-prompt');
+  }
+  const sliced = messages.slice(-PREDICTION_MESSAGES_MAX).map((m: unknown) => {
+    if (typeof m !== 'object' || m === null) {
+      throwIpcError('INVALID_PARAMS', 'messages entry must be an object');
+    }
+    const msg = m as Record<string, unknown>;
+    return {
+      role: typeof msg.role === 'string' ? msg.role : '',
+      content: typeof msg.content === 'string' ? msg.content.slice(0, PREDICTION_MSG_SLICE) : '',
+    };
+  });
+  return {
+    sessionId,
+    agentKind: agentKind as AgentKind,
+    messages: sliced,
+    ...(typeof workingDir === 'string' && workingDir.length <= PREDICTION_WORKDIR_MAX
+      ? { workingDir }
+      : {}),
+  };
+}
+
 export interface RegisterMakerTitleIpcOptions {
   /** True from turn dispatch until terminal delivery, including status:false → done. */
   isSessionTurnPendingCompletion?: (sessionId: string) => boolean;
@@ -405,6 +453,52 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
     ): Promise<SessionAutoTitleResult> => {
       assertTrustedAppRendererEvent(event);
       return runSessionAutoTitle(parseAutoTitleRequest(request));
+    },
+  );
+  // 输入框推荐提示词:turn 结束后预测用户下一步输入,复用 title one-shot 基础设施。
+  // 本 handler 会触发一次付费模型调用,按 electron-security-and-process-boundaries §5
+  // 做 sender 断言 + 运行期 payload 校验 + DB 防御纵深(远程会话拒绝)。
+  ipcMain.handle(
+    MAKER_INVOKE.PREDICT_PROMPT,
+    async (
+      event: Electron.IpcMainInvokeEvent,
+      request: unknown,
+    ): Promise<{ prompt: string | null }> => {
+      assertTrustedAppRendererEvent(event);
+      const params = parsePredictPromptRequest(request);
+      // 防御纵深:即使 renderer 有 UI 守卫,main 侧也需从 DB 确认 session 真实存在且非远程
+      // (SSH / device-link),避免受信 renderer 绕过 UI 守卫携带远程会话内容触发付费调用。
+      // 同时拒绝 review session:reviewer 会话的 composer 被禁用(disabled),不可编辑也不可发送,
+      // 对其做预测是浪费付费调用。
+      const [sessionRow] = await getDbClient()
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind })
+        .from(sessions)
+        .where(eq(sessions.id, params.sessionId));
+      if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review') {
+        return { prompt: null };
+      }
+      // 防御纵深:校验 renderer 上报的 agentKind 与 DB 记录一致,避免受信 renderer 绕过
+      // UI 守卫或 stale UI 状态将 Claude session 的对话内容发送给 Codex provider(反之亦然)。
+      const dbAgentKind = dbToMakerAgentKind(sessionRow.agentKind);
+      if (dbAgentKind !== params.agentKind) {
+        log.warn('predict-prompt agentKind mismatch — rejecting', {
+          sessionId: params.sessionId,
+          rendererAgentKind: params.agentKind,
+          dbAgentKind,
+        });
+        return { prompt: null };
+      }
+      // 多窗口去重:同一 session 同时只能有一笔预测在途,避免 openSessionInNewWindow
+      // 等多窗口场景下重复触发付费 provider 调用。主进程级 Set 跨窗口可见。
+      if (_predictingPromptSessions.has(params.sessionId)) {
+        return { prompt: null };
+      }
+      _predictingPromptSessions.add(params.sessionId);
+      try {
+        return { prompt: await generatePromptPrediction(params) };
+      } finally {
+        _predictingPromptSessions.delete(params.sessionId);
+      }
     },
   );
 }

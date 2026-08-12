@@ -145,6 +145,25 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(filterSource).not.toMatch(/filterStatus\.\w+', Icon:/);
   });
 
+  // 2026-08-12 用户裁决:置顶段头的显示样式按钮显示**当前选中**的模式图标,
+  // 此前恒为 LayoutGrid(网格),选文字/列表时与实际状态不符。
+  it('置顶段头显示样式 trigger 的图标跟随当前模式', () => {
+    const pinnedSectionSource = read(
+      'features',
+      'cc-agent',
+      'sidebar',
+      'sections',
+      'PinnedSection.tsx',
+    );
+    // 选项表提到模块级,菜单项与 trigger 共用同一张表(不各写一份字形映射)。
+    expect(pinnedSectionSource).toContain('const VIEW_STYLE_OPTIONS');
+    expect(pinnedSectionSource).toContain('function viewStyleIcon(mode: SidebarViewMode)');
+    expect(pinnedSectionSource).toContain('const ViewStyleTriggerIcon = viewStyleIcon(mode)');
+    expect(pinnedSectionSource).toContain('<ViewStyleTriggerIcon size={13} strokeWidth={2} />');
+    // trigger 不再硬编码网格图标。
+    expect(pinnedSectionSource).not.toContain('<LayoutGrid size={13} strokeWidth={2} />');
+  });
+
   it('连接中占位页不再自带 MachineSwitcherMenu(固定行已常驻,不会被困住)', () => {
     const idx = sidebarUpperSource.indexOf('selectedMachineConnecting ?');
     expect(idx).toBeGreaterThanOrEqual(0);

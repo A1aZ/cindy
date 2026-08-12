@@ -55,6 +55,26 @@ afterEach(() => {
 });
 
 describe('Windows close behavior', () => {
+  it('uses the default minimize action when no override is provided', () => {
+    installWindowsApi(null);
+    render(<WindowControls />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'titleBar.minimize' }));
+
+    expect(window.electronAPI.windowMinimize).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses a window-specific minimize action when provided', () => {
+    installWindowsApi(null);
+    const onMinimize = vi.fn();
+    render(<WindowControls onMinimize={onMinimize} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'titleBar.minimize' }));
+
+    expect(onMinimize).toHaveBeenCalledTimes(1);
+    expect(window.electronAPI.windowMinimize).not.toHaveBeenCalled();
+  });
+
   it('does not subscribe to main-window close requests from a secondary window', () => {
     window.history.replaceState({}, '', '/?secondaryWindow=1');
     const api = installWindowsApi(null);

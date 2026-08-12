@@ -24,7 +24,7 @@
  * 来源路由到被控端。
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PanelRight } from 'lucide-react';
 
@@ -37,9 +37,12 @@ import {
   getBucket,
 } from '@/features/right-sidebar/store';
 import { WindowControls } from '@/components/title-bar/WindowControls';
+import { ChromeIconButton } from '@/components/title-bar/ChromeIconButton';
 import { useAppShortcut } from '@/hooks/useAppShortcut';
 import { useCloseShortcutShellOwner } from '@/hooks/useCloseWindowShortcut';
+import { useLocale } from '@/hooks/useLocale';
 import { createLogger } from '@/lib/logger';
+import { makerChatStore } from '@/lib/makerChatStore';
 import {
   ensureGhostPanelsRegistered,
   useGhostPanelsSync,
@@ -57,34 +60,74 @@ interface SidebarWindowContext {
 
 export function SidebarWindowLayout() {
   const { t } = useTranslation();
+  const { effectiveLocale, setLocale } = useLocale();
   useDeviceLinkRemoteProjects();
   // 意识面板注册:子窗口没有 LayoutRoot,必须自行初始化 ghost 面板注册表
   // 并订阅 ghosts:changed(停靠形态所需;历史持久化的 ghost 页签也靠它识别 kind)。
   ensureGhostPanelsRegistered();
   useGhostPanelsSync();
+  useEffect(() => {
+    makerChatStore.initGlobalListeners();
+  }, []);
   const isMac = window.electronAPI?.platform === 'darwin';
   const [ctx, setCtx] = useState<SidebarWindowContext | null>(null);
+  const presentationReadySentRef = useRef(false);
+  // 复用隐藏窗口时，Chromium 可能保留上一次关闭按钮的 focus / :hover 状态。
+  // 与资源用量窗口一致，隐藏时重挂载 chrome，确保再次显示从干净状态开始。
+  const [windowChromeRevision, setWindowChromeRevision] = useState(0);
 
-  // mount:拉一次 context + 订阅跟随推送 + ready 握手。
+  // mount:拉一次 context + 订阅跟随推送 + renderer-ready 握手。
   useEffect(() => {
     let cancelled = false;
     void window.electronAPI.rightSidebarWindow
       .getContext()
       .then((initial) => {
-        // 订阅推送里可能先到更新 —— 已有值时不用 stale 的 getContext 结果覆盖
         if (!cancelled) setCtx((prev) => prev ?? initial);
       })
       .catch((err) => log.warn('getContext failed', err));
     const offCtx = window.electronAPI.rightSidebarWindow.onContextChanged((next) => {
       setCtx(next);
     });
-    void window.electronAPI.rightSidebarWindow.ready().catch((err) => {
-      log.warn('ready handshake failed', err);
+    // renderer-ready:Shell 已挂载,controller 可知 React 组件树就绪。
+    void window.electronAPI.rightSidebarWindow.rendererReady().catch((err) => {
+      log.warn('renderer-ready handshake failed', err);
     });
     return () => {
       cancelled = true;
       offCtx();
     };
+  }, []);
+
+  useEffect(() => {
+    return window.electronAPI.onLocaleChanged?.((locale) => {
+      if (locale !== effectiveLocale) setLocale(locale);
+    }) ?? undefined;
+  }, [effectiveLocale, setLocale]);
+
+  // presentation-ready 只代表轻量壳已经提交首帧。不能等待主窗 context:
+  // 隐藏预热阶段 Chromium 可能节流 renderer，而 context 又由主窗异步上推；
+  // 把二者绑定会形成「等 context 才 ready、等 ready 才显示」的循环，最终只能
+  // 命中 controller 的 5s fallback。真实任务上下文继续由 getContext / 推送恢复。
+  useEffect(() => {
+    if (presentationReadySentRef.current) return;
+    presentationReadySentRef.current = true;
+    void window.electronAPI.rightSidebarWindow.presentationReady().catch((err) => {
+      log.warn('presentation-ready handshake failed', err);
+    });
+  }, []);
+
+  // 隐藏/显示时刷新 context(主窗 session 可能已切换)并重置瞬时交互态。
+  useEffect(() => {
+    return window.electronAPI.rightSidebarWindow.onVisibilityChanged((payload) => {
+      if (!payload.visible) {
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        setWindowChromeRevision((revision) => revision + 1);
+      } else {
+        // 重新显示时从 main 缓存拉最新 context
+        void window.electronAPI.rightSidebarWindow.refreshContext().catch(() => undefined);
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      }
+    });
   }, []);
 
   const sessionId = ctx?.available ? ctx.sessionId : null;
@@ -157,12 +200,11 @@ export function SidebarWindowLayout() {
           </span>
         </div>
         <div
-          className="flex shrink-0 items-center gap-1 pr-2"
+          className="flex shrink-0 items-center gap-0.5 pr-2"
           style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
         >
           {/* 合并回主窗口:关偏好 + 关本窗,主窗恢复内嵌展开 */}
-          <button
-            type="button"
+          <ChromeIconButton
             onClick={() => {
               void window.electronAPI.rightSidebarWindow.setDetached(false).catch((err) => {
                 log.warn('merge back failed', err);
@@ -170,18 +212,23 @@ export function SidebarWindowLayout() {
             }}
             title={t('rightSidebar.window.mergeBack')}
             aria-label={t('rightSidebar.window.mergeBack')}
-            className="inline-flex h-7 items-center gap-1.5 rounded-full px-2.5 text-12 text-[var(--titlebar-icon)] transition-colors hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]"
           >
             <PanelRight size={14} />
-            <span>{t('rightSidebar.window.mergeBack')}</span>
-          </button>
+          </ChromeIconButton>
         </div>
         {!isMac && (
           <div
             className="flex h-full shrink-0 items-center"
             style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
           >
-            <WindowControls />
+            <WindowControls
+              key={windowChromeRevision}
+              onClose={() =>
+                window.electronAPI.rightSidebarWindow.close().catch((err) => {
+                  log.warn('close window via title bar failed', err);
+                })
+              }
+            />
           </div>
         )}
       </div>

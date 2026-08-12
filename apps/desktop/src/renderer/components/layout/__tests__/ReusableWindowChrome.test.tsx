@@ -1,0 +1,239 @@
+// @vitest-environment jsdom
+import React from 'react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { RsbWindowContext } from '../../../../shared/rightSidebarWindow';
+
+const mocks = vi.hoisted(() => ({
+  controlsMounts: 0,
+  sidebarVisibilityListener: null as ((payload: { visible: boolean }) => void) | null,
+  ghostVisibilityListener: null as ((payload: { visible: boolean }) => void) | null,
+  ghostMinimizeListener: null as (() => void) | null,
+  minimizeGhostPanel: vi.fn(),
+  restoreGhostPanel: vi.fn(),
+}));
+
+vi.mock('@/components/title-bar/WindowControls', () => ({
+  WindowControls: ({ onMinimize }: { onMinimize?: () => void | Promise<void> }) => {
+    const [mountId] = React.useState(() => ++mocks.controlsMounts);
+    return (
+      <button
+        data-testid="window-controls"
+        data-mount-id={mountId}
+        onClick={() => void onMinimize?.()}
+      />
+    );
+  },
+}));
+vi.mock('@/features/right-sidebar/RightSidebarShell', () => ({ RightSidebarShell: () => null }));
+vi.mock('@/features/device-link/useDeviceLinkRemoteProjects', () => ({
+  useDeviceLinkRemoteProjects: vi.fn(),
+}));
+vi.mock('@/features/right-sidebar/lib/sidebarCommands', () => ({
+  onRequestRightSidebarVisibility: () => vi.fn(),
+}));
+vi.mock('@/features/right-sidebar/lib/executeSidebarCommand', () => ({
+  executeSidebarCommand: vi.fn(),
+}));
+vi.mock('@/features/right-sidebar/store', () => ({
+  closeTab: vi.fn(),
+  getBucket: () => ({ activeTabId: null }),
+}));
+vi.mock('@/cindy-brain/ghostPanels', () => ({
+  ensureGhostPanelsRegistered: vi.fn(),
+  useGhostPanelsSync: vi.fn(),
+}));
+vi.mock('@/cindy-brain/GhostMediaLightboxHost', () => ({ GhostMediaLightboxHost: () => null }));
+vi.mock('@/cindy-brain/ghostPanelBody', () => ({
+  GhostChipPanelBody: () => null,
+  GhostPanelError: () => null,
+}));
+vi.mock('@/cindy-brain/installErrorKey', () => ({ ghostInstallErrorKey: () => 'error' }));
+vi.mock('@/cindy-brain/runtimeStates', () => ({ useGhostRuntimeState: () => 'running' }));
+vi.mock('@/cindy-brain/useInstalledGhosts', () => ({
+  useInstalledGhosts: () => [
+    {
+      enabled: true,
+      manifest: { id: 'test-ghost', name: 'Test Ghost', panel: { title: 'Test Panel' } },
+    },
+  ],
+}));
+vi.mock('@/components/ui/confirm-dialog-provider', () => ({
+  useConfirmDialog: () => ({ confirm: vi.fn(() => Promise.resolve(false)) }),
+}));
+vi.mock('@/hooks/useAppShortcut', () => ({ useAppShortcut: vi.fn() }));
+vi.mock('@/hooks/useCloseWindowShortcut', () => ({ useCloseShortcutShellOwner: vi.fn() }));
+vi.mock('@/hooks/useLocale', () => ({
+  useLocale: () => ({ effectiveLocale: 'en', setLocale: vi.fn() }),
+}));
+vi.mock('@/lib/ghostPanelWindow', () => ({ getGhostPanelWindowGhostId: () => 'test-ghost' }));
+vi.mock('@/lib/ghostPanelBubbleState', () => ({
+  minimizeGhostPanel: mocks.minimizeGhostPanel,
+  restoreGhostPanel: mocks.restoreGhostPanel,
+}));
+vi.mock('@/lib/makerChatStore', () => ({
+  makerChatStore: { initGlobalListeners: vi.fn() },
+}));
+vi.mock('@/lib/logger', () => ({
+  createLogger: () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }),
+}));
+vi.mock('@/lib/toast', () => ({ toast: { error: vi.fn() } }));
+vi.mock('@/utils/ipcError', () => ({ extractIpcError: () => null }));
+vi.mock('lucide-react', () => ({
+  PanelRight: () => null,
+  Minus: () => null,
+  PictureInPicture2: () => null,
+  Puzzle: () => null,
+}));
+vi.mock('react-i18next', () => ({
+  initReactI18next: { type: '3rdParty', init: vi.fn() },
+  useTranslation: () => ({ t: (key: string) => key }),
+}));
+
+import { GhostPanelWindowLayout } from '../GhostPanelWindowLayout';
+import { SidebarWindowLayout } from '../SidebarWindowLayout';
+
+describe('reusable auxiliary window chrome', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.controlsMounts = 0;
+    mocks.sidebarVisibilityListener = null;
+    mocks.ghostVisibilityListener = null;
+    mocks.ghostMinimizeListener = null;
+    Object.defineProperty(window, 'electronAPI', {
+      configurable: true,
+      value: {
+        platform: 'win32',
+        rightSidebarWindow: {
+          getContext: vi.fn(() =>
+            Promise.resolve({
+              sessionId: null,
+              workdir: null,
+              remoteHostId: null,
+              available: false,
+            }),
+          ),
+          onContextChanged: vi.fn(() => vi.fn()),
+          rendererReady: vi.fn(() => Promise.resolve()),
+          presentationReady: vi.fn(() => Promise.resolve()),
+          onVisibilityChanged: vi.fn((listener) => {
+            mocks.sidebarVisibilityListener = listener;
+            return vi.fn();
+          }),
+          refreshContext: vi.fn(() => Promise.resolve()),
+          onCommand: vi.fn(() => vi.fn()),
+          close: vi.fn(() => Promise.resolve()),
+          setDetached: vi.fn(() => Promise.resolve()),
+        },
+        ghostPanelWindow: {
+          rendererReady: vi.fn(() => Promise.resolve()),
+          presentationReady: vi.fn(() => Promise.resolve()),
+          onVisibilityChanged: vi.fn((listener) => {
+            mocks.ghostVisibilityListener = listener;
+            return vi.fn();
+          }),
+          onCloseRequested: vi.fn(() => vi.fn()),
+          onMinimizeRequested: vi.fn((listener) => {
+            mocks.ghostMinimizeListener = listener;
+            return vi.fn();
+          }),
+          resolveCloseRequest: vi.fn(() => Promise.resolve()),
+          setDetached: vi.fn(() => Promise.resolve()),
+        },
+        ghosts: { setEnabled: vi.fn(() => Promise.resolve()) },
+      },
+    });
+  });
+
+  afterEach(() => cleanup());
+
+  it('remounts right-sidebar controls when the cached window is hidden', async () => {
+    render(<SidebarWindowLayout />);
+    const controlsBeforeHide = screen.getByTestId('window-controls');
+    controlsBeforeHide.focus();
+
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
+
+    const controlsAfterHide = screen.getByTestId('window-controls');
+    expect(controlsAfterHide).not.toBe(controlsBeforeHide);
+    expect(document.activeElement).not.toBe(controlsAfterHide);
+  });
+
+  it('reports the sidebar shell ready without waiting for session context', async () => {
+    window.electronAPI.rightSidebarWindow.getContext = vi.fn(
+      () => new Promise<RsbWindowContext | null>(() => undefined),
+    );
+
+    render(<SidebarWindowLayout />);
+
+    await waitFor(() => {
+      expect(window.electronAPI.rightSidebarWindow.rendererReady).toHaveBeenCalledOnce();
+      expect(window.electronAPI.rightSidebarWindow.presentationReady).toHaveBeenCalledOnce();
+    });
+  });
+
+  it('remounts ghost-panel controls when the cached window is hidden', async () => {
+    render(<GhostPanelWindowLayout />);
+    const controlsBeforeHide = screen.getByTestId('window-controls');
+    controlsBeforeHide.focus();
+
+    await act(async () => mocks.ghostVisibilityListener?.({ visible: false }));
+
+    const controlsAfterHide = screen.getByTestId('window-controls');
+    expect(controlsAfterHide).not.toBe(controlsBeforeHide);
+    expect(document.activeElement).not.toBe(controlsAfterHide);
+  });
+
+  it('uses an icon-only merge-back action for detached plugin windows', async () => {
+    render(<GhostPanelWindowLayout />);
+
+    const mergeBack = screen.getByRole('button', { name: 'rightSidebar.window.mergeBack' });
+    expect(mergeBack.getAttribute('title')).toBe('rightSidebar.window.mergeBack');
+    expect(mergeBack.textContent).not.toContain('rightSidebar.window.mergeBack');
+    fireEvent.click(mergeBack);
+
+    expect(window.electronAPI.ghostPanelWindow.setDetached).toHaveBeenCalledWith(
+      'test-ghost',
+      false,
+    );
+  });
+
+  it('minimizes a detached plugin window into the main-window Ghost bubble', async () => {
+    render(<GhostPanelWindowLayout />);
+
+    fireEvent.click(screen.getByTestId('window-controls'));
+
+    expect(mocks.minimizeGhostPanel).toHaveBeenCalledWith('test-ghost');
+    expect(window.electronAPI.ghostPanelWindow.setDetached).toHaveBeenCalledWith(
+      'test-ghost',
+      false,
+    );
+    expect(mocks.restoreGhostPanel).not.toHaveBeenCalled();
+  });
+
+  it('restores the bubble state when merging the minimized plugin window fails', async () => {
+    window.electronAPI.ghostPanelWindow.setDetached = vi.fn(() =>
+      Promise.reject(new Error('failed')),
+    );
+    render(<GhostPanelWindowLayout />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('window-controls'));
+    });
+
+    expect(mocks.minimizeGhostPanel).toHaveBeenCalledWith('test-ghost');
+    expect(mocks.restoreGhostPanel).toHaveBeenCalledWith('test-ghost');
+  });
+
+  it('uses the same Ghost bubble action for a native minimize request', async () => {
+    render(<GhostPanelWindowLayout />);
+
+    await act(async () => mocks.ghostMinimizeListener?.());
+
+    expect(mocks.minimizeGhostPanel).toHaveBeenCalledWith('test-ghost');
+    expect(window.electronAPI.ghostPanelWindow.setDetached).toHaveBeenCalledWith(
+      'test-ghost',
+      false,
+    );
+  });
+});

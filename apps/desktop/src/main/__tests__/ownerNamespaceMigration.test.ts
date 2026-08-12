@@ -1807,6 +1807,79 @@ describe('legacy Ghost plugin recovery', () => {
     await expect(fs.access(path.join(root, __testing.CLAIM_MARKER))).rejects.toThrow();
   });
 
+  it('keeps corrupt reserved sources out of a newly frozen recovery marker', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await writeGhostDir(root, 'brain', 'recoverable-plugin');
+    await fs.mkdir(path.join(root, 'brain', 'cindy-corrupt'), { recursive: true });
+    await fs.writeFile(path.join(root, 'brain', 'cindy-corrupt', 'ghost.json'), '{ nope');
+
+    await expect(
+      recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+        { rejectReservedIds: true },
+      ),
+    ).resolves.toMatchObject({ status: 'partial', moved: 1, conflicts: 1 });
+
+    const marker = JSON.parse(await fs.readFile(markerPath, 'utf8')) as {
+      pendingIds: string[];
+      failedIds?: string[];
+      approvalProjectionSha256ById?: Record<string, string>;
+    };
+    expect(marker.pendingIds).toEqual(['recoverable-plugin']);
+    expect(marker.failedIds ?? []).not.toContain('cindy-corrupt');
+    expect(marker.approvalProjectionSha256ById ?? {}).not.toHaveProperty('cindy-corrupt');
+    await expect(
+      fs.readFile(path.join(root, 'brain', 'cindy-corrupt', 'ghost.json'), 'utf8'),
+    ).resolves.toBe('{ nope');
+  });
+
+  it('removes reserved ids from a dirty marker before later fresh discovery', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(markerPath, JSON.stringify({
+      version: 2,
+      ownerKey,
+      pendingIds: ['cindy-reserved'],
+      failedIds: ['cindy-reserved'],
+      approvalProjectionSha256ById: { 'cindy-reserved': 'a'.repeat(64) },
+    }));
+
+    await expect(
+      recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+        { rejectReservedIds: true },
+      ),
+    ).resolves.toMatchObject({ moved: 0 });
+    await expect(fs.access(markerPath)).rejects.toThrow();
+
+    await writeGhostDir(root, 'brain', 'later-plugin');
+    await expect(
+      recoverLegacyGhostPlugins(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        realFsDeps(root),
+        { rejectReservedIds: true },
+      ),
+    ).resolves.toMatchObject({ moved: 1, recoveredIds: ['later-plugin'] });
+  });
+
   it('moves builtin provisioning state with plugins before reconciliation', async () => {
     const root = await tempRoot();
     const ownerId = 'cloud-a';

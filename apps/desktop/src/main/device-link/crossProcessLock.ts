@@ -82,6 +82,7 @@ type ProcessIdentityProbe =
   | { status: 'found'; identity: ProcessIdentity }
   | { status: 'missing' }
   | { status: 'unavailable' };
+type ProcessIdentityProbeOverride = (pid: number) => Promise<ProcessIdentityProbe>;
 type PublishedLock = {
   handle: Awaited<ReturnType<typeof fsp.open>>;
   nonce: string;
@@ -112,6 +113,7 @@ type ReclaimGate = {
 };
 
 let currentProcessIdentityPromise: Promise<ProcessIdentity | null> | null = null;
+let processIdentityProbeOverride: ProcessIdentityProbeOverride | null = null;
 // A release gate whose final rename/fsync failed may still be ours. Keep its
 // nonce so the same process can recover it before treating the gate as busy.
 const pendingOwnRecordRecovery = new Map<string, string>();
@@ -128,10 +130,12 @@ function gateReleaseMarkerPath(gatePath: string): string {
  * Callers retain ownership of the degradation policy through `LockStatus`. This
  * path keeps the legacy canonical file shape, adding a nonce-bound owner record
  * and rename isolation for safe release/takeover. It deliberately avoids the
- * strict tier's process-identity commands, hard-link/fsync publication and
- * released-marker protocol on the ordinary hot path. Plugin approval boundaries
- * require those stronger proofs, but imposing their full state machine on every
- * cache/settings write enlarged the Windows failure surface.
+ * strict tier's process-identity commands and hard-link/fsync publication on
+ * the ordinary hot path. A nonce-bound release marker is only a Windows cleanup
+ * fallback when a gate file outlives bounded deletion retries. Plugin approval
+ * boundaries require the stronger protocol on every transition, but imposing
+ * its full state machine on every cache/settings write enlarged the Windows
+ * failure surface.
  */
 export async function withCrossProcessLock<T>(
   lockPath: string,
@@ -647,8 +651,21 @@ async function releaseAdvisoryReclaimGate(gate: AdvisoryReclaimGate): Promise<vo
   const current = await readLockRecord(gate.filePath, true);
   if (typeof current !== 'string' && current.nonce === gate.nonce) {
     await removePathWithRetry(gate.filePath);
+    // A Windows filesystem filter can keep the gate file undeletable beyond
+    // our bounded retry window. Publish the same nonce-bound release proof as
+    // the strict tier so the next contender can distinguish this dead gate
+    // from a live owner and finish the cleanup without weakening ownership.
+    if (await pathExists(gate.filePath)) {
+      await publishGateReleaseMarker(gate.filePath, gate.nonce).catch((error) => {
+        log.warn('advisory reclaim gate release marker could not be published', error);
+      });
+    }
   }
-  if (await pathExists(gate.filePath)) pendingOwnGateCleanup.add(gate.filePath);
+  if (await pathExists(gate.filePath)) {
+    pendingOwnGateCleanup.add(gate.filePath);
+  } else {
+    await removePathWithRetry(gateReleaseMarkerPath(gate.filePath));
+  }
   await removeEmptyDirectoryWithRetry(gate.dirPath);
 }
 
@@ -913,7 +930,12 @@ async function findActiveReclaimGate(
     const expectedNonce = typeof record !== 'string' ? (record.nonce ?? undefined) : undefined;
     if (await hasValidGateReleaseMarker(filePath, expectedNonce)) {
       await removePathWithRetry(filePath);
-      await removePathWithRetry(gateReleaseMarkerPath(filePath));
+      // Keep the release proof while Windows still retains the gate path. If
+      // the marker were removed first, the next contender would reinterpret
+      // the same fresh file as a live owner and block until it became stale.
+      if (!(await pathExists(filePath))) {
+        await removePathWithRetry(gateReleaseMarkerPath(filePath));
+      }
       continue;
     }
     if (typeof record === 'string') {
@@ -1109,7 +1131,9 @@ async function isRecordOwnerActive(
     // identity query decide when possible; if it also fails, the caller below
     // remains fail-closed.
   }
-  const identityProbe = await probeProcessIdentity(record.pid);
+  const identityProbe = processIdentityProbeOverride
+    ? await processIdentityProbeOverride(record.pid)
+    : await probeProcessIdentity(record.pid);
   if (identityProbe.status === 'missing') return false;
   if (identityProbe.status === 'unavailable') return true;
   const currentIdentity = identityProbe.identity;
@@ -1388,7 +1412,7 @@ async function releaseReclaimGate(gate: ReclaimGate): Promise<void> {
     releasedRecordDurable = true;
   } catch (error) {
     log.warn('lock reclaim gate could not be flushed before release', error);
-    await publishGateReleaseMarker(gate).catch((markerError) => {
+    await publishGateReleaseMarker(gate.filePath, gate.lock.nonce).catch((markerError) => {
       log.warn('lock reclaim gate release marker could not be published', markerError);
     });
   }
@@ -1402,19 +1426,19 @@ async function releaseReclaimGate(gate: ReclaimGate): Promise<void> {
   await removeEmptyDirectoryWithRetry(gate.dirPath);
 }
 
-async function publishGateReleaseMarker(gate: ReclaimGate): Promise<void> {
-  const markerPath = gateReleaseMarkerPath(gate.filePath);
+async function publishGateReleaseMarker(gatePath: string, nonce: string): Promise<void> {
+  const markerPath = gateReleaseMarkerPath(gatePath);
   let handle: Awaited<ReturnType<typeof fsp.open>> | null = null;
   try {
     handle = await fsp.open(markerPath, 'wx');
     await writeAllAt(handle, JSON.stringify({
-      gateFile: path.basename(gate.filePath),
-      nonce: gate.lock.nonce,
+      gateFile: path.basename(gatePath),
+      nonce,
     }));
     await handle.sync();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    if (!(await hasValidGateReleaseMarker(gate.filePath, gate.lock.nonce))) throw error;
+    if (!(await hasValidGateReleaseMarker(gatePath, nonce))) throw error;
   } finally {
     await handle?.close().catch(() => undefined);
   }
@@ -1560,4 +1584,7 @@ export const __testing = {
   removeEmptyDirectoryWithRetry,
   parseRecordedProcessStartMs,
   processIdentitiesMatch,
+  setProcessIdentityProbeOverride(override: ProcessIdentityProbeOverride | null): void {
+    processIdentityProbeOverride = override;
+  },
 };

@@ -1511,22 +1511,38 @@ export async function recoverLegacyGhostPlugins(
     recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
     return result;
   }
-  const sourceDiscoveryIds = new Set([
+  const discoveredSourceIds = new Set([
     ...sharedLegacyGhosts.map((ghost) => ghost.id),
     ...scopedLegacyGhosts.map((ghost) => ghost.id),
     ...[...sharedDiscovery.invalidIds, ...scopedDiscovery.invalidIds]
       .filter((id) => isValidGhostId(id)),
   ]);
+  // The durable marker is a frozen recovery capability, not merely progress
+  // bookkeeping. Apply the packaged-build reserved-id policy at this queue
+  // boundary so neither fresh discovery nor an older dirty marker can retain
+  // an official namespace id for later recovery.
+  const isRecoverableId = (id: string): boolean =>
+    !options.rejectReservedIds || !isOfficialGhostId(id);
+  const sourceDiscoveryIds = new Set([...discoveredSourceIds].filter(isRecoverableId));
   const targetDiscoveryIds = new Set(targetDiscovery.ghosts.map((ghost) => ghost.id));
-  const pendingRecoveryIds = new Set(recoveryMarker?.pendingIds ?? sourceDiscoveryIds);
+  const pendingRecoveryIds = new Set(
+    [...(recoveryMarker?.pendingIds ?? sourceDiscoveryIds)].filter(isRecoverableId),
+  );
   const approvalProjectionSha256ById = new Map<string, string>(
-    Object.entries(recoveryMarker?.approvalProjectionSha256ById ?? {}),
+    Object.entries(recoveryMarker?.approvalProjectionSha256ById ?? {})
+      .filter(([id]) => isRecoverableId(id)),
   );
   const failedRecoveryIds = new Set(
-    recoveryMarker?.failedIds ??
+    (recoveryMarker?.failedIds ??
       [...sourceDiscoveryIds].filter((id) =>
         [...sharedDiscovery.invalidIds, ...scopedDiscovery.invalidIds].includes(id),
-      ),
+      )).filter(isRecoverableId),
+  );
+  const recoveryMarkerNeedsPolicyCleanup = recoveryMarker !== null && (
+    recoveryMarker.pendingIds.some((id) => !isRecoverableId(id))
+    || recoveryMarker.failedIds?.some((id) => !isRecoverableId(id)) === true
+    || Object.keys(recoveryMarker.approvalProjectionSha256ById ?? {})
+      .some((id) => !isRecoverableId(id))
   );
   for (const id of [...sharedDiscovery.invalidIds, ...scopedDiscovery.invalidIds]) {
     if (isValidGhostId(id) && pendingRecoveryIds.has(id)) failedRecoveryIds.add(id);
@@ -1540,7 +1556,6 @@ export async function recoverLegacyGhostPlugins(
   // reject when options.rejectReservedIds is true (packaged builds).
   const recoveredTargetIds = (): string[] => [...pendingRecoveryIds]
     .filter((id) =>
-      (!options.rejectReservedIds || !isOfficialGhostId(id)) &&
       (movedThisRun.has(id) || (targetDiscoveryIds.has(id) && !sourceDiscoveryIds.has(id)))
     )
     .sort();
@@ -1585,6 +1600,10 @@ export async function recoverLegacyGhostPlugins(
     discoveryInvalidCount + unexpectedFrozenIds.length;
   const movableById = new Map<string, ReturnType<typeof listLegacyGhostDirs>>();
   for (const legacy of [...eligibleSharedGhosts, ...scopedLegacyGhosts]) {
+    if (options.rejectReservedIds && isOfficialGhostId(legacy.id)) {
+      conflicts += 1;
+      continue;
+    }
     if (recoveryMarker && !pendingRecoveryIds.has(legacy.id)) {
       continue;
     }
@@ -1592,10 +1611,6 @@ export async function recoverLegacyGhostPlugins(
       // A formerly invalid id may be retried after its manifest is repaired,
       // but it remains inside the original frozen whitelist.
       failedRecoveryIds.delete(legacy.id);
-    }
-    if (options.rejectReservedIds && isOfficialGhostId(legacy.id)) {
-      conflicts += 1;
-      continue;
     }
     if ((await pathType(deps, path.join(targetRoot, legacy.id))) === 'missing') {
       const siblings = movableById.get(legacy.id) ?? [];
@@ -1639,7 +1654,11 @@ export async function recoverLegacyGhostPlugins(
         : {}),
     };
   };
-  if (movableLegacyGhosts.length === 0 && !recoveryMarkerNeedsVersionUpgrade) {
+  if (
+    movableLegacyGhosts.length === 0
+    && !recoveryMarkerNeedsVersionUpgrade
+    && !recoveryMarkerNeedsPolicyCleanup
+  ) {
     const result = buildNoMoveResult();
     recordLegacyGhostMigrationResult(ownerId, result, userDataDir);
     return result;
@@ -1681,6 +1700,19 @@ export async function recoverLegacyGhostPlugins(
     return result;
   }
 
+  if (
+    recoveryMarkerNeedsPolicyCleanup
+    && pendingRecoveryIds.size === 0
+    && !sharedRecoveryBlocked
+  ) {
+    try {
+      await deps.unlink(recoveryMarkerPath);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    recoveryMarkerPersisted = false;
+  }
+
   // Freeze the complete approval projection only after passive/concurrent
   // ownership has been ruled out. A source that is still in the legacy root
   // can be re-frozen on every retry, but a target-only directory can never be
@@ -1711,7 +1743,8 @@ export async function recoverLegacyGhostPlugins(
   if (
     (!recoveryMarkerPersisted ||
       approvalProjectionDigestsChanged ||
-      recoveryMarkerNeedsVersionUpgrade) &&
+      recoveryMarkerNeedsVersionUpgrade ||
+      recoveryMarkerNeedsPolicyCleanup) &&
     pendingRecoveryIds.size > 0 &&
     !sharedRecoveryBlocked
   ) {

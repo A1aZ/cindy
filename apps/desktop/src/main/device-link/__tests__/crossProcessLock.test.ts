@@ -40,42 +40,24 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-process-lock-'));
 });
 
-async function createExitedPid(): Promise<number> {
-  // Strict takeover requires affirmative OS proof that the recorded owner is
-  // gone. A made-up large PID makes that proof depend on CIM/WMIC accepting
-  // the numeric value, which varies across Windows runner images. Use a PID
-  // this host created and observed exiting instead.
-  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], {
-    windowsHide: true,
-    stdio: 'ignore',
-  });
-  return new Promise<number>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', () => {
-      if (!child.pid) reject(new Error('fixture child pid missing'));
-      else resolve(child.pid);
-    });
-  });
-}
-
 afterEach(() => {
+  __testing.setProcessIdentityProbeOverride(null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
 /** 造一把「陈旧且 owner 已死」的锁。 */
 async function writeStaleLock(lock: string): Promise<void> {
-  const exitedPid = await createExitedPid();
-  await fsp.writeFile(lock, JSON.stringify({ pid: exitedPid, startedAt: 1 }), 'utf8');
+  await fsp.writeFile(lock, JSON.stringify({ pid: 424_242, startedAt: 1 }), 'utf8');
   const old = new Date(Date.now() - 60_000);
   await fsp.utimes(lock, old, old);
 }
 
 async function writeStaleStrictLock(lock: string): Promise<void> {
-  const exitedPid = await createExitedPid();
+  __testing.setProcessIdentityProbeOverride(async () => ({ status: 'missing' }));
   await fsp.writeFile(
     lock,
     JSON.stringify({
-      pid: exitedPid,
+      pid: 424_242,
       startedAt: 1,
       nonce: '00000000-0000-4000-8000-000000000001',
       processStartIdentity: 'start-ms:1',
@@ -88,11 +70,11 @@ async function writeStaleStrictLock(lock: string): Promise<void> {
 }
 
 async function writeStaleReclaimGate(lock: string): Promise<void> {
-  const exitedPid = await createExitedPid();
+  __testing.setProcessIdentityProbeOverride(async () => ({ status: 'missing' }));
   const gate = `${lock}.reclaim`;
   await fsp.writeFile(
     gate,
-    JSON.stringify({ pid: exitedPid, startedAt: 1, nonce: 'stale-gate' }),
+    JSON.stringify({ pid: 424_242, startedAt: 1, nonce: 'stale-gate' }),
     'utf8',
   );
   const old = new Date(Date.now() - 60_000);
@@ -154,13 +136,54 @@ describe('接管陈旧锁', () => {
 
   it('advisory release leaves no strict recovery artifacts and permits reacquisition', async () => {
     const lock = path.join(dir, 'advisory-lock');
+    const gateDir = `${lock}.reclaim.d`;
+    const originalRm = fsp.rm;
+    let blockedGateDeletes = 0;
+    let blockedGateFile: string | null = null;
+    let allowBlockedGateDelete = false;
+    const rmSpy = vi.spyOn(fsp, 'rm').mockImplementation((async (
+      target: unknown,
+      options?: unknown,
+    ) => {
+      if (
+        typeof target === 'string'
+        && path.dirname(target) === gateDir
+        && path.basename(target).startsWith('gate-')
+        && path.basename(target).endsWith('.json')
+      ) {
+        blockedGateFile ??= target;
+        if (target === blockedGateFile && !allowBlockedGateDelete) {
+          blockedGateDeletes += 1;
+          throw Object.assign(new Error('gate temporarily busy'), { code: 'EBUSY' });
+        }
+      }
+      return (originalRm as (...args: unknown[]) => Promise<unknown>)(target, options);
+    }) as typeof fsp.rm);
 
-    await expect(
-      withAdvisoryCrossProcessLock(lock, { label: 'first' }, async (s) => s),
-    ).resolves.toEqual({ held: true });
-    await expect(
-      withAdvisoryCrossProcessLock(lock, { label: 'second' }, async (s) => s),
-    ).resolves.toEqual({ held: true });
+    try {
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'first' }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+      expect(blockedGateDeletes).toBe(3);
+      expect(fs.readdirSync(gateDir)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^gate-.*\.json$/),
+        expect.stringMatching(/^gate-.*\.json\.released$/),
+      ]));
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'second' }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+      expect(blockedGateDeletes).toBeGreaterThan(3);
+      expect(fs.readdirSync(gateDir)).toEqual(expect.arrayContaining([
+        expect.stringMatching(/^gate-.*\.json$/),
+        expect.stringMatching(/^gate-.*\.json\.released$/),
+      ]));
+      allowBlockedGateDelete = true;
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'third' }, async (s) => s),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      rmSpy.mockRestore();
+    }
 
     const artifacts = fs.readdirSync(dir).flatMap((entry) => {
       const candidate = path.join(dir, entry);
@@ -168,9 +191,6 @@ describe('接管陈旧锁', () => {
         ? fs.readdirSync(candidate).map((child) => path.join(entry, child))
         : [entry];
     });
-    // Windows can retain an already-empty directory entry briefly after the
-    // bounded rmdir retries. The invariant is that no owner gate or release
-    // marker remains; the two acquisitions above also prove immediate re-entry.
     expect(artifacts).toEqual([]);
   });
 
@@ -397,6 +417,10 @@ describe('接管陈旧锁', () => {
         child.once('error', reject);
       });
       if (!child.pid) throw new Error('child pid missing');
+      __testing.setProcessIdentityProbeOverride(async (pid) => ({
+        status: 'found',
+        identity: { key: `start-ms:${pid + 10_000}`, startedAtMs: pid + 10_000 },
+      }));
       // The lock records a process identity that cannot match the live pid's
       // current identity ('start-ms:0' parses to null → never equal). This is
       // the only sound signal for a PID-reuse takeover: a live pid alone is
@@ -430,6 +454,10 @@ describe('接管陈旧锁', () => {
     // identity no longer matches: the exact-identity comparison must win over
     // the self-pid shortcut, or strict callers stay permanently busy.
     const lock = path.join(dir, 'lock');
+    __testing.setProcessIdentityProbeOverride(async () => ({
+      status: 'found',
+      identity: { key: 'start-ms:10000', startedAtMs: 10_000 },
+    }));
     await fsp.writeFile(
       lock,
       JSON.stringify({
@@ -501,7 +529,7 @@ describe('接管陈旧锁', () => {
     await fsp.writeFile(
       lock,
       JSON.stringify({
-        pid: 0x7ffffffe,
+        pid: process.pid,
         startedAt: 1,
         nonce: '00000000-0000-4000-8000-000000000001',
         processStartIdentity: 'start-ms:1',

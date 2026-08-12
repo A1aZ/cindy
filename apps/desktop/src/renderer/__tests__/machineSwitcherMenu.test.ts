@@ -92,6 +92,23 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(featureContextSource).toContain('export function useOwnsTopNavScrollableRows');
   });
 
+  // 2026-08-12 用户反馈:滚动后首行紧贴固定的「新建」被硬切、露出半截字。
+  it('滚动后顶部渐隐,未滚动时不加 mask(避免裁掉首行 hover 胶囊 / 焦点环)', () => {
+    // 按需启用:与右栏 TabBar 的 side-aware fade 同一取舍(常开 mask 会裁 border)。
+    expect(sidebarUpperSource).toContain('const [topFade, setTopFade] = useState(false)');
+    expect(sidebarUpperSource).toContain('const next = el.scrollTop > 1;');
+    expect(sidebarUpperSource).toContain('...(topFade');
+    // 用 mask-image(alpha)而非叠色块:透出侧栏自身背景,双主题天然正确、无需取色。
+    expect(sidebarUpperSource).toContain(
+      "WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px)'",
+    );
+    expect(sidebarUpperSource).toContain(
+      "maskImage: 'linear-gradient(to bottom, transparent 0, black 24px)'",
+    );
+    // jsdom 无 ResizeObserver:必须带 guard,否则测试环境构造即抛。
+    expect(sidebarUpperSource).toContain("typeof ResizeObserver !== 'undefined'");
+  });
+
   it('连接中占位页不再自带 MachineSwitcherMenu(固定行已常驻,不会被困住)', () => {
     const idx = sidebarUpperSource.indexOf('selectedMachineConnecting ?');
     expect(idx).toBeGreaterThanOrEqual(0);

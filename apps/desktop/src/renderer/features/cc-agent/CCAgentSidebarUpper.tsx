@@ -1672,6 +1672,31 @@ function ExpandedView({
   selectionAnchorSessionIdRef.current = selectionAnchorSessionId;
   const [bulkActionPending, setBulkActionPending] = useState<BulkSessionAction | null>(null);
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
+  /**
+   * 顶部溢出渐隐(2026-08-12 用户反馈):滚动后列表首行会紧贴固定的「新建」被硬切,
+   * 露出半截字。**只在真的滚动了才启用**——未滚动时不加 mask,首行 hover 胶囊 /
+   * 焦点环不会被裁(与右栏 TabBar 的 side-aware fade 同一取舍,见其 edgeFade 注释)。
+   * 用 mask-image(基于 alpha)而非叠色块:透出的是侧栏自身背景,light / dark /
+   * 任意扩展主题天然正确,不需要按主题取色。
+   */
+  const [topFade, setTopFade] = useState(false);
+  useEffect(() => {
+    const el = sidebarScrollRef.current;
+    if (!el) return undefined;
+    const update = () => {
+      const next = el.scrollTop > 1;
+      setTopFade((prev) => (prev === next ? prev : next));
+    };
+    update();
+    el.addEventListener('scroll', update, { passive: true });
+    // jsdom 无 ResizeObserver(仓库同款 guard,见 TabBar / RolePillDropdown)。
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    ro?.observe(el);
+    return () => {
+      el.removeEventListener('scroll', update);
+      ro?.disconnect();
+    };
+  }, []);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
   // (否则选中远程行 → 计数加了但 archive/delete 查 sessionsById 落空、静默忽略)。
   const sessionsById = useMemo(
@@ -3030,7 +3055,19 @@ function ExpandedView({
         <div
           ref={sidebarScrollRef}
           className="flex flex-col gap-2 pt-0 pb-4 overflow-y-auto flex-1"
-          style={{ scrollbarGutter: 'stable' }}
+          style={
+            {
+              scrollbarGutter: 'stable',
+              // 顶部溢出渐隐:滚动后首行不再紧贴「新建」被硬切(见 topFade 注释)。
+              // 24px 与右栏 TabBar 的横向 fade 同幅度,保持同一套视觉语言。
+              ...(topFade
+                ? {
+                    WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px)',
+                    maskImage: 'linear-gradient(to bottom, transparent 0, black 24px)',
+                  }
+                : null),
+            } as React.CSSProperties
+          }
         >
           {/* 顶部导航可滚动段:置于列表最上方,一起滚动。本组件即展开态视图
               (rail 走 CollapsedView 自己的图标入口),无需再判折叠。 */}

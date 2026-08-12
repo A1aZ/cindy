@@ -63,6 +63,7 @@ import {
 import { setSessionOrdinalBadges } from './sidebar/sessionOrdinalBadges';
 import { useOwnTopNavScrollableRows, useSidebarCollapsedState } from '../feature-context';
 import { SidebarTopNav } from '@/components/sidebar/SidebarTopNav';
+import { SidebarFilterPopover } from './sidebar/SidebarFilterPopover';
 import { stripTrailingPathSeparators } from '../../../shared/pathText';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
 import {
@@ -1679,6 +1680,15 @@ function ExpandedView({
    * 用 mask-image(基于 alpha)而非叠色块:透出的是侧栏自身背景,light / dark /
    * 任意扩展主题天然正确,不需要按主题取色。
    */
+  /**
+   * 空白处右键打开的整理菜单(2026-08-12 用户裁决)。会话行 / 项目行 / 对话组头
+   * 都在自己的 onContextMenu 里 stopPropagation,冒泡到滚动容器的必然是空白区域。
+   */
+  const [organizeMenuPos, setOrganizeMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const handleSidebarBlankContextMenu = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    setOrganizeMenuPos({ x: event.clientX, y: event.clientY });
+  }, []);
   const [topFade, setTopFade] = useState(false);
   useEffect(() => {
     const el = sidebarScrollRef.current;
@@ -3055,6 +3065,10 @@ function ExpandedView({
         <div
           ref={sidebarScrollRef}
           className="flex flex-col gap-2 pt-0 pb-4 overflow-y-auto flex-1"
+          // 空白处右键 = 打开整理菜单(2026-08-12 用户裁决)。命中会话行 / 项目行 /
+          // 对话组头时不接管——那些行有各自的右键菜单,由它们 stopPropagation 后
+          // 自行处理;这里只兜「没有任何行响应」的空白区域。
+          onContextMenu={handleSidebarBlankContextMenu}
           style={
             {
               scrollbarGutter: 'stable',
@@ -3246,6 +3260,18 @@ function ExpandedView({
           </div>
         )}
       </div>
+
+      {/* 空白处右键的整理菜单:与段头 sliders 按钮同一个组件、同一份内容,
+          只是改用隐形定位 trigger 开在光标处(2026-08-12 用户裁决)。 */}
+      <SidebarFilterPopover
+        filter={filter}
+        allKnownProjects={visibleProjectUniverse}
+        hasRemoteDevices={(remoteDeviceIndex?.size ?? 0) > 0}
+        contextMenuPos={organizeMenuPos}
+        onContextMenuOpenChange={(open) => {
+          if (!open) setOrganizeMenuPos(null);
+        }}
+      />
 
       {/* Delete / Archive confirm dialog */}
       <ConfirmDialog

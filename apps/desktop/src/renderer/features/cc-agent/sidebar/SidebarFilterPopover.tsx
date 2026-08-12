@@ -23,12 +23,18 @@
 import type { ReactNode } from 'react';
 import {
   AlignJustify,
+  Bot,
+  CalendarClock,
   Check,
   ChevronRight,
+  CircleDot,
   Clock,
   Coins,
+  Filter,
+  Folder,
   GitPullRequest,
   Globe,
+  Info,
   LayoutList,
   SlidersHorizontal,
   Wallet,
@@ -141,6 +147,14 @@ export interface SidebarFilterPopoverProps {
    * 仅远程连接时显示;仅本机时该选项整行隐藏。
    */
   hasRemoteDevices?: boolean;
+  /**
+   * 受控光标定位模式(2026-08-12 用户裁决:侧栏空白处右键也能开这个菜单)。
+   * 传入时不渲染段头那个 sliders 按钮,改用「隐形定位 trigger」把菜单开在光标处
+   * (与 ProjectNode / ChatImageView 的右键菜单同款做法)。null = 关闭。
+   */
+  contextMenuPos?: { x: number; y: number } | null;
+  /** 受控模式下的关闭回调(点外部 / Esc / 选中项)。 */
+  onContextMenuOpenChange?: (open: boolean) => void;
 }
 
 function optionLabel<T extends string>(
@@ -154,11 +168,21 @@ function optionLabel<T extends string>(
 function MenuSubRow({
   label,
   value,
+  valueNode,
   valueEmphasized = false,
+  Icon,
   children,
 }: {
   label: string;
+  /** 文字摘要;给了 valueNode 时忽略(仍需传,用于 aria-label 之类的可读兜底)。 */
   value: string;
+  /** 行首图标,与 MenuItemIcon 同规格。 */
+  Icon?: LucideIcon;
+  /**
+   * 自定义摘要节点。任务信息行用它渲染「已选项的图标串」——图标比逗号分隔的
+   * 短词更快扫读,且不会在 4 项全选时把行挤爆(2026-08-12 用户裁决)。
+   */
+  valueNode?: ReactNode;
   /** 偏离默认值时右侧摘要转正文色，提示筛选生效。 */
   valueEmphasized?: boolean;
   children: ReactNode;
@@ -166,14 +190,17 @@ function MenuSubRow({
   return (
     <DropdownMenuSub>
       <DropdownMenuSubTrigger className={MENU_ROW_CLASS}>
+        <MenuItemIcon Icon={Icon} />
         <span className="truncate">{label}</span>
         <span
           className={cn(
             'ml-auto max-w-[96px] truncate text-right',
             valueEmphasized ? 'text-foreground' : 'text-[var(--cmd-palette-item-meta)]',
           )}
+          // 图标摘要下把文字版留给读屏(图标本身 aria-hidden)。
+          aria-label={valueNode ? value : undefined}
         >
-          {value}
+          {valueNode ?? value}
         </span>
         <ChevronRight size={14} className="shrink-0 text-[var(--cmd-palette-item-meta)]" />
       </DropdownMenuSubTrigger>
@@ -248,8 +275,13 @@ export function SidebarFilterPopover({
   filter,
   allKnownProjects,
   hasRemoteDevices = false,
+  contextMenuPos,
+  onContextMenuOpenChange,
 }: SidebarFilterPopoverProps) {
   const { t } = useTranslation();
+  // 受控光标模式 = 调用方传了 contextMenuPos 这个 prop(值为 null 表示"当前关闭",
+  // 仍算受控);段头按钮模式则完全不传。用 !== undefined 而非真值判断。
+  const isContextMode = contextMenuPos !== undefined;
   const {
     status,
     projects,
@@ -332,30 +364,53 @@ export function SidebarFilterPopover({
   return (
     // modal={false}:侧栏是常驻面板,整理菜单不该锁住列表滚动、也不该给 body
     // 加 pointer-events:none 屏蔽其余界面(点外部 / Esc 仍正常关闭)。
-    <DropdownMenu modal={false}>
+    <DropdownMenu
+      modal={false}
+      {...(isContextMode
+        ? {
+            open: contextMenuPos !== null,
+            onOpenChange: (open: boolean) => onContextMenuOpenChange?.(open),
+          }
+        : null)}
+    >
       <DropdownMenuTrigger asChild>
-        {/* hover 不再展开菜单,补一个与邻居同规的 tooltip(复用菜单标题文案,
-              与「对话」段头同款按钮一致);aria-label 仍带完整设置摘要。 */}
-        <Tip text={t('ccAgent.sidebar.organizeSidebar')} side="bottom">
-          <button
-            type="button"
-            aria-label={ariaLabel}
-            aria-pressed={isFilterActive}
-            className={cn(
-              // 配色与段头其余按钮统一(侧栏 token 对),不用通用 text-tertiary。
-              'flex h-7 w-7 items-center justify-center rounded-md',
-              'text-[var(--sidebar-list-muted)]',
-              'transition-colors hover:text-[var(--sidebar-nav-text)]',
-            )}
-          >
-            <SlidersHorizontal size={14} strokeWidth={2} />
-          </button>
-        </Tip>
+        {isContextMode ? (
+          // 隐形定位 trigger:菜单开在光标处(与 ProjectNode / ChatImageView 右键菜单同款)。
+          <span
+            aria-hidden
+            style={{
+              position: 'fixed',
+              left: contextMenuPos?.x ?? 0,
+              top: contextMenuPos?.y ?? 0,
+              width: 0,
+              height: 0,
+              pointerEvents: 'none',
+            }}
+          />
+        ) : (
+          /* hover 不再展开菜单,补一个与邻居同规的 tooltip(复用菜单标题文案,
+              与「对话」段头同款按钮一致);aria-label 仍带完整设置摘要。 */
+          <Tip text={t('ccAgent.sidebar.organizeSidebar')} side="bottom">
+            <button
+              type="button"
+              aria-label={ariaLabel}
+              aria-pressed={isFilterActive}
+              className={cn(
+                // 配色与段头其余按钮统一(侧栏 token 对),不用通用 text-tertiary。
+                'flex h-7 w-7 items-center justify-center rounded-md',
+                'text-[var(--sidebar-list-muted)]',
+                'transition-colors hover:text-[var(--sidebar-nav-text)]',
+              )}
+            >
+              <SlidersHorizontal size={14} strokeWidth={2} />
+            </button>
+          </Tip>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent
         side="bottom"
         align="start"
-        sideOffset={8}
+        sideOffset={isContextMode ? 2 : 8}
         // 与窗口边缘留白:菜单向上翻转时不顶死在标题栏上(仓库既有 8~16 的先例)。
         collisionPadding={8}
         className={cn(MENU_CONTENT_CLASS, 'w-[248px]')}
@@ -416,8 +471,13 @@ export function SidebarFilterPopover({
             label={t('ccAgent.sidebar.filterHeading')}
             value={filterSummary}
             valueEmphasized={activeFilterCount > 0}
+            Icon={Filter}
           >
-            <MenuSubRow label={t('ccAgent.sidebar.filterStatusHeading')} value={statusValue}>
+            <MenuSubRow
+              label={t('ccAgent.sidebar.filterStatusHeading')}
+              value={statusValue}
+              Icon={CircleDot}
+            >
               {STATUS_OPTIONS.map((option) => (
                 <SelectMenuItem
                   key={option.value}
@@ -428,7 +488,11 @@ export function SidebarFilterPopover({
               ))}
             </MenuSubRow>
 
-            <MenuSubRow label={t('ccAgent.sidebar.filterProjectsHeading')} value={projectValue}>
+            <MenuSubRow
+              label={t('ccAgent.sidebar.filterProjectsHeading')}
+              value={projectValue}
+              Icon={Folder}
+            >
               <DropdownMenuItem
                 onSelect={(event) => {
                   event.preventDefault();
@@ -487,7 +551,11 @@ export function SidebarFilterPopover({
               </div>
             </MenuSubRow>
 
-            <MenuSubRow label={t('ccAgent.sidebar.filterAgentHeading')} value={vendorValue}>
+            <MenuSubRow
+              label={t('ccAgent.sidebar.filterAgentHeading')}
+              value={vendorValue}
+              Icon={Bot}
+            >
               {VENDOR_OPTIONS.map((option) => (
                 <SelectMenuItem
                   key={option.value}
@@ -501,6 +569,7 @@ export function SidebarFilterPopover({
             <MenuSubRow
               label={t('ccAgent.sidebar.filterLastActivityHeading')}
               value={lastActivityValue}
+              Icon={CalendarClock}
             >
               {LAST_ACTIVITY_OPTIONS.map((option) => (
                 <SelectMenuItem
@@ -545,6 +614,27 @@ export function SidebarFilterPopover({
           <MenuSubRow
             label={t('ccAgent.sidebar.taskInfoHeading')}
             value={taskInfoSummary}
+            Icon={Info}
+            valueNode={
+              taskInfoFields.length > 0 ? (
+                // 已选项用图标串表示(顺序固定为 TASK_INFO_OPTIONS 的展示顺序,
+                // 与列表行的渲染顺序一致),不再罗列短词。
+                <span className="flex items-center justify-end gap-1">
+                  {TASK_INFO_OPTIONS.filter((option) => taskInfoFields.includes(option.value)).map(
+                    (option) =>
+                      option.Icon ? (
+                        <option.Icon
+                          key={option.value}
+                          size={13}
+                          strokeWidth={1.8}
+                          className="shrink-0"
+                          aria-hidden
+                        />
+                      ) : null,
+                  )}
+                </span>
+              ) : undefined
+            }
             valueEmphasized={!taskInfoIsDefault}
           >
             {TASK_INFO_OPTIONS.map((option) => (

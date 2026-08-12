@@ -164,6 +164,41 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(pinnedSectionSource).not.toContain('<LayoutGrid size={13} strokeWidth={2} />');
   });
 
+  // 2026-08-12 用户裁决:侧栏空白处右键也能开整理菜单。
+  it('侧栏空白处右键打开整理菜单(行级右键仍归各自的菜单)', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    // 同一组件两种形态:段头按钮 / 受控光标定位(隐形 fixed trigger,同 ProjectNode 做法)。
+    expect(filterSource).toContain('const isContextMode = contextMenuPos !== undefined');
+    expect(filterSource).toContain("position: 'fixed'");
+    expect(filterSource).toContain('left: contextMenuPos?.x ?? 0');
+    expect(filterSource).toContain('top: contextMenuPos?.y ?? 0');
+
+    // 滚动容器接右键;行级菜单靠自身 stopPropagation 抢先处理,这里只兜空白区。
+    expect(sidebarUpperSource).toContain('onContextMenu={handleSidebarBlankContextMenu}');
+    expect(sidebarUpperSource).toContain(
+      'setOrganizeMenuPos({ x: event.clientX, y: event.clientY })',
+    );
+    expect(sidebarUpperSource).toContain('contextMenuPos={organizeMenuPos}');
+  });
+
+  // 2026-08-12 用户裁决:任务信息行的当前选中项用图标表示,不再罗列短词。
+  it('任务信息摘要用图标串,筛选各维度行也有图标', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    // 摘要节点按 TASK_INFO_OPTIONS 顺序过滤已选项渲染图标;文字版留给 aria-label。
+    expect(filterSource).toContain('valueNode={');
+    expect(filterSource).toContain(
+      'TASK_INFO_OPTIONS.filter((option) => taskInfoFields.includes(option.value))',
+    );
+    expect(filterSource).toContain('aria-label={valueNode ? value : undefined}');
+    // 具体维度行配图标(状态 / 项目 / Agent / 最近活跃 / 筛选 / 任务信息)。
+    expect(filterSource).toContain('Icon={Filter}');
+    expect(filterSource).toContain('Icon={CircleDot}');
+    expect(filterSource).toContain('Icon={Folder}');
+    expect(filterSource).toContain('Icon={Bot}');
+    expect(filterSource).toContain('Icon={CalendarClock}');
+    expect(filterSource).toContain('Icon={Info}');
+  });
+
   it('连接中占位页不再自带 MachineSwitcherMenu(固定行已常驻,不会被困住)', () => {
     const idx = sidebarUpperSource.indexOf('selectedMachineConnecting ?');
     expect(idx).toBeGreaterThanOrEqual(0);
@@ -360,7 +395,9 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(filterSource).not.toContain('HoverMenuAreaContext.Provider');
     expect(filterSource).not.toContain('{...triggerProps}');
     expect(filterSource).not.toContain('{...contentProps}');
-    expect(filterSource).toContain('<DropdownMenu modal={false}>');
+    // 非模态保留(侧栏常驻,不锁滚动);2026-08-12 起同一组件还支持受控光标模式
+    // (空白处右键),故 modal 与 open 分行书写,断言收窄到 modal 本身。
+    expect(filterSource).toMatch(/<DropdownMenu\s+modal=\{false\}/);
     // 触发按钮配色与段头其余按钮统一到侧栏 token 对(此前用通用 text-tertiary,hover 不齐)。
     expect(filterSource).toContain("'text-[var(--sidebar-list-muted)]'");
     expect(filterSource).toContain("'transition-colors hover:text-[var(--sidebar-nav-text)]'");

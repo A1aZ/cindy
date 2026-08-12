@@ -288,7 +288,10 @@ export function SidebarWindowLayout() {
           </div>
         )}
       </div>
-      <GhostMediaLightboxHost sessionId={interactiveSessionId ?? undefined} />
+      <GhostMediaLightboxHost
+        key={interactiveSessionId ?? 'hidden'}
+        sessionId={interactiveSessionId ?? undefined}
+      />
     </div>
   );
 }

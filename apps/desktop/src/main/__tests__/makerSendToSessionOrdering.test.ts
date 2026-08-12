@@ -643,6 +643,9 @@ describe('sendToSession ordering', () => {
       '  setGhostErrandRunner(',
     );
     expect(runnerBlock).toContain('if (!(await isTargetCurrent())) {');
+    expect(runnerBlock).toContain('const readAuthorization = async () => {');
+    expect(runnerBlock).toContain('classifyGhostVisibility(ghostId, sessionRow.workingDir');
+    expect(runnerBlock).toContain('if (!(await readAuthorization())) {');
     expectOrder(
       runnerBlock,
       'if (!(await isTargetCurrent())) {',
@@ -653,12 +656,20 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('clientId,');
     expect(runnerBlock).toContain('rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)');
     expect(runnerBlock).not.toContain('if (!rewound) return;');
-    expect(runnerBlock).toContain('dispatchCancelledForFocus = rewound;');
+    expect(runnerBlock).toContain('dispatchState.rewound = rewound;');
     expect(runnerBlock).toContain('return rewound;');
     expect(source).toContain("'消息取消失败，请在任务中检查后重试'");
     expect(runnerBlock).toContain('finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);');
+    expect(runnerBlock).toContain('const authorization = await readAuthorization();');
+    expect(runnerBlock).toContain('finalAuthorizedWorkingDir = authorization.workingDir;');
     expect(runnerBlock).toContain('assertBeforeVendorDispatch: () => {');
     expect(runnerBlock).toContain("'plugin target changed at final vendor dispatch boundary'");
+    expect(runnerBlock).toContain(
+      'classifyGhostVisibility(ghostId, finalAuthorizedWorkingDir',
+    );
+    expect(runnerBlock).toContain(
+      "'plugin current-task message authorization changed at final dispatch boundary'",
+    );
     expect(runnerBlock).toContain('onDispatchCancelled: rewindCancelledMessage,');
   });
 
@@ -714,6 +725,9 @@ describe('sendToSession ordering', () => {
     expect(coordinatorBlock).toContain('captureGhostSessionFocusGuard(sessionId)');
     expect(coordinatorBlock).toContain(
       "'plugin target changed at queued final vendor dispatch boundary'",
+    );
+    expect(coordinatorBlock).toContain(
+      "'plugin queued current-task message authorization changed at final dispatch boundary'",
     );
     expect(coordinatorBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
   });

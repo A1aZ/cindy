@@ -8671,6 +8671,30 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         message: '当前焦点任务已变化，请重试',
       };
     }
+    const readAuthorization = async () => {
+      const sessionRow = await getSessionRowSnapshot(sessionId);
+      if (!sessionRow) return null;
+      const visibility = classifyGhostVisibility(ghostId, sessionRow.workingDir, {
+        listGhosts: () => getGhostManager().list(),
+        isAvailableForActiveSession: isGhostAvailableForActiveSession,
+        isDisabledForWorkdir: isGhostDisabledForWorkdir,
+      });
+      if (
+        !visibility.ok ||
+        !visibility.ghost.manifest.slots.includes('agent') ||
+        visibility.ghost.manifest.agent?.sessionMessage !== true
+      ) {
+        return null;
+      }
+      return { workingDir: sessionRow.workingDir };
+    };
+    if (!(await readAuthorization())) {
+      return {
+        ok: false,
+        errorCode: 'PERMISSION_DENIED',
+        message: '插件在当前任务中已不可用',
+      };
+    }
     const liveSession = maker.getSession(sessionId);
     const meta = await maker.getSessionMeta(sessionId).catch(() => null);
     const hookModel = resolveGhostUserHookModel(
@@ -8691,7 +8715,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const screenedMessage = verdict.action === 'rewrite' ? verdict.text : message;
     const clientId = createId();
     let finalDispatchGuard: (() => boolean) | null = null;
-    let dispatchCancelledForFocus = false;
+    let finalAuthorizedWorkingDir: string | null = null;
+    const dispatchState: {
+      cancellation: {
+        errorCode: 'SESSION_UNAVAILABLE' | 'PERMISSION_DENIED';
+        message: string;
+      } | null;
+      rewound: boolean;
+    } = { cancellation: null, rewound: false };
     const rewindCancelledMessage = async (): Promise<boolean> => {
       let rewound = false;
       try {
@@ -8712,7 +8743,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           clientId,
         });
       }
-      dispatchCancelledForFocus = rewound;
+      dispatchState.rewound = rewound;
       return rewound;
     };
     const sent = await sendToSessionInternal({
@@ -8725,12 +8756,31 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       pluginSessionMessageGhostId: ghostId,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
+          dispatchState.cancellation = {
+            errorCode: 'SESSION_UNAVAILABLE',
+            message: '当前焦点任务已变化，请重试',
+          };
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target session is no longer focused',
           );
         }
+        const authorization = await readAuthorization();
+        if (!authorization) {
+          dispatchState.cancellation = {
+            errorCode: 'PERMISSION_DENIED',
+            message: '插件在当前任务中已不可用',
+          };
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message authorization is no longer valid',
+          );
+        }
+        finalAuthorizedWorkingDir = authorization.workingDir;
         finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);
         if (!finalDispatchGuard) {
+          dispatchState.cancellation = {
+            errorCode: 'SESSION_UNAVAILABLE',
+            message: '当前焦点任务已变化，请重试',
+          };
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target changed while preparing final dispatch guard',
           );
@@ -8738,19 +8788,42 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       },
       assertBeforeVendorDispatch: () => {
         if (!finalDispatchGuard?.()) {
+          dispatchState.cancellation = {
+            errorCode: 'SESSION_UNAVAILABLE',
+            message: '当前焦点任务已变化，请重试',
+          };
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target changed at final vendor dispatch boundary',
+          );
+        }
+        const visibility = classifyGhostVisibility(ghostId, finalAuthorizedWorkingDir, {
+          listGhosts: () => getGhostManager().list(),
+          isAvailableForActiveSession: isGhostAvailableForActiveSession,
+          isDisabledForWorkdir: isGhostDisabledForWorkdir,
+        });
+        if (
+          !visibility.ok ||
+          !visibility.ghost.manifest.slots.includes('agent') ||
+          visibility.ghost.manifest.agent?.sessionMessage !== true
+        ) {
+          dispatchState.cancellation = {
+            errorCode: 'PERMISSION_DENIED',
+            message: '插件在当前任务中已不可用',
+          };
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message authorization changed at final dispatch boundary',
           );
         }
       },
       onDispatchCancelled: rewindCancelledMessage,
     });
     if (!sent.ok) {
-      if (dispatchCancelledForFocus) {
+      const cancellation = dispatchState.cancellation;
+      if (dispatchState.rewound && cancellation) {
         return {
           ok: false,
-          errorCode: 'SESSION_UNAVAILABLE',
-          message: '当前焦点任务已变化，请重试',
+          errorCode: cancellation.errorCode,
+          message: cancellation.message,
         };
       }
       return sent;
@@ -11006,18 +11079,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedQueuedMessage: async (sessionId, item): Promise<void | (() => void)> => {
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。
       schedulerQueuedPromptDiscardWatchers.delete(item.clientId);
+      const ghostId = item.pluginSessionMessageGhostId;
       if (item.requireCurrentSessionFocus === true) {
-        const ghostId = item.pluginSessionMessageGhostId;
-        const visibility =
-          typeof ghostId === 'string'
-            ? classifyGhostVisibility(ghostId, item.workingDir ?? null, {
-                listGhosts: () => getGhostManager().list(),
-                isAvailableForActiveSession: isGhostAvailableForActiveSession,
-                isDisabledForWorkdir: isGhostDisabledForWorkdir,
-              })
-            : null;
+        if (typeof ghostId !== 'string') {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message identity is missing',
+          );
+        }
+        const visibility = classifyGhostVisibility(ghostId, item.workingDir ?? null, {
+          listGhosts: () => getGhostManager().list(),
+          isAvailableForActiveSession: isGhostAvailableForActiveSession,
+          isDisabledForWorkdir: isGhostDisabledForWorkdir,
+        });
         if (
-          !visibility?.ok ||
+          !visibility.ok ||
           !visibility.ghost.manifest.slots.includes('agent') ||
           visibility.ghost.manifest.agent?.sessionMessage !== true
         ) {
@@ -11045,6 +11120,12 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // pending auto-bridge 副作用必须先于 turn 启动完成；失败仍吞错落日志，不拦派发。
       await orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
       if (item.requireCurrentSessionFocus === true) {
+        if (typeof ghostId !== 'string') {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message identity is missing at final dispatch boundary',
+          );
+        }
+        const queuedGhostId = ghostId;
         const guard = await captureGhostSessionFocusGuard(sessionId);
         if (!guard) {
           throw new AcceptedCallbackDispatchCancelled(
@@ -11055,6 +11136,20 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           if (!guard()) {
             throw new AcceptedCallbackDispatchCancelled(
               'plugin target changed at queued final vendor dispatch boundary',
+            );
+          }
+          const visibility = classifyGhostVisibility(queuedGhostId, item.workingDir ?? null, {
+            listGhosts: () => getGhostManager().list(),
+            isAvailableForActiveSession: isGhostAvailableForActiveSession,
+            isDisabledForWorkdir: isGhostDisabledForWorkdir,
+          });
+          if (
+            !visibility.ok ||
+            !visibility.ghost.manifest.slots.includes('agent') ||
+            visibility.ghost.manifest.agent?.sessionMessage !== true
+          ) {
+            throw new AcceptedCallbackDispatchCancelled(
+              'plugin queued current-task message authorization changed at final dispatch boundary',
             );
           }
         };

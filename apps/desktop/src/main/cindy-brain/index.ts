@@ -4965,6 +4965,21 @@ export function registerGhostIpc(): void {
             message: '插件只能向当前焦点任务发送消息',
           };
         }
+        const focusedSession = await getSessionFsSnapshot(request.sessionId);
+        if (!focusedSession) {
+          return {
+            ok: false as const,
+            errorCode: 'SESSION_UNAVAILABLE' as const,
+            message: '当前任务信息不可用，请重试',
+          };
+        }
+        if (isGhostDisabledForWorkdir(id, focusedSession.workingDir)) {
+          return {
+            ok: false as const,
+            errorCode: 'PERMISSION_DENIED' as const,
+            message: '插件已在当前任务的工作目录中停用',
+          };
+        }
         const now = Date.now();
         const lastSentAt = ghostSessionMessageLastSentAt.get(id) ?? 0;
         if (now - lastSentAt < GHOST_SESSION_MESSAGE_MIN_INTERVAL_MS) {

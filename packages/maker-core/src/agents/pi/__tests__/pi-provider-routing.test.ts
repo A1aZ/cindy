@@ -75,6 +75,17 @@ describe('Pi provider-aware model routing', () => {
     const apiResolver = vi.fn((providerId: string | null | undefined) =>
       providerId === 'openai' ? 'anthropic-messages' as const : 'openai-responses' as const,
     );
+    const descriptorResolver = vi.fn((providerId: string | null | undefined, modelId: string) => ({
+      id: modelId,
+      displayName: providerId === 'openai' ? 'Subscription Shared' : 'XD Shared',
+      contextWindow: providerId === 'openai' ? 128_000 : 200_000,
+      maxOutputTokens: providerId === 'openai' ? 16_000 : 32_000,
+      cost: providerId === 'openai'
+        ? { input: 1, output: 2 }
+        : { input: 9, output: 10 },
+      efforts: [],
+      defaultEffort: null,
+    }));
     const deps: AgentDeps = {
       auth: {
         getState: async (options) => {
@@ -94,6 +105,7 @@ describe('Pi provider-aware model routing', () => {
         ],
       },
       resolvePiAgentHome: () => agentHome,
+      resolvePiGatewayModelDescriptor: descriptorResolver,
       resolvePiGatewayModelApi: apiResolver,
       resolvePiNativeProviders: async () => ({
         providers: [
@@ -120,11 +132,25 @@ describe('Pi provider-aware model routing', () => {
     const models = JSON.parse(
       readFileSync(path.join(captured.env.PI_CODING_AGENT_DIR as string, 'models.json'), 'utf8'),
     ) as {
-      providers: Record<string, { models: Array<{ id: string; api?: string }> }>;
+      providers: Record<string, {
+        models: Array<{
+          id: string;
+          name?: string;
+          api?: string;
+          contextWindow?: number;
+          maxTokens?: number;
+          cost?: Record<string, number>;
+        }>;
+      }>;
     };
     expect(apiResolver).toHaveBeenCalledWith('openai', 'shared-model');
+    expect(descriptorResolver).toHaveBeenCalledWith('openai', 'shared-model');
     expect(models.providers.cindy?.models.find((model) => model.id === 'shared-model')).toMatchObject({
+      name: 'Subscription Shared',
       api: 'anthropic-messages',
+      contextWindow: 128_000,
+      maxTokens: 16_000,
+      cost: { input: 1, output: 2 },
     });
     expect(models.providers['native-a']?.models.some((model) => model.id === 'shared-model')).toBe(true);
     expect(models.providers['native-b']?.models.some((model) => model.id === 'shared-model')).toBe(true);
@@ -159,7 +185,7 @@ describe('Pi provider-aware model routing', () => {
   });
 
   it('keeps built-in gateway reasoning when a same-id non-reasoning BYOM empties the flat effort intersection', async () => {
-    const resolver = vi.fn((modelId: string) => {
+    const resolver = vi.fn((_providerId: string | null | undefined, modelId: string) => {
       if (modelId !== 'shared-model') return null;
       return {
         id: modelId,
@@ -216,7 +242,7 @@ describe('Pi provider-aware model routing', () => {
     ) as {
       providers: Record<string, { models: Array<{ id: string; reasoning: boolean }> }>;
     };
-    expect(resolver).toHaveBeenCalledWith('shared-model');
+    expect(resolver).toHaveBeenCalledWith('openai', 'shared-model');
     expect(models.providers.cindy?.models.find((model) => model.id === 'shared-model')).toMatchObject({
       reasoning: true,
     });
@@ -772,7 +798,7 @@ describe('Pi provider-aware model routing', () => {
         defaultEffort: null,
       },
     ];
-    const resolveGatewayModel = vi.fn((modelId: string) =>
+    const resolveGatewayModel = vi.fn((_providerId: string | null | undefined, modelId: string) =>
       gatewayModels.find((candidate) => candidate.id === modelId) ?? null,
     );
     const agent = new PiAgent({

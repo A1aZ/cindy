@@ -1608,8 +1608,12 @@ export function getMaker(): Maker {
       },
       resolvePiRuntimeModelDescriptor: (providerId, modelId) =>
         resolvePiRuntimeModelDescriptor(getDesktopSelectableCatalog(), providerId, modelId),
-      resolvePiGatewayModelDescriptor: (modelId) =>
-        resolvePiRuntimeModelDescriptor(getDesktopSelectableCatalog(), 'cindy', modelId),
+      resolvePiGatewayModelDescriptor: (providerId, modelId) =>
+        resolvePiRuntimeModelDescriptor(
+          getDesktopSelectableCatalog(),
+          providerId?.trim() || 'cindy',
+          modelId,
+        ),
       mcpProviders: piMcpProviders,
       makerMemory: makerMemoryManager,
       getGhostRosterPrompt,

@@ -482,7 +482,10 @@ export class PiAgent extends BaseAgent {
       // 会按设计收敛成交集。cindy gateway 块则代表内置路由，必须回查其
       // provider-aware 描述符，不能被同名 non-reasoning BYOM 清空 reasoning。
       // host 未注入 resolver 或只有 BYOM 条目时保留旧 flat fallback。
-      const m = this.deps.resolvePiGatewayModelDescriptor?.(publicModel.id) ?? publicModel;
+      const m = this.deps.resolvePiGatewayModelDescriptor?.(
+        gatewayProviderId,
+        publicModel.id,
+      ) ?? publicModel;
       const resolvedApi = this.deps.resolvePiGatewayModelApi?.(gatewayProviderId, m.id);
       if (
         resolvedApi === null ||
@@ -715,7 +718,7 @@ export class PiAgent extends BaseAgent {
       }
       const gatewayModel = modelId === opts.model && selectedRuntimeModel
         ? selectedRuntimeModel
-        : this.deps.resolvePiGatewayModelDescriptor?.(modelId)
+        : this.deps.resolvePiGatewayModelDescriptor?.(authProviderId, modelId)
           ?? this.capabilities.availableModels.find((model) => model.id === modelId);
       return gatewayModel?.efforts;
     };

@@ -1417,12 +1417,21 @@ export async function recoverLegacyGhostPlugins(
   // deferred that blocks valid legacy plugins from being moved (P1,
   // PRRT_kwDOTgdRUs6YSU-u).  Match the filter already applied in
   // getLegacyGhostRecoveryStatus.
+  // targetDiscovery scans the whole install root, so a deferred id for a
+  // plugin not in the recovery marker's pendingIds must not abort recovery
+  // of the ones that are pending (P2, PRRT_kwDOTgdRUs6YcrCo).  Only
+  // count target-level deferred ids that are actually in pendingIds.
   const discoveryDeferred =
     sharedDiscovery.deferredRoots.length > 0 ||
     scopedDiscovery.deferredRoots.length > 0 ||
     targetDiscovery.deferredRoots.length > 0 ||
-    [...sharedDiscovery.deferredIds, ...scopedDiscovery.deferredIds, ...targetDiscovery.deferredIds]
-      .some((id) => !options.rejectReservedIds || !isOfficialGhostId(id));
+    [...sharedDiscovery.deferredIds, ...scopedDiscovery.deferredIds]
+      .some((id) => !options.rejectReservedIds || !isOfficialGhostId(id)) ||
+    targetDiscovery.deferredIds.some((id) =>
+      (!options.rejectReservedIds || !isOfficialGhostId(id)) &&
+      (earlyRecoveryMarkerRead.kind === 'ready' &&
+        earlyRecoveryMarkerRead.marker?.pendingIds?.includes(id)),
+    );
   const discoveryInvalidCount = new Set([
     ...sharedDiscovery.invalidIds,
     ...scopedDiscovery.invalidIds,

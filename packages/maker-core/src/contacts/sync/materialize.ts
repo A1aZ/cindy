@@ -16,6 +16,8 @@ import {
   type ContactsSnapshotMembership,
   type ContactsSnapshotRelation,
   type ContactsSyncEntity,
+  type ContactsSyncIdentityValue,
+  type ContactsSyncStamp,
   type ContactsSyncState,
 } from "./types.js";
 
@@ -70,6 +72,9 @@ function uniqueBy<T>(
 export function materializeContactsSyncState(
   state: ContactsSyncState,
 ): ContactsDataSnapshot {
+  const contactsById = new Map(
+    state.contacts.map((record) => [record.id, record]),
+  );
   const contacts = state.contacts
     .filter((record) => !record.deleted)
     .map<ContactsSnapshotContact>((record) => ({
@@ -102,17 +107,35 @@ export function materializeContactsSyncState(
     contactIds.has(record.value.value.contactId),
   );
   const identityOwners = new Map<string, Set<string>>();
+  const identityRecordsByKey = new Map<
+    string,
+    Array<ContactsSyncEntity<ContactsSyncIdentityValue>>
+  >();
+  const latestConflictStampByContact = new Map<string, ContactsSyncStamp>();
   for (const record of identityCandidates) {
     const value = record.value.value;
     const key = `${value.platform}\u0000${value.normalizedValue}`;
     const owners = identityOwners.get(key) ?? new Set<string>();
     owners.add(value.contactId);
     identityOwners.set(key, owners);
+    const records = identityRecordsByKey.get(key) ?? [];
+    records.push(record);
+    identityRecordsByKey.set(key, records);
   }
   const conflictedContactIds = new Set<string>();
-  for (const owners of identityOwners.values()) {
+  for (const [key, owners] of identityOwners.entries()) {
     if (owners.size <= 1) continue;
-    for (const contactId of owners) conflictedContactIds.add(contactId);
+    for (const record of identityRecordsByKey.get(key) ?? []) {
+      const value = record.value.value;
+      conflictedContactIds.add(value.contactId);
+      const previous = latestConflictStampByContact.get(value.contactId);
+      if (
+        !previous ||
+        compareContactsSyncStamp(previous, record.value.stamp) < 0
+      ) {
+        latestConflictStampByContact.set(value.contactId, record.value.stamp);
+      }
+    }
   }
 
   const identities = uniqueBy(
@@ -127,8 +150,20 @@ export function materializeContactsSyncState(
 
   // 同一身份被并发分给不同联系人时，SQLite 只能物化一个确定性赢家；把所有
   // 相关档案标成待确认，避免另一边被隐藏后用户完全不知道发生过冲突。
+  // 用户确认后会产生一个晚于冲突身份 stamp 的 status stamp；此时尊重用户
+  // 的裁决，不要在下一次 reconcile / 往返同步时把它重新打回 pending。
   for (const contact of contacts) {
-    if (conflictedContactIds.has(contact.id)) contact.status = "pending";
+    if (!conflictedContactIds.has(contact.id)) continue;
+    const status = contactsById.get(contact.id)?.status;
+    const conflictStamp = latestConflictStampByContact.get(contact.id);
+    if (
+      status &&
+      conflictStamp &&
+      compareContactsSyncStamp(status.stamp, conflictStamp) > 0
+    ) {
+      continue;
+    }
+    contact.status = "pending";
   }
 
   const events = liveEntities(state.events)

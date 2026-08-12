@@ -36,7 +36,9 @@ describe("contacts device sync", () => {
     for (const db of databases.splice(0)) db.close();
   });
 
-  function createStore(config?: { maxIdentityValueLen: number }): MakerContactsStore {
+  function createStore(config?: {
+    maxIdentityValueLen: number;
+  }): MakerContactsStore {
     const db = new DatabaseCtor(":memory:");
     databases.push(db);
     const store = new MakerContactsStore({ db, logger: noopLogger(), config });
@@ -244,6 +246,39 @@ describe("contacts device sync", () => {
     expect(aHit[0]!.profile.id).toBe(bHit[0]!.profile.id);
     expect(a.listContacts({ status: "pending" })).toHaveLength(2);
     expect(b.listContacts({ status: "pending" })).toHaveLength(2);
+  });
+
+  it("用户确认冲突联系人后，reconcile 和设备往返不会重新变成待确认", () => {
+    const a = createStore();
+    const b = createStore();
+    a.activateDeviceSync();
+    b.activateDeviceSync();
+    const aContact = a.createContact({
+      kind: "person",
+      displayName: "甲",
+      identities: [{ platform: "email", value: "same@example.com" }],
+    });
+    b.createContact({
+      kind: "person",
+      displayName: "乙",
+      identities: [{ platform: "email", value: "same@example.com" }],
+    });
+
+    exchange(a, b);
+    expect(a.listContacts({ status: "pending" })).toHaveLength(2);
+
+    a.updateContact(aContact.id, { status: "confirmed" });
+    expect(a.stats().pending).toBe(1);
+    // 这次读取会捕获用户确认，并重建同步投影；旧实现会在这里再次打回 pending。
+    expect(a.readDeviceSyncState()).not.toBeNull();
+    expect(a.stats().pending).toBe(1);
+
+    exchange(b, a);
+    exchange(a, b);
+    expect(a.getContact(aContact.id).status).toBe("confirmed");
+    expect(b.getContact(aContact.id).status).toBe("confirmed");
+    expect(a.stats().pending).toBe(1);
+    expect(b.stats().pending).toBe(1);
   });
 
   it("FTS 重建失败后重复接收相同状态仍会重试", () => {

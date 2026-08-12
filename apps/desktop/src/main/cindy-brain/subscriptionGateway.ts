@@ -605,13 +605,18 @@ export function createGhostSessionFocusTracker(
 /** 插件面板只面向用户主任务；特殊焦点若落到 Orca Worker，统一折回所属 Lead。 */
 export async function resolveGhostPrimarySessionId(
   sessionId: string | null,
+  readOrcaRole: (sessionId: string) => Promise<string | null | undefined>,
   resolveWorkerLead: (workerSessionId: string) => Promise<string | null>,
 ): Promise<string | null> {
   if (!sessionId) return null;
   try {
-    return (await resolveWorkerLead(sessionId)) ?? sessionId;
+    const role = await readOrcaRole(sessionId);
+    if (role === undefined) return null;
+    if (role === null || role === 'lead') return sessionId;
+    if (role !== 'worker') return null;
+    return await resolveWorkerLead(sessionId);
   } catch {
-    return sessionId;
+    return null;
   }
 }
 

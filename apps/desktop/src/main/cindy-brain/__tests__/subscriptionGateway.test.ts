@@ -755,19 +755,42 @@ describe('createGhostSessionFocusTracker(did-session-switched 去重)', () => {
 
 describe('resolveGhostPrimarySessionId', () => {
   it('普通任务保持原 id，Worker 归一到 Lead', async () => {
+    const readRole = vi.fn(async (sessionId: string) =>
+      sessionId === 'worker-1' ? 'worker' : null,
+    );
     const lookup = vi.fn(async (sessionId: string) =>
       sessionId === 'worker-1' ? 'lead-1' : null,
     );
-    await expect(resolveGhostPrimarySessionId('normal-1', lookup)).resolves.toBe('normal-1');
-    await expect(resolveGhostPrimarySessionId('worker-1', lookup)).resolves.toBe('lead-1');
+    await expect(resolveGhostPrimarySessionId('normal-1', readRole, lookup)).resolves.toBe(
+      'normal-1',
+    );
+    await expect(resolveGhostPrimarySessionId('worker-1', readRole, lookup)).resolves.toBe(
+      'lead-1',
+    );
   });
 
-  it('查询失败时保留原任务，不让插件上下文丢失', async () => {
+  it('Worker 归一缺失或查询失败时 fail closed', async () => {
     await expect(
-      resolveGhostPrimarySessionId('session-1', async () => {
-        throw new Error('db unavailable');
-      }),
-    ).resolves.toBe('session-1');
+      resolveGhostPrimarySessionId('worker-1', async () => 'worker', async () => null),
+    ).resolves.toBeNull();
+    await expect(
+      resolveGhostPrimarySessionId('session-1', async () => undefined, async () => null),
+    ).resolves.toBeNull();
+    await expect(
+      resolveGhostPrimarySessionId(
+        'worker-1',
+        async () => {
+          throw new Error('db unavailable');
+        },
+        async () => 'lead-1',
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it('未知协同角色不暴露给插件', async () => {
+    await expect(
+      resolveGhostPrimarySessionId('session-1', async () => 'unknown', async () => null),
+    ).resolves.toBeNull();
   });
 });
 

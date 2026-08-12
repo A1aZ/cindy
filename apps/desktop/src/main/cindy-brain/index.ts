@@ -1157,6 +1157,7 @@ export type GhostSessionMessageRunRequest = {
   ghostId: string;
   sessionId: string;
   message: string;
+  isTargetCurrent: () => Promise<boolean>;
 };
 
 export type GhostSessionMessageRunResult =
@@ -1927,12 +1928,18 @@ export function notifyGhostSessionEvent(
  * 不发;切走再切回算新切换(去重语义见 createGhostSessionFocusTracker)。
  */
 const rawGhostSessionFocusTracker = createGhostSessionFocusTracker(() => undefined);
-const ghostSessionFocusTracker = createGhostPrimarySessionFocusTracker(
-  async (sessionId) =>
-    resolveGhostPrimarySessionId(sessionId, async (workerSessionId) => {
+async function resolveGhostPrimarySession(sessionId: string): Promise<string | null> {
+  return resolveGhostPrimarySessionId(
+    sessionId,
+    async (candidateSessionId) => (await getSessionRowSnapshot(candidateSessionId))?.orcaRole,
+    async (workerSessionId) => {
       const team = await getTeamByWorkerSession(workerSessionId);
       return team?.leadSessionId ?? null;
-    }),
+    },
+  );
+}
+const ghostSessionFocusTracker = createGhostPrimarySessionFocusTracker(
+  resolveGhostPrimarySession,
   (sessionId) => notifyGhostSessionEvent('switched', { sessionId }),
 );
 export function noteGhostSessionFocused(sessionId: string | null): void {
@@ -1942,10 +1949,9 @@ export function noteGhostSessionFocused(sessionId: string | null): void {
 
 async function currentGhostSessionId(): Promise<string | null> {
   const focusedSessionId = rawGhostSessionFocusTracker.current();
-  return resolveGhostPrimarySessionId(focusedSessionId, async (sessionId) => {
-    const team = await getTeamByWorkerSession(sessionId);
-    return team?.leadSessionId ?? null;
-  });
+  if (!focusedSessionId) return null;
+  const primarySessionId = await resolveGhostPrimarySession(focusedSessionId);
+  return rawGhostSessionFocusTracker.current() === focusedSessionId ? primarySessionId : null;
 }
 const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
@@ -4910,11 +4916,21 @@ export function registerGhostIpc(): void {
             message: '任务消息服务尚未准备好',
           };
         }
+        const recheckedSessionId = await currentGhostSessionId();
+        if (recheckedSessionId !== request.sessionId) {
+          return {
+            ok: false as const,
+            errorCode: 'SESSION_UNAVAILABLE' as const,
+            message: '当前焦点任务已变化，请重试',
+          };
+        }
         ghostSessionMessageLastSentAt.set(id, now);
         const pending = ghostSessionMessageRunner({
             ghostId: id,
             sessionId: request.sessionId,
             message: request.message,
+            isTargetCurrent: async () =>
+              (await currentGhostSessionId()) === request.sessionId,
           });
         ghostSessionMessageInFlight.add(id);
         try {

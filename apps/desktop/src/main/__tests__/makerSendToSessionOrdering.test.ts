@@ -605,6 +605,28 @@ describe('sendToSession ordering', () => {
     expect(resumedBranch).toContain("wakeKind: 'queued' as const");
   });
 
+  it('preserves stored permission mode when lazy-resuming an existing session', () => {
+    const block = extractSendToSessionSource();
+    const resumedBranch = extractBetween(
+      block,
+      'const createOpts = buildCreateOptsWithStderr({\n          id: targetSessionId,',
+      "assertDesktopSendDispatched(sendResult, 'send_to_session resumed');",
+    );
+    expect(resumedBranch).toContain('permissionMode: permissionModeOrAsk(dbRow.permissionMode),');
+    expect(resumedBranch).not.toContain("permissionMode: 'bypassPermissions',");
+  });
+
+  it('rechecks plugin target focus at the accepted boundary', () => {
+    const runnerBlock = extractBetween(
+      source,
+      'setGhostSessionMessageRunner(async',
+      '  setGhostErrandRunner(',
+    );
+    expect(runnerBlock).toContain('onAccepted: async () => {');
+    expect(runnerBlock).toContain('if (!(await isTargetCurrent())) {');
+    expect(runnerBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
+  });
+
   it('preserves stored permission and extraDirs when sendToWorker resumes a worker', () => {
     const resumeBranch = extractBetween(
       source,

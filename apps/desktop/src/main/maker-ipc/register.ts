@@ -521,7 +521,10 @@ import {
 } from '../mcp-integrations/ios-simulator.js';
 import { MAKER_INVOKE, MAKER_PUSH, MAKER_SEND } from './channels.js';
 import type { CollabDispatchOutcome } from './collabSendOutcome.js';
-import { runAcceptedCallback } from './acceptedCallbackRunner.js';
+import {
+  AcceptedCallbackDispatchCancelled,
+  runAcceptedCallback,
+} from './acceptedCallbackRunner.js';
 import { createElectronIpcHandlerRegistry } from './electronIpcRegistry.js';
 import { refreshCodexMcpEnvironment } from './codexMcpRefresh.js';
 import { broadcastSchedulerChanged } from './schedule.js';
@@ -8379,7 +8382,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           workingDir: meta.workDir,
           model: meta.model,
           resumeSessionId: meta.sdkSessionId,
-          permissionMode: 'bypassPermissions',
+          permissionMode: permissionModeOrAsk(dbRow.permissionMode),
         });
         await synthesizeOrcaVendorOptionsFromDb(targetSessionId, createOpts);
         if (createOpts.extraDirs === undefined) {
@@ -8588,10 +8591,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 这里注入真实执行链——专属会话确保/统一投递/turn 收口。投递仍走
   // sendToSessionInternal 这一条主机通路(消息落库、进程拉起与用户亲发一致);
   // 收口复用 hook-control 的 observeHookTurn(与飞书 bot 同一套 turn 观察语义)。
-  setGhostSessionMessageRunner(async ({ sessionId, message }) => {
+  setGhostSessionMessageRunner(async ({ sessionId, message, isTargetCurrent }) => {
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
       message,
+      onAccepted: async () => {
+        if (!(await isTargetCurrent())) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin target session is no longer focused',
+          );
+        }
+      },
     });
     if (!sent.ok) return sent;
     return {

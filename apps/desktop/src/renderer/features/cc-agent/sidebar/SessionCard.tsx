@@ -657,8 +657,12 @@ export function SessionCard({
           ? cn(
               // 扁平行(类 Telegram / 对话列表):无描边、无卡片底色,仅 hover/active 行底色。
               'rounded-lg',
+              // active 描边用 inset shadow 而非真实 border(与 SessionItem 同款修法):
+              // 列表行高由内容撑开,真实 border 只在选中时存在 → 该行凭空高 2px,
+              // 把下方所有行整体推移,选中/取消时列表跳动(2026-08-12 用户反馈)。
+              // inset shadow 画在盒内、不参与布局,行高与未选中时逐像素一致。
               isActive
-                ? 'bg-sidebar-item-active text-sidebar-item-active-foreground border border-[var(--sidebar-item-active-border)]'
+                ? 'bg-sidebar-item-active text-sidebar-item-active-foreground shadow-[inset_0_0_0_1px_var(--sidebar-item-active-border)]'
                 : 'hover:bg-sidebar-item-hover',
             )
           : cn(

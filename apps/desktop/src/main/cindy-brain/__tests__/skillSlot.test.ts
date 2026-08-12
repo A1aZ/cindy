@@ -343,6 +343,76 @@ describe('skillSlot · reconcileGhostSkillLinks', () => {
     expect(fs.existsSync(managedLink)).toBe(false);
   });
 
+  it('reclaims a live managed projection after its snapshot root is replaced by an outside link', async () => {
+    const outsideRoot = path.join(workDir, 'outside-snapshot-root');
+    const snapshotRoot = path.join(approvalStateRoot, 'skill-snapshots');
+    const managedTarget = path.join(snapshotRoot, 'managed', 'rev', 'skills', 'demo');
+    await fs.promises.mkdir(managedTarget, { recursive: true });
+    await fs.promises.mkdir(path.join(outsideRoot, 'managed', 'rev', 'skills', 'demo'), {
+      recursive: true,
+    });
+    await fs.promises.mkdir(sharedDir(), { recursive: true });
+
+    const link = path.join(sharedDir(), 'managed--demo');
+    await fs.promises.symlink(
+      managedTarget,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+    await fs.promises.symlink(
+      outsideRoot,
+      snapshotRoot,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const result = await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
+    expect(result.changed).toBe(true);
+    expect(fs.existsSync(link)).toBe(false);
+  });
+
+  it('does not remove a foreign link that replaces a managed projection before cleanup', async () => {
+    const managedTarget = path.join(
+      approvalStateRoot,
+      'skill-snapshots',
+      'managed',
+      'rev',
+      'skills',
+      'demo',
+    );
+    const foreignTarget = path.join(workDir, 'foreign-skill');
+    await fs.promises.mkdir(managedTarget, { recursive: true });
+    await fs.promises.mkdir(foreignTarget, { recursive: true });
+    await fs.promises.mkdir(sharedDir(), { recursive: true });
+
+    const link = path.join(sharedDir(), 'managed--demo');
+    await fs.promises.symlink(
+      managedTarget,
+      link,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+
+    const actualLstat = fs.promises.lstat.bind(fs.promises);
+    let replaced = false;
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(async (target, options) => {
+      if (!replaced && path.resolve(String(target)) === path.resolve(link)) {
+        replaced = true;
+        await fs.promises.unlink(link);
+        await fs.promises.symlink(
+          foreignTarget,
+          link,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      }
+      return actualLstat(target, options as never);
+    });
+
+    const result = await reconcileGhostSkillLinks({ ghosts: [], brainRoot, approvalStateRoot, homeDir });
+    expect(result.changed).toBe(false);
+    expect(result.warnings).toContain('技能链接 managed--demo 在回收前已变化,留待下一轮对账');
+    expect(sameRealPath(link, foreignTarget)).toBe(true);
+  });
+
   it('用户自建悬空链接不因目标路径里恰有 cindy-brain 段而被删(布局 id 必须对上链接名)', async () => {
     await fs.promises.mkdir(sharedDir(), { recursive: true });
     // 用户把自己项目目录(路径里恰好有一段叫 cindy-brain)链进技能根,随后目标没了。

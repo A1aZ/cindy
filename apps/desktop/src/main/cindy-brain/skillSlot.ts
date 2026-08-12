@@ -383,29 +383,43 @@ export async function reconcileGhostSkillLinks(
   }
 
   const managedLive = new Map<string, string>(); // linkName → realpath(compare 形态)
-  const toRemove: string[] = [];
+  const toRemove = new Map<string, string>();
   for (const entName of linkNames) {
     const linkPath = path.join(sharedSkillsDir, entName);
+    let rawTarget: string | null = null;
+    try {
+      rawTarget = await fsp.readlink(linkPath);
+    } catch {
+      // A concurrent unlink/replacement is handled by the later lstat guard.
+    }
     const real = await realPathOrNull(linkPath);
     if (real !== null) {
       // 活链接:目标在当前 owner 的受管根内才归我们管;他 owner / 外来链接不碰。
-      if (!managedRootCompares.some((root) => isSameOrInside(real, root))) continue;
+      const lexicalTarget = rawTarget === null
+        ? null
+        : path.resolve(path.dirname(linkPath), rawTarget);
+      const rawManaged = lexicalTarget !== null && targetLooksGhostManaged(
+        lexicalTarget,
+        entName,
+        approvalStateDirName,
+        danglingManagedRootCompares,
+      );
+      // If the managed snapshot root was replaced by a link, resolved ownership
+      // can escape. Keep the lexical managed proof so our projection is revoked.
+      if (!rawManaged && !managedRootCompares.some((root) => isSameOrInside(real, root))) continue;
       const want = desired.get(entName);
       const wantCompare = want
         ? ((await realPathOrNull(want.target)) ?? normalizeForCompare(want.target))
         : null;
       if (want !== undefined && real === wantCompare) {
         managedLive.set(entName, real);
-      } else {
-        toRemove.push(entName);
+      } else if (rawTarget !== null) {
+        toRemove.set(entName, rawTarget);
       }
       continue;
     }
     // 断链:目标命中受管结构即回收(含他 owner 与登出态临时根的残留)。
-    let rawTarget: string;
-    try {
-      rawTarget = await fsp.readlink(linkPath);
-    } catch {
+    if (rawTarget === null) {
       continue;
     }
     const absTarget = path.isAbsolute(rawTarget)
@@ -419,16 +433,21 @@ export async function reconcileGhostSkillLinks(
         danglingManagedRootCompares,
       )
     ) {
-      toRemove.push(entName);
+      toRemove.set(entName, rawTarget);
     }
   }
 
   // —— 删除步:先撤旧再建新,防"改目标"落进冲突分支。
-  for (const linkName of toRemove) {
+  for (const [linkName, expectedRawTarget] of toRemove) {
     const linkPath = path.join(sharedSkillsDir, linkName);
     try {
       const stat = await fsp.lstat(linkPath);
       if (!stat.isSymbolicLink()) continue; // TOCTOU 防御:再确认一次才动手
+      const currentRawTarget = await fsp.readlink(linkPath);
+      if (currentRawTarget !== expectedRawTarget) {
+        warnings.push(`技能链接 ${linkName} 在回收前已变化,留待下一轮对账`);
+        continue;
+      }
       await fsp.unlink(linkPath);
       actions.push({ linkName, op: 'removed' });
       changed = true;

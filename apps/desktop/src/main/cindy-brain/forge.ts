@@ -1220,7 +1220,8 @@ Claude Code 与 Codex 都能发现,见 §4.16)、\`workspace\`(请主机为项�
 创建面板,任务由用户选好模型后亲手保存才存在;装入确认框单列一档。
 如果面板需要把普通用户消息投递给当前焦点任务,写 \`"agent": { "sessionMessage": true }\`。
 这项能力必须与 \`session-context\` 槽一起声明,并且只能投递到主机当前焦点任务;它不允许
-插件选择其它任务,也不会绕过当前 Agent 的权限和 Skill 流程。
+插件选择其它任务,也不会绕过当前 Agent 的权限和 Skill 流程。该能力依赖新版宿主 API,
+必须同时声明 \`minCindyVersion\`,取首次提供当前任务消息能力的 Cindy 正式发布版本。
 
 **node 工作进程详单**(声明 node 槽时必写,详见 §4.12):
 
@@ -3157,6 +3158,9 @@ cindy.onHostMessage(async (msg) => {
 ### 4.13.1 当前任务消息 API
 
 声明 \`session-context\` 与 \`agent.sessionMessage\` 后,面板可以把按钮动作交给当前任务继续处理:
+
+使用该能力的 manifest 必须同时声明 \`minCindyVersion\`,避免旧 Cindy 因不认识新增字段而
+拒绝整份插件身份卡;版本值填写首次提供该 Host API 的 Cindy 正式发布版本。
 
 \`cindy.session.getCurrentSessionId()\` 返回 \`{ ok, sessionId, session? }\`。新版宿主的
 \`session\` 会附带当前主任务的 \`sessionName\`、\`workdir\`、\`workdir_is_local\` 与

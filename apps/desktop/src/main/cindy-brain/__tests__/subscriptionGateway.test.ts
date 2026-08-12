@@ -16,6 +16,7 @@ import {
   createGhostPrimarySessionFocusTracker,
   GhostTurnTranslator,
   createGhostSessionFocusTracker,
+  createGhostWindowFocusRevisionTracker,
   ghostActivityId,
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
@@ -793,6 +794,24 @@ describe('selectGhostFocusedSessionCandidate', () => {
         1,
       ),
     ).toBeNull();
+  });
+});
+
+describe('createGhostWindowFocusRevisionTracker', () => {
+  it('只让发生路由变化的窗口版本失效', () => {
+    const revisions = createGhostWindowFocusRevisionTracker();
+    const firstWindowRevision = revisions.note(1);
+    revisions.note(2);
+    expect(revisions.current(1)).toBe(firstWindowRevision);
+    revisions.note(1);
+    expect(revisions.current(1)).toBe(firstWindowRevision + 1);
+  });
+
+  it('窗口销毁后清除旧版本', () => {
+    const revisions = createGhostWindowFocusRevisionTracker();
+    revisions.note(1);
+    revisions.drop(1);
+    expect(revisions.current(1)).toBe(0);
   });
 });
 

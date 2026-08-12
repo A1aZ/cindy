@@ -259,6 +259,7 @@ import {
   GhostTapPendingQueue,
   GhostTurnOriginTracker,
   buildGhostCurrentSessionSnapshot,
+  createGhostWindowFocusRevisionTracker,
   createGhostPrimarySessionFocusTracker,
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
@@ -1944,9 +1945,8 @@ const ghostSessionFocusTracker = createGhostPrimarySessionFocusTracker(
   resolveGhostPrimarySession,
   (sessionId) => notifyGhostSessionEvent('switched', { sessionId }),
 );
-let ghostSessionFocusRevision = 0;
+const ghostSessionFocusRevisions = createGhostWindowFocusRevisionTracker();
 export function noteGhostSessionFocused(sessionId: string | null): void {
-  ghostSessionFocusRevision += 1;
   rawGhostSessionFocusTracker.note(sessionId);
   ghostSessionFocusTracker.note(sessionId);
 }
@@ -1990,14 +1990,14 @@ export async function isGhostSessionCurrent(sessionId: string): Promise<boolean>
 export async function captureGhostSessionFocusGuard(
   sessionId: string,
 ): Promise<(() => boolean) | null> {
-  const revision = ghostSessionFocusRevision;
   const candidate = readGhostSessionFocusCandidate();
   if (!candidate) return null;
+  const revision = ghostSessionFocusRevisions.current(candidate.webContentsId);
   const primarySessionId = await resolveGhostPrimarySession(candidate.sessionId);
   const current = readGhostSessionFocusCandidate();
   if (
     primarySessionId !== sessionId ||
-    revision !== ghostSessionFocusRevision ||
+    revision !== ghostSessionFocusRevisions.current(candidate.webContentsId) ||
     current?.webContentsId !== candidate.webContentsId ||
     current.sessionId !== candidate.sessionId
   ) {
@@ -2011,7 +2011,7 @@ export async function captureGhostSessionFocusGuard(
   return () => {
     const latest = readGhostSessionFocusCandidate();
     return (
-      guard.revision === ghostSessionFocusRevision &&
+      guard.revision === ghostSessionFocusRevisions.current(guard.webContentsId) &&
       latest?.webContentsId === guard.webContentsId &&
       latest.sessionId === guard.rawSessionId
     );
@@ -2029,10 +2029,12 @@ function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | 
   const previous = ghostSessionFocusByWebContents.get(sender.id);
   if (previous === sessionId) return;
   ghostSessionFocusByWebContents.set(sender.id, sessionId);
+  ghostSessionFocusRevisions.note(sender.id);
   if (!ghostSessionFocusTrackedWebContents.has(sender.id)) {
     ghostSessionFocusTrackedWebContents.add(sender.id);
     sender.once('destroyed', () => {
       ghostSessionFocusByWebContents.delete(sender.id);
+      ghostSessionFocusRevisions.drop(sender.id);
       ghostSessionFocusTrackedWebContents.delete(sender.id);
     });
   }

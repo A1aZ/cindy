@@ -613,6 +613,28 @@ export function selectGhostFocusedSessionCandidate(
   return { webContentsId: selected.webContentsId, sessionId: selected.sessionId };
 }
 
+/** 窗口级焦点版本：一个主窗口的路由变化不能误伤另一个窗口已捕获的派发守卫。 */
+export function createGhostWindowFocusRevisionTracker(): {
+  note(webContentsId: number): number;
+  current(webContentsId: number): number;
+  drop(webContentsId: number): void;
+} {
+  const revisions = new Map<number, number>();
+  return {
+    note(webContentsId) {
+      const next = (revisions.get(webContentsId) ?? 0) + 1;
+      revisions.set(webContentsId, next);
+      return next;
+    },
+    current(webContentsId) {
+      return revisions.get(webContentsId) ?? 0;
+    },
+    drop(webContentsId) {
+      revisions.delete(webContentsId);
+    },
+  };
+}
+
 /** 异步读取当前任务快照，并在读取完成后复核焦点，避免返回已失焦任务的数据。 */
 export async function readStableGhostCurrentSessionSnapshot<T>(
   resolveCurrentSessionId: () => Promise<string | null>,

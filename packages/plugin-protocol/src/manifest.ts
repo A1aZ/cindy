@@ -2540,6 +2540,12 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
         reason: 'agent.sessionMessage 必须同时声明 session-context 卡槽',
       };
     }
+    if (agentRaw.sessionMessage === true && raw.minCindyVersion === undefined) {
+      return {
+        ok: false,
+        reason: 'agent.sessionMessage 必须同时声明 minCindyVersion',
+      };
+    }
     if (
       agentRaw.background !== true &&
       agentRaw.errand !== true &&

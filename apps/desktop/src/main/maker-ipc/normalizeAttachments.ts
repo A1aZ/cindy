@@ -418,6 +418,7 @@ type SerializedFileLike = {
   type?: unknown;
   category?: unknown;
   ext?: unknown;
+  annotated?: unknown;
 };
 
 function isQueuedImageFile(file: SerializedFileLike): boolean {
@@ -460,6 +461,10 @@ function needsImageMaterialize(v: unknown): v is string {
 
 function queuedFileMaterializeRef(file: SerializedFileLike): string | null {
   if (isOssRefField(file.url)) return file.url;
+  // 标注图的 url 是烧录位图，path 仍是原始磁盘图；本地队列必须继续使用 url。
+  if (file.annotated === true && typeof file.url === 'string' && file.url.length > 0) {
+    return null;
+  }
   if (isOssRefField(file.path)) return file.path;
   if (!isQueuedImageFile(file)) return null;
   if (isLocalImagePathField(file.url)) return file.url;

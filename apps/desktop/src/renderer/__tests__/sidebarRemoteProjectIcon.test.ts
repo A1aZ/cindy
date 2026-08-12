@@ -4,8 +4,9 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const sidebarDir = resolve(__dirname, '..', 'features', 'cc-agent', 'sidebar');
-const projectNodeSource = readFileSync(
-  resolve(sidebarDir, 'sections', 'ProjectNode.tsx'),
+const projectNodeSource = readFileSync(resolve(sidebarDir, 'sections', 'ProjectNode.tsx'), 'utf8');
+const projectsSectionSource = readFileSync(
+  resolve(sidebarDir, 'sections', 'ProjectsSection.tsx'),
   'utf8',
 );
 const sessionItemSource = readFileSync(resolve(sidebarDir, 'SessionItem.tsx'), 'utf8');
@@ -21,7 +22,9 @@ describe('sidebar remote project icon', () => {
     expect(projectNodeSource).toContain("import { RemoteProjectIcon } from '../RemoteProjectIcon'");
     expect(sessionItemSource).toContain("import { RemoteProjectIcon } from './RemoteProjectIcon'");
     expect(sessionCardSource).toContain("import { RemoteProjectIcon } from './RemoteProjectIcon'");
-    expect(sessionHeaderSource).toContain("import { RemoteProjectIcon } from './sidebar/RemoteProjectIcon'");
+    expect(sessionHeaderSource).toContain(
+      "import { RemoteProjectIcon } from './sidebar/RemoteProjectIcon'",
+    );
   });
 
   it('maps device-link sessions to the device-link project icon and SSH sessions to the SSH project icon', () => {
@@ -69,5 +72,17 @@ describe('sidebar remote project icon', () => {
     );
     expect(sessionItemSource).not.toContain('<span className="min-w-0 flex-1 truncate">');
     expect(sessionCardSource).not.toContain("'min-w-0 flex-1 truncate'");
+  });
+
+  // 2026-08-12 用户裁决:按设备分组时列表已按设备切段、段头写着设备名,项目行不再
+  // 重复标注归属;远程图标保留(表达「远程 + 连接状态」,不重复归属信息)。
+  it('drops the per-row machine label while device grouping is active, keeping the remote icon', () => {
+    expect(projectNodeSource).toContain('hideRemoteMachineLabel = false');
+    expect(projectNodeSource).toContain(
+      '{!isEditingName && remoteIdentity && !hideRemoteMachineLabel ? (',
+    );
+    // 远程图标的渲染条件不受该开关影响。
+    expect(projectNodeSource).toMatch(/\{!isEditingName && isDeviceLink \? \(/);
+    expect(projectsSectionSource).toContain('hideRemoteMachineLabel={deviceGroupingActive}');
   });
 });

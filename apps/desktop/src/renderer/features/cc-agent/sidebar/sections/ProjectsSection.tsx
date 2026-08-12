@@ -453,6 +453,8 @@ export function ProjectsSection({
       scheduleSessionIndex={scheduleSessionIndex}
       selectedSessionIds={selectedSessionIds}
       disableSessionCollapse={disableSessionCollapse}
+      // 按设备分段时段头已写明设备,行内不再重复标注归属(2026-08-12 用户裁决)。
+      hideRemoteMachineLabel={deviceGroupingActive}
       onToggle={onToggleProject}
       isProjectPinned={false}
       onToggleProjectPin={onToggleProjectPin}

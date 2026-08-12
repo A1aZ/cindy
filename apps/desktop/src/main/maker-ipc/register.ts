@@ -11082,13 +11082,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。
       schedulerQueuedPromptDiscardWatchers.delete(item.clientId);
       const ghostId = item.pluginSessionMessageGhostId;
-      if (item.requireCurrentSessionFocus === true) {
-        if (typeof ghostId !== 'string') {
-          throw new AcceptedCallbackDispatchCancelled(
-            'plugin current-task message identity is missing',
-          );
-        }
-        const visibility = classifyGhostVisibility(ghostId, item.workingDir ?? null, {
+      const readQueuedPluginAuthorization = async (): Promise<{ workingDir: string | null } | null> => {
+        if (typeof ghostId !== 'string') return null;
+        const sessionRow = await getSessionRowSnapshot(sessionId);
+        if (!sessionRow) return null;
+        const visibility = classifyGhostVisibility(ghostId, sessionRow.workingDir, {
           listGhosts: () => getGhostManager().list(),
           isAvailableForActiveSession: isGhostAvailableForActiveSession,
           isDisabledForWorkdir: isGhostDisabledForWorkdir,
@@ -11098,6 +11096,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           !visibility.ghost.manifest.slots.includes('agent') ||
           visibility.ghost.manifest.agent?.sessionMessage !== true
         ) {
+          return null;
+        }
+        return { workingDir: sessionRow.workingDir };
+      };
+      if (item.requireCurrentSessionFocus === true) {
+        if (typeof ghostId !== 'string') {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message identity is missing',
+          );
+        }
+        if (!(await readQueuedPluginAuthorization())) {
           throw new AcceptedCallbackDispatchCancelled(
             'plugin current-task message authorization is no longer valid',
           );
@@ -11128,6 +11137,16 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           );
         }
         const queuedGhostId = ghostId;
+        // 队列项可能跨越繁忙 turn 或进程恢复，item.workingDir 只是入队快照。
+        // 在异步 accepted 副作用完成后重读任务当前目录，避免旧项目的启用状态
+        // 授权后来切换到已停用项目的插件消息。
+        const authorization = await readQueuedPluginAuthorization();
+        if (!authorization) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin queued current-task message authorization changed before final dispatch',
+          );
+        }
+        const finalAuthorizedWorkingDir = authorization.workingDir;
         const guard = await captureGhostSessionFocusGuard(sessionId);
         if (!guard) {
           throw new AcceptedCallbackDispatchCancelled(
@@ -11140,7 +11159,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               'plugin target changed at queued final vendor dispatch boundary',
             );
           }
-          const visibility = classifyGhostVisibility(queuedGhostId, item.workingDir ?? null, {
+          const visibility = classifyGhostVisibility(queuedGhostId, finalAuthorizedWorkingDir, {
             listGhosts: () => getGhostManager().list(),
             isAvailableForActiveSession: isGhostAvailableForActiveSession,
             isDisabledForWorkdir: isGhostDisabledForWorkdir,

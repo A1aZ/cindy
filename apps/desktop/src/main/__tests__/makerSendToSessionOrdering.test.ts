@@ -714,8 +714,12 @@ describe('sendToSession ordering', () => {
     expect(coordinatorBlock).toContain('if (item.requireCurrentSessionFocus === true) {');
     expect(coordinatorBlock).toContain('const ghostId = item.pluginSessionMessageGhostId;');
     expect(coordinatorBlock).toContain(
-      'classifyGhostVisibility(ghostId, item.workingDir ?? null',
+      'const sessionRow = await getSessionRowSnapshot(sessionId);',
     );
+    expect(coordinatorBlock).toContain(
+      'classifyGhostVisibility(ghostId, sessionRow.workingDir',
+    );
+    expect(coordinatorBlock).not.toContain('classifyGhostVisibility(ghostId, item.workingDir');
     expect(coordinatorBlock).toContain(
       'visibility.ghost.manifest.agent?.sessionMessage !== true',
     );
@@ -725,6 +729,11 @@ describe('sendToSession ordering', () => {
       'rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId)',
     );
     expect(coordinatorBlock).toContain('captureGhostSessionFocusGuard(sessionId)');
+    expect(coordinatorBlock).toContain('const authorization = await readQueuedPluginAuthorization();');
+    expect(coordinatorBlock).toContain('const finalAuthorizedWorkingDir = authorization.workingDir;');
+    expect(coordinatorBlock).toContain(
+      'classifyGhostVisibility(queuedGhostId, finalAuthorizedWorkingDir',
+    );
     expect(coordinatorBlock).toContain(
       "'plugin target changed at queued final vendor dispatch boundary'",
     );

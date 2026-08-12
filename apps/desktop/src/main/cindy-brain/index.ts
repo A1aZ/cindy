@@ -144,6 +144,7 @@ import { handleGhostOauthRequest } from './runtime/ghostOauthEndpoint.js';
 import { handleGhostConnectionsRequest } from './runtime/ghostConnectionsEndpoint.js';
 import { GhostOauthAccountManager, type GhostOauthDecl } from './ghostOauthAccounts.js';
 import { withGhostOauthMutationLock } from './ghostOauthMutationLock.js';
+import { createGhostOauthOwnerReconciliationGate } from './ghostOauthOwnerReconciliation.js';
 import { cancelActiveGhostOauthFlow } from './ghostOauthFlow.js';
 import {
   appendReadyGhostOauthReauthSuggest,
@@ -3610,8 +3611,7 @@ export function getGhostCindySlot(): GhostCindySlot {
  * removeGhostSecrets 的前缀清扫天然连带)。
  */
 let ghostOauthManagerSingleton: GhostOauthAccountManager | null = null;
-let ghostOauthReconciledOwnerScope: string | null = null;
-let ghostOauthReconcileInFlight: Promise<void> | null = null;
+const ghostOauthOwnerReconciliationGate = createGhostOauthOwnerReconciliationGate();
 
 function ghostOauthMutationLockPath(ghostId: string): string {
   return ownerScopedUserDataPath('ghost-install-state', '.oauth-locks', `${ghostId}.lock`);
@@ -3638,11 +3638,8 @@ function withActiveOwnerGhostOauthMutationLock<T>(
 /** Reconcile migration markers once for every committed owner scope. */
 export async function reconcileGhostOauthAccountsForActiveOwner(): Promise<void> {
   const ownerScope = activeOwnerScopeKey();
-  if (ghostOauthReconciledOwnerScope === ownerScope) return;
-  if (ghostOauthReconcileInFlight) await ghostOauthReconcileInFlight;
-  if (ghostOauthReconciledOwnerScope === ownerScope) return;
-  const reconcileTask = (async () => {
-    if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) return;
+  await ghostOauthOwnerReconciliationGate.run(ownerScope, async () => {
+    if (isAppSessionBoundaryPending() || activeOwnerScopeKey() !== ownerScope) return false;
     const oauthManager = getGhostOauthAccountManager();
     for (const ghost of getGhostManager().list()) {
       await withActiveOwnerGhostOauthMutationLock(ghost.manifest.id, () => {
@@ -3654,16 +3651,8 @@ export async function reconcileGhostOauthAccountsForActiveOwner(): Promise<void>
         );
       });
     }
-    if (!isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScope) {
-      ghostOauthReconciledOwnerScope = ownerScope;
-    }
-  })();
-  ghostOauthReconcileInFlight = reconcileTask;
-  try {
-    await reconcileTask;
-  } finally {
-    if (ghostOauthReconcileInFlight === reconcileTask) ghostOauthReconcileInFlight = null;
-  }
+    return !isAppSessionBoundaryPending() && activeOwnerScopeKey() === ownerScope;
+  });
 }
 
 function getGhostOauthAccountManager(): GhostOauthAccountManager {

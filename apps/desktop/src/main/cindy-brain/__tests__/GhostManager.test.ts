@@ -3031,6 +3031,26 @@ describe('GhostManager · Host approval receipt', () => {
       '---\nname: demo\ndescription: Demo skill\n---\n\nApproved instructions\n',
   });
 
+  it('rejects an approved snapshot root replaced by a same-bytes link', async () => {
+    await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
+    const ghost = manager.list()[0];
+    const snapshotRoot = ghost.approvedSkillRoot!;
+    const external = path.join(workDir, 'external-approved-snapshot');
+    await fs.promises.rename(snapshotRoot, external);
+    try {
+      await fs.promises.symlink(
+        external,
+        snapshotRoot,
+        process.platform === 'win32' ? 'junction' : 'dir',
+      );
+    } catch {
+      await fs.promises.rename(external, snapshotRoot);
+      return;
+    }
+
+    expect(await manager.verifyApprovedSkillSnapshot(ghost)).toBe(false);
+  });
+
   it('keeps manifest, enabled state, and trust independent from mutable install files', async () => {
     await manager.install(await makeCindy('approved.cindy', goodManifest()));
     const before = manager.list()[0];

@@ -1249,9 +1249,7 @@ export function getLegacyGhostRecoveryStatus(
     scopedDiscovery.deferredRoots.length > 0 ||
     targetDiscovery.deferredRoots.length > 0 ||
     sourceDeferredIds.length > 0 ||
-    targetDiscovery.deferredIds.some((id) =>
-      recoveryMarker?.pendingIds?.includes(id),
-    );
+    targetDiscovery.deferredIds.some((id) => visiblePendingIds.includes(id));
   // 一个与待恢复 id 无关的 target 目录损坏（比如安装了别的插件但 ghost.json
   // 偶然坏了）不应永久卡死本 owner 的整批 legacy 恢复。用已按 pendingIds
   // 过滤的 targetInvalidIds 判定，而不是原始的 targetDiscovery.invalidIds。

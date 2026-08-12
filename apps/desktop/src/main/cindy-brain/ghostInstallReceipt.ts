@@ -849,8 +849,15 @@ export class GhostInstallReceiptStore {
     receipt: GhostInstallReceipt,
     snapshotDir: string,
   ): Promise<boolean> {
+    // The content walker pins the resolved directory identity while hashing,
+    // but an approved snapshot must also remain rooted at the Host-managed
+    // lexical path. A same-bytes symlink/junction is still an authorization
+    // escape because the projected global skill link would resolve outside
+    // the approval state root.
+    if (await classifyGhostDirEntry(snapshotDir).catch(() => null) !== 'directory') return false;
     const actual = await hashApprovedSkillContent(receipt.manifest, snapshotDir).catch(() => null);
     if (!actual) return false;
+    if (await classifyGhostDirEntry(snapshotDir).catch(() => null) !== 'directory') return false;
     return (receipt.manifest.skill?.items ?? []).every(
       (item) => actual[item.dir] === receipt.skillContentSha256[item.dir],
     );

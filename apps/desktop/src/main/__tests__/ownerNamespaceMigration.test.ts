@@ -2293,6 +2293,62 @@ describe('legacy Ghost plugin recovery', () => {
     await expect(fs.access(path.join(root, 'brain', 'queued-plugin'))).resolves.toBeUndefined();
   });
 
+  it('does not let a reserved deferred target id block visible recovery status', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    const reservedManifestPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      'cindy-brain',
+      'cindy-reserved',
+      'ghost.json',
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 1,
+        ownerKey,
+        pendingIds: ['cindy-reserved', 'recoverable-plugin'],
+      }),
+    );
+    await writeGhostDirAtPath(path.dirname(reservedManifestPath), 'cindy-reserved');
+    await writeGhostDir(root, 'brain', 'recoverable-plugin');
+
+    const boundedModule = await import('../utils/readBoundedFile.js');
+    const originalNoFollowSync = boundedModule.readBoundedFileNoFollowSync;
+    const noFollowSpy = vi
+      .spyOn(boundedModule, 'readBoundedFileNoFollowSync')
+      .mockImplementation(
+        (file: string, maxBytes?: number, options?: { containWithin?: string; nonBlocking?: boolean }) => {
+          if (path.resolve(String(file)) === path.resolve(reservedManifestPath)) {
+            throw Object.assign(new Error('reserved manifest locked'), { code: 'EACCES' });
+          }
+          return originalNoFollowSync(file, maxBytes!, options!);
+        },
+      );
+    try {
+      expect(
+        getLegacyGhostRecoveryStatus(
+          { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+          root,
+          false,
+          { rejectReservedIds: true },
+        ),
+      ).toEqual({ state: 'partial', legacyPluginCount: 1, canRetry: true });
+    } finally {
+      noFollowSpy.mockRestore();
+    }
+  });
+
   it('consolidates plugins left in the current owner scoped brain directory', async () => {
     const root = await tempRoot();
     const ownerId = 'cloud-a';

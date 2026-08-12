@@ -3056,26 +3056,37 @@ export class AgentInputCoordinator {
     return state.activeTurn !== null || this.deps.isTurnRunning(sessionId);
   }
 
+  /**
+   * 队首为何不可派发 —— getDrainableHead 的解释版,两者共用同一份 gate 序列
+   * (#2506 wake/drain 可观测性:此前 drain 被 gate 挡住时零日志,排队输入
+   * 静默滞留后无从定位断点)。返回 null = 队首可派发。
+   */
+  private explainDrainBlockGate(sessionId: string, state: SessionInputState): string | null {
+    if (this.queueRestorePromises.has(sessionId)) return 'queue-restore-in-progress';
+    if (this.restoreAttempted.has(sessionId) && !this.restoredQueueSessions.has(sessionId))
+      return 'queue-restore-failed';
+    if (state.pendingQueue.length === 0) return 'queue-empty';
+    if (state.queuePaused)
+      return state.queuePausedByRestore ? 'queue-paused-by-restore' : 'queue-paused';
+    if (state.queueAbortPending) return 'abort-pending';
+    if (state.queueInteractionLocks.length > 0) return 'interaction-lock';
+    if (state.steeringQueueClientIds.length > 0) return 'steering-in-flight';
+    if (state.recovery) return 'recovery-pending';
+    if (this.deps.hasPendingCredentialSwitch?.(sessionId)) return 'credential-switch-gate';
+    if (this.isDispatchBoundaryBusy(sessionId, state)) return 'dispatch-boundary-busy';
+    const head = state.pendingQueue[0];
+    if (!head) return 'queue-empty';
+    if (this.getDrainableCompact(sessionId, state)) return 'compact-first';
+    if (state.queueEditLocks.includes(head.clientId)) return 'edit-lock';
+    return null;
+  }
+
   private getDrainableHead(
     sessionId: string,
     state: SessionInputState,
   ): AgentInputQueuedMessage | null {
-    if (this.queueRestorePromises.has(sessionId)) return null;
-    if (this.restoreAttempted.has(sessionId) && !this.restoredQueueSessions.has(sessionId))
-      return null;
-    if (state.pendingQueue.length === 0) return null;
-    if (state.queuePaused) return null;
-    if (state.queueAbortPending) return null;
-    if (state.queueInteractionLocks.length > 0) return null;
-    if (state.steeringQueueClientIds.length > 0) return null;
-    if (state.recovery) return null;
-    if (this.deps.hasPendingCredentialSwitch?.(sessionId)) return null;
-    if (this.isDispatchBoundaryBusy(sessionId, state)) return null;
-    const head = state.pendingQueue[0];
-    if (!head) return null;
-    if (this.getDrainableCompact(sessionId, state)) return null;
-    if (state.queueEditLocks.includes(head.clientId)) return null;
-    return head;
+    if (this.explainDrainBlockGate(sessionId, state) !== null) return null;
+    return state.pendingQueue[0] ?? null;
   }
 
   private getDrainableCompact(
@@ -3129,6 +3140,26 @@ export class AgentInputCoordinator {
     }
     const head = this.getDrainableHead(sessionId, state);
     if (!head) {
+      // #2506 结果级诊断:排队输入被 gate 挡住时留痕(此前零日志,gate-clear
+      // 到成功 drain 之间的静默滞留无从定位)。只记 id / 布尔 / 枚举,不记正文;
+      // 空队列的例行 drain 不记,避免每次 turn-done 都产生噪音。
+      const gate = this.explainDrainBlockGate(sessionId, state);
+      if (gate !== null && gate !== 'queue-empty') {
+        log.info('drain blocked', {
+          sessionId,
+          reason,
+          gate,
+          queueLength: state.pendingQueue.length,
+          headClientId: state.pendingQueue[0]?.clientId ?? null,
+          queuePaused: state.queuePaused,
+          queuePausedByRestore: state.queuePausedByRestore,
+          queueRestoreInProgress: this.queueRestorePromises.has(sessionId),
+          recoveryKind: state.recovery?.kind ?? null,
+          hasActiveTurn: state.activeTurn !== null,
+          turnRunning: this.deps.isTurnRunning(sessionId),
+          credentialSwitchGate: this.deps.hasPendingCredentialSwitch?.(sessionId) === true,
+        });
+      }
       this.scheduleExternalTurnRetryIfNeeded(sessionId, state, `drain-blocked:${reason}`);
       return;
     }

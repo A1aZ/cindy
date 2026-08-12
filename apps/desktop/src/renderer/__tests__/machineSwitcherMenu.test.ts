@@ -47,13 +47,49 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).not.toMatch(/[^t]setSelectedMachineId\(MACHINE_ALL\)/);
   });
 
-  it('SidebarTopNav 渲染 MachineSwitcherMenu 作列表末行(与新建 / 搜索同列表,固定不滚动)', () => {
+  it('SidebarTopNav 渲染 MachineSwitcherMenu 作列表末行(与新建 / 搜索同列表)', () => {
     expect(topNavSource).toContain("from '@/features/cc-agent/sidebar/MachineSwitcherMenu'");
     // 末行:出现在 SidebarInlineSearch 之后。
     const searchIdx = topNavSource.indexOf('<SidebarInlineSearch');
     const menuIdx = topNavSource.indexOf('<MachineSwitcherMenu />');
     expect(searchIdx).toBeGreaterThanOrEqual(0);
     expect(menuIdx).toBeGreaterThan(searchIdx);
+  });
+
+  // 2026-08-12 用户裁决(对齐 Codex):任务列表向上滚动时,除「新建」外的顶部导航行
+  // 一起滚走。实现为 SidebarTopNav 分段渲染 —— Shell 只画固定段,cc-agent 在自己的
+  // 列表滚动容器最上方画可滚动段;归属由 feature-context 的开关声明,Shell 不判路由。
+  it('顶部导航分两段:新建固定,其余行进任务列表滚动区', () => {
+    const featureContextSource = read('features', 'feature-context.tsx');
+    const sidebarShellSource = read('components', 'sidebar', 'Sidebar.tsx');
+
+    // 三段渲染契约。
+    expect(topNavSource).toContain(
+      "export type SidebarTopNavSection = 'all' | 'pinned' | 'scrollable'",
+    );
+    expect(topNavSource).toContain("const showPinned = section !== 'scrollable'");
+    expect(topNavSource).toContain("const showScrollable = section !== 'pinned'");
+
+    // Shell:接管时只画固定段,否则整块五行(插件页等无长列表的视图)。
+    expect(sidebarShellSource).toContain(
+      "<SidebarTopNav section={ownsTopNavScrollableRows ? 'pinned' : 'all'} />",
+    );
+    // Shell 仍不感知路由:归属只读 context 开关(架构不变量:Shell 不 import router)。
+    // 只查 import 语句——文件头注释里本就写着「刻意不 import useLocation」。
+    expect(sidebarShellSource).toContain('useOwnsTopNavScrollableRows()');
+    expect(sidebarShellSource).not.toMatch(/^import .*from 'react-router-dom'/m);
+
+    // cc-agent:展开态声明接管,并把可滚动段画进滚动容器;rail 态交回 Shell。
+    expect(sidebarUpperSource).toContain('useOwnTopNavScrollableRows(!isCollapsed)');
+    expect(sidebarUpperSource).toContain('<SidebarTopNav section="scrollable" />');
+    const scrollRefIdx = sidebarUpperSource.indexOf('ref={sidebarScrollRef}');
+    const scrollableRowsIdx = sidebarUpperSource.indexOf('<SidebarTopNav section="scrollable" />');
+    expect(scrollRefIdx).toBeGreaterThanOrEqual(0);
+    expect(scrollableRowsIdx).toBeGreaterThan(scrollRefIdx);
+
+    // 声明语义与 useRegisterSidebarUpper 一致:卸载不复位,避免切到 /settings 时闪变。
+    expect(featureContextSource).toContain('export function useOwnTopNavScrollableRows');
+    expect(featureContextSource).toContain('export function useOwnsTopNavScrollableRows');
   });
 
   it('连接中占位页不再自带 MachineSwitcherMenu(固定行已常驻,不会被困住)', () => {

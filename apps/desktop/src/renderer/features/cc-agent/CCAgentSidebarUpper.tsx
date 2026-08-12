@@ -61,7 +61,8 @@ import {
   SWITCH_SESSION_SHORTCUT_IDS,
 } from '../../../shared/appShortcuts';
 import { setSessionOrdinalBadges } from './sidebar/sessionOrdinalBadges';
-import { useSidebarCollapsedState } from '../feature-context';
+import { useOwnTopNavScrollableRows, useSidebarCollapsedState } from '../feature-context';
+import { SidebarTopNav } from '@/components/sidebar/SidebarTopNav';
 import { stripTrailingPathSeparators } from '../../../shared/pathText';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
 import {
@@ -381,6 +382,10 @@ export function CCAgentSidebarUpper() {
   const { t } = useTranslation();
   const localPlatform = window.electronAPI.platform;
   const isCollapsed = useSidebarCollapsedState();
+  // 展开态由本 Feature 在自己的列表滚动区里渲染顶部导航的可滚动段(自动任务 /
+  // 插件 / 搜索 / 远程机器),shell 顶部只留固定的「新建」——列表上滚时这些行一起
+  // 滚走(2026-08-12 用户裁决,对齐 Codex)。rail 态没有该滚动区,交回 shell 整块渲染。
+  useOwnTopNavScrollableRows(!isCollapsed);
   // 错误红点的派生真源:拉取存在未处理告警(中断 ∪ 未 dismissed 错误尾行)的会话
   // 并在收敛触发点重算 —— 横幅不被处置,红点就不消失。
   usePendingAlertAttention();
@@ -3018,15 +3023,18 @@ function ExpandedView({
         </div>
       )}
 
-      {/* 侧栏内容区:单一滚动容器(置顶 + 项目 + 对话一起滚动)。外层 relative 承载搜索结果
-         overlay。远程机器切换入口是 shell SidebarTopNav 的末行(与新建 / 搜索同列表),
-         固定在本区上方、不随列表滚动。 */}
+      {/* 侧栏内容区:单一滚动容器(顶部导航的可滚动段 + 置顶 + 项目 + 对话一起滚动)。
+         外层 relative 承载搜索结果 overlay。「新建」仍固定在 shell 顶部;自动任务 /
+         插件 / 搜索 / 远程机器四行随列表滚走(2026-08-12 用户裁决,对齐 Codex)。 */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div
           ref={sidebarScrollRef}
-          className="flex flex-col gap-2 pt-2 pb-4 overflow-y-auto flex-1"
+          className="flex flex-col gap-2 pt-0 pb-4 overflow-y-auto flex-1"
           style={{ scrollbarGutter: 'stable' }}
         >
+          {/* 顶部导航可滚动段:置于列表最上方,一起滚动。本组件即展开态视图
+              (rail 走 CollapsedView 自己的图标入口),无需再判折叠。 */}
+          <SidebarTopNav section="scrollable" />
           {remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
             <RemoteSidebarLoadNotice
               kind="devices"

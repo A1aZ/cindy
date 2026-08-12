@@ -627,9 +627,15 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
     expect(runnerBlock).toContain('clientId,');
     expect(runnerBlock).toContain('rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)');
+    expect(runnerBlock).toContain('if (!rewound) return;');
     expectOrder(
       runnerBlock,
       'rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)',
+      'if (!rewound) return;',
+    );
+    expectOrder(
+      runnerBlock,
+      'if (!rewound) return;',
       'throw new AcceptedCallbackDispatchCancelled(',
     );
   });

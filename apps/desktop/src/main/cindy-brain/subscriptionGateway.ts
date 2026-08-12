@@ -602,6 +602,17 @@ export function createGhostSessionFocusTracker(
   };
 }
 
+/** 多窗口下为“当前任务”选择唯一可信的主壳窗口路由。 */
+export function selectGhostFocusedSessionCandidate(
+  windows: Array<{ webContentsId: number; sessionId: string | null }>,
+  focusedWebContentsId: number | null,
+): { webContentsId: number; sessionId: string } | null {
+  const focused = windows.find((window) => window.webContentsId === focusedWebContentsId);
+  const selected = focused ?? (windows.length === 1 ? windows[0] : null);
+  if (!selected?.sessionId) return null;
+  return { webContentsId: selected.webContentsId, sessionId: selected.sessionId };
+}
+
 /** 插件面板只面向用户主任务；特殊焦点若落到 Orca Worker，统一折回所属 Lead。 */
 export async function resolveGhostPrimarySessionId(
   sessionId: string | null,

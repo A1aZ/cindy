@@ -20,6 +20,7 @@ import {
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
   resolveGhostPrimarySessionId,
+  selectGhostFocusedSessionCandidate,
   normalizeTurnUsage,
   readStatusIsRunning,
   resolveGhostUserHookModel,
@@ -750,6 +751,47 @@ describe('createGhostSessionFocusTracker(did-session-switched 去重)', () => {
     tracker.note(null); // 重复 null:不发
     tracker.note('s1'); // 切回:算一次新切换
     expect(notify.mock.calls).toEqual([['s1'], ['s1']]);
+  });
+});
+
+describe('selectGhostFocusedSessionCandidate', () => {
+  it('优先使用聚焦主窗口自己的任务', () => {
+    expect(
+      selectGhostFocusedSessionCandidate(
+        [
+          { webContentsId: 1, sessionId: 's1' },
+          { webContentsId: 2, sessionId: 's2' },
+        ],
+        2,
+      ),
+    ).toEqual({ webContentsId: 2, sessionId: 's2' });
+  });
+
+  it('独立插件窗聚焦时仅对唯一主窗口回落，多主窗口 fail closed', () => {
+    expect(
+      selectGhostFocusedSessionCandidate([{ webContentsId: 1, sessionId: 's1' }], null),
+    ).toEqual({ webContentsId: 1, sessionId: 's1' });
+    expect(
+      selectGhostFocusedSessionCandidate(
+        [
+          { webContentsId: 1, sessionId: 's1' },
+          { webContentsId: 2, sessionId: 's2' },
+        ],
+        null,
+      ),
+    ).toBeNull();
+  });
+
+  it('聚焦窗口在非任务页时不借用其它窗口任务', () => {
+    expect(
+      selectGhostFocusedSessionCandidate(
+        [
+          { webContentsId: 1, sessionId: null },
+          { webContentsId: 2, sessionId: 's2' },
+        ],
+        1,
+      ),
+    ).toBeNull();
   });
 });
 

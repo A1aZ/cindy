@@ -8600,9 +8600,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       clientId,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
+          let rewound = false;
           try {
-            await enqueueDurableWrite(`plugin-message-rewind:${sessionId}:${clientId}`, () =>
-              rewindPersistedUserMessageBeforeDispatch(sessionId, clientId),
+            rewound = await enqueueDurableWrite(
+              `plugin-message-rewind:${sessionId}:${clientId}`,
+              () => rewindPersistedUserMessageBeforeDispatch(sessionId, clientId),
             );
           } catch (err) {
             log.warn('plugin message rewind before cancelled dispatch failed', {
@@ -8611,6 +8613,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               err: err instanceof Error ? err.message : String(err),
             });
           }
+          // 清理失败时不能再取消：否则数据库里留下一个永远未派发的可见消息。
+          // 继续派发到已确认的原目标，比制造孤立历史更符合发送事务的不变量。
+          if (!rewound) return;
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target session is no longer focused',
           );

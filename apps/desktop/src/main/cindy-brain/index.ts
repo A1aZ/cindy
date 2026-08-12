@@ -263,6 +263,7 @@ import {
   isGhostEligibleSessionRow,
   isGhostSessionSwitchEligibleRow,
   resolveGhostPrimarySessionId,
+  selectGhostFocusedSessionCandidate,
   type GhostInteractionActivityKind,
   type GhostScreenResult,
   type MinimalAgentEvent,
@@ -1948,10 +1949,35 @@ export function noteGhostSessionFocused(sessionId: string | null): void {
 }
 
 async function currentGhostSessionId(): Promise<string | null> {
-  const focusedSessionId = rawGhostSessionFocusTracker.current();
-  if (!focusedSessionId) return null;
-  const primarySessionId = await resolveGhostPrimarySession(focusedSessionId);
-  return rawGhostSessionFocusTracker.current() === focusedSessionId ? primarySessionId : null;
+  const candidates = mainShellWindows();
+  const focused = BrowserWindow.getFocusedWindow();
+  const readCandidate = () =>
+    selectGhostFocusedSessionCandidate(
+      mainShellWindows().map((window) => ({
+        webContentsId: window.webContents.id,
+        sessionId: ghostSessionFocusByWebContents.get(window.webContents.id) ?? null,
+      })),
+      (() => {
+        const currentFocused = BrowserWindow.getFocusedWindow();
+        return currentFocused && !currentFocused.isDestroyed()
+          ? currentFocused.webContents.id
+          : null;
+      })(),
+    );
+  const candidate = selectGhostFocusedSessionCandidate(
+    candidates.map((window) => ({
+      webContentsId: window.webContents.id,
+      sessionId: ghostSessionFocusByWebContents.get(window.webContents.id) ?? null,
+    })),
+    focused && !focused.isDestroyed() ? focused.webContents.id : null,
+  );
+  if (!candidate) return null;
+  const primarySessionId = await resolveGhostPrimarySession(candidate.sessionId);
+  const current = readCandidate();
+  return current?.webContentsId === candidate.webContentsId &&
+    current.sessionId === candidate.sessionId
+    ? primarySessionId
+    : null;
 }
 const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();

@@ -983,9 +983,9 @@ export function broadcastMessageDeleted(
 export async function rewindPersistedUserMessageBeforeDispatch(
   sessionId: string,
   clientId: string,
-): Promise<void> {
+): Promise<boolean> {
   const ownerScope = captureOwnerBroadcastScope();
-  if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
+  if (!isOwnerBroadcastScopeCurrent(ownerScope)) return false;
   const dbClient = getDbClient();
   const db = dbClient.drizzle;
   const [row] = await db
@@ -1000,8 +1000,8 @@ export async function rewindPersistedUserMessageBeforeDispatch(
       ),
     )
     .limit(1);
-  if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
-  if (!row) return;
+  if (!isOwnerBroadcastScopeCurrent(ownerScope)) return false;
+  if (!row) return true;
 
   const rewoundAt = Date.now();
   const updated = await dbClient.exec(
@@ -1013,8 +1013,8 @@ export async function rewindPersistedUserMessageBeforeDispatch(
         AND rewind_at IS NULL`,
     [rewoundAt, sessionId, clientId],
   );
-  if (!isOwnerBroadcastScopeCurrent(ownerScope)) return;
-  if (updated.changes === 0) return;
+  // DB 已成功隐藏该行后，即使 owner 在后续清理期间切换，取消派发仍然安全。
+  if (updated.changes === 0) return true;
 
   const mediaCleanup = await Promise.allSettled(
     [...new Set([row.id, row.clientId])].map((refId) =>
@@ -1047,6 +1047,7 @@ export async function rewindPersistedUserMessageBeforeDispatch(
   }
   broadcastMessageDeleted({ sessionId, clientId, clientIds: [clientId] }, ownerScope);
   void recomputePrRefsForSession(sessionId).catch(() => undefined);
+  return true;
 }
 
 /** Backward-compatible clear-race entry point for existing callers and tests. */

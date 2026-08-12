@@ -209,6 +209,7 @@ export function RightSidebarShell({
   );
   const getBucketSnapshot = useCallback(() => getBucket(sessionId), [sessionId]);
   const bucket = useSyncExternalStore(subscribeBucket, getBucketSnapshot);
+  const previousShellVisibleRef = useRef(shellVisible);
 
   useEffect(() => {
     // Phase 5: 推送当前焦点 RSB sessionId 给 main,让 RsbWebviewBackend 拿到。
@@ -219,7 +220,12 @@ export function RightSidebarShell({
       void window.electronAPI?.rsbBrowserBridge
         ?.setActiveSession({ sessionId })
         .catch(() => undefined);
+    } else if (previousShellVisibleRef.current) {
+      void window.electronAPI?.rsbBrowserBridge
+        ?.setActiveSession({ sessionId: null })
+        .catch(() => undefined);
     }
+    previousShellVisibleRef.current = shellVisible;
     if (!sessionId) return;
     // 首次访问该 sessionId 时触发 IPC list 拉取;命中 cache 直接 noop。
     // 完成后 setBucket → notify → subscribeBucket 唤醒 useSyncExternalStore 重渲染。

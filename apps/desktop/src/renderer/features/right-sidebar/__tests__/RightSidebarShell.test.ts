@@ -266,7 +266,7 @@ describe('RightSidebarShell empty state', () => {
     delete (window as unknown as { electronAPI?: unknown }).electronAPI;
   });
 
-  it('does not replace the active browser session while the detached shell is hidden', async () => {
+  it('clears the active browser session only when a visible detached shell is hidden', async () => {
     const setActiveSession = window.electronAPI.rsbBrowserBridge.setActiveSession;
     const view = render(
       createElement(RightSidebarShell, {
@@ -292,6 +292,18 @@ describe('RightSidebarShell empty state', () => {
     );
 
     await waitFor(() => expect(setActiveSession).toHaveBeenCalledWith({ sessionId: 's1' }));
+
+    view.rerender(
+      createElement(RightSidebarShell, {
+        sessionId: 's1',
+        workdir: '/tmp/repo',
+        remoteHostId: null,
+        shellVisible: false,
+        isMac: true,
+      }),
+    );
+
+    await waitFor(() => expect(setActiveSession).toHaveBeenCalledWith({ sessionId: null }));
   });
 
   it('mounts only the active body first, then idle-mounts and keeps the rest alive', async () => {

@@ -3457,6 +3457,13 @@ export class GhostManager {
         return true;
       }
       await this.finishTrustedBundledPublish(manifest.id, pendingPublish);
+      // Receipt already matches the immutable seed — no write needed,
+      // but the process-internal untrusted approval quarantine from
+      // publishTrustedBundledSeed must still be cleared.  The other
+      // two branches (full write and enabled toggle) both clear it;
+      // without it here, the no-op path leaves the plugin quarantined
+      // until the next restart (P1, PRRT_kwDOTgdRUs6YcxiH).
+      this.untrustedApprovals.delete(this.isolationKey(manifest.id));
       return false;
     }
     await this.receiptStore.write(

@@ -4847,8 +4847,12 @@ export function registerGhostIpc(): void {
       if (!ghost?.enabled) throwIpcError('PERMISSION_DENIED', '插件未启用');
 
       if (request.kind === 'get-current-session') {
-        if (!ghost.manifest.slots.includes('session-context')) {
-          throwIpcError('PERMISSION_DENIED', '插件未声明 session-context 能力');
+        if (
+          !ghost.manifest.slots.includes('session-context') ||
+          !ghost.manifest.slots.includes('agent') ||
+          ghost.manifest.agent?.sessionMessage !== true
+        ) {
+          throwIpcError('PERMISSION_DENIED', '插件未声明当前任务消息能力');
         }
         const current = await readStableGhostCurrentSessionSnapshot(
           currentGhostSessionId,

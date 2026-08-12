@@ -319,6 +319,47 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       .toBe('prompt');
   });
 
+  it('嵌套启动的 PowerShell 归一到 token 0,-EncodedCommand 的 argv 判据不失效', () => {
+    // codex 报并已实测复现:core 的 PowerShell 红线有两类,只有文本型能穿透包装 ——
+    // `-EncodedCommand`(base64 静态不可读 → 必问)是 **argv 位置**判据
+    // (powerShellNeedsConsent 要求 tokens[0] 就是 pwsh/powershell),被包进
+    // `-Command '…'` 的载荷后只是一串字面量,argv 扫描永远看不到 → 掉进灰区。
+    for (const command of [
+      "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
+      '& pwsh -EncodedCommand SQBFAFgA',
+      ". 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -enc SQBFAFgA",
+      "'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
+      '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -enc SQBFAFgA',
+      'pwsh.exe -EncodedCommand SQBFAFgA',
+      'powershell -enc SQBFAFgA',
+    ]) {
+      expect(verdict('PowerShell', { command }), command).toBe('prompt-each-time');
+    }
+
+    // 归一只搬解释器位置、原样保留余参,并保留 pwsh(7)与 powershell(5.1)的区分。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', {
+      command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
+    })).toEqual({ kind: 'exec', command: 'pwsh -EncodedCommand SQBFAFgA' });
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', {
+      command: '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -File a.ps1',
+    })).toEqual({ kind: 'exec', command: 'powershell -File a.ps1' });
+
+    // 非解释器的 `&` / `.` 调用不得被误认成 PowerShell 而少包一层引号。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\tools\\my.exe' -x" }))
+      .toEqual({ kind: 'exec', command: "pwsh -Command '& '\\''C:\\tools\\my.exe'\\'' -x'" });
+    // 引号未闭合 → 不当作解释器调用,照常整条包装(不得把残缺路径当 bin)。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\PF\\pwsh.exe -enc X" }))
+      .toEqual({ kind: 'exec', command: "pwsh -Command '& '\\''C:\\PF\\pwsh.exe -enc X'" });
+
+    // 归一不放宽非编码调用的判档:普通 `-File` / 无害 `-Command` 仍留在灰区。
+    expect(verdict('PowerShell', { command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -File a.ps1" }))
+      .toBe('prompt');
+    // 文本型红线经嵌套启动同样命中(归一前后都成立,这里锁住不回退)。
+    expect(verdict('PowerShell', {
+      command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -Command 'Remove-Item -Recurse -Force C:\\x'",
+    })).toBe('prompt-each-time');
+  });
+
   it('兜底 other 必须带 description,否则会在调模型前被判证据不足', () => {
     const action = normalizeBuiltinToolForAutoReview('SomeFutureTool', { anything: 1 });
     expect(action.kind).toBe('other');

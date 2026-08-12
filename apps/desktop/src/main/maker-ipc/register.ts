@@ -7826,7 +7826,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     /** Host-only synchronous fence for the last boundary before vendor dispatch. */
     assertBeforeVendorDispatch?: () => void;
     /** Cleanup for a durable row cancelled by an accepted/final-dispatch guard. */
-    onDispatchCancelled?: () => void | Promise<void>;
+    onDispatchCancelled?: () => boolean | Promise<boolean>;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -8354,7 +8354,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           };
         } catch (err) {
           if (err instanceof AcceptedCallbackDispatchCancelled) {
-            await onDispatchCancelled?.();
+            const cancelled = (await onDispatchCancelled?.()) === true;
             if (userPromptPreviewStarted) {
               rollbackAgentIslandUserPrompt(
                 targetSessionId,
@@ -8365,7 +8365,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             return {
               ok: false as const,
               errorCode: 'INTERNAL' as const,
-              message: '当前焦点任务已变化，请重试',
+              message: cancelled
+                ? '当前焦点任务已变化，请重试'
+                : '消息取消失败，请在任务中检查后重试',
             };
           }
           if (isSessionRunningError(err)) {
@@ -8472,7 +8474,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         };
       } catch (err) {
         if (err instanceof AcceptedCallbackDispatchCancelled) {
-          await onDispatchCancelled?.();
+          const cancelled = (await onDispatchCancelled?.()) === true;
           if (userPromptPreviewStarted) {
             rollbackAgentIslandUserPrompt(
               targetSessionId,
@@ -8483,7 +8485,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           return {
             ok: false as const,
             errorCode: 'INTERNAL' as const,
-            message: '当前焦点任务已变化，请重试',
+            message: cancelled
+              ? '当前焦点任务已变化，请重试'
+              : '消息取消失败，请在任务中检查后重试',
           };
         }
         if (isSessionRunningError(err)) {
@@ -8681,8 +8685,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     const clientId = createId();
     let finalDispatchGuard: (() => boolean) | null = null;
     let dispatchCancelledForFocus = false;
-    const rewindCancelledMessage = async (): Promise<void> => {
-      dispatchCancelledForFocus = true;
+    const rewindCancelledMessage = async (): Promise<boolean> => {
       let rewound = false;
       try {
         rewound = await enqueueDurableWrite(
@@ -8702,6 +8705,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           clientId,
         });
       }
+      dispatchCancelledForFocus = rewound;
+      return rewound;
     };
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
@@ -11026,7 +11031,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       }
     },
     rewindCancelledPersistedUserMessage: async (sessionId, item) => {
-      await enqueueDurableWrite(`plugin-message-rewind:${sessionId}:${item.clientId}`, () =>
+      return enqueueDurableWrite(`plugin-message-rewind:${sessionId}:${item.clientId}`, () =>
         rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId),
       );
     },

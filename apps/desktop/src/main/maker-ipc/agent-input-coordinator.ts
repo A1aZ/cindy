@@ -419,7 +419,7 @@ export interface AgentInputCoordinatorDeps {
   rewindCancelledPersistedUserMessage?: (
     sessionId: string,
     item: AgentInputQueuedMessage,
-  ) => void | Promise<void>;
+  ) => boolean | Promise<boolean>;
   /**
    * Awaited only after vendor dispatch is irreversible (`accepted=true`).
    * Hosts use this for side effects that must not run on cancelled-before-dispatch
@@ -3369,8 +3369,9 @@ export class AgentInputCoordinator {
         head.requireCurrentSessionFocus === true &&
         err instanceof AcceptedCallbackDispatchCancelled
       ) {
+        let rewound = false;
         try {
-          await this.deps.rewindCancelledPersistedUserMessage?.(sessionId, head);
+          rewound = (await this.deps.rewindCancelledPersistedUserMessage?.(sessionId, head)) === true;
         } catch (rewindError) {
           log.warn('focused plugin message rewind after final dispatch cancellation failed', {
             sessionId,
@@ -3378,16 +3379,26 @@ export class AgentInputCoordinator {
             error: errorMessage(rewindError),
           });
         }
-        latest.activeTurn = null;
-        latest.error = null;
-        latest.stickyError = null;
-        latest.recovery = null;
-        this.notifyUndispatchedUserTurn(sessionId, head, 'cancelled');
-        this.deps.onDiscardedQueuedMessage?.(sessionId, head);
-        this.emit(sessionId);
-        if (latest.pendingQueue.length > 0 || latest.pendingCompacts.length > 0) {
-          this.scheduleDrain(sessionId, 'focused-plugin-message-cancelled');
+        if (rewound) {
+          latest.activeTurn = null;
+          latest.error = null;
+          latest.stickyError = null;
+          latest.recovery = null;
+          this.notifyUndispatchedUserTurn(sessionId, head, 'cancelled');
+          this.deps.onDiscardedQueuedMessage?.(sessionId, head);
+          this.emit(sessionId);
+          if (latest.pendingQueue.length > 0 || latest.pendingCompacts.length > 0) {
+            this.scheduleDrain(sessionId, 'focused-plugin-message-cancelled');
+          }
+          this.deps.onQueueEmptied?.(sessionId);
+          return;
         }
+        latest.error = errorMessage(err);
+        latest.stickyError = null;
+        this.setActiveTurnRecovery(latest, head);
+        this.notifyRejectedUserTurn(sessionId, head);
+        this.notifyUndispatchedUserTurn(sessionId, head, 'failed');
+        this.emit(sessionId);
         this.deps.onQueueEmptied?.(sessionId);
         return;
       }

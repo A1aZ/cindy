@@ -210,7 +210,7 @@ function createHarness(opts?: {
   >(() => {});
   const rewindCancelledPersistedUserMessage = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['rewindCancelledPersistedUserMessage']>
-  >(async () => {});
+  >(async () => true);
   const onDispatchedUserTurn = vi.fn<
     NonNullable<AgentInputCoordinatorDeps['onDispatchedUserTurn']>
   >(() => {});
@@ -6192,6 +6192,42 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
       'cancelled',
     );
     expect(latestProjection(h.projections).recovery).toBeNull();
+  });
+
+  it('keeps failed recovery when a focused-plugin message cannot be rewound', async () => {
+    const h = createHarness();
+    const sid = 'plugin-focus-guard-rewind-failed';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sendSuccess();
+    });
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => {
+      throw new AcceptedCallbackDispatchCancelled('plugin target changed');
+    });
+    h.rewindCancelledPersistedUserMessage.mockResolvedValueOnce(false);
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-focus-rewind-failed', 'plugin message', {
+        bypassGhostHooks: true,
+        requireCurrentSessionFocus: true,
+      }),
+    );
+    await flush();
+
+    expect(latestProjection(h.projections)).toMatchObject({
+      recovery: {
+        kind: 'active-turn',
+        item: { clientId: 'q-focus-rewind-failed' },
+      },
+      error: 'plugin target changed',
+    });
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-focus-rewind-failed' }),
+      'failed',
+    );
+    expect(h.onDiscardedQueuedMessage).not.toHaveBeenCalled();
   });
 
   it('releases a crash-restored paused queue on explicit user input (resumeRestorePausedQueue)', async () => {

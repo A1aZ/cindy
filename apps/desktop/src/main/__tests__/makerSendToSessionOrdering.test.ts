@@ -653,6 +653,9 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('clientId,');
     expect(runnerBlock).toContain('rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)');
     expect(runnerBlock).not.toContain('if (!rewound) return;');
+    expect(runnerBlock).toContain('dispatchCancelledForFocus = rewound;');
+    expect(runnerBlock).toContain('return rewound;');
+    expect(source).toContain("'消息取消失败，请在任务中检查后重试'");
     expect(runnerBlock).toContain('finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);');
     expect(runnerBlock).toContain('assertBeforeVendorDispatch: () => {');
     expect(runnerBlock).toContain("'plugin target changed at final vendor dispatch boundary'");

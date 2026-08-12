@@ -7015,8 +7015,7 @@
         "all": "All"
       },
       "filterSortBy": {
-        "recency": "Recent first",
-        "time": "Oldest first",
+        "recency": "By time",
         "manual": "Manual",
         "priority": "Priority"
       },

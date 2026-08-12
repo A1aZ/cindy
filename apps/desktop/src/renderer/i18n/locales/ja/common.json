@@ -7003,8 +7003,7 @@
         "all": "すべて"
       },
       "filterSortBy": {
-        "recency": "最近順",
-        "time": "時系列",
+        "recency": "時間順",
         "manual": "手動",
         "priority": "優先度"
       },

@@ -122,7 +122,9 @@ describe('buildMainListEntries — 混排(recency)', () => {
 });
 
 describe('buildMainListEntries — 排序口径', () => {
-  it("sorts oldest-first under 'time'", () => {
+  // 2026-08-12 用户裁决:「最早优先」(旧 sortBy 'time')删除,时间排序只保留
+  // 最近活动在前一档(recency,菜单文案「按时间排序」)。
+  it("sorts newest-first under 'recency'", () => {
     const projNew = project('alpha', [session({ updatedAt: '2026-08-12T10:00:00Z' })]);
     const dlgOld = session({ updatedAt: '2026-08-01T10:00:00Z', title: 'old' });
     const entries = buildMainListEntries({
@@ -130,10 +132,10 @@ describe('buildMainListEntries — 排序口径', () => {
       dialogues: [dlgOld],
       groupBy: 'project',
       groupDialogue: false,
-      sortBy: 'time',
+      sortBy: 'recency',
       manualProjectOrder: [],
     });
-    expect(labels(entries)).toEqual(['s:old', 'p:alpha']);
+    expect(labels(entries)).toEqual(['p:alpha', 's:old']);
   });
 
   it("floats attention > running > rest under 'priority', recency within tiers", () => {

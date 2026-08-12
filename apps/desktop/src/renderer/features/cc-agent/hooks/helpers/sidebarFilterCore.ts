@@ -56,10 +56,11 @@ export type FilterVendor = 'all' | 'cc' | 'codex';
 export type FilterGroupBy = 'project' | 'flat';
 /** 最近活跃范围筛选。默认 all。 */
 export type FilterLastActivity = 'all' | '1d' | '3d' | '7d' | '30d';
-/** Sidebar 主列表排序方式。默认 recency。manual 只用于 Project 分组;
- *  priority = 等待处理 > 运行中 > 其余按最近活动(D 期新增)。
- *  （侧边栏重设计裁决：alphabetic 已删除，存量值回退到 recency。） */
-export type FilterSortBy = 'recency' | 'time' | 'manual' | 'priority';
+/** Sidebar 主列表排序方式。默认 recency(菜单文案「按时间排序」= 最近活动在前)。
+ *  manual 只用于 Project 分组;priority = 等待处理 > 运行中 > 其余按最近活动(D 期新增)。
+ *  （侧边栏重设计裁决：alphabetic 与 time(旧「最早优先」)已删除，存量值回退到
+ *  recency——时间排序只保留最近优先一档。） */
+export type FilterSortBy = 'recency' | 'manual' | 'priority';
 /** 任务行右侧信息项（复选）。顺序固定 pr → tokens → cost → time 渲染。 */
 export type TaskInfoField = 'time' | 'pr' | 'tokens' | 'cost';
 export type ManualProjectDropPosition = 'before' | 'after';
@@ -414,12 +415,14 @@ export function persistLastActivity(lastActivity: FilterLastActivity): void {
 
 const SORT_BY_VALUES: ReadonlySet<string> = new Set<FilterSortBy>([
   'recency',
-  'time',
   'manual',
   'priority',
 ]);
 
-/** 读 sortBy。已删除的 'alphabetic' 存量值不在合法集合内，自动回退 'recency'。 */
+/**
+ * 读 sortBy。已删除的 'alphabetic' / 'time'(旧「最早优先」)存量值不在合法集合内，
+ * 自动回退 'recency'——时间排序现在只保留「最近优先」一档,菜单里就叫「按时间排序」。
+ */
 export function loadSortBy(): FilterSortBy {
   const storage = safeStorage();
   if (!storage) return 'recency';

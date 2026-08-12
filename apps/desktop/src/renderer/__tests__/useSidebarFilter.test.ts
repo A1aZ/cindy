@@ -236,8 +236,8 @@ describe('loadSortBy', () => {
   });
 
   it('returns persisted sort modes', () => {
-    localStorage.setItem(SORT_BY_KEY, 'time');
-    expect(loadSortBy()).toBe('time');
+    localStorage.setItem(SORT_BY_KEY, 'priority');
+    expect(loadSortBy()).toBe('priority');
     localStorage.setItem(SORT_BY_KEY, 'manual');
     expect(loadSortBy()).toBe('manual');
     localStorage.setItem(SORT_BY_KEY, 'recency');
@@ -252,6 +252,13 @@ describe('loadSortBy', () => {
   it("falls back to 'recency' on the removed 'alphabetic' legacy value", () => {
     // 侧边栏重设计裁决:按名称排序已删除;老用户存量值静默回退默认。
     localStorage.setItem(SORT_BY_KEY, 'alphabetic');
+    expect(loadSortBy()).toBe('recency');
+  });
+
+  it("falls back to 'recency' on the removed 'time' (oldest-first) legacy value", () => {
+    // 2026-08-12 用户裁决:「最早优先」删除,时间排序只保留最近活动在前一档;
+    // 存量值静默回退到 recency(菜单文案「按时间排序」)。
+    localStorage.setItem(SORT_BY_KEY, 'time');
     expect(loadSortBy()).toBe('recency');
   });
 
@@ -397,8 +404,8 @@ describe('persist round-trip', () => {
   });
 
   it('persistSortBy → loadSortBy returns the same value', () => {
-    persistSortBy('time');
-    expect(loadSortBy()).toBe('time');
+    persistSortBy('priority');
+    expect(loadSortBy()).toBe('priority');
     persistSortBy('manual');
     expect(loadSortBy()).toBe('manual');
     persistSortBy('recency');

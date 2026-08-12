@@ -7003,8 +7003,7 @@
         "all": "전체"
       },
       "filterSortBy": {
-        "recency": "최근순",
-        "time": "시간순",
+        "recency": "시간순",
         "manual": "수동",
         "priority": "우선순위"
       },

@@ -73,15 +73,12 @@ function entryPriorityRank(entry: MainListEntry, ctx: MainListPriorityContext): 
   return min;
 }
 
-/** 组内(项目 / 对话组)会话排序:time 正序;priority 分档 + recency;其余保持入参序。 */
+/** 组内(项目 / 对话组)会话排序:priority 分档 + recency;其余保持入参序。 */
 export function sortSessionsForMainList(
   sessions: readonly Session[],
   sortBy: FilterSortBy,
   ctx: MainListPriorityContext = EMPTY_PRIORITY_CONTEXT,
 ): Session[] {
-  if (sortBy === 'time') {
-    return sessions.slice().sort((a, b) => sessionActivityMs(a) - sessionActivityMs(b));
-  }
   if (sortBy === 'priority') {
     return sessions
       .slice()
@@ -171,9 +168,6 @@ export function buildMainListEntries({
     });
   }
 
-  if (sortBy === 'time') {
-    return entries.slice().sort((a, b) => entryActivityMs(a) - entryActivityMs(b));
-  }
   if (sortBy === 'priority') {
     return entries
       .slice()

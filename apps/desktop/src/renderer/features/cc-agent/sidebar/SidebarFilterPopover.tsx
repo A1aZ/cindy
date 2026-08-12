@@ -81,9 +81,9 @@ const LAST_ACTIVITY_OPTIONS: ReadonlyArray<Option<FilterLastActivity>> = [
   { value: 'all', labelKey: 'ccAgent.sidebar.filterLastActivity.all' },
 ];
 
+/** 「最早优先」(旧 time)2026-08-12 用户裁决删除;时间排序只保留最近活动在前一档。 */
 const FLAT_SORT_BY_OPTIONS: ReadonlyArray<Option<FilterSortBy>> = [
   { value: 'recency', labelKey: 'ccAgent.sidebar.filterSortBy.recency' },
-  { value: 'time', labelKey: 'ccAgent.sidebar.filterSortBy.time' },
   { value: 'priority', labelKey: 'ccAgent.sidebar.filterSortBy.priority' },
 ];
 

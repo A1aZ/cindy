@@ -1,7 +1,7 @@
 /**
  * promptPrediction —— 输入框推荐提示词的 one-shot 预测。
  *
- * 参考 provider-one-shot.ts 的实现模式:复用同一套 provider/凭证/model routing
+ * 参考 title-one-shot.ts 的实现模式:复用同一套 provider/凭证/model routing
  * 基础设施,走 provider catalog 中的 titleModel(最经济模型)做单次 HTTP 请求,
  * 预测用户下一步会输入的提示词。不自己发 HTTP,不额外配置 endpoint。
  *
@@ -16,7 +16,7 @@ import type { AgentKind } from '@cindy/maker-core';
 
 import { getResolvedMainLocale } from '../i18n.js';
 import { getDesktopProviderService } from '../maker-host/createDesktopProviderService.js';
-import { runProviderOneShot } from '../maker-host/provider-one-shot.js';
+import { generateTitleViaProviderResult } from '../maker-host/title-one-shot.js';
 import { connectedProvidersForAgent, type ProviderView } from '@cindy/model-providers';
 import { eq } from 'drizzle-orm';
 import { getDbClient } from '../localDb/client/current.js';
@@ -57,7 +57,11 @@ function buildConversationContext(
     if (!text) continue;
     lines.push(`${m.role === 'user' ? 'User' : 'Assistant'}: ${text}`);
   }
-  return lines.join('\n');
+  // 超长时从最旧侧裁剪，保留最新对话（刚完成的回复与结尾指令不丢失）。
+  const context = lines.join('\n');
+  return context.length > PREDICTION_CONTEXT_MAX_CHARS
+    ? context.slice(-PREDICTION_CONTEXT_MAX_CHARS)
+    : context;
 }
 
 function escapeReferenceData(value: string): string {
@@ -165,8 +169,9 @@ export async function generatePromptPrediction(
     params.workingDir,
   );
 
-  // 截断到上限(char 数),防止超长上下文撑爆 prompt
-  const truncated = userPrompt.slice(0, PREDICTION_CONTEXT_MAX_CHARS + 1024); // prompt 固定部分 ~200 chars
+  // 截断到上限(char 数),防止超长上下文撑爆 prompt。保留最新内容(从尾部截断),
+  // 确保刚完成的回复与结尾指令不被丢弃。
+  const truncated = userPrompt.slice(-(PREDICTION_CONTEXT_MAX_CHARS + 1024)); // prompt 固定部分 ~200 chars
 
   // 仅记录长度用于调试，不记录对话内容避免敏感数据泄漏。
   log.debug('prompt prediction params', {
@@ -183,7 +188,7 @@ export async function generatePromptPrediction(
   //   - systemPrompt: Anthropic Messages API 顶层 system 字段(非 Anthropic wire 忽略)
   //   - maxOutputChars=512: 恢复 validateTitleOutput 输出校验(拦截多行/Markdown/role label),再交给 maxVisualChars=140 做展示截断
   //   - maxVisualChars=140: 截断到推荐提示词上限
-  return runProviderOneShot(
+  const result = await generateTitleViaProviderResult(
     {
       sessionId: params.sessionId,
       agentKind: params.agentKind,
@@ -202,4 +207,5 @@ export async function generatePromptPrediction(
       maxVisualChars: 140,
     },
   );
+  return result.status === 'ok' ? result.title : null;
 }

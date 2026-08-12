@@ -4758,10 +4758,18 @@ export function ChatInput({
         // 发送前校验 host-capability 插件仍处于启用且 workdir 可用的状态。
         // 若用户在插入芯片后停用/卸载了该插件，芯片内序列化的 ghostId/capability
         // 已失时效，不应再展开 Host 路由指令（fail-closed）。
+        // 额外收口(remote session + manifest 一致性)：
+        //   - SSH(remoteHostId)/device-link(deviceLinkDeviceId) 远程会话不展开控制端 Host 路由；
+        //   - 插件更新后芯片保留旧 capability 时，manifest 当前声明必须仍匹配才放行。
         const isHostCapabilityValid =
           hostCapability !== undefined &&
+          !remoteHostId &&
+          !deviceLinkDeviceId &&
           eligibleGhosts.some(
-            (g) => g.manifest.id === hostCapability.ghostId && g.enabled,
+            (g) =>
+              g.manifest.id === hostCapability.ghostId &&
+              g.enabled &&
+              hostCapabilityForGhost(g) === hostCapability.capability,
           );
         const routedText =
           hostCapability && isHostCapabilityValid

@@ -257,8 +257,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   ghosts: {
     listSync: (): { ghosts: unknown[] } => ipcRenderer.sendSync('ghosts:list'),
     reload: (id: string): Promise<{ state: string }> => ipcRenderer.invoke('ghosts:reload', id),
-    setEnabled: (id: string, enabled: boolean): Promise<{ ok: true }> =>
-      ipcRenderer.invoke('ghosts:set-enabled', id, enabled),
     resolvePanelMedia: (
       uri: string,
       purpose?: 'attach' | 'menu',

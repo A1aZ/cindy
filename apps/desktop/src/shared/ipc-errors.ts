@@ -23,6 +23,12 @@ export type IpcErrorCode =
   | 'REMOTE_PROVIDER_UPDATING'
   | 'REMOTE_PROVIDER_UNSUPPORTED'
   | 'REMOTE_NATIVE_OAUTH_UNAVAILABLE'
+  // 远端 Pi 会话启动时 Cindy AI gateway endpoint 未就绪(登录后自动下发):
+  // renderer 走 logic.errors.remoteError.REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE。
+  | 'REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE'
+  // 远端 Pi 会话选了 baseUrl 指向本机 loopback 的 BYOM provider(Ollama 等):
+  // 远端进程连不到本机服务, 创建时拒绝并引导换网关/远端可达 BYOM。
+  | 'REMOTE_LOCAL_ONLY_PROVIDER'
   // 远端切模/切来源需要不同路由(claude-code setModel 守卫):提示重建会话。
   | 'REMOTE_MODEL_SWITCH_ROUTE_CHANGE'
   | 'NO_LIVE_QUERY'
@@ -237,6 +243,8 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'REMOTE_PROVIDER_UPDATING',
   'REMOTE_PROVIDER_UNSUPPORTED',
   'REMOTE_NATIVE_OAUTH_UNAVAILABLE',
+  'REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE',
+  'REMOTE_LOCAL_ONLY_PROVIDER',
   'REMOTE_MODEL_SWITCH_ROUTE_CHANGE',
   'NO_LIVE_QUERY',
   'STALE_DIFF',

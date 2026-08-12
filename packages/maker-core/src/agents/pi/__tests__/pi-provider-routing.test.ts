@@ -11,13 +11,32 @@ const captured = vi.hoisted(() => ({
   requestHandler: undefined as undefined | ((command: Record<string, unknown>) => Promise<{ success: boolean; data?: unknown; error?: string }>),
 }));
 
+vi.mock('../transport.js', () => ({
+  createPiStdioTransport: (opts: {
+    args: string[];
+    env: Record<string, string | undefined>;
+    onProcessSpawned?: (pid: number) => void | (() => void);
+  }) => {
+    // spawn 参数断言移到 transport 工厂(spawn 行为在 stdio transport)。
+    captured.args = [...opts.args];
+    captured.env = { ...(opts.env ?? {}) };
+    opts.onProcessSpawned?.(1234);
+    return {
+      writeLine: async () => {},
+      onLine: () => () => {},
+      onStderr: () => () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      pid: 1234,
+      isClosed: () => false,
+    };
+  },
+  attachJsonlReader: () => {},
+}));
+
 vi.mock('../rpc-client.js', () => ({
   PiRpcProcess: class {
     isClosed = false;
-    constructor(opts: { args: string[]; env?: Record<string, string | undefined> }) {
-      captured.args = [...opts.args];
-      captured.env = { ...(opts.env ?? {}) };
-    }
     async request(command: Record<string, unknown>) {
       captured.requests.push(command);
       if (captured.requestHandler) return captured.requestHandler(command);
@@ -928,17 +947,18 @@ describe('Pi provider-aware model routing', () => {
       ],
     }));
 
-    // 文件读失败不会生成 image block，仍保留既有的“图片不可读”文本语义。
+    // 轮 40-w4-t6 CRITICAL:用户显式图片读取失败 → fail-before-dispatch(抛错),
+    // 不再静默降级文本占位(否则 DB/UI 与 Pi 实际输入分叉)。
     await handle.setModel!('local-model', { providerId: 'native-text' });
     captured.requests.length = 0;
-    await handle.send({
-      type: 'user',
-      content: [{ type: 'image', path: path.join(cwd, 'missing.png') }],
-    });
-    expect(captured.requests).toContainEqual(expect.objectContaining({
-      type: 'prompt',
-      message: expect.stringContaining('(image unavailable:'),
-    }));
+    await expect(
+      handle.send({
+        type: 'user',
+        content: [{ type: 'image', path: path.join(cwd, 'missing.png') }],
+      }),
+    ).rejects.toThrow(/failed to read image attachment/);
+    // 未发送任何 prompt(失败在 dispatch 前)
+    expect(captured.requests).toHaveLength(0);
     await handle.close();
   });
 
@@ -1191,5 +1211,54 @@ describe('Pi provider-aware model routing', () => {
     expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 2))
       .toEqual(['--provider', 'cindy']);
     await handle.close();
+  });
+
+  it('rejects a loopback-only BYOM provider for remote Pi sessions (fail-fast)', async () => {
+    // 轮 42 P2(codex-connector):远端 Pi + baseUrl 指向本机 loopback 的 BYOM
+    // (Ollama @ localhost 等)在创建时拒绝 —— 远端进程在 SSH 主机上连 localhost
+    // 是远端自己, 用户本机服务不可达, 首回合必然失败/错配。
+    const remoteStub: import('../transport.js').PiTransport = {
+      writeLine: async () => {},
+      onLine: () => () => {},
+      onStderr: () => () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      pid: 4321,
+      isClosed: () => false,
+      remoteBinaryPath: '/remote/pi',
+      killRemoteSession: async () => {},
+    };
+    const deps: AgentDeps = {
+      ...byomDeps(async () => ({
+        providers: [
+          {
+            id: 'ollama',
+            name: 'Ollama',
+            baseUrl: 'http://localhost:11434',
+            api: 'openai-completions' as const,
+            models: [{ id: 'local-model' }],
+          },
+        ],
+        env: {},
+      })),
+      getRemotePiTransport: async () => remoteStub,
+      getRemotePiFileOps: () => ({
+        mkdirp: async () => {},
+        writeFile: async () => {},
+        stat: async () => ({ isFile: true }),
+        rm: async () => {},
+        listDir: async () => [],
+      }),
+    };
+    const agent = new PiAgent(deps);
+    await expect(agent.startSession({
+      sessionId: 'remote-loopback-byom',
+      workingDir: cwd,
+      model: 'local-model',
+      providerId: 'ollama',
+      remoteHostId: 'remote-host',
+    })).rejects.toThrow(/\[REMOTE_LOCAL_ONLY_PROVIDER\]/);
+    // 未走到 spawn(transport 从未创建)。
+    expect(captured.args).toEqual([]);
   });
 });

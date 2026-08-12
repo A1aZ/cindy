@@ -308,6 +308,7 @@
         "statusInstalled": "インストール済み",
         "statusNotInstalled": "未インストール",
         "claudeCodeName": "Claude Code",
+        "piName": "Pi",
         "button": {
           "install": "インストール",
           "reinstall": "再インストール",
@@ -6183,7 +6184,10 @@
       "networkShowRaw": "元のエラーを表示",
       "networkHideRaw": "元のエラーを隠す",
       "silentStopContinue": "続行",
-      "silentStopContinueTitle": "現在のタスクを続行"
+      "silentStopContinueTitle": "現在のタスクを続行",
+      "piTransportClosed": "リモート Pi の接続が切断されました（SSH チャンネルが閉じました）。リモートのタスクは実行中のままです。再接続すると続行できます。",
+      "piManagerUnavailable": "リモート Pi マネージャーが準備できていません。しばらくして再試行してください。失敗が続く場合は「設定 → リモートマシン」で Pi を再インストールしてください。",
+      "piBundledNodeMissing": "リモートホストに実行環境（Node.js）がありません。「設定 → リモートマシン」でホストを展開し、まず Claude Code または Codex の「インストール」をクリックしてください（Node.js もインストールされます）。その後 Pi タスクを開始してください。"
     },
     "backgroundActivity": {
       "status": "バックグラウンドのサブタスクが実行中、モデル使用量を消費しています…",
@@ -6665,13 +6669,13 @@
       }
     },
     "upgradeBanner": {
-      "description": "{{hostId}} の cc-manager に新しいバージョンがあります — アップグレードするとこのホスト上のすべての Claude Code リモートセッションが中断されます",
-      "upgrading": "{{hostId}} の cc-manager をアップグレード中…",
+      "description": "{{hostId}} の {{manager}} に新しいバージョンがあります — アップグレードするとこのホスト上のすべての Claude Code リモートセッションが中断されます",
+      "upgrading": "{{hostId}} の {{manager}} をアップグレード中…",
       "upgrade": "今すぐアップグレード",
-      "upgradeTitle": "新しい cc-manager をダウンロードして再起動（現在のセッションは中断されます）",
+      "upgradeTitle": "新しい {{manager}} をダウンロードして再起動（現在のセッションは中断されます）",
       "dismissTitle": "あとで（次回起動時に再度通知）",
       "failed": "アップグレード失敗: {{message}}",
-      "daemonNotReady": "cc-manager のアップグレードは完了しましたが、リモート daemon がまだ起動していません — メッセージを手動で再送信してください"
+      "daemonNotReady": "{{manager}} のアップグレードは完了しましたが、リモート daemon がまだ起動していません — メッセージを手動で再送信してください"
     },
     "remoteError": {
       "REMOTE_DAEMON_CLOSED": "リモート接続が中断されました（daemon がアップグレードまたは再起動中の可能性があります）。ターンが終了しました — 再送信してください。",
@@ -6679,6 +6683,7 @@
       "AUTO_REVIEW_UNAVAILABLE": "自動レビューが判断できませんでした（ネットワークまたはサービスの一時的な問題）。レビューが必要な操作はご自身での確認に切り替わりました。中断を減らしたい場合は、このタスクをデフォルト権限に切り替えてください。",
       "REMOTE_COMPAT_MODE_UNSUPPORTED": "リモート Claude Code セッションはローカル互換プロキシ経由でルーティングできません(内部エラー)。",
       "REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE": "Cindy AI の資格情報がまだ準備できていません(サインイン後に自動発行されます)。しばらくしてから再試行してください。続く場合は 設定 → モデルプロバイダー で Cindy AI の接続状態を確認してください。",
+      "REMOTE_LOCAL_ONLY_PROVIDER": "このモデルプロバイダーはローカル専用サービス（Ollama など）で、SSH リモートタスクからはアクセスできません。Cindy AI ゲートウェイに切り替えるか、リモートホストから到達可能なプロバイダーを選んでください。",
       "DEVICE_LINK_CONTROL_DISABLED": "このデバイスの操作はオフです。メッセージは送信されていません。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "添付ファイルの転送に失敗しました。メッセージは送信されていません。もう一度お試しください。"
     },

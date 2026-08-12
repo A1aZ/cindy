@@ -282,6 +282,9 @@ export class RsbWindowController {
   refreshContext(sender: WebContents): void {
     const win = this.winRef;
     if (!win || win.isDestroyed() || sender !== win.webContents) return;
+    // 隐藏预热/复用窗口只保留已挂载的标签主体，不接收新的会话上下文。
+    // 显示时 renderer 会重新请求最新快照，再恢复交互。
+    if (!this.visible) return;
     if (!this.lastContext) return;
     this.deps.sendToWindow(win, this.deps.contextChannel, this.lastContext);
   }
@@ -398,6 +401,7 @@ export class RsbWindowController {
   getHostWebContents(): WebContents | null {
     if (
       this.deps.settings.read().detached &&
+      this.visible &&
       this.winRef &&
       !this.winRef.isDestroyed()
     ) {

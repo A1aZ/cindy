@@ -637,6 +637,28 @@ describe('getHostWebContents', () => {
     expect(h.controller.getHostWebContents()).toBe(win.webContents);
   });
 
+  it('detached + cached window hidden → main window webContents', () => {
+    const h = makeHarness({ detached: true });
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+    h.controller.open();
+    h.controller.close();
+
+    expect(h.controller.getHostWebContents()).toBe(h.mainWin.webContents);
+  });
+
+  it('detached + native-minimized window → main window webContents', () => {
+    const h = makeHarness({ detached: true });
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+    h.controller.open();
+    win.emitWindowEvent('minimize');
+
+    expect(h.controller.getHostWebContents()).toBe(h.mainWin.webContents);
+  });
+
   it('after destroy: falls back to main', () => {
     const h = makeHarness({ detached: true });
     h.controller.prewarm();
@@ -675,6 +697,29 @@ describe('setContext / routeCommand', () => {
       channel: 'ctx-channel',
       payload: { ...ctx, sessionId: 's2' },
     });
+  });
+
+  it('ignores refreshContext while the cached sidebar window is hidden', () => {
+    const h = makeHarness({ detached: true });
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+    h.controller.setContext(ctx);
+
+    h.controller.refreshContext(win.webContents as unknown as WebContents);
+    expect(h.sends.filter((entry) => entry.channel === 'ctx-channel')).toEqual([]);
+
+    h.controller.open();
+    h.controller.refreshContext(win.webContents as unknown as WebContents);
+    expect(h.sends.filter((entry) => entry.channel === 'ctx-channel')).toEqual([
+      { channel: 'ctx-channel', payload: ctx },
+    ]);
+
+    h.controller.close();
+    h.controller.refreshContext(win.webContents as unknown as WebContents);
+    expect(h.sends.filter((entry) => entry.channel === 'ctx-channel')).toEqual([
+      { channel: 'ctx-channel', payload: ctx },
+    ]);
   });
 
   it('detached + allowOpen: opens window, waits ready, routes', async () => {

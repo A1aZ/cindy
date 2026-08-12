@@ -26,10 +26,16 @@ import type {
   AgentInputSendResult,
 } from '../agent-input-coordinator.js';
 import { DeferredCodexRestartService } from '../deferredCodexRestart.js';
+import {
+  createDeferredRestartAppliedWake,
+  createDeferredRestartQueueGate,
+} from '../deferredRestartQueueWiring.js';
 import type {
   AgentInputProjection,
   AgentInputQueuedMessage,
 } from '../../../shared/agentInputQueue.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const mocks = vi.hoisted(() => {
   const logger = {
@@ -136,9 +142,11 @@ function sendSuccess(source = 'test'): AgentInputSendResult {
 
 /**
  * 真实 coordinator + 真实 DeferredCodexRestartService 的接线 harness。
- * 接线形状照抄 register.ts:hasPendingCredentialSwitch 读 service.isPending(),
- * onApplied 逐会话 wakeSession('deferred-codex-restart-applied');restart 的
- * 实现由用例注入(默认模拟 register 的 close cleanup:onSessionClosed)。
+ * gate 谓词与 onApplied 唤醒**直接复用生产接线工厂**
+ * (deferredRestartQueueWiring.ts,register.ts 同款 —— 不再照抄形状自行重
+ * 实现,谓词/唤醒逻辑改变时本回归同步失败;register 侧确实经由工厂接线由
+ * 下方源码断言锁住);restart 的实现由用例注入(默认模拟 register 的 close
+ * cleanup:onSessionClosed)。
  */
 function createRestartHarness() {
   let running = false;
@@ -165,11 +173,9 @@ function createRestartHarness() {
     },
     hasBusyLocalCodexSession: () => busyOtherSession,
     listLocalCodexSessionIds: () => [SID],
-    onApplied: (sessionIds) => {
-      for (const sessionId of sessionIds) {
-        coordinator.wakeSession(sessionId, 'deferred-codex-restart-applied');
-      }
-    },
+    onApplied: createDeferredRestartAppliedWake({
+      wakeSession: (sessionId, reason) => coordinator.wakeSession(sessionId, reason),
+    }),
     retryDelayMs: 60_000,
     logger: { info: vi.fn(), warn: vi.fn() },
   });
@@ -192,7 +198,11 @@ function createRestartHarness() {
     getAgentKind: () => 'codex',
     getSdkSessionId: vi.fn(async () => 'sdk-session'),
     hasAssistantProgressAfter: () => Promise.resolve(false),
-    hasPendingCredentialSwitch: () => service.isPending(),
+    hasPendingCredentialSwitch: createDeferredRestartQueueGate({
+      hasPendingCredentialSwitchEntry: () => false,
+      isDeferredRestartPending: () => service.isPending(),
+      listActiveSessions: () => [{ id: SID, agentKind: 'codex', remoteHostId: null }],
+    }),
     emitProjection: (projection) => {
       projections.push(projection);
     },
@@ -393,5 +403,36 @@ describe('deferred Codex restart × input queue drain (#2506)', () => {
     h2.coordinator.wakeSession(h2.SID, 'deferred-codex-restart-applied');
     await flush();
     expect(h2.sendToAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe('register.ts 真实接线经由共享工厂(源码断言,#2506)', () => {
+  // harness 复用了生产接线工厂,这里锁住「register 确实也经由同一工厂接线」:
+  // 谁把 register 改回手写谓词/手写唤醒循环,这两条会失败,提示同步回归覆盖。
+  const registerSource = readFileSync(
+    fileURLToPath(new URL('../register.ts', import.meta.url)),
+    'utf8',
+  );
+
+  it('coordinator 的 hasPendingCredentialSwitch 经由 createDeferredRestartQueueGate', () => {
+    expect(registerSource).toMatch(
+      /hasPendingCredentialSwitch:\s*createDeferredRestartQueueGate\(\{/,
+    );
+    // 三个 dep 都在同一接线块里:凭证切换登记表、重启 pending、活跃会话来源。
+    const gateBlock = registerSource.slice(
+      registerSource.indexOf('hasPendingCredentialSwitch: createDeferredRestartQueueGate'),
+    );
+    const gateHead = gateBlock.slice(0, 600);
+    expect(gateHead).toContain('pendingCredentialSwitchHolder?.has(sessionId) === true');
+    expect(gateHead).toContain('deferredCodexRestartHolder?.isPending() === true');
+    expect(gateHead).toContain('maker.listActiveSessions()');
+  });
+
+  it('DeferredCodexRestartService 的 onApplied 经由 createDeferredRestartAppliedWake', () => {
+    expect(registerSource).toMatch(/onApplied:\s*createDeferredRestartAppliedWake\(\{/);
+    const wakeBlock = registerSource.slice(
+      registerSource.indexOf('onApplied: createDeferredRestartAppliedWake'),
+    );
+    expect(wakeBlock.slice(0, 300)).toContain('inputCoordinator.wakeSession(sessionId, reason)');
   });
 });

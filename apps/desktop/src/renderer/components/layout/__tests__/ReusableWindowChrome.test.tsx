@@ -9,19 +9,30 @@ const mocks = vi.hoisted(() => ({
   sidebarVisibilityListener: null as ((payload: { visible: boolean }) => void) | null,
   ghostVisibilityListener: null as ((payload: { visible: boolean }) => void) | null,
   ghostMinimizeListener: null as (() => void) | null,
+  ghostMinimizeEnabled: true,
   minimizeGhostPanel: vi.fn(),
   restoreGhostPanel: vi.fn(),
 }));
 
 vi.mock('@/components/title-bar/WindowControls', () => ({
-  WindowControls: ({ onMinimize }: { onMinimize?: () => void | Promise<void> }) => {
+  WindowControls: ({
+    onMinimize,
+    showMinimize = true,
+  }: {
+    onMinimize?: () => void | Promise<void>;
+    showMinimize?: boolean;
+  }) => {
     const [mountId] = React.useState(() => ++mocks.controlsMounts);
     return (
-      <button
-        data-testid="window-controls"
-        data-mount-id={mountId}
-        onClick={() => void onMinimize?.()}
-      />
+      <div data-testid="window-controls" data-mount-id={mountId}>
+        {showMinimize && (
+          <button
+            type="button"
+            aria-label="titleBar.minimize"
+            onClick={() => void onMinimize?.()}
+          />
+        )}
+      </div>
     );
   },
 }));
@@ -54,7 +65,16 @@ vi.mock('@/cindy-brain/useInstalledGhosts', () => ({
   useInstalledGhosts: () => [
     {
       enabled: true,
-      manifest: { id: 'test-ghost', name: 'Test Ghost', panel: { title: 'Test Panel' } },
+      manifest: {
+        id: 'test-ghost',
+        name: 'Test Ghost',
+        panel: {
+          title: 'Test Panel',
+          ...(mocks.ghostMinimizeEnabled
+            ? {}
+            : { systemButtons: { minimize: false } }),
+        },
+      },
     },
   ],
 }));
@@ -100,6 +120,7 @@ describe('reusable auxiliary window chrome', () => {
     mocks.sidebarVisibilityListener = null;
     mocks.ghostVisibilityListener = null;
     mocks.ghostMinimizeListener = null;
+    mocks.ghostMinimizeEnabled = true;
     Object.defineProperty(window, 'electronAPI', {
       configurable: true,
       value: {
@@ -201,7 +222,7 @@ describe('reusable auxiliary window chrome', () => {
   it('minimizes a detached plugin window into the main-window Ghost bubble', async () => {
     render(<GhostPanelWindowLayout />);
 
-    fireEvent.click(screen.getByTestId('window-controls'));
+    fireEvent.click(screen.getByRole('button', { name: 'titleBar.minimize' }));
 
     expect(mocks.minimizeGhostPanel).toHaveBeenCalledWith('test-ghost');
     expect(window.electronAPI.ghostPanelWindow.setDetached).toHaveBeenCalledWith(
@@ -218,7 +239,7 @@ describe('reusable auxiliary window chrome', () => {
     render(<GhostPanelWindowLayout />);
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId('window-controls'));
+      fireEvent.click(screen.getByRole('button', { name: 'titleBar.minimize' }));
     });
 
     expect(mocks.minimizeGhostPanel).toHaveBeenCalledWith('test-ghost');
@@ -235,5 +256,16 @@ describe('reusable auxiliary window chrome', () => {
       'test-ghost',
       false,
     );
+  });
+
+  it('respects a plugin manifest that disables minimize in the detached window', async () => {
+    mocks.ghostMinimizeEnabled = false;
+
+    render(<GhostPanelWindowLayout />);
+
+    expect(screen.queryByRole('button', { name: 'titleBar.minimize' })).toBeNull();
+    expect(window.electronAPI.ghostPanelWindow.onMinimizeRequested).not.toHaveBeenCalled();
+    expect(mocks.ghostMinimizeListener).toBeNull();
+    expect(mocks.minimizeGhostPanel).not.toHaveBeenCalled();
   });
 });

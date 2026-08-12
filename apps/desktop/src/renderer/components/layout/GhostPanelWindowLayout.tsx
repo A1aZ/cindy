@@ -61,13 +61,15 @@ export function GhostPanelWindowLayout() {
   // 停用/卸载的瞬�?main �?reconcile 会收�?这里只兜住收窗前的一两帧�?
   const manifest = ghost && ghost.enabled !== false ? ghost.manifest : undefined;
   const title = manifest?.panel?.title ?? manifest?.name ?? '';
+  const minimizeEnabled =
+    manifest !== undefined && manifest.panel?.systemButtons?.minimize !== false;
   const presentationReadySentRef = useRef(false);
   // 复用隐藏窗口时，Chromium 可能保留上一次关闭按钮的 focus / :hover 状态�?
   // 与资源用量窗口一致，隐藏时重挂载 chrome，确保再次显示从干净状态开始�?
   const [windowChromeRevision, setWindowChromeRevision] = useState(0);
 
   const minimizeToBubble = async (): Promise<void> => {
-    if (!ghostId) return;
+    if (!ghostId || !minimizeEnabled) return;
     minimizeGhostPanel(ghostId);
     try {
       await window.electronAPI.ghostPanelWindow.setDetached(ghostId, false);
@@ -128,10 +130,11 @@ export function GhostPanelWindowLayout() {
   }, [ghostId, manifest, confirm, t, window.electronAPI.ghostPanelWindow]);
 
   useEffect(() => {
+    if (!minimizeEnabled) return;
     return window.electronAPI.ghostPanelWindow.onMinimizeRequested(() => {
       void minimizeToBubble();
     });
-  }, [ghostId, window.electronAPI.ghostPanelWindow]);
+  }, [ghostId, minimizeEnabled, window.electronAPI.ghostPanelWindow]);
 
   useEffect(() => {
     return window.electronAPI.onLocaleChanged?.((locale) => {
@@ -187,6 +190,7 @@ export function GhostPanelWindowLayout() {
             <WindowControls
               key={windowChromeRevision}
               onMinimize={minimizeToBubble}
+              showMinimize={minimizeEnabled}
               onClose={disableAndClose}
             />
           </div>

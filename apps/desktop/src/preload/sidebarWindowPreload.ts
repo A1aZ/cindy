@@ -71,12 +71,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     scope: string,
     msg: string,
   ): void => ipcRenderer.send('renderer:log', level, scope, msg),
-  safeStorageStore: (key: string, value: string): Promise<boolean> =>
-    ipcRenderer.invoke('safe-storage-store', key, value),
-  safeStorageRead: (key: string): Promise<string | null> =>
-    ipcRenderer.invoke('safe-storage-read', key),
-  safeStorageRemove: (key: string): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('safe-storage-remove', key),
   onLocaleChanged: (cb: (locale: SupportedLocale) => void): (() => void) =>
     onPayload(RSB_WINDOW_LOCALE_CHANGED_CHANNEL, cb),
   appearanceSettings: {

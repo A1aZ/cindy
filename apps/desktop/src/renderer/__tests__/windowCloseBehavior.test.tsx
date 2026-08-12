@@ -75,6 +75,13 @@ describe('Windows close behavior', () => {
     expect(window.electronAPI.windowMinimize).not.toHaveBeenCalled();
   });
 
+  it('hides minimize when the current surface opts out', () => {
+    installWindowsApi(null);
+    render(<WindowControls showMinimize={false} />);
+
+    expect(screen.queryByRole('button', { name: 'titleBar.minimize' })).toBeNull();
+  });
+
   it('does not subscribe to main-window close requests from a secondary window', () => {
     window.history.replaceState({}, '', '/?secondaryWindow=1');
     const api = installWindowsApi(null);

@@ -132,7 +132,6 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
     expect(topLevel).toEqual(expect.arrayContaining(['localThemes']));
     expect(topLevel).toEqual(expect.arrayContaining(['appShortcuts']));
     expect(topLevel).toEqual(expect.arrayContaining(['theme']));
-    expect(topLevel).toEqual(expect.arrayContaining(['safeStorageRead', 'safeStorageRemove']));
     expect(topLevel).toEqual(expect.arrayContaining(['search']));
   });
 
@@ -212,6 +211,7 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
       'resourceUsageWindow', 'ghostPanelWindow',
       'pluginMarket', 'deepLink', 'gitContext',
       'cacheMediaForSession',
+      'safeStorageStore', 'safeStorageRead', 'safeStorageRemove',
     ];
     for (const key of forbidden) {
       expect(topLevel).not.toEqual(expect.arrayContaining([key]));

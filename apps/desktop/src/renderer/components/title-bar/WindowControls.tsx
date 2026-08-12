@@ -22,6 +22,8 @@ interface WindowControlsProps {
   iconClassName?: string;
   /** Override the default minimize action for an auxiliary window. */
   onMinimize?: () => void | Promise<void>;
+  /** Hide minimize when the current surface explicitly opts out of that action. */
+  showMinimize?: boolean;
   /** Override the default close action for an auxiliary window. */
   onClose?: () => void | Promise<void>;
 }
@@ -31,6 +33,7 @@ const DEFAULT_ICON_CLASS = 'text-titlebar-icon';
 export function WindowControls({
   iconClassName = DEFAULT_ICON_CLASS,
   onMinimize,
+  showMinimize = true,
   onClose,
 }: WindowControlsProps = {}) {
   const [showCloseDialog, setShowCloseDialog] = useState(false);
@@ -180,13 +183,15 @@ export function WindowControls({
   return (
     <>
       <div className="flex gap-0.5">
-        <button
-          className={cn(controlBase, 'hover:bg-titlebar-control-hover')}
-          onClick={handleMinimizeClick}
-          aria-label={t('titleBar.minimize')}
-        >
-          <Minus size={14} />
-        </button>
+        {showMinimize && (
+          <button
+            className={cn(controlBase, 'hover:bg-titlebar-control-hover')}
+            onClick={handleMinimizeClick}
+            aria-label={t('titleBar.minimize')}
+          >
+            <Minus size={14} />
+          </button>
+        )}
         <button
           className={cn(controlBase, 'hover:bg-titlebar-control-hover')}
           onClick={() => window.electronAPI.windowMaximize()}

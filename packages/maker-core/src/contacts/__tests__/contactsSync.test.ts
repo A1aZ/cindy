@@ -281,6 +281,40 @@ describe("contacts device sync", () => {
     expect(b.stats().pending).toBe(1);
   });
 
+  it("用户确认后出现更新的同身份冲突时，所有关联联系人重新变成待确认", () => {
+    const a = createStore();
+    const b = createStore();
+    a.activateDeviceSync();
+    b.activateDeviceSync();
+    const aContact = a.createContact({
+      kind: "person",
+      displayName: "甲",
+      identities: [{ platform: "email", value: "same@example.com" }],
+    });
+    a.updateContact(aContact.id, { status: "pending" });
+    stateOf(a);
+    a.updateContact(aContact.id, { status: "confirmed" });
+    stateOf(a);
+
+    // 让离线设备 B 的后续身份写入晚于 A 的确认裁决。
+    for (const displayName of ["垫高时钟一", "垫高时钟二", "垫高时钟三"]) {
+      b.createContact({ kind: "person", displayName });
+      stateOf(b);
+    }
+    const bContact = b.createContact({
+      kind: "person",
+      displayName: "乙",
+      identities: [{ platform: "email", value: "same@example.com" }],
+    });
+
+    exchange(a, b);
+    exchange(b, a);
+    expect(a.getContact(aContact.id).status).toBe("pending");
+    expect(a.getContact(bContact.id).status).toBe("pending");
+    expect(b.getContact(aContact.id).status).toBe("pending");
+    expect(b.getContact(bContact.id).status).toBe("pending");
+  });
+
   it("FTS 重建失败后重复接收相同状态仍会重试", () => {
     const a = createStore();
     const b = createStore();

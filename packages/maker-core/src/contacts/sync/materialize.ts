@@ -125,15 +125,25 @@ export function materializeContactsSyncState(
   const conflictedContactIds = new Set<string>();
   for (const [key, owners] of identityOwners.entries()) {
     if (owners.size <= 1) continue;
+    let latestConflictStamp: ContactsSyncStamp | undefined;
     for (const record of identityRecordsByKey.get(key) ?? []) {
       const value = record.value.value;
       conflictedContactIds.add(value.contactId);
-      const previous = latestConflictStampByContact.get(value.contactId);
+      if (
+        !latestConflictStamp ||
+        compareContactsSyncStamp(latestConflictStamp, record.value.stamp) < 0
+      ) {
+        latestConflictStamp = record.value.stamp;
+      }
+    }
+    if (!latestConflictStamp) continue;
+    for (const contactId of owners) {
+      const previous = latestConflictStampByContact.get(contactId);
       if (
         !previous ||
-        compareContactsSyncStamp(previous, record.value.stamp) < 0
+        compareContactsSyncStamp(previous, latestConflictStamp) < 0
       ) {
-        latestConflictStampByContact.set(value.contactId, record.value.stamp);
+        latestConflictStampByContact.set(contactId, latestConflictStamp);
       }
     }
   }

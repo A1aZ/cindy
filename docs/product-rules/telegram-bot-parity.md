@@ -60,6 +60,12 @@ Cindy 有两个 Telegram bot，用户看到的是同一个产品：
 | `PresenterPolicy.intermediateThrottleMs`（节流间隔） | 个人路径是**双层节流**：`turnRunner` 的 `CARD_PATCH_THROTTLE_MS` 确实读共享值，但真正出站的 `streamingText.ts` 还有一份写死的 `TELEGRAM_UPDATE_THROTTLE_MS = 1500`（注释称「双层节流冗余但无害」）。**改共享值只改得动 runner 那层，driver 那层不跟**——所以这个值也不是同源，改它要连 driver 的常量一起核对 |
 | `im/shared/botCommands.ts` 的**官方那一半** | 官方 bot 的命令**仍由服务端 `TELEGRAM_COMMANDS` 下发**，本表对官方侧是「声明性镜像、不接线」。测试只用内联清单核对镜像，**服务端改了命令这边完全可能不同步**。个人侧那一半是真的单一真相源（菜单与分发直接读它）；官方那一半是跨仓镜像，**改命令要两个仓一起核对** |
 
+### 官方 bot 群内回复路由（服务端正本）
+
+官方群把“消息与 Cindy 任务有关”和“消息由 Cindy 发出、可通过回复召唤 Cindy”分成两个判据：只有 `TelegramMessageRoute.botAuthored === true` 的 route 才能让回复消息自动召唤 Cindy。回复曾经触发任务的普通用户消息（`botAuthored === false`）不会误触发；消息明确 `@cindyapp_bot` 仍可召唤当前发言者自己的 Cindy。
+
+回复同一 principal 的 Cindy 输出时，服务端可以续用该 principal 的历史群 lane；回复其他 principal 的 Cindy 输出时，只把被引消息作为引用上下文，任务归当前发言者，不继承原任务的 principal、设备、会话或权限。这个规则适用于普通群和 forum topic；`/session`、interaction、取消和 reaction 的 owner 校验仍保持严格。个人 bot 的客户端实现若调整同族行为，必须同步核对本条。
+
 进度帧去重的三槽基线（`shouldEmitProgressFrame` / `createProgressEmitter`）同理：只在注入
 `onProgress` 时启用，也就是**只有官方那条路在用**，个人侧不消费。
 

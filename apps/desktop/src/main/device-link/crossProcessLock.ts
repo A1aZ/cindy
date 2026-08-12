@@ -9,6 +9,21 @@ import { promisify } from 'node:util';
 import { createLogger } from '../logger';
 import { readBoundedFileNoFollow } from '../utils/readBoundedFile.js';
 
+/**
+ * Cross-process locking has two intentionally separate policies.
+ *
+ * `withCrossProcessLock` is the ordinary/advisory tier: it provides real
+ * mutual exclusion, while the caller decides whether `busy` / `unavailable`
+ * means fail, defer, skip an optimization, or take a separately safe fallback.
+ * "Advisory" describes the ownership-proof and recovery policy; it does not
+ * mean callers may ignore a failed acquisition.
+ *
+ * `withSecurityBoundaryLock` is reserved for transitions where accepting the
+ * wrong owner would cross an authorization boundary. Its stronger identity and
+ * durable recovery rules are fixed by the API. Do not merge the tiers into one
+ * option-driven lock: that makes a security invariant removable at call sites
+ * and pushes the strict Windows failure surface back onto ordinary writes.
+ */
 const log = createLogger('device-link:cross-process-lock');
 
 const LOCK_STALE_MS = 10_000;
@@ -38,12 +53,6 @@ export type LockStatus = { held: true } | { held: false; reason: 'busy' | 'unava
 export interface FileLockOptions {
   label: string;
   waitMs?: number;
-  /** Defaults to true. Set false only for legacy callers that must never reclaim. */
-  allowStaleTakeover?: boolean;
-  /** Security boundaries may require an OS process birth identity before publishing. */
-  requireProcessIdentity?: boolean;
-  /** Legacy advisory locks treated stale readable garbage as crash residue. */
-  allowMalformedStaleTakeover?: boolean;
 }
 
 interface LockRecord {
@@ -73,6 +82,23 @@ type PublishedLock = {
   nonce: string;
   record: LockRecord;
 };
+type AdvisoryPublishedLock = {
+  nonce: string;
+};
+type AdvisoryLockRecord = {
+  pid: number;
+  nonce: string | null;
+};
+type AdvisoryStaleCandidate = {
+  identity: MalformedLockIdentity;
+  record: AdvisoryLockRecord | null;
+};
+type AdvisoryReclaimGate = {
+  dirPath: string;
+  filePath: string;
+  nonce: string;
+  heartbeat: ReturnType<typeof setInterval>;
+};
 type ReclaimGate = {
   dirPath: string;
   filePath: string;
@@ -84,13 +110,107 @@ let currentProcessIdentityPromise: Promise<ProcessIdentity | null> | null = null
 // A release gate whose final rename/fsync failed may still be ours. Keep its
 // nonce so the same process can recover it before treating the gate as busy.
 const pendingOwnRecordRecovery = new Map<string, string>();
+const pendingAdvisoryRecovery = new Map<string, string>();
 const pendingOwnGateCleanup = new Set<string>();
 
 function gateReleaseMarkerPath(gatePath: string): string {
   return `${gatePath}.released`;
 }
 
+/**
+ * Lightweight cross-process advisory lock for caches and ordinary durable stores.
+ *
+ * Callers retain ownership of the degradation policy through `LockStatus`. This
+ * path keeps the legacy canonical file shape, adding a nonce-bound owner record
+ * and rename isolation for safe release/takeover. It deliberately avoids the
+ * strict tier's process-identity commands, hard-link/fsync publication and
+ * released-marker protocol on the ordinary hot path. Plugin approval boundaries
+ * require those stronger proofs, but imposing their full state machine on every
+ * cache/settings write enlarged the Windows failure surface.
+ */
 export async function withCrossProcessLock<T>(
+  lockPath: string,
+  opts: FileLockOptions,
+  task: (status: LockStatus) => Promise<T>,
+): Promise<T> {
+  const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
+  let held = false;
+  let reason: 'busy' | 'unavailable' = 'unavailable';
+  let takeovers = 0;
+  let ownLock: AdvisoryPublishedLock | null = null;
+
+  for (;;) {
+    await recoverPendingAdvisoryLock(lockPath);
+    if (await ordinaryReclaimInProgress(lockPath)) {
+      reason = 'busy';
+      if (Date.now() >= deadline) break;
+      await sleep(LOCK_RETRY_MS);
+      continue;
+    }
+    try {
+      ownLock = await publishAdvisoryLock(lockPath);
+      if (await ordinaryReclaimInProgress(lockPath)) {
+        await releaseAdvisoryLock(lockPath, opts.label, ownLock);
+        ownLock = null;
+        reason = 'busy';
+        if (Date.now() >= deadline) break;
+        await sleep(LOCK_RETRY_MS);
+        continue;
+      }
+      held = true;
+      break;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // Windows may transiently report these while a recently removed path is
+      // still being released by the filesystem. Keep them inside the bounded
+      // retry loop instead of disabling the caller immediately.
+      if (code !== 'EEXIST' && code !== 'EBUSY' && code !== 'EPERM' && code !== 'EACCES') {
+        reason = 'unavailable';
+        break;
+      }
+      const stale = takeovers < MAX_TAKEOVERS
+        ? await inspectStaleAdvisoryLock(lockPath)
+        : null;
+      if (stale) {
+        takeovers += 1;
+        const takeover = await quarantineAdvisoryLock(lockPath, stale);
+        if (takeover === 'taken' || takeover === 'changed') continue;
+        reason = 'busy';
+        break;
+      }
+      if (Date.now() >= deadline) {
+        reason = 'busy';
+        break;
+      }
+      await sleep(LOCK_RETRY_MS);
+    }
+  }
+
+  const heartbeat = held
+    ? setInterval(() => {
+        const now = new Date();
+        void fsp.utimes(lockPath, now, now).catch(() => undefined);
+      }, LOCK_HEARTBEAT_MS)
+    : null;
+  heartbeat?.unref?.();
+
+  try {
+    return await task(held ? { held: true } : { held: false, reason });
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+    if (held && ownLock) await releaseAdvisoryLock(lockPath, opts.label, ownLock);
+  }
+}
+
+/**
+ * Strict lock for plugin approval and skill-projection security boundaries.
+ *
+ * The policy is intentionally fixed: exact process identity, nonce-bound
+ * publication/release, no takeover of malformed records, and recoverable
+ * reclaim gates. Keeping this as a separate API prevents ordinary callers from
+ * accidentally inheriting security-boundary lifecycle complexity.
+ */
+export async function withSecurityBoundaryLock<T>(
   lockPath: string,
   opts: FileLockOptions,
   task: (status: LockStatus) => Promise<T>,
@@ -104,7 +224,7 @@ export async function withCrossProcessLock<T>(
   // Do not charge the first process-identity probe against the caller's wait
   // budget. On Windows the initial CIM/WMIC lookup can take several seconds.
   const deadline = Date.now() + (opts.waitMs ?? LOCK_WAIT_MS);
-  if (opts.requireProcessIdentity && !processIdentity) {
+  if (!processIdentity) {
     return task({ held: false, reason: 'unavailable' });
   }
 
@@ -121,7 +241,7 @@ export async function withCrossProcessLock<T>(
       if (!publishedLock) throw Object.assign(new Error('lock exists'), { code: 'EEXIST' });
       const { nonce } = publishedLock;
       const [published, reclaiming] = await Promise.all([
-        readLockRecord(lockPath, opts.requireProcessIdentity === true),
+        readLockRecord(lockPath, true),
         reclaimInProgress(lockPath),
       ]);
       if (reclaiming || typeof published === 'string' || published.nonce !== nonce) {
@@ -154,21 +274,18 @@ export async function withCrossProcessLock<T>(
       }
       publishingAfterTakeover = false;
 
-      if (
-        opts.allowStaleTakeover !== false &&
-        takeovers < MAX_TAKEOVERS
-      ) {
+      if (takeovers < MAX_TAKEOVERS) {
         const stale = await inspectStaleLock(
           lockPath,
-          opts.allowMalformedStaleTakeover !== false,
-          opts.requireProcessIdentity === true,
+          false,
+          true,
         );
         if (stale) {
           log.warn(`taking over stale ${opts.label} lock from a dead owner`);
           const takeover = await quarantineStaleLock(
             lockPath,
             stale,
-            opts.requireProcessIdentity === true,
+            true,
           );
           if (takeover === 'taken') {
             takeovers += 1;
@@ -257,6 +374,281 @@ async function inspectStaleLock(
   return (await isRecordOwnerActive(record, createdAtMs))
     ? null
     : { kind: 'record', record };
+}
+
+/** Only a stale record whose owner is definitely gone may be reclaimed. */
+async function inspectStaleAdvisoryLock(
+  lockPath: string,
+): Promise<AdvisoryStaleCandidate | null> {
+  let stat: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    stat = await fsp.lstat(lockPath);
+  } catch {
+    return null;
+  }
+  if (Date.now() - stat.mtimeMs <= LOCK_STALE_MS) return null;
+
+  const record = await readAdvisoryLockRecord(lockPath);
+  if (record === 'unreadable') return null;
+  if (record === null) {
+    return {
+      identity: malformedLockIdentity(stat),
+      record: null,
+    };
+  }
+  try {
+    process.kill(record.pid, 0);
+    return null;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code !== 'ESRCH') return null;
+  }
+  return {
+    identity: malformedLockIdentity(stat),
+    record,
+  };
+}
+
+async function publishAdvisoryLock(lockPath: string): Promise<AdvisoryPublishedLock> {
+  const nonce = crypto.randomUUID();
+  let handle: Awaited<ReturnType<typeof fsp.open>> | null = null;
+  let created = false;
+  try {
+    // The canonical path must remain a directly-created regular file: released
+    // clients and older Cindy versions already coordinate through this shape.
+    handle = await fsp.open(lockPath, 'wx');
+    created = true;
+    await handle.writeFile(
+      JSON.stringify({ pid: process.pid, startedAt: Date.now(), nonce }),
+      'utf8',
+    );
+    await handle.close();
+    handle = null;
+    return { nonce };
+  } catch (error) {
+    await handle?.close().catch(() => undefined);
+    if (created) await fsp.rm(lockPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function readAdvisoryLockRecord(
+  lockPath: string,
+): Promise<AdvisoryLockRecord | null | 'unreadable'> {
+  let raw: string;
+  try {
+    raw = await fsp.readFile(lockPath, 'utf8');
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+    return 'unreadable';
+  }
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const pid = (value as { pid?: unknown }).pid;
+      const nonce = (value as { nonce?: unknown }).nonce;
+      if (typeof pid === 'number' && Number.isInteger(pid) && pid > 0) {
+        return {
+          pid,
+          nonce: typeof nonce === 'string' && nonce !== '' ? nonce : null,
+        };
+      }
+    }
+  } catch {
+    // Legacy advisory locks treated readable malformed stale data as residue.
+  }
+  return null;
+}
+
+function sameAdvisoryCandidate(
+  left: AdvisoryStaleCandidate | null,
+  right: AdvisoryStaleCandidate,
+): boolean {
+  if (!left) return false;
+  return sameMalformedLockIdentity(left.identity, right.identity)
+    && left.record?.pid === right.record?.pid
+    && left.record?.nonce === right.record?.nonce;
+}
+
+async function quarantineAdvisoryLock(
+  lockPath: string,
+  expected: AdvisoryStaleCandidate,
+): Promise<'taken' | 'changed' | 'busy' | 'failed'> {
+  // Only crash recovery pays for the reclaim gate. Cooperating acquisitions
+  // check it both before and after publication, so a successor cannot enter
+  // its task while the stale canonical path is being isolated.
+  const gate = await acquireAdvisoryReclaimGate(lockPath, 0);
+  if (!gate) return 'busy';
+  const quarantinePath = `${lockPath}.stale-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    const current = await inspectStaleAdvisoryLock(lockPath);
+    if (!sameAdvisoryCandidate(current, expected)) return 'changed';
+    try {
+      await fsp.rename(lockPath, quarantinePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      return code === 'ENOENT' || code === 'ENOTDIR' ? 'changed' : 'failed';
+    }
+    const moved = await inspectAdvisoryCandidate(quarantinePath);
+    if (!sameAdvisoryCandidate(moved, expected)) {
+      await restoreMovedPathSafely(quarantinePath, lockPath);
+      return 'failed';
+    }
+    await removePathWithRetry(quarantinePath);
+    return await pathExists(quarantinePath) ? 'failed' : 'taken';
+  } finally {
+    await releaseAdvisoryReclaimGate(gate);
+  }
+}
+
+async function inspectAdvisoryCandidate(
+  lockPath: string,
+): Promise<AdvisoryStaleCandidate | null> {
+  let stat: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    stat = await fsp.lstat(lockPath);
+  } catch {
+    return null;
+  }
+  const record = await readAdvisoryLockRecord(lockPath);
+  if (record === 'unreadable') return null;
+  return {
+    identity: malformedLockIdentity(stat),
+    record,
+  };
+}
+
+async function releaseAdvisoryLock(
+  lockPath: string,
+  label: string,
+  lock: AdvisoryPublishedLock,
+): Promise<void> {
+  const gate = await acquireAdvisoryReclaimGate(lockPath);
+  if (!gate) {
+    pendingAdvisoryRecovery.set(lockPath, lock.nonce);
+    log.warn(`${label} lock release gate is busy; leaving a recoverable owner record`);
+    return;
+  }
+  const releasePath = `${lockPath}.release-${process.pid}-${crypto.randomUUID()}`;
+  try {
+    const current = await readAdvisoryLockRecord(lockPath);
+    // The nonce, not the PID, is the ownership token. The same long-lived
+    // process may already have acquired a successor after an earlier release
+    // failure, and the predecessor must never remove that successor.
+    if (current === 'unreadable' || current === null || current.nonce !== lock.nonce) {
+      log.warn(`${label} lock was taken over; leaving it to its new owner`);
+      return;
+    }
+    try {
+      await fsp.rename(lockPath, releasePath);
+    } catch {
+      pendingAdvisoryRecovery.set(lockPath, lock.nonce);
+      return;
+    }
+    const moved = await readAdvisoryLockRecord(releasePath);
+    if (moved !== 'unreadable' && moved !== null && moved.nonce === lock.nonce) {
+      pendingAdvisoryRecovery.delete(lockPath);
+      await removePathWithRetry(releasePath);
+    } else {
+      await restoreMovedPathSafely(releasePath, lockPath);
+      log.warn(`${label} lock identity changed during release; preserving the isolated record`);
+    }
+  } finally {
+    await releaseAdvisoryReclaimGate(gate);
+  }
+}
+
+async function recoverPendingAdvisoryLock(lockPath: string): Promise<void> {
+  const nonce = pendingAdvisoryRecovery.get(lockPath);
+  if (!nonce) return;
+  const current = await readAdvisoryLockRecord(lockPath);
+  if (current === 'unreadable') return;
+  if (current === null || current.nonce !== nonce) {
+    pendingAdvisoryRecovery.delete(lockPath);
+    return;
+  }
+  await releaseAdvisoryLock(lockPath, 'advisory recovery', { nonce });
+}
+
+async function ordinaryReclaimInProgress(lockPath: string): Promise<boolean> {
+  await cleanupPendingOwnGates();
+  return reclaimInProgress(lockPath);
+}
+
+async function acquireAdvisoryReclaimGate(
+  lockPath: string,
+  waitMs = RELEASE_GATE_WAIT_MS,
+): Promise<AdvisoryReclaimGate | null> {
+  await cleanupPendingOwnGates();
+  const deadline = Date.now() + waitMs;
+  const dirPath = reclaimGateDirPath(lockPath);
+  do {
+    if (await legacyReclaimInProgress(lockPath)) {
+      if (Date.now() >= deadline) return null;
+      await sleep(LOCK_RETRY_MS);
+      continue;
+    }
+    try {
+      await fsp.mkdir(dirPath, { recursive: true });
+    } catch {
+      return null;
+    }
+    const nonce = crypto.randomUUID();
+    const filePath = path.join(dirPath, `gate-${process.pid}-${nonce}.json`);
+    let handle: Awaited<ReturnType<typeof fsp.open>> | null = null;
+    try {
+      // Keep the shared `gate-*` name and complete LockRecord shape so strict
+      // and older contenders observe this lightweight recovery gate. The
+      // estimated self identity avoids CIM/WMIC on the advisory path; freshness
+      // and the nonce-bound file name protect the short reclaim transaction.
+      handle = await fsp.open(filePath, 'wx');
+      await handle.writeFile(JSON.stringify({
+        pid: process.pid,
+        startedAt: Date.now(),
+        nonce,
+        processStartIdentity: estimateCurrentProcessIdentity().key,
+        state: 'held',
+      } satisfies LockRecord), 'utf8');
+      await handle.close();
+      handle = null;
+    } catch {
+      await handle?.close().catch(() => undefined);
+      await removePathWithRetry(filePath);
+      return null;
+    }
+
+    const heartbeat = setInterval(() => {
+      const now = new Date();
+      void fsp.utimes(filePath, now, now).catch(() => undefined);
+    }, LOCK_HEARTBEAT_MS);
+    heartbeat.unref?.();
+    const gate = { dirPath, filePath, nonce, heartbeat };
+    for (;;) {
+      const winner = await findActiveReclaimGate(dirPath);
+      if (winner === filePath) return gate;
+      if (winner === null || Date.now() >= deadline) {
+        await releaseAdvisoryReclaimGate(gate);
+        break;
+      }
+      await sleep(LOCK_RETRY_MS);
+    }
+    if (Date.now() >= deadline) return null;
+  } while (true);
+}
+
+async function releaseAdvisoryReclaimGate(gate: AdvisoryReclaimGate): Promise<void> {
+  clearInterval(gate.heartbeat);
+  const current = await readLockRecord(gate.filePath, true);
+  if (typeof current !== 'string' && current.nonce === gate.nonce) {
+    await removePathWithRetry(gate.filePath);
+  }
+  if (await pathExists(gate.filePath)) pendingOwnGateCleanup.add(gate.filePath);
+  try {
+    await fsp.rmdir(gate.dirPath);
+  } catch {
+    // Strict or advisory contenders may still be using the shared directory.
+  }
 }
 
 async function readLockRecord(
@@ -426,9 +818,15 @@ async function quarantineStaleLock(
   }
 }
 
-async function reclaimInProgress(lockPath: string): Promise<boolean> {
+async function reclaimInProgress(
+  lockPath: string,
+  requireProcessIdentity = true,
+): Promise<boolean> {
   if (await legacyReclaimInProgress(lockPath)) return true;
-  return (await findActiveReclaimGate(reclaimGateDirPath(lockPath))) !== null;
+  return (await findActiveReclaimGate(
+    reclaimGateDirPath(lockPath),
+    requireProcessIdentity,
+  )) !== null;
 }
 
 async function legacyReclaimInProgress(lockPath: string): Promise<boolean> {
@@ -484,7 +882,10 @@ async function cleanupPendingOwnGates(): Promise<void> {
   }
 }
 
-async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
+async function findActiveReclaimGate(
+  dirPath: string,
+  requireProcessIdentity = true,
+): Promise<string | null> {
   let entries: string[];
   try {
     entries = await fsp.readdir(dirPath);
@@ -503,7 +904,7 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     } catch {
       continue;
     }
-    const record = await readLockRecord(filePath, true);
+    const record = await readLockRecord(filePath, requireProcessIdentity);
     if (record === 'missing') continue;
     // A leftover .released sidecar from a previous gate instance shares the
     // same locked file name — its nonce must match the current gate record's
@@ -516,7 +917,10 @@ async function findActiveReclaimGate(dirPath: string): Promise<string | null> {
     }
     if (typeof record === 'string') {
       const fresh = Date.now() - stat.mtimeMs <= LOCK_STALE_MS;
-      if (fresh || await isMalformedGateOwnerActive(filePath, stat)) return filePath;
+      if (
+        fresh
+        || (requireProcessIdentity && await isMalformedGateOwnerActive(filePath, stat))
+      ) return filePath;
       await removePathWithRetry(filePath);
       if (await pathExists(filePath)) return filePath;
       continue;
@@ -570,6 +974,7 @@ async function isMalformedGateOwnerActive(
 async function acquireReclaimGate(
   lockPath: string,
   waitMs = RELEASE_GATE_WAIT_MS,
+  requireProcessIdentity = true,
 ): Promise<ReclaimGate | null> {
   await cleanupPendingOwnGates();
   const deadline = Date.now() + waitMs;
@@ -591,7 +996,9 @@ async function acquireReclaimGate(
     try {
       lock = await publishLockRecord(
         filePath,
-        (await getProcessIdentity(process.pid))?.key ?? null,
+        requireProcessIdentity
+          ? ((await getProcessIdentity(process.pid))?.key ?? null)
+          : null,
       );
     } catch {
       return null;
@@ -605,7 +1012,7 @@ async function acquireReclaimGate(
     heartbeat.unref?.();
     const gate: ReclaimGate = { dirPath, filePath, lock, heartbeat };
     for (;;) {
-      const winner = await findActiveReclaimGate(dirPath);
+      const winner = await findActiveReclaimGate(dirPath, requireProcessIdentity);
       if (winner === filePath) return gate;
       if (winner === null || Date.now() >= deadline) {
         await releaseReclaimGate(gate);

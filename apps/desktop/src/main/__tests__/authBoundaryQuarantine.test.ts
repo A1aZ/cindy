@@ -25,7 +25,7 @@ vi.mock('../logger.js', () => ({
 }));
 
 vi.mock('../device-link/crossProcessLock.js', () => ({
-  withCrossProcessLock: async (
+  withSecurityBoundaryLock: async (
     _lockPath: string,
     _options: unknown,
     task: (status: { held: true } | { held: false; reason: 'busy' }) => Promise<unknown>,

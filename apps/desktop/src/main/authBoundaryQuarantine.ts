@@ -13,7 +13,7 @@ import os from 'node:os';
 
 import { app } from 'electron';
 
-import { withCrossProcessLock } from './device-link/crossProcessLock.js';
+import { withSecurityBoundaryLock } from './device-link/crossProcessLock.js';
 import { createLogger } from './logger.js';
 import { atomicWriteFileSync } from './utils/atomicWriteFile.js';
 import { readBoundedFileNoFollowSync } from './utils/readBoundedFile.js';
@@ -265,6 +265,11 @@ function clearQuarantineState(transitionId: string): void {
 }
 
 async function withStrictBoundaryLock<T>(task: () => Promise<T>): Promise<T> {
+  // The in-process tail and the cross-process security lock are complementary:
+  // the tail preserves ordering inside this Main process, while the strict lock
+  // proves the owner of the globally shared projection transition. This is an
+  // authorization boundary, so busy/unavailable must fail closed and must not
+  // be replaced with the ordinary advisory tier.
   const previous = inProcessBoundaryTail;
   let releaseInProcess: () => void = () => undefined;
   inProcessBoundaryTail = new Promise<void>((resolve) => {
@@ -274,16 +279,11 @@ async function withStrictBoundaryLock<T>(task: () => Promise<T>): Promise<T> {
   try {
     const file = filePath();
     fs.mkdirSync(path.dirname(file), { recursive: true });
-    return await withCrossProcessLock(
+    return await withSecurityBoundaryLock(
       lockPath(),
       {
         label: 'ghost-skill-projection-boundary',
         waitMs: 12_000,
-        // Nonce-verified takeover and a recoverable reclaim gate make a crashed
-        // owner reclaimable without allowing a live owner to be overwritten.
-        allowStaleTakeover: true,
-        requireProcessIdentity: true,
-        allowMalformedStaleTakeover: false,
       },
       async (status) => {
         if (!status.held) {

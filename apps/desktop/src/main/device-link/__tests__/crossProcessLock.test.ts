@@ -1,11 +1,10 @@
 /**
- * crossProcessLock —— 跨实例建议性文件锁的行为守卫。
+ * crossProcessLock —— ordinary/advisory 与 security-boundary 两档锁的行为守卫。
  *
- * 这里只守一件最容易出事的:**接管陈旧锁的路径不能空转**。锁文件删不掉(Windows 上
- * EPERM / EBUSY 最常见)时,"陈旧 + owner 已死"的判定下一轮仍然成立 —— 原实现 catch 掉
- * 删除失败就 continue,于是变成没有退避、没有截止时间的忙等,把调用方永久卡住
- * (review: copilot)。其余行为(存活判定、不删别人的锁、降级语义)由
- * mirrorCachePurgeQueue.test.ts 的「锁的所有权」用例覆盖。
+ * ordinary 档守旧文件形态、nonce 所有权和轻量 Windows 热路径；strict 档守精确进程身份、
+ * malformed fail-closed 与可恢复 reclaim 协议。两档共享路径时还必须互相看见 gate，避免
+ * 混版本或不同策略的实例同时进入临界区。测试中的别名只用于保留原 strict 回归组的命名，
+ * 新增用例应显式选择对应档位。
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
@@ -18,7 +17,11 @@ vi.mock('../../logger', () => ({
   createLogger: () => ({ warn: vi.fn(), error: vi.fn(), info: vi.fn(), debug: vi.fn() }),
 }));
 
-import { __testing, withCrossProcessLock } from '../crossProcessLock';
+import {
+  __testing,
+  withCrossProcessLock as withAdvisoryCrossProcessLock,
+  withSecurityBoundaryLock as withCrossProcessLock,
+} from '../crossProcessLock';
 
 let dir: string;
 
@@ -48,6 +51,22 @@ async function writeStaleLock(lock: string): Promise<void> {
   await fsp.utimes(lock, old, old);
 }
 
+async function writeStaleStrictLock(lock: string): Promise<void> {
+  await fsp.writeFile(
+    lock,
+    JSON.stringify({
+      pid: 0x7ffffffe,
+      startedAt: 1,
+      nonce: '00000000-0000-4000-8000-000000000001',
+      processStartIdentity: 'start-ms:1',
+      state: 'held',
+    }),
+    'utf8',
+  );
+  const old = new Date(Date.now() - 60_000);
+  await fsp.utimes(lock, old, old);
+}
+
 async function writeStaleReclaimGate(lock: string): Promise<void> {
   const gate = `${lock}.reclaim`;
   await fsp.writeFile(
@@ -64,7 +83,11 @@ describe('接管陈旧锁', () => {
     const lock = path.join(dir, 'lock');
     await writeStaleLock(lock);
 
-    const status = await withCrossProcessLock(lock, { label: 'test', waitMs: 200 }, async (s) => s);
+    const status = await withAdvisoryCrossProcessLock(
+      lock,
+      { label: 'test', waitMs: 200 },
+      async (s) => s,
+    );
 
     expect(status).toEqual({ held: true });
   });
@@ -78,7 +101,7 @@ describe('接管陈旧锁', () => {
       from: unknown,
       to: unknown,
     ) => {
-      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
+      if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.stale-`)) {
         renameAttempts += 1;
         throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
       }
@@ -86,7 +109,7 @@ describe('接管陈旧锁', () => {
     }) as typeof fsp.rename);
     try {
       const started = performance.now();
-      const status = await withCrossProcessLock(
+      const status = await withAdvisoryCrossProcessLock(
         lock,
         { label: 'test', waitMs: 5_000 },
         async (s) => s,
@@ -105,14 +128,197 @@ describe('接管陈旧锁', () => {
       spy.mockRestore();
     }
 
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it('advisory release leaves no strict recovery artifacts and permits reacquisition', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+
     await expect(
-      withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s),
+      withAdvisoryCrossProcessLock(lock, { label: 'first' }, async (s) => s),
     ).resolves.toEqual({ held: true });
+    await expect(
+      withAdvisoryCrossProcessLock(lock, { label: 'second' }, async (s) => s),
+    ).resolves.toEqual({ held: true });
+
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it('keeps the advisory canonical lock as a legacy-readable file', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+
+    await withAdvisoryCrossProcessLock(lock, { label: 'shape' }, async (status) => {
+      expect(status).toEqual({ held: true });
+      expect((await fsp.lstat(lock)).isFile()).toBe(true);
+      expect(JSON.parse(await fsp.readFile(lock, 'utf8'))).toMatchObject({
+        pid: process.pid,
+        nonce: expect.any(String),
+      });
+    });
+  });
+
+  it('does not use strict hard-link publication on the advisory hot path', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+    const linkSpy = vi.spyOn(fsp, 'link');
+    try {
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'lightweight' }, async (status) => status),
+      ).resolves.toEqual({ held: true });
+      expect(linkSpy).not.toHaveBeenCalled();
+    } finally {
+      linkSpy.mockRestore();
+    }
+  });
+
+  it('advisory release does not remove a successor with a different nonce', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+    const successor = {
+      pid: process.pid,
+      startedAt: Date.now(),
+      nonce: '00000000-0000-4000-8000-000000000002',
+    };
+
+    await withAdvisoryCrossProcessLock(lock, { label: 'predecessor' }, async (status) => {
+      expect(status).toEqual({ held: true });
+      await fsp.writeFile(lock, JSON.stringify(successor), 'utf8');
+    });
+
+    expect(JSON.parse(await fsp.readFile(lock, 'utf8'))).toEqual(successor);
+  });
+
+  it('does not reclaim a stale advisory lock while its owner pid is still alive', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+    await fsp.writeFile(
+      lock,
+      JSON.stringify({
+        pid: process.pid,
+        startedAt: 1,
+        nonce: '00000000-0000-4000-8000-000000000003',
+      }),
+      'utf8',
+    );
+    const old = new Date(Date.now() - 60_000);
+    await fsp.utimes(lock, old, old);
+
+    await expect(
+      withAdvisoryCrossProcessLock(
+        lock,
+        { label: 'live-owner', waitMs: 100 },
+        async (status) => status,
+      ),
+    ).resolves.toEqual({ held: false, reason: 'busy' });
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it('recovers a same-process advisory record after release rename fails', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+    const originalRename = fsp.rename;
+    let failedRelease = false;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (
+        !failedRelease
+        && from === lock
+        && typeof to === 'string'
+        && to.startsWith(`${lock}.release-`)
+      ) {
+        failedRelease = true;
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+    try {
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'first' }, async (status) => status),
+      ).resolves.toEqual({ held: true });
+      expect(fs.existsSync(lock)).toBe(true);
+
+      await expect(
+        withAdvisoryCrossProcessLock(lock, { label: 'second' }, async (status) => status),
+      ).resolves.toEqual({ held: true });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it('advisory release gate prevents a successor replacement race', async () => {
+    const lock = path.join(dir, 'advisory-lock');
+    const releaseFirstTask = deferred();
+    const firstTaskStarted = deferred();
+    const releaseRenameStarted = deferred();
+    const allowReleaseRename = deferred();
+    const originalRename = fsp.rename;
+    let blockedRelease = false;
+    const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
+      from: unknown,
+      to: unknown,
+    ) => {
+      if (
+        !blockedRelease
+        && from === lock
+        && typeof to === 'string'
+        && to.startsWith(`${lock}.release-`)
+      ) {
+        blockedRelease = true;
+        releaseRenameStarted.resolve();
+        await allowReleaseRename.promise;
+      }
+      return (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
+    }) as typeof fsp.rename);
+
+    try {
+      const first = withAdvisoryCrossProcessLock(
+        lock,
+        { label: 'first', waitMs: 500 },
+        async (status) => {
+          expect(status).toEqual({ held: true });
+          firstTaskStarted.resolve();
+          await releaseFirstTask.promise;
+          return status;
+        },
+      );
+      await firstTaskStarted.promise;
+      releaseFirstTask.resolve();
+      await releaseRenameStarted.promise;
+
+      await fsp.rm(lock, { force: true });
+      await fsp.writeFile(
+        lock,
+        JSON.stringify({
+          pid: process.pid,
+          startedAt: Date.now(),
+          nonce: '00000000-0000-4000-8000-000000000004',
+        }),
+        'utf8',
+      );
+
+      await expect(
+        withAdvisoryCrossProcessLock(
+          lock,
+          { label: 'third', waitMs: 100 },
+          async (status) => status,
+        ),
+      ).resolves.toEqual({ held: false, reason: 'busy' });
+
+      allowReleaseRename.resolve();
+      await expect(first).resolves.toEqual({ held: true });
+      expect(JSON.parse(await fsp.readFile(lock, 'utf8'))).toMatchObject({
+        nonce: '00000000-0000-4000-8000-000000000004',
+      });
+    } finally {
+      allowReleaseRename.resolve();
+      releaseFirstTask.resolve();
+      spy.mockRestore();
+    }
   });
 
   it('reclaims a crashed reclaim gate before taking over the stale lock', async () => {
     const lock = path.join(dir, 'lock');
-    await writeStaleLock(lock);
+    await writeStaleStrictLock(lock);
     await writeStaleReclaimGate(lock);
 
     const status = await withCrossProcessLock(lock, { label: 'test', waitMs: 500 }, async (s) => s);
@@ -130,7 +336,7 @@ describe('接管陈旧锁', () => {
     await expect(
       withCrossProcessLock(
         lock,
-        { label: 'test', waitMs: 100, allowMalformedStaleTakeover: false },
+        { label: 'test', waitMs: 100 },
         async (s) => s,
       ),
     ).resolves.toEqual({ held: false, reason: 'busy' });
@@ -171,7 +377,7 @@ describe('接管陈旧锁', () => {
         JSON.stringify({
           pid: child.pid,
           startedAt: 1,
-          processStartIdentity: 'start-ms:0',
+          processStartIdentity: 'start-ms:1',
           nonce: '00000000-0000-4000-8000-000000000001',
           state: 'held',
         }),
@@ -199,7 +405,7 @@ describe('接管陈旧锁', () => {
       JSON.stringify({
         pid: process.pid,
         startedAt: 1,
-        processStartIdentity: 'start-ms:0',
+        processStartIdentity: 'start-ms:1',
         nonce: '00000000-0000-4000-8000-000000000001',
         state: 'held',
       }),
@@ -268,6 +474,7 @@ describe('接管陈旧锁', () => {
         pid: 0x7ffffffe,
         startedAt: 1,
         nonce: '00000000-0000-4000-8000-000000000001',
+        processStartIdentity: 'start-ms:1',
         state: 'released',
       }),
       'utf8',
@@ -331,8 +538,6 @@ describe('接管陈旧锁', () => {
           {
             label: 'strict',
             waitMs: 100,
-            requireProcessIdentity: true,
-            allowMalformedStaleTakeover: false,
           },
           async (s) => s,
         ),
@@ -362,7 +567,7 @@ describe('接管陈旧锁', () => {
     await expect(
       withCrossProcessLock(
         lock,
-        { label: 'strict', waitMs: 100, requireProcessIdentity: true, allowMalformedStaleTakeover: false },
+        { label: 'strict', waitMs: 100 },
         async (s) => s,
       ),
     ).resolves.toEqual({ held: false, reason: 'busy' });
@@ -400,7 +605,7 @@ describe('接管陈旧锁', () => {
     await expect(
       withCrossProcessLock(
         lock,
-        { label: 'strict', waitMs: 100, requireProcessIdentity: true, allowMalformedStaleTakeover: false },
+        { label: 'strict', waitMs: 100 },
         async (s) => s,
       ),
     ).resolves.toEqual({ held: false, reason: 'busy' });
@@ -409,7 +614,7 @@ describe('接管陈旧锁', () => {
 
   it('bounds repeated successful stale takeovers by time and count', async () => {
     const lock = path.join(dir, 'lock');
-    await writeStaleLock(lock);
+    await writeStaleStrictLock(lock);
     const originalRename = fsp.rename;
     let takeovers = 0;
     const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
@@ -419,7 +624,7 @@ describe('接管陈旧锁', () => {
       const result = await (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
       if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
         takeovers += 1;
-        await writeStaleLock(lock);
+        await writeStaleStrictLock(lock);
       }
       return result;
     }) as typeof fsp.rename);
@@ -437,7 +642,7 @@ describe('接管陈旧锁', () => {
 
   it('publishes after the final stale takeover when the path stays empty', async () => {
     const lock = path.join(dir, 'lock');
-    await writeStaleLock(lock);
+    await writeStaleStrictLock(lock);
     const originalRename = fsp.rename;
     let takeovers = 0;
     const spy = vi.spyOn(fsp, 'rename').mockImplementation((async (
@@ -447,7 +652,7 @@ describe('接管陈旧锁', () => {
       const result = await (originalRename as (...args: unknown[]) => Promise<unknown>)(from, to);
       if (from === lock && typeof to === 'string' && to.startsWith(`${lock}.reclaim-`)) {
         takeovers += 1;
-        if (takeovers < 3) await writeStaleLock(lock);
+        if (takeovers < 3) await writeStaleStrictLock(lock);
       }
       return result;
     }) as typeof fsp.rename);

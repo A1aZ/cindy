@@ -703,6 +703,10 @@ export class GhostOauthAccountManager {
         ) {
           return { ok: false, error: 'VAULT_WRITE_FAILED' };
         }
+      } else if (existing.expiredReason === 'oauth_client_changed') {
+        // 新 client 的授权响应没有 refresh token 时，不能继续保留旧 client
+        // 签发的 token；当前 access token 过期后按无 refresh token 正常引导重连。
+        this.deps.vault.remove(ghostId, refreshTokenKey(secretKey, existing.id));
       }
       // 重连顺带刷新展示名:老账号(displayTemplate 上线前连的)或用户改过
       // 显示名/workspace 名的,这里追上最新值。
@@ -1107,7 +1111,7 @@ export class GhostOauthAccountManager {
           ghostId,
           secretKey,
         });
-        return 0;
+        throw new Error('Unable to persist OAuth client migration state');
       }
     }
     for (const key of this.tokenCache.keys()) {

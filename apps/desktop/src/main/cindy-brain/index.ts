@@ -4039,6 +4039,12 @@ async function installOrUpdateMarketGhostPackageLocked(
       result = await manager.update(cindyFilePath, {
         expectedPackageSha256: inspected.packageSha256,
         ...(trustOverride ? { trustOverride } : {}),
+        beforePackageCommit: () => {
+          getGhostOauthAccountManager().expireAccountsForChangedClients(
+            withRuntimeFiloGoogleClient(installed.manifest),
+            withRuntimeFiloGoogleClient(inspected.canonicalManifest),
+          );
+        },
         onPackagePlaced: () => {
           packagePlaced = true;
           expected.onPackagePlacedInLock?.();
@@ -4061,10 +4067,6 @@ async function installOrUpdateMarketGhostPackageLocked(
       spawnIfResident(installed);
       throwInstallError(result.rejection);
     }
-    getGhostOauthAccountManager().expireAccountsForChangedClients(
-      withRuntimeFiloGoogleClient(installed.manifest),
-      withRuntimeFiloGoogleClient(result.ghost.manifest),
-    );
     runtime.resetFuse(expected.ghostId);
     const store = getLayoutStore();
     const docked = layoutWithGhostPanel(store.getLayout(), result.ghost.manifest);
@@ -5401,6 +5403,16 @@ export function registerGhostIpc(): void {
         try {
           result = await manager.update(lizFilePath, {
             expectedPackageSha256,
+            ...(previousGhost
+              ? {
+                  beforePackageCommit: () => {
+                    getGhostOauthAccountManager().expireAccountsForChangedClients(
+                      withRuntimeFiloGoogleClient(previousGhost.manifest),
+                      withRuntimeFiloGoogleClient(inspected.canonicalManifest),
+                    );
+                  },
+                }
+              : {}),
             onPackagePlaced: () => {
               packagePlaced = true;
             },
@@ -5424,12 +5436,6 @@ export function registerGhostIpc(): void {
           restoreMarketRecord();
           if (previousGhost) spawnIfResident(previousGhost);
           throwInstallError(result.rejection);
-        }
-        if (previousGhost) {
-          getGhostOauthAccountManager().expireAccountsForChangedClients(
-            withRuntimeFiloGoogleClient(previousGhost.manifest),
-            withRuntimeFiloGoogleClient(result.ghost.manifest),
-          );
         }
         runtime.resetFuse(inspected.manifest.id); // 换了代码,给新版本干净的熔断记账
         const store = getLayoutStore();

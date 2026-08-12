@@ -22,6 +22,8 @@ import {
   SORT_BY_KEY,
   TASK_INFO_KEY,
   MANUAL_PROJECT_ORDER_KEY,
+  DIALOGUE_GROUP_COLLAPSED_KEY,
+  DIALOGUE_GROUP_ALL_KEY,
   loadStatus,
   loadProjects,
   loadGroupBy,
@@ -29,6 +31,8 @@ import {
   loadSortBy,
   loadTaskInfoFields,
   loadManualProjectOrder,
+  loadDialogueGroupCollapsedKeys,
+  persistDialogueGroupCollapsedKeys,
   persistStatus,
   persistProjects,
   persistGroupBy,
@@ -289,6 +293,39 @@ describe('taskInfoFields（任务行右侧信息复选）', () => {
     expect(nextTaskInfoAfterToggle(['time', 'cost'], 'time')).toEqual(['cost']);
     expect(nextTaskInfoAfterToggle(['cost'], 'cost')).toEqual([]);
     expect(nextTaskInfoAfterToggle([], 'pr')).toEqual(['pr']);
+  });
+});
+
+describe('dialogueGroupCollapsedKeys（对话组按分组 key 独立折叠）', () => {
+  beforeEach(() => installMemoryLocalStorage());
+  afterEach(() => uninstallLocalStorage());
+
+  it('defaults to empty set when storage is empty', () => {
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual([]);
+  });
+
+  it("migrates legacy boolean: 'true' → [DIALOGUE_GROUP_ALL_KEY], 'false' → empty", () => {
+    localStorage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, 'true');
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual([DIALOGUE_GROUP_ALL_KEY]);
+    localStorage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, 'false');
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual([]);
+  });
+
+  it('persist → load round-trips per-device keys independently', () => {
+    persistDialogueGroupCollapsedKeys(new Set(['local', 'device-1']));
+    const keys = loadDialogueGroupCollapsedKeys();
+    expect(keys.has('local')).toBe(true);
+    expect(keys.has('device-1')).toBe(true);
+    expect(keys.has('device-2')).toBe(false);
+  });
+
+  it('falls back to empty on broken JSON / shape mismatch and drops non-string entries', () => {
+    localStorage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, '{not-json');
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual([]);
+    localStorage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, JSON.stringify({ all: true }));
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual([]);
+    localStorage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, JSON.stringify(['local', 42, 'device-1']));
+    expect([...loadDialogueGroupCollapsedKeys()]).toEqual(['local', 'device-1']);
   });
 });
 

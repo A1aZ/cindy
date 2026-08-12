@@ -49,8 +49,9 @@ import {
 import {
   normalizeManualProjectOrder,
   mergeVisibleReorder,
-  loadDialogueGroupCollapsed,
-  persistDialogueGroupCollapsed,
+  loadDialogueGroupCollapsedKeys,
+  persistDialogueGroupCollapsedKeys,
+  DIALOGUE_GROUP_ALL_KEY,
 } from '../../hooks/helpers/sidebarFilterCore';
 import {
   buildMainListEntries,
@@ -87,6 +88,9 @@ const HEADER_HOVER_ACTION_CLASS = cn(
 );
 
 const HEADER_ACTIONS_CLASS = cn('flex items-center gap-0.5 -mt-px', HEADER_HOVER_ACTION_CLASS);
+
+/** 设备段折叠/对话组折叠共用的段 key:本机段 'local',远程段用 deviceId。 */
+const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
 
 export interface ProjectsSectionProps {
   unclassified: Session[];
@@ -320,15 +324,26 @@ export function ProjectsSection({
   // 设备段折叠(E 期):本机段 key 'local'。
   const [collapsedDevices, setCollapsedDevices] = useState<ReadonlySet<string>>(new Set());
   // 「对话」组折叠:与项目行折叠同级的分组状态(用户裁决:对话组的折叠交互与
-  // 项目分组一致,含「收起所有分组」批量操作)。持久化为显示类本地偏好。
-  const [dialogueGroupCollapsed, setDialogueGroupCollapsed] = useState<boolean>(() =>
-    loadDialogueGroupCollapsed(),
+  // 项目分组一致,含「收起所有分组」批量操作)。按分组 key 记忆——单一列表只有
+  // 一个组(DIALOGUE_GROUP_ALL_KEY);按设备分组时每个设备段各有一个对话组,
+  // 折叠互相独立(2026-08-12 实机反馈:共用一个 boolean 会点一个全展开)。
+  // 持久化为显示类本地偏好。
+  const [collapsedDialogueGroups, setCollapsedDialogueGroups] = useState<ReadonlySet<string>>(() =>
+    loadDialogueGroupCollapsedKeys(),
   );
-  const setDialogueCollapsed = useCallback((next: boolean) => {
-    setDialogueGroupCollapsed(next);
-    persistDialogueGroupCollapsed(next);
+  const setDialogueCollapsed = useCallback((keys: readonly string[], next: boolean) => {
+    setCollapsedDialogueGroups((prev) => {
+      const nextSet = new Set(prev);
+      for (const key of keys) {
+        if (next) nextSet.add(key);
+        else nextSet.delete(key);
+      }
+      // 在函数式更新里持久化:批量收起与单组切换共用一条路径;localStorage
+      // 同值重写幂等,StrictMode 双调用无副作用差异。
+      persistDialogueGroupCollapsedKeys(nextSet);
+      return nextSet;
+    });
   }, []);
-  const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
   const toggleDeviceSection = useCallback((key: string) => {
     setCollapsedDevices((prev) => {
       const next = new Set(prev);
@@ -344,8 +359,20 @@ export function ProjectsSection({
   // 组层 = 项目行 + 「对话」组行(用户裁决:对话组与项目分组同一套批量折叠),
   // 项目侧复用 ProjectNode 折叠状态(collapsed / onCollapseAll / onExpandAll)。
   const hasGroupLayer = visibleMixedEntries.some((entry) => entry.kind !== 'session');
-  const hasDialogueGroup = visibleMixedEntries.some((entry) => entry.kind === 'dialogue-group');
-  const allGroupsCollapsed = isAllCollapsed && (!hasDialogueGroup || dialogueGroupCollapsed);
+  // 当前可见的对话组 key:设备分组下 = 各含对话组条目的设备段;否则单一组。
+  // 「收起/展开所有分组」只作用于这些可见 key,不动其它模式下的记忆。
+  const visibleDialogueGroupKeys = useMemo<string[]>(() => {
+    if (!deviceGroupingActive) {
+      return visibleMixedEntries.some((entry) => entry.kind === 'dialogue-group')
+        ? [DIALOGUE_GROUP_ALL_KEY]
+        : [];
+    }
+    return deviceSections
+      .filter((section) => section.entries.some((entry) => entry.kind === 'dialogue-group'))
+      .map((section) => deviceSectionKey(section.deviceId));
+  }, [deviceGroupingActive, visibleMixedEntries, deviceSections]);
+  const allGroupsCollapsed =
+    isAllCollapsed && visibleDialogueGroupKeys.every((key) => collapsedDialogueGroups.has(key));
   const hasDeviceLayer = deviceGroupingActive && deviceSections.length > 0;
   const allDevicesCollapsed =
     hasDeviceLayer &&
@@ -359,7 +386,7 @@ export function ProjectsSection({
   const handleFoldAll = useCallback(() => {
     if (foldState === 'collapse-groups') {
       onCollapseAll();
-      setDialogueCollapsed(true);
+      setDialogueCollapsed(visibleDialogueGroupKeys, true);
       return;
     }
     if (foldState === 'collapse-devices') {
@@ -371,8 +398,15 @@ export function ProjectsSection({
     // expand-all:全部层级展开(设备段 + 项目行 + 对话组)。
     setCollapsedDevices(new Set());
     onExpandAll();
-    setDialogueCollapsed(false);
-  }, [foldState, deviceSections, onCollapseAll, onExpandAll, setDialogueCollapsed]);
+    setDialogueCollapsed(visibleDialogueGroupKeys, false);
+  }, [
+    foldState,
+    deviceSections,
+    visibleDialogueGroupKeys,
+    onCollapseAll,
+    onExpandAll,
+    setDialogueCollapsed,
+  ]);
   const foldLabel =
     foldState === 'collapse-groups'
       ? hasDeviceLayer
@@ -442,8 +476,9 @@ export function ProjectsSection({
   );
 
   // 散排对话行 / 「对话」组行。散排行带来源标签(hover);对话组行 = 可折叠的
-  // 分组头 + 组内会话(折叠上限与对话段旧口径一致)。
-  const renderNonProjectEntry = (entry: MainListEntry): ReactNode => {
+  // 分组头 + 组内会话(折叠上限与对话段旧口径一致)。dialogueGroupKey 标识
+  // 该组属于哪个段(设备段 key / 单一列表 DIALOGUE_GROUP_ALL_KEY),折叠独立。
+  const renderNonProjectEntry = (entry: MainListEntry, dialogueGroupKey: string): ReactNode => {
     if (entry.kind === 'session') {
       return (
         <SessionEntryList
@@ -468,12 +503,13 @@ export function ProjectsSection({
       );
     }
     if (entry.kind === 'dialogue-group') {
+      const isCollapsed = collapsedDialogueGroups.has(dialogueGroupKey);
       return (
         <DialogueGroupNode
-          key="dialogue-group"
+          key={`dialogue-group:${dialogueGroupKey}`}
           sessions={entry.sessions}
-          collapsed={dialogueGroupCollapsed}
-          onToggle={() => setDialogueCollapsed(!dialogueGroupCollapsed)}
+          collapsed={isCollapsed}
+          onToggle={() => setDialogueCollapsed([dialogueGroupKey], !isCollapsed)}
           onCreateDialogue={onCreateDialogue}
           isCreateDisabled={isCreateDialogueDisabled}
           parentSectionCollapsed={isSectionCollapsed}
@@ -632,7 +668,7 @@ export function ProjectsSection({
               />
               {visibleMixedEntries
                 .filter((entry) => entry.kind !== 'project')
-                .map((entry) => renderNonProjectEntry(entry))}
+                .map((entry) => renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY))}
             </>
           ) : deviceGroupingActive ? (
             <div className="flex flex-col gap-1">
@@ -691,7 +727,7 @@ export function ProjectsSection({
                         {section.entries.map((entry) =>
                           entry.kind === 'project'
                             ? renderProjectNode(entry.project)
-                            : renderNonProjectEntry(entry),
+                            : renderNonProjectEntry(entry, key),
                         )}
                       </div>
                     </SectionCollapse>
@@ -704,7 +740,7 @@ export function ProjectsSection({
               {visibleMixedEntries.map((entry) =>
                 entry.kind === 'project'
                   ? renderProjectNode(entry.project)
-                  : renderNonProjectEntry(entry),
+                  : renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY),
               )}
             </div>
           )}

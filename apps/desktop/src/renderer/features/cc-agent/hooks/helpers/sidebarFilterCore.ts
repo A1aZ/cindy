@@ -34,6 +34,8 @@ export const GROUP_BY_KEY = 'cc-agent.sidebar.filter.groupBy';
 export const GROUP_DIALOGUE_KEY = 'cc-agent.sidebar.filter.groupDialogue';
 export const GROUP_DEVICE_KEY = 'cc-agent.sidebar.filter.groupDevice';
 export const DIALOGUE_GROUP_COLLAPSED_KEY = 'cc-agent.sidebar.dialogueGroupCollapsed';
+/** 单一混排列表(未按设备切段)里唯一对话组的折叠状态 key。 */
+export const DIALOGUE_GROUP_ALL_KEY = 'all';
 export const LAST_ACTIVITY_KEY = 'cc-agent.sidebar.filter.lastActivity';
 export const SORT_BY_KEY = 'cc-agent.sidebar.filter.sortBy';
 export const TASK_INFO_KEY = 'cc-agent.sidebar.filter.taskInfo';
@@ -341,25 +343,34 @@ export function persistGroupDevice(groupDevice: boolean): void {
 
 /**
  * 「对话」组行的折叠状态(与项目行折叠同级的分组折叠,默认展开)。
- * 项目折叠是 owner-scoped(useCollapsedProjects);对话组只有一个、无 GC 需求,
+ * 项目折叠是 owner-scoped(useCollapsedProjects);对话组按分组 key 记忆:
+ * 单一混排列表只有一个组(DIALOGUE_GROUP_ALL_KEY),按设备分组时每个设备段
+ * 各有一个对话组('local' / deviceId),折叠互相独立(2026-08-12 实机反馈:
+ * 共用一个 boolean 会点一个全展开)。条目是有限的短字符串、无 GC 需求,
  * 按显示类偏好走本地 localStorage 即可。
+ * 兼容旧格式:曾是单个 boolean 字符串,'true' 迁移为 [DIALOGUE_GROUP_ALL_KEY]。
  */
-export function loadDialogueGroupCollapsed(): boolean {
+export function loadDialogueGroupCollapsedKeys(): ReadonlySet<string> {
   const storage = safeStorage();
-  if (!storage) return false;
+  if (!storage) return new Set();
   try {
-    return storage.getItem(DIALOGUE_GROUP_COLLAPSED_KEY) === 'true';
+    const raw = storage.getItem(DIALOGUE_GROUP_COLLAPSED_KEY);
+    if (!raw || raw === 'false') return new Set();
+    if (raw === 'true') return new Set([DIALOGUE_GROUP_ALL_KEY]);
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((v): v is string => typeof v === 'string'));
   } catch (err) {
     log.warn('[useSidebarFilter] failed to read dialogueGroupCollapsed:', err);
-    return false;
+    return new Set();
   }
 }
 
-export function persistDialogueGroupCollapsed(collapsed: boolean): void {
+export function persistDialogueGroupCollapsedKeys(keys: ReadonlySet<string>): void {
   const storage = safeStorage();
   if (!storage) return;
   try {
-    storage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, String(collapsed));
+    storage.setItem(DIALOGUE_GROUP_COLLAPSED_KEY, JSON.stringify([...keys]));
   } catch (err) {
     log.warn('[useSidebarFilter] failed to persist dialogueGroupCollapsed:', err);
   }

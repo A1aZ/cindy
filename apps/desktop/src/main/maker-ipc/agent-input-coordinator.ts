@@ -1715,6 +1715,7 @@ export class AgentInputCoordinator {
     // 可能已经清空的 activeTurn 读取。
     const steerContinuationOwnerClientId = state.activeTurn?.continuationOwnerClientId ?? null;
     const steerVendorTurnGeneration = this.deps.getTurnGeneration?.(sessionId) ?? null;
+    let finalDispatchGuard: (() => void) | undefined;
     this.clearErrorUnlessQueueHeadBlocked(state, item.clientId);
     state.queuePaused = false;
     if (!state.steeringQueueClientIds.includes(item.clientId)) {
@@ -1789,12 +1790,17 @@ export class AgentInputCoordinator {
         item.persistedContent,
         referenceContexts,
       );
+      if (steersStoredQueueItem && item.requireCurrentSessionFocus === true) {
+        const acceptedResult = await this.deps.onAcceptedQueuedMessage?.(sessionId, item);
+        finalDispatchGuard = typeof acceptedResult === 'function' ? acceptedResult : undefined;
+      }
       await this.deps.steerToAgent(sessionId, buildMakerUserMessage(item, referenceContexts), {
         messageUuid,
         userName: item.userName,
         signal: AbortSignal.any([inputBoundarySignal, steerAbort.signal]),
         expectedClearBoundaryMs: steerClearBoundaryMs,
         expectedInputGeneration: steerGeneration,
+        ...(finalDispatchGuard ? { assertBeforeVendorDispatch: finalDispatchGuard } : {}),
         // 同 drain:steer 投递也在入队时的 async context 之外。
         ...(item.fromMobileClient ? { fromMobileClient: true } : {}),
       });
@@ -1805,6 +1811,19 @@ export class AgentInputCoordinator {
       latest.steeringQueueClientIds = latest.steeringQueueClientIds.filter(
         (id) => id !== item.clientId,
       );
+
+      if (err instanceof AcceptedCallbackDispatchCancelled) {
+        if (markerStillPresent && opts?.removeFromQueue) {
+          latest.pendingQueue = latest.pendingQueue.filter((q) => q.clientId !== item.clientId);
+          this.removePendingCompactWaitClientId(latest, item.clientId);
+          latest.queueEditLocks = latest.queueEditLocks.filter((id) => id !== item.clientId);
+          if (latest.pendingQueue.length === 0) latest.queuePaused = false;
+          this.deps.onDiscardedQueuedMessage?.(sessionId, item);
+        }
+        this.emit(sessionId);
+        this.scheduleDrain(sessionId, 'focused-plugin-steer-cancelled');
+        return markerStillPresent && opts?.removeFromQueue === true;
+      }
 
       if (isNoActiveTurnError(err)) {
         // maker-core 权威判定无活跃 turn — 先让 host 校准可能 stale 的 busy

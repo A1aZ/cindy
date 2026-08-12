@@ -27,6 +27,22 @@ describe('Ghost current-session message permission boundary', () => {
     expect(body).toContain("throwIpcError('PERMISSION_DENIED', '插件未声明当前任务消息能力')");
   });
 
+  it('rejects current-session reads when the plugin is disabled for the focused workdir', () => {
+    const start = source.indexOf("if (request.kind === 'get-current-session') {");
+    const end = source.indexOf("if (request.kind === 'send-message') {", start);
+    const body = source.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(body).toContain(
+      'isGhostDisabledForWorkdir(id, fsSnapshot?.workingDir ?? row?.workingDir)',
+    );
+    expect(body).toContain("message: '插件已在当前任务的工作目录中停用'");
+    expect(
+      body.indexOf('isGhostDisabledForWorkdir(id, fsSnapshot?.workingDir ?? row?.workingDir)'),
+    ).toBeLessThan(body.indexOf('buildGhostCurrentSessionSnapshot('));
+  });
+
   it('rejects sends when the plugin is disabled for the focused task workdir', () => {
     const start = source.indexOf("if (request.kind === 'send-message') {");
     const end = source.indexOf("throwIpcError('INVALID_PARAMS', '未知的 session 请求类型')", start);

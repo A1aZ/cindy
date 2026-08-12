@@ -10317,6 +10317,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       fromMobileClient?: boolean;
       expectedClearBoundaryMs?: number | null;
       expectedInputGeneration?: number;
+      assertBeforeVendorDispatch?: () => void;
     };
     // 手机说明同样只进 wire payload(steer 路径不落库用户消息,天然不污染原话)。
     // 两个来源都要认:IPC 直连 steer 时 async context 在;coordinator 投递时靠透传。
@@ -10336,6 +10337,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         assertCurrentInputClearBoundary(sessionId, precondition.expected);
       }
       assertCurrentInputGeneration(sessionId, readExpectedInputGeneration(sendOpts));
+      so.assertBeforeVendorDispatch?.();
       await sess.steer(steerPayload as never, {
         logTitle: meta?.title,
         messageUuid: so.messageUuid,

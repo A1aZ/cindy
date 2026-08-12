@@ -4907,6 +4907,13 @@ export function registerGhostIpc(): void {
           };
         }
         const { sessionId, snapshot: [row, fsSnapshot] } = current;
+        if (isGhostDisabledForWorkdir(id, fsSnapshot?.workingDir ?? row?.workingDir)) {
+          return {
+            ok: false as const,
+            errorCode: 'PERMISSION_DENIED' as const,
+            message: '插件已在当前任务的工作目录中停用',
+          };
+        }
         return {
           ok: true,
           kind: 'current-session' as const,

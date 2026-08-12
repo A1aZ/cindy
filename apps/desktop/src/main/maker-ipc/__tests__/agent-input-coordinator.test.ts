@@ -6329,6 +6329,65 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
     expect(projection.continuationTurnClientId).toBeNull();
   });
 
+  it('rechecks a focused-plugin queue item before promoting it to steer', async () => {
+    const h = createHarness();
+    const sid = 'plugin-queued-steer-authorization-cancelled';
+    h.setRunning(true);
+    const item = makeItem('q-plugin-steer', 'plugin message', {
+      bypassGhostHooks: true,
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    h.coordinator.enqueue(sid, item);
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => {
+      throw new AcceptedCallbackDispatchCancelled('plugin authorization changed');
+    });
+
+    await expect(h.coordinator.steer(sid, item, { removeFromQueue: true })).resolves.toBe(true);
+
+    expect(h.onAcceptedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: item.clientId }),
+    );
+    expect(h.steerToAgent).not.toHaveBeenCalled();
+    expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: item.clientId }),
+    );
+  });
+
+  it('rechecks a focused-plugin queue item at the final steer dispatch boundary', async () => {
+    const h = createHarness();
+    const sid = 'plugin-queued-steer-final-authorization';
+    h.setRunning(true);
+    const item = makeItem('q-plugin-final-steer', 'plugin message', {
+      bypassGhostHooks: true,
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    h.coordinator.enqueue(sid, item);
+    let authorized = true;
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => () => {
+      if (!authorized) {
+        throw new AcceptedCallbackDispatchCancelled('plugin authorization changed');
+      }
+    });
+    h.steerToAgent.mockImplementationOnce(async (_sessionId, _message, sendOpts) => {
+      authorized = false;
+      sendOpts.assertBeforeVendorDispatch?.();
+    });
+
+    await expect(h.coordinator.steer(sid, item, { removeFromQueue: true })).resolves.toBe(true);
+
+    expect(h.steerToAgent).toHaveBeenCalledTimes(1);
+    expect(latestProjection(h.projections).pendingQueue).toEqual([]);
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: item.clientId }),
+    );
+  });
+
   it('keeps the continuation owner when a terminal event races ahead of steer ack but host remains running', async () => {
     const h = createHarness();
     h.setAgentKind('codex');

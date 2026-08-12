@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest';
 const repoRoot = resolve(__dirname, '..', '..', '..', '..', '..');
 const sourcePath = resolve(__dirname, '..', 'maker-ipc', 'register.ts');
 const source = readFileSync(sourcePath, 'utf8').replace(/\r\n?/g, '\n');
+const coordinatorSourcePath = resolve(__dirname, '..', 'maker-ipc', 'agent-input-coordinator.ts');
+const coordinatorSource = readFileSync(coordinatorSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const acceptedCallbackSourcePath = resolve(__dirname, '..', 'maker-ipc', 'acceptedCallbackRunner.ts');
 const acceptedCallbackSource = readFileSync(acceptedCallbackSourcePath, 'utf8').replace(/\r\n?/g, '\n');
 const orcaInterAgentDispatcherSourcePath = resolve(__dirname, '..', 'maker-ipc', 'orcaInterAgentDispatcher.ts');
@@ -730,6 +732,16 @@ describe('sendToSession ordering', () => {
       "'plugin queued current-task message authorization changed at final dispatch boundary'",
     );
     expect(coordinatorBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
+    expect(coordinatorSource).toContain(
+      'if (steersStoredQueueItem && item.requireCurrentSessionFocus === true) {',
+    );
+    expect(coordinatorSource).toContain(
+      'const acceptedResult = await this.deps.onAcceptedQueuedMessage?.(sessionId, item);',
+    );
+    expect(coordinatorSource).toContain(
+      '...(finalDispatchGuard ? { assertBeforeVendorDispatch: finalDispatchGuard } : {}),',
+    );
+    expect(source).toContain('so.assertBeforeVendorDispatch?.();');
   });
 
   it('preserves stored permission and extraDirs when sendToWorker resumes a worker', () => {

@@ -274,7 +274,12 @@ export function ProjectNode({
           }
         }}
         onContextMenu={(e) => {
-          if (isEditingName) return;
+          if (isEditingName) {
+            // 同 SessionItem:编辑态放行系统可编辑菜单,但拦下冒泡,避免与滚动
+            // 容器的空白处整理菜单叠弹(2026-08-13 实机回归)。
+            e.stopPropagation();
+            return;
+          }
           e.preventDefault();
           e.stopPropagation();
           setMenuPos({ x: e.clientX, y: e.clientY });

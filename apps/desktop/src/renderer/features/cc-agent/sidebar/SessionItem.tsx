@@ -840,7 +840,13 @@ export const SessionItem = memo(function SessionItem({
         }
       }}
       onContextMenu={(e) => {
-        if (isEditing) return;
+        if (isEditing) {
+          // 重命名输入框上的右键交给系统的可编辑菜单(剪切/复制/粘贴,main 侧
+          // selection-context-menu),但必须拦下冒泡——否则会穿透到滚动容器的
+          // 空白处右键 handler,整理菜单和原生菜单叠着弹(2026-08-13 实机回归)。
+          e.stopPropagation();
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         prefetchRemovalPreflight();

@@ -642,7 +642,12 @@ export function SessionCard({
         }
       }}
       onContextMenu={(e) => {
-        if (isEditing) return;
+        if (isEditing) {
+          // 同 SessionItem:编辑态放行系统可编辑菜单,但拦下冒泡,避免与滚动
+          // 容器的空白处整理菜单叠弹(2026-08-13 实机回归)。
+          e.stopPropagation();
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         prefetchRemovalPreflight();

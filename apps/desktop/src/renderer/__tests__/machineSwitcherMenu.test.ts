@@ -181,6 +181,25 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).toContain('contextMenuPos={organizeMenuPos}');
   });
 
+  // 2026-08-13 实机回归:重命名输入框上右键,行级 handler 裸 return 让事件冒泡到
+  // 滚动容器,整理菜单和系统的剪切/粘贴菜单叠着弹。编辑态必须 stopPropagation
+  // (但不 preventDefault——系统可编辑菜单要照常出)。
+  it('行级右键在编辑态阻止冒泡,不触发空白处整理菜单', () => {
+    const files = [
+      ['features', 'cc-agent', 'sidebar', 'SessionItem.tsx'],
+      ['features', 'cc-agent', 'sidebar', 'SessionCard.tsx'],
+      ['features', 'cc-agent', 'sidebar', 'sections', 'ProjectNode.tsx'],
+    ] as const;
+    for (const parts of files) {
+      const source = read(...parts);
+      // 编辑态分支必须 stopPropagation 后再 return;裸 `if (isEditing) return` 即回归。
+      expect(source).toMatch(
+        /if \(isEditing(?:Name)?\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*e\.stopPropagation\(\);\s*\n\s*return;/,
+      );
+      expect(source).not.toMatch(/onContextMenu=\{\(e\) => \{\s*\n\s*if \(isEditing(?:Name)?\) return;/);
+    }
+  });
+
   // 2026-08-12 用户裁决:筛选各维度选中后菜单不关闭(常要连调几项);排序与显示
   // 模式仍选完即关(一次一个决定)。
   it('筛选维度选中后保持菜单打开,排序 / 显示模式仍选完即关', () => {

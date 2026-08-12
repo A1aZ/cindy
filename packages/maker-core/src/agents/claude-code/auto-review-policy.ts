@@ -106,6 +106,17 @@ function quoteAsSingleShellToken(text: string): string {
  */
 function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。
+  //
+  // **必须保留「有运算符」这一位信息**:`& 'C:\path\pwsh.exe' -File a.ps1` 会执行,而去掉
+  // 运算符的同一串只是个字符串表达式(不执行)—— 两者归一成同一条缓存身份的话,
+  // 非执行形态拿到的 allow 会被执行形态复用(codex 报)。
+  //
+  // **但一律归一成 `&`,不原样保留 `.`**:core 的 splitExecutableSegments 把 `&` 当分隔符
+  // (于是解释器落回段首),却不识别 `.` —— 原样留 `.` 会让它占住 token 0,
+  // `-EncodedCommand` 的 argv 红线随之失效(实测:`. 'C:\…\pwsh.exe' -enc X` 掉回灰区)。
+  // 对**可执行文件**而言 `.` 与 `&` 效果相同(点源的作用域差异只对脚本有意义),
+  // 合并这两种写法是安全的;真正要区分的「执行 / 不执行」这一位完整保住了。
+  const operator = /^[&.]\s+/.test(command) ? '& ' : '';
   const withoutOperator = command.replace(/^[&.]\s+/, '');
   const target = leadingShellToken(withoutOperator);
   if (!target) return null;
@@ -118,7 +129,8 @@ function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 一个叫 pwsh.exe 的二进制复用(codex 报,已实测复现)。只剥调用运算符。
   const executable = withoutOperator.slice(0, target.length);
   const rest = withoutOperator.slice(target.length).trim();
-  return rest ? `${executable} ${normalizeInterpreterArgs(rest)}` : executable;
+  const args = rest ? ` ${normalizeInterpreterArgs(rest)}` : '';
+  return `${operator}${executable}${args}`;
 }
 
 /**
@@ -162,13 +174,25 @@ function quoteIfMultiToken(payload: string): string {
   return quoteAsSingleShellToken(payload);
 }
 
-/** 取开头的一个 shell token(支持单/双引号包裹的带空格路径),返回其值与在原串中占的长度。 */
+/**
+ * 取开头的一个 token(支持单/双引号包裹的带空格路径),返回其**值**与在原串中占的长度。
+ *
+ * 引号内按 **PowerShell 转义**扫描:PowerShell 用「重复引号」表示字面引号,
+ * `'C:\O''Brien\pwsh.exe'` 是一个 token、值为 `C:\O'Brien\pwsh.exe`。按首个匹配字符收尾
+ * 会把它截成 `C:\O` —— 解释器认不出来,整条被包成 `-Command` 载荷,argv 级的
+ * `-EncodedCommand` 红线随之失效(codex 报)。
+ *
+ * `length` 覆盖原文里的完整 token(含重复引号),调用方据此原样保留路径写法。
+ */
 function leadingShellToken(text: string): { value: string; length: number } | null {
   const quote = text[0];
   if (quote === '"' || quote === "'") {
-    const end = text.indexOf(quote, 1);
-    if (end < 0) return null; // 引号未闭合 → 不当作解释器调用,交给外层包装
-    return { value: text.slice(1, end), length: end + 1 };
+    for (let i = 1; i < text.length; i++) {
+      if (text[i] !== quote) continue;
+      if (text[i + 1] === quote) { i++; continue; } // 重复引号 = 字面引号,不收尾
+      return { value: text.slice(1, i).replaceAll(quote + quote, quote), length: i + 1 };
+    }
+    return null; // 引号未闭合 → 不当作解释器调用,交给外层包装
   }
   const match = /^\S+/.exec(text);
   return match ? { value: match[0], length: match[0].length } : null;

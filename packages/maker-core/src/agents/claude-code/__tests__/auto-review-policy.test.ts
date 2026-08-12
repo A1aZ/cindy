@@ -336,14 +336,22 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       expect(verdict('PowerShell', { command }), command).toBe('prompt-each-time');
     }
 
-    // 归一**只剥调用运算符**,解释器 token 原样保留(含完整路径与引号)。
-    // 不改写成短名:core 自己就能从完整路径求出解释器身份,而改写会抹掉路径 ——
-    // 归一结果就是 reviewAutoAction 的缓存身份(下一条用例锁住这点)。
+    // 解释器 token 原样保留(含完整路径与引号),调用运算符也保留 —— 不改写成短名:
+    // core 自己就能从完整路径求出解释器身份,而改写会抹掉路径,归一结果就是
+    // reviewAutoAction 的缓存身份(下一条用例锁住这点)。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', {
       command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
     })).toEqual({
       kind: 'exec',
-      command: "'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
+      command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -EncodedCommand SQBFAFgA",
+    });
+    // 点源 `.` 归一成 `&`:core 的分段器认 `&` 不认 `.`,原样留 `.` 会让它占住 token 0
+    // 而使 argv 红线失效(实测掉回灰区);对可执行文件 `.` 与 `&` 效果相同,可以合并。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', {
+      command: ". 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -enc SQBFAFgA",
+    })).toEqual({
+      kind: 'exec',
+      command: "& 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -enc SQBFAFgA",
     });
     expect(normalizeBuiltinToolForAutoReview('PowerShell', {
       command: '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -File a.ps1',
@@ -391,6 +399,32 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       expect(verdict('PowerShell', { command: `& ${exe} -EncodedCommand SQBFAFgA` }), exe)
         .toBe('prompt-each-time');
     }
+
+    // 「有调用运算符」这一位也必须留在身份里:`& 'x.exe' …` 会执行,去掉运算符的同一串
+    // 只是个字符串表达式(不执行)—— 撞成同一条 key 的话,非执行形态拿到的 allow 会被
+    // 执行形态复用(codex 报)。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\tmp\\pwsh.exe' -File a.ps1" }))
+      .not.toEqual(normalizeBuiltinToolForAutoReview('PowerShell', { command: "'C:\\tmp\\pwsh.exe' -File a.ps1" }));
+  });
+
+  it('引号内按 PowerShell 转义扫描:重复引号是字面引号,不是 token 收尾', () => {
+    // codex 报:PowerShell 用重复引号表示字面引号,`'C:\O''Brien\pwsh.exe'` 是一个 token。
+    // 按首个匹配字符收尾会截成 `C:\O` → 解释器认不出 → 整条被包成 -Command 载荷 →
+    // argv 级的 -EncodedCommand 红线失效。
+    for (const command of [
+      "& 'C:\\O''Brien\\pwsh.exe' -EncodedCommand SQBFAFgA",
+      "'C:\\O''Brien\\pwsh.exe' -EncodedCommand SQBFAFgA",
+      '& "C:\\O""Brien\\pwsh.exe" -enc SQBFAFgA',
+    ]) {
+      expect(verdict('PowerShell', { command }), command).toBe('prompt-each-time');
+    }
+    // 路径写法原样保留(重复引号不被改写),缓存身份才不失真。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', {
+      command: "& 'C:\\O''Brien\\pwsh.exe' -EncodedCommand SQBFAFgA",
+    })).toEqual({ kind: 'exec', command: "& 'C:\\O''Brien\\pwsh.exe' -EncodedCommand SQBFAFgA" });
+    // 重复引号解析出的 basename 不是 PowerShell 时,不得误认成解释器。
+    expect(verdict('PowerShell', { command: "& 'C:\\O''Brien\\notpwsh.exe' -EncodedCommand SQBFAFgA" }))
+      .toBe('prompt');
   });
 
   it('自带解释器前缀时,-Command 载荷也要收成单个 token 才不被管道拆断', () => {

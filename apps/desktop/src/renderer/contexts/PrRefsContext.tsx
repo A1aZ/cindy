@@ -99,16 +99,21 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   refsRef.current = refsBySession;
   // tip 快速划过多行时防止同一会话重复在飞;main 侧有 60s 缓存,这里不做 TTL。
   const inFlightSessions = useRef(new Set<string>());
-  // 远程会话:已发起过引用拉取的 sessionId(成功后不再重复;失败移除允许重试),
-  // 以及 sessionId → deviceId 路由表(状态查询据此改走 device-link 通道)。
-  const remoteFetchedSessions = useRef(new Set<string>());
+  // 远程会话引用拉取:在飞去重 + 上次**成功**时间戳(TTL 门)。空结果不是终态——
+  // 远端没有 pr-refs-changed 推送,被控端后来新增的 PR 只能靠周期重查发现;失败
+  // 不写时间戳,下一次触发(interval / 聚焦 / 行重挂载)立即重试。
+  // (2026-08-12 实机教训:此前用"已拉取过"永久集合兼任在飞守卫,一次空结果或
+  // 时序竞态就让该会话永远静默,置顶重挂载也救不回来。)
+  const remoteRefsInFlight = useRef(new Set<string>());
+  const remoteRefsFetchedAt = useRef(new Map<string, number>());
   const remoteDeviceBySession = useRef(new Map<string, string>());
 
   useEffect(() => {
     // owner 切换边界:先清掉上一 owner 的缓存,无 owner 时保持空、不发 IPC。
     setRefsBySession(new Map());
     setStatuses(new Map());
-    remoteFetchedSessions.current.clear();
+    remoteRefsInFlight.current.clear();
+    remoteRefsFetchedAt.current.clear();
     remoteDeviceBySession.current.clear();
     if (dataOwnerId === null) return;
 
@@ -193,11 +198,17 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   }).current;
 
   // 远程会话 PR 引用按需拉取(回调身份稳定)。结果进共享 refs 映射,渲染路径
-  // (usePrRefsForSession)对本地/远程一视同仁;空结果也算成功(不再重发)。
+  // (usePrRefsForSession)对本地/远程一视同仁。空结果同样写入 TTL 时间戳,
+  // 但**不是终态**:下个周期重查(远端新增 PR / 短暂竞态都靠这条自愈)。
   const fetchRefsForRemoteSession = useRef((sessionId: string, deviceId: string) => {
-    if (remoteFetchedSessions.current.has(sessionId)) return;
-    remoteFetchedSessions.current.add(sessionId);
     remoteDeviceBySession.current.set(sessionId, deviceId);
+    if (remoteRefsInFlight.current.has(sessionId)) return;
+    // TTL 门:距上次成功不足一个刷新周期就跳过(interval / 聚焦 / 行重挂载都会
+    // 频繁触发,靠它避免风暴);失败路径不写时间戳,天然立即可重试。
+    const fetchedAt = remoteRefsFetchedAt.current.get(sessionId);
+    if (fetchedAt !== undefined && Date.now() - fetchedAt < PR_STATUS_REFRESH_INTERVAL_MS - 5_000)
+      return;
+    remoteRefsInFlight.current.add(sessionId);
     void (async () => {
       try {
         const refs = (await window.electronAPI.deviceLink.invoke(
@@ -205,13 +216,19 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
           'git-context:pr-refs:list',
           [sessionId],
         )) as SessionPrRef[];
-        if (refs.length > 0) {
-          setRefsBySession((prev) => new Map(prev).set(sessionId, refs));
-        }
+        remoteRefsFetchedAt.current.set(sessionId, Date.now());
+        log.debug('remote pr refs fetched', { sessionId, count: refs.length });
+        setRefsBySession((prev) => {
+          const next = new Map(prev);
+          if (refs.length > 0) next.set(sessionId, refs);
+          else next.delete(sessionId);
+          return next;
+        });
       } catch (err) {
-        // 断链/超时:移出已发集,下个刷新周期(或行重挂载)重试。
+        // 断链/超时:不写时间戳,下个刷新周期(或行重挂载)立即重试。
         log.warn('remote pr refs fetch failed', String(err));
-        remoteFetchedSessions.current.delete(sessionId);
+      } finally {
+        remoteRefsInFlight.current.delete(sessionId);
       }
     })();
   }).current;

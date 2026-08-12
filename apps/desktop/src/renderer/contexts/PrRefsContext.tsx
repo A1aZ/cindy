@@ -26,7 +26,11 @@ import {
 } from 'react';
 
 import type { PrStatusResult, SessionPrRef } from '@/lib/gitContext.types';
-import { prStatusKey, MAX_STATUS_QUERIES } from '@/hooks/useSessionGitContext';
+import {
+  prStatusKey,
+  MAX_STATUS_QUERIES,
+  PR_STATUS_REFRESH_INTERVAL_MS,
+} from '@/hooks/useSessionGitContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { createLogger } from '@/lib/logger';
 
@@ -55,17 +59,22 @@ const PrStatusesContext = createContext<PrStatusesContextValue>({
  */
 interface PrActionsContextValue {
   /**
-   * 远程(device-link)会话按需拉取 PR 引用:复用白名单通道
-   * git-context:pr-refs:list(与聊天顶栏 useSessionGitContext 同一条),结果
-   * 合入共享 refs 映射并登记 sessionId→deviceId,后续状态查询自动走远程路由。
-   * 每会话只发一次(失败允许下次重试);仅当「任务信息」勾选 pr 且行实际
-   * 渲染时才调用——数量被列表 collapse 上限约束。
+   * 行级注册:声明「这一行正在展示 PR 信息」(SessionItem / SessionCard 在
+   * 勾选 pr 且行渲染时调用,返回注销函数挂 effect cleanup)。注册即触发一次
+   * 拉取,此后 Provider 以与聊天顶栏同一节拍(PR_STATUS_REFRESH_INTERVAL_MS)
+   * + 窗口聚焦统一刷新全部已注册会话——首查失败(device-link 慢/断、gh 限流、
+   * token 未就绪)由下个周期自愈,对齐顶栏行为,不再"拉一次定终身"。
+   *
+   * 远程(device-link)会话:引用经白名单通道 git-context:pr-refs:list 补拉
+   * (成功后不重复;失败随周期重试),并登记 sessionId→deviceId,状态查询自动
+   * 走 git-context:pr-status 远程路由。注册数被列表 collapse 上限约束,main /
+   * 被控端各有 60s TTL,周期刷新的实际开销有界。
    */
-  fetchRefsForRemoteSession: (sessionId: string, deviceId: string) => void;
+  registerPrConsumer: (sessionId: string, deviceId?: string) => () => void;
 }
 
 const PrActionsContext = createContext<PrActionsContextValue>({
-  fetchRefsForRemoteSession: () => undefined,
+  registerPrConsumer: () => () => undefined,
 });
 
 function groupBySession(rows: SessionPrRef[]): Map<string, SessionPrRef[]> {
@@ -200,14 +209,59 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
           setRefsBySession((prev) => new Map(prev).set(sessionId, refs));
         }
       } catch (err) {
-        // 断链/超时:移出已发集,该行下次挂载(或勾选变化)时重试。
+        // 断链/超时:移出已发集,下个刷新周期(或行重挂载)重试。
         log.warn('remote pr refs fetch failed', String(err));
         remoteFetchedSessions.current.delete(sessionId);
       }
     })();
   }).current;
 
-  const actionsValue = useMemo(() => ({ fetchRefsForRemoteSession }), [fetchRefsForRemoteSession]);
+  // 正在展示 PR 信息的行(sessionId → {deviceId?, count}),引用计数支持同一
+  // 会话同时出现在置顶与主列表。注册即拉一次;周期/聚焦刷新遍历本表。
+  const prConsumers = useRef(new Map<string, { deviceId?: string; count: number }>());
+
+  const refreshConsumer = useRef((sessionId: string, deviceId?: string) => {
+    // 远程行:引用可能还没拉到(或上次失败)——先补引用,再查状态。
+    // fetchRefsForRemoteSession 成功后幂等,fetchStatusesForSession 无引用时早退。
+    if (deviceId) fetchRefsForRemoteSession(sessionId, deviceId);
+    fetchStatusesForSession(sessionId);
+  }).current;
+
+  const registerPrConsumer = useRef((sessionId: string, deviceId?: string) => {
+    const map = prConsumers.current;
+    const entry = map.get(sessionId);
+    if (entry) {
+      entry.count += 1;
+      if (deviceId) entry.deviceId = deviceId;
+    } else {
+      map.set(sessionId, { deviceId, count: 1 });
+    }
+    refreshConsumer(sessionId, deviceId);
+    return () => {
+      const cur = map.get(sessionId);
+      if (!cur) return;
+      if (cur.count <= 1) map.delete(sessionId);
+      else cur.count -= 1;
+    };
+  }).current;
+
+  // 与聊天顶栏同一节拍的兜底刷新:周期 + 窗口聚焦。首查失败自愈;merged/closed
+  // 等远端状态变化也随节拍收敛(main / 被控端各有 60s TTL,重复查询便宜)。
+  useEffect(() => {
+    const refreshAll = () => {
+      for (const [sessionId, entry] of prConsumers.current) {
+        refreshConsumer(sessionId, entry.deviceId);
+      }
+    };
+    const interval = setInterval(refreshAll, PR_STATUS_REFRESH_INTERVAL_MS);
+    window.addEventListener('focus', refreshAll);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', refreshAll);
+    };
+  }, [refreshConsumer]);
+
+  const actionsValue = useMemo(() => ({ registerPrConsumer }), [registerPrConsumer]);
 
   const statusesValue = useMemo(
     () => ({ statuses, fetchStatusesForSession }),

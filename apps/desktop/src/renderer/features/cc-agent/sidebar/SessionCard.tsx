@@ -238,14 +238,15 @@ export function SessionCard({
   const cardInfoPieces = buildSessionInfoPieces(session, taskInfoFields, activityIso, t);
   const cardPrRefs = usePrRefsForSession(session.id);
   const cardInfoPrRef = taskInfoFields.includes('pr') ? cardPrRefs[0] : undefined;
-  // 远程(device-link)会话的 PR 引用不在本地 db,勾选 pr 且行渲染时按需经
-  // 远程通道补拉(与 SessionItem 同一条路径;usePrActions 的 value 恒定)。
-  const { fetchRefsForRemoteSession } = usePrActions();
+  // 勾选 pr 且行渲染时注册为 PR 消费者:注册即拉取(远程会话含引用补拉),
+  // 此后 Provider 周期/聚焦统一刷新,失败自愈(与 SessionItem 同一条路径)。
+  const { registerPrConsumer } = usePrActions();
   const wantsPrInfo = taskInfoFields.includes('pr');
   const remoteDeviceId = session.deviceLinkDeviceId;
   useEffect(() => {
-    if (wantsPrInfo && remoteDeviceId) fetchRefsForRemoteSession(session.id, remoteDeviceId);
-  }, [wantsPrInfo, remoteDeviceId, session.id, fetchRefsForRemoteSession]);
+    if (!wantsPrInfo) return undefined;
+    return registerPrConsumer(session.id, remoteDeviceId);
+  }, [wantsPrInfo, remoteDeviceId, session.id, registerPrConsumer]);
 
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [archivePending, setArchivePending] = useState(false);

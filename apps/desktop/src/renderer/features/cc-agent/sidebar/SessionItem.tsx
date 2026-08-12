@@ -312,14 +312,15 @@ export const SessionItem = memo(function SessionItem({
   const prRefs = usePrRefsForSession(session.id);
   // 任务信息复选(C 期):行右侧信息槽内容,与整理菜单同源共享状态。
   const { fields: taskInfoFields } = useTaskInfoFields();
-  // 远程(device-link)会话的 PR 引用不在本地 db,勾选 pr 且行渲染时按需经
-  // 远程通道补拉(每会话一次,usePrActions 的 value 恒定不引入重渲染)。
-  const { fetchRefsForRemoteSession } = usePrActions();
+  // 勾选 pr 且行渲染时注册为 PR 消费者:注册即拉取(远程会话含引用补拉),
+  // 此后 Provider 周期/聚焦统一刷新,失败自愈(usePrActions 的 value 恒定)。
+  const { registerPrConsumer } = usePrActions();
   const wantsPrInfo = taskInfoFields.includes('pr');
   const remoteDeviceId = session.deviceLinkDeviceId;
   useEffect(() => {
-    if (wantsPrInfo && remoteDeviceId) fetchRefsForRemoteSession(session.id, remoteDeviceId);
-  }, [wantsPrInfo, remoteDeviceId, session.id, fetchRefsForRemoteSession]);
+    if (!wantsPrInfo) return undefined;
+    return registerPrConsumer(session.id, remoteDeviceId);
+  }, [wantsPrInfo, remoteDeviceId, session.id, registerPrConsumer]);
   // mod+1..9 序号徽标:模块 store 按 sessionId 精准订阅(性能不变量第 2 条),
   // 非按住态恒为 null,不惊动 memo。
   const ordinalBadgeLabel = useSessionOrdinalBadge(session.id);

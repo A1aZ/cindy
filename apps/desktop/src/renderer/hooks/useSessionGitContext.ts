@@ -44,7 +44,9 @@ export const MAX_STATUS_QUERIES = 3;
  * 不会产生本地 pr-refs-changed 事件,长开会话只靠初次加载会一直显示旧状态
  * (review 反馈)。取值刻意 > main 侧 60s TTL,保证每次 tick 都真的打到远端。
  */
-const STATUS_REFRESH_INTERVAL_MS = 90_000;
+/** PR 状态的兜底刷新周期——聊天顶栏与侧栏徽标(PrRefsContext)共用同一节拍。 */
+export const PR_STATUS_REFRESH_INTERVAL_MS = 90_000;
+const STATUS_REFRESH_INTERVAL_MS = PR_STATUS_REFRESH_INTERVAL_MS;
 
 /**
  * 「对话真实工作目录」再解析间隔。对话中途 agent `cd` 进新 worktree 不产生本地事件,
@@ -105,7 +107,9 @@ export function useSessionGitContext(session: Session): SessionGitContext {
   const workingDir = session.workingDir ?? null;
   // device-link / SSH 的 path 属于真实执行端,会在那里重新 probe；本地会话仍只使用
   // WorktreeContext 的 live 路径,不信任 session 上的历史快照。
-  const worktreePath = isLocalSession ? worktreeMeta?.path ?? null : session.worktreePath ?? null;
+  const worktreePath = isLocalSession
+    ? (worktreeMeta?.path ?? null)
+    : (session.worktreePath ?? null);
 
   const [head, setHead] = useState<GitHeadInfo | null>(null);
   const [branchSource, setBranchSource] = useState<GitContextDirSource>(null);

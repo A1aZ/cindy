@@ -5163,12 +5163,7 @@ export class ClaudeCodeAgent extends BaseAgent {
             const hasFileAttachment = message.content.some(
               (b) => b.type === 'file' || b.type === 'mention',
             );
-            const sourceImageCount = message.content.filter((b) => b.type === 'image').length;
-            const inlineImageCount = Array.isArray(content)
-              ? content.filter((b) => b.type === 'image').length
-              : 0;
-            const hasPathBackedImage = sourceImageCount > inlineImageCount;
-            if (hasFileAttachment || hasPathBackedImage) {
+            if (hasFileAttachment) {
               log.warn('cc remote: local attachment not accessible on remote session', {
                 sessionId: opts.sessionId,
                 hostId: opts.remoteHostId,
@@ -5176,7 +5171,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               eventQueue.push({
                 type: 'error',
                 data: {
-                  message: '[REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED] Local file attachments and images that cannot be embedded are not accessible on remote sessions. Paste content directly instead.',
+                  message: '[REMOTE_LOCAL_ATTACHMENT_UNSUPPORTED] Local file attachments are not accessible on remote sessions. Paste content directly instead.',
                   isTerminal: false,
                 },
                 source: 'claude-code',

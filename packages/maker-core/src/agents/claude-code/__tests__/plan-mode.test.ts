@@ -520,7 +520,9 @@ describe('ClaudeCodeAgent plan mode', () => {
     const fakeQuery = { ...createFakeQuery(), send: remoteSend };
     const remoteCcQueryFactory: NonNullable<AgentDeps['remoteCcQueryFactory']> = async () =>
       fakeQuery as never;
-    const agent = new ClaudeCodeAgent(createDeps({ remoteCcQueryFactory }));
+    const logger = createNoopLogger();
+    const warn = vi.spyOn(logger, 'warn');
+    const agent = new ClaudeCodeAgent(createDeps({ logger, remoteCcQueryFactory }));
     const handle = await agent.startSession({
       sessionId: 'session-remote-image-path',
       model: 'claude-opus-4-6',
@@ -541,6 +543,10 @@ describe('ClaudeCodeAgent plan mode', () => {
     expect(remoteSend.mock.calls[0]?.[0]).toMatchObject({
       message: { content: `@"${imagePath}" Inspect this` },
     });
+    expect(warn).not.toHaveBeenCalledWith(
+      'cc remote: local attachment not accessible on remote session',
+      expect.anything(),
+    );
     await handle.close();
   });
 

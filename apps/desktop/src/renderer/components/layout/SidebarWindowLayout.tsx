@@ -152,9 +152,15 @@ export function SidebarWindowLayout() {
           .catch((err) => {
             if (visibilityRevisionRef.current !== revision) return;
             log.warn('refresh context on show failed', err);
-            // 保持 context 为空，允许窗口展示安全占位态；后续 context-changed
-            // 推送仍可正常恢复真实任务。
-            setWindowVisible(true);
+            // Keep the shell mounted for recovery, but never expose the
+            // previous session after a failed context refresh.
+            if (contextRevisionRef.current === contextRevision) {
+              setCtx(null);
+              setWindowVisible(false);
+            } else {
+              // A newer push won the race, so its context is safe to reveal.
+              setWindowVisible(true);
+            }
           });
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       }

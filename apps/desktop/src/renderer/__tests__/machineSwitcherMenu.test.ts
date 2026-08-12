@@ -203,14 +203,35 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     );
   });
 
+  // 2026-08-12 用户裁决:任务信息按用户勾选顺序显示(先勾时间再勾费用 → 时间在前)。
+  it('任务信息渲染顺序 = 勾选顺序,不再是固定的 pr → tokens → cost → time', () => {
+    const infoMetaSource = read('features', 'cc-agent', 'sidebar', 'SessionInfoMeta.tsx');
+    const filterCoreSource = read(
+      'features',
+      'cc-agent',
+      'hooks',
+      'helpers',
+      'sidebarFilterCore.ts',
+    );
+
+    // 勾选状态本身按先后追加(存储即顺序),这是整条链路的源头。
+    expect(filterCoreSource).toContain('return prev.concat(field);');
+    // 拼装遍历 fields 数组,而不是走固定的 if 序列。
+    expect(infoMetaSource).toContain('for (const field of fields)');
+    // PR 也参与排序:以 'pr' 占位进入 pieces,渲染时换成徽标。
+    expect(infoMetaSource).toContain("if (field === 'pr' && hasPrRef)");
+    expect(infoMetaSource).toContain("pieces.push({ key: 'pr', text: '' })");
+    expect(infoMetaSource).toContain("piece.key === 'pr' ?");
+    // 菜单摘要的图标串同样按勾选顺序(遍历 taskInfoFields,不是遍历选项表)。
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    expect(filterSource).toContain('{taskInfoFields.map((field) => {');
+  });
+
   // 2026-08-12 用户裁决:任务信息行的当前选中项用图标表示,不再罗列短词。
   it('任务信息摘要用图标串,筛选各维度行也有图标', () => {
     const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
-    // 摘要节点按 TASK_INFO_OPTIONS 顺序过滤已选项渲染图标;文字版留给 aria-label。
+    // 摘要节点渲染已选项的图标(顺序见上一条:按勾选顺序);文字版留给 aria-label。
     expect(filterSource).toContain('valueNode={');
-    expect(filterSource).toContain(
-      'TASK_INFO_OPTIONS.filter((option) => taskInfoFields.includes(option.value))',
-    );
     expect(filterSource).toContain('aria-label={valueNode ? value : undefined}');
     // 具体维度行配图标(状态 / 项目 / Agent / 最近活跃 / 筛选 / 任务信息)。
     expect(filterSource).toContain('Icon={Filter}');

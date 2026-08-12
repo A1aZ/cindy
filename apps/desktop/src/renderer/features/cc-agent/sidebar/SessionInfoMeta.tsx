@@ -1,8 +1,10 @@
 /**
  * SessionInfoMeta — 任务行右侧信息槽的内容(sidebar-redesign C / C' 期)。
  * ---------------------------------------------------------------------------
- * 按「任务信息」复选(useTaskInfoFields)拼装,渲染顺序固定 pr → tokens → cost →
- * time。以「·」分隔;全不选渲染 null(行右侧留空)。
+ * 按「任务信息」复选(useTaskInfoFields)拼装,**渲染顺序 = 用户勾选顺序**
+ * (2026-08-12 用户裁决,此前是固定的 pr → tokens → cost → time):勾选状态本身
+ * 就按先后追加(nextTaskInfoAfterToggle),这里遍历该数组即可。以「·」分隔;
+ * 全不选渲染 null(行右侧留空)。
  *
  * 数据口径:
  *   - pr:session_pr_refs 的最新一条(lastSeenAt 降序首位),显示「状态 icon +
@@ -54,44 +56,64 @@ export interface SessionInfoPiece {
   dateTime?: string;
 }
 
-/** 按复选拼装该会话应显示的信息片段(pr 由 SessionInfoMeta 单独渲染,不在此列)。 */
+/**
+ * 按复选拼装该会话应显示的信息片段(pr 由 SessionInfoMeta 单独渲染,不在此列)。
+ * **顺序 = 用户勾选顺序**(2026-08-12 用户裁决):fields 数组本身就按勾选先后
+ * 追加(见 nextTaskInfoAfterToggle),这里遍历它而不是走固定的 if 序列 ——
+ * 先勾时间再勾费用就显示「时间 · 费用」,反过来勾就是「费用 · 时间」。
+ * 无数据的项(token 为 0 / 无费用 / 无活动时间)照旧跳过,不占位。
+ */
 export function buildSessionInfoPieces(
   session: Session,
   fields: readonly TaskInfoField[],
   activityIso: string | undefined,
   t: TFunc,
+  /** 该会话是否有 PR 引用;有才为 'pr' 排一个占位(无 PR 的行不占位)。 */
+  hasPrRef = false,
 ): SessionInfoPiece[] {
   const pieces: SessionInfoPiece[] = [];
-  if (fields.includes('tokens') && session.totalTokenUsage > 0) {
-    pieces.push({
-      key: 'tokens',
-      text: formatCompactTokens(session.totalTokenUsage),
-      title: t('ccAgent.sidebar.taskInfoTip.tokens'),
-    });
-  }
-  if (fields.includes('cost')) {
-    const money = session.totalMoney;
-    if (money && money.amount > 0) {
-      pieces.push({
-        key: 'cost',
-        text: formatMoney(money),
-        title: t('ccAgent.sidebar.taskInfoTip.cost'),
-      });
-    } else if (session.totalCostUsd > 0) {
-      pieces.push({
-        key: 'cost',
-        text: formatUsd(session.totalCostUsd),
-        title: t('ccAgent.sidebar.taskInfoTip.cost'),
-      });
+  for (const field of fields) {
+    if (field === 'tokens') {
+      if (session.totalTokenUsage > 0) {
+        pieces.push({
+          key: 'tokens',
+          text: formatCompactTokens(session.totalTokenUsage),
+          title: t('ccAgent.sidebar.taskInfoTip.tokens'),
+        });
+      }
+      continue;
     }
-  }
-  if (fields.includes('time') && activityIso) {
-    pieces.push({
-      key: 'time',
-      text: formatSidebarTime(activityIso, t),
-      title: formatSidebarTimeAbsolute(activityIso),
-      dateTime: activityIso,
-    });
+    if (field === 'cost') {
+      const money = session.totalMoney;
+      if (money && money.amount > 0) {
+        pieces.push({
+          key: 'cost',
+          text: formatMoney(money),
+          title: t('ccAgent.sidebar.taskInfoTip.cost'),
+        });
+      } else if (session.totalCostUsd > 0) {
+        pieces.push({
+          key: 'cost',
+          text: formatUsd(session.totalCostUsd),
+          title: t('ccAgent.sidebar.taskInfoTip.cost'),
+        });
+      }
+      continue;
+    }
+    if (field === 'time' && activityIso) {
+      pieces.push({
+        key: 'time',
+        text: formatSidebarTime(activityIso, t),
+        title: formatSidebarTimeAbsolute(activityIso),
+        dateTime: activityIso,
+      });
+      continue;
+    }
+    if (field === 'pr' && hasPrRef) {
+      // 占位:PR 徽标要单独订阅状态缓存(见 PrNumberPiece),内容由 SessionInfoMeta
+      // 渲染时替换。放进 pieces 只为让它参与「按勾选顺序」排列。
+      pieces.push({ key: 'pr', text: '' });
+    }
   }
   return pieces;
 }
@@ -131,7 +153,8 @@ function PrNumberPiece({ prRef }: { prRef: SessionPrRef }) {
 /**
  * 信息槽内容。tabular-nums 保持数字纵向对齐;分隔点用低对比度,不与正文抢焦点。
  * 调用方负责外层布局(让位动画 / 对齐),本组件只渲染内容。
- * prRef 非空时在最前渲染 PR `#号`(渲染顺序定稿:pr → tokens → cost → time)。
+ * prRef 的位置由 pieces 里的 'pr' 占位决定(= 用户勾选顺序);兼容未传
+ * hasPrRef 的旧调用:那时 pieces 里没有占位,PR 仍前置渲染。
  */
 export function SessionInfoMeta({
   pieces,
@@ -154,15 +177,25 @@ export function SessionInfoMeta({
         className,
       )}
     >
-      {prRef && <PrNumberPiece prRef={prRef} />}
+      {/* 顺序完全由 pieces 决定(= 用户勾选顺序);'pr' 是占位,这里换成徽标。
+          兼容旧调用:未把 pr 排进 pieces 时(hasPrRef 未传),仍按老样子前置。 */}
+      {prRef && !pieces.some((piece) => piece.key === 'pr') && <PrNumberPiece prRef={prRef} />}
       {pieces.map((piece, index) => (
         <span key={piece.key} className="flex shrink-0 items-center gap-1" title={piece.title}>
-          {(index > 0 || prRef) && (
+          {(index > 0 || (prRef && !pieces.some((p) => p.key === 'pr'))) && (
             <span aria-hidden className="opacity-50">
               ·
             </span>
           )}
-          {piece.dateTime ? <time dateTime={piece.dateTime}>{piece.text}</time> : piece.text}
+          {piece.key === 'pr' ? (
+            prRef ? (
+              <PrNumberPiece prRef={prRef} />
+            ) : null
+          ) : piece.dateTime ? (
+            <time dateTime={piece.dateTime}>{piece.text}</time>
+          ) : (
+            piece.text
+          )}
         </span>
       ))}
     </span>

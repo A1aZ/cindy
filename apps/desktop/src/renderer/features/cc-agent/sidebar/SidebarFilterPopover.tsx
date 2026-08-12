@@ -117,7 +117,8 @@ const PROJECT_SORT_BY_OPTIONS: ReadonlyArray<Option<FilterSortBy>> = [
 ];
 
 /**
- * 复选顺序即菜单显示顺序;渲染顺序固定 pr → tokens → cost → time。
+ * 本表的顺序 = 菜单里四个复选项的排列顺序(固定)。列表行的**渲染顺序**另算:
+ * 按用户勾选先后(2026-08-12 用户裁决),见 SessionInfoMeta。
  * 图标对应各自的数据类型:时间=Clock(Timer 已被自动任务独占,不复用避免撞义)、
  * PR=GitPullRequest(与顶栏 / 侧栏徽标未知态同一个字形)、token=Coins、费用=Wallet。
  */
@@ -634,21 +635,21 @@ export function SidebarFilterPopover({
             Icon={Info}
             valueNode={
               taskInfoFields.length > 0 ? (
-                // 已选项用图标串表示(顺序固定为 TASK_INFO_OPTIONS 的展示顺序,
-                // 与列表行的渲染顺序一致),不再罗列短词。
+                // 已选项用图标串表示,不再罗列短词。顺序 = 用户勾选顺序(遍历
+                // taskInfoFields 而非选项表),与列表行的渲染顺序一致。
                 <span className="flex items-center justify-end gap-1">
-                  {TASK_INFO_OPTIONS.filter((option) => taskInfoFields.includes(option.value)).map(
-                    (option) =>
-                      option.Icon ? (
-                        <option.Icon
-                          key={option.value}
-                          size={13}
-                          strokeWidth={1.8}
-                          className="shrink-0"
-                          aria-hidden
-                        />
-                      ) : null,
-                  )}
+                  {taskInfoFields.map((field) => {
+                    const Icon = TASK_INFO_OPTIONS.find((option) => option.value === field)?.Icon;
+                    return Icon ? (
+                      <Icon
+                        key={field}
+                        size={13}
+                        strokeWidth={1.8}
+                        className="shrink-0"
+                        aria-hidden
+                      />
+                    ) : null;
+                  })}
                 </span>
               ) : undefined
             }

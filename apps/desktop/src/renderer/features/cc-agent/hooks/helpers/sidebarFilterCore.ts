@@ -61,7 +61,10 @@ export type FilterLastActivity = 'all' | '1d' | '3d' | '7d' | '30d';
  *  （侧边栏重设计裁决：alphabetic 与 time(旧「最早优先」)已删除，存量值回退到
  *  recency——时间排序只保留最近优先一档。） */
 export type FilterSortBy = 'recency' | 'manual' | 'priority';
-/** 任务行右侧信息项（复选）。顺序固定 pr → tokens → cost → time 渲染。 */
+/**
+ * 任务行右侧信息项（复选）。存储数组的顺序 = 用户勾选先后(nextTaskInfoAfterToggle
+ * 按序追加),列表行据此渲染(2026-08-12 用户裁决);菜单里四个选项的排列另有固定顺序。
+ */
 export type TaskInfoField = 'time' | 'pr' | 'tokens' | 'cost';
 export type ManualProjectDropPosition = 'before' | 'after';
 

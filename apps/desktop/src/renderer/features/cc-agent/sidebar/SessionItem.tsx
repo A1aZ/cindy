@@ -332,9 +332,16 @@ export const SessionItem = memo(function SessionItem({
     session.userSendAt && session.userSendAt > session.updatedAt
       ? session.userSendAt
       : session.updatedAt;
-  const infoPieces = buildSessionInfoPieces(session, taskInfoFields, activityIso, t);
   // PR 信息(C' 期):勾选且有引用时取最新一条(prRefs 已按 lastSeenAt 降序)。
   const infoPrRef = taskInfoFields.includes('pr') ? prRefs[0] : undefined;
+  // 传 hasPrRef 让 PR 参与「按勾选顺序」排列(否则它恒在最前)。
+  const infoPieces = buildSessionInfoPieces(
+    session,
+    taskInfoFields,
+    activityIso,
+    t,
+    infoPrRef != null,
+  );
   // 右侧状态指示器五档优先级(高→低),色表全端统一(侧栏 / 卡片 / 灵动岛同一张表):
   //   1. error(出错终止 / 定时任务失败未读)→ 红点   —— 红专职表示"坏了"
   //   2. awaiting(等待回复/权限/计划审阅)→ TapTap 蓝点 —— "在等你",邀请而非告警

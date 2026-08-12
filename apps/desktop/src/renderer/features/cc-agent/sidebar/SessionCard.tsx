@@ -235,9 +235,16 @@ export function SessionCard({
   const cardPreviewLineClamp = session.summary ? 3 : isRunning ? 2 : isAutomationGenerated ? 1 : 2;
   // 任务信息复选(C / C' 期):卡片右下角信息槽内容,与整理菜单同源共享状态。
   const { fields: taskInfoFields } = useTaskInfoFields();
-  const cardInfoPieces = buildSessionInfoPieces(session, taskInfoFields, activityIso, t);
   const cardPrRefs = usePrRefsForSession(session.id);
   const cardInfoPrRef = taskInfoFields.includes('pr') ? cardPrRefs[0] : undefined;
+  // 传 hasPrRef 让 PR 参与「按勾选顺序」排列(否则它恒在最前)。
+  const cardInfoPieces = buildSessionInfoPieces(
+    session,
+    taskInfoFields,
+    activityIso,
+    t,
+    cardInfoPrRef != null,
+  );
   // 勾选 pr 且行渲染时注册为 PR 消费者:注册即拉取(远程会话含引用补拉),
   // 此后 Provider 周期/聚焦统一刷新,失败自愈(与 SessionItem 同一条路径)。
   const { registerPrConsumer } = usePrActions();
@@ -1188,9 +1195,16 @@ function TimeActionsSlot({
   const { t } = useTranslation();
   // 任务信息复选(C / C' 期):与 SessionItem 的时间槽同源;默认仅 time 与旧渲染等价。
   const { fields: taskInfoFields } = useTaskInfoFields();
-  const infoPieces = buildSessionInfoPieces(session, taskInfoFields, activityIso, t);
   const prRefs = usePrRefsForSession(session.id);
   const infoPrRef = taskInfoFields.includes('pr') ? prRefs[0] : undefined;
+  // 传 hasPrRef 让 PR 参与「按勾选顺序」排列(否则它恒在最前)。
+  const infoPieces = buildSessionInfoPieces(
+    session,
+    taskInfoFields,
+    activityIso,
+    t,
+    infoPrRef != null,
+  );
   return (
     <div className="group/slot relative ml-auto flex h-5 shrink-0 items-center justify-end">
       {/* 默认内容:worktree + 信息槽;hover / 菜单打开 / archivePending 时淡出让位给操作钮。 */}

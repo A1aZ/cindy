@@ -163,6 +163,22 @@ describe('resolveGhostContentPath', () => {
 });
 
 describe('collectGhostContentFiles', () => {
+  it('rejects a linked content root before following it', async () => {
+    const root = path.join(workDir, 'plugin');
+    const outside = path.join(workDir, 'outside');
+    await fs.promises.mkdir(outside, { recursive: true });
+    await fs.promises.writeFile(path.join(outside, 'main.js'), '// outside');
+    if (!(await tryLinkDir(outside, root))) return;
+
+    await expect(
+      collectGhostContentFiles(root, {
+        dotEntries: 'include',
+        nonRegular: 'throw',
+        label: 'test',
+      }),
+    ).rejects.toThrow(/ghost content root is not a real directory/);
+  });
+
   it('includes dot entries for skill content and rejects links there', async () => {
     const dir = path.join(workDir, 'skill');
     await fs.promises.mkdir(path.join(dir, 'refs'), { recursive: true });

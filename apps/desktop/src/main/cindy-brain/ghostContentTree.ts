@@ -202,12 +202,22 @@ function sameStableDirectoryState(before: fs.BigIntStats, after: fs.BigIntStats)
 }
 
 async function captureGhostContentRootIdentity(rootDir: string): Promise<GhostContentRootIdentity> {
+  const lexicalBefore = await fs.promises.lstat(rootDir, { bigint: true });
+  if (lexicalBefore.isSymbolicLink() || !lexicalBefore.isDirectory()) {
+    throw new Error(`ghost content root is not a real directory: ${rootDir}`);
+  }
   const realPath = await fs.promises.realpath(rootDir);
-  const [pathStat, realStat] = await Promise.all([
+  const [pathStat, realStat, lexicalAfter] = await Promise.all([
     fs.promises.stat(rootDir, { bigint: true }),
     fs.promises.stat(realPath, { bigint: true }),
+    fs.promises.lstat(rootDir, { bigint: true }),
   ]);
-  if (!pathStat.isDirectory() || !sameStableDirectoryState(pathStat, realStat)) {
+  if (
+    !sameStableDirectoryState(lexicalBefore, pathStat) ||
+    !sameStableDirectoryState(pathStat, realStat) ||
+    !sameStableDirectoryState(pathStat, lexicalAfter) ||
+    lexicalAfter.isSymbolicLink()
+  ) {
     throw new Error(`ghost content root is not a stable directory: ${rootDir}`);
   }
   return {
@@ -223,7 +233,12 @@ async function assertGhostContentRootIdentity(
   rootDir: string,
   expected: GhostContentRootIdentity,
 ): Promise<void> {
-  const current = await captureGhostContentRootIdentity(rootDir);
+  let current: GhostContentRootIdentity;
+  try {
+    current = await captureGhostContentRootIdentity(rootDir);
+  } catch (error) {
+    throw new Error(`ghost content root changed while reading: ${rootDir}`, { cause: error });
+  }
   if (
     current.realPath !== expected.realPath ||
     current.dev !== expected.dev ||

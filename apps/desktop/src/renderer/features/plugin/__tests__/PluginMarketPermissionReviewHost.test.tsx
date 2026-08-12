@@ -166,7 +166,7 @@ describe('PluginMarketPermissionReviewHost', () => {
             ],
           },
         },
-        permissionDiff: { added: [], removed: [], unchanged: [] },
+        permissionDiff: { added: [], removed: [], unchanged: [], builtinOauthClientChanged: false },
         isUpdate: true,
         sourceType: 'server',
       });

@@ -172,6 +172,7 @@ import {
   broadcastMessageDeleted,
   commitMessageDeletion,
   createMessage as createDbMessage,
+  rewindPersistedUserMessageBeforeDispatch,
   rewindPersistedUserMessageAfterClear,
   findParkedEngineSession,
   getMessageDeletionTarget,
@@ -8592,11 +8593,24 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // sendToSessionInternal 这一条主机通路(消息落库、进程拉起与用户亲发一致);
   // 收口复用 hook-control 的 observeHookTurn(与飞书 bot 同一套 turn 观察语义)。
   setGhostSessionMessageRunner(async ({ sessionId, message, isTargetCurrent }) => {
+    const clientId = createId();
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
       message,
+      clientId,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
+          try {
+            await enqueueDurableWrite(`plugin-message-rewind:${sessionId}:${clientId}`, () =>
+              rewindPersistedUserMessageBeforeDispatch(sessionId, clientId),
+            );
+          } catch (err) {
+            log.warn('plugin message rewind before cancelled dispatch failed', {
+              sessionId,
+              clientId,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target session is no longer focused',
           );

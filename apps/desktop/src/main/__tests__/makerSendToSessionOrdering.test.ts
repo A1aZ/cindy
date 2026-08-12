@@ -625,6 +625,13 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('onAccepted: async () => {');
     expect(runnerBlock).toContain('if (!(await isTargetCurrent())) {');
     expect(runnerBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
+    expect(runnerBlock).toContain('clientId,');
+    expect(runnerBlock).toContain('rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)');
+    expectOrder(
+      runnerBlock,
+      'rewindPersistedUserMessageBeforeDispatch(sessionId, clientId)',
+      'throw new AcceptedCallbackDispatchCancelled(',
+    );
   });
 
   it('preserves stored permission and extraDirs when sendToWorker resumes a worker', () => {

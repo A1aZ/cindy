@@ -1389,6 +1389,30 @@ describe('Ghost manifest contract', () => {
       expect(result.ok, capability).toBe(true);
       if (result.ok) expect(result.manifest.agent).toEqual(expected);
     }
+
+    const sessionMessage = validateGhostManifest({
+      ...validManifest,
+      slots: ['tool', 'agent', 'session-context'],
+      agent: { sessionMessage: true },
+    });
+    expect(sessionMessage.ok).toBe(true);
+    if (sessionMessage.ok) {
+      expect(sessionMessage.manifest.agent).toEqual({ sessionMessage: true });
+    }
+    expect(
+      validateGhostManifest({
+        ...validManifest,
+        slots: ['tool', 'agent'],
+        agent: { sessionMessage: true },
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('session-context') });
+    expect(
+      validateGhostManifest({
+        ...validManifest,
+        slots: ['tool', 'agent', 'session-context'],
+        agent: { sessionMessage: 'yes' },
+      }),
+    ).toMatchObject({ ok: false, reason: expect.stringContaining('必须是布尔值') });
   });
 
   it("panel.position 'tab' 合法;tab 时停靠专属字段(minWidth/defaultFraction)明确拒绝", () => {

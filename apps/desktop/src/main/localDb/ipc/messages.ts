@@ -973,14 +973,14 @@ export function broadcastMessageDeleted(
 }
 
 /**
- * Hide a user row that was persisted after the session crossed `/clear`.
+ * Hide a user row that was persisted but cancelled before vendor dispatch.
  *
- * This is deliberately narrower than `commitMessageDeletion`: a clear-race
+ * This is deliberately narrower than `commitMessageDeletion`: pre-dispatch
  * cleanup must not create a context-rebuild marker, reset the native session,
- * or touch any other turn.  The row stays as a rewind tombstone so the same
- * clientId remains idempotent across a weak-link retry.
+ * or touch any other turn. The row stays as a rewind tombstone so the same
+ * clientId remains idempotent across retries.
  */
-export async function rewindPersistedUserMessageAfterClear(
+export async function rewindPersistedUserMessageBeforeDispatch(
   sessionId: string,
   clientId: string,
 ): Promise<void> {
@@ -1023,7 +1023,7 @@ export async function rewindPersistedUserMessageAfterClear(
   );
   for (const [index, cleanup] of mediaCleanup.entries()) {
     if (cleanup.status === 'fulfilled') continue;
-    log.warn('clear-race user media ref cleanup failed', {
+    log.warn('undispatched user media ref cleanup failed', {
       sessionId,
       clientId,
       refId: [row.id, row.clientId][index],
@@ -1038,7 +1038,7 @@ export async function rewindPersistedUserMessageAfterClear(
   );
   for (const [index, cleanup] of mediaHashCleanup.entries()) {
     if (cleanup.status === 'fulfilled') continue;
-    log.warn('clear-race session media ref reconcile failed', {
+    log.warn('undispatched session media ref reconcile failed', {
       sessionId,
       clientId,
       hash: mediaHashes[index],
@@ -1047,6 +1047,14 @@ export async function rewindPersistedUserMessageAfterClear(
   }
   broadcastMessageDeleted({ sessionId, clientId, clientIds: [clientId] }, ownerScope);
   void recomputePrRefsForSession(sessionId).catch(() => undefined);
+}
+
+/** Backward-compatible clear-race entry point for existing callers and tests. */
+export async function rewindPersistedUserMessageAfterClear(
+  sessionId: string,
+  clientId: string,
+): Promise<void> {
+  await rewindPersistedUserMessageBeforeDispatch(sessionId, clientId);
 }
 
 export async function dismissErrorMessage(

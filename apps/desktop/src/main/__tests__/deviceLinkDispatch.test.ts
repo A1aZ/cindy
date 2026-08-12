@@ -448,6 +448,7 @@ import {
   setControllersChangedListener,
   setRemoteInvokeBusyChangedListener,
   setSessionsSubscribedListener,
+  setControllerDisplayName,
   getActiveControllers,
   getUpdateRelaunchControllers,
   hasInFlightRemoteInvokes,
@@ -537,6 +538,52 @@ describe('被控端控制链路生命周期', () => {
     expect(calls.closed).toEqual([{ dst: 'ctrl-a', reason: 'user' }]);
     expect(getActiveControllers()).toHaveLength(0);
     expect(hasBroadcastTapListener()).toBe(false);
+  });
+
+  it('被控提示优先使用 presence 的数据库展示名，并在重命名后立即更新', () => {
+    remoteControlEnabled = true;
+    const changes: ActiveController[][] = [];
+    setControllersChangedListener((controllers) => changes.push(controllers));
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    // presence 先到：控制帧仍携带设备自报主机名，但展示应以数据库名为准。
+    setControllerDisplayName('ctrl-a', 'MacBook-Pro-2');
+    feed(subFrame('ctrl-a', SUB, ['session:s1'], 'Chriss-MacBook-Pro-2.local'));
+    expect(getActiveControllers()).toEqual([
+      { deviceId: 'ctrl-a', name: 'MacBook-Pro-2' },
+    ]);
+
+    // 设置页改名会广播新 presence；活跃横幅无需等重连或重订阅即可更新。
+    setControllerDisplayName('ctrl-a', '工作电脑');
+    expect(getActiveControllers()).toEqual([{ deviceId: 'ctrl-a', name: '工作电脑' }]);
+    expect(changes.at(-1)).toEqual([{ deviceId: 'ctrl-a', name: '工作电脑' }]);
+  });
+
+  it('数据库展示名为空或被清空时回退到控制端自报名，再缺失时回退到设备 ID 短码', () => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+
+    setControllerDisplayName('ctrl-reported', '数据库名称');
+    feed(subFrame('ctrl-reported', SUB, ['session:s1'], 'Host.local'));
+    expect(getActiveControllers()).toContainEqual({
+      deviceId: 'ctrl-reported',
+      name: '数据库名称',
+    });
+
+    setControllerDisplayName('ctrl-reported', '   ');
+    expect(getActiveControllers()).toContainEqual({
+      deviceId: 'ctrl-reported',
+      name: 'Host.local',
+    });
+
+    setControllerDisplayName('1234567890abcdef', '');
+    feed(subFrame('1234567890abcdef', SUB, ['session:s2']));
+    expect(getActiveControllers()).toContainEqual({
+      deviceId: '1234567890abcdef',
+      name: '12345678',
+    });
   });
 
   it('link-open(开关关)→ 不 accept、不记录', () => {

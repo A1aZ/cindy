@@ -72,6 +72,8 @@ import {
   forgetControllerInvokeState,
   handleControllerOffline,
   purgeRevokedController,
+  setControllerDisplayName,
+  clearControllerDisplayNames,
   setDispatchPresenceOfflineCheck,
 } from './dispatch';
 import {
@@ -555,6 +557,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     // (review P2)。翻转判据统一为「观察到进入某状态(含从未知)即触发一次」。
     if (!available && wasAvailable !== false) responsivenessTracker?.clearDevice(snap.deviceId);
     setControllerPlatform(snap.deviceId, snap.platform);
+    setControllerDisplayName(snap.deviceId, snap.deviceName);
     presenceNameByDevice.set(snap.deviceId, snap.selfName || snap.deviceName);
     void rememberLastKnownDeviceName(snap.deviceId, snap.deviceName); // best-effort 名称缓存,不阻塞 presence 处理
     broadcast(DEVICE_LINK_PUSH.PRESENCE_CHANGED, snap);
@@ -947,6 +950,7 @@ function teardownActiveLink(): void {
   // client 为 null 时 sendPush 也是 no-op。
   presenceOnlineByDevice.clear();
   clearControllerPlatforms();
+  clearControllerDisplayNames();
   presenceNameByDevice.clear();
   resetSubscriptionRefs();
   resetBusyDedupe(); // 重置 busy dedupe,避免重连后首个真实 busy 状态被旧值压掉

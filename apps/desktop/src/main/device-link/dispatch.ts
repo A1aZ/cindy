@@ -555,6 +555,14 @@ const remoteInvokeLinkEpoch = new Map<string, number>();
 const topicSubscriptionControllers = new Set<string>();
 /** 已成功 accept、尚未显式 close 的控制端；可无 active topic(现代重连等待 subscribe)。 */
 const acceptedLinkControllers = new Set<string>();
+/**
+ * relay presence 按 server 盖章的 deviceId 提供设备数据库展示名。它比控制端在
+ * link-open / subscribe 里自报的主机名更权威，用于让被控提示与设备列表一致。
+ * 仅作展示，不参与任何授权判断；账号 / 链路边界由 host 显式清空。
+ */
+const controllerDisplayNameByDevice = new Map<string, string>();
+/** 控制帧自报名称仅作数据库展示名缺失时的兼容回退。 */
+const reportedControllerNameByDevice = new Map<string, string>();
 
 /** `sessions` 订阅出现时通知 host replay 当前列表级轻量状态。 */
 type SessionsSubscribedListener = (controllerDeviceId: string) => void;
@@ -572,6 +580,46 @@ export function setRemoteInvokeBusyChangedListener(
 
 export function setSessionsSubscribedListener(cb: SessionsSubscribedListener | null): void {
   onSessionsSubscribed = cb;
+}
+
+function normalizeControllerName(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, MAX_CONTROLLER_NAME_LEN)
+    : undefined;
+}
+
+function resolveControllerName(deviceId: string, reportedName: unknown): string | undefined {
+  const normalizedReportedName = normalizeControllerName(reportedName);
+  if (normalizedReportedName) {
+    reportedControllerNameByDevice.set(deviceId, normalizedReportedName);
+  }
+  return controllerDisplayNameByDevice.get(deviceId)
+    ?? normalizedReportedName
+    ?? reportedControllerNameByDevice.get(deviceId);
+}
+
+/**
+ * presence 设备名变化(含设置页重命名)时更新展示真相；已有活跃订阅立即重发
+ * controlled-state，让横幅不用等下一次 subscribe / 重连才改名。
+ */
+export function setControllerDisplayName(deviceId: string, name: string): void {
+  const normalized = normalizeControllerName(name);
+  if (normalized) {
+    if (controllerDisplayNameByDevice.get(deviceId) === normalized) return;
+    controllerDisplayNameByDevice.set(deviceId, normalized);
+  } else {
+    if (!controllerDisplayNameByDevice.delete(deviceId)) return;
+  }
+  const displayName = normalized
+    ?? reportedControllerNameByDevice.get(deviceId)
+    ?? deviceId.slice(0, 8);
+  if (subscriptions.updateControllerMetadata(deviceId, displayName)) syncForwarding();
+}
+
+/** 账号切换 / 链路 teardown 时清空 presence 展示名，避免串到下一段身份。 */
+export function clearControllerDisplayNames(): void {
+  controllerDisplayNameByDevice.clear();
+  reportedControllerNameByDevice.clear();
 }
 
 export function getActiveControllers(): ActiveController[] {
@@ -1623,10 +1671,7 @@ function handleLinkOpen(
     client.closeLink(src, 'revoked', 'inbound');
     return;
   }
-  const name =
-    typeof payload?.controllerName === 'string' && payload.controllerName.trim()
-      ? payload.controllerName.trim().slice(0, MAX_CONTROLLER_NAME_LEN)
-      : src.slice(0, 8);
+  const name = resolveControllerName(src, payload?.controllerName) ?? src.slice(0, 8);
   // 老控制端无 subscribe 能力:link-open 视作订阅 legacy '*'(全量转发 + 横幅),向后兼容。
   // 已在当前 link 上证明支持 topic 的客户端可能重复 open;不能重新装回兼容 wildcard。
   const capabilities = sanitizeControllerCapabilities(payload?.capabilities);
@@ -2578,10 +2623,7 @@ function handleSubscriptionFrame(src: string, payload: InvokePayload): InvokeRes
     : [];
   // legacy `'*'`(全量 firehose + 点亮被控横幅)只允许走 link-open 路径,不接受 subscribe 帧
   // 携带 —— 上面 filter 已剔除,防控制端一帧订全部会话流。
-  const name =
-    typeof o.controllerName === 'string' && o.controllerName.trim()
-      ? o.controllerName.trim().slice(0, MAX_CONTROLLER_NAME_LEN)
-      : undefined;
+  const name = resolveControllerName(src, o.controllerName);
   const isSub = payload.channel === DL_SUBSCRIBE_CHANNEL;
   if (isSub) {
     // link-open provisionally installs legacy '*' for old clients. A non-empty modern subscribe
@@ -2901,6 +2943,8 @@ export const __testing = {
     remoteInvokeLinkEpoch.clear();
     topicSubscriptionControllers.clear();
     acceptedLinkControllers.clear();
+    controllerDisplayNameByDevice.clear();
+    reportedControllerNameByDevice.clear();
     onSessionsSubscribed = null;
     activeClient = null;
     offlinePushQueue.clear();

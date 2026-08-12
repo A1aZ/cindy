@@ -290,16 +290,19 @@ export function persistGroupBy(groupBy: FilterGroupBy): void {
 
 /**
  * 「对话归为一组」开关(D 期):true = 无项目任务收进「对话」组;
- * false(默认,定稿)= 散排在主列表里与项目行混排。
+ * false = 散排在主列表里与项目行混排。
+ * **默认 true**(2026-08-12 用户裁决,推翻 D 期定稿的默认关):默认配置是
+ * 设备 + 项目 + 对话三层都分组。老用户与新用户同一套分组默认(用户明确要求),
+ * 差异只在显示模式(见 useSidebarCardMode)。
  */
 export function loadGroupDialogue(): boolean {
   const storage = safeStorage();
-  if (!storage) return false;
+  if (!storage) return true;
   try {
-    return storage.getItem(GROUP_DIALOGUE_KEY) === 'true';
+    return storage.getItem(GROUP_DIALOGUE_KEY) !== 'false';
   } catch (err) {
     log.warn('[useSidebarFilter] failed to read groupDialogue:', err);
-    return false;
+    return true;
   }
 }
 

@@ -6,6 +6,8 @@
  *   2. 越界写 / 外发 / 不确定的一律 `prompt`，交给轻量 reviewer 静默裁决。
  *   3. 只有提权 / 系统控制 / 凭证等明确红线才 `prompt-each-time`(不可"总是允许")。
  */
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -532,6 +534,13 @@ describe('工具映射漏项不得变成静默拒绝', () => {
     // 摘要单向:不得把原文留在证据里。
     expect(ds).not.toContain('/tmp/safe__');
     expect(da).not.toContain('/etc/passwd');
+    // 摘要必须加进程内随机盐:否则低熵入参可被离线穷举反推(审阅器拿到键名+长度+摘要,
+    // 对候选值逐个求摘要即可)。同一入参的裸 SHA-256 是常量,加盐后必然不同 ——
+    // 用它反证盐确实生效。
+    const unsalted = createHash('sha256')
+      .update(JSON.stringify({ nonce: 'DXELUy3B', target: '/tmp/safe__' }), 'utf8')
+      .digest('hex').slice(0, 32);
+    expect(ds).not.toContain(unsalted);
 
     // 键序不同但语义相同的入参必须落到同一条缓存(否则白掏一次审阅费用)。
     expect(normalizeBuiltinToolForAutoReview('T', { a: 1, b: 2 }))

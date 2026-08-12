@@ -7,7 +7,7 @@
  * `default` 让 canUseTool 生效后,非 MCP 内置工具在此分类(见 claude-code/index.ts 的 dispatcher)。
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
 import {
   reviewAction,
@@ -373,8 +373,25 @@ function contentFingerprint(value: unknown): string {
     // BigInt、抛异常的 toJSON 等仍可能失败:退化成类型标记,仍比完全无区分好。
     return 'unserializable';
   }
-  return createHash('sha256').update(serialized, 'utf8').digest('hex').slice(0, 32);
+  return createHash('sha256')
+    .update(FINGERPRINT_SALT)
+    .update(serialized, 'utf8')
+    .digest('hex')
+    .slice(0, 32);
 }
+
+/**
+ * 指纹盐:进程内随机、永不外传。
+ *
+ * 没有盐时,低熵入参的摘要是可穷举的 —— 审阅器拿到「键名 + 类型 + 长度 + 摘要」后,
+ * 对候选值(如常见的 11 字符路径)逐个求摘要就能反推出原值,等于绕过「不发送入参内容」
+ * 这条承诺(codex 报)。加盐后摘要在进程外没有意义。
+ *
+ * 代价为零:指纹只需要在**同一进程内**稳定 —— 它服务的 `autoReviewDecisionCache` 是
+ * `new Map`(claude-code/index.ts:1965),会话内的内存缓存,本来就不跨进程存活;
+ * `description` 也只进审阅器 prompt,不落盘、不进持久批准记忆。
+ */
+const FINGERPRINT_SALT = randomBytes(16);
 
 /**
  * 递归按键名排序,让语义相同的入参得到同一份序列化。

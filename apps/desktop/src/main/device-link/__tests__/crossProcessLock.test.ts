@@ -877,4 +877,61 @@ describe('接管陈旧锁', () => {
       ),
     ).resolves.toBeNull();
   });
+
+  it('distinguishes a missing Windows process from an unavailable identity query', async () => {
+    await expect(
+      __testing.readWindowsIdentityWithPowershell(
+        123,
+        async () => ({ stdout: 'MISSING\r\n' }),
+      ),
+    ).resolves.toEqual({ status: 'missing' });
+    await expect(
+      __testing.readWindowsIdentityWithPowershell(
+        123,
+        async () => ({ stdout: 'unexpected output' }),
+      ),
+    ).resolves.toEqual({ status: 'unavailable' });
+    await expect(
+      __testing.readWindowsIdentityWithWmic(
+        123,
+        async () => ({ stdout: 'No Instance(s) Available.\r\n' }),
+      ),
+    ).resolves.toEqual({ status: 'missing' });
+    await expect(
+      __testing.readWindowsIdentityWithWmic(
+        123,
+        async () => ({ stdout: 'ERROR: provider unavailable\r\n' }),
+      ),
+    ).resolves.toEqual({ status: 'unavailable' });
+    await expect(
+      __testing.probeProcessIdentity(
+        123,
+        async () => ({ stdout: '' }),
+      ),
+    ).resolves.toEqual({ status: 'unavailable' });
+  });
+
+  it('retries transient empty-directory removal without recursive deletion', async () => {
+    const gateDir = path.join(dir, 'lock.reclaim.d');
+    await fsp.mkdir(gateDir);
+    const originalRmdir = fsp.rmdir;
+    let attempts = 0;
+    const rmdirSpy = vi.spyOn(fsp, 'rmdir').mockImplementation((async (target: unknown) => {
+      if (target === gateDir && attempts < 2) {
+        attempts += 1;
+        throw Object.assign(new Error('directory temporarily busy'), { code: 'EPERM' });
+      }
+      return originalRmdir(target as string);
+    }) as typeof fsp.rmdir);
+    const rmSpy = vi.spyOn(fsp, 'rm');
+    try {
+      await __testing.removeEmptyDirectoryWithRetry(gateDir);
+      expect(attempts).toBe(2);
+      expect(fs.existsSync(gateDir)).toBe(false);
+      expect(rmSpy).not.toHaveBeenCalledWith(gateDir, expect.objectContaining({ recursive: true }));
+    } finally {
+      rmdirSpy.mockRestore();
+      rmSpy.mockRestore();
+    }
+  });
 });

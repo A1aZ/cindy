@@ -3600,6 +3600,43 @@ describe('GhostManager · Host approval receipt', () => {
     ).toContain('Approved instructions');
   });
 
+  it('snapshot repair persists a one-way disable before the compatibility marker disappears', async () => {
+    const manifest = skillManifest();
+    await manager.install(await makeCindy('skill.cindy', manifest, skillFiles()));
+    const listed = manager.list()[0];
+    const source = await writeBundledSource(listed.manifest, skillFiles());
+    expect(await manager.approveTrustedBundledInstall(listed.manifest, true, source)).toBe(true);
+
+    const snapshotRoot = manager.list()[0].approvedSkillRoot!;
+    const disabledMarker = path.join(rootDir, listed.manifest.id, '.disabled');
+    await fs.promises.writeFile(disabledMarker, '');
+    await fs.promises.rm(snapshotRoot, { recursive: true, force: true });
+
+    expect(
+      await manager.approveTrustedBundledInstall(listed.manifest, false, source),
+    ).toBe(true);
+    expect(JSON.parse(await fs.promises.readFile(receiptPath('skilled'), 'utf8'))).toMatchObject({
+      enabled: false,
+    });
+
+    await fs.promises.rm(disabledMarker);
+    const restarted = new GhostManager({
+      getRootDir: () => rootDir,
+      getLocale: () => hostLocale,
+      isTrustedBundledId: (id) => trustedBundledIds.has(id),
+      isTrustedBundledSource: (id, sourceDir) =>
+        trustedBundledIds.has(id) &&
+        path.resolve(sourceDir) === path.resolve(workDir, 'bundled-seeds', id),
+      mutateSnapshot: async (request) => {
+        const { parentDir, ...workerRequest } = request;
+        await runGhostSnapshotWorkerRequest(workerRequest, parentDir);
+      },
+    });
+    await restarted.approveTrustedBundledInstall(listed.manifest, true, source);
+    expect(restarted.list()[0].enabled).toBe(false);
+    expect(fs.existsSync(disabledMarker)).toBe(true);
+  });
+
   it('invalidates a receipt whose skill content digests no longer match the manifest', async () => {
     await manager.install(await makeCindy('skill.cindy', skillManifest(), skillFiles()));
     const receipt = JSON.parse(

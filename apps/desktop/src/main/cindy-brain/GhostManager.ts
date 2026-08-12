@@ -3442,7 +3442,13 @@ export class GhostManager {
           this.receiptStore.skillSnapshotRoot(manifest.id, current.receipt.revision),
         ));
       if (!snapshotHealthy) {
-        await this.receiptStore.write(current.receipt, { skillSourceDir: sourceDir });
+        // Snapshot repair must persist the same one-way disabled merge as the
+        // healthy-snapshot path. Otherwise deleting the compatibility marker
+        // after this early return could silently re-enable the plugin.
+        await this.receiptStore.write({
+          ...current.receipt,
+          enabled,
+        }, { skillSourceDir: sourceDir });
         await this.finishTrustedBundledPublish(manifest.id, pendingPublish);
         this.untrustedApprovals.delete(this.isolationKey(manifest.id));
         return true;

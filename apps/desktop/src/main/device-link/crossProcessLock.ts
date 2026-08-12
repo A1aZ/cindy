@@ -33,6 +33,7 @@ const MAX_TAKEOVERS = 3;
 const LOCK_HEARTBEAT_MS = 2_000;
 const LEGACY_PID_REUSE_TOLERANCE_MS = 2_000;
 const REMOVE_RETRY_ATTEMPTS = 3;
+const EMPTY_DIR_REMOVE_RETRY_ATTEMPTS = 5;
 const RELEASE_GATE_WAIT_MS = 3_000;
 const execFileAsync = promisify(execFile);
 
@@ -77,6 +78,10 @@ interface ProcessIdentity {
   key: string;
   startedAtMs: number | null;
 }
+type ProcessIdentityProbe =
+  | { status: 'found'; identity: ProcessIdentity }
+  | { status: 'missing' }
+  | { status: 'unavailable' };
 type PublishedLock = {
   handle: Awaited<ReturnType<typeof fsp.open>>;
   nonce: string;
@@ -644,11 +649,7 @@ async function releaseAdvisoryReclaimGate(gate: AdvisoryReclaimGate): Promise<vo
     await removePathWithRetry(gate.filePath);
   }
   if (await pathExists(gate.filePath)) pendingOwnGateCleanup.add(gate.filePath);
-  try {
-    await fsp.rmdir(gate.dirPath);
-  } catch {
-    // Strict or advisory contenders may still be using the shared directory.
-  }
+  await removeEmptyDirectoryWithRetry(gate.dirPath);
 }
 
 async function readLockRecord(
@@ -1108,8 +1109,10 @@ async function isRecordOwnerActive(
     // identity query decide when possible; if it also fails, the caller below
     // remains fail-closed.
   }
-  const currentIdentity = await getProcessIdentity(record.pid);
-  if (!currentIdentity) return true;
+  const identityProbe = await probeProcessIdentity(record.pid);
+  if (identityProbe.status === 'missing') return false;
+  if (identityProbe.status === 'unavailable') return true;
+  const currentIdentity = identityProbe.identity;
   // Exact process identity is the strongest signal and must be checked before
   // the self-pid shortcut: after a crash + PID reuse the OS may hand our pid to
   // this process while the lock still records the dead instance's identity, so
@@ -1146,12 +1149,20 @@ async function readProcessIdentity(
   pid: number,
   runCommand: ExecFileRunner = execFileAsync as ExecFileRunner,
 ): Promise<ProcessIdentity | null> {
+  const probe = await probeProcessIdentity(pid, runCommand);
+  if (probe.status === 'found') return probe.identity;
+  return pid === process.pid ? estimateCurrentProcessIdentity() : null;
+}
+
+async function probeProcessIdentity(
+  pid: number,
+  runCommand: ExecFileRunner = execFileAsync as ExecFileRunner,
+): Promise<ProcessIdentityProbe> {
   if (process.platform === 'win32') {
     const fromPowershell = await readWindowsIdentityWithPowershell(pid, runCommand);
-    if (fromPowershell) return fromPowershell;
+    if (fromPowershell.status !== 'unavailable') return fromPowershell;
     const fromWmic = await readWindowsIdentityWithWmic(pid, runCommand);
-    if (fromWmic) return fromWmic;
-    return pid === process.pid ? estimateCurrentProcessIdentity() : null;
+    return fromWmic;
   }
   try {
     const { stdout } = await runCommand(
@@ -1164,41 +1175,48 @@ async function readProcessIdentity(
       },
     );
     const value = stdout.trim().replace(/\s+/g, ' ');
-    if (!value) return pid === process.pid ? estimateCurrentProcessIdentity() : null;
+    // A successful command with no parseable identity is not affirmative
+    // proof that the process is gone. `process.kill(pid, 0)` already handles
+    // the OS-level missing case; keep ambiguous `ps` output fail-closed.
+    if (!value) return { status: 'unavailable' };
     const parsed = Date.parse(`${value} UTC`);
-    return processIdentityFromStartMs(parsed, value);
+    const identity = processIdentityFromStartMs(parsed, value);
+    return identity ? { status: 'found', identity } : { status: 'unavailable' };
   } catch {
-    return pid === process.pid ? estimateCurrentProcessIdentity() : null;
+    return { status: 'unavailable' };
   }
 }
 
 async function readWindowsIdentityWithPowershell(
   pid: number,
   runCommand: ExecFileRunner,
-): Promise<ProcessIdentity | null> {
+): Promise<ProcessIdentityProbe> {
   try {
     const powershell = `${process.env.SystemRoot ?? 'C:\\Windows'}`
       + '\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
     const script =
       `$p = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\" -ErrorAction Stop; `
-      + `if ($p) { $p.CreationDate.ToUniversalTime().Ticks }`;
+      + `if ($null -eq $p) { 'MISSING' } else { $p.CreationDate.ToUniversalTime().Ticks }`;
     const { stdout } = await runCommand(
       powershell,
       ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-Command', script],
       { encoding: 'utf8', timeout: 5_000, windowsHide: true },
     );
-    const ticks = Number(stdout.trim());
-    if (!Number.isFinite(ticks)) return null;
-    return processIdentityFromStartMs(ticks / 10_000 - 62_135_596_800_000);
+    const value = stdout.trim();
+    if (value === 'MISSING') return { status: 'missing' };
+    if (!/^\d+$/.test(value)) return { status: 'unavailable' };
+    const ticks = Number(value);
+    const identity = processIdentityFromStartMs(ticks / 10_000 - 62_135_596_800_000);
+    return identity ? { status: 'found', identity } : { status: 'unavailable' };
   } catch {
-    return null;
+    return { status: 'unavailable' };
   }
 }
 
 async function readWindowsIdentityWithWmic(
   pid: number,
   runCommand: ExecFileRunner,
-): Promise<ProcessIdentity | null> {
+): Promise<ProcessIdentityProbe> {
   try {
     const wmic = `${process.env.SystemRoot ?? 'C:\\Windows'}\\System32\\wbem\\WMIC.exe`;
     const { stdout } = await runCommand(
@@ -1207,7 +1225,11 @@ async function readWindowsIdentityWithWmic(
       { encoding: 'utf8', timeout: 5_000, windowsHide: true },
     );
     const match = stdout.match(/CreationDate=(\d{14})\.(\d{1,6})([+-]\d{3})/i);
-    if (!match) return null;
+    if (!match) {
+      return /^\s*No Instance\(s\) Available\.\s*$/i.test(stdout)
+        ? { status: 'missing' }
+        : { status: 'unavailable' };
+    }
     const stamp = match[1];
     const micros = match[2].padEnd(6, '0');
     const offsetMinutes = Number(match[3]);
@@ -1220,9 +1242,10 @@ async function readWindowsIdentityWithWmic(
       Number(stamp.slice(12, 14)),
       Number(micros.slice(0, 3)),
     );
-    return processIdentityFromStartMs(localMs - offsetMinutes * 60_000);
+    const identity = processIdentityFromStartMs(localMs - offsetMinutes * 60_000);
+    return identity ? { status: 'found', identity } : { status: 'unavailable' };
   } catch {
-    return null;
+    return { status: 'unavailable' };
   }
 }
 
@@ -1376,11 +1399,7 @@ async function releaseReclaimGate(gate: ReclaimGate): Promise<void> {
   } else if (!releasedRecordDurable) {
     await removePathWithRetry(gateReleaseMarkerPath(gate.filePath));
   }
-  try {
-    await fsp.rmdir(gate.dirPath);
-  } catch {
-    // Another contender may already be publishing in the directory.
-  }
+  await removeEmptyDirectoryWithRetry(gate.dirPath);
 }
 
 async function publishGateReleaseMarker(gate: ReclaimGate): Promise<void> {
@@ -1511,11 +1530,34 @@ async function removePathWithRetry(file: string): Promise<void> {
   }
 }
 
+/** Retry only empty-directory removal; never delete a contender recursively. */
+async function removeEmptyDirectoryWithRetry(dir: string): Promise<void> {
+  for (let attempt = 0; attempt < EMPTY_DIR_REMOVE_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await fsp.rmdir(dir);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return;
+      if (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES' && code !== 'ENOTEMPTY') {
+        return;
+      }
+      if (attempt + 1 < EMPTY_DIR_REMOVE_RETRY_ATTEMPTS) {
+        await sleep(LOCK_RETRY_MS * (attempt + 1));
+      }
+    }
+  }
+}
+
 export const __testing = {
   staleMs: LOCK_STALE_MS,
   heartbeatMs: LOCK_HEARTBEAT_MS,
   getProcessIdentity,
   readProcessIdentity,
+  probeProcessIdentity,
+  readWindowsIdentityWithPowershell,
+  readWindowsIdentityWithWmic,
+  removeEmptyDirectoryWithRetry,
   parseRecordedProcessStartMs,
   processIdentitiesMatch,
 };

@@ -5913,6 +5913,41 @@ describe('AgentInputCoordinator queue mutations', () => {
     expect(updated?.sessionReferencesRequireTrustedSnapshot).toBeUndefined();
   });
 
+  it('re-screens a focused-plugin queue message after its text is edited', async () => {
+    const h = createHarness();
+    const sid = 'edit-plugin-text-rescreen';
+    const screen = vi.fn(
+      async () => ({ action: 'allow' }) as const,
+    );
+    h.setScreenUserMessage(screen);
+    h.setRunning(true);
+    const item = makeItem('q-plugin-text', 'screened original', {
+      bypassGhostHooks: true,
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    h.coordinator.enqueue(sid, item);
+    h.coordinator.updateText(sid, item.clientId, 'edited text');
+
+    expect(latestProjection(h.projections).pendingQueue[0]).toMatchObject({
+      text: 'edited text',
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    expect(latestProjection(h.projections).pendingQueue[0]?.bypassGhostHooks).toBeUndefined();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    expect(screen).toHaveBeenCalledWith(
+      sid,
+      'edited text',
+      expect.objectContaining({ pluginSessionMessageGhostId: 'plugin-a' }),
+    );
+    expect(h.sendToAgent.mock.calls[0]?.[1]).toEqual({ type: 'user', content: 'edited text' });
+  });
+
   it('replaces pending row content (text + files) in place while pinning identity fields', async () => {
     const h = createHarness();
     const sid = 'edit-content';
@@ -6006,6 +6041,47 @@ describe('AgentInputCoordinator queue mutations', () => {
     const empty = makeItem(second.clientId, '   ');
     h.coordinator.updateContent(sid, second.clientId, empty);
     expect(latestProjection(h.projections).pendingQueue[0]?.text).toBe('text only');
+  });
+
+  it('re-screens a focused-plugin queue message after its full content is edited', async () => {
+    const h = createHarness();
+    const sid = 'edit-plugin-content-rescreen';
+    const screen = vi.fn(
+      async () => ({ action: 'allow' }) as const,
+    );
+    h.setScreenUserMessage(screen);
+    h.setRunning(true);
+    const item = makeItem('q-plugin-content', 'screened original', {
+      bypassGhostHooks: true,
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    h.coordinator.enqueue(sid, item);
+    h.coordinator.updateContent(
+      sid,
+      item.clientId,
+      makeItem(item.clientId, 'edited content', {
+        persistedContent: JSON.stringify({ text: 'edited content', images: [], files: [] }),
+      }),
+    );
+
+    expect(latestProjection(h.projections).pendingQueue[0]).toMatchObject({
+      text: 'edited content',
+      requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: 'plugin-a',
+    });
+    expect(latestProjection(h.projections).pendingQueue[0]?.bypassGhostHooks).toBeUndefined();
+
+    h.setRunning(false);
+    h.coordinator.onTurnEvent(sid, 'done');
+    await flush();
+
+    expect(screen).toHaveBeenCalledWith(
+      sid,
+      'edited content',
+      expect.objectContaining({ pluginSessionMessageGhostId: 'plugin-a' }),
+    );
+    expect(h.sendToAgent.mock.calls[0]?.[1]).toEqual({ type: 'user', content: 'edited content' });
   });
 });
 

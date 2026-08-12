@@ -535,6 +535,11 @@ export function updateQueuedMessageText(
     persistedContent: nextPersisted,
     chatMessage: nextChatMessage,
   };
+  // 插件当前任务消息的 bypass 只证明原正文已经过用户消息钩子。用户编辑后
+  // 必须重新筛查新正文；插件身份与焦点票据仍保留，继续走后续授权复核。
+  if (typeof entry.pluginSessionMessageGhostId === 'string') {
+    delete updated.bypassGhostHooks;
+  }
   if (!refsUnchanged) {
     delete updated.trustedSessionReferenceContexts;
     // 引用坐标发生变化后，旧的 device-link 快照已经不再对应当前文本。
@@ -570,6 +575,11 @@ export function updateQueuedMessageContent(
         : {}),
     },
   };
+  // 与文本编辑相同，完整内容替换使原筛查结论失效；只撤销一次性 bypass，
+  // 不撤销 main 持有的插件身份、焦点约束或后续授权守卫。
+  if (typeof entry.pluginSessionMessageGhostId === 'string') {
+    delete merged.bypassGhostHooks;
+  }
   // 附件是"编辑后的完整集合"语义:清空要真的清掉键,不能靠 spread 残留旧值
   // (手机编辑器能完整表达附件,undefined / 空数组都表示清空)。
   if (next.files && next.files.length > 0) merged.files = next.files;

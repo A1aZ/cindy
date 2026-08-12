@@ -262,6 +262,13 @@ export interface AgentInputQueuedMessage {
    */
   requireCurrentSessionFocus?: boolean;
   /**
+   * Host-owned identity for a queued current-task Plugin message. Persisting
+   * it lets crash-restored items revalidate the originating Plugin immediately
+   * before dispatch. Renderer and device-link payloads must not be trusted to
+   * set this field.
+   */
+  pluginSessionMessageGhostId?: string;
+  /**
    * 本条是**自动**补发的续跑指令(turn 被上游打断后由 main 守卫触发,见
    * maker-ipc/interruptedTurnAutoResume.ts),不是人点的重试。
    *

@@ -7823,6 +7823,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     bypassGhostHooks?: boolean;
     /** 插件当前任务消息在最终派发前仍须命中当前焦点主任务。 */
     requireCurrentSessionFocus?: boolean;
+    /** Host 固化的插件身份，供排队恢复后的最终授权复核。 */
+    pluginSessionMessageGhostId?: string;
     /** Host-only synchronous fence for the last boundary before vendor dispatch. */
     assertBeforeVendorDispatch?: () => void;
     /** Cleanup for a durable row cancelled by an accepted/final-dispatch guard. */
@@ -7846,6 +7848,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       origin,
       bypassGhostHooks,
       requireCurrentSessionFocus,
+      pluginSessionMessageGhostId,
       assertBeforeVendorDispatch,
       onDispatchCancelled,
       createDefaults,
@@ -8193,6 +8196,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           origin,
           bypassGhostHooks,
           requireCurrentSessionFocus,
+          pluginSessionMessageGhostId,
         });
         return {
           ok: true as const,
@@ -8244,6 +8248,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             origin,
             bypassGhostHooks,
             requireCurrentSessionFocus,
+            pluginSessionMessageGhostId,
           });
           return {
             ok: true as const,
@@ -8390,6 +8395,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               origin,
               bypassGhostHooks,
               requireCurrentSessionFocus,
+              pluginSessionMessageGhostId,
             });
             return {
               ok: true as const,
@@ -8510,6 +8516,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             origin,
             bypassGhostHooks,
             requireCurrentSessionFocus,
+            pluginSessionMessageGhostId,
           });
           return {
             ok: true as const,
@@ -8654,7 +8661,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 这里注入真实执行链——专属会话确保/统一投递/turn 收口。投递仍走
   // sendToSessionInternal 这一条主机通路(消息落库、进程拉起与用户亲发一致);
   // 收口复用 hook-control 的 observeHookTurn(与飞书 bot 同一套 turn 观察语义)。
-  setGhostSessionMessageRunner(async ({ sessionId, message, isTargetCurrent }) => {
+  setGhostSessionMessageRunner(async ({ ghostId, sessionId, message, isTargetCurrent }) => {
     // 先在进入统一发送事务前挡住已经失焦的目标，避免为必然取消的插件请求
     // 创建排队项或持久化消息；accepted 边界仍会再次复核异步期间的焦点变化。
     if (!(await isTargetCurrent())) {
@@ -8715,6 +8722,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 直发已在上方筛查；繁忙转队列时沿用结果，避免同一消息重复触发钩子。
       bypassGhostHooks: true,
       requireCurrentSessionFocus: true,
+      pluginSessionMessageGhostId: ghostId,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
           throw new AcceptedCallbackDispatchCancelled(
@@ -8950,6 +8958,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     origin?: AgentInputQueuedMessage['origin'];
     bypassGhostHooks?: boolean;
     requireCurrentSessionFocus?: boolean;
+    pluginSessionMessageGhostId?: string;
   }): Promise<void> {
     const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
     const queued: AgentInputQueuedMessage = {
@@ -8970,6 +8979,9 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       createOpts,
       ...(params.bypassGhostHooks ? { bypassGhostHooks: true } : {}),
       ...(params.requireCurrentSessionFocus ? { requireCurrentSessionFocus: true } : {}),
+      ...(params.pluginSessionMessageGhostId
+        ? { pluginSessionMessageGhostId: params.pluginSessionMessageGhostId }
+        : {}),
       ...(params.origin ? { origin: params.origin } : {}),
     };
     if (params.onAccepted) {
@@ -10995,6 +11007,24 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。
       schedulerQueuedPromptDiscardWatchers.delete(item.clientId);
       if (item.requireCurrentSessionFocus === true) {
+        const ghostId = item.pluginSessionMessageGhostId;
+        const visibility =
+          typeof ghostId === 'string'
+            ? classifyGhostVisibility(ghostId, item.workingDir ?? null, {
+                listGhosts: () => getGhostManager().list(),
+                isAvailableForActiveSession: isGhostAvailableForActiveSession,
+                isDisabledForWorkdir: isGhostDisabledForWorkdir,
+              })
+            : null;
+        if (
+          !visibility?.ok ||
+          !visibility.ghost.manifest.slots.includes('agent') ||
+          visibility.ghost.manifest.agent?.sessionMessage !== true
+        ) {
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message authorization is no longer valid',
+          );
+        }
         let isCurrent = false;
         try {
           isCurrent = await isGhostSessionCurrent(sessionId);
@@ -11573,6 +11603,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       throwIpcError('INVALID_PARAMS', 'queued.createOpts.agentKind invalid');
     }
     const normalized: AgentInputQueuedMessage = { ...msg };
+    // 该字段是 Host 派发授权票据，Renderer / device-link 输入不得伪造。
+    delete normalized.pluginSessionMessageGhostId;
     const refs = requireSessionRefs(normalized.sessionRefs);
     if (!isDeviceLinkInvoke()) {
       // preload/renderer 不属于可信边界，不能直接注入历史正文。

@@ -6101,6 +6101,7 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
       makeItem('r-focus', 'plugin message', {
         bypassGhostHooks: true,
         requireCurrentSessionFocus: true,
+        pluginSessionMessageGhostId: 'plugin-a',
       }),
     ]);
 
@@ -6114,6 +6115,7 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
         clientId: 'r-focus',
         bypassGhostHooks: true,
         requireCurrentSessionFocus: true,
+        pluginSessionMessageGhostId: 'plugin-a',
       }),
     );
   });

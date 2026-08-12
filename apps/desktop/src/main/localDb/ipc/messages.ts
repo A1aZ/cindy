@@ -972,6 +972,53 @@ export function broadcastMessageDeleted(
   }
 }
 
+/** Canonical sidebar preview after a hidden pre-dispatch row is removed. */
+async function readVisibleSessionPreview(sessionId: string): Promise<string | null> {
+  const db = getDbClient().drizzle;
+  const [sessionRow] = await db
+    .select({ clearedAt: sessions.clearedAt })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
+  const visibleAfterClear =
+    sessionRow?.clearedAt == null ? undefined : gt(messages.createdAt, sessionRow.clearedAt);
+  const [latestRow] = await db
+    .select({ content: messages.content, role: messages.role })
+    .from(messages)
+    .where(
+      and(
+        eq(messages.sessionId, sessionId),
+        sql`${messages.role} IN ('user', 'assistant')`,
+        isNull(messages.rewindAt),
+        sql`(${messages.agentMeta} IS NULL OR json_extract(${messages.agentMeta}, '$.autoResume') IS NOT 1)`,
+        visibleAfterClear,
+      ),
+    )
+    .orderBy(desc(messages.createdAt), desc(messageRowid))
+    .limit(1);
+  return extractMessagePreview(latestRow?.content, latestRow?.role);
+}
+
+function broadcastSessionPreviewPatched(
+  sessionId: string,
+  preview: string | null,
+  ownerScope: DataOwnerBroadcastScope | null,
+): void {
+  const ownerStamp = ownerStampForBroadcast(ownerScope);
+  if (ownerStamp === null) return;
+  const payload = { sessionId, patch: { preview } };
+  if (ownerStamp === undefined) {
+    broadcastTap.tapWindowBroadcast('local-db:sessions:patched', payload);
+  } else {
+    broadcastTap.tapWindowBroadcast('local-db:sessions:patched', payload, ownerStamp);
+  }
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (win.isDestroyed()) continue;
+    if (ownerStamp === undefined) win.webContents.send('local-db:sessions:patched', payload);
+    else win.webContents.send('local-db:sessions:patched', payload, ownerStamp);
+  }
+}
+
 /**
  * Hide a user row that was persisted but cancelled before vendor dispatch.
  *
@@ -1046,6 +1093,21 @@ export async function rewindPersistedUserMessageBeforeDispatch(
     });
   }
   broadcastMessageDeleted({ sessionId, clientId, clientIds: [clientId] }, ownerScope);
+  if (isOwnerBroadcastScopeCurrent(ownerScope)) {
+    try {
+      broadcastSessionPreviewPatched(
+        sessionId,
+        await readVisibleSessionPreview(sessionId),
+        ownerScope,
+      );
+    } catch (error) {
+      log.warn('undispatched user session preview refresh failed', {
+        sessionId,
+        clientId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   void recomputePrRefsForSession(sessionId).catch(() => undefined);
   return true;
 }

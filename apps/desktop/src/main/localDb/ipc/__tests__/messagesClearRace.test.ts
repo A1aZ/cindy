@@ -193,6 +193,13 @@ describe('message persistence clear boundary', () => {
       .prepare(
         `INSERT INTO messages
           (id, client_id, session_id, role, content, created_at, rewind_at)
+         VALUES (?, ?, ?, 'assistant', ?, ?, NULL)`,
+      )
+      .run('row-previous', 'client-previous', 's1', 'previous answer', 90);
+    sqlite
+      .prepare(
+        `INSERT INTO messages
+          (id, client_id, session_id, role, content, created_at, rewind_at)
          VALUES (?, ?, ?, 'user', ?, ?, NULL)`,
       )
       .run('row-plugin', 'client-plugin', 's1', 'submit', 100);
@@ -209,6 +216,27 @@ describe('message persistence clear boundary', () => {
       sessionId: 's1',
       clientId: 'client-plugin',
       clientIds: ['client-plugin'],
+    });
+    expect(h.broadcast).toHaveBeenCalledWith('local-db:sessions:patched', {
+      sessionId: 's1',
+      patch: { preview: 'previous answer' },
+    });
+  });
+
+  it('clears the session preview when a cancelled plugin message was the only visible row', async () => {
+    sqlite
+      .prepare(
+        `INSERT INTO messages
+          (id, client_id, session_id, role, content, created_at, rewind_at)
+         VALUES (?, ?, ?, 'user', ?, ?, NULL)`,
+      )
+      .run('row-only', 'client-only', 's1', 'submit', 100);
+
+    await expect(rewindPersistedUserMessageBeforeDispatch('s1', 'client-only')).resolves.toBe(true);
+
+    expect(h.broadcast).toHaveBeenCalledWith('local-db:sessions:patched', {
+      sessionId: 's1',
+      patch: { preview: null },
     });
   });
 
@@ -230,5 +258,6 @@ describe('message persistence clear boundary', () => {
       .prepare('SELECT rewind_at AS rewindAt FROM messages WHERE session_id = ? AND client_id = ?')
       .get('s1', 'client-stale-owner') as { rewindAt: number | null };
     expect(row.rewindAt).toBeNull();
+    expect(h.broadcast).not.toHaveBeenCalled();
   });
 });

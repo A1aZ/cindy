@@ -677,6 +677,7 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('message: screenedMessage,');
     expect(runnerBlock).toContain('bypassGhostHooks: true,');
     expect(runnerBlock).toContain('requireCurrentSessionFocus: true,');
+    expect(runnerBlock).toContain('pluginSessionMessageGhostId: ghostId,');
 
     const enqueueBlock = extractBetween(
       source,
@@ -694,7 +695,18 @@ describe('sendToSession ordering', () => {
     expect(enqueueBlock).toContain(
       '...(params.requireCurrentSessionFocus ? { requireCurrentSessionFocus: true } : {}),',
     );
+    expect(enqueueBlock).toContain(
+      'pluginSessionMessageGhostId: params.pluginSessionMessageGhostId',
+    );
     expect(coordinatorBlock).toContain('if (item.requireCurrentSessionFocus === true) {');
+    expect(coordinatorBlock).toContain('const ghostId = item.pluginSessionMessageGhostId;');
+    expect(coordinatorBlock).toContain(
+      'classifyGhostVisibility(ghostId, item.workingDir ?? null',
+    );
+    expect(coordinatorBlock).toContain(
+      'visibility.ghost.manifest.agent?.sessionMessage !== true',
+    );
+    expect(source).toContain('delete normalized.pluginSessionMessageGhostId;');
     expect(coordinatorBlock).toContain('isGhostSessionCurrent(sessionId)');
     expect(coordinatorBlock).toContain(
       'rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId)',

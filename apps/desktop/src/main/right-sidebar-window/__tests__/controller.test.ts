@@ -694,7 +694,7 @@ describe('setContext / routeCommand', () => {
     await expect(h.controller.routeCommand(terminalRequest())).resolves.toBe('stale-context');
   });
 
-  it('allowOpen=false + window hidden: queued, flushed on ready', async () => {
+  it('allowOpen=false + window hidden: stays queued through prewarm and flushes on open', async () => {
     const h = makeHarness({ detached: true });
     h.controller.setContext(ctx);
     const cmd = { type: 'close-orca-workers-tab' as const, sessionId: 's1' };
@@ -706,6 +706,9 @@ describe('setContext / routeCommand', () => {
     h.controller.prewarm();
     const win = h.windows[0];
     markReady(h.controller, win);
+    expect(h.sends.filter((entry) => entry.channel === 'cmd-channel')).toEqual([]);
+
+    h.controller.open();
     expect(h.sends.at(-1)).toEqual({ channel: 'cmd-channel', payload: cmd });
   });
 

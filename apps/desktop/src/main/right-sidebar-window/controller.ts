@@ -779,6 +779,7 @@ export class RsbWindowController {
     if (
       !this.deps.settings.read().detached ||
       !this.presentationReady ||
+      !this.visible ||
       !this.winRef ||
       this.winRef.isDestroyed()
     ) {
@@ -788,6 +789,7 @@ export class RsbWindowController {
       () => Boolean(
         this.winRef &&
           !this.winRef.isDestroyed() &&
+          this.visible &&
           !this.destroyingWindow &&
           !this.disposed,
       ),

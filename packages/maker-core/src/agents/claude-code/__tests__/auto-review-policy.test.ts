@@ -262,3 +262,51 @@ describe('classifyBuiltinToolForAutoReview — 外发与未知', () => {
     expect(verdict('mcp__srv__tool', {})).toBe('prompt'); // 理论上不会传 MCP 进来,兜底也 fail-closed
   });
 });
+
+describe('工具映射漏项不得变成静默拒绝', () => {
+  it('PowerShell 归入 exec,且补解释器前缀让红线判据真正生效', () => {
+    // 漏掉它的后果不是「少审一个工具」而是落到兜底 other → 证据不足 → 直接 block,
+    // Windows 用户在 Auto 档下用 PowerShell 是坏的。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: 'Get-ChildItem' }))
+      .toEqual({ kind: 'exec', command: 'pwsh -Command Get-ChildItem' });
+
+    // core 的 powerShellNeedsConsent 要求命令以 pwsh/powershell 开头才认 —— 不补前缀
+    // 的话 POWERSHELL_DANGER_PATTERNS 一条都匹配不上,红线形同虚设。
+    expect(verdict('PowerShell', { command: 'Remove-Item -Recurse -Force C:\\' }))
+      .toBe('prompt-each-time');
+    expect(verdict('PowerShell', { command: 'Invoke-Expression $payload' }))
+      .toBe('prompt-each-time');
+
+    // 与「Bash 里调 powershell」两种入口给出一致结论。
+    expect(verdict('Bash', { command: 'pwsh -Command Remove-Item -Recurse -Force C:\\' }))
+      .toBe('prompt-each-time');
+
+    // 模型自带前缀时不重复包装。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: 'pwsh -c Get-Date' }))
+      .toEqual({ kind: 'exec', command: 'pwsh -c Get-Date' });
+
+    // 空命令仍按证据不足处理,不拼出一个只有前缀的假命令。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: '   ' }))
+      .toEqual({ kind: 'exec', command: '' });
+  });
+
+  it('兜底 other 必须带 description,否则会在调模型前被判证据不足', () => {
+    const action = normalizeBuiltinToolForAutoReview('SomeFutureTool', { anything: 1 });
+    expect(action.kind).toBe('other');
+    // 有 description = 能进审阅器裁决;没有 = missingReviewEvidence 直接 block。
+    expect(action.kind === 'other' && action.description?.trim()).toBeTruthy();
+    // 描述里带工具名,便于审阅器判断这类动作。
+    expect(action.kind === 'other' && action.description).toContain('SomeFutureTool');
+  });
+
+  it('兜底 description 不得泄漏入参内容', () => {
+    // description 会进 reviewer prompt;入参可能含文件内容、凭证或用户数据。
+    const action = normalizeBuiltinToolForAutoReview('SomeFutureTool', {
+      secret: 'sk-live-abcdef123456',
+      path: '/Users/me/.ssh/id_ed25519',
+    });
+    const description = action.kind === 'other' ? action.description ?? '' : '';
+    expect(description).not.toContain('sk-live-abcdef123456');
+    expect(description).not.toContain('id_ed25519');
+  });
+});

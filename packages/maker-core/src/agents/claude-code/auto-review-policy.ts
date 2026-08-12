@@ -45,6 +45,24 @@ const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'Write', 'Edit', 'MultiEdit', 'NotebookEdit',
 ]);
 
+/**
+ * PowerShell 工具的 `command` 是**裸** PowerShell 语句(如 `Remove-Item -Recurse x`),
+ * 而 core 的 `powerShellNeedsConsent` 判据要求命令以 `pwsh` / `powershell` 开头才认
+ * (它服务的是 Bash 里写 `powershell -c "…"` 那种形态)。直接把裸语句当 exec 传下去,
+ * POWERSHELL_DANGER_PATTERNS 一条都匹配不上 —— 红线形同虚设。
+ *
+ * 补上解释器前缀,让同一份判据对「PowerShell 工具」和「Bash 调 powershell」两种
+ * 入口给出一致结论。用 `-Command` 是 pwsh 的规范长写法,判据按前缀名识别、不依赖
+ * 具体参数拼写。
+ */
+function powerShellExecCommand(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) return '';
+  // 已经自带解释器前缀的(模型偶尔会写全)不重复包装,避免 `pwsh -c pwsh -c …`。
+  if (/^(?:pwsh|powershell)(?:\.exe)?\b/i.test(trimmed)) return trimmed;
+  return `pwsh -Command ${trimmed}`;
+}
+
 function extractFilePath(toolName: string, input: unknown): string | undefined {
   const obj = input as Record<string, unknown> | null;
   if (!obj) return undefined;
@@ -114,8 +132,16 @@ export function normalizeBuiltinToolForAutoReview(
   if (FILE_WRITE_TOOLS.has(toolName)) {
     return { kind: 'file-write', path: extractFilePath(toolName, input) };
   }
+  // Bash / PowerShell 都是「跑一段命令文本」,判据完全相同 —— 归一到 exec 让
+  // classifyShellCommand 的红线(含 POWERSHELL_DANGER_PATTERNS)真正生效。
+  // 漏掉 PowerShell 的后果不是「少审一个工具」而是**静默拒绝**:它会落到下面
+  // 的兜底 other,而无 description 的 other 在 missingReviewEvidence 处直接
+  // block、连模型都不问 —— Windows 用户在 Auto 档下用 PowerShell 是坏的。
   if (toolName === 'Bash') {
     return { kind: 'exec', command: extractCommand(input) };
+  }
+  if (toolName === 'PowerShell') {
+    return { kind: 'exec', command: powerShellExecCommand(extractCommand(input)) };
   }
   // WebFetch/WebSearch:把 URL/搜索词送往外部(exfil 面)→ 升级。
   if (toolName === 'WebFetch' || toolName === 'WebSearch') {
@@ -125,6 +151,17 @@ export function normalizeBuiltinToolForAutoReview(
       target: extractNetworkTarget(toolName, input),
     };
   }
-  // 未知 / 其它一切工具 → fail-closed 升级。
-  return { kind: 'other' };
+  // 未知 / 其它一切工具 → 升级给审阅器裁决。
+  //
+  // **必须带 description**:裸 `{ kind: 'other' }` 会在 missingReviewEvidence
+  // (shared/auto-review-decision.ts)被判为「证据不足」→ 在调模型**之前**直接
+  // block。那不是「fail-closed 升级」而是静默拒绝:用户既看不到卡也没有理由,
+  // 而 SDK 每加一个内置工具就会复发一次(实测 PowerShell 已中)。
+  //
+  // 只带工具名,不带入参 —— 入参可能含文件内容、凭证或用户数据,而 description
+  // 会进 reviewer prompt。工具名足以让审阅器判断这类动作该不该放行。
+  return {
+    kind: 'other',
+    description: `Claude Code built-in tool "${toolName}" (not individually classified by Cindy)`,
+  };
 }

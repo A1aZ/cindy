@@ -29,7 +29,6 @@ import {
   ChevronsUpDown,
   MessagesSquare,
   MonitorSmartphone,
-  Plus,
   SquarePen,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -135,8 +134,11 @@ export interface ProjectsSectionProps {
   onRemoveFromSidebar: (project: ProjectNodeData) => void;
   onCollapseAll: () => void;
   onExpandAll: () => void;
-  /** 段头新建项目：选择一个新项目目录后进入 transient draft route。 */
-  onCreateProject: () => void;
+  /**
+   * 段头新建项目：选择一个新项目目录后进入 transient draft route。
+   * 2026-08-12 起段头按钮暂时隐藏(见下方段头注释),prop 保留以便恢复入口。
+   */
+  onCreateProject?: () => void;
   /** delayed-create:在该 project 的 workingDir 下进 transient draft route。
    *  父层 wrapper 会处理"预填 workingDir 到 newMakerDraft store + navigate('/cc-agent/new')"。
    *  vendor 由用户在 NewMakerDraftRoute 内的 VendorSegmentedSwitcher 决定(读 draft.vendor)。 */
@@ -190,7 +192,6 @@ export function ProjectsSection({
   onRemoveFromSidebar,
   onCollapseAll,
   onExpandAll,
-  onCreateProject,
   onCreateInProject,
   onOpenConversationSearch,
   onOpenInExplorer,
@@ -604,20 +605,9 @@ export function ProjectsSection({
               allKnownProjects={allKnownProjects}
               hasRemoteDevices={hasRemoteDevices}
             />
-            <Tip text={t('ccAgent.sidebar.newProject')} side="bottom">
-              <button
-                type="button"
-                onClick={onCreateProject}
-                aria-label={t('ccAgent.sidebar.newProject')}
-                className={cn(
-                  'flex h-7 w-7 items-center justify-center rounded-md',
-                  'text-[var(--sidebar-list-muted)]',
-                  'transition-colors hover:text-[var(--sidebar-nav-text)]',
-                )}
-              >
-                <Plus size={14} strokeWidth={2} />
-              </button>
-            </Tip>
+            {/* 「新建项目」按钮 2026-08-12 暂时移除(用户裁决):同一动作(选目录 →
+                预填新任务草稿)在新任务页的工作目录选择器里仍可完成。onCreateProject
+                prop 与上游 handleCreateProject 保持接线,恢复入口只需重新渲染按钮。 */}
           </div>
         </div>
       </div>

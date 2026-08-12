@@ -23,7 +23,6 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain('ChevronRight');
     expect(projectsSectionSource).toContain('ChevronsDownUp');
     expect(projectsSectionSource).toContain('ChevronsUpDown');
-    expect(projectsSectionSource).toContain('Plus');
     expect(projectsSectionSource).toContain(
       'const [isSectionCollapsed, setIsSectionCollapsed] = useState(false)',
     );
@@ -39,7 +38,7 @@ describe('Projects sidebar section', () => {
     );
   });
 
-  it('makes the title and adjacent hover arrow collapse the section and keeps new project at the far right', () => {
+  it('makes the title and adjacent hover arrow collapse the section and keeps fold before filter', () => {
     const titleIndex = projectsSectionSource.indexOf("t('ccAgent.sidebar.allSessions')");
     const titleButtonIndex = projectsSectionSource.lastIndexOf('<button', titleIndex);
     const titleExpandedIndex = projectsSectionSource.indexOf(
@@ -52,7 +51,6 @@ describe('Projects sidebar section', () => {
       hoverToggleIndex,
     );
     const sectionToggleIndex = projectsSectionSource.indexOf('aria-expanded={!isSectionCollapsed}');
-    const createProjectIndex = projectsSectionSource.indexOf('onClick={onCreateProject}');
     const foldIndex = projectsSectionSource.indexOf('onClick={handleFoldAll}');
     const filterIndex = projectsSectionSource.indexOf('<SidebarFilterPopover');
 
@@ -64,7 +62,6 @@ describe('Projects sidebar section', () => {
     expect(hoverToggleExpandedIndex).toBeGreaterThan(hoverToggleIndex);
     expect(foldIndex).toBeGreaterThan(hoverToggleExpandedIndex);
     expect(filterIndex).toBeGreaterThan(foldIndex);
-    expect(createProjectIndex).toBeGreaterThan(filterIndex);
   });
 
   it('hides the group fold control when the section is collapsed', () => {
@@ -73,11 +70,13 @@ describe('Projects sidebar section', () => {
     );
   });
 
-  it('exposes a Projects-owned create-project button in the hover action group', () => {
-    expect(projectsSectionSource).toContain('onCreateProject: () => void');
-    expect(projectsSectionSource).toContain("t('ccAgent.sidebar.newProject')");
-    expect(projectsSectionSource).toContain('onClick={onCreateProject}');
-    expect(projectsSectionSource).toContain('<Plus size={14} strokeWidth={2} />');
+  // 2026-08-12 用户裁决:段头「新建项目」按钮暂时移除(同一动作在新任务页的工作
+  // 目录选择器仍可完成)。prop 保留但不再渲染按钮;恢复入口时把这条断言改回正向。
+  it('no longer renders the create-project button in the header action group', () => {
+    expect(projectsSectionSource).toContain('onCreateProject?: () => void');
+    expect(projectsSectionSource).not.toContain('onClick={onCreateProject}');
+    expect(projectsSectionSource).not.toContain("t('ccAgent.sidebar.newProject')");
+    expect(projectsSectionSource).not.toContain('<Plus size={14} strokeWidth={2} />');
   });
 
   it('only shows project header actions while hovering or focusing the Projects header row', () => {

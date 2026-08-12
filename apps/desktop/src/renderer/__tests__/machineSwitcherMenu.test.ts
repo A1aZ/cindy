@@ -242,12 +242,24 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(menuSource).toContain('align="start"');
   });
 
-  it('SidebarFilterPopover 仍用 useHoverOpenMenu(段头 hover 开合不受本次改动影响)', () => {
+  it('SidebarFilterPopover 点击展开(2026-08-12 用户裁决,推翻早前的 hover 自动展开)', () => {
     const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
-    expect(filterSource).toContain('useHoverOpenMenu');
-    expect(filterSource).toContain('{...triggerProps}');
-    expect(filterSource).toContain('{...contentProps}');
-    expect(filterSource).toContain('HoverMenuAreaContext.Provider');
-    expect(filterSource).toContain('useHoverMenuArea');
+    // 整理菜单改回普通 Radix 点击开合:hover 机制整套摘除(MachineSwitcherMenu 仍保留 hover)。
+    // 断言按「是否真的接线」判定,不按字符串出现——文件头注释会提到 useHoverOpenMenu 这个名字。
+    expect(filterSource).not.toContain("from './useHoverOpenMenu'");
+    expect(filterSource).not.toMatch(/useHoverOpenMenu\(/);
+    expect(filterSource).not.toMatch(/useHoverMenuArea\(/);
+    expect(filterSource).not.toContain('HoverMenuAreaContext.Provider');
+    expect(filterSource).not.toContain('{...triggerProps}');
+    expect(filterSource).not.toContain('{...contentProps}');
+    expect(filterSource).toContain('<DropdownMenu modal={false}>');
+    // 触发按钮配色与段头其余按钮统一到侧栏 token 对(此前用通用 text-tertiary,hover 不齐)。
+    expect(filterSource).toContain("'text-[var(--sidebar-list-muted)]'");
+    expect(filterSource).toContain("'transition-colors hover:text-[var(--sidebar-nav-text)]'");
+    expect(filterSource).not.toContain("'text-[var(--text-tertiary)]'");
+    // hover 不再开菜单 → 补 tooltip(与「对话」段头同款按钮一致)。
+    expect(filterSource).toContain(
+      '<Tip text={t(\'ccAgent.sidebar.organizeSidebar\')} side="bottom">',
+    );
   });
 });

@@ -2690,7 +2690,9 @@ export function getGhostPreviewSlot(): GhostPreviewSlot {
   if (!previewSlotSingleton) {
     previewSlotSingleton = new GhostPreviewSlot({
       getGhost: findAvailableGhost,
-      focusedSessionId: () => ghostSessionFocusTracker.current(),
+       // Preview keeps the raw focused task as its fallback target. The
+       // normalized tracker is reserved for plugin current-task/session events.
+       focusedSessionId: () => rawGhostSessionFocusTracker.current(),
       broadcast: (payload) => {
         const windows = BrowserWindow.getAllWindows().filter((window) => !window.isDestroyed());
         windows.forEach((window) => {

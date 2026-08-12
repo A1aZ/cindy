@@ -75,10 +75,23 @@ export class BoundedFileReadChangedError extends Error {
 }
 
 /** realpath 产物是否落在同为 realpath 产物的根内(含根本身)。 */
+function normalizeRealPathForComparison(realPath: string): string {
+  if (process.platform !== 'win32') return realPath;
+  // Node's sync and async realpath implementations may preserve different
+  // casing for a Windows drive letter even though both paths name the same
+  // volume. Normalize only that OS-defined case-insensitive component; the
+  // opened-handle inode checks below still prove the file's identity.
+  return realPath.replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
+}
+
 function isWithinRoot(realFilePath: string, realRoot: string): boolean {
-  if (realFilePath === realRoot) return true;
-  const rootWithSep = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
-  return realFilePath.startsWith(rootWithSep);
+  const comparableFilePath = normalizeRealPathForComparison(realFilePath);
+  const comparableRoot = normalizeRealPathForComparison(realRoot);
+  if (comparableFilePath === comparableRoot) return true;
+  const rootWithSep = comparableRoot.endsWith(path.sep)
+    ? comparableRoot
+    : `${comparableRoot}${path.sep}`;
+  return comparableFilePath.startsWith(rootWithSep);
 }
 
 /**

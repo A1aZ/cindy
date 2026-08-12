@@ -212,6 +212,31 @@ describe('readBoundedFileNoFollow', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'containWithin accepts the same Windows drive with different realpath drive-letter casing',
+    async () => {
+      const file = path.join(workDir, 'drive-case.json');
+      await fs.promises.writeFile(file, '{"ok":true}');
+      const realRoot = fs.realpathSync(workDir);
+      const alternateDriveCase = realRoot.replace(/^([A-Za-z]):/, (_, drive: string) => (
+        `${drive === drive.toLowerCase() ? drive.toUpperCase() : drive.toLowerCase()}:`
+      ));
+
+      expect(
+        (await readBoundedFileNoFollow(file, 1024, {
+          containWithin: alternateDriveCase,
+          noFollowFlag: null,
+        }))?.toString('utf8'),
+      ).toBe('{"ok":true}');
+      expect(
+        readBoundedFileNoFollowSync(file, 1024, {
+          containWithin: alternateDriveCase,
+          noFollowFlag: null,
+        })?.toString('utf8'),
+      ).toBe('{"ok":true}');
+    },
+  );
+
   it.runIf(process.platform !== 'win32')('nonBlocking: FIFO 不阻塞并被拒绝', async () => {
     const fifo = path.join(workDir, 'icon');
     if (spawnSync('mkfifo', [fifo]).status !== 0) return;

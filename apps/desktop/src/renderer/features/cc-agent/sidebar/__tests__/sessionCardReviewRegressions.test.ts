@@ -56,7 +56,7 @@ describe('SessionCard review regressions', () => {
   it('plays overflowing sidebar titles only while hovered', () => {
     expect(sessionItemSource).toContain('function SidebarTitleMarquee');
     expect(sessionItemSource).toContain("container.dataset.titleOverflowing = 'true'");
-    expect(sessionItemSource).toContain("delete container.dataset.titleOverflowing");
+    expect(sessionItemSource).toContain('delete container.dataset.titleOverflowing');
     expect(globalsSource).toContain('@keyframes sidebar-title-marquee');
     expect(globalsSource).toContain(
       "sidebar-title-marquee[data-title-overflowing='true'] .sidebar-title-marquee__track",
@@ -89,7 +89,9 @@ describe('SessionCard review regressions', () => {
   });
 
   it('observes layout changes only while the title is hovered', () => {
-    expect(sessionItemSource).toContain('const resizeObserverRef = useRef<ResizeObserver | null>(null);');
+    expect(sessionItemSource).toContain(
+      'const resizeObserverRef = useRef<ResizeObserver | null>(null);',
+    );
     expect(sessionItemSource).toContain("typeof ResizeObserver === 'undefined'");
     expect(sessionItemSource).toContain('observer.observe(container);');
     expect(sessionItemSource).toContain('observer.observe(track);');
@@ -314,16 +316,18 @@ describe('SessionCard review regressions', () => {
   });
 
   it('keeps selected automation group icons, spinner, and actions in the active color system', () => {
-    expect(automationGroupSource).toContain(
-      "colorClassName={hasActiveHidden ? 'text-[var(--sidebar-item-active-foreground)]' : undefined}",
+    // 用正则容忍 prettier 折行(三元在一行还是拆成多行都算通过)。
+    expect(automationGroupSource).toMatch(
+      /colorClassName=\{\s*hasActiveHidden \? 'text-\[var\(--sidebar-item-active-foreground\)\]' : undefined\s*\}/,
     );
     // running 语义下沉到统一 Timer；组头必须透传，图标组件保持橙色优先级。
     expect(automationGroupSource).toContain('running={isRunning}');
     expect(automationTimerIconSource).toMatch(
       /isActivelyRunning[\s\S]*?\? 'text-\[var\(--status-bar-accent\)\]'/,
     );
-    expect(automationGroupSource).toContain(
-      "hasActiveHidden ? 'text-sidebar-item-active-foreground' : 'text-sidebar-action-icon'",
+    // 用正则容忍 prettier 折行(三元在一行还是拆成多行都算通过)。
+    expect(automationGroupSource).toMatch(
+      /hasActiveHidden\s*\?\s*'text-sidebar-item-active-foreground'\s*:\s*'text-sidebar-action-icon'/,
     );
     expect(automationGroupSource).toContain('actionButtonToneClassName');
     expect(automationGroupSource).toContain(

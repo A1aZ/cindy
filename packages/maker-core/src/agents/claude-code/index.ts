@@ -422,41 +422,31 @@ interface ClaudeInputImageResizer {
 
 const CLAUDE_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 
-function resolveClaudeImageMediaType(
-  imagePath: string,
-  mimeType?: string,
-): ClaudeImageMediaType | null {
-  const extensionMediaType: Record<string, ClaudeImageMediaType> = {
-    '.gif': 'image/gif',
-    '.jfif': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.jpg': 'image/jpeg',
-    '.png': 'image/png',
-    '.webp': 'image/webp',
-  };
-  const fromExtension = extensionMediaType[path.extname(imagePath).toLowerCase()];
-  if (fromExtension) return fromExtension;
-
-  switch (mimeType?.toLowerCase()) {
-    case 'image/gif':
-    case 'image/jpeg':
-    case 'image/png':
-    case 'image/webp':
-      return mimeType.toLowerCase() as ClaudeImageMediaType;
-    case 'image/jpg':
-      return 'image/jpeg';
-    default:
-      return null;
+function detectClaudeImageMediaType(data: Buffer): ClaudeImageMediaType | null {
+  if (
+    data.length >= 8
+    && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+  ) {
+    return 'image/png';
   }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (data.length >= 6) {
+    const signature = data.toString('ascii', 0, 6);
+    if (signature === 'GIF87a' || signature === 'GIF89a') return 'image/gif';
+  }
+  if (
+    data.length >= 12
+    && data.toString('ascii', 0, 4) === 'RIFF'
+    && data.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return null;
 }
 
-async function toClaudeImageBlock(
-  imagePath: string,
-  mimeType?: string,
-): Promise<ClaudeSdkContentBlock | null> {
-  const mediaType = resolveClaudeImageMediaType(imagePath, mimeType);
-  if (!mediaType) return null;
-
+async function toClaudeImageBlock(imagePath: string): Promise<ClaudeSdkContentBlock | null> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(imagePath, 'r');
@@ -466,6 +456,8 @@ async function toClaudeImageBlock(
     }
     const data = await handle.readFile();
     if (data.length === 0 || data.length > CLAUDE_INLINE_IMAGE_MAX_BYTES) return null;
+    const mediaType = detectClaudeImageMediaType(data);
+    if (!mediaType) return null;
     return {
       type: 'image',
       source: {
@@ -506,7 +498,7 @@ export async function toClaudeSdkContent(
       imageBlockPromises.set(
         idx,
         imageResizer.process(block.path).then(async (finalPath) => ({
-          block: await toClaudeImageBlock(finalPath, block.mimeType),
+          block: await toClaudeImageBlock(finalPath),
           finalPath,
         })),
       );

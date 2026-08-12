@@ -23,7 +23,7 @@ describe('Claude Code SDK input', () => {
   it('inlines an original image while keeping file attachments as path refs', async () => {
     const tempDir = await createTempDir();
     const imagePath = path.join(tempDir, 'small.png');
-    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     await fs.writeFile(imagePath, imageBytes);
     const imageResizer = { process: vi.fn(async (inputPath: string) => inputPath) };
     const content: UserMessage['content'] = [
@@ -50,7 +50,7 @@ describe('Claude Code SDK input', () => {
     const tempDir = await createTempDir();
     const sourcePath = path.join(tempDir, 'large.png');
     const resizedPath = path.join(tempDir, 'large.webp');
-    const resizedBytes = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+    const resizedBytes = Buffer.from('RIFF0000WEBP', 'ascii');
     await fs.writeFile(resizedPath, resizedBytes);
     const imageResizer = { process: vi.fn(async () => resizedPath) };
     const content: UserMessage['content'] = [
@@ -70,6 +70,30 @@ describe('Claude Code SDK input', () => {
       { type: 'text', text: 'Read the image' },
     ]);
     expect(imageResizer.process).toHaveBeenCalledWith(sourcePath);
+  });
+
+  it('uses image bytes instead of a misleading extension or declared MIME type', async () => {
+    const tempDir = await createTempDir();
+    const imagePath = path.join(tempDir, 'misleading.png');
+    const imageBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+    await fs.writeFile(imagePath, imageBytes);
+    const imageResizer = { process: vi.fn(async () => imagePath) };
+    const content: UserMessage['content'] = [
+      { type: 'image', path: imagePath, mimeType: 'image/webp' },
+      { type: 'text', text: 'Inspect this' },
+    ];
+
+    expect(await toClaudeSdkContent(content, imageResizer)).toEqual([
+      {
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: 'image/jpeg',
+          data: imageBytes.toString('base64'),
+        },
+      },
+      { type: 'text', text: 'Inspect this' },
+    ]);
   });
 
   it('falls back to a quoted path when the final image cannot be read', async () => {

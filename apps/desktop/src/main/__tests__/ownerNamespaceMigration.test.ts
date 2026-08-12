@@ -1163,6 +1163,50 @@ describe('legacy Ghost plugin recovery', () => {
     });
   });
 
+  it('keeps target-only recovery retryable when a live registry pid was reused', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const target = path.join(root, 'owners', ownerKey, 'cindy-brain', 'legacy-plugin');
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    const startedAtMs = 1_000_000;
+    await writeGhostDirAtPath(target, 'legacy-plugin');
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(
+      markerPath,
+      JSON.stringify({
+        version: 2,
+        ownerKey,
+        pendingIds: ['legacy-plugin'],
+        approvalProjectionSha256ById: { 'legacy-plugin': 'a'.repeat(64) },
+      }),
+    );
+    await writeDevInstanceRecord(root, 4242, root, { startedAtMs });
+
+    expect(
+      getLegacyGhostRecoveryStatus(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        root,
+        false,
+        {},
+        (pid) => pid === 4242,
+        () => ({
+          startedAtMs: startedAtMs + 120_000,
+          command: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        }),
+      ),
+    ).toEqual({
+      state: 'partial',
+      legacyPluginCount: 1,
+      canRetry: true,
+    });
+  });
+
   it.each(['manifest', 'disabled', 'trust', 'locale', 'icon', 'skill'] as const)(
     'refuses an in-place %s approval projection change after the durable freeze',
     async (kind) => {

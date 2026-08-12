@@ -40,22 +40,42 @@ beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cross-process-lock-'));
 });
 
+async function createExitedPid(): Promise<number> {
+  // Strict takeover requires affirmative OS proof that the recorded owner is
+  // gone. A made-up large PID makes that proof depend on CIM/WMIC accepting
+  // the numeric value, which varies across Windows runner images. Use a PID
+  // this host created and observed exiting instead.
+  const child = spawn(process.execPath, ['-e', 'process.exit(0)'], {
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  return new Promise<number>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', () => {
+      if (!child.pid) reject(new Error('fixture child pid missing'));
+      else resolve(child.pid);
+    });
+  });
+}
+
 afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-/** 造一把「陈旧且 owner 已死」的锁:pid 用一个几乎不可能存在的值。 */
+/** 造一把「陈旧且 owner 已死」的锁。 */
 async function writeStaleLock(lock: string): Promise<void> {
-  await fsp.writeFile(lock, JSON.stringify({ pid: 0x7ffffffe, startedAt: 1 }), 'utf8');
+  const exitedPid = await createExitedPid();
+  await fsp.writeFile(lock, JSON.stringify({ pid: exitedPid, startedAt: 1 }), 'utf8');
   const old = new Date(Date.now() - 60_000);
   await fsp.utimes(lock, old, old);
 }
 
 async function writeStaleStrictLock(lock: string): Promise<void> {
+  const exitedPid = await createExitedPid();
   await fsp.writeFile(
     lock,
     JSON.stringify({
-      pid: 0x7ffffffe,
+      pid: exitedPid,
       startedAt: 1,
       nonce: '00000000-0000-4000-8000-000000000001',
       processStartIdentity: 'start-ms:1',
@@ -68,10 +88,11 @@ async function writeStaleStrictLock(lock: string): Promise<void> {
 }
 
 async function writeStaleReclaimGate(lock: string): Promise<void> {
+  const exitedPid = await createExitedPid();
   const gate = `${lock}.reclaim`;
   await fsp.writeFile(
     gate,
-    JSON.stringify({ pid: 0x7ffffffe, startedAt: 1, nonce: 'stale-gate' }),
+    JSON.stringify({ pid: exitedPid, startedAt: 1, nonce: 'stale-gate' }),
     'utf8',
   );
   const old = new Date(Date.now() - 60_000);
@@ -141,7 +162,16 @@ describe('接管陈旧锁', () => {
       withAdvisoryCrossProcessLock(lock, { label: 'second' }, async (s) => s),
     ).resolves.toEqual({ held: true });
 
-    expect(fs.readdirSync(dir)).toEqual([]);
+    const artifacts = fs.readdirSync(dir).flatMap((entry) => {
+      const candidate = path.join(dir, entry);
+      return fs.statSync(candidate).isDirectory()
+        ? fs.readdirSync(candidate).map((child) => path.join(entry, child))
+        : [entry];
+    });
+    // Windows can retain an already-empty directory entry briefly after the
+    // bounded rmdir retries. The invariant is that no owner gate or release
+    // marker remains; the two acquisitions above also prove immediate re-entry.
+    expect(artifacts).toEqual([]);
   });
 
   it('keeps the advisory canonical lock as a legacy-readable file', async () => {

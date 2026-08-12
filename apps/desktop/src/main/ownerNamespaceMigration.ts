@@ -1310,7 +1310,11 @@ export function getLegacyGhostRecoveryStatus(
     return { state: 'deferred', legacyPluginCount, canRetry: false };
   }
   if (recoveredIds.length > 0) {
-    if (hasConcurrentLiveInstanceSync(root, isPidAlive)) {
+    // Keep the target-only retry on the same exact-process identity policy as
+    // the owner-wide check above. A PID-only fallback here would let a reused
+    // stale registry PID block the only backfill path for an already-moved
+    // plugin.
+    if (hasConcurrentLiveInstanceSync(root, isPidAlive, readProcessIdentity)) {
       return { state: 'deferred', legacyPluginCount, canRetry: false };
     }
     return { state: 'partial', legacyPluginCount, canRetry: true };

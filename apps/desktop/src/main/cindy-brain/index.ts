@@ -5779,9 +5779,14 @@ export function registerGhostIpc(): void {
           result = { ghost: placed };
         }
         if ('rejection' in result) {
-          restoreMarketRecord();
           // 回滚失败 = 安装目录可能已是新字节或缺失，"旧版本还在"不成立，
           // 不得按旧 InstalledGhost 重启运行时（P1：那会拿旧批准跑未知字节）。
+          // 同样不得恢复旧市场来源路由——那会把不一致的字节绑定回原来源，
+          // 未来市场版本对账可能按旧 provenance 操作错位插件
+          // （P1, PRRT_kwDOTgdRUs6YcG8r）。
+          if (!(result.rejection.code === 'io' && result.rejection.rollbackFailed)) {
+            restoreMarketRecord();
+          }
           if (previousGhost &&
             !(result.rejection.code === 'io' && result.rejection.rollbackFailed)) {
             spawnIfResident(previousGhost);

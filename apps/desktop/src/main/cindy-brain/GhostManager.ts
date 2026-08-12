@@ -1310,12 +1310,14 @@ export class GhostManager {
         continue;
       }
       if (approval.state === 'unreadable') {
-        // 暂时读不动批准事实不等于 legacy/损坏。把它从可变安装目录重铸会覆盖一份
-        // 可能完全有效的批准；保持 fail closed 并把 id 钉进持久重试队列。
-        result.retryPending.push(id);
-        pendingForRetry.add(id);
+        // 暂时读不动批准事实不等于 legacy。尤其不能把它放进普通 pendingIds:
+        // 若 receipt 随后消失，续跑会把可变安装目录误当成旧授权事实重新铸批准。
+        // 记为确定性 fail-closed 审计项；原 receipt 恢复可读时仍自然生效，真的丢失
+        // 则只能走完整重新批准，不能自动 backfill。
+        result.failed.push(id);
+        pendingForRetry.delete(id);
         unreadableReceiptIds.push(id);
-        this.options.log?.warn('legacy migration found an unreadable receipt; will retry', {
+        this.options.log?.warn('legacy migration found an unreadable receipt; automatic backfill blocked', {
           id,
           reason: approval.reason,
         });
@@ -1357,19 +1359,32 @@ export class GhostManager {
       return result;
     }
     if (
-      !resumePending &&
-      (candidates.length > 0 ||
-        blockedByPendingJournal.length > 0 ||
-        unreadableReceiptIds.length > 0)
+      resumePending ||
+      candidates.length > 0 ||
+      blockedByPendingJournal.length > 0 ||
+      unreadableReceiptIds.length > 0
     ) {
+      const checkpointPendingIds = [
+        ...new Set([...candidates, ...blockedByPendingJournal]),
+      ].sort();
+      const checkpointFailedIds = [
+        ...new Set([...(resumeLedger?.failedIds ?? []), ...unreadableReceiptIds]),
+      ].sort();
       await this.receiptStore.writeMigrationLedger({
         version: 1,
         migratedAt: new Date().toISOString(),
-        migratedIds: [],
-        state: 'in-progress',
-        pendingIds: [
-          ...new Set([...candidates, ...blockedByPendingJournal, ...unreadableReceiptIds]),
-        ].sort(),
+        migratedIds: [...new Set([...(resumeLedger?.migratedIds ?? []), ...preMigrated])].sort(),
+        state: checkpointPendingIds.length > 0 ? 'in-progress' : 'completed',
+        ...(checkpointPendingIds.length > 0 ? { pendingIds: checkpointPendingIds } : {}),
+        ...(checkpointFailedIds.length > 0 ? { failedIds: checkpointFailedIds } : {}),
+        ...(checkpointPendingIds.length > 0 && resumeApprovalProjectionDigest
+          ? {
+              recoveryApprovalProjectionSha256ById: Object.fromEntries(
+                Object.entries(resumeApprovalProjectionDigest).filter(([id]) =>
+                  checkpointPendingIds.includes(id)),
+              ),
+            }
+          : {}),
       });
     }
 
@@ -1491,9 +1506,12 @@ export class GhostManager {
         throw new Error('legacy migration ledger exists but is unreadable; recovery queue preserved');
       }
       const pendingForRetry = new Set(prev?.pendingIds ?? []);
+      const permanentlyBlockedIds = new Set(prev?.failedIds ?? []);
       const workIds = [...new Set(ids)].filter(
         (id): id is string =>
-          isValidGhostId(id) && this.options.isTrustedBundledId?.(id) !== true,
+          isValidGhostId(id) &&
+          this.options.isTrustedBundledId?.(id) !== true &&
+          !permanentlyBlockedIds.has(id),
       );
       // Persist the complete recovery work queue before the first backfill. If the
       // first receipt write or subsequent processing crashes, receiptStore.write()
@@ -1534,9 +1552,12 @@ export class GhostManager {
           continue;
         }
         if (approval.state === 'unreadable') {
-          retryIds.push(id);
-          pendingForRetry.add(id);
-          this.options.log?.warn('recovered legacy receipt unreadable; will retry', {
+          // This id demonstrably had a receipt, so it is not eligible for legacy
+          // auto-approval. Keeping it in pendingIds would let a later receipt
+          // deletion turn mutable installed bytes into a new authorization fact.
+          out.failed.push(id);
+          pendingForRetry.delete(id);
+          this.options.log?.warn('recovered legacy receipt unreadable; automatic backfill blocked', {
             id,
             reason: approval.reason,
           });

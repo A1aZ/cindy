@@ -676,7 +676,10 @@ async function readLockRecord(
   const lockDir = path.dirname(lockPath);
   let lockRealDir: string;
   try {
-    lockRealDir = fsSync.realpathSync(lockDir);
+    // Keep the root and file on the same realpath implementation. On Windows,
+    // Node's sync and async variants can preserve different component casing;
+    // mixing their spellings makes a valid lock record fail containment.
+    lockRealDir = await fsp.realpath(lockDir);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code === 'ENOENT' || code === 'ENOTDIR') return 'missing';
@@ -1449,7 +1452,9 @@ async function hasValidGateReleaseMarker(gatePath: string, expectedNonce?: strin
   const gateDir = path.dirname(gatePath);
   let gateRealDir: string;
   try {
-    gateRealDir = fsSync.realpathSync(gateDir);
+    // This record is read asynchronously below, so anchor the root with the
+    // same async realpath representation (see readLockRecord above).
+    gateRealDir = await fsp.realpath(gateDir);
   } catch {
     return false;
   }

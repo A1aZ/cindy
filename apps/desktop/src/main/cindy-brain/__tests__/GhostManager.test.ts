@@ -488,7 +488,7 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
     expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
   });
 
-  it('已有 receipt 瞬时不可读时不从可变安装目录重铸,保留原批准并持久重试', async () => {
+  it('已有 receipt 不可读后即使消失也不从可变安装目录重铸', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
     const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
@@ -506,18 +506,20 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
 
     const first = await manager.migrateLegacyApprovalsOnce();
 
-    expect(first).toEqual({ migrated: [], skipped: [], failed: [], retryPending: ['hello'] });
+    expect(first).toEqual({ migrated: [], skipped: [], failed: ['hello'], retryPending: [] });
     expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
     expect(
       JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')),
-    ).toMatchObject({ state: 'in-progress', pendingIds: ['hello'] });
+    ).toMatchObject({ state: 'completed', failedIds: ['hello'] });
 
-    await manager.migrateLegacyApprovalsOnce();
-    expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
-    expect(
-      (JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')) as { state?: string })
-        .state,
-    ).toBe('completed');
+    await fs.promises.rm(receiptPath);
+    const second = await manager.migrateLegacyApprovalsOnce();
+    expect(second).toEqual({ migrated: [], skipped: [], failed: [], retryPending: [] });
+    expect(fs.existsSync(receiptPath)).toBe(false);
+    expect(manager.list()[0]).toMatchObject({
+      approval: { state: 'legacy-unapproved' },
+      enabled: false,
+    });
   });
 
   it('首轮迁移治愈损坏/旧 schema 的 receipt(格式升级不落到用户重新确认)', async () => {
@@ -1517,7 +1519,7 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
 
-  it('恢复旁路遇到 unreadable receipt 同样只排队重试,不重铸批准', async () => {
+  it('恢复旁路遇到 unreadable receipt 后不再允许自动重铸批准', async () => {
     await manager.install(await makeCindy('a.cindy', goodManifest()));
     const receiptPath = path.join(workDir, 'ghosts-install-state', 'hello.json');
     const receiptBefore = await fs.promises.readFile(receiptPath, 'utf8');
@@ -1539,12 +1541,24 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
       ),
     ).toEqual({
       migrated: [],
-      failed: [],
+      failed: ['hello'],
     });
     expect(await fs.promises.readFile(receiptPath, 'utf8')).toBe(receiptBefore);
     expect(
       JSON.parse(await fs.promises.readFile(migrationLedgerPath(), 'utf8')),
-    ).toMatchObject({ state: 'in-progress', pendingIds: ['hello'] });
+    ).toMatchObject({ state: 'completed', failedIds: ['hello'] });
+
+    await fs.promises.rm(receiptPath);
+    const retry = await manager.backfillRecoveredLegacyGhosts(
+      ['hello'],
+      await recoveredProjectionOptions('hello'),
+    );
+    expect(retry).toEqual({ migrated: [], failed: [] });
+    expect(fs.existsSync(receiptPath)).toBe(false);
+    expect(manager.list()[0]).toMatchObject({
+      approval: { state: 'legacy-unapproved' },
+      enabled: false,
+    });
   });
 
   it('persists transient recovered-legacy backfill failures in the migration work queue', async () => {

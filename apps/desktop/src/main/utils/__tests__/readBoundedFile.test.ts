@@ -217,20 +217,24 @@ describe('readBoundedFileNoFollow', () => {
     async () => {
       const file = path.join(workDir, 'drive-case.json');
       await fs.promises.writeFile(file, '{"ok":true}');
-      const realRoot = fs.realpathSync(workDir);
-      const alternateDriveCase = realRoot.replace(/^([A-Za-z]):/, (_, drive: string) => (
-        `${drive === drive.toLowerCase() ? drive.toUpperCase() : drive.toLowerCase()}:`
-      ));
+      const flipDriveCase = (realRoot: string) =>
+        realRoot.replace(/^([A-Za-z]):/, (_, drive: string) => (
+          `${drive === drive.toLowerCase() ? drive.toUpperCase() : drive.toLowerCase()}:`
+        ));
+      const asyncRootWithAlternateDriveCase = flipDriveCase(
+        await fs.promises.realpath(workDir),
+      );
+      const syncRootWithAlternateDriveCase = flipDriveCase(fs.realpathSync(workDir));
 
       expect(
         (await readBoundedFileNoFollow(file, 1024, {
-          containWithin: alternateDriveCase,
+          containWithin: asyncRootWithAlternateDriveCase,
           noFollowFlag: null,
         }))?.toString('utf8'),
       ).toBe('{"ok":true}');
       expect(
         readBoundedFileNoFollowSync(file, 1024, {
-          containWithin: alternateDriveCase,
+          containWithin: syncRootWithAlternateDriveCase,
           noFollowFlag: null,
         })?.toString('utf8'),
       ).toBe('{"ok":true}');

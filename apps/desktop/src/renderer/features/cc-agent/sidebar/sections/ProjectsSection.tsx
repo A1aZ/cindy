@@ -59,6 +59,8 @@ import {
   type MainListEntry,
 } from '../../lib/mainListModel';
 import { buildSessionSourceLabelMap } from '../../lib/sessionSourceLabel';
+import { useSessionAttentionKinds } from '@/lib/sessionAttentionStore';
+import { useSessionAttentionUrgencySet } from '../../contexts/SessionAttentionUrgencyContext';
 import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
 import { SidebarFilterPopover } from '../SidebarFilterPopover';
 import { SectionCollapse } from '../SectionCollapse';
@@ -259,6 +261,20 @@ export function ProjectsSection({
   // 文字搜索是独立面板、不在本段内联过滤,故无需为它禁用。
   const disableSessionCollapse = false;
 
+  // 优先级排序的 waiting 子集(等你处理:awaiting / error / 定时任务失败未读)。
+  // 整表订阅仅限本聚合组件(store 头注的性能边界):本组件本就随 notifications
+  // 整集变化重渲染,kinds 表与它同源同节拍,不额外放大。urgentSet 语义对齐
+  // SessionItem 行内状态(isUrgentFromContext 视同 error)。
+  const attentionKinds = useSessionAttentionKinds();
+  const urgentSet = useSessionAttentionUrgencySet();
+  const waitingSessionIds = useMemo(() => {
+    const waiting = new Set<string>(urgentSet);
+    for (const [sessionId, kind] of attentionKinds) {
+      if (kind === 'awaiting' || kind === 'error') waiting.add(sessionId);
+    }
+    return waiting;
+  }, [attentionKinds, urgentSet]);
+
   // 混排模型(D 期):项目行 / 散排对话 / 对话组统一为顶层条目并按同一口径排序。
   // 这有意推翻旧「Dialogue 固定段在 Projects 之后」的裁决(mainListModel.ts 文件头)。
   const mixedEntries = useMemo(
@@ -273,6 +289,7 @@ export function ProjectsSection({
         priorityContext: {
           runningSessionIds,
           attentionSessionIds: notifications,
+          waitingSessionIds,
         },
       }),
     [
@@ -284,6 +301,7 @@ export function ProjectsSection({
       filter.manualProjectOrder,
       runningSessionIds,
       notifications,
+      waitingSessionIds,
     ],
   );
 

@@ -104,7 +104,7 @@
 | 选项 | 默认 | 行为 |
 |---|---|---|
 | 按时间排序 | **是** | 顶层条目按组内最新活动时间倒序(最近的在前);组内同。排序时钟 = `userSendAt ?? updatedAt`(以用户最近一次按下发送为主键,agent 回复只 bump `updatedAt` 不重排) |
-| 优先级 | | 需你处理(未读 / 等待确认)> 运行中 > 其余按最近活动;同档内仍按最近活动 |
+| 优先级 | | 四档,对齐 Codex(2026-08-13 用户裁决「参考 Codex」):等你处理(等待回复 / 授权 / 出错)> 完成未读 > 运行中 > 其余;同档内按最近活动 |
 | 手动排序 | | 顶层条目可拖拽,顺序持久;新条目进顶部 |
 
 「按名称排序」(现状 alphabetic)删除。**「最早优先」(旧 `time`)2026-08-12 用户
@@ -120,17 +120,23 @@
 不配说明——菜单不该变成说明书。说明挂在选项表的 `tipKey` 上(与 `labelKey` /
 `Icon` 同源),`side="right"`(菜单贴侧栏右缘,提示往上下会压住相邻选项)。
 
-实现口径的两点澄清(与本表措辞对齐):
-- **第一档的真实语义是「有未读角标」,不只是「等待确认」**。`attentionSessionIds`
-  喂进来的是侧栏未读集合,含三种 kind:`awaiting`(等你回复 / 授权 / 审阅计划)、
-  `error`(出错未处理)、`done`(跑完还没点开)。所以**跑完没看的任务也会被顶到
-  最前**——这是有意的(它同样"需要你处理一下"),但与"等待确认"的字面理解不同,
-  故文案写「有未读或等你处理的」而非「等待确认」。三种 kind 在排序上**不再分级**
-  (都是 rank 0),`sidebarRightStatus.ts` 的 `error > awaiting > done` 只决定右侧
-  状态槽的**颜色**,不参与排序——原表述说「权重复用该优先级函数」不准确,已更正。
+实现口径的澄清(与本表措辞对齐):
+- **四档口径(2026-08-13 定稿,对齐 Codex)**。Codex 侧栏优先级排序的权重表是
+  `waiting:0 / unread:1 / active:2 / idle:3`(反编译其桌面端确认;它连置顶区都
+  提供同款排序,菜单项也带同样的 tooltip 说明——「Needs input and unread chats
+  first」)。本仓映射:waiting = attention kind 为 `awaiting`(等你回复 / 授权 /
+  审阅计划)或 `error`(出错未处理)∪ 定时任务失败未读(urgency 集);unread =
+  其余 attention(`done`,跑完还没点开);active = running。此前实现是三档
+  (attention 整体一档),完成未读一多就把真正等回应的淹掉——四档修正了这一点。
+  Codex 没有单独的 error 档(error 归 waiting),本仓同款,不另加档。
+  `sidebarRightStatus.ts` 的 `error > awaiting > done` 只决定右侧状态槽的
+  **颜色**,不参与排序。
+- **`waitingSessionIds` 在模型上可缺省**:缺省时全部 attention 落 unread 档,
+  排序仍成立(老调用方 / 测试夹具零迁移);组装层(ProjectsSection)从
+  `useSessionAttentionKinds` + urgency 集派生 waiting 子集喂入。
 - **未读是内存态,重启即失**(`sessionAttentionStore` 不落盘)。重启后只有两类点
-  会由 `usePendingAlertAttention` 从 DB 重建:未收尾的中断、未处置的错误尾行。
-  「跑完没看」的绿点不重建。因此**重启后优先级排序的结果会明显不同于重启前**,
+  会由 `usePendingAlertAttention` 从 DB 重建:未收尾的中断、未处置的错误尾行——
+  它们恰好都是 waiting 档,重建后仍排最前。「跑完没看」的 unread 档不重建,
   多数任务落回按时间排。这是既有架构的性质,不是本次排序引入的缺陷。
 
 ### 3.3 筛选 —— 一级只占一行,展开二级菜单

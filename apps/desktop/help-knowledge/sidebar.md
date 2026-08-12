@@ -16,7 +16,7 @@ The left sidebar lists your sessions. It's the main way to navigate and organize
 **Sorting:**
 
 - **By time** (default) — one activity timeline for the whole list, most recent first. There is no oldest-first option.
-- **Priority** — sessions with an unread badge (finished unread, waiting for your reply, or errored) float to the top, then running sessions, then the rest by time. A project row inherits the highest priority among its sessions. Unread state is in-memory: after a restart most sessions fall back to time order.
+- **Priority** — four tiers, same as Codex: sessions waiting on you (pending reply / approval / error) first, then finished-unread sessions, then running sessions, then the rest by time. A project row inherits the highest priority among its sessions. Unread state is in-memory: after a restart most sessions fall back to time order.
 - **Manual** — drag project rows to set a persistent custom order. Manual order covers **project rows only**; stray chats and the Chat group always follow by recency. Dragging a project in any other sort mode automatically switches to Manual.
 - Sorting **alphabetically** and **oldest first** have been removed.
 

@@ -12,8 +12,10 @@
  * 排序语义:
  *   - recency:条目活动时间(组取组内最新)倒序——最近的在上。
  *   - time:同一时间轴正序——最早的在上(沿用现状「最早优先」)。
- *   - priority:等待处理(attention)> 运行中 > 其余;同档内按 recency。
- *     权重口径与 sidebarRightStatus.ts 的右侧状态槽一致("需要你处理"最高)。
+ *   - priority:等你处理(waiting)> 完成未读(unread)> 运行中 > 其余;同档内按
+ *     recency。四档口径对齐 Codex 侧栏的优先级排序(waiting:0 / unread:1 /
+ *     active:2 / idle:3,2026-08-13 用户裁决"参考 Codex"):此前三档把「等你
+ *     回答」和「跑完没看」混在同一档,完成未读一多就把真正要回应的淹掉。
  *   - manual:项目行按 manualProjectOrder;散排对话与对话组不进手动顺序,
  *     排在项目之后按 recency(设计文档 §9.3 的收窄裁决:手动排序只管项目行,
  *     避免数百条散排对话冲乱顺序表)。
@@ -36,6 +38,13 @@ export interface MainListPriorityContext {
   runningSessionIds: ReadonlySet<string>;
   /** 需关注(等待确认 / 完成未读等 attention 通知)的 sessionIds。 */
   attentionSessionIds: ReadonlySet<string>;
+  /**
+   * attention 里「等你处理」的子集:等待回复 / 授权 / 计划审阅(awaiting)与
+   * 出错未处理(error)。attentionSessionIds 减去它 = 完成未读(done)。
+   * 可缺省(空集):此时全部 attention 落进 unread 档——排序仍然成立,只是
+   * 少了 waiting 细分(老调用方 / 测试夹具零迁移成本)。
+   */
+  waitingSessionIds?: ReadonlySet<string>;
 }
 
 const EMPTY_PRIORITY_CONTEXT: MainListPriorityContext = {
@@ -43,11 +52,18 @@ const EMPTY_PRIORITY_CONTEXT: MainListPriorityContext = {
   attentionSessionIds: new Set<string>(),
 };
 
-/** 单会话优先级权重:需关注 0 > 运行中 1 > 其余 2。 */
+/**
+ * 单会话优先级权重(对齐 Codex 的 waiting:0 / unread:1 / active:2 / idle:3):
+ * 等你处理 0 > 完成未读 1 > 运行中 2 > 其余 3。waiting 压过 unread:「要你回应
+ * 才能继续」比「跑完了等你看」急;unread 压过 running:running 不需要你动手,
+ * 而 unread 是已经可以处理的结果。
+ */
 export function sessionPriorityRank(session: Session, ctx: MainListPriorityContext): number {
-  if (ctx.attentionSessionIds.has(session.id)) return 0;
-  if (ctx.runningSessionIds.has(session.id)) return 1;
-  return 2;
+  if (ctx.attentionSessionIds.has(session.id)) {
+    return ctx.waitingSessionIds?.has(session.id) ? 0 : 1;
+  }
+  if (ctx.runningSessionIds.has(session.id)) return 2;
+  return 3;
 }
 
 function entryActivityMs(entry: MainListEntry): number {
@@ -64,7 +80,7 @@ function entryActivityMs(entry: MainListEntry): number {
 function entryPriorityRank(entry: MainListEntry, ctx: MainListPriorityContext): number {
   if (entry.kind === 'session') return sessionPriorityRank(entry.session, ctx);
   const sessions = entry.kind === 'project' ? entry.project.sessions : entry.sessions;
-  let min = 2;
+  let min = 3;
   for (const s of sessions) {
     const rank = sessionPriorityRank(s, ctx);
     if (rank < min) min = rank;

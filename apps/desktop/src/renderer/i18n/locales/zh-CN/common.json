@@ -7004,7 +7004,7 @@
         "priority": "优先级"
       },
       "filterSortByTip": {
-        "priority": "有未读或等你处理的排在最前，然后是运行中的，其余按时间"
+        "priority": "等你处理的排在最前，然后是未读、运行中，其余按时间"
       },
       "filterStatusHeading": "状态",
       "filterAgentHeading": "Agent",

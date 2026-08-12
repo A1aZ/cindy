@@ -7020,7 +7020,7 @@
         "priority": "Priority"
       },
       "filterSortByTip": {
-        "priority": "Unread or waiting on you first, then running, then by time"
+        "priority": "Waiting on you first, then unread, then running, then by time"
       },
       "filterStatusHeading": "Status",
       "filterAgentHeading": "Agent",

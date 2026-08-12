@@ -138,27 +138,42 @@ describe('buildMainListEntries — 排序口径', () => {
     expect(labels(entries)).toEqual(['p:alpha', 's:old']);
   });
 
-  it("floats attention > running > rest under 'priority', recency within tiers", () => {
-    const attention = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'needs-input' });
+  it("floats waiting > unread > running > rest under 'priority', recency within tiers", () => {
+    // 四档对齐 Codex(waiting:0 / unread:1 / active:2 / idle:3,2026-08-13 裁决)。
+    const waiting = session({ updatedAt: '2026-07-20T00:00:00Z', title: 'needs-input' });
+    const unread = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'done-unread' });
     const running = session({ updatedAt: '2026-08-05T00:00:00Z', title: 'running' });
     const idleNewest = session({ updatedAt: '2026-08-12T00:00:00Z', title: 'idle' });
     const ctx = {
       runningSessionIds: new Set([running.id]),
-      attentionSessionIds: new Set([attention.id]),
+      attentionSessionIds: new Set([waiting.id, unread.id]),
+      waitingSessionIds: new Set([waiting.id]),
     };
-    expect(sessionPriorityRank(attention, ctx)).toBe(0);
-    expect(sessionPriorityRank(running, ctx)).toBe(1);
-    expect(sessionPriorityRank(idleNewest, ctx)).toBe(2);
+    expect(sessionPriorityRank(waiting, ctx)).toBe(0);
+    expect(sessionPriorityRank(unread, ctx)).toBe(1);
+    expect(sessionPriorityRank(running, ctx)).toBe(2);
+    expect(sessionPriorityRank(idleNewest, ctx)).toBe(3);
     const entries = buildMainListEntries({
       projects: [],
-      dialogues: [idleNewest, running, attention],
+      dialogues: [idleNewest, running, unread, waiting],
       groupBy: 'project',
       groupDialogue: false,
       sortBy: 'priority',
       manualProjectOrder: [],
       priorityContext: ctx,
     });
-    expect(labels(entries)).toEqual(['s:needs-input', 's:running', 's:idle']);
+    expect(labels(entries)).toEqual(['s:needs-input', 's:done-unread', 's:running', 's:idle']);
+  });
+
+  it('waitingSessionIds 缺省时全部 attention 落 unread 档(老调用方零迁移)', () => {
+    const attention = session({ updatedAt: '2026-08-01T00:00:00Z', title: 'attn' });
+    const running = session({ updatedAt: '2026-08-05T00:00:00Z', title: 'running' });
+    const ctx = {
+      runningSessionIds: new Set([running.id]),
+      attentionSessionIds: new Set([attention.id]),
+    };
+    expect(sessionPriorityRank(attention, ctx)).toBe(1);
+    expect(sessionPriorityRank(running, ctx)).toBe(2);
   });
 
   it('a project inherits its best session priority (group floats with its members)', () => {

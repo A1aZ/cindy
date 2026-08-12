@@ -7008,7 +7008,7 @@
         "priority": "우선순위"
       },
       "filterSortByTip": {
-        "priority": "읽지 않았거나 확인이 필요한 항목 먼저, 다음 실행 중, 나머지는 시간순"
+        "priority": "확인이 필요한 항목 먼저, 다음 읽지 않음, 실행 중, 나머지는 시간순"
       },
       "filterStatusHeading": "상태",
       "filterAgentHeading": "에이전트",

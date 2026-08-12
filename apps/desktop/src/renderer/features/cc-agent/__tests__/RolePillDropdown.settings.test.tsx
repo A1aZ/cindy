@@ -39,7 +39,7 @@ describe('RolePillDropdown collaboration settings entry', () => {
     cleanup();
   });
 
-  it('hides the collaboration settings link when settings are disabled for detached sidebar windows', () => {
+  it('does not show settings link in the dropdown (moved to + button)', () => {
     const current = worker();
 
     render(
@@ -52,14 +52,13 @@ describe('RolePillDropdown collaboration settings entry', () => {
         hardLimit={8}
         onSwitchFocus={vi.fn()}
         onOpenCreate={vi.fn()}
-        onOpenSettings={vi.fn()}
-        settingsEnabled={false}
         onArchiveWorker={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole('button', { name: /developer/ }));
 
+    // 设置链接已从下拉菜单中移除
     expect(screen.queryByText('orca.rolePill.settingsCollaboration')).toBeNull();
   });
 
@@ -75,7 +74,6 @@ describe('RolePillDropdown collaboration settings entry', () => {
         hardLimit={8}
         onSwitchFocus={vi.fn()}
         onOpenCreate={onOpenCreate}
-        onOpenSettings={vi.fn()}
         onArchiveWorker={vi.fn()}
       />,
     );

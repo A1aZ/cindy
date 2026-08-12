@@ -716,7 +716,11 @@ export function createGhostPrimarySessionFocusTracker(
         return;
       }
       void resolvePrimarySessionId(sessionId).then((primarySessionId) => {
-        if (requestGeneration !== generation || !primarySessionId) return;
+        if (requestGeneration !== generation) return;
+        if (!primarySessionId) {
+          lastNotifiedSessionId = null;
+          return;
+        }
         currentSessionId = primarySessionId;
         if (primarySessionId === lastNotifiedSessionId) return;
         lastNotifiedSessionId = primarySessionId;

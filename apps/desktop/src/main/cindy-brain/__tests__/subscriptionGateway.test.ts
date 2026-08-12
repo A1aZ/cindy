@@ -945,6 +945,48 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     expect(tracker.current()).toBeNull();
     expect(notify).not.toHaveBeenCalled();
   });
+
+  it('焦点归一为空时清除去重，切回原主任务会再次发布', async () => {
+    const notify = vi.fn();
+    const tracker = createGhostPrimarySessionFocusTracker(
+      async (sessionId) => (sessionId === 'hidden-session' ? null : 'lead-1'),
+      notify,
+    );
+
+    tracker.note('worker-1');
+    await Promise.resolve();
+    tracker.note('hidden-session');
+    await Promise.resolve();
+    tracker.note('worker-1');
+    await Promise.resolve();
+
+    expect(notify.mock.calls).toEqual([['lead-1'], ['lead-1']]);
+  });
+
+  it('晚到的旧空结果不会清除新焦点的去重状态', async () => {
+    const notify = vi.fn();
+    const pending = new Map<string, (value: string | null) => void>();
+    const tracker = createGhostPrimarySessionFocusTracker(
+      (sessionId) =>
+        new Promise<string | null>((resolve) => {
+          pending.set(sessionId, resolve);
+        }),
+      notify,
+    );
+
+    tracker.note('old-session');
+    tracker.note('current-session');
+    pending.get('current-session')?.('lead-1');
+    await Promise.resolve();
+    pending.get('old-session')?.(null);
+    await Promise.resolve();
+    tracker.note('current-session');
+    pending.get('current-session')?.('lead-1');
+    await Promise.resolve();
+
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith('lead-1');
+  });
 });
 
 describe('buildGhostCurrentSessionSnapshot', () => {

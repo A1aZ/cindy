@@ -5,7 +5,8 @@
  *   verifyParent → mkdir temp → classifyGhostDirEntry(temp) →
  *   从 sourceDir 复制内容到 temp → matches(temp) 内容哈希 → 多层 pre-rename 复验
  *   (verifyParent + verifyDirectory + classifyGhostDirEntry + lstat absence) →
- *   原子 rename → post-rename classifyGhostDirEntry → matches(target) → cleanup。
+ *   原子 rename → post-rename classifyGhostDirEntry → matches(target)
+ *   → classifyGhostDirEntry(target)（终判——matches 本身不校验 root）→ cleanup。
  *
  * pre-check（classifyGhostDirEntry / verifyParent / matches）只缩窄 TOCTOU
  * 窗口；post-rename classifyGhostDirEntry + matches() 才是真正的安全判定
@@ -132,7 +133,17 @@ export async function runGhostSnapshotWorkerRequest(
   } catch (error) { if (!hasCode(error, 'ENOENT')) throw error; }
   if (exists) {
     await verifyDirectory(workingDir, parts[0]);
-    if (await matches(request.receipt, targetPath)) { send({ ok: true }); return; }
+    if (await matches(request.receipt, targetPath)) {
+      // matches() reads through pathnames and does not validate the
+      // baseDir itself (ghostContentTree.ts:68).  Recheck the target
+      // identity with lstat (no-follow) before accepting the fast path,
+      // so a concurrent process that swapped <id>/<revision> for a
+      // symlink after the initial lstat can't publish a linked external
+      // tree as the approved snapshot (P1, PRRT_kwDOTgdRUs6Yb404).
+      const targetKind = await classifyGhostDirEntry(targetPath);
+      if (targetKind !== 'directory') throw new Error('snapshot target is not a real directory on fast path');
+      send({ ok: true }); return;
+    }
   }
   try {
     const parentKind = await classifyGhostDirEntry(workPath(parts[0]));
@@ -203,6 +214,12 @@ export async function runGhostSnapshotWorkerRequest(
       }
       throw new Error('approved skill snapshot changed while being published');
     }
+    // matches() follows symlinks through resolveGhostContentPath and does
+    // not validate the root itself (ghostContentTree.ts:68).  Recheck
+    // after matches() so a concurrent swap to a symlink with identical
+    // bytes is caught before we send ok (same P1 as PRRT_kwDOTgdRUs6Yb404).
+    const targetKindAfterMatch = await classifyGhostDirEntry(targetPath);
+    if (targetKindAfterMatch !== 'directory') throw new Error('snapshot target no longer a real directory after match');
     send({ ok: true });
   } finally {
     if (await verifyParent(request.expectedParent, workingDir).then(() => true, () => false) &&

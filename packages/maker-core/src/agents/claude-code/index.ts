@@ -420,7 +420,11 @@ interface ClaudeInputImageResizer {
   process(absPath: string): Promise<string>;
 }
 
-const CLAUDE_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const CLAUDE_INLINE_IMAGE_MAX_ENCODED_BYTES = 5 * 1024 * 1024;
+
+function base64EncodedByteLength(rawByteLength: number): number {
+  return Math.ceil(rawByteLength / 3) * 4;
+}
 
 function detectClaudeImageMediaType(data: Buffer): ClaudeImageMediaType | null {
   if (
@@ -451,19 +455,27 @@ async function toClaudeImageBlock(imagePath: string): Promise<ClaudeSdkContentBl
   try {
     handle = await fs.open(imagePath, 'r');
     const stat = await handle.stat();
-    if (!stat.isFile() || stat.size <= 0 || stat.size > CLAUDE_INLINE_IMAGE_MAX_BYTES) {
+    if (
+      !stat.isFile()
+      || stat.size <= 0
+      || base64EncodedByteLength(stat.size) > CLAUDE_INLINE_IMAGE_MAX_ENCODED_BYTES
+    ) {
       return null;
     }
     const data = await handle.readFile();
-    if (data.length === 0 || data.length > CLAUDE_INLINE_IMAGE_MAX_BYTES) return null;
+    if (
+      data.length === 0
+      || base64EncodedByteLength(data.length) > CLAUDE_INLINE_IMAGE_MAX_ENCODED_BYTES
+    ) return null;
     const mediaType = detectClaudeImageMediaType(data);
     if (!mediaType) return null;
+    const encodedData = data.toString('base64');
     return {
       type: 'image',
       source: {
         type: 'base64',
         media_type: mediaType,
-        data: data.toString('base64'),
+        data: encodedData,
       },
     };
   } catch {
@@ -480,6 +492,7 @@ async function toClaudeImageBlock(imagePath: string): Promise<ClaudeSdkContentBl
 export async function toClaudeSdkContent(
   content: UserMessage['content'],
   imageResizer: ClaudeInputImageResizer = getDefaultImageResizer(),
+  readImagePathsLocally = true,
 ): Promise<string | ClaudeSdkContentBlock[]> {
   if (typeof content === 'string') return content;
 
@@ -494,7 +507,7 @@ export async function toClaudeSdkContent(
     Promise<{ block: ClaudeSdkContentBlock | null; finalPath: string }>
   >();
   content.forEach((block, idx) => {
-    if (block.type === 'image') {
+    if (block.type === 'image' && readImagePathsLocally) {
       imageBlockPromises.set(
         idx,
         imageResizer.process(block.path).then(async (finalPath) => ({
@@ -5132,7 +5145,12 @@ export class ClaudeCodeAgent extends BaseAgent {
               reviewReadGrants,
             );
           }
-          const content = await toClaudeSdkContent(message.content);
+          // SSH 图片路径属于远端主机，不能在桌面端压缩或读取；保留路径引用交给远端 SDK。
+          const content = await toClaudeSdkContent(
+            message.content,
+            undefined,
+            !opts.remoteHostId,
+          );
           if (sendOpts?.signal?.aborted) {
             throw new Error('Claude send cancelled before acceptance');
           }
@@ -5234,7 +5252,12 @@ export class ClaudeCodeAgent extends BaseAgent {
             reviewReadGrants,
           );
         }
-        const content = await toClaudeSdkContent(message.content);
+        // steer 与 send 保持同一来源边界：SSH 图片路径只由远端 SDK 读取。
+        const content = await toClaudeSdkContent(
+          message.content,
+          undefined,
+          !opts.remoteHostId,
+        );
         if (sendOpts?.signal?.aborted) {
           throw new Error('Claude steer cancelled before acceptance');
         }

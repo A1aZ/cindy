@@ -507,6 +507,43 @@ describe('ClaudeCodeAgent plan mode', () => {
     await handle.close();
   });
 
+  it('forwards SSH image paths without reading a same-named desktop file', async () => {
+    const configDir = await makeTempDir();
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    const workingDir = await makeTempDir();
+    const imagePath = path.join(workingDir, 'remote.png');
+    await fs.writeFile(
+      imagePath,
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const remoteSend = vi.fn(async () => {});
+    const fakeQuery = { ...createFakeQuery(), send: remoteSend };
+    const remoteCcQueryFactory: NonNullable<AgentDeps['remoteCcQueryFactory']> = async () =>
+      fakeQuery as never;
+    const agent = new ClaudeCodeAgent(createDeps({ remoteCcQueryFactory }));
+    const handle = await agent.startSession({
+      sessionId: 'session-remote-image-path',
+      model: 'claude-opus-4-6',
+      workingDir,
+      remoteHostId: 'remote-1',
+      permissionMode: 'auto',
+    });
+
+    await handle.send({
+      type: 'user',
+      content: [
+        { type: 'image', path: imagePath, mimeType: 'image/png' },
+        { type: 'text', text: 'Inspect this' },
+      ],
+    });
+    await vi.waitFor(() => expect(remoteSend).toHaveBeenCalledTimes(1));
+
+    expect(remoteSend.mock.calls[0]?.[0]).toMatchObject({
+      message: { content: `@"${imagePath}" Inspect this` },
+    });
+    await handle.close();
+  });
+
   it('overrides remote cc-manager env with a host-materialized Claude route', async () => {
     const configDir = await makeTempDir();
     process.env.CLAUDE_CONFIG_DIR = configDir;

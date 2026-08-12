@@ -143,9 +143,13 @@ More/Archive,复用 `TimeActionsSlot`),行 2 = 固定 1 行预览;整行恒两�
    `git-context:pr-status` IPC 实时查。侧栏常驻显示必须:仅查视口可见行、拉长
    TTL、批量合并;一会话多 PR 时取 `lastSeenAt` 最新;无 token/查询失败降级为
    灰色 `#号`。
-6. **远程会话的 token/费用/PR**:字段在远端 DB,device-link 投影扩字段触碰
-   `protocol-compatibility` 规则。第一期仅本机会话生效,远程留空,协议扩展
-   单独评审。
+6. **远程会话的 token/费用/PR**:token/费用字段在远端 DB,device-link 投影
+   扩字段触碰 `protocol-compatibility` 规则——第一期仅本机会话生效,远程留空,
+   协议扩展单独评审。**PR 不受此限**(2026-08-12 实机反馈修正):device-link
+   白名单已有 `git-context:pr-refs:list` / `git-context:pr-status` 逐会话通道
+   (聊天顶栏在用),侧栏对远程会话按需补拉引用、状态经远程路由查询(被控端持
+   gh token + main 侧按已提取引用 fail-closed 过滤),不改协议。触发条件:勾选
+   pr 且行实际渲染,每会话一次,数量被 collapse 上限约束。
 7. **筛选与置顶**:定稿为不作用于置顶。置顶条目不会因筛选消失。
 8. **PR 状态色登记**:绿/红对齐 `--diff-add-fg` / `--diff-del-fg`,「侧边栏 PR
    状态指示」作为新消费场景需在 DESIGN.md §2 登记后方可实现。

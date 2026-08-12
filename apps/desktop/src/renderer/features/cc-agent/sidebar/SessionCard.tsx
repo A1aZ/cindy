@@ -61,7 +61,7 @@ import { toast } from '@/lib/toast';
 import { buildSessionDeepLink } from '@/lib/deepLink';
 import { createLogger } from '@/lib/logger';
 import type { Session } from '@/lib/ccAgent.types';
-import { usePrRefsForSession } from '@/contexts/PrRefsContext';
+import { usePrActions, usePrRefsForSession } from '@/contexts/PrRefsContext';
 import { buildSessionInfoPieces, SessionInfoMeta } from './SessionInfoMeta';
 import { useTaskInfoFields } from '../hooks/useTaskInfoFields';
 import { highlightSegments } from '../lib/highlightSegments';
@@ -238,6 +238,14 @@ export function SessionCard({
   const cardInfoPieces = buildSessionInfoPieces(session, taskInfoFields, activityIso, t);
   const cardPrRefs = usePrRefsForSession(session.id);
   const cardInfoPrRef = taskInfoFields.includes('pr') ? cardPrRefs[0] : undefined;
+  // 远程(device-link)会话的 PR 引用不在本地 db,勾选 pr 且行渲染时按需经
+  // 远程通道补拉(与 SessionItem 同一条路径;usePrActions 的 value 恒定)。
+  const { fetchRefsForRemoteSession } = usePrActions();
+  const wantsPrInfo = taskInfoFields.includes('pr');
+  const remoteDeviceId = session.deviceLinkDeviceId;
+  useEffect(() => {
+    if (wantsPrInfo && remoteDeviceId) fetchRefsForRemoteSession(session.id, remoteDeviceId);
+  }, [wantsPrInfo, remoteDeviceId, session.id, fetchRefsForRemoteSession]);
 
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const [archivePending, setArchivePending] = useState(false);

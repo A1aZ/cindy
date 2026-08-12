@@ -47,6 +47,27 @@ const PrStatusesContext = createContext<PrStatusesContextValue>({
   fetchStatusesForSession: () => undefined,
 });
 
+/**
+ * 行级动作 context——value 恒定(回调身份稳定,无状态字段),SessionItem /
+ * SessionCard 可以安全订阅而不被 statuses 更新连带重渲染(文件头性能边界)。
+ * device-link 远程会话的 PR 引用不在本地 db(listAllPrRefs 看不见它们),
+ * 由渲染中的行按需经远程通道补拉,落进同一张 refsBySession 映射。
+ */
+interface PrActionsContextValue {
+  /**
+   * 远程(device-link)会话按需拉取 PR 引用:复用白名单通道
+   * git-context:pr-refs:list(与聊天顶栏 useSessionGitContext 同一条),结果
+   * 合入共享 refs 映射并登记 sessionId→deviceId,后续状态查询自动走远程路由。
+   * 每会话只发一次(失败允许下次重试);仅当「任务信息」勾选 pr 且行实际
+   * 渲染时才调用——数量被列表 collapse 上限约束。
+   */
+  fetchRefsForRemoteSession: (sessionId: string, deviceId: string) => void;
+}
+
+const PrActionsContext = createContext<PrActionsContextValue>({
+  fetchRefsForRemoteSession: () => undefined,
+});
+
 function groupBySession(rows: SessionPrRef[]): Map<string, SessionPrRef[]> {
   const map = new Map<string, SessionPrRef[]>();
   for (const row of rows) {
@@ -69,11 +90,17 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   refsRef.current = refsBySession;
   // tip 快速划过多行时防止同一会话重复在飞;main 侧有 60s 缓存,这里不做 TTL。
   const inFlightSessions = useRef(new Set<string>());
+  // 远程会话:已发起过引用拉取的 sessionId(成功后不再重复;失败移除允许重试),
+  // 以及 sessionId → deviceId 路由表(状态查询据此改走 device-link 通道)。
+  const remoteFetchedSessions = useRef(new Set<string>());
+  const remoteDeviceBySession = useRef(new Map<string, string>());
 
   useEffect(() => {
     // owner 切换边界:先清掉上一 owner 的缓存,无 owner 时保持空、不发 IPC。
     setRefsBySession(new Map());
     setStatuses(new Map());
+    remoteFetchedSessions.current.clear();
+    remoteDeviceBySession.current.clear();
     if (dataOwnerId === null) return;
 
     let cancelled = false;
@@ -126,6 +153,9 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   }, [dataOwnerId]);
 
   // 回调身份稳定(空闭包依赖):refs 经 refsRef 读,statuses 经函数式 setState 写。
+  // 远程会话(remoteDeviceBySession 命中)状态改走 device-link 通道——被控端持有
+  // gh token,且 main 侧按该会话已提取的引用过滤查询(git-context/ipc.ts 的
+  // fail-closed 逻辑),与聊天顶栏同一条安全路径。
   const fetchStatusesForSession = useRef((sessionId: string) => {
     const refs = refsRef.current.get(sessionId)?.slice(0, MAX_STATUS_QUERIES);
     if (!refs || refs.length === 0) return;
@@ -133,9 +163,13 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     inFlightSessions.current.add(sessionId);
     void (async () => {
       try {
-        const results = await window.electronAPI.gitContext.getPrStatuses(
-          refs.map((r) => ({ owner: r.owner, repo: r.repo, prNumber: r.prNumber })),
-        );
+        const queries = refs.map((r) => ({ owner: r.owner, repo: r.repo, prNumber: r.prNumber }));
+        const deviceId = remoteDeviceBySession.current.get(sessionId);
+        const results = deviceId
+          ? ((await window.electronAPI.deviceLink.invoke(deviceId, 'git-context:pr-status', [
+              { sessionId, queries },
+            ])) as PrStatusResult[])
+          : await window.electronAPI.gitContext.getPrStatuses(queries);
         setStatuses((prev) => {
           const next = new Map(prev);
           for (const r of results) next.set(prStatusKey(r), r);
@@ -149,6 +183,32 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     })();
   }).current;
 
+  // 远程会话 PR 引用按需拉取(回调身份稳定)。结果进共享 refs 映射,渲染路径
+  // (usePrRefsForSession)对本地/远程一视同仁;空结果也算成功(不再重发)。
+  const fetchRefsForRemoteSession = useRef((sessionId: string, deviceId: string) => {
+    if (remoteFetchedSessions.current.has(sessionId)) return;
+    remoteFetchedSessions.current.add(sessionId);
+    remoteDeviceBySession.current.set(sessionId, deviceId);
+    void (async () => {
+      try {
+        const refs = (await window.electronAPI.deviceLink.invoke(
+          deviceId,
+          'git-context:pr-refs:list',
+          [sessionId],
+        )) as SessionPrRef[];
+        if (refs.length > 0) {
+          setRefsBySession((prev) => new Map(prev).set(sessionId, refs));
+        }
+      } catch (err) {
+        // 断链/超时:移出已发集,该行下次挂载(或勾选变化)时重试。
+        log.warn('remote pr refs fetch failed', String(err));
+        remoteFetchedSessions.current.delete(sessionId);
+      }
+    })();
+  }).current;
+
+  const actionsValue = useMemo(() => ({ fetchRefsForRemoteSession }), [fetchRefsForRemoteSession]);
+
   const statusesValue = useMemo(
     () => ({ statuses, fetchStatusesForSession }),
     [statuses, fetchStatusesForSession],
@@ -156,7 +216,9 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
 
   return (
     <PrRefsMapContext.Provider value={refsBySession}>
-      <PrStatusesContext.Provider value={statusesValue}>{children}</PrStatusesContext.Provider>
+      <PrActionsContext.Provider value={actionsValue}>
+        <PrStatusesContext.Provider value={statusesValue}>{children}</PrStatusesContext.Provider>
+      </PrActionsContext.Provider>
     </PrRefsMapContext.Provider>
   );
 }
@@ -171,4 +233,9 @@ export function usePrRefsForSession(sessionId: string): SessionPrRef[] {
 /** tooltip 内容消费:状态缓存 + 按需拉取。仅打开中的 tip 因状态更新而重渲染。 */
 export function usePrStatuses(): PrStatusesContextValue {
   return useContext(PrStatusesContext);
+}
+
+/** 行级动作(value 恒定,订阅不会因 statuses 更新而重渲染)。 */
+export function usePrActions(): PrActionsContextValue {
+  return useContext(PrActionsContext);
 }

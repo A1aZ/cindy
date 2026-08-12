@@ -41,7 +41,7 @@ import { makerChatStore } from '@/lib/makerChatStore';
 import { WorktreeBadge } from '@/components/sidebar/WorktreeBadge';
 import { SessionStatusIcon } from './SessionStatusIcon';
 import { SessionRenameInput } from '../SessionRenameInput';
-import { usePrRefsForSession } from '@/contexts/PrRefsContext';
+import { usePrActions, usePrRefsForSession } from '@/contexts/PrRefsContext';
 import { SessionTooltip } from './SessionTooltip';
 import {
   DropdownMenu,
@@ -312,6 +312,14 @@ export const SessionItem = memo(function SessionItem({
   const prRefs = usePrRefsForSession(session.id);
   // 任务信息复选(C 期):行右侧信息槽内容,与整理菜单同源共享状态。
   const { fields: taskInfoFields } = useTaskInfoFields();
+  // 远程(device-link)会话的 PR 引用不在本地 db,勾选 pr 且行渲染时按需经
+  // 远程通道补拉(每会话一次,usePrActions 的 value 恒定不引入重渲染)。
+  const { fetchRefsForRemoteSession } = usePrActions();
+  const wantsPrInfo = taskInfoFields.includes('pr');
+  const remoteDeviceId = session.deviceLinkDeviceId;
+  useEffect(() => {
+    if (wantsPrInfo && remoteDeviceId) fetchRefsForRemoteSession(session.id, remoteDeviceId);
+  }, [wantsPrInfo, remoteDeviceId, session.id, fetchRefsForRemoteSession]);
   // mod+1..9 序号徽标:模块 store 按 sessionId 精准订阅(性能不变量第 2 条),
   // 非按住态恒为 null,不惊动 memo。
   const ordinalBadgeLabel = useSessionOrdinalBadge(session.id);

@@ -1225,8 +1225,13 @@ export function getLegacyGhostRecoveryStatus(
       ...scopedDiscovery.invalidIds,
     ].filter((id) => !options.rejectReservedIds || !isOfficialGhostId(id)),
   );
+  // Filter reserved IDs from pending marker ids so they don't inflate
+  // status counts in packaged builds (P2, PRRT_kwDOTgdRUs6YbtXr).
+  const visiblePendingIds = options.rejectReservedIds
+    ? (recoveryMarker?.pendingIds ?? []).filter((id) => !isOfficialGhostId(id))
+    : (recoveryMarker?.pendingIds ?? []);
   const targetInvalidIds = new Set(
-    targetDiscovery.invalidIds.filter((id) => recoveryMarker?.pendingIds.includes(id)),
+    targetDiscovery.invalidIds.filter((id) => visiblePendingIds.includes(id)),
   );
   // Filter reserved IDs from per-id counts so they don't report spurious
   // deferred/invalid problems for ids that can never be recovered (P2,
@@ -1253,7 +1258,7 @@ export function getLegacyGhostRecoveryStatus(
     ...legacySourceIds,
     ...sourceDiscoveryProblemIds,
     ...targetInvalidIds,
-    ...(recoveryMarker?.pendingIds ?? []),
+    ...visiblePendingIds,
   ]);
   const deferredRootCount =
     sharedDiscovery.deferredRoots.length +
@@ -1289,7 +1294,7 @@ export function getLegacyGhostRecoveryStatus(
     ...sourceDiscoveryProblemIds,
     ...targetInvalidIds,
     ...recoveredIds,
-    ...(recoveryMarker?.pendingIds ?? []),
+    ...visiblePendingIds,
   ]).size;
   if (discoveryHasInvalid && targetInvalidIds.size > 0) {
     return { state: 'partial', legacyPluginCount: Math.max(1, legacyPluginCount), canRetry: false };

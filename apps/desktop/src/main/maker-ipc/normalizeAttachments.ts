@@ -418,7 +418,6 @@ type SerializedFileLike = {
   type?: unknown;
   category?: unknown;
   ext?: unknown;
-  annotated?: unknown;
 };
 
 function isQueuedImageFile(file: SerializedFileLike): boolean {
@@ -459,12 +458,17 @@ function needsImageMaterialize(v: unknown): v is string {
   return isOssRefField(v) || isLocalImagePathField(v);
 }
 
+function isManagedImageUrl(v: unknown): v is string {
+  return (
+    typeof v === 'string'
+    && (v.startsWith('xdt-image://') || v.startsWith('cindy-media://'))
+  );
+}
+
 function queuedFileMaterializeRef(file: SerializedFileLike): string | null {
   if (isOssRefField(file.url)) return file.url;
-  // 标注图的 url 是烧录位图，path 仍是原始磁盘图；本地队列必须继续使用 url。
-  if (file.annotated === true && typeof file.url === 'string' && file.url.length > 0) {
-    return null;
-  }
+  // url 是队列实际消费的图片；path 只是文件选择器保留的原始磁盘来源。
+  if (isQueuedImageFile(file) && isManagedImageUrl(file.url)) return null;
   if (isOssRefField(file.path)) return file.path;
   if (!isQueuedImageFile(file)) return null;
   if (isLocalImagePathField(file.url)) return file.url;

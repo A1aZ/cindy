@@ -220,20 +220,38 @@ describe('inline attachment temporary files', () => {
     expect(downloadToFile).not.toHaveBeenCalled();
   });
 
-  it('keeps queued annotated images on their burned image URL', async () => {
+  it('keeps queued images on managed URLs instead of rematerializing their source paths', async () => {
     const burnedUrl = 'xdt-image://queued-annotated/annotated.png';
+    const selectedUrl = 'xdt-image://queued-selected/selected.png';
+    const mediaUrl = `cindy-media://blobs/${'d'.repeat(64)}.png`;
     const originalPath = path.join(tempRoot.value, 'original.png');
     await fs.writeFile(originalPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     const item = {
       clientId: 'queued-annotated-image',
-      files: [{
-        category: 'image',
-        ext: '.png',
-        path: originalPath,
-        url: burnedUrl,
-        mimeType: 'image/png',
-        annotated: true,
-      }],
+      files: [
+        {
+          category: 'image',
+          ext: '.png',
+          path: originalPath,
+          url: selectedUrl,
+          mimeType: 'image/png',
+        },
+        {
+          category: 'image',
+          ext: '.png',
+          path: originalPath,
+          url: mediaUrl,
+          mimeType: 'image/png',
+        },
+        {
+          category: 'image',
+          ext: '.png',
+          path: originalPath,
+          url: burnedUrl,
+          mimeType: 'image/png',
+          annotated: true,
+        },
+      ],
     };
 
     const materialized = await materializeQueuedOssAttachmentsDeferred(

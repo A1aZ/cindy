@@ -828,6 +828,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     } else {
       void clearTapdbUser();
+      // 登出时清除 THEMIS 用户绑定,避免崩溃/强杀上报误归于上一个账号。
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-unsafe-call,@typescript-eslint/no-unsafe-member-access
+        requireNativeModule('XdtThemis').addCustomField('playerinfo', '');
+      } catch {
+        // xdt-themis is build-time injected; absent in dev / unconfigured regions.
+      }
     }
   }, [initialized, user?.id]);
 

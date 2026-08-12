@@ -7760,6 +7760,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     message: string,
     anchorClientId: string,
     opts: SessionSendOptions,
+    prepareBeforeVendorDispatch?: () => void | Promise<void>,
   ): Promise<SessionSendResult> {
     let baselineStarted = false;
     let turnChangeSetStarted = false;
@@ -7781,6 +7782,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             await gitSnapshotCoordinator.onTurnStart(session.id);
             baselineStarted = true;
           }
+          await prepareBeforeVendorDispatch?.();
         },
       });
       if (turnChangeSetStarted && !sendResult.accepted) {
@@ -7827,6 +7829,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     pluginSessionMessageGhostId?: string;
     /** Host-only synchronous fence for the last boundary before vendor dispatch. */
     assertBeforeVendorDispatch?: () => void;
+    /** Host-only async refresh after Git preparation and before the synchronous vendor fence. */
+    prepareBeforeVendorDispatch?: () => void | Promise<void>;
     /** Cleanup for a durable row cancelled by an accepted/final-dispatch guard. */
     onDispatchCancelled?: () => boolean | Promise<boolean>;
     createDefaults?: SendToSessionCreateDefaults;
@@ -7850,6 +7854,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       requireCurrentSessionFocus,
       pluginSessionMessageGhostId,
       assertBeforeVendorDispatch,
+      prepareBeforeVendorDispatch,
       onDispatchCancelled,
       createDefaults,
       inheritSourcePermissionMode,
@@ -8335,7 +8340,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               assertBeforeVendorDispatch?.();
               dispatchAgentIslandUserPrompt(targetSessionId);
             },
-          });
+          }, prepareBeforeVendorDispatch);
           if (userPromptPreviewStarted) {
             if (sendResult.accepted) {
               commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -8456,7 +8461,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             assertBeforeVendorDispatch?.();
             dispatchAgentIslandUserPrompt(targetSessionId);
           },
-        });
+        }, prepareBeforeVendorDispatch);
         if (userPromptPreviewStarted) {
           if (sendResult.accepted) {
             commitAgentIslandUserPrompt(targetSessionId, clientId);
@@ -8774,7 +8779,13 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             'plugin current-task message authorization is no longer valid',
           );
         }
-        finalAuthorizedWorkingDir = authorization.workingDir;
+      },
+      prepareBeforeVendorDispatch: async () => {
+        // Git baseline / turn changeset preparation above can await. Capture the focus
+        // guard first, then read the latest durable workdir authorization; after this
+        // callback resolves, Session reaches the synchronous vendor fence without
+        // another await, so either later focus changes fail the guard or this latest
+        // workdir snapshot is the one used for the final visibility decision.
         finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);
         if (!finalDispatchGuard) {
           dispatchState.cancellation = {
@@ -8785,6 +8796,17 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             'plugin target changed while preparing final dispatch guard',
           );
         }
+        const authorization = await readAuthorization();
+        if (!authorization) {
+          dispatchState.cancellation = {
+            errorCode: 'PERMISSION_DENIED',
+            message: '插件在当前任务中已不可用',
+          };
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin current-task message authorization changed before final dispatch',
+          );
+        }
+        finalAuthorizedWorkingDir = authorization.workingDir;
       },
       assertBeforeVendorDispatch: () => {
         if (!finalDispatchGuard?.()) {

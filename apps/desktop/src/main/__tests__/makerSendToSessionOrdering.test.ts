@@ -341,6 +341,7 @@ describe('sendToSession ordering', () => {
     expect(helperBlock).toContain('await opts.onAccepted?.();');
     expect(helperBlock).toContain('await beginTurnChangeSetAtDispatch(session, anchorClientId);');
     expect(helperBlock).toContain('await gitSnapshotCoordinator.onTurnStart(session.id);');
+    expect(helperBlock).toContain('await prepareBeforeVendorDispatch?.();');
     expect(helperBlock).toContain('const pendingHandoff = await agentHandoffPending.peek(session.id);');
     expect(helperBlock).toContain('prependHandoffToUserMessage(');
     expect(helperBlock).toContain("{ type: 'user', content: message },");
@@ -373,6 +374,11 @@ describe('sendToSession ordering', () => {
       helperBlock,
       'await beginTurnChangeSetAtDispatch(session, anchorClientId);',
       'await gitSnapshotCoordinator.onTurnStart(session.id);',
+    );
+    expectOrder(
+      helperBlock,
+      'await gitSnapshotCoordinator.onTurnStart(session.id);',
+      'await prepareBeforeVendorDispatch?.();',
     );
     expect(countOccurrences(block, 'sendUserMessageWithAwaitedGitBaseline(')).toBe(3);
     expect(block).not.toContain('const sendResult = await session.send({ type: \'user\', content: message }, {');
@@ -661,9 +667,20 @@ describe('sendToSession ordering', () => {
     expect(runnerBlock).toContain('dispatchState.rewound = rewound;');
     expect(runnerBlock).toContain('return rewound;');
     expect(source).toContain("'消息取消失败，请在任务中检查后重试'");
+    expect(runnerBlock).toContain('prepareBeforeVendorDispatch: async () => {');
     expect(runnerBlock).toContain('finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);');
     expect(runnerBlock).toContain('const authorization = await readAuthorization();');
     expect(runnerBlock).toContain('finalAuthorizedWorkingDir = authorization.workingDir;');
+    expectOrder(
+      runnerBlock,
+      'prepareBeforeVendorDispatch: async () => {',
+      'assertBeforeVendorDispatch: () => {',
+    );
+    expectOrder(
+      runnerBlock,
+      'finalDispatchGuard = await captureGhostSessionFocusGuard(sessionId);',
+      'finalAuthorizedWorkingDir = authorization.workingDir;',
+    );
     expect(runnerBlock).toContain('assertBeforeVendorDispatch: () => {');
     expect(runnerBlock).toContain("'plugin target changed at final vendor dispatch boundary'");
     expect(runnerBlock).toContain(

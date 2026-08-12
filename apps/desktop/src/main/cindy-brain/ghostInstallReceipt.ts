@@ -548,7 +548,9 @@ export class GhostInstallReceiptStore {
     // ERROR: temp write or link/rename failed for a reason other than
     //   EEXIST — fail the receipt write, do not publish the receipt
     //   without the per-id migration guard.
-    if (this.hasMigrationMarker(id)) return false;
+    const initialState = this.migrationMarkerState(id);
+    if (initialState.state === 'present') return false;
+    if (initialState.state === 'unavailable') throw initialState.error;
     const root = this.rootDir();
     await fs.promises.mkdir(root, { recursive: true });
     const target = this.migrationMarkerPath(id);
@@ -569,7 +571,9 @@ export class GhostInstallReceiptStore {
         }
         if ((error as NodeJS.ErrnoException).code === 'EXDEV') {
           // Cross-device: re-check before rename so we don't clobber.
-          if (this.hasMigrationMarker(id)) return false;
+          const stateBeforeRename = this.migrationMarkerState(id);
+          if (stateBeforeRename.state === 'present') return false;
+          if (stateBeforeRename.state === 'unavailable') throw stateBeforeRename.error;
           await fs.promises.rename(temp, target);
         } else {
           throw error;
@@ -592,11 +596,25 @@ export class GhostInstallReceiptStore {
 
   /** 是否存在 per-id 迁移标记(表明此 id 是通过新模型安装,而非 legacy)。 */
   hasMigrationMarker(id: string): boolean {
+    // The migration coordinator only re-opens legacy candidacy on definite
+    // absence. Unknown marker state must keep backfill closed.
+    return this.migrationMarkerState(id).state !== 'missing';
+  }
+
+  private migrationMarkerState(
+    id: string,
+  ):
+    | { state: 'present' }
+    | { state: 'missing' }
+    | { state: 'unavailable'; error: unknown } {
     try {
       fs.lstatSync(this.migrationMarkerPath(id));
-      return true;
-    } catch {
-      return false;
+      return { state: 'present' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { state: 'missing' };
+      }
+      return { state: 'unavailable', error };
     }
   }
 

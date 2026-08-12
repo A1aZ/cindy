@@ -1281,6 +1281,32 @@ describe('GhostManager · review 第 6 轮回归(P0/P1 修复钉住)', () => {
     expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
   });
 
+  it('P0-2: unreadable per-id migration marker keeps deleted receipt fail-closed', async () => {
+    await manager.install(await makeCindy('a.cindy', goodManifest()));
+    await fs.promises.rm(path.join(workDir, 'ghosts-install-state', 'hello.json'));
+
+    const marker = path.join(workDir, 'ghosts-install-state', '.migrated-hello');
+    const realLstatSync = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(marker)) {
+        throw Object.assign(new Error('EIO: migration marker unreadable'), { code: 'EIO' });
+      }
+      return realLstatSync(target, options as never);
+    });
+    try {
+      expect(await manager.migrateLegacyApprovalsOnce()).toEqual({
+        migrated: [],
+        skipped: ['hello'],
+        failed: [],
+        retryPending: [],
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(manager.list()[0].approval.state).toBe('legacy-unapproved');
+  });
+
   it('P0-2:安装不自动落 migration ledger —— 落账失败也不影响安装', async () => {
     // With the ledger auto-close removed, the install path no longer touches
     // the migration ledger at all. A ledger I/O failure cannot block the

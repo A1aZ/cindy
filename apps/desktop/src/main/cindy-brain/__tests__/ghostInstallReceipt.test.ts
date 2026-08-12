@@ -4,7 +4,10 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { GhostInstallReceiptStore } from '../ghostInstallReceipt';
+import {
+  createGhostInstallReceipt,
+  GhostInstallReceiptStore,
+} from '../ghostInstallReceipt';
 
 describe('GhostInstallReceiptStore cleanup', () => {
   let workDir: string;
@@ -62,6 +65,59 @@ describe('GhostInstallReceiptStore cleanup', () => {
     });
 
     expect(() => store.removeSync('hello')).toThrow('state root unreadable');
+  });
+
+  it('treats an unreadable migration marker as present', () => {
+    const marker = path.join(stateRoot, '.migrated-hello');
+    const realLstatSync = fs.lstatSync;
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(marker)) {
+        throw Object.assign(new Error('migration marker unreadable'), { code: 'EACCES' });
+      }
+      return realLstatSync(target, options as never);
+    });
+
+    expect(store.hasMigrationMarker('hello')).toBe(true);
+  });
+
+  it('does not publish a receipt when migration marker state is unavailable', async () => {
+    const marker = path.join(stateRoot, '.migrated-hello');
+    const realLstatSync = fs.lstatSync;
+    vi.spyOn(fs, 'lstatSync').mockImplementation((target, options) => {
+      if (path.resolve(String(target)) === path.resolve(marker)) {
+        throw Object.assign(new Error('migration marker unavailable'), { code: 'EIO' });
+      }
+      return realLstatSync(target, options as never);
+    });
+
+    const receipt = createGhostInstallReceipt({
+      manifest: {
+        schemaVersion: 2,
+        id: 'hello',
+        name: 'Hello',
+        version: '1.0.0',
+        kind: 'chip',
+        entry: 'main.js',
+        slots: ['tool'],
+        tools: [{ name: 'do_thing', description: 'Do something' }],
+      },
+      localeResources: {},
+      enabled: true,
+      trust: {
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      },
+      skillContentSha256: {},
+    });
+
+    await expect(store.write(receipt)).rejects.toThrow('migration marker unavailable');
+    expect(fs.existsSync(path.join(stateRoot, 'hello.json'))).toBe(false);
+  });
+
+  it('treats only a missing migration marker as absent', () => {
+    expect(store.hasMigrationMarker('hello')).toBe(false);
   });
 
   it('rejects a linked snapshot root without touching its target', async () => {

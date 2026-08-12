@@ -182,6 +182,24 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     );
   });
 
+  // 2026-08-12 实机反馈:list 变体的分割线是「每行底线 + 列表首行顶线」,而混排把
+  // 每条散排对话各渲染成一个单条 SessionEntryList → 每个都自认首行,上一行底线与
+  // 本行顶线叠成两根横线。散排路径必须关掉顶线(底线已覆盖行间分割)。
+  it('does not double up dividers between standalone dialogues in list mode', () => {
+    const sessionEntryListSource = readFileSync(
+      resolve(__dirname, '..', 'features', 'cc-agent', 'sidebar', 'SessionEntryList.tsx'),
+      'utf8',
+    );
+    expect(sessionEntryListSource).toContain('isFirst={showFirstDivider && index === 0}');
+    expect(projectsSectionSource).toContain('showFirstDivider={false}');
+    // 真正的列表首行(置顶段 / 项目内会话 / 自动化组)保持默认,不传该 prop。
+    const pinnedSectionSource = readFileSync(
+      resolve(__dirname, '..', 'features', 'cc-agent', 'sidebar', 'sections', 'PinnedSection.tsx'),
+      'utf8',
+    );
+    expect(pinnedSectionSource).not.toContain('showFirstDivider');
+  });
+
   it('allows the shared create route to send a standalone dialogue without picking a project', () => {
     // 产品决策:新建入口、对话段 +、项目行内 + 都进同一个创建页;差异只在默认
     // workingDir。workingDir 为空时直接创建 dialogue,不再强制弹项目 picker。

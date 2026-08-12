@@ -514,6 +514,9 @@ export function ProjectsSection({
           onScheduleAction={onScheduleAction}
           sourceLabelMap={dialogueSourceLabelMap}
           sessionVariant={mainSessionVariant}
+          // 混排下每条散排对话各是一个单条列表,若都补顶线,会与上一行的底线叠成
+          // 两根横线(2026-08-12 实机反馈)。底线已覆盖行间分割,这里只关顶线。
+          showFirstDivider={false}
         />
       );
     }

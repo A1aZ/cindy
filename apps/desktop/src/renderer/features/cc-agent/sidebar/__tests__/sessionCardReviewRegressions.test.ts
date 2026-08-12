@@ -31,7 +31,10 @@ const globalsSource = readFileSync(
 
 describe('SessionCard review regressions', () => {
   it('only draws the list top divider on the first overall entry', () => {
-    expect(sessionEntryListSource).toContain('isFirst={index === 0}');
+    // 顶线只认「本列表的整体首行」,不因中间夹了非 session 条目就重画。
+    // 2026-08-12 起额外受 showFirstDivider 约束:混排主列表把每条散排对话各渲染成
+    // 一个单条列表,若都补顶线会与上一行的底线叠成两根横线,那条路径传 false。
+    expect(sessionEntryListSource).toContain('isFirst={showFirstDivider && index === 0}');
     expect(sessionEntryListSource).not.toContain(
       "isFirst={index === 0 || entries[index - 1]?.kind !== 'session'}",
     );

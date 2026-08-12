@@ -1753,6 +1753,13 @@ async function expireRuntimeAuth(
   reason: SessionExpiredReason = 'unknown',
   opts: { preservePersistedRefreshToken?: boolean } = {},
 ): Promise<void> {
+  // Raise the owner boundary before clearing auth so queued owner-scoped
+  // continuations see the pending boundary and fail closed, rather than
+  // executing between token clearance and the async teardown (P1,
+  // PRRT_kwDOTgdRUs6YaakC).  beginAppSessionBoundary is ref-counted;
+  // withAccountFreeOwnerCommit will extend it, and the finally block
+  // releases the outer reference after teardown completes.
+  const releaseBoundary = beginAppSessionBoundary();
   clearAuth({
     notify: false,
     nextMode: 'signed-out',
@@ -1774,6 +1781,7 @@ async function expireRuntimeAuth(
     // the durable boundary non-stable for the next recovery attempt.
     log.error('runtime auth expiry owner transition failed', err);
   } finally {
+    releaseBoundary();
     notifyRenderer();
     notifyAuthListeners();
     notifySessionExpired(reason);
@@ -1789,6 +1797,9 @@ async function expireRuntimeAuth(
 export function invalidateSession(reason: string): Promise<void> {
   if (sessionInvalidationPromise) return sessionInvalidationPromise;
 
+  // Raise the owner boundary before clearing auth (same P1 fix as
+  // expireRuntimeAuth — see PRRT_kwDOTgdRUs6YaakC).
+  const releaseBoundary = beginAppSessionBoundary();
   clearAuth({ notify: false, nextMode: 'signed-out', deferSessionCommit: true });
 
   // Schedule teardown one microtask later so the single-flight promise can be
@@ -1806,6 +1817,8 @@ export function invalidateSession(reason: string): Promise<void> {
       });
     } catch (error) {
       log.error(`auth session owner transition on ${reason} failed`, error);
+    } finally {
+      releaseBoundary();
     }
     notifyRenderer();
     notifyAuthListeners();

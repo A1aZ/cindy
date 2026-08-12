@@ -25,7 +25,10 @@ describe('Claude Code SDK input', () => {
     const imagePath = path.join(tempDir, 'small.png');
     const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     await fs.writeFile(imagePath, imageBytes);
-    const imageResizer = { process: vi.fn(async (inputPath: string) => inputPath) };
+    const imageResizer = {
+      process: vi.fn(async (inputPath: string) => inputPath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'text', text: 'Inspect these' },
       { type: 'file', path: 'E:\\repo\\large.txt', mimeType: 'text/plain' },
@@ -52,7 +55,10 @@ describe('Claude Code SDK input', () => {
     const resizedPath = path.join(tempDir, 'large.webp');
     const resizedBytes = Buffer.from('RIFF0000WEBP', 'ascii');
     await fs.writeFile(resizedPath, resizedBytes);
-    const imageResizer = { process: vi.fn(async () => resizedPath) };
+    const imageResizer = {
+      process: vi.fn(async () => resizedPath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: sourcePath, mimeType: 'image/png' },
       { type: 'text', text: 'Read the image' },
@@ -77,7 +83,10 @@ describe('Claude Code SDK input', () => {
     const imagePath = path.join(tempDir, 'misleading.png');
     const imageBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
     await fs.writeFile(imagePath, imageBytes);
-    const imageResizer = { process: vi.fn(async () => imagePath) };
+    const imageResizer = {
+      process: vi.fn(async () => imagePath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/webp' },
       { type: 'text', text: 'Inspect this' },
@@ -99,7 +108,10 @@ describe('Claude Code SDK input', () => {
   it('falls back to a quoted path when the final image cannot be read', async () => {
     const tempDir = await createTempDir();
     const missingPath = path.join(tempDir, 'missing.png');
-    const imageResizer = { process: vi.fn(async () => missingPath) };
+    const imageResizer = {
+      process: vi.fn(async () => missingPath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: missingPath, mimeType: 'image/png' },
       { type: 'text', text: 'Inspect this' },
@@ -116,7 +128,10 @@ describe('Claude Code SDK input', () => {
     const imageBytes = Buffer.alloc(Math.floor((5 * 1024 * 1024) / 4) * 3 + 1);
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
     await fs.writeFile(imagePath, imageBytes);
-    const imageResizer = { process: vi.fn(async () => imagePath) };
+    const imageResizer = {
+      process: vi.fn(async () => imagePath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },
       { type: 'text', text: 'Inspect this' },
@@ -133,7 +148,10 @@ describe('Claude Code SDK input', () => {
     const imageBytes = Buffer.alloc(Math.floor((5 * 1024 * 1024) / 4) * 3);
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(imageBytes);
     await fs.writeFile(imagePath, imageBytes);
-    const imageResizer = { process: vi.fn(async () => imagePath) };
+    const imageResizer = {
+      process: vi.fn(async () => imagePath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },
     ];
@@ -159,7 +177,10 @@ describe('Claude Code SDK input', () => {
       imagePath,
       Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     );
-    const imageResizer = { process: vi.fn(async () => imagePath) };
+    const imageResizer = {
+      process: vi.fn(async () => imagePath),
+      validate: vi.fn(async () => true),
+    };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },
       { type: 'text', text: 'Inspect this' },

@@ -123,7 +123,11 @@ function buildImageAttachment(file: AttachedFile): RenderImageAttachment | null 
 export function buildUserMessageAttachmentPayload(
   files?: readonly AttachedFile[],
 ): UserMessageAttachmentPayload {
-  const serializedFiles = serializeAttachedFiles(files);
+  const serializedFiles = serializeAttachedFiles(files)?.map((file) => (
+    getAgentInputAttachmentBlockType(file.category, file.ext) === 'image'
+      ? { ...file, pathOrigin: 'desktop-host' as const }
+      : file
+  ));
   const imageAttachments = files
     ?.map(buildImageAttachment)
     .filter((image): image is RenderImageAttachment => image !== null);

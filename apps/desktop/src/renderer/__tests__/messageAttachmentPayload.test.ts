@@ -49,6 +49,7 @@ describe('messageAttachmentPayload', () => {
         path: 'clipboard://paste-1',
         url: 'xdt-image://session/shot.png',
         originalName: 'original.png',
+        pathOrigin: 'desktop-host',
       }),
     ]);
     expect(payload.imageAttachments).toEqual([

@@ -200,7 +200,7 @@ describe('ClaudeCodeAgent plan mode', () => {
     await fs.writeFile(markdownPath, '# Launch\nBudget: 100 vs 80 + 50');
     await fs.writeFile(pdfPath, '%PDF-1.4\n% review transport fixture');
     const imageBase64 =
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
     await fs.writeFile(
       imagePath,
       Buffer.from(imageBase64, 'base64'),
@@ -504,6 +504,28 @@ describe('ClaudeCodeAgent plan mode', () => {
     ]);
     expect(starts[0]?.allowedTools).not.toBe(source);
     expect(sdkMock.query).not.toHaveBeenCalled();
+    await handle.close();
+  });
+
+  it('keeps a truncated image as a path reference instead of native inline data', async () => {
+    const { handle, queryPrompt, workingDir } = await startPlanSession(false);
+    const imagePath = path.join(workingDir, 'truncated.png');
+    await fs.writeFile(
+      imagePath,
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+    const nextInput = queryPrompt[Symbol.asyncIterator]().next();
+
+    await handle.send({
+      type: 'user',
+      content: [
+        { type: 'text', text: 'Inspect this image.' },
+        { type: 'image', path: imagePath, mimeType: 'image/png' },
+      ],
+    });
+
+    const sdkInput = (await nextInput).value;
+    expect(sdkInput?.message?.content).toBe(`@"${imagePath}" Inspect this image.`);
     await handle.close();
   });
 

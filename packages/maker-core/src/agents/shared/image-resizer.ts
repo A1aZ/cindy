@@ -83,6 +83,8 @@ const DEFAULTS = {
   cacheVersion: 'v1',
 };
 
+const VALIDATION_MAX_INPUT_PIXELS = 100_000_000;
+
 interface QueueTask {
   run: () => Promise<void>;
 }
@@ -178,6 +180,54 @@ export class ImageResizer {
     });
     this.inflight.set(key, task);
     return task;
+  }
+
+  /**
+   * Fully decode an image before it is embedded as model-native base64 input.
+   * Magic bytes identify a container but cannot prove that the payload is complete.
+   * Missing sharp, decode errors, and timeouts all fail closed so callers can keep
+   * the existing path-reference fallback.
+   */
+  async validate(absPath: string): Promise<boolean> {
+    if (!absPath || typeof absPath !== 'string') return false;
+    const sharp = loadSharp();
+    if (!sharp) return false;
+
+    return this.acquireSlot(async () => {
+      const work = sharp(absPath, {
+        failOn: 'error',
+        limitInputPixels: VALIDATION_MAX_INPUT_PIXELS,
+        sequentialRead: true,
+      })
+        .rotate()
+        .resize({
+          width: this.cfg.maxEdgePx,
+          height: this.cfg.maxEdgePx,
+          fit: 'inside',
+          withoutEnlargement: true,
+        })
+        .toBuffer()
+        .then(() => true)
+        .catch((error) => {
+          this.cfg.logger?.warn('image-resizer: image validation failed', {
+            absPath,
+            error: String(error),
+          });
+          return false;
+        });
+      const timeout = new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), this.cfg.timeoutMs).unref?.();
+      });
+      const result = await Promise.race([work, timeout]);
+      if (result === 'timeout') {
+        this.cfg.logger?.warn('image-resizer: image validation timeout', {
+          absPath,
+          timeoutMs: this.cfg.timeoutMs,
+        });
+        return false;
+      }
+      return result;
+    });
   }
 
   /** 内部: 跑实际的 resize, 含并发闸门 + 超时 + 错误降级。 */

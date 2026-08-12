@@ -418,6 +418,7 @@ type ClaudeSdkContentBlock =
 
 interface ClaudeInputImageResizer {
   process(absPath: string): Promise<string>;
+  validate(absPath: string): Promise<boolean>;
 }
 
 const CLAUDE_INLINE_IMAGE_MAX_ENCODED_BYTES = 5 * 1024 * 1024;
@@ -510,10 +511,13 @@ export async function toClaudeSdkContent(
     if (block.type === 'image' && readImagePathsLocally) {
       imageBlockPromises.set(
         idx,
-        imageResizer.process(block.path).then(async (finalPath) => ({
-          block: await toClaudeImageBlock(finalPath),
-          finalPath,
-        })),
+        imageResizer.process(block.path).then(async (finalPath) => {
+          const isValidImage = await imageResizer.validate(finalPath);
+          return {
+            block: isValidImage ? await toClaudeImageBlock(finalPath) : null,
+            finalPath,
+          };
+        }),
       );
     }
   });

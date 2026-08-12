@@ -9,7 +9,10 @@ import {
   type GhostManualItem,
   type InstalledGhost,
 } from '../../shared/ghost.js';
-import { readBoundedFileNoFollowWithSize } from '../utils/readBoundedFile.js';
+import {
+  isRealPathWithinRoot,
+  readBoundedFileNoFollowWithStat,
+} from '../utils/readBoundedFile.js';
 import {
   decodeGhostManualMarkdown,
   ghostManualLogicalPathForEntry,
@@ -19,12 +22,6 @@ import {
 const MANUAL_CANDIDATE_MAX_ITEMS = 32;
 const MANUAL_CANDIDATE_MAX_BYTES = 4096;
 const MANUAL_SCAN_MAX_ENTRIES = 512;
-
-function isWithinRoot(realPath: string, realRoot: string): boolean {
-  if (realPath === realRoot) return true;
-  const rootWithSep = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
-  return realPath.startsWith(rootWithSep);
-}
 
 function rootIndex(ghost: InstalledGhost): CindyGhostManualIndexItem[] {
   return (ghost.manifest.manual?.items ?? []).map(({ name, description }) => ({
@@ -61,9 +58,13 @@ async function readManualFile(
   realUnitRoot: string,
 ): Promise<{ ok: true; content: string } | { ok: false }> {
   try {
-    const read = await readBoundedFileNoFollowWithSize(absolutePath, GHOST_MANUAL_MD_MAX_BYTES, {
-      containWithin: realUnitRoot,
-    });
+    const read = await readBoundedFileNoFollowWithStat(
+      absolutePath,
+      GHOST_MANUAL_MD_MAX_BYTES,
+      {
+        containWithin: realUnitRoot,
+      },
+    );
     if (read === null || read.bytes.byteLength !== read.expectedSize) return { ok: false };
     const decoded = decodeGhostManualMarkdown(read.bytes);
     return decoded.ok ? decoded : { ok: false };
@@ -185,11 +186,38 @@ async function resolveUnitRoot(
       fs.promises.realpath(ghost.dir),
       fs.promises.realpath(unitRoot),
     ]);
-    if (!isWithinRoot(realUnitRoot, realGhostRoot)) return null;
+    if (!isRealPathWithinRoot(realUnitRoot, realGhostRoot)) return null;
     return { unitRoot, realUnitRoot };
   } catch {
     return null;
   }
+}
+
+async function resolveManualEntry(
+  ghost: InstalledGhost,
+  item: GhostManualItem,
+): Promise<
+  | { ok: true; unitRoot: string; realUnitRoot: string; content: string }
+  | { ok: false; result: CindyGhostManualResult }
+> {
+  const roots = await resolveUnitRoot(ghost, item);
+  if (!roots) {
+    return {
+      ok: false,
+      result: unavailable('插件声明的手册不可用；请更新或重装插件。'),
+    };
+  }
+  const entry = await readManualFile(
+    path.join(roots.unitRoot, GHOST_MANUAL_ENTRY_FILE),
+    roots.realUnitRoot,
+  );
+  if (!entry.ok) {
+    return {
+      ok: false,
+      result: unavailable('插件声明的手册入口不可用；请更新或重装插件。'),
+    };
+  }
+  return { ok: true, ...roots, content: entry.content };
 }
 
 async function pathNotFoundWithUnitCandidates(
@@ -249,49 +277,35 @@ export async function readInstalledGhostManual(
     if (!item) {
       return pathNotFound('手册路径不合法；请从返回索引选择可用路径。', index);
     }
-    const roots = await resolveUnitRoot(ghost, item);
-    if (!roots) return unavailable('插件声明的手册不可用；请更新或重装插件。');
-    const entry = await readManualFile(
-      path.join(roots.unitRoot, GHOST_MANUAL_ENTRY_FILE),
-      roots.realUnitRoot,
-    );
-    if (!entry.ok) return unavailable('插件声明的手册入口不可用；请更新或重装插件。');
+    const resolved = await resolveManualEntry(ghost, item);
+    if (!resolved.ok) return resolved.result;
     return pathNotFoundWithUnitCandidates(
       '手册路径不合法；请从返回候选选择可用路径。',
       item,
-      roots.unitRoot,
-      roots.realUnitRoot,
+      resolved.unitRoot,
+      resolved.realUnitRoot,
     );
   }
   const item = ghost.manifest.manual?.items.find((candidate) => candidate.name === segments[0]);
   if (!item) {
     return pathNotFound('未找到该手册单元；请从返回索引选择可用路径。', index);
   }
-  const roots = await resolveUnitRoot(ghost, item);
-  if (!roots) {
-    return unavailable('插件声明的手册不可用；请更新或重装插件。');
-  }
-  const entry = await readManualFile(
-    path.join(roots.unitRoot, GHOST_MANUAL_ENTRY_FILE),
-    roots.realUnitRoot,
-  );
-  if (!entry.ok) {
-    return unavailable('插件声明的手册入口不可用；请更新或重装插件。');
-  }
+  const resolved = await resolveManualEntry(ghost, item);
+  if (!resolved.ok) return resolved.result;
   const relativeFile =
     segments.length === 1 ? GHOST_MANUAL_ENTRY_FILE : segments.slice(1).join('/');
   if (relativeFile === GHOST_MANUAL_ENTRY_FILE) {
-    return { ok: true, manual: [], content: entry.content };
+    return { ok: true, manual: [], content: resolved.content };
   }
   if (ghostManualLogicalPathForEntry(item.name, relativeFile, 'file') === null) {
     return pathNotFoundWithUnitCandidates(
       '手册路径未命中 Markdown 文件；请从返回候选选择。',
       item,
-      roots.unitRoot,
-      roots.realUnitRoot,
+      resolved.unitRoot,
+      resolved.realUnitRoot,
     );
   }
-  const parentState = await classifyRelativeParents(roots.unitRoot, relativeFile);
+  const parentState = await classifyRelativeParents(resolved.unitRoot, relativeFile);
   if (parentState === 'unavailable') {
     return unavailable('插件声明的手册文件不可用；请更新或重装插件。');
   }
@@ -299,11 +313,11 @@ export async function readInstalledGhostManual(
     return pathNotFoundWithUnitCandidates(
       '未找到该手册文件；请从返回候选选择。',
       item,
-      roots.unitRoot,
-      roots.realUnitRoot,
+      resolved.unitRoot,
+      resolved.realUnitRoot,
     );
   }
-  const absolutePath = path.join(roots.unitRoot, ...relativeFile.split('/'));
+  const absolutePath = path.join(resolved.unitRoot, ...relativeFile.split('/'));
   let exists: fs.Stats;
   try {
     exists = await fs.promises.lstat(absolutePath);
@@ -314,8 +328,8 @@ export async function readInstalledGhostManual(
     return pathNotFoundWithUnitCandidates(
       '未找到该手册文件；请从返回候选选择。',
       item,
-      roots.unitRoot,
-      roots.realUnitRoot,
+      resolved.unitRoot,
+      resolved.realUnitRoot,
     );
   }
   if (exists.isSymbolicLink()) {
@@ -325,14 +339,14 @@ export async function readInstalledGhostManual(
     return pathNotFoundWithUnitCandidates(
       '手册路径未命中 Markdown 文件；请从返回候选选择。',
       item,
-      roots.unitRoot,
-      roots.realUnitRoot,
+      resolved.unitRoot,
+      resolved.realUnitRoot,
     );
   }
   if (!exists.isFile()) {
     return unavailable('插件声明的手册文件不可用；请更新或重装插件。');
   }
-  const read = await readManualFile(absolutePath, roots.realUnitRoot);
+  const read = await readManualFile(absolutePath, resolved.realUnitRoot);
   if (!read.ok) {
     return unavailable('插件声明的手册文件不可用；请更新或重装插件。');
   }

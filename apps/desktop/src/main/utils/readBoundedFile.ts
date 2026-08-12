@@ -77,7 +77,7 @@ export class BoundedFileReadChangedError extends Error {
 }
 
 /** realpath 产物是否落在同为 realpath 产物的根内(含根本身)。 */
-function isWithinRoot(realFilePath: string, realRoot: string): boolean {
+export function isRealPathWithinRoot(realFilePath: string, realRoot: string): boolean {
   if (realFilePath === realRoot) return true;
   const rootWithSep = realRoot.endsWith(path.sep) ? realRoot : `${realRoot}${path.sep}`;
   return realFilePath.startsWith(rootWithSep);
@@ -135,7 +135,7 @@ async function verifyStillWithinRoot(
       fs.promises.realpath(filePath),
     ]);
     if (!sameInode(pathStat, handleStat)) return false;
-    return isWithinRoot(realFilePath, realRoot);
+    return isRealPathWithinRoot(realFilePath, realRoot);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
@@ -220,17 +220,6 @@ export async function readBoundedFileNoFollowWithStat(
   }
 }
 
-/**
- * Manual 校验使用的兼容入口：保留同句柄 stat/稳定性复核，同时暴露读取前长度。
- */
-export async function readBoundedFileNoFollowWithSize(
-  filePath: string,
-  maxBytes: number,
-  options?: ReadBoundedFileOptions,
-): Promise<BoundedFileRead | null> {
-  return readBoundedFileNoFollowWithStat(filePath, maxBytes, options);
-}
-
 export async function readBoundedFileNoFollow(
   filePath: string,
   maxBytes: number,
@@ -292,7 +281,7 @@ export function readBoundedFileNoFollowSync(
         const pathStat = fs.statSync(filePath, { bigint: true });
         const realFilePath = fs.realpathSync(filePath);
         if (!sameInode(pathStat, stat)) return null;
-        if (!isWithinRoot(realFilePath, options.containWithin)) return null;
+        if (!isRealPathWithinRoot(realFilePath, options.containWithin)) return null;
       } catch {
         return null;
       }

@@ -87,6 +87,8 @@ import { createLogger } from '../logger.js';
 
 const log = createLogger('mcp/cindy');
 const MAX_FORGE_ICON_SOURCE_BYTES = 25 * 1024 * 1024;
+const GHOST_NO_TOOLS_MESSAGE =
+  '该插件未声明任何可供调用的工具;不要重试,改用其它方式完成。';
 
 const convertForgeIconToPng = createForgeIconConverter({
   fork: forkForgeIconConversionHost,
@@ -800,6 +802,10 @@ async function grantAttachmentUrls(params: {
   );
 }
 
+function ghostHasTools(ghost: InstalledGhost): boolean {
+  return (ghost.manifest.tools?.length ?? 0) > 0;
+}
+
 function visibleChipGhosts(workdir: string | null): InstalledGhost[] {
   return getGhostManager()
     .list()
@@ -808,7 +814,7 @@ function visibleChipGhosts(workdir: string | null): InstalledGhost[] {
         ghost.enabled &&
         isGhostAvailableForActiveSession(ghost.manifest.id) &&
         ghost.manifest.kind === 'chip' &&
-        (ghost.manifest.tools?.length ?? 0) > 0 &&
+        ghostHasTools(ghost) &&
         !isGhostDisabledForWorkdir(ghost.manifest.id, workdir),
     );
 }
@@ -936,7 +942,7 @@ export function getCindyGhostsMcpDeps(
       return {
         ok: false,
         errorCode: 'GHOST_NOT_FOUND',
-        message: '该插件未声明任何可供调用的工具;不要重试,改用其它方式完成。',
+        message: GHOST_NO_TOOLS_MESSAGE,
       };
     },
     async readGhostManual({ ghostId, path: manualPath }) {
@@ -951,13 +957,13 @@ export function getCindyGhostsMcpDeps(
           message: visibility.message,
         };
       }
-      if ((visibility.ghost.manifest.tools?.length ?? 0) === 0) {
+      if (!ghostHasTools(visibility.ghost)) {
         return {
           ok: false,
           manual: [],
           content: '',
           errorCode: 'GHOST_NOT_FOUND',
-          message: '该插件未声明任何可供调用的工具;不要重试,改用其它方式完成。',
+          message: GHOST_NO_TOOLS_MESSAGE,
         };
       }
       return readInstalledGhostManual(visibility.ghost, manualPath);

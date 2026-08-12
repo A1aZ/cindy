@@ -26,11 +26,7 @@ import {
 } from 'react';
 
 import type { PrStatusResult, SessionPrRef } from '@/lib/gitContext.types';
-import {
-  prStatusKey,
-  MAX_STATUS_QUERIES,
-  PR_STATUS_REFRESH_INTERVAL_MS,
-} from '@/hooks/useSessionGitContext';
+import { prStatusKey, MAX_STATUS_QUERIES, PR_STATUS_REFRESH_INTERVAL_MS } from '@/lib/prStatus';
 import { useAuth } from '@/contexts/AuthContext';
 import { createLogger } from '@/lib/logger';
 
@@ -107,14 +103,29 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   const remoteRefsInFlight = useRef(new Set<string>());
   const remoteRefsFetchedAt = useRef(new Map<string, number>());
   const remoteDeviceBySession = useRef(new Map<string, string>());
+  // 正在展示 PR 信息的会话(sessionId → {deviceId?, count})。顶栏(打开的会话)
+  // 与侧栏行(勾选 pr)都注册到这里;引用计数支持同一会话多处并存。refs 异步
+  // 到位(全量加载 / 远程补拉 / 引用变化推送)后,对注册中的会话立即补状态查询。
+  const prConsumers = useRef(new Map<string, { deviceId?: string; count: number }>());
+
+  // owner 边界判定:首挂载**不清**——React 子 effect 先于父 effect 运行,行组件的
+  // 注册与远程簿记(remoteDeviceBySession 等)此时已写入,首挂载清空会把它们连同
+  // 全量加载的合并保护一起打掉(实测:状态查询错落到本地路径)。只有 owner 真正
+  // 切换(上一个值存在且不同)才需要丢弃上一账号的缓存。
+  const prevOwnerRef = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
-    // owner 切换边界:先清掉上一 owner 的缓存,无 owner 时保持空、不发 IPC。
-    setRefsBySession(new Map());
-    setStatuses(new Map());
-    remoteRefsInFlight.current.clear();
-    remoteRefsFetchedAt.current.clear();
-    remoteDeviceBySession.current.clear();
+    const prevOwner = prevOwnerRef.current;
+    prevOwnerRef.current = dataOwnerId;
+    if (prevOwner !== undefined && prevOwner !== dataOwnerId) {
+      // owner 切换边界:清掉上一 owner 的缓存与远程簿记(prConsumers 保留——
+      // 行组件仍挂着,新 owner 下由周期刷新按注册表重建缓存)。
+      setRefsBySession(new Map());
+      setStatuses(new Map());
+      remoteRefsInFlight.current.clear();
+      remoteRefsFetchedAt.current.clear();
+      remoteDeviceBySession.current.clear();
+    }
     if (dataOwnerId === null) return;
 
     let cancelled = false;
@@ -134,7 +145,22 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
           scheduleRetry();
           return;
         }
-        setRefsBySession(groupBySession(rows));
+        // 合并而非整体替换:listAllPrRefs 只覆盖本地会话;远程(device-link)会话
+        // 的条目可能已先一步拉到,整体替换会把它们冲掉(启动时序竞态)。
+        const grouped = groupBySession(rows);
+        setRefsBySession((prev) => {
+          const next = new Map(grouped);
+          for (const [sid, refs] of prev) {
+            if (remoteDeviceBySession.current.has(sid) && !next.has(sid)) next.set(sid, refs);
+          }
+          return next;
+        });
+        // 已注册消费者(顶栏/侧栏正在展示的会话)拿到引用后立即补状态,
+        // 不等 90s 周期——覆盖「先注册、后加载完成」的启动时序。
+        for (const [sid] of prConsumers.current) {
+          const refs = grouped.get(sid);
+          if (refs) fetchStatusesForRefs(sid, refs);
+        }
       } catch (err) {
         log.warn('pr refs load failed, will retry', String(err));
         scheduleRetry();
@@ -153,6 +179,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
             else next.delete(data.sessionId);
             return next;
           });
+          // 该会话有消费者在展示(顶栏/侧栏徽标)→ 引用变化后立即刷状态,
+          // 不等 90s 周期(对齐顶栏旧行为:引用变化即时补状态)。
+          if (refs.length > 0 && prConsumers.current.has(data.sessionId)) {
+            fetchStatusesForRefs(data.sessionId, refs);
+          }
         } catch (err) {
           log.warn('pr refs refresh failed', String(err));
         }
@@ -166,24 +197,29 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     };
   }, [dataOwnerId]);
 
-  // 回调身份稳定(空闭包依赖):refs 经 refsRef 读,statuses 经函数式 setState 写。
-  // 远程会话(remoteDeviceBySession 命中)状态改走 device-link 通道——被控端持有
-  // gh token,且 main 侧按该会话已提取的引用过滤查询(git-context/ipc.ts 的
-  // fail-closed 逻辑),与聊天顶栏同一条安全路径。
-  const fetchStatusesForSession = useRef((sessionId: string) => {
-    const refs = refsRef.current.get(sessionId)?.slice(0, MAX_STATUS_QUERIES);
-    if (!refs || refs.length === 0) return;
+  // 回调身份稳定(空闭包依赖):refs 显式传入或经 refsRef 读,statuses 经函数式
+  // setState 写。远程会话(remoteDeviceBySession 命中)状态改走 device-link 通道
+  // ——被控端持有 gh token,且 main 侧按该会话已提取的引用过滤查询
+  // (git-context/ipc.ts 的 fail-closed 逻辑),与聊天顶栏同一条安全路径。
+  const fetchStatusesForRefs = useRef((sessionId: string, refsInput: readonly SessionPrRef[]) => {
+    const refs = refsInput.slice(0, MAX_STATUS_QUERIES);
+    if (refs.length === 0) return;
     if (inFlightSessions.current.has(sessionId)) return;
     inFlightSessions.current.add(sessionId);
     void (async () => {
       try {
         const queries = refs.map((r) => ({ owner: r.owner, repo: r.repo, prNumber: r.prNumber }));
-        const deviceId = remoteDeviceBySession.current.get(sessionId);
+        // 远程路由的 deviceId 兜底顺序:簿记表 → 消费者注册表(owner 切换清簿记后,
+        // 注册表仍保有 deviceId,避免远程会话错落到本机查询)。
+        const deviceId =
+          remoteDeviceBySession.current.get(sessionId) ??
+          prConsumers.current.get(sessionId)?.deviceId;
         const results = deviceId
           ? ((await window.electronAPI.deviceLink.invoke(deviceId, 'git-context:pr-status', [
               { sessionId, queries },
             ])) as PrStatusResult[])
           : await window.electronAPI.gitContext.getPrStatuses(queries);
+        if (!Array.isArray(results)) return;
         setStatuses((prev) => {
           const next = new Map(prev);
           for (const r of results) next.set(prStatusKey(r), r);
@@ -195,6 +231,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         inFlightSessions.current.delete(sessionId);
       }
     })();
+  }).current;
+
+  const fetchStatusesForSession = useRef((sessionId: string) => {
+    fetchStatusesForRefs(sessionId, refsRef.current.get(sessionId) ?? []);
   }).current;
 
   // 远程会话 PR 引用按需拉取(回调身份稳定)。结果进共享 refs 映射,渲染路径
@@ -224,6 +264,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
           else next.delete(sessionId);
           return next;
         });
+        // 该会话仍有消费者在展示 → 引用到位后立即补状态,不等 90s 周期
+        // (顶栏没有徽标挂载 effect,只读缓存,必须由这里主动触发)。
+        if (refs.length > 0 && prConsumers.current.has(sessionId)) {
+          fetchStatusesForRefs(sessionId, refs);
+        }
       } catch (err) {
         // 断链/超时:不写时间戳,下个刷新周期(或行重挂载)立即重试。
         log.warn('remote pr refs fetch failed', String(err));
@@ -232,10 +277,6 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
       }
     })();
   }).current;
-
-  // 正在展示 PR 信息的行(sessionId → {deviceId?, count}),引用计数支持同一
-  // 会话同时出现在置顶与主列表。注册即拉一次;周期/聚焦刷新遍历本表。
-  const prConsumers = useRef(new Map<string, { deviceId?: string; count: number }>());
 
   const refreshConsumer = useRef((sessionId: string, deviceId?: string) => {
     // 远程行:引用可能还没拉到(或上次失败)——先补引用,再查状态。

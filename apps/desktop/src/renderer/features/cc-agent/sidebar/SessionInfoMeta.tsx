@@ -34,7 +34,7 @@ import { cn } from '@/lib/utils';
 import type { Session } from '@/lib/ccAgent.types';
 import type { SessionPrRef } from '@/lib/gitContext.types';
 import { formatMoney, formatUsd } from '@/lib/usageFormat';
-import { prStatusKey } from '@/hooks/useSessionGitContext';
+import { prStatusKey } from '@/lib/prStatus';
 import { usePrStatuses } from '@/contexts/PrRefsContext';
 import { PR_STATUS_COLOR } from '../gitContextPrVisuals';
 import { formatSidebarTime, formatSidebarTimeAbsolute } from '../lib/formatSidebarTime';

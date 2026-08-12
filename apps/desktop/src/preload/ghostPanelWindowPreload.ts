@@ -76,8 +76,43 @@ function fanOut(channel: string): (cb: (payload: unknown) => void) => Unsub {
 const fanOutGhostsChanged = fanOut('ghosts:changed');
 const fanOutGhostRuntimeChanged = fanOut('ghosts:runtime-changed');
 const fanOutGhostPreviewMedia = fanOut('ghosts:preview-media');
-const fanOutGhostBadge = fanOut('ghosts:badge');
-const fanOutGhostUnreadSnapshot = fanOut('ghosts:unread-snapshot');
+
+function onCurrentGhostBadge(
+  cb: (payload: { ghostId: string; unread: boolean; summary?: string; at?: number }) => void,
+): Unsub {
+  const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
+    if (currentGhostPanelId === null || typeof payload !== 'object' || payload === null) return;
+    const candidate = payload as { ghostId?: unknown };
+    if (candidate.ghostId !== currentGhostPanelId) return;
+    cb(payload as { ghostId: string; unread: boolean; summary?: string; at?: number });
+  };
+  ipcRenderer.on('ghosts:badge', listener);
+  return () => ipcRenderer.removeListener('ghosts:badge', listener);
+}
+
+function onCurrentGhostUnreadSnapshot(
+  cb: (payload: { entries: { ghostId: string; summary?: string; at: number }[] }) => void,
+): Unsub {
+  const listener = (_event: Electron.IpcRendererEvent, payload: unknown): void => {
+    if (currentGhostPanelId === null || typeof payload !== 'object' || payload === null) return;
+    const entries = (payload as { entries?: unknown }).entries;
+    if (!Array.isArray(entries)) return;
+    const scoped: { ghostId: string; summary?: string; at: number }[] = [];
+    for (const entry of entries) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const candidate = entry as { ghostId?: unknown; at?: unknown; summary?: unknown };
+      if (candidate.ghostId !== currentGhostPanelId || typeof candidate.at !== 'number') continue;
+      scoped.push({
+        ghostId: currentGhostPanelId,
+        at: candidate.at,
+        ...(typeof candidate.summary === 'string' ? { summary: candidate.summary } : {}),
+      });
+    }
+    cb({ entries: scoped });
+  };
+  ipcRenderer.on('ghosts:unread-snapshot', listener);
+  return () => ipcRenderer.removeListener('ghosts:unread-snapshot', listener);
+}
 
 const appearanceSettings = ipcRenderer.sendSync(
   'appearance-settings:get-sync',
@@ -163,13 +198,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.sendSync('ghost-panel-window:get-state-sync') as GhostPanelWindowsState,
     getState: (): Promise<GhostPanelWindowsState> =>
       ipcRenderer.invoke('maker:ghost-panel-window:get-state'),
-    open: (ghostId: string): Promise<void> =>
-      ipcRenderer.invoke('maker:ghost-panel-window:open', ghostId),
+    open: (ghostId: string): Promise<void> => {
+      const error = mutationErrorForGhostPanel(ghostId);
+      if (error) return Promise.reject(error);
+      return ipcRenderer.invoke('maker:ghost-panel-window:open', ghostId);
+    },
     setDetached: (
       ghostId: string,
       detached: boolean,
-    ): Promise<GhostPanelWindowsState> =>
-      ipcRenderer.invoke('maker:ghost-panel-window:set-detached', ghostId, detached),
+    ): Promise<GhostPanelWindowsState> => {
+      const error = mutationErrorForGhostPanel(ghostId);
+      if (error) return Promise.reject(error);
+      return ipcRenderer.invoke('maker:ghost-panel-window:set-detached', ghostId, detached);
+    },
     onStateChanged: (cb: (state: GhostPanelWindowsState) => void): Unsub =>
       onPayload('maker:push:ghost-panel-window:state-changed', cb),
     rendererReady: (): Promise<void> =>
@@ -223,6 +264,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     onPreviewMedia: fanOutGhostPreviewMedia,
     /** 未读角标快照（ghostUnreadStore 首帧）。 */
     unreadSync: (): { entries: { ghostId: string; summary?: string; at: number }[] } => {
+      if (currentGhostPanelId === null) return { entries: [] };
       try {
         const result = ipcRenderer.sendSync('ghosts:unread') as { entries?: unknown } | null;
         if (!Array.isArray(result?.entries)) return { entries: [] };
@@ -230,7 +272,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
         for (const raw of result.entries) {
           if (typeof raw !== 'object' || raw === null) continue;
           const { ghostId, summary, at } = raw as Record<string, unknown>;
-          if (typeof ghostId !== 'string' || typeof at !== 'number') continue;
+          if (ghostId !== currentGhostPanelId || typeof at !== 'number') continue;
           entries.push({ ghostId, ...(typeof summary === 'string' ? { summary } : {}), at });
         }
         return { entries };
@@ -239,11 +281,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       }
     },
     /** 熄灭未读（打开面板 = 已读）。 */
-    clearUnread: (id: string, seenAt?: number): Promise<{ ok: boolean }> =>
-      ipcRenderer.invoke('ghosts:clear-unread', id, seenAt),
+    clearUnread: (id: string, seenAt?: number): Promise<{ ok: boolean }> => {
+      const error = mutationErrorForGhostPanel(id);
+      if (error) return Promise.reject(error);
+      return ipcRenderer.invoke('ghosts:clear-unread', id, seenAt);
+    },
     /** 未读角标变化。 */
-    onBadge: fanOutGhostBadge,
+    onBadge: onCurrentGhostBadge,
     /** 未读快照变化（ghostUnreadStore 增量更新）。 */
-    onUnreadSnapshot: fanOutGhostUnreadSnapshot,
+    onUnreadSnapshot: onCurrentGhostUnreadSnapshot,
   },
 });

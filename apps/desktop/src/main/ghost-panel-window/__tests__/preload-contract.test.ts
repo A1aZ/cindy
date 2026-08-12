@@ -87,8 +87,19 @@ describe('ghost panel preload contract', () => {
   it('guards plugin mutations to the current detached panel id', () => {
     expect(source).toContain("new URLSearchParams(window.location.search).get('ghostPanelWindow')");
     expect(source).toContain('mutationErrorForGhostPanel(id)');
+    expect(source).toContain("return ipcRenderer.invoke('maker:ghost-panel-window:open', ghostId);");
+    expect(source).toContain("return ipcRenderer.invoke('maker:ghost-panel-window:set-detached', ghostId, detached);");
     expect(source).toContain("ipcRenderer.invoke('ghosts:reload', id)");
     expect(source).toContain("ipcRenderer.invoke('ghosts:set-enabled', id, enabled)");
+    expect(source).toContain("return ipcRenderer.invoke('ghosts:clear-unread', id, seenAt);");
+  });
+
+  it('scopes unread snapshots and badge events to the current detached panel', () => {
+    expect(source).toContain('onCurrentGhostBadge');
+    expect(source).toContain('onCurrentGhostUnreadSnapshot');
+    expect(source).toContain('if (ghostId !== currentGhostPanelId || typeof at !== \'number\') continue;');
+    expect(source).toContain('if (candidate.ghostId !== currentGhostPanelId) return;');
+    expect(source).toContain('if (candidate.ghostId !== currentGhostPanelId || typeof candidate.at !== \'number\') continue;');
   });
 
   it('uses shared lifecycle channel constants', () => {

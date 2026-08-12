@@ -1361,7 +1361,7 @@ function resolveIOSSimulatorRendererWindow(
 ): BrowserWindow | null {
   const owner = BrowserWindow.fromWebContents(target);
   if (!owner || !isTrustedAppRendererWindow(owner)) return null;
-  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const sidebarTarget = rsbWindowController.getVisibleSidebarWebContents();
   const isSidebar = sidebarTarget === target;
   if (!isSidebar && !isMainShellWindowUrl(owner.webContents.getURL())) return null;
   return owner;
@@ -1373,7 +1373,7 @@ configureIOSSimulatorRendererTargets((preferredTarget) => {
     mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()
       ? mainWindowRef.webContents
       : null;
-  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const sidebarTarget = rsbWindowController.getVisibleSidebarWebContents();
   const belongsToMainFamily =
     !preferredTarget || preferredTarget === mainTarget || preferredTarget === sidebarTarget;
   if (!belongsToMainFamily) {

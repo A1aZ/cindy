@@ -418,6 +418,19 @@ export class RsbWindowController {
       : null;
   }
 
+  /**
+   * Return the detached sidebar renderer only while it is visible.
+   *
+   * The cached hidden renderer remains a valid IPC sender (for lifecycle
+   * handshakes and preload event guards), but it must not stay in capability
+   * target lists while the user cannot see or interact with it.
+   */
+  getVisibleSidebarWebContents(): WebContents | null {
+    return this.visible && this.winRef && !this.winRef.isDestroyed()
+      ? this.winRef.webContents
+      : null;
+  }
+
   /** 窗口存在 + 可见(隐藏复用模型中隐藏不算 open)。 */
   isOpen(): boolean {
     return (

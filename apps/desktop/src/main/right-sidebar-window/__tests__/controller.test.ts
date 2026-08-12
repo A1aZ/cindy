@@ -670,6 +670,24 @@ describe('getHostWebContents', () => {
   });
 });
 
+describe('getVisibleSidebarWebContents', () => {
+  it('returns null for a cached hidden window while keeping the IPC sender available', () => {
+    const h = makeHarness({ detached: true });
+    h.controller.prewarm();
+    const win = h.windows[0];
+    markReady(h.controller, win);
+
+    expect(h.controller.getSidebarWebContents()).toBe(win.webContents);
+    expect(h.controller.getVisibleSidebarWebContents()).toBeNull();
+
+    h.controller.open({ userInitiated: false });
+    expect(h.controller.getVisibleSidebarWebContents()).toBe(win.webContents);
+
+    h.controller.close();
+    expect(h.controller.getVisibleSidebarWebContents()).toBeNull();
+  });
+});
+
 // ═══════════════════════════════════════════════════════════════════════
 // setContext / routeCommand
 // ═══════════════════════════════════════════════════════════════════════

@@ -91,6 +91,8 @@ describe("cindy_helper MCP server", () => {
         message: "Continue the existing task",
         dispatcherSessionId: "dispatcher-session",
         title: undefined,
+        useWorktree: undefined,
+        workingDir: undefined,
       });
     } finally {
       await client.close();

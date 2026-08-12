@@ -41,7 +41,7 @@ createRoot(rootElement).render(
   <TopLevelErrorBoundary>
     <LocaleProvider>
       <ConfirmDialogProvider>
-        <AuthProvider>
+        <AuthProvider enableSessionExpiredPrompt={false}>
           <SidebarWindowLayout />
         </AuthProvider>
       </ConfirmDialogProvider>

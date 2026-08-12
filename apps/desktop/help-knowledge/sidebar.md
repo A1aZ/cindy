@@ -4,21 +4,21 @@ title: Finding and organizing sessions
 summary: Browse, group, filter, sort, search, and pin sessions or projects in the left sidebar.
 ---
 
-The left sidebar lists your sessions. It's the main way to navigate and organize. The **Organize sidebar** menu (the sliders icon on the **All sessions** header) holds grouping, sorting, filters, and display options.
+The left sidebar lists your sessions. It's the main way to navigate and organize. The **Organize sidebar** menu holds grouping, sorting, filters, and display options — open it from the sliders icon on the **All sessions** header, or right-click any blank area of the sidebar.
 
 **Grouping (independent checkboxes, freely combinable):**
 
 - **Group by project** (default on) — sessions with a project fold into project rows; project rows and stray chats compete for position on the same timeline (a chat active two minutes ago sorts above a project last touched yesterday). Turn it off for a flat list.
 - **Group by device** (default on) — only appears when a remote device is connected; splits the list into device sections (this device first), each with a collapsible header showing the device name and online state. When the last remote device disconnects, the option disappears and the effect is lifted.
-- **Group chats together** (default off) — collects projectless sessions into one collapsible **Chat** group instead of interleaving them.
+- **Group chats together** (default on) — collects projectless sessions into one collapsible **Chat** group instead of interleaving them. With device grouping on, each device section gets its own Chat group with independent collapse state.
 - Grouping **by date** has been removed.
 
 **Sorting:**
 
-- **Recent first** (default) / **Oldest first** — one activity timeline for the whole list.
-- **Priority** — sessions waiting for your input float to the top, then running sessions, then the rest by recency. A project row inherits the highest priority among its sessions.
-- **Manual** — drag project rows to set a persistent custom order. Manual order covers **project rows only**; stray chats and the Chat group always follow by recency. Dragging is only available while Manual is selected.
-- Sorting **alphabetically** has been removed.
+- **By time** (default) — one activity timeline for the whole list, most recent first. There is no oldest-first option.
+- **Priority** — sessions with an unread badge (finished unread, waiting for your reply, or errored) float to the top, then running sessions, then the rest by time. A project row inherits the highest priority among its sessions. Unread state is in-memory: after a restart most sessions fall back to time order.
+- **Manual** — drag project rows to set a persistent custom order. Manual order covers **project rows only**; stray chats and the Chat group always follow by recency. Dragging a project in any other sort mode automatically switches to Manual.
+- Sorting **alphabetically** and **oldest first** have been removed.
 
 **Filters (one row that opens a submenu):**
 
@@ -30,8 +30,8 @@ The left sidebar lists your sessions. It's the main way to navigate and organize
 
 **Display:**
 
-- The main list has **Text** (compact single row) and **List** (two-line row with a preview) styles — List is the default. This is separate from the Pinned section's style.
-- **Session info** — choose what shows at the right edge of each row: **Time** (default), **PR status** (a monospace `#number` colored by PR state — green open / gray merged / light-gray draft / red closed; sessions without a PR show nothing), **Tokens** (compact total like `1.4M`), and **Cost** (`$`/`¥` by currency). Multi-select; selections join with a `·` separator.
+- The main list has **Text** (compact single row) and **List** (two-line row with a preview) styles. Fresh installs default to List; installs upgraded from an older version keep Text so the sidebar looks the way it did before the upgrade. This is separate from the Pinned section's style.
+- **Session info** — choose what shows at the right edge of each row: **Time** (default), **PR status** (a status icon plus a monospace `#number`; only the icon is colored — green open / gray draft / red closed / accent merged; unknown state shows a gray icon; sessions without a PR show nothing), **Tokens** (compact total like `1.4M`), and **Cost** (`$`/`¥` by currency). Multi-select; items render in the order you selected them.
 
 **Pinning:**
 

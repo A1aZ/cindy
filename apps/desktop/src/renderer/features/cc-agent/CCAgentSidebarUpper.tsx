@@ -1474,20 +1474,18 @@ function ExpandedView({
   );
 
   const visiblePinnedSessions = useMemo(() => {
-    // 置顶段用 allGroups.pinned(未经"最近活跃 N 天"筛选)——置顶内容不受活跃时间过滤影响,
-    // 久未活跃的置顶会话也始终显示。vendor / project 过滤仍照常生效。
-    return allGroups.pinned.filter((session) => {
-      if (vendorPredicate && !vendorPredicate(session)) return false;
-      const allowedProjects = filter.projectsAsSet;
-      if (allowedProjects === null) return true;
-      if (session.workspaceKind === 'dialogue') return false;
-      const projectKey = projectIdentityKeyForSession(session);
-      return projectKey != null && allowedProjects.has(projectKey);
-    });
-  }, [allGroups.pinned, vendorPredicate, filter.projectsAsSet]);
+    // 置顶段用 allGroups.pinned(未经"最近活跃 N 天"筛选)。
+    // **筛选一律不作用于置顶区**(设计文档 §3.3 定稿;2026-08-12 用户重申):
+    // 状态 / 项目 / Agent / 最近活跃四个维度都不过滤置顶——用户主动置顶就是
+    // 「我要一直看见它」,被筛选条件挑走会让人以为置顶丢了。置顶区只跟随设备范围
+    // (scopedSidebarSessions 之外的设备切换在上游 allGroups 已收窄)。
+    return allGroups.pinned;
+  }, [allGroups.pinned]);
 
   const visiblePinnedProjects = useMemo(() => {
-    const allowedProjects = filter.projectsAsSet;
+    // 同上:**筛选不作用于置顶区**——项目 / Agent 维度都不过滤置顶项目及其会话
+    // (设计文档 §3.3 定稿;2026-08-12 用户重申)。仍然尊重「从侧栏移除项目」,
+    // 那不是筛选而是用户对该项目的显式隐藏。
     return allProjectGroups.projects.flatMap((project) => {
       if (
         projectKeyComparisonSetHas(hiddenProjectComparisonKeys, project.projectKey, localPlatform)
@@ -1495,29 +1493,17 @@ function ExpandedView({
         return [];
       }
       if (!pinnedProjectKeys.has(project.projectKey)) return [];
-      if (allowedProjects !== null && !allowedProjects.has(project.projectKey)) return [];
-
-      const matchingSessions = vendorPredicate
-        ? project.sessions.filter(vendorPredicate)
-        : project.sessions;
-      if (vendorPredicate && matchingSessions.length === 0) return [];
 
       return [
         {
           project,
           // Individually pinned conversations stay as their own siblings in the
           // Pinned section; the project container only shows the remainder.
-          displaySessions: matchingSessions.filter((session) => session.pinnedAt == null),
+          displaySessions: project.sessions.filter((session) => session.pinnedAt == null),
         },
       ];
     });
-  }, [
-    allProjectGroups.projects,
-    hiddenProjectComparisonKeys,
-    pinnedProjectKeys,
-    filter.projectsAsSet,
-    vendorPredicate,
-  ]);
+  }, [allProjectGroups.projects, hiddenProjectComparisonKeys, localPlatform, pinnedProjectKeys]);
 
   const visiblePinnedEntries = useMemo<PinnedSidebarEntry[]>(() => {
     const entries: PinnedSidebarEntry[] = [

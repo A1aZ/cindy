@@ -85,6 +85,7 @@ import {
   deriveAvailableModels,
   refreshCatalogDerivedModels,
   resolvePiRuntimeModelDescriptor,
+  resolvePiGatewayDescriptorProviderId,
   resolveVerifiedContextWindow,
 } from './catalog-to-descriptors.js';
 import { buildPiAgent } from './pi-host.js';
@@ -1608,12 +1609,15 @@ export function getMaker(): Maker {
       },
       resolvePiRuntimeModelDescriptor: (providerId, modelId) =>
         resolvePiRuntimeModelDescriptor(getDesktopSelectableCatalog(), providerId, modelId),
-      resolvePiGatewayModelDescriptor: (providerId, modelId) =>
-        resolvePiRuntimeModelDescriptor(
+      resolvePiGatewayModelDescriptor: (providerId, modelId) => {
+        // `cindy` / null 是 Pi 的默认 gateway 路由；其 wire 由 v3 XD runtime plan
+        // 决定，因此描述符也必须锁定 XD，不能让复合 `cindy` 按目录顺序命中同 id 订阅模型。
+        return resolvePiRuntimeModelDescriptor(
           getDesktopSelectableCatalog(),
-          providerId?.trim() || 'cindy',
+          resolvePiGatewayDescriptorProviderId(providerId),
           modelId,
-        ),
+        );
+      },
       mcpProviders: piMcpProviders,
       makerMemory: makerMemoryManager,
       getGhostRosterPrompt,

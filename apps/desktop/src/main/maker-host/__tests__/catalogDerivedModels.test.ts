@@ -19,6 +19,7 @@ import type { ModelDescriptor } from '@cindy/maker-core';
 import {
   deriveAvailableModels,
   refreshCatalogDerivedModels,
+  resolvePiGatewayDescriptorProviderId,
   resolvePiRuntimeModelDescriptor,
   resolveVerifiedContextWindow,
 } from '../catalog-to-descriptors.js';
@@ -174,6 +175,34 @@ describe('deriveAvailableModels — dynamic-first catalog contract', () => {
     expect(resolvePiRuntimeModelDescriptor(catalog, 'cindy', 'xai/grok-4.5')).toMatchObject({
       efforts: ['minimal', 'low', 'medium', 'high'],
       defaultEffort: 'high',
+    });
+  });
+
+  it('resolves an explicit XD descriptor instead of a same-id subscription descriptor', () => {
+    const catalog = structuredClone(BUNDLED_CATALOG);
+    const openai = catalog.providers.find((provider) => provider.id === 'openai');
+    const xd = catalog.providers.find((provider) => provider.id === 'xd');
+    expect(openai).toBeDefined();
+    expect(xd).toBeDefined();
+    openai!.models.pi = [model('shared-default-route', {
+      name: 'Subscription Shared',
+      contextWindow: 128_000,
+    })];
+    xd!.models.pi = [model('shared-default-route', {
+      name: 'XD Shared',
+      contextWindow: 200_000,
+    })];
+
+    expect(resolvePiGatewayDescriptorProviderId(null)).toBe('xd');
+    expect(resolvePiGatewayDescriptorProviderId('cindy')).toBe('xd');
+    expect(resolvePiGatewayDescriptorProviderId('openai')).toBe('openai');
+    expect(resolvePiRuntimeModelDescriptor(
+      catalog,
+      resolvePiGatewayDescriptorProviderId(null),
+      'shared-default-route',
+    )).toMatchObject({
+      displayName: 'XD Shared',
+      contextWindow: 200_000,
     });
   });
 

@@ -328,10 +328,7 @@ function isNewSessionDefaultForAgent(
   model: NewSessionDefaultModel,
   agentKind: NewSessionAgentKind,
 ): boolean {
-  const markers: readonly ('claude-code' | 'codex' | 'pi')[] = agentKind === 'pi'
-    ? ['pi', 'claude-code']
-    : [agentKind];
-  return model.newSessionDefault?.some((marker) => markers.includes(marker)) === true;
+  return model.newSessionDefault?.includes(agentKind) === true;
 }
 
 function pickRegionalNewSessionDefault<T extends NewSessionDefaultModel>(

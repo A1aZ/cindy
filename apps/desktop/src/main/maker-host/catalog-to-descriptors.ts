@@ -202,6 +202,14 @@ export function resolvePiRuntimeModelDescriptor(
   return null;
 }
 
+/** Pi 默认 gateway 的 v3 transport 来自 XD；描述符必须使用同一来源。 */
+export function resolvePiGatewayDescriptorProviderId(
+  providerId: string | null | undefined,
+): string {
+  const source = providerId?.trim();
+  return !source || source === 'cindy' ? 'xd' : source;
+}
+
 /**
  * 解析某条**具体路由**上该模型已核实的上下文窗口上限；没有则返回 null。
  *

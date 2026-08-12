@@ -542,10 +542,10 @@ describe('pickAgentDefaultRuntime', () => {
       modelRows: rows,
       currentEffort: 'high',
       catalogReady: true,
-    })).toEqual({ agentKind: 'pi', model: 'cc-regional', effort: 'medium', providerId: 'prov-cc-regional' });
+    })).toEqual({ agentKind: 'pi', model: 'pi-regional', effort: 'high', providerId: 'prov-pi-regional' });
   });
 
-  it('uses a Pi-only regional default when no legacy claude-code marker is present', () => {
+  it('uses only the explicit Pi regional default marker', () => {
     expect(pickAgentDefaultRuntime({
       agentKind: 'pi',
       sessions: [],

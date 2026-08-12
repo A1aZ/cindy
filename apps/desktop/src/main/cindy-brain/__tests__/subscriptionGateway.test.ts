@@ -12,10 +12,14 @@ import {
   GhostActivityTracker,
   GhostTapPendingQueue,
   GhostTurnOriginTracker,
+  buildGhostCurrentSessionSnapshot,
+  createGhostPrimarySessionFocusTracker,
   GhostTurnTranslator,
   createGhostSessionFocusTracker,
   ghostActivityId,
   isGhostEligibleSessionRow,
+  isGhostSessionSwitchEligibleRow,
+  resolveGhostPrimarySessionId,
   normalizeTurnUsage,
   readStatusIsRunning,
   resolveGhostUserHookModel,
@@ -717,6 +721,16 @@ describe('isGhostEligibleSessionRow(订阅投递资格行级判定)', () => {
   });
 });
 
+describe('isGhostSessionSwitchEligibleRow(did-session-switched 专用资格)', () => {
+  it('只额外放行 Orca Lead，仍排除 Worker 与后台来源', () => {
+    expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: null })).toBe(true);
+    expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: 'lead' })).toBe(true);
+    expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: 'worker' })).toBe(false);
+    expect(isGhostSessionSwitchEligibleRow({ source: 'desktop', orcaRole: 'unknown' })).toBe(false);
+    expect(isGhostSessionSwitchEligibleRow({ source: 'scheduler', orcaRole: null })).toBe(false);
+  });
+});
+
 describe('createGhostSessionFocusTracker(did-session-switched 去重)', () => {
   it('真变化才发;连续同 id 不重发', () => {
     const notify = vi.fn();
@@ -736,6 +750,98 @@ describe('createGhostSessionFocusTracker(did-session-switched 去重)', () => {
     tracker.note(null); // 重复 null:不发
     tracker.note('s1'); // 切回:算一次新切换
     expect(notify.mock.calls).toEqual([['s1'], ['s1']]);
+  });
+});
+
+describe('resolveGhostPrimarySessionId', () => {
+  it('普通任务保持原 id，Worker 归一到 Lead', async () => {
+    const lookup = vi.fn(async (sessionId: string) =>
+      sessionId === 'worker-1' ? 'lead-1' : null,
+    );
+    await expect(resolveGhostPrimarySessionId('normal-1', lookup)).resolves.toBe('normal-1');
+    await expect(resolveGhostPrimarySessionId('worker-1', lookup)).resolves.toBe('lead-1');
+  });
+
+  it('查询失败时保留原任务，不让插件上下文丢失', async () => {
+    await expect(
+      resolveGhostPrimarySessionId('session-1', async () => {
+        throw new Error('db unavailable');
+      }),
+    ).resolves.toBe('session-1');
+  });
+});
+
+describe('createGhostPrimarySessionFocusTracker', () => {
+  it('同一 Lead 下的 Worker 切换只发布一次主任务', async () => {
+    const notify = vi.fn();
+    const tracker = createGhostPrimarySessionFocusTracker(
+      async () => 'lead-1',
+      notify,
+    );
+    tracker.note('worker-1');
+    await Promise.resolve();
+    tracker.note('worker-2');
+    await Promise.resolve();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith('lead-1');
+  });
+
+  it('忽略晚到的旧任务归一结果', async () => {
+    const notify = vi.fn();
+    const pending = new Map<string, (value: string) => void>();
+    const tracker = createGhostPrimarySessionFocusTracker(
+      (sessionId) =>
+        new Promise<string>((resolve) => {
+          pending.set(sessionId, resolve);
+        }),
+      notify,
+    );
+    tracker.note('worker-old');
+    tracker.note('worker-new');
+    pending.get('worker-new')?.('lead-new');
+    await Promise.resolve();
+    pending.get('worker-old')?.('lead-old');
+    await Promise.resolve();
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith('lead-new');
+  });
+});
+
+describe('buildGhostCurrentSessionSnapshot', () => {
+  it('返回宿主当前任务的标题、本地目录与只读状态', () => {
+    expect(
+      buildGhostCurrentSessionSnapshot(
+        'lead-1',
+        { title: '主任务', workingDir: 'D:/repo-from-row' },
+        {
+          workingDir: 'D:/repo-from-fs',
+          remoteHostId: null,
+          workdirIsReadOnly: false,
+        },
+      ),
+    ).toEqual({
+      sessionId: 'lead-1',
+      sessionName: '主任务',
+      workdir: 'D:/repo-from-fs',
+      workdir_is_local: true,
+      workdir_is_read_only: false,
+    });
+  });
+
+  it('快照不可读时保留任务信息，但目录权限 fail closed', () => {
+    expect(
+      buildGhostCurrentSessionSnapshot(
+        'lead-1',
+        { title: '主任务', workingDir: 'D:/repo-from-row' },
+        null,
+      ),
+    ).toEqual({
+      sessionId: 'lead-1',
+      sessionName: '主任务',
+      workdir: 'D:/repo-from-row',
+      workdir_is_local: false,
+      workdir_is_read_only: true,
+    });
   });
 });
 

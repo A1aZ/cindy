@@ -240,9 +240,10 @@ import {
   type ConnectionAudienceResolver,
 } from './connectionAudienceResolver.js';
 import { ConnectionTokenProvider, type IssuedConnectionToken } from './connectionTokenProvider.js';
-import { GhostFsSlot } from './fsSlot.js';
+import { GhostFsSlot, workdirWriteVerdict } from './fsSlot.js';
 import { getGhostGrantConfirmBridge } from './ghostGrantConfirmBridge.js';
-import { getSessionFsSnapshot } from '../localDb/ipc/sessions.js';
+import { getSessionFsSnapshot, getSessionRowSnapshot } from '../localDb/ipc/sessions.js';
+import { getTeamByWorkerSession } from '../localDb/orcaTeamStore.js';
 import { getDirDepositVault, getSaveDepositVault, isPathInsideDir } from './dirDeposit.js';
 import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import {
@@ -257,7 +258,11 @@ import {
   createGhostSessionFocusTracker,
   GhostTapPendingQueue,
   GhostTurnOriginTracker,
+  buildGhostCurrentSessionSnapshot,
+  createGhostPrimarySessionFocusTracker,
   isGhostEligibleSessionRow,
+  isGhostSessionSwitchEligibleRow,
+  resolveGhostPrimarySessionId,
   type GhostInteractionActivityKind,
   type GhostScreenResult,
   type MinimalAgentEvent,
@@ -1148,6 +1153,38 @@ export function hasPendingGhostCalls(ghostId: string): boolean {
 
 let agentSlotSingleton: GhostAgentSlot | null = null;
 
+export type GhostSessionMessageRunRequest = {
+  ghostId: string;
+  sessionId: string;
+  message: string;
+};
+
+export type GhostSessionMessageRunResult =
+  | {
+      ok: true;
+      sessionId: string;
+      disposition: 'created' | 'resumed' | 'active' | 'queued';
+    }
+  | {
+      ok: false;
+      errorCode: string;
+      message: string;
+    };
+
+export type GhostSessionMessageRunner = (
+  request: GhostSessionMessageRunRequest,
+) => Promise<GhostSessionMessageRunResult>;
+
+let ghostSessionMessageRunner: GhostSessionMessageRunner | null = null;
+const ghostSessionMessageInFlight = new Set<string>();
+const ghostSessionMessageLastSentAt = new Map<string, number>();
+const GHOST_SESSION_MESSAGE_MIN_INTERVAL_MS = 1000;
+
+/** maker-ipc 注入统一 Session 消息投递器，避免 cindy-brain 反向依赖 maker-ipc。 */
+export function setGhostSessionMessageRunner(runner: GhostSessionMessageRunner | null): void {
+  ghostSessionMessageRunner = runner;
+}
+
 /** Agent 新回合槽单例：一次性点击票、后台权限与模板替换的统一守门点。 */
 export function getGhostAgentSlot(): GhostAgentSlot {
   if (!agentSlotSingleton) {
@@ -1381,6 +1418,7 @@ export function getGhostSubscriptionGateway(): GhostSubscriptionGateway {
  */
 async function isGhostEligibleSession(
   sessionId: string,
+  scope: 'default' | 'session-switch' = 'default',
 ): Promise<
   | { outcome: 'eligible'; agentKind?: string; workdir?: string }
   | { outcome: 'ineligible' }
@@ -1401,7 +1439,11 @@ async function isGhostEligibleSession(
       .limit(1);
     const row = rows[0];
     if (!row) return { outcome: 'retry' }; // 行未落库(极早期)→ 暂时态
-    if (isGhostEligibleSessionRow(row)) {
+    const eligible =
+      scope === 'session-switch'
+        ? isGhostSessionSwitchEligibleRow(row)
+        : isGhostEligibleSessionRow(row);
+    if (eligible) {
       return {
         outcome: 'eligible',
         agentKind: row.agentKind ?? undefined,
@@ -1410,6 +1452,7 @@ async function isGhostEligibleSession(
     }
     log.debug('ghost eligibility: rejected', {
       sessionId,
+      scope,
       source: String(row.source),
       orcaRole: String(row.orcaRole),
     });
@@ -1847,16 +1890,22 @@ export function notifyGhostSessionEvent(
         (g) => g.enabled && g.manifest.subscribe?.topics?.includes('session'),
       );
       if (!hasSubscriber) return;
-      // 投递范围与 turn 事件同口径:只投用户主会话(retry 视为不投,
-      // 生命周期事件不值得重试机制)。
-      const info = await isGhostEligibleSession(data.sessionId);
+      // switched 已在焦点入口归一到 Lead；这里只用专用资格判断放行该事件，
+      // 其它事件继续保持旧 turn/hook 范围。
+      const sessionId = data.sessionId;
+      if (!sessionId) return;
+      const info = await isGhostEligibleSession(
+        sessionId,
+        kind === 'switched' ? 'session-switch' : 'default',
+      );
       if (info.outcome !== 'eligible') return;
       // switched 的调用方(renderer 路由上报)只有 sessionId,workdir 从资格
       // 查询顺手补上,与 created/archived 的载荷形状对齐。
+      const normalizedData = sessionId === data.sessionId ? data : { ...data, sessionId };
       const payload =
         data.workdir === undefined && info.workdir !== undefined
-          ? { ...data, workdir: info.workdir }
-          : data;
+          ? { ...normalizedData, workdir: info.workdir }
+          : normalizedData;
       getGhostSubscriptionGateway().publish(
         'session',
         kind === 'created'
@@ -1877,13 +1926,27 @@ export function notifyGhostSessionEvent(
  * 调,平台无关):去重后发 did-session-switched。连续同 id / 非会话页(null)
  * 不发;切走再切回算新切换(去重语义见 createGhostSessionFocusTracker)。
  */
-const ghostSessionFocusTracker = createGhostSessionFocusTracker((sessionId) =>
-  notifyGhostSessionEvent('switched', { sessionId }),
+const rawGhostSessionFocusTracker = createGhostSessionFocusTracker(() => undefined);
+const ghostSessionFocusTracker = createGhostPrimarySessionFocusTracker(
+  async (sessionId) =>
+    resolveGhostPrimarySessionId(sessionId, async (workerSessionId) => {
+      const team = await getTeamByWorkerSession(workerSessionId);
+      return team?.leadSessionId ?? null;
+    }),
+  (sessionId) => notifyGhostSessionEvent('switched', { sessionId }),
 );
 export function noteGhostSessionFocused(sessionId: string | null): void {
+  rawGhostSessionFocusTracker.note(sessionId);
   ghostSessionFocusTracker.note(sessionId);
 }
 
+async function currentGhostSessionId(): Promise<string | null> {
+  const focusedSessionId = rawGhostSessionFocusTracker.current();
+  return resolveGhostPrimarySessionId(focusedSessionId, async (sessionId) => {
+    const team = await getTeamByWorkerSession(sessionId);
+    return team?.leadSessionId ?? null;
+  });
+}
 const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
 
@@ -4741,6 +4804,130 @@ export function registerGhostIpc(): void {
     }
     // host-request = 读取宿主公开上下文;不要求卡槽,只返回构建 region,
     // 不含登录态/路径/设备信息。未知 kind 明确拒绝,避免接口悄悄扩面。
+    if (type === 'session-request') {
+      const request = payload as {
+        kind?: unknown;
+        sessionId?: unknown;
+        message?: unknown;
+      };
+      const ghost = findAvailableGhost(id);
+      if (!ghost?.enabled) throwIpcError('PERMISSION_DENIED', '插件未启用');
+
+      if (request.kind === 'get-current-session') {
+        if (!ghost.manifest.slots.includes('session-context')) {
+          throwIpcError('PERMISSION_DENIED', '插件未声明 session-context 能力');
+        }
+        const sessionId = await currentGhostSessionId();
+        if (!sessionId) {
+          return {
+            ok: true,
+            kind: 'current-session' as const,
+            sessionId: null,
+          };
+        }
+        const [row, fsSnapshot] = await Promise.all([
+          getSessionRowSnapshot(sessionId),
+          getSessionFsSnapshot(sessionId),
+        ]);
+        return {
+          ok: true,
+          kind: 'current-session' as const,
+          sessionId,
+          session: buildGhostCurrentSessionSnapshot(
+            sessionId,
+            row,
+            fsSnapshot
+              ? {
+                  workingDir: fsSnapshot.workingDir,
+                  remoteHostId: fsSnapshot.remoteHostId,
+                  workdirIsReadOnly:
+                    workdirWriteVerdict(
+                      fsSnapshot.permissionMode,
+                      fsSnapshot.planModeEnabled,
+                    ) === 'deny',
+                }
+              : null,
+          ),
+        };
+      }
+
+      if (request.kind === 'send-message') {
+        if (
+          !ghost.manifest.slots.includes('agent') ||
+          ghost.manifest.agent?.sessionMessage !== true
+        ) {
+          throwIpcError('PERMISSION_DENIED', '插件未声明当前任务消息能力');
+        }
+        if (
+          typeof request.sessionId !== 'string' ||
+          request.sessionId.trim().length === 0 ||
+          request.sessionId.length > 128
+        ) {
+          throwIpcError('INVALID_PARAMS', 'sessionId must be a non-empty string');
+        }
+        if (
+          typeof request.message !== 'string' ||
+          request.message.trim().length === 0 ||
+          request.message.length > 16_384
+        ) {
+          throwIpcError('INVALID_PARAMS', 'message must be 1-16384 characters');
+        }
+        const focusedSessionId = await currentGhostSessionId();
+        if (!focusedSessionId) {
+          return {
+            ok: false as const,
+            errorCode: 'SESSION_UNAVAILABLE' as const,
+            message: '当前没有可用的任务',
+          };
+        }
+        if (request.sessionId !== focusedSessionId) {
+          return {
+            ok: false as const,
+            errorCode: 'PERMISSION_DENIED' as const,
+            message: '插件只能向当前焦点任务发送消息',
+          };
+        }
+        const now = Date.now();
+        const lastSentAt = ghostSessionMessageLastSentAt.get(id) ?? 0;
+        if (now - lastSentAt < GHOST_SESSION_MESSAGE_MIN_INTERVAL_MS) {
+          return {
+            ok: false as const,
+            errorCode: 'RATE_LIMITED' as const,
+            message: '插件发送任务消息过于频繁，请稍后重试',
+          };
+        }
+        if (ghostSessionMessageInFlight.has(id)) {
+          return {
+            ok: false as const,
+            errorCode: 'BUSY' as const,
+            message: '插件已有一条任务消息正在发送',
+          };
+        }
+        if (!ghostSessionMessageRunner) {
+          return {
+            ok: false as const,
+            errorCode: 'HOST_NOT_READY' as const,
+            message: '任务消息服务尚未准备好',
+          };
+        }
+        ghostSessionMessageLastSentAt.set(id, now);
+        const pending = ghostSessionMessageRunner({
+            ghostId: id,
+            sessionId: request.sessionId,
+            message: request.message,
+          });
+        ghostSessionMessageInFlight.add(id);
+        try {
+          const result = await pending;
+          if (!result.ok) return result;
+          return { ...result, kind: 'message-sent' as const };
+        } finally {
+          ghostSessionMessageInFlight.delete(id);
+        }
+      }
+
+      throwIpcError('INVALID_PARAMS', '未知的 session 请求类型');
+    }
     if (type === 'host-request') {
       const kind = (payload as { kind?: unknown } | null)?.kind;
       if (kind === 'app-context') return currentGhostAppContext();

@@ -836,6 +836,7 @@ import {
   hasEnabledUserMessageHookGhost,
   screenGhostUserMessage,
   setGhostAgentTurnRunner,
+  setGhostSessionMessageRunner,
   setGhostErrandRunner,
   setGhostWorkspaceSessionService,
   notifyGhostSessionEvent,
@@ -8587,6 +8588,22 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // 这里注入真实执行链——专属会话确保/统一投递/turn 收口。投递仍走
   // sendToSessionInternal 这一条主机通路(消息落库、进程拉起与用户亲发一致);
   // 收口复用 hook-control 的 observeHookTurn(与飞书 bot 同一套 turn 观察语义)。
+  setGhostSessionMessageRunner(async ({ sessionId, message }) => {
+    const sent = await sendToSessionInternal({
+      targetSessionId: sessionId,
+      message,
+    });
+    if (!sent.ok) return sent;
+    return {
+      ok: true,
+      sessionId: sent.targetSessionId,
+      disposition:
+        sent.wakeKind === 'already-active'
+          ? 'active'
+          : sent.wakeKind,
+    };
+  });
+
   setGhostErrandRunner(
     createGhostErrandRunner({
       readConfig: readGhostErrandConfig,

@@ -1218,6 +1218,9 @@ Claude Code 与 Codex 都能发现,见 §4.16)、\`workspace\`(请主机为项�
 要请用户新建一条**自动化**(让插件里的内容定期自己刷新),另写
 \`"agent": { "schedule": true }\`(可与前两项并存),见 §4.11.2。它只能打开预填好的
 创建面板,任务由用户选好模型后亲手保存才存在;装入确认框单列一档。
+如果面板需要把普通用户消息投递给当前焦点任务,写 \`"agent": { "sessionMessage": true }\`。
+这项能力必须与 \`session-context\` 槽一起声明,并且只能投递到主机当前焦点任务;它不允许
+插件选择其它任务,也不会绕过当前 Agent 的权限和 Skill 流程。
 
 **node 工作进程详单**(声明 node 槽时必写,详见 §4.12):
 
@@ -3151,6 +3154,33 @@ cindy.onHostMessage(async (msg) => {
 - 这只是"位置信息",不是文件访问权:读写仍走 fs 槽 / node 槽各自的守门;
 - 未声明本槽的插件,args 里永远没有 \`session_context\` 字段。
 
+### 4.13.1 当前任务消息 API
+
+声明 \`session-context\` 与 \`agent.sessionMessage\` 后,面板可以把按钮动作交给当前任务继续处理:
+
+\`cindy.session.getCurrentSessionId()\` 返回 \`{ ok, sessionId, session? }\`。新版宿主的
+\`session\` 会附带当前主任务的 \`sessionName\`、\`workdir\`、\`workdir_is_local\` 与
+\`workdir_is_read_only\`;插件应把它视为宿主最新快照。该字段是可选的，插件仍须兼容只返回
+\`sessionId\` 的旧版宿主;
+\`cindy.session.sendMessage({ sessionId, message })\` 把普通用户消息投递到当前焦点任务。
+主机会重新核对插件身份、能力声明、焦点任务 ID、消息长度和插件启用状态;任务忙时会排队,
+返回 \`created\`、\`resumed\`、\`active\` 或 \`queued\` disposition。
+
+\`sessionId\` 必须来自刚刚读取的当前任务,不能写死或替换成其它任务 ID:
+
+\`\`\`js
+const current = await cindy.session.getCurrentSessionId();
+if (current.ok) {
+  await cindy.session.sendMessage({
+    sessionId: current.sessionId,
+    message: '/your-skill run'
+  });
+}
+\`\`\`
+
+该 API 只是发送一条普通用户消息,不是直接执行 Skill 的特权入口;需要执行 Skill 时,消息内容
+应使用该 Skill 约定的命令格式。
+
 ## 4.14 目录选择(pick 槽)
 
 需要用户交一个文件夹进来(导入/同步/部署源)时,声明 \`pick\` 槽,经管子请主机
@@ -3585,7 +3615,7 @@ const opened = await cindy.iosSimulator.request({
 - panel.systemButtons 格式错(不是对象、未知键、值非布尔,或 position:"tab" 时声明——插件页内面板没有标准头)
 - keywords(已废弃字段,旧包兼容保留,新意识别写)有单字词 · kind 写了但不是 "chip"(可省略) · schemaVersion 不是 2
 - cindy 详单格式错(未知类目/动作、空数组、有详单但 slots 没有 "cindy")
-- agent 详单格式错(有详单但 slots 没有 "agent"，或 background / errand / schedule 都不是 true；只需点击触发时应省略 agent 字段)
+- agent 详单格式错(有详单但 slots 没有 "agent"，或 background / errand / schedule / sessionMessage 都不是 true；只需点击触发时应省略 agent 字段)
 - node 详单格式错(槽/详单不成对、entry 不是包内 CommonJS .js/.cjs、protocol 不在 json-rpc-stdio / mcp-stdio、
   写了 command/args/shell/env、resident 又写 idleTimeoutSeconds)
 - id 用了 \`cindy-\` / \`filo-\` / \`xd-\` 前缀(官方保留,正式版用户通道拒装;给自己的意识换个前缀)

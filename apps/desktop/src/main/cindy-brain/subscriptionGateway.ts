@@ -565,6 +565,21 @@ export function isGhostEligibleSessionRow(row: {
 }
 
 /**
+ * did-session-switched 单独使用的资格判定：协同 Lead 是用户正在看的主任务，
+ * 应参与前台任务切换；Worker 仍是内部协同任务，不直接暴露给插件。
+ * 其它 turn/activity/hook 路径继续使用 isGhostEligibleSessionRow，保持旧语义。
+ */
+export function isGhostSessionSwitchEligibleRow(row: {
+  source: string | null | undefined;
+  orcaRole: string | null | undefined;
+}): boolean {
+  return (
+    (row.source === 'desktop' || row.source === 'shared' || row.source === 'plugin') &&
+    (row.orcaRole == null || row.orcaRole === 'lead')
+  );
+}
+
+/**
  * 会话切换去重器(did-session-switched 的入口滤波,抽成工厂便于单测):
  * renderer 的路由 effect 每次路由变化都上报"当前台前会话"(路由重渲/非会话
  * 页为 null),这里只放行**真变化**——连续同 id 不重发;切去非会话页(null)
@@ -583,6 +598,78 @@ export function createGhostSessionFocusTracker(
     // 台前会话快照(preview 槽缺省落点等"当前会话"语境用;非会话页为 null)。
     current() {
       return last;
+    },
+  };
+}
+
+/** 插件面板只面向用户主任务；特殊焦点若落到 Orca Worker，统一折回所属 Lead。 */
+export async function resolveGhostPrimarySessionId(
+  sessionId: string | null,
+  resolveWorkerLead: (workerSessionId: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (!sessionId) return null;
+  try {
+    return (await resolveWorkerLead(sessionId)) ?? sessionId;
+  } catch {
+    return sessionId;
+  }
+}
+
+/** 当前任务 API 的宿主快照；会话详情不可读时保留 id，但目录能力一律 fail closed。 */
+export function buildGhostCurrentSessionSnapshot(
+  sessionId: string,
+  row: { title: string | null; workingDir: string | null } | null,
+  fsSnapshot: {
+    workingDir: string | null;
+    remoteHostId: string | null;
+    workdirIsReadOnly: boolean;
+  } | null,
+): {
+  sessionId: string;
+  sessionName: string | null;
+  workdir: string | null;
+  workdir_is_local: boolean;
+  workdir_is_read_only: boolean;
+} {
+  const workdir = fsSnapshot?.workingDir ?? row?.workingDir ?? null;
+  return {
+    sessionId,
+    sessionName: row?.title ?? null,
+    workdir,
+    workdir_is_local: fsSnapshot?.remoteHostId === null && workdir !== null,
+    workdir_is_read_only: fsSnapshot?.workdirIsReadOnly ?? true,
+  };
+}
+
+/**
+ * did-session-switched 的异步归一与去重器：只发布最新一次焦点对应的主任务，
+ * 并在 Worker 间切换但仍属于同一 Lead 时去重。
+ */
+export function createGhostPrimarySessionFocusTracker(
+  resolvePrimarySessionId: (sessionId: string) => Promise<string | null>,
+  notify: (sessionId: string) => void,
+): { note(sessionId: string | null): void; current(): string | null } {
+  let generation = 0;
+  let currentSessionId: string | null = null;
+  let lastNotifiedSessionId: string | null = null;
+  return {
+    note(sessionId) {
+      currentSessionId = sessionId;
+      const requestGeneration = ++generation;
+      if (!sessionId) {
+        lastNotifiedSessionId = null;
+        return;
+      }
+      void resolvePrimarySessionId(sessionId).then((primarySessionId) => {
+        if (requestGeneration !== generation || !primarySessionId) return;
+        currentSessionId = primarySessionId;
+        if (primarySessionId === lastNotifiedSessionId) return;
+        lastNotifiedSessionId = primarySessionId;
+        notify(primarySessionId);
+      });
+    },
+    current() {
+      return currentSessionId;
     },
   };
 }

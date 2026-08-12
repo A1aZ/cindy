@@ -7,6 +7,7 @@
  */
 
 import { compareContactsSyncStamp, compareContactsSyncText } from "./merge.js";
+import { collectContactsIdentityConflicts } from "./conflicts.js";
 import {
   type ContactsDataSnapshot,
   type ContactsSnapshotContact,
@@ -16,8 +17,6 @@ import {
   type ContactsSnapshotMembership,
   type ContactsSnapshotRelation,
   type ContactsSyncEntity,
-  type ContactsSyncIdentityValue,
-  type ContactsSyncStamp,
   type ContactsSyncState,
 } from "./types.js";
 
@@ -72,9 +71,6 @@ function uniqueBy<T>(
 export function materializeContactsSyncState(
   state: ContactsSyncState,
 ): ContactsDataSnapshot {
-  const contactsById = new Map(
-    state.contacts.map((record) => [record.id, record]),
-  );
   const contacts = state.contacts
     .filter((record) => !record.deleted)
     .map<ContactsSnapshotContact>((record) => ({
@@ -91,6 +87,12 @@ export function materializeContactsSyncState(
       updatedAt: record.updatedAt.value,
     }))
     .sort(byId);
+  const contactsById = new Map(
+    contacts.map((contact) => [contact.id, contact]),
+  );
+  const contactRecordsById = new Map(
+    state.contacts.map((contact) => [contact.id, contact]),
+  );
   const contactIds = new Set(contacts.map((contact) => contact.id));
 
   // contact_groups.name 的 UNIQUE 与 ContactsGroupsRepo 都是精确字符串语义；
@@ -106,48 +108,7 @@ export function materializeContactsSyncState(
   const identityCandidates = liveEntities(state.identities).filter((record) =>
     contactIds.has(record.value.value.contactId),
   );
-  const identityOwners = new Map<string, Set<string>>();
-  const identityRecordsByKey = new Map<
-    string,
-    Array<ContactsSyncEntity<ContactsSyncIdentityValue>>
-  >();
-  const latestConflictStampByContact = new Map<string, ContactsSyncStamp>();
-  for (const record of identityCandidates) {
-    const value = record.value.value;
-    const key = `${value.platform}\u0000${value.normalizedValue}`;
-    const owners = identityOwners.get(key) ?? new Set<string>();
-    owners.add(value.contactId);
-    identityOwners.set(key, owners);
-    const records = identityRecordsByKey.get(key) ?? [];
-    records.push(record);
-    identityRecordsByKey.set(key, records);
-  }
-  const conflictedContactIds = new Set<string>();
-  for (const [key, owners] of identityOwners.entries()) {
-    if (owners.size <= 1) continue;
-    let latestConflictStamp: ContactsSyncStamp | undefined;
-    for (const record of identityRecordsByKey.get(key) ?? []) {
-      const value = record.value.value;
-      conflictedContactIds.add(value.contactId);
-      if (
-        !latestConflictStamp ||
-        compareContactsSyncStamp(latestConflictStamp, record.value.stamp) < 0
-      ) {
-        latestConflictStamp = record.value.stamp;
-      }
-    }
-    if (!latestConflictStamp) continue;
-    for (const contactId of owners) {
-      const previous = latestConflictStampByContact.get(contactId);
-      if (
-        !previous ||
-        compareContactsSyncStamp(previous, latestConflictStamp) < 0
-      ) {
-        latestConflictStampByContact.set(contactId, latestConflictStamp);
-      }
-    }
-  }
-
+  const conflicts = collectContactsIdentityConflicts(state);
   const identities = uniqueBy(
     identityCandidates,
     (value) => `${value.platform}\u0000${value.normalizedValue}`,
@@ -160,20 +121,27 @@ export function materializeContactsSyncState(
 
   // 同一身份被并发分给不同联系人时，SQLite 只能物化一个确定性赢家；把所有
   // 相关档案标成待确认，避免另一边被隐藏后用户完全不知道发生过冲突。
-  // 用户确认后会产生一个晚于冲突身份 stamp 的 status stamp；此时尊重用户
-  // 的裁决，不要在下一次 reconcile / 往返同步时把它重新打回 pending。
-  for (const contact of contacts) {
-    if (!conflictedContactIds.has(contact.id)) continue;
-    const status = contactsById.get(contact.id)?.status;
-    const conflictStamp = latestConflictStampByContact.get(contact.id);
-    if (
-      status &&
-      conflictStamp &&
-      compareContactsSyncStamp(status.stamp, conflictStamp) > 0
-    ) {
-      continue;
+  // Lamport stamp 只提供确定性全序，不能证明确认写入见过某个离线成员。
+  // 只有确认记录的成员指纹与当前冲突完全一致，才保留 confirmed。
+  for (const conflict of conflicts) {
+    for (const contactId of conflict.owners) {
+      const contact = contactsById.get(contactId);
+      if (!contact) continue;
+      const acknowledgement = contactRecordsById
+        .get(contactId)
+        ?.status.acknowledgedConflicts?.find(
+          (membership) =>
+            membership.platform === conflict.platform &&
+            membership.normalizedValue === conflict.normalizedValue,
+        );
+      if (
+        contact.status === "confirmed" &&
+        acknowledgement?.membershipHash === conflict.membershipHash
+      ) {
+        continue;
+      }
+      contact.status = "pending";
     }
-    contact.status = "pending";
   }
 
   const events = liveEntities(state.events)

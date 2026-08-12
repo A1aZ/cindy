@@ -64,11 +64,10 @@ function mergeStamped<T>(
   const order = compareContactsSyncStamp(a.stamp, b.stamp);
   if (order > 0) return a;
   if (order < 0) return b;
-  // 同 stamp 理论上来自同一次写入；异常状态仍按规范化 JSON 值稳定裁决，
-  // 不能让对象 key 的输入顺序影响跨设备赢家。
-  return stableContactsSyncJson(a.value) >= stableContactsSyncJson(b.value)
-    ? a
-    : b;
+  // 同 stamp 理论上来自同一次写入；异常状态仍按完整 stamped value 的
+  // 规范化 JSON 稳定裁决。这样附着在写入上的向后兼容元数据也不会让
+  // 合并结果依赖参数顺序。
+  return stableContactsSyncJson(a) >= stableContactsSyncJson(b) ? a : b;
 }
 
 function mergeContact(

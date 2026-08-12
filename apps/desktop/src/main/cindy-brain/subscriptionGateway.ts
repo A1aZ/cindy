@@ -704,7 +704,7 @@ export function createGhostPrimarySessionFocusTracker(
   let lastNotifiedSessionId: string | null = null;
   return {
     note(sessionId) {
-      currentSessionId = sessionId;
+      currentSessionId = null;
       const requestGeneration = ++generation;
       if (!sessionId) {
         lastNotifiedSessionId = null;

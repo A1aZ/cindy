@@ -917,6 +917,26 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith('lead-new');
   });
+
+  it('主任务归一完成前不暴露原始 Worker，失败后保持为空', async () => {
+    const notify = vi.fn();
+    let resolvePrimary: ((value: string | null) => void) | undefined;
+    const tracker = createGhostPrimarySessionFocusTracker(
+      () =>
+        new Promise<string | null>((resolve) => {
+          resolvePrimary = resolve;
+        }),
+      notify,
+    );
+
+    tracker.note('worker-1');
+    expect(tracker.current()).toBeNull();
+
+    resolvePrimary?.(null);
+    await Promise.resolve();
+    expect(tracker.current()).toBeNull();
+    expect(notify).not.toHaveBeenCalled();
+  });
 });
 
 describe('buildGhostCurrentSessionSnapshot', () => {

@@ -375,7 +375,7 @@ describe('reusable auxiliary window chrome', () => {
     expect(mocks.sidebarLightboxMountId).not.toBe(hiddenMountId);
   });
 
-  it('keeps the sidebar hidden and clears the old context when refresh fails', async () => {
+  it('keeps the sidebar safe and clears the old context when refresh temporarily fails', async () => {
     window.electronAPI.rightSidebarWindow.getContext = vi
       .fn()
       .mockResolvedValueOnce({
@@ -390,7 +390,13 @@ describe('reusable auxiliary window chrome', () => {
         remoteHostId: null,
         available: true,
       })
-      .mockRejectedValueOnce(new Error('context unavailable'));
+      .mockRejectedValueOnce(new Error('context unavailable'))
+      .mockResolvedValueOnce({
+        sessionId: 'session-b',
+        workdir: '/workdir-b',
+        remoteHostId: null,
+        available: true,
+      });
 
     render(<SidebarWindowLayout />);
     await waitFor(() => expect(mocks.sidebarShellSessionId).toBe('session-a'));
@@ -399,9 +405,9 @@ describe('reusable auxiliary window chrome', () => {
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));
 
-    expect(mocks.sidebarShellVisible).toBe(false);
-    expect(mocks.sidebarShellSessionId).toBeNull();
-    expect(mocks.sidebarLightboxSessionId).toBeUndefined();
+    await waitFor(() => expect(mocks.sidebarShellSessionId).toBe('session-b'));
+    expect(mocks.sidebarShellVisible).toBe(true);
+    expect(mocks.sidebarLightboxSessionId).toBe('session-b');
   });
 
   it('respects a plugin manifest that disables minimize in the detached window', async () => {

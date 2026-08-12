@@ -51,6 +51,8 @@ import {
 
 const log = createLogger('SidebarWindowLayout');
 
+const SIDEBAR_CONTEXT_REFRESH_RETRY_DELAYS_MS = [250, 750] as const;
+
 interface SidebarWindowContext {
   sessionId: string | null;
   workdir: string | null;
@@ -129,42 +131,73 @@ export function SidebarWindowLayout() {
   // 沿用隐藏前的 session。这里先保持 Shell 不可交互并撤销旧 context，拿到 main 的
   // 当前快照后才恢复；revision 防止快速 hide/show 时迟到的请求重新激活窗口。
   useEffect(() => {
-    return window.electronAPI.rightSidebarWindow.onVisibilityChanged((payload) => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+
+    const clearRetryTimer = () => {
+      if (retryTimer === null) return;
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    };
+
+    const refreshForRevision = (revision: number, contextRevision: number, attempt: number) => {
+      void window.electronAPI.rightSidebarWindow
+        .getContext()
+        .then((next) => {
+          if (cancelled || visibilityRevisionRef.current !== revision) return;
+          // 请求期间若已有更新的 context-changed 推送，以推送为准，避免迟到的
+          // invoke 快照把新会话覆盖回旧会话。
+          if (contextRevisionRef.current === contextRevision) setCtx(next);
+          setWindowVisible(true);
+        })
+        .catch((err) => {
+          if (cancelled || visibilityRevisionRef.current !== revision) return;
+          log.warn('refresh context on show failed', { err, attempt });
+          if (contextRevisionRef.current !== contextRevision) {
+            // A newer push won the race, so its context is safe to reveal.
+            setWindowVisible(true);
+            return;
+          }
+          const delay = SIDEBAR_CONTEXT_REFRESH_RETRY_DELAYS_MS[attempt];
+          if (delay === undefined) {
+            // Keep the shell visible as a safe placeholder for recovery, but
+            // never expose the previous session after all refresh attempts
+            // fail. A later context-changed push can populate the shell
+            // without requiring another native visibility transition.
+            setCtx(null);
+            setWindowVisible(true);
+            return;
+          }
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            refreshForRevision(revision, contextRevision, attempt + 1);
+          }, delay);
+        });
+    };
+
+    const offVisibility = window.electronAPI.rightSidebarWindow.onVisibilityChanged((payload) => {
       const revision = ++visibilityRevisionRef.current;
       if (!payload.visible) {
+        clearRetryTimer();
         setWindowVisible(false);
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         setWindowChromeRevision((revision) => revision + 1);
       } else {
+        clearRetryTimer();
         setWindowVisible(false);
         const contextRevision = contextRevisionRef.current;
         // controller 在发送 visible:true 前已经切换为可见态，getContext 此时返回
         // main 缓存的最新快照；与单向 refresh push 相比，可明确等待本轮刷新完成。
-        void window.electronAPI.rightSidebarWindow
-          .getContext()
-          .then((next) => {
-            if (visibilityRevisionRef.current !== revision) return;
-            // 请求期间若已有更新的 context-changed 推送，以推送为准，避免迟到的
-            // invoke 快照把新会话覆盖回旧会话。
-            if (contextRevisionRef.current === contextRevision) setCtx(next);
-            setWindowVisible(true);
-          })
-          .catch((err) => {
-            if (visibilityRevisionRef.current !== revision) return;
-            log.warn('refresh context on show failed', err);
-            // Keep the shell mounted for recovery, but never expose the
-            // previous session after a failed context refresh.
-            if (contextRevisionRef.current === contextRevision) {
-              setCtx(null);
-              setWindowVisible(false);
-            } else {
-              // A newer push won the race, so its context is safe to reveal.
-              setWindowVisible(true);
-            }
-          });
+        refreshForRevision(revision, contextRevision, 0);
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       }
     });
+
+    return () => {
+      cancelled = true;
+      clearRetryTimer();
+      offVisibility();
+    };
   }, []);
 
   // ctx 同时是 keep-alive 宿主：隐藏期间保留旧 session，让 webview / terminal / review

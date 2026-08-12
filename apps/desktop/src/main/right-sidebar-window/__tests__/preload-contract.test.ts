@@ -203,11 +203,10 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
       'claim', 'setBounds', 'command', 'close', 'onEvent',
     ]));
     expect(ghostKeys).toEqual(expect.arrayContaining([
-      'listSync', 'reload', 'resolvePanelMedia', 'runtimeStates',
+      'listSync', 'reload', 'setEnabled', 'resolvePanelMedia', 'runtimeStates',
       'onChanged', 'onRuntimeChanged', 'onPreviewMedia',
       'unreadSync', 'clearUnread', 'onBadge', 'onUnreadSnapshot',
     ]));
-    expect(ghostKeys).not.toEqual(expect.arrayContaining(['setEnabled']));
   });
 
   it('涓嶆毚闇?maker / agent / voice / login 鑷不鑳藉姏', () => {

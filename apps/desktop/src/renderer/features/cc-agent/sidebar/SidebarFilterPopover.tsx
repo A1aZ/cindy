@@ -314,197 +314,206 @@ export function SidebarFilterPopover({
         side="bottom"
         align="start"
         sideOffset={8}
+        // 与窗口边缘留白:菜单向上翻转时不顶死在标题栏上(仓库既有 8~16 的先例)。
+        collisionPadding={8}
         className={cn(MENU_CONTENT_CLASS, 'w-[248px]')}
       >
-        <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
-          {t('ccAgent.sidebar.organizeSidebar')}
-        </div>
+        {/* 菜单自身的标题行已去掉(2026-08-12 用户裁决,节约高度;与远程机器菜单
+            2026-07 的「无标题行」同规)——触发按钮的 tooltip 已经说明这是什么。
 
-        {/* ── 分组:独立复选(D 期)。「按项目分组」关 = flat 平铺;
+            高度兜底:菜单四段展开约 470px,窗口矮 / 触发按钮居中时上下都放不下,
+            而 DropdownMenuContent 基础样式带 overflow-hidden 且无 max-height,
+            超出部分会被**静默切掉**(实机:最上面的「分组」整段不见)。渲染进程
+            画不到 BrowserWindow 外面,所以这里按 Radix 给出的可用高度收口并允许
+            纵向滚动——滚动容器放内层(与下方项目列表同款做法),不与 content 的
+            overflow-hidden 抢同一属性。减 0.75rem 让出 content 的 p-1 与边框。 */}
+        <div className="max-h-[calc(var(--radix-dropdown-menu-content-available-height)-0.75rem)] overflow-y-auto">
+          {/* ── 分组:独立复选(D 期)。「按项目分组」关 = flat 平铺;
             「对话归为一组」控制无项目任务是否收进对话组。 */}
-        <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
-          {t('ccAgent.sidebar.filterGroupByHeading')}
-        </div>
-        <CheckMenuItem
-          label={t('ccAgent.sidebar.filterGroupBy.project')}
-          checked={groupBy === 'project'}
-          onToggle={() => setGroupBy(groupBy === 'project' ? 'flat' : 'project')}
-        />
-        {/* 「按设备分组」与顶部设备切换栏同一出现条件:仅远程连接时显示(E 期)。 */}
-        {hasRemoteDevices && (
+          <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
+            {t('ccAgent.sidebar.filterGroupByHeading')}
+          </div>
           <CheckMenuItem
-            label={t('ccAgent.sidebar.filterGroupBy.device')}
-            checked={groupDevice}
-            onToggle={() => setGroupDevice(!groupDevice)}
+            label={t('ccAgent.sidebar.filterGroupBy.project')}
+            checked={groupBy === 'project'}
+            onToggle={() => setGroupBy(groupBy === 'project' ? 'flat' : 'project')}
           />
-        )}
-        <CheckMenuItem
-          label={t('ccAgent.sidebar.filterGroupBy.dialogue')}
-          checked={groupDialogue}
-          onToggle={() => setGroupDialogue(!groupDialogue)}
-        />
-
-        <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-
-        {/* ── 排序 ── */}
-        <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
-          {t('ccAgent.sidebar.filterSortByHeading')}
-        </div>
-        {sortByOptions.map((option) => (
-          <SelectMenuItem
-            key={option.value}
-            label={t(option.labelKey)}
-            selected={effectiveSortBy === option.value}
-            onSelect={() => setSortBy(option.value)}
+          {/* 「按设备分组」与顶部设备切换栏同一出现条件:仅远程连接时显示(E 期)。 */}
+          {hasRemoteDevices && (
+            <CheckMenuItem
+              label={t('ccAgent.sidebar.filterGroupBy.device')}
+              checked={groupDevice}
+              onToggle={() => setGroupDevice(!groupDevice)}
+            />
+          )}
+          <CheckMenuItem
+            label={t('ccAgent.sidebar.filterGroupBy.dialogue')}
+            checked={groupDialogue}
+            onToggle={() => setGroupDialogue(!groupDialogue)}
           />
-        ))}
 
-        <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+          <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
 
-        {/* ── 筛选（一行入口 → 二级四维度 + 重置） ── */}
-        <MenuSubRow
-          label={t('ccAgent.sidebar.filterHeading')}
-          value={filterSummary}
-          valueEmphasized={activeFilterCount > 0}
-        >
-          <MenuSubRow label={t('ccAgent.sidebar.filterStatusHeading')} value={statusValue}>
-            {STATUS_OPTIONS.map((option) => (
-              <SelectMenuItem
-                key={option.value}
-                label={t(option.labelKey)}
-                selected={status === option.value}
-                onSelect={() => setStatus(option.value)}
-              />
-            ))}
-          </MenuSubRow>
+          {/* ── 排序 ── */}
+          <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
+            {t('ccAgent.sidebar.filterSortByHeading')}
+          </div>
+          {sortByOptions.map((option) => (
+            <SelectMenuItem
+              key={option.value}
+              label={t(option.labelKey)}
+              selected={effectiveSortBy === option.value}
+              onSelect={() => setSortBy(option.value)}
+            />
+          ))}
 
-          <MenuSubRow label={t('ccAgent.sidebar.filterProjectsHeading')} value={projectValue}>
+          <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+
+          {/* ── 筛选（一行入口 → 二级四维度 + 重置） ── */}
+          <MenuSubRow
+            label={t('ccAgent.sidebar.filterHeading')}
+            value={filterSummary}
+            valueEmphasized={activeFilterCount > 0}
+          >
+            <MenuSubRow label={t('ccAgent.sidebar.filterStatusHeading')} value={statusValue}>
+              {STATUS_OPTIONS.map((option) => (
+                <SelectMenuItem
+                  key={option.value}
+                  label={t(option.labelKey)}
+                  selected={status === option.value}
+                  onSelect={() => setStatus(option.value)}
+                />
+              ))}
+            </MenuSubRow>
+
+            <MenuSubRow label={t('ccAgent.sidebar.filterProjectsHeading')} value={projectValue}>
+              <DropdownMenuItem
+                onSelect={(event) => {
+                  event.preventDefault();
+                  setProjectsAll();
+                }}
+                className={MENU_ITEM_CLASS}
+              >
+                <span className="truncate">{t('ccAgent.sidebar.filterAllProjects')}</span>
+                {projects === 'all' && (
+                  <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
+                )}
+              </DropdownMenuItem>
+              {allKnownProjects.length > 0 && (
+                <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+              )}
+              <div className="max-h-[256px] overflow-y-auto">
+                {allKnownProjects.map((project) => {
+                  const selected =
+                    projects === 'all' || (projectsAsSet?.has(project.projectKey) ?? false);
+                  const remoteIdentity = getRemoteProjectMachineIdentity(project);
+                  return (
+                    <DropdownMenuItem
+                      key={project.projectKey}
+                      onSelect={(event) => {
+                        event.preventDefault();
+                        toggleProject(project.projectKey);
+                      }}
+                      className={MENU_ITEM_CLASS}
+                    >
+                      {project.scope === 'remote' ? (
+                        <Tip text={remoteIdentity?.displayLabel ?? project.remoteHostId ?? ''}>
+                          <Globe
+                            size={14}
+                            strokeWidth={2}
+                            className="shrink-0 text-[var(--folder-item-icon)]"
+                          />
+                        </Tip>
+                      ) : null}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">{project.displayName}</span>
+                        {remoteIdentity ? (
+                          <span className="block truncate text-xs text-[var(--cmd-palette-item-meta)]">
+                            {remoteIdentity.displayLabel}
+                          </span>
+                        ) : null}
+                      </span>
+                      <span className="shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
+                        {project.sessions.length}
+                      </span>
+                      {selected && (
+                        <Check size={15} className="shrink-0 text-[var(--msg-assistant-text)]" />
+                      )}
+                    </DropdownMenuItem>
+                  );
+                })}
+              </div>
+            </MenuSubRow>
+
+            <MenuSubRow label={t('ccAgent.sidebar.filterAgentHeading')} value={vendorValue}>
+              {VENDOR_OPTIONS.map((option) => (
+                <SelectMenuItem
+                  key={option.value}
+                  label={t(option.labelKey)}
+                  selected={vendor === option.value}
+                  onSelect={() => setVendor(option.value)}
+                />
+              ))}
+            </MenuSubRow>
+
+            <MenuSubRow
+              label={t('ccAgent.sidebar.filterLastActivityHeading')}
+              value={lastActivityValue}
+            >
+              {LAST_ACTIVITY_OPTIONS.map((option) => (
+                <SelectMenuItem
+                  key={option.value}
+                  label={t(option.labelKey)}
+                  selected={lastActivity === option.value}
+                  onSelect={() => setLastActivity(option.value)}
+                />
+              ))}
+            </MenuSubRow>
+
+            <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
             <DropdownMenuItem
               onSelect={(event) => {
                 event.preventDefault();
-                setProjectsAll();
+                resetContentFilters();
               }}
+              disabled={!isSessionContentFiltered}
               className={MENU_ITEM_CLASS}
             >
-              <span className="truncate">{t('ccAgent.sidebar.filterAllProjects')}</span>
-              {projects === 'all' && (
-                <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
-              )}
+              <span className="truncate text-[var(--text-secondary)]">
+                {t('ccAgent.sidebar.filterReset')}
+              </span>
             </DropdownMenuItem>
-            {allKnownProjects.length > 0 && (
-              <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-            )}
-            <div className="max-h-[256px] overflow-y-auto">
-              {allKnownProjects.map((project) => {
-                const selected =
-                  projects === 'all' || (projectsAsSet?.has(project.projectKey) ?? false);
-                const remoteIdentity = getRemoteProjectMachineIdentity(project);
-                return (
-                  <DropdownMenuItem
-                    key={project.projectKey}
-                    onSelect={(event) => {
-                      event.preventDefault();
-                      toggleProject(project.projectKey);
-                    }}
-                    className={MENU_ITEM_CLASS}
-                  >
-                    {project.scope === 'remote' ? (
-                      <Tip text={remoteIdentity?.displayLabel ?? project.remoteHostId ?? ''}>
-                        <Globe
-                          size={14}
-                          strokeWidth={2}
-                          className="shrink-0 text-[var(--folder-item-icon)]"
-                        />
-                      </Tip>
-                    ) : null}
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate">{project.displayName}</span>
-                      {remoteIdentity ? (
-                        <span className="block truncate text-xs text-[var(--cmd-palette-item-meta)]">
-                          {remoteIdentity.displayLabel}
-                        </span>
-                      ) : null}
-                    </span>
-                    <span className="shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
-                      {project.sessions.length}
-                    </span>
-                    {selected && (
-                      <Check size={15} className="shrink-0 text-[var(--msg-assistant-text)]" />
-                    )}
-                  </DropdownMenuItem>
-                );
-              })}
-            </div>
-          </MenuSubRow>
-
-          <MenuSubRow label={t('ccAgent.sidebar.filterAgentHeading')} value={vendorValue}>
-            {VENDOR_OPTIONS.map((option) => (
-              <SelectMenuItem
-                key={option.value}
-                label={t(option.labelKey)}
-                selected={vendor === option.value}
-                onSelect={() => setVendor(option.value)}
-              />
-            ))}
-          </MenuSubRow>
-
-          <MenuSubRow
-            label={t('ccAgent.sidebar.filterLastActivityHeading')}
-            value={lastActivityValue}
-          >
-            {LAST_ACTIVITY_OPTIONS.map((option) => (
-              <SelectMenuItem
-                key={option.value}
-                label={t(option.labelKey)}
-                selected={lastActivity === option.value}
-                onSelect={() => setLastActivity(option.value)}
-              />
-            ))}
           </MenuSubRow>
 
           <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-          <DropdownMenuItem
-            onSelect={(event) => {
-              event.preventDefault();
-              resetContentFilters();
-            }}
-            disabled={!isSessionContentFiltered}
-            className={MENU_ITEM_CLASS}
-          >
-            <span className="truncate text-[var(--text-secondary)]">
-              {t('ccAgent.sidebar.filterReset')}
-            </span>
-          </DropdownMenuItem>
-        </MenuSubRow>
 
-        <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-
-        {/* ── 显示：主列表形态 + 任务信息复选 ── */}
-        <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
-          {t('ccAgent.sidebar.displayHeading')}
-        </div>
-        {MAIN_VIEW_OPTIONS.map((option) => (
-          <SelectMenuItem
-            key={option.value}
-            label={t(option.labelKey)}
-            selected={mainViewMode === option.value}
-            onSelect={() => setMainViewMode(option.value)}
-          />
-        ))}
-        <MenuSubRow
-          label={t('ccAgent.sidebar.taskInfoHeading')}
-          value={taskInfoSummary}
-          valueEmphasized={!taskInfoIsDefault}
-        >
-          {TASK_INFO_OPTIONS.map((option) => (
-            <CheckMenuItem
+          {/* ── 显示：主列表形态 + 任务信息复选 ── */}
+          <div className="px-2 py-1.5 text-xs font-medium text-[var(--cmd-palette-item-meta)]">
+            {t('ccAgent.sidebar.displayHeading')}
+          </div>
+          {MAIN_VIEW_OPTIONS.map((option) => (
+            <SelectMenuItem
               key={option.value}
               label={t(option.labelKey)}
-              checked={taskInfoFields.includes(option.value)}
-              onToggle={() => toggleTaskInfoField(option.value)}
+              selected={mainViewMode === option.value}
+              onSelect={() => setMainViewMode(option.value)}
             />
           ))}
-        </MenuSubRow>
+          <MenuSubRow
+            label={t('ccAgent.sidebar.taskInfoHeading')}
+            value={taskInfoSummary}
+            valueEmphasized={!taskInfoIsDefault}
+          >
+            {TASK_INFO_OPTIONS.map((option) => (
+              <CheckMenuItem
+                key={option.value}
+                label={t(option.labelKey)}
+                checked={taskInfoFields.includes(option.value)}
+                onToggle={() => toggleTaskInfoField(option.value)}
+              />
+            ))}
+          </MenuSubRow>
+        </div>
       </DropdownMenuContent>
     </DropdownMenu>
   );

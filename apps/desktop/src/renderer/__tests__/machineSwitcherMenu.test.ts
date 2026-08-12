@@ -262,4 +262,22 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
       '<Tip text={t(\'ccAgent.sidebar.organizeSidebar\')} side="bottom">',
     );
   });
+
+  it('整理菜单无自身标题行,且高度按可用空间收口可滚动(2026-08-12 用户裁决)', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    // 标题行去掉节约高度(与 MachineSwitcherMenu 2026-07 的「无标题行」同规);
+    // organizeSidebar 文案仍被 trigger tooltip 消费,不是孤儿 key(规则 18)。
+    const contentStart = filterSource.indexOf('<DropdownMenuContent');
+    const firstSectionHeading = filterSource.indexOf('filterGroupByHeading');
+    expect(contentStart).toBeGreaterThanOrEqual(0);
+    expect(firstSectionHeading).toBeGreaterThan(contentStart);
+    // content 打开后第一个渲染的文案就是「分组」段标题,中间没有 organizeSidebar 标题行。
+    expect(filterSource.slice(contentStart, firstSectionHeading)).not.toContain('organizeSidebar');
+    // 渲染进程画不到窗口外:菜单高度按 Radix 可用高度收口 + 纵向滚动,
+    // 否则 content 的 overflow-hidden 会把超出部分静默切掉(实机丢过「分组」整段)。
+    expect(filterSource).toContain(
+      'max-h-[calc(var(--radix-dropdown-menu-content-available-height)-0.75rem)] overflow-y-auto',
+    );
+    expect(filterSource).toContain('collisionPadding={8}');
+  });
 });

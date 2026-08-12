@@ -30,7 +30,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: sdkMock.query,
 }));
 
-import { ClaudeCodeAgent } from '../index.js';
+import { ClaudeCodeAgent, toClaudeSdkContent } from '../index.js';
 
 const tempDirs: string[] = [];
 const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
@@ -187,6 +187,36 @@ afterEach(async () => {
 });
 
 describe('ClaudeCodeAgent plan mode', () => {
+  it('encodes the same image bytes that passed validation', async () => {
+    const workingDir = await makeTempDir();
+    const imagePath = path.join(workingDir, 'race.png');
+    const originalBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const original = Buffer.from(originalBase64, 'base64');
+    const replacement = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    await fs.writeFile(imagePath, original);
+    const validateBuffer = vi.fn(async (data: Buffer) => {
+      expect(data).toEqual(original);
+      await fs.writeFile(imagePath, replacement);
+      return true;
+    });
+
+    const content = await toClaudeSdkContent(
+      [{ type: 'image', path: imagePath, mimeType: 'image/png' }],
+      { process: async (input) => input, validateBuffer },
+    );
+
+    expect(content).toEqual([{
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: 'image/png',
+        data: originalBase64,
+      },
+    }]);
+    expect(validateBuffer).toHaveBeenCalledOnce();
+  });
+
   it('keeps review text, file references, and a native image in one real SDK turn', async () => {
     const { handle, queryPrompt, workingDir } = await startPlanSession(
       false,

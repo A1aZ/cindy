@@ -27,7 +27,7 @@ describe('Claude Code SDK input', () => {
     await fs.writeFile(imagePath, imageBytes);
     const imageResizer = {
       process: vi.fn(async (inputPath: string) => inputPath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'text', text: 'Inspect these' },
@@ -57,7 +57,7 @@ describe('Claude Code SDK input', () => {
     await fs.writeFile(resizedPath, resizedBytes);
     const imageResizer = {
       process: vi.fn(async () => resizedPath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: sourcePath, mimeType: 'image/png' },
@@ -85,7 +85,7 @@ describe('Claude Code SDK input', () => {
     await fs.writeFile(imagePath, imageBytes);
     const imageResizer = {
       process: vi.fn(async () => imagePath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/webp' },
@@ -110,7 +110,7 @@ describe('Claude Code SDK input', () => {
     const missingPath = path.join(tempDir, 'missing.png');
     const imageResizer = {
       process: vi.fn(async () => missingPath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: missingPath, mimeType: 'image/png' },
@@ -130,7 +130,7 @@ describe('Claude Code SDK input', () => {
     await fs.writeFile(imagePath, imageBytes);
     const imageResizer = {
       process: vi.fn(async () => imagePath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },
@@ -150,7 +150,7 @@ describe('Claude Code SDK input', () => {
     await fs.writeFile(imagePath, imageBytes);
     const imageResizer = {
       process: vi.fn(async () => imagePath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },
@@ -179,7 +179,7 @@ describe('Claude Code SDK input', () => {
     );
     const imageResizer = {
       process: vi.fn(async () => imagePath),
-      validate: vi.fn(async () => true),
+      validateBuffer: vi.fn(async () => true),
     };
     const content: UserMessage['content'] = [
       { type: 'image', path: imagePath, mimeType: 'image/png' },

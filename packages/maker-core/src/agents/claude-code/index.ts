@@ -418,7 +418,7 @@ type ClaudeSdkContentBlock =
 
 interface ClaudeInputImageResizer {
   process(absPath: string): Promise<string>;
-  validate(absPath: string): Promise<boolean>;
+  validateBuffer(data: Buffer): Promise<boolean>;
 }
 
 const CLAUDE_INLINE_IMAGE_MAX_ENCODED_BYTES = 5 * 1024 * 1024;
@@ -451,7 +451,10 @@ function detectClaudeImageMediaType(data: Buffer): ClaudeImageMediaType | null {
   return null;
 }
 
-async function toClaudeImageBlock(imagePath: string): Promise<ClaudeSdkContentBlock | null> {
+async function toClaudeImageBlock(
+  imagePath: string,
+  validateBuffer: (data: Buffer) => Promise<boolean>,
+): Promise<ClaudeSdkContentBlock | null> {
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   try {
     handle = await fs.open(imagePath, 'r');
@@ -470,6 +473,7 @@ async function toClaudeImageBlock(imagePath: string): Promise<ClaudeSdkContentBl
     ) return null;
     const mediaType = detectClaudeImageMediaType(data);
     if (!mediaType) return null;
+    if (!(await validateBuffer(data))) return null;
     const encodedData = data.toString('base64');
     return {
       type: 'image',
@@ -512,9 +516,11 @@ export async function toClaudeSdkContent(
       imageBlockPromises.set(
         idx,
         imageResizer.process(block.path).then(async (finalPath) => {
-          const isValidImage = await imageResizer.validate(finalPath);
           return {
-            block: isValidImage ? await toClaudeImageBlock(finalPath) : null,
+            block: await toClaudeImageBlock(
+              finalPath,
+              (data) => imageResizer.validateBuffer(data),
+            ),
             finalPath,
           };
         }),

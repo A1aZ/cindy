@@ -190,11 +190,24 @@ export class ImageResizer {
    */
   async validate(absPath: string): Promise<boolean> {
     if (!absPath || typeof absPath !== 'string') return false;
+    return this.validateInput(absPath, { absPath });
+  }
+
+  /** Validate the exact bytes a caller is about to embed. */
+  async validateBuffer(data: Buffer): Promise<boolean> {
+    if (!Buffer.isBuffer(data) || data.length === 0) return false;
+    return this.validateInput(data, { bytes: data.length });
+  }
+
+  private async validateInput(
+    input: string | Buffer,
+    logMeta: Record<string, unknown>,
+  ): Promise<boolean> {
     const sharp = loadSharp();
     if (!sharp) return false;
 
     return this.acquireSlot(async () => {
-      const work = sharp(absPath, {
+      const work = sharp(input, {
         failOn: 'error',
         limitInputPixels: VALIDATION_MAX_INPUT_PIXELS,
         sequentialRead: true,
@@ -210,7 +223,7 @@ export class ImageResizer {
         .then(() => true)
         .catch((error) => {
           this.cfg.logger?.warn('image-resizer: image validation failed', {
-            absPath,
+            ...logMeta,
             error: String(error),
           });
           return false;
@@ -221,7 +234,7 @@ export class ImageResizer {
       const result = await Promise.race([work, timeout]);
       if (result === 'timeout') {
         this.cfg.logger?.warn('image-resizer: image validation timeout', {
-          absPath,
+          ...logMeta,
           timeoutMs: this.cfg.timeoutMs,
         });
         return false;

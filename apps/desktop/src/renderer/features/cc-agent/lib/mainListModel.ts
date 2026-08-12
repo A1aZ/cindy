@@ -159,8 +159,10 @@ export function buildMainListEntries({
   }
 
   if (sortBy === 'manual') {
-    // 手动:项目行按 manualProjectOrder 在前(未入序的项目排最前=新条目置顶),
-    // 非项目条目(散排对话 / 对话组)排在项目之后按 recency。
+    // 手动:项目行按 manualProjectOrder;不在序的新项目由 normalize 追加到已排
+    // 序列之后(沿用重设计前的既有语义;rank 兜底的 MAX_SAFE_INTEGER 只是防御,
+    // normalize 后不会真的触发)。非项目条目(散排对话 / 对话组)排在项目之后按
+    // recency。
     const projectKeys = entries
       .filter(
         (entry): entry is Extract<MainListEntry, { kind: 'project' }> => entry.kind === 'project',

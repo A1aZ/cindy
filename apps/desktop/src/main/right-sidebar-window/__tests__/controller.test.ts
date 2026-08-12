@@ -656,16 +656,20 @@ describe('setContext / routeCommand', () => {
     return { command: { type: 'open-terminal' as const, sessionId }, allowOpen };
   }
 
-  it('caches context; forwards only when window alive', () => {
+  it('keeps live context out of a hidden prewarm and exposes it after opening', () => {
     const h = makeHarness();
-    h.controller.setContext(ctx);
-    expect(h.sends).toHaveLength(0);
-    expect(h.controller.getContext()).toEqual(ctx);
-
     h.controller.prewarm();
     const win = h.windows[0];
     markReady(h.controller, win);
+    h.controller.setContext(ctx);
+    expect(h.sends.filter((entry) => entry.channel === 'ctx-channel')).toEqual([]);
+    expect(h.controller.getContext()).toBeNull();
+
     h.controller.open();
+    expect(h.controller.getContext()).toEqual(ctx);
+    h.controller.refreshContext(win.webContents as unknown as WebContents);
+    expect(h.sends.at(-1)).toEqual({ channel: 'ctx-channel', payload: ctx });
+
     h.controller.setContext({ ...ctx, sessionId: 's2' });
     expect(h.sends.at(-1)).toEqual({
       channel: 'ctx-channel',

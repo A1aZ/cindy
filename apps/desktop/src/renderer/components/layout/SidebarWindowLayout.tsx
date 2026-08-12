@@ -257,7 +257,7 @@ export function SidebarWindowLayout() {
           </div>
         )}
       </div>
-      <GhostMediaLightboxHost />
+      <GhostMediaLightboxHost sessionId={sessionId ?? undefined} />
     </div>
   );
 }

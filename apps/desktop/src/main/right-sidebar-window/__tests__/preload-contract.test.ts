@@ -176,6 +176,7 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
       'fileBrowser', 'terminal', 'gitReview', 'processMonitor', 'rsbNativePopup',
       'openExternal', 'openFileInBrowser', 'openPath', 'showItemInFolder',
       'copyMediaToClipboard', 'openMediaWithDefaultApp', 'saveMediaAs',
+      'cacheMediaForSession', 'readImageBytes', 'readCachedImageAsBase64',
       'getFilePath', 'cacheImageFromBuffer', 'maker', 'localDb', 'ghosts',
     ]));
     expect(fileBrowserKeys).toEqual(expect.arrayContaining([
@@ -210,7 +211,6 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
       'updater', 'chat', 'session',
       'resourceUsageWindow', 'ghostPanelWindow',
       'pluginMarket', 'deepLink', 'gitContext',
-      'cacheMediaForSession',
       'safeStorageStore', 'safeStorageRead', 'safeStorageRemove',
     ];
     for (const key of forbidden) {

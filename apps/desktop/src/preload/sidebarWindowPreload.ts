@@ -245,6 +245,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openMediaWithDefaultApp: (params: unknown): Promise<void> =>
     ipcRenderer.invoke('media:open-with-default-app', params),
   saveMediaAs: (params: unknown): Promise<unknown> => ipcRenderer.invoke('media:save-as', params),
+  cacheMediaForSession: (params: {
+    url: string;
+    sessionId: string;
+  }): Promise<unknown> => ipcRenderer.invoke('media:cache-for-session', params),
+  readImageBytes: (params: { url: string }): Promise<{ base64: string; mimeType: string }> =>
+    ipcRenderer.invoke('media:read-image-bytes', params),
+  readCachedImageAsBase64: (
+    params: { url: string },
+  ): Promise<{ base64: string; mimeType: string }> =>
+    ipcRenderer.invoke('image-cache:read-base64', params),
   getFilePath: (file: File): string => {
     try {
       return webUtils.getPathForFile(file);

@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   ghostMinimizeListener: null as (() => void) | null,
   ghostMinimizeEnabled: true,
   sidebarShellVisible: undefined as boolean | undefined,
+  sidebarLightboxSessionId: undefined as string | undefined,
   minimizeGhostPanel: vi.fn(),
   restoreGhostPanel: vi.fn(),
 }));
@@ -60,7 +61,12 @@ vi.mock('@/cindy-brain/ghostPanels', () => ({
   ensureGhostPanelsRegistered: vi.fn(),
   useGhostPanelsSync: vi.fn(),
 }));
-vi.mock('@/cindy-brain/GhostMediaLightboxHost', () => ({ GhostMediaLightboxHost: () => null }));
+vi.mock('@/cindy-brain/GhostMediaLightboxHost', () => ({
+  GhostMediaLightboxHost: ({ sessionId }: { sessionId?: string }) => {
+    mocks.sidebarLightboxSessionId = sessionId;
+    return null;
+  },
+}));
 vi.mock('@/cindy-brain/ghostPanelBody', () => ({
   GhostChipPanelBody: () => null,
   GhostPanelError: () => null,
@@ -128,6 +134,7 @@ describe('reusable auxiliary window chrome', () => {
     mocks.ghostMinimizeListener = null;
     mocks.ghostMinimizeEnabled = true;
     mocks.sidebarShellVisible = undefined;
+    mocks.sidebarLightboxSessionId = undefined;
     Object.defineProperty(window, 'electronAPI', {
       configurable: true,
       value: {
@@ -274,6 +281,21 @@ describe('reusable auxiliary window chrome', () => {
 
     await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
     expect(mocks.sidebarShellVisible).toBe(false);
+  });
+
+  it('passes the active sidebar session to the media lightbox host', async () => {
+    window.electronAPI.rightSidebarWindow.getContext = vi.fn(() =>
+      Promise.resolve({
+        sessionId: 'session-a',
+        workdir: '/workdir',
+        remoteHostId: null,
+        available: true,
+      }),
+    );
+
+    render(<SidebarWindowLayout />);
+
+    await waitFor(() => expect(mocks.sidebarLightboxSessionId).toBe('session-a'));
   });
 
   it('respects a plugin manifest that disables minimize in the detached window', async () => {

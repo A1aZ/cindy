@@ -337,14 +337,16 @@ export class RsbWindowController {
         if (sessionId !== ctx.sessionId) this.deferredCommands.delete(sessionId);
       }
     }
-    if (this.winRef && !this.winRef.isDestroyed()) {
+    if (this.visible && this.winRef && !this.winRef.isDestroyed()) {
       this.deps.sendToWindow(this.winRef, this.deps.contextChannel, ctx);
     }
     this.flushDeferredCommandsToDetachedHost();
   }
 
   getContext(): RsbWindowContext | null {
-    return this.lastContext;
+    // 隐藏预热只准备 renderer 壳，不注入当前任务上下文。真实显示后由
+    // visibility-changed → refreshContext 交付最新缓存，避免后台 hydrate 会话面板。
+    return this.visible ? this.lastContext : null;
   }
 
   /** main 原子裁决 command ownership；renderer 只在 attached 结果下写本地 store。 */

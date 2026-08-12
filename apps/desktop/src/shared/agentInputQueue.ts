@@ -256,6 +256,12 @@ export interface AgentInputQueuedMessage {
    */
   bypassGhostHooks?: boolean;
   /**
+   * Host-owned focus guard for plugin messages addressed to the current task.
+   * Persist this bit so crash-restored queue items are rechecked immediately
+   * before vendor dispatch instead of relying on an in-memory callback.
+   */
+  requireCurrentSessionFocus?: boolean;
+  /**
    * 本条是**自动**补发的续跑指令(turn 被上游打断后由 main 守卫触发,见
    * maker-ipc/interruptedTurnAutoResume.ts),不是人点的重试。
    *

@@ -90,6 +90,7 @@ import {
   getGhostSetupAssessment,
   getIOSSimulatorPluginAccessDecision,
   isGhostAvailableForActiveSession,
+  isGhostSessionCurrent,
 } from '../cindy-brain/index.js';
 import {
   assertTrustedAppRendererEvent,
@@ -7819,6 +7820,8 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     origin?: AgentInputQueuedMessage['origin'];
     /** 调用方已执行 will-user-message 筛查；繁忙入队后不得重复询问钩子。 */
     bypassGhostHooks?: boolean;
+    /** 插件当前任务消息在最终派发前仍须命中当前焦点主任务。 */
+    requireCurrentSessionFocus?: boolean;
     createDefaults?: SendToSessionCreateDefaults;
     /** 安全调用方可要求新会话不比来源会话拥有更高的权限。 */
     inheritSourcePermissionMode?: boolean;
@@ -7837,6 +7840,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       onAcceptedRollback,
       origin,
       bypassGhostHooks,
+      requireCurrentSessionFocus,
       createDefaults,
       inheritSourcePermissionMode,
     } = params;
@@ -8181,6 +8185,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
           onAcceptedRollback,
           origin,
           bypassGhostHooks,
+          requireCurrentSessionFocus,
         });
         return {
           ok: true as const,
@@ -8231,6 +8236,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAcceptedRollback,
             origin,
             bypassGhostHooks,
+            requireCurrentSessionFocus,
           });
           return {
             ok: true as const,
@@ -8356,6 +8362,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               onAcceptedRollback,
               origin,
               bypassGhostHooks,
+              requireCurrentSessionFocus,
             });
             return {
               ok: true as const,
@@ -8455,6 +8462,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
             onAcceptedRollback,
             origin,
             bypassGhostHooks,
+            requireCurrentSessionFocus,
           });
           return {
             ok: true as const,
@@ -8634,6 +8642,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       clientId,
       // 直发已在上方筛查；繁忙转队列时沿用结果，避免同一消息重复触发钩子。
       bypassGhostHooks: true,
+      requireCurrentSessionFocus: true,
       onAccepted: async () => {
         if (!(await isTargetCurrent())) {
           let rewound = false;
@@ -8866,6 +8875,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     onAcceptedRollback?: () => void | Promise<void>;
     origin?: AgentInputQueuedMessage['origin'];
     bypassGhostHooks?: boolean;
+    requireCurrentSessionFocus?: boolean;
   }): Promise<void> {
     const createOpts = await buildCreateOptsForQueuedSession(params.targetSessionId, params.meta);
     const queued: AgentInputQueuedMessage = {
@@ -8885,6 +8895,7 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
       },
       createOpts,
       ...(params.bypassGhostHooks ? { bypassGhostHooks: true } : {}),
+      ...(params.requireCurrentSessionFocus ? { requireCurrentSessionFocus: true } : {}),
       ...(params.origin ? { origin: params.origin } : {}),
     };
     if (params.onAccepted) {
@@ -10903,12 +10914,49 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
     // 可见行),理由与踩过的坑记在 helper 的注释里。
     supersedeRetriedUserTurn,
     getLastAssistantTranscriptUuid,
-    onAcceptedQueuedMessage: (sessionId, item): Promise<void> | undefined => {
+    onAcceptedQueuedMessage: async (sessionId, item): Promise<void> => {
       // 已派发 → 该项不会再走 discard,释放 scheduler 的 discard 监听防泄漏。
       schedulerQueuedPromptDiscardWatchers.delete(item.clientId);
+      if (item.requireCurrentSessionFocus === true) {
+        let isCurrent = false;
+        try {
+          isCurrent = await isGhostSessionCurrent(sessionId);
+        } catch (err) {
+          log.warn('plugin queued message focus recheck failed closed', {
+            sessionId,
+            clientId: item.clientId,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (!isCurrent) {
+          orcaInterAgentDispatcher.discardQueuedOrcaInterAgentAcceptedCallback(item.clientId);
+          let rewound = false;
+          try {
+            rewound = await enqueueDurableWrite(
+              `plugin-message-rewind:${sessionId}:${item.clientId}`,
+              () => rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId),
+            );
+          } catch (err) {
+            log.warn('restored plugin message rewind before cancelled dispatch failed', {
+              sessionId,
+              clientId: item.clientId,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+          if (!rewound) {
+            log.warn('restored plugin message rewind was not confirmed before cancelled dispatch', {
+              sessionId,
+              clientId: item.clientId,
+            });
+          }
+          throw new AcceptedCallbackDispatchCancelled(
+            'plugin target changed before queued vendor dispatch',
+          );
+        }
+      }
       // 返回 promise 让 coordinator 在 onPersisted 链路里 await —— worker 运行态与
       // pending auto-bridge 副作用必须先于 turn 启动完成；失败仍吞错落日志，不拦派发。
-      return orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
+      await orcaInterAgentDispatcher.runQueuedOrcaInterAgentAcceptedCallback(sessionId, item);
     },
     onUserMessagePersisting: (sessionId, item) => {
       markQueuedAttachmentPersistenceStarted(sessionId, item.clientId);

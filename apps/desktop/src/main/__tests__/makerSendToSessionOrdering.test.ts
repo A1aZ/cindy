@@ -654,15 +654,30 @@ describe('sendToSession ordering', () => {
     );
     expect(runnerBlock).toContain('message: screenedMessage,');
     expect(runnerBlock).toContain('bypassGhostHooks: true,');
+    expect(runnerBlock).toContain('requireCurrentSessionFocus: true,');
 
     const enqueueBlock = extractBetween(
       source,
       'async function enqueueSendToSessionMessage',
       'const orcaInterAgentDispatcher:',
     );
+    const coordinatorBlock = extractBetween(
+      source,
+      'const inputCoordinator: AgentInputCoordinator = new AgentInputCoordinator({',
+      'agentInputCoordinatorHolder = inputCoordinator;',
+    );
     expect(enqueueBlock).toContain(
       '...(params.bypassGhostHooks ? { bypassGhostHooks: true } : {}),',
     );
+    expect(enqueueBlock).toContain(
+      '...(params.requireCurrentSessionFocus ? { requireCurrentSessionFocus: true } : {}),',
+    );
+    expect(coordinatorBlock).toContain('if (item.requireCurrentSessionFocus === true) {');
+    expect(coordinatorBlock).toContain('isGhostSessionCurrent(sessionId)');
+    expect(coordinatorBlock).toContain(
+      'rewindPersistedUserMessageBeforeDispatch(sessionId, item.clientId)',
+    );
+    expect(coordinatorBlock).toContain('throw new AcceptedCallbackDispatchCancelled(');
   });
 
   it('preserves stored permission and extraDirs when sendToWorker resumes a worker', () => {

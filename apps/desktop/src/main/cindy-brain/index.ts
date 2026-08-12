@@ -1980,6 +1980,11 @@ async function currentGhostSessionId(): Promise<string | null> {
     ? primarySessionId
     : null;
 }
+
+export async function isGhostSessionCurrent(sessionId: string): Promise<boolean> {
+  return (await currentGhostSessionId()) === sessionId;
+}
+
 const ghostSessionFocusByWebContents = new Map<number, string | null>();
 const ghostSessionFocusTrackedWebContents = new Set<number>();
 

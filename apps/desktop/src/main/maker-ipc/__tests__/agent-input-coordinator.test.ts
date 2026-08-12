@@ -15,6 +15,7 @@ import {
   CONTINUE_AFTER_ERROR_PROMPT,
 } from '../../../shared/interruptedTurn.js';
 import type { RecoveryContextSnapshot } from '../recoveryCoordinator.js';
+import { AcceptedCallbackDispatchCancelled } from '../acceptedCallbackRunner.js';
 
 const mocks = vi.hoisted(() => {
   const logger = {
@@ -6086,6 +6087,67 @@ describe('AgentInputCoordinator crash-recovery queue snapshots (issue #761)', ()
     await flush();
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
     expect(h.sendToAgent.mock.calls[0]?.[1]).toEqual({ type: 'user', content: 'first' });
+  });
+
+  it('preserves the current-session focus guard in crash-restored queue items', async () => {
+    const h = createHarness();
+    const sid = 'snapshot-restore-plugin-focus-guard';
+    h.setLoadQueueSnapshot(async () => [
+      makeItem('r-focus', 'plugin message', {
+        bypassGhostHooks: true,
+        requireCurrentSessionFocus: true,
+      }),
+    ]);
+
+    await h.coordinator.ensureQueueRestored(sid);
+    h.coordinator.resume(sid);
+    await flush();
+
+    expect(h.onAcceptedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({
+        clientId: 'r-focus',
+        bypassGhostHooks: true,
+        requireCurrentSessionFocus: true,
+      }),
+    );
+  });
+
+  it('drops a persisted focused-plugin message when its accepted guard cancels dispatch', async () => {
+    const h = createHarness();
+    const sid = 'plugin-focus-guard-cancelled';
+    h.sendToAgent.mockImplementationOnce(async (sessionId, _message, _createOpts, sendOpts) => {
+      await persistQueuedUserMessage(sessionId, sendOpts);
+      return sendSuccess();
+    });
+    h.onAcceptedQueuedMessage.mockImplementationOnce(() => {
+      throw new AcceptedCallbackDispatchCancelled('plugin target changed');
+    });
+
+    h.coordinator.enqueue(
+      sid,
+      makeItem('q-focus', 'plugin message', {
+        bypassGhostHooks: true,
+        requireCurrentSessionFocus: true,
+      }),
+    );
+    await flush();
+
+    expect(latestProjection(h.projections).recovery).toBeNull();
+    expect(
+      (h.coordinator as unknown as { getState: (id: string) => { activeTurn: unknown } }).getState(
+        sid,
+      ).activeTurn,
+    ).toBeNull();
+    expect(h.onUndispatchedUserTurn).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-focus' }),
+      'cancelled',
+    );
+    expect(h.onDiscardedQueuedMessage).toHaveBeenCalledWith(
+      sid,
+      expect.objectContaining({ clientId: 'q-focus' }),
+    );
   });
 
   it('releases a crash-restored paused queue on explicit user input (resumeRestorePausedQueue)', async () => {

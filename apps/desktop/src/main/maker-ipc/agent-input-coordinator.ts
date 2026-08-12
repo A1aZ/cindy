@@ -61,6 +61,7 @@ import {
   RECOVERY_CHECKPOINT_MARKER,
   type RecoveryContextSnapshot,
 } from './recoveryCoordinator.js';
+import { AcceptedCallbackDispatchCancelled } from './acceptedCallbackRunner.js';
 
 const log = createLogger('maker-input-coordinator');
 const SESSION_RUNNING_RETRY_DELAY_MS = 250;
@@ -3351,6 +3352,24 @@ export class AgentInputCoordinator {
       // 放在分支之前 —— 三条出口都不会再走到接管决策。
       this.discardDeferredResumableCandidate(sessionId, active);
       const latest = this.getState(sessionId);
+      if (
+        active.persisted &&
+        head.requireCurrentSessionFocus === true &&
+        err instanceof AcceptedCallbackDispatchCancelled
+      ) {
+        latest.activeTurn = null;
+        latest.error = null;
+        latest.stickyError = null;
+        latest.recovery = null;
+        this.notifyUndispatchedUserTurn(sessionId, head, 'cancelled');
+        this.deps.onDiscardedQueuedMessage?.(sessionId, head);
+        this.emit(sessionId);
+        if (latest.pendingQueue.length > 0 || latest.pendingCompacts.length > 0) {
+          this.scheduleDrain(sessionId, 'focused-plugin-message-cancelled');
+        }
+        this.deps.onQueueEmptied?.(sessionId);
+        return;
+      }
       if (!active.persisted) {
         if (isSessionRunningError(err)) {
           this.deferQueueHeadAfterSessionRunning(

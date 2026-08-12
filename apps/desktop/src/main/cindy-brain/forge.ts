@@ -1219,7 +1219,7 @@ Claude Code 与 Codex 都能发现,见 §4.16)、\`workspace\`(请主机为项�
 \`"agent": { "schedule": true }\`(可与前两项并存),见 §4.11.2。它只能打开预填好的
 创建面板,任务由用户选好模型后亲手保存才存在;装入确认框单列一档。
 如果面板需要把普通用户消息投递给当前焦点任务,写 \`"agent": { "sessionMessage": true }\`。
-这项能力必须与 \`session-context\` 槽一起声明,并且只能投递到主机当前焦点任务;它不允许
+这项能力必须与 \`panel\`、\`session-context\` 槽一起声明,并且只能投递到主机当前焦点任务;它不允许
 插件选择其它任务,也不会绕过当前 Agent 的权限和 Skill 流程。该能力依赖新版宿主 API,
 必须同时声明 \`minCindyVersion\`,取首次提供当前任务消息能力的 Cindy 正式发布版本。
 
@@ -3157,7 +3157,8 @@ cindy.onHostMessage(async (msg) => {
 
 ### 4.13.1 当前任务消息 API
 
-声明 \`session-context\` 与 \`agent.sessionMessage\` 后,电子脑可以把普通用户消息交给当前任务继续处理。
+manifest 必须声明 \`panel\`、\`session-context\` 与 \`agent.sessionMessage\`;满足这些条件后,
+电子脑可以把普通用户消息交给当前任务继续处理。
 面板仍然保持零桥,不能直接调用 \`cindy.session\`;面板按钮必须按 §5 先唤醒电子脑,再通过
 同源 \`BroadcastChannel\` 把请求交给 \`main.js\`:
 

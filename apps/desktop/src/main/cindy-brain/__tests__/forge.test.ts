@@ -761,6 +761,15 @@ describe('FORGE_GUIDE', () => {
     expect(FORGE_GUIDE).toContain('会在插件边界固定映射为 `en`');
   });
 
+  it('当前任务消息指南列全 manifest 前置条件', () => {
+    expect(FORGE_GUIDE).toContain(
+      '这项能力必须与 `panel`、`session-context` 槽一起声明',
+    );
+    expect(FORGE_GUIDE).toContain(
+      'manifest 必须声明 `panel`、`session-context` 与 `agent.sessionMessage`',
+    );
+  });
+
   it('分章体量守卫:每个 ## 章节须留在单次工具结果安全体量内(#890 分章投递的不变量)', () => {
     // 手册"随主机版本演进"持续增长;任一章越过单次 MCP 结果上限会静默复现 #890 于该章。
     // 上限取 32KB:当前最大章 ~22KB,余量 ~45%,越线即该拆小节。

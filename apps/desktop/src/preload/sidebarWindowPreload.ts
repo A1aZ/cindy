@@ -99,30 +99,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
-  // Auth state is read-only for this window's normal startup. The methods are
-  // kept together because AuthProvider also owns account-boundary cleanup and
-  // must observe the same main-process auth broadcasts as the primary window.
+  // AuthProvider 在分离侧栏中只负责初始化账号快照、监听账号边界变化，以及给
+  // device-link 子面板投影当前身份。该窗口没有登录/登出/本地模式/账号删除 UI，
+  // 因此不暴露任何认证状态变更能力。
   authHasPersistedSessionHintSync: (): boolean =>
     ipcRenderer.sendSync('auth:has-persisted-session-hint-sync') === true,
   authInitialize: (): Promise<unknown> => ipcRenderer.invoke('auth:initialize'),
   authGetLoginState: (): Promise<unknown> => ipcRenderer.invoke('auth:get-login-state'),
-  authDispatchLoginAction: (action: unknown): Promise<unknown> =>
-    ipcRenderer.invoke('auth:dispatch-login-action', action),
-  authLogout: (): Promise<void> => ipcRenderer.invoke('auth:logout'),
-  authEnterLocal: (): Promise<unknown> => ipcRenderer.invoke('auth:enter-local'),
-  authExitLocal: (): Promise<unknown> => ipcRenderer.invoke('auth:exit-local'),
   authGetAccountDeletionAvailability: (): Promise<unknown> =>
     ipcRenderer.invoke('auth:account-deletion:get-availability'),
-  authRequestAccountDeletionChallenge: (): Promise<unknown> =>
-    ipcRenderer.invoke('auth:account-deletion:request-challenge'),
-  authConfirmAccountDeletion: (input: unknown): Promise<unknown> =>
-    ipcRenderer.invoke('auth:account-deletion:confirm', input),
   authGetAccountDeletionStatus: (): Promise<unknown> =>
     ipcRenderer.invoke('auth:account-deletion:get-status'),
-  authClearAccountDeletionReceipt: (): Promise<void> =>
-    ipcRenderer.invoke('auth:account-deletion:clear-receipt'),
-  authConsumeAccountDeletionRestoredNotice: (): Promise<boolean> =>
-    ipcRenderer.invoke('auth:account-deletion:consume-restored-notice'),
   onAuthStateChange: (cb: (payload: unknown) => void): (() => void) =>
     onPayload('auth:state-change', cb),
   onAuthSessionExpired: (cb: (payload: unknown) => void): (() => void) =>

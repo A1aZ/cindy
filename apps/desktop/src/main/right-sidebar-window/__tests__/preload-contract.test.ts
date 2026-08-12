@@ -140,19 +140,23 @@ describe('sidebarWindowPreload 椤跺眰濂戠害', () => {
       'authHasPersistedSessionHintSync',
       'authInitialize',
       'authGetLoginState',
+      'authGetAccountDeletionAvailability',
+      'authGetAccountDeletionStatus',
+      'onAuthStateChange',
+      'onAuthSessionExpired',
+    ]));
+    for (const key of [
       'authDispatchLoginAction',
       'authLogout',
       'authEnterLocal',
       'authExitLocal',
-      'authGetAccountDeletionAvailability',
       'authRequestAccountDeletionChallenge',
       'authConfirmAccountDeletion',
-      'authGetAccountDeletionStatus',
       'authClearAccountDeletionReceipt',
       'authConsumeAccountDeletionRestoredNotice',
-      'onAuthStateChange',
-      'onAuthSessionExpired',
-    ]));
+    ]) {
+      expect(topLevel).not.toEqual(expect.arrayContaining([key]));
+    }
   });
 
   it('鏆撮湶 rightSidebarWindow 鍛藉悕绌洪棿', () => {

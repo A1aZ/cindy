@@ -181,6 +181,28 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).toContain('contextMenuPos={organizeMenuPos}');
   });
 
+  // 2026-08-12 用户裁决:筛选各维度选中后菜单不关闭(常要连调几项);排序与显示
+  // 模式仍选完即关(一次一个决定)。
+  it('筛选维度选中后保持菜单打开,排序 / 显示模式仍选完即关', () => {
+    const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');
+    // keepOpen 走 onSelect 的 preventDefault(Radix 据此不关闭菜单)。
+    expect(filterSource).toContain('keepOpen = false');
+    expect(filterSource).toContain('if (keepOpen) event.preventDefault();');
+    // 三个筛选维度都传 keepOpen。
+    expect(filterSource).toMatch(/onSelect=\{\(\) => setStatus\(option\.value\)\}\s*\n\s*keepOpen/);
+    expect(filterSource).toMatch(/onSelect=\{\(\) => setVendor\(option\.value\)\}\s*\n\s*keepOpen/);
+    expect(filterSource).toMatch(
+      /onSelect=\{\(\) => setLastActivity\(option\.value\)\}\s*\n\s*keepOpen/,
+    );
+    // 排序 / 显示模式不传(选完即关)。
+    expect(filterSource).not.toMatch(
+      /onSelect=\{\(\) => setSortBy\(option\.value\)\}\s*\n\s*keepOpen/,
+    );
+    expect(filterSource).not.toMatch(
+      /onSelect=\{\(\) => setMainViewMode\(option\.value\)\}\s*\n\s*keepOpen/,
+    );
+  });
+
   // 2026-08-12 用户裁决:任务信息行的当前选中项用图标表示,不再罗列短词。
   it('任务信息摘要用图标串,筛选各维度行也有图标', () => {
     const filterSource = read('features', 'cc-agent', 'sidebar', 'SidebarFilterPopover.tsx');

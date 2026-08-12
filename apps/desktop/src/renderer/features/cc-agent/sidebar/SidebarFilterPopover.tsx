@@ -227,14 +227,28 @@ function SelectMenuItem({
   selected,
   onSelect,
   Icon,
+  keepOpen = false,
 }: {
   label: string;
   selected: boolean;
   onSelect: () => void;
   Icon?: LucideIcon;
+  /**
+   * 选中后保持菜单打开(2026-08-12 用户裁决)。给筛选的各维度用:筛选常要连着
+   * 调好几项(状态 + Agent + 最近活跃),每选一次就整棵菜单收掉、得从段头重新点开
+   * 再逐级展开,很难用。项目多选那段本就是这个行为,这里把三个单选维度对齐。
+   * 排序与显示模式仍是选完即关——它们是「一次一个决定」,选完就该看列表效果。
+   */
+  keepOpen?: boolean;
 }) {
   return (
-    <DropdownMenuItem onSelect={onSelect} className={MENU_ITEM_CLASS}>
+    <DropdownMenuItem
+      onSelect={(event) => {
+        if (keepOpen) event.preventDefault();
+        onSelect();
+      }}
+      className={MENU_ITEM_CLASS}
+    >
       <MenuItemIcon Icon={Icon} />
       <span className="truncate">{label}</span>
       {selected && (
@@ -484,6 +498,7 @@ export function SidebarFilterPopover({
                   label={t(option.labelKey)}
                   selected={status === option.value}
                   onSelect={() => setStatus(option.value)}
+                  keepOpen
                 />
               ))}
             </MenuSubRow>
@@ -562,6 +577,7 @@ export function SidebarFilterPopover({
                   label={t(option.labelKey)}
                   selected={vendor === option.value}
                   onSelect={() => setVendor(option.value)}
+                  keepOpen
                 />
               ))}
             </MenuSubRow>
@@ -577,6 +593,7 @@ export function SidebarFilterPopover({
                   label={t(option.labelKey)}
                   selected={lastActivity === option.value}
                   onSelect={() => setLastActivity(option.value)}
+                  keepOpen
                 />
               ))}
             </MenuSubRow>

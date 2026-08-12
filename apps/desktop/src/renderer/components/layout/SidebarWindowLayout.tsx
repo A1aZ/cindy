@@ -74,6 +74,8 @@ export function SidebarWindowLayout() {
   const [ctx, setCtx] = useState<SidebarWindowContext | null>(null);
   // 预热窗口初始隐藏；由 main 的 visibility push 驱动 Shell 内各子面板暂停/恢复。
   const [windowVisible, setWindowVisible] = useState(false);
+  const visibilityRevisionRef = useRef(0);
+  const contextRevisionRef = useRef(0);
   const presentationReadySentRef = useRef(false);
   // 复用隐藏窗口时，Chromium 可能保留上一次关闭按钮的 focus / :hover 状态。
   // 与资源用量窗口一致，隐藏时重挂载 chrome，确保再次显示从干净状态开始。
@@ -89,6 +91,7 @@ export function SidebarWindowLayout() {
       })
       .catch((err) => log.warn('getContext failed', err));
     const offCtx = window.electronAPI.rightSidebarWindow.onContextChanged((next) => {
+      contextRevisionRef.current += 1;
       setCtx(next);
     });
     // renderer-ready:Shell 已挂载,controller 可知 React 组件树就绪。
@@ -120,21 +123,46 @@ export function SidebarWindowLayout() {
   }, []);
 
   // 隐藏/显示时刷新 context(主窗 session 可能已切换)并重置瞬时交互态。
+  // 重新显示不能先恢复交互再异步收 context：否则媒体预览等宿主能力会在短暂窗口内
+  // 沿用隐藏前的 session。这里先保持 Shell 不可交互并撤销旧 context，拿到 main 的
+  // 当前快照后才恢复；revision 防止快速 hide/show 时迟到的请求重新激活窗口。
   useEffect(() => {
     return window.electronAPI.rightSidebarWindow.onVisibilityChanged((payload) => {
-      setWindowVisible(payload.visible);
+      const revision = ++visibilityRevisionRef.current;
       if (!payload.visible) {
+        setWindowVisible(false);
+        setCtx(null);
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
         setWindowChromeRevision((revision) => revision + 1);
       } else {
-        // 重新显示时从 main 缓存拉最新 context
-        void window.electronAPI.rightSidebarWindow.refreshContext().catch(() => undefined);
+        setWindowVisible(false);
+        setCtx(null);
+        const contextRevision = contextRevisionRef.current;
+        // controller 在发送 visible:true 前已经切换为可见态，getContext 此时返回
+        // main 缓存的最新快照；与单向 refresh push 相比，可明确等待本轮刷新完成。
+        void window.electronAPI.rightSidebarWindow
+          .getContext()
+          .then((next) => {
+            if (visibilityRevisionRef.current !== revision) return;
+            // 请求期间若已有更新的 context-changed 推送，以推送为准，避免迟到的
+            // invoke 快照把新会话覆盖回旧会话。
+            if (contextRevisionRef.current === contextRevision) setCtx(next);
+            setWindowVisible(true);
+          })
+          .catch((err) => {
+            if (visibilityRevisionRef.current !== revision) return;
+            log.warn('refresh context on show failed', err);
+            // 保持 context 为空，允许窗口展示安全占位态；后续 context-changed
+            // 推送仍可正常恢复真实任务。
+            setWindowVisible(true);
+          });
         if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       }
     });
   }, []);
 
-  const sessionId = ctx?.available ? ctx.sessionId : null;
+  const activeCtx = windowVisible ? ctx : null;
+  const sessionId = activeCtx?.available ? activeCtx.sessionId : null;
 
   // agent tab-op 触发的可见性请求(本窗口内 rsbBrowserBridge 派发):
   //  - 'close'(最后一个 tab 被关)且目标是当前会话 → 收起 = 关本窗口
@@ -243,9 +271,9 @@ export function SidebarWindowLayout() {
       <div className="relative flex flex-1 flex-col overflow-hidden">
         <RightSidebarShell
           sessionId={sessionId}
-          workdir={ctx?.workdir ?? ''}
-          remoteHostId={ctx?.remoteHostId ?? null}
-          deviceLinkDeviceId={ctx?.deviceLinkDeviceId}
+          workdir={activeCtx?.workdir ?? ''}
+          remoteHostId={activeCtx?.remoteHostId ?? null}
+          deviceLinkDeviceId={activeCtx?.deviceLinkDeviceId}
           shellVisible={windowVisible}
           isMac={isMac}
         />

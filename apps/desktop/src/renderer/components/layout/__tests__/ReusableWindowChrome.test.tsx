@@ -272,7 +272,7 @@ describe('reusable auxiliary window chrome', () => {
     );
   });
 
-  it('passes cached-window visibility through to right-sidebar tab bodies', async () => {
+  it('restores right-sidebar tab bodies only after the visible window has fresh context', async () => {
     render(<SidebarWindowLayout />);
     expect(mocks.sidebarShellVisible).toBe(false);
 
@@ -295,7 +295,58 @@ describe('reusable auxiliary window chrome', () => {
 
     render(<SidebarWindowLayout />);
 
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));
     await waitFor(() => expect(mocks.sidebarLightboxSessionId).toBe('session-a'));
+  });
+
+  it('does not expose a stale media session while refreshing context after reopen', async () => {
+    let resolveFreshContext!: (ctx: RsbWindowContext | null) => void;
+    window.electronAPI.rightSidebarWindow.getContext = vi
+      .fn()
+      .mockResolvedValueOnce({
+        sessionId: 'session-a',
+        workdir: '/workdir-a',
+        remoteHostId: null,
+        available: true,
+      })
+      .mockResolvedValueOnce({
+        sessionId: 'session-a',
+        workdir: '/workdir-a',
+        remoteHostId: null,
+        available: true,
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise<RsbWindowContext | null>((resolve) => {
+            resolveFreshContext = resolve;
+          }),
+      );
+
+    render(<SidebarWindowLayout />);
+    await waitFor(() =>
+      expect(window.electronAPI.rightSidebarWindow.getContext).toHaveBeenCalledTimes(1),
+    );
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: true }));
+    await waitFor(() => expect(mocks.sidebarLightboxSessionId).toBe('session-a'));
+
+    await act(async () => mocks.sidebarVisibilityListener?.({ visible: false }));
+    expect(mocks.sidebarLightboxSessionId).toBeUndefined();
+
+    act(() => mocks.sidebarVisibilityListener?.({ visible: true }));
+    expect(mocks.sidebarShellVisible).toBe(false);
+    expect(mocks.sidebarLightboxSessionId).toBeUndefined();
+
+    await act(async () => {
+      resolveFreshContext({
+        sessionId: 'session-b',
+        workdir: '/workdir-b',
+        remoteHostId: null,
+        available: true,
+      });
+    });
+
+    expect(mocks.sidebarShellVisible).toBe(true);
+    expect(mocks.sidebarLightboxSessionId).toBe('session-b');
   });
 
   it('respects a plugin manifest that disables minimize in the detached window', async () => {

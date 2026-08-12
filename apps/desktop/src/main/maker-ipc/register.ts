@@ -8593,6 +8593,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // sendToSessionInternal 这一条主机通路(消息落库、进程拉起与用户亲发一致);
   // 收口复用 hook-control 的 observeHookTurn(与飞书 bot 同一套 turn 观察语义)。
   setGhostSessionMessageRunner(async ({ sessionId, message, isTargetCurrent }) => {
+    // 先在进入统一发送事务前挡住已经失焦的目标，避免为必然取消的插件请求
+    // 创建排队项或持久化消息；accepted 边界仍会再次复核异步期间的焦点变化。
+    if (!(await isTargetCurrent())) {
+      return {
+        ok: false,
+        errorCode: 'SESSION_UNAVAILABLE',
+        message: '当前焦点任务已变化，请重试',
+      };
+    }
     const clientId = createId();
     const sent = await sendToSessionInternal({
       targetSessionId: sessionId,
@@ -8613,9 +8622,14 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
               err: err instanceof Error ? err.message : String(err),
             });
           }
-          // 清理失败时不能再取消：否则数据库里留下一个永远未派发的可见消息。
-          // 继续派发到已确认的原目标，比制造孤立历史更符合发送事务的不变量。
-          if (!rewound) return;
+          if (!rewound) {
+            log.warn('plugin message rewind was not confirmed before cancelled dispatch', {
+              sessionId,
+              clientId,
+            });
+          }
+          // 焦点权限边界优先于清理结果：回退失败可能留下待后续修复的孤立行，
+          // 但绝不能因此把插件消息派发到已经失焦的任务。
           throw new AcceptedCallbackDispatchCancelled(
             'plugin target session is no longer focused',
           );

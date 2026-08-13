@@ -155,7 +155,7 @@ const PENDING_PROVIDER_SWITCH_ERROR = 'provider_switch_pending';
 
 type PendingCredentialSwitchReader = (
   sessionId: string,
-) => { model: string; providerId: string | null } | undefined;
+) => { model: string; providerId: string | null; previousModel?: string } | undefined;
 let pendingCredentialSwitchReader: PendingCredentialSwitchReader = () => undefined;
 
 /** Main wires the pending switch service into this synchronous routing boundary. */
@@ -246,7 +246,9 @@ export function resolvePendingSessionRouteDecision(
     wireModel &&
     pendingSwitch &&
     pendingSwitch.providerId !== providerId &&
-    samePendingSwitchModel(pendingSwitch.model, wireModel)
+    samePendingSwitchModel(pendingSwitch.model, wireModel) &&
+    (!pendingSwitch.previousModel ||
+      !samePendingSwitchModel(pendingSwitch.previousModel, wireModel))
     ? pendingProviderSwitchRouteDecision(providerId)
     : null;
 }

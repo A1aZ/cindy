@@ -826,6 +826,14 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY, 'old-model')).toMatchObject({
       upstreamOverride: 'https://provider-a.example/v1',
     });
+    setPendingCredentialSwitchReader(() => ({
+      model: 'old-model',
+      providerId: 'provider-b',
+      previousModel: 'old-model',
+    }));
+    expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY, 'old-model')).toMatchObject({
+      upstreamOverride: 'https://provider-a.example/v1',
+    });
     setPendingCredentialSwitchReader(() => undefined);
     expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY, 'unknown-model')).toMatchObject({
       upstreamOverride: 'https://provider-a.example/v1',

@@ -11156,7 +11156,15 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   pendingCredentialSwitchHolder = pendingCredentialSwitchService;
   setPendingCredentialSwitchReader((sessionId) => {
     const pending = pendingCredentialSwitchService.get(sessionId);
-    return pending ? { model: pending.model, providerId: pending.providerId } : undefined;
+    return pending
+      ? {
+          model: pending.model,
+          providerId: pending.providerId,
+          ...(pending.previousRoute?.model
+            ? { previousModel: pending.previousRoute.model }
+            : {}),
+        }
+      : undefined;
   });
 
   // Memory 设置变更撞上 Codex busy 时的延迟软重启登记(见 deferredCodexRestart.ts)。

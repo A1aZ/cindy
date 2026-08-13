@@ -1895,6 +1895,118 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('PowerShell 删除 cmdlet 的系统路径目标 = 确定性红线(与 POSIX rm 同口径)', () => {
+    // `POWERSHELL_DANGER_PATTERNS` 只拦递归/强制形态,写通道表里又没有删除类 cmdlet,于是
+    // 「删掉一个系统文件」这种最直接的破坏一条判据都碰不到、落灰区可被轻量 reviewer 静默放行
+    // (codex 报)。POSIX 侧 `rm /etc/passwd` 早就是必问,这里补齐 PowerShell 原生名。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Remove-Item ${hosts}`,
+      `Remove-Item -Path ${hosts}`,
+      `Remove-Item -LiteralPath ${hosts}`,
+      `Remove-Item -Force ${hosts}`,
+      `Remove-Item ${hosts} -Confirm:$false`,
+      // 别名:`ri` / `rd` 此前谁都没接(`rm`/`rmdir`/`del`/`erase` 落各自既有分支,见下方回归)。
+      `ri ${hosts}`,
+      `rd ${hosts}`,
+      `Clear-Item C:\\Windows\\System32\\x`,
+      `Clear-ItemProperty C:\\Windows\\System32\\x -Name y`,
+      // 路径参数收数组:整串是**一个** shell token,不按逗号拆就看不见系统路径。
+      `Remove-Item a.txt,${hosts}`,
+      `Remove-Item -Path a.txt,${hosts}`,
+      // 载荷下探:`pwsh -Command` 里同样生效。
+      `pwsh -Command Remove-Item ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:区内删除仍是灰区 —— 本改动只把"目标是受保护系统路径"这一档抬起来,
+    // `Remove-Item -Recurse -Force <区内>` 这类日常清理不受影响。
+    for (const c of [
+      'Remove-Item C:\\repo\\build',
+      'Remove-Item -Recurse -Force C:\\repo\\node_modules',
+      'Remove-Item -Path C:\\repo\\dist -Recurse',
+      'Remove-Item C:\\repo\\a.txt,C:\\repo\\b.txt',
+      'ri C:\\repo\\tmp\\a.txt',
+      'Clear-Item C:\\repo\\x',
+      // 只**读**系统注册表/文件的 cmdlet 不算写通道。
+      `Get-Content ${hosts}`,
+      'Get-ItemProperty HKLM:\\SYSTEM\\Foo',
+      'Get-ChildItem HKLM:\\SOFTWARE',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 回归:`rm`/`rmdir`/`del`/`erase` 也是 Remove-Item 的别名,但它们各自落既有分支
+    // (POSIX rm / mkdir·rmdir / cmd del),**不能**被这张表抢走 —— 否则 `--`、shred 带值选项、
+    // cmd `/f /s /q` 的处理都会丢。这几条既要保持必问,又要保持各自分支的语义。
+    const posix = ['/repo'];
+    expect(classifyShellCommand('rm /etc/passwd', posix)).toBe('prompt-each-time');
+    expect(classifyShellCommand('shred -n 3 /etc/shadow', posix)).toBe('prompt-each-time');
+    expect(classifyShellCommand(`del ${hosts}`, win, { platform: 'win32' })).toBe('prompt-each-time');
+    expect(classifyShellCommand(`erase ${hosts}`, win, { platform: 'win32' })).toBe('prompt-each-time');
+    expect(classifyShellCommand('rmdir C:\\Windows\\System32\\x', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // `--` 之后的 `-weird-file` 仍按操作数处理、区内删除不升级(POSIX 分支语义没被顶掉)。
+    expect(classifyShellCommand('rm -- -weird-file', posix)).toBe('prompt');
+    expect(classifyShellCommand('shred -n 3 /repo/secret', posix)).toBe('prompt');
+    expect(classifyShellCommand('del /f /q C:\\repo\\x', win, { platform: 'win32' })).toBe('prompt');
+  });
+
+  it('PowerShell provider 路径(HKLM: 等机器级根)单独硬门禁,不交给文件路径匹配器', () => {
+    // `HKLM:` 的盘名多于一个字符,`isAbsolutePath` 只认单字母盘符 → normalizeTarget 把它当相对
+    // 路径拼到工作区下,`SYSTEM_WRITE_PATH_PATTERNS` 又只覆盖文件系统,于是「改系统注册表」看起来
+    // 落在区内、仍是灰区(codex 报)。这类目标必须在归一**之前**按 provider 根判。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Set-ItemProperty HKLM:\\SYSTEM\\CurrentControlSet\\Services\\x Start 4', // 禁用系统服务
+      'Set-ItemProperty -Path HKLM:\\SYSTEM\\Foo -Name Bar -Value 1',
+      'Set-Item HKLM:\\SOFTWARE\\Evil x',
+      'New-Item HKLM:\\SOFTWARE\\Evil',
+      'Remove-Item HKLM:\\SYSTEM\\Foo',
+      'Remove-ItemProperty -Path HKLM:\\SYSTEM\\Foo -Name Bar',
+      'Set-ItemProperty HKCR:\\.ps1 x 1',
+      'Set-ItemProperty HKU:\\.DEFAULT\\Foo Bar 1',
+      'Set-ItemProperty HKCC:\\Foo Bar 1',
+      // provider 限定形态:`Registry::HKEY_LOCAL_MACHINE\…`、带完整 provider 名的前缀。
+      'Set-ItemProperty Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1',
+      'Set-ItemProperty Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1',
+      'Set-ItemProperty HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1',
+      'set-itemproperty hklm:\\system\\foo bar 1', // 大小写不敏感
+      // 机器根证书区:装证书等于改信任链。
+      'New-Item Cert:\\LocalMachine\\Root\\x',
+      // 载荷下探同样生效。
+      'pwsh -Command Set-ItemProperty HKLM:\\SYSTEM\\Foo Bar 1',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:**只门禁机器级的根**。`HKCU:` 是当前用户自己的 hive、开发工具日常在写,
+    // `Env:`/`Variable:` 是进程内状态 —— 一并硬拦会把常规操作打成必问,违背"只在真正跨越
+    // 同意边界时才打断"。这些留灰区交 reviewer 裁决。
+    for (const c of [
+      'Set-ItemProperty HKCU:\\Software\\Foo Bar 1',
+      'Set-ItemProperty HKCU:\\Software\\Classes\\x y 1',
+      'Remove-Item HKCU:\\Software\\Mine',
+      'Remove-ItemProperty -Path HKCU:\\Software\\Mine -Name Bar',
+      'Set-ItemProperty Env:\\FOO bar',
+      'Set-Item Env:PATH x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 直接测导出判据:provider 根本身与其子路径都算,不受"像不像文件路径"影响。
+    expect(isProtectedSystemPath('HKLM:\\SYSTEM\\Foo')).toBe(true);
+    expect(isProtectedSystemPath('HKLM:')).toBe(true);
+    expect(isProtectedSystemPath('Registry::HKEY_LOCAL_MACHINE\\SYSTEM')).toBe(true);
+    expect(isProtectedSystemPath('HKCU:\\Software\\Foo')).toBe(false);
+    // 名字**以**受保护根开头但不是同一个根 → 不误命中(HKCU vs HKCR/HKU 的前缀重叠)。
+    expect(isProtectedSystemPath('HKCU:')).toBe(false);
+    expect(isProtectedSystemPath('HKLMX:\\Foo')).toBe(false);
+    expect(isProtectedSystemPath('C:\\repo\\HKLM-notes.txt')).toBe(false);
+  });
+
   it('setsid 的选项不遮蔽内层破坏命令', () => {
     for (const c of [
       'setsid -f rm -rf /outside',

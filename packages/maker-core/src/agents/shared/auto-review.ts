@@ -310,8 +310,9 @@ function shortClusterOption(
  * (codex 报)。补齐后 PowerShell 与其它入口判得一致。
  *
  * `sources: true` = 源操作数同样被销毁(搬走/改名系统文件等于改掉它),源与目标都算写目标。
+ * `targets: 'all'` = 每个操作数都是被写/被删的目标(删除类 cmdlet 的 `-Path` 收数组)。
  */
-const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last'; sources?: boolean }> =
+const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' | 'all'; sources?: boolean }> =
   new Map([
     // 写内容到 -Path(位置 0),值是第二个操作数。
     ['set-content', { targets: 'first' }],
@@ -336,6 +337,24 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last';
     ['rename-item', { targets: 'first', sources: true }],
     ['rni', { targets: 'first', sources: true }],
     ['ren', { targets: 'first', sources: true }],
+    // 删除同样是写通道:`Remove-Item C:\Windows\System32\drivers\etc\hosts`(不带 -Recurse/-Force)
+    // 此前一条判据都碰不到 —— POWERSHELL_DANGER_PATTERNS 只拦递归/强制形态,这张表又没有它,
+    // 于是删单个系统文件落灰区、可被轻量 reviewer 静默放行(codex 报)。与 POSIX `rm` 同口径:
+    // **所有**删除目标都要过受保护路径判定。
+    // 只列 PowerShell 原生名与**未被其它分支覆盖**的别名 —— `rm`/`rmdir`/`del`/`erase` 虽然也是
+    // Remove-Item 的别名,但它们已分别落到本函数下面的 POSIX rm / mkdir·rmdir / cmd del 分支
+    // (都已取到全部操作数、实测必问);放进这张表会**抢走**那些分支,反而丢掉 `--`、shred 带值
+    // 选项、cmd `/f /s /q` 这些各自的处理。`ri` / `rd` 此前谁都没接,是真正的漏网。
+    // 已知取舍:`-WhatIf`(空跑,并不真删)也会一并要求确认 —— 方向是多问一次,不放宽。
+    ['remove-item', { targets: 'all' }],
+    ['ri', { targets: 'all' }],
+    ['rd', { targets: 'all' }],
+    ['remove-itemproperty', { targets: 'all' }],
+    ['rp', { targets: 'all' }],
+    ['clear-item', { targets: 'all' }],
+    ['cli', { targets: 'all' }],
+    ['clear-itemproperty', { targets: 'all' }],
+    ['clp', { targets: 'all' }],
   ]);
 
 /** PowerShell 里指定写目标的具名参数(大小写无关,支持唯一前缀缩写)。 */
@@ -395,7 +414,9 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
         continue;
       }
       // 目标参数缺值 = 写通道在、目标不可证 → 哨兵(与 `cp --target-directory` 缺值同口径)。
-      named.push(value !== undefined && !value.startsWith('-') ? value : UNPROVABLE_WRITE_TARGET);
+      named.push(...(value !== undefined && !value.startsWith('-')
+        ? splitPowerShellPathList(value)
+        : [UNPROVABLE_WRITE_TARGET]));
       i++;
       continue;
     }
@@ -403,18 +424,30 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   }
   if (named.length > 0) {
     // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`)。
-    return spec.sources ? [...named, ...operands] : named;
+    return spec.sources ? [...named, ...operands.flatMap(splitPowerShellPathList)] : named;
   }
   // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
   // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
   // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
   if (operands.length === 0) return [];
-  if (spec.sources) return operands;
-  if (spec.targets === 'first') return [operands[0]];
+  if (spec.targets === 'all' || spec.sources) return operands.flatMap(splitPowerShellPathList);
+  if (spec.targets === 'first') return splitPowerShellPathList(operands[0]);
   // 末位是目标;只给一个操作数时 PowerShell 的 -Destination 默认当前位置(`Copy-Item payload`
   // 合法且常用)→ 目标就是 cwd,交给调用方按有效 cwd 解析(cwd 未知时那边会 fail-closed),
   // **不能**当成不可证而硬弹卡:那会把日常复制打成必问。
-  return operands.length >= 2 ? [operands[operands.length - 1]] : ['.'];
+  return operands.length >= 2 ? splitPowerShellPathList(operands[operands.length - 1]) : ['.'];
+}
+
+/**
+ * PowerShell 的路径参数收数组:`Remove-Item a.txt,C:\Windows\System32\drivers\etc\hosts` 是
+ * **一个** shell token,不拆就只看到拼在一起的整串、系统路径漏掉。按逗号拆成各段分别判。
+ * 方向安全:真含逗号的文件名被拆开后,绝对路径那一半仍保留系统根前缀(`C:\Windows\a,b` →
+ * `C:\Windows\a`),命中判据不变;最坏情况是多问一次。
+ */
+function splitPowerShellPathList(token: string): string[] {
+  if (!token.includes(',')) return [token];
+  const parts = token.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  return parts.length > 0 ? parts : [token];
 }
 
 function argumentWriteTargets(tokens: string[]): string[] {
@@ -639,9 +672,36 @@ function argumentWriteTargets(tokens: string[]): string[] {
  */
 const SAFE_DEVICE_PATH = /^\/dev\/(?:null|zero|full|random|urandom|std(?:in|out|err)|tty|fd\/\d+)$/i;
 
+/**
+ * PowerShell **provider 路径**里机器级的受保护根 —— 不是文件系统路径,不能交给路径匹配器。
+ *
+ * `Set-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\x Start 4`(禁用系统服务)、
+ * `Remove-Item HKLM:\SYSTEM\…`、`New-Item HKLM:\SOFTWARE\…` 都已被写通道表抽出目标,但
+ * `HKLM:` 的盘名有两个以上字符,`isAbsolutePath` 只认单字母盘符 → 被当成相对路径拼到工作区下,
+ * `SYSTEM_WRITE_PATH_PATTERNS` 又只覆盖文件系统,结果注册表改写仍是灰区、可被静默放行(codex 报)。
+ *
+ * **只门禁机器级的根**:`HKLM:`/`HKCR:`/`HKU:`/`HKCC:` 都是全机生效、正常需要管理员。
+ * **`HKCU:` 有意留灰区** —— 那是当前用户自己的 hive,开发工具日常就在写,一并硬拦会把常规
+ * 操作打成必问,违背"只在真正跨越同意边界时才打断"。`Env:`/`Variable:`/`Function:`/`Alias:`
+ * 同理(进程内、退出即失效)。`Cert:\LocalMachine` 纳入:往机器根证书区装证书等于改信任链。
+ */
+const PROTECTED_PROVIDER_REGISTRY_ROOT =
+  /^(?:HK(?:LM|CR|U|CC|PD)|HKEY_(?:LOCAL_MACHINE|CLASSES_ROOT|USERS|CURRENT_CONFIG|PERFORMANCE_DATA))(?::|[\\/]|$)/i;
+const PROTECTED_PROVIDER_CERT_ROOT = /^Cert:\/LocalMachine(?:\/|$)/i;
+
+function isProtectedProviderPath(target: string): boolean {
+  if (typeof target !== 'string' || target.length === 0) return false;
+  // provider 限定形态:`Registry::HKEY_LOCAL_MACHINE\…`、`Microsoft.PowerShell.Core\Registry::…`。
+  const body = target.replace(/^['"]|['"]$/g, '')
+    .replace(/^(?:[\w.]+[\\/])*(?:registry|certificate)::/i, '');
+  return PROTECTED_PROVIDER_REGISTRY_ROOT.test(body)
+    || PROTECTED_PROVIDER_CERT_ROOT.test(toForwardSlashes(body));
+}
+
 /** 路径是否落在系统/受保护目录(写入需确定性用户同意)。入参应为已归一的目标路径。 */
 export function isProtectedSystemPath(target: string): boolean {
   if (typeof target !== 'string' || target.length === 0) return false;
+  if (isProtectedProviderPath(target)) return true;
   if (SAFE_DEVICE_PATH.test(toForwardSlashes(target))) return false;
   // 先剥离 Windows extended-length / device namespace 前缀(`\\?\` `\\.\` `\\?\UNC\`):toForwardSlashes
   // 后它们变成 `//?/C:/…` / `//./C:/…`,会绕过盘符系统目录匹配落入灰区(copilot 报;与 desktop
@@ -2723,6 +2783,9 @@ function systemWriteTargetsInSegment(
   if (targets.length === 0) return false;
   // 静态不可证的写目标(tar -P 的归档成员等)一律要求同意。
   if (targets.includes(UNPROVABLE_WRITE_TARGET)) return true;
+  // PowerShell provider 路径(`HKLM:\…`)必须在归一**之前**判:normalizeTarget 只认单字母盘符,
+  // 会把它当相对路径拼到工作区下,于是注册表写入看起来落在区内。
+  if (targets.some(isProtectedProviderPath)) return true;
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
   return targets.some((t) =>

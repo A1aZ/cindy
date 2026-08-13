@@ -5,13 +5,20 @@ const COMPOSER_GAP_PX = 6;
 
 export function resolveMessageStreamIndicatorBottomOffset({
   bottomPadding,
-  composerTopOffset,
+  composerStackTopOffset,
 }: {
   bottomPadding?: number;
-  composerTopOffset?: number;
+  composerStackTopOffset?: number;
 }): number {
-  if (composerTopOffset != null) return composerTopOffset + COMPOSER_GAP_PX;
+  if (composerStackTopOffset != null) return composerStackTopOffset + COMPOSER_GAP_PX;
 
   const resolvedBottomPadding = bottomPadding ?? DEFAULT_BOTTOM_PADDING_PX;
   return Math.max(resolvedBottomPadding - LEGACY_STATUS_ROW_OFFSET_PX, MIN_BOTTOM_OFFSET_PX);
+}
+
+export function measureComposerStackTopOffset(overlayEl: HTMLElement): number | undefined {
+  const composerStack = overlayEl.querySelector<HTMLElement>('[data-chat-input-root]');
+  if (!composerStack) return undefined;
+
+  return overlayEl.getBoundingClientRect().bottom - composerStack.getBoundingClientRect().top;
 }

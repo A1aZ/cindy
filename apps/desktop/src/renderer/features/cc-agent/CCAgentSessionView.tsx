@@ -71,6 +71,7 @@ import { PlanViewerCard } from '@/components/new-chat/PlanViewerCard';
 import { PlanActionCard } from '@/components/new-chat/PlanActionCard';
 import { InteractionPromptHost } from '@/components/interaction-portal';
 import { MessageStream } from '@/components/chat/MessageStream';
+import { measureComposerStackTopOffset } from '@/components/chat/messageStreamIndicatorPosition';
 import { ShareSelectionBar } from '@/components/chat/ShareSelectionBar';
 import {
   shareSelectionStore,
@@ -1155,18 +1156,18 @@ export function CCAgentSessionView({
     setOverlayEl(node);
   }, []);
   const [overlayHeight, setOverlayHeight] = useState(200);
-  const [composerTopOffset, setComposerTopOffset] = useState<number | undefined>(undefined);
+  const [composerStackTopOffset, setComposerStackTopOffset] = useState<number | undefined>(
+    undefined,
+  );
 
   useEffect(() => {
     if (!overlayEl) return;
     const measureOverlay = () => {
-      // 状态行会动态出现 / 收起，overlay 总高度不等于输入框卡片顶边。
-      // 直接量卡片到 overlay 底边的距离，让消息流悬浮按钮不受状态行高度影响。
+      // 状态行会动态出现 / 收起，overlay 总高度不等于 composer 栈顶边。
+      // 直接量完整 composer 栈（含计划模式提示）到 overlay 底边的距离，
+      // 让消息流悬浮按钮不受状态行或输入框内部状态高度影响。
       setOverlayHeight(overlayEl.offsetHeight);
-      const composerCard = overlayEl.querySelector<HTMLElement>('[data-chat-input-card]');
-      setComposerTopOffset(
-        composerCard ? overlayEl.getBoundingClientRect().bottom - composerCard.getBoundingClientRect().top : undefined,
-      );
+      setComposerStackTopOffset(measureComposerStackTopOffset(overlayEl));
     };
     // Seed with the current height so the first paint after remount uses the
     // real value (not the stale state from the previous mount).
@@ -3701,7 +3702,7 @@ export function CCAgentSessionView({
       isLoadingMore={isLoadingMore}
       hasMoreMessages={hasMoreMessages}
       bottomPadding={overlayHeight}
-      composerTopOffset={composerTopOffset}
+      composerStackTopOffset={composerStackTopOffset}
       contentWidth={messageWidth}
       focusMessageClientId={focusedMessageTarget?.clientId ?? null}
       focusMessageRequestId={focusedMessageTarget?.requestId ?? 0}

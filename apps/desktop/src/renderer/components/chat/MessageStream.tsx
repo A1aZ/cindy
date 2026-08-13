@@ -268,8 +268,8 @@ interface MessageStreamProps {
   hasMoreMessages?: boolean;
   /** Dynamic bottom padding (px) to reserve space for the input overlay */
   bottomPadding?: number;
-  /** Distance from the chat viewport bottom to the visible composer card top. */
-  composerTopOffset?: number;
+  /** Distance from the chat viewport bottom to the visible composer stack top. */
+  composerStackTopOffset?: number;
   /** Content width — shared with the input overlay so chat stream + input
    *  box stay horizontally aligned (same width, same center, symmetric
    *  padding when the main area is compressed). */
@@ -2539,7 +2539,7 @@ export function MessageStream({
   isLoadingMore,
   hasMoreMessages,
   bottomPadding,
-  composerTopOffset,
+  composerStackTopOffset,
   contentWidth,
   focusMessageClientId,
   focusMessageRequestId,
@@ -4244,7 +4244,7 @@ export function MessageStream({
   const resolvedBottomPadding = bottomPadding ?? 200;
   const indicatorBottomOffset = resolveMessageStreamIndicatorBottomOffset({
     bottomPadding,
-    composerTopOffset,
+    composerStackTopOffset,
   });
 
   // 「提及 → 兑现」关联(方案 2):从会话历史现算,软提示卡据此升级为召唤卡。

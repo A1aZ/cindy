@@ -63,7 +63,7 @@ export type ReviewableAction =
   // 必须按未知处理:相对破坏目标不可证明在区内(copidot 报 `params.cwd || workingDir` 把空串当区内)。
   | { kind: 'exec'; command: string; cwd?: string; cwdUnknown?: boolean }
   | { kind: 'network'; target?: string; operation?: string }
-  | { kind: 'other'; description?: string };
+  | { kind: 'other'; description?: string; requireConsent?: boolean };
 
 /**
  * 核心裁决。纯函数、确定性、无副作用(不触文件系统 —— 探文件存在性会变侧信道,且对远端
@@ -132,6 +132,10 @@ export function reviewAction(
       if (action.target && isInternalFetchTarget(action.target)) return 'prompt-each-time';
       return 'prompt';
     case 'other':
+      // 未映射内置工具的安全性取决于入参(路径/收件人/部署目标),而 description 只带形状和
+      // 指纹、看不到值 —— 审阅器 allow 等于主动断言安全(codex 报)。`requireConsent` 把它
+      // 留在用户确认,不交灰区。Pi MCP 等已有完整证据的 other 不加这个标记,仍走审阅器。
+      return action.requireConsent ? 'prompt-each-time' : 'prompt';
     default:
       return 'prompt';
   }

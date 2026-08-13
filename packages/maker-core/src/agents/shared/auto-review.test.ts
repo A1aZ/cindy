@@ -24,8 +24,11 @@ describe('reviewAction — 非 shell 动作', () => {
   it('network → prompt(exfil 面)', () => {
     expect(reviewAction({ kind: 'network' }, roots)).toBe('prompt');
   });
-  it('other / 未知 → prompt(fail-closed)', () => {
+  it('other / 未知 → prompt;标了 requireConsent 则每次必问', () => {
     expect(reviewAction({ kind: 'other' }, roots)).toBe('prompt');
+    expect(reviewAction({ kind: 'other', description: 'mcp tool' }, roots)).toBe('prompt');
+    expect(reviewAction({ kind: 'other', description: 'unmapped', requireConsent: true }, roots))
+      .toBe('prompt-each-time');
   });
 });
 

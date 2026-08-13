@@ -272,7 +272,13 @@ export function normalizeBuiltinToolForAutoReview(
   // (shared/auto-review-decision.ts)被判为「证据不足」→ 在调模型**之前**直接
   // block。那不是「fail-closed 升级」而是静默拒绝:用户既看不到卡也没有理由,
   // 而 SDK 每加一个内置工具就会复发一次(实测 PowerShell 已中)。
-  return { kind: 'other', description: describeUnknownTool(toolName, input) };
+  return {
+    kind: 'other',
+    description: describeUnknownTool(toolName, input),
+    // 形状+指纹能分缓存桶,但不能让审阅器区分工作区/系统路径或测试/生产目标。
+    // 未映射工具在有显式归类之前必须用户确认,不能 allow(codex 报)。
+    requireConsent: true,
+  };
 }
 
 /**
@@ -286,8 +292,8 @@ export function normalizeBuiltinToolForAutoReview(
  *    于是「先一次无害调用拿到 allow、后续任意参数复用该 allow」(codex 报)。
  *    带上入参指纹让不同参数各自成键。
  *
- * 指纹用长度 + 字符和,不可逆(拿不回原文)但对内容变化敏感 —— 目的只是分桶,
- * 不是密码学承诺。真正的安全判断由审阅器基于键名与形状做。
+ * 形状与指纹**不是**安全证据:审阅器看不见路径是工作区还是系统目录。未映射
+ * 工具另标 `requireConsent`,确定性必问,不把 allow 交给审阅器。
  */
 function describeUnknownTool(toolName: string, input: unknown): string {
   const shape = describeInputShape(input);

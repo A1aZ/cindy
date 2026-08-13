@@ -259,9 +259,14 @@ describe('classifyBuiltinToolForAutoReview — 外发与未知', () => {
     expect(verdict('WebFetch', { url: 'https://x' })).toBe('prompt');
     expect(verdict('WebSearch', { query: 'x' })).toBe('prompt');
   });
-  it('未知工具 → prompt(fail-closed)', () => {
-    expect(verdict('SomeFutureTool', { anything: 1 })).toBe('prompt');
-    expect(verdict('mcp__srv__tool', {})).toBe('prompt'); // 理论上不会传 MCP 进来,兜底也 fail-closed
+  it('未知工具 → prompt-each-time(没有入参映射就不能 allow)', () => {
+    // 形状+指纹进 description,但审阅器仍分不清工作区/系统路径。未映射内置工具在有
+    // 显式归类之前必须用户确认,不能交给灰区 reviewer 静默 allow(codex 报)。
+    expect(verdict('SomeFutureTool', { anything: 1 })).toBe('prompt-each-time');
+    expect(verdict('SomeFutureTool', { path: '/etc/passwd' })).toBe('prompt-each-time');
+    expect(verdict('SomeFutureTool', { path: '/repo/a.ts' })).toBe('prompt-each-time');
+    expect(verdict('SomeFutureTool', {})).toBe('prompt-each-time');
+    expect(verdict('mcp__srv__tool', {})).toBe('prompt-each-time');
   });
 });
 
@@ -477,6 +482,8 @@ describe('工具映射漏项不得变成静默拒绝', () => {
     expect(action.kind === 'other' && action.description?.trim()).toBeTruthy();
     // 描述里带工具名,便于审阅器判断这类动作。
     expect(action.kind === 'other' && action.description).toContain('SomeFutureTool');
+    // 未映射内置工具必须用户确认:形状进 description 不等于审阅器可以 allow。
+    expect(action.kind === 'other' && action.requireConsent).toBe(true);
   });
 
   it('兜底 description 不得泄漏入参内容', () => {

@@ -133,6 +133,47 @@ describe('sidebarInstallVintage:老安装识别', () => {
     expect(getSidebarInstallVintage()).toBe('legacy');
   });
 
+  // 2026-08-13 review P1:claim key 由 sidebarOwnerStorage 在任何首次 owner-scoped
+  // 读取时建账写入——全新安装首帧 useSidebarFilter(父组件)先跑,首次读显示模式
+  // (子组件)在后。按「存在即痕迹」判会把所有新装误判成老装。
+  it('新装首帧建账写入的 claim key(捕获值全 null)不构成旧版痕迹', () => {
+    localStorage.setItem(
+      vintageTesting.OWNER_CLAIM_KEY,
+      JSON.stringify({
+        version: 1,
+        ownerId: 'owner-1',
+        legacy: {
+          schemaVersion: 1,
+          values: {
+            'cc-agent.sidebar.filter.projects': null,
+            'cc-agent.sidebar.pinnedSessionOrder': null,
+          },
+        },
+      }),
+    );
+    expect(getSidebarInstallVintage()).toBe('fresh');
+  });
+
+  it('claim 信封捕获到非空旧数据 = 老安装', () => {
+    localStorage.setItem(
+      vintageTesting.OWNER_CLAIM_KEY,
+      JSON.stringify({
+        version: 1,
+        ownerId: 'owner-1',
+        legacy: {
+          schemaVersion: 1,
+          values: { 'cc-agent.sidebar.filter.projects': '["/repo"]' },
+        },
+      }),
+    );
+    expect(getSidebarInstallVintage()).toBe('legacy');
+  });
+
+  it('bare 字符串形态的 claim(未发布中间版本的占位)= 老安装', () => {
+    localStorage.setItem(vintageTesting.OWNER_CLAIM_KEY, 'owner-1');
+    expect(getSidebarInstallVintage()).toBe('legacy');
+  });
+
   it('其它以痕迹键为前缀但非 owner-scoped 的键不误判', () => {
     localStorage.setItem('cc-agent.sidebar.collapsedProjectsSomethingElse', 'x');
     expect(getSidebarInstallVintage()).toBe('fresh');

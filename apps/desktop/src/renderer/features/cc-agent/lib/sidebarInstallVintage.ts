@@ -30,25 +30,54 @@ const INSTALL_VINTAGE_KEY = 'cc-agent.sidebar.installVintage.v1';
  * 「用过旧版」的痕迹 key。全部早于侧边栏重设计存在,且都不需要用户主动改设置:
  *   - lastChatView / lastDocView:打开过任意会话 / 文件视图就写(最强信号)。
  *   - collapsedProjects / collapsedAutomationGroups:折叠过任意分组。
- *   - identityOwnerClaim:侧栏 owner-scoped 存储建账(登录后用过侧栏)。
  *   - pinnedSessionOrder / filter.projects / filter.manualProjectOrder:置顶拖拽、
  *     项目筛选与手动排序(owner-scoped 前的历史裸 key,老安装才会有)。
  *   - sidebar.cardMode:显式改过显示模式(这类用户本就能被 cardMode 自身识别,
  *     列在这里是为了让判定对「只改过显示模式」的人同样成立)。
  * 注:owner-scoped 之后这些 key 会带 owner 后缀(sidebarOwnerStorage 的格式是
  * `<base>.owner.<ownerId>`),故除全等外再做该前缀匹配。
+ *
+ * ⚠️ identityOwnerClaim **不在**本表(2026-08-13 review 修正):它由
+ * sidebarOwnerStorage 在**任何**首次 owner-scoped 读取时建账写入——全新安装
+ * 首帧 useSidebarFilter 就会触发,且发生在首次读显示模式之前。按「存在即痕迹」
+ * 判会把所有新装都误判成老装,恰好打穿唯一的新老分叉(新装列表视图)。它只在
+ * 信封里**捕获到非空旧数据**时才构成旧版证据,见 claimEnvelopeCapturedLegacyData。
  */
 const LEGACY_USAGE_KEYS = [
   'cc-agent.lastChatView.v1',
   'cc-agent.lastDocView.v1',
   'cc-agent.sidebar.collapsedProjects',
   'cc-agent.sidebar.collapsedAutomationGroups',
-  'cc-agent.sidebar.identityOwnerClaim.v1',
   'cc-agent.sidebar.pinnedSessionOrder',
   'cc-agent.sidebar.filter.projects',
   'cc-agent.sidebar.filter.manualProjectOrder',
   'sidebar.cardMode',
 ] as const;
+
+/** sidebarOwnerStorage 的建账 key(格式见该模块;这里只读不写)。 */
+const OWNER_CLAIM_KEY = 'cc-agent.sidebar.identityOwnerClaim.v1';
+
+/**
+ * claim 信封是否捕获到了非空旧数据。三种取值的判定:
+ *   - envelope JSON 且 legacy.values 有任一非 null → 建账那一刻裸根键还有真实
+ *     旧数据 = 老安装;全 null = 建账时一无所有 = 新装建的账,不算痕迹。
+ *   - bare 字符串(非 JSON):未发布中间版本写的占位——能出现就说明装过旧版本,
+ *     算老安装。
+ *   - 解析异常 → 不算痕迹(证据不明时倾向 fresh:误给新默认的代价是显示密度
+ *     差异,一键可改;误判成 legacy 则新装永远拿不到新默认)。
+ */
+function claimEnvelopeCapturedLegacyData(raw: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== 'object' || parsed === null) return true; // bare 标记经 JSON.parse 成功仅当是字面量,视同旧版占位
+    const values = (parsed as { legacy?: { values?: Record<string, unknown> } }).legacy?.values;
+    if (values == null || typeof values !== 'object') return false;
+    return Object.values(values).some((value) => value != null);
+  } catch {
+    // 非 JSON = bare ownerId 字符串(未发布中间版本的占位)→ 装过旧版本。
+    return true;
+  }
+}
 
 export type SidebarInstallVintage = 'legacy' | 'fresh';
 
@@ -74,6 +103,13 @@ function hasLegacyUsageTrace(storage: Storage): boolean {
     if (LEGACY_USAGE_KEYS.some((base) => key === base || key.startsWith(`${base}.owner.`))) {
       return true;
     }
+  }
+  // claim key 单独判(不看存在、只看内容),原因见 LEGACY_USAGE_KEYS 头注。
+  try {
+    const claim = storage.getItem(OWNER_CLAIM_KEY);
+    if (claim != null && claimEnvelopeCapturedLegacyData(claim)) return true;
+  } catch {
+    // 读不到按无痕迹处理。
   }
   return false;
 }
@@ -107,6 +143,7 @@ export function getSidebarInstallVintage(): SidebarInstallVintage {
 export const __testing = {
   INSTALL_VINTAGE_KEY,
   LEGACY_USAGE_KEYS,
+  OWNER_CLAIM_KEY,
   resetMemo(): void {
     memoized = null;
   },

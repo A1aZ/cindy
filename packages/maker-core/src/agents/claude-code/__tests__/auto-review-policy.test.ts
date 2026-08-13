@@ -420,10 +420,18 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       "&'pwsh' -enc SQBFAFgA",
       '&pwsh -enc SQBFAFgA',
       ".'C:\\Program Files\\PowerShell\\7\\pwsh.exe' -enc SQBFAFgA",
-      '&& pwsh -enc SQBFAFgA', // 链式运算符后同样跟着一条真命令
     ]) {
       expect(verdict('PowerShell', { command }), command).toBe('prompt-each-time');
     }
+
+    // **只认单个 `&`**:`&&` 是管道链运算符,开头就写 `&& pwsh …` 左边没有管道、根本不执行,
+    // 而 `& pwsh …` 会执行 —— 折叠成同一条归一结果就等于让不执行的写法拿到的 allow 被能
+    // 执行的写法复用(codex 报)。曾为对齐 Bash 入口判档写成 `&{1,2}`,那是拿判档一致性去换
+    // 身份正确性,方向错了。
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: '&& pwsh -File a.ps1' }))
+      .not.toEqual(normalizeBuiltinToolForAutoReview('PowerShell', { command: '& pwsh -File a.ps1' }));
+    expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: '&& pwsh -enc SQBFAFgA' }))
+      .toEqual({ kind: 'exec', command: "pwsh -Command '&& pwsh -enc SQBFAFgA'" });
     // 紧贴形态与空格形态语义相同(都是执行同一个二进制),归一到同一条身份是安全的。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "&'C:\\tmp\\pwsh.exe' -enc X" }))
       .toEqual(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\tmp\\pwsh.exe' -enc X" }));
@@ -589,6 +597,15 @@ describe('工具映射漏项不得变成静默拒绝', () => {
     // 但数组顺序是语义,不能被规范化抹平。
     expect(normalizeBuiltinToolForAutoReview('T', { list: [1, 2] }))
       .not.toEqual(normalizeBuiltinToolForAutoReview('T', { list: [2, 1] }));
+
+    // `__proto__` 必须留在身份里:JSON.parse 产生的是 own 属性,但往普通 `{}` 上赋值会触发
+    // 原型 setter 而不建立 own 属性 —— 字段被静默丢掉,两个不同值都序列化成 `{}`
+    // (形状也相同)→ 指纹碰撞(codex 报)。规范化用 Object.create(null) 承接。
+    expect(normalizeBuiltinToolForAutoReview('T', JSON.parse('{"__proto__":"/tmp/safe__"}')))
+      .not.toEqual(normalizeBuiltinToolForAutoReview('T', JSON.parse('{"__proto__":"/etc/passwd"}')));
+    // 嵌套层同理。
+    expect(normalizeBuiltinToolForAutoReview('T', JSON.parse('{"o":{"__proto__":"a"}}')))
+      .not.toEqual(normalizeBuiltinToolForAutoReview('T', JSON.parse('{"o":{"__proto__":"b"}}')));
   });
 
   it('不可序列化入参不抛错,仍给出非空证据', () => {

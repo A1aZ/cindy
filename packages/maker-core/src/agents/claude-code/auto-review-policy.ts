@@ -121,10 +121,17 @@ function quoteAsSingleShellToken(text: string): string {
  * 落灰区不等于放行:审阅器面对不可读的 base64 倾向询问。
  */
 /**
- * 开头的调用运算符:`&` 调用、`&&` 链式、`.` 点源。与目标之间的空白可选。
- * `.` 必须紧跟空白或引号 —— 否则 `.\script.ps1` / `./script.ps1`(相对路径调用)会被误剥。
+ * 开头的调用运算符:`&` 调用、`.` 点源。与目标之间的空白可选。
+ *
+ * 两条边界都是踩过的:
+ *   - **只认单个 `&`**。`&&` 是管道链运算符,开头就写 `&& pwsh …` 左边没有管道、根本不执行,
+ *     而 `& pwsh …` 会执行 —— 把两者折叠成同一条归一结果,就等于让不执行的写法拿到的 allow
+ *     被能执行的写法复用(codex 报)。曾为了对齐 Bash 入口的判档写成 `&{1,2}`,那是拿判档
+ *     一致性去换身份正确性,方向错了。
+ *   - **`.` 必须紧跟空白或引号**。否则 `.\script.ps1` / `./script.ps1`(相对路径调用)会被
+ *     剥掉开头的 `.` 而变成另一个路径。
  */
-const CALL_OPERATOR_PREFIX = /^(?:&{1,2}|\.(?=[\s'"]))\s*/;
+const CALL_OPERATOR_PREFIX = /^(?:&(?!&)|\.(?=[\s'"]))\s*/;
 
 function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。
@@ -139,14 +146,13 @@ function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 对**可执行文件**而言 `.` 与 `&` 效果相同(点源的作用域差异只对脚本有意义),
   // 合并这两种写法是安全的;真正要区分的「执行 / 不执行」这一位完整保住了。
   //
-  // 运算符与目标之间的空白是**可选**的(`&'C:\…\pwsh.exe'`、`.'…'` 都是合法 PowerShell),
-  // 链式 `&&` 后面同样跟着一条真命令。早先要求必须有空白,于是紧贴写法整条被包成
-  // `-Command` 载荷、argv 红线失效 —— 而 core 原样透传这些写法时是**能**命中的
-  // (实测 `&'C:\…\pwsh.exe' -enc X` 在 Bash 入口判 prompt-each-time),
-  // 也就是说那个降级是本 adapter 自己造成的,不属于 #2563 的 core 侧缺口(codex 报)。
+  // 运算符与目标之间的空白是**可选**的(`&'C:\…\pwsh.exe'`、`.'…'` 都是合法 PowerShell)。
+  // 早先要求必须有空白,于是紧贴写法整条被包成 `-Command` 载荷、argv 红线失效 —— 而 core
+  // 原样透传这些写法时是**能**命中的(实测 `&'C:\…\pwsh.exe' -enc X` 在 Bash 入口判
+  // prompt-each-time),也就是说那个降级是本 adapter 自己造成的,不属于 #2563 的 core 侧
+  // 缺口(codex 报)。判定归属就靠这条:两个入口结论不同 = 我的问题,结论相同 = core 的问题。
   //
-  // `.` 后面必须紧跟空白或引号才算点源:`.\script.ps1` / `./script.ps1` 是相对路径调用,
-  // 剥掉开头的 `.` 会把路径改成另一个东西。
+  // 运算符的形状边界见 CALL_OPERATOR_PREFIX 的注释(只认单个 `&`;`.` 须紧跟空白或引号)。
   const operator = CALL_OPERATOR_PREFIX.test(command) ? '& ' : '';
   const withoutOperator = command.replace(CALL_OPERATOR_PREFIX, '');
   const target = leadingShellToken(withoutOperator);
@@ -435,7 +441,11 @@ function canonicalize(value: unknown, seen: Set<object>): unknown {
   seen.add(obj);
   try {
     if (Array.isArray(value)) return value.map((item) => canonicalize(item, seen));
-    const out: Record<string, unknown> = {};
+    // **必须 Object.create(null)**:`JSON.parse('{"__proto__":"x"}')` 产生的是 own 属性,
+    // 但往普通 `{}` 上 `out['__proto__'] = …` 会触发原型 setter 而**不建立 own 属性** ——
+    // 该字段被静默丢掉,`{"__proto__":"/tmp/safe__"}` 与 `{"__proto__":"/etc/passwd"}`
+    // 都序列化成 `{}`(形状也相同)→ 指纹碰撞 → 前者的 allow 被后者复用(codex 报,已实测)。
+    const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
       out[key] = canonicalize((value as Record<string, unknown>)[key], seen);
     }

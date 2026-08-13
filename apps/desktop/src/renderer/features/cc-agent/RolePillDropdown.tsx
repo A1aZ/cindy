@@ -167,7 +167,8 @@ function ensureChildHorizontallyVisible(container: HTMLElement, child: HTMLEleme
 type WorkerListLayout = 'tabs' | 'dropdown';
 type DropdownOpenMode = 'transient' | 'pinned' | null;
 
-function readStoredWorkerListLayout(): WorkerListLayout {
+// Exported for direct unit testing of the default-layout fallback matrix.
+export function readStoredWorkerListLayout(): WorkerListLayout {
   if (typeof window === 'undefined') return 'tabs';
   try {
     const stored = window.localStorage.getItem(WORKER_LIST_LAYOUT_KEY);

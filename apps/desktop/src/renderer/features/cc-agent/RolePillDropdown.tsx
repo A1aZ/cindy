@@ -345,6 +345,43 @@ function useAnchorMenuMaxHeight(
   return placement;
 }
 
+// 菜单宽度钳制：硬编码 w-[320px] 在窄侧栏（侧栏 shell overflow-hidden，最小宽 280px）
+// 会被裁掉一截。按锚点相对最近裁剪祖先（overflow 非 visible 的容器）的同侧可用宽度
+// 钳制菜单最大宽度，避免 worker 行与布局标签被裁切。找不到裁剪祖先时退回视口边界。
+// align: 'left' 表示菜单左对齐锚点向右展开（dropdown popover），
+//        'right' 表示菜单右对齐锚点向左展开（⋮ 菜单）。
+function useAnchorMenuMaxWidth(
+  anchorRef: { current: HTMLElement | null },
+  open: boolean,
+  align: 'left' | 'right',
+): number | undefined {
+  const [maxWidth, setMaxWidth] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      let container: HTMLElement | null = el.parentElement;
+      while (container) {
+        const style = window.getComputedStyle(container);
+        if (style.overflowX !== 'visible' || style.overflowY !== 'visible') break;
+        container = container.parentElement;
+      }
+      const anchor = el.getBoundingClientRect();
+      const bounds = container
+        ? container.getBoundingClientRect()
+        : { left: 0, right: window.innerWidth };
+      const available =
+        align === 'left' ? bounds.right - anchor.left : anchor.right - bounds.left;
+      setMaxWidth(Math.max(0, available));
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [anchorRef, open, align]);
+  return maxWidth;
+}
+
 function WorkerLayoutMenu({
   layout,
   onLayoutChange,
@@ -377,6 +414,7 @@ function WorkerLayoutMenu({
   const activeCount = activeWorkerCount;
   const open = openMode !== null;
   const menuPlacement = useAnchorMenuMaxHeight(wrapperRef, open);
+  const menuMaxWidth = useAnchorMenuMaxWidth(wrapperRef, open, 'right');
 
   const clearHoverTimers = useCallback(() => {
     clearTimerRef(hoverOpenTimerRef);
@@ -480,7 +518,11 @@ function WorkerLayoutMenu({
             'absolute right-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
             menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
           )}
-          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuPlacement?.maxHeight }}
+          style={{
+            boxShadow: 'var(--shadow-menu)',
+            maxHeight: menuPlacement?.maxHeight,
+            maxWidth: menuMaxWidth,
+          }}
         >
           {/* Header: WORKERS + count */}
           {layout === 'tabs' && (
@@ -941,6 +983,7 @@ export function RolePillDropdown({
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const open = openMode !== null;
   const menuPlacement = useAnchorMenuMaxHeight(triggerRef, open);
+  const menuMaxWidth = useAnchorMenuMaxWidth(triggerRef, open, 'left');
 
   useLayoutEffect(() => {
     if (!clearAttentionWhenVisible) return;
@@ -1080,7 +1123,11 @@ export function RolePillDropdown({
             'absolute left-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
             menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
           )}
-          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuPlacement?.maxHeight }}
+          style={{
+            boxShadow: 'var(--shadow-menu)',
+            maxHeight: menuPlacement?.maxHeight,
+            maxWidth: menuMaxWidth,
+          }}
         >
           {/* Header: WORKERS + count */}
           <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">

@@ -37,8 +37,30 @@ describe('review plugin', () => {
 
   it('defaultState returns fresh collapsedPaths array per call', () => {
     const p = registry.getTabKind('review')!;
-    const a = p.defaultState() as { collapsedPaths: string[]; diffViewMode: string; fileTreeVisible: boolean; wordWrap: boolean; wordDiff: boolean; hideWhitespace: boolean; richMarkdownPreview: boolean; branchBaseRef: string | null };
-    const b = p.defaultState() as { collapsedPaths: string[]; diffViewMode: string; fileTreeVisible: boolean; wordWrap: boolean; wordDiff: boolean; hideWhitespace: boolean; richMarkdownPreview: boolean; branchBaseRef: string | null };
+    const a = p.defaultState() as {
+      descriptor: { kind: string };
+      jumpTarget: unknown;
+      collapsedPaths: string[];
+      diffViewMode: string;
+      fileTreeVisible: boolean;
+      wordWrap: boolean;
+      wordDiff: boolean;
+      hideWhitespace: boolean;
+      richMarkdownPreview: boolean;
+    };
+    const b = p.defaultState() as {
+      descriptor: { kind: string };
+      jumpTarget: unknown;
+      collapsedPaths: string[];
+      diffViewMode: string;
+      fileTreeVisible: boolean;
+      wordWrap: boolean;
+      wordDiff: boolean;
+      hideWhitespace: boolean;
+      richMarkdownPreview: boolean;
+    };
+    expect(a.descriptor).toEqual({ kind: 'unstaged' });
+    expect(a.jumpTarget).toBeNull();
     expect(a.collapsedPaths).toEqual([]);
     expect(b.collapsedPaths).toEqual([]);
     expect(a.diffViewMode).toBe('unified');
@@ -47,7 +69,6 @@ describe('review plugin', () => {
     expect(a.wordDiff).toBe(false);
     expect(a.hideWhitespace).toBe(false);
     expect(a.richMarkdownPreview).toBe(true);
-    expect(a.branchBaseRef).toBeNull();
     // 不要让多个 tab 共享同一个数组引用 → mutate a 不影响 b
     a.collapsedPaths.push('whatever');
     expect(b.collapsedPaths).toEqual([]);
@@ -64,7 +85,8 @@ describe('review plugin', () => {
       wordDiff: false,
       hideWhitespace: true,
       richMarkdownPreview: false,
-      branchBaseRef: 'main',
+      descriptor: { kind: 'branch', baseRef: 'main' },
+      jumpTarget: { diffId: 'branch:main:a.ts', path: 'a.ts', nonce: 3 },
     }) as {
       collapsedPaths: string[];
       diffViewMode: string;
@@ -73,7 +95,8 @@ describe('review plugin', () => {
       wordDiff: boolean;
       hideWhitespace: boolean;
       richMarkdownPreview: boolean;
-      branchBaseRef: string | null;
+      descriptor: { kind: string; baseRef?: string | null };
+      jumpTarget: { diffId: string | null; path: string | null; nonce: number } | null;
     };
     expect(s.collapsedPaths).toEqual(['a.ts', 'b/c.tsx']);
     expect(s.diffViewMode).toBe('split');
@@ -82,16 +105,85 @@ describe('review plugin', () => {
     expect(s.wordDiff).toBe(false);
     expect(s.hideWhitespace).toBe(true);
     expect(s.richMarkdownPreview).toBe(false);
-    expect(s.branchBaseRef).toBe('main');
+    expect(s.descriptor).toEqual({ kind: 'branch', baseRef: 'main' });
+    expect(s.jumpTarget).toEqual({ diffId: 'branch:main:a.ts', path: 'a.ts', nonce: 3 });
   });
 
-  it('hydrateState keeps a valid session-level branch base ref and drops invalid values', () => {
+  it('hydrateState keeps a safe branch descriptor and fails closed on invalid refs', () => {
     const p = registry.getTabKind('review')!;
-    expect((p.hydrateState!({ branchBaseRef: 'origin/main' }) as { branchBaseRef: string | null }).branchBaseRef).toBe('origin/main');
-    expect((p.hydrateState!({ branchBaseRef: '' }) as { branchBaseRef: string | null }).branchBaseRef).toBeNull();
-    expect((p.hydrateState!({ branchBaseRef: '-bad' }) as { branchBaseRef: string | null }).branchBaseRef).toBeNull();
-    expect((p.hydrateState!({ branchBaseRef: 'main~1' }) as { branchBaseRef: string | null }).branchBaseRef).toBeNull();
-    expect((p.hydrateState!({ branchBaseRef: 42 }) as { branchBaseRef: string | null }).branchBaseRef).toBeNull();
+    expect(
+      (
+        p.hydrateState!({ descriptor: { kind: 'branch', baseRef: 'origin/main' } }) as {
+          descriptor: unknown;
+        }
+      ).descriptor,
+    ).toEqual({ kind: 'branch', baseRef: 'origin/main' });
+    expect(
+      (
+        p.hydrateState!({ descriptor: { kind: 'branch', baseRef: '-bad' } }) as {
+          descriptor: unknown;
+        }
+      ).descriptor,
+    ).toEqual({ kind: 'unstaged' });
+    expect(
+      (
+        p.hydrateState!({ descriptor: { kind: 'branch', baseRef: 'main~1' } }) as {
+          descriptor: unknown;
+        }
+      ).descriptor,
+    ).toEqual({ kind: 'unstaged' });
+    expect(
+      (p.hydrateState!({ descriptor: { kind: 'branch', baseRef: 42 } }) as { descriptor: unknown })
+        .descriptor,
+    ).toEqual({ kind: 'unstaged' });
+  });
+
+  it('migrates the legacy turnTarget into descriptor and jumpTarget once', () => {
+    const p = registry.getTabKind('review')!;
+    const state = p.hydrateState!({
+      turnTarget: {
+        changeSetIds: ['set-1', 'set-2'],
+        selectedDiffId: 'unstaged:src/a.ts',
+        selectedPath: 'src/a.ts',
+        requestNonce: 9,
+        targetSessionId: 'worker-session',
+      },
+    }) as { descriptor: unknown; jumpTarget: unknown };
+
+    expect(state.descriptor).toEqual({
+      kind: 'turn-set',
+      changeSetIds: ['set-1', 'set-2'],
+      targetSessionId: 'worker-session',
+    });
+    expect(state.jumpTarget).toEqual({
+      diffId: 'unstaged:src/a.ts',
+      path: 'src/a.ts',
+      nonce: 9,
+    });
+  });
+
+  it('does not mix a stale legacy jump into a persisted descriptor', () => {
+    const p = registry.getTabKind('review')!;
+    const state = p.hydrateState!({
+      descriptor: {
+        kind: 'turn-set',
+        targetSessionId: 'current-worker',
+        changeSetIds: ['current-set'],
+      },
+      turnTarget: {
+        targetSessionId: 'stale-worker',
+        changeSetIds: ['stale-set'],
+        selectedPath: 'stale.ts',
+        requestNonce: 4,
+      },
+    }) as { descriptor: unknown; jumpTarget: unknown };
+
+    expect(state.descriptor).toEqual({
+      kind: 'turn-set',
+      targetSessionId: 'current-worker',
+      changeSetIds: ['current-set'],
+    });
+    expect(state.jumpTarget).toBeNull();
   });
 
   it('hydrateState falls back to disabled word wrap for invalid values', () => {
@@ -111,30 +203,39 @@ describe('review plugin', () => {
 
   it('hydrateState falls back to visible whitespace changes for invalid values', () => {
     const p = registry.getTabKind('review')!;
-    expect((p.hydrateState!({ hideWhitespace: true }) as { hideWhitespace: boolean }).hideWhitespace).toBe(true);
-    expect((p.hydrateState!({ hideWhitespace: 'yes' }) as { hideWhitespace: boolean }).hideWhitespace).toBe(false);
+    expect(
+      (p.hydrateState!({ hideWhitespace: true }) as { hideWhitespace: boolean }).hideWhitespace,
+    ).toBe(true);
+    expect(
+      (p.hydrateState!({ hideWhitespace: 'yes' }) as { hideWhitespace: boolean }).hideWhitespace,
+    ).toBe(false);
     expect((p.hydrateState!({}) as { hideWhitespace: boolean }).hideWhitespace).toBe(false);
   });
 
   it('hydrateState defaults rich markdown preview to enabled for invalid values', () => {
     const p = registry.getTabKind('review')!;
-    expect((p.hydrateState!({ richMarkdownPreview: false }) as { richMarkdownPreview: boolean }).richMarkdownPreview).toBe(false);
-    expect((p.hydrateState!({ richMarkdownPreview: true }) as { richMarkdownPreview: boolean }).richMarkdownPreview).toBe(true);
-    expect((p.hydrateState!({ richMarkdownPreview: 'yes' }) as { richMarkdownPreview: boolean }).richMarkdownPreview).toBe(true);
-    expect((p.hydrateState!({}) as { richMarkdownPreview: boolean }).richMarkdownPreview).toBe(true);
+    expect(
+      (p.hydrateState!({ richMarkdownPreview: false }) as { richMarkdownPreview: boolean })
+        .richMarkdownPreview,
+    ).toBe(false);
+    expect(
+      (p.hydrateState!({ richMarkdownPreview: true }) as { richMarkdownPreview: boolean })
+        .richMarkdownPreview,
+    ).toBe(true);
+    expect(
+      (p.hydrateState!({ richMarkdownPreview: 'yes' }) as { richMarkdownPreview: boolean })
+        .richMarkdownPreview,
+    ).toBe(true);
+    expect((p.hydrateState!({}) as { richMarkdownPreview: boolean }).richMarkdownPreview).toBe(
+      true,
+    );
   });
 
   it('hydrateState falls back to empty when raw is null / wrong shape', () => {
     const p = registry.getTabKind('review')!;
-    expect(
-      (p.hydrateState!(null) as { collapsedPaths: string[] }).collapsedPaths,
-    ).toEqual([]);
-    expect(
-      (p.hydrateState!('garbage') as { collapsedPaths: string[] }).collapsedPaths,
-    ).toEqual([]);
-    expect(
-      (p.hydrateState!({}) as { collapsedPaths: string[] }).collapsedPaths,
-    ).toEqual([]);
+    expect((p.hydrateState!(null) as { collapsedPaths: string[] }).collapsedPaths).toEqual([]);
+    expect((p.hydrateState!('garbage') as { collapsedPaths: string[] }).collapsedPaths).toEqual([]);
+    expect((p.hydrateState!({}) as { collapsedPaths: string[] }).collapsedPaths).toEqual([]);
     expect(
       (p.hydrateState!({ collapsedPaths: 'not-an-array' }) as { collapsedPaths: string[] })
         .collapsedPaths,

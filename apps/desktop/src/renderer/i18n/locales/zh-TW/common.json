@@ -4776,7 +4776,10 @@
         "localOnly": "本條訊息的精確變更暫不支援遠端任務。",
         "partialNotice": "本條訊息包含無法精確追蹤的命令或工具寫入；以下僅展示已精確捕獲的部分，不能視為完整補丁。",
         "emptyTitle": "沒有已記錄的變更",
-        "emptyDesc": "這條訊息記錄的補丁中沒有可顯示的檔案變更。"
+        "emptyDesc": "這條訊息記錄的補丁中沒有可顯示的檔案變更。",
+        "crossSessionSwitchDisabled": "正在審查協作任務中的這條訊息，不能在目前任務中切換來源。",
+        "previewUnavailable": "這條訊息記錄的是歷史變更，無法可靠預覽目前磁碟中的檔案內容。",
+        "snapshotPatchUnavailable": "歷史變更快照不能產生面向目前 worktree 的 git apply 指令。"
       },
       "fileCount_one": "{{count}} 個檔案",
       "fileCount_other": "{{count}} 個檔案",
@@ -4834,6 +4837,7 @@
         "in-progress": "git 操作進行中",
         "agent-running": "Agent 正在執行",
         "disabled": "審查不可用",
+        "historical-snapshot": "歷史變更快照為唯讀",
         "remote-device": "遠端設備任務僅支援檢視",
         "remote-ssh": "SSH 工作區審查僅支援檢視"
       },

@@ -1,8 +1,8 @@
 /**
- * review plugin —— RSB 内显示"本次会话改动了哪些文件"的常驻 tab。
+ * review plugin —— RSB 内统一显示当前 Git 状态与消息级历史变更的常驻 tab。
  *
- * 数据从 git-review IPC 派生;makerChatStore 只提供 Last turn 过滤集合。plugin
- * 自身持久化用户收起过哪些 diff id(`collapsedPaths`)、diff 模式、文件树显隐、
+ * 数据源由可持久化 descriptor 选择；Git 来源走 git-review IPC，历史来源读取
+ * 已记录的 turn change sets。plugin 自身持久化用户收起过哪些 diff id(`collapsedPaths`)、diff 模式、文件树显隐、
  * diff 自动换行偏好、文字差异偏好、隐藏空白变更偏好、Markdown 富文本预览偏好与分支来源的基准分支。
  *
  * 单例语义 —— 由 RightSidebarShell + AddTabDropdown 在调用层用
@@ -16,7 +16,13 @@ import { lazy } from 'react';
 import { FileDiff } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
-import { isSafeBranchBaseRef } from '../../../../../shared/reviewBranchRef';
+import {
+  migrateLegacyTurnTarget,
+  parseReviewJumpTarget,
+  parseReviewSourceDescriptor,
+  type ReviewJumpTarget,
+  type ReviewSourceDescriptor,
+} from '../../../../../shared/reviewSource';
 import { registerTabKind } from '../../registry';
 import type { TabKindPlugin } from '../../types';
 import type { DiffViewMode } from './DiffViewer/PlainUnifiedDiff';
@@ -26,19 +32,10 @@ const ReviewTabBody = lazy(() =>
 );
 
 export interface ReviewState {
-  /** Programmatic exact-turn review target. Null keeps the normal Git-backed review surface. */
-  turnTarget: {
-    changeSetIds: string[];
-    selectedDiffId: string | null;
-    selectedPath: string | null;
-    requestNonce: number;
-    /**
-     * 变更集所属会话。null(旧数据)= 与 tab 桶同会话;与桶会话不同(协同面板
-     * 里审查 worker 的轮次)时按它取数,且不提供 git 来源切换(git 视图跟随桶
-     * 会话的 workdir,对 worker 语义错误)。
-     */
-    targetSessionId: string | null;
-  } | null;
+  /** Persisted discriminated source; all review entry points write the same field. */
+  descriptor: ReviewSourceDescriptor;
+  /** Optional one-shot positioning request supplied by a review entry point. */
+  jumpTarget: ReviewJumpTarget | null;
   /** 用户收起过哪些 diff id。空数组表示所有当前 diff 默认展开。 */
   collapsedPaths: string[];
   /** diff 展示模式。写操作仍回到原始 unified DiffLine.index。 */
@@ -53,12 +50,11 @@ export interface ReviewState {
   hideWhitespace: boolean;
   /** Markdown 文件是否默认用富文本预览替换 diff 主体。对齐 Codex,默认开启。 */
   richMarkdownPreview: boolean;
-  /** Branch source 的用户选择基准。首版按 tab/session 记住,不做 per-repo。 */
-  branchBaseRef: string | null;
 }
 
 const DEFAULT_STATE: ReviewState = {
-  turnTarget: null,
+  descriptor: { kind: 'unstaged' },
+  jumpTarget: null,
   collapsedPaths: [],
   diffViewMode: 'unified',
   fileTreeVisible: false,
@@ -66,7 +62,6 @@ const DEFAULT_STATE: ReviewState = {
   wordDiff: false,
   hideWhitespace: false,
   richMarkdownPreview: true,
-  branchBaseRef: null,
 };
 
 function ReviewTabPillTitle({ t }: { state: ReviewState; t: TFunction }) {
@@ -100,47 +95,37 @@ const plugin: TabKindPlugin<ReviewState> = {
       ? obj.collapsedPaths.filter((s): s is string => typeof s === 'string')
       : [];
     const diffViewMode = obj.diffViewMode === 'split' ? 'split' : 'unified';
-    const fileTreeVisible = typeof obj.fileTreeVisible === 'boolean'
-      ? obj.fileTreeVisible
-      : DEFAULT_STATE.fileTreeVisible;
-    const wordWrap = typeof obj.wordWrap === 'boolean'
-      ? obj.wordWrap
-      : DEFAULT_STATE.wordWrap;
-    const wordDiff = typeof obj.wordDiff === 'boolean'
-      ? obj.wordDiff
-      : DEFAULT_STATE.wordDiff;
-    const hideWhitespace = typeof obj.hideWhitespace === 'boolean'
-      ? obj.hideWhitespace
-      : DEFAULT_STATE.hideWhitespace;
-    const richMarkdownPreview = typeof obj.richMarkdownPreview === 'boolean'
-      ? obj.richMarkdownPreview
-      : DEFAULT_STATE.richMarkdownPreview;
-    const branchBaseRef = typeof obj.branchBaseRef === 'string' && isSafeBranchBaseRef(obj.branchBaseRef.trim())
-      ? obj.branchBaseRef.trim()
-      : null;
-    const rawTurnTarget = obj.turnTarget;
-    const turnTarget = rawTurnTarget && typeof rawTurnTarget === 'object'
-      && Array.isArray((rawTurnTarget as { changeSetIds?: unknown }).changeSetIds)
-      && (rawTurnTarget as { changeSetIds: unknown[] }).changeSetIds.length > 0
-      && (rawTurnTarget as { changeSetIds: unknown[] }).changeSetIds.length <= 16
-      && (rawTurnTarget as { changeSetIds: unknown[] }).changeSetIds.every((id) => typeof id === 'string')
-      ? {
-          changeSetIds: (rawTurnTarget as { changeSetIds: string[] }).changeSetIds,
-          selectedDiffId: typeof (rawTurnTarget as { selectedDiffId?: unknown }).selectedDiffId === 'string'
-            ? (rawTurnTarget as { selectedDiffId: string }).selectedDiffId
-            : null,
-          selectedPath: typeof (rawTurnTarget as { selectedPath?: unknown }).selectedPath === 'string'
-            ? (rawTurnTarget as { selectedPath: string }).selectedPath
-            : null,
-          requestNonce: typeof (rawTurnTarget as { requestNonce?: unknown }).requestNonce === 'number'
-            ? (rawTurnTarget as { requestNonce: number }).requestNonce
-            : 0,
-          targetSessionId: typeof (rawTurnTarget as { targetSessionId?: unknown }).targetSessionId === 'string'
-            ? (rawTurnTarget as { targetSessionId: string }).targetSessionId
-            : null,
-        }
-      : null;
-    return { turnTarget, collapsedPaths, diffViewMode, fileTreeVisible, wordWrap, wordDiff, hideWhitespace, richMarkdownPreview, branchBaseRef };
+    const fileTreeVisible =
+      typeof obj.fileTreeVisible === 'boolean'
+        ? obj.fileTreeVisible
+        : DEFAULT_STATE.fileTreeVisible;
+    const wordWrap = typeof obj.wordWrap === 'boolean' ? obj.wordWrap : DEFAULT_STATE.wordWrap;
+    const wordDiff = typeof obj.wordDiff === 'boolean' ? obj.wordDiff : DEFAULT_STATE.wordDiff;
+    const hideWhitespace =
+      typeof obj.hideWhitespace === 'boolean' ? obj.hideWhitespace : DEFAULT_STATE.hideWhitespace;
+    const richMarkdownPreview =
+      typeof obj.richMarkdownPreview === 'boolean'
+        ? obj.richMarkdownPreview
+        : DEFAULT_STATE.richMarkdownPreview;
+    const legacyTurnTarget = migrateLegacyTurnTarget(obj.turnTarget);
+    const persistedDescriptor = parseReviewSourceDescriptor(obj.descriptor);
+    const descriptor = persistedDescriptor ?? legacyTurnTarget?.descriptor ?? { kind: 'unstaged' };
+    const jumpTarget =
+      parseReviewJumpTarget(obj.jumpTarget) ??
+      (!persistedDescriptor && descriptor.kind === 'turn-set'
+        ? (legacyTurnTarget?.jumpTarget ?? null)
+        : null);
+    return {
+      descriptor,
+      jumpTarget,
+      collapsedPaths,
+      diffViewMode,
+      fileTreeVisible,
+      wordWrap,
+      wordDiff,
+      hideWhitespace,
+      richMarkdownPreview,
+    };
   },
 };
 

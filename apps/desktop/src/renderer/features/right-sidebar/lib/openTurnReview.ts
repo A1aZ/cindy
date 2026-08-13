@@ -1,8 +1,4 @@
-import {
-  addOrFocusSingletonTab,
-  ensureHydrated,
-  patchTabState,
-} from '../store';
+import { addOrFocusSingletonTab, ensureHydrated, patchTabState } from '../store';
 import { routeSidebarCommand } from './detachedSidebarRouting';
 import { requestRightSidebarVisibility } from './sidebarCommands';
 
@@ -36,22 +32,32 @@ export async function openTurnReview(
   };
   const routeResult = await routeSidebarCommand(command);
   if (routeResult !== 'attached') {
-    if (routeResult === 'routed') requestRightSidebarVisibility('open', { sessionId: hostSessionId });
+    if (routeResult === 'routed')
+      requestRightSidebarVisibility('open', { sessionId: hostSessionId });
     return;
   }
 
   await ensureHydrated(hostSessionId);
   const tab = await addOrFocusSingletonTab(hostSessionId, 'review', null);
-  await patchTabState(hostSessionId, tab.id, (current) => ({
-    ...(current && typeof current === 'object' ? current as Record<string, unknown> : {}),
-    turnTarget: {
-      changeSetIds,
-      selectedDiffId: opts.selectedDiffId ?? null,
-      selectedPath: opts.selectedPath ?? null,
-      requestNonce,
-      // 目标会话与宿主桶不同(跨会话审查 worker 的轮次)时,review 插件按它取数。
-      targetSessionId: sessionId,
-    },
-  }));
+  await patchTabState(hostSessionId, tab.id, (current) => {
+    const preserved =
+      current && typeof current === 'object' ? { ...(current as Record<string, unknown>) } : {};
+    delete preserved.turnTarget;
+    delete preserved.branchBaseRef;
+    return {
+      ...preserved,
+      descriptor: {
+        kind: 'turn-set',
+        changeSetIds,
+        // 目标会话与宿主桶不同(跨会话审查 worker 的轮次)时,review 插件按它取数。
+        targetSessionId: sessionId,
+      },
+      jumpTarget: {
+        diffId: opts.selectedDiffId ?? null,
+        path: opts.selectedPath ?? null,
+        nonce: requestNonce,
+      },
+    };
+  });
   requestRightSidebarVisibility('open', { sessionId: hostSessionId });
 }

@@ -17,27 +17,48 @@ import { t } from '../../i18n';
 import type { ImUiTextPack } from '../shared/types';
 
 export type FeishuTranslator = (key: string) => string;
+export type FeishuService = 'feishu' | 'lark';
 
-const AGENT_UNSUPPORTED_KEY = 'settings.imBot.defaults.feishuAgentUnsupportedHint';
-const AGENT_MODE_HINT_KEY = 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint';
-const PERMISSION_MODE_UNSUPPORTED_KEY =
-  'settings.imBot.defaults.feishuPermissionModeRecoveryHint';
+const RECOVERY_KEYS: Record<
+  FeishuService,
+  {
+    agentUnsupported: string;
+    agentModeHint: string;
+    permissionModeUnsupported: string;
+  }
+> = {
+  feishu: {
+    agentUnsupported: 'settings.imBot.defaults.feishuAgentUnsupportedHint',
+    agentModeHint: 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint',
+    permissionModeUnsupported: 'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
+  },
+  lark: {
+    agentUnsupported: 'settings.imBot.defaults.larkAgentUnsupportedHint',
+    agentModeHint: 'settings.imBot.defaults.larkAgentSwitchPermissionModeHint',
+    permissionModeUnsupported: 'settings.imBot.defaults.larkPermissionModeRecoveryHint',
+  },
+};
+
+const AGENT_UNSUPPORTED_KEY = RECOVERY_KEYS.feishu.agentUnsupported;
+const PERMISSION_MODE_UNSUPPORTED_KEY = RECOVERY_KEYS.feishu.permissionModeUnsupported;
 
 export function createFeishuPreDispatchFailureText(
   translate: FeishuTranslator,
+  getService: () => FeishuService = () => 'feishu',
 ): (reason: string) => string | undefined {
   return (reason) => {
+    const keys = RECOVERY_KEYS[getService()];
     if (reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED:agent')) {
       const mode = reason.split(':').pop() ?? '';
       return mode === 'bypassPermissions' || mode === 'acceptEdits'
-        ? `${translate(AGENT_UNSUPPORTED_KEY)}\n${translate(AGENT_MODE_HINT_KEY)}`
-        : translate(AGENT_UNSUPPORTED_KEY);
+        ? `${translate(keys.agentUnsupported)}\n${translate(keys.agentModeHint)}`
+        : translate(keys.agentUnsupported);
     }
     if (
       reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED') ||
       reason.includes('unsupported_turn_permission')
     ) {
-      return translate(PERMISSION_MODE_UNSUPPORTED_KEY);
+      return translate(keys.permissionModeUnsupported);
     }
     return undefined;
   };

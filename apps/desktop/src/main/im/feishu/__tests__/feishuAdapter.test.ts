@@ -184,9 +184,13 @@ describe('feishu group lane adapter hooks', () => {
       'settings.imBot.defaults.feishuAgentUnsupportedHint': '[agent-unsupported]',
       'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint': '[permission-mode-hint]',
       'settings.imBot.defaults.feishuPermissionModeRecoveryHint': '[permission-recovery]',
+      'settings.imBot.defaults.larkAgentUnsupportedHint': '[lark-agent-unsupported]',
+      'settings.imBot.defaults.larkAgentSwitchPermissionModeHint': '[lark-permission-mode-hint]',
+      'settings.imBot.defaults.larkPermissionModeRecoveryHint': '[lark-permission-recovery]',
     };
     const translate = vi.fn((key: string) => translations[key] ?? `[missing:${key}]`);
-    const preDispatchFailureText = createFeishuPreDispatchFailureText(translate);
+    const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
+    const preDispatchFailureText = createFeishuPreDispatchFailureText(translate, getService);
 
     expect(
       preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:bypassPermissions'),
@@ -202,6 +206,14 @@ describe('feishu group lane adapter hooks', () => {
     );
     expect(translate).toHaveBeenCalledWith(
       'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
+    );
+
+    getService.mockReturnValue('lark');
+    expect(
+      preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:bypassPermissions'),
+    ).toBe('[lark-agent-unsupported]\n[lark-permission-mode-hint]');
+    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:ask')).toBe(
+      '[lark-permission-recovery]',
     );
   });
 

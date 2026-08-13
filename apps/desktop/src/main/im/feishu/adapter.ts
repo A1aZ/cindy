@@ -18,10 +18,11 @@ import { app } from 'electron';
 import { decodeFeishuLaneUserId, type FeishuIM } from '@cindy/im';
 
 import type { ImChannelAdapter, ImOrchestratorConfig } from '../shared/types';
+import { t } from '../../i18n';
 import { claimLegacyImPath, ownerScopedImUserDataPath } from '../ownerScopedStorage';
 import { createFenceNeutralizer, GROUP_WINDOW_ENTRY_TEXT_MAX_CHARS } from '../shared/groupWindowCore';
 import { createFeishuGroupTurnPermissionPolicy } from './permissionPolicy';
-import { ui, REACTION_PROCESSING } from './uiText';
+import { createFeishuPreDispatchFailureText, ui, REACTION_PROCESSING } from './uiText';
 
 /**
  * 飞书 bot 的 workingDir = `userData/im-working-dir/{botAppId}/`
@@ -101,7 +102,15 @@ export function buildFeishuAdapter(
   feishuIm: FeishuIM,
   config: ImOrchestratorConfig,
 ): ImChannelAdapter {
-  const isLark = () => feishuIm.getService() === 'lark';
+  const getService = () => feishuIm.getService();
+  const isLark = () => getService() === 'lark';
+  const adapterUi: typeof ui = {
+    ...ui,
+    error: {
+      ...ui.error!,
+      preDispatchFailureText: createFeishuPreDispatchFailureText(t, getService),
+    },
+  };
   const conversationPrefix = () => (isLark() ? '[Lark·DM] ' : '[飞书·DM] ');
   const groupPrefix = (threadId: string) =>
     isLark()
@@ -116,7 +125,7 @@ export function buildFeishuAdapter(
     im: feishuIm,
     output: { kind: 'rich-card', im: feishuIm },
     config,
-    ui,
+    ui: adapterUi,
     sessions: {
       source: 'feishu',
       /**

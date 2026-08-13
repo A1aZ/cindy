@@ -203,8 +203,8 @@ describe('MessageNavRail', () => {
     const buttons = screen.getAllByRole('button');
     expect(buttons[1].getAttribute('data-message-nav-automation')).toBe('true');
     expect(buttons[0].getAttribute('data-message-nav-automation')).toBeNull();
-    expect(buttons[1].querySelector('span')?.className).toContain('w-1.5');
-    expect(buttons[0].querySelector('span')?.className).toContain('w-1.5');
+    expect(buttons[1].querySelector('span')?.className).toContain('w-[26px]');
+    expect(buttons[0].querySelector('span')?.className).toContain('w-[26px]');
   });
 
   it('渲染窗口外的锚点(DOM 缺失)视作已越过阈值', async () => {

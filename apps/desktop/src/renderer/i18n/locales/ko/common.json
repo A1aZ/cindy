@@ -6926,7 +6926,7 @@
         "remoteSettings": "원격 연결 설정",
         "multiSelect": "다중 선택",
         "deselect": "선택 해제",
-        "menuTrigger": "원격 기기",
+        "menuTrigger": "세션 범위",
         "selectedCount_one": "기기 {{count}}대",
         "selectedCount_other": "기기 {{count}}대"
       },
@@ -6966,8 +6966,8 @@
       "createProjectFailed": "프로젝트 생성 실패",
       "projectsToggleExpand": "모든 프로젝트 세션 펼치기",
       "projectsToggleCollapse": "모든 프로젝트 세션 접기",
-      "filterAria": "사이드바 정리(상태: {{status}}, Agent: {{vendor}}, 최근 활동: {{lastActivity}}, 그룹: {{groupBy}}, 정렬: {{sortBy}}, 프로젝트: {{projects}})",
-      "organizeSidebar": "사이드바 정리",
+      "filterAria": "사이드바 표시 설정(상태: {{status}}, Agent: {{vendor}}, 최근 활동: {{lastActivity}}, 그룹: {{groupBy}}, 정렬: {{sortBy}}, 프로젝트: {{projects}})",
+      "organizeSidebar": "사이드바 표시 설정",
       "filterAllText": "전체",
       "filterSelectedProjects": "{{count}}개 선택됨",
       "filterStatus": {

@@ -6926,7 +6926,7 @@
         "remoteSettings": "遠端連線設定",
         "multiSelect": "多選",
         "deselect": "取消勾選",
-        "menuTrigger": "遠端機器",
+        "menuTrigger": "任務範圍",
         "selectedCount_one": "{{count}} 臺機器",
         "selectedCount_other": "{{count}} 臺機器"
       },
@@ -6966,8 +6966,8 @@
       "createProjectFailed": "新建專案失敗",
       "projectsToggleExpand": "展開所有專案任務",
       "projectsToggleCollapse": "收起所有專案任務",
-      "filterAria": "整理側邊欄（狀態：{{status}}，Agent：{{vendor}}，最近活躍：{{lastActivity}}，分組：{{groupBy}}，排序：{{sortBy}}，專案：{{projects}}）",
-      "organizeSidebar": "整理側邊欄",
+      "filterAria": "側邊欄顯示設定（狀態：{{status}}，Agent：{{vendor}}，最近活躍：{{lastActivity}}，分組：{{groupBy}}，排序：{{sortBy}}，專案：{{projects}}）",
+      "organizeSidebar": "側邊欄顯示設定",
       "filterAllText": "全部",
       "filterSelectedProjects": "已選 {{count}} 個",
       "filterStatus": {

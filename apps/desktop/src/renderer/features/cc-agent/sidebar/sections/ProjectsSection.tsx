@@ -13,7 +13,8 @@
  *     · 包含 UnclassifiedSection（若有）+ ProjectNode 列表
  *
  * ProjectNode 的展开折叠由父层受控；段级收起是本组件内的纯 UI 状态。
- * projects + unclassified 都为空时整段不渲染。
+ * 完全没有 project / 未分类 / 对话时仍渲染范围标题行(2026-08-13 第 4 轮
+ * review P1:段头恒在),列表树不画。
  *
  * 拖拽：sortBy === 'manual' 时由 SortableList (SortableJS) 接管整行拖拽；
  *   其它排序模式 disabled。落定后通过 filter.setManualProjectOrder 写回。
@@ -35,7 +36,6 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { Tip } from '@/components/ui/tooltip';
-import { MachineSwitcherMenu } from '../MachineSwitcherMenu';
 import { useEffectiveSelectedMachineId } from '@/features/device-link/useMachineSwitcher';
 import { MACHINE_ALL } from '@/features/device-link/selectedMachineStore';
 import { SortableList } from '@/components/sidebar/SortableList';
@@ -69,7 +69,7 @@ import {
   useRemoteSessionActivityRevision,
 } from '@/features/device-link/remoteSessionActivityStore';
 import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
-import { SidebarFilterPopover } from '../SidebarFilterPopover';
+import { MainListScopeHeader } from '../MainListScopeHeader';
 import { SectionCollapse } from '../SectionCollapse';
 import { SessionEntryList } from '../SessionEntryList';
 import { useCollapsibleShowAll } from '../hooks/useCollapsibleShowAll';
@@ -84,19 +84,6 @@ import type {
 import type { Session } from '@/lib/ccAgent.types';
 import type { FolderPickerOption } from '@/components/new-chat/FolderPickerPopover';
 import type { SessionMoveTarget } from '../sessionMoveTarget';
-
-const HEADER_HOVER_ACTION_CLASS = cn(
-  'pointer-events-none opacity-0 transition-opacity duration-150',
-  'group-hover/sidebar-header:pointer-events-auto group-hover/sidebar-header:opacity-100',
-  // Pointer click focus must not pin these hover-only actions after the mouse leaves.
-  // Keyboard focus-visible still reveals them for tab navigation.
-  'has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100',
-  // 段头内任一菜单(远程机器 / 整理侧边栏)展开时(其 trigger 带 data-state=open),
-  // 整排 action 保持可见——鼠标移进展开的菜单、段头不再 hover 时,其它按钮不该消失。
-  'group-has-[[data-state=open]]/sidebar-header:pointer-events-auto group-has-[[data-state=open]]/sidebar-header:opacity-100',
-);
-
-const HEADER_ACTIONS_CLASS = cn('flex items-center gap-0.5 -mt-px', HEADER_HOVER_ACTION_CLASS);
 
 /** 设备段折叠/对话组折叠共用的段 key:本机段 'local',远程段用 deviceId。 */
 const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
@@ -481,8 +468,17 @@ export function ProjectsSection({
       .filter((section) => section.entries.some((entry) => entry.kind === 'dialogue-group'))
       .map((section) => deviceSectionKey(section.deviceId));
   }, [deviceGroupingActive, visibleMixedEntries, deviceSections]);
-  const allGroupsCollapsed =
-    isAllCollapsed && visibleDialogueGroupKeys.every((key) => collapsedDialogueGroups.has(key));
+  const allDialogueGroupsCollapsed =
+    visibleDialogueGroupKeys.length === 0 ||
+    visibleDialogueGroupKeys.every((key) => collapsedDialogueGroups.has(key));
+  // 组层是否收齐必须看**当前范围**有没有项目行。allKnownProjects 是全机器宇宙,
+  // 单机范围下本机只有对话组、远端仍有项目时 length>0;isAllCollapsed 却来自
+  // 当前范围的 activeWorkingDirs,此时为空并恒为 false,foldState 会卡在
+  // collapse-groups。有可见项目行才并上 isAllCollapsed。
+  const hasVisibleProjectGroups = mixedEntries.some((entry) => entry.kind === 'project');
+  const allGroupsCollapsed = hasVisibleProjectGroups
+    ? isAllCollapsed && allDialogueGroupsCollapsed
+    : allDialogueGroupsCollapsed;
   const hasDeviceLayer = deviceGroupingActive && deviceSections.length > 0;
   const allDevicesCollapsed =
     hasDeviceLayer &&
@@ -534,16 +530,14 @@ export function ProjectsSection({
 
   // F-PJ-10：即使 projects 因 filter 收窄到空，也要保留段头供用户切回 Filter。
   // 这里用原始 key 全集作为"是否有过任何 project"的判定 — 全部项目都被隐藏时
-  // 仍保留段头的 Add Project 入口，用户才能重新选择目录恢复项目。完全没有 project、
-  // 未分类与对话 → 整段不渲染。(早退必须在全部 hooks 之后——rules of hooks。)
-  if (
-    allProjectKeysForOrder.length === 0 &&
-    unclassified.length === 0 &&
-    dialogues.length === 0 &&
-    !filter.isFilterActive
-  ) {
-    return null;
-  }
+  // 仍保留段头,用户才能重新选择目录恢复项目。完全没有 project、未分类与对话
+  // 时仍画范围标题行(2026-08-13 第 4 轮 review P1:段头恒在),不画列表树。
+  // 早退必须在全部 hooks 之后——rules of hooks。
+  const hasMainListContent =
+    allProjectKeysForOrder.length > 0 ||
+    unclassified.length > 0 ||
+    dialogues.length > 0 ||
+    filter.isFilterActive;
 
   // F-PJ-10：未分类区在 projects 为具体多选状态时不渲染（spec 验收第 14 条）
   const unclassifiedHidden = filter.projects !== 'all';
@@ -669,59 +663,23 @@ export function ProjectsSection({
 
   return (
     <div className="flex flex-col gap-0.5 w-full">
-      {/* Section Title — 左侧标题 + 段级收起箭头；右侧保留 ProjectNode 全部折叠 + Filter。
-          pr-0：与下方 cells 子容器一样依赖 scrollbar-gutter:stable 预留 12px，
-          按钮组右边自然对齐 cell 右边。 */}
-      <div className="group/sidebar-header flex h-6 items-center justify-between pr-0 pl-6">
-        {/* 段标题 = 机器范围下拉(2026-08-13 用户定稿,「全部任务」与设备下拉合并):
-            标题文字反映当前范围(全部任务 / 本机任务 / 设备名 / N 台机器),点击弹
-            范围菜单;无远程设备时退化为纯静态标题。段级收起随之取消——标题的点击
-            语义让给范围切换,「想要紧凑」由右侧「收起所有分组」承接。 */}
-        <div className="flex min-w-0 items-center gap-1">
-          <MachineSwitcherMenu />
-        </div>
-        {/* 右侧工具组：ProjectNode Toggle All → Filter → New Project
-            -mt-px：h-7 按钮在 h-6 行里中心对齐时视觉偏低，上移 1px 与 "Projects" 文字
-            视觉中线对齐 */}
-        {/* 右侧:hover 才浮现的工具组(远程机器切换入口已移到侧栏顶部固定行,不在段头)。 */}
-        <div className="flex items-center gap-0.5 -mt-px">
-          <div className={HEADER_ACTIONS_CLASS}>
-            {/* 「展开/收起所有分组」(E 期):单层 = 收起↔展开;设备+项目双层 =
-                循环 收项目层 → 收设备层 → 全部展开。tooltip 提示下一步动作。 */}
-            {foldState !== null && (
-              <Tip text={foldLabel} side="bottom">
-                <button
-                  type="button"
-                  onClick={handleFoldAll}
-                  disabled={projectNodesToggleDisabled && !hasDeviceLayer}
-                  aria-label={foldLabel}
-                  className={cn(
-                    'flex h-7 w-7 items-center justify-center rounded-md',
-                    'text-[var(--sidebar-list-muted)]',
-                    'transition-colors hover:text-[var(--sidebar-nav-text)]',
-                    'disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent',
-                  )}
-                >
-                  <FoldIcon size={14} strokeWidth={2} />
-                </button>
-              </Tip>
-            )}
-            {/* F-PJ-10：Filter Popover 入口。allKnownProjects 是未过滤前的 Project 全集。 */}
-            <SidebarFilterPopover
-              filter={filter}
-              allKnownProjects={allKnownProjects}
-              hasRemoteDevices={deviceGroupingAvailable}
-            />
-            {/* 「新建项目」按钮 2026-08-12 暂时移除(用户裁决):同一动作(选目录 →
-                预填新任务草稿)在新任务页的工作目录选择器里仍可完成。onCreateProject
-                prop 与上游 handleCreateProject 保持接线,恢复入口只需重新渲染按钮。 */}
-          </div>
-        </div>
-      </div>
-
-      {/* Projects Tree — padding [4,0,0,12], gap 4(段级收起已取消,树恒渲染)
-          pr-0：右侧依赖 scroll body 的 scrollbar-gutter:stable 预留 12px，
-          与左 pl-3 视觉对称；全局滚动条已收窄到 12px 与 pl-3 等宽。 */}
+      {/* 范围标题恒在:无列表内容时仍画这一行,不把设置入口一起摘掉。 */}
+      <MainListScopeHeader
+        filter={filter}
+        allKnownProjects={allKnownProjects}
+        hasRemoteDevices={deviceGroupingAvailable}
+        fold={
+          hasMainListContent && foldState !== null
+            ? {
+                label: foldLabel,
+                Icon: FoldIcon,
+                onClick: handleFoldAll,
+                disabled: projectNodesToggleDisabled && !hasDeviceLayer && !hasGroupLayer,
+              }
+            : null
+        }
+      />
+      {hasMainListContent ? (
       <div className="relative flex flex-col gap-1 pt-1 pr-0 pl-3">
         <UnclassifiedSection
           sessions={unclassified}
@@ -872,6 +830,7 @@ export function ProjectsSection({
           <ShowAllEntriesButton count={projectsTotal} onClick={() => setShowAllProjects(true)} />
         )}
       </div>
+      ) : null}
     </div>
   );
 }

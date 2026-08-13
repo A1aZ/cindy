@@ -4,13 +4,13 @@ title: Finding and organizing sessions
 summary: Browse, group, filter, sort, search, and pin sessions or projects in the left sidebar.
 ---
 
-The left sidebar lists your sessions. It's the main way to navigate and organize. The **Organize sidebar** menu holds grouping, sorting, filters, and display options — open it from the sliders icon on the main list header, or right-click any blank area of the sidebar.
+The left sidebar lists your sessions. It's the main way to navigate and organize. The **Sidebar display settings** menu holds grouping, sorting, filters, and display options — open it from the sliders icon on the main list header, from **Sidebar display settings** in the device-scope menu, or by right-clicking any blank area of the sidebar.
 
 **Device scope (the list header itself):**
 
-- The main list header doubles as the device scope switcher. Its text names what you're looking at — **All sessions**, **This device's sessions**, a remote device's name, or **N machines** — and clicking it opens the scope menu: all / this device / each connected remote device (single-click switches; checkboxes multi-select), plus a **Remote connection settings** entry.
+- The main list header doubles as the device scope switcher. Its text names what you're looking at — **All sessions**, **This device's sessions**, a remote device's name, or **N machines** — and clicking it opens the scope menu: all / this device / each connected remote device (single-click switches; checkboxes multi-select), plus **Remote connection settings** and **Sidebar display settings**.
 - The scope applies to the whole sidebar, including the Pinned section.
-- With no remote devices, the header is just a static **All sessions** title — no arrow, nothing to click. There is no separate device row in the top navigation.
+- With no remote devices, the header still shows **All sessions ▾**. Clicking it opens a short menu with only **Remote connection settings** and **Sidebar display settings** — no device list. The header stays visible even when the list is empty, only pinned items remain, remote devices/tasks are loading or failed, or the selected remote device is still connecting. There is no separate device row in the top navigation.
 
 **Grouping (independent checkboxes, freely combinable):**
 
@@ -23,7 +23,7 @@ The left sidebar lists your sessions. It's the main way to navigate and organize
 
 - **By time** (default) — one activity timeline for the whole list, most recent first. There is no oldest-first option.
 - **Priority** — four tiers, same as Codex: sessions waiting on you (pending reply / approval / error) first, then finished-unread sessions, then running sessions, then the rest by time. A project row inherits the highest priority among its sessions. Unread state is in-memory: after a restart most sessions fall back to time order.
-- **Manual** — drag project rows to set a persistent custom order. Manual order covers **project rows only**; stray chats and the Chat group always follow by recency. Dragging a project in any other sort mode automatically switches to Manual.
+- **Manual** — drag project rows to set a persistent custom order. Manual order covers **project rows only**; stray chats and the Chat group always follow by recency. Switch to Manual first to drag; other sort modes do not start a drag.
 - Sorting **alphabetically** and **oldest first** have been removed.
 
 **Filters (one row that opens a submenu):**
@@ -49,7 +49,7 @@ The left sidebar lists your sessions. It's the main way to navigate and organize
 
 **Collapse / expand all groups:**
 
-- The fold button next to the Organize button collapses or expands every group at once. With both device and project grouping on, it cycles through levels: collapse project groups → collapse device groups → expand all. The tooltip always names the next step.
+- The fold button next to the display-settings button collapses or expands every group at once. With both device and project grouping on, it cycles through levels: collapse project groups → collapse device groups → expand all. The tooltip always names the next step.
 
 **Searching:**
 

@@ -4,16 +4,19 @@
  * 2026-08-13 用户定稿(新设计,显式推翻两条 2026-07 旧定稿):
  *   - 「全部任务」段头与设备下拉**合并**——标题文字反映当前范围(全部任务 /
  *     本机任务 / 设备名 / N 台机器),点击标题弹出「所有 / 本机 / 各远程设备」
- *     切换 + 「远程连接设置」入口。顶部导航不再有独立的远程机器行,省一行;
+ *     切换 + 「远程连接设置」/「侧边栏显示设置」入口。顶部导航不再有独立的远程
+ *     机器行,省一行;
  *     标题不再撒谎(旧结构下范围收窄后段头仍写「全部任务」)。
  *     (推翻 2026-07 「切换器收进 SidebarTopNav 末行、不挂段头」——当年是段头
  *     挂配件,现在段头本身就是切换器,语境已不同。)
  *   - **点击展开**,不再 hover 自动展开(推翻 2026-07-12 hover 定稿):作为段头
  *     标题,hover 扫过就弹菜单太吵;段级收起同时取消,标题的点击语义让给范围切换。
  *
- * 无任何相关远程机器时**退化为纯静态标题**「全部任务」(无箭头、不可点)——
- * 段头恒在,这正是它必须与「全部任务」合并而不是反向合并的原因;若断网导致设备
- * 目录与远端分片都清空,但 raw 选择仍指向远端,保留下拉让用户切回本机。
+ * 无任何相关远程机器时标题仍是「全部任务 ▾」(2026-08-13 用户裁决:箭头保留),
+ * 菜单不出现设备列表,只留「远程连接设置」与「侧边栏显示设置」——单机用户看不到
+ * 设备概念,但仍能从段头进这两项。范围标题恒在后,断网逃生不再靠「假装还有
+ * 远程设备」画出机器列表——目录空了就只留两项设置,用户从「远程连接设置」
+ * 或范围标题本身回到本机。
  *
  * 机器选择:**默认单选、多选框另走多选**(2026-07 用户定稿):
  *   - 「所有」→ 重置回默认(本机 + 全部远程),菜单关闭;
@@ -48,10 +51,11 @@ import {
   Ban,
   Check,
   ChevronDown,
-  EllipsisVertical,
   Loader2,
   Monitor,
+  MonitorCog,
   MonitorSmartphone,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { useMatch, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -81,10 +85,18 @@ import { MENU_CONTENT_CLASS, MENU_ITEM_CLASS, MENU_SEPARATOR_CLASS } from './men
 const SCOPE_TITLE_CLASS =
   'text-sm font-medium text-[var(--sidebar-list-muted)] transition-colors hover:text-[var(--sidebar-nav-text)]';
 
-export function MachineSwitcherMenu(): ReactNode {
+export function MachineSwitcherMenu({
+  onOpenDisplaySettings,
+}: {
+  /** 打开段头同一份「侧边栏显示设置」菜单;不传则不渲染该入口。 */
+  onOpenDisplaySettings?: () => void;
+} = {}): ReactNode {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const { devices, selectedDeviceId, hasRemote, select, toggle } = useMachineSwitcher();
+  const { devices, selectedDeviceId, select, toggle } = useMachineSwitcher();
+  // 设备列表只看当前是否真有可展示的远程设备。hasRemote 还会把「目录已空、
+  // raw 仍记着远端」算进去——那是旧逃生口,标题恒在后会误画出「所有 / 本机」。
+  const showDeviceList = devices.length > 0;
   // 段头标题是远程任务读取状态的固定承载点。后台 bootstrap 时只更新这一行，
   // 不再把 loading 提示插入下方会话列表，避免列表整体上下跳动。
   const remoteSessionBootstrapLoading = useRemoteSessionBootstrapLoading(selectedDeviceId);
@@ -115,17 +127,36 @@ export function MachineSwitcherMenu(): ReactNode {
     ensureConversationListVisible();
   };
 
-  // 无任何相关远程机器、也没有需要逃生的悬空远端选择 → 纯静态标题
-  // (段头恒在;与「按设备分组」选项同一出现条件,本机用户看不到任何设备概念)。
-  if (!hasRemote) {
-    return <span className={SCOPE_TITLE_CLASS}>{t('ccAgent.sidebar.allSessions')}</span>;
-  }
-
   const triggerLabel = t('ccAgent.sidebar.machineSwitcher.menuTrigger');
+  const settingsItems = (
+    <>
+      <DropdownMenuItem
+        className={MENU_ITEM_CLASS}
+        onSelect={() => navigate('/settings?tab=remote-control')}
+      >
+        <MonitorCog size={14} strokeWidth={2} className="shrink-0 opacity-70" />
+        <span className="truncate">{t('ccAgent.sidebar.machineSwitcher.remoteSettings')}</span>
+      </DropdownMenuItem>
+      {onOpenDisplaySettings ? (
+        <DropdownMenuItem
+          className={MENU_ITEM_CLASS}
+          onSelect={() => {
+            // 等本菜单关完、当前指针事件走完再开显示设置,避免两个 Radix
+            // 菜单抢焦点、或同一次 click 被新菜单当成点外部而立刻关掉。
+            window.setTimeout(() => onOpenDisplaySettings(), 0);
+          }}
+        >
+          <SlidersHorizontal size={14} strokeWidth={2} className="shrink-0 opacity-70" />
+          <span className="truncate">{t('ccAgent.sidebar.organizeSidebar')}</span>
+        </DropdownMenuItem>
+      ) : null}
+    </>
+  );
+
   // 标题文字 = 当前范围(2026-08-13 定稿:标题回答"我正在看什么"):
-  // 「所有」→「全部任务」;本机 →「本机任务」;单设备 → 设备名;多选 → 「N 台机器」。
+  // 「所有」/ 无远程 →「全部任务」;本机 →「本机任务」;单设备 → 设备名;多选 → 「N 台机器」。
   let triggerText = t('ccAgent.sidebar.allSessions');
-  if (selectedDeviceId !== MACHINE_ALL) {
+  if (showDeviceList && selectedDeviceId !== MACHINE_ALL) {
     if (selectedDeviceId.length === 1) {
       const only = selectedDeviceId[0];
       triggerText =
@@ -175,48 +206,46 @@ export function MachineSwitcherMenu(): ReactNode {
         sideOffset={4}
         className={cn(MENU_CONTENT_CLASS, 'min-w-48')}
       >
-        <MachineMenuItem
-          label={t('ccAgent.sidebar.machineSwitcher.allMachines')}
-          selected={selectedDeviceId === MACHINE_ALL}
-          onSelect={() => applySelect(MACHINE_ALL)}
-        />
-        <MachineMenuItem
-          icon={<Monitor size={14} strokeWidth={2} />}
-          label={t('ccAgent.sidebar.machineSwitcher.localMachine')}
-          selected={isMachineSelected(selectedDeviceId, MACHINE_LOCAL)}
-          onSelect={() => applySelect([MACHINE_LOCAL])}
-          onToggle={() => applyToggle(MACHINE_LOCAL)}
-        />
-        {devices.map((device) => {
-          const rejected = device.status === 'rejected';
-          const connecting = device.status === 'connecting';
-          return (
+        {showDeviceList ? (
+          <>
             <MachineMenuItem
-              key={device.deviceId}
-              icon={<MonitorSmartphone size={14} strokeWidth={2} />}
-              label={device.name}
-              selected={isMachineSelected(selectedDeviceId, device.deviceId)}
-              shimmer={connecting}
-              rejected={rejected}
-              // 被拒:不切换,弹提示(菜单保持打开);已连接 / 连接中:单选切换或
-              // 多选框勾选(连接中勾上先空、同步完填充)。
-              onSelect={
-                rejected
-                  ? () => toast.warning(t('settings.remoteControl.accessRevokedByPeer'))
-                  : () => applySelect([device.deviceId])
-              }
-              onToggle={rejected ? undefined : () => applyToggle(device.deviceId)}
+              label={t('ccAgent.sidebar.machineSwitcher.allMachines')}
+              selected={selectedDeviceId === MACHINE_ALL}
+              onSelect={() => applySelect(MACHINE_ALL)}
             />
-          );
-        })}
-        <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-        <DropdownMenuItem
-          className={MENU_ITEM_CLASS}
-          onSelect={() => navigate('/settings?tab=remote-control')}
-        >
-          <EllipsisVertical size={14} strokeWidth={2} className="shrink-0 opacity-70" />
-          <span className="truncate">{t('ccAgent.sidebar.machineSwitcher.remoteSettings')}</span>
-        </DropdownMenuItem>
+            <MachineMenuItem
+              icon={<Monitor size={14} strokeWidth={2} />}
+              label={t('ccAgent.sidebar.machineSwitcher.localMachine')}
+              selected={isMachineSelected(selectedDeviceId, MACHINE_LOCAL)}
+              onSelect={() => applySelect([MACHINE_LOCAL])}
+              onToggle={() => applyToggle(MACHINE_LOCAL)}
+            />
+            {devices.map((device) => {
+              const rejected = device.status === 'rejected';
+              const connecting = device.status === 'connecting';
+              return (
+                <MachineMenuItem
+                  key={device.deviceId}
+                  icon={<MonitorSmartphone size={14} strokeWidth={2} />}
+                  label={device.name}
+                  selected={isMachineSelected(selectedDeviceId, device.deviceId)}
+                  shimmer={connecting}
+                  rejected={rejected}
+                  // 被拒:不切换,弹提示(菜单保持打开);已连接 / 连接中:单选切换或
+                  // 多选框勾选(连接中勾上先空、同步完填充)。
+                  onSelect={
+                    rejected
+                      ? () => toast.warning(t('settings.remoteControl.accessRevokedByPeer'))
+                      : () => applySelect([device.deviceId])
+                  }
+                  onToggle={rejected ? undefined : () => applyToggle(device.deviceId)}
+                />
+              );
+            })}
+            <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
+          </>
+        ) : null}
+        {settingsItems}
       </DropdownMenuContent>
     </DropdownMenu>
   );

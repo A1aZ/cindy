@@ -4,7 +4,7 @@
  * 2026-08-13 用户定稿:段头标题即机器范围下拉(MachineSwitcherMenu,「全部任务」
  * 与设备下拉合并),段级收起取消;右侧保留折叠按钮(单层 = 收起所有分组 ↔ 展开;
  * 设备+项目双层 = 循环 收项目层 → 收设备层 → 全部展开,foldState 状态机)与
- * 整理菜单入口。
+ * 侧边栏显示设置入口。
  */
 
 import { readFileSync } from 'node:fs';
@@ -37,14 +37,21 @@ describe('Projects sidebar section', () => {
   });
 
   it('header order: scope title dropdown → fold → filter', () => {
-    const titleIndex = projectsSectionSource.indexOf('<MachineSwitcherMenu />');
-    const foldIndex = projectsSectionSource.indexOf('onClick={handleFoldAll}');
-    const filterIndex = projectsSectionSource.indexOf('<SidebarFilterPopover');
+    const titleIndex = projectsSectionSource.indexOf('<MainListScopeHeader');
+    const foldIndex = projectsSectionSource.indexOf('onClick: handleFoldAll');
     expect(titleIndex).toBeGreaterThanOrEqual(0);
     expect(foldIndex).toBeGreaterThan(titleIndex);
-    expect(filterIndex).toBeGreaterThan(foldIndex);
-    // 折叠按钮恒显(不再有段收起时隐藏的分支)。
-    expect(projectsSectionSource).toMatch(/\{foldState !== null && \(\s*<Tip text=\{foldLabel\}/);
+    expect(projectsSectionSource).toContain('hasMainListContent && foldState !== null');
+    // 只有对话组、没有项目时折叠按钮仍可用;零项目不能把 isAllCollapsed 当成组层已收齐。
+    expect(projectsSectionSource).toContain(
+      'disabled: projectNodesToggleDisabled && !hasDeviceLayer && !hasGroupLayer',
+    );
+    expect(projectsSectionSource).toContain(
+      "const hasVisibleProjectGroups = mixedEntries.some((entry) => entry.kind === 'project')",
+    );
+    expect(projectsSectionSource).toContain(
+      'const allGroupsCollapsed = hasVisibleProjectGroups',
+    );
   });
 
   // 2026-08-12 用户裁决:段头「新建项目」按钮暂时移除(同一动作在新任务页的工作
@@ -57,20 +64,31 @@ describe('Projects sidebar section', () => {
   });
 
   it('only shows project header actions while hovering or focusing the Projects header row', () => {
-    expect(projectsSectionSource).toContain('group/sidebar-header flex h-6');
-    expect(projectsSectionSource).toContain(
+    const headerSource = readFileSync(
+      resolve(
+        __dirname,
+        '..',
+        'features',
+        'cc-agent',
+        'sidebar',
+        'MainListScopeHeader.tsx',
+      ),
+      'utf8',
+    );
+    expect(headerSource).toContain('group/sidebar-header flex h-6');
+    expect(headerSource).toContain(
       'pointer-events-none opacity-0 transition-opacity duration-150',
     );
-    expect(projectsSectionSource).toContain(
+    expect(headerSource).toContain(
       'group-hover/sidebar-header:pointer-events-auto group-hover/sidebar-header:opacity-100',
     );
-    expect(projectsSectionSource).toContain(
+    expect(headerSource).toContain(
       'has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:opacity-100',
     );
-    expect(projectsSectionSource).not.toContain(
+    expect(headerSource).not.toContain(
       'group-focus-within/sidebar-header:pointer-events-auto',
     );
-    expect(projectsSectionSource).toContain('className={HEADER_ACTIONS_CLASS}');
+    expect(headerSource).toContain('className={HEADER_ACTIONS_CLASS}');
   });
 
   it('the project tree renders unconditionally (section collapse removed)', () => {

@@ -64,6 +64,7 @@ import { setSessionOrdinalBadges } from './sidebar/sessionOrdinalBadges';
 import { useOwnTopNavScrollableRows, useSidebarCollapsedState } from '../feature-context';
 import { SidebarTopNav } from '@/components/sidebar/SidebarTopNav';
 import { SidebarFilterPopover } from './sidebar/SidebarFilterPopover';
+import { MainListScopeHeader } from './sidebar/MainListScopeHeader';
 import { stripTrailingPathSeparators } from '../../../shared/pathText';
 import { useRefreshWorktrees } from '@/contexts/WorktreeContext';
 import {
@@ -1641,6 +1642,11 @@ function ExpandedView({
     visibleUnclassified.length > 0 ||
     visibleProjectsWithVendor.length > 0 ||
     visibleDialogues.length > 0;
+  // 与 ProjectsSection.deviceGroupingAvailable 同一门控:范围收窄到单台机器时
+  // 「按设备分组」选项隐藏。占位分支也要挂范围标题,不能各写一份。
+  const deviceGroupingAvailable =
+    (remoteDeviceIndex?.size ?? 0) > 0 &&
+    !(selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1);
 
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(() => new Set());
   const [selectionAnchorSessionId, setSelectionAnchorSessionId] = useState<string | null>(null);
@@ -3073,36 +3079,71 @@ function ExpandedView({
               (rail 走 CollapsedView 自己的图标入口),无需再判折叠。 */}
           <SidebarTopNav section="scrollable" />
           {remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
-            <RemoteSidebarLoadNotice
-              kind="devices"
-              status="error"
-              partial={false}
-              onRetry={retryDeviceLinkDeviceList}
-            />
+            <>
+              <MainListScopeHeader
+                filter={filter}
+                allKnownProjects={visibleProjectUniverse}
+                hasRemoteDevices={deviceGroupingAvailable}
+              />
+              <RemoteSidebarLoadNotice
+                kind="devices"
+                status="error"
+                partial={false}
+                onRetry={retryDeviceLinkDeviceList}
+              />
+            </>
           ) : remoteSessionBootstrapFailures.length > 0 && !hasVisibleSidebarContent ? (
-            <RemoteSidebarLoadNotice
-              kind="tasks"
-              status="error"
-              deviceLabel={failedRemoteDeviceLabel}
-              partial={false}
-            />
+            <>
+              <MainListScopeHeader
+                filter={filter}
+                allKnownProjects={visibleProjectUniverse}
+                hasRemoteDevices={deviceGroupingAvailable}
+              />
+              <RemoteSidebarLoadNotice
+                kind="tasks"
+                status="error"
+                deviceLabel={failedRemoteDeviceLabel}
+                partial={false}
+              />
+            </>
           ) : remoteDeviceDirectoryStatus === 'loading' && !hasVisibleSidebarContent ? (
-            <RemoteSidebarLoadNotice kind="devices" status="loading" partial={false} />
+            <>
+              <MainListScopeHeader
+                filter={filter}
+                allKnownProjects={visibleProjectUniverse}
+                hasRemoteDevices={deviceGroupingAvailable}
+              />
+              <RemoteSidebarLoadNotice kind="devices" status="loading" partial={false} />
+            </>
           ) : remoteSessionBootstrapLoadingDevices.length > 0 && !hasVisibleSidebarContent ? (
-            <RemoteSidebarLoadNotice
-              kind="tasks"
-              status="loading"
-              deviceLabel={loadingRemoteDeviceLabel}
-              partial={false}
-            />
+            <>
+              <MainListScopeHeader
+                filter={filter}
+                allKnownProjects={visibleProjectUniverse}
+                hasRemoteDevices={deviceGroupingAvailable}
+              />
+              <RemoteSidebarLoadNotice
+                kind="tasks"
+                status="loading"
+                deviceLabel={loadingRemoteDeviceLabel}
+                partial={false}
+              />
+            </>
           ) : selectedMachineConnecting ? (
             // 选中机器连接中:会话还没同步,显示「连接中」而非「暂无对话」。
-            // 机器切换入口在上方固定行常驻,始终能切回「所有」、不会被困在占位页。
-            <div className="flex flex-col items-center justify-center px-3 py-12 text-center">
-              <span className="animate-pulse text-xs text-[var(--text-tertiary)]">
-                {t('ccAgent.sidebar.machineSwitcher.connecting')}
-              </span>
-            </div>
+            // 范围标题恒在,可从菜单切回「所有 / 本机」,不会被困在占位页。
+            <>
+              <MainListScopeHeader
+                filter={filter}
+                allKnownProjects={visibleProjectUniverse}
+                hasRemoteDevices={deviceGroupingAvailable}
+              />
+              <div className="flex flex-col items-center justify-center px-3 py-12 text-center">
+                <span className="animate-pulse text-xs text-[var(--text-tertiary)]">
+                  {t('ccAgent.sidebar.machineSwitcher.connecting')}
+                </span>
+              </div>
+            </>
           ) : (
             <>
               {remoteDeviceDirectoryStatus === 'error' && (
@@ -3254,10 +3295,7 @@ function ExpandedView({
         allKnownProjects={visibleProjectUniverse}
         // 与段头实例同一门控:范围收窄到单台机器时「按设备分组」选项隐藏
         // (2026-08-13 用户定稿,详见 ProjectsSection.deviceGroupingAvailable)。
-        hasRemoteDevices={
-          (remoteDeviceIndex?.size ?? 0) > 0 &&
-          !(selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1)
-        }
+        hasRemoteDevices={deviceGroupingAvailable}
         contextMenuPos={organizeMenuPos}
         onContextMenuOpenChange={(open) => {
           if (!open) setOrganizeMenuPos(null);

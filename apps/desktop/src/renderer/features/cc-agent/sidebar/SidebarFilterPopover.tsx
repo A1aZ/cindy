@@ -1,5 +1,5 @@
 /**
- * SidebarFilterPopover — Sidebar 整理菜单
+ * SidebarFilterPopover — 侧边栏显示设置菜单
  * ---------------------------------------------------------------------------
  * 菜单分四段语义（侧边栏重设计,docs/product-rules/sidebar-redesign-plan.md §3）：
  *   - 分组：独立复选——按项目分组 / 按设备分组(仅远程连接时出现)/ 对话归为一组
@@ -166,6 +166,12 @@ export interface SidebarFilterPopoverProps {
   contextMenuPos?: { x: number; y: number } | null;
   /** 受控模式下的关闭回调(点外部 / Esc / 选中项)。 */
   onContextMenuOpenChange?: (open: boolean) => void;
+  /**
+   * 段头按钮模式的受控开合。范围菜单里的「侧边栏显示设置」入口用它把同一份
+   * 菜单打开;与 contextMenuPos 互斥——受控光标模式仍走上面那对 prop。
+   */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 function optionLabel<T extends string>(
@@ -310,6 +316,8 @@ export function SidebarFilterPopover({
   hasRemoteDevices = false,
   contextMenuPos,
   onContextMenuOpenChange,
+  open,
+  onOpenChange,
 }: SidebarFilterPopoverProps) {
   const { t } = useTranslation();
   // 受控光标模式 = 调用方传了 contextMenuPos 这个 prop(值为 null 表示"当前关闭",
@@ -402,9 +410,11 @@ export function SidebarFilterPopover({
       {...(isContextMode
         ? {
             open: contextMenuPos !== null,
-            onOpenChange: (open: boolean) => onContextMenuOpenChange?.(open),
+            onOpenChange: (next: boolean) => onContextMenuOpenChange?.(next),
           }
-        : null)}
+        : open !== undefined
+          ? { open, onOpenChange }
+          : null)}
     >
       <DropdownMenuTrigger asChild>
         {isContextMode ? (

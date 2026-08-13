@@ -6926,7 +6926,7 @@
         "remoteSettings": "リモート接続設定",
         "multiSelect": "複数選択",
         "deselect": "選択を解除",
-        "menuTrigger": "リモートマシン",
+        "menuTrigger": "タスク範囲",
         "selectedCount_one": "{{count}} 台のマシン",
         "selectedCount_other": "{{count}} 台のマシン"
       },
@@ -6966,8 +6966,8 @@
       "createProjectFailed": "プロジェクトの作成に失敗しました",
       "projectsToggleExpand": "すべてのプロジェクトセッションを展開",
       "projectsToggleCollapse": "すべてのプロジェクトセッションを折りたたむ",
-      "filterAria": "サイドバー整理（ステータス：{{status}}、Agent：{{vendor}}、最終アクティビティ：{{lastActivity}}、グループ：{{groupBy}}、並び替え：{{sortBy}}、プロジェクト：{{projects}}）",
-      "organizeSidebar": "サイドバー整理",
+      "filterAria": "サイドバー表示設定（ステータス：{{status}}、Agent：{{vendor}}、最終アクティビティ：{{lastActivity}}、グループ：{{groupBy}}、並び替え：{{sortBy}}、プロジェクト：{{projects}}）",
+      "organizeSidebar": "サイドバー表示設定",
       "filterAllText": "すべて",
       "filterSelectedProjects": "{{count}} 件選択",
       "filterStatus": {

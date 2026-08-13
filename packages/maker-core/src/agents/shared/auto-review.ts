@@ -401,6 +401,34 @@ const POWERSHELL_TARGET_PARAMS: readonly string[] = [
 const POWERSHELL_PATH_PARAMS: readonly string[] = ['-path', '-literalpath', '-lp', '-pspath'];
 
 /**
+ * **不做通配符展开**的路径参数:`-LiteralPath` 与它的文档别名 `-LP` / `-PSPath`。它们的值
+ * 逐字当路径用,里面的 `*` / `?` / `[` 是文件名的一部分,不是通配符。
+ *
+ * 反过来 `-Path`(以及绑定到 `-Path` 的位置参数)会在**运行期展开**通配符,所以
+ * `Set-Content C:\Win*\System32\drivers\etc\hosts owned` 的目标静态上根本不是一条路径,
+ * 而是一组;`SYSTEM_WRITE_PATH_PATTERNS` 要匹配字面 `Windows`,于是整条漏成灰区(codex 报)。
+ */
+const POWERSHELL_LITERAL_PATH_PARAMS: readonly string[] = ['-literalpath', '-lp', '-pspath'];
+
+/** PowerShell 的通配符:`*`、`?`、字符组 `[...]`。都**不跨**路径分隔符。 */
+const POWERSHELL_WILDCARD = /[*?[]/;
+
+/**
+ * 「这个写目标是个会展开的通配符模式」的标记前缀。
+ *
+ * 不能直接判成 `UNPROVABLE_WRITE_TARGET`:那是无条件必问,会把 `Remove-Item *.log`、
+ * `Remove-Item C:\repo\build\*` 这类日常清理全打成硬弹窗。通配符**不跨路径分隔符**,所以
+ * 「第一个通配符之前的最后一个分隔符」是所有可能展开结果的**共同前缀** —— 前缀能证明在工作区内
+ * 时,展开结果必然也在区内(模式里没有 `..`,`normalizeTarget` 会先折叠掉)。判定需要 workspace
+ * 根,所以留到消费点 `systemWriteTargetsInSegment` 做,这里只做标记。
+ */
+const GLOB_WRITE_TARGET_PREFIX = '\u0000glob:';
+
+function markGlobWriteTarget(value: string): string {
+  return POWERSHELL_WILDCARD.test(value) ? GLOB_WRITE_TARGET_PREFIX + value : value;
+}
+
+/**
  * 写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、顶掉真正的
  * 写目标:`Set-Content -ErrorVariable errs C:\Windows\…\hosts owned` 会把 `errs` 当目标,系统
  * 路径反而漏掉(codex 报,已实测)。
@@ -497,7 +525,11 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   if (targets === null) return null;
   // 表达式参数会让位置模型整体失效(见 isPowerShellExpressionToken)→ 整次抽取按不可证算。
   if (args.some(isPowerShellExpressionToken)) return [UNPROVABLE_WRITE_TARGET];
-  return targets.map((t) => (POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t));
+  return targets.map((t) => {
+    // 通配符标记要跳过再查 `$`:两者可以同时出现(`"$env:windir\*"`),动态优先(更保守)。
+    const bare = t.startsWith(GLOB_WRITE_TARGET_PREFIX) ? t.slice(GLOB_WRITE_TARGET_PREFIX.length) : t;
+    return POWERSHELL_DYNAMIC_TARGET.test(bare) ? UNPROVABLE_WRITE_TARGET : t;
+  });
 }
 
 function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | null {
@@ -535,11 +567,15 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
       const pathIsSourceHere = spec.pathIsSource === true
         && POWERSHELL_PATH_PARAMS.includes(candidates[0]);
       const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]) && !pathIsSourceHere;
+      // `-LiteralPath`(及别名 `-LP`/`-PSPath`)逐字取值,不展开通配符 → 不打通配符标记。
+      const literal = POWERSHELL_LITERAL_PATH_PARAMS.includes(candidates[0]);
+      const take = (value: string): string[] =>
+        splitPowerShellPathList(value).map((v) => (literal ? v : markGlobWriteTarget(v)));
       if (attached) {
         // 贴在参数上的值:目标参数取它,源路径按操作数收,其它带值参数直接丢掉。
         const value = token.slice(name.length + 1);
-        if (isTarget) named.push(...splitPowerShellPathList(value));
-        else if (pathIsSourceHere) operands.push(...splitPowerShellPathList(value));
+        if (isTarget) named.push(...take(value));
+        else if (pathIsSourceHere) operands.push(...take(value));
         continue;
       }
       const value = args[i + 1];
@@ -554,11 +590,12 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
         if (isTarget) named.push(UNPROVABLE_WRITE_TARGET);
         continue;
       }
-      (isTarget ? named : operands).push(...splitPowerShellPathList(value));
+      (isTarget ? named : operands).push(...take(value));
       i++;
       continue;
     }
-    operands.push(...splitPowerShellPathList(token));
+    // 位置参数绑定到 `-Path` / `-Destination`,都会展开通配符 → 打标记。
+    operands.push(...splitPowerShellPathList(token).map(markGlobWriteTarget));
   }
   if (named.length > 0) {
     // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`);
@@ -2963,14 +3000,37 @@ function systemWriteTargetsInSegment(
   if (targets.some(isProtectedProviderPath)) return true;
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
-  return targets.some((t) =>
+  return targets.some((t) => {
+    // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组,
+    // 只有"所有可能结果的共同前缀在工作区内"才算可证安全,否则要求同意。
+    if (t.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
+      const prefix = literalPrefixBeforeGlob(t.slice(GLOB_WRITE_TARGET_PREFIX.length));
+      if (opts.cwdUnknown && !isAbsolutePath(toForwardSlashes(prefix))) return true;
+      const resolved = canonicalPath(normalizeTarget(prefix, [base]), aliasFirmlinks);
+      // 前缀本身就落在系统目录(`C:\Windows\*`)→ 直接命中,不必再谈工作区。
+      if (isProtectedSystemPath(resolved)) return true;
+      return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
+    }
     // 每个目标查两种形态:原样(保留 Windows `\` 分隔符)与去 POSIX `\` 转义(`/e\tc`→`/etc`)。
-    [t, t.replace(/\\(.)/g, '$1')].some((v) => {
+    return [t, t.replace(/\\(.)/g, '$1')].some((v) => {
       const forward = toForwardSlashes(v);
       // cwd 未知 + 相对目标 → 无法证明它没落进系统目录,fail-closed。
       if (opts.cwdUnknown && !isAbsolutePath(forward)) return true;
       return isProtectedSystemPath(canonicalPath(normalizeTarget(v, [base]), aliasFirmlinks));
-    }));
+    });
+  });
+}
+
+/**
+ * 通配符模式里「所有可能展开结果的共同前缀」:第一个通配符之前的最后一个路径分隔符为止。
+ * PowerShell 的 `*`/`?`/`[...]` 都不跨分隔符,所以这个前缀对每个展开结果都成立。
+ * 模式整段就是通配符(`*.log`)时前缀为空 → 由调用方按有效 cwd 解析。
+ */
+function literalPrefixBeforeGlob(pattern: string): string {
+  const first = pattern.search(POWERSHELL_WILDCARD);
+  const head = first < 0 ? pattern : pattern.slice(0, first);
+  const cut = Math.max(head.lastIndexOf('/'), head.lastIndexOf('\\'));
+  return cut < 0 ? '.' : head.slice(0, cut + 1);
 }
 
 /** 系统/区外批量破坏与受保护分支强推不能只交给模型裁决。 */

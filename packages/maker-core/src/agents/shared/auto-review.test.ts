@@ -2337,6 +2337,63 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('会展开的通配符写目标:按"共同前缀能否证在区内"判,-LiteralPath 保留字面量语义', () => {
+    // `-Path`(及绑定到它的位置参数)在**运行期**展开通配符,所以
+    // `Set-Content C:\Win*\System32\drivers\etc\hosts owned` 的目标静态上不是一条路径而是一组;
+    // `SYSTEM_WRITE_PATH_PATTERNS` 要匹配字面 `Windows`,于是整条漏成灰区(codex 报)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Set-Content C:\\Win*\\System32\\drivers\\etc\\hosts owned',
+      'Set-Content -Path C:\\Win*\\System32\\drivers\\etc\\hosts owned',
+      'Set-Content C:\\Win?ows\\System32\\drivers\\etc\\hosts owned',      // `?`
+      'Set-Content "C:\\Win[d]ows\\System32\\drivers\\etc\\hosts" owned',  // 字符组
+      'Set-Content C:\\Program*\\app\\x owned',
+      'Remove-Item C:\\Win*\\System32\\drivers\\etc\\hosts',               // 删除同理
+      'Remove-Item C:\\Users\\*\\AppData\\x',                              // 通配落在中间组件
+      'Copy-Item C:\\repo\\payload C:\\Win*\\x',                           // 目标侧
+      'Set-Content -Path C:\\repo\\..\\Win*\\x owned',                     // `..` 先折叠再判前缀
+      // 通配符 + 变量同时出现 → 动态判据优先(更保守)。
+      'Set-Content "$env:windir\\*" owned',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:**区内 glob 是日常操作**,必须留灰区。判据不是"含通配符就必问",而是
+    // 「通配符不跨路径分隔符 → 第一个通配符前的最后一个分隔符是所有展开结果的共同前缀 →
+    // 前缀能证在区内,展开结果必然也在区内」。若按"含通配符即哨兵"写,下面这些全变硬弹窗。
+    for (const c of [
+      'Remove-Item *.log',
+      'Remove-Item C:\\repo\\build\\*',
+      'Remove-Item C:\\repo\\**\\*.tmp',
+      'Remove-Item -Recurse -Force C:\\repo\\dist\\*',
+      'Copy-Item C:\\repo\\a* C:\\repo\\b',
+      'Set-Content "C:\\repo\\my [notes]\\a.txt" hi',
+      'Copy-Item C:\\repo\\src\\*.ts C:\\repo\\out',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二:`-LiteralPath` 与它的文档别名 `-LP` / `-PSPath` **不展开通配符** —— 值逐字当路径用,
+    // 里面的 `*` 是文件名的一部分。这类目标不该因为"看见星号"被升级(那是个字面含 `*` 的路径,
+    // 不可能是真实系统路径)。
+    for (const c of [
+      'Set-Content -LiteralPath C:\\Win*\\System32\\x owned',
+      'Set-Content -LP C:\\Win*\\System32\\x owned',
+      'Set-Content -PSPath C:\\Win*\\System32\\x owned',
+      'Remove-Item -LiteralPath C:\\Win*\\System32\\x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 但 `-LiteralPath` 指向**真实**系统路径时照旧必问(字面量语义不等于放行)。
+    expect(classifyShellCommand(
+      'Set-Content -LiteralPath C:\\Windows\\System32\\drivers\\etc\\hosts owned', win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+
+    // 反例三:有效 cwd 未知时,相对 glob 无法证明落在哪 → fail-closed(与既有相对目标同口径)。
+    expect(classifyShellCommand('Remove-Item *.log', win, { platform: 'win32', cwdUnknown: true }))
+      .toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

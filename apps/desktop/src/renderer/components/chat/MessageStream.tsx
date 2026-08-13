@@ -65,7 +65,6 @@ import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
 import { cn } from '@/lib/utils';
 import {
-  markSessionAutomaticHistoryLoadStarted,
   readSessionScroll,
   restoreSessionAutomaticHistoryLoadAttempts,
   saveSessionScroll,
@@ -261,8 +260,8 @@ interface MessageStreamProps {
   continuationTurnClientId?: string | null;
   /** 旧被控端缺省该字段时才启用兼容兜底；unknown 在首个投影前 fail closed。 */
   continuationInFlightProjectionCapability?: ContinuationInFlightProjectionCapability;
-  /** F-SYNC-2: callback to load older messages */
-  onLoadMore?: () => void;
+  /** F-SYNC-2: callback to load older messages; true marks this as an automatic fill. */
+  onLoadMore?: (automatic?: boolean) => Promise<boolean>;
   isLoadingMore?: boolean;
   hasMoreMessages?: boolean;
   /** Dynamic bottom padding (px) to reserve space for the input overlay */
@@ -3258,7 +3257,7 @@ export function MessageStream({
   //   3. attemptCount >= MAX_AUTO_LOAD_ATTEMPTS  → 退化保护 (只数 IPC, 不数 expand)
   //
   // attemptCount 用 ref 持有,让同一次 mount 内仍可按原预算连续补页。第一次真的
-  // 发起自动补载时同时在 sessionScrollStore 记 started;切走再切回的新 mount
+  // 成功推进缓存窗口后同时在 sessionScrollStore 记 completed;切走再切回的新 mount
   // 直接从耗尽态开始,避免 leaveView 裁掉已补前缀后把同一页重新拉一遍。
   // 用户明确向上滚动 / 翻页走 decideUserIntentFillAction,不读取这份自动预算。
   // useLayoutEffect 而不是 useEffect — 在 commit 同步阶段读 scrollH/clientH,
@@ -3301,8 +3300,7 @@ export function MessageStream({
         autoLoadAttemptCountRef.current += 1;
         prevScrollHeightRef.current = el.scrollHeight;
         prevScrollTopAtLoadRef.current = el.scrollTop;
-        if (sessionId) markSessionAutomaticHistoryLoadStarted(sessionId);
-        onLoadMore();
+        void onLoadMore(true);
         return;
       }
       case 'none':
@@ -4096,8 +4094,7 @@ export function MessageStream({
       navRailBackfillRoundsRef.current += 1;
       prevScrollHeightRef.current = el.scrollHeight;
       prevScrollTopAtLoadRef.current = el.scrollTop;
-      if (sessionId) markSessionAutomaticHistoryLoadStarted(sessionId);
-      onLoadMore();
+      void onLoadMore(true);
     };
     // 空闲期执行,别跟首屏渲染 / 两段式扩窗抢主线程;测试等无 ric 环境退化。
     if (typeof window.requestIdleCallback === 'function') {

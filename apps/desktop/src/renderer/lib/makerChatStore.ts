@@ -120,6 +120,10 @@ import type { AgentKind } from '@/hooks/useAgentCapabilities';
 import type { Effort } from '@/lib/userPreferences.types';
 import { emitAutoTitlePreview, emitAutoTitlePreviewCleared, emitPatch } from '@/lib/sessionsBus';
 import { createLogger } from '@/lib/logger';
+import {
+  markSessionAutomaticHistoryLoadCompleted,
+  resetSessionAutomaticHistoryLoadCompletion,
+} from '@/lib/sessionScrollStore';
 import { extractIpcError } from '@/utils/ipcError';
 import { tryBeginAgentSendDispatch } from '@/lib/agentSwitchCoordinator';
 import { getUserPrompt } from '@/lib/userPromptStore';
@@ -3174,6 +3178,7 @@ function _purgeSession(sessionId: string): void {
   // 交接中的迟到 continuation，且不写入 /clear 的历史时间边界。
   bumpRendererClearGeneration(sessionId);
   cancelRemoteOptimisticSendsForSessionPurge(sessionId);
+  resetSessionAutomaticHistoryLoadCompletion(sessionId);
   sessions.delete(sessionId);
   localSentUserMessageIds.delete(sessionId);
   pendingLocalRetryIntents.delete(sessionId);
@@ -3387,6 +3392,7 @@ function _demoteIdleSessions(): void {
     // 分页锁。漏 bump 的后果是 in-flight 那一页按 demote 前的游标提交,把一段脱离上下文
     // 的旧历史 merge 进空切片(或重开后的新切片),最近的消息反而缺席(#676 review)。
     bumpMessagesEpoch(sessionId);
+    resetSessionAutomaticHistoryLoadCompletion(sessionId);
     setState(sessionId, (s) => ({
       ...s,
       messages: [],
@@ -9602,6 +9608,7 @@ function ensureInitialMessages(sessionId: string): void {
  */
 function reloadMessages(sessionId: string, opts?: { allowCacheHydrate?: boolean }): void {
   discardPendingTextDelta(sessionId);
+  resetSessionAutomaticHistoryLoadCompletion(sessionId);
   // 代际递增:作废 in-flight 的 loadOlderMessages 追页窗口(见 _messagesEpoch 注释)。
   bumpMessagesEpoch(sessionId);
   invalidateHistoryFetch(sessionId);
@@ -10094,7 +10101,10 @@ function runRemoteReconcile(sessionId: string, opts?: { force?: boolean }): Prom
           historyWindowHasIsland: hasDetachedArrival,
         };
       });
-      if (didRebuild) bumpMessagesEpoch(sessionId);
+      if (didRebuild) {
+        resetSessionAutomaticHistoryLoadCompletion(sessionId);
+        bumpMessagesEpoch(sessionId);
+      }
     } finally {
       // 消息路径的早返 / 异常都要等交互重建落定;交互失败会让 run reject(替换原结果),
       // 语义正确:本代不完成。
@@ -10147,21 +10157,26 @@ function finalizeStuckRemoteTurn(sessionId: string): void {
  */
 const MAX_LOAD_OLDER_PAGES = 10;
 
-function loadOlderMessages(sessionId: string): void {
+/**
+ * 加载并提交更早的历史。返回 true 仅表示当前缓存窗口确实向前推进;
+ * 行首守卫、空页、全程失败、代际作废和提交异常都返回 false。
+ * automatic=true 时只在推进成功后耗尽该缓存窗口的跨 mount 自动补载预算。
+ */
+function loadOlderMessages(sessionId: string, automatic = false): Promise<boolean> {
   const state = getOrCreateState(sessionId);
-  if (state.isLoadingMore || !state.hasMoreMessages) return;
+  if (state.isLoadingMore || !state.hasMoreMessages) return Promise.resolve(false);
 
   let firstPageOpts: { limit: number; before?: string; beforeTs?: number };
   if (state.oldestMessageId) {
     firstPageOpts = { limit: 50, before: state.oldestMessageId };
   } else if (state.messages.length > 0) {
     const oldest = state.messages[0];
-    if (!oldest.createdAt) return;
+    if (!oldest.createdAt) return Promise.resolve(false);
     const ts = new Date(oldest.createdAt).getTime();
-    if (!Number.isFinite(ts)) return;
+    if (!Number.isFinite(ts)) return Promise.resolve(false);
     firstPageOpts = { limit: 50, beforeTs: ts };
   } else {
-    return;
+    return Promise.resolve(false);
   }
 
   setState(sessionId, (s) => ({ ...s, isLoadingMore: true }));
@@ -10173,7 +10188,7 @@ function loadOlderMessages(sessionId: string): void {
   // 远程会话(device-link)往上翻页加载更多历史:会话与消息只在被控端,必须走 origin-aware
   // 的 listMessagesFor(本地会话回落 messageService.list),否则查控制端空库 → 旧历史加载为空。
   // 与初始加载 / backfill(本文件其余处)保持一致。
-  void (async () => {
+  return (async () => {
     try {
       const collected: Message[] = [];
       // 跨页按 clientId 去重:mergeMessages 只对"新批 vs 已有"去重,不去重批内
@@ -10220,7 +10235,7 @@ function loadOlderMessages(sessionId: string): void {
       // 重置之后,新代际很可能已经开始自己的分页并重新置了锁 —— 这里再无条件清一次,
       // 就是把别人的锁放掉,让后续滚动 / 跳转并发去抢同一个游标,重新制造游标回退与
       // 重复分页(#676 review)。谁重置谁释放,被作废的请求一律不碰。
-      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return;
+      if ((_messagesEpoch.get(sessionId) ?? 0) !== epochAtStart) return false;
 
       if (collected.length === 0) {
         setState(sessionId, (s) => ({
@@ -10229,17 +10244,28 @@ function loadOlderMessages(sessionId: string): void {
           hasMoreMessages: hasMore ? s.hasMoreMessages : false,
           isLoadingMore: false,
         }));
-        return;
+        return false;
       }
 
       const mapped = mapServerMessages(collected);
-      setState(sessionId, (s) => ({
-        ...s,
-        messages: mergeMessages(mapped, s.messages, {}, 'newest-first'),
-        oldestMessageId: oldestId ?? s.oldestMessageId,
-        hasMoreMessages: hasMore,
-        isLoadingMore: false,
-      }));
+      let didAdvanceWindow = false;
+      setState(sessionId, (s) => {
+        const messages = mergeMessages(mapped, s.messages, {}, 'newest-first');
+        const nextOldestMessageId = oldestId ?? s.oldestMessageId;
+        didAdvanceWindow =
+          messages.length > s.messages.length || nextOldestMessageId !== s.oldestMessageId;
+        return {
+          ...s,
+          messages,
+          oldestMessageId: nextOldestMessageId,
+          hasMoreMessages: hasMore,
+          isLoadingMore: false,
+        };
+      });
+      if (didAdvanceWindow && automatic) {
+        markSessionAutomaticHistoryLoadCompleted(sessionId);
+      }
+      return didAdvanceWindow;
     } catch (err) {
       // map/merge/commit 阶段兜底(subagent review P1):任何异常都必须复位
       // isLoadingMore,否则行首守卫会让该会话永久无法再翻页(spinner 卡死)。
@@ -10252,6 +10278,7 @@ function loadOlderMessages(sessionId: string): void {
       if ((_messagesEpoch.get(sessionId) ?? 0) === epochAtStart) {
         setState(sessionId, (s) => ({ ...s, isLoadingMore: false }));
       }
+      return false;
     }
   })();
 }
@@ -12551,6 +12578,7 @@ async function clearSessionAfterGuardImpl(sessionId: string, clearedAt: string):
   // The clear guard itself must be the new authority generation, otherwise an
   // older projection can win the race and reinsert pre-clear queue state.
   bumpMessagesEpoch(sessionId);
+  resetSessionAutomaticHistoryLoadCompletion(sessionId);
   bumpInteractionReconcileEpoch(sessionId);
   supersedeInputProjectionRequests(sessionId, { supersedeOperations: true });
   if (remoteDeviceId) {

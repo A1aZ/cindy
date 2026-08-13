@@ -2,8 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   clearSessionScroll,
-  markSessionAutomaticHistoryLoadStarted,
+  markSessionAutomaticHistoryLoadCompleted,
   readSessionScroll,
+  resetSessionAutomaticHistoryLoadCompletion,
   restoreSessionAutomaticHistoryLoadAttempts,
   saveSessionScroll,
   type SessionScrollSnapshot,
@@ -34,7 +35,7 @@ afterEach(() => {
 });
 
 describe('session automatic history load memory', () => {
-  it('keeps a started auto-fill run exhausted across an A → B → A remount', () => {
+  it('keeps a completed auto-fill run exhausted across an A → B → A remount', () => {
     saveSessionScroll(SESSION_A, bottomSnapshot);
 
     const firstMountAttempts = restoreSessionAutomaticHistoryLoadAttempts(
@@ -53,10 +54,10 @@ describe('session automatic history load memory', () => {
       }),
     ).toBe('load-from-db');
 
-    markSessionAutomaticHistoryLoadStarted(SESSION_A);
+    markSessionAutomaticHistoryLoadCompleted(SESSION_A);
 
-    // 真实卸载顺序是先 mark 自动加载,再由 layout cleanup 保存滚动快照。
-    // 保存快照不能把已启动标记覆盖掉。
+    // 真实卸载顺序是先完成自动加载,再由 layout cleanup 保存滚动快照。
+    // 保存快照不能把已完成标记覆盖掉。
     saveSessionScroll(SESSION_A, bottomSnapshot);
 
     // 切到另一个 Worker 不会继承 A 的预算。
@@ -109,8 +110,18 @@ describe('session automatic history load memory', () => {
     expect(readSessionScroll(SESSION_A)).toEqual(bottomSnapshot);
   });
 
+  it('restores the automatic budget when the cached message window is discarded', () => {
+    saveSessionScroll(SESSION_A, bottomSnapshot);
+    markSessionAutomaticHistoryLoadCompleted(SESSION_A);
+
+    resetSessionAutomaticHistoryLoadCompletion(SESSION_A);
+
+    expect(readSessionScroll(SESSION_A)).toEqual(bottomSnapshot);
+    expect(restoreSessionAutomaticHistoryLoadAttempts(SESSION_A, MAX_AUTO_LOAD_ATTEMPTS)).toBe(0);
+  });
+
   it('clears the automatic load marker together with the session view memory', () => {
-    markSessionAutomaticHistoryLoadStarted(SESSION_A);
+    markSessionAutomaticHistoryLoadCompleted(SESSION_A);
     clearSessionScroll(SESSION_A);
 
     expect(readSessionScroll(SESSION_A)).toBeUndefined();

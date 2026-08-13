@@ -72,6 +72,10 @@ vi.mock('@/lib/composerDraftStore', () => ({
 
 import { makerChatStore } from '@/lib/makerChatStore';
 import { aroundMessagesByClientIdFor, listMessagesFor } from '@/lib/makerTransport';
+import {
+  markSessionAutomaticHistoryLoadCompleted,
+  restoreSessionAutomaticHistoryLoadAttempts,
+} from '@/lib/sessionScrollStore';
 import type { Message } from '@/lib/ccAgent.types';
 
 const SID = 'sess-jump-backfill';
@@ -1331,6 +1335,7 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     await makerChatStore.loadAroundMessageClientId(SID, 'island-trim', { radius: 60 });
     expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
     expect(makerChatStore.getSnapshot(SID).messages.length).toBeGreaterThan(300);
+    markSessionAutomaticHistoryLoadCompleted(SID);
 
     // 离开视图 → 触发 _trimMessagesIfNeeded。
     const leave = makerChatStore.enterView(SID);
@@ -1339,6 +1344,8 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     expect(makerChatStore.getSnapshot(SID).messages).toHaveLength(200);
     // 关键:裁剪不清标记 —— 保留的 200 行未必连续。
     expect(makerChatStore.getSnapshot(SID).historyWindowHasIsland).toBe(true);
+    // 普通裁剪正是原问题的重挂载场景:消息窗口仍属同一代,自动补载预算必须保持耗尽。
+    expect(restoreSessionAutomaticHistoryLoadAttempts(SID, 5)).toBe(5);
   });
 
   it('Y2. 超长裁剪丢掉当前计划边界时,允许重入重新首拉补回计划', async () => {

@@ -519,6 +519,10 @@ const POWERSHELL_VALUE_PARAMS: readonly string[] = [
   '-encoding', '-value', '-itemtype', '-name', '-filter', '-include', '-exclude',
   '-width', '-delimiter', '-stream', '-credential', '-type', '-propertytype',
   '-fromsession', '-tosession', '-totalcount', '-tail',
+  // 位置 cmdlet(Set-Location / Push-Location / Pop-Location)的具名栈。带值,必须消费 —— 不消费的话
+  // `Push-Location -StackName foo -Path <系统目录>` 会把 `foo` 当成新 cwd,真正的 -Path 反而没被看
+  // (codex 报)。
+  '-stackname',
   // Set-Acl 的 ACL 对象:不是写目标,但**带值** —— 不消费的话值会被当位置操作数、顶掉真目标。
   '-aclobject', '-securitydescriptor', '-centralaccesspolicy',
   // Export-* / 归档族自己的带值参数。同一个道理:`Export-Csv -InputObject $x -Path <系统路径>`
@@ -3135,6 +3139,40 @@ function powerShellLocationAttachedTarget(token: string): string | undefined {
   return matched.length === 1 ? token.slice(name.length + 1) : undefined;
 }
 
+/**
+ * 位置 cmdlet 上一个选项**要不要吃掉下一个 token**。少了这一步就会把带值选项的值当成新 cwd:
+ * `Push-Location -StackName foo -Path <系统目录>` 里 `foo` 被当成位置、真正的 `-Path` 反而没被看,
+ * 于是后续相对写按工作区解析(codex 报;这是上一提交新加的 parser 自己的 bug)。
+ *
+ *   · `target-next`  下一个 token 就是要切到的位置(`-Path` / `-LiteralPath` 一族)。
+ *   · `consumes-value` 带值的非路径选项(`-StackName`、`-ErrorAction` 等 common parameters)→ 吃掉值。
+ *   · `standalone`   开关(`-PassThru`/`-Verbose`…),或值已贴在参数上 → 不吃下一个 token。
+ *   · `unprovable`   证不出它吃不吃值 / 它是不是 `-Path` → 位置无法确定,cwd 判未知(fail closed)。
+ */
+type LocationOptionKind = 'target-next' | 'consumes-value' | 'standalone' | 'unprovable';
+
+function powerShellLocationOptionKind(token: string): LocationOptionKind {
+  const name = token.split(/[:=]/)[0].toLowerCase();
+  const attached = token.length > name.length;
+  const known = [
+    ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
+  ];
+  // 精确写法优先于前缀,与写目标提取同一套口径。
+  const candidates = known.includes(name)
+    ? [name]
+    : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
+  if (candidates.length === 0) {
+    // 未知选项:贴值不会错位;不贴值就证不出它有没有吃掉后面那个 token。
+    return attached ? 'standalone' : 'unprovable';
+  }
+  if (candidates.every((p) => POWERSHELL_SWITCH_PARAMS.includes(p))) return 'standalone';
+  if (attached) return 'standalone';  // 唯一的路径参数贴值已在上面被当成目标取走
+  const paths = candidates.filter((p) => POWERSHELL_PATH_PARAMS.includes(p));
+  if (paths.length === candidates.length) return 'target-next';
+  // 候选里既有路径参数又有别的 → 下一个 token 是位置还是选项值,证不出来。
+  return paths.length > 0 ? 'unprovable' : 'consumes-value';
+}
+
 function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; target?: string } {
   // executableName 归一大小写/.exe:Windows cmd/PowerShell 大小写不敏感,`CD /` 的 cwd 变更不能漏识别
   // (copilot 报:漏了会把后续相对破坏目标误当仍在工作区内)。
@@ -3148,16 +3186,33 @@ function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; t
   }
   // POSIX `pushd -n` 只压栈、不切目录。PowerShell 的 Push-Location 没有这个开关。
   if (bin === 'pushd' && tokens.slice(1).includes('-n')) return { changesDirectory: false };
+  // PowerShell 的位置 cmdlet 有带值选项(`-StackName`、common parameters),必须先消费掉再挑位置。
+  // POSIX 的 `cd`/`pushd` 只有开关,沿用原来的"以 `-` 开头就跳过",不改既有行为。
+  const powerShellLocation = pushLike ? bin === 'push-location' : POWERSHELL_SET_LOCATION.has(bin);
   let optionsEnded = false;
-  for (const token of tokens.slice(1)) {
+  for (let i = 1; i < tokens.length; i++) {
+    const token = tokens[i];
     if (!optionsEnded && token === '--') {
       optionsEnded = true;
       continue;
     }
     if (!optionsEnded && token.startsWith('-') && token !== '-') {
+      if (!powerShellLocation) continue;
       const attached = powerShellLocationAttachedTarget(token);
       if (attached !== undefined) return { changesDirectory: true, target: attached };
-      continue;
+      const kind = powerShellLocationOptionKind(token);
+      if (kind === 'unprovable') return { changesDirectory: true };
+      if (kind === 'consumes-value') {
+        const value = tokens[i + 1];
+        if (value !== undefined && !value.startsWith('-')) i += 1;
+        continue;
+      }
+      if (kind === 'standalone') continue;
+      // target-next:下一个 token 就是位置;缺值 = 没给出位置 → cwd 未知。
+      const value = tokens[i + 1];
+      return value === undefined || value.startsWith('-')
+        ? { changesDirectory: true }
+        : { changesDirectory: true, target: value };
     }
     // pushd +/-N rotates the directory stack; the resulting cwd is runtime state.
     if (bin === 'pushd' && /^[+-]\d+$/.test(token)) {

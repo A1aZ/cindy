@@ -3118,6 +3118,39 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('位置 cmdlet 的带值选项要先消费,不能把选项值当成新 cwd', () => {
+    // 上一提交给位置 cmdlet 加的 parser 只做了"以 `-` 开头就跳过",于是带值选项的**值**被当成位置:
+    // `Push-Location -StackName foo -Path <系统目录>` 把 `foo` 当新 cwd,真正的 `-Path` 反而没被看,
+    // 后续相对写按工作区解析、整条落灰区(codex 报)。
+    const win = ['C:\\repo'];
+    const s32 = 'C:\\Windows\\System32';
+    for (const c of [
+      `Push-Location -StackName foo -Path ${s32}; Set-Content payload.txt owned`,
+      `Set-Location -StackName foo -Path ${s32}; Set-Content payload.txt owned`,
+      // common parameters 同样带值。
+      `Push-Location -ErrorVariable errs -Path ${s32}; Set-Content payload.txt owned`,
+      `Set-Location -ErrorAction Stop ${s32}; Set-Content payload.txt owned`,
+      // 未知选项证不出吃不吃值 → 位置不可确定 → cwd 未知,fail closed。
+      `Set-Location -Junk v ${s32}; Set-Content payload.txt owned`,
+      // 开关不吃值(修前就对,一并钉住)。
+      `Set-Location -PassThru ${s32}; Set-Content payload.txt owned`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:消费带值选项之后要选中**真正的** `-Path` —— 区内位置不能因此变成"未知"而被误升级。
+    for (const c of [
+      'Push-Location -StackName foo -Path C:\\repo\\build; Set-Content a.txt x',
+      'Set-Location -StackName foo -Path C:\\repo\\build; Set-Content a.txt x',
+      'Set-Location -ErrorAction Stop C:\\repo\\build; Set-Content a.txt x',
+      'Set-Location -PassThru C:\\repo\\build; Set-Content a.txt x',
+      'Set-Location -Path C:\\repo\\build; Remove-Item a.txt',
+      'Set-Location -Path',                       // 缺值 = 没给出位置,也没有写
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('前缀撞到别的 cmdlet 的参数时,按处理方式归并;贴值归不出来也不许丢', () => {
     // 真 PowerShell 把缩写解析到**被调 cmdlet 自己的参数集**,而这里的候选集是三张全局表拼的,
     // 于是 `Copy-Item -Dest` 撞上别的 cmdlet 的 `-DestinationPath` → 判成歧义。歧义分支对**贴值**

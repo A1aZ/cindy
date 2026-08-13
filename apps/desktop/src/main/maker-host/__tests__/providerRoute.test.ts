@@ -859,7 +859,7 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'shared-model')).toBeNull();
   });
 
-  it('同供应商 pending 与无 model 的控制面请求不受影响', () => {
+  it('同供应商 pending 也拦目标模型，但无 model 的控制面请求不受影响', () => {
     setCustomProviders([
       buildUserProvider({
         id: 'provider-a',
@@ -876,13 +876,24 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     setSessionProvider('s-user', 'provider-a');
     setPendingCredentialSwitchReader(() => ({ model: 'new-model', providerId: 'provider-a' }));
 
-    expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY, 'new-model')).toMatchObject({
-      upstreamOverride: 'https://provider-a.example/v1',
+    expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY, 'new-model')).toEqual({
+      localHandler: expect.any(Function),
     });
     setPendingCredentialSwitchReader(() => ({ model: 'new-model', providerId: 'provider-b' }));
     expect(resolveSessionRouteDecision('s-user', 'claude-code', KEY)).toMatchObject({
       upstreamOverride: 'https://provider-a.example/v1',
     });
+
+    clearSessionProvider('s-user');
+    setPendingCredentialSwitchReader(() => ({
+      model: 'codex/gpt-5.5',
+      providerId: null,
+      previousModel: 'gpt-5.5',
+    }));
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'codex/gpt-5.5')).toEqual({
+      localHandler: expect.any(Function),
+    });
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'gpt-5.5')).toBeNull();
   });
 
   it('blocks new routes while endpoint and key switch as one logical mutation', async () => {

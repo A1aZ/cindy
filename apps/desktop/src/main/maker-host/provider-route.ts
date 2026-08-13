@@ -245,7 +245,6 @@ export function resolvePendingSessionRouteDecision(
   const pendingSwitch = pendingCredentialSwitchReader(sessionId);
   return wireModel &&
     pendingSwitch &&
-    pendingSwitch.providerId !== providerId &&
     samePendingSwitchModel(pendingSwitch.model, wireModel) &&
     (!pendingSwitch.previousModel ||
       !samePendingSwitchModel(pendingSwitch.previousModel, wireModel))

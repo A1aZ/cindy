@@ -2570,6 +2570,70 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     )).toBe('prompt-each-time');
   });
 
+  it('通配符之后的 .. 跳转:整条按占位符归一,不能只看共同前缀', () => {
+    // 早先这里取"第一个通配符之前的共同前缀"判在不在区内。那漏了**通配符之后的 `..`**:
+    // `C:\repo\safe\*\..\..\..\Windows\…\hosts` 的共同前缀是 `C:\repo\safe\`,判成区内 → 灰区,
+    // 而它实际写的是 hosts(codex 报)。我当时的注释还写着"模式里没有 `..`,normalizeTarget 会
+    // 先折叠掉"—— 那句话只对前缀成立,对通配符**后面**那段不成立。
+    //
+    // 改法不是"再识别一下 `..`",而是把每个含通配符的**路径分量**换成一个不可折叠的占位符,
+    // 然后走与普通目标完全相同的归一 + 判定链:`..` 由 normalizeSlashes 正常折叠,通配符分量也
+    // 参与折叠。通配符不匹配 `.` / `..` 目录项,所以拿一个普通分量代表它是可靠的最坏边界。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Remove-Item C:\\repo\\safe\\*\\..\\..\\..\\Windows\\System32\\drivers\\etc\\hosts',
+      'Set-Content C:\\repo\\safe\\*\\..\\..\\..\\Windows\\System32\\drivers\\etc\\hosts owned',
+      'Remove-Item C:\\repo\\*\\..\\..\\Windows\\x',
+      'Copy-Item C:\\repo\\p C:\\repo\\safe\\*\\..\\..\\..\\Windows\\x', // 目标侧
+      'Remove-Item C:\\repo\\..\\Win*\\x',                                // `..` 在通配符之前
+      'Remove-Item C:\\repo\\safe\\?\\..\\..\\..\\Windows\\x',            // `?` 同理
+      'Remove-Item "C:\\repo\\safe\\[ab]\\..\\..\\..\\Windows\\x"',       // 字符组同理
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:通配符分量被 `..` **抵消**后仍在区内 → 灰区。占位符做法自动算对这一档,
+    // 「先看前缀再单独识别 `..`」那种写法会把它误升级。
+    expect(classifyShellCommand('Remove-Item C:\\repo\\a*\\..\\b', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Remove-Item C:\\repo\\x\\*\\..\\..\\y', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 反例二:普通区内 glob 判档不变。
+    for (const c of ['Remove-Item C:\\repo\\build\\*', 'Remove-Item *.log', 'Remove-Item C:\\repo\\dist\\*.tmp']) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
+  it('Tee-Object 是写通道;别名 tee 保持走 POSIX 分支的多目标语义', () => {
+    // `Get-Content payload | Tee-Object -FilePath <系统路径>` 与 `… | tee <系统路径>` 是同一个
+    // 写通道,但 `tee-object` 没登记 → 取不到目标、漏成灰区(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Get-Content payload | Tee-Object -FilePath ${hosts}`,
+      `Get-Content payload | Tee-Object ${hosts}`,                 // 位置参数
+      `Get-Content payload | Tee-Object -Append -FilePath ${hosts}`, // 开关不吃值
+      `Tee-Object -FilePath ${hosts}`,                              // 不在管道右侧也算写通道
+      `Get-Content payload | tee -FilePath ${hosts}`,               // 别名 + 具名参数
+      `Get-Content payload | tee ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:区内目标与"根本不写文件"的形态仍是灰区。
+    expect(classifyShellCommand('Get-Content payload | Tee-Object -FilePath C:\\repo\\a.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-Content payload | Tee-Object -Variable v', win, { platform: 'win32' }))
+      .toBe('prompt');
+
+    // 反例二(**回归**):别名 `tee` 只登记全名、不进 PowerShell 表 —— POSIX 的 tee 可以写多个
+    // 文件,那条分支取**全部**操作数。若把 `tee` 也映射成 `targets: 'first'`,下面这条就只剩
+    // 第一个目标、`/etc/hosts` 会漏掉,那是把既有覆盖面改小而不是补漏。
+    expect(classifyShellCommand('echo x | tee a /etc/hosts', ['/repo'])).toBe('prompt-each-time');
+    expect(classifyShellCommand('echo x | tee /etc/hosts', ['/repo'])).toBe('prompt-each-time');
+    expect(classifyShellCommand('echo x | tee a b c', ['/repo'])).toBe('prompt');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

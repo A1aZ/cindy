@@ -329,6 +329,11 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
     ['add-content', { targets: 'first' }],
     ['new-item', { targets: 'first' }],
     ['out-file', { targets: 'first' }],  // 常在管道右侧:`'x' | Out-File <path>`
+    // `Get-Content payload | Tee-Object -FilePath <path>` 与 `… | tee <path>` 是同一个写通道。
+    // **只登记全名**:别名 `tee` 已经落在 POSIX 的 `tee`/`sponge` 分支(那条取**全部**操作数,
+    // 因为 POSIX tee 可以写多个文件)。把 `tee` 加到这张表会让它改走 `targets: 'first'`,
+    // `echo x | tee a b c` 就只剩第一个目标 —— 那是把既有覆盖面改小,不是补漏。
+    ['tee-object', { targets: 'first' }],
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
     ['set-item', { targets: 'first' }],
@@ -3081,22 +3086,25 @@ function systemWriteTargetsInSegment(
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
   return targets.some((t) => {
-    // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组,
-    // 只有"所有可能结果的共同前缀在工作区内"才算可证安全,否则要求同意。
+    // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组。
     if (t.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
       const pattern = t.slice(GLOB_WRITE_TARGET_PREFIX.length);
       // 通配符落在 provider 限定符里(`HK*:\SYSTEM\x`)→ 连"是哪个 provider"都证不出来。
       // 这类 drive 段带通配符的写法在真 PowerShell 里解析不出驱动器,但判据不能靠"它大概会报错"
       // 兜底 —— 与本文件其它不可证口径一致,直接要求同意。
       if (WILDCARD_IN_DRIVE_QUALIFIER.test(pattern)) return true;
-      const prefix = literalPrefixBeforeGlob(pattern);
-      // 前缀就是 provider 根时(`Cert:\LocalMachine\*` 的 `Cert:\LocalMachine\`)同样要判 ——
-      // 上面那道用整串判过了,这里兜住"通配符出现在更靠前位置"的写法。
-      if (isProtectedProviderPath(prefix)) return true;
-      if (opts.cwdUnknown && !isAbsolutePath(toForwardSlashes(prefix))) return true;
-      const resolved = canonicalPath(normalizeTarget(prefix, [base]), aliasFirmlinks);
-      // 前缀本身就落在系统目录(`C:\Windows\*`)→ 直接命中,不必再谈工作区。
-      if (isProtectedSystemPath(resolved)) return true;
+      // 把每个**含通配符的路径分量**换成一个不可折叠的占位符,再走与普通目标完全相同的归一 +
+      // 判定链。这样 `..` 由 normalizeSlashes 正常折叠,通配符分量也参与折叠 —— 于是
+      //   `C:\repo\safe\*\..\..\..\Windows\…\hosts` → `C:/Windows/…/hosts`(必问),
+      //   `C:\repo\a*\..\b`                        → `C:/repo/b`(灰区,通配被 `..` 抵消),
+      //   `C:\repo\build\*`                        → `C:/repo/build/<占位>`(灰区)。
+      // 通配符**不匹配** `.` / `..` 目录项,所以拿一个普通分量代表它是可靠的最坏边界。
+      const concrete = pattern.split(/([\\/])/)
+        .map((part) => (POWERSHELL_WILDCARD.test(part) ? GLOB_COMPONENT_PLACEHOLDER : part))
+        .join('');
+      if (opts.cwdUnknown && !isAbsolutePath(toForwardSlashes(concrete))) return true;
+      const resolved = canonicalPath(normalizeTarget(concrete, [base]), aliasFirmlinks);
+      if (isProtectedProviderPath(resolved) || isProtectedSystemPath(resolved)) return true;
       return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
     }
     // 每个目标查两种形态:原样(保留 Windows `\` 分隔符)与去 POSIX `\` 转义(`/e\tc`→`/etc`)。
@@ -3110,16 +3118,15 @@ function systemWriteTargetsInSegment(
 }
 
 /**
- * 通配符模式里「所有可能展开结果的共同前缀」:第一个通配符之前的最后一个路径分隔符为止。
- * PowerShell 的 `*`/`?`/`[...]` 都不跨分隔符,所以这个前缀对每个展开结果都成立。
- * 模式整段就是通配符(`*.log`)时前缀为空 → 由调用方按有效 cwd 解析。
+ * 代表「一个含通配符的路径分量」的占位符。要求:归一化时不会被折叠(不是 `.` / `..` / 空)、
+ * 不可能命中受保护路径判据、也不可能出现在真实路径里。
+ *
+ * 早先这里是"取第一个通配符之前的共同前缀"。那个做法漏了**通配符之后的 `..`**:
+ * `Remove-Item C:\repo\safe\*\..\..\..\Windows\System32\drivers\etc\hosts` 的共同前缀是
+ * `C:\repo\safe\`,判成区内 → 灰区,而它实际写的是 hosts(codex 报)。换成占位符后整条路径
+ * 一起归一,`..` 正常折叠,不需要单独识别 `..`,也顺带修正了通配被 `..` 抵消的情形。
  */
-function literalPrefixBeforeGlob(pattern: string): string {
-  const first = pattern.search(POWERSHELL_WILDCARD);
-  const head = first < 0 ? pattern : pattern.slice(0, first);
-  const cut = Math.max(head.lastIndexOf('/'), head.lastIndexOf('\\'));
-  return cut < 0 ? '.' : head.slice(0, cut + 1);
-}
+const GLOB_COMPONENT_PLACEHOLDER = '\u0000globpart';
 
 /** 系统/区外批量破坏与受保护分支强推不能只交给模型裁决。 */
 function scopedDestructionNeedsConsent(

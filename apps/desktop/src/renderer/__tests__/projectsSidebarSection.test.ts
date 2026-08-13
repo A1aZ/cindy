@@ -1,10 +1,10 @@
 /**
- * projectsSidebarSection — 主列表(全部任务)段头控件不变量。
+ * projectsSidebarSection — 主列表段头控件不变量。
  *
- * 侧边栏重设计 D/E 期后本段是混排主列表:段头仍有两类折叠控件——
- * - 标题侧单箭头:收起/展开整段列表;
- * - 右侧折叠按钮(E 期):单层 = 收起所有分组 ↔ 展开;设备+项目双层 =
- *   循环 收项目层 → 收设备层 → 全部展开(foldState 状态机)。
+ * 2026-08-13 用户定稿:段头标题即机器范围下拉(MachineSwitcherMenu,「全部任务」
+ * 与设备下拉合并),段级收起取消;右侧保留折叠按钮(单层 = 收起所有分组 ↔ 展开;
+ * 设备+项目双层 = 循环 收项目层 → 收设备层 → 全部展开,foldState 状态机)与
+ * 整理菜单入口。
  */
 
 import { readFileSync } from 'node:fs';
@@ -18,17 +18,12 @@ const projectsSectionSource = readFileSync(
 );
 
 describe('Projects sidebar section', () => {
-  it('keeps separate icons and handlers for section collapse vs group fold', () => {
+  it('keeps the group fold state machine (section collapse itself is gone)', () => {
+    // 设备段头仍用单箭头折叠;右侧折叠按钮走三态状态机。
     expect(projectsSectionSource).toContain('ChevronDown');
     expect(projectsSectionSource).toContain('ChevronRight');
     expect(projectsSectionSource).toContain('ChevronsDownUp');
     expect(projectsSectionSource).toContain('ChevronsUpDown');
-    expect(projectsSectionSource).toContain(
-      'const [isSectionCollapsed, setIsSectionCollapsed] = useState(false)',
-    );
-    expect(projectsSectionSource).toContain(
-      'const SectionToggleIcon = isSectionCollapsed ? ChevronRight : ChevronDown',
-    );
     // E 期折叠状态机:三态循环 + 图标随「下一步动作」切换。
     expect(projectsSectionSource).toContain(
       "'collapse-groups' | 'collapse-devices' | 'expand-all'",
@@ -36,38 +31,20 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain(
       "const FoldIcon = foldState === 'expand-all' ? ChevronsUpDown : ChevronsDownUp",
     );
+    // 段级收起已随「标题 = 范围下拉」取消(2026-08-13 用户定稿)。
+    expect(projectsSectionSource).not.toContain('isSectionCollapsed');
+    expect(projectsSectionSource).not.toContain('SectionToggleIcon');
   });
 
-  it('makes the title and adjacent hover arrow collapse the section and keeps fold before filter', () => {
-    const titleIndex = projectsSectionSource.indexOf("t('ccAgent.sidebar.allSessions')");
-    const titleButtonIndex = projectsSectionSource.lastIndexOf('<button', titleIndex);
-    const titleExpandedIndex = projectsSectionSource.indexOf(
-      'aria-expanded={!isSectionCollapsed}',
-      titleButtonIndex,
-    );
-    const hoverToggleIndex = projectsSectionSource.indexOf('<Tip text={sectionToggleLabel}');
-    const hoverToggleExpandedIndex = projectsSectionSource.indexOf(
-      'aria-expanded={!isSectionCollapsed}',
-      hoverToggleIndex,
-    );
-    const sectionToggleIndex = projectsSectionSource.indexOf('aria-expanded={!isSectionCollapsed}');
+  it('header order: scope title dropdown → fold → filter', () => {
+    const titleIndex = projectsSectionSource.indexOf('<MachineSwitcherMenu />');
     const foldIndex = projectsSectionSource.indexOf('onClick={handleFoldAll}');
     const filterIndex = projectsSectionSource.indexOf('<SidebarFilterPopover');
-
     expect(titleIndex).toBeGreaterThanOrEqual(0);
-    expect(titleButtonIndex).toBeGreaterThanOrEqual(0);
-    expect(titleExpandedIndex).toBeLessThan(titleIndex);
-    expect(sectionToggleIndex).toBe(titleExpandedIndex);
-    expect(hoverToggleIndex).toBeGreaterThan(titleIndex);
-    expect(hoverToggleExpandedIndex).toBeGreaterThan(hoverToggleIndex);
-    expect(foldIndex).toBeGreaterThan(hoverToggleExpandedIndex);
+    expect(foldIndex).toBeGreaterThan(titleIndex);
     expect(filterIndex).toBeGreaterThan(foldIndex);
-  });
-
-  it('hides the group fold control when the section is collapsed', () => {
-    expect(projectsSectionSource).toMatch(
-      /\{!isSectionCollapsed && foldState !== null && \(\s*<Tip text=\{foldLabel\}/,
-    );
+    // 折叠按钮恒显(不再有段收起时隐藏的分支)。
+    expect(projectsSectionSource).toMatch(/\{foldState !== null && \(\s*<Tip text=\{foldLabel\}/);
   });
 
   // 2026-08-12 用户裁决:段头「新建项目」按钮暂时移除(同一动作在新任务页的工作
@@ -93,12 +70,12 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).not.toContain(
       'group-focus-within/sidebar-header:pointer-events-auto',
     );
-    expect(projectsSectionSource).toContain('className={HEADER_HOVER_ACTION_CLASS}');
     expect(projectsSectionSource).toContain('className={HEADER_ACTIONS_CLASS}');
   });
 
-  it('hides the project tree only through the section collapsed state', () => {
-    expect(projectsSectionSource).toContain('{!isSectionCollapsed && foldState !== null && (');
+  it('the project tree renders unconditionally (section collapse removed)', () => {
+    // 树不再包 SectionCollapse(设备段 / 对话组内部的仍在);项目行折叠照旧受控。
+    expect(projectsSectionSource).not.toMatch(/<SectionCollapse collapsed=\{isSectionCollapsed\}>/);
     expect(projectsSectionSource).toContain('isCollapsed={collapsed.has(project.projectKey)}');
   });
 
@@ -147,7 +124,7 @@ describe('Projects sidebar section', () => {
   // collapse-devices 却没有可见效果(派生态以为在设备分组、渲染实际是单段)。
   it('deviceGroupingActive excludes manual sort so derived state matches the rendered mode', () => {
     expect(projectsSectionSource).toContain(
-      "hasRemoteDevices && filter.groupDevice && filter.sortBy !== 'manual'",
+      "deviceGroupingAvailable && filter.groupDevice && filter.sortBy !== 'manual'",
     );
   });
 });

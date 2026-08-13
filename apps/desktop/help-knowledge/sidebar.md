@@ -4,12 +4,18 @@ title: Finding and organizing sessions
 summary: Browse, group, filter, sort, search, and pin sessions or projects in the left sidebar.
 ---
 
-The left sidebar lists your sessions. It's the main way to navigate and organize. The **Organize sidebar** menu holds grouping, sorting, filters, and display options — open it from the sliders icon on the **All sessions** header, or right-click any blank area of the sidebar.
+The left sidebar lists your sessions. It's the main way to navigate and organize. The **Organize sidebar** menu holds grouping, sorting, filters, and display options — open it from the sliders icon on the main list header, or right-click any blank area of the sidebar.
+
+**Device scope (the list header itself):**
+
+- The main list header doubles as the device scope switcher. Its text names what you're looking at — **All sessions**, **This device's sessions**, a remote device's name, or **N machines** — and clicking it opens the scope menu: all / this device / each connected remote device (single-click switches; checkboxes multi-select), plus a **Remote connection settings** entry.
+- The scope applies to the whole sidebar, including the Pinned section.
+- With no remote devices, the header is just a static **All sessions** title — no arrow, nothing to click. There is no separate device row in the top navigation.
 
 **Grouping (independent checkboxes, freely combinable):**
 
 - **Group by project** (default on) — sessions with a project fold into project rows; project rows and stray chats compete for position on the same timeline (a chat active two minutes ago sorts above a project last touched yesterday). Turn it off for a flat list.
-- **Group by device** (default on) — only appears when a remote device is connected; splits the list into device sections (this device first), each with a collapsible header showing the device name and online state. When the last remote device disconnects, the option disappears and the effect is lifted.
+- **Group by device** (default on) — only appears when a remote device is connected and the scope isn't narrowed to a single machine; splits the list into device sections (this device first), each with a collapsible header showing the device name and online state. When the last remote device disconnects — or the scope is a single machine — the option disappears and the effect is lifted; the saved preference is untouched and comes back automatically.
 - **Group chats together** (default on) — collects projectless sessions into one collapsible **Chat** group instead of interleaving them. With device grouping on, each device section gets its own Chat group with independent collapse state.
 - Grouping **by date** has been removed.
 

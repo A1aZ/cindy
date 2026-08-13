@@ -1,16 +1,15 @@
 /**
  * machineSwitcherMenu.test.ts
  * ---------------------------------------------------------------------------
- * 回归(2026-07):远程机器切换入口(MachineSwitcherMenu)并入 shell 的
- * SidebarTopNav(新建 / 自动任务 / Skill / 搜索)列表作末行,与其同款行样式,
- * 位于置顶段上方、滚动容器之外,不随会话列表滚动;不再挂在「项目」段头 /
- * 日期分组头 / 连接中占位页头(2026-07 用户定稿)。为避免回退:
- *   - SidebarTopNav 渲染 MachineSwitcherMenu 作列表末行;
- *   - CCAgentSidebarUpper 不再渲染任何机器切换入口(旧整行 MachineSwitcher /
- *     滚动区内的菜单都已移除),三种视图(项目 / 日期 / 连接中占位)都靠顶部
- *     常驻行切回「所有」,不会被困住;
- *   - ProjectsSection / DateGroupedSessionsSection 段头不再渲染该菜单;
- *   - 组件保留可见性门控 + 设备选择 + 远程连接设置入口。
+ * 2026-08-13 用户定稿(新设计,显式推翻 2026-07 的两条旧定稿):机器范围切换
+ * 与「全部任务」段头**合并**——MachineSwitcherMenu 即主列表段头标题,文字反映
+ * 当前范围(全部任务 / 本机任务 / 设备名 / N 台机器),点击展开范围菜单;
+ * SidebarTopNav 不再有独立的远程机器行。为避免回退:
+ *   - ProjectsSection 段头渲染 MachineSwitcherMenu 作标题;SidebarTopNav 不再
+ *     import / 渲染它;
+ *   - 无远程设备时退化为纯静态标题(段头恒在);
+ *   - 点击展开(不再 hover 自动展开);段级收起同时取消;
+ *   - 组件保留设备选择(单选 + 多选)+ 远程连接设置入口。
  *
  * 静态扫描风格(renderer 测试环境无 jsdom),与 sidebarUpperSingleButton.test.ts 一致。
  */
@@ -47,13 +46,11 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).not.toMatch(/[^t]setSelectedMachineId\(MACHINE_ALL\)/);
   });
 
-  it('SidebarTopNav 渲染 MachineSwitcherMenu 作列表末行(与新建 / 搜索同列表)', () => {
-    expect(topNavSource).toContain("from '@/features/cc-agent/sidebar/MachineSwitcherMenu'");
-    // 末行:出现在 SidebarInlineSearch 之后。
-    const searchIdx = topNavSource.indexOf('<SidebarInlineSearch');
-    const menuIdx = topNavSource.indexOf('<MachineSwitcherMenu />');
-    expect(searchIdx).toBeGreaterThanOrEqual(0);
-    expect(menuIdx).toBeGreaterThan(searchIdx);
+  it('SidebarTopNav 不再渲染 MachineSwitcherMenu(2026-08-13 并入段头标题)', () => {
+    expect(topNavSource).not.toContain("from '@/features/cc-agent/sidebar/MachineSwitcherMenu'");
+    expect(topNavSource).not.toContain('<MachineSwitcherMenu />');
+    // 搜索行仍在(顶部导航收敛为 新建 / 自动任务 / 插件 / 搜索 四行)。
+    expect(topNavSource).toContain('<SidebarInlineSearch');
   });
 
   // 2026-08-12 用户裁决(对齐 Codex):任务列表向上滚动时,除「新建」外的顶部导航行
@@ -196,7 +193,9 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
       expect(source).toMatch(
         /if \(isEditing(?:Name)?\) \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*e\.stopPropagation\(\);\s*\n\s*return;/,
       );
-      expect(source).not.toMatch(/onContextMenu=\{\(e\) => \{\s*\n\s*if \(isEditing(?:Name)?\) return;/);
+      expect(source).not.toMatch(
+        /onContextMenu=\{\(e\) => \{\s*\n\s*if \(isEditing(?:Name)?\) return;/,
+      );
     }
   });
 
@@ -304,14 +303,26 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(branch).not.toContain('<MachineSwitcherMenu');
   });
 
-  it('项目段头不再渲染 MachineSwitcherMenu(已移到顶部固定行)', () => {
-    expect(projectsSectionSource).not.toContain('MachineSwitcherMenu');
+  it('项目段头标题即 MachineSwitcherMenu(2026-08-13 定稿,推翻 2026-07「不挂段头」)', () => {
+    expect(projectsSectionSource).toContain("from '../MachineSwitcherMenu'");
+    expect(projectsSectionSource).toContain('<MachineSwitcherMenu />');
+    // 段头不再渲染硬编码的「全部任务」标题(标题文字由菜单 trigger 按范围决定)。
+    expect(projectsSectionSource).not.toContain("t('ccAgent.sidebar.allSessions')");
+    // 段级收起随合并取消:标题的点击语义让给范围切换。
+    expect(projectsSectionSource).not.toContain('isSectionCollapsed');
   });
 
-  it('项目视图:早退条件不再依赖机器切换 hook 保留空段头(入口不在本段头)', () => {
-    // E 期的 hasRemoteDevices 是 prop 注入的设备分组开关可见性,与当年段头里
-    // 直接消费 useMachineSwitcher 的旧结构无关——断言收窄到 hook 本身。
-    expect(projectsSectionSource).not.toContain('useMachineSwitcher');
+  it('项目视图:范围判定走 effective 选择 hook,不再有旧 hasRemoteMachines 结构', () => {
+    // 单机范围下设备分组退场(2026-08-13 用户定稿)——生效与选项可见共用
+    // deviceGroupingAvailable,由 effective 机器选择派生。
+    expect(projectsSectionSource).toContain('useEffectiveSelectedMachineId');
+    expect(projectsSectionSource).toContain(
+      'const singleMachineScope = selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1',
+    );
+    expect(projectsSectionSource).toContain(
+      'const deviceGroupingAvailable = hasRemoteDevices && !singleMachineScope',
+    );
+    expect(projectsSectionSource).toContain('hasRemoteDevices={deviceGroupingAvailable}');
     expect(projectsSectionSource).not.toContain('hasRemoteMachines');
   });
 
@@ -330,18 +341,17 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(menuSource).not.toContain('group-hover/sidebar-header');
   });
 
-  it('trigger 是 SidebarTopNav 同款文字行(图标 + 范围文字 + 下拉箭头),不是图标按钮', () => {
-    // trigger 文案 = 当前范围摘要:所有机器 / 本机 / 设备名 / N 台机器;旁边挂 ChevronDown。
+  it('trigger 是段头标题形态(范围文字 + 小箭头),不再是导航 pill 行(2026-08-13 定稿)', () => {
+    // 标题文字 = 当前范围:全部任务 / 本机任务 / 设备名 / N 台机器。
     expect(menuSource).toContain('triggerText');
-    // 「所有」态直接复用菜单项同款 allMachines 文案(2026-07 用户定稿,不用「所有机器」)。
-    expect(menuSource).toContain("t('ccAgent.sidebar.machineSwitcher.allMachines')");
+    expect(menuSource).toContain("t('ccAgent.sidebar.allSessions')");
+    expect(menuSource).toContain("t('ccAgent.sidebar.scopeLocalSessions')");
     expect(menuSource).toMatch(/<span className="truncate[^"]*">\{triggerText\}<\/span>/);
-    expect(menuSource).toContain('<ChevronDown');
-    // 与 SidebarTopNav ROW_CLASS 同款 pill 行样式;范围文字已表达过滤状态,
-    // trigger 不叠常驻高亮底色(常亮易被误读为导航选中态,2026-07 用户定稿)。
-    expect(menuSource).toContain('h-8 w-full');
-    expect(menuSource).toContain('rounded-full');
-    expect(menuSource).toContain('hover:bg-sidebar-item-hover');
+    expect(menuSource).toContain('<ChevronDown size={13}');
+    // 段头标题样式(与原「全部任务」一致:淡灰 + hover 加深),不再是 pill 导航行。
+    expect(menuSource).toContain('SCOPE_TITLE_CLASS');
+    expect(menuSource).not.toContain('h-8 w-full');
+    expect(menuSource).not.toContain('hover:bg-sidebar-item-hover');
     expect(menuSource).not.toContain('filterActive');
     expect(menuSource).not.toContain('--chat-input-chip-bg');
   });
@@ -425,22 +435,21 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     }
   });
 
-  it('在机器栏固定显示远程任务读取 loading,不改变文字与下拉箭头间距', () => {
-    // 文字与箭头保持原有相邻布局；后台 bootstrap 只占最右侧固定状态槽，
-    // 避免列表上下跳动，也避免空槽把下拉箭头推远。
+  it('段头标题固定承载远程任务读取 loading(spinner 附在箭头后,不进会话列表)', () => {
     expect(menuSource).toContain('useRemoteSessionBootstrapLoading(selectedDeviceId)');
     expect(menuSource).toContain('aria-busy={remoteSessionBootstrapLoading}');
     expect(menuSource).toMatch(
-      /<span className="truncate leading-none">\{triggerText\}<\/span>\s*<ChevronDown[\s\S]*?<span\s*aria-hidden="true"\s*className="ml-auto flex h-4 w-4 shrink-0 items-center justify-center"\s*>/,
+      /<span className="truncate leading-none">\{triggerText\}<\/span>\s*<ChevronDown[\s\S]*?animate-spinner motion-reduce:animate-none/,
     );
-    expect(menuSource).toContain(
-      '<span className="inline-flex animate-spinner motion-reduce:animate-none">',
-    );
-    expect(menuSource).toContain('<Loader2 size={14} strokeWidth={1.8} />');
+    expect(menuSource).toContain('<Loader2 size={12} strokeWidth={1.8} />');
   });
 
-  it('MachineSwitcherMenu 保留门控 / 设备选择 / 远程设置入口', () => {
-    expect(menuSource).toContain('if (!hasRemote) return null');
+  it('MachineSwitcherMenu 保留设备选择 / 远程设置入口;无远程时退化为静态标题', () => {
+    // 段头恒在:无远程设备时渲染纯静态「全部任务」标题,而不是消失(旧 return null)。
+    expect(menuSource).not.toContain('if (!hasRemote) return null');
+    expect(menuSource).toMatch(
+      /if \(!hasRemote\) \{\s*\n\s*return <span className=\{SCOPE_TITLE_CLASS\}>\{t\('ccAgent\.sidebar\.allSessions'\)\}<\/span>;/,
+    );
     expect(menuSource).toContain('MACHINE_ALL');
     expect(menuSource).toContain('MACHINE_LOCAL');
     expect(menuSource).toContain("navigate('/settings?tab=remote-control')");
@@ -468,17 +477,14 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(menuSource).toContain('applyToggle(device.deviceId)');
   });
 
-  it('MachineSwitcherMenu hover 自动展开(2026-07-12 产品定稿,推翻早前 Codex P2 点击展开)', () => {
-    // 鼠标移到本行短延迟即弹机器菜单、移开即收;受控开合走 useHoverOpenMenu,
-    // trigger / content 必须完整接线(triggerRef 供「点击触发按钮不误关」判定)。
-    expect(menuSource).toContain('useHoverOpenMenu');
-    expect(menuSource).toContain('open={open} onOpenChange={onOpenChange}');
-    expect(menuSource).toContain('ref={triggerRef as Ref<HTMLButtonElement>}');
-    expect(menuSource).toContain('{...triggerProps}');
-    expect(menuSource).toContain('{...contentProps}');
-    // hover 展开必须非模态,否则 body pointer-events:none 造成开/关闪烁循环。
+  it('MachineSwitcherMenu 点击展开(2026-08-13 定稿,推翻 2026-07-12 hover 展开)', () => {
+    // 作为段头标题,hover 扫过就弹菜单太吵;hover 机制连同 useHoverOpenMenu
+    // hook 一起下线(该 hook 已无消费方,文件已删)。
+    expect(menuSource).not.toContain('useHoverOpenMenu');
+    expect(menuSource).not.toContain('triggerProps');
+    // 非模态:侧栏是常驻面板,不锁列表滚动。
     expect(menuSource).toContain('modal={false}');
-    // 菜单在行下方展开、左边贴齐本行左边(2026-07-13 用户定稿,替换 07-12 的右侧飞出)。
+    // 菜单在标题下方展开、左边贴齐标题左边。
     expect(menuSource).toContain('side="bottom"');
     expect(menuSource).toContain('align="start"');
   });

@@ -21,7 +21,7 @@
  *   ghost / chosen / drag class 提供视觉。
  */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -35,6 +35,9 @@ import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { Tip } from '@/components/ui/tooltip';
+import { MachineSwitcherMenu } from '../MachineSwitcherMenu';
+import { useEffectiveSelectedMachineId } from '@/features/device-link/useMachineSwitcher';
+import { MACHINE_ALL } from '@/features/device-link/selectedMachineStore';
 import { SortableList } from '@/components/sidebar/SortableList';
 import { useReducedMotion } from '@/hooks/useReducedMotion';
 import { useSidebarMainViewMode } from '@/hooks/useSidebarCardMode';
@@ -243,17 +246,14 @@ export function ProjectsSection({
   // 的反直觉体验。
   const projectDragEnabled = filter.groupBy === 'project';
   const projectKeysForOrderBaseline = allProjectKeysForOrder;
-  const [isSectionCollapsed, setIsSectionCollapsed] = useState(false);
-  const [showAllProjects, setShowAllProjects] = useCollapsibleShowAll(isSectionCollapsed);
+  // 段级收起已随「全部任务 = 范围下拉」取消(2026-08-13 用户定稿):标题的点击
+  // 语义让给机器范围切换;「想要紧凑」由右侧「收起所有分组」承接。
+  const [showAllProjects, setShowAllProjects] = useCollapsibleShowAll(false);
   // 设备段各自的「显示全部」(2026-08-13 复核 P2:共用一个标志会让点任一段的
   // 段内按钮把所有段一起展开——按钮看起来是段内操作,作用域也必须是段内)。
-  // 段级收起时与全局 showAll 同款复位。
   const [expandedDeviceSections, setExpandedDeviceSections] = useState<ReadonlySet<string>>(
     new Set(),
   );
-  useEffect(() => {
-    if (isSectionCollapsed) setExpandedDeviceSections(new Set());
-  }, [isSectionCollapsed]);
 
   const getProjectId = useCallback((p: ProjectNodeData) => p.projectKey, []);
 
@@ -280,10 +280,6 @@ export function ProjectsSection({
     [filter, projectKeysForOrderBaseline],
   );
 
-  const SectionToggleIcon = isSectionCollapsed ? ChevronRight : ChevronDown;
-  const sectionToggleLabel = isSectionCollapsed
-    ? t('ccAgent.sidebar.projectsSectionToggleExpand')
-    : t('ccAgent.sidebar.projectsSectionToggleCollapse');
   // toggleDisabled 用 allKnownProjects（不是过滤后的 projects），避免 filter 收窄到 0 时
   // 即便没真正可折叠的目标，也保留视觉一致——但禁用按钮以避免无意义点击。
   const projectNodesToggleDisabled = allKnownProjects.length === 0;
@@ -419,8 +415,15 @@ export function ProjectsSection({
   // 定稿,但此前生效判定没跟着排除——机器标签被藏、批量折叠键按逐设备派生、
   // 折叠状态机进入 collapse-devices 却没有可见效果,全是"派生态以为在设备
   // 分组、渲染实际是单段"的错位。生效判定必须与实际渲染模式同一份。
+  // 范围收窄到单台机器时同样退场(2026-08-13 用户定稿):只有一台无段可切,
+  // 唯一的段头还会和范围标题重复报同一个设备名;整理菜单的选项行同步隐藏
+  // (deviceGroupingAvailable),偏好照旧不改写、范围放宽自动恢复。
   const hasRemoteDevices = (remoteDeviceIndex?.size ?? 0) > 0;
-  const deviceGroupingActive = hasRemoteDevices && filter.groupDevice && filter.sortBy !== 'manual';
+  const selectedMachineId = useEffectiveSelectedMachineId();
+  const singleMachineScope = selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1;
+  const deviceGroupingAvailable = hasRemoteDevices && !singleMachineScope;
+  const deviceGroupingActive =
+    deviceGroupingAvailable && filter.groupDevice && filter.sortBy !== 'manual';
   const deviceSections = useMemo<MainListDeviceSection[]>(() => {
     if (!deviceGroupingActive) return [{ deviceId: null, entries: [...visibleMixedEntries] }];
     // 设备分组:对**全量**条目先切段,折叠上限在渲染时每段独立应用(2026-08-13
@@ -551,7 +554,7 @@ export function ProjectsSection({
       project={project}
       statusFilter={filter.status}
       isCollapsed={collapsed.has(project.projectKey)}
-      parentSectionCollapsed={isSectionCollapsed}
+      parentSectionCollapsed={false}
       activeSessionId={activeSessionId}
       runningSessionIds={runningSessionIds}
       attachedSessionIds={attachedSessionIds}
@@ -642,7 +645,7 @@ export function ProjectsSection({
           createDisabledReason={
             targetDeviceOffline ? t('ccAgent.remoteSession.actionsUnavailable') : undefined
           }
-          parentSectionCollapsed={isSectionCollapsed}
+          parentSectionCollapsed={false}
           disableSessionCollapse={disableSessionCollapse}
           activeSessionId={activeSessionId}
           runningSessionIds={runningSessionIds}
@@ -670,37 +673,12 @@ export function ProjectsSection({
           pr-0：与下方 cells 子容器一样依赖 scrollbar-gutter:stable 预留 12px，
           按钮组右边自然对齐 cell 右边。 */}
       <div className="group/sidebar-header flex h-6 items-center justify-between pr-0 pl-6">
-        {/* 段标题:淡灰(text-tertiary,对齐 Codex 的低对比栏目标题;2026-07 用户定稿,
-            取代原 msg-assistant-text 深色),点击标题即可收起/展开整段(与右侧 hover
-            箭头同一行为,标题是更大的点击目标)。 */}
+        {/* 段标题 = 机器范围下拉(2026-08-13 用户定稿,「全部任务」与设备下拉合并):
+            标题文字反映当前范围(全部任务 / 本机任务 / 设备名 / N 台机器),点击弹
+            范围菜单;无远程设备时退化为纯静态标题。段级收起随之取消——标题的点击
+            语义让给范围切换,「想要紧凑」由右侧「收起所有分组」承接。 */}
         <div className="flex min-w-0 items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setIsSectionCollapsed((value) => !value)}
-            aria-expanded={!isSectionCollapsed}
-            className="text-sm font-medium text-[var(--sidebar-list-muted)] transition-colors hover:text-[var(--sidebar-nav-text)]"
-          >
-            {/* D 期改名:本段已是项目+对话的混排主列表,段头叫「全部任务」。 */}
-            {t('ccAgent.sidebar.allSessions')}
-          </button>
-          <div className={HEADER_HOVER_ACTION_CLASS}>
-            <Tip text={sectionToggleLabel} side="bottom">
-              <button
-                type="button"
-                onClick={() => setIsSectionCollapsed((value) => !value)}
-                aria-label={sectionToggleLabel}
-                aria-expanded={!isSectionCollapsed}
-                className={cn(
-                  'flex h-5 w-5 shrink-0 items-center justify-center rounded-md',
-                  // 无灰底 hover(2026-07 用户定稿):纯色加深反馈,与段标题一致。
-                  'text-[var(--sidebar-list-muted)]',
-                  'transition-colors hover:text-[var(--sidebar-nav-text)]',
-                )}
-              >
-                <SectionToggleIcon size={13} strokeWidth={2} />
-              </button>
-            </Tip>
-          </div>
+          <MachineSwitcherMenu />
         </div>
         {/* 右侧工具组：ProjectNode Toggle All → Filter → New Project
             -mt-px：h-7 按钮在 h-6 行里中心对齐时视觉偏低，上移 1px 与 "Projects" 文字
@@ -710,7 +688,7 @@ export function ProjectsSection({
           <div className={HEADER_ACTIONS_CLASS}>
             {/* 「展开/收起所有分组」(E 期):单层 = 收起↔展开;设备+项目双层 =
                 循环 收项目层 → 收设备层 → 全部展开。tooltip 提示下一步动作。 */}
-            {!isSectionCollapsed && foldState !== null && (
+            {foldState !== null && (
               <Tip text={foldLabel} side="bottom">
                 <button
                   type="button"
@@ -732,7 +710,7 @@ export function ProjectsSection({
             <SidebarFilterPopover
               filter={filter}
               allKnownProjects={allKnownProjects}
-              hasRemoteDevices={hasRemoteDevices}
+              hasRemoteDevices={deviceGroupingAvailable}
             />
             {/* 「新建项目」按钮 2026-08-12 暂时移除(用户裁决):同一动作(选目录 →
                 预填新任务草稿)在新任务页的工作目录选择器里仍可完成。onCreateProject
@@ -741,31 +719,29 @@ export function ProjectsSection({
         </div>
       </div>
 
-      {/* 段级收起走 SectionCollapse 高度动画；项目列表「显示全部」在收起动画结束后复位。 */}
-      <SectionCollapse collapsed={isSectionCollapsed}>
-        {/* Projects Tree — padding [4,0,0,12], gap 4
-            pr-0：右侧依赖 scroll body 的 scrollbar-gutter:stable 预留 12px，
-            与左 pl-3 视觉对称；全局滚动条已收窄到 12px 与 pl-3 等宽。 */}
-        <div className="relative flex flex-col gap-1 pt-1 pr-0 pl-3">
-          <UnclassifiedSection
-            sessions={unclassified}
-            hidden={unclassifiedHidden}
-            activeSessionId={activeSessionId}
-            runningSessionIds={runningSessionIds}
-            attachedSessionIds={attachedSessionIds}
-            notifications={notifications}
-            scheduleSessionIndex={scheduleSessionIndex}
-            selectedSessionIds={selectedSessionIds}
-            onSessionClick={onSessionClick}
-            onAction={onAction}
-            onRename={onRename}
-            onTogglePin={onTogglePin}
-            onMoveSession={onMoveSession}
-            projectOptions={projectOptions}
-            onScheduleAction={onScheduleAction}
-            sessionVariant={mainSessionVariant}
-          />
-          {/* 混排渲染(D / E 期):
+      {/* Projects Tree — padding [4,0,0,12], gap 4(段级收起已取消,树恒渲染)
+          pr-0：右侧依赖 scroll body 的 scrollbar-gutter:stable 预留 12px，
+          与左 pl-3 视觉对称；全局滚动条已收窄到 12px 与 pl-3 等宽。 */}
+      <div className="relative flex flex-col gap-1 pt-1 pr-0 pl-3">
+        <UnclassifiedSection
+          sessions={unclassified}
+          hidden={unclassifiedHidden}
+          activeSessionId={activeSessionId}
+          runningSessionIds={runningSessionIds}
+          attachedSessionIds={attachedSessionIds}
+          notifications={notifications}
+          scheduleSessionIndex={scheduleSessionIndex}
+          selectedSessionIds={selectedSessionIds}
+          onSessionClick={onSessionClick}
+          onAction={onAction}
+          onRename={onRename}
+          onTogglePin={onTogglePin}
+          onMoveSession={onMoveSession}
+          projectOptions={projectOptions}
+          onScheduleAction={onScheduleAction}
+          sessionVariant={mainSessionVariant}
+        />
+        {/* 混排渲染(D / E 期):
               - manual 排序:模型保证项目行连续在前 → 项目段整体走 SortableList 可拖,
                 其后是散排对话 / 对话组。折叠+溢出时禁用拖拽(PR #246 review 同款),
                 点「显示全部」展开为完整列表后再拖。设备分组与 manual 不叠加
@@ -773,130 +749,129 @@ export function ProjectsSection({
               - 其它排序:按 deviceSections 切段(设备分组开启时),段内项目行与
                 散排对话按排序口径交错,不可拖(拖动意图请先切「手动排序」;旧
                 「随手一拖自动切 manual」在交错列表上会产生歧义落点,D 期收窄)。 */}
-          {filter.sortBy === 'manual' ? (
-            <>
-              <SortableList
-                items={visibleProjectNodes}
-                getId={getProjectId}
-                onReorder={handleReorder}
-                disabled={!projectDragEnabled || (projectsOverflow && !showAllProjects)}
-                reducedMotion={reducedMotion}
-                filter="button, input, textarea, select, a, [data-no-drag], [data-project-header]"
-                className="flex flex-col gap-1"
-                renderItem={(project) => renderProjectNode(project)}
-              />
-              {visibleMixedEntries
-                .filter((entry) => entry.kind !== 'project')
-                .map((entry) => renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY))}
-            </>
-          ) : deviceGroupingActive ? (
-            <div className="flex flex-col gap-1">
-              {deviceSections.map((section) => {
-                const key = deviceSectionKey(section.deviceId);
-                const device = section.deviceId
-                  ? remoteDeviceIndex?.get(section.deviceId)
-                  : undefined;
-                const name = section.deviceId
-                  ? (device?.name ?? section.deviceId)
-                  : t('ccAgent.sidebar.deviceGroup.local');
-                const online = section.deviceId ? (device?.online ?? false) : true;
-                const sectionCollapsed = collapsedDevices.has(key);
-                return (
-                  <div key={key} className="flex flex-col gap-1">
-                    {/* 设备分组头:可折叠,在线状态点(绿/灰)+ 名称 + 条数。 */}
-                    <button
-                      type="button"
-                      onClick={() => toggleDeviceSection(key)}
-                      aria-expanded={!sectionCollapsed}
-                      aria-label={
-                        sectionCollapsed
-                          ? t('ccAgent.sidebar.deviceGroup.expand')
-                          : t('ccAgent.sidebar.deviceGroup.collapse')
-                      }
+        {filter.sortBy === 'manual' ? (
+          <>
+            <SortableList
+              items={visibleProjectNodes}
+              getId={getProjectId}
+              onReorder={handleReorder}
+              disabled={!projectDragEnabled || (projectsOverflow && !showAllProjects)}
+              reducedMotion={reducedMotion}
+              filter="button, input, textarea, select, a, [data-no-drag], [data-project-header]"
+              className="flex flex-col gap-1"
+              renderItem={(project) => renderProjectNode(project)}
+            />
+            {visibleMixedEntries
+              .filter((entry) => entry.kind !== 'project')
+              .map((entry) => renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY))}
+          </>
+        ) : deviceGroupingActive ? (
+          <div className="flex flex-col gap-1">
+            {deviceSections.map((section) => {
+              const key = deviceSectionKey(section.deviceId);
+              const device = section.deviceId
+                ? remoteDeviceIndex?.get(section.deviceId)
+                : undefined;
+              const name = section.deviceId
+                ? (device?.name ?? section.deviceId)
+                : t('ccAgent.sidebar.deviceGroup.local');
+              const online = section.deviceId ? (device?.online ?? false) : true;
+              const sectionCollapsed = collapsedDevices.has(key);
+              return (
+                <div key={key} className="flex flex-col gap-1">
+                  {/* 设备分组头:可折叠,在线状态点(绿/灰)+ 名称 + 条数。 */}
+                  <button
+                    type="button"
+                    onClick={() => toggleDeviceSection(key)}
+                    aria-expanded={!sectionCollapsed}
+                    aria-label={
+                      sectionCollapsed
+                        ? t('ccAgent.sidebar.deviceGroup.expand')
+                        : t('ccAgent.sidebar.deviceGroup.collapse')
+                    }
+                    className={cn(
+                      'flex h-6 w-full items-center gap-1.5 rounded-md px-1.5',
+                      'text-[var(--sidebar-list-muted)] transition-colors hover:text-[var(--sidebar-nav-text)]',
+                    )}
+                  >
+                    {sectionCollapsed ? (
+                      <ChevronRight size={12} strokeWidth={2} className="shrink-0" />
+                    ) : (
+                      <ChevronDown size={12} strokeWidth={2} className="shrink-0" />
+                    )}
+                    <MonitorSmartphone size={13} strokeWidth={2} className="shrink-0" />
+                    <span className="min-w-0 truncate text-xs font-medium">{name}</span>
+                    <span
+                      aria-hidden
                       className={cn(
-                        'flex h-6 w-full items-center gap-1.5 rounded-md px-1.5',
-                        'text-[var(--sidebar-list-muted)] transition-colors hover:text-[var(--sidebar-nav-text)]',
+                        'size-1.5 shrink-0 rounded-full',
+                        online ? 'bg-[var(--card-status-done)]' : 'bg-[var(--text-tertiary)]',
                       )}
-                    >
-                      {sectionCollapsed ? (
-                        <ChevronRight size={12} strokeWidth={2} className="shrink-0" />
-                      ) : (
-                        <ChevronDown size={12} strokeWidth={2} className="shrink-0" />
-                      )}
-                      <MonitorSmartphone size={13} strokeWidth={2} className="shrink-0" />
-                      <span className="min-w-0 truncate text-xs font-medium">{name}</span>
-                      <span
-                        aria-hidden
-                        className={cn(
-                          'size-1.5 shrink-0 rounded-full',
-                          online ? 'bg-[var(--card-status-done)]' : 'bg-[var(--text-tertiary)]',
-                        )}
-                      />
-                      {/* 条数已去掉(2026-08-12 用户裁决):它数的是顶层条目
+                    />
+                    {/* 条数已去掉(2026-08-12 用户裁决):它数的是顶层条目
                           (项目行 + 散排对话 + 对话组),不是任务数,读起来只会误导;
                           段展开后内容本身就是答案。「离线」接手 ml-auto 保持靠右。 */}
-                      {!online && (
-                        <span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
-                          {t('ccAgent.sidebar.deviceGroup.offline')}
-                        </span>
-                      )}
-                    </button>
-                    <SectionCollapse collapsed={sectionCollapsed}>
-                      <div className="flex flex-col gap-1 pl-2">
-                        {/* 折叠上限每段独立应用(切段在前,见 deviceSections 注释);
+                    {!online && (
+                      <span className="ml-auto shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
+                        {t('ccAgent.sidebar.deviceGroup.offline')}
+                      </span>
+                    )}
+                  </button>
+                  <SectionCollapse collapsed={sectionCollapsed}>
+                    <div className="flex flex-col gap-1 pl-2">
+                      {/* 折叠上限每段独立应用(切段在前,见 deviceSections 注释);
                             「显示全部」的作用域同样是段内(expandedDeviceSections)。 */}
-                        {(() => {
-                          const sectionView = collapseEntries(
-                            section.entries,
-                            expandedDeviceSections.has(key),
-                          );
-                          return (
-                            <>
-                              {sectionView.visibleEntries.map((entry) =>
-                                entry.kind === 'project'
-                                  ? renderProjectNode(entry.project)
-                                  : // 本机段 → null(强制本机);远程段 → 该设备。
-                                    renderNonProjectEntry(
-                                      entry,
-                                      key,
-                                      section.deviceId
-                                        ? { deviceId: section.deviceId, deviceName: name }
-                                        : null,
-                                    ),
-                              )}
-                              {sectionView.isOverflowing && (
-                                <ShowAllEntriesButton
-                                  count={sectionView.totalCount}
-                                  onClick={() =>
-                                    setExpandedDeviceSections((prev) => new Set(prev).add(key))
-                                  }
-                                />
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </SectionCollapse>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="flex flex-col gap-1">
-              {visibleMixedEntries.map((entry) =>
-                entry.kind === 'project'
-                  ? renderProjectNode(entry.project)
-                  : renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY),
-              )}
-            </div>
-          )}
-          {/* 全局「显示全部」只属于单段路径(manual / 未按设备分组——manual 已在
+                      {(() => {
+                        const sectionView = collapseEntries(
+                          section.entries,
+                          expandedDeviceSections.has(key),
+                        );
+                        return (
+                          <>
+                            {sectionView.visibleEntries.map((entry) =>
+                              entry.kind === 'project'
+                                ? renderProjectNode(entry.project)
+                                : // 本机段 → null(强制本机);远程段 → 该设备。
+                                  renderNonProjectEntry(
+                                    entry,
+                                    key,
+                                    section.deviceId
+                                      ? { deviceId: section.deviceId, deviceName: name }
+                                      : null,
+                                  ),
+                            )}
+                            {sectionView.isOverflowing && (
+                              <ShowAllEntriesButton
+                                count={sectionView.totalCount}
+                                onClick={() =>
+                                  setExpandedDeviceSections((prev) => new Set(prev).add(key))
+                                }
+                              />
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  </SectionCollapse>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="flex flex-col gap-1">
+            {visibleMixedEntries.map((entry) =>
+              entry.kind === 'project'
+                ? renderProjectNode(entry.project)
+                : renderNonProjectEntry(entry, DIALOGUE_GROUP_ALL_KEY),
+            )}
+          </div>
+        )}
+        {/* 全局「显示全部」只属于单段路径(manual / 未按设备分组——manual 已在
               deviceGroupingActive 定义里排除);设备分组下折叠与 footer 都在段内。 */}
-          {!deviceGroupingActive && projectsOverflow && (
-            <ShowAllEntriesButton count={projectsTotal} onClick={() => setShowAllProjects(true)} />
-          )}
-        </div>
-      </SectionCollapse>
+        {!deviceGroupingActive && projectsOverflow && (
+          <ShowAllEntriesButton count={projectsTotal} onClick={() => setShowAllProjects(true)} />
+        )}
+      </div>
     </div>
   );
 }

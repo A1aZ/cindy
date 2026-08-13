@@ -1,14 +1,14 @@
 /**
  * SidebarTopNav —— 侧栏顶部常驻动作/导航列表(取代原 HorizontalTabbar)。
  * ---------------------------------------------------------------------------
- * 一条同级、等权的列表行,按顺序:新建 / 自动任务 / Plugins / 搜索 / 远程机器。
+ * 一条同级、等权的列表行,按顺序:新建 / 自动任务 / Plugins / 搜索。
  *   - 新建 / 自动任务:项目(cc-agent)视图的动作 —— 在任意视图点击都跳回项目视图并执行。
  *   - Plugins:主视图切换(navigateToView),命中当前视图时高亮。
  *   - 搜索(SidebarInlineSearch):静息态与其余行同款「🔍 搜索」;hover / 聚焦
  *     就地展开成搜索框,结果 overlay 由下方功能槽(CCAgentSidebarUpper)绘制。搜索状态经
  *     ConversationSearchProvider 的 context 共享(行在此、overlay 在功能槽,两者是兄弟子树)。
- *   - 远程机器(MachineSwitcherMenu):末行,同款行样式的文字下拉,过滤下方会话列表
- *     的机器范围;无任何相关远程机器时组件自身 return null,不占行。
+ *   - 远程机器切换 2026-08-13 起不再占行:并入主列表段头标题(「全部任务」即
+ *     范围下拉,见 MachineSwitcherMenu 头注),省一行且标题不再与范围脱节。
  * 去掉了原来的「项目(Bot)」标签 —— 项目即默认主视图,无单独入口。
  * rail 态的搜索仍是 CollapsedView 里独立的 ConversationSearchBox 图标弹窗(不走本行 / context)。
  *
@@ -27,7 +27,6 @@ import { cn } from '@/lib/utils';
 import { AttentionDot } from '@/components/sidebar/AttentionDot';
 import { useAnyGhostUnread } from '@/cindy-brain/ghostUnreadStore';
 import { useActiveMainView } from '@/hooks/useActiveMainView';
-import { MachineSwitcherMenu } from '@/features/cc-agent/sidebar/MachineSwitcherMenu';
 import { SidebarInlineSearch } from '@/features/cc-agent/sidebar/SidebarInlineSearch';
 import { useConversationSearchContext } from '@/features/cc-agent/sidebar/conversationSearchContext';
 
@@ -161,10 +160,6 @@ export function SidebarTopNav({
             openSignal={openSignal}
             onSearchActive={ensureConversationView}
           />
-
-          {/* 5. 远程机器 —— 同款行样式的文字下拉(过滤下方会话列表的机器范围);
-          无相关远程机器时组件自身 return null,不占行。 */}
-          <MachineSwitcherMenu />
         </>
       )}
     </div>

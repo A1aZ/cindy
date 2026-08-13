@@ -1481,7 +1481,11 @@
           "confirmTitle": "Confirm overwrites",
           "confirmSubtitle": "Choose the fields to copy from {{source}}.",
           "source": "Source",
-          "columns": { "field": "Field", "source": "Source value", "target": "Current value" },
+          "columns": {
+            "field": "Field",
+            "source": "Source value",
+            "target": "Current value"
+          },
           "fields": {
             "endpointBundle": "Endpoint and API protocol",
             "baseUrl": "Base URL",
@@ -6954,6 +6958,7 @@
       },
       "showAllSessions": "Show all {{count}}",
       "allSessions": "All sessions",
+      "scopeLocalSessions": "This device’s sessions",
       "dialogues": "Chat",
       "newDialogue": "New session",
       "dialoguesToggleExpand": "Expand Chat",
@@ -6971,8 +6976,6 @@
       "projects": "Projects",
       "newProject": "New project",
       "createProjectFailed": "Failed to create project",
-      "projectsSectionToggleExpand": "Expand projects",
-      "projectsSectionToggleCollapse": "Collapse projects",
       "projectsToggleExpand": "Expand all project sessions",
       "projectsToggleCollapse": "Collapse all project sessions",
       "filterAria": "Organize sidebar (Status: {{status}}, Vendor: {{vendor}}, Last activity: {{lastActivity}}, Group by: {{groupBy}}, Sort by: {{sortBy}}, Projects: {{projects}})",

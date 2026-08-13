@@ -1481,7 +1481,11 @@
           "confirmTitle": "上書きを確認",
           "confirmSubtitle": "{{source}} からコピーする項目を選択してください。",
           "source": "コピー元",
-          "columns": { "field": "項目", "source": "コピー元", "target": "現在値" },
+          "columns": {
+            "field": "項目",
+            "source": "コピー元",
+            "target": "現在値"
+          },
           "fields": {
             "endpointBundle": "エンドポイントと API プロトコル",
             "baseUrl": "ベース URL",
@@ -6942,6 +6946,7 @@
       },
       "showAllSessions": "すべて表示 {{count}} 件",
       "allSessions": "すべてのセッション",
+      "scopeLocalSessions": "このデバイスのセッション",
       "dialogues": "会話",
       "newDialogue": "新規セッション",
       "dialoguesToggleExpand": "会話を展開",
@@ -6959,8 +6964,6 @@
       "projects": "プロジェクト",
       "newProject": "新規プロジェクト",
       "createProjectFailed": "プロジェクトの作成に失敗しました",
-      "projectsSectionToggleExpand": "プロジェクトを展開",
-      "projectsSectionToggleCollapse": "プロジェクトを折りたたむ",
       "projectsToggleExpand": "すべてのプロジェクトセッションを展開",
       "projectsToggleCollapse": "すべてのプロジェクトセッションを折りたたむ",
       "filterAria": "サイドバー整理（ステータス：{{status}}、Agent：{{vendor}}、最終アクティビティ：{{lastActivity}}、グループ：{{groupBy}}、並び替え：{{sortBy}}、プロジェクト：{{projects}}）",

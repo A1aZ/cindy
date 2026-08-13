@@ -3252,7 +3252,12 @@ function ExpandedView({
       <SidebarFilterPopover
         filter={filter}
         allKnownProjects={visibleProjectUniverse}
-        hasRemoteDevices={(remoteDeviceIndex?.size ?? 0) > 0}
+        // 与段头实例同一门控:范围收窄到单台机器时「按设备分组」选项隐藏
+        // (2026-08-13 用户定稿,详见 ProjectsSection.deviceGroupingAvailable)。
+        hasRemoteDevices={
+          (remoteDeviceIndex?.size ?? 0) > 0 &&
+          !(selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1)
+        }
         contextMenuPos={organizeMenuPos}
         onContextMenuOpenChange={(open) => {
           if (!open) setOrganizeMenuPos(null);

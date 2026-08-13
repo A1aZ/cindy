@@ -1481,7 +1481,11 @@
           "confirmTitle": "덮어쓰기 확인",
           "confirmSubtitle": "{{source}}에서 복사할 필드를 선택하세요.",
           "source": "원본",
-          "columns": { "field": "필드", "source": "원본 값", "target": "현재 값" },
+          "columns": {
+            "field": "필드",
+            "source": "원본 값",
+            "target": "현재 값"
+          },
           "fields": {
             "endpointBundle": "엔드포인트 및 API 프로토콜",
             "baseUrl": "기본 URL",
@@ -6942,6 +6946,7 @@
       },
       "showAllSessions": "모두 표시 {{count}}개",
       "allSessions": "모든 세션",
+      "scopeLocalSessions": "이 기기의 세션",
       "dialogues": "대화",
       "newDialogue": "새 세션",
       "dialoguesToggleExpand": "대화 펼치기",
@@ -6959,8 +6964,6 @@
       "projects": "프로젝트",
       "newProject": "새 프로젝트",
       "createProjectFailed": "프로젝트 생성 실패",
-      "projectsSectionToggleExpand": "프로젝트 펼치기",
-      "projectsSectionToggleCollapse": "프로젝트 접기",
       "projectsToggleExpand": "모든 프로젝트 세션 펼치기",
       "projectsToggleCollapse": "모든 프로젝트 세션 접기",
       "filterAria": "사이드바 정리(상태: {{status}}, Agent: {{vendor}}, 최근 활동: {{lastActivity}}, 그룹: {{groupBy}}, 정렬: {{sortBy}}, 프로젝트: {{projects}})",

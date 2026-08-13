@@ -25,7 +25,7 @@ function parseSearchJump(state: unknown): ConversationSearchJump | null {
 
 export interface UseOrcaWorkerSelectionOptions {
   leadSessionId: string;
-  deviceId?: string;
+  deviceId?: string | null;
   /** Whether the worker conversation is actually visible to the user. */
   viewVisible: boolean;
   focusWorkerSessionId?: string | null;

@@ -1979,8 +1979,9 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       'Set-ItemProperty Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1',
       'Set-ItemProperty HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1',
       'set-itemproperty hklm:\\system\\foo bar 1', // 大小写不敏感
-      // 机器根证书区:装证书等于改信任链。
+      // 机器根证书区:装证书等于改信任链。**两条入口都要**——见下方专门的证书用例。
       'New-Item Cert:\\LocalMachine\\Root\\x',
+      'Remove-Item Certificate::LocalMachine\\Root\\1A2B3C4D5E6F',
       // 载荷下探同样生效。
       'pwsh -Command Set-ItemProperty HKLM:\\SYSTEM\\Foo Bar 1',
     ]) {
@@ -2010,6 +2011,66 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     expect(isProtectedSystemPath('HKCU:')).toBe(false);
     expect(isProtectedSystemPath('HKLMX:\\Foo')).toBe(false);
     expect(isProtectedSystemPath('C:\\repo\\HKLM-notes.txt')).toBe(false);
+  });
+
+  it('证书 provider 的机器信任库:盘符形态与 Certificate:: 限定形态都要保住 provider 身份', () => {
+    // 注册表和证书在这里**不对称**,这是漏洞的根:
+    //   · 注册表的根名自带身份(`HKLM:` / `HKEY_LOCAL_MACHINE`),剥掉 `Registry::` 前缀也认得出;
+    //   · 证书的根名**不自带身份** —— `LocalMachine` 只是个普通词。原先只查 `^Cert:/LocalMachine`,
+    //     而 `Certificate::LocalMachine\…` 剥掉限定前缀后 `Cert:` 根本不存在,于是 provider 身份
+    //     整条丢掉、机器信任库的删除被当成 workspace 相对路径,从必问降成灰区(codex 报)。
+    const win = ['C:\\repo'];
+    const thumb = '1A2B3C4D5E6F';
+    for (const c of [
+      // provider 限定形态(本次修的)。
+      `Remove-Item Certificate::LocalMachine\\Root\\${thumb}`,          // 删掉受信根 = 破坏信任链
+      `Remove-Item certificate::localmachine\\root\\${thumb}`,          // 大小写不敏感
+      `Remove-Item Microsoft.PowerShell.Security\\Certificate::LocalMachine\\Root\\${thumb}`, // 带完整 provider 名
+      `Remove-Item Certificate::LocalMachine/Root/${thumb}`,            // 正斜杠分隔
+      `Remove-Item "Certificate::LocalMachine\\Root\\${thumb}"`,        // 带引号
+      'New-Item Certificate::LocalMachine\\Root\\x',                    // 装证书 = 改信任链
+      'Set-Item Certificate::LocalMachine\\Root\\x v',
+      'Remove-Item Certificate::LocalMachine\\CA\\x',                   // 不止 Root 这一个存储
+      // 盘符形态(回归基线,两条入口结论必须一致)。
+      `Remove-Item Cert:\\LocalMachine\\Root\\${thumb}`,
+      `Remove-Item cert:\\localmachine\\root\\${thumb}`,
+      'New-Item Cert:\\LocalMachine\\Root\\x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 两条入口同一判档(不是"都必问"就完事 —— 是同一个目标的两种写法不该分叉)。
+    for (const [drive, qualified] of [
+      [`Remove-Item Cert:\\LocalMachine\\Root\\${thumb}`, `Remove-Item Certificate::LocalMachine\\Root\\${thumb}`],
+      [`Remove-Item Cert:\\CurrentUser\\Root\\${thumb}`, `Remove-Item Certificate::CurrentUser\\Root\\${thumb}`],
+    ]) {
+      expect(classifyShellCommand(drive, win, { platform: 'win32' }), `${drive} vs ${qualified}`)
+        .toBe(classifyShellCommand(qualified, win, { platform: 'win32' }));
+    }
+
+    // 反例一:`CurrentUser` 是当前用户自己的存储 → 与 `HKCU:` 同口径留灰区,不是放行。
+    expect(classifyShellCommand(`Remove-Item Cert:\\CurrentUser\\Root\\${thumb}`, win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand(`Remove-Item Certificate::CurrentUser\\Root\\${thumb}`, win, { platform: 'win32' }))
+      .toBe('prompt');
+
+    // 反例二(**这条是收窄判据的原因**):`LocalMachine` 不自带 provider 身份,所以一个同名的
+    // 普通相对/区内目录绝不能因为名字撞上而被误升级。
+    for (const c of [
+      'Remove-Item LocalMachine\\Root\\x',
+      'Set-Content LocalMachine\\a.txt hi',
+      'Remove-Item C:\\repo\\LocalMachine\\x',
+      'Set-Content C:\\repo\\LocalMachine\\Root\\a.txt hi',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 直接测导出判据:两种写法都算,同名相对路径与每用户存储都不算。
+    expect(isProtectedSystemPath('Certificate::LocalMachine\\Root\\X')).toBe(true);
+    expect(isProtectedSystemPath('Cert:\\LocalMachine\\Root\\X')).toBe(true);
+    expect(isProtectedSystemPath('LocalMachine\\Root\\X')).toBe(false);
+    expect(isProtectedSystemPath('Cert:\\CurrentUser\\X')).toBe(false);
+    expect(isProtectedSystemPath('C:\\repo\\LocalMachine')).toBe(false);
   });
 
   it('PowerShell 写 cmdlet 的文档别名与 canonical 名判得完全一致', () => {

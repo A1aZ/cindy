@@ -831,15 +831,37 @@ const SAFE_DEVICE_PATH = /^\/dev\/(?:null|zero|full|random|urandom|std(?:in|out|
  */
 const PROTECTED_PROVIDER_REGISTRY_ROOT =
   /^(?:HK(?:LM|CR|U|CC|PD)|HKEY_(?:LOCAL_MACHINE|CLASSES_ROOT|USERS|CURRENT_CONFIG|PERFORMANCE_DATA))(?::|[\\/]|$)/i;
-const PROTECTED_PROVIDER_CERT_ROOT = /^Cert:\/LocalMachine(?:\/|$)/i;
+/**
+ * 证书存储的**机器级**根。只有 `LocalMachine` 全机生效(改它等于改整机信任链);`CurrentUser`
+ * 是当前用户自己的存储,与 `HKCU:` 同口径留灰区。
+ */
+const PROTECTED_CERT_STORE_ROOT = /^LocalMachine(?:\/|$)/i;
+
+/** `Registry::…` / `Certificate::…` 这类 provider 限定前缀,可带完整 provider 名。 */
+const POWERSHELL_PROVIDER_QUALIFIER = /^(?:[\w.]+[\\/])*(registry|certificate)::/i;
 
 function isProtectedProviderPath(target: string): boolean {
   if (typeof target !== 'string' || target.length === 0) return false;
-  // provider 限定形态:`Registry::HKEY_LOCAL_MACHINE\…`、`Microsoft.PowerShell.Core\Registry::…`。
-  const body = target.replace(/^['"]|['"]$/g, '')
-    .replace(/^(?:[\w.]+[\\/])*(?:registry|certificate)::/i, '');
-  return PROTECTED_PROVIDER_REGISTRY_ROOT.test(body)
-    || PROTECTED_PROVIDER_CERT_ROOT.test(toForwardSlashes(body));
+  const raw = target.replace(/^['"]|['"]$/g, '');
+  // provider 限定形态:`Registry::HKEY_LOCAL_MACHINE\…`、`Microsoft.PowerShell.Security\Certificate::…`。
+  const qualifier = POWERSHELL_PROVIDER_QUALIFIER.exec(raw);
+  const body = qualifier ? raw.slice(qualifier[0].length) : raw;
+  const fwd = toForwardSlashes(body);
+  // 注册表的根名**自带身份**(`HKLM:` / `HKEY_LOCAL_MACHINE`),剥掉 `Registry::` 前缀也认得出。
+  if (PROTECTED_PROVIDER_REGISTRY_ROOT.test(body)) return true;
+  // 证书的根名**不自带身份**:`LocalMachine` 只是个普通词,单看和一个同名的相对目录没法区分
+  // (`Remove-Item LocalMachine\Root\x` 必须留灰区)。所以判它必须先确认"这是 Certificate
+  // provider 的路径",两条入口都要:
+  //   · 盘符形态 `Cert:\LocalMachine\…`;
+  //   · provider 限定形态 `Certificate::LocalMachine\…` —— 剥掉前缀后 `Cert:` 根本不存在,
+  //     原先只查 `^Cert:/LocalMachine` 于是整条丢掉了 provider 身份,机器信任库的删除降成灰区
+  //     (codex 报)。
+  const drive = /^Cert:\//i.exec(fwd);
+  if (drive) return PROTECTED_CERT_STORE_ROOT.test(fwd.slice(drive[0].length));
+  if (qualifier && qualifier[1].toLowerCase() === 'certificate') {
+    return PROTECTED_CERT_STORE_ROOT.test(fwd);
+  }
+  return false;
 }
 
 /** 路径是否落在系统/受保护目录(写入需确定性用户同意)。入参应为已归一的目标路径。 */

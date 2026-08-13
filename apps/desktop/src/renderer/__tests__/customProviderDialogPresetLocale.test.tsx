@@ -133,8 +133,10 @@ describe('CustomProviderDialog preset locale ownership', () => {
       const option = await screen.findByRole('option', { name: expectedName });
       fireEvent.click(option);
 
-      expect(trigger.textContent).toContain(expectedName);
-      expect(screen.getByDisplayValue(expectedName)).not.toBeNull();
+      await waitFor(() => {
+        expect(trigger.textContent).toContain(expectedName);
+        expect(screen.getByDisplayValue(expectedName)).not.toBeNull();
+      });
 
       fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
       await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));

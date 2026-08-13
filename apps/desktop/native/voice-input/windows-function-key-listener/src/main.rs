@@ -1,4 +1,6 @@
 #[cfg(any(windows, test))]
+mod keys;
+#[cfg(any(windows, test))]
 mod press;
 
 #[cfg(not(windows))]
@@ -12,13 +14,16 @@ mod windows_listener {
     use std::io::{self, Write};
     use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
 
-    use crate::press::{on_foreign_keydown, on_target_keydown, on_target_keyup, TargetPress};
+    use crate::keys::{modifier_bit, other_key_slot, seed_other_key_slots};
+    use crate::press::{
+        initial_target_press, on_foreign_keydown, on_target_keydown, on_target_keyup, TargetPress,
+    };
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_F1, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU,
-        VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+        GetAsyncKeyState, VK_F1, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU,
+        VK_RSHIFT, VK_RWIN,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION,
@@ -40,8 +45,15 @@ mod windows_listener {
             emit_error("Expected exactly one argument from F1 through F24.");
             return 2;
         };
-        TARGET_VK.store(VK_F1 as u32 + function_number - 1, Ordering::Relaxed);
+        let target_vk = VK_F1 as u32 + function_number - 1;
+        TARGET_VK.store(target_vk, Ordering::Relaxed);
         MODIFIERS_DOWN.store(seed_modifier_state(), Ordering::Relaxed);
+        seed_other_key_state(target_vk);
+        let target_already_down = unsafe { GetAsyncKeyState(target_vk as i32) } < 0;
+        TARGET_PRESS.store(
+            initial_target_press(target_already_down) as u8,
+            Ordering::Relaxed,
+        );
 
         let module = unsafe { GetModuleHandleW(std::ptr::null()) };
         if module.is_null() {
@@ -122,13 +134,6 @@ mod windows_listener {
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
     }
 
-    fn other_key_slot(vk: u32) -> Option<(usize, u64)> {
-        if vk >= 256 {
-            return None;
-        }
-        Some((vk as usize / 64, 1 << (vk % 64)))
-    }
-
     fn set_other_key(vk: u32, down: bool) {
         let Some((index, bit)) = other_key_slot(vk) else {
             return;
@@ -146,27 +151,18 @@ mod windows_listener {
             .any(|slot| slot.load(Ordering::Relaxed) != 0)
     }
 
+    fn seed_other_key_state(target_vk: u32) {
+        let slots =
+            seed_other_key_slots(target_vk, |vk| unsafe { GetAsyncKeyState(vk as i32) } < 0);
+        for (index, value) in slots.iter().enumerate() {
+            OTHER_KEYS[index].store(*value, Ordering::Relaxed);
+        }
+    }
+
     fn parse_function_number() -> Option<u32> {
         let value = std::env::args().nth(1)?;
         let number = value.strip_prefix('F')?.parse::<u32>().ok()?;
         (1..=24).contains(&number).then_some(number)
-    }
-
-    fn modifier_bit(vk: u32) -> u32 {
-        match vk as u16 {
-            VK_SHIFT => 1 << 0,
-            VK_LSHIFT => 1 << 1,
-            VK_RSHIFT => 1 << 2,
-            VK_CONTROL => 1 << 3,
-            VK_LCONTROL => 1 << 4,
-            VK_RCONTROL => 1 << 5,
-            VK_MENU => 1 << 6,
-            VK_LMENU => 1 << 7,
-            VK_RMENU => 1 << 8,
-            VK_LWIN => 1 << 9,
-            VK_RWIN => 1 << 10,
-            _ => 0,
-        }
     }
 
     fn seed_modifier_state() -> u32 {

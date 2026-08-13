@@ -360,14 +360,31 @@ function resolveDevSourceRoot(): string {
   return path.join(__dirname, '..', '..', SOURCE_RELATIVE_PATH);
 }
 
-function isDevBinaryCurrent(sourceRoot: string, binary: string): boolean {
+export function listWindowsFunctionKeyListenerSourceFiles(sourceRoot: string): string[] {
+  const files = [path.join(sourceRoot, 'Cargo.toml'), path.join(sourceRoot, 'Cargo.lock')];
+  const srcRoot = path.join(sourceRoot, 'src');
+  collectRustSources(srcRoot, files);
+  return files;
+}
+
+function collectRustSources(dir: string, files: string[]): void {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectRustSources(fullPath, files);
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith('.rs')) files.push(fullPath);
+  }
+}
+
+export function isDevBinaryCurrent(sourceRoot: string, binary: string): boolean {
   if (!fs.existsSync(binary)) return false;
   const binaryMtimeMs = fs.statSync(binary).mtimeMs;
-  return [
-    path.join(sourceRoot, 'Cargo.toml'),
-    path.join(sourceRoot, 'Cargo.lock'),
-    path.join(sourceRoot, 'src', 'main.rs'),
-  ].every((source) => !fs.existsSync(source) || fs.statSync(source).mtimeMs <= binaryMtimeMs);
+  return listWindowsFunctionKeyListenerSourceFiles(sourceRoot).every(
+    (source) => !fs.existsSync(source) || fs.statSync(source).mtimeMs <= binaryMtimeMs,
+  );
 }
 
 function resolveCargoExecutable(): string {

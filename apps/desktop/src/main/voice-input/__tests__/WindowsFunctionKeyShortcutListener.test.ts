@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { VoiceInputShortcut } from '../../../shared/voiceInputData.js';
@@ -227,5 +230,35 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     expect(mocks.spawn).toHaveBeenCalledTimes(4);
     expect(onRestartLimitReached).toHaveBeenCalledTimes(1);
     listener.stop();
+  });
+
+  it('rebuilds the helper when any Rust source is newer than the existing binary', async () => {
+    const { isDevBinaryCurrent } = await import('../WindowsFunctionKeyShortcutListener.js');
+    const sourceRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-win-fkey-'));
+    const srcDir = path.join(sourceRoot, 'src');
+    const binary = path.join(sourceRoot, 'cindy-windows-function-key-listener.exe');
+    fs.mkdirSync(srcDir);
+    fs.writeFileSync(path.join(sourceRoot, 'Cargo.toml'), '[package]\n');
+    fs.writeFileSync(path.join(sourceRoot, 'Cargo.lock'), '');
+    fs.writeFileSync(path.join(srcDir, 'main.rs'), '');
+    fs.writeFileSync(path.join(srcDir, 'press.rs'), '');
+    fs.writeFileSync(binary, '');
+    const older = new Date(Date.now() - 60_000);
+    const newer = new Date(Date.now() + 60_000);
+    for (const file of [
+      path.join(sourceRoot, 'Cargo.toml'),
+      path.join(sourceRoot, 'Cargo.lock'),
+      path.join(srcDir, 'main.rs'),
+      binary,
+    ]) {
+      fs.utimesSync(file, older, older);
+    }
+    fs.utimesSync(path.join(srcDir, 'press.rs'), newer, newer);
+
+    expect(isDevBinaryCurrent(sourceRoot, binary)).toBe(false);
+
+    fs.utimesSync(path.join(srcDir, 'press.rs'), older, older);
+    expect(isDevBinaryCurrent(sourceRoot, binary)).toBe(true);
+    fs.rmSync(sourceRoot, { recursive: true, force: true });
   });
 });

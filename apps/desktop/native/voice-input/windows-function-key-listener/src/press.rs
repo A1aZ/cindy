@@ -90,6 +90,14 @@ pub fn on_foreign_keydown(current: TargetPress) -> ForeignKeydownEffect {
     }
 }
 
+pub fn initial_target_press(target_already_down: bool) -> TargetPress {
+    if target_already_down {
+        TargetPress::Rejected
+    } else {
+        TargetPress::Idle
+    }
+}
+
 pub fn on_target_keyup(current: TargetPress) -> KeyupEffect {
     match current {
         TargetPress::Idle => KeyupEffect {
@@ -113,6 +121,16 @@ pub fn on_target_keyup(current: TargetPress) -> KeyupEffect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_with_target_already_down_is_rejected_not_idle() {
+        assert_eq!(initial_target_press(false), TargetPress::Idle);
+        assert_eq!(initial_target_press(true), TargetPress::Rejected);
+        let repeat = on_target_keydown(initial_target_press(true), true);
+        assert_eq!(repeat.next, TargetPress::Rejected);
+        assert!(!repeat.swallow);
+        assert_eq!(repeat.emit_pressed, None);
+    }
 
     #[test]
     fn from_u8_round_trips_known_states() {

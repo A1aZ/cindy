@@ -184,7 +184,31 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     expect(attempts).toBe(3);
   });
 
-  it('clears deduplication when focus leaves the session or resolution fails', async () => {
+  it('preserves the published lead while a same-lead worker focus is unresolved', async () => {
+    let workerBAttempts = 0;
+    const published: string[] = [];
+    const notify = vi.fn(async (sessionId: string, claim: () => Promise<boolean>) => {
+      if (await claim()) published.push(sessionId);
+    });
+    const tracker = createGhostPrimarySessionFocusTracker(async (sessionId) => {
+      if (sessionId === 'worker-b') {
+        workerBAttempts += 1;
+        return workerBAttempts === 1 ? null : 'lead-a';
+      }
+      return 'lead-a';
+    }, notify);
+
+    tracker.note('worker-a');
+    await vi.waitFor(() => expect(published).toEqual(['lead-a']));
+    tracker.note('worker-b');
+    await vi.waitFor(() => expect(workerBAttempts).toBe(1));
+    tracker.note('worker-b');
+    await vi.waitFor(() => expect(workerBAttempts).toBe(3));
+
+    expect(published).toEqual(['lead-a']);
+  });
+
+  it('clears deduplication when focus explicitly leaves the session', async () => {
     const published: string[] = [];
     const notify = vi.fn(async (sessionId: string, claim: () => Promise<boolean>) => {
       if (await claim()) published.push(sessionId);
@@ -199,8 +223,7 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     tracker.note(null);
     tracker.note('lead');
     await vi.waitFor(() => expect(published).toHaveLength(2));
-    tracker.note('hidden-worker');
-    await Promise.resolve();
+    tracker.note(null);
     tracker.note('lead');
     await vi.waitFor(() => expect(published).toHaveLength(3));
 

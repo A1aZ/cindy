@@ -3,6 +3,7 @@ import {
   buildMobileModelSwitchConfirmation,
   buildSessionRuntimeOptions,
   categorizeMobileModel,
+  compactEnglishEffortLabel,
   normalizeMobileAgentCapabilities,
   reconcileRuntimeDraftWithCapabilities,
 } from '../agentCapabilities';
@@ -44,6 +45,15 @@ const desktopCapabilitiesPayload = {
 };
 
 describe('agent capabilities shared model', () => {
+  it('uses the same 2–3 letter English effort codes on desktop and mobile', () => {
+    expect(
+      ['minimal', 'low', 'medium', 'high', 'xhigh', 'ultra', 'max'].map(
+        compactEnglishEffortLabel,
+      ),
+    ).toEqual(['Min', 'Lo', 'Mid', 'Hi', 'XHi', 'Ult', 'Max']);
+    expect(compactEnglishEffortLabel('extra-high')).toBe('XHi');
+  });
+
   it('normalizes desktop capability payloads for runtime controls', () => {
     const capabilities = normalizeMobileAgentCapabilities(desktopCapabilitiesPayload);
 

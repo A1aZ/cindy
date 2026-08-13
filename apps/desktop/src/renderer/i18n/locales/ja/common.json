@@ -5547,6 +5547,7 @@
         "context": "コンテキスト {{value}}",
         "codexCompatibilityMode": "Codex 互換モード",
         "price": "{{input}}/{{output}} / 100万",
+        "subscriptionBadgeCompact": "サブスク",
         "fastBadge": "高速"
       },
       "source": {

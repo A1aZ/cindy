@@ -12,6 +12,7 @@ import type { MobileModelMemoryAccessors } from '@/session/draftModelMemory';
 import {
   budgetRowDisabled,
   buildRowMetaLine,
+  compactEffortLabelFor,
   effortLabelFor,
   formatContextWindow,
   formatPriceLine,
@@ -89,20 +90,54 @@ describe('providerDisplayTitle / formatPriceLine / buildRowMetaLine', () => {
   });
 });
 
-describe('effortLabelFor —— 四级优先(模型覆盖 → capabilities → 中文词表 → 原 id)', () => {
-  it('模型 effortDisplayNames 覆盖优先', () => {
-    expect(effortLabelFor({ effortDisplayNames: { xhigh: '特高' } }, 'xhigh', capabilities)).toBe('特高');
+describe('effortLabelFor —— 五级优先(i18n → 模型覆盖 → capabilities → 兼容词表 → 原 id)', () => {
+  it('已知档位优先使用当前界面的本地化文案', () => {
+    expect(effortLabelFor({ effortDisplayNames: { xhigh: '特高' } }, 'xhigh', capabilities)).toBe('超高');
   });
-  it('无覆盖 → capabilities effortLevels label', () => {
-    expect(effortLabelFor({}, 'xhigh', capabilities)).toBe('Extra High');
+  it('未知档位回退模型覆盖与 capabilities 标签', () => {
+    expect(effortLabelFor({ effortDisplayNames: { custom: '自定义' } }, 'custom', capabilities)).toBe('自定义');
+    expect(
+      effortLabelFor({}, 'remote', {
+        ...capabilities,
+        effortLevels: [{ id: 'remote', label: '远程档' }],
+      }),
+    ).toBe('远程档');
   });
-  it('capabilities 缺该档 / 未加载 → 中文词表兜底', () => {
+  it('capabilities 缺该档 / 未加载 → 本地化词表', () => {
     expect(effortLabelFor({}, 'minimal', capabilities)).toBe('最小');
     expect(effortLabelFor({}, 'high', null)).toBe('高');
     expect(effortLabelFor({}, 'ultra', null)).toBe('极致');
   });
   it('词表也没有 → 原 id', () => {
     expect(effortLabelFor({}, 'nonexistent', null)).toBe('nonexistent');
+  });
+});
+
+describe('compactEffortLabelFor —— 英文列表短码', () => {
+  it('英文按稳定 effort id 显示 2–3 字母，非英文仍用本地化全称', async () => {
+    const previousLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage('en');
+      expect(effortLabelFor({}, 'xhigh', capabilities)).toBe('Extra High');
+      expect(
+        compactEffortLabelFor({ effortDisplayNames: { xhigh: '特高' } }, 'xhigh', capabilities),
+      ).toBe('XHi');
+      expect(compactEffortLabelFor({}, 'minimal', capabilities)).toBe('Min');
+      expect(compactEffortLabelFor({}, 'low', capabilities)).toBe('Lo');
+      expect(compactEffortLabelFor({}, 'medium', capabilities)).toBe('Mid');
+      expect(compactEffortLabelFor({}, 'high', capabilities)).toBe('Hi');
+      expect(compactEffortLabelFor({}, 'ultra', capabilities)).toBe('Ult');
+      expect(compactEffortLabelFor({}, 'max', capabilities)).toBe('Max');
+
+      await i18n.changeLanguage('zh-CN');
+      expect(compactEffortLabelFor({}, 'high', null)).toBe('高');
+      await i18n.changeLanguage('ja');
+      expect(compactEffortLabelFor({}, 'ultra', null)).toBe('究極');
+      await i18n.changeLanguage('ko');
+      expect(compactEffortLabelFor({}, 'medium', null)).toBe('보통');
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
   });
 });
 

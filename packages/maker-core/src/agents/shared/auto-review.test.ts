@@ -2529,6 +2529,47 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('splatting(@params)把任意具名参数摊进来 → 整次抽取按不可证算', () => {
+    // `@变量` 把一个 hashtable / 数组整体摊成实参。它比变量、表达式、通配符更彻底地废掉静态
+    // 判定:摊进来的是**任意具名参数,包括 `-Path` 本身**。原先谓词只认数组表达式 `@(…)`,
+    // `@p` 既不含 `$` 也不以 `(` 开头,于是被当成普通相对路径拼进工作区(codex 报)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Set-Content @p',
+      'Set-Content @params',
+      'Set-Content @PSBoundParameters',
+      'Remove-Item @p',
+      'Copy-Item @p',
+      'Out-File @p',
+      'Set-ItemProperty @p',
+      'Move-Item @splat',
+      'Rename-Item @p',
+      'New-Item @{Path="C:\\Windows\\x"}',        // hashtable 字面量
+      'Set-Content @p owned',                      // splat + 位置参数混用
+      'Copy-Item C:\\repo\\a @p',                  // splat 在目标侧
+      // **关键**:命令行里已经有一个看得见的安全目标也不能信 —— `@p` 可以再带一个 `-Path`。
+      // 所以判据是"整次抽取不可证",不是"忽略这个 token、拿剩下的判"。
+      'Set-Content -Path C:\\repo\\a.txt @p',
+      'Copy-Item -Path C:\\repo\\a -Destination C:\\repo\\b @p',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:`@` 出现在 token **中间**是合法文件名的一部分,不是 splat。
+    expect(classifyShellCommand('Set-Content "C:\\repo\\mail@host.txt" hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Set-Content C:\\repo\\a@b\\c.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 反例二:只读 cmdlet 不在写目标表里,splat 不会把它拖进写通道判定。
+    expect(classifyShellCommand('Get-Content @p', win, { platform: 'win32' })).toBe('prompt');
+    // 反例三:普通目标判档不变(这条只针对"证明不了")。
+    expect(classifyShellCommand('Set-Content C:\\repo\\a.txt hi', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Set-Content C:\\repo\\build\\* x', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand(
+      'Set-Content C:\\Windows\\System32\\drivers\\etc\\hosts owned', win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

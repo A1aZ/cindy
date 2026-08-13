@@ -520,6 +520,23 @@ function isPowerShellExpressionToken(token: string): boolean {
 }
 
 /**
+ * **splatting**:`Set-Content @params` —— `@变量` 把一个 hashtable / 数组整体摊成实参。
+ *
+ * 它比前面那些形态更彻底地废掉静态判定:摊进来的是**任意具名参数**,包括 `-Path` 本身。
+ * 所以哪怕命令行里已经有一个看得见的安全目标也不能信 ——
+ * `Set-Content -Path C:\repo\a.txt @p` 里的 `@p` 可以带上另一个 `-Path`(实测原先落 prompt)。
+ * 因此只要出现 splat,整次抽取按不可证算,而不是"忽略这个 token、用剩下的判"。
+ *
+ * 只认 `@` 紧跟标识符或 `{`(hashtable 字面量);`@(` 是数组子表达式,由
+ * `isPowerShellExpressionToken` 管。`@` 出现在 token **中间**的不算 —— `C:\repo\mail@host.txt`
+ * 是个合法文件名(已断言不被误升级)。
+ *
+ * 已知代价:真有一个字面以 `@` 开头的文件名(`@foo.txt`)会多问一次。PowerShell 里这种名字
+ * 本来就得引号包着才不会被当 splat,方向是多问、不放宽。
+ */
+const POWERSHELL_SPLAT_TOKEN = /^@[A-Za-z_{]/;
+
+/**
  * PowerShell 写 cmdlet 的写目标。既支持具名参数(`-Path` / `-LiteralPath` / `-Destination` /
  * `-FilePath`,含唯一前缀缩写如 `-Dest`),也支持位置传参。
  *
@@ -540,8 +557,11 @@ function isPowerShellExpressionToken(token: string): boolean {
 function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   const targets = powerShellWriteTargetOperands(bin, args);
   if (targets === null) return null;
-  // 表达式参数会让位置模型整体失效(见 isPowerShellExpressionToken)→ 整次抽取按不可证算。
-  if (args.some(isPowerShellExpressionToken)) return [UNPROVABLE_WRITE_TARGET];
+  // 表达式参数会让位置模型整体失效(见 isPowerShellExpressionToken),splatting 更进一步 ——
+  // 它能摊出任意具名参数(含 `-Path` 本身),连"已经看见的目标"都不可信。两者都按不可证算。
+  if (args.some((t) => isPowerShellExpressionToken(t) || POWERSHELL_SPLAT_TOKEN.test(t))) {
+    return [UNPROVABLE_WRITE_TARGET];
+  }
   return targets.map((t) => {
     // 通配符标记要先去掉再查 `$`:两者可以同时出现(`"$env:windir\*"`),动态优先(更保守)。
     return POWERSHELL_DYNAMIC_TARGET.test(stripGlobWriteMarker(t)) ? UNPROVABLE_WRITE_TARGET : t;

@@ -963,7 +963,7 @@ describe('远程交互接线不变式', () => {
     expect(syncBody).toContain("opts.markModelChoice === true");
     expect(syncBody).toContain('markModelChoice');
     expect(syncBody).toContain('{ model: modelId, providerId: activeProviderId ?? null }');
-    expect(syncBody).toContain(': { model: modelId }');
+    expect(syncBody).not.toContain(': { model: modelId }');
     expect(syncBody).toContain(
       'opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId',
     );

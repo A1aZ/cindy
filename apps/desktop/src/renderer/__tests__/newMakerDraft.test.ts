@@ -420,6 +420,20 @@ describe('newMakerDraft store', () => {
     expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
   });
 
+  it('patchVendorPrefsPreservingModelChoice:未打标且不带 model 时不得改活动模型', async () => {
+    const m1 = await loadModule();
+    const seedModel = m1.getDraft().lastByVendor.cc.model;
+
+    m1.patchVendorPrefsPreservingModelChoice('cc', {
+      effort: 'high',
+    });
+
+    expect(m1.getDraft().lastByVendor.cc.model).toBe(seedModel);
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({});
+    expect(m1.getPersistedVendorModel('cc')).toBe('');
+  });
+
   it('patchVendorPrefsPreservingModelChoice:未打标时仍可写回活动模型与来源', async () => {
     const m1 = await loadModule();
     m1.patchVendorPrefsPreservingModelChoice('cc', {

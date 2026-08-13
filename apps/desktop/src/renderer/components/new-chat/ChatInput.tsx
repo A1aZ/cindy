@@ -5206,11 +5206,11 @@ export function ChatInput({
               : 'cc';
         const persistPrefs = markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice;
         persistPrefs(vendor, {
-          // 换模才带配对并打标记。只改思考档时仍带当前 model,让 store
-          // 判断是否与已保存模型一致;不一致则丢掉这次 effort。
+          // 换模才带配对并打标记。本机只改思考档 / Fast 不写回活动模型,
+          // 避免未打标用户把区域默认改成当前任务模型。
           ...(markModelChoice
             ? { model: modelId, providerId: activeProviderId ?? null }
-            : { model: modelId }),
+            : {}),
           ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
         });
         if (memoryProviderId) {

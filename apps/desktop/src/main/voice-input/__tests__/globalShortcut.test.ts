@@ -96,6 +96,10 @@ const mocks = vi.hoisted(() => {
   const windowsStop = vi.fn();
   const windowsReleaseActiveTrigger = vi.fn();
   const windowsIsReady = vi.fn();
+  const quitDisposers: Array<{ name: string; fn: () => void }> = [];
+  const onQuit = vi.fn((name: string, fn: () => void) => {
+    quitDisposers.push({ name, fn });
+  });
   const assertTrustedAppRenderer = vi.fn();
   const updateSettings = vi.fn();
   // 存盘里的快捷键。global-shortcut:set 只负责「让运行期对上存盘」,所以非 null 的同步
@@ -157,6 +161,8 @@ const mocks = vi.hoisted(() => {
     windowsStop,
     windowsReleaseActiveTrigger,
     windowsIsReady,
+    quitDisposers,
+    onQuit,
     assertTrustedAppRenderer,
     getMainWindow,
     ipcDeps,
@@ -277,6 +283,10 @@ vi.mock('../../security/trustedAppRenderer.js', () => ({
   assertTrustedAppRendererEvent: mocks.assertTrustedAppRenderer,
 }));
 
+vi.mock('../../lifecycle.js', () => ({
+  onQuit: mocks.onQuit,
+}));
+
 let setTimeoutSpy: { mockRestore: () => void } | null = null;
 const originalPlatform = process.platform;
 
@@ -344,6 +354,8 @@ describe('voice input global shortcut registration', () => {
     mocks.updateSettings.mockImplementation((patch: unknown) => ({ shortcut: null, ...(patch as object) }));
     mocks.registerShortcut.mockReset();
     mocks.registerShortcut.mockReturnValue(true);
+    mocks.onQuit.mockClear();
+    mocks.quitDisposers.length = 0;
   });
 
   afterEach(() => {
@@ -449,6 +461,16 @@ describe('voice input global shortcut registration', () => {
 
     expect(mocks.modifierReleaseActiveTrigger).toHaveBeenCalledTimes(1);
     expect(mocks.windowsReleaseActiveTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops both native listeners through the quit disposer, not will-quit', async () => {
+    const { registerGlobalVoiceInputIpc } = await import('../global.js');
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
+
+    expect(mocks.onQuit).toHaveBeenCalledWith('voice-input-global-shortcut', expect.any(Function));
+    mocks.quitDisposers[0]?.fn();
+    expect(mocks.modifierStop).toHaveBeenCalledTimes(1);
+    expect(mocks.windowsStop).toHaveBeenCalledTimes(1);
   });
 
   it('does not re-register an unchanged native macOS shortcut from multiple windows', async () => {

@@ -22,6 +22,7 @@ import { createLogger } from '../logger.js';
 import { scheduleMainAppPresenceRestore } from '../appPresence.js';
 import { openMainWindowVoiceSettings } from '../deepLink.js';
 import { throwIpcError } from '../utils/ipcValidate.js';
+import { onQuit } from '../lifecycle.js';
 import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { prewarmVoiceInputProvider } from './index.js';
 import {
@@ -1500,7 +1501,7 @@ export function registerGlobalVoiceInputIpc(deps: GlobalVoiceInputIpcDeps): void
     }
   });
 
-  app.once('will-quit', () => {
+  onQuit('voice-input-global-shortcut', () => {
     if (registeredAccelerator) {
       globalShortcut.unregister(registeredAccelerator);
       registeredAccelerator = null;

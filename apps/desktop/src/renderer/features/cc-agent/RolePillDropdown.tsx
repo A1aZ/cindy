@@ -314,6 +314,29 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
   trailingActions?: ReactNode;
 }
 
+// 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
+// 避免 Worker 工具栏不在视口顶部时，菜单底部的 Worker 行 / 布局切换项越过视口而不可达。
+function useAnchorMenuMaxHeight(
+  anchorRef: { current: HTMLElement | null },
+  open: boolean,
+): number | undefined {
+  const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const el = anchorRef.current;
+      if (!el) return;
+      const { bottom } = el.getBoundingClientRect();
+      // mt-1 (4px) + 底部 12px 安全边距；下限 120px 避免极端窗口高度下菜单过矮。
+      setMaxHeight(Math.max(120, window.innerHeight - bottom - 4 - 12));
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [anchorRef, open]);
+  return maxHeight;
+}
+
 function WorkerLayoutMenu({
   layout,
   onLayoutChange,
@@ -340,6 +363,7 @@ function WorkerLayoutMenu({
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const totalWorkerCount = workers.length;
   const activeCount = activeWorkerCount;
+  const menuMaxHeight = useAnchorMenuMaxHeight(wrapperRef, open);
 
   useLayoutEffect(() => {
     if (!open || !clearAttentionWhenVisible) return;
@@ -392,8 +416,8 @@ function WorkerLayoutMenu({
       </Tip>
       {open && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 flex max-h-[calc(100vh-24px)] w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
-          style={{ boxShadow: 'var(--shadow-menu)' }}
+          className="absolute right-0 top-full z-50 mt-1 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
+          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuMaxHeight }}
         >
           {/* Header: WORKERS + count */}
           {layout === 'tabs' && (
@@ -853,6 +877,7 @@ export function RolePillDropdown({
   const attention = useWorkerAttentionSnapshot();
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const open = openMode !== null;
+  const menuMaxHeight = useAnchorMenuMaxHeight(triggerRef, open);
 
   useLayoutEffect(() => {
     if (!clearAttentionWhenVisible) return;
@@ -988,8 +1013,8 @@ export function RolePillDropdown({
       {open && (
         <div
           ref={popoverRef}
-          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100vh-24px)] w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
-          style={{ boxShadow: 'var(--shadow-menu)' }}
+          className="absolute left-0 top-full z-50 mt-1 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
+          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuMaxHeight }}
         >
           {/* Header: WORKERS + count */}
           <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">

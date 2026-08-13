@@ -102,6 +102,7 @@ export class WindowsFunctionKeyShortcutListener {
             code,
             error: result.error,
           });
+          this.scheduleRestart(code, null, null);
         }
       })
       .catch((error: unknown) => {
@@ -109,6 +110,7 @@ export class WindowsFunctionKeyShortcutListener {
           code,
           error: error instanceof Error ? error.message : String(error),
         });
+        this.scheduleRestart(code, null, null);
       });
   }
 
@@ -205,19 +207,19 @@ export class WindowsFunctionKeyShortcutListener {
 
       child.on('exit', (exitCode, signal) => {
         const wasCurrentChild = this.child === child;
-        if (wasCurrentChild) {
-          this.child = null;
-          this.ready = false;
-          this.clearStableTimer();
-          this.phaseController.releaseIfPressed();
-          this.phaseController.reset();
-        }
         if (!settled) {
           settle({
             ok: false,
             error: `Windows function key listener exited before ready (${signal ?? exitCode ?? 'unknown'}).`,
           });
           return;
+        }
+        if (wasCurrentChild) {
+          this.child = null;
+          this.ready = false;
+          this.clearStableTimer();
+          this.phaseController.releaseIfPressed();
+          this.phaseController.reset();
         }
         log.debug('Windows function key listener exited', { exitCode, signal });
         if (wasCurrentChild && this.shortcutCode === code)

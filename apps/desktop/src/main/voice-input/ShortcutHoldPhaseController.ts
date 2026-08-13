@@ -52,6 +52,7 @@ export class ShortcutHoldPhaseController {
       this.holdThresholdReached = false;
       if (targetDown) {
         this.canceledUntilRelease = true;
+        this.options.onTrigger('end');
         return;
       }
       this.canceledUntilRelease = false;

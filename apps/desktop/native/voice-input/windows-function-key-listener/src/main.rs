@@ -72,7 +72,7 @@ mod windows_listener {
             }
         }
 
-        if key_down && ACTIVE.swap(false, Ordering::Relaxed) && modifier_bit != 0 {
+        if key_down && event.vkCode != target_vk && ACTIVE.swap(false, Ordering::Relaxed) {
             emit_canceled();
         }
 

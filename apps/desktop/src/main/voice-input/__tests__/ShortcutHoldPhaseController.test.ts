@@ -65,7 +65,7 @@ describe('ShortcutHoldPhaseController', () => {
     controller.setPressed(true, true);
     controller.setPressed(false, false);
 
-    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start']);
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
   });
 
   it('starts a new activation only after the cancelled target key is released', () => {
@@ -79,6 +79,6 @@ describe('ShortcutHoldPhaseController', () => {
     vi.advanceTimersByTime(450);
     controller.setPressed(false, false);
 
-    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'start', 'end']);
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end', 'start', 'end']);
   });
 });

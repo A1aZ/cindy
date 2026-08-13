@@ -123,7 +123,7 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     child.stdoutData('{"type":"pressed","pressed":true}\n');
     child.stdoutData('{"type":"pressed","pressed":false}\n');
 
-    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start']);
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
     listener.stop();
   });
 
@@ -159,6 +159,38 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     child.handlers.get('exit')?.(1, null);
 
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
+    listener.stop();
+  });
+
+  it('reports a real start failure when the helper exits before ready', async () => {
+    const { WindowsFunctionKeyShortcutListener } =
+      await import('../WindowsFunctionKeyShortcutListener.js');
+    const listener = new WindowsFunctionKeyShortcutListener({ onTrigger: vi.fn() });
+    const starting = listener.setShortcut(f2Shortcut);
+    await flush();
+    mocks.spawnedChildren[0].handlers.get('exit')?.(1, null);
+    const result = await starting;
+    expect(result).toMatchObject({ ok: false });
+    expect('superseded' in result ? result.superseded : false).toBeFalsy();
+    listener.stop();
+  });
+
+  it('retries a failed helper restart after a system release', async () => {
+    vi.useFakeTimers();
+    const { WindowsFunctionKeyShortcutListener } =
+      await import('../WindowsFunctionKeyShortcutListener.js');
+    const listener = new WindowsFunctionKeyShortcutListener({ onTrigger: vi.fn() });
+    const starting = listener.setShortcut(f2Shortcut);
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.spawnedChildren[0].stdoutData('{"type":"ready"}\n');
+    await expect(starting).resolves.toMatchObject({ ok: true });
+
+    listener.releaseActiveTrigger();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.spawn).toHaveBeenCalledTimes(2);
+    mocks.spawnedChildren[1].handlers.get('exit')?.(1, null);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.spawn).toHaveBeenCalledTimes(3);
     listener.stop();
   });
 

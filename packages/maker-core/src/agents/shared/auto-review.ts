@@ -375,6 +375,14 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
     // 之前只有 POSIX 名字,`Set-Acl C:\Windows\…\hosts $acl` 取不到目标、落灰区(codex 报)。
     // 位置 0 是 `-Path`,ACL 对象由 `-AclObject` 给出(已在带值参数表里)。
     ['set-acl', { targets: 'first' }],
+    // `Set-AuthenticodeSignature` 改的是**被签名文件本身**(它把签名块写进文件尾),与改内容同等
+    // 危险:`Set-AuthenticodeSignature -FilePath C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1
+    // -Certificate $cert` 之前取不到目标、落灰区(codex 报)。位置 0 是 `-FilePath`(与
+    // `Get-AuthenticodeSignature` 同签名),证书由 `-Certificate` 给出(已在带值参数表里)。
+    // 用 `first` 而不是 `all`:`-Certificate` 也能按位置绑到位置 1,取全部操作数会把 `$cert`
+    // 当成写目标 → 区内文件签名被误升级成硬弹窗。
+    // `Get-AuthenticodeSignature` 是只读的,不在此列。
+    ['set-authenticodesignature', { targets: 'first' }],
     // 文档别名(Microsoft.PowerShell.Management)—— PowerShell 里 alias 的解析**优先于**外部
     // 命令,所以 `sc <系统路径> owned` 等价于 `Set-Content`,不列就整条绕过本判据(codex 报)。
     // `sc` 在 PowerShell 7 里已因与 `sc.exe` 冲突而移除,Windows PowerShell 5.1 仍有;两边都
@@ -516,6 +524,8 @@ const POWERSHELL_VALUE_PARAMS: readonly string[] = [
   // Export-* / 归档族自己的带值参数。同一个道理:`Export-Csv -InputObject $x -Path <系统路径>`
   // 若不消费 `$x`,它会被当成位置操作数顶掉 `-Path`(这是本表第三次踩同一个坑,前两次是
   // `-Encoding` 与 `-AclObject`,所以登记新 cmdlet 时一并登记它的带值参数已是固定动作)。
+  // Set-AuthenticodeSignature 自己的带值参数(登记新 cmdlet 时一并登记带值参数,同上)。
+  '-includechain', '-hashalgorithm', '-timestampserver', '-sourcepathorextension', '-content',
   '-inputobject', '-cert', '-certificate', '-module', '-compressionlevel', '-password',
   '-usequotes', '-quotefields', '-usiculture', '-fullyqualifiedmodule',
   // Invoke-WebRequest / Invoke-RestMethod 的带值参数。这一组必须齐,否则未知参数会触发下面
@@ -3325,10 +3335,16 @@ function matchesPowerShellParam(token: string, full: string): boolean {
  *   · `-ExpandProperty <name>`:输出的是**那个属性的值**、不再是原对象。
  *     `Get-Item Env:ComSpec | Select-Object -ExpandProperty Value | Remove-Item` 喂给删除段的是
  *     系统 `cmd.exe` 的路径(codex 报)。
+ *   · `@` 开头的 token:**计算属性** `@{Name='Path';Expression={…}}` 造出一个新的 `Path` 值,而
+ *     `Remove-Item -Path` 按属性名接受 pipeline 输入 → 删除段吃的是表达式算出来的那个路径,不是
+ *     上游那个项(codex 报)。同形状的 splatting `@args`(可能把 `-InputObject` /
+ *     `-ExpandProperty` 塞进来)与数组 `@(…)` 一并算,判据只看"来源还证不证得出来"。
  */
 function pipelineStageReplacesSource(tokens: string[]): boolean {
   return tokens.slice(1).some((token) =>
-    matchesPowerShellParam(token, 'inputobject') || matchesPowerShellParam(token, 'expandproperty'));
+    token.startsWith('@')
+    || matchesPowerShellParam(token, 'inputobject')
+    || matchesPowerShellParam(token, 'expandproperty'));
 }
 
 /**
@@ -3578,7 +3594,10 @@ function scopedDestructionNeedsConsent(
       } else {
         const operands = positionalOperands(tokens.slice(1));
         // 没给实参:首段 = 枚举当前目录;有上游 = 项由上游喂进来,provenance 原样保留(含 `null`)。
-        const emitted = operands.length > 0 ? operands : (fromPipe ? upstreamOperands : ['.']);
+        // 类型标注是必须的:初始化式里读了 `upstreamOperands`,而它下一行又由本变量赋值,
+        // 少了标注 tsc 会判成循环推断(TS7022,desktop 的 typecheck 实测报错)。
+        const emitted: string[] | null =
+          operands.length > 0 ? operands : (fromPipe ? upstreamOperands : ['.']);
         // `-Name` 输出相对名称 → 下游按它自己的 cwd 解析,并集加一个 `.` 候选(`null` 不得被降级)。
         upstreamOperands = enumeratorEmitsRelativeNames(tokens) && emitted !== null
           ? [...emitted, '.']

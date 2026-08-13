@@ -3075,6 +3075,70 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('Select-Object 的计算属性造出新路径,不是透传', () => {
+    // `Select-Object @{Name='Path';Expression={…}}` 造出一个新的 `Path` 值,而 `Remove-Item -Path`
+    // 按属性名接受 pipeline 输入 → 删除段吃的是表达式算出来的路径,不是上游那个项(codex 报)。
+    //
+    // 实测:codex 给的那条原样命令**修前已经是 prompt-each-time**,但那是**偶然** —— `@{…}` 里的
+    // `;` 被当成语句分隔符把 hashtable 撕开了。去掉 `;` 的 `@{Name='Path'}` 修前就是 prompt,
+    // 所以这里按语义显式判 `@` 开头的 token,不再依赖分隔符。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Get-Item C:\\repo | Select-Object @{Name='Path';Expression={'${hosts}'}} | Remove-Item`,
+      "Get-Item C:\\repo | Select-Object @{Name='Path'} | Remove-Item",          // 无 `;`,修前漏
+      "Get-Item C:\\repo | Select-Object -Property @{Name='Path'} | Remove-Item", // 具名,修前漏
+      "Get-Item C:\\repo | Select-Object @{n='Path';e={$x}} | Remove-Item",      // 缩写键名
+      'Get-Item C:\\repo | Select-Object @props | Remove-Item',                  // splatting
+      'Get-Item C:\\repo | Where-Object @cond | Remove-Item',                    // 同族其它阶段
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:真正的透传形态判档不变(属性名、挑选开关、过滤条件都不含 `@`)。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build | Select-Object Name | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -Property Name | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -First 1 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Where-Object Name -eq x | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Where-Object { $_ } | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
+  it('Set-AuthenticodeSignature 写的是被签名文件本身', () => {
+    // 签名把签名块写进文件尾 → 是对该文件的写入。之前没登记,`-FilePath <系统路径>` 取不到目标、
+    // 落灰区(codex 报)。位置 0 是 `-FilePath`(与 Get-AuthenticodeSignature 同签名)。
+    const win = ['C:\\repo'];
+    const prof = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\profile.ps1';
+    for (const c of [
+      `Set-AuthenticodeSignature -FilePath ${prof} -Certificate $cert`,
+      `Set-AuthenticodeSignature ${prof} -Certificate $cert`,   // 位置 0
+      `Set-AuthenticodeSignature ${prof} $cert`,                // 证书也按位置绑
+      `Set-AuthenticodeSignature -File ${prof} -Certificate $cert`,   // 唯一前缀
+      `Set-AuthenticodeSignature -FilePath:${prof} -Certificate $cert`, // 贴值
+      // 自己的带值参数已登记 → 不会顶掉真目标,也不会触发操作数错位的 fail closed。
+      `Set-AuthenticodeSignature -FilePath ${prof} -HashAlgorithm SHA256 `
+        + '-TimestampServer http://t.test -IncludeChain All -Certificate $cert',
+      // 运行期求值的目标 → 不可证。
+      'Set-AuthenticodeSignature -FilePath $target -Certificate $cert',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:区内文件签名仍是灰区 —— 用 `first` 而不是 `all` 就是为了这条(`all` 会把按位置绑的
+    // `$cert` 当写目标,把区内签名误升级成硬弹窗)。
+    for (const c of [
+      'Set-AuthenticodeSignature -FilePath C:\\repo\\a.ps1 -Certificate $cert',
+      'Set-AuthenticodeSignature C:\\repo\\a.ps1 $cert',
+      'Set-AuthenticodeSignature -Certificate $cert',            // 缺目标参数 → 没有写入
+      `Get-AuthenticodeSignature ${prof}`,                       // 只读,不在此列
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('Select-Object -ExpandProperty 取的是属性值,来源变了', () => {
     // `Select-Object` 只有**透传对象**的形态算"只挑选、没换来源";`-ExpandProperty` 输出属性值,
     // 来源随之改变:`Get-Item Env:ComSpec | Select-Object -ExpandProperty Value | Remove-Item`

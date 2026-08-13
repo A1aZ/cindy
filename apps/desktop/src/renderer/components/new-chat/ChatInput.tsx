@@ -4617,6 +4617,7 @@ export function ChatInput({
           ? commentsBeforeOptimisticClear
           : [...browserCommentsRef.current];
         if (
+          !hostCapability &&
           isPlanModeComposerCommandText(
             editorText,
             planModeEntry !== undefined,

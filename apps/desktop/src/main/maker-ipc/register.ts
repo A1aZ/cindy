@@ -41,7 +41,11 @@ import {
 } from '@cindy/device-link';
 import { and, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from 'electron';
-import { getActiveAppSession, getActiveDataOwnerPushStamp } from '../appSessionState.js';
+import {
+  getActiveAppSession,
+  getActiveDataOwnerPushStamp,
+  isAppSessionBoundaryPending,
+} from '../appSessionState.js';
 import { upsertRecentWorkdir } from '../localDb/ipc/recentWorkdirs.js';
 import type { AgentMeta } from '../../renderer/lib/ccAgent.types';
 import {
@@ -726,8 +730,9 @@ import {
 import { setSessionEffort, setSessionFastMode } from '../maker-host/session-effort-store.js';
 import {
   getModelVisibilityMirrorSnapshot,
-  syncModelVisibilityMirror,
+  syncModelVisibilityMirrorForOwner,
 } from '../maker-host/model-visibility-mirror.js';
+import { claimLegacyModelVisibilityOwner } from '../maker-host/model-visibility-owner-claim.js';
 import {
   clearProviderDisableOverrides,
   setModelsDisabled,
@@ -13132,10 +13137,27 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   // main 缓存供 IM /model 与 device-link provider:list 复用同一套可见性过滤。值实变时
   // 复用 PROVIDER_CHANGED 目录失效事件，让已连接控制端驱逐缓存并重拉 override 快照。
   // 容错存储(非对象 ⇒ 清空),无错误路径,故不需要 throwIpcError。
-  ipcMain.handle(MAKER_INVOKE.MODEL_VISIBILITY_SYNC, async (_e, map: unknown) => {
-    syncModelVisibilityMirror(map, () => {
-      broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
-    });
+  ipcMain.on(MAKER_INVOKE.MODEL_VISIBILITY_LEGACY_OWNER_CLAIM_SYNC, (event) => {
+    assertTrustedAppRendererEvent(event);
+    event.returnValue = claimLegacyModelVisibilityOwner();
+  });
+
+  ipcMain.handle(MAKER_INVOKE.MODEL_VISIBILITY_SYNC, async (
+    event,
+    dataOwnerId: unknown,
+    ownerGeneration: unknown,
+    map: unknown,
+  ) => {
+    assertTrustedAppRendererEvent(event);
+    syncModelVisibilityMirrorForOwner(
+      map,
+      { dataOwnerId, ownerGeneration },
+      getActiveDataOwnerPushStamp(),
+      isAppSessionBoundaryPending(),
+      () => {
+        broadcastToAllWindows(MAKER_PUSH.PROVIDER_CHANGED, {});
+      },
+    );
   });
 
   // 附加只读引用目录的运行时 closure 推送。DB 持久化由 renderer 同步调

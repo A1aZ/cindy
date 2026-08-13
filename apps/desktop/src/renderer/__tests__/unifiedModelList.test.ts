@@ -5,7 +5,7 @@
  * 可见性 override 走真实 modelVisibilityPrefs(localStorage 由 jsdom 提供,用例间重置)。
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   buildUnionRows,
@@ -15,7 +15,11 @@ import {
   isRowDiverged,
   loadCollapsedMap,
 } from '@/components/settings/UnifiedModelList';
-import { __resetForTest, setModelVisibility } from '@/state/modelVisibilityPrefs';
+import {
+  __resetForTest,
+  setModelVisibility,
+  setModelVisibilityOwner,
+} from '@/state/modelVisibilityPrefs';
 
 import type { CatalogModel, ProviderView } from '@cindy/model-providers';
 
@@ -36,6 +40,25 @@ const provider = {
   },
   connected: true,
 } as unknown as ProviderView;
+
+beforeEach(() => {
+  Object.defineProperty(window, 'electronAPI', {
+    configurable: true,
+    value: {
+      maker: {
+        claimLegacyModelVisibilityOwner: () => ({
+          dataOwnerId: 'test-owner',
+          ownerGeneration: 1,
+          claimed: true,
+          claimedByOtherOwner: false,
+          canInitialize: true,
+        }),
+        syncModelVisibility: async () => undefined,
+      },
+    },
+  });
+  setModelVisibilityOwner('test-owner', 1, 'cloud');
+});
 
 afterEach(() => {
   __resetForTest();

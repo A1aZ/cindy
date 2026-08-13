@@ -449,6 +449,7 @@ import {
 } from './maker-host/createDesktopProviderService.js';
 import { isCindyEmbeddingModelAvailable } from './maker-host/provider-access-policy.js';
 import { setCustomProviders } from './maker-host/active-catalog.js';
+import { clearModelVisibilityMirror } from './maker-host/model-visibility-mirror.js';
 import { setClaudeSupportedModelsListener } from '@cindy/maker-core';
 import {
   noteAnthropicSdkSupportedModels,
@@ -1178,6 +1179,7 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // before any Agent route can start. A failed DB read therefore stays fail-closed (empty)
   // instead of retaining the previous owner's endpoint or model entries.
   setCustomProviders([]);
+  clearModelVisibilityMirror();
   // 远程会话的镜像冷缓存里是别的设备的聊天内容。owner 命名空间已经保证下一个账号读不到
   // 它,但登出后不该在盘上留着 —— 这里 owner 还指向**旧账号**(commitActiveAppSession 在
   // teardown 之后才切),正是唯一能清准的时机。

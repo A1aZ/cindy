@@ -14,10 +14,11 @@
  * 一致, 起不出来标题不阻塞主流程)。
  */
 
-import { BrowserWindow } from 'electron';
-
 import { desktopSessionStorage } from '../../maker-host/session-storage';
 import { generateMakerSessionTitle } from '../../maker-ipc/title';
+import { broadcastSessionPatched } from './sessionBroadcast';
+
+export { broadcastSessionPatched } from './sessionBroadcast';
 
 export const FBOT_TITLE_PREFIX = 'FBot · ';
 /** 草稿占位 title, 跟 desktop 'New Maker' 同语义 — 等首条消息到来后由 oneshot 替换。 */
@@ -29,20 +30,6 @@ export function fbotTitle(displayName: string, prefix: string = FBOT_TITLE_PREFI
   // 此前写死 'New Maker' 会拼出 `FBot · New Maker`:既和本模块自己的草稿常量不一致,
   // 也把 desktop 的哨兵串漏进了用户可见的飞书会话标题。
   return `${prefix}${name || 'New'}`;
-}
-
-export function broadcastSessionPatched(
-  sessionId: string,
-  patch: Record<string, unknown>,
-): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (win.isDestroyed()) continue;
-    try {
-      win.webContents.send('local-db:sessions:patched', { sessionId, patch });
-    } catch {
-      /* swallow */
-    }
-  }
 }
 
 /**

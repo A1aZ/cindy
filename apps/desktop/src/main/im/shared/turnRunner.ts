@@ -136,6 +136,7 @@ import { createTurnPresenter, DEFAULT_PRESENTER_POLICY, type TurnPresenter } fro
 import {
   toCoreAgentKind,
   readPermissionMode,
+  refreshResolvedSessionTitle,
   touchUserSent as repoTouchUserSent,
   updatePermissionMode,
   type ImSessionRepo,
@@ -352,6 +353,12 @@ export interface ImRunAgentTurnArgs {
    * 缺省 = text。落库(persistUserMessage)与标题生成恒用 text(渠道原文)。
    */
   agentText?: string;
+  /**
+   * 上下文附件(群历史里的图片/文件) —— 只拼进模型消息的 image/file
+   * block, **不随用户消息落库、不进 transcript**。与 attachments(触发
+   * 用户自己发的, 照常落库)是两条语义边界, 不可合并传参。
+   */
+  contextAttachments?: IMAttachment[];
   outputCardMessageId?: string;
   outputCardPrefix?: string;
   onTurnComplete?: () => void;
@@ -741,6 +748,24 @@ export function createTurnRunner(
       ((operation: () => Promise<void>): void => {
         void operation();
       });
+    // 存量会话标题自愈: 旧版本建行的会话标题停在旧格式(id 后缀 / 早前被
+    // oneshot 漂成 DM 前缀), 存量行下次收到消息时后台解析正式标题并刷新
+    // (飞书群 lane → [飞书·群] {群名})。新建行由 createSession 建行时解析,
+    // 这里只补存量; 失败 swallow, 标题是展示层, 不阻塞 turn。
+    const resolveSessionTitle = adapter.sessions.resolveSessionTitle;
+    if (!target.created && resolveSessionTitle) {
+      startBackgroundTask(async () => {
+        try {
+          await refreshResolvedSessionTitle({
+            sessionId: row.id,
+            resolve: () => resolveSessionTitle(userId, target.scopeKey),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`session title refresh failed (non-fatal): ${msg}`);
+        }
+      });
+    }
     // 受保护群的触发消息不能被总结成会话标题。标题是**长期记录**, 会一直挂在
     // 侧边栏上 —— 把「禁止保存内容」的正文摘要留在那里, 与把它写进 transcript
     // 是同一条边界被绕过, 而且主 turn 最终没被 provider 接受时照样会留下。
@@ -760,7 +785,9 @@ export function createTurnRunner(
       text.trim().length > 0 &&
       (adapter.threadScoped
         ? target.created
-        : adapter.sessions.generatedTitlePrefix !== undefined && row.sdkSessionId == null)
+        : adapter.sessions.skipOneshotTitleFor?.(userId) !== true &&
+          adapter.sessions.generatedTitlePrefix !== undefined &&
+          row.sdkSessionId == null)
     ) {
       // threadScoped 新 thread 会话: 用首条消息生成正式标题(渠道前缀),
       // 完成后把 thread 名片卡升级为「{正式标题}」。
@@ -772,7 +799,13 @@ export function createTurnRunner(
 
     const item: QueuedSend = {
       turn,
-      userMessage: buildImUserMessage(args.agentText ?? text, attachments, target.attached),
+      // contextAttachments 只进模型消息(跟在用户自己附件后面), 不进
+      // item.attachments —— persistUserMessage 落库的只有触发用户发的附件。
+      userMessage: buildImUserMessage(
+        args.agentText ?? text,
+        [...attachments, ...(args.contextAttachments ?? [])],
+        target.attached,
+      ),
       rowId: row.id,
       text,
       attachments,

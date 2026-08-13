@@ -27,7 +27,7 @@ import {
   resolveImSessionDefaults,
   type ResolvedImSessionDefaults,
 } from '../defaultSessionSettings';
-import { broadcastSessionCreated } from './sessionBroadcast';
+import { broadcastSessionCreated, broadcastSessionPatched } from './sessionBroadcast';
 import type { ImOrchestratorConfig, ImSessionNamespace } from './types';
 
 const log = createLogger('im:repo');
@@ -417,6 +417,24 @@ export function createImSessionRepo(
       );
       // 通知 renderer sidebar / device-link 控制端有新会话行,否则要手动刷新才出现
       broadcastSessionCreated(result.id);
+      // 渠道可异步解析正式标题(飞书群 lane → 拉群名拼 [飞书·群] {群名})。
+      // 值稳定且幂等, 复活行同样刷新(群改名后下次消息即更新); 失败/无结果
+      // 保持 defaultTitle, 不阻塞建行。
+      if (ns.resolveSessionTitle) {
+        try {
+          const resolved = await ns.resolveSessionTitle(userId, scopeKey);
+          if (resolved) {
+            await db
+              .update(sessions)
+              .set({ title: resolved })
+              .where(eq(sessions.id, result.id));
+            broadcastSessionPatched(result.id, { title: resolved });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`resolveSessionTitle failed for ${ns.source} session (non-fatal): ${msg}`);
+        }
+      }
       return result;
     },
   };
@@ -441,6 +459,31 @@ function rowFromDefaults(
 }
 
 // ── sessionId 维度的更新操作(渠道无关, 无需工厂) ─────────────────────────────
+
+/**
+ * 存量会话标题自愈: 读行当前 title, 用渠道解析器(飞书群 lane → 群名)
+ * 拿正式标题, 只有真的不同才写库 + 广播。旧版本建行的会话标题停在旧格式
+ * (id 后缀 / 早前被 oneshot 漂成 DM 前缀), 由 turnRunner 在存量行下次收到
+ * 消息时后台调用。解析器返回 null(拉不到)或结果与现名相同都不动行;
+ * 失败向上抛, 调用方 swallow — 标题是展示层, 不阻塞 turn。
+ */
+export async function refreshResolvedSessionTitle(args: {
+  sessionId: string;
+  resolve: () => Promise<string | null>;
+}): Promise<void> {
+  const db = getDbClient().drizzle;
+  const rows = await db
+    .select({ title: sessions.title })
+    .from(sessions)
+    .where(eq(sessions.id, args.sessionId))
+    .limit(1);
+  const current = rows[0]?.title;
+  if (current === undefined) return;
+  const resolved = await args.resolve();
+  if (!resolved || resolved === current) return;
+  await db.update(sessions).set({ title: resolved }).where(eq(sessions.id, args.sessionId));
+  broadcastSessionPatched(args.sessionId, { title: resolved });
+}
 
 /** Bump userSendAt so sidebar (if ever surfaced) sorts IM sessions correctly. */
 export async function touchUserSent(sessionId: string): Promise<void> {

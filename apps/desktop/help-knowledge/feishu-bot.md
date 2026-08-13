@@ -21,6 +21,25 @@ Cindy can send DMs and take commands through a FeiShu (Lark) bot. (This is unrel
 - Toggle **message notifications** on the same page to get bot DMs when sessions finish, or when the bot has updates for you.
 - The desktop-OS-level "session finished" notification is a separate toggle in **Settings > General > Notifications**.
 
+**Group chats:**
+
+- In a group, @ the bot to ask a question. The bot pages back through recent chat history (newest first, until the messages stop being relevant to your question) and answers with that history as context — including images and files shared in the chat.
+- @-ing the bot inside a thread (话题) uses that thread's own history as context instead of the main group stream.
+- Group sessions are titled `[飞书·群] {group name}` / `[飞书·话题] {group name}` in the sidebar.
+
+**Permissions for group features:**
+
+Group chat context needs an extra app permission that is not part of the default setup:
+
+1. Open the **FeiShu (Lark) Open Platform** → Developer Console → your app → **Permissions & Scopes** (权限管理).
+2. Search for and enable **both** of the following (searching by the scope id works regardless of the console language):
+   - **"Read all messages in associated group chat" (获取群组中所有消息, `im:message.group_msg`)** — pulls the chat history via API.
+   - **"Read user and bot messages in group chats" (获取群组中用户和机器人消息, `im:message.group_msg.include_bot:read`)** — needed for group message events, so the history covers messages from other bots too.
+   These are sensitive permissions: on FeiShu they are only available to self-built apps (自建应用), not store apps.
+3. Create and publish a new app **version** (self-built apps need admin approval).
+
+Without it the bot still answers when @-ed, but with no chat context, and it DMs the owner a one-line heads-up pointing here. Optionally, enabling **"Obtain basic group information" (获取群基本信息, `im:chat:readonly`)** lets session titles show the real group name instead of an id suffix.
+
 **Notes:**
 
 - The "conflict" badge state means another Cindy instance is already bound to the same bot for this user — typical when running dev + release simultaneously. Disconnect on one side to clear it.

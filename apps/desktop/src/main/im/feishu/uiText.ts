@@ -153,6 +153,8 @@ export const ui = {
       btnAllowOnce: '✅ 仅本次允许',
       btnAllowAlways: '✅ 总是允许',
       btnDeny: '❌ 拒绝',
+      /** 授权卡转投 owner 私聊后, 在原群/话题里留的指路提示。 */
+      dmRoutedNotice: '🔐 这个操作需要你确认 — 授权卡片已经发到你的私聊，去那里点一下继续~',
       resolvedAllowOnce: '✅ 已允许（仅本次）',
       resolvedAllowAlways: '✅ 已允许（这个工具以后都放行）',
       resolvedDeny: '❌ 已拒绝',

@@ -2285,9 +2285,14 @@ export function createTurnRunner(
     await completeTurnCallbackAfterAck(failure.turn);
     if (failure.turn.queueMode === 'internal') {
       try {
+        const policyUnsupported = failure.reason.startsWith(
+          'TURN_PERMISSION_POLICY_UNSUPPORTED',
+        );
         const message =
           adapter.ui.error?.preDispatchFailureText?.(failure.reason) ??
-          `❌ 启动 agent 失败：${failure.reason}`;
+          (policyUnsupported && adapter.ui.error?.permissionModeUnsupported
+            ? adapter.ui.error.permissionModeUnsupported
+            : `❌ 启动 agent 失败：${failure.reason}`);
         if (
           output.kind === 'chunked-text' &&
           failure.turn.chunkedReplyBegun

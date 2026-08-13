@@ -365,13 +365,52 @@ function WorkerLayoutMenu({
   clearAttentionWhenVisible?: boolean;
 }) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
+  // 与 dropdown (RolePillDropdown) 对齐展开交互：hover 临时展开 (transient)、
+  // 点击固定 (pinned)、移出后延迟关闭 —— 两种布局下 ⋮ 的操作体感一致。
+  const [openMode, setOpenMode] = useState<DropdownOpenMode>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const hoverOpenTimerRef = useRef<number | null>(null);
+  const hoverCloseTimerRef = useRef<number | null>(null);
   const attention = useWorkerAttentionSnapshot();
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const totalWorkerCount = workers.length;
   const activeCount = activeWorkerCount;
+  const open = openMode !== null;
   const menuPlacement = useAnchorMenuMaxHeight(wrapperRef, open);
+
+  const clearHoverTimers = useCallback(() => {
+    clearTimerRef(hoverOpenTimerRef);
+    clearTimerRef(hoverCloseTimerRef);
+  }, []);
+
+  const closeMenu = useCallback(() => {
+    clearHoverTimers();
+    setOpenMode(null);
+  }, [clearHoverTimers]);
+
+  const handleMouseEnter = useCallback(() => {
+    if (openMode === 'pinned') return;
+    clearTimerRef(hoverCloseTimerRef);
+    if (openMode === 'transient' || hoverOpenTimerRef.current !== null) return;
+    hoverOpenTimerRef.current = window.setTimeout(() => {
+      hoverOpenTimerRef.current = null;
+      setOpenMode('transient');
+    }, HOVER_OPEN_DELAY_MS);
+  }, [openMode]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (openMode === 'pinned') return;
+    clearTimerRef(hoverOpenTimerRef);
+    if (openMode !== 'transient' || hoverCloseTimerRef.current !== null) return;
+    hoverCloseTimerRef.current = window.setTimeout(() => {
+      hoverCloseTimerRef.current = null;
+      setOpenMode(null);
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [openMode]);
+
+  useEffect(() => {
+    return () => clearHoverTimers();
+  }, [clearHoverTimers]);
 
   useLayoutEffect(() => {
     if (!open || !clearAttentionWhenVisible) return;
@@ -387,11 +426,11 @@ function WorkerLayoutMenu({
     if (!open) return;
     const onMouseDown = (event: MouseEvent) => {
       if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
-        setOpen(false);
+        closeMenu();
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
+      if (event.key === 'Escape') closeMenu();
     };
     document.addEventListener('mousedown', onMouseDown);
     document.addEventListener('keydown', onKeyDown);
@@ -399,7 +438,7 @@ function WorkerLayoutMenu({
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('keydown', onKeyDown);
     };
-  }, [open]);
+  }, [closeMenu, open]);
 
   const layoutRows: Array<{ value: WorkerListLayout; label: string }> = [
     { value: 'tabs', label: t('orca.rolePill.layoutTabs') },
@@ -407,8 +446,18 @@ function WorkerLayoutMenu({
   ];
 
   return (
-    <div ref={wrapperRef} className="relative shrink-0">
-      <Tip text={t('orca.rolePill.layoutMenuLabel')} side="bottom" delay={250}>
+    <div
+      ref={wrapperRef}
+      className="relative shrink-0"
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      <Tip
+        text={t('orca.rolePill.layoutMenuLabel')}
+        side="bottom"
+        delay={250}
+        disabled={open}
+      >
         <button
           type="button"
           aria-label={t('orca.rolePill.layoutMenuLabel')}
@@ -417,7 +466,10 @@ function WorkerLayoutMenu({
             'hover:bg-muted/70 hover:text-foreground',
             open && 'bg-[var(--surface-chip)] text-[var(--text-primary)]',
           )}
-          onClick={() => setOpen((value) => !value)}
+          onClick={() => {
+            clearHoverTimers();
+            setOpenMode((mode) => (mode === 'pinned' ? null : 'pinned'));
+          }}
         >
           <EllipsisVertical size={13} />
         </button>
@@ -465,7 +517,7 @@ function WorkerLayoutMenu({
                         )}
                         onClick={() => {
                           onSwitchFocus(w.workerId);
-                          setOpen(false);
+                          closeMenu();
                         }}
                       >
                         <div className="flex items-center gap-2 text-13 leading-snug">
@@ -493,7 +545,7 @@ function WorkerLayoutMenu({
                         className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex h-[22px] w-[22px] items-center justify-center rounded opacity-0 transition-opacity group-hover:opacity-100 text-[var(--text-tertiary)] hover:text-[var(--text-primary)]"
                         onClick={(e) => {
                           e.stopPropagation();
-                          setOpen(false);
+                          closeMenu();
                           void requestArchiveWorker(w);
                         }}
                         aria-label={t('orca.rolePill.archiveWorkerAria', {
@@ -529,7 +581,7 @@ function WorkerLayoutMenu({
                   className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-12 leading-snug text-[var(--text-primary)] transition-colors hover:bg-[var(--surface-hover)]"
                   onClick={() => {
                     onLayoutChange(row.value);
-                    setOpen(false);
+                    closeMenu();
                   }}
                 >
                   <span className="inline-flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--text-primary)]">

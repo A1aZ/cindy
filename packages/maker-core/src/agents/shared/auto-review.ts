@@ -199,10 +199,14 @@ const SYSTEM_WRITE_PATH_PATTERNS: readonly RegExp[] = [
 /**
  * 抽出 shell 输出重定向(`>`/`>>`/`N>`/`&>`/`>|`)的目标文件。用于把重定向写入复用 file-write 的系统红线
  * (codex 报:`cat x > /etc/hosts` 只当灰区重定向会绕过系统写同意)。目标可带引号或裸,取到空白/分隔符止。
+ *
+ * `*>` / `*>>` 是 PowerShell 的**全流**重定向(about_Redirection),与 `>` 同一个写通道,只是把所有
+ * 流一起写进去 —— 不认它就等于 `'owned' *> <系统路径>` 整条落灰区(codex 报)。`*` 必须**紧跟**在
+ * 分隔符后面才算重定向操作符,所以 POSIX 的 `echo a*>b`(通配符后接重定向)判法不变。
  */
 function redirectionTargets(command: string): string[] {
   const out: string[] = [];
-  const re = /(?:^|[\s;&|()])(?:\d*|&)>{1,2}\|?\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|<>()]+)/g;
+  const re = /(?:^|[\s;&|()])(?:\d*|&|\*)>{1,2}\|?\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^\s;&|<>()]+)/g;
   for (const m of command.matchAll(re)) {
     // shell 词拼接:相邻引号/裸片段拼成一个词(`/e'tc'/hosts` → `/etc/hosts`,codex 报)→ 去掉所有引号字符。
     // **保留反斜杠**(Windows 路径分隔符);POSIX `\` 转义形态由调用点额外查去转义变体覆盖。
@@ -1356,7 +1360,8 @@ const ALWAYS_ASK_PATTERNS: readonly RegExp[] = [
   // 裸语句包装成 `pwsh -Command '…'` 后仍落灰区,可被轻量 reviewer 静默放行(codex 报)。
   // 放在**整条命令**扫描的这张表里,裸语句、`pwsh -Command` 嵌套、Bash 原样串一次覆盖。
   // 只收"整机电源"这一类;`Stop-Service` / `Restart-Service` 是服务级、不在本条范围。
-  /\b(?:Restart|Stop)-Computer\b/i,                      // 系统电源(PowerShell)
+  // `Suspend-Computer` 是同一族的第三个:挂起整台机器。`*-Service` 是服务级,不在本条范围。
+  /\b(?:Restart|Stop|Suspend)-Computer\b/i,               // 系统电源(PowerShell)
   /:\s*\(\s*\)\s*\{.*\|.*&.*\}/,                          // fork bomb :(){ :|:& };:
   /\bchmod\b[^|;&]*\s(?:-R\s+)?[0-7]*7{2,3}\b/,           // chmod 777 之类数字放宽权限
   /\bchmod\b[^|;&]*\s[ugoa]*[oa][ugoa]*[-+=][^\s]*w/,     // chmod 符号型对 other/all 开放写(a+w / o+w / a+rwx)
@@ -3151,9 +3156,14 @@ function powerShellLocationAttachedTarget(token: string): string | undefined {
  */
 type LocationOptionKind = 'target-next' | 'consumes-value' | 'standalone' | 'unprovable';
 
-function powerShellLocationOptionKind(token: string): LocationOptionKind {
+function powerShellLocationOptionKind(token: string, posixFlagsWin = false): LocationOptionKind {
   const name = token.split(/[:=]/)[0].toLowerCase();
   const attached = token.length > name.length;
+  // `cd` / `pushd` 这两个名字在 POSIX 是 shell 内建、在 PowerShell 是 Set-Location/Push-Location 的
+  // 别名,同一个 token 两种文法。**单字母**选项按 POSIX 开关处理(`cd -P /ws/build`、`pushd -n`),
+  // 多字母的才按 PowerShell 参数解析(`cd -ErrorAction Stop <路径>`)—— POSIX 的 cd/pushd 没有多字母
+  // 选项,所以这条分界不会改动 POSIX 侧任何既有判档。
+  if (posixFlagsWin && name.length <= 2) return 'standalone';   // `-P` / `-L` / `-n` / `-e`
   const known = [
     ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
   ];
@@ -3186,9 +3196,11 @@ function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; t
   }
   // POSIX `pushd -n` 只压栈、不切目录。PowerShell 的 Push-Location 没有这个开关。
   if (bin === 'pushd' && tokens.slice(1).includes('-n')) return { changesDirectory: false };
-  // PowerShell 的位置 cmdlet 有带值选项(`-StackName`、common parameters),必须先消费掉再挑位置。
-  // POSIX 的 `cd`/`pushd` 只有开关,沿用原来的"以 `-` 开头就跳过",不改既有行为。
-  const powerShellLocation = pushLike ? bin === 'push-location' : POWERSHELL_SET_LOCATION.has(bin);
+  // 位置 cmdlet 有带值选项(`-StackName`、common parameters),必须先消费掉再挑位置。
+  // `cd` / `pushd` 也是 Set-Location / Push-Location 的**别名**,同样要按 PowerShell 文法解析
+  // (`pushd -StackName foo -Path <系统目录>` 修前把 `foo` 当 cwd,codex 报);它们又同时是 POSIX
+  // 的 shell 内建,所以单字母选项按 POSIX 开关处理,见 powerShellLocationOptionKind。
+  const posixFlagAliases = bin === 'cd' || bin === 'pushd';
   let optionsEnded = false;
   for (let i = 1; i < tokens.length; i++) {
     const token = tokens[i];
@@ -3197,10 +3209,9 @@ function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; t
       continue;
     }
     if (!optionsEnded && token.startsWith('-') && token !== '-') {
-      if (!powerShellLocation) continue;
       const attached = powerShellLocationAttachedTarget(token);
       if (attached !== undefined) return { changesDirectory: true, target: attached };
-      const kind = powerShellLocationOptionKind(token);
+      const kind = powerShellLocationOptionKind(token, posixFlagAliases);
       if (kind === 'unprovable') return { changesDirectory: true };
       if (kind === 'consumes-value') {
         const value = tokens[i + 1];
@@ -3349,7 +3360,16 @@ function systemWriteTargetsInSegment(
   workspaceRoots: string[],
   opts: ShellReviewOptions,
 ): boolean {
-  const targets = [...redirectionTargets(segment), ...argumentWriteTargets(tokens)];
+  // Windows 上重定向目标里的 `$` 是运行期求值(`$env:windir`、`$target`、`$(Get-Location)`),与写
+  // cmdlet 的目标同一个判据 —— 早先只有 cmdlet 参数过了这一步,重定向目标被当字面量拼到工作区下,
+  // 于是 `'owned' > "$env:windir\System32\drivers\etc\hosts"` 落灰区(codex 报)。
+  // **只在 win32 生效**:POSIX 的 `echo x > $LOGFILE` 是另一件事(既有行为,#2622 在跟),这里不动它。
+  const dynamicRedirectUnprovable = (opts.platform ?? process.platform) === 'win32';
+  const targets = [
+    ...redirectionTargets(segment).map((t) =>
+      dynamicRedirectUnprovable && POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t),
+    ...argumentWriteTargets(tokens),
+  ];
   if (targets.length === 0) return false;
   // 静态不可证的写目标(tar -P 的归档成员等)一律要求同意。
   if (targets.includes(UNPROVABLE_WRITE_TARGET)) return true;

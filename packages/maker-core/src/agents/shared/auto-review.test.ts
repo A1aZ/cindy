@@ -3118,6 +3118,97 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('PowerShell 的 *> 全流重定向与 > 是同一个写通道', () => {
+    // `*>` / `*>>` 把所有流一起写进目标(about_Redirection),重定向提取只认 `>`/`N>`/`&>` → 整条
+    // 落灰区(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `'owned' *> ${hosts}`,
+      `'owned' *>> ${hosts}`,
+      `Get-Process *> ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例:区内落地判档不变。
+    expect(classifyShellCommand("'owned' *> C:\\repo\\out.txt", win, { platform: 'win32' }))
+      .toBe('prompt');
+    // `*` 必须紧跟分隔符才算操作符 —— POSIX 的"通配符后接重定向"判法不变。
+    expect(classifyShellCommand('echo a*>/ws/b', ['/ws'], { platform: 'linux' })).toBe('prompt');
+    // 同一个操作符解析是共用的:POSIX 上 `*>` 的目标也确实是那个文件,一并必问(修前为 prompt)。
+    expect(classifyShellCommand('echo x *> /etc/hosts', ['/ws'], { platform: 'linux' }))
+      .toBe('prompt-each-time');
+  });
+
+  it('Windows 上重定向目标含运行期求值 → 不可证', () => {
+    // 写 cmdlet 的目标早就过了"含 `$` = 不可证"这一步,重定向目标没过 → 被当字面量拼到工作区下,
+    // `'owned' > "$env:windir\System32\drivers\etc\hosts"` 落灰区(codex 报)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      "'owned' > \"$env:windir\\System32\\drivers\\etc\\hosts\"",
+      "'owned' > $target",
+      "'owned' > \"$(Get-Location)\\x\"",
+      "'owned' *> \"$env:windir\\x\"",
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例一:静态可证的区内目标判档不变。
+    for (const c of ["'owned' > C:\\repo\\out.txt", "'owned' *> C:\\repo\\out.txt"]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:**只在 win32 生效** —— POSIX 的 `echo x > $LOGFILE` 是既有行为,这轮不动它。
+    expect(classifyShellCommand('echo x > $LOGFILE', ['/ws'], { platform: 'linux' })).toBe('prompt');
+  });
+
+  it('整机电源:Suspend-Computer 与 Restart/Stop 同档', () => {
+    const win = ['C:\\repo'];
+    for (const c of ['Suspend-Computer -Force', 'Stop-Computer -Force', 'Restart-Computer']) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例:服务级与非电源的 `*-Computer` 不在本条范围。
+    for (const c of [
+      'Suspend-Service -Name spooler',
+      'Restart-Service -Name spooler',
+      'Checkpoint-Computer -Description x',
+      'Get-Process',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
+  it('cd / pushd 在 PowerShell 里是位置 cmdlet 的别名,但单字母选项仍按 POSIX 开关', () => {
+    // `cd`/`pushd` 同时是 POSIX 内建与 Set-Location/Push-Location 的别名。上一提交只给全名开了
+    // PowerShell 文法,于是 `pushd -StackName foo -Path <系统目录>` 把 `foo` 当 cwd(codex 报)。
+    const win = ['C:\\repo'];
+    const s32 = 'C:\\Windows\\System32';
+    for (const c of [
+      `pushd -StackName foo -Path ${s32}; Set-Content payload.txt owned`,
+      `cd -StackName foo -Path ${s32}; Set-Content payload.txt owned`,
+      `cd -ErrorAction Stop ${s32}; Set-Content payload.txt owned`,
+      `chdir -StackName foo -Path ${s32}; Set-Content payload.txt owned`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例一:消费带值选项后要选中真正的 `-Path`,区内位置不能变成"未知"而被误升级。
+    for (const c of [
+      'pushd -StackName foo -Path C:\\repo\\build; Set-Content a.txt x',
+      'cd -ErrorAction Stop C:\\repo\\build; Set-Content a.txt x',
+      'cd C:\\repo\\build; Set-Content a.txt x',
+      'pushd C:\\repo\\build; Set-Content a.txt x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:POSIX 的单字母开关照旧当开关 —— cwd 仍被跟踪,区内破坏不被误升级。
+    for (const c of [
+      'cd -P /ws/build && rm -rf x',
+      'cd -L /ws/build && rm -rf x',
+      'pushd -n /ws/x && rm -rf y',
+      'cd /ws/build && rm -rf x',
+    ]) {
+      expect(classifyShellCommand(c, ['/ws'], { platform: 'linux' }), c).toBe('prompt');
+    }
+  });
+
   it('位置 cmdlet 的带值选项要先消费,不能把选项值当成新 cwd', () => {
     // 上一提交给位置 cmdlet 加的 parser 只做了"以 `-` 开头就跳过",于是带值选项的**值**被当成位置:
     // `Push-Location -StackName foo -Path <系统目录>` 把 `foo` 当新 cwd,真正的 `-Path` 反而没被看,

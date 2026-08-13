@@ -786,6 +786,33 @@ function absorbPowerShellCommaList(args: string[], start: number): { value: stri
   return { value, last };
 }
 
+/**
+ * 从实参里取 PowerShell 风格的 `-OutFile <path>` 落地目标(含 `-OutFile:X` / `-OutFile=X` 贴值)。
+ * 供 `curl` / `wget` 这两个「同名但在 PowerShell 里是 Invoke-WebRequest 别名」的 bin 复用 ——
+ * 与 POSIX 的 `-o`/`-O` 取并集,不替换。缺值时按不可证哨兵处理(写通道在、目标看不出来)。
+ */
+/**
+ * 剥掉 `FileSystem::`(含完整 provider 名前缀)。只剥这一个 provider —— registry / certificate 的
+ * 结论由 `isProtectedProviderPath` 单独给出,剥了反而丢掉身份。
+ */
+function stripFileSystemQualifier(target: string): string {
+  const m = /^(?:[\w.]+[\\/])*filesystem::/i.exec(target);
+  return m ? target.slice(m[0].length) : target;
+}
+
+function powerShellOutFileTargets(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const attached = /^-outfile[:=](.+)$/i.exec(args[i]);
+    if (attached) { out.push(attached[1]); continue; }
+    if (!/^-outfile$/i.test(args[i])) continue;
+    const value = args[i + 1];
+    out.push(value !== undefined && !value.startsWith('-') ? value : UNPROVABLE_WRITE_TARGET);
+    i++;
+  }
+  return out;
+}
+
 function argumentWriteTargets(tokens: string[]): string[] {
   const bin = executableName(tokens[0] ?? '');
   const args = tokens.slice(1);
@@ -899,6 +926,17 @@ function argumentWriteTargets(tokens: string[]): string[] {
   // wget -O FILE / -P DIR —— 都能把内容写进系统目录。
   if (bin === 'tar' || bin === 'unzip' || bin === 'curl' || bin === 'wget') {
     const out: string[] = [];
+    // 在 Windows PowerShell 里 `curl` / `wget` 是 `Invoke-WebRequest` 的**别名**,落地参数写成
+    // `-OutFile`,这条 POSIX 分支只认 `-o`/`-O`/`--output`,于是
+    // `curl <url> -OutFile <受保护路径>` 取不到目标(codex 报)。
+    //
+    // 修法是**并集**而不是改路由:POSIX 那一套原样保留(`curl -o <系统路径>` 早就必问,不能因为
+    // 换解析器而变窄 —— 这是 `tee` / `Tee-Object` 已经踩过的形状),额外再认一个 `-OutFile`。
+    // **必须放在这个分支最前面**:`-OutFile` 以 `-O` 起头,会被 curl 的 `-O`(--remote-name)短选项
+    // 簇判据当成"下载到当前目录"、走 `out.length === 0` 的 cwd 兜底 return,后面再 push 就来不及了。
+    // 只认完整参数名(含 `:`/`=` 贴值):这个混合上下文里 `-Out` 这类缩写既可能是 PowerShell 的歧义
+    // 缩写、也可能是 curl 的短选项簇,判不出来的不硬猜。
+    if (bin === 'curl' || bin === 'wget') out.push(...powerShellOutFileTargets(args));
     // tar -P/--absolute-names:不剥成员路径的前导 `/`,归档里若含 `/etc/cron.d/job` 会直接写进系统路径。
     // 归档内容静态不可见 → 无法证明成员安全,用哨兵 `/` 强制必问(codex 报)。
     const tarOldStyle = bin === 'tar' ? tarOldStyleOptionWord(args) : null;
@@ -1029,8 +1067,15 @@ const PROTECTED_PROVIDER_REGISTRY_ROOT =
  */
 const PROTECTED_CERT_STORE_ROOT = /^LocalMachine(?:\/|$)/i;
 
-/** `Registry::…` / `Certificate::…` 这类 provider 限定前缀,可带完整 provider 名。 */
-const POWERSHELL_PROVIDER_QUALIFIER = /^(?:[\w.]+[\\/])*(registry|certificate)::/i;
+/**
+ * `Registry::…` / `Certificate::…` / `FileSystem::…` 这类 provider 限定前缀,可带完整 provider 名
+ * (`Microsoft.PowerShell.Core\FileSystem::C:\…`)。
+ *
+ * `FileSystem` 这一项与前两个不同:剥掉前缀之后剩下的**就是普通文件路径**,应当继续走既有的系统
+ * 路径判定,而不是在这里给出结论。少了它,`Set-Content FileSystem::C:\Windows\…\hosts owned` 的
+ * 目标既不匹配 `^[A-Za-z]:` 也不是 provider 根,于是整条落灰区(codex 报)。
+ */
+const POWERSHELL_PROVIDER_QUALIFIER = /^(?:[\w.]+[\\/])*(registry|certificate|filesystem)::/i;
 
 function isProtectedProviderPath(target: string): boolean {
   if (typeof target !== 'string' || target.length === 0) return false;
@@ -1057,9 +1102,14 @@ function isProtectedProviderPath(target: string): boolean {
 }
 
 /** 路径是否落在系统/受保护目录(写入需确定性用户同意)。入参应为已归一的目标路径。 */
-export function isProtectedSystemPath(target: string): boolean {
-  if (typeof target !== 'string' || target.length === 0) return false;
-  if (isProtectedProviderPath(target)) return true;
+export function isProtectedSystemPath(rawTarget: string): boolean {
+  if (typeof rawTarget !== 'string' || rawTarget.length === 0) return false;
+  if (isProtectedProviderPath(rawTarget)) return true;
+  // `FileSystem::C:\Windows\…` 剥掉 provider 限定符后就是普通文件路径,要继续过下面的系统目录判定
+  // (registry / certificate 那两个 provider 已在上一行给出结论,剥了也匹配不上文件系统判据)。
+  const qualifier = POWERSHELL_PROVIDER_QUALIFIER.exec(rawTarget.replace(/^['"]|['"]$/g, ''));
+  const target = qualifier ? rawTarget.slice(qualifier[0].length) : rawTarget;
+  if (target.length === 0) return false;
   if (SAFE_DEVICE_PATH.test(toForwardSlashes(target))) return false;
   // 先剥离 Windows extended-length / device namespace 前缀(`\\?\` `\\.\` `\\?\UNC\`):toForwardSlashes
   // 后它们变成 `//?/C:/…` / `//./C:/…`,会绕过盘符系统目录匹配落入灰区(copilot 报;与 desktop
@@ -3164,9 +3214,10 @@ function systemWriteTargetsInSegment(
   if (targets.some((t) => isProtectedProviderPath(stripGlobWriteMarker(t)))) return true;
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
-  return targets.some((t) => {
+  return targets.some((rawTarget) => {
     // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组。
-    if (t.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
+    if (rawTarget.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
+      const t = rawTarget;
       const pattern = t.slice(GLOB_WRITE_TARGET_PREFIX.length);
       // 通配符落在 provider 限定符里(`HK*:\SYSTEM\x`)→ 连"是哪个 provider"都证不出来。
       // 这类 drive 段带通配符的写法在真 PowerShell 里解析不出驱动器,但判据不能靠"它大概会报错"
@@ -3186,6 +3237,10 @@ function systemWriteTargetsInSegment(
       if (isProtectedProviderPath(resolved) || isProtectedSystemPath(resolved)) return true;
       return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
     }
+    // `FileSystem::C:\Windows\…` 的 provider 限定符必须在**归一之前**剥掉:normalizeTarget 只认
+    // 单字母盘符,会把整串当相对路径拼到工作区下(`C:/repo/FileSystem::C:/Windows/…`),此后再怎么判
+    // 都看不出它是系统路径(codex 报)。registry / certificate 那两个 provider 已在上面给出结论。
+    const t = stripFileSystemQualifier(rawTarget);
     // 每个目标查三种形态:原样(保留 Windows `\` 分隔符)、去 POSIX `\` 转义(`/e\tc`→`/etc`)、
     // 去 PowerShell 反引号转义。后者是 codex 报的绕过:PowerShell 里 `` ` `` 转义下一个字符,
     // 所以 ``C:\Win`dows\System32\drivers\etc\hosts`` 运行时就是 hosts,但判据要匹配字面

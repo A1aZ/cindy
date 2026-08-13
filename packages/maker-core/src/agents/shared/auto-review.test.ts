@@ -2816,6 +2816,77 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('FileSystem:: provider 限定符要在归一之前剥掉', () => {
+    // `Set-Content FileSystem::C:\Windows\…\hosts owned`:限定符解析只认 registry/certificate,
+    // 于是这串既不匹配 `^[A-Za-z]:` 也不是 provider 根 —— normalizeTarget 把它整条当**相对路径**
+    // 拼到工作区下(`C:/repo/FileSystem::C:/Windows/…`),此后再怎么判都看不出是系统路径(codex 报)。
+    // 所以剥离必须发生在归一**之前**;registry / certificate 那两个 provider 的结论另有判据给出,
+    // 剥了反而会丢掉身份,故只剥 FileSystem 这一个。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Set-Content FileSystem::${hosts} owned`,
+      `Set-Content filesystem::${hosts} owned`,                                  // 大小写不敏感
+      `Set-Content Microsoft.PowerShell.Core\\FileSystem::${hosts} owned`,       // 完整 provider 名
+      `Set-Content -Path FileSystem::${hosts} owned`,                            // 具名参数
+      `Remove-Item FileSystem::${hosts}`,
+      `Copy-Item C:\\repo\\p FileSystem::${hosts}`,                              // 目标侧
+      `Export-Csv -Path FileSystem::${hosts}`,
+      `pwsh -Command Set-Content FileSystem::${hosts} owned`,                    // 载荷下探
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例:区内路径带限定符仍是灰区(剥离只是让判据看见真实路径,不改变判档口径)。
+    expect(classifyShellCommand('Set-Content FileSystem::C:\\repo\\a.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 回归:不带限定符的形态判档不变。
+    expect(classifyShellCommand(`Set-Content ${hosts} owned`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 回归:registry / certificate 仍按 provider 判(不能被当成文件路径剥掉)。
+    expect(classifyShellCommand('Set-ItemProperty Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\Foo Bar 1', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('Remove-Item Certificate::LocalMachine\\Root\\ABC', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
+  it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
+    // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
+    // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `curl https://e.test/x -OutFile ${hosts}`,
+      `wget https://e.test/x -OutFile ${hosts}`,
+      `curl -OutFile ${hosts} https://e.test/x`,        // 参数在前
+      `curl https://e.test/x -OutFile:${hosts}`,        // 贴值
+      `curl https://e.test/x -Uri https://e.test/x -OutFile ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // **并集而不是改路由**:POSIX 那一套必须原样保留 —— 换解析器会把覆盖面改小,这是
+    // `tee` / `Tee-Object` 已经踩过的形状。下面三条修前就是必问,作为回归钉住。
+    expect(classifyShellCommand(`curl -o ${hosts} https://e.test/x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`curl --output ${hosts} https://e.test/x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`wget -O ${hosts} https://e.test/x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+
+    // 反例:区内落地、纯只读 GET 判档都不变 —— `-OutFile` 提取**必须放在这个分支最前面**,
+    // 因为它以 `-O` 起头、会被 curl 的 `-O`(--remote-name)簇判据当成"下载到当前目录"而走 cwd
+    // 兜底 return;放在后面 push 就来不及(实测踩过)。这几条同时钉住"没把 cwd 兜底弄坏"。
+    expect(classifyShellCommand('curl https://e.test/x -OutFile C:\\repo\\a.zip', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('curl -o C:\\repo\\a https://e.test/x', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('curl -s https://e.test/x', win, { platform: 'win32' })).toBe('auto-approve');
+    expect(classifyShellCommand('curl https://e.test/x | jq .', win, { platform: 'win32' })).toBe('auto-approve');
+    // `-O`(下载到当前目录)的 cwd 兜底仍在:cwd 落系统目录才升红线。
+    expect(classifyShellCommand('cd C:\\Windows\\System32; curl -O https://e.test/x', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('PowerShell 反引号转义的受保护路径要能命中', () => {
     // PowerShell 里 `` ` `` 转义下一个字符,所以 ``C:\Win`dows\…\hosts`` 运行时就是 hosts;
     // 判据要匹配字面 `Windows`,带着反引号一条都不命中(codex 报)。

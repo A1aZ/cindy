@@ -448,6 +448,26 @@ describe('工具映射漏项不得变成静默拒绝', () => {
     }
   });
 
+  it('script block 双引号内反引号转义:PowerShell / Bash 入口一致', () => {
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    const classify = (toolName: string, command: string) => classifyBuiltinToolForAutoReview({
+      toolName,
+      input: { command },
+      workspaceRoots: win,
+      platform: 'win32',
+    });
+    for (const command of [
+      `. { $x = "\`"}"; Set-Content ${hosts} owned }`,
+      `. { $x = "\`"x}"; Set-Content ${hosts} owned }`,
+      `Invoke-Command -ScriptBlock { $x = "\`"}"; Set-Content ${hosts} owned }`,
+    ]) {
+      expect(classify('PowerShell', command), command).toBe('prompt-each-time');
+      expect(classify('PowerShell', command), `${command} 与 Bash 入口一致`)
+        .toBe(classify('Bash', command));
+    }
+  });
+
   it('兜底 other 必须带 description,否则会在调模型前被判证据不足', () => {
     const action = normalizeBuiltinToolForAutoReview('SomeFutureTool', { anything: 1 });
     expect(action.kind).toBe('other');

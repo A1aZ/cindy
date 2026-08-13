@@ -3142,8 +3142,21 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       // 修前已必问的形态,一并钉住防回退。
       `& { Set-Content ${hosts} owned }`,
       `& { & { Set-Content ${hosts} owned } }`,
+      // 双引号内 `"\`"` 是字面引号,后面的 `}` 仍在串内,不能当块结尾(codex 报)。
+      `. { $x = "\`"}"; Set-Content ${hosts} owned }`,
+      `Invoke-Command -ScriptBlock { $x = "\`"}"; Set-Content ${hosts} owned }`,
+      `Get-ChildItem | ForEach-Object { $x = "\`"}"; Set-Content ${hosts} owned }`,
+      `pwsh -Command '. { $x = "\`"}"; Set-Content ${hosts} owned }'`,
+      // 相邻边界:转义引号和 `}` 之间还有字符 / 空白,去引号变体吃不到这个 `}`。
+      `. { $x = "\`"x}"; Set-Content ${hosts} owned }`,
+      `. { $x = "\`" }"; Set-Content ${hosts} owned }`,
+      // 相邻:反引号转的不是引号(`n),串仍要完整,写目标照常看见。
+      `. { $x = "\`n"; Set-Content ${hosts} owned }`,
     ]) {
-      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+      const v = classifyShellCommand(c, win, { platform: 'win32' });
+      expect(v, c).toBe('prompt-each-time');
+      // Bash 入口(reviewAction exec)与 core 同一条命令结论一致。
+      expect(reviewAction({ kind: 'exec', command: c }, win, { platform: 'win32' }), c).toBe(v);
     }
 
     // 反例一:块里写的是区内路径 → 判档不变。递归用的是同一套判据,不是"见到块就升级"。
@@ -3161,6 +3174,10 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       "Set-Content C:\\repo\\a.txt '{'",
       "Get-Content C:\\repo\\a.txt | ForEach-Object { $_ -replace '}','' }",
       "Get-ChildItem C:\\repo\\build | Where-Object { $_ -eq 'x'",   // 没闭合但不是 &/. /-ScriptBlock
+      // 块内区内路径 + 同一套反引号引号,不能因为看见 `"\`"` 就升级。
+      '. { $x = "`"}"; Set-Content C:\\repo\\a.txt x }',
+      // 单引号内反引号是字面量,不能按双引号转义去跳。
+      ". { $x = '`}'; Set-Content C:\\repo\\a.txt x }",
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
     }

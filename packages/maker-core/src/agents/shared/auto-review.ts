@@ -1549,7 +1549,7 @@ function segmentHasSideEffectRedirectOrSubstitution(segment: string): boolean {
 }
 
 /** 轻量 shell tokenizer：引号外按空白切，拼接相邻的 quoted/unquoted 片段并保留反斜杠。 */
-function tokenize(segment: string): string[] {
+function tokenize(segment: string, tokenizeOpts?: { powerShellQuotes?: boolean }): string[] {
   const tokens: string[] = [];
   let token = '';
   let tokenStarted = false;
@@ -1570,6 +1570,13 @@ function tokenize(segment: string): string[] {
       continue;
     }
     if (quote) {
+      // win32:双引号内反引号先于闭引号。POSIX 的 ` 是命令替换,开了会把 `"…`; rm …"` 藏进字符串。
+      if (tokenizeOpts?.powerShellQuotes && quote === '"' && char === '`' && i + 1 < segment.length) {
+        tokenStarted = true;
+        token += char + segment[i + 1];
+        i++;
+        continue;
+      }
       if (char === quote) quote = null;
       else token += char;
       tokenStarted = true;
@@ -1990,7 +1997,10 @@ type ShellSeparator = 'and' | 'or' | 'pipe' | 'sequence' | 'background' | 'end';
 type ExecutableSegment = { text: string; fromPipe: boolean; separatorAfter: ShellSeparator };
 
 /** 仅供高影响执行判定：识别引号外的 shell 分隔符，避免把 `echo 'x | sh'` 误当执行。 */
-function splitExecutableSegments(command: string): ExecutableSegment[] {
+function splitExecutableSegments(
+  command: string,
+  splitOpts?: { powerShellQuotes?: boolean },
+): ExecutableSegment[] {
   const out: ExecutableSegment[] = [];
   let start = 0;
   let fromPipe = false;
@@ -2002,6 +2012,11 @@ function splitExecutableSegments(command: string): ExecutableSegment[] {
     const char = command[i];
     if (escaped) { escaped = false; continue; }
     if (char === '\\' && !singleQuoted) { escaped = true; continue; }
+    // win32:双引号内 `X 是字面 X,必须在切换闭引号之前消费;POSIX 的 ` 是命令替换,不能开。
+    if (splitOpts?.powerShellQuotes && doubleQuoted && char === '`' && i + 1 < command.length) {
+      i++;
+      continue;
+    }
     if (char === "'" && !doubleQuoted) { singleQuoted = !singleQuoted; continue; }
     if (char === '"' && !singleQuoted) { doubleQuoted = !doubleQuoted; continue; }
     if (singleQuoted || doubleQuoted) continue;
@@ -3613,7 +3628,8 @@ const EXECUTABLE_SCRIPT_BLOCK = /(?:^|[\s;|&(])[&.]\s*\{|-scriptblock\s*[:=]?\s*
 
 /**
  * 抽出命令里**最外层**大括号块的内容,供递归审查。引号里的大括号不算(`-replace '}',''`)、
- * 反引号转义的也不算。嵌套块由递归自然覆盖,所以这里只取最外层。
+ * 反引号转义的也不算。双引号内先消费反引号再判闭引号,否则 `"\`"}"` 会把串内的 `}` 当成
+ * 块结尾。嵌套块由递归自然覆盖,所以这里只取最外层。
  *
  * `& { … }` 这一形态本来就已必问 —— `&` 是段分隔符,`{` 又被 stripShellControlTokens 剥掉,里面的
  * `Set-Content` 恰好落回普通段判据。但 `. { … }`、`-ScriptBlock { … }`、`ForEach-Object { … }`
@@ -3628,6 +3644,12 @@ function braceBlockPayloads(command: string): { payloads: string[]; unbalanced: 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i];
     if (quote !== null) {
+      // 双引号内先认反引号转义再判闭引号。`"\`"}"` 里的 `"` 是字面量,`} ` 仍在串内;
+      // 单引号内反引号是字面字符(`'}`'`),不能跳。
+      if (quote === '"' && ch === '`' && i + 1 < command.length) {
+        i += 1;
+        continue;
+      }
       if (ch === quote) quote = null;
       continue;
     }
@@ -3678,8 +3700,11 @@ function scopedDestructionNeedsConsent(
   let currentCwdUnknown = opts.cwdUnknown === true;
   // 上一段的位置操作数 —— 供「写 cmdlet 的目标由 pipeline 喂进来」时证明上游枚举的位置在区内。
   let upstreamOperands: string[] | null = null;
-  for (const { text: segment, fromPipe, separatorAfter } of splitExecutableSegments(command)) {
-    const unwrapped = unwrapCommand(tokenize(segment), currentCwd, currentCwdUnknown);
+  // 块提取已按 PowerShell 引号规则认了 `"\`"`;外层分段/分词必须同一套,否则载荷完整了
+  // `; Set-Content …` 仍会被错误的闭引号吞进字符串。POSIX 的 ` 是命令替换,只在 win32 开。
+  const powerShellQuotes = (opts.platform ?? process.platform) === 'win32';
+  for (const { text: segment, fromPipe, separatorAfter } of splitExecutableSegments(command, { powerShellQuotes })) {
+    const unwrapped = unwrapCommand(tokenize(segment, { powerShellQuotes }), currentCwd, currentCwdUnknown);
     const tokens = unwrapped.tokens;
     // 超深包装器链剥不完 → 看不到真实命令(可能是区外破坏),fail-closed 必问(codex 报)。
     if (unwrapped.wrapperUnresolved) return true;

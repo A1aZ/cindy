@@ -1,3 +1,6 @@
+#[cfg(any(windows, test))]
+mod press;
+
 #[cfg(not(windows))]
 fn main() {
     eprintln!("This helper is only supported on Windows.");
@@ -7,7 +10,9 @@ fn main() {
 #[cfg(windows)]
 mod windows_listener {
     use std::io::{self, Write};
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
+
+    use crate::press::{on_foreign_keydown, on_target_keydown, on_target_keyup, TargetPress};
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -28,8 +33,7 @@ mod windows_listener {
         AtomicU64::new(0),
         AtomicU64::new(0),
     ];
-    static ACTIVE: AtomicBool = AtomicBool::new(false);
-    static SUPPRESS_UNTIL_RELEASE: AtomicBool = AtomicBool::new(false);
+    static TARGET_PRESS: AtomicU8 = AtomicU8::new(TargetPress::Idle as u8);
 
     pub fn run() -> i32 {
         let Some(function_number) = parse_function_number() else {
@@ -84,26 +88,34 @@ mod windows_listener {
             }
         }
 
-        if key_down && event.vkCode != target_vk && ACTIVE.swap(false, Ordering::Relaxed) {
-            emit_canceled();
+        if key_down && event.vkCode != target_vk {
+            let current = TargetPress::from_u8(TARGET_PRESS.load(Ordering::Relaxed));
+            let effect = on_foreign_keydown(current);
+            TARGET_PRESS.store(effect.next as u8, Ordering::Relaxed);
+            if effect.emit_canceled {
+                emit_canceled();
+            }
         }
 
         if event.vkCode == target_vk {
+            let current = TargetPress::from_u8(TARGET_PRESS.load(Ordering::Relaxed));
             if key_down {
-                let already_held = SUPPRESS_UNTIL_RELEASE.swap(true, Ordering::Relaxed);
-                if already_held || ACTIVE.load(Ordering::Relaxed) {
-                    return 1;
+                let exact_chord =
+                    MODIFIERS_DOWN.load(Ordering::Relaxed) == 0 && !any_other_key_down();
+                let effect = on_target_keydown(current, exact_chord);
+                TARGET_PRESS.store(effect.next as u8, Ordering::Relaxed);
+                if let Some(pressed) = effect.emit_pressed {
+                    emit_pressed(pressed);
                 }
-                if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0 && !any_other_key_down() {
-                    ACTIVE.store(true, Ordering::Relaxed);
-                    emit_pressed(true);
-                    return 1;
+                return if effect.swallow { 1 } else { 0 };
+            }
+            if key_up {
+                let effect = on_target_keyup(current);
+                TARGET_PRESS.store(effect.next as u8, Ordering::Relaxed);
+                if let Some(pressed) = effect.emit_pressed {
+                    emit_pressed(pressed);
                 }
-                return 0;
-            } else if key_up && SUPPRESS_UNTIL_RELEASE.swap(false, Ordering::Relaxed) {
-                let was_active = ACTIVE.swap(false, Ordering::Relaxed);
-                emit_pressed(false);
-                return if was_active { 1 } else { 0 };
+                return if effect.swallow { 1 } else { 0 };
             }
         }
 

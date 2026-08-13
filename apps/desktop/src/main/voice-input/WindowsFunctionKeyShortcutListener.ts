@@ -90,8 +90,8 @@ export class WindowsFunctionKeyShortcutListener {
     if (!code || !shouldRestart) return;
 
     // Windows may drop the physical key-up while suspending or locking. The
-    // helper also owns a suppression latch, so reset the process itself rather
-    // than only clearing the TypeScript phase controller.
+    // helper also owns the physical-press state, so reset the process itself
+    // rather than only clearing the TypeScript phase controller.
     this.restartAttempts = 0;
     this.clearRestartTimer();
     this.clearStableTimer();

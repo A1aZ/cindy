@@ -3111,6 +3111,75 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     )).toBe('prompt-each-time');
   });
 
+  it('Get-ChildItem -Name 输出相对名称,由下游 cwd 解析', () => {
+    // `-Name` 输出的是名称(`hosts`)而不是绝对路径,下游按**它自己的 cwd** 解析,不是按枚举的那个
+    // 目录 → `cd <受保护目录>; Get-ChildItem C:\repo -Name | Remove-Item` 删的是受保护目录下的项,
+    // 而 provenance 还留着安全的 `C:\repo`(codex 报)。处理成并集(原位置 + `.`),只会更严。
+    const win = ['C:\\repo'];
+    const etc = 'C:\\Windows\\System32\\drivers\\etc';
+    for (const c of [
+      `cd ${etc}; Get-ChildItem C:\\repo -Name | Remove-Item`,
+      `cd ${etc}; gci C:\\repo -Name | Remove-Item`,            // 别名一并覆盖
+      `cd ${etc}; dir C:\\repo -Name | Remove-Item`,
+      `cd ${etc}; ls C:\\repo -Name | Remove-Item`,
+      `cd ${etc}; Get-ChildItem C:\\repo -Na | Remove-Item`,    // 唯一缩写
+      `cd ${etc}; Get-ChildItem C:\\repo -n | Remove-Item`,
+      `cd ${etc}; Get-ChildItem C:\\repo -Name:$true | Remove-Item`, // 贴值
+      `cd ${etc}; Get-ChildItem C:\\repo -Recurse -Name | Remove-Item`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:cwd 在区内 → 相对名称也落在区内,日常清理不得被误升级。
+    for (const c of [
+      'cd C:\\repo; Get-ChildItem C:\\repo\\build -Name | Remove-Item',
+      'Get-ChildItem C:\\repo\\build -Name | Remove-Item',      // 默认 cwd = 首个可写根
+      'cd C:\\repo; Get-ChildItem -Name | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:**没有** `-Name` 时输出绝对路径,与 cwd 无关 —— 这条证明并集不是"给枚举器一律加 cwd"。
+    expect(classifyShellCommand(
+      `cd ${etc}; Get-ChildItem C:\\repo | Remove-Item`, win, { platform: 'win32' },
+    )).toBe('prompt');
+    // 反例三:并集不得把原来可证的受保护位置洗掉(修前就是必问,钉住)。
+    expect(classifyShellCommand(
+      'cd C:\\repo; Get-ChildItem C:\\Windows\\System32 -Name | Remove-Item',
+      win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+  });
+
+  it('-InputObject 用显式对象替换管道来源', () => {
+    // `-InputObject` 不是透传:它把上游整个换掉。**所有透传阶段都有这个参数**,所以按整族判。
+    // `Get-Item C:\repo\safe | Select-Object -InputObject (Get-Item <受保护路径>) | Remove-Item`
+    // 里删除段吃的是那个表达式,而 provenance 还留着安全的 `C:\repo\safe`(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Get-Item C:\\repo\\safe | Select-Object -InputObject (Get-Item ${hosts}) | Remove-Item`,
+      `Get-Item C:\\repo\\safe | Select-Object -In (Get-Item ${hosts}) | Remove-Item`, // 唯一缩写
+      'Get-Item C:\\repo\\safe | Select-Object -InputObject:$victim | Remove-Item',    // 贴值
+      'Get-Item C:\\repo\\safe | select -InputObject $victim | Remove-Item',           // 别名
+      // 同族其它透传阶段一并覆盖。
+      'Get-Item C:\\repo\\safe | Where-Object -InputObject $victim | Remove-Item',
+      'Get-Item C:\\repo\\safe | Sort-Object -InputObject $victim | Remove-Item',
+      'Get-Item C:\\repo\\safe | Tee-Object -InputObject $victim | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:真正的透传形态不许被一并收紧 —— 名字带 `In`/`Ex` 的其它参数不算换来源。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build | Select-Object -Index 2 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -First 1 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Where-Object Name -eq x | Remove-Item',
+      'Get-ChildItem C:\\repo\\build -Include *.log | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Sort-Object -Descending | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

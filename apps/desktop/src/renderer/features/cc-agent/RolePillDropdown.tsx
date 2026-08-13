@@ -317,12 +317,30 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
   onOpenSettings?: () => void;
 }
 
-// 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
-// 避免 Worker 工具栏不在视口顶部时，菜单底部的 Worker 行 / 布局切换项越过视口而不可达。
-// 当锚点下方空间不足（低于上方空间）时改为向上展开。maxHeight 严格钳制在锚点一侧的
-// 真实可用空间内，不再设「固定内容高度保底」——可用空间小于 header + 布局切换项所需
-// 高度时，由菜单外层 overflow-y-auto 兜底滚动（布局切换项仍可滚动到），避免
-// Math.max(保底, 可用空间) 把菜单顶出视口、布局切换项反而不可点。
+// 菜单经 absolute 定位且未走 portal 渲染，会被最近的 overflow 非 visible 祖先裁剪。
+// 找到该裁剪祖先的视口边界（top/bottom/left/right），用于钳制菜单可用高度/宽度；
+// 找不到裁剪祖先时返回 null，由调用方退回视口边界。
+function findClippingBounds(
+  el: HTMLElement,
+): { top: number; bottom: number; left: number; right: number } | null {
+  let container: HTMLElement | null = el.parentElement;
+  while (container) {
+    const style = window.getComputedStyle(container);
+    if (style.overflowX !== 'visible' || style.overflowY !== 'visible') break;
+    container = container.parentElement;
+  }
+  if (!container) return null;
+  const r = container.getBoundingClientRect();
+  return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+}
+
+// 菜单经 top-full + mt-1 从锚点下方定位。按锚点相对最近裁剪祖先（而非 window.innerHeight）
+// 计算可用高度——当 Worker 工具栏位于高度小于 viewport 的 overflow-hidden 侧栏容器中时，
+// 仍能正确钳制菜单高度与展开方向，避免菜单伸出容器被裁掉、底部 Worker 行 / 布局切换项
+// 无法滚动到达。当锚点下方空间不足（低于上方空间）时改为向上展开。maxHeight 严格钳制在
+// 锚点一侧的真实可用空间内，不再设「固定内容高度保底」——可用空间小于 header + 布局切换项
+// 所需高度时，由菜单外层 overflow-y-auto 兜底滚动（布局切换项仍可滚动到），避免
+// Math.max(保底, 可用空间) 把菜单顶出裁剪边界、布局切换项反而不可点。
 function useAnchorMenuMaxHeight(
   anchorRef: { current: HTMLElement | null },
   open: boolean,
@@ -339,8 +357,11 @@ function useAnchorMenuMaxHeight(
       // mt-1/mb-1 (4px) + 12px 安全边距。
       const gap = 4;
       const pad = 12;
-      const belowSpace = window.innerHeight - rect.bottom - gap - pad;
-      const aboveSpace = rect.top - gap - pad;
+      const clip = findClippingBounds(el);
+      const topBound = clip ? clip.top : 0;
+      const bottomBound = clip ? clip.bottom : window.innerHeight;
+      const belowSpace = bottomBound - rect.bottom - gap - pad;
+      const aboveSpace = rect.top - topBound - gap - pad;
       const placeAbove = aboveSpace > belowSpace;
       setPlacement({
         maxHeight: Math.max(0, placeAbove ? aboveSpace : belowSpace),
@@ -370,16 +391,9 @@ function useAnchorMenuMaxWidth(
     const update = () => {
       const el = anchorRef.current;
       if (!el) return;
-      let container: HTMLElement | null = el.parentElement;
-      while (container) {
-        const style = window.getComputedStyle(container);
-        if (style.overflowX !== 'visible' || style.overflowY !== 'visible') break;
-        container = container.parentElement;
-      }
       const anchor = el.getBoundingClientRect();
-      const bounds = container
-        ? container.getBoundingClientRect()
-        : { left: 0, right: window.innerWidth };
+      const bounds =
+        findClippingBounds(el) ?? { left: 0, right: window.innerWidth };
       const available =
         align === 'left' ? bounds.right - anchor.left : anchor.right - bounds.left;
       setMaxWidth(Math.max(0, available));

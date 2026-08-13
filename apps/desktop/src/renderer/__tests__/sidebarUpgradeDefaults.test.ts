@@ -169,9 +169,24 @@ describe('sidebarInstallVintage:老安装识别', () => {
     expect(getSidebarInstallVintage()).toBe('legacy');
   });
 
-  it('bare 字符串形态的 claim(未发布中间版本的占位)= 老安装', () => {
-    localStorage.setItem(vintageTesting.OWNER_CLAIM_KEY, 'owner-1');
+  it('bare v1 形态的 claim(未发布中间版本的占位,生产形态见 parseClaimState)= 老安装', () => {
+    // 生产 bare 形态是「v1 + ownerId、无 legacy 字段」的 JSON 对象,不是裸字符串
+    // (2026-08-13 复核修正:上一版实现与测试都拿裸字符串互相印证)。
+    localStorage.setItem(
+      vintageTesting.OWNER_CLAIM_KEY,
+      JSON.stringify({ version: 1, ownerId: 'owner-1' }),
+    );
     expect(getSidebarInstallVintage()).toBe('legacy');
+  });
+
+  it.each([
+    ['裸字符串', 'owner-1'],
+    ['损坏 JSON', '{oops'],
+    ['非对象字面量', '42'],
+    ['缺 ownerId 的残缺对象', JSON.stringify({ version: 1 })],
+  ])('malformed claim 不构成痕迹(%s → fresh)', (_label, raw) => {
+    localStorage.setItem(vintageTesting.OWNER_CLAIM_KEY, raw);
+    expect(getSidebarInstallVintage()).toBe('fresh');
   });
 
   it('其它以痕迹键为前缀但非 owner-scoped 的键不误判', () => {

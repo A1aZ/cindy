@@ -130,11 +130,24 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain(
       'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])])',
     );
-    expect(projectsSectionSource).toContain('const sectionView = collapseEntries(section.entries)');
-    // 每段有自己的「显示全部」页脚;全局页脚只属于单段路径。
+    // 每段独立折叠视图 + 段内作用域的「显示全部」(复核 P2:共用一个标志会让
+    // 点任一段全段展开)。
+    expect(projectsSectionSource).toMatch(
+      /const sectionView = collapseEntries\(\s*section\.entries,\s*expandedDeviceSections\.has\(key\),\s*\)/,
+    );
     expect(projectsSectionSource).toContain('{sectionView.isOverflowing && (');
     expect(projectsSectionSource).toContain(
-      "{(filter.sortBy === 'manual' || !deviceGroupingActive) && projectsOverflow && (",
+      'setExpandedDeviceSections((prev) => new Set(prev).add(key))',
+    );
+    expect(projectsSectionSource).toContain('{!deviceGroupingActive && projectsOverflow && (');
+  });
+
+  // 2026-08-13 复核 P1:manual 与设备分组"渲染不叠加"是定稿,生效判定必须跟着
+  // 排除——否则机器标签被藏、批量折叠键按逐设备派生、折叠状态机进入
+  // collapse-devices 却没有可见效果(派生态以为在设备分组、渲染实际是单段)。
+  it('deviceGroupingActive excludes manual sort so derived state matches the rendered mode', () => {
+    expect(projectsSectionSource).toContain(
+      "hasRemoteDevices && filter.groupDevice && filter.sortBy !== 'manual'",
     );
   });
 });

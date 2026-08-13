@@ -24,7 +24,12 @@ vi.mock('@/contexts/AuthContext', () => ({
   useAuth: () => ({ dataOwnerId: mockOwner }),
 }));
 
-import { PrRefsProvider, usePrActions, usePrRefsForSession } from '@/contexts/PrRefsContext';
+import {
+  PrRefsProvider,
+  usePrActions,
+  usePrRefsForSession,
+  usePrStatus,
+} from '@/contexts/PrRefsContext';
 
 function makeRef(sessionId: string, prNumber: number): SessionPrRef {
   return {
@@ -156,5 +161,55 @@ describe('PrRefsProvider owner 切换的在飞隔离', () => {
       await Promise.resolve();
     });
     expect(result.current.refs).toEqual([]);
+  });
+
+  // 复核 P1:在飞去重表必须带代数——旧 owner 的状态请求可能要等超时(远程默认
+  // ~30s)才 settle,裸集合会让新 owner 的首查被旧 owner 的尸体挡住。
+  it('旧 owner 挂起中的状态请求不挡新 owner 的首查,其迟到结果被丢弃', async () => {
+    const api = installElectronApi();
+    const ref = makeRef('session-s', 9);
+    api.gitContext.listAllPrRefs.mockResolvedValue([ref]);
+    const pending: Array<(value: unknown) => void> = [];
+    api.gitContext.getPrStatuses.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          pending.push(resolve as (value: unknown) => void);
+        }),
+    );
+
+    mockOwner = 'owner-1';
+    const { result, rerender } = renderHook(
+      () => {
+        const { registerPrConsumer } = usePrActions();
+        const status = usePrStatus('octo/repo#9');
+        return { registerPrConsumer, status };
+      },
+      { wrapper },
+    );
+    act(() => {
+      result.current.registerPrConsumer('session-s');
+    });
+    // 全量加载到位后对已注册消费者发起首查(旧 owner,挂起不返回)。
+    await waitFor(() => expect(api.gitContext.getPrStatuses).toHaveBeenCalledTimes(1));
+
+    // 切 owner:effect 重跑 → 全量加载 → 对同一会话再次发起状态查询。
+    // 若在飞表不带代数,这次首查会被旧请求挡住(P1 的症状)。
+    mockOwner = 'owner-2';
+    rerender();
+    await waitFor(() => expect(api.gitContext.getPrStatuses).toHaveBeenCalledTimes(2));
+
+    // 新代结果落库;旧代迟到结果被代数丢弃,不得覆盖。
+    const newResult = { ok: true, owner: 'octo', repo: 'repo', prNumber: 9, status: 'open' };
+    const staleResult = { ok: true, owner: 'octo', repo: 'repo', prNumber: 9, status: 'merged' };
+    await act(async () => {
+      pending[1]?.([newResult]);
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.status).toMatchObject({ status: 'open' }));
+    await act(async () => {
+      pending[0]?.([staleResult]);
+      await Promise.resolve();
+    });
+    expect(result.current.status).toMatchObject({ status: 'open' });
   });
 });

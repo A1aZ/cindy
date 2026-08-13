@@ -58,24 +58,36 @@ const LEGACY_USAGE_KEYS = [
 const OWNER_CLAIM_KEY = 'cc-agent.sidebar.identityOwnerClaim.v1';
 
 /**
- * claim 信封是否捕获到了非空旧数据。三种取值的判定:
- *   - envelope JSON 且 legacy.values 有任一非 null → 建账那一刻裸根键还有真实
- *     旧数据 = 老安装;全 null = 建账时一无所有 = 新装建的账,不算痕迹。
- *   - bare 字符串(非 JSON):未发布中间版本写的占位——能出现就说明装过旧版本,
- *     算老安装。
- *   - 解析异常 → 不算痕迹(证据不明时倾向 fresh:误给新默认的代价是显示密度
- *     差异,一键可改;误判成 legacy 则新装永远拿不到新默认)。
+ * claim 是否构成「装过旧版本」的证据。形态分类**对齐 sidebarOwnerStorage 的
+ * parseClaimState**(2026-08-13 复核修正:上一版把 bare 想象成裸字符串,而生产
+ * 的 bare 形态是 `{"version":1,"ownerId":"..."}` 无 legacy 字段的 JSON 对象,
+ * 导致真实 bare 迁移用户被误判 fresh;catch 分支又与注释相反地返回 true):
+ *   - envelope(v1 + ownerId + legacy.values):任一捕获值非 null → 建账那一刻
+ *     裸根键还有真实旧数据 = 老安装;全 null = 新装建的空账,不算痕迹。
+ *   - bare(v1 + ownerId、无 legacy 字段):未发布中间版本写的占位——能出现
+ *     就说明装过旧版本,算老安装。
+ *   - 其余(非 JSON / 非对象 / 缺 version、ownerId 的残缺对象)= malformed →
+ *     不算痕迹。证据不明时倾向 fresh:误给新默认的代价是显示密度差异、一键
+ *     可改;误判成 legacy 则新装永远拿不到新默认。
  */
 function claimEnvelopeCapturedLegacyData(raw: string): boolean {
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== 'object' || parsed === null) return true; // bare 标记经 JSON.parse 成功仅当是字面量,视同旧版占位
-    const values = (parsed as { legacy?: { values?: Record<string, unknown> } }).legacy?.values;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return false;
+    const record = parsed as {
+      version?: unknown;
+      ownerId?: unknown;
+      legacy?: { values?: unknown };
+    };
+    if (record.version !== 1 || typeof record.ownerId !== 'string' || record.ownerId.length === 0) {
+      return false; // malformed:不是任何已知版本写的形态
+    }
+    if (!Object.hasOwn(record, 'legacy')) return true; // bare v1 占位
+    const values = record.legacy?.values;
     if (values == null || typeof values !== 'object') return false;
     return Object.values(values).some((value) => value != null);
   } catch {
-    // 非 JSON = bare ownerId 字符串(未发布中间版本的占位)→ 装过旧版本。
-    return true;
+    return false; // 非 JSON = malformed,不算痕迹
   }
 }
 

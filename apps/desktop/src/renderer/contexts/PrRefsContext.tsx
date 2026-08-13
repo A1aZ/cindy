@@ -210,14 +210,18 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   // 捕获当时代数,回来后对不上就整体丢弃——否则旧账号的响应会回写进新账号的
   // 共享缓存(2026-08-13 review P1:此前只清 Map,不隔离在飞请求)。
   const ownerGenRef = useRef(0);
-  // tip 快速划过多行时防止同一会话重复在飞;main 侧有 60s 缓存,这里不做 TTL。
-  const inFlightSessions = useRef(new Set<string>());
-  // 远程会话引用拉取:在飞去重 + 上次**成功**时间戳(TTL 门)。空结果不是终态——
-  // 远端没有 pr-refs-changed 推送,被控端后来新增的 PR 只能靠周期重查发现;失败
-  // 不写时间戳,下一次触发(interval / 聚焦 / 行重挂载)立即重试。
+  // 在飞去重表:sessionId → 发起时代数(main 侧有 60s 缓存,这里不做 TTL)。
+  // 记代数而非裸集合(2026-08-13 复核 P1):只有**同代**在飞才挡新请求——旧代
+  // 请求可能要等到超时(远程默认 ~30s)才 settle,裸集合会让新 owner 的首查被
+  // 旧 owner 的尸体挡住;finally 释放也按代数身份匹配,旧请求 settle 不误删新
+  // 请求刚登记的标记。
+  const inFlightSessions = useRef(new Map<string, number>());
+  // 远程会话引用拉取:在飞去重(同上,带代数)+ 上次**成功**时间戳(TTL 门)。
+  // 空结果不是终态——远端没有 pr-refs-changed 推送,被控端后来新增的 PR 只能靠
+  // 周期重查发现;失败不写时间戳,下一次触发(interval / 聚焦 / 行重挂载)立即重试。
   // (2026-08-12 实机教训:此前用"已拉取过"永久集合兼任在飞守卫,一次空结果或
   // 时序竞态就让该会话永远静默,置顶重挂载也救不回来。)
-  const remoteRefsInFlight = useRef(new Set<string>());
+  const remoteRefsInFlight = useRef(new Map<string, number>());
   const remoteRefsFetchedAt = useRef(new Map<string, number>());
   const remoteDeviceBySession = useRef(new Map<string, string>());
   // 正在展示 PR 信息的会话(sessionId → {deviceId?, count})。顶栏(打开的会话)
@@ -235,11 +239,12 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     const prevOwner = prevOwnerRef.current;
     prevOwnerRef.current = dataOwnerId;
     if (prevOwner !== undefined && prevOwner !== dataOwnerId) {
-      // owner 切换边界:作废在飞请求(代数自增)、清缓存与远程簿记(prConsumers
-      // 保留——行组件仍挂着,新 owner 下由周期刷新按注册表重建缓存)。
+      // owner 切换边界:作废在飞请求(代数自增——两张在飞表记着代数,旧代条目
+      // 既不挡新代首查、settle 时也只能删自己的标记,无需在这里清)、清缓存与
+      // 远程簿记(prConsumers 保留——行组件仍挂着,新 owner 下由周期刷新按注册
+      // 表重建缓存)。
       ownerGenRef.current += 1;
       store.clearAll();
-      remoteRefsInFlight.current.clear();
       remoteRefsFetchedAt.current.clear();
       remoteDeviceBySession.current.clear();
     }
@@ -311,9 +316,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   const fetchStatusesForRefs = useRef((sessionId: string, refsInput: readonly SessionPrRef[]) => {
     const refs = refsInput.slice(0, MAX_STATUS_QUERIES);
     if (refs.length === 0) return;
-    if (inFlightSessions.current.has(sessionId)) return;
-    inFlightSessions.current.add(sessionId);
     const gen = ownerGenRef.current;
+    // 同代在飞才挡;旧代尸体(等超时中)不能挡新 owner 的首查,直接覆盖标记。
+    if (inFlightSessions.current.get(sessionId) === gen) return;
+    inFlightSessions.current.set(sessionId, gen);
     void (async () => {
       try {
         const queries = refs.map((r) => ({ owner: r.owner, repo: r.repo, prNumber: r.prNumber }));
@@ -336,7 +342,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
       } catch (err) {
         log.warn('pr statuses fetch failed', String(err));
       } finally {
-        inFlightSessions.current.delete(sessionId);
+        // 身份匹配释放:标记可能已被新代请求覆盖,旧请求 settle 不得误删。
+        if (inFlightSessions.current.get(sessionId) === gen) {
+          inFlightSessions.current.delete(sessionId);
+        }
       }
     })();
   }).current;
@@ -355,14 +364,15 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     // 断线判定本地同步可得,先看一眼再发(2026-08-13 用户裁决)。fail-open:
     // shard 缺失(尚未建立 / 设备已移除)照常尝试,语义见 isRemoteDeviceMarkedDisconnected。
     if (isRemoteDeviceMarkedDisconnected(deviceId)) return;
-    if (remoteRefsInFlight.current.has(sessionId)) return;
+    const gen = ownerGenRef.current;
+    // 同代在飞才挡(见 inFlightSessions 注释)。
+    if (remoteRefsInFlight.current.get(sessionId) === gen) return;
     // TTL 门:距上次成功不足一个刷新周期就跳过(interval / 聚焦 / 行重挂载都会
     // 频繁触发,靠它避免风暴);失败路径不写时间戳,天然立即可重试。
     const fetchedAt = remoteRefsFetchedAt.current.get(sessionId);
     if (fetchedAt !== undefined && Date.now() - fetchedAt < PR_STATUS_REFRESH_INTERVAL_MS - 5_000)
       return;
-    remoteRefsInFlight.current.add(sessionId);
-    const gen = ownerGenRef.current;
+    remoteRefsInFlight.current.set(sessionId, gen);
     void (async () => {
       try {
         const refs = (await window.electronAPI.deviceLink.invoke(
@@ -384,7 +394,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         // 断链/超时:不写时间戳,下个刷新周期(或行重挂载)立即重试。
         log.warn('remote pr refs fetch failed', String(err));
       } finally {
-        remoteRefsInFlight.current.delete(sessionId);
+        // 身份匹配释放(同 inFlightSessions):旧代请求 settle 不得误删新代标记。
+        if (remoteRefsInFlight.current.get(sessionId) === gen) {
+          remoteRefsInFlight.current.delete(sessionId);
+        }
       }
     })();
   }).current;

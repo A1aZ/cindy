@@ -21,7 +21,7 @@
  *   ghost / chosen / drag class 提供视觉。
  */
 
-import { useCallback, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -245,6 +245,15 @@ export function ProjectsSection({
   const projectKeysForOrderBaseline = allProjectKeysForOrder;
   const [isSectionCollapsed, setIsSectionCollapsed] = useState(false);
   const [showAllProjects, setShowAllProjects] = useCollapsibleShowAll(isSectionCollapsed);
+  // 设备段各自的「显示全部」(2026-08-13 复核 P2:共用一个标志会让点任一段的
+  // 段内按钮把所有段一起展开——按钮看起来是段内操作,作用域也必须是段内)。
+  // 段级收起时与全局 showAll 同款复位。
+  const [expandedDeviceSections, setExpandedDeviceSections] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  useEffect(() => {
+    if (isSectionCollapsed) setExpandedDeviceSections(new Set());
+  }, [isSectionCollapsed]);
 
   const getProjectId = useCallback((p: ProjectNodeData) => p.projectKey, []);
 
@@ -378,24 +387,24 @@ export function ProjectsSection({
   // 排序同一口径(含远程活动镜像),远程 waiting/unread 的条目不能被折进
   // 「显示全部」。
   const collapseEntries = useCallback(
-    (entries: readonly MainListEntry[]) =>
+    (entries: readonly MainListEntry[], showAll: boolean) =>
       getSessionListCollapseView({
         entries,
         minVisibleCount: getProjectCollapseLimit(),
-        showAll: showAllProjects,
+        showAll,
         disableCollapse: false,
         isFiltering: false,
         isActiveEntry: (entry) => entrySessions(entry).some((s) => s.id === activeSessionId),
         hasAttentionEntry: (entry) =>
           entrySessions(entry).some((s) => priorityContext.attentionSessionIds.has(s.id)),
       }),
-    [showAllProjects, activeSessionId, entrySessions, priorityContext],
+    [activeSessionId, entrySessions, priorityContext],
   );
   const {
     visibleEntries: visibleMixedEntries,
     isOverflowing: projectsOverflow,
     totalCount: projectsTotal,
-  } = collapseEntries(mixedEntries);
+  } = collapseEntries(mixedEntries, showAllProjects);
   // SortableList 拖拽仍只作用于项目行(手动排序收窄裁决,设计文档 §9.3):
   // 混排下把可见条目切成「连续的项目行 run + 其间的散排条目」,项目 run 内可拖。
   const visibleProjectNodes = visibleMixedEntries
@@ -406,8 +415,12 @@ export function ProjectsSection({
 
   // E 期「按设备分组」:有远程设备连接 + 开关开 → 按设备切段(本机在前,
   // 远程按设备切换栏顺序);其余情况单段直渲。段内顺序保持混排口径不变。
+  // manual 一并排除(2026-08-13 复核 P1):manual 与设备分组不叠加是渲染层
+  // 定稿,但此前生效判定没跟着排除——机器标签被藏、批量折叠键按逐设备派生、
+  // 折叠状态机进入 collapse-devices 却没有可见效果,全是"派生态以为在设备
+  // 分组、渲染实际是单段"的错位。生效判定必须与实际渲染模式同一份。
   const hasRemoteDevices = (remoteDeviceIndex?.size ?? 0) > 0;
-  const deviceGroupingActive = hasRemoteDevices && filter.groupDevice;
+  const deviceGroupingActive = hasRemoteDevices && filter.groupDevice && filter.sortBy !== 'manual';
   const deviceSections = useMemo<MainListDeviceSection[]>(() => {
     if (!deviceGroupingActive) return [{ deviceId: null, entries: [...visibleMixedEntries] }];
     // 设备分组:对**全量**条目先切段,折叠上限在渲染时每段独立应用(2026-08-13
@@ -830,9 +843,13 @@ export function ProjectsSection({
                     </button>
                     <SectionCollapse collapsed={sectionCollapsed}>
                       <div className="flex flex-col gap-1 pl-2">
-                        {/* 折叠上限每段独立应用(切段在前,见 deviceSections 注释)。 */}
+                        {/* 折叠上限每段独立应用(切段在前,见 deviceSections 注释);
+                            「显示全部」的作用域同样是段内(expandedDeviceSections)。 */}
                         {(() => {
-                          const sectionView = collapseEntries(section.entries);
+                          const sectionView = collapseEntries(
+                            section.entries,
+                            expandedDeviceSections.has(key),
+                          );
                           return (
                             <>
                               {sectionView.visibleEntries.map((entry) =>
@@ -850,7 +867,9 @@ export function ProjectsSection({
                               {sectionView.isOverflowing && (
                                 <ShowAllEntriesButton
                                   count={sectionView.totalCount}
-                                  onClick={() => setShowAllProjects(true)}
+                                  onClick={() =>
+                                    setExpandedDeviceSections((prev) => new Set(prev).add(key))
+                                  }
                                 />
                               )}
                             </>
@@ -871,9 +890,9 @@ export function ProjectsSection({
               )}
             </div>
           )}
-          {/* 全局「显示全部」只属于单段路径(manual / 未按设备分组);设备分组下
-              折叠与 footer 都在段内(见上)。 */}
-          {(filter.sortBy === 'manual' || !deviceGroupingActive) && projectsOverflow && (
+          {/* 全局「显示全部」只属于单段路径(manual / 未按设备分组——manual 已在
+              deviceGroupingActive 定义里排除);设备分组下折叠与 footer 都在段内。 */}
+          {!deviceGroupingActive && projectsOverflow && (
             <ShowAllEntriesButton count={projectsTotal} onClick={() => setShowAllProjects(true)} />
           )}
         </div>

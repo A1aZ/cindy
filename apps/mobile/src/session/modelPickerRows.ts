@@ -122,12 +122,25 @@ export function compactEffortLabelFor(
   effort: string,
   capabilities: MobileAgentCapabilities | null,
 ): string {
+  const fullLabel = effortLabelFor(model, effort, capabilities);
   const language = (i18n.resolvedLanguage ?? i18n.language).toLowerCase();
   if (!language.startsWith('en')) {
-    return effortLabelFor(model, effort, capabilities);
+    return fullLabel;
   }
 
-  return compactEnglishEffortLabel(effort);
+  return compactEnglishEffortLabel(effort, fullLabel);
+}
+
+/** 父 Pressable 的完整无障碍名称：基础选择动作 + 当前可见元信息的完整语义。 */
+export function modelRowAccessibilityLabel(args: {
+  baseLabel: string;
+  subscriptionLabel?: string | null;
+  effortLabel?: string | null;
+  fastLabel?: string | null;
+}): string {
+  return [args.baseLabel, args.subscriptionLabel, args.effortLabel, args.fastLabel]
+    .filter((label): label is string => !!label)
+    .join(', ');
 }
 
 /** 选中行判定:分段模式比 (providerId, modelId) 双键;flat(providerId null)只比模型 id。 */

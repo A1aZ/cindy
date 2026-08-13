@@ -33,6 +33,7 @@ describe('MobileModelPickerList compact rows', () => {
     );
     expect(source).toContain('{compactEffortLabelFor(');
     expect(source).toContain('{fastOn ? (');
+    expect(source.match(/accessibilityLabel=\{rowAccessibilityLabel\}/g)).toHaveLength(2);
   });
 
   it('uses the same primary and secondary hierarchy for flat fallback rows', () => {

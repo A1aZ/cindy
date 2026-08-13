@@ -449,9 +449,10 @@ export function modelCompactEffortLabel(
   e: Effort,
   agentDisplayName?: string,
 ): string {
+  const fullLabel = modelEffortLabel(t, m, e, agentDisplayName);
   return language.toLowerCase().startsWith('en')
-    ? compactEnglishEffortLabel(e)
-    : modelEffortLabel(t, m, e, agentDisplayName);
+    ? compactEnglishEffortLabel(e, fullLabel)
+    : fullLabel;
 }
 
 function resolvedTranslationLanguage(

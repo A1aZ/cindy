@@ -32,6 +32,7 @@ import {
   budgetRowDisabled,
   compactEffortLabelFor,
   effortLabelFor,
+  modelRowAccessibilityLabel,
   rowEffortOf,
   rowFastEditable,
   rowFastOn,
@@ -232,6 +233,20 @@ export function MobileModelPickerList({
               fastEditable,
               memory: modelMemory,
             });
+          const fullEffortLabel = rowEffort
+            ? effortLabelFor(row.model, rowEffort, capabilities ?? null)
+            : null;
+          const rowAccessibilityLabel = modelRowAccessibilityLabel({
+            baseLabel: t('models.picker.selectProviderModelAccessibility', {
+              provider: row.provider.name,
+              model: row.model.displayName,
+            }),
+            subscriptionLabel: isSubscription ? t('models.picker.subscriptionBadge') : null,
+            effortLabel: fullEffortLabel
+              ? t('models.options.reasoningEffortAccessibility', { label: fullEffortLabel })
+              : null,
+            fastLabel: fastOn ? t('models.options.fastMode') : null,
+          });
           // 行内配置入口:置灰行不给;有 effort 档或 fast 可编辑才有意义;非选中行还要有记忆可写
           // (无记忆场景写不进任何地方 → 不显示,避免假开关)。
           const hasOptions =
@@ -242,10 +257,7 @@ export function MobileModelPickerList({
             (selected || !!modelMemory);
           return (
             <Pressable
-              accessibilityLabel={t('models.picker.selectProviderModelAccessibility', {
-                provider: row.provider.name,
-                model: row.model.displayName,
-              })}
+              accessibilityLabel={rowAccessibilityLabel}
               accessibilityRole="button"
               accessibilityState={{ selected, disabled: disabled || rowDisabled }}
               disabled={disabled || rowDisabled}
@@ -291,11 +303,7 @@ export function MobileModelPickerList({
                     ) : null}
                     {rowEffort ? (
                       <Text
-                        accessibilityLabel={effortLabelFor(
-                          row.model,
-                          rowEffort,
-                          capabilities ?? null,
-                        )}
+                        accessibilityLabel={fullEffortLabel ?? undefined}
                         numberOfLines={1}
                         style={styles.effortLabel}
                       >
@@ -355,9 +363,20 @@ export function MobileModelPickerList({
                 agentKind: agentKind ?? null,
               })
             : null;
+          const fullEffortLabel = rowEffort
+            ? effortLabelFor(option, rowEffort, capabilities ?? null)
+            : null;
+          const rowAccessibilityLabel = modelRowAccessibilityLabel({
+            baseLabel: t('models.picker.selectModelAccessibility', { model: option.label }),
+            effortLabel: fullEffortLabel
+              ? t('models.options.reasoningEffortAccessibility', { label: fullEffortLabel })
+              : null,
+            fastLabel:
+              fastEditable && selected && selectedFastMode ? t('models.options.fastMode') : null,
+          });
           return (
             <Pressable
-              accessibilityLabel={t('models.picker.selectModelAccessibility', { model: option.label })}
+              accessibilityLabel={rowAccessibilityLabel}
               accessibilityRole="button"
               accessibilityState={{ selected, disabled }}
               disabled={disabled}
@@ -384,11 +403,7 @@ export function MobileModelPickerList({
                   <View style={styles.optionMetaRow}>
                     {rowEffort ? (
                       <Text
-                        accessibilityLabel={effortLabelFor(
-                          option,
-                          rowEffort,
-                          capabilities ?? null,
-                        )}
+                        accessibilityLabel={fullEffortLabel ?? undefined}
                         numberOfLines={1}
                         style={styles.effortLabel}
                       >

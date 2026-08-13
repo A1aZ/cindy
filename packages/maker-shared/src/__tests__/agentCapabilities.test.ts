@@ -52,6 +52,10 @@ describe('agent capabilities shared model', () => {
       ),
     ).toEqual(['Min', 'Lo', 'Mid', 'Hi', 'XHi', 'Ult', 'Max']);
     expect(compactEnglishEffortLabel('extra-high')).toBe('XHi');
+    expect(compactEnglishEffortLabel('adaptive-fast', 'Adaptive Fast')).toBe('Adaptive Fast');
+    expect(compactEnglishEffortLabel('adaptive-safe', 'Adaptive Safe')).toBe('Adaptive Safe');
+    expect(compactEnglishEffortLabel('adaptive-fast')).toBe('adaptive-fast');
+    expect(compactEnglishEffortLabel('adaptive-safe')).toBe('adaptive-safe');
   });
 
   it('normalizes desktop capability payloads for runtime controls', () => {

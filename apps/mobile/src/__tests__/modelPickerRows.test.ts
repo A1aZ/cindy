@@ -16,6 +16,7 @@ import {
   effortLabelFor,
   formatContextWindow,
   formatPriceLine,
+  modelRowAccessibilityLabel,
   providerDisplayTitle,
   rowEffortOf,
   rowFastEditable,
@@ -128,6 +129,19 @@ describe('compactEffortLabelFor —— 英文列表短码', () => {
       expect(compactEffortLabelFor({}, 'high', capabilities)).toBe('Hi');
       expect(compactEffortLabelFor({}, 'ultra', capabilities)).toBe('Ult');
       expect(compactEffortLabelFor({}, 'max', capabilities)).toBe('Max');
+      expect(
+        compactEffortLabelFor(
+          { effortDisplayNames: { 'adaptive-fast': 'Adaptive Fast' } },
+          'adaptive-fast',
+          capabilities,
+        ),
+      ).toBe('Adaptive Fast');
+      expect(
+        compactEffortLabelFor({}, 'adaptive-safe', {
+          ...capabilities,
+          effortLevels: [{ id: 'adaptive-safe', label: 'Adaptive Safe' }],
+        }),
+      ).toBe('Adaptive Safe');
 
       await i18n.changeLanguage('zh-CN');
       expect(compactEffortLabelFor({}, 'high', null)).toBe('高');
@@ -135,6 +149,57 @@ describe('compactEffortLabelFor —— 英文列表短码', () => {
       expect(compactEffortLabelFor({}, 'ultra', null)).toBe('究極');
       await i18n.changeLanguage('ko');
       expect(compactEffortLabelFor({}, 'medium', null)).toBe('보통');
+    } finally {
+      await i18n.changeLanguage(previousLanguage);
+    }
+  });
+});
+
+describe('modelRowAccessibilityLabel —— 父行保留完整元信息', () => {
+  it('无元信息时只读基础选择动作', () => {
+    expect(modelRowAccessibilityLabel({ baseLabel: 'Select Luna' })).toBe('Select Luna');
+  });
+
+  it.each([
+    ['en', 'Select Luna from OpenAI', 'Subscription', 'Reasoning effort Extra High', 'Fast Mode'],
+    ['zh-CN', '选择来源 OpenAI 的模型 Luna', '订阅', '推理强度 超高', '快速模式'],
+    ['zh-TW', '選擇來源 OpenAI 的模型 Luna', '訂閱', '推理強度 超高', '快速模式'],
+    ['ja', 'OpenAI のモデル Luna を選択', 'サブスク', '推論強度 超高', '高速モード'],
+    ['ko', 'OpenAI의 모델 Luna 선택', '구독', '추론 강도 초고', '빠른 모드'],
+  ])('在 %s 下把订阅、完整 effort 和 Fast 纳入行级名称', async (
+    language,
+    expectedBase,
+    expectedSubscription,
+    expectedEffort,
+    expectedFast,
+  ) => {
+    const previousLanguage = i18n.language;
+    try {
+      await i18n.changeLanguage(language);
+      const baseLabel = i18n.t('models.picker.selectProviderModelAccessibility', {
+        provider: 'OpenAI',
+        model: 'Luna',
+      });
+      const subscriptionLabel = i18n.t('models.picker.subscriptionBadge');
+      const effortLabel = i18n.t('models.options.reasoningEffortAccessibility', {
+        label: i18n.t('models.options.effortLevels.xhigh'),
+      });
+      const fastLabel = i18n.t('models.options.fastMode');
+
+      expect([baseLabel, subscriptionLabel, effortLabel, fastLabel]).toEqual([
+        expectedBase,
+        expectedSubscription,
+        expectedEffort,
+        expectedFast,
+      ]);
+      expect(
+        modelRowAccessibilityLabel({
+          baseLabel,
+          subscriptionLabel,
+          effortLabel,
+          fastLabel,
+        }),
+      ).toBe([expectedBase, expectedSubscription, expectedEffort, expectedFast].join(', '));
     } finally {
       await i18n.changeLanguage(previousLanguage);
     }

@@ -1456,6 +1456,18 @@ describe('ModelSelector trigger variants', () => {
     ).toBe('XHi');
     expect(modelCompactEffortLabel('en-US', t, null, 'medium', '中')).toBe('Mid');
     expect(modelCompactEffortLabel('zh-CN', t, null, 'xhigh', 'Extra High')).toBe('超高');
+    expect(
+      modelCompactEffortLabel(
+        'en-US',
+        t,
+        { effortDisplayNames: { 'adaptive-fast': 'Adaptive Fast' } },
+        'adaptive-fast',
+        'Capability Fast',
+      ),
+    ).toBe('Adaptive Fast');
+    expect(modelCompactEffortLabel('en-US', t, null, 'adaptive-safe', 'Adaptive Safe')).toBe(
+      'Adaptive Safe',
+    );
   });
 
   it.each([

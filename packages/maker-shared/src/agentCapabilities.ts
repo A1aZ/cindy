@@ -105,22 +105,17 @@ const ENGLISH_COMPACT_EFFORT_LABELS: Record<string, string> = {
   xhigh: 'XHi',
 };
 
-/** Windows、macOS 与移动端模型选择器共用的英文 effort 短码。 */
-export function compactEnglishEffortLabel(effort: string): string {
+/**
+ * Windows、macOS 与移动端模型选择器共用的英文 effort 短码。
+ * 仅已知标准档位缩写；未知档位保留下发的完整显示名（没有显示名时保留完整 id），
+ * 避免不同技术 id 被截成同一个不可区分的前三字符。
+ */
+export function compactEnglishEffortLabel(effort: string, displayName?: string): string {
   const normalizedEffort = effort.toLowerCase().replace(/[^a-z0-9]/g, '');
   const standardLabel = ENGLISH_COMPACT_EFFORT_LABELS[normalizedEffort];
   if (standardLabel) return standardLabel;
 
-  const words = effort.match(/[a-z0-9]+/gi) ?? [];
-  if (words.length > 1) {
-    return words
-      .slice(0, 3)
-      .map((word) => word[0]?.toUpperCase() ?? '')
-      .join('');
-  }
-
-  const word = words[0] ?? effort;
-  return `${word.slice(0, 1).toUpperCase()}${word.slice(1, 3).toLowerCase()}`;
+  return displayName?.trim() || effort;
 }
 
 const FALLBACK_EFFORT_OPTIONS: MobileChoiceOption[] = [

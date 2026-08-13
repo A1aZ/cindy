@@ -412,7 +412,6 @@ describe('newMakerDraft store', () => {
     m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6', effort: 'medium' });
 
     m1.patchVendorPrefsPreservingModelChoice('cc', {
-      model: 'claude-sonnet-4-6',
       effort: 'high',
     });
     expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-sonnet-4-6');

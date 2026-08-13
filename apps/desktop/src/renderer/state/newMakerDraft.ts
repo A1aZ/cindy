@@ -754,9 +754,9 @@ function patchVendorPrefsInternal(
     const incomingModel =
       typeof nextPatch.model === 'string' && nextPatch.model.length > 0
         ? nextPatch.model
-        : undefined;
-    // 已显式选过时,只改思考档 / Fast / 远程档位同步不得替换那次选择的
-    // 模型、来源或思考档。活动任务模型与已保存模型一致时,才允许更新 effort。
+        : savedModel;
+    // 已显式选过时,不得替换那次选择的模型或来源。没带 model 视为仍在已保存
+    // 模型上改档;带了不同 model 则丢掉这次 effort,避免 A/B 错配。
     delete nextPatch.model;
     delete nextPatch.providerId;
     if (incomingModel !== savedModel) {

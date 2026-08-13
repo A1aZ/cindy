@@ -320,12 +320,19 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last';
     ['out-file', { targets: 'first' }],  // 常在管道右侧:`'x' | Out-File <path>`
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
+    ['set-item', { targets: 'first' }],
+    ['ac', { targets: 'first' }],
+    ['clc', { targets: 'first' }],
+    ['ni', { targets: 'first' }],
     // 复制:末位操作数是 -Destination,源是只读的。
+    // `copy` 既是 Copy-Item 的别名,也是 cmd.exe 的 copy —— 两者都是「末位是目标」,可共用。
     ['copy-item', { targets: 'last' }],
     ['cpi', { targets: 'last' }],
-    // 移动/改名:源也被销毁 → 两端都算。
+    ['copy', { targets: 'last' }],
+    // 移动/改名:源也被销毁 → 两端都算。`move` 同理兼作 cmd.exe 的 move。
     ['move-item', { targets: 'last', sources: true }],
     ['mi', { targets: 'last', sources: true }],
+    ['move', { targets: 'last', sources: true }],
     ['rename-item', { targets: 'first', sources: true }],
     ['rni', { targets: 'first', sources: true }],
     ['ren', { targets: 'first', sources: true }],
@@ -334,6 +341,21 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last';
 /** PowerShell 里指定写目标的具名参数(大小写无关,支持唯一前缀缩写)。 */
 const POWERSHELL_TARGET_PARAMS: readonly string[] = [
   '-path', '-literalpath', '-destination', '-filepath', '-newname',
+];
+
+/**
+ * 这些写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、
+ * 顶掉真正的写目标:`Out-File -Encoding utf8 C:\Windows\…\hosts` 会把 `utf8` 当目标,
+ * 系统路径反而漏掉(codex 报,已实测)。开关型参数(`-Force` / `-Recurse` / `-NoNewline` …)
+ * 不带值,不在此列。
+ *
+ * 与本文件既有做法同构:POSIX 分支也是枚举带值短选项(`valueLetters = 'tS'`),不做通用解析。
+ * **已知上限**:表外的带值参数仍会漏(值被当操作数)—— 失效方向是「少保护」,与补齐本表之前
+ * 的行为一致,不会造成误升级;真出现新参数按本表增量补。
+ */
+const POWERSHELL_VALUE_PARAMS: readonly string[] = [
+  '-encoding', '-value', '-itemtype', '-name', '-filter', '-include', '-exclude',
+  '-erroraction', '-warningaction', '-width', '-delimiter', '-stream', '-credential',
 ];
 
 /**
@@ -351,16 +373,30 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
     if (token.startsWith('-')) {
-      const lower = token.toLowerCase();
-      // 唯一前缀缩写:`-Dest` → -Destination。长度 ≥2 才认,避免 `-D` 之类歧义。
-      const matched = lower.length >= 2
-        && POWERSHELL_TARGET_PARAMS.filter((p) => p.startsWith(lower));
-      if (matched && matched.length === 1) {
-        const value = args[i + 1];
-        // 具名参数缺值 = 静态不可证。
-        named.push(value !== undefined && !value.startsWith('-') ? value : UNPROVABLE_WRITE_TARGET);
-        i++;
+      // `-Switch:$false` / `-Param=value` 的值是**贴在**参数上的,不消费下一个 token。
+      const name = token.split(/[:=]/)[0].toLowerCase();
+      const attached = token.length > name.length;
+      // 唯一前缀缩写:`-Dest` → -Destination、`-Enc` → -Encoding。长度 ≥2 才认,避免 `-D` 歧义。
+      // 目标参数与带值参数放在一起判唯一性:前缀同时命中两类时属歧义写法,当开关处理、不消费值。
+      const candidates = name.length >= 2
+        ? [...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS].filter((p) => p.startsWith(name))
+        : [];
+      if (candidates.length !== 1) continue; // 未知参数 / 歧义 / 开关 → 当开关,不消费下一个 token
+      const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]);
+      if (attached) {
+        // 贴在参数上的值:目标参数取它,带值参数直接丢掉。
+        if (isTarget) named.push(token.slice(name.length + 1));
+        continue;
       }
+      const value = args[i + 1];
+      if (!isTarget) {
+        // **带值的非目标参数必须把值一并消费**,否则值会被当操作数、顶掉真正的写目标。
+        if (value !== undefined && !value.startsWith('-')) i++;
+        continue;
+      }
+      // 目标参数缺值 = 写通道在、目标不可证 → 哨兵(与 `cp --target-directory` 缺值同口径)。
+      named.push(value !== undefined && !value.startsWith('-') ? value : UNPROVABLE_WRITE_TARGET);
+      i++;
       continue;
     }
     operands.push(token);

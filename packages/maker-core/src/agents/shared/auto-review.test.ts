@@ -1848,6 +1848,46 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     // 反例四:目标来自变量时静态不可解析,与 POSIX `cp payload $target` 同口径落灰区。
     expect(classifyShellCommand('Set-Content $target owned', win, { platform: 'win32' })).toBe('prompt');
     expect(classifyShellCommand('cp payload $target', win, { platform: 'win32' })).toBe('prompt');
+    // 别名同样要归一:`copy` / `move` 既是 Copy-Item/Move-Item 的别名,也是 cmd.exe 的同名命令,
+    // 两者都是「末位是目标」,可共用(codex 报 `copy` 未覆盖)。
+    for (const c of [
+      `copy payload ${hosts}`,
+      `move ${hosts} C:\\repo\\bak`,
+      `ac ${hosts} x`,
+      `clc ${hosts}`,
+      `ni ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // **带值的非目标参数必须把值一并消费**,否则值会被当位置操作数、顶掉真正的写目标:
+    // `Out-File -Encoding utf8 <系统路径>` 会把 `utf8` 当目标而漏掉系统路径(codex 报,已实测)。
+    for (const c of [
+      `Out-File -Encoding utf8 ${hosts}`,
+      `Out-File -Enc utf8 ${hosts}`,                 // 唯一前缀缩写
+      `Set-Content -Encoding utf8 ${hosts} owned`,
+      `Set-Content -Encoding:utf8 ${hosts} owned`,   // 贴在参数上的值不消费下一个 token
+      `Set-Content -Value hi ${hosts}`,
+      `New-Item -ItemType File ${hosts}`,
+      `Out-File -FilePath ${hosts} -Encoding utf8`,  // 目标参数与带值参数同时出现
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 开关型参数(不带值)不得误吞下一个 token —— 吞掉就会把真实目标吃了。
+    for (const c of [
+      `Copy-Item -Force payload ${hosts}`,
+      `Set-Content -Force ${hosts} hi`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例:带值参数的区内写仍是灰区(消费参数值不等于顺手升级)。
+    expect(classifyShellCommand('Set-Content -Encoding utf8 C:\\repo\\a.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Out-File -Encoding utf8 C:\\repo\\log.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('copy C:\\repo\\a C:\\repo\\b', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('move C:\\repo\\a C:\\repo\\b', win, { platform: 'win32' })).toBe('prompt');
+
     // 反例五:只**读**系统路径的 cmdlet 不受影响。
     expect(classifyShellCommand(`Get-Content ${hosts}`, win, { platform: 'win32' })).toBe('prompt');
     // 反例六:`-EncodedCommand` 不走载荷下探(base64 不可读,已由 PowerShell 红线直接必问)。

@@ -429,6 +429,23 @@ function markGlobWriteTarget(value: string): string {
 }
 
 /**
+ * 去掉通配符标记,拿回原始目标字符串。凡是**看目标内容本身**的判据(provider 路径、动态 `$`)
+ * 都必须先过这一步 —— 带着 marker 判等于把判据的锚点(`^HKLM:`)整条挪走。
+ */
+function stripGlobWriteMarker(target: string): string {
+  return target.startsWith(GLOB_WRITE_TARGET_PREFIX)
+    ? target.slice(GLOB_WRITE_TARGET_PREFIX.length)
+    : target;
+}
+
+/**
+ * 通配符落在 **provider / 盘符限定符**里:`HK*:\SYSTEM\x`、`Cer?:\LocalMachine\x`。
+ * 第一个路径分隔符之前出现 `:`,而 `:` 之前又有通配符 → 连"这是哪个 provider"都证不出来。
+ * `C:\Win*\x`(通配在 `:` 之后)与 `*.log`(没有 `:`)都不匹配。
+ */
+const WILDCARD_IN_DRIVE_QUALIFIER = /^[^\\/:]*[*?[][^\\/:]*:/;
+
+/**
  * 写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、顶掉真正的
  * 写目标:`Set-Content -ErrorVariable errs C:\Windows\…\hosts owned` 会把 `errs` 当目标,系统
  * 路径反而漏掉(codex 报,已实测)。
@@ -526,9 +543,8 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   // 表达式参数会让位置模型整体失效(见 isPowerShellExpressionToken)→ 整次抽取按不可证算。
   if (args.some(isPowerShellExpressionToken)) return [UNPROVABLE_WRITE_TARGET];
   return targets.map((t) => {
-    // 通配符标记要跳过再查 `$`:两者可以同时出现(`"$env:windir\*"`),动态优先(更保守)。
-    const bare = t.startsWith(GLOB_WRITE_TARGET_PREFIX) ? t.slice(GLOB_WRITE_TARGET_PREFIX.length) : t;
-    return POWERSHELL_DYNAMIC_TARGET.test(bare) ? UNPROVABLE_WRITE_TARGET : t;
+    // 通配符标记要先去掉再查 `$`:两者可以同时出现(`"$env:windir\*"`),动态优先(更保守)。
+    return POWERSHELL_DYNAMIC_TARGET.test(stripGlobWriteMarker(t)) ? UNPROVABLE_WRITE_TARGET : t;
   });
 }
 
@@ -3038,14 +3054,25 @@ function systemWriteTargetsInSegment(
   if (targets.includes(UNPROVABLE_WRITE_TARGET)) return true;
   // PowerShell provider 路径(`HKLM:\…`)必须在归一**之前**判:normalizeTarget 只认单字母盘符,
   // 会把它当相对路径拼到工作区下,于是注册表写入看起来落在区内。
-  if (targets.some(isProtectedProviderPath)) return true;
+  // **必须先去掉通配符标记**:`Remove-Item HKLM:\SYSTEM\*` 的目标带了 marker 前缀,
+  // 直接判会匹配不上 `^HKLM:`,provider 身份丢掉后落进下面的 glob 分支,又因为 `HKLM:` 不是
+  // 单字母盘符而被当相对路径拼进工作区、判成"区内" → 删注册表只剩 prompt(codex 报)。
+  if (targets.some((t) => isProtectedProviderPath(stripGlobWriteMarker(t)))) return true;
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
   return targets.some((t) => {
     // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组,
     // 只有"所有可能结果的共同前缀在工作区内"才算可证安全,否则要求同意。
     if (t.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
-      const prefix = literalPrefixBeforeGlob(t.slice(GLOB_WRITE_TARGET_PREFIX.length));
+      const pattern = t.slice(GLOB_WRITE_TARGET_PREFIX.length);
+      // 通配符落在 provider 限定符里(`HK*:\SYSTEM\x`)→ 连"是哪个 provider"都证不出来。
+      // 这类 drive 段带通配符的写法在真 PowerShell 里解析不出驱动器,但判据不能靠"它大概会报错"
+      // 兜底 —— 与本文件其它不可证口径一致,直接要求同意。
+      if (WILDCARD_IN_DRIVE_QUALIFIER.test(pattern)) return true;
+      const prefix = literalPrefixBeforeGlob(pattern);
+      // 前缀就是 provider 根时(`Cert:\LocalMachine\*` 的 `Cert:\LocalMachine\`)同样要判 ——
+      // 上面那道用整串判过了,这里兜住"通配符出现在更靠前位置"的写法。
+      if (isProtectedProviderPath(prefix)) return true;
       if (opts.cwdUnknown && !isAbsolutePath(toForwardSlashes(prefix))) return true;
       const resolved = canonicalPath(normalizeTarget(prefix, [base]), aliasFirmlinks);
       // 前缀本身就落在系统目录(`C:\Windows\*`)→ 直接命中,不必再谈工作区。

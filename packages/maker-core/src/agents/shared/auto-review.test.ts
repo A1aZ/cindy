@@ -2466,6 +2466,69 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('provider 路径 + 通配符:判定顺序不能让标记吃掉 provider 身份', () => {
+    // 通配符标记是个内部前缀(见 GLOB_WRITE_TARGET_PREFIX)。带着它去判 provider 路径,等于把
+    // 判据的锚点 `^HKLM:` 整条挪走 —— provider 身份丢掉后落进 glob 分支,又因为 `HKLM:` 不是
+    // 单字母盘符而被当相对路径拼进工作区、判成"区内",于是**删注册表只剩 prompt**(codex 报)。
+    // 所以凡是「看目标内容本身」的判据(provider、动态 `$`)都必须先 stripGlobWriteMarker。
+    const win = ['C:\\repo'];
+    for (const c of [
+      // 注册表机器 hive + 通配符,各类 cmdlet 与参数形态。
+      'Remove-Item HKLM:\\SYSTEM\\*',
+      'Remove-Item HKLM:\\SYSTEM\\CurrentControlSet\\Services\\*',
+      'Remove-Item -Path HKLM:\\SYSTEM\\*',
+      'Remove-Item -LiteralPath HKLM:\\SYSTEM\\*',   // 不打标记的形态,回归基线
+      'Remove-ItemProperty -Path HKLM:\\SYSTEM\\* -Name x',
+      'Set-ItemProperty HKLM:\\SYSTEM\\* Bar 1',
+      'New-Item HKLM:\\SOFTWARE\\*',
+      'Clear-Item HKLM:\\SYSTEM\\*',
+      'Copy-Item C:\\repo\\a HKLM:\\SOFTWARE\\*',    // 目标侧(targets: 'last')
+      // 三种通配符都要覆盖,不只是 `*`。
+      'Remove-Item HKLM:\\SYSTEM\\Foo?',
+      'Remove-Item "HKLM:\\SYSTEM\\[Ff]oo"',
+      // 逗号数组里混着通配符。
+      'Remove-Item HKLM:\\SYSTEM\\a, HKLM:\\SYSTEM\\*',
+      // 证书机器信任库,盘符形态与 provider 限定形态都要。
+      'Remove-Item Cert:\\LocalMachine\\Root\\*',
+      'Remove-Item Certificate::LocalMachine\\Root\\*',
+      'Remove-Item -Path Cert:\\LocalMachine\\Root\\*',
+      // 通配符落在 **provider 限定符**里:连"是哪个 provider"都证不出来 → 不可证。
+      'Remove-Item HK*:\\SYSTEM\\x',
+      'Remove-Item Cer?:\\LocalMachine\\Root\\x',
+      // 无通配符的基线,判档不变。
+      'Remove-Item HKLM:\\SYSTEM\\Foo',
+      'Remove-Item Cert:\\LocalMachine\\Root\\ABC',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:留灰区的 provider 不因为加了通配符就升级 —— `HKCU:` 是用户自己的 hive,
+    // `Env:` 是进程内状态,与既有口径一致。
+    for (const c of [
+      'Remove-Item HKCU:\\Software\\*',
+      'Remove-Item HKCU:\\Software\\Foo?',
+      'Remove-Item Cert:\\CurrentUser\\Root\\*',
+      'Remove-Item Certificate::CurrentUser\\Root\\*',
+      'Remove-Item Env:\\FOO*',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二:普通文件 glob 不受影响 —— 这条修的是"标记盖住了 provider 判据",
+    // 不是"含通配符就升级"。区内 glob 仍按共同前缀判、仍是灰区。
+    for (const c of [
+      'Remove-Item C:\\repo\\build\\*',
+      'Remove-Item *.log',
+      'Remove-Item C:\\repo\\dist\\*.tmp',
+      'Copy-Item C:\\repo\\src\\*.ts C:\\repo\\out',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 而系统**文件**路径的 glob 照旧必问(两条判据各自独立生效)。
+    expect(classifyShellCommand('Set-Content C:\\Win*\\System32\\drivers\\etc\\hosts owned', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

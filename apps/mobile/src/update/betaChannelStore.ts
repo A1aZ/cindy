@@ -82,10 +82,18 @@ export function subscribeBetaChannel(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-/** 设置页开关写入；同步内存态 + 串行落盘。 */
+/**
+ * 设置页开关写入；内存态先行、串行落盘。落盘失败回滚内存态并重新抛错。
+ *
+ * 与 canaryChannelStore.syncCanaryChannel 的差异：canary 是服务端下发、落盘失败
+ * 下次登录会重新同步；beta 是**用户可见**的设置开关，若不回滚会出现「设置页显示已开、
+ * 本次运行按 beta 检查更新、重启后却回 release」的漂移，所以这里额外做失败回滚。
+ */
 export function syncBetaChannel(next: boolean): Promise<void> {
   const value = next === true;
+  const previous = beta;
   mutationEpoch += 1;
+  const epoch = mutationEpoch;
   hydrated = true;
   beta = value;
   notifyListeners();
@@ -93,7 +101,14 @@ export function syncBetaChannel(next: boolean): Promise<void> {
     value
       ? AsyncStorage.setItem(STORAGE_KEY, 'true')
       : AsyncStorage.removeItem(STORAGE_KEY)
-  ));
+  )).catch((err) => {
+    // 仅在期间无更新 mutation(epoch 未变)时才回滚；否则以更新 mutation 的结果为准。
+    if (epoch === mutationEpoch) {
+      beta = previous;
+      notifyListeners();
+    }
+    throw err;
+  });
 }
 
 export const __testing = {

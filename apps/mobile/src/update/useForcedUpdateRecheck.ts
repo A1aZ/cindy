@@ -25,6 +25,11 @@ const RECHECK_TICK_MS = 30_000;
 export function useForcedUpdateRecheck(
   channel: UpdateChannel = resolveUpdateChannelForDevice(),
 ): void {
+  // 通道正确性不变量:强更阻断屏在业务树之外、channel gate(useUpdateChannelGate)
+  // 不挂载;但 canary/beta 两个 store 是模块级单例,强更只会在它们 hydrate 之后才被
+  // 检测到(_layout.tsx 的 RootAfterEndpoints → useUpdateChannelGate 先于
+  // useBundleUpdatePrompt/useResumeUpdateCheck 触发 enterForcedUpdate)。因此这里的
+  // resolveUpdateChannelForDevice() 读到的必是已 hydrate 的真实通道,不会回落 release。
   useEffect(() => {
     let current = true;
     const rechecker = createForcedUpdateRechecker({

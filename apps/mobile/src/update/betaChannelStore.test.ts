@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const storage = new Map<string, string>();
 vi.mock('@react-native-async-storage/async-storage', () => ({
@@ -58,5 +59,17 @@ describe('betaChannelStore', () => {
     unsubscribe();
     await syncBetaChannel(true);
     expect(changes).toEqual([true, false]);
+  });
+
+  it('落盘失败回滚内存态并 reject，避免「本次按 beta 检查、重启后回 release」漂移', async () => {
+    await hydrateBetaChannel();
+    expect(isBetaChannel()).toBe(false);
+
+    // 模拟 AsyncStorage.setItem 失败
+    vi.mocked(AsyncStorage.setItem).mockRejectedValueOnce(new Error('disk full'));
+
+    await expect(syncBetaChannel(true)).rejects.toThrow('disk full');
+    // 回滚到落盘前的旧值(未启用)
+    expect(isBetaChannel()).toBe(false);
   });
 });

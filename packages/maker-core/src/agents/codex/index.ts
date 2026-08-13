@@ -449,6 +449,8 @@ function isLocalForkHostKey(key: string): boolean {
 
 /** Review threads use a one-session app-server so native Codex memory cannot leak in. */
 const LOCAL_REVIEW_HOST_PREFIX = 'local-review:';
+/** Codex Desktop's built-in Apps server has no user-configurable MCP transport. */
+const CODEX_APPS_MCP_SERVER_NAME = 'codex_apps';
 
 function localReviewHostKey(sessionId: string): string {
   return `${LOCAL_REVIEW_HOST_PREFIX}${sessionId || randomUUID()}`;
@@ -3848,7 +3850,8 @@ export class CodexAgent extends BaseAgent {
         const effectiveConfig = asRecord(configResponse.config);
         const configuredMcp = asRecord(effectiveConfig.mcp_servers);
         const configuredPlugins = asRecord(effectiveConfig.plugins);
-        const mcpServerNames = new Set(Object.keys(configuredMcp));
+        const configuredMcpServerNames = new Set(Object.keys(configuredMcp));
+        const unconfiguredRuntimeMcpServerNames = new Set<string>();
         let cursor: string | null = null;
         do {
           const status: CodexMcpServerStatusListResponse =
@@ -3857,9 +3860,23 @@ export class CodexAgent extends BaseAgent {
             { cursor, limit: 100, detail: 'toolsAndAuthOnly', threadId: null },
             { timeoutMs: CRITICAL_THREAD_RPC_TIMEOUT_MS },
           );
-          for (const server of status.data) mcpServerNames.add(server.name);
+          for (const server of status.data) {
+            if (
+              !configuredMcpServerNames.has(server.name) &&
+              server.name !== CODEX_APPS_MCP_SERVER_NAME
+            ) {
+              unconfiguredRuntimeMcpServerNames.add(server.name);
+            }
+          }
           cursor = status.nextCursor;
         } while (cursor !== null);
+        if (unconfiguredRuntimeMcpServerNames.size > 0) {
+          throw new Error(
+            `Codex reported runtime MCP servers without transport-bearing config: ${[
+              ...unconfiguredRuntimeMcpServerNames,
+            ].sort().join(', ')}`,
+          );
+        }
 
         const skillPaths = new Set([
           ...skills.map((skill) => skill.path),
@@ -3877,7 +3894,13 @@ export class CodexAgent extends BaseAgent {
             .sort()
             .map((skillPath) => ({ path: skillPath, enabled: false }));
         }
-        for (const serverName of mcpServerNames) {
+        // Only configured MCP entries have a command/url transport that can
+        // accept a per-thread `.enabled=false` merge. `codex_apps` is an
+        // app-server builtin surfaced by mcpServerStatus/list but absent from
+        // config/read; synthesizing an override for it makes Codex 0.145.0
+        // reject thread/start with "invalid transport". Apps are isolated by
+        // `features.apps=false` below instead.
+        for (const serverName of configuredMcpServerNames) {
           reviewCapabilityConfig[
             `mcp_servers.${renderReviewConfigSegment(serverName)}.enabled`
           ] = false;

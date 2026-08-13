@@ -121,7 +121,12 @@ import {
   type ImAuthRouteStatus,
   type ImAuthCheckDeps,
 } from './authCheck';
-import { FBOT_DRAFT_TITLE, generateAndPersistFbotTitle } from './fbotTitle';
+import {
+  FBOT_DRAFT_TITLE,
+  generateAndPersistFbotTitle,
+  generateImSessionTitleText,
+  persistGeneratedSessionTitle,
+} from './fbotTitle';
 import { materializeLocalMarkdownImages } from './localMarkdownImages';
 import {
   createTurnActivity,
@@ -352,6 +357,12 @@ export interface ImRunAgentTurnArgs {
    * 缺省 = text。落库(persistUserMessage)与标题生成恒用 text(渠道原文)。
    */
   agentText?: string;
+  /**
+   * 上下文附件(群历史里的图片/文件) —— 只拼进模型消息的 image/file
+   * block, **不随用户消息落库、不进 transcript**。与 attachments(触发
+   * 用户自己发的, 照常落库)是两条语义边界, 不可合并传参。
+   */
+  contextAttachments?: IMAttachment[];
   outputCardMessageId?: string;
   outputCardPrefix?: string;
   onTurnComplete?: () => void;
@@ -760,19 +771,27 @@ export function createTurnRunner(
       text.trim().length > 0 &&
       (adapter.threadScoped
         ? target.created
-        : adapter.sessions.generatedTitlePrefix !== undefined && row.sdkSessionId == null)
+        : adapter.sessions.skipOneshotTitleFor?.(userId) !== true &&
+          adapter.sessions.generatedTitlePrefix !== undefined &&
+          row.sdkSessionId == null)
     ) {
       // threadScoped 新 thread 会话: 用首条消息生成正式标题(渠道前缀),
       // 完成后把 thread 名片卡升级为「{正式标题}」。
       // 非 threadScoped 渠道(feishu/discord, 一 (bot,user) 一行长期复用):
       // 每条"新对话"的首条消息重新起名 —— sdkSessionId == null 即新上下文
       // (首次建行 / /new 重置后), 标题跟随当前话题而不是永远停在第一次。
-      startBackgroundTask(() => maybeGenerateImSessionTitle(row.id, text, threadHeaderCardId));
+      startBackgroundTask(() =>
+        maybeGenerateImSessionTitle(row.id, userId, target.scopeKey, text, threadHeaderCardId),
+      );
     }
 
     const item: QueuedSend = {
       turn,
-      userMessage: buildImUserMessage(args.agentText ?? text, attachments, target.attached),
+      userMessage: buildImUserMessage(
+        args.agentText ?? text,
+        [...attachments, ...(args.contextAttachments ?? [])],
+        target.attached,
+      ),
       rowId: row.id,
       text,
       attachments,
@@ -1583,7 +1602,12 @@ export function createTurnRunner(
               : { kind, behavior: 'deny', reason: err.message },
           );
         },
-        req.kind === 'permission' ? { toolName: req.toolName } : undefined,
+        req.kind === 'permission'
+          ? {
+              toolName: req.toolName,
+              permissionCard: { title: spec.title ?? '', body: spec.body },
+            }
+          : undefined,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1668,15 +1692,35 @@ export function createTurnRunner(
    */
   async function maybeGenerateImSessionTitle(
     sessionId: string,
+    userId: string,
+    scopeKey: string | undefined,
     text: string,
     headerCardId: string | null,
   ): Promise<void> {
     const threadUiPack = adapter.ui.thread;
     const configuredPrefix = adapter.sessions.generatedTitlePrefix;
-    if (configuredPrefix === undefined && !(adapter.threadScoped && threadUiPack)) return;
+    const composeTitle = adapter.sessions.composeGeneratedTitle;
+    if (
+      configuredPrefix === undefined &&
+      !composeTitle &&
+      !(adapter.threadScoped && threadUiPack)
+    )
+      return;
     const prefix = typeof configuredPrefix === 'function' ? configuredPrefix() : configuredPrefix;
     try {
-      const title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+      let title: string | null;
+      if (composeTitle) {
+        const generated = await generateImSessionTitleText(sessionId, text);
+        if (!generated) return;
+        title = await composeTitle(userId, scopeKey, generated, sessionId);
+        if (title) {
+          await persistGeneratedSessionTitle(sessionId, title);
+        } else {
+          title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+        }
+      } else {
+        title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+      }
       if (!richIm || !title || !headerCardId || !threadUiPack) return;
       await richIm.updateInteractiveCard(headerCardId, {
         ...threadUiPack.sessionHeaderTitled(title),
@@ -2870,7 +2914,12 @@ export function createTurnRunner(
           messageId,
           // Stash toolName for permission requests so cardActionHandler can
           // build permissionUpdates when the user picks 'allow:always'.
-          req.kind === 'permission' ? { toolName: req.toolName } : undefined,
+          req.kind === 'permission'
+            ? {
+                toolName: req.toolName,
+                permissionCard: { title: spec.title ?? '', body: spec.body },
+              }
+            : undefined,
         );
         return decision;
       } catch (err) {

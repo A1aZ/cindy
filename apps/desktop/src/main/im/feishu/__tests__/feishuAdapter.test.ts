@@ -268,7 +268,7 @@ describe('feishu group lane adapter hooks', () => {
     expect(text).not.toContain('/permission auto');
     expect(text).not.toContain('/permission ask');
     expect(text).toContain('/new');
-    expect(text).toContain('new session');
+    expect(text).toContain('new chat');
     expect(text).not.toContain('new task');
     expect(text).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
     expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();

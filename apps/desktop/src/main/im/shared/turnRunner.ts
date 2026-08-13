@@ -136,6 +136,7 @@ import { createTurnPresenter, DEFAULT_PRESENTER_POLICY, type TurnPresenter } fro
 import {
   toCoreAgentKind,
   readPermissionMode,
+  refreshResolvedSessionTitle,
   touchUserSent as repoTouchUserSent,
   updatePermissionMode,
   type ImSessionRepo,
@@ -747,6 +748,24 @@ export function createTurnRunner(
       ((operation: () => Promise<void>): void => {
         void operation();
       });
+    // 存量会话标题自愈: 旧版本建行的会话标题停在旧格式(id 后缀 / 早前被
+    // oneshot 漂成 DM 前缀), 存量行下次收到消息时后台解析正式标题并刷新
+    // (飞书群 lane → [飞书·群] {群名})。新建行由 createSession 建行时解析,
+    // 这里只补存量; 失败 swallow, 标题是展示层, 不阻塞 turn。
+    const resolveSessionTitle = adapter.sessions.resolveSessionTitle;
+    if (!target.created && resolveSessionTitle) {
+      startBackgroundTask(async () => {
+        try {
+          await refreshResolvedSessionTitle({
+            sessionId: row.id,
+            resolve: () => resolveSessionTitle(userId, target.scopeKey),
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`session title refresh failed (non-fatal): ${msg}`);
+        }
+      });
+    }
     // 受保护群的触发消息不能被总结成会话标题。标题是**长期记录**, 会一直挂在
     // 侧边栏上 —— 把「禁止保存内容」的正文摘要留在那里, 与把它写进 transcript
     // 是同一条边界被绕过, 而且主 turn 最终没被 provider 接受时照样会留下。

@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => {
     insertConflict,
     insertValues: vi.fn(() => ({ onConflictDoUpdate: insertConflict })),
     // createSession upsert 后回读持久化行;返回空数组时回落 prepared row
-    selectLimit: vi.fn(async () => []),
+    selectLimit: vi.fn<() => Promise<Array<{ title?: string | null }>>>(async () => []),
     updateSet: vi.fn(),
     updateWhere: vi.fn(async () => undefined),
     webContentsSend: vi.fn(),
@@ -63,7 +63,7 @@ vi.mock('../../defaultSessionSettings', () => ({
   })),
 }));
 
-import { createImSessionRepo, type ImSessionRow } from '../sessionRepo';
+import { createImSessionRepo, refreshResolvedSessionTitle, type ImSessionRow } from '../sessionRepo';
 import type { ImOrchestratorConfig, ImSessionNamespace } from '../types';
 
 const ns: ImSessionNamespace = {
@@ -139,6 +139,34 @@ describe('sessionRepo.createSession broadcast', () => {
     resolveSessionTitle.mockResolvedValueOnce(null);
     mocks.updateSet.mockClear();
     await repo.createSession('bot', 'user', undefined, preparedRow);
+    expect(mocks.updateSet).not.toHaveBeenCalled();
+  });
+
+  it('refreshResolvedSessionTitle: 解析结果与现名不同才写库+广播; 相同/null 不动', async () => {
+    mocks.selectLimit.mockResolvedValueOnce([{ title: '[飞书·群] oc_abc123' }]);
+    mocks.updateSet.mockClear();
+    await refreshResolvedSessionTitle({
+      sessionId: 'feishu_cli_abc_g-oc_abc123',
+      resolve: async () => '[飞书·群] 产品交流群',
+    });
+    expect(mocks.updateSet).toHaveBeenCalledWith({ title: '[飞书·群] 产品交流群' });
+    expect(mocks.webContentsSend).toHaveBeenCalledWith('local-db:sessions:patched', {
+      sessionId: 'feishu_cli_abc_g-oc_abc123',
+      patch: { title: '[飞书·群] 产品交流群' },
+    });
+
+    // 解析结果与现名相同 → 不动行
+    mocks.selectLimit.mockResolvedValueOnce([{ title: '[飞书·群] 产品交流群' }]);
+    mocks.updateSet.mockClear();
+    await refreshResolvedSessionTitle({
+      sessionId: 'feishu_cli_abc_g-oc_abc123',
+      resolve: async () => '[飞书·群] 产品交流群',
+    });
+    expect(mocks.updateSet).not.toHaveBeenCalled();
+
+    // 解析器返回 null(如拉不到群名) → 不动行
+    mocks.selectLimit.mockResolvedValueOnce([{ title: 'old' }]);
+    await refreshResolvedSessionTitle({ sessionId: 'x', resolve: async () => null });
     expect(mocks.updateSet).not.toHaveBeenCalled();
   });
 });

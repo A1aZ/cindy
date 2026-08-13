@@ -514,6 +514,41 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
     }
   });
 
+  it('wake 任务在 pre-Done 空闲后终态 → 主轮 Done 仍不清桥接（跨主 turn 标记覆盖 pre-Done idle）', async () => {
+    // Codex P1:主轮结束前 SDK 可能先推 isRunning=false 且 status!=='Done' 的中间
+    // status,把 isRunning 提前翻 false;若 wake 终态在这之后、主轮 Done 之前才到达,
+    // 旧条件只用 state.agentStatus.isRunning 判断会漏标 pendingTaskWakeDuringTurn,
+    // 主轮 Done 随之把桥接当 wake 失败误清,空窗里 hasBackgroundAgentWork 翻 false、
+    // ChatInput 用不完整上下文发起预测。修复:跨主 turn 标记改看「主轮终态 Done 是否
+    // 尚未越过」(isRunning 或 status!=='Done'),覆盖 pre-Done 空闲窗口。
+    const sid = `wake-predone-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // turn start + subagent 启动
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+
+      // 中间 status 先把 isRunning 翻 false（pre-Done idle），随后 subagent 才 completed
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Stopped'));
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      const predone = makerChatStore.getSnapshot(sid);
+      expect(predone.pendingTaskWake).toBe(true);
+      expect(predone.pendingTaskWakeDuringTurn).toBe(true);
+
+      // 主 turn 自己的 Done 到达 —— 桥接必须存活（不能误清），跨主 turn 标记此刻退休
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterMainDone = makerChatStore.getSnapshot(sid);
+      expect(afterMainDone.pendingTaskWake).toBe(true);
+      expect(afterMainDone.pendingTaskWakeDuringTurn).toBe(false);
+
+      // wake turn 真正启动（isRunning:true）→ 桥接清除
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(false);
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeDuringTurn).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
   it('wake 任务在主 turn 内终态、随后 wake turn 未启动即失败 → 主轮 Done 退休标记后桥接仍能清除', async () => {
     // Codex P1:主轮 Done 越过时标记(pendingTaskWakeDuringTurn)已退休,若随后 wake turn
     // 失败(从未 isRunning:true、无 isTurnStart),终态 Done 应能正常清除 pendingTaskWake,

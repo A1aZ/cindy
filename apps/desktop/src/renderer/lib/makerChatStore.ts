@@ -4850,17 +4850,23 @@ export function handleStreamEvent(
         (merged.status === 'completed' || merged.status === 'failed') &&
         isWakeAgentTask(merged);
       const nextWake = state.pendingTaskWake || wakesAfterTerminal;
+      // 主 turn 的终态 Done 是否尚未越过:仍 running,或已进入「pre-Done 空闲」
+      // (isRunning 已提前翻 false 但 status 还不是 'Done')。只有在这个窗口内到达
+      // 的 wake 终态才算「跨主 turn」——紧接着的 Done 是主轮自己的 Done,桥接必须
+      // 跨过它继续存活。主轮 Done 已经越过(!isRunning && status==='Done')之后才到
+      // 的 wake 终态属于「wake turn 从未启动即失败」,不标记,好让后续 Done 能清除桥接。
+      const mainTurnDoneNotCrossed =
+        state.agentStatus.isRunning || state.agentStatus.status !== 'Done';
       return {
         ...state,
         lastAgentMeta: incomingMeta ?? state.lastAgentMeta,
         taskUpdates: nextMap,
         pendingTaskWake: nextWake,
-        // 跨主 turn 标记:桥接一旦在主 turn 仍 running 时被置位就保持,直到唤醒桥接
-        // 整体被清除。用 state.agentStatus.isRunning(本事件前的主 turn 状态)判断
-        // 本次 wake 终态是否落在主 turn 仍运行的窗口里。
+        // 跨主 turn 标记:桥接一旦在主 turn 仍 running 或 pre-Done 空闲里被置位就保持,
+        // 直到唤醒桥接整体被清除。
         pendingTaskWakeDuringTurn:
           nextWake &&
-          (state.pendingTaskWakeDuringTurn || (wakesAfterTerminal && state.agentStatus.isRunning)),
+          (state.pendingTaskWakeDuringTurn || (wakesAfterTerminal && mainTurnDoneNotCrossed)),
       };
     }
 

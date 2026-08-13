@@ -348,6 +348,69 @@ describe("contacts device sync", () => {
     expect(b.stats().pending).toBe(1);
   });
 
+  it("确认后同一身份删除重建不撤销确认", () => {
+    const a = createStore();
+    const b = createStore();
+    a.activateDeviceSync();
+    b.activateDeviceSync();
+    const aContact = a.createContact({
+      kind: "person",
+      displayName: "甲",
+      identities: [{ platform: "email", value: "recreated@example.com" }],
+    });
+    b.createContact({
+      kind: "person",
+      displayName: "乙",
+      identities: [{ platform: "email", value: "recreated@example.com" }],
+    });
+    exchange(a, b);
+    a.updateContact(aContact.id, { status: "confirmed" });
+    const state = stateOf(a);
+    const recreated = structuredClone(state);
+    const identity = recreated.identities.find(
+      (record) => record.value.value.contactId === aContact.id,
+    )!;
+    identity.id = `${identity.id}-recreated`;
+
+    const projection = materializeContactsSyncState(recreated);
+    expect(
+      projection.contacts.find((contact) => contact.id === aContact.id)!.status,
+    ).toBe("confirmed");
+  });
+
+  it("清理同 owner 重复 identity 不撤销确认", () => {
+    const a = createStore();
+    const b = createStore();
+    a.activateDeviceSync();
+    b.activateDeviceSync();
+    const aContact = a.createContact({
+      kind: "person",
+      displayName: "甲",
+      identities: [{ platform: "email", value: "duplicate@example.com" }],
+    });
+    b.createContact({
+      kind: "person",
+      displayName: "乙",
+      identities: [{ platform: "email", value: "duplicate@example.com" }],
+    });
+    exchange(a, b);
+    a.updateContact(aContact.id, { status: "confirmed" });
+    const state = stateOf(a);
+    const duplicate = structuredClone(state);
+    const identity = duplicate.identities.find(
+      (record) => record.value.value.contactId === aContact.id,
+    )!;
+    duplicate.identities.push({
+      ...identity,
+      id: `${identity.id}-duplicate`,
+    });
+
+    const projection = materializeContactsSyncState(duplicate);
+    expect(
+      projection.contacts.find((contact) => contact.id === aContact.id)!.status,
+    ).toBe("confirmed");
+  });
+
   it("旧客户端丢失确认凭据后不靠 Lamport 大小吞掉新冲突", () => {
     const a = createStore();
     const b = createStore();

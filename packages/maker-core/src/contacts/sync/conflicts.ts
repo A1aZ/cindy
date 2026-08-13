@@ -42,17 +42,11 @@ export function collectContactsIdentityConflicts(
       records.map((record) => record.value.value.contactId),
     );
     if (owners.size <= 1) continue;
-    const sortedRecords = [...records].sort((left, right) =>
-      compareContactsSyncText(left.id, right.id),
-    );
-    const first = sortedRecords[0]!.value.value;
+    const first = records[0]!.value.value;
     const membershipHash = createHash("sha256")
       .update(
         JSON.stringify(
-          sortedRecords.map((record) => [
-            record.id,
-            record.value.value.contactId,
-          ]),
+          [...owners].sort(compareContactsSyncText),
         ),
       )
       .digest("hex");

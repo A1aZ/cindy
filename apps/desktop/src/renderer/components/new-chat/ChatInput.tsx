@@ -3547,7 +3547,16 @@ export function ChatInput({
         },
         { silent: true },
       );
-      if (ghost) placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
+      // 远程/未解析归属不恢复 Host capability 芯片(与 `+` 菜单和发送路径的
+      // fail-closed 同口径):SSH(remoteHostId)或 device-link(deviceLinkDeviceId
+      // !== null,含未解析)会话若恢复芯片,发送时会被 TARGET_UNAVAILABLE 拦截,
+      // 阻塞用户发送正文。仅已确认本机(deviceLinkDeviceId === null 且无
+      // remoteHostId)才恢复,否则静默丢弃芯片意图。
+      const canPlaceHostCapability =
+        !remoteHostIdRef.current && deviceLinkDeviceIdRef.current === null;
+      if (ghost && canPlaceHostCapability) {
+        placeHostCapabilityAtComposerStart(editor, ghost, installedGhosts);
+      }
       return;
     }
 

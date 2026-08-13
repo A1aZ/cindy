@@ -40,7 +40,7 @@ import type { Session } from '@/lib/ccAgent.types';
 import type { SessionPrRef } from '@/lib/gitContext.types';
 import { formatMoney, formatUsd } from '@/lib/usageFormat';
 import { prStatusKey } from '@/lib/prStatus';
-import { usePrStatuses } from '@/contexts/PrRefsContext';
+import { usePrActions, usePrStatus } from '@/contexts/PrRefsContext';
 import { PR_STATUS_COLOR, PR_STATUS_ICON } from '../gitContextPrVisuals';
 import { formatSidebarTime, formatSidebarTimeAbsolute } from '../lib/formatSidebarTime';
 import type { TaskInfoField } from '../hooks/useTaskInfoFields';
@@ -127,11 +127,15 @@ export function buildSessionInfoPieces(
  */
 function PrNumberPiece({ prRef }: { prRef: SessionPrRef }) {
   const { t } = useTranslation();
-  const { statuses, fetchStatusesForSession } = usePrStatuses();
+  // fetch 从恒定的 actions context 拿——经 usePrStatuses 拿会连带订阅整表快照,
+  // 徽标就退化回"任一状态变化全体重渲染"。
+  const { fetchStatusesForSession } = usePrActions();
   useEffect(() => {
     fetchStatusesForSession(prRef.sessionId);
   }, [fetchStatusesForSession, prRef.sessionId]);
-  const status = statuses.get(prStatusKey(prRef));
+  // 按 key 精准订阅(2026-08-13 review P1):整表快照会让任一 PR 的刷新惊动
+  // 全部已挂载徽标;usePrStatus 在本 PR 结果未变时快照引用不变、不重渲染。
+  const status = usePrStatus(prStatusKey(prRef));
   const kind = status?.ok ? status.status : null;
   const Icon = kind ? PR_STATUS_ICON[kind] : GitPullRequest;
   const title = kind

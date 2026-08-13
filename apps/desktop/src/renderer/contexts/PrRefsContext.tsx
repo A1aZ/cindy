@@ -6,10 +6,17 @@
  * 之后靠 git-context:pr-refs-changed 推送对单个 session 增量刷新。
  * SessionItem 据此零 IPC 判断"这行有没有 PR"——没有的行不挂任何浮层。
  *
- * **刻意拆成两个 context**:refs(每个 SessionItem 都订阅)与 statuses
- * (只有打开中的 tooltip 订阅)。状态在每次 tip 打开时按需拉取并 setState,
- * 若合在一个 value 里,每次 hover 拉到状态都会让整个侧边栏的所有行重渲染;
- * 拆开后状态更新只触达正在显示的 tip(code-review 性能反馈)。
+ * ⚠️ 订阅粒度(2026-08-13 review P1 重构;性能不变量,对齐 sessionAttentionStore):
+ * context 只传**稳定的 store 引用**,数据变化经 listeners 通知、消费方用
+ * useSyncExternalStore 按需取快照——refs 按 sessionId、状态按 prStatusKey,
+ * 快照未变(引用/值相等)就不重渲染。此前把整张 Map 当 context value,任何一个
+ * 会话的 refs/状态更新都会广播重渲染所有行(SessionItem 的 memo 挡不住 context),
+ * 正是 SessionItem 头注明令禁止的"整张表订阅"。
+ *   - usePrRefsForSession(sessionId):按会话精准订阅,bulk 加载时逐会话做
+ *     内容比对保引用稳定,没变的行不醒。
+ *   - usePrStatus(key):单个 PR 徽标按 key 精准订阅(状态对象未变时保引用)。
+ *   - usePrStatuses():整表快照,**只给聚合消费方**(打开中的 tooltip、顶栏
+ *     单会话视图)——任何状态变化都会重渲染订阅者,列表行禁止用。
  *
  * PR 状态(open/merged/...)是远端易变数据,不在启动期预取;main 侧本就有
  * 60s TTL + in-flight 去重,这里只做轻量去重,不再加 TTL。
@@ -21,7 +28,7 @@ import {
   useEffect,
   useMemo,
   useRef,
-  useState,
+  useSyncExternalStore,
   type ReactNode,
 } from 'react';
 
@@ -33,26 +40,131 @@ import { createLogger } from '@/lib/logger';
 
 const log = createLogger('PrRefsContext');
 
-/** sessionId → PR 引用(lastSeenAt 降序)。无 PR 的会话不在 map 里。 */
-const PrRefsMapContext = createContext<Map<string, SessionPrRef[]>>(new Map());
+const EMPTY_REFS: SessionPrRef[] = [];
 
-interface PrStatusesContextValue {
-  /** prStatusKey(ref) → 状态查询结果。 */
-  statuses: Map<string, PrStatusResult>;
-  /** tip 打开时按需拉该会话前几条 PR 的状态(共享缓存,重复调用便宜)。 */
-  fetchStatusesForSession: (sessionId: string) => void;
+/** 同一会话的引用列表内容未变 → 复用旧数组引用(逐行订阅的快照比较基石)。 */
+function sameRefList(
+  a: SessionPrRef[] | undefined,
+  b: readonly SessionPrRef[],
+): a is SessionPrRef[] {
+  if (!a || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i].id !== b[i].id || a[i].lastSeenAt !== b[i].lastSeenAt) return false;
+  }
+  return true;
 }
 
-const PrStatusesContext = createContext<PrStatusesContextValue>({
-  statuses: new Map(),
-  fetchStatusesForSession: () => undefined,
-});
+/** 同一 PR 的状态结果未变 → 保留旧对象引用(徽标按 key 订阅不醒)。
+ *  小对象、量有界(可见徽标数),序列化比较足够便宜且对 shape 演进稳健。 */
+function sameStatus(a: PrStatusResult | undefined, b: PrStatusResult): boolean {
+  return a !== undefined && JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Provider 内部的可变缓存 + 订阅簇。listeners 在任何写入后统一通知,粒度由
+ * 各 hook 的 getSnapshot 决定(useSyncExternalStore 按快照相等性裁剪重渲染)。
+ */
+interface PrCacheStore {
+  subscribe: (listener: () => void) => () => void;
+  getRefs: (sessionId: string) => SessionPrRef[];
+  getStatus: (key: string) => PrStatusResult | undefined;
+  /** 整表快照(引用仅在状态真实变化时更换)——聚合消费方专用。 */
+  getStatusesSnapshot: () => ReadonlyMap<string, PrStatusResult>;
+  /** 本地全量加载:整表替换,但保住 keep 判定为真的既有条目(远程先到的)与未变引用。 */
+  mergeLocalRefs: (
+    grouped: Map<string, SessionPrRef[]>,
+    keep: (sessionId: string) => boolean,
+  ) => void;
+  /** 单会话 refs 覆盖(空列表 = 删除)。内容未变不通知。 */
+  setSessionRefs: (sessionId: string, refs: readonly SessionPrRef[]) => void;
+  /** 批量落状态结果。全部未变不通知。 */
+  applyStatuses: (results: readonly PrStatusResult[]) => void;
+  clearAll: () => void;
+}
+
+function createPrCacheStore(): PrCacheStore {
+  const refsBySession = new Map<string, SessionPrRef[]>();
+  const statuses = new Map<string, PrStatusResult>();
+  let statusesSnapshot: ReadonlyMap<string, PrStatusResult> = new Map();
+  const listeners = new Set<() => void>();
+  const notify = () => {
+    for (const listener of listeners) listener();
+  };
+  return {
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    getRefs(sessionId) {
+      return refsBySession.get(sessionId) ?? EMPTY_REFS;
+    },
+    getStatus(key) {
+      return statuses.get(key);
+    },
+    getStatusesSnapshot() {
+      return statusesSnapshot;
+    },
+    mergeLocalRefs(grouped, keep) {
+      let changed = false;
+      // 覆盖/新增本地条目(内容未变时保旧引用)。
+      for (const [sessionId, refs] of grouped) {
+        const prev = refsBySession.get(sessionId);
+        if (sameRefList(prev, refs)) continue;
+        refsBySession.set(sessionId, refs);
+        changed = true;
+      }
+      // 清掉既不在本次全量、也不该保留(非远程簿记)的旧条目。
+      for (const sessionId of [...refsBySession.keys()]) {
+        if (grouped.has(sessionId) || keep(sessionId)) continue;
+        refsBySession.delete(sessionId);
+        changed = true;
+      }
+      if (changed) notify();
+    },
+    setSessionRefs(sessionId, refs) {
+      if (refs.length === 0) {
+        if (!refsBySession.delete(sessionId)) return;
+        notify();
+        return;
+      }
+      const prev = refsBySession.get(sessionId);
+      if (sameRefList(prev, refs)) return;
+      refsBySession.set(sessionId, [...refs]);
+      notify();
+    },
+    applyStatuses(results) {
+      let changed = false;
+      for (const result of results) {
+        const key = prStatusKey(result);
+        if (sameStatus(statuses.get(key), result)) continue;
+        statuses.set(key, result);
+        changed = true;
+      }
+      if (!changed) return;
+      statusesSnapshot = new Map(statuses);
+      notify();
+    },
+    clearAll() {
+      if (refsBySession.size === 0 && statuses.size === 0) return;
+      refsBySession.clear();
+      statuses.clear();
+      statusesSnapshot = new Map();
+      notify();
+    },
+  };
+}
+
+/** Provider 外(测试等)兜底:惰性 store,永远空、永远不通知。 */
+const INERT_STORE = createPrCacheStore();
+const PrStoreContext = createContext<PrCacheStore>(INERT_STORE);
 
 /**
  * 行级动作 context——value 恒定(回调身份稳定,无状态字段),SessionItem /
  * SessionCard 可以安全订阅而不被 statuses 更新连带重渲染(文件头性能边界)。
  * device-link 远程会话的 PR 引用不在本地 db(listAllPrRefs 看不见它们),
- * 由渲染中的行按需经远程通道补拉,落进同一张 refsBySession 映射。
+ * 由渲染中的行按需经远程通道补拉,落进同一张 refs 缓存。
  */
 interface PrActionsContextValue {
   /**
@@ -68,10 +180,13 @@ interface PrActionsContextValue {
    * 被控端各有 60s TTL,周期刷新的实际开销有界。
    */
   registerPrConsumer: (sessionId: string, deviceId?: string) => () => void;
+  /** tip 打开时按需拉该会话前几条 PR 的状态(共享缓存,重复调用便宜)。 */
+  fetchStatusesForSession: (sessionId: string) => void;
 }
 
 const PrActionsContext = createContext<PrActionsContextValue>({
   registerPrConsumer: () => () => undefined,
+  fetchStatusesForSession: () => undefined,
 });
 
 function groupBySession(rows: SessionPrRef[]): Map<string, SessionPrRef[]> {
@@ -88,12 +203,13 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   // 同进程切换 data owner → 另一份本地 db。云账号和本地模式都以 owner id
   // 为 key 重跑，先清旧缓存，再从新 owner 的库重新全量加载。
   const { dataOwnerId } = useAuth();
-  const [refsBySession, setRefsBySession] = useState<Map<string, SessionPrRef[]>>(new Map());
-  const [statuses, setStatuses] = useState<Map<string, PrStatusResult>>(new Map());
-  // fetchStatusesForSession 经 ref 读最新 refs,保持回调身份稳定
-  // (依赖 refsBySession 会让每次 refs 更新都重建回调、连带 tooltip 重渲染)。
-  const refsRef = useRef(refsBySession);
-  refsRef.current = refsBySession;
+  const storeRef = useRef<PrCacheStore | null>(null);
+  if (storeRef.current === null) storeRef.current = createPrCacheStore();
+  const store = storeRef.current;
+  // owner 代数:owner 切换时自增。异步闭包(远程隧道 / GitHub 查询)在发起时
+  // 捕获当时代数,回来后对不上就整体丢弃——否则旧账号的响应会回写进新账号的
+  // 共享缓存(2026-08-13 review P1:此前只清 Map,不隔离在飞请求)。
+  const ownerGenRef = useRef(0);
   // tip 快速划过多行时防止同一会话重复在飞;main 侧有 60s 缓存,这里不做 TTL。
   const inFlightSessions = useRef(new Set<string>());
   // 远程会话引用拉取:在飞去重 + 上次**成功**时间戳(TTL 门)。空结果不是终态——
@@ -119,10 +235,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     const prevOwner = prevOwnerRef.current;
     prevOwnerRef.current = dataOwnerId;
     if (prevOwner !== undefined && prevOwner !== dataOwnerId) {
-      // owner 切换边界:清掉上一 owner 的缓存与远程簿记(prConsumers 保留——
-      // 行组件仍挂着,新 owner 下由周期刷新按注册表重建缓存)。
-      setRefsBySession(new Map());
-      setStatuses(new Map());
+      // owner 切换边界:作废在飞请求(代数自增)、清缓存与远程簿记(prConsumers
+      // 保留——行组件仍挂着,新 owner 下由周期刷新按注册表重建缓存)。
+      ownerGenRef.current += 1;
+      store.clearAll();
       remoteRefsInFlight.current.clear();
       remoteRefsFetchedAt.current.clear();
       remoteDeviceBySession.current.clear();
@@ -149,13 +265,7 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         // 合并而非整体替换:listAllPrRefs 只覆盖本地会话;远程(device-link)会话
         // 的条目可能已先一步拉到,整体替换会把它们冲掉(启动时序竞态)。
         const grouped = groupBySession(rows);
-        setRefsBySession((prev) => {
-          const next = new Map(grouped);
-          for (const [sid, refs] of prev) {
-            if (remoteDeviceBySession.current.has(sid) && !next.has(sid)) next.set(sid, refs);
-          }
-          return next;
-        });
+        store.mergeLocalRefs(grouped, (sid) => remoteDeviceBySession.current.has(sid));
         // 已注册消费者(顶栏/侧栏正在展示的会话)拿到引用后立即补状态,
         // 不等 90s 周期——覆盖「先注册、后加载完成」的启动时序。
         for (const [sid] of prConsumers.current) {
@@ -174,12 +284,7 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         try {
           const refs = await window.electronAPI.gitContext.listPrRefs(data.sessionId);
           if (cancelled) return;
-          setRefsBySession((prev) => {
-            const next = new Map(prev);
-            if (refs.length > 0) next.set(data.sessionId, refs);
-            else next.delete(data.sessionId);
-            return next;
-          });
+          store.setSessionRefs(data.sessionId, refs);
           // 该会话有消费者在展示(顶栏/侧栏徽标)→ 引用变化后立即刷状态,
           // 不等 90s 周期(对齐顶栏旧行为:引用变化即时补状态)。
           if (refs.length > 0 && prConsumers.current.has(data.sessionId)) {
@@ -196,10 +301,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
       if (retryTimer) clearTimeout(retryTimer);
       unsubscribe();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- store / fetchStatusesForRefs 均为稳定引用
   }, [dataOwnerId]);
 
-  // 回调身份稳定(空闭包依赖):refs 显式传入或经 refsRef 读,statuses 经函数式
-  // setState 写。远程会话(remoteDeviceBySession 命中)状态改走 device-link 通道
+  // 回调身份稳定(空闭包依赖):refs 显式传入或经 store 读,状态写回也走 store。
+  // 远程会话(remoteDeviceBySession 命中)状态改走 device-link 通道
   // ——被控端持有 gh token,且 main 侧按该会话已提取的引用过滤查询
   // (git-context/ipc.ts 的 fail-closed 逻辑),与聊天顶栏同一条安全路径。
   const fetchStatusesForRefs = useRef((sessionId: string, refsInput: readonly SessionPrRef[]) => {
@@ -207,6 +313,7 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     if (refs.length === 0) return;
     if (inFlightSessions.current.has(sessionId)) return;
     inFlightSessions.current.add(sessionId);
+    const gen = ownerGenRef.current;
     void (async () => {
       try {
         const queries = refs.map((r) => ({ owner: r.owner, repo: r.repo, prNumber: r.prNumber }));
@@ -223,12 +330,9 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
               { sessionId, queries },
             ])) as PrStatusResult[])
           : await window.electronAPI.gitContext.getPrStatuses(queries);
+        if (gen !== ownerGenRef.current) return; // owner 已切换:旧账号结果整体丢弃
         if (!Array.isArray(results)) return;
-        setStatuses((prev) => {
-          const next = new Map(prev);
-          for (const r of results) next.set(prStatusKey(r), r);
-          return next;
-        });
+        store.applyStatuses(results);
       } catch (err) {
         log.warn('pr statuses fetch failed', String(err));
       } finally {
@@ -238,10 +342,10 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   }).current;
 
   const fetchStatusesForSession = useRef((sessionId: string) => {
-    fetchStatusesForRefs(sessionId, refsRef.current.get(sessionId) ?? []);
+    fetchStatusesForRefs(sessionId, store.getRefs(sessionId));
   }).current;
 
-  // 远程会话 PR 引用按需拉取(回调身份稳定)。结果进共享 refs 映射,渲染路径
+  // 远程会话 PR 引用按需拉取(回调身份稳定)。结果进共享 refs 缓存,渲染路径
   // (usePrRefsForSession)对本地/远程一视同仁。空结果同样写入 TTL 时间戳,
   // 但**不是终态**:下个周期重查(远端新增 PR / 短暂竞态都靠这条自愈)。
   const fetchRefsForRemoteSession = useRef((sessionId: string, deviceId: string) => {
@@ -258,6 +362,7 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     if (fetchedAt !== undefined && Date.now() - fetchedAt < PR_STATUS_REFRESH_INTERVAL_MS - 5_000)
       return;
     remoteRefsInFlight.current.add(sessionId);
+    const gen = ownerGenRef.current;
     void (async () => {
       try {
         const refs = (await window.electronAPI.deviceLink.invoke(
@@ -265,14 +370,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
           'git-context:pr-refs:list',
           [sessionId],
         )) as SessionPrRef[];
+        // owner 已切换:结果与簿记(时间戳会抑制新 owner 的重查)都不能落。
+        if (gen !== ownerGenRef.current) return;
         remoteRefsFetchedAt.current.set(sessionId, Date.now());
         log.debug('remote pr refs fetched', { sessionId, count: refs.length });
-        setRefsBySession((prev) => {
-          const next = new Map(prev);
-          if (refs.length > 0) next.set(sessionId, refs);
-          else next.delete(sessionId);
-          return next;
-        });
+        store.setSessionRefs(sessionId, refs);
         // 该会话仍有消费者在展示 → 引用到位后立即补状态,不等 90s 周期
         // (顶栏没有徽标挂载 effect,只读缓存,必须由这里主动触发)。
         if (refs.length > 0 && prConsumers.current.has(sessionId)) {
@@ -333,35 +435,61 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     };
   }, [refreshConsumer]);
 
-  const actionsValue = useMemo(() => ({ registerPrConsumer }), [registerPrConsumer]);
-
-  const statusesValue = useMemo(
-    () => ({ statuses, fetchStatusesForSession }),
-    [statuses, fetchStatusesForSession],
+  const actionsValue = useMemo(
+    () => ({ registerPrConsumer, fetchStatusesForSession }),
+    [registerPrConsumer, fetchStatusesForSession],
   );
 
   return (
-    <PrRefsMapContext.Provider value={refsBySession}>
-      <PrActionsContext.Provider value={actionsValue}>
-        <PrStatusesContext.Provider value={statusesValue}>{children}</PrStatusesContext.Provider>
-      </PrActionsContext.Provider>
-    </PrRefsMapContext.Provider>
+    <PrStoreContext.Provider value={store}>
+      <PrActionsContext.Provider value={actionsValue}>{children}</PrActionsContext.Provider>
+    </PrStoreContext.Provider>
   );
 }
 
-/** 某会话的 PR 引用(无则空数组,引用稳定避免重渲染)。状态更新不触发本 hook。 */
-const EMPTY_REFS: SessionPrRef[] = [];
+/** 某会话的 PR 引用(无则空数组,内容未变时引用稳定)。其它会话的更新不触发重渲染。 */
 export function usePrRefsForSession(sessionId: string): SessionPrRef[] {
-  const refsBySession = useContext(PrRefsMapContext);
-  return refsBySession.get(sessionId) ?? EMPTY_REFS;
+  const store = useContext(PrStoreContext);
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getRefs(sessionId),
+    () => store.getRefs(sessionId),
+  );
 }
 
-/** tooltip 内容消费:状态缓存 + 按需拉取。仅打开中的 tip 因状态更新而重渲染。 */
+/** 单个 PR 的状态(按 prStatusKey 精准订阅;结果未变时引用稳定)。列表行徽标专用。 */
+export function usePrStatus(key: string): PrStatusResult | undefined {
+  const store = useContext(PrStoreContext);
+  return useSyncExternalStore(
+    store.subscribe,
+    () => store.getStatus(key),
+    () => store.getStatus(key),
+  );
+}
+
+interface PrStatusesContextValue {
+  /** prStatusKey(ref) → 状态查询结果(整表快照)。 */
+  statuses: ReadonlyMap<string, PrStatusResult>;
+  fetchStatusesForSession: (sessionId: string) => void;
+}
+
+/** 整表状态消费:**只给聚合消费方**(打开中的 tooltip、顶栏单会话视图)——任何
+ *  状态变化都会重渲染订阅者。列表行禁止用(改用 usePrStatus)。 */
 export function usePrStatuses(): PrStatusesContextValue {
-  return useContext(PrStatusesContext);
+  const store = useContext(PrStoreContext);
+  const { fetchStatusesForSession } = useContext(PrActionsContext);
+  const statuses = useSyncExternalStore(
+    store.subscribe,
+    store.getStatusesSnapshot,
+    store.getStatusesSnapshot,
+  );
+  return useMemo(
+    () => ({ statuses, fetchStatusesForSession }),
+    [statuses, fetchStatusesForSession],
+  );
 }
 
-/** 行级动作(value 恒定,订阅不会因 statuses 更新而重渲染)。 */
+/** 行级动作(value 恒定,订阅不会因 refs/statuses 更新而重渲染)。 */
 export function usePrActions(): PrActionsContextValue {
   return useContext(PrActionsContext);
 }

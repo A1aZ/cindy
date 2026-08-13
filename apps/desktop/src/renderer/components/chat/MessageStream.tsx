@@ -65,7 +65,9 @@ import { createLogger } from '@/lib/logger';
 import { stopAllMedia } from '@/lib/mediaPlaybackBus';
 import { cn } from '@/lib/utils';
 import {
+  markSessionAutomaticHistoryLoadStarted,
   readSessionScroll,
+  restoreSessionAutomaticHistoryLoadAttempts,
   saveSessionScroll,
   type SessionScrollSnapshot,
 } from '@/lib/sessionScrollStore';
@@ -200,6 +202,7 @@ import { usePrevUserMessageInView } from './usePrevUserMessageInView';
 import { JumpToBottomChip } from './JumpToBottomChip';
 import { MessageNavRail } from './MessageNavRail';
 import {
+  NAV_RAIL_BACKFILL_MAX_ROUNDS,
   NAV_RAIL_JUMP_TOP_OFFSET_PX,
   deriveNavRailEntries,
   shouldBackfillForNavRail,
@@ -209,6 +212,7 @@ import { detectScrollAnchoringApplied } from './scrollAnchoringDetect';
 import {
   decideAutoFillAction,
   decideUserIntentFillAction,
+  MAX_AUTO_LOAD_ATTEMPTS,
   TOP_HISTORY_TRIGGER_PX,
   NO_SCROLL_TOLERANCE_PX,
 } from './viewportFillDetect';
@@ -3253,8 +3257,10 @@ export function MessageStream({
   //   2. windowAtTop=y AND hasMoreMessages=false  → DB 真的没历史了
   //   3. attemptCount >= MAX_AUTO_LOAD_ATTEMPTS  → 退化保护 (只数 IPC, 不数 expand)
   //
-  // attemptCount 用 ref 持有, 跟着 mount 生命周期走; sessionId 切换时父组件用
-  // key={sessionId} 重挂载本组件, ref 自动归零 (单 session 内独立计数, 无需手动 reset).
+  // attemptCount 用 ref 持有,让同一次 mount 内仍可按原预算连续补页。第一次真的
+  // 发起自动补载时同时在 sessionScrollStore 记 started;切走再切回的新 mount
+  // 直接从耗尽态开始,避免 leaveView 裁掉已补前缀后把同一页重新拉一遍。
+  // 用户明确向上滚动 / 翻页走 decideUserIntentFillAction,不读取这份自动预算。
   // useLayoutEffect 而不是 useEffect — 在 commit 同步阶段读 scrollH/clientH,
   // 避免 useEffect 滞后一帧导致跟 ResizeObserver/pinToBottom 的副作用错序.
   //
@@ -3263,7 +3269,9 @@ export function MessageStream({
   // 当前触发条件下 (scrollH===clientH) scrollTop 必为 0, 视觉收敛主要靠 line 716
   // 的 pinToBottom effect, 这两个 ref 在这是防御层 (避免 IPC race window 里
   // handleScroll 误覆盖 ref 用错快照 → F-SYNC-2 算错 delta).
-  const autoLoadAttemptCountRef = useRef<number>(0);
+  const autoLoadAttemptCountRef = useRef<number>(
+    restoreSessionAutomaticHistoryLoadAttempts(sessionId, MAX_AUTO_LOAD_ATTEMPTS),
+  );
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -3293,6 +3301,7 @@ export function MessageStream({
         autoLoadAttemptCountRef.current += 1;
         prevScrollHeightRef.current = el.scrollHeight;
         prevScrollTopAtLoadRef.current = el.scrollTop;
+        if (sessionId) markSessionAutomaticHistoryLoadStarted(sessionId);
         onLoadMore();
         return;
       }
@@ -3316,6 +3325,7 @@ export function MessageStream({
     hasMoreMessages,
     isLoadingMore,
     onLoadMore,
+    sessionId,
     windowAtTop,
     expandWindow,
     windowCoversEnd,
@@ -4061,12 +4071,12 @@ export function MessageStream({
   // 打开后本 effect 依赖变化会重新评估补页。
   // 调度 effect 的依赖含 sessionId(与 MessageNavRail 的 resetKey 同款惯例):
   // 两个会话的条目数 / hasMore 恰好相同且 onLoadMore 身份未变时,切会话也要
-  // 取消旧会话待发的空闲回调、并按归零后的轮数预算为新会话重新评估
-  // (Copilot review)。
-  const navRailBackfillRoundsRef = useRef(0);
-  useEffect(() => {
-    navRailBackfillRoundsRef.current = 0;
-  }, [sessionId]);
+  // 取消旧会话待发的空闲回调。轮数预算只在 mount 时按会话记忆恢复一次;
+  // 不能在 passive effect 再读,否则同一 mount 的 viewport-fill 先 mark 后会
+  // 提前封死导航条自己的本轮预算。
+  const navRailBackfillRoundsRef = useRef(
+    restoreSessionAutomaticHistoryLoadAttempts(sessionId, NAV_RAIL_BACKFILL_MAX_ROUNDS),
+  );
   useEffect(() => {
     if (!navRailEnabled) return;
     if (!onLoadMore) return;
@@ -4086,6 +4096,7 @@ export function MessageStream({
       navRailBackfillRoundsRef.current += 1;
       prevScrollHeightRef.current = el.scrollHeight;
       prevScrollTopAtLoadRef.current = el.scrollTop;
+      if (sessionId) markSessionAutomaticHistoryLoadStarted(sessionId);
       onLoadMore();
     };
     // 空闲期执行,别跟首屏渲染 / 两段式扩窗抢主线程;测试等无 ric 环境退化。

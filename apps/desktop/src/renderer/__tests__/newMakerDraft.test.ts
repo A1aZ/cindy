@@ -350,14 +350,12 @@ describe('newMakerDraft store', () => {
     expect(m2.getPersistedVendorModel('cc')).toBe('claude-opus-4-8');
   });
 
-  it('patchVendorPrefsPreservingModelChoice:会话同步草稿默认不打显式选择标记', async () => {
+  it('patchVendorPrefsPreservingModelChoice:只改思考档不打显式选择标记', async () => {
     const m1 = await loadModule();
     m1.patchVendorPrefsPreservingModelChoice('cc', {
-      model: 'claude-opus-4-8',
       effort: 'high',
     });
 
-    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
     expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
     expect(m1.getDraft().modelChosenByVendor).toEqual({});
     expect(m1.getPersistedVendorModel('cc')).toBe('');
@@ -367,31 +365,26 @@ describe('newMakerDraft store', () => {
     expect(m1.getPersistedVendorModel('cc')).toBe('claude-opus-4-8');
   });
 
-  it('patchVendorPrefsPreservingModelChoice:会话同步 model 会清掉旧显式选模标记', async () => {
+  it('patchVendorPrefsPreservingModelChoice:已有任务换模后只改思考档不得清掉选模标记', async () => {
     const m1 = await loadModule();
     m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6' });
     expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
     expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
 
     m1.patchVendorPrefsPreservingModelChoice('cc', {
-      model: 'claude-opus-4-8',
       effort: 'high',
     });
 
-    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
-    expect(m1.getDraft().modelChosenByVendor).toEqual({});
-    expect(m1.getPersistedVendorModel('cc')).toBe('');
+    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-sonnet-4-6');
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
+    expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
   });
 
-  it('patchVendorPrefsPreservingModelChoice:会话同步同一 model 保留旧显式选模标记', async () => {
+  it('已有任务换模走 patchVendorPrefs,下次新建跟随这次选择', async () => {
     const m1 = await loadModule();
-    m1.patchVendorPrefs('cc', { model: 'claude-opus-4-8' });
-    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
-
-    m1.patchVendorPrefsPreservingModelChoice('cc', {
-      model: 'claude-opus-4-8',
-      effort: 'high',
-    });
+    m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6' });
+    m1.patchVendorPrefs('cc', { model: 'claude-opus-4-8', effort: 'high' });
 
     expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
     expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');

@@ -296,6 +296,7 @@ import {
 } from '@/state/providerModelMemory';
 import {
   getDraft,
+  patchVendorPrefs,
   patchVendorPrefsPreservingModelChoice,
   setEffortForModel,
   setFastModeForModel,
@@ -5181,6 +5182,8 @@ export function ChatInput({
         activeProviderId?: string | null;
         memoryProviderId?: string | null;
         remoteDeviceId?: string;
+        /** 已有任务里换模 / 换来源时为 true,下次新建跟随这次选择。只改思考档 / Fast 保持 false。 */
+        markModelChoice?: boolean;
       } = {},
     ) => {
       if (!sessionId || !currentModelAgentKind || !modelId) return;
@@ -5190,6 +5193,7 @@ export function ChatInput({
         opts.memoryProviderId !== undefined ? opts.memoryProviderId : effectiveSourceId;
       const remoteDeviceId =
         opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId;
+      const markModelChoice = opts.markModelChoice === true;
       if (!remoteDeviceId) {
         const vendor =
           currentModelAgentKind === 'codex'
@@ -5197,8 +5201,10 @@ export function ChatInput({
             : currentModelAgentKind === 'pi'
               ? 'pi'
               : 'cc';
-        patchVendorPrefsPreservingModelChoice(vendor, {
-          model: modelId,
+        const persistPrefs = markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice;
+        persistPrefs(vendor, {
+          // 只改思考档 / Fast 不得改写下次新建用的模型;换模才带 model 并打标记。
+          ...(markModelChoice ? { model: modelId } : {}),
           providerId: activeProviderId ?? null,
           ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
         });
@@ -5221,7 +5227,7 @@ export function ChatInput({
             providerId: activeProviderId ?? '',
             modelId,
             active: true,
-            markModelChoice: false,
+            markModelChoice,
             ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
             ...(patch.fast !== undefined ? { fast: patch.fast } : {}),
           },
@@ -5700,7 +5706,7 @@ export function ChatInput({
             syncSessionDraftModelPrefs(
               newModelId,
               { effort: newEffort, fast: fastPersisted ? restoredFast : fastMode },
-              { remoteDeviceId: sourceRemoteDeviceId },
+              { remoteDeviceId: sourceRemoteDeviceId, markModelChoice: true },
             );
             if (remoteDeferred && isSourceSessionCurrent()) {
               toast.success(t('newChat.chatInput.credentialSwitchDeferred'), { duration: 4000 });
@@ -5734,7 +5740,9 @@ export function ChatInput({
               // 默认 success 1200ms 读不完这句;拉长到 4s。
               toast.success(t('newChat.chatInput.credentialSwitchDeferred'), { duration: 4000 });
             }
-            syncSessionDraftModelPrefs(newModelId, { effort: newEffort, fast: restoredFast });
+            syncSessionDraftModelPrefs(newModelId, { effort: newEffort, fast: restoredFast }, {
+              markModelChoice: true,
+            });
             if (currentModelAgentKind && effectiveSourceId) {
               modelMemory?.setFast(
                 currentModelAgentKind,
@@ -6104,6 +6112,7 @@ export function ChatInput({
             activeProviderId: newProviderId,
             memoryProviderId: newProviderId,
             remoteDeviceId: sourceRemoteDeviceId,
+            markModelChoice: true,
           },
         );
         onModelDidChange?.(targetModel);
@@ -6161,7 +6170,11 @@ export function ChatInput({
           syncSessionDraftModelPrefs(
             modelId,
             { effort: eff, fast: restoredFast },
-            { activeProviderId: newProviderId, memoryProviderId: newProviderId },
+            {
+              activeProviderId: newProviderId,
+              memoryProviderId: newProviderId,
+              markModelChoice: true,
+            },
           );
           if (currentModelAgentKind && newProviderId) {
             modelMemory?.setFast(currentModelAgentKind, newProviderId, modelId, restoredFast);

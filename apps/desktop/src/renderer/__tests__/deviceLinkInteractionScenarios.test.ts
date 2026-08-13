@@ -951,7 +951,7 @@ describe('远程交互接线不变式', () => {
     expect(finalize).toBeGreaterThan(sync);
   });
 
-  it('会话同步 New Maker 草稿默认不应打 modelChosenByVendor 显式选择标记', () => {
+  it('已有任务换模会打选模标记,只改思考档 / Fast 不会', () => {
     const chatInputSrc = read('components/new-chat/ChatInput.tsx');
     const syncStart = chatInputSrc.indexOf('const syncSessionDraftModelPrefs');
     const syncEnd = chatInputSrc.indexOf('const persistFastModeChange', syncStart);
@@ -959,12 +959,14 @@ describe('远程交互接线不变式', () => {
     expect(syncEnd).toBeGreaterThan(syncStart);
     const syncBody = chatInputSrc.slice(syncStart, syncEnd);
     expect(syncBody).toContain('patchVendorPrefsPreservingModelChoice');
-    expect(syncBody).toContain('markModelChoice: false');
+    expect(syncBody).toContain('markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice');
+    expect(syncBody).toContain("opts.markModelChoice === true");
     expect(syncBody).toContain(
       'opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId',
     );
     expect(syncBody).toContain(".invoke(remoteDeviceId, 'maker:apply-new-maker-draft-pref'");
-    expect(syncBody).not.toContain('patchVendorPrefs(vendor');
+
+    expect(chatInputSrc).toContain('markModelChoice: true');
 
     const appSrc = read('App.tsx');
     expect(appSrc).toContain(

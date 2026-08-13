@@ -144,13 +144,13 @@ export interface NewMakerDraft {
   /** 每个 vendor 的"上次使用配置"——切回该 vendor 时自动恢复。 */
   lastByVendor: Record<MakerVendor, VendorPrefs>;
   /**
-   * 用户是否在 New Maker 界面**显式**选过该 vendor 的模型。
+   * 用户是否**显式**选过该 vendor 的模型（新建页 picker，或已有任务里换模）。
    * lastByVendor 整个快照随任意 draft 写入落盘,model 即使从没被用户碰过也会带上
    * sanitize 的种子默认值 —— 仅凭 lastByVendor 无法区分"真选过"和"默认回填"。
    * 调度任务默认模型的三级回退(getPersistedVendorModel 消费)只认这里标记过的
    * vendor,否则全新 / 没用过该 vendor 的用户会被对话侧 Opus 种子默认顶掉
-   * 成本保守兜底。patchVendorPrefs 收到 New Maker 显式 model 时置 true;会话同步 model
-   * 覆盖 lastByVendor 时清掉,避免把会话侧模型误当成 New Maker picker 选择。
+   * 成本保守兜底。patchVendorPrefs 收到显式 model 时置 true;只改思考档 / Fast
+   * 的会话回写走 patchVendorPrefsPreservingModelChoice，不得清掉已有标记。
    */
   modelChosenByVendor: Partial<Record<MakerVendor, boolean>>;
 }
@@ -741,19 +741,12 @@ function patchVendorPrefsInternal(
   const modelChosen = { ...currentDraft.modelChosenByVendor };
   if (typeof patch.model === 'string' && patch.model.length > 0) {
     if (opts.markModelChoice) {
-      // New Maker 显式 model 选择 → 打标记(见 modelChosenByVendor 注释)。
+      // 新建页 picker 或已有任务换模 → 打标记,下次新建跟随这次选择,不再回落区域默认。
       modelChosen[vendor] = true;
-    } else if (
-      currentDraft.modelChosenByVendor[vendor] &&
-      currentDraft.lastByVendor[vendor].model === patch.model
-    ) {
-      // 会话同步的是同一个 model:保留原 New Maker picker 选择语义。
-      modelChosen[vendor] = true;
-    } else {
-      // 会话同步 model 会覆盖 lastByVendor[vendor].model。若 model 发生变化,旧标记已不能继续代表
-      // "New Maker picker 选过这个 model",否则 scheduler 会把会话侧模型误当成显式选择。
-      delete modelChosen[vendor];
     }
+    // markModelChoice=false 只回写思考档 / 来源等非选模字段。即便 patch 里带着
+    // 当前任务的 model id,也不得把已有标记清掉,否则已有任务里随手换模 / 改档
+    // 会让下次新建重新落到服务端区域默认。
   }
   currentDraft = {
     ...currentDraft,
@@ -772,9 +765,10 @@ export function patchVendorPrefs(vendor: MakerVendor, patch: Partial<VendorPrefs
 }
 
 /**
- * 已创建会话把最近一次成功应用的模型偏好同步回 New Maker 草稿默认时使用。
- * 这会更新 lastByVendor 供下一次新建聊天复用,但不把 modelChosenByVendor 打成
- * "用户在 New Maker 显式选过模型",避免影响 scheduler 的成本保守默认模型兜底。
+ * 已创建任务把思考档等非选模偏好同步回新建草稿时使用。
+ * 更新 lastByVendor,但不把 modelChosenByVendor 打成「显式选过模型」:
+ * 只改思考档不能把区域默认升级成用户选择,也不得清掉已有的选模标记。
+ * 已有任务里换模型应走 patchVendorPrefs,让下次新建跟随这次选择。
  */
 export function patchVendorPrefsPreservingModelChoice(
   vendor: MakerVendor,
@@ -859,11 +853,11 @@ export function getCurrentVendorPrefs(): VendorPrefs {
  * 与 getDraft().lastByVendor[v].model 的区别:后者永远非空 —— sanitize 会用
  * getDefaultModelForVendor 兜底填充,且 lastByVendor 整个快照随任意 draft 写入
  * 落盘,即使用户从没碰过该 vendor 的模型,持久化里也躺着种子默认值。
- * 所以这里要求 modelChosenByVendor[vendor] === true(只在 patchVendorPrefs
- * 收到显式 model 时打的标)才返回,否则一律 ''。
+ * 所以这里要求 modelChosenByVendor[vendor] === true(新建页 picker 或已有
+ * 任务换模经 patchVendorPrefs 打的标)才返回,否则一律 ''。
  * 调度任务的默认模型三级回退(useScheduleForm getScheduleDefaultModel)依赖这个
  * 区分:没显式选过的用户应落到调度自己的成本保守兜底(Sonnet),而不是被
- * 对话侧的 Opus 默认顶掉。读 raw localStorage 而非 getDraft(),解析失败 → ''。
+ * 对话侧的 Opus 种子默认顶掉。读 raw localStorage 而非 getDraft(),解析失败 → ''。
  */
 export function getPersistedVendorModel(vendor: MakerVendor): string {
   if (typeof window === 'undefined') return '';

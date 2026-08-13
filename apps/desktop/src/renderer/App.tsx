@@ -235,7 +235,7 @@ export function App() {
           const shouldPatchActiveModel = markModelChoice !== false || effort !== undefined;
           if (shouldPatchActiveModel) {
             patch(vendor, {
-              model: modelId,
+              ...(markModelChoice === false ? {} : { model: modelId }),
               providerId: providerId || null,
               ...(effort !== undefined ? { effort: effort as Effort } : {}),
             });

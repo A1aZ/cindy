@@ -97,10 +97,24 @@ function isProviderRoute(value: unknown): boolean {
   );
 }
 
+function sanitizeProviderModels(
+  models: unknown,
+): Record<string, unknown[]> | null {
+  if (!isRecord(models)) return null;
+  const sanitized: Record<string, unknown[]> = {};
+  for (const [agent, entries] of Object.entries(models)) {
+    if (!Array.isArray(entries)) return null;
+    sanitized[agent] = entries.filter(isProviderModel);
+  }
+  return sanitized;
+}
+
 function isProviderView(value: unknown): value is ProviderView {
   if (!isRecord(value)) return false;
   const routing = value.routing;
-  const models = value.models;
+  const models = sanitizeProviderModels(value.models);
+  if (!models) return false;
+  value.models = models;
   return (
     typeof value.id === 'string' &&
     value.id.length > 0 &&
@@ -109,10 +123,6 @@ function isProviderView(value: unknown): value is ProviderView {
     value.agents.every((agent) => typeof agent === 'string') &&
     (routing === undefined ||
       (isRecord(routing) && Object.values(routing).every(isProviderRoute))) &&
-    isRecord(models) &&
-    Object.values(models).every(
-      (entries) => Array.isArray(entries) && entries.every(isProviderModel),
-    ) &&
     typeof value.connected === 'boolean' &&
     isOptionalBoolean(value.suspended)
   );
@@ -122,9 +132,14 @@ export function parseDeviceProvidersPayload(value: unknown): DeviceProvidersPayl
   if (!isRecord(value)) {
     throw new Error('Invalid provider list response');
   }
-  if (!Array.isArray(value.providers) || !value.providers.every(isProviderView)) {
+  if (!Array.isArray(value.providers)) {
     throw new Error('Invalid provider list response');
   }
+  const providersIn = value.providers.filter(isProviderView);
+  if (providersIn.length === 0 && value.providers.length > 0) {
+    throw new Error('Invalid provider list response');
+  }
+  value.providers = providersIn;
   const overrides = value.modelVisibilityOverrides;
   if (
     overrides !== undefined &&

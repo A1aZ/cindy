@@ -85,9 +85,9 @@ function quoteAsSingleShellToken(text: string): string {
 }
 
 /**
- * 把「已经是 PowerShell 解释器调用」的形态归一成 `pwsh <原样余参>`,让解释器落在 **token 0**。
+ * 识别「已经是 PowerShell 解释器调用」的形态并原样透传,让解释器落在 **token 0**。
  *
- * 为什么必须归一而不能一律往外包 `-Command`:core 的 PowerShell 红线有两类,
+ * 为什么必须识别而不能一律往外包 `-Command`:core 的 PowerShell 红线有两类,
  * 只有一类能穿透包装 ——
  *   - **文本型**(`Remove-Item -Recurse`、`iex`、`iwr … | iex`)扫的是载荷正文,
  *     包在 `-Command '…'` 里照样命中;
@@ -96,13 +96,29 @@ function quoteAsSingleShellToken(text: string): string {
  *     pwsh/powershell,且逐个 argv 匹配。一旦被包进 `-Command` 的载荷,它只是载荷正文里的
  *     一串字面量,argv 扫描永远看不到 → 整条从 prompt-each-time 掉进灰区(codex 报,已实测)。
  *
- * 命中的形态:短名 / 带 `.exe` / 带完整路径 / 带引号 / 前置调用运算符(`&` 调用、`.` 点源)。
- * 归一只搬解释器位置、不改余参,所以对非编码调用(`-File`、普通 `-Command`)判档与此前一致。
+ * 覆盖的形态:短名 / 带 `.exe` / 完整路径 / 带引号路径 / 前置调用运算符(`&` 调用、`.` 点源)
+ * / PowerShell 重复引号转义。只搬位置、不改写内容,所以对非编码调用(`-File`、普通
+ * `-Command`)判档与此前一致。
  *
- * **已知残留**(均属 core 侧 tokenizer/文本判据范围,不在本 adapter 修:见 #2563):
- *   - 未加引号且含空格的完整路径(`& C:\Program Files\…\pwsh.exe -enc X`)—— 该写法本身
- *     不是合法 PowerShell,core 的 Bash 入口同样只判 prompt;
- *   - 解释器不在开头的间接启动(`Start-Process pwsh -ArgumentList '-EncodedCommand …'`)。
+ * ---
+ * **这一层的上限,别再逐个往里补(review 六轮的结论)。**
+ *
+ * argv 型红线的成立条件是「解释器名字能被静态解析到 token 0」,而 PowerShell 命名解释器的
+ * 方式是**开放集合**。实测下列 8 种仍落灰区,且 **`PowerShell` 工具与 `Bash` 原样透传两个
+ * 入口结论完全相同**(都是 `prompt`)—— 说明这不是本 adapter 的包装造成的,而是 core 侧
+ * 对所有 harness 一致存在的缺口(Codex 今天同样有):
+ *
+ *   & ('C:\…\pwsh.exe') -enc X          括号目标        &('pwsh') -enc X
+ *   & C:\Program` Files\…\pwsh.exe …    反引号转义空格   $e = '…'; & $e -enc X   变量间接
+ *   & $(Get-Command pwsh).Source …      子表达式        & ('C:\tmp\' + 'pwsh.exe') …  拼接
+ *   Start-Process pwsh -ArgumentList …  间接启动        C:\Program Files\…\pwsh.exe … 未引号含空格
+ *
+ * 在这里逐个补只会制造 harness 分叉(单侧收严、对外却声称边界闭合),而且补不完。
+ * 正确修法是给 core 的 `POWERSHELL_DANGER_PATTERNS` 加一条**文本型**规则(编码命令 flag +
+ * base64 实参),8 种一次全关、两个入口同时生效 —— 但那会同时收严 Codex/Bash,属跨 harness
+ * 收严,需独立评审。完整实测表与待决策点见 **#2563**。
+ *
+ * 落灰区不等于放行:审阅器面对不可读的 base64 倾向询问。
  */
 function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。

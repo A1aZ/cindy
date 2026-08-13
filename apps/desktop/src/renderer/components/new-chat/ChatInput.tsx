@@ -5176,6 +5176,7 @@ export function ChatInput({
       restoreFiles,
       storageKey,
       deviceLinkDeviceId,
+      remoteHostId,
       t,
       currentModelAgentKind,
       enforceConnectedSourceGate,

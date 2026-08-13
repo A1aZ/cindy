@@ -187,22 +187,44 @@ describe('modelVisibilityPrefs store', () => {
     expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.6' })).toBe(false);
   });
 
-  it('仲裁暂不可用时不允许 owner 写入覆盖迁移输入，恢复后重试并保留旧 override', async () => {
+  it('已归属但非独占时保存新 override，恢复独占后合并旧值且新值优先', async () => {
     memStorage.setItem(
       'xdt:modelVisibilityPrefs:v1',
-      JSON.stringify({ 'codex:openai:gpt-5.6': false }),
+      JSON.stringify({
+        'codex:openai:gpt-5.6': false,
+        'codex:openai:gpt-5.5': true,
+      }),
     );
     setOwnerClaim('owner-a', 1, true, false);
     const module = await loadModuleForOwner();
 
     module.setModelVisibility('codex', 'openai', 'gpt-5.5', false);
-    expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1.owner.owner-a')).toBeNull();
+    expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1.owner.owner-a')).toBe(
+      JSON.stringify({ 'codex:openai:gpt-5.5': false }),
+    );
 
     setOwnerClaim('owner-a', 1, true, true);
     module.setModelVisibility('codex', 'openai', 'gpt-5.5', false);
 
     expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.6' })).toBe(false);
     expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.5' })).toBe(false);
+    expect(memStorage.getItem(
+      'xdt:modelVisibilityPrefs:v1.migration-complete.owner.owner-a',
+    )).toBe('1');
+  });
+
+  it('旧 key 尚未归属任何账号时继续阻止写入，避免抢占未知 owner 的迁移输入', async () => {
+    memStorage.setItem(
+      'xdt:modelVisibilityPrefs:v1',
+      JSON.stringify({ 'codex:openai:gpt-5.6': false }),
+    );
+    setOwnerClaim('owner-a', 1, false, false);
+    const module = await loadModuleForOwner();
+
+    module.setModelVisibility('codex', 'openai', 'gpt-5.5', false);
+
+    expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1.owner.owner-a')).toBeNull();
+    expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.5' })).toBe(true);
   });
 
   it('已有 owner-scoped override 优先，迁移不会覆盖', async () => {

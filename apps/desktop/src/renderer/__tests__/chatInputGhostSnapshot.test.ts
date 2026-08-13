@@ -31,7 +31,7 @@ describe('ChatInput Ghost snapshot contract', () => {
   });
 
   it('does not expose controller-local plugin rows in device-link sessions', () => {
-    expect(source).toContain('if (deviceLinkDeviceId) return [];');
+    expect(source).toContain('if (deviceLinkDeviceId !== null) return [];');
     expect(source).toContain(
       '[deviceLinkDeviceId, pluginsForMenu, pluginAvailableIds, remoteHostId, t]',
     );

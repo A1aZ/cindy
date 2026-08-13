@@ -1007,7 +1007,7 @@ export function ChatInput({
   topSlot,
   collaboration,
 }: ChatInputProps) {
-  // device-link 远程会话:null = 所有权尚未解析,undefined = 已确认本地会话,string = 远程会话。
+  // device-link 远程会话:null = 已确认本地会话,undefined = 所有权尚未解析,string = 远程会话。
   // 预测守卫用原始值区分 null vs undefined,下游通路继续用 ?? undefined 归一化。
   const deviceLinkDeviceId = _deviceLinkDeviceId;
   const { t } = useTranslation();

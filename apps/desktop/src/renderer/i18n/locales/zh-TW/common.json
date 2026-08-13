@@ -6669,7 +6669,7 @@
       }
     },
     "upgradeBanner": {
-      "description": "遠端 {{hostId}} 的 {{manager}} 有新版本可用 — 升級會中斷該機器上當前所有 Claude Code 遠端任務",
+      "description": "遠端 {{hostId}} 的 {{manager}} 有新版本可用 — 升級會中斷該機器上當前所有遠端任務",
       "upgrading": "正在升級遠端 {{hostId}} 的 {{manager}}…",
       "upgrade": "立即升級",
       "upgradeTitle": "下載並啟動新版本 {{manager}}（會中斷當前任務）",

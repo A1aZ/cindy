@@ -142,8 +142,8 @@ Cindy 显式设置:models.json、`--append-system-prompt`、`--session-dir`、�
   用户可见性由 i18n 文案覆盖。
 - **受限能力(有意)**:远端会话不支持本地 fork(`forkSdkSession` 抛 remoteFork);
   `/review` 对 SSH 远端会话前置拦截(device-link 同款);无自动重连(用户手动 Retry,
-  与 CC/Codex 对齐);升级无 banner(版本差静默 kill daemon + 重装,中断 alive 会话为
-  已知取舍)。
+  与 CC/Codex 对齐);版本差 + daemon 活着时 defer 并显示 UpgradeBanner, 用户确认
+  后才 kill + 重装(daemon 已死则静默升级磁盘 bundle)。
 
 ## 6. 上线门禁
 

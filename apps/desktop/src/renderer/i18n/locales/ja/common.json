@@ -6669,7 +6669,7 @@
       }
     },
     "upgradeBanner": {
-      "description": "{{hostId}} の {{manager}} に新しいバージョンがあります — アップグレードするとこのホスト上のすべての Claude Code リモートセッションが中断されます",
+      "description": "{{hostId}} の {{manager}} に新しいバージョンがあります — アップグレードするとこのホスト上のすべてのリモートセッションが中断されます",
       "upgrading": "{{hostId}} の {{manager}} をアップグレード中…",
       "upgrade": "今すぐアップグレード",
       "upgradeTitle": "新しい {{manager}} をダウンロードして再起動（現在のセッションは中断されます）",

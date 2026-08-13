@@ -6672,7 +6672,7 @@
       }
     },
     "upgradeBanner": {
-      "description": "A new {{manager}} version is available on {{hostId}} — upgrading will interrupt all active Claude Code remote sessions on this host",
+      "description": "A new {{manager}} version is available on {{hostId}} — upgrading will interrupt all active remote sessions on this host",
       "upgrading": "Upgrading {{manager}} on {{hostId}}…",
       "upgrade": "Upgrade now",
       "upgradeTitle": "Download and restart {{manager}} (will interrupt current sessions)",

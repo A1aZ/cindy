@@ -226,12 +226,8 @@ export function ensurePiManagerDaemon(
   const key = `${host.id}`;
   const inFlight = piManagerEnsureInFlight.get(key);
   if (inFlight) {
-    // [pi-ssh-diag] 并发 ensure 去重命中 —— 协同委托下 lead/worker 双会话并发
-    // ensure 会走这里;命中本身无副作用, 只记录便于对齐时序。
-    console.error(`[pi-ssh-diag] ensurePiManagerDaemon dedup-hit host=${host.id}`);
     return inFlight;
   }
-  console.error(`[pi-ssh-diag] ensurePiManagerDaemon enter host=${host.id}`);
   const promise = ensurePiManagerDaemonInner(host, opts)
     .finally(() => piManagerEnsureInFlight.delete(key));
   piManagerEnsureInFlight.set(key, promise);
@@ -301,9 +297,6 @@ async function ensurePiManagerDaemonInner(
     timeoutMs: 10_000,
     label: 'pi-manager-daemon-check',
   });
-  // [pi-ssh-diag] 在线校验结果 —— DEAD 会进入下方 kill+respawn, 若 daemon 实际
-  // 活着(误判)这里就是「daemon 被意外 SIGTERM」的第一现场。
-  console.error(`[pi-ssh-diag] daemon-check result host=${host.id} exit=${checkResult.exitCode} out=${JSON.stringify(checkResult.stdout.trim().slice(0, 100))}`);
   if (checkResult.exitCode === 0 && checkResult.stdout.trim().includes('ALIVE')) {
     // connect test 通过, 若传了 protocolVersion 则额外校验 daemon 运行期协议版本。
     // 用 String.fromCharCode(10) 代替 "\n" 避 template literal + shellQuote 双重
@@ -321,7 +314,6 @@ async function ensurePiManagerDaemonInner(
         timeoutMs: 10_000,
         label: 'pi-manager-protocol-check',
       });
-      console.error(`[pi-ssh-diag] protocol-check result host=${host.id} exit=${protoResult.exitCode} out=${JSON.stringify(protoResult.stdout.trim().slice(0, 60))}`);
       if (protoResult.exitCode === 0 && protoResult.stdout.trim().includes('PROTOCOL_OK')) return;
       // 协议不匹配 → 不 return, 继续走下方 kill+respawn。
     } else {
@@ -329,10 +321,6 @@ async function ensurePiManagerDaemonInner(
     }
   }
 
-  // [pi-ssh-diag] 走到这里 = check 判 DEAD → 进入 kill+respawn。若 daemon 是活的,
-  // 下面的 pidfile/orphan kill 会发 SIGTERM 杀活 daemon —— 复现时此日志与远端
-  // audit 行的时间戳对上了就是根因。
-  console.error(`[pi-ssh-diag] daemon-check DEAD -> kill+respawn host=${host.id}`);
   // Spawn detached. `node pi-manager.mjs daemon --socket <sock> --detach
   // --log-file <log>` re-spawns itself as a detached grandchild and prints PID.
   const spawnScript = [
@@ -407,7 +395,6 @@ async function ensurePiManagerDaemonInner(
       `pi-manager daemon spawn failed: ${spawnResult.stderr.trim().slice(0, 300) || spawnResult.stdout.trim().slice(0, 300)}`,
     );
   }
-  console.error(`[pi-ssh-diag] daemon spawn done host=${host.id} ${spawnResult ? `exit=${spawnResult.exitCode} out=${JSON.stringify(spawnResult.stdout.trim().slice(0, 60))}` : 'channel-closed-before-result'}`);
 
   // Wait for socket to appear (grandchild boot may take a moment).
   const waitScript = [
@@ -422,7 +409,6 @@ async function ensurePiManagerDaemonInner(
     timeoutMs: 15_000,
     label: 'pi-manager-daemon-wait',
   });
-  console.error(`[pi-ssh-diag] daemon wait-result host=${host.id} exit=${waitResult.exitCode} out=${JSON.stringify(waitResult.stdout.trim().slice(0, 60))}`);
   if (waitResult.exitCode !== 0 || !waitResult.stdout.trim().includes('READY')) {
     // 轮 21-W3 HIGH:超时/失败时已 spawn 的 daemon 进程可能仍在(启动慢/半挂),
     // 直接抛错会让调用方重试时双 spawn, 且旧进程残留占 socket。先按

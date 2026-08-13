@@ -6669,7 +6669,7 @@
       }
     },
     "upgradeBanner": {
-      "description": "원격 {{hostId}}의 {{manager}}에 새 버전이 있습니다 — 업그레이드하면 이 호스트의 모든 Claude Code 원격 세션이 중단됩니다",
+      "description": "원격 {{hostId}}의 {{manager}}에 새 버전이 있습니다 — 업그레이드하면 이 호스트의 모든 원격 세션이 중단됩니다",
       "upgrading": "{{hostId}}의 {{manager}}를 업그레이드하는 중…",
       "upgrade": "지금 업그레이드",
       "upgradeTitle": "새 {{manager}} 다운로드 및 재시작 (현재 세션이 중단됨)",

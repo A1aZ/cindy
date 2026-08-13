@@ -135,7 +135,6 @@ async function ensurePiManagerInstalledInner(
   logger: Logger,
   onEvent?: PiManagerInstallEventCallback,
 ): Promise<void> {
-  console.error(`[pi-ssh-diag] ensurePiManagerInstalled enter host=${host.id}`);
   let probe = await probePiManager(host);
   // 临时诊断(排查 remoteVersion:null / LAZY_CREATE_FAILED):probe 原始结果。
   logger.info('pi-manager probe debug', {
@@ -432,10 +431,6 @@ export async function piManagerList(
  * daemon 的 SIGTERM handler 会 shutdownAll + 清理 env-file/socket。
  */
 export async function killRemotePiManagerDaemon(host: RemoteHost): Promise<void> {
-  // [pi-ssh-diag] 显式 daemon kill 入口 —— 复现时此日志与远端 audit 行时间戳
-  // 对齐即为此调用方所为。stack 前三行定位调用链。
-  const diagStack = new Error().stack?.split('\n').slice(2, 5).map((l) => l.trim()).join(' <- ') ?? '(no stack)';
-  console.error(`[pi-ssh-diag] killRemotePiManagerDaemon enter host=${host.id} stack=${diagStack}`);
   const probe = await probePiManager(host);
   const pidFile = `${probe.installDir}/pi-manager/pi-manager.pid`;
   const killScript = [
@@ -480,7 +475,6 @@ export async function killRemotePiManagerDaemon(host: RemoteHost): Promise<void>
     label: 'pi-manager-daemon-force-kill',
   });
   const out = result.stdout.trim();
-  console.error(`[pi-ssh-diag] killRemotePiManagerDaemon result host=${host.id} exit=${result.exitCode} out=${JSON.stringify(out.slice(0, 60))}`);
   if (result.exitCode !== 0 && !out.includes('NO_DAEMON')) {
     // 轮 13 MEDIUM-3:STILL_ALIVE(D 状态杀不死)必须抛错 —— 静默继续会让调用方
     // 以为 daemon 已死, 实际旧 daemon 仍占 socket, ensurePiManagerDaemon 探活

@@ -2037,10 +2037,6 @@ async function softClosePiSessionsForHost(hostId: string, opts?: { onlySessionId
 }
 
 export async function cleanupRemotePiDaemonsOnHost(host: RemoteHost): Promise<void> {
-  // [pi-ssh-diag] host disconnect/remove 的 daemon 清理入口 —— 此路径会杀远端
-  // 会话, 复现时若此日志与远端 audit 行对齐即为该调用链。
-  const diagStack = new Error().stack?.split('\n').slice(2, 5).map((l) => l.trim()).join(' <- ') ?? '(no stack)';
-  console.error(`[pi-ssh-diag] cleanupRemotePiDaemonsOnHost enter host=${host.id} stack=${diagStack}`);
   // pi-manager RPC 清理(唯一 daemon 形态 —— python daemon 已退役)。
   // list 失败(未装/daemon 挂)留日志, 残留由 daemon 空闲超时兜底回收。
   try {

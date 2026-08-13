@@ -4752,9 +4752,21 @@ export function ChatInput({
           workingDirRef.current,
         );
         const ghostCommandWord = parseGhostCommandWord(text);
+        // Host-capability 芯片同样计入最近插件使用(与 $command 路径对齐)：
+        // 从 eligibleGhosts 解析出仍有效(启用 + workdir + manifest 一致 + 非远程会话)
+        // 的 host 插件对象交给 usedGhost，使发送后 markUsed 能更新该插件的最近使用排序。
+        const hostCapabilityGhost =
+          hostCapability !== undefined && !remoteHostId && !deviceLinkDeviceId
+            ? eligibleGhosts.find(
+                (g) =>
+                  g.manifest.id === hostCapability.ghostId &&
+                  g.enabled &&
+                  hostCapabilityForGhost(g) === hostCapability.capability,
+              )
+            : undefined;
         const usedGhost = ghostCommandWord
           ? findGhostByCommand(eligibleGhosts, ghostCommandWord)
-          : null;
+          : (hostCapabilityGhost ?? null);
         const textToSend = expandGhostCommand(text, eligibleGhosts);
         // 发送前校验 host-capability 插件仍处于启用且 workdir 可用的状态。
         // 若用户在插入芯片后停用/卸载了该插件，芯片内序列化的 ghostId/capability
@@ -4762,16 +4774,7 @@ export function ChatInput({
         // 额外收口(remote session + manifest 一致性)：
         //   - SSH(remoteHostId)/device-link(deviceLinkDeviceId) 远程会话不展开控制端 Host 路由；
         //   - 插件更新后芯片保留旧 capability 时，manifest 当前声明必须仍匹配才放行。
-        const isHostCapabilityValid =
-          hostCapability !== undefined &&
-          !remoteHostId &&
-          !deviceLinkDeviceId &&
-          eligibleGhosts.some(
-            (g) =>
-              g.manifest.id === hostCapability.ghostId &&
-              g.enabled &&
-              hostCapabilityForGhost(g) === hostCapability.capability,
-          );
+        const isHostCapabilityValid = hostCapabilityGhost !== undefined;
         // 校验失败(插件停用/卸载/超 workdir/远程会话)时不静默退化为普通文本发送:
         // 芯片承载的是用户选择的能力路由意图,退化发送会丢失 Host 路由,仅芯片消息还会
         // 以空文本派发,静默丢弃用户意图。直接提示并拦截,让用户修复插件状态后重发。

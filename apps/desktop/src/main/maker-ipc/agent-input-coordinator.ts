@@ -2116,6 +2116,7 @@ export class AgentInputCoordinator {
         sessionId,
         clientId: pausedQueueHeadRecoveryClientId,
       });
+      this.touchUserSend(sessionId);
     } else {
       this.clearErrorUnlessQueueHeadBlocked(state);
     }

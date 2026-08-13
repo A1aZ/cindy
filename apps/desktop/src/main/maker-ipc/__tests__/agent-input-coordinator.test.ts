@@ -4424,6 +4424,7 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
 
     h.coordinator.enqueue(sid, second);
     await flush();
+    mocks.touchUserSendInDb.mockClear();
 
     // A mechanical duplicate resume must not retry an unpaused recovery. Only
     // the visible paused-queue Continue action owns the recovery transition.
@@ -4431,6 +4432,7 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
     await flush();
     let projection = latestProjection(h.projections);
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.touchUserSendInDb).not.toHaveBeenCalled();
     expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-1' });
 
     projection = h.coordinator.pausePendingQueueForRewind(sid);
@@ -4446,6 +4448,7 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
     await flush();
     projection = latestProjection(h.projections);
     expect(h.sendToAgent).toHaveBeenCalledTimes(1);
+    expect(mocks.touchUserSendInDb).not.toHaveBeenCalled();
     expect(projection.recovery).toEqual({ kind: 'queue-head', clientId: 'q-1' });
     expect(projection.pendingQueue.map((item) => item.clientId)).toEqual(['q-2', 'q-1']);
 
@@ -4460,6 +4463,8 @@ describe('AgentInputCoordinator stop and drain boundaries', () => {
     projection = latestProjection(h.projections);
     expect(h.sendToAgent).toHaveBeenCalledTimes(2);
     expect(h.sendToAgent.mock.calls[1]?.[1]).toEqual({ type: 'user', content: 'first' });
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledOnce();
+    expect(mocks.touchUserSendInDb).toHaveBeenCalledWith(sid, undefined);
     expect(projection.recovery).toBeNull();
     expect(projection.error).toBeNull();
     expect(projection.pendingQueue.map((item) => item.clientId)).toEqual(['q-2']);

@@ -475,7 +475,10 @@ async function ensurePiManagerDaemonInner(
       // 改用 for 循环 + 命令替换(同一 shell, 变量共享)。存活标志置位后跳过
       // unlink 并整体退出。
       `ORPHAN_LEFT=0`,
-      `for ORPHAN in $(ps -axo pid=,command= | grep -F -- "pi-manager.mjs daemon --socket ${probe.piManagerSockPath}" | awk '{print $1}'); do`,
+      // 轮 43 P2(codex-connector):grep 行自身也含匹配串, bash -c 脚本同样,
+      // 会误杀自己的 shell。加 grep -v grep 排除 grep 进程, $$ 排本 shell。
+      `for ORPHAN in $(ps -axo pid=,command= | grep -F -- "pi-manager.mjs daemon --socket ${probe.piManagerSockPath}" | grep -v -F "grep" | awk '{print $1}'); do`,
+      `  [ "$ORPHAN" = "$$" ] && continue`,
       `  kill "$ORPHAN" >/dev/null 2>&1 || true`,
       `  for i in $(seq 1 15); do kill -0 "$ORPHAN" 2>/dev/null || break; sleep 0.2; done`,
       `  if kill -0 "$ORPHAN" 2>/dev/null; then`,

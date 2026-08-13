@@ -48,13 +48,26 @@ export async function generateAndPersistFbotTitle(
   seedText: string,
   prefix: string = FBOT_TITLE_PREFIX,
 ): Promise<string | null> {
-  const generated = (
-    await generateMakerSessionTitle(seedText, 'claude-code', sessionId)
-  )?.trim();
+  const generated = await generateImSessionTitleText(sessionId, seedText);
   if (!generated) return null;
 
   const title = fbotTitle(generated, prefix);
   await desktopSessionStorage.update(sessionId, { title });
   broadcastSessionPatched(sessionId, { title });
   return title;
+}
+
+/** 只生成标题文本(不落库) — 供渠道自定义拼装(飞书话题标题)复用 oneshot 通道。 */
+export async function generateImSessionTitleText(
+  sessionId: string,
+  seedText: string,
+): Promise<string | null> {
+  const generated = (await generateMakerSessionTitle(seedText, 'claude-code', sessionId))?.trim();
+  return generated || null;
+}
+
+/** 落库 + 广播一个已拼装好的标题(渠道 composeGeneratedTitle 的产物)。 */
+export async function persistGeneratedSessionTitle(sessionId: string, title: string): Promise<void> {
+  await desktopSessionStorage.update(sessionId, { title });
+  broadcastSessionPatched(sessionId, { title });
 }

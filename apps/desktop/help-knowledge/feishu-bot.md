@@ -23,9 +23,10 @@ Cindy can send DMs and take commands through a FeiShu (Lark) bot. (This is unrel
 
 **Group chats:**
 
-- In a group, @ the bot to ask a question. The bot pages back through recent chat history (newest first, until the messages stop being relevant to your question) and answers with that history as context — including images and files shared in the chat.
-- @-ing the bot inside a thread (话题) uses that thread's own history as context instead of the main group stream.
-- Group sessions are titled `[飞书·群] {group name}` / `[飞书·话题] {group name}` in the sidebar.
+- In a group, @ the bot to ask a question. The bot opens a new thread (话题) for the reply — the main stream stays clean and each thread is its own session, like Slack threads.
+- The bot pages back through recent chat history (newest first, until the messages stop being relevant to your question) and answers with that history as context — including images and files shared in the chat. For a fresh thread opened from the main stream, the context still comes from the main stream history.
+- @-ing the bot inside an existing thread uses that thread's own history as context.
+- Thread sessions are titled `[飞书·{group name}·{topic summary}] {id suffix}` in the sidebar.
 
 **Permissions for group features:**
 

@@ -63,7 +63,7 @@ vi.mock('../../defaultSessionSettings', () => ({
   })),
 }));
 
-import { createImSessionRepo, refreshResolvedSessionTitle, type ImSessionRow } from '../sessionRepo';
+import { createImSessionRepo, type ImSessionRow } from '../sessionRepo';
 import type { ImOrchestratorConfig, ImSessionNamespace } from '../types';
 
 const ns: ImSessionNamespace = {
@@ -142,31 +142,20 @@ describe('sessionRepo.createSession broadcast', () => {
     expect(mocks.updateSet).not.toHaveBeenCalled();
   });
 
-  it('refreshResolvedSessionTitle: 解析结果与现名不同才写库+广播; 相同/null 不动', async () => {
-    mocks.selectLimit.mockResolvedValueOnce([{ title: '[飞书·群] oc_abc123' }]);
+  it('resolveSessionTitle 只对新建行生效 — 复活行保留历史标题不回调解析器', async () => {
+    // upsert 前预检 select 返回已存在的行 → 复活路径, 不解析标题
+    // (oneshot 拼装过的话题名不能被渠道解析结果刷掉)。
+    mocks.selectLimit.mockResolvedValueOnce([{ title: '[飞书·群名·简介] abc123' }]);
+    const resolveSessionTitle = vi.fn<
+      (userId: string, scopeKey?: string) => Promise<string | null>
+    >(async () => '[飞书·群] 产品交流群');
+    const repo = createImSessionRepo({ agentKind: 'claude-code' } as ImOrchestratorConfig, {
+      ...ns,
+      resolveSessionTitle,
+    });
     mocks.updateSet.mockClear();
-    await refreshResolvedSessionTitle({
-      sessionId: 'feishu_cli_abc_g-oc_abc123',
-      resolve: async () => '[飞书·群] 产品交流群',
-    });
-    expect(mocks.updateSet).toHaveBeenCalledWith({ title: '[飞书·群] 产品交流群' });
-    expect(mocks.webContentsSend).toHaveBeenCalledWith('local-db:sessions:patched', {
-      sessionId: 'feishu_cli_abc_g-oc_abc123',
-      patch: { title: '[飞书·群] 产品交流群' },
-    });
-
-    // 解析结果与现名相同 → 不动行
-    mocks.selectLimit.mockResolvedValueOnce([{ title: '[飞书·群] 产品交流群' }]);
-    mocks.updateSet.mockClear();
-    await refreshResolvedSessionTitle({
-      sessionId: 'feishu_cli_abc_g-oc_abc123',
-      resolve: async () => '[飞书·群] 产品交流群',
-    });
-    expect(mocks.updateSet).not.toHaveBeenCalled();
-
-    // 解析器返回 null(如拉不到群名) → 不动行
-    mocks.selectLimit.mockResolvedValueOnce([{ title: 'old' }]);
-    await refreshResolvedSessionTitle({ sessionId: 'x', resolve: async () => null });
+    await repo.createSession('bot', 'user', undefined, preparedRow);
+    expect(resolveSessionTitle).not.toHaveBeenCalled();
     expect(mocks.updateSet).not.toHaveBeenCalled();
   });
 });

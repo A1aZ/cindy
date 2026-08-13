@@ -8,9 +8,10 @@
  *     MCP (send_file_to_user)
  *   - ack emoji: REACTION_PROCESSING
  *   - 群 lane(senderId = `g/{chatId}[/{threadId}]`, @cindy/im feishu/codec.ts):
- *     每群/每话题一个会话; 群轮次挂强确认策略 + 触发时按页回翻群历史
- *     (50/页, 最多 5 页, 模型相关性早停), 图片/文件下载后进上下文,
- *     统一防注入包裹(见 ./groupContext.ts)。
+ *     群主流 @ 入站即开话题(每话题一个会话, 群 lane 仅开话题失败的降级路径);
+ *     群轮次挂强确认策略 + 触发时按页回翻群历史(50/页, 最多 5 页, 模型相关性
+ *     早停), 图片/文件下载后进上下文, 统一防注入包裹(见 ./groupContext.ts)。
+ *     话题会话标题 = [飞书·{群名}·{话题简介}] {threadId 后 6 位}。
  *     (飞书有拉历史 API, 不需要 telegram 那样的本地群消息池)。
  */
 
@@ -182,8 +183,9 @@ export function buildFeishuAdapter(
         feishuBotAppId: botAppId,
         feishuOpenId: userId,
       }),
-      // 群 lane 建行后异步拉群名把标题升级为 [飞书·群] {群名} /
+      // 群/话题 lane 建行后异步拉群名把标题升级为 [飞书·群] {群名} /
       // [飞书·话题] {群名}; 拉不到(无「获取群基本信息」权限)保持后缀回落。
+      // 只对新建行生效(sessionRepo 侧保证), 复活行保留自己的历史标题。
       resolveSessionTitle: async (userId) => {
         const lane = decodeFeishuLaneUserId(userId);
         if (!lane) return null;
@@ -191,9 +193,23 @@ export function buildFeishuAdapter(
         if (!name) return null;
         return `${groupPrefix(lane.threadId)}${name}`;
       },
-      // 群 lane 标题是稳定的群名, 不参与首条消息的 oneshot 起名
-      // (否则会被首条消息话题标题漂掉, 且拿到的还是 DM 前缀)。
-      skipOneshotTitleFor: (userId) => userId.startsWith('g/'),
+      // 群主流 lane(仅开话题失败的降级路径)标题是稳定的群名, 不参与首条消息
+      // oneshot 起名; 话题 lane 需要 oneshot 出「话题简介」, 照常参与。
+      skipOneshotTitleFor: (userId) => {
+        const lane = decodeFeishuLaneUserId(userId);
+        return lane !== null && lane.threadId === '';
+      },
+      // 话题 lane 的 oneshot 标题拼装: [飞书·{群名}·{话题简介}] {threadId 后 6 位}
+      // — 群名拉不到时退化为 [飞书·话题·{简介}]。DM/群主流 lane 返回 null,
+      // 回落默认 generatedTitlePrefix 路径(DM → [飞书·DM] {简介})。
+      composeGeneratedTitle: async (userId, _scopeKey, generated) => {
+        const lane = decodeFeishuLaneUserId(userId);
+        if (!lane || !lane.threadId) return null;
+        const name = await resolveChatName(feishuIm, lane.chatId);
+        const label = isLark() ? 'Lark' : '飞书';
+        const mid = name ? `${label}·${name}·${generated}` : `${label}·话题·${generated}`;
+        return `[${mid}] ${lane.threadId.slice(-6)}`;
+      },
     },
     processingEmoji: REACTION_PROCESSING,
     buildVendorOptions: (userId) => ({ feishuChatId: userId, source: 'feishu' }),
@@ -206,8 +222,12 @@ export function buildFeishuAdapter(
     prepareAgentTurnText: async (event) => {
       const lane = decodeFeishuLaneUserId(event.senderId);
       if (!lane) return null;
+      // 群主流 @ 开新话题: 上下文取数 lane 与路由 lane 分离(见
+      // IMMessageEvent.groupContextLane) — 新话题是空的, 群历史仍按群主流
+      // 拉取, 「总结上面」等依赖上文的消息才能拿到上下文。
+      const contextLane = event.groupContextLane ?? lane;
       const built = await buildFeishuGroupContext({
-        lane,
+        lane: contextLane,
         triggerMessageId: event.messageId,
         question: event.text,
         deps: {

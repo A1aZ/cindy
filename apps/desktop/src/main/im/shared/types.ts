@@ -91,10 +91,23 @@ export interface ImSessionNamespace {
    */
   resolveSessionTitle?(userId: string, scopeKey?: string): Promise<string | null>;
   /**
-   * 该 userId 的会话不参与 oneshot 起名(飞书群 lane 的标题是稳定的
-   * 「群名」, 不该被首条消息的话题标题漂掉; DM lane 仍照常起名)。
+   * 该 userId 的会话不参与 oneshot 起名(飞书群主流 lane 只剩开话题失败的
+   * 降级路径, 标题是稳定的「群名」, 不该被首条消息的话题标题漂掉;
+   * 话题 lane 与 DM lane 仍照常起名)。
    */
   skipOneshotTitleFor?(userId: string): boolean;
+  /**
+   * 渠道自定义 oneshot 标题拼装(飞书话题 lane →
+   * `[飞书·{群名}·{话题简介}] {threadId 后 6 位}`)。收到 oneshot 生成的
+   * 简介文本后返回完整标题; 返回 null = 该 lane 不适用, 回落默认
+   * generatedTitlePrefix 路径。
+   */
+  composeGeneratedTitle?(
+    userId: string,
+    scopeKey: string | undefined,
+    generated: string,
+    sessionId: string,
+  ): Promise<string | null>;
   /**
    * 非接管会话 oneshot 生成正式标题时的前缀(如 'Slack · ' / '[飞书·DM] ')。
    *   - threadScoped 渠道(slack): 新 thread 会话的首条消息触发;

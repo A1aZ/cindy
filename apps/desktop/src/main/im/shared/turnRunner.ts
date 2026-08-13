@@ -121,7 +121,12 @@ import {
   type ImAuthRouteStatus,
   type ImAuthCheckDeps,
 } from './authCheck';
-import { FBOT_DRAFT_TITLE, generateAndPersistFbotTitle } from './fbotTitle';
+import {
+  FBOT_DRAFT_TITLE,
+  generateAndPersistFbotTitle,
+  generateImSessionTitleText,
+  persistGeneratedSessionTitle,
+} from './fbotTitle';
 import { materializeLocalMarkdownImages } from './localMarkdownImages';
 import {
   createTurnActivity,
@@ -136,7 +141,6 @@ import { createTurnPresenter, DEFAULT_PRESENTER_POLICY, type TurnPresenter } fro
 import {
   toCoreAgentKind,
   readPermissionMode,
-  refreshResolvedSessionTitle,
   touchUserSent as repoTouchUserSent,
   updatePermissionMode,
   type ImSessionRepo,
@@ -748,24 +752,6 @@ export function createTurnRunner(
       ((operation: () => Promise<void>): void => {
         void operation();
       });
-    // 存量会话标题自愈: 旧版本建行的会话标题停在旧格式(id 后缀 / 早前被
-    // oneshot 漂成 DM 前缀), 存量行下次收到消息时后台解析正式标题并刷新
-    // (飞书群 lane → [飞书·群] {群名})。新建行由 createSession 建行时解析,
-    // 这里只补存量; 失败 swallow, 标题是展示层, 不阻塞 turn。
-    const resolveSessionTitle = adapter.sessions.resolveSessionTitle;
-    if (!target.created && resolveSessionTitle) {
-      startBackgroundTask(async () => {
-        try {
-          await refreshResolvedSessionTitle({
-            sessionId: row.id,
-            resolve: () => resolveSessionTitle(userId, target.scopeKey),
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(`session title refresh failed (non-fatal): ${msg}`);
-        }
-      });
-    }
     // 受保护群的触发消息不能被总结成会话标题。标题是**长期记录**, 会一直挂在
     // 侧边栏上 —— 把「禁止保存内容」的正文摘要留在那里, 与把它写进 transcript
     // 是同一条边界被绕过, 而且主 turn 最终没被 provider 接受时照样会留下。
@@ -794,7 +780,9 @@ export function createTurnRunner(
       // 非 threadScoped 渠道(feishu/discord, 一 (bot,user) 一行长期复用):
       // 每条"新对话"的首条消息重新起名 —— sdkSessionId == null 即新上下文
       // (首次建行 / /new 重置后), 标题跟随当前话题而不是永远停在第一次。
-      startBackgroundTask(() => maybeGenerateImSessionTitle(row.id, text, threadHeaderCardId));
+      startBackgroundTask(() =>
+        maybeGenerateImSessionTitle(row.id, userId, target.scopeKey, text, threadHeaderCardId),
+      );
     }
 
     const item: QueuedSend = {
@@ -1701,15 +1689,38 @@ export function createTurnRunner(
    */
   async function maybeGenerateImSessionTitle(
     sessionId: string,
+    userId: string,
+    scopeKey: string | undefined,
     text: string,
     headerCardId: string | null,
   ): Promise<void> {
     const threadUiPack = adapter.ui.thread;
     const configuredPrefix = adapter.sessions.generatedTitlePrefix;
-    if (configuredPrefix === undefined && !(adapter.threadScoped && threadUiPack)) return;
+    const composeTitle = adapter.sessions.composeGeneratedTitle;
+    if (
+      configuredPrefix === undefined &&
+      !composeTitle &&
+      !(adapter.threadScoped && threadUiPack)
+    )
+      return;
     const prefix = typeof configuredPrefix === 'function' ? configuredPrefix() : configuredPrefix;
     try {
-      const title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+      let title: string | null;
+      if (composeTitle) {
+        // 渠道自定义拼装(飞书话题 lane → [飞书·{群名}·{简介}] {threadId 后 6 位}):
+        // oneshot 只负责出「话题简介」文本, 完整标题由渠道按 lane 拼; 返回 null
+        // (该 lane 不适用, 如 DM)回落默认 prefix 路径。
+        const generated = await generateImSessionTitleText(sessionId, text);
+        if (!generated) return;
+        title = await composeTitle(userId, scopeKey, generated, sessionId);
+        if (title) {
+          await persistGeneratedSessionTitle(sessionId, title);
+        } else {
+          title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+        }
+      } else {
+        title = await generateAndPersistFbotTitle(sessionId, text, prefix);
+      }
       if (!richIm || !title || !headerCardId || !threadUiPack) return;
       await richIm.updateInteractiveCard(headerCardId, {
         ...threadUiPack.sessionHeaderTitled(title),

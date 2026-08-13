@@ -17,7 +17,7 @@ export function resolveMessageStreamIndicatorBottomOffset({
 }
 
 export function measureComposerStackTopOffset(overlayEl: HTMLElement): number | undefined {
-  const composerStack = overlayEl.querySelector<HTMLElement>('[data-chat-input-root]');
+  const composerStack = overlayEl.querySelector<HTMLElement>('[data-chat-composer-stack]');
   if (!composerStack) return undefined;
 
   return overlayEl.getBoundingClientRect().bottom - composerStack.getBoundingClientRect().top;

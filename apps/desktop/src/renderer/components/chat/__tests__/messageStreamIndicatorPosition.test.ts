@@ -26,12 +26,12 @@ describe('resolveMessageStreamIndicatorBottomOffset', () => {
     expect(resolveMessageStreamIndicatorBottomOffset({ bottomPadding: 40 })).toBe(12);
   });
 
-  it('measures from the whole composer stack so plan mode stays above the indicator', () => {
+  it('measures from the outer composer stack so goal and plan indicators stay above the button', () => {
     const composerStack = {
       getBoundingClientRect: () => ({ top: 620 }),
     } as HTMLElement;
     const querySelector = vi.fn((selector: string) =>
-      selector === '[data-chat-input-root]' ? composerStack : null,
+      selector === '[data-chat-composer-stack]' ? composerStack : null,
     );
     const overlay = {
       querySelector,
@@ -39,6 +39,6 @@ describe('resolveMessageStreamIndicatorBottomOffset', () => {
     } as unknown as HTMLElement;
 
     expect(measureComposerStackTopOffset(overlay)).toBe(180);
-    expect(querySelector).toHaveBeenCalledWith('[data-chat-input-root]');
+    expect(querySelector).toHaveBeenCalledWith('[data-chat-composer-stack]');
   });
 });

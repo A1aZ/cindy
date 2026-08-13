@@ -4154,6 +4154,7 @@ export function CCAgentSessionView({
             <div
               className="mx-auto flex flex-col items-center gap-[10px]"
               style={{ width: inputWidth }}
+              data-chat-composer-stack
             >
               {/* FP-7 / F-PERM-2 / F7.4: mutually exclusive prompts.
                  Plan review takes precedence — the SDK won't interleave it with

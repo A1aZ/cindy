@@ -141,6 +141,12 @@ const STARTUP_MANIFEST_TIMEOUT_MS = 8_000;
 let currentStatus: UpdateStatus = 'idle';
 let readyVersion: string | undefined;
 let readyFilePath: string | undefined;
+/**
+ * 更新渠道代际计数:用户在下载进行中关掉 beta(clearStagedPatch)时 +1,
+ * 让 in-flight 的 checkForUpdate 在写回 patch-info / 恢复旧 patch 前察觉
+ * 「渠道已变」,放弃本次下载产物,避免 opt-out 后仍被装到 beta 版本。
+ */
+let updateChannelEpoch = 0;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let autoRelaunchPollTimer: ReturnType<typeof setInterval> | null = null;
 let isRelaunching = false;
@@ -564,6 +570,9 @@ function clearStagedPatch(): void {
   readyVersion = undefined;
   readyFilePath = undefined;
   removePatchInfo();
+  // 递增代际:任何 in-flight 的 checkForUpdate 在写回 patch 前都会看到代际变化,
+  // 从而放弃本次(基于旧渠道的)下载产物,不把 beta patch 重新落盘。
+  updateChannelEpoch += 1;
   if (currentStatus === 'ready' || currentStatus === 'superseding') {
     setStatus('idle');
   }
@@ -701,6 +710,9 @@ export function isVersionlessAppVersion(version: string): boolean {
 
 async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<CheckForUpdateResult> {
   log.info('checkForUpdate() called, currentStatus=%s', currentStatus);
+  // 快照发起时的渠道代际;下载期间若用户 opt-out(clearStagedPatch 递增),
+  // 成功/失败写回前都据此作废本次产物。
+  const channelEpochAtStart = updateChannelEpoch;
 
   if (isVersionlessAppVersion(app.getVersion())) {
     log.info('Versionless build (placeholder %s) — in-app update disabled', app.getVersion());
@@ -866,6 +878,14 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
       cleanOldFiles(fileName);
     }
 
+    // 下载期间用户 opt-out(渠道代际已变):放弃这次下载的产物,不写 patch-info。
+    // 否则会重新落盘一份 beta patch,用户关掉开关后仍被呈现 beta 更新。
+    if (channelEpochAtStart !== updateChannelEpoch) {
+      log.info('update channel changed during download — discarding patch v%s', latestVersion);
+      try { fs.unlinkSync(destPath); } catch { /* ignore */ }
+      return 'idle';
+    }
+
     const requireRelogin = manifest.app.requireRelogin === true;
     writePatchInfo({
       version: latestVersion,
@@ -899,6 +919,11 @@ async function doCheckForUpdate(manifestOverride?: Manifest | null): Promise<Che
     // readyFilePath 全都没动过,直接重新广播 ready 让 banner 按钮从 loading 恢复成可点。
     // 下一次 30min 轮询会再次尝试 b。
     if (wasReady) {
+      // 下载期间用户 opt-out:旧 patch 已被 clearStagedPatch 清掉,不能恢复。
+      if (channelEpochAtStart !== updateChannelEpoch) {
+        log.info('update channel changed during superseding download — not restoring stale patch');
+        return 'idle';
+      }
       log.info('Superseding download failed — rolling back to ready v%s', previousReadyVersion);
       readyVersion = previousReadyVersion;
       readyFilePath = previousReadyFilePath;

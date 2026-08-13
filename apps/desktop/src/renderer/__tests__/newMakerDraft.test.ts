@@ -381,6 +381,28 @@ describe('newMakerDraft store', () => {
     expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
   });
 
+  it('patchVendorPrefsPreservingModelChoice:可写回活动模型但不打标也不清标', async () => {
+    const m1 = await loadModule();
+    m1.patchVendorPrefsPreservingModelChoice('cc', {
+      model: 'claude-opus-4-8',
+      effort: 'high',
+    });
+    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({});
+    expect(m1.getPersistedVendorModel('cc')).toBe('');
+
+    m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6' });
+    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
+
+    m1.patchVendorPrefsPreservingModelChoice('cc', {
+      model: 'claude-opus-4-8',
+      effort: 'high',
+    });
+    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
+    expect(m1.getPersistedVendorModel('cc')).toBe('claude-opus-4-8');
+  });
+
   it('已有任务换模走 patchVendorPrefs,下次新建跟随这次选择', async () => {
     const m1 = await loadModule();
     m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6' });

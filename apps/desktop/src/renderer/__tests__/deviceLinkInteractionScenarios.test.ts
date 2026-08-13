@@ -972,6 +972,8 @@ describe('远程交互接线不变式', () => {
     expect(appSrc).toContain(
       'markModelChoice === false ? patchVendorPrefsPreservingModelChoice : patchVendorPrefs',
     );
+    expect(appSrc).toContain('model: modelId');
+    expect(appSrc).not.toContain("markModelChoice === false ? {} : { model: modelId }");
 
     const newMakerDraftRouteSrc = read('features/cc-agent/NewMakerDraftRoute.tsx');
     const pushActiveStart = newMakerDraftRouteSrc.indexOf('const pushActiveDraftPref');

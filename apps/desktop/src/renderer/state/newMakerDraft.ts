@@ -744,9 +744,8 @@ function patchVendorPrefsInternal(
       // 新建页 picker 或已有任务换模 → 打标记,下次新建跟随这次选择,不再回落区域默认。
       modelChosen[vendor] = true;
     }
-    // markModelChoice=false 只回写思考档 / 来源等非选模字段。即便 patch 里带着
-    // 当前任务的 model id,也不得把已有标记清掉,否则已有任务里随手换模 / 改档
-    // 会让下次新建重新落到服务端区域默认。
+    // markModelChoice=false 仍可写回当前活动模型(远程草稿 / 旧控制端 wire
+    // 会带 modelId),但不得打标,也不得清掉已有标记。
   }
   currentDraft = {
     ...currentDraft,
@@ -765,10 +764,10 @@ export function patchVendorPrefs(vendor: MakerVendor, patch: Partial<VendorPrefs
 }
 
 /**
- * 已创建任务把思考档等非选模偏好同步回新建草稿时使用。
- * 更新 lastByVendor,但不把 modelChosenByVendor 打成「显式选过模型」:
- * 只改思考档不能把区域默认升级成用户选择,也不得清掉已有的选模标记。
- * 已有任务里换模型应走 patchVendorPrefs,让下次新建跟随这次选择。
+ * 已创建任务把思考档、以及 wire 上的当前活动模型同步回新建草稿时使用。
+ * 可以更新 lastByVendor.model,但不把 modelChosenByVendor 打成「显式选过」:
+ * 只改思考档 / 远程草稿回写不能把区域默认升级成用户选择,也不得清掉已有标记。
+ * 本机已有任务里换模型应走 patchVendorPrefs,让下次新建跟随这次选择。
  */
 export function patchVendorPrefsPreservingModelChoice(
   vendor: MakerVendor,

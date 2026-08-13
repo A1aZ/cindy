@@ -1620,7 +1620,12 @@ export function createTurnRunner(
               : { kind, behavior: 'deny', reason: err.message },
           );
         },
-        req.kind === 'permission' ? { toolName: req.toolName } : undefined,
+        req.kind === 'permission'
+          ? {
+              toolName: req.toolName,
+              permissionCard: { title: spec.title ?? '', body: spec.body },
+            }
+          : undefined,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -2946,7 +2951,13 @@ export function createTurnRunner(
           messageId,
           // Stash toolName for permission requests so cardActionHandler can
           // build permissionUpdates when the user picks 'allow:always'.
-          req.kind === 'permission' ? { toolName: req.toolName } : undefined,
+          // permissionCard 留着收口时恢复原始正文(工具名 + 参数预览)。
+          req.kind === 'permission'
+            ? {
+                toolName: req.toolName,
+                permissionCard: { title: spec.title ?? '', body: spec.body },
+              }
+            : undefined,
         );
         return decision;
       } catch (err) {

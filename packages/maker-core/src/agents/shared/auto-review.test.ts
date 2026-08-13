@@ -2007,6 +2007,121 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     expect(isProtectedSystemPath('C:\\repo\\HKLM-notes.txt')).toBe(false);
   });
 
+  it('PowerShell 写 cmdlet 的文档别名与 canonical 名判得完全一致', () => {
+    // PowerShell 里 alias 的解析**优先于**外部命令,所以 `sc <系统路径> owned` 就是 Set-Content。
+    // 表里只登记 canonical 名会让整条命令绕过写通道判据、落灰区被静默放行(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `sc ${hosts} owned`,          // Set-Content
+      `si ${hosts} x`,              // Set-Item
+      `sp ${hosts} Name 1`,         // Set-ItemProperty
+      `sp HKLM:\\SYSTEM\\Foo Bar 1`,
+      `ac ${hosts} owned`,          // Add-Content
+      `clc ${hosts}`,               // Clear-Content
+      `ni ${hosts}`,                // New-Item
+      // `*-ItemProperty` 同族的其余写入口 + 各自别名。
+      'New-ItemProperty HKLM:\\SYSTEM\\Foo -Name B -Value 1',
+      'np HKLM:\\SYSTEM\\Foo -Name Bar -Value 1',
+      `Copy-ItemProperty C:\\repo\\a -Name x -Destination ${hosts}`,
+      `cpp C:\\repo\\a -Name x -Destination ${hosts}`,
+      `Move-ItemProperty C:\\repo\\a -Name x -Destination ${hosts}`,
+      `mp C:\\repo\\a -Name x -Destination ${hosts}`,
+      `Rename-ItemProperty ${hosts} -Name a -NewName b`,
+      `rnp ${hosts} -Name a -NewName b`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // alias 与 canonical 名必须给出**同一个**判档 —— 这是本条的不变量,不只是"都必问"。
+    for (const [alias, canonical] of [
+      [`sc ${hosts} owned`, `Set-Content ${hosts} owned`],
+      [`si ${hosts} x`, `Set-Item ${hosts} x`],
+      [`sp ${hosts} n 1`, `Set-ItemProperty ${hosts} n 1`],
+      ['sc C:\\repo\\a.txt hi', 'Set-Content C:\\repo\\a.txt hi'],
+      ['si C:\\repo\\a x', 'Set-Item C:\\repo\\a x'],
+      ['sp C:\\repo\\a n 1', 'Set-ItemProperty C:\\repo\\a n 1'],
+      ['rnp C:\\repo\\a -Name x -NewName y', 'Rename-ItemProperty C:\\repo\\a -Name x -NewName y'],
+    ]) {
+      expect(classifyShellCommand(alias, win, { platform: 'win32' }), `${alias} vs ${canonical}`)
+        .toBe(classifyShellCommand(canonical, win, { platform: 'win32' }));
+    }
+
+    // 反例:`sc` 在 PowerShell 7 里已因与 `sc.exe` 冲突而移除别名,两边都覆盖也不误伤
+    // 服务控制 —— `sc config …` 的首个操作数是 `config`,不是路径。
+    expect(classifyShellCommand('sc config MyService start= disabled', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 反例:区内写仍是灰区。
+    for (const c of ['sc C:\\repo\\a.txt hi', 'si C:\\repo\\a x', 'sp C:\\repo\\a n 1']) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
+  it('带值的 PowerShell 通用参数要消费值;未知参数 fail closed 但不误升区内写', () => {
+    // 带值参数不消费值 → 值被当成第一个位置操作数、顶掉真正的写目标:
+    // `Set-Content -ErrorVariable errs <系统路径> owned` 会去判 `errs`(codex 报)。
+    // 通用参数是**每个 cmdlet 都有**的固定集合,连官方短别名(`-ea` / `-ev` / `-ov` …)一起列 ——
+    // 别名不是前缀,唯一前缀规则匹配不到。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Set-Content -ErrorVariable errs ${hosts} owned`,
+      `Set-Content -WarningVariable w ${hosts} owned`,
+      `Set-Content -InformationVariable i ${hosts} owned`,
+      `Set-Content -OutVariable o ${hosts} owned`,
+      `Set-Content -PipelineVariable p ${hosts} owned`,
+      `Set-Content -OutBuffer 5 ${hosts} owned`,
+      `Set-Content -InformationAction Ignore ${hosts} owned`,
+      `Set-Content -ProgressAction Ignore ${hosts} owned`,
+      // 官方短别名形态。
+      `Set-Content -ev errs ${hosts} owned`,
+      `Set-Content -ov o ${hosts} owned`,
+      `Set-Content -ea Stop ${hosts} owned`,
+      // cmdlet 自己的带值参数(`-Type` 是 -PropertyType 的别名)。
+      `Set-ItemProperty -Type String ${hosts} n v`,
+      // `-LP` / `-PSPath` 是 -LiteralPath 的文档别名,按**目标**参数取值。
+      `Set-Content -PSPath ${hosts} -Value x`,
+      `Set-Content -LP ${hosts} -Value x`,
+      // 未知参数可能吃掉下一个 token → 操作数顺序不可证 → 全部当目标(fail closed)。
+      `Set-Content -Junk v ${hosts} owned`,
+      `Out-File -Junk v ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:**已知开关**必须被认出来,否则 fail closed 会把「从系统路径读、写到区内」
+    // 这种完全正常的操作打成硬弹窗 —— 这是 fail closed 唯一的误伤面,靠枚举开关消掉。
+    for (const c of [
+      `Copy-Item -Force ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Recurse ${hosts} C:\\repo\\backup`,
+      `Copy-Item -PassThru ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Verbose ${hosts} C:\\repo\\backup`,
+      `Copy-Item -WhatIf ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Confirm ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Confirm:$false ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Container ${hosts} C:\\repo\\backup`,
+      // 带值参数同理:值被正确消费,源不会被当成写目标。
+      `Copy-Item -ErrorAction Stop ${hosts} C:\\repo\\backup`,
+      `Copy-Item -ea Stop ${hosts} C:\\repo\\backup`,
+      `Copy-Item -Filter *.txt ${hosts} C:\\repo\\backup`,
+      `Copy-Item ${hosts} C:\\repo\\backup -Force`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二:fail closed 的做法是"全部操作数都当目标",不是"直接判不可证" —— 所以未知参数
+    // 出现在**区内**写上时判档不变。若改成不可证哨兵,这几条会全部变成硬弹窗。
+    for (const c of [
+      'Set-Content -Junk v C:\\repo\\a.txt hi',
+      'Set-Content -ErrorVariable errs C:\\repo\\a.txt hi',
+      'Set-Content -ov o -ev e C:\\repo\\a.txt hi',
+      'Copy-Item -Junk v C:\\repo\\a C:\\repo\\b',
+      'New-Item -ItemType Directory -Force C:\\repo\\out',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('setsid 的选项不遮蔽内层破坏命令', () => {
     for (const c of [
       'setsid -f rm -rf /outside',

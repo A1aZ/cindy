@@ -322,9 +322,28 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' 
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
     ['set-item', { targets: 'first' }],
-    ['ac', { targets: 'first' }],
-    ['clc', { targets: 'first' }],
-    ['ni', { targets: 'first' }],
+    // 文档别名(Microsoft.PowerShell.Management)—— PowerShell 里 alias 的解析**优先于**外部
+    // 命令,所以 `sc <系统路径> owned` 等价于 `Set-Content`,不列就整条绕过本判据(codex 报)。
+    // `sc` 在 PowerShell 7 里已因与 `sc.exe` 冲突而移除,Windows PowerShell 5.1 仍有;两边都
+    // 覆盖不会误伤 `sc.exe`:`sc config MyService start= disabled` 的首个操作数是 `config`,
+    // 不是路径,判档不变(已实测)。
+    ['ac', { targets: 'first' }],   // Add-Content
+    ['clc', { targets: 'first' }],  // Clear-Content
+    ['ni', { targets: 'first' }],   // New-Item
+    ['sc', { targets: 'first' }],   // Set-Content
+    ['si', { targets: 'first' }],   // Set-Item
+    ['sp', { targets: 'first' }],   // Set-ItemProperty
+    // `*-ItemProperty` 同族的其余写入口。位置签名各不相同(源/目标/属性名的次序不一样),
+    // 与其逐个硬编码次序,一律按 `all` 取全部操作数:属性名不是路径、不会命中受保护判据,
+    // 最坏是把源也算进去多问一次,但**不可能**漏掉目标(具名 `-Destination` 仍走目标参数)。
+    ['new-itemproperty', { targets: 'all' }],
+    ['np', { targets: 'all' }],
+    ['copy-itemproperty', { targets: 'all' }],
+    ['cpp', { targets: 'all' }],
+    ['move-itemproperty', { targets: 'all' }],
+    ['mp', { targets: 'all' }],
+    ['rename-itemproperty', { targets: 'all' }],
+    ['rnp', { targets: 'all' }],
     // 复制:末位操作数是 -Destination,源是只读的。
     // `copy` 既是 Copy-Item 的别名,也是 cmd.exe 的 copy —— 两者都是「末位是目标」,可共用。
     ['copy-item', { targets: 'last' }],
@@ -357,24 +376,52 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' 
     ['clp', { targets: 'all' }],
   ]);
 
-/** PowerShell 里指定写目标的具名参数(大小写无关,支持唯一前缀缩写)。 */
+/**
+ * PowerShell 里指定写目标的具名参数(大小写无关,支持唯一前缀缩写如 `-Dest`)。
+ * `-LP` / `-PSPath` 是 `-LiteralPath` 的**文档别名**,前缀规则匹配不到,必须显式列出。
+ */
 const POWERSHELL_TARGET_PARAMS: readonly string[] = [
-  '-path', '-literalpath', '-destination', '-filepath', '-newname',
+  '-path', '-literalpath', '-lp', '-pspath', '-destination', '-filepath', '-newname',
 ];
 
 /**
- * 这些写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、
- * 顶掉真正的写目标:`Out-File -Encoding utf8 C:\Windows\…\hosts` 会把 `utf8` 当目标,
- * 系统路径反而漏掉(codex 报,已实测)。开关型参数(`-Force` / `-Recurse` / `-NoNewline` …)
- * 不带值,不在此列。
+ * 写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、顶掉真正的
+ * 写目标:`Set-Content -ErrorVariable errs C:\Windows\…\hosts owned` 会把 `errs` 当目标,系统
+ * 路径反而漏掉(codex 报,已实测)。
  *
- * 与本文件既有做法同构:POSIX 分支也是枚举带值短选项(`valueLetters = 'tS'`),不做通用解析。
- * **已知上限**:表外的带值参数仍会漏(值被当操作数)—— 失效方向是「少保护」,与补齐本表之前
- * 的行为一致,不会造成误升级;真出现新参数按本表增量补。
+ * 第一组是 about_CommonParameters 里**每个 cmdlet 都有**的带值通用参数(含官方短别名 —— `-ea`
+ * 这类别名不是前缀,前缀规则匹配不到,必须逐个列)。第二组是这些写/删除 cmdlet 自己的带值参数。
  */
 const POWERSHELL_VALUE_PARAMS: readonly string[] = [
+  // 通用参数(带值):-ErrorAction/-WarningAction/-InformationAction/-ProgressAction 与
+  // -*Variable / -OutBuffer / -PipelineVariable,各带官方短别名。
+  '-erroraction', '-ea', '-warningaction', '-wa', '-informationaction', '-ia', '-infa',
+  '-progressaction', '-proga', '-errorvariable', '-ev', '-warningvariable', '-wv',
+  '-informationvariable', '-iv', '-outvariable', '-ov', '-outbuffer', '-ob',
+  '-pipelinevariable', '-pv',
+  // cmdlet 自己的带值参数。
   '-encoding', '-value', '-itemtype', '-name', '-filter', '-include', '-exclude',
-  '-erroraction', '-warningaction', '-width', '-delimiter', '-stream', '-credential',
+  '-width', '-delimiter', '-stream', '-credential', '-type', '-propertytype',
+  '-fromsession', '-tosession', '-totalcount', '-tail',
+];
+
+/**
+ * **开关**参数(不带值)。列出来的意义不是"跳过它们"——不列也会跳过——而是把「未知参数」
+ * 缩小到真的未知:未知参数**可能**吃掉下一个 token,一旦吃掉,后面的位置操作数就整体错位、
+ * 真正的写目标被顶掉而静默降级(codex 报)。所以判据是:
+ *   已知开关 → 确定不吃值,位置照常算;
+ *   未知 / 前缀歧义 + 下一个 token 不是 `-` 开头 → **无法证明**操作数没错位 → fail closed。
+ * fail closed 的做法是把**全部**操作数都当写目标(见 powerShellWriteTargets),而不是直接判
+ * 不可证:后者会把 `Set-Content -Junk v C:\repo\a.txt hi` 这种区内写也打成硬弹窗;前者
+ * 只可能多问(把源/属性名也算进去),不可能漏掉真目标。
+ */
+const POWERSHELL_SWITCH_PARAMS: readonly string[] = [
+  // 通用参数里的开关(含官方短别名)。
+  '-verbose', '-vb', '-debug', '-db', '-whatif', '-wi', '-confirm', '-cf',
+  // 写 / 删除 cmdlet 自己的开关。
+  '-force', '-recurse', '-passthru', '-nonewline', '-noclobber', '-append', '-container',
+  '-usetransaction', '-asbytestream', '-raw', '-wait', '-followsymlink', '-nooverwrite',
+  '-notypeinformation', '-nonewwindow',
 ];
 
 /**
@@ -389,6 +436,8 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   if (!spec) return null;
   const named: string[] = [];
   const operands: string[] = [];
+  // 出现了「可能吃掉下一个 token 的未知参数」→ 位置操作数可能整体错位,不能再按 first/last 挑。
+  let operandOrderUnprovable = false;
   for (let i = 0; i < args.length; i++) {
     const token = args[i];
     if (token.startsWith('-')) {
@@ -396,11 +445,21 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
       const name = token.split(/[:=]/)[0].toLowerCase();
       const attached = token.length > name.length;
       // 唯一前缀缩写:`-Dest` → -Destination、`-Enc` → -Encoding。长度 ≥2 才认,避免 `-D` 歧义。
-      // 目标参数与带值参数放在一起判唯一性:前缀同时命中两类时属歧义写法,当开关处理、不消费值。
+      // 三类参数放在一起判唯一性 —— 前缀同时命中多类就是歧义写法(真 PowerShell 也报错)。
       const candidates = name.length >= 2
-        ? [...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS].filter((p) => p.startsWith(name))
+        ? [...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS]
+          .filter((p) => p.startsWith(name))
         : [];
-      if (candidates.length !== 1) continue; // 未知参数 / 歧义 / 开关 → 当开关,不消费下一个 token
+      if (candidates.length !== 1) {
+        // 未知 / 歧义参数:无法证明它不吃下一个 token。值贴在参数上、或下一个 token 本身是参数时
+        // 不可能错位;否则标记 fail closed(后面把全部操作数都当目标,而不是直接判不可证)。
+        if (!attached) {
+          const next = args[i + 1];
+          if (next !== undefined && !next.startsWith('-')) operandOrderUnprovable = true;
+        }
+        continue;
+      }
+      if (POWERSHELL_SWITCH_PARAMS.includes(candidates[0])) continue; // 已知开关:确定不吃值
       const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]);
       if (attached) {
         // 贴在参数上的值:目标参数取它,带值参数直接丢掉。
@@ -423,14 +482,21 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
     operands.push(token);
   }
   if (named.length > 0) {
-    // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`)。
-    return spec.sources ? [...named, ...operands.flatMap(splitPowerShellPathList)] : named;
+    // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`);
+    // `targets: 'all'` 同理 —— 它的语义就是"每个操作数都是目标",具名参数只是**追加**一个,
+    // 不能因为出现了具名目标就把操作数丢掉(`Rename-ItemProperty <系统路径> -Name a -NewName b`
+    // 里被改的是位置操作数那个路径,`-NewName` 只是新属性名)。
+    return spec.sources || spec.targets === 'all'
+      ? [...named, ...operands.flatMap(splitPowerShellPathList)]
+      : named;
   }
   // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
   // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
   // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
   if (operands.length === 0) return [];
   if (spec.targets === 'all' || spec.sources) return operands.flatMap(splitPowerShellPathList);
+  // 操作数顺序不可证(见 POWERSHELL_SWITCH_PARAMS)→ 全部当目标:只会多问,不会漏掉真目标。
+  if (operandOrderUnprovable) return operands.flatMap(splitPowerShellPathList);
   if (spec.targets === 'first') return splitPowerShellPathList(operands[0]);
   // 末位是目标;只给一个操作数时 PowerShell 的 -Destination 默认当前位置(`Copy-Item payload`
   // 合法且常用)→ 目标就是 cwd,交给调用方按有效 cwd 解析(cwd 未知时那边会 fail-closed),

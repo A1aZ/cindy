@@ -42,16 +42,18 @@ export async function openTurnReview(
   await patchTabState(hostSessionId, tab.id, (current) => {
     const preserved =
       current && typeof current === 'object' ? { ...(current as Record<string, unknown>) } : {};
+    const messageSnapshot = {
+      kind: 'turn-set' as const,
+      changeSetIds,
+      // 目标会话与宿主桶不同(跨会话审查 worker 的轮次)时,review 插件按它取数。
+      targetSessionId: sessionId,
+    };
     delete preserved.turnTarget;
     delete preserved.branchBaseRef;
     return {
       ...preserved,
-      descriptor: {
-        kind: 'turn-set',
-        changeSetIds,
-        // 目标会话与宿主桶不同(跨会话审查 worker 的轮次)时,review 插件按它取数。
-        targetSessionId: sessionId,
-      },
+      descriptor: messageSnapshot,
+      messageSnapshot,
       jumpTarget: {
         diffId: opts.selectedDiffId ?? null,
         path: opts.selectedPath ?? null,

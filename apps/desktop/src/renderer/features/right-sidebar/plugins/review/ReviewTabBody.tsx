@@ -89,6 +89,7 @@ import { buildCappedDiffData } from '../../../../../shared/gitReviewCapped';
 import { capabilitiesFor, type ReviewSourceDescriptor } from '../../../../../shared/reviewSource';
 import type { TabKindHostContext } from '../../types';
 import type { ReviewState } from './index';
+import { getReviewDiffsExpanded, setReviewDiffsExpanded } from './diffExpansionPreference';
 import { PlainUnifiedDiff, type DiffViewMode } from './DiffViewer/PlainUnifiedDiff';
 import { MarkdownDiffPreview } from './DiffViewer/MarkdownDiffPreview';
 import { shouldVirtualizeFileList } from './DiffViewer/diffRows';
@@ -97,7 +98,7 @@ import {
   filterReviewFileJumpResults,
   findReviewFileTreeFileIndex,
   flattenReviewFileTree,
-  getReviewDiffExpansionToggle,
+  getReviewDiffExpansionAction,
   getReviewFileTreeVisibility,
   isReviewFileTreeScrollKey,
   moveReviewFileJumpSelection,
@@ -243,9 +244,14 @@ export function filterWhitespaceHiddenDiffs(
 
 export function getExpandedDiffSet(
   diffs: readonly Pick<FileDiff, 'id'>[],
-  collapsedPaths: ReadonlySet<string>,
+  diffsExpanded: boolean,
+  expansionOverrides: ReadonlyMap<string, boolean>,
 ): Set<string> {
-  return new Set(diffs.map((diff) => diff.id).filter((id) => !collapsedPaths.has(id)));
+  return new Set(
+    diffs
+      .map((diff) => diff.id)
+      .filter((id) => (expansionOverrides.get(id) ?? diffsExpanded) === true),
+  );
 }
 
 export function summaryEntryToPlaceholderDiff(entry: ReviewDiffSummaryEntry): FileDiff {
@@ -428,6 +434,8 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const sessionId = ctx.sessionId || null;
   const hideWhitespace = state.hideWhitespace ?? false;
   const descriptor = state.descriptor;
+  const messageSnapshot =
+    state.messageSnapshot ?? (descriptor.kind === 'turn-set' ? descriptor : null);
   const source: ReviewSource | 'turn' = descriptor.kind === 'turn-set' ? 'turn' : descriptor.kind;
   const branchBaseRef = descriptor.kind === 'branch' ? descriptor.baseRef : null;
   const selectedCommitOid = descriptor.kind === 'commit' ? descriptor.commitOid : null;
@@ -461,6 +469,9 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
     },
     [setDescriptor],
   );
+  const selectMessageSnapshot = useCallback(() => {
+    if (messageSnapshot) setDescriptor(messageSnapshot);
+  }, [messageSnapshot, setDescriptor]);
   const sourceState = useReviewSource(descriptor, sessionId, {
     hideWhitespace,
     deviceLinkDeviceId,
@@ -503,7 +514,18 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const wordWrap = state.wordWrap ?? false;
   const wordDiff = state.wordDiff ?? false;
   const richMarkdownPreview = state.richMarkdownPreview ?? true;
-  const collapsedSet = useMemo(() => new Set(state.collapsedPaths ?? []), [state.collapsedPaths]);
+  const persistedDiffsExpanded = state.diffsExpanded ?? true;
+  const diffsExpanded = getReviewDiffsExpanded(sessionId ?? '', persistedDiffsExpanded);
+  const [diffExpansionOverrides, setDiffExpansionOverrides] = useState<Map<string, boolean>>(
+    () => new Map(),
+  );
+  useEffect(() => {
+    if (!sessionId) return;
+    setReviewDiffsExpanded(sessionId, diffsExpanded);
+    if (diffsExpanded !== persistedDiffsExpanded) {
+      ctx.patchState({ diffsExpanded });
+    }
+  }, [ctx, diffsExpanded, persistedDiffsExpanded, sessionId]);
   const rawUnstaged = data?.diffs.unstaged ?? [];
   const rawStaged = data?.diffs.staged ?? [];
   const worktreeCapped = data?.diffs.capped ?? null;
@@ -533,8 +555,8 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   );
   const visibleDiffs = currentCapped ? cappedSummaryDiffs : sourceState.diffs;
   const expandedSet = useMemo(
-    () => getExpandedDiffSet(visibleDiffs, collapsedSet),
-    [collapsedSet, visibleDiffs],
+    () => getExpandedDiffSet(visibleDiffs, diffsExpanded, diffExpansionOverrides),
+    [diffExpansionOverrides, diffsExpanded, visibleDiffs],
   );
   const entryJumpDiff = state.jumpTarget?.diffId
     ? visibleDiffs.find((diff) => diff.id === state.jumpTarget?.diffId)
@@ -581,13 +603,13 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const lastTurnHydrating =
     source === 'last-turn' && sourceState.loading && sourceState.diffs.length === 0;
   const lastTurnHydrationError = source === 'last-turn' ? sourceState.error : null;
-  const expansionToggle = useMemo(
+  const expansionAction = useMemo(
     () =>
-      getReviewDiffExpansionToggle(
+      getReviewDiffExpansionAction(
         expansionDiffs.map((diff) => diff.id),
-        collapsedSet,
+        diffsExpanded,
       ),
-    [collapsedSet, expansionDiffs],
+    [diffsExpanded, expansionDiffs],
   );
   const gitApplyAvailability = useMemo(
     () => getGitApplyCopyAvailability(visibleDiffs, hideWhitespace, platform),
@@ -1037,12 +1059,15 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
 
   const togglePath = useCallback(
     (id: string) => {
-      const next = new Set(collapsedSet);
-      if (expandedSet.has(id)) next.add(id);
-      else next.delete(id);
-      ctx.patchState({ collapsedPaths: Array.from(next) });
+      setDiffExpansionOverrides((current) => {
+        const next = new Map(current);
+        const nextExpanded = !(next.get(id) ?? diffsExpanded);
+        if (nextExpanded === diffsExpanded) next.delete(id);
+        else next.set(id, nextExpanded);
+        return next;
+      });
     },
-    [collapsedSet, ctx, expandedSet],
+    [diffsExpanded],
   );
   const setDiffViewMode = useCallback(
     (mode: DiffViewMode) => {
@@ -1098,18 +1123,19 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const selectCappedFile = useCallback(
     (diff: FileDiff) => {
       setSelectedCappedFileId(diff.id);
-      if (collapsedSet.has(diff.id)) {
-        const next = new Set(collapsedSet);
-        next.delete(diff.id);
-        ctx.patchState({ collapsedPaths: Array.from(next) });
+      if (!expandedSet.has(diff.id)) {
+        setDiffExpansionOverrides((current) => new Map(current).set(diff.id, true));
       }
     },
-    [collapsedSet, ctx],
+    [expandedSet],
   );
   const toggleAllDiffs = useCallback(() => {
-    if (expansionToggle.action === 'disabled') return;
-    ctx.patchState({ collapsedPaths: expansionToggle.nextCollapsedPaths });
-  }, [ctx, expansionToggle]);
+    if (expansionAction === 'disabled') return;
+    const nextDiffsExpanded = expansionAction === 'expand';
+    setDiffExpansionOverrides(new Map());
+    if (sessionId) setReviewDiffsExpanded(sessionId, nextDiffsExpanded);
+    ctx.patchState({ diffsExpanded: nextDiffsExpanded });
+  }, [ctx, expansionAction, sessionId]);
   const copyGitApplyCommand = useCallback(() => {
     const availability = getGitApplyCopyAvailability(visibleDiffs, hideWhitespace, platform);
     if (!availability.canCopy) return;
@@ -1124,12 +1150,10 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
     const nextId = getNextCappedFileSelection(selectedCappedFileId, cappedSummaryDiffs);
     if (nextId === selectedCappedFileId) return;
     setSelectedCappedFileId(nextId);
-    if (nextId && collapsedSet.has(nextId)) {
-      const next = new Set(collapsedSet);
-      next.delete(nextId);
-      ctx.patchState({ collapsedPaths: Array.from(next) });
+    if (nextId && !expandedSet.has(nextId)) {
+      setDiffExpansionOverrides((current) => new Map(current).set(nextId, true));
     }
-  }, [cappedSummaryDiffs, collapsedSet, ctx, currentCapped, selectedCappedFileId]);
+  }, [cappedSummaryDiffs, currentCapped, expandedSet, selectedCappedFileId]);
 
   useEffect(() => {
     // 切 source 后 DiffList 重挂载、nonce 去重 ref 归零;残留的
@@ -1267,6 +1291,7 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
         >
           <SourceDropdown
             source={source}
+            messageSnapshotAvailable={messageSnapshot !== null}
             counts={{
               unstaged: sourceUnstagedCount,
               staged: sourceStagedCount,
@@ -1285,6 +1310,7 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
                 : t('rightSidebar.review.turn.crossSessionSwitchDisabled')
             }
             onChange={setSource}
+            onSelectMessageSnapshot={selectMessageSnapshot}
             onSelectCommit={selectCommitSource}
             onRefreshCommits={commitsState.refresh}
           />
@@ -1325,7 +1351,7 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
                 toolbarShowSecondaryActions
                   ? null
                   : {
-                      action: expansionToggle.action,
+                      action: expansionAction,
                       onToggle: toggleAllDiffs,
                     }
               }
@@ -1351,10 +1377,7 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
             />
             {toolbarShowSecondaryActions && (
               <>
-                <DiffExpansionToggleButton
-                  action={expansionToggle.action}
-                  onToggle={toggleAllDiffs}
-                />
+                <DiffExpansionToggleButton action={expansionAction} onToggle={toggleAllDiffs} />
                 <FileTreeToggleButton
                   preferenceVisible={fileTreeVisible}
                   temporarilyHidden={toolbarFileTreeVisibility.temporarilyHidden}
@@ -2495,6 +2518,7 @@ function FileTreeMenuItem({
 
 export function SourceDropdown({
   source,
+  messageSnapshotAvailable = false,
   counts,
   commits,
   commitsLoading,
@@ -2504,11 +2528,14 @@ export function SourceDropdown({
   layout = 'wide',
   disabledReason,
   onChange,
+  onSelectMessageSnapshot,
   onSelectCommit,
   onRefreshCommits,
 }: {
   /** `'turn'` is the selected label for a persisted turn-set descriptor. */
   source: ReviewSource | 'turn';
+  /** Whether the exact message snapshot remains available after selecting a Git source. */
+  messageSnapshotAvailable?: boolean;
   counts: { unstaged?: number; staged?: number; branch?: number; lastTurn?: number };
   commits?: ReviewCommit[];
   commitsLoading?: boolean;
@@ -2518,15 +2545,17 @@ export function SourceDropdown({
   layout?: ReviewToolbarLayout;
   disabledReason?: string;
   onChange: (source: ReviewSource) => void;
+  onSelectMessageSnapshot?: () => void;
   onSelectCommit?: (oid: string) => void;
   onRefreshCommits?: () => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
-  // 轮次项只在轮次审查态存在(进入它的唯一入口是聊天流的变更卡片);
-  // 切走即整体替换 descriptor,不提供"切回轮次"的常驻项。
+  // 消息快照独立于当前来源保存；切到 Git 来源后仍可精确返回原消息的变更。
   const turnOption: SourceDropdownOption | null =
-    source === 'turn' ? { source: 'turn', label: t('rightSidebar.review.turn.title') } : null;
+    source === 'turn' || messageSnapshotAvailable
+      ? { source: 'turn', label: t('rightSidebar.review.turn.title') }
+      : null;
   const options: SourceDropdownOption[] = [
     { source: 'unstaged', label: t('rightSidebar.review.source.unstaged'), count: counts.unstaged },
     { source: 'staged', label: t('rightSidebar.review.source.staged'), count: counts.staged },
@@ -2535,7 +2564,10 @@ export function SourceDropdown({
     { source: 'last-turn', label: t('rightSidebar.review.source.lastTurn') },
   ];
   const directOptions = options.filter((option) => option.source !== 'commit');
-  const selected = turnOption ?? options.find((option) => option.source === source) ?? options[0];
+  const selected =
+    source === 'turn' && turnOption
+      ? turnOption
+      : (options.find((option) => option.source === source) ?? options[0]);
   const commitList = commits ?? [];
   const commitMenuLoaded = commitsLoaded ?? false;
   return (
@@ -2572,7 +2604,14 @@ export function SourceDropdown({
         sideOffset={4}
         className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-[12rem] rounded-[8px] border border-[var(--cmd-palette-border)] bg-[var(--cmd-palette-bg)] p-1 shadow-[var(--shadow-menu)]"
       >
-        {turnOption && <SourceDropdownItem option={turnOption} active onChange={onChange} />}
+        {turnOption && (
+          <SourceDropdownItem
+            option={turnOption}
+            active={source === 'turn'}
+            onChange={onChange}
+            onSelectMessageSnapshot={onSelectMessageSnapshot}
+          />
+        )}
         {directOptions.slice(0, 2).map((option) => (
           <SourceDropdownItem
             key={option.source}
@@ -2705,16 +2744,21 @@ function SourceDropdownItem({
   option,
   active,
   onChange,
+  onSelectMessageSnapshot,
 }: {
   option: SourceDropdownOption;
   active: boolean;
   onChange: (source: ReviewSource) => void;
+  onSelectMessageSnapshot?: () => void;
 }) {
   return (
     <DropdownMenuItem
-      // 轮次伪选项已是选中态,点它只关菜单,不产生来源切换。
       onSelect={() => {
-        if (option.source !== 'turn') onChange(option.source);
+        if (option.source === 'turn') {
+          if (!active) onSelectMessageSnapshot?.();
+          return;
+        }
+        onChange(option.source);
       }}
       className="flex h-8 items-center gap-2 rounded-[6px] px-2 text-12 text-[var(--text-primary)] focus:bg-[var(--cmd-palette-item-hover)]"
     >

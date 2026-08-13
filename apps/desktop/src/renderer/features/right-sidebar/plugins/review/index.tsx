@@ -2,7 +2,7 @@
  * review plugin —— RSB 内统一显示当前 Git 状态与消息级历史变更的常驻 tab。
  *
  * 数据源由可持久化 descriptor 选择；Git 来源走 git-review IPC，历史来源读取
- * 已记录的 turn change sets。plugin 自身持久化用户收起过哪些 diff id(`collapsedPaths`)、diff 模式、文件树显隐、
+ * 已记录的 turn change sets。plugin 自身持久化全部 diff 的默认展开状态、diff 模式、文件树显隐、
  * diff 自动换行偏好、文字差异偏好、隐藏空白变更偏好、Markdown 富文本预览偏好与分支来源的基准分支。
  *
  * 单例语义 —— 由 RightSidebarShell + AddTabDropdown 在调用层用
@@ -26,18 +26,21 @@ import {
 import { registerTabKind } from '../../registry';
 import type { TabKindPlugin } from '../../types';
 import type { DiffViewMode } from './DiffViewer/PlainUnifiedDiff';
+import { seedReviewDiffsExpanded } from './diffExpansionPreference';
 
 const ReviewTabBody = lazy(() =>
   import('./ReviewTabBody').then((module) => ({ default: module.ReviewTabBody })),
 );
 
 export interface ReviewState {
-  /** Persisted discriminated source; all review entry points write the same field. */
+  /** 当前选中的审查来源。 */
   descriptor: ReviewSourceDescriptor;
+  /** 最近一次从消息变更卡片进入时的精确快照，切换 Git 来源后仍可返回。 */
+  messageSnapshot: Extract<ReviewSourceDescriptor, { kind: 'turn-set' }> | null;
   /** Optional one-shot positioning request supplied by a review entry point. */
   jumpTarget: ReviewJumpTarget | null;
-  /** 用户收起过哪些 diff id。空数组表示所有当前 diff 默认展开。 */
-  collapsedPaths: string[];
+  /** 所有 diff 的持久化默认展开状态；单文件覆盖只保留在当前组件生命周期。 */
+  diffsExpanded: boolean;
   /** diff 展示模式。写操作仍回到原始 unified DiffLine.index。 */
   diffViewMode: DiffViewMode;
   /** 右侧已修改文件树显隐。默认收起,用户选择通过 tab state 记住。 */
@@ -54,8 +57,9 @@ export interface ReviewState {
 
 const DEFAULT_STATE: ReviewState = {
   descriptor: { kind: 'unstaged' },
+  messageSnapshot: null,
   jumpTarget: null,
-  collapsedPaths: [],
+  diffsExpanded: true,
   diffViewMode: 'unified',
   fileTreeVisible: false,
   wordWrap: false,
@@ -87,13 +91,12 @@ const plugin: TabKindPlugin<ReviewState> = {
   TabPillTitle: ReviewTabPillTitle,
   TabPillIcon: ReviewTabPillIcon,
   TabBody: ReviewTabBody,
-  defaultState: () => ({ ...DEFAULT_STATE, collapsedPaths: [] }),
+  defaultState: () => ({ ...DEFAULT_STATE }),
   hydrateState: (raw): ReviewState => {
-    if (!raw || typeof raw !== 'object') return { ...DEFAULT_STATE, collapsedPaths: [] };
+    if (!raw || typeof raw !== 'object') return { ...DEFAULT_STATE };
     const obj = raw as Record<string, unknown>;
-    const collapsedPaths = Array.isArray(obj.collapsedPaths)
-      ? obj.collapsedPaths.filter((s): s is string => typeof s === 'string')
-      : [];
+    const diffsExpanded =
+      typeof obj.diffsExpanded === 'boolean' ? obj.diffsExpanded : DEFAULT_STATE.diffsExpanded;
     const diffViewMode = obj.diffViewMode === 'split' ? 'split' : 'unified';
     const fileTreeVisible =
       typeof obj.fileTreeVisible === 'boolean'
@@ -110,6 +113,13 @@ const plugin: TabKindPlugin<ReviewState> = {
     const legacyTurnTarget = migrateLegacyTurnTarget(obj.turnTarget);
     const persistedDescriptor = parseReviewSourceDescriptor(obj.descriptor);
     const descriptor = persistedDescriptor ?? legacyTurnTarget?.descriptor ?? { kind: 'unstaged' };
+    const persistedMessageSnapshot = parseReviewSourceDescriptor(obj.messageSnapshot);
+    const messageSnapshot =
+      persistedMessageSnapshot?.kind === 'turn-set'
+        ? persistedMessageSnapshot
+        : descriptor.kind === 'turn-set'
+          ? descriptor
+          : null;
     const jumpTarget =
       parseReviewJumpTarget(obj.jumpTarget) ??
       (!persistedDescriptor && descriptor.kind === 'turn-set'
@@ -117,8 +127,9 @@ const plugin: TabKindPlugin<ReviewState> = {
         : null);
     return {
       descriptor,
+      messageSnapshot,
       jumpTarget,
-      collapsedPaths,
+      diffsExpanded,
       diffViewMode,
       fileTreeVisible,
       wordWrap,
@@ -126,6 +137,9 @@ const plugin: TabKindPlugin<ReviewState> = {
       hideWhitespace,
       richMarkdownPreview,
     };
+  },
+  onBeforeClose: (state, { sessionId }) => {
+    seedReviewDiffsExpanded(sessionId, state?.diffsExpanded ?? DEFAULT_STATE.diffsExpanded);
   },
 };
 

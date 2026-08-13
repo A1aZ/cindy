@@ -32,7 +32,7 @@ describe('openTurnReview', () => {
     mocks.ensureHydrated.mockResolvedValue(undefined);
     mocks.patchTabState.mockImplementation(
       async (_sessionId: string, _tabId: string, update: (current: unknown) => unknown) =>
-        update({ collapsedPaths: ['keep.ts'], turnTarget: { legacy: true } }),
+        update({ diffsExpanded: false, turnTarget: { legacy: true } }),
     );
   });
 
@@ -49,9 +49,14 @@ describe('openTurnReview', () => {
     const update = mocks.patchTabState.mock.calls[0]?.[2] as (
       current: unknown,
     ) => Record<string, unknown>;
-    expect(update({ collapsedPaths: ['keep.ts'], turnTarget: { legacy: true } })).toEqual({
-      collapsedPaths: ['keep.ts'],
+    expect(update({ diffsExpanded: false, turnTarget: { legacy: true } })).toEqual({
+      diffsExpanded: false,
       descriptor: {
+        kind: 'turn-set',
+        changeSetIds: ['set-1'],
+        targetSessionId: 'worker-session',
+      },
+      messageSnapshot: {
         kind: 'turn-set',
         changeSetIds: ['set-1'],
         targetSessionId: 'worker-session',

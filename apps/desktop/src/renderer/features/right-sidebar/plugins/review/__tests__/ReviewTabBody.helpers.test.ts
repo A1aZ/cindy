@@ -177,16 +177,20 @@ describe('ReviewTabBody hunk action eligibility', () => {
 });
 
 describe('ReviewTabBody diff expansion state', () => {
-  it('expands every visible diff by default and removes collapsed ids only', () => {
+  it('combines the persisted all-diff default with ephemeral per-file overrides', () => {
     const diffs = [diff('unstaged', 'a.ts'), diff('unstaged', 'b.ts')];
 
-    expect(Array.from(getExpandedDiffSet(diffs, new Set()))).toEqual([
+    expect(Array.from(getExpandedDiffSet(diffs, true, new Map()))).toEqual([
       'unstaged:a.ts',
       'unstaged:b.ts',
     ]);
-    expect(Array.from(getExpandedDiffSet(diffs, new Set(['unstaged:b.ts'])))).toEqual([
-      'unstaged:a.ts',
-    ]);
+    expect(
+      Array.from(getExpandedDiffSet(diffs, true, new Map([['unstaged:b.ts', false]]))),
+    ).toEqual(['unstaged:a.ts']);
+    expect(
+      Array.from(getExpandedDiffSet(diffs, false, new Map([['unstaged:b.ts', true]]))),
+    ).toEqual(['unstaged:b.ts']);
+    expect(Array.from(getExpandedDiffSet(diffs, false, new Map()))).toEqual([]);
   });
 });
 
@@ -314,13 +318,15 @@ describe('ReviewTabBody turn source dropdown', () => {
     expect(onChange).toHaveBeenCalledWith('unstaged');
   });
 
-  it('keeps the turn pseudo-item selection-only (no source change on click)', async () => {
+  it('keeps the selected message snapshot item as a no-op', async () => {
     const onChange = vi.fn();
+    const onSelectMessageSnapshot = vi.fn();
     render(
       createElement(SourceDropdown, {
         source: 'turn',
         counts: {},
         onChange,
+        onSelectMessageSnapshot,
       }),
     );
 
@@ -330,9 +336,33 @@ describe('ReviewTabBody turn source dropdown', () => {
       await screen.findByRole('menuitem', { name: 'rightSidebar.review.turn.title' }),
     );
     expect(onChange).not.toHaveBeenCalled();
+    expect(onSelectMessageSnapshot).not.toHaveBeenCalled();
   });
 
-  it('does not offer the turn pseudo-item while a git source is active', async () => {
+  it('keeps the message snapshot available while a git source is active and restores it', async () => {
+    const onChange = vi.fn();
+    const onSelectMessageSnapshot = vi.fn();
+    render(
+      createElement(SourceDropdown, {
+        source: 'unstaged',
+        messageSnapshotAvailable: true,
+        counts: { unstaged: 0, staged: 0, branch: 0, lastTurn: 0 },
+        onChange,
+        onSelectMessageSnapshot,
+      }),
+    );
+
+    const trigger = screen.getByRole('button', { name: 'rightSidebar.review.sourceDropdownAria' });
+    expect(trigger.textContent).toBe('rightSidebar.review.source.unstaged');
+    fireEvent.keyDown(trigger, { key: 'Enter' });
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: 'rightSidebar.review.turn.title' }),
+    );
+    expect(onSelectMessageSnapshot).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('does not offer a message snapshot for a normal review tab', async () => {
     render(
       createElement(SourceDropdown, {
         source: 'unstaged',

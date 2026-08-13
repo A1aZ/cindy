@@ -459,6 +459,15 @@ function modelEntryError(
       new Set(supportedAgents),
     );
     if (defaultError) return defaultError;
+    if (
+      schemaVersion === MODEL_ACCESS_CATALOG_SCHEMA_VERSION &&
+      Array.isArray(value.agents) &&
+      value.agents.length === 0 &&
+      value.mode !== 'image_generation' &&
+      value.mode !== 'video_generation'
+    ) {
+      return `${path}.agents may be empty only for a Gateway media mode`;
+    }
   }
 
   for (const [key, max] of [
@@ -487,9 +496,10 @@ function modelEntryError(
   }
   if (
     schemaVersion === MODEL_ACCESS_CATALOG_SCHEMA_VERSION &&
+    supportedAgents.length > 0 &&
     value.contextWindow === undefined
   ) {
-    return `${path}.contextWindow is required in schema version 3`;
+    return `${path}.contextWindow is required for chat models in schema version 3`;
   }
   error = modelModalitiesError(value.modalities, `${path}.modalities`);
   if (error) return error;

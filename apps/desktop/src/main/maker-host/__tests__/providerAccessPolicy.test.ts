@@ -66,10 +66,7 @@ function catalog(): Catalog {
   xd.models.codex = undefined;
   return {
     version: 'test',
-    providers: [
-      provider('anthropic', [model('shared-model')]),
-      xd,
-    ],
+    providers: [provider('anthropic', [model('shared-model')]), xd],
   };
 }
 
@@ -102,33 +99,31 @@ describe('provider access policy', () => {
   });
 
   it.each(['cn', 'dev'] as const)(
-    'projects the Cindy AI media catalog to Mainland capabilities for %s',
+    'preserves Gateway image/video and only clears unavailable embedding for %s',
     (region) => {
       const projected = projectProviderCatalogForBuildRegion(catalog(), region);
       const xd = projected.providers.find((item) => item.id === 'xd');
 
-      expect(xd?.imageModels).toEqual([]);
-      expect(xd?.imageDefaults).toBeUndefined();
-      // 向量与图像同口径:整段清空 —— 该 endpoint 后面全是境外模型,
-      // 留着清单只会让插件拿到"可选但必失败"的型号。
+      expect(xd?.imageModels?.map((item) => item.id)).toEqual(['gpt-image-2', 'gemini-image']);
+      expect(xd?.imageDefaults).toEqual({ standard: 'gpt-image-2', draft: 'gemini-image' });
+      // 向量 endpoint 后面全是境外模型，非 global 仍整段清空。
       expect(xd?.embeddingModels).toEqual([]);
       expect(xd?.embeddingDefaults).toBeUndefined();
       expect(xd?.videoModels?.map((item) => item.id)).toEqual([
         'seedance-fast',
         'seedance-pro',
         'bytedance/seedance-2.5',
+        'happyhorse',
       ]);
       expect(xd?.videoDefaults).toEqual({
         standard: 'seedance-fast',
+        draft: 'happyhorse',
         best: 'seedance-pro',
       });
-      // 聊天目录里被归到 embedding 的条目也一并滤掉(设置页的「向量」分组同样清空)。
+      // 媒体条目由专属清单承载，不混进聊天 agent 清单。
       expect(xd?.models['claude-code']?.map((item) => item.id)).toEqual([
         'shared-model',
         'xd-only-model',
-        'seedance-fast',
-        'seedance-pro',
-        'bytedance/seedance-2.5',
       ]);
       expect(xd?.models.codex).toEqual([]);
     },
@@ -167,12 +162,13 @@ describe('projectProviderCatalogForBuildRegion — 用户自有媒体来源', ()
     expect(projected.providers.find((p) => p.id === 'gemini')).toBe(gemini);
     expect(projected.providers.find((p) => p.id === 'openai')).toBe(openai);
     const xd = projected.providers.find((p) => p.id === 'xd');
-    expect(xd?.imageModels).toEqual([]);
-    expect(xd?.imageDefaults).toBeUndefined();
+    expect(xd?.imageModels?.map((m) => m.id)).toEqual(['gpt-image-2', 'gemini-image']);
+    expect(xd?.imageDefaults).toEqual({ standard: 'gpt-image-2', draft: 'gemini-image' });
     expect(xd?.videoModels?.map((m) => m.id)).toEqual([
       'seedance-fast',
       'seedance-pro',
       'bytedance/seedance-2.5',
+      'happyhorse',
     ]);
   });
 
@@ -237,10 +233,7 @@ describe('projectProviderCatalogForBuildRegion — 用户自有媒体来源', ()
     );
     const xai = projected.providers.find((p) => p.id === 'xai');
     expect(xai).toBe(modeOnly);
-    expect(xai?.models['claude-code']?.map((m) => m.id)).toEqual([
-      'xai/aurora',
-      'xai/grok-chat',
-    ]);
+    expect(xai?.models['claude-code']?.map((m) => m.id)).toEqual(['xai/aurora', 'xai/grok-chat']);
   });
 
   it('global 区域原样返回(含新来源的媒体清单)', () => {

@@ -671,7 +671,20 @@ function computeMerged(): Catalog {
         )
         .map(({ model }) => model);
     }
-    return { ...p, models };
+    // 媒体能力同样只投影 Gateway mode，不沿用客户端内置清单。专属清单供设置页
+    // 展示并写入既有 provider/model 停用 override；调用协议仍由 Cindy Server Guide 决定。
+    const imageModels = gwModels
+      .filter((model) => model.mode === 'image_generation')
+      .map((model) => ({ id: model.id, name: model.name ?? model.id }));
+    const videoModels = gwModels
+      .filter((model) => model.mode === 'video_generation')
+      .map((model) => ({ id: model.id, name: model.name ?? model.id }));
+    const provider: Provider = { ...p, models, imageModels, videoModels };
+    // 旧目录默认值可能指向已不在 Gateway 清单里的型号；媒体默认统一按 Gateway
+    // 顺序取首项，不把任何客户端型号字面量带入新链路。
+    delete provider.imageDefaults;
+    delete provider.videoDefaults;
+    return provider;
   });
 
   if (providers === b.providers) return b; // 无 augment、无 custom → 原样返回
@@ -796,6 +809,11 @@ export function setDiscoveredProviderModels(
 export function setXdGatewayModels(models: XdGatewayModelInfo[]): void {
   xdGatewayModels = [...models];
   markChanged();
+}
+
+/** 同步读取最近一次完整 `/models` 快照，供 sendSync 配置面只读投影。 */
+export function getXdGatewayModels(): readonly XdGatewayModelInfo[] {
+  return xdGatewayModels;
 }
 
 /** 返回当前 active catalog 的单调递增修订号。 */

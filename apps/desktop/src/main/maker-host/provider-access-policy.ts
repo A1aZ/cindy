@@ -14,28 +14,11 @@ export interface ProviderAccessContext {
 }
 
 const CINDY_AI_PROVIDER_ID = 'xd';
-const MAINLAND_VIDEO_MODEL_IDS: ReadonlySet<string> = new Set([
-  'seedance-fast',
-  'seedance-pro',
-  'bytedance/seedance-2.5',
-]);
-
-function projectVideoDefaults(
-  defaults: Provider['videoDefaults'],
-  allowedIds: ReadonlySet<string>,
-): Provider['videoDefaults'] | undefined {
-  if (!defaults || !allowedIds.has(defaults.standard)) return undefined;
-  return {
-    standard: defaults.standard,
-    ...(defaults.draft && allowedIds.has(defaults.draft) ? { draft: defaults.draft } : {}),
-    ...(defaults.best && allowedIds.has(defaults.best) ? { best: defaults.best } : {}),
-  };
-}
-
 /**
  * Build-region projection for Cindy-managed media capabilities. Global keeps
- * the catalog source verbatim; Mainland China and dev expose only the media
- * capabilities that the regional Cindy service supports.
+ * the catalog source verbatim. Cindy AI image/video availability is already
+ * projected per account and region by Gateway `/model-groups`, so the client
+ * must preserve that list instead of applying another model-id allowlist.
  *
  * Region is a build-time choice for Cindy-owned services, not a restriction on
  * providers the user connected locally. OpenAI/Codex OAuth, xAI OAuth, Gemini
@@ -91,32 +74,21 @@ export function projectProviderCatalogForBuildRegion(
     }
     changed = true;
 
-    const videoModels = (provider.videoModels ?? []).filter((model) =>
-      MAINLAND_VIDEO_MODEL_IDS.has(model.id),
-    );
-    const videoIds = new Set(videoModels.map((model) => model.id));
-    const videoDefaults = projectVideoDefaults(provider.videoDefaults, videoIds);
     const models = Object.fromEntries(
       Object.entries(provider.models).map(([agent, list]) => [
         agent,
         (list ?? []).filter((model) => {
           const group = classifyModel(model);
-          if (group === 'image' || group === 'embedding') return false;
-          return group !== 'video' || MAINLAND_VIDEO_MODEL_IDS.has(model.id);
+          return group !== 'image' && group !== 'video' && group !== 'embedding';
         }),
       ]),
     ) as Provider['models'];
     const projected: Provider = {
       ...provider,
       models,
-      imageModels: [],
-      videoModels,
       embeddingModels: [],
     };
-    delete projected.imageDefaults;
-    delete projected.videoDefaults;
     delete projected.embeddingDefaults;
-    if (videoDefaults) projected.videoDefaults = videoDefaults;
     return projected;
   });
 

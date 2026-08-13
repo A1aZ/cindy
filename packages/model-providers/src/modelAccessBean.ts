@@ -23,6 +23,15 @@ export type ModelAccessV2Agent = (typeof MODEL_ACCESS_V2_AGENTS)[number];
 export const MODEL_ACCESS_WIRE_PROTOCOLS = ['anthropic-messages', 'openai-responses'] as const;
 export type ModelAccessWireProtocol = (typeof MODEL_ACCESS_WIRE_PROTOCOLS)[number];
 
+export const MODEL_ACCESS_MEDIA_CAPABILITIES = [
+  'image.generate',
+  'image.edit',
+  'video.generate',
+  'video.image_to_video',
+  'audio.generate',
+] as const;
+export type MediaCapability = (typeof MODEL_ACCESS_MEDIA_CAPABILITIES)[number];
+
 export const MODEL_ACCESS_EFFORTS = [
   'minimal',
   'low',
@@ -228,7 +237,7 @@ export interface ListModelsResponseV2 extends ListModelsResponse {
 
 export interface ListModelsResponseV3 extends ListModelsResponse {
   schemaVersion: typeof MODEL_ACCESS_CATALOG_SCHEMA_VERSION;
-  models: Array<ModelCatalogEntry & { name: string; contextWindow: number }>;
+  models: Array<ModelCatalogEntry & { name: string }>;
 }
 
 /** Result returned by local Model Access boundary parsers. */

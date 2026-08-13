@@ -22,6 +22,7 @@ import {
   GHOST_CARD_HEIGHT_MAX,
   GHOST_CARD_HEIGHT_MIN,
   GHOST_INSTALL_MANIFEST_MAX_BYTES,
+  GHOST_MEDIA_CAPABILITIES,
   GHOST_NETWORK_MAX_CONNECTIONS_PER_DECL,
   GHOST_NOTIFY_MIN_INTERVAL_MS,
   isGhostInstallApprovalToken,
@@ -39,6 +40,10 @@ import {
   type GhostHostNoticeKey,
   type GhostImageAspectRatio,
   type GhostManifest,
+  type GhostCindyPreferenceResult,
+  type GhostMediaCapability,
+  type GhostMediaModelsResult,
+  type GhostMediaModelType,
   type GhostSetupAllowedAction,
   type GhostSetupAssessment,
   type GhostSetupReauthSuggest,
@@ -114,6 +119,7 @@ import {
   setGhostAppContextProvider,
   setGhostConnectionsHandler,
   setGhostKvStore,
+  setGhostMediaModelsProvider,
   setGhostOauthHandler,
   setGhostSandboxDevToolsDisabled,
   setGhostSecretsHandler,
@@ -304,7 +310,7 @@ import {
   removeGhostSecrets,
   storeGhostSecret,
 } from '../secrets/providerSecretStore.js';
-import { getActiveCatalog } from '../maker-host/active-catalog.js';
+import { getActiveCatalog, getXdGatewayModels } from '../maker-host/active-catalog.js';
 import { projectProviderCatalogForBuildRegion } from '../maker-host/provider-access-policy.js';
 import { getGrokAccessToken, hasGrokOAuthLogin } from '../maker-host/grok-oauth-login.js';
 import { invalidateXaiBridgeAuth } from '../maker-host/xai-auth-invalidation-host.js';
@@ -359,6 +365,10 @@ import { MAKER_PUSH } from '../maker-ipc/channels.js';
 import { ghostSetupNavigationForAction } from './ghostSetupNavigation.js';
 import { assessGhostHostSetupRequirements } from './ghostHostSetupRequirements.js';
 import { isModelAccessReady } from '../model-access/readiness.js';
+import {
+  filterEnabledGatewayMediaModels,
+  listAvailableMediaModels,
+} from '../model-access/mediaModels.js';
 // ⚠️ 下面三个依赖必须保持模块顶层静态 import,禁止改回函数内 await import():
 // 运行时 import() 会被 Rollup 编译成跨 chunk 的 require(尤其 drizzle-orm 会拆独立
 // chunk),而 bootstrap chunk 因 conf(electron-store 依赖)的模块副作用
@@ -3105,6 +3115,120 @@ const getCatalogEmbedConfig = (): ReturnType<typeof getCatalogMediaConfig> =>
   getCatalogMediaConfig('embed');
 
 /**
+ * Art 等插件的媒体偏好只认 Gateway `/models` 快照，并叠加客户端现有停用准入。
+ * 不合并 providers.json 的 OpenAI/Gemini/自定义来源；第三方媒体模型后续单独接入。
+ */
+function getGatewayMediaPreferenceConfig(kind: 'image' | 'video'): CindyMediaCatalogConfig {
+  const capability = kind === 'image' ? 'image.generate' : 'video.generate';
+  const models = filterEnabledGatewayMediaModels(
+    getXdGatewayModels(),
+    capability,
+    readModelDisableOverrides(),
+  ).map((model) => ({
+    id: model.id,
+    label: model.name ?? model.id,
+    providerId: 'xd',
+    // Host 不从 modalities 推导插件业务动作；Art 等插件读取 /media-models 后自行判断。
+    supportsEdit: true,
+  }));
+  const standard = models[0]?.id;
+  return {
+    models,
+    defaults: standard ? { standard, draft: standard, best: standard } : null,
+  };
+}
+
+/**
+ * 插件配置页的模型目录；这里只读目录，不提供任何生成入口。Host 只按 Gateway mode
+ * 切图片/视频大类并透传 modalities，具体动作支持度由插件自行解释。
+ */
+async function getGhostConfigurableMediaModels(
+  ghostId: string,
+  type: GhostMediaModelType,
+): Promise<GhostMediaModelsResult> {
+  const ghost = findAvailableGhost(ghostId);
+  if (!ghost || !ghost.enabled) {
+    return { ok: false, errorCode: 'NOT_AVAILABLE', message: '插件当前不可用' };
+  }
+  const declared = ghost.manifest.cindy?.[type] ?? [];
+  if (!ghost.manifest.slots?.includes('cindy') || declared.length === 0) {
+    return {
+      ok: false,
+      errorCode: 'PERMISSION_DENIED',
+      message: `插件未声明 Cindy ${type} 能力`,
+    };
+  }
+  try {
+    const models = await listAvailableMediaModels(
+      type === 'image' ? 'image.generate' : 'video.generate',
+    );
+    return {
+      ok: true,
+      type,
+      models: models.map((model) => ({
+        id: model.id,
+        name: model.name ?? model.id,
+        ...(model.modalities
+          ? {
+              modalities: {
+                input: [...model.modalities.input],
+                output: [...model.modalities.output],
+              },
+            }
+          : {}),
+      })),
+      defaultModelId: models[0]?.id ?? null,
+    };
+  } catch (error) {
+    log.warn('read plugin media model catalog failed', {
+      ghostId,
+      type,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return { ok: false, errorCode: 'NOT_AVAILABLE', message: '媒体模型目录暂不可用' };
+  }
+}
+
+/**
+ * 读取插件在 Host「Cindy 能力」中的现有媒体选型。
+ * 这里只投影当前有效值，不复制或迁移配置；override 失效时与设置 UI 一样回落目录默认。
+ */
+function getGhostConfiguredMediaModel(
+  ghostId: string,
+  capability: unknown,
+): GhostCindyPreferenceResult {
+  if (
+    typeof capability !== 'string' ||
+    !(GHOST_MEDIA_CAPABILITIES as readonly string[]).includes(capability)
+  ) {
+    return { ok: false, errorCode: 'INVALID_REQUEST', message: '未知的 Cindy 媒体能力' };
+  }
+  const mediaCapability = capability as GhostMediaCapability;
+  const [type, action] = mediaCapability.split('.') as ['image' | 'video', 'generate' | 'edit'];
+  const ghost = findAvailableGhost(ghostId);
+  if (!ghost || !ghost.enabled) {
+    return { ok: false, errorCode: 'NOT_AVAILABLE', message: '插件当前不可用' };
+  }
+  const declared = ghost.manifest.cindy?.[type] ?? [];
+  if (!ghost.manifest.slots?.includes('cindy') || !declared.includes(action)) {
+    return {
+      ok: false,
+      errorCode: 'PERMISSION_DENIED',
+      message: `插件未声明 Cindy ${mediaCapability} 能力`,
+    };
+  }
+
+  const config = getGatewayMediaPreferenceConfig(type);
+  const available = new Set(config.models.map((model) => model.id));
+  const override = readGhostCindyOverrides(ghostId)[mediaCapability];
+  const modelId = override && available.has(override) ? override : config.defaults?.standard;
+  if (!modelId) {
+    return { ok: false, errorCode: 'NOT_AVAILABLE', message: '当前没有可用的媒体模型' };
+  }
+  return { ok: true, capability: mediaCapability, modelId };
+}
+
+/**
  * 派发前重查(PR #744 review 第二十轮):cindySlot 从白名单校验到实际下单之间隔着
  * 归属查账、参考图准备等长 await,期间该媒体模型 / 供应商可能被用户停用 —— 在
  * generateImage / editImage / 视频提交边界按**当前** override 重算启用候选再验一次,
@@ -4785,6 +4909,7 @@ export function registerGhostIpc(): void {
   ipcMain.handle(LEGACY_GHOST_RECOVERY_RETRY_CHANNEL, legacyRecoveryIpc.retry);
   setGhostSandboxDevToolsDisabled(app.isPackaged);
   setGhostAppContextProvider(currentGhostAppContext);
+  setGhostMediaModelsProvider(getGhostConfigurableMediaModels);
   // 面板唤醒电子脑(cindy-ghost://<id>/wake 供片分支):面板零桥,唤醒经它
   // 自己的协议通道进来。只对"已装且唤醒"的意识放行;熔断态不清账(重载 /
   // 重新唤醒才 resetFuse),spawn 幂等所以重复唤醒零成本。
@@ -5251,11 +5376,18 @@ export function registerGhostIpc(): void {
         log.warn('ghost tool-progress rejected', { id, reason: outcome.reason });
       return { ok: true };
     }
-    // host-request = 读取宿主公开上下文;不要求卡槽,只返回构建 region,
-    // 不含登录态/路径/设备信息。未知 kind 明确拒绝,避免接口悄悄扩面。
+    // host-request = 读取宿主只读信息。app-context 不要求卡槽；cindy-preference
+    // 只返回调用插件自己已声明能力的当前选型，不返回其它插件配置或凭证。
+    // 未知 kind 明确拒绝，避免接口悄悄扩面。
     if (type === 'host-request') {
       const kind = (payload as { kind?: unknown } | null)?.kind;
       if (kind === 'app-context') return currentGhostAppContext();
+      if (kind === 'cindy-preference') {
+        return getGhostConfiguredMediaModel(
+          id,
+          (payload as { capability?: unknown } | null)?.capability,
+        );
+      }
       throwIpcError('INVALID_PARAMS', '未知的宿主请求类型');
     }
     // cindy-request = 请 Cindy 本体代办;旧名 model-request 静默兼容(更名前的老包)。
@@ -5630,8 +5762,8 @@ export function registerGhostIpc(): void {
       : null;
     event.returnValue = {
       overrides,
-      image: byKind(getCatalogImageConfig()),
-      video: byKind(getCatalogVideoConfig()),
+      image: byKind(getGatewayMediaPreferenceConfig('image')),
+      video: byKind(getGatewayMediaPreferenceConfig('video')),
       text: {
         options: textOptions,
         defaultModel:
@@ -5688,7 +5820,9 @@ export function registerGhostIpc(): void {
     },
   );
 
-  ipcMain.handle('ghosts:cindy-prefs:set', (_event, ghostId: unknown, capability: unknown, model: unknown) => {
+  ipcMain.handle(
+    'ghosts:cindy-prefs:set',
+    (_event, ghostId: unknown, capability: unknown, model: unknown) => {
       if (typeof ghostId !== 'string' || ghostId.trim().length === 0) {
         throwIpcError('INVALID_PARAMS', 'ghostId must be a non-empty string');
       }
@@ -5702,15 +5836,19 @@ export function registerGhostIpc(): void {
       // fail-closed 兜底,不在这层把「暂时没配 key」当成非法值。
       if (
         !isCindyOverrideModelAllowed(capability as string, model, {
-          image: getCatalogImageConfig().models,
-          video: getCatalogVideoConfig().models,
+          image: getGatewayMediaPreferenceConfig('image').models,
+          video: getGatewayMediaPreferenceConfig('video').models,
           embed: getCatalogEmbedConfig().models,
-        textPinIds: buildTextOneshotPinOptions(getActiveCatalog(), readModelDisableOverrides()).map(
-          (o) => o.id,
-        ),
+          textPinIds: buildTextOneshotPinOptions(
+            getActiveCatalog(),
+            readModelDisableOverrides(),
+          ).map((o) => o.id),
         })
       ) {
-      throwIpcError('INVALID_PARAMS', 'model must be null or an allowed model of the capability category');
+        throwIpcError(
+          'INVALID_PARAMS',
+          'model must be null or an allowed model of the capability category',
+        );
       }
       const overrides = writeGhostCindyOverride(
         ghostId,
@@ -5722,7 +5860,8 @@ export function registerGhostIpc(): void {
         ref: `cindy-pref:${String(capability)}`,
       });
       return { overrides };
-  });
+    },
+  );
 
   // ── agent 槽派活(errand)每插件配置(插件详情页「AI 代办」卡)──
   // 读走 sendSync(与 cindy-prefs 同理:详情页首帧同帧渲染);写走 invoke,

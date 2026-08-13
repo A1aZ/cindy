@@ -425,6 +425,12 @@ export interface GhostToolDecl {
   description: string;
   /** JSON Schema(object)形态的参数声明;可省略(无参工具)。 */
   parameters?: Record<string, unknown>;
+  /**
+   * 参数中承载媒体地址的顶层字段名。调用工具时 Host 从这些字段提取
+   * string / string[]，复用 attachments 授权链完成过户并把指纹注入
+   * args.attachments；Agent 无需再把同一地址手工复制到 ghost_call.attachments。
+   */
+  attachmentArgs?: string[];
 }
 
 /** cindy 槽·图像类可申请的动作(主机代办菜单的"图像"类目)。 */
@@ -3469,12 +3475,63 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           return { ok: false, reason: 'tools[].parameters 必须可序列化' };
         }
       }
+      let attachmentArgs: string[] | undefined;
+      if (t.attachmentArgs !== undefined) {
+        if (
+          !Array.isArray(t.attachmentArgs) ||
+          t.attachmentArgs.length === 0 ||
+          t.attachmentArgs.length > 4
+        ) {
+          return { ok: false, reason: 'tools[].attachmentArgs 必须是 1–4 项的字段名数组' };
+        }
+        const properties =
+          isPlainObject(t.parameters) && isPlainObject(t.parameters.properties)
+            ? t.parameters.properties
+            : null;
+        const seenAttachmentArgs = new Set<string>();
+        attachmentArgs = [];
+        for (const rawName of t.attachmentArgs) {
+          if (
+            typeof rawName !== 'string' ||
+            rawName.length === 0 ||
+            rawName.length > 64 ||
+            isGhostManifestReservedRecordKey(rawName)
+          ) {
+            return {
+              ok: false,
+              reason: 'tools[].attachmentArgs 只能引用 1–64 字符的安全顶层参数名',
+            };
+          }
+          if (seenAttachmentArgs.has(rawName)) {
+            return {
+              ok: false,
+              reason: `tools[].attachmentArgs 含重复字段 ${JSON.stringify(rawName)}`,
+            };
+          }
+          const schema = properties?.[rawName];
+          const acceptsMediaRef =
+            isPlainObject(schema) &&
+            (schema.type === 'string' ||
+              (schema.type === 'array' &&
+                isPlainObject(schema.items) &&
+                schema.items.type === 'string'));
+          if (!acceptsMediaRef) {
+            return {
+              ok: false,
+              reason: `tools[].attachmentArgs 字段 ${JSON.stringify(rawName)} 必须在 parameters.properties 中声明为 string 或 string[]`,
+            };
+          }
+          seenAttachmentArgs.add(rawName);
+          attachmentArgs.push(rawName);
+        }
+      }
       tools.push({
         name: t.name,
         description: t.description,
         ...(t.parameters !== undefined
           ? { parameters: t.parameters as Record<string, unknown> }
           : {}),
+        ...(attachmentArgs !== undefined ? { attachmentArgs } : {}),
       });
     }
   }
@@ -5379,13 +5436,20 @@ export const GHOST_PIPE_CALL_MAX_TOTAL_MS = 30 * 60_000;
 export type GhostAppRegion = 'cn' | 'global';
 
 /**
- * 上行:读取宿主公开上下文。`cindy.request({kind:'app-context'})` 是 preload
- * 提供的语法糖,底层仍走同一根 ghost-pipe 与主机白名单。
+ * 上行:读取宿主只读信息。`cindy.request(...)` 是 preload 提供的语法糖,
+ * 底层仍走同一根 ghost-pipe 与主机白名单。
  */
-export interface GhostPipeHostRequest {
-  type: 'host-request';
-  kind: 'app-context';
-}
+export type GhostPipeHostRequest =
+  | {
+      type: 'host-request';
+      kind: 'app-context';
+    }
+  | {
+      type: 'host-request';
+      kind: 'cindy-preference';
+      /** 只能读取本插件已声明的媒体能力配置。 */
+      capability: GhostMediaCapability;
+    };
 
 /** 插件请求 Agent 新回合时可选的会话处理方式。 */
 export const GHOST_AGENT_RUN_MODES = ['continue', 'fork', 'new'] as const;
@@ -5961,6 +6025,51 @@ export interface GhostAppContextResult {
     locale: GhostLocale;
   };
 }
+
+/** 插件设置页 / 面板可读取的 Cindy Core 媒体模型类型。 */
+export const GHOST_MEDIA_MODEL_TYPES = ['image', 'video'] as const;
+export type GhostMediaModelType = (typeof GHOST_MEDIA_MODEL_TYPES)[number];
+
+/** Host「Cindy 能力」区域现有的四项媒体模型配置键。 */
+export const GHOST_MEDIA_CAPABILITIES = [
+  'image.generate',
+  'image.edit',
+  'video.generate',
+  'video.edit',
+] as const;
+export type GhostMediaCapability = (typeof GHOST_MEDIA_CAPABILITIES)[number];
+
+/** 插件读取自身某项 Cindy 媒体能力当前实际选型的只读结果。 */
+export type GhostCindyPreferenceResult =
+  | { ok: true; capability: GhostMediaCapability; modelId: string }
+  | {
+      ok: false;
+      errorCode: 'INVALID_REQUEST' | 'PERMISSION_DENIED' | 'NOT_AVAILABLE';
+      message: string;
+    };
+
+/**
+ * 插件配置界面使用的只读媒体模型目录。模型类型来自 Gateway mode；输入/输出能力
+ * 原样使用 Model Access 已归一化的 modalities，由插件自行解释，不在 Host 内映射成
+ * 出图、改图或图生视频等业务动作。Guide 是独立可选信息，不进入这份配置契约。
+ */
+export type GhostMediaModelsResult =
+  | {
+      ok: true;
+      type: GhostMediaModelType;
+      models: Array<{
+        id: string;
+        name: string;
+        /** Gateway architecture 的归一化投影；缺省表示上游未声明，插件不得猜测。 */
+        modalities?: { input: string[]; output: string[] };
+      }>;
+      defaultModelId: string | null;
+    }
+  | {
+      ok: false;
+      errorCode: 'PERMISSION_DENIED' | 'NOT_AVAILABLE';
+      message: string;
+    };
 
 /**
  * 上行:聊天卡片供片(卡槽③海报模式)。意识为自己的一次 tool-call

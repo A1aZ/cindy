@@ -147,6 +147,11 @@ export interface GhostToolDecl {
   description: string;
   /** JSON Schema(object)形态的参数声明;可省略(无参工具)。 */
   parameters?: Record<string, unknown>;
+  /**
+   * 参数中承载媒体地址的顶层字段名。Host 从这些字段提取 string / string[]，
+   * 复用 attachments 授权链完成过户并把指纹注入 args.attachments。
+   */
+  attachmentArgs?: string[];
 }
 
 /**
@@ -1423,12 +1428,63 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
           return { ok: false, reason: 'tools[].parameters 必须可序列化' };
         }
       }
+      let attachmentArgs: string[] | undefined;
+      if (t.attachmentArgs !== undefined) {
+        if (
+          !Array.isArray(t.attachmentArgs) ||
+          t.attachmentArgs.length === 0 ||
+          t.attachmentArgs.length > 4
+        ) {
+          return { ok: false, reason: 'tools[].attachmentArgs 必须是 1–4 项的字段名数组' };
+        }
+        const properties =
+          isPlainObject(t.parameters) && isPlainObject(t.parameters.properties)
+            ? t.parameters.properties
+            : null;
+        const seenAttachmentArgs = new Set<string>();
+        attachmentArgs = [];
+        for (const rawName of t.attachmentArgs) {
+          if (
+            typeof rawName !== 'string' ||
+            rawName.length === 0 ||
+            rawName.length > 64 ||
+            ['__proto__', 'constructor', 'prototype'].includes(rawName)
+          ) {
+            return {
+              ok: false,
+              reason: 'tools[].attachmentArgs 只能引用 1–64 字符的安全顶层参数名',
+            };
+          }
+          if (seenAttachmentArgs.has(rawName)) {
+            return {
+              ok: false,
+              reason: `tools[].attachmentArgs 含重复字段 ${JSON.stringify(rawName)}`,
+            };
+          }
+          const schema = properties?.[rawName];
+          const acceptsMediaRef =
+            isPlainObject(schema) &&
+            (schema.type === 'string' ||
+              (schema.type === 'array' &&
+                isPlainObject(schema.items) &&
+                schema.items.type === 'string'));
+          if (!acceptsMediaRef) {
+            return {
+              ok: false,
+              reason: `tools[].attachmentArgs 字段 ${JSON.stringify(rawName)} 必须在 parameters.properties 中声明为 string 或 string[]`,
+            };
+          }
+          seenAttachmentArgs.add(rawName);
+          attachmentArgs.push(rawName);
+        }
+      }
       tools.push({
         name: t.name,
         description: t.description,
         ...(t.parameters !== undefined
           ? { parameters: t.parameters as Record<string, unknown> }
           : {}),
+        ...(attachmentArgs !== undefined ? { attachmentArgs } : {}),
       });
     }
   }

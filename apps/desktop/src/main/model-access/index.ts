@@ -125,9 +125,11 @@ function broadcastStatus(status: ModelAccessStatus): void {
 }
 
 // ─── XD 网关模型目录同步(`/models` 是模型、能力与价格的唯一事实源)─────────
-// 凭据同步成功后从 model-access-server 拉 GET /models(AIGateway /model-groups
-// 的 mode=chat 投影),整体重建 xd 供应商的模型列表(active-catalog
-// setXdGatewayModels)。拉取失败保留最后一次完整成功快照；成功空列表同时清空模型和价格。
+// 凭据同步成功后从 model-access-server 拉现有 GET /models：聊天模型与
+// 媒体模型都来自同一份 AIGateway /model-groups 投影。active-catalog 按 agents
+// 重建聊天目录，并按 mode 重建 XD 专属媒体清单供设置页沿用模型停用逻辑；Core
+// 媒体工具和插件也只按 mode 投影。调用时只按 modelId 向 Server 懒取 Guide。
+// 拉取失败保留最后一次完整成功快照；成功空列表同时清空模型和价格。
 
 let modelsSyncInflight: Promise<void> | null = null;
 /** 模型请求的单调尝试号与最近成功号，供手动刷新区分“旧成功 + 本次失败”。 */

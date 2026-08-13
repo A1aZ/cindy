@@ -38,6 +38,9 @@ describe('XD 网关权威模型清单重建', () => {
     setActiveCatalog(BUNDLED_CATALOG);
     expect(xdModels('claude-code')).toEqual([]);
     expect(xdModels('codex')).toEqual([]);
+    const xd = getActiveCatalog().providers.find((provider) => provider.id === 'xd');
+    expect(xd?.imageModels).toEqual([]);
+    expect(xd?.videoModels).toEqual([]);
   });
 
   it('显式空列表保持 XD 模型不可用', () => {
@@ -182,6 +185,37 @@ describe('XD 网关权威模型清单重建', () => {
 
     expect(xdModels('claude-code')).toEqual([]);
     expect(xdModels('codex').map((model) => model.id)).toEqual(['codex-native-only']);
+  });
+
+  it('媒体 mode 条目不进入聊天目录，并重建设置页专属媒体清单', () => {
+    setActiveCatalog(BUNDLED_CATALOG);
+    setXdGatewayModels([
+      {
+        id: 'image-without-guide',
+        mode: 'image_generation',
+        agents: [],
+        name: 'Image Without Guide',
+      },
+      {
+        id: 'video-model',
+        mode: 'video_generation',
+        agents: [],
+        name: 'Video Model',
+      },
+      {
+        id: 'chat-model',
+        mode: 'chat',
+        agents: ['codex'],
+      },
+    ]);
+
+    const xd = getActiveCatalog().providers.find((provider) => provider.id === 'xd');
+    expect(xd?.imageModels).toEqual([{ id: 'image-without-guide', name: 'Image Without Guide' }]);
+    expect(xd?.videoModels).toEqual([{ id: 'video-model', name: 'Video Model' }]);
+    expect(xd?.imageDefaults).toBeUndefined();
+    expect(xd?.videoDefaults).toBeUndefined();
+    expect(xdModels('claude-code')).toEqual([]);
+    expect(xdModels('codex').map((model) => model.id)).toEqual(['chat-model']);
   });
 
   it('perAgent 覆盖块按 tab 应用(cc 无 Fast + 1M 窗口;codex 保持基线)', () => {

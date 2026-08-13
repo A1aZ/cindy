@@ -232,6 +232,47 @@ describe('model access catalog contract', () => {
     }
   });
 
+  it('requires v3 contextWindow only for chat models', () => {
+    const { contextWindow: _contextWindow, ...withoutContextWindow } =
+      VALID_V3_RESPONSE.models[0]!;
+    expectReject(
+      { schemaVersion: MODEL_ACCESS_CATALOG_SCHEMA_VERSION, models: [withoutContextWindow] },
+      'response.models[0].contextWindow',
+    );
+
+    for (const mode of ['image_generation', 'video_generation'] as const) {
+      expect(
+        parseListModelsResponse({
+          schemaVersion: MODEL_ACCESS_CATALOG_SCHEMA_VERSION,
+          models: [
+            {
+              id: `${mode}-model`,
+              name: `${mode} model`,
+              mode,
+              currency: 'CNY',
+              agents: [],
+            },
+          ],
+        }),
+      ).toMatchObject({ ok: true });
+    }
+  });
+
+  it.each([undefined, 'responses'] as const)(
+    '仍要求 mode=%s 的可聊天模型提供 contextWindow',
+    (mode) => {
+      const { contextWindow: _contextWindow, mode: _mode, ...withoutContextWindow } =
+        VALID_V3_RESPONSE.models[0]!;
+      expectReject(
+        {
+          schemaVersion: MODEL_ACCESS_CATALOG_SCHEMA_VERSION,
+          models: [{ ...withoutContextWindow, ...(mode === undefined ? {} : { mode }) }],
+        },
+        'response.models[0].contextWindow',
+      );
+    },
+  );
+
   it.each(['CNY', 'USD'] as const)('accepts the supported %s currency', (currency) => {
     const result = parseListModelsResponse({
       ...VALID_RESPONSE,

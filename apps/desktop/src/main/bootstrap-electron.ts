@@ -36,7 +36,11 @@ import {
   markDesktopDevStartupFailed,
   markDesktopDevWindowReady,
 } from './devStartupStatus';
-import { showMainWindowAndRestoreFullscreen } from './mainWindowFullscreenStartup';
+import {
+  installWindowFullscreenStateBroadcast,
+  readWindowFullscreenState,
+  showMainWindowAndRestoreFullscreen,
+} from './mainWindowFullscreenStartup';
 import { prewarmMacComputerPermissionGuideHelper } from './computer-permission-guide/MacComputerPermissionGuideNativeHost.js';
 import { handleOpenChatGPTApp } from './chatgpt-app.js';
 import {
@@ -2839,33 +2843,11 @@ const createWindow = () => {
   // 同一个窗口级安装器，命令发回实际接收按键的窗口；Mac 安装器会直接 no-op。
   installNewMakerWindowShortcut(mainWindow);
 
-  // Notify renderer when fullscreen state changes (macOS traffic-light adaptation).
   // Register before state restoration so the initial transition is tracked.
-  // macOS 26 (Tahoe) + Electron 41 上 `will-enter-full-screen` / `will-leave-full-screen`
-  // 这两个 macOS 私有事件不再触发,只有动画 END 的 `enter-full-screen` /
-  // `leave-full-screen` 还能用。问题:出全屏时红绿灯在动画一开始就回位,但 padding
-  // 要等 `leave-full-screen` (动画 END) 才补回去 → 中间几百毫秒红绿灯和工具栏 icon
-  // 重叠。退化方案:监听 `resize`,一旦发现处于 fullscreen 标记态但窗口尺寸已经
-  // 小于显示器 → 出全屏动画启动了 → 提前发 false 补 padding。`leave-full-screen`
-  // 仍保留作兜底。
-  let inFullscreen = false;
-  mainWindow.on('enter-full-screen', () => {
-    inFullscreen = true;
-    mainWindow.webContents.send('fullscreen-change', true);
-  });
-  mainWindow.on('leave-full-screen', () => {
-    if (!inFullscreen) return;
-    inFullscreen = false;
-    mainWindow.webContents.send('fullscreen-change', false);
-  });
-  mainWindow.on('resize', () => {
-    if (!inFullscreen) return;
-    const bounds = mainWindow.getBounds();
-    const display = screen.getDisplayMatching(bounds);
-    if (bounds.width < display.bounds.width || bounds.height < display.bounds.height) {
-      inFullscreen = false;
-      mainWindow.webContents.send('fullscreen-change', false);
-    }
+  installWindowFullscreenStateBroadcast(mainWindow, {
+    // macOS 26 no longer emits will-leave-full-screen. Resize detects the
+    // animation start so traffic-light padding returns before the end event.
+    getDisplayBounds: (bounds) => screen.getDisplayMatching(bounds).bounds,
   });
 
   // Wire resize / move / maximize / fullscreen listeners that persist the
@@ -3795,10 +3777,9 @@ const registerIpcHandlers = () => {
   // Fullscreen state query — renderer calls this on mount to recover from the
   // race where `enter-full-screen` fires before the renderer subscribes (e.g.
   // when window-state restores a fullscreen window on launch).
-  ipcMain.handle('get-fullscreen-state', (): boolean => {
-    const win = getWindow();
-    if (!win) return false;
-    return win.isFullScreen() || win.isSimpleFullScreen();
+  ipcMain.handle('get-fullscreen-state', (event): boolean => {
+    assertTrustedAppRendererEvent(event);
+    return readWindowFullscreenState(BrowserWindow.fromWebContents(event.sender));
   });
 
   // Find-in-page (F-FIP-1): renderer overlay drives Chromium's native page search.

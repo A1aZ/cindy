@@ -32,7 +32,7 @@
  * 用 transform 平移后按钮视觉位置和 no-drag 挖洞错位，点击会变成拖拽窗口。
  */
 
-import { Minimize2, PanelLeft } from 'lucide-react';
+import { PanelLeft } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { MenuButton } from '@/components/title-bar/MenuButton';
@@ -93,22 +93,11 @@ export function ChromeActions({
       >
         <PanelLeft size={15} />
       </button>
-      <MenuButton />
-      {isMac && isFullscreen && (
-        <button
-          className={cn(
-            'flex items-center justify-center',
-            'h-7 w-7 rounded-md',
-            'text-titlebar-icon',
-            'transition-colors',
-            'hover:bg-titlebar-button-hover',
-          )}
-          onClick={() => window.electronAPI?.windowExitFullscreen()}
-          aria-label={t('contentHeader.exitFullscreen')}
-        >
-          <Minimize2 size={15} />
-        </button>
-      )}
+      <MenuButton
+        onExitFullscreen={
+          isMac && isFullscreen ? () => window.electronAPI?.windowExitFullscreen() : undefined
+        }
+      />
     </div>
   );
 }

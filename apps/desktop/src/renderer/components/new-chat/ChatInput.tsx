@@ -5196,6 +5196,8 @@ export function ChatInput({
       navigate,
       planModeEntry,
       captureSendFocusForRestore,
+      slashCommandsReady,
+      mergedCommands,
     ],
   );
   useEffect(() => {

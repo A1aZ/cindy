@@ -29,6 +29,10 @@ const h = vi.hoisted(() => ({
   ),
   /** 模拟 DB 返回的 session row */
   sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null } | undefined,
+  /** 模拟 DB 第二次读取(排空落盘队列之后)返回的 session row;用于「drain 期间被删除」竞态测试。 */
+  sessionRowAfterDrain: undefined as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null } | undefined,
+  /** DB 读取次数计数(区分 drain 前后的两次读取)。 */
+  dbReads: 0,
 }));
 
 function nativeImageEmpty() {
@@ -167,7 +171,14 @@ vi.mock('../../localDb/client/current.js', () => ({
     drizzle: {
       select: () => ({
         from: () => ({
-          where: () => Promise.resolve([h.sessionRow].filter(Boolean)),
+          where: () => {
+            h.dbReads += 1;
+            const row =
+              h.dbReads >= 2 && h.sessionRowAfterDrain !== undefined
+                ? h.sessionRowAfterDrain
+                : h.sessionRow;
+            return Promise.resolve([row].filter(Boolean));
+          },
         }),
       }),
     },
@@ -212,6 +223,8 @@ beforeEach(() => {
   h.handlers.clear();
   h.trusted = true;
   h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
+  h.sessionRowAfterDrain = undefined;
+  h.dbReads = 0;
   h.predict.mockResolvedValue('下一步做什么');
   registerMakerTitleIpc();
 });
@@ -306,6 +319,16 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
 
   it('session 为已删除(soft-deleted)时静默返回 null,不触发付费调用', async () => {
     h.sessionRow = { remoteHostId: null, agentKind: 'cc', status: 'deleted' };
+
+    await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
+    expect(h.predict).not.toHaveBeenCalled();
+  });
+
+  it('drain 等待期间 session 被软删除时,排空后重新校验并静默返回 null', async () => {
+    // 第一次读取(drain 前)返回合法本地 session;排空落盘队列后第二次读取返回已删除状态,
+    // 覆盖 TOCTOU 竞态:drain 前的 status 检查过期后,必须在素材物化/调用 provider 前重新校验。
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
+    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'cc', status: 'deleted' };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();

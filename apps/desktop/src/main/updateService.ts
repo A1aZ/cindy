@@ -41,6 +41,7 @@ import {
   writeAutoRelaunchOnIdle,
 } from './auto-update-settings-store';
 import {
+  readUpdateChannelSettings,
   readUpdateChannelSettingsState,
   resetUpdateChannelSettings,
   writeEnableBeta,
@@ -549,6 +550,23 @@ function writePatchInfo(info: PatchInfo): void {
 
 function removePatchInfo(): void {
   try { fs.unlinkSync(path.join(getUpdatesDir(), PATCH_INFO_FILE)); } catch { /* ignore */ }
+}
+
+/**
+ * 清掉已 staged 的补丁(ready 态):删 zip + patch-info.json,状态回 idle。
+ * 只在「用户关掉 beta 开关」时调用——opt-out 后不能仍让 staged 的 beta patch
+ * 在下一次启动/后台轮询里被装上去(切渠道不等于切版本,必须把旧渠道的补丁作废)。
+ */
+function clearStagedPatch(): void {
+  if (readyFilePath) {
+    try { fs.unlinkSync(readyFilePath); } catch { /* ignore */ }
+  }
+  readyVersion = undefined;
+  readyFilePath = undefined;
+  removePatchInfo();
+  if (currentStatus === 'ready' || currentStatus === 'superseding') {
+    setStatus('idle');
+  }
 }
 
 function incrementApplyAttempts(): void {
@@ -1209,14 +1227,25 @@ export function initUpdateService(): void {
     if (typeof next !== 'boolean') {
       throwIpcError('INVALID_PARAMS', 'enableBeta required (boolean)');
     }
+    const wasBeta = readUpdateChannelSettings().enableBeta;
     writeEnableBeta(next);
+    // 从 beta 切回 release 时,作废已 staged 的 beta 补丁,避免用户 opt-out 后
+    // 仍被装到 beta 版本(切渠道不等于切版本)。
+    if (wasBeta && !next) {
+      clearStagedPatch();
+    }
     const state = readUpdateChannelSettingsState();
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
   });
 
   ipcMain.handle('update-channel-settings-reset', (event) => {
     assertTrustedAppRendererEvent(event);
+    const wasBeta = readUpdateChannelSettings().enableBeta;
     resetUpdateChannelSettings();
+    // 恢复默认 = 关闭 beta;同 set(false),作废已 staged 的 beta 补丁。
+    if (wasBeta) {
+      clearStagedPatch();
+    }
     const state = readUpdateChannelSettingsState();
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
   });
@@ -1229,11 +1258,14 @@ export function initUpdateService(): void {
   });
 
   // 用户主动重启:让 beta 通道切换在下次冷启动的 manifest 拉取前生效。
+  // 用 app.quit() 而非 app.exit(0):切渠道重启不是 updater 替换场景,没有独立更新器
+  // 进程负责收尾,必须走 before-quit 链优雅停掉 Codex/IM/后台服务、落盘本地状态。
+  // app.relaunch() 只是标记「退出后重启」,真正触发重启的是 app.quit() 的退出流程。
   ipcMain.handle('update-channel-relaunch', (event) => {
     assertTrustedAppRendererEvent(event);
     log.info('relaunch requested for update channel change');
     app.relaunch();
-    app.exit(0);
+    app.quit();
   });
 
   ipcMain.on('update-set-relaunch-theme', (_event, theme: 'light' | 'dark') => {

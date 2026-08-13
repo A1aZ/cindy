@@ -72,4 +72,18 @@ describe('betaChannelStore', () => {
     // 回滚到落盘前的旧值(未启用)
     expect(isBetaChannel()).toBe(false);
   });
+
+  it('连续两次落盘都失败时，回滚到磁盘确认态而非上一次的乐观值', async () => {
+    await hydrateBetaChannel();
+    expect(isBetaChannel()).toBe(false);
+
+    // release → 开 → 关，两次存储操作都失败。
+    vi.mocked(AsyncStorage.setItem).mockRejectedValueOnce(new Error('full'));
+    vi.mocked(AsyncStorage.removeItem).mockRejectedValueOnce(new Error('full'));
+
+    await expect(syncBetaChannel(true)).rejects.toThrow('full');
+    await expect(syncBetaChannel(false)).rejects.toThrow('full');
+    // 磁盘仍是 release；内存不得停留在第一次的乐观值(已开)。
+    expect(isBetaChannel()).toBe(false);
+  });
 });

@@ -16,6 +16,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 const STORAGE_KEY = 'cindy.mobile.update.beta';
 
 let beta = false;
+/** 磁盘确认态:最近一次成功落盘的值。回滚一律回到它,而非上一次调用的乐观值。 */
+let committed = false;
 let hydrated = false;
 let hydratePromise: Promise<boolean> | null = null;
 let mutationEpoch = 0;
@@ -47,6 +49,7 @@ export function hydrateBetaChannel(): Promise<boolean> {
     .then((raw) => {
       if (epoch === mutationEpoch) {
         const next = raw === 'true';
+        committed = next;
         if (beta !== next || !hydrated) {
           beta = next;
           notifyListeners();
@@ -57,6 +60,7 @@ export function hydrateBetaChannel(): Promise<boolean> {
     })
     .catch(() => {
       if (epoch === mutationEpoch) {
+        committed = false;
         if (beta || !hydrated) {
           beta = false;
           notifyListeners();
@@ -88,27 +92,30 @@ export function subscribeBetaChannel(listener: () => void): () => void {
  * 与 canaryChannelStore.syncCanaryChannel 的差异：canary 是服务端下发、落盘失败
  * 下次登录会重新同步；beta 是**用户可见**的设置开关，若不回滚会出现「设置页显示已开、
  * 本次运行按 beta 检查更新、重启后却回 release」的漂移，所以这里额外做失败回滚。
+ *
+ * 回滚目标是 `committed`(磁盘确认态)而非「本次调用前的内存态」:连续两次落盘都失败时,
+ * 后一次的「调用前内存态」是前一次尚未落盘的乐观值,回滚到它会得到错误结果
+ * (例如 release→开→关 都失败,内存反而停在「已开」)。回滚到磁盘真实值总是安全的。
  */
 export function syncBetaChannel(next: boolean): Promise<void> {
   const value = next === true;
-  const previous = beta;
   mutationEpoch += 1;
-  const epoch = mutationEpoch;
   hydrated = true;
   beta = value;
   notifyListeners();
-  return enqueueMutation(() => (
-    value
-      ? AsyncStorage.setItem(STORAGE_KEY, 'true')
-      : AsyncStorage.removeItem(STORAGE_KEY)
-  )).catch((err) => {
-    // 仅在期间无更新 mutation(epoch 未变)时才回滚；否则以更新 mutation 的结果为准。
-    if (epoch === mutationEpoch) {
-      beta = previous;
+  return enqueueMutation(async () => {
+    if (value) await AsyncStorage.setItem(STORAGE_KEY, 'true');
+    else await AsyncStorage.removeItem(STORAGE_KEY);
+  }).then(
+    () => {
+      committed = value;
+    },
+    (err) => {
+      beta = committed;
       notifyListeners();
-    }
-    throw err;
-  });
+      throw err;
+    },
+  );
 }
 
 export const __testing = {
@@ -116,6 +123,7 @@ export const __testing = {
   async resetMemory(): Promise<void> {
     await mutationQueue.catch(() => undefined);
     beta = false;
+    committed = false;
     hydrated = false;
     hydratePromise = null;
     mutationEpoch = 0;

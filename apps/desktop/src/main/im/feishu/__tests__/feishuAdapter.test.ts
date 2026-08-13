@@ -171,8 +171,9 @@ describe('feishu group lane adapter hooks', () => {
     const text = adapter.ui.error?.preDispatchFailureText?.(
       'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions',
     );
-    expect(text).toContain('/permission auto');
-    expect(text).toContain('/permission ask');
+    expect(text).toContain('/permission');
+    expect(text).not.toContain('/permission auto');
+    expect(text).not.toContain('/permission ask');
     expect(text).toContain('/new');
     expect(text).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
     expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();

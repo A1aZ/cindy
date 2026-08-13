@@ -2595,11 +2595,12 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     expect(h.setPermissionMode).not.toHaveBeenCalled();
     expect(mocks.feishuIm.sendText).toHaveBeenLastCalledWith(
       'ou_user',
-      expect.stringContaining('/permission auto'),
+      expect.stringContaining('/permission'),
       { threadTs: undefined },
     );
     const recoveryText = String(mocks.feishuIm.sendText.mock.lastCall?.[1]);
-    expect(recoveryText).toContain('/permission ask');
+    expect(recoveryText).not.toContain('/permission auto');
+    expect(recoveryText).not.toContain('/permission ask');
     expect(recoveryText).toContain('/new');
     expect(recoveryText).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
   });

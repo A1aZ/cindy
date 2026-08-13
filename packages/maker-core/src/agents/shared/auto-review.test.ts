@@ -1845,8 +1845,13 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     // 反例三:命令不完整(一个操作数都没有)与 `cp payload` 同口径落灰区,不虚构目标。
     expect(classifyShellCommand('Set-Content', win, { platform: 'win32' })).toBe('prompt');
     expect(classifyShellCommand('Copy-Item', win, { platform: 'win32' })).toBe('prompt');
-    // 反例四:目标来自变量时静态不可解析,与 POSIX `cp payload $target` 同口径落灰区。
-    expect(classifyShellCommand('Set-Content $target owned', win, { platform: 'win32' })).toBe('prompt');
+    // 反例四(**口径已改**):目标来自变量时静态不可解析 —— 原先按"与 POSIX `cp payload $target`
+    // 同口径"落灰区,但那是一条真实绕过(`$env:windir` 一个 token 就能躲开全部系统写红线),
+    // 现在 PowerShell 侧改为 fail-closed,见下方专门的动态目标用例。
+    expect(classifyShellCommand('Set-Content $target owned', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // POSIX 侧**有意**仍落灰区:改它会把 `cp a "$TMPDIR/b"`、`echo x > $LOGFILE` 这类日常命令
+    // 全打成硬弹窗,是超出本 PR 的口径变更,已单独立案。这条断言就是为了让那个不对称是显式的。
     expect(classifyShellCommand('cp payload $target', win, { platform: 'win32' })).toBe('prompt');
     // 别名同样要归一:`copy` / `move` 既是 Copy-Item/Move-Item 的别名,也是 cmd.exe 的同名命令,
     // 两者都是「末位是目标」,可共用(codex 报 `copy` 未覆盖)。
@@ -2173,6 +2178,66 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
     expect(classifyShellCommand(`Remove-Item -Path ${hosts}`, win, { platform: 'win32' }))
       .toBe('prompt-each-time');
+  });
+
+  it('PowerShell 运行期求值的写目标 = 不可证哨兵(fail closed),不按相对路径拼进工作区', () => {
+    // 这是一条一个 token 就能绕掉全部系统写红线的路径:`$env:windir` 不匹配盘符 →
+    // `isAbsolutePath` 判否 → `normalizeTarget` 把它当**相对路径拼到工作区下** → 看起来落在区内
+    // → 灰区可被 reviewer 放行(codex 报)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Set-Content "$env:windir\\System32\\drivers\\etc\\hosts" owned',
+      'Set-Content $env:windir\\System32\\drivers\\etc\\hosts owned',     // 不带引号
+      'Set-Content "${env:windir}\\System32\\drivers\\etc\\hosts" owned', // ${} 形态
+      'Set-Content -Path "$env:windir\\x" -Value owned',                  // 具名目标
+      'Set-Content "$(Get-Location)\\x" owned',                           // 子表达式
+      'Set-Content $target owned',                                        // 普通变量
+      'New-Item "$env:windir\\x"',
+      'Remove-Item "$env:windir\\System32\\x"',
+      'Copy-Item C:\\repo\\payload "$env:windir\\x"',                     // 末位是目标
+      'Move-Item C:\\repo\\payload "$env:ProgramFiles\\x"',
+      'Set-ItemProperty "$env:foo" n 1',
+      // 载荷下探同样生效(Bash 入口里的 `pwsh -Command …` 也走这条)。
+      'pwsh -Command Set-Content "$env:windir\\System32\\x" owned',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 判据是"不可证",不是"看起来像哪里" —— `C:\repo\$name` 同样证明不了在区内
+    // (`$name` 可以是 `..\..\Windows\System32\x`),所以也要哨兵。
+    expect(classifyShellCommand('Set-Content "C:\\repo\\$name" hi', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+
+    // 反例一:只有**写目标**受这条判据管。值/内容里的变量与写位置无关,不该升级。
+    for (const c of [
+      'Set-Content C:\\repo\\a.txt $payload',
+      'Set-Content C:\\repo\\a.txt "$payload"',
+      'Set-Content -Value $payload C:\\repo\\a.txt',
+      'Set-Content -Encoding $enc C:\\repo\\a.txt hi',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二:动态的**源**不是写目标 —— 从变量路径读、写到区内仍是灰区。
+    expect(classifyShellCommand('Copy-Item "$env:windir\\x" C:\\repo\\bak', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Copy-Item -Path "$env:windir\\x" -Destination C:\\repo\\bak', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-Content "$env:windir\\x"', win, { platform: 'win32' })).toBe('prompt');
+    // 但 `Move-Item` 会销毁源 → 动态源也算写目标,仍必问。
+    expect(classifyShellCommand('Move-Item "$env:windir\\x" C:\\repo\\bak', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+
+    // 反例三:静态路径判档完全不变(这条改动只针对"证明不了")。
+    expect(classifyShellCommand('Set-Content C:\\repo\\a.txt hi', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Copy-Item C:\\repo\\a C:\\repo\\b', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand(
+      'Set-Content C:\\Windows\\System32\\drivers\\etc\\hosts owned', win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+
+    // 反例四:`%WINDIR%` 在 PowerShell 里是**字面**文件名、不展开,当成动态会误升级。
+    expect(classifyShellCommand('Set-Content "C:\\repo\\%WINDIR%.txt" hi', win, { platform: 'win32' }))
+      .toBe('prompt');
   });
 
   it('setsid 的选项不遮蔽内层破坏命令', () => {

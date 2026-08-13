@@ -441,13 +441,36 @@ const POWERSHELL_SWITCH_PARAMS: readonly string[] = [
 ];
 
 /**
+ * 目标里含 PowerShell 的**运行期求值**成分:变量(`$target`)、环境变量(`$env:windir`、
+ * `${env:windir}`)、子表达式(`$(Get-Location)`)。这类目标静态不可证。
+ */
+const POWERSHELL_DYNAMIC_TARGET = /\$/;
+
+/**
  * PowerShell 写 cmdlet 的写目标。既支持具名参数(`-Path` / `-LiteralPath` / `-Destination` /
  * `-FilePath`,含唯一前缀缩写如 `-Dest`),也支持位置传参。
  *
- * **取不到目标时返回不可证哨兵**(fail-closed):cmdlet 确实是写通道,但静态看不出写去哪
- * (目标来自变量、管道绑定等)→ 不能当成"没有写目标"而静默降级。
+ * **取不到目标、或目标要到运行期才知道时返回不可证哨兵**(fail-closed)。后者是 codex 报的
+ * 一条真实绕过:`Set-Content "$env:windir\System32\drivers\etc\hosts" owned` 里的目标不是绝对
+ * 路径(`$env:…` 不匹配盘符),`normalizeTarget` 于是把它当**相对路径拼到工作区下**,系统写看起来
+ * 落在区内、掉进灰区可被 reviewer 放行 —— 一个 token 就绕掉全部系统写红线。
+ *
+ * 判据只能是"不可证",不能是"看起来像哪里":`C:\repo\$name` 也证明不了在区内(`$name` 可以是
+ * `..\..\Windows\System32\x`),所以**任何**含 `$` 的目标一律哨兵,与本文件既有的不可证口径
+ * (`tar -P` 的归档成员、`-t` 缺值、`cwdUnknown` 下的相对目标)一致。
+ *
+ * **已知代价**:`Set-Content "$env:TEMP\log.txt" x`、`"$repoRoot\a.txt"` 这类无害写入也会要求
+ * 确认。方向是多问,不是放宽;若实际打扰过多,缓解手段(比如只解析已知安全的环境变量)是另一个
+ * 需要单独裁决的口径,不在这里猜。
+ * **不覆盖** `%WINDIR%\…`:在 PowerShell 里它是字面文件名、不展开,当成动态反而误升级。
  */
 function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
+  const targets = powerShellWriteTargetOperands(bin, args);
+  if (targets === null) return null;
+  return targets.map((t) => (POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t));
+}
+
+function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | null {
   const spec = POWERSHELL_WRITE_CMDLETS.get(bin);
   if (!spec) return null;
   const named: string[] = [];

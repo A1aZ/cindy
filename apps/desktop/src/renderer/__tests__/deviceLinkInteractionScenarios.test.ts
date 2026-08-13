@@ -967,6 +967,7 @@ describe('远程交互接线不变式', () => {
     expect(syncBody).toContain(".invoke(remoteDeviceId, 'maker:apply-new-maker-draft-pref'");
 
     expect(chatInputSrc).toContain('markModelChoice: true');
+    expect(chatInputSrc).toContain('agentKind: targetAgentKind');
 
     const appSrc = read('App.tsx');
     expect(appSrc).toContain(

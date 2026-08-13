@@ -3402,12 +3402,14 @@ const opened = await cindy.iosSimulator.request({
   在 Host 面板里选择设备;连续请求会限速;
 - panel.html 保持零桥。面板要使用本槽时,按 §5 先 \`/wake\`,再用同源
   BroadcastChannel 把请求交给 main.js,由 main.js 调 \`cindy.iosSimulator.request\`;
-- Agent 构建、安装、启动与 UI 操作继续调用 Host 注册的 \`cindy_ios_simulator\` MCP。
-  插件 Skill 可以编排这套工作流,但不要用 shell 打开外部 Simulator.app,也不要重复
-  打包一份 WDA/Sidecar;
+- 插件 Skill 选择内嵌路线后,Agent 构建、安装、启动与 UI 操作调用 Host 注册的
+  \`cindy_ios_simulator\` MCP,不要重复打包一份 WDA/Sidecar。内嵌能力不存在或不可用时,
+  Skill 可以按用户目标与普通权限规则改走外部 Xcode、Simulator.app、\`simctl\` 或
+  Computer Use;Host 不会把这些外部操作自动转换为内嵌调用;
 - 本能力仅存在于带该槽的 Cindy Desktop。当前 Host 遇到未来 schema 或未知 capability
   slot 时会把包识别为“需要更新 Cindy”,而不是误报插件非法。已发布的旧 Host 无法追改;
-  Skill 在 MCP 不存在时仍必须引导用户升级 Cindy,不要降级成 shell 或 Node 替代实现。
+  Skill 在 MCP 不存在时必须说明内嵌路线不可用;如果用户目标不依赖 Cindy viewer,
+  可以继续使用正常的外部工具链,否则再引导用户升级 Cindy。
 
 ## 5. 面板(panel.html/css/js)
 

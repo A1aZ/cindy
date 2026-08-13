@@ -24,6 +24,7 @@
  * 引用补齐不变量:已注册消费者的会话,refs 不能只靠 listAllPrRefs 的 2000 行
  * 启动缓存。远程走 device-link list;本机 / SSH 走 listPrRefs(sessionId)。
  * 注册、周期刷新、聚焦刷新共用 refreshConsumer。空结果记 TTL,失败可重试。
+ * 全表 merge 必须保住已按会话补到的本机 / SSH 结果,不能只 keep 远程簿记。
  */
 
 import {
@@ -283,8 +284,15 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         }
         // 合并而非整体替换:listAllPrRefs 只覆盖本地会话;远程(device-link)会话
         // 的条目可能已先一步拉到,整体替换会把它们冲掉(启动时序竞态)。
+        // 本机 / SSH 按会话回退同样可能先于全表返回——keep 也要保住这些已注册
+        // 消费者,否则截断会话的补拉结果会被清掉,TTL 再压 85s(2026-08-13 P1)。
         const grouped = groupBySession(rows);
-        store.mergeLocalRefs(grouped, (sid) => remoteDeviceBySession.current.has(sid));
+        store.mergeLocalRefs(
+          grouped,
+          (sid) =>
+            remoteDeviceBySession.current.has(sid) ||
+            (prConsumers.current.has(sid) && !grouped.has(sid)),
+        );
         // 已注册消费者(顶栏/侧栏正在展示的会话)拿到引用后立即补状态,
         // 不等 90s 周期——覆盖「先注册、后加载完成」的启动时序。
         for (const [sid, entry] of prConsumers.current) {

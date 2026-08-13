@@ -237,5 +237,43 @@ describe('PrRefsProvider owner 切换的在飞隔离', () => {
     await waitFor(() => expect(api.gitContext.listPrRefs).toHaveBeenCalledWith('session-local'));
     await waitFor(() => expect(result.current.refs).toHaveLength(1));
     await waitFor(() => expect(api.gitContext.getPrStatuses).toHaveBeenCalled());
+    // 全表后到时不得把按会话结果冲掉;否则 TTL 会压住约 85s。
+    expect(result.current.refs).toHaveLength(1);
+    expect(api.gitContext.listPrRefs).toHaveBeenCalledTimes(1);
+  });
+
+  it('全表后到时保住先返回的本机按会话引用', async () => {
+    const api = installElectronApi();
+    const ref = makeRef('session-local', 12);
+    let resolveAll: ((value: SessionPrRef[]) => void) | null = null;
+    api.gitContext.listAllPrRefs.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveAll = resolve as (value: SessionPrRef[]) => void;
+        }),
+    );
+    api.gitContext.listPrRefs.mockImplementation(async (sessionId: string) =>
+      sessionId === 'session-local' ? [ref] : [],
+    );
+
+    const { result } = renderHook(
+      () => {
+        const { registerPrConsumer } = usePrActions();
+        const refs = usePrRefsForSession('session-local');
+        return { registerPrConsumer, refs };
+      },
+      { wrapper },
+    );
+    act(() => {
+      result.current.registerPrConsumer('session-local');
+    });
+    await waitFor(() => expect(result.current.refs).toHaveLength(1));
+
+    await act(async () => {
+      resolveAll?.([]);
+      await Promise.resolve();
+    });
+    expect(result.current.refs).toHaveLength(1);
+    expect(api.gitContext.listPrRefs).toHaveBeenCalledTimes(1);
   });
 });

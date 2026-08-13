@@ -316,25 +316,33 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
 
 // 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
 // 避免 Worker 工具栏不在视口顶部时，菜单底部的 Worker 行 / 布局切换项越过视口而不可达。
+// 当锚点下方空间不足（低于上方空间）时改为向上展开，保证任意窗口高度下菜单都不越出视口。
 function useAnchorMenuMaxHeight(
   anchorRef: { current: HTMLElement | null },
   open: boolean,
-): number | undefined {
-  const [maxHeight, setMaxHeight] = useState<number | undefined>(undefined);
+): { maxHeight: number; placeAbove: boolean } | undefined {
+  const [placement, setPlacement] = useState<{ maxHeight: number; placeAbove: boolean } | undefined>(
+    undefined,
+  );
   useLayoutEffect(() => {
     if (!open) return;
     const update = () => {
       const el = anchorRef.current;
       if (!el) return;
-      const { bottom } = el.getBoundingClientRect();
-      // mt-1 (4px) + 底部 12px 安全边距；下限 120px 避免极端窗口高度下菜单过矮。
-      setMaxHeight(Math.max(120, window.innerHeight - bottom - 4 - 12));
+      const rect = el.getBoundingClientRect();
+      // mt-1/mb-1 (4px) + 12px 安全边距。
+      const gap = 4;
+      const pad = 12;
+      const belowSpace = window.innerHeight - rect.bottom - gap - pad;
+      const aboveSpace = rect.top - gap - pad;
+      const placeAbove = aboveSpace > belowSpace;
+      setPlacement({ maxHeight: Math.max(0, placeAbove ? aboveSpace : belowSpace), placeAbove });
     };
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
   }, [anchorRef, open]);
-  return maxHeight;
+  return placement;
 }
 
 function WorkerLayoutMenu({
@@ -363,7 +371,7 @@ function WorkerLayoutMenu({
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const totalWorkerCount = workers.length;
   const activeCount = activeWorkerCount;
-  const menuMaxHeight = useAnchorMenuMaxHeight(wrapperRef, open);
+  const menuPlacement = useAnchorMenuMaxHeight(wrapperRef, open);
 
   useLayoutEffect(() => {
     if (!open || !clearAttentionWhenVisible) return;
@@ -416,8 +424,11 @@ function WorkerLayoutMenu({
       </Tip>
       {open && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
-          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuMaxHeight }}
+          className={cn(
+            'absolute right-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
+            menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
+          )}
+          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuPlacement?.maxHeight }}
         >
           {/* Header: WORKERS + count */}
           {layout === 'tabs' && (
@@ -877,7 +888,7 @@ export function RolePillDropdown({
   const attention = useWorkerAttentionSnapshot();
   const requestArchiveWorker = useRequestArchiveWorker(onArchiveWorker);
   const open = openMode !== null;
-  const menuMaxHeight = useAnchorMenuMaxHeight(triggerRef, open);
+  const menuPlacement = useAnchorMenuMaxHeight(triggerRef, open);
 
   useLayoutEffect(() => {
     if (!clearAttentionWhenVisible) return;
@@ -1013,8 +1024,11 @@ export function RolePillDropdown({
       {open && (
         <div
           ref={popoverRef}
-          className="absolute left-0 top-full z-50 mt-1 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
-          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuMaxHeight }}
+          className={cn(
+            'absolute left-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
+            menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
+          )}
+          style={{ boxShadow: 'var(--shadow-menu)', maxHeight: menuPlacement?.maxHeight }}
         >
           {/* Header: WORKERS + count */}
           <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">

@@ -313,7 +313,8 @@ export interface RolePillDropdownProps {
 
 export interface WorkerListToolbarProps extends RolePillDropdownProps {
   trailingActions?: ReactNode;
-  onOpenSettings: () => void;
+  /** 硬上限时 + 按钮跳转协同设置的逃生口；分离侧栏窗口无法导航到设置路由，传 undefined 表示不接线。 */
+  onOpenSettings?: () => void;
 }
 
 // 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
@@ -659,40 +660,50 @@ function CreateWorkerTabButton({
   softLimit: number;
   hardLimit: number;
   onOpenCreate: () => void;
-  onOpenSettings: () => void;
+  onOpenSettings?: () => void;
 }) {
   const { t } = useTranslation();
   const shortcutKey = useAppShortcutDisplay('new-maker');
   const hardDisabled = activeCount >= hardLimit;
+  // 硬上限时 + 按钮提供「跳转协同设置」逃生口；但分离侧栏窗口无法导航到设置路由
+  // （onOpenSettings 未接线），此时退回旧的 disabled 行为，避免呈现一个点了没反应的按钮。
+  const hardSettingsAction = hardDisabled && !!onOpenSettings;
+  const hardBlocked = hardDisabled && !onOpenSettings;
   const softWarn = !hardDisabled && activeCount >= softLimit;
-  const tooltip = hardDisabled
+  const tooltip = hardSettingsAction
     ? t('orca.rolePill.hardLimitSettingsHint', { count: hardLimit })
-    : softWarn
-      ? t('orca.rolePill.softLimitHint', { count: softLimit })
-      : shortcutKey
-        ? `${t('orca.rolePill.createWorker')} (${shortcutKey})`
-        : t('orca.rolePill.createWorker');
+    : hardBlocked
+      ? t('orca.rolePill.hardLimitHint', { count: hardLimit })
+      : softWarn
+        ? t('orca.rolePill.softLimitHint', { count: softLimit })
+        : shortcutKey
+          ? `${t('orca.rolePill.createWorker')} (${shortcutKey})`
+          : t('orca.rolePill.createWorker');
 
   return (
     <Tip text={tooltip} side="bottom" delay={250}>
       <button
         type="button"
         aria-label={
-          hardDisabled
+          hardSettingsAction
             ? t('orca.rolePill.settingsCollaboration')
             : t('orca.rolePill.createWorker')
         }
+        aria-disabled={hardBlocked || undefined}
         className={cn(
           'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[var(--border-default)]',
           'bg-[var(--surface-elevated)] text-[var(--text-secondary)] transition-colors',
           'hover:bg-[var(--surface-chip)] hover:text-[var(--text-primary)]',
-          (softWarn || hardDisabled) && 'text-[var(--status-bar-accent)]',
+          (softWarn || hardSettingsAction) && 'text-[var(--status-bar-accent)]',
+          hardBlocked &&
+            'cursor-not-allowed opacity-40 hover:bg-[var(--surface-elevated)] hover:text-[var(--text-secondary)]',
         )}
         onClick={() => {
-          if (hardDisabled) {
-            onOpenSettings();
+          if (hardSettingsAction) {
+            onOpenSettings?.();
             return;
           }
+          if (hardBlocked) return;
           onOpenCreate();
         }}
       >

@@ -106,4 +106,28 @@ describe('RolePillDropdown collaboration settings entry', () => {
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
     expect(onOpenCreate).not.toHaveBeenCalled();
   });
+
+  it('keeps the + button disabled at hard limit when settings navigation is unavailable (detached sidebar)', () => {
+    const onOpenCreate = vi.fn();
+    render(
+      <WorkerListToolbar
+        worker={null}
+        workers={[]}
+        selectedWorkerId={null}
+        activeWorkerCount={8}
+        softLimit={5}
+        hardLimit={8}
+        onSwitchFocus={vi.fn()}
+        onOpenCreate={onOpenCreate}
+        // onOpenSettings 省略 → 分离侧栏窗口无法导航到设置路由。
+        onArchiveWorker={vi.fn()}
+      />,
+    );
+
+    // 无设置跳转入口时，硬上限 + 按钮回退为 disabled no-op：不再是「设置 · 协同」，也不触发新建。
+    const button = screen.getByRole('button', { name: 'orca.rolePill.createWorker' });
+    expect(button.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(button);
+    expect(onOpenCreate).not.toHaveBeenCalled();
+  });
 });

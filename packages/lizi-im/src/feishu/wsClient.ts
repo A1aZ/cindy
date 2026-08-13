@@ -691,10 +691,13 @@ async function handleIncomingMessage(botAppId: string, data: RawMessageEvent): P
       laneUserId = encodeLaneUserId(chatId, incomingThreadId);
       outbound.pushReplyAnchor(laneUserId, messageId);
     } else {
-      const opener = await outbound.openThread(messageId, transportMessages.group.threadOpener);
+      const opener = await outbound.openThread(messageId);
       if (opener) {
         laneUserId = encodeLaneUserId(chatId, opener.threadId);
         outbound.pushReplyAnchor(laneUserId, opener.messageId);
+        // 开场白卡是本轮流式卡: streamingText.start 认领后直接 patch,
+        // 话题里不会多出一条占位消息。
+        outbound.pushPatchableOpener(laneUserId, opener.messageId);
         // 上下文取数 lane 与路由 lane 分离: 新话题是空的, 群历史前缀仍按
         // 触发时所在的群主流拉取(「总结上面」等依赖上文的消息才能拿到
         // 群主流历史), 由 host adapter 消费(IMMessageEvent.groupContextLane)。

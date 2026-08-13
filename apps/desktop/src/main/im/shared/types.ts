@@ -303,6 +303,11 @@ export interface ImUiTextPack {
       resolvedAllowOnce: string;
       resolvedAllowAlways: string;
       resolvedDeny: string;
+      /**
+       * 授权卡转投 owner 私聊(deliverToOwnerDm)后, 在原群/话题 lane 里发的
+       * 指路提示 — 否则群里的人不知道卡片去了哪。缺省不发。
+       */
+      dmRoutedNotice?: string;
     };
     ask: {
       title: (header: string) => string;

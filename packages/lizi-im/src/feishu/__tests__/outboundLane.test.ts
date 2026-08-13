@@ -160,13 +160,13 @@ describe('feishu outbound lane routing', () => {
     );
   });
 
-  it('openThread replies with reply_in_thread + uuid and returns the new thread id', async () => {
-    const res = await outbound.openThread('om_root1', '开个话题');
+  it('openThread replies with a patchable card + reply_in_thread + uuid, returns the new thread id', async () => {
+    const res = await outbound.openThread('om_root1');
     expect(larkMocks.reply).toHaveBeenCalledWith(
       expect.objectContaining({
         path: { message_id: 'om_root1' },
         data: expect.objectContaining({
-          msg_type: 'text',
+          msg_type: 'interactive',
           reply_in_thread: true,
           uuid: 'om_root1',
         }),
@@ -176,8 +176,8 @@ describe('feishu outbound lane routing', () => {
   });
 
   it('openThread is idempotent per trigger message (duplicate delivery opens no second topic)', async () => {
-    const first = outbound.openThread('om_root2', '开个话题');
-    const second = outbound.openThread('om_root2', '开个话题');
+    const first = outbound.openThread('om_root2');
+    const second = outbound.openThread('om_root2');
     expect(await first).toEqual({ messageId: 'om_replied', threadId: 'omt_r1' });
     expect(await second).toEqual({ messageId: 'om_replied', threadId: 'omt_r1' });
     // 并发/重复调用只打一次 API — 飞书重投同一条 @ 事件不会开出多个话题。
@@ -189,7 +189,7 @@ describe('feishu outbound lane routing', () => {
     larkMocks.getMessage.mockResolvedValueOnce({
       data: { items: [{ thread_id: 'omt_recovered' }] },
     });
-    const res = await outbound.openThread('om_root3', '开个话题');
+    const res = await outbound.openThread('om_root3');
     expect(res).toEqual({ messageId: 'om_replied', threadId: 'omt_recovered' });
     expect(larkMocks.getMessage).toHaveBeenCalledWith({
       path: { message_id: 'om_replied' },
@@ -200,7 +200,7 @@ describe('feishu outbound lane routing', () => {
   it('openThread recalls the opener and returns null when thread_id is unrecoverable', async () => {
     larkMocks.reply.mockResolvedValueOnce({ data: { message_id: 'om_replied' } });
     larkMocks.getMessage.mockResolvedValueOnce({ data: { items: [] } });
-    await expect(outbound.openThread('om_root4', 'x')).resolves.toBeNull();
+    await expect(outbound.openThread('om_root4')).resolves.toBeNull();
     // 开场白已发出但拿不到话题 id: 撤回它再降级, 不让「回复都在里面」误导。
     expect(larkMocks.deleteMessage).toHaveBeenCalledWith({
       path: { message_id: 'om_replied' },
@@ -210,7 +210,7 @@ describe('feishu outbound lane routing', () => {
   it('openThread recalls the opener and returns null when message.get itself fails', async () => {
     larkMocks.reply.mockResolvedValueOnce({ data: { message_id: 'om_replied' } });
     larkMocks.getMessage.mockRejectedValueOnce(new Error('get failed'));
-    await expect(outbound.openThread('om_root5', 'x')).resolves.toBeNull();
+    await expect(outbound.openThread('om_root5')).resolves.toBeNull();
     expect(larkMocks.deleteMessage).toHaveBeenCalledWith({
       path: { message_id: 'om_replied' },
     });
@@ -218,7 +218,7 @@ describe('feishu outbound lane routing', () => {
 
   it('openThread returns null instead of throwing when the API fails', async () => {
     larkMocks.reply.mockRejectedValueOnce(new Error('no thread permission'));
-    await expect(outbound.openThread('om_root6', 'x')).resolves.toBeNull();
+    await expect(outbound.openThread('om_root6')).resolves.toBeNull();
     expect(larkMocks.deleteMessage).not.toHaveBeenCalled();
   });
 

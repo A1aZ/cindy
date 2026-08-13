@@ -25,6 +25,7 @@ const mocks = {
     }),
   ),
   pushReplyAnchor: vi.fn(),
+  pushPatchableOpener: vi.fn(),
   firstAllowed: vi.fn<() => string | null>(() => null),
   readOwnerOpenId: vi.fn<() => string | null>(() => null),
   clearOwner: vi.fn(),
@@ -71,6 +72,7 @@ vi.doMock('../outbound.js', () => ({
   replyText: mocks.replyText,
   openThread: mocks.openThread,
   pushReplyAnchor: mocks.pushReplyAnchor,
+  pushPatchableOpener: mocks.pushPatchableOpener,
 }));
 
 vi.doMock('../ownerGuard.js', () => ({
@@ -205,7 +207,7 @@ describe('feishu group inbound gate', () => {
     const events = collectEvents();
     await mocks.eventHandlers['im.message.receive_v1']!(groupMessage({}));
 
-    expect(mocks.openThread).toHaveBeenCalledWith('om_msg1', expect.any(String));
+    expect(mocks.openThread).toHaveBeenCalledWith('om_msg1');
     expect(events).toHaveLength(1);
     const event = events[0]!;
     expect(event.senderId).toBe('g/oc_chat1/omt_new');
@@ -214,6 +216,8 @@ describe('feishu group inbound gate', () => {
     expect(event.speaker).toEqual({ id: OWNER, name: '', isOwner: true });
     // 锚点是开场白消息(话题内合法锚点), 不是触发消息。
     expect(mocks.pushReplyAnchor).toHaveBeenCalledWith('g/oc_chat1/omt_new', 'om_opener');
+    // 开场白卡登记为可补丁锚点 — 本轮流式卡直接 patch 它, 不发占位消息。
+    expect(mocks.pushPatchableOpener).toHaveBeenCalledWith('g/oc_chat1/omt_new', 'om_opener');
     // 路由进新话题 lane, 但上下文取数 lane 仍是群主流(新话题是空的)。
     expect(event.groupContextLane).toEqual({ chatId: 'oc_chat1', threadId: '' });
   });

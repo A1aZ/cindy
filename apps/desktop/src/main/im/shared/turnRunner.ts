@@ -1606,6 +1606,17 @@ export function createTurnRunner(
         },
         req.kind === 'permission' ? { toolName: req.toolName } : undefined,
       );
+      // 授权卡已转投 owner 私聊 — 原 lane 留指路提示(与 handleInteractionFor 同款)。
+      if (req.kind === 'permission' && adapter.ui.cards.permission.dmRoutedNotice) {
+        try {
+          await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+            threadTs: scopeKey,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`publishMigrated registerPendingExternal failed: ${msg}`);
@@ -2329,7 +2340,13 @@ export function createTurnRunner(
     await completeTurnCallbackAfterAck(failure.turn);
     if (failure.turn.queueMode === 'internal') {
       try {
-        const message = `❌ 启动 agent 失败：${failure.reason}`;
+        // 群轮次强确认策略与「完全访问」档互斥(maker fail-closed 拒绝) — 给
+        // 用户能看懂的说法并指路 /permission, 而不是裸抛策略错误码。
+        const policyUnsupported = failure.reason.startsWith('TURN_PERMISSION_POLICY_UNSUPPORTED');
+        const message =
+          policyUnsupported && adapter.ui.error?.permissionModeUnsupported
+            ? adapter.ui.error.permissionModeUnsupported
+            : `❌ 启动 agent 失败：${failure.reason}`;
         if (
           output.kind === 'chunked-text' &&
           failure.turn.chunkedReplyBegun
@@ -2909,6 +2926,18 @@ export function createTurnRunner(
           // build permissionUpdates when the user picks 'allow:always'.
           req.kind === 'permission' ? { toolName: req.toolName } : undefined,
         );
+        // 授权卡已转投 owner 私聊 — 在原群/话题 lane 留一句指路, 否则用户
+        // 不知道卡片去了哪、也不知道去哪点。
+        if (req.kind === 'permission' && adapter.ui.cards.permission.dmRoutedNotice) {
+          try {
+            await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+              threadTs: scopeKey,
+            });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
+          }
+        }
         return decision;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

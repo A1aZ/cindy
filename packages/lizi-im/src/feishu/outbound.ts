@@ -23,11 +23,12 @@ import path from 'node:path';
 import * as Lark from '@larksuiteoapi/node-sdk';
 
 import { getLog } from './moduleScope.js';
-import { buildInteractiveCardV1 } from './cards.js';
+import { buildInteractiveCardV1, buildMarkdownCardV2 } from './cards.js';
 import { decodeLaneUserId } from './codec.js';
 import * as ownerGuard from './ownerGuard.js';
 import { parseIncoming } from './incomingContent.js';
 import type { AttachmentRef } from './incomingContent.js';
+import { messages as transportMessages } from './messages.js';
 import type { InteractiveCardSpec, SendFileResult } from '../types.js';
 import type { BotCredentials } from './internal-types.js';
 
@@ -77,6 +78,35 @@ export function pushReplyAnchor(laneUserId: string, messageId: string): void {
   const state = laneAnchors.get(laneUserId) ?? { queue: [], held: null, quotedHeld: false };
   state.queue.push(messageId);
   laneAnchors.set(laneUserId, state);
+}
+
+// ── patchable opener (开话题开场白卡 = 本轮流式卡) ──────────────────────────
+// 群主流 @ 开话题时, 开场白是一张「思考中」占位卡; 本轮流式卡不再新建一条
+// 回复, 而是直接 patch 这张卡 — 话题里第一条可见内容就是答案。lane → opener
+// 卡的映射由 wsClient 在 openThread 成功后登记, streamingText.start 认领。
+
+const patchableOpeners = new Map<string, string>();
+
+export function pushPatchableOpener(laneUserId: string, messageId: string): void {
+  patchableOpeners.set(laneUserId, messageId);
+}
+
+/**
+ * 认领本 lane 的开场白卡: 存在则把它推进为已持有锚点(后续 reply 挂它, 仍落
+ * 在话题内)并返回消息 id, streamingText.start 拿它直接 patch; 不存在(开话题
+ * 失败的降级群 lane / 话题内 @)返回 null, 走新建流式卡的老路。
+ */
+export function claimPatchableOpener(laneUserId: string): string | null {
+  const openerId = patchableOpeners.get(laneUserId);
+  if (!openerId) return null;
+  patchableOpeners.delete(laneUserId);
+  const state = laneAnchors.get(laneUserId) ?? { queue: [], held: null, quotedHeld: false };
+  // 锚点队列头正常就是这张开场白卡; 对不上说明顺序被破坏, 保守起见仍保留队列。
+  if (state.queue[0] === openerId) state.queue.shift();
+  state.held = openerId;
+  state.quotedHeld = true;
+  laneAnchors.set(laneUserId, state);
+  return openerId;
 }
 
 type SendTarget =
@@ -224,40 +254,38 @@ function pruneOpenThreadDedup(): void {
 }
 
 /**
- * 以 reply_in_thread 回复触发消息, 用它作为根开一个新话题。返回开场白消息
- * id + 新话题 thread_id(话题内合法锚点)。同一触发消息并发/重复调用共享同
- * 一次开话题 — 防飞书重投事件开出多个话题(含进程重启: uuid 走服务端去重)。
+ * 以 reply_in_thread 回复触发消息, 用它作为根开一个新话题。开场白**就是
+ * 本轮流式卡**: 发一张「思考中」占位卡片(message 可被 patch 升级成正文),
+ * 之后流式卡直接 patch 它 — 话题里不会多出一条「开个话题聊这条」的占位
+ * 消息, 第一条可见内容就是答案本身(streamingText.start 经
+ * claimPatchableOpener 认领)。返回开场白卡 id + 新话题 thread_id。
+ * 同一触发消息并发/重复调用共享同一次开话题 — 防飞书重投事件开出多个话题
+ * (含进程重启: uuid 走服务端去重)。
  *
  * 失败语义: API 失败或响应缺 message_id → null(没有可确认已发出的开场白);
  * 响应有 message_id 但缺 thread_id → 用 message.get 补查话题 id, 查不到就
  * 撤回开场白再返回 null — 不让「回复都在里面」的开场白承诺落空。调用方在
  * null 时降级回群 lane 旧行为(引用回复 + chat_id 直发)。
  */
-export function openThread(
-  replyToMessageId: string,
-  text: string,
-): Promise<OpenThreadResult | null> {
+export function openThread(replyToMessageId: string): Promise<OpenThreadResult | null> {
   const now = Date.now();
   const cached = openThreadByTrigger.get(replyToMessageId);
   if (cached && now - cached.ts <= OPEN_THREAD_DEDUP_TTL_MS) return cached.promise;
 
-  const promise = doOpenThread(replyToMessageId, text);
+  const promise = doOpenThread(replyToMessageId);
   openThreadByTrigger.set(replyToMessageId, { ts: now, promise });
   pruneOpenThreadDedup();
   return promise;
 }
 
-async function doOpenThread(
-  replyToMessageId: string,
-  text: string,
-): Promise<OpenThreadResult | null> {
+async function doOpenThread(replyToMessageId: string): Promise<OpenThreadResult | null> {
   const log = getLog();
   try {
     const res = await ensureClient().im.v1.message.reply({
       path: { message_id: replyToMessageId },
       data: {
-        content: JSON.stringify({ text }),
-        msg_type: 'text',
+        content: JSON.stringify(buildMarkdownCardV2(transportMessages.streaming.randomThinking())),
+        msg_type: 'interactive',
         reply_in_thread: true,
         // 服务端幂等键: 同一触发消息重复开话题(重投事件、进程重启后重放)时,
         // 飞书按 uuid 去重(1 小时内同 uuid 至多发一条, 重复调用返回原消息

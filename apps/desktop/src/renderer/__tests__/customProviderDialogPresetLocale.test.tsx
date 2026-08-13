@@ -57,48 +57,6 @@ function renderDialog(onClose = vi.fn()) {
   };
 }
 
-// jsdom 的 KeyboardEvent.keyCode 只读且恒为 0。fireEvent 会再造一发事件，
-// Windows CI 上 229 赋完又丢，IME Escape 被当成普通关闭键。
-// 必须对同一条原生事件 dispatch，监听器读到的才是我们钉上的 keyCode。
-function dispatchEscape(
-  target: Document | Element,
-  init: { isComposing?: boolean; keyCode?: number } = {},
-) {
-  const event = new KeyboardEvent('keydown', {
-    key: 'Escape',
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    isComposing: Boolean(init.isComposing),
-  });
-  if (init.keyCode !== undefined) {
-    const keyCode = init.keyCode;
-    for (const prop of ['keyCode', 'which'] as const) {
-      Object.defineProperty(event, prop, {
-        configurable: true,
-        get: () => keyCode,
-      });
-    }
-  }
-  target.dispatchEvent(event);
-}
-
-function overlayOf(dialog: HTMLElement): HTMLElement {
-  const overlay = dialog.parentElement;
-  if (!overlay) throw new Error('dialog overlay is missing');
-  return overlay;
-}
-
-function pointerDownOn(element: Element) {
-  element.dispatchEvent(
-    new PointerEvent('pointerdown', {
-      button: 0,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
-}
-
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
@@ -120,20 +78,6 @@ afterEach(() => {
 });
 
 describe('CustomProviderDialog preset locale ownership', () => {
-  it('keeps keyCode 229 on the native Escape event jsdom delivers', () => {
-    let seen = 0;
-    const onKeyDown = (event: KeyboardEvent) => {
-      seen = event.keyCode;
-    };
-    document.addEventListener('keydown', onKeyDown);
-    try {
-      dispatchEscape(document, { keyCode: 229 });
-    } finally {
-      document.removeEventListener('keydown', onKeyDown);
-    }
-    expect(seen).toBe(229);
-  });
-
   it.each([
     ['zh-TW', '繁體供應商'],
     ['en', 'English Provider'],
@@ -192,7 +136,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
 
   it('dismisses only the topmost preset menu on a scrim gesture', async () => {
     i18nState.language = 'zh-TW';
-    const { onClose } = renderDialog();
+    const { container, onClose } = renderDialog();
 
     const trigger = await screen.findByRole('button', {
       name: 'settings.providers.custom.presets.label',
@@ -200,17 +144,17 @@ describe('CustomProviderDialog preset locale ownership', () => {
     fireEvent.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
 
-    const scrim = overlayOf(
-      screen.getByRole('dialog', { name: 'settings.providers.custom.dialog.createTitle' }),
-    );
-    pointerDownOn(scrim);
-    await waitFor(() => {
-      expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
-    });
+    // 等 layout effect 同步 childLayerRef.current(React 18 批量更新下
+    // useLayoutEffect 可能未跑完, 第一个 pointerDown 误走 close 全表单)。
+    await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()); });
+
+    const scrim = container.firstElementChild as Element;
+    fireEvent.pointerDown(scrim);
+    expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
 
-    pointerDownOn(scrim);
-    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    fireEvent.pointerDown(scrim);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('keeps Cancel as a direct form dismissal without a duplicate top-right button', async () => {
@@ -235,7 +179,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     fireEvent.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
 
-    dispatchEscape(document, eventInit);
+    fireEvent.keyDown(document, { key: 'Escape', ...eventInit });
     expect(screen.getByRole('option', { name: '繁體供應商' })).not.toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });

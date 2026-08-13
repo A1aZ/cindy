@@ -550,7 +550,7 @@ function WorkerLayoutMenu({
               </div>
 
               {/* Worker rows */}
-              <div className="flex min-h-0 flex-col overflow-y-auto">
+              <div className="flex flex-col">
                 {workers.map((w) => {
                   const isFocused = w.workerId === selectedWorkerId || w.focused;
                   const isError = w.status === 'error';
@@ -1175,7 +1175,7 @@ export function RolePillDropdown({
           </div>
 
           {/* Worker rows */}
-          <div className="flex min-h-0 flex-col overflow-y-auto">
+          <div className="flex flex-col">
             {workers.map((w) => {
               const isFocused = w.workerId === selectedWorkerId || w.focused;
               // error 行整体描红(优先于 focused 高亮), 软红底 + 红左边, 与 tabs 布局一致。

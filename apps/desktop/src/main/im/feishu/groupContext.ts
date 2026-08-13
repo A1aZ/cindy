@@ -103,7 +103,17 @@ export interface FeishuGroupContextResult {
   contextAttachments: IMAttachment[];
 }
 
-/** 渲染一条历史消息为上下文行(附件给占位标注, 内容经 fence 中和)。 */
+/**
+ * 历史消息时间标注(本地时区) — 上下文行与相关性判断都靠它回答「今天聊了啥」
+ * 这类时间问题。月-日 时:分 够用; 跨年的旧消息时间退化为同格式(年份缺省)。
+ */
+export function formatHistoryTime(ms: number): string {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** 渲染一条历史消息为上下文行(带时间, 附件给占位标注, 内容经 fence 中和)。 */
 function renderHistoryLine(m: FeishuRecentChatMessage): string {
   const name = sanitizeDisplayText(m.senderName) || (m.senderIsBot ? 'bot' : 'user');
   const parts: string[] = [];
@@ -111,7 +121,9 @@ function renderHistoryLine(m: FeishuRecentChatMessage): string {
   for (const att of m.attachments) {
     parts.push(att.kind === 'image' ? '[图片]' : `[文件: ${att.fileName}]`);
   }
-  return neutralizeFenceTags(`[${name}${m.senderIsBot ? ' (bot)' : ''}] ${parts.join(' ')}`);
+  return neutralizeFenceTags(
+    `[${name}${m.senderIsBot ? ' (bot)' : ''}] ${formatHistoryTime(m.createTimeMs)} ${parts.join(' ')}`,
+  );
 }
 
 function isTextLikeFile(att: IMAttachment): boolean {

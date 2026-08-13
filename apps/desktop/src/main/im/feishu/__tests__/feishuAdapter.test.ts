@@ -50,6 +50,7 @@ import type {
   IMStatus,
 } from '@cindy/im';
 import { buildFeishuAdapter } from '../adapter';
+import { formatHistoryTime } from '../groupContext';
 
 const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
 const fetchChatHistoryPage = vi.fn<
@@ -258,7 +259,7 @@ describe('feishu group lane adapter hooks', () => {
     expect(dmPolicy).toBeUndefined();
   });
 
-  it('prepareAgentTurnText: 群 lane 拉历史拼上下文前缀, 剔除触发消息', async () => {
+  it('prepareAgentTurnText: 群 lane 拉历史拼上下文前缀(带时间标注), 剔除触发消息', async () => {
     fetchChatHistoryPage.mockResolvedValueOnce(
       historyPage([
         historyEntry({ messageId: 'om_h1', senderName: 'Alice', text: '部署挂了' }),
@@ -267,9 +268,13 @@ describe('feishu group lane adapter hooks', () => {
     );
     const result = await adapter.prepareAgentTurnText?.(groupEvent());
     expect(result?.agentText).toContain('<group_chat_context>');
-    expect(result?.agentText).toContain('[Alice] 部署挂了');
+    expect(result?.agentText).toContain(`[Alice] ${formatHistoryTime(1)} 部署挂了`);
     expect(result?.agentText).not.toContain('触发消息自己');
     expect(result?.agentText.endsWith('上面说的问题怎么解决')).toBe(true);
+    // 相关性判断的提示词带时间限定规则 — 「今天/昨天」类问题靠它卡时间窗。
+    const judgePrompt = String(scopeMocks.utilityText.mock.calls[0][1] ?? '');
+    expect(judgePrompt).toContain('时间限定');
+    expect(judgePrompt).toContain('月-日 时:分');
   });
 
   it('prepareAgentTurnText: 群主流 @ 开新话题时按 groupContextLane(群主流)拉上下文', async () => {

@@ -67,10 +67,13 @@ async function judgeHistoryPageRelevant(question: string, pageLines: string[]): 
     '你在为一个群聊机器人决定上下文窗口。用户在群里 @ 机器人提了一个问题, ' +
     '机器人正在按时间倒序分页回翻聊天记录, 需要判断当前这一页是否仍属于与问题相关的对话上下文。\n\n' +
     `[用户的问题]\n${question.trim().slice(0, 500)}\n\n` +
-    `[本页聊天记录(时间正序)]\n${pageLines.join('\n')}\n\n` +
-    '只回答一个词:\n' +
+    `[本页聊天记录(时间正序, 每条消息带 月-日 时:分 的时间标注)]\n${pageLines.join('\n')}\n\n` +
+    '判定规则:\n' +
     '- RELATED: 本页消息与用户问题相关(同一话题/讨论串, 或对理解问题有帮助)\n' +
-    '- UNRELATED: 本页消息已经与用户问题无关(属于更早的其它话题)';
+    '- UNRELATED: 本页消息已经与用户问题无关(属于更早的其它话题)\n' +
+    '- **时间限定优先**: 用户问题若包含时间限定(如「今天/昨天/本周/最近 N 小时」), ' +
+    '消息时间不在该范围内的页一律判定 UNRELATED, 时间不符比话题相似更优先。\n\n' +
+    '只回答一个词:';
   const r = await requestUtilityText(getMaker(), prompt, {
     maxTokens: 8,
     timeoutMs: 12_000,

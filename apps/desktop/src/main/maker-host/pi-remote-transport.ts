@@ -137,13 +137,11 @@ export function createRemotePiFileOps(remoteHost: RemoteHost): PiRemoteFileOps {
       // 展开。bash 双引号只展开一次参数(值里的 $HOME 不再递归展开), 且
       // ${P/#$HOME/$HOME} 右侧在单引号内不展开 —— 本地 JS 插值会把 Windows
       // 本地 HOME 拼进去(建出 /c/Users/... 字面目录), 字面 \$HOME 又得不到
-      // 远端值。唯一正确: H=$(printf ...) 取远端真实 HOME, case 用字面
-      // 轮 22 CRITICAL:路径值经 shellQuote 单引号包裹后 bash 无法在其中展开
-      // $HOME —— case 用**字面** '$HOME' 前缀匹配(单引号冻住), 命中后
-      // eval "P=$P" 让 bash 展开(路径来自固定模板无注入, shellQuote 已防引号),
-      // 绝对路径不走 eval 保持原样。远端实测通过。
-      // 注意:变量引用写 $P 而非 \$P —— \$P 是转义字面(轮 22-Z2 CRITICAL)。
-      const script = `P=${shellQuote(dir)}; case "$P" in '$HOME'/*) eval "P=$P";; esac; mkdir -p "$P"`;
+      // 远端值。
+      // 轮 43 P1(codex-connector):eval "P=$P" 对路径内 shell 语法(如 $(...)/反引号)
+      // 无防护, 会执行命令替换。改用 H=\$(printf ...) 取远端 HOME + 参数替换
+      // ${P#\$HOME} 剥离前缀(无 eval, 无注入风险)。
+      const script = `P=${shellQuote(dir)}; case "$P" in '$HOME'/*) H=$(printf '%s' "$HOME"); [ "\${P#\\\$HOME}" != "$P" ] && P="\${H}\${P#\\\$HOME}";; esac; mkdir -p "$P"`;
       const result = await remoteHost.exec(`bash -c ${shellQuote(script)}`, {
         timeoutMs: 15_000,
         label: 'pi-remote-mkdirp',
@@ -156,9 +154,8 @@ export function createRemotePiFileOps(remoteHost: RemoteHost): PiRemoteFileOps {
     async writeFile(file: string, content: string, mode?: number): Promise<void> {
       const script = [
         `REMOTE_PATH=${shellQuote(file)}`,
-        // 轮 22 CRITICAL:字面 $HOME 前缀匹配 + eval 展开(与 mkdirp 同方案)。
-        // 变量引用写 $REMOTE_PATH 而非 \$REMOTE_PATH(轮 22-Z2 CRITICAL)。
-        `case "$REMOTE_PATH" in '$HOME'/*) eval "REMOTE_PATH=$REMOTE_PATH";; esac`,
+        // 轮 43 P1(codex-connector):eval 换 H=$(printf) + 参数替换, 无注入风险。
+        `case "$REMOTE_PATH" in '$HOME'/*) H=$(printf '%s' "$HOME"); [ "\${REMOTE_PATH#\\\$HOME}" != "$REMOTE_PATH" ] && REMOTE_PATH="\${H}\${REMOTE_PATH#\\\$HOME}";; esac`,
         `mkdir -p "$(dirname "$REMOTE_PATH")"`,
         // 原子写:内容只经 stdin 进入,不进 argv(ps / ssh audit log / 错误消息都看不到)。
         // (umask 077 && cat >) 而非 cat > + chmod:后者在 chmod 执行前文件已按
@@ -178,10 +175,10 @@ export function createRemotePiFileOps(remoteHost: RemoteHost): PiRemoteFileOps {
     },
 
     async stat(file: string): Promise<{ isFile: boolean } | null> {
-      // 轮 22 CRITICAL:字面 $HOME 前缀匹配 + eval 展开(与 mkdirp 同方案)。
+      // 轮 43 P1(codex-connector):eval 换 H=$(printf) + 参数替换, 无注入风险。
       const script = `
 P=${shellQuote(file)}
-case "$P" in '$HOME'/*) eval "P=$P";; esac
+case "$P" in '$HOME'/*) H=$(printf '%s' "$HOME"); [ "\${P#\\\$HOME}" != "$P" ] && P="\${H}\${P#\\\$HOME}";; esac
 if [ -f "$P" ]; then
   printf 'FILE\\n'
 elif [ -e "$P" ]; then
@@ -202,8 +199,8 @@ fi
 
     async rm(fileOrDir: string, opts?: { recursive?: boolean }): Promise<void> {
       const flag = opts?.recursive === true ? ' -rf' : ' -f';
-      // 轮 22 CRITICAL:字面 $HOME 前缀匹配 + eval 展开(与 mkdirp 同方案)。
-      const script = `P=${shellQuote(fileOrDir)}; case "$P" in '$HOME'/*) eval "P=$P";; esac; rm${flag} "$P"`;
+      // 轮 43 P1(codex-connector):eval 换 H=$(printf) + 参数替换, 无注入风险。
+      const script = `P=${shellQuote(fileOrDir)}; case "$P" in '$HOME'/*) H=$(printf '%s' "$HOME"); [ "\${P#\\\$HOME}" != "$P" ] && P="\${H}\${P#\\\$HOME}";; esac; rm${flag} "$P"`;
       const result = await remoteHost.exec(`bash -c ${shellQuote(script)}`, {
         timeoutMs: 10_000,
         label: 'pi-remote-rm',
@@ -216,8 +213,8 @@ fi
     },
 
     async listDir(dir: string): Promise<string[]> {
-      // 轮 22 CRITICAL:字面 $HOME 前缀匹配 + eval 展开(与 mkdirp 同方案)。
-      const script = `P=${shellQuote(dir)}; case "$P" in '$HOME'/*) eval "P=$P";; esac; ls -1 "$P" 2>/dev/null || true`;
+      // 轮 43 P1(codex-connector):eval 换 H=$(printf) + 参数替换, 无注入风险。
+      const script = `P=${shellQuote(dir)}; case "$P" in '$HOME'/*) H=$(printf '%s' "$HOME"); [ "\${P#\\\$HOME}" != "$P" ] && P="\${H}\${P#\\\$HOME}";; esac; ls -1 "$P" 2>/dev/null || true`;
       const result = await remoteHost.exec(`bash -c ${shellQuote(script)}`, {
         timeoutMs: 10_000,
         label: 'pi-remote-listdir',

@@ -196,12 +196,46 @@ function normalizeInterpreterArgs(args: string): string {
     if (name.length >= 2 && '-command'.startsWith(name)) {
       const payload = rest.slice(token.length).trim();
       if (!payload) return args;
-      return [...consumed, raw, quoteIfMultiToken(payload)].join(' ');
+      // 只收拢**真正进入子进程**的那一段:`;` / `|` / `&&` 等是**外层**分隔符,其后的命令由
+      // 外层 shell 执行,不属于 `-Command` 载荷。把它们一并包进引号会谎报执行位置 ——
+      // `pwsh -Command exit 0; Set-Content <系统路径> x` 的写操作发生在外层,包进去就藏起来了,
+      // 而且与「整段都在子进程里」的写法折叠成同一条缓存身份(codex 报,已实测)。
+      const { head, tail } = splitAtFirstOuterSeparator(payload);
+      if (!head) return args;
+      const quoted = quoteIfMultiToken(head);
+      return [...consumed, raw, tail ? `${quoted} ${tail}` : quoted].join(' ');
     }
     consumed.push(raw);
     rest = rest.slice(token.length).trimStart();
   }
   return args;
+}
+
+/**
+ * 在**引号外**的第一个 shell 分隔符处切开:`head` 是进入子进程的载荷,`tail` 是仍由外层
+ * 执行的部分(含分隔符本身,原样保留)。引号内按 PowerShell 的重复引号转义跳过。
+ */
+function splitAtFirstOuterSeparator(text: string): { head: string; tail: string } {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "'" && !inDouble) {
+      if (inSingle && text[i + 1] === "'") { i++; continue; } // '' = 字面单引号
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      if (inDouble && text[i + 1] === '"') { i++; continue; } // "" = 字面双引号
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+    if (ch === ';' || ch === '|' || ch === '&') {
+      return { head: text.slice(0, i).trimEnd(), tail: text.slice(i).trim() };
+    }
+  }
+  return { head: text, tail: '' };
 }
 
 /** 已经是单个 token 的载荷保持原样(避免双重包引号);否则整条包成一个 token。 */

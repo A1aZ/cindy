@@ -22,6 +22,7 @@ mod windows_listener {
 
     static TARGET_VK: AtomicU32 = AtomicU32::new(0);
     static MODIFIERS_DOWN: AtomicU32 = AtomicU32::new(0);
+    static OTHER_KEYS_DOWN: AtomicU32 = AtomicU32::new(0);
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static SUPPRESS_UNTIL_RELEASE: AtomicBool = AtomicBool::new(false);
 
@@ -70,6 +71,16 @@ mod windows_listener {
             } else if key_up {
                 MODIFIERS_DOWN.fetch_and(!modifier_bit, Ordering::Relaxed);
             }
+        } else if event.vkCode != target_vk {
+            if key_down {
+                OTHER_KEYS_DOWN.fetch_add(1, Ordering::Relaxed);
+            } else if key_up {
+                OTHER_KEYS_DOWN
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                        Some(count.saturating_sub(1))
+                    })
+                    .ok();
+            }
         }
 
         if key_down && event.vkCode != target_vk && ACTIVE.swap(false, Ordering::Relaxed) {
@@ -82,7 +93,9 @@ mod windows_listener {
                 {
                     return 1;
                 }
-                if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0 {
+                if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0
+                    && OTHER_KEYS_DOWN.load(Ordering::Relaxed) == 0
+                {
                     ACTIVE.store(true, Ordering::Relaxed);
                     SUPPRESS_UNTIL_RELEASE.store(true, Ordering::Relaxed);
                     emit_pressed(true);
@@ -163,8 +176,9 @@ mod windows_listener {
 
     fn emit_line(line: &str) {
         let mut stdout = io::stdout().lock();
-        let _ = writeln!(stdout, "{line}");
-        let _ = stdout.flush();
+        if writeln!(stdout, "{line}").is_err() || stdout.flush().is_err() {
+            std::process::exit(0);
+        }
     }
 }
 

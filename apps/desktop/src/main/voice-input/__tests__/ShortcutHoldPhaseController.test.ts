@@ -81,4 +81,15 @@ describe('ShortcutHoldPhaseController', () => {
 
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end', 'start', 'end']);
   });
+
+  it('does not start when the target key arrives while another key is already down', () => {
+    const onTrigger = vi.fn();
+    const controller = new ShortcutHoldPhaseController({ onTrigger });
+
+    controller.setPressed(false, true);
+    controller.setPressed(true, true);
+    controller.setPressed(false, false);
+
+    expect(onTrigger).not.toHaveBeenCalled();
+  });
 });

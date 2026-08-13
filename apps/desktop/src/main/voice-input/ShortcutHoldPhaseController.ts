@@ -60,7 +60,11 @@ export class ShortcutHoldPhaseController {
       return;
     }
 
-    if (!targetDown) this.canceledUntilRelease = false;
+    if (targetDown) {
+      this.canceledUntilRelease = true;
+      return;
+    }
+    this.canceledUntilRelease = false;
   }
 
   releaseIfPressed(): void {

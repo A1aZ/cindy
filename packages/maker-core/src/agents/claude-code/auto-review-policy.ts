@@ -120,6 +120,12 @@ function quoteAsSingleShellToken(text: string): string {
  *
  * 落灰区不等于放行:审阅器面对不可读的 base64 倾向询问。
  */
+/**
+ * 开头的调用运算符:`&` 调用、`&&` 链式、`.` 点源。与目标之间的空白可选。
+ * `.` 必须紧跟空白或引号 —— 否则 `.\script.ps1` / `./script.ps1`(相对路径调用)会被误剥。
+ */
+const CALL_OPERATOR_PREFIX = /^(?:&{1,2}|\.(?=[\s'"]))\s*/;
+
 function normalizeNestedPowerShellInvocation(command: string): string | null {
   // 调用运算符:`& <exe>` 调用、`. <exe>` 点源,两者都是启动该解释器。
   //
@@ -132,8 +138,17 @@ function normalizeNestedPowerShellInvocation(command: string): string | null {
   // `-EncodedCommand` 的 argv 红线随之失效(实测:`. 'C:\…\pwsh.exe' -enc X` 掉回灰区)。
   // 对**可执行文件**而言 `.` 与 `&` 效果相同(点源的作用域差异只对脚本有意义),
   // 合并这两种写法是安全的;真正要区分的「执行 / 不执行」这一位完整保住了。
-  const operator = /^[&.]\s+/.test(command) ? '& ' : '';
-  const withoutOperator = command.replace(/^[&.]\s+/, '');
+  //
+  // 运算符与目标之间的空白是**可选**的(`&'C:\…\pwsh.exe'`、`.'…'` 都是合法 PowerShell),
+  // 链式 `&&` 后面同样跟着一条真命令。早先要求必须有空白,于是紧贴写法整条被包成
+  // `-Command` 载荷、argv 红线失效 —— 而 core 原样透传这些写法时是**能**命中的
+  // (实测 `&'C:\…\pwsh.exe' -enc X` 在 Bash 入口判 prompt-each-time),
+  // 也就是说那个降级是本 adapter 自己造成的,不属于 #2563 的 core 侧缺口(codex 报)。
+  //
+  // `.` 后面必须紧跟空白或引号才算点源:`.\script.ps1` / `./script.ps1` 是相对路径调用,
+  // 剥掉开头的 `.` 会把路径改成另一个东西。
+  const operator = CALL_OPERATOR_PREFIX.test(command) ? '& ' : '';
+  const withoutOperator = command.replace(CALL_OPERATOR_PREFIX, '');
   const target = leadingShellToken(withoutOperator);
   if (!target) return null;
   if (!isPowerShellExecutable(target.value)) return null;

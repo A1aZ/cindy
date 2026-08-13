@@ -225,3 +225,50 @@ export async function fetchManifest(
 export function getCachedManifest(): Manifest | null {
   return cached;
 }
+
+/**
+ * 探测 beta 渠道 manifest 是否可达(HTTP 200)。
+ *
+ * 供设置页在用户打开 beta 开关前预检:CDN 尚未部署 manifest-{platform}-beta.json
+ * 时拒绝开启。beta 失败不回落 stable(与 canary 同口径),一旦开启却拉不到,
+ * 不只应用热更失效,连 agent 二进制(Claude Code / Codex / ripgrep / pi)也会因
+ * 拿不到 manifest 里的版本号而不可用(见 agent-binaries/factory.ts 的
+ * 「manifest 之后才判 isInstalled」顺序)——所以「能不能开」必须提前探明,
+ * 而不是等用户重启后才发现坏了。
+ *
+ * 只判 HTTP 200 可达,不解析正文、不写 cache、不改当前发布通道。dev 不联网,
+ * 直接返回 true(dev 不消费远程 manifest,无需预检)。
+ */
+export function probeBetaManifest(timeoutMs = 8_000): Promise<boolean> {
+  if (isDev()) return Promise.resolve(true);
+  const url = `${getBaseUrl()}/manifest-${getPlatformKey()}-beta.json?t=${Date.now()}`;
+  return new Promise<boolean>((resolve) => {
+    try {
+      const request = net.request(url);
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const finish = (value: boolean, abortRequest = false): void => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        if (abortRequest) request.abort();
+        resolve(value);
+      };
+      timeout = setTimeout(() => finish(false, true), timeoutMs);
+      request.on('response', (response) => {
+        // 读完响应体以正确触发流结束、避免连接泄漏(内容不关心)。
+        response.on('data', () => {});
+        response.on('end', () => finish(response.statusCode === 200));
+        response.on('error', () => finish(false));
+      });
+      request.on('error', () => finish(false));
+      try {
+        request.end();
+      } catch {
+        finish(false, true);
+      }
+    } catch {
+      resolve(false);
+    }
+  });
+}

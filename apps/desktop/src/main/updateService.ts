@@ -28,7 +28,7 @@ import os from 'node:os';
 
 import { BRAND_IDENTITY } from '@cindy/maker-shared/brand-identity';
 
-import { fetchManifest, getBaseUrl, isDev } from './manifestService';
+import { fetchManifest, getBaseUrl, isDev, probeBetaManifest } from './manifestService';
 import type { Manifest } from './manifestService';
 import { download, DownloadError } from './downloader/index';
 import { ProgressNormalizer } from './updateProgressNormalizer';
@@ -1219,6 +1219,13 @@ export function initUpdateService(): void {
     resetUpdateChannelSettings();
     const state = readUpdateChannelSettingsState();
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+  });
+
+  // 打开 beta 前的预检:探测 manifest-{platform}-beta.json 是否可达。
+  ipcMain.handle('update-channel-probe-beta', async (event) => {
+    assertTrustedAppRendererEvent(event);
+    const available = await probeBetaManifest();
+    return { available };
   });
 
   // 用户主动重启:让 beta 通道切换在下次冷启动的 manifest 拉取前生效。

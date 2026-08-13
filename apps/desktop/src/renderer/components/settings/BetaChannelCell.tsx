@@ -28,6 +28,15 @@ export function BetaChannelCell() {
     async (next: boolean) => {
       setPending(true);
       try {
+        if (next) {
+          // 预检:CDN 尚未部署 manifest-{platform}-beta.json 时拒绝开启。
+          // 否则用户开了 beta 却连 agent 二进制都拉不到(beta 失败不回落 stable)。
+          const { available } = await window.electronAPI.probeBetaChannel();
+          if (!available) {
+            toast.error(t('settings.betaChannel.unavailable'));
+            return; // 不落盘,开关保持关闭
+          }
+        }
         await setEnableBeta(next);
         if (next) {
           const restart = await confirm({

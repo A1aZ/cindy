@@ -148,6 +148,7 @@ export function SessionCard({
   onMoveSession,
   projectOptions = [],
   matchIndices,
+  sourceLabel,
   variant = 'card',
   isFirst = false,
   hideBottomDivider = false,
@@ -773,6 +774,18 @@ export function SessionCard({
                       }
                     />
                   )}
+                  {sourceLabel ? (
+                    <span
+                      className={cn(
+                        'min-w-0 truncate text-11 font-normal',
+                        isActive
+                          ? 'text-sidebar-item-active-foreground/70'
+                          : 'text-[var(--cmd-palette-item-meta)]',
+                      )}
+                    >
+                      {sourceLabel}
+                    </span>
+                  ) : null}
                 </div>
               )}
             </div>

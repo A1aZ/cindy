@@ -522,10 +522,19 @@ export function ProjectsSection({
         ? t('ccAgent.sidebar.foldAll.collapseDevices')
         : t('ccAgent.sidebar.foldAll.expandAll');
   const FoldIcon = foldState === 'expand-all' ? ChevronsUpDown : ChevronsDownUp;
-  // 散排对话 hover 时右侧的来源标签(与时间排序视图同口径):全部标成「对话」。
+  // 散排行的来源标签:平铺时项目会话也要标项目名,不能只喂 dialogues。
+  const flattenedSessionsForSourceLabels = useMemo(() => {
+    if (filter.groupBy === 'project') return dialogues;
+    return [...projects.flatMap((project) => project.sessions), ...dialogues];
+  }, [filter.groupBy, projects, dialogues]);
   const dialogueSourceLabelMap = useMemo(
-    () => buildSessionSourceLabelMap(dialogues, allKnownProjects, t('ccAgent.sidebar.dialogues')),
-    [dialogues, allKnownProjects, t],
+    () =>
+      buildSessionSourceLabelMap(
+        flattenedSessionsForSourceLabels,
+        allKnownProjects,
+        t('ccAgent.sidebar.dialogues'),
+      ),
+    [flattenedSessionsForSourceLabels, allKnownProjects, t],
   );
 
   // F-PJ-10：即使 projects 因 filter 收窄到空，也要保留段头供用户切回 Filter。

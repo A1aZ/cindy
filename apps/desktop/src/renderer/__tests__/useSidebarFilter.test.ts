@@ -42,6 +42,7 @@ import {
   nextTaskInfoAfterToggle,
   persistManualProjectOrder,
   nextProjectsAfterToggle,
+  nextSortByAfterGroupByChange,
   includeProjectInFilter,
   removeProjectsFromFilter,
   gcProjectsAgainstActive,
@@ -265,6 +266,15 @@ describe('loadSortBy', () => {
   it("returns 'recency' when localStorage is unavailable", () => {
     uninstallLocalStorage();
     expect(loadSortBy()).toBe('recency');
+  });
+});
+
+describe('nextSortByAfterGroupByChange', () => {
+  it('flat + manual 回落到 recency;其它组合保持', () => {
+    expect(nextSortByAfterGroupByChange('flat', 'manual')).toBe('recency');
+    expect(nextSortByAfterGroupByChange('flat', 'priority')).toBe('priority');
+    expect(nextSortByAfterGroupByChange('flat', 'recency')).toBe('recency');
+    expect(nextSortByAfterGroupByChange('project', 'manual')).toBe('manual');
   });
 });
 

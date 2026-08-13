@@ -61,6 +61,14 @@ export type FilterLastActivity = 'all' | '1d' | '3d' | '7d' | '30d';
  *  （侧边栏重设计裁决：alphabetic 与 time(旧「最早优先」)已删除，存量值回退到
  *  recency——时间排序只保留最近优先一档。） */
 export type FilterSortBy = 'recency' | 'manual' | 'priority';
+
+/** 切到平铺时,手动排序失去项目行载体,回落到按时间;其它档位保持。 */
+export function nextSortByAfterGroupByChange(
+  groupBy: FilterGroupBy,
+  sortBy: FilterSortBy,
+): FilterSortBy {
+  return groupBy === 'flat' && sortBy === 'manual' ? 'recency' : sortBy;
+}
 /**
  * 任务行右侧信息项（复选）。存储数组的顺序 = 用户勾选先后(nextTaskInfoAfterToggle
  * 按序追加),列表行据此渲染(2026-08-12 用户裁决);菜单里四个选项的排列另有固定顺序。

@@ -74,6 +74,7 @@ import {
   persistManualProjectOrder,
   persistManualPinnedOrder,
   nextProjectsAfterToggle,
+  nextSortByAfterGroupByChange,
   includeProjectInFilter,
   removeProjectsFromFilter,
   gcProjectsAgainstActive,
@@ -459,6 +460,14 @@ export function useSidebarFilter(
   const setGroupBy = useCallback((next: FilterGroupBy) => {
     setGroupByState(next);
     persistGroupBy(next);
+    // 手动排序只对项目行有意义。切到平铺后菜单不再露出该档,若仍保留
+    // sortBy=manual,渲染层会继续按它禁用设备分组,菜单却显示「按时间」。
+    setSortByState((current) => {
+      const nextSort = nextSortByAfterGroupByChange(next, current);
+      if (nextSort === current) return current;
+      persistSortBy(nextSort);
+      return nextSort;
+    });
   }, []);
 
   const setGroupDialogue = useCallback((next: boolean) => {

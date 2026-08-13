@@ -199,6 +199,23 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     }
   });
 
+  it('关项目分组时 hook 把 manual 回落到 recency', () => {
+    const hookSource = read('features', 'cc-agent', 'hooks', 'useSidebarFilter.ts');
+    expect(hookSource).toContain('nextSortByAfterGroupByChange');
+    expect(hookSource).toContain('const nextSort = nextSortByAfterGroupByChange(next, current)');
+  });
+
+  it('列表行也接收来源标签(平铺时项目会话不再丢项目名)', () => {
+    const entryListSource = read('features', 'cc-agent', 'sidebar', 'SessionEntryList.tsx');
+    expect(entryListSource).toContain('sourceLabel={sourceLabelMap?.get(entry.session.id)}');
+    expect(entryListSource.match(/sourceLabel=\{sourceLabelMap\?\.get\(entry\.session\.id\)\}/g)).toHaveLength(
+      2,
+    );
+    const cardSource = read('features', 'cc-agent', 'sidebar', 'SessionCard.tsx');
+    expect(cardSource).toContain('sourceLabel,');
+    expect(cardSource).toContain('{sourceLabel ? (');
+  });
+
   // 2026-08-12 用户裁决:筛选各维度选中后菜单不关闭(常要连调几项);排序与显示
   // 模式仍选完即关(一次一个决定)。
   it('筛选维度选中后保持菜单打开,排序 / 显示模式仍选完即关', () => {

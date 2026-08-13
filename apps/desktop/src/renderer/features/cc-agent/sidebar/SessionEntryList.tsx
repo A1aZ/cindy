@@ -138,6 +138,7 @@ export function SessionEntryRows({
               variant="list"
               isFirst={showFirstDivider && index === 0}
               hideBottomDivider={nextHighlighted}
+              sourceLabel={sourceLabelMap?.get(entry.session.id)}
             />
           ) : (
             <SessionItem

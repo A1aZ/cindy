@@ -52,6 +52,11 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain(
       'const allGroupsCollapsed = hasVisibleProjectGroups',
     );
+    // 平铺时来源标签要覆盖从项目摊出来的会话,不能只喂 dialogues。
+    expect(projectsSectionSource).toContain('flattenedSessionsForSourceLabels');
+    expect(projectsSectionSource).toContain(
+      '[...projects.flatMap((project) => project.sessions), ...dialogues]',
+    );
   });
 
   // 2026-08-12 用户裁决:段头「新建项目」按钮暂时移除(同一动作在新任务页的工作

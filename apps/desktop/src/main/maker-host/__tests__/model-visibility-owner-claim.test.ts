@@ -11,10 +11,17 @@ const harness = vi.hoisted(() => ({
   ownerGeneration: 1,
   boundaryPending: false,
   exclusive: true,
+  listeners: new Map<string, (event: { returnValue?: unknown }) => void>(),
+  assertTrusted: vi.fn(),
 }));
 
 vi.mock('electron', () => ({
   app: { getPath: () => harness.root },
+  ipcMain: {
+    on: (channel: string, listener: (event: { returnValue?: unknown }) => void) => {
+      harness.listeners.set(channel, listener);
+    },
+  },
 }));
 
 vi.mock('../../appSessionState.js', () => ({
@@ -38,7 +45,14 @@ vi.mock('../../ownerNamespaceMigration.js', () => ({
   hasExclusiveSharedLegacyUserDataAccess: () => harness.exclusive,
 }));
 
-import { claimLegacyModelVisibilityOwner } from '../model-visibility-owner-claim.js';
+vi.mock('../../security/trustedAppRenderer.js', () => ({
+  assertTrustedAppRendererEvent: (...args: unknown[]) => harness.assertTrusted(...args),
+}));
+
+import {
+  claimLegacyModelVisibilityOwner,
+  registerModelVisibilityOwnerClaimIpc,
+} from '../model-visibility-owner-claim.js';
 
 const markerName = 'model-visibility-renderer-legacy-owner.v1.json';
 
@@ -49,6 +63,8 @@ beforeEach(() => {
   harness.ownerGeneration = 1;
   harness.boundaryPending = false;
   harness.exclusive = true;
+  harness.listeners.clear();
+  harness.assertTrusted.mockClear();
 });
 
 afterEach(() => {
@@ -56,7 +72,7 @@ afterEach(() => {
 });
 
 describe('model visibility legacy Renderer owner claim', () => {
-  it('atomically binds the legacy key to the active verified cloud account only once', () => {
+  it('atomically binds the legacy key to the active stable owner only once', () => {
     expect(claimLegacyModelVisibilityOwner()).toEqual({
       dataOwnerId: 'owner-a',
       ownerGeneration: 1,
@@ -80,16 +96,46 @@ describe('model visibility legacy Renderer owner claim', () => {
     });
   });
 
-  it('does not claim from signed-out, local, boundary-pending, or shared access', () => {
+  it('lets a stable local profile claim the legacy key before a later cloud login', () => {
     harness.mode = 'local';
+    harness.ownerId = 'local-v1';
+    expect(claimLegacyModelVisibilityOwner()).toMatchObject({
+      dataOwnerId: 'local-v1',
+      claimed: true,
+      claimedByOtherOwner: false,
+      canInitialize: true,
+    });
+    harness.mode = 'cloud';
+    harness.ownerId = 'owner-a';
+    expect(claimLegacyModelVisibilityOwner()).toMatchObject({
+      claimed: false,
+      claimedByOtherOwner: true,
+      canInitialize: false,
+    });
+  });
+
+  it('does not claim from signed-out, boundary-pending, or shared access', () => {
+    harness.mode = 'signed-out';
+    harness.ownerId = null;
     expect(claimLegacyModelVisibilityOwner().claimed).toBe(false);
     harness.mode = 'cloud';
+    harness.ownerId = 'owner-a';
     harness.boundaryPending = true;
     expect(claimLegacyModelVisibilityOwner().claimed).toBe(false);
     harness.boundaryPending = false;
     harness.exclusive = false;
     expect(claimLegacyModelVisibilityOwner().claimed).toBe(false);
     expect(fs.existsSync(path.join(harness.root, markerName))).toBe(false);
+  });
+
+  it('registers the trusted synchronous claim handler in the eager bootstrap phase', () => {
+    registerModelVisibilityOwnerClaimIpc();
+    const listener = harness.listeners.get('maker:model-visibility:legacy-owner-claim-sync');
+    expect(listener).toBeDefined();
+    const event: { returnValue?: unknown } = {};
+    listener?.(event);
+    expect(harness.assertTrusted).toHaveBeenCalledWith(event);
+    expect(event.returnValue).toMatchObject({ dataOwnerId: 'owner-a', claimed: true });
   });
 
   it('keeps a claimed owner readable but blocks legacy initialization without exclusivity', () => {

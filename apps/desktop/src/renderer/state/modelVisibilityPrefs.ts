@@ -106,7 +106,7 @@ function migrateLegacyVisibility(ownerId: string, ownerGeneration: number): Migr
       return { readyForWrites: true, migrationPending: false };
     }
 
-    // Main 用模型可见性专属 marker 把旧 key 原子归属给升级时的当前已验证云账号；
+    // Main 用模型可见性专属 marker 把旧 key 原子归属给升级时的当前稳定 local/cloud owner；
     // canInitialize 还保证此刻没有另一个共享 userData 的旧进程在并发改写迁移输入。
     const claim = window.electronAPI?.maker?.claimLegacyModelVisibilityOwner?.();
     if (claim?.dataOwnerId !== ownerId || claim.ownerGeneration !== ownerGeneration) {
@@ -145,12 +145,7 @@ function migrateLegacyVisibility(ownerId: string, ownerGeneration: number): Migr
 function ensureActiveOwnerReadyForWrites(): boolean {
   if (!activeOwnerId) return false;
   if (activeOwnerReadyForWrites && !activeOwnerMigrationPending) return true;
-  if (activeOwnerMode === 'local') {
-    activeOwnerReadyForWrites = true;
-    activeOwnerMigrationPending = false;
-    return true;
-  }
-  if (activeOwnerMode !== 'cloud') return false;
+  if (activeOwnerMode === 'signed-out') return false;
   const migration = migrateLegacyVisibility(activeOwnerId, activeOwnerGeneration);
   activeOwnerReadyForWrites = migration.readyForWrites;
   activeOwnerMigrationPending = migration.migrationPending;
@@ -242,10 +237,10 @@ export function setModelVisibilityOwner(
   activeOwnerId = ownerId;
   activeOwnerGeneration = ownerGeneration;
   activeOwnerMode = mode;
-  activeOwnerReadyForWrites = mode === 'local' && ownerId !== null;
+  activeOwnerReadyForWrites = false;
   activeOwnerMigrationPending = false;
   cache = null;
-  if (ownerId && mode === 'cloud') {
+  if (ownerId && mode !== 'signed-out') {
     const migration = migrateLegacyVisibility(ownerId, ownerGeneration);
     activeOwnerReadyForWrites = migration.readyForWrites;
     activeOwnerMigrationPending = migration.migrationPending;

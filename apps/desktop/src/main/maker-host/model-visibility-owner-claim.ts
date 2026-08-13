@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, ipcMain } from 'electron';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,7 +11,9 @@ import {
 } from '../appSessionState.js';
 import { createLogger } from '../logger.js';
 import { hasExclusiveSharedLegacyUserDataAccess } from '../ownerNamespaceMigration.js';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
+import { MAKER_INVOKE } from '../maker-ipc/channels.js';
 import type { ModelVisibilityLegacyOwnerClaim } from '../../shared/modelVisibility.js';
 
 const MARKER_FILE = 'model-visibility-renderer-legacy-owner.v1.json';
@@ -52,7 +54,7 @@ function readOwnerMarker(markerPath: string): OwnerMarkerRead {
 }
 
 /**
- * Atomically binds the pre-account Renderer preference key to the cloud account that is active
+ * Atomically binds the pre-account Renderer preference key to the stable local/cloud owner active
  * during this upgrade. The marker is model-visibility-specific: older general migrations may have
  * been claimed by a historical account and therefore cannot establish who owns this localStorage.
  */
@@ -60,7 +62,7 @@ export function claimLegacyModelVisibilityOwner(): ModelVisibilityLegacyOwnerCla
   const stamp = getActiveDataOwnerPushStamp();
   const session = getActiveAppSession();
   if (
-    session.mode !== 'cloud'
+    session.mode === 'signed-out'
     || !stamp.dataOwnerId
     || session.dataOwnerId !== stamp.dataOwnerId
     || isAppSessionBoundaryPending()
@@ -113,4 +115,12 @@ export function claimLegacyModelVisibilityOwner(): ModelVisibilityLegacyOwnerCla
     canInitialize:
       claimed && exclusiveAtStart && hasExclusiveSharedLegacyUserDataAccess(),
   };
+}
+
+/** Register before the first BrowserWindow: preload uses a synchronous claim read during auth boot. */
+export function registerModelVisibilityOwnerClaimIpc(): void {
+  ipcMain.on(MAKER_INVOKE.MODEL_VISIBILITY_LEGACY_OWNER_CLAIM_SYNC, (event) => {
+    assertTrustedAppRendererEvent(event);
+    event.returnValue = claimLegacyModelVisibilityOwner();
+  });
 }

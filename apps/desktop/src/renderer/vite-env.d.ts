@@ -4747,7 +4747,7 @@ interface ElectronAPI {
       ownerGeneration: number,
       map: Record<string, boolean>,
     ) => Promise<void>;
-    /** Resolve the verified cloud owner allowed to import the pre-account preference key. */
+    /** Resolve the stable local/cloud owner allowed to import the pre-account preference key. */
     claimLegacyModelVisibilityOwner: () => import('../shared/modelVisibility').ModelVisibilityLegacyOwnerClaim;
     /**
      * 「模型 / 供应商停用」override 写入(main 侧 model-disable-store);成功后 main 广播

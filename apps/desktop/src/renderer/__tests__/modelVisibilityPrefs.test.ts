@@ -253,14 +253,15 @@ describe('modelVisibilityPrefs store', () => {
     expect(syncModelVisibility).toHaveBeenLastCalledWith(null, 2, {});
   });
 
-  it('本地 profile 使用自己的 namespace，但不会认领云账号的历史全局 key', async () => {
+  it('本地 profile 认领历史全局 key 并迁移到自己的 namespace', async () => {
     memStorage.setItem(
       'xdt:modelVisibilityPrefs:v1',
       JSON.stringify({ 'codex:openai:gpt-5.6': false }),
     );
+    setOwnerClaim('local-v1', 1);
     const module = await loadModuleForOwner('local-v1', 1, 'local');
 
-    expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.6' })).toBe(true);
+    expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.6' })).toBe(false);
     module.setModelVisibility('codex', 'openai', 'gpt-5.5', false);
     expect(module.isModelEnabled('codex', 'openai', { id: 'gpt-5.5' })).toBe(false);
     expect(memStorage.getItem('xdt:modelVisibilityPrefs:v1')).not.toBeNull();

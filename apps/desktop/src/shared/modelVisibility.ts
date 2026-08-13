@@ -2,7 +2,7 @@ import { isDataOwnerPushStamp, type DataOwnerPushStamp } from './dataOwnerPush.j
 
 /** Main's decision for importing the one pre-account model visibility namespace. */
 export interface ModelVisibilityLegacyOwnerClaim extends DataOwnerPushStamp {
-  /** The model visibility legacy marker belongs to the active verified cloud owner. */
+  /** The model visibility legacy marker belongs to the active stable local/cloud owner. */
   readonly claimed: boolean;
   /** The model visibility legacy marker durably belongs to another account. */
   readonly claimedByOtherOwner: boolean;

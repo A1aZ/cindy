@@ -226,7 +226,7 @@ export const MAKER_INVOKE = {
    * ownerGeneration，Main 拒绝账号切换期间的迟到快照。fire-and-forget,不落盘。
    */
   MODEL_VISIBILITY_SYNC: 'maker:model-visibility:sync',
-  /** Sync read: which verified cloud owner may import the pre-account Renderer preference key. */
+  /** Sync read: which stable local/cloud owner may import the pre-account Renderer preference key. */
   MODEL_VISIBILITY_LEGACY_OWNER_CLAIM_SYNC: 'maker:model-visibility:legacy-owner-claim-sync',
   /**
    * 「模型 / 供应商停用」override 写入(model-disable-store,main 侧持久化真源)。

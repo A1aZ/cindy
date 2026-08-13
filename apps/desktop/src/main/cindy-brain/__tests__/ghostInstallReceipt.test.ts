@@ -119,7 +119,6 @@ describe('GhostInstallReceiptStore cleanup', () => {
   it('treats only a missing migration marker as absent', () => {
     expect(store.hasMigrationMarker('hello')).toBe(false);
   });
-
   it('rejects a linked snapshot root without touching its target', async () => {
     const external = path.join(workDir, 'external');
     const sentinel = path.join(external, 'hello', 'sentinel.txt');

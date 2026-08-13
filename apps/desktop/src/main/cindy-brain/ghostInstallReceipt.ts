@@ -262,9 +262,11 @@ export class GhostInstallReceiptStore {
     // 无 receipt 的哨兵把合法 legacy 插件永久挡在迁移之外。
     // ensureMigrationMarker 返回 true 仅当本次调用实际创建了 marker，
     // 因此不存在 TOCTOU：检查和创建在同一个调用内完成。
-    let markerWritten = false;
+    // Once published, retain the marker on receipt-write failure. Another
+    // writer may have observed it and committed the receipt; pathname-based
+    // rollback could remove that install's only durable migration guard.
     if (!this.hasMigrationLedger()) {
-      markerWritten = await this.ensureMigrationMarker(receipt.id);
+      await this.ensureMigrationMarker(receipt.id);
     }
     const target = this.receiptPath(receipt.id);
     const temp = path.join(
@@ -279,20 +281,6 @@ export class GhostInstallReceiptStore {
       });
       await fs.promises.rename(temp, target);
     } catch (error) {
-      if (markerWritten) {
-        // Best-effort rollback.  removeMigrationMarker uses force:true rm,
-        // so the only failures are real I/O errors (same filesystem that
-        // just rejected the receipt write).  Don't silently swallow the
-        // rollback failure — a surviving orphaned .migrated-<id> marker
-        // permanently blocks legacy migration for this id.
-        try {
-          await this.removeMigrationMarker(receipt.id);
-        } catch {
-          // Rollback failed after receipt write failed: the original error
-          // is the primary concern.  The orphaned marker is observable in
-          // the receipt-write failure diagnostics.
-        }
-      }
       throw error;
     } finally {
       await fs.promises.rm(temp, { force: true }).catch(() => undefined);

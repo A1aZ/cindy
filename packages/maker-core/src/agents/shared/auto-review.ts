@@ -3278,6 +3278,27 @@ const GLOB_COMPONENT_PLACEHOLDER = '\u0000globpart';
  * **不能直接看写目标表抽到了什么** —— `Rename-Item -NewName x` 会抽到 `x`,但那是新**名字**、
  * 不是被改的项;被改的项来自 pipeline。所以这里只认真正承载路径的参数与位置实参。
  */
+/**
+ * 只**过滤/排序/挑选**、不改变对象来源的 pipeline 阶段。它们让 `$_` 还是上游那些项,所以路径
+ * provenance 要原样传下去 —— 否则
+ * `Get-ChildItem <受保护目录> | Where-Object Name -eq hosts | Remove-Item` 里删除段看到的"上游"
+ * 是 `Where-Object` 的实参(`Name`、`hosts`),那两个按相对路径落在工作区内 → 整条降级(codex 报)。
+ *
+ * `ForEach-Object` / `%` **不在此列**:它能返回任意对象,来源无法证明 → 落到"不可证"那档。
+ */
+const POWERSHELL_PIPELINE_PASSTHROUGH: ReadonlySet<string> = new Set([
+  'where-object', 'where', '?', 'sort-object', 'sort', 'select-object', 'select',
+  'get-unique', 'gu', 'tee-object', 'tee',
+]);
+
+/**
+ * 会**枚举路径**的 cmdlet:不给实参时枚举当前目录,所以 provenance 落到 `.`(与本文件既有的 cwd
+ * 兜底同口径)。表外的阶段不给实参时 provenance 记为"不可证",不假设它产出的是区内路径。
+ */
+const POWERSHELL_PATH_ENUMERATORS: ReadonlySet<string> = new Set([
+  'get-childitem', 'gci', 'dir', 'ls', 'get-item', 'gi', 'resolve-path', 'rvpa',
+]);
+
 function hasExplicitPathArgument(tokens: string[]): boolean {
   const known = [
     ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
@@ -3292,7 +3313,7 @@ function hasExplicitPathArgument(tokens: string[]): boolean {
       ? [name]
       : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
     // 承载路径的具名参数(`-NewName` 只是新名字,不算)。
-    if (candidates.length === 1 && POWERSHELL_PATH_TARGET_PARAMS.includes(candidates[0])) return true;
+    if (candidates.length === 1 && POWERSHELL_ITEM_PARAMS.includes(candidates[0])) return true;
     // **凡是带值的已知参数都要把值一并消费**(不只 VALUE_PARAMS —— `-NewName` 在目标参数表里
     // 但同样带值)。不消费的话 `Rename-Item -NewName x` 的 `x` 会被当成位置路径,于是
     // "目标来自 pipeline"被误判成"目标写在命令行上"(实测漏过)。
@@ -3304,10 +3325,16 @@ function hasExplicitPathArgument(tokens: string[]): boolean {
   return false;
 }
 
-/** 真正承载「被写/被删的路径」的具名参数 —— `-NewName` 是新名字,不在此列。 */
-const POWERSHELL_PATH_TARGET_PARAMS: readonly string[] = [
-  '-path', '-literalpath', '-lp', '-pspath',
-  '-destination', '-destinationpath', '-filepath', '-outfile', '-outputdirectory',
+/**
+ * 承载「这个 cmdlet 要操作的**项**」的具名参数 —— 也就是 pipeline 能替代的那个位置。
+ *
+ * **`-Destination` 一族刻意不在此列**:显式给了安全的落地位置,不等于**源**也是显式安全的。
+ * `Get-Item <受保护路径> | Move-Item -Destination C:\repo\hosts` 的源来自 pipeline,而 Move-Item
+ * 会销毁源 —— 把 `-Destination` 也算成"目标已显式给出"就会早退出、跳过对 piped source 的检查
+ * (codex 报)。`-NewName` 同理:那是新名字,不是被改的项。
+ */
+const POWERSHELL_ITEM_PARAMS: readonly string[] = [
+  '-path', '-literalpath', '-lp', '-pspath', '-filepath', '-outfile', '-outputdirectory',
 ];
 
 /**
@@ -3328,11 +3355,19 @@ function pipelineFedWriteTargetNeedsConsent(
   workspaceRoots: string[],
   opts: ShellReviewOptions,
 ): boolean {
-  if (!POWERSHELL_WRITE_CMDLETS.has(executableName(tokens[0] ?? ''))) return false;
-  if (hasExplicitPathArgument(tokens)) return false; // 目标写在命令行上 → 已由写目标表判过
+  const spec = POWERSHELL_WRITE_CMDLETS.get(executableName(tokens[0] ?? ''));
+  if (!spec) return false;
+  // pipeline 供的是「被操作的项」。它到底会不会被写/被销毁,由 cmdlet 语义决定:
+  //   · `targets: 'first' | 'all'`(Remove-Item / Clear-Content / Set-Content …)—— 项本身就是目标;
+  //   · `targets: 'last'` + `sources: true`(Move-Item / Rename-Item)—— 项是源,但**源会被销毁**;
+  //   · `targets: 'last'` 且不销毁源(Copy-Item)—— 项只被读,不需要同意。
+  if (spec.targets === 'last' && spec.sources !== true) return false;
+  if (hasExplicitPathArgument(tokens)) return false; // 项写在命令行上 → 已由写目标表判过
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
-  const candidates = upstreamOperands && upstreamOperands.length > 0 ? upstreamOperands : ['.'];
+  // `null` = 上游来源不可证(表外的 pipeline 阶段能返回任意对象)→ 直接要求同意。
+  if (upstreamOperands === null) return true;
+  const candidates = upstreamOperands.length > 0 ? upstreamOperands : ['.'];
   return candidates.some((raw) => {
     const t = stripFileSystemQualifier(raw);
     // 运行期才定型的上游位置(变量/表达式/splat)证不出在区内。
@@ -3472,9 +3507,18 @@ function scopedDestructionNeedsConsent(
       && tokens.slice(1).some((token) => SHELL_EXECUTORS.has(executableName(token)))) return true;
     if (forcePushNeedsConsent(tokens)) return true;
 
-    // 留给下一段用:本段枚举了哪些位置(`Get-ChildItem <这里>`)。必须在下面那个 `continue` 之前
-    // 赋值,否则改目录的段会把它漏掉。
-    upstreamOperands = positionalOperands(tokens.slice(1));
+    // 留给下一段用:pipeline 到这里为止,「被传下去的对象来自哪些位置」。必须在下面那个
+    // `continue` 之前赋值,否则改目录的段会把它漏掉。
+    //   · 只过滤/排序/挑选的阶段 → provenance 原样传递(它没换来源);
+    //   · 给了位置实参 → 就是这些位置;
+    //   · 没给实参但会枚举路径(`Get-ChildItem`)→ 当前目录;
+    //   · 其余(`ForEach-Object` 等能返回任意对象的)→ `null` = 不可证,由下游 fail closed。
+    if (!POWERSHELL_PIPELINE_PASSTHROUGH.has(bin)) {
+      const operands = positionalOperands(tokens.slice(1));
+      upstreamOperands = operands.length > 0
+        ? operands
+        : POWERSHELL_PATH_ENUMERATORS.has(bin) ? ['.'] : null;
+    }
 
     const cwdChange = directoryChangeTarget(tokens);
     if (!cwdChange.changesDirectory || separatorAfter === 'pipe' || separatorAfter === 'background') {

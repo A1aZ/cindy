@@ -2941,6 +2941,59 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('pipeline provenance 穿过过滤阶段;显式 destination 不代表 source 也显式', () => {
+    // 两条都是上一版 pipeline 判据自己的缺口:
+    //  1) 只过滤/排序/挑选的阶段没换对象来源,但 provenance 被换成了那一段自己的实参 ——
+    //     `Get-ChildItem <受保护目录> | Where-Object Name -eq hosts | Remove-Item` 里删除段看到的
+    //     "上游"变成 `Name` / `hosts`,按相对路径落在区内 → 整条降级(codex 报);
+    //  2) `-Destination` 被算成"目标已显式给出"就会早退出、跳过对 piped **source** 的检查 ——
+    //     而 Move-Item / Rename-Item 会**销毁源**(codex 报)。
+    const win = ['C:\\repo'];
+    const etc = 'C:\\Windows\\System32\\drivers\\etc';
+    const hosts = `${etc}\\hosts`;
+    for (const c of [
+      // provenance 穿过过滤阶段
+      `Get-ChildItem ${etc} | Where-Object Name -eq hosts | Remove-Item`,
+      'Get-ChildItem C:\\Windows\\System32 | Where-Object Name -eq x | Remove-Item -Force',
+      'Get-ChildItem C:\\Windows\\System32 | Sort-Object Name | Remove-Item',
+      'Get-ChildItem C:\\Windows\\System32 | Select-Object -First 1 | Remove-Item',
+      'Get-ChildItem C:\\Windows\\System32 | ? Name -eq x | Remove-Item',   // 别名
+      // 显式 destination ≠ 源显式;源来自 pipeline 且会被销毁
+      `Get-Item ${hosts} | Move-Item -Destination C:\\repo\\hosts`,
+      'Get-ChildItem C:\\Windows\\System32\\* | Move-Item -Destination C:\\repo\\bak',
+      `Get-Item ${hosts} | Rename-Item -NewName x`,
+      `Get-Item ${hosts} | Set-Content -Value x`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:`Copy-Item` **不销毁源** → piped source 只被读,不需要同意。这条是判据按 cmdlet
+    // 语义分档的关键反例:不能因为"源来自 pipeline"就一律升级。
+    expect(classifyShellCommand(`Get-Item ${hosts} | Copy-Item -Destination C:\\repo\\bak`, win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-ChildItem C:\\repo\\*.txt | Copy-Item -Destination C:\\repo\\out', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 反例二:区内的过滤式清理仍是灰区(provenance 传递不等于一律升级)。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build | Where-Object Name -eq x | Remove-Item',
+      'Get-ChildItem C:\\repo\\build\\* | Sort-Object Name | Remove-Item',
+      'Get-ChildItem | Where-Object Name -eq x | Remove-Item',   // 枚举当前目录
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例三:项写在命令行上 / 管道右侧不是写 cmdlet → 不走这条。
+    expect(classifyShellCommand('Get-Content C:\\repo\\a.txt | Set-Content C:\\repo\\b.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-ChildItem C:\\Windows\\System32 | Where-Object Name -eq x | Select-Object Name', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-Process | Export-Csv C:\\repo\\a.csv', win, { platform: 'win32' }))
+      .toBe('prompt');
+
+    // `ForEach-Object` 能返回任意对象,来源证不出来 → 表外阶段一律 fail closed(哪怕上游在区内)。
+    expect(classifyShellCommand('Get-ChildItem C:\\repo\\build | ForEach-Object { $_ } | Remove-Item', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

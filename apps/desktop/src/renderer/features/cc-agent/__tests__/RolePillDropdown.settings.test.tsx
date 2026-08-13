@@ -74,11 +74,36 @@ describe('RolePillDropdown collaboration settings entry', () => {
         hardLimit={8}
         onSwitchFocus={vi.fn()}
         onOpenCreate={onOpenCreate}
+        onOpenSettings={vi.fn()}
         onArchiveWorker={vi.fn()}
       />,
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'orca.rolePill.createWorker' }));
     expect(onOpenCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes the + button to collaboration settings when at the hard limit', () => {
+    const onOpenCreate = vi.fn();
+    const onOpenSettings = vi.fn();
+    render(
+      <WorkerListToolbar
+        worker={null}
+        workers={[]}
+        selectedWorkerId={null}
+        activeWorkerCount={8}
+        softLimit={5}
+        hardLimit={8}
+        onSwitchFocus={vi.fn()}
+        onOpenCreate={onOpenCreate}
+        onOpenSettings={onOpenSettings}
+        onArchiveWorker={vi.fn()}
+      />,
+    );
+
+    // 硬上限下 + 按钮不再 disabled no-op，而是以「设置 · 协同」为可访问名、点击跳转设置。
+    fireEvent.click(screen.getByRole('button', { name: 'orca.rolePill.settingsCollaboration' }));
+    expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    expect(onOpenCreate).not.toHaveBeenCalled();
   });
 });

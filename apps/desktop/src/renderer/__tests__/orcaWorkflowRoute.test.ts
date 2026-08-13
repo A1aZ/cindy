@@ -410,8 +410,11 @@ describe('OrcaWorkflowRoute source invariants', () => {
   });
 
   it('does not navigate the detached sidebar window to settings from the worker toolbar', () => {
-    // 设置链接已从 WorkerListToolbar 中移除，OrcaWorkerPanel 不再需要 isSidebarWindow 来限制设置入口
-    expect(workerPanelSource).not.toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
+    // 硬上限时 + 按钮跳转到协同设置（codex P1 逃生口），但分离侧栏窗口不能整壳替换成设置路由，
+    // 因此 OrcaWorkerPanel 的 handleOpenSettings 用 isSidebarWindow() 守卫：侧栏窗口下不跳转。
+    expect(workerPanelSource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
+    expect(workerPanelSource).toContain('if (isSidebarWindow()) return;');
+    expect(workerPanelSource).toContain("navigate('/settings?section=collaboration')");
     expect(workerPanelSource).not.toContain('settingsEnabled');
     expect(workersTabBodySource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
     expect(workersTabBodySource).toContain('<OrcaWorkerPanel {...workerPanelProps} />');

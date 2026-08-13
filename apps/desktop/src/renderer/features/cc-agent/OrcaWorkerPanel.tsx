@@ -8,9 +8,11 @@
 
 import { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { isAgentIslandSupported } from '@/hooks/useAgentIslandSettings';
 import { toast } from '@/lib/toast';
+import { isSidebarWindow } from '@/lib/sidebarWindow';
 import { CCAgentSessionView } from './CCAgentSessionView';
 import { CreateWorkerPopover } from './CreateWorkerPopover';
 import { WorkerListToolbar } from './RolePillDropdown';
@@ -60,6 +62,7 @@ export function OrcaWorkerPanel({
   onSearchJumpConsumed,
 }: OrcaWorkerPanelProps) {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const {
     workers,
     focusedWorker,
@@ -99,6 +102,14 @@ export function OrcaWorkerPanel({
     if (result.hardLimit !== null && activeCount >= result.hardLimit) return;
     setCreateOpen(true);
   }, [refreshCreationState, setCreateOpen, t]);
+
+  // 硬上限时 + 按钮不再只是 disabled no-op，而是跳转到协同设置去调高上限（codex P1 逃生口）。
+  // 但分离侧栏窗口固定在 /sidebar-window 壳路由，本地 navigate 会把辅助窗口整壳替换成主设置
+  // 路由，故侧栏窗口下不接线跳转（与 CreateWorkerPopover 的 onNavigateToProviders 同口径）。
+  const handleOpenSettings = useCallback(() => {
+    if (isSidebarWindow()) return;
+    navigate('/settings?section=collaboration');
+  }, [navigate]);
 
   useEffect(() => {
     if (!viewVisible) return;
@@ -162,6 +173,7 @@ export function OrcaWorkerPanel({
           hardLimit={hardLimit}
           onSwitchFocus={handleSwitchFocus}
           onOpenCreate={() => void handleOpenCreate()}
+          onOpenSettings={handleOpenSettings}
           onArchiveWorker={handleArchiveWorker}
           clearAttentionWhenVisible={viewVisible}
         />

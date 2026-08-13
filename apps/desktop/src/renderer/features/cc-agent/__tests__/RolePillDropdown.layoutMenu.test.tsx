@@ -50,6 +50,7 @@ function renderToolbar(overrides: Partial<Parameters<typeof WorkerListToolbar>[0
       hardLimit={8}
       onSwitchFocus={vi.fn()}
       onOpenCreate={vi.fn()}
+      onOpenSettings={vi.fn()}
       onArchiveWorker={vi.fn()}
       {...overrides}
     />,

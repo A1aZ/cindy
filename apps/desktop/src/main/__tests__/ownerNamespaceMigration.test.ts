@@ -1880,6 +1880,36 @@ describe('legacy Ghost plugin recovery', () => {
     ).resolves.toMatchObject({ moved: 1, recoveredIds: ['later-plugin'] });
   });
 
+  it('does not freeze fresh legacy recovery behind a marker containing only reserved ids', async () => {
+    const root = await tempRoot();
+    const ownerId = 'cloud-a';
+    const ownerKey = dataOwnerStorageKey(ownerId);
+    const markerPath = path.join(
+      root,
+      'owners',
+      ownerKey,
+      __testing.LEGACY_GHOST_RECOVERY_MARKER,
+    );
+    await fs.mkdir(path.dirname(markerPath), { recursive: true });
+    await fs.writeFile(markerPath, JSON.stringify({
+      version: 2,
+      ownerKey,
+      pendingIds: ['cindy-reserved'],
+      failedIds: ['cindy-reserved'],
+      approvalProjectionSha256ById: { 'cindy-reserved': 'a'.repeat(64) },
+    }));
+    await writeGhostDir(root, 'brain', 'later-plugin');
+
+    await expect(
+      getLegacyGhostRecoveryStatus(
+        { mode: 'cloud', dataOwnerId: ownerId, user: { id: ownerId } },
+        root,
+        false,
+        { rejectReservedIds: true },
+      ),
+    ).toEqual({ state: 'partial', legacyPluginCount: 1, canRetry: true });
+  });
+
   it('moves builtin provisioning state with plugins before reconciliation', async () => {
     const root = await tempRoot();
     const ownerId = 'cloud-a';

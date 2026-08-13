@@ -1235,6 +1235,9 @@ export function getLegacyGhostRecoveryStatus(
   const visiblePendingIds = options.rejectReservedIds
     ? (recoveryMarker?.pendingIds ?? []).filter((id) => !isOfficialGhostId(id))
     : (recoveryMarker?.pendingIds ?? []);
+  // A marker containing only reserved ids has no applicable recovery
+  // whitelist in packaged builds; treat it as empty for fresh legacy sources.
+  const hasVisibleFrozenWhitelist = recoveryMarker !== null && visiblePendingIds.length > 0;
   const targetInvalidIds = new Set(
     targetDiscovery.invalidIds.filter((id) => visiblePendingIds.includes(id)),
   );
@@ -1295,7 +1298,9 @@ export function getLegacyGhostRecoveryStatus(
     (!options.rejectReservedIds || !isOfficialGhostId(id)),
   );
   const unexpectedFrozenIds = recoveryMarker
-    ? legacyGhosts.map((ghost) => ghost.id).filter((id) => !recoveryMarker.pendingIds.includes(id))
+    ? (hasVisibleFrozenWhitelist
+      ? legacyGhosts.map((ghost) => ghost.id).filter((id) => !visiblePendingIds.includes(id))
+      : [])
     : [];
   const legacyPluginCount = new Set([
     ...legacyGhosts.map((ghost) => ghost.id),
@@ -1344,7 +1349,7 @@ export function getLegacyGhostRecoveryStatus(
   }
 
   const eligibleLegacyGhosts = (sharedRecoveryBlocked ? scopedLegacyGhosts : legacyGhosts)
-    .filter((ghost) => !recoveryMarker || recoveryMarker.pendingIds.includes(ghost.id));
+    .filter((ghost) => !hasVisibleFrozenWhitelist || visiblePendingIds.includes(ghost.id));
   if (!hasSafeRecoveryTargetChainSync(root, targetRoot)) {
     return { state: 'partial', legacyPluginCount, canRetry: false };
   }

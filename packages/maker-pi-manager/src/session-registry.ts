@@ -562,7 +562,9 @@ export class PiSessionRegistry {
     // kill 该会话(干净重来, 比卡死强)。
     let detachedBuffer = '';
     const isControlFrame = (text: string): boolean =>
-      /"type"\s*:\s*"extension_ui_(request|response|close)"/.test(text);
+      // 轮 43 P2(codex-connector):只匹配顶层 type 字段(JSON 开头), 避免
+      // 嵌套对象(如 tool/MCP 参数)内的同名 type 字段被误判为控制帧。
+      /^\s*\{\s*"type"\s*:\s*"extension_ui_(request|response|close)"/.test(text);
     child.stdout.on('data', (chunk: Buffer) => {
       state.lastActivity = Date.now();
       state.lastActivityMono = process.hrtime.bigint();

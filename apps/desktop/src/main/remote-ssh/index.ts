@@ -17,6 +17,7 @@
  */
 
 import { app, ipcMain, BrowserWindow } from 'electron';
+import { assertTrustedAppRendererEvent } from '../security/trustedAppRenderer.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -1536,12 +1537,10 @@ export function registerRemoteSshIpc(): void {
   //   dismiss-pending— banner X 关掉, 本 desktop session 不再提示该 host
   //                    (下次 desktop 重启 + 探到版本不匹配会再提)。
   ipcMain.handle(REMOTE_SSH_INVOKE.CC_MGR_FORCE_UPGRADE, async (event, args: unknown) => {
-    // 轮 43 P1(codex-connector):sender 必须是顶层 BrowserWindow —— 拒绝 webview
-    // 等非 trusted renderer 触发 kill daemon + 重装（中断远端凭证持有会话）。
-    const senderWindow = BrowserWindow.fromWebContents(event.sender);
-    if (!senderWindow) {
-      throwIpcError('PERMISSION_DENIED', 'upgrade must be requested from a top-level renderer');
-    }
+    // 轮 43 P1(codex-connector):用 assertTrustedAppRendererEvent 统一校验
+    // sender 是顶层 Cindy renderer(非 child frame/webview/别的窗口), 比
+    // BrowserWindow.fromWebContents 更严格(还校验 frame + window 身份)。
+    assertTrustedAppRendererEvent(event);
     const obj = requireObject(args);
     const id = requireString(obj.hostId, 'hostId');
     // 轮 22:agent 参数区分 cc-mgr / pi-manager 升级(banner 复用同一通道)。

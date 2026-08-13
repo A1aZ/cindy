@@ -498,17 +498,55 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
       makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Stopped'));
       expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(true);
 
-      // 主 turn 自己的 Done 到达 —— 桥接必须存活(不能误清)
+      // 主 turn 自己的 Done 到达 —— 桥接必须存活(不能误清),跨主 turn 标记此刻退休
       makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
       const afterMainDone = makerChatStore.getSnapshot(sid);
       expect(afterMainDone.pendingTaskWake).toBe(true);
-      expect(afterMainDone.pendingTaskWakeDuringTurn).toBe(true);
+      expect(afterMainDone.pendingTaskWakeDuringTurn).toBe(false);
       expect(makerChatStore.getRunningSnapshot().get(sid)?.isRunning).toBe(true);
 
       // wake turn 真正启动(isRunning:true)→ 桥接清除
       makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
       expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(false);
       expect(makerChatStore.getSnapshot(sid).pendingTaskWakeDuringTurn).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
+  it('wake 任务在主 turn 内终态、随后 wake turn 未启动即失败 → 主轮 Done 退休标记后桥接仍能清除', async () => {
+    // Codex P1:主轮 Done 越过时标记(pendingTaskWakeDuringTurn)已退休,若随后 wake turn
+    // 失败(从未 isRunning:true、无 isTurnStart),终态 Done 应能正常清除 pendingTaskWake,
+    // 否则标记恒为 true 会挡住清除条件、会话永久卡在 running/Stop 态。
+    const sid = `wake-midturn-fail-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // turn start + subagent 启动
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+
+      // subagent 在主 turn 仍 running 时 completed → 桥接置位 + 跨主 turn 标记
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeDuringTurn).toBe(true);
+      // 建立 running 快照基线,好让后续 running→stopped 边沿检测能投递 transition 条目
+      expect(makerChatStore.getRunningSnapshot().get(sid)?.isRunning).toBe(true);
+
+      // 中间 status 提前把 isRunning 翻 false,再到达主轮自己的 Done → 标记退休、桥接存活
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Stopped'));
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterMainDone = makerChatStore.getSnapshot(sid);
+      expect(afterMainDone.pendingTaskWake).toBe(true);
+      expect(afterMainDone.pendingTaskWakeDuringTurn).toBe(false);
+
+      // wake turn 失败:SDK 直接推 Done,从未推 isRunning:true → 桥接必须被清除,不永久转圈
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterWakeFail = makerChatStore.getSnapshot(sid);
+      expect(afterWakeFail.pendingTaskWake).toBe(false);
+      expect(afterWakeFail.pendingTaskWakeDuringTurn).toBe(false);
+
+      const transition = makerChatStore.getRunningSnapshot().get(sid);
+      expect(transition?.isRunning).toBe(false);
+      await flushStopTransition();
+      expect(makerChatStore.getRunningSnapshot().has(sid)).toBe(false);
     } finally {
       makerChatStore.purgeSession(sid);
     }

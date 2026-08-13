@@ -2525,7 +2525,9 @@ export interface SessionChatState {
    * running 快照。但「主 turn 的 Done」与「wake turn 失败的 Done」从 renderer 视角
    * 都是 status='Done' + isRunning=false,只能靠置位时主 turn 是否还在跑来区分:
    * - 主 turn 还在跑时置位 → 紧接着的 Done 是主 turn 自己的 Done,桥接必须跨过它
-   *   继续存活,直到 wake turn 真正启动(isRunning:true)才清除;
+   *   继续存活,直到 wake turn 真正启动(isRunning:true)才清除;标记自身则在主轮
+   *   Done 越过时立即退休(只清标记、不清桥接),好让后续 wake turn 失败的 Done
+   *   能正常清除桥接;
    * - 主 turn 已结束(!isRunning)才置位 → 下一个 Done 只能是 wake turn 失败的 Done
    *   (wake turn 从未启动),此时应清除桥接,否则 running 快照永久转圈。
    *
@@ -5763,8 +5765,13 @@ function handleStatusUpdate(
     pendingTaskWake: isTurnStart ? false :
       (isTurnComplete && state.pendingTaskWake && !state.agentStatus.isRunning && !state.pendingTaskWakeDuringTurn) ? false :
       state.pendingTaskWake,
+    // 跨主 turn 标记:主 turn 自己的 Done 越过(标记仍为 true 时到达的首个 Done)后,
+    // 标记使命已尽、立即退休。否则 wake turn 失败(从未 isRunning:true、无 isTurnStart)
+    // 时,终态 Done 会因 !pendingTaskWakeDuringTurn 恒为 false 而永远无法清除
+    // pendingTaskWake,会话永久卡在 running/Stop 态。退休只清标记、不清桥接:
+    // 桥接(pendingTaskWake)仍存活,直到 wake turn 真正启动或失败。
     pendingTaskWakeDuringTurn: isTurnStart ? false :
-      (isTurnComplete && state.pendingTaskWake && !state.agentStatus.isRunning && !state.pendingTaskWakeDuringTurn) ? false :
+      (isTurnComplete && state.pendingTaskWakeDuringTurn) ? false :
       state.pendingTaskWakeDuringTurn,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,
     agentStatus: {

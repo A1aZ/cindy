@@ -45,6 +45,7 @@ import {
   resetUpdateChannelSettings,
   writeEnableBeta,
 } from './updateChannelStore';
+import { assertTrustedAppRendererEvent } from './security/trustedAppRenderer';
 import {
   AUTO_UPDATE_IDLE_THRESHOLD_SECONDS,
   getAutoRelaunchBlockReason,
@@ -1190,12 +1191,17 @@ export function initUpdateService(): void {
 
   // beta 测试渠道(设备级)开关。开关本身即时落盘,但 manifest 通道只在
   // 下一次 fetchManifest(后台轮询)或重启后才会切换;设置页打开后引导用户重启。
-  ipcMain.handle('update-channel-settings-get', () => {
+  // 这些 handler 写本地设置 / 触发重启,按 electron-security-and-process-boundaries.md
+  // §5 必须做 trusted-renderer 来源断言——utility/Ghost 等带 preload 的窗口不应能改
+  // 更新设置或重启应用(旧 update-auto-settings 没断言是历史债,不构成豁免)。
+  ipcMain.handle('update-channel-settings-get', (event) => {
+    assertTrustedAppRendererEvent(event);
     const state = readUpdateChannelSettingsState();
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
   });
 
-  ipcMain.handle('update-channel-settings-set', (_event, payload: unknown) => {
+  ipcMain.handle('update-channel-settings-set', (event, payload: unknown) => {
+    assertTrustedAppRendererEvent(event);
     if (!payload || typeof payload !== 'object') {
       throwIpcError('INVALID_PARAMS', 'update channel settings payload required');
     }
@@ -1208,14 +1214,16 @@ export function initUpdateService(): void {
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
   });
 
-  ipcMain.handle('update-channel-settings-reset', () => {
+  ipcMain.handle('update-channel-settings-reset', (event) => {
+    assertTrustedAppRendererEvent(event);
     resetUpdateChannelSettings();
     const state = readUpdateChannelSettingsState();
     return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
   });
 
   // 用户主动重启:让 beta 通道切换在下次冷启动的 manifest 拉取前生效。
-  ipcMain.handle('update-channel-relaunch', () => {
+  ipcMain.handle('update-channel-relaunch', (event) => {
+    assertTrustedAppRendererEvent(event);
     log.info('relaunch requested for update channel change');
     app.relaunch();
     app.exit(0);

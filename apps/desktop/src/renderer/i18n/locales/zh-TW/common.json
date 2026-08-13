@@ -1751,6 +1751,7 @@
       "restartDescription": "Beta 測試管道需要重新啟動客戶端後才能生效，是否立即重新啟動？",
       "restartNow": "立即重新啟動",
       "restartLater": "稍後",
+      "restartBusyDescription": "目前有任務進行中，重新啟動會中斷它們。確定要立即重新啟動嗎？",
       "toast": {
         "disabled": "Beta 測試管道已關閉，重新啟動後生效",
         "toggleFailed": "切換 Beta 測試管道失敗"

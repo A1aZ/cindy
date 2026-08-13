@@ -37,9 +37,26 @@ export function BetaChannelCell() {
             cancelText: t('settings.betaChannel.restartLater'),
             autoFocusConfirm: true,
           });
-          if (restart) {
-            await window.electronAPI.relaunchForChannelChange();
+          if (!restart) return;
+          // 与 UpdateBanner 同一口径:重启会杀掉 in-flight turn / 后台活动 / Ghost
+          // card-action,属于不可撤销动作。探针失败 = 无法确认 → 按「有任务在跑」保守
+          // 处理,多要一次确认,而不是静默打断用户任务。
+          let hasInFlight = true;
+          try {
+            hasInFlight = await window.electronAPI.anyActivityBlockingRelaunch();
+          } catch {
+            hasInFlight = true;
           }
+          if (hasInFlight) {
+            const confirmed = await confirm({
+              title: t('settings.betaChannel.restartTitle'),
+              description: t('settings.betaChannel.restartBusyDescription'),
+              confirmText: t('settings.betaChannel.restartNow'),
+              cancelText: t('settings.betaChannel.restartLater'),
+            });
+            if (!confirmed) return;
+          }
+          await window.electronAPI.relaunchForChannelChange();
         } else {
           toast.success(t('settings.betaChannel.toast.disabled'));
         }

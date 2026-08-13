@@ -1755,6 +1755,7 @@
       "restartDescription": "Beta チャンネルは再起動後に反映されます。今すぐ再起動しますか？",
       "restartNow": "今すぐ再起動",
       "restartLater": "後で",
+      "restartBusyDescription": "進行中のタスクがあります。再起動すると中断されます。今すぐ再起動しますか？",
       "toast": {
         "disabled": "Beta チャンネルをオフにしました。再起動後に反映されます",
         "toggleFailed": "Beta チャンネルの切り替えに失敗しました"

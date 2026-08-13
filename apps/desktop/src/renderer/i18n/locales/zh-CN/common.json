@@ -1751,6 +1751,7 @@
       "restartDescription": "Beta 测试渠道需要重启客户端后才能生效，是否立即重启？",
       "restartNow": "立即重启",
       "restartLater": "稍后",
+      "restartBusyDescription": "当前有任务正在进行中，重启会打断它们。确定要立即重启吗？",
       "toast": {
         "disabled": "Beta 测试渠道已关闭，重启后生效",
         "toggleFailed": "切换 Beta 测试渠道失败"

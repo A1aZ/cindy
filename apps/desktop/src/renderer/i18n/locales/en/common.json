@@ -1756,6 +1756,7 @@
       "restartDescription": "The beta channel requires a restart to take effect. Restart now?",
       "restartNow": "Restart now",
       "restartLater": "Later",
+      "restartBusyDescription": "Tasks are currently in progress and restarting will interrupt them. Restart now anyway?",
       "toast": {
         "disabled": "Beta channel disabled; takes effect after restart",
         "toggleFailed": "Failed to toggle beta channel"

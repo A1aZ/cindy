@@ -9067,6 +9067,7 @@
       "archiveWorkerAria": "Worker {{name}} をアーカイブ",
       "createWorker": "新しい Worker を作成",
       "hardLimitHint": "ハード上限 {{count}} に達しました。既存 Worker をアーカイブすると追加できます。",
+      "hardLimitSettingsHint": "ハード上限 {{count}} に達しました。クリックしてコラボレーション設定を調整します。",
       "softLimitHint": "ソフト上限 {{count}} を超えています。Worker が多いほどメモリ使用量が増えます。",
       "settingsCollaboration": "設定 · コラボレーション",
       "layoutMenuLabel": "Worker リストの表示方式",

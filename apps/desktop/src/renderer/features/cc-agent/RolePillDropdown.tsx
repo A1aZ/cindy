@@ -313,6 +313,7 @@ export interface RolePillDropdownProps {
 
 export interface WorkerListToolbarProps extends RolePillDropdownProps {
   trailingActions?: ReactNode;
+  onOpenSettings: () => void;
 }
 
 // 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
@@ -652,18 +653,20 @@ function CreateWorkerTabButton({
   softLimit,
   hardLimit,
   onOpenCreate,
+  onOpenSettings,
 }: {
   activeCount: number;
   softLimit: number;
   hardLimit: number;
   onOpenCreate: () => void;
+  onOpenSettings: () => void;
 }) {
   const { t } = useTranslation();
   const shortcutKey = useAppShortcutDisplay('new-maker');
   const hardDisabled = activeCount >= hardLimit;
   const softWarn = !hardDisabled && activeCount >= softLimit;
   const tooltip = hardDisabled
-    ? t('orca.rolePill.hardLimitHint', { count: hardLimit })
+    ? t('orca.rolePill.hardLimitSettingsHint', { count: hardLimit })
     : softWarn
       ? t('orca.rolePill.softLimitHint', { count: softLimit })
       : shortcutKey
@@ -674,18 +677,22 @@ function CreateWorkerTabButton({
     <Tip text={tooltip} side="bottom" delay={250}>
       <button
         type="button"
-        aria-label={t('orca.rolePill.createWorker')}
-        aria-disabled={hardDisabled}
+        aria-label={
+          hardDisabled
+            ? t('orca.rolePill.settingsCollaboration')
+            : t('orca.rolePill.createWorker')
+        }
         className={cn(
           'inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-[var(--border-default)]',
           'bg-[var(--surface-elevated)] text-[var(--text-secondary)] transition-colors',
           'hover:bg-[var(--surface-chip)] hover:text-[var(--text-primary)]',
-          softWarn && 'text-[var(--status-bar-accent)]',
-          hardDisabled &&
-            'cursor-not-allowed opacity-40 hover:bg-[var(--surface-elevated)] hover:text-[var(--text-secondary)]',
+          (softWarn || hardDisabled) && 'text-[var(--status-bar-accent)]',
         )}
         onClick={() => {
-          if (hardDisabled) return;
+          if (hardDisabled) {
+            onOpenSettings();
+            return;
+          }
           onOpenCreate();
         }}
       >
@@ -867,6 +874,7 @@ export function WorkerListToolbar({
   hardLimit,
   onSwitchFocus,
   onOpenCreate,
+  onOpenSettings,
   onArchiveWorker,
   trailingActions,
   clearAttentionWhenVisible = true,
@@ -892,6 +900,7 @@ export function WorkerListToolbar({
           softLimit={softLimit}
           hardLimit={hardLimit}
           onOpenCreate={onOpenCreate}
+          onOpenSettings={onOpenSettings}
         />
         <WorkerLayoutMenu
           layout={layout}
@@ -917,6 +926,7 @@ export function WorkerListToolbar({
             softLimit={softLimit}
             hardLimit={hardLimit}
             onOpenCreate={onOpenCreate}
+            onOpenSettings={onOpenSettings}
           />
           <WorkerTabsList
             workers={workers}
@@ -933,6 +943,7 @@ export function WorkerListToolbar({
             softLimit={softLimit}
             hardLimit={hardLimit}
             onOpenCreate={onOpenCreate}
+            onOpenSettings={onOpenSettings}
           />
           <div className="min-w-0 flex-1">
             <RolePillDropdown

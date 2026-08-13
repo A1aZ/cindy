@@ -2427,7 +2427,8 @@
       "toast": {
         "enabled": "對話記錄語義索引已啟用",
         "disabled": "對話記錄語義索引已停止",
-        "toggleFailed": "切換對話嵌入失敗"
+        "unavailable": "目前帳號或地區暫不支援對話記錄語義索引",
+        "toggleFailed": "切換對話記錄語義索引失敗"
       }
     },
     "messageNavRail": {
@@ -3313,6 +3314,7 @@
         "manageAria": "管理 {{name}}",
         "agentInvoked": "Agent 自動呼叫",
         "upToDate": "已是最新",
+        "oauthAuthorizationExpired": "授權已失效，需重新連線",
         "installAria": "安裝 {{name}}"
       },
       "market": {
@@ -3738,6 +3740,7 @@
       "updateConfirm": {
         "title": "更新插件「{{name}}」？",
         "body": "版本 {{from}} → {{to}}。將替換現有版本；生效狀態與面板位置保持不變。",
+        "oauthClientChanged": "本次更新更換了 OAuth 用戶端。使用插件內建授權的已連線帳號將在更新後失效，需要重新連線。",
         "confirm": "更新",
         "cancel": "取消"
       },
@@ -4461,12 +4464,12 @@
   "ghostPanel": {
     "disableConfirm": {
       "title": "停用「{{name}}」？",
-      "body": "關閉這個面板會停用整個插件，它的面板和能力都會暫停。之後可以隨時在側邊欄「插件」裡重新開啟。",
+      "body": "關閉這個面板會停用插件並暫停其能力。你可以隨時在側邊欄「插件」中重新啟用。",
       "confirm": "停用"
     }
   },
   "ghostPanelWindow": {
-    "mergeBack": "合併回主視窗",
+    "mergeBack": "返回主視窗",
     "unavailable": "該插件面板當前不可用"
   },
   "ghostPanelBubble": {
@@ -4476,6 +4479,11 @@
   },
   "rightSidebar": {
     "ariaLabel": "右側邊欄",
+    "panelError": {
+      "title": "面板載入失敗",
+      "description": "此面板目前無法顯示，其他面板仍可繼續使用。",
+      "reload": "重新載入面板"
+    },
     "window": {
       "title": "側邊欄",
       "mergeBack": "合併回主視窗",
@@ -4506,6 +4514,7 @@
         "ghostPanel": "插件面板"
       },
       "controls": {
+        "showAria": "顯示側欄",
         "maximizeAria": "最大化側欄",
         "restoreAria": "退出最大化",
         "closeAria": "關閉側欄",
@@ -9378,7 +9387,8 @@
     },
     "currentSubscription": {
       "title": "當前訂閱",
-      "purchaseBlocked": "當前已有未結束的訂閱，請先處理現有訂閱後再購買新套餐。"
+      "purchaseBlocked": "當前已有未結束的訂閱，請先處理現有訂閱後再購買新套餐。",
+      "purchaseBlockedUntilPeriodEnd": "當前套餐將於 {{date}} 結束，屆時可購買新套餐。"
     },
     "subscriptionStatus": {
       "INCOMPLETE": "等待完成支付",

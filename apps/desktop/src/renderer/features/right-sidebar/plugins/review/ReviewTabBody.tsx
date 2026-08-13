@@ -424,6 +424,15 @@ export function reviewSourceStatePatch(descriptor: ReviewSourceDescriptor) {
   };
 }
 
+export function descriptorForReviewSource(
+  source: ReviewSource,
+  branchBaseRef: string | null,
+): ReviewSourceDescriptor {
+  if (source === 'commit') return { kind: 'commit', commitOid: null };
+  if (source === 'branch') return { kind: 'branch', baseRef: branchBaseRef };
+  return { kind: source };
+}
+
 export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const { t } = useTranslation();
   const { confirm } = useConfirmDialog();
@@ -437,7 +446,8 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   const messageSnapshot =
     state.messageSnapshot ?? (descriptor.kind === 'turn-set' ? descriptor : null);
   const source: ReviewSource | 'turn' = descriptor.kind === 'turn-set' ? 'turn' : descriptor.kind;
-  const branchBaseRef = descriptor.kind === 'branch' ? descriptor.baseRef : null;
+  const branchBaseRef =
+    state.branchBaseRef ?? (descriptor.kind === 'branch' ? descriptor.baseRef : null);
   const selectedCommitOid = descriptor.kind === 'commit' ? descriptor.commitOid : null;
   const effectiveCommitOid = selectedCommitOid;
   const crossSession =
@@ -459,22 +469,16 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   );
   const setSource = useCallback(
     (nextSource: ReviewSource) => {
-      const nextDescriptor: ReviewSourceDescriptor =
-        nextSource === 'commit'
-          ? { kind: 'commit', commitOid: null }
-          : nextSource === 'branch'
-            ? { kind: 'branch', baseRef: null }
-            : { kind: nextSource };
-      setDescriptor(nextDescriptor);
+      setDescriptor(descriptorForReviewSource(nextSource, branchBaseRef));
     },
-    [setDescriptor],
+    [branchBaseRef, setDescriptor],
   );
   const selectMessageSnapshot = useCallback(() => {
     if (messageSnapshot) setDescriptor(messageSnapshot);
   }, [messageSnapshot, setDescriptor]);
   const sourceState = useReviewSource(descriptor, sessionId, {
     hideWhitespace,
-    deviceLinkDeviceId,
+    deviceLinkDeviceId: ctx.deviceLinkDeviceId,
     remoteHostId: ctx.remoteHostId,
   });
   const data = sourceState.reviewData;
@@ -1107,9 +1111,12 @@ export function ReviewTabBody({ state, ctx }: ReviewTabBodyProps) {
   );
   const setBranchBaseRef = useCallback(
     (nextBaseRef: string) => {
-      setDescriptor({ kind: 'branch', baseRef: nextBaseRef });
+      ctx.patchState({
+        ...reviewSourceStatePatch({ kind: 'branch', baseRef: nextBaseRef }),
+        branchBaseRef: nextBaseRef,
+      });
     },
-    [setDescriptor],
+    [ctx],
   );
   const selectCommitSource = useCallback(
     (oid: string) => {

@@ -119,4 +119,18 @@ describe('useReviewSource', () => {
     expect(result.current.error).toBe(REVIEW_TURN_LOCAL_ONLY_ERROR);
     expect(mocks.getTurnChangeSets).not.toHaveBeenCalled();
   });
+
+  it('fails closed while device-link ownership is unresolved', async () => {
+    const { result } = renderHook(() =>
+      useReviewSource(
+        { kind: 'turn-set', targetSessionId: null, changeSetIds: ['set-1'] },
+        'host-session',
+        { hideWhitespace: false, deviceLinkDeviceId: undefined, remoteHostId: null },
+      ),
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBe(REVIEW_TURN_LOCAL_ONLY_ERROR);
+    expect(mocks.getTurnChangeSets).not.toHaveBeenCalled();
+  });
 });

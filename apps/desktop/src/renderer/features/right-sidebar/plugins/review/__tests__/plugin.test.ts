@@ -61,6 +61,7 @@ describe('review plugin', () => {
       wordDiff: boolean;
       hideWhitespace: boolean;
       richMarkdownPreview: boolean;
+      branchBaseRef: string | null;
     };
     expect(a.descriptor).toEqual({ kind: 'unstaged' });
     expect(a.messageSnapshot).toBeNull();
@@ -72,6 +73,7 @@ describe('review plugin', () => {
     expect(a.wordDiff).toBe(false);
     expect(a.hideWhitespace).toBe(false);
     expect(a.richMarkdownPreview).toBe(true);
+    expect(a.branchBaseRef).toBeNull();
   });
 
   it('hydrateState recovers the persisted all-diff expansion preference', () => {
@@ -85,6 +87,7 @@ describe('review plugin', () => {
       hideWhitespace: true,
       richMarkdownPreview: false,
       descriptor: { kind: 'branch', baseRef: 'main' },
+      branchBaseRef: 'origin/release',
       jumpTarget: { diffId: 'branch:main:a.ts', path: 'a.ts', nonce: 3 },
     }) as {
       diffsExpanded: boolean;
@@ -95,6 +98,7 @@ describe('review plugin', () => {
       hideWhitespace: boolean;
       richMarkdownPreview: boolean;
       descriptor: { kind: string; baseRef?: string | null };
+      branchBaseRef: string | null;
       jumpTarget: { diffId: string | null; path: string | null; nonce: number } | null;
     };
     expect(s.diffsExpanded).toBe(false);
@@ -105,6 +109,7 @@ describe('review plugin', () => {
     expect(s.hideWhitespace).toBe(true);
     expect(s.richMarkdownPreview).toBe(false);
     expect(s.descriptor).toEqual({ kind: 'branch', baseRef: 'main' });
+    expect(s.branchBaseRef).toBe('origin/release');
     expect(s.jumpTarget).toEqual({ diffId: 'branch:main:a.ts', path: 'a.ts', nonce: 3 });
   });
 
@@ -135,6 +140,25 @@ describe('review plugin', () => {
       (p.hydrateState!({ descriptor: { kind: 'branch', baseRef: 42 } }) as { descriptor: unknown })
         .descriptor,
     ).toEqual({ kind: 'unstaged' });
+  });
+
+  it('derives the remembered branch base from the descriptor and rejects unsafe state', () => {
+    const p = registry.getTabKind('review')!;
+    expect(
+      (
+        p.hydrateState!({ descriptor: { kind: 'branch', baseRef: 'origin/main' } }) as {
+          branchBaseRef: string | null;
+        }
+      ).branchBaseRef,
+    ).toBe('origin/main');
+    expect(
+      (
+        p.hydrateState!({
+          descriptor: { kind: 'unstaged' },
+          branchBaseRef: '-unsafe',
+        }) as { branchBaseRef: string | null }
+      ).branchBaseRef,
+    ).toBeNull();
   });
 
   it('hydrates an exact message snapshot independently from the active git source', () => {

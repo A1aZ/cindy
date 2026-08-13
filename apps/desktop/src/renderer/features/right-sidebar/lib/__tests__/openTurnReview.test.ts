@@ -32,7 +32,11 @@ describe('openTurnReview', () => {
     mocks.ensureHydrated.mockResolvedValue(undefined);
     mocks.patchTabState.mockImplementation(
       async (_sessionId: string, _tabId: string, update: (current: unknown) => unknown) =>
-        update({ diffsExpanded: false, turnTarget: { legacy: true } }),
+        update({
+          diffsExpanded: false,
+          branchBaseRef: 'origin/release',
+          turnTarget: { legacy: true },
+        }),
     );
   });
 
@@ -49,8 +53,15 @@ describe('openTurnReview', () => {
     const update = mocks.patchTabState.mock.calls[0]?.[2] as (
       current: unknown,
     ) => Record<string, unknown>;
-    expect(update({ diffsExpanded: false, turnTarget: { legacy: true } })).toEqual({
+    expect(
+      update({
+        diffsExpanded: false,
+        branchBaseRef: 'origin/release',
+        turnTarget: { legacy: true },
+      }),
+    ).toEqual({
       diffsExpanded: false,
+      branchBaseRef: 'origin/release',
       descriptor: {
         kind: 'turn-set',
         changeSetIds: ['set-1'],

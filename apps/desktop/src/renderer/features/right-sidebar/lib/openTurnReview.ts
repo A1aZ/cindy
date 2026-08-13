@@ -49,7 +49,6 @@ export async function openTurnReview(
       targetSessionId: sessionId,
     };
     delete preserved.turnTarget;
-    delete preserved.branchBaseRef;
     return {
       ...preserved,
       descriptor: messageSnapshot,

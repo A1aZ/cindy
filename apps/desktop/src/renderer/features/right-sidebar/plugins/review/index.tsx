@@ -23,6 +23,7 @@ import {
   type ReviewJumpTarget,
   type ReviewSourceDescriptor,
 } from '../../../../../shared/reviewSource';
+import { isSafeBranchBaseRef } from '../../../../../shared/reviewBranchRef';
 import { registerTabKind } from '../../registry';
 import type { TabKindPlugin } from '../../types';
 import type { DiffViewMode } from './DiffViewer/PlainUnifiedDiff';
@@ -53,6 +54,8 @@ export interface ReviewState {
   hideWhitespace: boolean;
   /** Markdown 文件是否默认用富文本预览替换 diff 主体。对齐 Codex,默认开启。 */
   richMarkdownPreview: boolean;
+  /** 最近选择的分支比较基线；切到其它来源或消息快照后仍保留。 */
+  branchBaseRef: string | null;
 }
 
 const DEFAULT_STATE: ReviewState = {
@@ -66,6 +69,7 @@ const DEFAULT_STATE: ReviewState = {
   wordDiff: false,
   hideWhitespace: false,
   richMarkdownPreview: true,
+  branchBaseRef: null,
 };
 
 function ReviewTabPillTitle({ t }: { state: ReviewState; t: TFunction }) {
@@ -113,6 +117,14 @@ const plugin: TabKindPlugin<ReviewState> = {
     const legacyTurnTarget = migrateLegacyTurnTarget(obj.turnTarget);
     const persistedDescriptor = parseReviewSourceDescriptor(obj.descriptor);
     const descriptor = persistedDescriptor ?? legacyTurnTarget?.descriptor ?? { kind: 'unstaged' };
+    const rawBranchBaseRef =
+      typeof obj.branchBaseRef === 'string' ? obj.branchBaseRef.trim() : null;
+    const branchBaseRef =
+      rawBranchBaseRef && isSafeBranchBaseRef(rawBranchBaseRef)
+        ? rawBranchBaseRef
+        : descriptor.kind === 'branch'
+          ? descriptor.baseRef
+          : null;
     const persistedMessageSnapshot = parseReviewSourceDescriptor(obj.messageSnapshot);
     const messageSnapshot =
       persistedMessageSnapshot?.kind === 'turn-set'
@@ -136,6 +148,7 @@ const plugin: TabKindPlugin<ReviewState> = {
       wordDiff,
       hideWhitespace,
       richMarkdownPreview,
+      branchBaseRef,
     };
   },
   onBeforeClose: (state, { sessionId }) => {

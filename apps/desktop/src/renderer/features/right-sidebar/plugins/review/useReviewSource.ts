@@ -97,27 +97,28 @@ export function useReviewSource(
   sessionId: string | null,
   opts: {
     hideWhitespace: boolean;
-    deviceLinkDeviceId: string | null;
+    deviceLinkDeviceId: string | null | undefined;
     remoteHostId: string | null;
   },
 ): ReviewSourceData {
   const { hideWhitespace, deviceLinkDeviceId, remoteHostId } = opts;
+  const gitDeviceLinkDeviceId = deviceLinkDeviceId ?? null;
   const gitSessionId = descriptor.kind === 'turn-set' ? null : sessionId;
   const branchBaseRef = descriptor.kind === 'branch' ? descriptor.baseRef : null;
   const commitOid = descriptor.kind === 'commit' ? descriptor.commitOid : null;
-  const gitState = useReviewGitState(gitSessionId, hideWhitespace, deviceLinkDeviceId);
+  const gitState = useReviewGitState(gitSessionId, hideWhitespace, gitDeviceLinkDeviceId);
   const commitState = useReviewCommitDiff(
     gitSessionId,
     commitOid,
     hideWhitespace,
-    deviceLinkDeviceId,
+    gitDeviceLinkDeviceId,
   );
   const branchState = useReviewBranchDiff(
     gitSessionId,
     branchBaseRef,
     hideWhitespace,
     descriptor.kind === 'branch',
-    deviceLinkDeviceId,
+    gitDeviceLinkDeviceId,
   );
   const currentBranchData = getCurrentBranchDiffData(branchState.data, branchBaseRef);
   const lastTurnPaths = useLastTurnFilter(gitSessionId, gitState.data?.scope.repoRoot ?? null);
@@ -184,7 +185,7 @@ export function useReviewSource(
   const lastTurnHydratedState = useReviewFileDiffs(
     gitSessionId,
     lastTurnHydrationRequests,
-    deviceLinkDeviceId,
+    gitDeviceLinkDeviceId,
   );
   const hydratedLastTurnDiffs = useMemo(
     () =>

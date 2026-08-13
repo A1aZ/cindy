@@ -21,6 +21,7 @@ import {
   buildLastTurnCappedData,
   canUsePatchBasedReviewActions,
   CappedSourceView,
+  descriptorForReviewSource,
   discardForReviewDiff,
   filterWhitespaceHiddenDiffs,
   getLastTurnCappedSummaryEntries,
@@ -200,6 +201,13 @@ describe('ReviewTabBody source state', () => {
       descriptor: { kind: 'branch', baseRef: 'main' },
       jumpTarget: null,
       turnTarget: null,
+    });
+  });
+
+  it('restores a non-default branch base when returning to the branch source', () => {
+    expect(descriptorForReviewSource('branch', 'origin/release')).toEqual({
+      kind: 'branch',
+      baseRef: 'origin/release',
     });
   });
 });

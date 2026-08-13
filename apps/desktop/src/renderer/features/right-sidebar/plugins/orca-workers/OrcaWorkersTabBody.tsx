@@ -114,8 +114,8 @@ export function OrcaWorkersTabBody({
 
   const workerPanelProps = {
     leadSessionId: ctx.sessionId,
-    deviceId: leadSession?.deviceLinkDeviceId,
-    sshRemote: !!leadSession?.remoteHostId,
+    deviceId: ctx.deviceLinkDeviceId,
+    sshRemote: !!ctx.remoteHostId,
     viewVisible,
     chatRealtime,
     focusWorkerSessionId: state.focusWorkerSessionId,

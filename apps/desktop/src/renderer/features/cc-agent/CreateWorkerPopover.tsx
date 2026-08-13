@@ -70,8 +70,8 @@ export interface CreateWorkerPopoverProps {
   title?: string;
   submitLabel?: string;
   className?: string;
-  /** device-link controlled device; omitted for a local Lead session. */
-  deviceId?: string;
+  /** device-link controlled device; omitted (or null) for a local Lead session. */
+  deviceId?: string | null;
   /**
    * SSH 远程 Lead(session.remoteHostId 非空):模型清单按 SSH 口径过滤 ——
    * 订阅直连(chatgpt/ / xai/)与 openai-chat 桥接 Codex 供应商的桥只挂在本地
@@ -135,7 +135,7 @@ export function CreateWorkerPopover({
     return selectWorkerModels({
       agent,
       capabilities: activeCaps,
-      deviceId,
+      deviceId: deviceId ?? undefined,
       providers,
       providersLoading,
       providersError,
@@ -738,7 +738,7 @@ export function CreateWorkerPopover({
                 onModelChange={updateModel}
                 onEffortChange={updateEffort}
                 vendorKey={vendorKey}
-                deviceId={deviceId}
+                deviceId={deviceId ?? undefined}
                 // SSH 远程 Lead:与 ChatInput 同口径藏掉仅本地可桥接的模型/来源
                 // (订阅直连接本地 compat-proxy,openai-chat 桥接 Codex 接本地
                 // codex-proxy,远端都不经翻译)—— 否则提交才被 main 侧 guard 拒绝。
@@ -813,7 +813,7 @@ export function CreateWorkerPopover({
                 void updateWorkerPermissionMode(mode as OrcaWorkerPermissionMode)
               }
               vendorKey={vendorKey}
-              deviceId={deviceId}
+              deviceId={deviceId ?? undefined}
               triggerVariant="field"
               dense
               ariaContext={t('orca.createWorker.permissionLabel')}

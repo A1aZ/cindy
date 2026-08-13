@@ -231,7 +231,7 @@ export interface UseDeviceProvidersResult {
   unsupported: boolean;
 }
 
-export function useDeviceProviders(deviceId?: string): UseDeviceProvidersResult {
+export function useDeviceProviders(deviceId?: string | null): UseDeviceProvidersResult {
   const initialPayload = deviceId ? cache.get(deviceId) : undefined;
   const [ownerDeviceId, setOwnerDeviceId] = useState<string | null>(
     initialPayload ? (deviceId ?? null) : null,

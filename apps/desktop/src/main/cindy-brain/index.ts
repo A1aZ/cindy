@@ -1913,11 +1913,12 @@ const ghostPrimarySessionFocusTracker = createGhostPrimarySessionFocusTracker(
     ),
   (sessionId, claim) => notifyGhostSessionEvent('switched', { sessionId }, claim),
 );
-const ghostSessionFocusTracker = createGhostSessionFocusTracker((sessionId) =>
-  ghostPrimarySessionFocusTracker.note(sessionId),
-);
+// 原始焦点只供 preview 使用；不能用它的 raw-id 去重阻断 primary tracker 的重试。
+const ghostSessionFocusTracker = createGhostSessionFocusTracker(() => {});
 export function noteGhostSessionFocused(sessionId: string | null): void {
-  if (sessionId === null) ghostPrimarySessionFocusTracker.note(null);
+  // 两个 tracker 都必须收到每次上报：raw tracker 负责 preview，primary tracker
+  // 负责 Worker → Lead 归一、异步乱序和失败后的重试。
+  ghostPrimarySessionFocusTracker.note(sessionId);
   ghostSessionFocusTracker.note(sessionId);
 }
 

@@ -840,6 +840,25 @@ describe('resolveSessionRouteDecision — 自定义供应商(resolve 时注入 k
     });
   });
 
+  it('implicit 旧路由也拦截 pending 目标，但允许同模型旧 turn 收尾', () => {
+    clearSessionProvider('s-user');
+    setPendingCredentialSwitchReader(() => ({
+      model: 'new-model',
+      providerId: 'provider-b',
+      previousModel: 'old-model',
+    }));
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'new-model')).toEqual({
+      localHandler: expect.any(Function),
+    });
+
+    setPendingCredentialSwitchReader(() => ({
+      model: 'shared-model',
+      providerId: 'provider-b',
+      previousModel: 'shared-model',
+    }));
+    expect(resolveSessionRouteDecision('s-user', 'codex', KEY, 'shared-model')).toBeNull();
+  });
+
   it('同供应商 pending 与无 model 的控制面请求不受影响', () => {
     setCustomProviders([
       buildUserProvider({

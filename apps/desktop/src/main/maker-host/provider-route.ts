@@ -209,15 +209,16 @@ function updatingProviderRouteDecision(providerId: string): RoutingDecision {
   };
 }
 
-function pendingProviderSwitchRouteDecision(providerId: string): RoutingDecision {
+function pendingProviderSwitchRouteDecision(providerId: string | null): RoutingDecision {
   return {
     localHandler: async ({ res }) => {
+      const source = providerId ? `Provider '${providerId}'` : 'The default Provider route';
       const payload = JSON.stringify({
         type: 'error',
         error: {
           type: PENDING_PROVIDER_SWITCH_ERROR,
           code: PENDING_PROVIDER_SWITCH_ERROR,
-          message: `Provider switch from '${providerId}' is pending; retry after the current turn completes.`,
+          message: `${source} has a pending Provider switch; retry after the current turn completes.`,
         },
       });
       res.writeHead(503, {
@@ -242,8 +243,7 @@ export function resolvePendingSessionRouteDecision(
 ): RoutingDecision | null {
   const providerId = getSessionProvider(sessionId);
   const pendingSwitch = pendingCredentialSwitchReader(sessionId);
-  return providerId &&
-    wireModel &&
+  return wireModel &&
     pendingSwitch &&
     pendingSwitch.providerId !== providerId &&
     samePendingSwitchModel(pendingSwitch.model, wireModel) &&
@@ -670,7 +670,8 @@ export function resolveSessionRouteDecision(
   wireModel?: string,
 ): RoutingDecision | null | Promise<RoutingDecision | null> {
   const providerId = getSessionProvider(sessionId);
-  if (!providerId) return null;
+  const pendingDecision = resolvePendingSessionRouteDecision(sessionId, wireModel);
+  if (!providerId) return pendingDecision;
   if (isProviderRouteMutationInProgress(providerId)) {
     return updatingProviderRouteDecision(providerId);
   }
@@ -679,7 +680,6 @@ export function resolveSessionRouteDecision(
   const routing = provider ? providerRoutingForModel(provider, agent, wireModel) : null;
   if (!routing) return null;
   if (routing.disabled) return disabledProviderRouteDecision(providerId);
-  const pendingDecision = resolvePendingSessionRouteDecision(sessionId, wireModel);
   if (pendingDecision) return pendingDecision;
   if (!routingServesWireModel(routing, wireModel)) return null;
   // 自定义供应商：resolve 时按 provider_key_<id>_<agent> 读出该 runtime 的 API key 注入鉴权头（不在 catalog）。

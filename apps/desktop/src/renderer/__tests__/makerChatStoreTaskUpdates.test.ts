@@ -476,6 +476,44 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
     }
   });
 
+  it('wake 任务在主 turn 内终态 → 中间 status 提前翻 false + 主 turn Done 不误清桥接', async () => {
+    // Greptile P1:主轮结束前 SDK 可能先推一个 isRunning=false 且 status!=='Done'
+    // 的中间 status 事件,把 agentStatus.isRunning 提前翻 false。此时主轮自己的
+    // Done 会被旧条件误判成 wake 失败、提前清除 pendingTaskWake,导致 ChatInput
+    // 在 wake 最终回复到达前就用不完整上下文发起一次付费预测。修复:桥接在主 turn
+    // 仍 running 时置位(pendingTaskWakeDuringTurn),主轮 Done 不清除,直到 wake turn 启动。
+    const sid = `wake-midturn-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // turn start + subagent 启动
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+
+      // subagent 在主 turn 仍 running 时 completed → 桥接置位 + 跨主 turn 标记
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      const midTurn = makerChatStore.getSnapshot(sid);
+      expect(midTurn.pendingTaskWake).toBe(true);
+      expect(midTurn.pendingTaskWakeDuringTurn).toBe(true);
+
+      // 中间 status:isRunning=false 但 status!=='Done' → 提前把 isRunning 翻 false
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Stopped'));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(true);
+
+      // 主 turn 自己的 Done 到达 —— 桥接必须存活(不能误清)
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterMainDone = makerChatStore.getSnapshot(sid);
+      expect(afterMainDone.pendingTaskWake).toBe(true);
+      expect(afterMainDone.pendingTaskWakeDuringTurn).toBe(true);
+      expect(makerChatStore.getRunningSnapshot().get(sid)?.isRunning).toBe(true);
+
+      // wake turn 真正启动(isRunning:true)→ 桥接清除
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(false);
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeDuringTurn).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
   it('local_bash 后台任务不折算:主 turn 结束即 stopped(dev server 不永转)', async () => {
     const sid = `bash-${Math.random().toString(36).slice(2, 8)}`;
     try {

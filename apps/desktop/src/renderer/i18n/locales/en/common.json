@@ -979,7 +979,7 @@
         },
         "inputMonitoring": {
           "label": "Shortcut listener",
-          "tooltip": "Used to listen for Fn, standalone Command / Option / Control, and Fn-based voice input shortcuts. Regular key combinations and standalone F1-F24 keys usually do not need it. Granted means the currently running app can listen for shortcuts; dev builds may be authorized through Terminal."
+          "tooltip": "Used to listen for Fn, standalone Command / Option / Control, Fn-based shortcuts, and standalone F1-F24 push-to-talk release events. Regular key combinations do not need it. Granted means the currently running app can listen for shortcuts; dev builds may be authorized through Terminal."
         },
         "accessibility": {
           "label": "Automatic input",

@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { Readable } from 'node:stream';
 
 import {
+  isVoiceInputBareFunctionKeyShortcut,
   isVoiceInputMacNativeKeyboardShortcut,
   isVoiceInputMacNativeKeyboardShortcutPressed,
   isVoiceInputMacNativeKeyboardShortcutTargetDown,
@@ -12,6 +13,7 @@ import {
   type VoiceInputShortcut,
 } from '../../shared/voiceInputData.js';
 import { createLogger } from '../logger.js';
+import { ShortcutHoldPhaseController } from './ShortcutHoldPhaseController.js';
 
 const log = createLogger('voice-input:modifier-shortcut');
 
@@ -113,6 +115,9 @@ export class MacModifierShortcutListener {
   private holdThresholdReached = false;
   private keyboardShortcutPressed = false;
   private canceledUntilRelease = false;
+  private readonly functionKeyPhaseController = new ShortcutHoldPhaseController({
+    onTrigger: (phase) => this.options.onTrigger(phase),
+  });
 
   constructor(private readonly options: MacModifierShortcutListenerOptions) {}
 
@@ -216,6 +221,47 @@ export class MacModifierShortcutListener {
     this.restartAttempts = 0;
     this.endActiveTriggerIfNeeded();
     this.resetState();
+  }
+
+  /**
+   * System suspend / lock can consume the physical key-up event. End the
+   * delivered push-to-talk activation now and forget the native snapshot so a
+   * late release cannot leave the voice-input state stuck.
+   */
+  releaseActiveTrigger(): void {
+    const shouldRestart = this.isReady();
+    this.endActiveTriggerIfNeeded();
+    this.resetState();
+    if (!shouldRestart) return;
+
+    // The helper owns the pressed-key snapshot. A suspend/lock transition can
+    // consume key-up, so restart the process itself instead of leaving a stale
+    // F-key in that snapshot. This also preserves a capture-only helper when a
+    // shortcut recorder is open.
+    this.startGeneration += 1;
+    const child = this.child;
+    this.child = null;
+    this.ready = false;
+    this.clearRestartTimer();
+    this.restartAttempts = 0;
+    if (child && !child.killed) child.kill();
+    void this.startChildProcess({ preserveShortcutOnFailure: true })
+      .then((result) => {
+        if (!result.ok && !result.superseded) {
+          log.warn('modifier shortcut listener did not restart after system release', {
+            error: result.error,
+            shortcut: this.shortcut ? getShortcutLogLabel(this.shortcut) : null,
+          });
+          if (this.shortcut) this.scheduleRestart(null, null);
+        }
+      })
+      .catch((error: unknown) => {
+        log.warn('modifier shortcut listener restart after system release crashed', {
+          error: error instanceof Error ? error.message : String(error),
+          shortcut: this.shortcut ? getShortcutLogLabel(this.shortcut) : null,
+        });
+        if (this.shortcut) this.scheduleRestart(null, null);
+      });
   }
 
   stop(): void {
@@ -452,6 +498,12 @@ export class MacModifierShortcutListener {
   }
 
   private handleMacNativeKeyboardPressedKeys(keys: string[], shortcut: VoiceInputShortcut): void {
+    if (isVoiceInputBareFunctionKeyShortcut(shortcut)) {
+      this.functionKeyPhaseController.setPressed(
+        isVoiceInputMacNativeKeyboardShortcutPressed(keys, shortcut),
+      );
+      return;
+    }
     const pressed = isVoiceInputMacNativeKeyboardShortcutPressed(keys, shortcut);
     const targetDown = isVoiceInputMacNativeKeyboardShortcutTargetDown(keys, shortcut);
     if (!pressed) {
@@ -511,6 +563,7 @@ export class MacModifierShortcutListener {
     this.holdThresholdReached = false;
     this.keyboardShortcutPressed = false;
     this.canceledUntilRelease = false;
+    this.functionKeyPhaseController.reset();
   }
 
   private clearStartTimer(): void {
@@ -520,6 +573,7 @@ export class MacModifierShortcutListener {
   }
 
   private endActiveTriggerIfNeeded(): void {
+    this.functionKeyPhaseController.releaseIfPressed();
     if (!this.triggered) return;
     this.triggered = false;
     this.options.onTrigger('end');
@@ -667,7 +721,8 @@ async function runMacInputMonitoringPermissionCommand(command: string): Promise<
     return {
       ok: false,
       status: 'denied',
-      error: 'Input Monitoring permission is required for Fn and single-modifier voice input shortcuts.',
+      error:
+        'Input Monitoring permission is required for Fn, F1-F24, and single-modifier voice input shortcuts.',
     };
   } catch (error) {
     return {

@@ -358,20 +358,9 @@ export function planNavRailTickWidth(input: {
   inView: boolean;
   isAutomation?: boolean;
 }): string {
-  const automation = Boolean(input.isAutomation);
-  // 交互态优先于阅读态：hover/scrub 会把目标置于渐进缩放的中心，
-  // 不能让当前阅读项再次覆盖邻近刻度的宽度。
-  if (input.distance !== null) {
-    if (input.distance === 0) return 'w-[26px]';
-    if (input.distance === 1) return 'w-[26px]';
-    if (input.distance === 2) return 'w-[26px]';
-    if (input.distance === 3) return 'w-[26px]';
-    return 'w-[26px]';
-  }
-  /* ordinary state keeps every marker at the same baseline width */
-  if (input.distance === null) return 'w-[26px]';
-  // 普通态只保留细窄的地图基线；当前项由 isActive 单独强调，
-  // 不再把整个可视范围渲染成连续粗线。
+  // 所有状态共享同一条 26px 轨道；hover/scrub 的渐进伸缩由渲染层
+  // 的 scaleX 负责，避免普通态出现不一致的横条长度。
+  void input;
   return 'w-[26px]';
 }
 

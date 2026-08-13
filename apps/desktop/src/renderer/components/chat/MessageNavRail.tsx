@@ -561,10 +561,10 @@ export function MessageNavRail({
             interactionDistance === 0
               ? 'opacity-100'
               : interactionDistance !== null
-                ? 'opacity-65'
+                ? 'opacity-[0.65]'
                 : isActive
                   ? 'opacity-90'
-                  : 'opacity-65';
+                  : 'opacity-[0.65]';
           const markerProgress = planNavRailTickProgress(interactionDistance);
           return (
             <Tooltip.Root key={entry.id}>

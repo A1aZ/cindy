@@ -1589,6 +1589,22 @@ export function createTurnRunner(
     }
 
     try {
+      // 授权卡已转投 owner 私聊 — 立刻在原群/话题 lane 留指路提示
+      // (与 handleInteractionFor 同款; 私聊 lane 卡片就在原地, 不需要)。
+      if (
+        req.kind === 'permission' &&
+        userId.startsWith('g/') &&
+        adapter.ui.cards.permission.dmRoutedNotice
+      ) {
+        try {
+          await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
+            threadTs: scopeKey,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
+        }
+      }
       registerPendingExternal(
         req.requestId,
         req.kind as InteractionDecision['kind'],
@@ -1606,17 +1622,6 @@ export function createTurnRunner(
         },
         req.kind === 'permission' ? { toolName: req.toolName } : undefined,
       );
-      // 授权卡已转投 owner 私聊 — 原 lane 留指路提示(与 handleInteractionFor 同款)。
-      if (req.kind === 'permission' && adapter.ui.cards.permission.dmRoutedNotice) {
-        try {
-          await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
-            threadTs: scopeKey,
-          });
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
-        }
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`publishMigrated registerPendingExternal failed: ${msg}`);
@@ -2918,17 +2923,14 @@ export function createTurnRunner(
       }
 
       try {
-        const decision = await registerPending(
-          req.requestId,
-          req.kind as InteractionDecision['kind'],
-          messageId,
-          // Stash toolName for permission requests so cardActionHandler can
-          // build permissionUpdates when the user picks 'allow:always'.
-          req.kind === 'permission' ? { toolName: req.toolName } : undefined,
-        );
-        // 授权卡已转投 owner 私聊 — 在原群/话题 lane 留一句指路, 否则用户
-        // 不知道卡片去了哪、也不知道去哪点。
-        if (req.kind === 'permission' && adapter.ui.cards.permission.dmRoutedNotice) {
+        // 授权卡已转投 owner 私聊 — 立刻在原群/话题 lane 留一句指路(不能等
+        // registerPending: 它要等用户点完卡才返回, 那提示就变成"事后"的了)。
+        // 私聊 lane 的卡片就落在当前会话里, 不需要指路。
+        if (
+          req.kind === 'permission' &&
+          userId.startsWith('g/') &&
+          adapter.ui.cards.permission.dmRoutedNotice
+        ) {
           try {
             await im.sendText(userId, adapter.ui.cards.permission.dmRoutedNotice, {
               threadTs: scopeKey,
@@ -2938,6 +2940,14 @@ export function createTurnRunner(
             log.warn(`dm routed notice send failed (non-fatal): ${msg}`);
           }
         }
+        const decision = await registerPending(
+          req.requestId,
+          req.kind as InteractionDecision['kind'],
+          messageId,
+          // Stash toolName for permission requests so cardActionHandler can
+          // build permissionUpdates when the user picks 'allow:always'.
+          req.kind === 'permission' ? { toolName: req.toolName } : undefined,
+        );
         return decision;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

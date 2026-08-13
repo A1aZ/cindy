@@ -355,6 +355,7 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
       createdAt: '2026-07-20T00:00:00.000Z',
     });
     vi.mocked(aroundMessagesByClientIdFor).mockResolvedValueOnce([target]);
+    markSessionAutomaticHistoryLoadCompleted(SID);
     vi.mocked(listMessagesFor).mockImplementationOnce(async () => {
       const page = fullPageNewestFirst();
       // 补齐 await 期间发生 edit-last 截断。
@@ -367,6 +368,7 @@ describe('跳转补齐 — 窗口连续,不留历史空洞', () => {
     // 跳转整体作废：不返回目标，也不把 around 行 merge 回窗口。
     expect(result).toBeNull();
     expect(makerChatStore.getSnapshot(SID).messages.map((m) => m.clientId)).not.toContain('rewound');
+    expect(restoreSessionAutomaticHistoryLoadAttempts(SID, 5)).toBe(0);
   });
 
   it('J. 纯文本会话在预算内停手,不会无限翻到几千行', async () => {

@@ -66,7 +66,6 @@ import { stopAllMedia } from '@/lib/mediaPlaybackBus';
 import { cn } from '@/lib/utils';
 import {
   readSessionScroll,
-  restoreSessionAutomaticHistoryLoadAttempts,
   saveSessionScroll,
   type SessionScrollSnapshot,
 } from '@/lib/sessionScrollStore';
@@ -226,6 +225,7 @@ import {
 import { countUnreadAdded } from './unreadCount';
 import { useNavigationKeyListener } from './useNavigationKeyListener';
 import { suppressScrollbarActivation } from '@/lib/scrollbarAutoHide';
+import { useAutomaticHistoryLoadBudget } from './useAutomaticHistoryLoadBudget';
 import { collectAssistantTurnUsageDetails } from '@/lib/userTurnUsage';
 import type { TurnUsageDetails } from '../../../shared/turnUsageDetails';
 import { hasReviewableTurnChanges, type TurnChangeSetSummary } from '../../../shared/turnChangeSet';
@@ -250,6 +250,7 @@ interface MessageStreamProps {
    *  triggers extra re-renders mid-session. */
   workingDir: string;
   messages: ChatMessage[];
+  historyLoaded: boolean;
   taskUpdates?: ReadonlyMap<string, AgentTaskUpdate>;
   /** Kept for API compatibility. v2 — no longer threaded into render items
    *  (AgentActionsBlock + ThinkingCard manage their own per-block expand
@@ -2526,6 +2527,7 @@ export function MessageStream({
   remoteHostId,
   workingDir,
   messages,
+  historyLoaded,
   taskUpdates,
   isSessionStreaming = false,
   continuationTurnClientId = null,
@@ -3268,9 +3270,23 @@ export function MessageStream({
   // 当前触发条件下 (scrollH===clientH) scrollTop 必为 0, 视觉收敛主要靠 line 716
   // 的 pinToBottom effect, 这两个 ref 在这是防御层 (避免 IPC race window 里
   // handleScroll 误覆盖 ref 用错快照 → F-SYNC-2 算错 delta).
-  const autoLoadAttemptCountRef = useRef<number>(
-    restoreSessionAutomaticHistoryLoadAttempts(sessionId, MAX_AUTO_LOAD_ATTEMPTS),
+  const {
+    viewportAttemptsRef: autoLoadAttemptCountRef,
+    navRailRoundsRef: navRailBackfillRoundsRef,
+    runAutomaticLoad,
+  } = useAutomaticHistoryLoadBudget(
+    sessionId,
+    MAX_AUTO_LOAD_ATTEMPTS,
+    NAV_RAIL_BACKFILL_MAX_ROUNDS,
+    {
+      historyLoaded,
+      messageCount: messages.length,
+      firstMessageClientId: messages[0]?.clientId ?? null,
+    },
   );
+  // MessageStream 只按 sessionId remount。逻辑窗口在同一 mount 内被 reload / reconcile /
+  // truncate 时,hook 会同步归零两套本地预算；不能只用 messages identity,正常
+  // push/prepend 同样会换引用。
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -3300,7 +3316,7 @@ export function MessageStream({
         autoLoadAttemptCountRef.current += 1;
         prevScrollHeightRef.current = el.scrollHeight;
         prevScrollTopAtLoadRef.current = el.scrollTop;
-        void onLoadMore(true);
+        void runAutomaticLoad(onLoadMore);
         return;
       }
       case 'none':
@@ -3323,6 +3339,7 @@ export function MessageStream({
     hasMoreMessages,
     isLoadingMore,
     onLoadMore,
+    runAutomaticLoad,
     sessionId,
     windowAtTop,
     expandWindow,
@@ -4072,9 +4089,6 @@ export function MessageStream({
   // 取消旧会话待发的空闲回调。轮数预算只在 mount 时按会话记忆恢复一次;
   // 不能在 passive effect 再读,否则同一 mount 的 viewport-fill 先 mark 后会
   // 提前封死导航条自己的本轮预算。
-  const navRailBackfillRoundsRef = useRef(
-    restoreSessionAutomaticHistoryLoadAttempts(sessionId, NAV_RAIL_BACKFILL_MAX_ROUNDS),
-  );
   useEffect(() => {
     if (!navRailEnabled) return;
     if (!onLoadMore) return;
@@ -4094,7 +4108,7 @@ export function MessageStream({
       navRailBackfillRoundsRef.current += 1;
       prevScrollHeightRef.current = el.scrollHeight;
       prevScrollTopAtLoadRef.current = el.scrollTop;
-      void onLoadMore(true);
+      void runAutomaticLoad(onLoadMore);
     };
     // 空闲期执行,别跟首屏渲染 / 两段式扩窗抢主线程;测试等无 ric 环境退化。
     if (typeof window.requestIdleCallback === 'function') {
@@ -4110,6 +4124,7 @@ export function MessageStream({
     hasMoreMessages,
     isLoadingMore,
     onLoadMore,
+    runAutomaticLoad,
   ]);
 
   const railJumpSeqRef = useRef(0);

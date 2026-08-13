@@ -1077,6 +1077,7 @@ describe('makerChatStore active view tracking', () => {
     it('keeps legacy single-row removal compatible with an in-flight paging window', async () => {
       const sessionId = sid('older-backfill-single-delete-compat');
       await seedSession(sessionId);
+      markSessionAutomaticHistoryLoadCompleted(sessionId);
 
       let resolveOlderPage!: (rows: Message[]) => void;
       vi.mocked(messageService.list).mockReturnValueOnce(
@@ -1094,11 +1095,13 @@ describe('makerChatStore active view tracking', () => {
       expect(snapshot.messages).toHaveLength(10);
       expect(snapshot.messages.some((message) => message.clientId === 'client-current')).toBe(false);
       expect(snapshot.isLoadingMore).toBe(false);
+      expect(restoreSessionAutomaticHistoryLoadAttempts(sessionId, 5)).toBe(5);
     });
 
     it('discards an in-flight paging window after grouped deletion', async () => {
       const sessionId = sid('older-backfill-group-delete-race');
       await seedSession(sessionId);
+      markSessionAutomaticHistoryLoadCompleted(sessionId);
 
       let resolveOlderPage!: (rows: Message[]) => void;
       vi.mocked(messageService.list).mockReturnValueOnce(
@@ -1115,6 +1118,7 @@ describe('makerChatStore active view tracking', () => {
       const snapshot = makerChatStore.getSnapshot(sessionId);
       expect(snapshot.messages).toHaveLength(0);
       expect(snapshot.isLoadingMore).toBe(false);
+      expect(restoreSessionAutomaticHistoryLoadAttempts(sessionId, 5)).toBe(0);
     });
   });
 

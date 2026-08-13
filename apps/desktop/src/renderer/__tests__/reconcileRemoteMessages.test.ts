@@ -514,6 +514,14 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
       dbMessage(s, 'cached-future', 'controller clock ahead text', '2026-06-16T00:00:00.000Z'),
     ]);
     markSessionAutomaticHistoryLoadCompleted(s);
+    const completionAttemptsAtRebuildNotification: number[] = [];
+    const unsubscribe = makerChatStore.subscribe(s, () => {
+      if (makerChatStore.getSnapshot(s).messages[0]?.clientId === 'client-new-50') {
+        completionAttemptsAtRebuildNotification.push(
+          restoreSessionAutomaticHistoryLoadAttempts(s, 5),
+        );
+      }
+    });
 
     const remoteHistory = Array.from({ length: 550 }, (_, index) =>
       dbMessage(
@@ -527,6 +535,7 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
 
     makerChatStore.reconcileRemoteMessages(s);
     await flushMany(REMOTE_RECONCILE_FLUSH_TICKS);
+    unsubscribe();
 
     const snapshot = makerChatStore.getSnapshot(s);
     expect(snapshot.messages).toHaveLength(500);
@@ -537,6 +546,7 @@ describe('makerChatStore.reconcileRemoteMessages', () => {
     expect(snapshot.oldestMessageId).toBe('new-50');
     expect(snapshot.hasMoreMessages).toBe(true);
     expect(restoreSessionAutomaticHistoryLoadAttempts(s, 5)).toBe(0);
+    expect(completionAttemptsAtRebuildNotification).toContain(0);
   });
 
   it('远程会话:无重叠对账保留分页期间新到的 remote push', async () => {

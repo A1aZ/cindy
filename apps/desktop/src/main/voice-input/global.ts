@@ -126,8 +126,20 @@ function handleNativeGlobalShortcutPhase(phase: GlobalVoiceInputShortcutPhase): 
   }
 }
 
+function abandonNativeShortcutAfterRestartLimit(): void {
+  if (registeredAccelerator) {
+    globalShortcut.unregister(registeredAccelerator);
+    registeredAccelerator = null;
+  }
+  registeredShortcut = null;
+  registeredNativeShortcutLabel = null;
+  registeredNativeShortcutKey = null;
+  notifyPendingShortcutRecoveryFailed();
+}
+
 const macModifierShortcutListener = new MacModifierShortcutListener({
   onTrigger: handleNativeGlobalShortcutPhase,
+  onRestartLimitReached: abandonNativeShortcutAfterRestartLimit,
   onKeys: (keys) => {
     for (const webContentsId of Array.from(modifierShortcutRecordingWebContentsIds)) {
       const window = BrowserWindow.getAllWindows()
@@ -143,6 +155,7 @@ const macModifierShortcutListener = new MacModifierShortcutListener({
 
 const windowsFunctionKeyShortcutListener = new WindowsFunctionKeyShortcutListener({
   onTrigger: handleNativeGlobalShortcutPhase,
+  onRestartLimitReached: abandonNativeShortcutAfterRestartLimit,
 });
 
 export function releaseActiveGlobalVoiceInputShortcut(): void {

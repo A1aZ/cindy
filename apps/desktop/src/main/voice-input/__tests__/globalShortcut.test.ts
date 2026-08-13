@@ -122,9 +122,11 @@ const mocks = vi.hoisted(() => {
   const listenerOptions: {
     onKeys?: (keys: string[]) => void;
     onTrigger?: (phase: 'tap' | 'start' | 'end') => void;
+    onRestartLimitReached?: () => void;
   } = {};
   const windowsListenerOptions: {
     onTrigger?: (phase: 'tap' | 'start' | 'end') => void;
+    onRestartLimitReached?: () => void;
   } = {};
   const registerShortcut = vi.fn((accelerator: string) => {
     void accelerator;
@@ -241,6 +243,9 @@ vi.mock('../MacModifierShortcutListener.js', () => ({
       }) => {
         mocks.listenerOptions.onKeys = options?.onKeys;
         mocks.listenerOptions.onTrigger = options?.onTrigger;
+        mocks.listenerOptions.onRestartLimitReached = (
+          options as { onRestartLimitReached?: () => void }
+        )?.onRestartLimitReached;
         return {
           setShortcut: mocks.modifierSetShortcut,
           isRunning: mocks.modifierIsRunning,
@@ -263,6 +268,9 @@ vi.mock('../WindowsFunctionKeyShortcutListener.js', () => ({
     .fn()
     .mockImplementation((options: { onTrigger?: (phase: 'tap' | 'start' | 'end') => void }) => {
       mocks.windowsListenerOptions.onTrigger = options?.onTrigger;
+      mocks.windowsListenerOptions.onRestartLimitReached = (
+        options as { onRestartLimitReached?: () => void }
+      )?.onRestartLimitReached;
       return {
         setShortcut: mocks.windowsSetShortcut,
         isReady: mocks.windowsIsReady,
@@ -461,6 +469,26 @@ describe('voice input global shortcut registration', () => {
 
     expect(mocks.modifierReleaseActiveTrigger).toHaveBeenCalledTimes(1);
     expect(mocks.windowsReleaseActiveTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases a reserved Windows F-key when the helper restart budget is exhausted', async () => {
+    setPlatform('win32');
+    const { registerGlobalVoiceInputIpc } = await import('../global.js');
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
+    const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
+    const f16Shortcut: VoiceInputShortcut = {
+      trigger: 'keyboard',
+      code: 'F16',
+      key: 'F16',
+      modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+    };
+
+    mocks.setStoredShortcut(f16Shortcut);
+    await setShortcut?.({}, f16Shortcut);
+    expect(mocks.registeredShortcuts.has('F16')).toBe(true);
+
+    mocks.windowsListenerOptions.onRestartLimitReached?.();
+    expect(mocks.registeredShortcuts.has('F16')).toBe(false);
   });
 
   it('stops both native listeners through the quit disposer, not will-quit', async () => {

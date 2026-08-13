@@ -32,6 +32,7 @@ const LISTENER_START_TIMEOUT_MS = 1_500;
 const LISTENER_RESTART_MAX_ATTEMPTS = 3;
 const LISTENER_RESTART_BASE_DELAY_MS = 1_000;
 const LISTENER_RESTART_MAX_DELAY_MS = 5_000;
+const LISTENER_RESTART_STABLE_MS = 10_000;
 
 type ListenerTriggerPhase = 'tap' | 'start' | 'end';
 
@@ -67,6 +68,7 @@ type ListenerPayload = {
 type MacModifierShortcutListenerOptions = {
   onTrigger: (phase: ListenerTriggerPhase) => void;
   onKeys?: (keys: string[]) => void;
+  onRestartLimitReached?: () => void;
 };
 
 type ListenerProcess = ChildProcessByStdio<null, Readable, Readable>;
@@ -110,6 +112,7 @@ export class MacModifierShortcutListener {
   private pressedKeys = new Set<string>();
   private startTimer: NodeJS.Timeout | null = null;
   private restartTimer: NodeJS.Timeout | null = null;
+  private stableTimer: NodeJS.Timeout | null = null;
   private restartAttempts = 0;
   private triggered = false;
   private holdThresholdReached = false;
@@ -148,6 +151,7 @@ export class MacModifierShortcutListener {
     }
     this.shortcut = shortcut;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.restartAttempts = 0;
     this.endActiveTriggerIfNeeded();
     this.resetState();
@@ -160,6 +164,7 @@ export class MacModifierShortcutListener {
 
   async startKeyCapture(): Promise<ListenerStartResult> {
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.restartAttempts = 0;
     this.resetState();
     if (this.child) {
@@ -218,6 +223,7 @@ export class MacModifierShortcutListener {
   releaseShortcutKeepingCapture(): void {
     this.shortcut = null;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.restartAttempts = 0;
     this.endActiveTriggerIfNeeded();
     this.resetState();
@@ -243,6 +249,7 @@ export class MacModifierShortcutListener {
     this.child = null;
     this.ready = false;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.restartAttempts = 0;
     if (child && !child.killed) child.kill();
     void this.startChildProcess({ preserveShortcutOnFailure: true })
@@ -273,6 +280,7 @@ export class MacModifierShortcutListener {
     this.ready = false;
     this.shortcut = null;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.restartAttempts = 0;
     this.endActiveTriggerIfNeeded();
     this.resetState();
@@ -339,7 +347,10 @@ export class MacModifierShortcutListener {
         // 录制框重开。就绪状态同理：只认当前 child 报的 ready。
         const stale = generation !== this.startGeneration || this.child !== child;
         const outcome = stale ? supersededStart() : result;
-        if (result.ok && !stale) this.ready = true;
+        if (result.ok && !stale) {
+          this.ready = true;
+          this.armStableTimer();
+        }
         if (!result.ok && this.child === child) {
           this.child = null;
           this.ready = false;
@@ -392,6 +403,7 @@ export class MacModifierShortcutListener {
         if (this.child === child) {
           this.child = null;
           this.ready = false;
+          this.clearStableTimer();
           this.endActiveTriggerIfNeeded();
           this.resetState();
         }
@@ -589,6 +601,8 @@ export class MacModifierShortcutListener {
         signal,
         shortcut: shortcutLabel,
       });
+      this.shortcut = null;
+      this.options.onRestartLimitReached?.();
       return;
     }
     this.restartAttempts += 1;
@@ -617,7 +631,6 @@ export class MacModifierShortcutListener {
             this.scheduleRestart(null, null);
             return;
           }
-          this.restartAttempts = 0;
           log.info('modifier shortcut listener restarted', {
             shortcut: this.shortcut ? getShortcutLogLabel(this.shortcut) : null,
           });
@@ -637,6 +650,20 @@ export class MacModifierShortcutListener {
     if (!this.restartTimer) return;
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
+  }
+
+  private armStableTimer(): void {
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.restartAttempts = 0;
+    }, LISTENER_RESTART_STABLE_MS);
+  }
+
+  private clearStableTimer(): void {
+    if (!this.stableTimer) return;
+    clearTimeout(this.stableTimer);
+    this.stableTimer = null;
   }
 }
 

@@ -205,7 +205,11 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     vi.useFakeTimers();
     const { WindowsFunctionKeyShortcutListener } =
       await import('../WindowsFunctionKeyShortcutListener.js');
-    const listener = new WindowsFunctionKeyShortcutListener({ onTrigger: vi.fn() });
+    const onRestartLimitReached = vi.fn();
+    const listener = new WindowsFunctionKeyShortcutListener({
+      onTrigger: vi.fn(),
+      onRestartLimitReached,
+    });
     const starting = listener.setShortcut(f2Shortcut);
     await vi.advanceTimersByTimeAsync(0);
     mocks.spawnedChildren.at(-1)?.stdoutData('{"type":"ready"}\n');
@@ -221,6 +225,7 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     mocks.spawnedChildren.at(-1)?.handlers.get('exit')?.(1, null);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(mocks.spawn).toHaveBeenCalledTimes(4);
+    expect(onRestartLimitReached).toHaveBeenCalledTimes(1);
     listener.stop();
   });
 });

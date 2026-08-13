@@ -37,6 +37,7 @@ type ListenerProcess = ChildProcessByStdio<null, Readable, Readable>;
 
 export interface WindowsFunctionKeyShortcutListenerOptions {
   onTrigger: (phase: ShortcutHoldPhase) => void;
+  onRestartLimitReached?: () => void;
 }
 
 function supersededStart(): WindowsFunctionKeyListenerStartResult {
@@ -58,7 +59,7 @@ export class WindowsFunctionKeyShortcutListener {
   private stableTimer: NodeJS.Timeout | null = null;
   private readonly phaseController: ShortcutHoldPhaseController;
 
-  constructor(options: WindowsFunctionKeyShortcutListenerOptions) {
+  constructor(private readonly options: WindowsFunctionKeyShortcutListenerOptions) {
     this.phaseController = new ShortcutHoldPhaseController({ onTrigger: options.onTrigger });
   }
 
@@ -276,6 +277,8 @@ export class WindowsFunctionKeyShortcutListener {
     if (!this.shortcutCode || this.restartTimer) return;
     if (this.restartAttempts >= RESTART_MAX_ATTEMPTS) {
       log.warn('Windows function key listener restart limit reached', { code, exitCode, signal });
+      this.shortcutCode = null;
+      this.options.onRestartLimitReached?.();
       return;
     }
     this.restartAttempts += 1;

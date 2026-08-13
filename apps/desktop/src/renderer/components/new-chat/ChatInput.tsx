@@ -6503,7 +6503,7 @@ export function ChatInput({
           Hence this extra `relative` layer around the wrapper. It also serves
           as the outside-click boundary for collapsing the expanded queue tail
           (see paletteAnchorRef) — palette clicks are "inside". */}
-      <div ref={paletteAnchorRef} className="relative w-full">
+      <div ref={paletteAnchorRef} className="relative w-full" data-chat-input-card>
         <div
           ref={mergedCardRef}
           className={cn(

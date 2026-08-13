@@ -1155,17 +1155,23 @@ export function CCAgentSessionView({
     setOverlayEl(node);
   }, []);
   const [overlayHeight, setOverlayHeight] = useState(200);
+  const [composerTopOffset, setComposerTopOffset] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     if (!overlayEl) return;
+    const measureOverlay = () => {
+      // 状态行会动态出现 / 收起，overlay 总高度不等于输入框卡片顶边。
+      // 直接量卡片到 overlay 底边的距离，让消息流悬浮按钮不受状态行高度影响。
+      setOverlayHeight(overlayEl.offsetHeight);
+      const composerCard = overlayEl.querySelector<HTMLElement>('[data-chat-input-card]');
+      setComposerTopOffset(
+        composerCard ? overlayEl.getBoundingClientRect().bottom - composerCard.getBoundingClientRect().top : undefined,
+      );
+    };
     // Seed with the current height so the first paint after remount uses the
     // real value (not the stale state from the previous mount).
-    setOverlayHeight(overlayEl.offsetHeight);
-    const ro = new ResizeObserver(() => {
-      // offsetHeight (includes padding) instead of contentRect.height so the
-      // bottom padding fully covers the overlay.
-      setOverlayHeight(overlayEl.offsetHeight);
-    });
+    measureOverlay();
+    const ro = new ResizeObserver(measureOverlay);
     ro.observe(overlayEl);
     return () => ro.disconnect();
   }, [overlayEl]);
@@ -3695,6 +3701,7 @@ export function CCAgentSessionView({
       isLoadingMore={isLoadingMore}
       hasMoreMessages={hasMoreMessages}
       bottomPadding={overlayHeight}
+      composerTopOffset={composerTopOffset}
       contentWidth={messageWidth}
       focusMessageClientId={focusedMessageTarget?.clientId ?? null}
       focusMessageRequestId={focusedMessageTarget?.requestId ?? 0}

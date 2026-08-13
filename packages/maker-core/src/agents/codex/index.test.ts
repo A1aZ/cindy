@@ -16,7 +16,12 @@ import {
 import type { AuthAdapter } from '../../interfaces/auth-adapter.js';
 import type { AgentEvent as CoreAgentEvent, InteractionDecision, InteractionRequest } from '../../types/events.js';
 import type { Logger } from '../../interfaces/logger.js';
-import type { AutoReviewDelegate } from '../shared/auto-review-decision.js';
+import {
+  AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE,
+  AUTO_REVIEW_UNAVAILABLE_METADATA_KEY,
+  AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT,
+  type AutoReviewDelegate,
+} from '../shared/auto-review-decision.js';
 
 type AgentEvent = Omit<CoreAgentEvent, 'data'> & { data: any };
 type LooseThreadEventHandlers = {
@@ -11661,6 +11666,139 @@ describe('CodexAgent MCP thread context hooks', () => {
     expect(request?.kind).toBe('permission');
     if (request?.kind !== 'permission') throw new Error('expected permission request');
     expect(request.suggestions).toBeUndefined();
+    await handle.close();
+  });
+
+  it('hands gray actions to the user when auto-review is unavailable, then accepts this action', async () => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-unavailable-handoff',
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    const resolver = vi.fn(async (): Promise<InteractionDecision> => (
+      { kind: 'permission', behavior: 'allow' }
+    ));
+    handle.setInteractionResolver(resolver);
+
+    const result = await handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-unavailable',
+      itemId: 'cmd-unavailable',
+      approvalId: 'approval-unavailable',
+      command: 'npx tsc --noEmit',
+      cwd: '/repo',
+    });
+
+    expect(result).toEqual({ decision: 'accept' });
+    expect(reviewAutoPermissionAction).toHaveBeenCalledOnce();
+    expect(resolver).toHaveBeenCalledOnce();
+    const request = (resolver.mock.calls as unknown as Array<[InteractionRequest]>)[0]?.[0];
+    expect(request).toMatchObject({
+      kind: 'permission',
+      description: AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT,
+      metadata: { [AUTO_REVIEW_UNAVAILABLE_METADATA_KEY]: true },
+      suggestions: undefined,
+    });
+    await handle.close();
+  });
+
+  it('does not treat a missing confirmation as a user rejection after auto-review fails', async () => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-unavailable-undelivered',
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    handle.setInteractionResolver(async () => ({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'timeout',
+    }));
+    const notices: string[] = [];
+    void (async () => {
+      for await (const event of handle.events()) {
+        if (
+          event.type === 'error'
+          && typeof event.data === 'object'
+          && event.data !== null
+          && 'message' in event.data
+          && typeof event.data.message === 'string'
+        ) {
+          notices.push(event.data.message);
+        }
+      }
+    })().catch(() => {});
+
+    await expect(handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-unavailable-timeout',
+      itemId: 'cmd-unavailable-timeout',
+      command: 'npx tsc --noEmit',
+      cwd: '/repo',
+    })).resolves.toEqual({ decision: 'decline' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
+    expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    await handle.close();
+  });
+
+  it('keeps a real user deny distinct from a missing confirmation', async () => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-unavailable-user-deny',
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    handle.setInteractionResolver(async () => ({
+      kind: 'permission',
+      behavior: 'deny',
+      reason: 'User denied',
+    }));
+    const notices: string[] = [];
+    void (async () => {
+      for await (const event of handle.events()) {
+        if (
+          event.type === 'error'
+          && typeof event.data === 'object'
+          && event.data !== null
+          && 'message' in event.data
+          && typeof event.data.message === 'string'
+        ) {
+          notices.push(event.data.message);
+        }
+      }
+    })().catch(() => {});
+
+    await expect(handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-user-deny',
+      itemId: 'cmd-user-deny',
+      command: 'npx tsc --noEmit',
+      cwd: '/repo',
+    })).resolves.toEqual({ decision: 'decline' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(false);
     await handle.close();
   });
 

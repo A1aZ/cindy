@@ -1,15 +1,22 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE,
   AUTO_REVIEW_UNAVAILABLE_CODE,
+  AUTO_REVIEW_UNAVAILABLE_METADATA_KEY,
+  AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT,
   AUTO_REVIEW_MAX_REQUEST_TIMEOUT_MS,
   AUTO_REVIEW_RETRY_ATTEMPTS,
   AUTO_REVIEW_RETRY_BACKOFF_MS,
+  annotatePermissionRequestForUnavailableReview,
   autoReviewRetryBudgetMs,
   getAutoReviewDelegateHardCeilingMs,
   DEFAULT_AUTO_REVIEW_TIMEOUT_POLICY,
   classifyLocalAutoReviewTier,
+  createAutoReviewConfirmUndeliveredNotice,
+  isAutoReviewConfirmUndeliveredNotice,
   isAutoReviewUnavailableNotice,
+  isSystemPermissionDenialReason,
   composeAutoReviewIntentWithApprovedPlan,
   composeAutoReviewIntentWithClarification,
   createAutoReviewUnavailableNotice,
@@ -291,6 +298,50 @@ describe('isAutoReviewUnavailableNotice', () => {
     expect(isAutoReviewUnavailableNotice(undefined)).toBe(false);
     expect(isAutoReviewUnavailableNotice(null)).toBe(false);
     expect(isAutoReviewUnavailableNotice(123)).toBe(false);
+  });
+});
+
+describe('annotatePermissionRequestForUnavailableReview', () => {
+  it('marks the confirmation card as an auto-review handoff without re-reviewing', () => {
+    const annotated = annotatePermissionRequestForUnavailableReview({
+      kind: 'permission',
+      requestId: 'req-1',
+      toolName: 'exec',
+      input: { command: 'npx tsc --noEmit' },
+      description: 'Allow Codex to run this command?',
+      metadata: { reason: 'workspace write' },
+    });
+    expect(annotated.description).toBe(AUTO_REVIEW_UNAVAILABLE_PROMPT_TEXT);
+    expect(annotated.metadata).toMatchObject({
+      reason: 'workspace write',
+      [AUTO_REVIEW_UNAVAILABLE_METADATA_KEY]: true,
+    });
+  });
+});
+
+describe('isSystemPermissionDenialReason', () => {
+  it('treats router and timeout codes as system denials, not user clicks', () => {
+    expect(isSystemPermissionDenialReason('timeout')).toBe(true);
+    expect(isSystemPermissionDenialReason('no_interaction_resolver')).toBe(true);
+    expect(isSystemPermissionDenialReason('stale_turn')).toBe(true);
+    expect(isSystemPermissionDenialReason('User denied')).toBe(false);
+    expect(isSystemPermissionDenialReason(undefined)).toBe(false);
+  });
+});
+
+describe('createAutoReviewConfirmUndeliveredNotice', () => {
+  it('emits once and is recognized by the shared matcher', () => {
+    const emitted: string[] = [];
+    const notice = createAutoReviewConfirmUndeliveredNotice((message) => emitted.push(message));
+    notice.notify();
+    notice.notify();
+    expect(emitted).toHaveLength(1);
+    expect(isAutoReviewConfirmUndeliveredNotice(emitted[0])).toBe(true);
+    expect(emitted[0]).toContain(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`);
+    expect(emitted[0]).toContain('not a user rejection');
+    notice.reset();
+    notice.notify();
+    expect(emitted).toHaveLength(2);
   });
 });
 

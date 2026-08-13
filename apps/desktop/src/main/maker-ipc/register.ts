@@ -3244,11 +3244,6 @@ export function installDesktopInteractionListener(session: {
         planFilePath?: unknown;
       },
     );
-    broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
-      sessionId: session.id,
-      request: req,
-      persistId: interactionPersistId,
-    });
     return new Promise<InteractionDecision>((resolve) => {
       const entry: PendingInteractionEntry = {
         sessionId: session.id,
@@ -3266,7 +3261,14 @@ export function installDesktopInteractionListener(session: {
           dismissRendererInteraction(pending, req.requestId, 'timeout', 'deny');
         }, PERMISSION_INTERACTION_TIMEOUT_MS);
       }
+      // 必须先登记 pending,再广播。否则 renderer / device-link 回得太快会打到
+      // 「no pending resolver」,确认卡看起来没反应,Codex 最终却记成用户拒绝。
       pendingInteractionResolvers.set(req.requestId, entry);
+      broadcastToAllWindows(MAKER_PUSH.INTERACTION_REQUEST, {
+        sessionId: session.id,
+        request: req,
+        persistId: interactionPersistId,
+      });
       handleAgentIslandInteractionAfterBroadcast(
         session as { id: string; agentKind?: unknown; workDir?: unknown; workspaceKind?: unknown },
         req,

@@ -117,6 +117,7 @@ import {
 } from './capability-routing.js';
 import { normalizeBuiltinToolForAutoReview } from './auto-review-policy.js';
 import {
+  annotatePermissionRequestForUnavailableReview,
   composeAutoReviewIntentWithApprovedPlan,
   composeAutoReviewIntentWithClarification,
   createAutoReviewUnavailableNotice,
@@ -1894,6 +1895,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       const mcpApprovalPolicy = classifyMcpApprovalPolicy(toolName, input);
       const hostApprovalPresentation = mcpApprovalPresentation(toolName, input);
       let forcePrompt = turnPolicyForcePrompt;
+      let unavailableHandoff = false;
       if (mutablePermissionMode === 'auto' && !toolName.startsWith('mcp__')) {
         const workspaceRoots = [opts.workingDir, ...mutableExtraDirs].filter(
           (d): d is string => typeof d === 'string' && d.length > 0,
@@ -1928,7 +1930,10 @@ export class ClaudeCodeAgent extends BaseAgent {
           // AI `ask` and deterministic red-line verdicts are never persisted.
           // 审阅器故障降级来的 ask 额外发一条会话级提示:用户需要知道自己为什么
           // 突然开始被问,否则 Auto 档看起来像坏了。
-          if (autoDecision.unavailable) autoReviewUnavailableNotice.notify();
+          if (autoDecision.unavailable) {
+            autoReviewUnavailableNotice.notify();
+            unavailableHandoff = true;
+          }
           forcePrompt = true;
         }
       } else {
@@ -1937,8 +1942,8 @@ export class ClaudeCodeAgent extends BaseAgent {
         }
         forcePrompt = forcePrompt || mcpApprovalPolicy === 'prompt-each-time';
       }
-      const decision = await dispatchInteraction({
-        kind: 'permission',
+      const permissionRequest = {
+        kind: 'permission' as const,
         requestId: options.toolUseID,
         toolName,
         input: input as Record<string, unknown>,
@@ -1955,7 +1960,13 @@ export class ClaudeCodeAgent extends BaseAgent {
           ...(options.decisionReason ? { decisionReason: options.decisionReason } : {}),
           ...(options.agentID ? { agentID: options.agentID } : {}),
         },
-      }, { forcePrompt });
+      };
+      const decision = await dispatchInteraction(
+        unavailableHandoff
+          ? annotatePermissionRequestForUnavailableReview(permissionRequest)
+          : permissionRequest,
+        { forcePrompt },
+      );
       if (decision.kind !== 'permission') {
         log.warn('permission got mismatched decision', { tool: toolName, decKind: decision.kind });
         return { behavior: 'deny', message: 'resolver kind mismatch' };
@@ -2945,6 +2956,7 @@ export class ClaudeCodeAgent extends BaseAgent {
               params.input ?? {},
             );
             let remoteForcePrompt = remoteTurnPolicyForcePrompt;
+            let remoteUnavailableHandoff = false;
             if (
               mutablePermissionMode === 'auto'
               && remoteToolName
@@ -2969,7 +2981,10 @@ export class ClaudeCodeAgent extends BaseAgent {
                 };
               }
               // 与本地分支同口径:故障降级来的 ask 提示一次,让用户知道为何开始被问。
-              if (autoDecision.unavailable) autoReviewUnavailableNotice.notify();
+              if (autoDecision.unavailable) {
+                autoReviewUnavailableNotice.notify();
+                remoteUnavailableHandoff = true;
+              }
               remoteForcePrompt = true;
             } else {
               if (remoteMcpPolicy === 'auto-approve' && !remoteTurnPolicyForcePrompt) {
@@ -2977,8 +2992,8 @@ export class ClaudeCodeAgent extends BaseAgent {
               }
               remoteForcePrompt = remoteForcePrompt || remoteMcpPolicy === 'prompt-each-time';
             }
-            const decision = await dispatchWithTimeout({
-              kind: 'permission',
+            const remotePermissionRequest = {
+              kind: 'permission' as const,
               requestId: params.requestId,
               toolName: params.toolName ?? 'unknown',
               input: params.input ?? {},
@@ -2989,7 +3004,13 @@ export class ClaudeCodeAgent extends BaseAgent {
                 ? undefined
                 : this.normalizeSessionPermissionSuggestions(params.suggestions),
               metadata: params.metadata ?? {},
-            }, { forcePrompt: remoteForcePrompt });
+            };
+            const decision = await dispatchWithTimeout(
+              remoteUnavailableHandoff
+                ? annotatePermissionRequestForUnavailableReview(remotePermissionRequest)
+                : remotePermissionRequest,
+              { forcePrompt: remoteForcePrompt },
+            );
             if (decision.kind !== 'permission') {
               return { kind: 'permission', behavior: 'deny', reason: 'resolver kind mismatch' };
             }

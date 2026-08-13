@@ -740,6 +740,7 @@ interface CCAgentPermissionRequestPayload {
   displayName?: string;
   description?: string;
   suggestions?: unknown[];
+  autoReviewUnavailable?: boolean;
 }
 
 interface CCAgentPermissionResult {

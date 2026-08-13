@@ -615,7 +615,7 @@ export function MessageNavRail({
                       'ease-[var(--motion-ease-move)]',
                       tickWidthClass,
                       tickOpacityClass,
-                      interactionDistance === 0 || (interactionDistance === null && isActive)
+                      interactionDistance === 0 || (interactionDistance === null && (isActive || inView))
                         ? 'bg-[var(--text-primary)]'
                         : 'bg-[var(--text-secondary)] group-hover:bg-[var(--text-primary)]',
                     )}

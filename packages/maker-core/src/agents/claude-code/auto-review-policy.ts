@@ -220,6 +220,10 @@ function splitAtFirstOuterSeparator(text: string): { head: string; tail: string 
   let inDouble = false;
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
+    // 反引号是 PowerShell 的转义符(单引号串内除外):`` `| `` 是**字面** `|`,作为参数传给子进程,
+    // 那条管道其实在子进程内执行。不消费被转义的字符就会误当外层分隔符切开 —— 「下载即执行」
+    // 因此掉进灰区(codex 报)。转义同样能挡住引号,所以必须在引号判断之前处理。
+    if (ch === '`' && !inSingle) { i++; continue; }
     if (ch === "'" && !inDouble) {
       if (inSingle && text[i + 1] === "'") { i++; continue; } // '' = 字面单引号
       inSingle = !inSingle;

@@ -27,7 +27,7 @@ import {
   resolveImSessionDefaults,
   type ResolvedImSessionDefaults,
 } from '../defaultSessionSettings';
-import { broadcastSessionCreated } from './sessionBroadcast';
+import { broadcastSessionCreated, broadcastSessionPatched } from './sessionBroadcast';
 import type { ImOrchestratorConfig, ImSessionNamespace } from './types';
 
 const log = createLogger('im:repo');
@@ -417,6 +417,24 @@ export function createImSessionRepo(
       );
       // 通知 renderer sidebar / device-link 控制端有新会话行,否则要手动刷新才出现
       broadcastSessionCreated(result.id);
+      // 渠道可异步解析正式标题(飞书群 lane → 拉群名拼 [飞书·群] {群名})。
+      // 值稳定且幂等, 复活行同样刷新(群改名后下次消息即更新); 失败/无结果
+      // 保持 defaultTitle, 不阻塞建行。
+      if (ns.resolveSessionTitle) {
+        try {
+          const resolved = await ns.resolveSessionTitle(userId, scopeKey);
+          if (resolved) {
+            await db
+              .update(sessions)
+              .set({ title: resolved })
+              .where(eq(sessions.id, result.id));
+            broadcastSessionPatched(result.id, { title: resolved });
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn(`resolveSessionTitle failed for ${ns.source} session (non-fatal): ${msg}`);
+        }
+      }
       return result;
     },
   };

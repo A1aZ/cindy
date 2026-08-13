@@ -27,6 +27,7 @@ import { buildInteractiveCardV1 } from './cards.js';
 import { decodeLaneUserId } from './codec.js';
 import * as ownerGuard from './ownerGuard.js';
 import { parseIncoming } from './incomingContent.js';
+import type { AttachmentRef } from './incomingContent.js';
 import type { InteractiveCardSpec, SendFileResult } from '../types.js';
 import type { BotCredentials } from './internal-types.js';
 
@@ -404,67 +405,106 @@ export interface RecentChatMessage {
   senderOpenId: string;
   senderIsBot: boolean;
   text: string;
+  /** 图片/文件附件引用(image_key / file_key) — 下载需要配对的 messageId。 */
+  attachments: AttachmentRef[];
   createTimeMs: number;
 }
 
+export interface ChatHistoryPage {
+  /** 页内按时间升序(拉取是倒序的, 返回前翻正)。 */
+  messages: RecentChatMessage[];
+  /** 还有更早的页时给下一次调用的 page_token; 没有更早历史为 null。 */
+  nextPageToken: string | null;
+}
+
 /**
- * 拉群会话最近历史(群 lane 触发时拼上下文前缀用)。倒序拉一页, 返回升序。
- * 需要「获取群组中所有消息」权限; 权限不足/失败返回空数组 + log warn —
- * 上下文前缀降级为无, turn 照跑。文本抽取复用 parseIncoming(text/post 之外
- * 的类型给占位标签)。
+ * 按页拉群/话题历史(群 lane 触发时 adapter 拼上下文用)。倒序拉一页, 返回
+ * 页内升序。话题 lane 传 threadId 走 thread 容器, 只回本话题消息; 群主流
+ * 不传, 调用方自行按 thread_id 过滤(chat 容器会混入话题消息)。
+ *
+ * 需要「获取群组中所有消息」权限。**失败(权限不足/网络)直接抛错** — 调用方
+ * 需要区分「真的没有历史」与「拉取失败」来做降级提示, 不能吞成空数组。
+ * 文本抽取复用 parseIncoming; audio/media/sticker 等对上下文无意义的类型跳过。
  */
-export async function fetchRecentChatMessages(
-  chatId: string,
-  opts?: { limit?: number },
-): Promise<RecentChatMessage[]> {
+export async function fetchChatHistoryPage(args: {
+  chatId: string;
+  threadId?: string;
+  pageToken?: string;
+  pageSize?: number;
+}): Promise<ChatHistoryPage> {
+  const c = client;
+  if (!c) throw new Error('feishu client not bound');
+  const res = await c.im.v1.message.list({
+    params: {
+      container_id_type: args.threadId ? 'thread' : 'chat',
+      container_id: args.threadId ?? args.chatId,
+      sort_type: 'ByCreateTimeDesc',
+      page_size: Math.min(Math.max(args.pageSize ?? 50, 1), 50),
+      with_sender_name: true,
+      ...(args.pageToken ? { page_token: args.pageToken } : {}),
+    },
+  });
+  if (res.code !== 0) {
+    throw new Error(`im.message.list failed: code=${res.code} msg=${res.msg ?? 'unknown'}`);
+  }
+  const items = res.data?.items ?? [];
+  const out: RecentChatMessage[] = [];
+  for (const item of items) {
+    if (!item.message_id || item.deleted) continue;
+    const msgType = item.msg_type ?? '';
+    const rawContent = item.body?.content ?? '';
+    let text = '';
+    let attachments: AttachmentRef[] = [];
+    if (msgType === 'text' || msgType === 'post' || msgType === 'image' || msgType === 'file') {
+      const parsed = parseIncoming(msgType, rawContent);
+      text = parsed.text;
+      attachments = parsed.attachments;
+    } else if (msgType === 'interactive') {
+      text = '[卡片消息]';
+    } else {
+      continue; // audio/media/sticker 等对上下文无意义, 跳过
+    }
+    if (!text && attachments.length === 0) continue;
+    out.push({
+      messageId: item.message_id,
+      threadId: item.thread_id ?? '',
+      senderName: item.sender?.sender_name ?? '',
+      senderOpenId: item.sender?.id_type === 'open_id' ? (item.sender?.id ?? '') : '',
+      senderIsBot: item.sender?.sender_type === 'app',
+      text,
+      attachments,
+      createTimeMs: Number(item.create_time ?? 0),
+    });
+  }
+  out.reverse();
+  const hasMore = res.data?.has_more === true;
+  const nextToken = res.data?.page_token;
+  return {
+    messages: out,
+    nextPageToken: hasMore && nextToken ? nextToken : null,
+  };
+}
+
+/**
+ * 拉群名称(群 lane 会话标题用)。需要「获取群基本信息」权限; 失败/无权限
+ * 返回 null — 调用方回落 chatId 后 6 位。bot 拉不到群名的常见原因与群历史
+ * 相同: 应用未开权限或未发布版本。
+ */
+export async function getChatName(chatId: string): Promise<string | null> {
   const log = getLog();
   const c = client;
-  if (!c) return [];
+  if (!c) return null;
   try {
-    const res = await c.im.v1.message.list({
-      params: {
-        container_id_type: 'chat',
-        container_id: chatId,
-        sort_type: 'ByCreateTimeDesc',
-        page_size: Math.min(Math.max(opts?.limit ?? 50, 1), 50),
-        with_sender_name: true,
-      },
-    });
-    const items = res.data?.items ?? [];
-    const out: RecentChatMessage[] = [];
-    for (const item of items) {
-      if (!item.message_id || item.deleted) continue;
-      const msgType = item.msg_type ?? '';
-      const rawContent = item.body?.content ?? '';
-      let text = '';
-      if (msgType === 'text' || msgType === 'post') {
-        text = parseIncoming(msgType, rawContent).text;
-      } else if (msgType === 'image') {
-        text = '[图片]';
-      } else if (msgType === 'file') {
-        text = '[文件]';
-      } else if (msgType === 'interactive') {
-        text = '[卡片消息]';
-      } else {
-        continue; // audio/media/sticker 等对上下文无意义, 跳过
-      }
-      if (!text) continue;
-      out.push({
-        messageId: item.message_id,
-        threadId: item.thread_id ?? '',
-        senderName: item.sender?.sender_name ?? '',
-        senderOpenId: item.sender?.id_type === 'open_id' ? (item.sender?.id ?? '') : '',
-        senderIsBot: item.sender?.sender_type === 'app',
-        text,
-        createTimeMs: Number(item.create_time ?? 0),
-      });
+    const res = await c.im.v1.chat.get({ path: { chat_id: chatId } });
+    if (res.code !== 0) {
+      log.warn(`[feishu/outbound] chat.get failed: code=${res.code} msg=${res.msg ?? 'unknown'}`);
+      return null;
     }
-    out.reverse();
-    return out;
+    return res.data?.name ?? null;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log.warn(`[feishu/outbound] fetchRecentChatMessages failed (context degraded): ${msg}`);
-    return [];
+    log.warn(`[feishu/outbound] chat.get failed: ${msg}`);
+    return null;
   }
 }
 

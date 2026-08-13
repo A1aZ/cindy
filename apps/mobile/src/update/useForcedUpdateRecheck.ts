@@ -16,12 +16,15 @@ import {
   getForcedUpdateRevision,
   getForcedUpdateTarget,
 } from './forcedUpdateStore';
-import { isCanaryChannel } from './canaryChannelStore';
+import { resolveUpdateChannelForDevice } from './canaryChannelStore';
+import type { UpdateChannel } from '@cindy/maker-shared/update-channel';
 
 /** 定时敲门间隔;真实请求频率仍由核对器内部节流决定(默认 30s)。 */
 const RECHECK_TICK_MS = 30_000;
 
-export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
+export function useForcedUpdateRecheck(
+  channel: UpdateChannel = resolveUpdateChannelForDevice(),
+): void {
   useEffect(() => {
     let current = true;
     const rechecker = createForcedUpdateRechecker({
@@ -29,7 +32,7 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
         Platform.OS === 'android' ? 'android' : 'ios',
         undefined,
         undefined,
-        isCanary,
+        channel,
       ),
       getCurrentRuntimeVersion: () => Updates.runtimeVersion,
       // 与 useBundleUpdatePrompt 同口径:强更解除也按原生真值比,热更后不漂移。
@@ -66,5 +69,5 @@ export function useForcedUpdateRecheck(isCanary = isCanaryChannel()): void {
       subscription.remove();
       clearInterval(timer);
     };
-  }, [isCanary]);
+  }, [channel]);
 }

@@ -40,12 +40,15 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
     expectCacheBustedUrl(url, `${BASE}/latest?platform=ios`);
   });
 
-  it('canary 显式追加 channel，stable URL 保持旧契约', async () => {
+  it('canary/beta 显式追加 channel，release URL 保持旧契约', async () => {
     const fetchMock = vi.fn(async () => resp(200, { runtimeVersion: 'rtv1' }));
     vi.stubGlobal('fetch', fetchMock);
-    await fetchLatestRelease('android', 8000, BASE, true);
-    const [url] = fetchMock.mock.calls[0] as unknown as [string];
+    await fetchLatestRelease('android', 8000, BASE, 'canary');
+    let [url] = fetchMock.mock.calls[0] as unknown as [string];
     expectCacheBustedUrl(url, `${BASE}/latest?platform=android&channel=canary`);
+    await fetchLatestRelease('android', 8000, BASE, 'beta');
+    [url] = fetchMock.mock.calls[1] as unknown as [string];
+    expectCacheBustedUrl(url, `${BASE}/latest?platform=android&channel=beta`);
   });
 
   it('一律绕缓存:每次请求都带 cache-buster + no-cache 头', async () => {

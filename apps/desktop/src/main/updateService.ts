@@ -41,6 +41,11 @@ import {
   writeAutoRelaunchOnIdle,
 } from './auto-update-settings-store';
 import {
+  readUpdateChannelSettingsState,
+  resetUpdateChannelSettings,
+  writeEnableBeta,
+} from './updateChannelStore';
+import {
   AUTO_UPDATE_IDLE_THRESHOLD_SECONDS,
   getAutoRelaunchBlockReason,
   type AutoRelaunchBlockReason,
@@ -1181,6 +1186,39 @@ export function initUpdateService(): void {
     resetAutoUpdateSettings();
     void evaluateAutoRelaunch('settings-reset');
     return autoUpdateSettingsWire();
+  });
+
+  // beta 测试渠道(设备级)开关。开关本身即时落盘,但 manifest 通道只在
+  // 下一次 fetchManifest(后台轮询)或重启后才会切换;设置页打开后引导用户重启。
+  ipcMain.handle('update-channel-settings-get', () => {
+    const state = readUpdateChannelSettingsState();
+    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+  });
+
+  ipcMain.handle('update-channel-settings-set', (_event, payload: unknown) => {
+    if (!payload || typeof payload !== 'object') {
+      throwIpcError('INVALID_PARAMS', 'update channel settings payload required');
+    }
+    const next = (payload as { enableBeta?: unknown }).enableBeta;
+    if (typeof next !== 'boolean') {
+      throwIpcError('INVALID_PARAMS', 'enableBeta required (boolean)');
+    }
+    writeEnableBeta(next);
+    const state = readUpdateChannelSettingsState();
+    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+  });
+
+  ipcMain.handle('update-channel-settings-reset', () => {
+    resetUpdateChannelSettings();
+    const state = readUpdateChannelSettingsState();
+    return { enableBeta: state.value.enableBeta, isCustomized: state.isCustomized };
+  });
+
+  // 用户主动重启:让 beta 通道切换在下次冷启动的 manifest 拉取前生效。
+  ipcMain.handle('update-channel-relaunch', () => {
+    log.info('relaunch requested for update channel change');
+    app.relaunch();
+    app.exit(0);
   });
 
   ipcMain.on('update-set-relaunch-theme', (_event, theme: 'light' | 'dark') => {

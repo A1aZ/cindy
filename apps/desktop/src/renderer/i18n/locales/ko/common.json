@@ -1747,6 +1747,19 @@
         "toggleFailed": "LSP 전환에 실패했습니다"
       }
     },
+    "betaChannel": {
+      "title": "베타 채널",
+      "description": "베타 채널에 참여하면 출시 예정인 클라이언트 업데이트를 먼저 받을 수 있습니다. 재시작 후 적용됩니다.",
+      "toggleAria": "베타 채널 토글",
+      "restartTitle": "클라이언트 재시작",
+      "restartDescription": "베타 채널은 재시작해야 적용됩니다. 지금 재시작할까요?",
+      "restartNow": "지금 재시작",
+      "restartLater": "나중에",
+      "toast": {
+        "disabled": "베타 채널이 꺼졌습니다. 재시작 후 적용됩니다",
+        "toggleFailed": "베타 채널 전환 실패"
+      }
+    },
     "gitSafety": {
       "title": "Git 안전",
       "autoSnapshotTitle": "Git 안전 저장점",

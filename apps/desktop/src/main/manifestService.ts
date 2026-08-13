@@ -17,8 +17,11 @@
 import { app, net } from 'electron';
 import * as canaryFlagStore from './canaryFlagStore';
 
+import { resolveUpdateChannel } from '@cindy/maker-shared/update-channel';
+
 import { createLogger } from './logger';
 import { getClientEndpoint } from './clientEndpointsService';
+import { isBetaChannelEnabled } from './updateChannelStore';
 
 const log = createLogger('manifestService');
 
@@ -137,6 +140,10 @@ export function isDev(): boolean {
  * instead of the stable manifest. On failure we deliberately do NOT fall back
  * to stable — that would silently downgrade canary users to whatever stale
  * version is sitting on the stable channel.
+ *
+ * beta 渠道(2026-08):设备级开关(isBetaChannelEnabled)。发布通道按
+ * resolveUpdateChannel 收敛为 canary > beta > release;release 无后缀,
+ * canary/beta 分别拼 -canary / -beta 后缀。canary 命中时忽略 beta。
  */
 export async function fetchManifest(
   timeoutMs?: number,
@@ -145,11 +152,14 @@ export async function fetchManifest(
   if (isDev()) return null;
   if (signal?.aborted) return null;
 
-  const isCanary = canaryFlagStore.read();
-  const channelSuffix = isCanary ? '-canary' : '';
+  const channel = resolveUpdateChannel(
+    canaryFlagStore.read(),
+    isBetaChannelEnabled(),
+  );
+  const channelSuffix = channel === 'release' ? '' : `-${channel}`;
   // Cache-bust: append timestamp to prevent Chromium / CDN serving stale manifest
   const url = `${getBaseUrl()}/manifest-${getPlatformKey()}${channelSuffix}.json?t=${Date.now()}`;
-  log.info('Fetching (%s channel): %s', isCanary ? 'canary' : 'stable', url);
+  log.info('Fetching (%s channel): %s', channel, url);
 
   return new Promise<Manifest | null>((resolve) => {
     try {

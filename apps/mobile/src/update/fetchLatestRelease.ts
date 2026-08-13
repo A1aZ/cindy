@@ -1,6 +1,7 @@
 // 拉 mobile-update-server 的 `/latest`(整包版本记录)。薄 IO 封装,判定逻辑在 bundleUpdate.ts。
 import { i18n } from '@/i18n';
 import { OTA_SERVER_BASE_URL } from '@/config/env';
+import type { UpdateChannel } from '@cindy/maker-shared/update-channel';
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
@@ -17,18 +18,19 @@ const DEFAULT_TIMEOUT_MS = 8000;
  * 强更闸门外,旧记录没门槛时又把该挡的用户**放行**。两者都不可接受,所以四条调用路径
  * (启动 / resume / 设置页 / 阻断屏核对)统一不吃缓存,代价只是每次多一个小 JSON 请求。
  * @param platform 目标平台(默认 ios)
+ * @param channel 发布通道(默认 release;canary/beta 分别追加 &channel=canary/beta)
  */
 export async function fetchLatestRelease(
   platform = 'ios',
   timeoutMs = DEFAULT_TIMEOUT_MS,
   baseUrl = OTA_SERVER_BASE_URL,
-  isCanary = false,
+  channel: UpdateChannel = 'release',
 ): Promise<unknown | null> {
   if (!baseUrl) return null; // 非自建变体,无自托管服务
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const channelQuery = isCanary ? '&channel=canary' : '';
+    const channelQuery = channel === 'release' ? '' : `&channel=${channel}`;
     const res = await fetch(`${baseUrl}/latest?platform=${encodeURIComponent(platform)}${channelQuery}&t=${Date.now()}`, {
       signal: controller.signal,
       headers: { accept: 'application/json', 'cache-control': 'no-cache' },

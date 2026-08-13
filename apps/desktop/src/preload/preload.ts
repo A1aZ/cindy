@@ -2223,6 +2223,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
     isCustomized?: boolean;
     defaultAutoRelaunchOnIdle?: boolean;
   }> => ipcRenderer.invoke('update-auto-settings-reset'),
+  // beta 测试渠道(设备级)开关
+  getUpdateChannelSettings: (): Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }> => ipcRenderer.invoke('update-channel-settings-get'),
+  setUpdateChannelSettings: (settings: {
+    enableBeta: boolean;
+  }): Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }> => ipcRenderer.invoke('update-channel-settings-set', settings),
+  resetUpdateChannelSettings: (): Promise<{
+    enableBeta: boolean;
+    isCustomized?: boolean;
+  }> => ipcRenderer.invoke('update-channel-settings-reset'),
+  relaunchForChannelChange: (): Promise<void> =>
+    ipcRenderer.invoke('update-channel-relaunch'),
   setUpdateRelaunchTheme: (theme: 'light' | 'dark'): void => {
     ipcRenderer.send('update-set-relaunch-theme', theme);
   },

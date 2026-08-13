@@ -101,4 +101,40 @@ describe('Projects sidebar section', () => {
     expect(projectsSectionSource).toContain('{!isSectionCollapsed && foldState !== null && (');
     expect(projectsSectionSource).toContain('isCollapsed={collapsed.has(project.projectKey)}');
   });
+
+  // 2026-08-13 review P1:优先级排序的三个集合必须并入 device-link 远程活动镜像
+  // ——远程行自己的状态点亮着,排序却把它当 idle。
+  it('priority context merges remote activity (running / waiting / unread)', () => {
+    // 远程镜像经整表版本号订阅 + 逐 id 读(聚合组件先例)。
+    expect(projectsSectionSource).toContain(
+      'const remoteActivityRevision = useRemoteSessionActivityRevision()',
+    );
+    expect(projectsSectionSource).toContain(
+      'const activity = getRemoteSessionActivity(session.id)',
+    );
+    // running / needs-interaction / error / completed-unread 各归其档。
+    expect(projectsSectionSource).toMatch(
+      /activity\.phase === 'needs-interaction' \|\| activity\.phase === 'error'/,
+    );
+    // 三个集合作为一个整体喂给混排模型。
+    expect(projectsSectionSource).toContain('priorityContext,');
+    // 折叠豁免与排序同一口径(含远程),不再用只有本地的 notifications。
+    expect(projectsSectionSource).toContain(
+      'entrySessions(entry).some((s) => priorityContext.attentionSessionIds.has(s.id))',
+    );
+  });
+
+  // 2026-08-13 review P1:设备是最外层层级,折叠只能发生在段内——先全局折叠再
+  // 切段会把前 N 名之外的设备连段头一起藏掉。
+  it('device grouping splits the full list first, then collapses per section', () => {
+    expect(projectsSectionSource).toContain(
+      'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])])',
+    );
+    expect(projectsSectionSource).toContain('const sectionView = collapseEntries(section.entries)');
+    // 每段有自己的「显示全部」页脚;全局页脚只属于单段路径。
+    expect(projectsSectionSource).toContain('{sectionView.isOverflowing && (');
+    expect(projectsSectionSource).toContain(
+      "{(filter.sortBy === 'manual' || !deviceGroupingActive) && projectsOverflow && (",
+    );
+  });
 });

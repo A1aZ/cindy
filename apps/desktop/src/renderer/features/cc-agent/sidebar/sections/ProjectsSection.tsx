@@ -61,6 +61,10 @@ import {
 import { buildSessionSourceLabelMap } from '../../lib/sessionSourceLabel';
 import { useSessionAttentionKinds } from '@/lib/sessionAttentionStore';
 import { useSessionAttentionUrgencySet } from '../../contexts/SessionAttentionUrgencyContext';
+import {
+  getRemoteSessionActivity,
+  useRemoteSessionActivityRevision,
+} from '@/features/device-link/remoteSessionActivityStore';
 import type { DialogueDeviceTarget } from '../../lib/dialogueCreateTarget';
 import { SidebarFilterPopover } from '../SidebarFilterPopover';
 import { SectionCollapse } from '../SectionCollapse';
@@ -93,6 +97,24 @@ const HEADER_ACTIONS_CLASS = cn('flex items-center gap-0.5 -mt-px', HEADER_HOVER
 
 /** 设备段折叠/对话组折叠共用的段 key:本机段 'local',远程段用 deviceId。 */
 const deviceSectionKey = (deviceId: string | null) => deviceId ?? 'local';
+
+/** 顶层条目折叠的「显示全部 N 项」页脚(单段路径与设备分组的每段共用同一份样式)。 */
+function ShowAllEntriesButton({ count, onClick }: { count: number; onClick: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      className={cn(
+        'flex h-6 w-full items-center justify-center rounded-full px-2 text-xs font-normal',
+        'text-[var(--cmd-palette-item-meta)] transition-colors hover:bg-sidebar-item-hover hover:text-foreground',
+        'focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--focus-ring)]',
+      )}
+      onClick={onClick}
+    >
+      {t('ccAgent.sidebar.showAllSessions', { count })}
+    </button>
+  );
+}
 
 export interface ProjectsSectionProps {
   unclassified: Session[];
@@ -261,19 +283,59 @@ export function ProjectsSection({
   // 文字搜索是独立面板、不在本段内联过滤,故无需为它禁用。
   const disableSessionCollapse = false;
 
-  // 优先级排序的 waiting 子集(等你处理:awaiting / error / 定时任务失败未读)。
-  // 整表订阅仅限本聚合组件(store 头注的性能边界):本组件本就随 notifications
-  // 整集变化重渲染,kinds 表与它同源同节拍,不额外放大。urgentSet 语义对齐
-  // SessionItem 行内状态(isUrgentFromContext 视同 error)。
+  // 优先级排序的运行时上下文。三个集合都在本地链路之上并入 device-link 远程
+  // 活动镜像(2026-08-13 review P1:此前只喂本地 maker/attention,远程行自己的
+  // 状态点亮着、排序却把它当 idle):
+  //   - waiting:本地 attention kind 为 awaiting / error、定时任务失败未读
+  //     (urgentSet,语义对齐 SessionItem 的 isUrgentFromContext)、远程
+  //     needs-interaction / error;
+  //   - attention:本地未读集 ∪ 远程有活动条目的会话(waiting ⊆ attention,
+  //     rank 函数先查 attention 再分档);
+  //   - running:本地 running ∪ 远程 running。
+  // 整表订阅仅限本聚合组件(两个 store 头注的性能边界):本组件本就随
+  // notifications 整集变化重渲染,不额外放大;远程镜像走整表版本号 + 逐 id 读,
+  // 与 CCAgentSidebarUpper.projectAgg 同款先例。
   const attentionKinds = useSessionAttentionKinds();
   const urgentSet = useSessionAttentionUrgencySet();
-  const waitingSessionIds = useMemo(() => {
+  const remoteActivityRevision = useRemoteSessionActivityRevision();
+  const priorityContext = useMemo(() => {
+    const running = new Set(runningSessionIds);
+    const attention = new Set(notifications);
     const waiting = new Set<string>(urgentSet);
     for (const [sessionId, kind] of attentionKinds) {
       if (kind === 'awaiting' || kind === 'error') waiting.add(sessionId);
     }
-    return waiting;
-  }, [attentionKinds, urgentSet]);
+    const considerRemote = (session: Session) => {
+      const activity = getRemoteSessionActivity(session.id);
+      if (!activity) return; // 本地会话 / 无活动条目:一次 Map 查找即返回
+      if (activity.phase === 'running') {
+        running.add(session.id);
+        return;
+      }
+      // needs-interaction / error → waiting;completed(镜像只保留未读终态,
+      // 已读收尾包会删条目)→ 完成未读档。
+      attention.add(session.id);
+      if (activity.phase === 'needs-interaction' || activity.phase === 'error') {
+        waiting.add(session.id);
+      }
+    };
+    for (const project of projects) for (const session of project.sessions) considerRemote(session);
+    for (const session of dialogues) considerRemote(session);
+    return {
+      runningSessionIds: running,
+      attentionSessionIds: attention,
+      waitingSessionIds: waiting,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remoteActivityRevision 代表 getRemoteSessionActivity 读到的整表内容
+  }, [
+    runningSessionIds,
+    notifications,
+    urgentSet,
+    attentionKinds,
+    projects,
+    dialogues,
+    remoteActivityRevision,
+  ]);
 
   // 混排模型(D 期):项目行 / 散排对话 / 对话组统一为顶层条目并按同一口径排序。
   // 这有意推翻旧「Dialogue 固定段在 Projects 之后」的裁决(mainListModel.ts 文件头)。
@@ -286,11 +348,7 @@ export function ProjectsSection({
         groupDialogue: filter.groupDialogue,
         sortBy: filter.sortBy,
         manualProjectOrder: filter.manualProjectOrder,
-        priorityContext: {
-          runningSessionIds,
-          attentionSessionIds: notifications,
-          waitingSessionIds,
-        },
+        priorityContext,
       }),
     [
       projects,
@@ -299,9 +357,7 @@ export function ProjectsSection({
       filter.groupDialogue,
       filter.sortBy,
       filter.manualProjectOrder,
-      runningSessionIds,
-      notifications,
-      waitingSessionIds,
+      priorityContext,
     ],
   );
 
@@ -317,19 +373,29 @@ export function ProjectsSection({
           : [entry.session],
     [],
   );
+  // 折叠视图共用一份参数:非设备分组 = 全列表一份;设备分组 = 每段各一份(见
+  // deviceSections)。attention 豁免用 priorityContext.attentionSessionIds——与
+  // 排序同一口径(含远程活动镜像),远程 waiting/unread 的条目不能被折进
+  // 「显示全部」。
+  const collapseEntries = useCallback(
+    (entries: readonly MainListEntry[]) =>
+      getSessionListCollapseView({
+        entries,
+        minVisibleCount: getProjectCollapseLimit(),
+        showAll: showAllProjects,
+        disableCollapse: false,
+        isFiltering: false,
+        isActiveEntry: (entry) => entrySessions(entry).some((s) => s.id === activeSessionId),
+        hasAttentionEntry: (entry) =>
+          entrySessions(entry).some((s) => priorityContext.attentionSessionIds.has(s.id)),
+      }),
+    [showAllProjects, activeSessionId, entrySessions, priorityContext],
+  );
   const {
     visibleEntries: visibleMixedEntries,
     isOverflowing: projectsOverflow,
     totalCount: projectsTotal,
-  } = getSessionListCollapseView({
-    entries: mixedEntries,
-    minVisibleCount: getProjectCollapseLimit(),
-    showAll: showAllProjects,
-    disableCollapse: false,
-    isFiltering: false,
-    isActiveEntry: (entry) => entrySessions(entry).some((s) => s.id === activeSessionId),
-    hasAttentionEntry: (entry) => entrySessions(entry).some((s) => notifications.has(s.id)),
-  });
+  } = collapseEntries(mixedEntries);
   // SortableList 拖拽仍只作用于项目行(手动排序收窄裁决,设计文档 §9.3):
   // 混排下把可见条目切成「连续的项目行 run + 其间的散排条目」,项目 run 内可拖。
   const visibleProjectNodes = visibleMixedEntries
@@ -344,8 +410,11 @@ export function ProjectsSection({
   const deviceGroupingActive = hasRemoteDevices && filter.groupDevice;
   const deviceSections = useMemo<MainListDeviceSection[]>(() => {
     if (!deviceGroupingActive) return [{ deviceId: null, entries: [...visibleMixedEntries] }];
-    return splitEntriesByDevice(visibleMixedEntries, [...(remoteDeviceIndex?.keys() ?? [])]);
-  }, [deviceGroupingActive, visibleMixedEntries, remoteDeviceIndex]);
+    // 设备分组:对**全量**条目先切段,折叠上限在渲染时每段独立应用(2026-08-13
+    // review P1:此前先全局折叠再切段,排在前 N 名之外的设备连段头一起消失,
+    // 看起来像"这台设备没有任务"——设备是最外层层级,折叠只能发生在段内)。
+    return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])]);
+  }, [deviceGroupingActive, visibleMixedEntries, mixedEntries, remoteDeviceIndex]);
   // 设备段折叠(E 期):本机段 key 'local'。
   const [collapsedDevices, setCollapsedDevices] = useState<ReadonlySet<string>>(new Set());
   // 「对话」组折叠:与项目行折叠同级的分组状态(用户裁决:对话组的折叠交互与
@@ -383,7 +452,7 @@ export function ProjectsSection({
   //   双层(设备 + 组层同时存在)→ 循环:收组层 → 收设备层 → 全部展开。
   // 组层 = 项目行 + 「对话」组行(用户裁决:对话组与项目分组同一套批量折叠),
   // 项目侧复用 ProjectNode 折叠状态(collapsed / onCollapseAll / onExpandAll)。
-  const hasGroupLayer = visibleMixedEntries.some((entry) => entry.kind !== 'session');
+  const hasGroupLayer = mixedEntries.some((entry) => entry.kind !== 'session');
   // 当前可见的对话组 key:设备分组下 = 各含对话组条目的设备段;否则单一组。
   // 「收起/展开所有分组」只作用于这些可见 key,不动其它模式下的记忆。
   const visibleDialogueGroupKeys = useMemo<string[]>(() => {
@@ -761,18 +830,32 @@ export function ProjectsSection({
                     </button>
                     <SectionCollapse collapsed={sectionCollapsed}>
                       <div className="flex flex-col gap-1 pl-2">
-                        {section.entries.map((entry) =>
-                          entry.kind === 'project'
-                            ? renderProjectNode(entry.project)
-                            : // 本机段 → null(强制本机);远程段 → 该设备。
-                              renderNonProjectEntry(
-                                entry,
-                                key,
-                                section.deviceId
-                                  ? { deviceId: section.deviceId, deviceName: name }
-                                  : null,
-                              ),
-                        )}
+                        {/* 折叠上限每段独立应用(切段在前,见 deviceSections 注释)。 */}
+                        {(() => {
+                          const sectionView = collapseEntries(section.entries);
+                          return (
+                            <>
+                              {sectionView.visibleEntries.map((entry) =>
+                                entry.kind === 'project'
+                                  ? renderProjectNode(entry.project)
+                                  : // 本机段 → null(强制本机);远程段 → 该设备。
+                                    renderNonProjectEntry(
+                                      entry,
+                                      key,
+                                      section.deviceId
+                                        ? { deviceId: section.deviceId, deviceName: name }
+                                        : null,
+                                    ),
+                              )}
+                              {sectionView.isOverflowing && (
+                                <ShowAllEntriesButton
+                                  count={sectionView.totalCount}
+                                  onClick={() => setShowAllProjects(true)}
+                                />
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     </SectionCollapse>
                   </div>
@@ -788,18 +871,10 @@ export function ProjectsSection({
               )}
             </div>
           )}
-          {projectsOverflow && (
-            <button
-              type="button"
-              className={cn(
-                'flex h-6 w-full items-center justify-center rounded-full px-2 text-xs font-normal',
-                'text-[var(--cmd-palette-item-meta)] transition-colors hover:bg-sidebar-item-hover hover:text-foreground',
-                'focus:outline-none focus-visible:ring-1 focus-visible:ring-[var(--focus-ring)]',
-              )}
-              onClick={() => setShowAllProjects(true)}
-            >
-              {t('ccAgent.sidebar.showAllSessions', { count: projectsTotal })}
-            </button>
+          {/* 全局「显示全部」只属于单段路径(manual / 未按设备分组);设备分组下
+              折叠与 footer 都在段内(见上)。 */}
+          {(filter.sortBy === 'manual' || !deviceGroupingActive) && projectsOverflow && (
+            <ShowAllEntriesButton count={projectsTotal} onClick={() => setShowAllProjects(true)} />
           )}
         </div>
       </SectionCollapse>

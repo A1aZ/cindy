@@ -20,6 +20,10 @@
  *
  * PR 状态(open/merged/...)是远端易变数据,不在启动期预取;main 侧本就有
  * 60s TTL + in-flight 去重,这里只做轻量去重,不再加 TTL。
+ *
+ * 引用补齐不变量:已注册消费者的会话,refs 不能只靠 listAllPrRefs 的 2000 行
+ * 启动缓存。远程走 device-link list;本机 / SSH 走 listPrRefs(sessionId)。
+ * 注册、周期刷新、聚焦刷新共用 refreshConsumer。空结果记 TTL,失败可重试。
  */
 
 import {
@@ -227,6 +231,11 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
   // 时序竞态就让该会话永远静默,置顶重挂载也救不回来。)
   const remoteRefsInFlight = useRef(new Map<string, number>());
   const remoteRefsFetchedAt = useRef(new Map<string, number>());
+  // 本机 / SSH 引用按会话回退:listAllPrRefs 有 2000 行上限,截断后的会话
+  // 不会出现在启动缓存里。已注册消费者必须能走 listPrRefs(sessionId) 补齐,
+  // 与远程 fetchRefsForRemoteSession 对称(2026-08-13 review P1)。
+  const localRefsInFlight = useRef(new Map<string, number>());
+  const localRefsFetchedAt = useRef(new Map<string, number>());
   const remoteDeviceBySession = useRef(new Map<string, string>());
   // 正在展示 PR 信息的会话(sessionId → {deviceId?, count})。顶栏(打开的会话)
   // 与侧栏行(勾选 pr)都注册到这里;引用计数支持同一会话多处并存。refs 异步
@@ -250,6 +259,7 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
       ownerGenRef.current += 1;
       store.clearAll();
       remoteRefsFetchedAt.current.clear();
+      localRefsFetchedAt.current.clear();
       remoteDeviceBySession.current.clear();
     }
     if (dataOwnerId === null) return;
@@ -277,9 +287,14 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
         store.mergeLocalRefs(grouped, (sid) => remoteDeviceBySession.current.has(sid));
         // 已注册消费者(顶栏/侧栏正在展示的会话)拿到引用后立即补状态,
         // 不等 90s 周期——覆盖「先注册、后加载完成」的启动时序。
-        for (const [sid] of prConsumers.current) {
+        for (const [sid, entry] of prConsumers.current) {
           const refs = grouped.get(sid);
-          if (refs) fetchStatusesForRefs(sid, refs);
+          if (refs) {
+            fetchStatusesForRefs(sid, refs);
+            continue;
+          }
+          // 全表截断 / 本就没有行:已注册的本机消费者按会话补拉。
+          if (!entry.deviceId) fetchRefsForLocalSession(sid);
         }
       } catch (err) {
         log.warn('pr refs load failed, will retry', String(err));
@@ -406,10 +421,41 @@ export function PrRefsProvider({ children }: { children: ReactNode }) {
     })();
   }).current;
 
+  const fetchRefsForLocalSession = useRef((sessionId: string) => {
+    // 启动全表已经命中的会话不必再打 IPC;缺席才按会话回退。
+    if (store.getRefs(sessionId).length > 0) return;
+    const gen = ownerGenRef.current;
+    if (localRefsInFlight.current.get(sessionId) === gen) return;
+    const fetchedAt = localRefsFetchedAt.current.get(sessionId);
+    if (fetchedAt !== undefined && Date.now() - fetchedAt < PR_STATUS_REFRESH_INTERVAL_MS - 5_000) {
+      return;
+    }
+    localRefsInFlight.current.set(sessionId, gen);
+    void (async () => {
+      try {
+        const refs = await window.electronAPI.gitContext.listPrRefs(sessionId);
+        if (gen !== ownerGenRef.current) return;
+        localRefsFetchedAt.current.set(sessionId, Date.now());
+        store.setSessionRefs(sessionId, refs);
+        if (refs.length > 0 && prConsumers.current.has(sessionId)) {
+          fetchStatusesForRefs(sessionId, refs);
+        }
+      } catch (err) {
+        log.warn('local pr refs fetch failed', String(err));
+      } finally {
+        if (localRefsInFlight.current.get(sessionId) === gen) {
+          localRefsInFlight.current.delete(sessionId);
+        }
+      }
+    })();
+  }).current;
+
   const refreshConsumer = useRef((sessionId: string, deviceId?: string) => {
     // 远程行:引用可能还没拉到(或上次失败)——先补引用,再查状态。
-    // fetchRefsForRemoteSession 成功后幂等,fetchStatusesForSession 无引用时早退。
+    // 本机 / SSH:全表缓存截断后同样先按会话补引用。两边成功后幂等,
+    // fetchStatusesForSession 无引用时早退。
     if (deviceId) fetchRefsForRemoteSession(sessionId, deviceId);
+    else fetchRefsForLocalSession(sessionId);
     fetchStatusesForSession(sessionId);
   }).current;
 

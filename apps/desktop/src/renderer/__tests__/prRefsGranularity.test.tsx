@@ -212,4 +212,30 @@ describe('PrRefsProvider owner 切换的在飞隔离', () => {
     });
     expect(result.current.status).toMatchObject({ status: 'open' });
   });
+
+  it('本机已注册会话在全表缓存未命中时按会话补拉引用', async () => {
+    const api = installElectronApi();
+    const ref = makeRef('session-local', 11);
+    // 模拟 listAllPrRefs 的 2000 行上限把该会话截掉。
+    api.gitContext.listAllPrRefs.mockResolvedValue([]);
+    api.gitContext.listPrRefs.mockImplementation(async (sessionId: string) =>
+      sessionId === 'session-local' ? [ref] : [],
+    );
+
+    const { result } = renderHook(
+      () => {
+        const { registerPrConsumer } = usePrActions();
+        const refs = usePrRefsForSession('session-local');
+        return { registerPrConsumer, refs };
+      },
+      { wrapper },
+    );
+    act(() => {
+      result.current.registerPrConsumer('session-local');
+    });
+
+    await waitFor(() => expect(api.gitContext.listPrRefs).toHaveBeenCalledWith('session-local'));
+    await waitFor(() => expect(result.current.refs).toHaveLength(1));
+    await waitFor(() => expect(api.gitContext.getPrStatuses).toHaveBeenCalled());
+  });
 });

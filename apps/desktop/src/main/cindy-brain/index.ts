@@ -5100,7 +5100,16 @@ export function registerGhostIpc(): void {
     // preview-request = 右侧栏开预览标签(preview 槽):URL 必须命中身份卡
     // preview.hosts 白名单;守门/限速在 previewSlot,落地在 renderer。
     if (type === 'preview-request') {
-      return getGhostPreviewSlot().handleRequest(id, payload);
+      const request = payload as { sessionId?: unknown } | null;
+      const hasExplicitSessionId =
+        request !== null &&
+        typeof request === 'object' &&
+        !Array.isArray(request) &&
+        typeof request.sessionId === 'string';
+      const focusedSessionIdOverride = hasExplicitSessionId
+        ? undefined
+        : await currentGhostSessionId();
+      return getGhostPreviewSlot().handleRequest(id, payload, { focusedSessionIdOverride });
     }
     // schedule-request = 打开自动化创建面板并预填(agent 槽的 schedule 加档):
     // 只开面板,任务由用户选模型后亲手保存才落库——本槽全程不碰 schedule storage。

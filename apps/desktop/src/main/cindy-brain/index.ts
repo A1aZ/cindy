@@ -192,6 +192,7 @@ import {
   LEGACY_MIGRATION_MISSING,
   LEGACY_MIGRATION_RETRYABLE_FAILURE,
   legacyMigrationAvailable,
+  readLegacyEncryptedValue,
   type LegacyMigrationRead,
 } from './legacyMigrationRead.js';
 import { GHOST_SCHEME, ghostExternalLinkUrls, parseGhostPartition } from '../../shared/ghost.js';
@@ -4723,17 +4724,11 @@ function readLegacyJson<T>(
 }
 
 function readLegacyEncryptedSecret(file: string): LegacyMigrationRead<string> {
-  try {
-    if (!safeStorage.isEncryptionAvailable()) return LEGACY_MIGRATION_RETRYABLE_FAILURE;
-    const value = safeStorage.decryptString(Buffer.from(fs.readFileSync(file, 'utf-8'), 'base64'));
-    return value.length > 0
-      ? legacyMigrationAvailable(value)
-      : LEGACY_MIGRATION_RETRYABLE_FAILURE;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT'
-      ? LEGACY_MIGRATION_MISSING
-      : LEGACY_MIGRATION_RETRYABLE_FAILURE;
-  }
+  return readLegacyEncryptedValue(
+    () => fs.readFileSync(file, 'utf-8'),
+    () => safeStorage.isEncryptionAvailable(),
+    (encoded) => safeStorage.decryptString(Buffer.from(encoded, 'base64')),
+  );
 }
 
 export function registerGhostIpc(): void {

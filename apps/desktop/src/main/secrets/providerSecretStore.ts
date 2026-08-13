@@ -646,16 +646,18 @@ export function readGhostSecretStrict(ghostId: string, secretKey: string): strin
     ghostSecretStorageKey(ghostId, secretKey),
   );
   if (!physicalKey) return null;
-  if (!safeStorage.isEncryptionAvailable()) {
-    throw new Error('safeStorage is unavailable');
-  }
   const filepath = path.join(secretDir(), `${physicalKey}.enc`);
+  let encoded: string;
   try {
-    return safeStorage.decryptString(Buffer.from(fs.readFileSync(filepath, 'utf-8'), 'base64'));
+    encoded = fs.readFileSync(filepath, 'utf-8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error('safeStorage is unavailable');
+  }
+  return safeStorage.decryptString(Buffer.from(encoded, 'base64'));
 }
 
 /**

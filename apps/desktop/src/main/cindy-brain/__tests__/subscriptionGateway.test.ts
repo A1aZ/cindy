@@ -165,6 +165,25 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     await expect(pending[0]?.claim()).resolves.toBe(false);
   });
 
+  it('allows the same unresolved focus to retry after the first lookup fails', async () => {
+    let attempts = 0;
+    const published: string[] = [];
+    const notify = vi.fn(async (sessionId: string, claim: () => Promise<boolean>) => {
+      if (await claim()) published.push(sessionId);
+    });
+    const tracker = createGhostPrimarySessionFocusTracker(async () => {
+      attempts += 1;
+      return attempts === 1 ? null : 'lead';
+    }, notify);
+
+    tracker.note('worker');
+    await vi.waitFor(() => expect(attempts).toBe(1));
+    tracker.note('worker');
+    await vi.waitFor(() => expect(published).toEqual(['lead']));
+
+    expect(attempts).toBe(3);
+  });
+
   it('clears deduplication when focus leaves the session or resolution fails', async () => {
     const published: string[] = [];
     const notify = vi.fn(async (sessionId: string, claim: () => Promise<boolean>) => {

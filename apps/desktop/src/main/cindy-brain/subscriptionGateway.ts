@@ -648,6 +648,8 @@ export function createGhostPrimarySessionFocusTracker(
         .then((primarySessionId) => {
           if (currentGeneration !== generation) return;
           if (primarySessionId === null) {
+            // 解析失败不应占用 raw focus；同一焦点的后续上报需要能够重试。
+            lastRawSessionId = null;
             lastPrimarySessionId = null;
             return;
           }
@@ -662,7 +664,10 @@ export function createGhostPrimarySessionFocusTracker(
           });
         })
         .catch(() => {
-          if (currentGeneration === generation) lastPrimarySessionId = null;
+          if (currentGeneration === generation) {
+            lastRawSessionId = null;
+            lastPrimarySessionId = null;
+          }
         });
     },
   };

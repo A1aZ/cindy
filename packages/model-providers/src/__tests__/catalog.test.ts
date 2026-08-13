@@ -100,6 +100,25 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
     expect(() => parseCatalog(BUNDLED_CATALOG)).not.toThrow();
   });
 
+  it('keeps selectable registry efforts self-consistent with defaultEffort', () => {
+    const registry = BUNDLED_CATALOG.modelRegistry;
+    expect(registry).toBeDefined();
+    for (const entry of registry!.models) {
+      const efforts = entry.efforts ?? [];
+      if (efforts.length === 0) continue;
+      expect(entry.defaultEffort, entry.id).toBeTruthy();
+      expect(efforts, entry.id).toContain(entry.defaultEffort);
+    }
+    expect(registryEntryForRoute('openai', 'gpt-5.6-luna')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'high',
+    });
+    expect(registryEntryForRoute('openai', 'gpt-5.4-nano')).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+  });
+
   it('has exactly the built-in providers in stable order', () => {
     // 顺序契约:决定选择器分段顺序与 deriveAvailableModels first-wins 优先级。
     expect(BUNDLED_CATALOG.providers.map((p) => p.id)).toEqual(['anthropic', 'openai', 'xai', 'xd', 'gemini']);

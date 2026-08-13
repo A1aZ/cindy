@@ -410,10 +410,11 @@ describe('OrcaWorkflowRoute source invariants', () => {
   });
 
   it('does not navigate the detached sidebar window to settings from the worker toolbar', () => {
-    // 硬上限时 + 按钮跳转到协同设置（codex P1 逃生口），但分离侧栏窗口不能整壳替换成设置路由，
-    // 因此 OrcaWorkerPanel 的 handleOpenSettings 用 isSidebarWindow() 守卫：侧栏窗口下不跳转。
+    // 硬上限时 + 按钮跳转到协同设置（codex P1 逃生口），但分离侧栏窗口不能整壳替换成设置路由。
+    // 实现用 onOpenSettings={isSidebarWindow() ? undefined : handleOpenSettings} 在调用处守卫：
+    // 侧栏窗口下传 undefined，+ 按钮回退为 disabled（不再呈现点了没反应的「设置 · 协同」按钮）。
     expect(workerPanelSource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
-    expect(workerPanelSource).toContain('if (isSidebarWindow()) return;');
+    expect(workerPanelSource).toContain('onOpenSettings={isSidebarWindow() ? undefined : handleOpenSettings}');
     expect(workerPanelSource).toContain("navigate('/settings?section=collaboration')");
     expect(workerPanelSource).not.toContain('settingsEnabled');
     expect(workersTabBodySource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");

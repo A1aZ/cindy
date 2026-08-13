@@ -1149,7 +1149,7 @@ export function RolePillDropdown({
         <div
           ref={popoverRef}
           className={cn(
-            'absolute left-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
+            'absolute left-0 z-50 flex w-[320px] flex-col overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
             menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
           )}
           style={{

@@ -321,7 +321,7 @@ function shortClusterOption(
  */
 const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
   string,
-  { targets: 'first' | 'last' | 'all'; sources?: boolean; pathIsSource?: boolean }
+  { targets: 'first' | 'last' | 'all' | 'named'; sources?: boolean; pathIsSource?: boolean }
 > =
   new Map([
     // 写内容到 -Path(位置 0),值是第二个操作数。
@@ -355,6 +355,18 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
     ['expand-archive', { targets: 'last', pathIsSource: true }],
     ['export-certificate', { targets: 'last', pathIsSource: true }],
     ['export-pfxcertificate', { targets: 'last', pathIsSource: true }],
+    // 下载落盘:`iwr <url> -OutFile <path>` 与 `curl -o <path> <url>` 是同一个写通道
+    // (后者早就被 POSIX 分支覆盖、已必问,PowerShell 形态一直漏,codex 报)。
+    // **`targets: 'named'`**:位置 0 是 `-Uri`,不是路径 —— 既不能当写目标,也不能像 copy 那样
+    // 落回 cwd(不带 `-OutFile` 的 `iwr <url>` 只返回对象、根本不落盘,给它编一个 cwd 目标就是
+    // 凭空造出一次写入)。所以这一档只认具名 `-OutFile`,不做任何位置推断。
+    // **不登记 `curl` / `wget`**:它们在 Windows PowerShell 里也是 Invoke-WebRequest 的别名,但
+    // 已经落在 POSIX 的 curl/wget 分支(那条认 `-o`/`-O`/`--output-dir` 等更完整的一套)。
+    // 加进这张表会把它们改走这条更窄的规则 —— 那是把既有覆盖面改小,和 `tee` 同一个道理。
+    ['invoke-webrequest', { targets: 'named' }],
+    ['iwr', { targets: 'named' }],
+    ['invoke-restmethod', { targets: 'named' }],
+    ['irm', { targets: 'named' }],
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
     ['set-item', { targets: 'first' }],
@@ -425,6 +437,8 @@ const POWERSHELL_TARGET_PARAMS: readonly string[] = [
   '-path', '-literalpath', '-lp', '-pspath', '-destination', '-filepath', '-newname',
   // 归档 / 转录 / 帮助下载各自的落地位置参数(Compress-Archive、Start-Transcript、Save-Help…)。
   '-destinationpath', '-outputdirectory',
+  // 下载落盘位置(Invoke-WebRequest / Invoke-RestMethod)。
+  '-outfile',
 ];
 
 /**
@@ -504,6 +518,14 @@ const POWERSHELL_VALUE_PARAMS: readonly string[] = [
   // `-Encoding` 与 `-AclObject`,所以登记新 cmdlet 时一并登记它的带值参数已是固定动作)。
   '-inputobject', '-cert', '-certificate', '-module', '-compressionlevel', '-password',
   '-usequotes', '-quotefields', '-usiculture', '-fullyqualifiedmodule',
+  // Invoke-WebRequest / Invoke-RestMethod 的带值参数。这一组必须齐,否则未知参数会触发下面
+  // 「操作数顺序不可证」的 fail closed,把 `iwr <url> -Headers $h` 这种日常调用打成硬弹窗。
+  '-uri', '-method', '-headers', '-body', '-contenttype', '-useragent', '-timeoutsec',
+  '-maximumredirection', '-maximumretrycount', '-retryintervalsec', '-proxy',
+  '-proxycredential', '-sessionvariable', '-websession', '-form', '-infile',
+  '-transferencoding', '-authentication', '-token', '-certificatethumbprint',
+  '-statuscodevariable', '-responseheadersvariable', '-connectiontimeoutseconds',
+  '-operationtimeoutseconds', '-httpversion',
 ];
 
 /**
@@ -523,6 +545,10 @@ const POWERSHELL_SWITCH_PARAMS: readonly string[] = [
   '-force', '-recurse', '-passthru', '-nonewline', '-noclobber', '-append', '-container',
   '-usetransaction', '-asbytestream', '-raw', '-wait', '-followsymlink', '-nooverwrite',
   '-notypeinformation', '-nonewwindow',
+  // Invoke-WebRequest / Invoke-RestMethod 的开关(同上:列出来才能把「未知参数」缩小到真的未知)。
+  '-usebasicparsing', '-usedefaultcredentials', '-skipcertificatecheck', '-skiphttperrorcheck',
+  '-skipheadervalidation', '-allowunencryptedauthentication', '-noproxy', '-resume',
+  '-preserveauthorizationonredirect', '-disablekeepalive', '-allowinsecureredirect',
 ];
 
 /**
@@ -702,6 +728,11 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
       ? [...named, ...operands.flatMap(expand)]
       : named;
   }
+  // 只认具名目标的 cmdlet(下载类:位置 0 是 URL,不是路径)—— 没给具名落地参数就是不落盘,
+  // 不能像 copy 那样落回 cwd,那等于凭空造出一次写入。
+  // 但**有歧义/未知参数吃了值**时不能就此判"没写目标":那个参数可能正是 `-OutFile`
+  // (`iwr <url> -Out <系统路径>` 里 `-Out` 同时像 -OutFile/-OutVariable/-OutBuffer)→ fail closed。
+  if (spec.targets === 'named') return operandOrderUnprovable ? [UNPROVABLE_WRITE_TARGET] : [];
   // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
   // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
   // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
@@ -3155,8 +3186,13 @@ function systemWriteTargetsInSegment(
       if (isProtectedProviderPath(resolved) || isProtectedSystemPath(resolved)) return true;
       return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
     }
-    // 每个目标查两种形态:原样(保留 Windows `\` 分隔符)与去 POSIX `\` 转义(`/e\tc`→`/etc`)。
-    return [t, t.replace(/\\(.)/g, '$1')].some((v) => {
+    // 每个目标查三种形态:原样(保留 Windows `\` 分隔符)、去 POSIX `\` 转义(`/e\tc`→`/etc`)、
+    // 去 PowerShell 反引号转义。后者是 codex 报的绕过:PowerShell 里 `` ` `` 转义下一个字符,
+    // 所以 ``C:\Win`dows\System32\drivers\etc\hosts`` 运行时就是 hosts,但判据要匹配字面
+    // `Windows`,带着反引号一条都不命中。**只多加一个候选形态,不改原判据** —— 与既有那条
+    // POSIX 去转义变体完全同构,所以两个入口(PowerShell 工具与 Bash 原样串)自动一致。
+    // 反引号出现在真实文件名里(``C:\repo\a`b.txt``)只会多出一个候选,判档不变(已断言)。
+    return [t, t.replace(/\\(.)/g, '$1'), t.replace(/`/g, '')].some((v) => {
       const forward = toForwardSlashes(v);
       // cwd 未知 + 相对目标 → 无法证明它没落进系统目录,fail-closed。
       if (opts.cwdUnknown && !isAbsolutePath(forward)) return true;

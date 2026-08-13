@@ -392,13 +392,13 @@ function WorkerLayoutMenu({
       </Tip>
       {open && (
         <div
-          className="absolute right-0 top-full z-50 mt-1 w-[320px] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
+          className="absolute right-0 top-full z-50 mt-1 flex max-h-[calc(100vh-24px)] w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
           style={{ boxShadow: 'var(--shadow-menu)' }}
         >
           {/* Header: WORKERS + count */}
           {layout === 'tabs' && (
             <>
-              <div className="flex select-none items-center justify-between px-4 pt-3 pb-2">
+              <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">
                 <span className="text-10 font-medium uppercase tracking-[0.5px] text-[var(--text-tertiary)]">
                   {t('orca.rolePill.workersHeader')}
                 </span>
@@ -412,7 +412,7 @@ function WorkerLayoutMenu({
               </div>
 
               {/* Worker rows */}
-              <div className="flex flex-col">
+              <div className="flex min-h-0 flex-col overflow-y-auto">
                 {workers.map((w) => {
                   const isFocused = w.workerId === selectedWorkerId || w.focused;
                   const isError = w.status === 'error';
@@ -476,12 +476,12 @@ function WorkerLayoutMenu({
               </div>
 
               {/* Separator */}
-              <div className="mx-4 h-px bg-[var(--border-default)]" />
+              <div className="mx-4 h-px shrink-0 bg-[var(--border-default)]" />
             </>
           )}
 
           {/* Layout options */}
-          <div className="p-1">
+          <div className="shrink-0 p-1">
             <div className="select-none px-2.5 py-1.5 text-10 font-medium leading-snug text-[var(--text-tertiary)]">
               {t('orca.rolePill.layoutMenuLabel')}
             </div>
@@ -988,11 +988,11 @@ export function RolePillDropdown({
       {open && (
         <div
           ref={popoverRef}
-          className="absolute left-0 top-full z-50 mt-1 w-[320px] rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
+          className="absolute left-0 top-full z-50 mt-1 flex max-h-[calc(100vh-24px)] w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]"
           style={{ boxShadow: 'var(--shadow-menu)' }}
         >
           {/* Header: WORKERS + count */}
-          <div className="flex select-none items-center justify-between px-4 pt-3 pb-2">
+          <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">
             <span className="text-10 font-medium uppercase tracking-[0.5px] text-[var(--text-tertiary)]">
               {t('orca.rolePill.workersHeader')}
             </span>
@@ -1008,7 +1008,7 @@ export function RolePillDropdown({
           </div>
 
           {/* Worker rows */}
-          <div className="flex flex-col">
+          <div className="flex min-h-0 flex-col overflow-y-auto">
             {workers.map((w) => {
               const isFocused = w.workerId === selectedWorkerId || w.focused;
               // error 行整体描红(优先于 focused 高亮), 软红底 + 红左边, 与 tabs 布局一致。

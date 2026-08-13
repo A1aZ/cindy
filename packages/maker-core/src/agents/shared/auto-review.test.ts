@@ -2849,6 +2849,48 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('FileSystem:: 限定符 + 通配符组合:剥离点必须在 glob/非 glob 两条分支之前', () => {
+    // 上一轮只在**非 glob** 那条分支里剥 `FileSystem::`,于是限定符 + 通配符的组合照旧漏:
+    // `FileSystem::C:\Win*\System32\…` 里 `FileSystem::C:` 不是单字母盘符 → 被当相对路径锚到
+    // 工作区下,真实的系统删除落到灰区(codex 报)。
+    // 修法不是在 glob 分支再补一次剥离,而是把剥离提到**两条分支之前的唯一入口** —— 以后再加
+    // 分支也不会漏。registry / certificate 的结论由 provider 判据单独给出,不能剥(见反例组)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Remove-Item FileSystem::C:\\Win*\\System32\\drivers\\etc\\hosts',
+      'Set-Content FileSystem::C:\\Win*\\System32\\drivers\\etc\\hosts owned',
+      'Remove-Item filesystem::C:\\Win*\\System32\\x',                            // 大小写
+      'Remove-Item Microsoft.PowerShell.Core\\FileSystem::C:\\Win*\\System32\\x', // 完整 provider 名
+      'Remove-Item FileSystem::C:\\Windows\\System32\\*',                         // 通配在末段
+      // 通配符之后还接 `..` 跳转 —— 占位符归一那条判据要能在剥掉限定符后照常生效。
+      'Remove-Item FileSystem::C:\\repo\\safe\\*\\..\\..\\..\\Windows\\System32\\x',
+      'Copy-Item C:\\repo\\p FileSystem::C:\\Win*\\x',                            // 目标侧
+      'Export-Csv -Path FileSystem::C:\\Win*\\System32\\x',                       // 其它写 cmdlet
+      'pwsh -Command Remove-Item FileSystem::C:\\Win*\\System32\\x',              // 载荷下探
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:registry / certificate 限定符**不能**被当文件路径剥掉 —— 剥了就丢 provider 身份。
+    expect(classifyShellCommand('Remove-Item Registry::HKEY_LOCAL_MACHINE\\SYSTEM\\*', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('Remove-Item Certificate::LocalMachine\\Root\\*', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 反例二:区内目标判档不变(剥离只让判据看见真实路径,不改口径)。
+    for (const c of [
+      'Remove-Item FileSystem::C:\\repo\\build\\*',
+      'Remove-Item FileSystem::C:\\repo\\a.txt',
+      'Remove-Item C:\\repo\\build\\*',
+      'Remove-Item FileSystem::C:\\repo\\a*\\..\\b',   // 通配被 `..` 抵消后仍在区内
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例三:非 glob 的限定符形态仍必问(上一轮的回归基线)。
+    expect(classifyShellCommand(
+      'Remove-Item FileSystem::C:\\Windows\\System32\\drivers\\etc\\hosts', win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

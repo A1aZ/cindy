@@ -3215,10 +3215,19 @@ function systemWriteTargetsInSegment(
   const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
   const base = opts.cwd ?? workspaceRoots[0];
   return targets.some((rawTarget) => {
+    const isGlob = rawTarget.startsWith(GLOB_WRITE_TARGET_PREFIX);
+    // **两条分支之前只剥一次**:`FileSystem::C:\Windows\…` 的 provider 限定符必须在任何归一之前
+    // 去掉 —— normalizeTarget 只认单字母盘符,会把整串当相对路径拼到工作区下
+    // (`C:/repo/FileSystem::C:/Windows/…`),此后再怎么判都看不出它是系统路径。
+    // 上一轮只在下面的非 glob 分支里剥,于是 `FileSystem::C:\Win*\System32\…` 这类
+    // **限定符 + 通配符**的组合照旧漏掉(codex 报)。剥离点提到分支之前,glob 与非 glob 同时覆盖,
+    // 以后再加分支也不会漏。registry / certificate 的结论已在上面单独给出,不能剥。
+    const t = stripFileSystemQualifier(isGlob
+      ? rawTarget.slice(GLOB_WRITE_TARGET_PREFIX.length)
+      : rawTarget);
     // 会展开的通配符目标(见 GLOB_WRITE_TARGET_PREFIX):静态上不是一条路径而是一组。
-    if (rawTarget.startsWith(GLOB_WRITE_TARGET_PREFIX)) {
-      const t = rawTarget;
-      const pattern = t.slice(GLOB_WRITE_TARGET_PREFIX.length);
+    if (isGlob) {
+      const pattern = t;
       // 通配符落在 provider 限定符里(`HK*:\SYSTEM\x`)→ 连"是哪个 provider"都证不出来。
       // 这类 drive 段带通配符的写法在真 PowerShell 里解析不出驱动器,但判据不能靠"它大概会报错"
       // 兜底 —— 与本文件其它不可证口径一致,直接要求同意。
@@ -3237,10 +3246,6 @@ function systemWriteTargetsInSegment(
       if (isProtectedProviderPath(resolved) || isProtectedSystemPath(resolved)) return true;
       return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
     }
-    // `FileSystem::C:\Windows\…` 的 provider 限定符必须在**归一之前**剥掉:normalizeTarget 只认
-    // 单字母盘符,会把整串当相对路径拼到工作区下(`C:/repo/FileSystem::C:/Windows/…`),此后再怎么判
-    // 都看不出它是系统路径(codex 报)。registry / certificate 那两个 provider 已在上面给出结论。
-    const t = stripFileSystemQualifier(rawTarget);
     // 每个目标查三种形态:原样(保留 Windows `\` 分隔符)、去 POSIX `\` 转义(`/e\tc`→`/etc`)、
     // 去 PowerShell 反引号转义。后者是 codex 报的绕过:PowerShell 里 `` ` `` 转义下一个字符,
     // 所以 ``C:\Win`dows\System32\drivers\etc\hosts`` 运行时就是 hosts,但判据要匹配字面

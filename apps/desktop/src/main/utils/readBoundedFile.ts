@@ -49,6 +49,8 @@ export interface BoundedFileRead {
   bytes: Buffer;
   /** 与 bytes 来自同一已打开句柄，且读取前后版本字段保持不变。 */
   stat: fs.BigIntStats;
+  /** 同一文件句柄在读取前校验过的字节长度。 */
+  expectedSize: number;
 }
 
 export class BoundedFileReadUncertainError extends Error {
@@ -84,7 +86,7 @@ function normalizeRealPathForComparison(realPath: string): string {
   return realPath.replace(/^([A-Z]):/, (_, drive: string) => `${drive.toLowerCase()}:`);
 }
 
-function isWithinRoot(realFilePath: string, realRoot: string): boolean {
+export function isRealPathWithinRoot(realFilePath: string, realRoot: string): boolean {
   const comparableFilePath = normalizeRealPathForComparison(realFilePath);
   const comparableRoot = normalizeRealPathForComparison(realRoot);
   if (comparableFilePath === comparableRoot) return true;
@@ -165,7 +167,7 @@ async function verifyStillWithinRoot(
       fs.promises.realpath(filePath),
     ]);
     if (!sameInode(pathStat, handleStat)) return false;
-    return isWithinRoot(realFilePath, realRoot);
+    return isRealPathWithinRoot(realFilePath, realRoot);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException)?.code;
     if (code !== 'ENOENT' && code !== 'ENOTDIR' && code !== 'ELOOP') {
@@ -186,7 +188,7 @@ function verifyStillWithinRootSync(
       fs.realpathSync(filePath),
     ];
     if (!sameInode(pathStat, handleStat)) return false;
-    return isWithinRoot(realFilePath, realRoot);
+    return isRealPathWithinRoot(realFilePath, realRoot);
   } catch {
     return false;
   }
@@ -265,9 +267,9 @@ export async function readBoundedFileNoFollowWithStat(
       ) {
         throw new BoundedFileReadChangedError();
       }
-      return { bytes, stat: verificationStat };
+      return { bytes, stat: verificationStat, expectedSize: Number(stat.size) };
     }
-    return { bytes, stat: after };
+    return { bytes, stat: after, expectedSize: Number(stat.size) };
   } finally {
     await handle.close();
   }

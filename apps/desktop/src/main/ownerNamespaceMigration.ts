@@ -11,15 +11,19 @@ import {
   GHOST_MANIFEST_FILE,
   isOfficialGhostId,
   isValidGhostId,
-  validateGhostManifest,
 } from '../shared/ghost.js';
+import { parseInstalledGhostManifest } from './installedGhostManifest.js';
 import {
   NO_LEGACY_GHOST_RECOVERY,
   type LegacyGhostRecoveryStatus,
 } from '../shared/legacyGhostRecovery.js';
 import { readLegacyGhostApprovalProjection } from './cindy-brain/GhostManager.js';
 import { withGhostInstallLock } from './cindy-brain/ghostInstallLock.js';
-import { readBoundedFileNoFollow, readBoundedFileNoFollowSync, GHOST_MANIFEST_MAX_BYTES } from './utils/readBoundedFile.js';
+import {
+  GHOST_MANIFEST_MAX_BYTES,
+  readBoundedFileNoFollow,
+  readBoundedFileNoFollowSync,
+} from './utils/readBoundedFile.js';
 
 const CLAIM_MARKER = '.owner-namespace-claim-v1.json';
 const LEGACY_GHOST_RECOVERY_MARKER = '.legacy-ghost-recovery-v1.json';
@@ -825,14 +829,15 @@ function readLegacyGhostManifest(
   expectedId: string,
 ): LegacyGhostManifestRead {
   const manifestPath = path.join(dir, GHOST_MANIFEST_FILE);
-  // containWithin needs the real path so that symlinked/relocated userData
-  // doesn't reject the manifest as outside the root.  If realpathSync itself
-  // fails the directory is inaccessible and the scan treats it as invalid.
+  // Keep recovery's three-state I/O semantics at this boundary. The installed
+  // manifest parser only owns the legacy-manual compatibility rule; it must
+  // not collapse a transient no-follow/containment failure into an ordinary
+  // invalid manifest, because recovery must defer rather than freeze it out.
   let containWithin: string;
   try {
     containWithin = fsSync.realpathSync(dir);
-  } catch {
-    return { kind: 'invalid' };
+  } catch (error) {
+    return isMissing(error) ? { kind: 'invalid' } : { kind: 'deferred' };
   }
   let bytes: Buffer | null;
   try {
@@ -842,14 +847,14 @@ function readLegacyGhostManifest(
   } catch (error) {
     return isMissing(error) ? { kind: 'invalid' } : { kind: 'deferred' };
   }
-  if (!bytes) return { kind: 'invalid' };
+  if (bytes === null) return { kind: 'invalid' };
   let raw: unknown;
   try {
-    raw = JSON.parse(bytes.toString('utf-8'));
+    raw = JSON.parse(bytes.toString('utf8')) as unknown;
   } catch {
     return { kind: 'invalid' };
   }
-  const parsed = validateGhostManifest(raw);
+  const parsed = parseInstalledGhostManifest(raw);
   if (!parsed.ok || parsed.manifest.id !== expectedId) return { kind: 'invalid' };
   return { kind: 'ready', command: parsed.manifest.command ?? null };
 }

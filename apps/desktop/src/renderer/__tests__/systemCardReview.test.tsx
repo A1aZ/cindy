@@ -49,7 +49,7 @@ describe('SystemCard Review', () => {
     expect(screen.getByText('chat.systemCard.review.readOnlyHint')).toBeTruthy();
   });
 
-  it('renders the completed findings and opens the isolated reviewer task', () => {
+  it('renders the completed findings and opens the internal review details', () => {
     renderCard({
       status: 'completed',
       reviewerSessionId: 'review-task',

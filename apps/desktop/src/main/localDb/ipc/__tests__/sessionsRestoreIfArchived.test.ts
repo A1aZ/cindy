@@ -224,4 +224,12 @@ describe('local-db:sessions:restore-if-archived', () => {
   it('throws NOT_FOUND when the session no longer exists', async () => {
     await expect(restore('missing')).rejects.toThrow('[NOT_FOUND]');
   });
+
+  it('rejects restoring a retained Review audit detail', async () => {
+    h.sqlite!.prepare("UPDATE sessions SET source = 'review' WHERE id = 'target'").run();
+
+    await expect(restore()).rejects.toThrow(/Review audit details are read-only/);
+    expect(readStatus()).toBe('archived');
+    expect(h.routeLock).not.toHaveBeenCalled();
+  });
 });

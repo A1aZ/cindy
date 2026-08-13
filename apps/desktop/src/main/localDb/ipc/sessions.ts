@@ -56,6 +56,7 @@ import { removeTurnChangeSetsForSession } from '../../turn-change-set/store.js';
 import { quiesceSessionBeforeWorktreeRecycle } from './sessionRemovalOperations.js';
 import { withSessionRouteLock, withSessionRouteLocks } from '../sessionRouteLock.js';
 import { broadcastSubagentRunsInvalidated } from './subagentRuns.js';
+import { assertReviewSessionMutationAllowed } from '../../reviewer/reviewSessionMutationPolicy.js';
 
 const log = createLogger('sessions');
 const REMOTE_EDITABLE_META = new Set(['status', 'title', 'pinnedAt']);
@@ -1287,6 +1288,7 @@ export function registerSessionIpc(
       }
 
       const db = getDbClient().drizzle;
+      await assertReviewSessionMutationAllowed(sid);
       const updated = await withSessionRouteLock(sid, async () => {
         if (!isOwnerScopeCurrent(ownerScope)) return null;
         // 显式 .run() 才能从生产 DbClient.drizzle proxy 拿到 changes；隐式 await
@@ -1360,31 +1362,7 @@ export function registerSessionIpc(
     if (typeof p.workingDir === 'string') {
       p.workingDir = normalizeWorkingDirForStorage(p.workingDir) ?? null;
     }
-    const REVIEW_IMMUTABLE_FIELDS = new Set([
-      'workingDir',
-      'workspaceKind',
-      'model',
-      'providerId',
-      'effort',
-      'permissionMode',
-      'fastMode',
-      'planModeEnabled',
-      'orcaRole',
-      'extraDirs',
-    ]);
-    if (Object.keys(p).some((key) => REVIEW_IMMUTABLE_FIELDS.has(key))) {
-      const [target] = await db
-        .select({ source: sessions.source })
-        .from(sessions)
-        .where(eq(sessions.id, sid))
-        .limit(1);
-      if (target?.source === 'review') {
-        throwIpcError(
-          'UNSUPPORTED_CAPABILITY',
-          'Review task settings are fixed to the source task',
-        );
-      }
-    }
+    if (Object.keys(p).length > 0) await assertReviewSessionMutationAllowed(sid);
     // 会话移动转录迁移:patch 带 workingDir 时先留存旧值,update 后对比实际变化。
     // CLI 转录按 cwd 转码目录存放,workingDir 变了必须跟着搬,否则 resume 报
     // "No conversation found with session ID"(见 claude-transcript-relocation.ts)。
@@ -1575,6 +1553,7 @@ export async function patchSessionMetaInDb(
   }
 
   const db = getDbClient().drizzle;
+  await assertReviewSessionMutationAllowed(sessionId);
   const setObj = sessionPatchToRow(patch, { bumpUpdatedAt: false });
   // 控制端远程改名走这条,与本机改名同口径(同样先记号后写库)。
   if (patch.title !== undefined) noteUserTitleWritten(sessionId);
@@ -1676,6 +1655,10 @@ export async function renameSessionTitlesInDb(
 
   if (dryRun) return preview;
 
+  for (const change of changes) {
+    await assertReviewSessionMutationAllowed(change.sessionId);
+  }
+
   // 批量改名(MCP 工具)同样是"人给的名字",自动起名不得再覆盖;与上面两条出口
   // 一样先记号后写库,不给并发的智能标题留窗口。
   for (const change of changes) noteUserTitleWritten(change.sessionId);
@@ -1725,6 +1708,9 @@ export async function setSessionsStatusInDb(
   if (sessionIds.length === 0) return [];
   const ownerScope = captureOwnerScope();
   const dbClient = getDbClient();
+  for (const sessionId of sessionIds) {
+    await assertReviewSessionMutationAllowed(sessionId);
+  }
   const applied = await withSessionRouteLocks(sessionIds, () =>
     dbClient.tx('sessions.setStatus', { sessionIds, status }).catch((err) => {
       const code = (err as { code?: string }).code;

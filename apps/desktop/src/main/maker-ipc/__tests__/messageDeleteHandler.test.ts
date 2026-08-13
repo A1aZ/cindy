@@ -11,7 +11,7 @@ function makeDeps(
   overrides: Partial<MessageDeleteHandlerDeps> = {},
 ): MessageDeleteHandlerDeps {
   return {
-    getSessionRow: vi.fn(async () => ({ status: 'active', agentKind: 'cc' })),
+    getSessionRow: vi.fn(async () => ({ status: 'active', agentKind: 'cc', source: 'desktop' })),
     getMessage: vi.fn(async () => ({
       id: 'target-row',
       role: 'user' as const,
@@ -42,6 +42,24 @@ function makeDeps(
 }
 
 describe('performMessageDeletion', () => {
+  it('rejects forged deletion requests for Review audit details before any side effect', async () => {
+    const deps = makeDeps({
+      getSessionRow: vi.fn(async () => ({
+        status: 'active',
+        agentKind: 'codex',
+        source: 'review',
+      })),
+    });
+
+    await expect(
+      performMessageDeletion(deps, { sessionId: 'review-1', clientId: 'target' }),
+    ).rejects.toThrow(/Review audit details are read-only/);
+
+    expect(deps.closeSession).not.toHaveBeenCalled();
+    expect(deps.drainPersistQueue).not.toHaveBeenCalled();
+    expect(deps.commitDeletion).not.toHaveBeenCalled();
+  });
+
   it('keeps the deleted-session preview on the visible message projection', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/main/localDb/ipc/messages.ts'), 'utf8');
     const deletionBlock = source.slice(

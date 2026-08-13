@@ -6482,8 +6482,8 @@
         "running": "正在審查當前成果",
         "completed": "審查完成",
         "failed": "審查未完成",
-        "openTask": "開啟審查任務",
-        "readOnlyHint": "獨立任務 · 無開發記憶 · 只讀",
+        "openTask": "查看審查詳情",
+        "readOnlyHint": "內部審查 · 無開發記憶 · 只讀",
         "noResult": "審查任務沒有返回可見結論",
         "failure": {
           "reviewerClosed": "審查任務在完成前已關閉",

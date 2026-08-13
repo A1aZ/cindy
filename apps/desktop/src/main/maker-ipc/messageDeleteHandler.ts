@@ -24,6 +24,7 @@ interface ContextSourceMessage extends HandoffSourceMessage {
 interface MessageDeleteSessionRow {
   status: string;
   agentKind: string;
+  source: string;
 }
 
 /**
@@ -93,6 +94,9 @@ export async function performMessageDeletion(
   ]);
   if (!sessionRow || sessionRow.status === 'deleted') {
     throwIpcError('NOT_FOUND', `Session ${sessionId} not found`);
+  }
+  if (sessionRow.source === 'review') {
+    throwIpcError('UNSUPPORTED_CAPABILITY', 'Review audit details are read-only');
   }
   if (!initialTarget) {
     throwIpcError('NOT_FOUND', 'Message 不存在或不可删除');

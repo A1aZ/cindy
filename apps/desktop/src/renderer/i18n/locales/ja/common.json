@@ -6483,8 +6483,8 @@
         "running": "現在の成果をレビュー中",
         "completed": "レビュー完了",
         "failed": "レビューを完了できませんでした",
-        "openTask": "レビュータスクを開く",
-        "readOnlyHint": "独立タスク・開発メモリなし・読み取り専用",
+        "openTask": "レビュー詳細を表示",
+        "readOnlyHint": "内部レビュー・開発メモリなし・読み取り専用",
         "noResult": "レビュー結果が返されませんでした",
         "failure": {
           "reviewerClosed": "レビュータスクは完了前に閉じられました",

@@ -6479,8 +6479,8 @@
         "running": "正在审查当前成果",
         "completed": "审查完成",
         "failed": "审查未完成",
-        "openTask": "打开审查任务",
-        "readOnlyHint": "独立任务 · 无开发记忆 · 只读",
+        "openTask": "查看审查详情",
+        "readOnlyHint": "内部审查 · 无开发记忆 · 只读",
         "noResult": "审查任务没有返回可见结论",
         "failure": {
           "reviewerClosed": "审查任务在完成前已关闭",

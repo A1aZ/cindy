@@ -3680,6 +3680,7 @@ export function CCAgentSessionView({
       // 消息下方 Fork / Rewind icon 的显示 (Codex rewind=false → 隐藏)。
       agentKind={session?.agentKind}
       remoteHostId={session?.remoteHostId ?? null}
+      readOnly={session?.source === 'review'}
       // text-lightbox-trigger-extension F1/F2: cwd flows from session
       // owner down through MessageStream → AssistantMessage / UserMessage.
       // The spec guarantees `session.workingDir` is set; `?? ''` is purely

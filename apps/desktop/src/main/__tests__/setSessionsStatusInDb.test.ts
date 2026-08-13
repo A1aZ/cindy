@@ -15,27 +15,39 @@ import type { SessionRouteLock } from '../localDb/sessionRouteLock.js';
 type SessionRouteLockMock = SessionRouteLock &
   MockInstance<(sessionId: string, task: () => Promise<unknown>) => Promise<unknown>>;
 
-const h = vi.hoisted(() => ({
-  tx: vi.fn(),
-  tapWindowBroadcast: vi.fn(),
-  webContentsSend: vi.fn(),
-  closeSession: vi.fn(),
-  isSessionAlive: vi.fn(),
-  withSendToSessionLock: vi.fn(async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> =>
-    task(),
-  ) as SessionRouteLockMock,
-  isSessionStillRemovable: vi.fn(),
-  cancelSessionOperations: vi.fn(),
-  cleanupRemovedSession: vi.fn(),
-  removeSessionRefs: vi.fn(),
-  recycleWorktreeForRemovedSession: vi.fn(),
-  isOwnerScopeCurrent: vi.fn(),
-  drizzle: {},
-  userDataPath: '',
-  agentIslandService: {
-    handleSessionMetadataPatch: vi.fn(),
-  },
-}));
+const h = vi.hoisted(() => {
+  const reviewSource = { current: 'desktop' };
+  const drizzle = {
+    select: vi.fn(() => {
+      const chain: Record<string, unknown> = {};
+      chain.from = () => chain;
+      chain.where = () => Promise.resolve([{ source: reviewSource.current }]);
+      return chain;
+    }),
+  };
+  return {
+    tx: vi.fn(),
+    tapWindowBroadcast: vi.fn(),
+    webContentsSend: vi.fn(),
+    closeSession: vi.fn(),
+    isSessionAlive: vi.fn(),
+    withSendToSessionLock: vi.fn(
+      async <T>(_sessionId: string, task: () => Promise<T>): Promise<T> => task(),
+    ) as SessionRouteLockMock,
+    isSessionStillRemovable: vi.fn(),
+    cancelSessionOperations: vi.fn(),
+    cleanupRemovedSession: vi.fn(),
+    removeSessionRefs: vi.fn(),
+    recycleWorktreeForRemovedSession: vi.fn(),
+    isOwnerScopeCurrent: vi.fn(),
+    drizzle,
+    reviewSource,
+    userDataPath: '',
+    agentIslandService: {
+      handleSessionMetadataPatch: vi.fn(),
+    },
+  };
+});
 
 vi.mock('electron', () => ({
   app: { getPath: () => h.userDataPath },
@@ -95,6 +107,7 @@ beforeEach(() => {
   h.removeSessionRefs.mockResolvedValue(0);
   h.recycleWorktreeForRemovedSession.mockResolvedValue(undefined);
   h.isOwnerScopeCurrent.mockReturnValue(true);
+  h.reviewSource.current = 'desktop';
   setSessionRemovalCancelOperations(h.cancelSessionOperations);
   setSessionRemovalCleanup(h.cleanupRemovedSession);
   setSessionRouteLockImplementation(h.withSendToSessionLock);
@@ -161,6 +174,17 @@ describe('setSessionsStatusInDb', () => {
     const result = await setSessionsStatusInDb([], 'active');
     expect(result).toEqual([]);
     expect(h.tx).not.toHaveBeenCalled();
+  });
+
+  it('rejects batch lifecycle changes for retained Review audit details', async () => {
+    h.reviewSource.current = 'review';
+
+    await expect(setSessionsStatusInDb(['review-1'], 'archived')).rejects.toThrow(
+      /Review audit details are read-only/,
+    );
+
+    expect(h.tx).not.toHaveBeenCalled();
+    expect(h.withSendToSessionLock).not.toHaveBeenCalled();
   });
 
   it('does not schedule recycle when batch restores sessions to active', async () => {

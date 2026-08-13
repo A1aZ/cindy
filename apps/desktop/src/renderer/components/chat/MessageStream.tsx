@@ -239,6 +239,8 @@ interface MessageStreamProps {
    *  so message-level controls can gate features unsupported on remote
    *  (e.g. rewind on cc-remote daemon sessions). */
   remoteHostId?: string | null;
+  /** Review audit details may be inspected and copied, but never mutated. */
+  readOnly?: boolean;
   /** Session working directory; passed down so MarkdownRenderer / UserMessage
    *  can resolve relative paths in markdown links and inline @-chips
    *  (text-lightbox-trigger-extension F1 / F2). Stable within a session
@@ -2367,6 +2369,7 @@ function renderWorkGroupChild(
     sessionTitle?: string | null;
     agentKind?: 'cc' | 'codex' | 'pi';
     remoteHostId?: string | null;
+    readOnly: boolean;
     isSessionStreaming: boolean;
     firstUserMessageClientId: string | null;
     lastUserMessageClientId: string | null;
@@ -2409,6 +2412,7 @@ function renderWorkGroupChild(
       sessionTitle={props.sessionTitle}
       agentKind={props.agentKind}
       remoteHostId={props.remoteHostId}
+      readOnly={props.readOnly}
       sessionRunning={props.isSessionStreaming}
       assistantForkBlocked={shouldBlockAssistantFork(
         props.isSessionStreaming,
@@ -2521,6 +2525,7 @@ export function MessageStream({
   sessionTitle,
   agentKind,
   remoteHostId,
+  readOnly = false,
   workingDir,
   messages,
   taskUpdates,
@@ -4404,6 +4409,7 @@ export function MessageStream({
                               sessionTitle,
                               agentKind,
                               remoteHostId,
+                              readOnly,
                               isSessionStreaming,
                               firstUserMessageClientId,
                               lastUserMessageClientId,
@@ -4537,6 +4543,7 @@ export function MessageStream({
                           sessionTitle={sessionTitle}
                           agentKind={agentKind}
                           remoteHostId={remoteHostId}
+                          readOnly={readOnly}
                           sessionRunning={isSessionStreaming}
                           assistantForkBlocked={shouldBlockAssistantFork(
                             isSessionStreaming,
@@ -4636,6 +4643,7 @@ const MessageItem = memo(function MessageItem({
   sessionTitle,
   agentKind,
   remoteHostId,
+  readOnly,
   sessionRunning,
   assistantForkBlocked,
   assistantIsTurnFinal,
@@ -4658,6 +4666,8 @@ const MessageItem = memo(function MessageItem({
   /** Owning session's remote SSH host id; forwarded to User/AssistantMessage
    *  to gate Fork/Rewind (unsupported on remote cc daemon sessions). */
   remoteHostId?: string | null;
+  /** Review audit details expose copy/share only, never mutation actions. */
+  readOnly: boolean;
   /** Forwarded to User/AssistantMessage so they can read this agent's
    *  capabilities (gates Fork/Rewind icon visibility). */
   agentKind?: 'cc' | 'codex' | 'pi';
@@ -4735,6 +4745,7 @@ const MessageItem = memo(function MessageItem({
           sessionId={sessionId}
           agentKind={agentKind}
           remoteHostId={remoteHostId}
+          readOnly={readOnly}
           messageClientId={message.clientId}
           sessionRunning={sessionRunning}
           isFirstUserMessage={isFirstUserMessage}
@@ -4769,6 +4780,7 @@ const MessageItem = memo(function MessageItem({
           messageClientId={message.clientId}
           agentKind={agentKind}
           remoteHostId={remoteHostId}
+          readOnly={readOnly}
           forkBlocked={assistantForkBlocked}
           sessionRunning={sessionRunning}
           // 任务执行过程中(尾部 turn 流式中,forkBlocked=true)不出现操作行;

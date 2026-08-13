@@ -139,6 +139,7 @@ export function SessionContentHeader({
   // 会停留在旧值(Codex review P2)。prop 兜底覆盖 archived 等不在
   // active 桶里的会话。
   const session = routeSessionById.get(sessionProp.id) ?? sessionProp;
+  const auditReadOnly = session.source === 'review';
   const { runningSessionIds } = useSessionRunningStatus(session.id);
   const { confirm: confirmDialog } = useConfirmDialog();
   const { runSessionAction, unarchiveSession } = useSessionLifecycleActions();
@@ -603,7 +604,7 @@ export function SessionContentHeader({
         </Tip>
       )}
 
-      {isEditing ? (
+      {isEditing && !auditReadOnly ? (
         <div style={WINDOW_NO_DRAG_STYLE}>
           <SessionRenameInput
             sessionId={session.id}
@@ -627,7 +628,7 @@ export function SessionContentHeader({
         // 双击(死区内)不动窗、正常进入改名。
         <span
           {...titleManualDrag}
-          onDoubleClick={startEdit}
+          onDoubleClick={auditReadOnly ? undefined : startEdit}
           title={displayTitle}
           className="min-w-0 max-w-[40vw] cursor-default truncate text-sm font-medium text-foreground"
           style={WINDOW_NO_DRAG_STYLE}
@@ -636,7 +637,7 @@ export function SessionContentHeader({
         </span>
       )}
 
-      {!isEditing && (
+      {!isEditing && !auditReadOnly && (
         // 菜单打开就把归档/删除的 dirty 预检发出去:用户从展开菜单到点条目至少
         // 一次反应时间,足够这次 git status 跑完,点下去时命中缓存、零等待。
         <DropdownMenu

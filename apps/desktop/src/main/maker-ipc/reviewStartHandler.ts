@@ -198,7 +198,6 @@ export interface ReviewStartHandlerDeps {
   publishReviewerLink(input: ReviewCardWrite): Promise<void>;
   startReviewer(createOpts: MakerSessionCreateOpts): Promise<ReviewRunnerHandle>;
   markReviewerStarted(reviewerSessionId: string, startedAt: number): Promise<void>;
-  broadcastReviewerCreated(reviewerSessionId: string): void;
   persistReviewerPrompt(input: {
     reviewerSessionId: string;
     runId: string;
@@ -548,16 +547,13 @@ export function registerReviewStartHandler(
         void terminalFinalization;
       });
 
-      // Install both terminal listeners before the reviewer becomes visible to
-      // the renderer. Otherwise an immediate user close can land between the
-      // created broadcast and listener registration, leaving the source gate
-      // permanently occupied.
+      // Install both terminal listeners before the source card exposes the
+      // internal reviewer link. Otherwise an immediate close can land between
+      // link publication and listener registration, leaving the source gate
+      // permanently occupied. Reviewer sessions intentionally do not emit the
+      // ordinary session-created broadcast: they are audit details owned by
+      // the source card, not peers in the normal task sidebar.
       await deps.markReviewerStarted(reviewerSessionId, startedAt);
-      if (settled) {
-        await terminalFinalization;
-        throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');
-      }
-      deps.broadcastReviewerCreated(reviewerSessionId);
       if (settled) {
         await terminalFinalization;
         throwIpcError('PRECONDITION_FAILED', 'Reviewer task closed before it started');

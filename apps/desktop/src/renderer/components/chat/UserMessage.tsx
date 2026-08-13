@@ -159,6 +159,8 @@ interface UserMessageProps {
    *  sessions don't support the query-rebuild that Fork/Rewind need yet (MVP),
    *  so both actions are hidden when this is set. */
   remoteHostId?: string | null;
+  /** Hide every action that can mutate or branch from an audit-only message. */
+  readOnly?: boolean;
   /** clientId of this message (== messages.client_id in DB). Backend's
    *  fork IPC takes (sessionId, clientId) to locate the fork point. When
    *  omitted, the Fork button is not rendered. */
@@ -934,6 +936,7 @@ export function UserMessage({
   sessionId,
   agentKind,
   remoteHostId,
+  readOnly = false,
   messageClientId,
   sessionRunning,
   delivery,
@@ -1744,12 +1747,18 @@ export function UserMessage({
                   copyLinkText={messageDeepLink}
                   align="right"
                   hovered={hovered}
-                  onFork={!isBlocked && canFork ? handleFork : undefined}
-                  onAddToChat={!isBlocked && messageDeepLink ? handleAddToChat : undefined}
+                  onFork={!readOnly && !isBlocked && canFork ? handleFork : undefined}
+                  onAddToChat={
+                    !readOnly && !isBlocked && messageDeepLink ? handleAddToChat : undefined
+                  }
                   onShareAsImage={handleShareAsImage}
-                  onDelete={!isBlocked && sessionId && messageClientId ? handleDelete : undefined}
-                  onEdit={canEdit ? handleEdit : undefined}
-                  onRewind={!isBlocked && canRewind ? handleRewind : undefined}
+                  onDelete={
+                    !readOnly && !isBlocked && sessionId && messageClientId
+                      ? handleDelete
+                      : undefined
+                  }
+                  onEdit={!readOnly && canEdit ? handleEdit : undefined}
+                  onRewind={!readOnly && !isBlocked && canRewind ? handleRewind : undefined}
                   rewindInFlight={rewindOpen}
                 />
               </>

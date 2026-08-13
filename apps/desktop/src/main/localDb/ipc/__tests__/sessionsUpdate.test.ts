@@ -182,16 +182,30 @@ describe('local-db:sessions:update handler wiring', () => {
     expect(h.routeLock).toHaveBeenCalledWith('codex-local', expect.any(Function));
   });
 
-  it('rejects setting drift for retained Review tasks while preserving metadata edits', async () => {
-    await expect(invokeUpdate('review-local', { effort: 'low' })).rejects.toThrow(
-      /Review task settings are fixed/,
+  it.each([
+    ['settings', { effort: 'low' }],
+    ['title', { title: '审查记录' }],
+    ['pin', { pinnedAt: '2026-08-13T00:00:00.000Z' }],
+    ['lifecycle', { status: 'archived' }],
+  ])('rejects forged %s mutations for retained Review audit details', async (_kind, patch) => {
+    await expect(invokeUpdate('review-local', patch)).rejects.toThrow(
+      /Review audit details are read-only/,
     );
-    await invokeUpdate('review-local', { title: '审查记录' });
 
     const persisted = h
-      .sqlite!.prepare('SELECT effort, title FROM sessions WHERE id = ?')
-      .get('review-local') as { effort: string; title: string };
-    expect(persisted).toEqual({ effort: 'high', title: '审查记录' });
+      .sqlite!.prepare('SELECT effort, title, pinned_at, status FROM sessions WHERE id = ?')
+      .get('review-local') as {
+        effort: string;
+        title: string;
+        pinned_at: number | null;
+        status: string;
+      };
+    expect(persisted).toEqual({
+      effort: 'high',
+      title: 'New CCS',
+      pinned_at: null,
+      status: 'active',
+    });
   });
 
   it('persists and broadcasts title-only patches to device-link subscribers', async () => {

@@ -115,7 +115,6 @@ describe('automation-generated sessions', () => {
       'wecom',
       'scheduler',
       'learn',
-      'review',
       'shared',
       'plugin',
     ]);
@@ -123,7 +122,9 @@ describe('automation-generated sessions', () => {
     expect(DESKTOP_VISIBLE_SESSION_SOURCES).toContain('telegram');
     expect(DESKTOP_VISIBLE_SESSION_SOURCES).toContain('discord');
     expect(DESKTOP_VISIBLE_SESSION_SOURCES).toContain('dingtalk');
-    expect(DESKTOP_VISIBLE_SESSION_SOURCES).toContain('review');
+    // Reviewers are internal audit tasks reachable from their source cards;
+    // they must not compete with ordinary tasks in the sidebar.
+    expect(DESKTOP_VISIBLE_SESSION_SOURCES).not.toContain('review');
     expect(DESKTOP_VISIBLE_SESSION_SOURCES).toContain('plugin');
 
     expect(normalizeSessionSource('desktop')).toBe('desktop');
@@ -134,6 +135,7 @@ describe('automation-generated sessions', () => {
     expect(normalizeSessionSource('discord')).toBe('discord');
     expect(normalizeSessionSource('dingtalk')).toBe('dingtalk');
     expect(normalizeSessionSource('wecom')).toBe('wecom');
+    expect(normalizeSessionSource('review')).toBe('review');
     expect(normalizeSessionSource('plugin')).toBe('plugin');
     expect(normalizeSessionSource(null)).toBe('desktop');
     expect(normalizeSessionSource('unknown')).toBe('desktop');

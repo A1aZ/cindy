@@ -6483,8 +6483,8 @@
         "running": "현재 결과물을 검토하는 중",
         "completed": "검토 완료",
         "failed": "검토를 완료하지 못했습니다",
-        "openTask": "검토 작업 열기",
-        "readOnlyHint": "독립 작업 · 개발 메모리 없음 · 읽기 전용",
+        "openTask": "검토 상세 보기",
+        "readOnlyHint": "내부 검토 · 개발 메모리 없음 · 읽기 전용",
         "noResult": "검토 결과가 반환되지 않았습니다",
         "failure": {
           "reviewerClosed": "검토 작업이 완료되기 전에 닫혔습니다",

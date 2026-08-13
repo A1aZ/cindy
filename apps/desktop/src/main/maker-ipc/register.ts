@@ -7396,7 +7396,6 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
         .set({ userSendAt: startedAt, updatedAt: startedAt })
         .where(eq(sessions.id, reviewerSessionId));
     },
-    broadcastReviewerCreated: broadcastSessionCreated,
     persistReviewerPrompt: async ({ reviewerSessionId, runId, prompt, sourceAgentKind }) => {
       await createDbMessage(reviewerSessionId, {
         clientId: `review-prompt:${runId}`,
@@ -7597,7 +7596,11 @@ export function registerMakerIpc(maker: Maker, options: RegisterMakerIpcOptions)
   registerMakerMessageDeleteHandler(makerSessionRegistry, {
     getSessionRow: async (sessionId) => {
       const [row] = await getDbClient()
-        .drizzle.select({ status: sessions.status, agentKind: sessions.agentKind })
+        .drizzle.select({
+          status: sessions.status,
+          agentKind: sessions.agentKind,
+          source: sessions.source,
+        })
         .from(sessions)
         .where(eq(sessions.id, sessionId))
         .limit(1);

@@ -171,6 +171,8 @@ interface AssistantMessageProps {
   /** Owning session's remote SSH host id (null for local). Remote cc daemon
    *  sessions don't support the query-rebuild that Fork needs yet (MVP). */
   remoteHostId?: string | null;
+  /** Hide every action that can mutate or branch from an audit-only message. */
+  readOnly?: boolean;
   /** True when this assistant belongs to the still-active tail turn. */
   forkBlocked?: boolean;
   /** Whole-session running state; single-message deletion waits until idle. */
@@ -210,6 +212,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   messageClientId,
   agentKind,
   remoteHostId,
+  readOnly = false,
   forkBlocked,
   sessionRunning,
   showActionBar = false,
@@ -390,10 +393,12 @@ export const AssistantMessage = memo(function AssistantMessage({
           copyLinkText={messageDeepLink}
           align="left"
           hovered={hovered}
-          onFork={canFork ? handleFork : undefined}
-          onAddToChat={messageDeepLink ? handleAddToChat : undefined}
+          onFork={!readOnly && canFork ? handleFork : undefined}
+          onAddToChat={!readOnly && messageDeepLink ? handleAddToChat : undefined}
           onShareAsImage={handleShareAsImage}
-          onDelete={currentSessionId && messageClientId ? handleDelete : undefined}
+          onDelete={
+            !readOnly && currentSessionId && messageClientId ? handleDelete : undefined
+          }
           turnMoney={turnMoney}
           turnCostUsd={turnCostUsd}
           turnCostIsEstimate={turnCostIsEstimate}

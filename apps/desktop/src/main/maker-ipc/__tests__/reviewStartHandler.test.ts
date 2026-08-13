@@ -101,7 +101,6 @@ function makeDeps(
     publishReviewerLink: vi.fn(async () => undefined),
     startReviewer: vi.fn(async () => reviewer),
     markReviewerStarted: vi.fn(async () => undefined),
-    broadcastReviewerCreated: vi.fn(),
     persistReviewerPrompt: vi.fn(async () => undefined),
     drainPersistQueue: vi.fn(async () => undefined),
     readReviewerResult: vi.fn(async () => 'P1: real finding'),
@@ -497,11 +496,11 @@ describe('maker:review:start IPC lifecycle', () => {
     );
   });
 
-  it('installs the close listener before publishing the reviewer task', async () => {
+  it('installs the close listener before exposing the internal reviewer link', async () => {
     const harness = new IpcHarness();
     const reviewer = new FakeReviewer();
     const deps = makeDeps(reviewer);
-    vi.mocked(deps.broadcastReviewerCreated).mockImplementationOnce(() => {
+    vi.mocked(deps.markReviewerStarted).mockImplementationOnce(async () => {
       reviewer.emitStatus('closed');
     });
     registerReviewStartHandler(harness, deps);
@@ -510,6 +509,7 @@ describe('maker:review:start IPC lifecycle', () => {
       code: 'PRECONDITION_FAILED',
     });
     expect(reviewer.send).not.toHaveBeenCalled();
+    expect(deps.publishReviewerLink).not.toHaveBeenCalled();
 
     await expect(harness.invoke(MAKER_INVOKE.START_REVIEW, reviewRequest())).resolves.toMatchObject(
       {

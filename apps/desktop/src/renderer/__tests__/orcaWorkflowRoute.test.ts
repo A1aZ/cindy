@@ -63,6 +63,18 @@ const workerPanelSource = readTextLf(
   resolve(__dirname, '..', 'features', 'cc-agent', 'OrcaWorkerPanel.tsx'),
   'utf8',
 );
+const workersTabBodySource = readTextLf(
+  resolve(
+    __dirname,
+    '..',
+    'features',
+    'right-sidebar',
+    'plugins',
+    'orca-workers',
+    'OrcaWorkersTabBody.tsx',
+  ),
+  'utf8',
+);
 const workerSelectionHookSource = readTextLf(
   resolve(__dirname, '..', 'features', 'cc-agent', 'hooks', 'useOrcaWorkerSelection.ts'),
   'utf8',
@@ -401,6 +413,9 @@ describe('OrcaWorkflowRoute source invariants', () => {
     // 设置链接已从 WorkerListToolbar 中移除，OrcaWorkerPanel 不再需要 isSidebarWindow 来限制设置入口
     expect(workerPanelSource).not.toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
     expect(workerPanelSource).not.toContain('settingsEnabled');
+    expect(workersTabBodySource).toContain("import { isSidebarWindow } from '@/lib/sidebarWindow';");
+    expect(workersTabBodySource).toContain('<OrcaWorkerPanel {...workerPanelProps} />');
+    expect(workersTabBodySource).toContain('<RoutedOrcaWorkerPanel {...workerPanelProps} />');
   });
 
   it('marks the collaboration worker chat as sidebar-embedded so it cannot replace the host route', () => {

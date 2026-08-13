@@ -143,10 +143,7 @@ import {
 import { createDesktopMcpProviders } from '../mcp-integrations/mcp-providers.js';
 import { getGhostRosterPrompt } from '../mcp-integrations/ghost.js';
 import { invalidatePiEnvironment } from '../mcp-integrations/piEnvironment.js';
-import {
-  getIOSSimulatorMcpDeps,
-  isIOSSimulatorHostRuntimeActive,
-} from '../mcp-integrations/ios-simulator.js';
+import { getIOSSimulatorMcpDeps } from '../mcp-integrations/ios-simulator.js';
 import { readContactsSettings } from './contacts-settings-store.js';
 import { createIOSSimulatorCodexDynamicToolProvider } from './ios-simulator-codex-dynamic-tools.js';
 import { captureKnownFileBefore, noteOpaqueTurnChange } from '../turn-change-set/store.js';

@@ -321,15 +321,16 @@ export async function withPiManagerRpc<R>(
     // 崩溃/报错的现场(bridge 只给 stderr, 拿不到 daemon 侧最后 10 行)。
     // best-effort:tail 失败不阻断原错误。
     const base = err instanceof Error ? err : new Error(String(err));
+    let tailLine: string | undefined;
     try {
-      const tail = await tailDaemonLog(host, probe);
-      if (tail) {
-        const enriched = new Error(`${base.message}\ndaemon log tail: ${tail}`);
-        enriched.stack = base.stack;
-        throw enriched;
-      }
+      tailLine = await tailDaemonLog(host, probe);
     } catch {
       /* tail 失败保留原错误 */
+    }
+    if (tailLine) {
+      const enriched = new Error(`${base.message}\ndaemon log tail: ${tailLine}`);
+      enriched.stack = base.stack;
+      throw enriched;
     }
     throw base;
   } finally {

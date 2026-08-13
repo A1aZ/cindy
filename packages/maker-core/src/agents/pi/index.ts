@@ -1833,15 +1833,20 @@ export class PiAgent extends BaseAgent {
               data: { message: `pi process exited unexpectedly (code=${code}, signal=${signal})`, isTerminal: true },
               source: 'pi',
             });
-            // 崩溃/被杀:上层见迭代器结束即把 session 标 closed,close() 随后短路,
-            // proxy token 与 MCP session ctx 会滞留 Main 内存直到重启 —— 期间任何本地
-            // 进程仍可拿旧 token 经 loopback 代理盗用宿主凭证(codex review)。在此幂等注销。
-            try {
-              disposeSessionRegistrations();
-            } catch (err) {
-              this.deps.logger.warn('pi dispose on unexpected exit failed (non-fatal)', {
-                message: err instanceof Error ? err.message : String(err),
-              });
+            // 轮 43 P1(codex-connector):**远端 daemon 模式不注销 MCP 注册** ——
+            // transport onClose(SSH 闪断/桥断)≠ 进程死, daemon 仍持有同一个 pi
+            // 子进程继续跑; 注销 MCP 注册会关闭 SSH remote-forward 隧道并清掉
+            // MCP session context, 远端 pi 的 cindy_memory/cindy_orca/cindy_ghost
+            // 等 MCP 调用在 detach 期间立即 401 或不可达, 破坏断链保活语义。
+            // 本地 stdio 无 daemon, onExit 即真死, 保持清理。
+            if (!remote) {
+              try {
+                disposeSessionRegistrations();
+              } catch (err) {
+                this.deps.logger.warn('pi dispose on unexpected exit failed (non-fatal)', {
+                  message: err instanceof Error ? err.message : String(err),
+                });
+              }
             }
           }
           // 进程已死:隔离的 configHome(models.json + extension)与 runtime 文件不再被读,清理。

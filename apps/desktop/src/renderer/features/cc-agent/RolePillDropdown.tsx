@@ -318,17 +318,23 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
 }
 
 // 菜单经 absolute 定位且未走 portal 渲染，会被最近的 overflow 非 visible 祖先裁剪。
-// 找到该裁剪祖先的视口边界（top/bottom/left/right），用于钳制菜单可用高度/宽度；
-// 找不到裁剪祖先时返回 null，由调用方退回视口边界。
-function findClippingBounds(
-  el: HTMLElement,
-): { top: number; bottom: number; left: number; right: number } | null {
+// 找到该裁剪祖先元素（overflow 非 visible 的最近祖先）；找不到返回 null。
+function findClippingContainer(el: HTMLElement): HTMLElement | null {
   let container: HTMLElement | null = el.parentElement;
   while (container) {
     const style = window.getComputedStyle(container);
     if (style.overflowX !== 'visible' || style.overflowY !== 'visible') break;
     container = container.parentElement;
   }
+  return container;
+}
+
+// 找到裁剪祖先的视口边界（top/bottom/left/right），用于钳制菜单可用高度/宽度；
+// 找不到裁剪祖先时返回 null，由调用方退回视口边界。
+function findClippingBounds(
+  el: HTMLElement,
+): { top: number; bottom: number; left: number; right: number } | null {
+  const container = findClippingContainer(el);
   if (!container) return null;
   const r = container.getBoundingClientRect();
   return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
@@ -370,7 +376,20 @@ function useAnchorMenuMaxHeight(
     };
     update();
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    // 侧栏经拖拽分割线（pointermove）调整宽度时不会触发 window.resize；用 ResizeObserver
+    // 监听裁剪祖先容器尺寸变化，菜单打开期间及时重算边界，避免菜单超出当前侧栏被裁掉。
+    const clipContainer = anchorRef.current
+      ? findClippingContainer(anchorRef.current)
+      : null;
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined' && clipContainer
+        ? new ResizeObserver(update)
+        : null;
+    if (resizeObserver && clipContainer) resizeObserver.observe(clipContainer);
+    return () => {
+      window.removeEventListener('resize', update);
+      resizeObserver?.disconnect();
+    };
   }, [anchorRef, open]);
   return placement;
 }
@@ -400,7 +419,20 @@ function useAnchorMenuMaxWidth(
     };
     update();
     window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    // 侧栏经拖拽分割线（pointermove）调整宽度时不会触发 window.resize；用 ResizeObserver
+    // 监听裁剪祖先容器尺寸变化，菜单打开期间及时重算边界，避免菜单超出当前侧栏被裁掉。
+    const clipContainer = anchorRef.current
+      ? findClippingContainer(anchorRef.current)
+      : null;
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined' && clipContainer
+        ? new ResizeObserver(update)
+        : null;
+    if (resizeObserver && clipContainer) resizeObserver.observe(clipContainer);
+    return () => {
+      window.removeEventListener('resize', update);
+      resizeObserver?.disconnect();
+    };
   }, [anchorRef, open, align]);
   return maxWidth;
 }

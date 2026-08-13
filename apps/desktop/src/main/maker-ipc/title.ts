@@ -450,12 +450,13 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       // 防御纵深:即使 renderer 有 UI 守卫,main 侧也需从 DB 确认 session 真实存在且非远程
       // (SSH / device-link),避免受信 renderer 绕过 UI 守卫携带远程会话内容触发付费调用。
       // 同时拒绝 review session:reviewer 会话的 composer 被禁用(disabled),不可编辑也不可发送,
-      // 对其做预测是浪费付费调用。
+      // 对其做预测是浪费付费调用。也拒绝 soft-deleted session:删除态会话的消息仍保留在 DB,
+      // 但已从用户会话列表移除,对其做预测会外发已删除转写并产生付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status })
         .from(sessions)
         .where(eq(sessions.id, sessionId));
-      if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review') {
+      if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review' || sessionRow.status === 'deleted') {
         return { prompt: null };
       }
       // 防御纵深:校验 renderer 上报的 agentKind 与 DB 记录一致,避免受信 renderer 绕过

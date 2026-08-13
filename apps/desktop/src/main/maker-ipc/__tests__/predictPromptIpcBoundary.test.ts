@@ -28,7 +28,7 @@ const h = vi.hoisted(() => ({
     },
   ),
   /** 模拟 DB 返回的 session row */
-  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null } | undefined,
+  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null; status?: string | null } | undefined,
 }));
 
 function nativeImageEmpty() {
@@ -299,6 +299,13 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
   it('agentKind 不匹配时静默返回 null,不触发付费调用', async () => {
     // renderer 上报 claude-code,DB 存的是 codex
     h.sessionRow = { remoteHostId: null, agentKind: 'codex' };
+
+    await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
+    expect(h.predict).not.toHaveBeenCalled();
+  });
+
+  it('session 为已删除(soft-deleted)时静默返回 null,不触发付费调用', async () => {
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc', status: 'deleted' };
 
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();

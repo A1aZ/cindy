@@ -198,7 +198,11 @@ import {
 import { getSessionListCollapseView } from './lib/sessionListCollapse';
 import { hasSessionSelectionModifier, type SessionClickModifiers } from './sidebar/SessionItem';
 import type { SessionMoveTarget } from './sidebar/sessionMoveTarget';
-import { normalizeManualPinnedOrder, mergeVisibleReorder } from './hooks/helpers/sidebarFilterCore';
+import {
+  DIALOGUE_FILTER_KEY,
+  mergeVisibleReorder,
+  normalizeManualPinnedOrder,
+} from './hooks/helpers/sidebarFilterCore';
 import {
   activePinnedSidebarEntryIds,
   pinnedProjectEntryId,
@@ -1550,8 +1554,12 @@ function ExpandedView({
   );
 
   const visibleDialogues = useMemo(() => {
-    return vendorPredicate ? groups.dialogues.filter(vendorPredicate) : groups.dialogues;
-  }, [groups.dialogues, vendorPredicate]);
+    const sessions = vendorPredicate
+      ? groups.dialogues.filter(vendorPredicate)
+      : groups.dialogues;
+    if (filter.projectsAsSet === null) return sessions;
+    return filter.projectsAsSet.has(DIALOGUE_FILTER_KEY) ? sessions : [];
+  }, [groups.dialogues, vendorPredicate, filter.projectsAsSet]);
 
   // 对话段排序状态提升到此处:DialogueSection(展开态)受控消费,rail 对话
   // 面板按同一排序渲染——否则折叠后面板的前 N 条/折叠溢出与展开态刚排好的
@@ -3083,6 +3091,7 @@ function ExpandedView({
               <MainListScopeHeader
                 filter={filter}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 hasRemoteDevices={deviceGroupingAvailable}
               />
               <RemoteSidebarLoadNotice
@@ -3097,6 +3106,7 @@ function ExpandedView({
               <MainListScopeHeader
                 filter={filter}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 hasRemoteDevices={deviceGroupingAvailable}
               />
               <RemoteSidebarLoadNotice
@@ -3111,6 +3121,7 @@ function ExpandedView({
               <MainListScopeHeader
                 filter={filter}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 hasRemoteDevices={deviceGroupingAvailable}
               />
               <RemoteSidebarLoadNotice kind="devices" status="loading" partial={false} />
@@ -3120,6 +3131,7 @@ function ExpandedView({
               <MainListScopeHeader
                 filter={filter}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 hasRemoteDevices={deviceGroupingAvailable}
               />
               <RemoteSidebarLoadNotice
@@ -3136,6 +3148,7 @@ function ExpandedView({
               <MainListScopeHeader
                 filter={filter}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 hasRemoteDevices={deviceGroupingAvailable}
               />
               <div className="flex flex-col items-center justify-center px-3 py-12 text-center">
@@ -3232,6 +3245,7 @@ function ExpandedView({
                 projects={visibleProjectsWithVendor}
                 dialogues={visibleDialogues}
                 allKnownProjects={visibleProjectUniverse}
+                dialogueCount={allGroups.dialogues.length}
                 allProjectKeysForOrder={gcProjectKeys}
                 filter={filter}
                 collapsed={collapse.collapsed}
@@ -3293,6 +3307,7 @@ function ExpandedView({
       <SidebarFilterPopover
         filter={filter}
         allKnownProjects={visibleProjectUniverse}
+        dialogueCount={allGroups.dialogues.length}
         // 与段头实例同一门控:范围收窄到单台机器时「按设备分组」选项隐藏
         // (2026-08-13 用户定稿,详见 ProjectsSection.deviceGroupingAvailable)。
         hasRemoteDevices={deviceGroupingAvailable}

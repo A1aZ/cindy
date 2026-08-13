@@ -41,6 +41,7 @@ import {
   persistTaskInfoFields,
   nextTaskInfoAfterToggle,
   persistManualProjectOrder,
+  DIALOGUE_FILTER_KEY,
   nextProjectsAfterToggle,
   nextSortByAfterGroupByChange,
   includeProjectInFilter,
@@ -147,6 +148,11 @@ describe('loadProjects', () => {
   it("falls back to 'all' on empty array", () => {
     localStorage.setItem(PROJECTS_KEY, JSON.stringify([]));
     expect(loadProjects(OWNER_ID)).toBe('all');
+  });
+
+  it('preserves the dialogue sentinel in persisted project filters', () => {
+    persistProjects([DIALOGUE_FILTER_KEY, '/a/b'], OWNER_ID);
+    expect(loadProjects(OWNER_ID)).toEqual([DIALOGUE_FILTER_KEY, 'local:/a/b']);
   });
 
   it('cleans non-string entries from a mixed array', () => {
@@ -463,6 +469,17 @@ describe('nextProjectsAfterToggle', () => {
     nextProjectsAfterToggle(prev, 'local:/proj-c');
     expect(prev).toEqual(snapshot);
   });
+
+  it("toggles the dialogue sentinel without treating it as a project path", () => {
+    expect(nextProjectsAfterToggle('all', DIALOGUE_FILTER_KEY)).toEqual([DIALOGUE_FILTER_KEY]);
+    expect(nextProjectsAfterToggle([DIALOGUE_FILTER_KEY], 'local:/proj-a')).toEqual([
+      DIALOGUE_FILTER_KEY,
+      'local:/proj-a',
+    ]);
+    expect(nextProjectsAfterToggle([DIALOGUE_FILTER_KEY, 'local:/proj-a'], DIALOGUE_FILTER_KEY)).toEqual([
+      'local:/proj-a',
+    ]);
+  });
 });
 
 describe('includeProjectInFilter', () => {
@@ -528,6 +545,13 @@ describe('removeProjectsFromFilter', () => {
     expect(removeProjectsFromFilter(prev, new Set(['local:/a']), 'linux')).toBe('all');
   });
 
+  it('keeps the dialogue sentinel when hidden-project snapshots arrive', () => {
+    const prev: FilterProjects = [DIALOGUE_FILTER_KEY, 'local:/a'];
+    expect(removeProjectsFromFilter(prev, new Set(['local:/a']), 'linux')).toEqual([
+      DIALOGUE_FILTER_KEY,
+    ]);
+  });
+
   it('is idempotent for unrelated and repeated hidden snapshots', () => {
     const unrelated: FilterProjects = ['local:/b'];
     expect(removeProjectsFromFilter(unrelated, new Set(['local:/a']), 'linux')).toBe(unrelated);
@@ -578,6 +602,15 @@ describe('gcProjectsAgainstActive', () => {
   it('with empty active list → falls back to "all"', () => {
     const prev: FilterProjects = ['local:/a'];
     expect(gcProjectsAgainstActive(prev, [])).toBe('all');
+  });
+
+  it('keeps the dialogue sentinel when GC drops stale projects', () => {
+    const prev: FilterProjects = [DIALOGUE_FILTER_KEY, 'local:/gone'];
+    expect(gcProjectsAgainstActive(prev, ['local:/a'])).toEqual([DIALOGUE_FILTER_KEY]);
+  });
+
+  it('keeps dialogue-only filters even when no projects remain', () => {
+    expect(gcProjectsAgainstActive([DIALOGUE_FILTER_KEY], [])).toEqual([DIALOGUE_FILTER_KEY]);
   });
 });
 

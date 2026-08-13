@@ -8,7 +8,7 @@
  * **有意推翻**——对话与项目行在主列表中按同一口径混排(mainListModel),
  * 「对话归为一组」成为可选开关。本文件的不变量随之改写:
  *   - 主列表由 ProjectsSection 统一渲染,dialogues 作为混排输入传入;
- *   - 项目筛选不得隐藏对话(散排对话不因 projects 多选被清空);
+ *   - 项目筛选含「对话」哨兵:未勾选 DIALOGUE_FILTER_KEY 时隐藏无项目任务;
  *   - 固定 DialogueSection 段与按日期分组段不再渲染。
  */
 
@@ -60,8 +60,9 @@ describe('Mixed main list (sidebar-redesign D 期)', () => {
     expect(sidebarSource).not.toContain("filter.groupBy === 'date'");
   });
 
-  it('does not let project filtering hide dialogues', () => {
-    expect(sidebarSource).not.toMatch(/filter\.projectsAsSet\s*!==\s*null\)\s*return\s*\[\]/);
+  it('lets the project filter include or exclude dialogues via DIALOGUE_FILTER_KEY', () => {
+    expect(sidebarSource).toContain('DIALOGUE_FILTER_KEY');
+    expect(sidebarSource).toContain('filter.projectsAsSet.has(DIALOGUE_FILTER_KEY)');
   });
 
   it('keeps manual sort scoped to project rows (设计文档 §9.3 收窄)', () => {

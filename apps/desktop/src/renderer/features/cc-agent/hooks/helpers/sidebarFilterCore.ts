@@ -43,7 +43,12 @@ export const MANUAL_PROJECT_ORDER_KEY = 'cc-agent.sidebar.filter.manualProjectOr
 export const MANUAL_PINNED_ORDER_KEY = 'cc-agent.sidebar.pinnedSessionOrder';
 
 export type FilterStatus = 'active' | 'archived' | 'all';
-/** 'all' 字符串字面量 = 选中"全部"；string[] = 仅显示其中的 normalized workingDir。 */
+/**
+ * 项目筛选里的「对话」哨兵 = 无项目归属的任务。不是真实 projectKey,
+ * 不能走路径归一化,也不能被项目 GC 清掉。
+ */
+export const DIALOGUE_FILTER_KEY = 'dialogue';
+/** 'all' 字符串字面量 = 选中"全部"；string[] = 勾选的 projectKey 和/或 DIALOGUE_FILTER_KEY。 */
 export type FilterProjects = 'all' | string[];
 /** M41: vendor filter — 'all' = 全部；'cc' = 仅 Claude；'codex' = 仅 Codex。 */
 export type FilterVendor = 'all' | 'cc' | 'codex';
@@ -133,7 +138,7 @@ export function loadProjects(ownerId: string | null): FilterProjects {
   }
   if (parsed === 'all') return 'all';
   if (Array.isArray(parsed)) {
-    const cleaned = normalizeProjectKeyList(parsed);
+    const cleaned = normalizeFilterProjectList(parsed);
     if (cleaned.length === 0) return 'all';
     return cleaned;
   }
@@ -172,12 +177,12 @@ export function persistProjects(p: FilterProjects, ownerId: string | null): void
  * 实际上本函数总是返回新对象（除非语义无变化才返回 prev）。
  */
 export function nextProjectsAfterToggle(prev: FilterProjects, workingDir: string): FilterProjects {
-  const projectKey = normalizeProjectKey(workingDir);
+  const projectKey = normalizeFilterEntry(workingDir);
   if (!projectKey) return prev;
   if (prev === 'all') {
     return [projectKey];
   }
-  const normalizedPrev = normalizeProjectKeyList(prev);
+  const normalizedPrev = normalizeFilterProjectList(prev);
   const idx = normalizedPrev.indexOf(projectKey);
   if (idx >= 0) {
     if (normalizedPrev.length === 1) {
@@ -196,9 +201,9 @@ export function nextProjectsAfterToggle(prev: FilterProjects, workingDir: string
  */
 export function includeProjectInFilter(prev: FilterProjects, workingDir: string): FilterProjects {
   if (prev === 'all') return prev;
-  const projectKey = normalizeProjectKey(workingDir);
+  const projectKey = normalizeFilterEntry(workingDir);
   if (!projectKey) return prev;
-  const normalizedPrev = normalizeProjectKeyList(prev);
+  const normalizedPrev = normalizeFilterProjectList(prev);
   if (normalizedPrev.includes(projectKey)) {
     return arraysEqual(normalizedPrev, prev) ? prev : normalizedPrev;
   }
@@ -224,8 +229,9 @@ export function removeProjectsFromFilter(
       .filter((projectKey): projectKey is string => projectKey != null),
   );
   if (hiddenComparisonKeys.size === 0) return prev;
-  const normalizedPrev = normalizeProjectKeyList(prev);
+  const normalizedPrev = normalizeFilterProjectList(prev);
   const filtered = normalizedPrev.filter((projectKey) => {
+    if (projectKey === DIALOGUE_FILTER_KEY) return true;
     const comparisonKey = projectKeyComparisonKey(projectKey, localPlatform);
     return comparisonKey == null || !hiddenComparisonKeys.has(comparisonKey);
   });
@@ -747,12 +753,32 @@ export function gcProjectsAgainstActive(
 ): FilterProjects {
   if (prev === 'all') return prev;
   const activeSet = new Set(normalizeProjectKeyList(activeWorkingDirs));
-  const normalizedPrev = normalizeProjectKeyList(prev);
-  const filtered = normalizedPrev.filter((wd) => activeSet.has(wd));
+  const normalizedPrev = normalizeFilterProjectList(prev);
+  const filtered = normalizedPrev.filter(
+    (wd) => wd === DIALOGUE_FILTER_KEY || activeSet.has(wd),
+  );
   if (filtered.length === 0) return 'all';
   if (filtered.length === normalizedPrev.length && arraysEqual(normalizedPrev, prev)) return prev;
   if (filtered.length === normalizedPrev.length) return normalizedPrev;
   return filtered;
+}
+
+function normalizeFilterEntry(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  if (raw === DIALOGUE_FILTER_KEY) return DIALOGUE_FILTER_KEY;
+  return normalizeProjectKey(raw);
+}
+
+function normalizeFilterProjectList(values: readonly unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    const key = normalizeFilterEntry(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(key);
+  }
+  return out;
 }
 
 function normalizeProjectKeyList(values: readonly unknown[]): string[] {

@@ -7024,6 +7024,7 @@
       "filterSummaryNone": "없음",
       "filterSummaryActive": "{{count}}개 적용 중",
       "filterReset": "필터 초기화",
+      "filterActiveBadge": "필터링됨",
       "displayHeading": "표시",
       "taskInfoHeading": "세션 정보",
       "taskInfoSummaryNone": "없음",

@@ -306,6 +306,8 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(filterSource).toContain('aria-label={valueNode ? value : undefined}');
     // 具体维度行配图标(状态 / 项目 / Agent / 最近活跃 / 筛选 / 任务信息)。
     expect(filterSource).toContain('Icon={Filter}');
+    expect(filterSource).toContain('toggleProject(DIALOGUE_FILTER_KEY)');
+    expect(filterSource).toContain("t('ccAgent.sidebar.dialogues')");
     expect(filterSource).toContain('Icon={CircleDot}');
     expect(filterSource).toContain('Icon={Folder}');
     expect(filterSource).toContain('Icon={Bot}');
@@ -316,6 +318,8 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
   it('空态 / 远程 loading-error / 连接中占位都挂范围标题(2026-08-13 第 4 轮 P1)', () => {
     const headerSource = read('features', 'cc-agent', 'sidebar', 'MainListScopeHeader.tsx');
     expect(headerSource).toContain('<MachineSwitcherMenu onOpenDisplaySettings=');
+    expect(headerSource).toContain('filter.isSessionContentFiltered');
+    expect(headerSource).toContain("t('ccAgent.sidebar.filterActiveBadge')");
     expect(headerSource).toContain('<SidebarFilterPopover');
     expect(projectsSectionSource).toContain('<MainListScopeHeader');
     expect(projectsSectionSource).toContain('hasMainListContent');

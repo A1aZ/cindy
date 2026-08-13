@@ -7024,6 +7024,7 @@
       "filterSummaryNone": "無",
       "filterSummaryActive": "{{count}} 項生效",
       "filterReset": "重設篩選",
+      "filterActiveBadge": "已篩選",
       "displayHeading": "顯示",
       "taskInfoHeading": "任務資訊",
       "taskInfoSummaryNone": "無",

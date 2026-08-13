@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * 封装 Status × Project × Vendor × Last activity 筛选状态，以及主列表整理偏好：
  *   - status   : 'active' | 'archived' | 'all'   → 由后端通过 query 过滤
- *   - projects : 'all' | string[]                 → 客户端 render 阶段过滤
+ *   - projects : 'all' | string[]                 → 客户端 render 阶段过滤(含对话哨兵)
  *   - vendor   : 'all' | 'cc' | 'codex'           → 客户端 render 阶段过滤
  *   - lastActivity : 'all' | '1d' | ...           → 客户端 render 阶段过滤
  *   - groupBy  : 'project' | 'flat'               → 客户端 render 阶段切换主列表分组

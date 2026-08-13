@@ -120,6 +120,8 @@ export interface ProjectsSectionProps {
    * 用于 SidebarFilterPopover 与来源标签；隐藏项目不能从这些入口泄漏。
    */
   allKnownProjects: ProjectNodeData[];
+  /** 项目筛选前的无项目任务数,供菜单「对话」选项用。 */
+  dialogueCount?: number;
   /**
    * 原始项目全集的规范 key。手动排序以此为 baseline，保证隐藏项目的
    * 位置记忆不会因用户拖动其它可见项目而被 GC。
@@ -189,6 +191,7 @@ export function ProjectsSection({
   projects,
   dialogues,
   allKnownProjects,
+  dialogueCount = 0,
   allProjectKeysForOrder,
   filter,
   collapsed,
@@ -676,6 +679,7 @@ export function ProjectsSection({
       <MainListScopeHeader
         filter={filter}
         allKnownProjects={allKnownProjects}
+        dialogueCount={dialogueCount}
         hasRemoteDevices={deviceGroupingAvailable}
         fold={
           hasMainListContent && foldState !== null

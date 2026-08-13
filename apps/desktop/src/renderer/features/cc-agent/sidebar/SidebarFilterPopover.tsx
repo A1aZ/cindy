@@ -65,6 +65,7 @@ import type {
   FilterVendor,
   UseSidebarFilterReturn,
 } from '../hooks/useSidebarFilter';
+import { DIALOGUE_FILTER_KEY } from '../hooks/helpers/sidebarFilterCore';
 import { useTaskInfoFields, type TaskInfoField } from '../hooks/useTaskInfoFields';
 import {
   MENU_CONTENT_CLASS,
@@ -153,6 +154,8 @@ export interface SidebarFilterPopoverProps {
   filter: UseSidebarFilterReturn;
   /** 用于 Project 多选列表的完整候选集（不受 Last activity 收窄影响）。 */
   allKnownProjects: ProjectNodeData[];
+  /** 当前范围内无项目任务数,用来在项目筛选里画「对话」选项。 */
+  dialogueCount?: number;
   /**
    * 是否有远程设备连接(E 期)。「按设备分组」与顶部设备切换栏同一出现条件:
    * 仅远程连接时显示;仅本机时该选项整行隐藏。
@@ -313,6 +316,7 @@ function CheckMenuItem({
 export function SidebarFilterPopover({
   filter,
   allKnownProjects,
+  dialogueCount = 0,
   hasRemoteDevices = false,
   contextMenuPos,
   onContextMenuOpenChange,
@@ -550,10 +554,25 @@ export function SidebarFilterPopover({
                   <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />
                 )}
               </DropdownMenuItem>
-              {allKnownProjects.length > 0 && (
-                <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
-              )}
+              <DropdownMenuSeparator className={MENU_SEPARATOR_CLASS} />
               <div className="max-h-[256px] overflow-y-auto">
+                <DropdownMenuItem
+                  onSelect={(event) => {
+                    event.preventDefault();
+                    toggleProject(DIALOGUE_FILTER_KEY);
+                  }}
+                  className={MENU_ITEM_CLASS}
+                >
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{t('ccAgent.sidebar.dialogues')}</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-[var(--cmd-palette-item-meta)]">
+                    {dialogueCount}
+                  </span>
+                  {(projects === 'all' || (projectsAsSet?.has(DIALOGUE_FILTER_KEY) ?? false)) && (
+                    <Check size={15} className="shrink-0 text-[var(--msg-assistant-text)]" />
+                  )}
+                </DropdownMenuItem>
                 {allKnownProjects.map((project) => {
                   const selected =
                     projects === 'all' || (projectsAsSet?.has(project.projectKey) ?? false);

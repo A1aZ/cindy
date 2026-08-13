@@ -8,6 +8,7 @@
  */
 import { useState, type ReactNode } from 'react';
 import type { LucideIcon } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
 
 import { cn } from '@/lib/utils';
 import { Tip } from '@/components/ui/tooltip';
@@ -32,11 +33,13 @@ const HEADER_ACTIONS_CLASS = cn('flex items-center gap-0.5 -mt-px', HEADER_HOVER
 export function MainListScopeHeader({
   filter,
   allKnownProjects,
+  dialogueCount = 0,
   hasRemoteDevices,
   fold = null,
 }: {
   filter: UseSidebarFilterReturn;
   allKnownProjects: ProjectNodeData[];
+  dialogueCount?: number;
   hasRemoteDevices: boolean;
   fold?: {
     label: string;
@@ -45,11 +48,17 @@ export function MainListScopeHeader({
     disabled: boolean;
   } | null;
 }): ReactNode {
+  const { t } = useTranslation();
   const [displaySettingsOpen, setDisplaySettingsOpen] = useState(false);
   return (
     <div className="group/sidebar-header flex h-6 items-center justify-between pr-0 pl-6">
       <div className="flex min-w-0 items-center gap-1">
         <MachineSwitcherMenu onOpenDisplaySettings={() => setDisplaySettingsOpen(true)} />
+        {filter.isSessionContentFiltered ? (
+          <span className="shrink-0 select-none text-xs font-medium leading-none text-[var(--sidebar-list-muted)]">
+            {t('ccAgent.sidebar.filterActiveBadge')}
+          </span>
+        ) : null}
       </div>
       <div className="flex items-center gap-0.5 -mt-px">
         <div className={HEADER_ACTIONS_CLASS}>
@@ -74,6 +83,7 @@ export function MainListScopeHeader({
           <SidebarFilterPopover
             filter={filter}
             allKnownProjects={allKnownProjects}
+            dialogueCount={dialogueCount}
             hasRemoteDevices={hasRemoteDevices}
             open={displaySettingsOpen}
             onOpenChange={setDisplaySettingsOpen}

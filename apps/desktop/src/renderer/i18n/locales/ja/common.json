@@ -7024,6 +7024,7 @@
       "filterSummaryNone": "なし",
       "filterSummaryActive": "{{count}} 件適用中",
       "filterReset": "フィルターをリセット",
+      "filterActiveBadge": "絞り込み中",
       "displayHeading": "表示",
       "taskInfoHeading": "セッション情報",
       "taskInfoSummaryNone": "なし",

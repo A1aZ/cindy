@@ -7036,6 +7036,7 @@
       "filterSummaryNone": "None",
       "filterSummaryActive": "{{count}} active",
       "filterReset": "Reset filters",
+      "filterActiveBadge": "Filtered",
       "displayHeading": "Display",
       "taskInfoHeading": "Session info",
       "taskInfoSummaryNone": "None",

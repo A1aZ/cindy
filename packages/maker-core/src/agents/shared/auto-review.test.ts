@@ -3075,6 +3075,49 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('PowerShell 的位置 cmdlet 也要进 cwd 跟踪', () => {
+    // cwd 跟踪早先只认 POSIX 名字(`cd`/`pushd`/`popd`),于是同一条命令换成 `Set-Location` 判档就
+    // 不同:`Set-Location C:\Windows\System32; Set-Content payload.txt owned` 的相对目标仍按工作区
+    // 解析、整条落灰区,而 `cd` 写法修前就已必问(codex 报)。
+    const win = ['C:\\repo'];
+    const s32 = 'C:\\Windows\\System32';
+    for (const c of [
+      `Set-Location ${s32}; Set-Content payload.txt owned`,
+      `sl ${s32}; Set-Content payload.txt owned`,                  // 别名
+      `chdir ${s32}; Set-Content payload.txt owned`,
+      `Set-Location -Path ${s32}; Set-Content payload.txt owned`,  // 具名
+      `Set-Location -Path:${s32}; Set-Content payload.txt owned`,  // 贴值
+      `Set-Location -LiteralPath ${s32}; Set-Content payload.txt owned`,
+      `Push-Location ${s32}; Set-Content payload.txt owned`,
+      // 连续切换:第二段是相对路径,按上一段跟踪到的 cwd 解析。
+      'Set-Location C:\\Windows; Set-Location System32; Set-Content payload.txt owned',
+      `Set-Location ${s32}; Remove-Item payload.txt`,              // 删除同族
+      // 回到栈上一层 = 运行期状态 → cwd 未知 → fail closed(与 POSIX `popd` 同口径)。
+      'Pop-Location; Set-Content payload.txt owned',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 对照:POSIX 写法修前就已必问,补齐后两边一致(钉住"换个名字判档不同"不再发生)。
+    for (const c of [
+      `cd ${s32}; Set-Content payload.txt owned`,
+      'popd; Set-Content payload.txt owned',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:切到区内、或目标是绝对路径 → 判档不变,补齐没有把日常操作打成硬弹窗。
+    for (const c of [
+      'Set-Location C:\\repo\\build; Set-Content a.txt x',
+      'sl C:\\repo; Remove-Item build\\x',
+      `Set-Location ${s32}; Set-Content C:\\repo\\a.txt x`,        // 绝对目标不受 cwd 影响
+      `Set-Location ${s32}`,                                       // 只切目录,没有写
+      'Get-Location',                                              // 只读,不算切换
+      'Set-Location C:\\repo; Push-Location C:\\repo\\build; Set-Content a.txt x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('前缀撞到别的 cmdlet 的参数时,按处理方式归并;贴值归不出来也不许丢', () => {
     // 真 PowerShell 把缩写解析到**被调 cmdlet 自己的参数集**,而这里的候选集是三张全局表拼的,
     // 于是 `Copy-Item -Dest` 撞上别的 cmdlet 的 `-DestinationPath` → 判成歧义。歧义分支对**贴值**

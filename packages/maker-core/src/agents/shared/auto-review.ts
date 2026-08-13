@@ -3108,12 +3108,45 @@ function windowsDestructiveRmTargets(tokens: string[]): string[] | null {
   return targets.length > 0 ? targets : null;
 }
 
+/**
+ * PowerShell 改当前位置的 cmdlet 与别名。`cd` / `chdir` 在 cmd.exe 与 PowerShell 里语义一致,
+ * 早先只认 `cd`/`pushd`(POSIX 名字),于是
+ * `Set-Location C:\Windows\System32; Set-Content payload.txt owned` 的相对目标仍按工作区解析、
+ * 整条落灰区(codex 报)。**同一条命令换个 cmdlet 名字判档就不同**,这里把三个入口补齐:
+ *   · `Set-Location` / `sl` / `chdir` → 同 `cd`;
+ *   · `Push-Location` → 同 `pushd`;
+ *   · `Pop-Location` → 同 `popd`(回到栈上一层 = 运行期状态 → cwd 未知,fail closed)。
+ * `Get-Location` 只读,不在此列。
+ */
+const POWERSHELL_SET_LOCATION: ReadonlySet<string> = new Set(['set-location', 'sl', 'chdir']);
+
+/**
+ * PowerShell 的 `-Path:<路径>` / `-LiteralPath:<路径>` 把值**贴在**参数上,不占一个 token。按
+ * "以 `-` 开头就跳过"处理等于"没给目标"→ cwd 变未知 → 后续**区内**相对写会被误升级成硬弹窗。
+ * 前缀歧义(`-p:` 同时命中 `-Path`/`-PSPath`)时返回 undefined,走原来的"没给目标"分支 = fail closed。
+ */
+function powerShellLocationAttachedTarget(token: string): string | undefined {
+  const name = token.split(/[:=]/)[0].toLowerCase();
+  if (token.length === name.length) return undefined;   // 没有贴值
+  const known = POWERSHELL_PATH_PARAMS;
+  const matched = known.includes(name)
+    ? [name]
+    : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
+  return matched.length === 1 ? token.slice(name.length + 1) : undefined;
+}
+
 function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; target?: string } {
   // executableName 归一大小写/.exe:Windows cmd/PowerShell 大小写不敏感,`CD /` 的 cwd 变更不能漏识别
   // (copilot 报:漏了会把后续相对破坏目标误当仍在工作区内)。
   const bin = executableName(tokens[0] ?? '');
-  if (bin === 'source' || bin === '.' || bin === 'popd') return { changesDirectory: true };
-  if (bin !== 'cd' && bin !== 'pushd') return { changesDirectory: false };
+  if (bin === 'source' || bin === '.' || bin === 'popd' || bin === 'pop-location') {
+    return { changesDirectory: true };
+  }
+  const pushLike = bin === 'pushd' || bin === 'push-location';
+  if (bin !== 'cd' && !pushLike && !POWERSHELL_SET_LOCATION.has(bin)) {
+    return { changesDirectory: false };
+  }
+  // POSIX `pushd -n` 只压栈、不切目录。PowerShell 的 Push-Location 没有这个开关。
   if (bin === 'pushd' && tokens.slice(1).includes('-n')) return { changesDirectory: false };
   let optionsEnded = false;
   for (const token of tokens.slice(1)) {
@@ -3121,7 +3154,11 @@ function directoryChangeTarget(tokens: string[]): { changesDirectory: boolean; t
       optionsEnded = true;
       continue;
     }
-    if (!optionsEnded && token.startsWith('-') && token !== '-') continue;
+    if (!optionsEnded && token.startsWith('-') && token !== '-') {
+      const attached = powerShellLocationAttachedTarget(token);
+      if (attached !== undefined) return { changesDirectory: true, target: attached };
+      continue;
+    }
     // pushd +/-N rotates the directory stack; the resulting cwd is runtime state.
     if (bin === 'pushd' && /^[+-]\d+$/.test(token)) {
       return { changesDirectory: true };

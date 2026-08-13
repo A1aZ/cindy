@@ -609,6 +609,13 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+function hasCodexMcpTransport(value: unknown): boolean {
+  const config = asRecord(value);
+  return [config.command, config.url].some(
+    (transport) => typeof transport === 'string' && transport.trim().length > 0,
+  );
+}
+
 /**
  * SandboxMode (thread/start 用 kebab enum) → SandboxPolicy (turn/start 用 tag union)。
  * 两者**字段名 + 类型都不一样**, 是 Codex 协议的不对称设计 — turn/start 接 SandboxPolicy
@@ -3850,7 +3857,19 @@ export class CodexAgent extends BaseAgent {
         const effectiveConfig = asRecord(configResponse.config);
         const configuredMcp = asRecord(effectiveConfig.mcp_servers);
         const configuredPlugins = asRecord(effectiveConfig.plugins);
-        const configuredMcpServerNames = new Set(Object.keys(configuredMcp));
+        const configuredMcpServerNames = new Set(
+          Object.entries(configuredMcp)
+            .filter(([, serverConfig]) => hasCodexMcpTransport(serverConfig))
+            .map(([serverName]) => serverName),
+        );
+        const transportConfiguredMcpServerNames = new Set(configuredMcpServerNames);
+        for (const pluginConfig of Object.values(configuredPlugins)) {
+          const pluginMcp = asRecord(asRecord(pluginConfig).mcp_servers);
+          for (const [serverName, serverConfig] of Object.entries(pluginMcp)) {
+            if (!hasCodexMcpTransport(serverConfig)) continue;
+            transportConfiguredMcpServerNames.add(serverName);
+          }
+        }
         const unconfiguredRuntimeMcpServerNames = new Set<string>();
         let cursor: string | null = null;
         do {
@@ -3862,7 +3881,7 @@ export class CodexAgent extends BaseAgent {
           );
           for (const server of status.data) {
             if (
-              !configuredMcpServerNames.has(server.name) &&
+              !transportConfiguredMcpServerNames.has(server.name) &&
               server.name !== CODEX_APPS_MCP_SERVER_NAME
             ) {
               unconfiguredRuntimeMcpServerNames.add(server.name);
@@ -3910,7 +3929,8 @@ export class CodexAgent extends BaseAgent {
             `plugins.${quoteReviewConfigSegment(pluginId)}.enabled`
           ] = false;
           const pluginMcp = asRecord(asRecord(configuredPlugins[pluginId]).mcp_servers);
-          for (const serverName of Object.keys(pluginMcp)) {
+          for (const [serverName, serverConfig] of Object.entries(pluginMcp)) {
+            if (!hasCodexMcpTransport(serverConfig)) continue;
             reviewCapabilityConfig[
               `plugins.${quoteReviewConfigSegment(pluginId)}.mcp_servers.${renderReviewConfigSegment(serverName)}.enabled`
             ] = false;

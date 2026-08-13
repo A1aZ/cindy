@@ -537,10 +537,12 @@ describe('CodexAgent permissions', () => {
         if (method === Method.ConfigRead) {
           return {
             config: {
-              mcp_servers: { local_docs: { enabled: true } },
+              mcp_servers: { local_docs: { command: '/usr/bin/local-docs', enabled: true } },
               plugins: {
                 'configured@personal': {
-                  mcp_servers: { configured_server: { enabled: true } },
+                  mcp_servers: {
+                    configured_server: { url: 'https://example.invalid/mcp', enabled: true },
+                  },
                 },
               },
             },
@@ -551,6 +553,7 @@ describe('CodexAgent permissions', () => {
             data: [
               { name: 'codex_apps', tools: {} },
               { name: 'local_docs', tools: {} },
+              { name: 'configured_server', tools: {} },
             ],
             nextCursor: null,
           };
@@ -635,8 +638,9 @@ describe('CodexAgent permissions', () => {
         enabled: false,
       },
     ]);
-    expect(threadStart.config).not.toHaveProperty('mcp_servers.should_not_exist');
-    expect(threadStart.config).not.toHaveProperty('mcp_servers.codex_apps.enabled');
+    expect(threadStart.config).not.toHaveProperty(['mcp_servers.should_not_exist']);
+    expect(threadStart.config).not.toHaveProperty(['mcp_servers.codex_apps.enabled']);
+    expect(threadStart.config).not.toHaveProperty(['mcp_servers.configured_server.enabled']);
     expect(handle.getPlanMode?.()).toBe(false);
 
     await expect(
@@ -733,6 +737,48 @@ describe('CodexAgent permissions', () => {
         reviewMode: true,
       }),
     ).rejects.toThrow(/runtime MCP servers without transport-bearing config: unknown_runtime_mcp/);
+  });
+
+  it('fails closed when a runtime MCP only matches a transportless plugin entry', async () => {
+    const reviewDir = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-review-plugin-mcp-'));
+    tempRoots.push(reviewDir);
+    const agent = new CodexAgent(createDeps());
+    installFakeHost(
+      agent,
+      (method) => {
+        if (method === Method.ExperimentalFeatureEnablementSet) return {};
+        if (method === Method.ConfigRead) {
+          return {
+            config: {
+              plugins: {
+                'transportless@personal': {
+                  mcp_servers: { colliding_runtime_name: { enabled: true } },
+                },
+              },
+            },
+          };
+        }
+        if (method === Method.McpServerStatusList) {
+          return {
+            data: [{ name: 'colliding_runtime_name', tools: {} }],
+            nextCursor: null,
+          };
+        }
+        return undefined;
+      },
+      { userAgent: 'mock-codex/0.145.0' },
+    );
+
+    await expect(
+      agent.startSession({
+        sessionId: 'session-review-plugin-mcp',
+        model: 'gpt-5.5',
+        workingDir: reviewDir,
+        reviewMode: true,
+      }),
+    ).rejects.toThrow(
+      /runtime MCP servers without transport-bearing config: colliding_runtime_name/,
+    );
   });
 
   it('refuses to start Review when Codex native memory cannot be disabled', async () => {

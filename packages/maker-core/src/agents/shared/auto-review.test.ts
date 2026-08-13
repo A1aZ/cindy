@@ -2891,6 +2891,56 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     )).toBe('prompt-each-time');
   });
 
+  it('写 cmdlet 的目标由 pipeline 喂进来时:上游位置证不出在区内就要确定性同意', () => {
+    // `Get-ChildItem C:\Windows\System32\* | Remove-Item` 的删除段**一个路径实参都没有**,写目标表
+    // 因此抽不到目标、整条落灰区(codex 报)。目标既然由上游对象决定,那就只有「上游枚举的位置
+    // 全部可证在区内」才算安全。判上游用的是与写目标完全相同的那套判据(provider 路径、动态 `$`、
+    // 表达式/splat、通配符占位符归一、系统路径、工作区包含),所以不会出现"直接写必问、换管道放行"。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Get-ChildItem C:\\Windows\\System32\\* | Remove-Item',
+      'Get-ChildItem C:\\Windows\\System32 | Remove-Item -Force',
+      'Get-Item C:\\Windows\\System32\\drivers\\etc\\hosts | Remove-Item',
+      'Get-ChildItem C:\\Windows | Remove-Item -Recurse -Force',
+      'Get-Item HKLM:\\SYSTEM\\Foo | Remove-Item',                   // provider 路径
+      'Get-ChildItem C:\\Windows\\System32\\* | Clear-Content',      // 另一个写 cmdlet
+      'Get-ChildItem $env:windir | Remove-Item',                     // 上游位置是变量 → 证不出
+      // `-NewName` 是新**名字**、不是被改的项 —— 被改的项来自 pipeline,所以这条也要必问。
+      // 判「有没有显式路径实参」时必须把带值参数的值消费掉,否则 `x` 会被当成位置路径而漏过。
+      'Get-ChildItem C:\\Windows\\System32\\* | Rename-Item -NewName x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:上游位置可证在区内 → 灰区。这是日常清理,不能打断。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build\\* | Remove-Item',
+      'Get-ChildItem C:\\repo\\dist | Remove-Item -Recurse -Force',
+      'Get-ChildItem C:\\repo\\build\\*.tmp | Remove-Item',
+      // 上游没给位置 = 枚举当前目录 → 按 `.` 判,与既有 cwd 兜底同口径。
+      'Get-ChildItem | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:目标写在命令行上时不走这条(已由写目标表判过,不重复升级)。
+    expect(classifyShellCommand('Get-Content C:\\repo\\a.txt | Set-Content C:\\repo\\b.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-Content C:\\repo\\a.txt | Out-File C:\\repo\\b.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 但显式目标是系统路径时照旧必问(两条判据各自独立)。
+    expect(classifyShellCommand(
+      'Get-Content C:\\repo\\a.txt | Out-File C:\\Windows\\System32\\drivers\\etc\\hosts', win, { platform: 'win32' },
+    )).toBe('prompt-each-time');
+    // 反例三:管道右侧不是写 cmdlet → 不受影响。
+    expect(classifyShellCommand('Get-ChildItem C:\\Windows\\System32 | Select-Object Name', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand('Get-ChildItem C:\\Windows\\System32 | Measure-Object', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 反例四:有效 cwd 未知 + 上游没给位置 → 证不出,fail closed。
+    expect(classifyShellCommand('Get-ChildItem | Remove-Item', win, { platform: 'win32', cwdUnknown: true }))
+      .toBe('prompt-each-time');
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

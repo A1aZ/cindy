@@ -3272,6 +3272,84 @@ function systemWriteTargetsInSegment(
  */
 const GLOB_COMPONENT_PLACEHOLDER = '\u0000globpart';
 
+/**
+ * 「这一段自己给出了路径实参吗」。用于区分"目标写在命令行上"与"目标由 pipeline 喂进来"。
+ *
+ * **不能直接看写目标表抽到了什么** —— `Rename-Item -NewName x` 会抽到 `x`,但那是新**名字**、
+ * 不是被改的项;被改的项来自 pipeline。所以这里只认真正承载路径的参数与位置实参。
+ */
+function hasExplicitPathArgument(tokens: string[]): boolean {
+  const known = [
+    ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
+  ];
+  const args = tokens.slice(1);
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (!token.startsWith('-')) return true; // 真正的位置实参
+    const name = token.split(/[:=]/)[0].toLowerCase();
+    const attached = token.length > name.length;
+    const candidates = known.includes(name)
+      ? [name]
+      : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
+    // 承载路径的具名参数(`-NewName` 只是新名字,不算)。
+    if (candidates.length === 1 && POWERSHELL_PATH_TARGET_PARAMS.includes(candidates[0])) return true;
+    // **凡是带值的已知参数都要把值一并消费**(不只 VALUE_PARAMS —— `-NewName` 在目标参数表里
+    // 但同样带值)。不消费的话 `Rename-Item -NewName x` 的 `x` 会被当成位置路径,于是
+    // "目标来自 pipeline"被误判成"目标写在命令行上"(实测漏过)。
+    if (candidates.length === 1 && !attached && !POWERSHELL_SWITCH_PARAMS.includes(candidates[0])) {
+      const value = args[i + 1];
+      if (value !== undefined && !value.startsWith('-')) i++;
+    }
+  }
+  return false;
+}
+
+/** 真正承载「被写/被删的路径」的具名参数 —— `-NewName` 是新名字,不在此列。 */
+const POWERSHELL_PATH_TARGET_PARAMS: readonly string[] = [
+  '-path', '-literalpath', '-lp', '-pspath',
+  '-destination', '-destinationpath', '-filepath', '-outfile', '-outputdirectory',
+];
+
+/**
+ * 写 cmdlet 的目标由 **pipeline** 喂进来时是否必须确定性同意。
+ *
+ * `Get-ChildItem C:\Windows\System32\* | Remove-Item` 的删除段一个路径实参都没有,写目标表抽不到
+ * 目标 → 整条落灰区、可被轻量 reviewer 静默放行(codex 报)。目标既然由上游对象决定,那就只有
+ * **上游枚举的位置全部可证在工作区内**时才算安全,其余一律要求同意。
+ *
+ * 判上游位置用的是与写目标完全相同的那套判据(provider 路径、动态 `$`、表达式/splat、通配符
+ * 占位符归一、系统路径、工作区包含),所以不会出现"直接写目标必问、换成管道就放行"的不一致。
+ * 上游没给位置(`Get-ChildItem | Remove-Item`)= 枚举当前目录 → 按 `.` 判,与本文件既有的 cwd
+ * 兜底同口径(cwd 未知时那边 fail-closed)。
+ */
+function pipelineFedWriteTargetNeedsConsent(
+  tokens: string[],
+  upstreamOperands: readonly string[] | null,
+  workspaceRoots: string[],
+  opts: ShellReviewOptions,
+): boolean {
+  if (!POWERSHELL_WRITE_CMDLETS.has(executableName(tokens[0] ?? ''))) return false;
+  if (hasExplicitPathArgument(tokens)) return false; // 目标写在命令行上 → 已由写目标表判过
+  const aliasFirmlinks = (opts.platform ?? process.platform) === 'darwin';
+  const base = opts.cwd ?? workspaceRoots[0];
+  const candidates = upstreamOperands && upstreamOperands.length > 0 ? upstreamOperands : ['.'];
+  return candidates.some((raw) => {
+    const t = stripFileSystemQualifier(raw);
+    // 运行期才定型的上游位置(变量/表达式/splat)证不出在区内。
+    if (POWERSHELL_DYNAMIC_TARGET.test(t) || isPowerShellExpressionToken(t)
+      || POWERSHELL_SPLAT_TOKEN.test(t)) return true;
+    if (isProtectedProviderPath(t)) return true;
+    // 通配符分量换占位符后整条归一(与写目标那条同一做法,`..` 会正常折叠)。
+    const concrete = t.split(/([\\/])/)
+      .map((part) => (POWERSHELL_WILDCARD.test(part) ? GLOB_COMPONENT_PLACEHOLDER : part))
+      .join('');
+    if (opts.cwdUnknown && !isAbsolutePath(toForwardSlashes(concrete))) return true;
+    const resolved = canonicalPath(normalizeTarget(concrete, [base]), aliasFirmlinks);
+    if (isProtectedSystemPath(resolved)) return true;
+    return !isInsideWorkspace(resolved, workspaceRoots, aliasFirmlinks);
+  });
+}
+
 /** 系统/区外批量破坏与受保护分支强推不能只交给模型裁决。 */
 function scopedDestructionNeedsConsent(
   command: string,
@@ -3281,7 +3359,9 @@ function scopedDestructionNeedsConsent(
 ): boolean {
   let currentCwd: string | undefined = opts.cwd ?? workspaceRoots[0];
   let currentCwdUnknown = opts.cwdUnknown === true;
-  for (const { text: segment, separatorAfter } of splitExecutableSegments(command)) {
+  // 上一段的位置操作数 —— 供「写 cmdlet 的目标由 pipeline 喂进来」时证明上游枚举的位置在区内。
+  let upstreamOperands: string[] | null = null;
+  for (const { text: segment, fromPipe, separatorAfter } of splitExecutableSegments(command)) {
     const unwrapped = unwrapCommand(tokenize(segment), currentCwd, currentCwdUnknown);
     const tokens = unwrapped.tokens;
     // 超深包装器链剥不完 → 看不到真实命令(可能是区外破坏),fail-closed 必问(codex 报)。
@@ -3296,6 +3376,12 @@ function scopedDestructionNeedsConsent(
     // (含 `cd /etc &&` 跨段传递与 `env -C /etc` 段内改目录),否则 `cp /tmp/payload hosts` 配 cwd=/etc
     // 实际覆盖 /etc/hosts 却因按 workspaceRoots 解析而只落灰区(codex 报)。
     if (systemWriteTargetsInSegment(segment, tokens, workspaceRoots, segmentOpts)) return true;
+    // 写 cmdlet 的目标也可以**由 pipeline 喂进来**(`Get-ChildItem <系统目录> | Remove-Item`):
+    // 这一段自己一个路径实参都没有,写目标表因此抽不到目标、整条落灰区(codex 报)。
+    if (fromPipe
+      && pipelineFedWriteTargetNeedsConsent(tokens, upstreamOperands, workspaceRoots, segmentOpts)) {
+      return true;
+    }
     const rmTargets = destructiveRmTargets(tokens);
     if (rmTargets?.some((target) =>
       destructiveTargetNeedsConsent(target, workspaceRoots, segmentOpts))) return true;
@@ -3385,6 +3471,10 @@ function scopedDestructionNeedsConsent(
     if (bin === 'parallel'
       && tokens.slice(1).some((token) => SHELL_EXECUTORS.has(executableName(token)))) return true;
     if (forcePushNeedsConsent(tokens)) return true;
+
+    // 留给下一段用:本段枚举了哪些位置(`Get-ChildItem <这里>`)。必须在下面那个 `continue` 之前
+    // 赋值,否则改目录的段会把它漏掉。
+    upstreamOperands = positionalOperands(tokens.slice(1));
 
     const cwdChange = directoryChangeTarget(tokens);
     if (!cwdChange.changesDirectory || separatorAfter === 'pipe' || separatorAfter === 'background') {

@@ -225,7 +225,13 @@ export function ensurePiManagerDaemon(
 ): Promise<void> {
   const key = `${host.id}`;
   const inFlight = piManagerEnsureInFlight.get(key);
-  if (inFlight) return inFlight;
+  if (inFlight) {
+    // [pi-ssh-diag] 并发 ensure 去重命中 —— 协同委托下 lead/worker 双会话并发
+    // ensure 会走这里;命中本身无副作用, 只记录便于对齐时序。
+    console.error(`[pi-ssh-diag] ensurePiManagerDaemon dedup-hit host=${host.id}`);
+    return inFlight;
+  }
+  console.error(`[pi-ssh-diag] ensurePiManagerDaemon enter host=${host.id}`);
   const promise = ensurePiManagerDaemonInner(host, opts)
     .finally(() => piManagerEnsureInFlight.delete(key));
   piManagerEnsureInFlight.set(key, promise);
@@ -263,21 +269,16 @@ async function ensurePiManagerDaemonInner(
   // 连接后发一次 protocol/hello 校验运行中 daemon 的协议版本 —— 不匹配
   // 判定 DEAD → spawn 新 daemon(磁盘已是新 bundle), 覆盖升级/回滚残留。
   const expectedProtocol = opts?.protocolVersion;
+  // 简单 connect test:只验 socket 可连 —— 不用 protocol/hello 校验。
+  // 原因:node inline script 内的 `"\\n"` 经 template literal + shellQuote
+  // 两层转义后, 传到 node -e 的不是 0x0A 换行符而是字面 \n(两个字符),
+  // daemon 的 NDJSON codec 收不到合法分界 → 永不解析 → 超时 exit 1 →
+  // 误判 DEAD → kill 活 daemon(协同委托双会话并发 kill+respawn 循环的根因)。
+  // protocol 版本校验改由下方 RPC hello 单独做(复用 RpcClient, 无转义问题)。
   const checkScript = [
     `MGR_SOCK=${shellQuote(probe.piManagerSockPath)}`,
     `PID_FILE=${shellQuote(`${probe.installDir}/pi-manager/pi-manager.pid`)}`,
     `NODE_BIN=${shellQuote(probe.nodeBinaryPath)}`,
-    ...(expectedProtocol !== undefined
-      ? [`EXPECTED_PROTOCOL=${shellQuote(String(expectedProtocol))}`]
-      : []),
-    // 轮 42 P1(codex-connector):socket 存在即 probe —— **不依赖 pidfile**。
-    // spawn 后 SSH wrapper 中断时 pidfile 可能未落盘, 但 daemon 已起、socket
-    // 已 live; 若只在 pidfile 存在时才 probe, 会误判 DEAD → unlink 活 socket
-    // + 双 spawn(两个 daemon 争同一状态目录, pi 子进程/凭证 env 残留)。
-    // socket 存在 + pidfile 存在时, 额外做 PID 身份校验(防 stale pidfile
-    // 复用成别的 daemon 却占用本 socket 路径的极端情况); socket 存在但
-    // pidfile 缺失时, socket 本身就是 live 证据(本 install 独有路径), 直接
-    // probe。
     `if [ -S "$MGR_SOCK" ]; then`,
     `  if [ -f "$PID_FILE" ]; then`,
     `    PID=$(cat "$PID_FILE" 2>/dev/null || true)`,
@@ -286,15 +287,12 @@ async function ensurePiManagerDaemonInner(
     `      *) if kill -0 "$PID" 2>/dev/null && (ps -p "$PID" -o command= 2>/dev/null | grep -F -- "pi-manager.mjs" | grep -F -- "--socket $MGR_SOCK"); then PID_OK=1; else PID_OK=0; fi ;;`,
     `    esac`,
     `  else`,
-    `    # pidfile 缺失(spawn 后 SSH 中断):socket live 即视为本 install daemon。`,
     `    PID_OK=1`,
     `  fi`,
     `  if [ "$PID_OK" = "1" ]; then`,
-    `         # 连接测试:node net.connect 真正连接 unix socket, 2s 超时。`,
-    `         # 有 EXPECTED_PROTOCOL 时额外发 protocol/hello 校验运行中 daemon。`,
-    `         if "$NODE_BIN" -e 'const n=require("net"),s=n.createConnection(process.argv[1]),e=process.argv[2];let b="";const t=setTimeout(()=>{s.destroy();process.exit(1)},3000);s.on("error",()=>{clearTimeout(t);process.exit(1)});if(!e){s.on("connect",()=>{clearTimeout(t);process.exit(0)})}else{s.on("connect",()=>s.write(JSON.stringify({type:"request",id:1,method:"protocol/hello",params:{protocolVersion:Number(e)}})+"\\n"));s.on("data",c=>{b+=c.toString();const i=b.indexOf("\\n");if(i>=0){clearTimeout(t);try{const r=JSON.parse(b.slice(0,i));if(r.type==="response"&&r.result&&r.result.protocolVersion===Number(e)){s.destroy();process.exit(0)}}catch(_){}s.destroy();process.exit(1)}})}}' "$MGR_SOCK" "$EXPECTED_PROTOCOL" >/dev/null 2>&1; then`,
-    `           echo ALIVE; exit 0;`,
-    `         fi`,
+    `    if "$NODE_BIN" -e 'require("net").createConnection(process.argv[1]).on("connect",()=>process.exit(0)).on("error",()=>process.exit(1)).setTimeout(3000,()=>process.exit(1))' "$MGR_SOCK" >/dev/null 2>&1; then`,
+    `      echo ALIVE; exit 0;`,
+    `    fi`,
     `  fi`,
     `fi`,
     `echo DEAD`,
@@ -303,8 +301,38 @@ async function ensurePiManagerDaemonInner(
     timeoutMs: 10_000,
     label: 'pi-manager-daemon-check',
   });
-  if (checkResult.exitCode === 0 && checkResult.stdout.trim().includes('ALIVE')) return;
+  // [pi-ssh-diag] 在线校验结果 —— DEAD 会进入下方 kill+respawn, 若 daemon 实际
+  // 活着(误判)这里就是「daemon 被意外 SIGTERM」的第一现场。
+  console.error(`[pi-ssh-diag] daemon-check result host=${host.id} exit=${checkResult.exitCode} out=${JSON.stringify(checkResult.stdout.trim().slice(0, 100))}`);
+  if (checkResult.exitCode === 0 && checkResult.stdout.trim().includes('ALIVE')) {
+    // connect test 通过, 若传了 protocolVersion 则额外校验 daemon 运行期协议版本。
+    // 用 String.fromCharCode(10) 代替 "\n" 避 template literal + shellQuote 双重
+    // 转义——`\\n` 经两层后变成字面 \n(两个字符)而非 0x0A, daemon 永不解析 造成
+    // 误判 DEAD → kill 活 daemon(协同委托双会话并发 kill+respawn 循环的根因)。
+    if (expectedProtocol !== undefined) {
+      const protoCheckScript = [
+        `MGR_SOCK=${shellQuote(probe.piManagerSockPath)}`,
+        `NODE_BIN=${shellQuote(probe.nodeBinaryPath)}`,
+        `EXPECTED=${shellQuote(String(expectedProtocol))}`,
+        `"$NODE_BIN" -e 'const n=require("net"),s=n.createConnection(process.argv[1]),e=Number(process.argv[2]),nl=String.fromCharCode(10);let b="";const t=setTimeout(()=>{s.destroy();process.exit(1)},3000);s.on("error",()=>{clearTimeout(t);process.exit(1)});s.on("connect",()=>s.write(JSON.stringify({type:"request",id:1,method:"protocol/hello",params:{protocolVersion:e}})+nl));s.on("data",c=>{b+=c.toString();const i=b.indexOf(nl);if(i>=0){clearTimeout(t);try{const r=JSON.parse(b.slice(0,i));if(r.type==="response"&&r.result&&r.result.protocolVersion===e){s.destroy();process.exit(0)}}catch(_){}s.destroy();process.exit(1)}})' "$MGR_SOCK" "$EXPECTED" >/dev/null 2>&1`,
+        `if [ $? -eq 0 ]; then echo PROTOCOL_OK; else echo PROTOCOL_MISMATCH; fi`,
+      ].join('\n');
+      const protoResult = await host.exec(`bash -c ${shellQuote(protoCheckScript)}`, {
+        timeoutMs: 10_000,
+        label: 'pi-manager-protocol-check',
+      });
+      console.error(`[pi-ssh-diag] protocol-check result host=${host.id} exit=${protoResult.exitCode} out=${JSON.stringify(protoResult.stdout.trim().slice(0, 60))}`);
+      if (protoResult.exitCode === 0 && protoResult.stdout.trim().includes('PROTOCOL_OK')) return;
+      // 协议不匹配 → 不 return, 继续走下方 kill+respawn。
+    } else {
+      return;
+    }
+  }
 
+  // [pi-ssh-diag] 走到这里 = check 判 DEAD → 进入 kill+respawn。若 daemon 是活的,
+  // 下面的 pidfile/orphan kill 会发 SIGTERM 杀活 daemon —— 复现时此日志与远端
+  // audit 行的时间戳对上了就是根因。
+  console.error(`[pi-ssh-diag] daemon-check DEAD -> kill+respawn host=${host.id}`);
   // Spawn detached. `node pi-manager.mjs daemon --socket <sock> --detach
   // --log-file <log>` re-spawns itself as a detached grandchild and prints PID.
   const spawnScript = [
@@ -379,6 +407,7 @@ async function ensurePiManagerDaemonInner(
       `pi-manager daemon spawn failed: ${spawnResult.stderr.trim().slice(0, 300) || spawnResult.stdout.trim().slice(0, 300)}`,
     );
   }
+  console.error(`[pi-ssh-diag] daemon spawn done host=${host.id} ${spawnResult ? `exit=${spawnResult.exitCode} out=${JSON.stringify(spawnResult.stdout.trim().slice(0, 60))}` : 'channel-closed-before-result'}`);
 
   // Wait for socket to appear (grandchild boot may take a moment).
   const waitScript = [
@@ -393,6 +422,7 @@ async function ensurePiManagerDaemonInner(
     timeoutMs: 15_000,
     label: 'pi-manager-daemon-wait',
   });
+  console.error(`[pi-ssh-diag] daemon wait-result host=${host.id} exit=${waitResult.exitCode} out=${JSON.stringify(waitResult.stdout.trim().slice(0, 60))}`);
   if (waitResult.exitCode !== 0 || !waitResult.stdout.trim().includes('READY')) {
     // 轮 21-W3 HIGH:超时/失败时已 spawn 的 daemon 进程可能仍在(启动慢/半挂),
     // 直接抛错会让调用方重试时双 spawn, 且旧进程残留占 socket。先按

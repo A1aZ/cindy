@@ -515,26 +515,30 @@ describe('ensurePiManagerDaemon', () => {
     ]);
   });
 
-  it('fast path with protocolVersion: check script does RPC hello (round 40-w4-t3 HIGH)', async () => {
-    const checkCmds: string[] = [];
+  it('fast path with protocolVersion: separate protocol check after connect test (round 40-w4-t3 HIGH)', async () => {
+    const checkLabels: string[] = [];
     const host = makeHost('h1', async (cmd, opts) => {
       if (opts?.label === 'pi-manager-probe') {
         return res(0, FULL_PROBE);
       }
       if (opts?.label === 'pi-manager-daemon-check') {
-        checkCmds.push(cmd);
+        checkLabels.push(opts.label);
         return res(0, 'ALIVE\n');
+      }
+      if (opts?.label === 'pi-manager-protocol-check') {
+        checkLabels.push(opts.label);
+        return res(0, 'PROTOCOL_OK\n');
       }
       return res(0, '');
     });
 
     await ensurePiManagerDaemon(host, { protocolVersion: 7 });
 
-    expect(checkCmds).toHaveLength(1);
-    // 期望协议版本进入 shell 脚本(赋值行, shellQuote 转义)+ node -e 做 hello 校验
-    expect(checkCmds[0]).toContain('EXPECTED_PROTOCOL=');
-    expect(checkCmds[0]).toContain('protocol/hello');
-    expect(checkCmds[0]).toContain('protocolVersion:Number(e)');
+    // 两步:先 connect test(ALIVE), 再独立 protocol check(PROTOCOL_OK)
+    expect(checkLabels).toEqual([
+      'pi-manager-daemon-check',
+      'pi-manager-protocol-check',
+    ]);
   });
 
   it('protocolVersion hello mismatch → DEAD → daemon re-spawn (round 18-U3 HIGH behavior)', async () => {

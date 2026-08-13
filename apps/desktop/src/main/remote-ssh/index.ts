@@ -1535,7 +1535,13 @@ export function registerRemoteSshIpc(): void {
   //                    挂载之前已经发送的 pending 状态 (race condition)。
   //   dismiss-pending— banner X 关掉, 本 desktop session 不再提示该 host
   //                    (下次 desktop 重启 + 探到版本不匹配会再提)。
-  ipcMain.handle(REMOTE_SSH_INVOKE.CC_MGR_FORCE_UPGRADE, async (_event, args: unknown) => {
+  ipcMain.handle(REMOTE_SSH_INVOKE.CC_MGR_FORCE_UPGRADE, async (event, args: unknown) => {
+    // 轮 43 P1(codex-connector):sender 必须是顶层 BrowserWindow —— 拒绝 webview
+    // 等非 trusted renderer 触发 kill daemon + 重装（中断远端凭证持有会话）。
+    const senderWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!senderWindow) {
+      throwIpcError('PERMISSION_DENIED', 'upgrade must be requested from a top-level renderer');
+    }
     const obj = requireObject(args);
     const id = requireString(obj.hostId, 'hostId');
     // 轮 22:agent 参数区分 cc-mgr / pi-manager 升级(banner 复用同一通道)。
@@ -2032,6 +2038,10 @@ async function softClosePiSessionsForHost(hostId: string, opts?: { onlySessionId
 }
 
 export async function cleanupRemotePiDaemonsOnHost(host: RemoteHost): Promise<void> {
+  // [pi-ssh-diag] host disconnect/remove 的 daemon 清理入口 —— 此路径会杀远端
+  // 会话, 复现时若此日志与远端 audit 行对齐即为该调用链。
+  const diagStack = new Error().stack?.split('\n').slice(2, 5).map((l) => l.trim()).join(' <- ') ?? '(no stack)';
+  console.error(`[pi-ssh-diag] cleanupRemotePiDaemonsOnHost enter host=${host.id} stack=${diagStack}`);
   // pi-manager RPC 清理(唯一 daemon 形态 —— python daemon 已退役)。
   // list 失败(未装/daemon 挂)留日志, 残留由 daemon 空闲超时兜底回收。
   try {

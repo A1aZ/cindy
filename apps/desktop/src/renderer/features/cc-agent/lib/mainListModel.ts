@@ -112,6 +112,8 @@ export interface BuildMainListEntriesInput {
   projects: readonly ProjectNode[];
   /** 无项目归属(workspaceKind dialogue)的可见会话。 */
   dialogues: readonly Session[];
+  /** 未绑定目录的草稿。按设备分组时随条目进对应设备段。 */
+  unclassified?: readonly Session[];
   /** 'project' = 项目行;'flat' = 项目内会话平铺为顶层条目。 */
   groupBy: 'project' | 'flat';
   /** true = 散排对话收进单个「对话组」条目。 */
@@ -125,6 +127,7 @@ export interface BuildMainListEntriesInput {
 export function buildMainListEntries({
   projects,
   dialogues,
+  unclassified = [],
   groupBy,
   groupDialogue,
   sortBy,
@@ -158,6 +161,17 @@ export function buildMainListEntries({
     for (const session of dialogues) entries.push({ kind: 'session', session });
   }
 
+  for (const session of unclassified) entries.push({ kind: 'session', session });
+
+  return sortMainListEntries(entries, sortBy, manualProjectOrder, ctx);
+}
+
+function sortMainListEntries(
+  entries: readonly MainListEntry[],
+  sortBy: FilterSortBy,
+  manualProjectOrder: readonly string[],
+  ctx: MainListPriorityContext,
+): MainListEntry[] {
   if (sortBy === 'manual') {
     // 手动:项目行按 manualProjectOrder;不在序的新项目由 normalize 追加到已排
     // 序列之后(沿用重设计前的既有语义;rank 兜底的 MAX_SAFE_INTEGER 只是防御,
@@ -220,13 +234,18 @@ function entryDeviceId(entry: MainListEntry): string | null {
  * 把有序顶层条目切成设备段(E 期「按设备分组」):
  *   - 段顺序:本机在前,远程设备按 deviceOrder(设备切换栏同序);
  *     不在 deviceOrder 里的设备(断线缓存等)按段内最新活动排在其后。
- *   - 段内保持入参 entries 的相对顺序(排序口径不变,只是切段)。
+ *   - 段内按当前 sortBy 重排(跨设备对话组拆开后,不能再沿用整组位置)。
  *   - 「对话归为一组」开启时,跨设备的对话组会被拆成每设备一组——调用方无需
  *     预切分,这里对 dialogue-group 条目按成员设备拆分。
  */
 export function splitEntriesByDevice(
   entries: readonly MainListEntry[],
   deviceOrder: readonly string[],
+  options: {
+    sortBy?: FilterSortBy;
+    manualProjectOrder?: readonly string[];
+    priorityContext?: MainListPriorityContext;
+  } = {},
 ): MainListDeviceSection[] {
   // 先把跨设备对话组拆开(组内成员可能来自不同设备)。
   const flattened: MainListEntry[] = [];
@@ -260,18 +279,41 @@ export function splitEntriesByDevice(
   for (const id of orderedIds) {
     const sectionEntries = sections.get(id);
     if (sectionEntries && sectionEntries.length > 0) {
-      result.push({ deviceId: id, entries: sectionEntries });
+      result.push({
+        deviceId: id,
+        entries: sortSectionEntries(sectionEntries, options),
+      });
       sections.delete(id);
     }
   }
   // 不在 deviceOrder 的残余设备(断线缓存):按段内最新活动追加。
   const rest = [...sections.entries()]
     .filter(([, sectionEntries]) => sectionEntries.length > 0)
-    .map(([deviceId, sectionEntries]) => ({ deviceId, entries: sectionEntries }))
+    .map(([deviceId, sectionEntries]) => ({
+      deviceId,
+      entries: sortSectionEntries(sectionEntries, options),
+    }))
     .sort(
       (a, b) =>
         Math.max(...b.entries.map(entryActivityMs)) - Math.max(...a.entries.map(entryActivityMs)),
     );
   result.push(...rest);
   return result;
+}
+
+function sortSectionEntries(
+  entries: readonly MainListEntry[],
+  options: {
+    sortBy?: FilterSortBy;
+    manualProjectOrder?: readonly string[];
+    priorityContext?: MainListPriorityContext;
+  },
+): MainListEntry[] {
+  if (!options.sortBy) return [...entries];
+  return sortMainListEntries(
+    entries,
+    options.sortBy,
+    options.manualProjectOrder ?? [],
+    options.priorityContext ?? EMPTY_PRIORITY_CONTEXT,
+  );
 }

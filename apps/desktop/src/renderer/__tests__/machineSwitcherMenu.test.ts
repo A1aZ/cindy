@@ -369,6 +369,7 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     );
     expect(projectsSectionSource).toContain('hasRemoteDevices={deviceGroupingAvailable}');
     expect(projectsSectionSource).not.toContain('hasRemoteMachines');
+    expect(sidebarUpperSource).toContain("if (device.status === 'rejected') continue;");
   });
 
   // (侧边栏重设计 D 期:按日期分组段已删除,其 MachineSwitcherMenu / 空态 /

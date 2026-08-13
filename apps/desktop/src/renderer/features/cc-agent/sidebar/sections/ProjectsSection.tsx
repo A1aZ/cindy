@@ -316,6 +316,7 @@ export function ProjectsSection({
     };
     for (const project of projects) for (const session of project.sessions) considerRemote(session);
     for (const session of dialogues) considerRemote(session);
+    for (const session of unclassified) considerRemote(session);
     return {
       runningSessionIds: running,
       attentionSessionIds: attention,
@@ -329,16 +330,37 @@ export function ProjectsSection({
     attentionKinds,
     projects,
     dialogues,
+    unclassified,
     remoteActivityRevision,
   ]);
 
+  // E 期「按设备分组」:有远程设备连接 + 开关开 → 按设备切段(本机在前,
+  // 远程按设备切换栏顺序);其余情况单段直渲。切段后按当前排序重排本段。
+  // manual 一并排除(2026-08-13 复核 P1):manual 与设备分组不叠加是渲染层
+  // 定稿,但此前生效判定没跟着排除——机器标签被藏、批量折叠键按逐设备派生、
+  // 折叠状态机进入 collapse-devices 却没有可见效果,全是"派生态以为在设备
+  // 分组、渲染实际是单段"的错位。生效判定必须与实际渲染模式同一份。
+  // 范围收窄到单台机器时同样退场(2026-08-13 用户定稿):只有一台无段可切,
+  // 唯一的段头还会和范围标题重复报同一个设备名;整理菜单的选项行同步隐藏
+  // (deviceGroupingAvailable),偏好照旧不改写、范围放宽自动恢复。
+  const hasRemoteDevices = (remoteDeviceIndex?.size ?? 0) > 0;
+  const selectedMachineId = useEffectiveSelectedMachineId();
+  const singleMachineScope = selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1;
+  const deviceGroupingAvailable = hasRemoteDevices && !singleMachineScope;
+  const deviceGroupingActive =
+    deviceGroupingAvailable && filter.groupDevice && filter.sortBy !== 'manual';
+  // F-PJ-10：未分类区在 projects 为具体多选状态时不渲染（spec 验收第 14 条）
+  const unclassifiedHidden = filter.projects !== 'all';
+
   // 混排模型(D 期):项目行 / 散排对话 / 对话组统一为顶层条目并按同一口径排序。
   // 这有意推翻旧「Dialogue 固定段在 Projects 之后」的裁决(mainListModel.ts 文件头)。
+  // 设备分组开启时,未分类草稿并进混排再按设备切段;单段路径仍走顶部独立段。
   const mixedEntries = useMemo(
     () =>
       buildMainListEntries({
         projects,
         dialogues,
+        unclassified: deviceGroupingActive && !unclassifiedHidden ? unclassified : [],
         groupBy: filter.groupBy,
         groupDialogue: filter.groupDialogue,
         sortBy: filter.sortBy,
@@ -348,6 +370,9 @@ export function ProjectsSection({
     [
       projects,
       dialogues,
+      unclassified,
+      unclassifiedHidden,
+      deviceGroupingActive,
       filter.groupBy,
       filter.groupDialogue,
       filter.sortBy,
@@ -399,28 +424,25 @@ export function ProjectsSection({
     )
     .map((entry) => entry.project);
 
-  // E 期「按设备分组」:有远程设备连接 + 开关开 → 按设备切段(本机在前,
-  // 远程按设备切换栏顺序);其余情况单段直渲。段内顺序保持混排口径不变。
-  // manual 一并排除(2026-08-13 复核 P1):manual 与设备分组不叠加是渲染层
-  // 定稿,但此前生效判定没跟着排除——机器标签被藏、批量折叠键按逐设备派生、
-  // 折叠状态机进入 collapse-devices 却没有可见效果,全是"派生态以为在设备
-  // 分组、渲染实际是单段"的错位。生效判定必须与实际渲染模式同一份。
-  // 范围收窄到单台机器时同样退场(2026-08-13 用户定稿):只有一台无段可切,
-  // 唯一的段头还会和范围标题重复报同一个设备名;整理菜单的选项行同步隐藏
-  // (deviceGroupingAvailable),偏好照旧不改写、范围放宽自动恢复。
-  const hasRemoteDevices = (remoteDeviceIndex?.size ?? 0) > 0;
-  const selectedMachineId = useEffectiveSelectedMachineId();
-  const singleMachineScope = selectedMachineId !== MACHINE_ALL && selectedMachineId.length === 1;
-  const deviceGroupingAvailable = hasRemoteDevices && !singleMachineScope;
-  const deviceGroupingActive =
-    deviceGroupingAvailable && filter.groupDevice && filter.sortBy !== 'manual';
   const deviceSections = useMemo<MainListDeviceSection[]>(() => {
     if (!deviceGroupingActive) return [{ deviceId: null, entries: [...visibleMixedEntries] }];
     // 设备分组:对**全量**条目先切段,折叠上限在渲染时每段独立应用(2026-08-13
     // review P1:此前先全局折叠再切段,排在前 N 名之外的设备连段头一起消失,
     // 看起来像"这台设备没有任务"——设备是最外层层级,折叠只能发生在段内)。
-    return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])]);
-  }, [deviceGroupingActive, visibleMixedEntries, mixedEntries, remoteDeviceIndex]);
+    return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])], {
+      sortBy: filter.sortBy,
+      manualProjectOrder: filter.manualProjectOrder,
+      priorityContext,
+    });
+  }, [
+    deviceGroupingActive,
+    visibleMixedEntries,
+    mixedEntries,
+    remoteDeviceIndex,
+    filter.sortBy,
+    filter.manualProjectOrder,
+    priorityContext,
+  ]);
   // 设备段折叠(E 期):本机段 key 'local'。
   const [collapsedDevices, setCollapsedDevices] = useState<ReadonlySet<string>>(new Set());
   // 「对话」组折叠:与项目行折叠同级的分组状态(用户裁决:对话组的折叠交互与
@@ -550,9 +572,6 @@ export function ProjectsSection({
     unclassified.length > 0 ||
     dialogues.length > 0 ||
     filter.isFilterActive;
-
-  // F-PJ-10：未分类区在 projects 为具体多选状态时不渲染（spec 验收第 14 条）
-  const unclassifiedHidden = filter.projects !== 'all';
 
   const renderProjectNode = (project: ProjectNodeData): ReactNode => (
     <ProjectNode
@@ -694,24 +713,26 @@ export function ProjectsSection({
       />
       {hasMainListContent ? (
       <div className="relative flex flex-col gap-1 pt-1 pr-0 pl-3">
-        <UnclassifiedSection
-          sessions={unclassified}
-          hidden={unclassifiedHidden}
-          activeSessionId={activeSessionId}
-          runningSessionIds={runningSessionIds}
-          attachedSessionIds={attachedSessionIds}
-          notifications={notifications}
-          scheduleSessionIndex={scheduleSessionIndex}
-          selectedSessionIds={selectedSessionIds}
-          onSessionClick={onSessionClick}
-          onAction={onAction}
-          onRename={onRename}
-          onTogglePin={onTogglePin}
-          onMoveSession={onMoveSession}
-          projectOptions={projectOptions}
-          onScheduleAction={onScheduleAction}
-          sessionVariant={mainSessionVariant}
-        />
+        {!deviceGroupingActive ? (
+          <UnclassifiedSection
+            sessions={unclassified}
+            hidden={unclassifiedHidden}
+            activeSessionId={activeSessionId}
+            runningSessionIds={runningSessionIds}
+            attachedSessionIds={attachedSessionIds}
+            notifications={notifications}
+            scheduleSessionIndex={scheduleSessionIndex}
+            selectedSessionIds={selectedSessionIds}
+            onSessionClick={onSessionClick}
+            onAction={onAction}
+            onRename={onRename}
+            onTogglePin={onTogglePin}
+            onMoveSession={onMoveSession}
+            projectOptions={projectOptions}
+            onScheduleAction={onScheduleAction}
+            sessionVariant={mainSessionVariant}
+          />
+        ) : null}
         {/* 混排渲染(D / E 期):
               - manual 排序:模型保证项目行连续在前 → 项目段整体走 SortableList 可拖,
                 其后是散排对话 / 对话组。折叠+溢出时禁用拖拽(PR #246 review 同款),

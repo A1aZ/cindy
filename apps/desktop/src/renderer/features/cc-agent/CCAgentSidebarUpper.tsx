@@ -1137,6 +1137,7 @@ function ExpandedView({
   const remoteDeviceIndex = useMemo(() => {
     const index = new Map<string, { name: string; online: boolean }>();
     for (const device of switcherDevices) {
+      if (device.status === 'rejected') continue;
       index.set(device.deviceId, {
         name: device.name,
         online: device.status === 'connected',

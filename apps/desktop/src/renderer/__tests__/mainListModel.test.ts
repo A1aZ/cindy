@@ -11,6 +11,7 @@ import type { ProjectNode } from '../features/cc-agent/lib/projectGrouping';
 import {
   buildMainListEntries,
   sessionPriorityRank,
+  splitEntriesByDevice,
   type MainListEntry,
 } from '../features/cc-agent/lib/mainListModel';
 
@@ -210,5 +211,58 @@ describe('buildMainListEntries — 排序口径', () => {
     });
     // 项目按手动顺序;最新的散排对话也排在项目之后(手动排序只管项目行)。
     expect(labels(entries)).toEqual(['p:beta', 'p:alpha', 's:newest-dlg']);
+  });
+});
+
+describe('splitEntriesByDevice — 拆段后按本段重排', () => {
+  it('re-sorts each device section by its own activity after splitting a dialogue group', () => {
+    const localOld = session({
+      updatedAt: '2026-08-01T00:00:00Z',
+      title: 'local-old',
+    });
+    const remoteNew = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'remote-new',
+      deviceLinkDeviceId: 'dev-a',
+    });
+    const localProject = project('local-proj', [
+      session({
+        updatedAt: '2026-08-10T00:00:00Z',
+        title: 'local-proj',
+        workingDir: '/local',
+        workspaceKind: 'project',
+      }),
+    ]);
+    const entries = buildMainListEntries({
+      projects: [localProject],
+      dialogues: [localOld, remoteNew],
+      groupBy: 'project',
+      groupDialogue: true,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    const sections = splitEntriesByDevice(entries, ['dev-a'], { sortBy: 'recency' });
+    const local = sections.find((section) => section.deviceId === null);
+    expect(local && labels(local.entries)).toEqual(['p:local-proj', 'dlg-group']);
+  });
+
+  it('places unclassified drafts into the owning device section', () => {
+    const remoteDraft = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'remote-draft',
+      deviceLinkDeviceId: 'dev-a',
+    });
+    const entries = buildMainListEntries({
+      projects: [],
+      dialogues: [],
+      unclassified: [remoteDraft],
+      groupBy: 'project',
+      groupDialogue: true,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    const sections = splitEntriesByDevice(entries, ['dev-a'], { sortBy: 'recency' });
+    expect(sections.map((section) => section.deviceId)).toEqual(['dev-a']);
+    expect(labels(sections[0].entries)).toEqual(['s:remote-draft']);
   });
 });

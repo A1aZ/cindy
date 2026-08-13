@@ -128,8 +128,9 @@ describe('Projects sidebar section', () => {
   // 切段会把前 N 名之外的设备连段头一起藏掉。
   it('device grouping splits the full list first, then collapses per section', () => {
     expect(projectsSectionSource).toContain(
-      'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])])',
+      'return splitEntriesByDevice(mixedEntries, [...(remoteDeviceIndex?.keys() ?? [])], {',
     );
+    expect(projectsSectionSource).toContain('unclassified: deviceGroupingActive && !unclassifiedHidden ? unclassified : []');
     // 每段独立折叠视图 + 段内作用域的「显示全部」(复核 P2:共用一个标志会让
     // 点任一段全段展开)。
     expect(projectsSectionSource).toMatch(

@@ -2634,6 +2634,60 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     expect(classifyShellCommand('echo x | tee a b c', ['/repo'])).toBe('prompt');
   });
 
+  it('整机电源与 ACL:PowerShell 形态要与 POSIX/cmd 同口径,不能只有 shutdown 那几个名字', () => {
+    // 这两条都不是新判据,是既有判据**缺 PowerShell 的名字**:
+    //   · 电源:HIGH_RISK 里只有 `shutdown|reboot|halt|poweroff`(`shutdown /r` 已必问),
+    //     `Restart-Computer` / `Stop-Computer` 一条都不匹配 → 裸语句包装后仍落灰区(codex 报);
+    //   · ACL:`chmod`/`chown`/`setfacl` 分支早就把 FILE 操作数当写目标(改访问控制与改内容同险),
+    //     但 `Set-Acl` 没登记 → 取不到目标(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+
+    // 整机电源。放在**整条命令**扫描的表里,所以裸语句 / `pwsh -Command` 嵌套 / 多段混合一次覆盖。
+    for (const c of [
+      'Restart-Computer',
+      'Stop-Computer',
+      'Restart-Computer -Force',
+      'Stop-Computer -ComputerName localhost',
+      'restart-computer',                       // 大小写不敏感
+      'pwsh -Command Restart-Computer',
+      "pwsh -Command 'Stop-Computer -Force'",
+      'Get-Process; Restart-Computer',          // 与只读段混合
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 回归:POSIX / cmd 形态判档不变。
+    expect(classifyShellCommand('shutdown /r', win, { platform: 'win32' })).toBe('prompt-each-time');
+    expect(classifyShellCommand('reboot', win, { platform: 'win32' })).toBe('prompt-each-time');
+    // 只收「整机电源」这一类 —— 服务级的 Stop-Service/Restart-Service 不在本条范围,仍交审阅器。
+    expect(classifyShellCommand('Restart-Service MyService', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Stop-Service MyService', win, { platform: 'win32' })).toBe('prompt');
+
+    // Set-Acl:受保护目标的访问控制变更 = 确定性同意。
+    for (const c of [
+      `Set-Acl ${hosts} $acl`,
+      `Set-Acl -Path ${hosts} -AclObject $acl`,
+      `Set-Acl -LiteralPath ${hosts} -AclObject $acl`,
+      'Set-Acl C:\\Windows\\System32 $acl',
+      `Set-Acl -AclObject $acl -Path ${hosts}`,        // 参数顺序反过来
+      `pwsh -Command Set-Acl -Path ${hosts} -AclObject $acl`, // 载荷下探
+      `Set-Acl -Path HKLM:\\SYSTEM\\Foo -AclObject $acl`,     // provider 路径同族
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+    // 反例:区内目标仍是灰区;只读 Get-Acl 不在写目标表里。
+    expect(classifyShellCommand('Set-Acl C:\\repo\\a.txt $acl', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Set-Acl -Path C:\\repo\\a.txt -AclObject $acl', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand(`Get-Acl ${hosts}`, win, { platform: 'win32' })).toBe('prompt');
+    // 反例:`-AclObject` 是**带值**参数,值不能被当成位置操作数顶掉真目标 ——
+    // 这条钉住的是"值被吃掉"那个错法(会让 `$acl` 变成写目标、系统路径反而漏掉)。
+    expect(classifyShellCommand('Set-Acl -AclObject $acl C:\\repo\\a.txt', win, { platform: 'win32' }))
+      .toBe('prompt');
+    expect(classifyShellCommand(`Set-Acl -AclObject $acl ${hosts}`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

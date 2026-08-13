@@ -337,6 +337,11 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
     ['set-item', { targets: 'first' }],
+    // `Set-Acl` 改的是**访问控制**,与改内容同等危险 —— 与本文件既有的
+    // `chmod`/`chown`/`setfacl` 分支同口径(那条已经把 FILE 操作数当写目标)。
+    // 之前只有 POSIX 名字,`Set-Acl C:\Windows\…\hosts $acl` 取不到目标、落灰区(codex 报)。
+    // 位置 0 是 `-Path`,ACL 对象由 `-AclObject` 给出(已在带值参数表里)。
+    ['set-acl', { targets: 'first' }],
     // 文档别名(Microsoft.PowerShell.Management)—— PowerShell 里 alias 的解析**优先于**外部
     // 命令,所以 `sc <系统路径> owned` 等价于 `Set-Content`,不列就整条绕过本判据(codex 报)。
     // `sc` 在 PowerShell 7 里已因与 `sc.exe` 冲突而移除,Windows PowerShell 5.1 仍有;两边都
@@ -469,6 +474,8 @@ const POWERSHELL_VALUE_PARAMS: readonly string[] = [
   '-encoding', '-value', '-itemtype', '-name', '-filter', '-include', '-exclude',
   '-width', '-delimiter', '-stream', '-credential', '-type', '-propertytype',
   '-fromsession', '-tosession', '-totalcount', '-tail',
+  // Set-Acl 的 ACL 对象:不是写目标,但**带值** —— 不消费的话值会被当位置操作数、顶掉真目标。
+  '-aclobject', '-securitydescriptor', '-centralaccesspolicy',
 ];
 
 /**
@@ -1169,6 +1176,12 @@ const ALWAYS_ASK_PATTERNS: readonly RegExp[] = [
   /\b(?:mkfs|fdisk|dd)\b/,                               // 磁盘/文件系统操作
   /(?:^|\s)>\s*\/dev\/[sh]d/,                            // 写块设备
   /\b(?:shutdown|reboot|halt|poweroff)\b/,               // 系统电源
+  // PowerShell 的同一件事:`Restart-Computer` / `Stop-Computer` 关掉或重启整台机器。
+  // 这条红线本来只有 POSIX / cmd 的名字(`shutdown /r` 已必问),PowerShell 形态一条都不匹配 →
+  // 裸语句包装成 `pwsh -Command '…'` 后仍落灰区,可被轻量 reviewer 静默放行(codex 报)。
+  // 放在**整条命令**扫描的这张表里,裸语句、`pwsh -Command` 嵌套、Bash 原样串一次覆盖。
+  // 只收"整机电源"这一类;`Stop-Service` / `Restart-Service` 是服务级、不在本条范围。
+  /\b(?:Restart|Stop)-Computer\b/i,                      // 系统电源(PowerShell)
   /:\s*\(\s*\)\s*\{.*\|.*&.*\}/,                          // fork bomb :(){ :|:& };:
   /\bchmod\b[^|;&]*\s(?:-R\s+)?[0-7]*7{2,3}\b/,           // chmod 777 之类数字放宽权限
   /\bchmod\b[^|;&]*\s[ugoa]*[oa][ugoa]*[-+=][^\s]*w/,     // chmod 符号型对 other/all 开放写(a+w / o+w / a+rwx)

@@ -3604,6 +3604,55 @@ function pipelineFedWriteTargetNeedsConsent(
   });
 }
 
+/**
+ * 「明确要执行这个大括号块」的写法:`&`/`.` 紧跟 `{`(call operator / 点源),或 `-ScriptBlock {`
+ * (`Invoke-Command`、`Start-Job`、`Start-Process` 等)。解析不出完整块时**这些写法**要 fail closed
+ * —— 其余场合的大括号(hashtable、通配符展开、`find … {} \;`)不因解析不完整而升级。
+ */
+const EXECUTABLE_SCRIPT_BLOCK = /(?:^|[\s;|&(])[&.]\s*\{|-scriptblock\s*[:=]?\s*\{/i;
+
+/**
+ * 抽出命令里**最外层**大括号块的内容,供递归审查。引号里的大括号不算(`-replace '}',''`)、
+ * 反引号转义的也不算。嵌套块由递归自然覆盖,所以这里只取最外层。
+ *
+ * `& { … }` 这一形态本来就已必问 —— `&` 是段分隔符,`{` 又被 stripShellControlTokens 剥掉,里面的
+ * `Set-Content` 恰好落回普通段判据。但 `. { … }`、`-ScriptBlock { … }`、`ForEach-Object { … }`
+ * 没有分隔符可依赖,块里的写目标一个都进不了判据(codex 报的是 call operator,实测该形态已必问,
+ * 真正漏的是这三种)。所以这里不按操作符挑,直接对所有块递归 —— 递归只会**增加**命中,不会放松。
+ */
+function braceBlockPayloads(command: string): { payloads: string[]; unbalanced: boolean } {
+  const payloads: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '`') {                     // PowerShell 转义符:跳过被转义的那个字符
+      i += 1;
+      continue;
+    }
+    if (ch === '{') {
+      if (depth === 0) start = i + 1;
+      depth += 1;
+      continue;
+    }
+    if (ch === '}' && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) payloads.push(command.slice(start, i));
+      continue;
+    }
+  }
+  return { payloads, unbalanced: depth > 0 };
+}
+
 /** 系统/区外批量破坏与受保护分支强推不能只交给模型裁决。 */
 function scopedDestructionNeedsConsent(
   command: string,
@@ -3611,6 +3660,20 @@ function scopedDestructionNeedsConsent(
   opts: ShellReviewOptions,
   depth = 0,
 ): boolean {
+  // script block 里是一段完整命令文本,块外的段判据看不到它(`. { Set-Content <系统路径> owned }`
+  // 的 bin 是 `.`,写目标表抽不到东西 → 整条落灰区,codex 报)。递归用同一套判据审块内文本。
+  const blocks = braceBlockPayloads(command);
+  if (blocks.payloads.length > 0 || blocks.unbalanced) {
+    // 块没闭合 / 递归到上限 = 看不到真实载荷。**明确要执行它**时不能当没看见。
+    if ((blocks.unbalanced || depth >= MAX_EXEC_REVIEW_DEPTH)
+      && EXECUTABLE_SCRIPT_BLOCK.test(command)) return true;
+    if (depth < MAX_EXEC_REVIEW_DEPTH) {
+      for (const inner of blocks.payloads) {
+        if (inner.trim().length > 0
+          && scopedDestructionNeedsConsent(inner, workspaceRoots, opts, depth + 1)) return true;
+      }
+    }
+  }
   let currentCwd: string | undefined = opts.cwd ?? workspaceRoots[0];
   let currentCwdUnknown = opts.cwdUnknown === true;
   // 上一段的位置操作数 —— 供「写 cmdlet 的目标由 pipeline 喂进来」时证明上游枚举的位置在区内。

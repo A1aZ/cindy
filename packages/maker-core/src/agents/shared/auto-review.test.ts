@@ -3118,6 +3118,61 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('script block 里的写目标要递归审,块没闭合就 fail closed', () => {
+    // 块里是一段完整命令文本,块外的段判据看不到它。`& { … }` 恰好已被覆盖(`&` 是段分隔符、`{` 又被
+    // stripShellControlTokens 剥掉),真正漏的是没有分隔符可依赖的那几种(codex 报 call operator,
+    // 实测该形态修前已必问)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `. { Set-Content ${hosts} owned }`,                              // 点源块
+      `Invoke-Command -ScriptBlock { Set-Content ${hosts} owned }`,
+      `Start-Job -ScriptBlock { Set-Content ${hosts} owned }`,
+      `Start-Job -ScriptBlock:{ Set-Content ${hosts} owned }`,         // 贴值
+      `Get-ChildItem | ForEach-Object { Set-Content ${hosts} owned }`,
+      `Get-ChildItem | % { Remove-Item ${hosts} }`,                    // 别名
+      `. { . { Set-Content ${hosts} owned } }`,                        // 嵌套
+      // 块内自带 cd:递归里 cwd 跟踪照常生效。
+      `Invoke-Command -ScriptBlock { cd C:\\Windows\\System32; Set-Content payload.txt owned }`,
+      // 块没闭合 = 看不到真实载荷,而写法明确要执行它 → fail closed。
+      `. { Set-Content ${hosts} owned`,
+      `Invoke-Command -ScriptBlock { Set-Content ${hosts} owned`,
+      // 包装成 pwsh -Command 后同样覆盖。
+      `pwsh -Command '. { Set-Content ${hosts} owned }'`,
+      // 修前已必问的形态,一并钉住防回退。
+      `& { Set-Content ${hosts} owned }`,
+      `& { & { Set-Content ${hosts} owned } }`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:块里写的是区内路径 → 判档不变。递归用的是同一套判据,不是"见到块就升级"。
+    for (const c of [
+      '& { Set-Content C:\\repo\\a.txt x }',
+      '. { Set-Content C:\\repo\\a.txt x }',
+      'Invoke-Command -ScriptBlock { Set-Content C:\\repo\\a.txt x }',
+      'Get-ChildItem C:\\repo\\build | ForEach-Object { Set-Content C:\\repo\\out.txt x }',
+      'cd C:\\repo\\build && & { Set-Content a.txt x }',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:引号里的大括号不是块;非"要执行"的写法即使没闭合也不升级。
+    for (const c of [
+      "Set-Content C:\\repo\\a.txt '{'",
+      "Get-Content C:\\repo\\a.txt | ForEach-Object { $_ -replace '}','' }",
+      "Get-ChildItem C:\\repo\\build | Where-Object { $_ -eq 'x'",   // 没闭合但不是 &/. /-ScriptBlock
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例三:POSIX 侧的大括号用法判档不变(`find … {} \;`、awk 程序体)。
+    for (const c of ['find . -name x -exec rm {} \\;', "awk '{print $1}' /ws/a.txt"]) {
+      expect(classifyShellCommand(c, ['/ws'], { platform: 'linux' }), c).toBe('prompt');
+    }
+    // POSIX 的命令组本来就必问,递归不改它。
+    expect(classifyShellCommand('{ rm -rf /etc; }', ['/ws'], { platform: 'linux' }))
+      .toBe('prompt-each-time');
+  });
+
   it('PowerShell 的 *> 全流重定向与 > 是同一个写通道', () => {
     // `*>` / `*>>` 把所有流一起写进目标(about_Redirection),重定向提取只认 `>`/`N>`/`&>` → 整条
     // 落灰区(codex 报)。

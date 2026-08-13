@@ -1929,17 +1929,20 @@ function noteGhostWindowSessionFocused(sender: WebContents, sessionId: string | 
   // Renderer route reports are not an authority to grant Simulator access. They
   // may only remove a stale Main-owned grant when this window family moves away
   // from the task for which it was explicitly authorized.
-  revokeIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
   const previous = ghostSessionFocusByWebContents.get(sender.id);
-  if (previous === sessionId) return;
-  ghostSessionFocusByWebContents.set(sender.id, sessionId);
-  if (!ghostSessionFocusTrackedWebContents.has(sender.id)) {
-    ghostSessionFocusTrackedWebContents.add(sender.id);
-    sender.once('destroyed', () => {
-      ghostSessionFocusByWebContents.delete(sender.id);
-      ghostSessionFocusTrackedWebContents.delete(sender.id);
-    });
+  if (previous !== sessionId) {
+    revokeIOSSimulatorRendererAccessForSessionChange(sender, sessionId);
+    ghostSessionFocusByWebContents.set(sender.id, sessionId);
+    if (!ghostSessionFocusTrackedWebContents.has(sender.id)) {
+      ghostSessionFocusTrackedWebContents.add(sender.id);
+      sender.once('destroyed', () => {
+        ghostSessionFocusByWebContents.delete(sender.id);
+        ghostSessionFocusTrackedWebContents.delete(sender.id);
+      });
+    }
   }
+  // Keep forwarding same-id reports: the primary tracker may have cleared its
+  // raw-id dedupe marker after a transient resolution failure and needs a retry.
   noteGhostSessionFocused(sessionId);
 }
 

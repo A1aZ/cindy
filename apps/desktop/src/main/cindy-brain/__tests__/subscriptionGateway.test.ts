@@ -208,6 +208,27 @@ describe('createGhostPrimarySessionFocusTracker', () => {
     expect(published).toEqual(['lead-a']);
   });
 
+  it('allows the same focus to retry when the publication recheck fails', async () => {
+    let attempts = 0;
+    const pending: Array<{ sessionId: string; claim: () => Promise<boolean> }> = [];
+    const tracker = createGhostPrimarySessionFocusTracker(
+      async () => {
+        attempts += 1;
+        return attempts === 2 ? null : 'lead';
+      },
+      (sessionId, claim) => pending.push({ sessionId, claim }),
+    );
+
+    tracker.note('worker');
+    await vi.waitFor(() => expect(pending).toHaveLength(1));
+    await expect(pending[0]?.claim()).resolves.toBe(false);
+
+    tracker.note('worker');
+    await vi.waitFor(() => expect(pending).toHaveLength(2));
+    await expect(pending[1]?.claim()).resolves.toBe(true);
+    expect(attempts).toBe(4);
+  });
+
   it('clears deduplication when focus explicitly leaves the session', async () => {
     const published: string[] = [];
     const notify = vi.fn(async (sessionId: string, claim: () => Promise<boolean>) => {

@@ -655,7 +655,19 @@ export function createGhostPrimarySessionFocusTracker(
           notify(primarySessionId, async () => {
             if (currentGeneration !== generation) return false;
             // Team 归属也可能在首次解析后变化；发布前重新解析，绝不投递过期 Lead。
-            if ((await resolve(sessionId)) !== primarySessionId) return false;
+            let recheckedPrimarySessionId: string | null;
+            try {
+              recheckedPrimarySessionId = await resolve(sessionId);
+            } catch {
+              if (currentGeneration === generation) lastRawSessionId = null;
+              return false;
+            }
+            if (recheckedPrimarySessionId !== primarySessionId) {
+              // 发布前复查失败或映射已变化时，释放 raw marker；同一焦点的后续
+              // 上报必须能够重新归一，而已发布的 primary 去重状态保持不变。
+              if (currentGeneration === generation) lastRawSessionId = null;
+              return false;
+            }
             if (currentGeneration !== generation) return false;
             if (primarySessionId === lastPrimarySessionId) return false;
             lastPrimarySessionId = primarySessionId;

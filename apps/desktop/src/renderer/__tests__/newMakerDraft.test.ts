@@ -372,6 +372,7 @@ describe('newMakerDraft store', () => {
     expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
 
     m1.patchVendorPrefsPreservingModelChoice('cc', {
+      model: 'claude-sonnet-4-6',
       effort: 'high',
     });
 
@@ -391,7 +392,7 @@ describe('newMakerDraft store', () => {
     expect(m1.getDraft().modelChosenByVendor).toEqual({});
     expect(m1.getPersistedVendorModel('cc')).toBe('');
 
-    m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6' });
+    m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6', effort: 'medium' });
     expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
 
     m1.patchVendorPrefsPreservingModelChoice('cc', {
@@ -401,9 +402,22 @@ describe('newMakerDraft store', () => {
     });
     expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-sonnet-4-6');
     expect(m1.getDraft().lastByVendor.cc.providerId).toBeNull();
-    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('medium');
     expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
     expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
+  });
+
+  it('patchVendorPrefsPreservingModelChoice:已打标且活动模型一致时才更新思考档', async () => {
+    const m1 = await loadModule();
+    m1.patchVendorPrefs('cc', { model: 'claude-sonnet-4-6', effort: 'medium' });
+
+    m1.patchVendorPrefsPreservingModelChoice('cc', {
+      model: 'claude-sonnet-4-6',
+      effort: 'high',
+    });
+    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-sonnet-4-6');
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
   });
 
   it('patchVendorPrefsPreservingModelChoice:未打标时仍可写回活动模型与来源', async () => {

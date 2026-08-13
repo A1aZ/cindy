@@ -151,7 +151,7 @@ export interface NewMakerDraft {
    * vendor,否则全新 / 没用过该 vendor 的用户会被对话侧 Opus 种子默认顶掉
    * 成本保守兜底。patchVendorPrefs 收到显式 model 时置 true;只改思考档 / Fast
    * 的会话回写走 patchVendorPrefsPreservingModelChoice：不得打标、不得清标，
-   * 也不得在已打标后改写 lastByVendor.model / providerId。
+   * 也不得在已打标后改写 lastByVendor.model / providerId / effort。
    */
   modelChosenByVendor: Partial<Record<MakerVendor, boolean>>;
 }
@@ -750,9 +750,18 @@ function patchVendorPrefsInternal(
     // 会带 modelId),但不得打标,也不得清掉已有标记。
   }
   if (!opts.markModelChoice && modelChosen[vendor] === true) {
-    // 已显式选过时,只改思考档 / Fast / 远程档位同步不得替换那次选择的模型或来源。
+    const savedModel = currentDraft.lastByVendor[vendor].model;
+    const incomingModel =
+      typeof nextPatch.model === 'string' && nextPatch.model.length > 0
+        ? nextPatch.model
+        : undefined;
+    // 已显式选过时,只改思考档 / Fast / 远程档位同步不得替换那次选择的
+    // 模型、来源或思考档。活动任务模型与已保存模型一致时,才允许更新 effort。
     delete nextPatch.model;
     delete nextPatch.providerId;
+    if (incomingModel !== savedModel) {
+      delete nextPatch.effort;
+    }
   }
   currentDraft = {
     ...currentDraft,
@@ -772,9 +781,10 @@ export function patchVendorPrefs(vendor: MakerVendor, patch: Partial<VendorPrefs
 
 /**
  * 已创建任务把思考档、以及 wire 上的当前活动模型同步回新建草稿时使用。
- * 未打标时可以更新 lastByVendor.model / providerId,方便远程草稿 / 旧控制端
- * 把活动值写回,但不把这次当成显式选模。已打标后只接受思考档等非选模字段,
- * 不得替换那次选择的模型或来源。本机已有任务里换模型应走 patchVendorPrefs。
+ * 未打标时可以更新 lastByVendor.model / providerId / effort,方便远程草稿 /
+ * 旧控制端把活动值写回,但不把这次当成显式选模。已打标后不得替换那次选择的
+ * 模型、来源或思考档;只有活动模型与已保存模型一致时才更新 effort。
+ * 本机已有任务里换模型应走 patchVendorPrefs。
  */
 export function patchVendorPrefsPreservingModelChoice(
   vendor: MakerVendor,

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -57,6 +58,26 @@ function renderDialog(onClose = vi.fn()) {
   };
 }
 
+type User = ReturnType<typeof userEvent.setup>;
+
+async function openLocalizedPresetMenu(user: User) {
+  const trigger = await screen.findByRole('button', {
+    name: 'settings.providers.custom.presets.label',
+  });
+  await user.click(trigger);
+  const option = await screen.findByRole('option', { name: '繁體供應商' });
+  await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('true'));
+  return { option, trigger };
+}
+
+async function applyLocalizedPreset(user: User) {
+  const { option, trigger } = await openLocalizedPresetMenu(user);
+  await user.click(option);
+  await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+  await screen.findByDisplayValue('繁體供應商');
+  return trigger;
+}
+
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
@@ -86,15 +107,17 @@ describe('CustomProviderDialog preset locale ownership', () => {
     async (locale, expectedName) => {
       i18nState.language = locale;
       renderDialog();
+      const user = userEvent.setup();
 
       const trigger = await screen.findByRole('button', {
         name: 'settings.providers.custom.presets.label',
       });
       expect(trigger.textContent).toContain('settings.providers.custom.presets.placeholder');
 
-      fireEvent.click(trigger);
+      await user.click(trigger);
       const option = await screen.findByRole('option', { name: expectedName });
-      fireEvent.click(option);
+      await user.click(option);
+      await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
 
       expect(trigger.textContent).toContain(expectedName);
       expect(screen.getByDisplayValue(expectedName)).not.toBeNull();
@@ -108,6 +131,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses only the topmost preset menu on Escape and preserves unsaved form edits', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
+    const user = userEvent.setup();
 
     const trigger = await screen.findByRole('button', {
       name: 'settings.providers.custom.presets.label',
@@ -122,8 +146,9 @@ describe('CustomProviderDialog preset locale ownership', () => {
       'settings.providers.custom.fields.namePlaceholder',
     );
     fireEvent.change(nameInput, { target: { value: 'Unsaved provider' } });
-    fireEvent.click(trigger);
+    await user.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
+    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('true'));
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
@@ -137,12 +162,9 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses only the topmost preset menu on a scrim gesture', async () => {
     i18nState.language = 'zh-TW';
     const { container, onClose } = renderDialog();
+    const user = userEvent.setup();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
-    fireEvent.click(trigger);
-    expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
+    await openLocalizedPresetMenu(user);
 
     const scrim = container.firstElementChild as Element;
     fireEvent.pointerDown(scrim);
@@ -168,14 +190,15 @@ describe('CustomProviderDialog preset locale ownership', () => {
   ])('keeps IME Escape inside composition for %s', async (_label, eventInit) => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
+    const user = userEvent.setup();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
-    fireEvent.click(trigger);
-    expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
+    await openLocalizedPresetMenu(user);
 
-    fireEvent.keyDown(document, { key: 'Escape', ...eventInit });
+    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    for (const [key, value] of Object.entries(eventInit)) {
+      Object.defineProperty(event, key, { configurable: true, value });
+    }
+    fireEvent(document, event);
     expect(screen.getByRole('option', { name: '繁體供應商' })).not.toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -183,15 +206,14 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses the model picker before the underlying form on Escape', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
+    const user = userEvent.setup();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
-    fireEvent.click(trigger);
-    fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
+    await applyLocalizedPreset(user);
 
-    fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
-    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
+    await user.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
+    await user.click(
+      screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }),
+    );
     expect(
       await screen.findByRole('heading', {
         name: 'settings.providers.custom.fetch.pickerTitle',
@@ -223,14 +245,13 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses only the model picker on its scrim gesture', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
+    const user = userEvent.setup();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
-    fireEvent.click(trigger);
-    fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
-    fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
-    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
+    await applyLocalizedPreset(user);
+    await user.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
+    await user.click(
+      screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }),
+    );
 
     const pickerHeading = await screen.findByRole('heading', {
       name: 'settings.providers.custom.fetch.pickerTitle',

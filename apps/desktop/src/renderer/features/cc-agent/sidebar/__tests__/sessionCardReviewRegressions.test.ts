@@ -119,10 +119,25 @@ describe('SessionCard review regressions', () => {
     expect(sessionCardSource).not.toContain('titlePrefixWidth');
   });
 
-  it('keeps card preview line budgets stable across content sources', () => {
-    expect(sessionCardSource).toContain(
-      'const cardPreviewLineClamp = session.summary ? 3 : isRunning ? 2 : isAutomationGenerated ? 1 : 2',
+  it('merges remote activity into the left vendor-mark running state', () => {
+    // 远程会话的运行态原先只进右侧状态槽,左侧图标仍只看本地 running 集。
+    // 按行精准订阅活动镜像,与折叠 rail / remoteLampOf 同一口径。
+    expect(sessionItemSource).toContain('isRemoteSessionActivityActive');
+    expect(sessionItemSource).toContain(
+      'const leftIconRunning = isRunning || isRemoteSessionActivityActive(remoteActivity)',
     );
+    expect(sessionItemSource).toContain('isRunning={leftIconRunning}');
+    expect(sessionCardSource).toContain('isRemoteSessionActivityActive');
+    expect(sessionCardSource).toContain(
+      'const leftIconRunning = isRunning || isRemoteSessionActivityActive(remoteActivity)',
+    );
+    expect(sessionCardSource).toContain('isRunning={leftIconRunning}');
+  });
+
+  it('keeps card preview line budgets stable across content sources', () => {
+    expect(sessionCardSource).toContain('const cardPreviewLineClamp = session.summary');
+    expect(sessionCardSource).toContain('leftIconRunning');
+    expect(sessionCardSource).toContain('isAutomationGenerated');
     expect(sessionCardSource).toContain('style={{ WebkitLineClamp: cardPreviewLineClamp }}');
   });
 

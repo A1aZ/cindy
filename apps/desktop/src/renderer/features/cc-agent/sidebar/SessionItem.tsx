@@ -91,7 +91,10 @@ import { isRemoteSessionWriteBlocked } from '../lib/remoteSessionWriteGuard';
 import { prefetchDirtyWorktreeForRemoval } from '@/lib/worktreeRemovalWarning';
 import { useSessionAttentionKind } from '@/lib/sessionAttentionStore';
 import { useSessionAttentionUrgency } from '../contexts/SessionAttentionUrgencyContext';
-import { useRemoteSessionActivity } from '@/features/device-link/remoteSessionActivityStore';
+import {
+  isRemoteSessionActivityActive,
+  useRemoteSessionActivity,
+} from '@/features/device-link/remoteSessionActivityStore';
 import { resolveSidebarRightStatus } from './sidebarRightStatus';
 import { AutomationTimerIcon } from './AutomationTimerIcon';
 import { SidebarRightStatusIndicator } from './SidebarRightStatusIndicator';
@@ -381,12 +384,15 @@ export const SessionItem = memo(function SessionItem({
           : remoteActivity.phase === 'running'
             ? ('running' as const)
             : ('done' as const);
+  // 左侧 vendor mark 呼吸原先只看本地 running 集;远程会话的运行态只进了右侧
+  // 状态槽,图标颜色不会刷新。并入活动镜像,与折叠 rail / 活动 store 同一口径。
+  const leftIconRunning = isRunning || isRemoteSessionActivityActive(remoteActivity);
   const rightStatusKind =
     remoteRightStatus ??
     resolveSidebarRightStatus({
       attentionKind,
       isUrgentFromContext,
-      isRunning,
+      isRunning: leftIconRunning,
       hasAttentionNotification,
     });
   const showRightStatus = rightStatusKind !== 'time';
@@ -890,7 +896,7 @@ export const SessionItem = memo(function SessionItem({
       <span className="flex w-[15px] shrink-0 items-center justify-center">
         <SessionStatusIcon
           session={session}
-          isRunning={isRunning}
+          isRunning={leftIconRunning}
           isAttached={isAttached}
           hasAttentionNotification={hasAttentionNotification}
           isActive={isActive}

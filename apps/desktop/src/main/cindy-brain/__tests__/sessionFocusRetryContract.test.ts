@@ -32,4 +32,16 @@ describe('session focus retry wiring', () => {
     expect(body).toContain('lastRawSessionId = null;');
     expect(body).toContain('primarySessionId === lastPrimarySessionId');
   });
+
+  it('releases raw focus when session-switch eligibility is temporarily unavailable', () => {
+    const start = mainSource.indexOf('export function notifyGhostSessionEvent(');
+    const end = mainSource.indexOf('\n}\n\n/**\n * 会话切换上报入口', start);
+    const body = mainSource.slice(start, end);
+
+    expect(body).toContain('onRetry: () => void = () => {}');
+    expect(body).toContain("if (info.outcome === 'retry') onRetry();");
+    expect(mainSource).toContain(
+      "notifyGhostSessionEvent('switched', { sessionId }, claim, releaseRaw)",
+    );
+  });
 });

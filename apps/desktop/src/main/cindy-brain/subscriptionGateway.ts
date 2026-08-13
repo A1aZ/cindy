@@ -627,7 +627,11 @@ export function createGhostSessionFocusTracker(
  */
 export function createGhostPrimarySessionFocusTracker(
   resolve: (sessionId: string) => Promise<string | null>,
-  notify: (sessionId: string, claim: () => Promise<boolean>) => void,
+  notify: (
+    sessionId: string,
+    claim: () => Promise<boolean>,
+    releaseRaw: () => void,
+  ) => void,
 ): { note(sessionId: string | null): void } {
   let lastRawSessionId: string | null = null;
   let lastPrimarySessionId: string | null = null;
@@ -672,6 +676,8 @@ export function createGhostPrimarySessionFocusTracker(
             if (primarySessionId === lastPrimarySessionId) return false;
             lastPrimarySessionId = primarySessionId;
             return true;
+          }, () => {
+            if (currentGeneration === generation) lastRawSessionId = null;
           });
         })
         .catch(() => {

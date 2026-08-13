@@ -1860,6 +1860,7 @@ export function notifyGhostSessionEvent(
   kind: 'created' | 'archived' | 'switched',
   data: { sessionId: string; workdir?: string },
   shouldPublish: () => boolean | Promise<boolean> = () => true,
+  onRetry: () => void = () => {},
 ): void {
   void (async () => {
     try {
@@ -1874,7 +1875,10 @@ export function notifyGhostSessionEvent(
         data.sessionId,
         kind === 'switched' ? 'session-switch' : 'default',
       );
-      if (info.outcome !== 'eligible') return;
+      if (info.outcome !== 'eligible') {
+        if (info.outcome === 'retry') onRetry();
+        return;
+      }
       // switched 的调用方(renderer 路由上报)只有 sessionId,workdir 从资格
       // 查询顺手补上,与 created/archived 的载荷形状对齐。
       const payload =
@@ -1911,7 +1915,8 @@ const ghostPrimarySessionFocusTracker = createGhostPrimarySessionFocusTracker(
       async (workerSessionId) =>
         (await getTeamByWorkerSession(workerSessionId))?.leadSessionId ?? null,
     ),
-  (sessionId, claim) => notifyGhostSessionEvent('switched', { sessionId }, claim),
+  (sessionId, claim, releaseRaw) =>
+    notifyGhostSessionEvent('switched', { sessionId }, claim, releaseRaw),
 );
 // 原始焦点只供 preview 使用；不能用它的 raw-id 去重阻断 primary tracker 的重试。
 const ghostSessionFocusTracker = createGhostSessionFocusTracker(() => {});

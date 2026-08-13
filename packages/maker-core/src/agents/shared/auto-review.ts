@@ -651,6 +651,43 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
  */
 interface PowerShellOperand { raw: string; literal: boolean }
 
+/**
+ * 一个参数名在本判据里的**处理方式**。真 PowerShell 把缩写解析到**被调 cmdlet 自己的参数集**,
+ * 而这里的候选集是三张全局表拼出来的,所以前缀会撞上别的 cmdlet 的参数:`Copy-Item -Dest` 撞
+ * `-DestinationPath`(codex 报)。
+ *
+ * 不为此按 cmdlet 建参数表(那是另一件事),改成判**候选们的处理方式是否一致**:`-Destination` 与
+ * `-DestinationPath` 都是写目标、都不是源、都展开通配符 —— 不知道它到底是哪一个也不影响结论。
+ * 处理方式不一致(跨了目标/带值/开关)才算真的证不出来,走 fail closed。
+ */
+type PowerShellParamRole =
+  | { role: 'switch' }
+  | { role: 'value' }
+  | { role: 'target'; literal: boolean }
+  | { role: 'source'; literal: boolean };
+
+function powerShellParamRole(
+  candidates: readonly string[],
+  spec: { pathIsSource?: boolean },
+): PowerShellParamRole | null {
+  if (candidates.length === 0) return null;
+  const roles = candidates.map((param): PowerShellParamRole => {
+    if (POWERSHELL_SWITCH_PARAMS.includes(param)) return { role: 'switch' };
+    const literal = POWERSHELL_LITERAL_PATH_PARAMS.includes(param);
+    // `-Path` 一族在 copy/move 上指的是**源**(见 pathIsSource)。
+    if (spec.pathIsSource === true && POWERSHELL_PATH_PARAMS.includes(param)) {
+      return { role: 'source', literal };
+    }
+    return POWERSHELL_TARGET_PARAMS.includes(param) ? { role: 'target', literal } : { role: 'value' };
+  });
+  const first = roles[0];
+  const literalOf = (r: PowerShellParamRole): boolean | undefined =>
+    r.role === 'target' || r.role === 'source' ? r.literal : undefined;
+  return roles.every((r) => r.role === first.role && literalOf(r) === literalOf(first))
+    ? first
+    : null;
+}
+
 function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | null {
   const spec = POWERSHELL_WRITE_CMDLETS.get(bin);
   if (!spec) return null;
@@ -679,24 +716,32 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
       const candidates = known.includes(name)
         ? [name]
         : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
-      if (candidates.length !== 1) {
-        // 未知 / 歧义参数:无法证明它不吃下一个 token。值贴在参数上、或下一个 token 本身是参数时
-        // 不可能错位;否则标记 fail closed(后面把全部操作数都当目标,而不是直接判不可证)。
-        if (!attached) {
-          const next = args[i + 1];
-          if (next !== undefined && !next.startsWith('-')) operandOrderUnprovable = true;
+      // 候选们的处理方式一致就够用,不必知道它具体是哪一个(见 powerShellParamRole)。
+      const paramRole = powerShellParamRole(candidates, spec);
+      if (paramRole === null) {
+        // 未知 / 处理方式不一致的参数。
+        if (attached) {
+          // 贴值不会让位置操作数错位,但**不能静默丢掉** —— 它可能就是写目标:
+          // `Copy-Item -Path C:\repo\payload -Junk:C:\Windows\System32\payload` 修前整条落灰区
+          // (codex 报的 `-Dest` 是同一个洞的可解析那一半)。归不出参数就按写目标处理 = fail closed;
+          // 值是区内路径或非路径时判档不变,只有指向受保护位置才升级。
+          named.push(...expand({ raw: token.slice(name.length + 1), literal: false }));
+          continue;
         }
+        // 无法证明它不吃下一个 token → 位置操作数可能整体错位。下一个 token 本身是参数时不可能
+        // 错位;否则标记 fail closed(后面把全部操作数都当目标,而不是直接判不可证)。
+        const next = args[i + 1];
+        if (next !== undefined && !next.startsWith('-')) operandOrderUnprovable = true;
         continue;
       }
-      if (POWERSHELL_SWITCH_PARAMS.includes(candidates[0])) continue; // 已知开关:确定不吃值
-      // `-Path`/`-LiteralPath` 在 copy/move 上指的是**源**(见 pathIsSource):它的值要按位置
-      // 操作数处理 —— 既不能当写目标,也不能丢掉(`sources: true` 的 cmdlet 源本身也被销毁,
-      // 而且操作数个数决定了"有没有给出目标"、要不要落回 cwd)。
-      const pathIsSourceHere = spec.pathIsSource === true
-        && POWERSHELL_PATH_PARAMS.includes(candidates[0]);
-      const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]) && !pathIsSourceHere;
+      if (paramRole.role === 'switch') continue; // 已知开关:确定不吃值
+      // 源参数(`-Path`/`-LiteralPath` 在 copy/move 上)的值要按位置操作数处理 —— 既不能当写目标,
+      // 也不能丢掉(`sources: true` 的 cmdlet 源本身也被销毁,而且操作数个数决定了"有没有给出
+      // 目标"、要不要落回 cwd)。
+      const pathIsSourceHere = paramRole.role === 'source';
+      const isTarget = paramRole.role === 'target';
       // `-LiteralPath`(及别名 `-LP`/`-PSPath`)逐字取值,不展开通配符 → 不打通配符标记。
-      const literal = POWERSHELL_LITERAL_PATH_PARAMS.includes(candidates[0]);
+      const literal = paramRole.role === 'value' ? false : paramRole.literal;
       if (attached) {
         // 贴在参数上的值:目标参数取它,源路径按操作数收,其它带值参数直接丢掉。
         const value = token.slice(name.length + 1);

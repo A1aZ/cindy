@@ -3075,6 +3075,49 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('前缀撞到别的 cmdlet 的参数时,按处理方式归并;贴值归不出来也不许丢', () => {
+    // 真 PowerShell 把缩写解析到**被调 cmdlet 自己的参数集**,而这里的候选集是三张全局表拼的,
+    // 于是 `Copy-Item -Dest` 撞上别的 cmdlet 的 `-DestinationPath` → 判成歧义。歧义分支对**贴值**
+    // 既不记目标、也不标操作数错位,于是整条落灰区(codex 报)。
+    const win = ['C:\\repo'];
+    const sys = 'C:\\Windows\\System32\\payload';
+    for (const c of [
+      // 归并可解析的那一半:两个候选都是写目标、都不是源、都展开通配符 → 按写目标处理。
+      `Copy-Item -Path C:\\repo\\payload -Dest:${sys}`,
+      `Move-Item -Path C:\\repo\\payload -Dest:${sys}`,
+      `Copy-Item -Path C:\\repo\\payload -Destina:${sys}`,
+      // 归不出来的那一半:贴值按写目标处理 = fail closed,不再静默丢掉。
+      `Copy-Item -Path C:\\repo\\payload -D:${sys}`,        // 单字母,候选集空
+      `Set-Content -Junk:${sys} C:\\repo\\a.txt hi`,        // 未知参数
+      `Set-Content -Junk:C:\\repo\\a.txt,${sys} hi`,        // 贴值里的逗号数组一并拆
+      // 不带冒号的形态修前就已必问(走操作数错位那条),一并钉住。
+      `Copy-Item -Path C:\\repo\\payload -Dest ${sys}`,
+      `Copy-Item -Path C:\\repo\\payload -Destination:${sys}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:目标在区内 → 判档不变,归并没有把普通复制打成硬弹窗。
+    for (const c of [
+      'Copy-Item -Path C:\\repo\\payload -Dest:C:\\repo\\bak',
+      'Copy-Item -Path C:\\repo\\payload -D:C:\\repo\\bak',
+      'Set-Content -Junk v C:\\repo\\a.txt hi',
+      'Set-Content C:\\repo\\a.txt -Encoding:utf8 hi',
+      'Set-Content -Junk:utf8 C:\\repo\\a.txt hi',           // 贴值不是路径 → 相对路径落在区内
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:**源**在受保护位置、目标在区内仍是灰区 —— 归并不得把源当成目标。
+    expect(classifyShellCommand(
+      'Copy-Item -Path C:\\Windows\\System32\\drivers\\etc\\hosts -Dest:C:\\repo\\bak',
+      win, { platform: 'win32' },
+    )).toBe('prompt');
+    // 反例三:`-LiteralPath` 一族逐字取值的口径不变(处理方式不一致的候选才算证不出来)。
+    expect(classifyShellCommand(
+      'Set-Content -LiteralPath C:\\repo\\a[1].txt hi', win, { platform: 'win32' },
+    )).toBe('prompt');
+  });
+
   it('Select-Object 的计算属性造出新路径,不是透传', () => {
     // `Select-Object @{Name='Path';Expression={…}}` 造出一个新的 `Path` 值,而 `Remove-Item -Path`
     // 按属性名接受 pipeline 输入 → 删除段吃的是表达式算出来的路径,不是上游那个项(codex 报)。

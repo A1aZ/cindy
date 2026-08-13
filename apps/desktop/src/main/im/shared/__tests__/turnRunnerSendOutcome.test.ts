@@ -193,6 +193,7 @@ interface SessionHarness {
   isTurnRunning: ReturnType<typeof vi.fn>;
   /** maker-core Session.abort 的 mock — !stop 中止路径断言用。 */
   abort: ReturnType<typeof vi.fn>;
+  setPermissionMode: ReturnType<typeof vi.fn>;
   acquireTurnLease: ReturnType<typeof vi.fn>;
   releaseTurnLease: ReturnType<typeof vi.fn>;
   emit(event: AgentEvent): void;
@@ -219,6 +220,7 @@ function createSessionHarness(
   });
   const isTurnRunning = vi.fn(() => false);
   const abort = vi.fn(async () => undefined);
+  const setPermissionMode = vi.fn(async () => undefined);
   const releaseTurnLease = vi.fn();
   const acquireTurnLease = vi.fn(() => releaseTurnLease);
   let interactionListener: Parameters<Session['setInteractionListener']>[0] = null;
@@ -231,6 +233,7 @@ function createSessionHarness(
     send,
     isTurnRunning,
     abort,
+    setPermissionMode,
     acquireTurnLease,
     onEvent(listener: (event: AgentEvent) => void) {
       listeners.push(listener);
@@ -250,6 +253,7 @@ function createSessionHarness(
     send,
     isTurnRunning,
     abort,
+    setPermissionMode,
     acquireTurnLease,
     releaseTurnLease,
     emit(event: AgentEvent) {
@@ -2541,6 +2545,63 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     await flushMicrotasks();
     expect(h.send).toHaveBeenCalledTimes(1);
     expect(mocks.persistUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps bypassPermissions after Stop and explains how to recover when the next group turn is rejected', async () => {
+    const capabilities = {
+      turnPermissionPolicy: {
+        supported: { supported: true },
+        unsupportedPermissionModes: ['bypassPermissions'],
+      },
+    } as unknown as Capabilities;
+    const h = createSessionHarness(async () => ({ accepted: true }), 'feishu-session', {
+      capabilities,
+    });
+    mocks.getMaker.mockReturnValue(createMakerHarness(h.session));
+    const policy: TurnPermissionPolicy = {
+      origin: { kind: 'im', channel: 'feishu', taskId: 'task-stop-retry' },
+      confirmationSurface: 'channel',
+      forceConfirmToolCall: () => true,
+    };
+
+    await runDefaultTurn(vi.fn(), {
+      userMessageId: 'msg-before-stop',
+      text: 'already running task',
+    });
+    const stopped = await getRunner().stopActiveTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'ou_user',
+    });
+    expect(stopped).toEqual({ stopped: true, droppedQueued: 0 });
+    expect(h.setPermissionMode).not.toHaveBeenCalled();
+    h.emit({ type: 'done', data: {} });
+    await flushMicrotasks();
+
+    h.send.mockImplementationOnce(async () => {
+      throw new TurnPermissionPolicyUnsupportedError('claude-code', 'bypassPermissions');
+    });
+
+    await getRunner().runAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'ou_user',
+      userMessageId: 'msg-after-stop',
+      text: 'second group message',
+      attachments: [],
+      turnPermissionPolicy: policy,
+    });
+
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.send.mock.calls[1]?.[1]).toEqual(expect.objectContaining({ turnPermissionPolicy: policy }));
+    expect(h.setPermissionMode).not.toHaveBeenCalled();
+    expect(mocks.feishuIm.sendText).toHaveBeenLastCalledWith(
+      'ou_user',
+      expect.stringContaining('/permission auto'),
+      { threadTs: undefined },
+    );
+    const recoveryText = String(mocks.feishuIm.sendText.mock.lastCall?.[1]);
+    expect(recoveryText).toContain('/permission ask');
+    expect(recoveryText).toContain('/new');
+    expect(recoveryText).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
   });
 
   it('disposeAllSessions aborts and awaits an IM-owned in-flight turn', async () => {

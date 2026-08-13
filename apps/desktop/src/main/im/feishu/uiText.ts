@@ -13,7 +13,37 @@
 
 import type { IMUnsupportedEntry } from '@cindy/im';
 
+import { t } from '../../i18n';
 import type { ImUiTextPack } from '../shared/types';
+
+export type FeishuTranslator = (key: string) => string;
+
+const AGENT_UNSUPPORTED_KEY = 'settings.imBot.defaults.feishuAgentUnsupportedHint';
+const AGENT_MODE_HINT_KEY = 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint';
+const PERMISSION_MODE_UNSUPPORTED_KEY =
+  'settings.imBot.defaults.feishuPermissionModeRecoveryHint';
+
+export function createFeishuPreDispatchFailureText(
+  translate: FeishuTranslator,
+): (reason: string) => string | undefined {
+  return (reason) => {
+    if (reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED:agent')) {
+      const mode = reason.split(':').pop() ?? '';
+      return mode === 'bypassPermissions' || mode === 'acceptEdits'
+        ? `${translate(AGENT_UNSUPPORTED_KEY)}\n${translate(AGENT_MODE_HINT_KEY)}`
+        : translate(AGENT_UNSUPPORTED_KEY);
+    }
+    if (
+      reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED') ||
+      reason.includes('unsupported_turn_permission')
+    ) {
+      return translate(PERMISSION_MODE_UNSUPPORTED_KEY);
+    }
+    return undefined;
+  };
+}
+
+const preDispatchFailureText = createFeishuPreDispatchFailureText(t);
 
 export const ui = {
   // ── slash command replies ──────────────────────────────────────────────────
@@ -86,6 +116,12 @@ export const ui = {
     unsupportedNotice: (entries: IMUnsupportedEntry[]) =>
       `ℹ️ 以下内容我消化不了，先丢一边了：\n${entries.map((e) => `• ${e.label}`).join('\n')}\n\n` +
       `其它部分收到啦，正在处理~`,
+  },
+
+  error: {
+    agentUnsupported: t(AGENT_UNSUPPORTED_KEY),
+    permissionModeUnsupported: t(PERMISSION_MODE_UNSUPPORTED_KEY),
+    preDispatchFailureText,
   },
 
   // ── card text (sent via @cindy/im InteractiveCardSpec) ──────────────────────

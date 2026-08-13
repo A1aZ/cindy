@@ -2285,7 +2285,9 @@ export function createTurnRunner(
     await completeTurnCallbackAfterAck(failure.turn);
     if (failure.turn.queueMode === 'internal') {
       try {
-        const message = `❌ 启动 agent 失败：${failure.reason}`;
+        const message =
+          adapter.ui.error?.preDispatchFailureText?.(failure.reason) ??
+          `❌ 启动 agent 失败：${failure.reason}`;
         if (
           output.kind === 'chunked-text' &&
           failure.turn.chunkedReplyBegun

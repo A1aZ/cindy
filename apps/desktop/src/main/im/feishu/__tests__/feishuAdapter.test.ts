@@ -33,6 +33,7 @@ vi.mock('../../ownerScopedStorage', () => ({
 
 import type { FeishuIM, FeishuRecentChatMessage, IMMessageEvent } from '@cindy/im';
 import { buildFeishuAdapter } from '../adapter';
+import { createFeishuPreDispatchFailureText } from '../uiText';
 
 const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
 const fetchRecentChatMessages = vi.fn<
@@ -164,6 +165,43 @@ describe('feishu group lane adapter hooks', () => {
       groupEvent({ senderId: 'ou_owner', speaker: undefined }),
     );
     expect(dmPolicy).toBeUndefined();
+  });
+
+  it('将群权限策略不兼容转换为可执行的恢复指引', () => {
+    const text = adapter.ui.error?.preDispatchFailureText?.(
+      'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions',
+    );
+    expect(text).toContain('/permission auto');
+    expect(text).toContain('/permission ask');
+    expect(text).toContain('/new');
+    expect(text).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
+    expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();
+  });
+
+  it('派发前错误提示通过注入翻译器按当前语言生成', () => {
+    const translations: Record<string, string> = {
+      'settings.imBot.defaults.feishuAgentUnsupportedHint': '[agent-unsupported]',
+      'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint': '[permission-mode-hint]',
+      'settings.imBot.defaults.feishuPermissionModeRecoveryHint': '[permission-recovery]',
+    };
+    const translate = vi.fn((key: string) => translations[key] ?? `[missing:${key}]`);
+    const preDispatchFailureText = createFeishuPreDispatchFailureText(translate);
+
+    expect(
+      preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:bypassPermissions'),
+    ).toBe('[agent-unsupported]\n[permission-mode-hint]');
+    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:ask')).toBe(
+      '[permission-recovery]',
+    );
+    expect(translate).toHaveBeenCalledWith(
+      'settings.imBot.defaults.feishuAgentUnsupportedHint',
+    );
+    expect(translate).toHaveBeenCalledWith(
+      'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint',
+    );
+    expect(translate).toHaveBeenCalledWith(
+      'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
+    );
   });
 
   it('prepareAgentTurnText: 群 lane 拉历史拼上下文前缀, 剔除触发消息', async () => {

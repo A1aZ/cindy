@@ -48,6 +48,7 @@ import {
   getSessionRoutingDescriptor,
   resolveSessionRoute,
   resolveSessionRouteDecision,
+  resolvePendingSessionRouteDecision,
   buildLocalHandlerHeaders,
   inferProviderIdForModel,
   isHostInjectedAuthSession,
@@ -2165,6 +2166,10 @@ export function createModelRoutingTransform(
       return unresolvedCollabSpawnRouteDecision();
     }
     const explicitProviderId = sessionId ? getSessionProvider(sessionId) : null;
+    const pendingRoute = sessionId
+      ? resolvePendingSessionRouteDecision(sessionId, model || undefined)
+      : null;
+    if (pendingRoute) return pendingRoute;
     const selectedRouting = sessionId
       ? getSessionRoutingDescriptor(sessionId, 'codex', model || undefined)
       : null;

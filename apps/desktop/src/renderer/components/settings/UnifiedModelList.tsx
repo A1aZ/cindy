@@ -713,6 +713,12 @@ export function UnifiedModelList({
                         .join(' · ')
                     : undefined;
                   const hiddenAgents = diverged ? getHiddenAgents(provider.id, row) : [];
+                  const divergedChipLabel =
+                    hiddenAgents.length > 0
+                      ? t('settings.providers.models.divergedChip', {
+                          agent: hiddenAgents.map((agent) => AGENT_LABEL[agent]).join(' / '),
+                        })
+                      : '';
                   return (
                     <div
                       key={row.id}
@@ -746,15 +752,14 @@ export function UnifiedModelList({
                         <button
                           type="button"
                           onClick={() => setSplitMode(true)}
-                          className="flex h-[18px] shrink-0 items-center rounded-full px-2 text-11 font-medium transition-opacity hover:opacity-80"
+                          className="flex h-[18px] min-w-0 max-w-32 items-center rounded-full px-2 text-11 font-medium transition-opacity hover:opacity-80"
                           style={{
                             backgroundColor: 'var(--surface-chip)',
                             color: 'var(--text-secondary)',
                           }}
+                          title={divergedChipLabel}
                         >
-                          {t('settings.providers.models.divergedChip', {
-                            agent: hiddenAgents.map((agent) => AGENT_LABEL[agent]).join(' / '),
-                          })}
+                          <span className="truncate">{divergedChipLabel}</span>
                         </button>
                       )}
                       {/* 固定 44px 右对齐列:上下扫读时数字齐成一条线;合成媒体行

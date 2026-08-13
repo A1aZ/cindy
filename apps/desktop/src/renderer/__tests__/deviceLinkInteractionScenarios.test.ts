@@ -961,6 +961,8 @@ describe('远程交互接线不变式', () => {
     expect(syncBody).toContain('patchVendorPrefsPreservingModelChoice');
     expect(syncBody).toContain('markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice');
     expect(syncBody).toContain("opts.markModelChoice === true");
+    expect(syncBody).toContain('markModelChoice');
+    expect(syncBody).toContain('{ model: modelId, providerId: activeProviderId ?? null }');
     expect(syncBody).toContain(
       'opts.remoteDeviceId ?? getSessionDeviceId(sessionId) ?? deviceLinkDeviceId',
     );
@@ -975,6 +977,11 @@ describe('远程交互接线不变式', () => {
     );
     expect(appSrc).toContain('model: modelId');
     expect(appSrc).not.toContain("markModelChoice === false ? {} : { model: modelId }");
+
+    const draftSrc = read('state/newMakerDraft.ts');
+    expect(draftSrc).toContain('if (!opts.markModelChoice && modelChosen[vendor] === true)');
+    expect(draftSrc).toContain('delete nextPatch.model');
+    expect(draftSrc).toContain('delete nextPatch.providerId');
 
     const newMakerDraftRouteSrc = read('features/cc-agent/NewMakerDraftRoute.tsx');
     const pushActiveStart = newMakerDraftRouteSrc.indexOf('const pushActiveDraftPref');

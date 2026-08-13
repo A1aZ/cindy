@@ -150,7 +150,8 @@ export interface NewMakerDraft {
    * 调度任务默认模型的三级回退(getPersistedVendorModel 消费)只认这里标记过的
    * vendor,否则全新 / 没用过该 vendor 的用户会被对话侧 Opus 种子默认顶掉
    * 成本保守兜底。patchVendorPrefs 收到显式 model 时置 true;只改思考档 / Fast
-   * 的会话回写走 patchVendorPrefsPreservingModelChoice，不得清掉已有标记。
+   * 的会话回写走 patchVendorPrefsPreservingModelChoice：不得打标、不得清标，
+   * 也不得在已打标后改写 lastByVendor.model / providerId。
    */
   modelChosenByVendor: Partial<Record<MakerVendor, boolean>>;
 }
@@ -739,7 +740,8 @@ function patchVendorPrefsInternal(
   opts: { markModelChoice: boolean },
 ): void {
   const modelChosen = { ...currentDraft.modelChosenByVendor };
-  if (typeof patch.model === 'string' && patch.model.length > 0) {
+  const nextPatch = { ...patch };
+  if (typeof nextPatch.model === 'string' && nextPatch.model.length > 0) {
     if (opts.markModelChoice) {
       // 新建页 picker 或已有任务换模 → 打标记,下次新建跟随这次选择,不再回落区域默认。
       modelChosen[vendor] = true;
@@ -747,12 +749,17 @@ function patchVendorPrefsInternal(
     // markModelChoice=false 仍可写回当前活动模型(远程草稿 / 旧控制端 wire
     // 会带 modelId),但不得打标,也不得清掉已有标记。
   }
+  if (!opts.markModelChoice && modelChosen[vendor] === true) {
+    // 已显式选过时,只改思考档 / Fast / 远程档位同步不得替换那次选择的模型或来源。
+    delete nextPatch.model;
+    delete nextPatch.providerId;
+  }
   currentDraft = {
     ...currentDraft,
     modelChosenByVendor: modelChosen,
     lastByVendor: {
       ...currentDraft.lastByVendor,
-      [vendor]: { ...currentDraft.lastByVendor[vendor], ...patch },
+      [vendor]: { ...currentDraft.lastByVendor[vendor], ...nextPatch },
     },
   };
   scheduleWrite();
@@ -765,9 +772,9 @@ export function patchVendorPrefs(vendor: MakerVendor, patch: Partial<VendorPrefs
 
 /**
  * 已创建任务把思考档、以及 wire 上的当前活动模型同步回新建草稿时使用。
- * 可以更新 lastByVendor.model,但不把 modelChosenByVendor 打成「显式选过」:
- * 只改思考档 / 远程草稿回写不能把区域默认升级成用户选择,也不得清掉已有标记。
- * 本机已有任务里换模型应走 patchVendorPrefs,让下次新建跟随这次选择。
+ * 未打标时可以更新 lastByVendor.model / providerId,方便远程草稿 / 旧控制端
+ * 把活动值写回,但不把这次当成显式选模。已打标后只接受思考档等非选模字段,
+ * 不得替换那次选择的模型或来源。本机已有任务里换模型应走 patchVendorPrefs。
  */
 export function patchVendorPrefsPreservingModelChoice(
   vendor: MakerVendor,

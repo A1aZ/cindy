@@ -396,11 +396,28 @@ describe('newMakerDraft store', () => {
 
     m1.patchVendorPrefsPreservingModelChoice('cc', {
       model: 'claude-opus-4-8',
+      providerId: 'anthropic',
+      effort: 'high',
+    });
+    expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-sonnet-4-6');
+    expect(m1.getDraft().lastByVendor.cc.providerId).toBeNull();
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
+    expect(m1.getPersistedVendorModel('cc')).toBe('claude-sonnet-4-6');
+  });
+
+  it('patchVendorPrefsPreservingModelChoice:未打标时仍可写回活动模型与来源', async () => {
+    const m1 = await loadModule();
+    m1.patchVendorPrefsPreservingModelChoice('cc', {
+      model: 'claude-opus-4-8',
+      providerId: 'anthropic',
       effort: 'high',
     });
     expect(m1.getDraft().lastByVendor.cc.model).toBe('claude-opus-4-8');
-    expect(m1.getDraft().modelChosenByVendor).toEqual({ cc: true });
-    expect(m1.getPersistedVendorModel('cc')).toBe('claude-opus-4-8');
+    expect(m1.getDraft().lastByVendor.cc.providerId).toBe('anthropic');
+    expect(m1.getDraft().lastByVendor.cc.effort).toBe('high');
+    expect(m1.getDraft().modelChosenByVendor).toEqual({});
+    expect(m1.getPersistedVendorModel('cc')).toBe('');
   });
 
   it('已有任务换模走 patchVendorPrefs,下次新建跟随这次选择', async () => {

@@ -5206,9 +5206,10 @@ export function ChatInput({
               : 'cc';
         const persistPrefs = markModelChoice ? patchVendorPrefs : patchVendorPrefsPreservingModelChoice;
         persistPrefs(vendor, {
-          // 只改思考档 / Fast 不得改写下次新建用的模型;换模才带 model 并打标记。
-          ...(markModelChoice ? { model: modelId } : {}),
-          providerId: activeProviderId ?? null,
+          // 只改思考档 / Fast 不得改写下次新建用的模型或来源;换模才带配对并打标记。
+          ...(markModelChoice
+            ? { model: modelId, providerId: activeProviderId ?? null }
+            : {}),
           ...(patch.effort !== undefined ? { effort: patch.effort } : {}),
         });
         if (memoryProviderId) {

@@ -78,6 +78,27 @@ async function applyLocalizedPreset(user: User) {
   return trigger;
 }
 
+// jsdom 的 KeyboardEvent.keyCode 只读且恒为 0；fireEvent 赋不上 229，
+// Windows CI 上会把 IME Escape 当成普通关闭键。
+function dispatchEscape(
+  target: Document | Element,
+  init: { isComposing?: boolean; keyCode?: number } = {},
+) {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true,
+    isComposing: Boolean(init.isComposing),
+  });
+  if (init.keyCode !== undefined) {
+    Object.defineProperty(event, 'keyCode', {
+      configurable: true,
+      value: init.keyCode,
+    });
+  }
+  fireEvent(target, event);
+}
+
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
@@ -194,11 +215,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
 
     await openLocalizedPresetMenu(user);
 
-    const event = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-    for (const [key, value] of Object.entries(eventInit)) {
-      Object.defineProperty(event, key, { configurable: true, value });
-    }
-    fireEvent(document, event);
+    dispatchEscape(document, eventInit);
     expect(screen.getByRole('option', { name: '繁體供應商' })).not.toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });

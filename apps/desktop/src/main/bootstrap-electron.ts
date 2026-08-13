@@ -491,9 +491,11 @@ import {
   patchGhostPanelWindowEntry,
   readGhostPanelWindowsSettings,
   removeGhostPanelWindowEntry,
+  resetGhostPanelWindowSettingsForStartup,
 } from './ghost-panel-window/settings-store.js';
 import {
   readRsbWindowSettings,
+  resetRsbWindowSettingsForStartup,
   writeRsbWindowSettingsPatch,
 } from './right-sidebar-window/settings-store.js';
 import {
@@ -752,7 +754,9 @@ import {
   getGhostCindySlot,
   getGhostManager,
   getGhostSessionActivityTracker,
+  interruptGhostCallsForAccountBoundary,
   isGhostAvailableForActiveSession,
+  reconcileGhostOauthAccountsForActiveOwner,
   refreshGhostLocalization,
   registerGhostIpc,
   setGhostsChangedObserver,
@@ -1117,10 +1121,57 @@ async function ensureLifecycleDbClient(userId: string) {
   });
 }
 
+const AUTH_BOUNDARY_WAIT_TIMEOUT_MS = 10_000;
+
+async function withAuthBoundaryTimeout<T>(label: string, task: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      task(),
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} timed out after ${AUTH_BOUNDARY_WAIT_TIMEOUT_MS}ms`));
+        }, AUTH_BOUNDARY_WAIT_TIMEOUT_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function teardownGhostProjectionBoundary(reason: string): Promise<void> {
+  const failures: unknown[] = [];
+  const run = async (label: string, task: () => Promise<void>): Promise<void> => {
+    try {
+      await task();
+    } catch (error) {
+      failures.push(error);
+      authBoundaryLog.error(`${label} on ${reason} failed`, error);
+    }
+  };
+
+  await run('interruptGhostCallsForAccountBoundary', () =>
+    withAuthBoundaryTimeout('interrupt Ghost calls', interruptGhostCallsForAccountBoundary));
+  await run('waitForGhostMutations', () =>
+    withAuthBoundaryTimeout('wait for Ghost mutations', waitForGhostMutations));
+  await run('suspendAllGhosts', suspendAllGhosts);
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, `Ghost projection teardown on ${reason} was incomplete`);
+  }
+}
+
 async function teardownAuthAccountBoundary(reason: string): Promise<void> {
+  const blockingFailures: unknown[] = [];
   // The boundary is already marked pending by every caller. New actions now
   // fail closed; drain an action that crossed the boundary before closing its DB.
-  await waitForTurnChangeSetActions();
+  try {
+    await withAuthBoundaryTimeout('wait for turn change-set actions', waitForTurnChangeSetActions);
+  } catch (error) {
+    blockingFailures.push(error);
+    authBoundaryLog.error(`waitForTurnChangeSetActions on ${reason} failed`, error);
+  }
   skillhubAutoSyncService.cancelInFlight();
   // Custom provider routes are owner-scoped but the active catalog is process-global.
   // Clear synchronously at the boundary; the next owner's tracked readiness reloads them
@@ -1169,8 +1220,11 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   // Every Ghost sandbox can retain live OAuth, subscription, or in-memory
   // state. Stop them before changing owners; resident Ghosts are recreated by
   // the auth-change activation pass after the new boundary is committed.
-  await waitForGhostMutations();
-  suspendAllGhosts();
+  try {
+    await teardownGhostProjectionBoundary(reason);
+  } catch (error) {
+    blockingFailures.push(error);
+  }
   // Personal IM channels have the same DB boundary. Relogin restarts them from
   // the next owner DB-ready callback; app:ready-for-bot remains a compatibility
   // retry after the new DbClient is ready.
@@ -1275,13 +1329,39 @@ async function teardownAuthAccountBoundary(reason: string): Promise<void> {
   } finally {
     releaseEndedSuppression();
   }
-  agentIslandService?.resetRuntimeState();
+  // device-link 单持有者仲裁:必须在 dispose DbClient **之前**释放持有权行
+  // (dispose 同步 clearCurrentDbClient,之后 store 不可用,只能等 15s+ 心跳
+  // 过期,同机幸存实例接管变慢)。内部带 1.5s 超时,不会卡住登出。
+  try {
+    await releaseDeviceLinkOwnershipBeforeLogout();
+  } catch (err) {
+    authBoundaryLog.error(
+      `[bootstrap-electron] release device-link ownership on ${reason} failed (non-fatal):`,
+      err,
+    );
+  }
+  try {
+    await lifecycleDbClientManager.dispose(reason);
+  } finally {
+    try {
+      localDbCloseDb();
+    } catch (error) {
+      blockingFailures.push(error);
+      authBoundaryLog.error(`close local DB on ${reason} failed`, error);
+    }
+    agentIslandService?.resetRuntimeState();
+  }
+
+  if (blockingFailures.length > 0) {
+    throw new AggregateError(blockingFailures, `account boundary teardown on ${reason} was incomplete`);
+  }
 }
 
 authManager.setAccountSwitchTeardown(async () => {
   await teardownAuthAccountBoundary('runtime-replacement-account-switch');
 });
 authManager.setAuthSessionTeardown(teardownAuthAccountBoundary);
+authManager.setProjectionRepairTeardown(teardownGhostProjectionBoundary);
 
 try {
   reapClaudeOrphansSync();
@@ -1340,15 +1420,16 @@ installWebviewHardener();
 // 通知用的 host webContents 通过 mainWindowRef lazy 取,主窗未就绪时静默跳过
 // (pin 状态由 main 端 registry 保权威,renderer 端会通过 reconciliation 跟上)。
 // ── 右侧栏独立子窗口(RSB window)────────────────────────────────────────
-// 「侧边栏在新窗口中显示」偏好 + 子窗口生命周期状态机。detached 且窗口开着时,
+// 右侧栏当前进程内的分离状态 + 子窗口生命周期状态机。detached 且窗口开着时,
 // RSB host(pin/unpin 通知、tab-op dispatch 的目标 renderer)是子窗口而非主窗,
 // 下方三处 RSB bridge wiring 统一经 controller.getHostWebContents() 解析。
 // deps 全部是 lazy 闭包(mainWindowRef / isQuitting 在文件更靠后声明+赋值,
 // 调用时机远晚于此处构造),状态机本体见 right-sidebar-window/controller.ts。
+resetRsbWindowSettingsForStartup();
 const rsbWindowController = new RsbWindowController({
   settings: { read: readRsbWindowSettings, writePatch: writeRsbWindowSettingsPatch },
-  createWindow: (opts) => {
-    const window = createRightSidebarWindow(opts);
+  createWindow: () => {
+    const window = createRightSidebarWindow();
     const mainTarget =
       mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()
         ? mainWindowRef.webContents
@@ -1397,7 +1478,7 @@ function resolveIOSSimulatorRendererWindow(
 ): BrowserWindow | null {
   const owner = BrowserWindow.fromWebContents(target);
   if (!owner || !isTrustedAppRendererWindow(owner)) return null;
-  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const sidebarTarget = rsbWindowController.getVisibleSidebarWebContents();
   const isSidebar = sidebarTarget === target;
   if (!isSidebar && !isMainShellWindowUrl(owner.webContents.getURL())) return null;
   return owner;
@@ -1409,7 +1490,7 @@ configureIOSSimulatorRendererTargets((preferredTarget) => {
     mainWindowRef && !mainWindowRef.isDestroyed() && !mainWindowRef.webContents.isDestroyed()
       ? mainWindowRef.webContents
       : null;
-  const sidebarTarget = rsbWindowController.getSidebarWebContents();
+  const sidebarTarget = rsbWindowController.getVisibleSidebarWebContents();
   const belongsToMainFamily =
     !preferredTarget || preferredTarget === mainTarget || preferredTarget === sidebarTarget;
   if (!belongsToMainFamily) {
@@ -1514,6 +1595,7 @@ registerRsbWindowIpc({
 // 主窗布局树里该 pane 停止渲染(树不动);关窗/合并即回停靠。装/卸/启停广播
 // 经 setGhostsChangedObserver 喂 reconcile,失去资格的窗口即时收掉。
 // deps 同样全 lazy(isQuitting 声明在后),状态机见 ghost-panel-window/controller.ts。
+resetGhostPanelWindowSettingsForStartup();
 const ghostPanelWindowsController = new GhostPanelWindowsController({
   settings: {
     read: readGhostPanelWindowsSettings,
@@ -1548,6 +1630,9 @@ const ghostPanelWindowsController = new GhostPanelWindowsController({
         // window torn down mid-broadcast — ignore
       }
     }
+  },
+  sendToWindow: (win, channel, payload) => {
+    try { win.webContents.send(channel, payload); } catch { /* ignore */ }
   },
   isQuitting: () => isQuitting,
   log: createLogger('ghost-panel-window-controller'),
@@ -2052,6 +2137,8 @@ ipcMain.handle('app-menu:set-locale', (_event, locale: unknown): { ok: true } =>
   setSelectionContextMenuLocale(currentApplicationMenuLocale);
   setMainLocale(currentApplicationMenuLocale);
   resourceUsageWindowController.setLocale(currentApplicationMenuLocale);
+  rsbWindowController.setLocale(currentApplicationMenuLocale);
+  ghostPanelWindowsController.setLocale(currentApplicationMenuLocale);
   refreshGhostLocalization();
   const mainWindow = mainWindowRef && !mainWindowRef.isDestroyed() ? mainWindowRef : null;
   if (mainWindow) {
@@ -2777,6 +2864,8 @@ const createWindow = () => {
       resourceUsagePrewarmTimer = null;
     }
     resourceUsageWindowController.destroyWindow();
+    rsbWindowController.destroyWindow();
+    ghostPanelWindowsController.destroyAllWindows();
     if (mainWindowRef === mainWindow) mainWindowRef = null;
     setDeepLinkMainWindow(null);
   });
@@ -2852,6 +2941,10 @@ const createWindow = () => {
         currentApplicationMenuLocale ?? getPreferredApplicationLocale(),
       );
       resourceUsageWindowController.prewarm();
+      // 右侧栏子窗口预热:复刻资源用量窗口模式,主窗口可见后后台创建
+      // 隐藏 BrowserWindow 并加载轻量 renderer,后续 detach 点击仅 show+focus。
+      rsbWindowController.prewarm();
+      // 插件面板保持按需创建：分离状态不跨重启恢复，多实例也不在启动期全量预热。
     }, 1_500);
     resourceUsagePrewarmTimer.unref?.();
     // 日志上报的启动补传:采集 + 脱敏是同步的重活,必须让主窗口先出来(内部再延迟 15s,
@@ -3040,6 +3133,15 @@ function syncDefaultPluginsForActiveOwner(): void {
   defaultPluginSyncInFlightScope = scope;
   void syncDefaultMarketPlugins().finally(() => {
     if (defaultPluginSyncInFlightScope === scope) defaultPluginSyncInFlightScope = null;
+  });
+}
+
+function reconcileGhostOauthForActiveOwner(): void {
+  void reconcileGhostOauthAccountsForActiveOwner().catch((error) => {
+    createLogger('ghost-oauth-owner-reconcile').warn(
+      'OAuth account reconciliation for active owner failed',
+      { error: error instanceof Error ? error.message : String(error) },
+    );
   });
 }
 
@@ -4291,13 +4393,7 @@ const registerIpcHandlers = () => {
   });
 
   ipcMain.handle('auth:logout', async () => {
-    const releaseBoundary = beginAppSessionBoundary();
-    try {
-      await teardownAuthAccountBoundary('logout');
-      await authManager.logout();
-    } finally {
-      releaseBoundary();
-    }
+    await authManager.logout();
   });
 
   ipcMain.handle('auth:enter-local', async () => {
@@ -4305,26 +4401,14 @@ const registerIpcHandlers = () => {
       return authManager.getAuthState();
     }
     await authManager.waitForSessionInvalidation();
-    const releaseBoundary = beginAppSessionBoundary();
-    try {
-      await teardownAuthAccountBoundary('enter-local-mode');
-      return authManager.enterLocalMode();
-    } finally {
-      releaseBoundary();
-    }
+    return authManager.enterLocalMode();
   });
 
   ipcMain.handle('auth:exit-local', async () => {
     if (getActiveAppSession().mode !== 'local') {
       throwIpcError('PRECONDITION_FAILED', 'Local mode is not active.');
     }
-    const releaseBoundary = beginAppSessionBoundary();
-    try {
-      await teardownAuthAccountBoundary('exit-local-mode');
-      return authManager.exitLocalMode();
-    } finally {
-      releaseBoundary();
-    }
+    return authManager.exitLocalMode();
   });
 
   ipcMain.handle('auth:refresh', async () => {
@@ -4344,7 +4428,6 @@ const registerIpcHandlers = () => {
     clearReceipt: () => authManager.clearAccountDeletionReceipt(),
     consumeRestoredNotice: () => authManager.consumeAccountDeletionRestoredNotice(),
     isConfirmedLocalSessionCurrent: () => authManager.isConfirmedAccountDeletionSessionCurrent(),
-    teardownAccountBoundary: () => teardownAuthAccountBoundary('account-deletion'),
     clearLocalSession: () => authManager.clearLocalSessionAfterAccountDeletion(),
     logWarn: (message, error) => accountDeletionLog.warn(message, error),
   });
@@ -5187,9 +5270,13 @@ const registerIpcHandlers = () => {
   // 复用市场快照；云端登录/切号的通知可能早于 owner boundary 释放，因此
   // 延迟到当前调用栈结束后再按已提交的新 owner 补跑一次。
   disposePluginMarketAuthListener = authManager.onAuthStateChange(() => {
-    queueMicrotask(syncDefaultPluginsForActiveOwner);
+    queueMicrotask(() => {
+      syncDefaultPluginsForActiveOwner();
+      reconcileGhostOauthForActiveOwner();
+    });
   });
   syncDefaultPluginsForActiveOwner();
+  reconcileGhostOauthForActiveOwner();
 
   // ── Dialog: 目录选择器（v0.6 新增，与旧 show-open-directory-dialog 并存） ──
   ipcMain.handle(
@@ -7161,6 +7248,8 @@ onQuit(
 );
 onQuit('auth-manager', () => authManager.dispose(), 'sync');
 onQuit('resource-usage-window', () => resourceUsageWindowController.dispose(), 'sync');
+onQuit('rsb-window', () => rsbWindowController.dispose(), 'sync');
+onQuit('ghost-panel-windows', () => ghostPanelWindowsController.dispose(), 'sync');
 onQuit('app-badge-clear', () => clearAllSessionAttention(), 'sync');
 onQuit('session-drag-preview', () => disposeSessionDragPreview(), 'sync');
 // 自带 adb 的常驻 server 守护进程随退出收掉(fire-and-forget detached spawn,

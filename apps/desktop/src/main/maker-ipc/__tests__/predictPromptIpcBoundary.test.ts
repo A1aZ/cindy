@@ -11,8 +11,24 @@ const h = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
   trusted: true,
   predict: vi.fn(async (_params: unknown) => '下一步做什么'),
+  drainPersistQueue: vi.fn<() => Promise<void>>(async () => undefined),
+  /** 模拟 DB 读出的最近 user/assistant 素材(来源:latestMessageText.regenerateTitleMaterial)。 */
+  regenerateMaterial: vi.fn(
+    async (_sessionId: string, _limit: number, _latestTurnIsInFlight?: boolean | (() => boolean)) => {
+      void _sessionId;
+      void _limit;
+      void _latestTurnIsInFlight;
+      return {
+        opening: { text: '', createdAt: null, rowid: null },
+        recent: [
+          { role: 'user' as const, text: '帮我写一个函数', createdAt: 1, rowid: 1 },
+          { role: 'assistant' as const, text: '好的，这是一个函数...', createdAt: 2, rowid: 2 },
+        ],
+      };
+    },
+  ),
   /** 模拟 DB 返回的 session row */
-  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null } | undefined,
+  sessionRow: { remoteHostId: null, agentKind: null } as { remoteHostId: string | null; source?: string | null; agentKind: string | null; workingDir?: string | null } | undefined,
 }));
 
 function nativeImageEmpty() {
@@ -160,6 +176,12 @@ vi.mock('../../localDb/client/current.js', () => ({
 vi.mock('../promptPrediction.js', () => ({
   generatePromptPrediction: h.predict,
 }));
+vi.mock('../../messagePersistBroadcaster.js', () => ({
+  drainPersistQueue: h.drainPersistQueue,
+}));
+vi.mock('../../localDb/latestMessageText.js', () => ({
+  regenerateTitleMaterial: h.regenerateMaterial,
+}));
 vi.mock('../../security/trustedAppRenderer.js', () => ({
   assertTrustedAppRendererEvent: () => {
     if (!h.trusted) {
@@ -179,14 +201,10 @@ function invokePredict(request: unknown): Promise<unknown> {
   return Promise.resolve(handler(EVENT, request));
 }
 
-/** 合法的 predict-prompt payload:至少包含 sessionId、agentKind、messages */
+/** 合法的 predict-prompt payload:仅 sessionId + agentKind(素材由 main 从 DB 读取)。 */
 const VALID_REQUEST = {
   sessionId: 'session-1',
   agentKind: 'claude-code',
-  messages: [
-    { role: 'user', content: '帮我写一个函数' },
-    { role: 'assistant', content: '好的，这是一个函数...' },
-  ],
 };
 
 beforeEach(() => {
@@ -221,43 +239,37 @@ describe('maker:predict-prompt — payload 运行期校验', () => {
   it.each([
     ['非对象', null],
     ['数组', []],
-    ['缺 sessionId', { agentKind: 'claude-code', messages: [] }],
-    ['sessionId 非字符串', { sessionId: 1, agentKind: 'claude-code', messages: [] }],
-    ['sessionId 空串', { sessionId: '', agentKind: 'claude-code', messages: [] }],
-    ['sessionId 超长', { sessionId: 'a'.repeat(200), agentKind: 'claude-code', messages: [] }],
-    ['agentKind 非枚举值', { sessionId: 's1', agentKind: 'gpt', messages: [] }],
-    ['缺 messages', { sessionId: 's1', agentKind: 'claude-code' }],
-    ['messages 非数组', { sessionId: 's1', agentKind: 'claude-code', messages: 'not-array' }],
+    ['缺 sessionId', { agentKind: 'claude-code' }],
+    ['sessionId 非字符串', { sessionId: 1, agentKind: 'claude-code' }],
+    ['sessionId 空串', { sessionId: '', agentKind: 'claude-code' }],
+    ['sessionId 超长', { sessionId: 'a'.repeat(200), agentKind: 'claude-code' }],
+    ['agentKind 非枚举值', { sessionId: 's1', agentKind: 'gpt' }],
   ])('%s → INVALID_PARAMS 且不调用付费模型', async (_label, payload) => {
     await expect(invokePredict(payload)).rejects.toThrow(/INVALID_PARAMS/);
     expect(h.predict).not.toHaveBeenCalled();
   });
 
-  it('messages 条目非对象时拒绝', async () => {
-    await expect(
-      invokePredict({
-        sessionId: 's1',
-        agentKind: 'codex',
-        messages: ['not-an-object'],
-      }),
-    ).rejects.toThrow(/INVALID_PARAMS/);
-    expect(h.predict).not.toHaveBeenCalled();
-  });
-
-  it('有效 payload 截断后传递', async () => {
-    h.sessionRow = { remoteHostId: null, agentKind: 'pi' };
+  it('素材从 DB 读取,不采用 renderer 上报的 messages / workingDir', async () => {
+    h.sessionRow = { remoteHostId: null, agentKind: 'pi', workingDir: '/db/workdir' };
     await invokePredict({
       sessionId: 'session-1',
       agentKind: 'pi',
-      messages: [
-        { role: 'user', content: 'x'.repeat(9000) },
-      ],
-      workingDir: '/very/long/path',
+      // 受信 renderer 或 stale UI 可能上报其它会话转写 / 伪造 workdir,应被忽略
+      messages: [{ role: 'user', content: '外部注入的伪造内容' }],
+      workingDir: '/spoofed/path',
     });
 
-    const forwarded = h.predict.mock.calls[0]?.[0] as { messages: Array<{ role: string; content: string }> };
-    expect(forwarded.messages[0].content.length).toBeLessThanOrEqual(600);
-    expect(forwarded.messages[0].role).toBe('user');
+    const forwarded = h.predict.mock.calls[0]?.[0] as {
+      messages: Array<{ role: string; content: string }>;
+      workingDir?: string;
+    };
+    // 消息来自 DB(mock 的 regenerateTitleMaterial),不是 renderer payload
+    expect(forwarded.messages).toEqual([
+      { role: 'user', content: '帮我写一个函数' },
+      { role: 'assistant', content: '好的，这是一个函数...' },
+    ]);
+    // workingDir 来自 sessionRow,不是 renderer 上报的 /spoofed/path
+    expect(forwarded.workingDir).toBe('/db/workdir');
     expect(h.predict).toHaveBeenCalledTimes(1);
   });
 });

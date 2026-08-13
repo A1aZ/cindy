@@ -186,6 +186,87 @@ describe('RSB store', () => {
       expect((store.getBucket('ghost-s1').tabs[0].state as { title: string }).title).toBe('Example');
     });
 
+    it('exports and restores a memory-only bucket across host cache invalidation', async () => {
+      ipc.list.mockResolvedValueOnce({ tabs: [], activeTabId: null, persistable: false });
+      await store.ensureHydrated('handoff-s1');
+      const tab = await store.addTab('handoff-s1', 'web-browser', { url: 'https://example.com' });
+
+      const snapshot = store.getTabSnapshot('handoff-s1');
+      expect(snapshot).toEqual({
+        sessionId: 'handoff-s1',
+        tabs: [{ id: tab.id, kind: 'web-browser', state: { url: 'https://example.com' } }],
+        activeTabId: tab.id,
+        persistable: false,
+      });
+
+      store.invalidateSessionCaches();
+      store.importTabSnapshot(snapshot!);
+      store.invalidateSessionCaches();
+      await store.ensureHydrated('handoff-s1');
+
+      expect(ipc.list).toHaveBeenCalledOnce();
+      expect(store.getBucket('handoff-s1')).toEqual({
+        hydrated: true,
+        tabs: [{ id: tab.id, kind: 'web-browser', state: { url: 'https://example.com' } }],
+        activeTabId: tab.id,
+      });
+    });
+
+    it('restores a pending handoff synchronously during the target host transition', async () => {
+      ipc.list.mockResolvedValueOnce({ tabs: [], activeTabId: null, persistable: false });
+      await store.ensureHydrated('handoff-transition');
+      const tab = await store.addTab('handoff-transition', 'web-browser', {
+        url: 'https://example.com',
+      });
+      const snapshot = store.getTabSnapshot('handoff-transition');
+
+      store.invalidateSessionCaches();
+      store.importTabSnapshot(snapshot!);
+      store.resetCachesForHostTransition();
+
+      expect(store.getBucket('handoff-transition')).toEqual({
+        hydrated: true,
+        tabs: [{ id: tab.id, kind: 'web-browser', state: { url: 'https://example.com' } }],
+        activeTabId: tab.id,
+      });
+    });
+
+    it('does not let a late empty hydrate overwrite a received handoff', async () => {
+      let resolveList!: (value: {
+        tabs: never[];
+        activeTabId: null;
+        persistable: false;
+      }) => void;
+      ipc.list.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveList = resolve;
+          }),
+      );
+      const hydration = store.ensureHydrated('handoff-race');
+      const snapshot = {
+        sessionId: 'handoff-race',
+        tabs: [{ id: 'tab-a', kind: 'web-browser', state: { url: 'about:blank' } }],
+        activeTabId: 'tab-a',
+        persistable: false as const,
+      };
+
+      store.importTabSnapshot(snapshot);
+      resolveList({ tabs: [], activeTabId: null, persistable: false });
+      await hydration;
+
+      expect(store.getBucket('handoff-race')).toEqual({
+        hydrated: true,
+        tabs: snapshot.tabs,
+        activeTabId: 'tab-a',
+      });
+    });
+
+    it('does not export a persistable local-DB bucket as a renderer handoff', async () => {
+      await store.ensureHydrated('persisted-s1');
+      expect(store.getTabSnapshot('persisted-s1')).toBeNull();
+    });
+
     it('sanitizes non-persistable favicons when hydrating web-browser tabs', async () => {
       ipc.list.mockResolvedValueOnce({
         tabs: [

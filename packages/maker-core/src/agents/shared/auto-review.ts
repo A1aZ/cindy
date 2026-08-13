@@ -447,6 +447,34 @@ const POWERSHELL_SWITCH_PARAMS: readonly string[] = [
 const POWERSHELL_DYNAMIC_TARGET = /\$/;
 
 /**
+ * 参数是不是 PowerShell **表达式**:`([Environment]::SystemDirectory+'\drivers\etc\hosts')`、
+ * `[System.IO.Path]::Combine(…)`、`(Join-Path $env:windir x)`、`(Get-Location)`、`@(…)`。
+ *
+ * 这类目标不只是"要运行期才知道",它还让**位置模型整体失效**:表达式常常跨多个 shell token
+ * (`(Join-Path`、`$env:windir`、`x)`),于是 `POWERSHELL_DYNAMIC_TARGET` 那条按目标逐个查 `$`
+ * 的判据也躲得过 —— `Set-Content (Join-Path $env:windir x) owned` 的第一个操作数是 `(Join-Path`,
+ * 不含 `$`,看起来是个普通相对路径(codex 报)。
+ *
+ * **判据必须能扛住去引号变体**:`classifyShellCommand` 会把 `quotesOnly` 等去引号形态也送进来
+ * (为的是拆穿引号拆词的绕过),任一变体命中即必问。于是 `"C:\repo\my (notes)\a.txt"` 去引号后
+ * 被空格拆成 `C:\repo\my` + `(notes)\a.txt`,单看"以 `(` 开头"会把这条日常路径误升成硬弹窗
+ * (Windows 目录名合法带括号:`Program Files (x86)`、`New Folder (2)`)。所以除了开头,还要求
+ * 至少一条**路径片段不会有**的特征:
+ *   a. 括号在 token 内不配平 → 表达式跨了多个 token;
+ *   b. 含 `::` → 类型/静态成员访问;
+ *   c. token 以 `)`/`]` 收尾 → 是个完整的括号表达式,而路径片段在括号之后还会接着走(`(notes)\a.txt`)。
+ *
+ * 残留已知上限:路径**最后一段**恰好是纯括号组时(`C:\repo\New Folder (2)`)会命中 (c) 而多问
+ * 一次;方向是多问,不放宽。
+ */
+function isPowerShellExpressionToken(token: string): boolean {
+  if (!/^(?:@?\(|\[)/.test(token)) return false;
+  const opens = (token.match(/[([]/g) ?? []).length;
+  const closes = (token.match(/[)\]]/g) ?? []).length;
+  return opens !== closes || token.includes('::') || /[)\]]$/.test(token);
+}
+
+/**
  * PowerShell 写 cmdlet 的写目标。既支持具名参数(`-Path` / `-LiteralPath` / `-Destination` /
  * `-FilePath`,含唯一前缀缩写如 `-Dest`),也支持位置传参。
  *
@@ -467,6 +495,8 @@ const POWERSHELL_DYNAMIC_TARGET = /\$/;
 function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   const targets = powerShellWriteTargetOperands(bin, args);
   if (targets === null) return null;
+  // 表达式参数会让位置模型整体失效(见 isPowerShellExpressionToken)→ 整次抽取按不可证算。
+  if (args.some(isPowerShellExpressionToken)) return [UNPROVABLE_WRITE_TARGET];
   return targets.map((t) => (POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t));
 }
 
@@ -1701,6 +1731,15 @@ const PIPE_EXECUTORS: ReadonlySet<string> = new Set([
   'r', 'rscript', 'tclsh', 'wish', 'julia', 'groovy', 'swift', 'osascript',
   'guile', 'racket', 'scheme', 'chezscheme', 'csi', 'gosh', 'mit-scheme',
   'clisp', 'sbcl', 'ecl', 'qjs', 'xargs', 'parallel',
+  // PowerShell 的 `Invoke-Expression`(别名 `iex`)**就是 eval**:管道进来的字符串直接当代码跑,
+  // 与 `curl … | sh` 是同一形状。少了它,`pwsh -Command 'iwr https://…/a.ps1' | iex` 的 `| iex`
+  // 落在**外层** shell,被顶层分段切成独立一段 —— 那一段的 tokens[0] 不是 pwsh,
+  // `powerShellNeedsConsent` 不适用;而 payload 那一段只有 `iwr`(单纯下载不是红线),
+  // 于是「下载即执行」整条红线降成灰区(greptile 报)。
+  // 判据挂在**右侧 bin 是不是把 stdin 当程序**上,所以三种入口一次覆盖:PowerShell 工具的裸串
+  // (包装成 `pwsh -Command '…'` 后同理)、Bash 原样串、`pwsh -Command` 嵌套。
+  // `iex` 同时是 Elixir 的 REPL 可执行名 —— 管道喂给它同样会求值,红线在那边也成立。
+  'iex', 'invoke-expression',
 ]);
 
 function isPipeExecutor(bin: string): boolean {

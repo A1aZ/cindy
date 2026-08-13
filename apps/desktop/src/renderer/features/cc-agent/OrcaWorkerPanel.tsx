@@ -104,9 +104,11 @@ export function OrcaWorkerPanel({
   }, [refreshCreationState, setCreateOpen, t]);
 
   // 硬上限时 + 按钮不再只是 disabled no-op，而是跳转到协同设置去调高上限（codex P1 逃生口）。
-  // 但分离侧栏窗口固定在 /sidebar-window 壳路由，本地 navigate 会把辅助窗口整壳替换成主设置
-  // 路由，故侧栏窗口下不接线跳转（onOpenSettings 传 undefined，+ 按钮回退为 disabled，
-  // 与 CreateWorkerPopover 的 onNavigateToProviders 同口径）。
+  // 但两类面板不接线跳转（onOpenSettings 传 undefined，+ 按钮回退为 disabled）：
+  // 1) 分离侧栏窗口固定在 /sidebar-window 壳路由，本地 navigate 会把辅助窗口整壳替换成主设置
+  //    路由，与 CreateWorkerPopover 的 onNavigateToProviders 同口径；
+  // 2) device-link 受控 Lead（deviceId 面板）：其 worker 上限走 device-link Orca 路径，
+  //    本地 /settings?section=collaboration 读写的是本机 localDb.orcaWorkflows，改不动远程上限。
   const handleOpenSettings = useCallback(() => {
     navigate('/settings?section=collaboration');
   }, [navigate]);
@@ -173,7 +175,7 @@ export function OrcaWorkerPanel({
           hardLimit={hardLimit}
           onSwitchFocus={handleSwitchFocus}
           onOpenCreate={() => void handleOpenCreate()}
-          onOpenSettings={isSidebarWindow() ? undefined : handleOpenSettings}
+          onOpenSettings={isSidebarWindow() || deviceId ? undefined : handleOpenSettings}
           onArchiveWorker={handleArchiveWorker}
           clearAttentionWhenVisible={viewVisible}
         />

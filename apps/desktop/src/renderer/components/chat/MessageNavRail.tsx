@@ -417,16 +417,19 @@ export function MessageNavRail({
     [findScrubIndex, jumpToScrubIndex],
   );
 
-  const finishScrub = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    const scrub = scrubRef.current;
-    if (!scrub || scrub.pointerId !== event.pointerId) return;
-    if (scrub.button.hasPointerCapture?.(event.pointerId)) {
-      scrub.button.releasePointerCapture?.(event.pointerId);
-    }
-    if (scrub.moved) suppressClickRef.current = true;
-    scrubRef.current = null;
-    setScrubId(null);
-  }, []);
+  const finishScrub = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>, suppressFollowUpClick: boolean) => {
+      const scrub = scrubRef.current;
+      if (!scrub || scrub.pointerId !== event.pointerId) return;
+      if (scrub.button.hasPointerCapture?.(event.pointerId)) {
+        scrub.button.releasePointerCapture?.(event.pointerId);
+      }
+      suppressClickRef.current = suppressFollowUpClick && scrub.moved;
+      scrubRef.current = null;
+      setScrubId(null);
+    },
+    [],
+  );
 
   const handleTickMouseEnter = useCallback(() => {
     hoveringRef.current = true;
@@ -586,9 +589,9 @@ export function MessageNavRail({
                   }}
                   onPointerDown={(event) => handleTickPointerDown(fullIdx, event)}
                   onPointerMove={handleTickPointerMove}
-                  onPointerUp={finishScrub}
-                  onPointerCancel={finishScrub}
-                  onLostPointerCapture={finishScrub}
+                  onPointerUp={(event) => finishScrub(event, true)}
+                  onPointerCancel={(event) => finishScrub(event, false)}
+                  onLostPointerCapture={(event) => finishScrub(event, false)}
                   onMouseEnter={() => {
                     setHoveredId(entry.id);
                     handleTickMouseEnter();

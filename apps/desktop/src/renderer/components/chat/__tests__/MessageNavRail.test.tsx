@@ -325,4 +325,34 @@ describe('MessageNavRail', () => {
     fireEvent.click(buttons[1]);
     expect(onJump).toHaveBeenCalledTimes(1);
   });
+
+  it('拖动被取消后不抑制下一次正常 click', async () => {
+    const onJump = vi.fn();
+    const root = buildScrollContainer(1000, [
+      { id: 'u1', top: -400 },
+      { id: 'u2', top: 50 },
+      { id: 'u3', top: 400 },
+      { id: 'u4', top: 600 },
+      { id: 'u5', top: 900 },
+    ]);
+    render(
+      <MessageNavRail
+        entries={ENTRIES}
+        scrollRef={{ current: root }}
+        contentMaxWidth={880}
+        bottomOffset={200}
+        onJump={onJump}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('button')).toHaveLength(5));
+    const buttons = screen.getAllByRole('button');
+    buttons.forEach((button, index) => mockRect(button, { top: index * 20, height: 10 }));
+    fireEvent.pointerDown(buttons[1], { pointerId: 7, button: 0, clientY: 25 });
+    fireEvent.pointerMove(buttons[1], { pointerId: 7, clientY: 87 });
+    expect(onJump).toHaveBeenCalledWith('u5');
+    fireEvent.pointerCancel(buttons[1], { pointerId: 7, clientY: 87 });
+    fireEvent.click(buttons[2]);
+    expect(onJump).toHaveBeenLastCalledWith('u3');
+    expect(onJump).toHaveBeenCalledTimes(2);
+  });
 });

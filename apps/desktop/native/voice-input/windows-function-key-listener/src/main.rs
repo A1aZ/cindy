@@ -90,20 +90,20 @@ mod windows_listener {
 
         if event.vkCode == target_vk {
             if key_down {
-                if ACTIVE.load(Ordering::Relaxed) || SUPPRESS_UNTIL_RELEASE.load(Ordering::Relaxed)
-                {
+                let already_held = SUPPRESS_UNTIL_RELEASE.swap(true, Ordering::Relaxed);
+                if already_held || ACTIVE.load(Ordering::Relaxed) {
                     return 1;
                 }
                 if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0 && !any_other_key_down() {
                     ACTIVE.store(true, Ordering::Relaxed);
-                    SUPPRESS_UNTIL_RELEASE.store(true, Ordering::Relaxed);
                     emit_pressed(true);
                     return 1;
                 }
+                return 0;
             } else if key_up && SUPPRESS_UNTIL_RELEASE.swap(false, Ordering::Relaxed) {
-                ACTIVE.store(false, Ordering::Relaxed);
+                let was_active = ACTIVE.swap(false, Ordering::Relaxed);
                 emit_pressed(false);
-                return 1;
+                return if was_active { 1 } else { 0 };
             }
         }
 

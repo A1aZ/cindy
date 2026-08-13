@@ -3040,6 +3040,77 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('路径枚举器无实参时,有上游就不是"枚举当前目录"', () => {
+    // `Get-ChildItem` 一族的 `-Path` 都接受 pipeline 输入,所以"没给实参"在**有上游**时是"项由上游
+    // 喂进来",不是"枚举当前目录"。早先一律兜底成 `.` → `'<受保护路径>' | Resolve-Path | Remove-Item`
+    // 的上游被换成当前目录、判成区内 → 整条降级(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `'${hosts}' | Resolve-Path | Remove-Item`,
+      `'${hosts}' | Get-Item | Remove-Item`,             // 同族别名一并覆盖
+      `'${hosts}' | gi | Remove-Item`,
+      `'${hosts}' | rvpa | Remove-Item`,
+      // 上游本来就不可证时,枚举器不得把它"洗"成当前目录。
+      'Get-Content C:\\repo\\targets.txt | Resolve-Path | Remove-Item',
+      '$env:TEMP | Resolve-Path | Remove-Item',
+      // 受保护位置经枚举器透传仍必问。
+      'Get-ChildItem C:\\Windows\\System32\\* | Resolve-Path | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:**首段**没实参才是"枚举当前目录",这条不能被收紧。
+    for (const c of [
+      'Get-ChildItem | Remove-Item',
+      'Resolve-Path | Remove-Item',
+      'cd C:\\repo; Get-ChildItem | Remove-Item',        // 分号后仍是首段(不是 pipeline 下游)
+      // 上游可证在区内 → 枚举器原样传递,日常清理仍是灰区。
+      'Get-ChildItem C:\\repo\\build\\* | Get-Item | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Resolve-Path | Remove-Item',
+      // 枚举器自己显式给了区内位置 → 用它,不看上游。
+      `'${hosts}' | Get-ChildItem C:\\repo\\build | Remove-Item`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
+  it('Select-Object -ExpandProperty 取的是属性值,来源变了', () => {
+    // `Select-Object` 只有**透传对象**的形态算"只挑选、没换来源";`-ExpandProperty` 输出属性值,
+    // 来源随之改变:`Get-Item Env:ComSpec | Select-Object -ExpandProperty Value | Remove-Item`
+    // 喂给删除段的是系统 cmd.exe 路径,而 provenance 还留着看着安全的 `Env:ComSpec`(codex 报)。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Get-Item Env:ComSpec | Select-Object -ExpandProperty Value | Remove-Item',
+      'Get-ChildItem C:\\repo | Select-Object -ExpandProperty Target | Remove-Item',
+      'Get-ChildItem C:\\repo | Select-Object -Exp Target | Remove-Item',       // 前缀缩写
+      'Get-ChildItem C:\\repo | Select-Object -ExpandProperty:Target | Remove-Item', // 贴值
+      'Get-ChildItem C:\\repo | select -ExpandProperty Target | Remove-Item',   // 别名
+      // `-e` / `-ex` 真机上与 -ExcludeProperty 歧义会报错,这里按改变来源处理 = fail closed。
+      'Get-ChildItem C:\\repo | Select-Object -ex Target | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例:透传形态照旧传递 provenance —— 这次收窄不许把 Select-Object 整个踢出透传表。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build | Select-Object -First 1 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -Last 2 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -Skip 1 | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object Name | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -ExcludeProperty Name | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Select-Object -Unique | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 受保护位置经透传形态仍必问(收窄没有削弱原有覆盖)。
+    expect(classifyShellCommand(
+      'Get-ChildItem C:\\Windows\\System32 | Select-Object -First 1 | Remove-Item',
+      win,
+      { platform: 'win32' },
+    )).toBe('prompt-each-time');
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

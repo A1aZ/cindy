@@ -3285,6 +3285,8 @@ const GLOB_COMPONENT_PLACEHOLDER = '\u0000globpart';
  * 是 `Where-Object` 的实参(`Name`、`hosts`),那两个按相对路径落在工作区内 → 整条降级(codex 报)。
  *
  * `ForEach-Object` / `%` **不在此列**:它能返回任意对象,来源无法证明 → 落到"不可证"那档。
+ * `Select-Object` 在此列,但只限**透传**形态 —— `-ExpandProperty` 由
+ * {@link selectObjectChangesProvenance} 单独摘出去。
  */
 const POWERSHELL_PIPELINE_PASSTHROUGH: ReadonlySet<string> = new Set([
   'where-object', 'where', '?', 'sort-object', 'sort', 'select-object', 'select',
@@ -3292,12 +3294,36 @@ const POWERSHELL_PIPELINE_PASSTHROUGH: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 会**枚举路径**的 cmdlet:不给实参时枚举当前目录,所以 provenance 落到 `.`(与本文件既有的 cwd
- * 兜底同口径)。表外的阶段不给实参时 provenance 记为"不可证",不假设它产出的是区内路径。
+ * 会**枚举路径**的 cmdlet:**首段**不给实参时枚举当前目录,所以 provenance 落到 `.`(与本文件既有
+ * 的 cwd 兜底同口径)。表外的阶段不给实参时 provenance 记为"不可证",不假设它产出的是区内路径。
+ *
+ * 注意:这一族的 `-Path` 都**接受 pipeline 输入**,所以「不给实参」在**有上游**时不等于"枚举当前
+ * 目录",而是"项由上游喂进来" —— 见段循环里的 `fromPipe` 分支。
  */
 const POWERSHELL_PATH_ENUMERATORS: ReadonlySet<string> = new Set([
   'get-childitem', 'gci', 'dir', 'ls', 'get-item', 'gi', 'resolve-path', 'rvpa',
 ]);
+
+/** `Select-Object` 及其别名 —— 只有透传对象的形态才保留 provenance,见下。 */
+const POWERSHELL_SELECT_CMDLETS: ReadonlySet<string> = new Set(['select-object', 'select']);
+
+/**
+ * `Select-Object` 用 `-ExpandProperty <name>` 时输出的是**那个属性的值**、不再是原对象,来源随之
+ * 改变,不能算"只挑选、没换来源":
+ * `Get-Item Env:ComSpec | Select-Object -ExpandProperty Value | Remove-Item` 喂给删除段的是系统
+ * `cmd.exe` 的路径,而 provenance 还留着看着安全的 `Env:ComSpec`(codex 报)。
+ *
+ * 按**前缀**匹配识别(PowerShell 允许 `-Exp` 这类缩写)。`-e` / `-ex` 在真机上会因与
+ * `-ExcludeProperty` 歧义而报错,这里也一并按"改变来源"处理 = fail closed。
+ */
+function selectObjectChangesProvenance(bin: string, tokens: string[]): boolean {
+  if (!POWERSHELL_SELECT_CMDLETS.has(bin)) return false;
+  return tokens.slice(1).some((token) => {
+    if (!token.startsWith('-')) return false;
+    const name = token.slice(1).split(/[:=]/)[0].toLowerCase();
+    return name.length > 0 && 'expandproperty'.startsWith(name);
+  });
+}
 
 function hasExplicitPathArgument(tokens: string[]): boolean {
   const known = [
@@ -3510,7 +3536,12 @@ function scopedDestructionNeedsConsent(
     // 留给下一段用:pipeline 到这里为止,「被传下去的对象来自哪些位置」。必须在下面那个
     // `continue` 之前赋值,否则改目录的段会把它漏掉。
     //   · 只过滤/排序/挑选的阶段 → provenance 原样传递(它没换来源);
-    //   · **路径枚举器**(`Get-ChildItem` 一族)→ 它的位置实参就是产出的位置,没给实参则枚举当前目录;
+    //     唯一例外是 `Select-Object -ExpandProperty` —— 那是取属性值,来源变了,落到不可证。
+    //   · **路径枚举器**(`Get-ChildItem` 一族)→ 它的位置实参就是产出的位置;没给实参时分两种:
+    //     首段 = 枚举当前目录 → `.`;**有上游**(`… | Resolve-Path | …`)= 项由 pipeline 喂进来 →
+    //     provenance 原样保留(可能是 `null`)。这一族的 `-Path` 都接受 pipeline 输入,所以无实参时
+    //     一律兜底成 `.` 会把上游那个路径换成"当前目录",于是
+    //     `'<受保护路径>' | Resolve-Path | Remove-Item` 被判成区内 → 整条降级(codex 报)。
     //   · 其余一律 `null` = 不可证,由下游 fail closed。
     //
     // 第三条早先写成「给了位置实参就拿它当 provenance」,那个泛化是**错的** ——
@@ -3519,12 +3550,14 @@ function scopedDestructionNeedsConsent(
     // 断言"上游是 C:\repo\targets.txt,在区内,所以安全"(codex 报)。输出一个错的"安全"比没有这条
     // 规则更糟,所以收窄成只对路径枚举器成立;`Get-Content`/`Import-Csv`/`Select-String`/
     // `ForEach-Object` 这些一概落到不可证。
-    if (!POWERSHELL_PIPELINE_PASSTHROUGH.has(bin)) {
+    if (!POWERSHELL_PIPELINE_PASSTHROUGH.has(bin) || selectObjectChangesProvenance(bin, tokens)) {
       if (!POWERSHELL_PATH_ENUMERATORS.has(bin)) {
         upstreamOperands = null;
       } else {
         const operands = positionalOperands(tokens.slice(1));
-        upstreamOperands = operands.length > 0 ? operands : ['.'];
+        if (operands.length > 0) upstreamOperands = operands;
+        else if (!fromPipe) upstreamOperands = ['.'];
+        // fromPipe 且没给实参 → 项由上游喂进来,provenance 原样保留(含 `null` = 不可证)。
       }
     }
 

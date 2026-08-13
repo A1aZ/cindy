@@ -292,24 +292,32 @@ function CheckMenuItem({
   checked,
   onToggle,
   Icon,
+  disabled = false,
+  tip,
 }: {
   label: string;
   checked: boolean;
   onToggle: () => void;
   Icon?: LucideIcon;
+  disabled?: boolean;
+  tip?: string;
 }) {
   return (
-    <DropdownMenuItem
-      onSelect={(event) => {
-        event.preventDefault();
-        onToggle();
-      }}
-      className={MENU_ITEM_CLASS}
-    >
-      <MenuItemIcon Icon={Icon} />
-      <span className="truncate">{label}</span>
-      {checked && <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />}
-    </DropdownMenuItem>
+    <Tip text={tip} side="right">
+      <DropdownMenuItem
+        disabled={disabled}
+        onSelect={(event) => {
+          event.preventDefault();
+          if (disabled) return;
+          onToggle();
+        }}
+        className={MENU_ITEM_CLASS}
+      >
+        <MenuItemIcon Icon={Icon} />
+        <span className="truncate">{label}</span>
+        {checked && <Check size={15} className="ml-auto shrink-0 text-[var(--msg-assistant-text)]" />}
+      </DropdownMenuItem>
+    </Tip>
   );
 }
 
@@ -486,7 +494,11 @@ export function SidebarFilterPopover({
           {hasRemoteDevices && (
             <CheckMenuItem
               label={t('ccAgent.sidebar.filterGroupBy.device')}
-              checked={groupDevice}
+              checked={groupDevice && sortBy !== 'manual'}
+              disabled={sortBy === 'manual'}
+              tip={
+                sortBy === 'manual' ? t('ccAgent.sidebar.filterGroupByDeviceManualTip') : undefined
+              }
               onToggle={() => setGroupDevice(!groupDevice)}
             />
           )}

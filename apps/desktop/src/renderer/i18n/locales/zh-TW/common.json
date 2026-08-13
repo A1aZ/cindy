@@ -6986,6 +6986,7 @@
         "device": "按裝置分組",
         "dialogue": "對話歸為一組"
       },
+      "filterGroupByDeviceManualTip": "手動排序時按裝置分組暫不可用",
       "deviceGroup": {
         "local": "本機",
         "offline": "離線",
@@ -7024,7 +7025,6 @@
       "filterSummaryNone": "無",
       "filterSummaryActive": "{{count}} 項生效",
       "filterReset": "重設篩選",
-      "filterActiveBadge": "已篩選",
       "displayHeading": "顯示",
       "taskInfoHeading": "任務資訊",
       "taskInfoSummaryNone": "無",

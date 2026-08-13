@@ -236,6 +236,9 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(filterSource).not.toMatch(
       /onSelect=\{\(\) => setMainViewMode\(option\.value\)\}\s*\n\s*keepOpen/,
     );
+    expect(filterSource).toContain("checked={groupDevice && sortBy !== 'manual'}");
+    expect(filterSource).toContain("disabled={sortBy === 'manual'}");
+    expect(filterSource).toContain("t('ccAgent.sidebar.filterGroupByDeviceManualTip')");
   });
 
   // 2026-08-13 用户裁决:「优先级」光看标签猜不出排序依据,需要 hover 说明。
@@ -318,8 +321,7 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
   it('空态 / 远程 loading-error / 连接中占位都挂范围标题(2026-08-13 第 4 轮 P1)', () => {
     const headerSource = read('features', 'cc-agent', 'sidebar', 'MainListScopeHeader.tsx');
     expect(headerSource).toContain('<MachineSwitcherMenu onOpenDisplaySettings=');
-    expect(headerSource).toContain('filter.isSessionContentFiltered');
-    expect(headerSource).toContain("t('ccAgent.sidebar.filterActiveBadge')");
+    expect(headerSource).not.toContain('filterActiveBadge');
     expect(headerSource).toContain('<SidebarFilterPopover');
     expect(projectsSectionSource).toContain('<MainListScopeHeader');
     expect(projectsSectionSource).toContain('hasMainListContent');
@@ -370,6 +372,9 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(projectsSectionSource).toContain('hasRemoteDevices={deviceGroupingAvailable}');
     expect(projectsSectionSource).not.toContain('hasRemoteMachines');
     expect(sidebarUpperSource).toContain("if (device.status === 'rejected') continue;");
+    expect(sidebarUpperSource).toContain(
+      "if (device.status === 'connecting' && isRemoteDeviceMarkedDisconnected(device.deviceId))",
+    );
   });
 
   // (侧边栏重设计 D 期:按日期分组段已删除,其 MachineSwitcherMenu / 空态 /

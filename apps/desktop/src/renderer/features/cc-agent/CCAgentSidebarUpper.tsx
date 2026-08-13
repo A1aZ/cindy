@@ -223,6 +223,7 @@ import {
   useRemoteArchivedLoadedDeviceIds,
   useRemoteArchivedLoadingDeviceIds,
   useRemoteDevices,
+  isRemoteDeviceMarkedDisconnected,
   useRemoteProjectSessions,
 } from '@/features/device-link/remoteProjectsStore';
 import {
@@ -1138,6 +1139,11 @@ function ExpandedView({
     const index = new Map<string, { name: string; online: boolean }>();
     for (const device of switcherDevices) {
       if (device.status === 'rejected') continue;
+      // connecting 含两种:真在连,以及断线缓存。后者不能撑开设备分组,
+      // 否则最后一台远程掉线后仍会留下「本机」段头;重连后偏好自动恢复。
+      if (device.status === 'connecting' && isRemoteDeviceMarkedDisconnected(device.deviceId)) {
+        continue;
+      }
       index.set(device.deviceId, {
         name: device.name,
         online: device.status === 'connected',

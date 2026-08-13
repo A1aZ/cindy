@@ -138,7 +138,11 @@ function createPrCacheStore(): PrCacheStore {
       let changed = false;
       for (const result of results) {
         const key = prStatusKey(result);
-        if (sameStatus(statuses.get(key), result)) continue;
+        const prev = statuses.get(key);
+        // 本机成功与远端 no-token/not-found 会写同一把 PR 键。失败结果不得覆盖
+        // 已有成功态,否则徽标会随两端轮询来回降级。
+        if (prev?.ok === true && result.ok === false) continue;
+        if (sameStatus(prev, result)) continue;
         statuses.set(key, result);
         changed = true;
       }

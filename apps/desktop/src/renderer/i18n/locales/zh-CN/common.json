@@ -6986,6 +6986,7 @@
         "device": "按设备分组",
         "dialogue": "对话归为一组"
       },
+      "filterGroupByDeviceManualTip": "手动排序时按设备分组暂不可用",
       "deviceGroup": {
         "local": "本机",
         "offline": "离线",
@@ -7024,7 +7025,6 @@
       "filterSummaryNone": "无",
       "filterSummaryActive": "{{count}} 项生效",
       "filterReset": "重置筛选",
-      "filterActiveBadge": "已筛选",
       "displayHeading": "显示",
       "taskInfoHeading": "任务信息",
       "taskInfoSummaryNone": "无",

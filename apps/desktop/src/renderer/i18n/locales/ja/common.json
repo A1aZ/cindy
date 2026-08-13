@@ -6986,6 +6986,7 @@
         "device": "デバイスでグループ化",
         "dialogue": "チャットをまとめる"
       },
+      "filterGroupByDeviceManualTip": "手動並び替え中はデバイスグループを使えません",
       "deviceGroup": {
         "local": "このデバイス",
         "offline": "オフライン",
@@ -7024,7 +7025,6 @@
       "filterSummaryNone": "なし",
       "filterSummaryActive": "{{count}} 件適用中",
       "filterReset": "フィルターをリセット",
-      "filterActiveBadge": "絞り込み中",
       "displayHeading": "表示",
       "taskInfoHeading": "セッション情報",
       "taskInfoSummaryNone": "なし",

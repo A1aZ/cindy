@@ -32,7 +32,7 @@ The left sidebar lists your sessions. It's the main way to navigate and organize
 - **Project** — multi-select working directories plus **Chat** (projectless sessions), or "all". Selecting specific projects hides chats unless **Chat** is also checked; check only **Chat** to see projectless sessions alone.
 - **Agent** — Claude Code / Codex / all.
 - **Recent activity** — last 1 day / 3 days / 7 days / 30 days / all.
-- A **Reset filters** action at the bottom clears all four at once. Filters do **not** apply to the Pinned section, except Status (archived pins stay hidden while Status is Active). When any filter is on, a **Filtered** mark stays next to the list header so a persisted filter cannot hide sessions with no visible explanation.
+- A **Reset filters** action at the bottom clears all four at once. Filters do **not** apply to the Pinned section, except Status (archived pins stay hidden while Status is Active). The list header does not show a standing “filtered” mark; open Sidebar display settings to see which filters are on.
 
 **Display:**
 

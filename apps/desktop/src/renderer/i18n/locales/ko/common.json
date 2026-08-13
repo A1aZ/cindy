@@ -6986,6 +6986,7 @@
         "device": "기기별 그룹",
         "dialogue": "대화 묶기"
       },
+      "filterGroupByDeviceManualTip": "수동 정렬 중에는 기기별 그룹을 사용할 수 없습니다",
       "deviceGroup": {
         "local": "이 기기",
         "offline": "오프라인",
@@ -7024,7 +7025,6 @@
       "filterSummaryNone": "없음",
       "filterSummaryActive": "{{count}}개 적용 중",
       "filterReset": "필터 초기화",
-      "filterActiveBadge": "필터링됨",
       "displayHeading": "표시",
       "taskInfoHeading": "세션 정보",
       "taskInfoSummaryNone": "없음",

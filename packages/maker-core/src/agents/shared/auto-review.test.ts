@@ -2994,6 +2994,52 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('内容生产阶段的位置实参是"被读的输入",不是"产出的位置"', () => {
+    // provenance 早先写成「给了位置实参就拿它当上游位置」。那个泛化对**内容**生产阶段是错的:
+    // `Get-Content C:\repo\targets.txt | Remove-Item` 删的是那个文件**里写着的**路径,而判据却断言
+    // "上游是 C:\repo\targets.txt、在区内、所以安全"(codex 报)。输出一个错的"安全"比没有这条规则
+    // 更糟,所以模型收窄成**只对路径枚举器成立**,其余一概不可证。
+    const win = ['C:\\repo'];
+    for (const c of [
+      'Get-Content C:\\repo\\targets.txt | Remove-Item',
+      'Get-Content C:\\repo\\targets.txt | Remove-Item -Force',
+      'gc C:\\repo\\targets.txt | Remove-Item',                      // 别名
+      'cat C:\\repo\\targets.txt | Remove-Item',
+      'type C:\\repo\\targets.txt | Remove-Item',
+      'Get-Content C:\\repo\\t.txt | Where-Object { $_ } | Remove-Item', // 经过滤阶段仍不可证
+      'Import-Csv C:\\repo\\t.csv | Remove-Item',
+      'Select-String -Path C:\\repo\\t.txt -Pattern x | Remove-Item',
+      // 源会被销毁的 cmdlet 同样覆盖。
+      'Get-Content C:\\repo\\t.txt | Move-Item -Destination C:\\repo\\x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:**路径枚举器**的位置实参确实就是产出的位置 → 区内清理仍是灰区。
+    for (const c of [
+      'Get-ChildItem C:\\repo\\build\\* | Remove-Item',
+      'Get-ChildItem C:\\repo\\build | Where-Object Name -eq x | Remove-Item',
+      'Get-ChildItem | Remove-Item',                    // 没实参 = 枚举当前目录
+      'Get-Item C:\\repo\\a.txt | Remove-Item',
+      'Resolve-Path C:\\repo\\a.txt | Remove-Item',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:枚举受保护位置仍必问(收窄没有削弱原有覆盖)。
+    expect(classifyShellCommand('Get-ChildItem C:\\Windows\\System32\\* | Remove-Item', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 反例三:项写在命令行上 / 只读源 / 管道右侧不是写 cmdlet → 不走这条。
+    for (const c of [
+      'Get-Content C:\\repo\\a.txt | Set-Content C:\\repo\\b.txt',
+      'Get-Content C:\\repo\\a.txt | Out-File C:\\repo\\b.txt',
+      'Get-Process | Export-Csv C:\\repo\\a.csv',
+      'Get-Content C:\\repo\\t.txt | Copy-Item -Destination C:\\repo\\x', // Copy 不销毁源
+      'Get-Content C:\\repo\\a.txt | Select-String x',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+  });
+
   it('curl/wget 在 PowerShell 里是 iwr 别名:-OutFile 与 POSIX -o/-O 取并集', () => {
     // Windows PowerShell 里 `curl` / `wget` 是 Invoke-WebRequest 的别名,落地参数写成 `-OutFile`,
     // 而这两个 bin 走的是 POSIX 分支(只认 `-o`/`-O`/`--output`)→ 受保护落地漏掉(codex 报)。

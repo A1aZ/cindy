@@ -3510,14 +3510,22 @@ function scopedDestructionNeedsConsent(
     // 留给下一段用:pipeline 到这里为止,「被传下去的对象来自哪些位置」。必须在下面那个
     // `continue` 之前赋值,否则改目录的段会把它漏掉。
     //   · 只过滤/排序/挑选的阶段 → provenance 原样传递(它没换来源);
-    //   · 给了位置实参 → 就是这些位置;
-    //   · 没给实参但会枚举路径(`Get-ChildItem`)→ 当前目录;
-    //   · 其余(`ForEach-Object` 等能返回任意对象的)→ `null` = 不可证,由下游 fail closed。
+    //   · **路径枚举器**(`Get-ChildItem` 一族)→ 它的位置实参就是产出的位置,没给实参则枚举当前目录;
+    //   · 其余一律 `null` = 不可证,由下游 fail closed。
+    //
+    // 第三条早先写成「给了位置实参就拿它当 provenance」,那个泛化是**错的** ——
+    // 对内容生产阶段来说,位置实参是**被读的输入**、不是产出的位置:
+    // `Get-Content C:\repo\targets.txt | Remove-Item` 删的是那个文件**里写着的**路径,而判据却
+    // 断言"上游是 C:\repo\targets.txt,在区内,所以安全"(codex 报)。输出一个错的"安全"比没有这条
+    // 规则更糟,所以收窄成只对路径枚举器成立;`Get-Content`/`Import-Csv`/`Select-String`/
+    // `ForEach-Object` 这些一概落到不可证。
     if (!POWERSHELL_PIPELINE_PASSTHROUGH.has(bin)) {
-      const operands = positionalOperands(tokens.slice(1));
-      upstreamOperands = operands.length > 0
-        ? operands
-        : POWERSHELL_PATH_ENUMERATORS.has(bin) ? ['.'] : null;
+      if (!POWERSHELL_PATH_ENUMERATORS.has(bin)) {
+        upstreamOperands = null;
+      } else {
+        const operands = positionalOperands(tokens.slice(1));
+        upstreamOperands = operands.length > 0 ? operands : ['.'];
+      }
     }
 
     const cwdChange = directoryChangeTarget(tokens);

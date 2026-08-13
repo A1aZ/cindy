@@ -930,7 +930,12 @@ function argumentWriteTargets(tokens: string[]): string[] {
         if (t === '--') { optionsEnded = true; continue; }
         // shred 的带值选项(-n 次数 / -s 字节 / --random-source=FILE)不能当成删除目标。
         if (bin === 'shred' && /^(?:-n|--iterations|-s|--size|--random-source)$/.test(t)) { i++; continue; }
-        if (t.startsWith('-') && t !== '-') continue;
+        if (t.startsWith('-') && t !== '-') {
+          // PowerShell 别名 `rm -Path:<系统路径>`:值贴在参数上,按 POSIX 丢掉就取不到目标(codex 报)。
+          const attached = powerShellLocationAttachedTarget(t);
+          if (attached !== undefined) out.push(attached);
+          continue;
+        }
       }
       out.push(t);
     }
@@ -938,7 +943,16 @@ function argumentWriteTargets(tokens: string[]): string[] {
   }
   if (bin === 'del' || bin === 'erase') {
     // cmd.exe 的开关形如 `/f` `/s` `/q` `/a:-h`;Windows 路径不会以单个 `/` + 字母起头。
-    return args.filter((t) => !/^\/[a-zA-Z](?::|$)/.test(t));
+    // PowerShell 里它们又是 Remove-Item 的别名,`-Path:<路径>` 必须抽出值,不能整段当目标。
+    const out: string[] = [];
+    for (const t of args) {
+      if (/^\/[a-zA-Z](?::|$)/.test(t)) continue;
+      const attached = powerShellLocationAttachedTarget(t);
+      if (attached !== undefined) { out.push(attached); continue; }
+      if (t.startsWith('-') && t !== '-') continue;
+      out.push(t);
+    }
+    return out;
   }
   if (bin === 'dd') {
     return tokens.slice(1).flatMap((t) => {
@@ -965,7 +979,11 @@ function argumentWriteTargets(tokens: string[]): string[] {
       const t = args[i];
       // touch -r REF / -d DATE / -t STAMP;mkdir -m MODE 都带独立值。
       if (/^(?:-r|--reference|-d|--date|-t|-m|--mode)$/.test(t)) { i++; continue; }
-      if (t.startsWith('-')) continue;
+      if (t.startsWith('-')) {
+        const attached = powerShellLocationAttachedTarget(t);
+        if (attached !== undefined) out.push(attached);
+        continue;
+      }
       out.push(t);
     }
     return out;
@@ -2956,6 +2974,30 @@ function positionalOperands(tokens: string[]): string[] {
   return out;
 }
 
+/**
+ * 在「以 `-` 开头就跳过」之上，把 PowerShell 贴值路径抽出来。
+ * `rm -Path:C:\Windows\…\hosts`、`Get-ChildItem -Path:C:\Windows\… | Remove-Item` 里
+ * 唯一的目标就贴在参数上；按 POSIX 丢掉之后删除段要么没目标、要么 provenance 落到 `.`。
+ * 具名 `-Path value` 的值本身不是 `-` 开头，本来就会留下，不必再认。
+ */
+function operandsIncludingAttachedPowerShellPaths(args: string[]): string[] {
+  const out: string[] = [];
+  let optionsEnded = false;
+  for (const token of args) {
+    if (!optionsEnded && token === '--') {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && token.startsWith('-') && token !== '-') {
+      const attached = powerShellLocationAttachedTarget(token);
+      if (attached !== undefined) out.push(attached);
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
+}
+
 /** 破坏性目标是否无法证明被限制在首个可写根的子目录内。 */
 /**
  * 破坏目标里的字符类 `[…]` 能否展开出路径穿越字符 `.`(0x2E)或 `/`(0x2F)——能则运行期可拼出 `..`/额外
@@ -3060,7 +3102,7 @@ function destructiveRmTargets(tokens: string[]): string[] | null {
   const args = tokens.slice(1);
   const destructive = args.some((token) =>
     /^-[^-]*[rRfF]/.test(token) || /^--(?:recursive|force|dir)(?:=|$)/.test(token));
-  return destructive ? positionalOperands(args) : null;
+  return destructive ? operandsIncludingAttachedPowerShellPaths(args) : null;
 }
 
 /**
@@ -3128,7 +3170,9 @@ function windowsDestructiveRmTargets(tokens: string[]): string[] | null {
   if (bin !== 'rd' && bin !== 'rmdir' && bin !== 'del' && bin !== 'erase') return null;
   const args = tokens.slice(1);
   if (!args.some((token) => /^\/s$/i.test(token))) return null; // 无 /s 非广泛递归
-  const targets = args.filter((token) => !token.startsWith('/'));
+  const targets = operandsIncludingAttachedPowerShellPaths(
+    args.filter((token) => !token.startsWith('/')),
+  );
   return targets.length > 0 ? targets : null;
 }
 
@@ -3837,7 +3881,7 @@ function scopedDestructionNeedsConsent(
       if (!POWERSHELL_PATH_ENUMERATORS.has(bin) || replacesSource) {
         upstreamOperands = null;
       } else {
-        const operands = positionalOperands(tokens.slice(1));
+        const operands = operandsIncludingAttachedPowerShellPaths(tokens.slice(1));
         // 没给实参:首段 = 枚举当前目录;有上游 = 项由上游喂进来,provenance 原样保留(含 `null`)。
         // 类型标注是必须的:初始化式里读了 `upstreamOperands`,而它下一行又由本变量赋值,
         // 少了标注 tsc 会判成循环推断(TS7022,desktop 的 typecheck 实测报错)。

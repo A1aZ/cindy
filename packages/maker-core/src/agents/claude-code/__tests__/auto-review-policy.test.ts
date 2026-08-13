@@ -461,6 +461,8 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       `. { $x = "\`"}"; Set-Content ${hosts} owned }`,
       `. { $x = "\`"x}"; Set-Content ${hosts} owned }`,
       `Invoke-Command -ScriptBlock { $x = "\`"}"; Set-Content ${hosts} owned }`,
+      `rm -Path:${hosts}`,
+      `Get-ChildItem -Path:C:\\Windows\\System32\\drivers\\etc | Remove-Item`,
     ]) {
       expect(classify('PowerShell', command), command).toBe('prompt-each-time');
       expect(classify('PowerShell', command), `${command} 与 Bash 入口一致`)

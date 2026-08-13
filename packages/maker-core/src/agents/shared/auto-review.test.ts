@@ -2941,6 +2941,48 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('重叠别名与枚举器的贴值 -Path: 也要抽成写目标', () => {
+    // POSIX/cmd 分支按「以 `-` 开头就跳过」取操作数,PowerShell 的 `-Path:<路径>` 整段被丢掉
+    // (codex 报 `rm -Path:<hosts>`、`Get-ChildItem -Path:<etc> | Remove-Item`)。具名
+    // `-Path value` 的值本来就会留下,修前已必问;只补贴值这一半。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    const etc = 'C:\\Windows\\System32\\drivers\\etc';
+    for (const c of [
+      `rm -Path:${hosts}`,
+      `rm -LiteralPath:${hosts}`,
+      `rm -LP:${hosts}`,
+      `rm -rf -Path:${hosts}`,
+      `rmdir -Path:${etc}`,
+      `del -Path:${hosts}`,
+      `erase -Path:${hosts}`,
+      `mkdir -Path:C:\\Windows\\System32\\evil`,
+      `Get-ChildItem -Path:${etc} | Remove-Item`,
+      `Get-ChildItem -LiteralPath:${etc} | Remove-Item`,
+      `gci -Path:${etc} | ri`,
+      `Get-Item -Path:${hosts} | Remove-Item`,
+      `Resolve-Path -Path:${hosts} | Remove-Item`,
+      // 修前已必问的分开写法,一并钉住。
+      `rm -Path ${hosts}`,
+      `Get-ChildItem -Path ${etc} | Remove-Item`,
+    ]) {
+      const v = classifyShellCommand(c, win, { platform: 'win32' });
+      expect(v, c).toBe('prompt-each-time');
+      expect(reviewAction({ kind: 'exec', command: c }, win, { platform: 'win32' }), c).toBe(v);
+    }
+
+    // 反例:贴值指向区内 → 判档不变,没有因为看见 `-Path:` 就升级。
+    for (const c of [
+      'rm -Path:C:\\repo\\a.txt',
+      'Get-ChildItem -Path:C:\\repo\\build | Remove-Item',
+      'del -Path:C:\\repo\\a.txt',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // POSIX 侧不认 `-Path:`,照旧当开关丢掉,判档不变。
+    expect(classifyShellCommand('rm /ws/a.txt', ['/ws'], { platform: 'linux' })).toBe('prompt');
+  });
+
   it('pipeline provenance 穿过过滤阶段;显式 destination 不代表 source 也显式', () => {
     // 两条都是上一版 pipeline 判据自己的缺口:
     //  1) 只过滤/排序/挑选的阶段没换对象来源,但 provenance 被换成了那一段自己的实参 ——

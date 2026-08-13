@@ -262,6 +262,40 @@ describe('RSB store', () => {
       });
     });
 
+    it('can rehydrate after a host transition invalidates an in-flight hydrate', async () => {
+      let resolveInitial!: (value: {
+        tabs: never[];
+        activeTabId: null;
+      }) => void;
+      ipc.list.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveInitial = resolve;
+          }),
+      );
+
+      const initialHydration = store.ensureHydrated('host-transition-race');
+      await vi.waitFor(() => expect(ipc.list).toHaveBeenCalledOnce());
+
+      store.resetCachesForHostTransition();
+      resolveInitial({ tabs: [], activeTabId: null });
+      await initialHydration;
+      expect(store.getBucket('host-transition-race').hydrated).toBe(false);
+
+      ipc.list.mockResolvedValueOnce({
+        tabs: [{ id: 'tab-after-transition', kind: 'web-browser', state: { url: 'about:blank' } }],
+        activeTabId: 'tab-after-transition',
+      });
+      await store.ensureHydrated('host-transition-race');
+
+      expect(store.getBucket('host-transition-race')).toEqual({
+        hydrated: true,
+        tabs: [{ id: 'tab-after-transition', kind: 'web-browser', state: { url: 'about:blank' } }],
+        activeTabId: 'tab-after-transition',
+      });
+      expect(ipc.list).toHaveBeenCalledTimes(2);
+    });
+
     it('does not export a persistable local-DB bucket as a renderer handoff', async () => {
       await store.ensureHydrated('persisted-s1');
       expect(store.getTabSnapshot('persisted-s1')).toBeNull();

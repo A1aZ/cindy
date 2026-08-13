@@ -720,7 +720,9 @@ export class RsbWindowController {
   private sendTabHandoffToAttachedHost(handoff?: RsbWindowTabHandoff): void {
     const channel = this.deps.tabHandoffChannel;
     const main = this.deps.getMainWindow();
-    const filtered = this.filterTabHandoffForCurrentContext(handoff);
+    // The detached renderer is the authoritative owner for this merge
+    // snapshot, even if main has already advanced to another session.
+    const filtered = this.filterTabHandoffForCurrentContext(handoff, true);
     if (!channel || !main || main.isDestroyed() || !filtered) return;
     this.deps.sendToWindow(main, channel, filtered);
   }
@@ -743,14 +745,20 @@ export class RsbWindowController {
 
   private filterTabHandoffForCurrentContext(
     handoff?: RsbWindowTabHandoff,
+    allowStaleSession = false,
   ): RsbWindowTabHandoff | null {
-    const currentSessionId = this.lastContext?.available ? this.lastContext.sessionId : null;
-    if (!currentSessionId || !handoff) return null;
+    if (!handoff) return null;
 
-    // Main owns the current context. Drop renderer-reported snapshots for any
-    // other session and never use a persistable snapshot as a DB replacement.
+    // The sender is already validated by the IPC boundary. During merge-back,
+    // keep the detached renderer's previous-session snapshot even when main
+    // has already advanced to another context. During detach, still require
+    // the main-owned snapshot to match main's current context. Never use a
+    // persistable snapshot as a DB replacement.
+    const currentSessionId = this.lastContext?.available ? this.lastContext.sessionId : null;
     const snapshots = handoff.snapshots.filter(
-      (snapshot) => !snapshot.persistable && snapshot.sessionId === currentSessionId,
+      (snapshot) =>
+        !snapshot.persistable &&
+        (allowStaleSession || (currentSessionId !== null && snapshot.sessionId === currentSessionId)),
     );
     return snapshots.length > 0 ? { snapshots } : null;
   }

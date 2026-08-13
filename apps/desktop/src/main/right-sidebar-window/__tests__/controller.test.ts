@@ -531,13 +531,14 @@ describe('setDetached', () => {
     expect(win.destroy).toHaveBeenCalledOnce();
   });
 
-  it('drops persistable and stale-session handoff snapshots', () => {
+  it('drops persistable snapshots but preserves a stale-session merge snapshot', () => {
     const h = makeHarness({ detached: true });
     h.controller.prewarm();
     const win = h.windows[0];
     markReady(h.controller, win);
     h.controller.setContext(ctx);
     h.controller.open({ userInitiated: false });
+    h.controller.setContext({ ...ctx, sessionId: 's2' });
 
     h.controller.setDetached(false, {
       snapshots: [
@@ -556,7 +557,22 @@ describe('setDetached', () => {
       ],
     });
 
-    expect(h.sends.some((entry) => entry.channel === 'handoff-channel')).toBe(false);
+    const handoffIndex = h.sends.findIndex((entry) => entry.channel === 'handoff-channel');
+    expect(h.sends[handoffIndex]).toEqual({
+      channel: 'handoff-channel',
+      payload: {
+        snapshots: [
+          {
+            sessionId: 'other',
+            tabs: [],
+            activeTabId: null,
+            persistable: false,
+          },
+        ],
+      },
+    });
+    expect(h.sendTargets[handoffIndex]).toBe(h.mainWin.webContents.id);
+    expect(win.destroy).toHaveBeenCalledOnce();
   });
 });
 

@@ -925,6 +925,16 @@ export function MainLayout() {
       resetCachesForHostTransition();
       const sessionId = rightSidebarSessionIdRef.current;
       if (sessionId) {
+        // The attached shell can mount before this parent transition effect.
+        // Its initial hydrate then belongs to the cache generation that the
+        // reset above invalidates. Start a fresh hydrate after the reset so a
+        // persisted Windows session cannot remain on EMPTY_BUCKET forever.
+        void ensureHydrated(sessionId).catch((err) => {
+          applicationMenuLog.warn('rehydrate right sidebar after host transition failed', {
+            sessionId,
+            err,
+          });
+        });
         writeCollapsedFor(sessionId, false);
         setIsRightSidebarCollapsed(false);
       }

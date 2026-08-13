@@ -2742,9 +2742,12 @@ export function ChatInput({
   // Host 入口或未生效项保留展示但置灰(entry 级 disabled + 原因)。
   const pluginSuggestions = useMemo<ComposerPluginSuggestion[]>(
     () => {
-      // device-link 远程会话的插件运行在被控端；控制端清单既不代表远端
-      // 已安装状态，选择后也无法用本地 InstalledGhost 解析并插入命令。
-      if (deviceLinkDeviceId) return [];
+      // device-link 会话的插件运行在被控端；控制端清单既不代表远端已安装
+      // 状态，选择后也无法用本地 InstalledGhost 解析并插入命令。fail-closed：
+      // 仅 deviceLinkDeviceId === null（已确认本机）才展示；undefined（所有权
+      // 尚未解析）与 string（远程）一律隐藏，避免 bootstrap/重连窗口期把控制端
+      // 本地插件项泄漏进可能落为远程的会话。
+      if (deviceLinkDeviceId !== null) return [];
       return pluginsForMenu.map((ghost) => {
         const hasCommand = !!ghost.manifest.command;
         const hostCapability = remoteHostId ? null : hostCapabilityForGhost(ghost);
@@ -4756,7 +4759,7 @@ export function ChatInput({
         // 从 eligibleGhosts 解析出仍有效(启用 + workdir + manifest 一致 + 非远程会话)
         // 的 host 插件对象交给 usedGhost，使发送后 markUsed 能更新该插件的最近使用排序。
         const hostCapabilityGhost =
-          hostCapability !== undefined && !remoteHostId && !deviceLinkDeviceId
+          hostCapability !== undefined && !remoteHostId && deviceLinkDeviceId === null
             ? eligibleGhosts.find(
                 (g) =>
                   g.manifest.id === hostCapability.ghostId &&
@@ -4773,6 +4776,7 @@ export function ChatInput({
         // 已失时效，不应再展开 Host 路由指令（fail-closed）。
         // 额外收口(remote session + manifest 一致性)：
         //   - SSH(remoteHostId)/device-link(deviceLinkDeviceId) 远程会话不展开控制端 Host 路由；
+        //     deviceLinkDeviceId 仅 null（已确认本机）放行，undefined（所有权未解析）fail-closed；
         //   - 插件更新后芯片保留旧 capability 时，manifest 当前声明必须仍匹配才放行。
         const isHostCapabilityValid = hostCapabilityGhost !== undefined;
         // 校验失败(插件停用/卸载/超 workdir/远程会话)时不静默退化为普通文本发送:

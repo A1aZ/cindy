@@ -301,10 +301,92 @@ function shortClusterOption(
   return null;
 }
 
+/**
+ * PowerShell 的写通道 cmdlet → 写目标取哪几个操作数。
+ *
+ * 这张表此前只有 POSIX 形态(`tee` / `cp` / `mv` / `rm` …),于是 Windows 上等价的写操作
+ * 取不到目标:`Set-Content C:\Windows\System32\drivers\etc\hosts owned` 落灰区,而
+ * `echo owned > /etc/hosts`、`cp payload /etc/hosts`、以及 `Write` 工具写同一位置都是必问
+ * (codex 报)。补齐后 PowerShell 与其它入口判得一致。
+ *
+ * `sources: true` = 源操作数同样被销毁(搬走/改名系统文件等于改掉它),源与目标都算写目标。
+ */
+const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last'; sources?: boolean }> =
+  new Map([
+    // 写内容到 -Path(位置 0),值是第二个操作数。
+    ['set-content', { targets: 'first' }],
+    ['add-content', { targets: 'first' }],
+    ['new-item', { targets: 'first' }],
+    ['out-file', { targets: 'first' }],  // 常在管道右侧:`'x' | Out-File <path>`
+    ['clear-content', { targets: 'first' }],
+    ['set-itemproperty', { targets: 'first' }],
+    // 复制:末位操作数是 -Destination,源是只读的。
+    ['copy-item', { targets: 'last' }],
+    ['cpi', { targets: 'last' }],
+    // 移动/改名:源也被销毁 → 两端都算。
+    ['move-item', { targets: 'last', sources: true }],
+    ['mi', { targets: 'last', sources: true }],
+    ['rename-item', { targets: 'first', sources: true }],
+    ['rni', { targets: 'first', sources: true }],
+    ['ren', { targets: 'first', sources: true }],
+  ]);
+
+/** PowerShell 里指定写目标的具名参数(大小写无关,支持唯一前缀缩写)。 */
+const POWERSHELL_TARGET_PARAMS: readonly string[] = [
+  '-path', '-literalpath', '-destination', '-filepath', '-newname',
+];
+
+/**
+ * PowerShell 写 cmdlet 的写目标。既支持具名参数(`-Path` / `-LiteralPath` / `-Destination` /
+ * `-FilePath`,含唯一前缀缩写如 `-Dest`),也支持位置传参。
+ *
+ * **取不到目标时返回不可证哨兵**(fail-closed):cmdlet 确实是写通道,但静态看不出写去哪
+ * (目标来自变量、管道绑定等)→ 不能当成"没有写目标"而静默降级。
+ */
+function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
+  const spec = POWERSHELL_WRITE_CMDLETS.get(bin);
+  if (!spec) return null;
+  const named: string[] = [];
+  const operands: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i];
+    if (token.startsWith('-')) {
+      const lower = token.toLowerCase();
+      // 唯一前缀缩写:`-Dest` → -Destination。长度 ≥2 才认,避免 `-D` 之类歧义。
+      const matched = lower.length >= 2
+        && POWERSHELL_TARGET_PARAMS.filter((p) => p.startsWith(lower));
+      if (matched && matched.length === 1) {
+        const value = args[i + 1];
+        // 具名参数缺值 = 静态不可证。
+        named.push(value !== undefined && !value.startsWith('-') ? value : UNPROVABLE_WRITE_TARGET);
+        i++;
+      }
+      continue;
+    }
+    operands.push(token);
+  }
+  if (named.length > 0) {
+    // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`)。
+    return spec.sources ? [...named, ...operands] : named;
+  }
+  // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
+  // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
+  // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
+  if (operands.length === 0) return [];
+  if (spec.sources) return operands;
+  if (spec.targets === 'first') return [operands[0]];
+  // 末位是目标;只给一个操作数时 PowerShell 的 -Destination 默认当前位置(`Copy-Item payload`
+  // 合法且常用)→ 目标就是 cwd,交给调用方按有效 cwd 解析(cwd 未知时那边会 fail-closed),
+  // **不能**当成不可证而硬弹卡:那会把日常复制打成必问。
+  return operands.length >= 2 ? [operands[operands.length - 1]] : ['.'];
+}
+
 function argumentWriteTargets(tokens: string[]): string[] {
   const bin = executableName(tokens[0] ?? '');
   const args = tokens.slice(1);
   const operands = positionalOperands(args);
+  const powerShell = powerShellWriteTargets(bin, args);
+  if (powerShell) return powerShell;
   if (bin === 'tee' || bin === 'sponge') return operands;
   if (bin === 'cp' || bin === 'mv' || bin === 'install' || bin === 'rsync' || bin === 'ln') {
     // `install -d/--directory DIR...`:第四种用法只创建目录,**全部操作数都是写目标**、且可能只有一个
@@ -2405,6 +2487,29 @@ function dumpsFullEnvironmentCommand(tokens: string[]): boolean {
 }
 
 /** cmd.exe `/c`/`/k`/`/r` 后的载荷命令(其余全部构成待执行命令);非 cmd 启动器返回 null。 */
+/**
+ * PowerShell `-Command` 的载荷,供破坏面判定下探 —— 与 `sh -c`(`shellCommandPayload`)、
+ * `cmd /c`(`cmdCommandPayload`)同一形态,此前只漏了 PowerShell:`pwsh -Command 'Set-Content
+ * C:\Windows\…\hosts owned'` 的写目标取不到,而 `sh -c 'cp payload /etc/hosts'` 取得到
+ * (codex 报)。`-Command` 后的**全部**剩余 token 构成待执行命令(PowerShell 语义),
+ * 与 `powerShellNeedsConsent` 用同一套唯一前缀缩写判据(`-c` / `-co` / … = -Command)。
+ *
+ * `-EncodedCommand` 不在此列:base64 静态不可读,已由 `powerShellNeedsConsent` 直接判必问。
+ */
+function powerShellCommandPayload(tokens: string[]): string | null {
+  if (!/^(?:pwsh|powershell)$/.test(executableName(tokens[0] ?? ''))) return null;
+  for (let i = 1; i < tokens.length; i++) {
+    const name = tokens[i].split('=')[0].toLowerCase();
+    if (name.length >= 2 && '-encodedcommand'.startsWith(name)) return null;
+    if (name.length >= 2 && '-command'.startsWith(name)) {
+      return tokens[i].includes('=')
+        ? [tokens[i].slice(tokens[i].indexOf('=') + 1), ...tokens.slice(i + 1)].join(' ')
+        : tokens.slice(i + 1).join(' ');
+    }
+  }
+  return null;
+}
+
 function cmdCommandPayload(tokens: string[]): string | null {
   if (executableName(tokens[0] ?? '') !== 'cmd') return null;
   for (let i = 1; i < tokens.length; i++) {
@@ -2635,6 +2740,13 @@ function scopedDestructionNeedsConsent(
     const cmdPayload = cmdCommandPayload(tokens);
     if (cmdPayload && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
       cmdPayload, workspaceRoots, segmentOpts, depth + 1))) {
+      return true;
+    }
+    // pwsh -Command "Set-Content C:\Windows\…\hosts owned" 同理 —— 此前 `sh -c` 与 `cmd /c`
+    // 都会下探,只漏了 PowerShell,于是 Windows 上等价的受保护写入取不到目标(codex 报)。
+    const psPayload = powerShellCommandPayload(tokens);
+    if (psPayload && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
+      psPayload, workspaceRoots, segmentOpts, depth + 1))) {
       return true;
     }
     if (bin === 'find') {

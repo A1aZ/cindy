@@ -96,14 +96,18 @@ function powerShellExecCommand(command: string): string {
 }
 
 /**
- * 把任意命令文本包成**一个** shell token,供审查判据取整条载荷。
+ * 把任意命令文本包成**一个** token,供审查判据取整条载荷。
  *
- * 只服务静态审查,不用于真实执行 —— 但仍按单引号规范转义(`'` → `'\''`),
- * 否则载荷里的引号会把 token 提前截断、让判据只看到前半段。
- * 转义是单射的,所以包装对缓存身份无损:不同原文必得不同结果。
+ * **用双引号 + 重复引号转义(`"` → `""`),不用单引号**:载荷是 PowerShell 语句,里面的路径
+ * 很常见地写成单引号(`Set-Content 'C:\Program Files\x' …`)。早先用单引号包装并把内层 `'`
+ * 转成 POSIX 的 `'\''`,core 的 tokenizer 还原不回原路径 —— 于是单引号写的系统路径取不到
+ * 写目标、掉进灰区(实测:同一条命令交 `Bash` 入口是必问)。改成双引号后内层单引号原样保留,
+ * 双引号按 PowerShell 自己的重复引号规则转义,core 两边都认。
+ *
+ * 只服务静态审查、不用于真实执行;转义单射,所以包装对缓存身份无损:不同原文必得不同结果。
  */
 function quoteAsSingleShellToken(text: string): string {
-  return `'${text.replaceAll("'", "'\\''")}'`;
+  return `"${text.replaceAll('"', '""')}"`;
 }
 
 /**

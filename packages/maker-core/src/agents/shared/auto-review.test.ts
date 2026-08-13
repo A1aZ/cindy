@@ -1791,6 +1791,70 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     expect(classifyShellCommand('cp /etc/hosts ./local-copy', roots)).toBe('prompt');
   });
 
+  it('PowerShell 写 cmdlet 的系统路径目标 = 确定性红线(与 POSIX 写通道同口径)', () => {
+    // 这张写通道表此前只有 POSIX 形态,于是 Windows 上等价的写操作取不到目标:
+    // `Set-Content C:\Windows\…\hosts owned` 落灰区,而 `cp payload /etc/hosts`、
+    // `echo owned > /etc/hosts`、`file-write` 动作写同一位置都是必问(codex 报)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Set-Content ${hosts} owned`,
+      `Set-Content -Path ${hosts} -Value owned`,
+      `Set-Content -LiteralPath ${hosts} -Value owned`,
+      `Add-Content ${hosts} owned`,
+      `Clear-Content ${hosts}`,
+      `'x' | Out-File ${hosts}`,
+      `Out-File -FilePath ${hosts}`,
+      `Copy-Item payload ${hosts}`,
+      `Copy-Item payload -Destination ${hosts}`,
+      `Copy-Item payload -Dest ${hosts}`,          // 唯一前缀缩写
+      `cpi payload ${hosts}`,                       // 别名
+      `New-Item ${hosts} -ItemType File`,
+      // 搬走/改名系统文件等于改掉它 → 源也算写目标
+      `Move-Item ${hosts} C:\\repo\\bak`,
+      `Rename-Item ${hosts} hosts.bak`,
+      // 经 `pwsh -Command` 包装同样下探(此前只有 `sh -c` 与 `cmd /c` 会)
+      `pwsh -Command 'Set-Content ${hosts} owned'`,
+      `powershell -Command Copy-Item payload ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 具名参数缺值 = 写通道在、目标不可证 → fail-closed(与 `cp --target-directory` 缺值同口径)。
+    expect(classifyShellCommand('Copy-Item payload -Destination', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('Set-Content -Path', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+
+    // 反例一:区内写仍是灰区,不把日常开发命令打成必问。
+    for (const c of [
+      'Set-Content C:\\repo\\a.txt hello',
+      'Set-Content -Path C:\\repo\\a.txt -Value hello',
+      'Copy-Item C:\\repo\\a.txt C:\\repo\\b.txt',
+      'Out-File C:\\repo\\log.txt',
+      'New-Item C:\\repo\\sub -ItemType Directory',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:省略 -Destination 是**合法**用法(默认当前位置),不得当成不可证而硬弹卡;
+    // 但 cwd 落在系统目录时照样必问(交给既有的有效 cwd 解析)。
+    expect(classifyShellCommand('Copy-Item payload', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Move-Item a', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('cd C:\\Windows\\System32 ; Copy-Item payload', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 反例三:命令不完整(一个操作数都没有)与 `cp payload` 同口径落灰区,不虚构目标。
+    expect(classifyShellCommand('Set-Content', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Copy-Item', win, { platform: 'win32' })).toBe('prompt');
+    // 反例四:目标来自变量时静态不可解析,与 POSIX `cp payload $target` 同口径落灰区。
+    expect(classifyShellCommand('Set-Content $target owned', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('cp payload $target', win, { platform: 'win32' })).toBe('prompt');
+    // 反例五:只**读**系统路径的 cmdlet 不受影响。
+    expect(classifyShellCommand(`Get-Content ${hosts}`, win, { platform: 'win32' })).toBe('prompt');
+    // 反例六:`-EncodedCommand` 不走载荷下探(base64 不可读,已由 PowerShell 红线直接必问)。
+    expect(classifyShellCommand('pwsh -EncodedCommand SQBFAFgA', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('setsid 的选项不遮蔽内层破坏命令', () => {
     for (const c of [
       'setsid -f rm -rf /outside',

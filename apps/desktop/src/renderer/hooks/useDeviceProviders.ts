@@ -139,7 +139,6 @@ export function parseDeviceProvidersPayload(value: unknown): DeviceProvidersPayl
   if (providersIn.length === 0 && value.providers.length > 0) {
     throw new Error('Invalid provider list response');
   }
-  value.providers = providersIn;
   const overrides = value.modelVisibilityOverrides;
   if (
     overrides !== undefined &&
@@ -152,7 +151,7 @@ export function parseDeviceProvidersPayload(value: unknown): DeviceProvidersPayl
   // 但 model-providers 的 connectedProvidersForAgent 需要每个声明的 agent 有一个
   // routing entry 才会把供应商视为可用。只在远程解析边界补齐空 entry，不改变本机
   // registry 对缺失 route 的严格语义，也保留已有 disabled 标记。
-  const providers = value.providers.map((provider) => {
+  const providers = providersIn.map((provider) => {
     const routing = { ...(provider.routing ?? {}) } as ProviderView['routing'];
     for (const agent of provider.agents) {
       if (routing[agent as keyof ProviderView['routing']] === undefined) {

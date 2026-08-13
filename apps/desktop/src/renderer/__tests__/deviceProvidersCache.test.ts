@@ -219,7 +219,7 @@ describe('useDeviceProviders deviceId-aware cache', () => {
     await mod.prefetchDeviceProviders('dev-luna');
 
     expect(
-      mod.getCachedDeviceProviders('dev-luna')?.providers[0]?.models['claude-code'].map((m) => m.id),
+      mod.getCachedDeviceProviders('dev-luna')?.providers[0]?.models['claude-code']?.map((m) => m.id),
     ).toEqual(['claude-opus-5']);
   });
 
@@ -293,7 +293,7 @@ describe('useDeviceProviders deviceId-aware cache', () => {
     expect(
       mod
         .getCachedDeviceProviders(`dev-drop-${key}`)
-        ?.providers[0]?.models['claude-code'].map((model) => model.id),
+        ?.providers[0]?.models['claude-code']?.map((model) => model.id),
     ).toEqual(['good']);
   });
 

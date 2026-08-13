@@ -311,8 +311,18 @@ function shortClusterOption(
  *
  * `sources: true` = 源操作数同样被销毁(搬走/改名系统文件等于改掉它),源与目标都算写目标。
  * `targets: 'all'` = 每个操作数都是被写/被删的目标(删除类 cmdlet 的 `-Path` 收数组)。
+ * `pathIsSource: true` = 这个 cmdlet 的 `-Path`/`-LiteralPath` 指的是**读**的源,写目标由
+ *   `-Destination` 或末位操作数给出。`-Path` 的语义按 cmdlet 变:`Set-Content -Path` 是写目标,
+ *   `Copy-Item -Path` 是源 —— 一律当目标会同时造成两个错判(codex 报,都已实测):
+ *     · `cd C:\Windows\System32; Copy-Item -Path C:\repo\payload` 把源当目标 → 隐式写进系统
+ *       目录**漏成灰区**(省略 -Destination 时目标是 cwd);
+ *     · `Copy-Item -Path <系统路径> -Destination C:\repo\bak`(从系统路径读、写区内)反被
+ *       **误升成硬弹窗**。
  */
-const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' | 'all'; sources?: boolean }> =
+const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
+  string,
+  { targets: 'first' | 'last' | 'all'; sources?: boolean; pathIsSource?: boolean }
+> =
   new Map([
     // 写内容到 -Path(位置 0),值是第二个操作数。
     ['set-content', { targets: 'first' }],
@@ -344,15 +354,15 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' 
     ['mp', { targets: 'all' }],
     ['rename-itemproperty', { targets: 'all' }],
     ['rnp', { targets: 'all' }],
-    // 复制:末位操作数是 -Destination,源是只读的。
+    // 复制:末位操作数是 -Destination,源是只读的 → `-Path` 在这里是**源**。
     // `copy` 既是 Copy-Item 的别名,也是 cmd.exe 的 copy —— 两者都是「末位是目标」,可共用。
-    ['copy-item', { targets: 'last' }],
-    ['cpi', { targets: 'last' }],
-    ['copy', { targets: 'last' }],
+    ['copy-item', { targets: 'last', pathIsSource: true }],
+    ['cpi', { targets: 'last', pathIsSource: true }],
+    ['copy', { targets: 'last', pathIsSource: true }],
     // 移动/改名:源也被销毁 → 两端都算。`move` 同理兼作 cmd.exe 的 move。
-    ['move-item', { targets: 'last', sources: true }],
-    ['mi', { targets: 'last', sources: true }],
-    ['move', { targets: 'last', sources: true }],
+    ['move-item', { targets: 'last', sources: true, pathIsSource: true }],
+    ['mi', { targets: 'last', sources: true, pathIsSource: true }],
+    ['move', { targets: 'last', sources: true, pathIsSource: true }],
     ['rename-item', { targets: 'first', sources: true }],
     ['rni', { targets: 'first', sources: true }],
     ['ren', { targets: 'first', sources: true }],
@@ -383,6 +393,12 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<string, { targets: 'first' | 'last' 
 const POWERSHELL_TARGET_PARAMS: readonly string[] = [
   '-path', '-literalpath', '-lp', '-pspath', '-destination', '-filepath', '-newname',
 ];
+
+/**
+ * `-Path` 这一族(含 `-LiteralPath` 的文档别名)—— 它指目标还是指源**由 cmdlet 决定**:
+ * `Set-Content -Path` 是写目标,`Copy-Item -Path` 是读源。见 `pathIsSource`。
+ */
+const POWERSHELL_PATH_PARAMS: readonly string[] = ['-path', '-literalpath', '-lp', '-pspath'];
 
 /**
  * 写 cmdlet 上**带值**的非目标参数 —— 必须把值一并消费,否则值会被当成位置操作数、顶掉真正的
@@ -460,48 +476,57 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
         continue;
       }
       if (POWERSHELL_SWITCH_PARAMS.includes(candidates[0])) continue; // 已知开关:确定不吃值
-      const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]);
+      // `-Path`/`-LiteralPath` 在 copy/move 上指的是**源**(见 pathIsSource):它的值要按位置
+      // 操作数处理 —— 既不能当写目标,也不能丢掉(`sources: true` 的 cmdlet 源本身也被销毁,
+      // 而且操作数个数决定了"有没有给出目标"、要不要落回 cwd)。
+      const pathIsSourceHere = spec.pathIsSource === true
+        && POWERSHELL_PATH_PARAMS.includes(candidates[0]);
+      const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]) && !pathIsSourceHere;
       if (attached) {
-        // 贴在参数上的值:目标参数取它,带值参数直接丢掉。
-        if (isTarget) named.push(token.slice(name.length + 1));
+        // 贴在参数上的值:目标参数取它,源路径按操作数收,其它带值参数直接丢掉。
+        const value = token.slice(name.length + 1);
+        if (isTarget) named.push(...splitPowerShellPathList(value));
+        else if (pathIsSourceHere) operands.push(...splitPowerShellPathList(value));
         continue;
       }
       const value = args[i + 1];
-      if (!isTarget) {
+      if (!isTarget && !pathIsSourceHere) {
         // **带值的非目标参数必须把值一并消费**,否则值会被当操作数、顶掉真正的写目标。
         if (value !== undefined && !value.startsWith('-')) i++;
         continue;
       }
-      // 目标参数缺值 = 写通道在、目标不可证 → 哨兵(与 `cp --target-directory` 缺值同口径)。
-      named.push(...(value !== undefined && !value.startsWith('-')
-        ? splitPowerShellPathList(value)
-        : [UNPROVABLE_WRITE_TARGET]));
+      if (value === undefined || value.startsWith('-')) {
+        // 目标参数缺值 = 写通道在、目标不可证 → 哨兵(与 `cp --target-directory` 缺值同口径)。
+        // 源参数缺值 = 没给出源,不虚构操作数。两种情况都**没有**消费下一个 token,不能 i++。
+        if (isTarget) named.push(UNPROVABLE_WRITE_TARGET);
+        continue;
+      }
+      (isTarget ? named : operands).push(...splitPowerShellPathList(value));
       i++;
       continue;
     }
-    operands.push(token);
+    operands.push(...splitPowerShellPathList(token));
   }
   if (named.length > 0) {
     // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`);
     // `targets: 'all'` 同理 —— 它的语义就是"每个操作数都是目标",具名参数只是**追加**一个,
     // 不能因为出现了具名目标就把操作数丢掉(`Rename-ItemProperty <系统路径> -Name a -NewName b`
     // 里被改的是位置操作数那个路径,`-NewName` 只是新属性名)。
-    return spec.sources || spec.targets === 'all'
-      ? [...named, ...operands.flatMap(splitPowerShellPathList)]
-      : named;
+    return spec.sources || spec.targets === 'all' ? [...named, ...operands] : named;
   }
   // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
   // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
   // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
   if (operands.length === 0) return [];
-  if (spec.targets === 'all' || spec.sources) return operands.flatMap(splitPowerShellPathList);
   // 操作数顺序不可证(见 POWERSHELL_SWITCH_PARAMS)→ 全部当目标:只会多问,不会漏掉真目标。
-  if (operandOrderUnprovable) return operands.flatMap(splitPowerShellPathList);
-  if (spec.targets === 'first') return splitPowerShellPathList(operands[0]);
-  // 末位是目标;只给一个操作数时 PowerShell 的 -Destination 默认当前位置(`Copy-Item payload`
-  // 合法且常用)→ 目标就是 cwd,交给调用方按有效 cwd 解析(cwd 未知时那边会 fail-closed),
-  // **不能**当成不可证而硬弹卡:那会把日常复制打成必问。
-  return operands.length >= 2 ? splitPowerShellPathList(operands[operands.length - 1]) : ['.'];
+  if (spec.targets === 'all' || operandOrderUnprovable) return operands;
+  if (spec.targets === 'first') return spec.sources ? operands : [operands[0]];
+  // 末位是目标;只给一个操作数(含 `-Path <源>` 这种只给了源的写法)时,PowerShell 的
+  // -Destination 默认**当前位置**(`Copy-Item payload` 合法且常用)→ 目标就是 cwd,交给调用方
+  // 按有效 cwd 解析(`cd C:\Windows\System32; Copy-Item -Path payload` 由此命中系统写红线;
+  // cwd 未知时那边会 fail-closed)。**不能**当成不可证而硬弹卡:那会把日常复制打成必问。
+  if (operands.length >= 2) return spec.sources ? operands : [operands[operands.length - 1]];
+  return spec.sources ? [...operands, '.'] : ['.'];
 }
 
 /**

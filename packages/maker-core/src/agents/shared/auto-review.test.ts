@@ -2122,6 +2122,59 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
     }
   });
 
+  it('copy/move 的 -Path 是源不是目标;省略 -Destination 时目标默认 cwd', () => {
+    // `-Path` 的语义**按 cmdlet 变**:`Set-Content -Path` 是写目标,`Copy-Item -Path` 是读源。
+    // 一律当目标会同时造成两个方向的错判(codex 报,都已实测)。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+
+    // 一、把源当目标 → 省略 -Destination 时目标其实是 cwd,隐式写进系统目录会**漏成灰区**。
+    for (const c of [
+      'cd C:\\Windows\\System32; Copy-Item -Path C:\\repo\\payload',
+      'cd C:\\Windows\\System32; Copy-Item -LiteralPath C:\\repo\\payload',
+      'cd C:\\Windows\\System32; Copy-Item C:\\repo\\payload',
+      'cd C:\\Windows\\System32; Move-Item -Path C:\\repo\\payload',
+      'cd C:\\Windows\\System32; cpi -Path C:\\repo\\payload',
+      'cd "C:\\Program Files\\Windows Defender"; Copy-Item -Path C:\\repo\\payload',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 二、反方向:从系统路径**读**、写到工作区内,不该被误升成硬弹窗。
+    for (const c of [
+      `Copy-Item -Path ${hosts} -Destination C:\\repo\\bak`,
+      `Copy-Item -LiteralPath ${hosts} -Destination C:\\repo\\bak`,
+      `Copy-Item ${hosts} C:\\repo\\bak`,
+      `cpi -Path ${hosts} -Destination C:\\repo\\bak`,
+      // cwd 在区内时,省略 -Destination 的复制也只是写区内。
+      'cd C:\\repo; Copy-Item -Path C:\\repo\\payload',
+      'Copy-Item -Path C:\\repo\\a -Destination C:\\repo\\b',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 三、具名 -Destination 指向系统路径仍必问(修 -Path 语义没有削弱目标侧判定)。
+    for (const c of [
+      `Copy-Item -Path C:\\repo\\payload -Destination ${hosts}`,
+      `Copy-Item -Destination ${hosts} -Path C:\\repo\\payload`,
+      `Move-Item -Path C:\\repo\\payload -Destination ${hosts}`,
+      `Copy-Item C:\\repo\\payload ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 四、`Move-Item` 的源也被销毁 → 搬走系统文件仍必问,哪怕目标在区内。
+    expect(classifyShellCommand(`Move-Item -Path ${hosts} -Destination C:\\repo\\bak`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 五、`Set-Content` 这类 cmdlet 的 `-Path` 仍是写目标 —— 本改动按 cmdlet 区分,不是全局改语义。
+    expect(classifyShellCommand(`Set-Content -Path ${hosts} -Value owned`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`Rename-Item -Path ${hosts} -NewName x`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`Remove-Item -Path ${hosts}`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('setsid 的选项不遮蔽内层破坏命令', () => {
     for (const c of [
       'setsid -f rm -rf /outside',

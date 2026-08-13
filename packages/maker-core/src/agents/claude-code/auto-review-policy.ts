@@ -98,16 +98,26 @@ function powerShellExecCommand(command: string): string {
 /**
  * 把任意命令文本包成**一个** token,供审查判据取整条载荷。
  *
- * **用双引号 + 重复引号转义(`"` → `""`),不用单引号**:载荷是 PowerShell 语句,里面的路径
- * 很常见地写成单引号(`Set-Content 'C:\Program Files\x' …`)。早先用单引号包装并把内层 `'`
- * 转成 POSIX 的 `'\''`,core 的 tokenizer 还原不回原路径 —— 于是单引号写的系统路径取不到
- * 写目标、掉进灰区(实测:同一条命令交 `Bash` 入口是必问)。改成双引号后内层单引号原样保留,
- * 双引号按 PowerShell 自己的重复引号规则转义,core 两边都认。
+ * 判据是"core 的 tokenizer 能不能把这一个 token 还原成原文"。它的两条相关行为决定了写法:
+ *   1. 单引号内**一切原样**(连反斜杠都保留)—— Windows 路径需要这个;
+ *   2. 引号外的 `\X` **连反斜杠一起保留**(为了 Windows 路径分隔符),所以 POSIX 的 `\'`
+ *      转义还原不回一个裸单引号。
+ *
+ * 于是:**单引号包装,内层 `'` 转成 `'"'"'`**(闭单引号 → 双引号裹一个单引号 → 重开单引号,
+ * 相邻片段被 tokenizer 拼回同一个 token)。这样内层的 `"`、`\`、空格全部逐字还原。
+ *
+ * 两条都是实测踩过的坑,不要再换回去:
+ *   - 用 `'\''` 转义 → tokenizer 保留反斜杠,单引号写的路径还原成 `\'C:\…\'`,取不到写目标;
+ *   - 改用双引号 + PowerShell 的重复引号规则(`"` → `""`)→ 单引号路径修好了,但**双引号**
+ *     写的路径反而坏掉:`""` 在 POSIX 规则下是"闭引号紧接开引号"= 字符串拼接,于是
+ *     `Set-Content "C:\Program Files\Windows Defender\x" owned` 的引号被吃掉、路径按空格
+ *     拆成 `C:\Program` + `Files\Windows` + …,系统路径判据整条失效(codex 报,已实测)。
+ *   两种引号都得能过,所以只能用 tokenizer 自己那套规则,不能用 PowerShell 的。
  *
  * 只服务静态审查、不用于真实执行;转义单射,所以包装对缓存身份无损:不同原文必得不同结果。
  */
 function quoteAsSingleShellToken(text: string): string {
-  return `"${text.replaceAll('"', '""')}"`;
+  return `'${text.replaceAll("'", `'"'"'`)}'`;
 }
 
 /**

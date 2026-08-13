@@ -317,39 +317,52 @@ describe('工具映射漏项不得变成静默拒绝', () => {
     // POWERSHELL_DANGER_PATTERNS 一条都匹配不上,红线形同虚设;而落到兜底 other
     // 又会因缺 description 在调模型前被直接 block(静默拒绝)。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: 'Get-ChildItem' }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "Get-ChildItem"' });
-    // **用双引号包装、内层单引号原样保留**:PowerShell 路径很常见地写成单引号
-    // (`Set-Content 'C:\Program Files\x' …`)。早先用单引号包装并把内层 `'` 转成 POSIX 的
-    // `'\''`,core 的 tokenizer 还原不回原路径 —— 单引号写的系统路径因此取不到写目标、
-    // 掉进灰区(而同一条命令交 Bash 入口是必问)。下一条用例锁住修复效果。
+      .toEqual({ kind: 'exec', command: "pwsh -Command 'Get-ChildItem'" });
+    // 包装的唯一判据是「core 的 tokenizer 能不能把这一个 token 还原成原文」,所以用的是
+    // **tokenizer 自己那套规则**,不是 PowerShell 的。两种引号都得能过 —— 这里各锁一条:
+    //   · 内层**双**引号:PowerShell 的重复引号规则(`"` → `""`)在 POSIX 规则下是"闭引号紧接
+    //     开引号"= 字符串拼接,引号会被吃掉、路径按空格拆散(见下一条用例);
+    //   · 内层**单**引号:POSIX 的 `\'` 转义也不行 —— tokenizer 为了 Windows 路径分隔符会
+    //     连反斜杠一起保留,还原成 `\'C:\…\'`。
+    // 只有单引号包装 + 内层 `'` → `'"'"'` 两者都对。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "echo 'x'" }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "echo \'x\'"' });
-    // 内层双引号按 PowerShell 自己的重复引号规则转义(仍是单射 → 身份无损)。
+      .toEqual({ kind: 'exec', command: `pwsh -Command 'echo '"'"'x'"'"''` });
+    // 内层双引号原样保留(不转义 → 也不会被 tokenizer 当成拼接)。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: 'echo "x"' }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "echo ""x"""' });
+      .toEqual({ kind: 'exec', command: `pwsh -Command 'echo "x"'` });
     // 空命令仍按证据不足处理,不拼出一个只有前缀的假命令。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: '   ' }))
       .toEqual({ kind: 'exec', command: '' });
 
     // 非解释器目标 / 引号未闭合都不算解释器调用 → 照常整条包装。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\tools\\my.exe' -x" }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "& \'C:\\tools\\my.exe\' -x"' });
+      .toEqual({ kind: 'exec', command: `pwsh -Command '& '"'"'C:\\tools\\my.exe'"'"' -x'` });
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: "& 'C:\\PF\\pwsh.exe -enc X" }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "& \'C:\\PF\\pwsh.exe -enc X"' });
+      .toEqual({ kind: 'exec', command: `pwsh -Command '& '"'"'C:\\PF\\pwsh.exe -enc X'` });
     // `.\script.ps1` / `./script.ps1` 是相对路径调用,开头的 `.` 不是点源运算符。
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: '.\\script.ps1 -enc X' }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command ".\\script.ps1 -enc X"' });
+      .toEqual({ kind: 'exec', command: `pwsh -Command '.\\script.ps1 -enc X'` });
     expect(normalizeBuiltinToolForAutoReview('PowerShell', { command: './script.ps1 -enc X' }))
-      .toEqual({ kind: 'exec', command: 'pwsh -Command "./script.ps1 -enc X"' });
+      .toEqual({ kind: 'exec', command: `pwsh -Command './script.ps1 -enc X'` });
   });
 
-  it('单引号写的系统路径也要取到写目标(包装用双引号的原因)', () => {
+  it('带引号的系统路径三种写法都要取到写目标(包装转义的回归锁)', () => {
     const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
-    // 三种引号写法都必须与 Bash 入口结论一致 —— 早先单引号形态在 PowerShell 工具入口
-    // 掉进灰区,而 Bash 入口是必问,那个差异纯粹由包装的转义造成。
+    // **必须用带空格的路径**才能测出包装转义的问题:早先这条用例只用了 `…\etc\hosts`,
+    // 它不含空格,所以即使引号被 tokenizer 吃掉、路径按空格拆散,拆出来的第一段仍是整条路径,
+    // 判据照旧命中 —— 双引号形态的缺陷因此被这条用例漏过(codex 报)。
+    const defender = 'C:\\Program Files\\Windows Defender\\x';
     for (const command of [
+      // 单引号:早先用 POSIX `\'` 转义,tokenizer 连反斜杠一起保留 → 还原不回原路径。
+      `Set-Content '${defender}' owned`,
+      `Copy-Item payload '${defender}'`,
+      // 双引号:早先按 PowerShell 的重复引号规则转成 `""`,在 POSIX 规则下等于字符串拼接 →
+      // 引号被吃掉,`C:\Program Files\…` 被拆成 `C:\Program` + `Files\Windows` + …,判据失效。
+      `Set-Content "${defender}" owned`,
+      `Remove-Item "${defender}"`,
+      `Copy-Item C:\\repo\\payload "${defender}"`,
+      // 裸路径(无空格)与带引号的无空格路径:回归基线。
       `Set-Content '${hosts}' owned`,
-      `Copy-Item payload '${hosts}'`,
       `Set-Content "${hosts}" owned`,
       `Set-Content ${hosts} owned`,
     ]) {
@@ -357,8 +370,9 @@ describe('工具映射漏项不得变成静默拒绝', () => {
       expect(verdict('PowerShell', { command }), `${command} 与 Bash 入口一致`)
         .toBe(verdict('Bash', { command }));
     }
-    // 区内的单引号路径不受影响,仍是灰区。
+    // 区内的带引号路径不受影响,仍是灰区(转义修好不等于顺手升级)。
     expect(verdict('PowerShell', { command: "Set-Content 'C:\\repo\\a.txt' hi" })).toBe('prompt');
+    expect(verdict('PowerShell', { command: 'Set-Content "C:\\repo\\my notes.txt" hi' })).toBe('prompt');
   });
 
   it('PowerShell 判档实测表:哪些必问、哪些留灰区、上限在哪', () => {

@@ -291,6 +291,13 @@ describe('MacModifierShortcutListener start race', () => {
 
     onTrigger.mockClear();
     mocks.stdoutDataHandlers[0]?.('{"type":"keys","keys":["Function:F24"]}\n');
+    mocks.stdoutDataHandlers[0]?.('{"type":"keys","keys":["Function:F24","ShiftLeft"]}\n');
+    mocks.stdoutDataHandlers[0]?.('{"type":"keys","keys":["Function:F24"]}\n');
+    mocks.stdoutDataHandlers[0]?.('{"type":"keys","keys":[]}\n');
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start']);
+
+    onTrigger.mockClear();
+    mocks.stdoutDataHandlers[0]?.('{"type":"keys","keys":["Function:F24"]}\n');
     mocks.spawnedChildren[0].get('exit')?.(1, null);
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
     listener.stop();

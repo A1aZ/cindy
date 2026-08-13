@@ -22,6 +22,7 @@ const START_TIMEOUT_MS = 3_000;
 const RESTART_MAX_ATTEMPTS = 3;
 const RESTART_BASE_DELAY_MS = 1_000;
 const RESTART_MAX_DELAY_MS = 5_000;
+const RESTART_STABLE_MS = 10_000;
 
 export type WindowsFunctionKeyListenerStartResult =
   { ok: true } | { ok: false; error: string; superseded?: true };
@@ -54,6 +55,7 @@ export class WindowsFunctionKeyShortcutListener {
   private startGeneration = 0;
   private restartAttempts = 0;
   private restartTimer: NodeJS.Timeout | null = null;
+  private stableTimer: NodeJS.Timeout | null = null;
   private readonly phaseController: ShortcutHoldPhaseController;
 
   constructor(options: WindowsFunctionKeyShortcutListenerOptions) {
@@ -74,6 +76,7 @@ export class WindowsFunctionKeyShortcutListener {
     this.shortcutCode = shortcut.code;
     this.restartAttempts = 0;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.stopChildKeepingShortcut();
     return this.startChildProcess(shortcut.code);
   }
@@ -90,6 +93,7 @@ export class WindowsFunctionKeyShortcutListener {
     // than only clearing the TypeScript phase controller.
     this.restartAttempts = 0;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.stopChildKeepingShortcut();
     void this.startChildProcess(code)
       .then((result) => {
@@ -112,6 +116,7 @@ export class WindowsFunctionKeyShortcutListener {
     this.shortcutCode = null;
     this.restartAttempts = 0;
     this.clearRestartTimer();
+    this.clearStableTimer();
     this.stopChildKeepingShortcut();
   }
 
@@ -154,7 +159,10 @@ export class WindowsFunctionKeyShortcutListener {
         const stale =
           generation !== this.startGeneration || this.child !== child || this.shortcutCode !== code;
         const outcome = stale ? supersededStart() : result;
-        if (result.ok && !stale) this.ready = true;
+        if (result.ok && !stale) {
+          this.ready = true;
+          this.armStableTimer();
+        }
         if (!result.ok && this.child === child) {
           this.child = null;
           this.ready = false;
@@ -200,6 +208,7 @@ export class WindowsFunctionKeyShortcutListener {
         if (wasCurrentChild) {
           this.child = null;
           this.ready = false;
+          this.clearStableTimer();
           this.phaseController.releaseIfPressed();
           this.phaseController.reset();
         }
@@ -244,6 +253,10 @@ export class WindowsFunctionKeyShortcutListener {
       });
       return;
     }
+    if (payload.type === 'canceled' && this.child === child) {
+      this.phaseController.setPressed(false, true);
+      return;
+    }
     if (
       payload.type === 'pressed' &&
       typeof payload.pressed === 'boolean' &&
@@ -282,9 +295,7 @@ export class WindowsFunctionKeyShortcutListener {
         .then((result) => {
           if (!result.ok) {
             this.scheduleRestart(code, null, null);
-            return;
           }
-          this.restartAttempts = 0;
         })
         .catch((error: unknown) => {
           log.warn('Windows function key listener restart crashed', {
@@ -300,6 +311,20 @@ export class WindowsFunctionKeyShortcutListener {
     if (!this.restartTimer) return;
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
+  }
+
+  private armStableTimer(): void {
+    this.clearStableTimer();
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = null;
+      this.restartAttempts = 0;
+    }, RESTART_STABLE_MS);
+  }
+
+  private clearStableTimer(): void {
+    if (!this.stableTimer) return;
+    clearTimeout(this.stableTimer);
+    this.stableTimer = null;
   }
 }
 

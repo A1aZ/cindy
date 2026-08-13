@@ -55,4 +55,30 @@ describe('ShortcutHoldPhaseController', () => {
 
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
   });
+
+  it('cancels a held chord when another key joins, then waits for the real key-up', () => {
+    const onTrigger = vi.fn();
+    const controller = new ShortcutHoldPhaseController({ onTrigger });
+
+    controller.setPressed(true, true);
+    controller.setPressed(false, true);
+    controller.setPressed(true, true);
+    controller.setPressed(false, false);
+
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start']);
+  });
+
+  it('starts a new activation only after the cancelled target key is released', () => {
+    const onTrigger = vi.fn();
+    const controller = new ShortcutHoldPhaseController({ onTrigger });
+
+    controller.setPressed(true, true);
+    controller.setPressed(false, true);
+    controller.setPressed(false, false);
+    controller.setPressed(true, true);
+    vi.advanceTimersByTime(450);
+    controller.setPressed(false, false);
+
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'start', 'end']);
+  });
 });

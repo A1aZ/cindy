@@ -501,6 +501,7 @@ export class MacModifierShortcutListener {
     if (isVoiceInputBareFunctionKeyShortcut(shortcut)) {
       this.functionKeyPhaseController.setPressed(
         isVoiceInputMacNativeKeyboardShortcutPressed(keys, shortcut),
+        isVoiceInputMacNativeKeyboardShortcutTargetDown(keys, shortcut),
       );
       return;
     }

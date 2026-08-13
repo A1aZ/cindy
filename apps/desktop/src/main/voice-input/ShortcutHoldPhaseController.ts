@@ -18,15 +18,23 @@ export class ShortcutHoldPhaseController {
   private readonly holdDelayMs: number;
   private down = false;
   private holdThresholdReached = false;
+  private canceledUntilRelease = false;
   private holdTimer: NodeJS.Timeout | null = null;
 
   constructor(private readonly options: ShortcutHoldPhaseControllerOptions) {
     this.holdDelayMs = options.holdDelayMs ?? DEFAULT_HOLD_DELAY_MS;
   }
 
-  setPressed(pressed: boolean): void {
-    if (pressed === this.down) return;
+  /**
+   * @param pressed whether the exact configured chord is currently down
+   * @param targetDown whether the target key itself is still physically held.
+   *   When the chord is broken by another key (e.g. F16 + Shift), callers pass
+   *   `pressed=false` with `targetDown=true` so this press is cancelled instead
+   *   of being treated as a tap or a submit.
+   */
+  setPressed(pressed: boolean, targetDown = pressed): void {
     if (pressed) {
+      if (this.canceledUntilRelease || this.down) return;
       this.down = true;
       this.holdThresholdReached = false;
       this.options.onTrigger('start');
@@ -37,18 +45,32 @@ export class ShortcutHoldPhaseController {
       return;
     }
 
-    const shouldTap = !this.holdThresholdReached;
-    this.clearHoldTimer();
-    this.down = false;
-    this.holdThresholdReached = false;
-    this.options.onTrigger(shouldTap ? 'tap' : 'end');
+    if (this.down) {
+      this.clearHoldTimer();
+      this.down = false;
+      const shouldTap = !this.holdThresholdReached;
+      this.holdThresholdReached = false;
+      if (targetDown) {
+        this.canceledUntilRelease = true;
+        return;
+      }
+      this.canceledUntilRelease = false;
+      this.options.onTrigger(shouldTap ? 'tap' : 'end');
+      return;
+    }
+
+    if (!targetDown) this.canceledUntilRelease = false;
   }
 
   releaseIfPressed(): void {
-    if (!this.down) return;
+    if (!this.down) {
+      this.canceledUntilRelease = false;
+      return;
+    }
     this.clearHoldTimer();
     this.down = false;
     this.holdThresholdReached = false;
+    this.canceledUntilRelease = false;
     this.options.onTrigger('end');
   }
 
@@ -56,6 +78,7 @@ export class ShortcutHoldPhaseController {
     this.clearHoldTimer();
     this.down = false;
     this.holdThresholdReached = false;
+    this.canceledUntilRelease = false;
   }
 
   private clearHoldTimer(): void {

@@ -72,9 +72,8 @@ mod windows_listener {
             }
         }
 
-        if key_down && ACTIVE.load(Ordering::Relaxed) && modifier_bit != 0 {
-            ACTIVE.store(false, Ordering::Relaxed);
-            emit_pressed(false);
+        if key_down && ACTIVE.swap(false, Ordering::Relaxed) && modifier_bit != 0 {
+            emit_canceled();
         }
 
         if event.vkCode == target_vk {
@@ -151,6 +150,10 @@ mod windows_listener {
         } else {
             "{\"type\":\"pressed\",\"pressed\":false}"
         });
+    }
+
+    fn emit_canceled() {
+        emit_line("{\"type\":\"canceled\"}");
     }
 
     fn emit_error(message: &str) {

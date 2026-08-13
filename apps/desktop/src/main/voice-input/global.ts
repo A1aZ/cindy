@@ -1697,10 +1697,29 @@ async function setVoiceInputGlobalShortcut(
 
   if (voiceInputShortcutNeedsWindowsNativeListener(shortcut, process.platform)) {
     const nativeShortcutKey = stableVoiceInputShortcutKey(shortcut);
+    const reservationAccelerator = toElectronAccelerator(shortcut);
+    if (!reservationAccelerator) {
+      return { ok: false, error: 'Unsupported voice input shortcut.' };
+    }
+    const reservedNewAccelerator = registeredAccelerator !== reservationAccelerator;
+    if (
+      reservedNewAccelerator &&
+      !globalShortcut.register(reservationAccelerator, () => {
+        // Native press/release owns start/tap/end. Electron only reserves the
+        // bare F-key so another app cannot claim it first.
+      })
+    ) {
+      log.warn('Windows global shortcut reservation failed', { accelerator: reservationAccelerator });
+      return {
+        ok: false,
+        error: `Global shortcut is already in use: ${reservationAccelerator}`,
+      };
+    }
     if (
       registeredNativeShortcutKey === nativeShortcutKey &&
       windowsFunctionKeyShortcutListener.isReady()
     ) {
+      if (reservedNewAccelerator) registeredAccelerator = reservationAccelerator;
       return { ok: true };
     }
     const previousShortcut = registeredShortcut;
@@ -1708,9 +1727,11 @@ async function setVoiceInputGlobalShortcut(
       windowsFunctionKeyShortcutListener.setShortcut(shortcut),
     );
     if (!result.ok && result.superseded) {
+      if (reservedNewAccelerator) globalShortcut.unregister(reservationAccelerator);
       return { ok: false, error: result.error, errorCode: 'superseded' };
     }
     if (!result.ok) {
+      if (reservedNewAccelerator) globalShortcut.unregister(reservationAccelerator);
       if (
         previousShortcut &&
         voiceInputShortcutNeedsWindowsNativeListener(previousShortcut, process.platform)
@@ -1735,10 +1756,10 @@ async function setVoiceInputGlobalShortcut(
         errorCode: 'failed',
       };
     }
-    if (registeredAccelerator) {
+    if (registeredAccelerator && registeredAccelerator !== reservationAccelerator) {
       globalShortcut.unregister(registeredAccelerator);
-      registeredAccelerator = null;
     }
+    registeredAccelerator = reservationAccelerator;
     registeredShortcut = shortcut;
     registeredNativeShortcutLabel = getNativeShortcutLogLabel(shortcut);
     registeredNativeShortcutKey = nativeShortcutKey;

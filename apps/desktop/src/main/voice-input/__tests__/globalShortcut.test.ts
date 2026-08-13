@@ -392,7 +392,7 @@ describe('voice input global shortcut registration', () => {
     );
   });
 
-  it('uses the Windows low-level listener for F16 without Electron registration', async () => {
+  it('uses the Windows low-level listener for F16 and Electron only to reserve the key', async () => {
     setPlatform('win32');
     const { registerGlobalVoiceInputIpc } = await import('../global.js');
     registerGlobalVoiceInputIpc(mocks.ipcDeps);
@@ -408,13 +408,37 @@ describe('voice input global shortcut registration', () => {
     await setShortcut?.({}, f16Shortcut);
 
     expect(mocks.windowsSetShortcut).toHaveBeenCalledWith(f16Shortcut);
-    expect(mocks.registeredShortcuts.has('F16')).toBe(false);
+    expect(mocks.registeredShortcuts.has('F16')).toBe(true);
+
+    mocks.registeredShortcuts.get('F16')?.();
+    expect(mocks.focusedWindow.webContents.send).not.toHaveBeenCalled();
 
     mocks.windowsListenerOptions.onTrigger?.('start');
     expect(mocks.focusedWindow.webContents.send).toHaveBeenCalledWith(
       'voice-input:global-shortcut-trigger',
       expect.objectContaining({ id: expect.any(String), phase: 'start' }),
     );
+  });
+
+  it('rejects a Windows F-key that another app already owns', async () => {
+    setPlatform('win32');
+    mocks.registerShortcut.mockImplementationOnce(() => false);
+    const { registerGlobalVoiceInputIpc } = await import('../global.js');
+    registerGlobalVoiceInputIpc(mocks.ipcDeps);
+    const setShortcut = mocks.handlers.get('voice-input:global-shortcut:set');
+    const f16Shortcut: VoiceInputShortcut = {
+      trigger: 'keyboard',
+      code: 'F16',
+      key: 'F16',
+      modifiers: { meta: false, ctrl: false, alt: false, shift: false, fn: false },
+    };
+
+    mocks.setStoredShortcut(f16Shortcut);
+    const result = await setShortcut?.({}, f16Shortcut);
+
+    expect(result).toMatchObject({ ok: false });
+    expect(mocks.windowsSetShortcut).not.toHaveBeenCalled();
+    expect(mocks.registeredShortcuts.has('F16')).toBe(false);
   });
 
   it('releases both native listener states on system power transitions', async () => {

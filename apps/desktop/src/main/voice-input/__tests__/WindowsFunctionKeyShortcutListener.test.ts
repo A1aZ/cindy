@@ -110,6 +110,23 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     listener.stop();
   });
 
+  it('cancels an active press when a modifier joins and waits for the real key-up', async () => {
+    const { WindowsFunctionKeyShortcutListener } =
+      await import('../WindowsFunctionKeyShortcutListener.js');
+    const onTrigger = vi.fn();
+    const listener = new WindowsFunctionKeyShortcutListener({ onTrigger });
+    await startReady(listener);
+    const child = mocks.spawnedChildren[0];
+
+    child.stdoutData('{"type":"pressed","pressed":true}\n');
+    child.stdoutData('{"type":"canceled"}\n');
+    child.stdoutData('{"type":"pressed","pressed":true}\n');
+    child.stdoutData('{"type":"pressed","pressed":false}\n');
+
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start']);
+    listener.stop();
+  });
+
   it('ends a held activation and restarts the helper on a system release', async () => {
     const { WindowsFunctionKeyShortcutListener } =
       await import('../WindowsFunctionKeyShortcutListener.js');
@@ -142,6 +159,29 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     child.handlers.get('exit')?.(1, null);
 
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
+    listener.stop();
+  });
+
+  it('stops restarting after consecutive post-ready crashes before the listener is stable', async () => {
+    vi.useFakeTimers();
+    const { WindowsFunctionKeyShortcutListener } =
+      await import('../WindowsFunctionKeyShortcutListener.js');
+    const listener = new WindowsFunctionKeyShortcutListener({ onTrigger: vi.fn() });
+    const starting = listener.setShortcut(f2Shortcut);
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.spawnedChildren.at(-1)?.stdoutData('{"type":"ready"}\n');
+    await expect(starting).resolves.toMatchObject({ ok: true });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      mocks.spawnedChildren.at(-1)?.handlers.get('exit')?.(1, null);
+      await vi.advanceTimersByTimeAsync(5_000);
+      mocks.spawnedChildren.at(-1)?.stdoutData('{"type":"ready"}\n');
+      await vi.advanceTimersByTimeAsync(0);
+    }
+
+    mocks.spawnedChildren.at(-1)?.handlers.get('exit')?.(1, null);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(mocks.spawn).toHaveBeenCalledTimes(4);
     listener.stop();
   });
 });

@@ -1740,11 +1740,14 @@ setCodexImageAuthBinding({
 });
 registerGhostIpc();
 registerPluginMarketIpc();
-authManager.setStableOwnerPostCommitTask(async ({ reason }) => {
-  const builtinOutcome = await runStableOwnerPostCommitTask(reason);
+authManager.setStableOwnerPostCommitTask(async ({ reason, scopeKey, dataOwnerId }) => {
+  const builtinOutcome = await runStableOwnerPostCommitTask(reason, { scopeKey, dataOwnerId });
   if (builtinOutcome === 'deferred') return builtinOutcome;
 
   let needsRetry = builtinOutcome === 'retry-pending' || builtinOutcome === 'failed';
+  // Signed-out is a real stable scope for account-free bundled provisioning.
+  // Market and OAuth are owner-private follow-ups and stay behind this gate.
+  if (dataOwnerId === null) return needsRetry ? 'failed' : 'completed';
   let deferred = false;
   const marketOutcome = await syncDefaultMarketPlugins();
   if (marketOutcome === 'failed') needsRetry = true;

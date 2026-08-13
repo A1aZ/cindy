@@ -7,7 +7,8 @@ export type StableOwnerPostCommitOutcome =
 export interface StableOwnerPostCommitContext {
   reason: string;
   scopeKey: string;
-  dataOwnerId: string;
+  /** Null identifies the stable signed-out scope, not an unstable boundary. */
+  dataOwnerId: string | null;
 }
 
 export type StableOwnerPostCommitTask = (
@@ -31,9 +32,11 @@ interface StableOwnerPostCommitCoordinatorOptions {
 const DEFAULT_RETRY_DELAYS_MS = [1_000, 5_000, 15_000, 60_000] as const;
 
 /**
- * Serializes the owner-scoped work that must run after the durable Ghost
- * projection boundary is stable. A completed scope is memoized, while a
- * deferred or failed pass remains eligible for the next stable opportunity.
+ * Serializes the work that must run after the durable Ghost projection
+ * boundary is stable. This includes the signed-out scope: account-free
+ * bundled reconciliation still runs there, while the task itself gates work
+ * that requires a data owner. A completed scope is memoized, while a deferred
+ * or failed pass remains eligible for the next stable opportunity.
  */
 export class StableOwnerPostCommitCoordinator {
   private task: StableOwnerPostCommitTask | null = null;
@@ -62,7 +65,6 @@ export class StableOwnerPostCommitCoordinator {
     if (this.retryScopeKey && this.retryScopeKey !== requested.scopeKey) {
       this.cancelScheduledRetry();
     }
-    if (!requested.dataOwnerId) return Promise.resolve('not-applicable');
     const dataOwnerId = requested.dataOwnerId;
     if (!requested.stable || !this.task) return Promise.resolve('deferred');
     if (this.completedScopeKey === requested.scopeKey) return Promise.resolve('completed');
@@ -142,10 +144,10 @@ export class StableOwnerPostCommitCoordinator {
     const generation = this.taskGeneration;
     this.retryScopeKey = requested.scopeKey;
     const schedule = this.options.scheduleRetry ?? ((callback, delay) => {
-      const handle = setTimeout(callback, delay);
-      handle.unref?.();
-      return handle;
-    });
+        const handle = setTimeout(callback, delay);
+        handle.unref?.();
+        return handle;
+      });
     this.retryHandle = schedule(() => {
       this.retryHandle = null;
       if (generation !== this.taskGeneration) return;

@@ -1035,11 +1035,21 @@ function currentProvisionIdentity(): ProvisionIdentity | null {
 let builtinReconcileChain: Promise<void> = Promise.resolve();
 
 type BuiltinReconcileOutcome = 'completed' | 'deferred' | 'failed' | 'retry-pending';
-let stableOwnerPostCommitTask: ((reason: string) => Promise<BuiltinReconcileOutcome>) | null = null;
+interface BuiltinReconcileScope {
+  scopeKey: string;
+  dataOwnerId: string | null;
+}
+
+let stableOwnerPostCommitTask:
+  ((reason: string, scope: BuiltinReconcileScope) => Promise<BuiltinReconcileOutcome>) | null =
+  null;
 
 /** Run the Plugin post-commit pipeline registered during Ghost IPC bootstrap. */
-export function runStableOwnerPostCommitTask(reason: string): Promise<BuiltinReconcileOutcome> {
-  return stableOwnerPostCommitTask?.(reason) ?? Promise.resolve('deferred');
+export function runStableOwnerPostCommitTask(
+  reason: string,
+  scope: BuiltinReconcileScope,
+): Promise<BuiltinReconcileOutcome> {
+  return stableOwnerPostCommitTask?.(reason, scope) ?? Promise.resolve('deferred');
 }
 
 /**
@@ -1054,7 +1064,13 @@ export function runStableOwnerPostCommitTask(reason: string): Promise<BuiltinRec
  */
 const quenchedResidentBuiltinIds = new Set<string>();
 
-function scheduleBuiltinReconcile(reason: string): Promise<BuiltinReconcileOutcome> {
+function scheduleBuiltinReconcile(
+  reason: string,
+  expectedScope: BuiltinReconcileScope = {
+    scopeKey: activeOwnerScopeKey(),
+    dataOwnerId: getActiveAppSession().dataOwnerId,
+  },
+): Promise<BuiltinReconcileOutcome> {
   const scheduled = builtinReconcileChain
     .catch((err) => {
       log.warn('builtin ghost activation error; reconcile chain resumed', {
@@ -1062,8 +1078,16 @@ function scheduleBuiltinReconcile(reason: string): Promise<BuiltinReconcileOutco
       });
     })
     .then(async () => {
+      const activeSession = getActiveAppSession();
+      if (
+        activeOwnerScopeKey() !== expectedScope.scopeKey ||
+        activeSession.dataOwnerId !== expectedScope.dataOwnerId
+      ) {
+        log.info('builtin ghost reconcile skipped: stale owner scope', { reason });
+        return 'deferred' as const;
+      }
       try {
-        return await reconcileBuiltinGhosts(reason);
+        return await reconcileBuiltinGhosts(reason, expectedScope.dataOwnerId);
       } catch (err) {
         log.warn('builtin ghost reconcile error', {
           reason,
@@ -1146,7 +1170,10 @@ function migrateGhostKvOnRename(fromId: string, toId: string): void {
 }
 
 /** 单轮对账:一次性 legacy 迁移 → 播种 → (有变化时)广播 + 首装停靠 + 常驻点火。 */
-async function reconcileBuiltinGhosts(reason: string): Promise<BuiltinReconcileOutcome> {
+async function reconcileBuiltinGhosts(
+  reason: string,
+  dataOwnerId: string | null,
+): Promise<BuiltinReconcileOutcome> {
   // 整轮对账(迁移 backfill + 播种换目录 + 批准 receipt 写入)都是 owner 绑定的
   // 文件系统写路径,但 GhostManager/ReceiptStore 的根目录是**每次调用现解析**的:
   // 异步 hash/copy 中途账号切换落定,后半段写入就会漏进新 owner 的状态根(拿 A 的
@@ -1163,25 +1190,27 @@ async function reconcileBuiltinGhosts(reason: string): Promise<BuiltinReconcileO
   let migrationNeedsRetry = false;
   try {
     const manager = getGhostManager();
-    // 存量插件迁移必须先于播种与授权消费:#1080 之前装的插件没有 receipt,这里从旧安装
-    // 布局 backfill 出等价批准,让它们升级后无感可用(docs §5 红线)。全局一次性 —— 首次
-    // 之后 ledger 存在即瞬时 no-op,所以放在每轮 reconcile 前都安全。它自己取事务锁,因此
-    // 必须在下面 runExclusiveMutation **之外**调用(锁内再取锁会死锁),两次顺序取锁。
-    try {
-      const migration = await manager.migrateLegacyApprovalsOnce();
-      migrationNeedsRetry =
-        migration.retryPending.length > 0 || manager.hasPendingLegacyApprovalMigration();
-    } catch (err) {
-      migrationNeedsRetry = true;
-      // 迁移整体失败(如状态根不可写)不能挡住播种与后续对账:随包插件仍要能装/更新,
-      // 存量插件保持 fail-closed(列停用、走恢复 UI),下一轮启动再尝试迁移。
-      log.warn('legacy ghost approval migration pass failed', {
-        reason,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (dataOwnerId !== null) {
+      // 存量插件迁移必须先于播种与授权消费:#1080 之前装的插件没有 receipt,这里从旧安装
+      // 布局 backfill 出等价批准,让它们升级后无感可用(docs §5 红线)。signed-out 的
+      // no-session 根只承载本进程的 account-free bundled 投影,绝不扫描或确认 legacy
+      // 安装事实。迁移自己取事务锁,因此必须在下面 runExclusiveMutation **之外**调用。
+      try {
+        const migration = await manager.migrateLegacyApprovalsOnce();
+        migrationNeedsRetry =
+          migration.retryPending.length > 0 || manager.hasPendingLegacyApprovalMigration();
+      } catch (err) {
+        migrationNeedsRetry = true;
+        // 迁移整体失败(如状态根不可写)不能挡住播种与后续对账:随包插件仍要能装/更新,
+        // 存量插件保持 fail-closed(列停用、走恢复 UI),下一轮启动再尝试迁移。
+        log.warn('legacy ghost approval migration pass failed', {
+          reason,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     const approvalNeedsRetry = await manager.runExclusiveMutation((mutation) =>
-      reconcileBuiltinGhostsLocked(reason, manager, mutation),
+      reconcileBuiltinGhostsLocked(reason, dataOwnerId, manager, mutation),
     );
     migrationNeedsRetry ||= approvalNeedsRetry;
   } finally {
@@ -1192,6 +1221,7 @@ async function reconcileBuiltinGhosts(reason: string): Promise<BuiltinReconcileO
 
 async function reconcileBuiltinGhostsLocked(
   reason: string,
+  dataOwnerId: string | null,
   manager: GhostManager,
   mutation: GhostExclusiveMutation,
 ): Promise<boolean> {
@@ -1201,14 +1231,16 @@ async function reconcileBuiltinGhostsLocked(
   // (旧种子已不随包,旧墓碑是死数据;清掉也避免用户日后手动恢复新 id 时被
   // 本处反复重新盖墓)。停用态:抓在播种前(孤儿回收会删旧目录),装上后补。
   const renameDisabledCarry = new Map<string, boolean>();
-  for (const [fromId, toId] of RENAMED_BUILTIN_GHOSTS) {
-    if (renameBuiltinTombstone(brainRootDir(), fromId, toId, log)) {
-      log.info('builtin ghost tombstone carried over rename', { fromId, toId });
+  if (dataOwnerId !== null) {
+    for (const [fromId, toId] of RENAMED_BUILTIN_GHOSTS) {
+      if (renameBuiltinTombstone(brainRootDir(), fromId, toId, log)) {
+        log.info('builtin ghost tombstone carried over rename', { fromId, toId });
+      }
+      renameDisabledCarry.set(
+        toId,
+        hasDisabledMarker(path.join(brainRootDir(), fromId)),
+      );
     }
-    renameDisabledCarry.set(
-      toId,
-      hasDisabledMarker(path.join(brainRootDir(), fromId)),
-    );
   }
   // "播种进行中"胶囊提示:只在真的动手(装/覆盖/回收)时亮起,no-op 对账
   // 不闪(onApplyStart 整轮至多一次);结束广播放 finally,异常也不留悬挂提示。
@@ -1263,36 +1295,39 @@ async function reconcileBuiltinGhostsLocked(
   // 交互按钮按 ghostId 找主,不迁全废)+ KV 偏好搬家。密钥零迁移(官方别名
   // 映射到底层同一存储键);媒体账本旧引用保留(历史聊天图继续可读,新任务
   // 在新 id 名下重新记账)。
-  for (const [fromId, toId] of RENAMED_BUILTIN_GHOSTS) {
-    void reassignGhostCards(fromId, toId).catch((err) =>
-      log.warn('ghost card reassign failed', {
-        fromId,
-        toId,
-        error: err instanceof Error ? err.message : String(err),
-      }),
-    );
-    migrateGhostKvOnRename(fromId, toId);
-  }
-  // 退役意识的存量数据清理(孤儿回收只删包不删数据;每轮幂等,见台账注释)
-  for (const retiredId of RETIRED_BUILTIN_GHOSTS) {
-    cleanupRetiredGhostData(retiredId);
-  }
-  // 改名停用态补挂:新 id 本轮首装且旧 id 此前处于停用 → 新目录补 .disabled
-  // (播种首装默认启用,这里还原用户选择;放在广播/停靠之前,清单首帧即正确)。
-  for (const manifest of outcome.installed) {
-    if (!renameDisabledCarry.get(manifest.id)) continue;
-    try {
-      mutation.writeDisabledMarker(manifest.id);
-      log.info('builtin ghost disabled state carried over rename', { id: manifest.id });
-    } catch (err) {
-      log.warn('builtin ghost disabled carry failed', {
-        id: manifest.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  if (dataOwnerId !== null) {
+    for (const [fromId, toId] of RENAMED_BUILTIN_GHOSTS) {
+      void reassignGhostCards(fromId, toId).catch((err) =>
+        log.warn('ghost card reassign failed', {
+          fromId,
+          toId,
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      );
+      migrateGhostKvOnRename(fromId, toId);
+    }
+    // 退役插件的凭证、KV 与 fs 槽都是 owner 私有数据；signed-out 不得借
+    // no-session 临时命名空间替任何真实 owner 做清理。
+    for (const retiredId of RETIRED_BUILTIN_GHOSTS) {
+      cleanupRetiredGhostData(retiredId);
+    }
+    // 改名停用态补挂:新 id 本轮首装且旧 id 此前处于停用 → 新目录补 .disabled
+    // (播种首装默认启用,这里还原用户选择;放在广播/停靠之前,清单首帧即正确)。
+    for (const manifest of outcome.installed) {
+      if (!renameDisabledCarry.get(manifest.id)) continue;
+      try {
+        mutation.writeDisabledMarker(manifest.id);
+        log.info('builtin ghost disabled state carried over rename', { id: manifest.id });
+      } catch (err) {
+        log.warn('builtin ghost disabled carry failed', {
+          id: manifest.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
   let approvalChanged = false;
-  let approvalNeedsRetry = false;
+  let approvalNeedsRetry = outcome.retryPending === true;
   const healedResidentIds: string[] = [];
   for (const manifest of outcome.approved) {
     try {
@@ -5159,9 +5194,18 @@ export function registerGhostIpc(): void {
     });
   });
 
-  stableOwnerPostCommitTask = async (reason) => {
-    const outcome = await scheduleBuiltinReconcile(reason);
+  stableOwnerPostCommitTask = async (reason, scope) => {
+    const outcome = await scheduleBuiltinReconcile(reason, scope);
     if (outcome === 'deferred') return outcome;
+    if (
+      activeOwnerScopeKey() !== scope.scopeKey
+      || getActiveAppSession().dataOwnerId !== scope.dataOwnerId
+    ) {
+      return 'deferred';
+    }
+    // Resident activation is account-free for audience:"all" bundled plugins.
+    // The migration body has its own committed-owner gate, so signed-out runs
+    // the common activation phase without touching legacy account data.
     const activationOutcome = activateGhostsAndMigrateLegacyAccounts();
     return outcome === 'failed'
       ? 'failed'
@@ -5645,39 +5689,39 @@ export function registerGhostIpc(): void {
   );
 
   ipcMain.handle('ghosts:cindy-prefs:set', (_event, ghostId: unknown, capability: unknown, model: unknown) => {
-    if (typeof ghostId !== 'string' || ghostId.trim().length === 0) {
-      throwIpcError('INVALID_PARAMS', 'ghostId must be a non-empty string');
-    }
-    if (!(CINDY_CAPABILITY_KEYS as readonly string[]).includes(capability as string)) {
-      throwIpcError('INVALID_PARAMS', `unknown capability: ${String(capability)}`);
-    }
-    // 白名单按能力键类目分流:image.*/video.*/embed.* 钉各媒体目录模型 id;
-    // text.*(快问快答)钉轻量档位键或目录钉(cat: 编码)——与消费方(cindySlot
-    // route)同一判据,否则存进去的值链路不认。刻意不查凭证态(与清单的凭证
-    // 过滤不同):凭证是瞬态(可以后补/会过期),钉档是持久意图;执行侧
-    // fail-closed 兜底,不在这层把「暂时没配 key」当成非法值。
-    if (
-      !isCindyOverrideModelAllowed(capability as string, model, {
-        image: getCatalogImageConfig().models,
-        video: getCatalogVideoConfig().models,
-        embed: getCatalogEmbedConfig().models,
+      if (typeof ghostId !== 'string' || ghostId.trim().length === 0) {
+        throwIpcError('INVALID_PARAMS', 'ghostId must be a non-empty string');
+      }
+      if (!(CINDY_CAPABILITY_KEYS as readonly string[]).includes(capability as string)) {
+        throwIpcError('INVALID_PARAMS', `unknown capability: ${String(capability)}`);
+      }
+      // 白名单按能力键类目分流:image.*/video.*/embed.* 钉各媒体目录模型 id;
+      // text.*(快问快答)钉轻量档位键或目录钉(cat: 编码)——与消费方(cindySlot
+      // route)同一判据,否则存进去的值链路不认。刻意不查凭证态(与清单的凭证
+      // 过滤不同):凭证是瞬态(可以后补/会过期),钉档是持久意图;执行侧
+      // fail-closed 兜底,不在这层把「暂时没配 key」当成非法值。
+      if (
+        !isCindyOverrideModelAllowed(capability as string, model, {
+          image: getCatalogImageConfig().models,
+          video: getCatalogVideoConfig().models,
+          embed: getCatalogEmbedConfig().models,
         textPinIds: buildTextOneshotPinOptions(getActiveCatalog(), readModelDisableOverrides()).map(
           (o) => o.id,
         ),
-      })
-    ) {
+        })
+      ) {
       throwIpcError('INVALID_PARAMS', 'model must be null or an allowed model of the capability category');
-    }
-    const overrides = writeGhostCindyOverride(
-      ghostId,
-      capability as CindyCapabilityKey,
-      model as string | null,
-    );
-    getGhostSetupChangeBus().emit(ghostId, {
-      source: 'host_config',
-      ref: `cindy-pref:${String(capability)}`,
-    });
-    return { overrides };
+      }
+      const overrides = writeGhostCindyOverride(
+        ghostId,
+        capability as CindyCapabilityKey,
+        model as string | null,
+      );
+      getGhostSetupChangeBus().emit(ghostId, {
+        source: 'host_config',
+        ref: `cindy-pref:${String(capability)}`,
+      });
+      return { overrides };
   });
 
   // ── agent 槽派活(errand)每插件配置(插件详情页「AI 代办」卡)──

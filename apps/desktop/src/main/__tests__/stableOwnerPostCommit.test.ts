@@ -41,6 +41,24 @@ describe('StableOwnerPostCommitCoordinator', () => {
     expect(task).toHaveBeenCalledTimes(1);
   });
 
+  it('runs and memoizes stable signed-out scopes for account-free post-commit work', async () => {
+    const task = vi.fn().mockResolvedValue('completed');
+    const coordinator = new StableOwnerPostCommitCoordinator({
+      snapshot: () => ({ scopeKey: 'signed-out:none:1', dataOwnerId: null, stable: true }),
+      warn: vi.fn(),
+    });
+    coordinator.setTask(task);
+
+    await expect(coordinator.ensure('signed-out-startup')).resolves.toBe('completed');
+    await expect(coordinator.ensure('signed-out-again')).resolves.toBe('completed');
+    expect(task).toHaveBeenCalledTimes(1);
+    expect(task).toHaveBeenCalledWith({
+      reason: 'signed-out-startup',
+      scopeKey: 'signed-out:none:1',
+      dataOwnerId: null,
+    });
+  });
+
   it('retries deferred and failed passes instead of caching false success', async () => {
     const task = vi
       .fn()

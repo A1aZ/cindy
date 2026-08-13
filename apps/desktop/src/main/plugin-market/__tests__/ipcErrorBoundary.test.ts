@@ -136,13 +136,21 @@ describe('Plugin Market IPC error boundary', () => {
     expect(ghostPluginPageSource).toContain('void refreshMarket(true).catch(() => undefined);');
 
     const ownerTaskStart = bootstrapSource.indexOf(
-      'authManager.setStableOwnerPostCommitTask(async ({ reason }) => {',
+      'authManager.setStableOwnerPostCommitTask(async ({ reason, scopeKey, dataOwnerId }) => {',
     );
     const ownerTaskEnd = bootstrapSource.indexOf('\n});', ownerTaskStart);
     const ownerTaskBody = bootstrapSource.slice(ownerTaskStart, ownerTaskEnd);
     expect(ownerTaskStart).toBeGreaterThan(-1);
-    expect(ownerTaskBody).toContain('await runStableOwnerPostCommitTask(reason)');
+    expect(ownerTaskBody).toContain(
+      'await runStableOwnerPostCommitTask(reason, { scopeKey, dataOwnerId })',
+    );
     expect(ownerTaskBody).toContain("if (builtinOutcome === 'deferred') return builtinOutcome;");
+    expect(ownerTaskBody).toContain(
+      "if (dataOwnerId === null) return needsRetry ? 'failed' : 'completed';",
+    );
+    expect(ownerTaskBody.indexOf('dataOwnerId === null')).toBeLessThan(
+      ownerTaskBody.indexOf('syncDefaultMarketPlugins()'),
+    );
     expect(ownerTaskBody).not.toContain("builtinOutcome === 'failed') return builtinOutcome");
     expect(ownerTaskBody).toContain("builtinOutcome === 'retry-pending'");
     expect(ownerTaskBody).toContain("builtinOutcome === 'failed'");

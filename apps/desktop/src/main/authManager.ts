@@ -261,8 +261,7 @@ const stableOwnerPostCommitCoordinator = new StableOwnerPostCommitCoordinator({
       scopeKey: activeOwnerScopeKey(),
       dataOwnerId: session.dataOwnerId,
       stable:
-        session.dataOwnerId !== null
-        && !isAppSessionBoundaryPending()
+        !isAppSessionBoundaryPending()
         && isGhostSkillProjectionBoundaryStableForOwner(session.dataOwnerId),
     };
   },

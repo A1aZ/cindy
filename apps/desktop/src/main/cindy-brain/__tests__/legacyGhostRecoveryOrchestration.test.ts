@@ -10,7 +10,7 @@ describe('legacy Ghost recovery acknowledgement orchestration', () => {
       'utf8',
     ).replace(/\r\n?/g, '\n');
 
-    expect(source).toContain('stableOwnerPostCommitTask = async (reason) => {');
+    expect(source).toContain('stableOwnerPostCommitTask = async (reason, scope) => {');
     expect(source).not.toContain("scheduleBuiltinReconcile('startup')");
     expect(source).not.toContain("scheduleBuiltinReconcile('auth-change')");
     expect(source).not.toContain('ghost oauth startup reconciliation failed');
@@ -19,6 +19,10 @@ describe('legacy Ghost recovery acknowledgement orchestration', () => {
     expect(source).toContain('migrationNeedsRetry ||= approvalNeedsRetry;');
     expect(source).toContain('approvalNeedsRetry = true;');
     expect(source).toContain("if (outcome === 'deferred') return outcome;");
+    expect(source).toContain('if (dataOwnerId !== null) {');
+    expect(source).toContain('activeOwnerScopeKey() !== scope.scopeKey');
+    expect(source).toContain('getActiveAppSession().dataOwnerId !== scope.dataOwnerId');
+    expect(source).toContain('const activationOutcome = activateGhostsAndMigrateLegacyAccounts();');
     expect(source).toContain("return outcome === 'failed'");
     expect(source).toContain(
       "const activateGhostsAndMigrateLegacyAccounts = (): 'completed' | 'retry-pending' => {",

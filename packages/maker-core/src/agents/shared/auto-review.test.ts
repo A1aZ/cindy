@@ -2394,6 +2394,78 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('逗号数组实参:两侧空白都算一个实参,多目标里的系统路径不能漏', () => {
+    // PowerShell 的路径参数收 `String[]`,且逗号**两侧允许空白**。shell tokenizer 按空白切词,
+    // 于是一个数组实参散成多个 token。两个独立的缺陷叠在一起(codex 报):
+    //   a. 空白形态 `a, b` / `a ,b` / `a , b` 的后半截变成了独立操作数;
+    //   b. 即使**无空白**的 `a,b`,`targets: 'first'` 取的是第一个**段**而不是第一个**实参** ——
+    //      于是只看到 `a`,后面的系统路径整条漏掉。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    const safe = 'C:\\repo\\safe.txt';
+    for (const c of [
+      `Set-Content ${safe},${hosts} owned`,     // 逗号紧贴
+      `Set-Content ${safe}, ${hosts} owned`,    // 逗号后有空白
+      `Set-Content ${safe} ,${hosts} owned`,    // 逗号前有空白
+      `Set-Content ${safe} , ${hosts} owned`,   // 两侧都有空白
+      // 具名参数同理(原先 `-Path a, <系统路径>` 会把后半截丢成操作数、具名分支又只返回 named)。
+      `Set-Content -Path ${safe}, ${hosts} -Value owned`,
+      `Set-Content -Path ${safe} , ${hosts} -Value owned`,
+      `Set-Content -LiteralPath ${safe}, ${hosts} -Value owned`,
+      // 写/删除 cmdlet 全族同口径,不是只修 Set-Content。
+      `New-Item ${safe}, ${hosts}`,
+      `Clear-Content ${safe}, ${hosts}`,
+      `Add-Content ${safe}, ${hosts} owned`,
+      `Remove-Item ${safe}, ${hosts}`,
+      `Remove-Item -Path ${safe}, ${hosts}`,
+      `Set-Item ${safe}, ${hosts} v`,
+      // 顺序反过来也要看到(不是只看最后一段)。
+      `Set-Content ${hosts}, ${safe} owned`,
+      // copy/move 的目标侧:源是数组、目标是系统路径。
+      `Copy-Item C:\\repo\\a, C:\\repo\\b ${hosts}`,
+      `Move-Item C:\\repo\\a, C:\\repo\\b ${hosts}`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:**带值参数的值不能被并进目标数组**。`-Encoding utf8, <系统路径>` 在真 PowerShell 里
+    // 本就非法,但判据不能因此少看一个目标 —— 所以吸收逗号续行只用在"取路径值"和"收位置操作数"
+    // 两处,带值参数照旧只吃一个 token,系统路径仍作为操作数被看到。
+    expect(classifyShellCommand(`Set-Content -Encoding utf8, ${hosts} owned`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 而值本身含逗号时不该被当成路径目标。
+    for (const c of [
+      `Set-Content -Value hi, there ${safe}`,
+      `Set-Content ${safe} -Value hi, there`,
+      `Set-Content -Encoding utf8, ascii ${safe} hi`,
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例二:区内多目标仍是灰区(修的是"看不见",不是"一律升级")。
+    for (const c of [
+      'Set-Content C:\\repo\\a.txt, C:\\repo\\b.txt hi',
+      'Set-Content C:\\repo\\a.txt , C:\\repo\\b.txt hi',
+      'Remove-Item C:\\repo\\a, C:\\repo\\b',
+      'Copy-Item C:\\repo\\a, C:\\repo\\b C:\\repo\\out',
+      `Copy-Item ${safe}, ${hosts} C:\\repo\\out`, // 源含系统路径但只是**读**,目标在区内
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+
+    // 反例三:单目标与非路径参数行为不回归。
+    expect(classifyShellCommand(`Set-Content ${hosts} owned`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`Set-Content ${safe} hi`, win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Copy-Item C:\\repo\\a C:\\repo\\b', win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand('Set-Content -Encoding utf8 C:\\repo\\a.txt hi', win, { platform: 'win32' }))
+      .toBe('prompt');
+    // 数组实参 + 省略 -Destination:`Copy-Item a,b` 是"把数组复制到当前位置",目标是 cwd ——
+    // 按段算会把 `b` 当成目标而错判(实参计数修正的直接后果)。
+    expect(classifyShellCommand('cd C:\\Windows\\System32; Copy-Item C:\\repo\\a, C:\\repo\\b', win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

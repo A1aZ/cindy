@@ -532,11 +532,20 @@ function powerShellWriteTargets(bin: string, args: string[]): string[] | null {
   });
 }
 
+/**
+ * 一个**位置实参**(不是一个 shell token,也不是拆开后的一段):`C:\a, C:\b` 是一个实参、两段路径。
+ * `literal` = 来自 `-LiteralPath` 族,不展开通配符。区分实参与段很关键 —— `targets: 'first'` 取的是
+ * 第一个**实参**(它可能是整个数组),按段取会只看到 `C:\a` 而漏掉后面的系统路径(codex 报)。
+ */
+interface PowerShellOperand { raw: string; literal: boolean }
+
 function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | null {
   const spec = POWERSHELL_WRITE_CMDLETS.get(bin);
   if (!spec) return null;
   const named: string[] = [];
-  const operands: string[] = [];
+  const operands: PowerShellOperand[] = [];
+  const expand = (op: PowerShellOperand): string[] =>
+    splitPowerShellPathList(op.raw).map((v) => (op.literal ? v : markGlobWriteTarget(v)));
   // 出现了「可能吃掉下一个 token 的未知参数」→ 位置操作数可能整体错位,不能再按 first/last 挑。
   let operandOrderUnprovable = false;
   for (let i = 0; i < args.length; i++) {
@@ -569,54 +578,64 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
       const isTarget = POWERSHELL_TARGET_PARAMS.includes(candidates[0]) && !pathIsSourceHere;
       // `-LiteralPath`(及别名 `-LP`/`-PSPath`)逐字取值,不展开通配符 → 不打通配符标记。
       const literal = POWERSHELL_LITERAL_PATH_PARAMS.includes(candidates[0]);
-      const take = (value: string): string[] =>
-        splitPowerShellPathList(value).map((v) => (literal ? v : markGlobWriteTarget(v)));
       if (attached) {
         // 贴在参数上的值:目标参数取它,源路径按操作数收,其它带值参数直接丢掉。
         const value = token.slice(name.length + 1);
-        if (isTarget) named.push(...take(value));
-        else if (pathIsSourceHere) operands.push(...take(value));
+        if (isTarget) named.push(...expand({ raw: value, literal }));
+        else if (pathIsSourceHere) operands.push({ raw: value, literal });
         continue;
       }
-      const value = args[i + 1];
       if (!isTarget && !pathIsSourceHere) {
         // **带值的非目标参数必须把值一并消费**,否则值会被当操作数、顶掉真正的写目标。
+        // 这里**不吸收逗号续行**:见 absorbPowerShellCommaList 的说明。
+        const value = args[i + 1];
         if (value !== undefined && !value.startsWith('-')) i++;
         continue;
       }
-      if (value === undefined || value.startsWith('-')) {
+      // 路径参数收 String[],逗号两侧可带空白 → 把整个数组实参吸回来再拆。
+      const { value, last } = absorbPowerShellCommaList(args, i + 1);
+      if (i + 1 >= args.length || args[i + 1].startsWith('-')) {
         // 目标参数缺值 = 写通道在、目标不可证 → 哨兵(与 `cp --target-directory` 缺值同口径)。
-        // 源参数缺值 = 没给出源,不虚构操作数。两种情况都**没有**消费下一个 token,不能 i++。
+        // 源参数缺值 = 没给出源,不虚构操作数。两种情况都**没有**消费下一个 token,不能推进 i。
         if (isTarget) named.push(UNPROVABLE_WRITE_TARGET);
         continue;
       }
-      (isTarget ? named : operands).push(...take(value));
-      i++;
+      if (isTarget) named.push(...expand({ raw: value, literal }));
+      else operands.push({ raw: value, literal });
+      i = last;
       continue;
     }
-    // 位置参数绑定到 `-Path` / `-Destination`,都会展开通配符 → 打标记。
-    operands.push(...splitPowerShellPathList(token).map(markGlobWriteTarget));
+    // 位置参数绑定到 `-Path` / `-Destination`,都会展开通配符 → 打标记(literal: false)。
+    const { value, last } = absorbPowerShellCommaList(args, i);
+    operands.push({ raw: value, literal: false });
+    i = last;
   }
   if (named.length > 0) {
     // 具名给出目标时,`sources: true` 的 cmdlet 仍要把位置源算进来(`Move-Item src -Dest /etc`);
     // `targets: 'all'` 同理 —— 它的语义就是"每个操作数都是目标",具名参数只是**追加**一个,
     // 不能因为出现了具名目标就把操作数丢掉(`Rename-ItemProperty <系统路径> -Name a -NewName b`
     // 里被改的是位置操作数那个路径,`-NewName` 只是新属性名)。
-    return spec.sources || spec.targets === 'all' ? [...named, ...operands] : named;
+    return spec.sources || spec.targets === 'all'
+      ? [...named, ...operands.flatMap(expand)]
+      : named;
   }
   // 一个操作数都没有 = 命令本身不完整(`Set-Content` 单独一条会报错)。与 coreutils 的
   // `cp payload`(操作数不足)同口径返回空,不虚构目标 —— 真正的"写通道存在但目标不可证"
   // 只有具名参数缺值那种,已在上面返回哨兵(与 `cp --target-directory` 缺值一致)。
   if (operands.length === 0) return [];
   // 操作数顺序不可证(见 POWERSHELL_SWITCH_PARAMS)→ 全部当目标:只会多问,不会漏掉真目标。
-  if (spec.targets === 'all' || operandOrderUnprovable) return operands;
-  if (spec.targets === 'first') return spec.sources ? operands : [operands[0]];
+  if (spec.targets === 'all' || operandOrderUnprovable) return operands.flatMap(expand);
+  // `first` 取第一个**实参**并整段展开 —— 实参本身可能就是数组(`Set-Content a, <系统路径> owned`),
+  // 按"段"取会只看到 `a`(codex 报)。
+  if (spec.targets === 'first') return spec.sources ? operands.flatMap(expand) : expand(operands[0]);
   // 末位是目标;只给一个操作数(含 `-Path <源>` 这种只给了源的写法)时,PowerShell 的
   // -Destination 默认**当前位置**(`Copy-Item payload` 合法且常用)→ 目标就是 cwd,交给调用方
   // 按有效 cwd 解析(`cd C:\Windows\System32; Copy-Item -Path payload` 由此命中系统写红线;
   // cwd 未知时那边会 fail-closed)。**不能**当成不可证而硬弹卡:那会把日常复制打成必问。
-  if (operands.length >= 2) return spec.sources ? operands : [operands[operands.length - 1]];
-  return spec.sources ? [...operands, '.'] : ['.'];
+  if (operands.length >= 2) {
+    return spec.sources ? operands.flatMap(expand) : expand(operands[operands.length - 1]);
+  }
+  return spec.sources ? [...operands.flatMap(expand), '.'] : ['.'];
 }
 
 /**
@@ -629,6 +648,28 @@ function splitPowerShellPathList(token: string): string[] {
   if (!token.includes(',')) return [token];
   const parts = token.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
   return parts.length > 0 ? parts : [token];
+}
+
+/**
+ * PowerShell 的数组实参允许逗号**两侧带空白**(`a, b` / `a ,b` / `a , b`),而 shell tokenizer 按
+ * 空白切词,于是一个数组实参会散成多个 token。从 `start` 起把逗号连起来的 token 吸回**一个**实参。
+ *
+ * 只在"取路径值"和"收位置操作数"两处调用,**不**用于带值的非目标参数 —— 否则
+ * `Set-Content -Encoding utf8, <系统路径> hi` 会把系统路径吸进 `-Encoding` 的值里丢掉
+ * (那条命令在真 PowerShell 里本就非法,但判据不能因此少看一个目标)。
+ * 遇到以 `-` 开头的 token 停:那是下一个参数,真 PowerShell 也不会把它并进数组。
+ */
+function absorbPowerShellCommaList(args: string[], start: number): { value: string; last: number } {
+  let value = args[start] ?? '';
+  let last = start;
+  while (last + 1 < args.length) {
+    const next = args[last + 1];
+    if (next.startsWith('-')) break;
+    if (!value.endsWith(',') && !next.startsWith(',')) break;
+    value += next;
+    last += 1;
+  }
+  return { value, last };
 }
 
 function argumentWriteTargets(tokens: string[]): string[] {

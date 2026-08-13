@@ -317,13 +317,13 @@ export interface WorkerListToolbarProps extends RolePillDropdownProps {
 
 // 菜单经 top-full + mt-1 从锚点下方定位。按锚点实际 viewport 位置计算下方可用高度，
 // 避免 Worker 工具栏不在视口顶部时，菜单底部的 Worker 行 / 布局切换项越过视口而不可达。
-// 当锚点下方空间不足（低于上方空间）时改为向上展开，保证任意窗口高度下菜单都不越出视口。
-// minContentHeight：菜单内不可收缩（shrink-0）内容（header + 布局切换项）所需的最小高度，
-// 作为 maxHeight 的保底——否则小窗口下可用高度低于该值时，外层 overflow-hidden 会裁掉底部布局切换项。
+// 当锚点下方空间不足（低于上方空间）时改为向上展开。maxHeight 严格钳制在锚点一侧的
+// 真实可用空间内，不再设「固定内容高度保底」——可用空间小于 header + 布局切换项所需
+// 高度时，由菜单外层 overflow-y-auto 兜底滚动（布局切换项仍可滚动到），避免
+// Math.max(保底, 可用空间) 把菜单顶出视口、布局切换项反而不可点。
 function useAnchorMenuMaxHeight(
   anchorRef: { current: HTMLElement | null },
   open: boolean,
-  minContentHeight = 0,
 ): { maxHeight: number; placeAbove: boolean } | undefined {
   const [placement, setPlacement] = useState<{ maxHeight: number; placeAbove: boolean } | undefined>(
     undefined,
@@ -341,14 +341,14 @@ function useAnchorMenuMaxHeight(
       const aboveSpace = rect.top - gap - pad;
       const placeAbove = aboveSpace > belowSpace;
       setPlacement({
-        maxHeight: Math.max(minContentHeight, placeAbove ? aboveSpace : belowSpace),
+        maxHeight: Math.max(0, placeAbove ? aboveSpace : belowSpace),
         placeAbove,
       });
     };
     update();
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
-  }, [anchorRef, open, minContentHeight]);
+  }, [anchorRef, open]);
   return placement;
 }
 
@@ -413,9 +413,6 @@ function WorkerLayoutMenu({
   // 点击固定 (pinned)、移出后延迟关闭 —— 两种布局下 ⋮ 的操作体感一致。
   const [openMode, setOpenMode] = useState<DropdownOpenMode>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
-  // 菜单内不可收缩内容（header + 布局切换项）的测量 ref，用于 maxHeight 保底。
-  const headerRef = useRef<HTMLDivElement | null>(null);
-  const footerRef = useRef<HTMLDivElement | null>(null);
   const hoverOpenTimerRef = useRef<number | null>(null);
   const hoverCloseTimerRef = useRef<number | null>(null);
   const attention = useWorkerAttentionSnapshot();
@@ -423,17 +420,7 @@ function WorkerLayoutMenu({
   const totalWorkerCount = workers.length;
   const activeCount = activeWorkerCount;
   const open = openMode !== null;
-  const [fixedContentHeight, setFixedContentHeight] = useState(0);
-  // 打开后测量 header + 布局切换项的高度，作为 maxHeight 保底：小窗口下可用高度再小
-  // 也不能低于它，否则外层 overflow-hidden 会裁掉底部布局切换项。header/footer 文案
-  // 固定（无换行），高度恒定，一次测量即可。
-  useLayoutEffect(() => {
-    if (!open) return;
-    setFixedContentHeight(
-      (headerRef.current?.offsetHeight ?? 0) + (footerRef.current?.offsetHeight ?? 0),
-    );
-  }, [open]);
-  const menuPlacement = useAnchorMenuMaxHeight(wrapperRef, open, fixedContentHeight);
+  const menuPlacement = useAnchorMenuMaxHeight(wrapperRef, open);
   const menuMaxWidth = useAnchorMenuMaxWidth(wrapperRef, open, 'right');
 
   const clearHoverTimers = useCallback(() => {
@@ -535,7 +522,7 @@ function WorkerLayoutMenu({
       {open && (
         <div
           className={cn(
-            'absolute right-0 z-50 flex w-[320px] flex-col overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
+            'absolute right-0 z-50 flex w-[320px] flex-col overflow-y-auto overflow-x-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-elevated)]',
             menuPlacement?.placeAbove ? 'bottom-full mb-1' : 'top-full mt-1',
           )}
           style={{
@@ -547,7 +534,7 @@ function WorkerLayoutMenu({
           {/* Header: WORKERS + count */}
           {layout === 'tabs' && (
             <>
-              <div ref={headerRef} className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">
+              <div className="flex shrink-0 select-none items-center justify-between px-4 pt-3 pb-2">
                 <span className="text-10 font-medium uppercase tracking-[0.5px] text-[var(--text-tertiary)]">
                   {t('orca.rolePill.workersHeader')}
                 </span>
@@ -630,7 +617,7 @@ function WorkerLayoutMenu({
           )}
 
           {/* Layout options */}
-          <div ref={footerRef} className="shrink-0 p-1">
+          <div className="shrink-0 p-1">
             <div className="select-none px-2.5 py-1.5 text-10 font-medium leading-snug text-[var(--text-tertiary)]">
               {t('orca.rolePill.layoutMenuLabel')}
             </div>

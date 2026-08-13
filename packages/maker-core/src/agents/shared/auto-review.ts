@@ -334,6 +334,27 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
     // 因为 POSIX tee 可以写多个文件)。把 `tee` 加到这张表会让它改走 `targets: 'first'`,
     // `echo x | tee a b c` 就只剩第一个目标 —— 那是把既有覆盖面改小,不是补漏。
     ['tee-object', { targets: 'first' }],
+    // `Export-*` / 归档 / 转录:PowerShell 里**真正落盘**的其余文件写入口。这一族此前一个都没登记,
+    // 于是 `Get-Process | Export-Csv <系统路径>` 取不到目标、落灰区(codex 报 Export-Csv/Export-Clixml)。
+    // 这里按「真实文件写入」一次列全,不再逐个等报;`ConvertTo-*` / `Out-GridView` / `Out-Printer`
+    // 不落盘,不在此列,`Import-*` 是只读、更不在。
+    ['export-csv', { targets: 'first' }],
+    ['epcsv', { targets: 'first' }],          // Export-Csv 别名
+    ['export-clixml', { targets: 'first' }],
+    ['export-alias', { targets: 'first' }],
+    ['epal', { targets: 'first' }],           // Export-Alias 别名
+    ['export-console', { targets: 'first' }],
+    ['export-startlayout', { targets: 'first' }],
+    ['export-binarymilog', { targets: 'first' }],
+    ['start-transcript', { targets: 'first' }],
+    ['save-help', { targets: 'first' }],      // 目标只由 -DestinationPath 给出
+    // 「源在前、落地在后」的一族:位置 0 是被读的源,位置 1(或 -DestinationPath / -FilePath)是写目标,
+    // 所以和 Copy-Item 同一形状 —— `-Path` 在这里是**源**,不能当目标(否则
+    // `Compress-Archive -Path <系统路径> -DestinationPath C:\repo\bak.zip` 这种"读系统、写区内"会误升级)。
+    ['compress-archive', { targets: 'last', pathIsSource: true }],
+    ['expand-archive', { targets: 'last', pathIsSource: true }],
+    ['export-certificate', { targets: 'last', pathIsSource: true }],
+    ['export-pfxcertificate', { targets: 'last', pathIsSource: true }],
     ['clear-content', { targets: 'first' }],
     ['set-itemproperty', { targets: 'first' }],
     ['set-item', { targets: 'first' }],
@@ -402,6 +423,8 @@ const POWERSHELL_WRITE_CMDLETS: ReadonlyMap<
  */
 const POWERSHELL_TARGET_PARAMS: readonly string[] = [
   '-path', '-literalpath', '-lp', '-pspath', '-destination', '-filepath', '-newname',
+  // 归档 / 转录 / 帮助下载各自的落地位置参数(Compress-Archive、Start-Transcript、Save-Help…)。
+  '-destinationpath', '-outputdirectory',
 ];
 
 /**
@@ -476,6 +499,11 @@ const POWERSHELL_VALUE_PARAMS: readonly string[] = [
   '-fromsession', '-tosession', '-totalcount', '-tail',
   // Set-Acl 的 ACL 对象:不是写目标,但**带值** —— 不消费的话值会被当位置操作数、顶掉真目标。
   '-aclobject', '-securitydescriptor', '-centralaccesspolicy',
+  // Export-* / 归档族自己的带值参数。同一个道理:`Export-Csv -InputObject $x -Path <系统路径>`
+  // 若不消费 `$x`,它会被当成位置操作数顶掉 `-Path`(这是本表第三次踩同一个坑,前两次是
+  // `-Encoding` 与 `-AclObject`,所以登记新 cmdlet 时一并登记它的带值参数已是固定动作)。
+  '-inputobject', '-cert', '-certificate', '-module', '-compressionlevel', '-password',
+  '-usequotes', '-quotefields', '-usiculture', '-fullyqualifiedmodule',
 ];
 
 /**
@@ -604,10 +632,17 @@ function powerShellWriteTargetOperands(bin: string, args: string[]): string[] | 
       const attached = token.length > name.length;
       // 唯一前缀缩写:`-Dest` → -Destination、`-Enc` → -Encoding。长度 ≥2 才认,避免 `-D` 歧义。
       // 三类参数放在一起判唯一性 —— 前缀同时命中多类就是歧义写法(真 PowerShell 也报错)。
-      const candidates = name.length >= 2
-        ? [...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS]
-          .filter((p) => p.startsWith(name))
-        : [];
+      //
+      // **精确写法优先于前缀**,和真 PowerShell 一致:`-Destination` 同时是 `-DestinationPath` 的
+      // 前缀,`-Cert` 是 `-Certificate` 的前缀。只按前缀判会让这些**完整参数名**变成"歧义"而被当
+      // 开关丢掉 —— 加 `-DestinationPath` 时实测打挂了 copy/move 的目标提取(三条既有用例变红)。
+      // 表越长这类"长参数吃掉短参数"越容易发生,所以这一步是结构性的,不是给某个名字打补丁。
+      const known = [
+        ...POWERSHELL_TARGET_PARAMS, ...POWERSHELL_VALUE_PARAMS, ...POWERSHELL_SWITCH_PARAMS,
+      ];
+      const candidates = known.includes(name)
+        ? [name]
+        : name.length >= 2 ? known.filter((p) => p.startsWith(name)) : [];
       if (candidates.length !== 1) {
         // 未知 / 歧义参数:无法证明它不吃下一个 token。值贴在参数上、或下一个 token 本身是参数时
         // 不可能错位;否则标记 fail closed(后面把全部操作数都当目标,而不是直接判不可证)。

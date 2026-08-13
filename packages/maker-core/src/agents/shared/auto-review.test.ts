@@ -2688,6 +2688,83 @@ describe('参数形式的系统路径写入 / setsid 选项(第三十五批评�
       .toBe('prompt-each-time');
   });
 
+  it('Export-* / 归档 / 转录:PowerShell 其余真实文件写入口一次登记全', () => {
+    // 这一族此前一个都没登记 —— `Get-Process | Export-Csv <系统路径>` 取不到目标、落灰区
+    // (codex 报 Export-Csv / Export-Clixml)。按"真实落盘"一次列全,不再逐个等报:
+    // `ConvertTo-*` / `Out-GridView` / `Out-Printer` 不落盘,`Import-*` 是只读,都不在此列。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    for (const c of [
+      `Get-Process | Export-Csv ${hosts}`,          // 位置参数(最常见形态)
+      `Export-Csv -Path ${hosts}`,
+      `Export-Csv -LiteralPath ${hosts}`,
+      `Export-Csv -Dest ${hosts}`,                  // 唯一前缀缩写仍生效
+      `epcsv ${hosts}`,                             // Export-Csv 别名
+      `Export-Csv -NoTypeInformation -Path ${hosts}`, // 开关不吃值
+      `Export-Csv -InputObject $x -Path ${hosts}`,    // 带值参数要消费掉,否则顶掉真目标
+      `Export-Clixml ${hosts}`,
+      `Export-Alias ${hosts}`,
+      `epal ${hosts}`,
+      `Export-Console ${hosts}`,
+      `Export-StartLayout -Path ${hosts}`,
+      `Export-BinaryMiLog -Path ${hosts}`,
+      `Start-Transcript ${hosts}`,
+      'Start-Transcript -OutputDirectory C:\\Windows\\System32',
+      'Save-Help -DestinationPath C:\\Windows\\System32',
+      // 「源在前、落地在后」的一族,与 Copy-Item 同形状。
+      `Compress-Archive -Path C:\\repo\\a -DestinationPath ${hosts}`,
+      `Compress-Archive C:\\repo\\a ${hosts}`,
+      'Expand-Archive -Path C:\\repo\\a.zip -DestinationPath C:\\Windows\\System32',
+      `Export-Certificate -Cert $c -FilePath ${hosts}`,
+      `Export-Certificate $c ${hosts}`,
+      `Export-PfxCertificate -Cert $c -FilePath ${hosts}`,
+      `pwsh -Command Export-Csv -Path ${hosts}`,     // 载荷下探
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
+    }
+
+    // 反例一:区内落地仍是灰区。
+    for (const c of [
+      'Export-Csv C:\\repo\\a.csv',
+      'Get-Process | Export-Csv -Path C:\\repo\\a.csv',
+      'Export-Clixml C:\\repo\\a.xml',
+      'Compress-Archive -Path C:\\repo\\a -DestinationPath C:\\repo\\a.zip',
+      'Expand-Archive -Path C:\\repo\\a.zip -DestinationPath C:\\repo\\out',
+      'Start-Transcript C:\\repo\\log.txt',
+      'Export-Certificate -Cert $c -FilePath C:\\repo\\x.cer',
+    ]) {
+      expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
+    }
+    // 反例二:归档族的 `-Path` 是**源** —— 从系统路径读、打包到区内不该被误升级。
+    expect(classifyShellCommand(
+      `Compress-Archive -Path ${hosts} -DestinationPath C:\\repo\\bak.zip`, win, { platform: 'win32' },
+    )).toBe('prompt');
+    // 反例三:`Import-*` 只读,不进写目标表。
+    expect(classifyShellCommand(`Import-Csv ${hosts}`, win, { platform: 'win32' })).toBe('prompt');
+    expect(classifyShellCommand(`Import-Clixml ${hosts}`, win, { platform: 'win32' })).toBe('prompt');
+  });
+
+  it('参数名精确写法优先于前缀匹配(长参数不能吃掉短参数)', () => {
+    // 表变长以后,「完整参数名恰好是另一个参数的前缀」会真实发生:加 `-DestinationPath` 时,
+    // `-Destination` 自己变成了"歧义前缀"、被当开关丢掉 —— 实测打挂了 copy/move 的目标提取
+    // (三条既有用例同时变红)。真 PowerShell 也是精确名优先,所以这是结构性判据,不是补名字。
+    const win = ['C:\\repo'];
+    const hosts = 'C:\\Windows\\System32\\drivers\\etc\\hosts';
+    // `-Destination` 精确名仍是写目标(而 `-DestinationPath` 也在表里)。
+    expect(classifyShellCommand(`Copy-Item -Path C:\\repo\\a -Destination ${hosts}`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand(`Copy-Item -Dest ${hosts} -Path C:\\repo\\a`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    // 反方向也没坏:`-Path` 在 copy 上仍是源。
+    expect(classifyShellCommand(`Copy-Item -Path ${hosts} -Destination C:\\repo\\bak`, win, { platform: 'win32' }))
+      .toBe('prompt');
+    // `-Cert` 精确名(它是 `-Certificate` 的前缀)仍被当带值参数消费,值不会顶掉 `-FilePath`。
+    expect(classifyShellCommand(`Export-Certificate -Cert $c -FilePath ${hosts}`, win, { platform: 'win32' }))
+      .toBe('prompt-each-time');
+    expect(classifyShellCommand('Export-Certificate -Cert $c -FilePath C:\\repo\\x.cer', win, { platform: 'win32' }))
+      .toBe('prompt');
+  });
+
   it('iex 是把 stdin 当程序的执行器:`| iex` 落在外层 shell 也命中下载即执行', () => {
     // `pwsh -Command 'iwr https://…/a.ps1' | iex`:`| iex` 在**外层**,顶层分段把它切成独立一段。
     // 于是两段各自都不红 —— payload 那段只有 `iwr`(单纯下载不是红线),`iex` 那段 tokens[0] 不是

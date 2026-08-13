@@ -7,7 +7,7 @@ fn main() {
 #[cfg(windows)]
 mod windows_listener {
     use std::io::{self, Write};
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
     use windows_sys::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -22,7 +22,12 @@ mod windows_listener {
 
     static TARGET_VK: AtomicU32 = AtomicU32::new(0);
     static MODIFIERS_DOWN: AtomicU32 = AtomicU32::new(0);
-    static OTHER_KEYS_DOWN: AtomicU32 = AtomicU32::new(0);
+    static OTHER_KEYS: [AtomicU64; 4] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
     static ACTIVE: AtomicBool = AtomicBool::new(false);
     static SUPPRESS_UNTIL_RELEASE: AtomicBool = AtomicBool::new(false);
 
@@ -73,13 +78,9 @@ mod windows_listener {
             }
         } else if event.vkCode != target_vk {
             if key_down {
-                OTHER_KEYS_DOWN.fetch_add(1, Ordering::Relaxed);
+                set_other_key(event.vkCode, true);
             } else if key_up {
-                OTHER_KEYS_DOWN
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                        Some(count.saturating_sub(1))
-                    })
-                    .ok();
+                set_other_key(event.vkCode, false);
             }
         }
 
@@ -93,23 +94,44 @@ mod windows_listener {
                 {
                     return 1;
                 }
-                if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0
-                    && OTHER_KEYS_DOWN.load(Ordering::Relaxed) == 0
-                {
+                if MODIFIERS_DOWN.load(Ordering::Relaxed) == 0 && !any_other_key_down() {
                     ACTIVE.store(true, Ordering::Relaxed);
                     SUPPRESS_UNTIL_RELEASE.store(true, Ordering::Relaxed);
                     emit_pressed(true);
                     return 1;
                 }
             } else if key_up && SUPPRESS_UNTIL_RELEASE.swap(false, Ordering::Relaxed) {
-                if ACTIVE.swap(false, Ordering::Relaxed) {
-                    emit_pressed(false);
-                }
+                ACTIVE.store(false, Ordering::Relaxed);
+                emit_pressed(false);
                 return 1;
             }
         }
 
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    fn other_key_slot(vk: u32) -> Option<(usize, u64)> {
+        if vk >= 256 {
+            return None;
+        }
+        Some((vk as usize / 64, 1 << (vk % 64)))
+    }
+
+    fn set_other_key(vk: u32, down: bool) {
+        let Some((index, bit)) = other_key_slot(vk) else {
+            return;
+        };
+        if down {
+            OTHER_KEYS[index].fetch_or(bit, Ordering::Relaxed);
+        } else {
+            OTHER_KEYS[index].fetch_and(!bit, Ordering::Relaxed);
+        }
+    }
+
+    fn any_other_key_down() -> bool {
+        OTHER_KEYS
+            .iter()
+            .any(|slot| slot.load(Ordering::Relaxed) != 0)
     }
 
     fn parse_function_number() -> Option<u32> {

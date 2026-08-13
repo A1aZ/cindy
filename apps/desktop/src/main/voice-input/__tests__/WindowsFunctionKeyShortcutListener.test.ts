@@ -122,8 +122,15 @@ describe('WindowsFunctionKeyShortcutListener', () => {
     child.stdoutData('{"type":"canceled"}\n');
     child.stdoutData('{"type":"pressed","pressed":true}\n');
     child.stdoutData('{"type":"pressed","pressed":false}\n');
-
     expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end']);
+
+    onTrigger.mockClear();
+    child.stdoutData('{"type":"pressed","pressed":true}\n');
+    child.stdoutData('{"type":"canceled"}\n');
+    child.stdoutData('{"type":"pressed","pressed":false}\n');
+    child.stdoutData('{"type":"pressed","pressed":true}\n');
+    child.stdoutData('{"type":"pressed","pressed":false}\n');
+    expect(onTrigger.mock.calls.map(([phase]) => phase)).toEqual(['start', 'end', 'start', 'tap']);
     listener.stop();
   });
 

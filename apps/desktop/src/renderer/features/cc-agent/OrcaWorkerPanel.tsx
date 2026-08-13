@@ -84,7 +84,7 @@ export function OrcaWorkerPanel({
     handleArchiveWorker,
   } = useOrcaWorkerSelection({
     leadSessionId,
-    deviceId,
+    deviceId: deviceId ?? undefined,
     viewVisible,
     focusWorkerSessionId,
     focusWorkerHintRevision,
@@ -209,7 +209,7 @@ export function OrcaWorkerPanel({
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreateWorker}
-        deviceId={deviceId}
+        deviceId={deviceId ?? undefined}
         sshRemote={sshRemote}
       />
     </div>

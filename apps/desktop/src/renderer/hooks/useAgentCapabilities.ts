@@ -301,7 +301,7 @@ function getDeviceLink(): DeviceLinkShape | null {
 // 缓存按 (deviceId, agentKind) 隔离 —— 两台机器模型/能力配置可能不同,绝不能串。
 // deviceId 省略 = 本机会话,走与改造前逐字节相同的本地路径(零回归)。
 type CacheKey = string;
-function cacheKey(agentKind: AgentKind, deviceId?: string | null): CacheKey {
+function cacheKey(agentKind: AgentKind, deviceId?: string): CacheKey {
   return `${deviceId ?? 'local'}:${agentKind}`;
 }
 
@@ -355,7 +355,7 @@ export function subscribeDeviceCapabilities(
 
 async function fetchCapabilities(
   agentKind: AgentKind,
-  deviceId?: string | null,
+  deviceId?: string,
 ): Promise<AgentCapabilities | null> {
   const key = cacheKey(agentKind, deviceId);
   const cached = cache.get(key);
@@ -430,7 +430,7 @@ export interface UseAgentCapabilitiesResult {
 
 export function useAgentCapabilities(
   agentKind: AgentKind | null | undefined,
-  deviceId?: string | null,
+  deviceId?: string,
 ): UseAgentCapabilitiesResult {
   const selectedKey = agentKind ? cacheKey(agentKind, deviceId) : null;
   const initialCapabilities = selectedKey ? cache.get(selectedKey) : undefined;

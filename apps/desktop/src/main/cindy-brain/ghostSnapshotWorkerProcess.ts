@@ -78,6 +78,38 @@ async function verifyDirectory(workingDir: string, name: string): Promise<void> 
   const kind = await classifyGhostDirEntry(target);
   if (kind !== 'directory') throw new Error('snapshot id parent changed');
 }
+async function removeVerifiedDirectory(
+  expectedParent: GhostSnapshotParentIdentity,
+  workingDir: string,
+  targetPath: string,
+  parentName: string,
+): Promise<void> {
+  const targetStat = await fs.promises.lstat(targetPath, { bigint: true });
+  if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+    throw new Error('snapshot target is not a real directory');
+  }
+  const targetRealPath = await fs.promises.realpath(targetPath);
+  const quarantinePath = `${targetPath}.remove-${process.pid}-${Date.now()}`;
+  await fs.promises.rename(targetPath, quarantinePath);
+  const movedStat = await fs.promises.lstat(quarantinePath, { bigint: true });
+  if (
+    !movedStat.isDirectory()
+    || movedStat.isSymbolicLink()
+    || movedStat.dev !== targetStat.dev
+    || movedStat.ino !== targetStat.ino
+    || !samePath(await fs.promises.realpath(quarantinePath), targetRealPath)
+  ) {
+    // Never recursively delete an unverified path. Leave the quarantined
+    // directory for a later owner-checked cleanup pass.
+    throw new Error('snapshot target identity changed during removal');
+  }
+  // The pathname was renamed through a mutable parent. Revalidate the
+  // owner-bound parent before recursive deletion; on failure the isolated
+  // directory is intentionally left for a later guarded cleanup pass.
+  await verifyParent(expectedParent, workingDir);
+  await verifyDirectory(workingDir, parentName);
+  await fs.promises.rm(quarantinePath, { recursive: true, force: true });
+}
 async function copyDirectory(source: string, target: string): Promise<void> {
   if ((await classifyGhostDirEntry(source)) !== 'directory') throw new Error(`skill source is not a directory: ${source}`);
   await fs.promises.mkdir(target, { recursive: true });
@@ -120,8 +152,9 @@ export async function runGhostSnapshotWorkerRequest(
   await verifyParent(request.expectedParent, workingDir);
   if (request.operation === 'remove') {
     await verifyParent(request.expectedParent, workingDir);
-    if (parts.length === 1) await verifyDirectory(workingDir, parts[0]);
-    await fs.promises.rm(targetPath, { recursive: true, force: true });
+    if (parts.length !== 1) throw new Error('invalid snapshot removal target');
+    await verifyDirectory(workingDir, parts[0]);
+    await removeVerifiedDirectory(request.expectedParent, workingDir, targetPath, parts[0]);
     send({ ok: true }); return;
   }
   if (!request.receipt || !request.sourceDir) throw new Error('approved skill snapshot is missing');
@@ -189,7 +222,7 @@ export async function runGhostSnapshotWorkerRequest(
     await verifyParent(request.expectedParent, workingDir);
     await verifyDirectory(workingDir, parts[0]);
     try {
-      const recheck = await fs.promises.lstat(targetPath);
+      await fs.promises.lstat(targetPath);
       throw new Error('snapshot target recreated before publish');
     } catch (error) {
       if (!hasCode(error, 'ENOENT')) throw error;

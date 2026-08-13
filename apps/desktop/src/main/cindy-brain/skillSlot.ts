@@ -195,6 +195,19 @@ export async function removeGhostSkillLinksForRoots(
           blockers.push(message);
           continue;
         }
+        // The link may have been replaced after the ownership read. Re-read
+        // the raw target immediately before unlinking so a user-owned link
+        // cannot be removed merely because the old target was managed.
+        const finalRawTarget = await fsp.readlink(linkPath);
+        const finalLexicalTarget = normalizeForCompare(
+          path.resolve(path.dirname(linkPath), finalRawTarget),
+        );
+        if (finalLexicalTarget !== lexicalTarget) {
+          const message = `Skipped owner skill link whose target changed before removal: ${linkPath}`;
+          warnings.push(message);
+          blockers.push(message);
+          continue;
+        }
         await fsp.unlink(linkPath);
         changed = true;
       } catch (err) {

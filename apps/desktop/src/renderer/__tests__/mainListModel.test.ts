@@ -196,6 +196,94 @@ describe('buildMainListEntries — 排序口径', () => {
     expect(labels(entries)).toEqual(['p:alpha', 's:idle-dlg']);
   });
 
+  it('re-sorts project and dialogue groups by recency even when input is active-first', () => {
+    // groupSessions 会先把 active 排在 archived 前。状态=全部时若组内沿用该序,
+    // 刚归档的任务会沉到陈旧活跃任务下面,项目组和对话组都不符合「按时间」。
+    const archivedNew = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'archived-new',
+      status: 'archived',
+      workingDir: '/alpha',
+      workspaceKind: 'project',
+    });
+    const activeOld = session({
+      updatedAt: '2026-08-01T00:00:00Z',
+      title: 'active-old',
+      status: 'active',
+      workingDir: '/alpha',
+      workspaceKind: 'project',
+    });
+    const dlgArchivedNew = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'dlg-archived-new',
+      status: 'archived',
+    });
+    const dlgActiveOld = session({
+      updatedAt: '2026-08-01T00:00:00Z',
+      title: 'dlg-active-old',
+      status: 'active',
+    });
+    const entries = buildMainListEntries({
+      projects: [project('alpha', [activeOld, archivedNew])],
+      dialogues: [dlgActiveOld, dlgArchivedNew],
+      groupBy: 'project',
+      groupDialogue: true,
+      sortBy: 'recency',
+      manualProjectOrder: [],
+    });
+    const projectEntry = entries.find((entry) => entry.kind === 'project');
+    const dialogueEntry = entries.find((entry) => entry.kind === 'dialogue-group');
+    expect(
+      projectEntry?.kind === 'project' && projectEntry.project.sessions.map((item) => item.title),
+    ).toEqual(['archived-new', 'active-old']);
+    expect(
+      dialogueEntry?.kind === 'dialogue-group' && dialogueEntry.sessions.map((item) => item.title),
+    ).toEqual(['dlg-archived-new', 'dlg-active-old']);
+  });
+
+  it('keeps manual project-row order but still recency-sorts inside each group', () => {
+    const archivedNew = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'archived-new',
+      status: 'archived',
+      workingDir: '/alpha',
+      workspaceKind: 'project',
+    });
+    const activeOld = session({
+      updatedAt: '2026-08-01T00:00:00Z',
+      title: 'active-old',
+      status: 'active',
+      workingDir: '/alpha',
+      workspaceKind: 'project',
+    });
+    const dlgArchivedNew = session({
+      updatedAt: '2026-08-13T00:00:00Z',
+      title: 'dlg-archived-new',
+      status: 'archived',
+    });
+    const dlgActiveOld = session({
+      updatedAt: '2026-08-01T00:00:00Z',
+      title: 'dlg-active-old',
+      status: 'active',
+    });
+    const entries = buildMainListEntries({
+      projects: [project('alpha', [activeOld, archivedNew])],
+      dialogues: [dlgActiveOld, dlgArchivedNew],
+      groupBy: 'project',
+      groupDialogue: true,
+      sortBy: 'manual',
+      manualProjectOrder: ['local:alpha'],
+    });
+    const projectEntry = entries.find((entry) => entry.kind === 'project');
+    const dialogueEntry = entries.find((entry) => entry.kind === 'dialogue-group');
+    expect(
+      projectEntry?.kind === 'project' && projectEntry.project.sessions.map((item) => item.title),
+    ).toEqual(['archived-new', 'active-old']);
+    expect(
+      dialogueEntry?.kind === 'dialogue-group' && dialogueEntry.sessions.map((item) => item.title),
+    ).toEqual(['dlg-archived-new', 'dlg-active-old']);
+  });
+
   it('keeps manual sort scoped to project rows; dialogues follow by recency (§9.3)', () => {
     const projA = project('alpha', [session({ updatedAt: '2026-08-01T00:00:00Z' })]);
     const projB = project('beta', [session({ updatedAt: '2026-08-12T00:00:00Z' })]);

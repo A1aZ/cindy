@@ -10,15 +10,14 @@
  * 固定显示在 Projects 之后」的裁决(设计文档 §9.1,2026-08-12 定稿)。
  *
  * 排序语义:
- *   - recency:条目活动时间(组取组内最新)倒序——最近的在上。
- *   - time:同一时间轴正序——最早的在上(沿用现状「最早优先」)。
+ *   - recency:顶层条目按组内最新活动倒序;项目 / 对话组内部同样按最近活动
+ *     倒序,不沿用 groupSessions 的 active-first。
  *   - priority:等你处理(waiting)> 完成未读(unread)> 运行中 > 其余;同档内按
  *     recency。四档口径对齐 Codex 侧栏的优先级排序(waiting:0 / unread:1 /
  *     active:2 / idle:3,2026-08-13 用户裁决"参考 Codex"):此前三档把「等你
  *     回答」和「跑完没看」混在同一档,完成未读一多就把真正要回应的淹掉。
  *   - manual:项目行按 manualProjectOrder;散排对话与对话组不进手动顺序,
- *     排在项目之后按 recency(设计文档 §9.3 的收窄裁决:手动排序只管项目行,
- *     避免数百条散排对话冲乱顺序表)。
+ *     排在项目之后按 recency。组内仍按最近活动(设计文档 §9.3)。
  */
 
 import type { Session } from '@/lib/ccAgent.types';
@@ -89,7 +88,13 @@ function entryPriorityRank(entry: MainListEntry, ctx: MainListPriorityContext): 
   return min;
 }
 
-/** 组内(项目 / 对话组)会话排序:priority 分档 + recency;其余保持入参序。 */
+/**
+ * 组内(项目 / 对话组)会话排序的唯一入口。
+ *   - priority:分档 + 同档 recency
+ *   - recency / manual:一律按最近活动倒序
+ * 手动排序只影响顶层项目行,组内仍走 recency。不得沿用 groupSessions 的
+ * active-first 入参序——状态=全部时,刚归档的任务必须能排在陈旧活跃任务前面。
+ */
 export function sortSessionsForMainList(
   sessions: readonly Session[],
   sortBy: FilterSortBy,
@@ -104,7 +109,7 @@ export function sortSessionsForMainList(
           sessionActivityMs(b) - sessionActivityMs(a),
       );
   }
-  return sessions.slice();
+  return sessions.slice().sort((a, b) => sessionActivityMs(b) - sessionActivityMs(a));
 }
 
 export interface BuildMainListEntriesInput {

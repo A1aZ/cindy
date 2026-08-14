@@ -985,7 +985,7 @@
         },
         "inputMonitoring": {
           "label": "監聽權限",
-          "tooltip": "用於監聽 Fn、單獨 Command / Option / Control 以及帶 Fn 的語音輸入快捷鍵。普通組合鍵和 F1-F24 單鍵通常不需要。已授權表示當前執行中的 App 可以監聽快捷鍵；開發版可能由 Terminal 承載授權。"
+          "tooltip": "用於監聽 Fn、單獨 Command / Option / Control、帶 Fn 的快捷鍵，以及 F1-F24 單鍵按住說話的放開事件。普通組合鍵不需要。已授權表示目前執行中的 App 可以監聽快捷鍵；開發版可能由 Terminal 承載授權。"
         },
         "accessibility": {
           "label": "自動輸入",

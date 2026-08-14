@@ -57,6 +57,20 @@ function renderDialog(onClose = vi.fn()) {
   };
 }
 
+async function findReadyPresetTrigger() {
+  const trigger = await screen.findByRole('button', {
+    name: 'settings.providers.custom.presets.label',
+  });
+  // 弹窗挂载后会在 rAF 中把焦点移到第一个输入框。若测试在这之前打开
+  // Radix Popover，迟到的自动聚焦会把菜单立即关掉，后续交互命中已卸载节点。
+  await waitFor(() => {
+    expect(document.activeElement).toBe(
+      screen.getByPlaceholderText('settings.providers.custom.fields.namePlaceholder'),
+    );
+  });
+  return trigger;
+}
+
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
@@ -87,9 +101,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
       i18nState.language = locale;
       renderDialog();
 
-      const trigger = await screen.findByRole('button', {
-        name: 'settings.providers.custom.presets.label',
-      });
+      const trigger = await findReadyPresetTrigger();
       expect(trigger.textContent).toContain('settings.providers.custom.presets.placeholder');
 
       fireEvent.click(trigger);
@@ -109,9 +121,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
 
     const heading = screen.getByRole('heading', {
       name: 'settings.providers.custom.dialog.createTitle',
@@ -138,9 +148,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { container, onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     const option = await screen.findByRole('option', { name: '繁體供應商' });
     // 等 layout effect 把 childLayer 写进 childLayerRef。只等 option 出现不够:
@@ -166,7 +174,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    await screen.findByRole('button', { name: 'settings.providers.custom.presets.label' });
+    await findReadyPresetTrigger();
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -178,9 +186,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
     await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()); });
@@ -194,9 +200,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
 
@@ -234,9 +238,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
     fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));

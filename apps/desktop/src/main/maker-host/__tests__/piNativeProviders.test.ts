@@ -4,6 +4,7 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { existsSync } from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { BUNDLED_CATALOG, type Catalog } from '@cindy/model-providers';
@@ -65,6 +66,20 @@ describe('buildPiNativeProvidersFromConfigs', () => {
   });
 
   const bundledPiPath = path.join(process.cwd(), 'apps/pi-bin/darwin-arm64/pi');
+  it('caches a null fallback when the PI probe temp directory cannot be created', async () => {
+    const binaryPath = path.join(process.cwd(), 'pi-temp-dir-probe-failure');
+    const mkdtempSpy = vi.spyOn(fsp, 'mkdtemp')
+      .mockRejectedValueOnce(new Error('temporary directory unavailable'));
+
+    try {
+      await expect(readPiBundledModels(binaryPath)).resolves.toBeNull();
+      await expect(readPiBundledModels(binaryPath)).resolves.toBeNull();
+      expect(mkdtempSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      mkdtempSpy.mockRestore();
+    }
+  });
+
   it.skipIf(process.platform !== 'darwin' || process.arch !== 'arm64' || !existsSync(bundledPiPath))(
     'reads full APIs from the exact bundled PI binary without network access',
     async () => {

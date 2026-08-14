@@ -297,8 +297,9 @@ export async function readPiBundledModels(
   const cached = piBundledModelsByBinary.get(binaryPath);
   if (cached) return cached;
   const pending = (async () => {
-    const configDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cindy-pi-catalog-'));
+    let configDir: string | undefined;
     try {
+      configDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cindy-pi-catalog-'));
       // Placeholder keys only make bundled providers visible to the offline
       // catalog commands; no credential or network request is involved.
       await fsp.writeFile(path.join(configDir, 'models.json'), JSON.stringify({
@@ -358,7 +359,9 @@ export async function readPiBundledModels(
       });
       return null;
     } finally {
-      await fsp.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+      if (configDir) {
+        await fsp.rm(configDir, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   })();
   piBundledModelsByBinary.set(binaryPath, pending);

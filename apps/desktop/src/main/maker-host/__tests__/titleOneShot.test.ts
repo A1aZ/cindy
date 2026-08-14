@@ -407,7 +407,7 @@ describe('generateTitleViaProviderResult — beforeDispatch 派发紧前复查',
 
     expect(result).toEqual({ status: 'ok', title: '标题' });
     // 复查发生在凭证到手、请求发出的紧前,并收到本次 one-shot 的解析口径。
-    expect(beforeDispatch).toHaveBeenCalledWith({ sessionId: 's-bd', agentKind: 'claude-code' });
+    expect(beforeDispatch).toHaveBeenCalledWith({ sessionId: 's-bd', agentKind: 'claude-code', providerId: 'anthropic' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 

@@ -114,7 +114,7 @@ export interface TitleOneShotDeps {
    * prompt prediction 用它防「等待期间会话被切换 agent,仍把转写路由到切换前的 provider /
    * 账号」的 TOCTOU 竞态;标题场景无此竞态,缺省不复查。
    */
-  beforeDispatch?: (args: { sessionId: string; agentKind: AgentKind }) => Promise<boolean>;
+  beforeDispatch?: (args: { sessionId: string; agentKind: AgentKind; providerId: string }) => Promise<boolean>;
 }
 
 const EFFORT_RANK: Record<Effort, number> = {
@@ -567,7 +567,7 @@ export async function generateTitleViaProviderResult(
     if (!canDispatchNow(stage)) return false;
     if (
       deps.beforeDispatch &&
-      !(await deps.beforeDispatch({ sessionId: args.sessionId, agentKind: args.agentKind }))
+      !(await deps.beforeDispatch({ sessionId: args.sessionId, agentKind: args.agentKind, providerId }))
     ) {
       log.debug('title oneShot skipped: pre-dispatch eligibility check failed', {
         providerId,

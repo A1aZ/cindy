@@ -207,7 +207,7 @@ export async function generatePromptPrediction(
       //   - source: 会话被转为 review 时中止
       //   - remoteHostId: 会话被转为远程时中止
       //   - providerId: 会话 provider 被切换时中止,避免路由到过期 provider
-      beforeDispatch: async ({ sessionId, agentKind }) => {
+      beforeDispatch: async ({ sessionId, agentKind, providerId: resolvedProviderId }) => {
         try {
           const [row] = await getDbClient()
             .drizzle.select({
@@ -225,10 +225,12 @@ export async function generatePromptPrediction(
           if (row.source === 'review') return false;
           if (row.remoteHostId) return false;
           if (dbToMakerAgentKind(row.agentKind) !== agentKind) return false;
-          // providerId 变更:会话在派发紧前被切换 provider 时,本次预测路由到
-          // 切换前的 provider/账号触发付费调用,应中止。
-          const currentProviderId = await readSessionProviderIdFromDb(sessionId);
-          if (currentProviderId !== row.providerId) return false;
+          // 用已解析的 providerId(来自 generateTitleViaProviderResult 的
+          // 凭证解析口径)与当前 DB 的 providerId 比对。此前只比较两次 DB 读,
+          // 会话在 provider 解析后、beforeDispatch 前被切换 provider 时,
+          // 两次 DB 读都返回新值,比对通过,但凭证已用旧 provider 解析,
+          // 导致付费请求路由到过期 provider/账号。
+          if (row.providerId !== resolvedProviderId) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

@@ -11709,12 +11709,16 @@ describe('CodexAgent MCP thread context hooks', () => {
     await handle.close();
   });
 
-  it('does not treat a missing confirmation as a user rejection after auto-review fails', async () => {
+  it.each([
+    'timeout',
+    'hook_interaction_timeout',
+    'interaction_route_released',
+  ] as const)('does not treat a missing confirmation as a user rejection after auto-review fails (%s)', async (reason) => {
     const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
     const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
     const host = installFakeHost(agent);
     const handle = await agent.startSession({
-      sessionId: 'session-auto-unavailable-undelivered',
+      sessionId: `session-auto-unavailable-undelivered-${reason}`,
       model: 'gpt-5.5',
       providerId: 'openai',
       workingDir: '/repo',
@@ -11725,7 +11729,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     handle.setInteractionResolver(async () => ({
       kind: 'permission',
       behavior: 'deny',
-      reason: 'timeout',
+      reason,
     }));
     const notices: string[] = [];
     void (async () => {
@@ -11744,8 +11748,8 @@ describe('CodexAgent MCP thread context hooks', () => {
 
     await expect(handlers.commandExecutionApproval({
       threadId: 'start-thread-id',
-      turnId: 'turn-unavailable-timeout',
-      itemId: 'cmd-unavailable-timeout',
+      turnId: `turn-unavailable-${reason}`,
+      itemId: `cmd-unavailable-${reason}`,
       command: 'npx tsc --noEmit',
       cwd: '/repo',
     })).resolves.toEqual({ decision: 'decline' });

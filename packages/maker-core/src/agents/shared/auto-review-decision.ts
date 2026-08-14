@@ -128,6 +128,9 @@ export function createAutoReviewConfirmUndeliveredNotice(
 /**
  * Desktop / IM / router 在确认失败时写下的系统 reason。
  * 这些不是用户点击「拒绝」，不能当成 `user-denied`。
+ *
+ * 必须覆盖所有会走到 permission deny 的系统码：漏一个，Codex 就会把这次系统拒绝
+ * 显示成用户点了拒绝。Hook 超时、路由释放、turn 收口、卡片没发出去都属于这一类。
  */
 export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'no_interaction_resolver',
@@ -136,11 +139,21 @@ export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'interaction_resolver_error',
   'interaction_handler_failed',
   'interaction_timeout',
+  'hook_interaction_timeout',
   'timeout',
   'stale_turn',
+  'stale_route',
   'duplicate_request_id',
   'session_closed',
   'session_aborted',
+  'session_cleanup',
+  'interaction_route_released',
+  'hook_turn_terminal',
+  'turn_terminal',
+  'not_renderable',
+  'headless_interaction_unavailable',
+  'no_card',
+  'wecom_interaction_disconnected',
 ]);
 
 export function isSystemPermissionDenialReason(reason: unknown): boolean {

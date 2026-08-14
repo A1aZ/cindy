@@ -324,7 +324,18 @@ describe('isSystemPermissionDenialReason', () => {
     expect(isSystemPermissionDenialReason('timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('no_interaction_resolver')).toBe(true);
     expect(isSystemPermissionDenialReason('stale_turn')).toBe(true);
+    expect(isSystemPermissionDenialReason('hook_interaction_timeout')).toBe(true);
+    expect(isSystemPermissionDenialReason('interaction_route_released')).toBe(true);
+    expect(isSystemPermissionDenialReason('hook_turn_terminal')).toBe(true);
+    expect(isSystemPermissionDenialReason('turn_terminal')).toBe(true);
+    expect(isSystemPermissionDenialReason('not_renderable')).toBe(true);
+    expect(isSystemPermissionDenialReason('headless_interaction_unavailable')).toBe(true);
+    expect(isSystemPermissionDenialReason('session_cleanup')).toBe(true);
+    expect(isSystemPermissionDenialReason('no_card')).toBe(true);
+    expect(isSystemPermissionDenialReason('stale_route')).toBe(true);
+    expect(isSystemPermissionDenialReason('wecom_interaction_disconnected')).toBe(true);
     expect(isSystemPermissionDenialReason('User denied')).toBe(false);
+    expect(isSystemPermissionDenialReason('wechat_user_denied')).toBe(false);
     expect(isSystemPermissionDenialReason(undefined)).toBe(false);
   });
 });

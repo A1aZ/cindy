@@ -573,7 +573,14 @@ function clearStagedPatch(): void {
   // 递增代际:任何 in-flight 的 checkForUpdate 在写回 patch 前都会看到代际变化,
   // 从而放弃本次(基于旧渠道的)下载产物,不把 beta patch 重新落盘。
   updateChannelEpoch += 1;
-  if (currentStatus === 'ready' || currentStatus === 'superseding') {
+  // downloading 也要重置:opt-out 若发生在「首次 beta 下载进行中」,status 仍是
+  // downloading;不 reset 的话,in-flight 下载完成后 discard 分支只是 `return 'idle'`
+  // 而不 setStatus,update-get-status / update-check-now 会永远卡在 downloading。
+  if (
+    currentStatus === 'ready' ||
+    currentStatus === 'superseding' ||
+    currentStatus === 'downloading'
+  ) {
     setStatus('idle');
   }
 }

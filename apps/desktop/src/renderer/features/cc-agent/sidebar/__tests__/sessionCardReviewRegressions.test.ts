@@ -163,6 +163,16 @@ describe('SessionCard review regressions', () => {
     expect(sessionCardSource).not.toContain('session-card-progress');
   });
 
+  it('lets text-mode info slots shrink to their visible content', () => {
+    expect(sessionItemSource).not.toMatch(
+      /group\/slot relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14/,
+    );
+    expect(automationGroupSource).not.toContain('min-w-14 max-w-[96px]');
+    expect(automationGroupSource).toContain(
+      'group/slot relative ml-auto flex h-6 max-w-[96px] shrink-0 items-center justify-end',
+    );
+  });
+
   it('keeps card info anchored to the bottom meta row instead of the overlay layout', () => {
     // 时间/信息槽固定在底部 meta 行右端(ml-auto),不再依赖 overlay/block 双态测量。
     // C 期起时间渲染并入 SessionInfoMeta(任务信息复选),锚点与让位语义不变。

@@ -867,7 +867,7 @@ export const SessionItem = memo(function SessionItem({
         //   indented=true → 左 22px（Project Sessions 缩进,比顶层深一档;
         //     2026-07 用户定稿在 18px 基础上再 +4px 加深层级)
         //   indented=false → 左 12px（Pinned / Unclassified / Dialogue 段）
-        // 右侧固定槽位显示最近活动时间；hover 时 archive 快捷按钮覆盖同一槽位。
+        // 右侧信息槽按内容收缩；hover 时 archive 快捷按钮覆盖同一槽位。
         indented ? 'pl-[22px] pr-2' : 'pl-3 pr-2',
         // 注意:不加 transition-colors —— 行 bg 的 hover/active 变化要瞬时,
         // 否则归档/取消归档后 DOM 列表重排,原 hover bg 在前一个屏幕位置上要
@@ -989,10 +989,11 @@ export const SessionItem = memo(function SessionItem({
           渲染), 与时间同步 hover-fade 让位给 action buttons —— 让右侧只看到一组
           视觉元素, 不和 action buttons 共存。
           archive 快捷按钮 hover/focus 时覆盖整个槽位,避免右侧拥挤;完整菜单仍走右键。
-          min-w-14 保证无 worktree 时仍保留原 56px 槽位(action buttons 锚点),有
-          worktree 时槽位自然撑开以容纳 16px 图标 + 时间。 */}
+          槽宽跟可见内容走:状态点 / worktree / 任务信息有多宽占多宽,「任务信息 =
+          无」且无状态、无 worktree 时宽度归零,把行宽还给标题。操作钮绝对定位叠在
+          槽上,不靠预留 56px 空位当锚点——否则短时间(「刚刚」)和无信息都会挤标题。 */}
       {!isEditing && (
-        <div className="group/slot relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14">
+        <div className="group/slot relative ml-auto flex h-6 shrink-0 items-center justify-end">
           {/* WorktreeBadge + time 同步 fade-out:hover/菜单打开/archivePending 时
               一起让位,确保只有 action buttons 占住右侧。fade 容器复用同一份条件,
               避免两个元素 fade 时机不一致产生闪烁。
@@ -1017,7 +1018,7 @@ export const SessionItem = memo(function SessionItem({
               <SidebarRightStatusIndicator kind={rightStatusKind} isActive={isActive} />
             ) : (
               // 任务信息复选(C 期):按用户勾选拼装 pr / tokens / cost / time;默认仅
-              // time,与旧时间槽渲染等价。全不选 → 槽位留空(min-w-14 仍保住 action 锚点)。
+              // time,与旧时间槽渲染等价。全不选 → SessionInfoMeta 渲染 null,槽宽归零。
               <SessionInfoMeta pieces={infoPieces} prRef={infoPrRef} isActive={isActive} />
             )}
           </div>

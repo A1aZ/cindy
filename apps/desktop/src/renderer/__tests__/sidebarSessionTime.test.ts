@@ -105,7 +105,11 @@ describe('SessionItem activity time', () => {
 
   it('keeps the archive shortcut in the same right-side slot instead of crowding the time', () => {
     expect(sessionItemSource).toContain(
-      'relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14',
+      'relative ml-auto flex h-6 shrink-0 items-center justify-end',
+    );
+    // 文字模式信息槽按内容收缩:「任务信息 = 无」或短时间都不能再预留 56px 空位挤标题。
+    expect(sessionItemSource).not.toMatch(
+      /group\/slot relative ml-auto flex h-6 shrink-0 items-center justify-end min-w-14/,
     );
     expect(sessionItemSource).toContain('<WorktreeBadge sessionId={session.id}');
     expect(sessionItemSource).toContain('canQuickArchive && archivePending &&');

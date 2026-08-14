@@ -420,7 +420,7 @@ export function AutomationSessionGroupItem({
           {/* focus 隐藏条件用命名 group(/slot) 收窄到本槽位:行内 toggle/title
               button 点击后焦点常驻行内,整行 group-focus-within 会让选中态
               (非 hover)的 meta 文本被永久隐藏,与 SessionItem 同款修法。 */}
-          <div className="group/slot relative ml-auto flex h-6 min-w-14 max-w-[96px] shrink-0 items-center justify-end">
+          <div className="group/slot relative ml-auto flex h-6 max-w-[96px] shrink-0 items-center justify-end">
             {/* 右侧状态槽 —— 与 SessionItem 同款五档色表 / 图标尺寸(size-4 wrapper +
                 size-2 dot / size-12 spinner),让分组头和普通任务行状态语义视觉可比。
                 showRightStatus=true 时渲染状态图标(error/awaiting/done 圆点 + running

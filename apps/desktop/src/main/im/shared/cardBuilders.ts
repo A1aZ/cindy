@@ -105,7 +105,7 @@ export interface ImCardBuilders {
     sessions: RecentControlSession[];
   }): InteractiveCardSpec;
   buildResolvedCard(label: string): InteractiveCardSpec;
-  /** 「群会话不能用完全访问」失败时的私聊修复卡(仅提供 permissionModeFix 文案的渠道)。 */
+  /** 群会话权限档与强确认策略不兼容时的私聊修复卡(仅提供 permissionModeFix 文案的渠道)。 */
   buildPermissionModeFixCard(args: {
     sessionId: string;
     agentKind: AgentKind;

@@ -328,6 +328,11 @@ export function buildFeishuAdapter(
     // 改投 owner 私聊, 点击也只认 owner。DM 不挂, owner 私聊保持全速。
     turnPermissionPolicyFor: (event) =>
       event.speaker ? createFeishuGroupTurnPermissionPolicy(event.messageId) : undefined,
+    // 群护栏取缔: 用户在渠道设置里显式允许群会话用「完全访问」→ 该档位
+    // 不再挂强确认策略(maker 不再拒绝, 按用户选择直接执行)。群上下文的
+    // 防注入过滤/包裹在 prepareAgentTurnText 里独立生效, 不随权限档关闭;
+    // acceptEdits 仍保持失败路径(错误 + 私聊修复卡)。
+    turnPolicyOptionalForMode: (mode) => mode === 'bypassPermissions',
     // 群 lane: 触发时按页回翻群历史拼上下文前缀(含媒体附件), 落库仍是渠道原文。
     prepareAgentTurnText: async (event) => {
       const lane = decodeFeishuLaneUserId(event.senderId);

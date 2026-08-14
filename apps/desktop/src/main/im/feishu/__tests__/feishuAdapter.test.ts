@@ -274,7 +274,7 @@ describe('feishu group lane adapter hooks', () => {
 
   it('将群权限策略不兼容转换为可执行的恢复指引', () => {
     const text = adapter.ui.error?.preDispatchFailureText?.(
-      'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:bypassPermissions',
+      'TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits',
     );
     expect(text).toContain('/permission');
     expect(text).not.toContain('/permission auto');
@@ -292,9 +292,9 @@ describe('feishu group lane adapter hooks', () => {
     expect(fixFailedText).not.toContain('/permission auto');
     expect(fixFailedText).not.toContain('/permission ask');
     expect(fixFailedText).toContain('Auto / Auto-review');
-    expect(adapter.ui.cards.permissionModeFix?.body('Recovered session')).toContain(
-      'Recovered session',
-    );
+    const fixBody = adapter.ui.cards.permissionModeFix?.body('Recovered session') ?? '';
+    expect(fixBody).toContain('Recovered session');
+    expect(fixBody).not.toContain('Full access');
   });
 
   it('派发前错误提示通过注入翻译器按当前语言生成', () => {
@@ -313,7 +313,7 @@ describe('feishu group lane adapter hooks', () => {
     expect(
       preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:bypassPermissions'),
     ).toBe('[agent-unsupported]\n[permission-mode-hint]');
-    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:ask')).toBe(
+    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits')).toBe(
       '[permission-recovery]',
     );
     expect(translate).toHaveBeenCalledWith(
@@ -330,9 +330,15 @@ describe('feishu group lane adapter hooks', () => {
     expect(
       preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:bypassPermissions'),
     ).toBe('[lark-agent-unsupported]\n[lark-permission-mode-hint]');
-    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:ask')).toBe(
+    expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits')).toBe(
       '[lark-permission-recovery]',
     );
+  });
+
+  it('turnPolicyOptionalForMode: 仅完全访问档可选(护栏取缔), 其余档保持挂策略', () => {
+    expect(adapter.turnPolicyOptionalForMode?.('bypassPermissions')).toBe(true);
+    expect(adapter.turnPolicyOptionalForMode?.('auto')).toBe(false);
+    expect(adapter.turnPolicyOptionalForMode?.('acceptEdits')).toBe(false);
   });
 
   it('prepareAgentTurnText: 群 lane 拉历史拼上下文前缀(带时间标注), 剔除触发消息', async () => {

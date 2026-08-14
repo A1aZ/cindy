@@ -3154,7 +3154,7 @@
         "larkAgentSwitchPermissionModeHint": "如果新的 Agent 仍提示权限模式问题，请发送 `/permission`，在权限选择卡片中选择 Ask permissions / Default permissions 或 Auto / Auto-review 后重试。",
         "larkPermissionModeRecoveryHint": "⚠️ 当前权限模式无法在 Lark 群里安全运行。\n请发送 `/permission`，在权限选择卡片中选择 Ask permissions / Default permissions 或 Auto / Auto-review 后重试；如果仍无法启动，可以发送 `/new` 开启新的对话。",
         "permissionModeFixTitle": "将群聊权限档切换为「自动审批」",
-        "permissionModeFixBody": "群聊或话题里的消息未能启动：**{{sessionTitle}}** 使用了「完全访问」权限档。群上下文里可能包含成员可控制的内容，因此必须保留操作确认。\n\n点击下方按钮切换为「自动审批」，然后回到群里重新发送消息。",
+        "permissionModeFixBody": "群聊或话题里的消息未能启动：**{{sessionTitle}}** 使用了与群聊确认策略不兼容的权限档。群上下文里可能包含成员可控制的内容，因此必须保留操作确认。\n\n点击下方按钮切换为「自动审批」，然后回到群里重新发送消息。",
         "permissionModeFixButton": "✅ 切换为自动审批",
         "permissionModeFixResolved": "✅ 已切换为「自动审批」— 回到群里重试即可",
         "permissionModeFixFailed": "❌ 未能切换权限模式：{{reason}}。请发送 `/permission`，并在卡片中选择 Auto / Auto-review",
@@ -3168,7 +3168,7 @@
           "pi": "Pi"
         },
         "groupCtrPermissionLabel": "群聊 /ctr 新建任务权限档",
-        "groupCtrPermissionDescription": "群里 @bot 用 /ctr 新建任务时使用的权限档，默认「自动审批」。群上下文里有成员可控的内容，设成「完全访问」后群里的消息会被拒绝，并引导你切回「自动审批」。"
+        "groupCtrPermissionDescription": "群里 @bot 用 /ctr 新建任务时使用的权限档，默认「自动审批」。群上下文里有成员可控的内容，设成「完全访问」后将直接执行、不再逐条确认，请确认群里的人都可信。"
       }
     },
     "shortcuts": {

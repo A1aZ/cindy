@@ -224,7 +224,7 @@ export const ui = {
       fullAccessCancelled: '已取消，保留当前权限',
     },
     /**
-     * 群会话「完全访问」档被强确认策略拒绝时, 发到 owner 私聊的一键修复卡 —
+     * 群会话权限档被强确认策略拒绝时, 发到 owner 私聊的一键修复卡 —
      * 点按钮把该会话切回 auto(自动审批), 群里就能继续发消息了。
      */
     permissionModeFix: permissionModeFixText,

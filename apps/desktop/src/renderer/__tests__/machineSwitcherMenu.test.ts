@@ -90,6 +90,8 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(topNavSource).toContain('if (section === \'scrollable\')');
     expect(sidebarUpperSource).toContain('searchScrollRestoreRef.current = el.scrollTop');
     expect(sidebarUpperSource).toContain("el.scrollTo({ top: searchScrollRestoreRef.current })");
+    expect(sidebarUpperSource).toContain('[searchActive, search.trimmed]');
+    expect(sidebarUpperSource).toContain('onContextMenu={(event) => event.stopPropagation()}');
     expect(sidebarUpperSource).toContain('{searchActive ? (');
     expect(sidebarUpperSource).toContain('<div hidden={searchActive}>');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');

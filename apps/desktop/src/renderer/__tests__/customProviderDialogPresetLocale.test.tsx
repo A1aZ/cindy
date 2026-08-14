@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -199,6 +199,40 @@ describe('CustomProviderDialog preset locale ownership', () => {
 
     fireEvent.pointerDown(scrim);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not consume runtime tab or input pointerdowns while a child layer is open', async () => {
+    i18nState.language = 'zh-TW';
+    const { onClose } = renderDialog();
+
+    const trigger = await screen.findByRole('button', {
+      name: 'settings.providers.custom.presets.label',
+    });
+    const openPresetMenu = async () => {
+      fireEvent.click(trigger);
+      expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
+    };
+
+    await openPresetMenu();
+    const piTab = screen.getByRole('tab', {
+      name: 'settings.providers.custom.protocol.pi',
+    });
+    const tabPointerDown = createEvent.pointerDown(piTab, { button: 0 });
+    fireEvent(piTab, tabPointerDown);
+    expect(tabPointerDown.defaultPrevented).toBe(false);
+    fireEvent.click(piTab);
+    expect(piTab.getAttribute('aria-selected')).toBe('true');
+
+    await openPresetMenu();
+    const baseUrl = screen.getByPlaceholderText(
+      'settings.providers.custom.fields.baseUrlPlaceholder',
+    );
+    const inputPointerDown = createEvent.pointerDown(baseUrl, { button: 0 });
+    fireEvent(baseUrl, inputPointerDown);
+    expect(inputPointerDown.defaultPrevented).toBe(false);
+    fireEvent.change(baseUrl, { target: { value: 'https://runtime.example.test/v1' } });
+    expect((baseUrl as HTMLInputElement).value).toBe('https://runtime.example.test/v1');
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('keeps Cancel as a direct form dismissal without a duplicate top-right button', async () => {

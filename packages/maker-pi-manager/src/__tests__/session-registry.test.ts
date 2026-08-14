@@ -530,6 +530,27 @@ describe('list / shutdownAll / teardown identity', () => {
     expect(registry.list()).toHaveLength(0);
   });
 
+  it('awaits close-handler teardown cleanup during shutdownAll', async () => {
+    const { registry, tmpDir } = await createRegistry();
+    cleanupFns.push(() => { registry.close(); fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+    const child = makeChild();
+    mockSpawn.mockReturnValueOnce(child);
+    mockCreateServer.mockReturnValueOnce(makeServer());
+    await registry.ensure('close-race', 'cmd', { CINDY_PI_API_KEY: 'gateway-secret' }, 'h1', false);
+    const envFile = path.join(tmpDir, 'envs', 'env-close-race');
+    expect(fs.existsSync(envFile)).toBe(true);
+
+    child.kill = vi.fn((_signal?: string) => {
+      child.exitCode = 0;
+      child.emit('close', 0, null);
+      return true;
+    });
+
+    await registry.shutdownAll();
+    expect(fs.existsSync(envFile)).toBe(false);
+  });
+
   // 轮 40-w4-t3 CRITICAL:shutdownAll 遇杀不死的 session 不得 teardown ——
   // 保留 entry(防凭证进程残留不受管理)并聚合抛出 SESSION_KILL_SURVIVED。
   it('shutdownAll keeps survivor entry and rejects (round 40-w4-t3 CRITICAL)', async () => {

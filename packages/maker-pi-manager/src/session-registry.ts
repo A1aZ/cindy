@@ -96,6 +96,8 @@ export class PiSessionRegistry {
   private readonly idleTimer: NodeJS.Timeout | null = null;
   /** 关停中:拒绝新 ensure, 防孤儿子进程(自审轮 2 HIGH)。 */
   private shuttingDown = false;
+  /** shutdownAll 收集 close-handler teardown 的异步 rm, 避免 process.exit 抢在凭证文件删除前。 */
+  private shutdownCleanupBatch: Array<(p: Promise<void>) => void> | null = null;
 
   constructor(opts: PiSessionRegistryOptions) {
     this.sockDir = opts.sockDir;
@@ -324,6 +326,7 @@ export class PiSessionRegistry {
     await Promise.allSettled([...this.pendingSpawns.values()]);
     // 二次扫描:spawn 完成后可能注册了新 entry, 一并收掉。
     const cleanupBatch: Promise<void>[] = [];
+    this.shutdownCleanupBatch = (p) => { cleanupBatch.push(p); };
     // 轮 40-w4-t3 CRITICAL:杀不死的 entry 不得 teardown —— 否则删了 registry
     // 状态/env-file/socket 但进程仍活着, 残留持凭证进程不受管理, 与 kill()/
     // recycleIdle() 的「杀不死保留 entry 防双 spawn」不变量冲突。收集并最后抛出,
@@ -364,6 +367,7 @@ export class PiSessionRegistry {
     }
     // 等 teardown 的异步清理完成(env-file/socket rm)—— 防 process.exit 前
     // 凭证文件未删(退役审轮 3 M-1)。batch 局部变量, 正常路径不持有(退役审轮 8 M-1)。
+    this.shutdownCleanupBatch = null;
     await Promise.allSettled(cleanupBatch);
     if (survivors.length > 0) {
       throw makeServerError(
@@ -688,6 +692,7 @@ export class PiSessionRegistry {
         state,
         state.dying ? 'killed' : code === 0 ? 'completed' : 'error',
         `pi exited code=${code ?? 'null'} signal=${signal ?? 'null'}`,
+        this.shutdownCleanupBatch ?? undefined,
       );
     });
 

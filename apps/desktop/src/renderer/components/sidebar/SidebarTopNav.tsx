@@ -5,8 +5,8 @@
  *   - 新建 / 自动任务:项目(cc-agent)视图的动作 —— 在任意视图点击都跳回项目视图并执行。
  *   - Plugins:主视图切换(navigateToView),命中当前视图时高亮。
  *   - 搜索(SidebarInlineSearch):静息态与其余行同款「🔍 搜索」;hover / 聚焦
- *     就地展开成搜索框,结果 overlay 由下方功能槽(CCAgentSidebarUpper)绘制。搜索状态经
- *     ConversationSearchProvider 的 context 共享(行在此、overlay 在功能槽,两者是兄弟子树)。
+ *     就地展开成搜索框,结果由下方功能槽(CCAgentSidebarUpper)替换列表绘制。搜索状态经
+ *     ConversationSearchProvider 的 context 共享(行在此、结果在功能槽,两者是兄弟子树)。
  *   - 远程机器切换 2026-08-13 起不再占行:并入主列表段头标题(「全部任务」即
  *     范围下拉,见 MachineSwitcherMenu 头注),省一行且标题不再与范围脱节。
  * 去掉了原来的「项目(Bot)」标签 —— 项目即默认主视图,无单独入口。

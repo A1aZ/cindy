@@ -208,9 +208,8 @@ export function PinnedSection({
   // 置顶不做"最多显示 N 条"折叠——置顶是用户主动钉住的,全部显示(三种模式一致)。
   const slicedEntries = visibleEntries;
 
-  // 文字模式 SessionItem hover 时右侧浮层展示的"项目来源"标签(口径见
-  // buildSessionSourceLabelMap),与时间排序视图同口径。card / list 模式视觉自成一体,
-  // 当前不注入。置顶视图传 visibleSessions。
+  // 平铺时标题旁的"项目来源"标签(口径见 buildSessionSourceLabelMap)。
+  // 置顶视图传 visibleSessions;card 变体不画这个标签。
   const sourceLabelMap = useMemo(
     () =>
       buildSessionSourceLabelMap(visibleSessions, allKnownProjects, t('ccAgent.sidebar.dialogues')),

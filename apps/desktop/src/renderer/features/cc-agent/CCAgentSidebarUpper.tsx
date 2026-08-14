@@ -1347,7 +1347,7 @@ function ExpandedView({
   );
 
   // 内联会话搜索:输入行在 SidebarTopNav 的第 4 行,状态经 ConversationSearchProvider 共享;
-  // 这里只取 search 来渲染下方的结果 overlay(query 非空时盖住置顶 + 项目 + 对话)。
+  // query 非空时同一份顶部导航 sticky 钉住,结果替换下方列表,不再用 overlay 盖输入框。
   const { search } = useConversationSearchContext();
   const gcProjectKeys = useMemo(
     () => projectUniverse.projects.map((p) => p.projectKey),
@@ -3066,8 +3066,9 @@ function ExpandedView({
       )}
 
       {/* 侧栏内容区:单一滚动容器(顶部导航的可滚动段 + 置顶 + 项目 + 对话一起滚动)。
-         外层 relative 承载搜索结果 overlay。「新建」仍固定在 shell 顶部;自动任务 /
-         插件 / 搜索 / 远程机器四行随列表滚走(2026-08-12 用户裁决,对齐 Codex)。 */}
+         「新建」仍固定在 shell 顶部;自动任务 / 插件 / 搜索随列表滚走
+         (2026-08-12 用户裁决,对齐 Codex)。搜索有查询时同一份顶部导航就地 sticky,
+         结果替换下方列表 —— 输入框不卸载、也不会被结果盖住。 */}
       <div className="relative flex min-h-0 flex-1 flex-col">
         <div
           ref={sidebarScrollRef}
@@ -3081,7 +3082,7 @@ function ExpandedView({
               scrollbarGutter: 'stable',
               // 顶部溢出渐隐:滚动后首行不再紧贴「新建」被硬切(见 topFade 注释)。
               // 24px 与右栏 TabBar 的横向 fade 同幅度,保持同一套视觉语言。
-              ...(topFade
+              ...(topFade && !search.trimmed
                 ? {
                     WebkitMaskImage: 'linear-gradient(to bottom, transparent 0, black 24px)',
                     maskImage: 'linear-gradient(to bottom, transparent 0, black 24px)',
@@ -3090,10 +3091,25 @@ function ExpandedView({
             } as React.CSSProperties
           }
         >
-          {/* 顶部导航可滚动段:置于列表最上方,一起滚动。本组件即展开态视图
-              (rail 走 CollapsedView 自己的图标入口),无需再判折叠。 */}
-          <SidebarTopNav section="scrollable" />
-          {remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
+          {/* 顶部导航可滚动段:置于列表最上方,一起滚动。搜索打开时 sticky 钉在顶部,
+              输入框保持同一份实例,结果替换下方列表。 */}
+          <div
+            className={cn(
+              search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]',
+            )}
+          >
+            <SidebarTopNav section="scrollable" />
+          </div>
+          {search.trimmed ? (
+            <div data-conversation-search-surface>
+              <SearchResultsBody
+                trimmed={search.trimmed}
+                status={search.status}
+                results={search.results}
+                onSelect={search.handleSelect}
+              />
+            </div>
+          ) : remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
             <>
               <MainListScopeHeader
                 filter={filter}
@@ -3291,22 +3307,6 @@ function ExpandedView({
             </>
           )}
         </div>
-        {/* 搜索结果 overlay:query 非空时盖住搜索框下方的全部空间(置顶 + 项目 + 对话)。
-            data-conversation-search-surface:标记为「搜索界面内部」——Provider 的 outside-pointerdown
-            监听据此判定,overlay 内点击 / 滚动都不收起,只有点到本标记以外才收起(见 conversationSearchContext)。 */}
-        {search.trimmed && (
-          <div
-            data-conversation-search-surface
-            className="absolute inset-0 z-20 overflow-y-auto bg-[var(--cmd-palette-bg)]"
-          >
-            <SearchResultsBody
-              trimmed={search.trimmed}
-              status={search.status}
-              results={search.results}
-              onSelect={search.handleSelect}
-            />
-          </div>
-        )}
       </div>
 
       {/* 空白处右键的整理菜单:与段头 sliders 按钮同一个组件、同一份内容,

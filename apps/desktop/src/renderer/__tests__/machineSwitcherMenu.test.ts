@@ -83,6 +83,10 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     const scrollableRowsIdx = sidebarUpperSource.indexOf('<SidebarTopNav section="scrollable" />');
     expect(scrollRefIdx).toBeGreaterThanOrEqual(0);
     expect(scrollableRowsIdx).toBeGreaterThan(scrollRefIdx);
+    // 搜索打开时同一份顶部导航 sticky 钉住,结果替换列表;不再用 overlay 盖住输入框。
+    expect(sidebarUpperSource).toContain("search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'");
+    expect(sidebarUpperSource).toContain('{search.trimmed ? (');
+    expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');
 
     // 声明语义与 useRegisterSidebarUpper 一致:卸载不复位,避免切到 /settings 时闪变。
     expect(featureContextSource).toContain('export function useOwnTopNavScrollableRows');
@@ -214,6 +218,8 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     const cardSource = read('features', 'cc-agent', 'sidebar', 'SessionCard.tsx');
     expect(cardSource).toContain('sourceLabel,');
     expect(cardSource).toContain('{sourceLabel ? (');
+    const itemSource = read('features', 'cc-agent', 'sidebar', 'SessionItem.tsx');
+    expect(itemSource).toContain('{sourceLabel ? (');
   });
 
   // 2026-08-12 用户裁决:筛选各维度选中后菜单不关闭(常要连调几项);排序与显示

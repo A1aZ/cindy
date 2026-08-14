@@ -620,6 +620,22 @@ export function setControllerDisplayName(deviceId: string, name: string): void {
   if (subscriptions.updateControllerMetadata(deviceId, displayName)) syncForwarding();
 }
 
+/**
+ * 旧 relay presence 的主机名只刷新当前横幅，不进入数据库名或控制帧自报名缓存。
+ * 已有权威名或链路自报名时保持原优先级；断链后 metadata 随订阅一起失效。
+ */
+export function setControllerFallbackDisplayName(deviceId: string, name: string): void {
+  const normalized = normalizeControllerName(name);
+  if (
+    !normalized
+    || controllerDisplayNameByDevice.has(deviceId)
+    || reportedControllerNameByDevice.has(deviceId)
+  ) {
+    return;
+  }
+  if (subscriptions.updateControllerMetadata(deviceId, normalized)) syncForwarding();
+}
+
 /** 账号切换 / 链路 teardown 时清空 presence 展示名，避免串到下一段身份。 */
 export function clearControllerDisplayNames(): void {
   controllerDisplayNameByDevice.clear();

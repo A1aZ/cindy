@@ -34,6 +34,7 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName: setDisplayName,
       rememberName,
       forgetName,
     });
@@ -114,6 +115,7 @@ describe('controller display-name directory freshness', () => {
         freshness,
         normalizeName,
         setDisplayName,
+        setFallbackDisplayName: setDisplayName,
         rememberName,
         forgetName,
       });
@@ -147,6 +149,7 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName: setDisplayName,
       rememberName,
       forgetName,
     });
@@ -193,6 +196,7 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName: setDisplayName,
       rememberName,
       forgetName,
     });
@@ -206,6 +210,7 @@ describe('controller display-name directory freshness', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const requestEpoch = freshness.epoch;
     const setDisplayName = vi.fn();
+    const setFallbackDisplayName = vi.fn();
     const rememberName = vi.fn();
     const forgetName = vi.fn();
 
@@ -219,6 +224,7 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName,
       rememberName,
       forgetName,
     });
@@ -258,6 +264,7 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName: setDisplayName,
       rememberName,
       forgetName,
     });
@@ -284,6 +291,7 @@ describe('controller display-name directory freshness', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const requestEpoch = freshness.epoch;
     const setDisplayName = vi.fn();
+    const setFallbackDisplayName = vi.fn();
     const rememberName = vi.fn();
     const forgetName = vi.fn();
 
@@ -293,10 +301,12 @@ describe('controller display-name directory freshness', () => {
       freshness,
       normalizeName,
       setDisplayName,
+      setFallbackDisplayName,
       rememberName,
       forgetName,
     });
-    expect(setDisplayName).toHaveBeenLastCalledWith('dev-1', 'Host.local');
+    expect(setDisplayName).not.toHaveBeenCalled();
+    expect(setFallbackDisplayName).toHaveBeenCalledWith('dev-1', 'Host.local');
     expect(rememberName).not.toHaveBeenCalled();
     expect(freshness.epoch).toBe(0);
 
@@ -337,6 +347,7 @@ describe('controller display-name directory freshness', () => {
           freshness,
           normalizeName,
           setDisplayName,
+          setFallbackDisplayName: setDisplayName,
           rememberName,
           forgetName,
         });

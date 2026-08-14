@@ -69,6 +69,7 @@ export function applyControllerDisplayNamePresence(options: {
   freshness: ControllerDisplayNameFreshnessTracker;
   normalizeName: (name: string) => string | null;
   setDisplayName: (deviceId: string, name: string) => void;
+  setFallbackDisplayName: (deviceId: string, name: string) => void;
   rememberName: (deviceId: string, name: string) => void;
   forgetName: (deviceId: string) => void;
 }): void {
@@ -77,7 +78,7 @@ export function applyControllerDisplayNamePresence(options: {
     const hasSelfNameField = Object.prototype.hasOwnProperty.call(options, 'selfName');
     if (!hasSelfNameField) {
       if (options.freshness.authoritativeNameByDevice.has(options.deviceId)) return;
-      options.setDisplayName(options.deviceId, candidate.name);
+      options.setFallbackDisplayName(options.deviceId, candidate.name);
       return;
     }
     markControllerDisplayNamePresenceFresh(options.freshness, options.deviceId);

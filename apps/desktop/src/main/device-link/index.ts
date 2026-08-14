@@ -77,6 +77,7 @@ import {
   handleControllerOffline,
   purgeRevokedController,
   setControllerDisplayName,
+  setControllerFallbackDisplayName,
   clearControllerDisplayNames,
   setDispatchPresenceOfflineCheck,
 } from './dispatch';
@@ -637,6 +638,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
       freshness: controllerDisplayNameFreshness,
       normalizeName: normalizeCachedDeviceName,
       setDisplayName: setControllerDisplayName,
+      setFallbackDisplayName: setControllerFallbackDisplayName,
       rememberName: (deviceId, name) => {
         void rememberLastKnownDeviceName(deviceId, name);
       },

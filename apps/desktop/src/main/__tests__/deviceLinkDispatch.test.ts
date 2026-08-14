@@ -449,6 +449,7 @@ import {
   setRemoteInvokeBusyChangedListener,
   setSessionsSubscribedListener,
   setControllerDisplayName,
+  setControllerFallbackDisplayName,
   purgeRevokedController,
   getActiveControllers,
   getUpdateRelaunchControllers,
@@ -456,6 +457,10 @@ import {
   dropAllControllers,
   pushSessionActivityToController,
 } from '../device-link/dispatch';
+import {
+  applyControllerDisplayNamePresence,
+  createControllerDisplayNameFreshnessTracker,
+} from '../device-link/controllerDisplayNameFreshness';
 import { hasBroadcastTapListener, tapWindowBroadcast } from '../device-link/broadcast-tap';
 import {
   CONTROLLER_CAPABILITY_SET_MODEL_EXPLICIT_PROVIDER_NULL_V1,
@@ -601,6 +606,49 @@ describe('被控端控制链路生命周期', () => {
     expect(getActiveControllers()).toEqual([
       { deviceId: 'ctrl-late-directory', name: '数据库展示名' },
     ]);
+  });
+
+  it('旧协议 presence 临时名不遮蔽同一链路后到的控制端自报名', () => {
+    remoteControlEnabled = true;
+    const { client, feed } = makeFakeClient();
+    wireInboundDispatch(client);
+    const deviceId = '1234567890abcdef';
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    feed(subFrame(deviceId, SUB, ['session:s1']));
+    expect(getActiveControllers()).toEqual([{ deviceId, name: '12345678' }]);
+
+    applyControllerDisplayNamePresence({
+      deviceId,
+      name: 'Old-Host.local',
+      freshness,
+      normalizeName: (name) => name.trim() || null,
+      setDisplayName: setControllerDisplayName,
+      setFallbackDisplayName: setControllerFallbackDisplayName,
+      rememberName,
+      forgetName,
+    });
+    expect(getActiveControllers()).toEqual([{ deviceId, name: 'Old-Host.local' }]);
+    expect(freshness.epoch).toBe(0);
+    expect(rememberName).not.toHaveBeenCalled();
+    expect(forgetName).not.toHaveBeenCalled();
+
+    feed(subFrame(deviceId, SUB, ['session:s2'], 'New-Host.local'));
+    expect(getActiveControllers()).toEqual([{ deviceId, name: 'New-Host.local' }]);
+
+    applyControllerDisplayNamePresence({
+      deviceId,
+      name: 'Older-Host.local',
+      freshness,
+      normalizeName: (name) => name.trim() || null,
+      setDisplayName: setControllerDisplayName,
+      setFallbackDisplayName: setControllerFallbackDisplayName,
+      rememberName,
+      forgetName,
+    });
+    expect(getActiveControllers()).toEqual([{ deviceId, name: 'New-Host.local' }]);
   });
 
   it.each([

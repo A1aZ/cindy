@@ -89,6 +89,57 @@ describe('serverApiFetch', () => {
     );
   });
 
+  it('账号上下文在首个 401 返回前变化时不 refresh 或重试', async () => {
+    let retryContextCurrent = true;
+    mocks.getAccessToken.mockReturnValue('token-a');
+    mocks.netFetch.mockImplementationOnce(async () => {
+      retryContextCurrent = false;
+      return {
+        ok: false,
+        status: 401,
+        json: async () => ({ error: { code: 'TOKEN_EXPIRED' } }),
+      };
+    });
+
+    await expect(
+      serverApiFetch('/api/billing/subscription/resume', {
+        method: 'POST',
+        baseUrl: 'https://billing.example.com',
+        isAuthContextCurrent: () => retryContextCurrent,
+      }),
+    ).rejects.toMatchObject({ code: 'TOKEN_EXPIRED', statusCode: 401 });
+
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.netFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.invalidateSession).not.toHaveBeenCalled();
+  });
+
+  it('refresh 切换账号上下文时不使用新账号 token 重试', async () => {
+    let retryContextCurrent = true;
+    mocks.getAccessToken.mockReturnValue('token-a');
+    mocks.refresh.mockImplementation(async () => {
+      retryContextCurrent = false;
+      return true;
+    });
+    mocks.netFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { code: 'TOKEN_EXPIRED' } }),
+    });
+
+    await expect(
+      serverApiFetch('/api/billing/subscription/resume', {
+        method: 'POST',
+        baseUrl: 'https://billing.example.com',
+        isAuthContextCurrent: () => retryContextCurrent,
+      }),
+    ).rejects.toMatchObject({ code: 'TOKEN_EXPIRED', statusCode: 401 });
+
+    expect(mocks.refresh).toHaveBeenCalledTimes(1);
+    expect(mocks.netFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.invalidateSession).not.toHaveBeenCalled();
+  });
+
   it('refresh 切换区域后重新解析业务端点，避免新 token 重试到旧区域', async () => {
     let baseUrl = 'https://resource.cn.example.com';
     mocks.getAccessToken.mockReturnValueOnce('token-cn').mockReturnValueOnce('token-global');
@@ -156,6 +207,30 @@ describe('serverApiFetch', () => {
     expect(mocks.invalidateSession).toHaveBeenCalledWith('account-unavailable');
   });
 
+  it('旧账号的 ACCOUNT_UNAVAILABLE 响应不退登当前新账号', async () => {
+    let authContextCurrent = true;
+    mocks.getAccessToken.mockReturnValue('token-a');
+    mocks.netFetch.mockImplementationOnce(async () => {
+      authContextCurrent = false;
+      return {
+        ok: false,
+        status: 401,
+        json: async () => ({ error: { code: 'ACCOUNT_UNAVAILABLE' } }),
+      };
+    });
+
+    await expect(
+      serverApiFetch('/api/billing/subscription/resume', {
+        method: 'POST',
+        baseUrl: 'https://billing.example.com',
+        isAuthContextCurrent: () => authContextCurrent,
+      }),
+    ).rejects.toMatchObject({ code: 'ACCOUNT_UNAVAILABLE', statusCode: 401 });
+
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.invalidateSession).not.toHaveBeenCalled();
+  });
+
   it.each(['INVALID_TOKEN', 'UNAUTHORIZED'])('%s refresh 一次后重试', async (code) => {
     mocks.getAccessToken.mockReturnValueOnce('token-a').mockReturnValueOnce('token-b');
     mocks.refresh.mockResolvedValue(true);
@@ -202,6 +277,37 @@ describe('serverApiFetch', () => {
       }),
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
     expect(mocks.invalidateSession).toHaveBeenCalledWith('resource-unauthorized-after-refresh');
+  });
+
+  it('重试响应返回前账号变化时不退登当前新账号', async () => {
+    let authContextCurrent = true;
+    mocks.getAccessToken.mockReturnValue('token-a');
+    mocks.refresh.mockResolvedValue(true);
+    mocks.netFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 401,
+        json: async () => ({ error: { code: 'TOKEN_EXPIRED' } }),
+      })
+      .mockImplementationOnce(async () => {
+        authContextCurrent = false;
+        return {
+          ok: false,
+          status: 401,
+          json: async () => ({ error: { code: 'UNAUTHORIZED' } }),
+        };
+      });
+
+    await expect(
+      serverApiFetch('/api/billing/subscription/resume', {
+        method: 'POST',
+        baseUrl: 'https://billing.example.com',
+        isAuthContextCurrent: () => authContextCurrent,
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', statusCode: 401 });
+
+    expect(mocks.netFetch).toHaveBeenCalledTimes(2);
+    expect(mocks.invalidateSession).not.toHaveBeenCalled();
   });
 
   it.each([

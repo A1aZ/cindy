@@ -5,6 +5,15 @@ import { BILLING_INVOKE } from '../../../shared/billing.js';
 import { ServerApiError } from '../../serverApiClient.js';
 import { createBillingHandlers } from '../index.js';
 
+const ownerBoundary = vi.hoisted(() => ({
+  pending: false,
+  scopeKey: 'cloud:user-a:1',
+}));
+
+vi.mock('../../appSessionState.js', () => ({
+  activeOwnerScopeKey: () => ownerBoundary.scopeKey,
+  isAppSessionBoundaryPending: () => ownerBoundary.pending,
+}));
 vi.mock('../../clientEndpointsService.js', () => ({ getClientEndpoint: vi.fn() }));
 vi.mock('../../serverApiClient.js', () => {
   class ServerApiError extends Error {
@@ -20,6 +29,8 @@ vi.mock('../../serverApiClient.js', () => {
 });
 
 function harness() {
+  ownerBoundary.pending = false;
+  ownerBoundary.scopeKey = 'cloud:user-a:1';
   const mainFrame = { routingId: 1 };
   const mainWebContents = { id: 1, mainFrame };
   const mainWindow = {
@@ -303,7 +314,15 @@ describe('billing IPC', () => {
       redactErrorDetails: true,
       method: 'POST',
       allowedRedactedErrorCodes: ['RESUME_NOT_AVAILABLE'],
+      isAuthContextCurrent: expect.any(Function),
     });
+    const isAuthContextCurrent = fetch.mock.calls[0]?.[1]?.isAuthContextCurrent;
+    expect(isAuthContextCurrent?.()).toBe(true);
+    ownerBoundary.scopeKey = 'cloud:user-b:2';
+    expect(isAuthContextCurrent?.()).toBe(false);
+    ownerBoundary.scopeKey = 'cloud:user-a:1';
+    ownerBoundary.pending = true;
+    expect(isAuthContextCurrent?.()).toBe(false);
   });
 
   it('preserves the safe subscription-resume rejection code across IPC', async () => {

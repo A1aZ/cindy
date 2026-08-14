@@ -80,6 +80,80 @@ export function SidebarTopNav({
 
   const showPinned = section !== 'scrollable';
   const showScrollable = section !== 'pinned';
+  const pinSearch = section === 'scrollable' && search.query.trim().length > 0;
+  const automationsRow = showScrollable ? (
+    <button
+      onClick={() => navigate('/cc-agent/scheduled')}
+      className={cn(ROW_CLASS, onScheduleMatch && ROW_ACTIVE_CLASS)}
+      aria-label={t('ccAgent.layout.automations')}
+      aria-current={onScheduleMatch ? 'page' : undefined}
+    >
+      <Timer
+        size={15}
+        strokeWidth={1.8}
+        className={cn(
+          'shrink-0',
+          // 选中反相胶囊上图标跟随 active 前景(图标自带显式色,行级 text 覆盖不到它)。
+          onScheduleMatch
+            ? 'text-sidebar-item-active-foreground'
+            : 'text-[var(--sidebar-nav-text)]',
+        )}
+      />
+      <span className="leading-none">{t('ccAgent.layout.automations')}</span>
+    </button>
+  ) : null;
+  const pluginsRow = showScrollable ? (
+    <button
+      onClick={() => navigateToView('plugins')}
+      className={cn(ROW_CLASS, activeKey === 'plugins' && ROW_ACTIVE_CLASS)}
+      aria-label={t('sidebar.tabs.plugins')}
+      aria-current={activeKey === 'plugins' ? 'page' : undefined}
+    >
+      <Plug
+        size={15}
+        strokeWidth={1.8}
+        className={cn(
+          'shrink-0',
+          // 同上:选中反相胶囊上图标跟随 active 前景。
+          activeKey === 'plugins'
+            ? 'text-sidebar-item-active-foreground'
+            : 'text-[var(--sidebar-nav-text)]',
+        )}
+      />
+      <span className="leading-none">{t('sidebar.tabs.plugins')}</span>
+      {hasGhostUnread && <AttentionDot size={6} className="ml-auto mr-0.5" />}
+    </button>
+  ) : null;
+  const searchRow = showScrollable ? (
+    <SidebarInlineSearch
+      search={search}
+      allKnownProjects={allKnownProjects}
+      openSignal={openSignal}
+      onSearchActive={ensureConversationView}
+    />
+  ) : null;
+
+  // 滚动段把搜索行拆成滚动容器的直接子项:sticky 才能钉在结果列表上,
+  // 不被短导航父盒的底边提前带走。输入框仍是同一份实例。
+  if (section === 'scrollable') {
+    return (
+      <>
+        <div className="flex flex-col gap-0.5 pr-3 pl-3">
+          {automationsRow}
+          {pluginsRow}
+        </div>
+        <div
+          className={cn(
+            // -mt-1.5 抵消滚动容器 gap-2,与上面两行仍保持 gap-0.5。
+            'px-3 pb-2.5 -mt-1.5',
+            pinSearch && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]',
+          )}
+        >
+          {searchRow}
+        </div>
+      </>
+    );
+  }
 
   return (
     // pt-1(原 2.5):顶行 chrome 收窄到 46px 后,列表整体上提贴近顶行(对齐 Codex)。
@@ -90,8 +164,6 @@ export function SidebarTopNav({
       className={cn(
         'flex flex-col gap-0.5 pt-1 pr-3 pl-3',
         section === 'pinned' ? 'pb-0.5' : 'pb-2.5',
-        // 滚动段接在固定段下方,不再需要顶部 chrome 让位。
-        section === 'scrollable' && 'pt-0',
       )}
     >
       {showPinned && (
@@ -106,71 +178,9 @@ export function SidebarTopNav({
           <span className="leading-none">{t('ccAgent.layout.new')}</span>
         </button>
       )}
-
-      {showScrollable && (
-        <>
-          {/* 2. 自动任务 —— 仅作导航入口,不再在此提示自动化任务的运行状态(dot 已移除,
-          未读 / 运行状态由下方各 schedule 组头承载)。 */}
-          <button
-            onClick={() => navigate('/cc-agent/scheduled')}
-            className={cn(ROW_CLASS, onScheduleMatch && ROW_ACTIVE_CLASS)}
-            aria-label={t('ccAgent.layout.automations')}
-            aria-current={onScheduleMatch ? 'page' : undefined}
-          >
-            <Timer
-              size={15}
-              strokeWidth={1.8}
-              className={cn(
-                'shrink-0',
-                // 选中反相胶囊上图标跟随 active 前景(图标自带显式色,行级 text 覆盖不到它)。
-                onScheduleMatch
-                  ? 'text-sidebar-item-active-foreground'
-                  : 'text-[var(--sidebar-nav-text)]',
-              )}
-            />
-            <span className="leading-none">{t('ccAgent.layout.automations')}</span>
-          </button>
-
-          {/* 3. Plugins —— Plugin / Skill 在页面顶部 Tab 内切换 */}
-          <button
-            onClick={() => navigateToView('plugins')}
-            className={cn(ROW_CLASS, activeKey === 'plugins' && ROW_ACTIVE_CLASS)}
-            aria-label={t('sidebar.tabs.plugins')}
-            aria-current={activeKey === 'plugins' ? 'page' : undefined}
-          >
-            <Plug
-              size={15}
-              strokeWidth={1.8}
-              className={cn(
-                'shrink-0',
-                // 同上:选中反相胶囊上图标跟随 active 前景。
-                activeKey === 'plugins'
-                  ? 'text-sidebar-item-active-foreground'
-                  : 'text-[var(--sidebar-nav-text)]',
-              )}
-            />
-            <span className="leading-none">{t('sidebar.tabs.plugins')}</span>
-            {hasGhostUnread && <AttentionDot size={6} className="ml-auto mr-0.5" />}
-          </button>
-
-          {/* 4. 搜索 —— 静息态与上面三行同款;hover / 聚焦就地展开成搜索框。
-              有查询时只钉这一行:自动任务 / 插件仍随结果滚走,输入框不卸载。 */}
-          <div
-            className={cn(
-              section === 'scrollable' &&
-                search.query.trim().length > 0 &&
-                'sticky top-0 z-30 -mx-3 bg-[var(--cmd-palette-bg)] px-3',
-            )}
-          >
-            <SidebarInlineSearch
-              search={search}
-              allKnownProjects={allKnownProjects}
-              openSignal={openSignal}
-              onSearchActive={ensureConversationView}
-            />
-          </div>
-        </>
-      )}
+      {automationsRow}
+      {pluginsRow}
+      {searchRow}
     </div>
   );
 }

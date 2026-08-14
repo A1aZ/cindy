@@ -83,11 +83,13 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     const scrollableRowsIdx = sidebarUpperSource.indexOf('<SidebarTopNav section="scrollable" />');
     expect(scrollRefIdx).toBeGreaterThanOrEqual(0);
     expect(scrollableRowsIdx).toBeGreaterThan(scrollRefIdx);
-    // 搜索打开时只钉搜索行,结果替换列表;打开查询时滚回顶部,不再用 overlay 盖住输入框。
-    expect(topNavSource).toContain(
-      "section === 'scrollable' &&\n                search.query.trim().length > 0 &&\n                'sticky top-0 z-30 -mx-3 bg-[var(--cmd-palette-bg)] px-3'",
-    );
-    expect(sidebarUpperSource).toContain('sidebarScrollRef.current?.scrollTo({ top: 0 })');
+    // 搜索打开时搜索行作为滚动容器直接子项 sticky;打开查询时记下并复位滚动,
+    // 清查询时还原,不再用 overlay 盖住输入框。
+    expect(topNavSource).toContain("const pinSearch = section === 'scrollable' && search.query.trim().length > 0");
+    expect(topNavSource).toContain("pinSearch && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'");
+    expect(topNavSource).toContain('if (section === \'scrollable\')');
+    expect(sidebarUpperSource).toContain('searchScrollRestoreRef.current = el.scrollTop');
+    expect(sidebarUpperSource).toContain("el.scrollTo({ top: searchScrollRestoreRef.current })");
     expect(sidebarUpperSource).toContain('{searchActive ? (');
     expect(sidebarUpperSource).toContain('<div hidden={searchActive}>');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');

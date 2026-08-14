@@ -643,7 +643,7 @@ export class PiAgent extends BaseAgent {
     nativeProviders: PiNativeProviderSpec[] = [],
     retainedRuntimeModel?: ModelDescriptor,
     gatewayProviderId?: string | null,
-    opts: { remote?: boolean; fileOps?: PiRemoteFileOps } = {},
+    opts: { remote?: boolean; fileOps?: PiRemoteFileOps; preview?: boolean } = {},
   ): Promise<{
     gatewayImageInputByModel: Map<string, boolean>;
     gatewayApiByModel: Map<string, 'anthropic-messages' | 'openai-responses'>;
@@ -769,25 +769,28 @@ export class PiAgent extends BaseAgent {
     }
     const modelsJsonPath = joinRemotePosixPath(agentHome, 'models.json');
     const modelsJsonContent = JSON.stringify({ providers }, null, 2) + '\n';
-    // 诊断(排查 LAZY_CREATE_FAILED):远端写前留痕 —— 确认 writeModelsJson 是否
-    // 执行、endpoint 是否有值、路径形态。
-    this.deps.logger.info?.('pi writeModelsJson', {
-      remote: opts.remote === true,
-      hasFileOps: Boolean(opts.fileOps),
-      endpointSet: Boolean(endpoint),
-      modelsJsonPath,
-      providerKeys: Object.keys(providers),
-    });
-    if (opts.fileOps) {
-      await opts.fileOps.mkdirp(agentHome);
-      // fileOps 远端写入内部已 umask 077(创建即 600,无 TOCTOU —— R5 H-1)。
-      await opts.fileOps.writeFile(modelsJsonPath, modelsJsonContent);
-      this.deps.logger.info?.('pi writeModelsJson done', { modelsJsonPath });
-    } else {
-      await fs.mkdir(agentHome, { recursive: true });
-      // 控制面文件:显式 600,防同机其他用户读 BYOM baseUrl / provider 路由
-      // (R5 安全审计 H-5)。
-      await fs.writeFile(modelsJsonPath, modelsJsonContent, { mode: 0o600 });
+    const modelsJsonHash = createHash('sha256').update(modelsJsonContent).digest('hex');
+    if (!opts.preview) {
+      // 诊断(排查 LAZY_CREATE_FAILED):远端写前留痕 —— 确认 writeModelsJson 是否
+      // 执行、endpoint 是否有值、路径形态。
+      this.deps.logger.info?.('pi writeModelsJson', {
+        remote: opts.remote === true,
+        hasFileOps: Boolean(opts.fileOps),
+        endpointSet: Boolean(endpoint),
+        modelsJsonPath,
+        providerKeys: Object.keys(providers),
+      });
+      if (opts.fileOps) {
+        await opts.fileOps.mkdirp(agentHome);
+        // fileOps 远端写入内部已 umask 077(创建即 600,无 TOCTOU —— R5 H-1)。
+        await opts.fileOps.writeFile(modelsJsonPath, modelsJsonContent);
+        this.deps.logger.info?.('pi writeModelsJson done', { modelsJsonPath });
+      } else {
+        await fs.mkdir(agentHome, { recursive: true });
+        // 控制面文件:显式 600,防同机其他用户读 BYOM baseUrl / provider 路由
+        // (R5 安全审计 H-5)。
+        await fs.writeFile(modelsJsonPath, modelsJsonContent, { mode: 0o600 });
+      }
     }
     return {
       gatewayImageInputByModel,
@@ -795,7 +798,7 @@ export class PiAgent extends BaseAgent {
       // 轮 42 P1(codex-connector):models.json 内容 hash 纳入远端 daemon 启动身份
       // —— BYOM baseUrl/wire 或 gateway endpoint 变更会改写此文件, 但 env/cmd
       // 可能不变; 不加这个 daemon 会误判纯 attach 用旧配置。
-      modelsJsonHash: createHash('sha256').update(modelsJsonContent).digest('hex'),
+      modelsJsonHash,
     };
   }
 
@@ -1109,7 +1112,10 @@ export class PiAgent extends BaseAgent {
     // → 纯 attach 复用同一路径, 无并发写; envHash 不同(如模型变更) → kill
     // 先于 spawn, 旧进程已死, 路径复用安全。本地会话无 envHash 约束, 保持
     // randomBytes 隔离(多实例并发启动)。
-    const configHome = remote
+    // 远端再叠 models.json hash:startSession 在 pi/ensure 之前就会写
+    // models.json, 若只按 sessionId 分目录, 另一实例改路由会先覆盖仍在跑的
+    // 旧 Pi / 子代理热读快照。
+    let configHome = remote
       ? joinRemotePosixPath(agentHome, 'run-tmp', stableSessionPathSegment(opts.sessionId))
       : joinRemotePosixPath(agentHome, 'run-tmp', randomBytes(8).toString('hex'));
     let configHomeCleaned = false;
@@ -1137,6 +1143,20 @@ export class PiAgent extends BaseAgent {
     // 失败的孤儿)由本会话 close 路径的低频清理覆盖, 不牺牲活跃会话。
     // 注:断链残留的孤儿 configHome 会累积 —— 但删错活跃会话是毁任务,
     // 宁可残留(可由用户手动清或未来加 lease 机制), 不误删。
+    if (remote) {
+      const preview = await this.writeModelsJson(
+        configHome,
+        nativeProviders,
+        retainedRuntimeModel,
+        authProviderId,
+        { remote, fileOps, preview: true },
+      );
+      configHome = joinRemotePosixPath(
+        agentHome,
+        'run-tmp',
+        `${stableSessionPathSegment(opts.sessionId)}-${preview.modelsJsonHash.slice(0, 16)}`,
+      );
+    }
     const { gatewayImageInputByModel, gatewayApiByModel, modelsJsonHash } = await this.writeModelsJson(
       configHome,
       nativeProviders,

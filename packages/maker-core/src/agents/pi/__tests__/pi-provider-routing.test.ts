@@ -1319,6 +1319,59 @@ describe('Pi provider-aware model routing', () => {
       .toContain(capturedRemoteEnvs[1]!.CINDY_PI_PERMISSION_HASH);
   });
 
+  it('isolates remote configHome by models.json hash so a later route change does not overwrite the live child', async () => {
+    const remoteStub: import('../transport.js').PiTransport = {
+      writeLine: async () => {},
+      onLine: () => () => {},
+      onStderr: () => () => {},
+      onClose: () => () => {},
+      close: async () => {},
+      pid: 4321,
+      isClosed: () => false,
+      remoteBinaryPath: '/remote/pi',
+      killRemoteSession: async () => {},
+    };
+    const capturedRemoteEnvs: Array<Record<string, string | undefined>> = [];
+    const startRemote = async (remoteEndpoint: string) => {
+      const base = byomDeps(async () => ({ providers: [], env: {} }));
+      const agent = new PiAgent({
+        ...base,
+        runtimeConfig: { ...base.runtimeConfig, remoteEndpoint },
+        resolveRemotePiBinaryPath: async () => '/remote/pi',
+        getRemotePiTransport: async (_hostId, opts) => {
+          capturedRemoteEnvs.push({ ...(opts.env ?? {}) });
+          return remoteStub;
+        },
+        getRemotePiFileOps: () => ({
+          mkdirp: async () => {},
+          writeFile: async () => {},
+          stat: async () => ({ isFile: true }),
+          rm: async () => {},
+          listDir: async () => [],
+        }),
+      });
+      const handle = await agent.startSession({
+        sessionId: 'remote-config-hash',
+        workingDir: cwd,
+        model: 'local-model',
+        remoteHostId: 'remote-host',
+      });
+      await handle.close();
+    };
+
+    await startRemote('https://gateway-a.example.test');
+    await startRemote('https://gateway-b.example.test');
+    expect(capturedRemoteEnvs).toHaveLength(2);
+    expect(capturedRemoteEnvs[0]!.PI_CODING_AGENT_DIR)
+      .not.toBe(capturedRemoteEnvs[1]!.PI_CODING_AGENT_DIR);
+    expect(capturedRemoteEnvs[0]!.CINDY_PI_MODELS_JSON_HASH)
+      .not.toBe(capturedRemoteEnvs[1]!.CINDY_PI_MODELS_JSON_HASH);
+    expect(capturedRemoteEnvs[0]!.PI_CODING_AGENT_DIR)
+      .toContain((capturedRemoteEnvs[0]!.CINDY_PI_MODELS_JSON_HASH ?? '').slice(0, 16));
+    expect(capturedRemoteEnvs[1]!.PI_CODING_AGENT_DIR)
+      .toContain((capturedRemoteEnvs[1]!.CINDY_PI_MODELS_JSON_HASH ?? '').slice(0, 16));
+  });
+
   it('inlines remote text attachments and rejects local path mentions before dispatch', async () => {
     const remoteStub: import('../transport.js').PiTransport = {
       writeLine: async () => {},

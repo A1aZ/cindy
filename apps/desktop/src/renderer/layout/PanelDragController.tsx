@@ -35,6 +35,7 @@ import {
   moveGhostPaneToRootByKind,
   stackGhostPaneByKind,
   swapPanesByKind,
+  swapRootSplitChildrenByKind,
   type LayoutNode,
 } from '../../shared/layoutTree';
 import { toast } from '@/lib/toast';
@@ -142,7 +143,7 @@ function pointInRect(x: number, y: number, rect: RectLike): boolean {
 
 /**
  * 二维停靠意图：插件之间上/下形成 grid，左/右回到根横排，中心交换槽位。
- * 内置面板保持原有根级交换，不允许被塞进插件纵向列。
+ * 内置面板保持根级交换；落在插件纵向列时交换整列，不把内置面板塞进列内。
  */
 export function computePanelDropIntent(input: {
   pointerX: number;
@@ -161,9 +162,7 @@ export function computePanelDropIntent(input: {
   const sourceGhost = sourceKind.startsWith('ghost:');
   const targetGhost = targetKind.startsWith('ghost:');
   if (!sourceGhost) {
-    return input.sourceIsRootPane &&
-      input.targetIsRootPane &&
-      input.sourceRootIndex !== input.targetRootIndex
+    return input.sourceIsRootPane && input.sourceRootIndex !== input.targetRootIndex
       ? 'swap'
       : null;
   }
@@ -208,8 +207,13 @@ export function computePanelDropZone(
   intent: PanelDropIntent,
   paneRect: RectLike,
   rootRect: RectLike,
+  swapAtRoot = false,
 ): ZoneRect {
-  const base = insetRect(intent === 'root-before' || intent === 'root-after' ? rootRect : paneRect);
+  const base = insetRect(
+    intent === 'root-before' || intent === 'root-after' || (intent === 'swap' && swapAtRoot)
+      ? rootRect
+      : paneRect,
+  );
   switch (intent) {
     case 'stack-before':
       return { ...base, height: base.height / 2 };
@@ -386,7 +390,12 @@ export function PanelDragController({
             targetKind: nextKind,
             zone:
               nextTarget && nextIntent
-                ? computePanelDropZone(nextIntent, nextTarget.paneRect, nextTarget.rootRect)
+                ? computePanelDropZone(
+                    nextIntent,
+                    nextTarget.paneRect,
+                    nextTarget.rootRect,
+                    nextIntent === 'swap' && !sourceKind.startsWith('ghost:'),
+                  )
                 : null,
           });
         }
@@ -423,7 +432,9 @@ export function PanelDragController({
                       targetKindNow,
                       targetIntentNow === 'root-before' ? 'before' : 'after',
                     )
-                  : swapPanesByKind(layout, sourceKind, targetKindNow);
+                  : sourceKind.startsWith('ghost:')
+                    ? swapPanesByKind(layout, sourceKind, targetKindNow)
+                    : swapRootSplitChildrenByKind(layout, sourceKind, targetKindNow);
             if (op.applied) {
               void window.electronAPI.layout
                 .set(op.layout)

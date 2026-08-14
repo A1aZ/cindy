@@ -559,17 +559,27 @@ describe('插件面板 grid 停靠', () => {
     expect(validateLayout(result.layout)).toEqual({ ok: true });
   });
 
-  it('数据层拒绝把 chat/right-tabs 交换进插件纵向列', () => {
+  it('内置面板可与整个插件纵向列交换，但仍拒绝进入列内槽位', () => {
     const stacked = stackGhostPaneByKind(
       layoutWithTwoGhostPanes(),
       'ghost:alpha',
       'ghost:beta',
       'before',
     );
+    const before = stacked.layout.content as SplitNode;
+    const columnFraction = before.children[0].fraction;
+    const chatFraction = before.children[1].fraction;
 
     expect(swapPanesByKind(stacked.layout, 'chat-main', 'ghost:alpha').applied).toBe(false);
-    expect(countPanelKind(stacked.layout, 'chat-main')).toBe(1);
-    expect(validateLayout(stacked.layout)).toEqual({ ok: true });
+    const result = swapRootSplitChildrenByKind(stacked.layout, 'chat-main', 'ghost:alpha');
+    expect(result.applied).toBe(true);
+    const root = result.layout.content as SplitNode;
+    expect(root.children[0].node).toMatchObject({ type: 'pane', panelKind: 'chat-main' });
+    expect(root.children[0].fraction).toBeCloseTo(chatFraction);
+    expect(root.children[1].node).toMatchObject({ type: 'split', direction: 'column' });
+    expect(root.children[1].fraction).toBeCloseTo(columnFraction);
+    expect(countPanelKind(result.layout, 'chat-main')).toBe(1);
+    expect(validateLayout(result.layout)).toEqual({ ok: true });
   });
 
   it('上下停靠拒绝内置面板或缺失目标，保持 chat-main 不变量', () => {

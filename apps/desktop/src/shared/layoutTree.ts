@@ -510,9 +510,9 @@ export function removeRootSplitPaneByKind(layout: Layout, kind: PanelKind): Layo
 }
 
 /**
- * 交换 content 根分割中两个 panelKind 对应 child 的位置(N 面板拖拽换位的
- * 提交操作)。child 整体交换 —— fraction 随面板走(换位不改变各自宽度份额)。
- * 任一 kind 不在根分割里则拒绝。
+ * 交换 content 根分割中两个 panelKind 所在 child 的位置(N 面板拖拽换位的
+ * 提交操作)。kind 可以是根 pane，也可以位于根级插件 column 内；后者交换整列，
+ * 避免把内置面板塞进 ghost-only column。child 整体交换，fraction 随区域走。
  */
 export function swapRootSplitChildrenByKind(
   layout: Layout,
@@ -522,17 +522,11 @@ export function swapRootSplitChildrenByKind(
   if (layout.content.type !== 'split') {
     return { layout, applied: false, reason: 'content is not a split' };
   }
-  const indexOf = (kind: PanelKind) =>
-    layout.content.type === 'split'
-      ? layout.content.children.findIndex(
-          (c) => c.node.type === 'pane' && c.node.panelKind === kind,
-        )
-      : -1;
-  const a = indexOf(kindA);
-  const b = indexOf(kindB);
+  const a = rootChildIndexContainingKind(layout, kindA);
+  const b = rootChildIndexContainingKind(layout, kindB);
   if (a < 0 || b < 0)
     return { layout, applied: false, reason: `pane kind not found: ${a < 0 ? kindA : kindB}` };
-  if (a === b) return { layout, applied: false, reason: 'cannot swap a pane with itself' };
+  if (a === b) return { layout, applied: false, reason: 'cannot swap within the same root child' };
   const next = structuredClone(layout);
   const split = next.content as SplitNode;
   [split.children[a], split.children[b]] = [split.children[b], split.children[a]];

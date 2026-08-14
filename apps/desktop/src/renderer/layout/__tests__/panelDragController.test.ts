@@ -99,7 +99,7 @@ describe('插件面板二维停靠落点', () => {
     expect(computePanelDropIntent({ ...base, pointerX: 300, pointerY: 400 })).toBe('swap');
   });
 
-  it('内置面板只保留根级交换，不进入插件 column', () => {
+  it('内置面板与根 pane 或整个插件 column 做根级交换', () => {
     expect(
       computePanelDropIntent({
         ...base,
@@ -115,6 +115,17 @@ describe('插件面板二维停靠落点', () => {
         pointerX: 300,
         pointerY: 400,
         sourceKind: 'chat-main',
+        targetIsRootPane: false,
+      }),
+    ).toBe('swap');
+    expect(
+      computePanelDropIntent({
+        ...base,
+        pointerX: 300,
+        pointerY: 400,
+        sourceKind: 'chat-main',
+        sourceRootIndex: 1,
+        targetRootIndex: 1,
         targetIsRootPane: false,
       }),
     ).toBeNull();
@@ -144,6 +155,16 @@ describe('插件面板二维停靠落点', () => {
       top: 106,
       width: 194,
       height: 588,
+    });
+  });
+
+  it('内置面板交换插件 grid 时高亮整个根级列，而不是单个插件 pane', () => {
+    const columnRect = { left: 80, top: 80, width: 440, height: 640, right: 520, bottom: 720 };
+    expect(computePanelDropZone('swap', paneRect, columnRect, true)).toMatchObject({
+      left: 86,
+      top: 86,
+      width: 428,
+      height: 628,
     });
   });
 });

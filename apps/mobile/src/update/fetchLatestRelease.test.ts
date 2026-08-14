@@ -81,9 +81,9 @@ describe('fetchLatestRelease —— 区分"无更新"与"连不上"', () => {
 });
 
 describe('probeBetaChannel —— 打开 beta 前的可用性探测', () => {
-  it('服务端 404(无 beta 记录)仍视为可达(通道已部署、暂无可发布记录)', async () => {
+  it('404(无 beta 记录)视为不可达——「未部署」与「未发版本」不可区分,都不该开', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => resp(404)));
-    await expect(probeBetaChannel('ios', 8000, BASE)).resolves.toBe(true);
+    await expect(probeBetaChannel('ios', 8000, BASE)).resolves.toBe(false);
   });
 
   it('200 返回记录视为可达', async () => {

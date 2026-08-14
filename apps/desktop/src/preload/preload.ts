@@ -2078,12 +2078,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ── IM Binding (feishu /ctr 接管 → desktop session 路由) ──
   // 整体接管态由 main/im/binding.ts 维护; renderer 用这套 API 实时知道
   // 某个 sessionId 是否被某 IM 用户接管 (用来渲染 mask + 收回按钮)。
-  /** renderer 启动/cc prefs 变化时推送当前 cc vendor 偏好给 main，供接管新建 session 时使用 */
+  /**
+   * renderer 启动/cc prefs 变化时推送当前 cc vendor 偏好给 main，供接管新建 session
+   * 时使用。providerId 必须随模型一起推送：/ctr 新建会话靠它把路由钉在用户选择的
+   * 供应商上（缺省时隐式路由可能落到官方网关，而模型只在用户供应商存在 → 400）。
+   */
   syncDesktopCcPrefs: (prefs: {
     model: string;
     effort: string;
     permissionMode: string;
     fastMode: boolean;
+    providerId: string | null;
   }): void => ipcRenderer.send('desktop:cc-prefs-changed', prefs),
 
   /**

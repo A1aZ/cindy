@@ -46,6 +46,12 @@ const MAX_MEDIA_RESULTS = 16;
 const MAX_LOCAL_MEDIA_INPUTS = 16;
 const MAX_LOCAL_MEDIA_INPUT_TOTAL_BYTES = 64 * 1024 * 1024;
 const FORBIDDEN_PATH_SEGMENTS = new Set(['__proto__', 'prototype', 'constructor']);
+const TERMINAL_MEDIA_RESULT_ERRORS = new Set([
+  'MEDIA_RESULT_INVALID',
+  'MEDIA_RESULT_MISSING',
+  'MEDIA_RESULT_TOO_LARGE',
+  'RESPONSE_TOO_LARGE',
+]);
 
 interface MediaConnection {
   baseUrl: string;
@@ -783,7 +789,24 @@ async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record
     const rawStatus = valuesAtPath(response, guide.statusPath)[0];
     const status = typeof rawStatus === 'string' ? rawStatus : '';
     if (guide.successValues.includes(status)) {
-      const media = await materializeResults(response, guide.media);
+      let media: Record<string, unknown>;
+      try {
+        media = await materializeResults(response, guide.media);
+      } catch (error) {
+        if (
+          error instanceof MediaInvocationError &&
+          TERMINAL_MEDIA_RESULT_ERRORS.has(error.code)
+        ) {
+          await transitionMediaInvocation({
+            id: invocation.id,
+            owner: invocation.owner,
+            from: 'pending',
+            to: 'failed',
+          });
+          return failure(error.code, error.message);
+        }
+        throw error;
+      }
       await transitionMediaInvocation({
         id: invocation.id,
         owner: invocation.owner,

@@ -498,4 +498,53 @@ describe('Cindy Core media invocation state and security boundary', () => {
       'https://gateway.example.com/video/tasks/task-1',
     );
   });
+
+  it('异步任务成功但媒体结果确定无效时终止 invocation，不诱导重复 poll', async () => {
+    const asyncOperation = {
+      ...operation({
+        mode: 'async',
+        taskIdPath: ['task_id'],
+        poll: {
+          method: 'GET',
+          path: '/video/tasks/{taskId}',
+          statusPath: ['status'],
+          successValues: ['succeeded'],
+          failureValues: ['failed'],
+          recommendedIntervalMs: 10,
+          timeoutMs: 5_000,
+          maxResponseBytes: 1_048_576,
+          media: [{ path: ['video'], encoding: 'base64', kind: 'video' }],
+        },
+      }, '/video/tasks'),
+      capability: 'video.generate',
+    };
+    mocks.models.mockResolvedValue([
+      { id: 'image-model', name: 'Video Model', mode: 'video_generation' },
+    ]);
+    mocks.guide.mockResolvedValue(resolvedGuide(asyncOperation));
+    mocks.outboundFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({ task_id: 'task-2' }), { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ status: 'succeeded' }), { status: 200 }),
+      );
+
+    const prepared = await callCindyMedia({
+      action: 'prepare',
+      modelId: 'image-model',
+      capability: 'video.generate',
+    });
+    const invocationId = prepared.invocation_id as string;
+    await callCindyMedia({ action: 'request', invocationId, body: { content: [] } });
+
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'MEDIA_RESULT_MISSING',
+      retryable: false,
+    });
+    expect(mocks.rows.get(invocationId)?.state).toBe('failed');
+    await expect(callCindyMedia({ action: 'poll', invocationId })).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'INVOCATION_NOT_PENDING',
+    });
+  });
 });

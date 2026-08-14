@@ -587,6 +587,33 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
     }
   });
 
+  it('LRU 降级/重开后重建的 running wake 任务终态 → 不误标跨主 turn,wake 失败仍能清桥接', async () => {
+    // Codex P1:renderer 错过主 turn 终态 Done(如 LRU 降级/重开后
+    // seedBackgroundTaskSnapshots 重建 running local_agent)时,agentStatus.status 仍是
+    // 初始空串。旧条件 status!=='Done' 会把它当「pre-Done 空闲」误标
+    // pendingTaskWakeDuringTurn;wake turn 随后失败(从未 isRunning:true)时,终态 Done
+    // 只退休标记、却因 !pendingTaskWakeDuringTurn 恒为 false 无法清除 pendingTaskWake,
+    // 会话永久卡 running/Stop。修复:初始态(status==='')不算「主 turn 尚未越过」。
+    const sid = `wake-lru-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // 无任何 status update —— 模拟 renderer 错过主 turn,agentStatus 仍是初始态
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      const recreated = makerChatStore.getSnapshot(sid);
+      expect(recreated.pendingTaskWake).toBe(true);
+      // 修复点:初始态不误标跨主 turn
+      expect(recreated.pendingTaskWakeDuringTurn).toBe(false);
+
+      // wake turn 失败:SDK 直接推 Done,从未推 isRunning:true → 桥接必须被清除,不永久转圈
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterWakeFail = makerChatStore.getSnapshot(sid);
+      expect(afterWakeFail.pendingTaskWake).toBe(false);
+      expect(afterWakeFail.pendingTaskWakeDuringTurn).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
   it('local_bash 后台任务不折算:主 turn 结束即 stopped(dev server 不永转)', async () => {
     const sid = `bash-${Math.random().toString(36).slice(2, 8)}`;
     try {

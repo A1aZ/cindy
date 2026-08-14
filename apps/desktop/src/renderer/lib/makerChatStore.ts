@@ -4855,8 +4855,13 @@ export function handleStreamEvent(
       // 的 wake 终态才算「跨主 turn」——紧接着的 Done 是主轮自己的 Done,桥接必须
       // 跨过它继续存活。主轮 Done 已经越过(!isRunning && status==='Done')之后才到
       // 的 wake 终态属于「wake turn 从未启动即失败」,不标记,好让后续 Done 能清除桥接。
+      // status==='' 是初始态(本 renderer 从未观察到任何 turn):LRU 降级/重开后
+      // seedBackgroundTaskSnapshots 重建 running 任务时 agentStatus 仍是初始值,若把
+      // 它也当成「pre-Done 空闲」,会把重建的 wake 任务误标成跨主 turn,wake turn 失败
+      // 后桥接无法清除、会话永久卡 running/Stop。初始态不算「主 turn 尚未越过」。
       const mainTurnDoneNotCrossed =
-        state.agentStatus.isRunning || state.agentStatus.status !== 'Done';
+        state.agentStatus.isRunning ||
+        (state.agentStatus.status !== 'Done' && state.agentStatus.status !== '');
       return {
         ...state,
         lastAgentMeta: incomingMeta ?? state.lastAgentMeta,

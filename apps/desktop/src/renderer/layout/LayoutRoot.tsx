@@ -168,19 +168,19 @@ export function normalizeSubMinFractions(
     (c) => c.node.type === 'pane' && c.node.panelKind === 'chat-main',
   );
   if (chatIndex < 0) return null;
+  const nodeIsRegistered = (node: LayoutNode): boolean =>
+    node.type === 'pane'
+      ? isRegistered(node.panelKind)
+      : node.children.some((child) => nodeIsRegistered(child.node));
   // 在场份额的比例尺(share × scale = 树份额)。此处不能复用 activeSplitLedger:
   // 自愈是纯函数,可见性判定由入参 isRegistered 提供(测试注入)。
   const scale = children
-    .filter((c) => c.node.type !== 'pane' || isRegistered(c.node.panelKind))
+    .filter((c) => nodeIsRegistered(c.node))
     .reduce((sum, c) => sum + c.fraction, 0);
   if (!(scale > 0)) return null;
 
   let neededTotal = 0; // 在场份额口径的缺口总额
   const bumps = new Map<number, number>(); // treeIndex → 目标在场份额
-  const nodeIsRegistered = (node: LayoutNode): boolean =>
-    node.type === 'pane'
-      ? isRegistered(node.panelKind)
-      : node.children.some((child) => nodeIsRegistered(child.node));
   children.forEach((child, index) => {
     const node = child.node;
     if (node.type === 'pane' && node.panelKind === 'chat-main') return;
@@ -689,7 +689,7 @@ export function LayoutRoot({ suppressNonChatPanels = false }: LayoutRootProps = 
   // isPanelKindVisible 的隐式数据源(模块级镜像),必须进 deps 才能感知抽离变化。
   const rootWidths = useMemo(
     () => computeRootWidths(layout, liveFractions, avail),
-    [layout, liveFractions, avail, ghostWindowsState, ghostBubbleState],
+    [layout, liveFractions, avail, ghostBubbleState, ghostSyncVersion, ghostWindowsState],
   );
   // chat 实际渲染宽 ≈ 可用宽 − 各在场非 chat 面板宽度之和(拖缝余量的兜底估值,
   // 见 RootDividerPropsExtra;起拖优先实测元素矩形)。

@@ -374,8 +374,9 @@ export function ImDefaultSettingsSection({
       </div>
 
       {/* 飞书专属: 群聊 /ctr 新建会话的权限档(默认自动审批)。群上下文含成员
-          可控内容, 完全访问档会在群轮次被强确认策略拒绝(报错 + 私聊修复卡)。
-          共享 PermissionSelector — 权限语义与新建对话工具栏同一份。 */}
+          可控内容; 用户显式选择「完全访问」时群护栏取缔(不挂强确认策略, 直接
+          执行), 防注入过滤仍独立生效。共享 PermissionSelector — 权限语义与
+          新建对话工具栏同一份。 */}
       {channel === 'feishu' && (
         <div className="flex flex-col gap-2">
           <span className="text-12 font-medium text-[var(--text-secondary)]">

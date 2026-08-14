@@ -857,6 +857,34 @@ export function createTurnRunner(
    * 典型: 接管模式下 desktop 排队消息和渠道排队消息在同一个 done 后争抢) →
    * 退回队首, 等下一个 done/error 或 retry timer 再派发, 不报错。
    */
+  /**
+   * 群护栏取缔(feishu): 渠道通过 turnPolicyOptionalForMode 声明「该权限档下
+   * 强确认策略可选」时, dispatch 前按会话当前权限档决定是否真正挂策略 —
+   * 返回 undefined = 不挂, maker 不再 fail-closed, 按用户显式选择直接执行。
+   * 群上下文的防注入过滤与包裹独立于策略, 照常生效; 查档失败保持挂策略
+   * (fail-closed 兜底)。其它渠道不实现该钩子, 行为不变。
+   */
+  async function resolveEffectiveTurnPolicy(
+    item: QueuedSend,
+  ): Promise<TurnPermissionPolicy | undefined> {
+    if (!item.turnPermissionPolicy || !adapter.turnPolicyOptionalForMode) {
+      return item.turnPermissionPolicy;
+    }
+    try {
+      const row = await repo.peekSessionById(item.rowId);
+      if (row && adapter.turnPolicyOptionalForMode(row.permissionMode)) {
+        log.info(
+          `turn policy skipped by channel (mode=${row.permissionMode}) session=${item.rowId.slice(-8)}`,
+        );
+        return undefined;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.warn(`resolveEffectiveTurnPolicy peek failed (keep policy): ${msg}`);
+    }
+    return item.turnPermissionPolicy;
+  }
+
   async function dispatchQueuedSend(
     state: SessionState,
     userId: string,
@@ -932,15 +960,19 @@ export function createTurnRunner(
           )
         : withHandoff;
 
+      // 群护栏取缔(飞书): 按会话当前权限档决定是否真正挂强确认策略, 见
+      // resolveEffectiveTurnPolicy。不挂时走与 DM 轮次相同的无策略路径。
+      const effectiveTurnPolicy = await resolveEffectiveTurnPolicy(item);
+
       const sendResult = await state.makerSession.send(outgoingMessage as typeof item.userMessage, {
         planMode: false,
-        ...(item.turnPermissionPolicy ? { turnPermissionPolicy: item.turnPermissionPolicy } : {}),
+        ...(effectiveTurnPolicy ? { turnPermissionPolicy: effectiveTurnPolicy } : {}),
         beforeProviderStart: async () => {
           // 策略轮持一张 host turn lease:期间 setPermissionMode 切到 agent 声明为
           // turnPermissionPolicy-unsupported 的档位(如 Pi Full Access)会被阻塞到本轮
           // 终态,堵死"热切到 bypass 让 bridge 直接放行、策略连冒泡机会都没有"的绕过。
           // 两个 surface 都需要:channel 与 desktop 的策略同样必须扛住热切。
-          if (item.turnPermissionPolicy) {
+          if (effectiveTurnPolicy) {
             item.turn.hostTurnLeaseRelease = state.makerSession.acquireTurnLease();
           }
           if (item.groupHistoryAccess) {
@@ -951,21 +983,21 @@ export function createTurnRunner(
             });
           }
           item.turn.interactionRouteLease =
-            item.turnPermissionPolicy?.confirmationSurface === 'desktop'
+            effectiveTurnPolicy?.confirmationSurface === 'desktop'
               ? beginInteractionRoute(state.makerSession, {
                   route: {
                     sessionId: rowId,
                     turnId: item.turn.turnId,
-                    origin: item.turnPermissionPolicy.origin,
+                    origin: effectiveTurnPolicy.origin,
                     interactionSurface: 'desktop',
-                    ...(item.turnPermissionPolicy.confirmationTimeoutMs
+                    ...(effectiveTurnPolicy.confirmationTimeoutMs
                       ? {
-                          timeoutMs: item.turnPermissionPolicy.confirmationTimeoutMs,
+                          timeoutMs: effectiveTurnPolicy.confirmationTimeoutMs,
                         }
                       : {}),
-                    ...(item.turnPermissionPolicy.onInteractionStateChange
+                    ...(effectiveTurnPolicy.onInteractionStateChange
                       ? {
-                          onStateChange: item.turnPermissionPolicy.onInteractionStateChange,
+                          onStateChange: effectiveTurnPolicy.onInteractionStateChange,
                         }
                       : {}),
                   },
@@ -974,20 +1006,20 @@ export function createTurnRunner(
                   route: {
                     sessionId: rowId,
                     turnId: item.turn.turnId,
-                    origin: item.turnPermissionPolicy?.origin ?? { kind: 'im', channel },
+                    origin: effectiveTurnPolicy?.origin ?? { kind: 'im', channel },
                     interactionSurface: 'channel-card',
-                    ...(item.turnPermissionPolicy?.confirmationTimeoutMs
-                      ? { timeoutMs: item.turnPermissionPolicy.confirmationTimeoutMs }
+                    ...(effectiveTurnPolicy?.confirmationTimeoutMs
+                      ? { timeoutMs: effectiveTurnPolicy.confirmationTimeoutMs }
                       : {}),
-                    ...(item.turnPermissionPolicy?.onInteractionStateChange
-                      ? { onStateChange: item.turnPermissionPolicy.onInteractionStateChange }
+                    ...(effectiveTurnPolicy?.onInteractionStateChange
+                      ? { onStateChange: effectiveTurnPolicy.onInteractionStateChange }
                       : {}),
                   },
                   handle: handleInteractionFor(
                     rowId,
                     userId,
                     state.scopeKey,
-                    item.turnPermissionPolicy?.confirmationTimeoutMs,
+                    effectiveTurnPolicy?.confirmationTimeoutMs,
                   ),
                   // 文本渠道自己认领掉的不动卡片(它本来就没有卡);其余走
                   // dropInteractionCard —— 作废 pending 的同时把那张卡收口。
@@ -2388,12 +2420,17 @@ export function createTurnRunner(
     await completeTurnCallbackAfterAck(failure.turn);
     if (failure.turn.queueMode === 'internal') {
       try {
-        // 群轮次强确认策略与「完全访问」档互斥(maker fail-closed 拒绝) — 给
-        // 用户能看懂的说法并指路 /permission, 而不是裸抛策略错误码。
+        // 群轮次强确认策略与不支持档互斥(maker fail-closed 拒绝;「完全访问」
+        // 已由渠道设置显式放行, 实际只剩 acceptEdits)— 给用户能看懂的说法并
+        // 指路 /permission + 私聊修复卡, 而不是裸抛策略错误码。
         const policyUnsupported = failure.reason.startsWith('TURN_PERMISSION_POLICY_UNSUPPORTED');
+        const rejectedMode = failure.reason.split(':')[2] ?? '';
+        const unsupportedCopy = adapter.ui.error?.permissionModeUnsupported;
         const message =
-          policyUnsupported && adapter.ui.error?.permissionModeUnsupported
-            ? adapter.ui.error.permissionModeUnsupported
+          policyUnsupported && unsupportedCopy
+            ? typeof unsupportedCopy === 'function'
+              ? unsupportedCopy(rejectedMode)
+              : unsupportedCopy
             : `❌ 启动 agent 失败：${failure.reason}`;
         if (
           output.kind === 'chunked-text' &&

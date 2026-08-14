@@ -214,6 +214,14 @@ export interface ImChannelAdapter {
    * 该轮(fail-closed), 不会静默放开。
    */
   turnPermissionPolicyFor?(event: IMMessageEvent): TurnPermissionPolicy | undefined;
+  /**
+   * 群轮次强确认策略对指定权限档「可选」的渠道判定 — 返回 true 的档位在
+   * dispatch 时不挂 turnPermissionPolicy(maker 不再 fail-closed, 按用户显式
+   * 选择直接执行)。飞书用它在用户于渠道设置中显式选择「完全访问」后取缔
+   * 群护栏; 群上下文的防注入过滤/包裹独立于权限档, 照常生效。其它渠道
+   * 不实现即保持 fail-closed。
+   */
+  turnPolicyOptionalForMode?(permissionMode: PermissionMode): boolean;
   /** Telegram 每轮的群历史检索授权；其它渠道不实现即 fail closed。 */
   groupHistoryAccessFor?(event: IMMessageEvent): GroupHistoryAccessScope | undefined;
   /**
@@ -297,7 +305,8 @@ export interface ImUiTextPack {
    */
   error?: {
     agentUnsupported: string;
-    permissionModeUnsupported: string;
+    /** 函数形态接收 maker 拒绝时的权限档 id(如 acceptEdits), 报错能点名档位。 */
+    permissionModeUnsupported: string | ((permissionMode: string) => string);
     /** 换 Agent 后仍可能不兼容的权限模式(bypassPermissions / acceptEdits)时附加。 */
     agentSwitchAlsoCheckPermissionMode?: string;
   };

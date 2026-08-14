@@ -3157,7 +3157,7 @@
           "pi": "Pi"
         },
         "groupCtrPermissionLabel": "群聊 /ctr 新建任務權限檔",
-        "groupCtrPermissionDescription": "群組裡 @bot 用 /ctr 新建任務時使用的權限檔，預設「自動審批」。群組上下文裡有成員可控制的內容，設成「完全存取」後群組裡的消息會被拒絕，並引導你切回「自動審批」。"
+        "groupCtrPermissionDescription": "群組裡 @bot 用 /ctr 新建任務時使用的權限檔，預設「自動審批」。群組上下文裡有成員可控制的內容，設成「完全存取」後將直接執行、不再逐項確認，請確認群組成員都可信。"
       }
     },
     "shortcuts": {

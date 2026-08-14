@@ -850,13 +850,21 @@ export function createCardActionHandler(
 
     const desktopPrefs = getDesktopCcPrefs() ?? DESKTOP_CC_DEFAULTS;
     // 飞书群/话题里的 /ctr 新建: 权限档用渠道设置「群聊新建会话权限档」
-    // (默认 auto 自动审批) — 群上下文含成员可控内容, 完全访问档与群轮次
-    // 强确认策略互斥, 派发时会被拒绝; 私聊保持 desktop 偏好不变。
+    // (默认 auto 自动审批); 私聊保持 desktop 偏好不变。
+    // 群判定不能只靠 senderId lane 归一 — lane 登记表在 WS 重连/进程重启后
+    // 清空, 回调 senderId 会回落 operator.open_id。open_chat_id 恒在回调里:
+    // 群 chat 以 oc_ 开头, p2p 的 chat_id 是对方 open_id(ou_ 前缀), 用
+    // chatId 前缀兜底判定, 与 lane 归一互为备份。
     const isFeishuGroupControl =
-      channel === 'feishu' && decodeFeishuLaneUserId(event.senderId) !== null;
+      channel === 'feishu' &&
+      (decodeFeishuLaneUserId(event.senderId) !== null || event.chatId.startsWith('oc_'));
     const controlNewPermissionMode = isFeishuGroupControl
       ? readImDefaultSettings('feishu').groupCtrPermissionMode
       : desktopPrefs.permissionMode;
+    log.info(
+      `control:new permission mode=${controlNewPermissionMode} group=${isFeishuGroupControl} ` +
+        `sender=...${event.senderId.slice(-8)}`,
+    );
     // 停用轴准入(PR #744 review 第五轮):IM 新建会话是新的付费路由,desktop 偏好里
     // 保存的 model/provider 可能已被用户停用 —— 宽松降级:被停用的显式来源/模型逐级
     // 丢弃(退回 agent 默认路由),隐式默认被停用时显式落替代来源;不因停用让 IM

@@ -23,8 +23,12 @@ import { isActiveWorkerStatus } from '../../../shared/orca-worker-status';
 
 export interface OrcaWorkerPanelProps {
   leadSessionId: string;
-  /** device-link controlled device that owns the Lead and its Worker team. */
-  deviceId?: string;
+  /**
+   * device-link 受控设备：string = 被控设备(远程)，null = 已确认本机，undefined = 归属尚未解析。
+   * 本地设置跳转只在归属解析为 null(本机)时启用，未解析时 fail closed，
+   * 避免冷启动 / relay 重连竞态把远端上限误当成本机可调。
+   */
+  deviceId?: string | null;
   /** SSH 远程 Lead:worker 创建面板的模型清单按 SSH 口径过滤(见 CreateWorkerPopover.sshRemote)。 */
   sshRemote?: boolean;
   /** tab active && RSB 未折叠 && 窗口可见。挂载但不可见时不能清红点 / ack 消息。 */
@@ -80,7 +84,7 @@ export function OrcaWorkerPanel({
     handleArchiveWorker,
   } = useOrcaWorkerSelection({
     leadSessionId,
-    deviceId,
+    deviceId: deviceId ?? undefined,
     viewVisible,
     focusWorkerSessionId,
     focusWorkerHintRevision,
@@ -175,7 +179,7 @@ export function OrcaWorkerPanel({
           hardLimit={hardLimit}
           onSwitchFocus={handleSwitchFocus}
           onOpenCreate={() => void handleOpenCreate()}
-          onOpenSettings={isSidebarWindow() || deviceId ? undefined : handleOpenSettings}
+          onOpenSettings={isSidebarWindow() || deviceId !== null ? undefined : handleOpenSettings}
           onArchiveWorker={handleArchiveWorker}
           clearAttentionWhenVisible={viewVisible}
         />
@@ -205,7 +209,7 @@ export function OrcaWorkerPanel({
         open={createOpen}
         onClose={() => setCreateOpen(false)}
         onCreate={handleCreateWorker}
-        deviceId={deviceId}
+        deviceId={deviceId ?? undefined}
         sshRemote={sshRemote}
       />
     </div>

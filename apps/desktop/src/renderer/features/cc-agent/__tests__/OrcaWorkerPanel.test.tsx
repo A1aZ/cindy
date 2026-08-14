@@ -137,7 +137,12 @@ describe('OrcaWorkerPanel settings navigation wiring', () => {
   });
 
   it('wires settings navigation for local leads', () => {
-    render(<OrcaWorkerPanel leadSessionId="lead-1" viewVisible />);
+    render(<OrcaWorkerPanel leadSessionId="lead-1" deviceId={null} viewVisible />);
     expect(mocks.toolbarProps.onOpenSettings).toBeTypeOf('function');
+  });
+
+  it('fails closed for unresolved device ownership', () => {
+    render(<OrcaWorkerPanel leadSessionId="lead-1" viewVisible />);
+    expect(mocks.toolbarProps.onOpenSettings).toBeUndefined();
   });
 });

@@ -101,6 +101,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // ── State ──────────────────────────────────────────────────────────────────
 
 let cached: Manifest | null = null;
+/**
+ * manifest 代际:切渠道(clearCachedManifest)时 +1。fetchManifest 发起时快照,
+ * 响应完成写 cached 前核对——若期间切了渠道,这次 in-flight 的旧渠道响应直接作废,
+ * 不写缓存、返回 null,让调用方(agent prepare / 更新轮询)下次按新渠道重新 fetch。
+ */
+let manifestEpoch = 0;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -159,6 +165,8 @@ export async function fetchManifest(
   const channelSuffix = channel === 'release' ? '' : `-${channel}`;
   // Cache-bust: append timestamp to prevent Chromium / CDN serving stale manifest
   const url = `${getBaseUrl()}/manifest-${getPlatformKey()}${channelSuffix}.json?t=${Date.now()}`;
+  // 快照发起时的代际:响应完成写 cached 前核对,期间切渠道则作废本次结果。
+  const epochAtStart = manifestEpoch;
   log.info('Fetching (%s channel): %s', channel, url);
 
   return new Promise<Manifest | null>((resolve) => {
@@ -195,6 +203,13 @@ export async function fetchManifest(
           if (settled) return;
           try {
             const json = JSON.parse(body) as Manifest;
+            // 响应回来前切了渠道:这是旧渠道的 manifest,不作废会污染 cached,
+            // 让后续 agent prepare 装旧渠道资产。返回 null 让调用方下次按新渠道重取。
+            if (epochAtStart !== manifestEpoch) {
+              log.info('manifest channel changed during fetch — discarding stale response');
+              finish(null);
+              return;
+            }
             cached = json;
             log.info('Fetched OK: app.version=%s, hotfix=%s', json.app?.version, json.app?.hotfix?.file ?? 'none');
             finish(json);
@@ -236,6 +251,7 @@ export function getCachedManifest(): Manifest | null {
  */
 export function clearCachedManifest(): void {
   cached = null;
+  manifestEpoch += 1;
 }
 
 /**

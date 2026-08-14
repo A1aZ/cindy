@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   currentUserId: 'media-user-0',
+  ownerGeneration: 1,
   models: vi.fn(),
   guide: vi.fn(),
   outboundFetch: vi.fn(),
@@ -14,6 +15,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../../authManager.js', () => ({
   getCurrentUserId: () => mocks.currentUserId,
   getActiveAuthRealm: () => 'cn',
+  getAuthState: () => ({
+    user: mocks.currentUserId ? { id: mocks.currentUserId } : null,
+    ownerGeneration: mocks.ownerGeneration,
+  }),
 }));
 vi.mock('../../appCapabilities.js', () => ({
   getAppCapabilities: () => ({ canUseCindyGateway: true }),
@@ -135,6 +140,7 @@ async function prepare(): Promise<string> {
 describe('Cindy Core media invocation state and security boundary', () => {
   beforeEach(() => {
     mocks.currentUserId = `media-user-${crypto.randomUUID()}`;
+    mocks.ownerGeneration += 1;
     mocks.rows.clear();
     mocks.models.mockReset().mockResolvedValue([
       { id: 'image-model', name: 'Image Model', mode: 'image_generation' },
@@ -225,6 +231,29 @@ describe('Cindy Core media invocation state and security boundary', () => {
     ).resolves.toMatchObject({ ok: false, errorCode: 'INVOCATION_ALREADY_USED' });
     expect(mocks.rows.get(invocationId)?.state).toBe('unknown');
     expect(mocks.outboundFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('付费提交准备参数期间账号切换时不发出上游请求', async () => {
+    mocks.guide.mockResolvedValue(
+      resolvedGuide(
+        operation({
+          mode: 'sync',
+          media: [{ path: ['data'], encoding: 'base64', kind: 'image' }],
+        }),
+      ),
+    );
+    const invocationId = await prepare();
+    mocks.models.mockImplementationOnce(async () => {
+      mocks.currentUserId = `other-user-${crypto.randomUUID()}`;
+      mocks.ownerGeneration += 1;
+      return [{ id: 'image-model', name: 'Image Model', mode: 'image_generation' }];
+    });
+
+    await expect(
+      callCindyMedia({ action: 'request', invocationId, body: { prompt: 'cat' } }),
+    ).resolves.toMatchObject({ ok: false, errorCode: 'ACCOUNT_CHANGED' });
+    expect(mocks.outboundFetch).not.toHaveBeenCalled();
+    expect(mocks.rows.get(invocationId)?.state).toBe('prepared');
   });
 
   it('进程中断遗留的 submitting 在恢复时转为 unknown，不会补发 POST', async () => {

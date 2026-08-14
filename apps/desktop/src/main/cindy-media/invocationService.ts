@@ -65,12 +65,31 @@ class MediaInvocationError extends Error {
 
 const recoveredOwners = new Set<string>();
 
-function currentOwner(): string {
-  const userId = authManager.getCurrentUserId();
+interface MediaAuthScope {
+  owner: string;
+  generation: number;
+}
+
+function currentAuthScope(): MediaAuthScope {
+  const state = authManager.getAuthState();
+  const userId = state.user?.id ?? null;
   if (!userId) {
     throw new MediaInvocationError('CONNECTION_UNAVAILABLE', '当前没有可用的 Cindy 登录态');
   }
-  return `${authManager.getActiveAuthRealm()}:${userId}`;
+  return {
+    owner: `${authManager.getActiveAuthRealm()}:${userId}`,
+    generation: state.ownerGeneration,
+  };
+}
+
+function assertAuthScope(scope: MediaAuthScope, expectedOwner = scope.owner): void {
+  const current = currentAuthScope();
+  if (current.owner !== expectedOwner || current.generation !== scope.generation) {
+    throw new MediaInvocationError(
+      'ACCOUNT_CHANGED',
+      '媒体调用期间 Cindy 账号发生变化，请在当前账号下重新准备',
+    );
+  }
 }
 
 async function ensureOwnerRecovered(owner: string): Promise<void> {
@@ -531,9 +550,12 @@ async function prepareInvocation(
   modelId: string,
   capability: MediaCapability,
 ): Promise<Record<string, unknown>> {
-  const owner = currentOwner();
+  const scope = currentAuthScope();
+  const owner = scope.owner;
   await ensureOwnerRecovered(owner);
+  assertAuthScope(scope);
   const models = await listAvailableMediaModels(capability);
+  assertAuthScope(scope);
   const model = models.find((candidate) => candidate.id === modelId);
   if (!model) {
     return failure('MODEL_NOT_AVAILABLE', '该模型当前不可见，或不是请求的媒体类型');
@@ -541,6 +563,7 @@ async function prepareInvocation(
   let resolvedGuide: ResolvedMediaInvocationGuide;
   try {
     resolvedGuide = await fetchMediaInvocationGuide(modelId);
+    assertAuthScope(scope);
   } catch (error) {
     if (error instanceof ServerApiError && error.code === 'MEDIA_INVOCATION_GUIDE_NOT_FOUND') {
       return failure('GUIDE_NOT_AVAILABLE', '该模型当前没有可用的调用说明');
@@ -561,13 +584,12 @@ async function prepareInvocation(
     ...guideProtocol,
     ...operation,
   };
-  if (owner !== currentOwner()) {
-    return failure('ACCOUNT_CHANGED', '查询期间 Cindy 账号发生变化，请重新 list_models 和 prepare');
-  }
   await pruneInvocations(owner);
+  assertAuthScope(scope);
   if ((await countMediaInvocations(owner)) >= MAX_INVOCATIONS) {
     return failure('TOO_MANY_INVOCATIONS', '媒体任务数量已达上限，请等待现有任务完成后重试');
   }
+  assertAuthScope(scope);
   const id = randomUUID();
   const createdAt = Date.now();
   await createMediaInvocation({
@@ -576,6 +598,7 @@ async function prepareInvocation(
     guide: preparedGuide,
     createdAt,
   });
+  assertAuthScope(scope);
   return {
     ok: true,
     status: 'prepared',
@@ -593,10 +616,14 @@ async function prepareInvocation(
 }
 
 async function requireInvocation(id: string): Promise<StoredMediaInvocation> {
-  const owner = currentOwner();
+  const scope = currentAuthScope();
+  const owner = scope.owner;
   await ensureOwnerRecovered(owner);
+  assertAuthScope(scope);
   await pruneInvocations(owner);
+  assertAuthScope(scope);
   const invocation = await getMediaInvocation(id, owner);
+  assertAuthScope(scope);
   if (!invocation)
     throw new MediaInvocationError('INVOCATION_NOT_FOUND', '调用已过期或不存在，请重新 prepare');
   return invocation;
@@ -606,6 +633,8 @@ async function submitInvocation(
   invocation: StoredMediaInvocation,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
+  const scope = currentAuthScope();
+  assertAuthScope(scope, invocation.owner);
   if (invocation.state !== 'prepared') {
     return failure(
       'INVOCATION_ALREADY_USED',
@@ -624,11 +653,12 @@ async function submitInvocation(
   // prepare 与实际付费提交之间可能隔着 Agent 组装参数的时间；提交边界重新读取
   // Gateway 清单和客户端停用状态，避免模型/供应商刚被停用后仍发出新请求。
   const models = await listAvailableMediaModels(invocation.capability);
+  assertAuthScope(scope, invocation.owner);
   if (!models.some((model) => model.id === invocation.modelId)) {
     return failure('MODEL_NOT_AVAILABLE', '该模型已下架或被停用，本次生成未发出');
   }
   const requestBody = await prepareRequestBody(body, invocation.guide);
-  const connection = resolveConnection(invocation.guide.connection.providerId);
+  assertAuthScope(scope, invocation.owner);
   const claimed = await transitionMediaInvocation({
     id: invocation.id,
     owner: invocation.owner,
@@ -642,6 +672,10 @@ async function submitInvocation(
       `该 invocation 当前状态为 ${current?.state ?? 'unknown'}；付费提交不可重复执行`,
     );
   }
+  // claim 之后再过一次认证代次闸；通过后到 outboundFetch 发起之间没有异步让出点，
+  // 因而不会拿切换后账号的 endpoint / key 提交旧账号的付费请求。
+  assertAuthScope(scope, invocation.owner);
+  const connection = resolveConnection(invocation.guide.connection.providerId);
   try {
     const response = await dispatchJson({
       connection,
@@ -725,6 +759,8 @@ function pollBody(guide: MediaAsyncPollGuide, taskId: string): Record<string, un
 }
 
 async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record<string, unknown>> {
+  const scope = currentAuthScope();
+  assertAuthScope(scope, invocation.owner);
   if (invocation.guide.response.mode !== 'async') {
     return failure('POLL_NOT_SUPPORTED', '同步媒体调用不需要 poll');
   }
@@ -743,6 +779,7 @@ async function pollInvocation(invocation: StoredMediaInvocation): Promise<Record
       maxResponseBytes: guide.maxResponseBytes,
       operation: 'poll',
     });
+    assertAuthScope(scope, invocation.owner);
     const rawStatus = valuesAtPath(response, guide.statusPath)[0];
     const status = typeof rawStatus === 'string' ? rawStatus : '';
     if (guide.successValues.includes(status)) {
@@ -802,9 +839,9 @@ export async function callCindyMedia(
       return prepareInvocation(request.modelId, request.capability as MediaCapability);
     }
     const invocation = await requireInvocation(request.invocationId);
-    return request.action === 'request'
+    return await (request.action === 'request'
       ? submitInvocation(invocation, request.body)
-      : pollInvocation(invocation);
+      : pollInvocation(invocation));
   } catch (error) {
     if (error instanceof MediaInvocationError) return failure(error.code, error.message);
     log.warn('media tool call failed', {

@@ -82,6 +82,7 @@ import { workdirWriteVerdict } from '../cindy-brain/fsSlot.js';
 import { handleIncomingCindyFile } from '../cindy-brain/openFileInstall.js';
 import * as blobStore from '../cindy-media/blobStore.js';
 import { commitMessageMediaRefs } from '../cindy-media/chatAttachments.js';
+import { callCindyMedia } from '../cindy-media/invocationService.js';
 import * as ledger from '../cindy-media/ledger.js';
 import { chatAttachmentOrigin } from '../cindy-media/attachmentGrantGate.js';
 import { resolveGhostAttachmentUrl } from './ghostAttachmentResolve.js';
@@ -962,6 +963,39 @@ function declaredAttachmentUrls(
   return { ok: true, urls };
 }
 
+async function rewriteDeclaredAttachmentArgs(
+  ghostId: string,
+  tool: GhostToolDecl,
+  args: Record<string, unknown>,
+  sourceUrls: string[],
+  hashes: string[],
+): Promise<{ ok: true; args: Record<string, unknown> } | { ok: false; message: string }> {
+  const safeUrlBySource = new Map<string, string>();
+  for (let index = 0; index < sourceUrls.length; index += 1) {
+    const source = sourceUrls[index]!;
+    const hash = hashes[index];
+    if (!hash) {
+      return { ok: false, message: '媒体授权结果不完整，本次插件调用未执行' };
+    }
+    const info = await ledger.getBlobInfo(hash);
+    if (!info) {
+      return { ok: false, message: '媒体授权结果未写入总仓，本次插件调用未执行' };
+    }
+    safeUrlBySource.set(source, `cindy-ghost://${ghostId}/media/${hash}${info.ext}`);
+  }
+
+  const rewritten = { ...args };
+  for (const name of tool.attachmentArgs ?? []) {
+    const value = args[name];
+    if (typeof value === 'string') {
+      rewritten[name] = safeUrlBySource.get(value) ?? value;
+    } else if (Array.isArray(value)) {
+      rewritten[name] = value.map((source) => safeUrlBySource.get(source) ?? source);
+    }
+  }
+  return { ok: true, args: rewritten };
+}
+
 /**
  * 构造总机 deps(每次工具调用都现查,无任何缓存层)。
  *
@@ -979,7 +1013,6 @@ export function getCindyGhostsMcpDeps(
     getLiziMcpSessionContext() ?? sessionCtx;
   return {
     callMedia: async (request) => {
-      const { callCindyMedia } = await import('../cindy-media/invocationService.js');
       const result = await callCindyMedia(request);
       const sessionId = resolveSessionContext()?.sessionId;
       if (result.ok !== false && sessionId) {
@@ -1278,7 +1311,19 @@ export function getCindyGhostsMcpDeps(
         if (!grant.ok) {
           return { ok: false, errorCode: 'ATTACHMENT_INVALID', message: grant.message };
         }
-        mergedArgs = { ...args, attachments: grant.hashes };
+        const rewritten = refreshedTool
+          ? await rewriteDeclaredAttachmentArgs(
+              ghostId,
+              refreshedTool,
+              args,
+              attachmentUrls,
+              grant.hashes,
+            )
+          : { ok: true as const, args };
+        if (!rewritten.ok) {
+          return { ok: false, errorCode: 'ATTACHMENT_INVALID', message: rewritten.message };
+        }
+        mergedArgs = { ...rewritten.args, attachments: grant.hashes };
       }
       // 目录过户(xd-service 意识化二期):dir 收集文件发一次性票据,元数据
       // 注入 args.dir_deposit——意识拿到的只有票据与相对路径清单;上传时

@@ -9,7 +9,8 @@
 
 export const MODEL_ACCESS_CATALOG_LEGACY_SCHEMA_VERSION = 1 as const;
 export const MODEL_ACCESS_CATALOG_V2_SCHEMA_VERSION = 2 as const;
-export const MODEL_ACCESS_CATALOG_SCHEMA_VERSION = 3 as const;
+export const MODEL_ACCESS_CATALOG_V3_SCHEMA_VERSION = 3 as const;
+export const MODEL_ACCESS_CATALOG_SCHEMA_VERSION = 4 as const;
 export const MODEL_ACCESS_MODELS_PATH = '/api/model-access/models' as const;
 
 export const MODEL_ACCESS_CURRENCIES = ['CNY', 'USD'] as const;
@@ -28,7 +29,6 @@ export const MODEL_ACCESS_MEDIA_CAPABILITIES = [
   'image.edit',
   'video.generate',
   'video.image_to_video',
-  'audio.generate',
 ] as const;
 export type MediaCapability = (typeof MODEL_ACCESS_MEDIA_CAPABILITIES)[number];
 
@@ -222,6 +222,7 @@ export interface ListModelsResponse {
   schemaVersion:
     | typeof MODEL_ACCESS_CATALOG_LEGACY_SCHEMA_VERSION
     | typeof MODEL_ACCESS_CATALOG_V2_SCHEMA_VERSION
+    | typeof MODEL_ACCESS_CATALOG_V3_SCHEMA_VERSION
     | typeof MODEL_ACCESS_CATALOG_SCHEMA_VERSION;
   models: ModelCatalogEntry[];
 }
@@ -236,6 +237,11 @@ export interface ListModelsResponseV2 extends ListModelsResponse {
 }
 
 export interface ListModelsResponseV3 extends ListModelsResponse {
+  schemaVersion: typeof MODEL_ACCESS_CATALOG_V3_SCHEMA_VERSION;
+  models: Array<ModelCatalogEntry & { name: string; contextWindow: number }>;
+}
+
+export interface ListModelsResponseV4 extends ListModelsResponse {
   schemaVersion: typeof MODEL_ACCESS_CATALOG_SCHEMA_VERSION;
   models: Array<ModelCatalogEntry & { name: string }>;
 }

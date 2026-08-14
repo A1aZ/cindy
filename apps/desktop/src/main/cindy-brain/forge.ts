@@ -2264,7 +2264,9 @@ Guide 是独立可选信息，不在此接口返回，也不决定模型是否�
 3. 同一个 Agent 读取结果后，自行调用 Cindy Core \`media\` 工具；
 4. 如果插件需要最终媒体，在普通接收工具的 \`attachmentArgs\` 声明承载媒体地址的
    顶层参数；Agent 按该参数调用时，Host 机械提取地址并复用通用 attachments 授权链，
-   插件自行保存业务状态与更新 UI。显式 \`ghost_call.attachments\` 仍保持兼容。
+   再把声明参数中的原地址改写为该插件自己的 \`cindy-ghost://<id>/media/<hash>.<ext>\`
+   地址后派发，避免把本地绝对路径暴露给插件。插件自行保存业务状态与更新 UI；显式
+   \`ghost_call.attachments\` 仍保持兼容。
 
 第 2 步的字段完全由插件定义，Host 不识别 \`mediaIntent\`、\`nextTool\` 等保留字段，也不
 自动把插件结果转成媒体请求。下面只是普通结果示例，字段名不是平台契约：

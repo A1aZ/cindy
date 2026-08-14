@@ -499,7 +499,6 @@ const MEDIA_CAPABILITIES = new Set<CindyMediaCapability>([
   "image.edit",
   "video.generate",
   "video.image_to_video",
-  "audio.generate",
 ]);
 
 /** Core media 工具 handler；只做 MCP snake_case 边界到 Host 稳定类型的转换。 */
@@ -1144,7 +1143,6 @@ export function createCindyGhostsMcpServer(
           "image.edit",
           "video.generate",
           "video.image_to_video",
-          "audio.generate",
         ])
         .optional()
         .describe("list_models 的可选筛选项；prepare 时必填"),

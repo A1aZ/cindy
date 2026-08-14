@@ -70,6 +70,12 @@ const ledgerAddRefMock = vi.fn(async (params: TestLedgerRef) => {
   ledgerRefs.push({ ...params });
   return `ref-${ledgerRefs.length}`;
 });
+const ledgerGetBlobInfoMock = vi.fn(async () => ({
+  ext: '.png',
+  mimeType: 'image/png',
+  bytes: 1,
+}));
+const callCindyMediaMock = vi.fn();
 const dirDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'dir-ticket' } }));
 const saveDepositMock = vi.fn(() => ({ ok: true, receipt: { token: 'save-ticket' } }));
 const liveGrantStateMock = vi.fn();
@@ -183,6 +189,10 @@ vi.mock('../../cindy-media/ledger.js', () => ({
   hasRef: ledgerHasRefMock,
   hasGhostToolGrant: ledgerHasGhostToolGrantMock,
   addRef: ledgerAddRefMock,
+  getBlobInfo: ledgerGetBlobInfoMock,
+}));
+vi.mock('../../cindy-media/invocationService.js', () => ({
+  callCindyMedia: callCindyMediaMock,
 }));
 vi.mock('../../cindy-media/attachmentGrantGate.js', () => ({ chatAttachmentOrigin: vi.fn() }));
 vi.mock('../ghostAttachmentResolve.js', () => ({
@@ -336,6 +346,8 @@ beforeEach(() => {
     ledgerRefs.push({ ...params });
     return `ref-${ledgerRefs.length}`;
   });
+  ledgerGetBlobInfoMock.mockReset();
+  ledgerGetBlobInfoMock.mockResolvedValue({ ext: '.png', mimeType: 'image/png', bytes: 1 });
   ledgerRefs.length = 0;
   dirDepositMock.mockClear();
   saveDepositMock.mockClear();
@@ -730,6 +742,42 @@ describe('ghost_call 兜底拒绝', () => {
     expect(r).toMatchObject({ ok: true, result: 'done' });
     expect(r).not.toHaveProperty('setup');
     expect(dispatchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('attachmentArgs 在派发前改写为插件私有媒体地址，不泄漏本地路径', async () => {
+    const file = path.join(outsideDir, 'declared-media.png');
+    const bytes = Buffer.from('declared-media');
+    fs.writeFileSync(file, bytes);
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    listMock.mockReturnValue([
+      chipGhost('art', ['tool'], {
+        tools: [
+          {
+            name: 'import_artwork',
+            description: 'd',
+            attachmentArgs: ['mediaUrl'],
+          },
+        ],
+      }),
+    ]);
+
+    const result = await makeDeps().callGhostTool({
+      ghostId: 'art',
+      tool: 'import_artwork',
+      args: { mediaUrl: file, caption: 'snow' },
+    });
+
+    expect(result).toMatchObject({ ok: true, result: 'done' });
+    expect(dispatchMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: {
+          mediaUrl: `cindy-ghost://art/media/${hash}.png`,
+          caption: 'snow',
+          attachments: [hash],
+        },
+      }),
+    );
+    expect(JSON.stringify(dispatchMock.mock.calls)).not.toContain(file);
   });
 
   it('ready + scope stale 时成功 envelope 附非阻塞 reauthSuggest', async () => {

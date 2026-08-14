@@ -16,7 +16,7 @@ vi.mock('../../maker-host/model-disable-store.js', () => ({
 import { fetchMediaInvocationGuide, listAvailableMediaModels } from '../mediaModels.js';
 
 const payload = {
-  schemaVersion: 3 as const,
+  schemaVersion: 4 as const,
   models: [
     {
       id: 'image-without-guide',
@@ -90,6 +90,12 @@ describe('listAvailableMediaModels', () => {
 
     readModelDisableOverridesMock.mockReturnValueOnce({ disabledProviders: { xd: true } });
     await expect(listAvailableMediaModels()).resolves.toEqual([]);
+  });
+
+  it('拒绝旧版聊天目录，不把版本不匹配静默解释为空媒体列表', async () => {
+    serverApiFetchMock.mockResolvedValueOnce({ ...payload, schemaVersion: 3 });
+
+    await expect(listAvailableMediaModels()).rejects.toThrow('媒体模型目录响应版本必须是 4');
   });
 
   it('只用 modelId 获取 Cindy Server Guide', async () => {

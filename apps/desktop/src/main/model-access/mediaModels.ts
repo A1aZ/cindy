@@ -54,6 +54,14 @@ export async function listAvailableMediaModels(
     timeoutMs: MEDIA_MODEL_REQUEST_TIMEOUT_MS,
     logLabel: MEDIA_MODELS_PATH,
   });
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    !('schemaVersion' in payload) ||
+    payload.schemaVersion !== MODEL_ACCESS_CATALOG_SCHEMA_VERSION
+  ) {
+    throw new Error(`媒体模型目录响应版本必须是 ${MODEL_ACCESS_CATALOG_SCHEMA_VERSION}`);
+  }
   const parsed = parseListModelsResponse(payload);
   if (!parsed.ok) throw new Error(`媒体模型目录响应不合法: ${parsed.error}`);
   return filterEnabledGatewayMediaModels(

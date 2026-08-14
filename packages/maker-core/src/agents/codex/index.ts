@@ -5482,6 +5482,8 @@ export class CodexAgent extends BaseAgent {
       req: InteractionRequest,
       opts?: {
         forcePrompt?: boolean;
+        /** Auto 下跳过轻量 reviewer 转人工；仍保留 Full access 自动放行与热切换语义。 */
+        promptInAuto?: boolean;
         autoReviewAction?: ReviewableAction;
         itemId?: string;
       },
@@ -5492,6 +5494,7 @@ export class CodexAgent extends BaseAgent {
           opts?.forcePrompt === true ||
           (req.kind === 'permission' &&
             forceTurnConfirmation(req.toolName, req.input));
+        const promptInAuto = opts?.promptInAuto === true;
         // Full access 的普通审批不应打断用户。Auto 在已验证路由上由 app-server
         // auto_review 负责；fallback 路由则由 user reviewer 把越界请求发回客户端，
         // 再由 Cindy reviewer 静默裁决。
@@ -5537,6 +5540,7 @@ export class CodexAgent extends BaseAgent {
         // UI 不可用时 dispatchInteraction 自然 fail-closed decline。
         if (
           !forcePrompt &&
+          !promptInAuto &&
           mutablePermissionMode === 'auto' &&
           opts?.autoReviewAction
         ) {
@@ -6357,10 +6361,11 @@ export class CodexAgent extends BaseAgent {
         // Codex may omit grantRoot for ordinary apply_patch requests. Without a
         // concrete target the lightweight reviewer cannot classify the write,
         // but silently declining is surfaced by app-server as "rejected by user"
-        // even though no user interaction happened. Escalate that protocol gap
-        // to a real confirmation; unattended callers still fail closed when no
-        // interaction resolver is available.
-        forcePrompt: mutablePermissionMode === 'auto' && !params.grantRoot?.trim(),
+        // even though no user interaction happened. In interactive Auto, route
+        // that protocol gap to the ordinary approval UI; unlike forcePrompt this
+        // still lets a pending request follow a switch to Full access. Unattended
+        // policy turns retain their earlier fail-closed branch above.
+        promptInAuto: !params.grantRoot?.trim(),
         autoReviewAction: { kind: 'file-write', path: params.grantRoot ?? undefined },
         itemId: params.itemId,
       });

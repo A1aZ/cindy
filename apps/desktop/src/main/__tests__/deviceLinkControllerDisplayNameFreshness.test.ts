@@ -168,7 +168,7 @@ describe('controller display-name directory freshness', () => {
     expect(rememberName).not.toHaveBeenCalled();
   });
 
-  it('目录权威名不被后到的主机名 presence 覆盖或反写缓存', () => {
+  it('旧协议缺少 selfName 的主机名 presence 不覆盖目录权威名', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const setDisplayName = vi.fn();
     const rememberName = vi.fn();
@@ -190,7 +190,6 @@ describe('controller display-name directory freshness', () => {
     applyControllerDisplayNamePresence({
       deviceId: 'dev-1',
       name: 'Host.local',
-      selfName: 'Host.local',
       freshness,
       normalizeName,
       setDisplayName,
@@ -200,6 +199,45 @@ describe('controller display-name directory freshness', () => {
 
     expect(setDisplayName).not.toHaveBeenCalled();
     expect(rememberName).not.toHaveBeenCalled();
+    expect(forgetName).not.toHaveBeenCalled();
+  });
+
+  it('数据库名改成与 selfName 相同时仍作为权威 presence 即时刷新', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const requestEpoch = freshness.epoch;
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    seedControllerDisplayNamesFromCache({ 'dev-1': '旧数据库名' }, freshness, setDisplayName);
+    setDisplayName.mockClear();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: 'Host.local',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '旧数据库名' }],
+      cachedNames: { 'dev-1': '旧数据库名' },
+      freshness,
+      requestEpoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    expect(freshness.epoch).toBe(1);
+    expect(freshness.authoritativeNameByDevice.get('dev-1')).toBe('Host.local');
+    expect(setDisplayName).toHaveBeenCalledTimes(1);
+    expect(setDisplayName).toHaveBeenCalledWith('dev-1', 'Host.local');
+    expect(rememberName).toHaveBeenCalledWith('dev-1', 'Host.local');
     expect(forgetName).not.toHaveBeenCalled();
   });
 
@@ -213,7 +251,6 @@ describe('controller display-name directory freshness', () => {
     applyControllerDisplayNamePresence({
       deviceId: 'dev-1',
       name: 'Host.local',
-      selfName: 'Host.local',
       freshness,
       normalizeName,
       setDisplayName,

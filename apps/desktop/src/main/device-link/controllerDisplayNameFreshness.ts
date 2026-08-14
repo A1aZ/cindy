@@ -10,9 +10,7 @@ export interface ControllerDisplayNameDirectoryDevice {
 }
 
 type ControllerDisplayNameCandidate =
-  | { kind: 'valid'; name: string }
-  | { kind: 'empty' }
-  | { kind: 'placeholder' };
+  { kind: 'valid'; name: string } | { kind: 'empty' } | { kind: 'placeholder' };
 
 export function createControllerDisplayNameFreshnessTracker(): ControllerDisplayNameFreshnessTracker {
   return { epoch: 0, epochByDevice: new Map(), authoritativeNameByDevice: new Map() };
@@ -52,15 +50,14 @@ function classifyControllerDisplayName(
   if (typeof value !== 'string') return { kind: 'placeholder' };
   if (!value.trim()) return { kind: 'empty' };
   const normalized = normalizeName(value);
-  return normalized
-    ? { kind: 'valid', name: normalized }
-    : { kind: 'placeholder' };
+  return normalized ? { kind: 'valid', name: normalized } : { kind: 'placeholder' };
 }
 
 /**
- * presence.deviceName 可能是数据库展示名，也可能只是 hello 自报的系统主机名：
- * - 与 selfName 不同的有效值视为服务端已解析出的权威展示名；
- * - 与 selfName 相同（或旧协议没有 selfName）的值只作临时回退，不能覆盖目录/缓存；
+ * presence.deviceName 可能是数据库展示名，也可能是旧 relay 直接转发的主机名：
+ * - 现代 presence 携带 selfName，说明 deviceName 是 relay 已解析的当前展示名；
+ *   即使两者恰好相同，也可能是用户刚把数据库名改成了自报名，必须权威更新；
+ * - 旧 presence 缺少 selfName 时无法区分展示名与主机名，只在无目录/缓存时临时回退；
  * - 空名是显式清除，必须推进新鲜度以挡住在途旧目录响应；
  * - unknown/no 等占位值不改状态，也不阻断目录补齐。
  */
@@ -76,10 +73,9 @@ export function applyControllerDisplayNamePresence(options: {
 }): void {
   const candidate = classifyControllerDisplayName(options.name, options.normalizeName);
   if (candidate.kind === 'valid') {
-    const selfCandidate = classifyControllerDisplayName(options.selfName, options.normalizeName);
-    const isSelfReportedFallback = selfCandidate.kind !== 'valid'
-      || selfCandidate.name === candidate.name;
-    if (isSelfReportedFallback) {
+    const hasResolvedSelfName =
+      typeof options.selfName === 'string' && options.selfName.trim().length > 0;
+    if (!hasResolvedSelfName) {
       if (options.freshness.authoritativeNameByDevice.has(options.deviceId)) return;
       options.setDisplayName(options.deviceId, candidate.name);
       return;

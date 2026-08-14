@@ -217,6 +217,7 @@ export async function generatePromptPrediction(
               remoteHostId: sessions.remoteHostId,
               providerId: sessions.providerId,
               workingDir: sessions.workingDir,
+              updatedAt: sessions.updatedAt,
             })
             .from(sessions)
             .where(eq(sessions.id, sessionId))
@@ -264,6 +265,7 @@ export async function generatePromptPrediction(
               remoteHostId: sessions.remoteHostId,
               providerId: sessions.providerId,
               workingDir: sessions.workingDir,
+              updatedAt: sessions.updatedAt,
             })
             .from(sessions)
             .where(eq(sessions.id, sessionId))
@@ -280,6 +282,10 @@ export async function generatePromptPrediction(
           // 中止，避免用旧 provider 凭证外发付费调用。
           if (finalRow.providerId == null && row.providerId != null) return false;
           if (finalRow.workingDir !== (params.workingDir ?? null)) return false;
+          // 终末复核消息轮次：用户在 drain 后、provider/凭证解析期间发送了新消息，
+          // touchUserSendInDb 会推进 sessions.updatedAt。若 updatedAt 已变化说明
+          // 会话已进入新轮次，当前预测素材已过期，按 fail-closed 中止。
+          if (finalRow.updatedAt !== row.updatedAt) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

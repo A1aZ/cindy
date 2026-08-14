@@ -5857,7 +5857,7 @@ function handleStatusUpdate(
     // (pendingTaskWakeDuringTurn),不清除:桥接必须跨过主 turn 自己的 Done 继续
     // 存活,直到 wake turn 启动或失败。仅靠 agentStatus.isRunning 判断会把「主轮
     // Done 前 SDK 先推了 isRunning=false 的中间 status」误判成 wake 失败。
-    pendingTaskWake: isTurnStart ? Math.max(0, state.pendingTaskWake - 1) :
+    pendingTaskWake: isTurnStart ? 0 :
       (isTurnComplete && state.pendingTaskWake > 0 && !state.agentStatus.isRunning && state.pendingTaskWakeDuringTurn === 0) ? 0 :
       state.pendingTaskWake,
     // 跨主 turn 标记:主 turn 自己的 Done 越过(标记仍为 true 时到达的首个 Done)后,
@@ -5865,7 +5865,7 @@ function handleStatusUpdate(
     // 时,终态 Done 会因 !pendingTaskWakeDuringTurn 恒为 false 而永远无法清除
     // pendingTaskWake,会话永久卡在 running/Stop 态。退休只清标记、不清桥接:
     // 桥接(pendingTaskWake)仍存活,直到 wake turn 真正启动或失败。
-    pendingTaskWakeDuringTurn: isTurnStart ? Math.max(0, state.pendingTaskWakeDuringTurn - 1) :
+    pendingTaskWakeDuringTurn: isTurnStart ? 0 :
       (isTurnComplete && state.pendingTaskWakeDuringTurn > 0) ? 0 :
       state.pendingTaskWakeDuringTurn,
     turnStoppedByUser: isTurnStart ? false : state.turnStoppedByUser,

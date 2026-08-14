@@ -24,7 +24,15 @@ vi.mock('@/lib/customProviderId', () => ({
 }));
 
 vi.mock('@/lib/customProviders', () => ({
+  clearCustomProviderModelPiApiOverrides: vi.fn((models: Array<Record<string, unknown>>) =>
+    models.map((model) => {
+      const next = { ...model };
+      delete next.piApi;
+      return next;
+    })),
   createCustomProvider: vi.fn(async () => undefined),
+  customProviderWireProtocolForSave: vi.fn((agent: string, wireProtocol: string, defaultWireProtocol: string) =>
+    agent === 'pi' || wireProtocol !== defaultWireProtocol ? wireProtocol : undefined),
   readCustomProviderKey: vi.fn(),
   replaceCustomProviderModelId: vi.fn(),
   setCustomProviderModelReasoning: vi.fn(),
@@ -50,6 +58,24 @@ const localizedPreset: ProviderPreset = {
   },
 };
 
+const piProtocolPreset: ProviderPreset = {
+  id: 'pi-protocol-preset',
+  name: 'PI Protocol Preset',
+  nameEn: 'PI Protocol Preset',
+  authMethod: 'none',
+  runtimes: {
+    pi: {
+      baseUrl: 'http://127.0.0.1:4001/v1',
+      wireProtocol: 'openai-responses',
+      models: [{
+        id: 'deepseek-v4-pro',
+        name: 'DeepSeek V4 Pro',
+        piApi: 'openai-responses',
+      }],
+    },
+  },
+};
+
 function renderDialog(onClose = vi.fn()) {
   return {
     onClose,
@@ -60,7 +86,9 @@ function renderDialog(onClose = vi.fn()) {
 beforeEach(() => {
   (window as unknown as { electronAPI: unknown }).electronAPI = {
     maker: {
-      listProviderPresets: vi.fn(async () => ({ presets: [localizedPreset] })),
+      listProviderPresets: vi.fn(async () => ({
+        presets: [localizedPreset, piProtocolPreset],
+      })),
       fetchProviderModels: vi.fn(async () => ({
         ok: true,
         models: [
@@ -170,6 +198,33 @@ describe('CustomProviderDialog preset locale ownership', () => {
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it.each([
+    ['settings.providers.custom.wireProtocol.piChat', 'openai-chat'],
+    ['settings.providers.custom.wireProtocol.piAnthropic', 'anthropic-messages'],
+  ] as const)(
+    'saves an explicit %s PI selection without the preset piApi override',
+    async (buttonName, wireProtocol) => {
+      i18nState.language = 'en';
+      renderDialog();
+
+      fireEvent.click(await screen.findByRole('button', {
+        name: 'settings.providers.custom.presets.label',
+      }));
+      fireEvent.click(await screen.findByRole('option', { name: 'PI Protocol Preset' }));
+      fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.pi' }));
+      fireEvent.click(screen.getByRole('button', { name: buttonName }));
+      fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.save' }));
+
+      await waitFor(() => expect(createCustomProvider).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi).toMatchObject({
+        wireProtocol,
+        models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }],
+      });
+      expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi?.models[0])
+        .not.toHaveProperty('piApi');
+    },
+  );
 
   it.each([
     ['isComposing', { isComposing: true }],

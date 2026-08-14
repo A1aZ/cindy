@@ -709,7 +709,7 @@ describe('buildPiNativeProvidersFromConfigs', () => {
     ]);
   });
 
-  it('maps a per-model piApi correction into the native model spec', () => {
+  it('keeps an unedited preset per-model piApi correction in the native model spec', () => {
     const { providers } = buildPiNativeProvidersFromConfigs(
       [{
         id: 'deepseek',
@@ -734,6 +734,32 @@ describe('buildPiNativeProvidersFromConfigs', () => {
       api: 'openai-responses',
     });
   });
+
+  it.each([
+    ['openai-chat', 'openai-completions'],
+    ['anthropic-messages', 'anthropic-messages'],
+  ] as const)(
+    'uses a saved explicit %s PI protocol after the dialog clears preset piApi',
+    (wireProtocol, expectedApi) => {
+      const { providers } = buildPiNativeProvidersFromConfigs(
+        [{
+          id: 'deepseek',
+          name: 'DeepSeek',
+          auth: { method: 'none' },
+          runtimes: {
+            pi: piRuntime({
+              wireProtocol,
+              models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }],
+            }),
+          },
+        }],
+        () => null,
+      );
+
+      expect(providers[0]?.api).toBe(expectedApi);
+      expect(providers[0]?.models[0]?.api).toBeUndefined();
+    },
+  );
 
   it('maps an explicit Responses reasoning capability and supported efforts into Pi', () => {
     const { providers } = buildPiNativeProvidersFromConfigs(

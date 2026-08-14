@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   appendDiscoveredCustomProviderModels,
+  clearCustomProviderModelPiApiOverrides,
   createCustomProvider,
   customProviderModelConfigFromCatalogModel,
+  customProviderWireProtocolForSave,
   providerViewToCustomProviderConfig,
   replaceCustomProviderModelId,
   setCustomProviderModelReasoning,
@@ -42,6 +44,30 @@ describe('replaceCustomProviderModelId', () => {
       contextWindow: 1_000_000,
     };
     expect(replaceCustomProviderModelId(model, model.id)).toBe(model);
+  });
+});
+
+describe('PI custom-provider protocol overrides', () => {
+  it('drops preset piApi metadata and persists an explicit Chat selection', () => {
+    const models: ProviderRuntimeModelConfig[] = [{
+      id: 'deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro',
+      piApi: 'openai-responses',
+      contextWindow: 1_000_000,
+    }];
+
+    expect(clearCustomProviderModelPiApiOverrides(models)).toEqual([{
+      id: 'deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro',
+      contextWindow: 1_000_000,
+    }]);
+    expect(customProviderWireProtocolForSave('pi', 'openai-chat', 'openai-chat'))
+      .toBe('openai-chat');
+  });
+
+  it('keeps non-PI default protocol serialization sparse', () => {
+    expect(customProviderWireProtocolForSave('codex', 'openai-responses', 'openai-responses'))
+      .toBeUndefined();
   });
 });
 

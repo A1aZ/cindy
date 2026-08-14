@@ -39,7 +39,9 @@ import {
 } from '@/components/settings/CustomProviderRuntimeFillOverlay';
 import { extractIpcError } from '@/utils/ipcError';
 import {
+  clearCustomProviderModelPiApiOverrides,
   createCustomProvider,
+  customProviderWireProtocolForSave,
   readCustomProviderKey,
   replaceCustomProviderModelId,
   setCustomProviderModelReasoning,
@@ -931,7 +933,13 @@ export function CustomProviderDialog({
     (agent: DialogAgentKind, wireProtocol: ProviderWireProtocol) => {
       setRtSynced((prev) => ({
         ...prev,
-        [agent]: { ...prev[agent], wireProtocol },
+        [agent]: {
+          ...prev[agent],
+          wireProtocol,
+          ...(agent === 'pi'
+            ? { models: clearCustomProviderModelPiApiOverrides(prev[agent].models) }
+            : {}),
+        },
       }));
       setTest((prev) => ({ ...prev, [agent]: IDLE_TEST }));
     },
@@ -1374,10 +1382,15 @@ export function CustomProviderDialog({
       }
       const savedHeaders = authMode === 'none' ? stripCredentialHeaders(headers) : headers;
       const defaultProtocol = defaultWireFor(a);
+      const savedWireProtocol = customProviderWireProtocolForSave(
+        a,
+        rf.wireProtocol,
+        defaultProtocol,
+      );
       runtimes[a] = {
         baseUrl: rf.baseUrl.trim(),
         ...(requestPath ? { requestPath } : {}),
-        ...(rf.wireProtocol !== defaultProtocol ? { wireProtocol: rf.wireProtocol } : {}),
+        ...(savedWireProtocol ? { wireProtocol: savedWireProtocol } : {}),
         models,
         ...(Object.keys(savedHeaders).length > 0 ? { headers: savedHeaders } : {}),
         ...(rf.modelsUrl.trim() ? { modelsUrl: rf.modelsUrl.trim() } : {}),

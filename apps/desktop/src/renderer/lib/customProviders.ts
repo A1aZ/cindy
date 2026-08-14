@@ -17,6 +17,7 @@ import type {
   CatalogModel,
   CustomProviderConfig,
   PiReasoningEffort,
+  ProviderWireProtocol,
   ProviderView,
   ProviderRuntimeModelConfig,
 } from '@cindy/model-providers';
@@ -42,6 +43,33 @@ export function replaceCustomProviderModelId(
 ): ProviderRuntimeModelConfig {
   if (nextId === model.id) return model;
   return { id: nextId, name: model.name };
+}
+
+/**
+ * A preset piApi is upstream metadata, not a second user choice. Once the user
+ * explicitly chooses a PI runtime protocol, remove those hidden per-model
+ * defaults so the saved runtime protocol becomes authoritative.
+ */
+export function clearCustomProviderModelPiApiOverrides(
+  models: readonly ProviderRuntimeModelConfig[],
+): ProviderRuntimeModelConfig[] {
+  return models.map((model) => {
+    if (!model.piApi) return model;
+    const next = { ...model };
+    delete next.piApi;
+    return next;
+  });
+}
+
+/** PI always persists the selected protocol, including its common Chat default. */
+export function customProviderWireProtocolForSave(
+  agent: AgentKind,
+  wireProtocol: ProviderWireProtocol,
+  defaultWireProtocol: ProviderWireProtocol,
+): ProviderWireProtocol | undefined {
+  return agent === 'pi' || wireProtocol !== defaultWireProtocol
+    ? wireProtocol
+    : undefined;
 }
 
 export function setCustomProviderModelSupportsImageInput(

@@ -1697,10 +1697,19 @@ function ExpandedView({
     setOrganizeMenuPos({ x: event.clientX, y: event.clientY });
   }, []);
   const [topFade, setTopFade] = useState(false);
+  const searchActive = Boolean(search.trimmed);
+  const searchActiveRef = useRef(searchActive);
+  searchActiveRef.current = searchActive;
+  // 搜索激活前持续记下列表 scrollTop:layout effect 跑时原列表已经 hidden,
+  // 那时再读会被浏览器钳成 0。
+  const lastListScrollTopRef = useRef(0);
   useEffect(() => {
     const el = sidebarScrollRef.current;
     if (!el) return undefined;
     const update = () => {
+      if (!searchActiveRef.current) {
+        lastListScrollTopRef.current = el.scrollTop;
+      }
       const next = el.scrollTop > 1;
       setTopFade((prev) => (prev === next ? prev : next));
     };
@@ -1714,24 +1723,29 @@ function ExpandedView({
       ro?.disconnect();
     };
   }, []);
-  // 搜索结果替换同一滚动容器里的列表:打开查询时记下原 scrollTop 再滚回顶部,
-  // 换关键词也滚回顶部;清查询时还原,避免从结果中间开始看,也不把用户送回列表顶。
-  const searchActive = Boolean(search.trimmed);
-  const searchScrollRestoreRef = useRef(0);
+  // 搜索结果替换同一滚动容器里的列表:打开 / 换词 / 换筛选时滚回顶部;
+  // 清查询时还原搜索前记下的列表位置。
   const wasSearchActiveRef = useRef(false);
+  const searchProjectKey =
+    search.projectSelection === 'all' ? 'all' : search.projectSelection.join('\0');
   useLayoutEffect(() => {
     const el = sidebarScrollRef.current;
     if (!el) return;
     if (searchActive) {
-      if (!wasSearchActiveRef.current) {
-        searchScrollRestoreRef.current = el.scrollTop;
-      }
       el.scrollTo({ top: 0 });
     } else if (wasSearchActiveRef.current) {
-      el.scrollTo({ top: searchScrollRestoreRef.current });
+      el.scrollTo({ top: lastListScrollTopRef.current });
     }
     wasSearchActiveRef.current = searchActive;
-  }, [searchActive, search.trimmed]);
+  }, [
+    searchActive,
+    search.trimmed,
+    search.statusFilter,
+    search.agentFilter,
+    search.lastActivityFilter,
+    search.sortBy,
+    searchProjectKey,
+  ]);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
   // (否则选中远程行 → 计数加了但 archive/delete 查 sessionsById 落空、静默忽略)。
   const sessionsById = useMemo(

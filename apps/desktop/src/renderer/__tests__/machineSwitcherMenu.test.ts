@@ -88,9 +88,10 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(topNavSource).toContain("const pinSearch = section === 'scrollable' && search.query.trim().length > 0");
     expect(topNavSource).toContain("pinSearch && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'");
     expect(topNavSource).toContain('if (section === \'scrollable\')');
-    expect(sidebarUpperSource).toContain('searchScrollRestoreRef.current = el.scrollTop');
-    expect(sidebarUpperSource).toContain("el.scrollTo({ top: searchScrollRestoreRef.current })");
-    expect(sidebarUpperSource).toContain('[searchActive, search.trimmed]');
+    expect(sidebarUpperSource).toContain('lastListScrollTopRef.current = el.scrollTop');
+    expect(sidebarUpperSource).toContain("el.scrollTo({ top: lastListScrollTopRef.current })");
+    expect(sidebarUpperSource).toContain('search.statusFilter');
+    expect(sidebarUpperSource).toContain('searchProjectKey');
     expect(sidebarUpperSource).toContain('onContextMenu={(event) => event.stopPropagation()}');
     expect(sidebarUpperSource).toContain('{searchActive ? (');
     expect(sidebarUpperSource).toContain('<div hidden={searchActive}>');

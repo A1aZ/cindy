@@ -900,7 +900,11 @@ export function listAvailableGhostsForAuthorization(): InstalledGhost[] {
 
 function requireGhostAvailableForActiveSession(id: string): void {
   if (!isGhostAvailableForActiveSession(id)) {
-    if (isAppSessionBoundaryPending()) {
+    const activeOwner = getActiveAppSession().dataOwnerId;
+    if (
+      isAppSessionBoundaryPending() ||
+      !isGhostSkillProjectionBoundaryStableForOwner(activeOwner)
+    ) {
       throwIpcError(
         'PRECONDITION_FAILED',
         'Ghost projection is switching owners; retry after the boundary settles.',

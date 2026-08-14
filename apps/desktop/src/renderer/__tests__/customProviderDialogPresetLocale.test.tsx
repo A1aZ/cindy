@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -90,13 +90,15 @@ function overlayOf(dialog: HTMLElement): HTMLElement {
 }
 
 function pointerDownOn(element: Element) {
-  element.dispatchEvent(
-    new PointerEvent('pointerdown', {
-      button: 0,
-      bubbles: true,
-      cancelable: true,
-    }),
-  );
+  act(() => {
+    element.dispatchEvent(
+      new PointerEvent('pointerdown', {
+        button: 0,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
 }
 
 beforeEach(() => {

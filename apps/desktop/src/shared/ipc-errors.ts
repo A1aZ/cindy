@@ -176,6 +176,7 @@ export type IpcErrorCode =
   | 'MODEL_ACCESS_UNSUPPORTED' // 企业未接入(403)——XD 网关不可用,不重试
   | 'MODEL_CATALOG_FETCH_DISABLED' // 模型目录远程拉取被禁用(dev 缺省禁网/XDT_DISABLE_MODELS_FETCH),未发起请求
   | 'PLAN_CHANGE_NOT_AVAILABLE' // 当前订阅不能切换到目标套餐，可返回候选列表重选
+  | 'RESUME_NOT_AVAILABLE' // 当前订阅已到期、渠道协议失效或状态不可恢复
   // 钉钉机器人连接
   | 'DINGTALK_AUTH_FAILED' // Client ID / Client Secret 被钉钉拒绝
   | 'DINGTALK_NETWORK_FAILED' // 钉钉凭证校验接口不可达
@@ -360,6 +361,7 @@ const IPC_ERROR_CODES: ReadonlySet<IpcErrorCode> = new Set<IpcErrorCode>([
   'MODEL_ACCESS_UNSUPPORTED',
   'MODEL_CATALOG_FETCH_DISABLED',
   'PLAN_CHANGE_NOT_AVAILABLE',
+  'RESUME_NOT_AVAILABLE',
   'DINGTALK_AUTH_FAILED',
   'DINGTALK_NETWORK_FAILED',
   'DINGTALK_STREAM_CONNECTION_FAILED',

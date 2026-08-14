@@ -290,6 +290,51 @@ describe('device-link IPC handlers', () => {
     await expect(handleListDevices(depsNet)).rejects.toThrowError(/\[DEVICE_LINK_UNAVAILABLE\]/);
   });
 
+  it.each(['旧目录名', ''] as const)(
+    'listDevices:并发请求中新响应先返回时，晚到旧响应(%s)跟随新结果且不回写缓存',
+    async (oldName) => {
+      const resolvers: Array<(value: unknown) => void> = [];
+      const apiFetch: DeviceLinkIpcDeps['apiFetch'] = <T>() =>
+        new Promise<T>((resolve) => {
+          resolvers.push((value) => resolve(value as T));
+        });
+      const rememberLastKnownDeviceName = vi.fn(async () => true);
+      const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const deps = makeDeps({
+        apiFetch,
+        rememberLastKnownDeviceName,
+        forgetLastKnownDeviceName,
+      });
+      const device = (name: string) => ({
+        deviceId: 'dev-1',
+        name,
+        selfName: 'Host.local',
+        platform: 'darwin',
+        lastSeenAt: '2026-06-23T00:00:00.000Z',
+        online: true,
+        busy: false,
+        remoteControlEnabled: true,
+        controlEnabled: true,
+        isSelf: false,
+      });
+
+      const oldRequest = handleListDevices(deps);
+      const newRequest = handleListDevices(deps);
+      resolvers[1]?.({ devices: [device('新数据库名')] });
+      await expect(newRequest).resolves.toMatchObject({
+        devices: [{ name: '新数据库名' }],
+      });
+      resolvers[0]?.({ devices: [device(oldName)] });
+      await expect(oldRequest).resolves.toMatchObject({
+        devices: [{ name: '新数据库名' }],
+      });
+
+      expect(rememberLastKnownDeviceName).toHaveBeenCalledTimes(1);
+      expect(rememberLastKnownDeviceName).toHaveBeenCalledWith('dev-1', '新数据库名');
+      expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+    },
+  );
+
   it('listDevices:缓存服务端返回的有效设备名', async () => {
     const rememberLastKnownDeviceName = vi.fn(async () => true);
     const deps = makeDeps({

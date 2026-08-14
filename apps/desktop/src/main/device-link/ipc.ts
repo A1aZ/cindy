@@ -302,18 +302,38 @@ export async function handleSetDeviceControlEnabled(
   return { deviceId: normalizedDeviceId, enabled, disabledControlDeviceIds };
 }
 
-export async function handleListDevices(
+type DeviceListResult = { devices: DeviceLinkDeviceView[] };
+
+/**
+ * 所有 renderer 的设备列表入口最终都汇到本 handler。代次刻意跨状态变化与 teardown
+ * 单调递增：后发请求代表更新的目录意图，先发请求即使更晚返回也只能跟随最新 promise，
+ * 不能进入 reconcile 写回旧名称/空值，也不能把旧列表重新交给 UI。
+ */
+let deviceListRequestSequence = 0;
+let latestDeviceListRequest: { sequence: number; promise: Promise<DeviceListResult> } | null = null;
+
+export function handleListDevices(
   deps: DeviceLinkIpcDeps,
-): Promise<{ devices: DeviceLinkDeviceView[] }> {
+): Promise<DeviceListResult> {
+  const sequence = ++deviceListRequestSequence;
   const requestEpoch = deps.captureControllerDisplayNameRequestEpoch();
-  try {
-    const result = await deps.apiFetch<{ devices: DeviceLinkServerDeviceView[] }>(
-      '/api/device-link/devices',
-    );
-    return reconcileDeviceNames(result, deps, requestEpoch);
-  } catch (err) {
-    rethrowServerError(err);
-  }
+  let request!: Promise<DeviceListResult>;
+  request = deps.apiFetch<{ devices: DeviceLinkServerDeviceView[] }>(
+    '/api/device-link/devices',
+  ).then(
+    (result) => {
+      const latest = latestDeviceListRequest;
+      if (latest && latest.sequence > sequence) return latest.promise;
+      return reconcileDeviceNames(result, deps, requestEpoch);
+    },
+    (err: unknown) => {
+      const latest = latestDeviceListRequest;
+      if (latest && latest.sequence > sequence) return latest.promise;
+      rethrowServerError(err);
+    },
+  );
+  latestDeviceListRequest = { sequence, promise: request };
+  return request;
 }
 
 function reconcileDeviceNames(

@@ -88,7 +88,8 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
       "section === 'scrollable' &&\n                search.query.trim().length > 0 &&\n                'sticky top-0 z-30 -mx-3 bg-[var(--cmd-palette-bg)] px-3'",
     );
     expect(sidebarUpperSource).toContain('sidebarScrollRef.current?.scrollTo({ top: 0 })');
-    expect(sidebarUpperSource).toContain('{search.trimmed ? (');
+    expect(sidebarUpperSource).toContain('{searchActive ? (');
+    expect(sidebarUpperSource).toContain('<div hidden={searchActive}>');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');
     expect(sidebarUpperSource).not.toContain(
       "search.trimmed && 'sticky top-0 z-30 bg-[var(--cmd-palette-bg)]'",

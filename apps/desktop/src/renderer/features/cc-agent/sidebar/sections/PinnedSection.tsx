@@ -145,9 +145,8 @@ export interface PinnedSectionProps {
   /** 已按筛选和持久化顺序排好的置顶对话与项目。 */
   entries: PinnedSidebarEntry[];
   /**
-   * 已知项目全集,用于 hover 时把 pinned session 映射到项目 displayName(与
-   * ProjectNode 表头同口径消歧)。文字模式渲染 SessionItem 时才用到,card / list
-   * 模式当前不消费。
+   * 已知项目全集,用于把 pinned session 映射到项目 displayName(与
+   * ProjectNode 表头同口径消歧)。文字 / 列表模式画在标题旁;卡片模式不消费。
    */
   allKnownProjects: readonly ProjectNodeData[];
   /** 复用 ProjectNode 渲染项目，确保展开/收起和项目操作与普通项目段一致。 */
@@ -209,7 +208,7 @@ export function PinnedSection({
   const slicedEntries = visibleEntries;
 
   // 平铺时标题旁的"项目来源"标签(口径见 buildSessionSourceLabelMap)。
-  // 置顶视图传 visibleSessions;card 变体不画这个标签。
+  // 置顶视图传 visibleSessions;文字 / 列表都画,card 变体不画这个标签。
   const sourceLabelMap = useMemo(
     () =>
       buildSessionSourceLabelMap(visibleSessions, allKnownProjects, t('ccAgent.sidebar.dialogues')),
@@ -267,6 +266,7 @@ export function PinnedSection({
           onTogglePin={onTogglePin}
           onMoveSession={onMoveSession}
           projectOptions={projectOptions}
+          sourceLabel={sourceLabelMap.get(session.id)}
         />
       );
     },
@@ -286,6 +286,7 @@ export function PinnedSection({
       onTogglePin,
       onMoveSession,
       projectOptions,
+      sourceLabelMap,
     ],
   );
 

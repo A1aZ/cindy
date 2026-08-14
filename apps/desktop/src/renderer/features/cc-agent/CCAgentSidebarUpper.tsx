@@ -3101,7 +3101,7 @@ function ExpandedView({
           {/* 顶部导航可滚动段:置于列表最上方,一起滚动。搜索打开时由 TopNav
               只钉搜索行,输入框保持同一份实例,结果替换下方列表。 */}
           <SidebarTopNav section="scrollable" />
-          {search.trimmed ? (
+          {searchActive ? (
             <div data-conversation-search-surface>
               <SearchResultsBody
                 trimmed={search.trimmed}
@@ -3110,7 +3110,10 @@ function ExpandedView({
                 onSelect={search.handleSelect}
               />
             </div>
-          ) : remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
+          ) : null}
+          {/* 搜索时原列表只隐藏、不卸载:置顶段折叠等本地 state 才能保住。 */}
+          <div hidden={searchActive}>
+          {remoteDeviceDirectoryStatus === 'error' && !hasVisibleSidebarContent ? (
             <>
               <MainListScopeHeader
                 filter={filter}
@@ -3307,6 +3310,7 @@ function ExpandedView({
               />
             </>
           )}
+          </div>
         </div>
       </div>
 

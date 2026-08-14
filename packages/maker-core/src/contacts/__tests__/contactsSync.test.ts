@@ -7,6 +7,7 @@ import { MakerContactsStore } from "../store.js";
 import {
   createContactsSyncDelta,
   mergeContactsSyncStates,
+  stableContactsSyncJson,
 } from "../sync/merge.js";
 import { materializeContactsSyncState } from "../sync/materialize.js";
 import {
@@ -177,6 +178,25 @@ describe("contacts device sync", () => {
     expect(mergeContactsSyncStates(plain, enriched)).toEqual(
       mergeContactsSyncStates(enriched, plain),
     );
+  });
+
+  it("深层 stamped 扩展字段不会耗尽规范化调用栈", () => {
+    const store = createStore();
+    const contact = store.createContact({
+      kind: "person",
+      displayName: "深层扩展",
+    });
+    store.activateDeviceSync();
+    const state = stateOf(store);
+    const contactRecord = state.contacts.find((entry) => entry.id === contact.id)!;
+    let extension: Record<string, unknown> = { leaf: "ok" };
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      extension = { next: extension };
+    }
+    (contactRecord.status as unknown as Record<string, unknown>).extension =
+      extension;
+
+    expect(() => stableContactsSyncJson(contactRecord.status)).not.toThrow();
   });
 
   it("确认成员元数据使用同步层上限，不收紧多设备合并后的合法身份数", () => {
@@ -375,6 +395,43 @@ describe("contacts device sync", () => {
     const projection = materializeContactsSyncState(recreated);
     expect(
       projection.contacts.find((contact) => contact.id === aContact.id)!.status,
+    ).toBe("confirmed");
+  });
+
+  it("大量确认凭据仍按冲突 key 线性索引并保留确认状态", () => {
+    const a = createStore();
+    const b = createStore();
+    a.activateDeviceSync();
+    b.activateDeviceSync();
+    const aContact = a.createContact({
+      kind: "person",
+      displayName: "甲",
+      identities: [{ platform: "email", value: "indexed@example.com" }],
+    });
+    b.createContact({
+      kind: "person",
+      displayName: "乙",
+      identities: [{ platform: "email", value: "indexed@example.com" }],
+    });
+    exchange(a, b);
+    a.updateContact(aContact.id, { status: "confirmed" });
+
+    const state = stateOf(a);
+    const contact = state.contacts.find((entry) => entry.id === aContact.id)!;
+    const acknowledgement = contact.status.acknowledgedConflicts![0]!;
+    contact.status.acknowledgedConflicts = [
+      ...Array.from({ length: 50_000 }, (_, index) => ({
+        platform: "custom",
+        normalizedValue: `unrelated-${index}`,
+        membershipHash: index.toString(16).padStart(64, "0"),
+      })),
+      acknowledgement,
+    ];
+
+    expect(
+      materializeContactsSyncState(state).contacts.find(
+        (entry) => entry.id === aContact.id,
+      )!.status,
     ).toBe("confirmed");
   });
 

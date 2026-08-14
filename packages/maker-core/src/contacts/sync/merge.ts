@@ -21,23 +21,75 @@ export function compareContactsSyncText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** JSON-compatible serialization with recursively sorted object keys. */
+const MAX_STABLE_JSON_NODES = 100_000;
+
+/**
+ * JSON-compatible serialization with sorted object keys.
+ *
+ * This is deliberately iterative: stamped values may carry unknown extension
+ * fields from a newer client, and a deeply nested extension must not overflow
+ * the codec worker's call stack. The node budget keeps malformed cyclic or
+ * unexpectedly broad values bounded while preserving deterministic ordering for
+ * normal JSON-shaped sync data.
+ */
 export function stableContactsSyncJson(value: unknown): string {
-  if (value === null || typeof value !== "object") {
-    return JSON.stringify(value) ?? "null";
+  type Frame =
+    | { kind: "value"; value: unknown }
+    | { kind: "text"; text: string };
+
+  const output: string[] = [];
+  const stack: Frame[] = [{ kind: "value", value }];
+  const seen = new WeakSet<object>();
+  let nodes = 0;
+
+  while (stack.length > 0) {
+    const frame = stack.pop()!;
+    if (frame.kind === "text") {
+      output.push(frame.text);
+      continue;
+    }
+
+    nodes += 1;
+    if (nodes > MAX_STABLE_JSON_NODES) {
+      output.push('"[truncated]"');
+      continue;
+    }
+
+    const current = frame.value;
+    if (current === null || typeof current !== "object") {
+      output.push(JSON.stringify(current) ?? "null");
+      continue;
+    }
+    if (seen.has(current)) {
+      output.push('"[circular]"');
+      continue;
+    }
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      output.push("[");
+      stack.push({ kind: "text", text: "]" });
+      for (let index = current.length - 1; index >= 0; index -= 1) {
+        stack.push({ kind: "value", value: current[index] });
+        if (index > 0) stack.push({ kind: "text", text: "," });
+      }
+      continue;
+    }
+
+    const keys = Object.keys(current)
+      .filter((key) => current[key] !== undefined)
+      .sort(compareContactsSyncText);
+    output.push("{");
+    stack.push({ kind: "text", text: "}" });
+    for (let index = keys.length - 1; index >= 0; index -= 1) {
+      const key = keys[index]!;
+      stack.push({ kind: "value", value: current[key] });
+      stack.push({ kind: "text", text: `:${JSON.stringify(key)}` });
+      if (index > 0) stack.push({ kind: "text", text: "," });
+    }
   }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => stableContactsSyncJson(entry)).join(",")}]`;
-  }
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record)
-    .filter((key) => record[key] !== undefined)
-    .sort(compareContactsSyncText);
-  return `{${keys
-    .map(
-      (key) => `${JSON.stringify(key)}:${stableContactsSyncJson(record[key])}`,
-    )
-    .join(",")}}`;
+
+  return output.join("");
 }
 
 export function compareContactsSyncStamp(

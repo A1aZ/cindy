@@ -16,6 +16,7 @@ import {
   type ContactsSnapshotIdentity,
   type ContactsSnapshotMembership,
   type ContactsSnapshotRelation,
+  type ContactsSyncConflictMembership,
   type ContactsSyncEntity,
   type ContactsSyncState,
 } from "./types.js";
@@ -90,9 +91,22 @@ export function materializeContactsSyncState(
   const contactsById = new Map(
     contacts.map((contact) => [contact.id, contact]),
   );
-  const contactRecordsById = new Map(
-    state.contacts.map((contact) => [contact.id, contact]),
-  );
+  const acknowledgementsByContactId = new Map<
+    string,
+    Map<string, ContactsSyncConflictMembership>
+  >();
+  for (const contact of state.contacts) {
+    const acknowledgements = contact.status.acknowledgedConflicts;
+    if (!acknowledgements || acknowledgements.length === 0) continue;
+    const byConflictKey = new Map<string, ContactsSyncConflictMembership>();
+    for (const acknowledgement of acknowledgements) {
+      byConflictKey.set(
+        `${acknowledgement.platform}\u0000${acknowledgement.normalizedValue}`,
+        acknowledgement,
+      );
+    }
+    acknowledgementsByContactId.set(contact.id, byConflictKey);
+  }
   const contactIds = new Set(contacts.map((contact) => contact.id));
 
   // contact_groups.name 的 UNIQUE 与 ContactsGroupsRepo 都是精确字符串语义；
@@ -124,16 +138,13 @@ export function materializeContactsSyncState(
   // Lamport stamp 只提供确定性全序，不能证明确认写入见过某个离线成员。
   // 只有确认记录的成员指纹与当前冲突完全一致，才保留 confirmed。
   for (const conflict of conflicts) {
+    const conflictKey = `${conflict.platform}\u0000${conflict.normalizedValue}`;
     for (const contactId of conflict.owners) {
       const contact = contactsById.get(contactId);
       if (!contact) continue;
-      const acknowledgement = contactRecordsById
+      const acknowledgement = acknowledgementsByContactId
         .get(contactId)
-        ?.status.acknowledgedConflicts?.find(
-          (membership) =>
-            membership.platform === conflict.platform &&
-            membership.normalizedValue === conflict.normalizedValue,
-        );
+        ?.get(conflictKey);
       if (
         contact.status === "confirmed" &&
         acknowledgement?.membershipHash === conflict.membershipHash

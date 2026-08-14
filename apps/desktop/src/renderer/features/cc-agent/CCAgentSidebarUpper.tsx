@@ -1737,6 +1737,37 @@ function ExpandedView({
     freezeListScrollOnOpenRef.current = false;
     sidebarScrollRef.current?.scrollTo({ top: lastListScrollTopRef.current });
   }, []);
+  // 指针手势期间不还原滚动:按下的按钮会在 click 前被滚走,第一次点击被吞。
+  // 空查询取消和有查询退出共用这一条,等 pointerup 后再还原。
+  const pointerDownRef = useRef(false);
+  const pendingRestoreRef = useRef(false);
+  const restoreListScrollAfterPointer = useCallback(() => {
+    if (pointerDownRef.current) {
+      pendingRestoreRef.current = true;
+      return;
+    }
+    pendingRestoreRef.current = false;
+    restoreListScroll();
+  }, [restoreListScroll]);
+  useEffect(() => {
+    const onPointerDown = () => {
+      pointerDownRef.current = true;
+    };
+    const onPointerEnd = () => {
+      pointerDownRef.current = false;
+      if (!pendingRestoreRef.current) return;
+      pendingRestoreRef.current = false;
+      window.setTimeout(() => restoreListScroll(), 0);
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('pointerup', onPointerEnd, true);
+    window.addEventListener('pointercancel', onPointerEnd, true);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('pointerup', onPointerEnd, true);
+      window.removeEventListener('pointercancel', onPointerEnd, true);
+    };
+  }, [restoreListScroll]);
   useLayoutEffect(() => {
     if (openSignal === 0 || searchActive || !freezeListScrollOnOpenRef.current) return;
     sidebarScrollRef.current?.scrollTo({ top: 0 });
@@ -1750,25 +1781,12 @@ function ExpandedView({
       if (target.closest('[data-radix-popper-content-wrapper]')) return false;
       return true;
     };
-    // 不在 pointerdown 里还原:否则按下的按钮会在 click 前被滚走,第一次点击被吞。
-    // 指针手势结束后再还原;纯键盘离开可以立刻还原。
-    let pointerGestureOpen = false;
-    const restoreAfterPointer = () => {
-      window.removeEventListener('pointerup', restoreAfterPointer, true);
-      window.removeEventListener('pointercancel', restoreAfterPointer, true);
-      window.setTimeout(() => {
-        pointerGestureOpen = false;
-        restoreListScroll();
-      }, 0);
-    };
     const onPointerDown = (event: PointerEvent) => {
       if (!isOutsideSearch(event)) return;
-      pointerGestureOpen = true;
-      window.addEventListener('pointerup', restoreAfterPointer, true);
-      window.addEventListener('pointercancel', restoreAfterPointer, true);
+      restoreListScrollAfterPointer();
     };
     const onFocusIn = (event: FocusEvent) => {
-      if (!isOutsideSearch(event) || pointerGestureOpen) return;
+      if (!isOutsideSearch(event) || pointerDownRef.current) return;
       restoreListScroll();
     };
     document.addEventListener('pointerdown', onPointerDown, true);
@@ -1776,10 +1794,8 @@ function ExpandedView({
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true);
       document.removeEventListener('focusin', onFocusIn);
-      window.removeEventListener('pointerup', restoreAfterPointer, true);
-      window.removeEventListener('pointercancel', restoreAfterPointer, true);
     };
-  }, [openSignal, searchActive, restoreListScroll]);
+  }, [openSignal, searchActive, restoreListScroll, restoreListScrollAfterPointer]);
   // 搜索结果替换同一滚动容器里的列表:打开 / 换词 / 换筛选时滚回顶部;
   // 清查询时还原搜索前记下的列表位置。
   const wasSearchActiveRef = useRef(false);
@@ -1790,9 +1806,10 @@ function ExpandedView({
     if (!el) return;
     if (searchActive) {
       freezeListScrollOnOpenRef.current = false;
+      pendingRestoreRef.current = false;
       el.scrollTo({ top: 0 });
     } else if (wasSearchActiveRef.current) {
-      restoreListScroll();
+      restoreListScrollAfterPointer();
     }
     wasSearchActiveRef.current = searchActive;
   }, [
@@ -1803,7 +1820,7 @@ function ExpandedView({
     search.lastActivityFilter,
     search.sortBy,
     searchProjectKey,
-    restoreListScroll,
+    restoreListScrollAfterPointer,
   ]);
   // 含远程会话:device-link 远程行也渲染在可选行里,bulk 选择/归档/删除必须能解析到它们
   // (否则选中远程行 → 计数加了但 archive/delete 查 sessionsById 落空、静默忽略)。

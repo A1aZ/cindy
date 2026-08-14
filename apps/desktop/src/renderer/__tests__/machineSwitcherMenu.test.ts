@@ -99,10 +99,10 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(sidebarUpperSource).toContain('<div hidden={searchActive} className="flex flex-col gap-2">');
     expect(sidebarUpperSource).toContain('freezeListScrollOnOpenRef.current = true');
     expect(sidebarUpperSource).toContain('const restoreListScroll = useCallback');
-    expect(sidebarUpperSource).toContain("document.addEventListener('pointerdown', onPointerDown, true)");
+    expect(sidebarUpperSource).toContain('const restoreListScrollAfterPointer = useCallback');
+    expect(sidebarUpperSource).toContain('restoreListScrollAfterPointer()');
+    expect(sidebarUpperSource).toContain("window.addEventListener('pointerup', onPointerEnd, true)");
     expect(sidebarUpperSource).toContain("document.addEventListener('focusin', onFocusIn)");
-    expect(sidebarUpperSource).toContain("window.addEventListener('pointerup', restoreAfterPointer, true)");
-    expect(sidebarUpperSource).toContain('window.setTimeout(() => {');
     const inlineSearchSource = read('features', 'cc-agent', 'sidebar', 'SidebarInlineSearch.tsx');
     expect(inlineSearchSource).toContain('inputRef.current?.focus({ preventScroll: true })');
     expect(sidebarUpperSource).not.toContain('absolute inset-0 z-20');

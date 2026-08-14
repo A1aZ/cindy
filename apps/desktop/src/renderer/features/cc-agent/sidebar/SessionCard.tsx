@@ -1250,7 +1250,12 @@ function TimeActionsSlot({
       </div>
 
       {canQuickArchive && archivePending && (
-        <span aria-hidden className="invisible col-start-1 row-start-1 inline-block h-[22px] w-14" />
+        <span
+          aria-hidden
+          className="invisible col-start-1 row-start-1 inline-flex h-[22px] w-max min-w-14 items-center justify-center whitespace-nowrap rounded-full px-[9px] text-11 font-semibold"
+        >
+          {t('ccAgent.sidebar.sessionMenu.archived')}
+        </span>
       )}
       {yieldToOrdinalBadge && ordinalBadgeLabel ? (
         <span

@@ -726,6 +726,16 @@ describe('SessionCard visual cases', () => {
       if (variant === 'list') {
         // 让位容器是 time 最近的 div 祖先(time 嵌在 SessionInfoMeta span 内)。
         expect(container.querySelector('time')?.closest('div')?.className).toContain('invisible');
+        const confirmReserve = Array.from(container.querySelectorAll<HTMLElement>('span')).find(
+          (node) =>
+            node.getAttribute('aria-hidden') === 'true' &&
+            node.className.includes('w-max') &&
+            node.textContent === '归档',
+        );
+        expect(confirmReserve).toBeTruthy();
+        expect(confirmReserve?.className).toContain('px-[9px]');
+        expect(confirmReserve?.className).toContain('text-11');
+        expect(confirmReserve?.className).not.toContain('inline-block h-[22px] w-14');
       }
     },
   );

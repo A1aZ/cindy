@@ -205,6 +205,18 @@ describe('SessionCard review regressions', () => {
     expect(sessionCardSource).toContain('w-max min-w-14');
     expect(sessionCardSource).toContain('whitespace-nowrap text-11 font-semibold');
     expect(sessionCardSource).toContain(
+      'invisible col-start-1 row-start-1 inline-flex h-[22px] w-max min-w-14 items-center justify-center whitespace-nowrap rounded-full px-[9px] text-11 font-semibold',
+    );
+    expect(sessionCardSource).not.toContain(
+      'invisible col-start-1 row-start-1 inline-block h-[22px] w-14',
+    );
+    expect(sessionItemSource).toContain(
+      'invisible col-start-1 row-start-1 inline-block h-6 w-14',
+    );
+    expect(sessionItemSource).toContain(
+      'absolute right-0 top-0 flex h-6 w-14 items-center justify-center rounded-md text-xs font-medium',
+    );
+    expect(sessionCardSource).toContain(
       '!isEditing && !archivePending && ordinalBadgeLabel != null',
     );
     expect(sessionCardSource).toContain("archivePending && 'invisible opacity-0'");

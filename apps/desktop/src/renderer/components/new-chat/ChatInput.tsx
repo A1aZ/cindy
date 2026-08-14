@@ -3620,7 +3620,7 @@ export function ChatInput({
       { silent: true },
     );
     focusComposerEndNextFrame(editor);
-  }, [editor, ghostsForCommand, installedGhosts, storageKey, deviceLinkDeviceId]);
+  }, [editor, ghostsForCommand, installedGhosts, storageKey, deviceLinkDeviceId, remoteHostId]);
 
   // browser-comment-chip:挂载 / 会话切换时从草稿恢复评论胶囊。
   useEffect(() => {

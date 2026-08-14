@@ -814,6 +814,7 @@ export function SessionCard({
                 canUnarchive={!remoteWritesBlocked}
                 onUnarchive={handleUnarchiveSelect}
                 yieldToOrdinalBadge={ordinalBadgeLabel != null}
+                ordinalBadgeLabel={ordinalBadgeLabel}
               />
             )}
           </div>
@@ -1191,6 +1192,7 @@ function TimeActionsSlot({
   onArchiveNow,
   onUnarchive,
   yieldToOrdinalBadge = false,
+  ordinalBadgeLabel,
 }: {
   sessionId: string;
   /** 任务信息复选(C 期)需要读 totalTokenUsage / totalMoney 等字段。 */
@@ -1209,6 +1211,7 @@ function TimeActionsSlot({
   onUnarchive: () => void;
   /** mod+1..9 序号徽标出现时让位:徽标独占右缘,不与时间/badge 并排。 */
   yieldToOrdinalBadge?: boolean;
+  ordinalBadgeLabel?: string | null;
 }) {
   const { t } = useTranslation();
   // 任务信息复选(C / C' 期):与 SessionItem 的时间槽同源;默认仅 time 与旧渲染等价。
@@ -1249,6 +1252,14 @@ function TimeActionsSlot({
       {canQuickArchive && archivePending && (
         <span aria-hidden className="invisible col-start-1 row-start-1 inline-block h-[22px] w-14" />
       )}
+      {yieldToOrdinalBadge && ordinalBadgeLabel ? (
+        <span
+          aria-hidden
+          className="invisible col-start-1 row-start-1 inline-flex h-5 items-center px-1.5 py-[2px] text-11 leading-none"
+        >
+          {ordinalBadgeLabel}
+        </span>
+      ) : null}
       {canQuickArchive && archivePending && (
         <button
           ref={confirmPillRef}

@@ -185,6 +185,12 @@ describe('SessionCard review regressions', () => {
     expect(sessionCardSource).toContain(
       "!menuOpen && 'hidden group-hover/card:flex group-focus-within/slot:flex'",
     );
+    expect(sessionItemSource).toContain(
+      'invisible col-start-1 row-start-1 inline-flex h-6 items-center px-1.5 py-[2px] text-11 leading-none',
+    );
+    expect(sessionCardSource).toContain(
+      'invisible col-start-1 row-start-1 inline-flex h-5 items-center px-1.5 py-[2px] text-11 leading-none',
+    );
   });
 
   it('keeps card info anchored to the bottom meta row instead of the overlay layout', () => {

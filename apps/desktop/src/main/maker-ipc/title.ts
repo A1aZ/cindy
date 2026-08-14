@@ -453,7 +453,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
       // 对其做预测是浪费付费调用。也拒绝 soft-deleted session:删除态会话的消息仍保留在 DB,
       // 但已从用户会话列表移除,对其做预测会外发已删除转写并产生付费调用。
       const [sessionRow] = await getDbClient()
-        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status })
+        .drizzle.select({ remoteHostId: sessions.remoteHostId, source: sessions.source, agentKind: sessions.agentKind, workingDir: sessions.workingDir, status: sessions.status, updatedAt: sessions.updatedAt })
         .from(sessions)
         .where(eq(sessions.id, sessionId));
       if (!sessionRow || sessionRow.remoteHostId || sessionRow.source === 'review' || sessionRow.status === 'deleted') {
@@ -481,10 +481,11 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         // stale UI 可能携带其它会话转写或伪造 workdir,把非本会话内容送到本地 provider 触发
         // 付费调用。先排空落盘队列,确保刚结束 turn 的最终回复已持久化,再读最近消息。
         await drainPersistQueue();
-        // 重新校验 session 资格:drainPersistQueue 等待期间 session 可能被软删除或转为远程/review,
-        // 上方基于 status / source / remoteHostId 的防御纵深检查会过期(TOCTOU)。此处再从 DB 读取
-        // 同一行的资格字段,若已不再可预测(缺失 / 远程 / review / 已删除),静默返回 null,避免把
-        // 已删除或已易主的转写外发到本地 provider 触发付费调用。
+        // drainPersistQueue 等待期间 session 可能被软删除或转为远程/review，
+        // 或用户发起新 turn（session.updatedAt 变化）。上方基于 status / source /
+        // remoteHostId 的防御纵深检查会过期（TOCTOU）。此处再从 DB 读取同一行
+        // 的资格字段，并比对 updatedAt：若 session 在 drain 期间被修改（新 turn
+        // 启动），中止预测，避免用旧上下文发起付费调用。
         const [latestSessionRow] = await getDbClient()
           .drizzle.select({
             remoteHostId: sessions.remoteHostId,
@@ -492,6 +493,7 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
             status: sessions.status,
             agentKind: sessions.agentKind,
             workingDir: sessions.workingDir,
+            updatedAt: sessions.updatedAt,
           })
           .from(sessions)
           .where(eq(sessions.id, sessionId));
@@ -501,6 +503,13 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           latestSessionRow.source === 'review' ||
           latestSessionRow.status === 'deleted'
         ) {
+          return { prompt: null };
+        }
+        // drain 期间 session 被修改（新 turn 启动 / 消息落盘等），中止预测。
+        if (latestSessionRow.updatedAt !== sessionRow.updatedAt) {
+          log.debug('predict-prompt session updated during drain — rejecting', {
+            sessionId,
+          });
           return { prompt: null };
         }
         // drain 期间 session 可能被切换 agent(sessionAgentSwitchHandler 会提交 agentKind 变更):

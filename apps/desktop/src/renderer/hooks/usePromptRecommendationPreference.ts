@@ -31,13 +31,9 @@ export function usePromptRecommendationPreference(): {
     memoryValue = next;
     setState(next);
     try {
-      // 只持久化非默认值（默认是 true/enabled），避免把默认值固化回用户配置。
-      // 如果未来版本默认值变化，未显式自定义的用户自动跟随新默认。
-      if (next) {
-        localStorage.removeItem(PROMPT_RECOMMENDATION_KEY);
-      } else {
-        localStorage.setItem(PROMPT_RECOMMENDATION_KEY, 'false');
-      }
+      // 持久化用户显式选择，与「从未自定义」明确区分。
+      // 若未来版本默认值变化，显式设为 true 的用户不受影响。
+      localStorage.setItem(PROMPT_RECOMMENDATION_KEY, next ? 'true' : 'false');
     } catch {
       // localStorage 不可用 → 静默; 模块级内存值仍在本渲染进程内生效。
     }

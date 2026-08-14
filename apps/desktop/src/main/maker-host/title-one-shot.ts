@@ -601,17 +601,19 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no anthropic OAuth', { providerId });
           return { status: 'failed' };
         }
-        if (!(await preDispatchEligible('after-credential-refresh'))) {
-          return { status: 'failed' };
-        }
-        // 紧前复查：preDispatchEligible 内部的 async 操作（listConnectedProviders
-        // 等）期间用户可能登出/切换账号/轮换凭证，旧 OAuth token 仍指向切换前的账号。
+        // 紧前复查：readAnthropicOAuth 是异步操作，期间用户可能登出/切换账号/轮换凭证。
         // 重新读取当前凭证并与捕获值比对，不一致则中止，避免向旧账号外发付费调用。
         const oauthRecheck = await readAnthropicOAuth();
         if (oauthRecheck?.accessToken !== oauth.accessToken) {
-          log.debug('title oneShot skipped: credential changed during eligibility check', {
+          log.debug('title oneShot skipped: credential changed during OAuth read', {
             providerId,
           });
+          return { status: 'failed' };
+        }
+        // 凭证确认后再做派发紧前复查（会话资格），把凭证读取期间的 TOCTOU 窗口也覆盖。
+        // preDispatchEligible 内部异步操作（listConnectedProviders 等）之后，实际
+        // fetch 之前不再有 await，使会话变更窗口最小化。
+        if (!(await preDispatchEligible('after-credential-recheck'))) {
           return { status: 'failed' };
         }
         text = await fetchAnthropicTitle(
@@ -632,21 +634,21 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no codex creds', { providerId });
           return { status: 'failed' };
         }
-        if (!(await preDispatchEligible('after-credential-read'))) {
-          return { status: 'failed' };
-        }
-        // 紧前复查：preDispatchEligible 内部的 async 操作期间用户可能切换 ChatGPT
-        // workspace/账号或轮换 token，旧 creds 仍指向切换前的账号。重新读取并与
-        // 捕获值比对（accountId + accessToken），不一致则中止。
+        // 紧前复查：readCodexCreds 之后用户可能切换 ChatGPT workspace/账号或轮换 token。
+        // 重新读取并与捕获值比对（accountId + accessToken），不一致则中止。
         const credsRecheck = readCodexCreds();
         if (
           !credsRecheck ||
           credsRecheck.accountId !== creds.accountId ||
           credsRecheck.accessToken !== creds.accessToken
         ) {
-          log.debug('title oneShot skipped: credential changed during eligibility check', {
+          log.debug('title oneShot skipped: credential changed during creds read', {
             providerId,
           });
+          return { status: 'failed' };
+        }
+        // 凭证确认后再做派发紧前复查（会话资格），把凭证读取期间的 TOCTOU 窗口也覆盖。
+        if (!(await preDispatchEligible('after-credential-recheck'))) {
           return { status: 'failed' };
         }
         text = await fetchCodexTitle(
@@ -659,7 +661,7 @@ export async function generateTitleViaProviderResult(
           controller.signal,
           codexInstructions,
           opts?.systemPrompt,
-          maxTokens,
+          opts?.maxTokens,
         );
         break;
       }
@@ -669,15 +671,16 @@ export async function generateTitleViaProviderResult(
           log.debug('title oneShot skipped: no gateway key', { providerId });
           return { status: 'failed' };
         }
-        if (!(await preDispatchEligible('after-credential-read'))) {
-          return { status: 'failed' };
-        }
-        // 紧前复查：preDispatchEligible 内部的 async 操作期间用户可能轮换 XD 网关
-        // key，旧 key 仍指向切换前的租户。重新读取并与捕获值比对，不一致则中止。
+        // 紧前复查：readGatewayKey 之后用户可能轮换 XD 网关 key。
+        // 重新读取并与捕获值比对，不一致则中止。
         if (readGatewayKey() !== key) {
-          log.debug('title oneShot skipped: credential changed during eligibility check', {
+          log.debug('title oneShot skipped: credential changed during key read', {
             providerId,
           });
+          return { status: 'failed' };
+        }
+        // 凭证确认后再做派发紧前复查（会话资格），把凭证读取期间的 TOCTOU 窗口也覆盖。
+        if (!(await preDispatchEligible('after-credential-recheck'))) {
           return { status: 'failed' };
         }
         text = await fetchGatewayTitle(

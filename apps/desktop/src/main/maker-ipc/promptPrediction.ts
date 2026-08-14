@@ -274,6 +274,11 @@ export async function generatePromptPrediction(
           if (finalRow.remoteHostId) return false;
           if (dbToMakerAgentKind(finalRow.agentKind) !== agentKind) return false;
           if (finalRow.providerId != null && finalRow.providerId !== resolvedProviderId) return false;
+          // 会话在检查期间从显式 provider 切换到默认 provider（finalRow.providerId
+          // 为 null 但 row.providerId 非 null），resolvedProviderId 仍指向旧显式
+          // provider。此时无法再做异步 provider 解析（TOCTOU 最小化），按 fail-closed
+          // 中止，避免用旧 provider 凭证外发付费调用。
+          if (finalRow.providerId == null && row.providerId != null) return false;
           if (finalRow.workingDir !== (params.workingDir ?? null)) return false;
           return true;
         } catch {

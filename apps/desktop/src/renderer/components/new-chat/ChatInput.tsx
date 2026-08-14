@@ -5807,7 +5807,7 @@ export function ChatInput({
             {
               activeProviderId: providerId,
               memoryProviderId: providerId,
-              remoteDeviceId: deviceLinkDeviceId,
+              remoteDeviceId: deviceLinkDeviceId ?? undefined,
               agentKind: targetAgentKind,
               markModelChoice: true,
             },
@@ -5856,7 +5856,7 @@ export function ChatInput({
           {
             activeProviderId: providerId,
             memoryProviderId: providerId,
-            remoteDeviceId: deviceLinkDeviceId,
+            remoteDeviceId: deviceLinkDeviceId ?? undefined,
             agentKind: targetAgentKind,
             markModelChoice: true,
           },

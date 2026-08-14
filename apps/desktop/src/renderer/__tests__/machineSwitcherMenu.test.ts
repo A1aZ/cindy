@@ -226,6 +226,13 @@ describe('远程机器切换入口并入 SidebarTopNav(置顶段上方,固定不
     expect(entryListSource.match(/sourceLabel=\{sourceLabelMap\?\.get\(entry\.session\.id\)\}/g)).toHaveLength(
       2,
     );
+    const automationGroupSource = read(
+      'features',
+      'cc-agent',
+      'sidebar',
+      'AutomationSessionGroupItem.tsx',
+    );
+    expect(automationGroupSource).toContain('sourceLabel: sourceLabelMap?.get(session.id)');
     const cardSource = read('features', 'cc-agent', 'sidebar', 'SessionCard.tsx');
     expect(cardSource).toContain('sourceLabel,');
     expect(cardSource).toContain('{sourceLabel ? (');

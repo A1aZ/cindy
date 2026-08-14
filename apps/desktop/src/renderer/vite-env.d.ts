@@ -2200,6 +2200,7 @@ interface ElectronAPI {
     effort: string;
     permissionMode: string;
     fastMode: boolean;
+    providerId: string | null;
   }) => void;
 
   syncNewMakerDraft: (snapshot: {

@@ -4869,8 +4869,9 @@ export function handleStreamEvent(
       // 它也当成「pre-Done 空闲」,会把重建的 wake 任务误标成跨主 turn,wake turn 失败
       // 后桥接无法清除、会话永久卡 running/Stop。初始态不算「主 turn 尚未越过」。
       const mainTurnDoneNotCrossed =
-        state.agentStatus.isRunning ||
-        (state.agentStatus.status !== 'Done' && state.agentStatus.status !== '');
+        !state.turnStoppedByUser &&
+        (state.agentStatus.isRunning ||
+          (state.agentStatus.status !== 'Done' && state.agentStatus.status !== ''));
       return {
         ...state,
         lastAgentMeta: incomingMeta ?? state.lastAgentMeta,

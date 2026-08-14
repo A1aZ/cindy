@@ -216,6 +216,7 @@ export async function generatePromptPrediction(
               source: sessions.source,
               remoteHostId: sessions.remoteHostId,
               providerId: sessions.providerId,
+              workingDir: sessions.workingDir,
             })
             .from(sessions)
             .where(eq(sessions.id, sessionId))
@@ -230,10 +231,20 @@ export async function generatePromptPrediction(
           // 会话在 provider 解析后、beforeDispatch 前被切换 provider 时,
           // 两次 DB 读都返回新值,比对通过,但凭证已用旧 provider 解析,
           // 导致付费请求路由到过期 provider/账号。
-          // 注意:DB 中 provider_id 为 null 时表示未显式设置,此时 resolvedProviderId
-          // 为默认 provider,不存在 TOCTOU 风险,跳过比对。否则 null !== "anthropic"
-          // 会导致所有未显式设 provider 的会话预测被静默跳过。
-          if (row.providerId != null && row.providerId !== resolvedProviderId) return false;
+          if (row.providerId != null) {
+            if (row.providerId !== resolvedProviderId) return false;
+          } else {
+            // provider_id 为 null 表示使用默认 provider。若用户在凭证解析后
+            // 断开/切换了默认 provider，resolvedProviderId 仍指向旧 provider，
+            // 继续派发会外发到过期 provider/账号。重新计算当前有效默认 provider
+            // 并与 resolvedProviderId 比对。
+            const providers = await listConnectedProvidersForAgent(agentKind);
+            if (providers.length > 0 && providers[0].id !== resolvedProviderId) return false;
+          }
+          // 紧前复查 workingDir：用户在 provider/凭证解析期间切换了工作目录，
+          // 此时 buildPredictionPrompt 已嵌入旧 params.workingDir，继续派发
+          // 会向 provider 外发过期本地路径。按 fail-closed 中止。
+          if (row.workingDir !== (params.workingDir ?? null)) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

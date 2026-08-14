@@ -21,10 +21,14 @@ export function registerPiProxySession(
   token: string,
   resolveProviderId: () => string | null = () => null,
 ): () => void {
-  if (!sessionId || !token) throw new Error('Pi proxy session registration requires an id and token');
-  activeSessions.set(sessionId, { token, resolveProviderId });
+  if (!sessionId || !token)
+    throw new Error('Pi proxy session registration requires an id and token');
+  const registration = { token, resolveProviderId };
+  activeSessions.set(sessionId, registration);
   return () => {
-    if (activeSessions.get(sessionId)?.token === token) activeSessions.delete(sessionId);
+    if (activeSessions.get(sessionId) === registration) {
+      activeSessions.delete(sessionId);
+    }
   };
 }
 
@@ -33,8 +37,9 @@ export function authenticatePiProxySession(sessionId: string, candidate: string 
   if (!expected || !candidate) return false;
   const expectedBytes = Buffer.from(expected);
   const candidateBytes = Buffer.from(candidate);
-  return expectedBytes.length === candidateBytes.length
-    && timingSafeEqual(expectedBytes, candidateBytes);
+  return (
+    expectedBytes.length === candidateBytes.length && timingSafeEqual(expectedBytes, candidateBytes)
+  );
 }
 
 /**

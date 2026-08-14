@@ -182,7 +182,21 @@ export type PiNativeApi =
   /** PI's native ChatGPT subscription adapter; not a portable BYOM protocol. */
   | 'openai-codex-responses';
 
-export type PiNativeThinkingLevel = Exclude<Effort, 'ultra'>;
+export type PiNativeThinkingLevel = 'off' | Exclude<Effort, 'ultra'>;
+
+export interface PiNativeModelCost {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  tiers?: Array<{
+    inputTokensAbove: number;
+    input: number;
+    output: number;
+    cacheRead: number;
+    cacheWrite: number;
+  }>;
+}
 
 /** BYOM:写进 pi models.json 的一个模型(原生 provider 块内)。 */
 export interface PiNativeModelSpec {
@@ -197,6 +211,8 @@ export interface PiNativeModelSpec {
   /** Add a model missing from PI's bundled catalog while inheriting the provider's bundled API. */
   catalogAddition?: boolean;
   name?: string;
+  /** Per-model request headers from the authoritative Pi catalog. */
+  headers?: Record<string, string>;
   reasoning?: boolean;
   /** Pi models.json 的 provider-specific thinking level 映射；null 明确禁用该档。 */
   thinkingLevelMap?: Partial<Record<PiNativeThinkingLevel, string | null>>;
@@ -204,15 +220,10 @@ export interface PiNativeModelSpec {
   maxTokens?: number;
   input?: Array<'text' | 'image'>;
   /** Preserve bundled accounting metadata when a protocol correction replaces a model entry. */
-  cost?: {
-    input: number;
-    output: number;
-    cacheRead: number;
-    cacheWrite: number;
-  };
+  cost?: PiNativeModelCost;
   /** Preserve model-specific request metadata on a required full-entry replacement. */
-  headers?: Record<string, string>;
   compat?: Record<string, unknown>;
+  samplingParams?: Record<string, unknown>;
 }
 
 /**
@@ -258,6 +269,17 @@ export interface PiNativeProviderSpec {
   apiKeyEnvVar?: string;
   headers?: Record<string, string>;
   models: PiNativeModelSpec[];
+  /** Translate Cindy's persisted/public model id to the Pi-native model id for this provider. */
+  modelIdAliases?: Record<string, string>;
+  /**
+   * This provider is backed by a loopback service owned by the Desktop host. Remote Pi may use
+   * it only after the host establishes the exact SSH reverse-forward described here. The marker
+   * is host control-plane data and is never serialized into models.json.
+   */
+  hostProxyForward?: {
+    localUrl: string;
+    remotePort: number;
+  };
 }
 
 /** host 解析出的 pi 原生 provider + 需注入子进程的 env(api keys)。 */
@@ -464,15 +486,20 @@ export interface AgentDeps {
   /**
    * Pi-only: authenticate a child process to the host's loopback model proxy.
    * PiAgent creates a high-entropy token per session, registers it before spawn,
-   * binds the currently resolved native provider, and disposes the exact
-   * registration when startup fails or the session closes. The provider reader
-   * follows confirmed set_model changes without trusting a child-supplied header.
+   * and disposes the exact registration when startup fails or the session closes.
    */
   registerPiProxySession?: (
     sessionId: string,
     token: string,
     resolveProviderId: () => string | null,
   ) => (() => void) | void;
+
+  /**
+   * Pi-only: host-owned derivation for restart-stable remote proxy tokens.
+   * Desktop persists the secret key; maker-core receives only the per-session
+   * result. Missing hooks preserve the legacy process-stable fallback.
+   */
+  derivePiProxySessionToken?: (sessionId: string) => string;
 
   /**
    * BYOM:host 解析出当前会话可用的 pi **原生 provider**(用户自定义/本地模型)+ 需注入的
@@ -482,7 +509,14 @@ export interface AgentDeps {
    * 缺省 / 返回空 → 只有网关 provider `cindy`(现状,行为不变)。keyless provider 的 key 可省。
    */
   resolvePiNativeProviders?: (
-    ctx: { workingDir: string; remoteHostId?: string | null },
+    ctx: {
+      workingDir: string;
+      remoteHostId?: string | null;
+      providerId?: string | null;
+      model: string;
+      /** Present only when restoring an existing Pi session; permits private compatibility ids. */
+      resumeSessionId?: string;
+    },
   ) => Promise<PiNativeProvidersResult | null>;
 
   /**
@@ -711,6 +745,11 @@ export interface AgentDeps {
       logger: AgentDeps['logger'];
       /** maker sessionId(daemon 模式用作远端 daemon 的 session key)。 */
       sessionId?: string | null;
+      /** Host-owned loopback providers that must be reverse-forwarded before remote Pi starts. */
+      hostProxyForwards?: ReadonlyArray<{
+        localUrl: string;
+        remotePort: number;
+      }>;
     },
   ) => import('./pi/transport.js').PiTransport | Promise<import('./pi/transport.js').PiTransport>;
 

@@ -29,10 +29,22 @@ vi.mock('@/lib/customProviders', () => ({
       const next = { ...model };
       delete next.piApi;
       return next;
-    })),
+    }),
+  ),
   createCustomProvider: vi.fn(async () => undefined),
-  customProviderWireProtocolForSave: vi.fn((agent: string, wireProtocol: string, defaultWireProtocol: string) =>
-    agent === 'pi' || wireProtocol !== defaultWireProtocol ? wireProtocol : undefined),
+  customProviderWireProtocolForSave: vi.fn(
+    (agent: string, wireProtocol: string, defaultWireProtocol: string) =>
+      agent === 'pi' || wireProtocol !== defaultWireProtocol ? wireProtocol : undefined,
+  ),
+  piCatalogProviderIdAfterRouteEdit: (
+    _agent: string,
+    previous: { baseUrl: string; wireProtocol: string; piCatalogProviderId?: string },
+    next: { baseUrl: string; wireProtocol: string; piCatalogProviderId?: string },
+  ) =>
+    next.piCatalogProviderId === previous.piCatalogProviderId &&
+    (next.baseUrl !== previous.baseUrl || next.wireProtocol !== previous.wireProtocol)
+      ? undefined
+      : next.piCatalogProviderId,
   readCustomProviderKey: vi.fn(),
   replaceCustomProviderModelId: vi.fn(),
   setCustomProviderModelReasoning: vi.fn(),
@@ -67,11 +79,13 @@ const piProtocolPreset: ProviderPreset = {
     pi: {
       baseUrl: 'http://127.0.0.1:4001/v1',
       wireProtocol: 'openai-responses',
-      models: [{
-        id: 'deepseek-v4-pro',
-        name: 'DeepSeek V4 Pro',
-        piApi: 'openai-responses',
-      }],
+      models: [
+        {
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          piApi: 'openai-responses',
+        },
+      ],
     },
   },
 };
@@ -81,6 +95,45 @@ function renderDialog(onClose = vi.fn()) {
     onClose,
     ...render(<CustomProviderDialog onSaved={vi.fn()} onClose={onClose} existingIds={[]} />),
   };
+}
+
+async function findReadyPresetTrigger() {
+  const trigger = await screen.findByRole('button', {
+    name: 'settings.providers.custom.presets.label',
+  });
+  // The dialog moves focus in rAF after mounting. Opening the Radix Popover before
+  // that focus settles can immediately dismiss it and leave tests using a stale node.
+  await waitFor(() => {
+    expect(document.activeElement).toBe(
+      screen.getByPlaceholderText('settings.providers.custom.fields.namePlaceholder'),
+    );
+  });
+  return trigger;
+}
+
+// jsdom exposes keyCode as read-only. Testing Library's keyDown helper can recreate
+// the event and lose 229 on Windows, so dispatch the exact native event we configure.
+function dispatchEscape(
+  target: Document | Element,
+  init: { isComposing?: boolean; keyCode?: number } = {},
+) {
+  const event = new KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    isComposing: Boolean(init.isComposing),
+  });
+  if (init.keyCode !== undefined) {
+    const keyCode = init.keyCode;
+    for (const prop of ['keyCode', 'which'] as const) {
+      Object.defineProperty(event, prop, {
+        configurable: true,
+        get: () => keyCode,
+      });
+    }
+  }
+  target.dispatchEvent(event);
 }
 
 beforeEach(() => {
@@ -115,9 +168,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
       i18nState.language = locale;
       renderDialog();
 
-      const trigger = await screen.findByRole('button', {
-        name: 'settings.providers.custom.presets.label',
-      });
+      const trigger = await findReadyPresetTrigger();
       expect(trigger.textContent).toContain('settings.providers.custom.presets.placeholder');
 
       fireEvent.click(trigger);
@@ -137,9 +188,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
 
     const heading = screen.getByRole('heading', {
       name: 'settings.providers.custom.dialog.createTitle',
@@ -166,9 +215,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { container, onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     const option = await screen.findByRole('option', { name: '繁體供應商' });
     // 等 layout effect 把 childLayer 写进 childLayerRef。只等 option 出现不够:
@@ -176,8 +223,12 @@ describe('CustomProviderDialog preset locale ownership', () => {
     await waitFor(() => {
       expect(option.isConnected).toBe(true);
     });
-    await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()); });
-    await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()); });
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
 
     const scrim = container.firstElementChild as Element;
     fireEvent.pointerDown(scrim);
@@ -194,7 +245,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    await screen.findByRole('button', { name: 'settings.providers.custom.presets.label' });
+    await findReadyPresetTrigger();
     fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.cancel' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -208,9 +259,11 @@ describe('CustomProviderDialog preset locale ownership', () => {
       i18nState.language = 'en';
       renderDialog();
 
-      fireEvent.click(await screen.findByRole('button', {
-        name: 'settings.providers.custom.presets.label',
-      }));
+      fireEvent.click(
+        await screen.findByRole('button', {
+          name: 'settings.providers.custom.presets.label',
+        }),
+      );
       fireEvent.click(await screen.findByRole('option', { name: 'PI Protocol Preset' }));
       fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.pi' }));
       fireEvent.click(screen.getByRole('button', { name: buttonName }));
@@ -221,8 +274,9 @@ describe('CustomProviderDialog preset locale ownership', () => {
         wireProtocol,
         models: [{ id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' }],
       });
-      expect(vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi?.models[0])
-        .not.toHaveProperty('piApi');
+      expect(
+        vi.mocked(createCustomProvider).mock.calls[0][0].runtimes.pi?.models[0],
+      ).not.toHaveProperty('piApi');
     },
   );
 
@@ -233,14 +287,14 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
-    await new Promise<void>((resolve) => { requestAnimationFrame(() => resolve()); });
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve());
+    });
 
-    fireEvent.keyDown(document, { key: 'Escape', ...eventInit });
+    dispatchEscape(document, eventInit);
     expect(screen.getByRole('option', { name: '繁體供應商' })).not.toBeNull();
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -249,9 +303,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
 
@@ -289,9 +341,7 @@ describe('CustomProviderDialog preset locale ownership', () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
 
-    const trigger = await screen.findByRole('button', {
-      name: 'settings.providers.custom.presets.label',
-    });
+    const trigger = await findReadyPresetTrigger();
     fireEvent.click(trigger);
     fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
     fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));

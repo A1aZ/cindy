@@ -100,6 +100,7 @@ export function subscribeBetaChannel(listener: () => void): () => void {
 export function syncBetaChannel(next: boolean): Promise<void> {
   const value = next === true;
   mutationEpoch += 1;
+  const epoch = mutationEpoch;
   hydrated = true;
   beta = value;
   notifyListeners();
@@ -111,8 +112,13 @@ export function syncBetaChannel(next: boolean): Promise<void> {
       committed = value;
     },
     (err) => {
-      beta = committed;
-      notifyListeners();
+      // 只有自己仍是最新 mutation 时才回滚:若有更新的 mutation 已乐观设置了
+      // beta(它自己负责成功/失败),这里回滚 committed 会把它的乐观值覆盖掉,
+      // 造成「内存 release、磁盘 beta」的漂移。更新 mutation 会处理它自己的结果。
+      if (epoch === mutationEpoch) {
+        beta = committed;
+        notifyListeners();
+      }
       throw err;
     },
   );

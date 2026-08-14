@@ -227,6 +227,18 @@ export function getCachedManifest(): Manifest | null {
 }
 
 /**
+ * 清掉内存里的 manifest 缓存。
+ *
+ * 切渠道(beta↔release)时调用:agent 二进制(Claude Code / Codex / ripgrep / pi)
+ * 的 prepare 会先 getCachedManifest() 再 fetchManifest(),若缓存还停在旧渠道,
+ * 同进程内切渠道后可能继续按旧渠道的版本号/下载地址安装资产。清掉后下一次
+ * prepare/轮询会重新按新渠道 fetch。
+ */
+export function clearCachedManifest(): void {
+  cached = null;
+}
+
+/**
  * 探测 beta 渠道 manifest 是否可达(HTTP 200)。
  *
  * 供设置页在用户打开 beta 开关前预检:CDN 尚未部署 manifest-{platform}-beta.json

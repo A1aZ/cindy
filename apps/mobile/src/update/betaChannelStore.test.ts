@@ -86,4 +86,22 @@ describe('betaChannelStore', () => {
     // 磁盘仍是 release；内存不得停留在第一次的乐观值(已开)。
     expect(isBetaChannel()).toBe(false);
   });
+
+  it('前一次失败、后一次成功时，后一次成功不把内存覆盖成磁盘旧值', async () => {
+    await hydrateBetaChannel();
+    expect(isBetaChannel()).toBe(false);
+
+    // 第一次开：失败；第二次开（同值）：成功。两次并发在同一个 mutation 队列里。
+    vi.mocked(AsyncStorage.setItem)
+      .mockRejectedValueOnce(new Error('full'))  // 第一次失败
+      .mockResolvedValueOnce(undefined);          // 第二次成功
+
+    // 第二次调用（成功）先入队、第一次失败后到 —— 用两个 promise 同时发起。
+    const p1 = syncBetaChannel(true);
+    const p2 = syncBetaChannel(true);
+    await expect(p1).rejects.toThrow('full');
+    await expect(p2).resolves.toBeUndefined();
+    // 磁盘已是 beta（第二次成功落盘）；内存不得被第一次失败回滚成 release。
+    expect(isBetaChannel()).toBe(true);
+  });
 });

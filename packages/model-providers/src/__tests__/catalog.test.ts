@@ -117,6 +117,9 @@ describe('bundled catalog validity (dynamic-first contract)', () => {
       efforts: ['low', 'medium', 'high', 'xhigh'],
       defaultEffort: 'high',
     });
+    // Corrections must forward-fix: same updatedAt + different content is a
+    // conflict, so cached clients would keep the entries without defaultEffort.
+    expect(Date.parse(registry!.updatedAt)).toBeGreaterThan(Date.parse('2026-08-05T00:00:00.000Z'));
   });
 
   it('has exactly the built-in providers in stable order', () => {

@@ -4814,7 +4814,10 @@
         "localOnly": "Exact message changes are not available for remote sessions yet.",
         "partialNotice": "This message includes command or tool writes that could not be tracked exactly. Only the captured subset is shown; it is not a complete patch.",
         "emptyTitle": "No recorded changes",
-        "emptyDesc": "The recorded patch for this message has no displayable file changes."
+        "emptyDesc": "The recorded patch for this message has no displayable file changes.",
+        "crossSessionSwitchDisabled": "This review belongs to a collaborator session. Source switching is available only within its own session.",
+        "previewUnavailable": "This message records historical changes, so current on-disk file content cannot be previewed reliably.",
+        "snapshotPatchUnavailable": "A historical change snapshot cannot produce a git apply command for the current worktree."
       },
       "fileCount_one": "{{count}} file",
       "fileCount_other": "{{count}} files",
@@ -4872,6 +4875,7 @@
         "in-progress": "git operation in progress",
         "agent-running": "agent is running",
         "disabled": "review unavailable",
+        "historical-snapshot": "historical change snapshot is read-only",
         "remote-device": "remote device sessions are view-only",
         "remote-ssh": "SSH workspace review is view-only"
       },

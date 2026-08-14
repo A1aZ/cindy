@@ -310,7 +310,10 @@ export interface ImUiTextPack {
     /** 换 Agent 后仍可能不兼容的权限模式(bypassPermissions / acceptEdits)时附加。 */
     agentSwitchAlsoCheckPermissionMode?: string;
     /** 将派发前的内部失败码转换成渠道专属、可操作的用户提示。未能分类时回退通用文案。 */
-    preDispatchFailureText?: (reason: string) => string | undefined;
+    preDispatchFailureText?: (
+      reason: string,
+      context?: { attached?: boolean; agentKind?: string },
+    ) => string | undefined;
   };
   cards: {
     permission: {

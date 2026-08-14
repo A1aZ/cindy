@@ -25,17 +25,25 @@ const RECOVERY_KEYS: Record<
     agentUnsupported: string;
     agentModeHint: string;
     permissionModeUnsupported: string;
+    attachedAgentUnsupported: string;
+    attachedPermissionModeUnsupported: string;
   }
 > = {
   feishu: {
     agentUnsupported: 'settings.imBot.defaults.feishuAgentUnsupportedHint',
     agentModeHint: 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
+    attachedAgentUnsupported: 'settings.imBot.defaults.agentUnsupportedOnChannelHint',
+    attachedPermissionModeUnsupported:
+      'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
   },
   lark: {
     agentUnsupported: 'settings.imBot.defaults.larkAgentUnsupportedHint',
     agentModeHint: 'settings.imBot.defaults.larkAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.larkPermissionModeRecoveryHint',
+    attachedAgentUnsupported: 'settings.imBot.defaults.agentUnsupportedOnChannelHint',
+    attachedPermissionModeUnsupported:
+      'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
   },
 };
 
@@ -49,13 +57,35 @@ const PERMISSION_MODE_FIX_KEYS = {
   failed: 'settings.imBot.defaults.permissionModeFixFailed',
 } as const;
 
+function displayAgentKind(agentKind: string | undefined): string {
+  switch (agentKind) {
+    case 'claude-code':
+      return 'Claude Code';
+    case 'codex':
+      return 'Codex';
+    case 'pi':
+      return 'Pi';
+    default:
+      return agentKind ?? 'Agent';
+  }
+}
+
 export function createFeishuPreDispatchFailureText(
   translate: FeishuTranslator,
   getService: () => FeishuService = () => 'feishu',
-): (reason: string) => string | undefined {
-  return (reason) => {
+): (
+  reason: string,
+  context?: { attached?: boolean; agentKind?: string },
+) => string | undefined {
+  return (reason, context) => {
     const keys = RECOVERY_KEYS[getService()];
     if (reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED:agent')) {
+      if (context?.attached) {
+        return translate(keys.attachedAgentUnsupported).replace(
+          '{{agent}}',
+          displayAgentKind(context.agentKind),
+        );
+      }
       const mode = reason.split(':').pop() ?? '';
       return mode === 'bypassPermissions' || mode === 'acceptEdits'
         ? `${translate(keys.agentUnsupported)}\n${translate(keys.agentModeHint)}`
@@ -65,6 +95,9 @@ export function createFeishuPreDispatchFailureText(
       reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED') ||
       reason.includes('unsupported_turn_permission')
     ) {
+      if (context?.attached) {
+        return translate(keys.attachedPermissionModeUnsupported);
+      }
       return translate(keys.permissionModeUnsupported);
     }
     return undefined;

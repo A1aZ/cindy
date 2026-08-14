@@ -375,9 +375,15 @@ function setupSession(sendImpl: Parameters<typeof createSessionHarness>[0]): Ses
 
 function setupAttachedSession(
   sendImpl: Parameters<typeof createSessionHarness>[0],
+  options: {
+    capabilities?: Capabilities;
+    permissionMode?: string;
+  } = {},
 ): SessionHarness {
   const sessionId = 'desktop-attached-session';
-  const h = createSessionHarness(sendImpl, sessionId);
+  const h = createSessionHarness(sendImpl, sessionId, {
+    capabilities: options.capabilities,
+  });
   mocks.bindingGet.mockReturnValue(sessionId);
   mocks.desktopSessionRows.mockResolvedValue([
     {
@@ -386,7 +392,7 @@ function setupAttachedSession(
       workingDir: 'F:\\XDMaker',
       model: 'claude-opus-4-7',
       effort: 'xhigh',
-      permissionMode: 'bypassPermissions',
+      permissionMode: options.permissionMode ?? 'bypassPermissions',
       fastMode: false,
       sdkSessionId: null,
       providerId: null,
@@ -1222,6 +1228,42 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
       expect.objectContaining({ title: expect.any(String) }),
       { deliverToOwnerDm: true },
     );
+  });
+
+  it('uses attached recovery copy and skips the group fix card for an attached desktop session', async () => {
+    setupAttachedSession(
+      async () => {
+        throw new TurnPermissionPolicyUnsupportedError('claude-code', 'acceptEdits');
+      },
+      {
+        permissionMode: 'acceptEdits',
+        capabilities: {
+          turnPermissionPolicy: {
+            supported: { supported: true },
+            unsupportedPermissionModes: ['acceptEdits'],
+          },
+        } as unknown as Capabilities,
+      },
+    );
+
+    await getRunner().runAgentTurn({
+      botContextId: 'cli_test_bot',
+      userId: 'g/oc_group1/omt_t1',
+      userMessageId: 'msg-attached-policy-failure',
+      text: 'policy failure in attached session',
+      attachments: [],
+      turnPermissionPolicy: {
+        origin: { kind: 'im', channel: 'feishu', taskId: 'msg-attached-policy-failure' },
+        confirmationSurface: 'channel',
+        forceConfirmToolCall: () => false,
+      },
+    });
+
+    const recoveryText = String(mocks.feishuIm.sendText.mock.lastCall?.[1]);
+    expect(recoveryText).toContain('/permission');
+    expect(recoveryText).not.toContain('Feishu groups');
+    expect(recoveryText).not.toContain('/new');
+    expect(mocks.feishuIm.sendInteractiveCard).not.toHaveBeenCalled();
   });
 
   it('does not suppress a requested close during no-op switch acquisition', async () => {

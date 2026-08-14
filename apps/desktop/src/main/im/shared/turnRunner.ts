@@ -2427,7 +2427,10 @@ export function createTurnRunner(
         const rejectedMode = failure.reason.split(':')[2] ?? '';
         const unsupportedCopy = adapter.ui.error?.permissionModeUnsupported;
         const message =
-          adapter.ui.error?.preDispatchFailureText?.(failure.reason) ??
+          adapter.ui.error?.preDispatchFailureText?.(failure.reason, {
+            attached: state.attached,
+            agentKind: state.makerSession.agentKind,
+          }) ??
           (policyUnsupported && unsupportedCopy
             ? typeof unsupportedCopy === 'function'
               ? unsupportedCopy(rejectedMode)
@@ -2457,7 +2460,8 @@ export function createTurnRunner(
           policyUnsupported &&
           adapter.ui.cards.permissionModeFix &&
           output.kind === 'rich-card' &&
-          userId.startsWith('g/')
+          userId.startsWith('g/') &&
+          !state.attached
         ) {
           try {
             // 动态 import: 保持 turnRunner 静态依赖链不因修复卡拖进 controlProjects

@@ -338,6 +338,9 @@ describe('feishu group lane adapter hooks', () => {
       'settings.imBot.defaults.larkAgentUnsupportedHint': '[lark-agent-unsupported]',
       'settings.imBot.defaults.larkAgentSwitchPermissionModeHint': '[lark-permission-mode-hint]',
       'settings.imBot.defaults.larkPermissionModeRecoveryHint': '[lark-permission-recovery]',
+      'settings.imBot.defaults.agentUnsupportedOnChannelHint': '[attached-agent-unsupported:{{agent}}]',
+      'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint':
+        '[attached-permission-recovery]',
     };
     const translate = vi.fn((key: string) => translations[key] ?? `[missing:${key}]`);
     const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
@@ -349,6 +352,17 @@ describe('feishu group lane adapter hooks', () => {
     expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits')).toBe(
       '[permission-recovery]',
     );
+    expect(
+      preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask', {
+        attached: true,
+        agentKind: 'claude-code',
+      }),
+    ).toBe('[attached-agent-unsupported:Claude Code]');
+    expect(
+      preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits', {
+        attached: true,
+      }),
+    ).toBe('[attached-permission-recovery]');
     expect(translate).toHaveBeenCalledWith(
       'settings.imBot.defaults.feishuAgentUnsupportedHint',
     );
@@ -366,6 +380,11 @@ describe('feishu group lane adapter hooks', () => {
     expect(preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits')).toBe(
       '[lark-permission-recovery]',
     );
+    expect(
+      preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits', {
+        attached: true,
+      }),
+    ).toBe('[attached-permission-recovery]');
   });
 
   it('turnPolicyOptionalForMode: 仅完全访问档可选(护栏取缔), 其余档保持挂策略', () => {

@@ -1,10 +1,16 @@
 /**
- * 群主流消息的 /ctr 接管 lane 覆写钩子。
+ * 群消息的话题路由不变量 —— 每条话题一条 lane, 谁也别想截流。
  *
- * 语义: host 注入的钩子返回接管 lane 时, 群主流消息不再 openThread 开新
- * 话题, 直接以接管 lane 路由(senderId = 接管 lane, 出站回复进接管话题);
- * 上下文取数 lane(groupContextLane)仍指向群主流。钩子返回 null / 未注入 /
- * 话题消息 = 默认行为。
+ * 语义:
+ *   - 群主流 @bot: **恒** openThread 开新话题, 以新话题 lane 路由(senderId =
+ *     新话题 lane, 回复锚点 = 开场白消息), 上下文取数 lane 仍指向群主流;
+ *     开话题失败才降级回群 lane(锚点 = 触发消息)。
+ *   - 话题内消息: 直接进该话题自己的 lane, 锚点 = 触发消息。
+ *
+ * 这条不变量是 `/ctr` 接管「只跟话题走」的地基: 接管 binding 的 key 就是话题
+ * lane, transport 这边不给任何「把群主流消息改道进某条接管话题」的口子 ——
+ * 有过一版这样的覆写钩子, 结果群里随便 @ 一句都掉进被接管的会话里
+ * (用户感知: 不管在哪问, 工作目录都是绑定那个项目), 已移除。
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -22,7 +28,10 @@ const mocks = {
   getBoundClient: vi.fn(() => null),
   sendText: vi.fn(async () => ({ messageId: 'om_sent' })),
   replyText: vi.fn(async () => ({ messageId: 'om_reply' })),
-  openThread: vi.fn(async () => ({ messageId: 'om_opener', threadId: 'omt_new' })),
+  // 返回 null = 开话题失败(降级回群 lane), 单测按用例覆盖。
+  openThread: vi.fn<
+    () => Promise<{ messageId: string; threadId: string } | null>
+  >(async () => ({ messageId: 'om_opener', threadId: 'omt_new' })),
   pushReplyAnchor: vi.fn(),
   pushPatchableOpener: vi.fn(),
   resolveCardLane: vi.fn<(messageId: string, chatId: string) => string | null>(
@@ -143,7 +152,6 @@ beforeEach(async () => {
   mocks.eventHandlers = {};
   vi.clearAllMocks();
   feishuEvents.removeAllListeners('message');
-  wsClient.setGroupMainFlowLaneOverride(null);
   mocks.firstAllowed.mockReturnValue(OWNER);
   mocks.checkOwner.mockImplementation((id: string) => id === OWNER);
 });
@@ -165,69 +173,43 @@ afterAll(() => {
   vi.doUnmock('../moduleScope.js');
 });
 
-describe('feishu group main-flow takeover lane override', () => {
-  it('钩子命中时不开新话题, 消息以接管 lane 路由, 回复锚点用话题内消息', async () => {
-    wsClient.setGroupMainFlowLaneOverride((args) => {
-      expect(args.chatId).toBe('oc_chat1');
-      expect(args.botAppId).toBe('cli_takeover_test');
-      return { laneUserId: 'g/oc_chat1/omt_ctr', replyAnchorMessageId: 'om_card_ctr' };
-    });
-    const events = collectMessages();
-    await connect();
-
-    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('接着聊'));
-
-    expect(mocks.openThread).not.toHaveBeenCalled();
-    // 锚点必须是话题内消息(/ctr 控制卡), 不能是群主流触发消息 — 否则
-    // 回复会被打进群主流(outbound fail-closed 不变量)。
-    expect(mocks.pushReplyAnchor).toHaveBeenCalledWith('g/oc_chat1/omt_ctr', 'om_card_ctr');
-    expect(mocks.pushReplyAnchor).not.toHaveBeenCalledWith('g/oc_chat1/omt_ctr', 'om_msg1');
-    expect(mocks.pushPatchableOpener).not.toHaveBeenCalled();
-    expect(events).toHaveLength(1);
-    expect(events[0].senderId).toBe('g/oc_chat1/omt_ctr');
-    expect(events[0].groupContextLane).toEqual({ chatId: 'oc_chat1', threadId: '' });
-    expect(events[0].text).toBe('接着聊');
-  });
-
-  it('钩子未给锚点时也不 push 群主流触发消息(复用该 lane 持有的话题内锚点)', async () => {
-    wsClient.setGroupMainFlowLaneOverride(() => ({ laneUserId: 'g/oc_chat1/omt_ctr' }));
-    const events = collectMessages();
-    await connect();
-
-    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('接着聊'));
-
-    expect(mocks.openThread).not.toHaveBeenCalled();
-    expect(mocks.pushReplyAnchor).not.toHaveBeenCalled();
-    expect(events[0].senderId).toBe('g/oc_chat1/omt_ctr');
-    expect(events[0].groupContextLane).toEqual({ chatId: 'oc_chat1', threadId: '' });
-  });
-
-  it('钩子返回 null 时保持默认开话题行为', async () => {
-    wsClient.setGroupMainFlowLaneOverride(() => null);
+describe('feishu group thread routing', () => {
+  it('群主流 @bot 恒开新话题, 以新话题 lane 路由, 锚点 = 开场白消息', async () => {
     const events = collectMessages();
     await connect();
 
     await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('开个新话题'));
 
     expect(mocks.openThread).toHaveBeenCalledWith('om_msg1');
+    expect(mocks.pushReplyAnchor).toHaveBeenCalledWith('g/oc_chat1/omt_new', 'om_opener');
+    expect(mocks.pushPatchableOpener).toHaveBeenCalledWith('g/oc_chat1/omt_new', 'om_opener');
     expect(events).toHaveLength(1);
     expect(events[0].senderId).toBe('g/oc_chat1/omt_new');
+    // 新话题是空的, 群历史前缀仍按触发时所在的群主流拉取。
     expect(events[0].groupContextLane).toEqual({ chatId: 'oc_chat1', threadId: '' });
+    expect(events[0].text).toBe('开个新话题');
   });
 
-  it('未注入钩子 = 默认开话题行为', async () => {
+  /**
+   * 回归守卫: 曾有一版「群里存在 /ctr 接管时把群主流消息改道进接管话题」的
+   * transport 钩子, 结果群里随便 @ 一句都进那条被接管的会话。接管只跟话题走,
+   * 群主流永远只会开出新话题 —— transport 这层不认识任何接管状态。
+   */
+  it('每次群主流 @bot 都开自己的新话题(没有任何"截流进接管话题"的通道)', async () => {
+    mocks.openThread
+      .mockResolvedValueOnce({ messageId: 'om_opener1', threadId: 'omt_a' })
+      .mockResolvedValueOnce({ messageId: 'om_opener2', threadId: 'omt_b' });
     const events = collectMessages();
     await connect();
 
-    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('普通消息'));
+    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('第一句'));
+    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('第二句'));
 
-    expect(mocks.openThread).toHaveBeenCalledTimes(1);
-    expect(events[0].senderId).toBe('g/oc_chat1/omt_new');
+    expect(mocks.openThread).toHaveBeenCalledTimes(2);
+    expect(events.map((e) => e.senderId)).toEqual(['g/oc_chat1/omt_a', 'g/oc_chat1/omt_b']);
   });
 
-  it('话题内消息不咨询钩子', async () => {
-    const hook = vi.fn(() => ({ laneUserId: 'g/oc_chat1/omt_ctr' }));
-    wsClient.setGroupMainFlowLaneOverride(hook);
+  it('话题内消息进该话题自己的 lane, 不开新话题, 锚点 = 触发消息', async () => {
     const events = collectMessages();
     await connect();
 
@@ -235,19 +217,22 @@ describe('feishu group main-flow takeover lane override', () => {
       groupTopicMessage('话题里回复', 'omt_existing'),
     );
 
-    expect(hook).not.toHaveBeenCalled();
     expect(mocks.openThread).not.toHaveBeenCalled();
+    expect(mocks.pushReplyAnchor).toHaveBeenCalledWith('g/oc_chat1/omt_existing', 'om_msg1');
     expect(events[0].senderId).toBe('g/oc_chat1/omt_existing');
+    // 话题内触发: 取数 lane 就是话题自己(不带 groupContextLane 覆写)。
+    expect(events[0].groupContextLane).toBeUndefined();
   });
 
-  it('钩子返回非法 lane(非 g/ 前缀)时原样透传, 路由裁决交给下游', async () => {
-    // 钩子的返回值由 host 保证形状; transport 不做二次校验, 只透传。
-    wsClient.setGroupMainFlowLaneOverride(() => ({ laneUserId: 'g/oc_chat1' }));
+  it('开话题失败时降级回群 lane(锚点 = 触发消息)', async () => {
+    mocks.openThread.mockResolvedValueOnce(null);
     const events = collectMessages();
     await connect();
 
-    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('群 lane 接管'));
+    await mocks.eventHandlers['im.message.receive_v1'](groupMainFlowMessage('开话题失败'));
 
     expect(events[0].senderId).toBe('g/oc_chat1');
+    expect(mocks.pushReplyAnchor).toHaveBeenCalledWith('g/oc_chat1', 'om_msg1');
+    expect(events[0].groupContextLane).toBeUndefined();
   });
 });

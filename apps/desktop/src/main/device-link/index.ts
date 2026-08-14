@@ -84,6 +84,13 @@ import {
   getControllerPlatform,
   setControllerPlatform,
 } from './controllerPlatform';
+import {
+  applyControllerDisplayNameDirectorySnapshot,
+  createControllerDisplayNameFreshnessTracker,
+  markControllerDisplayNamePresenceFresh,
+  resetControllerDisplayNameFreshness,
+  seedControllerDisplayNamesFromCache,
+} from './controllerDisplayNameFreshness';
 import { setBusyProbe, helloBusy, pollBusyChange, resetBusyDedupe } from './busyReporter';
 import {
   DL_VOICE_DICTIONARY_SYNC_CHANNEL,
@@ -145,11 +152,10 @@ type DeviceDirectoryResponse = {
   devices?: Array<{ deviceId?: unknown; name?: unknown }>;
 };
 let controllerDisplayNameRefreshGeneration = 0;
+const controllerDisplayNameFreshness = createControllerDisplayNameFreshnessTracker();
 
 function seedControllerDisplayNamesFromLastKnown(): void {
-  for (const [deviceId, name] of Object.entries(readLastKnownDeviceNames())) {
-    setControllerDisplayName(deviceId, name);
-  }
+  seedControllerDisplayNamesFromCache(readLastKnownDeviceNames(), setControllerDisplayName);
 }
 
 /**
@@ -157,6 +163,7 @@ function seedControllerDisplayNamesFromLastKnown(): void {
  * 上线时从现有设备目录补齐展示名，避免 link-open 抢先时长期停在主机名回退。
  */
 async function refreshControllerDisplayNamesFromDirectory(generation: number): Promise<void> {
+  const requestEpoch = controllerDisplayNameFreshness.epoch;
   try {
     const result = await serverApiFetch<DeviceDirectoryResponse>('/api/device-link/devices', {
       baseUrl: deviceLinkApiBase,
@@ -170,17 +177,17 @@ async function refreshControllerDisplayNamesFromDirectory(generation: number): P
       return;
     }
     const cachedNames = readLastKnownDeviceNames();
-    for (const device of result.devices ?? []) {
-      if (typeof device.deviceId !== 'string' || !device.deviceId.trim()) continue;
-      const deviceId = device.deviceId.trim();
-      const serverName = typeof device.name === 'string'
-        ? normalizeCachedDeviceName(device.name)
-        : null;
-      const displayName = serverName ?? cachedNames[deviceId];
-      if (!displayName) continue;
-      setControllerDisplayName(deviceId, displayName);
-      if (serverName) void rememberLastKnownDeviceName(deviceId, serverName);
-    }
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: result.devices ?? [],
+      cachedNames,
+      freshness: controllerDisplayNameFreshness,
+      requestEpoch,
+      normalizeName: normalizeCachedDeviceName,
+      setDisplayName: setControllerDisplayName,
+      rememberName: (deviceId, name) => {
+        void rememberLastKnownDeviceName(deviceId, name);
+      },
+    });
   } catch (err) {
     // 目录补齐是展示层 best-effort；失败时保留控制帧自报名 / 短 ID 回退，不影响建链。
     log.warn(`device directory display-name refresh failed (non-fatal): ${String(err)}`);
@@ -556,6 +563,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     if (status !== 'online') {
       presenceOnlineByDevice.clear();
       presenceAvailableByDevice.clear();
+      resetControllerDisplayNameFreshness(controllerDisplayNameFreshness);
     }
     broadcast(DEVICE_LINK_PUSH.STATUS_CHANGED, { status });
     handleContactsDeviceLinkStatusChanged(status === 'online');
@@ -599,6 +607,7 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     transportTimeoutReopen.trigger(deviceId);
   });
   client.onPresenceChanged((snap: PresenceSnapshot) => {
+    markControllerDisplayNamePresenceFresh(controllerDisplayNameFreshness, snap.deviceId);
     const wasAvailable = presenceAvailableByDevice.get(snap.deviceId);
     const available = snap.online && snap.remoteControlEnabled;
     const wasOnline = presenceOnlineByDevice.get(snap.deviceId);
@@ -1008,6 +1017,7 @@ function teardownActiveLink(): void {
   // 同步在降级过一次之后永久失效。清空 presence 就够了 —— 没有对端就不会发送,
   // client 为 null 时 sendPush 也是 no-op。
   presenceOnlineByDevice.clear();
+  resetControllerDisplayNameFreshness(controllerDisplayNameFreshness);
   clearControllerPlatforms();
   clearControllerDisplayNames();
   presenceNameByDevice.clear();

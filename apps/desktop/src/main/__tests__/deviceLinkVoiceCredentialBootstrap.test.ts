@@ -69,11 +69,20 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
     expect(deviceLinkHost).toContain(
       'generation !== controllerDisplayNameRefreshGeneration',
     );
+    expect(deviceLinkHost).toContain(
+      'const requestEpoch = controllerDisplayNameFreshness.epoch;',
+    );
+    expect(deviceLinkHost).toContain(
+      'markControllerDisplayNamePresenceFresh(controllerDisplayNameFreshness, snap.deviceId);',
+    );
+    expect(deviceLinkHost).toContain('applyControllerDisplayNameDirectorySnapshot({');
   });
 
   it('presence 占位名或空名不覆盖已有展示名，无有效名时保留 dispatch 回退链', () => {
-    const deviceLinkHost = readFileSync(resolve(mainRoot, 'device-link/index.ts'), 'utf8');
-    const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8');
+    const deviceLinkHost = readFileSync(resolve(mainRoot, 'device-link/index.ts'), 'utf8')
+      .replace(/\r\n/g, '\n');
+    const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8')
+      .replace(/\r\n/g, '\n');
 
     const presenceHandler = deviceLinkHost.indexOf('client.onPresenceChanged');
     const normalizePresenceName = deviceLinkHost.indexOf(

@@ -1743,18 +1743,41 @@ function ExpandedView({
   }, [openSignal, searchActive]);
   useEffect(() => {
     if (searchActive || !freezeListScrollOnOpenRef.current) return undefined;
-    const release = (event: Event) => {
+    const isOutsideSearch = (event: Event) => {
       const target = event.target as Element | null;
-      if (!target) return;
-      if (target.closest('[data-conversation-search-surface]')) return;
-      if (target.closest('[data-radix-popper-content-wrapper]')) return;
+      if (!target) return false;
+      if (target.closest('[data-conversation-search-surface]')) return false;
+      if (target.closest('[data-radix-popper-content-wrapper]')) return false;
+      return true;
+    };
+    // 不在 pointerdown 里还原:否则按下的按钮会在 click 前被滚走,第一次点击被吞。
+    // 指针手势结束后再还原;纯键盘离开可以立刻还原。
+    let pointerGestureOpen = false;
+    const restoreAfterPointer = () => {
+      window.removeEventListener('pointerup', restoreAfterPointer, true);
+      window.removeEventListener('pointercancel', restoreAfterPointer, true);
+      window.setTimeout(() => {
+        pointerGestureOpen = false;
+        restoreListScroll();
+      }, 0);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!isOutsideSearch(event)) return;
+      pointerGestureOpen = true;
+      window.addEventListener('pointerup', restoreAfterPointer, true);
+      window.addEventListener('pointercancel', restoreAfterPointer, true);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (!isOutsideSearch(event) || pointerGestureOpen) return;
       restoreListScroll();
     };
-    document.addEventListener('pointerdown', release, true);
-    document.addEventListener('focusin', release);
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('focusin', onFocusIn);
     return () => {
-      document.removeEventListener('pointerdown', release, true);
-      document.removeEventListener('focusin', release);
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('focusin', onFocusIn);
+      window.removeEventListener('pointerup', restoreAfterPointer, true);
+      window.removeEventListener('pointercancel', restoreAfterPointer, true);
     };
   }, [openSignal, searchActive, restoreListScroll]);
   // 搜索结果替换同一滚动容器里的列表:打开 / 换词 / 换筛选时滚回顶部;

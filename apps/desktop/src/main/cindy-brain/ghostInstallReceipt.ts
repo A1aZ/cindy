@@ -6,6 +6,7 @@ import { readBoundedFileNoFollowSync } from '../utils/readBoundedFile.js';
 import {
   GHOST_LOCALE_MAX_BYTES,
   GHOST_SKILL_MD_MAX_BYTES,
+  ghostManifestToAuthorFormat,
   isValidGhostId,
   validateGhostManifestLocaleResource,
   validateNormalizedGhostManifest,
@@ -273,8 +274,12 @@ export class GhostInstallReceiptStore {
       root,
       `.${receipt.id}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.tmp`,
     );
+    const persistedReceipt = {
+      ...validated.receipt,
+      manifest: ghostManifestToAuthorFormat(validated.receipt.manifest),
+    };
     try {
-      await fs.promises.writeFile(temp, `${JSON.stringify(receipt, null, 2)}\n`, {
+      await fs.promises.writeFile(temp, `${JSON.stringify(persistedReceipt, null, 2)}\n`, {
         encoding: 'utf8',
         flag: 'wx',
         mode: 0o600,

@@ -5321,7 +5321,11 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
  * validateGhostManifest，因此作者直接写内部格式仍会被拒绝。
  */
 export function validateNormalizedGhostManifest(raw: unknown): ManifestValidation {
-  if (!isPlainObject(raw) || raw.setup === undefined) return validateGhostManifest(raw);
+  // Durable Host state is written in author format so released clients can read it
+  // after a rollback. Still accept normalized snapshots produced by affected dev
+  // builds and passed between current Host code paths.
+  const authorResult = validateGhostManifest(raw);
+  if (authorResult.ok || !isPlainObject(raw) || raw.setup === undefined) return authorResult;
   if (!isPlainObject(raw.setup) || !Array.isArray(raw.setup.requires)) {
     return { ok: false, reason: '标准化清单 setup 必须是带 requires 数组的对象' };
   }
@@ -5353,6 +5357,29 @@ export function validateNormalizedGhostManifest(raw: unknown): ManifestValidatio
   }
 
   return validateGhostManifest({ ...raw, setup: { requires } });
+}
+
+/**
+ * 把 Host 归一化清单投影回 ghost.json 作者格式，供跨版本持久化。
+ *
+ * receipt schema v2 已随 v0.1.48 发布；旧版读取时会直接调用
+ * validateGhostManifest，因此不能把内部 `{ kind, key }` setup 形态写盘。
+ */
+export function ghostManifestToAuthorFormat(manifest: GhostManifest): Record<string, unknown> {
+  if (manifest.setup === undefined) return { ...manifest };
+  return {
+    ...manifest,
+    setup: {
+      requires: manifest.setup.requires.map((group) => ({
+        anyOf: group.anyOf.map((requirement) => {
+          if (requirement.kind === 'kv') {
+            return { kv: requirement.key, label: requirement.label };
+          }
+          return `${requirement.kind}:${requirement.key}`;
+        }),
+      })),
+    },
+  };
 }
 
 /**

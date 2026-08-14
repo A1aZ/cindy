@@ -3220,12 +3220,13 @@ describe('GhostManager · Host approval receipt', () => {
   const writeBundledSource = async (
     manifest: InstalledGhost['manifest'],
     files: Record<string, string> = { 'main.js': '// bundled seed' },
+    sourceManifest: unknown = manifest,
   ): Promise<{ sourceDir: string }> => {
     const sourceDir = path.join(workDir, 'bundled-seeds', manifest.id);
     await fs.promises.rm(sourceDir, { recursive: true, force: true });
     await fs.promises.mkdir(sourceDir, { recursive: true });
     trustedBundledIds.add(manifest.id);
-    await fs.promises.writeFile(path.join(sourceDir, 'ghost.json'), JSON.stringify(manifest));
+    await fs.promises.writeFile(path.join(sourceDir, 'ghost.json'), JSON.stringify(sourceManifest));
     for (const [relativePath, content] of Object.entries(files)) {
       const target = path.join(sourceDir, relativePath);
       await fs.promises.mkdir(path.dirname(target), { recursive: true });
@@ -3834,6 +3835,34 @@ describe('GhostManager · Host approval receipt', () => {
         'utf8',
       ),
     ).toContain('Approved instructions');
+  });
+
+  it('bundled approval accepts a normalized setup manifest while validating source author syntax', async () => {
+    const sourceManifest = setupKvManifest();
+    await manager.install(
+      await makeCindy('setup.cindy', sourceManifest, {
+        'main.js': '// installed setup plugin',
+        'settings.html': '<!doctype html>',
+      }),
+    );
+    const listed = manager.list()[0];
+    const source = await writeBundledSource(
+      listed.manifest,
+      {
+        'main.js': '// bundled setup plugin',
+        'settings.html': '<!doctype html>',
+      },
+      sourceManifest,
+    );
+
+    await expect(
+      manager.approveTrustedBundledInstall(listed.manifest, listed.enabled, source),
+    ).resolves.toBe(true);
+    expect(manager.list()[0].manifest.setup).toEqual({
+      requires: [
+        { anyOf: [{ kind: 'kv', key: 'repoDir', label: '本机 cindy 项目目录' }] },
+      ],
+    });
   });
 
   it('snapshot repair persists a one-way disable before the compatibility marker disappears', async () => {

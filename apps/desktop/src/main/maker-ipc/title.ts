@@ -484,12 +484,13 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
         // 重新校验 session 资格:drainPersistQueue 等待期间 session 可能被软删除或转为远程/review,
         // 上方基于 status / source / remoteHostId 的防御纵深检查会过期(TOCTOU)。此处再从 DB 读取
         // 同一行的资格字段,若已不再可预测(缺失 / 远程 / review / 已删除),静默返回 null,避免把
-        // 已删除或已易主的转写外发到本地 provider 触发付费调用。agentKind 不可变且已在上方校验,无需复查。
+        // 已删除或已易主的转写外发到本地 provider 触发付费调用。
         const [latestSessionRow] = await getDbClient()
           .drizzle.select({
             remoteHostId: sessions.remoteHostId,
             source: sessions.source,
             status: sessions.status,
+            agentKind: sessions.agentKind,
           })
           .from(sessions)
           .where(eq(sessions.id, sessionId));
@@ -499,6 +500,18 @@ export function registerMakerTitleIpc(options: RegisterMakerTitleIpcOptions = {}
           latestSessionRow.source === 'review' ||
           latestSessionRow.status === 'deleted'
         ) {
+          return { prompt: null };
+        }
+        // drain 期间 session 可能被切换 agent(sessionAgentSwitchHandler 会提交 agentKind 变更):
+        // 上方 drain 前的 agentKind 校验已过期,这里用 drain 后的 DB agentKind 复核,与 renderer
+        // 上报不一致时拒绝,避免把转写路由到切换前的 provider/账号触发付费调用。
+        const latestDbAgentKind = dbToMakerAgentKind(latestSessionRow.agentKind);
+        if (latestDbAgentKind !== agentKind) {
+          log.warn('predict-prompt agentKind changed after drain — rejecting', {
+            sessionId,
+            rendererAgentKind: agentKind,
+            dbAgentKind: latestDbAgentKind,
+          });
           return { prompt: null };
         }
         const material = await regenerateTitleMaterial(sessionId, PREDICTION_RECENT_MESSAGE_LIMIT);

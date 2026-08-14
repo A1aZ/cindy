@@ -333,6 +333,18 @@ describe('maker:predict-prompt — DB 防御纵深(远程会话拒绝)', () => {
     await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
     expect(h.predict).not.toHaveBeenCalled();
   });
+
+  it('drain 等待期间 session 被切换 agent 时,排空后重新校验 agentKind 并静默返回 null', async () => {
+    // 第一次读取(drain 前)返回 agentKind='cc'(claude-code);排空落盘队列后第二次读取返回
+    // agentKind='codex'。sessionAgentSwitchHandler 会在会话切换时提交 agentKind 变更,因此
+    // drain 前的 agentKind 校验已过期:必须在调用 provider 前用 drain 后的 DB agentKind 复核,
+    // 与 renderer 上报(claude-code)不一致时拒绝,避免把转写路由到切换前的 provider/账号。
+    h.sessionRow = { remoteHostId: null, agentKind: 'cc' };
+    h.sessionRowAfterDrain = { remoteHostId: null, agentKind: 'codex' };
+
+    await expect(invokePredict(VALID_REQUEST)).resolves.toEqual({ prompt: null });
+    expect(h.predict).not.toHaveBeenCalled();
+  });
 });
 
 describe('maker:predict-prompt — 多窗口去重', () => {

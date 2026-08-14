@@ -1261,9 +1261,12 @@ export function initUpdateService(): void {
     }
     const wasBeta = readUpdateChannelSettings().enableBeta;
     writeEnableBeta(next);
-    // 从 beta 切回 release 时,作废已 staged 的 beta 补丁,避免用户 opt-out 后
-    // 仍被装到 beta 版本(切渠道不等于切版本)。
-    if (wasBeta && !next) {
+    // 渠道一变(无论 opt-in 还是 opt-out)就作废已 staged 的旧渠道补丁:
+    // - opt-out(beta→release):否则用户关掉 beta 后仍被装到 beta 版本;
+    // - opt-in(release→beta):否则旧 release 补丁仍 staged,重启后 beta manifest
+    //   拉取失败时 checkExistingPatch() 会兜底把用户装到 release 版本。
+    // 切渠道不等于切版本,两个方向都要清。
+    if (wasBeta !== next) {
       clearStagedPatch();
     }
     const state = readUpdateChannelSettingsState();
@@ -1274,7 +1277,7 @@ export function initUpdateService(): void {
     assertTrustedAppRendererEvent(event);
     const wasBeta = readUpdateChannelSettings().enableBeta;
     resetUpdateChannelSettings();
-    // 恢复默认 = 关闭 beta;同 set(false),作废已 staged 的 beta 补丁。
+    // 恢复默认 = 关闭 beta;同 set(false),渠道变化即作废已 staged 的补丁。
     if (wasBeta) {
       clearStagedPatch();
     }

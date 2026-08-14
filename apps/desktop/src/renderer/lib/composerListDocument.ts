@@ -307,6 +307,35 @@ export function normalizeComposerDocumentJSON(document: JSONContent): JSONConten
   return { ...document, content: normalized };
 }
 
+/**
+ * Remove Host capability chips (`mentionChip` with `attrs.kind === 'plugin-capability'`)
+ * from a composer document, recursively.
+ *
+ * Host capability chips carry routing intent that only makes sense on a
+ * confirmed-local composer. They are serialized into the saved draft's `text`,
+ * so when a draft that was authored locally is restored into a remote/unresolved
+ * session (SSH `remoteHostId`, or device-link `deviceLinkDeviceId !== null`), the
+ * generic `setContent` restore path would otherwise bring the chip back and make
+ * the send path abort with TARGET_UNAVAILABLE — forcing the user to delete it by
+ * hand. Stripping the chip at restore time keeps that path consistent with the
+ * `pendingHostCapabilityGhostId` guard, which already refuses to place the chip
+ * for non-local sessions.
+ */
+export function stripHostCapabilityChips(document: JSONContent): JSONContent {
+  if (!document || typeof document !== 'object' || !Array.isArray(document.content)) {
+    return document;
+  }
+  const nextContent = document.content
+    .map((node) => {
+      if (node?.type === 'mentionChip' && node.attrs?.kind === 'plugin-capability') {
+        return null;
+      }
+      return stripHostCapabilityChips(node);
+    })
+    .filter((node): node is JSONContent => node !== null);
+  return { ...document, content: nextContent };
+}
+
 export interface ComposerRestoreInsertion {
   document: JSONContent;
   insertedBlocks: JSONContent[];

@@ -271,6 +271,7 @@ import {
   composerDocumentContainsList,
   normalizeComposerDocumentJSON,
   plainTextToComposerDocument,
+  stripHostCapabilityChips,
 } from '@/lib/composerListDocument';
 import { useAgentCapabilities, type AgentKind } from '@/hooks/useAgentCapabilities';
 import { useConnectedSource } from '@/hooks/useConnectedSource';
@@ -1463,6 +1464,20 @@ export function ChatInput({
   remoteHostIdRef.current = remoteHostId;
   const deviceLinkDeviceIdRef = useRef<string | null | undefined>(deviceLinkDeviceId);
   deviceLinkDeviceIdRef.current = deviceLinkDeviceId;
+  // Host capability 芯片只在「已确认本机」的 composer 里有效:SSH(remoteHostId)或
+  // device-link(deviceLinkDeviceId !== null,含未解析)会话若恢复本地草稿里序列化的芯片,
+  // 发送路径会因 TARGET_UNAVAILABLE 中断、逼用户手动删芯片。这里把「归一化 + 非本机剥芯片」
+  // 收口成一个入口,供草稿恢复路径统一复用(与 pendingHostCapabilityGhostId 的
+  // canPlaceHostCapability 同口径:仅已确认本机保留芯片,否则静默丢弃芯片意图)。
+  const normalizeRestoredComposerDraft = (
+    draftText: JSONContent | null | undefined,
+  ): JSONContent | null => {
+    if (!draftText) return null;
+    const normalized = normalizeComposerDocumentJSON(draftText);
+    return remoteHostIdRef.current || deviceLinkDeviceIdRef.current !== null
+      ? stripHostCapabilityChips(normalized)
+      : normalized;
+  };
   const tRef = useRef(t);
   tRef.current = t;
   // 长文本粘贴 chip 的点击编辑目标。保存时用 nodePos + originalText 双重校验，
@@ -3343,7 +3358,7 @@ export function ChatInput({
         if (draftDocument && composerDocIsEmpty(editor.state.doc)) {
           isRestoringRef.current = true;
           try {
-            editor.commands.setContent(normalizeComposerDocumentJSON(draftDocument));
+            editor.commands.setContent(normalizeRestoredComposerDraft(draftDocument));
           } finally {
             isRestoringRef.current = false;
           }
@@ -3403,7 +3418,7 @@ export function ChatInput({
       try {
         const draft = storageKey !== undefined ? getComposerDraft(storageKey) : undefined;
         if (draft?.text) {
-          editor.commands.setContent(normalizeComposerDocumentJSON(draft.text));
+          editor.commands.setContent(normalizeRestoredComposerDraft(draft.text));
         } else {
           editor.commands.clearContent();
         }
@@ -3483,7 +3498,7 @@ export function ChatInput({
       // "编辑器为空"一律折叠成 null。两侧判空口径必须一致,否则每次外部草稿通知都
       // 会拿一份空文档整段 setContent:doc 被原地重建,所有按位置存活的状态(语音
       // 草稿锚点等)被迫跨整篇映射(#720 后语音录音时首行多一个空行的成因)。
-      const draftDocument = draft.text ? normalizeComposerDocumentJSON(draft.text) : null;
+      const draftDocument = normalizeRestoredComposerDraft(draft.text);
       const normalizedDraftText =
         draftDocument && tiptapDocHasContent(draftDocument) ? draftDocument : null;
       const textUnchanged =

@@ -199,6 +199,18 @@ describe("contacts device sync", () => {
     expect(() => stableContactsSyncJson(contactRecord.status)).not.toThrow();
   });
 
+  it("规范化不会把旧预算之后的合法快照差异折叠成相等", () => {
+    const baseline = {
+      rows: Array.from({ length: 100_001 }, (_, index) => index),
+    };
+    const changed = structuredClone(baseline);
+    changed.rows[100_000] = -1;
+
+    expect(stableContactsSyncJson(baseline)).not.toBe(
+      stableContactsSyncJson(changed),
+    );
+  });
+
   it("确认成员元数据使用同步层上限，不收紧多设备合并后的合法身份数", () => {
     const store = createStore();
     store.activateDeviceSync();

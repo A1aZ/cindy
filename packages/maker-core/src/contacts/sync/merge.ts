@@ -21,16 +21,14 @@ export function compareContactsSyncText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-const MAX_STABLE_JSON_NODES = 100_000;
-
 /**
  * JSON-compatible serialization with sorted object keys.
  *
  * This is deliberately iterative: stamped values may carry unknown extension
  * fields from a newer client, and a deeply nested extension must not overflow
- * the codec worker's call stack. The node budget keeps malformed cyclic or
- * unexpectedly broad values bounded while preserving deterministic ordering for
- * normal JSON-shaped sync data.
+ * the codec worker's call stack. Valid sync rows are already bounded by the
+ * state validator; cyclic references are handled explicitly so malformed
+ * in-memory values cannot loop forever.
  */
 export function stableContactsSyncJson(value: unknown): string {
   type Frame =
@@ -40,18 +38,11 @@ export function stableContactsSyncJson(value: unknown): string {
   const output: string[] = [];
   const stack: Frame[] = [{ kind: "value", value }];
   const seen = new WeakSet<object>();
-  let nodes = 0;
 
   while (stack.length > 0) {
     const frame = stack.pop()!;
     if (frame.kind === "text") {
       output.push(frame.text);
-      continue;
-    }
-
-    nodes += 1;
-    if (nodes > MAX_STABLE_JSON_NODES) {
-      output.push('"[truncated]"');
       continue;
     }
 
@@ -76,14 +67,15 @@ export function stableContactsSyncJson(value: unknown): string {
       continue;
     }
 
-    const keys = Object.keys(current)
-      .filter((key) => current[key] !== undefined)
+    const record = current as Record<string, unknown>;
+    const keys = Object.keys(record)
+      .filter((key) => record[key] !== undefined)
       .sort(compareContactsSyncText);
     output.push("{");
     stack.push({ kind: "text", text: "}" });
     for (let index = keys.length - 1; index >= 0; index -= 1) {
       const key = keys[index]!;
-      stack.push({ kind: "value", value: current[key] });
+      stack.push({ kind: "value", value: record[key] });
       stack.push({ kind: "text", text: `:${JSON.stringify(key)}` });
       if (index > 0) stack.push({ kind: "text", text: "," });
     }

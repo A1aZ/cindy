@@ -230,7 +230,10 @@ export async function generatePromptPrediction(
           // 会话在 provider 解析后、beforeDispatch 前被切换 provider 时,
           // 两次 DB 读都返回新值,比对通过,但凭证已用旧 provider 解析,
           // 导致付费请求路由到过期 provider/账号。
-          if (row.providerId !== resolvedProviderId) return false;
+          // 注意:DB 中 provider_id 为 null 时表示未显式设置,此时 resolvedProviderId
+          // 为默认 provider,不存在 TOCTOU 风险,跳过比对。否则 null !== "anthropic"
+          // 会导致所有未显式设 provider 的会话预测被静默跳过。
+          if (row.providerId != null && row.providerId !== resolvedProviderId) return false;
           return true;
         } catch {
           // 复查失败按 fail-closed 处理:宁可漏掉一次推荐,也不在归属不确定时外发付费调用。

@@ -301,6 +301,7 @@ describe('feishu group lane adapter hooks', () => {
     expect(attachedText).toContain('Ask permissions / Default permissions');
     expect(attachedText).toContain('Auto / Auto-review');
     expect(attachedText).toContain('Feishu groups');
+    expect(attachedText).not.toContain('/new');
     const attachedAgentText = adapter.ui.error?.preDispatchFailureText?.(
       'TURN_PERMISSION_POLICY_UNSUPPORTED:agent:ask',
       { attached: true, agentKind: 'claude-code' },
@@ -308,6 +309,7 @@ describe('feishu group lane adapter hooks', () => {
     expect(attachedAgentText).toContain('/permission');
     expect(attachedAgentText).toContain('Ask permissions / Default permissions');
     expect(attachedAgentText).toContain('Auto / Auto-review');
+    expect(attachedAgentText).not.toContain('/new');
     expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();
 
     const fixFailedText = adapter.ui.cards.permissionModeFix?.failed('mock failure');
@@ -343,9 +345,13 @@ describe('feishu group lane adapter hooks', () => {
       'settings.imBot.defaults.feishuAgentUnsupportedHint': '[agent-unsupported]',
       'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint': '[permission-mode-hint]',
       'settings.imBot.defaults.feishuPermissionModeRecoveryHint': '[permission-recovery]',
+      'settings.imBot.defaults.feishuAttachedPermissionModeRecoveryHint':
+        '[attached-permission-recovery]',
       'settings.imBot.defaults.larkAgentUnsupportedHint': '[lark-agent-unsupported]',
       'settings.imBot.defaults.larkAgentSwitchPermissionModeHint': '[lark-permission-mode-hint]',
       'settings.imBot.defaults.larkPermissionModeRecoveryHint': '[lark-permission-recovery]',
+      'settings.imBot.defaults.larkAttachedPermissionModeRecoveryHint':
+        '[lark-attached-permission-recovery]',
     };
     const translate = vi.fn((key: string) => translations[key] ?? `[missing:${key}]`);
     const getService = vi.fn<() => 'feishu' | 'lark'>(() => 'feishu');
@@ -362,12 +368,12 @@ describe('feishu group lane adapter hooks', () => {
         attached: true,
         agentKind: 'claude-code',
       }),
-    ).toBe('[permission-recovery]');
+    ).toBe('[attached-permission-recovery]');
     expect(
       preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits', {
         attached: true,
       }),
-    ).toBe('[permission-recovery]');
+    ).toBe('[attached-permission-recovery]');
     expect(translate).toHaveBeenCalledWith(
       'settings.imBot.defaults.feishuAgentUnsupportedHint',
     );
@@ -376,6 +382,9 @@ describe('feishu group lane adapter hooks', () => {
     );
     expect(translate).toHaveBeenCalledWith(
       'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
+    );
+    expect(translate).toHaveBeenCalledWith(
+      'settings.imBot.defaults.feishuAttachedPermissionModeRecoveryHint',
     );
 
     getService.mockReturnValue('lark');
@@ -389,7 +398,7 @@ describe('feishu group lane adapter hooks', () => {
       preDispatchFailureText('TURN_PERMISSION_POLICY_UNSUPPORTED:mode:acceptEdits', {
         attached: true,
       }),
-    ).toBe('[lark-permission-recovery]');
+    ).toBe('[lark-attached-permission-recovery]');
   });
 
   /**

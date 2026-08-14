@@ -1341,7 +1341,7 @@ describe('turnRunner send outcome policy (feishu adapter characterization)', () 
     const recoveryText = String(mocks.feishuIm.sendText.mock.lastCall?.[1]);
     expect(recoveryText).toContain('/permission');
     expect(recoveryText).toContain('Feishu groups');
-    expect(recoveryText).toContain('/new');
+    expect(recoveryText).not.toContain('/new');
     expect(mocks.feishuIm.sendInteractiveCard).not.toHaveBeenCalled();
   });
 

@@ -33,14 +33,14 @@ const RECOVERY_KEYS: Record<
     agentModeHint: 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
     attachedPermissionModeUnsupported:
-      'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
+      'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
   },
   lark: {
     agentUnsupported: 'settings.imBot.defaults.larkAgentUnsupportedHint',
     agentModeHint: 'settings.imBot.defaults.larkAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.larkPermissionModeRecoveryHint',
     attachedPermissionModeUnsupported:
-      'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
+      'settings.imBot.defaults.larkPermissionModeRecoveryHint',
   },
 };
 

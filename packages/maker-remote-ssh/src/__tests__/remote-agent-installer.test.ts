@@ -169,6 +169,9 @@ describe('remote agent installer', () => {
     // 轮 18-T4:SIGTERM 3s 未退出 → 补 SIGKILL 升级序列
     expect(killCmd).toContain('kill -9 "$PID"');
     expect(killCmd).toContain('WARN: pi-manager daemon (PID $PID) still alive after SIGKILL');
+    // socket-only sweep 不得匹配 grep / 本 bash -c(否则误杀卸载脚本自己)。
+    expect(killCmd).toContain('grep -v -F "grep"');
+    expect(killCmd).toContain('[ "$ORPHAN" = "$$" ] && continue');
     // python daemon 已退役:不再有 pi-daemon.py kill 路径
     expect(killCmd).not.toContain('pi-daemon.py kill');
 

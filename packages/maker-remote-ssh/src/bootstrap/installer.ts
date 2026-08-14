@@ -364,7 +364,10 @@ export async function uninstallRemoteAgent(
       // 后旧 daemon 带着 pi 子进程与凭证 env 在 unlinked socket 后继续跑。
       // 按 cmdline 扫本 install 的 daemon(socket 独有路径) + 确认退出。
       `if [ -S ${instDir}/pi-manager/pi-manager.sock ]; then`,
-      `  for ORPHAN in $(ps -axo pid=,command= | grep -F -- "pi-manager.mjs daemon --socket ${instDir}/pi-manager/pi-manager.sock" | awk '{print $1}'); do`,
+      // 与 ensure 侧 orphan sweep 同口径:grep / 本 bash -c 命令行也含匹配串,
+      // 不排除会误杀卸载脚本自己, 随后 rm -rf 仍继续, 未扫到的 daemon 带着凭证残留。
+      `  for ORPHAN in $(ps -axo pid=,command= | grep -F -- "pi-manager.mjs daemon --socket ${instDir}/pi-manager/pi-manager.sock" | grep -v -F "grep" | awk '{print $1}'); do`,
+      `    [ "$ORPHAN" = "$$" ] && continue`,
       `    kill "$ORPHAN" >/dev/null 2>&1 || true`,
       `    for i in $(seq 1 15); do kill -0 "$ORPHAN" 2>/dev/null || break; sleep 0.2; done`,
       `    if kill -0 "$ORPHAN" 2>/dev/null; then`,

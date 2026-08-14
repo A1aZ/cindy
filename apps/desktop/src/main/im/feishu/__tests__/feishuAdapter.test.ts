@@ -279,6 +279,8 @@ describe('feishu group lane adapter hooks', () => {
     expect(text).toContain('/permission');
     expect(text).not.toContain('/permission auto');
     expect(text).not.toContain('/permission ask');
+    expect(text).toContain('Ask permissions / Default permissions');
+    expect(text).toContain('Auto / Auto-review');
     expect(text).toContain('/new');
     expect(text).toContain('new chat');
     expect(text).not.toContain('new task');

@@ -336,6 +336,28 @@ export function stripHostCapabilityChips(document: JSONContent): JSONContent {
   return { ...document, content: nextContent };
 }
 
+/**
+ * Whether a composer document contains at least one Host capability chip
+ * (`mentionChip` with `attrs.kind === 'plugin-capability'`), recursively.
+ *
+ * Used to decide whether a confirmed-remote ownership resolution needs to
+ * re-run {@link stripHostCapabilityChips} over the live editor content, without
+ * rebuilding the whole document (and resetting the caret) when there is nothing
+ * to strip.
+ */
+export function composerDocumentContainsHostCapabilityChip(document: JSONContent): boolean {
+  if (!document || typeof document !== 'object' || !Array.isArray(document.content)) {
+    return false;
+  }
+  return document.content.some((node) => {
+    if (!node || typeof node !== 'object') return false;
+    if (node.type === 'mentionChip' && node.attrs?.kind === 'plugin-capability') {
+      return true;
+    }
+    return composerDocumentContainsHostCapabilityChip(node);
+  });
+}
+
 export interface ComposerRestoreInsertion {
   document: JSONContent;
   insertedBlocks: JSONContent[];

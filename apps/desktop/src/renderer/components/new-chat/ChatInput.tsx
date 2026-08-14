@@ -268,6 +268,7 @@ import {
 import { createComposerFrameScheduler } from './composerFrameScheduler';
 import { serializeEditorContent, serializeEditorSlice } from './composerContentSerialization';
 import {
+  composerDocumentContainsHostCapabilityChip,
   composerDocumentContainsList,
   normalizeComposerDocumentJSON,
   plainTextToComposerDocument,
@@ -3525,6 +3526,27 @@ export function ChatInput({
       }
     });
   }, [editor, storageKey]);
+
+  // device-link 归属解析成「已确认远程」后补剥 Host capability 芯片。草稿恢复
+  // 效果依赖 [editor, storageKey],归属从 undefined(未解析)→ 远程 string 时不会
+  // 重跑,而 normalizeRestoredComposerDraft 在未解析阶段保留了芯片(不能把已存本机
+  // 草稿的芯片当远程剥掉);这里监听归属转译,一旦确认远程就把当前编辑器内容里残留
+  // 的 Host 芯片剥掉,避免发送路径被 TARGET_UNAVAILABLE 拦截、逼用户手动删芯片。
+  const prevConfirmedRemoteRef = useRef<boolean>(false);
+  useEffect(() => {
+    const isConfirmedRemote = !!remoteHostId || typeof deviceLinkDeviceId === 'string';
+    const becameRemote = isConfirmedRemote && !prevConfirmedRemoteRef.current;
+    prevConfirmedRemoteRef.current = isConfirmedRemote;
+    if (!becameRemote || !editor) return;
+    const doc = editor.getJSON();
+    if (!composerDocumentContainsHostCapabilityChip(doc)) return;
+    isRestoringRef.current = true;
+    try {
+      editor.commands.setContent(stripHostCapabilityChips(doc));
+    } finally {
+      isRestoringRef.current = false;
+    }
+  }, [editor, remoteHostId, deviceLinkDeviceId]);
 
   // Plugin page routed entry: wait until the editor has hydrated its existing
   // draft, then reuse the exact same insertion/focus path as the in-composer

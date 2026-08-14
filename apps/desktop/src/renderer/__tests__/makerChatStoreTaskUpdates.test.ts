@@ -614,6 +614,40 @@ describe('getRunningSnapshot 后台 subagent 折算(真 store)', () => {
     }
   });
 
+  it('wake 任务终态帧在 wake turn 已启动后重放 → 不误标跨主 turn、会话不永久转圈', async () => {
+    // Codex P1:wake 型任务 terminal update 被 replay / 延迟到达时,任务此前已经
+    // completed,这一帧只是同一终态的重复投递。旧逻辑把它当 fresh wakesAfterTerminal,
+    // 在 wake turn 已 running(isRunning:true)时误置 pendingTaskWakeDuringTurn;
+    // wake turn 的 Done 只退休标记、却因 pendingTaskWake 仍被置位而无法清除桥接,
+    // 会话永久卡 running/Stop。修复:终态重复帧(already-terminal)不再重标桥接。
+    const sid = `wake-replay-${Math.random().toString(36).slice(2, 8)}`;
+    try {
+      // 空窗:无 turn 在跑,任务 running → completed → 桥接置位
+      applyTask(sid, { taskId: 't1', status: 'running', taskType: 'local_agent' });
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(true);
+
+      // wake turn 启动(isRunning:true)→ isTurnStart 清除桥接
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, true));
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWake).toBe(false);
+      expect(makerChatStore.getSnapshot(sid).pendingTaskWakeDuringTurn).toBe(false);
+
+      // 同一终态帧重放(wake turn 已 running):不得重新置位桥接/跨主 turn 标记
+      applyTask(sid, { taskId: 't1', status: 'completed' });
+      const replayed = makerChatStore.getSnapshot(sid);
+      expect(replayed.pendingTaskWake).toBe(false);
+      expect(replayed.pendingTaskWakeDuringTurn).toBe(false);
+
+      // wake turn 结束:桥接本就清除,会话正常停,不永久转圈
+      makerChatStore.__applyStatusUpdateForTest(sid, statusUpdate(sid, false, 'Done'));
+      const afterDone = makerChatStore.getSnapshot(sid);
+      expect(afterDone.pendingTaskWake).toBe(false);
+      expect(afterDone.pendingTaskWakeDuringTurn).toBe(false);
+    } finally {
+      makerChatStore.purgeSession(sid);
+    }
+  });
+
   it('local_bash 后台任务不折算:主 turn 结束即 stopped(dev server 不永转)', async () => {
     const sid = `bash-${Math.random().toString(36).slice(2, 8)}`;
     try {

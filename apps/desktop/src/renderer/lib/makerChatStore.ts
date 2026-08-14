@@ -4846,7 +4846,16 @@ export function handleStreamEvent(
       // hasBackgroundAgentWork 返回 true,阻止 ChatInput 用不完整上下文发起预测。
       // 后续 wake turn 启动(isRunning:true)时 handleStatusUpdate 通过
       // isTurnStart 分支清除 pendingTaskWake,桥接不会永久撑住 running 快照。
+      // 终态重复帧(replay / 延迟到达)不得当成新的「终态转译」:任务此前已经
+      // completed / failed 时,这一帧只是同一终态的重复投递。若在 wake turn 已启动
+      // (isRunning:true)之后才重放,仍把 already-terminal 的任务当 fresh wakesAfterTerminal
+      // 会误置 pendingTaskWakeDuringTurn,wake turn 的 Done 只退休了标记却留下
+      // pendingTaskWake,会话永久卡 running/Stop。这里只在「非终态 → 终态」的真实转译
+      // 时置桥接,重复的终态帧不重新标记。
+      const wasAlreadyTerminal =
+        existing?.status === 'completed' || existing?.status === 'failed';
       const wakesAfterTerminal =
+        !wasAlreadyTerminal &&
         (merged.status === 'completed' || merged.status === 'failed') &&
         isWakeAgentTask(merged);
       const nextWake = state.pendingTaskWake || wakesAfterTerminal;

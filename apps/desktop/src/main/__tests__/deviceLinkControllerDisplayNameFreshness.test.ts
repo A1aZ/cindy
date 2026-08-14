@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyControllerDisplayNameDirectorySnapshot,
   applyControllerDisplayNamePresence,
+  beginControllerDisplayNameDirectoryRequest,
   createControllerDisplayNameFreshnessTracker,
   getControllerDisplayNameFreshnessSince,
+  isLatestControllerDisplayNameDirectoryRequest,
   resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
 } from '../device-link/controllerDisplayNameFreshness';
@@ -15,6 +17,15 @@ const normalizeName = (name: string): string | null => {
 };
 
 describe('controller display-name directory freshness', () => {
+  it('后台刷新与列表刷新共享单调请求序号，只有最新目录响应可落地', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const backgroundRequest = beginControllerDisplayNameDirectoryRequest(freshness);
+    const listRequest = beginControllerDisplayNameDirectoryRequest(freshness);
+
+    expect(isLatestControllerDisplayNameDirectoryRequest(freshness, backgroundRequest)).toBe(false);
+    expect(isLatestControllerDisplayNameDirectoryRequest(freshness, listRequest)).toBe(true);
+  });
+
   it('仅 reset 时保持全局代次单调，但不把连接变化误判为设备名称更新', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const requestEpoch = freshness.epoch;

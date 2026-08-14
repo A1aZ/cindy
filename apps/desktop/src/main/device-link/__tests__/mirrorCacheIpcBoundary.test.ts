@@ -91,7 +91,9 @@ vi.mock('../index', () => ({
   broadcast: vi.fn(),
   deviceLinkApiBase: 'https://example.invalid',
   applyControllerDisplayNameListSnapshot: vi.fn(),
+  beginControllerDisplayNameDirectoryRefresh: vi.fn(() => 1),
   captureControllerDisplayNameRequestEpoch: () => 0,
+  isLatestControllerDisplayNameDirectoryRefresh: vi.fn(() => true),
   readControllerDisplayNameFreshnessSince: () => ({
     changedAfterRequest: false,
     authoritativeName: null,

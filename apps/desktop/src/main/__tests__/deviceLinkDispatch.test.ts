@@ -656,6 +656,11 @@ describe('被控端控制链路生命周期', () => {
     expect(rememberName).not.toHaveBeenCalled();
     expect(forgetName).not.toHaveBeenCalled();
 
+    // 旧协议 presence 只改过当前 metadata，没有写入权威 map；空目录名仍必须
+    // 强制重算回退，不能因 delete(false) 留下旧主机名。
+    setControllerDisplayName(deviceId, '');
+    expect(getActiveControllers()).toEqual([{ deviceId, name: '12345678' }]);
+
     feed(subFrame(deviceId, SUB, ['session:s2'], 'New-Host.local'));
     expect(getActiveControllers()).toEqual([{ deviceId, name: 'New-Host.local' }]);
 
@@ -669,6 +674,9 @@ describe('被控端控制链路生命周期', () => {
       rememberName,
       forgetName,
     });
+    expect(getActiveControllers()).toEqual([{ deviceId, name: 'New-Host.local' }]);
+
+    setControllerDisplayName(deviceId, '');
     expect(getActiveControllers()).toEqual([{ deviceId, name: 'New-Host.local' }]);
   });
 

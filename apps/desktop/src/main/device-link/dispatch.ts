@@ -612,7 +612,7 @@ export function setControllerDisplayName(deviceId: string, name: string): void {
     if (controllerDisplayNameByDevice.get(deviceId) === normalized) return;
     controllerDisplayNameByDevice.set(deviceId, normalized);
   } else {
-    if (!controllerDisplayNameByDevice.delete(deviceId)) return;
+    controllerDisplayNameByDevice.delete(deviceId);
   }
   const displayName = normalized
     ?? reportedControllerNameByDevice.get(deviceId)

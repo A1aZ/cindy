@@ -145,7 +145,9 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
     rememberLastKnownDeviceName: vi.fn(async () => false),
     forgetLastKnownDeviceName: vi.fn(async () => false),
     applyControllerDisplayNameListSnapshot: vi.fn(),
+    beginControllerDisplayNameDirectoryRefresh: vi.fn(() => 1),
     captureControllerDisplayNameRequestEpoch: vi.fn(() => 0),
+    isLatestControllerDisplayNameDirectoryRefresh: vi.fn(() => true),
     readControllerDisplayNameFreshnessSince: vi.fn(() => ({
       changedAfterRequest: false,
       authoritativeName: null,
@@ -290,6 +292,44 @@ describe('device-link IPC handlers', () => {
     });
     await expect(handleListDevices(depsNet)).rejects.toThrowError(/\[DEVICE_LINK_UNAVAILABLE\]/);
   });
+
+  it.each(['旧数据库名', ''] as const)(
+    'listDevices:被更新的后台目录请求取代后，旧列表响应(%s)不得更新提示或缓存',
+    async (name) => {
+      const applyControllerDisplayNameListSnapshot = vi.fn();
+      const rememberLastKnownDeviceName = vi.fn(async () => true);
+      const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const deps = makeDeps({
+        apiFetch: vi.fn().mockResolvedValue({
+          devices: [
+            {
+              deviceId: 'dev-1',
+              name,
+              selfName: 'Host.local',
+              platform: 'darwin',
+              lastSeenAt: '2026-06-23T00:00:00.000Z',
+              online: true,
+              busy: false,
+              remoteControlEnabled: true,
+              controlEnabled: true,
+              isSelf: false,
+            },
+          ],
+        }),
+        applyControllerDisplayNameListSnapshot,
+        rememberLastKnownDeviceName,
+        forgetLastKnownDeviceName,
+        beginControllerDisplayNameDirectoryRefresh: vi.fn(() => 1),
+        isLatestControllerDisplayNameDirectoryRefresh: vi.fn(() => false),
+      });
+
+      await handleListDevices(deps);
+
+      expect(applyControllerDisplayNameListSnapshot).not.toHaveBeenCalled();
+      expect(rememberLastKnownDeviceName).not.toHaveBeenCalled();
+      expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['旧目录名', ''] as const)(
     'listDevices:并发请求中新响应先返回时，晚到旧响应(%s)跟随新结果且不回写缓存',

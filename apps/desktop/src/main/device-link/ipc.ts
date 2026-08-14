@@ -42,7 +42,9 @@ import {
   broadcast,
   deviceLinkApiBase,
   applyControllerDisplayNameListSnapshot,
+  beginControllerDisplayNameDirectoryRefresh,
   captureControllerDisplayNameRequestEpoch,
+  isLatestControllerDisplayNameDirectoryRefresh,
   readControllerDisplayNameFreshnessSince,
 } from './index';
 import { getActiveControllers } from './dispatch';
@@ -116,6 +118,8 @@ export interface DeviceLinkIpcDeps {
     devices: readonly DeviceLinkServerDeviceView[],
     requestEpoch: number,
   ): void;
+  beginControllerDisplayNameDirectoryRefresh(): number;
+  isLatestControllerDisplayNameDirectoryRefresh(sequence: number): boolean;
   captureControllerDisplayNameRequestEpoch(): number;
   readControllerDisplayNameFreshnessSince(
     deviceId: string,
@@ -167,7 +171,9 @@ export function defaultDeps(): DeviceLinkIpcDeps {
     rememberLastKnownDeviceName,
     forgetLastKnownDeviceName,
     applyControllerDisplayNameListSnapshot,
+    beginControllerDisplayNameDirectoryRefresh,
     captureControllerDisplayNameRequestEpoch,
+    isLatestControllerDisplayNameDirectoryRefresh,
     readControllerDisplayNameFreshnessSince,
     rewriteOutboundMedia,
     rewriteOutboundSessionReferences,
@@ -322,6 +328,7 @@ export function handleListDevices(
   deps: DeviceLinkIpcDeps,
 ): Promise<DeviceListResult> {
   const sequence = ++deviceListRequestSequence;
+  const directoryRequestSequence = deps.beginControllerDisplayNameDirectoryRefresh();
   const requestEpoch = deps.captureControllerDisplayNameRequestEpoch();
   let request!: Promise<DeviceListResult>;
   request = deps.apiFetch<{ devices: DeviceLinkServerDeviceView[] }>(
@@ -330,8 +337,13 @@ export function handleListDevices(
     (result) => {
       const latest = latestDeviceListRequest;
       if (latest && latest.sequence > sequence) return latest.promise;
-      deps.applyControllerDisplayNameListSnapshot(result.devices, requestEpoch);
-      return reconcileDeviceNames(result, deps, requestEpoch);
+      const isLatestDirectorySnapshot = deps.isLatestControllerDisplayNameDirectoryRefresh(
+        directoryRequestSequence,
+      );
+      if (isLatestDirectorySnapshot) {
+        deps.applyControllerDisplayNameListSnapshot(result.devices, requestEpoch);
+      }
+      return reconcileDeviceNames(result, deps, requestEpoch, isLatestDirectorySnapshot);
     },
     (err: unknown) => {
       const latest = latestDeviceListRequest;
@@ -354,6 +366,7 @@ function reconcileDeviceNames(
     | 'readControllerDisplayNameFreshnessSince'
   >,
   requestEpoch: number,
+  writeCache: boolean = true,
 ): { devices: DeviceLinkDeviceView[] } {
   const cachedNames = deps.readLastKnownDeviceNames();
   const disabledControlDeviceIds = new Set(deps.getState().disabledControlDeviceIds ?? []);
@@ -376,12 +389,16 @@ function reconcileDeviceNames(
     const trimmedName = device.name.trim();
     const hasDisplayName = !!trimmedName && !isPlaceholderDeviceName(trimmedName);
     if (hasDisplayName) {
-      void deps.rememberLastKnownDeviceName(device.deviceId, trimmedName); // best-effort,不阻塞列表返回
+      if (writeCache) {
+        void deps.rememberLastKnownDeviceName(device.deviceId, trimmedName); // best-effort,不阻塞列表返回
+      }
       if (device.name !== trimmedName) {
         name = trimmedName;
       }
     } else if (!trimmedName) {
-      void deps.forgetLastKnownDeviceName(device.deviceId); // 显式清空与后台目录刷新保持同义
+      if (writeCache) {
+        void deps.forgetLastKnownDeviceName(device.deviceId); // 显式清空与后台目录刷新保持同义
+      }
       name = selfName ?? device.deviceId.slice(0, 8);
     } else if (cachedNames[device.deviceId]) {
       name = cachedNames[device.deviceId];

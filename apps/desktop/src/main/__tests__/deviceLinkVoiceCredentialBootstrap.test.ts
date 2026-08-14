@@ -75,6 +75,12 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
       'generation !== controllerDisplayNameRefreshGeneration',
     );
     expect(deviceLinkHost).toContain(
+      'const directoryRequestSequence = beginControllerDisplayNameDirectoryRefresh();',
+    );
+    expect(deviceLinkHost).toContain(
+      '!isLatestControllerDisplayNameDirectoryRefresh(directoryRequestSequence)',
+    );
+    expect(deviceLinkHost).toContain(
       'const requestEpoch = controllerDisplayNameFreshness.epoch;',
     );
     expect(deviceLinkHost).toContain(

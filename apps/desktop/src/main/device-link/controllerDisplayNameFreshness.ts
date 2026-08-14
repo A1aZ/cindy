@@ -1,5 +1,6 @@
 export interface ControllerDisplayNameFreshnessTracker {
   epoch: number;
+  directoryRequestSequence: number;
   epochByDevice: Map<string, number>;
   authoritativeNameByDevice: Map<string, string>;
 }
@@ -20,9 +21,24 @@ type ControllerDisplayNameCandidate =
 export function createControllerDisplayNameFreshnessTracker(): ControllerDisplayNameFreshnessTracker {
   return {
     epoch: 0,
+    directoryRequestSequence: 0,
     epochByDevice: new Map(),
     authoritativeNameByDevice: new Map(),
   };
+}
+
+export function beginControllerDisplayNameDirectoryRequest(
+  tracker: ControllerDisplayNameFreshnessTracker,
+): number {
+  tracker.directoryRequestSequence += 1;
+  return tracker.directoryRequestSequence;
+}
+
+export function isLatestControllerDisplayNameDirectoryRequest(
+  tracker: ControllerDisplayNameFreshnessTracker,
+  sequence: number,
+): boolean {
+  return tracker.directoryRequestSequence === sequence;
 }
 
 function markControllerDisplayNamePresenceFresh(

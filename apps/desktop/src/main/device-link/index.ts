@@ -89,8 +89,10 @@ import {
 import {
   applyControllerDisplayNameDirectorySnapshot,
   applyControllerDisplayNamePresence,
+  beginControllerDisplayNameDirectoryRequest,
   createControllerDisplayNameFreshnessTracker,
   getControllerDisplayNameFreshnessSince,
+  isLatestControllerDisplayNameDirectoryRequest,
   resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
   type ControllerDisplayNameDirectoryDevice,
@@ -162,6 +164,17 @@ export function captureControllerDisplayNameRequestEpoch(): number {
   return controllerDisplayNameFreshness.epoch;
 }
 
+export function beginControllerDisplayNameDirectoryRefresh(): number {
+  return beginControllerDisplayNameDirectoryRequest(controllerDisplayNameFreshness);
+}
+
+export function isLatestControllerDisplayNameDirectoryRefresh(sequence: number): boolean {
+  return isLatestControllerDisplayNameDirectoryRequest(
+    controllerDisplayNameFreshness,
+    sequence,
+  );
+}
+
 export function readControllerDisplayNameFreshnessSince(
   deviceId: string,
   requestEpoch: number,
@@ -207,6 +220,7 @@ function seedControllerDisplayNamesFromLastKnown(): void {
  * 上线时从现有设备目录补齐展示名，避免 link-open 抢先时长期停在主机名回退。
  */
 async function refreshControllerDisplayNamesFromDirectory(generation: number): Promise<void> {
+  const directoryRequestSequence = beginControllerDisplayNameDirectoryRefresh();
   const requestEpoch = controllerDisplayNameFreshness.epoch;
   try {
     const result = await serverApiFetch<DeviceDirectoryResponse>('/api/device-link/devices', {
@@ -215,6 +229,7 @@ async function refreshControllerDisplayNamesFromDirectory(generation: number): P
     });
     if (
       generation !== controllerDisplayNameRefreshGeneration
+      || !isLatestControllerDisplayNameDirectoryRefresh(directoryRequestSequence)
       || linkTornDown
       || client?.getStatus() !== 'online'
     ) {

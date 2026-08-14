@@ -9,6 +9,11 @@ export interface ControllerDisplayNameDirectoryDevice {
   name?: unknown;
 }
 
+export interface ControllerDisplayNameFreshnessSince {
+  changedAfterRequest: boolean;
+  authoritativeName: string | null;
+}
+
 type ControllerDisplayNameCandidate =
   { kind: 'valid'; name: string } | { kind: 'empty' } | { kind: 'placeholder' };
 
@@ -41,6 +46,17 @@ export function seedControllerDisplayNamesFromCache(
     freshness.authoritativeNameByDevice.set(deviceId, name);
     setDisplayName(deviceId, name);
   }
+}
+
+export function getControllerDisplayNameFreshnessSince(
+  tracker: ControllerDisplayNameFreshnessTracker,
+  deviceId: string,
+  requestEpoch: number,
+): ControllerDisplayNameFreshnessSince {
+  return {
+    changedAfterRequest: (tracker.epochByDevice.get(deviceId) ?? 0) > requestEpoch,
+    authoritativeName: tracker.authoritativeNameByDevice.get(deviceId) ?? null,
+  };
 }
 
 function classifyControllerDisplayName(
@@ -110,7 +126,12 @@ export function applyControllerDisplayNameDirectorySnapshot(options: {
   for (const device of options.devices) {
     if (typeof device.deviceId !== 'string' || !device.deviceId.trim()) continue;
     const deviceId = device.deviceId.trim();
-    if ((options.freshness.epochByDevice.get(deviceId) ?? 0) > options.requestEpoch) continue;
+    if (
+      getControllerDisplayNameFreshnessSince(options.freshness, deviceId, options.requestEpoch)
+        .changedAfterRequest
+    ) {
+      continue;
+    }
 
     const candidate = classifyControllerDisplayName(device.name, options.normalizeName);
     if (candidate.kind === 'valid') {

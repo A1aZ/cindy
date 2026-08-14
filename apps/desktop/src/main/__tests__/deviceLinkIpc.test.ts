@@ -35,6 +35,11 @@ vi.mock('./index', () => ({
   remoteUnsubscribe: vi.fn(),
   disconnectAllControllers: vi.fn(),
   broadcast: vi.fn(),
+  captureControllerDisplayNameRequestEpoch: () => 0,
+  readControllerDisplayNameFreshnessSince: () => ({
+    changedAfterRequest: false,
+    authoritativeName: null,
+  }),
 }));
 vi.mock('../device-link/index', () => ({
   getDeviceLinkStatus: () => 'online',
@@ -46,6 +51,11 @@ vi.mock('../device-link/index', () => ({
   remoteUnsubscribe: vi.fn(),
   disconnectAllControllers: vi.fn(),
   broadcast: vi.fn(),
+  captureControllerDisplayNameRequestEpoch: () => 0,
+  readControllerDisplayNameFreshnessSince: () => ({
+    changedAfterRequest: false,
+    authoritativeName: null,
+  }),
 }));
 vi.mock('../device-link/dispatch', () => ({
   getActiveControllers: () => [],
@@ -92,8 +102,16 @@ import {
 } from '../device-link/ipc';
 import { DeviceLinkError } from '@cindy/device-link';
 import { ServerApiError } from '../serverApiClient';
-import { __testing as settingsTesting } from '../device-link/settings-store';
+import {
+  __testing as settingsTesting,
+  normalizeCachedDeviceName,
+} from '../device-link/settings-store';
 import { __testing as refcountTesting } from '../device-link/subscriptionRefcount';
+import {
+  applyControllerDisplayNamePresence,
+  createControllerDisplayNameFreshnessTracker,
+  getControllerDisplayNameFreshnessSince,
+} from '../device-link/controllerDisplayNameFreshness';
 
 function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
   return {
@@ -125,6 +143,11 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
     readLastKnownDeviceNames: vi.fn(() => ({})),
     rememberLastKnownDeviceName: vi.fn(async () => false),
     forgetLastKnownDeviceName: vi.fn(async () => false),
+    captureControllerDisplayNameRequestEpoch: vi.fn(() => 0),
+    readControllerDisplayNameFreshnessSince: vi.fn(() => ({
+      changedAfterRequest: false,
+      authoritativeName: null,
+    })),
     ...overrides,
   };
 }
@@ -349,6 +372,94 @@ describe('device-link IPC handlers', () => {
       ],
     });
   });
+
+  it.each([
+    ['unknown', 'Host.local', 'Host.local'],
+    ['no', null, '12345678'],
+  ] as const)(
+    'listDevices:目录占位名 %s 无缓存时回退 selfName/设备短 ID(%s)',
+    async (name, selfName, expectedName) => {
+      const deps = makeDeps({
+        apiFetch: vi.fn().mockResolvedValue({
+          devices: [
+            {
+              deviceId: '1234567890abcdef',
+              name,
+              selfName,
+              platform: 'darwin',
+              lastSeenAt: '2026-06-23T00:00:00.000Z',
+              online: false,
+              busy: false,
+              remoteControlEnabled: false,
+              controlEnabled: true,
+              isSelf: false,
+            },
+          ],
+        }),
+        readLastKnownDeviceNames: vi.fn(() => ({})),
+      });
+
+      const result = await handleListDevices(deps);
+      expect(result.devices[0]?.name).toBe(expectedName);
+      expect(deps.rememberLastKnownDeviceName).not.toHaveBeenCalled();
+      expect(deps.forgetLastKnownDeviceName).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['旧目录名', '新数据库名', 'remember', '新数据库名'],
+    ['', '新数据库名', 'forget', '新数据库名'],
+    ['旧目录名', '', 'remember', 'Host.local'],
+  ] as const)(
+    'listDevices:旧目录 %s 在 presence(%s) 后不得触发 %s，并返回当前名称',
+    async (directoryName, presenceName, _mutation, expectedName) => {
+      const freshness = createControllerDisplayNameFreshnessTracker();
+      const rememberLastKnownDeviceName = vi.fn(async () => true);
+      const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const apiFetch: DeviceLinkIpcDeps['apiFetch'] = async <T>() => {
+        applyControllerDisplayNamePresence({
+          deviceId: 'dev-1',
+          name: presenceName,
+          selfName: 'Host.local',
+          freshness,
+          normalizeName: (value) => normalizeCachedDeviceName(value),
+          setDisplayName: vi.fn(),
+          setFallbackDisplayName: vi.fn(),
+          rememberName: vi.fn(),
+          forgetName: vi.fn(),
+        });
+        return {
+          devices: [
+            {
+              deviceId: 'dev-1',
+              name: directoryName,
+              selfName: 'Host.local',
+              platform: 'darwin',
+              lastSeenAt: '2026-06-23T00:00:00.000Z',
+              online: true,
+              busy: false,
+              remoteControlEnabled: true,
+              controlEnabled: true,
+              isSelf: false,
+            },
+          ],
+        } as T;
+      };
+      const deps = makeDeps({
+        apiFetch,
+        rememberLastKnownDeviceName,
+        forgetLastKnownDeviceName,
+        captureControllerDisplayNameRequestEpoch: () => freshness.epoch,
+        readControllerDisplayNameFreshnessSince: (deviceId, requestEpoch) =>
+          getControllerDisplayNameFreshnessSince(freshness, deviceId, requestEpoch),
+      });
+
+      const result = await handleListDevices(deps);
+      expect(result.devices[0]?.name).toBe(expectedName);
+      expect(rememberLastKnownDeviceName).not.toHaveBeenCalled();
+      expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['Host.local', 'Host.local'],

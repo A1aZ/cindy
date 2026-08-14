@@ -90,6 +90,11 @@ vi.mock('../index', () => ({
   restoreController: vi.fn(),
   broadcast: vi.fn(),
   deviceLinkApiBase: 'https://example.invalid',
+  captureControllerDisplayNameRequestEpoch: () => 0,
+  readControllerDisplayNameFreshnessSince: () => ({
+    changedAfterRequest: false,
+    authoritativeName: null,
+  }),
 }));
 vi.mock('../dispatch', () => ({ getActiveControllers: () => [] }));
 vi.mock('../outboundMedia', () => ({ rewriteOutboundMedia: vi.fn(async (_c, a) => a) }));

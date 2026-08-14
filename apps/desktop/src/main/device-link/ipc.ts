@@ -41,6 +41,8 @@ import {
   restoreController,
   broadcast,
   deviceLinkApiBase,
+  captureControllerDisplayNameRequestEpoch,
+  readControllerDisplayNameFreshnessSince,
 } from './index';
 import { getActiveControllers } from './dispatch';
 import { rewriteOutboundMedia } from './outboundMedia';
@@ -109,6 +111,11 @@ export interface DeviceLinkIpcDeps {
   readLastKnownDeviceNames(): Record<string, string>;
   rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean>;
   forgetLastKnownDeviceName(deviceId: string): Promise<boolean>;
+  captureControllerDisplayNameRequestEpoch(): number;
+  readControllerDisplayNameFreshnessSince(
+    deviceId: string,
+    requestEpoch: number,
+  ): { changedAfterRequest: boolean; authoritativeName: string | null };
   /**
    * 出方向附件改写:把消息里的本机附件上传 OSS、替换成引用串(仅 send/steer/enqueue 生效)。
    * 可选 —— 测试可不注入(跳过改写,行为同旧版纯透传)。
@@ -154,6 +161,8 @@ export function defaultDeps(): DeviceLinkIpcDeps {
     readLastKnownDeviceNames,
     rememberLastKnownDeviceName,
     forgetLastKnownDeviceName,
+    captureControllerDisplayNameRequestEpoch,
+    readControllerDisplayNameFreshnessSince,
     rewriteOutboundMedia,
     rewriteOutboundSessionReferences,
   };
@@ -296,11 +305,12 @@ export async function handleSetDeviceControlEnabled(
 export async function handleListDevices(
   deps: DeviceLinkIpcDeps,
 ): Promise<{ devices: DeviceLinkDeviceView[] }> {
+  const requestEpoch = deps.captureControllerDisplayNameRequestEpoch();
   try {
     const result = await deps.apiFetch<{ devices: DeviceLinkServerDeviceView[] }>(
       '/api/device-link/devices',
     );
-    return reconcileDeviceNames(result, deps);
+    return reconcileDeviceNames(result, deps, requestEpoch);
   } catch (err) {
     rethrowServerError(err);
   }
@@ -314,13 +324,28 @@ function reconcileDeviceNames(
     | 'readLastKnownDeviceNames'
     | 'rememberLastKnownDeviceName'
     | 'forgetLastKnownDeviceName'
+    | 'readControllerDisplayNameFreshnessSince'
   >,
+  requestEpoch: number,
 ): { devices: DeviceLinkDeviceView[] } {
   const cachedNames = deps.readLastKnownDeviceNames();
   const disabledControlDeviceIds = new Set(deps.getState().disabledControlDeviceIds ?? []);
 
   const devices = result.devices.map<DeviceLinkDeviceView>((device) => {
     let name = device.name;
+    const selfName = typeof device.selfName === 'string'
+      ? normalizeCachedDeviceName(device.selfName)
+      : null;
+    const freshness = deps.readControllerDisplayNameFreshnessSince(
+      device.deviceId,
+      requestEpoch,
+    );
+    if (freshness.changedAfterRequest) {
+      name = freshness.authoritativeName ?? selfName ?? device.deviceId.slice(0, 8);
+      const controlEnabled = !disabledControlDeviceIds.has(device.deviceId);
+      return { ...device, name, controlEnabled };
+    }
+
     const trimmedName = device.name.trim();
     const hasDisplayName = !!trimmedName && !isPlaceholderDeviceName(trimmedName);
     if (hasDisplayName) {
@@ -330,12 +355,11 @@ function reconcileDeviceNames(
       }
     } else if (!trimmedName) {
       void deps.forgetLastKnownDeviceName(device.deviceId); // 显式清空与后台目录刷新保持同义
-      const selfName = typeof device.selfName === 'string'
-        ? normalizeCachedDeviceName(device.selfName)
-        : null;
       name = selfName ?? device.deviceId.slice(0, 8);
     } else if (cachedNames[device.deviceId]) {
       name = cachedNames[device.deviceId];
+    } else {
+      name = selfName ?? device.deviceId.slice(0, 8);
     }
 
     const controlEnabled = !disabledControlDeviceIds.has(device.deviceId);

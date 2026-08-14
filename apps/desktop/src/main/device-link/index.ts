@@ -90,6 +90,7 @@ import {
   applyControllerDisplayNameDirectorySnapshot,
   applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
+  getControllerDisplayNameFreshnessSince,
   resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
 } from './controllerDisplayNameFreshness';
@@ -155,6 +156,21 @@ type DeviceDirectoryResponse = {
 };
 let controllerDisplayNameRefreshGeneration = 0;
 const controllerDisplayNameFreshness = createControllerDisplayNameFreshnessTracker();
+
+export function captureControllerDisplayNameRequestEpoch(): number {
+  return controllerDisplayNameFreshness.epoch;
+}
+
+export function readControllerDisplayNameFreshnessSince(
+  deviceId: string,
+  requestEpoch: number,
+): { changedAfterRequest: boolean; authoritativeName: string | null } {
+  return getControllerDisplayNameFreshnessSince(
+    controllerDisplayNameFreshness,
+    deviceId,
+    requestEpoch,
+  );
+}
 
 function seedControllerDisplayNamesFromLastKnown(): void {
   seedControllerDisplayNamesFromCache(

@@ -55,6 +55,7 @@ import {
   shouldAbortTransportTimeoutReopen,
 } from './transportTimeoutReopen';
 import {
+  forgetLastKnownDeviceName,
   normalizeCachedDeviceName,
   readDeviceLinkSettings,
   readLastKnownDeviceNames,
@@ -86,8 +87,8 @@ import {
 } from './controllerPlatform';
 import {
   applyControllerDisplayNameDirectorySnapshot,
+  applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
-  markControllerDisplayNamePresenceFresh,
   resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
 } from './controllerDisplayNameFreshness';
@@ -186,6 +187,9 @@ async function refreshControllerDisplayNamesFromDirectory(generation: number): P
       setDisplayName: setControllerDisplayName,
       rememberName: (deviceId, name) => {
         void rememberLastKnownDeviceName(deviceId, name);
+      },
+      forgetName: (deviceId) => {
+        void forgetLastKnownDeviceName(deviceId);
       },
     });
   } catch (err) {
@@ -607,7 +611,6 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     transportTimeoutReopen.trigger(deviceId);
   });
   client.onPresenceChanged((snap: PresenceSnapshot) => {
-    markControllerDisplayNamePresenceFresh(controllerDisplayNameFreshness, snap.deviceId);
     const wasAvailable = presenceAvailableByDevice.get(snap.deviceId);
     const available = snap.online && snap.remoteControlEnabled;
     const wasOnline = presenceOnlineByDevice.get(snap.deviceId);
@@ -621,12 +624,20 @@ export function initDeviceLinkService(options: DeviceLinkServiceOptions = {}): v
     // (review P2)。翻转判据统一为「观察到进入某状态(含从未知)即触发一次」。
     if (!available && wasAvailable !== false) responsivenessTracker?.clearDevice(snap.deviceId);
     setControllerPlatform(snap.deviceId, snap.platform);
-    const presenceDisplayName = normalizeCachedDeviceName(snap.deviceName);
-    if (presenceDisplayName) {
-      setControllerDisplayName(snap.deviceId, presenceDisplayName);
-    }
+    applyControllerDisplayNamePresence({
+      deviceId: snap.deviceId,
+      name: snap.deviceName,
+      freshness: controllerDisplayNameFreshness,
+      normalizeName: normalizeCachedDeviceName,
+      setDisplayName: setControllerDisplayName,
+      rememberName: (deviceId, name) => {
+        void rememberLastKnownDeviceName(deviceId, name);
+      },
+      forgetName: (deviceId) => {
+        void forgetLastKnownDeviceName(deviceId);
+      },
+    });
     presenceNameByDevice.set(snap.deviceId, snap.selfName || snap.deviceName);
-    void rememberLastKnownDeviceName(snap.deviceId, snap.deviceName); // best-effort 名称缓存,不阻塞 presence 处理
     broadcast(DEVICE_LINK_PUSH.PRESENCE_CHANGED, snap);
     // 被控端兜底:对等控制端下线 → 清掉它在本机的订阅 registry(防僵尸订阅持续 sendPush)。
     if (!snap.online) handleControllerOffline(snap.deviceId);

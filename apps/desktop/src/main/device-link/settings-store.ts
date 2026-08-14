@@ -321,6 +321,28 @@ export async function rememberLastKnownDeviceName(deviceId: string, name: string
   return true;
 }
 
+export async function forgetLastKnownDeviceName(deviceId: string): Promise<boolean> {
+  const normalizedDeviceId = deviceId.trim();
+  if (!normalizedDeviceId) return false;
+  let removed = false;
+  try {
+    await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) => {
+      if (!(normalizedDeviceId in latest)) return latest;
+      const next = { ...latest };
+      delete next[normalizedDeviceId];
+      removed = true;
+      return next;
+    });
+  } catch (err) {
+    log.warn('forget last-known device name failed, continuing with in-memory fallback', {
+      deviceId: normalizedDeviceId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+  return removed;
+}
+
 export function normalizeCachedDeviceName(name: string): string | null {
   const trimmed = name.trim();
   if (!trimmed || isPlaceholderDeviceName(trimmed)) return null;

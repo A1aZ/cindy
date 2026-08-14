@@ -73,32 +73,24 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
       'const requestEpoch = controllerDisplayNameFreshness.epoch;',
     );
     expect(deviceLinkHost).toContain(
-      'markControllerDisplayNamePresenceFresh(controllerDisplayNameFreshness, snap.deviceId);',
+      'applyControllerDisplayNamePresence({',
     );
     expect(deviceLinkHost).toContain('applyControllerDisplayNameDirectorySnapshot({');
   });
 
-  it('presence 占位名或空名不覆盖已有展示名，无有效名时保留 dispatch 回退链', () => {
+  it('presence 展示名统一走协调器，无有效权威名时保留 dispatch 回退链', () => {
     const deviceLinkHost = readFileSync(resolve(mainRoot, 'device-link/index.ts'), 'utf8')
       .replace(/\r\n/g, '\n');
     const dispatch = readFileSync(resolve(mainRoot, 'device-link/dispatch.ts'), 'utf8')
       .replace(/\r\n/g, '\n');
 
     const presenceHandler = deviceLinkHost.indexOf('client.onPresenceChanged');
-    const normalizePresenceName = deviceLinkHost.indexOf(
-      'const presenceDisplayName = normalizeCachedDeviceName(snap.deviceName);',
+    const applyPresenceName = deviceLinkHost.indexOf(
+      'applyControllerDisplayNamePresence({',
       presenceHandler,
     );
-    const guardedDisplayNameUpdate = deviceLinkHost.indexOf(
-      'if (presenceDisplayName) {\n      setControllerDisplayName(snap.deviceId, presenceDisplayName);\n    }',
-      normalizePresenceName,
-    );
     expect(presenceHandler).toBeGreaterThanOrEqual(0);
-    expect(normalizePresenceName).toBeGreaterThan(presenceHandler);
-    expect(guardedDisplayNameUpdate).toBeGreaterThan(normalizePresenceName);
-    expect(deviceLinkHost.slice(presenceHandler, guardedDisplayNameUpdate)).not.toContain(
-      'setControllerDisplayName(snap.deviceId, snap.deviceName)',
-    );
+    expect(applyPresenceName).toBeGreaterThan(presenceHandler);
 
     // guard 不写缓存时，dispatch 继续按「数据库名 → 自报名 → 短 ID」回退。
     expect(dispatch).toContain(

@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   applyControllerDisplayNameDirectorySnapshot,
+  applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
-  markControllerDisplayNamePresenceFresh,
   seedControllerDisplayNamesFromCache,
 } from '../device-link/controllerDisplayNameFreshness';
 
@@ -20,16 +20,25 @@ describe('controller display-name directory freshness', () => {
     let persistedName = '旧名称';
 
     // 请求在途时先收到新 presence：内存提示与 last-known 都已更新。
-    markControllerDisplayNamePresenceFresh(freshness, 'dev-1');
-    displayedName = '新名称';
-    persistedName = '新名称';
-
     const setDisplayName = vi.fn((_deviceId: string, name: string) => {
       displayedName = name;
     });
     const rememberName = vi.fn((_deviceId: string, name: string) => {
       persistedName = name;
     });
+    const forgetName = vi.fn();
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '新名称',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    setDisplayName.mockClear();
+    rememberName.mockClear();
     applyControllerDisplayNameDirectorySnapshot({
       devices: [{ deviceId: 'dev-1', name: '旧名称' }],
       cachedNames: { 'dev-1': persistedName },
@@ -38,12 +47,14 @@ describe('controller display-name directory freshness', () => {
       normalizeName,
       setDisplayName,
       rememberName,
+      forgetName,
     });
 
     expect(setDisplayName).not.toHaveBeenCalled();
     expect(rememberName).not.toHaveBeenCalled();
     expect(displayedName).toBe('新名称');
     expect(persistedName).toBe('新名称');
+    expect(forgetName).not.toHaveBeenCalled();
 
     // 下一次 relay 连接走真实种入 helper，仍从 last-known 得到新名称。
     displayedName = '';
@@ -57,6 +68,7 @@ describe('controller display-name directory freshness', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const setDisplayName = vi.fn();
     const rememberName = vi.fn();
+    const forgetName = vi.fn();
 
     applyControllerDisplayNameDirectorySnapshot({
       devices: [{ deviceId: ' dev-1 ', name: ' 数据库名称 ' }],
@@ -66,9 +78,126 @@ describe('controller display-name directory freshness', () => {
       normalizeName,
       setDisplayName,
       rememberName,
+      forgetName,
     });
 
     expect(setDisplayName).toHaveBeenCalledWith('dev-1', '数据库名称');
     expect(rememberName).toHaveBeenCalledWith('dev-1', '数据库名称');
+    expect(forgetName).not.toHaveBeenCalled();
+  });
+
+  it.each(['unknown', 'no', '   '])(
+    '首次连接在目录请求期间收到占位/空 presence(%s)时仍应用有效目录名',
+    (presenceName) => {
+      const freshness = createControllerDisplayNameFreshnessTracker();
+      const requestEpoch = freshness.epoch;
+      let displayedName = 'Host.local';
+      let persistedName: string | undefined;
+      const setDisplayName = vi.fn((_deviceId: string, name: string) => {
+        displayedName = name || 'Host.local';
+      });
+      const rememberName = vi.fn((_deviceId: string, name: string) => {
+        persistedName = name;
+      });
+      const forgetName = vi.fn(() => {
+        persistedName = undefined;
+      });
+
+      applyControllerDisplayNamePresence({
+        deviceId: 'dev-1',
+        name: presenceName,
+        freshness,
+        normalizeName,
+        setDisplayName,
+        rememberName,
+        forgetName,
+      });
+      applyControllerDisplayNameDirectorySnapshot({
+        devices: [{ deviceId: 'dev-1', name: '数据库名称' }],
+        cachedNames: {},
+        freshness,
+        requestEpoch,
+        normalizeName,
+        setDisplayName,
+        rememberName,
+        forgetName,
+      });
+
+      expect(freshness.epoch).toBe(0);
+      expect(displayedName).toBe('数据库名称');
+      expect(persistedName).toBe('数据库名称');
+    },
+  );
+
+  it.each(['presence', 'directory'] as const)(
+    '空数据库名经 %s 路径清除旧展示名与 last-known，并回退当前链路自报名',
+    (source) => {
+      const freshness = createControllerDisplayNameFreshnessTracker();
+      let displayedName = '旧数据库名';
+      let persistedName: string | undefined = '旧数据库名';
+      const setDisplayName = vi.fn((_deviceId: string, name: string) => {
+        displayedName = name || 'Host.local';
+      });
+      const rememberName = vi.fn((_deviceId: string, name: string) => {
+        persistedName = name;
+      });
+      const forgetName = vi.fn(() => {
+        persistedName = undefined;
+      });
+
+      if (source === 'presence') {
+        applyControllerDisplayNamePresence({
+          deviceId: 'dev-1',
+          name: '',
+          freshness,
+          normalizeName,
+          setDisplayName,
+          rememberName,
+          forgetName,
+        });
+      } else {
+        applyControllerDisplayNameDirectorySnapshot({
+          devices: [{ deviceId: 'dev-1', name: '' }],
+          cachedNames: { 'dev-1': '旧数据库名' },
+          freshness,
+          requestEpoch: freshness.epoch,
+          normalizeName,
+          setDisplayName,
+          rememberName,
+          forgetName,
+        });
+      }
+
+      expect(setDisplayName).toHaveBeenCalledWith('dev-1', '');
+      expect(forgetName).toHaveBeenCalledWith('dev-1');
+      expect(displayedName).toBe('Host.local');
+      expect(persistedName).toBeUndefined();
+
+      setDisplayName.mockClear();
+      seedControllerDisplayNamesFromCache({}, setDisplayName);
+      expect(setDisplayName).not.toHaveBeenCalled();
+    },
+  );
+
+  it('目录占位名继续使用 last-known，但不写回占位值', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: 'unknown' }],
+      cachedNames: { 'dev-1': '缓存名称' },
+      freshness,
+      requestEpoch: freshness.epoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+
+    expect(setDisplayName).toHaveBeenCalledWith('dev-1', '缓存名称');
+    expect(rememberName).not.toHaveBeenCalled();
+    expect(forgetName).not.toHaveBeenCalled();
   });
 });

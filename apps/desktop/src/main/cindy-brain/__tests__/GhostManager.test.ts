@@ -72,6 +72,16 @@ function goodManifest(id = 'hello'): Record<string, unknown> {
   };
 }
 
+function setupKvManifest(id = 'hello'): Record<string, unknown> {
+  return {
+    ...goodManifest(id),
+    settingsHtml: 'settings.html',
+    setup: {
+      requires: [{ anyOf: [{ kv: 'repoDir', label: '本机 cindy 项目目录' }] }],
+    },
+  };
+}
+
 function atResourceManifest(id = 'hello'): Record<string, unknown> {
   return {
     ...goodManifest(id),
@@ -261,6 +271,27 @@ describe('GhostManager · 存量插件一次性迁移(§5 升级无感)', () => 
       approval: { state: 'approved' },
     });
     expect(fs.existsSync(migrationLedgerPath())).toBe(true);
+  });
+
+  it('带 setup.kv 的旧安装无感迁移并保留标准化就绪声明', async () => {
+    await writeLegacyInstall('hello', setupKvManifest(), {
+      files: { 'settings.html': '<!doctype html>' },
+    });
+
+    const outcome = await manager.migrateLegacyApprovalsOnce();
+
+    expect(outcome.migrated).toEqual(['hello']);
+    expect(manager.list()[0]).toMatchObject({
+      enabled: true,
+      approval: { state: 'approved' },
+      manifest: {
+        setup: {
+          requires: [
+            { anyOf: [{ kind: 'kv', key: 'repoDir', label: '本机 cindy 项目目录' }] },
+          ],
+        },
+      },
+    });
   });
 
   it('未批准或 receipt 损坏的插件不展示可变 trust 镜像', async () => {
@@ -919,6 +950,34 @@ describe('GhostManager · 从已装目录重新确认(本地包第三条恢复�
     expect(manager.list()[0]).toMatchObject({ enabled: true, approval: { state: 'approved' } });
     // 启停镜像同步维护(回滚到旧客户端不错位)。
     expect(fs.existsSync(path.join(rootDir, 'hello', '.disabled'))).toBe(false);
+  });
+
+  it('带 setup.kv 的旧安装可从已装目录重新确认并恢复可用', async () => {
+    await writeLegacyInstall('hello', setupKvManifest(), {
+      files: { 'settings.html': '<!doctype html>' },
+    });
+    const inspected = await manager.inspectInstalledReapproval('hello');
+    if ('rejection' in inspected) throw new Error(JSON.stringify(inspected.rejection));
+
+    const result = await manager.reapproveInstalled('hello', {
+      enable: true,
+      expectedManifestSha256: inspected.manifestSha256,
+      expectedApprovalProjectionSha256: inspected.approvalProjectionSha256,
+      expectedInstalledApproval: 'legacy-unapproved',
+    });
+
+    if ('rejection' in result) throw new Error(JSON.stringify(result.rejection));
+    expect(manager.list()[0]).toMatchObject({
+      enabled: true,
+      approval: { state: 'approved' },
+      manifest: {
+        setup: {
+          requires: [
+            { anyOf: [{ kind: 'kv', key: 'repoDir', label: '本机 cindy 项目目录' }] },
+          ],
+        },
+      },
+    });
   });
 
   it('重新确认要求立即启用时，删除停用镜像失败必须拒绝且不提交批准', async () => {

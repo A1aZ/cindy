@@ -5313,6 +5313,49 @@ export function validateGhostManifest(raw: unknown): ManifestValidation {
 }
 
 /**
+ * 校验 Host 已归一化的 GhostManifest 快照（例如批准 receipt 中的 manifest）。
+ *
+ * ghost.json 的作者格式与运行期格式只在 setup 条目上不同：作者写字符串引用或
+ * `{ kv, label }`，Host 归一化后统一保存 `{ kind, key, label? }`。这里仅把已归一化
+ * setup 还原为作者格式，再复用同一套完整清单校验；原始 ghost.json 仍必须走
+ * validateGhostManifest，因此作者直接写内部格式仍会被拒绝。
+ */
+export function validateNormalizedGhostManifest(raw: unknown): ManifestValidation {
+  if (!isPlainObject(raw) || raw.setup === undefined) return validateGhostManifest(raw);
+  if (!isPlainObject(raw.setup) || !Array.isArray(raw.setup.requires)) {
+    return { ok: false, reason: '标准化清单 setup 必须是带 requires 数组的对象' };
+  }
+
+  const requires: Array<{ anyOf: Array<string | { kv: unknown; label: unknown }> }> = [];
+  for (const group of raw.setup.requires) {
+    if (!isPlainObject(group) || !Array.isArray(group.anyOf)) {
+      return { ok: false, reason: '标准化清单 setup.requires 每组必须是带 anyOf 数组的对象' };
+    }
+    const anyOf: Array<string | { kv: unknown; label: unknown }> = [];
+    for (const requirement of group.anyOf) {
+      if (!isPlainObject(requirement)) {
+        return { ok: false, reason: '标准化清单 setup 条目必须是 { kind, key } 对象' };
+      }
+      if (requirement.kind === 'secret' || requirement.kind === 'connection') {
+        if (typeof requirement.key !== 'string') {
+          return { ok: false, reason: '标准化清单 setup 条目的 key 必须是字符串' };
+        }
+        anyOf.push(`${requirement.kind}:${requirement.key}`);
+        continue;
+      }
+      if (requirement.kind === 'kv') {
+        anyOf.push({ kv: requirement.key, label: requirement.label });
+        continue;
+      }
+      return { ok: false, reason: '标准化清单 setup 条目的 kind 不受支持' };
+    }
+    requires.push({ anyOf });
+  }
+
+  return validateGhostManifest({ ...raw, setup: { requires } });
+}
+
+/**
  * ── 管子(脑机接口)消息协议(docs/dev-rules/plugin-security-and-authoring.md)──
  *
  * 下行(主机 → 电子脑,'ghost-pipe:message' 单向推):

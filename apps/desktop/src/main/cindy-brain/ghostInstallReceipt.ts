@@ -7,8 +7,8 @@ import {
   GHOST_LOCALE_MAX_BYTES,
   GHOST_SKILL_MD_MAX_BYTES,
   isValidGhostId,
-  validateGhostManifest,
   validateGhostManifestLocaleResource,
+  validateNormalizedGhostManifest,
   type GhostManifest,
   type GhostManifestLocaleResource,
   type GhostTrustInfo,
@@ -1079,7 +1079,7 @@ function validateReceipt(
   if (typeof value.revision !== 'string' || !isRevision(value.revision)) {
     return { ok: false, reason: 'receipt revision 不合法' };
   }
-  const manifestResult = validateGhostManifest(value.manifest);
+  const manifestResult = validateNormalizedGhostManifest(value.manifest);
   if (!manifestResult.ok || manifestResult.manifest.id !== expectedId) {
     return {
       ok: false,

@@ -4,6 +4,8 @@ import path from 'node:path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { validateGhostManifest } from '../../../shared/ghost';
+
 import {
   createGhostInstallReceipt,
   GhostInstallReceiptStore,
@@ -114,6 +116,52 @@ describe('GhostInstallReceiptStore cleanup', () => {
 
     await expect(store.write(receipt)).rejects.toThrow('migration marker unavailable');
     expect(fs.existsSync(path.join(stateRoot, 'hello.json'))).toBe(false);
+  });
+
+  it('writes and reads a receipt containing a normalized setup kv requirement', async () => {
+    const parsed = validateGhostManifest({
+      schemaVersion: 2,
+      id: 'hello',
+      name: 'Hello',
+      version: '1.0.0',
+      kind: 'chip',
+      entry: 'main.js',
+      settingsHtml: 'settings.html',
+      slots: ['tool'],
+      tools: [{ name: 'do_thing', description: 'Do something' }],
+      setup: {
+        requires: [{ anyOf: [{ kv: 'repoDir', label: '本机 cindy 项目目录' }] }],
+      },
+    });
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+
+    const receipt = createGhostInstallReceipt({
+      manifest: parsed.manifest,
+      localeResources: {},
+      enabled: true,
+      trust: {
+        level: 'unverified',
+        publisherSigned: false,
+        publisherVerified: false,
+        reviewed: false,
+      },
+      skillContentSha256: {},
+    });
+
+    await store.write(receipt);
+    expect(store.read('hello')).toMatchObject({
+      state: 'approved',
+      receipt: {
+        manifest: {
+          setup: {
+            requires: [
+              { anyOf: [{ kind: 'kv', key: 'repoDir', label: '本机 cindy 项目目录' }] },
+            ],
+          },
+        },
+      },
+    });
   });
 
   it('treats only a missing migration marker as absent', () => {

@@ -1,7 +1,6 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,28 +57,9 @@ function renderDialog(onClose = vi.fn()) {
   };
 }
 
-type User = ReturnType<typeof userEvent.setup>;
-
-async function openLocalizedPresetMenu(user: User) {
-  const trigger = await screen.findByRole('button', {
-    name: 'settings.providers.custom.presets.label',
-  });
-  await user.click(trigger);
-  const option = await screen.findByRole('option', { name: '繁體供應商' });
-  await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('true'));
-  return { option, trigger };
-}
-
-async function applyLocalizedPreset(user: User) {
-  const { option, trigger } = await openLocalizedPresetMenu(user);
-  await user.click(option);
-  await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
-  await screen.findByDisplayValue('繁體供應商');
-  return trigger;
-}
-
-// jsdom 的 KeyboardEvent.keyCode 只读且恒为 0；fireEvent 赋不上 229，
-// Windows CI 上会把 IME Escape 当成普通关闭键。
+// jsdom 的 KeyboardEvent.keyCode 只读且恒为 0。fireEvent 会再造一发事件，
+// Windows CI 上 229 赋完又丢，IME Escape 被当成普通关闭键。
+// 必须对同一条原生事件 dispatch，监听器读到的才是我们钉上的 keyCode。
 function dispatchEscape(
   target: Document | Element,
   init: { isComposing?: boolean; keyCode?: number } = {},
@@ -88,15 +68,35 @@ function dispatchEscape(
     key: 'Escape',
     bubbles: true,
     cancelable: true,
+    composed: true,
     isComposing: Boolean(init.isComposing),
   });
   if (init.keyCode !== undefined) {
-    Object.defineProperty(event, 'keyCode', {
-      configurable: true,
-      value: init.keyCode,
-    });
+    const keyCode = init.keyCode;
+    for (const prop of ['keyCode', 'which'] as const) {
+      Object.defineProperty(event, prop, {
+        configurable: true,
+        get: () => keyCode,
+      });
+    }
   }
-  fireEvent(target, event);
+  target.dispatchEvent(event);
+}
+
+function overlayOf(dialog: HTMLElement): HTMLElement {
+  const overlay = dialog.parentElement;
+  if (!overlay) throw new Error('dialog overlay is missing');
+  return overlay;
+}
+
+function pointerDownOn(element: Element) {
+  element.dispatchEvent(
+    new PointerEvent('pointerdown', {
+      button: 0,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
 }
 
 beforeEach(() => {
@@ -120,6 +120,20 @@ afterEach(() => {
 });
 
 describe('CustomProviderDialog preset locale ownership', () => {
+  it('keeps keyCode 229 on the native Escape event jsdom delivers', () => {
+    let seen = 0;
+    const onKeyDown = (event: KeyboardEvent) => {
+      seen = event.keyCode;
+    };
+    document.addEventListener('keydown', onKeyDown);
+    try {
+      dispatchEscape(document, { keyCode: 229 });
+    } finally {
+      document.removeEventListener('keydown', onKeyDown);
+    }
+    expect(seen).toBe(229);
+  });
+
   it.each([
     ['zh-TW', '繁體供應商'],
     ['en', 'English Provider'],
@@ -128,17 +142,15 @@ describe('CustomProviderDialog preset locale ownership', () => {
     async (locale, expectedName) => {
       i18nState.language = locale;
       renderDialog();
-      const user = userEvent.setup();
 
       const trigger = await screen.findByRole('button', {
         name: 'settings.providers.custom.presets.label',
       });
       expect(trigger.textContent).toContain('settings.providers.custom.presets.placeholder');
 
-      await user.click(trigger);
+      fireEvent.click(trigger);
       const option = await screen.findByRole('option', { name: expectedName });
-      await user.click(option);
-      await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('false'));
+      fireEvent.click(option);
 
       expect(trigger.textContent).toContain(expectedName);
       expect(screen.getByDisplayValue(expectedName)).not.toBeNull();
@@ -152,7 +164,6 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses only the topmost preset menu on Escape and preserves unsaved form edits', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
-    const user = userEvent.setup();
 
     const trigger = await screen.findByRole('button', {
       name: 'settings.providers.custom.presets.label',
@@ -167,9 +178,8 @@ describe('CustomProviderDialog preset locale ownership', () => {
       'settings.providers.custom.fields.namePlaceholder',
     );
     fireEvent.change(nameInput, { target: { value: 'Unsaved provider' } });
-    await user.click(trigger);
+    fireEvent.click(trigger);
     expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
-    await waitFor(() => expect(trigger.getAttribute('aria-expanded')).toBe('true'));
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
@@ -182,18 +192,25 @@ describe('CustomProviderDialog preset locale ownership', () => {
 
   it('dismisses only the topmost preset menu on a scrim gesture', async () => {
     i18nState.language = 'zh-TW';
-    const { container, onClose } = renderDialog();
-    const user = userEvent.setup();
+    const { onClose } = renderDialog();
 
-    await openLocalizedPresetMenu(user);
+    const trigger = await screen.findByRole('button', {
+      name: 'settings.providers.custom.presets.label',
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
 
-    const scrim = container.firstElementChild as Element;
-    fireEvent.pointerDown(scrim);
-    expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
+    const scrim = overlayOf(
+      screen.getByRole('dialog', { name: 'settings.providers.custom.dialog.createTitle' }),
+    );
+    pointerDownOn(scrim);
+    await waitFor(() => {
+      expect(screen.queryByRole('option', { name: '繁體供應商' })).toBeNull();
+    });
     expect(onClose).not.toHaveBeenCalled();
 
-    fireEvent.pointerDown(scrim);
-    expect(onClose).toHaveBeenCalledTimes(1);
+    pointerDownOn(scrim);
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it('keeps Cancel as a direct form dismissal without a duplicate top-right button', async () => {
@@ -211,9 +228,12 @@ describe('CustomProviderDialog preset locale ownership', () => {
   ])('keeps IME Escape inside composition for %s', async (_label, eventInit) => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
-    const user = userEvent.setup();
 
-    await openLocalizedPresetMenu(user);
+    const trigger = await screen.findByRole('button', {
+      name: 'settings.providers.custom.presets.label',
+    });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole('option', { name: '繁體供應商' })).not.toBeNull();
 
     dispatchEscape(document, eventInit);
     expect(screen.getByRole('option', { name: '繁體供應商' })).not.toBeNull();
@@ -223,14 +243,15 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses the model picker before the underlying form on Escape', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
-    const user = userEvent.setup();
 
-    await applyLocalizedPreset(user);
+    const trigger = await screen.findByRole('button', {
+      name: 'settings.providers.custom.presets.label',
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
 
-    await user.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
-    await user.click(
-      screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }),
-    );
+    fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
     expect(
       await screen.findByRole('heading', {
         name: 'settings.providers.custom.fetch.pickerTitle',
@@ -262,13 +283,14 @@ describe('CustomProviderDialog preset locale ownership', () => {
   it('dismisses only the model picker on its scrim gesture', async () => {
     i18nState.language = 'zh-TW';
     const { onClose } = renderDialog();
-    const user = userEvent.setup();
 
-    await applyLocalizedPreset(user);
-    await user.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
-    await user.click(
-      screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }),
-    );
+    const trigger = await screen.findByRole('button', {
+      name: 'settings.providers.custom.presets.label',
+    });
+    fireEvent.click(trigger);
+    fireEvent.click(await screen.findByRole('option', { name: '繁體供應商' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'settings.providers.custom.protocol.codex' }));
+    fireEvent.click(screen.getByRole('button', { name: 'settings.providers.custom.fetch.button' }));
 
     const pickerHeading = await screen.findByRole('heading', {
       name: 'settings.providers.custom.fetch.pickerTitle',

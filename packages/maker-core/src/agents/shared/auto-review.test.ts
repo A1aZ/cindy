@@ -1221,11 +1221,18 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       'powershell.exe -EncodedCommand ZQBjAGgAbwA=',
       'pwsh -enc ZQBjAGgAbwA=',
       'powershell -Command "Format-Volume -DriveLetter C"',
+      'powershell -Command "Remove-Partition -DriveLetter D -Confirm:$false"',
+      'pwsh -Command "Remove-Partition -DiskNumber 5 -PartitionNumber 2"',
     ]) {
       expect(classifyShellCommand(c, roots), c).toBe('prompt-each-time');
     }
     // 反例:良性 PowerShell 只读命令留灰区(非只读白名单,交 reviewer),不误升红线。
     expect(classifyShellCommand('powershell -Command "Get-ChildItem"', roots)).toBe('prompt');
+    // 只移除盘符/挂载路径，不删除分区；不能被 `Remove-Partition` 的前缀误伤。
+    expect(classifyShellCommand(
+      'powershell -Command "Remove-PartitionAccessPath -DriveLetter D -AccessPath C:\\mount"',
+      roots,
+    )).toBe('prompt');
   });
 });
 

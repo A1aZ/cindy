@@ -2830,12 +2830,12 @@ function substitutionBodies(text: string): string[] {
 /**
  * PowerShell 载荷的确定性红线(payload 语法与 POSIX 不同,scopedDestruction 的 rm/ 等规则识别不到):
  *   - `-EncodedCommand`(及唯一前缀缩写 -e/-enc/…)= base64,静态不可读 → 必问;
- *   - 明文 `-Command` 载荷含递归/强制删除、磁盘格式化、Invoke-Expression(eval)、下载 | iex → 必问。
+ *   - 明文 `-Command` 载荷含递归/强制删除、磁盘/分区销毁、Invoke-Expression(eval)、下载 | iex → 必问。
  * codex 报:此前只查了 PowerShell 载荷里的命令替换下载,没过破坏/系统控制检查。
  */
 const POWERSHELL_DANGER_PATTERNS: readonly RegExp[] = [
   /\b(?:remove-item|rm|ri|rd|rmdir|del|erase)\b[\s\S]*?-(?:recurse|r|force|f)\b/i, // 递归/强制删除(rm 是 Remove-Item 官方别名,codex 报)
-  /\b(?:format-volume|clear-disk|format-disk)\b/i,                              // 磁盘格式化/清空
+  /\b(?:format-volume|clear-disk|format-disk|remove-partition)\b/i,             // 磁盘格式化/清空、分区删除
   /\b(?:invoke-expression|iex)\b/i,                                            // eval
   /\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[\s\S]*\|\s*(?:iex|invoke-expression)\b/i, // 下载 | iex
 ];

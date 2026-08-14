@@ -308,6 +308,7 @@
         "statusInstalled": "已安装",
         "statusNotInstalled": "未安装",
         "claudeCodeName": "Claude Code",
+        "piName": "Pi",
         "button": {
           "install": "安装",
           "reinstall": "重新安装",
@@ -6198,7 +6199,10 @@
       "networkShowRaw": "查看原始错误",
       "networkHideRaw": "收起原始错误",
       "silentStopContinue": "继续",
-      "silentStopContinueTitle": "继续当前任务"
+      "silentStopContinueTitle": "继续当前任务",
+      "piTransportClosed": "远端 Pi 连接已中断（SSH 通道关闭）。远端任务仍在运行，重新连接后可以继续。",
+      "piManagerUnavailable": "远端 Pi 管理器未就绪，请稍后重试；若持续失败请到「设置 → 远端机器」重新安装 Pi。",
+      "piBundledNodeMissing": "远端缺少运行环境（Node.js）。请到「设置 → 远端机器」展开该主机，先在 Claude Code 或 Codex 行点击「安装」（会附带 Node.js），再创建 Pi 任务。"
     },
     "backgroundActivity": {
       "status": "后台子任务运行中，模型用量仍在消耗…",
@@ -6615,6 +6619,8 @@
       "automationSent": "由自动化发送",
       "automationSentNamed": "由自动化「{{name}}」发送",
       "automationViewTask": "查看自动化",
+      "orcaFromLead": "来自 Lead 的消息",
+      "orcaFromWorker": "来自 Worker 的消息",
       "expandLongMessage": "展开全文",
       "collapseLongMessage": "收起",
       "sessionReference": {
@@ -6680,13 +6686,13 @@
       }
     },
     "upgradeBanner": {
-      "description": "远端 {{hostId}} 的 cc-manager 有新版本可用 — 升级会中断该机器上当前所有 Claude Code 远端任务",
-      "upgrading": "正在升级远端 {{hostId}} 的 cc-manager…",
+      "description": "远端 {{hostId}} 的 {{manager}} 有新版本可用 — 升级会中断该机器上当前所有远端任务",
+      "upgrading": "正在升级远端 {{hostId}} 的 {{manager}}…",
       "upgrade": "立即升级",
-      "upgradeTitle": "下载并启动新版本 cc-manager（会中断当前任务）",
+      "upgradeTitle": "下载并启动新版本 {{manager}}（会中断当前任务）",
       "dismissTitle": "暂不升级（下次启动会再次提示）",
       "failed": "升级失败：{{message}}",
-      "daemonNotReady": "cc-manager 升级完成，但远端 daemon 暂未启动 — 请手动重新发送消息"
+      "daemonNotReady": "{{manager}} 升级完成，但远端 daemon 暂未启动 — 请手动重新发送消息"
     },
     "remoteError": {
       "REMOTE_DAEMON_CLOSED": "远端连接已中断（daemon 可能正在升级或重启）。本轮已结束 — 请重新发送。",
@@ -6694,6 +6700,7 @@
       "AUTO_REVIEW_UNAVAILABLE": "自动审批暂时无法给出判断（网络或服务波动），需要审批的操作已转由你来确认。想少被打断，可以把任务切到「默认权限」自行掌控。",
       "REMOTE_COMPAT_MODE_UNSUPPORTED": "远端 Claude Code 会话无法通过本地兼容 Proxy 路由(内部错误，请反馈)。",
       "REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE": "Cindy AI 凭据尚未就绪(登录后由服务端自动下发)。请稍候重试；若持续出现，请到 设置 → 模型供应商 检查 Cindy AI 连接状态。",
+      "REMOTE_LOCAL_ONLY_PROVIDER": "该模型供应商是本机专属服务（如 Ollama），SSH 远端任务无法访问本机地址。请改用 Cindy AI 网关，或选择远端主机可达的模型供应商。",
       "DEVICE_LINK_CONTROL_DISABLED": "已关闭对该设备的控制，消息未发送。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "附件传输失败，消息未发送。请重试。"
     },

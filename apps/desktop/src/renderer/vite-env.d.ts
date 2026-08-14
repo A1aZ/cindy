@@ -194,13 +194,14 @@ interface RemoteAgentSilentInstallStatusPush {
   message?: string;
 }
 
-/** cc-mgr 版本升级 push payload。available=null 表示该 host 的 pending 已清空。 */
+/** cc-mgr / pi-manager 版本升级 push payload。available=null 表示该 host 的 pending 已清空。 */
 interface RemoteAgentCcMgrUpgradeAvailablePush {
   hostId: string;
   available: {
     currentVersion: string;
     availableVersion: string;
   } | null;
+  agent: 'cc' | 'pi';
 }
 
 interface RemoteAgentExecResult {
@@ -3673,11 +3674,12 @@ interface ElectronAPI {
     ccMgrForceUpgrade: (
       hostId: string,
       sessionId?: string,
+      agent?: 'cc' | 'pi',
     ) => Promise<{ ok: true; daemonReady: boolean }>;
     ccMgrListPendingUpgrades: () => Promise<{
-      pending: Array<{ hostId: string; currentVersion: string; availableVersion: string }>;
+      pending: Array<{ hostId: string; currentVersion: string; availableVersion: string; agent: 'cc' | 'pi' }>;
     }>;
-    ccMgrDismissPendingUpgrade: (hostId: string) => Promise<{ ok: true }>;
+    ccMgrDismissPendingUpgrade: (hostId: string, agent?: 'cc' | 'pi') => Promise<{ ok: true }>;
     // Codex credential sync
     checkCodexAuth: (id: string) => Promise<{
       localExists: boolean;

@@ -301,10 +301,7 @@ export interface RolePillDropdownProps {
   workers: WorkerInfo[];
   selectedWorkerId: string | null;
   activeWorkerCount: number;
-  softLimit: number;
-  hardLimit: number;
   onSwitchFocus: (workerId: string) => void;
-  onOpenCreate: () => void;
   onArchiveWorker: (workerId: string) => void;
   /** false 时,选中的 worker 不会仅因组件挂载/刷新而自动清 attention。 */
   clearAttentionWhenVisible?: boolean;
@@ -312,6 +309,9 @@ export interface RolePillDropdownProps {
 }
 
 export interface WorkerListToolbarProps extends RolePillDropdownProps {
+  softLimit: number;
+  hardLimit: number;
+  onOpenCreate: () => void;
   trailingActions?: ReactNode;
   /** 硬上限时 + 按钮跳转协同设置的逃生口；分离侧栏窗口无法导航到设置路由，传 undefined 表示不接线。 */
   onOpenSettings?: () => void;
@@ -1008,10 +1008,7 @@ export function WorkerListToolbar({
               workers={workers}
               selectedWorkerId={selectedWorkerId}
               activeWorkerCount={activeWorkerCount}
-              softLimit={softLimit}
-              hardLimit={hardLimit}
               onSwitchFocus={onSwitchFocus}
-              onOpenCreate={onOpenCreate}
               onArchiveWorker={onArchiveWorker}
               clearAttentionWhenVisible={clearAttentionWhenVisible}
             />
@@ -1038,17 +1035,12 @@ export function RolePillDropdown({
   workers,
   selectedWorkerId,
   activeWorkerCount,
-  softLimit,
-  hardLimit,
   onSwitchFocus,
-  onOpenCreate,
   onArchiveWorker,
   clearAttentionWhenVisible = true,
   className,
 }: RolePillDropdownProps) {
   const { t } = useTranslation();
-  // new-maker 快捷键显示跟随 registry 生效值 (用户改绑后热更新)。
-  const shortcutKey = useAppShortcutDisplay('new-maker');
   const [openMode, setOpenMode] = useState<DropdownOpenMode>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);

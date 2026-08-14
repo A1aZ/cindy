@@ -63,7 +63,9 @@ const fetchChatHistoryPage = vi.fn<
 >(async () => ({ messages: [], nextPageToken: null }));
 const downloadMessageAttachments = vi.fn(async () => ({ attachments: [], unsupported: [] }));
 const getOwnerOpenId = vi.fn(() => 'ou_owner');
-const sendMarkdownText = vi.fn(async () => ({ messageId: 'om_notice' }));
+const sendMarkdownText = vi.fn<(_userId: string, _text: string) => Promise<{ messageId: string }>>(
+  async () => ({ messageId: 'om_notice' }),
+);
 const getChatName = vi.fn<(chatId: string) => Promise<string | null>>(async () => null);
 const getStatus = vi.fn<() => IMStatus>(() => ({ kind: 'connected', appId: 'cli_abc' }));
 const fakeIm = {
@@ -267,6 +269,12 @@ describe('feishu group lane adapter hooks', () => {
       groupEvent({ senderId: 'ou_owner', speaker: undefined }),
     );
     expect(dmPolicy).toBeUndefined();
+  });
+
+  it('turnPolicyOptionalForMode: 仅完全访问档可选(护栏取缔), 其余档保持挂策略', () => {
+    expect(adapter.turnPolicyOptionalForMode?.('bypassPermissions')).toBe(true);
+    expect(adapter.turnPolicyOptionalForMode?.('auto')).toBe(false);
+    expect(adapter.turnPolicyOptionalForMode?.('acceptEdits')).toBe(false);
   });
 
   it('prepareAgentTurnText: 群 lane 拉历史拼上下文前缀(带时间标注), 剔除触发消息', async () => {

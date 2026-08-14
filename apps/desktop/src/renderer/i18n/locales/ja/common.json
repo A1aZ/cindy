@@ -3160,7 +3160,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "グループ /ctr 新規セッションの権限モード",
+        "groupCtrPermissionDescription": "グループで @bot の /ctr により新規セッションを作成する際の権限モード。初期値は「自動承認」。グループの文脈にはメンバーが操作できる内容が含まれるため、「フルアクセス」を選ぶと確認なしで直接実行されます。信頼できるグループでのみ選択してください。"
       }
     },
     "shortcuts": {

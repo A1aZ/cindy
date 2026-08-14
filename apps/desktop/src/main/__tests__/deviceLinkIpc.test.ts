@@ -144,6 +144,7 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
     readLastKnownDeviceNames: vi.fn(() => ({})),
     rememberLastKnownDeviceName: vi.fn(async () => false),
     forgetLastKnownDeviceName: vi.fn(async () => false),
+    applyControllerDisplayNameListSnapshot: vi.fn(),
     captureControllerDisplayNameRequestEpoch: vi.fn(() => 0),
     readControllerDisplayNameFreshnessSince: vi.fn(() => ({
       changedAfterRequest: false,
@@ -300,10 +301,12 @@ describe('device-link IPC handlers', () => {
         });
       const rememberLastKnownDeviceName = vi.fn(async () => true);
       const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const applyControllerDisplayNameListSnapshot = vi.fn();
       const deps = makeDeps({
         apiFetch,
         rememberLastKnownDeviceName,
         forgetLastKnownDeviceName,
+        applyControllerDisplayNameListSnapshot,
       });
       const device = (name: string) => ({
         deviceId: 'dev-1',
@@ -332,6 +335,11 @@ describe('device-link IPC handlers', () => {
       expect(rememberLastKnownDeviceName).toHaveBeenCalledTimes(1);
       expect(rememberLastKnownDeviceName).toHaveBeenCalledWith('dev-1', '新数据库名');
       expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+      expect(applyControllerDisplayNameListSnapshot).toHaveBeenCalledTimes(1);
+      expect(applyControllerDisplayNameListSnapshot).toHaveBeenCalledWith(
+        [expect.objectContaining({ deviceId: 'dev-1', name: '新数据库名' })],
+        0,
+      );
     },
   );
 

@@ -93,6 +93,7 @@ import {
   getControllerDisplayNameFreshnessSince,
   resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
+  type ControllerDisplayNameDirectoryDevice,
 } from './controllerDisplayNameFreshness';
 import { setBusyProbe, helloBusy, pollBusyChange, resetBusyDedupe } from './busyReporter';
 import {
@@ -170,6 +171,27 @@ export function readControllerDisplayNameFreshnessSince(
     deviceId,
     requestEpoch,
   );
+}
+
+/**
+ * renderer 的设备列表刷新同样来自权威目录。把最新响应同步进被控提示元数据，
+ * 让 REST 改名/清空无需等待 presence 或 relay 重连；last-known 落盘仍由 IPC
+ * reconcile 负责，避免同一目录响应重复排队写入。
+ */
+export function applyControllerDisplayNameListSnapshot(
+  devices: readonly ControllerDisplayNameDirectoryDevice[],
+  requestEpoch: number,
+): void {
+  applyControllerDisplayNameDirectorySnapshot({
+    devices,
+    cachedNames: readLastKnownDeviceNames(),
+    freshness: controllerDisplayNameFreshness,
+    requestEpoch,
+    normalizeName: normalizeCachedDeviceName,
+    setDisplayName: setControllerDisplayName,
+    rememberName: () => {},
+    forgetName: () => {},
+  });
 }
 
 function seedControllerDisplayNamesFromLastKnown(): void {

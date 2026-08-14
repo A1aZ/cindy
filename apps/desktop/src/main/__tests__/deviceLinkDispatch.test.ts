@@ -458,6 +458,7 @@ import {
   pushSessionActivityToController,
 } from '../device-link/dispatch';
 import {
+  applyControllerDisplayNameDirectorySnapshot,
   applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
 } from '../device-link/controllerDisplayNameFreshness';
@@ -546,24 +547,44 @@ describe('被控端控制链路生命周期', () => {
     expect(hasBroadcastTapListener()).toBe(false);
   });
 
-  it('被控提示优先使用 presence 的数据库展示名，并在重命名后立即更新', () => {
+  it('目录刷新在无 active link 时预存数据库名，并让活跃提示立即响应改名与清空', () => {
     remoteControlEnabled = true;
     const changes: ActiveController[][] = [];
     setControllersChangedListener((controllers) => changes.push(controllers));
     const { client, feed } = makeFakeClient();
     wireInboundDispatch(client);
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const applyDirectoryName = (name: string): void => {
+      applyControllerDisplayNameDirectorySnapshot({
+        devices: [{ deviceId: 'ctrl-a', name }],
+        cachedNames: {},
+        freshness,
+        requestEpoch: freshness.epoch,
+        normalizeName: (value) => value.trim() || null,
+        setDisplayName: setControllerDisplayName,
+        rememberName: vi.fn(),
+        forgetName: vi.fn(),
+      });
+    };
 
-    // presence 先到：控制帧仍携带设备自报主机名，但展示应以数据库名为准。
-    setControllerDisplayName('ctrl-a', 'MacBook-Pro-2');
+    // 目录先于 link 到达时先预存名称，之后的控制帧仍以数据库名展示。
+    applyDirectoryName('MacBook-Pro-2');
     feed(subFrame('ctrl-a', SUB, ['session:s1'], 'Chriss-MacBook-Pro-2.local'));
     expect(getActiveControllers()).toEqual([
       { deviceId: 'ctrl-a', name: 'MacBook-Pro-2' },
     ]);
 
-    // 设置页改名会广播新 presence；活跃横幅无需等重连或重订阅即可更新。
-    setControllerDisplayName('ctrl-a', '工作电脑');
+    applyDirectoryName('工作电脑');
     expect(getActiveControllers()).toEqual([{ deviceId: 'ctrl-a', name: '工作电脑' }]);
     expect(changes.at(-1)).toEqual([{ deviceId: 'ctrl-a', name: '工作电脑' }]);
+
+    applyDirectoryName('');
+    expect(getActiveControllers()).toEqual([
+      { deviceId: 'ctrl-a', name: 'Chriss-MacBook-Pro-2.local' },
+    ]);
+    expect(changes.at(-1)).toEqual([
+      { deviceId: 'ctrl-a', name: 'Chriss-MacBook-Pro-2.local' },
+    ]);
   });
 
   it('数据库展示名为空或被清空时回退到控制端自报名，再缺失时回退到设备 ID 短码', () => {

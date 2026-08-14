@@ -41,6 +41,7 @@ import {
   restoreController,
   broadcast,
   deviceLinkApiBase,
+  applyControllerDisplayNameListSnapshot,
   captureControllerDisplayNameRequestEpoch,
   readControllerDisplayNameFreshnessSince,
 } from './index';
@@ -111,6 +112,10 @@ export interface DeviceLinkIpcDeps {
   readLastKnownDeviceNames(): Record<string, string>;
   rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean>;
   forgetLastKnownDeviceName(deviceId: string): Promise<boolean>;
+  applyControllerDisplayNameListSnapshot(
+    devices: readonly DeviceLinkServerDeviceView[],
+    requestEpoch: number,
+  ): void;
   captureControllerDisplayNameRequestEpoch(): number;
   readControllerDisplayNameFreshnessSince(
     deviceId: string,
@@ -161,6 +166,7 @@ export function defaultDeps(): DeviceLinkIpcDeps {
     readLastKnownDeviceNames,
     rememberLastKnownDeviceName,
     forgetLastKnownDeviceName,
+    applyControllerDisplayNameListSnapshot,
     captureControllerDisplayNameRequestEpoch,
     readControllerDisplayNameFreshnessSince,
     rewriteOutboundMedia,
@@ -324,6 +330,7 @@ export function handleListDevices(
     (result) => {
       const latest = latestDeviceListRequest;
       if (latest && latest.sequence > sequence) return latest.promise;
+      deps.applyControllerDisplayNameListSnapshot(result.devices, requestEpoch);
       return reconcileDeviceNames(result, deps, requestEpoch);
     },
     (err: unknown) => {

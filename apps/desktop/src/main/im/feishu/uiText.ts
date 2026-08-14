@@ -25,7 +25,6 @@ const RECOVERY_KEYS: Record<
     agentUnsupported: string;
     agentModeHint: string;
     permissionModeUnsupported: string;
-    attachedAgentUnsupported: string;
     attachedPermissionModeUnsupported: string;
   }
 > = {
@@ -33,7 +32,6 @@ const RECOVERY_KEYS: Record<
     agentUnsupported: 'settings.imBot.defaults.feishuAgentUnsupportedHint',
     agentModeHint: 'settings.imBot.defaults.feishuAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.feishuPermissionModeRecoveryHint',
-    attachedAgentUnsupported: 'settings.imBot.defaults.agentUnsupportedOnChannelHint',
     attachedPermissionModeUnsupported:
       'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
   },
@@ -41,7 +39,6 @@ const RECOVERY_KEYS: Record<
     agentUnsupported: 'settings.imBot.defaults.larkAgentUnsupportedHint',
     agentModeHint: 'settings.imBot.defaults.larkAgentSwitchPermissionModeHint',
     permissionModeUnsupported: 'settings.imBot.defaults.larkPermissionModeRecoveryHint',
-    attachedAgentUnsupported: 'settings.imBot.defaults.agentUnsupportedOnChannelHint',
     attachedPermissionModeUnsupported:
       'settings.imBot.defaults.permissionModeUnsupportedOnChannelHint',
   },
@@ -57,19 +54,6 @@ const PERMISSION_MODE_FIX_KEYS = {
   failed: 'settings.imBot.defaults.permissionModeFixFailed',
 } as const;
 
-function displayAgentKind(agentKind: string | undefined): string {
-  switch (agentKind) {
-    case 'claude-code':
-      return 'Claude Code';
-    case 'codex':
-      return 'Codex';
-    case 'pi':
-      return 'Pi';
-    default:
-      return agentKind ?? 'Agent';
-  }
-}
-
 export function createFeishuPreDispatchFailureText(
   translate: FeishuTranslator,
   getService: () => FeishuService = () => 'feishu',
@@ -81,10 +65,10 @@ export function createFeishuPreDispatchFailureText(
     const keys = RECOVERY_KEYS[getService()];
     if (reason.includes('TURN_PERMISSION_POLICY_UNSUPPORTED:agent')) {
       if (context?.attached) {
-        return translate(keys.attachedAgentUnsupported).replace(
-          '{{agent}}',
-          displayAgentKind(context.agentKind),
-        );
+        // Attached desktop sessions cannot switch their bound Agent from the
+        // channel. Keep the recovery actionable through /permission, even
+        // when the provider reports the policy failure as agent-scoped.
+        return translate(keys.attachedPermissionModeUnsupported);
       }
       const mode = reason.split(':').pop() ?? '';
       return mode === 'bypassPermissions' || mode === 'acceptEdits'

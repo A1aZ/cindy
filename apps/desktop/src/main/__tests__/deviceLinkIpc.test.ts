@@ -148,6 +148,7 @@ function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
     beginControllerDisplayNameDirectoryRefresh: vi.fn(() => 1),
     captureControllerDisplayNameRequestEpoch: vi.fn(() => 0),
     isLatestControllerDisplayNameDirectoryRefresh: vi.fn(() => true),
+    waitForNewerControllerDisplayNameDirectoryRefresh: vi.fn(async () => {}),
     readControllerDisplayNameFreshnessSince: vi.fn(() => ({
       changedAfterRequest: false,
       authoritativeName: null,
@@ -293,12 +294,17 @@ describe('device-link IPC handlers', () => {
     await expect(handleListDevices(depsNet)).rejects.toThrowError(/\[DEVICE_LINK_UNAVAILABLE\]/);
   });
 
-  it.each(['旧数据库名', ''] as const)(
-    'listDevices:被更新的后台目录请求取代后，旧列表响应(%s)不得更新提示或缓存',
-    async (name) => {
+  it.each([
+    ['旧数据库名', '新数据库名', '新数据库名'],
+    ['', '新数据库名', '新数据库名'],
+    ['旧数据库名', null, 'Host.local'],
+  ] as const)(
+    'listDevices:被后台目录淘汰的旧响应(%s)等待后返回当前权威名(%s)',
+    async (name, authoritativeName, expectedName) => {
       const applyControllerDisplayNameListSnapshot = vi.fn();
       const rememberLastKnownDeviceName = vi.fn(async () => true);
       const forgetLastKnownDeviceName = vi.fn(async () => true);
+      const waitForNewerControllerDisplayNameDirectoryRefresh = vi.fn(async () => {});
       const deps = makeDeps({
         apiFetch: vi.fn().mockResolvedValue({
           devices: [
@@ -321,10 +327,18 @@ describe('device-link IPC handlers', () => {
         forgetLastKnownDeviceName,
         beginControllerDisplayNameDirectoryRefresh: vi.fn(() => 1),
         isLatestControllerDisplayNameDirectoryRefresh: vi.fn(() => false),
+        waitForNewerControllerDisplayNameDirectoryRefresh,
+        readControllerDisplayNameFreshnessSince: vi.fn(() => ({
+          changedAfterRequest: false,
+          authoritativeName,
+        })),
       });
 
-      await handleListDevices(deps);
+      await expect(handleListDevices(deps)).resolves.toMatchObject({
+        devices: [{ name: expectedName }],
+      });
 
+      expect(waitForNewerControllerDisplayNameDirectoryRefresh).toHaveBeenCalledWith(1);
       expect(applyControllerDisplayNameListSnapshot).not.toHaveBeenCalled();
       expect(rememberLastKnownDeviceName).not.toHaveBeenCalled();
       expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();

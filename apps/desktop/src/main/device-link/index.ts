@@ -159,6 +159,10 @@ type DeviceDirectoryResponse = {
 };
 let controllerDisplayNameRefreshGeneration = 0;
 const controllerDisplayNameFreshness = createControllerDisplayNameFreshnessTracker();
+let latestControllerDisplayNameDirectoryRefresh: {
+  sequence: number;
+  promise: Promise<void>;
+} | null = null;
 
 export function captureControllerDisplayNameRequestEpoch(): number {
   return controllerDisplayNameFreshness.epoch;
@@ -173,6 +177,18 @@ export function isLatestControllerDisplayNameDirectoryRefresh(sequence: number):
     controllerDisplayNameFreshness,
     sequence,
   );
+}
+
+export async function waitForNewerControllerDisplayNameDirectoryRefresh(
+  sequence: number,
+): Promise<void> {
+  let pending = latestControllerDisplayNameDirectoryRefresh;
+  while (pending && pending.sequence > sequence) {
+    await pending.promise;
+    const latest = latestControllerDisplayNameDirectoryRefresh;
+    if (!latest || latest.sequence <= pending.sequence) return;
+    pending = latest;
+  }
 }
 
 export function readControllerDisplayNameFreshnessSince(
@@ -219,9 +235,11 @@ function seedControllerDisplayNamesFromLastKnown(): void {
  * presence 是增量流，新建连接不会收到已在线设备的历史快照；每个 relay 连接代
  * 上线时从现有设备目录补齐展示名，避免 link-open 抢先时长期停在主机名回退。
  */
-async function refreshControllerDisplayNamesFromDirectory(generation: number): Promise<void> {
-  const directoryRequestSequence = beginControllerDisplayNameDirectoryRefresh();
-  const requestEpoch = controllerDisplayNameFreshness.epoch;
+async function runControllerDisplayNamesFromDirectory(
+  generation: number,
+  directoryRequestSequence: number,
+  requestEpoch: number,
+): Promise<void> {
   try {
     const result = await serverApiFetch<DeviceDirectoryResponse>('/api/device-link/devices', {
       baseUrl: deviceLinkApiBase,
@@ -254,6 +272,21 @@ async function refreshControllerDisplayNamesFromDirectory(generation: number): P
     // 目录补齐是展示层 best-effort；失败时保留控制帧自报名 / 短 ID 回退，不影响建链。
     log.warn(`device directory display-name refresh failed (non-fatal): ${String(err)}`);
   }
+}
+
+function refreshControllerDisplayNamesFromDirectory(generation: number): Promise<void> {
+  const directoryRequestSequence = beginControllerDisplayNameDirectoryRefresh();
+  const requestEpoch = controllerDisplayNameFreshness.epoch;
+  const promise = runControllerDisplayNamesFromDirectory(
+    generation,
+    directoryRequestSequence,
+    requestEpoch,
+  );
+  latestControllerDisplayNameDirectoryRefresh = {
+    sequence: directoryRequestSequence,
+    promise,
+  };
+  return promise;
 }
 
 let client: DeviceLinkClient | null = null;

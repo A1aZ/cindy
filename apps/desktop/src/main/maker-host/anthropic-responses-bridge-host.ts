@@ -407,6 +407,50 @@ function recordNativeXaiRateLimit(
   }
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * PI already emits xAI-native payloads, so this path bypasses the Messages →
+ * Responses bridge that normally supplies xAI's model-gated server tools.
+ * Restore the same stable contract here: append missing tools after PI's own
+ * tools, preserve an existing declaration verbatim, and keep a forced single
+ * function call from being satisfied by x_search instead.
+ */
+function withNativeXaiServerSideTools(body: unknown): Record<string, unknown> | null {
+  if (!isPlainRecord(body) || typeof body.model !== 'string') return null;
+  const model = body.model.startsWith(XAI_MODEL_PREFIX)
+    ? body.model.slice(XAI_MODEL_PREFIX.length)
+    : body.model;
+  const serverTools = xaiServerSideTools(model);
+  if (serverTools.length === 0) return null;
+
+  const existing = Array.isArray(body.tools) ? body.tools : [];
+  const declaredTypes = new Set(
+    existing.map((tool) => (
+      isPlainRecord(tool) && typeof tool.type === 'string' ? tool.type : ''
+    )),
+  );
+  const missing = serverTools.filter((tool) => !declaredTypes.has(tool.type));
+  const tools = missing.length > 0 ? [...existing, ...missing] : existing;
+  let next = missing.length > 0 ? { ...body, tools } : body;
+
+  if (body.tool_choice === 'required') {
+    const functionTools = tools.filter(
+      (tool) => isPlainRecord(tool) && tool.type === 'function' && typeof tool.name === 'string',
+    );
+    if (functionTools.length === 1) {
+      next = {
+        ...next,
+        tool_choice: { type: 'function', name: functionTools[0]!.name },
+      };
+      return next;
+    }
+  }
+  return missing.length > 0 ? next : null;
+}
+
 async function pipeNativeResponse(response: Response, res: Parameters<LocalRequestHandler>[0]['res']): Promise<void> {
   res.writeHead(response.status, nativeResponseHeaders(response));
   if (!response.body) {
@@ -439,15 +483,15 @@ async function pipeNativeResponse(response: Response, res: Parameters<LocalReque
 /**
  * Forward an already-native PI request. Unlike getResponsesBridgeHandler this
  * performs no Messages/Responses conversion: PI constructs the provider's
- * native payload, while the host only swaps placeholder loopback credentials
- * for the connected account credential.
+ * native payload, while the host swaps placeholder loopback credentials for
+ * the connected account credential and restores xAI's model-gated server tools.
  */
 export function getPiNativeSubscriptionHandler(
   providerId: PiNativeSubscriptionProvider,
   sessionId: string,
   deps: PiNativeSubscriptionHandlerDeps = defaultPiNativeSubscriptionHandlerDeps,
 ): LocalRequestHandler {
-  return async ({ rawBody, ctx, res }) => {
+  return async ({ rawBody, parsedBody, ctx, res }) => {
     const upstreamUrl = piNativeUpstreamUrl(providerId, ctx.url);
     if (ctx.method !== 'POST' || !upstreamUrl) {
       res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
@@ -474,13 +518,23 @@ export function getPiNativeSubscriptionHandler(
       }
       headers['content-type'] = ctx.headers['content-type'] ?? 'application/json';
       headers.accept = ctx.headers.accept ?? 'text/event-stream';
-      const contentEncoding = ctx.headers['content-encoding'];
+      let outboundBody = rawBody;
+      let contentEncoding = ctx.headers['content-encoding'];
+      if (providerId === 'xai') {
+        const withServerTools = withNativeXaiServerSideTools(parsedBody);
+        if (withServerTools) {
+          outboundBody = Buffer.from(JSON.stringify(withServerTools));
+          // The proxy parsed a plain JSON request. After reserializing it the
+          // original content encoding, if any, no longer describes the bytes.
+          contentEncoding = undefined;
+        }
+      }
       if (contentEncoding) headers['content-encoding'] = contentEncoding;
 
       const response = await deps.fetch(upstreamUrl, {
         method: 'POST',
         headers,
-        body: new Uint8Array(rawBody),
+        body: new Uint8Array(outboundBody),
         signal: controller.signal,
       });
       if (providerId === 'xai' && response.ok) {

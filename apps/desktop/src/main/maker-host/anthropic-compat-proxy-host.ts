@@ -229,7 +229,8 @@ export function createModelRoutingTransform(): RoutingTransform {
     if (piSessionId && (piProviderId === 'openai' || piProviderId === 'xai')) {
       return {
         // PI has already built the provider-native request. The local handler
-        // only authenticates and forwards it; no Claude protocol bridge runs.
+        // authenticates and forwards it; the xAI forwarder also restores its
+        // provider server tools, but no Claude protocol bridge runs.
         localHandler: getPiNativeSubscriptionHandler(piProviderId, piSessionId),
       };
     }

@@ -156,6 +156,102 @@ describe('PI native subscription forwarding', () => {
     }
   });
 
+  it('adds model-gated x_search to native general Grok requests after PI function tools', async () => {
+    const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    const handler = getPiNativeSubscriptionHandler('xai', 'session-x-search', deps({
+      fetch: fetchMock as PiNativeSubscriptionHandlerDeps['fetch'],
+    }));
+    const parsedBody = {
+      model: 'grok-4.5',
+      tools: [{ type: 'function', name: 'read_file', parameters: { type: 'object' } }],
+      tool_choice: 'required',
+    };
+
+    await handler({
+      rawBody: Buffer.from(JSON.stringify(parsedBody)),
+      parsedBody,
+      ctx: {
+        reqId: 5,
+        method: 'POST',
+        url: '/v1/responses',
+        headers: { 'content-type': 'application/json' },
+      },
+      res: responseRecorder(),
+    } as never);
+
+    const request = JSON.parse(Buffer.from(fetchMock.mock.calls[0]![1]?.body as Uint8Array).toString('utf8'));
+    expect(request.tools).toEqual([
+      { type: 'function', name: 'read_file', parameters: { type: 'object' } },
+      { type: 'x_search' },
+    ]);
+    expect(request.tool_choice).toEqual({ type: 'function', name: 'read_file' });
+  });
+
+  it('preserves an existing native x_search declaration without duplicating it', async () => {
+    const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }));
+    const handler = getPiNativeSubscriptionHandler('xai', 'session-x-search-existing', deps({
+      fetch: fetchMock as PiNativeSubscriptionHandlerDeps['fetch'],
+    }));
+    const parsedBody = {
+      model: 'grok-4.5',
+      tools: [{ type: 'x_search', from_date: '2026-08-01' }],
+    };
+    const rawBody = Buffer.from(JSON.stringify(parsedBody));
+
+    await handler({
+      rawBody,
+      parsedBody,
+      ctx: {
+        reqId: 6,
+        method: 'POST',
+        url: '/v1/responses',
+        headers: { 'content-type': 'application/json' },
+      },
+      res: responseRecorder(),
+    } as never);
+
+    const forwarded = Buffer.from(fetchMock.mock.calls[0]![1]?.body as Uint8Array);
+    expect(forwarded).toEqual(rawBody);
+    expect(JSON.parse(forwarded.toString('utf8')).tools).toEqual([
+      { type: 'x_search', from_date: '2026-08-01' },
+    ]);
+  });
+
+  it.each(['grok-code-fast', 'grok-build-0.1'])(
+    'does not add x_search to native coding model %s',
+    async (model) => {
+      const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }));
+      const handler = getPiNativeSubscriptionHandler('xai', `session-${model}`, deps({
+        fetch: fetchMock as PiNativeSubscriptionHandlerDeps['fetch'],
+      }));
+      const parsedBody = { model };
+      const rawBody = Buffer.from(JSON.stringify(parsedBody));
+
+      await handler({
+        rawBody,
+        parsedBody,
+        ctx: {
+          reqId: 7,
+          method: 'POST',
+          url: '/v1/responses',
+          headers: { 'content-type': 'application/json' },
+        },
+        res: responseRecorder(),
+      } as never);
+
+      expect(Buffer.from(fetchMock.mock.calls[0]![1]?.body as Uint8Array)).toEqual(rawBody);
+    },
+  );
+
   it('forwards xAI Chat Completions natively and invalidates the failed host token', async () => {
     const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response('{"error":"expired"}', {
       status: 401,

@@ -64,7 +64,7 @@ const fetchChatHistoryPage = vi.fn<
 >(async () => ({ messages: [], nextPageToken: null }));
 const downloadMessageAttachments = vi.fn(async () => ({ attachments: [], unsupported: [] }));
 const getOwnerOpenId = vi.fn(() => 'ou_owner');
-const sendMarkdownText = vi.fn<(userId: string, markdown: string) => Promise<{ messageId: string }>>(
+const sendMarkdownText = vi.fn<(_userId: string, _text: string) => Promise<{ messageId: string }>>(
   async () => ({ messageId: 'om_notice' }),
 );
 const getChatName = vi.fn<(chatId: string) => Promise<string | null>>(async () => null);
@@ -286,6 +286,15 @@ describe('feishu group lane adapter hooks', () => {
     expect(text).not.toContain('new task');
     expect(text).not.toContain('TURN_PERMISSION_POLICY_UNSUPPORTED');
     expect(adapter.ui.error?.preDispatchFailureText?.('Error')).toBeUndefined();
+
+    const fixFailedText = adapter.ui.cards.permissionModeFix?.failed('mock failure');
+    expect(fixFailedText).toContain('/permission');
+    expect(fixFailedText).not.toContain('/permission auto');
+    expect(fixFailedText).not.toContain('/permission ask');
+    expect(fixFailedText).toContain('Auto / Auto-review');
+    expect(adapter.ui.cards.permissionModeFix?.body('Recovered session')).toContain(
+      'Recovered session',
+    );
   });
 
   it('派发前错误提示通过注入翻译器按当前语言生成', () => {

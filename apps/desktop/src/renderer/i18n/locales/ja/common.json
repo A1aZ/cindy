@@ -3153,6 +3153,11 @@
         "larkAgentUnsupportedHint": "⚠️ 現在の Agent は Lark グループに必要なメッセージごとの権限確認に対応していないため、メッセージを開始できません。\ndesktop の設定で Lark の Agent を Claude Code または Codex に切り替え、`/new` を送信して再試行してください。",
         "larkAgentSwitchPermissionModeHint": "新しい Agent でも権限モードの問題が表示される場合は、`/permission` を送信し、権限選択カードで Ask permissions / Default permissions または Auto / Auto-review を選んでから再試行してください。",
         "larkPermissionModeRecoveryHint": "⚠️ 現在の権限モードは Lark グループで安全に実行できません。\n`/permission` を送信し、権限選択カードで Ask permissions / Default permissions または Auto / Auto-review を選んでから再試行してください。それでも開始できない場合は、`/new` を送信して新しいチャットを開始してください。",
+        "permissionModeFixTitle": "グループの権限モードを「自動承認」に切り替える",
+        "permissionModeFixBody": "グループまたはトピックのメッセージを開始できませんでした。**{{sessionTitle}}** が「フルアクセス」を使用しています。グループの文脈にはメンバーが操作できる内容が含まれるため、操作確認を維持する必要があります。\n\n下のボタンで「自動承認」に切り替え、グループに戻ってメッセージをもう一度送信してください。",
+        "permissionModeFixButton": "✅ 自動承認に切り替える",
+        "permissionModeFixResolved": "✅ 「自動承認」に切り替えました。グループに戻ってもう一度お試しください",
+        "permissionModeFixFailed": "❌ 権限モードを切り替えられませんでした：{{reason}}。`/permission` を送信し、カードで Auto / Auto-review を選択してください。",
         "modelLabel": "モデル設定",
         "loading": "新規会話設定を読み込み中…",
         "loadFailed": "新規会話設定を読み込めませんでした",
@@ -3161,7 +3166,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "グループ /ctr 新規セッションの権限モード",
+        "groupCtrPermissionDescription": "グループで @bot の /ctr により新規セッションを作成する際の権限モード。初期値は「自動承認」。グループの文脈にはメンバーが操作できる内容が含まれるため、「フルアクセス」にするとグループのメッセージは拒否され、「自動承認」への切り戻しを案内します。"
       }
     },
     "shortcuts": {

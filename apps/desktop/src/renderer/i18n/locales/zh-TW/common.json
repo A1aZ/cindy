@@ -3153,6 +3153,11 @@
         "larkAgentUnsupportedHint": "⚠️ 目前 Agent 不支援 Lark 群組所需的逐條權限確認，訊息無法啟動。\ndesktop 設定中請將 Lark 渠道的 Agent 切換為 Claude Code 或 Codex，然後傳送 `/new` 重試。",
         "larkAgentSwitchPermissionModeHint": "如果新的 Agent 仍提示權限模式問題，請傳送 `/permission`，在權限選擇卡片中選擇 Ask permissions / Default permissions 或 Auto / Auto-review 後重試。",
         "larkPermissionModeRecoveryHint": "⚠️ 目前權限模式無法在 Lark 群組中安全執行。\n請傳送 `/permission`，在權限選擇卡片中選擇 Ask permissions / Default permissions 或 Auto / Auto-review 後重試；如果仍無法啟動，可以傳送 `/new` 開啟新的對話。",
+        "permissionModeFixTitle": "將群聊權限檔切換為「自動審批」",
+        "permissionModeFixBody": "群聊或話題裡的訊息未能啟動：**{{sessionTitle}}** 使用了「完全存取」權限檔。群組上下文裡可能包含成員可控制的內容，因此必須保留操作確認。\n\n點擊下方按鈕切換為「自動審批」，然後回到群組重新傳送訊息。",
+        "permissionModeFixButton": "✅ 切換為自動審批",
+        "permissionModeFixResolved": "✅ 已切換為「自動審批」— 回到群組重試即可",
+        "permissionModeFixFailed": "❌ 無法切換權限模式：{{reason}}。請傳送 `/permission`，並在卡片中選擇 Auto / Auto-review",
         "modelLabel": "模型配置",
         "loading": "正在讀取新對話配置…",
         "loadFailed": "讀取新對話配置失敗",
@@ -3161,7 +3166,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "群聊 /ctr 新建任務權限檔",
+        "groupCtrPermissionDescription": "群組裡 @bot 用 /ctr 新建任務時使用的權限檔，預設「自動審批」。群組上下文裡有成員可控制的內容，設成「完全存取」後群組裡的消息會被拒絕，並引導你切回「自動審批」。"
       }
     },
     "shortcuts": {

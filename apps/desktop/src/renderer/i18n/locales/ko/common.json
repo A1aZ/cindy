@@ -3153,6 +3153,11 @@
         "larkAgentUnsupportedHint": "⚠️ 현재 Agent는 Lark 그룹에 필요한 메시지별 권한 확인을 지원하지 않아 메시지를 시작할 수 없습니다.\ndesktop 설정에서 Lark Agent를 Claude Code 또는 Codex로 전환한 다음 `/new`를 보내 다시 시도하세요.",
         "larkAgentSwitchPermissionModeHint": "새 Agent에서도 권한 모드 문제가 표시되면 `/permission`을 보내고 권한 선택 카드에서 Ask permissions / Default permissions 또는 Auto / Auto-review를 선택한 후 다시 시도하세요.",
         "larkPermissionModeRecoveryHint": "⚠️ 현재 권한 모드는 Lark 그룹에서 안전하게 실행할 수 없습니다.\n`/permission`을 보내고 권한 선택 카드에서 Ask permissions / Default permissions 또는 Auto / Auto-review를 선택한 후 다시 시도하세요. 그래도 시작되지 않으면 `/new`를 보내 새 채팅을 시작하세요.",
+        "permissionModeFixTitle": "그룹 권한 모드를 자동 승인으로 전환",
+        "permissionModeFixBody": "그룹 또는 토픽 메시지를 시작하지 못했습니다. **{{sessionTitle}}**에서 전체 액세스를 사용 중입니다. 그룹 컨텍스트에는 멤버가 조작할 수 있는 내용이 포함될 수 있으므로 작업 확인을 유지해야 합니다.\n\n아래 버튼을 눌러 자동 승인으로 전환한 뒤 그룹으로 돌아가 메시지를 다시 보내세요.",
+        "permissionModeFixButton": "✅ 자동 승인으로 전환",
+        "permissionModeFixResolved": "✅ 자동 승인으로 전환했습니다. 그룹으로 돌아가 다시 시도하세요",
+        "permissionModeFixFailed": "❌ 권한 모드를 전환하지 못했습니다: {{reason}}. `/permission`을 보낸 뒤 카드에서 Auto / Auto-review를 선택하세요.",
         "modelLabel": "모델 설정",
         "loading": "새 대화 설정을 불러오는 중…",
         "loadFailed": "새 대화 설정을 불러오지 못했습니다",
@@ -3161,7 +3166,9 @@
           "claude-code": "Claude Code",
           "codex": "Codex",
           "pi": "Pi"
-        }
+        },
+        "groupCtrPermissionLabel": "그룹 /ctr 새 세션 권한 모드",
+        "groupCtrPermissionDescription": "그룹 채팅에서 @bot /ctr로 새 세션을 만들 때 적용되는 권한 모드입니다. 기본값은 자동 승인입니다. 그룹 컨텍스트에는 멤버가 조작할 수 있는 내용이 포함되므로 전체 액세스로 설정하면 그룹 메시지가 거부되고 자동 승인으로 전환하도록 안내합니다."
       }
     },
     "shortcuts": {

@@ -41,6 +41,13 @@ const RECOVERY_KEYS: Record<
 
 const AGENT_UNSUPPORTED_KEY = RECOVERY_KEYS.feishu.agentUnsupported;
 const PERMISSION_MODE_UNSUPPORTED_KEY = RECOVERY_KEYS.feishu.permissionModeUnsupported;
+const PERMISSION_MODE_FIX_KEYS = {
+  title: 'settings.imBot.defaults.permissionModeFixTitle',
+  body: 'settings.imBot.defaults.permissionModeFixBody',
+  btnFix: 'settings.imBot.defaults.permissionModeFixButton',
+  resolved: 'settings.imBot.defaults.permissionModeFixResolved',
+  failed: 'settings.imBot.defaults.permissionModeFixFailed',
+} as const;
 
 export function createFeishuPreDispatchFailureText(
   translate: FeishuTranslator,
@@ -65,6 +72,22 @@ export function createFeishuPreDispatchFailureText(
 }
 
 const preDispatchFailureText = createFeishuPreDispatchFailureText(t);
+function tWithValues(key: string, values: Record<string, string>): string {
+  let text = t(key);
+  for (const [name, value] of Object.entries(values)) {
+    text = text.replaceAll(`{{${name}}}`, () => value);
+  }
+  return text;
+}
+
+const permissionModeFixText: NonNullable<ImUiTextPack['cards']['permissionModeFix']> = {
+  title: t(PERMISSION_MODE_FIX_KEYS.title),
+  body: (sessionTitle: string) =>
+    tWithValues(PERMISSION_MODE_FIX_KEYS.body, { sessionTitle }),
+  btnFix: t(PERMISSION_MODE_FIX_KEYS.btnFix),
+  resolved: t(PERMISSION_MODE_FIX_KEYS.resolved),
+  failed: (reason: string) => tWithValues(PERMISSION_MODE_FIX_KEYS.failed, { reason }),
+};
 
 export const ui = {
   // ── slash command replies ──────────────────────────────────────────────────
@@ -139,6 +162,7 @@ export const ui = {
       `其它部分收到啦，正在处理~`,
   },
 
+  // ── pre-dispatch 失败细分文案 ──────────────────────────────────────────────
   error: {
     agentUnsupported: t(AGENT_UNSUPPORTED_KEY),
     permissionModeUnsupported: t(PERMISSION_MODE_UNSUPPORTED_KEY),
@@ -153,8 +177,9 @@ export const ui = {
       btnAllowOnce: '✅ 仅本次允许',
       btnAllowAlways: '✅ 总是允许',
       btnDeny: '❌ 拒绝',
-      /** 授权卡转投 owner 私聊后, 在原群/话题里留的指路提示。 */
-      dmRoutedNotice: '🔐 这个操作需要你确认 — 授权卡片已经发到你的私聊，去那里点一下继续~',
+      /** 授权卡转投 owner 私聊后, 在原群/话题里留的指路提示 — 带工具名, 点出具体是什么操作。 */
+      dmRoutedNotice: (toolName: string) =>
+        `🔐 \`${toolName}\` 这个操作需要你确认 — 授权卡片已经发到你的私聊，去那里点一下继续~`,
       resolvedAllowOnce: '✅ 已允许（仅本次）',
       resolvedAllowAlways: '✅ 已允许（这个工具以后都放行）',
       resolvedDeny: '❌ 已拒绝',
@@ -198,6 +223,11 @@ export const ui = {
       btnCancelFullAccess: '保留当前权限',
       fullAccessCancelled: '已取消，保留当前权限',
     },
+    /**
+     * 群会话「完全访问」档被强确认策略拒绝时, 发到 owner 私聊的一键修复卡 —
+     * 点按钮把该会话切回 auto(自动审批), 群里就能继续发消息了。
+     */
+    permissionModeFix: permissionModeFixText,
     control: {
       title: '🎮 挑个工作区上号',
       emptyBody: '_暂时还没有可接管的工作区~ 在 desktop 端打开/创建一个任务再来_',

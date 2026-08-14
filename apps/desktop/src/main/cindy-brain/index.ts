@@ -3268,7 +3268,7 @@ function getImageChannelRegistry(): ImageChannelRegistry {
         hasOAuthLogin: () => hasGrokOAuthLogin(),
         getAccessToken: () => getGrokAccessToken(),
         getOwnerScopeKey: () => activeOwnerScopeKey(),
-        isOwnerBoundaryPending: () => isAppSessionBoundaryPending(),
+        isOwnerBoundaryPending: () => isGhostBoundaryPending(),
         fetchImplementation: ((url, init) => outboundFetch(url as string, init)) as typeof fetch,
         beforeDispatch: (model) => assertMediaModelStillEnabled('image', model),
         onAuthRejected: (failure) => invalidateXaiBridgeAuth(failure),
@@ -3367,12 +3367,26 @@ function resolveImageChannelForModel(model: string, operation: 'generate' | 'edi
   return getImageChannelRegistry().resolve(entry.providerId);
 }
 
+/**
+ * Combined Ghost-owner boundary gate for Ghost-only paths (media generation,
+ * cindy-slot work). Unlike the app-wide isAppSessionBoundaryPending(), this
+ * also fails closed while the durable projection owner (shared global marker)
+ * differs, so a sibling instance flipping the owner cannot let an in-flight
+ * Ghost task keep calling upstream or saving media.
+ */
+function isGhostBoundaryPending(): boolean {
+  return (
+    isAppSessionBoundaryPending() ||
+    !isGhostSkillProjectionBoundaryStableForOwner(getActiveAppSession().dataOwnerId)
+  );
+}
+
 export function getGhostCindySlot(): GhostCindySlot {
   if (!cindySlotSingleton) {
     cindySlotSingleton = new GhostCindySlot({
       getGhost: (id) => findAvailableGhost(id),
       getOwnerScopeKey: () => activeOwnerScopeKey(),
-      isOwnerBoundaryPending: () => isAppSessionBoundaryPending(),
+      isOwnerBoundaryPending: () => isGhostBoundaryPending(),
       // model 已在 modelSlot 按白名单校验;归属来源(providerId)按白名单条目
       // 定位,经 imageChannelRegistry 取对应执行通道(2026-07 图像多来源)。
       generateImage: async ({ prompt, model, aspectRatio }) => {

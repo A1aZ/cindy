@@ -191,4 +191,18 @@ describe('market Ghost session boundary', () => {
     expect(body).toContain("throwIpcError('INTERNAL', 'Unable to verify the installed Plugin source');");
     expect(body).toContain("throwIpcError('INTERNAL', 'Unable to detach the installed Plugin source');");
   });
+
+  it('Ghost 媒体在途守卫注入 durable owner 组合条件,而不是退化成只看进程内边界', () => {
+    const helperStart = source.indexOf('function isGhostBoundaryPending(): boolean {');
+    expect(helperStart).toBeGreaterThan(-1);
+    const helperEnd = source.indexOf('\n}\n', helperStart);
+    const helperBody = source.slice(helperStart, helperEnd);
+    // helper 必须是组合条件:进程内 App boundary + durable projection owner 稳定性。
+    expect(helperBody).toContain('isAppSessionBoundaryPending()');
+    expect(helperBody).toContain('isGhostSkillProjectionBoundaryStableForOwner');
+    // 两处 Ghost 专属消费点(xAI 通道与 GhostCindySlot)都必须走 helper。
+    const injections =
+      source.match(/isOwnerBoundaryPending: \(\) => isGhostBoundaryPending\(\)/g)?.length ?? 0;
+    expect(injections).toBeGreaterThanOrEqual(2);
+  });
 });

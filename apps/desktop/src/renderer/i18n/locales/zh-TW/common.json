@@ -308,6 +308,7 @@
         "statusInstalled": "已安裝",
         "statusNotInstalled": "未安裝",
         "claudeCodeName": "Claude Code",
+        "piName": "Pi",
         "button": {
           "install": "安裝",
           "reinstall": "重新安裝",
@@ -6190,7 +6191,10 @@
       "networkShowRaw": "檢視原始錯誤",
       "networkHideRaw": "收起原始錯誤",
       "silentStopContinue": "繼續",
-      "silentStopContinueTitle": "繼續當前任務"
+      "silentStopContinueTitle": "繼續當前任務",
+      "piTransportClosed": "遠端 Pi 連線已中斷（SSH 通道關閉）。遠端任務仍在執行，重新連線後可以繼續。",
+      "piManagerUnavailable": "遠端 Pi 管理器未就緒，請稍後重試；若持續失敗請到「設定 → 遠端機器」重新安裝 Pi。",
+      "piBundledNodeMissing": "遠端缺少執行環境（Node.js）。請到「設定 → 遠端機器」展開該主機，先在 Claude Code 或 Codex 列點擊「安裝」（會附帶 Node.js），再建立 Pi 任務。"
     },
     "backgroundActivity": {
       "status": "後臺子任務執行中，模型用量仍在消耗…",
@@ -6672,13 +6676,13 @@
       }
     },
     "upgradeBanner": {
-      "description": "遠端 {{hostId}} 的 cc-manager 有新版本可用 — 升級會中斷該機器上當前所有 Claude Code 遠端任務",
-      "upgrading": "正在升級遠端 {{hostId}} 的 cc-manager…",
+      "description": "遠端 {{hostId}} 的 {{manager}} 有新版本可用 — 升級會中斷該機器上當前所有遠端任務",
+      "upgrading": "正在升級遠端 {{hostId}} 的 {{manager}}…",
       "upgrade": "立即升級",
-      "upgradeTitle": "下載並啟動新版本 cc-manager（會中斷當前任務）",
+      "upgradeTitle": "下載並啟動新版本 {{manager}}（會中斷當前任務）",
       "dismissTitle": "暫不升級（下次啟動會再次提示）",
       "failed": "升級失敗：{{message}}",
-      "daemonNotReady": "cc-manager 升級完成，但遠端 daemon 暫未啟動 — 請手動重新傳送訊息"
+      "daemonNotReady": "{{manager}} 升級完成，但遠端 daemon 暫未啟動 — 請手動重新傳送訊息"
     },
     "remoteError": {
       "REMOTE_DAEMON_CLOSED": "遠端連線已中斷（daemon 可能正在升級或重啟）。本輪已結束 — 請重新傳送。",
@@ -6686,6 +6690,7 @@
       "AUTO_REVIEW_UNAVAILABLE": "自動審批暫時無法給出判斷（網路或服務波動），需要審批的操作已轉由你來確認。想少被打斷，可以把任務切到「預設權限」自行掌控。",
       "REMOTE_COMPAT_MODE_UNSUPPORTED": "遠端 Claude Code 會話無法透過本地相容 Proxy 路由(內部錯誤，請反饋)。",
       "REMOTE_GATEWAY_ENDPOINT_UNAVAILABLE": "Cindy AI 憑據尚未就緒(登入後由服務端自動下發)。請稍候重試；若持續出現，請到 設定 → 模型供應商 檢查 Cindy AI 連線狀態。",
+      "REMOTE_LOCAL_ONLY_PROVIDER": "此模型供應商是本機專屬服務（如 Ollama），SSH 遠端任務無法存取本機位址。請改用 Cindy AI 閘道，或選擇遠端主機可達的模型供應商。",
       "DEVICE_LINK_CONTROL_DISABLED": "已關閉對該裝置的控制，訊息未傳送。",
       "DEVICE_LINK_MEDIA_TRANSFER_FAILED": "附件傳輸失敗，訊息未傳送。請重試。"
     },

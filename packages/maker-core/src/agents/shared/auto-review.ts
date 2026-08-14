@@ -904,12 +904,43 @@ const POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES = new Set([
 ]);
 
 function powerShellDotNetStaticWriteTargets(segment: string): string[] {
-  const call = /^\s*\[(?:system\.)?io\.(file|directory)\]\s*::\s*([a-z][a-z0-9]*)\s*\(/i.exec(segment);
-  if (!call) return [];
-  const methods = call[1].toLowerCase() === 'file'
-    ? POWERSHELL_DOTNET_STATIC_FILE_WRITES
-    : POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES;
-  return methods.has(call[2].toLowerCase()) ? [UNPROVABLE_WRITE_TARGET] : [];
+  // 调用表达式不一定在段首:`$null = [IO.File]::Delete(...)`、`[void][IO.File]::WriteAllText(...)`
+  // 与括号中的调用都会照常执行。只在 PowerShell 字符串**之外**扫描类型表达式，既覆盖这些前缀，
+  // 又不把 `Write-Output "[IO.File]::Delete(...)"` 里的数据文字当成执行。
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote !== null) {
+      if (quote === '"' && ch === '`' && i + 1 < segment.length) {
+        i += 1; // 双引号内反引号转义下一个字符
+        continue;
+      }
+      if (ch === quote) {
+        // PowerShell 单引号内用两个单引号表示一个字面单引号。
+        if (quote === "'" && segment[i + 1] === "'") i += 1;
+        else quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '`' && i + 1 < segment.length) {
+      i += 1;
+      continue;
+    }
+    if (ch !== '[') continue;
+    const call = /^\[(?:system\.)?io\.(file|directory)\]\s*::\s*([a-z][a-z0-9]*)\s*\(/i
+      .exec(segment.slice(i));
+    if (!call) continue;
+    const methods = call[1].toLowerCase() === 'file'
+      ? POWERSHELL_DOTNET_STATIC_FILE_WRITES
+      : POWERSHELL_DOTNET_STATIC_DIRECTORY_WRITES;
+    if (methods.has(call[2].toLowerCase())) return [UNPROVABLE_WRITE_TARGET];
+    i += call[0].length - 1;
+  }
+  return [];
 }
 
 function argumentWriteTargets(tokens: string[]): string[] {
@@ -3464,6 +3495,7 @@ function systemWriteTargetsInSegment(
   tokens: string[],
   workspaceRoots: string[],
   opts: ShellReviewOptions,
+  scanPowerShellDotNet: boolean,
 ): boolean {
   // Windows 上重定向目标里的 `$` 是运行期求值(`$env:windir`、`$target`、`$(Get-Location)`),与写
   // cmdlet 的目标同一个判据 —— 早先只有 cmdlet 参数过了这一步,重定向目标被当字面量拼到工作区下,
@@ -3473,7 +3505,7 @@ function systemWriteTargetsInSegment(
   const targets = [
     ...redirectionTargets(segment).map((t) =>
       dynamicRedirectUnprovable && POWERSHELL_DYNAMIC_TARGET.test(t) ? UNPROVABLE_WRITE_TARGET : t),
-    ...powerShellDotNetStaticWriteTargets(segment),
+    ...(scanPowerShellDotNet ? powerShellDotNetStaticWriteTargets(segment) : []),
     ...argumentWriteTargets(tokens),
   ];
   if (targets.length === 0) return false;
@@ -3772,6 +3804,7 @@ function scopedDestructionNeedsConsent(
   workspaceRoots: string[],
   opts: ShellReviewOptions,
   depth = 0,
+  scanPowerShellDotNet = true,
 ): boolean {
   // script block 里是一段完整命令文本,块外的段判据看不到它(`. { Set-Content <系统路径> owned }`
   // 的 bin 是 `.`,写目标表抽不到东西 → 整条落灰区,codex 报)。递归用同一套判据审块内文本。
@@ -3783,7 +3816,8 @@ function scopedDestructionNeedsConsent(
     if (depth < MAX_EXEC_REVIEW_DEPTH) {
       for (const inner of blocks.payloads) {
         if (inner.trim().length > 0
-          && scopedDestructionNeedsConsent(inner, workspaceRoots, opts, depth + 1)) return true;
+          && scopedDestructionNeedsConsent(
+            inner, workspaceRoots, opts, depth + 1, scanPowerShellDotNet)) return true;
       }
     }
   }
@@ -3808,7 +3842,8 @@ function scopedDestructionNeedsConsent(
     // 系统写目标(shell 重定向 + 参数写通道)按**本段有效 cwd** 解析:相对目标必须挂到 unwrapped.cwd
     // (含 `cd /etc &&` 跨段传递与 `env -C /etc` 段内改目录),否则 `cp /tmp/payload hosts` 配 cwd=/etc
     // 实际覆盖 /etc/hosts 却因按 workspaceRoots 解析而只落灰区(codex 报)。
-    if (systemWriteTargetsInSegment(segment, tokens, workspaceRoots, segmentOpts)) return true;
+    if (systemWriteTargetsInSegment(
+      segment, tokens, workspaceRoots, segmentOpts, scanPowerShellDotNet)) return true;
     // 写 cmdlet 的目标也可以**由 pipeline 喂进来**(`Get-ChildItem <系统目录> | Remove-Item`):
     // 这一段自己一个路径实参都没有,写目标表因此抽不到目标、整条落灰区(codex 报)。
     if (fromPipe
@@ -3825,20 +3860,20 @@ function scopedDestructionNeedsConsent(
     // shell -c（含 -lc 等组合短选项）内还有一层命令字符串；递归有限深，超过说明静态结构已不可靠。
     const shellPayload = shellCommandPayload(tokens);
     if (shellPayload && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
-      shellPayload, workspaceRoots, segmentOpts, depth + 1))) {
+      shellPayload, workspaceRoots, segmentOpts, depth + 1, scanPowerShellDotNet))) {
       return true;
     }
     // cmd.exe /c "rd /s /q …" 把破坏性删除藏进 cmd 载荷,递归下探(codex 报)。
     const cmdPayload = cmdCommandPayload(tokens);
     if (cmdPayload && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
-      cmdPayload, workspaceRoots, segmentOpts, depth + 1))) {
+      cmdPayload, workspaceRoots, segmentOpts, depth + 1, scanPowerShellDotNet))) {
       return true;
     }
     // pwsh -Command "Set-Content C:\Windows\…\hosts owned" 同理 —— 此前 `sh -c` 与 `cmd /c`
     // 都会下探,只漏了 PowerShell,于是 Windows 上等价的受保护写入取不到目标(codex 报)。
     const psPayload = powerShellCommandPayload(tokens);
     if (psPayload && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
-      psPayload, workspaceRoots, segmentOpts, depth + 1))) {
+      psPayload, workspaceRoots, segmentOpts, depth + 1, scanPowerShellDotNet))) {
       return true;
     }
     if (bin === 'find') {
@@ -3874,7 +3909,8 @@ function scopedDestructionNeedsConsent(
             innerArgv = argv.map((t) => substituteMatchedPath(t, sentinel));
           }
           if (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
-            shellQuoteArgvForReview(innerArgv), workspaceRoots, execScope, depth + 1)) return true;
+            shellQuoteArgvForReview(innerArgv), workspaceRoots, execScope, depth + 1,
+            scanPowerShellDotNet)) return true;
         }
       }
       // 删的是被匹配到的路径(占位符 {}/$0/…),或 -delete → 删除作用域由遍历根决定;动态根一律必问。
@@ -3895,7 +3931,8 @@ function scopedDestructionNeedsConsent(
         // Unmodelled options plus an apparent shell command cannot be proven safe.
         if (tokens.slice(1).some((token) => SHELL_EXECUTORS.has(executableName(token)))) return true;
       } else if (nested.length > 0 && (depth >= MAX_EXEC_REVIEW_DEPTH || scopedDestructionNeedsConsent(
-        serializeArgvForReview(nested), workspaceRoots, segmentOpts, depth + 1))) {
+        serializeArgvForReview(nested), workspaceRoots, segmentOpts, depth + 1,
+        scanPowerShellDotNet))) {
         return true;
       }
     }
@@ -4597,12 +4634,15 @@ export function classifyShellCommand(
   // 删除/强推需要结合目标范围判断，不能只按关键词一刀切：可证明局限在工作区子目录或普通
   // feature ref 的操作进入 reviewer；系统级、区外、整工作区、动态目标和受保护/隐含分支必问。
   // Windows 保留反斜杠路径，避免把 C:\repo\build 去斜杠后误判；POSIX 额外检查去转义形态。
-  const scopedVariants = [command, quotesOnly, stripExpansions(quotesOnly), substituteDefaults(quotesOnly)];
+  // .NET 静态调用扫描依赖原始 PowerShell 引号结构，先只在原文(及其真实递归载荷)上跑一次。
+  // 去引号变体仍供其它路径/破坏判据防混淆，但不能再把字符串里的 API 文字当成执行。
+  if (scopedDestructionNeedsConsent(command, workspaceRoots, opts)) return 'prompt-each-time';
+  const scopedVariants = [quotesOnly, stripExpansions(quotesOnly), substituteDefaults(quotesOnly)];
   if ((opts.platform ?? process.platform) !== 'win32') {
     scopedVariants.push(deEscaped, deExpanded, deSubstituted);
   }
   if (scopedVariants.some((variant) =>
-    scopedDestructionNeedsConsent(variant, workspaceRoots, opts))) return 'prompt-each-time';
+    scopedDestructionNeedsConsent(variant, workspaceRoots, opts, 0, false))) return 'prompt-each-time';
   for (const re of REVIEW_REQUIRED_PATTERNS) {
     if (re.test(deEscaped) || re.test(quotesOnly) || re.test(deGlobbed) || re.test(deExpanded) || re.test(deExpandedGlob) || re.test(deSubstituted)) return 'prompt';
   }

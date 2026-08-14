@@ -1255,8 +1255,14 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       "[IO.Directory]::CreateDirectory('C:\\Windows\\Temp\\x')",
       "[System.IO.File]::WriteAllText($target, 'owned')",
       "[System.IO.File]::WriteAllText('C:\\repo\\out.txt', 'owned')",
+      "$null = [System.IO.File]::Delete('C:\\Windows\\System32\\drivers\\etc\\hosts')",
+      "$result = [IO.File]::WriteAllText('C:\\Windows\\System32\\x', 'owned')",
+      "[void][System.IO.File]::Delete('C:\\Windows\\System32\\x')",
+      "Write-Output ([IO.Directory]::Delete('C:\\Windows\\Temp\\x', $true))",
       'pwsh -Command "[System.IO.File]::Delete(\'C:\\Windows\\System32\\drivers\\etc\\hosts\')"',
+      'pwsh -Command "$null = [System.IO.File]::Delete(\'C:\\Windows\\System32\\x\')"',
       'pwsh -CommandWithArgs "[IO.File]::WriteAllText(\'C:\\Windows\\System32\\x\', \'owned\')"',
+      'pwsh -CommandWithArgs "$result = [IO.File]::WriteAllText(\'C:\\Windows\\System32\\x\', \'owned\')"',
       'pwsh -cwa "[System.IO.Directory]::Delete(\'C:\\Windows\\Temp\\x\', $true)"',
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt-each-time');
@@ -1268,6 +1274,8 @@ describe('classifyShellCommand — 嵌套替换 eval / PowerShell 载荷 / 系�
       "[IO.File]::Exists('C:\\Windows\\System32\\drivers\\etc\\hosts')",
       "[System.IO.Directory]::GetFiles('C:\\Windows\\System32')",
       "Write-Output \"[System.IO.File]::Delete('C:\\Windows\\System32\\drivers\\etc\\hosts')\"",
+      "Write-Output '[IO.File]::WriteAllText(''C:\\Windows\\System32\\x'', ''owned'')'",
+      "$result = [System.IO.File]::ReadAllText('C:\\Windows\\System32\\drivers\\etc\\hosts')",
     ]) {
       expect(classifyShellCommand(c, win, { platform: 'win32' }), c).toBe('prompt');
     }

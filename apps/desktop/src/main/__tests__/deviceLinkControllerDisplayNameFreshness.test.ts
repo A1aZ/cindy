@@ -4,6 +4,8 @@ import {
   applyControllerDisplayNameDirectorySnapshot,
   applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
+  getControllerDisplayNameFreshnessSince,
+  resetControllerDisplayNameFreshness,
   seedControllerDisplayNamesFromCache,
 } from '../device-link/controllerDisplayNameFreshness';
 
@@ -13,6 +15,84 @@ const normalizeName = (name: string): string | null => {
 };
 
 describe('controller display-name directory freshness', () => {
+  it('列表请求跨断线重连时 freshness 代次保持单调，旧响应不得回写', () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    const setDisplayName = vi.fn();
+    const rememberName = vi.fn();
+    const forgetName = vi.fn();
+
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '断线前名称',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      setFallbackDisplayName: setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    const requestEpoch = freshness.epoch;
+
+    resetControllerDisplayNameFreshness(freshness);
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '重连后名称',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName,
+      setDisplayName,
+      setFallbackDisplayName: setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    rememberName.mockClear();
+    forgetName.mockClear();
+
+    expect(freshness.epoch).toBeGreaterThan(requestEpoch);
+    expect(getControllerDisplayNameFreshnessSince(freshness, 'dev-1', requestEpoch)).toEqual({
+      changedAfterRequest: true,
+      authoritativeName: '重连后名称',
+    });
+
+    applyControllerDisplayNameDirectorySnapshot({
+      devices: [{ deviceId: 'dev-1', name: '' }],
+      cachedNames: { 'dev-1': '断线前名称' },
+      freshness,
+      requestEpoch,
+      normalizeName,
+      setDisplayName,
+      rememberName,
+      forgetName,
+    });
+    expect(rememberName).not.toHaveBeenCalled();
+    expect(forgetName).not.toHaveBeenCalled();
+    expect(freshness.authoritativeNameByDevice.get('dev-1')).toBe('重连后名称');
+  });
+
+  it('两个控制端共享同一被控端时，一个控制端重连只恢复自己的名称状态', () => {
+    const controllerA = createControllerDisplayNameFreshnessTracker();
+    const controllerB = createControllerDisplayNameFreshnessTracker();
+    const setA = vi.fn();
+    const setB = vi.fn();
+
+    seedControllerDisplayNamesFromCache({ target: '旧名称' }, controllerA, setA);
+    seedControllerDisplayNamesFromCache({ target: '旧名称' }, controllerB, setB);
+    setA.mockClear();
+    setB.mockClear();
+
+    resetControllerDisplayNameFreshness(controllerA);
+    seedControllerDisplayNamesFromCache({ target: '新名称' }, controllerA, setA);
+    const replaySubscriptionsA = vi.fn(() =>
+      controllerA.authoritativeNameByDevice.get('target'),
+    );
+
+    expect(replaySubscriptionsA()).toBe('新名称');
+    expect(controllerB.authoritativeNameByDevice.get('target')).toBe('旧名称');
+    expect(setA).toHaveBeenCalledWith('target', '新名称');
+    expect(setB).not.toHaveBeenCalled();
+  });
+
   it('旧 REST 响应晚于新 presence 时不覆盖提示、不回写旧缓存，重连继续使用新名称', () => {
     const freshness = createControllerDisplayNameFreshnessTracker();
     const requestEpoch = freshness.epoch;

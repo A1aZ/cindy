@@ -274,7 +274,12 @@ export function writeDeviceLinkSetting<K extends keyof DeviceLinkSettings>(
 }
 
 export function readLastKnownDeviceNames(): Record<string, string> {
-  return { ...readDeviceLinkSettings().lastKnownDeviceNames };
+  const names = { ...readDeviceLinkSettings().lastKnownDeviceNames };
+  for (const [deviceId, pending] of pendingLastKnownDeviceNameByDevice) {
+    if (pending.name === null) delete names[deviceId];
+    else names[deviceId] = pending.name;
+  }
+  return names;
 }
 
 export function writeLastKnownDeviceNames(names: Record<string, string>): Promise<void> {
@@ -283,17 +288,31 @@ export function writeLastKnownDeviceNames(names: Record<string, string>): Promis
 
 /** 同一设备的名称判重与写入必须同序，避免旧删除覆盖紧随其后的同名恢复。 */
 const lastKnownDeviceNameMutationByDevice = new Map<string, Promise<unknown>>();
+/**
+ * presence 已生效、但设置文件写入仍在队列/跨实例锁中等待时的同步覆盖层。
+ * relay 重连 seed 必须先看到这里的最新意图，不能用旧磁盘快照覆盖当前提示。
+ */
+const pendingLastKnownDeviceNameByDevice = new Map<
+  string,
+  { name: string | null }
+>();
 
 function enqueueLastKnownDeviceNameMutation<T>(
   deviceId: string,
+  pendingName: string | null,
   mutation: () => Promise<T>,
 ): Promise<T> {
+  const pending = { name: pendingName };
+  pendingLastKnownDeviceNameByDevice.set(deviceId, pending);
   const previous = lastKnownDeviceNameMutationByDevice.get(deviceId) ?? Promise.resolve();
   const task = previous.catch(() => undefined).then(mutation);
   lastKnownDeviceNameMutationByDevice.set(deviceId, task);
   const cleanup = (): void => {
     if (lastKnownDeviceNameMutationByDevice.get(deviceId) === task) {
       lastKnownDeviceNameMutationByDevice.delete(deviceId);
+    }
+    if (pendingLastKnownDeviceNameByDevice.get(deviceId) === pending) {
+      pendingLastKnownDeviceNameByDevice.delete(deviceId);
     }
   };
   void task.then(cleanup, cleanup);
@@ -323,7 +342,7 @@ export async function setDeviceControlEnabled(
 export async function rememberLastKnownDeviceName(deviceId: string, name: string): Promise<boolean> {
   const normalizedName = normalizeCachedDeviceName(name);
   if (!deviceId.trim() || !normalizedName) return false;
-  return enqueueLastKnownDeviceNameMutation(deviceId, async () => {
+  return enqueueLastKnownDeviceNameMutation(deviceId, normalizedName, async () => {
     const settings = readDeviceLinkSettings();
     if (settings.lastKnownDeviceNames[deviceId] === normalizedName) return false;
     try {
@@ -345,7 +364,7 @@ export async function rememberLastKnownDeviceName(deviceId: string, name: string
 export async function forgetLastKnownDeviceName(deviceId: string): Promise<boolean> {
   const normalizedDeviceId = deviceId.trim();
   if (!normalizedDeviceId) return false;
-  return enqueueLastKnownDeviceNameMutation(normalizedDeviceId, async () => {
+  return enqueueLastKnownDeviceNameMutation(normalizedDeviceId, null, async () => {
     let removed = false;
     try {
       await updateDeviceLinkSetting('lastKnownDeviceNames', (latest) => {

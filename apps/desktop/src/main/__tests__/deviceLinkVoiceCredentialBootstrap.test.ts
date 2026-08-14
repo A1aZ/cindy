@@ -63,9 +63,14 @@ describe('mobile voice credential sync desktop bootstrap path', () => {
       'void refreshControllerDisplayNamesFromDirectory(displayNameGeneration);',
       onlineBranch,
     );
+    const replaySubscriptions = deviceLinkHost.indexOf(
+      "replayActiveSubscriptions('ws-online');",
+      onlineBranch,
+    );
     expect(onlineBranch).toBeGreaterThanOrEqual(0);
     expect(seedCachedNames).toBeGreaterThan(onlineBranch);
     expect(refreshDirectory).toBeGreaterThan(seedCachedNames);
+    expect(replaySubscriptions).toBeGreaterThan(refreshDirectory);
     expect(deviceLinkHost).toContain(
       'generation !== controllerDisplayNameRefreshGeneration',
     );

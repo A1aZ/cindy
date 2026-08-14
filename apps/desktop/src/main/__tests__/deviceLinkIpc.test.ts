@@ -111,6 +111,7 @@ import {
   applyControllerDisplayNamePresence,
   createControllerDisplayNameFreshnessTracker,
   getControllerDisplayNameFreshnessSince,
+  resetControllerDisplayNameFreshness,
 } from '../device-link/controllerDisplayNameFreshness';
 
 function makeDeps(overrides?: Partial<DeviceLinkIpcDeps>): DeviceLinkIpcDeps {
@@ -405,6 +406,66 @@ describe('device-link IPC handlers', () => {
       expect(deps.forgetLastKnownDeviceName).not.toHaveBeenCalled();
     },
   );
+
+  it('listDevices:断线重连后的新 presence 阻止断线前旧列表响应删除名称', async () => {
+    const freshness = createControllerDisplayNameFreshnessTracker();
+    applyControllerDisplayNamePresence({
+      deviceId: 'dev-1',
+      name: '断线前名称',
+      selfName: 'Host.local',
+      freshness,
+      normalizeName: normalizeCachedDeviceName,
+      setDisplayName: vi.fn(),
+      setFallbackDisplayName: vi.fn(),
+      rememberName: vi.fn(),
+      forgetName: vi.fn(),
+    });
+    const rememberLastKnownDeviceName = vi.fn(async () => true);
+    const forgetLastKnownDeviceName = vi.fn(async () => true);
+    const apiFetch: DeviceLinkIpcDeps['apiFetch'] = async <T>() => {
+      resetControllerDisplayNameFreshness(freshness);
+      applyControllerDisplayNamePresence({
+        deviceId: 'dev-1',
+        name: '重连后名称',
+        selfName: 'Host.local',
+        freshness,
+        normalizeName: normalizeCachedDeviceName,
+        setDisplayName: vi.fn(),
+        setFallbackDisplayName: vi.fn(),
+        rememberName: vi.fn(),
+        forgetName: vi.fn(),
+      });
+      return {
+        devices: [
+          {
+            deviceId: 'dev-1',
+            name: '',
+            selfName: 'Host.local',
+            platform: 'darwin',
+            lastSeenAt: '2026-06-23T00:00:00.000Z',
+            online: true,
+            busy: false,
+            remoteControlEnabled: true,
+            controlEnabled: true,
+            isSelf: false,
+          },
+        ],
+      } as T;
+    };
+    const deps = makeDeps({
+      apiFetch,
+      rememberLastKnownDeviceName,
+      forgetLastKnownDeviceName,
+      captureControllerDisplayNameRequestEpoch: () => freshness.epoch,
+      readControllerDisplayNameFreshnessSince: (deviceId, requestEpoch) =>
+        getControllerDisplayNameFreshnessSince(freshness, deviceId, requestEpoch),
+    });
+
+    const result = await handleListDevices(deps);
+    expect(result.devices[0]?.name).toBe('重连后名称');
+    expect(rememberLastKnownDeviceName).not.toHaveBeenCalled();
+    expect(forgetLastKnownDeviceName).not.toHaveBeenCalled();
+  });
 
   it.each([
     ['旧目录名', '新数据库名', 'remember', '新数据库名'],

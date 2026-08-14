@@ -270,6 +270,23 @@ describe('writeDeviceLinkSetting', () => {
     expect(readDeviceLinkSettings().lastKnownDeviceNames).toEqual({ 'dev-1': 'MacBook' });
   });
 
+  it('remember/forget 待落盘时，同步读取先合并最新内存意图供重连 seed 使用', async () => {
+    h.seed(SETTINGS_PATH, JSON.stringify({ lastKnownDeviceNames: { 'dev-1': '旧名称' } }));
+    const {
+      forgetLastKnownDeviceName,
+      readLastKnownDeviceNames,
+      rememberLastKnownDeviceName,
+    } = await load();
+
+    const remember = rememberLastKnownDeviceName('dev-1', '新名称');
+    expect(readLastKnownDeviceNames()).toEqual({ 'dev-1': '新名称' });
+    await expect(remember).resolves.toBe(true);
+
+    const forget = forgetLastKnownDeviceName('dev-1');
+    expect(readLastKnownDeviceNames()).toEqual({});
+    await expect(forget).resolves.toBe(true);
+  });
+
   it('rememberLastKnownDeviceName 写缓存失败时不影响调用方', async () => {
     h.writeFileSync.mockImplementationOnce(() => {
       throw new Error('disk full');

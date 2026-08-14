@@ -6354,6 +6354,13 @@ export class CodexAgent extends BaseAgent {
         suggestions: codexSessionApprovalSuggestions(),
         metadata: params.reason ? { reason: params.reason } : undefined,
       }, {
+        // Codex may omit grantRoot for ordinary apply_patch requests. Without a
+        // concrete target the lightweight reviewer cannot classify the write,
+        // but silently declining is surfaced by app-server as "rejected by user"
+        // even though no user interaction happened. Escalate that protocol gap
+        // to a real confirmation; unattended callers still fail closed when no
+        // interaction resolver is available.
+        forcePrompt: mutablePermissionMode === 'auto' && !params.grantRoot?.trim(),
         autoReviewAction: { kind: 'file-write', path: params.grantRoot ?? undefined },
         itemId: params.itemId,
       });

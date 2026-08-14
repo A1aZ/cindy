@@ -5666,6 +5666,7 @@ export class CodexAgent extends BaseAgent {
             })
             .catch((e) => {
               log.error('dispatchInteraction threw → decline', { requestId, message: (e as Error).message });
+              if (unavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
               finalize('decline');
             });
         });

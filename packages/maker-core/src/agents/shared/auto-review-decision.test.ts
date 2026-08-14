@@ -338,6 +338,9 @@ describe('isSystemPermissionDenialReason', () => {
   it('treats router and timeout codes as system denials, not user clicks', () => {
     expect(isSystemPermissionDenialReason('timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('no_interaction_resolver')).toBe(true);
+    expect(isSystemPermissionDenialReason('no_resolver_attached')).toBe(true);
+    expect(isSystemPermissionDenialReason('resolver_threw')).toBe(true);
+    expect(isSystemPermissionDenialReason('approval_timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('stale_turn')).toBe(true);
     expect(isSystemPermissionDenialReason('hook_interaction_timeout')).toBe(true);
     expect(isSystemPermissionDenialReason('interaction_route_released')).toBe(true);

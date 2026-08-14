@@ -134,9 +134,12 @@ export function createAutoReviewConfirmUndeliveredNotice(
  */
 export const SYSTEM_PERMISSION_DENIAL_REASONS: ReadonlySet<string> = new Set([
   'no_interaction_resolver',
+  'no_resolver_attached',
   'no_interaction_route',
   'no_listener_attached',
   'interaction_resolver_error',
+  'resolver_threw',
+  'approval_timeout',
   'interaction_handler_failed',
   'interaction_timeout',
   'hook_interaction_timeout',

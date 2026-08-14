@@ -120,8 +120,10 @@ import {
   annotatePermissionRequestForUnavailableReview,
   composeAutoReviewIntentWithApprovedPlan,
   composeAutoReviewIntentWithClarification,
+  createAutoReviewConfirmUndeliveredNotice,
   createAutoReviewUnavailableNotice,
   extractAutoReviewUserIntent,
+  isSystemPermissionDenialReason,
   resolveAutoReviewDecision,
   type AutoReviewDecision,
 } from '../shared/auto-review-decision.js';
@@ -1967,6 +1969,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           : permissionRequest,
         { forcePrompt },
       );
+      notifyIfAutoReviewConfirmUndelivered(unavailableHandoff, decision);
       if (decision.kind !== 'permission') {
         log.warn('permission got mismatched decision', { tool: toolName, decKind: decision.kind });
         return { behavior: 'deny', message: 'resolver kind mismatch' };
@@ -2107,16 +2110,33 @@ export class ClaudeCodeAgent extends BaseAgent {
     // 会让用户在后续轮次里完全看不到;改为每轮至多一条 —— 不刷屏,又保证每一轮遇到时
     // 都有机会看见。持久呈现需要一条真正的会话级 notice 通道,见 issue 外推。
       autoReviewUnavailableNotice.reset();
+      autoReviewConfirmUndeliveredNotice.reset();
     };
     // 「自动审核不可用」的会话级一次性提示(issue #1574)。走既有的非终止 error 事件 +
     // `[CODE]` 约定,不新增事件类型;逐条提示会把 Auto 退化成比 Ask 更烦的东西,所以去重。
-    const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice((message) => {
+    const emitAutoReviewRuntimeNotice = (message: string): void => {
       eventQueue.push({
         type: 'error',
         data: { message, isTerminal: false },
         source: 'claude-code',
       });
-    });
+    };
+    const autoReviewUnavailableNotice = createAutoReviewUnavailableNotice(emitAutoReviewRuntimeNotice);
+    const autoReviewConfirmUndeliveredNotice =
+      createAutoReviewConfirmUndeliveredNotice(emitAutoReviewRuntimeNotice);
+    const notifyIfAutoReviewConfirmUndelivered = (
+      unavailableHandoff: boolean,
+      decision: InteractionDecision,
+    ): void => {
+      if (!unavailableHandoff) return;
+      if (decision.kind !== 'permission') {
+        autoReviewConfirmUndeliveredNotice.notify();
+        return;
+      }
+      if (decision.behavior === 'deny' && isSystemPermissionDenialReason(decision.reason)) {
+        autoReviewConfirmUndeliveredNotice.notify();
+      }
+    };
     const reviewAutoAction = (
       action: ReviewableAction,
       workspaceRoots: string[],
@@ -3005,12 +3025,19 @@ export class ClaudeCodeAgent extends BaseAgent {
                 : this.normalizeSessionPermissionSuggestions(params.suggestions),
               metadata: params.metadata ?? {},
             };
-            const decision = await dispatchWithTimeout(
-              remoteUnavailableHandoff
-                ? annotatePermissionRequestForUnavailableReview(remotePermissionRequest)
-                : remotePermissionRequest,
-              { forcePrompt: remoteForcePrompt },
-            );
+            let decision: InteractionDecision;
+            try {
+              decision = await dispatchWithTimeout(
+                remoteUnavailableHandoff
+                  ? annotatePermissionRequestForUnavailableReview(remotePermissionRequest)
+                  : remotePermissionRequest,
+                { forcePrompt: remoteForcePrompt },
+              );
+            } catch {
+              if (remoteUnavailableHandoff) autoReviewConfirmUndeliveredNotice.notify();
+              return { kind: 'permission', behavior: 'deny', reason: 'approval_timeout' };
+            }
+            notifyIfAutoReviewConfirmUndelivered(remoteUnavailableHandoff, decision);
             if (decision.kind !== 'permission') {
               return { kind: 'permission', behavior: 'deny', reason: 'resolver kind mismatch' };
             }
@@ -5835,6 +5862,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         // 换模型 / 换路由可能正好修掉了审阅器不可用的原因(目录解析失败、provider 被停用
         // 等);若换完又不可用,值得再提醒一次。
         autoReviewUnavailableNotice.reset();
+        autoReviewConfirmUndeliveredNotice.reset();
         if (
           !isControlBlocked
           && mutablePermissionMode === 'auto'
@@ -5939,6 +5967,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         if (newMode !== mutablePermissionMode) {
           autoReviewDecisionCache.clear();
           autoReviewUnavailableNotice.reset();
+          autoReviewConfirmUndeliveredNotice.reset();
         }
         // 计划模式武装中 / 本轮 plan turn 进行中 SDK 恒在 plan 档: 只记录底层权限档
         // (循环收尾切回时生效), 不 push SDK、不动挂起交互(挂着的多半是 plan_review)。

@@ -11795,6 +11795,7 @@ describe('CodexAgent MCP thread context hooks', () => {
     'timeout',
     'hook_interaction_timeout',
     'interaction_route_released',
+    'interaction_resolver_error',
     'card send failed: slack timeout',
     'pending failed: channel closed',
   ] as const)('does not treat a missing confirmation as a user rejection after auto-review fails (%s)', async (reason) => {
@@ -11841,6 +11842,50 @@ describe('CodexAgent MCP thread context hooks', () => {
 
     expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
     expect(notices.some((message) => message.includes('not a user rejection'))).toBe(true);
+    await handle.close();
+  });
+
+  it('does not treat a thrown confirmation resolver as a user rejection after auto-review fails', async () => {
+    const reviewAutoPermissionAction = vi.fn<AutoReviewDelegate>(async () => null);
+    const agent = new CodexAgent(createDeps({}, { reviewAutoPermissionAction }));
+    const host = installFakeHost(agent);
+    const handle = await agent.startSession({
+      sessionId: 'session-auto-unavailable-resolver-throw',
+      model: 'gpt-5.5',
+      providerId: 'openai',
+      workingDir: '/repo',
+      permissionMode: 'auto',
+    });
+    const handlers = host.getThreadHandlers();
+    if (!handlers?.commandExecutionApproval) throw new Error('expected commandExecutionApproval handler');
+    handle.setInteractionResolver(async () => {
+      throw new Error('session interaction listener crashed');
+    });
+    const notices: string[] = [];
+    void (async () => {
+      for await (const event of handle.events()) {
+        if (
+          event.type === 'error'
+          && typeof event.data === 'object'
+          && event.data !== null
+          && 'message' in event.data
+          && typeof event.data.message === 'string'
+        ) {
+          notices.push(event.data.message);
+        }
+      }
+    })().catch(() => {});
+
+    await expect(handlers.commandExecutionApproval({
+      threadId: 'start-thread-id',
+      turnId: 'turn-unavailable-resolver-throw',
+      itemId: 'cmd-unavailable-resolver-throw',
+      command: 'npx tsc --noEmit',
+      cwd: '/repo',
+    })).resolves.toEqual({ decision: 'decline' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(notices.some((message) => message.includes(`[${AUTO_REVIEW_CONFIRM_UNDELIVERED_CODE}]`))).toBe(true);
     await handle.close();
   });
 

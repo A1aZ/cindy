@@ -4274,6 +4274,15 @@ describe('iOS Simulator host', () => {
       get: vi.fn(() => running),
       start: vi.fn(),
       stop: vi.fn(async () => undefined),
+      diagnostics: vi.fn(() => ({
+        running: true,
+        logTail: '',
+        capabilityReport: null,
+        nativeSidecar: {
+          recoveryEligible: true,
+          admission: { launch: { allowed: true } },
+        } as never,
+      })),
       recoverNativeSidecar: vi.fn(async () => {
         selectedNativeDriver = recoveredNativeDriver;
         nativeAvailable = true;
@@ -4512,6 +4521,7 @@ describe('iOS Simulator host', () => {
       sessionId: 'session-a',
       instanceId: started.instanceId,
       generation: latestRoute.generation,
+      nativeRecoveryAvailable: true,
       stream: {
         adapter: 'wda',
         encoding: 'jpeg',
@@ -4526,6 +4536,7 @@ describe('iOS Simulator host', () => {
       data: { stream: { state: 'reconnecting' } },
     });
     expect(routeStatuses.at(-1)).toMatchObject({
+      nativeRecoveryAvailable: true,
       stream: {
         adapter: 'wda',
         encoding: 'jpeg',
@@ -4552,6 +4563,7 @@ describe('iOS Simulator host', () => {
     );
     expect(h264FramePump.clear).toHaveBeenLastCalledWith(started.instanceId);
     expect(routeStatuses.at(-1)).toMatchObject({
+      nativeRecoveryAvailable: true,
       stream: {
         adapter: 'wda',
         encoding: 'jpeg',

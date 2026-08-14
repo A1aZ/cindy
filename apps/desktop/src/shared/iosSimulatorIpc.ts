@@ -75,6 +75,8 @@ export interface IOSSimulatorPublicRouteStatus {
   instanceId: string;
   generation: number;
   updatedAt: string;
+  /** Optional for compatibility with older Host builds; missing fails closed. */
+  nativeRecoveryAvailable?: boolean;
   stream: {
     adapter: IOSSimulatorPublicRouteAdapter;
     encoding: 'h264' | 'jpeg' | null;

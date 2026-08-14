@@ -1770,11 +1770,25 @@ export function createIOSSimulatorHost(options: IOSSimulatorHostOptions = {}): I
               : 'native-sidecar-unavailable',
       };
     }
+    const nativeFallback =
+      stream.reasonCode === 'native-stream-disconnected' ||
+      stream.reasonCode === 'native-sidecar-unavailable' ||
+      input.reasonCode === 'native-sidecar-unavailable';
+    const manager = getDriverManager();
+    const nativeDiagnostics = manager.diagnostics?.(instance.instanceId)?.nativeSidecar;
+    const nativeRecoveryAvailable = Boolean(
+      manager.recoverNativeSidecar &&
+        nativeFallback &&
+        (stream.reasonCode === 'native-stream-disconnected' ||
+          (nativeDiagnostics?.recoveryEligible === true &&
+            nativeDiagnostics.admission?.launch.allowed === true)),
+    );
     return {
       sessionId: instance.sessionId,
       instanceId: instance.instanceId,
       generation: instance.generation,
       updatedAt: now,
+      nativeRecoveryAvailable,
       stream,
       input,
     };

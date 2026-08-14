@@ -140,13 +140,7 @@ function nativeRecoveryBackoff(attemptCount: number): number {
 }
 
 function isRecoverableNativeFallback(status: IOSSimulatorPublicRouteStatus | null): boolean {
-  if (!status) return false;
-  if (status.stream.reasonCode === 'native-decoder-fallback') return false;
-  return (
-    status.stream.reasonCode === 'native-stream-disconnected' ||
-    status.stream.reasonCode === 'native-sidecar-unavailable' ||
-    status.input.reasonCode === 'native-sidecar-unavailable'
-  );
+  return status?.nativeRecoveryAvailable === true;
 }
 
 /** Translate stable discovery codes instead of leaking host-side English guidance into the UI. */

@@ -1051,6 +1051,7 @@ describe('IOSSimulatorTabBody', () => {
     const nativeFallback: IOSSimulatorRouteStatusPush = {
       ...nativeActive,
       updatedAt: '2026-08-06T00:00:01.000Z',
+      nativeRecoveryAvailable: true,
       stream: {
         adapter: 'wda',
         encoding: 'jpeg',
@@ -1131,6 +1132,7 @@ describe('IOSSimulatorTabBody', () => {
       api.emitRouteStatus({
         ...nativeActive,
         updatedAt: '2026-08-06T00:00:02.000Z',
+        nativeRecoveryAvailable: true,
         input: nativeFallback.input,
       }),
     );
@@ -1211,6 +1213,7 @@ describe('IOSSimulatorTabBody', () => {
       api.emitRouteStatus({
         ...nativeActive,
         updatedAt: '2026-08-06T00:00:01.000Z',
+        nativeRecoveryAvailable: true,
         stream: {
           adapter: 'wda',
           encoding: 'jpeg',
@@ -1331,6 +1334,7 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         updatedAt: '2026-08-06T00:00:00.000Z',
+        nativeRecoveryAvailable: true,
         stream: {
           adapter: 'wda',
           encoding: 'jpeg',
@@ -1435,6 +1439,7 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         updatedAt: '2026-08-06T00:00:00.000Z',
+        nativeRecoveryAvailable: true,
         stream: {
           adapter: 'wda',
           encoding: 'jpeg',
@@ -1479,6 +1484,68 @@ describe('IOSSimulatorTabBody', () => {
     });
   });
 
+  it('hides Native recovery when the Host omits or denies recovery eligibility', async () => {
+    const instance = readyInstance();
+    const statusValue = readyStatus(instance);
+    if (!statusValue.ok) throw new Error('Expected a ready simulator status.');
+    statusValue.routeStatuses = [
+      {
+        sessionId: 'session-a',
+        instanceId: instance.instanceId,
+        generation: instance.generation,
+        updatedAt: '2026-08-06T00:00:00.000Z',
+        stream: {
+          adapter: 'wda',
+          encoding: 'jpeg',
+          state: 'fallback',
+          reasonCode: 'native-sidecar-unavailable',
+        },
+        input: {
+          adapter: 'wda',
+          state: 'fallback',
+          continuous: false,
+          multiTouch: false,
+          reasonCode: 'native-sidecar-unavailable',
+        },
+      },
+    ];
+    const api = installStatus(statusValue);
+    api.setViewerVisibility.mockResolvedValue(streamingJpegResult());
+    api.latestFrame.mockResolvedValue(streamingJpegResult());
+
+    render(
+      <IOSSimulatorTabBody
+        state={{ instanceId: instance.instanceId }}
+        ctx={ctx}
+        active
+        shellVisible
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('rightSidebar.iosSimulator.route.wdaJpeg')).toBeTruthy();
+    });
+    expect(
+      screen.queryByRole('button', {
+        name: 'rightSidebar.iosSimulator.nativeRecovery.action',
+      }),
+    ).toBeNull();
+    expect(api.retryNativeRoute).not.toHaveBeenCalled();
+
+    act(() => {
+      api.emitRouteStatus({
+        ...statusValue.routeStatuses![0]!,
+        updatedAt: '2026-08-06T00:00:01.000Z',
+        nativeRecoveryAvailable: false,
+      });
+    });
+    expect(
+      screen.queryByRole('button', {
+        name: 'rightSidebar.iosSimulator.nativeRecovery.action',
+      }),
+    ).toBeNull();
+  });
+
   it('lets the current viewer explicitly re-arm Native without disabling WDA controls', async () => {
     installFakeH264DecoderRuntime();
     const instance = readyInstance();
@@ -1490,6 +1557,7 @@ describe('IOSSimulatorTabBody', () => {
         instanceId: instance.instanceId,
         generation: instance.generation,
         updatedAt: '2026-08-06T00:00:00.000Z',
+        nativeRecoveryAvailable: true,
         stream: {
           adapter: 'wda',
           encoding: 'jpeg',
@@ -1570,6 +1638,7 @@ describe('IOSSimulatorTabBody', () => {
       instanceId: instance.instanceId,
       generation: instance.generation,
       updatedAt: '2026-08-06T00:00:00.000Z',
+      nativeRecoveryAvailable: true,
       stream: {
         adapter: 'wda',
         encoding: 'jpeg',

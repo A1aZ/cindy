@@ -305,6 +305,7 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     expect(createChannel).not.toHaveBeenCalled();
     expect(manager.diagnostics("instance-a")).toMatchObject({
       running: false,
+      recoveryEligible: false,
       sandbox: {
         required: true,
         enforced: false,
@@ -451,6 +452,7 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
       running: true,
       state: "running",
       crashCount: 0,
+      recoveryEligible: true,
     });
     await manager.stop("instance-a");
     expect(channel.requests.at(-1)?.op).toBe("detach");
@@ -458,6 +460,7 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     expect(manager.diagnostics("instance-a")).toMatchObject({
       running: false,
       state: "stopped",
+      recoveryEligible: false,
       admission: {
         processState: "stopped",
         launch: { active: false },
@@ -493,6 +496,7 @@ describe("IOSSimulatorNativeSidecarProcessManager", () => {
     expect(manager.diagnostics("instance-a")).toMatchObject({
       running: false,
       state: "failed",
+      recoveryEligible: true,
       lastFailure: "Native sidecar exited beside <redacted-path>",
       lastTermination: {
         reasonCode: "process-exit",

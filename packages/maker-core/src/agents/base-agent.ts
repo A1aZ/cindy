@@ -240,9 +240,9 @@ export interface PiRemoteFileOps {
  * 解析产出;PiAgent 写进 models.json 的独立 provider 块,并按 model→provider 路由 set_model。
  */
 export interface PiNativeProviderSpec {
-  /** PI provider id(slug,禁与网关 provider `cindy` 撞名)。 */
+  /** PI runtime provider id(slug,禁与网关 provider `cindy` 撞名)。 */
   id: string;
-  /** Cindy catalog provider id; defaults to id for BYOM providers. */
+  /** Cindy catalog / persisted provider id; defaults to the runtime id. */
   sourceProviderId?: string;
   name: string;
   baseUrl: string;

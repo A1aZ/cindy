@@ -326,6 +326,75 @@ describe('Pi provider-aware model routing', () => {
     await handle.close();
   });
 
+  it('routes a persisted BYOM id through its namespaced PI runtime provider', async () => {
+    const authProviderIds: Array<string | null | undefined> = [];
+    const deps: AgentDeps = {
+      auth: {
+        getState: async (options) => {
+          authProviderIds.push(options?.providerId);
+          return { authenticated: true, identity: 'custom', authSource: 'api-key' as const };
+        },
+        triggerLogin: async () => ({ authenticated: true }),
+        logout: async () => {},
+        getAuthEnv: async () => ({}),
+      },
+      runtimeConfig: { endpoint: 'http://127.0.0.1:9988' },
+      binaryPath: path.join(agentHome, 'pi'),
+      logger: noopLogger,
+      capabilityAdditions: {
+        availableModels: [{
+          id: 'chatgpt/gpt-5.6-sol',
+          displayName: 'Same-name Custom Model',
+          contextWindow: 128_000,
+          efforts: [],
+          defaultEffort: null,
+        }],
+      },
+      resolvePiAgentHome: () => agentHome,
+      resolvePiNativeProviders: async () => ({
+        providers: [
+          {
+            id: 'openai-codex',
+            sourceProviderId: 'openai',
+            name: 'OpenAI (ChatGPT)',
+            baseUrl: 'http://127.0.0.1:9988',
+            inheritModels: true,
+            models: [{ id: 'chatgpt/gpt-5.6-sol', wireId: 'gpt-5.6-sol' }],
+          },
+          {
+            id: 'cindy-byom-openai-codex',
+            sourceProviderId: 'openai-codex',
+            name: 'User endpoint',
+            baseUrl: 'https://user.example/v1',
+            api: 'openai-completions',
+            models: [{ id: 'chatgpt/gpt-5.6-sol' }],
+          },
+        ],
+        env: {},
+      }),
+    };
+
+    const handle = await new PiAgent(deps).startSession({
+      sessionId: 'namespaced-byom-routing',
+      workingDir: cwd,
+      model: 'chatgpt/gpt-5.6-sol',
+      providerId: 'openai-codex',
+    });
+
+    expect(authProviderIds).toEqual(['openai-codex']);
+    expect(captured.args.slice(captured.args.indexOf('--provider'), captured.args.indexOf('--provider') + 4))
+      .toEqual(['--provider', 'cindy-byom-openai-codex', '--model', 'chatgpt/gpt-5.6-sol']);
+    const configHome = captured.env.PI_CODING_AGENT_DIR as string;
+    const models = JSON.parse(readFileSync(path.join(configHome, 'models.json'), 'utf8')) as {
+      providers: Record<string, { baseUrl?: string }>;
+    };
+    expect(models.providers['openai-codex']?.baseUrl).toBe('http://127.0.0.1:9988');
+    expect(models.providers['cindy-byom-openai-codex']?.baseUrl).toBe('https://user.example/v1');
+    expect(JSON.parse(readFileSync(runtimeFileOf('subagent', 'namespaced-byom-routing'), 'utf8')))
+      .toEqual({ model: 'chatgpt/gpt-5.6-sol', provider: 'cindy-byom-openai-codex' });
+    await handle.close();
+  });
+
   it('keeps built-in gateway reasoning when a same-id non-reasoning BYOM empties the flat effort intersection', async () => {
     const resolver = vi.fn((_providerId: string | null | undefined, modelId: string) => {
       if (modelId !== 'shared-model') return null;

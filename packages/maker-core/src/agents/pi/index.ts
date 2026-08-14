@@ -940,16 +940,22 @@ export class PiAgent extends BaseAgent {
     // 同时校验显式 providerId 与 legacy/default 路由 resolve 出的 native provider
     // (providerId 未持久化时 resolveProviderForModel 也能选出 BYOM)。
     if (opts.remoteHostId) {
-      const candidateIds = new Set<string>();
-      if (opts.providerId && !NON_BYOM_PROVIDER_IDS.has(opts.providerId)) candidateIds.add(opts.providerId);
-      if (initialProvider !== PI_PROVIDER_ID && !NON_BYOM_PROVIDER_IDS.has(initialProvider)) {
-        candidateIds.add(initialProvider);
+      const candidateRuntimeIds = new Set<string>();
+      if (opts.providerId && !NON_BYOM_PROVIDER_IDS.has(opts.providerId)) {
+        const explicitNative = nativeProviderForSource(opts.providerId);
+        if (explicitNative) candidateRuntimeIds.add(explicitNative.id);
       }
-      for (const candidateId of candidateIds) {
-        const loopbackNative = nativeProviderById.get(candidateId);
+      if (
+        initialProvider !== PI_PROVIDER_ID
+        && !NON_BYOM_PROVIDER_IDS.has(resolveSourceProvider(initialProvider))
+      ) {
+        candidateRuntimeIds.add(initialProvider);
+      }
+      for (const runtimeProviderId of candidateRuntimeIds) {
+        const loopbackNative = nativeProviderById.get(runtimeProviderId);
         if (loopbackNative && isLoopbackOnlyBaseUrl(loopbackNative.baseUrl)) {
           throw new Error(
-            `[REMOTE_LOCAL_ONLY_PROVIDER] pi: BYOM provider '${candidateId}' baseUrl ${loopbackNative.baseUrl} is loopback-only — ` +
+            `[REMOTE_LOCAL_ONLY_PROVIDER] pi: BYOM provider '${resolveSourceProvider(runtimeProviderId)}' baseUrl ${loopbackNative.baseUrl} is loopback-only — ` +
               'a remote Pi session runs on the SSH host and cannot reach a service on this machine; ' +
               'pick the XD gateway or a BYOM endpoint reachable from that host.',
           );

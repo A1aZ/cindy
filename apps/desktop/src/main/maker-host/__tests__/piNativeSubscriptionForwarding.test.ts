@@ -157,7 +157,7 @@ describe('PI native subscription forwarding', () => {
   });
 
   it('adds model-gated x_search to native general Grok requests after PI function tools', async () => {
-    const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response('event: done\n\n', {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
     }));
@@ -191,7 +191,7 @@ describe('PI native subscription forwarding', () => {
   });
 
   it('preserves an existing native x_search declaration without duplicating it', async () => {
-    const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+    const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response('event: done\n\n', {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
     }));
@@ -226,7 +226,7 @@ describe('PI native subscription forwarding', () => {
   it.each(['grok-code-fast', 'grok-build-0.1'])(
     'does not add x_search to native coding model %s',
     async (model) => {
-      const fetchMock = vi.fn(async () => new Response('event: done\n\n', {
+      const fetchMock = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response('event: done\n\n', {
         status: 200,
         headers: { 'content-type': 'text/event-stream' },
       }));

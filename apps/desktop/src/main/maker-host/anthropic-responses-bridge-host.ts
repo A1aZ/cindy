@@ -519,7 +519,7 @@ export function getPiNativeSubscriptionHandler(
       headers['content-type'] = ctx.headers['content-type'] ?? 'application/json';
       headers.accept = ctx.headers.accept ?? 'text/event-stream';
       let outboundBody = rawBody;
-      let contentEncoding = ctx.headers['content-encoding'];
+      let contentEncoding: string | undefined = ctx.headers['content-encoding'];
       if (providerId === 'xai') {
         const withServerTools = withNativeXaiServerSideTools(parsedBody);
         if (withServerTools) {

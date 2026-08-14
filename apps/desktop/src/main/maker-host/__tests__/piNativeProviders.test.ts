@@ -21,6 +21,7 @@ vi.mock('electron', () => ({
 import {
   buildPiNativeProvidersFromConfigs,
   buildPiSubscriptionNativeProviders,
+  mergePiNativeProviderResults,
   parsePiListModels,
   piNativeKeyEnvVar,
   readPiBundledModels,
@@ -179,6 +180,61 @@ describe('buildPiNativeProvidersFromConfigs', () => {
         'x-cindy-pi-provider-id': provider.sourceProviderId,
       });
     }
+  });
+
+  it('namespaces only colliding BYOM runtime ids and preserves their persisted source ids', () => {
+    const collisions: Array<[string, string]> = [];
+    const merged = mergePiNativeProviderResults(
+      {
+        providers: [{
+          id: 'openai-codex',
+          sourceProviderId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          baseUrl: 'http://127.0.0.1:4567',
+          inheritModels: true,
+          models: [{ id: 'chatgpt/gpt-5.6-sol', wireId: 'gpt-5.6-sol' }],
+        }],
+        env: { CINDY_PI_OPENAI_PROXY_KEY: 'subscription-key' },
+      },
+      {
+        providers: [
+          {
+            id: 'openai-codex',
+            name: 'User OpenAI-compatible endpoint',
+            baseUrl: 'https://user.example/v1',
+            api: 'openai-completions',
+            models: [{ id: 'local-model' }],
+          },
+          {
+            id: 'cindy-byom-openai-codex',
+            name: 'Existing custom provider',
+            baseUrl: 'https://other.example/v1',
+            api: 'openai-completions',
+            models: [{ id: 'other-model' }],
+          },
+        ],
+        env: { CINDY_PI_KEY_OPENAI_CODEX: 'custom-key' },
+      },
+      (sourceProviderId, runtimeProviderId) => collisions.push([sourceProviderId, runtimeProviderId]),
+    );
+
+    expect(merged.providers.map((provider) => provider.id)).toEqual([
+      'openai-codex',
+      'cindy-byom-openai-codex-2',
+      'cindy-byom-openai-codex',
+    ]);
+    expect(merged.providers[1]).toMatchObject({
+      id: 'cindy-byom-openai-codex-2',
+      sourceProviderId: 'openai-codex',
+      baseUrl: 'https://user.example/v1',
+      models: [{ id: 'local-model' }],
+    });
+    expect(merged.providers[2]?.sourceProviderId).toBeUndefined();
+    expect(merged.env).toEqual({
+      CINDY_PI_OPENAI_PROXY_KEY: 'subscription-key',
+      CINDY_PI_KEY_OPENAI_CODEX: 'custom-key',
+    });
+    expect(collisions).toEqual([['openai-codex', 'cindy-byom-openai-codex-2']]);
   });
 
   it('preserves daily additions and protocol annotations when PI probing fails or is empty', () => {

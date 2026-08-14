@@ -869,6 +869,52 @@ export function buildPiNativeProvidersFromConfigs(
   return { providers, env };
 }
 
+/**
+ * Combine host subscriptions with user providers without changing persisted
+ * custom-provider IDs. PI's bundled provider IDs (notably `openai-codex`) are
+ * runtime implementation details and may legally match an existing BYOM ID.
+ * In that case only the generated models.json key is namespaced; routing and
+ * auth continue to use sourceProviderId, so no DB or safeStorage migration is
+ * required.
+ */
+export function mergePiNativeProviderResults(
+  subscriptions: PiNativeProvidersResult,
+  custom: PiNativeProvidersResult,
+  onNamespace?: (sourceProviderId: string, runtimeProviderId: string) => void,
+): PiNativeProvidersResult {
+  const occupiedIds = new Set([
+    ...subscriptions.providers.map((provider) => provider.id),
+    ...custom.providers.map((provider) => provider.id),
+  ]);
+  const runtimeIds = new Set(subscriptions.providers.map((provider) => provider.id));
+  const customProviders = custom.providers.map((provider) => {
+    if (!runtimeIds.has(provider.id)) {
+      runtimeIds.add(provider.id);
+      return provider;
+    }
+
+    const sourceProviderId = provider.sourceProviderId ?? provider.id;
+    const baseRuntimeId = `cindy-byom-${sourceProviderId}`;
+    let runtimeProviderId = baseRuntimeId;
+    for (let suffix = 2; occupiedIds.has(runtimeProviderId); suffix += 1) {
+      runtimeProviderId = `${baseRuntimeId}-${suffix}`;
+    }
+    occupiedIds.add(runtimeProviderId);
+    runtimeIds.add(runtimeProviderId);
+    onNamespace?.(sourceProviderId, runtimeProviderId);
+    return {
+      ...provider,
+      id: runtimeProviderId,
+      sourceProviderId,
+    };
+  });
+
+  return {
+    providers: [...subscriptions.providers, ...customProviders],
+    env: { ...subscriptions.env, ...custom.env },
+  };
+}
+
 /** BYOM:读 DB 自定义 provider + safeStorage key → pi 原生 provider spec。IO 外壳,逻辑在上面。 */
 async function resolvePiNativeProviders(ctx?: {
   workingDir?: string;
@@ -917,20 +963,12 @@ async function resolvePiNativeProviders(ctx?: {
       log.warn('resolvePiNativeProviders: skipped custom provider', { id, reason }),
     bundledModels ?? undefined,
   );
-  const reserved = new Set(subscriptions.providers.map((provider) => provider.id));
-  return {
-    providers: [
-      ...subscriptions.providers,
-      ...custom.providers.filter((provider) => {
-        if (!reserved.has(provider.id)) return true;
-        log.warn('resolvePiNativeProviders: custom provider collides with native subscription provider', {
-          id: provider.id,
-        });
-        return false;
-      }),
-    ],
-    env: { ...subscriptions.env, ...custom.env },
-  };
+  return mergePiNativeProviderResults(subscriptions, custom, (sourceProviderId, runtimeProviderId) => {
+    log.info('resolvePiNativeProviders: namespaced custom provider runtime id', {
+      sourceProviderId,
+      runtimeProviderId,
+    });
+  });
 }
 
 /** baseUrl 是否指向本机 loopback(与本机 proxy 同判定,远端会话不可达)。
